@@ -2229,6 +2229,132 @@ static void test_cs_builder_accepts_zero_body_action(void)
     for (int i = 1; i < 5; i++) TEST_ASSERT_EQUAL_UINT8(0xFF, d[i]);
 }
 
+static void test_cs_builder_repeated_wraps_three_fetch_bursts(void)
+{
+    /* REPEATED_ACTION wrapping 3 × fetch_ccw_bursts (3 B body each).
+     * Total: 5 (common hdr) + 3 (repeated hdr) + 9 (sub bodies) = 17 B. */
+    uint8_t buf[64];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    struct hailo_cs_act_fetch_ccw_bursts subs[3] = {
+        { .ccw_bursts = 0x0101, .config_stream_index = 1 },
+        { .ccw_bursts = 0x0202, .config_stream_index = 2 },
+        { .ccw_bursts = 0x0303, .config_stream_index = 3 },
+    };
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append_repeated(&b,
+            HAILO_CS_ACT_FETCH_CCW_BURSTS,
+            /*count=*/3, subs, sizeof(subs[0])));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)17, hailo_cs_builder_size(&b));
+
+    const uint8_t *d = hailo_cs_builder_data(&b);
+
+    /* [0]=action_type=REPEATED_ACTION (24), [1..4]=time_stamp INIT. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_REPEATED_ACTION, d[0]);
+    for (int i = 1; i < 5; i++) TEST_ASSERT_EQUAL_UINT8(0xFF, d[i]);
+
+    /* [5]=count=3, [6]=last_executed=0, [7]=sub_action_type=FETCH_CCW_BURSTS (27). */
+    TEST_ASSERT_EQUAL_UINT8(3, d[5]);
+    TEST_ASSERT_EQUAL_UINT8(0, d[6]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS, d[7]);
+
+    /* [8..10] sub[0]: ccw_bursts=0x0101 LE, stream_index=1.
+     * [11..13] sub[1]: ccw_bursts=0x0202 LE, stream_index=2.
+     * [14..16] sub[2]: ccw_bursts=0x0303 LE, stream_index=3. */
+    for (int i = 0; i < 3; i++) {
+        uint16_t bursts;
+        memcpy(&bursts, d + 8 + i * 3, 2);
+        TEST_ASSERT_EQUAL_UINT16(0x0101 * (uint16_t)(i + 1), bursts);
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)(i + 1), d[8 + i * 3 + 2]);
+    }
+}
+
+static void test_cs_builder_repeated_rejects_zero_count(void)
+{
+    /* count == 0 is illegal: every REPEATED_ACTION must wrap ≥1
+     * sub-action, otherwise firmware has nothing to execute and the
+     * wire layout becomes ambiguous (no way to tell it apart from
+     * an 8-byte stub). */
+    uint8_t buf[32];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    struct hailo_cs_act_fetch_ccw_bursts one = { .ccw_bursts = 1, .config_stream_index = 0 };
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_builder_append_repeated(&b,
+            HAILO_CS_ACT_FETCH_CCW_BURSTS,
+            /*count=*/0, &one, sizeof(one)));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)0, hailo_cs_builder_size(&b));
+}
+
+static void test_cs_builder_repeated_returns_nomem_on_overflow(void)
+{
+    /* 5 (common) + 3 (repeated) + 3 * 3 (three 3-B sub bodies) = 17 B.
+     * A 16-byte buffer should not fit. */
+    uint8_t small[16];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, small, sizeof(small));
+
+    struct hailo_cs_act_fetch_ccw_bursts subs[3] = {{0}};
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_NOMEM,
+        hailo_cs_builder_append_repeated(&b,
+            HAILO_CS_ACT_FETCH_CCW_BURSTS,
+            3, subs, sizeof(subs[0])));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)0, hailo_cs_builder_size(&b));
+}
+
+static void test_cs_builder_repeated_rejects_mul_overflow(void)
+{
+    /* count (u8 up to 255) × sub_body_size (size_t) must not overflow.
+     * Using count=255 and sub_body_size = SIZE_MAX/100 forces the
+     * __builtin_mul_overflow branch on both 32-bit and 64-bit hosts
+     * (255 * (SIZE_MAX/100) ≈ 2.55 × SIZE_MAX/100 which exceeds
+     * SIZE_MAX for any reasonable-size SIZE_MAX). Builder rejects
+     * with HAILO_ERR_INVAL before even touching the buffer. */
+    uint8_t buf[32];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    /* sub_bodies pointer may be NULL when we know we'll fail the
+     * overflow check first; pass a valid pointer to rule out the
+     * null-arg early-exit, so the overflow path is exercised. */
+    uint8_t dummy = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_cs_builder_append_repeated(&b,
+            HAILO_CS_ACT_FETCH_CCW_BURSTS,
+            /*count=*/255, &dummy, SIZE_MAX / 100u));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)0, hailo_cs_builder_size(&b));
+}
+
+static void test_cs_builder_repeated_single_count(void)
+{
+    /* count=1 is the minimum non-degenerate case and the shape
+     * translate_preliminary will emit for the Hailo-8L MVP
+     * (one AddCcwBurst wrapped in REPEATED_ACTION). */
+    uint8_t buf[32];
+    struct hailo_cs_builder b;
+    hailo_cs_builder_init(&b, buf, sizeof(buf));
+
+    struct hailo_cs_act_fetch_ccw_bursts one = {
+        .ccw_bursts          = 0x1234,
+        .config_stream_index = 0,
+    };
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_builder_append_repeated(&b,
+            HAILO_CS_ACT_FETCH_CCW_BURSTS,
+            1, &one, sizeof(one)));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(5 + 3 + 3), hailo_cs_builder_size(&b));
+
+    const uint8_t *d = hailo_cs_builder_data(&b);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_REPEATED_ACTION, d[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, d[5]);   /* count */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS, d[7]);
+    uint16_t bursts;
+    memcpy(&bursts, d + 8, 2);
+    TEST_ASSERT_EQUAL_UINT16(0x1234, bursts);
+}
+
 /* -------------------------------------------------------------------------- */
 /* CHANGE_CONTEXT_SWITCH_STATUS (opcode 0x25, CORE CPU)                        */
 /* -------------------------------------------------------------------------- */
@@ -2521,12 +2647,15 @@ static void test_cs_translate_contexts_produces_all_four(void)
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
                             out.batch_switching[5]);
 
-    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL only (type 22, 21 B body
-     * → 26 B). FETCH_CCW_BURSTS was dropped in #180 because firmware
-     * v4.23 on Hailo-8L rejects it with CONFIG_MANAGER_WRAPPER_
-     * STATUS_ACTION_TYPE_NOT_SUPPORTED — HailoRT uses a different
-     * (REPEATED_ACTION-wrapped) CCW load path on Hailo-8L. */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)26, out.preliminary_len);
+    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL (type 22, 21 B body → 26 B)
+     * + REPEATED_ACTION wrapping 1 × FETCH_CFG_CHANNEL_DESCRIPTORS
+     * (5 common hdr + 3 repeated hdr + 3 sub body = 11 B). Total 37 B.
+     * Phase 6.10 step 2: HailoRT v4.23 uses FETCH_CFG_CHANNEL_DESCRIPTORS
+     * (action_type 0) on Hailo-8L, not FETCH_CCW_BURSTS, because
+     * support_pre_fetch=false on that device. Wrapped in REPEATED_ACTION
+     * so firmware's CONFIG_MANAGER_WRAPPER accepts it (bare form
+     * returns ACTION_TYPE_NOT_SUPPORTED). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)37, out.preliminary_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
                             out.preliminary[0]);
     /* host_buffer_info.dma_address inside the activate body — after
@@ -2535,6 +2664,22 @@ static void test_cs_translate_contexts_produces_all_four(void)
     uint64_t iova;
     memcpy(&iova, out.preliminary + 8, 8);
     TEST_ASSERT_EQUAL_UINT64(0xDEADBEEF00000000ull, iova);
+    /* REPEATED_ACTION starts at offset 26 (after ACTIVATE_CFG_CHANNEL).
+     *   [26]=action_type=REPEATED_ACTION
+     *   [27..30]=time_stamp INIT
+     *   [31]=count=1, [32]=last_executed=0,
+     *   [33]=sub_action_type=FETCH_CFG_CHANNEL_DESCRIPTORS (0)
+     *   [34..35]=descriptors_count u16 LE (= ccw_total_desc_count = 2)
+     *   [36]=packed_vdma_channel_id (= config_vdma_channel = 1) */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_REPEATED_ACTION,
+                            out.preliminary[26]);
+    TEST_ASSERT_EQUAL_UINT8(1, out.preliminary[31]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+                            out.preliminary[33]);
+    uint16_t desc_count_u16;
+    memcpy(&desc_count_u16, out.preliminary + 34, 2);
+    TEST_ASSERT_EQUAL_UINT16(2, desc_count_u16);
+    TEST_ASSERT_EQUAL_UINT8(0x01, out.preliminary[36]);
 
     /* DYNAMIC: APPLICATION_CHANGE_INTERRUPT tail marker (zero body). */
     TEST_ASSERT_EQUAL_UINT32((uint32_t)5, out.dynamic_len);
@@ -6512,6 +6657,11 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_builder_returns_nomem_on_overflow);
     RUN_TEST(test_cs_builder_rejects_null_buffer);
     RUN_TEST(test_cs_builder_accepts_zero_body_action);
+    RUN_TEST(test_cs_builder_repeated_wraps_three_fetch_bursts);
+    RUN_TEST(test_cs_builder_repeated_rejects_zero_count);
+    RUN_TEST(test_cs_builder_repeated_returns_nomem_on_overflow);
+    RUN_TEST(test_cs_builder_repeated_rejects_mul_overflow);
+    RUN_TEST(test_cs_builder_repeated_single_count);
     RUN_TEST(test_change_context_switch_status_reset_wire_layout);
     RUN_TEST(test_change_context_switch_status_enabled_carries_batch_params);
     RUN_TEST(test_control_registers_msi_on_first_send);

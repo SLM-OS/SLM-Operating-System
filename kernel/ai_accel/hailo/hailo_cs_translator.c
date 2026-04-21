@@ -342,19 +342,22 @@ static int translate_batch_switching(const struct hef_info *info,
 /* -------------------------------------------------------------------------- */
 
 /* ACTIVATE_CFG_CHANNEL binds a config stream to the VDMA channel
- * firmware will DMA-pull CCW payloads through.
+ * firmware will DMA-pull CCW payloads through. Followed by a
+ * REPEATED_ACTION wrapping one or more AddCcwBurst sub-actions
+ * that tell firmware how many bursts to pull from that channel.
  *
- * Direct FETCH_CCW_BURSTS used to follow but firmware v4.23 on
- * Hailo-8L rejects it in PRELIMINARY with 0x402a0001 =
- * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED — see
- * #180 wire capture (docs/reference/hailort-v4.23.0-wire-capture-
- * mobilenet.txt). HailoRT instead wraps AddCcwBurst sub-actions in
- * REPEATED_ACTION on this device. Real CCW loading via that path
- * is Phase 6.10; for now PRELIMINARY emits ACTIVATE_CFG_CHANNEL
- * alone, which is enough to satisfy firmware's "context must contain
- * ≥1 valid action" check. No weights are actually transferred via
- * the context-switch path today; legacy v0/v1 HEFs go through the
- * separate hailo_control_upload_ccw (WRITE_MEMORY) path.
+ * Direct FETCH_CCW_BURSTS (without the REPEATED_ACTION wrapper)
+ * gets rejected in PRELIMINARY on Hailo-8L with 0x402a0001 =
+ * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED —
+ * confirmed via HailoRT v4.23 wire capture (docs/reference/
+ * hailort-v4.23.0-wire-capture-mobilenet.txt). The wrapped form
+ * is accepted.
+ *
+ * Phase 6.10 step 2: this function now emits the wrapper with a
+ * single sub-action carrying info->ccw_action_count as the burst
+ * count. Multi-sub-action layouts (needed for multi-config-channel
+ * HEFs, which aren't in our current test set) land when the HEF
+ * parser learns to extract per-context add-ccw-burst sequences.
  */
 static int translate_preliminary(const struct hef_info *info,
                                  const struct hailo_cs_translate_cfg *cfg,
@@ -375,19 +378,25 @@ static int translate_preliminary(const struct hef_info *info,
                                      &act, sizeof(act));
     if (rc != HAILO_OK) return rc;
 
-    /* #180 bisect (2026-04-20): HailoRT v4.23 does NOT emit
-     * FETCH_CCW_BURSTS (action_type 27) directly in PRELIMINARY
-     * on Hailo-8L — wire capture against mobilenet_v1.hef shows
-     * neither `1b ff ff ff ff` nor `00 ff ff ff ff` (the alternative
-     * FETCH_CFG_CHANNEL_DESCRIPTORS path) as an action header in
-     * the PRELIMINARY context_network_data stream. Firmware rejects
-     * FETCH_CCW_BURSTS with 0x402a0001 = CONFIG_MANAGER_WRAPPER_
-     * STATUS_ACTION_TYPE_NOT_SUPPORTED. Drop the FETCH for now;
-     * adding the right CCW-load path requires HEF action parsing
-     * (REPEATED_ACTION wrappers + per-burst sub-actions per the
-     * captured layout) and is tracked separately. */
+    /* One FETCH_CFG_CHANNEL_DESCRIPTORS sub-action wrapped in
+     * REPEATED_ACTION. HailoRT v4.23 uses this (not FETCH_CCW_BURSTS)
+     * on Hailo-8L because support_pre_fetch=false on that device —
+     * wire capture against mobilenet_v1 shows `18 ff ff ff ff NN 00
+     * 00` (sub_action_type=0x00 = FETCH_CFG_CHANNEL_DESCRIPTORS)
+     * rather than sub_action_type=0x1b (FETCH_CCW_BURSTS). The
+     * sub-body carries {descriptors_count, packed_vdma_channel_id}. */
+    uint32_t descs = cfg->ccw_total_desc_count;
+    if (descs == 0) descs = 1;               /* firmware rejects 0 */
+    if (descs > UINT16_MAX) descs = UINT16_MAX;
     (void)info;
-    return HAILO_OK;
+
+    struct hailo_cs_act_fetch_cfg_channel_descriptors sub = {
+        .descriptors_count      = (uint16_t)descs,
+        .packed_vdma_channel_id = cfg->config_vdma_channel,
+    };
+    return hailo_cs_builder_append_repeated(
+        b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+        /*count=*/1, &sub, sizeof(sub));
 }
 
 /* -------------------------------------------------------------------------- */

@@ -735,29 +735,90 @@ The resulting capture is cached at
 `docs/reference/hailort-v4.23.0-wire-capture-mobilenet.txt` so
 future sessions can decode further without re-running the patch.
 
-#### Phase 6.10 (next): full CCW loading via REPEATED_ACTION
+#### Phase 6.10 landed (2026-04-20): REPEATED_ACTION wrapper + ENABLE transition
 
-The `ACTIVATE_CFG_CHANNEL` action is in place but no weights are
-actually transferred yet. HailoRT's PRELIMINARY for mobilenet_v1
-is 704 bytes of action stream, including:
+Follow-on to the Phase 6.9 context-handshake breakthrough. Three
+code steps + a scope correction after looking at the wire capture
+more carefully:
 
-- A `REPEATED_ACTION` (action_type 24) header wrapping multiple
-  `AddCcwBurst` (FETCH_CCW_BURSTS = 27) sub-actions.
-- Per-cluster `DISABLE_LCU` actions.
-- `MODULE_CONFIG_DONE_INTERRUPT`, `SEQUENCER_DONE_INTERRUPT`,
-  per-channel `INPUT_CHANNEL_TRANSFER_DONE_INTERRUPT` waits.
-- Final `DEACTIVATE_CFG_CHANNEL` calls.
+**Step 1: `REPEATED_ACTION` wire-format serializer.**
+`struct hailo_cs_repeated_action_header` (3 bytes packed: `count`,
+`last_executed`, `sub_action_type`) per v4.23
+`context_switch_defs.h:146-187`. New builder helper
+`hailo_cs_builder_append_repeated(sub_action_type, count, subs,
+sub_body_size)` emits the 5-byte common header +
+repeated-header + `count` back-to-back sub-bodies (no per-sub-body
+common headers). Overflow-safe via `__builtin_mul_overflow`.
+Four unit tests: full multi-sub layout, single-count MVP shape,
+zero-count rejection, capacity overflow.
 
-Implementing this requires:
-- HEF action parsing for the PRELIMINARY context's
-  context_actions list (currently we only extract a count).
-- Wire format for `REPEATED_ACTION` and the per-sub-type
-  body layouts (cached in `docs/reference/`).
-- Per-cluster LCU enable/disable from HEF data.
+**Step 2: Wire `FETCH_CFG_CHANNEL_DESCRIPTORS` into PRELIMINARY.**
+Initial attempt wrapped `FETCH_CCW_BURSTS` (action_type 27, which
+the PR #343 commits had dropped) — firmware rejected it with the
+same `CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED`
+error. Re-decoding the cached mobilenet_v1 wire capture showed
+HailoRT's REPEATED_ACTIONs use sub-action types `{0x00, 0x03, 0x24}`
+— never `0x1b`. On Hailo-8L `support_pre_fetch=false`, so
+`resource_manager_builder.cpp:579-584` branches to
+`FetchCfgChannelDescriptorsAction::create` instead of
+`AddCcwBurstAction`. Switched the sub-body to the 3-byte
+`fetch_cfg_channel_descriptors_action_data_t` layout (u16
+`descriptors_count` + u8 `packed_vdma_channel_id`). Firmware
+accepts this shape.
 
-After PRELIMINARY/DYNAMIC complete with real content,
-`CHANGE_CONTEXT_SWITCH_STATUS(ENABLED)` followed by per-frame
-boundary VDMA submission unlocks actual inference.
+**Step 3: `CHANGE_CONTEXT_SWITCH_STATUS(ENABLED)` in ctxsmoke.**
+After all four `SET_CONTEXT_INFO` calls return rc=0, flip firmware
+out of config mode into RUN. `hailo_control_change_context_switch_
+status(ENABLED, application_index=0)` now runs in ctxsmoke and
+returns rc=0. (The real `load_model` path already emitted this
+transition from Phase 6.6.)
+
+**Hardware-verified on pi-5-1 fw v4.23 (2026-04-20):**
+
+```
+[1/8] CHANGE_CONTEXT_SWITCH_STATUS(RESET)      rc=0
+[2/8] CLEAR_CONFIGURED_APPS                    rc=0
+[3/8] GET_HW_CONSTS                            rc=0  resp_len=51
+[4/8] SET_NETWORK_GROUP_HEADER                 rc=0
+[5/8] SET_CONTEXT_INFO(ACTIVATION, 63 bytes)   rc=0
+[6/8] SET_CONTEXT_INFO(BATCH_SWITCHING, 16 B)  rc=0
+[7/8] SET_CONTEXT_INFO(PRELIMINARY, 37 bytes)  rc=0
+[8/8] SET_CONTEXT_INFO(DYNAMIC, 5 bytes)       rc=0
+[-/8] CHANGE_CONTEXT_SWITCH_STATUS(ENABLED)    rc=0
+```
+
+**What's still outside Phase 6:**
+
+- **Real weight transfer.** ctxsmoke's CCW buffer is 512 bytes
+  of `0xA5` filler. `descriptors_count=2` points at a scratch
+  region, not real quantized weights. `load_model` does allocate
+  a real CCW tensor from the HEF's ccws_size, so a real HEF load
+  *should* transfer its weights — hardware-verifying that requires
+  deploying a Hailo-8L-compiled HEF and running `hailo load <path>
+  sched` + `sched policy ai_hailo` + triggering inference (Phase 7
+  demo work).
+- **Multi-config-channel HEFs.** ctxsmoke / `translate_preliminary`
+  emit a single `ACTIVATE_CFG_CHANNEL` + single wrapped
+  `FETCH_CFG_CHANNEL_DESCRIPTORS`. HEFs with multiple config
+  streams (multi-network-group) need the bitmap walked and one
+  activate/fetch pair per stream (tracked in #339).
+- **Full PRELIMINARY action set.** HailoRT's PRELIMINARY for
+  mobilenet_v1 is 704 bytes: also includes `WRITE_DATA_BY_TYPE`
+  (sub-type 0x24, 46 actions), `ENABLE_LCU_DEFAULT` (sub-type
+  0x03, 12 + 10 actions), `DISABLE_LCU`, and module/sequencer/
+  channel transfer-done interrupt waits. These are emitted from
+  HEF-parsed action data (not hardcoded). SLM-OS already parses
+  `EnableLcu` actions (Phase 6.4g); bringing up `WRITE_DATA_BY_TYPE`
+  and the interrupt-wait variants is follow-on work.
+
+**Phase 6 status:** the context-switch handshake is functional
+end-to-end. `hailo ctxsmoke` walks the full 9-step sequence and
+firmware accepts every step. `load_model` in the inference backend
+drives the same sequence for real HEFs. `hailo_backend_run`
+(`kernel/inference/inference_device_hailo.c:679`) is fully wired:
+cache-clean → start H2D/D2H channels → reprogram desc lists →
+submit-and-wait on both → cache-invalidate output copy → stop
+channels.
 
 ### Phase 7: Shell Integration & Demo Polish (1 week)
 

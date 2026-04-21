@@ -180,7 +180,9 @@ _Static_assert(sizeof(struct hailo_cs_act_activate_cfg_channel) == 21,
 
 /* FETCH_CCW_BURSTS: tells firmware to pull `ccw_bursts` bursts from
  * the config stream. Each burst is a fixed-size (compiler-chosen)
- * chunk of CCW payload bytes. */
+ * chunk of CCW payload bytes. Used by HailoRT on Hailo-8 (with
+ * support_pre_fetch). On Hailo-8L support_pre_fetch=false, so
+ * FETCH_CFG_CHANNEL_DESCRIPTORS is used instead — see below. */
 struct hailo_cs_act_fetch_ccw_bursts {
     uint16_t ccw_bursts;
     uint8_t  config_stream_index;
@@ -188,6 +190,21 @@ struct hailo_cs_act_fetch_ccw_bursts {
 
 _Static_assert(sizeof(struct hailo_cs_act_fetch_ccw_bursts) == 3,
                "fetch_ccw_bursts body must be 3 bytes");
+
+/* FETCH_CFG_CHANNEL_DESCRIPTORS (action_type 0): tells firmware to
+ * program `descriptors_count` VDMA descriptors on the config channel
+ * for upcoming CCW DMA-pulls. HailoRT's fallback (non-pre-fetch)
+ * path used on Hailo-8L. Normally wrapped in REPEATED_ACTION so
+ * the firmware's CONFIG_MANAGER_WRAPPER dispatches correctly — the
+ * bare action_type is rejected in PRELIMINARY as
+ * ACTION_TYPE_NOT_SUPPORTED. Per v4.23 context_switch_defs.h:187-191. */
+struct hailo_cs_act_fetch_cfg_channel_descriptors {
+    uint16_t descriptors_count;
+    uint8_t  packed_vdma_channel_id;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_fetch_cfg_channel_descriptors) == 3,
+               "fetch_cfg_channel_descriptors body must be 3 bytes");
 
 /* DEACTIVATE_CFG_CHANNEL: tears down the config stream binding,
  * typically the last action in the preliminary context. */
@@ -198,6 +215,48 @@ struct hailo_cs_act_deactivate_cfg_channel {
 
 _Static_assert(sizeof(struct hailo_cs_act_deactivate_cfg_channel) == 2,
                "deactivate_cfg_channel body must be 2 bytes");
+
+/* REPEATED_ACTION header — the 3-byte block that follows the 5-byte
+ * common_action_header when an action is of type REPEATED_ACTION.
+ * Contents:
+ *   count: how many consecutive sub-action bodies follow (1..255).
+ *   last_executed: firmware-tracked progress counter; set to 0 on
+ *     emission (firmware overwrites as it processes each sub-body).
+ *   sub_action_type: action_type of the sub-bodies, with the bodies
+ *     laid out back-to-back with NO interleaved common_action_headers.
+ *
+ * Layout on the wire (per v4.23 context_switch_defs.h:146-187):
+ *   [0] common_action_header (5 B, action_type = REPEATED_ACTION)
+ *   [5] repeated_action_header {
+ *         count (u8), last_executed (u8), sub_action_type (u8)
+ *       }
+ *   [8..] N × <sub-action body> (each sized to its action_type's
+ *         body struct; no per-body headers)
+ *
+ * HailoRT uses REPEATED_ACTION in PRELIMINARY to wrap the CCW-load
+ * sub-action, with the sub_action_type picked by
+ * ChannelAllocator::support_pre_fetch:
+ *
+ *   Hailo-8  (support_pre_fetch = true):
+ *     sub_action_type = FETCH_CCW_BURSTS  (0x1b)
+ *     body            = hailo_cs_act_fetch_ccw_bursts (3 B)
+ *
+ *   Hailo-8L (support_pre_fetch = false):
+ *     sub_action_type = FETCH_CFG_CHANNEL_DESCRIPTORS  (0x00)
+ *     body            = hailo_cs_act_fetch_cfg_channel_descriptors (3 B)
+ *
+ * SLM-OS targets Hailo-8L (AI HAT+) today, so translate_preliminary
+ * emits the FETCH_CFG_CHANNEL_DESCRIPTORS variant. Either sub-type
+ * emitted WITHOUT the REPEATED_ACTION wrapper is rejected with
+ * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED. */
+struct hailo_cs_repeated_action_header {
+    uint8_t count;
+    uint8_t last_executed;
+    uint8_t sub_action_type;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_repeated_action_header) == 3,
+               "repeated_action_header must be 3 bytes");
 
 /* -------------------------------------------------------------------------- */
 /* Compute-context actions (DYNAMIC)                                            */

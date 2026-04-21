@@ -54,6 +54,34 @@ int hailo_cs_builder_append(struct hailo_cs_builder *b,
                             const void *body, size_t body_len);
 
 /*
+ * Append a REPEATED_ACTION wrapper: writes the 5-byte common_action_
+ * header_t (action_type = HAILO_CS_ACT_REPEATED_ACTION), the 3-byte
+ * repeated_action_header_t (count + last_executed=0 + sub_action_type),
+ * then `count` sub-bodies of `sub_body_size` bytes each, packed
+ * back-to-back with no interleaved common_action_headers.
+ *
+ * Total bytes written: 8 + count * sub_body_size.
+ *
+ * Used by PRELIMINARY to wrap the CCW-load sub-action: AddCcwBurst
+ * on Hailo-8 (sub_action_type = FETCH_CCW_BURSTS, 0x1b) or
+ * FetchCfgChannelDescriptors on Hailo-8L (sub_action_type = 0x00).
+ * HailoRT picks based on ChannelAllocator::support_pre_fetch — see
+ * hailo_cs_repeated_action_header's docstring in hailo_cs_actions.h
+ * for the full rule. Either sub-type rejected without the wrapper
+ * (CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED). Wire
+ * capture reference: docs/reference/hailort-v4.23.0-wire-capture-
+ * mobilenet.txt.
+ *
+ * Returns HAILO_OK on success, HAILO_ERR_INVAL on null args or
+ * count == 0, HAILO_ERR_NOMEM if the append would exceed capacity.
+ */
+int hailo_cs_builder_append_repeated(struct hailo_cs_builder *b,
+                                     enum hailo_cs_action_type sub_action_type,
+                                     uint8_t count,
+                                     const void *sub_bodies,
+                                     size_t sub_body_size);
+
+/*
  * Bytes written so far. Pass to hailo_control_set_context_info as
  * `network_data_len`.
  */
