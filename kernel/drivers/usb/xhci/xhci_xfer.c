@@ -191,7 +191,13 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     bool has_data = urb->length > 0 && urb->buffer != NULL;
     bool data_in  = (urb->setup.bmRequestType & USB_DIR_IN) != 0;
     uint32_t trt  = 0U;
-    if (xhci_caps_cached.hci_version == 0x0100 && has_data)
+    /*
+     * xHCI 1.0+ consumes the Setup Stage TRT field for control transfers
+     * with a data phase. Leaving TRT at "No Data" on a v1.20 controller
+     * makes our GET_DESCRIPTOR path diverge from Linux's queueing rules
+     * before the data stage ever starts.
+     */
+    if (xhci_caps_cached.hci_version >= 0x0100 && has_data)
         trt = data_in ? 3U : 2U;
 
     struct xhci_urb_slot *slot = xhci_urb_slot_alloc();

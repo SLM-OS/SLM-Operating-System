@@ -549,11 +549,10 @@ static uint32_t xhci_speed_to_id(enum usb_speed s)
 /*
  * Per §4.3 + §6.2.1.1: bMaxPacketSize0 depends on speed:
  *   low   -> 8
- *   full  -> 8, 16, 32, or 64 (we pick 8 as a safe lower bound; the
- *                              8-byte device-descriptor probe will
- *                              tell us the real value and the
- *                              ADDRESS_DEVICE evaluate-context step
- *                              will patch it)
+ *   full  -> 8, 16, 32, or 64. Linux/xHCI seeds EP0 with 64 here so the
+ *                              first 8-byte device-descriptor probe uses
+ *                              the controller's normal FS default-pipe
+ *                              programming rather than an undersized MPS.
  *   high  -> 64
  *   super -> 512 (out of scope; accept for forward compatibility)
  */
@@ -561,7 +560,7 @@ static uint16_t xhci_ep0_max_packet(enum usb_speed s)
 {
     switch (s) {
     case USB_SPEED_LOW:   return 8;
-    case USB_SPEED_FULL:  return 8;
+    case USB_SPEED_FULL:  return 64;
     case USB_SPEED_HIGH:  return 64;
     case USB_SPEED_SUPER: return 512;
     default:              return 8;
