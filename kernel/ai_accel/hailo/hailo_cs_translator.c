@@ -368,21 +368,19 @@ static int translate_preliminary(const struct hef_info *info,
                                      &act, sizeof(act));
     if (rc != HAILO_OK) return rc;
 
-    /* If the HEF has CCW actions, emit a FETCH_CCW_BURSTS sized to
-     * the count. For a zero-CCW HEF (unusual; some synthetic tests)
-     * we still emit a single fetch with count=1 — firmware accepts
-     * this, and the subsequent DYNAMIC path tolerates "no weights
-     * were actually transferred". */
-    uint32_t bursts = info->ccw_action_count;
-    if (bursts == 0) bursts = 1;
-    if (bursts > UINT16_MAX) bursts = UINT16_MAX;
-
-    struct hailo_cs_act_fetch_ccw_bursts fetch = {
-        .ccw_bursts          = (uint16_t)bursts,
-        .config_stream_index = cfg->config_stream_index,
-    };
-    return hailo_cs_builder_append(b, HAILO_CS_ACT_FETCH_CCW_BURSTS,
-                                   &fetch, sizeof(fetch));
+    /* #180 bisect (2026-04-20): HailoRT v4.23 does NOT emit
+     * FETCH_CCW_BURSTS (action_type 27) directly in PRELIMINARY
+     * on Hailo-8L — wire capture against mobilenet_v1.hef shows
+     * neither `1b ff ff ff ff` nor `00 ff ff ff ff` (the alternative
+     * FETCH_CFG_CHANNEL_DESCRIPTORS path) as an action header in
+     * the PRELIMINARY context_network_data stream. Firmware rejects
+     * FETCH_CCW_BURSTS with 0x402a0001 = CONFIG_MANAGER_WRAPPER_
+     * STATUS_ACTION_TYPE_NOT_SUPPORTED. Drop the FETCH for now;
+     * adding the right CCW-load path requires HEF action parsing
+     * (REPEATED_ACTION wrappers + per-burst sub-actions per the
+     * captured layout) and is tracked separately. */
+    (void)info;
+    return HAILO_OK;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -2521,25 +2521,20 @@ static void test_cs_translate_contexts_produces_all_four(void)
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
                             out.batch_switching[5]);
 
-    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL (type 22, 21 B body → 26 B)
-     * + FETCH_CCW_BURSTS (type 27, 3 B body → 8 B). Total 34 B. */
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)34, out.preliminary_len);
+    /* PRELIMINARY: ACTIVATE_CFG_CHANNEL only (type 22, 21 B body
+     * → 26 B). FETCH_CCW_BURSTS was dropped in #180 because firmware
+     * v4.23 on Hailo-8L rejects it with CONFIG_MANAGER_WRAPPER_
+     * STATUS_ACTION_TYPE_NOT_SUPPORTED — HailoRT uses a different
+     * (REPEATED_ACTION-wrapped) CCW load path on Hailo-8L. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)26, out.preliminary_len);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
                             out.preliminary[0]);
-    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CCW_BURSTS,
-                            out.preliminary[26]);
     /* host_buffer_info.dma_address inside the activate body — after
      * 5-byte header + 2-byte (channel_id + stream_index) + 1-byte
      * (buffer_type). Offset = 5 + 2 + 1 = 8. */
     uint64_t iova;
     memcpy(&iova, out.preliminary + 8, 8);
     TEST_ASSERT_EQUAL_UINT64(0xDEADBEEF00000000ull, iova);
-    /* FETCH_CCW_BURSTS body at offset 26+5 = 31: u16 ccw_bursts (=1)
-     * then u8 config_stream_index (=0). */
-    uint16_t bursts;
-    memcpy(&bursts, out.preliminary + 31, 2);
-    TEST_ASSERT_EQUAL_UINT16(1, bursts);
-    TEST_ASSERT_EQUAL_UINT8(0, out.preliminary[33]);
 
     /* DYNAMIC: APPLICATION_CHANGE_INTERRUPT tail marker (zero body). */
     TEST_ASSERT_EQUAL_UINT32((uint32_t)5, out.dynamic_len);
@@ -2547,51 +2542,16 @@ static void test_cs_translate_contexts_produces_all_four(void)
                             out.dynamic[0]);
 }
 
-static void test_cs_translate_contexts_uses_ccw_count_for_burst_count(void)
-{
-    /* 7 CCW actions in hef_info → FETCH_CCW_BURSTS encodes ccw_bursts=7. */
-    struct hef_info info;
-    memset(&info, 0, sizeof(info));
-    info.ccw_action_count = 7;
-
-    struct hailo_cs_translate_cfg cfg = {
-        .config_vdma_channel   = 0x01,
-        .ccw_desc_list_iova    = 0x100000,
-        .ccw_desc_page_size    = 512,
-        .ccw_total_desc_count  = 16,
-    };
-
-    struct hailo_cs_context_buffers out;
-    TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_cs_translate_contexts(&info, &cfg, &out));
-
-    uint16_t bursts;
-    memcpy(&bursts, out.preliminary + 31, 2);
-    TEST_ASSERT_EQUAL_UINT16(7, bursts);
-}
-
-static void test_cs_translate_contexts_clamps_burst_count_to_u16(void)
-{
-    /* Pathological ccw_action_count > UINT16_MAX: clamp to 65535. */
-    struct hef_info info;
-    memset(&info, 0, sizeof(info));
-    info.ccw_action_count = 100000u;
-
-    struct hailo_cs_translate_cfg cfg = {
-        .config_vdma_channel   = 0x01,
-        .ccw_desc_list_iova    = 0x100000,
-        .ccw_desc_page_size    = 512,
-        .ccw_total_desc_count  = 16,
-    };
-
-    struct hailo_cs_context_buffers out;
-    TEST_ASSERT_EQUAL_INT(HAILO_OK,
-        hailo_cs_translate_contexts(&info, &cfg, &out));
-
-    uint16_t bursts;
-    memcpy(&bursts, out.preliminary + 31, 2);
-    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, bursts);
-}
+/* Removed: test_cs_translate_contexts_uses_ccw_count_for_burst_count
+ *          test_cs_translate_contexts_clamps_burst_count_to_u16
+ *
+ * Both tests asserted that FETCH_CCW_BURSTS is emitted in PRELIMINARY
+ * with a ccw_bursts field driven by ccw_action_count. That behaviour
+ * was removed in #180: firmware v4.23 on Hailo-8L rejects
+ * FETCH_CCW_BURSTS in PRELIMINARY with CONFIG_MANAGER_WRAPPER_
+ * STATUS_ACTION_TYPE_NOT_SUPPORTED (0x402a0001). The translator
+ * now emits ACTIVATE_CFG_CHANNEL alone there; full CCW loading via
+ * REPEATED_ACTION-wrapped sub-actions is a separate workstream. */
 
 static void test_cs_translate_contexts_rejects_null(void)
 {
@@ -6540,8 +6500,6 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_application_header_boundary_bitmap);
     RUN_TEST(test_cs_translate_application_header_rejects_null);
     RUN_TEST(test_cs_translate_contexts_produces_all_four);
-    RUN_TEST(test_cs_translate_contexts_uses_ccw_count_for_burst_count);
-    RUN_TEST(test_cs_translate_contexts_clamps_burst_count_to_u16);
     RUN_TEST(test_cs_translate_contexts_rejects_null);
     RUN_TEST(test_cs_translate_activation_emits_open_boundary_input);
     RUN_TEST(test_cs_translate_activation_emits_open_boundary_output);
