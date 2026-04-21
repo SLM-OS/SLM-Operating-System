@@ -62,8 +62,10 @@
  * Concurrency note for all functions below: internally serialised by
  * a spinlock held for the full MRQ round-trip (commit → ring → poll →
  * consume). Safe to call from any task context on any CPU. Do NOT
- * call from an ISR — the round-trip can take up to 100 ms polling
- * and holds IRQs disabled for that duration.
+ * call from an ISR — MRQs typically round-trip in well under 1 ms
+ * (MRQ_PING is microseconds, MRQ_CLK/RESET/PG a few ms at most), but
+ * the watchdog timeout is 100 ms and IRQs stay disabled for the full
+ * critical section.
  */
 int bpmp_init(void);
 
