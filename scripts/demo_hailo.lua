@@ -42,11 +42,17 @@ local function subhead(s) P("  -- " .. s) end
 -- under dofile / lua scripts; treat it defensively in case the host
 -- shell passes no args at all.
 local hef_path = (arg and arg[1]) or "/mnt/files/mobilenet_v1.hef"
--- Negative or non-numeric bench_iters collapses to 0 (skip benchmark)
--- rather than silently producing a loop that never executes but still
--- prints a "Total: -500 iterations" summary line.
-local bench_iters = math.max(0, math.floor(
-    tonumber((arg and arg[2]) or 100) or 100))
+-- Negative, inf, nan, or non-numeric bench_iters collapses to 0
+-- (skip benchmark) rather than silently producing a loop that never
+-- executes but still prints a "Total: -500 iterations" summary, or
+-- crashing on math.floor(inf) which raises "number has no integer
+-- representation" in Lua 5.4.
+local function parse_bench_iters(raw)
+    local n = tonumber(raw) or 100
+    if n ~= n or n == math.huge or n == -math.huge then return 0 end
+    return math.max(0, math.floor(n))
+end
+local bench_iters = parse_bench_iters(arg and arg[2])
 
 header("SLM-OS Hailo NPU Demo")
 note("Target device: hailo-8L NPU (AI HAT+ on Pi 5)")

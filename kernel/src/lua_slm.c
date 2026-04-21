@@ -2118,9 +2118,10 @@ static int l_hailo_infer(lua_State *L)
         lua_pushnil(L); return 1;
     }
     if (in_len != (size_t)expected_in) { lua_pushnil(L); return 1; }
-    if (expected_out == 0
-     || expected_out > LUA_HAILO_TENSOR_MAX_BYTES
-     || expected_in  > LUA_HAILO_TENSOR_MAX_BYTES) {
+    if (expected_in  == 0
+     || expected_out == 0
+     || expected_in  > LUA_HAILO_TENSOR_MAX_BYTES
+     || expected_out > LUA_HAILO_TENSOR_MAX_BYTES) {
         lua_pushnil(L); return 1;
     }
 
