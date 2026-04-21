@@ -150,6 +150,7 @@ static uint32_t xhci_stale_portsc_initial = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 static bool xhci_skip_next_port_reset = false;
 static bool xhci_force_connected_disabled_reset = false;
+static bool xhci_force_bsr0_on_open = false;
 
 /*
  * Hot-plug state: STALE at boot (assume pre-kexec stale device) →
@@ -425,6 +426,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
+        xhci_force_bsr0_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -439,6 +441,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = false;
         xhci_force_connected_disabled_reset = true;
+        xhci_force_bsr0_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -453,6 +456,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
+        xhci_force_bsr0_on_open = true;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -469,6 +473,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
+        xhci_force_bsr0_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -487,6 +492,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
                  (unsigned)xhci_active_port);
             xhci_prereset_speed = s;
             xhci_force_connected_disabled_reset = false;
+            xhci_force_bsr0_on_open = false;
         }
     }
 
@@ -976,16 +982,19 @@ int xhci_hcd_device_open(struct usb_device *dev)
      * HC's internal SET_ADDRESS failed immediately with cc=4, while
      * BSR=1 gets far enough to exercise software-driven EP0 traffic.
      */
+    bool use_bsr0 = xhci_force_bsr0_on_open;
+    xhci_force_bsr0_on_open = false;
     cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
-                   (1u << 9) |
+                   ((use_bsr0 ? 0u : 1u) << 9) |
                    ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
     if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
         cc != XHCI_CC_SUCCESS) {
-        WARN("xhci: ADDRESS_DEVICE(BSR=1) cc=%u", cc);
+        WARN("xhci: ADDRESS_DEVICE(BSR=%u) cc=%u",
+             use_bsr0 ? 0u : 1u, cc);
         goto err_slot;
     }
-    INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=1)",
-         slot, (unsigned)dev->speed, d->root_port);
+    INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=%u)",
+         slot, (unsigned)dev->speed, d->root_port, use_bsr0 ? 0u : 1u);
     xhci_log_devctx_snapshot(d, "post-address");
 
     dev->hcd_private = d;
