@@ -380,8 +380,14 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/uart_tegra.c>
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/drivers/uart_x86.c>
 
-    # BPMP - Jetson only (required for clock control)
-    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp.c>
+    # BPMP IPC stack — Jetson only.
+    # kernel/drivers/bpmp/bpmp.c provides stubs on non-Jetson platforms,
+    # so it is always compiled. The HSP/IVC/MRQ internals are Jetson-
+    # specific and gated on PLATFORM_JETSON_ORIN_NANO inside each file.
+    kernel/drivers/bpmp/bpmp.c
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp/hsp.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp/ivc.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp/mrq.c>
 
     # Interrupt controller and timer (ARM64 only — x86-64 uses pic.c + timer_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/gic.c>
@@ -396,6 +402,7 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:kernel/drivers/pcie/pcie_qemu_gpex.c>
     $<$<STREQUAL:${PLATFORM},RASPI5>:kernel/drivers/pcie/pcie_bcm2712.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/pcie/pcie_stub.c>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/pcie/pcie_tegra194.c>
 
     # Inference-device abstraction (dispatcher always compiled;
     # CPU-MLP backend added under the ai_sched library when AI_SCHED=ON)
@@ -555,6 +562,7 @@ set(TEST_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_cmd.c>
     kernel/tests/test_pmm.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_bpmp.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hailo.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hef.c>
@@ -672,6 +680,8 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/lib/lwip/src/include
     ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src
     ${CMAKE_SOURCE_DIR}/kernel/drivers/usb/xhci
+    ${CMAKE_SOURCE_DIR}/kernel/drivers/bpmp
+    ${CMAKE_SOURCE_DIR}/kernel/drivers/pcie
 )
 
 # Per-platform arch include paths so test code under kernel/tests

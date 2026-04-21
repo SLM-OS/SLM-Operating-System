@@ -136,6 +136,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_pmm();
 #if !defined(PLATFORM_X86_64)
     total_failures += test_suite_pcie();
+    total_failures += test_suite_bpmp();
     total_failures += test_suite_inference_device();
     total_failures += test_suite_hailo();
     total_failures += test_suite_hef();

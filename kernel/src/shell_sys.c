@@ -4055,3 +4055,271 @@ int cmd_xhcidiag(int argc, char *argv[])
     return 0;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO && ENABLE_NETWORKING */
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "bpmp.h"
+#include "hsp.h"
+
+/*
+ * hspdiag — probe the HSP controller directly (no BPMP IPC required).
+ *
+ * Verifies three things before the BPMP IPC stack can work:
+ *   1. HSP_DIMENSIONING reads cleanly (not 0xffffffff). If it does,
+ *      the MMIO mapping is broken or the HSP block is powered down.
+ *   2. The computed BPMP doorbell address matches expectations for
+ *      Tegra234 (should be near HSP+0x140000, far from the hardcoded
+ *      0x10300 the old driver used).
+ *   3. The BPMP doorbell's ENABLE register has the CCPLEX bit set,
+ *      meaning BPMP has authorised us to ring it.
+ *
+ * Safe to run even if bpmp_init() failed or was never called.
+ */
+int cmd_hspdiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== HSP / BPMP Doorbell Diagnostic ===\r\n");
+
+    /* Idempotent init. If bpmp_init already ran, this returns 0 quickly
+     * because hsp_init caches its own state. If not, we ran the
+     * dimensioning read ourselves. */
+    int rc = hsp_init(HSP_TOP_BASE);
+    uart_printf("  hsp_init(0x%lx): rc=%d\r\n",
+                (unsigned long)HSP_TOP_BASE, rc);
+    if (rc != 0) {
+        uart_puts("=== End Diagnostic ===\r\n");
+        return 0;
+    }
+
+    uint32_t dim = hsp_dimensioning_raw();
+    uint32_t sm = dim & 0xF;
+    uint32_t ss = (dim >> 4) & 0xF;
+    uint32_t as = (dim >> 8) & 0xF;
+    uart_printf("  DIMENSIONING (0x%08x):  SharedMailboxes=%u "
+                "SharedSemaphores=%u ArbitratedSemaphores=%u\r\n",
+                (unsigned)dim, (unsigned)sm, (unsigned)ss, (unsigned)as);
+
+    uintptr_t ccplex_db = hsp_ccplex_doorbell_addr();
+    uintptr_t bpmp_db   = hsp_bpmp_doorbell_addr();
+    uart_printf("  Doorbell CCPLEX:        0x%lx\r\n", (unsigned long)ccplex_db);
+    uart_printf("  Doorbell BPMP:          0x%lx\r\n", (unsigned long)bpmp_db);
+
+    uint32_t bpmp_enable  = *(volatile uint32_t *)(bpmp_db + HSP_DB_REG_ENABLE);
+    uint32_t bpmp_pending = *(volatile uint32_t *)(bpmp_db + HSP_DB_REG_PENDING);
+    uart_printf("  BPMP ENABLE:            0x%08x  (CCPLEX bit 17 = %s)\r\n",
+                (unsigned)bpmp_enable,
+                (bpmp_enable & (1u << HSP_DB_MASTER_CCPLEX)) ? "SET"
+                                                             : "clear (BPMP not listening)");
+    uart_printf("  BPMP PENDING:           0x%08x\r\n", (unsigned)bpmp_pending);
+
+    uint32_t ccplex_enable  = *(volatile uint32_t *)(ccplex_db + HSP_DB_REG_ENABLE);
+    uint32_t ccplex_pending = *(volatile uint32_t *)(ccplex_db + HSP_DB_REG_PENDING);
+    uart_printf("  CCPLEX ENABLE:          0x%08x  (BPMP bit 19 = %s)\r\n",
+                (unsigned)ccplex_enable,
+                (ccplex_enable & (1u << HSP_DB_MASTER_BPMP)) ? "SET"
+                                                              : "clear");
+    uart_printf("  CCPLEX PENDING:         0x%08x  (BPMP notification = %s)\r\n",
+                (unsigned)ccplex_pending,
+                (ccplex_pending & (1u << HSP_DB_MASTER_BPMP)) ? "YES"
+                                                               : "no");
+
+    uart_puts("=== End Diagnostic ===\r\n");
+    return 0;
+}
+
+/*
+ * bpmp — exercise the BPMP IPC stack end-to-end.
+ *
+ *   bpmp         full test suite (ping, clock queries, pcie enable,
+ *                rtldiag readback).
+ *   bpmp ping    MRQ_PING round-trip only.
+ *   bpmp clk     CMD_CLK_IS_ENABLED queries on UART-A + PEX2_C8_CORE.
+ *   bpmp pcie    Enable PEX2_C8_CORE clock + deassert its resets,
+ *                then re-read APPL_CTRL via the rtldiag pipeline.
+ *                THIS IS THE #25 STEP 3 KICKOFF.
+ */
+int cmd_bpmp(int argc, char *argv[])
+{
+    const char *mode = (argc >= 2) ? argv[1] : "all";
+
+    uart_puts("\r\n=== BPMP IPC Smoke Test ===\r\n");
+
+    int rc = bpmp_init();
+    uart_printf("  bpmp_init:            rc=%d\r\n", rc);
+    if (rc != 0) {
+        uart_puts("=== End Smoke Test ===\r\n");
+        return 0;
+    }
+
+    /* Step 1: MRQ_PING. */
+    if (argc < 2 || argv[1][0] == 'a' || argv[1][0] == 'p') {
+        bool ok = bpmp_is_available();
+        uart_printf("  MRQ_PING round-trip:  %s\r\n",
+                    ok ? "OK" : "FAIL");
+        if (mode[0] == 'p' && mode[1] == 'i') { /* "ping" */
+            uart_puts("=== End Smoke Test ===\r\n");
+            return 0;
+        }
+    }
+
+    /* Step 2: Clock query smoke tests. UART-A should always be enabled
+     * (Linux just used it); PEX2_C8_CORE state is what #25 cares about. */
+    if (mode[0] == 'a' || mode[0] == 'c') {
+        int uart_state = -1;
+        int uart_rc = bpmp_clk_is_enabled(TEGRA234_CLK_UARTA, &uart_state);
+        uart_printf("  UART_A IS_ENABLED:    rc=%d state=%d (expect 1)\r\n",
+                    uart_rc, uart_state);
+
+        int pcie_state = -1;
+        int pcie_rc = bpmp_clk_is_enabled(TEGRA234_CLK_PEX2_C8_CORE,
+                                          &pcie_state);
+        uart_printf("  PEX2_C8_CORE EN:      rc=%d state=%d\r\n",
+                    pcie_rc, pcie_state);
+    }
+
+    /* Step 3 kickoff: set APPL_CTRL.LTSSM_EN after the clock/reset
+     * sequence, and sample APPL_DEBUG LTSSM state a few times to see
+     * whether the link trains. This is a minimal stab at Step 3 —
+     * full RC init (DBI programming, Gen3/4 eq, iATU) is not here. */
+    if (mode[0] == 'l' && mode[1] == 't') { /* "ltssm" */
+        uart_puts("\r\n--- LTSSM_EN probe (trivial, no DBI init) ---\r\n");
+        volatile uint32_t *appl_ctrl  = (volatile uint32_t *)(uintptr_t)0x140a0004UL;
+        volatile uint32_t *appl_debug = (volatile uint32_t *)(uintptr_t)0x140a00d0UL;
+
+        uint32_t before_ctrl = *appl_ctrl;
+        uint32_t before_dbg  = *appl_debug;
+        uart_printf("  Before: APPL_CTRL=0x%08x APPL_DEBUG=0x%08x LTSSM=0x%02x\r\n",
+                    (unsigned)before_ctrl, (unsigned)before_dbg,
+                    (unsigned)((before_dbg >> 3) & 0x3F));
+
+        *appl_ctrl = before_ctrl | (1u << 7);   /* APPL_CTRL_LTSSM_EN */
+        __asm__ volatile("dsb sy" ::: "memory");
+
+        for (int i = 0; i < 10; i++) {
+            for (volatile uint32_t k = 0; k < 100000; k++) { }
+            uint32_t ctrl = *appl_ctrl;
+            uint32_t dbg  = *appl_debug;
+            uart_printf("  tick %d: APPL_CTRL=0x%08x LTSSM_EN=%u LTSSM=0x%02x\r\n",
+                        i, (unsigned)ctrl,
+                        (ctrl >> 7) & 1u,
+                        (unsigned)((dbg >> 3) & 0x3F));
+        }
+    }
+
+    /* Step 3: Actually enable PEX2_C8_CORE + deassert the PCIe resets.
+     * The real demonstration of BPMP IPC — and the door-opener for #25
+     * Step 3 (PCIe RC re-init). Only runs when explicitly requested
+     * (not under `bpmp all`) so a stray exec doesn't disturb the
+     * already-live PCIe state when slmos-kexec pre-held the clocks. */
+    if (mode[0] == 'p' && mode[1] == 'c') { /* "pcie" */
+        uart_puts("\r\n--- PCIe C8 clock/reset sequence ---\r\n");
+        int en_rc = bpmp_clk_enable(TEGRA234_CLK_PEX2_C8_CORE);
+        uart_printf("  CLK_ENABLE(PEX2_C8_CORE):          rc=%d\r\n", en_rc);
+
+        int rs_rc = bpmp_reset_deassert(TEGRA234_RESET_PEX2_CORE_8);
+        uart_printf("  RESET_DEASSERT(PEX2_CORE_8):       rc=%d\r\n", rs_rc);
+
+        int ra_rc = bpmp_reset_deassert(TEGRA234_RESET_PEX2_CORE_8_APB);
+        uart_printf("  RESET_DEASSERT(PEX2_CORE_8_APB):   rc=%d\r\n", ra_rc);
+
+        int post_state = -1;
+        (void)bpmp_clk_is_enabled(TEGRA234_CLK_PEX2_C8_CORE, &post_state);
+        uart_printf("  PEX2_C8_CORE post-enable state:    %d\r\n",
+                    post_state);
+
+        uart_puts("  (Run `rtldiag` next to check APPL liveness.)\r\n");
+    }
+
+    uart_puts("=== End Smoke Test ===\r\n");
+    return 0;
+}
+
+#include "pcie_tegra194.h"
+
+/*
+ * pcietrain — full Tegra PCIe C8 host init + link training + iATU
+ * program + endpoint VID/DID read, using the kernel/drivers/pcie/
+ * pcie_tegra194.c driver layered on top of the BPMP IPC stack.
+ *
+ *   pcietrain       Default: full init + LTSSM train + EP probe.
+ *   pcietrain warm  Do clock/reset + P2U init but DO NOT toggle
+ *                   PEX_RST or set LTSSM_EN. Checks whether Linux's
+ *                   pre-kexec link survives — if so, the problem
+ *                   is in our re-init sequence, not elsewhere.
+ *
+ * The success criterion for #25 Step 3:
+ *   - LTSSM reaches L0 (0x11)
+ *   - DBI bus 0 vendor/device reads 0x10DE:0x229c (NVIDIA RC bridge)
+ *   - CFG bus 1 dev 0 fn 0 reads 0x10EC:0x8168 (Realtek RTL8168)
+ */
+int cmd_pcietrain(int argc, char *argv[])
+{
+    const char *mode = (argc >= 2) ? argv[1] : "full";
+
+    uart_puts("\r\n=== Tegra PCIe C8 link-up sequence ===\r\n");
+
+    int rc = bpmp_init();
+    uart_printf("  bpmp_init:            rc=%d\r\n", rc);
+    if (rc != 0) {
+        uart_puts("  (cannot proceed without BPMP)\r\n");
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+
+    rc = pcie_tegra_host_init();
+    uart_printf("  pcie host init:       rc=%d\r\n", rc);
+    if (rc != 0) {
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+
+    uint32_t ltssm = 0;
+    int link_rc = 0;
+    if (mode[0] == 'w') {
+        /* warm: read current LTSSM state without toggling anything */
+        struct pcie_tegra_snapshot s0;
+        pcie_tegra_read_snapshot(&s0);
+        ltssm = s0.ltssm_state;
+        uart_printf("  (warm mode) current LTSSM=0x%02x LTSSM_EN=%u\r\n",
+                    (unsigned)ltssm, (unsigned)(s0.ltssm_en ? 1 : 0));
+        link_rc = (ltssm == 0x11) ? 0 : -1;
+    } else {
+        link_rc = pcie_tegra_start_link(2000, &ltssm);
+    }
+    uart_printf("  pcie start link:      rc=%d  final LTSSM=0x%02x\r\n",
+                link_rc, (unsigned)ltssm);
+
+    struct pcie_tegra_snapshot s;
+    pcie_tegra_read_snapshot(&s);
+    uart_printf("  APPL_CTRL:            0x%08x  (LTSSM_EN=%u)\r\n",
+                (unsigned)s.appl_ctrl, (unsigned)(s.ltssm_en ? 1 : 0));
+    uart_printf("  APPL_DEBUG:           0x%08x  (LTSSM=0x%02x)\r\n",
+                (unsigned)s.appl_debug, (unsigned)s.ltssm_state);
+    uart_printf("  APPL_PINMUX:          0x%08x  (PEX_RST=%u)\r\n",
+                (unsigned)s.appl_pinmux,
+                (unsigned)(s.appl_pinmux & 1));
+    uart_printf("  APPL_LINK_STATUS:     0x%08x  (RDLH_LINK_UP=%u)\r\n",
+                (unsigned)s.appl_link_status,
+                (unsigned)(s.appl_link_status & 1));
+    uart_printf("  DBI bus0 VID:DID:     0x%08x  (expect 0x229c10de)\r\n",
+                (unsigned)s.dbi_bus0_vid_did);
+    uart_printf("  RC alive:             %s\r\n",
+                s.rc_alive ? "YES" : "no (DBI returns all-ones/zeros)");
+
+    if (link_rc == 0) {
+        uint32_t ep = 0;
+        int ep_rc = pcie_tegra_probe_endpoint(&ep);
+        uart_printf("\r\n  EP probe:             rc=%d\r\n", ep_rc);
+        uart_printf("  CFG bus1 VID:DID:     0x%08x  (expect 0x816810ec)\r\n",
+                    (unsigned)ep);
+        if ((ep & 0xFFFF) == 0x10EC && ((ep >> 16) & 0xFFFF) == 0x8168) {
+            uart_puts("  *** RTL8168 endpoint reachable from SLM-OS! ***\r\n");
+        }
+    } else {
+        uart_puts("  (EP probe skipped — link never reached L0)\r\n");
+    }
+
+    uart_puts("=== End ===\r\n");
+    return 0;
+}
+#endif /* PLATFORM_JETSON_ORIN_NANO */

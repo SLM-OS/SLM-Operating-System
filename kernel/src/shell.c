@@ -108,6 +108,11 @@ const shell_cmd_t builtin_commands[] = {
     {"rtldiag",  cmd_rtldiag,  "RTL8168 PCIe probe diagnostic", false},
     {"xhcidiag", cmd_xhcidiag, "Tegra XHCI CBB-at-EL2 probe", false},
 #endif
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    {"hspdiag",   cmd_hspdiag,   "HSP dimensioning + BPMP doorbell probe", false},
+    {"bpmp",      cmd_bpmp,      "BPMP IPC smoke test (PING + clock query)", false},
+    {"pcietrain", cmd_pcietrain, "Tegra PCIe C8 host init + link train + EP probe", false},
+#endif
 };
 
 const int NUM_BUILTIN_COMMANDS = sizeof(builtin_commands) / sizeof(builtin_commands[0]);
