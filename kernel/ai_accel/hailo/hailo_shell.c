@@ -754,6 +754,24 @@ static int cmd_hailo(int argc, char *argv[])
                          (unsigned long)meta.ccw_total_bytes,
                          meta.ccw_actions_truncated
                              ? " (truncated)" : "");
+            /* #253 Phase 8: tally CCW bytes per cfg_channel_index so
+             * we can decide whether HailoRT's multi-cfg-channel flow
+             * needs to be mirrored. Emit the first few entries + a
+             * per-channel byte breakdown. */
+            uint32_t per_ch[8] = {0};
+            uint32_t per_ch_count[8] = {0};
+            for (uint32_t i = 0; i < meta.ccw_action_count; i++) {
+                uint32_t ci = meta.ccw_actions[i].cfg_channel_index;
+                if (ci < 8) {
+                    per_ch[ci] += meta.ccw_actions[i].data_size;
+                    per_ch_count[ci]++;
+                }
+            }
+            for (uint32_t c = 0; c < 8; c++) {
+                if (per_ch[c] == 0 && per_ch_count[c] == 0) continue;
+                shell_printf("    cfg_channel[%u]: %u action(s), %lu bytes\n",
+                             c, per_ch_count[c], (unsigned long)per_ch[c]);
+            }
         }
 
         if (do_upload) {
