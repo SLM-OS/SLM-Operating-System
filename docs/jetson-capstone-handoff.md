@@ -157,19 +157,23 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   creates channel + writes handoff block (v2 wire format, carries
   `work_submit_token`); SLM-OS scans DRAM, finds magic, parses
   all addresses. E2E verified via `nvgpu inherit` → `nvgpu channel`.
-- **Phase 7 host-family sema VERIFIED (April 18):** Linux-side
-  helper writes a PBDMA-decoded SEMAPHORE_RELEASE pushbuffer,
-  advances GP_PUT, rings the USERMODE doorbell at physical
-  0x17BB0090, and observes `0x0000CAFE` at the target sem VA.
-  SLM-OS-side kernel builder (`ga10b_build_sema_release_pushbuffer`)
-  emits the same encoding. Two prior bugs fixed: (1) method-header
-  encoding — `method_id = byte_off / 4` at bits [12:0], not
-  byte_off at [11:0]; PBDMA advanced GP_GET on the malformed
-  header but silently discarded the method so the sema never
-  fired, (2) AMPERE_COMPUTE_B on subch 1 (not 0) per NVK
-  nv_push.h. See capstone-feature-status.md §Phase 7 for the
-  full investigation trail. COMPUTE_B path still blocked on
-  MME_FE1 exception (issue #291).
+- **Phase 7 host-family sema VERIFIED end-to-end (April 21, #297):**
+  Linux-side helper writes a PBDMA-decoded SEMAPHORE_RELEASE
+  pushbuffer, advances GP_PUT, rings the USERMODE doorbell at
+  physical 0x17BB0090, and observes `0x0000CAFE` at the target
+  sem VA. After kexec, the SLM-OS kernel builder
+  (`ga10b_build_sema_release_pushbuffer`) runs the same flow:
+  `nvgpu inherit` → `nvgpu channel` → zero the sema via `poke`
+  → `nvgpu submit` → sema reads `0x0000CAFE`. Verified on
+  jetson-nano-1 post-#295. Two prior bugs fixed in #295:
+  (1) method-header encoding — `method_id = byte_off / 4` at
+  bits [12:0], not byte_off at [11:0]; PBDMA advanced GP_GET
+  on the malformed header but silently discarded the method
+  so the sema never fired, (2) AMPERE_COMPUTE_B on subch 1
+  (not 0) per NVK nv_push.h. See capstone-feature-status.md
+  §Phase 7 for the full investigation trail. COMPUTE_B path
+  still blocked on MME_FE1 exception (issue #291); see
+  #291 for the NVK MME-init scope estimate.
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)
