@@ -298,4 +298,27 @@ int hailo_vdma_channel_wait_proc(uint8_t channel_index,
                                  uint16_t target_num_proc,
                                  uint32_t timeout_us);
 
+/*
+ * OR `ctrl_mask` (lower 8 bits of page_size_desc_control) into the
+ * first descriptor of `list`. Mirrors the reference driver's pattern
+ * in hailo_vdma_launch_transfer (hailo-vdma-common.c:505-506):
+ *
+ *   desc_list->desc_list[first_desc].PageSize_DescControl |=
+ *       get_interrupts_bitmask(vdma_hw, first_interrupts_domain, ...);
+ *
+ * For boundary transfers the typical choice is the DEVICE-side IRQ
+ * bitmask (0x10 | 0x04 | 0x08 = 0x1C) so the NPU's DMA engine sees
+ * "new transfer starting here". Pair with the LAST descriptor's
+ * HOST-side bits set at program time to close the round-trip.
+ *
+ * Cache-flushes the descriptor after the OR so fw reads the new
+ * control byte. Safe to call multiple times; idempotent on already-
+ * set bits.
+ *
+ * Returns HAILO_OK / HAILO_ERR_INVAL.
+ */
+int hailo_vdma_arm_first_desc_irq(struct hailo_vdma_desc_list *list,
+                                  uint32_t starting_desc,
+                                  uint32_t ctrl_mask);
+
 #endif /* AI_ACCEL_HAILO_VDMA_H */

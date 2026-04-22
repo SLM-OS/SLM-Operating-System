@@ -506,6 +506,23 @@ int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us)
     return HAILO_ERR_TIMEOUT;
 }
 
+int hailo_vdma_arm_first_desc_irq(struct hailo_vdma_desc_list *list,
+                                  uint32_t starting_desc,
+                                  uint32_t ctrl_mask)
+{
+    if (!list || !list->descs) return HAILO_ERR_INVAL;
+    if (starting_desc >= list->desc_count) return HAILO_ERR_INVAL;
+
+    uint32_t slot = starting_desc & list->desc_count_mask;
+    struct hailo_vdma_descriptor *d = &list->descs[slot];
+    d->page_size_desc_control |= (ctrl_mask & 0xFFu);
+
+    if (hailo_platform && hailo_platform->cache_clean) {
+        hailo_platform->cache_clean(d, sizeof(*d));
+    }
+    return HAILO_OK;
+}
+
 int hailo_vdma_channel_wait_proc(uint8_t channel_index,
                                  uint16_t target_num_proc,
                                  uint32_t timeout_us)

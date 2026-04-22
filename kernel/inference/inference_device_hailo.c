@@ -1625,6 +1625,22 @@ static int hailo_backend_run(struct inference_device *dev,
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
+    /* Reference hailo_vdma_launch_transfer (hailo-vdma-common.c:505-506)
+     * sets IRQ bits on the FIRST descriptor AFTER programming — not
+     * just the last. For boundary transfers this is the DEVICE-side
+     * IRQ bitmask (0x10 | 0x04 | 0x08 = 0x1C) so fw's DMA engine sees
+     * "new transfer starts here" when it walks the ring. Hypothesis:
+     * this is why the boundary ch=2 num_proc stays 0 despite
+     * num_avail being latched — the first desc has only ctrl=0x02 so
+     * fw's DMA engine may treat it as "continuation of a transfer
+     * that never started" rather than "new transfer to process". */
+    const uint32_t first_desc_device_irq =
+        (1u << 4) | (1u << 2) | (1u << 3);   /* DEVICE | IRQ_PROCESSED | IRQ_ERR */
+    (void)hailo_vdma_arm_first_desc_irq(&slot->boundary_in_list,  0,
+                                         first_desc_device_irq);
+    (void)hailo_vdma_arm_first_desc_irq(&slot->boundary_out_list, 0,
+                                         first_desc_device_irq);
+
 #ifdef HAILO_WIRE_DEBUG
     /* Phase 8 #253: dump programmed descriptors + channel regs so we
      * can compare byte-for-byte against HailoRT's reference output.
