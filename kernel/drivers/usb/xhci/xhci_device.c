@@ -566,7 +566,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
-        xhci_force_bsr0_on_open = false;
+        xhci_force_bsr0_on_open = true;
         xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
