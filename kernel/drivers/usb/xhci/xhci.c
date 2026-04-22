@@ -1001,6 +1001,44 @@ static int xhci_send_noop(void)
     return -1;
 }
 
+/*
+ * Tegra234 survives Linux->kexec without a full host-controller reset,
+ * and the remaining EP0 failure still looks like stale controller-owned
+ * device state. Probe that directly by issuing DISABLE_SLOT across the
+ * controller's reported slot-id space once the command ring is live but
+ * before usb_core starts touching ports.
+ */
+static void xhci_scrub_inherited_slots(void)
+{
+    uint32_t max_slots = xhci_caps_cached.max_slots;
+    unsigned successes = 0;
+
+    for (uint32_t slot = 1; slot <= max_slots; slot++) {
+        struct xhci_trb cmd = {0};
+        uint8_t cc = 0;
+
+        cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_DISABLE_SLOT) |
+                      ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+        if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
+            WARN("xhci: inherited-slot scrub timed out on slot %u",
+                 (unsigned)slot);
+            continue;
+        }
+        if (cc == XHCI_CC_SUCCESS) {
+            INFO("xhci: inherited-slot scrub disabled stale slot %u",
+                 (unsigned)slot);
+            successes++;
+        }
+    }
+
+    if (successes == 0) {
+        INFO("xhci: inherited-slot scrub found no live slots");
+    } else {
+        INFO("xhci: inherited-slot scrub cleared %u stale slot(s)",
+             successes);
+    }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Public API                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -1210,6 +1248,7 @@ int xhci_init(void)
     }
 
     xhci_live = true;
+    xhci_scrub_inherited_slots();
 
     /*
      * Register with usb_core so the single-device enumeration path
