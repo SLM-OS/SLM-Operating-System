@@ -113,6 +113,46 @@ void hailo_vdma_desc_list_free(struct hailo_vdma_desc_list *list)
 #define HAILO_VDMA_DESC_DESC_CONTROL    0x02u
 #define HAILO_VDMA_DESC_ADDR_L_MASK     0xFFFFFFC0u
 
+/* Control-byte flags that go into the LAST descriptor of a transfer
+ * (hailo-vdma-common.c:50-54 + get_interrupts_bitmask L203-223). The
+ * reference ORs these into the last-desc PageSize_DescControl when
+ * the caller asks for DOMAIN_DEVICE or DOMAIN_HOST completion
+ * signaling.
+ *
+ * For H2D boundary submits the hypothesis is that at least
+ * DESC_REQUEST_IRQ_PROCESSED (0x04) is load-bearing even with
+ * poll-based waits — it may be the marker firmware's
+ * BURST_CREDITS_TASK uses to know "this is the last desc of a
+ * transfer, advance the per-channel batch counter". Today our
+ * descriptors only set DESCRIPTOR_DESC_CONTROL (0x02). */
+#define HAILO_VDMA_DESC_REQUEST_IRQ_PROCESSED  (1u << 2)   /* 0x04 */
+#define HAILO_VDMA_DESC_REQUEST_IRQ_ERR        (1u << 3)   /* 0x08 */
+#define HAILO_VDMA_DESC_DEVICE_IRQ_BITMASK     (1u << 4)   /* 0x10 */
+#define HAILO_VDMA_DESC_HOST_IRQ_BITMASK       (1u << 5)   /* 0x20 */
+
+/* DOMAIN_DEVICE: last-desc bits mirror the reference's
+ * get_interrupts_bitmask(DEVICE) output — 0x10 (device bitmask) |
+ * 0x04 | 0x08 (always ORed when any domain is selected). Total
+ * 0x1C plus the base 0x02 = 0x1E. */
+#define HAILO_VDMA_LAST_DESC_CTRL_DOMAIN_DEVICE \
+    (HAILO_VDMA_DESC_DESC_CONTROL | \
+     HAILO_VDMA_DESC_DEVICE_IRQ_BITMASK | \
+     HAILO_VDMA_DESC_REQUEST_IRQ_PROCESSED | \
+     HAILO_VDMA_DESC_REQUEST_IRQ_ERR)
+
+/* DOMAIN_BOTH: both device-side and host-side bitmasks set. 0x02 |
+ * 0x10 | 0x20 | 0x04 | 0x08 = 0x3E. HailoRT uses this for async
+ * transfers that both (a) signal the NPU that data arrived and
+ * (b) signal the host when the transfer completes. Maximum-signal
+ * variant — if DOMAIN_DEVICE alone doesn't unblock the submit, this
+ * rules out "wrong domain selected" as a variable. */
+#define HAILO_VDMA_LAST_DESC_CTRL_DOMAIN_BOTH \
+    (HAILO_VDMA_DESC_DESC_CONTROL | \
+     HAILO_VDMA_DESC_DEVICE_IRQ_BITMASK | \
+     HAILO_VDMA_DESC_HOST_IRQ_BITMASK | \
+     HAILO_VDMA_DESC_REQUEST_IRQ_PROCESSED | \
+     HAILO_VDMA_DESC_REQUEST_IRQ_ERR)
+
 void hailo_vdma_program_descriptor(struct hailo_vdma_descriptor *desc,
                                    uint64_t dma_address,
                                    uint16_t page_size,
@@ -171,6 +211,22 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
     uint16_t last_size = (residue == 0) ? page_size : (uint16_t)residue;
     hailo_vdma_program_descriptor(&list->descs[last_slot],
                                   dma_address, last_size, data_id);
+
+    /* #253 last-desc IRQ bits: OR the DOMAIN_DEVICE bitmask into the
+     * final descriptor's control byte, mirroring reference
+     * bind_and_program_descriptors_list (hailo-vdma-common.c:313-314).
+     * Hypothesis: firmware's BURST_CREDITS_TASK uses
+     * DESC_REQUEST_IRQ_PROCESSED (0x04) as the transfer-end marker
+     * even when the host is polling. Plain 0x02-only descriptors may
+     * get silently treated as "not last", which would explain why our
+     * num_proc stays at 0 despite num_avail being accepted. */
+    {
+        struct hailo_vdma_descriptor *last = &list->descs[last_slot];
+        uint32_t ps_ctrl = last->page_size_desc_control;
+        ps_ctrl = (ps_ctrl & ~0xFFu) |
+                  (uint32_t)HAILO_VDMA_LAST_DESC_CTRL_DOMAIN_DEVICE;
+        last->page_size_desc_control = ps_ctrl;
+    }
 
     /* PMM allocates cacheable kernel memory, so descriptor writes land
      * in L1/L2. BCM2712's PCIe engine claims cache coherency via
