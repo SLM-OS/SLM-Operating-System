@@ -705,9 +705,9 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
          *
          * Linux's healthy EP0 ring on nano-2 starts with a 64-byte device
          * descriptor read for this Realtek hub path. Keep accepting any
-         * reply >= 8 bytes (we only need bMaxPacketSize0 here), but widen
-         * the initial request so the default-address transaction semantics
-         * match the working Linux path more closely.
+         * reply >= 8 bytes (we only need bMaxPacketSize0 here), but keep
+         * the initial request widened so the default-address transaction
+         * semantics match the working Linux path as closely as possible.
          */
         uint8_t dd_stub[64];
         n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,

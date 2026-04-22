@@ -516,6 +516,23 @@ static bool xhci_connected_disabled_port(uint32_t portsc)
            speed == USB_SPEED_HIGH;
 }
 
+static bool xhci_connected_enabled_u0_port(uint32_t portsc)
+{
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    bool decoded = xhci_decode_portsc(portsc, &connected, &speed);
+    uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+
+    if (!connected || !(portsc & XHCI_PORTSC_PED) || !decoded)
+        return false;
+
+    if (pls != XHCI_PLS_U0)
+        return false;
+
+    return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
+           speed == USB_SPEED_HIGH;
+}
+
 static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
                                       const char *why)
 {
@@ -523,7 +540,7 @@ static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
     if (!change)
         return portsc;
 
-    uint32_t ack = (portsc & ~XHCI_PORTSC_RW1CS_MASK) | change;
+    uint32_t ack = xhci_port_state_to_neutral(portsc) | change;
     xhci_op_w32(XHCI_OP_PORTSC(pidx), ack);
 
     uint64_t settle_start = timer_get_count();
@@ -808,10 +825,20 @@ int xhci_hcd_port_reset(uint8_t port)
     bool connected_disabled =
         (xhci_attach_state == XHCI_ATTACH_FRESH &&
          xhci_connected_disabled_port(portsc));
+    bool connected_enabled_u0 =
+        (xhci_attach_state == XHCI_ATTACH_FRESH &&
+         xhci_connected_enabled_u0_port(portsc));
     bool force_connected_disabled_reset =
         connected_disabled && xhci_force_connected_disabled_reset;
 
     xhci_force_connected_disabled_reset = false;
+
+    if (connected_enabled_u0) {
+        xhci_active_portsc = portsc;
+        INFO("xhci: reusing already-enabled U0 PORTSC[%u] (0x%08x)",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        return 0;
+    }
 
     if (xhci_skip_next_port_reset ||
         (connected_disabled && !force_connected_disabled_reset)) {
