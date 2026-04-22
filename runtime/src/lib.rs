@@ -351,21 +351,23 @@ pub extern "C" fn rust_run_tests() -> i32 {
         if !passed { failures += 1; }
     }
 
-    // Test 15: max topics overflow (8 topics)
+    // Test 15: max topics overflow (16 topics)
     {
         msg_router::msg_router_init();
-        for i in 0..8u8 {
-            let mut name = [0u8; 4];
+        for i in 0..16u8 {
+            let mut name = [0u8; 5];
             name[0] = b't';
-            name[1] = b'0' + i;
-            name[2] = 0;
+            if i >= 10 {
+                name[1] = b'1';
+                name[2] = b'0' + (i - 10);
+                name[3] = 0;
+            } else {
+                name[1] = b'0' + i;
+                name[2] = 0;
+            }
             msg_router::msg_router_subscribe(name.as_ptr(), i as i32);
         }
-        let mut name9 = [0u8; 4];
-        name9[0] = b't';
-        name9[1] = b'9';
-        name9[2] = 0;
-        let overflow = msg_router::msg_router_subscribe(name9.as_ptr(), 8);
+        let overflow = msg_router::msg_router_subscribe(b"t16\0".as_ptr(), 16);
         let passed = overflow == -1;
         print_test_result(b"topic overflow returns -1\0", passed);
         if !passed { failures += 1; }

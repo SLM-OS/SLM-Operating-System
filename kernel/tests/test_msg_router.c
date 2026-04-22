@@ -191,6 +191,22 @@ static void test_subscribe_idempotent_wildcard(void)
     msg_router_unsubscribe_all(7);
 }
 
+static void test_subscribe_max_topics_sixteen(void)
+{
+    msg_router_init();
+
+    for (int i = 0; i < 16; i++) {
+        char topic[8];
+        topic[0] = 't';
+        topic[1] = (char)('0' + (i / 10));
+        topic[2] = (char)('0' + (i % 10));
+        topic[3] = '\0';
+        TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe(topic, i));
+    }
+
+    TEST_ASSERT_EQUAL_INT(-1, msg_router_subscribe("t16", 16));
+}
+
 int test_suite_msg_router(void)
 {
     UNITY_BEGIN();
@@ -200,6 +216,7 @@ int test_suite_msg_router(void)
     RUN_TEST(test_wildcard_short_topic_bounds);
     RUN_TEST(test_subscribe_idempotent_exact);
     RUN_TEST(test_subscribe_idempotent_wildcard);
+    RUN_TEST(test_subscribe_max_topics_sixteen);
     RUN_TEST(test_publish_times_out_without_ack);
     return UNITY_END();
 }

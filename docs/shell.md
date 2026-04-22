@@ -659,7 +659,7 @@ submit once; bare LF (raw nc) still works.
 ### Session model
 
 - The console session (UART) is a singleton; each TCP connection
-  allocates a slot from a pool of size `MAX_TCP_SHELL_SESSIONS = 2`
+  allocates a slot from a pool of size `MAX_TCP_SHELL_SESSIONS = 16`
   (see `kernel/include/shell_session.h`). When the pool is full the
   listener politely sends "Too many sessions\r\n" and drops.
 - Every session carries its own cwd and Lua interpreter slot — `cd`
@@ -689,16 +689,17 @@ as a deprecated alias. Subcommands:
 
 ### Autostart and `/etc/telnetd.conf`
 
-Build with `cmake -DNET_TELNETD_AUTOSTART=ON` to start `telnetd` at
-boot. A `/etc/telnetd.conf` in the VFS can flip that on/off at
-runtime and tune the settings:
+Pi 5 lab/demo builds now default `NET_TELNETD_AUTOSTART=ON`. Other
+platforms still need `cmake -DNET_TELNETD_AUTOSTART=ON` to start
+`telnetd` at boot. A `/etc/telnetd.conf` in the VFS can flip that
+on/off at runtime and tune the settings:
 
 ```
 # /etc/telnetd.conf — flat key=value
 enabled=true
 port=2323
 bind=0.0.0.0
-max_sessions=2
+max_sessions=16
 ```
 
 Unknown keys and malformed lines are logged + counted but do not
@@ -722,10 +723,11 @@ binding convention.
 ### Security
 
 Raw TCP has **no authentication** and **no encryption**. The QEMU
-hostfwd binds to `127.0.0.1` only, and telnetd does not auto-start
-unless explicitly enabled via `NET_TELNETD_AUTOSTART=ON` or
-`/etc/telnetd.conf`. Do not expose the port on untrusted networks
-until Phase 4 SSH (#199) lands.
+hostfwd binds to `127.0.0.1` only. Pi 5 lab/demo images currently
+auto-start telnetd by operator choice on trusted networks; other
+platforms still require explicit enablement via
+`NET_TELNETD_AUTOSTART=ON` or `/etc/telnetd.conf`. Do not expose the
+port on untrusted networks until Phase 4 SSH (#199) lands.
 
 ---
 

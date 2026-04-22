@@ -18,11 +18,25 @@
 #include "../include/shell_io.h"
 #include "../include/task.h"
 #include "../include/string.h"
+#include "../include/vfs.h"
+#include "../include/littlefs_slm.h"
 
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+
+static void write_lfs_file(const char *path, const char *contents)
+{
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(path, &subpath);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    int fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(fd >= 0);
+    TEST_ASSERT_TRUE(littlefs_file_write(mnt, fd, contents, (int)strlen(contents)) >= 0);
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+}
 
 /* ============================================================================
  * Capturing shell_io mock — records everything written so helpers can be
@@ -494,6 +508,67 @@ static void test_nested_mutating_dispatch_no_deadlock(void)
 }
 
 /* ============================================================================
+ * Lua shell command regressions
+ * ============================================================================ */
+
+static void test_lua_command_non_repl_state_does_not_persist_per_session(void)
+{
+    struct task *cur = task_current();
+    TEST_ASSERT_NOT_NULL(cur);
+
+    struct shell_session *s = shell_session_alloc();
+    TEST_ASSERT_NOT_NULL(s);
+
+    shell_session_bind(cur, s);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"session_value = 11\""));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"assert(session_value == nil)\""));
+    TEST_ASSERT_NULL(s->lua);
+
+    shell_session_unbind(cur);
+    shell_session_free(s);
+}
+
+static void test_lua_command_state_does_not_persist_on_console(void)
+{
+    struct task *cur = task_current();
+    TEST_ASSERT_NOT_NULL(cur);
+
+    shell_session_unbind(cur);
+    struct shell_session *console = shell_session_console();
+    TEST_ASSERT_NOT_NULL(console);
+    console->lua = NULL;
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"console_value = 11\""));
+    TEST_ASSERT_NULL(console->lua);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"assert(console_value == nil)\""));
+    TEST_ASSERT_NULL(console->lua);
+}
+
+static void test_lua_command_arg_table_rebuilt_per_invocation(void)
+{
+    struct task *cur = task_current();
+    TEST_ASSERT_NOT_NULL(cur);
+
+    write_lfs_file("/mnt/files/lua_args_first.lua",
+                   "assert(arg[0]=='/mnt/files/lua_args_first.lua');"
+                   "assert(arg[1]=='foo');assert(arg[2]=='bar')");
+    write_lfs_file("/mnt/files/lua_args_second.lua",
+                   "assert(arg[0]=='/mnt/files/lua_args_second.lua');"
+                   "assert(arg[1]==nil);assert(arg[2]==nil)");
+
+    struct shell_session *s = shell_session_alloc();
+    TEST_ASSERT_NOT_NULL(s);
+    shell_session_bind(cur, s);
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua /mnt/files/lua_args_first.lua foo bar"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua /mnt/files/lua_args_second.lua"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"assert(arg == nil)\""));
+
+    shell_session_unbind(cur);
+    shell_session_free(s);
+}
+
+/* ============================================================================
  * Entry point
  * ============================================================================ */
 
@@ -530,6 +605,9 @@ int test_suite_shell_session(void)
     RUN_TEST(test_shell_getc_reads_from_bound_session);
 
     RUN_TEST(test_nested_mutating_dispatch_no_deadlock);
+    RUN_TEST(test_lua_command_non_repl_state_does_not_persist_per_session);
+    RUN_TEST(test_lua_command_state_does_not_persist_on_console);
+    RUN_TEST(test_lua_command_arg_table_rebuilt_per_invocation);
 
     return UNITY_END();
 }

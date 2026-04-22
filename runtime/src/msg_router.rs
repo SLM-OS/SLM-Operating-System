@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 // Constants
 // =============================================================================
 
-const MAX_TOPICS: usize = 8;
+const MAX_TOPICS: usize = 16;
 const MAX_SUBSCRIBERS: usize = 4;
 const MAX_MSG_LEN: usize = 60;
 const TOPIC_NAME_LEN: usize = 16;
@@ -161,6 +161,8 @@ impl Topic {
 static mut TOPICS: [Topic; MAX_TOPICS] = [
     Topic::new(), Topic::new(), Topic::new(), Topic::new(),
     Topic::new(), Topic::new(), Topic::new(), Topic::new(),
+    Topic::new(), Topic::new(), Topic::new(), Topic::new(),
+    Topic::new(), Topic::new(), Topic::new(), Topic::new(),
 ];
 static mut TOPIC_COUNT: i32 = 0;
 
@@ -202,7 +204,7 @@ static mut WILDCARD_SUBS: [WildcardSub; MAX_WILDCARD_SUBS] = [
 /// for each component, so msg_router_ack() targets the exact same mailbox.
 /// Prevents race conditions when a higher-priority message arrives between
 /// receive() and ack().
-const MAX_COMPONENTS: usize = 32;
+const MAX_COMPONENTS: usize = 64;
 
 #[derive(Clone, Copy)]
 struct LastReceived {

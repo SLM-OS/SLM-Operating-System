@@ -12,6 +12,9 @@
 
 local P = slm.print
 local run = slm.shell_exec
+local SMP_DEMO_MS = 5000
+local SMP_DEMO_SLICE = 20000
+local SMP_DEMO_WORKERS_PER_CPU = 3
 
 local function banner(title, n, total)
     P("")
@@ -28,6 +31,79 @@ local function pause()
         return "skip"
     end
     return "continue"
+end
+
+local function smp_demo_targets()
+    local cpus = {}
+    if slm.cpu_count() <= 1 then
+        cpus[1] = 0
+    else
+        for cpu = 1, slm.cpu_count() - 1 do
+            cpus[#cpus + 1] = cpu
+        end
+    end
+    return cpus
+end
+
+local function csv(list)
+    local out = {}
+    for i, v in ipairs(list) do
+        out[i] = tostring(v)
+    end
+    return table.concat(out, ", ")
+end
+
+local function make_smp_worker(deadline_ms, cpu, worker)
+    local spin_count = SMP_DEMO_SLICE + cpu * 3000 + worker * 2000
+    local yield_every = 2 + ((cpu + worker) % 3)
+    local sleep_every = 5 + ((cpu * 2 + worker) % 4)
+    local sleep_ms = 1 + ((cpu + worker) % 3)
+    local loader, err = load(string.format([[
+        return function()
+            local deadline = %d
+            local acc = 0
+            local loops = 0
+            while slm.uptime() < deadline do
+                for i = 1, %d do
+                    acc = (acc + i) %% 65521
+                end
+                loops = loops + 1
+                if (loops %% %d) == 0 then
+                    slm.sleep(%d)
+                elseif (loops %% %d) == 0 then
+                    slm.yield()
+                end
+            end
+            if acc == -1 then slm.print("") end
+        end
+    ]], deadline_ms, spin_count, sleep_every, sleep_ms, yield_every), "smp_demo_worker")
+    if not loader then
+        return nil, err
+    end
+    return loader()
+end
+
+local function run_smp_demo(duration_ms)
+    local ids = {}
+    local cpus = smp_demo_targets()
+    local deadline = slm.uptime() + duration_ms
+
+    for _, cpu in ipairs(cpus) do
+        for worker = 1, SMP_DEMO_WORKERS_PER_CPU do
+            local fn = make_smp_worker(deadline, cpu, worker)
+            if fn then
+                local id = slm.task_create(string.format("smp-%d-%d", cpu, worker), fn)
+                if id and slm.task_pin(id, cpu) then
+                    ids[#ids + 1] = id
+                elseif id then
+                    slm.task_kill(id)
+                end
+            end
+            slm.yield()
+        end
+    end
+
+    return ids, cpus
 end
 
 -- ---------------------------------------------------------------------------
@@ -53,11 +129,20 @@ if pause() == "skip" then P("Demo aborted by user."); return end
 
 -- [1/5] SMP -----------------------------------------------------------------
 banner("Symmetric Multiprocessing", 1, 5)
-P("  Launching bench smp — dispatches work to every CPU.")
+P("  Launching multiple pinned Lua workers per secondary CPU.")
+local ids, cpus = run_smp_demo(SMP_DEMO_MS)
+P(string.format("  Workers launched: %d (%d per CPU) on CPU(s) %s.",
+    #ids, SMP_DEMO_WORKERS_PER_CPU, csv(cpus)))
+P("  This should leave ready tasks queued so `top` shows visible rotation.")
+P("")
+slm.sleep(SMP_DEMO_MS)
+P("")
+P("  Following with `bench smp` for the fast dispatch proof:")
 P("")
 run("bench smp")
 P("")
-P("  Observation: All " .. slm.cpu_count() .. " cores executed the workload.")
+P("  Observation: the pinned workers make SMP visible; `bench smp`")
+P("  still confirms cross-CPU dispatch on the same build.")
 
 if pause() == "skip" then return end
 

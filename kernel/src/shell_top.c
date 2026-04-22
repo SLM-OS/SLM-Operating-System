@@ -66,12 +66,12 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
     for (uint32_t c = 0; c < cpu_count; c++) {
         struct cpu_runqueue *rq = sched_cpu_rq(c);
         const char *cur_name = "-";
-        if (c == cpu_id()) {
-            struct task *t = task_current();
-            if (t && t->name[0]) cur_name = t->name;
+        struct task *t = task_current_on_cpu(c);
+        if (t && t->name[0]) {
+            cur_name = t->name;
         } else if (rq && rq->head) {
-            /* Best-effort: show head-of-queue on other CPUs since
-             * task_current() only works for the caller's CPU. */
+            /* Fallback to the head of the ready queue when a CPU has no
+             * current task published yet. */
             cur_name = rq->head->name[0] ? rq->head->name : "-";
         }
 #ifdef CONFIG_AI_SCHEDULER
@@ -94,6 +94,7 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
     /* Task roll-up */
     struct sched_stats stats;
     scheduler_get_stats(&stats);
+    uint32_t live_tasks = 0;
     uint32_t running_tasks = 0;
     uint32_t blocked_tasks = 0;
     uint32_t ready_tasks = 0;
@@ -102,6 +103,7 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
          * counter and can exceed MAX_TASKS (#321). */
         struct task *t = task_slot(i);
         if (!t || t->id == 0 || t->state == TASK_TERMINATED) continue;
+        live_tasks++;
         switch (t->state) {
         case TASK_RUNNING:    running_tasks++; break;
         case TASK_BLOCKED:    blocked_tasks++; break;
@@ -111,7 +113,7 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
     }
 
     shell_printf("\r\nTasks: %u total (%u running, %u ready, %u blocked)\r\n",
-                stats.task_count, running_tasks, ready_tasks, blocked_tasks);
+                live_tasks, running_tasks, ready_tasks, blocked_tasks);
 
     /* Memory */
     size_t total_pages = pmm_get_total_pages();

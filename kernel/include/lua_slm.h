@@ -112,6 +112,7 @@ void lua_shell_init(void);
  *
  * CPU / Memory:
  *   slm.cpu_info()                    - Per-CPU state
+ *   slm.term_size()                   - Terminal size {cols, rows, term}
  *   slm.vmm_stats()                   - VMM stats (ARM64) or nil on x86-64
  *   slm.ipc_stats()                   - IPC stats
  *
@@ -122,6 +123,7 @@ void lua_shell_init(void);
  *
  * Shell integration:
  *   slm.read_line()                   - Read one line from UART (blocks)
+ *   slm.try_getc()                    - Read one char without blocking, nil if none
  *   slm.shell_exec(cmd)               - Run a shell command, return exit code
  */
 

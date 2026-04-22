@@ -2508,6 +2508,8 @@ static void test_shell_cmd_hailo_load_too_small(void)
  * silently would. */
 extern const shell_cmd_t builtin_commands[];
 extern const int NUM_BUILTIN_COMMANDS;
+extern shell_cmd_t external_commands[];
+extern int num_external_commands;
 
 /* Generic table scanner — non-static so test_x86_boot.c can reuse it
  * via an extern declaration. Takes a `const shell_cmd_t *` so it
@@ -2542,6 +2544,19 @@ static void test_shell_gpu_cmd_platform_correctness(void)
      * the built-in here would break Jetson's GPU debug surface. */
     TEST_ASSERT_TRUE(present);
 #endif
+}
+
+static void test_lua_shell_command_registered_mutating(void)
+{
+    bool found = false;
+    for (int i = 0; i < num_external_commands; i++) {
+        if (strcmp(external_commands[i].name, "lua") == 0) {
+            found = true;
+            TEST_ASSERT_TRUE(external_commands[i].mutates);
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(found);
 }
 
 /*
@@ -2792,6 +2807,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_help_files_exist);
     RUN_TEST(test_shell_help_file_content);
     RUN_TEST(test_shell_help_dir_listing);
+    RUN_TEST(test_lua_shell_command_registered_mutating);
 
     /* Write/modify command tests */
     RUN_TEST(test_shell_cmd_write);

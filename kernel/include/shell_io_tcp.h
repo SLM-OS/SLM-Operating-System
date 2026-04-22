@@ -100,4 +100,12 @@ void shell_io_tcp_foreach(tcp_session_visitor_t visitor, void *ctx);
  * true if a matching session was found, false otherwise. */
 bool shell_io_tcp_kick(uint32_t session_id);
 
+/* Test-only helper: normalize one or two output chunks using the same
+ * CRLF carry-over rules as the live TCP backend. Returns the byte count
+ * written to `out` (not including any trailing NUL the caller may add). */
+size_t shell_io_tcp_test_normalize_output(const char *first,
+                                          const char *second,
+                                          char *out,
+                                          size_t out_len);
+
 #endif /* SHELL_IO_TCP_H */

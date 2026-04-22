@@ -510,12 +510,17 @@ static void macb_release_phy_reset(void)
     /* Function select: SYS_RIO so we drive the pin directly */
     *ctrl = MACB_RIO_FUNCSEL_SYS_RIO;
 
-    /* Drive pin low (assert reset), pulse, then high (release) */
+    /* Drive pin low (assert reset), pulse, then high (release).
+     *
+     * Use counter-based busy waits here rather than sleep_ms(). The
+     * network bring-up path can run before the platform's task-sleep
+     * wakeups are trustworthy; blocking on scheduler-driven sleeps here
+     * strands `net init` before the first PHY log line. */
     *rio_out_clr = (1u << bank_pin);
     *rio_oe_set  = (1u << bank_pin);
-    sleep_ms(10);
+    timer_busy_wait_us(10 * 1000);
     *rio_out_set = (1u << bank_pin);
-    sleep_ms(20);   /* Spec: BCM54213PE needs up to 10 ms post-reset */
+    timer_busy_wait_us(20 * 1000);   /* Spec: BCM54213PE needs up to 10 ms post-reset */
 
     INFO("  Released PHY reset via GPIO %u", phy_reset_gpio);
 }
@@ -571,7 +576,10 @@ static int macb_phy_bringup(void)
      * "down" state and clears the latch; only the *second* read
      * reflects the current link state. Without the double-read a
      * momentary disconnect would strand us in the polling loop
-     * after the cable comes back. Linux phylib does the same. */
+     * after the cable comes back. Linux phylib does the same.
+     *
+     * Use timer_busy_wait_us rather than sleep_ms so `net init` does
+     * not depend on scheduler wakeups during early Pi 5 bring-up. */
     INFO("  Waiting for PHY auto-negotiate / link up...");
     for (int i = 0; i < 50; i++) {
         (void)macb_mdio_read(PHY_ADDR, MII_BMSR);           /* Clear latch */
@@ -622,7 +630,7 @@ static int macb_phy_bringup(void)
                  lpa, stat1000);
             return 0;
         }
-        sleep_ms(100);
+        timer_busy_wait_us(100 * 1000);
     }
 
     ERROR("PHY auto-negotiate timed out — no link");

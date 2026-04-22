@@ -22,11 +22,11 @@
 #include "vfs.h"
 #include "shell_io.h"
 
-/* Maximum number of non-console sessions (e.g. TCP). Chosen small to
- * keep per-session state (stack + Lua interpreter slot + ring buffers)
- * bounded. Bump with care: each slot costs roughly 64 KB task stack +
- * 8 KB ring buffers = ~72 KB. */
-#define MAX_TCP_SHELL_SESSIONS 2
+/* Maximum number of non-console sessions (e.g. TCP). Kept fixed so the
+ * session/task/ring-buffer footprint stays statically bounded. Each slot
+ * costs roughly 64 KB task stack + 8 KB ring buffers = ~72 KB, so 16 TCP
+ * sessions reserve about 1.125 MB before any future per-session Lua state. */
+#define MAX_TCP_SHELL_SESSIONS 16
 
 struct task;
 
@@ -50,12 +50,9 @@ struct shell_session {
     struct task     *owner_task;          /* task running this session (NULL if unbound) */
     bool             in_use;              /* pool slot occupancy */
 
-    /* Per-session Lua interpreter slot. Unused today — the `lua`
-     * command still creates and tears down a fresh state per
-     * invocation (see kernel/src/lua_shell.c). When Lua starts being
-     * driven from a long-running remote session, the `lua` command
-     * will lazily allocate this on first use and tear it down when
-     * the session closes. Access via void * to avoid pulling <lua.h>
+    /* Per-session Lua interpreter slot. Lazily allocated on first
+     * `lua` command use in this session and torn down when the
+     * session closes. Access via void * to avoid pulling <lua.h>
      * into this header. */
     void            *lua;
 

@@ -16,8 +16,13 @@
 #include "string.h"
 
 /* Size of the stack-formatting buffer used by shell_io_printf.
- * Matches SHELL_MAX_LINE so any single printf from a command fits. */
-#define SHELL_IO_PRINTF_BUF 1024
+ *
+ * Interactive dashboards like the IPC demo render an entire frame in one
+ * printf call, which can easily exceed SHELL_MAX_LINE. Keep this buffer
+ * comfortably above a full telnet-screen payload so frames are not silently
+ * truncated mid-line.
+ */
+#define SHELL_IO_PRINTF_BUF 4096
 
 void shell_io_puts(struct shell_io *io, const char *s)
 {

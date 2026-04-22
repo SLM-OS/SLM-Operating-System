@@ -26,16 +26,16 @@ Interactive shell, command surface, observability commands, multi-session.
 | Scheduler (`sched`, `sched policy`, `sched stats`) | ✅ | ✅ | ✅ | ✅ |
 | Diagnostic (`dtb`, `timdiag`, `peek`, `macbdiag`) | ✅ | ✅ | ✅ | 🟡 (`timdiag` ARM-only) |
 | GPU/hw shell (`gpu`, `nvgpu phase-N`) | — | — | ✅ | ✅ |
-| Multi-session TCP shell (port 2323) | ✅ | ✅ hw-capable, off by default | ❌ no NIC | ✅ |
-| Telnet protocol (IAC, ECHO, SGA, NAWS, TERMINAL-TYPE, IAC IP→Ctrl+C) | ✅ | ✅ hw-capable, off by default | ❌ no NIC | ✅ |
-| `telnetd` daemon controls (`start/stop/status/sessions/kick`) | ✅ | ✅ hw-capable, off by default | ❌ no NIC | ✅ |
+| Multi-session TCP shell (port 2323) | ✅ | ✅ | ❌ no NIC | ✅ |
+| Telnet protocol (IAC, ECHO, SGA, NAWS, TERMINAL-TYPE, IAC IP→Ctrl+C) | ✅ | ✅ | ❌ no NIC | ✅ |
+| `telnetd` daemon controls (`start/stop/status/sessions/kick`) | ✅ | ✅ | ❌ no NIC | ✅ |
 | `/etc/telnetd.conf` + `NET_TELNETD_AUTOSTART` | ✅ | ✅ | ❌ no NIC | ✅ |
 | `slm.telnetd_*` Lua bindings | ✅ | ✅ | ❌ no NIC | ✅ |
 | SSH (#199) | ⏸️ | ⏸️ | ⏸️ | ⏸️ |
 
 ## Skipped / Blocked
 
-- **Real-hardware default-on for telnet** — code is hardware-capable on Pi 5 (and on Jetson once networking lands), but `NET_TELNETD_AUTOSTART` is OFF by default on those platforms because the session is unauthenticated. Rollout is gated on SSH (#199) or an explicit operator decision.
+- **Unauthenticated telnet on hardware** — Pi 5 lab/demo builds now default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. That is acceptable only on trusted networks; SSH/authentication (#199) is still the real security boundary.
 - **SSH** (#199) — deferred until wolfSSH integration; out of current scope.
 - **Jetson multi-session shell** — blocked on Jetson networking (#25 / #266). Single-session UARTC console works fine.
 - **Command completion / history / arrow-key editing** — not implemented. Raw-line mode only. Would require telnet IAC negotiation for server-side echo.
@@ -49,4 +49,4 @@ Interactive shell, command surface, observability commands, multi-session.
 - `docs/demo-readiness-backlog.md` (observability backlog — closed items)
 - Issues: #191-#196 (observability tickets), #199 (SSH)
 
-*Last updated: 18 April 2026*
+*Last updated: 22 April 2026*

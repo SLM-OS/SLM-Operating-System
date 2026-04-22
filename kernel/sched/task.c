@@ -508,6 +508,14 @@ void task_exit(void)
 struct task *task_current(void)
 {
     uint32_t cpu = cpu_id();
+    return task_current_on_cpu(cpu);
+}
+
+struct task *task_current_on_cpu(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS) {
+        return NULL;
+    }
 #if !defined(PLATFORM_HAS_NC_MEMORY)
     cache_invalidate(&current_task[cpu]);
 #endif
