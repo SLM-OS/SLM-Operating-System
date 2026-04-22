@@ -248,7 +248,13 @@ static uint32_t xhci_resume_usb2_port_to_u0(uint8_t pidx, uint32_t portsc,
             WARN("xhci: PORTSC[%u] did not reach U0 after finish-resume (%s, portsc=0x%08x)",
                  pidx, why, (unsigned)final_sc);
         }
-        return final_sc;
+        uint32_t cleaned = xhci_ack_port_changes(pidx, final_sc, why);
+        if (cleaned != final_sc) {
+            INFO("xhci: PORTSC[%u] post-resume change-ack for %s "
+                 "(0x%08x -> 0x%08x)",
+                 pidx, why, (unsigned)final_sc, (unsigned)cleaned);
+        }
+        return cleaned;
     }
 
     return portsc;
