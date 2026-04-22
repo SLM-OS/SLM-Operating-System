@@ -923,23 +923,49 @@ static void xhci_patch_inherited_address(struct xhci_device *d, uint8_t addr)
          (unsigned)addr, (unsigned)old, (unsigned)patched);
 }
 
-static void xhci_try_reset_device_slot(uint8_t slot, const char *why)
+static void xhci_try_eval_ep0_context(struct xhci_device *d, const char *why)
 {
-    if (slot == 0)
+    if (d == NULL || d->slot_id == 0 || d->input_ctx == NULL)
         return;
+
+    bool cz = xhci_caps_cached.ctx_64;
+    memset(d->input_ctx, 0, xhci_ctx_in_bytes(cz));
+    *xhci_in_control_dw(d->input_ctx, 1) = XHCI_INPUT_ADD_EP(XHCI_DCI_EP0);
+
+    uint32_t *e0 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 0, cz);
+    uint32_t *e1 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 1, cz);
+    uint32_t *e2 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 2, cz);
+    uint32_t *e3 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 3, cz);
+    uint32_t *e4 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 4, cz);
+    uint32_t *de0 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
+    uint32_t *de1 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
+    uint32_t *de2 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+    uint32_t *de3 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+    uint32_t *de4 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 4, cz);
+    *e0 = *de0;
+    *e1 = *de1;
+    *e2 = *de2;
+    *e3 = *de3;
+    *e4 = *de4;
 
     struct xhci_trb cmd = {0};
     uint8_t cc = 0;
-    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_RESET_DEVICE) |
-                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+    cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
+    cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_EVAL_CONTEXT) |
+                  ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
     if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
-        WARN("xhci: RESET_DEVICE(slot=%u, %s) transport failure",
-             (unsigned)slot, why ? why : "probe");
+        WARN("xhci: EVAL_CONTEXT(slot=%u, %s) transport failure",
+             (unsigned)d->slot_id, why ? why : "probe");
         return;
     }
 
-    INFO("xhci: RESET_DEVICE(slot=%u, %s) cc=%u",
-         (unsigned)slot, why ? why : "probe", (unsigned)cc);
+    INFO("xhci: EVAL_CONTEXT(slot=%u, %s) cc=%u add=0x%08x ep0_dw0=0x%08x "
+         "ep0_dw1=0x%08x ep0_dw2=0x%08x ep0_dw3=0x%08x ep0_dw4=0x%08x",
+         (unsigned)d->slot_id, why ? why : "probe", (unsigned)cc,
+         (unsigned)*xhci_in_control_dw(d->input_ctx, 1),
+         (unsigned)*e0, (unsigned)*e1, (unsigned)*e2,
+         (unsigned)*e3, (unsigned)*e4);
 }
 
 /*
@@ -1176,7 +1202,7 @@ int xhci_hcd_device_open(struct usb_device *dev)
     if (use_inherited_addr2 && !use_bsr0)
         xhci_patch_inherited_address(d, 2);
     xhci_log_devctx_snapshot(d, "post-address");
-    xhci_try_reset_device_slot(slot, "post-address");
+    xhci_try_eval_ep0_context(d, "post-address");
 
     dev->hcd_private = d;
     return 0;
