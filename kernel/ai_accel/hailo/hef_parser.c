@@ -1629,12 +1629,32 @@ static bool decode_nested_ng_cb(pb_istream_t *stream,
      * double-count contexts + duplicate CCW actions without this
      * reset. Clear the affected counters before re-walking; pads[]
      * are deduped separately via pad_key lookup so they don't need
-     * a reset. */
+     * a reset.
+     *
+     * #253: the per-kind compute-action arrays also need reset —
+     * previously we only zeroed context_actions_count, which let
+     * allow_input_dataflow_count / enable_lcu_count / etc. keep
+     * entries from the top-level walk while action_types[] got
+     * wiped by the nested walker's decode_context_cb memset. The
+     * translator walks action_types[] first so this mismatch is
+     * inert today, but would surface as spurious "per-kind array
+     * exhausted" errors the moment MNIST grows to multi-context
+     * or the walk order changes. */
     struct hef_info *info = nctx->op_ctx->info;
     info->context_actions_count = 0;
     info->context_actions_truncated = false;
     info->op_count = 0;
     info->ccw_action_count = 0;
+    info->enable_lcu_count = 0;
+    info->enable_lcu_truncated = false;
+    info->disable_lcu_count = 0;
+    info->disable_lcu_truncated = false;
+    info->trigger_sequencer_count = 0;
+    info->trigger_sequencer_truncated = false;
+    info->wait_sequencer_count = 0;
+    info->wait_sequencer_truncated = false;
+    info->allow_input_dataflow_count = 0;
+    info->allow_input_dataflow_truncated = false;
 
     ProtoHEFNetworkGroup grp = ProtoHEFNetworkGroup_init_default;
     grp.ops.funcs.decode                = decode_op_cb;
