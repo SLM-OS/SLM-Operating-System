@@ -172,6 +172,21 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
     hailo_vdma_program_descriptor(&list->descs[last_slot],
                                   dma_address, last_size, data_id);
 
+    /* PMM allocates cacheable kernel memory, so descriptor writes land
+     * in L1/L2. BCM2712's PCIe engine claims cache coherency via
+     * ACE-Lite but empirically firmware reads stale zeros unless we
+     * push the writes to the PoC. One clean covers all programmed
+     * slots since they were written sequentially.
+     *
+     * TODO: if a future regression shows the PCIe window actually
+     * snoops caches correctly, drop this flush — it costs ~microseconds
+     * per submit. Today we can't distinguish "snoop works but fw logic
+     * still wrong" from "snoop broken" without this baseline. */
+    if (hailo_platform && hailo_platform->cache_clean) {
+        hailo_platform->cache_clean(list->descs,
+            (size_t)descs_needed * sizeof(struct hailo_vdma_descriptor));
+    }
+
     return (int)descs_needed;
 }
 
@@ -342,4 +357,65 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
                 (unsigned)channel_index, (unsigned)proc_end,
                 (unsigned)base_end);
     return HAILO_ERR_TIMEOUT;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Diagnostic dumps — Phase 8 inference-submit investigation (#253)           */
+/* -------------------------------------------------------------------------- */
+
+void hailo_vdma_dump_desc_list(const struct hailo_vdma_desc_list *list,
+                               const char *label,
+                               uint32_t max_descs)
+{
+    if (!list || !list->descs || !label) return;
+    uart_printf("[desc] %s list iova=0x%lx page_size=%u "
+                "desc_count=%u circular=%d\r\n",
+                label, (uint64_t)list->iova,
+                (unsigned)list->desc_page_size,
+                (unsigned)list->desc_count,
+                (int)list->is_circular);
+    uint32_t n = (max_descs < list->desc_count) ? max_descs : list->desc_count;
+    for (uint32_t i = 0; i < n; i++) {
+        const struct hailo_vdma_descriptor *d = &list->descs[i];
+        uint32_t ps_ctrl = d->page_size_desc_control;
+        uint32_t ctrl    = ps_ctrl & 0xFFu;
+        uint32_t page    = ps_ctrl >> HAILO_VDMA_DESC_PAGE_SIZE_SHIFT;
+        uint32_t addr_l  = d->addr_l_rsvd_data_id & HAILO_VDMA_DESC_ADDR_L_MASK;
+        uint32_t data_id = d->addr_l_rsvd_data_id & 0x3Fu;
+        uart_printf("[desc] %s[%u] ps_ctrl=0x%08x (page=%u ctrl=0x%02x) "
+                    "addr_l=0x%08x data_id=0x%02x addr_h=0x%08x "
+                    "rem_status=0x%08x\r\n",
+                    label, (unsigned)i,
+                    (unsigned)ps_ctrl, (unsigned)page, (unsigned)ctrl,
+                    (unsigned)addr_l, (unsigned)data_id,
+                    (unsigned)d->addr_h,
+                    (unsigned)d->remaining_page_size_status);
+    }
+}
+
+void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label)
+{
+    if (!hailo_platform || channel_index >= HAILO_VDMA_MAX_CHANNELS) return;
+    uint32_t base = channel_base(channel_index);
+    uint32_t base_dw = hailo_platform->read32(HAILO_BAR_VDMA,
+        base + HAILO_VDMA_CHANNEL_BASE_DWORD);
+    uint32_t proc_dw = hailo_platform->read32(HAILO_BAR_VDMA,
+        base + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+    uint32_t addr_l  = hailo_platform->read32(HAILO_BAR_VDMA,
+        base + HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L);
+    uint32_t addr_h  = hailo_platform->read32(HAILO_BAR_VDMA,
+        base + HAILO_VDMA_CHANNEL_ADDR_H);
+    uart_printf("[chan] %s ch=%u base=0x%08x (ctrl=0x%02x data_id=%u "
+                "depth=%u num_avail=%u) proc=0x%08x (proc=%u ongoing=%u) "
+                "aligned_addr_l=0x%08x addr_h=0x%08x\r\n",
+                label ? label : "",
+                (unsigned)channel_index, (unsigned)base_dw,
+                (unsigned)(base_dw & 0xFFu),
+                (unsigned)((base_dw >> HAILO_VDMA_CHANNEL_DATA_ID_SHIFT) & 0x7u),
+                (unsigned)((base_dw >> HAILO_VDMA_CHANNEL_DESC_DEPTH_SHIFT) & 0xFu),
+                (unsigned)(base_dw >> HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT),
+                (unsigned)proc_dw,
+                (unsigned)(proc_dw & 0xFFFFu),
+                (unsigned)(proc_dw >> 16),
+                (unsigned)addr_l, (unsigned)addr_h);
 }

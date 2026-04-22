@@ -429,7 +429,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
         }
         int prog = hailo_vdma_program_buffer(&slot->boundary_in_list, 0,
                                              slot->boundary_in_tensor.iova,
-                                             in_bytes, in_pad->sys_index);
+                                             in_bytes,
+                                             HAILO_VDMA_HOST_DMA_DATA_ID);
         if (prog < 0) {
             WARN("hailo backend: boundary IN program_buffer failed (rc=%d)", prog);
             rc = HAILO_ERR_IO;
@@ -473,7 +474,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
         }
         int prog = hailo_vdma_program_buffer(&slot->boundary_out_list, 0,
                                              slot->boundary_out_tensor.iova,
-                                             out_bytes, out_pad->sys_index);
+                                             out_bytes,
+                                             HAILO_VDMA_HOST_DMA_DATA_ID);
         if (prog < 0) {
             WARN("hailo backend: boundary OUT program_buffer failed (rc=%d)", prog);
             rc = HAILO_ERR_IO;
@@ -958,7 +960,7 @@ static int hailo_backend_run(struct inference_device *dev,
         &slot->boundary_in_list, 0,
         slot->boundary_in_tensor.iova,
         slot->boundary_in_tensor.tensor_bytes,
-        slot->cfg.input_data_id);
+        HAILO_VDMA_HOST_DMA_DATA_ID);
     if (programmed < 0) {
         return INF_ERR_NOSUPPORT;
     }
@@ -968,11 +970,20 @@ static int hailo_backend_run(struct inference_device *dev,
         &slot->boundary_out_list, 0,
         slot->boundary_out_tensor.iova,
         slot->boundary_out_tensor.tensor_bytes,
-        slot->cfg.output_data_id);
+        HAILO_VDMA_HOST_DMA_DATA_ID);
     if (programmed < 0) {
         return INF_ERR_NOSUPPORT;
     }
     uint16_t out_num_avail = (uint16_t)programmed;
+
+    /* Phase 8 #253: dump programmed descriptors + channel regs so we
+     * can compare byte-for-byte against HailoRT's reference output.
+     * Runs once per hailo_backend_run call; `hailo runmodel <h> 1`
+     * gives exactly one dump per inference. Strip when resolved. */
+    hailo_vdma_dump_desc_list(&slot->boundary_in_list,  "IN",  4);
+    hailo_vdma_dump_channel_regs(in_channel,  "IN pre-submit");
+    hailo_vdma_dump_desc_list(&slot->boundary_out_list, "OUT", 4);
+    hailo_vdma_dump_channel_regs(out_channel, "OUT pre-submit");
 
     int rc;
     uint64_t t_in_submit  = timer_get_count();
