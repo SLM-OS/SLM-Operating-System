@@ -3129,9 +3129,11 @@ static void test_cs_translate_dynamic_emits_boundary_prologue(void)
     /* After 44 + 5+42=91 bytes: RESUME_VDMA_CHANNEL. */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_RESUME_VDMA_CHANNEL,
                             out.dynamic[91]);
-    /* RESUME body: packed_vdma = 2, direction = H2D (0). */
+    /* RESUME body: packed_vdma = 2, direction = H2D (1 per HailoRT
+     * v4.23 EDGE_LAYER_DIRECTION enum). */
     TEST_ASSERT_EQUAL_UINT8(0x02, out.dynamic[96]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_EDGE_DIR_H2D, out.dynamic[97]);
+    TEST_ASSERT_EQUAL_UINT8(1u, out.dynamic[97]);    /* wire value */
 
     /* After 91+7=98 bytes: APPLICATION_CHANGE_INTERRUPT tail. */
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
@@ -3530,7 +3532,11 @@ static void test_cs_translate_allow_input_dataflow_wire_format(void)
                             out.dynamic[0]);
     /* packed_vdma = config_vdma + 1 = 0x04. */
     TEST_ASSERT_EQUAL_UINT8(0x04, out.dynamic[5]);
-    TEST_ASSERT_EQUAL_UINT8(0,    out.dynamic[6]);   /* stream_index */
+    /* stream_index follows the pad's sys_index (42 here), not a
+     * fixed 0 — fw correlates this with ACTIVATE_BOUNDARY_INPUT's
+     * stream_index in the DYNAMIC prologue. HailoRT wire capture on
+     * pi-5-1 confirmed stream_index = pad_sys_index here. */
+    TEST_ASSERT_EQUAL_UINT8(42,   out.dynamic[6]);   /* stream_index */
     TEST_ASSERT_EQUAL_UINT8(0,    out.dynamic[7]);  /* network_index */
     uint32_t fps; memcpy(&fps, out.dynamic + 8, 4);
     TEST_ASSERT_EQUAL_UINT32(0x01020304, fps);

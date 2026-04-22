@@ -182,9 +182,21 @@ struct hailo_cs_translate_cfg {
     uint64_t boundary_output_desc_list_iova;
     uint32_t boundary_output_total_desc_count;
 
-    /* Boundary descriptor page size (shared by input + output today).
-     * Must match the programmed VDMA descriptor list's page size. */
+    /* Boundary descriptor page size. Used for the INPUT boundary
+     * channel and, as a fallback, for the OUTPUT channel when
+     * boundary_output_desc_page_size is 0. Must match the programmed
+     * VDMA descriptor list's page size. */
     uint16_t boundary_desc_page_size;
+
+    /* OUTPUT-specific boundary descriptor page size. HailoRT v4.23
+     * allocates the output boundary desc list with a different
+     * page size than the input (16384 vs 512 observed on MNIST);
+     * firmware cross-checks host_buffer_info.desc_page_size against
+     * the list on the other side of the VDMA channel and wedges the
+     * D2H pipe silently on a mismatch. Set to 0 to fall back to
+     * boundary_desc_page_size — that preserves pre-2026-04-22
+     * behavior for callers that haven't been updated yet. */
+    uint16_t boundary_output_desc_page_size;
 };
 
 /*

@@ -29,6 +29,50 @@
 #include "hailo_cs_translator.h"
 #include "hef.pb.h"   /* ProtoHEFAction_*_tag constants */
 
+/* "periph frame size" = periph_bytes_per_buffer * periph_buffers_per_frame.
+ * This is the value firmware expects in:
+ *   - OpenBoundary{Input,Output}.host_buffer_info.bytes_in_pattern
+ *   - OpenBoundaryInput.frame_periph_size / periph_bytes_per_buffer
+ *   - AllowInputDataflow.frame_periph_size
+ *   - Activate_Boundary.host_buffer_info.bytes_in_pattern
+ *
+ * HailoRT v4.23 synthesizes nn_stream_config such that
+ *   INPUT  periph_bytes_per_buffer  = h * w * features, periph_buffers=1
+ *   OUTPUT periph_bytes_per_buffer  = core_bytes_per_buffer,   periph_buffers=1
+ * so periph_frame boils down to tensor size for input and core size
+ * for output. Verified byte-for-byte against HailoRT's MNIST wire
+ * capture (docs/reference/pios_{ACTIVATION,DYNAMIC}.bin). */
+/* Resolve the OUTPUT boundary desc page size with fallback to the
+ * INPUT default. Kept inline so both translate_open_boundary_for_pad
+ * and emit_dynamic_boundary_prologue agree on the value they emit. */
+static inline uint16_t cfg_output_page_size(
+    const struct hailo_cs_translate_cfg *cfg)
+{
+    return cfg->boundary_output_desc_page_size
+             ? cfg->boundary_output_desc_page_size
+             : cfg->boundary_desc_page_size;
+}
+
+static uint32_t pad_periph_frame_size(const struct hef_pad_info *p)
+{
+    uint32_t bpb = p->core_bytes_per_buffer;
+    uint32_t bpf = p->core_buffers_per_frame ? p->core_buffers_per_frame : 1u;
+    if (p->is_input) {
+        /* Input: periph view is the full tensor as one buffer. */
+        if (p->has_tensor_shape) {
+            return (uint32_t)p->height * p->width * p->features;
+        }
+        /* Fall back to core size if shape missing — keeps submit flow
+         * alive with a plausible value, same as pre-2026-04-22 behavior. */
+        return bpb * bpf;
+    }
+    /* Output: periph bytes matches the core buffer size (padding is
+     * encoded separately via buffer_padding{,_payload}). Multiply by
+     * periph_buffers_per_frame (=1) to keep the shape symmetric with
+     * the input case. */
+    return bpb;
+}
+
 /* Compute `config_vdma_channel + offset` and narrow to u8 for the
  * wire. Returns HAILO_OK + writes `*out` on success, HAILO_ERR_INVAL
  * and logs a WARN if the sum exceeds 0xFF (would silently truncate).
@@ -178,24 +222,14 @@ static int translate_open_boundary_for_pad(
                  pad->sys_index);
             return HAILO_ERR_INVAL;
         }
-        /* Two distinct quantities:
-         *   bpb   = core_bytes_per_buffer — single periph-buffer size
-         *           (one 224-pixel row of 224×3 INT8 in our test HEF = 672)
-         *   frame = bpb * core_buffers_per_frame — full tensor frame
-         *           (224 rows × 672 = 150528 for a 224×224×3 input)
-         *
-         * Firmware cross-checks:
-         *   - bytes_in_pattern  == frame_periph_size      (transfer size)
-         *   - periph_bytes_per_buffer * frame/bytes ratio  matches desc list
-         *
-         * Earlier build collapsed these to one value (frame = bpb) which
-         * worked for single-row test HEFs but failed the firmware check
-         * on real multi-row tensors with
-         * HAILO_DATAFLOW_STATUS_INVALID_RECEIVE_COMMUNICATION. */
-        uint32_t bpb   = pad->core_bytes_per_buffer;
-        uint32_t bpf   = pad->core_buffers_per_frame
-                           ? pad->core_buffers_per_frame : 1u;
-        uint32_t frame = bpb * bpf;
+        /* Periph transfer size for INPUT = h*w*features (one whole-frame
+         * periph buffer); see pad_periph_frame_size() comment for why
+         * the proto's core_bytes_per_buffer value isn't the right
+         * quantity here — HailoRT synthesizes the periph split from
+         * direction + shape + DFC flags, not directly from the proto.
+         * Byte-verified against pios_ACTIVATION.bin / pios_DYNAMIC.bin
+         * for the MNIST HEF on pi-5-1 (#253). */
+        uint32_t periph_frame = pad_periph_frame_size(pad);
         struct hailo_cs_act_open_boundary_input_channel body = {
             .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {
@@ -203,12 +237,13 @@ static int translate_open_boundary_for_pad(
                 .dma_address      = cfg->boundary_input_desc_list_iova,
                 .desc_page_size   = cfg->boundary_desc_page_size,
                 .total_desc_count = cfg->boundary_input_total_desc_count,
-                .bytes_in_pattern = frame,
+                .bytes_in_pattern = periph_frame,
             },
             .stream_index             = stream_index,
             .network_index            = 0,
-            .periph_bytes_per_buffer  = (uint16_t)((bpb > 0xFFFFu) ? 0xFFFFu : bpb),
-            .frame_periph_size        = frame,
+            .periph_bytes_per_buffer  =
+                (uint16_t)((periph_frame > 0xFFFFu) ? 0xFFFFu : periph_frame),
+            .frame_periph_size        = periph_frame,
         };
         return hailo_cs_builder_append(
             b, HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
@@ -224,19 +259,18 @@ static int translate_open_boundary_for_pad(
                  "is 0", pad->sys_index);
             return HAILO_ERR_INVAL;
         }
-        uint32_t obpf = pad->core_buffers_per_frame
-                          ? pad->core_buffers_per_frame : 1u;
-        uint32_t out_frame = pad->core_bytes_per_buffer * obpf;
+        uint32_t periph_frame = pad_periph_frame_size(pad);
         struct hailo_cs_act_open_boundary_output_channel body = {
             .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {
                 .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
                 .dma_address      = cfg->boundary_output_desc_list_iova,
-                .desc_page_size   = cfg->boundary_desc_page_size,
+                .desc_page_size   = cfg_output_page_size(cfg),
                 .total_desc_count = cfg->boundary_output_total_desc_count,
-                /* See note on the input body above — HailoRT derives
-                 * this from the output pad's transfer_size. */
-                .bytes_in_pattern = out_frame,
+                /* Output: periph frame == core_bytes_per_buffer per
+                 * pad_periph_frame_size. bytes_in_pattern = 16 for
+                 * MNIST's 1x1x10 (padded) output on the wire. */
+                .bytes_in_pattern = periph_frame,
             },
         };
         (void)stream_index;   /* OUTPUT body omits stream_index today. */
@@ -548,21 +582,21 @@ static int translate_allow_input_dataflow(
      * error for `frame_periph_size=0`, so fail fast here and let
      * the caller surface the missing pad.
      *
-     * #253 fix: frame_periph_size here must match the value
-     * OpenBoundaryInputChannel declared in ACTIVATION — i.e. the
-     * FULL periph frame (bpb * bpf), not just bpb. Firmware
-     * cross-checks the two and silently wedges the inference
-     * pipeline (device-side avail stays 0) when they disagree.
-     * For our MNIST HEF: bpb=32, bpf=28, frame=896. */
+     * #253 (2026-04-22): frame_periph_size here must match the value
+     * OpenBoundaryInputChannel declared in ACTIVATION and the one
+     * ACTIVATE_BOUNDARY_INPUT carries in the DYNAMIC prologue —
+     * all three use pad_periph_frame_size() for a single
+     * direction-aware formula (tensor size for input, core size
+     * for output). For the MNIST HEF: h=28, w=28, features=1 ->
+     * periph_frame=784 (was 896 when it was bpb*bpf). */
     uint32_t frame_size = 0;
+    uint8_t  pad_sys_index = 0;
     bool pad_found = false;
     for (uint32_t i = 0; i < info->pad_count; i++) {
         if (info->pads[i].sys_index == a->sys_index) {
-            uint32_t bpb = info->pads[i].core_bytes_per_buffer;
-            uint32_t bpf = info->pads[i].core_buffers_per_frame
-                              ? info->pads[i].core_buffers_per_frame : 1u;
-            frame_size = bpb * bpf;
-            pad_found = true;
+            frame_size    = pad_periph_frame_size(&info->pads[i]);
+            pad_sys_index = info->pads[i].sys_index;
+            pad_found     = true;
             break;
         }
     }
@@ -582,9 +616,16 @@ static int translate_allow_input_dataflow(
                                      "AllowInputDataflow", &packed_vdma);
     if (rc_pack != HAILO_OK) return rc_pack;
 
+    /* stream_index in FETCH_DATA_FROM_VDMA must match the pad's
+     * sys_index, not a fixed 0. Fw uses this to correlate the fetch
+     * with ACTIVATE_BOUNDARY_INPUT's stream_index (also sys_index in
+     * emit_dynamic_boundary_prologue); a mismatch leaves the periph
+     * engine waiting on the wrong stream slot. HailoRT wire capture
+     * for MNIST on pi-5-1 shows stream_index=1 here (input pad's
+     * sys_index), not 0. */
     struct hailo_cs_act_fetch_data_from_vdma body = {
         .packed_vdma_channel_id = packed_vdma,
-        .stream_index           = 0,
+        .stream_index           = pad_sys_index,
         .network_index          = 0,
         .frame_periph_size      = frame_size,
         .credit_type            = 1,   /* CREDIT_IN_BYTES */
@@ -644,25 +685,77 @@ static int find_boundary_pads(const struct hef_info *info,
     return (*in_pad && *out_pad) ? 0 : -1;
 }
 
-/* Fill a stream_reg_info from pad geometry. Matches HailoRT v4.23
- * byte layout exactly (see pios_DYNAMIC.bin for MNIST reference). */
+/* Fill a stream_reg_info from pad geometry, matching HailoRT v4.23
+ * byte-for-byte (cross-checked against pios_DYNAMIC.bin for the
+ * MNIST HEF).
+ *
+ * HailoRT synthesizes `nn_stream_config` at load time from
+ * ProtoHEFEdgeLayerBase + direction + HW padding support
+ * (HefConfigurator::parse_nn_stream_config in
+ * hailo-hef-internal.hpp:538). The proto itself does NOT expose
+ * `periph_bytes_per_buffer`, `periph_buffers_per_frame`,
+ * `buffer_padding_payload`, `buffer_padding` — we compute them the
+ * same way:
+ *
+ *   INPUT:
+ *     periph_bytes_per_buffer  = h*w*features   (whole-frame view)
+ *     periph_buffers_per_frame = 1
+ *     buffer_padding_payload   = 0
+ *     buffer_padding           = 0
+ *     (HW handles the core-vs-periph alignment inside the NN engine.)
+ *
+ *   OUTPUT:
+ *     periph_bytes_per_buffer  = core_bytes_per_buffer
+ *     periph_buffers_per_frame = 1
+ *     buffer_padding_payload   = h*w*features / bpf  (real bytes per buffer)
+ *     buffer_padding           = core_bytes_per_buffer - payload
+ *     (The core emits padded buffers; the buffer_padding pair encodes
+ *     the payload/padding split that downstream code uses to strip
+ *     padding when presenting to the host.)
+ *
+ * Verified numerically against HailoRT wire capture for MNIST on
+ * pi-5-1 fw v4.23:
+ *   INPUT  (28x28x1, bpb=32, bpf=28):
+ *     periph=(784,1,0,0)  ✓
+ *   OUTPUT (1x1x10, bpb=16, bpf=1):
+ *     periph=(16,1,10,6)  ✓
+ *
+ * is_core_hw_padding_config_in_dfc=1 marks the HEF as having been
+ * compiled with DFC's post-3.33 padding convention (the only shape
+ * we've seen in the wild so far). */
 static void fill_stream_reg_info_from_pad(const struct hef_pad_info *p,
                                           struct hailo_cs_stream_reg_info *out)
 {
     memset(out, 0, sizeof(*out));
     uint32_t bpb = p->core_bytes_per_buffer;
     uint32_t bpf = p->core_buffers_per_frame ? p->core_buffers_per_frame : 1u;
+
     out->core_bytes_per_buffer    = (uint16_t)bpb;
     out->core_buffers_per_frame   = (uint16_t)bpf;
-    /* periph fields: HailoRT's v4.23 wire capture for MNIST input shows
-     * periph_bytes_per_buffer = 784 = HEF tensor h*w (28*28), not bpb.
-     * For output the periph side matched bpb (16). Use tensor total as
-     * a best approximation — if periph differs from core the HEF's
-     * stream_info would expose it but we don't extract those fields. */
+
     uint32_t tensor_total = p->has_tensor_shape
         ? (uint32_t)p->height * p->width * p->features : bpb * bpf;
-    out->periph_bytes_per_buffer  = (uint16_t)(tensor_total / bpf);
-    out->periph_buffers_per_frame = 1u;
+
+    if (p->is_input) {
+        /* Input: periph view is the full tensor as one buffer. */
+        out->periph_bytes_per_buffer  = (uint16_t)tensor_total;
+        out->periph_buffers_per_frame = 1u;
+        /* feature_padding_payload / buffer_padding{,_payload} left 0
+         * — HW handles core/periph reshape without host-side info. */
+    } else {
+        /* Output: periph matches core; per-buffer padding split is
+         * encoded in buffer_padding_payload / buffer_padding. */
+        out->periph_bytes_per_buffer  = (uint16_t)bpb;
+        out->periph_buffers_per_frame = 1u;
+        uint32_t payload = (bpf > 0) ? (tensor_total / bpf) : 0;
+        /* Clamp pathological cases: HEFs with core smaller than the
+         * tensor shape (shouldn't happen for real v4.23 compilations,
+         * but cheap to guard). */
+        if (payload > bpb) payload = bpb;
+        uint32_t padding = bpb - payload;
+        out->buffer_padding_payload = payload;
+        out->buffer_padding         = (uint16_t)padding;
+    }
     out->is_core_hw_padding_config_in_dfc = 1u;
 }
 
@@ -701,14 +794,11 @@ static int emit_dynamic_boundary_prologue(
                             "DynamicActivateOut", &out_ch);
     if (rc != HAILO_OK) return rc;
 
-    uint32_t in_bpb  = in_pad->core_bytes_per_buffer;
-    uint32_t in_bpf  = in_pad->core_buffers_per_frame
-                           ? in_pad->core_buffers_per_frame : 1u;
-    uint32_t in_frame  = in_bpb * in_bpf;
-    uint32_t out_bpb = out_pad->core_bytes_per_buffer;
-    uint32_t out_bpf = out_pad->core_buffers_per_frame
-                           ? out_pad->core_buffers_per_frame : 1u;
-    uint32_t out_frame = out_bpb * out_bpf;
+    /* host_buffer_info.bytes_in_pattern = periph_frame_size; same
+     * direction-aware formula as ACTIVATION's OpenBoundary and
+     * AllowInputDataflow's frame_periph_size. */
+    uint32_t in_frame  = pad_periph_frame_size(in_pad);
+    uint32_t out_frame = pad_periph_frame_size(out_pad);
 
     /* 1. ACTIVATE_BOUNDARY_OUTPUT (v4.23 emits output first). */
     struct hailo_cs_act_activate_boundary_output out_body;
@@ -718,7 +808,7 @@ static int emit_dynamic_boundary_prologue(
     out_body.network_index          = 0;
     fill_stream_reg_info_from_pad(out_pad, &out_body.stream_reg_info);
     fill_host_buffer_info(cfg->boundary_output_desc_list_iova,
-                          cfg->boundary_desc_page_size,
+                          cfg_output_page_size(cfg),
                           cfg->boundary_output_total_desc_count,
                           out_frame, &out_body.host_buffer_info);
     rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_BOUNDARY_OUTPUT,

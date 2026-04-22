@@ -477,11 +477,20 @@ _Static_assert(sizeof(struct hailo_cs_act_activate_boundary_output) == 39,
                "activate_boundary_output body must be 39 bytes per v4.23 wire");
 
 /* Edge layer direction enum used by (de)activate/pause/resume actions.
- * Reference: hailort-v4.23.0-context_switch_defs.h (near the
- * deactivate_vdma_channel / resume_vdma_channel structs). */
+ * Values MUST match HailoRT v4.23 CONTEXT_SWITCH_DEFS__EDGE_LAYER_DIRECTION_t:
+ *   UNINITIALIZED = 0, HOST_TO_DEVICE = 1, DEVICE_TO_HOST = 2.
+ * See docs/reference/hailort-v4.23.0-context_switch_defs.h:134-138.
+ * Pre-2026-04-22 we had H2D=0/D2H=1 which happened to survive through
+ * ACTIVATION (the direction byte there is cross-validated against the
+ * packed channel id and fw tolerates either) but broke in DYNAMIC's
+ * RESUME_VDMA_CHANNEL — fw gates the first FETCH_DATA on matching
+ * direction and silently wedges device-side num_avail at 0 when the
+ * enum value is wrong. Wire-verified against pios_DYNAMIC.bin on
+ * pi-5-1 (#253 Phase 8 submit-hang investigation). */
 enum hailo_cs_edge_layer_direction {
-    HAILO_CS_EDGE_DIR_H2D = 0,
-    HAILO_CS_EDGE_DIR_D2H = 1,
+    HAILO_CS_EDGE_DIR_UNINIT = 0,
+    HAILO_CS_EDGE_DIR_H2D    = 1,
+    HAILO_CS_EDGE_DIR_D2H    = 2,
 };
 
 /* PAUSE_VDMA_CHANNEL / RESUME_VDMA_CHANNEL share the same 2-byte body:

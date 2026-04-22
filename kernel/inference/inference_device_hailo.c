@@ -458,7 +458,34 @@ static int pick_largest_pads(const struct hef_info *info,
  * default lives in hailo_cs_translator.h alongside the boundary-
  * channel offsets and their compile-time range guards. */
 #define HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE   512u
-#define HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE   4096u
+/* HailoRT v4.23 wire capture on pi-5-1 shows boundary channels use
+ * desc_page_size=512 (pios_ACTIVATION.bin / pios_DYNAMIC.bin: low-16
+ * of OpenBoundary.host_buffer_info.desc_page_size = 0x0200). 4096
+ * is within the HW 4 KB cap but fw appears to cache the
+ * (desc_page_size, total_desc_count) pair declared in
+ * OpenBoundary and silently refuse transfers whose host-side geometry
+ * disagrees. Matching HailoRT's chosen values byte-for-byte is the
+ * safest default. */
+#define HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE   512u
+/* Output-side boundary desc page size. HailoRT v4.23 on MNIST
+ * allocates the output boundary descriptor list at page_size=64
+ * (MIN_VDMA_DESCRIPTOR_BUFFER_SIZE) while the input uses 512. See
+ * pios_DYNAMIC.bin host_buffer_info.desc_page_size fields for
+ * ACTIVATE_BOUNDARY_INPUT vs ACTIVATE_BOUNDARY_OUTPUT — the LE
+ * bytes at abs offset 0x22-0x23 of the DYNAMIC stream are
+ * 0x40 0x00 (=64) for OUTPUT and 0x00 0x02 (=512) for INPUT.
+ * The asymmetry lets tiny output tensors (16 B for MNIST) use the
+ * smallest possible descriptor granularity without overcommitting
+ * SG table space. Firmware cross-validates the declared page size
+ * against the descriptor list's own header and silently wedges
+ * the D2H pipe (num_proc stays 0 forever) on a mismatch.
+ * Byte-verified on pi-5-1 #253. */
+#define HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE  64u
+/* HailoRT allocates a 32-entry boundary SG list on v4.23 (host_buffer_
+ * info.total_desc_count = 32). Our desc_count_for() rounds up to a
+ * power of two anyway, so for MNIST-scale transfers (one 784 B frame
+ * in a 512 B page = 2 descs) the floor pushes us to 32 explicitly. */
+#define HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT  32u
 
 /* Round `bytes` up to `page_size` and return the descriptor count
  * needed to cover the region, rounded UP to the next power of two
@@ -602,7 +629,18 @@ static int context_switch_load(struct hailo_model_slot *slot,
         uint32_t bpb    = in_pad->core_bytes_per_buffer;
         uint32_t bpf    = in_pad->core_buffers_per_frame
                             ? in_pad->core_buffers_per_frame : 1u;
-        uint32_t in_bytes = bpb * bpf;
+        /* Size the DMA buffer to the PERIPH frame (h*w*features for
+         * INT8 inputs), not the core-padded size. HailoRT declares
+         * host_buffer_info.bytes_in_pattern = periph_frame on the
+         * wire; host-side DMA must transfer exactly that many bytes
+         * or fw's periph layer waits for a partial tail that never
+         * arrives. For MNIST: core bpb*bpf = 32*28 = 896, periph =
+         * 28*28*1 = 784. Pre-2026-04-22 we allocated 896 and the
+         * submit hung with device-side avail stuck at 0. */
+        uint32_t in_bytes = in_pad->has_tensor_shape
+            ? (uint32_t)in_pad->height * in_pad->width * in_pad->features
+            : bpb * bpf;
+        if (in_bytes == 0) in_bytes = bpb * bpf;  /* shape-less fallback */
         rc = hailo_tensor_alloc(in_bytes, &slot->boundary_in_tensor);
         if (rc != HAILO_OK) {
             WARN("hailo backend: boundary IN tensor alloc failed (rc=%d)", rc);
@@ -618,6 +656,12 @@ static int context_switch_load(struct hailo_model_slot *slot,
                  in_bytes);
             rc = HAILO_ERR_INVAL;
             goto fail;
+        }
+        /* Floor at HailoRT's chosen 32-entry ring so the host_buffer_
+         * info.total_desc_count field we declare to fw matches what
+         * HailoRT would have declared (pios_DYNAMIC.bin). */
+        if (boundary_in_desc_count < HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT) {
+            boundary_in_desc_count = HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT;
         }
         rc = hailo_vdma_desc_list_alloc(boundary_in_desc_count,
                                         HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
@@ -657,15 +701,21 @@ static int context_switch_load(struct hailo_model_slot *slot,
         hailo_tensor_prepare_for_device(&slot->boundary_out_tensor);
 
         boundary_out_desc_count =
-            desc_count_for(out_bytes, HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE);
+            desc_count_for(out_bytes,
+                           HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE);
         if (boundary_out_desc_count == 0) {
             WARN("hailo backend: boundary OUT region too large for VDMA desc list (%u)",
                  out_bytes);
             rc = HAILO_ERR_INVAL;
             goto fail;
         }
+        /* Floor at HailoRT's chosen 32-entry ring — same reason as
+         * the input side. */
+        if (boundary_out_desc_count < HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT) {
+            boundary_out_desc_count = HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT;
+        }
         rc = hailo_vdma_desc_list_alloc(boundary_out_desc_count,
-                                        HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
+                                        HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE,
                                         /*circular=*/false,
                                         &slot->boundary_out_list);
         if (rc != HAILO_OK) {
@@ -700,6 +750,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
         .boundary_output_desc_list_iova   = boundary_out_iova,
         .boundary_output_total_desc_count = boundary_out_desc_count,
         .boundary_desc_page_size          = HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
+        .boundary_output_desc_page_size   =
+            HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE,
     };
 
     /* Step 4: translate. */
@@ -830,6 +882,20 @@ static int context_switch_load(struct hailo_model_slot *slot,
         uart_printf("[cs] allow_input_dataflow[%u]: ctx=%u sys_index=%u\r\n",
                     (unsigned)i, (unsigned)a->context_index,
                     (unsigned)a->sys_index);
+    }
+    /* Dump the first 144 bytes of DYNAMIC for byte-level diff against
+     * docs/reference/pios_DYNAMIC.bin. Strip when the submit blocker
+     * lifts — diagnostic-only. */
+    {
+        uint32_t dump_len = cs_bufs.dynamic_len < 144u
+            ? cs_bufs.dynamic_len : 144u;
+        for (uint32_t off = 0; off < dump_len; off += 16) {
+            uart_printf("[cs] dyn[%02x]:", (unsigned)off);
+            for (uint32_t j = 0; j < 16 && off + j < dump_len; j++) {
+                uart_printf(" %02x", cs_bufs.dynamic[off + j]);
+            }
+            uart_printf("\r\n");
+        }
     }
 
     for (uint32_t i = 0; i < sizeof(ctxs) / sizeof(ctxs[0]); i++) {
