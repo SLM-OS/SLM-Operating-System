@@ -186,6 +186,47 @@ static bool xhci_force_connected_disabled_reset = false;
 static bool xhci_force_bsr0_on_open = false;
 static bool xhci_force_inherited_addr2_on_open = false;
 
+static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
+                                      const char *why);
+
+static uint32_t xhci_resume_usb2_port_to_u0(uint8_t pidx, uint32_t portsc,
+                                            const char *why)
+{
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    (void)xhci_decode_portsc(portsc, &connected, &speed);
+
+    uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+    if (!connected || !(portsc & XHCI_PORTSC_PED) || speed > USB_SPEED_HIGH ||
+        pls != XHCI_PLS_U3) {
+        return portsc;
+    }
+
+    uint32_t write = (portsc & ~(XHCI_PORTSC_RW1CS_MASK | XHCI_PORTSC_PLS_MASK)) |
+                     (XHCI_PLS_RESUME << XHCI_PORTSC_PLS_SHIFT) |
+                     XHCI_PORTSC_LWS;
+    xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
+
+    uint64_t start = timer_get_count();
+    uint64_t ticks = timer_get_frequency() / 40; /* 25 ms */
+    while (timer_get_count() - start < ticks) { }
+
+    uint32_t resumed = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+    resumed = xhci_ack_port_changes(pidx, resumed, why);
+
+    uint32_t resumed_pls =
+        (resumed & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+    INFO("xhci: PORTSC[%u] resume-to-U0 for %s (0x%08x -> 0x%08x, pls %u -> %u)",
+         pidx, why, (unsigned)portsc, (unsigned)resumed,
+         (unsigned)pls, (unsigned)resumed_pls);
+    if (resumed_pls != XHCI_PLS_U0) {
+        WARN("xhci: PORTSC[%u] did not reach U0 after resume (%s, portsc=0x%08x)",
+             pidx, why, (unsigned)resumed);
+    }
+
+    return resumed;
+}
+
 static uint32_t xhci_padctl_r32(uint32_t off)
 {
     volatile uint8_t *base = (volatile uint8_t *)TEGRA_XUSB_PADCTL_BASE;
@@ -566,7 +607,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
-        xhci_force_bsr0_on_open = true;
+        xhci_force_bsr0_on_open = false;
         xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
@@ -749,6 +790,8 @@ int xhci_hcd_port_reset(uint8_t port)
         (connected_disabled && !force_connected_disabled_reset)) {
         portsc = xhci_ack_port_changes(xhci_active_port, portsc,
                                        "connected-disabled reuse");
+        portsc = xhci_resume_usb2_port_to_u0(xhci_active_port, portsc,
+                                             "connected-disabled reuse");
         xhci_skip_next_port_reset = false;
         xhci_active_portsc = portsc;
         INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x)",
@@ -1079,6 +1122,16 @@ int xhci_hcd_device_open(struct usb_device *dev)
         d->root_port = (uint8_t)(xhci_active_port + 1U);
         dev->root_hub_port = d->root_port;
     }
+
+    /*
+     * On the Linux-authorized=0 path, Tegra sometimes inherits the
+     * USB2 root port still enabled but sitting in U3 (0x00000e63).
+     * Normalize that here as well, so the first default-address EP0
+     * transfer doesn't depend on the earlier reset policy branch.
+     */
+    xhci_active_portsc = xhci_resume_usb2_port_to_u0(xhci_active_port,
+                                                     xhci_active_portsc,
+                                                     "device_open pre-ep0");
 
     /*
      * Decide which speed to program into the Slot Context.

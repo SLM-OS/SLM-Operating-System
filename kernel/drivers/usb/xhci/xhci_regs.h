@@ -90,6 +90,7 @@
 #define XHCI_PORTSC_PR              (1u << 4)   /* port reset */
 #define XHCI_PORTSC_PLS_SHIFT       5
 #define XHCI_PORTSC_PLS_MASK        (0xFu << XHCI_PORTSC_PLS_SHIFT)
+#define XHCI_PORTSC_LWS             (1u << 16)  /* link state write strobe */
 #define XHCI_PORTSC_PP              (1u << 9)   /* port power */
 #define XHCI_PORTSC_SPEED_SHIFT     10
 #define XHCI_PORTSC_SPEED_MASK      (0xFu << XHCI_PORTSC_SPEED_SHIFT)
@@ -104,5 +105,10 @@
 #define XHCI_PORTSC_SPEED_LOW       2
 #define XHCI_PORTSC_SPEED_HIGH      3
 #define XHCI_PORTSC_SPEED_SUPER     4
+
+/* PORTSC link-state values (xHCI 1.2 §5.4.8). */
+#define XHCI_PLS_U0                 0
+#define XHCI_PLS_U3                 3
+#define XHCI_PLS_RESUME             15
 
 #endif /* XHCI_REGS_H */
