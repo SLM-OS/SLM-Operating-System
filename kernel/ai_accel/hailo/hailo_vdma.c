@@ -382,11 +382,17 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
 
     uint32_t base_post = channel_read_base_dword(channel_index);
 
+#ifdef HAILO_WIRE_DEBUG
     uart_printf("[vdma] ch=%u new_avail=%u base_pre=0x%08x "
                 "base_post=0x%08x proc_pre=0x%08x\r\n",
                 (unsigned)channel_index, (unsigned)new_num_avail,
                 (unsigned)base_pre, (unsigned)base_post,
                 (unsigned)proc_pre);
+#else
+    (void)base_pre;
+    (void)base_post;
+    (void)proc_pre;
+#endif
 
     /* Poll NUM_PROC (low 16 bits of NUM_PROC_DWORD). Yield via
      * udelay between polls to stay cooperative on Pi 5. */
@@ -507,11 +513,13 @@ int hailo_vdma_channel_wait_proc(uint8_t channel_index,
     if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
     if (!hailo_platform) return HAILO_ERR_NODEV;
 
+#ifdef HAILO_WIRE_DEBUG
     uint32_t proc_pre = hailo_platform->read32(HAILO_BAR_VDMA,
         channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
     uart_printf("[vdma] ch=%u wait_proc target=%u proc_pre=0x%08x\r\n",
                 (unsigned)channel_index, (unsigned)target_num_proc,
                 (unsigned)proc_pre);
+#endif
 
     /* target_num_proc is the ABSOLUTE num_proc value fw should reach
      * once all descriptors in the channel's desc list have been

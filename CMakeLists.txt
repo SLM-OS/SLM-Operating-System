@@ -104,6 +104,18 @@ if(PLATFORM STREQUAL "RASPI5" AND PI5_FIQ_TIMER)
     add_compile_definitions(PI5_FIQ_TIMER=1)
 endif()
 
+# Verbose per-load / per-submit Hailo context-switch wire dumps.
+# Default ON for the active Phase 8 investigation (#253) because the
+# full-context hex dump + per-descriptor VDMA state are what drive
+# byte-level diffs against HailoRT's reference capture. Flip OFF once
+# the submit blocker resolves to strip the chatter from release
+# kernels. Single-line error paths (timeouts, submit_and_wait rc,
+# load-stage markers) stay unconditional regardless of this flag.
+option(HAILO_WIRE_DEBUG "Emit verbose Hailo context-switch + VDMA diagnostic dumps" ON)
+if(HAILO_WIRE_DEBUG)
+    add_compile_definitions(HAILO_WIRE_DEBUG=1)
+endif()
+
 # Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1). Adds EL2 register
 # snapshot in boot.S, per-CPU per-vector exception counters in vectors.S,
 # a real el1_fiq handler that captures the FIQ source, and the `diag`

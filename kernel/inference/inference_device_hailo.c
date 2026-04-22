@@ -1057,10 +1057,12 @@ static int context_switch_load(struct hailo_model_slot *slot,
                     (unsigned)i, (unsigned)a->context_index,
                     (unsigned)a->sys_index);
     }
+#ifdef HAILO_WIRE_DEBUG
     /* Dump each CS context for byte-level diff against
      * docs/reference/pios_{ACTIVATION,BATCH_SWITCHING,PRELIMINARY,
-     * DYNAMIC}.bin. Strip when the submit blocker lifts —
-     * diagnostic-only. */
+     * DYNAMIC}.bin. Gated behind HAILO_WIRE_DEBUG (CMake option,
+     * default ON while Phase 8 #253 submit blocker is open). Release
+     * kernels built with HAILO_WIRE_DEBUG=OFF skip this block. */
     {
         const struct { const char *tag; const uint8_t *buf; uint32_t len; } ctxdumps[] = {
             { "act", cs_bufs.activation,      cs_bufs.activation_len      },
@@ -1079,6 +1081,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
             }
         }
     }
+#endif /* HAILO_WIRE_DEBUG */
 
     for (uint32_t i = 0; i < sizeof(ctxs) / sizeof(ctxs[0]); i++) {
         cs_load_stage_set(60 + (int)i * 2);     /* 60, 62, 64, 66 per context */
@@ -1568,10 +1571,12 @@ static int hailo_backend_run(struct inference_device *dev,
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
+#ifdef HAILO_WIRE_DEBUG
     /* Phase 8 #253: dump programmed descriptors + channel regs so we
      * can compare byte-for-byte against HailoRT's reference output.
      * Runs once per hailo_backend_run call; `hailo runmodel <h> 1`
-     * gives exactly one dump per inference. Strip when resolved.
+     * gives exactly one dump per inference. Gated behind
+     * HAILO_WIRE_DEBUG; OFF builds skip.
      *
      * Also dumps the CONFIG channel (ch 1) so we can see whether the
      * CCW upload actually advanced num_proc to total_desc_count — if
@@ -1585,6 +1590,7 @@ static int hailo_backend_run(struct inference_device *dev,
     hailo_vdma_dump_channel_regs(in_channel,  "IN pre-submit");
     hailo_vdma_dump_desc_list(&slot->boundary_out_list, "OUT", 4);
     hailo_vdma_dump_channel_regs(out_channel, "OUT pre-submit");
+#endif /* HAILO_WIRE_DEBUG */
 
     int rc;
     uint64_t t_in_submit  = timer_get_count();

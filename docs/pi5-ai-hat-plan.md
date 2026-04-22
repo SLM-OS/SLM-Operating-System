@@ -1101,6 +1101,17 @@ For MNIST this reveals
 `cfg_channel[1]: 6 action(s), 336 bytes` — the fingerprint
 that led to the dual-channel fix.
 
+**Diagnostic gating** (`CMakeLists.txt`): the verbose per-load
+context hex dump and the per-submit VDMA register / descriptor
+dumps sit behind a new `HAILO_WIRE_DEBUG` CMake option
+(default **ON**) plumbed through the top-level Makefile as
+`make kernel HAILO_WIRE_DEBUG=OFF`. OFF builds strip the
+bulky `[cs] act[...]`, `[vdma] new_avail/base_pre`, and
+`wait_proc target` chatter while preserving single-line status
+and error markers (submit_and_wait rc, TIMEOUT, `[hailo] run:
+IN ok`). Flip OFF once the submit blocker resolves to clean up
+release kernel output.
+
 **Test coverage** (`kernel/tests/test_hailo.c`):
 
 - `test_cs_translate_batch_switching_mnist_template` asserts
