@@ -312,6 +312,37 @@ static void test_slm_uptime(void)
 }
 
 /*
+ * Test: slm.uptime_us() returns monotonic microseconds. Two successive
+ * calls must satisfy t2 >= t1; the value must be at least 1000x the
+ * corresponding uptime() value (trivially, since us >= ms * 1000). The
+ * Phase 8 demo benchmark relies on this for sub-ms latency percentiles.
+ */
+static void test_slm_uptime_us(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local t1 = slm.uptime_us()\n"
+        "assert(type(t1) == 'number', 'uptime_us returns number')\n"
+        "assert(t1 >= 0, 'uptime_us non-negative')\n"
+        "-- Busy work to guarantee a forward delta\n"
+        "local x = 0\n"
+        "for i = 1, 1000 do x = x + i end\n"
+        "local t2 = slm.uptime_us()\n"
+        "assert(t2 >= t1, 'uptime_us monotonic')\n"
+        "-- us clock should be at least as large as ms*1000\n"
+        "local ms = slm.uptime()\n"
+        "assert(slm.uptime_us() >= ms * 1000 - 2000,\n"
+        "       'us clock within 2ms of ms*1000')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
  * Test: slm.mem_stats returns valid table
  */
 static void test_slm_mem_stats(void)
@@ -2901,6 +2932,7 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_telnetd_sessions_empty_and_kick_nomatch);
 #endif
     RUN_TEST(test_slm_uptime);
+    RUN_TEST(test_slm_uptime_us);
     RUN_TEST(test_slm_mem_stats);
     RUN_TEST(test_slm_tasks);
     RUN_TEST(test_slm_version);

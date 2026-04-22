@@ -104,6 +104,18 @@ if(PLATFORM STREQUAL "RASPI5" AND PI5_FIQ_TIMER)
     add_compile_definitions(PI5_FIQ_TIMER=1)
 endif()
 
+# Verbose per-load / per-submit Hailo context-switch wire dumps.
+# Default ON for the active Phase 8 investigation (#253) because the
+# full-context hex dump + per-descriptor VDMA state are what drive
+# byte-level diffs against HailoRT's reference capture. Flip OFF once
+# the submit blocker resolves to strip the chatter from release
+# kernels. Single-line error paths (timeouts, submit_and_wait rc,
+# load-stage markers) stay unconditional regardless of this flag.
+option(HAILO_WIRE_DEBUG "Emit verbose Hailo context-switch + VDMA diagnostic dumps" ON)
+if(HAILO_WIRE_DEBUG)
+    add_compile_definitions(HAILO_WIRE_DEBUG=1)
+endif()
+
 # Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1). Adds EL2 register
 # snapshot in boot.S, per-CPU per-vector exception counters in vectors.S,
 # a real el1_fiq handler that captures the FIQ source, and the `diag`
@@ -456,6 +468,10 @@ set(KERNEL_SOURCES
     # the call site; the .S file compiles only when the blob is set.
     kernel/src/sched_hef_init.c
     $<$<BOOL:${SCHEDULER_HEF_BLOB}>:kernel/src/sched_hef_embed.S>
+    # Phase 8: user .hef embed (gated on USER_HEF_BLOB). Same stub
+    # pattern as the scheduler HEF above. Writes to /mnt/files/user.hef.
+    kernel/src/user_hef_init.c
+    $<$<BOOL:${USER_HEF_BLOB}>:kernel/src/user_hef_embed.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
     # General-purpose FDT reader — path + property lookup for any
     # driver. Built on every ARM64 target; x86-64 builds skip it
@@ -785,6 +801,32 @@ if(SCHEDULER_HEF_BLOB)
         OBJECT_DEPENDS "${SCHEDULER_HEF_BLOB}"
     )
     message(STATUS "Embedding scheduler MLP .hef: ${SCHEDULER_HEF_BLOB}")
+endif()
+
+# ============================================================================
+# User .hef (optional .incbin — Phase 8 real-inference deploy path)
+# ============================================================================
+#
+# Set -DUSER_HEF_BLOB=path/to/model.hef to embed a user-supplied Hailo HEF
+# into the kernel image. user_hef_init.c writes the bytes to
+# /mnt/files/user.hef at boot so Lua and the shell can reach them without
+# a FAT driver. Used for Phase 8 hardware bring-up with a real compiled
+# HEF (e.g. resnet_v1_18 for Hailo-8L).
+set(USER_HEF_BLOB "" CACHE FILEPATH
+    "Path to a user HEF to embed via .incbin (Phase 8)")
+if(USER_HEF_BLOB)
+    if(NOT EXISTS "${USER_HEF_BLOB}")
+        message(FATAL_ERROR "USER_HEF_BLOB set but file does not exist: "
+                            "${USER_HEF_BLOB}")
+    endif()
+    add_compile_definitions(ENABLE_USER_HEF_EMBED=1)
+    set_source_files_properties(
+        kernel/src/user_hef_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "USER_HEF_PATH=${USER_HEF_BLOB}"
+        OBJECT_DEPENDS "${USER_HEF_BLOB}"
+    )
+    message(STATUS "Embedding user .hef: ${USER_HEF_BLOB}")
 endif()
 
 # ============================================================================

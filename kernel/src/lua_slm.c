@@ -82,6 +82,30 @@ static int l_uptime(lua_State *L) {
     return 1;
 }
 
+/*
+ * slm.uptime_us() — microsecond resolution uptime.
+ *
+ * Pi 5's CNTPCT runs at ~54 MHz (18.5 ns per tick), giving real sub-
+ * microsecond precision. Use this for benchmarks that measure work
+ * shorter than a millisecond — e.g., slm.hailo.infer on a Hailo-8L
+ * classifier that completes in ~0.5 ms native. slm.uptime() buckets
+ * such samples into 0/1/2 ms quantized garbage.
+ *
+ * Returned as a Lua integer (signed 64-bit in Lua 5.4). 64-bit us
+ * rolls over after ~292 thousand years — no wrap to worry about.
+ */
+static int l_uptime_us(lua_State *L) {
+    if (!L) return 0;
+    uint64_t count = timer_get_count();
+    uint64_t freq = timer_get_frequency();
+    /* us = count * 1e6 / freq. Compute in 64-bit to keep precision
+     * for high-frequency counters. (count * 1000000) fits uint64 for
+     * any realistic freq (54 MHz → ~342 years before overflow). */
+    uint64_t us = (count * 1000000ULL) / freq;
+    lua_pushinteger(L, (lua_Integer)us);
+    return 1;
+}
+
 /**
  * slm.mem_stats() - Get memory statistics
  * Returns table: {total_kb, free_kb, used_kb}
@@ -2225,6 +2249,7 @@ static const luaL_Reg slm_hailo_lib[] = {
 static const luaL_Reg slm_lib[] = {
     {"print", l_print},
     {"uptime", l_uptime},
+    {"uptime_us", l_uptime_us},
     {"mem_stats", l_mem_stats},
     {"tasks", l_tasks},
     {"sleep", l_sleep},

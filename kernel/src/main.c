@@ -363,6 +363,15 @@ void kernel_main(void *dtb)
                     extern int sched_hef_init(void);
                     sched_hef_init();
                 }
+
+                /* Phase 8: write the embedded user .hef (if built with
+                 * USER_HEF_BLOB=...) to /mnt/files/user.hef so Lua
+                 * scripts can reach it without a FAT driver. Stub is
+                 * a no-op when not embedded. */
+                {
+                    extern int user_hef_init(void);
+                    user_hef_init();
+                }
             } else {
                 WARN("Failed to mount LittleFS");
             }

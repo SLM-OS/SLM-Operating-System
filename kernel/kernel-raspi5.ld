@@ -106,5 +106,11 @@ SECTIONS
     }
 }
 
-/* Sanity check: ensure kernel fits in first 16 MB */
-ASSERT(__kernel_end < 0x01080000, "Kernel image too large!")
+/* Sanity check: kernel must fit below the stack region (0x04000000).
+ * Bumped from the original 0x01080000 (16 MB) on 2026-04-21 to
+ * accommodate large embedded HEFs under USER_HEF_BLOB (Phase 8) —
+ * ResNet-18 Hailo-8L is ~18 MB alone. Pi 5 has 8 GB RAM and the
+ * kernel base is 0x80000, so 0x04000000 (64 MB) gives plenty of
+ * headroom without colliding with anything else. Update in lockstep
+ * if the stack base in boot.S moves. */
+ASSERT(__kernel_end < 0x04000000, "Kernel image too large!")

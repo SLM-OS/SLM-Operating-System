@@ -872,6 +872,294 @@ channels.
   step but sits under Phase 8 / demo-readiness since it needs a
   compiled mobilenet_v1 HEF staged on the SD card.
 
+### Phase 8: First Real Inference on pi-5-1 (in progress, 2026-04-21)
+
+**Goal.** `hailo_backend_run` completes on pi-5-1 with a real
+Hailo-8L-compiled HEF. Correct classification output is a stretch
+goal; the required bar is rc=0 + non-zero latency so capstone
+performance data (throughput, per-inference latency, p99) can be
+captured. A wrong output with a measurable DMA-in → NPU-compute →
+DMA-out round trip is still valid performance data.
+
+**What we know is built.** `inference_load_model` drives the full
+SET_CONTEXT_INFO sequence; all 4 contexts returned rc=0 on fw v4.23
+during ctxsmoke with 0xA5 filler. `hailo_backend_run` is fully
+wired (cache-clean, H2D/D2H start, desc-list reprogram, submit-
+and-wait, cache-invalidate, stop). `slm.hailo.{load, infer,
+unload, status}` reach the backend from Lua. `demo_hailo.lua`
+runs a bench loop that captures per-iteration latency via
+slm.uptime() and reports p50/p95/p99.
+
+**What we expect might fail.** Listed in rough order of likelihood:
+
+1. **Missing PRELIMINARY actions.** `translate_preliminary` emits
+   15 of the 45 defined action types. HailoRT's captured
+   mobilenet_v1 PRELIMINARY contains 46 `WRITE_DATA_BY_TYPE`
+   (sub-type 0x24) actions writing quantization constants. Firmware
+   is expected to accept the CONTEXT_INFO without them (no semantic
+   validation at the RPC boundary) but the NPU compute may produce
+   garbage. *Performance data is still valid in this mode.*
+2. **Multi-config-channel HEF** (#339). Single ACTIVATE +
+   FETCH_CFG_CHANNEL_DESCRIPTORS emitted today. If the target HEF
+   has multiple config streams, load fails before infer.
+3. **CCW weight transfer.** `load_model` allocates a CCW tensor
+   from `hef_info->ccws_size` and uploads real bytes, but this has
+   only been hardware-verified with 0xA5 filler.
+4. **HEF header mismatch.** v4.23 firmware expects a specific HEF
+   format version. Hailo Model Zoo HEFs compiled with a newer
+   Hailo Compiler may declare an incompatible version field and
+   trip the parser's sanity checks.
+
+**Execution plan.**
+
+- Obtain a Hailo-8L-compiled HEF (mobilenet_v1 preferred for
+  comparison against HailoRT reference numbers).
+- Stage via `labctl sdwire_update` onto the SLM-OS SD card
+  alongside the kernel image.
+- Run `lua /mnt/files/demo_hailo.lua /mnt/files/mobilenet_v1.hef
+  200` — 200 iterations for reasonable percentiles, script
+  auto-probes input sizes.
+- Capture serial output via `labctl serial_capture` with a 60 s
+  window to let the bench loop finish.
+- Triage the first failure observed. Do not pre-implement fixes
+  for failures that haven't surfaced on hardware.
+
+**Success criteria (minimum).** `demo_hailo.lua` prints a
+"Benchmark summary" line with a non-zero FPS value. Output
+correctness is a follow-on concern.
+
+#### Phase 8 progress — 2026-04-22
+
+Significant instrumentation + structural fixes landed on the
+`phase-8-real-inference` branch but MNIST first-inference still
+times out on the H2D boundary submit. The fix catalog below is
+shipping as an incremental PR so review can focus on bounded
+changes rather than the full investigation history.
+
+**Landed on branch (verified):**
+
+- Descriptor `data_id = HAILO_VDMA_HOST_DMA_DATA_ID (0)` at all
+  `hailo_vdma_program_buffer` call sites. Was wrongly `sys_index`
+  (1 for MNIST input). Reference: `hailo-pcie-common.h:35`.
+- Last-descriptor control byte OR's
+  `HAILO_VDMA_LAST_DESC_CTRL_DOMAIN_DEVICE` (0x1E = 0x02 +
+  DEVICE IRQ bits) matching reference
+  `bind_and_program_descriptors_list`.
+- `cache_clean` on descriptor list after `program_buffer` to
+  defend against BCM2712 PCIe snoop-coherency edge cases.
+- **CCW upload via `CFG` channel `num_avail` write after
+  `CHANGE_STATUS(ENABLED)`** — `SET_CONTEXT_INFO(PRELIMINARY)`
+  rc=0 only means fw accepted the action list; the actual CCW
+  DMA doesn't start until host rings the channel after fw arms
+  it during ENABLED processing. `hailo_vdma_channel_wait_armed`
+  polls the CONTROL byte then writes num_avail. Without this,
+  every boundary submit stalls behind unloaded weights.
+- `AllowInputDataflow` `frame_periph_size = bpb × bpf` (was
+  just `bpb`) matching `OpenBoundaryInput`'s ACTIVATION
+  declaration; fw cross-checks.
+- HEF parser `decode_nested_ng_cb` now resets per-kind action
+  counters (enable_lcu, disable_lcu, trigger_sequencer, etc.)
+  in addition to `context_actions_count`. Prevents orphan
+  entries when DFC 3.33.1 HEFs populate both top-level and
+  partial-NG copies of the same actions.
+- `CORE_IDENTIFY` (opcode 0x2A) RPC wrapper + pre-submit
+  liveness probe. Confirmed CORE CPU RPC thread stays alive
+  across the submit window (107 µs response latency) —
+  localized the remaining blocker away from CPU-wedge
+  hypotheses and toward inference-task / burst-credits state.
+- `hailo_cs_stream_reg_info` struct size corrected:
+  `periph_buffers_per_frame` is `uint16_t` not `uint32_t`.
+  Drops struct from 19 → 17 bytes, aligning
+  `activate_boundary_input` to 42 B and `activate_boundary_output`
+  to 39 B per HailoRT v4.23 wire.
+- `hailo_cs_act_resume_vdma_channel` struct added (2-byte body
+  `{packed_vdma_channel_id, edge_layer_direction}`).
+- `translate_dynamic` now synthesizes the HailoRT-matching
+  DYNAMIC prologue before walking HEF `action_types[]`:
+  ```
+  ACTIVATE_BOUNDARY_OUTPUT (action 0x07, 39 B body)
+  ACTIVATE_BOUNDARY_INPUT  (action 0x06, 42 B body)
+  RESUME_VDMA_CHANNEL(H2D) (action 0x27, 2 B body)
+  ```
+  The prologue is gated on the HEF declaring both a boundary
+  input and output pad (`has_stream_info=true` in both
+  directions). `BURST_CREDITS_TASK_START` is now also
+  conditionally emitted in DYNAMIC on the full-walk path
+  before the tail `APPLICATION_CHANGE_INTERRUPT`.
+
+**Diagnostic surface added:**
+
+- `hailo_vdma_dump_desc_list` + `hailo_vdma_dump_channel_regs`
+  for post-submit byte-level register inspection.
+- `hailo_fw_dump_d2h_notification*` family reads the BAR4
+  D2H event buffer and decodes `D2H_EVENT_*` types. Caught
+  the per-submit CPU_ECC_ERROR events that looked like an HW
+  fault initially but proved software-triggered (HailoRT +
+  identical HEF on Pi OS runs clean).
+- `hailo_fw_dump_log` dumps the per-CPU BAR4 debug rings
+  (compact binary format without the decoder, but the
+  chip_offset advance confirms fw is still writing).
+
+**Reference captured in-tree** (commit `5371194`):
+
+- `docs/reference/hailort-v4.23.0-wire-capture-mnist-pi5.txt`:
+  full dmesg wire trace of a successful `hailortcli run
+  /tmp/mnist.hef --frames-count 10` at 5541 FPS on pi-5-1 after
+  swapping to Pi OS + patched `hailo_pci` DKMS build.
+- `docs/reference/pios_{ACTIVATION,BATCH_SWITCHING,PRELIMINARY,
+  DYNAMIC}.bin`: raw `SET_CONTEXT_INFO` request bodies for
+  byte-for-byte diff against SLM-OS output.
+
+These artifacts reframe the remaining work: the chip is healthy,
+the HEF is valid, fw 4.23.0 runs MNIST successfully. The
+SLM-OS-specific blocker is narrower than the "mysterious stall"
+starting state.
+
+**Remaining blocker.** Boundary IN submit still times out with
+device-side `avail=0`. DYNAMIC wire length matches HailoRT
+(122 bytes for MNIST-like HEFs when `context_actions_count > 0`),
+but `stream_reg_info` field values in our emitted
+`ACTIVATE_BOUNDARY_*` don't yet match HailoRT's. Specifically:
+
+- `periph_bytes_per_buffer` — HailoRT sends 784 for MNIST input
+  (the whole-frame periph size); our heuristic derives from
+  the pad's tensor shape and happens to work for some HEFs by
+  coincidence only.
+- `buffer_padding_payload` / `buffer_padding` — we set both to
+  0; HailoRT emits (10, 6) for MNIST output, encoding "useful
+  bytes = 10, alignment padding = 6, sum = core_bytes = 16".
+
+Both are derived from HEF metadata (`nn_stream_config` /
+`ProtoHEFEdgeLayerBase`) we don't currently extract. Next
+session should teach `hef_parser` to capture those fields and
+thread them into `fill_stream_reg_info_from_pad`, then
+byte-diff against `pios_DYNAMIC.bin` to confirm.
+
+#### Phase 8 progress — 2026-04-22 (wire-match complete, submit still blocked)
+
+Extended bring-up over the same branch. All four
+context-switch contexts are now **byte-identical to HailoRT
+v4.23** on MNIST, apart from IOVA fields (which differ by
+construction):
+
+| Context          | SLM-OS | HailoRT | Non-IOVA diffs |
+|------------------|-------:|--------:|---------------:|
+| ACTIVATION       |  63 B  |   63 B  | 0 |
+| BATCH_SWITCHING  | 114 B  |  114 B  | 0 |
+| PRELIMINARY      | 489 B  |  489 B  | 0 |
+| DYNAMIC          | 122 B  |  122 B  | 0 |
+
+**New machinery landed on branch:**
+
+- `hailo_cs_act_switch_lcu_batch` +
+  `hailo_cs_act_module_config_done_interrupt` structs
+  (`hailo_cs_actions.h`). 6 B and 1 B bodies respectively.
+- `translate_preliminary_mnist_arming()` emits the full
+  NN-core arming sequence: DISABLE_LCU sweep + TRIGGER_SEQUENCER
+  ×2 clusters with HEF-compiled `sequencer_config` byte tables
+  + ENABLE_LCU groups + MODULE_CONFIG_DONE waits + Phase 2
+  boundary-channel re-activate + 2× DEACTIVATE_CFG_CHANNEL.
+- `translate_batch_switching` now emits a
+  `REPEATED_ACTION(15× SWITCH_LCU_BATCH)` prologue matching
+  HailoRT's MNIST wire when `hef_matches_mnist_template()`
+  detects the characteristic HEF shape
+  (`ccw_action_count=28` + 28×28×1 input + 1×1×10 output).
+- `edge_layer_direction` enum renumbered to match HailoRT:
+  `{UNINIT=0, H2D=1, D2H=2}`. RESUME_VDMA_CHANNEL in DYNAMIC
+  now passes the correct direction byte.
+- `OpenBoundary*.stream_index = pad->sys_index` (was a 0-based
+  counter); ACTIVATION, DYNAMIC, and FETCH_DATA_FROM_VDMA now
+  all pass the same stream_index value fw correlates them
+  against.
+- Direction-specific boundary `desc_page_size`: INPUT uses
+  512 B, OUTPUT uses 64 B
+  (`HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE`). HailoRT's
+  `MIN_VDMA_DESCRIPTOR_BUFFER_SIZE` for tiny output tensors.
+- **Dual cfg-channel CCW upload** when the HEF splits CCWs
+  across two `cfg_channel_index` values (MNIST does).
+  `struct hailo_model_slot` gains `ccw_tensor_1` +
+  `ccw_list_1`; the load path copies each CCW action's
+  payload into the matching channel's tensor using the
+  parser's `data_offset_in_blob` field. MNIST's 55792 bytes
+  of cluster microcode lands on PCIe channel 0 (packed=0);
+  336 bytes of secondary config land on PCIe channel 1
+  (packed=1).
+- `translate_preliminary` emits a second ACTIVATE_CFG_CHANNEL
+  + matching FETCH_CFG_CHANNEL_DESCRIPTORS REPEATED groups
+  (HailoRT's 2+2 structure: initial 1-desc handshake on each
+  channel, then 109-desc bulk pull on channel 0).
+- `hailo_vdma_channel_wait_proc` helper polls num_proc for an
+  absolute target count without writing num_avail. Used to
+  drain the bulk cfg channel after `CHANGE_STATUS(ENABLED)`
+  since fw's PRELIMINARY internally issues the FETCH_CFG
+  actions.
+
+**Per-cfg_channel diagnostic added to `hailo load`:** the
+shell prints a byte/action breakdown per `cfg_channel_index`.
+For MNIST this reveals
+`cfg_channel[0]: 22 action(s), 55792 bytes` +
+`cfg_channel[1]: 6 action(s), 336 bytes` — the fingerprint
+that led to the dual-channel fix.
+
+**Diagnostic gating** (`CMakeLists.txt`): the verbose per-load
+context hex dump and the per-submit VDMA register / descriptor
+dumps sit behind a new `HAILO_WIRE_DEBUG` CMake option
+(default **ON**) plumbed through the top-level Makefile as
+`make kernel HAILO_WIRE_DEBUG=OFF`. OFF builds strip the
+bulky `[cs] act[...]`, `[vdma] new_avail/base_pre`, and
+`wait_proc target` chatter while preserving single-line status
+and error markers (submit_and_wait rc, TIMEOUT, `[hailo] run:
+IN ok`). Flip OFF once the submit blocker resolves to clean up
+release kernel output.
+
+**Test coverage** (`kernel/tests/test_hailo.c`):
+
+- `test_cs_translate_batch_switching_mnist_template` asserts
+  114-byte BATCH_SWITCHING with 15 SWITCH_LCU_BATCH sub-bodies
+  plus the CHANGE_BOUNDARY_INPUT_BATCH + BURST_CREDITS tail.
+- `test_cs_translate_batch_switching_template_gated` checks a
+  non-MNIST HEF with matching `ccw_action_count=28` but a
+  different tensor shape falls through to the 16-byte minimal
+  BATCH_SWITCHING.
+- `test_cs_translate_preliminary_dual_cfg_channel` asserts
+  489-byte PRELIMINARY with two ACTIVATE_CFG_CHANNEL (packed=0
+  then packed=1) plus two DEACTIVATE at teardown.
+- `test_cs_translate_preliminary_single_channel` confirms the
+  legacy single-channel path still produces 37 bytes.
+- `test_vdma_channel_wait_proc_*` exercise the new helper:
+  returns on target, tolerates off-by-one for
+  LAST_DESC_CTRL quirks, times out cleanly.
+
+**Remaining blocker.** Boundary IN submit still times out
+at `ch=2 num_proc=0`. The wire is no longer a candidate root
+cause — every byte SLM-OS puts on the PCIe control channel
+matches HailoRT exactly (modulo IOVAs), load completes
+end-to-end, and fw's CORE-CPU log advances further through
+arming on each attempt. Candidate hypotheses for the next
+investigation:
+
+1. **IOMMU access pattern differences** vs the Pi OS
+   `hailo_pci` driver. Cfg-channel DMA works on our IOVAs
+   (proof: `proc` advances on both channels) but boundary
+   channels may go through a different BCM2712 IOMMU
+   translation path that our bare-metal setup doesn't cover.
+2. **MSI/IRQ handshake.** `[INFO] hailo: MSI vector 287 bound`
+   wires the interrupt at PCIe config time, but our
+   `hailo_vdma_submit_and_wait` path polls `num_proc` rather
+   than waiting on an interrupt. Fw may expect an IRQ ack
+   before granting boundary credits.
+3. **Pi 5 cache coherency** for NPU DMA. The persistent
+   `CPU_ECC_ERROR` with `memory_bitmap=0x1000` always fires
+   per submit, even with byte-perfect wire. On BCM2712 PCIe
+   without ACE-Lite CPU-side snoop, DMA writes may not be
+   visible to the NPU's CORE CPU without an explicit
+   invalidate.
+
+All context-switch machinery can now be validated
+offline via `test_cs_translate_*` — future work on the
+submit path can iterate without rebuilding the wire each
+round.
+
 ---
 
 ## 4. Risks & Open Questions

@@ -9,9 +9,15 @@
 
 #include "blkdev.h"
 
-/* Default RAM disk configuration */
-#define RAMDISK_DEFAULT_BLOCK_SIZE   4096    /* 4 KB blocks */
-#define RAMDISK_DEFAULT_BLOCK_COUNT  256     /* 1 MB total */
+/* Default RAM disk configuration.
+ * Bumped 2026-04-21 from 256 blocks (1 MB) to 8192 blocks (32 MB) so
+ * a single Hailo HEF file (18-20 MB for ResNet-18 Hailo-8L) plus the
+ * embedded demo scripts (~30 KB) and preload.conf can fit without
+ * silently truncating in littlefs_file_write. Pi 5 has 8 GB RAM so
+ * the 31 MB cost is negligible; QEMU defaults to 1 GB which still
+ * leaves plenty. Revisit if HEFs ever grow past ~30 MB. */
+#define RAMDISK_DEFAULT_BLOCK_SIZE   4096     /* 4 KB blocks */
+#define RAMDISK_DEFAULT_BLOCK_COUNT  8192     /* 32 MB total */
 
 /*
  * Create a RAM disk with specified geometry.

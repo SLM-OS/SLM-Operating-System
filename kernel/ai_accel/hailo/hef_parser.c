@@ -659,6 +659,16 @@ struct edge_layer_stage {
     uint32_t padded_width;
     uint32_t features;
     uint32_t padded_features;
+
+    /* Phase 8: context_switch_info parsed from ProtoHEFEdgeLayer
+     * field 5 — holds the real output stream ID for boundary outputs
+     * that don't carry sys_index in edge_layer_base.f8. */
+    bool     seen_csi;
+    uint32_t csi_edge_connection_type;   /* 0=BOUNDARY, 1=INTERMEDIATE, 2=DDR, 3=CACHE */
+    uint32_t csi_connected_sys_index;
+    bool     seen_csi_connected_sys_index;
+    uint32_t csi_connected_ctx_sys_index;  /* from connected_contexts[0].sys_index */
+    bool     seen_csi_connected_ctx_sys_index;
 };
 
 /*
@@ -832,6 +842,134 @@ struct edge_ctx {
  * silently skipped — they describe intermediate/DDR connections we
  * don't route at the top level.
  */
+/* Phase 8 diagnostic: per-category tallies of edge_layer outcomes.
+ * `hailo edgeinfo` reads these to understand where pads are being
+ * dropped when a HEF doesn't yield both input and output. */
+uint32_t hef_edge_layer_calls          = 0;
+uint32_t hef_edge_layer_no_key         = 0;    /* neither pad_index nor sys_index */
+uint32_t hef_edge_layer_kept_h2d       = 0;
+uint32_t hef_edge_layer_kept_d2h       = 0;
+uint32_t hef_edge_layer_deduped        = 0;    /* existing pad key matched */
+
+/* Phase 8 per-entry debug: record the first 8 edge_layers seen so we
+ * can dump their (direction, pad_index, sys_index, seen_shape) flags. */
+struct hef_edge_debug {
+    uint32_t direction;
+    uint32_t pad_index;
+    uint32_t sys_index;
+    uint32_t csi_edge_connection_type;
+    uint32_t csi_connected_sys_index;
+    uint32_t csi_connected_ctx_sys_index;
+    uint8_t  seen_direction : 1;
+    uint8_t  seen_pad_index : 1;
+    uint8_t  seen_sys_index : 1;
+    uint8_t  seen_shape     : 1;
+    uint8_t  seen_csi       : 1;
+    uint8_t  seen_csi_connected_sys_index : 1;
+    uint8_t  seen_csi_connected_ctx_sys_index : 1;
+};
+#define HEF_EDGE_DEBUG_MAX 8
+struct hef_edge_debug hef_edge_debug_slots[HEF_EDGE_DEBUG_MAX];
+uint32_t hef_edge_debug_count = 0;
+
+/*
+ * Phase 8: ProtoHEFConnectedContextInfo decode. Captures the first
+ * connected_contexts[].sys_index we see. `sys_index` is f3.
+ */
+static bool decode_connected_context_cb(pb_istream_t *stream,
+                                        const pb_field_t *field,
+                                        void **arg)
+{
+    (void)field;
+    struct edge_layer_stage *st = (struct edge_layer_stage *)*arg;
+    while (stream->bytes_left > 0) {
+        uint64_t tag = 0;
+        if (!pb_decode_varint(stream, &tag)) return false;
+        uint32_t field_no = (uint32_t)(tag >> 3);
+        uint32_t wire_type = (uint32_t)(tag & 0x7);
+        if (wire_type == 0) {
+            uint64_t v = 0;
+            if (!pb_decode_varint(stream, &v)) return false;
+            if (field_no == 3 && !st->seen_csi_connected_ctx_sys_index) {
+                st->csi_connected_ctx_sys_index = (uint32_t)v;
+                st->seen_csi_connected_ctx_sys_index = true;
+            }
+            continue;
+        }
+        switch (wire_type) {
+        case 1: if (!pb_read(stream, NULL, 8)) return false; break;
+        case 2: {
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            if (!pb_read(stream, NULL, (size_t)len)) return false;
+            break;
+        }
+        case 5: if (!pb_read(stream, NULL, 4)) return false; break;
+        default: return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * Phase 8: ProtoHEFContextSwitchInformation decode. Captures:
+ *   f3: edge_connection_type    (BOUNDARY=0 / INTERMEDIATE=1 / DDR=2 / CACHE=3)
+ *   f7: connected_sys_index
+ *   f8: connected_contexts[] (repeated ProtoHEFConnectedContextInfo)
+ */
+static bool decode_context_switch_info_cb(pb_istream_t *stream,
+                                          const pb_field_t *field,
+                                          void **arg)
+{
+    (void)field;
+    struct edge_layer_stage *st = (struct edge_layer_stage *)*arg;
+    st->seen_csi = true;
+    while (stream->bytes_left > 0) {
+        uint64_t tag = 0;
+        if (!pb_decode_varint(stream, &tag)) return false;
+        uint32_t field_no = (uint32_t)(tag >> 3);
+        uint32_t wire_type = (uint32_t)(tag & 0x7);
+        if (wire_type == 0) {
+            uint64_t v = 0;
+            if (!pb_decode_varint(stream, &v)) return false;
+            if (field_no == 3) {
+                st->csi_edge_connection_type = (uint32_t)v;
+            } else if (field_no == 7) {
+                st->csi_connected_sys_index = (uint32_t)v;
+                st->seen_csi_connected_sys_index = true;
+            }
+            continue;
+        }
+        if (wire_type == 2 && field_no == 8) {
+            /* Nested ProtoHEFConnectedContextInfo sub-message. */
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            size_t saved = stream->bytes_left;
+            stream->bytes_left = (size_t)len;
+            bool ok = decode_connected_context_cb(stream, NULL, arg);
+            stream->bytes_left = saved - (size_t)len;
+            if (!ok) return false;
+            continue;
+        }
+        /* Skip other fields (wire-type aware). */
+        switch (wire_type) {
+        case 1: if (!pb_read(stream, NULL, 8)) return false; break;
+        case 2: {
+            uint64_t len = 0;
+            if (!pb_decode_varint(stream, &len)) return false;
+            if (len > stream->bytes_left) return false;
+            if (!pb_read(stream, NULL, (size_t)len)) return false;
+            break;
+        }
+        case 5: if (!pb_read(stream, NULL, 4)) return false; break;
+        default: return false;
+        }
+    }
+    return true;
+}
+
 static bool decode_edge_layer_cb(pb_istream_t *stream,
                                  const pb_field_t *field,
                                  void **arg)
@@ -839,6 +977,7 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     (void)field;
     struct edge_ctx *ectx = (struct edge_ctx *)*arg;
     struct edge_layer_stage stage = {0};
+    hef_edge_layer_calls++;
 
     ProtoHEFEdgeLayer el = ProtoHEFEdgeLayer_init_default;
     /* layer_info lives in the `edge` oneof union; nanopb uses a shared
@@ -851,7 +990,27 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     el.pad_index.arg                = &stage;
     el.direction.funcs.decode       = decode_edge_direction_cb;
     el.direction.arg                = &stage;
+    el.context_switch_info.funcs.decode = decode_context_switch_info_cb;
+    el.context_switch_info.arg          = &stage;
     if (!pb_decode(stream, ProtoHEFEdgeLayer_fields, &el)) return false;
+
+    /* Phase 8: stash per-entry flags for post-wedge inspection. */
+    if (hef_edge_debug_count < HEF_EDGE_DEBUG_MAX) {
+        struct hef_edge_debug *d = &hef_edge_debug_slots[hef_edge_debug_count++];
+        d->direction                        = stage.direction;
+        d->pad_index                        = stage.pad_index;
+        d->sys_index                        = stage.sys_index;
+        d->csi_edge_connection_type         = stage.csi_edge_connection_type;
+        d->csi_connected_sys_index          = stage.csi_connected_sys_index;
+        d->csi_connected_ctx_sys_index      = stage.csi_connected_ctx_sys_index;
+        d->seen_direction                   = stage.seen_direction;
+        d->seen_pad_index                   = stage.seen_pad_index;
+        d->seen_sys_index                   = stage.seen_sys_index;
+        d->seen_shape                       = stage.seen_shape;
+        d->seen_csi                         = stage.seen_csi;
+        d->seen_csi_connected_sys_index     = stage.seen_csi_connected_sys_index;
+        d->seen_csi_connected_ctx_sys_index = stage.seen_csi_connected_ctx_sys_index;
+    }
 
     /* Derive a pad identity. DFC 3.33.1 simple-MLP HEFs don't emit
      * ProtoHEFEdgeLayer.pad_index on their boundary edge_layers (the
@@ -870,7 +1029,22 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
         pad_key = stage.pad_index;
     } else if (stage.seen_sys_index) {
         pad_key = stage.sys_index;
+    } else if (stage.seen_direction && stage.direction == 1 && stage.seen_shape) {
+        /* Phase 8: multi-context HEFs encode their boundary output
+         * edge_layer with direction=D2H + shape-only (no pad_index,
+         * no sys_index in edge_layer_base). Both the pad_index and
+         * the per-stream sys_index live elsewhere in the proto
+         * (context_switch_info / partial_network_group layout info)
+         * that our walker doesn't yet reach. Synthesize a distinct
+         * pad_key for the output so pick_largest_pads can succeed;
+         * the shape is what load_model actually needs for output
+         * buffer sizing. sys_index stays zero — firmware may reject
+         * the resulting ACTIVATION if the output stream id isn't
+         * accepted as a default, but that's the next diagnostic,
+         * not a parser limitation. */
+        pad_key = 0xFFFF0001;
     } else {
+        hef_edge_layer_no_key++;
         return true;                                /* non-boundary layer */
     }
 
@@ -879,6 +1053,7 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
     for (uint32_t i = 0; i < ectx->info->pad_count; i++) {
         if (ectx->info->pads[i].index == pad_key) {
             p = &ectx->info->pads[i];
+            hef_edge_layer_deduped++;
             break;
         }
     }
@@ -894,6 +1069,8 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
          * field is absent — proto3 doesn't emit zero-valued enums.
          * We flip to output only on an explicit direction==1. */
         p->is_input = !(stage.seen_direction && stage.direction == 1);
+        if (p->is_input) hef_edge_layer_kept_h2d++;
+        else             hef_edge_layer_kept_d2h++;
         if (stage.seen_shape) {
             p->has_tensor_shape = true;
             p->height           = stage.height;
@@ -1336,6 +1513,175 @@ static bool decode_context_cb(pb_istream_t *stream,
 }
 
 /* -------------------------------------------------------------------------- */
+/* Partial network group fallback path.                                        */
+/*                                                                             */
+/* DFC 3.33.1 HEFs (confirmed against resnet_v1_18_8L.hef, 2026-04-21) leave   */
+/* the top-level ProtoHEFNetworkGroup.ops / preliminary_config / contexts      */
+/* empty and instead nest the real data inside partial_network_groups[]:       */
+/*                                                                             */
+/*   ProtoHEFNetworkGroup                                                      */
+/*   └── partial_network_groups[] (field 7, repeated)                          */
+/*        └── network_group (ProtoHEFNetworkGroup, field 1) — recurses         */
+/*             ├── ops (field 8)                                               */
+/*             ├── preliminary_config (field 2)                                */
+/*             └── contexts (field 3)                                          */
+/*                                                                             */
+/* Both callbacks reuse the existing decode_op_cb /                            */
+/* decode_preliminary_config_cb / decode_context_cb so pads, CCW actions,      */
+/* and per-context actions land in the same hef_info the top-level path        */
+/* would populate.                                                             */
+/* -------------------------------------------------------------------------- */
+
+struct nested_ng_ctx {
+    struct op_ctx     *op_ctx;
+    struct ccw_ctx    *ccw_ctx;
+    struct ctx_walker *walker_ctx;
+};
+
+/*
+ * ProtoHEFEdgeLayerFused decode: same edge_layer_info as the boundary
+ * walker but always recorded as an OUTPUT pad. DFC 3.33.1 HEFs for
+ * ImageNet classifiers (resnet_v1_18_8L) keep the output softmax as a
+ * fused layer rather than a plain edge_layer, so without this walker
+ * pick_largest_pads sees an input pad but no output.
+ */
+static bool decode_fused_layer_cb(pb_istream_t *stream,
+                                  const pb_field_t *field,
+                                  void **arg)
+{
+    (void)field;
+    struct edge_ctx *ectx = (struct edge_ctx *)*arg;
+    struct edge_layer_stage stage = {0};
+
+    ProtoHEFEdgeLayerFused fused = ProtoHEFEdgeLayerFused_init_default;
+    fused.layer_info.funcs.decode = decode_edge_layer_info_cb;
+    fused.layer_info.arg          = &stage;
+    if (!pb_decode(stream, ProtoHEFEdgeLayerFused_fields, &fused)) return false;
+
+    /* Fused layers don't carry pad_index. Use sys_index as the key —
+     * matches the data_id the firmware uses for DMA routing. Skip if
+     * neither is present (malformed / intermediate layer). */
+    if (!stage.seen_sys_index) return true;
+    uint32_t pad_key = stage.sys_index;
+
+    /* Dedup: if a boundary edge_layer already seeded this pad, don't
+     * clobber it. */
+    for (uint32_t i = 0; i < ectx->info->pad_count; i++) {
+        if (ectx->info->pads[i].index == pad_key) return true;
+    }
+    if (ectx->info->pad_count >= HEF_PARSER_MAX_PADS) {
+        ectx->info->pads_truncated = true;
+        return true;
+    }
+
+    struct hef_pad_info *p = &ectx->info->pads[ectx->info->pad_count++];
+    memset(p, 0, sizeof(*p));
+    p->index    = pad_key;
+    p->is_input = false;       /* fused layers are outputs */
+    if (stage.seen_shape) {
+        p->has_tensor_shape = true;
+        p->height           = stage.height;
+        p->width            = stage.width;
+        p->features         = stage.features;
+        p->padded_height    = stage.padded_height;
+        p->padded_width     = stage.padded_width;
+        p->padded_features  = stage.padded_features;
+    }
+    if (stage.seen_sys_index) {
+        p->has_stream_info         = true;
+        p->sys_index               = stage.sys_index;
+        p->core_bytes_per_buffer   = stage.core_bytes_per_buffer;
+        p->core_buffers_per_frame  = stage.core_buffers_per_frame;
+    }
+    if (stage.seen_quant) {
+        p->has_quant_info = true;
+        p->qp_scale_raw   = stage.qp_scale_raw;
+        p->qp_zp_raw      = stage.qp_zp_raw;
+    }
+    return true;
+}
+
+static bool decode_fused_layers_metadata_cb(pb_istream_t *stream,
+                                            const pb_field_t *field,
+                                            void **arg)
+{
+    (void)field;
+    struct edge_ctx *ectx = (struct edge_ctx *)*arg;
+
+    ProtoHEFFusedLayersMetadata md = ProtoHEFFusedLayersMetadata_init_default;
+    md.fused_layers.funcs.decode = decode_fused_layer_cb;
+    md.fused_layers.arg          = ectx;
+    return pb_decode(stream, ProtoHEFFusedLayersMetadata_fields, &md);
+}
+
+static bool decode_nested_ng_cb(pb_istream_t *stream,
+                                const pb_field_t *field,
+                                void **arg)
+{
+    (void)field;
+    struct nested_ng_ctx *nctx = (struct nested_ng_ctx *)*arg;
+
+    /* Dedupe top-level vs nested walk: DFC 3.33.1 populates BOTH the
+     * top-level NG.contexts/ops/preliminary_config AND the nested
+     * partial_network_groups[].network_group.* with the same data for
+     * backward compatibility. The top-level walker already fired by
+     * the time we get here (tag 3 < tag 7 in wire order), so we'd
+     * double-count contexts + duplicate CCW actions without this
+     * reset. Clear the affected counters before re-walking; pads[]
+     * are deduped separately via pad_key lookup so they don't need
+     * a reset.
+     *
+     * #253: the per-kind compute-action arrays also need reset —
+     * previously we only zeroed context_actions_count, which let
+     * allow_input_dataflow_count / enable_lcu_count / etc. keep
+     * entries from the top-level walk while action_types[] got
+     * wiped by the nested walker's decode_context_cb memset. The
+     * translator walks action_types[] first so this mismatch is
+     * inert today, but would surface as spurious "per-kind array
+     * exhausted" errors the moment MNIST grows to multi-context
+     * or the walk order changes. */
+    struct hef_info *info = nctx->op_ctx->info;
+    info->context_actions_count = 0;
+    info->context_actions_truncated = false;
+    info->op_count = 0;
+    info->ccw_action_count = 0;
+    info->enable_lcu_count = 0;
+    info->enable_lcu_truncated = false;
+    info->disable_lcu_count = 0;
+    info->disable_lcu_truncated = false;
+    info->trigger_sequencer_count = 0;
+    info->trigger_sequencer_truncated = false;
+    info->wait_sequencer_count = 0;
+    info->wait_sequencer_truncated = false;
+    info->allow_input_dataflow_count = 0;
+    info->allow_input_dataflow_truncated = false;
+
+    ProtoHEFNetworkGroup grp = ProtoHEFNetworkGroup_init_default;
+    grp.ops.funcs.decode                = decode_op_cb;
+    grp.ops.arg                         = nctx->op_ctx;
+    grp.preliminary_config.funcs.decode = decode_preliminary_config_cb;
+    grp.preliminary_config.arg          = nctx->ccw_ctx;
+    grp.contexts.funcs.decode           = decode_context_cb;
+    grp.contexts.arg                    = nctx->walker_ctx;
+    grp.fused_layers_metadata.funcs.decode = decode_fused_layers_metadata_cb;
+    grp.fused_layers_metadata.arg          = nctx->walker_ctx->edge_ectx;
+    return pb_decode(stream, ProtoHEFNetworkGroup_fields, &grp);
+}
+
+static bool decode_partial_ng_cb(pb_istream_t *stream,
+                                 const pb_field_t *field,
+                                 void **arg)
+{
+    (void)field;
+    struct nested_ng_ctx *nctx = (struct nested_ng_ctx *)*arg;
+
+    ProtoHEFPartialNetworkGroup partial = ProtoHEFPartialNetworkGroup_init_default;
+    partial.network_group.funcs.decode = decode_nested_ng_cb;
+    partial.network_group.arg          = nctx;
+    return pb_decode(stream, ProtoHEFPartialNetworkGroup_fields, &partial);
+}
+
+/* -------------------------------------------------------------------------- */
 /* Repeated network_groups counter + first-name capture                        */
 /* -------------------------------------------------------------------------- */
 
@@ -1377,6 +1723,20 @@ static bool decode_network_group_cb(pb_istream_t *stream,
         .info      = ng->info,
         .edge_ectx = &edge_ctx,
     };
+    /* Phase 8: `nested` threads op/ccw/walker contexts through the
+     * partial_network_groups fallback so DFC 3.33.1 HEFs (which stash
+     * ops / preliminary_config / contexts one level deeper inside
+     * network_group_metadata.partial_network_groups[].network_group)
+     * hit the same slots[] population as the top-level path. Wired
+     * unconditionally: nanopb's callback fires only if the field is
+     * actually present on the wire, so older HEFs with a direct
+     * top-level layout still go through the ops / preliminary_config
+     * / contexts wiring below. */
+    struct nested_ng_ctx nested = {
+        .op_ctx     = &op_ctx,
+        .ccw_ctx    = &ccw_ctx,
+        .walker_ctx = &walker_ctx,
+    };
     if (first_ng) {
         grp.network_group_name.funcs.decode = read_string_cb;
         grp.network_group_name.arg          = &name_ctx;
@@ -1396,6 +1756,20 @@ static bool decode_network_group_cb(pb_istream_t *stream,
          * and the hef_info for actions[] accumulation. */
         grp.contexts.funcs.decode           = decode_context_cb;
         grp.contexts.arg                    = &walker_ctx;
+        /* Phase 8: partial_network_groups fallback (field 7). Newer
+         * DFC outputs nest ops / preliminary_config / contexts one
+         * level deeper under partial_network_groups[].network_group.
+         * nanopb's default callback path silently skips the field
+         * when absent so older HEFs are unaffected. */
+        grp.partial_network_groups.funcs.decode = decode_partial_ng_cb;
+        grp.partial_network_groups.arg          = &nested;
+        /* Phase 8: fused_layers_metadata (field 5) — ImageNet-class
+         * HEFs park the output softmax edge here rather than in
+         * ops.output_pads / contexts[].metadata.edge_layers, so
+         * pick_largest_pads would see only the input pad without
+         * this walker. */
+        grp.fused_layers_metadata.funcs.decode  = decode_fused_layers_metadata_cb;
+        grp.fused_layers_metadata.arg           = &edge_ctx;
     }
     if (!pb_decode(stream, ProtoHEFNetworkGroup_fields, &grp)) return false;
 

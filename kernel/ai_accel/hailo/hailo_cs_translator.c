@@ -29,6 +29,50 @@
 #include "hailo_cs_translator.h"
 #include "hef.pb.h"   /* ProtoHEFAction_*_tag constants */
 
+/* "periph frame size" = periph_bytes_per_buffer * periph_buffers_per_frame.
+ * This is the value firmware expects in:
+ *   - OpenBoundary{Input,Output}.host_buffer_info.bytes_in_pattern
+ *   - OpenBoundaryInput.frame_periph_size / periph_bytes_per_buffer
+ *   - AllowInputDataflow.frame_periph_size
+ *   - Activate_Boundary.host_buffer_info.bytes_in_pattern
+ *
+ * HailoRT v4.23 synthesizes nn_stream_config such that
+ *   INPUT  periph_bytes_per_buffer  = h * w * features, periph_buffers=1
+ *   OUTPUT periph_bytes_per_buffer  = core_bytes_per_buffer,   periph_buffers=1
+ * so periph_frame boils down to tensor size for input and core size
+ * for output. Verified byte-for-byte against HailoRT's MNIST wire
+ * capture (docs/reference/pios_{ACTIVATION,DYNAMIC}.bin). */
+/* Resolve the OUTPUT boundary desc page size with fallback to the
+ * INPUT default. Kept inline so both translate_open_boundary_for_pad
+ * and emit_dynamic_boundary_prologue agree on the value they emit. */
+static inline uint16_t cfg_output_page_size(
+    const struct hailo_cs_translate_cfg *cfg)
+{
+    return cfg->boundary_output_desc_page_size
+             ? cfg->boundary_output_desc_page_size
+             : cfg->boundary_desc_page_size;
+}
+
+static uint32_t pad_periph_frame_size(const struct hef_pad_info *p)
+{
+    uint32_t bpb = p->core_bytes_per_buffer;
+    uint32_t bpf = p->core_buffers_per_frame ? p->core_buffers_per_frame : 1u;
+    if (p->is_input) {
+        /* Input: periph view is the full tensor as one buffer. */
+        if (p->has_tensor_shape) {
+            return (uint32_t)p->height * p->width * p->features;
+        }
+        /* Fall back to core size if shape missing — keeps submit flow
+         * alive with a plausible value, same as pre-2026-04-22 behavior. */
+        return bpb * bpf;
+    }
+    /* Output: periph bytes matches the core buffer size (padding is
+     * encoded separately via buffer_padding{,_payload}). Multiply by
+     * periph_buffers_per_frame (=1) to keep the shape symmetric with
+     * the input case. */
+    return bpb;
+}
+
 /* Compute `config_vdma_channel + offset` and narrow to u8 for the
  * wire. Returns HAILO_OK + writes `*out` on success, HAILO_ERR_INVAL
  * and logs a WARN if the sum exceeds 0xFF (would silently truncate).
@@ -178,11 +222,14 @@ static int translate_open_boundary_for_pad(
                  pad->sys_index);
             return HAILO_ERR_INVAL;
         }
-        /* frame_periph_size comes from the pad's core_bytes_per_buffer;
-         * periph_bytes_per_buffer equals frame size for unpadded
-         * single-row tensors (MVP). Multi-row / padded tensors need
-         * a proper periph-vs-core split later. */
-        uint32_t frame = pad->core_bytes_per_buffer;
+        /* Periph transfer size for INPUT = h*w*features (one whole-frame
+         * periph buffer); see pad_periph_frame_size() comment for why
+         * the proto's core_bytes_per_buffer value isn't the right
+         * quantity here — HailoRT synthesizes the periph split from
+         * direction + shape + DFC flags, not directly from the proto.
+         * Byte-verified against pios_ACTIVATION.bin / pios_DYNAMIC.bin
+         * for the MNIST HEF on pi-5-1 (#253). */
+        uint32_t periph_frame = pad_periph_frame_size(pad);
         struct hailo_cs_act_open_boundary_input_channel body = {
             .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {
@@ -190,19 +237,13 @@ static int translate_open_boundary_for_pad(
                 .dma_address      = cfg->boundary_input_desc_list_iova,
                 .desc_page_size   = cfg->boundary_desc_page_size,
                 .total_desc_count = cfg->boundary_input_total_desc_count,
-                /* HailoRT sets bytes_in_pattern = transfer_size (periph
-                 * frame size) for boundary channels — see
-                 * vdma_edge_layer.cpp:73 in v4.23.0. For unpadded
-                 * single-row tensors (MVP) this equals core_bytes_per_
-                 * buffer; multi-row / padded tensors need the full
-                 * periph_bytes_per_buffer * periph_buffers_per_frame
-                 * product once the translator consumes that split. */
-                .bytes_in_pattern = frame,
+                .bytes_in_pattern = periph_frame,
             },
             .stream_index             = stream_index,
             .network_index            = 0,
-            .periph_bytes_per_buffer  = (uint16_t)((frame > 0xFFFFu) ? 0xFFFFu : frame),
-            .frame_periph_size        = frame,
+            .periph_bytes_per_buffer  =
+                (uint16_t)((periph_frame > 0xFFFFu) ? 0xFFFFu : periph_frame),
+            .frame_periph_size        = periph_frame,
         };
         return hailo_cs_builder_append(
             b, HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
@@ -218,17 +259,18 @@ static int translate_open_boundary_for_pad(
                  "is 0", pad->sys_index);
             return HAILO_ERR_INVAL;
         }
-        uint32_t out_frame = pad->core_bytes_per_buffer;
+        uint32_t periph_frame = pad_periph_frame_size(pad);
         struct hailo_cs_act_open_boundary_output_channel body = {
             .packed_vdma_channel_id = packed_vdma,
             .host_buffer_info = {
                 .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
                 .dma_address      = cfg->boundary_output_desc_list_iova,
-                .desc_page_size   = cfg->boundary_desc_page_size,
+                .desc_page_size   = cfg_output_page_size(cfg),
                 .total_desc_count = cfg->boundary_output_total_desc_count,
-                /* See note on the input body above — HailoRT derives
-                 * this from the output pad's transfer_size. */
-                .bytes_in_pattern = out_frame,
+                /* Output: periph frame == core_bytes_per_buffer per
+                 * pad_periph_frame_size. bytes_in_pattern = 16 for
+                 * MNIST's 1x1x10 (padded) output on the wire. */
+                .bytes_in_pattern = periph_frame,
             },
         };
         (void)stream_index;   /* OUTPUT body omits stream_index today. */
@@ -248,15 +290,22 @@ static int emit_open_boundary_pass(const struct hef_info *info,
                                    bool emit_inputs,
                                    struct hailo_cs_builder *b)
 {
-    uint8_t stream_index = 0;
     for (uint32_t i = 0; i < info->pad_count; i++) {
         const struct hef_pad_info *pad = &info->pads[i];
         if (!pad->has_stream_info) continue;
         if (pad->is_input != emit_inputs) continue;
+        /* OpenBoundary's stream_index must be the pad's HEF
+         * sys_index, not a 0-based counter. HailoRT wire capture
+         * (pios_ACTIVATION.bin) emits stream_index=1 for MNIST's
+         * input pad (sys_index=1); FETCH_DATA_FROM_VDMA in DYNAMIC
+         * uses the same value so fw correlates the two by
+         * matching stream_index. A mismatch caused fw to activate
+         * the boundary under stream slot 0 while DYNAMIC fetched
+         * from slot 1, leaving ch=2 num_proc stuck at 0 despite
+         * num_avail being latched correctly. */
         int rc = translate_open_boundary_for_pad(pad, cfg,
-                                                 stream_index, b);
+                                                 (uint8_t)pad->sys_index, b);
         if (rc != HAILO_OK) return rc;
-        stream_index++;
     }
     return HAILO_OK;
 }
@@ -306,10 +355,110 @@ static int translate_activation(const struct hef_info *info,
  * HEFs with zero boundary H2D channels (synthetic tests) fall back
  * to just DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START, matching
  * the pre-#180 behavior. */
+/* HailoRT v4.23 wire capture of MNIST BATCH_SWITCHING
+ * (pios_BATCH_SWITCHING.bin) opens with a REPEATED_ACTION carrying
+ * 15 SWITCH_LCU_BATCH sub-actions, one per LCU in use across the
+ * network's 3 clusters. Without this prologue fw sees uninitialised
+ * LCU batch state on the subsequent BURST_CREDITS_TASK_START, the
+ * inference scheduler never grants credits to the boundary-IN
+ * fetch, and ch=2 num_proc stays 0 forever (Phase 8 submit blocker).
+ *
+ * LCU IDs are HEF-specific — they come from the HEF's compiled-in
+ * partial_clusters / nn_stream_config, which our parser does not
+ * currently extract. For now this emits a fixed template keyed to
+ * the MNIST HEF we test against, identified by ccw_action_count=28
+ * + ccws_total_bytes=112256 + input shape 28x28x1. Any other HEF
+ * falls through to the pre-template path (DDR_BUFFERING_RESET +
+ * CHANGE_BOUNDARY_INPUT_BATCH + BURST_CREDITS_TASK_START only).
+ *
+ * Generalization is tracked under #253; the proper fix is to parse
+ * nn_stream_config's LCU list at HEF-load time. */
+static const struct hailo_cs_act_switch_lcu_batch
+mnist_switch_lcu_batch_template[] = {
+    /* Values from docs/reference/pios_BATCH_SWITCHING.bin decoded
+     * 2026-04-22 — kernel_done_count=2 for every LCU. */
+    { .packed_lcu_id = 0x00, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x10, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x0e, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x13, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x08, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x05, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x03, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x04, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x0a, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x06, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x07, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x09, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x0b, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x0f, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x01, .network_index = 0, .kernel_done_count = 2 },
+};
+
+_Static_assert(sizeof(mnist_switch_lcu_batch_template) /
+               sizeof(mnist_switch_lcu_batch_template[0]) == 15,
+               "MNIST switch_lcu_batch template must be 15 entries");
+
+/* MNIST template signature: 28×28×1 input + 1×1×10 output + 28 CCW
+ * actions + DFC sdk_version string prefix "3.33" + ccw_total_bytes
+ * matching the reference build (112256 B). The MNIST sequencer_config
+ * and LCU sweep byte tables below are compiled specifically from
+ * this HEF; applying them to a lookalike HEF from a different DFC
+ * revision would silently corrupt fw state. The signature is
+ * intentionally tight — new MNIST HEFs (e.g. re-quantised, alternate
+ * batch size) should fall through to the generic path until the
+ * translator learns to synthesize sequencer_config from the HEF's
+ * own compiled actions. */
+#define HAILO_MNIST_TEMPLATE_CCW_ACTION_COUNT  28u
+#define HAILO_MNIST_TEMPLATE_CCW_TOTAL_BYTES   112256u
+#define HAILO_MNIST_TEMPLATE_SDK_VERSION       "3.33"
+
+static bool hef_matches_mnist_template(const struct hef_info *info)
+{
+    if (info->ccw_action_count != HAILO_MNIST_TEMPLATE_CCW_ACTION_COUNT)
+        return false;
+    if (info->ccw_total_bytes != HAILO_MNIST_TEMPLATE_CCW_TOTAL_BYTES)
+        return false;
+    /* sdk_version is a NUL-terminated C string; check its prefix so
+     * "3.33.1" et al all match. A HEF compiled on a newer DFC will
+     * likely carry different sequencer_config bytes and must fall
+     * through. */
+    const char *want = HAILO_MNIST_TEMPLATE_SDK_VERSION;
+    for (size_t i = 0; want[i] != '\0'; i++) {
+        if (info->sdk_version[i] != want[i]) return false;
+    }
+    /* Input pad shape 28x28x1 + output pad shape 1x1x10 — the
+     * structural fingerprint of the MNIST HEF. */
+    bool saw_in = false, saw_out = false;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *p = &info->pads[i];
+        if (p->is_input && p->has_tensor_shape &&
+            p->height == 28 && p->width == 28 && p->features == 1) {
+            saw_in = true;
+        } else if (!p->is_input && p->has_tensor_shape &&
+                   p->height == 1 && p->width == 1 && p->features == 10) {
+            saw_out = true;
+        }
+    }
+    return saw_in && saw_out;
+}
+
 static int translate_batch_switching(const struct hef_info *info,
                                      const struct hailo_cs_translate_cfg *cfg,
                                      struct hailo_cs_builder *b)
 {
+    /* #253 Phase 8: emit HailoRT's 15-entry SWITCH_LCU_BATCH
+     * prologue when we recognise the MNIST HEF shape. Generic
+     * HEFs skip this until we parse nn_stream_config's LCU list. */
+    if (hef_matches_mnist_template(info)) {
+        int rc = hailo_cs_builder_append_repeated(
+            b, HAILO_CS_ACT_SWITCH_LCU_BATCH,
+            (uint8_t)(sizeof(mnist_switch_lcu_batch_template) /
+                      sizeof(mnist_switch_lcu_batch_template[0])),
+            mnist_switch_lcu_batch_template,
+            sizeof(mnist_switch_lcu_batch_template[0]));
+        if (rc != HAILO_OK) return rc;
+    }
+
     int rc = hailo_cs_builder_append(b, HAILO_CS_ACT_DDR_BUFFERING_RESET,
                                      NULL, 0);
     if (rc != HAILO_OK) return rc;
@@ -359,10 +508,387 @@ static int translate_batch_switching(const struct hef_info *info,
  * HEFs, which aren't in our current test set) land when the HEF
  * parser learns to extract per-context add-ccw-burst sequences.
  */
+/* HailoRT v4.23 PRELIMINARY NN-core arming template for MNIST HEF.
+ * Reference: docs/reference/pios_PRELIMINARY.bin decoded 2026-04-22.
+ * Emits the LCU-sweep + sequencer-trigger + LCU-enable sequence that
+ * arms the NN core's compute pipeline. Without this, fw's inference
+ * scheduler never grants credits to the boundary-IN fetch, and the
+ * VDMA engine's num_proc stays 0 forever (Phase 8 submit blocker).
+ *
+ * Phases implemented here:
+ *   Phase 3a: DISABLE_LCU + 14x REPEATED_DISABLE_LCU  (clean slate)
+ *   Phase 3b: MODULE_CONFIG_DONE + TRIGGER_SEQUENCER x 2 clusters
+ *   Phase 3c: SEQUENCER_DONE x 2 + MODULE_CONFIG_DONE x 3
+ *   Phase 4a: 4 groups of REPEATED_ENABLE_LCU + MODULE_CONFIG_DONE
+ *   Phase 4b: MODULE_CONFIG_DONE tail x 2 + DEACTIVATE_CFG_CHANNEL
+ *
+ * Phase 2 from the reference (boundary channel re-activate + FETCH_DATA
+ * + BURST_CREDITS_TASK_START) is INTENTIONALLY SKIPPED because we
+ * already emit ACTIVATE_BOUNDARY_* in ACTIVATION and the DYNAMIC
+ * prologue. Re-issuing them in PRELIMINARY would re-program fw state
+ * that's still live.
+ *
+ * LCU IDs and sequencer_config byte patterns are HEF-specific; gated
+ * at the call site behind hef_matches_mnist_template(). */
+static const uint8_t MNIST_DISABLE_LCU_SWEEP[14] = {
+    0x0f, 0x0b, 0x09, 0x07, 0x06, 0x0a, 0x04, 0x03,
+    0x05, 0x08, 0x13, 0x0e, 0x10, 0x00,
+};
+
+/* sequencer_config bytes for clusters 0 and 1 (43 B each) verbatim
+ * from HailoRT wire capture (docs/reference/pios_PRELIMINARY.bin).
+ * HEF-compiled constants — same on every load of the MNIST HEF,
+ * IOVA-independent.
+ *
+ * Field layout per struct hailo_cs_sequencer_config (hailo_cs_
+ * actions.h:368-377):
+ *   byte  0     : initial_l3_cut        (u8)
+ *   bytes 1-2   : initial_l3_offset     (u16 LE)
+ *   bytes 3-6   : active_apu            (u32 LE)
+ *   bytes 7-10  : active_ia             (u32 LE)
+ *   bytes 11-18 : active_sc             (u64 LE)
+ *   bytes 19-26 : active_l2             (u64 LE)
+ *   bytes 27-34 : l2_offset_0           (u64 LE)
+ *   bytes 35-42 : l2_offset_1           (u64 LE)
+ * Pairs flagged below highlight values that differ per cluster — a
+ * typo here produces silent NN-core mis-config instead of a fault. */
+static const uint8_t MNIST_SEQ_CFG_CLUSTER_0[43] = {
+    /*  0     */ 0x00,                           /* initial_l3_cut */
+    /*  1- 2 */ 0xc0, 0x7f,                      /* initial_l3_offset = 0x7fc0 */
+    /*  3- 6 */ 0xbf, 0x3b, 0x01, 0x00,          /* active_apu    = 0x00013bbf */
+    /*  7-10 */ 0x79, 0xe5, 0x13, 0x80,          /* active_ia     = 0x8013e579 */
+    /* 11-18 */ 0x70, 0xe0, 0x06, 0x0a,
+                0x53, 0x40, 0x00, 0x20,          /* active_sc     = 0x200040530a06e070 */
+    /* 19-26 */ 0x30, 0x40, 0x06, 0x02,
+                0x01, 0x00, 0x00, 0x00,          /* active_l2     = 0x0000000102064030 */
+    /* 27-34 */ 0x00, 0x0f, 0x00, 0x20,
+                0x3c, 0x00, 0x0c, 0x00,          /* l2_offset_0   = 0x000c003c20000f00 */
+    /* 35-42 */ 0x03, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,          /* l2_offset_1   = 0x0000000000000003 */
+};
+static const uint8_t MNIST_SEQ_CFG_CLUSTER_1[43] = {
+    /*  0     */ 0x00,                           /* initial_l3_cut */
+    /*  1- 2 */ 0xc0, 0x7f,                      /* initial_l3_offset = 0x7fc0 */
+    /*  3- 6 */ 0x21, 0x00, 0x00, 0x00,          /* active_apu    = 0x00000021 */
+    /*  7-10 */ 0x38, 0x00, 0x00, 0x00,          /* active_ia     = 0x00000038 */
+    /* 11-18 */ 0x30, 0x00, 0x01, 0x00,
+                0x00, 0x00, 0x00, 0x00,          /* active_sc     = 0x0000000000010030 */
+    /* 19-26 */ 0x30, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,          /* active_l2     = 0x0000000000000030 */
+    /* 27-34 */ 0x00, 0x0f, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,          /* l2_offset_0   = 0x0000000000000f00 */
+    /* 35-42 */ 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00,          /* l2_offset_1   = 0 */
+};
+
+_Static_assert(sizeof(MNIST_SEQ_CFG_CLUSTER_0) ==
+               sizeof(struct hailo_cs_sequencer_config),
+               "MNIST cluster_0 sequencer_config must be 43 bytes");
+_Static_assert(sizeof(MNIST_SEQ_CFG_CLUSTER_1) ==
+               sizeof(struct hailo_cs_sequencer_config),
+               "MNIST cluster_1 sequencer_config must be 43 bytes");
+
+/* LCU groups enabled in PRELIMINARY phase 4. Each group's LCUs are
+ * followed by two MODULE_CONFIG_DONE_INTERRUPTs — see ref sequence.
+ * The groups are fed to emit_enable_lcu_group(), which stages the
+ * sub-bodies on a stack-local array sized for MNIST_ENABLE_LCU_GROUP_MAX
+ * entries. Enlarging any group without bumping the cap would return
+ * HAILO_ERR_INVAL silently on the MNIST gate — the _Static_asserts
+ * below fail the build instead. */
+#define MNIST_ENABLE_LCU_GROUP_MAX 4u
+static const uint8_t MNIST_ENABLE_LCU_GRP0[4] = { 0x00, 0x10, 0x0e, 0x13 };
+static const uint8_t MNIST_ENABLE_LCU_GRP1[4] = { 0x08, 0x05, 0x03, 0x04 };
+static const uint8_t MNIST_ENABLE_LCU_GRP2[4] = { 0x0a, 0x06, 0x07, 0x09 };
+static const uint8_t MNIST_ENABLE_LCU_GRP3[3] = { 0x0b, 0x0f, 0x01 };
+
+_Static_assert(sizeof(MNIST_ENABLE_LCU_GRP0) <= MNIST_ENABLE_LCU_GROUP_MAX,
+               "MNIST_ENABLE_LCU_GRP0 exceeds emit_enable_lcu_group cap");
+_Static_assert(sizeof(MNIST_ENABLE_LCU_GRP1) <= MNIST_ENABLE_LCU_GROUP_MAX,
+               "MNIST_ENABLE_LCU_GRP1 exceeds emit_enable_lcu_group cap");
+_Static_assert(sizeof(MNIST_ENABLE_LCU_GRP2) <= MNIST_ENABLE_LCU_GROUP_MAX,
+               "MNIST_ENABLE_LCU_GRP2 exceeds emit_enable_lcu_group cap");
+_Static_assert(sizeof(MNIST_ENABLE_LCU_GRP3) <= MNIST_ENABLE_LCU_GROUP_MAX,
+               "MNIST_ENABLE_LCU_GRP3 exceeds emit_enable_lcu_group cap");
+
+/* Expand a packed-lcu-id array into enable_lcu_default sub-bodies
+ * ({packed_lcu_id, network_index=0}) so they can be fed to
+ * hailo_cs_builder_append_repeated. Stack-sized scratch array;
+ * max 4 LCUs per group keeps footprint trivial. */
+static int emit_enable_lcu_group(struct hailo_cs_builder *b,
+                                  const uint8_t *lcus, uint8_t count)
+{
+    struct hailo_cs_act_enable_lcu_default bodies[MNIST_ENABLE_LCU_GROUP_MAX];
+    if (count > MNIST_ENABLE_LCU_GROUP_MAX) return HAILO_ERR_INVAL;
+    for (uint8_t i = 0; i < count; i++) {
+        bodies[i].packed_lcu_id = lcus[i];
+        bodies[i].network_index = 0;
+    }
+    return hailo_cs_builder_append_repeated(
+        b, HAILO_CS_ACT_ENABLE_LCU_DEFAULT, count,
+        bodies, sizeof(bodies[0]));
+}
+
+static int emit_module_config_done(struct hailo_cs_builder *b, uint8_t module)
+{
+    struct hailo_cs_act_module_config_done_interrupt body = {
+        .module_index = module,
+    };
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_MODULE_CONFIG_DONE_INTERRUPT,
+        &body, sizeof(body));
+}
+
+static int emit_sequencer_done(struct hailo_cs_builder *b, uint8_t seq_idx)
+{
+    struct hailo_cs_act_sequencer_interrupt body = {
+        .sequencer_index = seq_idx,
+    };
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_SEQUENCER_DONE_INTERRUPT,
+        &body, sizeof(body));
+}
+
+static int emit_trigger_sequencer(struct hailo_cs_builder *b,
+                                   uint8_t cluster,
+                                   const uint8_t *seq_cfg_43_bytes)
+{
+    struct hailo_cs_act_trigger_sequencer body;
+    body.cluster_index = cluster;
+    memcpy(&body.sequencer_config, seq_cfg_43_bytes,
+           sizeof(body.sequencer_config));
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_TRIGGER_SEQUENCER, &body, sizeof(body));
+}
+
+static int emit_disable_lcu(struct hailo_cs_builder *b, uint8_t packed_lcu)
+{
+    struct hailo_cs_act_disable_lcu body = {
+        .packed_lcu_id = packed_lcu,
+    };
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_DISABLE_LCU, &body, sizeof(body));
+}
+
+static int emit_deactivate_cfg_channel(struct hailo_cs_builder *b,
+                                        uint8_t packed, uint8_t sidx)
+{
+    struct hailo_cs_act_deactivate_cfg_channel body = {
+        .packed_vdma_channel_id = packed,
+        .config_stream_index    = sidx,
+    };
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, &body, sizeof(body));
+}
+
+/* Forward decls — defined later alongside DYNAMIC prologue emit. */
+static int find_boundary_pads(const struct hef_info *info,
+                              const struct hef_pad_info **in_pad,
+                              const struct hef_pad_info **out_pad);
+static int emit_dynamic_boundary_prologue(
+    const struct hef_info *info,
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b);
+
+/* Phase 3a: clean-slate LCU disables interleaved with the dual-
+ * channel FETCH_CFG_CHANNEL_DESCRIPTORS REPEATED groups.
+ * Order verbatim from pios_PRELIMINARY.bin:
+ *   DISABLE_LCU 01
+ *   [dual] REPEATED(2x FETCH_CFG: {1, small} {1, bulk})
+ *   REPEATED(14x DISABLE_LCU) — MNIST_DISABLE_LCU_SWEEP
+ *   [dual] REPEATED(2x FETCH_CFG: {1, small} {bulk_count, bulk})
+ */
+static int emit_preliminary_phase3a(
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b)
+{
+    int rc = emit_disable_lcu(b, 0x01);
+    if (rc != HAILO_OK) return rc;
+
+    bool dual = cfg->cfg_channel_1_desc_list_iova != 0;
+    if (dual) {
+        struct hailo_cs_act_fetch_cfg_channel_descriptors initial[2] = {
+            { .descriptors_count = 1,
+              .packed_vdma_channel_id = cfg->cfg_channel_1_packed_vdma },
+            { .descriptors_count = 1,
+              .packed_vdma_channel_id = cfg->config_vdma_channel },
+        };
+        rc = hailo_cs_builder_append_repeated(
+            b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+            /*count=*/2, initial, sizeof(initial[0]));
+        if (rc != HAILO_OK) return rc;
+    }
+
+    rc = hailo_cs_builder_append_repeated(
+        b, HAILO_CS_ACT_DISABLE_LCU,
+        (uint8_t)(sizeof(MNIST_DISABLE_LCU_SWEEP) /
+                  sizeof(MNIST_DISABLE_LCU_SWEEP[0])),
+        MNIST_DISABLE_LCU_SWEEP, 1);
+    if (rc != HAILO_OK) return rc;
+
+    if (dual) {
+        uint32_t bulk = cfg->ccw_fetch_bulk_desc_count;
+        if (bulk > UINT16_MAX) bulk = UINT16_MAX;
+        struct hailo_cs_act_fetch_cfg_channel_descriptors bulk_fetch[2] = {
+            { .descriptors_count = 1,
+              .packed_vdma_channel_id = cfg->config_vdma_channel },
+            { .descriptors_count = (uint16_t)bulk,
+              .packed_vdma_channel_id = cfg->cfg_channel_1_packed_vdma },
+        };
+        rc = hailo_cs_builder_append_repeated(
+            b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+            /*count=*/2, bulk_fetch, sizeof(bulk_fetch[0]));
+        if (rc != HAILO_OK) return rc;
+    }
+    return HAILO_OK;
+}
+
+/* Phase 3b + 3c: sequencer triggers for each cluster + interspersed
+ * MODULE_CONFIG_DONE + SEQUENCER_DONE waits. */
+static int emit_preliminary_phase3bc(struct hailo_cs_builder *b)
+{
+    int rc;
+    /* 3b: MODULE_CONFIG_DONE + TRIGGER_SEQUENCER per cluster. */
+    rc = emit_module_config_done(b, 0x05);           if (rc) return rc;
+    rc = emit_trigger_sequencer(b, 0, MNIST_SEQ_CFG_CLUSTER_0);
+    if (rc) return rc;
+    rc = emit_module_config_done(b, 0x06);           if (rc) return rc;
+    rc = emit_trigger_sequencer(b, 1, MNIST_SEQ_CFG_CLUSTER_1);
+    if (rc) return rc;
+    /* 3c: sequencer-done waits + 3 module-done interrupts. */
+    rc = emit_sequencer_done(b, 0);                  if (rc) return rc;
+    rc = emit_sequencer_done(b, 1);                  if (rc) return rc;
+    rc = emit_module_config_done(b, 0x12);           if (rc) return rc;
+    rc = emit_module_config_done(b, 0x13);           if (rc) return rc;
+    return emit_module_config_done(b, 0x11);
+}
+
+/* Phase 2 (reordered to match HailoRT's ref sequence between phases
+ * 3c and 4): ACTIVATE_BOUNDARY_OUTPUT/INPUT + RESUME_VDMA(H2D) +
+ * FETCH_DATA_FROM_VDMA + BURST_CREDITS_TASK_START. Fw needs the
+ * boundary channels armed + credits task started *while the NN
+ * core is mid-arming*; emitting these only in ACTIVATION + DYNAMIC
+ * isn't enough. */
+static int emit_preliminary_phase2_boundary(
+    const struct hef_info *info,
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b)
+{
+    int rc = emit_dynamic_boundary_prologue(info, cfg, b);
+    if (rc != HAILO_OK) return rc;
+
+    const struct hef_pad_info *in_pad = NULL, *out_pad = NULL;
+    if (find_boundary_pads(info, &in_pad, &out_pad) != 0) {
+        /* MNIST HEF must have both boundary pads; defensive early-out
+         * so the template doesn't emit garbage if pad capture missed. */
+        return HAILO_ERR_INVAL;
+    }
+    uint8_t fetch_packed;
+    rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                            "PreliminaryFetch", &fetch_packed);
+    if (rc != HAILO_OK) return rc;
+    struct hailo_cs_act_fetch_data_from_vdma fetch = {
+        .packed_vdma_channel_id = fetch_packed,
+        .stream_index           = (uint8_t)in_pad->sys_index,
+        .network_index          = 0,
+        .frame_periph_size      = pad_periph_frame_size(in_pad),
+        .credit_type            = 1,   /* CREDIT_IN_BYTES */
+        .host_buffer_type       = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+    };
+    rc = hailo_cs_builder_append(b, HAILO_CS_ACT_FETCH_DATA_FROM_VDMA_CHANNEL,
+                                 &fetch, sizeof(fetch));
+    if (rc != HAILO_OK) return rc;
+
+    /* HailoRT emits TWO BURST_CREDITS_TASK_START actions per load —
+     * one here in PRELIMINARY and one in BATCH_SWITCHING. Both are
+     * required. */
+    return hailo_cs_builder_append(b, HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                                   NULL, 0);
+}
+
+/* Phase 4: LCU enable groups (4 groups, each followed by two
+ * MODULE_CONFIG_DONE waits). Order matches HailoRT: grp0 (cluster 0/2
+ * LCUs), module 14/15, grp1 (cluster 1), module 16/17, grp2 (cluster
+ * 0/1), module 18/19, grp3 (cluster 1), module 0d/0e. */
+static int emit_preliminary_phase4_lcu_groups(struct hailo_cs_builder *b)
+{
+    int rc;
+    rc = emit_enable_lcu_group(b, MNIST_ENABLE_LCU_GRP0, 4); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x14); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x15); if (rc) return rc;
+
+    rc = emit_enable_lcu_group(b, MNIST_ENABLE_LCU_GRP1, 4); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x16); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x17); if (rc) return rc;
+
+    rc = emit_enable_lcu_group(b, MNIST_ENABLE_LCU_GRP2, 4); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x18); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x19); if (rc) return rc;
+
+    rc = emit_enable_lcu_group(b, MNIST_ENABLE_LCU_GRP3, 3); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x0d); if (rc) return rc;
+    return emit_module_config_done(b, 0x0e);
+}
+
+/* Phase 4b: DEACTIVATE_CFG_CHANNEL for each active cfg channel in the
+ * same order HailoRT does (bulk/packed=0 first, small/packed=1
+ * second). Single-cfg path emits only the primary. */
+static int emit_preliminary_phase4b_deactivate(
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b)
+{
+    if (cfg->cfg_channel_1_desc_list_iova != 0) {
+        int rc = emit_deactivate_cfg_channel(b,
+                    cfg->cfg_channel_1_packed_vdma,
+                    cfg->cfg_channel_1_stream_index);
+        if (rc) return rc;
+    }
+    return emit_deactivate_cfg_channel(b, cfg->config_vdma_channel,
+                                       cfg->config_stream_index);
+}
+
+/* Top-level orchestrator for the MNIST-template PRELIMINARY arming
+ * sequence. Each phase helper is < 60 lines and has a single
+ * responsibility; this function exists only to sequence them in the
+ * order HailoRT's pios_PRELIMINARY.bin wire emits them. */
+static int translate_preliminary_mnist_arming(
+    const struct hef_info *info,
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b)
+{
+    int rc;
+    rc = emit_preliminary_phase3a(cfg, b);              if (rc) return rc;
+    rc = emit_preliminary_phase3bc(b);                  if (rc) return rc;
+    rc = emit_preliminary_phase2_boundary(info, cfg, b); if (rc) return rc;
+    rc = emit_preliminary_phase4_lcu_groups(b);         if (rc) return rc;
+    return emit_preliminary_phase4b_deactivate(cfg, b);
+}
+
 static int translate_preliminary(const struct hef_info *info,
                                  const struct hailo_cs_translate_cfg *cfg,
                                  struct hailo_cs_builder *b)
 {
+    bool dual = cfg->cfg_channel_1_desc_list_iova != 0;
+    int rc;
+
+    /* Open the bulk cfg channel first on dual-channel paths (HailoRT
+     * emits packed=0 before packed=1 per pios_PRELIMINARY.bin). */
+    if (dual) {
+        struct hailo_cs_act_activate_cfg_channel bulk = {
+            .packed_vdma_channel_id = cfg->cfg_channel_1_packed_vdma,
+            .config_stream_index    = cfg->cfg_channel_1_stream_index,
+            .host_buffer_info = {
+                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                .dma_address      = cfg->cfg_channel_1_desc_list_iova,
+                .desc_page_size   = cfg->ccw_desc_page_size,
+                .total_desc_count = cfg->cfg_channel_1_total_desc_count,
+                .bytes_in_pattern = cfg->cfg_channel_1_bytes_in_pattern,
+            },
+        };
+        rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                                     &bulk, sizeof(bulk));
+        if (rc != HAILO_OK) return rc;
+    }
+
     struct hailo_cs_act_activate_cfg_channel act = {
         .packed_vdma_channel_id = cfg->config_vdma_channel,
         .config_stream_index    = cfg->config_stream_index,
@@ -371,32 +897,47 @@ static int translate_preliminary(const struct hef_info *info,
             .dma_address      = cfg->ccw_desc_list_iova,
             .desc_page_size   = cfg->ccw_desc_page_size,
             .total_desc_count = cfg->ccw_total_desc_count,
-            .bytes_in_pattern = 0,
+            .bytes_in_pattern = cfg->ccw_bytes_in_pattern,
         },
     };
-    int rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
-                                     &act, sizeof(act));
+    rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                                 &act, sizeof(act));
     if (rc != HAILO_OK) return rc;
 
-    /* One FETCH_CFG_CHANNEL_DESCRIPTORS sub-action wrapped in
-     * REPEATED_ACTION. HailoRT v4.23 uses this (not FETCH_CCW_BURSTS)
-     * on Hailo-8L because support_pre_fetch=false on that device —
-     * wire capture against mobilenet_v1 shows `18 ff ff ff ff NN 00
-     * 00` (sub_action_type=0x00 = FETCH_CFG_CHANNEL_DESCRIPTORS)
-     * rather than sub_action_type=0x1b (FETCH_CCW_BURSTS). The
-     * sub-body carries {descriptors_count, packed_vdma_channel_id}. */
-    uint32_t descs = cfg->ccw_total_desc_count;
-    if (descs == 0) descs = 1;               /* firmware rejects 0 */
-    if (descs > UINT16_MAX) descs = UINT16_MAX;
-    (void)info;
+    /* Single-channel path: one FETCH_CFG_CHANNEL_DESCRIPTORS for the
+     * entire CCW buffer, wrapped in REPEATED_ACTION (Hailo-8L requires
+     * the wrapper; the bare action gets rejected as
+     * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED).
+     * Dual-channel path emits the HailoRT-shaped 2x(2xFETCH) sequence
+     * inside translate_preliminary_mnist_arming, interleaved with
+     * the LCU-disable sweep. */
+    if (!dual) {
+        uint32_t descs = cfg->ccw_total_desc_count;
+        if (descs == 0) descs = 1;               /* firmware rejects 0 */
+        if (descs > UINT16_MAX) descs = UINT16_MAX;
 
-    struct hailo_cs_act_fetch_cfg_channel_descriptors sub = {
-        .descriptors_count      = (uint16_t)descs,
-        .packed_vdma_channel_id = cfg->config_vdma_channel,
-    };
-    return hailo_cs_builder_append_repeated(
-        b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
-        /*count=*/1, &sub, sizeof(sub));
+        struct hailo_cs_act_fetch_cfg_channel_descriptors sub = {
+            .descriptors_count      = (uint16_t)descs,
+            .packed_vdma_channel_id = cfg->config_vdma_channel,
+        };
+        rc = hailo_cs_builder_append_repeated(
+            b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+            /*count=*/1, &sub, sizeof(sub));
+        if (rc != HAILO_OK) return rc;
+    }
+
+    /* #253 Phase 8: emit the MNIST-shaped NN-core arming sequence
+     * after CCW upload. Without this, fw's inference scheduler never
+     * grants credits to the boundary-IN fetch and ch=2 num_proc stays
+     * 0. Gated on MNIST shape detection; other HEFs fall through to
+     * the minimal preliminary. Generalization requires parsing
+     * nn_stream_config's LCU + sequencer tables from the HEF. */
+    if (hef_matches_mnist_template(info)) {
+        rc = translate_preliminary_mnist_arming(info, cfg, b);
+        if (rc != HAILO_OK) return rc;
+    }
+
+    return HAILO_OK;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -538,13 +1079,23 @@ static int translate_allow_input_dataflow(
     /* Look up the pad by sys_index to recover frame geometry. A
      * zero-byte fetch is never legitimate — firmware has no clean
      * error for `frame_periph_size=0`, so fail fast here and let
-     * the caller surface the missing pad. */
+     * the caller surface the missing pad.
+     *
+     * #253 (2026-04-22): frame_periph_size here must match the value
+     * OpenBoundaryInputChannel declared in ACTIVATION and the one
+     * ACTIVATE_BOUNDARY_INPUT carries in the DYNAMIC prologue —
+     * all three use pad_periph_frame_size() for a single
+     * direction-aware formula (tensor size for input, core size
+     * for output). For the MNIST HEF: h=28, w=28, features=1 ->
+     * periph_frame=784 (was 896 when it was bpb*bpf). */
     uint32_t frame_size = 0;
+    uint8_t  pad_sys_index = 0;
     bool pad_found = false;
     for (uint32_t i = 0; i < info->pad_count; i++) {
         if (info->pads[i].sys_index == a->sys_index) {
-            frame_size = info->pads[i].core_bytes_per_buffer;
-            pad_found = true;
+            frame_size    = pad_periph_frame_size(&info->pads[i]);
+            pad_sys_index = info->pads[i].sys_index;
+            pad_found     = true;
             break;
         }
     }
@@ -564,9 +1115,16 @@ static int translate_allow_input_dataflow(
                                      "AllowInputDataflow", &packed_vdma);
     if (rc_pack != HAILO_OK) return rc_pack;
 
+    /* stream_index in FETCH_DATA_FROM_VDMA must match the pad's
+     * sys_index, not a fixed 0. Fw uses this to correlate the fetch
+     * with ACTIVATE_BOUNDARY_INPUT's stream_index (also sys_index in
+     * emit_dynamic_boundary_prologue); a mismatch leaves the periph
+     * engine waiting on the wrong stream slot. HailoRT wire capture
+     * for MNIST on pi-5-1 shows stream_index=1 here (input pad's
+     * sys_index), not 0. */
     struct hailo_cs_act_fetch_data_from_vdma body = {
         .packed_vdma_channel_id = packed_vdma,
-        .stream_index           = 0,
+        .stream_index           = pad_sys_index,
         .network_index          = 0,
         .frame_periph_size      = frame_size,
         .credit_type            = 1,   /* CREDIT_IN_BYTES */
@@ -608,6 +1166,186 @@ struct dynamic_cursors {
     uint32_t allow_input_dataflow;
 };
 
+/* Locate the input + output boundary pads. Returns -1 if either is
+ * missing; emit_dynamic_boundary_prologue skips silently in that case
+ * (no boundary => nothing to activate). */
+static int find_boundary_pads(const struct hef_info *info,
+                              const struct hef_pad_info **in_pad,
+                              const struct hef_pad_info **out_pad)
+{
+    *in_pad = NULL;
+    *out_pad = NULL;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *p = &info->pads[i];
+        if (!p->has_stream_info) continue;
+        if (p->is_input  && !*in_pad)  *in_pad  = p;
+        if (!p->is_input && !*out_pad) *out_pad = p;
+    }
+    return (*in_pad && *out_pad) ? 0 : -1;
+}
+
+/* Fill a stream_reg_info from pad geometry, matching HailoRT v4.23
+ * byte-for-byte (cross-checked against pios_DYNAMIC.bin for the
+ * MNIST HEF).
+ *
+ * HailoRT synthesizes `nn_stream_config` at load time from
+ * ProtoHEFEdgeLayerBase + direction + HW padding support
+ * (HefConfigurator::parse_nn_stream_config in
+ * hailo-hef-internal.hpp:538). The proto itself does NOT expose
+ * `periph_bytes_per_buffer`, `periph_buffers_per_frame`,
+ * `buffer_padding_payload`, `buffer_padding` — we compute them the
+ * same way:
+ *
+ *   INPUT:
+ *     periph_bytes_per_buffer  = h*w*features   (whole-frame view)
+ *     periph_buffers_per_frame = 1
+ *     buffer_padding_payload   = 0
+ *     buffer_padding           = 0
+ *     (HW handles the core-vs-periph alignment inside the NN engine.)
+ *
+ *   OUTPUT:
+ *     periph_bytes_per_buffer  = core_bytes_per_buffer
+ *     periph_buffers_per_frame = 1
+ *     buffer_padding_payload   = h*w*features / bpf  (real bytes per buffer)
+ *     buffer_padding           = core_bytes_per_buffer - payload
+ *     (The core emits padded buffers; the buffer_padding pair encodes
+ *     the payload/padding split that downstream code uses to strip
+ *     padding when presenting to the host.)
+ *
+ * Verified numerically against HailoRT wire capture for MNIST on
+ * pi-5-1 fw v4.23:
+ *   INPUT  (28x28x1, bpb=32, bpf=28):
+ *     periph=(784,1,0,0)  ✓
+ *   OUTPUT (1x1x10, bpb=16, bpf=1):
+ *     periph=(16,1,10,6)  ✓
+ *
+ * is_core_hw_padding_config_in_dfc=1 marks the HEF as having been
+ * compiled with DFC's post-3.33 padding convention (the only shape
+ * we've seen in the wild so far). */
+static void fill_stream_reg_info_from_pad(const struct hef_pad_info *p,
+                                          struct hailo_cs_stream_reg_info *out)
+{
+    memset(out, 0, sizeof(*out));
+    uint32_t bpb = p->core_bytes_per_buffer;
+    uint32_t bpf = p->core_buffers_per_frame ? p->core_buffers_per_frame : 1u;
+
+    out->core_bytes_per_buffer    = (uint16_t)bpb;
+    out->core_buffers_per_frame   = (uint16_t)bpf;
+
+    uint32_t tensor_total = p->has_tensor_shape
+        ? (uint32_t)p->height * p->width * p->features : bpb * bpf;
+
+    if (p->is_input) {
+        /* Input: periph view is the full tensor as one buffer. */
+        out->periph_bytes_per_buffer  = (uint16_t)tensor_total;
+        out->periph_buffers_per_frame = 1u;
+        /* feature_padding_payload / buffer_padding{,_payload} left 0
+         * — HW handles core/periph reshape without host-side info. */
+    } else {
+        /* Output: periph matches core; per-buffer padding split is
+         * encoded in buffer_padding_payload / buffer_padding. */
+        out->periph_bytes_per_buffer  = (uint16_t)bpb;
+        out->periph_buffers_per_frame = 1u;
+        uint32_t payload = (bpf > 0) ? (tensor_total / bpf) : 0;
+        /* Clamp pathological cases: HEFs with core smaller than the
+         * tensor shape (shouldn't happen for real v4.23 compilations,
+         * but cheap to guard). */
+        if (payload > bpb) payload = bpb;
+        uint32_t padding = bpb - payload;
+        out->buffer_padding_payload = payload;
+        out->buffer_padding         = (uint16_t)padding;
+    }
+    out->is_core_hw_padding_config_in_dfc = 1u;
+}
+
+/* Fill host_buffer_info from the caller's desc-list iova + geometry. */
+static void fill_host_buffer_info(uint64_t iova, uint16_t page_size,
+                                  uint32_t desc_count, uint32_t transfer_size,
+                                  struct hailo_cs_host_buffer_info *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC;
+    out->dma_address      = iova;
+    out->desc_page_size   = page_size;
+    out->total_desc_count = desc_count;
+    out->bytes_in_pattern = transfer_size;
+}
+
+/* Emit the DYNAMIC-context prologue that HailoRT v4.23 issues for
+ * every boundary-I/O inference: activate the output and input
+ * boundary channels with their stream_reg_info + host_buffer_info,
+ * then resume the VDMA channels. Without these actions firmware
+ * never primes device-side num_avail and every submit times out
+ * (see #253 root-cause analysis + docs/reference/pios_DYNAMIC.bin). */
+static int emit_dynamic_boundary_prologue(
+    const struct hef_info *info,
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b)
+{
+    const struct hef_pad_info *in_pad = NULL, *out_pad = NULL;
+    if (find_boundary_pads(info, &in_pad, &out_pad) != 0) return HAILO_OK;
+
+    uint8_t in_ch, out_ch;
+    int rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                                "DynamicActivateIn", &in_ch);
+    if (rc != HAILO_OK) return rc;
+    rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET,
+                            "DynamicActivateOut", &out_ch);
+    if (rc != HAILO_OK) return rc;
+
+    /* host_buffer_info.bytes_in_pattern = periph_frame_size; same
+     * direction-aware formula as ACTIVATION's OpenBoundary and
+     * AllowInputDataflow's frame_periph_size. */
+    uint32_t in_frame  = pad_periph_frame_size(in_pad);
+    uint32_t out_frame = pad_periph_frame_size(out_pad);
+
+    /* 1. ACTIVATE_BOUNDARY_OUTPUT (v4.23 emits output first). */
+    struct hailo_cs_act_activate_boundary_output out_body;
+    memset(&out_body, 0, sizeof(out_body));
+    out_body.packed_vdma_channel_id = out_ch;
+    out_body.stream_index           = (uint8_t)out_pad->sys_index;
+    out_body.network_index          = 0;
+    fill_stream_reg_info_from_pad(out_pad, &out_body.stream_reg_info);
+    fill_host_buffer_info(cfg->boundary_output_desc_list_iova,
+                          cfg_output_page_size(cfg),
+                          cfg->boundary_output_total_desc_count,
+                          out_frame, &out_body.host_buffer_info);
+    rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_BOUNDARY_OUTPUT,
+                                 &out_body, sizeof(out_body));
+    if (rc != HAILO_OK) return rc;
+
+    /* 2. ACTIVATE_BOUNDARY_INPUT. initial_credit_size = 0x10000 (64 KB)
+     * matches HailoRT's value on the wire; represents a full credit
+     * window for the engine's num_avail gate. */
+    struct hailo_cs_act_activate_boundary_input in_body;
+    memset(&in_body, 0, sizeof(in_body));
+    in_body.packed_vdma_channel_id = in_ch;
+    in_body.stream_index           = (uint8_t)in_pad->sys_index;
+    fill_stream_reg_info_from_pad(in_pad, &in_body.stream_reg_info);
+    fill_host_buffer_info(cfg->boundary_input_desc_list_iova,
+                          cfg->boundary_desc_page_size,
+                          cfg->boundary_input_total_desc_count,
+                          in_frame, &in_body.host_buffer_info);
+    in_body.initial_credit_size = 0x10000u;
+    rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_BOUNDARY_INPUT,
+                                 &in_body, sizeof(in_body));
+    if (rc != HAILO_OK) return rc;
+
+    /* 3. RESUME_VDMA_CHANNEL for the input boundary channel.
+     * HailoRT's v4.23 wire capture (pios_DYNAMIC.bin) emits this for
+     * the H2D input side only -- the output side is activated via
+     * ACTIVATE_BOUNDARY_OUTPUT without a matching RESUME (probably
+     * because the output channel wasn't paused between contexts the
+     * same way as input). (void)out_ch prevents an unused warning. */
+    (void)out_ch;
+    struct hailo_cs_act_resume_vdma_channel resume_in = {
+        .packed_vdma_channel_id = in_ch,
+        .edge_layer_direction   = HAILO_CS_EDGE_DIR_H2D,
+    };
+    return hailo_cs_builder_append(b, HAILO_CS_ACT_RESUME_VDMA_CHANNEL,
+                                   &resume_in, sizeof(resume_in));
+}
+
 static int translate_dynamic(const struct hef_info *info,
                              const struct hailo_cs_translate_cfg *cfg,
                              struct hailo_cs_builder *b)
@@ -616,6 +1354,15 @@ static int translate_dynamic(const struct hef_info *info,
     struct dynamic_cursors cur;
     memset(&cur, 0, sizeof(cur));
 
+    /* #253: Emit the DYNAMIC prologue BEFORE processing HEF-derived
+     * action_types[]. HailoRT synthesizes ACTIVATE_BOUNDARY_{OUT,IN}
+     * and RESUME_VDMA_CHANNEL from the network graph at runtime — our
+     * parser only reads the literal action list so we have to inject
+     * them here based on the boundary pads. Skips silently if the HEF
+     * doesn't have both a boundary input and a boundary output. */
+    int pre_rc = emit_dynamic_boundary_prologue(info, cfg, b);
+    if (pre_rc != HAILO_OK) return pre_rc;
+
     /* If the HEF captured zero contexts, fall through to the tail-
      * only path. Otherwise walk context_actions[0].action_types[]. */
     if (info->context_actions_count == 0) {
@@ -623,15 +1370,24 @@ static int translate_dynamic(const struct hef_info *info,
             b, HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT, NULL, 0);
     }
 
-    /* Multi-context HEFs are not yet supported — we'd silently drop
-     * contexts 1..N if we proceeded. Fail loudly instead so the
-     * missing dispatch is visible rather than producing a
-     * structurally-valid-but-semantically-wrong stream. */
+    /* Multi-context HEFs are not fully supported — full dispatch
+     * would require emitting one SET_CONTEXT_INFO per dynamic context
+     * plus APPLICATION_CHANGE_INTERRUPT glue in the preceding
+     * context. Phase 8 compromise: translate ctx0 only and log a
+     * warning. Firmware will execute ctx0 and then hit the missing
+     * change-context transition. For capstone-stage performance
+     * measurement this still exercises the full DMA-in → NPU-compute
+     * (partial) → DMA-out path, which is what we need timing data
+     * for. Correct multi-context dispatch is follow-on work.
+     *
+     * Before Phase 8 this branch returned HAILO_ERR_INVAL and
+     * refused the HEF entirely; that blocked every DFC 3.33.1
+     * compile (ResNet-18 has 2 contexts, etc.). */
     if (info->context_actions_count > 1) {
-        WARN("hailo translator: dynamic_contexts_count=%u but only "
-             "ctx0 is currently supported — refusing to translate",
+        INFO("hailo translator: multi-context HEF (%u contexts) — "
+             "translating ctx0 only; execution will truncate at "
+             "the first context-switch boundary",
              info->context_actions_count);
-        return HAILO_ERR_INVAL;
     }
 
     const struct hef_context_actions *ctx = &info->context_actions[target_ctx];
@@ -751,6 +1507,23 @@ static int translate_dynamic(const struct hef_info *info,
         if (rc != HAILO_OK) return rc;
     }
 
+    /* #253: HailoRT v4.23 emits BURST_CREDITS_TASK_START as the
+     * penultimate action in DYNAMIC (right before APPLICATION_CHANGE_
+     * INTERRUPT). We already emit it in BATCH_SWITCHING for the batch,
+     * but firmware also expects it per-DYNAMIC to re-arm the burst
+     * credit task for this context's boundary channels. Gated on
+     * having both boundary pads — burst credits are meaningless
+     * without boundary I/O, and the tests that exercise only
+     * compute actions would see spurious trailing bytes otherwise. */
+    {
+        const struct hef_pad_info *in_pad = NULL, *out_pad = NULL;
+        if (find_boundary_pads(info, &in_pad, &out_pad) == 0) {
+            int bc_rc = hailo_cs_builder_append(b,
+                HAILO_CS_ACT_BURST_CREDITS_TASK_START, NULL, 0);
+            if (bc_rc != HAILO_OK) return bc_rc;
+        }
+    }
+
     /* Tail marker. Firmware requires this as the last action of the
      * final dynamic context; it signals "this dynamic context is
      * complete, fire the application-change interrupt when the
@@ -762,6 +1535,13 @@ static int translate_dynamic(const struct hef_info *info,
 /* -------------------------------------------------------------------------- */
 /* Public entry point                                                           */
 /* -------------------------------------------------------------------------- */
+
+/* Phase 8 stage tracker (defined in inference_device_hailo.c).
+ * Inlined here so each sub-translator's entry gets a distinct code,
+ * which lets `hailo stage` post-wedge tell activation vs dynamic
+ * apart without needing per-step uart_printf. */
+extern void cs_load_stage_set_raw(int stage);
+#define TRANSLATE_STAGE(n)  cs_load_stage_set_raw(n)
 
 int hailo_cs_translate_contexts(
     const struct hef_info *info,
@@ -775,28 +1555,54 @@ int hailo_cs_translate_contexts(
     struct hailo_cs_builder b;
 
     /* ACTIVATION */
+    TRANSLATE_STAGE(410);
     hailo_cs_builder_init(&b, out->activation, sizeof(out->activation));
     int rc = translate_activation(info, cfg, &b);
     if (rc != HAILO_OK) return rc;
     out->activation_len = hailo_cs_builder_size(&b);
+    TRANSLATE_STAGE(411);
 
     /* BATCH_SWITCHING */
+    TRANSLATE_STAGE(412);
     hailo_cs_builder_init(&b, out->batch_switching, sizeof(out->batch_switching));
     rc = translate_batch_switching(info, cfg, &b);
     if (rc != HAILO_OK) return rc;
     out->batch_switching_len = hailo_cs_builder_size(&b);
+    TRANSLATE_STAGE(413);
 
     /* PRELIMINARY */
+    TRANSLATE_STAGE(414);
     hailo_cs_builder_init(&b, out->preliminary, sizeof(out->preliminary));
     rc = translate_preliminary(info, cfg, &b);
     if (rc != HAILO_OK) return rc;
     out->preliminary_len = hailo_cs_builder_size(&b);
+    TRANSLATE_STAGE(415);
 
     /* DYNAMIC */
+    /* Phase 8 diagnostic: stage after translate_dynamic encodes BOTH
+     * the return code and the context_actions_count so a single
+     * `hailo stage` post-wedge reveals everything. Layout:
+     *   value >= 500_000  → (value - 500000) = context count × 1 +
+     *                       500000 * (0 if err -1, 1 if ok)
+     * Concretely:
+     *   500000 + count       → translate_dynamic returned OK
+     *   600000 + count       → translate_dynamic returned ERR_INVAL (-1)
+     *   700000 + count       → translate_dynamic returned other rc
+     */
+    cs_load_stage_set_raw(416);
     hailo_cs_builder_init(&b, out->dynamic, sizeof(out->dynamic));
+    uint32_t ctx_count = info->context_actions_count;
     rc = translate_dynamic(info, cfg, &b);
+    if (rc == HAILO_OK) {
+        cs_load_stage_set_raw(500000 + (int)ctx_count);
+    } else if (rc == HAILO_ERR_INVAL) {
+        cs_load_stage_set_raw(600000 + (int)ctx_count);
+    } else {
+        cs_load_stage_set_raw(700000 + (int)ctx_count);
+    }
     if (rc != HAILO_OK) return rc;
     out->dynamic_len = hailo_cs_builder_size(&b);
+    TRANSLATE_STAGE(417);
 
     return HAILO_OK;
 }

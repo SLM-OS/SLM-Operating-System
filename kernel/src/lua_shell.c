@@ -8,6 +8,7 @@
 #include "shell.h"
 #include "debug.h"
 
+#include "../lib/lua/src/lua.h"      /* lua_newtable, lua_rawseti, lua_setglobal */
 #include <stddef.h>
 
 /**
@@ -31,17 +32,29 @@ static int cmd_lua(int argc, char *argv[]) {
     } else if (argc >= 3 && argv[1][0] == '-' && argv[1][1] == 'e') {
         /* -e "code" - execute code */
         lua_slm_dostring(L, argv[2]);
-    } else if (argc == 2) {
-        /* Filename - try to run script */
+    } else if (argc >= 2) {
+        /* Filename + optional positional args. Populate Lua's `arg`
+         * global with argv[2..argc-1] so scripts like demo_hailo.lua
+         * can read `arg[1]`, `arg[2]`, ... just like a standalone
+         * Lua interpreter. arg[0] holds the script path. */
+        if (argc > 2) {
+            lua_newtable(L);
+            for (int i = 1; i < argc; i++) {
+                lua_pushstring(L, argv[i]);
+                lua_rawseti(L, -2, i - 1);  /* arg[0] = script path,
+                                               arg[1..] = extra args */
+            }
+            lua_setglobal(L, "arg");
+        }
         if (lua_slm_dofile(L, argv[1]) != 0) {
-            /* File loading not yet implemented - try as inline code */
+            /* File loading failed - try as inline code */
             lua_slm_dostring(L, argv[1]);
         }
     } else {
         shell_printf("Usage:\n");
-        shell_printf("  lua              - Enter interactive REPL\n");
-        shell_printf("  lua -e \"code\"    - Execute code directly\n");
-        shell_printf("  lua <filename>   - Run script from file\n");
+        shell_printf("  lua                        - Enter interactive REPL\n");
+        shell_printf("  lua -e \"code\"              - Execute code directly\n");
+        shell_printf("  lua <filename> [args...]   - Run script with positional args\n");
     }
 
     lua_slm_close(L);

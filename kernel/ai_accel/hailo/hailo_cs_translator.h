@@ -157,6 +157,38 @@ struct hailo_cs_translate_cfg {
     /* Number of descriptors in the CCW list. */
     uint32_t ccw_total_desc_count;
 
+    /* Total CCW payload bytes for the primary cfg channel. HailoRT
+     * sets ACTIVATE_CFG_CHANNEL.host_buffer_info.bytes_in_pattern
+     * to this value so fw knows when a complete frame has been DMA'd
+     * and can advance its pattern counter. Leave zero if the caller
+     * does not have per-channel byte totals; firmware tolerates it
+     * on single-channel loads but the dual-channel NN-core arming
+     * sequence relies on matching HailoRT's non-zero values. */
+    uint32_t ccw_bytes_in_pattern;
+
+    /* #253 Phase 8: number of descs the SECOND
+     * FETCH_CFG_CHANNEL_DESCRIPTORS in PRELIMINARY should request
+     * on the bulk cfg channel. HailoRT uses the real data size
+     * (e.g. 109 descs for 55792 bytes of MNIST microcode), not the
+     * pow2-rounded list size. Set to 0 on non-dual loads — the
+     * second FETCH is gated on use_dual anyway. */
+    uint32_t ccw_fetch_bulk_desc_count;
+
+    /* #253 Phase 8: second cfg channel for HEFs that split their CCW
+     * actions across two cfg_channel_index values (MNIST does). The
+     * first cfg channel (config_vdma_channel / ccw_desc_list_iova /
+     * ccw_total_desc_count above) maps to logical cfg_channel_index
+     * = 0 on those HEFs; this pair maps to cfg_channel_index = 1.
+     * Leave cfg_channel_1_desc_list_iova = 0 when the HEF only uses
+     * one cfg channel; the translator's PRELIMINARY emitter detects
+     * that sentinel and skips the second ACTIVATE_CFG_CHANNEL +
+     * DEACTIVATE_CFG_CHANNEL pair. */
+    uint8_t  cfg_channel_1_packed_vdma;
+    uint8_t  cfg_channel_1_stream_index;
+    uint64_t cfg_channel_1_desc_list_iova;    /* 0 = no second channel */
+    uint32_t cfg_channel_1_total_desc_count;
+    uint32_t cfg_channel_1_bytes_in_pattern;
+
     /* ------------------------------------------------------------ *
      * Boundary-channel descriptor lists (one for input, one for
      * output). Populated by the caller (inference_device_hailo::
@@ -182,9 +214,21 @@ struct hailo_cs_translate_cfg {
     uint64_t boundary_output_desc_list_iova;
     uint32_t boundary_output_total_desc_count;
 
-    /* Boundary descriptor page size (shared by input + output today).
-     * Must match the programmed VDMA descriptor list's page size. */
+    /* Boundary descriptor page size. Used for the INPUT boundary
+     * channel and, as a fallback, for the OUTPUT channel when
+     * boundary_output_desc_page_size is 0. Must match the programmed
+     * VDMA descriptor list's page size. */
     uint16_t boundary_desc_page_size;
+
+    /* OUTPUT-specific boundary descriptor page size. HailoRT v4.23
+     * allocates the output boundary desc list with a different
+     * page size than the input (16384 vs 512 observed on MNIST);
+     * firmware cross-checks host_buffer_info.desc_page_size against
+     * the list on the other side of the VDMA channel and wedges the
+     * D2H pipe silently on a mismatch. Set to 0 to fall back to
+     * boundary_desc_page_size — that preserves pre-2026-04-22
+     * behavior for callers that haven't been updated yet. */
+    uint16_t boundary_output_desc_page_size;
 };
 
 /*

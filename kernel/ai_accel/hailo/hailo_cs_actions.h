@@ -152,15 +152,18 @@ struct hailo_cs_stream_reg_info {
     uint16_t core_bytes_per_buffer;
     uint16_t core_buffers_per_frame;
     uint16_t periph_bytes_per_buffer;
-    uint32_t periph_buffers_per_frame;
+    uint16_t periph_buffers_per_frame;       /* #253: was uint32_t; reference
+                                              * uses u16, confirmed via
+                                              * byte-for-byte wire capture on
+                                              * pi-5-1 (pios_DYNAMIC.bin). */
     uint16_t feature_padding_payload;
     uint32_t buffer_padding_payload;
     uint16_t buffer_padding;
     uint8_t  is_core_hw_padding_config_in_dfc;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct hailo_cs_stream_reg_info) == 19,
-               "stream_reg_info must be 19 bytes");
+_Static_assert(sizeof(struct hailo_cs_stream_reg_info) == 17,
+               "stream_reg_info must be 17 bytes per v4.23 wire format");
 
 /* -------------------------------------------------------------------------- */
 /* Preliminary-context actions (CCW upload)                                    */
@@ -335,6 +338,18 @@ struct hailo_cs_act_sequencer_interrupt {
 _Static_assert(sizeof(struct hailo_cs_act_sequencer_interrupt) == 1,
                "sequencer_interrupt body must be 1 byte");
 
+/* MODULE_CONFIG_DONE_INTERRUPT: firmware waits on a module's
+ * config-done signal. 1-byte body — module_index. Used liberally
+ * throughout HailoRT's PRELIMINARY context between LCU enables
+ * and sequencer triggers to make sure earlier configuration
+ * actions have settled before the next stage starts. */
+struct hailo_cs_act_module_config_done_interrupt {
+    uint8_t module_index;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_module_config_done_interrupt) == 1,
+               "module_config_done_interrupt body must be 1 byte");
+
 /* CONTEXT_SWITCH_DEFS__sequencer_config_t. Embedded inside
  * TRIGGER_SEQUENCER's action body. Captures enough register-image
  * state for firmware to program the sequencer. Packed to 43 bytes
@@ -459,8 +474,8 @@ struct hailo_cs_act_activate_boundary_input {
     uint32_t                         initial_credit_size;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_input) == 44,
-               "activate_boundary_input body must be 44 bytes");
+_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_input) == 42,
+               "activate_boundary_input body must be 42 bytes per v4.23 wire");
 
 struct hailo_cs_act_activate_boundary_output {
     uint8_t                          packed_vdma_channel_id;
@@ -470,7 +485,55 @@ struct hailo_cs_act_activate_boundary_output {
     struct hailo_cs_host_buffer_info host_buffer_info;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_output) == 41,
-               "activate_boundary_output body must be 41 bytes");
+_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_output) == 39,
+               "activate_boundary_output body must be 39 bytes per v4.23 wire");
+
+/* Edge layer direction enum used by (de)activate/pause/resume actions.
+ * Values MUST match HailoRT v4.23 CONTEXT_SWITCH_DEFS__EDGE_LAYER_DIRECTION_t:
+ *   UNINITIALIZED = 0, HOST_TO_DEVICE = 1, DEVICE_TO_HOST = 2.
+ * See docs/reference/hailort-v4.23.0-context_switch_defs.h:134-138.
+ * Pre-2026-04-22 we had H2D=0/D2H=1 which happened to survive through
+ * ACTIVATION (the direction byte there is cross-validated against the
+ * packed channel id and fw tolerates either) but broke in DYNAMIC's
+ * RESUME_VDMA_CHANNEL — fw gates the first FETCH_DATA on matching
+ * direction and silently wedges device-side num_avail at 0 when the
+ * enum value is wrong. Wire-verified against pios_DYNAMIC.bin on
+ * pi-5-1 (#253 Phase 8 submit-hang investigation). */
+enum hailo_cs_edge_layer_direction {
+    HAILO_CS_EDGE_DIR_UNINIT = 0,
+    HAILO_CS_EDGE_DIR_H2D    = 1,
+    HAILO_CS_EDGE_DIR_D2H    = 2,
+};
+
+/* PAUSE_VDMA_CHANNEL / RESUME_VDMA_CHANNEL share the same 2-byte body:
+ * just the packed channel id and the direction. Fw uses these to
+ * freeze/unfreeze a boundary channel between context switches;
+ * RESUME must be emitted in DYNAMIC before the first FETCH_DATA
+ * on that channel. */
+struct hailo_cs_act_resume_vdma_channel {
+    uint8_t packed_vdma_channel_id;
+    uint8_t edge_layer_direction;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_resume_vdma_channel) == 2,
+               "resume_vdma_channel body must be 2 bytes");
+
+/* SWITCH_LCU_BATCH: carried inside a REPEATED_ACTION in BATCH_SWITCHING.
+ * Each sub-body programs one LCU's batch state for the next inference
+ * context. packed_lcu_id encodes (cluster_index << 3) | lcu_index.
+ * kernel_done_count is the number of LCU kernel completions the
+ * sequencer should wait for before signaling the next stage.
+ *
+ * Reference: HailoRT v4.23
+ * CONTEXT_SWITCH_DEFS__switch_lcu_batch_action_data_t
+ * (context_switch_defs.h:442-446). */
+struct hailo_cs_act_switch_lcu_batch {
+    uint8_t  packed_lcu_id;
+    uint8_t  network_index;
+    uint32_t kernel_done_count;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_switch_lcu_batch) == 6,
+               "switch_lcu_batch body must be 6 bytes per v4.23 wire");
 
 #endif /* AI_ACCEL_HAILO_CS_ACTIONS_H */

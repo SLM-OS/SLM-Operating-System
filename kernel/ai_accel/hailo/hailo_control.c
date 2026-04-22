@@ -56,6 +56,14 @@
 #include <stddef.h>
 #include <string.h>
 
+/* Phase 8 diagnostic: last firmware error status captured by
+ * control_check_response_header. Zero until the first RPC that
+ * returned a non-zero major_status. Exposed via hailo shell
+ * `hailo last_err` for post-wedge triage. */
+volatile uint32_t hailo_control_last_err_major  = 0;
+volatile uint32_t hailo_control_last_err_minor  = 0;
+volatile uint32_t hailo_control_last_err_opcode = 0;
+
 /*
  * The Hailo firmware marshals every scalar in the common header, the
  * parameter_count, and the response status/length fields via htonl /
@@ -277,6 +285,22 @@ static void control_post_boot_init(void)
     mask |= HAILO_BSC_ISTATUS_HOST_MASK;
     hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
     hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
+                            0xFFFFFFFFu);
+    /* Per-channel VDMA interrupt enable. The reference driver arms
+     * ALL 32 source + 32 destination channels in `hailo_pcie_enable_interrupts`
+     * (hailo-pcie-common.c:873-874) as part of MSI setup. Without
+     * these writes the PCIe bridge aggregator silently drops VDMA
+     * completion interrupts and — more importantly on Hailo-8L —
+     * firmware's channel-processing loop observed num_avail on the
+     * host-side channel regs but never advanced num_proc because
+     * its own per-channel "interrupt armed" check failed. Register
+     * offsets: BCS_SOURCE_INTERRUPT_PER_CHANNEL=0x400 (H2D),
+     * BCS_DESTINATION_INTERRUPT_PER_CHANNEL=0x500 (D2H). */
+    hailo_platform->write32(HAILO_BAR_CONFIG,
+                            HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL,
+                            0xFFFFFFFFu);
+    hailo_platform->write32(HAILO_BAR_CONFIG,
+                            HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
                             0xFFFFFFFFu);
     hailo_platform->mb();
 
@@ -616,6 +640,13 @@ static int control_check_response_header(
      * protocol violations (opcode is any other value AND status
      * says success) still fall through as BAD_FIRMWARE. */
     if (major != 0) {
+        /* Phase 8: stash last firmware-error status so shell can dump
+         * it post-wedge via `hailo last_err`. uart_printf WARN output
+         * gets corrupted on real HEFs for reasons not yet understood,
+         * so an observable global is the reliable diagnostic channel. */
+        hailo_control_last_err_major = major;
+        hailo_control_last_err_minor = minor;
+        hailo_control_last_err_opcode = opcode;
         WARN("hailo: %s failed (major=0x%x minor=0x%x opcode_echo=0x%x)",
              op_name, major, minor, opcode);
         return HAILO_ERR_IO;
@@ -1503,10 +1534,22 @@ struct hailo_cs_hw_consts_resp_wire {
     uint8_t  body[128];
 } __attribute__((packed));
 
+/* CORE_IDENTIFY response: parameter_count=1, one param carrying
+ * firmware_version_t = {major, minor, revision} as three u32s (12 B).
+ * Framed wire: header(12) + parameter_count(4) + length(4) + body(12)
+ * = 32 bytes. 64 B ceiling is defensive. */
+struct hailo_cs_core_identify_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                /* BE */
+    uint8_t  body[64];
+} __attribute__((packed));
+
 static struct hailo_cs_empty_req_wire        control_clear_apps_req;
 static struct hailo_cs_clear_apps_resp_wire  control_clear_apps_resp;
 static struct hailo_cs_empty_req_wire        control_hw_consts_req;
 static struct hailo_cs_hw_consts_resp_wire   control_hw_consts_resp;
+static struct hailo_cs_empty_req_wire        control_core_identify_req;
+static struct hailo_cs_core_identify_resp_wire control_core_identify_resp;
 
 /* Shared implementation for empty-body CORE-CPU RPCs (0x47, 0x48,
  * and any future `parameter_count=0`-only opcode). Caller owns the
@@ -1576,6 +1619,17 @@ int hailo_control_get_hw_consts(uint32_t *out_response_len)
         &control_hw_consts_req,
         &control_hw_consts_resp,
         sizeof(control_hw_consts_resp),
+        out_response_len);
+}
+
+int hailo_control_core_identify(uint32_t *out_response_len)
+{
+    return control_send_empty_body_core_rpc(
+        HAILO_CONTROL_OPCODE_CORE_IDENTIFY,
+        "CORE_IDENTIFY",
+        &control_core_identify_req,
+        &control_core_identify_resp,
+        sizeof(control_core_identify_resp),
         out_response_len);
 }
 

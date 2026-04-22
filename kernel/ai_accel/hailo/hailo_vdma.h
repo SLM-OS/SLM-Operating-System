@@ -82,6 +82,16 @@ struct hailo_vdma_desc_list {
 #define HAILO_VDMA_MIN_DESC_COUNT    2u
 #define HAILO_VDMA_MAX_DESC_COUNT    65536u
 
+/* data_id written into each descriptor's AddrL_rsvd_DataID field AND
+ * into the channel's BASE_DWORD at start time. Reference hw-ops pin
+ * this at 0 for PCIe (`HAILO_PCIE_HOST_DMA_DATA_ID` in
+ * docs/reference/hailo-pcie-common.h:35, used as `vdma_hw->ddr_data_id`
+ * in hailo-vdma-common.c:294 and hailo-pcie.c:670). The `sys_index`
+ * from the HEF is a stream identifier, NOT the descriptor's data_id —
+ * mixing them up causes channel-vs-descriptor data_id divergence,
+ * which the VDMA engine rejects silently (num_proc never advances). */
+#define HAILO_VDMA_HOST_DMA_DATA_ID  0u
+
 /*
  * Allocate a descriptor list. `desc_count` must be a power of 2
  * in [2, 65536]. `desc_page_size` is the number of bytes each
@@ -248,5 +258,44 @@ void hailo_vdma_channel_stop(uint8_t channel_index);
 int hailo_vdma_submit_and_wait(uint8_t channel_index,
                                uint16_t new_num_avail,
                                uint32_t timeout_us);
+
+/*
+ * Diagnostic: dump the first `max_descs` entries of `list` plus the
+ * `channel_index` host-register block to UART. `label` is a short
+ * tag ("IN"/"OUT") embedded in each line to disambiguate channels
+ * in mixed log output. Decodes PageSize_DescControl into page_size
+ * and control byte (with named IRQ bits where set) so a byte-for-
+ * byte comparison against hailo-vdma-common.c is possible without
+ * post-processing. Intended for the Phase 8 inference-submit
+ * investigation (issue #253) — strip once the blocker lifts.
+ */
+void hailo_vdma_dump_desc_list(const struct hailo_vdma_desc_list *list,
+                               const char *label,
+                               uint32_t max_descs);
+void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label);
+
+/*
+ * Poll `channel_index` until its CONTROL byte reads START (0x01), or
+ * `timeout_us` elapses. Used by the context-switch load path to know
+ * when fw has finished processing ACTIVATION/PRELIMINARY and armed
+ * the channel — before that, MMIO writes to the channel's regs don't
+ * stick (base_dword reads back as 0). Returns HAILO_OK on arm,
+ * HAILO_ERR_TIMEOUT on expiry, HAILO_ERR_INVAL for bad args.
+ */
+int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us);
+
+/*
+ * Poll `channel_index`'s num_proc until it advances by at least
+ * `target_num_proc` descriptors relative to the count observed when
+ * the function was entered, or `timeout_us` elapses. Unlike
+ * hailo_vdma_submit_and_wait this does NOT write num_avail — use
+ * when fw is driving DMA internally (e.g. via PRELIMINARY's
+ * FETCH_CFG_CHANNEL_DESCRIPTORS actions) and the host just needs to
+ * observe completion. Returns HAILO_OK on reach, HAILO_ERR_TIMEOUT
+ * otherwise.
+ */
+int hailo_vdma_channel_wait_proc(uint8_t channel_index,
+                                 uint16_t target_num_proc,
+                                 uint32_t timeout_us);
 
 #endif /* AI_ACCEL_HAILO_VDMA_H */

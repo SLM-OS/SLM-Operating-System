@@ -49,6 +49,7 @@
 #include "inference_device.h"
 #include "ai_policy_hailo.h"
 #include "ai_types.h"
+#include "timer.h"
 #endif
 #include <stdint.h>
 #include <string.h>
@@ -691,10 +692,12 @@ static int cmd_hailo(int argc, char *argv[])
         shell_printf("  hw_arch = %s (%u)\n",
                      meta.hw_arch_known ?
                          (meta.hw_arch == HEF_HW_ARCH_HAILO8   ? "hailo8"  :
+                          meta.hw_arch == HEF_HW_ARCH_HAILO8P  ? "hailo8p" :
+                          meta.hw_arch == HEF_HW_ARCH_HAILO8R  ? "hailo8r" :
                           meta.hw_arch == HEF_HW_ARCH_HAILO8L  ? "hailo8l" :
-                          meta.hw_arch == HEF_HW_ARCH_HAILO15H ? "hailo15h":
                           meta.hw_arch == HEF_HW_ARCH_HAILO15M ? "hailo15m":
-                          meta.hw_arch == HEF_HW_ARCH_HAILO10H ? "hailo10h":
+                          meta.hw_arch == HEF_HW_ARCH_HAILO15L ? "hailo15l":
+                          meta.hw_arch == HEF_HW_ARCH_HAILO1XH ? "hailo1xh":
                           "unknown") : "absent",
                      meta.hw_arch);
         if (meta.sdk_version[0]) {
@@ -751,6 +754,24 @@ static int cmd_hailo(int argc, char *argv[])
                          (unsigned long)meta.ccw_total_bytes,
                          meta.ccw_actions_truncated
                              ? " (truncated)" : "");
+            /* #253 Phase 8: tally CCW bytes per cfg_channel_index so
+             * we can decide whether HailoRT's multi-cfg-channel flow
+             * needs to be mirrored. Emit the first few entries + a
+             * per-channel byte breakdown. */
+            uint32_t per_ch[8] = {0};
+            uint32_t per_ch_count[8] = {0};
+            for (uint32_t i = 0; i < meta.ccw_action_count; i++) {
+                uint32_t ci = meta.ccw_actions[i].cfg_channel_index;
+                if (ci < 8) {
+                    per_ch[ci] += meta.ccw_actions[i].data_size;
+                    per_ch_count[ci]++;
+                }
+            }
+            for (uint32_t c = 0; c < 8; c++) {
+                if (per_ch[c] == 0 && per_ch_count[c] == 0) continue;
+                shell_printf("    cfg_channel[%u]: %u action(s), %lu bytes\n",
+                             c, per_ch_count[c], (unsigned long)per_ch[c]);
+            }
         }
 
         if (do_upload) {
@@ -774,13 +795,14 @@ static int cmd_hailo(int argc, char *argv[])
 
 #ifdef CONFIG_AI_SCHEDULER
         if (do_sched) {
-            /* Hand the full HEF blob (header + proto) to the Hailo
-             * inference_device backend for load_model. Allocate a
-             * contiguous buffer sized to the whole file, populate
-             * header + body (body is already resident), and release
-             * it immediately after load_model returns — the backend
-             * does not keep a pointer. */
-            size_t total = (size_t)outer.proto_offset + outer.proto_size;
+            /* Hand the full HEF blob (header + proto + CCWS) to the
+             * Hailo inference_device backend for load_model. Size
+             * includes the CCWS region (HEF v2 appends CCWS after
+             * the proto body, no explicit size field — see
+             * hef_header.c v2 handler). Without CCWS the NPU has no
+             * weights and inference_run times out. */
+            size_t proto_end = (size_t)outer.proto_offset + outer.proto_size;
+            size_t total     = proto_end + (size_t)outer.ccws_size;
             size_t full_pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
             uint8_t *full = NULL;
             /* Defensive bound: hdr_buf is 64 B. v0/v1/v2/v3 proto_offset
@@ -801,8 +823,28 @@ static int cmd_hailo(int argc, char *argv[])
             if (full) {
                 memcpy(full, hdr_buf, outer.proto_offset);
                 memcpy(full + outer.proto_offset, body, outer.proto_size);
+                /* Read CCWS (the rest of the file) directly from VFS
+                 * into the tail of the buffer. No need to stage
+                 * through a separate body allocation — CCWS is
+                 * device-bound, not parsed. */
+                if (outer.ccws_size > 0) {
+                    int ccws_read = vfs_read_path(path,
+                        (char *)(full + proto_end),
+                        (size_t)outer.ccws_size, proto_end);
+                    if (ccws_read < 0 ||
+                        (size_t)ccws_read != (size_t)outer.ccws_size) {
+                        shell_printf("hailo: sched: CCWS read short "
+                                     "(%d of %lu at offset %lu)\n",
+                                     ccws_read,
+                                     (unsigned long)outer.ccws_size,
+                                     (unsigned long)proto_end);
+                        pmm_free_pages(full, full_pages);
+                        full = NULL;
+                    }
+                }
 
-                struct inference_device *dev = inference_device_find("hailo-8");
+                struct inference_device *dev = NULL;
+                if (full) dev = inference_device_find("hailo-8");
                 if (!dev) {
                     shell_puts("hailo: sched: 'hailo-8' device not registered\n");
                 } else {
@@ -1044,6 +1086,225 @@ static int cmd_hailo(int argc, char *argv[])
 
     if (argc >= 2 && strcmp(argv[1], "ctxsmoke") == 0) {
         return cmd_hailo_ctxsmoke(argc, argv);
+    }
+
+    /* Phase 8: dump the cs_load progress counter. Updated by the
+     * inference backend at each stage of context_switch_load so we
+     * can diagnose wedges without relying on live serial output.
+     * See kernel/inference/inference_device_hailo.c for stage codes. */
+    if (argc >= 2 && strcmp(argv[1], "stage") == 0) {
+        extern int hailo_backend_get_cs_load_stage(void);
+        shell_printf("hailo: cs_load_stage=%d\n",
+                     hailo_backend_get_cs_load_stage());
+        return 0;
+    }
+
+#ifdef CONFIG_AI_SCHEDULER
+    /* Phase 8: run inference on a previously-loaded handle with
+     * zeroed input. Measures end-to-end latency including our
+     * cache-clean/submit/MSI-wait/cache-invalidate pipeline.
+     *
+     * Wrapped in CONFIG_AI_SCHEDULER because it depends on
+     * inference_device_find / inference_run / inference_tensor_t,
+     * all of which live in the AI scheduler path. Without the
+     * scheduler (e.g. `make test` QEMU build) those symbols aren't
+     * compiled in and this block would fail to link.
+     *
+     *   hailo runmodel <handle> [iterations]
+     */
+    if (argc >= 2 && strcmp(argv[1], "runmodel") == 0) {
+        extern int hailo_backend_model_sizes(int32_t h,
+                                             uint32_t *in_bytes,
+                                             uint32_t *out_bytes);
+        if (argc < 3) {
+            shell_puts("usage: hailo runmodel <handle> [iterations]\n");
+            return 0;
+        }
+        /* Small decimal parser — no libc. */
+        int32_t handle = 0;
+        for (const char *p = argv[2]; *p >= '0' && *p <= '9'; p++) {
+            handle = handle * 10 + (*p - '0');
+        }
+        uint32_t iters = 1;
+        if (argc >= 4) {
+            iters = 0;
+            for (const char *p = argv[3]; *p >= '0' && *p <= '9'; p++) {
+                iters = iters * 10u + (uint32_t)(*p - '0');
+            }
+        }
+        if (iters == 0) iters = 1;
+
+        struct inference_device *dev = inference_device_find("hailo-8");
+        if (!dev) {
+            shell_puts("hailo: no inference device registered\n");
+            return 0;
+        }
+
+        uint32_t in_bytes = 0, out_bytes = 0;
+        int rc = hailo_backend_model_sizes(handle, &in_bytes, &out_bytes);
+        if (rc != 0) {
+            shell_printf("hailo: invalid handle %d (rc=%d)\n", handle, rc);
+            return 0;
+        }
+        shell_printf("hailo: runmodel handle=%d in=%u out=%u iters=%u\n",
+                     handle, in_bytes, out_bytes, iters);
+
+        /* Allocate input+output from PMM to keep the 16 KB task
+         * stack safe. Zero-init the input. */
+        size_t in_pages  = (in_bytes  + 4095) / 4096;
+        size_t out_pages = (out_bytes + 4095) / 4096;
+        uint8_t *in_buf  = (uint8_t *)pmm_alloc_pages(in_pages);
+        uint8_t *out_buf = (uint8_t *)pmm_alloc_pages(out_pages);
+        if (!in_buf || !out_buf) {
+            shell_puts("hailo: alloc failed\n");
+            if (in_buf)  pmm_free_pages(in_buf,  in_pages);
+            if (out_buf) pmm_free_pages(out_buf, out_pages);
+            return 0;
+        }
+        memset(in_buf, 0, in_bytes);
+
+        inference_tensor_t in_t = {
+            .data = in_buf, .n_elems = in_bytes,
+            .dtype = 3 /* INT8 */, .rank = 1,
+            .shape = { (uint16_t)(in_bytes > 0xFFFFu ? 0u : in_bytes), 0, 0, 0 },
+        };
+        inference_tensor_t out_t = {
+            .data = out_buf, .n_elems = out_bytes,
+            .dtype = 3, .rank = 1,
+            .shape = { (uint16_t)(out_bytes > 0xFFFFu ? 0u : out_bytes), 0, 0, 0 },
+        };
+
+        uint64_t min_us = 0xFFFFFFFFFFFFFFFFULL, max_us = 0, sum_us = 0;
+        uint32_t ok = 0, fail = 0;
+        for (uint32_t i = 0; i < iters; i++) {
+            uint64_t t0 = timer_get_count();
+            int r = inference_run(dev, handle, &in_t, &out_t);
+            uint64_t t1 = timer_get_count();
+            uint64_t us = (t1 - t0) * 1000000ULL / timer_get_frequency();
+            if (r == 0) {
+                ok++;
+                if (us < min_us) min_us = us;
+                if (us > max_us) max_us = us;
+                sum_us += us;
+            } else {
+                fail++;
+                if (fail <= 3) {
+                    shell_printf("  iter %u: inference_run rc=%d\n", i, r);
+                }
+            }
+        }
+        if (ok > 0) {
+            shell_printf("hailo: runmodel ok=%u fail=%u  "
+                         "latency min=%lu us avg=%lu us max=%lu us\n",
+                         ok, fail, (unsigned long)min_us,
+                         (unsigned long)(sum_us / ok),
+                         (unsigned long)max_us);
+            /* Show first 16 bytes of last output */
+            shell_puts("  out[0..15]: ");
+            for (uint32_t i = 0; i < 16 && i < out_bytes; i++) {
+                shell_printf("%02x ", out_buf[i]);
+            }
+            shell_puts("\n");
+        } else {
+            shell_printf("hailo: runmodel all %u iterations failed\n", fail);
+        }
+        pmm_free_pages(in_buf,  in_pages);
+        pmm_free_pages(out_buf, out_pages);
+        return 0;
+    }
+#endif /* CONFIG_AI_SCHEDULER */
+
+    /* Phase 8: dump per-edge-layer details of first 8 entries. Shows
+     * direction, pad_index, sys_index, and shape flags for each
+     * edge_layer the walker processed. Helps identify which entry
+     * IS the output (and why it wasn't picked up as such). */
+    if (argc >= 2 && strcmp(argv[1], "edges") == 0) {
+        struct hef_edge_debug {
+            uint32_t direction;
+            uint32_t pad_index;
+            uint32_t sys_index;
+            uint32_t csi_edge_connection_type;
+            uint32_t csi_connected_sys_index;
+            uint32_t csi_connected_ctx_sys_index;
+            uint8_t  seen_direction : 1;
+            uint8_t  seen_pad_index : 1;
+            uint8_t  seen_sys_index : 1;
+            uint8_t  seen_shape     : 1;
+            uint8_t  seen_csi       : 1;
+            uint8_t  seen_csi_connected_sys_index : 1;
+            uint8_t  seen_csi_connected_ctx_sys_index : 1;
+        };
+        extern struct hef_edge_debug hef_edge_debug_slots[];
+        extern uint32_t hef_edge_debug_count;
+        shell_printf("hailo: edge_debug count=%u\n", hef_edge_debug_count);
+        for (uint32_t i = 0; i < hef_edge_debug_count; i++) {
+            const struct hef_edge_debug *d = &hef_edge_debug_slots[i];
+            const char *conn = "?";
+            if (d->seen_csi) {
+                switch (d->csi_edge_connection_type) {
+                case 0: conn = "BOUNDARY"; break;
+                case 1: conn = "INTERMED"; break;
+                case 2: conn = "DDR";      break;
+                case 3: conn = "CACHE";    break;
+                default: conn = "??";      break;
+                }
+            } else {
+                conn = "nocsi";
+            }
+            shell_printf("  [%u] dir=%s pad=%s(%u) sys=%s(%u) shape=%s "
+                         "csi=%s conn_sys=%s(%u) cctx_sys=%s(%u)\n",
+                         i,
+                         d->seen_direction
+                            ? (d->direction == 1 ? "D2H" : "H2D")
+                            : "unset",
+                         d->seen_pad_index ? "yes" : "no ",
+                         d->pad_index,
+                         d->seen_sys_index ? "yes" : "no ",
+                         d->sys_index,
+                         d->seen_shape ? "yes" : "no",
+                         conn,
+                         d->seen_csi_connected_sys_index ? "yes" : "no ",
+                         d->csi_connected_sys_index,
+                         d->seen_csi_connected_ctx_sys_index ? "yes" : "no ",
+                         d->csi_connected_ctx_sys_index);
+        }
+        return 0;
+    }
+
+    /* Phase 8: dump edge_layer walker tallies. Populated by
+     * decode_edge_layer_cb in hef_parser.c — shows how many edge
+     * layers the walker saw, how many had no pad_key (skipped),
+     * and how many landed as input vs output pads. */
+    if (argc >= 2 && strcmp(argv[1], "edgeinfo") == 0) {
+        extern uint32_t hef_edge_layer_calls;
+        extern uint32_t hef_edge_layer_no_key;
+        extern uint32_t hef_edge_layer_kept_h2d;
+        extern uint32_t hef_edge_layer_kept_d2h;
+        extern uint32_t hef_edge_layer_deduped;
+        shell_printf("hailo: edge_layer calls=%u no_key=%u "
+                     "kept_input=%u kept_output=%u deduped=%u\n",
+                     hef_edge_layer_calls,
+                     hef_edge_layer_no_key,
+                     hef_edge_layer_kept_h2d,
+                     hef_edge_layer_kept_d2h,
+                     hef_edge_layer_deduped);
+        return 0;
+    }
+
+    /* Phase 8: dump last firmware-reject reason. Populated by
+     * control_check_response_header whenever a SET_CONTEXT_INFO /
+     * CHANGE_STATUS / similar RPC returns a non-zero major_status.
+     * Cleared on kernel boot. */
+    if (argc >= 2 && strcmp(argv[1], "last_err") == 0) {
+        extern volatile uint32_t hailo_control_last_err_major;
+        extern volatile uint32_t hailo_control_last_err_minor;
+        extern volatile uint32_t hailo_control_last_err_opcode;
+        shell_printf("hailo: last_err major=0x%08x minor=0x%08x "
+                     "opcode_echo=0x%08x\n",
+                     hailo_control_last_err_major,
+                     hailo_control_last_err_minor,
+                     hailo_control_last_err_opcode);
+        return 0;
     }
 
     /* Default: one-line status. */
