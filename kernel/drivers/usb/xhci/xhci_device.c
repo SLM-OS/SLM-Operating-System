@@ -39,6 +39,37 @@
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
+/*
+ * Tegra234 exposes USB2 root-hub ports at xHCI ports 5..8
+ * (linux-xhci-tegra.c tegra234_soc.ports.usb2.offset = 4). Linux's
+ * tegra_xhci_hub_control() powers the matching UTMI pad back on
+ * around USB2 reset/resume operations; SLM-OS currently does not,
+ * so inherited post-kexec ports can stay logically connected while
+ * the USB2 pad remains powered down.
+ *
+ * This helper mirrors the narrow part of Linux's path that is easy to
+ * express locally: map the active USB2 lane to XUSB host mode and
+ * clear the bias/pad power-down bits before root-port recovery.
+ */
+#define TEGRA_XUSB_USB2_PORT_OFFSET         4u
+#define TEGRA_XUSB_USB2_PORT_COUNT          4u
+#define XUSB_PADCTL_USB2_PAD_MUX           0x004u
+#define XUSB_PADCTL_USB2_PORT_CAP          0x008u
+#define XUSB_PADCTL_USB2_OTG_PADX_CTL0(x)  (0x088u + ((x) * 0x40u))
+#define XUSB_PADCTL_USB2_OTG_PADX_CTL1(x)  (0x08cu + ((x) * 0x40u))
+#define XUSB_PADCTL_USB2_BIAS_PAD_CTL0     0x284u
+#define USB2_PORT_SHIFT(x)                 ((x) * 2u)
+#define USB2_PORT_MASK                     0x3u
+#define PORT_XUSB                          0x1u
+#define PORTX_CAP_SHIFT(x)                ((x) * 4u)
+#define PORT_CAP_MASK                      0x3u
+#define PORT_CAP_HOST                      0x1u
+#define TERM_SEL                           (1u << 25)
+#define USB2_OTG_PD                        (1u << 26)
+#define USB2_OTG_PD_DR                     (1u << 2)
+#define USB2_OTG_PD_ZI                     (1u << 29)
+#define BIAS_PAD_PD                        (1u << 11)
+
 /* -------------------------------------------------------------------------- */
 /* Per-device state pool. Minimal hub support needs two live devices at once:
  * the upstream hub and one downstream child. */
@@ -152,6 +183,80 @@ static bool xhci_skip_next_port_reset = false;
 static bool xhci_force_connected_disabled_reset = false;
 static bool xhci_force_bsr0_on_open = false;
 static bool xhci_force_inherited_addr2_on_open = false;
+
+static uint32_t xhci_padctl_r32(uint32_t off)
+{
+    volatile uint8_t *base = (volatile uint8_t *)TEGRA_XUSB_PADCTL_BASE;
+    return *(volatile uint32_t *)(base + off);
+}
+
+static void xhci_padctl_w32(uint32_t off, uint32_t v)
+{
+    volatile uint8_t *base = (volatile uint8_t *)TEGRA_XUSB_PADCTL_BASE;
+    *(volatile uint32_t *)(base + off) = v;
+}
+
+static bool xhci_active_usb2_lane(unsigned *lane_out)
+{
+    if (xhci_active_port < TEGRA_XUSB_USB2_PORT_OFFSET)
+        return false;
+
+    unsigned lane = (unsigned)xhci_active_port - TEGRA_XUSB_USB2_PORT_OFFSET;
+    if (lane >= TEGRA_XUSB_USB2_PORT_COUNT)
+        return false;
+
+    if (lane_out)
+        *lane_out = lane;
+    return true;
+}
+
+static void tegra_xusb_utmi_pad_power_on_active_lane(const char *why)
+{
+    unsigned lane = 0;
+    if (!xhci_active_usb2_lane(&lane))
+        return;
+
+    uint32_t mux_before  = xhci_padctl_r32(XUSB_PADCTL_USB2_PAD_MUX);
+    uint32_t cap_before  = xhci_padctl_r32(XUSB_PADCTL_USB2_PORT_CAP);
+    uint32_t bias_before = xhci_padctl_r32(XUSB_PADCTL_USB2_BIAS_PAD_CTL0);
+    uint32_t ctl0_before = xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL0(lane));
+    uint32_t ctl1_before = xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL1(lane));
+
+    uint32_t mux = mux_before;
+    mux &= ~(USB2_PORT_MASK << USB2_PORT_SHIFT(lane));
+    mux |= (PORT_XUSB << USB2_PORT_SHIFT(lane));
+    xhci_padctl_w32(XUSB_PADCTL_USB2_PAD_MUX, mux);
+
+    uint32_t cap = cap_before;
+    cap &= ~(PORT_CAP_MASK << PORTX_CAP_SHIFT(lane));
+    cap |= (PORT_CAP_HOST << PORTX_CAP_SHIFT(lane));
+    xhci_padctl_w32(XUSB_PADCTL_USB2_PORT_CAP, cap);
+
+    uint32_t bias = bias_before & ~BIAS_PAD_PD;
+    xhci_padctl_w32(XUSB_PADCTL_USB2_BIAS_PAD_CTL0, bias);
+
+    uint64_t start = timer_get_count();
+    uint64_t delay = (timer_get_frequency() + 499999ULL) / 500000ULL; /* ~2 us */
+    while (timer_get_count() - start < delay) { }
+
+    uint32_t ctl0 = ctl0_before & ~(USB2_OTG_PD | USB2_OTG_PD_ZI);
+    ctl0 |= TERM_SEL;
+    xhci_padctl_w32(XUSB_PADCTL_USB2_OTG_PADX_CTL0(lane), ctl0);
+
+    uint32_t ctl1 = ctl1_before & ~USB2_OTG_PD_DR;
+    xhci_padctl_w32(XUSB_PADCTL_USB2_OTG_PADX_CTL1(lane), ctl1);
+    dsb(sy);
+
+    INFO("xhci: %s UTMI lane %u mux 0x%08x->0x%08x cap 0x%08x->0x%08x "
+         "bias 0x%08x->0x%08x ctl0 0x%08x->0x%08x ctl1 0x%08x->0x%08x",
+         why ? why : "powered",
+         lane,
+         (unsigned)mux_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_PAD_MUX),
+         (unsigned)cap_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_PORT_CAP),
+         (unsigned)bias_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_BIAS_PAD_CTL0),
+         (unsigned)ctl0_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL0(lane)),
+         (unsigned)ctl1_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL1(lane)));
+}
 
 /*
  * Hot-plug state: STALE at boot (assume pre-kexec stale device) →
@@ -626,6 +731,8 @@ int xhci_hcd_port_reset(uint8_t port)
     if (port != 0) return -1;
     if (xhci_active_port == 0xFF)
         return -1;
+
+    tegra_xusb_utmi_pad_power_on_active_lane("pre-reset");
 
     uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
     bool connected_disabled =
