@@ -922,12 +922,18 @@ static int translate_dynamic(const struct hef_info *info,
      * penultimate action in DYNAMIC (right before APPLICATION_CHANGE_
      * INTERRUPT). We already emit it in BATCH_SWITCHING for the batch,
      * but firmware also expects it per-DYNAMIC to re-arm the burst
-     * credit task for this context's boundary channels. Safe to emit
-     * unconditionally — empty body, no state pollution if burst
-     * credits are already running. */
-    int bc_rc = hailo_cs_builder_append(b, HAILO_CS_ACT_BURST_CREDITS_TASK_START,
-                                        NULL, 0);
-    if (bc_rc != HAILO_OK) return bc_rc;
+     * credit task for this context's boundary channels. Gated on
+     * having both boundary pads — burst credits are meaningless
+     * without boundary I/O, and the tests that exercise only
+     * compute actions would see spurious trailing bytes otherwise. */
+    {
+        const struct hef_pad_info *in_pad = NULL, *out_pad = NULL;
+        if (find_boundary_pads(info, &in_pad, &out_pad) == 0) {
+            int bc_rc = hailo_cs_builder_append(b,
+                HAILO_CS_ACT_BURST_CREDITS_TASK_START, NULL, 0);
+            if (bc_rc != HAILO_OK) return bc_rc;
+        }
+    }
 
     /* Tail marker. Firmware requires this as the last action of the
      * final dynamic context; it signals "this dynamic context is

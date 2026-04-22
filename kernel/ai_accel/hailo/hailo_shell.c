@@ -1081,9 +1081,16 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+#ifdef CONFIG_AI_SCHEDULER
     /* Phase 8: run inference on a previously-loaded handle with
      * zeroed input. Measures end-to-end latency including our
      * cache-clean/submit/MSI-wait/cache-invalidate pipeline.
+     *
+     * Wrapped in CONFIG_AI_SCHEDULER because it depends on
+     * inference_device_find / inference_run / inference_tensor_t,
+     * all of which live in the AI scheduler path. Without the
+     * scheduler (e.g. `make test` QEMU build) those symbols aren't
+     * compiled in and this block would fail to link.
      *
      *   hailo runmodel <handle> [iterations]
      */
@@ -1187,6 +1194,7 @@ static int cmd_hailo(int argc, char *argv[])
         pmm_free_pages(out_buf, out_pages);
         return 0;
     }
+#endif /* CONFIG_AI_SCHEDULER */
 
     /* Phase 8: dump per-edge-layer details of first 8 entries. Shows
      * direction, pad_index, sys_index, and shape flags for each

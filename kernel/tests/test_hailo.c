@@ -412,8 +412,9 @@ static bool mock_smart_memory_handle(uint32_t opcode_native,
         return true;
     }
 
-    /* Context-switch opcodes: auto-echo OK for any of the three
-     * load_model RPCs (CHANGE_CONTEXT_SWITCH_STATUS,
+    /* Context-switch opcodes: auto-echo OK for the pre-configure
+     * handshake (CLEAR_CONFIGURED_APPS + GET_HW_CONSTS) and the
+     * load-model RPCs (CHANGE_CONTEXT_SWITCH_STATUS,
      * SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO). load_model issues
      * these in sequence and the single shared mock_fw_sim_control_resp
      * buffer can't supply per-opcode responses; auto-echo solves that
@@ -422,7 +423,10 @@ static bool mock_smart_memory_handle(uint32_t opcode_native,
     if (mock_fw_sim_smart_memory_enabled
      && (opcode_native == HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS
       || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER
-      || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO)) {
+      || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO
+      || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS
+      || opcode_native == HAILO_CONTROL_OPCODE_GET_HW_CONSTS
+      || opcode_native == HAILO_CONTROL_OPCODE_CORE_IDENTIFY)) {
         mock_build_echo_response(resp_out, resp_out_len,
                                  req_opcode_be, 0, NULL, 0);
         return true;
@@ -2527,6 +2531,44 @@ static void test_msi_handler_sets_pending_and_clears_istatus(void)
     TEST_ASSERT_EQUAL_UINT32(0u, after);
 }
 
+/* CORE_IDENTIFY (opcode 0x2A, CPU_ID_CORE_CPU, empty-body request).
+ * #253 / commit 4a0043a — added as a pre-submit liveness probe. This
+ * test verifies the wire layout: 20-byte packed request (16 B common
+ * header + 4 B parameter_count=0), opcode byte-swapped to BE in the
+ * common header's opcode field, delivered via the CORE doorbell. */
+static void test_control_core_identify_wire_layout(void)
+{
+    control_setup_running();
+    mock_fw_sim_smart_memory_enabled = true;   /* auto-echo CORE_IDENTIFY */
+
+    uint32_t before_core = mock_control_core_doorbells;
+    uint32_t before_app  = mock_control_doorbells;
+
+    uint32_t resp_len = 0;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_core_identify(&resp_len));
+
+    /* Exactly one CORE doorbell, no APP doorbells. */
+    TEST_ASSERT_EQUAL_UINT32(before_core + 1u, mock_control_core_doorbells);
+    TEST_ASSERT_EQUAL_UINT32(before_app, mock_control_doorbells);
+
+    /* Request wire size = 16 B common header + 4 B parameter_count
+     * (= 0). Nothing else. */
+    TEST_ASSERT_EQUAL_UINT32(20u, (uint32_t)mock_last_control_request_len);
+
+    /* Opcode at offset 12 of the 16-byte common header, BE. */
+    uint32_t opcode_be;
+    memcpy(&opcode_be, mock_last_control_request + 12, 4);
+    TEST_ASSERT_EQUAL_UINT32(
+        __builtin_bswap32((uint32_t)HAILO_CONTROL_OPCODE_CORE_IDENTIFY),
+        opcode_be);
+
+    /* parameter_count at offset 16 of the payload, BE, must be 0. */
+    uint32_t pcount_be;
+    memcpy(&pcount_be, mock_last_control_request + 16, 4);
+    TEST_ASSERT_EQUAL_UINT32(0u, pcount_be);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Phase 6.4f: HEF → wire-action translator                                    */
 /* -------------------------------------------------------------------------- */
@@ -3009,6 +3051,125 @@ static void test_cs_translate_batch_switching_no_boundary_input(void)
                             out.batch_switching[0]);
     TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
                             out.batch_switching[5]);
+}
+
+/* DYNAMIC boundary prologue (#253 / commit a6b3ef6): when the HEF
+ * has both a boundary input and boundary output pad, the translator
+ * synthesizes ACTIVATE_BOUNDARY_OUTPUT -> ACTIVATE_BOUNDARY_INPUT ->
+ * RESUME_VDMA_CHANNEL(H2D) before any HEF-derived DYNAMIC actions.
+ * Without this prologue firmware never primes device-side num_avail
+ * on the boundary input channel and every submit times out.
+ *
+ * Byte budget with MNIST-ish geometry (context_actions_count=0, so
+ * translate_dynamic hits the "captured zero contexts" early-return
+ * right after the tail marker — BURST_CREDITS_TASK_START only fires
+ * on the full-walk path where a real DYNAMIC action list exists):
+ *   prologue: 44 (OUT act) + 47 (IN act) + 7 (RESUME) = 98 B
+ *   tail    : 5 (APPLICATION_CHANGE_INTERRUPT)          =  5 B
+ *   total   = 103 B. The full-walk path adds BURST_CREDITS_TASK_START
+ * before the tail for 108 total — exercised by
+ * test_cs_translate_allow_input_dataflow_wire_format. */
+static void test_cs_translate_dynamic_emits_boundary_prologue(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 2;
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].sys_index             = 1;
+    info.pads[0].core_bytes_per_buffer = 32;
+    info.pads[0].core_buffers_per_frame = 28;
+    info.pads[0].has_tensor_shape      = true;
+    info.pads[0].height = 28;
+    info.pads[0].width  = 28;
+    info.pads[0].features = 1;
+    info.pads[1].is_input              = false;
+    info.pads[1].has_stream_info       = true;
+    info.pads[1].sys_index             = 0;
+    info.pads[1].core_bytes_per_buffer = 16;
+    info.pads[1].core_buffers_per_frame = 1;
+    info.pads[1].has_tensor_shape      = true;
+    info.pads[1].height = 1;
+    info.pads[1].width  = 1;
+    info.pads[1].features = 10;
+    info.ccw_action_count = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel              = 0x01,
+        .ccw_desc_list_iova               = 0x1000,
+        .ccw_desc_page_size               = 512,
+        .ccw_total_desc_count             = 2,
+        .boundary_input_desc_list_iova    = 0x10000,
+        .boundary_input_total_desc_count  = 2,
+        .boundary_output_desc_list_iova   = 0x20000,
+        .boundary_output_total_desc_count = 2,
+        .boundary_desc_page_size          = 4096,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* 5 (OUT hdr) + 39 (OUT body) + 5 (IN hdr) + 42 (IN body)
+     * + 5 (RESUME hdr) + 2 (RESUME body) + 5 (tail) = 103 B. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)103, out.dynamic_len);
+
+    /* Byte 0 of DYNAMIC: ACTIVATE_BOUNDARY_OUTPUT action type. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_BOUNDARY_OUTPUT,
+                            out.dynamic[0]);
+    /* OUTPUT body byte 0: packed_vdma = 0x01 + OUTPUT_OFFSET(15) = 0x10. */
+    TEST_ASSERT_EQUAL_UINT8(0x10, out.dynamic[5]);
+
+    /* After 5+39=44 bytes: ACTIVATE_BOUNDARY_INPUT. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_BOUNDARY_INPUT,
+                            out.dynamic[44]);
+    /* INPUT body byte 0: packed_vdma = 0x01 + INPUT_OFFSET(1) = 0x02. */
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.dynamic[49]);
+
+    /* After 44 + 5+42=91 bytes: RESUME_VDMA_CHANNEL. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_RESUME_VDMA_CHANNEL,
+                            out.dynamic[91]);
+    /* RESUME body: packed_vdma = 2, direction = H2D (0). */
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.dynamic[96]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_EDGE_DIR_H2D, out.dynamic[97]);
+
+    /* After 91+7=98 bytes: APPLICATION_CHANGE_INTERRUPT tail. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[98]);
+}
+
+/* Without both boundary pads, the prologue is skipped — synthesizing
+ * ACTIVATE_BOUNDARY_* for a non-boundary HEF would point firmware at
+ * a zero iova and corrupt channel state. Verify a HEF with only
+ * internal pads (no has_stream_info) yields DYNAMIC that ends right
+ * at the tail marker with no prologue bytes. */
+static void test_cs_translate_dynamic_skips_prologue_without_boundary(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 2;
+    info.pads[0].is_input        = true;
+    info.pads[0].has_stream_info = false;   /* internal, not boundary */
+    info.pads[1].is_input        = false;
+    info.pads[1].has_stream_info = false;
+    info.ccw_action_count = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel   = 0x01,
+        .ccw_desc_list_iova    = 0x1000,
+        .ccw_desc_page_size    = 512,
+        .ccw_total_desc_count  = 2,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Only the APPLICATION_CHANGE_INTERRUPT tail (5 B). No prologue,
+     * no BURST_CREDITS (BURST_CREDITS is also boundary-gated). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)5, out.dynamic_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_APPLICATION_CHANGE_INTERRUPT,
+                            out.dynamic[0]);
 }
 
 static void test_cs_translate_activation_missing_output_iova_fails(void)
@@ -4377,6 +4538,12 @@ static void test_vdma_program_descriptor_masks_low_addr_bits(void)
     TEST_ASSERT_EQUAL_UINT32(0x10u, d.addr_h);
 }
 
+/* The LAST descriptor in every program_buffer call carries the
+ * DOMAIN_DEVICE IRQ bits (0x1C) OR'd into the base 0x02 control byte,
+ * matching HailoRT reference (#253 / commit 34a3f8f). Non-last descs
+ * keep the plain 0x02 control. */
+#define LAST_DESC_CTRL  0x1Eu   /* 0x02 | DEVICE (0x10) | IRQ_PROC (0x04) | IRQ_ERR (0x08) */
+
 static void test_vdma_program_buffer_one_descriptor(void)
 {
     vdma_setup();
@@ -4384,12 +4551,11 @@ static void test_vdma_program_buffer_one_descriptor(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_vdma_desc_list_alloc(64, 512, false, &list));
 
-    /* Buffer smaller than page_size → one descriptor with the
-     * residue as the last-descriptor page size. */
+    /* Buffer smaller than page_size → one descriptor (also the last). */
     int rc = hailo_vdma_program_buffer(&list, 0,
         /*iova=*/0x10000, /*size=*/200, /*data_id=*/0x05);
     TEST_ASSERT_EQUAL_INT(1, rc);
-    TEST_ASSERT_EQUAL_UINT32((200u << 8) | 0x02u,
+    TEST_ASSERT_EQUAL_UINT32((200u << 8) | LAST_DESC_CTRL,
                              list.descs[0].page_size_desc_control);
     TEST_ASSERT_EQUAL_UINT32(0x10000u | 0x05u,
                              list.descs[0].addr_l_rsvd_data_id);
@@ -4406,7 +4572,7 @@ static void test_vdma_program_buffer_exact_multiple(void)
         hailo_vdma_desc_list_alloc(64, 512, false, &list));
 
     /* 1024 B / 512 page = exactly 2 descriptors, no residue.
-     * Each descriptor's page_size field = full page size. */
+     * First desc gets plain 0x02; second desc (last) gets LAST_DESC_CTRL. */
     int rc = hailo_vdma_program_buffer(&list, 0,
         /*iova=*/0x40000, /*size=*/1024, /*data_id=*/0x01);
     TEST_ASSERT_EQUAL_INT(2, rc);
@@ -4414,7 +4580,7 @@ static void test_vdma_program_buffer_exact_multiple(void)
                              list.descs[0].page_size_desc_control);
     TEST_ASSERT_EQUAL_UINT32(0x40000u | 0x01u,
                              list.descs[0].addr_l_rsvd_data_id);
-    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | LAST_DESC_CTRL,
                              list.descs[1].page_size_desc_control);
     /* Second descriptor's address advances by page_size. */
     TEST_ASSERT_EQUAL_UINT32((0x40000u + 512u) | 0x01u,
@@ -4430,17 +4596,15 @@ static void test_vdma_program_buffer_with_residue(void)
         hailo_vdma_desc_list_alloc(64, 512, false, &list));
 
     /* 1280 B / 512 page = 2 full + 256 residue = 3 descriptors.
-     * Last descriptor's page size == residue size. */
+     * descs[0]+[1] plain 0x02; descs[2] LAST_DESC_CTRL with residue. */
     int rc = hailo_vdma_program_buffer(&list, 0,
         /*iova=*/0x80000, /*size=*/1280, /*data_id=*/0x02);
     TEST_ASSERT_EQUAL_INT(3, rc);
-    /* descs[0] and descs[1] carry full page_size. */
     TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
                              list.descs[0].page_size_desc_control);
     TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
                              list.descs[1].page_size_desc_control);
-    /* descs[2] carries residue (256). */
-    TEST_ASSERT_EQUAL_UINT32((256u << 8) | 0x02u,
+    TEST_ASSERT_EQUAL_UINT32((256u << 8) | LAST_DESC_CTRL,
                              list.descs[2].page_size_desc_control);
     hailo_vdma_desc_list_free(&list);
 }
@@ -4453,7 +4617,9 @@ static void test_vdma_program_buffer_wraps_circular_list(void)
         hailo_vdma_desc_list_alloc(4, 512, /*circular=*/true, &list));
 
     /* 4-descriptor circular list; 3 full-page descriptors starting
-     * at index 2 → programs descs[2], descs[3], descs[0] (wrap). */
+     * at index 2 → programs descs[2], descs[3], descs[0] (wrap).
+     * descs[2]+[3] plain 0x02; descs[0] is LAST (wrapped) and gets
+     * LAST_DESC_CTRL. */
     int rc = hailo_vdma_program_buffer(&list, /*start=*/2,
         /*iova=*/0x2000, /*size=*/1536, /*data_id=*/0x04);
     TEST_ASSERT_EQUAL_INT(3, rc);
@@ -4461,7 +4627,7 @@ static void test_vdma_program_buffer_wraps_circular_list(void)
                              list.descs[2].page_size_desc_control);
     TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
                              list.descs[3].page_size_desc_control);
-    TEST_ASSERT_EQUAL_UINT32((512u << 8) | 0x02u,
+    TEST_ASSERT_EQUAL_UINT32((512u << 8) | LAST_DESC_CTRL,
                              list.descs[0].page_size_desc_control);
     /* descs[1] untouched. */
     TEST_ASSERT_EQUAL_UINT32(0u, list.descs[1].page_size_desc_control);
@@ -4667,6 +4833,47 @@ static void test_vdma_submit_rejects_bad_channel(void)
     vdma_setup();
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
         hailo_vdma_submit_and_wait(HAILO_VDMA_MAX_CHANNELS, 1, 1000));
+}
+
+/* hailo_vdma_channel_wait_armed (#253 / commit f160fe0): polls a
+ * channel's CONTROL byte until firmware flips it to START post-
+ * ENABLED. Used by context_switch_load before the CCW num_avail
+ * write. Returns HAILO_OK once the CONTROL byte reads START. */
+static void test_vdma_channel_wait_armed_returns_on_start(void)
+{
+    vdma_setup();
+    /* Pre-arm channel 3's base_dword with CONTROL=START (0x01). */
+    uint32_t base = 3 * HAILO_VDMA_CHANNEL_STRIDE;
+    uint32_t armed = 0x00004001u;     /* ctrl=START, depth=8 */
+    memcpy(&mock_bar2[base], &armed, sizeof(armed));
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_channel_wait_armed(3, /*timeout=*/1000));
+}
+
+static void test_vdma_channel_wait_armed_times_out(void)
+{
+    vdma_setup();
+    /* Channel 4's base_dword starts at 0 (CTRL=0, not START) and
+     * nothing writes to it during the poll window → timeout. */
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_vdma_channel_wait_armed(4, /*timeout=*/200));
+}
+
+static void test_vdma_channel_wait_armed_rejects_bad_channel(void)
+{
+    vdma_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_channel_wait_armed(HAILO_VDMA_MAX_CHANNELS, 1000));
+}
+
+/* HAILO_VDMA_HOST_DMA_DATA_ID is the data_id value the reference
+ * PCIe driver pins for host-side DMA (hailo-pcie-common.h:35). All
+ * descriptor-list programming in SLM-OS must use this value — not
+ * the HEF's sys_index, which was the bug that triggered the Phase 8
+ * data_id mismatch (#253 / commit 717196f). */
+static void test_vdma_host_dma_data_id_is_zero(void)
+{
+    TEST_ASSERT_EQUAL_UINT8(0u, HAILO_VDMA_HOST_DMA_DATA_ID);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -5703,6 +5910,24 @@ static struct inference_device *hailo_backend_ready(void)
     (void)inference_device_hailo_register();   /* idempotent for test purposes */
     hailo_backend_reset_slots_for_tests();
     mock_fw_sim_smart_memory_enabled = true;
+
+    /* #253 (commit f160fe0): the real context_switch_load now polls
+     * the CFG VDMA channel's CONTROL byte after CHANGE_STATUS(ENABLED)
+     * and writes num_avail once fw has armed the channel. In the
+     * mock we have to stand in for fw: pre-arm the CFG channel
+     * (CONTROL=START + depth=8) so hailo_vdma_channel_wait_armed
+     * returns immediately, and enable mock_vdma_auto_advance so the
+     * submit's num_proc poll completes. Without this every inf_hailo
+     * load test times out at the 500 ms arm poll. */
+    {
+        uint32_t cfg_base = HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
+                          * HAILO_VDMA_CHANNEL_STRIDE;
+        /* control=START (0x01), data_id=0, depth=8 (=0x40 at shift 11). */
+        uint32_t armed = 0x00004001u;
+        memcpy(&mock_bar2[cfg_base], &armed, sizeof(armed));
+    }
+    mock_vdma_auto_advance = true;
+
     return inference_device_find("hailo-8");
 }
 
@@ -5917,8 +6142,18 @@ static void test_inf_hailo_load_rings_context_switch_sequence(void)
     inference_model_handle_t h = INF_INVALID_HANDLE;
     TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
 
+    /* Expected core-CPU RPCs per context_switch_load:
+     *   1. CHANGE_STATUS(RESET)
+     *   2. CLEAR_CONFIGURED_APPS     (pre-configure handshake)
+     *   3. GET_HW_CONSTS             (pre-configure handshake)
+     *   4. SET_NETWORK_GROUP_HEADER
+     *   5-8. SET_CONTEXT_INFO × 4    (ACT/BS/PRE/DYN)
+     *   9. CHANGE_STATUS(ENABLED)
+     * Post-ENABLED the driver also writes num_avail on the CFG VDMA
+     * channel (#253 / f160fe0) but that's an MMIO poke, not an RPC, so
+     * it doesn't touch mock_control_core_doorbells. */
     uint32_t core_rpcs = mock_control_core_doorbells - core_before;
-    TEST_ASSERT_EQUAL_UINT32(7u, core_rpcs);
+    TEST_ASSERT_EQUAL_UINT32(9u, core_rpcs);
 }
 
 /* #179 failure unwind: if the context-switch sequence fails partway
@@ -6179,22 +6414,21 @@ static void test_inf_hailo_run_reuses_load_boundary_iovas(void)
     };
     TEST_ASSERT_EQUAL_INT(INF_OK, inference_run(dev, h, &in, &out));
 
-    /* Boundary input channel = config_vdma(1) + OFFSET(1) = 2.
-     * channel_base(2) = 2 * 32 = 0x40. ALIGNED_ADDR_L is at +0x08.
-     * The reference VDMA writes (iova >> 16) << 16 into that dword's
-     * high 16 bits (RMW to preserve low 16). Extract and compare. */
-    uint32_t addr_l_dword;
-    memcpy(&addr_l_dword, &mock_bar2[2 * 32 + 0x08], 4);
-    uint32_t expected_addr_l = (uint32_t)((in_iova >> 16) & 0xFFFFu) << 16;
-    TEST_ASSERT_EQUAL_UINT32(expected_addr_l,
-                             addr_l_dword & 0xFFFF0000u);
-
-    /* Boundary output channel = config_vdma(1) + OFFSET(15) = 16
-     * (first valid D2H channel). channel_base(16) = 16 * 32 = 0x200. */
-    memcpy(&addr_l_dword, &mock_bar2[16 * 32 + 0x08], 4);
-    uint32_t expected_out_addr_l = (uint32_t)((out_iova >> 16) & 0xFFFFu) << 16;
-    TEST_ASSERT_EQUAL_UINT32(expected_out_addr_l,
-                             addr_l_dword & 0xFFFF0000u);
+    /* Fetch the post-run iovas and verify they match pre-run — run()
+     * must not reallocate boundary desc lists (pre-#338 behavior) or
+     * firmware's ACTIVATION-bound iova diverges from what host then
+     * writes descriptors to. We originally asserted via BAR2 channel
+     * ALIGNED_ADDR_L regs, but that only worked when run() called
+     * hailo_vdma_channel_start (removed in the Phase 8 work per
+     * memory_note hailo_180_resolved: firmware owns channel-start
+     * post-ACTIVATION). The updated invariant is simpler: the
+     * slot-resident iovas stay stable across run(). */
+    uint64_t post_in_iova = 0, post_out_iova = 0;
+    hailo_backend_get_boundary_iovas_for_tests(h, &post_in_iova, &post_out_iova);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(in_iova  & 0xFFFFFFFFu),
+                             (uint32_t)(post_in_iova  & 0xFFFFFFFFu));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(out_iova & 0xFFFFFFFFu),
+                             (uint32_t)(post_out_iova & 0xFFFFFFFFu));
 }
 
 static void test_inf_hailo_free_releases_slot(void)
@@ -6766,6 +7000,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_builder_repeated_single_count);
     RUN_TEST(test_change_context_switch_status_reset_wire_layout);
     RUN_TEST(test_change_context_switch_status_enabled_carries_batch_params);
+    RUN_TEST(test_control_core_identify_wire_layout);
     RUN_TEST(test_control_registers_msi_on_first_send);
     RUN_TEST(test_msi_handler_sets_pending_and_clears_istatus);
     RUN_TEST(test_cs_translate_application_header_fills_defaults);
@@ -6778,6 +7013,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_activation_emits_input_and_output);
     RUN_TEST(test_cs_translate_activation_skips_internal_pads);
     RUN_TEST(test_cs_translate_activation_missing_input_iova_fails);
+    RUN_TEST(test_cs_translate_dynamic_emits_boundary_prologue);
+    RUN_TEST(test_cs_translate_dynamic_skips_prologue_without_boundary);
     RUN_TEST(test_cs_translate_activation_missing_output_iova_fails);
     RUN_TEST(test_cs_translate_batch_switching_emits_change_boundary_input_batch);
     RUN_TEST(test_cs_translate_batch_switching_no_boundary_input);
@@ -6876,6 +7113,10 @@ int test_suite_hailo(void)
     RUN_TEST(test_vdma_submit_and_wait_completes_fast);
     RUN_TEST(test_vdma_submit_and_wait_times_out);
     RUN_TEST(test_vdma_submit_rejects_bad_channel);
+    RUN_TEST(test_vdma_channel_wait_armed_returns_on_start);
+    RUN_TEST(test_vdma_channel_wait_armed_times_out);
+    RUN_TEST(test_vdma_channel_wait_armed_rejects_bad_channel);
+    RUN_TEST(test_vdma_host_dma_data_id_is_zero);
 
     /* Phase 5.4 hailo_infer orchestration */
     RUN_TEST(test_infer_rejects_null_args);
