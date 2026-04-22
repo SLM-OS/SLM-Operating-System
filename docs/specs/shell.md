@@ -35,7 +35,7 @@ Interactive shell, command surface, observability commands, multi-session.
 
 ## Skipped / Blocked
 
-- **Unauthenticated telnet on hardware** — Pi 5 lab/demo builds now force `NET_TELNETD_AUTOSTART=ON`. That is acceptable only on trusted networks; SSH/authentication (#199) is still the real security boundary.
+- **Unauthenticated telnet on hardware** — Pi 5 lab/demo builds now default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. That is acceptable only on trusted networks; SSH/authentication (#199) is still the real security boundary.
 - **SSH** (#199) — deferred until wolfSSH integration; out of current scope.
 - **Jetson multi-session shell** — blocked on Jetson networking (#25 / #266). Single-session UARTC console works fine.
 - **Command completion / history / arrow-key editing** — not implemented. Raw-line mode only. Would require telnet IAC negotiation for server-side echo.

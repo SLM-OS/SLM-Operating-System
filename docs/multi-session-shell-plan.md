@@ -518,7 +518,7 @@ than "making it work."
 Supersedes the `NET_TCP_SHELL` flag from §1.8 once Phase 2 lands:
 
 - `NET_TELNETD=ON` — builds the telnetd sources into the kernel.
-  Default ON for QEMU and x86-64. Pi 5 lab/demo builds now also force
+  Default ON for QEMU and x86-64. Pi 5 lab/demo builds now also default
   it ON as an explicit trusted-network operator choice; Jetson remains
   gated on networking plus the same security caveat.
 - `NET_TELNETD=OFF` — sources not compiled in; runtime control

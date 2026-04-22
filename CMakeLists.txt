@@ -235,12 +235,14 @@ endif()
 # if the resolved config says enabled it calls net_init + starts
 # the TCP listener on port 2323.
 #
-# Default is ON for Pi 5 lab/demo images and OFF elsewhere. Real
-# hardware remains an explicit operator decision; this repo's Pi 5
-# workflow is using trusted-network lab hardware.
+# Default is ON for Pi 5 lab/demo images and OFF elsewhere. This is a
+# cache default only: an explicit -DNET_TELNETD_AUTOSTART=OFF must win,
+# especially on real hardware where the listener is unauthenticated.
 if(PLATFORM STREQUAL "RASPI5")
-    set(NET_TELNETD_AUTOSTART ON CACHE BOOL
-        "Start telnetd at boot (unauthenticated TCP shell)" FORCE)
+    if(NOT DEFINED NET_TELNETD_AUTOSTART)
+        set(NET_TELNETD_AUTOSTART ON CACHE BOOL
+            "Start telnetd at boot (unauthenticated TCP shell)")
+    endif()
 else()
     option(NET_TELNETD_AUTOSTART "Start telnetd at boot (unauthenticated TCP shell)" OFF)
 endif()

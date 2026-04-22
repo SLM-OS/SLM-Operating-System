@@ -113,6 +113,7 @@ struct tcp_shell_ctx {
     uint8_t           tx_buf[TCP_SHELL_RING_SIZE];
     uint32_t          tx_head;
     uint32_t          tx_tail;
+    bool              tx_prev_was_cr;   /* preserve CRLF state across write calls */
 
     /* Telnet parser — state machine between the peer and the RX
      * ring. Fed byte-by-byte from on_recv; emits data bytes into
@@ -139,6 +140,27 @@ static inline uint32_t ring_used(uint32_t head, uint32_t tail)
 static inline uint32_t ring_free(uint32_t head, uint32_t tail)
 {
     return TCP_SHELL_RING_MASK - ring_used(head, tail);
+}
+
+static size_t normalize_output_bytes(uint8_t *dst,
+                                     size_t avail,
+                                     const char *src,
+                                     size_t src_len,
+                                     bool *prev_was_cr)
+{
+    size_t out = 0;
+    for (size_t i = 0; i < src_len && out < avail; i++) {
+        char c = src[i];
+        if (c == '\n' && !*prev_was_cr) {
+            if (out + 2 > avail) {
+                break;
+            }
+            dst[out++] = '\r';
+        }
+        dst[out++] = (uint8_t)c;
+        *prev_was_cr = (c == '\r');
+    }
+    return out;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -283,8 +305,8 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
 
     /* Match the UART backend's line discipline: emit CRLF on output so
      * telnet clients don't render bare LF as "move down but stay in the
-     * same column". Insert '\r' before any '\n' that isn't already part
-     * of a CRLF sequence in the source buffer. */
+     * same column". Preserve standalone '\r' state across write calls so
+     * callers that emit '\r' and '\n' separately still produce one CRLF. */
     size_t src = 0;
     while (src < len) {
         /* Fast unlocked check — `closed` is volatile bool, so single-
@@ -308,7 +330,7 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
         size_t queued = 0;
         while (src < len && queued < avail) {
             char c = buf[src];
-            if (c == '\n' && (src == 0 || buf[src - 1] != '\r')) {
+            if (c == '\n' && !ctx->tx_prev_was_cr) {
                 if (queued + 2 > avail) {
                     break;
                 }
@@ -318,6 +340,7 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
             }
             ctx->tx_buf[ctx->tx_head & TCP_SHELL_RING_MASK] = (uint8_t)c;
             ctx->tx_head = (ctx->tx_head + 1) & TCP_SHELL_RING_MASK;
+            ctx->tx_prev_was_cr = (c == '\r');
             queued++;
             src++;
         }
@@ -436,6 +459,7 @@ static struct tcp_shell_ctx *ctx_alloc(void)
             c->tx_lock = (spinlock_t)SPINLOCK_INIT;
             c->rx_head = c->rx_tail = 0;
             c->tx_head = c->tx_tail = 0;
+            c->tx_prev_was_cr = false;
             spin_unlock_irqrestore(&pool_lock, flags);
             return c;
         }
@@ -449,6 +473,34 @@ static void ctx_free(struct tcp_shell_ctx *ctx)
     irq_flags_t flags = spin_lock_irqsave(&pool_lock);
     ctx->in_use = false;
     spin_unlock_irqrestore(&pool_lock, flags);
+}
+
+size_t shell_io_tcp_test_normalize_output(const char *first,
+                                          const char *second,
+                                          char *out,
+                                          size_t out_len)
+{
+    size_t total = 0;
+    bool prev_was_cr = false;
+
+    if (!out || out_len == 0) {
+        return 0;
+    }
+    if (first) {
+        total += normalize_output_bytes((uint8_t *)out + total,
+                                        out_len - total,
+                                        first,
+                                        strlen(first),
+                                        &prev_was_cr);
+    }
+    if (second && total < out_len) {
+        total += normalize_output_bytes((uint8_t *)out + total,
+                                        out_len - total,
+                                        second,
+                                        strlen(second),
+                                        &prev_was_cr);
+    }
+    return total;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -138,6 +138,18 @@ static void test_active_count_starts_zero(void)
     TEST_ASSERT_EQUAL_UINT32(0, shell_io_tcp_active_count());
 }
 
+static void test_output_normalization_preserves_split_crlf(void)
+{
+    char out[16];
+    size_t n = shell_io_tcp_test_normalize_output("\r", "\n", out, sizeof(out));
+    TEST_ASSERT_EQUAL_UINT32(2, (uint32_t)n);
+    TEST_ASSERT_EQUAL_MEMORY("\r\n", out, 2);
+
+    n = shell_io_tcp_test_normalize_output("a\n", NULL, out, sizeof(out));
+    TEST_ASSERT_EQUAL_UINT32(3, (uint32_t)n);
+    TEST_ASSERT_EQUAL_MEMORY("a\r\n", out, 3);
+}
+
 /* ============================================================================
  * Entry
  * ============================================================================ */
@@ -174,6 +186,7 @@ int test_suite_telnetd_cmd(void)
     RUN_TEST(test_foreach_null_visitor_is_noop);
     RUN_TEST(test_kick_empty_pool_returns_false);
     RUN_TEST(test_active_count_starts_zero);
+    RUN_TEST(test_output_normalization_preserves_split_crlf);
 
     return UNITY_END();
 }

@@ -34,6 +34,11 @@ static int cmd_lua(int argc, char *argv[]) {
         return -1;
     }
 
+    /* Each invocation gets a fresh `arg` view. Persistent per-session
+     * Lua states must not leak argv from a prior script or -e run. */
+    lua_pushnil(L);
+    lua_setglobal(L, "arg");
+
     if (argc == 1) {
         /* No arguments - enter REPL */
         lua_slm_repl(L);
@@ -45,15 +50,13 @@ static int cmd_lua(int argc, char *argv[]) {
          * global with argv[2..argc-1] so scripts like demo_hailo.lua
          * can read `arg[1]`, `arg[2]`, ... just like a standalone
          * Lua interpreter. arg[0] holds the script path. */
-        if (argc > 2) {
-            lua_newtable(L);
-            for (int i = 1; i < argc; i++) {
-                lua_pushstring(L, argv[i]);
-                lua_rawseti(L, -2, i - 1);  /* arg[0] = script path,
-                                               arg[1..] = extra args */
-            }
-            lua_setglobal(L, "arg");
+        lua_newtable(L);
+        for (int i = 1; i < argc; i++) {
+            lua_pushstring(L, argv[i]);
+            lua_rawseti(L, -2, i - 1);  /* arg[0] = script path,
+                                           arg[1..] = extra args */
         }
+        lua_setglobal(L, "arg");
         if (lua_slm_dofile(L, argv[1]) != 0) {
             /* File loading failed - try as inline code */
             lua_slm_dostring(L, argv[1]);
