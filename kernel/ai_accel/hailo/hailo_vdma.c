@@ -424,9 +424,26 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
 #endif
 
     /* Poll NUM_PROC (low 16 bits of NUM_PROC_DWORD). Yield via
-     * udelay between polls to stay cooperative on Pi 5. */
+     * udelay between polls to stay cooperative on Pi 5.
+     *
+     * #253 diagnostic: on every change to proc_dword OR base_dword
+     * (either side of the channel block), log the transition. Also
+     * emit a heartbeat snapshot every 50 ms so long stalls show a
+     * flat-line pattern rather than silence. This lets us tell:
+     *   - whether fw moved ongoing/proc at all during the wait
+     *   - whether fw changed CONTROL (e.g. to PAUSE on error)
+     *   - whether avail somehow got clobbered
+     * Gated behind HAILO_WIRE_DEBUG; OFF builds keep the tight loop. */
     const uint32_t poll_interval_us = 100u;
     uint32_t elapsed = 0;
+#ifdef HAILO_WIRE_DEBUG
+    uint32_t last_proc_dword = 0xFFFFFFFFu;
+    uint32_t last_base_dword_host = 0xFFFFFFFFu;
+    uint32_t last_proc_dword_dev  = 0xFFFFFFFFu;
+    uint32_t last_base_dword_dev  = 0xFFFFFFFFu;
+    uint32_t heartbeat_us = 0;
+    const uint32_t dev_off = (channel_host_regs_offset(channel_index) == 0) ? 0x10u : 0x00u;
+#endif
     while (elapsed < timeout_us) {
         uint32_t proc_dword = hailo_platform->read32(HAILO_BAR_VDMA,
             channel_base(channel_index)
@@ -439,6 +456,61 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
                         (unsigned)proc_dword);
             return HAILO_OK;
         }
+#ifdef HAILO_WIRE_DEBUG
+        /* Change-of-state logging. */
+        if (proc_dword != last_proc_dword) {
+            uart_printf("[vdma-poll] ch=%u t=%u us host proc_dword "
+                        "0x%08x -> 0x%08x (proc=%u ongoing=%u)\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)last_proc_dword, (unsigned)proc_dword,
+                        (unsigned)(proc_dword & 0xFFFFu),
+                        (unsigned)(proc_dword >> 16));
+            last_proc_dword = proc_dword;
+        }
+        uint32_t base_dword = channel_read_base_dword(channel_index);
+        if (base_dword != last_base_dword_host) {
+            uart_printf("[vdma-poll] ch=%u t=%u us host base_dword "
+                        "0x%08x -> 0x%08x (ctrl=0x%02x avail=%u)\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)last_base_dword_host, (unsigned)base_dword,
+                        (unsigned)(base_dword & 0xFFu),
+                        (unsigned)(base_dword >> HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT));
+            last_base_dword_host = base_dword;
+        }
+        /* Also sample the opposite-side (device-side) mirror to spot
+         * fw progress there — fw may advance its internal counters
+         * before publishing to the host-side window. */
+        uint32_t proc_dev = hailo_platform->read32(HAILO_BAR_VDMA,
+            channel_base(channel_index) + dev_off
+            + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+        uint32_t base_dev = hailo_platform->read32(HAILO_BAR_VDMA,
+            channel_base(channel_index) + dev_off
+            + HAILO_VDMA_CHANNEL_BASE_DWORD);
+        if (proc_dev != last_proc_dword_dev) {
+            uart_printf("[vdma-poll] ch=%u t=%u us dev  proc_dword "
+                        "0x%08x -> 0x%08x\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)last_proc_dword_dev, (unsigned)proc_dev);
+            last_proc_dword_dev = proc_dev;
+        }
+        if (base_dev != last_base_dword_dev) {
+            uart_printf("[vdma-poll] ch=%u t=%u us dev  base_dword "
+                        "0x%08x -> 0x%08x\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)last_base_dword_dev, (unsigned)base_dev);
+            last_base_dword_dev = base_dev;
+        }
+        /* 50 ms heartbeat so we can see poll density in the log. */
+        heartbeat_us += poll_interval_us;
+        if (heartbeat_us >= 50000u) {
+            uart_printf("[vdma-poll] ch=%u t=%u us heartbeat "
+                        "host(proc=0x%08x base=0x%08x) dev(proc=0x%08x base=0x%08x)\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)proc_dword, (unsigned)base_dword,
+                        (unsigned)proc_dev, (unsigned)base_dev);
+            heartbeat_us = 0;
+        }
+#endif
         hailo_platform->udelay(poll_interval_us);
         elapsed += poll_interval_us;
     }

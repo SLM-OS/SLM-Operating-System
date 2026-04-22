@@ -2610,9 +2610,14 @@ static void test_cs_translate_application_header_fills_defaults(void)
 
 static void test_cs_translate_application_header_boundary_bitmap(void)
 {
-    /* With one input + one output boundary pad, the bitmap includes
-     * both boundary channel bits (config+1, config+2) but NOT the
-     * config channel itself. */
+    /* Pi OS wire capture (2026-04-22, docs/reference/hailort-v4.23.0-
+     * wire-capture-mnist-pi5.txt, SET_NETWORK_GROUP_HEADER #1 body)
+     * shows HailoRT leaves all three boundary_channels_bitmap slots
+     * at 0 for MNIST — firmware v4.23 discovers boundary channels
+     * from ACTIVATE_BOUNDARY_{INPUT,OUTPUT} actions in DYNAMIC, not
+     * from this bitmap. An earlier SLM-OS draft populated it with
+     * the host-side channel bits; matching the reference means
+     * leaving it zero regardless of which pads are present. */
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.pad_count = 2;
@@ -2632,11 +2637,39 @@ static void test_cs_translate_application_header_boundary_bitmap(void)
     TEST_ASSERT_EQUAL_INT(HAILO_OK,
         hailo_cs_translate_application_header(&info, &cfg, &hdr));
 
-    /* Input boundary at channel 0x02 → bit 2 (H2D range [0,15]).
-     * Output at 0x10 → bit 16 (D2H range [16,31]).
-     * Config channel (0x01) must NOT be set. */
-    TEST_ASSERT_EQUAL_UINT32((1u << 2) | (1u << 16),
-                             hdr.boundary_channels_bitmap[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, hdr.boundary_channels_bitmap[0]);
+}
+
+static void test_cs_translate_application_header_dual_cfg_channels(void)
+{
+    /* Pi OS wire capture shows config_channels_count=2 with
+     * packed_id={0, 1} when the HEF's CCWs split across two cfg
+     * channels (cfg_channel_1_desc_list_iova != 0). Single-cfg
+     * loads stay at count=1 with just the primary id. */
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 2;
+    info.pads[0].is_input        = true;
+    info.pads[0].has_stream_info = true;
+    info.pads[1].is_input        = false;
+    info.pads[1].has_stream_info = true;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel          = 0x01,
+        .ccw_desc_list_iova           = 0x1000,
+        .ccw_desc_page_size           = 512,
+        .ccw_total_desc_count         = 2,
+        .cfg_channel_1_packed_vdma    = 0x00,
+        .cfg_channel_1_desc_list_iova = 0x2000,
+    };
+
+    struct hailo_cs_application_header hdr;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_application_header(&info, &cfg, &hdr));
+
+    TEST_ASSERT_EQUAL_UINT8(2, hdr.config_channels_count);
+    TEST_ASSERT_EQUAL_UINT8(0x00, hdr.config_channel_packed_id[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x01, hdr.config_channel_packed_id[1]);
 }
 
 static void test_cs_translate_application_header_rejects_null(void)
@@ -7447,6 +7480,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_msi_handler_sets_pending_and_clears_istatus);
     RUN_TEST(test_cs_translate_application_header_fills_defaults);
     RUN_TEST(test_cs_translate_application_header_boundary_bitmap);
+    RUN_TEST(test_cs_translate_application_header_dual_cfg_channels);
     RUN_TEST(test_cs_translate_application_header_rejects_null);
     RUN_TEST(test_cs_translate_contexts_produces_all_four);
     RUN_TEST(test_cs_translate_contexts_rejects_null);

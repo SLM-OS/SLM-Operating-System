@@ -124,47 +124,33 @@ int hailo_cs_translate_application_header(
      * would be read as a valid DDR pointer and rejected. */
     out->external_action_list_address = HAILO_CS_NO_DDR_ACTION_LIST;
 
-    /* Declare the config channel to firmware so it can bind the
-     * subsequent ACTIVATE_CFG_CHANNEL action. For v4.23 the array
-     * is capped at HAILO_CS_MAX_CFG_CHANNELS=4; single-channel loads
-     * occupy slot 0. */
-    out->config_channels_count       = 1;
-    out->config_channel_packed_id[0] = cfg->config_vdma_channel;
+    /* Declare all config channels to firmware so its BURST_CREDITS_TASK
+     * knows about them. For single-cfg HEFs that's just one entry;
+     * for dual-cfg HEFs (where CCWs split across cfg_channel_index
+     * 0 + 1) both must be declared or fw's credit task walks an
+     * incomplete list. Pi OS wire capture confirms HailoRT sends
+     * config_channels_count=2 with packed_id=[0, 1] for MNIST on
+     * v4.23 (docs/reference/hailort-v4.23.0-wire-capture-mnist-pi5.txt,
+     * SET_NETWORK_GROUP_HEADER #1 body). For v4.23 the array is
+     * capped at HAILO_CS_MAX_CFG_CHANNELS=4. */
+    if (cfg->cfg_channel_1_desc_list_iova != 0) {
+        out->config_channels_count       = 2;
+        out->config_channel_packed_id[0] = cfg->cfg_channel_1_packed_vdma;
+        out->config_channel_packed_id[1] = cfg->config_vdma_channel;
+    } else {
+        out->config_channels_count       = 1;
+        out->config_channel_packed_id[0] = cfg->config_vdma_channel;
+    }
 
-    /* boundary_channels_bitmap: bit per VDMA channel used for
-     * boundary dataflow (input and output streams bound via
-     * OpenBoundary actions in ACTIVATION). Config channel is NOT
-     * included — that's tracked separately via
-     * config_channel_packed_id[]. If we have a boundary input pad,
-     * bit (config_vdma + INPUT_OFFSET) is set; boundary output pad
-     * → bit (config_vdma + OUTPUT_OFFSET).
-     *
-     * Earlier draft set the config_vdma bit here; that is wrong on
-     * two counts: (a) config channel doesn't belong in the boundary
-     * bitmap by convention, (b) the actual boundary channels
-     * (config+1, config+2) weren't represented at all. Firmware
-     * treats the bitmap as authoritative for which channels it
-     * should walk during BURST_CREDITS_TASK_START — a bitmap that
-     * doesn't include the real boundary channels causes the task
-     * to read uninitialized channel state. */
-    bool has_input_boundary  = false;
-    bool has_output_boundary = false;
-    for (uint32_t i = 0; i < info->pad_count; i++) {
-        const struct hef_pad_info *pad = &info->pads[i];
-        if (!pad->has_stream_info) continue;
-        if (pad->is_input)  has_input_boundary  = true;
-        else                has_output_boundary = true;
-    }
-    uint32_t bitmap = 0;
-    if (has_input_boundary) {
-        bitmap |= 1u << ((cfg->config_vdma_channel
-                        + HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET) & 0x1Fu);
-    }
-    if (has_output_boundary) {
-        bitmap |= 1u << ((cfg->config_vdma_channel
-                        + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET) & 0x1Fu);
-    }
-    out->boundary_channels_bitmap[0] = bitmap;
+    /* boundary_channels_bitmap: Pi OS wire capture shows all three
+     * engine slots as 0 for MNIST. Firmware discovers boundary
+     * channels via the ACTIVATE_BOUNDARY_{INPUT,OUTPUT} actions in
+     * DYNAMIC, not via this bitmap. An earlier draft set bits here
+     * to "help fw find the channels" — that was wrong: fw does not
+     * consult the bitmap for boundary dataflow at all on v4.23.
+     * Leaving it zero matches the reference exactly. */
+    out->boundary_channels_bitmap[0] = 0;
+    (void)info;
 
     return HAILO_OK;
 }
