@@ -906,6 +906,45 @@ static void test_slm_read_line_callable(void)
     lua_slm_close(L);
 }
 
+/*
+ * Test: slm.try_getc is callable and reports no pending input as nil.
+ */
+static void test_slm_try_getc_no_input_returns_nil(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    int rc = lua_slm_dostring(L,
+        "assert(type(slm.try_getc) == 'function',\n"
+        "       'slm.try_getc should be a function')\n"
+        "assert(slm.try_getc() == nil,\n"
+        "       'try_getc should return nil when no input is pending')");
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.term_size returns the documented table shape.
+ */
+static void test_slm_term_size_shape(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    int rc = lua_slm_dostring(L,
+        "local t = slm.term_size()\n"
+        "assert(type(t) == 'table', 'term_size should return table')\n"
+        "assert(type(t.cols) == 'number' and t.cols > 0,\n"
+        "       'term_size.cols should be positive number')\n"
+        "assert(type(t.rows) == 'number' and t.rows > 0,\n"
+        "       'term_size.rows should be positive number')\n"
+        "assert(type(t.term) == 'string', 'term_size.term should be string')");
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    lua_slm_close(L);
+}
+
 /* ============================================================================
  * Extended Binding Tests (#152 audit)
  * ============================================================================ */
@@ -1738,6 +1777,148 @@ static void test_slm_msg_subscribe_basic(void)
     TEST_ASSERT_EQUAL_INT(0, result);
 
     lua_slm_close(L);
+}
+
+/*
+ * Test: distinct lua_State instances keep globals isolated.
+ *
+ * This is the minimal contract behind per-session Lua state: one shell's
+ * globals must not leak into another shell's interpreter.
+ */
+static void test_lua_state_globals_are_isolated(void)
+{
+    lua_State *L1 = lua_slm_newstate();
+    lua_State *L2 = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L1);
+    TEST_ASSERT_NOT_NULL(L2);
+
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L1, "session_value = 11"));
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L2, "session_value = 22"));
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L1,
+        "assert(session_value == 11, 'L1 should keep its own global')"));
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L2,
+        "assert(session_value == 22, 'L2 should keep its own global')"));
+
+    lua_slm_close(L1);
+    lua_slm_close(L2);
+}
+
+extern void msg_router_init(void);
+extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
+
+static volatile int lua_publish_result;
+
+static void lua_publish_task_body(void *arg)
+{
+    const char *topic = (const char *)arg;
+    lua_publish_result = msg_router_publish((const uint8_t *)topic,
+                                            (const uint8_t *)"ping");
+    task_exit();
+}
+
+static void drain_lua_states_until_task_done(struct task *t,
+                                             lua_State *L1,
+                                             lua_State *L2)
+{
+    int timeout = 20000;
+    while (t->state != TASK_TERMINATED && timeout-- > 0) {
+        if (L1) TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L1, "slm.msg_drain()"));
+        if (L2) TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L2, "slm.msg_drain()"));
+        yield();
+    }
+    TEST_ASSERT_MESSAGE(t->state == TASK_TERMINATED,
+        "publisher task should terminate once all Lua subscribers ack");
+}
+
+/*
+ * Test: two independent lua_States subscribed to the same topic each receive
+ * one delivery. Regression for the old shared LUA_MSG_SUB_IDX mailbox.
+ */
+static void test_slm_msg_subscribe_multiple_states_independent_delivery(void)
+{
+    msg_router_init();
+    lua_State *L1 = lua_slm_newstate();
+    lua_State *L2 = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L1);
+    TEST_ASSERT_NOT_NULL(L2);
+
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L1,
+        "count = 0; last = ''\n"
+        "h = slm.msg_subscribe('/lua/two', function(_, data)\n"
+        "    count = count + 1; last = data\n"
+        "end)\n"
+        "assert(h ~= nil)"));
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L2,
+        "count = 0; last = ''\n"
+        "h = slm.msg_subscribe('/lua/two', function(_, data)\n"
+        "    count = count + 1; last = data\n"
+        "end)\n"
+        "assert(h ~= nil)"));
+
+    lua_publish_result = -999;
+    struct task *t = task_create_with_priority("lua_pub2",
+                                               lua_publish_task_body,
+                                               "/lua/two",
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task(t);
+    drain_lua_states_until_task_done(t, L1, L2);
+
+    TEST_ASSERT_EQUAL_INT(2, lua_publish_result);
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L1,
+        "assert(count == 1, 'L1 should receive exactly one callback')\n"
+        "assert(last == 'ping', 'L1 payload mismatch')"));
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L2,
+        "assert(count == 1, 'L2 should receive exactly one callback')\n"
+        "assert(last == 'ping', 'L2 payload mismatch')"));
+
+    task_destroy(t);
+    lua_slm_close(L1);
+    lua_slm_close(L2);
+}
+
+/*
+ * Test: closing one subscribed lua_State must not unsubscribe a different
+ * state that listens on the same topic. Regression for shared-mailbox cleanup.
+ */
+static void test_slm_msg_subscribe_close_one_state_preserves_other(void)
+{
+    msg_router_init();
+    lua_State *L1 = lua_slm_newstate();
+    lua_State *L2 = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L1);
+    TEST_ASSERT_NOT_NULL(L2);
+
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L1,
+        "h = slm.msg_subscribe('/lua/keep', function() end)\n"
+        "assert(h ~= nil)"));
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L2,
+        "count = 0\n"
+        "h = slm.msg_subscribe('/lua/keep', function(_, data)\n"
+        "    count = count + 1\n"
+        "    last = data\n"
+        "end)\n"
+        "assert(h ~= nil)"));
+
+    lua_slm_close(L1);
+    L1 = NULL;
+
+    lua_publish_result = -999;
+    struct task *t = task_create_with_priority("lua_pub1",
+                                               lua_publish_task_body,
+                                               "/lua/keep",
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+    scheduler_add_task(t);
+    drain_lua_states_until_task_done(t, NULL, L2);
+
+    TEST_ASSERT_EQUAL_INT(1, lua_publish_result);
+    TEST_ASSERT_EQUAL_INT(0, lua_slm_dostring(L2,
+        "assert(count == 1, 'remaining state should still receive callback')\n"
+        "assert(last == 'ping', 'remaining state payload mismatch')"));
+
+    task_destroy(t);
+    lua_slm_close(L2);
 }
 
 /*
@@ -2968,6 +3149,8 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_shell_exec_unknown);
     RUN_TEST(test_slm_shell_exec_too_long);
     RUN_TEST(test_slm_read_line_callable);
+    RUN_TEST(test_slm_try_getc_no_input_returns_nil);
+    RUN_TEST(test_slm_term_size_shape);
     RUN_TEST(test_slm_model_load_find_infer);
     RUN_TEST(test_slm_model_pin_unpin);
     RUN_TEST(test_digit_classifier_preloads_model);
@@ -3009,7 +3192,10 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_task_create_bad_args);
     RUN_TEST(test_slm_task_lifecycle_bindings);
     /* #207 msg_subscribe */
+    RUN_TEST(test_lua_state_globals_are_isolated);
     RUN_TEST(test_slm_msg_subscribe_basic);
+    RUN_TEST(test_slm_msg_subscribe_multiple_states_independent_delivery);
+    RUN_TEST(test_slm_msg_subscribe_close_one_state_preserves_other);
     RUN_TEST(test_slm_msg_subscribe_wildcard);
     RUN_TEST(test_slm_msg_subscribe_error_isolation);
     RUN_TEST(test_slm_msg_subscribe_bad_args);

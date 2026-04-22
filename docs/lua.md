@@ -111,6 +111,7 @@ The `slm` module provides access to kernel functionality:
 | `slm.msg_subscribe(topic, fn)` | Register a Lua callback for a topic. Pass `"/foo/*"` for wildcard prefix match. Returns a subscription handle (integer ≥ 1) on success or `nil` when the Lua subscription pool is full. Callbacks are dispatched as `fn(topic, data)` at `slm.yield` / `slm.sleep` / `slm.read_line` points — they do not run truly concurrently. Callback errors are logged and swallowed so one bad handler does not break the drain loop. |
 | `slm.msg_unsubscribe(handle)` | Remove a subscription. Returns `true` on success, `false` if the handle is unknown. |
 | `slm.msg_drain()` | Manually dispatch any pending callbacks. Usually not needed — drains happen automatically at yield points — but useful for scripts that compute without yielding. |
+| `slm.try_getc()` | Nonblocking one-character read from the current shell session. Returns a one-byte string or `nil` when no input is pending. Useful for live dashboards that refresh without blocking on `read_line()`. |
 
 ### Scheduler
 
@@ -123,7 +124,7 @@ The `slm` module provides access to kernel functionality:
 | `slm.ai_sched_stats()` | AI scheduler statistics: `{policy, decisions, fallbacks, avg_latency_ns, histogram}`. Returns `nil` when `CONFIG_AI_SCHEDULER` is off. |
 | `slm.ai_sched_decision(task_id)` | Last AI-scheduler decision recorded for this task: `{core, priority_adj, preempt, raw}`. `priority_adj` is `0`/`1`/`2` (none/boost/reduce); `preempt` is `0`/`1`; `raw` is the packed action index (`core*6 + priority_adj*2 + preempt`). Returns `nil` when `CONFIG_AI_SCHEDULER` is off, the task id is unknown, or the AI policy has never run on the task. |
 | `slm.task_migrate(task_id, target_cpu)` | Move a non-running task to a specific CPU. Returns `true` on success, `false` if the task is running, the affinity forbids it, or the arguments are out of range. |
-| `slm.task_create(name, fn)` | Spawn a kernel task that runs `fn` in a fresh `lua_State`. `fn` is serialized via `lua_dump` (bytecode only — no upvalues or global captures). Returns the task id (≥1) on success, `nil` on pool exhaustion / dump failure / task creation failure. Concurrency: each running Lua task keeps its own `lua_State`, but all share one Lua heap — `heap_reset` is deferred until the last state closes. Pool is capped at 4 concurrent Lua tasks. |
+| `slm.task_create(name, fn)` | Spawn a kernel task that runs `fn` in a fresh `lua_State`. `fn` is serialized via `lua_dump` (bytecode only — no upvalues or global captures). Returns the task id (≥1) on success, `nil` on pool exhaustion / dump failure / task creation failure. Concurrency: each running Lua task keeps its own `lua_State`, but all share one Lua heap — `heap_reset` is deferred until the last state closes. Pool is capped at 16 concurrent Lua tasks. |
 | `slm.task_kill(task_id)` | Terminate a task (`scheduler_remove_task` + `task_destroy`). Refuses the idle task (id 0), the current task (use `task_exit` for self-termination), and already-terminated tasks. Returns bool. |
 | `slm.task_set_priority(task_id, priority)` | Change a task's priority. `priority` must be in `[0, 7]` (0=idle, 7=critical). Returns bool. |
 | `slm.task_pin(task_id, cpu)` | Pin a task to a specific CPU. Pass a negative `cpu` to clear affinity (task becomes CPU_AFFINITY_ANY). Returns bool. |
@@ -133,6 +134,7 @@ The `slm` module provides access to kernel functionality:
 | Function | Description |
 |----------|-------------|
 | `slm.cpu_info()` | Per-CPU state: `{online_count, total_count, current_cpu, cpus={{id, isolated, ticks, schedules}, ...}}`. |
+| `slm.term_size()` | Current shell-session terminal metadata: `{cols, rows, term}`. `cols`/`rows` default to 80x24 when the client did not negotiate NAWS. |
 | `slm.vmm_stats()` | Virtual memory statistics: `{l1_tables, l2_tables, blocks_mapped, bytes_mapped}`. Returns `nil` on x86-64 (no VMM yet). |
 | `slm.ipc_stats()` | IPC statistics: `{queue_count, buffer_count, msgs_sent, msgs_recv}`. |
 

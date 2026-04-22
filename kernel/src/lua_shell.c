@@ -6,6 +6,7 @@
 
 #include "lua_slm.h"
 #include "shell.h"
+#include "shell_session.h"
 #include "debug.h"
 
 #include "../lib/lua/src/lua.h"      /* lua_newtable, lua_rawseti, lua_setglobal */
@@ -20,7 +21,14 @@
  *   lua <filename>   - Run script from filesystem
  */
 static int cmd_lua(int argc, char *argv[]) {
-    lua_State *L = lua_slm_newstate();
+    struct shell_session *sess = shell_session_current();
+    lua_State *L = sess ? (lua_State *)sess->lua : NULL;
+    if (sess && !L) {
+        L = lua_slm_newstate();
+        if (L) {
+            sess->lua = L;
+        }
+    }
     if (L == NULL) {
         shell_printf("Failed to initialize Lua\n");
         return -1;
@@ -57,13 +65,12 @@ static int cmd_lua(int argc, char *argv[]) {
         shell_printf("  lua <filename> [args...]   - Run script with positional args\n");
     }
 
-    lua_slm_close(L);
     return 0;
 }
 
 /* Command registration */
 static const shell_cmd_t lua_commands[] = {
-    {"lua", cmd_lua, "Lua scripting (REPL or script)", true},
+    {"lua", cmd_lua, "Lua scripting (REPL or script)", false},
 };
 
 void lua_shell_init(void) {

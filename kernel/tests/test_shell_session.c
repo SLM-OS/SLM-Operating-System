@@ -494,6 +494,39 @@ static void test_nested_mutating_dispatch_no_deadlock(void)
 }
 
 /* ============================================================================
+ * Lua shell command regressions
+ * ============================================================================ */
+
+static void test_lua_command_state_persists_per_session(void)
+{
+    struct task *cur = task_current();
+    TEST_ASSERT_NOT_NULL(cur);
+
+    struct shell_session *s1 = shell_session_alloc();
+    struct shell_session *s2 = shell_session_alloc();
+    TEST_ASSERT_NOT_NULL(s1);
+    TEST_ASSERT_NOT_NULL(s2);
+
+    shell_session_bind(cur, s1);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"session_value = 11\""));
+    TEST_ASSERT_NOT_NULL(s1->lua);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"assert(session_value == 11)\""));
+
+    shell_session_bind(cur, s2);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"assert(session_value == nil)\""));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"session_value = 22\""));
+    TEST_ASSERT_NOT_NULL(s2->lua);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"assert(session_value == 22)\""));
+
+    shell_session_bind(cur, s1);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"assert(session_value == 11)\""));
+
+    shell_session_unbind(cur);
+    shell_session_free(s1);
+    shell_session_free(s2);
+}
+
+/* ============================================================================
  * Entry point
  * ============================================================================ */
 
@@ -530,6 +563,7 @@ int test_suite_shell_session(void)
     RUN_TEST(test_shell_getc_reads_from_bound_session);
 
     RUN_TEST(test_nested_mutating_dispatch_no_deadlock);
+    RUN_TEST(test_lua_command_state_persists_per_session);
 
     return UNITY_END();
 }

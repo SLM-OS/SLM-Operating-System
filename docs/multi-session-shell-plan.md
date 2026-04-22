@@ -10,11 +10,11 @@ as the initial protocol layer and a proper daemon control surface
 into character-at-a-time server-echoed mode, raw clients see a
 12-byte negotiation burst and otherwise behave identically. UART
 console coexists; up to `MAX_TCP_SHELL_SESSIONS` concurrent remote
-sessions (currently 2). Daemon-style operator controls (`telnetd
+sessions (currently 16). Daemon-style operator controls (`telnetd
 start/stop/status/sessions/kick`, `/etc/telnetd.conf` parser,
 `NET_TELNETD_AUTOSTART` build flag, `slm.telnetd_*` Lua bindings)
 all landed. Phase 4 (SSH, #199) is out-of-scope here.
-**Last updated:** 18 April 2026
+**Last updated:** 22 April 2026
 
 ---
 
@@ -195,7 +195,7 @@ for DHCP / ICMP ping.
 Design choices:
 - Port: `2323` (avoids privileged 1-1023; easy to remember; not 23
   because we may want to run real telnet/SSH on standard ports later)
-- `MAX_SHELL_SESSIONS = 4` initially (stack + Lua state ≈ 64 KB each)
+- `MAX_SHELL_SESSIONS = 16` initially (stack + Lua state ≈ 104 KB each)
 - Session allocation from a fixed pool — no dynamic memory during a
   demo
 - Listener task has its own priority separate from shell tasks
@@ -263,12 +263,12 @@ contention.
 
 ### 1.7 Resource Limits
 
-- `MAX_SHELL_SESSIONS = 4` hard cap
-- Per-session stack: 16 KB (same as existing shell task)
+- `MAX_SHELL_SESSIONS = 16` hard cap
+- Per-session stack: 64 KB (matches current `STACK_SIZE`)
 - Per-session Lua state: ~32 KB
 - Per-session buffers: 4 KB line buffer + 4 KB TCP receive buffer
-- Total per TCP session: ~56 KB
-- Total fixed overhead at 4 sessions: ~224 KB
+- Total per TCP session: ~104 KB
+- Total fixed overhead at 16 sessions: ~1.6 MB
 
 These fit comfortably in existing memory budgets. If tightened later,
 reduce `MAX_SHELL_SESSIONS` or disable Lua for TCP sessions.
@@ -322,7 +322,7 @@ Manual tests:
 
 At the end of Phase 1:
 - `nc localhost 2323` connects to an SLM-OS shell
-- Up to 4 concurrent sessions, each with its own cwd and Lua state
+- Up to 16 concurrent sessions, each with its own cwd and Lua state
 - UART console continues to work alongside TCP sessions
 - All existing shell commands work via TCP
 - All existing tests pass
@@ -518,14 +518,16 @@ than "making it work."
 Supersedes the `NET_TCP_SHELL` flag from §1.8 once Phase 2 lands:
 
 - `NET_TELNETD=ON` — builds the telnetd sources into the kernel.
-  Default ON for QEMU and x86-64; OFF for Pi 5 / Jetson until SSH
-  (#199) lands, since those run on untrusted networks.
+  Default ON for QEMU and x86-64. Pi 5 lab/demo builds now also force
+  it ON as an explicit trusted-network operator choice; Jetson remains
+  gated on networking plus the same security caveat.
 - `NET_TELNETD=OFF` — sources not compiled in; runtime control
   commands print "telnetd not built in" and return an error.
 
-Separate flag `NET_TELNETD_AUTOSTART` (default OFF) controls whether
-the boot path starts the daemon by default. This lets a build include
-the feature without silently opening a port.
+Separate flag `NET_TELNETD_AUTOSTART` (default ON for Pi 5 lab/demo
+builds, OFF elsewhere) controls whether the boot path starts the
+daemon by default. This lets a build include the feature without
+silently opening a port on platforms that still leave it disabled.
 
 ### 3.2 Boot-Time Auto-Start
 
@@ -580,7 +582,7 @@ parser for those and doesn't need one for five keys.
 enabled=true
 port=2323
 bind=0.0.0.0
-max_sessions=4
+max_sessions=16
 idle_timeout_sec=600
 ```
 

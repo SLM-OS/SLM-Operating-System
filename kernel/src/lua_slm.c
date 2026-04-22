@@ -12,8 +12,10 @@
 #include "sched.h"
 #include "task.h"
 #include "shell.h"
+#include "shell_session.h"
 #include "vfs.h"
 #include "component.h"
+#include "spinlock.h"
 #include "inference_device.h"
 #include "slm_ffi.h"
 #include "sched_policy.h"
@@ -23,7 +25,6 @@
 #if defined(ENABLE_NETWORKING)
 #include "shell_io_tcp.h"
 #include "tcp_shell_server.h"
-#include "shell_session.h"   /* MAX_TCP_SHELL_SESSIONS */
 #include "net.h"
 #endif
 #if !defined(PLATFORM_X86_64)
@@ -40,6 +41,14 @@
 
 /* Version string */
 #define SLM_VERSION "0.1.0"
+
+/* Router-side component slots reserved for Lua states. Native components use
+ * 0..COMPONENT_MAX_COUNT-1; Lua states get a disjoint fixed pool above that.
+ * Size covers the console session, all TCP sessions, and the Lua task pool. */
+#define LUA_TASK_MAX_CTX 16
+#define LUA_MSG_COMPONENT_BASE COMPONENT_MAX_COUNT
+#define LUA_MSG_COMPONENT_CAP  (MAX_TCP_SHELL_SESSIONS + 1 + LUA_TASK_MAX_CTX)
+#define LUA_MSG_COMPONENT_MAX  (LUA_MSG_COMPONENT_BASE + LUA_MSG_COMPONENT_CAP)
 
 /* ============================================================================
  * SLM-OS Kernel Bindings
@@ -595,34 +604,19 @@ static int l_msg_publish_priority(lua_State *L) {
  * Lua scripts register callbacks against msg_router topics; messages are
  * dispatched on the shell task's stack at yield / sleep / read_line. The
  * callbacks are not truly concurrent — option (1) from the issue — but
- * match the existing single-threaded Lua model. A single sentinel
- * component_idx (LUA_MSG_SUB_IDX) represents the Lua mailbox at the
- * router; the Lua side tracks which callbacks care about which topics.
+ * match the existing single-threaded Lua model. Each lua_State gets its
+ * own router mailbox component_idx so concurrent shells / Lua tasks do
+ * not fight over a shared ack path.
  */
-
-/* Sentinel component id for the Lua subscriber pool.
- *
- * Must be in [0, MAX_COMPONENTS=32) — msg_router_ack() rejects indices
- * outside that range so we cannot use an "obviously large" sentinel
- * like 1000. We pick the top of the range (31) so it sits above the
- * real component slots (0..COMPONENT_MAX_COUNT-1 = 0..15). If
- * COMPONENT_MAX_COUNT ever grows to where it might collide with the
- * sentinel, the static_assert below traps it at build time — PR #217
- * review flagged the silent-collision risk. If that assert ever fires,
- * bump MSG_ROUTER's MAX_COMPONENTS in runtime/src/msg_router.rs and
- * move the sentinel into the freshly-opened range. */
-#define LUA_MSG_SUB_IDX  31
-_Static_assert(LUA_MSG_SUB_IDX > COMPONENT_MAX_COUNT,
-               "LUA_MSG_SUB_IDX must not collide with native component slots; "
-               "grow MAX_COMPONENTS in runtime/src/msg_router.rs first");
-_Static_assert(LUA_MSG_SUB_IDX < 32,
-               "LUA_MSG_SUB_IDX must be < msg_router's MAX_COMPONENTS "
-               "or msg_router_ack silently drops acks");
+_Static_assert(LUA_MSG_COMPONENT_BASE >= COMPONENT_MAX_COUNT,
+               "Lua component slots must not overlap native components");
+_Static_assert(LUA_MSG_COMPONENT_MAX <= 64,
+               "grow msg_router MAX_COMPONENTS before increasing Lua state slots");
 
 /* Maximum concurrent Lua subscriptions across all active lua_States.
  * Subscriptions are lightweight (one Lua registry slot + ~20 bytes) so
  * the cap is mostly a sanity ceiling. */
-#define LUA_MSG_MAX_SUBS 16
+#define LUA_MSG_MAX_SUBS 32
 
 /* Topic buffer in the router — keep in sync with TOPIC_NAME_LEN in
  * runtime/src/msg_router.rs. */
@@ -630,12 +624,14 @@ _Static_assert(LUA_MSG_SUB_IDX < 32,
 
 extern const char *msg_router_receive(int component_idx, char *topic_out);
 extern void msg_router_ack(int component_idx);
+extern int msg_router_subscribe(const uint8_t *topic_name, int component_idx);
 extern void msg_router_unsubscribe_all(int component_idx);
 
 struct lua_msg_sub {
     int handle;                         /* Caller-visible id (1, 2, ...) */
     int ref;                            /* luaL_ref slot for the callback */
     lua_State *L;                       /* State owning ref (for cleanup) */
+    int component_idx;                  /* Router mailbox for this lua_State */
     char pattern[LUA_MSG_TOPIC_LEN];    /* Subscribed topic or wildcard */
     uint8_t wildcard;                   /* 1 if pattern ends in '/*' */
     uint8_t prefix_len;                 /* Pattern length excl. trailing '*' */
@@ -644,7 +640,76 @@ struct lua_msg_sub {
 
 static struct lua_msg_sub lua_msg_subs[LUA_MSG_MAX_SUBS];
 static int lua_msg_next_handle = 1;
-static int lua_msg_router_subscribed = 0;  /* Lazy msg_router registration */
+static spinlock_t        lua_msg_subs_lock = SPINLOCK_INIT;
+
+struct lua_state_slot {
+    lua_State *L;
+    int component_idx;
+    uint8_t active;
+};
+
+static struct lua_state_slot lua_state_slots[LUA_MSG_COMPONENT_CAP];
+static spinlock_t            lua_state_slots_lock = SPINLOCK_INIT;
+static volatile int          lua_state_count = 0;
+
+static void lua_state_count_inc(void)
+{
+    irq_flags_t flags = spin_lock_irqsave(&lua_state_slots_lock);
+    lua_state_count++;
+    spin_unlock_irqrestore(&lua_state_slots_lock, flags);
+}
+
+static int lua_state_count_dec_and_test_zero(void)
+{
+    int is_zero;
+    irq_flags_t flags = spin_lock_irqsave(&lua_state_slots_lock);
+    if (lua_state_count > 0) lua_state_count--;
+    is_zero = (lua_state_count == 0);
+    spin_unlock_irqrestore(&lua_state_slots_lock, flags);
+    return is_zero;
+}
+
+static struct lua_state_slot *lua_state_slot_from_state(lua_State *L)
+{
+    if (!L) return NULL;
+    return *(struct lua_state_slot **)lua_getextraspace(L);
+}
+
+static int lua_state_component_idx(lua_State *L)
+{
+    struct lua_state_slot *slot = lua_state_slot_from_state(L);
+    return slot ? slot->component_idx : -1;
+}
+
+static struct lua_state_slot *lua_state_slot_alloc(lua_State *L)
+{
+    irq_flags_t flags = spin_lock_irqsave(&lua_state_slots_lock);
+    for (int i = 0; i < LUA_MSG_COMPONENT_CAP; i++) {
+        if (!lua_state_slots[i].active) {
+            lua_state_slots[i].active = 1;
+            lua_state_slots[i].L = L;
+            lua_state_slots[i].component_idx = LUA_MSG_COMPONENT_BASE + i;
+            spin_unlock_irqrestore(&lua_state_slots_lock, flags);
+            return &lua_state_slots[i];
+        }
+    }
+    spin_unlock_irqrestore(&lua_state_slots_lock, flags);
+    return NULL;
+}
+
+static void lua_state_slot_free(lua_State *L)
+{
+    irq_flags_t flags = spin_lock_irqsave(&lua_state_slots_lock);
+    for (int i = 0; i < LUA_MSG_COMPONENT_CAP; i++) {
+        if (lua_state_slots[i].active && lua_state_slots[i].L == L) {
+            lua_state_slots[i].active = 0;
+            lua_state_slots[i].L = NULL;
+            lua_state_slots[i].component_idx = 0;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&lua_state_slots_lock, flags);
+}
 
 /* Match a Lua subscription pattern against an actual delivered topic.
  * Exact match OR (for patterns ending in "/*") prefix match up to the '*'. */
@@ -670,7 +735,9 @@ static int lua_msg_topic_matches(const struct lua_msg_sub *sub, const char *topi
  * bad subscriber cannot wedge the drain loop. */
 static void lua_msg_drain(lua_State *L)
 {
-    if (!L || !lua_msg_router_subscribed) return;
+    if (!L) return;
+    int component_idx = lua_state_component_idx(L);
+    if (component_idx < 0) return;
 
     /* The drain cap bounds work done per yield/sleep/read_line so a
      * flooded router mailbox cannot starve the main Lua thread. PR #217
@@ -684,16 +751,23 @@ static void lua_msg_drain(lua_State *L)
      * a tight loop themselves. */
 #define LUA_MSG_DRAIN_BATCH 256
     for (int guard = 0; guard < LUA_MSG_DRAIN_BATCH; guard++) {
+        int refs[LUA_MSG_MAX_SUBS];
+        int ref_count = 0;
         char topic_buf[LUA_MSG_TOPIC_LEN];
-        const char *data = msg_router_receive(LUA_MSG_SUB_IDX, topic_buf);
+        const char *data = msg_router_receive(component_idx, topic_buf);
         if (!data) break;
 
+        irq_flags_t flags = spin_lock_irqsave(&lua_msg_subs_lock);
         for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
             struct lua_msg_sub *s = &lua_msg_subs[i];
             if (!s->active || s->L != L) continue;
             if (!lua_msg_topic_matches(s, topic_buf)) continue;
+            refs[ref_count++] = s->ref;
+        }
+        spin_unlock_irqrestore(&lua_msg_subs_lock, flags);
 
-            lua_rawgeti(L, LUA_REGISTRYINDEX, s->ref);
+        for (int i = 0; i < ref_count; i++) {
+            lua_rawgeti(L, LUA_REGISTRYINDEX, refs[i]);
             lua_pushstring(L, topic_buf);
             lua_pushstring(L, data);
             if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
@@ -704,7 +778,7 @@ static void lua_msg_drain(lua_State *L)
             }
         }
 
-        msg_router_ack(LUA_MSG_SUB_IDX);
+        msg_router_ack(component_idx);
     }
 }
 
@@ -739,12 +813,14 @@ static int l_msg_subscribe(lua_State *L) {
         prefix_len = (uint8_t)(tlen - 1);  /* everything before the '*' */
     }
 
+    irq_flags_t flags = spin_lock_irqsave(&lua_msg_subs_lock);
     /* Find a free slot */
     int slot = -1;
     for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
         if (!lua_msg_subs[i].active) { slot = i; break; }
     }
     if (slot < 0) {
+        spin_unlock_irqrestore(&lua_msg_subs_lock, flags);
         lua_pushnil(L);
         return 1;
     }
@@ -757,6 +833,7 @@ static int l_msg_subscribe(lua_State *L) {
     s->handle = lua_msg_next_handle++;
     s->ref = ref;
     s->L = L;
+    s->component_idx = lua_state_component_idx(L);
     for (size_t i = 0; i < LUA_MSG_TOPIC_LEN; i++) s->pattern[i] = buf[i];
     s->wildcard = (uint8_t)wildcard;
     s->prefix_len = prefix_len;
@@ -770,6 +847,7 @@ static int l_msg_subscribe(lua_State *L) {
     int already_subscribed_at_router = 0;
     for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
         if (i == slot || !lua_msg_subs[i].active) continue;
+        if (lua_msg_subs[i].component_idx != s->component_idx) continue;
         int eq = 1;
         for (int k = 0; k < LUA_MSG_TOPIC_LEN; k++) {
             if (lua_msg_subs[i].pattern[k] != s->pattern[k]) { eq = 0; break; }
@@ -778,9 +856,15 @@ static int l_msg_subscribe(lua_State *L) {
         if (eq) { already_subscribed_at_router = 1; break; }
     }
     if (!already_subscribed_at_router) {
-        msg_router_subscribe((const uint8_t *)buf, LUA_MSG_SUB_IDX);
+        if (msg_router_subscribe((const uint8_t *)buf, s->component_idx) != 0) {
+            s->active = 0;
+            spin_unlock_irqrestore(&lua_msg_subs_lock, flags);
+            luaL_unref(L, LUA_REGISTRYINDEX, ref);
+            lua_pushnil(L);
+            return 1;
+        }
     }
-    lua_msg_router_subscribed = 1;
+    spin_unlock_irqrestore(&lua_msg_subs_lock, flags);
 
     lua_pushinteger(L, (lua_Integer)s->handle);
     return 1;
@@ -797,15 +881,18 @@ static int l_msg_subscribe(lua_State *L) {
 static int l_msg_unsubscribe(lua_State *L) {
     if (!L) return 0;
     lua_Integer handle = luaL_checkinteger(L, 1);
+    irq_flags_t flags = spin_lock_irqsave(&lua_msg_subs_lock);
     for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
         struct lua_msg_sub *s = &lua_msg_subs[i];
         if (s->active && s->handle == (int)handle) {
             luaL_unref(s->L, LUA_REGISTRYINDEX, s->ref);
             s->active = 0;
+            spin_unlock_irqrestore(&lua_msg_subs_lock, flags);
             lua_pushboolean(L, 1);
             return 1;
         }
     }
+    spin_unlock_irqrestore(&lua_msg_subs_lock, flags);
     lua_pushboolean(L, 0);
     return 1;
 }
@@ -827,20 +914,19 @@ static int l_msg_drain(lua_State *L) {
  * ask the router to drop the Lua mailbox if no Lua sub remains. Called
  * from lua_slm_close. */
 static void lua_msg_subs_cleanup(lua_State *L) {
-    int any_left = 0;
+    int component_idx = lua_state_component_idx(L);
+    irq_flags_t flags = spin_lock_irqsave(&lua_msg_subs_lock);
     for (int i = 0; i < LUA_MSG_MAX_SUBS; i++) {
         struct lua_msg_sub *s = &lua_msg_subs[i];
         if (!s->active) continue;
         if (s->L == L) {
             luaL_unref(L, LUA_REGISTRYINDEX, s->ref);
             s->active = 0;
-        } else {
-            any_left = 1;
         }
     }
-    if (!any_left) {
-        msg_router_unsubscribe_all(LUA_MSG_SUB_IDX);
-        lua_msg_router_subscribed = 0;
+    spin_unlock_irqrestore(&lua_msg_subs_lock, flags);
+    if (component_idx >= 0) {
+        msg_router_unsubscribe_all(component_idx);
     }
 }
 
@@ -992,7 +1078,6 @@ static int l_ai_sched_stats(lua_State *L) {
  * Context pool is static; no malloc in the binding hot path.
  */
 
-#define LUA_TASK_MAX_CTX 4        /* bumped if demos need more concurrency */
 #define LUA_TASK_NAME_LEN 32
 
 struct lua_task_ctx {
@@ -1391,6 +1476,23 @@ static int l_cpu_info(lua_State *L) {
     }
     lua_setfield(L, -2, "cpus");
 
+    return 1;
+}
+
+/**
+ * slm.term_size() - Get current shell session terminal metadata.
+ * Returns table: {cols, rows, term}
+ */
+static int l_term_size(lua_State *L) {
+    if (!L) return 0;
+    struct shell_session *s = shell_session_current();
+    lua_createtable(L, 0, 3);
+    lua_pushinteger(L, (lua_Integer)(s ? s->window_cols : SHELL_DEFAULT_COLS));
+    lua_setfield(L, -2, "cols");
+    lua_pushinteger(L, (lua_Integer)(s ? s->window_rows : SHELL_DEFAULT_ROWS));
+    lua_setfield(L, -2, "rows");
+    lua_pushstring(L, (s && s->term_type[0]) ? s->term_type : "");
+    lua_setfield(L, -2, "term");
     return 1;
 }
 
@@ -1855,6 +1957,25 @@ static int l_read_line(lua_State *L) {
 }
 
 /**
+ * slm.try_getc() - Read one input character without blocking.
+ *
+ * Returns a one-byte Lua string when input is available, or nil when the
+ * current shell session has no pending character.
+ */
+static int l_try_getc(lua_State *L) {
+    if (!L) return 0;
+    lua_msg_drain(L);
+    int ch = shell_try_getc();
+    if (ch < 0) {
+        lua_pushnil(L);
+    } else {
+        char c = (char)ch;
+        lua_pushlstring(L, &c, 1);
+    }
+    return 1;
+}
+
+/**
  * slm.shell_exec(cmd) - Run a shell command string and return its exit code.
  *
  * Dispatches `cmd` through the same parser the shell REPL uses, so anything
@@ -2293,6 +2414,7 @@ static const luaL_Reg slm_lib[] = {
     {"task_pin", l_task_pin},
     /* CPU info */
     {"cpu_info", l_cpu_info},
+    {"term_size", l_term_size},
     /* Memory / VMM / IPC */
     {"vmm_stats", l_vmm_stats},
     {"ipc_stats", l_ipc_stats},
@@ -2309,6 +2431,7 @@ static const luaL_Reg slm_lib[] = {
     {"gpu_status", l_gpu_status},
     /* Shell integration */
     {"read_line", l_read_line},
+    {"try_getc", l_try_getc},
     {"shell_exec", l_shell_exec},
 #if defined(ENABLE_NETWORKING)
     /* TCP shell daemon (Phase 3) */
@@ -2339,12 +2462,6 @@ static int luaopen_slm(lua_State *L) {
 
 static int lua_initialized = 0;
 
-/* Active lua_State count. heap_reset() in lua_slm_close must wait until
- * this drops to zero — with Lua-defined tasks (#208) more than one state
- * can be live and resetting the shared heap would pull the rug out from
- * under the surviving state. */
-static volatile int lua_state_count = 0;
-
 void lua_slm_init(void) {
     if (lua_initialized) return;
     lua_initialized = 1;
@@ -2362,7 +2479,14 @@ lua_State *lua_slm_newstate(void) {
         shell_printf("Failed to create Lua state\n");
         return NULL;
     }
-    lua_state_count++;
+    struct lua_state_slot *slot = lua_state_slot_alloc(L);
+    if (!slot) {
+        shell_printf("Failed to allocate Lua state slot\n");
+        lua_close(L);
+        return NULL;
+    }
+    *(struct lua_state_slot **)lua_getextraspace(L) = slot;
+    lua_state_count_inc();
 
     /* Open safe standard libraries */
     luaL_requiref(L, "_G", luaopen_base, 1);
@@ -2393,12 +2517,13 @@ void lua_slm_close(lua_State *L) {
         /* Release any Lua msg_subscribe refs owned by this state (#207)
          * before the state is closed — luaL_unref needs a live state. */
         lua_msg_subs_cleanup(L);
+        *(struct lua_state_slot **)lua_getextraspace(L) = NULL;
         lua_close(L);
+        lua_state_slot_free(L);
         /* Only reset the shared Lua heap when the last state is gone.
          * With Lua-defined tasks (#208), multiple states can be live at
          * once and a reset would wipe allocations belonging to survivors. */
-        if (lua_state_count > 0) lua_state_count--;
-        if (lua_state_count == 0) {
+        if (lua_state_count_dec_and_test_zero()) {
             extern void heap_reset(void);
             heap_reset();
         }
@@ -2463,7 +2588,7 @@ const char *lua_slm_geterror(lua_State *L) {
 #define REPL_BUFFER_SIZE 256
 
 void lua_slm_repl(lua_State *L) {
-    static char buffer[REPL_BUFFER_SIZE];
+    char buffer[REPL_BUFFER_SIZE];
     int pos = 0;
 
     shell_printf("Lua 5.4 REPL - type 'exit' to quit\n");

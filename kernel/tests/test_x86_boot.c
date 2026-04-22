@@ -3306,7 +3306,7 @@ static void test_msg_router_subscribe_max_per_topic(void)
 static void test_msg_router_subscribe_max_topics(void)
 {
     msg_router_init();
-    /* Fill all 8 topic slots */
+    /* Fill all 16 topic slots */
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t0", 0));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t1", 1));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t2", 2));
@@ -3315,8 +3315,16 @@ static void test_msg_router_subscribe_max_topics(void)
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t5", 5));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t6", 6));
     TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t7", 7));
-    /* 9th topic should fail */
-    TEST_ASSERT_EQUAL_INT(-1, msg_router_subscribe("t8", 8));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t8", 8));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t9", 9));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t10", 10));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t11", 11));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t12", 12));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t13", 13));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t14", 14));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("t15", 15));
+    /* 17th topic should fail */
+    TEST_ASSERT_EQUAL_INT(-1, msg_router_subscribe("t16", 16));
 }
 
 static void test_msg_router_ack_no_pending(void)

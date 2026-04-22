@@ -74,7 +74,7 @@ shell output) flowing through Lua.
 | Key | Option |
 |-----|--------|
 | 1 | System overview — version, memory, IPC, VMM, model pools |
-| 2 | SMP — per-core ticks / schedules / isolation + `bench smp` |
+| 2 | SMP — per-core ticks / schedules / isolation + pinned worker demo + `bench smp` |
 | 3 | Scheduling — policy list, stats, AI scheduler stats |
 | 4 | Switch scheduler policy at runtime |
 | 5 | Eviction — current policy + pool stats + CACHEUS expert weights |
@@ -95,9 +95,12 @@ slm> lua /mnt/files/multiproc_demo.lua
 ```
 
 A separate scenario focused on multi-task concurrency — spawns the
-`listener`, `sensor_monitor`, and `counter` built-in components and
-drives IPC across them. Useful for narrating how SLM-OS schedules
-cooperative tasks across the available CPUs.
+`listener`, `sensor_monitor`, and `counter` built-in components, includes
+a live IPC pub/sub dashboard, and includes a pinned SMP-worker option
+that keeps three Lua tasks per secondary CPU alive for ~8 seconds.
+Useful when you want `top` or a second telnet session to show both the
+current task and nonzero per-CPU ready counts instead of the
+near-instant `bench smp` dispatch.
 
 ### Hailo NPU demo
 

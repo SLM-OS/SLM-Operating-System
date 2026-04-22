@@ -53,7 +53,7 @@ static void test_full_config_parses(void)
     PARSE("enabled=true\n"
           "port=2300\n"
           "bind=127.0.0.1\n"
-          "max_sessions=2\n");
+          "max_sessions=16\n");
 
     TEST_ASSERT_TRUE(cfg.enabled);
     TEST_ASSERT_EQUAL_UINT16(2300, cfg.port);
@@ -62,7 +62,7 @@ static void test_full_config_parses(void)
      * (127 in the lowest byte) because parse_ipv4 shifts by octet*8
      * starting at offset 0. 127 | 0 | 0 | (1<<24) = 0x0100007F. */
     TEST_ASSERT_EQUAL_UINT32(0x0100007F, cfg.bind_ip);
-    TEST_ASSERT_EQUAL_UINT8(2, cfg.max_sessions);
+    TEST_ASSERT_EQUAL_UINT8(16, cfg.max_sessions);
     TEST_ASSERT_EQUAL_UINT16(0, cfg.unknown_keys);
     TEST_ASSERT_EQUAL_UINT16(0, cfg.malformed_lines);
 }

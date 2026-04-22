@@ -14,6 +14,9 @@
 -- Usage:  lua /mnt/files/demo_menu.lua
 
 local P = slm.print
+local SMP_DEMO_MS = 6000
+local SMP_DEMO_SLICE = 20000
+local SMP_DEMO_WORKERS_PER_CPU = 3
 
 local function header(title)
     P("")
@@ -24,6 +27,82 @@ end
 
 local function note(s) P("  " .. s) end
 local function subhead(s) P("  -- " .. s) end
+
+local function csv(list)
+    local out = {}
+    for i, v in ipairs(list) do
+        out[i] = tostring(v)
+    end
+    return table.concat(out, ", ")
+end
+
+local function smp_demo_targets()
+    local cpus = {}
+    if slm.cpu_count() <= 1 then
+        cpus[1] = 0
+    else
+        for cpu = 1, slm.cpu_count() - 1 do
+            cpus[#cpus + 1] = cpu
+        end
+    end
+    return cpus
+end
+
+local function make_smp_worker(deadline_ms, cpu, worker)
+    local spin_count = SMP_DEMO_SLICE + cpu * 3000 + worker * 2000
+    local yield_every = 2 + ((cpu + worker) % 3)
+    local sleep_every = 5 + ((cpu * 2 + worker) % 4)
+    local sleep_ms = 1 + ((cpu + worker) % 3)
+    local loader, err = load(string.format([[
+        return function()
+            local deadline = %d
+            local acc = 0
+            local loops = 0
+            while slm.uptime() < deadline do
+                for i = 1, %d do
+                    acc = (acc + i) %% 65521
+                end
+                loops = loops + 1
+                if (loops %% %d) == 0 then
+                    slm.sleep(%d)
+                elseif (loops %% %d) == 0 then
+                    slm.yield()
+                end
+            end
+            if acc == -1 then slm.print("") end
+        end
+    ]], deadline_ms, spin_count, sleep_every, sleep_ms, yield_every), "smp_demo_worker")
+    if not loader then
+        return nil, err
+    end
+    return loader()
+end
+
+local function launch_smp_workers(duration_ms)
+    local cpus = smp_demo_targets()
+    local deadline = slm.uptime() + duration_ms
+    local ids = {}
+
+    for _, cpu in ipairs(cpus) do
+        for worker = 1, SMP_DEMO_WORKERS_PER_CPU do
+            local fn, err = make_smp_worker(deadline, cpu, worker)
+            if fn then
+                local id = slm.task_create(string.format("smp-%d-%d", cpu, worker), fn)
+                if id and slm.task_pin(id, cpu) then
+                    ids[#ids + 1] = id
+                elseif id then
+                    slm.task_kill(id)
+                end
+            else
+                note(string.format("worker build failed for CPU %d slot %d: %s",
+                    cpu, worker, tostring(err)))
+            end
+            slm.yield()
+        end
+    end
+
+    return ids, cpus
+end
 
 -- ---------------------------------------------------------------------------
 -- System overview
@@ -82,7 +161,22 @@ local function show_smp()
             c.ticks, c.schedules))
     end
     note("")
-    subhead("Driving all cores via `bench smp`:")
+    subhead("Pinned worker demo:")
+    local ids, cpus = launch_smp_workers(SMP_DEMO_MS)
+    if #ids > 0 then
+        note(string.format("Spawned %d pinned workers (%d per CPU) on CPU(s) %s for %d seconds.",
+            #ids, SMP_DEMO_WORKERS_PER_CPU, csv(cpus), SMP_DEMO_MS // 1000))
+        note("Use `top` from another shell now; the workers exit on their own.")
+        local start = slm.uptime()
+        while slm.uptime() - start < SMP_DEMO_MS do
+            slm.sleep(250)
+        end
+        note("Pinned worker window complete.")
+    else
+        note("Pinned worker demo could not launch any Lua tasks.")
+    end
+    note("")
+    subhead("Quick dispatch check via `bench smp`:")
     slm.shell_exec("bench smp")
 end
 

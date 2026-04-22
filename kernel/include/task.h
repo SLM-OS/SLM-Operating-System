@@ -236,6 +236,13 @@ void task_exit(void);
 struct task *task_current(void);
 
 /*
+ * Get the currently running task for a specific CPU.
+ *
+ * Returns NULL if the CPU index is out of range or no task is current.
+ */
+struct task *task_current_on_cpu(uint32_t cpu);
+
+/*
  * Create a user-mode (EL0) task.
  *
  * The task transitions from EL1 to EL0 via ERET on first schedule.

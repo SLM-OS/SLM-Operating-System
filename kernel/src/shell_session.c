@@ -26,6 +26,7 @@
 #include "shell_io.h"
 #include "task.h"
 #include "config.h"
+#include "lua_slm.h"
 #include "spinlock.h"
 #include "string.h"
 
@@ -149,11 +150,14 @@ void shell_session_free(struct shell_session *s)
     if (!s || s == &console_session) {
         return;
     }
+    if (s->lua) {
+        lua_slm_close((lua_State *)s->lua);
+        s->lua = NULL;
+    }
     irq_flags_t flags = spin_lock_irqsave(&pool_lock);
     s->in_use     = false;
     s->io         = NULL;
     s->owner_task = NULL;
-    s->lua        = NULL;
     spin_unlock_irqrestore(&pool_lock, flags);
 }
 

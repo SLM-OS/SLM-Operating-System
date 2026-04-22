@@ -235,10 +235,15 @@ endif()
 # if the resolved config says enabled it calls net_init + starts
 # the TCP listener on port 2323.
 #
-# Default is OFF on every platform — operator must opt in explicitly.
-# Real hardware (Pi 5, Jetson) has no host-loopback gate, so the
-# default stays off until Phase 4 SSH (#199) lands.
-option(NET_TELNETD_AUTOSTART "Start telnetd at boot (unauthenticated TCP shell)" OFF)
+# Default is ON for Pi 5 lab/demo images and OFF elsewhere. Real
+# hardware remains an explicit operator decision; this repo's Pi 5
+# workflow is using trusted-network lab hardware.
+if(PLATFORM STREQUAL "RASPI5")
+    set(NET_TELNETD_AUTOSTART ON CACHE BOOL
+        "Start telnetd at boot (unauthenticated TCP shell)" FORCE)
+else()
+    option(NET_TELNETD_AUTOSTART "Start telnetd at boot (unauthenticated TCP shell)" OFF)
+endif()
 if(ENABLE_NETWORKING AND NET_TELNETD_AUTOSTART)
     add_compile_definitions(NET_TELNETD_AUTOSTART=1)
 endif()

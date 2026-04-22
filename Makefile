@@ -655,14 +655,14 @@ endif
 .PHONY: run
 run: kernel grub-iso
 	@echo "Running in QEMU..."
-	$(QEMU) $(QEMU_COMMON) $(QEMU_NET) $(QEMU_BOOT_ARG)
+	$(QEMU_GUARD) $(QEMU) $(QEMU_COMMON) $(QEMU_NET) $(QEMU_BOOT_ARG)
 
 .PHONY: shell
 shell: kernel grub-iso
 	@echo "Running in QEMU (interactive shell)..."
 	@echo "Press Ctrl+A then X to exit QEMU"
 	@echo ""
-	$(QEMU) $(QEMU_COMMON) $(QEMU_NET) $(QEMU_BOOT_ARG)
+	$(QEMU_GUARD) $(QEMU) $(QEMU_COMMON) $(QEMU_NET) $(QEMU_BOOT_ARG)
 
 .PHONY: debug
 debug: kernel grub-iso

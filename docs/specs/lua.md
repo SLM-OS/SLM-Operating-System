@@ -20,15 +20,13 @@ In-kernel Lua runtime, SLM bindings, REPL.
 | AI scheduler bindings | `slm.ai_sched_decision` | Same | Same | Same |
 | Scheduler bindings | `slm.sched_set_policy`, `slm.sched_stats` | Same | Same | Same |
 | Component bindings | `slm.component_run`, `slm.component_swap` | Same | Same | Same |
-| Shell I/O bindings | `slm.print`, `slm.read_line` | Same | Same | Same |
+| Shell I/O bindings | `slm.print`, `slm.read_line`, `slm.try_getc`, `slm.term_size` | Same | Same | Same |
 | Embedded scripts | Lua demos via `.incbin` (demo.lua and friends) | Same | Same | Same |
 | Bytecode trust boundary | Currently trusted; documented hazard before TCP shell lands | Same | Same | Same |
 
 ## Skipped / Blocked
 
-- **`lua_msg_subs` spinlock** — the global subscribers table is not spinlock-protected. Acceptable under single-CPU-0 shell access; unsafe when TCP shell sessions start running Lua concurrently on different CPUs.
-- **Cross-state `msg_subscribe` ack loss** — `LUA_MSG_SUB_IDX` sentinel is shared across Lua states; the ack-always code path can lose acks when two states subscribe to the same topic. Queued as an issue.
-- **Bytecode trust boundary** — `l_task_create` and similar bindings can execute arbitrary Lua bytecode that can invoke syscall-ish kernel APIs. Safe today (shell is single-user, UART-console-only); becomes a concern when TCP shell (unauthenticated) or SSH (authenticated multi-user) land. Flagged in PR #217 review.
+- **Bytecode trust boundary** — `l_task_create` and similar bindings can execute arbitrary Lua bytecode that can invoke syscall-ish kernel APIs. Safe today only on trusted systems; now more relevant because multi-session TCP shell is live on Pi 5 lab images and SSH/authentication (#199) is still outstanding.
 - **Debug library (`debug.*`)** — not compiled in (`LUA_USE_DEBUG` off); not a concern for demo workloads.
 - **LuaJIT / alternative VMs** — not in scope; stock Lua 5.4 interpreter.
 - **Hot-reload of running scripts** — no. Script runs to completion; re-invoke to re-run.
@@ -42,4 +40,4 @@ In-kernel Lua runtime, SLM bindings, REPL.
 - `kernel/src/lua_shell.c` — REPL
 - Issue: #152 (Lua audit — closed)
 
-*Last updated: 18 April 2026*
+*Last updated: 22 April 2026*
