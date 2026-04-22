@@ -110,6 +110,21 @@ static uint32_t              xhci_num_scratchpads;
 struct xhci_ring       xhci_cmd_ring;
 struct xhci_event_ring xhci_evt_ring;
 
+static const uint32_t tegra_xusb_context_fpci_offsets[] = {
+    XUSB_CFG_ARU_CONTEXT_HS_PLS,
+    XUSB_CFG_ARU_CONTEXT_FS_PLS,
+    XUSB_CFG_ARU_CONTEXT_HSFS_SPEED,
+    XUSB_CFG_ARU_CONTEXT_HSFS_PP,
+    XUSB_CFG_ARU_CONTEXT,
+    XUSB_CFG_AXI_CFG,
+    XUSB_CFG_24,
+    XUSB_CFG_16,
+};
+static uint32_t xhci_tegra_context_cache[
+    sizeof(tegra_xusb_context_fpci_offsets) /
+    sizeof(tegra_xusb_context_fpci_offsets[0])];
+static bool xhci_tegra_context_cached;
+
 /*
  * Event Ring Segment Table entry layout per xHCI 1.2 §6.5. One entry
  * is enough — Phase 3A uses a single event-ring segment.
@@ -170,6 +185,45 @@ static uint32_t fpci_r32(uint32_t off) { return r32(xhci_fpci_base, off); }
 static void     fpci_w32(uint32_t off, uint32_t v) { w32(xhci_fpci_base, off, v); }
 static uint32_t bar2_r32(uint32_t off) { return r32(xhci_bar2_base, off); }
 static void     bar2_w32(uint32_t off, uint32_t v) { w32(xhci_bar2_base, off, v); }
+
+static void tegra_xusb_cache_context(void)
+{
+    for (unsigned i = 0;
+         i < sizeof(tegra_xusb_context_fpci_offsets) /
+             sizeof(tegra_xusb_context_fpci_offsets[0]);
+         i++) {
+        xhci_tegra_context_cache[i] =
+            fpci_r32(tegra_xusb_context_fpci_offsets[i]);
+    }
+    xhci_tegra_context_cached = true;
+    INFO("xhci: cached Tegra FPCI context hs_pls=0x%08x fs_pls=0x%08x "
+         "hsfs_speed=0x%08x hsfs_pp=0x%08x aru_ctx=0x%08x axi=0x%08x "
+         "cfg24=0x%08x cfg16=0x%08x",
+         (unsigned)xhci_tegra_context_cache[0],
+         (unsigned)xhci_tegra_context_cache[1],
+         (unsigned)xhci_tegra_context_cache[2],
+         (unsigned)xhci_tegra_context_cache[3],
+         (unsigned)xhci_tegra_context_cache[4],
+         (unsigned)xhci_tegra_context_cache[5],
+         (unsigned)xhci_tegra_context_cache[6],
+         (unsigned)xhci_tegra_context_cache[7]);
+}
+
+void xhci_tegra_restore_context(const char *why)
+{
+    if (!xhci_tegra_context_cached)
+        return;
+
+    for (unsigned i = 0;
+         i < sizeof(tegra_xusb_context_fpci_offsets) /
+             sizeof(tegra_xusb_context_fpci_offsets[0]);
+         i++) {
+        fpci_w32(tegra_xusb_context_fpci_offsets[i],
+                 xhci_tegra_context_cache[i]);
+    }
+    dsb(sy);
+    INFO("xhci: restored Tegra FPCI context for %s", why ? why : "recovery");
+}
 
 /* -------------------------------------------------------------------------- */
 /* Polling utility (used by Tegra-section Falcon probes + halt/reset below)    */
@@ -1142,6 +1196,8 @@ int xhci_init(void)
         return -1;
     INFO("xhci: controller running (USBSTS=0x%08x)",
          (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+
+    tegra_xusb_cache_context();
 
     if (xhci_send_noop() != 0) {
         /* Don't give up — the driver is partially usable even without

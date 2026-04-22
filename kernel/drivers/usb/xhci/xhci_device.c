@@ -526,12 +526,12 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     if (prev == XHCI_ATTACH_STALE &&
         xhci_stale_port_already_recovered(portsc, c)) {
         INFO("xhci: stale port on PORTSC[%u] is connected with PED=0 "
-             "and change latched (0x%08x) — treating as fresh attach",
+             "and change latched (0x%08x) — forcing reset-backed recovery",
              (unsigned)xhci_active_port, (unsigned)portsc);
         xhci_attach_state = XHCI_ATTACH_FRESH;
         xhci_prereset_speed = s;
-        xhci_skip_next_port_reset = true;
-        xhci_force_connected_disabled_reset = false;
+        xhci_skip_next_port_reset = false;
+        xhci_force_connected_disabled_reset = true;
         xhci_force_bsr0_on_open = false;
         xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
@@ -558,11 +558,11 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     if (prev == XHCI_ATTACH_STALE &&
         xhci_stale_port_enabled_inherited(portsc, c, s)) {
         INFO("xhci: stale port on PORTSC[%u] is already enabled at USB2 speed "
-             "(0x%08x) — attempting direct enumeration",
+             "(0x%08x) — attempting reset-backed enumeration",
              (unsigned)xhci_active_port, (unsigned)portsc);
         xhci_attach_state = XHCI_ATTACH_FRESH;
         xhci_prereset_speed = s;
-        xhci_skip_next_port_reset = true;
+        xhci_skip_next_port_reset = false;
         xhci_force_connected_disabled_reset = false;
         xhci_force_bsr0_on_open = false;
         xhci_force_inherited_addr2_on_open = true;
@@ -823,8 +823,22 @@ int xhci_hcd_port_reset(uint8_t port)
                     return 0;
                 }
 
+                xhci_tegra_restore_context("post-reset ped=0");
+
+                uint64_t restore_start = timer_get_count();
+                uint64_t restore_ticks = timer_get_frequency() / 100;  /* 10 ms */
+                while (timer_get_count() - restore_start < restore_ticks) { }
+
+                uint32_t restored_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+                INFO("xhci: PORTSC[%u] after Tegra context restore 0x%08x -> 0x%08x",
+                     pidx, (unsigned)final_sc, (unsigned)restored_sc);
+                if (restored_sc & XHCI_PORTSC_PED) {
+                    xhci_active_portsc = restored_sc;
+                    return 0;
+                }
+
                 WARN("xhci: PORTSC[%u] reset left PED=0 (0x%08x)%s",
-                     pidx, (unsigned)final_sc,
+                     pidx, (unsigned)restored_sc,
                      attempt < 3 ? " — retrying" : "");
                 break;
             }

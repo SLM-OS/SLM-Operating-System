@@ -73,6 +73,7 @@ extern uint64_t               *xhci_dcbaa;
 
 uint32_t xhci_op_r32(uint32_t off);
 void     xhci_op_w32(uint32_t off, uint32_t val);
+void     xhci_tegra_restore_context(const char *why);
 
 /* Doorbell at `db_index` (0 = command, 1..MaxSlots = device slot). */
 void xhci_ring_doorbell(uint8_t db_index, uint8_t target);
