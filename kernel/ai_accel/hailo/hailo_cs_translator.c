@@ -546,12 +546,22 @@ static int translate_allow_input_dataflow(
     /* Look up the pad by sys_index to recover frame geometry. A
      * zero-byte fetch is never legitimate — firmware has no clean
      * error for `frame_periph_size=0`, so fail fast here and let
-     * the caller surface the missing pad. */
+     * the caller surface the missing pad.
+     *
+     * #253 fix: frame_periph_size here must match the value
+     * OpenBoundaryInputChannel declared in ACTIVATION — i.e. the
+     * FULL periph frame (bpb * bpf), not just bpb. Firmware
+     * cross-checks the two and silently wedges the inference
+     * pipeline (device-side avail stays 0) when they disagree.
+     * For our MNIST HEF: bpb=32, bpf=28, frame=896. */
     uint32_t frame_size = 0;
     bool pad_found = false;
     for (uint32_t i = 0; i < info->pad_count; i++) {
         if (info->pads[i].sys_index == a->sys_index) {
-            frame_size = info->pads[i].core_bytes_per_buffer;
+            uint32_t bpb = info->pads[i].core_bytes_per_buffer;
+            uint32_t bpf = info->pads[i].core_buffers_per_frame
+                              ? info->pads[i].core_buffers_per_frame : 1u;
+            frame_size = bpb * bpf;
             pad_found = true;
             break;
         }

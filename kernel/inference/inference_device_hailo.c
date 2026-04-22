@@ -594,6 +594,45 @@ static int context_switch_load(struct hailo_model_slot *slot,
         { HAILO_CS_CONTEXT_TYPE_DYNAMIC,         cs_bufs.dynamic,
           (uint32_t)cs_bufs.dynamic_len,         "DYNAMIC" },
     };
+    /* #253 diagnostic: surface per-context action-list lengths so we
+     * can tell at a glance whether e.g. DYNAMIC is empty (just the
+     * APPLICATION_CHANGE_INTERRUPT tail, ~5 bytes) vs populated with
+     * compute-driving actions (ENABLE_LCU, AllowInputDataflow, ...).
+     * An empty DYNAMIC would mean fw has no recipe for driving the
+     * compute side of the inference, which stalls boundary submits. */
+    uart_printf("[cs] ctx bytes: activation=%u batch_switching=%u "
+                "preliminary=%u dynamic=%u; hef ctx_actions_count=%u "
+                "action_count[0]=%u allow_input_dataflow_count=%u "
+                "enable_lcu_count=%u trigger_seq_count=%u "
+                "wait_seq_count=%u disable_lcu_count=%u\r\n",
+                (unsigned)cs_bufs.activation_len,
+                (unsigned)cs_bufs.batch_switching_len,
+                (unsigned)cs_bufs.preliminary_len,
+                (unsigned)cs_bufs.dynamic_len,
+                (unsigned)info->context_actions_count,
+                (unsigned)(info->context_actions_count > 0
+                    ? info->context_actions[0].action_count : 0),
+                (unsigned)info->allow_input_dataflow_count,
+                (unsigned)info->enable_lcu_count,
+                (unsigned)info->trigger_sequencer_count,
+                (unsigned)info->wait_sequencer_count,
+                (unsigned)info->disable_lcu_count);
+    if (info->context_actions_count > 0) {
+        uart_printf("[cs] dynamic action_types[0..]: ");
+        for (uint32_t i = 0; i < info->context_actions[0].action_count
+                                 && i < 16; i++) {
+            uart_printf("%u ", (unsigned)info->context_actions[0].action_types[i]);
+        }
+        uart_printf("\r\n");
+    }
+    for (uint32_t i = 0; i < info->allow_input_dataflow_count && i < 4; i++) {
+        const struct hef_allow_input_dataflow_action *a =
+            &info->allow_input_dataflow_actions[i];
+        uart_printf("[cs] allow_input_dataflow[%u]: ctx=%u sys_index=%u\r\n",
+                    (unsigned)i, (unsigned)a->context_index,
+                    (unsigned)a->sys_index);
+    }
+
     for (uint32_t i = 0; i < sizeof(ctxs) / sizeof(ctxs[0]); i++) {
         cs_load_stage_set(60 + (int)i * 2);     /* 60, 62, 64, 66 per context */
         rc = hailo_control_set_context_info(ctxs[i].type,
