@@ -445,35 +445,6 @@ static int xhci_submit_bulk_int(struct usb_urb *urb, struct xhci_device *d)
     return 0;
 }
 
-/*
- * Intercept USB standard SET_ADDRESS (bmRequestType=0x00,
- * bRequest=0x05) and convert it into a synchronous success without
- * actually submitting TRBs.
- *
- * Why: xHCI's ADDRESS_DEVICE command (issued during device_open with
- * BSR=1) has already taken the device out of the default state and
- * set up the slot context. Replaying a user-driven SET_ADDRESS on
- * EP0 would at best duplicate that work — and at worst (BSR=0 path)
- * diverge the HC's view of the address from the device's. The xHCI
- * spec explicitly forbids the user from issuing SET_ADDRESS on the
- * EP0 ring because the HC owns the address assignment.
- *
- * usb_core_enumerate() sends SET_ADDRESS(1) as part of its generic
- * enumeration sequence (Phase 1 design: addresses come from the
- * caller so simple HCDs don't need to know about it). Returning
- * synthetic success keeps usb_core's state machine happy; the HC
- * and the device continue to agree on whatever address the
- * ADDRESS_DEVICE picked, and subsequent transfers route via the
- * Slot Context rather than dev->address.
- */
-static bool xhci_is_set_address(const struct usb_urb *urb)
-{
-    return urb->transfer_type == USB_XFER_CONTROL &&
-           urb->setup.bmRequestType == (USB_DIR_OUT | USB_TYPE_STANDARD |
-                                        USB_RECIP_DEVICE) &&
-           urb->setup.bRequest == USB_REQ_SET_ADDRESS;
-}
-
 int xhci_hcd_submit_urb(struct usb_urb *urb)
 {
     if (!xhci_live || urb == NULL || urb->dev == NULL)
@@ -481,16 +452,6 @@ int xhci_hcd_submit_urb(struct usb_urb *urb)
     struct xhci_device *d = (struct xhci_device *)urb->dev->hcd_private;
     if (d == NULL || d->slot_id == 0)
         return -USB_URB_IO_ERROR;
-
-    if (xhci_is_set_address(urb)) {
-        INFO("xhci: SET_ADDRESS(%u) intercepted — xHCI handled it via "
-             "ADDRESS_DEVICE in device_open", (unsigned)urb->setup.wValue);
-        urb->status        = USB_URB_OK;
-        urb->actual_length = 0;
-        urb->hcd_private   = NULL;
-        if (urb->complete) urb->complete(urb);
-        return 0;
-    }
 
     switch (urb->transfer_type) {
     case USB_XFER_CONTROL:   return xhci_submit_control(urb, d);
@@ -514,14 +475,20 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
                          ((uintptr_t)evt->param_hi << 32);
     uint32_t residual  = evt->status & 0x00FFFFFFu;   /* bits 23:0 */
     uint8_t  cc        = XHCI_CC_GET(evt->status);
+    uint8_t  slot_id   = XHCI_TRB_SLOT_GET(evt->control);
+    uint8_t  ep_id     = (uint8_t)((evt->control >> XHCI_TRB_EP_SHIFT) & 0x1Fu);
 
     struct xhci_urb_slot *slot = xhci_urb_slot_find_by_trb(trb_phys);
     if (slot == NULL) {
         /* Could be a stale event from a cancelled URB. Control-transfer
          * chains match any TRB in their contiguous Setup/Data/Status
          * range; anything else is genuinely unexpected in Phase 3A. */
-        INFO("xhci: unmatched transfer event trb=0x%lx cc=%u",
-             (unsigned long)trb_phys, cc);
+        INFO("xhci: unmatched transfer event trb=0x%lx cc=%u slot=%u ep=%u "
+             "status=0x%08x control=0x%08x residual=%u",
+             (unsigned long)trb_phys, cc,
+             (unsigned)slot_id, (unsigned)ep_id,
+             (unsigned)evt->status, (unsigned)evt->control,
+             (unsigned)residual);
         return;
     }
 
