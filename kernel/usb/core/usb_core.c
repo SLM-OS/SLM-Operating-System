@@ -654,6 +654,18 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
     if (dev == NULL || active_hcd == NULL)
         return -1;
 
+    /*
+     * Devices always start enumeration at USB address 0. Keep the target
+     * post-enumeration address separate so the first 8-byte device
+     * descriptor read in Step 3 still goes out on the default address.
+     *
+     * Phase 1 remains single-device at the class-driver layer, but a
+     * one-tier hub is allowed as transport detail. Keep the historical
+     * address split: root device = 1, first child behind hub = 2.
+     */
+    uint8_t target_address = (dev->route_string == 0) ? 1u : 2u;
+    dev->address = 0;
+
     int n;
     int rc;
     bool device_opened = false;
@@ -713,16 +725,17 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
 
 got_initial_descriptor:
 
-    /* Step 4: assign address 1 (single-device policy). */
+    /* Step 4: assign the device's non-zero USB address. */
     rc = usb_control_msg(dev,
                          USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
                          USB_REQ_SET_ADDRESS,
-                         dev->address, 0, NULL, 0, 500);
+                         target_address, 0, NULL, 0, 500);
     if (rc < 0) {
         WARN("usb_core: SET_ADDRESS failed: %s",
              usb_urb_status_str((enum usb_urb_status)(-rc)));
         goto err_close;
     }
+    dev->address = target_address;
     dev->state = USB_STATE_ADDRESS;
 
     /* Step 5: full device descriptor. */
@@ -830,7 +843,7 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub)
 
     memset(&root_device, 0, sizeof(root_device));
     root_device.hcd = active_hcd;
-    root_device.address = 2;
+    root_device.address = 0;
     root_device.speed = child_speed;
     root_device.state = USB_STATE_ATTACHED;
     root_device.port = child_port;
@@ -873,7 +886,7 @@ int usb_core_enumerate(void)
 
     memset(&root_device, 0, sizeof(root_device));
     root_device.hcd   = active_hcd;
-    root_device.address = 1;
+    root_device.address = 0;
     root_device.speed = speed;
     root_device.state = USB_STATE_ATTACHED;
     root_device.port  = 0;
