@@ -794,9 +794,18 @@ int xhci_hcd_port_reset(uint8_t port)
                                              "connected-disabled reuse");
         xhci_skip_next_port_reset = false;
         xhci_active_portsc = portsc;
+        uint32_t pls =
+            (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+        if (!(portsc & XHCI_PORTSC_PED) || pls != XHCI_PLS_U0) {
+            WARN("xhci: inherited reuse path degraded to PORTSC[%u]=0x%08x (ped=%u pls=%u) — falling back to reset-backed recovery",
+                 (unsigned)xhci_active_port, (unsigned)portsc,
+                 (unsigned)((portsc & XHCI_PORTSC_PED) ? 1u : 0u),
+                 (unsigned)pls);
+        } else {
         INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x)",
              (unsigned)xhci_active_port, (unsigned)xhci_active_portsc);
-        return 0;
+            return 0;
+        }
     }
 
     if (force_connected_disabled_reset) {
