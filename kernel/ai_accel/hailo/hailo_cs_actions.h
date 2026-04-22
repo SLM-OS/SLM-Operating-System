@@ -506,4 +506,22 @@ struct hailo_cs_act_resume_vdma_channel {
 _Static_assert(sizeof(struct hailo_cs_act_resume_vdma_channel) == 2,
                "resume_vdma_channel body must be 2 bytes");
 
+/* SWITCH_LCU_BATCH: carried inside a REPEATED_ACTION in BATCH_SWITCHING.
+ * Each sub-body programs one LCU's batch state for the next inference
+ * context. packed_lcu_id encodes (cluster_index << 3) | lcu_index.
+ * kernel_done_count is the number of LCU kernel completions the
+ * sequencer should wait for before signaling the next stage.
+ *
+ * Reference: HailoRT v4.23
+ * CONTEXT_SWITCH_DEFS__switch_lcu_batch_action_data_t
+ * (context_switch_defs.h:442-446). */
+struct hailo_cs_act_switch_lcu_batch {
+    uint8_t  packed_lcu_id;
+    uint8_t  network_index;
+    uint32_t kernel_done_count;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_switch_lcu_batch) == 6,
+               "switch_lcu_batch body must be 6 bytes per v4.23 wire");
+
 #endif /* AI_ACCEL_HAILO_CS_ACTIONS_H */

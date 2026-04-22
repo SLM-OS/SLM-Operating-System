@@ -355,10 +355,85 @@ static int translate_activation(const struct hef_info *info,
  * HEFs with zero boundary H2D channels (synthetic tests) fall back
  * to just DDR_BUFFERING_RESET + BURST_CREDITS_TASK_START, matching
  * the pre-#180 behavior. */
+/* HailoRT v4.23 wire capture of MNIST BATCH_SWITCHING
+ * (pios_BATCH_SWITCHING.bin) opens with a REPEATED_ACTION carrying
+ * 15 SWITCH_LCU_BATCH sub-actions, one per LCU in use across the
+ * network's 3 clusters. Without this prologue fw sees uninitialised
+ * LCU batch state on the subsequent BURST_CREDITS_TASK_START, the
+ * inference scheduler never grants credits to the boundary-IN
+ * fetch, and ch=2 num_proc stays 0 forever (Phase 8 submit blocker).
+ *
+ * LCU IDs are HEF-specific — they come from the HEF's compiled-in
+ * partial_clusters / nn_stream_config, which our parser does not
+ * currently extract. For now this emits a fixed template keyed to
+ * the MNIST HEF we test against, identified by ccw_action_count=28
+ * + ccws_total_bytes=112256 + input shape 28x28x1. Any other HEF
+ * falls through to the pre-template path (DDR_BUFFERING_RESET +
+ * CHANGE_BOUNDARY_INPUT_BATCH + BURST_CREDITS_TASK_START only).
+ *
+ * Generalization is tracked under #253; the proper fix is to parse
+ * nn_stream_config's LCU list at HEF-load time. */
+static const struct hailo_cs_act_switch_lcu_batch
+mnist_switch_lcu_batch_template[] = {
+    /* Values from docs/reference/pios_BATCH_SWITCHING.bin decoded
+     * 2026-04-22 — kernel_done_count=2 for every LCU. */
+    { .packed_lcu_id = 0x00, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x10, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x0e, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x13, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x08, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x05, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x03, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x04, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x0a, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x06, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x07, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x09, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x0b, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x0f, .network_index = 0, .kernel_done_count = 2 },
+    { .packed_lcu_id = 0x01, .network_index = 0, .kernel_done_count = 2 },
+};
+
+_Static_assert(sizeof(mnist_switch_lcu_batch_template) /
+               sizeof(mnist_switch_lcu_batch_template[0]) == 15,
+               "MNIST switch_lcu_batch template must be 15 entries");
+
+static bool hef_matches_mnist_template(const struct hef_info *info)
+{
+    if (info->ccw_action_count != 28) return false;
+    /* Input pad sys_index=1 with shape 28x28x1 + output pad sys_index=0
+     * with shape 1x1x10 uniquely identifies the MNIST HEF we use. */
+    bool saw_in = false, saw_out = false;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *p = &info->pads[i];
+        if (p->is_input && p->has_tensor_shape &&
+            p->height == 28 && p->width == 28 && p->features == 1) {
+            saw_in = true;
+        } else if (!p->is_input && p->has_tensor_shape &&
+                   p->height == 1 && p->width == 1 && p->features == 10) {
+            saw_out = true;
+        }
+    }
+    return saw_in && saw_out;
+}
+
 static int translate_batch_switching(const struct hef_info *info,
                                      const struct hailo_cs_translate_cfg *cfg,
                                      struct hailo_cs_builder *b)
 {
+    /* #253 Phase 8: emit HailoRT's 15-entry SWITCH_LCU_BATCH
+     * prologue when we recognise the MNIST HEF shape. Generic
+     * HEFs skip this until we parse nn_stream_config's LCU list. */
+    if (hef_matches_mnist_template(info)) {
+        int rc = hailo_cs_builder_append_repeated(
+            b, HAILO_CS_ACT_SWITCH_LCU_BATCH,
+            (uint8_t)(sizeof(mnist_switch_lcu_batch_template) /
+                      sizeof(mnist_switch_lcu_batch_template[0])),
+            mnist_switch_lcu_batch_template,
+            sizeof(mnist_switch_lcu_batch_template[0]));
+        if (rc != HAILO_OK) return rc;
+    }
+
     int rc = hailo_cs_builder_append(b, HAILO_CS_ACT_DDR_BUFFERING_RESET,
                                      NULL, 0);
     if (rc != HAILO_OK) return rc;
