@@ -840,6 +840,18 @@ int xhci_hcd_port_reset(uint8_t port)
                 WARN("xhci: PORTSC[%u] reset left PED=0 (0x%08x)%s",
                      pidx, (unsigned)restored_sc,
                      attempt < 3 ? " — retrying" : "");
+                if (attempt == 3) {
+                    /*
+                     * If bus reset never actually re-enables the port,
+                     * the device may still be sitting at Linux's old
+                     * address rather than at USB address 0. On nano-2
+                     * the inherited Realtek hub is address 2 under Linux,
+                     * so bias the subsequent fallback open path toward
+                     * that address/state and see whether EP0 setup can
+                     * finally reach the device.
+                     */
+                    xhci_force_inherited_addr2_on_open = true;
+                }
                 break;
             }
             if (timer_get_count() - start >= ticks) {
