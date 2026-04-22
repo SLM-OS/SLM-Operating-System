@@ -4937,7 +4937,12 @@ static void test_vdma_program_descriptor_masks_low_addr_bits(void)
  * DOMAIN_DEVICE IRQ bits (0x1C) OR'd into the base 0x02 control byte,
  * matching HailoRT reference (#253 / commit 34a3f8f). Non-last descs
  * keep the plain 0x02 control. */
-#define LAST_DESC_CTRL  0x1Eu   /* 0x02 | DEVICE (0x10) | IRQ_PROC (0x04) | IRQ_ERR (0x08) */
+/* 0x02 DESC_CONTROL | 0x20 HOST_IRQ_BITMASK | 0x04 REQ_IRQ_PROCESSED
+ * | 0x08 REQ_IRQ_ERR = 0x2E. Host-domain IRQ per HailoRT's hailo_pci
+ * driver as captured on Pi OS 2026-04-22 (docs/reference/hailort-
+ * v4.23.0-vdma-mnist-pi5.txt): every per-transfer last desc ends in
+ * 0x2e. Earlier SLM-OS pick of 0x1E (DEVICE domain) was wrong. */
+#define LAST_DESC_CTRL  0x2Eu
 
 static void test_vdma_program_buffer_one_descriptor(void)
 {

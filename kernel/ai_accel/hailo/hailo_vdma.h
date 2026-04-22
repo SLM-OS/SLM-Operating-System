@@ -285,6 +285,19 @@ void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label);
 int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us);
 
 /*
+ * RMW the NUM_AVAIL field (bits 31:16 of CHANNEL_BASE_DWORD) without
+ * polling for num_proc afterwards. Reference
+ * `hailo_vdma_set_num_avail` in hailo-vdma-common.c:426 does the same
+ * read-modify-write; the difference vs hailo_vdma_submit_and_wait is
+ * that this helper returns immediately, leaving it to the caller to
+ * poll num_proc on its own schedule. Used to pre-arm the OUTPUT
+ * boundary channel before submitting INPUT, matching HailoRT's
+ * observed host-side order (see docs/reference/hailort-v4.23.0-vdma-
+ * mnist-pi5.txt). Returns HAILO_OK / HAILO_ERR_INVAL.
+ */
+int hailo_vdma_write_num_avail(uint8_t channel_index, uint16_t num_avail);
+
+/*
  * Poll `channel_index`'s num_proc until it advances by at least
  * `target_num_proc` descriptors relative to the count observed when
  * the function was entered, or `timeout_us` elapses. Unlike
