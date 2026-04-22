@@ -148,6 +148,13 @@ static void test_output_normalization_preserves_split_crlf(void)
     n = shell_io_tcp_test_normalize_output("a\n", NULL, out, sizeof(out));
     TEST_ASSERT_EQUAL_UINT32(3, (uint32_t)n);
     TEST_ASSERT_EQUAL_MEMORY("a\r\n", out, 3);
+
+    n = shell_io_tcp_test_normalize_output("\n", NULL, out, 1);
+    TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)n);
+
+    n = shell_io_tcp_test_normalize_output("\n", NULL, out, 2);
+    TEST_ASSERT_EQUAL_UINT32(2, (uint32_t)n);
+    TEST_ASSERT_EQUAL_MEMORY("\r\n", out, 2);
 }
 
 /* ============================================================================

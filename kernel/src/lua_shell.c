@@ -73,7 +73,7 @@ static int cmd_lua(int argc, char *argv[]) {
 
 /* Command registration */
 static const shell_cmd_t lua_commands[] = {
-    {"lua", cmd_lua, "Lua scripting (REPL or script)", false},
+    {"lua", cmd_lua, "Lua scripting (REPL or script)", true},
 };
 
 void lua_shell_init(void) {

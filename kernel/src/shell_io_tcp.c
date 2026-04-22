@@ -345,6 +345,12 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
             src++;
         }
         spin_unlock_irqrestore(&ctx->tx_lock, flags);
+        if (queued == 0) {
+            /* A bare '\n' needs two bytes of ring space. If only one
+             * slot is free, we must yield here rather than immediately
+             * retrying and spinning forever on CPU 0. */
+            sleep_ms(TCP_SHELL_POLL_INTERVAL_MS);
+        }
     }
 }
 

@@ -2546,13 +2546,13 @@ static void test_shell_gpu_cmd_platform_correctness(void)
 #endif
 }
 
-static void test_lua_shell_command_registered_non_mutating(void)
+static void test_lua_shell_command_registered_mutating(void)
 {
     bool found = false;
     for (int i = 0; i < num_external_commands; i++) {
         if (strcmp(external_commands[i].name, "lua") == 0) {
             found = true;
-            TEST_ASSERT_FALSE(external_commands[i].mutates);
+            TEST_ASSERT_TRUE(external_commands[i].mutates);
             break;
         }
     }
@@ -2807,7 +2807,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_help_files_exist);
     RUN_TEST(test_shell_help_file_content);
     RUN_TEST(test_shell_help_dir_listing);
-    RUN_TEST(test_lua_shell_command_registered_non_mutating);
+    RUN_TEST(test_lua_shell_command_registered_mutating);
 
     /* Write/modify command tests */
     RUN_TEST(test_shell_cmd_write);
