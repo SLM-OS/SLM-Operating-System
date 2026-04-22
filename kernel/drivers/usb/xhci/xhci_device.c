@@ -189,6 +189,11 @@ static bool xhci_force_inherited_addr2_on_open = false;
 static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
                                       const char *why);
 
+static uint32_t xhci_port_state_to_neutral(uint32_t portsc)
+{
+    return portsc & XHCI_PORTSC_NEUTRAL_MASK;
+}
+
 static uint32_t xhci_resume_usb2_port_to_u0(uint8_t pidx, uint32_t portsc,
                                             const char *why)
 {
@@ -197,34 +202,56 @@ static uint32_t xhci_resume_usb2_port_to_u0(uint8_t pidx, uint32_t portsc,
     (void)xhci_decode_portsc(portsc, &connected, &speed);
 
     uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
-    if (!connected || !(portsc & XHCI_PORTSC_PED) || speed > USB_SPEED_HIGH ||
-        pls != XHCI_PLS_U3) {
+    if (!connected || !(portsc & XHCI_PORTSC_PED) || speed > USB_SPEED_HIGH) {
         return portsc;
     }
 
-    uint32_t write = (portsc & ~(XHCI_PORTSC_RW1CS_MASK | XHCI_PORTSC_PLS_MASK)) |
-                     (XHCI_PLS_RESUME << XHCI_PORTSC_PLS_SHIFT) |
-                     XHCI_PORTSC_LWS;
-    xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
+    if (pls == XHCI_PLS_U3) {
+        uint32_t write = (xhci_port_state_to_neutral(portsc) &
+                          ~XHCI_PORTSC_PLS_MASK) |
+                         (XHCI_PLS_RESUME << XHCI_PORTSC_PLS_SHIFT) |
+                         XHCI_PORTSC_LWS;
+        xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
 
-    uint64_t start = timer_get_count();
-    uint64_t ticks = timer_get_frequency() / 40; /* 25 ms */
-    while (timer_get_count() - start < ticks) { }
+        uint64_t start = timer_get_count();
+        uint64_t ticks = timer_get_frequency() / 20; /* 50 ms USB2 resume signal */
+        while (timer_get_count() - start < ticks) { }
 
-    uint32_t resumed = xhci_op_r32(XHCI_OP_PORTSC(pidx));
-    resumed = xhci_ack_port_changes(pidx, resumed, why);
-
-    uint32_t resumed_pls =
-        (resumed & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
-    INFO("xhci: PORTSC[%u] resume-to-U0 for %s (0x%08x -> 0x%08x, pls %u -> %u)",
-         pidx, why, (unsigned)portsc, (unsigned)resumed,
-         (unsigned)pls, (unsigned)resumed_pls);
-    if (resumed_pls != XHCI_PLS_U0) {
-        WARN("xhci: PORTSC[%u] did not reach U0 after resume (%s, portsc=0x%08x)",
-             pidx, why, (unsigned)resumed);
+        uint32_t resumed = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+        resumed = xhci_ack_port_changes(pidx, resumed, why);
+        uint32_t resumed_pls =
+            (resumed & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+        INFO("xhci: PORTSC[%u] request-resume for %s (0x%08x -> 0x%08x, pls %u -> %u)",
+             pidx, why, (unsigned)portsc, (unsigned)resumed,
+             (unsigned)pls, (unsigned)resumed_pls);
+        return resumed;
     }
 
-    return resumed;
+    if (pls == XHCI_PLS_RESUME) {
+        uint32_t u0 = (xhci_port_state_to_neutral(portsc) &
+                       ~XHCI_PORTSC_PLS_MASK) |
+                      (XHCI_PLS_U0 << XHCI_PORTSC_PLS_SHIFT) |
+                      XHCI_PORTSC_LWS;
+        xhci_op_w32(XHCI_OP_PORTSC(pidx), u0);
+
+        uint64_t u0_start = timer_get_count();
+        uint64_t u0_ticks = timer_get_frequency() / 100; /* 10 ms settle */
+        while (timer_get_count() - u0_start < u0_ticks) { }
+
+        uint32_t final_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+        uint32_t final_pls =
+            (final_sc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+        INFO("xhci: PORTSC[%u] finish-resume for %s (0x%08x -> 0x%08x, pls %u -> %u)",
+             pidx, why, (unsigned)portsc, (unsigned)final_sc,
+             (unsigned)pls, (unsigned)final_pls);
+        if (final_pls != XHCI_PLS_U0) {
+            WARN("xhci: PORTSC[%u] did not reach U0 after finish-resume (%s, portsc=0x%08x)",
+                 pidx, why, (unsigned)final_sc);
+        }
+        return final_sc;
+    }
+
+    return portsc;
 }
 
 static uint32_t xhci_padctl_r32(uint32_t off)
@@ -796,14 +823,16 @@ int xhci_hcd_port_reset(uint8_t port)
         xhci_active_portsc = portsc;
         uint32_t pls =
             (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
-        if (!(portsc & XHCI_PORTSC_PED) || pls != XHCI_PLS_U0) {
+        if (!(portsc & XHCI_PORTSC_PED) ||
+            (pls != XHCI_PLS_U0 && pls != XHCI_PLS_RESUME)) {
             WARN("xhci: inherited reuse path degraded to PORTSC[%u]=0x%08x (ped=%u pls=%u) — falling back to reset-backed recovery",
                  (unsigned)xhci_active_port, (unsigned)portsc,
                  (unsigned)((portsc & XHCI_PORTSC_PED) ? 1u : 0u),
                  (unsigned)pls);
         } else {
-        INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x)",
-             (unsigned)xhci_active_port, (unsigned)xhci_active_portsc);
+        INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x, pls=%u)",
+             (unsigned)xhci_active_port, (unsigned)xhci_active_portsc,
+             (unsigned)pls);
             return 0;
         }
     }
