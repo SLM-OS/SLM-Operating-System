@@ -541,6 +541,52 @@ static void context_switch_unwind(struct hailo_model_slot *slot)
     slot->cs_loaded = false;
 }
 
+/* Walk ccw_actions[] and copy every action with a matching
+ * cfg_channel_index into the tensor buffer `dst` at consecutive
+ * offsets, bounded by `dst_bytes`. Used by the dual-cfg-channel
+ * path in context_switch_load to split MNIST's 28 CCW actions
+ * into a small (cfg_channel_index=1) buffer and a bulk
+ * (cfg_channel_index=0) buffer.
+ *
+ * Bounds-checks every copy against the source CCWS block (via
+ * outer->ccws_size) so a malformed HEF with a large
+ * data_offset_in_blob can't OOB-read past the PMM-allocated model
+ * blob. Destination bounds stop copying early — any remaining
+ * bytes past dst_bytes are silently skipped (the caller sized the
+ * tensor to the summed ch_bytes total, so this is defensive
+ * against the tally itself overflowing).
+ *
+ * Returns copied-byte count on success, a HAILO_ERR_* on a source
+ * bounds-check failure (in which case *dst contents are undefined
+ * and the caller should propagate the error up). */
+static int copy_ccws_for_cfg_channel(
+    const struct hef_info *info,
+    const struct hef_outer_header *outer,
+    const void *model,
+    uint32_t select_cfg_channel_index,
+    uint8_t *dst, uint32_t dst_bytes)
+{
+    const uint8_t *ccws_base = (const uint8_t *)model + outer->ccws_offset;
+    uint32_t off = 0;
+    for (uint32_t i = 0; i < info->ccw_action_count; i++) {
+        const struct hef_ccw_action *a = &info->ccw_actions[i];
+        if (a->cfg_channel_index != select_cfg_channel_index) continue;
+        if (off + a->data_size > dst_bytes) break;   /* dst-bounded */
+        if (a->data_offset_in_blob > outer->ccws_size
+         || a->data_size > outer->ccws_size - a->data_offset_in_blob) {
+            WARN("hailo backend: CCW action %u (ch=%u) out-of-bounds "
+                 "(offset=%u size=%u ccws_size=%lu)",
+                 i, select_cfg_channel_index,
+                 a->data_offset_in_blob, a->data_size,
+                 (unsigned long)outer->ccws_size);
+            return HAILO_ERR_INVAL;
+        }
+        memcpy(dst + off, ccws_base + a->data_offset_in_blob, a->data_size);
+        off += a->data_size;
+    }
+    return (int)off;
+}
+
 /* The full 6-step load sequence. Called from load_model after the
  * slot has been claimed and shapes stored. Returns HAILO_OK on
  * success (slot->cs_loaded=true, resources owned by the slot) or a
@@ -600,7 +646,17 @@ static int context_switch_load(struct hailo_model_slot *slot,
     for (uint32_t i = 0; i < hef->ccw_action_count; i++) {
         uint32_t ci = hef->ccw_actions[i].cfg_channel_index;
         if (ci <= 1) {
-            ch_bytes[ci] += hef->ccw_actions[i].data_size;
+            /* Saturating add — a malformed HEF could otherwise wrap
+             * our u32 accumulator and make `use_dual` or the
+             * downstream alloc compute undersized buffers. Cap at
+             * UINT32_MAX so the tensor allocator refuses cleanly via
+             * its existing size guard. */
+            uint32_t ds = hef->ccw_actions[i].data_size;
+            if (ch_bytes[ci] > UINT32_MAX - ds) {
+                ch_bytes[ci] = UINT32_MAX;
+            } else {
+                ch_bytes[ci] += ds;
+            }
             ch_count[ci]++;
         }
     }
@@ -632,32 +688,12 @@ static int context_switch_load(struct hailo_model_slot *slot,
          * PCIe channel 1 (packed_vdma=1). Secondary (ccw_tensor_1,
          * allocated below) carries cfg_channel_index=0 bulk data on
          * PCIe channel 0 (packed_vdma=0). See earlier comment. */
-        const uint8_t *ccws_base =
-            (const uint8_t *)model + outer->ccws_offset;
         memset(slot->ccw_tensor.cpu_addr, 0, ccw_bytes);
-        uint32_t off_sm = 0;
-        for (uint32_t i = 0; i < hef->ccw_action_count; i++) {
-            const struct hef_ccw_action *a = &hef->ccw_actions[i];
-            if (a->cfg_channel_index != 1) continue;
-            /* Destination (ccw_tensor) and source (ccws block) bounds
-             * check. `data_offset_in_blob` comes from the HEF wire so
-             * a malformed HEF could set it out of range; without the
-             * source check we'd OOB-read past the PMM-allocated model
-             * buffer into adjacent kernel memory. */
-            if (off_sm + a->data_size > ccw_bytes) break;
-            if (a->data_offset_in_blob > outer->ccws_size
-             || a->data_size > outer->ccws_size - a->data_offset_in_blob) {
-                WARN("hailo backend: CCW action %u (ch=1) out-of-bounds "
-                     "(offset=%u size=%u ccws_size=%lu)",
-                     i, a->data_offset_in_blob, a->data_size,
-                     (unsigned long)outer->ccws_size);
-                rc = HAILO_ERR_INVAL;
-                goto fail;
-            }
-            memcpy((uint8_t *)slot->ccw_tensor.cpu_addr + off_sm,
-                   ccws_base + a->data_offset_in_blob, a->data_size);
-            off_sm += a->data_size;
-        }
+        int copied = copy_ccws_for_cfg_channel(hef, outer, model,
+                                               /*cfg_channel_index=*/1,
+                                               slot->ccw_tensor.cpu_addr,
+                                               ccw_bytes);
+        if (copied < 0) { rc = copied; goto fail; }
     } else if (outer->ccws_size > 0) {
         const uint8_t *ccws_base = (const uint8_t *)model + outer->ccws_offset;
         memcpy(slot->ccw_tensor.cpu_addr, ccws_base, outer->ccws_size);
@@ -725,26 +761,10 @@ static int context_switch_load(struct hailo_model_slot *slot,
          * up correctly. */
         slot->ccw_has_second_channel = true;
         memset(slot->ccw_tensor_1.cpu_addr, 0, bulk_bytes);
-        const uint8_t *ccws_base =
-            (const uint8_t *)model + outer->ccws_offset;
-        uint32_t off_bulk = 0;
-        for (uint32_t i = 0; i < hef->ccw_action_count; i++) {
-            const struct hef_ccw_action *a = &hef->ccw_actions[i];
-            if (a->cfg_channel_index != 0) continue;
-            if (off_bulk + a->data_size > bulk_bytes) break;
-            if (a->data_offset_in_blob > outer->ccws_size
-             || a->data_size > outer->ccws_size - a->data_offset_in_blob) {
-                WARN("hailo backend: CCW action %u (ch=0) out-of-bounds "
-                     "(offset=%u size=%u ccws_size=%lu)",
-                     i, a->data_offset_in_blob, a->data_size,
-                     (unsigned long)outer->ccws_size);
-                rc = HAILO_ERR_INVAL;
-                goto fail;
-            }
-            memcpy((uint8_t *)slot->ccw_tensor_1.cpu_addr + off_bulk,
-                   ccws_base + a->data_offset_in_blob, a->data_size);
-            off_bulk += a->data_size;
-        }
+        int copied_bulk = copy_ccws_for_cfg_channel(
+            hef, outer, model, /*cfg_channel_index=*/0,
+            slot->ccw_tensor_1.cpu_addr, bulk_bytes);
+        if (copied_bulk < 0) { rc = copied_bulk; goto fail; }
         hailo_tensor_prepare_for_device(&slot->ccw_tensor_1);
         uint32_t bulk_dc =
             desc_count_for(bulk_bytes, HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE);
@@ -1304,6 +1324,17 @@ static int hailo_backend_load_model(struct inference_device *dev,
                 (unsigned)info.op_count,
                 (unsigned)info.pad_count,
                 (unsigned)info.ccw_action_count);
+
+    /* The parser silently truncates at HEF_PARSER_MAX_CCW_ACTIONS (256)
+     * and sets info.ccw_actions_truncated; a truncated load would stall
+     * at inference with missing microcode and no direct symptom pointing
+     * at the cause. Refuse the load instead so the error is obvious. */
+    if (info.ccw_actions_truncated) {
+        WARN("hailo backend: HEF has more CCW actions than HEF_PARSER_"
+             "MAX_CCW_ACTIONS; load aborted (count=%u)",
+             (unsigned)info.ccw_action_count);
+        return INF_ERR_BAD_MODEL;
+    }
 
     /* 3. Pick the largest pads in each direction. See pick_largest_pads
      * for the multi-head rationale. */
