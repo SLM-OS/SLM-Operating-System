@@ -52,6 +52,7 @@ _Static_assert(sizeof(struct xhci_trb) == 16, "TRB must be 16 bytes");
 /* Slot ID occupies bits 31:24 of control dword on Command Completion events. */
 #define XHCI_TRB_SLOT_SHIFT         24
 #define XHCI_TRB_SLOT_GET(ctrl)     (((ctrl) >> XHCI_TRB_SLOT_SHIFT) & 0xFF)
+#define XHCI_TRB_EP_SHIFT           16
 
 /* Transfer TRB status dword helpers (§6.4.1). */
 #define XHCI_TRB_STATUS_LEN_MASK    0x1FFFFu

@@ -992,6 +992,33 @@ static void xhci_try_eval_ep0_context(struct xhci_device *d, const char *why)
          (unsigned)*e3, (unsigned)*e4);
 }
 
+static void xhci_try_set_tr_deq_ep0(struct xhci_device *d, const char *why)
+{
+    if (d == NULL || d->slot_id == 0)
+        return;
+
+    struct xhci_ring *r = d->ep_rings[XHCI_DCI_EP0];
+    if (r == NULL)
+        return;
+
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+    cmd.param_lo = (uint32_t)(r->phys & 0xFFFFFFFFu) | 0x1U;
+    cmd.param_hi = (uint32_t)(r->phys >> 32);
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_SET_TR_DEQ) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
+        WARN("xhci: SET_TR_DEQ(slot=%u ep0, %s) transport failure",
+             (unsigned)d->slot_id, why ? why : "probe");
+        return;
+    }
+
+    INFO("xhci: SET_TR_DEQ(slot=%u ep0, %s) cc=%u deq=0x%lx",
+         (unsigned)d->slot_id, why ? why : "probe",
+         (unsigned)cc, (unsigned long)r->phys);
+}
+
 static void xhci_try_power_cycle_port(uint8_t pidx, const char *why)
 {
     if (!XHCI_HCC1_PPC(xhci_caps_cached.hcc_params1))
@@ -1257,6 +1284,7 @@ int xhci_hcd_device_open(struct usb_device *dev)
         xhci_patch_inherited_address(d, 2);
     xhci_log_devctx_snapshot(d, "post-address");
     xhci_try_eval_ep0_context(d, "post-address");
+    xhci_try_set_tr_deq_ep0(d, "post-address");
 
     dev->hcd_private = d;
     return 0;
