@@ -243,6 +243,47 @@ static struct xhci_trb *xhci_ring_put(struct xhci_ring *r,
     return xhci_ring_enqueue(r, t);
 }
 
+/*
+ * Publish-order probe for the very first EP0 TRB in a control TD.
+ *
+ * Why: our normal ring helper writes the producer-cycle bit live as part
+ * of enqueue. For the first Setup TRB we were then clearing that bit and
+ * later re-setting it once the rest of the TD was built. That means the
+ * controller can momentarily observe a live Setup TRB and then see it get
+ * retracted again. Keep the first TRB hidden from hardware from the start
+ * instead, then publish it exactly once after the whole TD has been laid
+ * out.
+ */
+static struct xhci_trb *xhci_ring_put_hidden(struct xhci_ring *r,
+                                             const struct xhci_trb *t,
+                                             uint32_t *publish_cycle)
+{
+    if (r == NULL || t == NULL || r->trbs == NULL)
+        return NULL;
+
+    if (r->enqueue == r->num_trbs - 1) {
+        struct xhci_trb *link = &r->trbs[r->enqueue];
+        uint32_t ctrl = link->control & ~XHCI_TRB_CYCLE;
+        ctrl |= (r->cycle_state & 1);
+        link->control = ctrl;
+        r->enqueue = 0;
+        r->cycle_state ^= 1;
+    }
+
+    struct xhci_trb *slot = &r->trbs[r->enqueue];
+    slot->param_lo = t->param_lo;
+    slot->param_hi = t->param_hi;
+    slot->status   = t->status;
+    dmb(oshst);
+    slot->control  = t->control & ~XHCI_TRB_CYCLE;
+
+    if (publish_cycle != NULL)
+        *publish_cycle = r->cycle_state & 1U;
+
+    r->enqueue++;
+    return slot;
+}
+
 static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
 {
     struct xhci_ring *r = d->ep_rings[XHCI_DCI_EP0];
@@ -308,12 +349,10 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
              (unsigned)tmpl.param_lo, (unsigned)tmpl.param_hi,
              (unsigned)tmpl.status, (unsigned)tmpl.control);
     }
-    slot_trb = xhci_ring_put(r, &tmpl);
+    slot_trb = xhci_ring_put_hidden(r, &tmpl, &first_cycle);
     if (slot_trb == NULL) goto fail;
     slot->first_trb_phys = (uintptr_t)slot_trb;
     first_trb = slot_trb;
-    first_cycle = first_trb->control & XHCI_TRB_CYCLE;
-    first_trb->control &= ~XHCI_TRB_CYCLE;
 
     /* 2. Optional Data Stage. */
     if (has_data) {
@@ -361,6 +400,7 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     if (first_trb != NULL) {
         dmb(oshst);
         first_trb->control |= first_cycle;
+        dmb(oshst);
     }
 
     /* Kick EP0. */
