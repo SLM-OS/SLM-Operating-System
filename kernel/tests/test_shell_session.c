@@ -540,6 +540,22 @@ static void test_lua_command_state_persists_per_session(void)
     shell_session_free(s2);
 }
 
+static void test_lua_command_state_does_not_persist_on_console(void)
+{
+    struct task *cur = task_current();
+    TEST_ASSERT_NOT_NULL(cur);
+
+    shell_session_unbind(cur);
+    struct shell_session *console = shell_session_console();
+    TEST_ASSERT_NOT_NULL(console);
+    console->lua = NULL;
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"console_value = 11\""));
+    TEST_ASSERT_NULL(console->lua);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua -e \"assert(console_value == nil)\""));
+    TEST_ASSERT_NULL(console->lua);
+}
+
 static void test_lua_command_arg_table_rebuilt_per_invocation(void)
 {
     struct task *cur = task_current();
@@ -602,6 +618,7 @@ int test_suite_shell_session(void)
 
     RUN_TEST(test_nested_mutating_dispatch_no_deadlock);
     RUN_TEST(test_lua_command_state_persists_per_session);
+    RUN_TEST(test_lua_command_state_does_not_persist_on_console);
     RUN_TEST(test_lua_command_arg_table_rebuilt_per_invocation);
 
     return UNITY_END();

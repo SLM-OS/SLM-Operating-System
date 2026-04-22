@@ -22,12 +22,18 @@
  */
 static int cmd_lua(int argc, char *argv[]) {
     struct shell_session *sess = shell_session_current();
-    lua_State *L = sess ? (lua_State *)sess->lua : NULL;
-    if (sess && !L) {
+    bool cache_state = (sess && sess->id != 0);
+    bool close_on_return = false;
+    lua_State *L = (cache_state && sess) ? (lua_State *)sess->lua : NULL;
+    if (cache_state && sess && !L) {
         L = lua_slm_newstate();
         if (L) {
             sess->lua = L;
         }
+    }
+    if (!cache_state) {
+        L = lua_slm_newstate();
+        close_on_return = (L != NULL);
     }
     if (L == NULL) {
         shell_printf("Failed to initialize Lua\n");
@@ -66,6 +72,10 @@ static int cmd_lua(int argc, char *argv[]) {
         shell_printf("  lua                        - Enter interactive REPL\n");
         shell_printf("  lua -e \"code\"              - Execute code directly\n");
         shell_printf("  lua <filename> [args...]   - Run script with positional args\n");
+    }
+
+    if (close_on_return) {
+        lua_slm_close(L);
     }
 
     return 0;
