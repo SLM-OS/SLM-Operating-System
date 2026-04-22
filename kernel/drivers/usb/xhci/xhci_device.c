@@ -1109,7 +1109,6 @@ int xhci_hcd_device_open(struct usb_device *dev)
     }
     d->slot_id = slot;
     INFO("xhci: slot %u enabled for port %u", slot, d->root_port);
-    xhci_try_reset_device_slot(slot, "post-enable");
 
     /* 2. Build Input Context for ADDRESS_DEVICE and write DCBAA[slot]. */
     xhci_build_input_ctx_for_address(d, dev, ep0->phys);
@@ -1165,6 +1164,7 @@ int xhci_hcd_device_open(struct usb_device *dev)
     if (use_inherited_addr2 && !use_bsr0)
         xhci_patch_inherited_address(d, 2);
     xhci_log_devctx_snapshot(d, "post-address");
+    xhci_try_reset_device_slot(slot, "post-address");
 
     dev->hcd_private = d;
     return 0;
