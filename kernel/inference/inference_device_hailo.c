@@ -50,6 +50,205 @@
 #include "uart.h"
 #include <string.h>
 
+/* Firmware debug log layout (from docs/reference/hailo-fw-operation.c:18-21
+ * and hailo-fw-operation.h:11).
+ *
+ *   BAR4[0x2000]                 APP CPU  { host_offset, chip_offset } + 4088 B data
+ *   BAR4[0x2000 + 0x1000]        CORE CPU { host_offset, chip_offset } + 4088 B data
+ *
+ * The buffer is circular: `chip_offset` advances as fw writes; `host_offset`
+ * is where the host has read up to. Data between them is "ready to read".
+ * Both are 32-bit, naturally aligned at the start of each per-CPU window. */
+#define HAILO_FW_LOG_APP_CPU_OFFSET   (8u * 1024u)     /* 0x2000 */
+#define HAILO_FW_LOG_BUF_SIZE         (4u * 1024u)     /* per-CPU */
+#define HAILO_FW_LOG_CORE_CPU_OFFSET  (HAILO_FW_LOG_APP_CPU_OFFSET + HAILO_FW_LOG_BUF_SIZE)
+#define HAILO_FW_LOG_HEADER_SIZE      8u
+#define HAILO_FW_LOG_DATA_SIZE        (HAILO_FW_LOG_BUF_SIZE - HAILO_FW_LOG_HEADER_SIZE)
+
+/* D2H notification buffer (from hailo-fw-operation.c:19,
+ * hailort-d2h_events.h). Layout:
+ *   u16 is_buffer_in_use
+ *   u16 buffer_len
+ *   u8  buffer[0x370]
+ *
+ * When fw has a notification pending (is_buffer_in_use=1), buffer[] holds
+ * a D2H_EVENT_MESSAGE_t starting with a D2H_EVENT_HEADER_t {version,
+ * sequence, priority, module_id, event_id, parameter_count, payload_length}
+ * — each 32-bit — followed by a typed body per event_id. Event id 12 is
+ * CONTEXT_SWITCH_RUN_TIME_ERROR, which carries {exit_status, batch_index,
+ * context_index, action_index, application_index}. If fw stalled the
+ * inference pipeline it tells us exactly which action/context blew up
+ * via this buffer. */
+#define HAILO_D2H_NOTIFICATION_OFFSET 0x0c80u
+#define HAILO_D2H_EVENT_MAX_SIZE      0x370u
+
+/* Dump one fw CPU's debug log ring via BAR4. `label` is a short tag
+ * ("APP"/"CORE") prepended to each line. Prints up to HAILO_FW_LOG_DATA_SIZE
+ * bytes as raw ASCII with \n → \r\n translation so serial-console parsers
+ * stay happy. Ignores the header's host/chip_offset pair and just dumps
+ * the whole ring — on a healthy boot the circular buffer has wrapped at
+ * least once so contents are always up-to-date. Diagnostic-only; strip
+ * once the Phase 8 inference-submit blocker lifts. */
+static void hailo_fw_dump_log(uint32_t cpu_base_offset, const char *label)
+{
+    if (!hailo_platform || !hailo_platform->bar4_read) return;
+
+    uint32_t header[2] = { 0, 0 };
+    hailo_platform->bar4_read(cpu_base_offset, header, sizeof(header));
+    uart_printf("[fwlog:%s] header host_offset=%u chip_offset=%u\r\n",
+                label, (unsigned)header[0], (unsigned)header[1]);
+
+    static uint32_t log_buf[HAILO_FW_LOG_DATA_SIZE / 4];
+    hailo_platform->bar4_read(cpu_base_offset + HAILO_FW_LOG_HEADER_SIZE,
+                              log_buf, sizeof(log_buf));
+    const char *p = (const char *)log_buf;
+    uart_printf("[fwlog:%s] --- begin ---\r\n", label);
+    char line[128];
+    size_t l = 0;
+    for (size_t i = 0; i < sizeof(log_buf); i++) {
+        char c = p[i];
+        if (c == 0) {
+            if (l > 0) { line[l] = 0; uart_printf("%s\r\n", line); l = 0; }
+            continue;
+        }
+        if (c == '\r') continue;
+        if (c == '\n' || l + 2 >= sizeof(line)) {
+            line[l] = 0;
+            uart_printf("%s\r\n", line);
+            l = 0;
+            continue;
+        }
+        if (c < 0x20 || c > 0x7E) c = '.';
+        line[l++] = c;
+    }
+    if (l > 0) { line[l] = 0; uart_printf("%s\r\n", line); }
+    uart_printf("[fwlog:%s] --- end ---\r\n", label);
+}
+
+/* Decode event_id to a short name so the output doesn't need a cross-
+ * reference to d2h_events.h. Order matches D2H_EVENT_ID_t. */
+static const char *d2h_event_name(uint32_t event_id)
+{
+    switch (event_id) {
+    case 0:  return "ETHERNET_RX_ERROR";
+    case 1:  return "HOST_INFO";
+    case 2:  return "TEMPERATURE_ALARM";
+    case 3:  return "CLOSED_STREAMS";
+    case 4:  return "OVERCURRENT_ALERT";
+    case 5:  return "LCU_ECC_CORRECTABLE";
+    case 6:  return "LCU_ECC_UNCORRECTABLE";
+    case 7:  return "CPU_ECC_ERROR";
+    case 8:  return "CPU_ECC_FATAL";
+    case 9:  return "CS_BREAKPOINT_REACHED";
+    case 10: return "CLOCK_CHANGED";
+    case 11: return "HW_INFER_DONE";
+    case 12: return "CS_RUN_TIME_ERROR";
+    case 13: return "NN_CORE_CRC_ERROR";
+    case 14: return "THROTTLING_CHANGE";
+    default: return "UNKNOWN";
+    }
+}
+
+/* ACK the pending notification by writing 0 to the is_buffer_in_use +
+ * buffer_len u32 at offset 0. Fw is then free to overwrite the buffer
+ * with the next queued event. */
+static void hailo_fw_ack_d2h_notification(void)
+{
+    if (!hailo_platform || !hailo_platform->bar4_write) return;
+    uint32_t zero = 0;
+    hailo_platform->bar4_write(HAILO_D2H_NOTIFICATION_OFFSET, &zero,
+                               sizeof(zero));
+    hailo_platform->mb();
+}
+
+/* Dump the D2H notification buffer. If fw has raised a
+ * CONTEXT_SWITCH_RUN_TIME_ERROR (or similar) we see it here as a
+ * typed D2H_EVENT_MESSAGE_t. `is_buffer_in_use=0` means no pending
+ * notification. Returns true if a notification was pending (and the
+ * buffer has been left in_use — caller may want to ACK). */
+static bool hailo_fw_dump_d2h_notification_once(void)
+{
+    if (!hailo_platform || !hailo_platform->bar4_read) return false;
+
+    /* 32-bit read so bar4_read's alignment check passes. is_buffer_in_use
+     * is the low 16 bits, buffer_len is the high 16. */
+    uint32_t first_word = 0;
+    hailo_platform->bar4_read(HAILO_D2H_NOTIFICATION_OFFSET, &first_word,
+                              sizeof(first_word));
+    uint16_t in_use  = (uint16_t)(first_word & 0xFFFFu);
+    uint16_t buf_len = (uint16_t)(first_word >> 16);
+    uart_printf("[d2h] notification: in_use=%u buffer_len=%u\r\n",
+                (unsigned)in_use, (unsigned)buf_len);
+
+    if (!in_use || buf_len == 0 || buf_len > HAILO_D2H_EVENT_MAX_SIZE) {
+        return in_use ? true : false;
+    }
+
+    /* D2H_EVENT_HEADER_t is 7 × u32 = 28 bytes. */
+    uint32_t hdr[7] = { 0 };
+    uint32_t hdr_bytes = buf_len < sizeof(hdr) ? buf_len : sizeof(hdr);
+    /* Round hdr_bytes up to 4-byte multiple for bar4_read alignment. */
+    hdr_bytes = (hdr_bytes + 3u) & ~3u;
+    hailo_platform->bar4_read(HAILO_D2H_NOTIFICATION_OFFSET + 4u, hdr,
+                              hdr_bytes);
+    uart_printf("[d2h] header: version=%u seq=%u priority=%u module_id=%u "
+                "event_id=%u(%s) param_count=%u payload_len=%u\r\n",
+                (unsigned)hdr[0], (unsigned)hdr[1], (unsigned)hdr[2],
+                (unsigned)hdr[3], (unsigned)hdr[4],
+                d2h_event_name(hdr[4]),
+                (unsigned)hdr[5], (unsigned)hdr[6]);
+
+    /* event_id 12 = CONTEXT_SWITCH_RUN_TIME_ERROR. Body: {exit_status,
+     * batch_index, context_index (u16), action_index (u16),
+     * application_index (u8)}. Packed, 13 bytes total. Read 16 B of
+     * payload and decode the first few fields. */
+    if (buf_len > sizeof(hdr)) {
+        uint32_t body[4] = { 0 };
+        hailo_platform->bar4_read(HAILO_D2H_NOTIFICATION_OFFSET + 4u
+                                      + sizeof(hdr),
+                                  body, sizeof(body));
+        uart_printf("[d2h] body[0..3]: 0x%08x 0x%08x 0x%08x 0x%08x\r\n",
+                    (unsigned)body[0], (unsigned)body[1],
+                    (unsigned)body[2], (unsigned)body[3]);
+        if (hdr[4] == 12) {   /* CONTEXT_SWITCH_RUN_TIME_ERROR */
+            uint32_t exit_status  = body[0];
+            uint32_t batch_index  = body[1];
+            uint16_t context_idx  = (uint16_t)(body[2] & 0xFFFFu);
+            uint16_t action_idx   = (uint16_t)(body[2] >> 16);
+            uint8_t  app_idx      = (uint8_t)(body[3] & 0xFFu);
+            uart_printf("[d2h] CS_RUNTIME_ERROR: exit_status=0x%08x "
+                        "batch=%u ctx=%u action=%u app=%u\r\n",
+                        (unsigned)exit_status, (unsigned)batch_index,
+                        (unsigned)context_idx, (unsigned)action_idx,
+                        (unsigned)app_idx);
+        }
+    }
+    return true;
+}
+
+/* Drain pending notifications: for each one, dump it, ACK the buffer,
+ * then delay a little so fw can write the next queued event before we
+ * re-check. Bounded by `max_events` so we don't loop forever on a fw
+ * that re-writes the same event repeatedly. */
+static void hailo_fw_drain_d2h_notifications(uint32_t max_events)
+{
+    for (uint32_t i = 0; i < max_events; i++) {
+        bool had = hailo_fw_dump_d2h_notification_once();
+        if (!had) {
+            uart_printf("[d2h] drain: %u events processed, buffer now "
+                        "empty\r\n", (unsigned)i);
+            return;
+        }
+        hailo_fw_ack_d2h_notification();
+        /* Give fw a moment to write the next event. */
+        if (hailo_platform->udelay) {
+            hailo_platform->udelay(5000u);  /* 5 ms */
+        }
+    }
+    uart_printf("[d2h] drain: hit max_events=%u cap; more may be queued\r\n",
+                (unsigned)max_events);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Model slot table                                                            */
 /* -------------------------------------------------------------------------- */
@@ -1028,6 +1227,14 @@ static int hailo_backend_run(struct inference_device *dev,
                     (unsigned long)probe_us);
     }
 
+    /* #253: drain any pending D2H notifications BEFORE the submit so
+     * fw can post a CONTEXT_SWITCH_RUN_TIME_ERROR (or similar) after
+     * processing our transfer. Without this drain, a stale boot-time
+     * ECC notification can sit in the buffer indefinitely, blocking
+     * fw from delivering the event we actually want to see. */
+    uart_printf("[d2h] pre-submit drain:\r\n");
+    hailo_fw_drain_d2h_notifications(4);
+
     /* Copy caller's input into the pre-allocated DMA buffer +
      * cache-clean so the device picks up the fresh bytes.
      * Corresponding invalidate+copy for output happens after submit. */
@@ -1103,6 +1310,16 @@ static int hailo_backend_run(struct inference_device *dev,
     if (rc != HAILO_OK) {
         uart_printf("[hailo] run: IN submit_and_wait rc=%d (avail=%u)\r\n",
                     rc, (unsigned)in_num_avail);
+        /* #253: dump fw debug log + D2H notification buffer on submit
+         * failure. The D2H notification contains CONTEXT_SWITCH_RUN_TIME_ERROR
+         * events that carry {exit_status, context_idx, action_idx} — exactly
+         * what we want to know when fw's inference pipeline stalled. The
+         * debug log is compact binary so less immediately useful, kept
+         * for offset-advancement signals (chip_offset > last seen == fw
+         * still writing). */
+        hailo_fw_drain_d2h_notifications(8);
+        hailo_fw_dump_log(HAILO_FW_LOG_CORE_CPU_OFFSET, "CORE");
+        hailo_fw_dump_log(HAILO_FW_LOG_APP_CPU_OFFSET,  "APP");
         goto run_out;
     }
     uart_printf("[hailo] run: IN ok in %lu us\r\n",
