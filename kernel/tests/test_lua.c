@@ -1995,6 +1995,51 @@ static void test_slm_msg_subscribe_error_isolation(void)
 }
 
 /*
+ * Test: callbacks mutating subscriptions during slm.msg_drain must not
+ * cause later callbacks from the old snapshot to fire spuriously.
+ */
+static void test_slm_msg_subscribe_mutation_during_drain(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "events = {}\n"
+        "local h2 = nil\n"
+        "local h3 = nil\n"
+        "local h1 = slm.msg_subscribe('/lua/mut', function()\n"
+        "    table.insert(events, 'first')\n"
+        "    if h2 then\n"
+        "        assert(slm.msg_unsubscribe(h2) == true)\n"
+        "        h2 = nil\n"
+        "    end\n"
+        "    if not h3 then\n"
+        "        h3 = slm.msg_subscribe('/lua/mut', function()\n"
+        "            table.insert(events, 'new')\n"
+        "        end)\n"
+        "        assert(h3)\n"
+        "    end\n"
+        "end)\n"
+        "h2 = slm.msg_subscribe('/lua/mut', function()\n"
+        "    table.insert(events, 'second')\n"
+        "end)\n"
+        "assert(h1 and h2)\n"
+        "slm.msg_publish('/lua/mut', 'first')\n"
+        "slm.yield()\n"
+        "assert(#events == 1 and events[1] == 'first', 'stale callback fired during first drain')\n"
+        "slm.msg_publish('/lua/mut', 'second')\n"
+        "slm.yield()\n"
+        "assert(#events == 3, 'expected first+new on second drain')\n"
+        "assert(events[2] == 'first')\n"
+        "assert(events[3] == 'new')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
  * Test: slm.msg_subscribe argument validation.
  */
 static void test_slm_msg_subscribe_bad_args(void)
@@ -3198,6 +3243,7 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_msg_subscribe_close_one_state_preserves_other);
     RUN_TEST(test_slm_msg_subscribe_wildcard);
     RUN_TEST(test_slm_msg_subscribe_error_isolation);
+    RUN_TEST(test_slm_msg_subscribe_mutation_during_drain);
     RUN_TEST(test_slm_msg_subscribe_bad_args);
     /* #211 ai_sched_decision */
     RUN_TEST(test_slm_ai_sched_decision);

@@ -698,8 +698,10 @@ QEMU_TEST_MEMORY := $(QEMU_MEMORY)
 # CPU limit for QEMU process — prevents a runaway busy-spin test from
 # pegging all host cores for the full timeout duration.
 QEMU_CPU_LIMIT := 200%
-# Wrapper to enforce memory and CPU limits (requires systemd --user)
-QEMU_GUARD := systemd-run --user --scope -q -p MemoryMax=$(QEMU_MEM_LIMIT) -p CPUQuota=$(QEMU_CPU_LIMIT)
+# Wrapper to enforce memory and CPU limits when systemd --user is available.
+# On hosts without a user systemd session (containers, macOS, WSL, many SSH
+# environments), fall back to launching QEMU directly.
+QEMU_GUARD := $(shell if command -v systemd-run >/dev/null 2>&1 && systemd-run --user --scope -q true >/dev/null 2>&1; then printf '%s' "systemd-run --user --scope -q -p MemoryMax=$(QEMU_MEM_LIMIT) -p CPUQuota=$(QEMU_CPU_LIMIT)"; fi)
 
 # Build kernel with ENABLE_BOOT_TESTS (runs tests at boot and exits)
 .PHONY: kernel-test

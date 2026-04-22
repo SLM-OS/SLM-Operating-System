@@ -747,8 +747,8 @@ static void lua_msg_drain(lua_State *L)
      * a tight loop themselves. */
 #define LUA_MSG_DRAIN_BATCH 256
     for (int guard = 0; guard < LUA_MSG_DRAIN_BATCH; guard++) {
-        int refs[LUA_MSG_MAX_SUBS];
-        int ref_count = 0;
+        int handles[LUA_MSG_MAX_SUBS];
+        int handle_count = 0;
         char topic_buf[LUA_MSG_TOPIC_LEN];
         const char *data = msg_router_receive(component_idx, topic_buf);
         if (!data) break;
@@ -758,12 +758,33 @@ static void lua_msg_drain(lua_State *L)
             struct lua_msg_sub *s = &lua_msg_subs[i];
             if (!s->active || s->L != L) continue;
             if (!lua_msg_topic_matches(s, topic_buf)) continue;
-            refs[ref_count++] = s->ref;
+            handles[handle_count++] = s->handle;
         }
         spin_unlock_irqrestore(&lua_msg_subs_lock, flags);
 
-        for (int i = 0; i < ref_count; i++) {
-            lua_rawgeti(L, LUA_REGISTRYINDEX, refs[i]);
+        for (int i = 0; i < handle_count; i++) {
+            int ref = LUA_NOREF;
+
+            flags = spin_lock_irqsave(&lua_msg_subs_lock);
+            for (int j = 0; j < LUA_MSG_MAX_SUBS; j++) {
+                struct lua_msg_sub *s = &lua_msg_subs[j];
+                if (!s->active || s->L != L) continue;
+                if (s->handle != handles[i]) continue;
+                if (!lua_msg_topic_matches(s, topic_buf)) continue;
+                ref = s->ref;
+                break;
+            }
+            spin_unlock_irqrestore(&lua_msg_subs_lock, flags);
+
+            if (ref == LUA_NOREF) {
+                continue;
+            }
+
+            lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+            if (!lua_isfunction(L, -1)) {
+                lua_pop(L, 1);
+                continue;
+            }
             lua_pushstring(L, topic_buf);
             lua_pushstring(L, data);
             if (lua_pcall(L, 2, 0, 0) != LUA_OK) {
