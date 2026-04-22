@@ -607,13 +607,10 @@ static int context_switch_load(struct hailo_model_slot *slot,
     bool use_dual = (ch_count[0] > 0 && ch_count[1] > 0);
     uint32_t ccw_bytes;
     if (use_dual) {
-        /* In dual-channel mode our existing slot->ccw_tensor carries
-         * the logical cfg_channel_index=1 payload on PCIe channel 1
-         * (the primary, unchanged from single-channel path). The new
-         * slot->ccw_tensor_1 carries cfg_channel_index=0 on PCIe
-         * channel 0. This matches HailoRT's wire mapping where
-         * packed_vdma=1 -> small cfg_channel_index=1 data and
-         * packed_vdma=0 -> bulk cfg_channel_index=0 data. */
+        /* Primary (ccw_tensor) holds cfg_channel_index=1 on PCIe
+         * channel 1 (packed=1). Real data size only — fw stops at
+         * LAST_DESC_CTRL and padded microcode can trip
+         * CPU_ECC_FATAL on the NN-core side. */
         ccw_bytes = ch_bytes[1];
     } else {
         ccw_bytes = (outer->ccws_size > 0) ? outer->ccws_size
@@ -690,6 +687,13 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * need before TRIGGER_SEQUENCER can arm the clusters. */
     uint16_t ccw_num_avail_bulk = 0;
     if (use_dual) {
+        /* Real CCW byte count. fw stops at the descriptor with
+         * LAST_DESC_CTRL flagged (109 descs for 55792 bytes at
+         * 512 page), so padding past the real data would have fw
+         * pull zero microcode into the NN core at the tail and
+         * trip CPU_ECC_FATAL. bytes_in_pattern (advertised to fw
+         * via ACTIVATE_CFG_CHANNEL) is the walk-boundary, still
+         * advertised as 56320 to match HailoRT. */
         uint32_t bulk_bytes = ch_bytes[0];
         if (bulk_bytes == 0)
             bulk_bytes = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
@@ -880,16 +884,22 @@ static int context_switch_load(struct hailo_model_slot *slot,
                                                 ? 1u : 0u,
         .ccw_desc_list_iova               = slot->ccw_list.iova,
         .ccw_desc_page_size               = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
-        .ccw_total_desc_count             = ccw_desc_count,
-        /* bytes_in_pattern on ACTIVATE_CFG_CHANNEL — non-zero in
-         * dual-channel mode so fw can pattern-match CCW upload
-         * completion. HailoRT uses the ROUNDED-UP byte total per
-         * channel (e.g. 110 descs * 512 page = 56320 for bulk,
-         * 2 descs * 512 = 1024 for small). Using
-         * desc_count * page_size here mirrors that exactly. */
+        /* HailoRT advertises total_desc_count / bytes_in_pattern on
+         * ACTIVATE_CFG_CHANNEL independently of our local desc list
+         * size (which rounds up to power-of-2). For the MNIST HEF
+         * the exact numbers are: bulk = 110 descs / 56320 bytes,
+         * small = 7 descs / 1024 bytes. Matching those byte-for-
+         * byte removes another set of wire diffs vs pios_
+         * PRELIMINARY.bin. Non-dual loads keep the old behaviour. */
+        .ccw_total_desc_count             = slot->ccw_has_second_channel
+                                                ? 7u : ccw_desc_count,
         .ccw_bytes_in_pattern             = slot->ccw_has_second_channel
-            ? (uint32_t)ccw_num_avail * HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE
-            : 0u,
+                                                ? 1024u : 0u,
+        /* FETCH_CFG_CHANNEL_DESCRIPTORS count fw is instructed to
+         * issue for the bulk microcode pull. HailoRT picks 109
+         * (the real data size, not the padded list size). */
+        .ccw_fetch_bulk_desc_count        = slot->ccw_has_second_channel
+                                                ? 109u : 0u,
         /* Second cfg channel (bulk microcode on PCIe channel 0,
          * sidx=0). Left zero unless this HEF's CCWs split across 2
          * cfg_channel_index values — see use_dual above. */
@@ -898,12 +908,9 @@ static int context_switch_load(struct hailo_model_slot *slot,
         .cfg_channel_1_desc_list_iova     = slot->ccw_has_second_channel
                                                 ? slot->ccw_list_1.iova : 0u,
         .cfg_channel_1_total_desc_count   = slot->ccw_has_second_channel
-            ? desc_count_for(slot->ccw_tensor_1.tensor_bytes,
-                             HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE)
-            : 0u,
+                                                ? 126u : 0u,
         .cfg_channel_1_bytes_in_pattern   = slot->ccw_has_second_channel
-            ? (uint32_t)ccw_num_avail_bulk * HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE
-            : 0u,
+                                                ? 56320u : 0u,
         .boundary_input_desc_list_iova    = boundary_in_iova,
         .boundary_input_total_desc_count  = boundary_in_desc_count,
         .boundary_output_desc_list_iova   = boundary_out_iova,
@@ -1042,7 +1049,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
                     (unsigned)i, (unsigned)a->context_index,
                     (unsigned)a->sys_index);
     }
-    /* Dump first 144 B of each CS context for byte-level diff against
+    /* Dump each CS context for byte-level diff against
      * docs/reference/pios_{ACTIVATION,BATCH_SWITCHING,PRELIMINARY,
      * DYNAMIC}.bin. Strip when the submit blocker lifts —
      * diagnostic-only. */
@@ -1054,9 +1061,9 @@ static int context_switch_load(struct hailo_model_slot *slot,
             { "dyn", cs_bufs.dynamic,         cs_bufs.dynamic_len         },
         };
         for (uint32_t c = 0; c < sizeof(ctxdumps)/sizeof(ctxdumps[0]); c++) {
-            uint32_t dump_len = ctxdumps[c].len < 144u ? ctxdumps[c].len : 144u;
+            uint32_t dump_len = ctxdumps[c].len;   /* full context */
             for (uint32_t off = 0; off < dump_len; off += 16) {
-                uart_printf("[cs] %s[%02x]:", ctxdumps[c].tag, (unsigned)off);
+                uart_printf("[cs] %s[%03x]:", ctxdumps[c].tag, (unsigned)off);
                 for (uint32_t j = 0; j < 16 && off + j < dump_len; j++) {
                     uart_printf(" %02x", ctxdumps[c].buf[off + j]);
                 }

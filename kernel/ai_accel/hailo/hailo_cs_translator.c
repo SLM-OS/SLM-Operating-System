@@ -525,7 +525,7 @@ static const uint8_t MNIST_SEQ_CFG_CLUSTER_1[43] = {
     0x00, 0xc0, 0x7f, 0x21, 0x00, 0x00, 0x00, 0x38,
     0x00, 0x00, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0xf0, 0x0f, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00,
 };
@@ -664,15 +664,10 @@ static int translate_preliminary_mnist_arming(
 
     if (dual) {
         /* Bulk CCW pull: one more desc on the small channel, then
-         * (total-1) descs on the bulk channel. HailoRT picks 109
-         * on the bulk side out of the 110 descs its list holds,
-         * saving one for the initial handshake above. Mirror the
-         * same subtraction here.
-         *
-         * Clamp to u16 on the wire; our CCW bulk is only ~110
-         * descs anyway so clamping never triggers in practice. */
-        uint32_t bulk_descs = cfg->cfg_channel_1_total_desc_count;
-        if (bulk_descs > 0) bulk_descs -= 1;
+         * cfg->ccw_fetch_bulk_desc_count descs on the bulk channel.
+         * HailoRT picks the real data-size count (109 for MNIST's
+         * 55792 bytes), not the pow2-rounded list size. */
+        uint32_t bulk_descs = cfg->ccw_fetch_bulk_desc_count;
         if (bulk_descs > UINT16_MAX) bulk_descs = UINT16_MAX;
 
         struct hailo_cs_act_fetch_cfg_channel_descriptors bulk_fetch[2] = {

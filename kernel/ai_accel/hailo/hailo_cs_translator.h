@@ -166,6 +166,14 @@ struct hailo_cs_translate_cfg {
      * sequence relies on matching HailoRT's non-zero values. */
     uint32_t ccw_bytes_in_pattern;
 
+    /* #253 Phase 8: number of descs the SECOND
+     * FETCH_CFG_CHANNEL_DESCRIPTORS in PRELIMINARY should request
+     * on the bulk cfg channel. HailoRT uses the real data size
+     * (e.g. 109 descs for 55792 bytes of MNIST microcode), not the
+     * pow2-rounded list size. Set to 0 on non-dual loads — the
+     * second FETCH is gated on use_dual anyway. */
+    uint32_t ccw_fetch_bulk_desc_count;
+
     /* #253 Phase 8: second cfg channel for HEFs that split their CCW
      * actions across two cfg_channel_index values (MNIST does). The
      * first cfg channel (config_vdma_channel / ccw_desc_list_iova /
