@@ -84,6 +84,8 @@ static struct xhci_device xhci_dev_pool[2];
 static struct xhci_ring xhci_ring_pool[XHCI_DEV_MAX_RINGS];
 static bool             xhci_ring_in_use[XHCI_DEV_MAX_RINGS];
 
+static void xhci_try_power_cycle_port(uint8_t pidx, const char *why);
+
 static struct xhci_ring *xhci_ring_pool_alloc(void)
 {
     for (unsigned i = 0; i < XHCI_DEV_MAX_RINGS; i++) {
@@ -757,6 +759,7 @@ int xhci_hcd_port_reset(uint8_t port)
     if (force_connected_disabled_reset) {
         INFO("xhci: forcing root-port reset on Linux-detached PORTSC[%u] (0x%08x)",
              (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_try_power_cycle_port(xhci_active_port, "pre-reset stale-port");
     }
 
     uint8_t pidx = xhci_active_port;
@@ -840,18 +843,6 @@ int xhci_hcd_port_reset(uint8_t port)
                 WARN("xhci: PORTSC[%u] reset left PED=0 (0x%08x)%s",
                      pidx, (unsigned)restored_sc,
                      attempt < 3 ? " — retrying" : "");
-                if (attempt == 3) {
-                    /*
-                     * If bus reset never actually re-enables the port,
-                     * the device may still be sitting at Linux's old
-                     * address rather than at USB address 0. On nano-2
-                     * the inherited Realtek hub is address 2 under Linux,
-                     * so bias the subsequent fallback open path toward
-                     * that address/state and see whether EP0 setup can
-                     * finally reach the device.
-                     */
-                    xhci_force_inherited_addr2_on_open = true;
-                }
                 break;
             }
             if (timer_get_count() - start >= ticks) {
@@ -999,6 +990,36 @@ static void xhci_try_eval_ep0_context(struct xhci_device *d, const char *why)
          (unsigned)*xhci_in_control_dw(d->input_ctx, 1),
          (unsigned)*e0, (unsigned)*e1, (unsigned)*e2,
          (unsigned)*e3, (unsigned)*e4);
+}
+
+static void xhci_try_power_cycle_port(uint8_t pidx, const char *why)
+{
+    if (!XHCI_HCC1_PPC(xhci_caps_cached.hcc_params1))
+        return;
+
+    uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+    if ((portsc & XHCI_PORTSC_PP) == 0) {
+        INFO("xhci: PORTSC[%u] power-cycle skipped (%s, pp=0, portsc=0x%08x)",
+             (unsigned)pidx, why ? why : "probe", (unsigned)portsc);
+        return;
+    }
+
+    uint32_t off = portsc & ~(XHCI_PORTSC_PP | XHCI_PORTSC_RW1CS_MASK);
+    xhci_op_w32(XHCI_OP_PORTSC(pidx), off);
+    uint64_t start = timer_get_count();
+    uint64_t ticks = timer_get_frequency() / 20; /* 50 ms */
+    while (timer_get_count() - start < ticks) { }
+    uint32_t after_off = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+
+    uint32_t on = (after_off & ~XHCI_PORTSC_RW1CS_MASK) | XHCI_PORTSC_PP;
+    xhci_op_w32(XHCI_OP_PORTSC(pidx), on);
+    start = timer_get_count();
+    while (timer_get_count() - start < ticks) { }
+    uint32_t after_on = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+
+    INFO("xhci: PORTSC[%u] power-cycle (%s) 0x%08x -> off 0x%08x -> on 0x%08x",
+         (unsigned)pidx, why ? why : "probe",
+         (unsigned)portsc, (unsigned)after_off, (unsigned)after_on);
 }
 
 /*

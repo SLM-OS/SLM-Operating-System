@@ -166,6 +166,26 @@ static bool xhci_urb_is_get_descriptor(const struct usb_urb *urb)
            urb->setup.bRequest == USB_REQ_GET_DESCRIPTOR;
 }
 
+static void xhci_prepare_first_control_transfer(const struct usb_urb *urb,
+                                                const struct xhci_device *d)
+{
+    if (urb == NULL || d == NULL)
+        return;
+    if (!xhci_urb_is_get_descriptor(urb))
+        return;
+
+    uint32_t before = xhci_op_r32(XHCI_OP_USBSTS);
+    int drained = xhci_event_ring_drain();
+    uint32_t ack = before & (XHCI_STS_EINT | XHCI_STS_PCD);
+    if (ack != 0)
+        xhci_op_w32(XHCI_OP_USBSTS, ack);
+    uint32_t after = xhci_op_r32(XHCI_OP_USBSTS);
+
+    INFO("xhci: pre-EP0 cleanup slot=%u drained=%d usbsts=0x%08x ack=0x%08x -> 0x%08x",
+         (unsigned)d->slot_id, drained,
+         (unsigned)before, (unsigned)ack, (unsigned)after);
+}
+
 static void xhci_log_control_urb(const char *tag, const struct usb_urb *urb,
                                  const struct xhci_urb_slot *slot,
                                  uintptr_t event_trb_phys,
@@ -272,6 +292,8 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
              (unsigned)has_data,
              (unsigned)data_in);
     }
+
+    xhci_prepare_first_control_transfer(urb, d);
 
     struct xhci_trb tmpl;
     struct xhci_trb *slot_trb;
