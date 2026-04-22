@@ -380,6 +380,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
         rc = HAILO_ERR_IO;
         goto fail;
     }
+    uint16_t ccw_num_avail = (uint16_t)programmed;   /* N descs to submit */
     cs_load_stage_set(13);
 
     /* Step 2: boundary tensors + desc lists — only for pads the HEF
@@ -608,6 +609,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
             goto fail;
         }
         cs_load_stage_set(61 + (int)i * 2);
+
     }
 
     cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
@@ -618,6 +620,47 @@ static int context_switch_load(struct hailo_model_slot *slot,
     if (rc != HAILO_OK) {
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(ENABLED) failed (rc=%d)", rc);
         goto fail;
+    }
+
+    /* #253: CHANGE_STATUS(ENABLED) returns synchronously but fw's
+     * action-list processing (ACTIVATION → BATCH_SWITCHING →
+     * PRELIMINARY → DYNAMIC) continues asynchronously. Fw programs
+     * the CFG channel's regs (CONTROL=START, depth, iova) while
+     * processing ACTIVATION/PRELIMINARY — before ENABLED the channel
+     * is all zeros, writes don't stick.
+     *
+     * Poll CFG ch base_dword until CONTROL=START lights up, then
+     * write num_avail = ccw_num_avail so the engine fetches the
+     * programmed descriptors. Wait for num_proc to catch up: when
+     * it equals num_avail the CCW DMA pull is complete, which is
+     * what PRELIMINARY's FETCH_CFG_CHANNEL_DESCRIPTORS was waiting
+     * for. Only then is fw's inference pipeline ready to process
+     * the first boundary submit. Skipping this step leaves fw
+     * blocked behind unloaded CCWs and every H2D submit times out
+     * with num_proc=0. */
+    cs_load_stage_set(72);
+    {
+        const uint8_t cfg_ch = HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL;
+        int arm_rc = hailo_vdma_channel_wait_armed(cfg_ch, 500000u /* 500 ms */);
+        if (arm_rc != HAILO_OK) {
+            WARN("hailo backend: CFG channel %u never armed after "
+                 "ENABLED (rc=%d)", cfg_ch, arm_rc);
+            cs_load_stage_set(830072);
+            rc = arm_rc;
+            goto fail;
+        }
+        cs_load_stage_set(73);
+
+        int sub_rc = hailo_vdma_submit_and_wait(
+            cfg_ch, ccw_num_avail, 2000000u /* 2 s */);
+        if (sub_rc != HAILO_OK) {
+            WARN("hailo backend: CFG channel submit (avail=%u) "
+                 "failed (rc=%d)", (unsigned)ccw_num_avail, sub_rc);
+            cs_load_stage_set(830000 + (sub_rc < 0 ? -sub_rc : sub_rc));
+            rc = sub_rc;
+            goto fail;
+        }
+        cs_load_stage_set(74);
     }
 
     cs_load_stage_set(71);
@@ -998,7 +1041,16 @@ static int hailo_backend_run(struct inference_device *dev,
     /* Phase 8 #253: dump programmed descriptors + channel regs so we
      * can compare byte-for-byte against HailoRT's reference output.
      * Runs once per hailo_backend_run call; `hailo runmodel <h> 1`
-     * gives exactly one dump per inference. Strip when resolved. */
+     * gives exactly one dump per inference. Strip when resolved.
+     *
+     * Also dumps the CONFIG channel (ch 1) so we can see whether the
+     * CCW upload actually advanced num_proc to total_desc_count — if
+     * it's still at 0, PRELIMINARY's FETCH_CFG_CHANNEL_DESCRIPTORS
+     * never completed, which would stall the whole inference
+     * pipeline even though SET_CONTEXT_INFO(PRELIMINARY) returned
+     * rc=0 (the RPC acknowledges "got it", not "done"). */
+    hailo_vdma_dump_channel_regs(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL,
+                                 "CFG pre-submit");
     hailo_vdma_dump_desc_list(&slot->boundary_in_list,  "IN",  4);
     hailo_vdma_dump_channel_regs(in_channel,  "IN pre-submit");
     hailo_vdma_dump_desc_list(&slot->boundary_out_list, "OUT", 4);

@@ -449,10 +449,16 @@ void hailo_vdma_dump_desc_list(const struct hailo_vdma_desc_list *list,
     }
 }
 
-void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label)
+/* Dump one 16-byte register block (host-side OR device-side) with
+ * the BASE_DWORD decoded into its named subfields. `side_offset` is
+ * 0 for the block at `channel_base + 0` and 0x10 for the block at
+ * `+0x10`. Which side that corresponds to (host vs device) depends
+ * on the channel's direction: H2D (ch 0..15) puts host-side at +0
+ * and device-side at +0x10; D2H (ch 16..31) swaps them. */
+static void dump_channel_block(uint8_t channel_index, uint32_t side_offset,
+                               const char *block_label)
 {
-    if (!hailo_platform || channel_index >= HAILO_VDMA_MAX_CHANNELS) return;
-    uint32_t base = channel_base(channel_index);
+    uint32_t base = channel_base(channel_index) + side_offset;
     uint32_t base_dw = hailo_platform->read32(HAILO_BAR_VDMA,
         base + HAILO_VDMA_CHANNEL_BASE_DWORD);
     uint32_t proc_dw = hailo_platform->read32(HAILO_BAR_VDMA,
@@ -461,11 +467,13 @@ void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label)
         base + HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L);
     uint32_t addr_h  = hailo_platform->read32(HAILO_BAR_VDMA,
         base + HAILO_VDMA_CHANNEL_ADDR_H);
-    uart_printf("[chan] %s ch=%u base=0x%08x (ctrl=0x%02x data_id=%u "
-                "depth=%u num_avail=%u) proc=0x%08x (proc=%u ongoing=%u) "
-                "aligned_addr_l=0x%08x addr_h=0x%08x\r\n",
-                label ? label : "",
-                (unsigned)channel_index, (unsigned)base_dw,
+    uart_printf("[chan] %s ch=%u +0x%02x base=0x%08x "
+                "(ctrl=0x%02x did=%u depth=%u avail=%u) "
+                "proc=0x%08x (proc=%u ongoing=%u) "
+                "addr_l=0x%08x addr_h=0x%08x\r\n",
+                block_label,
+                (unsigned)channel_index, (unsigned)side_offset,
+                (unsigned)base_dw,
                 (unsigned)(base_dw & 0xFFu),
                 (unsigned)((base_dw >> HAILO_VDMA_CHANNEL_DATA_ID_SHIFT) & 0x7u),
                 (unsigned)((base_dw >> HAILO_VDMA_CHANNEL_DESC_DEPTH_SHIFT) & 0xFu),
@@ -474,4 +482,31 @@ void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label)
                 (unsigned)(proc_dw & 0xFFFFu),
                 (unsigned)(proc_dw >> 16),
                 (unsigned)addr_l, (unsigned)addr_h);
+}
+
+int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us)
+{
+    if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
+    if (!hailo_platform) return HAILO_ERR_NODEV;
+
+    const uint32_t poll_us = 100u;
+    uint32_t elapsed = 0;
+    while (elapsed < timeout_us) {
+        uint32_t base = channel_read_base_dword(channel_index);
+        if ((base & 0xFFu) == HAILO_VDMA_CTRL_START) return HAILO_OK;
+        hailo_platform->udelay(poll_us);
+        elapsed += poll_us;
+    }
+    return HAILO_ERR_TIMEOUT;
+}
+
+void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label)
+{
+    if (!hailo_platform || channel_index >= HAILO_VDMA_MAX_CHANNELS) return;
+    /* Dump both halves of the channel's 32-byte window. Direction
+     * labels (host/device) are inferred from HAILO_PCIE_DMA_SRC_CHANNELS_
+     * BITMASK=0x0000FFFF at the call site; here we just say "+0x00"
+     * and "+0x10" so readers can decode against the direction. */
+    dump_channel_block(channel_index, 0x00u, label ? label : "");
+    dump_channel_block(channel_index, 0x10u, label ? label : "");
 }

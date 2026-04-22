@@ -274,4 +274,14 @@ void hailo_vdma_dump_desc_list(const struct hailo_vdma_desc_list *list,
                                uint32_t max_descs);
 void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label);
 
+/*
+ * Poll `channel_index` until its CONTROL byte reads START (0x01), or
+ * `timeout_us` elapses. Used by the context-switch load path to know
+ * when fw has finished processing ACTIVATION/PRELIMINARY and armed
+ * the channel — before that, MMIO writes to the channel's regs don't
+ * stick (base_dword reads back as 0). Returns HAILO_OK on arm,
+ * HAILO_ERR_TIMEOUT on expiry, HAILO_ERR_INVAL for bad args.
+ */
+int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us);
+
 #endif /* AI_ACCEL_HAILO_VDMA_H */
