@@ -2820,8 +2820,11 @@ static void test_cs_translate_activation_emits_open_boundary_input(void)
     uint32_t bytes_in_pattern;
     memcpy(&bytes_in_pattern, out.activation + 26, 4);
     TEST_ASSERT_EQUAL_UINT32(0x0400u, bytes_in_pattern);
-    /* stream_index @ 30, network_index @ 31, periph @ 32, frame @ 34. */
-    TEST_ASSERT_EQUAL_UINT8(0, out.activation[30]);   /* stream_index */
+    /* stream_index @ 30, network_index @ 31, periph @ 32, frame @ 34.
+     * stream_index must be the pad's sys_index (7 here), not a
+     * 0-based counter — fw correlates this with DYNAMIC's
+     * FETCH_DATA_FROM_VDMA_CHANNEL.stream_index, also sys_index. */
+    TEST_ASSERT_EQUAL_UINT8(7, out.activation[30]);   /* stream_index */
     TEST_ASSERT_EQUAL_UINT8(0, out.activation[31]);   /* network_index */
     uint16_t periph; memcpy(&periph, out.activation + 32, 2);
     TEST_ASSERT_EQUAL_UINT16(0x0400, periph);

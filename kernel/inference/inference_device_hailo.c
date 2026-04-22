@@ -883,18 +883,26 @@ static int context_switch_load(struct hailo_model_slot *slot,
                     (unsigned)i, (unsigned)a->context_index,
                     (unsigned)a->sys_index);
     }
-    /* Dump the first 144 bytes of DYNAMIC for byte-level diff against
-     * docs/reference/pios_DYNAMIC.bin. Strip when the submit blocker
-     * lifts — diagnostic-only. */
+    /* Dump first 144 B of each CS context for byte-level diff against
+     * docs/reference/pios_{ACTIVATION,BATCH_SWITCHING,PRELIMINARY,
+     * DYNAMIC}.bin. Strip when the submit blocker lifts —
+     * diagnostic-only. */
     {
-        uint32_t dump_len = cs_bufs.dynamic_len < 144u
-            ? cs_bufs.dynamic_len : 144u;
-        for (uint32_t off = 0; off < dump_len; off += 16) {
-            uart_printf("[cs] dyn[%02x]:", (unsigned)off);
-            for (uint32_t j = 0; j < 16 && off + j < dump_len; j++) {
-                uart_printf(" %02x", cs_bufs.dynamic[off + j]);
+        const struct { const char *tag; const uint8_t *buf; uint32_t len; } ctxdumps[] = {
+            { "act", cs_bufs.activation,      cs_bufs.activation_len      },
+            { "bs",  cs_bufs.batch_switching, cs_bufs.batch_switching_len },
+            { "pre", cs_bufs.preliminary,     cs_bufs.preliminary_len     },
+            { "dyn", cs_bufs.dynamic,         cs_bufs.dynamic_len         },
+        };
+        for (uint32_t c = 0; c < sizeof(ctxdumps)/sizeof(ctxdumps[0]); c++) {
+            uint32_t dump_len = ctxdumps[c].len < 144u ? ctxdumps[c].len : 144u;
+            for (uint32_t off = 0; off < dump_len; off += 16) {
+                uart_printf("[cs] %s[%02x]:", ctxdumps[c].tag, (unsigned)off);
+                for (uint32_t j = 0; j < 16 && off + j < dump_len; j++) {
+                    uart_printf(" %02x", ctxdumps[c].buf[off + j]);
+                }
+                uart_printf("\r\n");
             }
-            uart_printf("\r\n");
         }
     }
 

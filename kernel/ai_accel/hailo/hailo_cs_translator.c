@@ -290,15 +290,22 @@ static int emit_open_boundary_pass(const struct hef_info *info,
                                    bool emit_inputs,
                                    struct hailo_cs_builder *b)
 {
-    uint8_t stream_index = 0;
     for (uint32_t i = 0; i < info->pad_count; i++) {
         const struct hef_pad_info *pad = &info->pads[i];
         if (!pad->has_stream_info) continue;
         if (pad->is_input != emit_inputs) continue;
+        /* OpenBoundary's stream_index must be the pad's HEF
+         * sys_index, not a 0-based counter. HailoRT wire capture
+         * (pios_ACTIVATION.bin) emits stream_index=1 for MNIST's
+         * input pad (sys_index=1); FETCH_DATA_FROM_VDMA in DYNAMIC
+         * uses the same value so fw correlates the two by
+         * matching stream_index. A mismatch caused fw to activate
+         * the boundary under stream slot 0 while DYNAMIC fetched
+         * from slot 1, leaving ch=2 num_proc stuck at 0 despite
+         * num_avail being latched correctly. */
         int rc = translate_open_boundary_for_pad(pad, cfg,
-                                                 stream_index, b);
+                                                 (uint8_t)pad->sys_index, b);
         if (rc != HAILO_OK) return rc;
-        stream_index++;
     }
     return HAILO_OK;
 }
