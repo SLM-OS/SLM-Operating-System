@@ -3056,6 +3056,245 @@ static void test_cs_translate_batch_switching_no_boundary_input(void)
                             out.batch_switching[5]);
 }
 
+/* MNIST-shape HEF (28x28x1 input + 1x1x10 output + ccw_action_count=28)
+ * triggers the BATCH_SWITCHING template prologue: a REPEATED_ACTION
+ * wrapping 15 SWITCH_LCU_BATCH sub-actions. The size goes from 10 B
+ * (plain) through 16 B (CHANGE_BOUNDARY_INPUT_BATCH) to 114 B with
+ * the template. See hailo_cs_translator.c:mnist_switch_lcu_batch_template.
+ * Verifies the wire shape HailoRT v4.23 captures emit for MNIST. */
+static void test_cs_translate_batch_switching_mnist_template(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 28;             /* MNIST HEF signature */
+    info.pad_count = 2;
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].has_tensor_shape      = true;
+    info.pads[0].height = 28; info.pads[0].width = 28; info.pads[0].features = 1;
+    info.pads[0].sys_index             = 1;
+    info.pads[0].core_bytes_per_buffer = 32;
+    info.pads[0].core_buffers_per_frame = 28;
+    info.pads[1].is_input              = false;
+    info.pads[1].has_stream_info       = true;
+    info.pads[1].has_tensor_shape      = true;
+    info.pads[1].height = 1; info.pads[1].width = 1; info.pads[1].features = 10;
+    info.pads[1].sys_index             = 0;
+    info.pads[1].core_bytes_per_buffer = 16;
+    info.pads[1].core_buffers_per_frame = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel              = 0x01,
+        .ccw_desc_list_iova               = 0x1000,
+        .ccw_desc_page_size               = 512,
+        .ccw_total_desc_count             = 2,
+        .boundary_input_desc_list_iova    = 0x10000,
+        .boundary_input_total_desc_count  = 32,
+        .boundary_output_desc_list_iova   = 0x20000,
+        .boundary_output_total_desc_count = 32,
+        .boundary_desc_page_size          = 512,
+        .boundary_output_desc_page_size   = 64,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* HailoRT's MNIST BATCH_SWITCHING is exactly 114 bytes:
+     *   5 (REPEATED hdr) + 3 (REPEATED meta) + 15*6 (SWITCH_LCU_BATCH
+     *   sub-bodies) = 98
+     *   + 5 (DDR_BUFFERING_RESET hdr) + 0
+     *   + 5 (CHANGE_BOUNDARY_INPUT_BATCH hdr) + 1
+     *   + 5 (BURST_CREDITS_TASK_START hdr) + 0
+     *   = 114 */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)114, out.batch_switching_len);
+
+    /* First action is REPEATED_ACTION with count=15 + sub_type=36 =
+     * HAILO_CS_ACT_SWITCH_LCU_BATCH. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_REPEATED_ACTION,
+                            out.batch_switching[0]);
+    TEST_ASSERT_EQUAL_UINT8(15, out.batch_switching[5]);     /* count */
+    TEST_ASSERT_EQUAL_UINT8(0,  out.batch_switching[6]);     /* last_executed */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_SWITCH_LCU_BATCH,
+                            out.batch_switching[7]);
+
+    /* Spot-check a couple of template entries — byte layout per the
+     * HailoRT wire capture in docs/reference/pios_BATCH_SWITCHING.bin. */
+    TEST_ASSERT_EQUAL_UINT8(0x00, out.batch_switching[8]);   /* sub[0] packed_lcu */
+    TEST_ASSERT_EQUAL_UINT8(0x10, out.batch_switching[14]);  /* sub[1] packed_lcu */
+    TEST_ASSERT_EQUAL_UINT8(0x01, out.batch_switching[92]);  /* sub[14] packed_lcu */
+
+    /* All sub-bodies end with kernel_done_count=2 as a u32 little-endian. */
+    for (uint32_t i = 0; i < 15; i++) {
+        uint32_t kdc;
+        memcpy(&kdc, out.batch_switching + 5 + 3 + i*6 + 2, 4);
+        TEST_ASSERT_EQUAL_UINT32(2u, kdc);
+    }
+
+    /* Tail still has DDR_BUFFERING_RESET + CHANGE_BOUNDARY_INPUT_BATCH +
+     * BURST_CREDITS_TASK_START in that order. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DDR_BUFFERING_RESET,
+                            out.batch_switching[98]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_CHANGE_BOUNDARY_INPUT_BATCH,
+                            out.batch_switching[103]);
+    TEST_ASSERT_EQUAL_UINT8(0x02, out.batch_switching[108]); /* boundary packed=2 */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                            out.batch_switching[109]);
+}
+
+/* Non-MNIST HEF falls through to the minimal BATCH_SWITCHING without
+ * the SWITCH_LCU_BATCH template. Confirms hef_matches_mnist_template()
+ * doesn't misfire on arbitrary HEF shapes. */
+static void test_cs_translate_batch_switching_template_gated(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 28;              /* CCW count matches MNIST */
+    info.pad_count = 2;
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].has_tensor_shape      = true;
+    info.pads[0].height = 224; info.pads[0].width = 224;    /* NOT MNIST */
+    info.pads[0].features = 3;
+    info.pads[0].core_bytes_per_buffer = 672;
+    info.pads[1].is_input              = false;
+    info.pads[1].has_stream_info       = true;
+    info.pads[1].has_tensor_shape      = true;
+    info.pads[1].height = 1; info.pads[1].width = 1; info.pads[1].features = 1000;
+    info.pads[1].core_bytes_per_buffer = 1000;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel              = 0x01,
+        .ccw_desc_list_iova               = 0x1000,
+        .ccw_desc_page_size               = 512,
+        .ccw_total_desc_count             = 2,
+        .boundary_input_desc_list_iova    = 0x10000,
+        .boundary_input_total_desc_count  = 2,
+        .boundary_output_desc_list_iova   = 0x20000,
+        .boundary_output_total_desc_count = 2,
+        .boundary_desc_page_size          = 4096,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+    /* 16 B = DDR_BUFFERING_RESET + CHANGE_BOUNDARY_INPUT_BATCH +
+     * BURST_CREDITS_TASK_START (no SWITCH_LCU_BATCH prologue). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)16, out.batch_switching_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DDR_BUFFERING_RESET,
+                            out.batch_switching[0]);
+}
+
+/* PRELIMINARY with dual cfg-channel (ccw_cfg_channel_1_* set) emits
+ * TWO ACTIVATE_CFG_CHANNEL actions in HailoRT's bulk-before-small
+ * order, followed by the MNIST arming sequence (gated by shape
+ * detector), and closes with two DEACTIVATE_CFG_CHANNEL. This
+ * matches pios_PRELIMINARY.bin structure (commit 75724f7). */
+static void test_cs_translate_preliminary_dual_cfg_channel(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 28;
+    info.pad_count = 2;
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].has_tensor_shape      = true;
+    info.pads[0].height = 28; info.pads[0].width = 28; info.pads[0].features = 1;
+    info.pads[0].sys_index             = 1;
+    info.pads[0].core_bytes_per_buffer = 32;
+    info.pads[0].core_buffers_per_frame = 28;
+    info.pads[1].is_input              = false;
+    info.pads[1].has_stream_info       = true;
+    info.pads[1].has_tensor_shape      = true;
+    info.pads[1].height = 1; info.pads[1].width = 1; info.pads[1].features = 10;
+    info.pads[1].sys_index             = 0;
+    info.pads[1].core_bytes_per_buffer = 16;
+    info.pads[1].core_buffers_per_frame = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel              = 0x01,
+        .config_stream_index              = 1,
+        .ccw_desc_list_iova               = 0x10a70000,
+        .ccw_desc_page_size               = 512,
+        .ccw_total_desc_count             = 7,
+        .ccw_bytes_in_pattern             = 1024,
+        .ccw_fetch_bulk_desc_count        = 109,
+        .cfg_channel_1_packed_vdma        = 0,
+        .cfg_channel_1_stream_index       = 0,
+        .cfg_channel_1_desc_list_iova     = 0x10c10000,
+        .cfg_channel_1_total_desc_count   = 126,
+        .cfg_channel_1_bytes_in_pattern   = 56320,
+        .boundary_input_desc_list_iova    = 0x10ffc20000ull,
+        .boundary_input_total_desc_count  = 32,
+        .boundary_output_desc_list_iova   = 0x10ffc30000ull,
+        .boundary_output_total_desc_count = 32,
+        .boundary_desc_page_size          = 512,
+        .boundary_output_desc_page_size   = 64,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* Full MNIST PRELIMINARY: 489 bytes. Matches
+     * docs/reference/pios_PRELIMINARY.bin (modulo IOVAs). */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)489, out.preliminary_len);
+
+    /* Byte 0: first ACTIVATE_CFG_CHANNEL is the bulk channel
+     * (packed=0 per HailoRT's emission order). */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                            out.preliminary[0]);
+    TEST_ASSERT_EQUAL_UINT8(0x00, out.preliminary[5]);    /* packed_vdma = 0 */
+    TEST_ASSERT_EQUAL_UINT8(0x00, out.preliminary[6]);    /* sidx = 0 */
+
+    /* Byte 0x1a (26): second ACTIVATE_CFG_CHANNEL for small / primary
+     * cfg (packed=1, sidx=1). */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                            out.preliminary[26]);
+    TEST_ASSERT_EQUAL_UINT8(0x01, out.preliminary[31]);   /* packed_vdma = 1 */
+    TEST_ASSERT_EQUAL_UINT8(0x01, out.preliminary[32]);   /* sidx = 1 */
+
+    /* Tail: two DEACTIVATE_CFG_CHANNEL — bulk (packed=0) then small
+     * (packed=1). Last action is at 0x1db, header = 5 + body = 2. */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL,
+                            out.preliminary[0x1db]);
+    TEST_ASSERT_EQUAL_UINT8(0x00, out.preliminary[0x1db + 5]);  /* packed=0 */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL,
+                            out.preliminary[0x1e2]);
+    TEST_ASSERT_EQUAL_UINT8(0x01, out.preliminary[0x1e2 + 5]);  /* packed=1 */
+}
+
+/* Single-channel PRELIMINARY keeps the legacy shape so arbitrary
+ * HEFs that don't split CCWs across cfg channels continue to
+ * translate correctly (one ACTIVATE_CFG_CHANNEL +
+ * REPEATED(FETCH_CFG_CHANNEL_DESCRIPTORS)). */
+static void test_cs_translate_preliminary_single_channel(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel      = 0x01,
+        .ccw_desc_list_iova       = 0x1000,
+        .ccw_desc_page_size       = 512,
+        .ccw_total_desc_count     = 4,
+        /* cfg_channel_1_desc_list_iova = 0 → dual path disabled. */
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* ACTIVATE_CFG_CHANNEL (5+21=26 B) + REPEATED(1x FETCH_CFG) (5+3+3=11 B) = 37 B. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)37, out.preliminary_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                            out.preliminary[0]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_REPEATED_ACTION,
+                            out.preliminary[26]);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+                            out.preliminary[26 + 7]);
+}
+
 /* DYNAMIC boundary prologue (#253 / commit a6b3ef6): when the HEF
  * has both a boundary input and boundary output pad, the translator
  * synthesizes ACTIVATE_BOUNDARY_OUTPUT -> ACTIVATE_BOUNDARY_INPUT ->
@@ -4873,6 +5112,48 @@ static void test_vdma_channel_wait_armed_rejects_bad_channel(void)
     vdma_setup();
     TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
         hailo_vdma_channel_wait_armed(HAILO_VDMA_MAX_CHANNELS, 1000));
+}
+
+/* hailo_vdma_channel_wait_proc (#253 / commit 75724f7): polls
+ * num_proc for an absolute target count without writing num_avail.
+ * Used after CHANGE_STATUS(ENABLED) to wait for fw's internal
+ * FETCH_CFG_CHANNEL_DESCRIPTORS actions in PRELIMINARY to drain the
+ * bulk cfg channel (dual-channel CCW upload path). */
+static void test_vdma_channel_wait_proc_returns_on_target(void)
+{
+    vdma_setup();
+    /* Channel 5: write num_proc=110 (absolute count) into the
+     * NUM_PROC_DWORD. hailo_vdma_channel_wait_proc should return OK
+     * since num_proc already meets the target. */
+    uint32_t ch_base = 5 * HAILO_VDMA_CHANNEL_STRIDE;
+    uint32_t proc_dword = 110u;
+    memcpy(&mock_bar2[ch_base + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD],
+           &proc_dword, sizeof(proc_dword));
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_channel_wait_proc(5, /*target=*/110, /*timeout=*/1000));
+}
+
+/* The helper tolerates an off-by-one (num_proc == target-1) because
+ * some fw revisions don't increment proc for the final LAST_DESC_CTRL
+ * descriptor. Without this tolerance the dual-channel load would
+ * stall one step short of completion. */
+static void test_vdma_channel_wait_proc_tolerates_off_by_one(void)
+{
+    vdma_setup();
+    uint32_t ch_base = 6 * HAILO_VDMA_CHANNEL_STRIDE;
+    uint32_t proc_dword = 108u;                /* target-1 */
+    memcpy(&mock_bar2[ch_base + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD],
+           &proc_dword, sizeof(proc_dword));
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_channel_wait_proc(6, /*target=*/109, /*timeout=*/1000));
+}
+
+static void test_vdma_channel_wait_proc_times_out(void)
+{
+    vdma_setup();
+    /* Channel 7 sits at num_proc=0 for the whole poll window. */
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_TIMEOUT,
+        hailo_vdma_channel_wait_proc(7, /*target=*/42, /*timeout=*/200));
 }
 
 /* HAILO_VDMA_HOST_DMA_DATA_ID is the data_id value the reference
@@ -7027,6 +7308,10 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_activation_missing_output_iova_fails);
     RUN_TEST(test_cs_translate_batch_switching_emits_change_boundary_input_batch);
     RUN_TEST(test_cs_translate_batch_switching_no_boundary_input);
+    RUN_TEST(test_cs_translate_batch_switching_mnist_template);
+    RUN_TEST(test_cs_translate_batch_switching_template_gated);
+    RUN_TEST(test_cs_translate_preliminary_dual_cfg_channel);
+    RUN_TEST(test_cs_translate_preliminary_single_channel);
     RUN_TEST(test_cs_translate_enable_lcu_default_variant);
     RUN_TEST(test_cs_translate_enable_lcu_non_default_variant);
     RUN_TEST(test_cs_translate_skips_enable_lcu_from_other_contexts);
@@ -7125,6 +7410,9 @@ int test_suite_hailo(void)
     RUN_TEST(test_vdma_channel_wait_armed_returns_on_start);
     RUN_TEST(test_vdma_channel_wait_armed_times_out);
     RUN_TEST(test_vdma_channel_wait_armed_rejects_bad_channel);
+    RUN_TEST(test_vdma_channel_wait_proc_returns_on_target);
+    RUN_TEST(test_vdma_channel_wait_proc_tolerates_off_by_one);
+    RUN_TEST(test_vdma_channel_wait_proc_times_out);
     RUN_TEST(test_vdma_host_dma_data_id_is_zero);
 
     /* Phase 5.4 hailo_infer orchestration */
