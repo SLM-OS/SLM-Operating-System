@@ -560,14 +560,14 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     if (prev == XHCI_ATTACH_STALE &&
         xhci_stale_port_enabled_inherited(portsc, c, s)) {
         INFO("xhci: stale port on PORTSC[%u] is already enabled at USB2 speed "
-             "(0x%08x) — attempting reset-backed enumeration",
+             "(0x%08x) — reusing enabled inherited state",
              (unsigned)xhci_active_port, (unsigned)portsc);
         xhci_attach_state = XHCI_ATTACH_FRESH;
         xhci_prereset_speed = s;
-        xhci_skip_next_port_reset = false;
+        xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
         xhci_force_bsr0_on_open = false;
-        xhci_force_inherited_addr2_on_open = true;
+        xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -954,7 +954,11 @@ static void xhci_try_power_cycle_port(uint8_t pidx, const char *why)
  *   - EP0 Ctx   DW1: CErr = 3, EP Type = CONTROL, Max Packet Size
  *   - EP0 Ctx   DW2: TR Dequeue Pointer (low) | DCS=1
  *   - EP0 Ctx   DW3: TR Dequeue Pointer (high)
- *   - EP0 Ctx   DW4: Average TRB Length = 8 (control-transfer rule-of-thumb)
+ *   - EP0 Ctx   DW4: Average TRB Length = 0
+ *
+ * Linux leaves EP0's Average TRB Length at 0 for the healthy Realtek
+ * hub path on nano-2. Keep that match here instead of carrying the
+ * earlier "8-byte control setup" heuristic into the context.
  */
 static void xhci_build_input_ctx_for_address(struct xhci_device *d,
                                              const struct usb_device *dev,
@@ -995,7 +999,7 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
           ((uint32_t)mps << XHCI_EP_DW1_MAXPKT_SHIFT);
     *e2 = (uint32_t)(ep0_ring_phys & 0xFFFFFFFFu) | 0x1U;  /* DCS = 1 */
     *e3 = (uint32_t)(ep0_ring_phys >> 32);
-    *e4 = 8U;                                 /* avg TRB length */
+    *e4 = 0U;
 
     INFO("xhci: address ctx route=0x%x speed_id=%u root_port=%u "
          "slot_dw0=0x%08x slot_dw1=0x%08x ep0_dw0=0x%08x ep0_dw1=0x%08x "

@@ -700,20 +700,26 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
         while (timer_get_count() - settle_start < settle_ticks) { }
 
         /*
-         * Step 3: read the first 8 bytes of the device descriptor. Some
-         * devices lie about bMaxPacketSize0 until they've seen the first
-         * IN — Linux does this same two-step for the same reason.
+         * Step 3: read the first bytes of the device descriptor while the
+         * device is still at address 0.
+         *
+         * Linux's healthy EP0 ring on nano-2 starts with a 64-byte device
+         * descriptor read for this Realtek hub path. Keep accepting any
+         * reply >= 8 bytes (we only need bMaxPacketSize0 here), but widen
+         * the initial request so the default-address transaction semantics
+         * match the working Linux path more closely.
          */
-        uint8_t dd_stub[8];
-        n = usb_get_descriptor(dev, USB_DT_DEVICE, 0, dd_stub, 8);
+        uint8_t dd_stub[64];
+        n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
+                               dd_stub, sizeof(dd_stub));
         if (n >= 8) {
             /* bMaxPacketSize0 is byte 7. Record it for the HCD if useful later. */
             dev->dev_desc.bMaxPacketSize0 = dd_stub[7];
             goto got_initial_descriptor;
         }
 
-        WARN("usb_core: short GET_DESCRIPTOR(device, 8) n=%d (attempt %u/3)",
-             n, attempt + 1);
+        WARN("usb_core: short GET_DESCRIPTOR(device, %u) n=%d (attempt %u/3)",
+             (unsigned)sizeof(dd_stub), n, attempt + 1);
 
         if (device_opened && active_hcd->device_close) {
             active_hcd->device_close(dev);
