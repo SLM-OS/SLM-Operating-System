@@ -1172,9 +1172,12 @@ int xhci_hcd_device_open(struct usb_device *dev)
 err_slot: {
         /* Best effort: DISABLE_SLOT so we don't leak the slot. */
         struct xhci_trb dis = {0};
+        uint8_t cc_dis = 0;
         dis.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_DISABLE_SLOT) |
                       ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
-        (void)xhci_cmd_submit_and_wait(&dis, NULL, NULL, 500);
+        (void)xhci_cmd_submit_and_wait(&dis, &cc_dis, NULL, 500);
+        INFO("xhci: DISABLE_SLOT(slot=%u, err_slot) cc=%u",
+             (unsigned)slot, (unsigned)cc_dis);
         xhci_dcbaa[slot] = 0;
     }
 err:
@@ -1196,10 +1199,12 @@ void xhci_hcd_device_close(struct usb_device *dev)
 
     if (d->slot_id != 0) {
         struct xhci_trb cmd = {0};
+        uint8_t cc = 0;
         cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_DISABLE_SLOT) |
                       ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
-        uint8_t cc = 0;
         (void)xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 500);
+        INFO("xhci: DISABLE_SLOT(slot=%u, device_close) cc=%u",
+             (unsigned)d->slot_id, (unsigned)cc);
         xhci_dcbaa[d->slot_id] = 0;
         d->slot_id = 0;
     }
