@@ -273,6 +273,15 @@ struct hailo_model_slot {
     bool                          cs_loaded;
     struct hailo_tensor           ccw_tensor;
     struct hailo_vdma_desc_list   ccw_list;
+    /* #253 Phase 8: optional second cfg channel for HEFs that split
+     * their CCWs across two cfg_channel_index values (MNIST does).
+     * cs_loaded HEFs without a split leave these zeroed and the
+     * load path skips the dual-channel upload. */
+    struct hailo_tensor           ccw_tensor_1;
+    struct hailo_vdma_desc_list   ccw_list_1;
+    uint16_t                      ccw_num_avail_0;   /* pri chan */
+    uint16_t                      ccw_num_avail_1;   /* aux chan */
+    bool                          ccw_has_second_channel;
     struct hailo_tensor           boundary_in_tensor;
     struct hailo_vdma_desc_list   boundary_in_list;
     struct hailo_tensor           boundary_out_tensor;
@@ -522,6 +531,11 @@ static void context_switch_unwind(struct hailo_model_slot *slot)
     hailo_tensor_free(&slot->boundary_out_tensor);
     hailo_vdma_desc_list_free(&slot->boundary_in_list);
     hailo_tensor_free(&slot->boundary_in_tensor);
+    if (slot->ccw_has_second_channel) {
+        hailo_vdma_desc_list_free(&slot->ccw_list_1);
+        hailo_tensor_free(&slot->ccw_tensor_1);
+        slot->ccw_has_second_channel = false;
+    }
     hailo_vdma_desc_list_free(&slot->ccw_list);
     hailo_tensor_free(&slot->ccw_tensor);
     slot->cs_loaded = false;
@@ -560,13 +574,54 @@ static int context_switch_load(struct hailo_model_slot *slot,
     cs_load_stage_set(10);
 
     /* Step 1: CCW buffer + descriptor list.
-     * CCWs block lives in the HEF at ccws_offset; size is ccws_size
-     * (possibly zero for synthetic test HEFs). A zero-CCW HEF still
-     * needs a valid descriptor list for ACTIVATE_CFG_CHANNEL — we
-     * allocate a minimum 512-byte scratch so firmware's walker has
-     * something to DMA. */
-    uint32_t ccw_bytes = (outer->ccws_size > 0) ? outer->ccws_size
-                                                : HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
+     *
+     * The MNIST HEF (and likely other real HEFs) tags each CCW action
+     * with a cfg_channel_index of 0 or 1. HailoRT opens BOTH cfg
+     * channels and DMAs each channel's payloads to its own desc list.
+     * Our old single-channel code lumped everything onto the default
+     * cfg VDMA channel (HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL=1), so
+     * the ~56 KB tagged for logical channel 0 never reached the NN
+     * core — fw's TRIGGER_SEQUENCER had nothing to program, clusters
+     * never armed, boundary credits never issued (Phase 8 submit
+     * blocker, #253).
+     *
+     * Fix: tally per-channel byte/action counts, allocate two
+     * tensors + desc lists (channel 0 = packed_vdma=0 with the bulk
+     * microcode, channel 1 = packed_vdma=1 with the secondary
+     * payload), and copy each action's payload from the CCWS blob
+     * into its matching channel buffer at contiguous offsets.
+     *
+     * HEFs with a single cfg_channel_index (synthetic tests, or
+     * simpler topologies) keep the legacy single-channel path —
+     * ccw_has_second_channel stays false. */
+    uint32_t ch_bytes[2]  = { 0, 0 };
+    uint32_t ch_count[2]  = { 0, 0 };
+    const struct hef_info *hef = info;
+    for (uint32_t i = 0; i < hef->ccw_action_count; i++) {
+        uint32_t ci = hef->ccw_actions[i].cfg_channel_index;
+        if (ci <= 1) {
+            ch_bytes[ci] += hef->ccw_actions[i].data_size;
+            ch_count[ci]++;
+        }
+    }
+    bool use_dual = (ch_count[0] > 0 && ch_count[1] > 0);
+    uint32_t ccw_bytes;
+    if (use_dual) {
+        /* In dual-channel mode our existing slot->ccw_tensor carries
+         * the logical cfg_channel_index=1 payload on PCIe channel 1
+         * (the primary, unchanged from single-channel path). The new
+         * slot->ccw_tensor_1 carries cfg_channel_index=0 on PCIe
+         * channel 0. This matches HailoRT's wire mapping where
+         * packed_vdma=1 -> small cfg_channel_index=1 data and
+         * packed_vdma=0 -> bulk cfg_channel_index=0 data. */
+        ccw_bytes = ch_bytes[1];
+    } else {
+        ccw_bytes = (outer->ccws_size > 0) ? outer->ccws_size
+                                           : HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
+    }
+    if (ccw_bytes == 0)
+        ccw_bytes = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
+
     rc = hailo_tensor_alloc(ccw_bytes, &slot->ccw_tensor);
     if (rc != HAILO_OK) {
         WARN("hailo backend: CCW tensor alloc failed (rc=%d, bytes=%u)",
@@ -574,7 +629,25 @@ static int context_switch_load(struct hailo_model_slot *slot,
         goto fail;
     }
     cs_load_stage_set(11);
-    if (outer->ccws_size > 0) {
+
+    if (use_dual) {
+        /* Primary (ccw_tensor) carries cfg_channel_index=1 data on
+         * PCIe channel 1 (packed_vdma=1). Secondary (ccw_tensor_1,
+         * allocated below) carries cfg_channel_index=0 bulk data on
+         * PCIe channel 0 (packed_vdma=0). See earlier comment. */
+        const uint8_t *ccws_base =
+            (const uint8_t *)model + outer->ccws_offset;
+        memset(slot->ccw_tensor.cpu_addr, 0, ccw_bytes);
+        uint32_t off_sm = 0;
+        for (uint32_t i = 0; i < hef->ccw_action_count; i++) {
+            const struct hef_ccw_action *a = &hef->ccw_actions[i];
+            if (a->cfg_channel_index != 1) continue;
+            if (off_sm + a->data_size > ccw_bytes) break;   /* defensive */
+            memcpy((uint8_t *)slot->ccw_tensor.cpu_addr + off_sm,
+                   ccws_base + a->data_offset_in_blob, a->data_size);
+            off_sm += a->data_size;
+        }
+    } else if (outer->ccws_size > 0) {
         const uint8_t *ccws_base = (const uint8_t *)model + outer->ccws_offset;
         memcpy(slot->ccw_tensor.cpu_addr, ccws_base, outer->ccws_size);
     } else {
@@ -607,7 +680,64 @@ static int context_switch_load(struct hailo_model_slot *slot,
         goto fail;
     }
     uint16_t ccw_num_avail = (uint16_t)programmed;   /* N descs to submit */
+    slot->ccw_num_avail_0 = ccw_num_avail;
     cs_load_stage_set(13);
+
+    /* Step 1b: allocate and program the SECOND cfg-channel buffer
+     * carrying the cfg_channel_index=0 bulk payload. Targets PCIe
+     * channel 0 (packed_vdma=0) per HailoRT's wire mapping. For
+     * MNIST this is ~55 KB of NN-core microcode that the sequencers
+     * need before TRIGGER_SEQUENCER can arm the clusters. */
+    uint16_t ccw_num_avail_bulk = 0;
+    if (use_dual) {
+        uint32_t bulk_bytes = ch_bytes[0];
+        if (bulk_bytes == 0)
+            bulk_bytes = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
+        rc = hailo_tensor_alloc(bulk_bytes, &slot->ccw_tensor_1);
+        if (rc != HAILO_OK) {
+            WARN("hailo backend: CCW bulk tensor alloc failed (rc=%d, bytes=%u)",
+                 rc, bulk_bytes);
+            goto fail;
+        }
+        memset(slot->ccw_tensor_1.cpu_addr, 0, bulk_bytes);
+        const uint8_t *ccws_base =
+            (const uint8_t *)model + outer->ccws_offset;
+        uint32_t off_bulk = 0;
+        for (uint32_t i = 0; i < hef->ccw_action_count; i++) {
+            const struct hef_ccw_action *a = &hef->ccw_actions[i];
+            if (a->cfg_channel_index != 0) continue;
+            if (off_bulk + a->data_size > bulk_bytes) break;
+            memcpy((uint8_t *)slot->ccw_tensor_1.cpu_addr + off_bulk,
+                   ccws_base + a->data_offset_in_blob, a->data_size);
+            off_bulk += a->data_size;
+        }
+        hailo_tensor_prepare_for_device(&slot->ccw_tensor_1);
+        uint32_t bulk_dc =
+            desc_count_for(bulk_bytes, HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE);
+        if (bulk_dc == 0) {
+            WARN("hailo backend: CCW bulk region too large (%u bytes)", bulk_bytes);
+            rc = HAILO_ERR_INVAL;
+            goto fail;
+        }
+        rc = hailo_vdma_desc_list_alloc(bulk_dc,
+                                        HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
+                                        /*circular=*/false, &slot->ccw_list_1);
+        if (rc != HAILO_OK) {
+            WARN("hailo backend: CCW bulk desc_list alloc failed (rc=%d)", rc);
+            goto fail;
+        }
+        int prog1 = hailo_vdma_program_buffer(&slot->ccw_list_1, 0,
+                                              slot->ccw_tensor_1.iova,
+                                              bulk_bytes, /*data_id=*/0);
+        if (prog1 < 0) {
+            WARN("hailo backend: CCW bulk program_buffer failed (rc=%d)", prog1);
+            rc = HAILO_ERR_IO;
+            goto fail;
+        }
+        ccw_num_avail_bulk = (uint16_t)prog1;
+        slot->ccw_num_avail_1 = ccw_num_avail_bulk;
+        slot->ccw_has_second_channel = true;
+    }
 
     /* Step 2: boundary tensors + desc lists — only for pads the HEF
      * marked as stream-bound. Tests HEFs without edge_layers have
@@ -741,10 +871,39 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * so the two views stay consistent. */
     struct hailo_cs_translate_cfg tcfg = {
         .config_vdma_channel              = HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL,
-        .config_stream_index              = 0,
+        /* HailoRT's wire uses stream_index = packed_vdma_channel_id
+         * (packed=1 sidx=1, packed=0 sidx=0). Single-channel path
+         * retains sidx=0; dual-channel primary (packed=1, small
+         * payload = cfg_channel_index=1 on HailoRT's side) uses
+         * sidx=1. */
+        .config_stream_index              = slot->ccw_has_second_channel
+                                                ? 1u : 0u,
         .ccw_desc_list_iova               = slot->ccw_list.iova,
         .ccw_desc_page_size               = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
         .ccw_total_desc_count             = ccw_desc_count,
+        /* bytes_in_pattern on ACTIVATE_CFG_CHANNEL — non-zero in
+         * dual-channel mode so fw can pattern-match CCW upload
+         * completion. HailoRT uses the ROUNDED-UP byte total per
+         * channel (e.g. 110 descs * 512 page = 56320 for bulk,
+         * 2 descs * 512 = 1024 for small). Using
+         * desc_count * page_size here mirrors that exactly. */
+        .ccw_bytes_in_pattern             = slot->ccw_has_second_channel
+            ? (uint32_t)ccw_num_avail * HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE
+            : 0u,
+        /* Second cfg channel (bulk microcode on PCIe channel 0,
+         * sidx=0). Left zero unless this HEF's CCWs split across 2
+         * cfg_channel_index values — see use_dual above. */
+        .cfg_channel_1_packed_vdma        = 0u,
+        .cfg_channel_1_stream_index       = 0u,
+        .cfg_channel_1_desc_list_iova     = slot->ccw_has_second_channel
+                                                ? slot->ccw_list_1.iova : 0u,
+        .cfg_channel_1_total_desc_count   = slot->ccw_has_second_channel
+            ? desc_count_for(slot->ccw_tensor_1.tensor_bytes,
+                             HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE)
+            : 0u,
+        .cfg_channel_1_bytes_in_pattern   = slot->ccw_has_second_channel
+            ? (uint32_t)ccw_num_avail_bulk * HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE
+            : 0u,
         .boundary_input_desc_list_iova    = boundary_in_iova,
         .boundary_input_total_desc_count  = boundary_in_desc_count,
         .boundary_output_desc_list_iova   = boundary_out_iova,
@@ -952,6 +1111,42 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * with num_proc=0. */
     cs_load_stage_set(72);
     {
+        /* Drain BOTH cfg channels when we're in dual-channel mode.
+         * PCIe channel 0 carries the bulk microcode, channel 1 the
+         * small secondary payload — both need num_avail written and
+         * num_proc polled before fw's PRELIMINARY can finish. Order
+         * doesn't matter (separate VDMA engines) but wait for the
+         * bulk channel first so the NN-core microcode lands before
+         * fw's TRIGGER_SEQUENCER runs. */
+        if (slot->ccw_has_second_channel) {
+            /* On the bulk channel fw's PRELIMINARY itself issues two
+             * FETCH_CFG_CHANNEL_DESCRIPTORS REPEATED groups (1 desc
+             * handshake + bulk_desc_count-1 for the microcode), so
+             * the channel DMA is driven by those actions rather than
+             * by a host-side num_avail write. Just wait for the
+             * channel's num_proc to reach bulk_desc_count — that's
+             * the signal the microcode has fully landed and the
+             * NN-core sequencers have their program loaded. */
+            const uint8_t bulk_ch = 0;
+            int arm0 = hailo_vdma_channel_wait_armed(bulk_ch, 500000u);
+            if (arm0 != HAILO_OK) {
+                WARN("hailo backend: CFG bulk ch=%u never armed (rc=%d)",
+                     bulk_ch, arm0);
+                cs_load_stage_set(830072);
+                rc = arm0;
+                goto fail;
+            }
+            int sub0 = hailo_vdma_channel_wait_proc(
+                bulk_ch, ccw_num_avail_bulk, 2000000u);
+            if (sub0 != HAILO_OK) {
+                WARN("hailo backend: CFG bulk wait_proc (target=%u) "
+                     "failed (rc=%d)", (unsigned)ccw_num_avail_bulk, sub0);
+                cs_load_stage_set(830000 + (sub0 < 0 ? -sub0 : sub0));
+                rc = sub0;
+                goto fail;
+            }
+        }
+
         const uint8_t cfg_ch = HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL;
         int arm_rc = hailo_vdma_channel_wait_armed(cfg_ch, 500000u /* 500 ms */);
         if (arm_rc != HAILO_OK) {

@@ -500,6 +500,47 @@ int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us)
     return HAILO_ERR_TIMEOUT;
 }
 
+int hailo_vdma_channel_wait_proc(uint8_t channel_index,
+                                 uint16_t target_num_proc,
+                                 uint32_t timeout_us)
+{
+    if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
+    if (!hailo_platform) return HAILO_ERR_NODEV;
+
+    uint32_t proc_pre = hailo_platform->read32(HAILO_BAR_VDMA,
+        channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+    uart_printf("[vdma] ch=%u wait_proc target=%u proc_pre=0x%08x\r\n",
+                (unsigned)channel_index, (unsigned)target_num_proc,
+                (unsigned)proc_pre);
+
+    /* target_num_proc is the ABSOLUTE num_proc value fw should reach
+     * once all descriptors in the channel's desc list have been
+     * processed. Tolerate off-by-one (some fw revisions don't
+     * increment proc for the final LAST_DESC_CTRL descriptor). */
+    const uint32_t poll_interval_us = 100u;
+    uint32_t elapsed = 0;
+    while (elapsed < timeout_us) {
+        uint32_t proc_dword = hailo_platform->read32(HAILO_BAR_VDMA,
+            channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+        uint16_t num_proc = (uint16_t)(proc_dword & 0xFFFFu);
+        if (num_proc >= target_num_proc
+            || (target_num_proc > 0 && num_proc == target_num_proc - 1)) {
+            uart_printf("[vdma] ch=%u wait_proc done after %u us "
+                        "proc=0x%08x\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)proc_dword);
+            return HAILO_OK;
+        }
+        hailo_platform->udelay(poll_interval_us);
+        elapsed += poll_interval_us;
+    }
+    uint32_t proc_end = hailo_platform->read32(HAILO_BAR_VDMA,
+        channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+    uart_printf("[vdma] ch=%u wait_proc TIMEOUT proc_end=0x%08x\r\n",
+                (unsigned)channel_index, (unsigned)proc_end);
+    return HAILO_ERR_TIMEOUT;
+}
+
 void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label)
 {
     if (!hailo_platform || channel_index >= HAILO_VDMA_MAX_CHANNELS) return;

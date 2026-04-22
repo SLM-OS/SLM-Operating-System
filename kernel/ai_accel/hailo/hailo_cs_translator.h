@@ -157,6 +157,30 @@ struct hailo_cs_translate_cfg {
     /* Number of descriptors in the CCW list. */
     uint32_t ccw_total_desc_count;
 
+    /* Total CCW payload bytes for the primary cfg channel. HailoRT
+     * sets ACTIVATE_CFG_CHANNEL.host_buffer_info.bytes_in_pattern
+     * to this value so fw knows when a complete frame has been DMA'd
+     * and can advance its pattern counter. Leave zero if the caller
+     * does not have per-channel byte totals; firmware tolerates it
+     * on single-channel loads but the dual-channel NN-core arming
+     * sequence relies on matching HailoRT's non-zero values. */
+    uint32_t ccw_bytes_in_pattern;
+
+    /* #253 Phase 8: second cfg channel for HEFs that split their CCW
+     * actions across two cfg_channel_index values (MNIST does). The
+     * first cfg channel (config_vdma_channel / ccw_desc_list_iova /
+     * ccw_total_desc_count above) maps to logical cfg_channel_index
+     * = 0 on those HEFs; this pair maps to cfg_channel_index = 1.
+     * Leave cfg_channel_1_desc_list_iova = 0 when the HEF only uses
+     * one cfg channel; the translator's PRELIMINARY emitter detects
+     * that sentinel and skips the second ACTIVATE_CFG_CHANNEL +
+     * DEACTIVATE_CFG_CHANNEL pair. */
+    uint8_t  cfg_channel_1_packed_vdma;
+    uint8_t  cfg_channel_1_stream_index;
+    uint64_t cfg_channel_1_desc_list_iova;    /* 0 = no second channel */
+    uint32_t cfg_channel_1_total_desc_count;
+    uint32_t cfg_channel_1_bytes_in_pattern;
+
     /* ------------------------------------------------------------ *
      * Boundary-channel descriptor lists (one for input, one for
      * output). Populated by the caller (inference_device_hailo::

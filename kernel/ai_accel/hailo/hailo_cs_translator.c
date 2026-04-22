@@ -630,17 +630,62 @@ static int translate_preliminary_mnist_arming(
 {
     int rc;
 
-    /* Phase 3a: clean slate — disable LCU 0x01 + 14 more in a
-     * REPEATED_ACTION. Ref order: 0f 0b 09 07 06 0a 04 03 05 08
-     * 13 0e 10 00. */
+    /* Phase 3a: clean slate — disable LCU 0x01 + (if dual-channel
+     * mode) an initial REPEATED(2x FETCH_CFG_CHANNEL_DESCRIPTORS)
+     * handshake, then the 14-LCU REPEATED DISABLE sweep, then a
+     * second REPEATED(2x FETCH_CFG_CHANNEL_DESCRIPTORS) that pulls
+     * the main CCW payload. Order verbatim from
+     * pios_PRELIMINARY.bin. */
     rc = emit_disable_lcu(b, 0x01);
     if (rc != HAILO_OK) return rc;
+
+    bool dual = cfg->cfg_channel_1_desc_list_iova != 0;
+    if (dual) {
+        struct hailo_cs_act_fetch_cfg_channel_descriptors initial_fetch[2] = {
+            /* HailoRT: sub[0]=010000  sub[1]=010001 — one desc each
+             * to kick fw's per-channel descriptor walker. */
+            { .descriptors_count = 1,
+              .packed_vdma_channel_id = cfg->cfg_channel_1_packed_vdma },
+            { .descriptors_count = 1,
+              .packed_vdma_channel_id = cfg->config_vdma_channel },
+        };
+        rc = hailo_cs_builder_append_repeated(
+            b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+            /*count=*/2, initial_fetch, sizeof(initial_fetch[0]));
+        if (rc != HAILO_OK) return rc;
+    }
+
     rc = hailo_cs_builder_append_repeated(
         b, HAILO_CS_ACT_DISABLE_LCU,
         (uint8_t)(sizeof(MNIST_DISABLE_LCU_SWEEP) /
                   sizeof(MNIST_DISABLE_LCU_SWEEP[0])),
         MNIST_DISABLE_LCU_SWEEP, 1);
     if (rc != HAILO_OK) return rc;
+
+    if (dual) {
+        /* Bulk CCW pull: one more desc on the small channel, then
+         * (total-1) descs on the bulk channel. HailoRT picks 109
+         * on the bulk side out of the 110 descs its list holds,
+         * saving one for the initial handshake above. Mirror the
+         * same subtraction here.
+         *
+         * Clamp to u16 on the wire; our CCW bulk is only ~110
+         * descs anyway so clamping never triggers in practice. */
+        uint32_t bulk_descs = cfg->cfg_channel_1_total_desc_count;
+        if (bulk_descs > 0) bulk_descs -= 1;
+        if (bulk_descs > UINT16_MAX) bulk_descs = UINT16_MAX;
+
+        struct hailo_cs_act_fetch_cfg_channel_descriptors bulk_fetch[2] = {
+            { .descriptors_count = 1,
+              .packed_vdma_channel_id = cfg->config_vdma_channel },
+            { .descriptors_count = (uint16_t)bulk_descs,
+              .packed_vdma_channel_id = cfg->cfg_channel_1_packed_vdma },
+        };
+        rc = hailo_cs_builder_append_repeated(
+            b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+            /*count=*/2, bulk_fetch, sizeof(bulk_fetch[0]));
+        if (rc != HAILO_OK) return rc;
+    }
 
     /* Phase 3b: module-config-done + TRIGGER_SEQUENCER per cluster. */
     rc = emit_module_config_done(b, 0x05);           if (rc) return rc;
@@ -720,10 +765,14 @@ static int translate_preliminary_mnist_arming(
     rc = emit_module_config_done(b, 0x0d); if (rc) return rc;
     rc = emit_module_config_done(b, 0x0e); if (rc) return rc;
 
-    /* Phase 4b: tear down the cfg channel. Ref uses two
-     * DEACTIVATE_CFG_CHANNEL (packed=0 and packed=1); we only opened
-     * one cfg channel (packed=1 = cfg->config_vdma_channel), so emit
-     * just that. */
+    /* Phase 4b: tear down cfg channels in the same order HailoRT
+     * does (bulk/packed=0 before small/packed=1). The single-cfg
+     * path emits only the primary deactivation. */
+    if (cfg->cfg_channel_1_desc_list_iova != 0) {
+        rc = emit_deactivate_cfg_channel(b, cfg->cfg_channel_1_packed_vdma,
+                                         cfg->cfg_channel_1_stream_index);
+        if (rc) return rc;
+    }
     rc = emit_deactivate_cfg_channel(b, cfg->config_vdma_channel,
                                      cfg->config_stream_index);
     if (rc) return rc;
@@ -735,6 +784,28 @@ static int translate_preliminary(const struct hef_info *info,
                                  const struct hailo_cs_translate_cfg *cfg,
                                  struct hailo_cs_builder *b)
 {
+    bool dual = cfg->cfg_channel_1_desc_list_iova != 0;
+    int rc;
+
+    /* Open the bulk cfg channel first on dual-channel paths (HailoRT
+     * emits packed=0 before packed=1 per pios_PRELIMINARY.bin). */
+    if (dual) {
+        struct hailo_cs_act_activate_cfg_channel bulk = {
+            .packed_vdma_channel_id = cfg->cfg_channel_1_packed_vdma,
+            .config_stream_index    = cfg->cfg_channel_1_stream_index,
+            .host_buffer_info = {
+                .buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+                .dma_address      = cfg->cfg_channel_1_desc_list_iova,
+                .desc_page_size   = cfg->ccw_desc_page_size,
+                .total_desc_count = cfg->cfg_channel_1_total_desc_count,
+                .bytes_in_pattern = cfg->cfg_channel_1_bytes_in_pattern,
+            },
+        };
+        rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                                     &bulk, sizeof(bulk));
+        if (rc != HAILO_OK) return rc;
+    }
+
     struct hailo_cs_act_activate_cfg_channel act = {
         .packed_vdma_channel_id = cfg->config_vdma_channel,
         .config_stream_index    = cfg->config_stream_index,
@@ -743,41 +814,41 @@ static int translate_preliminary(const struct hef_info *info,
             .dma_address      = cfg->ccw_desc_list_iova,
             .desc_page_size   = cfg->ccw_desc_page_size,
             .total_desc_count = cfg->ccw_total_desc_count,
-            .bytes_in_pattern = 0,
+            .bytes_in_pattern = cfg->ccw_bytes_in_pattern,
         },
     };
-    int rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
-                                     &act, sizeof(act));
+    rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_CFG_CHANNEL,
+                                 &act, sizeof(act));
     if (rc != HAILO_OK) return rc;
 
-    /* One FETCH_CFG_CHANNEL_DESCRIPTORS sub-action wrapped in
-     * REPEATED_ACTION. HailoRT v4.23 uses this (not FETCH_CCW_BURSTS)
-     * on Hailo-8L because support_pre_fetch=false on that device —
-     * wire capture against mobilenet_v1 shows `18 ff ff ff ff NN 00
-     * 00` (sub_action_type=0x00 = FETCH_CFG_CHANNEL_DESCRIPTORS)
-     * rather than sub_action_type=0x1b (FETCH_CCW_BURSTS). The
-     * sub-body carries {descriptors_count, packed_vdma_channel_id}. */
-    uint32_t descs = cfg->ccw_total_desc_count;
-    if (descs == 0) descs = 1;               /* firmware rejects 0 */
-    if (descs > UINT16_MAX) descs = UINT16_MAX;
+    /* Single-channel path: one FETCH_CFG_CHANNEL_DESCRIPTORS for the
+     * entire CCW buffer, wrapped in REPEATED_ACTION (Hailo-8L requires
+     * the wrapper; the bare action gets rejected as
+     * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED).
+     * Dual-channel path emits the HailoRT-shaped 2x(2xFETCH) sequence
+     * inside translate_preliminary_mnist_arming, interleaved with
+     * the LCU-disable sweep. */
+    if (!dual) {
+        uint32_t descs = cfg->ccw_total_desc_count;
+        if (descs == 0) descs = 1;               /* firmware rejects 0 */
+        if (descs > UINT16_MAX) descs = UINT16_MAX;
 
-    struct hailo_cs_act_fetch_cfg_channel_descriptors sub = {
-        .descriptors_count      = (uint16_t)descs,
-        .packed_vdma_channel_id = cfg->config_vdma_channel,
-    };
-    rc = hailo_cs_builder_append_repeated(
-        b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
-        /*count=*/1, &sub, sizeof(sub));
-    if (rc != HAILO_OK) return rc;
+        struct hailo_cs_act_fetch_cfg_channel_descriptors sub = {
+            .descriptors_count      = (uint16_t)descs,
+            .packed_vdma_channel_id = cfg->config_vdma_channel,
+        };
+        rc = hailo_cs_builder_append_repeated(
+            b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
+            /*count=*/1, &sub, sizeof(sub));
+        if (rc != HAILO_OK) return rc;
+    }
 
     /* #253 Phase 8: emit the MNIST-shaped NN-core arming sequence
      * after CCW upload. Without this, fw's inference scheduler never
      * grants credits to the boundary-IN fetch and ch=2 num_proc stays
      * 0. Gated on MNIST shape detection; other HEFs fall through to
-     * the minimal preliminary + APPLICATION_CHANGE_INTERRUPT tail.
-     * Generalization requires parsing nn_stream_config's LCU +
-     * sequencer tables from the HEF (resource_manager_builder port).
-     */
+     * the minimal preliminary. Generalization requires parsing
+     * nn_stream_config's LCU + sequencer tables from the HEF. */
     if (hef_matches_mnist_template(info)) {
         rc = translate_preliminary_mnist_arming(info, cfg, b);
         if (rc != HAILO_OK) return rc;

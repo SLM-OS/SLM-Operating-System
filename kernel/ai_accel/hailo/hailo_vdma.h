@@ -284,4 +284,18 @@ void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label);
  */
 int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us);
 
+/*
+ * Poll `channel_index`'s num_proc until it advances by at least
+ * `target_num_proc` descriptors relative to the count observed when
+ * the function was entered, or `timeout_us` elapses. Unlike
+ * hailo_vdma_submit_and_wait this does NOT write num_avail — use
+ * when fw is driving DMA internally (e.g. via PRELIMINARY's
+ * FETCH_CFG_CHANNEL_DESCRIPTORS actions) and the host just needs to
+ * observe completion. Returns HAILO_OK on reach, HAILO_ERR_TIMEOUT
+ * otherwise.
+ */
+int hailo_vdma_channel_wait_proc(uint8_t channel_index,
+                                 uint16_t target_num_proc,
+                                 uint32_t timeout_us);
+
 #endif /* AI_ACCEL_HAILO_VDMA_H */
