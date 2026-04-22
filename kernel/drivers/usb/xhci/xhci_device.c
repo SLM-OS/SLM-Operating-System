@@ -911,6 +911,25 @@ static void xhci_patch_inherited_address(struct xhci_device *d, uint8_t addr)
          (unsigned)addr, (unsigned)old, (unsigned)patched);
 }
 
+static void xhci_try_reset_device_slot(uint8_t slot, const char *why)
+{
+    if (slot == 0)
+        return;
+
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_RESET_DEVICE) |
+                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
+        WARN("xhci: RESET_DEVICE(slot=%u, %s) transport failure",
+             (unsigned)slot, why ? why : "probe");
+        return;
+    }
+
+    INFO("xhci: RESET_DEVICE(slot=%u, %s) cc=%u",
+         (unsigned)slot, why ? why : "probe", (unsigned)cc);
+}
+
 /*
  * Populate an Input Context for ADDRESS_DEVICE on a freshly-opened
  * slot. Writes:
@@ -1090,6 +1109,7 @@ int xhci_hcd_device_open(struct usb_device *dev)
     }
     d->slot_id = slot;
     INFO("xhci: slot %u enabled for port %u", slot, d->root_port);
+    xhci_try_reset_device_slot(slot, "post-enable");
 
     /* 2. Build Input Context for ADDRESS_DEVICE and write DCBAA[slot]. */
     xhci_build_input_ctx_for_address(d, dev, ep0->phys);
