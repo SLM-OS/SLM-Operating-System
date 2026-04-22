@@ -183,6 +183,8 @@ static uint32_t xhci_stale_portsc_initial = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 static bool xhci_skip_next_port_reset = false;
 static bool xhci_force_connected_disabled_reset = false;
+static bool xhci_probe_prefer_fullspeed_port = true;
+static bool xhci_probe_fullspeed_addr3 = true;
 static bool xhci_force_bsr0_on_open = false;
 static bool xhci_force_inherited_addr2_on_open = false;
 
@@ -561,6 +563,27 @@ static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
 
 static uint8_t xhci_locate_usb2_port(void)
 {
+    if (xhci_probe_prefer_fullspeed_port) {
+        for (uint8_t p = 0; p < xhci_caps_cached.max_ports; p++) {
+            uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(p));
+            bool c = false;
+            enum usb_speed s = USB_SPEED_UNKNOWN;
+            bool decoded = xhci_decode_portsc(sc, &c, &s);
+            if (c && decoded &&
+                (s == USB_SPEED_FULL || s == USB_SPEED_LOW)) {
+                xhci_probe_prefer_fullspeed_port = false;
+                xhci_active_portsc  = sc;
+                xhci_stale_portsc_initial = sc;
+                xhci_prereset_speed = s;
+                INFO("xhci: preferring non-Realtek USB2 port %u for probe "
+                     "(portsc=0x%08x speed=%u)",
+                     p, (unsigned)sc, (unsigned)s);
+                return p;
+            }
+        }
+        xhci_probe_prefer_fullspeed_port = false;
+    }
+
     for (uint8_t p = 0; p < xhci_caps_cached.max_ports; p++) {
         uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(p));
         bool c = false;
@@ -1289,7 +1312,22 @@ int xhci_hcd_device_open(struct usb_device *dev)
      * BSR=1 gets far enough to exercise software-driven EP0 traffic.
      */
     bool use_bsr0 = xhci_force_bsr0_on_open;
-    bool use_inherited_addr2 = xhci_force_inherited_addr2_on_open;
+    uint8_t inherited_addr = 0;
+    if (xhci_force_inherited_addr2_on_open) {
+        inherited_addr = (dev->speed == USB_SPEED_FULL) ? 3 : 2;
+    } else if (xhci_probe_fullspeed_addr3 &&
+               (dev->speed == USB_SPEED_FULL || dev->speed == USB_SPEED_LOW) &&
+               dev->route_string == 0) {
+        /*
+         * Diagnostic probe: the always-present full-speed Bluetooth path
+         * on nano-2 may be retaining Linux's old USB address 3 across
+         * kexec. Force that one-shot address patch here, after the slot
+         * has actually been opened, so earlier attach-state transitions
+         * cannot clear the probe before it runs.
+         */
+        inherited_addr = 3;
+        xhci_probe_fullspeed_addr3 = false;
+    }
     xhci_force_bsr0_on_open = false;
     xhci_force_inherited_addr2_on_open = false;
     cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
@@ -1303,8 +1341,8 @@ int xhci_hcd_device_open(struct usb_device *dev)
     }
     INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=%u)",
          slot, (unsigned)dev->speed, d->root_port, use_bsr0 ? 0u : 1u);
-    if (use_inherited_addr2 && !use_bsr0)
-        xhci_patch_inherited_address(d, 2);
+    if (inherited_addr != 0 && !use_bsr0)
+        xhci_patch_inherited_address(d, inherited_addr);
     xhci_log_devctx_snapshot(d, "post-address");
 
     dev->hcd_private = d;
