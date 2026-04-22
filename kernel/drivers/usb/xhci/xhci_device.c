@@ -1313,20 +1313,28 @@ int xhci_hcd_device_open(struct usb_device *dev)
      */
     bool use_bsr0 = xhci_force_bsr0_on_open;
     uint8_t inherited_addr = 0;
+    bool fullspeed_addr3_probe = false;
     if (xhci_force_inherited_addr2_on_open) {
         inherited_addr = (dev->speed == USB_SPEED_FULL) ? 3 : 2;
     } else if (xhci_probe_fullspeed_addr3 &&
-               (dev->speed == USB_SPEED_FULL || dev->speed == USB_SPEED_LOW) &&
+               d->root_port == 7 &&
                dev->route_string == 0) {
         /*
          * Diagnostic probe: the always-present full-speed Bluetooth path
-         * on nano-2 may be retaining Linux's old USB address 3 across
-         * kexec. Force that one-shot address patch here, after the slot
-         * has actually been opened, so earlier attach-state transitions
-         * cannot clear the probe before it runs.
+         * on nano-2 hangs off root port 7 in Linux. Key the retained-
+         * address test off that port directly so the probe can't silently
+         * disappear if dev->speed bookkeeping changes while we are still
+         * narrowing the inherited-address hypothesis.
          */
         inherited_addr = 3;
+        fullspeed_addr3_probe = true;
         xhci_probe_fullspeed_addr3 = false;
+    }
+    if (fullspeed_addr3_probe) {
+        INFO("xhci: forcing retained full-speed address 3 probe on root_port=%u speed=%u route=0x%x",
+             (unsigned)d->root_port,
+             (unsigned)dev->speed,
+             (unsigned)dev->route_string);
     }
     xhci_force_bsr0_on_open = false;
     xhci_force_inherited_addr2_on_open = false;
