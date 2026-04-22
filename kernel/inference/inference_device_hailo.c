@@ -639,7 +639,21 @@ static int context_switch_load(struct hailo_model_slot *slot,
         for (uint32_t i = 0; i < hef->ccw_action_count; i++) {
             const struct hef_ccw_action *a = &hef->ccw_actions[i];
             if (a->cfg_channel_index != 1) continue;
-            if (off_sm + a->data_size > ccw_bytes) break;   /* defensive */
+            /* Destination (ccw_tensor) and source (ccws block) bounds
+             * check. `data_offset_in_blob` comes from the HEF wire so
+             * a malformed HEF could set it out of range; without the
+             * source check we'd OOB-read past the PMM-allocated model
+             * buffer into adjacent kernel memory. */
+            if (off_sm + a->data_size > ccw_bytes) break;
+            if (a->data_offset_in_blob > outer->ccws_size
+             || a->data_size > outer->ccws_size - a->data_offset_in_blob) {
+                WARN("hailo backend: CCW action %u (ch=1) out-of-bounds "
+                     "(offset=%u size=%u ccws_size=%lu)",
+                     i, a->data_offset_in_blob, a->data_size,
+                     (unsigned long)outer->ccws_size);
+                rc = HAILO_ERR_INVAL;
+                goto fail;
+            }
             memcpy((uint8_t *)slot->ccw_tensor.cpu_addr + off_sm,
                    ccws_base + a->data_offset_in_blob, a->data_size);
             off_sm += a->data_size;
@@ -718,6 +732,15 @@ static int context_switch_load(struct hailo_model_slot *slot,
             const struct hef_ccw_action *a = &hef->ccw_actions[i];
             if (a->cfg_channel_index != 0) continue;
             if (off_bulk + a->data_size > bulk_bytes) break;
+            if (a->data_offset_in_blob > outer->ccws_size
+             || a->data_size > outer->ccws_size - a->data_offset_in_blob) {
+                WARN("hailo backend: CCW action %u (ch=0) out-of-bounds "
+                     "(offset=%u size=%u ccws_size=%lu)",
+                     i, a->data_offset_in_blob, a->data_size,
+                     (unsigned long)outer->ccws_size);
+                rc = HAILO_ERR_INVAL;
+                goto fail;
+            }
             memcpy((uint8_t *)slot->ccw_tensor_1.cpu_addr + off_bulk,
                    ccws_base + a->data_offset_in_blob, a->data_size);
             off_bulk += a->data_size;
