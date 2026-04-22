@@ -152,15 +152,18 @@ struct hailo_cs_stream_reg_info {
     uint16_t core_bytes_per_buffer;
     uint16_t core_buffers_per_frame;
     uint16_t periph_bytes_per_buffer;
-    uint32_t periph_buffers_per_frame;
+    uint16_t periph_buffers_per_frame;       /* #253: was uint32_t; reference
+                                              * uses u16, confirmed via
+                                              * byte-for-byte wire capture on
+                                              * pi-5-1 (pios_DYNAMIC.bin). */
     uint16_t feature_padding_payload;
     uint32_t buffer_padding_payload;
     uint16_t buffer_padding;
     uint8_t  is_core_hw_padding_config_in_dfc;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct hailo_cs_stream_reg_info) == 19,
-               "stream_reg_info must be 19 bytes");
+_Static_assert(sizeof(struct hailo_cs_stream_reg_info) == 17,
+               "stream_reg_info must be 17 bytes per v4.23 wire format");
 
 /* -------------------------------------------------------------------------- */
 /* Preliminary-context actions (CCW upload)                                    */
@@ -459,8 +462,8 @@ struct hailo_cs_act_activate_boundary_input {
     uint32_t                         initial_credit_size;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_input) == 44,
-               "activate_boundary_input body must be 44 bytes");
+_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_input) == 42,
+               "activate_boundary_input body must be 42 bytes per v4.23 wire");
 
 struct hailo_cs_act_activate_boundary_output {
     uint8_t                          packed_vdma_channel_id;
@@ -470,7 +473,28 @@ struct hailo_cs_act_activate_boundary_output {
     struct hailo_cs_host_buffer_info host_buffer_info;
 } __attribute__((packed));
 
-_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_output) == 41,
-               "activate_boundary_output body must be 41 bytes");
+_Static_assert(sizeof(struct hailo_cs_act_activate_boundary_output) == 39,
+               "activate_boundary_output body must be 39 bytes per v4.23 wire");
+
+/* Edge layer direction enum used by (de)activate/pause/resume actions.
+ * Reference: hailort-v4.23.0-context_switch_defs.h (near the
+ * deactivate_vdma_channel / resume_vdma_channel structs). */
+enum hailo_cs_edge_layer_direction {
+    HAILO_CS_EDGE_DIR_H2D = 0,
+    HAILO_CS_EDGE_DIR_D2H = 1,
+};
+
+/* PAUSE_VDMA_CHANNEL / RESUME_VDMA_CHANNEL share the same 2-byte body:
+ * just the packed channel id and the direction. Fw uses these to
+ * freeze/unfreeze a boundary channel between context switches;
+ * RESUME must be emitted in DYNAMIC before the first FETCH_DATA
+ * on that channel. */
+struct hailo_cs_act_resume_vdma_channel {
+    uint8_t packed_vdma_channel_id;
+    uint8_t edge_layer_direction;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_resume_vdma_channel) == 2,
+               "resume_vdma_channel body must be 2 bytes");
 
 #endif /* AI_ACCEL_HAILO_CS_ACTIONS_H */

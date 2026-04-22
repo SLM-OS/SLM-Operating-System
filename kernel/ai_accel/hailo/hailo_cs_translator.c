@@ -626,6 +626,137 @@ struct dynamic_cursors {
     uint32_t allow_input_dataflow;
 };
 
+/* Locate the input + output boundary pads. Returns -1 if either is
+ * missing; emit_dynamic_boundary_prologue skips silently in that case
+ * (no boundary => nothing to activate). */
+static int find_boundary_pads(const struct hef_info *info,
+                              const struct hef_pad_info **in_pad,
+                              const struct hef_pad_info **out_pad)
+{
+    *in_pad = NULL;
+    *out_pad = NULL;
+    for (uint32_t i = 0; i < info->pad_count; i++) {
+        const struct hef_pad_info *p = &info->pads[i];
+        if (!p->has_stream_info) continue;
+        if (p->is_input  && !*in_pad)  *in_pad  = p;
+        if (!p->is_input && !*out_pad) *out_pad = p;
+    }
+    return (*in_pad && *out_pad) ? 0 : -1;
+}
+
+/* Fill a stream_reg_info from pad geometry. Matches HailoRT v4.23
+ * byte layout exactly (see pios_DYNAMIC.bin for MNIST reference). */
+static void fill_stream_reg_info_from_pad(const struct hef_pad_info *p,
+                                          struct hailo_cs_stream_reg_info *out)
+{
+    memset(out, 0, sizeof(*out));
+    uint32_t bpb = p->core_bytes_per_buffer;
+    uint32_t bpf = p->core_buffers_per_frame ? p->core_buffers_per_frame : 1u;
+    out->core_bytes_per_buffer    = (uint16_t)bpb;
+    out->core_buffers_per_frame   = (uint16_t)bpf;
+    /* periph fields: HailoRT's v4.23 wire capture for MNIST input shows
+     * periph_bytes_per_buffer = 784 = HEF tensor h*w (28*28), not bpb.
+     * For output the periph side matched bpb (16). Use tensor total as
+     * a best approximation — if periph differs from core the HEF's
+     * stream_info would expose it but we don't extract those fields. */
+    uint32_t tensor_total = p->has_tensor_shape
+        ? (uint32_t)p->height * p->width * p->features : bpb * bpf;
+    out->periph_bytes_per_buffer  = (uint16_t)(tensor_total / bpf);
+    out->periph_buffers_per_frame = 1u;
+    out->is_core_hw_padding_config_in_dfc = 1u;
+}
+
+/* Fill host_buffer_info from the caller's desc-list iova + geometry. */
+static void fill_host_buffer_info(uint64_t iova, uint16_t page_size,
+                                  uint32_t desc_count, uint32_t transfer_size,
+                                  struct hailo_cs_host_buffer_info *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->buffer_type      = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC;
+    out->dma_address      = iova;
+    out->desc_page_size   = page_size;
+    out->total_desc_count = desc_count;
+    out->bytes_in_pattern = transfer_size;
+}
+
+/* Emit the DYNAMIC-context prologue that HailoRT v4.23 issues for
+ * every boundary-I/O inference: activate the output and input
+ * boundary channels with their stream_reg_info + host_buffer_info,
+ * then resume the VDMA channels. Without these actions firmware
+ * never primes device-side num_avail and every submit times out
+ * (see #253 root-cause analysis + docs/reference/pios_DYNAMIC.bin). */
+static int emit_dynamic_boundary_prologue(
+    const struct hef_info *info,
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b)
+{
+    const struct hef_pad_info *in_pad = NULL, *out_pad = NULL;
+    if (find_boundary_pads(info, &in_pad, &out_pad) != 0) return HAILO_OK;
+
+    uint8_t in_ch, out_ch;
+    int rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                                "DynamicActivateIn", &in_ch);
+    if (rc != HAILO_OK) return rc;
+    rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET,
+                            "DynamicActivateOut", &out_ch);
+    if (rc != HAILO_OK) return rc;
+
+    uint32_t in_bpb  = in_pad->core_bytes_per_buffer;
+    uint32_t in_bpf  = in_pad->core_buffers_per_frame
+                           ? in_pad->core_buffers_per_frame : 1u;
+    uint32_t in_frame  = in_bpb * in_bpf;
+    uint32_t out_bpb = out_pad->core_bytes_per_buffer;
+    uint32_t out_bpf = out_pad->core_buffers_per_frame
+                           ? out_pad->core_buffers_per_frame : 1u;
+    uint32_t out_frame = out_bpb * out_bpf;
+
+    /* 1. ACTIVATE_BOUNDARY_OUTPUT (v4.23 emits output first). */
+    struct hailo_cs_act_activate_boundary_output out_body;
+    memset(&out_body, 0, sizeof(out_body));
+    out_body.packed_vdma_channel_id = out_ch;
+    out_body.stream_index           = (uint8_t)out_pad->sys_index;
+    out_body.network_index          = 0;
+    fill_stream_reg_info_from_pad(out_pad, &out_body.stream_reg_info);
+    fill_host_buffer_info(cfg->boundary_output_desc_list_iova,
+                          cfg->boundary_desc_page_size,
+                          cfg->boundary_output_total_desc_count,
+                          out_frame, &out_body.host_buffer_info);
+    rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_BOUNDARY_OUTPUT,
+                                 &out_body, sizeof(out_body));
+    if (rc != HAILO_OK) return rc;
+
+    /* 2. ACTIVATE_BOUNDARY_INPUT. initial_credit_size = 0x10000 (64 KB)
+     * matches HailoRT's value on the wire; represents a full credit
+     * window for the engine's num_avail gate. */
+    struct hailo_cs_act_activate_boundary_input in_body;
+    memset(&in_body, 0, sizeof(in_body));
+    in_body.packed_vdma_channel_id = in_ch;
+    in_body.stream_index           = (uint8_t)in_pad->sys_index;
+    fill_stream_reg_info_from_pad(in_pad, &in_body.stream_reg_info);
+    fill_host_buffer_info(cfg->boundary_input_desc_list_iova,
+                          cfg->boundary_desc_page_size,
+                          cfg->boundary_input_total_desc_count,
+                          in_frame, &in_body.host_buffer_info);
+    in_body.initial_credit_size = 0x10000u;
+    rc = hailo_cs_builder_append(b, HAILO_CS_ACT_ACTIVATE_BOUNDARY_INPUT,
+                                 &in_body, sizeof(in_body));
+    if (rc != HAILO_OK) return rc;
+
+    /* 3. RESUME_VDMA_CHANNEL for the input boundary channel.
+     * HailoRT's v4.23 wire capture (pios_DYNAMIC.bin) emits this for
+     * the H2D input side only -- the output side is activated via
+     * ACTIVATE_BOUNDARY_OUTPUT without a matching RESUME (probably
+     * because the output channel wasn't paused between contexts the
+     * same way as input). (void)out_ch prevents an unused warning. */
+    (void)out_ch;
+    struct hailo_cs_act_resume_vdma_channel resume_in = {
+        .packed_vdma_channel_id = in_ch,
+        .edge_layer_direction   = HAILO_CS_EDGE_DIR_H2D,
+    };
+    return hailo_cs_builder_append(b, HAILO_CS_ACT_RESUME_VDMA_CHANNEL,
+                                   &resume_in, sizeof(resume_in));
+}
+
 static int translate_dynamic(const struct hef_info *info,
                              const struct hailo_cs_translate_cfg *cfg,
                              struct hailo_cs_builder *b)
@@ -633,6 +764,15 @@ static int translate_dynamic(const struct hef_info *info,
     const uint32_t target_ctx = 0;
     struct dynamic_cursors cur;
     memset(&cur, 0, sizeof(cur));
+
+    /* #253: Emit the DYNAMIC prologue BEFORE processing HEF-derived
+     * action_types[]. HailoRT synthesizes ACTIVATE_BOUNDARY_{OUT,IN}
+     * and RESUME_VDMA_CHANNEL from the network graph at runtime — our
+     * parser only reads the literal action list so we have to inject
+     * them here based on the boundary pads. Skips silently if the HEF
+     * doesn't have both a boundary input and a boundary output. */
+    int pre_rc = emit_dynamic_boundary_prologue(info, cfg, b);
+    if (pre_rc != HAILO_OK) return pre_rc;
 
     /* If the HEF captured zero contexts, fall through to the tail-
      * only path. Otherwise walk context_actions[0].action_types[]. */
@@ -777,6 +917,17 @@ static int translate_dynamic(const struct hef_info *info,
 
         if (rc != HAILO_OK) return rc;
     }
+
+    /* #253: HailoRT v4.23 emits BURST_CREDITS_TASK_START as the
+     * penultimate action in DYNAMIC (right before APPLICATION_CHANGE_
+     * INTERRUPT). We already emit it in BATCH_SWITCHING for the batch,
+     * but firmware also expects it per-DYNAMIC to re-arm the burst
+     * credit task for this context's boundary channels. Safe to emit
+     * unconditionally — empty body, no state pollution if burst
+     * credits are already running. */
+    int bc_rc = hailo_cs_builder_append(b, HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                                        NULL, 0);
+    if (bc_rc != HAILO_OK) return bc_rc;
 
     /* Tail marker. Firmware requires this as the last action of the
      * final dynamic context; it signals "this dynamic context is
