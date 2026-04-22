@@ -1621,6 +1621,21 @@ static bool decode_nested_ng_cb(pb_istream_t *stream,
     (void)field;
     struct nested_ng_ctx *nctx = (struct nested_ng_ctx *)*arg;
 
+    /* Dedupe top-level vs nested walk: DFC 3.33.1 populates BOTH the
+     * top-level NG.contexts/ops/preliminary_config AND the nested
+     * partial_network_groups[].network_group.* with the same data for
+     * backward compatibility. The top-level walker already fired by
+     * the time we get here (tag 3 < tag 7 in wire order), so we'd
+     * double-count contexts + duplicate CCW actions without this
+     * reset. Clear the affected counters before re-walking; pads[]
+     * are deduped separately via pad_key lookup so they don't need
+     * a reset. */
+    struct hef_info *info = nctx->op_ctx->info;
+    info->context_actions_count = 0;
+    info->context_actions_truncated = false;
+    info->op_count = 0;
+    info->ccw_action_count = 0;
+
     ProtoHEFNetworkGroup grp = ProtoHEFNetworkGroup_init_default;
     grp.ops.funcs.decode                = decode_op_cb;
     grp.ops.arg                         = nctx->op_ctx;
