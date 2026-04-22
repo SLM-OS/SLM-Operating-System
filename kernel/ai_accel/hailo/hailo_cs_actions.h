@@ -338,6 +338,18 @@ struct hailo_cs_act_sequencer_interrupt {
 _Static_assert(sizeof(struct hailo_cs_act_sequencer_interrupt) == 1,
                "sequencer_interrupt body must be 1 byte");
 
+/* MODULE_CONFIG_DONE_INTERRUPT: firmware waits on a module's
+ * config-done signal. 1-byte body — module_index. Used liberally
+ * throughout HailoRT's PRELIMINARY context between LCU enables
+ * and sequencer triggers to make sure earlier configuration
+ * actions have settled before the next stage starts. */
+struct hailo_cs_act_module_config_done_interrupt {
+    uint8_t module_index;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_act_module_config_done_interrupt) == 1,
+               "module_config_done_interrupt body must be 1 byte");
+
 /* CONTEXT_SWITCH_DEFS__sequencer_config_t. Embedded inside
  * TRIGGER_SEQUENCER's action body. Captures enough register-image
  * state for firmware to program the sequencer. Packed to 43 bytes

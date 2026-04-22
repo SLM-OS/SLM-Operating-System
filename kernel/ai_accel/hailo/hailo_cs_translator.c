@@ -483,6 +483,254 @@ static int translate_batch_switching(const struct hef_info *info,
  * HEFs, which aren't in our current test set) land when the HEF
  * parser learns to extract per-context add-ccw-burst sequences.
  */
+/* HailoRT v4.23 PRELIMINARY NN-core arming template for MNIST HEF.
+ * Reference: docs/reference/pios_PRELIMINARY.bin decoded 2026-04-22.
+ * Emits the LCU-sweep + sequencer-trigger + LCU-enable sequence that
+ * arms the NN core's compute pipeline. Without this, fw's inference
+ * scheduler never grants credits to the boundary-IN fetch, and the
+ * VDMA engine's num_proc stays 0 forever (Phase 8 submit blocker).
+ *
+ * Phases implemented here:
+ *   Phase 3a: DISABLE_LCU + 14x REPEATED_DISABLE_LCU  (clean slate)
+ *   Phase 3b: MODULE_CONFIG_DONE + TRIGGER_SEQUENCER x 2 clusters
+ *   Phase 3c: SEQUENCER_DONE x 2 + MODULE_CONFIG_DONE x 3
+ *   Phase 4a: 4 groups of REPEATED_ENABLE_LCU + MODULE_CONFIG_DONE
+ *   Phase 4b: MODULE_CONFIG_DONE tail x 2 + DEACTIVATE_CFG_CHANNEL
+ *
+ * Phase 2 from the reference (boundary channel re-activate + FETCH_DATA
+ * + BURST_CREDITS_TASK_START) is INTENTIONALLY SKIPPED because we
+ * already emit ACTIVATE_BOUNDARY_* in ACTIVATION and the DYNAMIC
+ * prologue. Re-issuing them in PRELIMINARY would re-program fw state
+ * that's still live.
+ *
+ * LCU IDs and sequencer_config byte patterns are HEF-specific; gated
+ * at the call site behind hef_matches_mnist_template(). */
+static const uint8_t MNIST_DISABLE_LCU_SWEEP[14] = {
+    0x0f, 0x0b, 0x09, 0x07, 0x06, 0x0a, 0x04, 0x03,
+    0x05, 0x08, 0x13, 0x0e, 0x10, 0x00,
+};
+
+/* sequencer_config bytes for clusters 0 and 1 (43 B each) verbatim
+ * from HailoRT wire capture. HEF-compiled constants — same on every
+ * load of the MNIST HEF, IOVA-independent. */
+static const uint8_t MNIST_SEQ_CFG_CLUSTER_0[43] = {
+    0x00, 0xc0, 0x7f, 0xbf, 0x3b, 0x01, 0x00, 0x79,
+    0xe5, 0x13, 0x80, 0x70, 0xe0, 0x06, 0x0a, 0x53,
+    0x40, 0x00, 0x20, 0x30, 0x40, 0x06, 0x02, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x20, 0x3c,
+    0x00, 0x0c, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00,
+};
+static const uint8_t MNIST_SEQ_CFG_CLUSTER_1[43] = {
+    0x00, 0xc0, 0x7f, 0x21, 0x00, 0x00, 0x00, 0x38,
+    0x00, 0x00, 0x00, 0x30, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xf0, 0x0f, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00,
+};
+
+_Static_assert(sizeof(MNIST_SEQ_CFG_CLUSTER_0) ==
+               sizeof(struct hailo_cs_sequencer_config),
+               "MNIST cluster_0 sequencer_config must be 43 bytes");
+_Static_assert(sizeof(MNIST_SEQ_CFG_CLUSTER_1) ==
+               sizeof(struct hailo_cs_sequencer_config),
+               "MNIST cluster_1 sequencer_config must be 43 bytes");
+
+/* LCU groups enabled in PRELIMINARY phase 4. Each group's LCUs are
+ * followed by two MODULE_CONFIG_DONE_INTERRUPTs — see ref sequence. */
+static const uint8_t MNIST_ENABLE_LCU_GRP0[4] = { 0x00, 0x10, 0x0e, 0x13 };
+static const uint8_t MNIST_ENABLE_LCU_GRP1[4] = { 0x08, 0x05, 0x03, 0x04 };
+static const uint8_t MNIST_ENABLE_LCU_GRP2[4] = { 0x0a, 0x06, 0x07, 0x09 };
+static const uint8_t MNIST_ENABLE_LCU_GRP3[3] = { 0x0b, 0x0f, 0x01 };
+
+/* Expand a packed-lcu-id array into enable_lcu_default sub-bodies
+ * ({packed_lcu_id, network_index=0}) so they can be fed to
+ * hailo_cs_builder_append_repeated. Stack-sized scratch array;
+ * max 4 LCUs per group keeps footprint trivial. */
+static int emit_enable_lcu_group(struct hailo_cs_builder *b,
+                                  const uint8_t *lcus, uint8_t count)
+{
+    struct hailo_cs_act_enable_lcu_default bodies[4];
+    if (count > 4) return HAILO_ERR_INVAL;
+    for (uint8_t i = 0; i < count; i++) {
+        bodies[i].packed_lcu_id = lcus[i];
+        bodies[i].network_index = 0;
+    }
+    return hailo_cs_builder_append_repeated(
+        b, HAILO_CS_ACT_ENABLE_LCU_DEFAULT, count,
+        bodies, sizeof(bodies[0]));
+}
+
+static int emit_module_config_done(struct hailo_cs_builder *b, uint8_t module)
+{
+    struct hailo_cs_act_module_config_done_interrupt body = {
+        .module_index = module,
+    };
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_MODULE_CONFIG_DONE_INTERRUPT,
+        &body, sizeof(body));
+}
+
+static int emit_sequencer_done(struct hailo_cs_builder *b, uint8_t seq_idx)
+{
+    struct hailo_cs_act_sequencer_interrupt body = {
+        .sequencer_index = seq_idx,
+    };
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_SEQUENCER_DONE_INTERRUPT,
+        &body, sizeof(body));
+}
+
+static int emit_trigger_sequencer(struct hailo_cs_builder *b,
+                                   uint8_t cluster,
+                                   const uint8_t *seq_cfg_43_bytes)
+{
+    struct hailo_cs_act_trigger_sequencer body;
+    body.cluster_index = cluster;
+    memcpy(&body.sequencer_config, seq_cfg_43_bytes,
+           sizeof(body.sequencer_config));
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_TRIGGER_SEQUENCER, &body, sizeof(body));
+}
+
+static int emit_disable_lcu(struct hailo_cs_builder *b, uint8_t packed_lcu)
+{
+    struct hailo_cs_act_disable_lcu body = {
+        .packed_lcu_id = packed_lcu,
+    };
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_DISABLE_LCU, &body, sizeof(body));
+}
+
+static int emit_deactivate_cfg_channel(struct hailo_cs_builder *b,
+                                        uint8_t packed, uint8_t sidx)
+{
+    struct hailo_cs_act_deactivate_cfg_channel body = {
+        .packed_vdma_channel_id = packed,
+        .config_stream_index    = sidx,
+    };
+    return hailo_cs_builder_append(
+        b, HAILO_CS_ACT_DEACTIVATE_CFG_CHANNEL, &body, sizeof(body));
+}
+
+/* Forward decls — defined later alongside DYNAMIC prologue emit. */
+static int find_boundary_pads(const struct hef_info *info,
+                              const struct hef_pad_info **in_pad,
+                              const struct hef_pad_info **out_pad);
+static int emit_dynamic_boundary_prologue(
+    const struct hef_info *info,
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b);
+
+static int translate_preliminary_mnist_arming(
+    const struct hef_info *info,
+    const struct hailo_cs_translate_cfg *cfg,
+    struct hailo_cs_builder *b)
+{
+    int rc;
+
+    /* Phase 3a: clean slate — disable LCU 0x01 + 14 more in a
+     * REPEATED_ACTION. Ref order: 0f 0b 09 07 06 0a 04 03 05 08
+     * 13 0e 10 00. */
+    rc = emit_disable_lcu(b, 0x01);
+    if (rc != HAILO_OK) return rc;
+    rc = hailo_cs_builder_append_repeated(
+        b, HAILO_CS_ACT_DISABLE_LCU,
+        (uint8_t)(sizeof(MNIST_DISABLE_LCU_SWEEP) /
+                  sizeof(MNIST_DISABLE_LCU_SWEEP[0])),
+        MNIST_DISABLE_LCU_SWEEP, 1);
+    if (rc != HAILO_OK) return rc;
+
+    /* Phase 3b: module-config-done + TRIGGER_SEQUENCER per cluster. */
+    rc = emit_module_config_done(b, 0x05);           if (rc) return rc;
+    rc = emit_trigger_sequencer(b, 0, MNIST_SEQ_CFG_CLUSTER_0);
+    if (rc) return rc;
+    rc = emit_module_config_done(b, 0x06);           if (rc) return rc;
+    rc = emit_trigger_sequencer(b, 1, MNIST_SEQ_CFG_CLUSTER_1);
+    if (rc) return rc;
+
+    /* Phase 3c: sequencer-done waits + 3 module-done interrupts. */
+    rc = emit_sequencer_done(b, 0);                  if (rc) return rc;
+    rc = emit_sequencer_done(b, 1);                  if (rc) return rc;
+    rc = emit_module_config_done(b, 0x12);           if (rc) return rc;
+    rc = emit_module_config_done(b, 0x13);           if (rc) return rc;
+    rc = emit_module_config_done(b, 0x11);           if (rc) return rc;
+
+    /* Phase 2 (reordered to match HailoRT's ref sequence):
+     * ACTIVATE_BOUNDARY_OUTPUT/INPUT + RESUME_VDMA (H2D) +
+     * FETCH_DATA_FROM_VDMA + BURST_CREDITS_TASK_START. HailoRT emits
+     * this AFTER Phase 3c (MODULE_CONFIG_DONE 0x11) and BEFORE Phase 4
+     * LCU enables, per pios_PRELIMINARY.bin. Fw seems to need the
+     * boundary channels armed + credits task started *while the NN
+     * core is mid-arming* — emitting these only in ACTIVATION +
+     * DYNAMIC isn't enough. */
+    rc = emit_dynamic_boundary_prologue(info, cfg, b);
+    if (rc != HAILO_OK) return rc;
+
+    /* FETCH_DATA_FROM_VDMA for the input boundary — mirror of what
+     * translate_allow_input_dataflow emits in DYNAMIC. */
+    const struct hef_pad_info *in_pad = NULL, *out_pad = NULL;
+    if (find_boundary_pads(info, &in_pad, &out_pad) != 0) {
+        /* MNIST HEF must have both boundary pads; defensive early-out
+         * so the template doesn't emit garbage if pad capture missed. */
+        return HAILO_ERR_INVAL;
+    }
+    uint8_t fetch_packed;
+    rc = pack_boundary_vdma(cfg, HAILO_CS_BOUNDARY_INPUT_CHANNEL_OFFSET,
+                            "PreliminaryFetch", &fetch_packed);
+    if (rc != HAILO_OK) return rc;
+    struct hailo_cs_act_fetch_data_from_vdma fetch = {
+        .packed_vdma_channel_id = fetch_packed,
+        .stream_index           = (uint8_t)in_pad->sys_index,
+        .network_index          = 0,
+        .frame_periph_size      = pad_periph_frame_size(in_pad),
+        .credit_type            = 1,   /* CREDIT_IN_BYTES */
+        .host_buffer_type       = HAILO_CS_HOST_BUFFER_EXTERNAL_DESC,
+    };
+    rc = hailo_cs_builder_append(b, HAILO_CS_ACT_FETCH_DATA_FROM_VDMA_CHANNEL,
+                                 &fetch, sizeof(fetch));
+    if (rc != HAILO_OK) return rc;
+
+    /* Phase 2 tail: start the credit task. There are TWO
+     * BURST_CREDITS_TASK_START actions in HailoRT's flow — one here
+     * in PRELIMINARY and one in BATCH_SWITCHING (ours emits that
+     * already). Both are required. */
+    rc = hailo_cs_builder_append(b, HAILO_CS_ACT_BURST_CREDITS_TASK_START,
+                                 NULL, 0);
+    if (rc != HAILO_OK) return rc;
+
+    /* Phase 4: 4 LCU enable groups + 2 module-config-done waits each.
+     * Matches ref ordering: grp0 (cluster 0/2 LCUs), module 14/15,
+     * grp1 (cluster 1 LCUs), module 16/17, grp2 (cluster 0/1),
+     * module 18/19, grp3 (cluster 1), module 0d/0e. */
+    rc = emit_enable_lcu_group(b, MNIST_ENABLE_LCU_GRP0, 4); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x14); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x15); if (rc) return rc;
+
+    rc = emit_enable_lcu_group(b, MNIST_ENABLE_LCU_GRP1, 4); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x16); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x17); if (rc) return rc;
+
+    rc = emit_enable_lcu_group(b, MNIST_ENABLE_LCU_GRP2, 4); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x18); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x19); if (rc) return rc;
+
+    rc = emit_enable_lcu_group(b, MNIST_ENABLE_LCU_GRP3, 3); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x0d); if (rc) return rc;
+    rc = emit_module_config_done(b, 0x0e); if (rc) return rc;
+
+    /* Phase 4b: tear down the cfg channel. Ref uses two
+     * DEACTIVATE_CFG_CHANNEL (packed=0 and packed=1); we only opened
+     * one cfg channel (packed=1 = cfg->config_vdma_channel), so emit
+     * just that. */
+    rc = emit_deactivate_cfg_channel(b, cfg->config_vdma_channel,
+                                     cfg->config_stream_index);
+    if (rc) return rc;
+
+    return HAILO_OK;
+}
+
 static int translate_preliminary(const struct hef_info *info,
                                  const struct hailo_cs_translate_cfg *cfg,
                                  struct hailo_cs_builder *b)
@@ -512,15 +760,30 @@ static int translate_preliminary(const struct hef_info *info,
     uint32_t descs = cfg->ccw_total_desc_count;
     if (descs == 0) descs = 1;               /* firmware rejects 0 */
     if (descs > UINT16_MAX) descs = UINT16_MAX;
-    (void)info;
 
     struct hailo_cs_act_fetch_cfg_channel_descriptors sub = {
         .descriptors_count      = (uint16_t)descs,
         .packed_vdma_channel_id = cfg->config_vdma_channel,
     };
-    return hailo_cs_builder_append_repeated(
+    rc = hailo_cs_builder_append_repeated(
         b, HAILO_CS_ACT_FETCH_CFG_CHANNEL_DESCRIPTORS,
         /*count=*/1, &sub, sizeof(sub));
+    if (rc != HAILO_OK) return rc;
+
+    /* #253 Phase 8: emit the MNIST-shaped NN-core arming sequence
+     * after CCW upload. Without this, fw's inference scheduler never
+     * grants credits to the boundary-IN fetch and ch=2 num_proc stays
+     * 0. Gated on MNIST shape detection; other HEFs fall through to
+     * the minimal preliminary + APPLICATION_CHANGE_INTERRUPT tail.
+     * Generalization requires parsing nn_stream_config's LCU +
+     * sequencer tables from the HEF (resource_manager_builder port).
+     */
+    if (hef_matches_mnist_template(info)) {
+        rc = translate_preliminary_mnist_arming(info, cfg, b);
+        if (rc != HAILO_OK) return rc;
+    }
+
+    return HAILO_OK;
 }
 
 /* -------------------------------------------------------------------------- */
