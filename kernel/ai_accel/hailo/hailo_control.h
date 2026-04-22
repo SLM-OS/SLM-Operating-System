@@ -85,6 +85,10 @@ enum hailo_control_cpu {
  */
 #define HAILO_BCS_ISTATUS_HOST                   0x018Cu
 #define HAILO_BSC_IMASK_HOST                     0x0188u
+/* Per-channel VDMA interrupt enable registers (hailo-pcie-common.c:20-21).
+ * Reference arms 0xFFFFFFFF into both during `hailo_pcie_enable_interrupts`. */
+#define HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL   0x0400u
+#define HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL 0x0500u
 #define HAILO_BCS_ISTATUS_HOST_SW_IRQ_MASK       0xFF000000u
 #define HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT      24u
 #define HAILO_BCS_ISTATUS_HOST_VDMA_SRC_MASK     0x000000FFu

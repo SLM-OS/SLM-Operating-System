@@ -931,48 +931,50 @@ static int hailo_backend_run(struct inference_device *dev,
     memcpy(slot->boundary_in_tensor.cpu_addr, in->data, in->n_elems);
     hailo_tensor_prepare_for_device(&slot->boundary_in_tensor);
 
-    /* Start the channels against the load-time desc lists. Safe to
-     * call on each inference — channel_start is idempotent and the
-     * descriptor list bytes were already programmed at load time.
-     * Re-starting ensures CONTROL.start is asserted, which firmware
-     * may have cleared between inferences. */
-    int rc = hailo_vdma_channel_start(in_channel, &slot->boundary_in_list,
-                                      slot->cfg.input_data_id);
-    if (rc != HAILO_OK) return hailo_err_to_inf(rc);
-    rc = hailo_vdma_channel_start(out_channel, &slot->boundary_out_list,
-                                  slot->cfg.output_data_id);
-    if (rc != HAILO_OK) {
-        hailo_vdma_channel_stop(in_channel);
-        return hailo_err_to_inf(rc);
-    }
-
-    /* Re-program the input descriptor list against the fresh tensor
-     * bytes for this inference. The desc list structure is shared
-     * with firmware (bound via OpenBoundary at load time) but the
-     * per-submit num_avail signal tells firmware how many pages to
-     * consume from the current buffer contents. */
-    int programmed = hailo_vdma_program_buffer(&slot->boundary_in_list, 0,
-                                               slot->boundary_in_tensor.iova,
-                                               in->n_elems,
-                                               slot->cfg.input_data_id);
+    /* Re-program the input/output descriptor lists against the fresh
+     * tensor bytes for this inference. The desc list structure is
+     * shared with firmware (bound via OpenBoundary at load time) but
+     * the per-submit num_avail signal tells firmware how many pages
+     * to consume from the current buffer contents.
+     *
+     * Do NOT call channel_start here — firmware owns the boundary
+     * channels after context-switch ACTIVATION+ENABLED. An early
+     * experiment re-issued channel_start each inference which wrote
+     * ABORT_PAUSE (then START) into the CONTROL byte; this clobbered
+     * firmware's channel state and num_proc never advanced on IN.
+     * Reference behaviour (hailo-vdma-common.c:hailo_vdma_start_channel)
+     * is a one-time setup during resource manager activation, not
+     * per-transfer. */
+    /* Program the FULL boundary-tensor size, not in->n_elems. Firmware
+     * was told bytes_in_pattern = bpb*bpf (the HEF's periph-aligned
+     * frame size) in OpenBoundary at load time. A partial program at
+     * run time would describe a shorter frame than the one firmware
+     * expects, and firmware silently refuses to advance num_proc on
+     * the boundary channel. The caller's payload (in->n_elems) was
+     * memcpy'd into the tensor above; positions beyond it stay at the
+     * zero-fill from load_model, giving firmware a periph-padded frame
+     * matching OpenBoundary's declaration. */
+    int programmed = hailo_vdma_program_buffer(
+        &slot->boundary_in_list, 0,
+        slot->boundary_in_tensor.iova,
+        slot->boundary_in_tensor.tensor_bytes,
+        slot->cfg.input_data_id);
     if (programmed < 0) {
-        hailo_vdma_channel_stop(in_channel);
-        hailo_vdma_channel_stop(out_channel);
         return INF_ERR_NOSUPPORT;
     }
     uint16_t in_num_avail = (uint16_t)programmed;
 
-    programmed = hailo_vdma_program_buffer(&slot->boundary_out_list, 0,
-                                           slot->boundary_out_tensor.iova,
-                                           out->n_elems,
-                                           slot->cfg.output_data_id);
+    programmed = hailo_vdma_program_buffer(
+        &slot->boundary_out_list, 0,
+        slot->boundary_out_tensor.iova,
+        slot->boundary_out_tensor.tensor_bytes,
+        slot->cfg.output_data_id);
     if (programmed < 0) {
-        hailo_vdma_channel_stop(in_channel);
-        hailo_vdma_channel_stop(out_channel);
         return INF_ERR_NOSUPPORT;
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
+    int rc;
     uint64_t t_in_submit  = timer_get_count();
     rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
                                     slot->cfg.timeout_us);
@@ -1004,10 +1006,11 @@ static int hailo_backend_run(struct inference_device *dev,
     rc = HAILO_OK;
 
 run_out:
-    /* Stop channels (safe even if start failed). Keep the descriptor
-     * lists + tensors allocated — they're slot-lifetime. */
-    hailo_vdma_channel_stop(in_channel);
-    hailo_vdma_channel_stop(out_channel);
+    /* Do NOT stop the boundary channels on success — firmware expects
+     * them live for subsequent inferences. On error, leaving them
+     * running is also safe: the next submit will fail the same way
+     * until the model is freed (which tears the channels down via
+     * context_switch_unwind → hailo_backend_free_model). */
     return hailo_err_to_inf(rc);
 }
 

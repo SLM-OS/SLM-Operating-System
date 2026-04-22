@@ -286,6 +286,22 @@ static void control_post_boot_init(void)
     hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
     hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
                             0xFFFFFFFFu);
+    /* Per-channel VDMA interrupt enable. The reference driver arms
+     * ALL 32 source + 32 destination channels in `hailo_pcie_enable_interrupts`
+     * (hailo-pcie-common.c:873-874) as part of MSI setup. Without
+     * these writes the PCIe bridge aggregator silently drops VDMA
+     * completion interrupts and — more importantly on Hailo-8L —
+     * firmware's channel-processing loop observed num_avail on the
+     * host-side channel regs but never advanced num_proc because
+     * its own per-channel "interrupt armed" check failed. Register
+     * offsets: BCS_SOURCE_INTERRUPT_PER_CHANNEL=0x400 (H2D),
+     * BCS_DESTINATION_INTERRUPT_PER_CHANNEL=0x500 (D2H). */
+    hailo_platform->write32(HAILO_BAR_CONFIG,
+                            HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL,
+                            0xFFFFFFFFu);
+    hailo_platform->write32(HAILO_BAR_CONFIG,
+                            HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
+                            0xFFFFFFFFu);
     hailo_platform->mb();
 
     /* Register the MSI handler — non-fatal on failure. */

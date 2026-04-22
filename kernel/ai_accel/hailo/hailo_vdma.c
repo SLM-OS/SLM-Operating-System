@@ -11,6 +11,7 @@
 #include "hailo.h"
 #include "hailo_internal.h"
 #include "debug.h"
+#include "uart.h"
 #include <string.h>
 
 /* Power-of-2 check: n is a power of 2 iff n != 0 and n & (n-1) == 0. */
@@ -296,13 +297,25 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
     if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
     if (!hailo_platform) return HAILO_ERR_NODEV;
 
+    /* Diagnostic snapshot before num_avail write. */
+    uint32_t base_pre = channel_read_base_dword(channel_index);
+    uint32_t proc_pre = hailo_platform->read32(HAILO_BAR_VDMA,
+        channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+
     /* Write new_num_avail into bits [31:16] of the base dword.
      * Read-modify-write to preserve CONTROL and DEPTH_ID. */
-    uint32_t cur = channel_read_base_dword(channel_index);
-    cur = (cur & 0x0000FFFFu)
+    uint32_t cur = (base_pre & 0x0000FFFFu)
         | ((uint32_t)new_num_avail << HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT);
     channel_write_base_dword(channel_index, cur);
     hailo_platform->mb();
+
+    uint32_t base_post = channel_read_base_dword(channel_index);
+
+    uart_printf("[vdma] ch=%u new_avail=%u base_pre=0x%08x "
+                "base_post=0x%08x proc_pre=0x%08x\r\n",
+                (unsigned)channel_index, (unsigned)new_num_avail,
+                (unsigned)base_pre, (unsigned)base_post,
+                (unsigned)proc_pre);
 
     /* Poll NUM_PROC (low 16 bits of NUM_PROC_DWORD). Yield via
      * udelay between polls to stay cooperative on Pi 5. */
@@ -313,9 +326,20 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
             channel_base(channel_index)
             + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
         uint16_t num_proc = (uint16_t)(proc_dword & 0xFFFFu);
-        if (num_proc == new_num_avail) return HAILO_OK;
+        if (num_proc == new_num_avail) {
+            uart_printf("[vdma] ch=%u done after %u us proc=0x%08x\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)proc_dword);
+            return HAILO_OK;
+        }
         hailo_platform->udelay(poll_interval_us);
         elapsed += poll_interval_us;
     }
+    uint32_t proc_end = hailo_platform->read32(HAILO_BAR_VDMA,
+        channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+    uint32_t base_end = channel_read_base_dword(channel_index);
+    uart_printf("[vdma] ch=%u TIMEOUT proc_end=0x%08x base_end=0x%08x\r\n",
+                (unsigned)channel_index, (unsigned)proc_end,
+                (unsigned)base_end);
     return HAILO_ERR_TIMEOUT;
 }
