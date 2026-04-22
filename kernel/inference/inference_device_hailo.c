@@ -703,6 +703,13 @@ static int context_switch_load(struct hailo_model_slot *slot,
                  rc, bulk_bytes);
             goto fail;
         }
+        /* Arm the unwind flag as soon as ccw_tensor_1 is allocated so
+         * any `goto fail` between here and the desc-list programming
+         * below still frees the tensor. context_switch_unwind's
+         * hailo_tensor_free / hailo_vdma_desc_list_free are NULL-safe,
+         * so partially-initialised state (tensor but no list) cleans
+         * up correctly. */
+        slot->ccw_has_second_channel = true;
         memset(slot->ccw_tensor_1.cpu_addr, 0, bulk_bytes);
         const uint8_t *ccws_base =
             (const uint8_t *)model + outer->ccws_offset;
@@ -740,7 +747,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
         }
         ccw_num_avail_bulk = (uint16_t)prog1;
         slot->ccw_num_avail_1 = ccw_num_avail_bulk;
-        slot->ccw_has_second_channel = true;
+        /* ccw_has_second_channel was set immediately after the
+         * tensor alloc above so the unwind path catches partial init. */
     }
 
     /* Step 2: boundary tensors + desc lists — only for pads the HEF

@@ -2929,6 +2929,57 @@ static void test_cs_translate_activation_emits_input_and_output(void)
     TEST_ASSERT_EQUAL_UINT8(0x02, out.activation[5 + 25 + 5]);
 }
 
+/* OpenBoundary's stream_index field must be set to the pad's HEF
+ * sys_index, NOT a 0-based counter (commit 3ebc164). When a HEF
+ * carries multiple boundary input pads, each must land in ACTIVATION
+ * with its own sys_index so fw correlates it with the FETCH_DATA_
+ * FROM_VDMA emitted later in DYNAMIC. A 0-based counter would have
+ * emitted 0,1 instead of the real sys_indexes and caused a silent
+ * mismatch on multi-input HEFs. */
+static void test_cs_translate_activation_multi_input_preserves_sys_index(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.pad_count = 2;   /* two boundary inputs, no output */
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].sys_index             = 3;
+    info.pads[0].core_bytes_per_buffer = 0x100;
+    info.pads[1].is_input              = true;
+    info.pads[1].has_stream_info       = true;
+    info.pads[1].sys_index             = 9;
+    info.pads[1].core_bytes_per_buffer = 0x200;
+    info.ccw_action_count = 1;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel             = 0x01,
+        .ccw_desc_list_iova              = 0x1000,
+        .ccw_desc_page_size              = 512,
+        .ccw_total_desc_count            = 2,
+        .boundary_input_desc_list_iova   = 0xAABB00000011ull,
+        .boundary_input_total_desc_count = 4,
+        .boundary_desc_page_size         = 1024,
+    };
+
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+
+    /* ACTIVATION = BURST_CREDITS(5) + 2×OPEN_BOUNDARY_INPUT(5+28)
+     * = 5 + 33 + 33 = 71 B. OPEN_BOUNDARY_INPUT body (28 B)
+     * layout puts stream_index at body offset 20 (after
+     * packed_vdma(1) + host_buffer_info(19)).
+     *   First pad:  hdr 5..9, body 10..37, stream_index @ 10+20=30
+     *   Second pad: hdr 38..42, body 43..70, stream_index @ 43+20=63 */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(5 + 33 + 33), out.activation_len);
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
+                            out.activation[5]);
+    TEST_ASSERT_EQUAL_UINT8(3, out.activation[30]);   /* first pad sys_index */
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_ACT_OPEN_BOUNDARY_INPUT_CHANNEL,
+                            out.activation[5 + 33]);
+    TEST_ASSERT_EQUAL_UINT8(9, out.activation[63]);   /* second pad sys_index */
+}
+
 static void test_cs_translate_activation_skips_internal_pads(void)
 {
     /* Pads without has_stream_info are internal ops — translator
@@ -3066,7 +3117,12 @@ static void test_cs_translate_batch_switching_mnist_template(void)
 {
     struct hef_info info;
     memset(&info, 0, sizeof(info));
-    info.ccw_action_count = 28;             /* MNIST HEF signature */
+    /* Full MNIST template signature (tightened per PR #348 review):
+     * ccw_action_count=28, ccw_total_bytes=112256, sdk_version
+     * prefix "3.33", plus the 28×28×1 / 1×1×10 shapes set below. */
+    info.ccw_action_count = 28;
+    info.ccw_total_bytes  = 112256;
+    strncpy(info.sdk_version, "3.33.1", sizeof(info.sdk_version) - 1);
     info.pad_count = 2;
     info.pads[0].is_input              = true;
     info.pads[0].has_stream_info       = true;
@@ -3149,7 +3205,12 @@ static void test_cs_translate_batch_switching_template_gated(void)
 {
     struct hef_info info;
     memset(&info, 0, sizeof(info));
-    info.ccw_action_count = 28;              /* CCW count matches MNIST */
+    /* Matches MNIST on CCW count + byte total + SDK version but the
+     * input/output shapes are 224×224×3 / 1×1×1000 — a real
+     * classifier, not MNIST. Tight detector must still decline. */
+    info.ccw_action_count = 28;
+    info.ccw_total_bytes  = 112256;
+    strncpy(info.sdk_version, "3.33.1", sizeof(info.sdk_version) - 1);
     info.pad_count = 2;
     info.pads[0].is_input              = true;
     info.pads[0].has_stream_info       = true;
@@ -3184,6 +3245,90 @@ static void test_cs_translate_batch_switching_template_gated(void)
                             out.batch_switching[0]);
 }
 
+/* MNIST template gated on sdk_version prefix "3.33" + ccw_total_bytes
+ * = 112256. A HEF with matching shape but a mismatched sdk_version
+ * (e.g. future DFC compiler) must NOT receive the hardcoded
+ * sequencer_config byte tables — the detector's third guard. */
+static void test_cs_translate_batch_switching_template_rejects_new_sdk(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 28;
+    info.ccw_total_bytes  = 112256;
+    strncpy(info.sdk_version, "4.0.0",  /* != "3.33*" */
+            sizeof(info.sdk_version) - 1);
+    info.pad_count = 2;
+    info.pads[0].is_input              = true;
+    info.pads[0].has_stream_info       = true;
+    info.pads[0].has_tensor_shape      = true;
+    info.pads[0].height = 28; info.pads[0].width = 28; info.pads[0].features = 1;
+    info.pads[0].core_bytes_per_buffer = 32;
+    info.pads[0].core_buffers_per_frame = 28;
+    info.pads[1].is_input              = false;
+    info.pads[1].has_stream_info       = true;
+    info.pads[1].has_tensor_shape      = true;
+    info.pads[1].height = 1; info.pads[1].width = 1; info.pads[1].features = 10;
+    info.pads[1].core_bytes_per_buffer = 16;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel              = 0x01,
+        .ccw_desc_list_iova               = 0x1000,
+        .ccw_desc_page_size               = 512,
+        .ccw_total_desc_count             = 2,
+        .boundary_input_desc_list_iova    = 0x10000,
+        .boundary_input_total_desc_count  = 2,
+        .boundary_output_desc_list_iova   = 0x20000,
+        .boundary_output_total_desc_count = 2,
+        .boundary_desc_page_size          = 4096,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+    /* Mismatched SDK → template declines → 16-byte minimal BATCH_SWITCHING. */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)16, out.batch_switching_len);
+}
+
+/* Same shape as MNIST but ccw_total_bytes doesn't match the
+ * reference (112256) — detector must decline because the CCW split
+ * across cfg channels is what keys the sequencer_config templates to
+ * the specific HEF compile. */
+static void test_cs_translate_batch_switching_template_rejects_new_ccw(void)
+{
+    struct hef_info info;
+    memset(&info, 0, sizeof(info));
+    info.ccw_action_count = 28;
+    info.ccw_total_bytes  = 113000;   /* slightly off — same count, different bytes */
+    strncpy(info.sdk_version, "3.33.1", sizeof(info.sdk_version) - 1);
+    info.pad_count = 2;
+    info.pads[0].is_input         = true;
+    info.pads[0].has_stream_info  = true;
+    info.pads[0].has_tensor_shape = true;
+    info.pads[0].height = 28; info.pads[0].width = 28; info.pads[0].features = 1;
+    info.pads[0].core_bytes_per_buffer = 32;
+    info.pads[0].core_buffers_per_frame = 28;
+    info.pads[1].is_input         = false;
+    info.pads[1].has_stream_info  = true;
+    info.pads[1].has_tensor_shape = true;
+    info.pads[1].height = 1; info.pads[1].width = 1; info.pads[1].features = 10;
+    info.pads[1].core_bytes_per_buffer = 16;
+
+    struct hailo_cs_translate_cfg cfg = {
+        .config_vdma_channel              = 0x01,
+        .ccw_desc_list_iova               = 0x1000,
+        .ccw_desc_page_size               = 512,
+        .ccw_total_desc_count             = 2,
+        .boundary_input_desc_list_iova    = 0x10000,
+        .boundary_input_total_desc_count  = 2,
+        .boundary_output_desc_list_iova   = 0x20000,
+        .boundary_output_total_desc_count = 2,
+        .boundary_desc_page_size          = 4096,
+    };
+    struct hailo_cs_context_buffers out;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_cs_translate_contexts(&info, &cfg, &out));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)16, out.batch_switching_len);
+}
+
 /* PRELIMINARY with dual cfg-channel (ccw_cfg_channel_1_* set) emits
  * TWO ACTIVATE_CFG_CHANNEL actions in HailoRT's bulk-before-small
  * order, followed by the MNIST arming sequence (gated by shape
@@ -3194,6 +3339,8 @@ static void test_cs_translate_preliminary_dual_cfg_channel(void)
     struct hef_info info;
     memset(&info, 0, sizeof(info));
     info.ccw_action_count = 28;
+    info.ccw_total_bytes  = 112256;
+    strncpy(info.sdk_version, "3.33.1", sizeof(info.sdk_version) - 1);
     info.pad_count = 2;
     info.pads[0].is_input              = true;
     info.pads[0].has_stream_info       = true;
@@ -7301,6 +7448,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_activation_emits_open_boundary_input);
     RUN_TEST(test_cs_translate_activation_emits_open_boundary_output);
     RUN_TEST(test_cs_translate_activation_emits_input_and_output);
+    RUN_TEST(test_cs_translate_activation_multi_input_preserves_sys_index);
     RUN_TEST(test_cs_translate_activation_skips_internal_pads);
     RUN_TEST(test_cs_translate_activation_missing_input_iova_fails);
     RUN_TEST(test_cs_translate_dynamic_emits_boundary_prologue);
@@ -7310,6 +7458,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_translate_batch_switching_no_boundary_input);
     RUN_TEST(test_cs_translate_batch_switching_mnist_template);
     RUN_TEST(test_cs_translate_batch_switching_template_gated);
+    RUN_TEST(test_cs_translate_batch_switching_template_rejects_new_sdk);
+    RUN_TEST(test_cs_translate_batch_switching_template_rejects_new_ccw);
     RUN_TEST(test_cs_translate_preliminary_dual_cfg_channel);
     RUN_TEST(test_cs_translate_preliminary_single_channel);
     RUN_TEST(test_cs_translate_enable_lcu_default_variant);

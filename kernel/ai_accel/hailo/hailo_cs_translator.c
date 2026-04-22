@@ -398,11 +398,36 @@ _Static_assert(sizeof(mnist_switch_lcu_batch_template) /
                sizeof(mnist_switch_lcu_batch_template[0]) == 15,
                "MNIST switch_lcu_batch template must be 15 entries");
 
+/* MNIST template signature: 28×28×1 input + 1×1×10 output + 28 CCW
+ * actions + DFC sdk_version string prefix "3.33" + ccw_total_bytes
+ * matching the reference build (112256 B). The MNIST sequencer_config
+ * and LCU sweep byte tables below are compiled specifically from
+ * this HEF; applying them to a lookalike HEF from a different DFC
+ * revision would silently corrupt fw state. The signature is
+ * intentionally tight — new MNIST HEFs (e.g. re-quantised, alternate
+ * batch size) should fall through to the generic path until the
+ * translator learns to synthesize sequencer_config from the HEF's
+ * own compiled actions. */
+#define HAILO_MNIST_TEMPLATE_CCW_ACTION_COUNT  28u
+#define HAILO_MNIST_TEMPLATE_CCW_TOTAL_BYTES   112256u
+#define HAILO_MNIST_TEMPLATE_SDK_VERSION       "3.33"
+
 static bool hef_matches_mnist_template(const struct hef_info *info)
 {
-    if (info->ccw_action_count != 28) return false;
-    /* Input pad sys_index=1 with shape 28x28x1 + output pad sys_index=0
-     * with shape 1x1x10 uniquely identifies the MNIST HEF we use. */
+    if (info->ccw_action_count != HAILO_MNIST_TEMPLATE_CCW_ACTION_COUNT)
+        return false;
+    if (info->ccw_total_bytes != HAILO_MNIST_TEMPLATE_CCW_TOTAL_BYTES)
+        return false;
+    /* sdk_version is a NUL-terminated C string; check its prefix so
+     * "3.33.1" et al all match. A HEF compiled on a newer DFC will
+     * likely carry different sequencer_config bytes and must fall
+     * through. */
+    const char *want = HAILO_MNIST_TEMPLATE_SDK_VERSION;
+    for (size_t i = 0; want[i] != '\0'; i++) {
+        if (info->sdk_version[i] != want[i]) return false;
+    }
+    /* Input pad shape 28x28x1 + output pad shape 1x1x10 — the
+     * structural fingerprint of the MNIST HEF. */
     bool saw_in = false, saw_out = false;
     for (uint32_t i = 0; i < info->pad_count; i++) {
         const struct hef_pad_info *p = &info->pads[i];
@@ -538,11 +563,26 @@ _Static_assert(sizeof(MNIST_SEQ_CFG_CLUSTER_1) ==
                "MNIST cluster_1 sequencer_config must be 43 bytes");
 
 /* LCU groups enabled in PRELIMINARY phase 4. Each group's LCUs are
- * followed by two MODULE_CONFIG_DONE_INTERRUPTs — see ref sequence. */
+ * followed by two MODULE_CONFIG_DONE_INTERRUPTs — see ref sequence.
+ * The groups are fed to emit_enable_lcu_group(), which stages the
+ * sub-bodies on a stack-local array sized for MNIST_ENABLE_LCU_GROUP_MAX
+ * entries. Enlarging any group without bumping the cap would return
+ * HAILO_ERR_INVAL silently on the MNIST gate — the _Static_asserts
+ * below fail the build instead. */
+#define MNIST_ENABLE_LCU_GROUP_MAX 4u
 static const uint8_t MNIST_ENABLE_LCU_GRP0[4] = { 0x00, 0x10, 0x0e, 0x13 };
 static const uint8_t MNIST_ENABLE_LCU_GRP1[4] = { 0x08, 0x05, 0x03, 0x04 };
 static const uint8_t MNIST_ENABLE_LCU_GRP2[4] = { 0x0a, 0x06, 0x07, 0x09 };
 static const uint8_t MNIST_ENABLE_LCU_GRP3[3] = { 0x0b, 0x0f, 0x01 };
+
+_Static_assert(sizeof(MNIST_ENABLE_LCU_GRP0) <= MNIST_ENABLE_LCU_GROUP_MAX,
+               "MNIST_ENABLE_LCU_GRP0 exceeds emit_enable_lcu_group cap");
+_Static_assert(sizeof(MNIST_ENABLE_LCU_GRP1) <= MNIST_ENABLE_LCU_GROUP_MAX,
+               "MNIST_ENABLE_LCU_GRP1 exceeds emit_enable_lcu_group cap");
+_Static_assert(sizeof(MNIST_ENABLE_LCU_GRP2) <= MNIST_ENABLE_LCU_GROUP_MAX,
+               "MNIST_ENABLE_LCU_GRP2 exceeds emit_enable_lcu_group cap");
+_Static_assert(sizeof(MNIST_ENABLE_LCU_GRP3) <= MNIST_ENABLE_LCU_GROUP_MAX,
+               "MNIST_ENABLE_LCU_GRP3 exceeds emit_enable_lcu_group cap");
 
 /* Expand a packed-lcu-id array into enable_lcu_default sub-bodies
  * ({packed_lcu_id, network_index=0}) so they can be fed to
@@ -551,8 +591,8 @@ static const uint8_t MNIST_ENABLE_LCU_GRP3[3] = { 0x0b, 0x0f, 0x01 };
 static int emit_enable_lcu_group(struct hailo_cs_builder *b,
                                   const uint8_t *lcus, uint8_t count)
 {
-    struct hailo_cs_act_enable_lcu_default bodies[4];
-    if (count > 4) return HAILO_ERR_INVAL;
+    struct hailo_cs_act_enable_lcu_default bodies[MNIST_ENABLE_LCU_GROUP_MAX];
+    if (count > MNIST_ENABLE_LCU_GROUP_MAX) return HAILO_ERR_INVAL;
     for (uint8_t i = 0; i < count; i++) {
         bodies[i].packed_lcu_id = lcus[i];
         bodies[i].network_index = 0;

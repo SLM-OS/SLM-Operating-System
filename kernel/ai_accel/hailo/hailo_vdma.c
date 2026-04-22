@@ -525,6 +525,15 @@ int hailo_vdma_channel_wait_proc(uint8_t channel_index,
         uint16_t num_proc = (uint16_t)(proc_dword & 0xFFFFu);
         if (num_proc >= target_num_proc
             || (target_num_proc > 0 && num_proc == target_num_proc - 1)) {
+            /* Flag the off-by-one path so future regressions where fw
+             * legitimately stalls one short don't silently pass —
+             * LAST_DESC_CTRL quirk was the only known trigger. */
+            if (target_num_proc > 0 && num_proc == target_num_proc - 1) {
+                WARN("[vdma] ch=%u wait_proc accepted off-by-one "
+                     "(target=%u, proc=%u) — LAST_DESC_CTRL quirk?",
+                     (unsigned)channel_index,
+                     (unsigned)target_num_proc, (unsigned)num_proc);
+            }
             uart_printf("[vdma] ch=%u wait_proc done after %u us "
                         "proc=0x%08x\r\n",
                         (unsigned)channel_index, (unsigned)elapsed,
