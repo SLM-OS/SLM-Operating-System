@@ -111,6 +111,7 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER = 0x20,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO      = 0x21,
     HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS         = 0x25,
+    HAILO_CONTROL_OPCODE_CORE_IDENTIFY                        = 0x2A,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS = 0x47,
     HAILO_CONTROL_OPCODE_GET_HW_CONSTS                        = 0x48,
     /* Full table in docs/reference/hailort-control-protocol.h. */
@@ -653,6 +654,25 @@ int hailo_control_context_switch_clear_configured_apps(void);
  * received so callers can optionally inspect; pass NULL to ignore.
  */
 int hailo_control_get_hw_consts(uint32_t *out_response_len);
+
+/*
+ * CORE_IDENTIFY (opcode 0x2A, CPU_ID_CORE_CPU). Empty-body liveness
+ * probe. Firmware responds with its fw_version ({major, minor,
+ * revision} u32s). If the CORE CPU's RPC thread is alive, it responds
+ * in single-digit microseconds; if the CORE CPU is wedged (e.g. the
+ * inference task crashed and starved the RPC thread) the call times
+ * out.
+ *
+ * Added 2026-04-21 for the Phase 8 #253 investigation: it lets the
+ * submit path check "is CORE CPU still listening?" immediately before
+ * writing num_avail. A live response here but a frozen num_proc after
+ * submit would localize the blocker to the inference task / BURST_
+ * CREDITS_TASK state rather than the whole CORE CPU.
+ *
+ * `out_response_len` is set to the number of response body bytes on
+ * success; pass NULL to ignore.
+ */
+int hailo_control_core_identify(uint32_t *out_response_len);
 
 /*
  * Reset internal control-channel state (sequence counter and the

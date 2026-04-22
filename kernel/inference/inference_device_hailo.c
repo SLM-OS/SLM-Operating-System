@@ -927,6 +927,25 @@ static int hailo_backend_run(struct inference_device *dev,
     uint8_t out_channel = (uint8_t)(HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL
                                   + HAILO_CS_BOUNDARY_OUTPUT_CHANNEL_OFFSET);
 
+    /* #253 CORE-CPU liveness probe: issue an empty-body CORE_IDENTIFY
+     * right before the submit. If this returns rc=0 quickly, fw's
+     * CORE-CPU RPC thread is alive and the submit blocker is inside
+     * the inference-task / burst-credits state machine. If it times
+     * out, the whole CORE CPU is wedged (e.g. inference task crashed
+     * and starved the RPC thread). Strip once the blocker lifts. */
+    {
+        uint64_t t_probe_start = timer_get_count();
+        uint32_t resp_len = 0;
+        int probe_rc = hailo_control_core_identify(&resp_len);
+        uint64_t t_probe_end = timer_get_count();
+        uint64_t probe_us = (t_probe_end - t_probe_start) * 1000000ULL
+                             / timer_get_frequency();
+        uart_printf("[hailo] run: pre-submit CORE_IDENTIFY rc=%d "
+                    "resp_len=%u latency=%lu us\r\n",
+                    probe_rc, (unsigned)resp_len,
+                    (unsigned long)probe_us);
+    }
+
     /* Copy caller's input into the pre-allocated DMA buffer +
      * cache-clean so the device picks up the fresh bytes.
      * Corresponding invalidate+copy for output happens after submit. */

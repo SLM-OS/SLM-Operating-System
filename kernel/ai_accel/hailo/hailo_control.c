@@ -1534,10 +1534,22 @@ struct hailo_cs_hw_consts_resp_wire {
     uint8_t  body[128];
 } __attribute__((packed));
 
+/* CORE_IDENTIFY response: parameter_count=1, one param carrying
+ * firmware_version_t = {major, minor, revision} as three u32s (12 B).
+ * Framed wire: header(12) + parameter_count(4) + length(4) + body(12)
+ * = 32 bytes. 64 B ceiling is defensive. */
+struct hailo_cs_core_identify_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                /* BE */
+    uint8_t  body[64];
+} __attribute__((packed));
+
 static struct hailo_cs_empty_req_wire        control_clear_apps_req;
 static struct hailo_cs_clear_apps_resp_wire  control_clear_apps_resp;
 static struct hailo_cs_empty_req_wire        control_hw_consts_req;
 static struct hailo_cs_hw_consts_resp_wire   control_hw_consts_resp;
+static struct hailo_cs_empty_req_wire        control_core_identify_req;
+static struct hailo_cs_core_identify_resp_wire control_core_identify_resp;
 
 /* Shared implementation for empty-body CORE-CPU RPCs (0x47, 0x48,
  * and any future `parameter_count=0`-only opcode). Caller owns the
@@ -1607,6 +1619,17 @@ int hailo_control_get_hw_consts(uint32_t *out_response_len)
         &control_hw_consts_req,
         &control_hw_consts_resp,
         sizeof(control_hw_consts_resp),
+        out_response_len);
+}
+
+int hailo_control_core_identify(uint32_t *out_response_len)
+{
+    return control_send_empty_body_core_rpc(
+        HAILO_CONTROL_OPCODE_CORE_IDENTIFY,
+        "CORE_IDENTIFY",
+        &control_core_identify_req,
+        &control_core_identify_resp,
+        sizeof(control_core_identify_resp),
         out_response_len);
 }
 
