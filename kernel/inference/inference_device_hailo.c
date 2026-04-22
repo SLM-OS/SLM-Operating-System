@@ -46,6 +46,8 @@
 #include "hef_parser.h"
 #include "spinlock.h"
 #include "debug.h"
+#include "timer.h"
+#include "uart.h"
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -524,7 +526,18 @@ static int context_switch_load(struct hailo_model_slot *slot,
     }
     cs_load_stage_set(42);
 
-    /* Step 5: six RPCs. Each must succeed; abort on any failure. */
+    /* Step 5: RPC sequence. Each must succeed; abort on any failure.
+     *
+     * Phase 8 fix: inserted CLEAR_CONFIGURED_APPS + GET_HW_CONSTS
+     * between RESET and SET_NETWORK_GROUP_HEADER. `hailo ctxsmoke`
+     * does this handshake and its SET_CONTEXT_INFO calls return
+     * rc=0. load_model skipped it and every real-HEF load failed
+     * at SET_CONTEXT_INFO(ACTIVATION) with major=0x40130016
+     * (HAILO_DATAFLOW_STATUS_INVALID_RECEIVE_COMMUNICATION). The
+     * memory note for the CORE CPU 0xFFFFFFFF wedge resolution
+     * (2026-04-20) confirmed this: v4.23 firmware requires the
+     * pre-configure handshake before accepting network-group-
+     * level setup. */
     cs_load_stage_set(50);
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
@@ -536,7 +549,26 @@ static int context_switch_load(struct hailo_model_slot *slot,
     }
     cs_load_stage_set(51);
 
+    /* Pre-configure handshake (matches ctxsmoke flow + HailoRT
+     * convention). CLEAR_CONFIGURED_APPS drops any apps the
+     * firmware had registered from a prior load; GET_HW_CONSTS
+     * reads hardware constants firmware needs to have handy
+     * before it can validate subsequent context-switch bytes. */
+    rc = hailo_control_context_switch_clear_configured_apps();
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: CLEAR_CONFIGURED_APPS failed (rc=%d)", rc);
+        goto fail;
+    }
     cs_load_stage_set(52);
+
+    uint32_t hw_consts_len = 0;
+    rc = hailo_control_get_hw_consts(&hw_consts_len);
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: GET_HW_CONSTS failed (rc=%d)", rc);
+        goto fail;
+    }
+    cs_load_stage_set(53);
+
     rc = hailo_control_set_network_group_header(&hdr);
     if (rc != HAILO_OK) {
         WARN("hailo backend: SET_NETWORK_GROUP_HEADER failed (rc=%d)", rc);
@@ -656,6 +688,13 @@ static int hailo_backend_load_model(struct inference_device *dev,
         uart_printf("[hailo] load_model: outer parse failed rc=%d\r\n", rc);
         return INF_ERR_BAD_MODEL;
     }
+    uart_printf("[hailo] load_model: outer v=%u proto=%u@%u ccws=%lu@%lu (blob=%lu)\r\n",
+                (unsigned)outer.version,
+                (unsigned)outer.proto_size,
+                (unsigned)outer.proto_offset,
+                (unsigned long)outer.ccws_size,
+                (unsigned long)outer.ccws_offset,
+                (unsigned long)size);
 
     /* 2. Proto body — extract pad shapes for the first network group.
      * struct hef_info is ~1.2 KB; the 16 KB kernel stack has room. */
@@ -786,10 +825,11 @@ static int hailo_backend_load_model(struct inference_device *dev,
         /* Deliberately tight: scheduler-policy path (ai_hailo) invokes
          * run() from contexts that may have IRQs disabled. A 500 ms
          * poll would stall the CPU and drop timer ticks. A real
-         * Hailo-8 MLP inference completes in microseconds; 10 ms is
-         * a ~500x safety margin that still caps pathological waits
-         * at a recoverable duration. */
-        .timeout_us       = 10000,      /* 10 ms */
+         * Hailo-8 MLP inference completes in microseconds; 10 ms was
+         * the original 500x safety margin but bumping to 500 ms for
+         * real-HEF bring-up — first inference may include one-time
+         * CCW upload latency and we don't yet know the real variance. */
+        .timeout_us       = 500000,     /* 500 ms */
     };
     slots[idx].input_shape[0]  = (uint16_t)pad_dim(in_pad->padded_height,   in_pad->height);
     slots[idx].input_shape[1]  = (uint16_t)pad_dim(in_pad->padded_width,    in_pad->width);
@@ -933,13 +973,31 @@ static int hailo_backend_run(struct inference_device *dev,
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
+    uint64_t t_in_submit  = timer_get_count();
     rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
                                     slot->cfg.timeout_us);
-    if (rc != HAILO_OK) goto run_out;
+    uint64_t t_in_done = timer_get_count();
+    if (rc != HAILO_OK) {
+        uart_printf("[hailo] run: IN submit_and_wait rc=%d (avail=%u)\r\n",
+                    rc, (unsigned)in_num_avail);
+        goto run_out;
+    }
+    uart_printf("[hailo] run: IN ok in %lu us\r\n",
+                (unsigned long)((t_in_done - t_in_submit) * 1000000ULL
+                                / timer_get_frequency()));
 
+    uint64_t t_out_submit = timer_get_count();
     rc = hailo_vdma_submit_and_wait(out_channel, out_num_avail,
                                     slot->cfg.timeout_us);
-    if (rc != HAILO_OK) goto run_out;
+    uint64_t t_out_done = timer_get_count();
+    if (rc != HAILO_OK) {
+        uart_printf("[hailo] run: OUT submit_and_wait rc=%d (avail=%u)\r\n",
+                    rc, (unsigned)out_num_avail);
+        goto run_out;
+    }
+    uart_printf("[hailo] run: OUT ok in %lu us\r\n",
+                (unsigned long)((t_out_done - t_out_submit) * 1000000ULL
+                                / timer_get_frequency()));
 
     hailo_tensor_prepare_for_host(&slot->boundary_out_tensor);
     memcpy(out->data, slot->boundary_out_tensor.cpu_addr, out->n_elems);
