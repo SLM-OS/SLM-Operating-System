@@ -923,10 +923,37 @@ static void xhci_patch_inherited_address(struct xhci_device *d, uint8_t addr)
          (unsigned)addr, (unsigned)old, (unsigned)patched);
 }
 
+static void xhci_reprime_ep0_ring(struct xhci_device *d, const char *why)
+{
+    if (d == NULL)
+        return;
+
+    struct xhci_ring *r = d->ep_rings[XHCI_DCI_EP0];
+    if (r == NULL || r->trbs == NULL || r->num_trbs == 0)
+        return;
+
+    if (xhci_ring_init(r, r->trbs, r->phys, r->num_trbs) != 0) {
+        WARN("xhci: reprime EP0 ring failed (%s)",
+             why ? why : "probe");
+        return;
+    }
+
+    INFO("xhci: reprime EP0 ring (%s) phys=0x%lx pcs=%u enqueue=%u "
+         "trb0_ctl=0x%08x link_ctl=0x%08x",
+         why ? why : "probe",
+         (unsigned long)r->phys,
+         (unsigned)r->cycle_state,
+         (unsigned)r->enqueue,
+         (unsigned)r->trbs[0].control,
+         (unsigned)r->trbs[r->num_trbs - 1].control);
+}
+
 static void xhci_try_eval_ep0_context(struct xhci_device *d, const char *why)
 {
     if (d == NULL || d->slot_id == 0 || d->input_ctx == NULL)
         return;
+
+    xhci_reprime_ep0_ring(d, why);
 
     bool cz = xhci_caps_cached.ctx_64;
     memset(d->input_ctx, 0, xhci_ctx_in_bytes(cz));
@@ -947,6 +974,12 @@ static void xhci_try_eval_ep0_context(struct xhci_device *d, const char *why)
     *e2 = *de2;
     *e3 = *de3;
     *e4 = *de4;
+
+    struct xhci_ring *r = d->ep_rings[XHCI_DCI_EP0];
+    if (r != NULL) {
+        *e2 = (uint32_t)(r->phys & 0xFFFFFFFFu) | 0x1U;
+        *e3 = (uint32_t)(r->phys >> 32);
+    }
 
     struct xhci_trb cmd = {0};
     uint8_t cc = 0;
