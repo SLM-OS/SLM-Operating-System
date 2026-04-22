@@ -22,18 +22,17 @@
  */
 static int cmd_lua(int argc, char *argv[]) {
     struct shell_session *sess = shell_session_current();
-    bool cache_state = (sess && sess->id != 0);
-    bool close_on_return = false;
-    lua_State *L = (cache_state && sess) ? (lua_State *)sess->lua : NULL;
-    if (cache_state && sess && !L) {
+    bool persistent_repl = (sess && sess->id != 0 && argc == 1);
+    bool close_on_return = !persistent_repl;
+    lua_State *L = (persistent_repl && sess) ? (lua_State *)sess->lua : NULL;
+    if (persistent_repl && sess && !L) {
         L = lua_slm_newstate();
         if (L) {
             sess->lua = L;
         }
     }
-    if (!cache_state) {
+    if (!persistent_repl) {
         L = lua_slm_newstate();
-        close_on_return = (L != NULL);
     }
     if (L == NULL) {
         shell_printf("Failed to initialize Lua\n");

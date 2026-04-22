@@ -697,17 +697,13 @@ static struct lua_state_slot *lua_state_slot_alloc(lua_State *L)
     return NULL;
 }
 
-static void lua_state_slot_free(lua_State *L)
+static void lua_state_slot_free(struct lua_state_slot *slot)
 {
+    if (!slot) return;
     irq_flags_t flags = spin_lock_irqsave(&lua_state_slots_lock);
-    for (int i = 0; i < LUA_MSG_COMPONENT_CAP; i++) {
-        if (lua_state_slots[i].active && lua_state_slots[i].L == L) {
-            lua_state_slots[i].active = 0;
-            lua_state_slots[i].L = NULL;
-            lua_state_slots[i].component_idx = 0;
-            break;
-        }
-    }
+    slot->active = 0;
+    slot->L = NULL;
+    slot->component_idx = 0;
     spin_unlock_irqrestore(&lua_state_slots_lock, flags);
 }
 
@@ -2514,12 +2510,13 @@ lua_State *lua_slm_newstate(void) {
 
 void lua_slm_close(lua_State *L) {
     if (L) {
+        struct lua_state_slot *slot = lua_state_slot_from_state(L);
         /* Release any Lua msg_subscribe refs owned by this state (#207)
          * before the state is closed — luaL_unref needs a live state. */
         lua_msg_subs_cleanup(L);
         *(struct lua_state_slot **)lua_getextraspace(L) = NULL;
+        lua_state_slot_free(slot);
         lua_close(L);
-        lua_state_slot_free(L);
         /* Only reset the shared Lua heap when the last state is gone.
          * With Lua-defined tasks (#208), multiple states can be live at
          * once and a reset would wipe allocations belonging to survivors. */
