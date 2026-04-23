@@ -1202,9 +1202,6 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
         return -1;
     }
 
-    d->ep_rings[XHCI_DCI_EP0] = ep0;
-    d->slot_id = slot;
-    d->adopted_inherited = true;
     /*
      * Linux's live full-speed Bluetooth path keeps using slot/address 3
      * after deauthorize/reauthorize. When we adopt that retained slot,
@@ -1215,11 +1212,22 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
      */
     dev->address = slot;
     dev->state = USB_STATE_ADDRESS;
+    d->slot_id = slot;
+    d->ep_rings[XHCI_DCI_EP0] = ep0;
+    d->adopted_inherited = true;
+    if (xhci_inherited_slot3_devctx_phys != 0) {
+        xhci_dcbaa[slot] = (uint64_t)d->dev_ctx_phys;
+        dsb(sy);
+    } else {
+        INFO("xhci: adopt slot %u leaving DCBAA entry untouched (no inherited devctx phys)",
+             (unsigned)slot);
+    }
     xhci_probe_adopt_inherited_slot3 = false;
     INFO("xhci: adopted inherited slot %u for full-speed root device "
-         "(root_port=%u ring=0x%lx via on-demand SET_TR_DEQ)",
+         "(root_port=%u ring=0x%lx devctx=0x%lx via on-demand SET_TR_DEQ)",
          (unsigned)slot, (unsigned)d->root_port,
-         (unsigned long)ep0->phys);
+         (unsigned long)ep0->phys,
+         (unsigned long)d->dev_ctx_phys);
     return 0;
 }
 

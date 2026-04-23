@@ -76,6 +76,8 @@ extern uintptr_t               xhci_inherited_slot3_devctx_phys;
 uint32_t xhci_op_r32(uint32_t off);
 void     xhci_op_w32(uint32_t off, uint32_t val);
 void     xhci_tegra_restore_context(const char *why);
+void     xhci_dump_runtime_state(const char *tag);
+void     xhci_dump_runtime_state_slot(const char *tag, uint8_t slot_id);
 
 /* Doorbell at `db_index` (0 = command, 1..MaxSlots = device slot). */
 void xhci_ring_doorbell(uint8_t db_index, uint8_t target);
@@ -103,6 +105,8 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
 /* Drain every currently-pending event from the event ring. Returns
  * the number of events consumed. Safe to call with no pending events. */
 int xhci_event_ring_drain(void);
+void xhci_defer_post_short_noop(uint8_t slot_id);
+void xhci_run_deferred_probes(void);
 
 /* -------------------------------------------------------------------------- */
 /* URB dispatch hooks (xhci_xfer.c implements)                                 */

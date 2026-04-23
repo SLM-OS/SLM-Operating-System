@@ -912,6 +912,41 @@ void xhci_ring_doorbell(uint8_t db_index, uint8_t target)
     dsb(sy);
 }
 
+void xhci_dump_runtime_state(const char *tag)
+{
+    volatile uint8_t *ir0 = xhci_rt_base + XHCI_IR0_OFFSET;
+    uint32_t usbcmd = r32(xhci_op_base, XHCI_OP_USBCMD);
+    uint32_t usbsts = r32(xhci_op_base, XHCI_OP_USBSTS);
+    uint32_t crcr_lo = r32(xhci_op_base, XHCI_OP_CRCR);
+    uint32_t crcr_hi = r32(xhci_op_base, XHCI_OP_CRCR + 4);
+    uint32_t iman = r32(ir0, XHCI_IR_IMAN);
+    uint32_t imod = r32(ir0, XHCI_IR_IMOD);
+    uint32_t erdp_lo = r32(ir0, XHCI_IR_ERDP);
+    uint32_t erdp_hi = r32(ir0, XHCI_IR_ERDP + 4);
+    uint32_t cmd_db = r32(xhci_db_base, 0);
+
+    INFO("xhci: %s runtime USBCMD=0x%08x USBSTS=0x%08x CRCR=%08x%08x IMAN=0x%08x IMOD=0x%08x ERDP=%08x%08x DB0=0x%08x",
+         tag != NULL ? tag : "runtime",
+         (unsigned)usbcmd, (unsigned)usbsts,
+         (unsigned)crcr_hi, (unsigned)crcr_lo,
+         (unsigned)iman, (unsigned)imod,
+         (unsigned)erdp_hi, (unsigned)erdp_lo,
+         (unsigned)cmd_db);
+}
+
+void xhci_dump_runtime_state_slot(const char *tag, uint8_t slot_id)
+{
+    xhci_dump_runtime_state(tag);
+    if (slot_id == 0)
+        return;
+
+    uint32_t slot_db = r32(xhci_db_base, 4u * (uint32_t)slot_id);
+    INFO("xhci: %s slot%u-doorbell=0x%08x",
+         tag != NULL ? tag : "runtime",
+         (unsigned)slot_id,
+         (unsigned)slot_db);
+}
+
 /*
  * Drain every Transfer / Command-Completion event currently visible
  * on the event ring. Transfer Events route through
@@ -931,6 +966,92 @@ static uintptr_t xhci_cmd_pending_phys;
 static bool      xhci_cmd_completed;
 static uint8_t   xhci_cmd_completion_cc;
 static uint8_t   xhci_cmd_completion_slot;
+static bool      xhci_post_short_noop_pending;
+static uint8_t   xhci_post_short_noop_slot;
+
+static void xhci_dump_event_ring_window(const char *tag)
+{
+    INFO("xhci: %s evt-ring dequeue=%u ecs=%u phys=0x%lx",
+         tag ? tag : "evt-ring",
+         (unsigned)xhci_evt_ring.dequeue,
+         (unsigned)xhci_evt_ring.cycle_state,
+         (unsigned long)xhci_event_ring_dequeue_phys(&xhci_evt_ring));
+
+    if (xhci_evt_ring.trbs == NULL || xhci_evt_ring.num_trbs == 0)
+        return;
+
+    for (unsigned i = 0; i < 4 && i < xhci_evt_ring.num_trbs; i++) {
+        uint32_t idx = (xhci_evt_ring.dequeue + i) % xhci_evt_ring.num_trbs;
+        const struct xhci_trb *trb = &xhci_evt_ring.trbs[idx];
+        INFO("xhci: %s evt[%u] param=0x%08x:%08x status=0x%08x control=0x%08x cycle=%u type=%u",
+             tag ? tag : "evt-ring",
+             idx,
+             (unsigned)trb->param_hi, (unsigned)trb->param_lo,
+             (unsigned)trb->status, (unsigned)trb->control,
+             (unsigned)(trb->control & 0x1U),
+             (unsigned)XHCI_TRB_TYPE_GET(trb->control));
+    }
+}
+
+static void xhci_scan_event_ring_for_cmd(const char *tag, uintptr_t pending_phys)
+{
+    if (xhci_evt_ring.trbs == NULL || xhci_evt_ring.num_trbs == 0)
+        return;
+
+    unsigned matches = 0;
+    for (uint32_t i = 0; i < xhci_evt_ring.num_trbs; i++) {
+        const struct xhci_trb *trb = &xhci_evt_ring.trbs[i];
+        uintptr_t evt_phys = (uintptr_t)trb->param_lo |
+                             ((uintptr_t)trb->param_hi << 32);
+        uint32_t type = XHCI_TRB_TYPE_GET(trb->control);
+        if (type != XHCI_TRB_EVT_CMD_COMPLETION && evt_phys != pending_phys)
+            continue;
+
+        INFO("xhci: %s evt[%u] match param=0x%08x:%08x status=0x%08x control=0x%08x cycle=%u type=%u",
+             tag ? tag : "evt-scan",
+             i,
+             (unsigned)trb->param_hi, (unsigned)trb->param_lo,
+             (unsigned)trb->status, (unsigned)trb->control,
+             (unsigned)(trb->control & 0x1U),
+             (unsigned)type);
+        matches++;
+    }
+
+    INFO("xhci: %s evt-scan pending=0x%lx matches=%u",
+         tag ? tag : "evt-scan",
+         (unsigned long)pending_phys,
+         matches);
+}
+
+void xhci_defer_post_short_noop(uint8_t slot_id)
+{
+    if (slot_id == 0)
+        return;
+    xhci_post_short_noop_pending = true;
+    xhci_post_short_noop_slot = slot_id;
+}
+
+void xhci_run_deferred_probes(void)
+{
+    if (!xhci_post_short_noop_pending)
+        return;
+
+    uint8_t slot_id = xhci_post_short_noop_slot;
+    xhci_post_short_noop_pending = false;
+    xhci_post_short_noop_slot = 0;
+
+    struct xhci_trb cmd = {0};
+    uint8_t cmd_cc = 0;
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_NOOP);
+    if (xhci_cmd_submit_and_wait(&cmd, &cmd_cc, NULL, 200) == 0) {
+        INFO("xhci: deferred post-short NO_OP cc=%u (adopted slot=%u)",
+             (unsigned)cmd_cc, (unsigned)slot_id);
+    } else {
+        WARN("xhci: deferred post-short NO_OP transport failed (adopted slot=%u)",
+             (unsigned)slot_id);
+        xhci_dump_event_ring_window("post-short timeout");
+    }
+}
 
 int xhci_event_ring_drain(void)
 {
@@ -1018,6 +1139,8 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
             WARN("xhci: command timeout (type=%u, USBSTS=0x%08x)",
                  (unsigned)XHCI_TRB_TYPE_GET(cmd->control),
                  (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+            xhci_dump_event_ring_window("cmd timeout");
+            xhci_scan_event_ring_for_cmd("cmd timeout", xhci_cmd_pending_phys);
             xhci_cmd_pending_phys = 0;
             return -1;
         }

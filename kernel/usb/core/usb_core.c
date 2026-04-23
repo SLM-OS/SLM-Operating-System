@@ -825,6 +825,20 @@ got_initial_descriptor:
     if (dev->state == USB_STATE_ADDRESS && dev->address != 0) {
         INFO("usb_core: reusing inherited device address %u after initial descriptor",
              (unsigned)dev->address);
+        /*
+         * On nano-2's retained full-speed slot-3 path, the first 64-byte
+         * descriptor read can succeed as an inherited-address short packet,
+         * but jumping straight to the first config-descriptor request stalls.
+         * Force the normal full device-descriptor step to run anyway so the
+         * next control transfer stays in-device-descriptor traffic instead of
+         * immediately switching descriptor types.
+         */
+        if (have_full_device_desc &&
+            dev->route_string == 0 &&
+            dev->speed == USB_SPEED_FULL) {
+            INFO("usb_core: forcing explicit full device-descriptor read after inherited-address short packet");
+            have_full_device_desc = false;
+        }
     } else {
         rc = usb_control_msg(dev,
                              USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
@@ -841,9 +855,24 @@ got_initial_descriptor:
 
     /* Step 5: full device descriptor. */
     if (!have_full_device_desc) {
-        n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
-                               &dev->dev_desc,
-                               sizeof(dev->dev_desc));
+        if (dev->state == USB_STATE_ADDRESS &&
+            dev->address != 0 &&
+            dev->route_string == 0 &&
+            dev->speed == USB_SPEED_FULL) {
+            uint8_t dd_full[64];
+            n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
+                                   dd_full, sizeof(dd_full));
+            if (n >= (int)sizeof(dev->dev_desc)) {
+                memcpy(&dev->dev_desc, dd_full, sizeof(dev->dev_desc));
+            } else {
+                WARN("usb_core: short GET_DESCRIPTOR(device, 64) n=%d", n);
+                goto err_close;
+            }
+        } else {
+            n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
+                                   &dev->dev_desc,
+                                   sizeof(dev->dev_desc));
+        }
         if (n < (int)sizeof(dev->dev_desc)) {
             WARN("usb_core: short GET_DESCRIPTOR(device) n=%d", n);
             goto err_close;

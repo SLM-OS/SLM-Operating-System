@@ -223,6 +223,126 @@ static void xhci_log_control_urb(const char *tag, const struct usb_urb *urb,
          (int)urb->status);
 }
 
+static void xhci_log_post_short_control_state(const struct usb_urb *urb,
+                                              const struct xhci_urb_slot *slot,
+                                              uintptr_t event_trb_phys,
+                                              uint8_t cc)
+{
+    if (urb == NULL || slot == NULL || slot->ring == NULL)
+        return;
+    if (urb->transfer_type != USB_XFER_CONTROL || cc != XHCI_CC_SHORT_PACKET)
+        return;
+    if (event_trb_phys != slot->data_trb_phys)
+        return;
+
+    struct xhci_device *d = (struct xhci_device *)urb->dev->hcd_private;
+    if (d == NULL || d->slot_id == 0)
+        return;
+
+    struct xhci_ring *r = slot->ring;
+    uintptr_t next_trb_phys = r->phys + (uintptr_t)r->enqueue * sizeof(struct xhci_trb);
+    uint32_t ring_ctrl = 0;
+    if (r->trbs != NULL && r->enqueue < r->num_trbs)
+        ring_ctrl = r->trbs[r->enqueue].control;
+
+    INFO("xhci: post-short ctrl slot=%u dci=%u adopted=%u next=0x%lx enqueue=%u pcs=%u "
+         "first=0x%lx data=0x%lx last=0x%lx ctrl=0x%08x",
+         (unsigned)d->slot_id, (unsigned)slot->dci,
+         (unsigned)d->adopted_inherited,
+         (unsigned long)next_trb_phys,
+         (unsigned)r->enqueue, (unsigned)r->cycle_state,
+         (unsigned long)slot->first_trb_phys,
+         (unsigned long)slot->data_trb_phys,
+         (unsigned long)slot->last_trb_phys,
+         (unsigned)ring_ctrl);
+
+    if (d->dev_ctx != NULL) {
+        bool cz = xhci_caps_cached.ctx_64;
+        uint32_t slot0 = *xhci_dev_slot_dw(d->dev_ctx, 0);
+        uint32_t slot1 = *xhci_dev_slot_dw(d->dev_ctx, 1);
+        uint32_t slot3 = *xhci_dev_slot_dw(d->dev_ctx, 3);
+        uint32_t ep00  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
+        uint32_t ep01  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
+        uint32_t ep02  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+        uint32_t ep03  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+
+        INFO("xhci: post-short devctx slot route=0x%x speed=%u root=%u addr=%u state=%u "
+             "dw0=0x%08x dw1=0x%08x dw3=0x%08x",
+             (unsigned)(slot0 & XHCI_SLOT_DW0_ROUTE_MASK),
+             (unsigned)((slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT),
+             (unsigned)((slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT),
+             (unsigned)(slot3 & XHCI_SLOT_DW3_ADDR_MASK),
+             (unsigned)((slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT),
+             (unsigned)slot0, (unsigned)slot1, (unsigned)slot3);
+        INFO("xhci: post-short devctx ep0 state=%u type=%u mps=%u tr=0x%lx dcs=%u "
+             "dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
+             (unsigned)(ep00 & XHCI_EP_DW0_STATE_MASK),
+             (unsigned)((ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT),
+             (unsigned)((ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT),
+             (unsigned long)((((uint64_t)ep03) << 32) | (ep02 & ~0xFULL)),
+             (unsigned)(ep02 & 0x1U),
+             (unsigned)ep00, (unsigned)ep01, (unsigned)ep02, (unsigned)ep03);
+    }
+
+    xhci_dump_runtime_state_slot("post-short", d->slot_id);
+
+}
+
+static void xhci_log_adopted_submit_state(const struct usb_urb *urb,
+                                          const struct xhci_device *d,
+                                          const struct xhci_ring *r)
+{
+    if (urb == NULL || d == NULL || r == NULL)
+        return;
+    if (!d->adopted_inherited || urb->transfer_type != USB_XFER_CONTROL)
+        return;
+
+    uintptr_t next_trb_phys = r->phys + (uintptr_t)r->enqueue * sizeof(struct xhci_trb);
+    uint32_t ring_ctrl = 0;
+    if (r->trbs != NULL && r->enqueue < r->num_trbs)
+        ring_ctrl = r->trbs[r->enqueue].control;
+
+    INFO("xhci: adopted submit slot=%u addr=%u req=0x%02x len=%u next=0x%lx enqueue=%u pcs=%u ctrl=0x%08x",
+         (unsigned)d->slot_id,
+         (unsigned)urb->dev->address,
+         (unsigned)urb->setup.bRequest,
+         (unsigned)urb->setup.wLength,
+         (unsigned long)next_trb_phys,
+         (unsigned)r->enqueue,
+         (unsigned)r->cycle_state,
+         (unsigned)ring_ctrl);
+
+    xhci_dump_runtime_state_slot("pre-submit", d->slot_id);
+
+    if (d->dev_ctx != NULL) {
+        bool cz = xhci_caps_cached.ctx_64;
+        uint32_t slot0 = *xhci_dev_slot_dw(d->dev_ctx, 0);
+        uint32_t slot1 = *xhci_dev_slot_dw(d->dev_ctx, 1);
+        uint32_t slot3 = *xhci_dev_slot_dw(d->dev_ctx, 3);
+        uint32_t ep00  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
+        uint32_t ep01  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
+        uint32_t ep02  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+        uint32_t ep03  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+
+        INFO("xhci: adopted submit devctx slot route=0x%x speed=%u root=%u addr=%u state=%u "
+             "dw0=0x%08x dw1=0x%08x dw3=0x%08x",
+             (unsigned)(slot0 & XHCI_SLOT_DW0_ROUTE_MASK),
+             (unsigned)((slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT),
+             (unsigned)((slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT),
+             (unsigned)(slot3 & XHCI_SLOT_DW3_ADDR_MASK),
+             (unsigned)((slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT),
+             (unsigned)slot0, (unsigned)slot1, (unsigned)slot3);
+        INFO("xhci: adopted submit devctx ep0 state=%u type=%u mps=%u tr=0x%lx dcs=%u "
+             "dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
+             (unsigned)(ep00 & XHCI_EP_DW0_STATE_MASK),
+             (unsigned)((ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT),
+             (unsigned)((ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT),
+             (unsigned long)((((uint64_t)ep03) << 32) | (ep02 & ~0xFULL)),
+             (unsigned)(ep02 & 0x1U),
+             (unsigned)ep00, (unsigned)ep01, (unsigned)ep02, (unsigned)ep03);
+    }
+}
+
 /* TRB builders live in xhci_trb_build.h (shared with test_xhci_xfer.c). */
 
 /* -------------------------------------------------------------------------- */
@@ -294,6 +414,8 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
              (unsigned)data_in);
     }
 
+    xhci_log_adopted_submit_state(urb, d, r);
+
     xhci_prepare_first_control_transfer(urb, d);
 
     struct xhci_trb tmpl;
@@ -329,13 +451,7 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     }
 
     /* 3. Status Stage — Direction is opposite of the Data Stage. For
-     *    a no-data control transfer it must be IN per §4.11.2.2.
-     *
-     * Error completions may reference any TRB in the chain, not just
-     * the IOC-bearing Status Stage. Track the whole contiguous span so
-     * a cc=4 on Setup or Data still completes the URB instead of timing
-     * out in usb_wait_urb().
-     */
+     *    a no-data control transfer it must be IN per §4.11.2.2. */
     bool status_in = has_data ? !data_in : true;
     xhci_build_status_stage(&tmpl, status_in, 0);
     if (xhci_urb_is_get_descriptor(urb)) {
@@ -345,8 +461,8 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     }
     slot_trb = xhci_ring_put(r, &tmpl);
     if (slot_trb == NULL) goto fail;
-
     slot->last_trb_phys = (uintptr_t)slot_trb;
+
     urb->hcd_private    = slot;
 
     /* Kick EP0. */
@@ -457,6 +573,8 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
     if (urb->transfer_type == USB_XFER_CONTROL && cc != XHCI_CC_SUCCESS)
         xhci_log_control_urb("event", urb, slot, trb_phys, cc, residual);
 
+    xhci_log_post_short_control_state(urb, slot, trb_phys, cc);
+
     usb_urb_complete_fn cb = urb->complete;
     xhci_urb_slot_free(slot);
     urb->hcd_private = NULL;
@@ -503,6 +621,7 @@ void xhci_hcd_poll(void)
 {
     if (!xhci_live) return;
     (void)xhci_event_ring_drain();
+    xhci_run_deferred_probes();
 }
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
