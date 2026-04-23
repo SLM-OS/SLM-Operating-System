@@ -1023,6 +1023,46 @@ static void xhci_scan_event_ring_for_cmd(const char *tag, uintptr_t pending_phys
          matches);
 }
 
+static void xhci_dump_cmd_ring_state(const char *tag, const struct xhci_trb *cmd,
+                                     const struct xhci_trb *slot)
+{
+    uintptr_t next_phys = xhci_cmd_ring.phys +
+                          (uintptr_t)xhci_cmd_ring.enqueue *
+                          sizeof(struct xhci_trb);
+    uint32_t next_ctrl = 0;
+    if (xhci_cmd_ring.trbs != NULL &&
+        xhci_cmd_ring.enqueue < xhci_cmd_ring.num_trbs) {
+        next_ctrl = xhci_cmd_ring.trbs[xhci_cmd_ring.enqueue].control;
+    }
+
+    INFO("xhci: %s cmd ring enqueue=%u pcs=%u next=0x%lx pending=0x%lx crcr=0x%08x%08x db0=0x%08x",
+         tag ? tag : "cmd",
+         (unsigned)xhci_cmd_ring.enqueue,
+         (unsigned)xhci_cmd_ring.cycle_state,
+         (unsigned long)next_phys,
+         (unsigned long)xhci_cmd_pending_phys,
+         (unsigned)r32(xhci_op_base, XHCI_OP_CRCR + 4),
+         (unsigned)r32(xhci_op_base, XHCI_OP_CRCR),
+         (unsigned)r32(xhci_db_base, 4u * XHCI_DB_COMMAND));
+
+    if (cmd != NULL) {
+        INFO("xhci: %s cmd req type=%u param=0x%08x%08x status=0x%08x control=0x%08x",
+             tag ? tag : "cmd",
+             (unsigned)XHCI_TRB_TYPE_GET(cmd->control),
+             (unsigned)cmd->param_hi, (unsigned)cmd->param_lo,
+             (unsigned)cmd->status, (unsigned)cmd->control);
+    }
+
+    if (slot != NULL) {
+        INFO("xhci: %s slot trb @0x%lx param=0x%08x%08x status=0x%08x control=0x%08x next_ctrl=0x%08x",
+             tag ? tag : "cmd",
+             (unsigned long)(uintptr_t)slot,
+             (unsigned)slot->param_hi, (unsigned)slot->param_lo,
+             (unsigned)slot->status, (unsigned)slot->control,
+             (unsigned)next_ctrl);
+    }
+}
+
 void xhci_defer_post_short_noop(uint8_t slot_id)
 {
     if (slot_id == 0)
@@ -1125,7 +1165,9 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
     xhci_cmd_completion_cc   = 0;
     xhci_cmd_completion_slot = 0;
 
+    xhci_dump_cmd_ring_state("pre-cmd-doorbell", cmd, slot);
     xhci_ring_doorbell(XHCI_DB_COMMAND, 0);
+    xhci_dump_cmd_ring_state("post-cmd-doorbell", cmd, slot);
 
     uint64_t freq  = timer_get_frequency();
     uint64_t start = timer_get_count();
@@ -1139,6 +1181,7 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
             WARN("xhci: command timeout (type=%u, USBSTS=0x%08x)",
                  (unsigned)XHCI_TRB_TYPE_GET(cmd->control),
                  (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+            xhci_dump_cmd_ring_state("cmd-timeout", cmd, slot);
             xhci_dump_event_ring_window("cmd timeout");
             xhci_scan_event_ring_for_cmd("cmd timeout", xhci_cmd_pending_phys);
             xhci_cmd_pending_phys = 0;
@@ -1146,6 +1189,7 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
         }
     }
 
+    xhci_dump_cmd_ring_state("cmd-complete", cmd, slot);
     if (cc_out   != NULL) *cc_out   = xhci_cmd_completion_cc;
     if (slot_out != NULL) *slot_out = xhci_cmd_completion_slot;
     xhci_cmd_pending_phys = 0;

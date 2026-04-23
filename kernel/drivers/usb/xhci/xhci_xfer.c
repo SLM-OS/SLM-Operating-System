@@ -40,6 +40,7 @@
 #include "debug.h"
 #include "timer.h"
 #include "spinlock.h"
+#include "vmm.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -65,6 +66,8 @@ struct xhci_urb_slot {
 };
 
 static struct xhci_urb_slot xhci_urbs[XHCI_MAX_INFLIGHT_URBS];
+static bool xhci_probe_advance_adopted_devctx_after_first_short = true;
+static bool xhci_probe_noop_after_first_short = true;
 
 static struct xhci_urb_slot *xhci_urb_slot_alloc(void)
 {
@@ -374,6 +377,7 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
 
     bool has_data = urb->length > 0 && urb->buffer != NULL;
     bool data_in  = (urb->setup.bmRequestType & USB_DIR_IN) != 0;
+    uintptr_t data_phys = 0;
     uint32_t trt  = 0U;
     /*
      * xHCI 1.0+ consumes the Setup Stage TRT field for control transfers
@@ -383,6 +387,16 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
      */
     if (xhci_caps_cached.hci_version >= 0x0100 && has_data)
         trt = data_in ? 3U : 2U;
+
+    if (has_data) {
+        data_phys = (uintptr_t)vmm_virt_to_phys((uintptr_t)urb->buffer);
+        if (data_phys == 0) {
+            WARN("xhci: submit_control unmapped data buffer virt=0x%lx len=%u",
+                 (unsigned long)(uintptr_t)urb->buffer,
+                 (unsigned)urb->length);
+            return -USB_URB_IO_ERROR;
+        }
+    }
 
     struct xhci_urb_slot *slot = xhci_urb_slot_alloc();
     if (slot == NULL)
@@ -434,16 +448,17 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
 
     /* 2. Optional Data Stage. */
     if (has_data) {
-        xhci_build_data_stage(&tmpl, (uintptr_t)urb->buffer,
+        xhci_build_data_stage(&tmpl, data_phys,
                               urb->length, data_in, 0);
         tmpl.status |= xhci_td_size_for_single_data_trb(urb)
                        << XHCI_TRB_STATUS_TD_SIZE_SHIFT;
         if (xhci_urb_is_get_descriptor(urb)) {
             INFO("xhci: data trb param_lo=0x%08x param_hi=0x%08x status=0x%08x "
-                 "control=0x%08x buf=0x%lx",
+                 "control=0x%08x buf_virt=0x%lx buf_phys=0x%lx",
                  (unsigned)tmpl.param_lo, (unsigned)tmpl.param_hi,
                  (unsigned)tmpl.status, (unsigned)tmpl.control,
-                 (unsigned long)(uintptr_t)urb->buffer);
+                 (unsigned long)(uintptr_t)urb->buffer,
+                 (unsigned long)data_phys);
         }
         slot_trb = xhci_ring_put(r, &tmpl);
         if (slot_trb == NULL) goto fail;
@@ -467,6 +482,8 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
 
     /* Kick EP0. */
     xhci_ring_doorbell(d->slot_id, XHCI_DCI_EP0);
+    if (urb->transfer_type == USB_XFER_CONTROL)
+        xhci_dump_runtime_state_slot("post-doorbell", d->slot_id);
     return 0;
 
 fail:
@@ -485,6 +502,15 @@ static int xhci_submit_bulk_int(struct usb_urb *urb, struct xhci_device *d)
         return -USB_URB_IO_ERROR;
     }
 
+    uintptr_t buf_phys = (uintptr_t)vmm_virt_to_phys((uintptr_t)urb->buffer);
+    if (buf_phys == 0) {
+        WARN("xhci: submit bulk/int unmapped buffer virt=0x%lx len=%u dci=%u",
+             (unsigned long)(uintptr_t)urb->buffer,
+             (unsigned)urb->length,
+             dci);
+        return -USB_URB_IO_ERROR;
+    }
+
     struct xhci_urb_slot *slot = xhci_urb_slot_alloc();
     if (slot == NULL)
         return -USB_URB_IO_ERROR;
@@ -494,7 +520,7 @@ static int xhci_submit_bulk_int(struct usb_urb *urb, struct xhci_device *d)
     slot->requested_len  = urb->length;
 
     struct xhci_trb tmpl;
-    xhci_build_normal(&tmpl, (uintptr_t)urb->buffer, urb->length, 0);
+    xhci_build_normal(&tmpl, buf_phys, urb->length, 0);
     struct xhci_trb *slot_trb = xhci_ring_put(r, &tmpl);
     if (slot_trb == NULL) {
         xhci_urb_slot_free(slot);
@@ -574,6 +600,42 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
         xhci_log_control_urb("event", urb, slot, trb_phys, cc, residual);
 
     xhci_log_post_short_control_state(urb, slot, trb_phys, cc);
+
+    if (xhci_probe_advance_adopted_devctx_after_first_short &&
+        urb->transfer_type == USB_XFER_CONTROL &&
+        cc == XHCI_CC_SHORT_PACKET &&
+        trb_phys == slot->data_trb_phys) {
+        struct xhci_device *d = (struct xhci_device *)urb->dev->hcd_private;
+        if (d != NULL && d->adopted_inherited && d->dev_ctx != NULL &&
+            slot->ring != NULL) {
+            bool cz = xhci_caps_cached.ctx_64;
+            uintptr_t next_trb_phys = slot->ring->phys +
+                                      (uintptr_t)slot->ring->enqueue *
+                                      sizeof(struct xhci_trb);
+            uint32_t *ep02 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+            uint32_t *ep03 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+            *ep02 = (uint32_t)(next_trb_phys & 0xFFFFFFFFu) | 0x1U;
+            *ep03 = (uint32_t)(next_trb_phys >> 32);
+            xhci_probe_advance_adopted_devctx_after_first_short = false;
+            INFO("xhci: advanced adopted devctx ep0 tr to next ring slot "
+                 "(slot=%u next=0x%lx)",
+                 (unsigned)d->slot_id,
+                 (unsigned long)next_trb_phys);
+        }
+    }
+
+    if (xhci_probe_noop_after_first_short &&
+        urb->transfer_type == USB_XFER_CONTROL &&
+        cc == XHCI_CC_SHORT_PACKET &&
+        trb_phys == slot->data_trb_phys) {
+        struct xhci_device *d = (struct xhci_device *)urb->dev->hcd_private;
+        xhci_probe_noop_after_first_short = false;
+        if (d != NULL) {
+            INFO("xhci: deferring post-short NO_OP until after event retirement "
+                 "(slot=%u)", (unsigned)d->slot_id);
+            xhci_defer_post_short_noop(d->slot_id);
+        }
+    }
 
     usb_urb_complete_fn cb = urb->complete;
     xhci_urb_slot_free(slot);
