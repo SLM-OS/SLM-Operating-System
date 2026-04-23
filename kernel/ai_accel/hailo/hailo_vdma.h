@@ -293,6 +293,33 @@ void hailo_vdma_dump_desc_list(const struct hailo_vdma_desc_list *list,
 void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label);
 
 /*
+ * Diagnostic: read back per-descriptor status fields from DRAM after
+ * a stuck submit, so we can tell whether fw fetched our descriptors.
+ *
+ * VDMA hardware writes the per-descriptor status into bits [7:0] of
+ * `remaining_page_size_status` when it processes a descriptor (per
+ * hailo-vdma-common.c:121-137 in the reference driver):
+ *   bit 0 — DESC_DONE   (HW finished processing this descriptor)
+ *   bit 1 — DESC_ERROR  (HW tried but got a DMA error)
+ *
+ * Reading the field after a num_proc-stuck submit answers a key
+ * diagnostic question: did fw ever even try to fetch desc[0]?
+ *   - status == 0 → fw never touched it (problem is upstream:
+ *                    channel arming, num_avail latch, scheduler
+ *                    not assigning credits)
+ *   - DONE set    → fw fetched and processed it (problem is
+ *                    downstream — periph engine accepting data)
+ *   - ERROR set   → fw fetched but got a DMA fault (points at
+ *                    IOVA / inbound-window translation)
+ *
+ * Issues a cache_invalidate over the desc range first because
+ * descriptor write-backs come from device DMA and bypass host cache.
+ */
+void hailo_vdma_dump_desc_status(const struct hailo_vdma_desc_list *list,
+                                 const char *label,
+                                 uint32_t max_descs);
+
+/*
  * Poll `channel_index` until its CONTROL byte reads START (0x01), or
  * `timeout_us` elapses. Used by the context-switch load path to know
  * when fw has finished processing ACTIVATION/PRELIMINARY and armed

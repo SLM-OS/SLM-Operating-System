@@ -1661,13 +1661,46 @@ int hailo_control_context_switch_clear_configured_apps(void)
 
 int hailo_control_get_hw_consts(uint32_t *out_response_len)
 {
-    return control_send_empty_body_core_rpc(
+    int rc = control_send_empty_body_core_rpc(
         HAILO_CONTROL_OPCODE_GET_HW_CONSTS,
         "GET_HW_CONSTS",
         &control_hw_consts_req,
         &control_hw_consts_resp,
         sizeof(control_hw_consts_resp),
         out_response_len);
+    if (rc != HAILO_OK) return rc;
+
+    /* Phase 8 #253 (2026-04-23 probe): dump the raw response body so
+     * we can decode the hw_consts struct on the host side. HailoRT's
+     * upstream control_protocol.h v4.23 declares:
+     *   uint32_t fifo_word_granularity_bytes;
+     *   uint16_t max_periph_buffers_per_frame;
+     *   uint16_t max_periph_bytes_per_buffer;
+     *   uint16_t max_acceptable_bytes_per_buffer;
+     *   uint32_t outbound_data_stream_size;
+     *   uint8_t  should_optimize_credits;
+     *   uint32_t default_initial_credit_size;
+     * Wire layout per param: 4 B BE length + value. We dump the raw
+     * bytes; future revision can parse fields once layout confirmed
+     * against what fw on Hailo-8L actually returns. */
+    if (out_response_len && *out_response_len > 0) {
+        uint32_t body_len = *out_response_len;
+        if (body_len > sizeof(control_hw_consts_resp.body)) {
+            body_len = sizeof(control_hw_consts_resp.body);
+        }
+        uart_printf("[hw_consts] response body %u bytes:\r\n",
+                    (unsigned)body_len);
+        const uint8_t *b = control_hw_consts_resp.body;
+        for (uint32_t i = 0; i < body_len; i += 16) {
+            uart_printf("[hw_consts] [%03x]:", (unsigned)i);
+            uint32_t end = (i + 16 > body_len) ? body_len : (i + 16);
+            for (uint32_t j = i; j < end; j++) {
+                uart_printf(" %02x", b[j]);
+            }
+            uart_printf("\r\n");
+        }
+    }
+    return HAILO_OK;
 }
 
 int hailo_control_core_identify(uint32_t *out_response_len)

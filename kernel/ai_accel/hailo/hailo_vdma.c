@@ -643,6 +643,34 @@ void hailo_vdma_dump_desc_list(const struct hailo_vdma_desc_list *list,
     }
 }
 
+void hailo_vdma_dump_desc_status(const struct hailo_vdma_desc_list *list,
+                                 const char *label,
+                                 uint32_t max_descs)
+{
+    if (!list || !list->descs || !label) return;
+    uint32_t n = (max_descs < list->desc_count) ? max_descs : list->desc_count;
+    if (n == 0) return;
+
+    /* Descriptor write-backs come from device DMA, bypassing host
+     * cache. Without invalidate, we'd see the zero we wrote at
+     * program time even if fw has since updated DRAM. */
+    if (hailo_platform && hailo_platform->cache_invalidate) {
+        hailo_platform->cache_invalidate(list->descs,
+            (size_t)n * sizeof(struct hailo_vdma_descriptor));
+    }
+
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t rps = list->descs[i].remaining_page_size_status;
+        uint8_t  status = (uint8_t)(rps & 0xFFu);
+        const char *done = (status & 0x01u) ? "DONE" : "    ";
+        const char *err  = (status & 0x02u) ? "ERR " : "    ";
+        uart_printf("[desc-status] %s desc[%u] status=0x%02x %s %s "
+                    "rps_full=0x%08x\r\n",
+                    label, (unsigned)i, (unsigned)status, done, err,
+                    (unsigned)rps);
+    }
+}
+
 /* Dump one 16-byte register block (host-side OR device-side) with
  * the BASE_DWORD decoded into its named subfields. `side_offset` is
  * 0 for the block at `channel_base + 0` and 0x10 for the block at

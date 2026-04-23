@@ -1744,6 +1744,19 @@ static int hailo_backend_run(struct inference_device *dev,
     if (rc != HAILO_OK) {
         uart_printf("[hailo] run: IN submit_and_wait rc=%d (avail=%u)\r\n",
                     rc, (unsigned)in_num_avail);
+        /* #253 (2026-04-23): read back desc[0..7] status fields from
+         * DRAM. fw writes DESC_DONE / DESC_ERROR into the low byte
+         * when it processes a descriptor; the value tells us whether
+         * fw ever even tried to fetch our descriptors:
+         *   status==0 → fw never touched it (upstream problem:
+         *               channel arming, num_avail latch, scheduler
+         *               not assigning credits)
+         *   DONE      → fw fetched + processed (problem is downstream)
+         *   ERROR     → fw fetched but DMA-faulted (IOVA / inbound)
+         * This splits "fw never tried" from "fw tried and failed",
+         * which num_proc==0 alone can't distinguish. */
+        hailo_vdma_dump_desc_status(&slot->boundary_in_list, "IN", 8);
+        hailo_vdma_dump_desc_status(&slot->boundary_out_list, "OUT", 8);
         /* #253: dump fw debug log + D2H notification buffer on submit
          * failure. The D2H notification contains CONTEXT_SWITCH_RUN_TIME_ERROR
          * events that carry {exit_status, context_idx, action_idx} — exactly
