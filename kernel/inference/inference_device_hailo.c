@@ -1660,20 +1660,6 @@ static int hailo_backend_run(struct inference_device *dev,
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
-    /* Phase 8 experiment (2026-04-22): pre-fill descs 1..N-1 with
-     * the same output buffer so fw's prefetch window has valid
-     * entries past OUT[0]. See HAILO_BOUNDARY_OUT_PREFETCH_DEPTH
-     * for the reference-count rationale. A repeat OUT[0] overwrite
-     * is semantically harmless — for a single-inference run num_avail
-     * only ever reaches 1 so fw never advances past OUT[0]. */
-    for (uint32_t i = 1; i < HAILO_BOUNDARY_OUT_PREFETCH_DEPTH; i++) {
-        (void)hailo_vdma_program_buffer(
-            &slot->boundary_out_list, i,
-            slot->boundary_out_tensor.iova,
-            slot->boundary_out_tensor.tensor_bytes,
-            HAILO_VDMA_HOST_DMA_DATA_ID);
-    }
-
 #ifdef HAILO_WIRE_DEBUG
     /* Phase 8 #253: dump programmed descriptors + channel regs so we
      * can compare byte-for-byte against HailoRT's reference output.
@@ -1695,21 +1681,41 @@ static int hailo_backend_run(struct inference_device *dev,
     hailo_vdma_dump_channel_regs(out_channel, "OUT pre-submit");
 #endif /* HAILO_WIRE_DEBUG */
 
-    /* PHASE 8 KEY FINDING (2026-04-22, instrumented hailo_pci trace on
-     * Pi OS — see docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt):
-     * HailoRT submits the OUTPUT channel's num_avail BEFORE the
-     * INPUT. Every MNIST inference the Linux driver issued 8 OUTPUT
-     * transfers (ch=16 num_avail 1→8) and only THEN a single INPUT
-     * (ch=2 num_avail=2). Without output credits pre-armed fw's
-     * boundary-credit state machine has nowhere to land the result
-     * and refuses to begin consuming the INPUT descriptors — which
-     * is exactly the symptom we hit all the way through the wire-
-     * identical load path.
+    /* PHASE 8 KEY FINDING #2 (2026-04-22, instrumented hailo_pci on
+     * Pi OS yolov6n — see docs/reference/hailort-trace-findings-2026
+     * -04-22.md): HailoRT pre-arms each output channel with N
+     * SEPARATE launch_transfer calls, each one programming desc[i]
+     * and bumping num_avail from i to i+1. Across 8 calls fw's
+     * channel-side num_avail register sees 1, 2, 3, 4, 5, 6, 7, 8
+     * as eight distinct MMIO writes — not a single 0→8 jump.
      *
-     * Fix: write num_avail to the OUTPUT channel first (just the
-     * register RMW, no wait), then submit INPUT and wait for its
-     * completion, then wait for OUTPUT completion. */
-    (void)hailo_vdma_write_num_avail(out_channel, out_num_avail);
+     * Hypothesis: firmware's boundary-credit state machine processes
+     * num_avail bumps incrementally and won't recognize a multi-
+     * credit jump in one MMIO write. PR #350's "program desc[1..7]
+     * + write num_avail=1 once" placed valid descriptors but fw
+     * never saw the credits arrive in the way it expects. This loop
+     * mirrors the HailoRT pattern exactly: one program_buffer +
+     * one num_avail bump per pre-armed credit, OUT first, IN last.
+     *
+     * out_num_avail from program_buffer above is the count for ONE
+     * descriptor; we ignore it here and pre-arm
+     * HAILO_BOUNDARY_OUT_PREFETCH_DEPTH credits sequentially. */
+    for (uint16_t i = 0; i < HAILO_BOUNDARY_OUT_PREFETCH_DEPTH; i++) {
+        if (i > 0) {
+            (void)hailo_vdma_program_buffer(
+                &slot->boundary_out_list, i,
+                slot->boundary_out_tensor.iova,
+                slot->boundary_out_tensor.tensor_bytes,
+                HAILO_VDMA_HOST_DMA_DATA_ID);
+        }
+        (void)hailo_vdma_write_num_avail(out_channel, (uint16_t)(i + 1));
+    }
+    /* `out_num_avail` from program_buffer above is the desc count fw
+     * is expected to *consume* for one inference (== 1 for our single-
+     * desc OUT). Keep that as the wait target — even though we
+     * primed 8 credits via the loop, only ONE descriptor's worth of
+     * data lands per input we submit. wait_proc(target=1) is the
+     * right downstream poll. */
 
     int rc;
     uint64_t t_in_submit  = timer_get_count();
