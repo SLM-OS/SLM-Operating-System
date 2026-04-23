@@ -12,6 +12,7 @@
 #include "sched.h"
 #include "task.h"
 #include "shell.h"
+#include "shell_internal.h"
 #include "shell_session.h"
 #include "vfs.h"
 #include "component.h"
@@ -2384,7 +2385,7 @@ static const luaL_Reg slm_hailo_lib[] = {
 };
 
 /* SLM library functions */
-static const luaL_Reg slm_lib[] = {
+static const luaL_Reg slm_lib_safe[] = {
     {"print", l_print},
     {"uptime", l_uptime},
     {"uptime_us", l_uptime_us},
@@ -2399,18 +2400,9 @@ static const luaL_Reg slm_lib[] = {
     {"component_count", l_component_count},
     {"component_list", l_component_list},
     {"component_find", l_component_find},
-    {"component_run", l_component_run},
-    {"component_hot_swap", l_component_hot_swap},
-    {"component_hot_swap_stateful", l_component_hot_swap_stateful},
     /* Model memory and inference */
     {"model_stats", l_model_stats},
     {"model_find", l_model_find},
-    {"model_infer", l_model_infer},
-    {"model_load_mnist", l_model_load_mnist},
-    {"model_pin", l_model_pin},
-    {"model_preload", l_model_preload},
-    {"model_preload_wait", l_model_preload_wait},
-    {"model_unpin", l_model_unpin},
     /* Message routing */
     {"msg_publish", l_msg_publish},
     {"msg_publish_priority", l_msg_publish_priority},
@@ -2420,15 +2412,9 @@ static const luaL_Reg slm_lib[] = {
     /* Scheduler */
     {"sched_policy", l_sched_policy},
     {"sched_stats", l_sched_stats},
-    {"sched_set_policy", l_sched_set_policy},
     {"sched_policy_list", l_sched_policy_list},
     {"ai_sched_stats", l_ai_sched_stats},
     {"ai_sched_decision", l_ai_sched_decision},
-    {"task_migrate", l_task_migrate},
-    {"task_create", l_task_create},
-    {"task_kill", l_task_kill},
-    {"task_set_priority", l_task_set_priority},
-    {"task_pin", l_task_pin},
     /* CPU info */
     {"cpu_info", l_cpu_info},
     {"term_size", l_term_size},
@@ -2437,25 +2423,52 @@ static const luaL_Reg slm_lib[] = {
     {"ipc_stats", l_ipc_stats},
     /* Eviction */
     {"eviction_policy", l_eviction_policy},
-    {"eviction_set_policy", l_eviction_set_policy},
     {"eviction_stats", l_eviction_stats},
     /* Extended model bindings */
     {"model_list", l_model_list},
     {"model_info", l_model_info},
-    {"model_bench", l_model_bench},
-    {"model_load", l_model_load},
     {"infer_stats", l_infer_stats},
     {"gpu_status", l_gpu_status},
     /* Shell integration */
     {"read_line", l_read_line},
     {"try_getc", l_try_getc},
-    {"shell_exec", l_shell_exec},
 #if defined(ENABLE_NETWORKING)
     /* TCP shell daemon (Phase 3) */
-    {"telnetd_start",    l_telnetd_start},
-    {"telnetd_stop",     l_telnetd_stop},
     {"telnetd_status",   l_telnetd_status},
     {"telnetd_sessions", l_telnetd_sessions},
+#endif
+    {NULL, NULL}
+};
+
+static const luaL_Reg slm_lib_admin[] = {
+    /* Component management */
+    {"component_run", l_component_run},
+    {"component_hot_swap", l_component_hot_swap},
+    {"component_hot_swap_stateful", l_component_hot_swap_stateful},
+    /* Model memory and inference */
+    {"model_infer", l_model_infer},
+    {"model_load_mnist", l_model_load_mnist},
+    {"model_pin", l_model_pin},
+    {"model_preload", l_model_preload},
+    {"model_preload_wait", l_model_preload_wait},
+    {"model_unpin", l_model_unpin},
+    {"model_bench", l_model_bench},
+    {"model_load", l_model_load},
+    /* Scheduler / task mutation */
+    {"sched_set_policy", l_sched_set_policy},
+    {"task_migrate", l_task_migrate},
+    {"task_create", l_task_create},
+    {"task_kill", l_task_kill},
+    {"task_set_priority", l_task_set_priority},
+    {"task_pin", l_task_pin},
+    /* Eviction mutation */
+    {"eviction_set_policy", l_eviction_set_policy},
+    /* Shell integration */
+    {"shell_exec", l_shell_exec},
+#if defined(ENABLE_NETWORKING)
+    /* TCP shell daemon control */
+    {"telnetd_start",    l_telnetd_start},
+    {"telnetd_stop",     l_telnetd_stop},
     {"telnetd_kick",     l_telnetd_kick},
 #endif
     {NULL, NULL}
@@ -2464,13 +2477,19 @@ static const luaL_Reg slm_lib[] = {
 /**
  * Open the SLM library
  */
-static int luaopen_slm(lua_State *L) {
-    luaL_newlib(L, slm_lib);
-    /* Nest the Hailo bindings under slm.hailo so callers can write
-     * slm.hailo.load(path) instead of slm.hailo_load(path). */
-    luaL_newlib(L, slm_hailo_lib);
-    lua_setfield(L, -2, "hailo");
-    return 1;
+static void lua_push_slm_library(lua_State *L, bool admin)
+{
+    luaL_newlib(L, slm_lib_safe);
+    if (admin) {
+        for (const luaL_Reg *r = slm_lib_admin; r->name; r++) {
+            lua_pushcfunction(L, r->func);
+            lua_setfield(L, -2, r->name);
+        }
+        /* Keep the Hailo bindings on the admin surface until the
+         * device/backend concurrency contract is explicitly audited. */
+        luaL_newlib(L, slm_hailo_lib);
+        lua_setfield(L, -2, "hailo");
+    }
 }
 
 /* ============================================================================
@@ -2485,7 +2504,7 @@ void lua_slm_init(void) {
     shell_printf("Lua 5.4 scripting initialized\n");
 }
 
-lua_State *lua_slm_newstate(void) {
+static lua_State *lua_slm_newstate_mode(bool admin) {
     if (!lua_initialized) {
         lua_slm_init();
     }
@@ -2518,15 +2537,24 @@ lua_State *lua_slm_newstate(void) {
     luaL_requiref(L, "math", luaopen_math, 1);
     lua_pop(L, 1);
 
-    /* Open SLM library */
-    luaL_requiref(L, "slm", luaopen_slm, 1);
-    lua_pop(L, 1);
+    /* Open SLM library. `slm` defaults to the concurrent-safe surface;
+     * admin states explicitly opt into the global mutator bindings. */
+    lua_push_slm_library(L, admin);
+    lua_setglobal(L, "slm");
 
     /* Replace print with our version */
     lua_pushcfunction(L, l_print);
     lua_setglobal(L, "print");
 
     return L;
+}
+
+lua_State *lua_slm_newstate(void) {
+    return lua_slm_newstate_mode(false);
+}
+
+lua_State *lua_slm_newstate_admin(void) {
+    return lua_slm_newstate_mode(true);
 }
 
 void lua_slm_close(lua_State *L) {
@@ -2566,22 +2594,29 @@ int lua_slm_dostring(lua_State *L, const char *script) {
 int lua_slm_dofile(lua_State *L, const char *filename) {
     if (!L || !filename) return -1;
     int saved_top = lua_gettop(L);
+    char resolved[VFS_MAX_PATH];
 
-    /* Sized to fit the largest embedded demo (~7 KB demo_menu.lua) plus
-     * headroom. Lives on the shell task's 64 KB stack; cheap. */
-    char buf[16384];
-    int len = vfs_read_path(filename, buf, sizeof(buf) - 1, 0);
+    if (shell_resolve_path(filename, resolved, sizeof(resolved)) < 0) {
+        shell_printf("lua: path too long: %s\n", filename);
+        return -1;
+    }
+
+    /* Sized to fit the embedded demo scripts with headroom. Lives on the
+     * shell task's 64 KB stack, so keep it bounded but comfortably above
+     * the current demo payload sizes. */
+    char buf[32768];
+    int len = vfs_read_path(resolved, buf, sizeof(buf) - 1, 0);
     if (len < 0) {
-        shell_printf("lua: cannot open %s\n", filename);
+        shell_printf("lua: cannot open %s\n", resolved);
         return -1;
     }
     if (len >= (int)sizeof(buf) - 1) {
-        shell_printf("lua: %s exceeds %d bytes\n", filename, (int)sizeof(buf) - 1);
+        shell_printf("lua: %s exceeds %d bytes\n", resolved, (int)sizeof(buf) - 1);
         return -1;
     }
     buf[len] = '\0';
 
-    int status = luaL_loadbufferx(L, buf, (size_t)len, filename, NULL);
+    int status = luaL_loadbufferx(L, buf, (size_t)len, resolved, NULL);
     if (status == LUA_OK)
         status = lua_pcall(L, 0, LUA_MULTRET, 0);
     if (status != LUA_OK) {
@@ -2613,7 +2648,9 @@ void lua_slm_repl(lua_State *L) {
     shell_printf(">>> ");
 
     while (1) {
+        bool paused = shell_mutation_pause();
         int c = shell_getc();
+        shell_mutation_resume(paused);
         if (c < 0) continue;
 
         if (c == '\r' || c == '\n') {

@@ -10,13 +10,20 @@ Lua integration provides:
 - Kernel API access through the `slm` module
 - Standard Lua libraries: base, table, string, math
 
-## Shell Command
+## Shell Commands
 
 ```
 lua              # Enter interactive REPL
 lua -e "code"    # Execute Lua code directly
 lua <file>       # Run script from filesystem
+lua-admin        # Full admin/global-control Lua REPL
 ```
+
+`lua` is the default concurrent-safe surface. It exposes the
+session-local / read-mostly bindings intended for multiple interactive
+sessions. `lua-admin` is the serialized surface for global mutators
+such as task control, shell escape, component hot-swap, and telnetd
+control.
 
 ### Interactive REPL
 
@@ -98,9 +105,9 @@ The `slm` module provides access to kernel functionality:
 | `slm.component_count()` | Number of registered components |
 | `slm.component_list()` | Array of component tables (name, version, type, state, priority, task_id, index) |
 | `slm.component_find(name)` | Find component by name, returns index or nil |
-| `slm.component_run(name)` | Run a built-in component, returns index or nil |
-| `slm.component_hot_swap(old, new)` | Replace component preserving subscriptions, returns index or nil |
-| `slm.component_hot_swap_stateful(old, new)` | Replace component, transfer state + subscriptions. Sensor monitor transfers alert count. |
+| `slm.component_run(name)` | Admin surface only. Run a built-in component, returns index or nil |
+| `slm.component_hot_swap(old, new)` | Admin surface only. Replace component preserving subscriptions, returns index or nil |
+| `slm.component_hot_swap_stateful(old, new)` | Admin surface only. Replace component, transfer state + subscriptions. Sensor monitor transfers alert count. |
 
 ### Message Routing
 
@@ -119,15 +126,15 @@ The `slm` module provides access to kernel functionality:
 |----------|-------------|
 | `slm.sched_policy()` | Get current scheduler policy name (e.g., `"heuristic"`). |
 | `slm.sched_stats()` | Scheduler statistics: `{task_count, ready_count, context_switches, timer_ticks, policy}`. |
-| `slm.sched_set_policy(name)` | Switch active scheduler policy at runtime. Returns `true` on success, `false` on unknown name. |
+| `slm.sched_set_policy(name)` | Admin surface only. Switch active scheduler policy at runtime. Returns `true` on success, `false` on unknown name. |
 | `slm.sched_policy_list()` | Array of `{name, active}` tables for every registered policy. Exactly one entry has `active=true`. |
 | `slm.ai_sched_stats()` | AI scheduler statistics: `{policy, decisions, fallbacks, avg_latency_ns, histogram}`. Returns `nil` when `CONFIG_AI_SCHEDULER` is off. |
 | `slm.ai_sched_decision(task_id)` | Last AI-scheduler decision recorded for this task: `{core, priority_adj, preempt, raw}`. `priority_adj` is `0`/`1`/`2` (none/boost/reduce); `preempt` is `0`/`1`; `raw` is the packed action index (`core*6 + priority_adj*2 + preempt`). Returns `nil` when `CONFIG_AI_SCHEDULER` is off, the task id is unknown, or the AI policy has never run on the task. |
-| `slm.task_migrate(task_id, target_cpu)` | Move a non-running task to a specific CPU. Returns `true` on success, `false` if the task is running, the affinity forbids it, or the arguments are out of range. |
-| `slm.task_create(name, fn)` | Spawn a kernel task that runs `fn` in a fresh `lua_State`. `fn` is serialized via `lua_dump` (bytecode only — no upvalues or global captures). Returns the task id (≥1) on success, `nil` on pool exhaustion / dump failure / task creation failure. Concurrency: each running Lua task keeps its own `lua_State`, but all share one Lua heap — `heap_reset` is deferred until the last state closes. Pool is capped at 16 concurrent Lua tasks. |
-| `slm.task_kill(task_id)` | Terminate a task (`scheduler_remove_task` + `task_destroy`). Refuses the idle task (id 0), the current task (use `task_exit` for self-termination), and already-terminated tasks. Returns bool. |
-| `slm.task_set_priority(task_id, priority)` | Change a task's priority. `priority` must be in `[0, 7]` (0=idle, 7=critical). Returns bool. |
-| `slm.task_pin(task_id, cpu)` | Pin a task to a specific CPU. Pass a negative `cpu` to clear affinity (task becomes CPU_AFFINITY_ANY). Returns bool. |
+| `slm.task_migrate(task_id, target_cpu)` | Admin surface only. Move a non-running task to a specific CPU. Returns `true` on success, `false` if the task is running, the affinity forbids it, or the arguments are out of range. |
+| `slm.task_create(name, fn)` | Admin surface only. Spawn a kernel task that runs `fn` in a fresh `lua_State`. `fn` is serialized via `lua_dump` (bytecode only — no upvalues or global captures). Returns the task id (≥1) on success, `nil` on pool exhaustion / dump failure / task creation failure. Concurrency: each running Lua task keeps its own `lua_State`, but all share one Lua heap — `heap_reset` is deferred until the last state closes. Pool is capped at 16 concurrent Lua tasks. |
+| `slm.task_kill(task_id)` | Admin surface only. Terminate a task (`scheduler_remove_task` + `task_destroy`). Refuses the idle task (id 0), the current task (use `task_exit` for self-termination), and already-terminated tasks. Returns bool. |
+| `slm.task_set_priority(task_id, priority)` | Admin surface only. Change a task's priority. `priority` must be in `[0, 7]` (0=idle, 7=critical). Returns bool. |
+| `slm.task_pin(task_id, cpu)` | Admin surface only. Pin a task to a specific CPU. Pass a negative `cpu` to clear affinity (task becomes CPU_AFFINITY_ANY). Returns bool. |
 
 ### CPU / Memory / IPC
 
@@ -140,14 +147,15 @@ The `slm` module provides access to kernel functionality:
 
 ### Eviction
 
-Requires `AI_EVICTION=ON` at build time. When the feature is off, every
+Available by default. When the kernel is built with
+`DISABLE_EVICTION=ON`, every
 binding returns `nil`/`false` — scripts can branch on the return value
 without a compile-time guard.
 
 | Function | Description |
 |----------|-------------|
 | `slm.eviction_policy()` | Current policy name string (`"lru"`, `"lfu"`, `"cacheus"`, `"xgboost"`, ...) or `nil`. |
-| `slm.eviction_set_policy(name)` | Switch active eviction policy. Returns `true` on success, `false` on unknown name / feature off. |
+| `slm.eviction_set_policy(name)` | Admin surface only. Switch active eviction policy. Returns `true` on success, `false` on unknown name / feature off. |
 | `slm.eviction_stats()` | `{enabled, policy, weight_evictions, workspace_evictions, weight_allocated, weight_total, workspace_allocated, workspace_total, snapshot_candidates, expert_weights_bp}` or `nil`. CACHEUS expert weights are in basis points (0–10000). |
 
 ### Model Memory and Inference
@@ -155,19 +163,22 @@ without a compile-time guard.
 | Function | Description |
 |----------|-------------|
 | `slm.model_stats()` | Pool statistics: `{weights={total_blocks, free_blocks, allocated_blocks, shared_blocks, peak_usage}, workspace={...}}` |
-| `slm.model_load_mnist()` | Load the built-in MNIST ONNX model (26 KB). Returns model index or -1. |
+| `slm.model_load_mnist()` | Admin surface only. Load the built-in MNIST ONNX model (26 KB). Returns model index or -1. |
 | `slm.model_list()` | Array of loaded models: `{{index, name, format, params, weight_size, nodes}, ...}`. |
 | `slm.model_info(index)` | Detailed info: `{index, name, format, params, weight_size, workspace_size, nodes, inputs, outputs}` or `nil` if index invalid. |
 | `slm.model_find(name)` | Find a loaded model by name. Returns index or -1. |
-| `slm.model_infer(index)` | Run inference on a loaded model. Returns predicted class (0-9 for MNIST). |
-| `slm.model_bench(index, iters)` | Run inference benchmark for `iters` iterations. Results printed to UART. Returns 0 on success, -1 on error. |
-| `slm.model_load(path[, name])` | Load an ONNX model from a VFS path. Mirrors the `model load <path>` shell command: reads the file, allocates a transient PMM buffer, calls `rust_model_load`, frees the buffer. If `name` is omitted, the model name is derived from the filename (extension stripped). Returns the model index (≥0) on success, -1 on any error. |
-| `slm.model_pin(index)` | Pin a model to prevent LRU eviction. Returns 0 on success, -1 on error. |
-| `slm.model_unpin(index)` | Unpin a model (allow LRU eviction). Returns 0 on success, -1 on error. |
+| `slm.model_infer(index)` | Admin surface for now. Run inference on a loaded model. Returns predicted class (0-9 for MNIST). |
+| `slm.model_bench(index, iters)` | Admin surface only. Run inference benchmark for `iters` iterations. Results printed to UART. Returns 0 on success, -1 on error. |
+| `slm.model_load(path[, name])` | Admin surface only. Load an ONNX model from a VFS path. Mirrors the `model load <path>` shell command: reads the file, allocates a transient PMM buffer, calls `rust_model_load`, frees the buffer. If `name` is omitted, the model name is derived from the filename (extension stripped). Returns the model index (≥0) on success, -1 on any error. |
+| `slm.model_pin(index)` | Admin surface only. Pin a model to prevent LRU eviction. Returns 0 on success, -1 on error. |
+| `slm.model_unpin(index)` | Admin surface only. Unpin a model (allow LRU eviction). Returns 0 on success, -1 on error. |
 | `slm.infer_stats()` | Cumulative inference statistics: `{total, total_ns, min_ns, max_ns, last_ns, errors}`. |
 | `slm.gpu_status()` | GPU subsystem info: `{available, name, device, compute_ready, unified_memory, memory_size}`. `.available` is always set; other fields populated when a driver is present. |
 
 ### Hailo NPU (AI HAT+)
+
+Available on `lua-admin` for now, not the default concurrent `lua`
+surface.
 
 The `slm.hailo` sub-table exposes the Hailo-8L NPU backend when the Pi 5
 AI HAT+ is present (the backend registers itself during boot after

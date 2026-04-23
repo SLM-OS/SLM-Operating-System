@@ -7,7 +7,7 @@
 -- Usage:  lua /mnt/files/demo_auto.lua
 --
 -- Each section is resilient: if a subsystem isn't compiled in (e.g.,
--- AI_EVICTION=OFF skips the eviction narrative), the script prints a
+-- DISABLE_EVICTION=ON skips the eviction narrative), the script prints a
 -- note and moves on rather than failing.
 
 local P = slm.print

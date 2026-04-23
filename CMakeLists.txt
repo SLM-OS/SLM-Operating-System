@@ -1260,32 +1260,36 @@ else()
 endif()
 
 # ==========================================================================
-# AI Eviction Policies (optional)
+# Eviction Policies (optional model weights)
 #
 # Policies live entirely in the Rust runtime; CMake only threads the
 # feature flags through to cargo via the top-level Makefile. The
 # compile definitions are exported so C shell/test code can guard
 # calls to the Rust FFI on `CONFIG_AI_EVICTION`.
 # ==========================================================================
-option(ENABLE_AI_EVICTION "Include pluggable AI eviction policies (Rust)" OFF)
-option(ENABLE_AI_EVICTION_MODELS "Include trained XGBoost + MLP weights (~1.3 MB)" OFF)
+option(DISABLE_EVICTION "Disable the pluggable eviction-policy framework" OFF)
+option(ENABLE_EVICTION_MODELS "Include trained XGBoost + MLP weights (~1.3 MB)" OFF)
+set(EVICTION_DEFAULT_POLICY "lru" CACHE STRING
+    "Compiled-in default eviction policy when eviction is enabled")
+set_property(CACHE EVICTION_DEFAULT_POLICY PROPERTY STRINGS
+    lru lfu arc slm xgboost mlp cacheus cacheus_all5 first_candidate)
 
-if(ENABLE_AI_EVICTION_MODELS AND NOT ENABLE_AI_EVICTION)
+if(ENABLE_EVICTION_MODELS AND DISABLE_EVICTION)
     message(FATAL_ERROR
-        "ENABLE_AI_EVICTION_MODELS requires ENABLE_AI_EVICTION. "
-        "Add -DENABLE_AI_EVICTION=ON or use AI_EVICTION=ON AI_EVICTION_MODELS=ON.")
+        "ENABLE_EVICTION_MODELS requires eviction to be enabled. "
+        "Remove -DDISABLE_EVICTION=ON or use DISABLE_EVICTION=OFF EVICTION_MODELS=ON.")
 endif()
 
-if(ENABLE_AI_EVICTION)
+if(NOT DISABLE_EVICTION)
     add_compile_definitions(CONFIG_AI_EVICTION=1)
-    if(ENABLE_AI_EVICTION_MODELS)
+    if(ENABLE_EVICTION_MODELS)
         add_compile_definitions(CONFIG_AI_EVICTION_MODELS=1)
-        message(STATUS "  AI Eviction: ENABLED (with trained models)")
+        message(STATUS "  Eviction: ENABLED (default=${EVICTION_DEFAULT_POLICY}, trained models)")
     else()
-        message(STATUS "  AI Eviction: ENABLED (stub models)")
+        message(STATUS "  Eviction: ENABLED (default=${EVICTION_DEFAULT_POLICY}, classical + stub ML policies)")
     endif()
 else()
-    message(STATUS "  AI Eviction: disabled")
+    message(STATUS "  Eviction: disabled")
 endif()
 
 # Link with Rust runtime (weak C stubs provide fallback if not built)

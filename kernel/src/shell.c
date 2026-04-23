@@ -576,6 +576,23 @@ int shell_execute(const char *cmdline)
     return dispatch_cmd(cmd, argc, argv);
 }
 
+bool shell_mutation_pause(void)
+{
+    if (!pi_mutex_held_by_self(&shell_mutex)) {
+        return false;
+    }
+    pi_mutex_unlock(&shell_mutex);
+    return true;
+}
+
+void shell_mutation_resume(bool paused)
+{
+    if (!paused) {
+        return;
+    }
+    pi_mutex_lock(&shell_mutex);
+}
+
 /*
  * Shell main loop.
  */

@@ -354,12 +354,14 @@ make BUILD_TYPE=Release  # Optimized, no debug symbols
 
 ```bash
 make kernel AI_SCHED=ON               # AI scheduler (MLP/PPO, kernel-side, C)
-make kernel AI_EVICTION=ON            # AI eviction trait + classical policies (Rust, stub models)
-make kernel AI_EVICTION_MODELS=ON     # AI eviction with trained XGBoost + int8 MLP (Rust)
+make kernel                          # eviction enabled by default (LRU)
+make kernel EVICTION_DEFAULT_POLICY=lfu
+make kernel EVICTION_MODELS=ON        # trained XGBoost + int8 MLP policies
+make kernel DISABLE_EVICTION=ON       # compile eviction out entirely
 ```
 
-`AI_EVICTION_MODELS=ON` implies `AI_EVICTION=ON`. Before enabling
-`AI_EVICTION_MODELS`, run `./scripts/import_eviction_weights.sh` to
+`EVICTION_MODELS=ON` implies eviction remains enabled. Before enabling
+`EVICTION_MODELS`, run `./scripts/import_eviction_weights.sh` to
 stage the generated weight files from the sibling `slm-os-page-sim`
 project. See `docs/eviction.md` for the full workflow.
 

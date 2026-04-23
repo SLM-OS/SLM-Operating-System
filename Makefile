@@ -39,30 +39,49 @@ ifeq ($(PI5_SECONDARY_PREEMPT),ON)
     SECONDARY_PREEMPT := ON
 endif
 
-# AI Eviction (Phase AI-Eviction):
-#   AI_EVICTION=ON         — compile the pluggable EvictionPolicy trait +
-#                            classical Rust policies (stub XGBoost/MLP).
-#   AI_EVICTION_MODELS=ON  — additionally pull in the trained XGBoost +
+# Eviction:
+#   DISABLE_EVICTION=ON    — compile out the pluggable eviction framework.
+#                            Default OFF, so LRU-style eviction is available.
+#   EVICTION_MODELS=ON     — additionally pull in the trained XGBoost +
 #                            int8 MLP weights. Run scripts/import_eviction_weights.sh
 #                            first to stage the generated files from the sibling
-#                            slm-os-page-sim project. Implies AI_EVICTION=ON.
-AI_EVICTION ?= OFF
-AI_EVICTION_MODELS ?= OFF
+#                            slm-os-page-sim project.
+#   EVICTION_DEFAULT_POLICY=<name>
+#                          — choose the compiled-in default policy when
+#                            eviction is enabled. Default: lru.
+DISABLE_EVICTION ?= OFF
+EVICTION_MODELS ?= OFF
+EVICTION_DEFAULT_POLICY ?= lru
+
+# Back-compat aliases. Keep accepting the old names for now, but map
+# them onto the clearer user-facing controls.
+ifdef AI_EVICTION
+$(warning AI_EVICTION is deprecated; use DISABLE_EVICTION=OFF or ON)
+ifeq ($(AI_EVICTION),OFF)
+    DISABLE_EVICTION := ON
+else
+    DISABLE_EVICTION := OFF
+endif
+endif
+ifdef AI_EVICTION_MODELS
+$(warning AI_EVICTION_MODELS is deprecated; use EVICTION_MODELS=ON)
+EVICTION_MODELS := $(AI_EVICTION_MODELS)
+endif
 
 # Embed scripts/*.lua demo scripts via .incbin (#14). Default ON; pass
 # EMBED_DEMO_SCRIPTS=OFF to leave them out of the kernel image (saves ~20KB).
 # Lua interpreter + slm.* bindings remain functional when OFF.
 EMBED_DEMO_SCRIPTS ?= ON
-ifeq ($(AI_EVICTION_MODELS),ON)
-    # Models imply the trait layer; callers don't have to set both.
-    AI_EVICTION := ON
+ifeq ($(EVICTION_MODELS),ON)
+    # Model weights require the base eviction framework.
+    DISABLE_EVICTION := OFF
 endif
 
 # Cargo feature list built from the flags above.
 CARGO_FEATURES :=
-ifeq ($(AI_EVICTION_MODELS),ON)
+ifeq ($(EVICTION_MODELS),ON)
     CARGO_FEATURES := ai_eviction_models
-else ifeq ($(AI_EVICTION),ON)
+else ifeq ($(DISABLE_EVICTION),OFF)
     CARGO_FEATURES := ai_eviction
 endif
 ifeq ($(CARGO_FEATURES),)
@@ -164,8 +183,9 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
-		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
-		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
+		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
+		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
 		$(if $(filter ON,$(JETSON_EL1_SMOKE)),-DJETSON_EL1_SMOKE=ON) \
 		$(if $(HAILO_FW_BLOB),-DHAILO_FW_BLOB=$(HAILO_FW_BLOB)) \
@@ -200,8 +220,9 @@ $(KERNEL_KEXEC_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
-		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
-		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
+		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
+		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
 		$(MAKE_PROGRAM_ARG)
 
@@ -286,8 +307,9 @@ $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
-		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
-		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
+		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
+		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
 		$(MAKE_PROGRAM_ARG)
 
@@ -567,7 +589,7 @@ endif
 .PHONY: runtime
 runtime:
 	@echo "Building runtime... (cargo features: $(if $(CARGO_FEATURES),$(CARGO_FEATURES),none))"
-	cd runtime && cargo build $(RUST_TARGET_FLAG) $(if $(filter Release,$(BUILD_TYPE)),--release,) $(CARGO_FEATURES_FLAG)
+	cd runtime && SLM_DEFAULT_EVICTION_POLICY=$(EVICTION_DEFAULT_POLICY) cargo build $(RUST_TARGET_FLAG) $(if $(filter Release,$(BUILD_TYPE)),--release,) $(CARGO_FEATURES_FLAG)
 
 .PHONY: runtime-clean
 runtime-clean:
@@ -721,8 +743,9 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
-		$(if $(filter ON,$(AI_EVICTION)),-DENABLE_AI_EVICTION=ON) \
-		$(if $(filter ON,$(AI_EVICTION_MODELS)),-DENABLE_AI_EVICTION_MODELS=ON) \
+		$(if $(filter ON,$(DISABLE_EVICTION)),-DDISABLE_EVICTION=ON) \
+		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
+		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
 		$(MAKE_PROGRAM_ARG)
 

@@ -87,7 +87,7 @@ python3 tools/convert_trace.py eviction.bin > trace.csv
 python3 scripts/train_xgboost.py --input trace.csv
 python3 scripts/train_mlp.py --input trace.csv
 bash scripts/import_eviction_weights.sh
-make kernel AI_EVICTION_MODELS=ON
+make kernel EVICTION_MODELS=ON
 ```
 
 ### Phase 3: Hot-Swap Weight Reload (Future)

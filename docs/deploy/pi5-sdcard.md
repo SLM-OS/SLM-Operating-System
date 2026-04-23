@@ -2,6 +2,8 @@
 
 This guide covers physically writing an SD card from the development host and installing it in a Raspberry Pi 5. Use this path when the target board has **no SDWire interface** (for example, `pi-5-2` in the capstone lab). For boards equipped with SDWire, see [`pi5-sdwire.md`](pi5-sdwire.md).
 
+Cards prepared with a Raspberry Pi OS maintenance install can also update `kernel_2712.img` locally from that OS, but that is a convenience layer on top of this guide, not a replacement for it. If the maintenance OS is not reachable over SSH or an exclusive serial/login path, the deploy path is still sneakernet.
+
 ---
 
 ## When to use this guide
@@ -10,6 +12,7 @@ This guide covers physically writing an SD card from the development host and in
 |---|---|
 | New Pi 5 board, fresh SD card, no lab integration | This guide |
 | Pi 5 with SDWire, iterative kernel updates | [`pi5-sdwire.md`](pi5-sdwire.md) |
+| Pi 5 without SDWire, Pi OS maintenance install reachable locally | This guide, use [Local maintenance update](#local-maintenance-update) |
 | Moving an existing SLM-OS SD card between boards | This guide, skip to [Kernel update](#kernel-update) |
 
 ---
@@ -33,7 +36,7 @@ The simplest provisioning path reuses the Raspberry Pi OS boot partition layout.
 
 ### Step 1 — Flash Raspberry Pi OS Lite with the Imager
 
-Use the official Raspberry Pi Imager to write **Raspberry Pi OS Lite (64-bit)** to the SD card. The rootfs (ext4) is never touched by SLM-OS and is preserved for revert.
+Use the official Raspberry Pi Imager to write **Raspberry Pi OS Lite (64-bit)** to the SD card. The rootfs (ext4) is never touched by SLM-OS during normal kernel updates and is preserved for revert.
 
 ### Step 2 — Identify the SD card
 
@@ -115,6 +118,14 @@ After this completes, the boot partition contains:
 | `kernel_2712.img.pios-bak` | Original Linux kernel |
 | `bootcode.bin`, `start*.elf`, `fixup*.dat`, DTBs, `overlays/` | Pi firmware — untouched |
 
+The simplest durable layout is:
+
+| Partition | Typical size | Purpose |
+|---|---|---|
+| `bootfs` (`/dev/sdX1`) | `512M` FAT32 | Pi firmware files, `config.txt`, `kernel_2712.img` |
+| `rootfs` (`/dev/sdX2`) | `8G` ext4 | Raspberry Pi OS maintenance environment used for recovery and local updates |
+| optional data partition (`/dev/sdX3`) | remainder | staging area for new kernels, logs, captures |
+
 ### Step 5 — Wire up the serial console
 
 SLM-OS has no video output. The shell is only reachable over UART.
@@ -168,6 +179,38 @@ rmdir "$MNT"
 
 Re-insert the card and power on.
 
+## Local maintenance update
+
+If the card keeps a bootable Raspberry Pi OS maintenance install and that OS is reachable, you can update SLM-OS without removing the card from the Pi.
+
+This path requires one of:
+
+- SSH access to the Pi OS environment
+- exclusive serial/login access to the Pi OS environment
+
+It does **not** work if the board only answers `ping` and neither SSH nor an interactive login path is available.
+
+Typical flow from within Pi OS:
+
+```bash
+# Copy the freshly built kernel onto the Pi by whatever path is available.
+# Example destination:
+cp /path/to/slmos.bin /mnt/slmdata/slmos.bin.new
+
+# Then run the local updater.
+sudo /usr/local/sbin/slmos-update
+```
+
+Typical updater behavior:
+
+- mounts the Pi boot partition
+- preserves the previous `kernel_2712.img`
+- installs the new SLM-OS kernel
+- verifies the copy
+- syncs before returning
+
+If you cannot reach the Pi OS maintenance install, fall back to the host-driven [Kernel update](#kernel-update) path above.
+
 ---
 
 ## Reverting to Raspberry Pi OS
@@ -187,6 +230,8 @@ rmdir "$MNT"
 ```
 
 The rootfs (`/dev/sdX2`) was never modified, so the resulting card boots Pi OS Lite normally.
+
+If the card uses the maintenance layout above, `rootfs` remains available as a recovery environment even after many SLM-OS kernel updates.
 
 ---
 

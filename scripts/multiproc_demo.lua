@@ -43,6 +43,50 @@ local function csv(list)
     return table.concat(out, ", ")
 end
 
+local function wait_for_key(message)
+    P("")
+    P(message or "Press any key to return")
+    while true do
+        local ch = slm.try_getc()
+        if ch ~= nil then
+            break
+        end
+        slm.sleep(50)
+    end
+end
+
+local function admin_only_message(title, reason)
+    header(title)
+    P("  This demo action requires lua-admin.")
+    if reason then
+        P("  Missing binding: " .. reason)
+    end
+    P("")
+    P("  Re-run the demo with:")
+    P("    lua-admin /mnt/files/multiproc_demo.lua")
+    wait_for_key("Press any key to return to the menu")
+end
+
+local function require_binding(title, field)
+    if slm[field] == nil then
+        admin_only_message(title, "slm." .. field)
+        return false
+    end
+    return true
+end
+
+local function collect_task_rows()
+    local rows = {}
+    rows[#rows + 1] = string.format("  %-4s %-20s %-10s %-4s %-4s",
+        "ID", "NAME", "STATE", "CPU", "PRI")
+    rows[#rows + 1] = "  ----------------------------------------------------"
+    for _, t in ipairs(slm.tasks()) do
+        rows[#rows + 1] = string.format("  %-4d %-20s %-10s %-4d %-4d",
+            t.id, t.name, t.state, t.cpu, t.priority)
+    end
+    return rows
+end
+
 local function smp_demo_targets()
     local cpus = {}
     if slm.cpu_count() <= 1 then
@@ -124,20 +168,63 @@ local function show_overview()
     P("  CPUs:       " .. slm.cpu_count() .. " cores")
     P("  This CPU:   " .. slm.cpu_id())
     P("  Scheduler:  " .. slm.sched_policy())
+    P("  Eviction:   " .. tostring(slm.eviction_policy() or "disabled"))
     local mem = slm.mem_stats()
     P(string.format("  RAM:        %d KB free / %d KB total",
         mem.free_kb, mem.total_kb))
     P(string.format("  Uptime:     %d ms", slm.uptime()))
+    wait_for_key("Press any key to return to the menu")
 end
 
 local function show_tasks()
-    header("Active Tasks")
-    dump_tasks()
+    while true do
+        local term = slm.term_size()
+        local max_rows = 18
+        if term and term.rows and term.rows > 8 then
+            max_rows = term.rows - 6
+        end
+
+        local rows = collect_task_rows()
+        local lines = {
+            "\027[H\027[2JSLM-OS Task Table",
+            "Press q to return to the menu",
+            string.format("uptime=%d ms  tasks=%d", slm.uptime(), #slm.tasks()),
+            "",
+        }
+        for i = 1, math.min(#rows, max_rows) do
+            lines[#lines + 1] = rows[i]
+        end
+        if #rows > max_rows then
+            lines[#lines + 1] = string.format("  ... %d more tasks not shown", #rows - max_rows)
+        end
+
+        P(table.concat(lines, "\n"))
+
+        local waited = 0
+        while waited < 1000 do
+            local ch = slm.try_getc()
+            if ch == "q" or ch == "Q" or ch == " " then
+                P("")
+                return
+            end
+            slm.sleep(100)
+            waited = waited + 100
+        end
+    end
 end
 
 local function spawn_components()
+    if not require_binding("Spawning Concurrent Components", "component_run") then
+        return
+    end
     header("Spawning Concurrent Components")
     local names = {"listener", "sensor_monitor", "counter"}
+    P("  Demo value:")
+    P("    listener       subscribes to 'events'")
+    P("    sensor_monitor subscribes to '/sensors/data'")
+    P("    counter        runs independent periodic work")
+    P("  This shows built-in components becoming separate kernel tasks.")
+    P("")
     for _, name in ipairs(names) do
         local idx = slm.component_run(name)
         if idx and idx >= 0 then
@@ -153,12 +240,7 @@ local function spawn_components()
     dump_tasks()
     P("")
     P("  Active components: " .. slm.component_count())
-end
-
-local function run_bench(which)
-    header("bench " .. which)
-    local rc = slm.shell_exec("bench " .. which)
-    P("  bench " .. which .. " returned " .. tostring(rc))
+    wait_for_key("Press any key to return to the menu")
 end
 
 local function pad_right(s, width)
@@ -209,7 +291,7 @@ local function draw_ipc_dashboard(logs, consumers, now_ms, stats)
 
         local right = ""
         if row == 1 then
-            right = string.format("   %-8s %-7s %-8s %-10s  %s",
+            right = string.format("     %-8s %7s %-8s %-10s %s",
                 "name", "count", "topic", "last msg", "subs")
         else
             local c = consumers[row - 1]
@@ -368,9 +450,16 @@ local function run_ipc_dashboard()
 
     P("")
     P("IPC dashboard stopped.")
+    wait_for_key("Press any key to return to the menu")
 end
 
 local function run_smp_workers()
+    if not require_binding("Pinned SMP Workers", "task_create") then
+        return
+    end
+    if not require_binding("Pinned SMP Workers", "task_pin") then
+        return
+    end
     header("Pinned SMP Workers")
     P(string.format("  Launching %d Lua workers per secondary CPU for %d seconds.",
         SMP_DEMO_WORKERS_PER_CPU, SMP_DEMO_MS // 1000))
@@ -401,32 +490,17 @@ local function run_smp_workers()
     P("  Worker window finished.")
     P("  Task table after completion:")
     dump_tasks()
-end
-
-local function run_shell_command()
-    P("")
-    P("  Enter a shell command (e.g. 'tasks', 'cpu', 'help'):")
-    P("  > ")
-    local cmd = slm.read_line()
-    if cmd == nil or cmd == "" then
-        P("  (no command entered)")
-        return
-    end
-    local rc = slm.shell_exec(cmd)
-    P(string.format("  [exit %d]", rc))
+    wait_for_key("Press any key to return to the menu")
 end
 
 -- --- Menu --------------------------------------------------------------------
 
 local menu = {
     {key = "1", label = "System overview",                 action = show_overview},
-    {key = "2", label = "Show task table",                 action = show_tasks},
-    {key = "3", label = "Spawn 3 components (multi-task)", action = spawn_components},
+    {key = "2", label = "Live task table",                 action = show_tasks},
+    {key = "3", label = "Spawn 3 built-in components*",    action = spawn_components},
     {key = "4", label = "IPC dashboard (live pub/sub)",    action = run_ipc_dashboard},
-    {key = "5", label = "Pinned SMP workers x3 (8s)",      action = run_smp_workers},
-    {key = "6", label = "bench smp",                       action = function() run_bench("smp") end},
-    {key = "7", label = "bench stats",                     action = function() run_bench("stats") end},
-    {key = "8", label = "Run an arbitrary shell command",  action = run_shell_command},
+    {key = "5", label = "Pinned SMP workers x3 (8s)*",     action = run_smp_workers},
     {key = "q", label = "Quit",                            action = nil},
 }
 
@@ -454,6 +528,11 @@ P("############################################################")
 P("#  SLM-OS Multi-Process Demo")
 P("#  (interactive menu — uses slm.read_line / slm.shell_exec)")
 P("############################################################")
+if slm.component_run == nil or slm.task_create == nil or slm.task_pin == nil then
+    P("#  * marked options require lua-admin")
+    P("#    launch with: lua-admin /mnt/files/multiproc_demo.lua")
+    P("############################################################")
+end
 
 while true do
     show_menu()

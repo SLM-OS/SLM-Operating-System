@@ -79,6 +79,16 @@ int shell_register_command(const shell_cmd_t *cmd);
  */
 int shell_execute(const char *cmdline);
 
+/* Temporarily release the shell mutation lock if the current task holds it.
+ * Intended for long-running mutating handlers that need to block on input,
+ * then reacquire before touching unlocked global state again. Returns true
+ * when the lock was released and must later be resumed. */
+bool shell_mutation_pause(void);
+
+/* Reacquire the shell mutation lock after shell_mutation_pause() returned
+ * true. Safe to call with false (no-op). */
+void shell_mutation_resume(bool paused);
+
 /*
  * Read one line from the current session's I/O with basic line editing
  * (backspace, Ctrl+C). Echoes input as it arrives and terminates on

@@ -10,7 +10,7 @@ For build instructions, see `docs/getting-started.md`. For interactive lab opera
 
 | Target | SD card | NVMe / SSD | USB drive | Notes |
 |---|---|---|---|---|
-| Raspberry Pi 5 | [`pi5-sdcard.md`](pi5-sdcard.md), [`pi5-sdwire.md`](pi5-sdwire.md) | **Gap** (#TBD) | — | SDWire path is the primary lab workflow; sneakernet for boards without SDWire. |
+| Raspberry Pi 5 | [`pi5-sdcard.md`](pi5-sdcard.md), [`pi5-sdwire.md`](pi5-sdwire.md) | **Gap** (#TBD) | — | SDWire path is the primary lab workflow; boards without SDWire can use sneakernet or a local Pi OS maintenance install if that OS is reachable. |
 | Jetson Orin Nano | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SD rootfs) | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SSD rootfs) | — | No standalone bare-metal boot path yet — UEFI-direct is WIP (see `docs/jetson-uefi-direct-result.md`). |
 | x86-64 (test-pc) | — | [`x86-64-ssd.md`](x86-64-ssd.md) | **Gap** (#TBD) | UEFI disk image written to SSD via SDWire; kexec-from-Linux is WIP (see `docs/x86-64-gpu-inference-status.md` §4.2.k). |
 | QEMU (ARM64 / x86-64) | N/A | N/A | N/A | `make run` — no deploy step. See `docs/getting-started.md`. |
@@ -23,7 +23,7 @@ Gaps marked above represent paths that are known to work in principle but have n
 
 ### Hardware access
 
-All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The *only* exception is **sneakernet** — when a board lacks an SDWire interface (e.g. `pi-5-2`), the SD card is physically removed and written via the host machine's built-in card reader. This is called out explicitly in each guide that needs it.
+All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The main exception is **sneakernet** — when a board lacks an SDWire interface (for example `pi-5-2`), the SD card may need to be physically removed and written via the host machine's built-in card reader. Some Pi 5 cards also keep a local Raspberry Pi OS maintenance install on the same card; that can update `kernel_2712.img` in place, but only when that Pi OS environment is reachable via SSH or an exclusive serial/login path.
 
 Never bypass labctl by running `mount`/`cp`/`picocom`/`nc` directly against lab-managed SD cards or serial ports — doing so risks device conflicts with other sessions and can corrupt the wrong card. Sneakernet is the one sanctioned exception.
 

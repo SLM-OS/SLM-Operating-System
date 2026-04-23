@@ -1238,19 +1238,10 @@ pub unsafe extern "C" fn rust_eviction_policy_set(name: *const u8) -> i32 {
             Err(_) => return -1,
         };
 
-        use alloc::boxed::Box;
-        use mm::eviction::{self, EvictionPolicy};
-        let boxed: Box<dyn EvictionPolicy + Send> = match requested {
-            "lru" => Box::new(eviction::LruPolicy::new()),
-            "lfu" => Box::new(eviction::LfuPolicy::new()),
-            "arc" => Box::new(eviction::ARCPolicy::new()),
-            "slm" => Box::new(eviction::SlmHeuristicPolicy::new()),
-            "xgboost" => Box::new(eviction::XGBoostPolicy::new()),
-            "mlp" => Box::new(eviction::MlpPolicy::new()),
-            "cacheus" => Box::new(eviction::CacheusSelector::ml_only()),
-            "cacheus_all5" => Box::new(eviction::CacheusSelector::all_5()),
-            "first_candidate" => Box::new(eviction::FirstCandidatePolicy),
-            _ => return -1,
+        use mm::eviction;
+        let boxed = match eviction::registry::make_policy_by_name(requested) {
+            Some(policy) => policy,
+            None => return -1,
         };
         eviction::set_eviction_policy(boxed);
         0
@@ -1291,19 +1282,9 @@ pub unsafe extern "C" fn rust_eviction_policy_set_pool(
             Err(_) => return -1,
         };
 
-        use alloc::boxed::Box;
-        use mm::eviction::EvictionPolicy;
-        let boxed: Box<dyn EvictionPolicy + Send> = match requested {
-            "lru" => Box::new(mm::eviction::LruPolicy::new()),
-            "lfu" => Box::new(mm::eviction::LfuPolicy::new()),
-            "arc" => Box::new(mm::eviction::ARCPolicy::new()),
-            "slm" => Box::new(mm::eviction::SlmHeuristicPolicy::new()),
-            "xgboost" => Box::new(mm::eviction::XGBoostPolicy::new()),
-            "mlp" => Box::new(mm::eviction::MlpPolicy::new()),
-            "cacheus" => Box::new(mm::eviction::CacheusSelector::ml_only()),
-            "cacheus_all5" => Box::new(mm::eviction::CacheusSelector::all_5()),
-            "first_candidate" => Box::new(mm::eviction::FirstCandidatePolicy),
-            _ => return -1,
+        let boxed = match mm::eviction::registry::make_policy_by_name(requested) {
+            Some(policy) => policy,
+            None => return -1,
         };
         mm::eviction::set_eviction_policy_for_pool(pool, boxed);
         0
@@ -2202,6 +2183,50 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
 
         mm::eviction::slm_heuristic::clear_active();
         eviction::reset_to_default();
+
+        puts(b"\n-- eviction: runtime blob format --\n\0");
+
+        {
+            let payload = b"\x01\x02\x03\x04dynamic-mlp";
+            let blob = mm::eviction::blob::build_test_blob(
+                mm::eviction::BlobKind::Mlp,
+                payload);
+            let parsed = mm::eviction::parse_blob(&blob);
+            check!(b"blob_parse_valid_header\0", parsed.is_ok());
+            if let Ok(parsed) = parsed {
+                check!(b"blob_parse_kind_roundtrip\0",
+                       parsed.header.kind == mm::eviction::BlobKind::Mlp);
+                check!(b"blob_parse_payload_roundtrip\0",
+                       parsed.payload.as_slice() == payload);
+            }
+
+            let mut bad_magic = blob.clone();
+            bad_magic[0] ^= 0x01;
+            check!(b"blob_rejects_bad_magic\0",
+                   mm::eviction::parse_blob(&bad_magic)
+                       == Err(mm::eviction::BlobError::BadMagic));
+
+            let mut bad_checksum = blob.clone();
+            let last = bad_checksum.len() - 1;
+            bad_checksum[last] ^= 0x01;
+            check!(b"blob_rejects_bad_checksum\0",
+                   mm::eviction::parse_blob(&bad_checksum)
+                       == Err(mm::eviction::BlobError::ChecksumMismatch));
+
+            let mut bad_schema = blob.clone();
+            // feature_schema_version at bytes 8..10
+            bad_schema[8] = 0xFF;
+            bad_schema[9] = 0x7F;
+            check!(b"blob_rejects_unknown_feature_schema\0",
+                   mm::eviction::parse_blob(&bad_schema)
+                       == Err(mm::eviction::BlobError::UnsupportedFeatureSchema));
+
+            let mut bad_length = blob.clone();
+            bad_length.truncate(bad_length.len() - 1);
+            check!(b"blob_rejects_length_mismatch\0",
+                   mm::eviction::parse_blob(&bad_length)
+                       == Err(mm::eviction::BlobError::LengthMismatch));
+        }
 
         puts(b"\n-- eviction: classical policies --\n\0");
 

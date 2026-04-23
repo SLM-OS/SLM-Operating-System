@@ -256,12 +256,12 @@ local function show_eviction()
     header("Page / Model Eviction")
     note("When the weight or workspace pool fills, an eviction policy picks")
     note("which block to reclaim. Policies include LRU, LFU, CACHEUS,")
-    note("XGBoost and int8-MLP (when AI_EVICTION_MODELS=ON).")
+    note("XGBoost and int8-MLP (when EVICTION_MODELS=ON).")
     note("")
 
     local pol = slm.eviction_policy()
     if pol == nil then
-        note("Eviction feature is disabled (build with AI_EVICTION=ON).")
+        note("Eviction is disabled in this build (DISABLE_EVICTION=ON).")
         return
     end
 
@@ -292,7 +292,7 @@ local function switch_eviction()
     header("Switch Eviction Policy")
     local cur = slm.eviction_policy()
     if cur == nil then
-        note("Eviction feature is disabled (build with AI_EVICTION=ON).")
+        note("Eviction is disabled in this build (DISABLE_EVICTION=ON).")
         return
     end
     note("Active policy: " .. cur)

@@ -14,33 +14,37 @@ eviction subsystem.
 
 ## Build Flags
 
-Two tiers, both off by default:
+Eviction is on by default. There are now two user-facing controls:
 
 | Flag | Adds | Binary cost |
 |------|------|-------------|
-| `AI_EVICTION=ON` | Trait, registry, classical policies, stub ML predictors (`xgb_stub`, `mlp_stub` return 0.5) | ~30 KB |
-| `AI_EVICTION_MODELS=ON` | Trained XGBoost (~1.3 MB source) + int8 MLP (~5 KB) | still ~30 KB until M4 calls them; LTO drops the unused weight tables |
+| default build | Trait, registry, classical policies, stub ML predictors (`xgb_stub`, `mlp_stub` return 0.5) | ~30 KB |
+| `EVICTION_MODELS=ON` | Trained XGBoost (~1.3 MB source) + int8 MLP (~5 KB) | still ~30 KB until M4 calls them; LTO drops the unused weight tables |
+| `DISABLE_EVICTION=ON` | Compiles the eviction framework out entirely | saves the eviction-framework footprint |
+| `EVICTION_DEFAULT_POLICY=<name>` | Chooses the compiled-in default policy (`lru`, `lfu`, `arc`, `slm`, `cacheus`, ...) | none beyond the selected built-in policy set |
 
-`AI_EVICTION_MODELS=ON` implies `AI_EVICTION=ON` — the Makefile auto-
-promotes the flag. CMake enforces the dependency at configure time:
-setting `ENABLE_AI_EVICTION_MODELS=ON` without `ENABLE_AI_EVICTION=ON`
-aborts with a `FATAL_ERROR`.
+`EVICTION_MODELS=ON` requires eviction to stay enabled. CMake enforces
+that dependency at configure time: setting `ENABLE_EVICTION_MODELS=ON`
+with `DISABLE_EVICTION=ON` aborts with a `FATAL_ERROR`.
 
 ### Build Examples
 
 ```bash
-# Default: no AI eviction code
+# Default: eviction enabled, default policy = LRU
 make kernel
 
-# Pluggable trait + classical policies (stubs for XGBoost/MLP)
-make kernel AI_EVICTION=ON
+# Pick a different compiled-in default policy
+make kernel EVICTION_DEFAULT_POLICY=lfu
 
 # Full: real trained models (requires import step first)
 ./scripts/import_eviction_weights.sh
-make kernel AI_EVICTION_MODELS=ON
+make kernel EVICTION_MODELS=ON
+
+# Compile eviction out entirely
+make kernel DISABLE_EVICTION=ON
 
 # Combined with AI scheduler
-make kernel AI_SCHED=ON AI_EVICTION=ON
+make kernel AI_SCHED=ON EVICTION_MODELS=ON
 ```
 
 The Cargo feature names match the Makefile flags: `ai_eviction` and
@@ -275,7 +279,7 @@ registered policy so the values land in each `make test` log.
 
 **QEMU baseline** (aarch64 `virt`, cortex-a76, Release build):
 
-| Policy | Stub (AI_EVICTION=ON) | Real models (AI_EVICTION_MODELS=ON) |
+| Policy | Default build | Real models (`EVICTION_MODELS=ON`) |
 |--------|---------:|---------:|
 | first_candidate | 55 ns | 58 ns |
 | lru | 71 ns | 72 ns |
@@ -296,11 +300,11 @@ numbers are pending a hardware run.
 
 Binary size (QEMU_VIRT Release `slmos.elf`):
 
-| Config | ELF size | Δ vs OFF |
+| Config | ELF size | Δ vs eviction-disabled build |
 |--------|---------:|---------:|
-| OFF | 2,444,536 B | — |
-| AI_EVICTION=ON (stubs) | 2,580,376 B | +135,840 B (~133 KB) |
-| AI_EVICTION_MODELS=ON | 2,789,944 B | +345,408 B (~337 KB) |
+| `DISABLE_EVICTION=ON` | 2,444,536 B | — |
+| default build | 2,580,376 B | +135,840 B (~133 KB) |
+| `EVICTION_MODELS=ON` | 2,789,944 B | +345,408 B (~337 KB) |
 
 The stripped `slmos.bin` footprint is smaller (+48 KB stubs /
 +254 KB real), well under the 2 MB M9 target.
@@ -336,7 +340,7 @@ here so future callers don't trip over them.
   emit floats directly (e.g. the shell's stats printer) must either
   route through the AI-Sched `FP_CONTEXT_SAVE()` wrappers or use
   integer-encoded values — M7's `expert_weights_bp: [u32; 5]` is an
-  example. Test coverage: every `make test` run under `AI_EVICTION=ON`
+  example. Test coverage: every `make test` run with eviction enabled
   exercises 91 internal CACHEUS / MLP / feature-extraction checks
   while QEMU's timer preempts; no FP corruption has been observed.
 - **Lock ordering.** `alloc_weights` / `alloc_workspace` release the
@@ -494,7 +498,7 @@ Unity suite (24 tests) alongside the existing `test_suite_model_mem`:
     numbers to the test log, and asserts each stays under 10 ms per
     call (sanity cap; the < 1 µs hardware target lives in the
     benchmarks table above). Numbers surface in every `make test`
-    run under `AI_EVICTION=ON`.
+    run with eviction enabled.
 
 `rust_eviction_run_tests()` itself exercises 91 internal invariants (87
 when `ai_eviction_models` is off — the int8-vs-f32 cross-check and
@@ -521,7 +525,7 @@ the three Python-parity smoke cases are models-only):
 - **ML policies (M4)** (10 always + 1 gated): `extract_features` shape
   and rank-distinctness, `XGBoostPolicy` / `MlpPolicy` produce valid
   indices and finite scores in [0, 1], victim matches argmax of scores
-  for both, and — only under `AI_EVICTION_MODELS=ON` — int8 MLP vs
+  for both, and — only under `EVICTION_MODELS=ON` — int8 MLP vs
   float32 MLP decision agreement (≥ 85% across 7 candidate groups).
 - **CACHEUS + tracker (M5)** (15): initial uniform weights, weights
   sum to 1 after update, reset restores uniform, min_weight floor
@@ -535,12 +539,11 @@ the three Python-parity smoke cases are models-only):
   feedback-loop probe hit fires `update_feedback(_, true)`, probe miss
   fires nothing, window-expiry drain fires `update_feedback(_, false)`,
   rapid-swap stress leaves a valid active policy. Under
-  `AI_EVICTION_MODELS=ON`, three Python-parity smoke cases exercise
+  `EVICTION_MODELS=ON`, three Python-parity smoke cases exercise
   the XGBoost + MLP loaded code path.
 
 All suites pass under `make test` on the three supported configs:
-`AI_EVICTION=OFF` (default), `AI_EVICTION=ON` (stubs),
-`AI_EVICTION_MODELS=ON` (trained weights).
+`DISABLE_EVICTION=ON`, default build, and `EVICTION_MODELS=ON`.
 
 ---
 

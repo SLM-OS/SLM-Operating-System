@@ -568,6 +568,44 @@ static void test_lua_command_arg_table_rebuilt_per_invocation(void)
     shell_session_free(s);
 }
 
+static void test_lua_command_relative_path_uses_session_cwd(void)
+{
+    struct task *cur = task_current();
+    TEST_ASSERT_NOT_NULL(cur);
+
+    write_lfs_file("/mnt/files/lua_relative.lua",
+                   "relative_ok = 'yes'");
+
+    struct shell_session *s = shell_session_alloc();
+    TEST_ASSERT_NOT_NULL(s);
+    shell_session_bind(cur, s);
+    strcpy(s->cwd, "/mnt/files");
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("lua lua_relative.lua"));
+    TEST_ASSERT_NULL(s->lua);
+
+    shell_session_unbind(cur);
+    shell_session_free(s);
+}
+
+static void test_lua_default_surface_excludes_admin_bindings(void)
+{
+    struct task *cur = task_current();
+    TEST_ASSERT_NOT_NULL(cur);
+
+    struct shell_session *s = shell_session_alloc();
+    TEST_ASSERT_NOT_NULL(s);
+    shell_session_bind(cur, s);
+
+    TEST_ASSERT_EQUAL_INT(0,
+        shell_execute("lua -e \"assert(slm.shell_exec == nil); assert(slm.telnetd_start == nil); assert(slm.task_kill == nil)\""));
+    TEST_ASSERT_EQUAL_INT(0,
+        shell_execute("lua-admin -e \"assert(type(slm.shell_exec) == 'function'); assert(type(slm.task_kill) == 'function')\""));
+
+    shell_session_unbind(cur);
+    shell_session_free(s);
+}
+
 /* ============================================================================
  * Entry point
  * ============================================================================ */
@@ -608,6 +646,8 @@ int test_suite_shell_session(void)
     RUN_TEST(test_lua_command_non_repl_state_does_not_persist_per_session);
     RUN_TEST(test_lua_command_state_does_not_persist_on_console);
     RUN_TEST(test_lua_command_arg_table_rebuilt_per_invocation);
+    RUN_TEST(test_lua_command_relative_path_uses_session_cwd);
+    RUN_TEST(test_lua_default_surface_excludes_admin_bindings);
 
     return UNITY_END();
 }

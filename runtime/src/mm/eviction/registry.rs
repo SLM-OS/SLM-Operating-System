@@ -30,7 +30,6 @@ use alloc::vec::Vec;
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use super::lru::LruPolicy;
 use super::policy::{BlockMeta, EvictionPolicy, PoolType};
 
 // =============================================================================
@@ -85,16 +84,37 @@ extern "C" {
     fn slm_get_time_ns() -> u64;
 }
 
+/// Construct a policy instance from a stable ASCII config name.
+pub fn make_policy_by_name(name: &str) -> Option<Box<dyn EvictionPolicy + Send>> {
+    match name {
+        "lru" => Some(Box::new(super::lru::LruPolicy::new())),
+        "lfu" => Some(Box::new(super::lfu::LfuPolicy::new())),
+        "arc" => Some(Box::new(super::arc::ARCPolicy::new())),
+        "slm" => Some(Box::new(super::slm_heuristic::SlmHeuristicPolicy::new())),
+        "xgboost" => Some(Box::new(super::xgboost::XGBoostPolicy::new())),
+        "mlp" => Some(Box::new(super::mlp::MlpPolicy::new())),
+        "cacheus" => Some(Box::new(super::cacheus::CacheusSelector::ml_only())),
+        "cacheus_all5" => Some(Box::new(super::cacheus::CacheusSelector::all_5())),
+        "first_candidate" => Some(Box::new(FirstCandidatePolicy)),
+        _ => None,
+    }
+}
+
 /// Construct the default eviction policy.
 ///
-/// M3 picked LRU: it is the strongest classical baseline in the
-/// sibling project's Phase 5 sweep, and it matches the implicit
-/// first-fit-then-FIFO behaviour of the pre-M6 allocator most
-/// closely. Tests that need a deterministic trivial policy can
-/// install [`FirstCandidatePolicy`] explicitly via
-/// [`set_eviction_policy`].
+/// M3 picked LRU as the fallback default: it is the strongest
+/// classical baseline in the sibling project's Phase 5 sweep, and it
+/// matches the implicit first-fit-then-FIFO behaviour of the pre-M6
+/// allocator most closely. Builders can override the compiled-in
+/// default via the `SLM_DEFAULT_EVICTION_POLICY` environment variable
+/// threaded through the top-level Makefile.
 fn default_policy() -> Box<dyn EvictionPolicy + Send> {
-    Box::new(LruPolicy::new())
+    if let Some(name) = option_env!("SLM_DEFAULT_EVICTION_POLICY") {
+        if let Some(policy) = make_policy_by_name(name) {
+            return policy;
+        }
+    }
+    make_policy_by_name("lru").expect("built-in LRU policy missing")
 }
 
 /// Deterministic policy that always picks index 0.
@@ -343,6 +363,15 @@ mod tests {
     fn default_is_lru() {
         init_default();
         assert_eq!(get_eviction_policy_name(), "LRU");
+    }
+
+    #[test]
+    fn factory_accepts_known_policy_names() {
+        assert_eq!(make_policy_by_name("lru").unwrap().name(), "LRU");
+        assert_eq!(make_policy_by_name("lfu").unwrap().name(), "LFU");
+        assert_eq!(make_policy_by_name("arc").unwrap().name(), "ARC");
+        assert_eq!(make_policy_by_name("slm").unwrap().name(), "SLM-Heuristic");
+        assert!(make_policy_by_name("nope").is_none());
     }
 
     #[test]

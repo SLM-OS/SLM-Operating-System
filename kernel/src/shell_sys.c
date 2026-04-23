@@ -3113,7 +3113,7 @@ int cmd_sched(int argc, char *argv[])
 }
 
 /* ============================================================================
- * eviction — AI eviction policy inspection and control (Phase AI-Eviction M7)
+ * eviction — eviction policy inspection and control (Phase AI-Eviction M7)
  * ============================================================================
  *
  * Subcommands:
@@ -3129,10 +3129,10 @@ int cmd_sched(int argc, char *argv[])
 static void eviction_print_summary(const RustEvictionStats *s, const char *name)
 {
     if (!s->feature_enabled) {
-        shell_puts("AI eviction: disabled (build with AI_EVICTION=ON)\r\n");
+        shell_puts("Eviction: disabled (rebuild without DISABLE_EVICTION=ON)\r\n");
         return;
     }
-    shell_puts("AI eviction:\r\n");
+    shell_puts("Eviction:\r\n");
     shell_printf("  Policy:              %s\r\n", name);
     shell_printf("  Models:              %s\r\n",
                 s->models_available ? "trained (xgb + mlp)" : "stubs");
@@ -3249,7 +3249,7 @@ int cmd_eviction(int argc, char *argv[])
             int rc = rust_eviction_policy_set_pool(pool_id,
                                                     (const uint8_t *)argv[3]);
             if (rc == -2) {
-                shell_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
+                shell_puts("Eviction disabled — rebuild without DISABLE_EVICTION=ON\r\n");
                 return 1;
             }
             if (rc != 0) {
@@ -3265,7 +3265,7 @@ int cmd_eviction(int argc, char *argv[])
         /* Global variant: `eviction policy <name>` (sets both pools). */
         int rc = rust_eviction_policy_set((const uint8_t *)argv[2]);
         if (rc == -2) {
-            shell_puts("AI eviction disabled — rebuild with AI_EVICTION=ON\r\n");
+            shell_puts("Eviction disabled — rebuild without DISABLE_EVICTION=ON\r\n");
             return 1;
         }
         if (rc != 0) {

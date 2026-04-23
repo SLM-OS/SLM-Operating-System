@@ -10,7 +10,7 @@
 # expected public symbols are present.
 #
 # After running this script, build with:
-#   make kernel AI_EVICTION_MODELS=ON
+#   make kernel EVICTION_MODELS=ON
 #
 # Usage:
 #   ./scripts/import_eviction_weights.sh [--source <path>]
@@ -155,4 +155,4 @@ fi
 echo "  All required symbols present."
 echo
 echo "Done. Build with:"
-echo "  make kernel AI_EVICTION_MODELS=ON"
+echo "  make kernel EVICTION_MODELS=ON"

@@ -22,9 +22,16 @@ void lua_slm_init(void);
 
 /**
  * Create a new Lua state with SLM-OS bindings.
+ * The default state exposes the concurrent-safe Lua surface.
  * Returns NULL on failure.
  */
 lua_State *lua_slm_newstate(void);
+
+/**
+ * Create a new Lua state with the full admin/global-control bindings.
+ * Intended for serialized bring-up / debug use, not concurrent REPLs.
+ */
+lua_State *lua_slm_newstate_admin(void);
 
 /**
  * Close a Lua state and free resources.
@@ -78,8 +85,8 @@ void lua_shell_init(void);
  *   slm.component_count()             - Number of registered components
  *   slm.component_list()              - List all components (array of tables)
  *   slm.component_find(name)          - Find component by name (index or nil)
- *   slm.component_run(name)           - Run built-in component (index or nil)
- *   slm.component_hot_swap(old, new)  - Hot-swap component (index or nil)
+ *   slm.component_run(name)           - Admin surface only
+ *   slm.component_hot_swap(old, new)  - Admin surface only
  *
  * Model memory:
  *   slm.model_stats()                 - Pool stats {weights={...}, workspace={...}}
@@ -100,15 +107,15 @@ void lua_shell_init(void);
  * Scheduler:
  *   slm.sched_policy()                - Current policy name
  *   slm.sched_stats()                 - {task_count, ready_count, ctx_switches, ticks}
- *   slm.sched_set_policy(name)        - Switch policy, returns bool
+ *   slm.sched_set_policy(name)        - Admin surface only
  *   slm.sched_policy_list()           - Array of {name, active}
  *   slm.ai_sched_stats()              - AI scheduler stats or nil
  *   slm.ai_sched_decision(task_id)    - {core, priority_adj, preempt, raw} or nil (#211)
  *   slm.task_migrate(id, cpu)         - Move task to CPU, returns bool (#210)
- *   slm.task_create(name, fn)         - Spawn Lua-defined task, returns id or nil (#208)
- *   slm.task_kill(id)                 - Terminate task, returns bool (#208)
- *   slm.task_set_priority(id, p)      - Set priority 0-7, returns bool (#208)
- *   slm.task_pin(id, cpu)             - Pin task to CPU (-1 clears), returns bool (#208)
+ *   slm.task_create(name, fn)         - Admin surface only (#208)
+ *   slm.task_kill(id)                 - Admin surface only (#208)
+ *   slm.task_set_priority(id, p)      - Admin surface only (#208)
+ *   slm.task_pin(id, cpu)             - Admin surface only (#208)
  *
  * CPU / Memory:
  *   slm.cpu_info()                    - Per-CPU state
@@ -118,13 +125,13 @@ void lua_shell_init(void);
  *
  * Eviction (requires CONFIG_AI_EVICTION):
  *   slm.eviction_policy()             - Current policy name or nil
- *   slm.eviction_set_policy(name)     - Switch policy, returns bool
+ *   slm.eviction_set_policy(name)     - Admin surface only
  *   slm.eviction_stats()              - Detailed stats table or nil
  *
  * Shell integration:
  *   slm.read_line()                   - Read one line from UART (blocks)
  *   slm.try_getc()                    - Read one char without blocking, nil if none
- *   slm.shell_exec(cmd)               - Run a shell command, return exit code
+ *   slm.shell_exec(cmd)               - Admin surface only
  */
 
 #endif /* LUA_SLM_H */

@@ -12,6 +12,7 @@
 pub mod policy;
 pub mod registry;
 pub mod generated;
+pub mod blob;
 
 // Classical policies (M3). Ports of the sibling `slm-os-page-sim`
 // reference crate + Python ARC. Decisions match the Python simulator
@@ -35,6 +36,11 @@ pub mod tracker;
 
 pub use policy::{BlockFeatures, BlockMeta, EvictionPolicy, PoolType,
     TrajectoryEntry, MAX_EXPERTS};
+pub use blob::{
+    BlobError, BlobHeader, BlobKind, ParsedBlob, BLOB_MAGIC,
+    BLOB_VERSION_V1, EVICTION_FEATURE_SCHEMA_V1, HEADER_LEN,
+    checksum32, parse_blob,
+};
 pub use registry::{
     get_eviction_policy_name, get_eviction_policy_name_for_pool,
     policy_counters, reset_to_default, score,

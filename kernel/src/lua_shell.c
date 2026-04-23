@@ -20,9 +20,9 @@
  *   lua -e "code"    - Execute code directly
  *   lua <filename>   - Run script from filesystem
  */
-static int cmd_lua(int argc, char *argv[]) {
+static int cmd_lua_common(int argc, char *argv[], bool admin) {
     struct shell_session *sess = shell_session_current();
-    bool persistent_repl = (sess && sess->id != 0 && argc == 1);
+    bool persistent_repl = (!admin && sess && sess->id != 0 && argc == 1);
     bool close_on_return = !persistent_repl;
     lua_State *L = (persistent_repl && sess) ? (lua_State *)sess->lua : NULL;
     if (persistent_repl && sess && !L) {
@@ -32,7 +32,7 @@ static int cmd_lua(int argc, char *argv[]) {
         }
     }
     if (!persistent_repl) {
-        L = lua_slm_newstate();
+        L = admin ? lua_slm_newstate_admin() : lua_slm_newstate();
     }
     if (L == NULL) {
         shell_printf("Failed to initialize Lua\n");
@@ -68,9 +68,12 @@ static int cmd_lua(int argc, char *argv[]) {
         }
     } else {
         shell_printf("Usage:\n");
-        shell_printf("  lua                        - Enter interactive REPL\n");
-        shell_printf("  lua -e \"code\"              - Execute code directly\n");
-        shell_printf("  lua <filename> [args...]   - Run script with positional args\n");
+        shell_printf("  %s                        - Enter interactive REPL\n",
+                     admin ? "lua-admin" : "lua");
+        shell_printf("  %s -e \"code\"              - Execute code directly\n",
+                     admin ? "lua-admin" : "lua");
+        shell_printf("  %s <filename> [args...]   - Run script with positional args\n",
+                     admin ? "lua-admin" : "lua");
     }
 
     if (close_on_return) {
@@ -80,9 +83,18 @@ static int cmd_lua(int argc, char *argv[]) {
     return 0;
 }
 
+static int cmd_lua(int argc, char *argv[]) {
+    return cmd_lua_common(argc, argv, false);
+}
+
+static int cmd_lua_admin(int argc, char *argv[]) {
+    return cmd_lua_common(argc, argv, true);
+}
+
 /* Command registration */
 static const shell_cmd_t lua_commands[] = {
-    {"lua", cmd_lua, "Lua scripting (REPL or script)", true},
+    {"lua", cmd_lua, "Lua scripting (concurrent-safe REPL or script)", false},
+    {"lua-admin", cmd_lua_admin, "Lua scripting with global admin bindings", true},
 };
 
 void lua_shell_init(void) {
