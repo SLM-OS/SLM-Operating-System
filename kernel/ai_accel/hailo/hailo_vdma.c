@@ -240,15 +240,30 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
     /* PMM allocates cacheable kernel memory, so descriptor writes land
      * in L1/L2. BCM2712's PCIe engine claims cache coherency via
      * ACE-Lite but empirically firmware reads stale zeros unless we
-     * push the writes to the PoC. One clean covers all programmed
-     * slots since they were written sequentially.
+     * push the writes to the PoC.
+     *
+     * Bug fix 2026-04-22: this flush previously used `list->descs` as
+     * the base, ignoring `starting_desc`. That worked for the standard
+     * single-shot inference path (starting_desc=0) but corrupted any
+     * caller that programs at a non-zero starting_desc — e.g. the
+     * Phase 8 OUT prefetch fill writes desc[1..7] then this flush
+     * cleans desc[0..0] for each of those calls, leaving desc[1..7]
+     * dirty in cache while DRAM holds stale zeros that fw would read
+     * on prefetch.
+     *
+     * Now correctly flushes the contiguous range
+     * [first_slot, first_slot + descs_needed). Wrapping (circular
+     * desc lists) is rare for boundary submits and would still be
+     * partially handled, but worth a follow-up if circular usage
+     * grows.
      *
      * TODO: if a future regression shows the PCIe window actually
      * snoops caches correctly, drop this flush — it costs ~microseconds
      * per submit. Today we can't distinguish "snoop works but fw logic
      * still wrong" from "snoop broken" without this baseline. */
     if (hailo_platform && hailo_platform->cache_clean) {
-        hailo_platform->cache_clean(list->descs,
+        uint32_t first_slot = starting_desc & list->desc_count_mask;
+        hailo_platform->cache_clean(&list->descs[first_slot],
             (size_t)descs_needed * sizeof(struct hailo_vdma_descriptor));
     }
 
