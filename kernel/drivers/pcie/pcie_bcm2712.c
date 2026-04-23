@@ -790,6 +790,64 @@ static int bcm2712_train_link(void)
     /* 17 + 17b. RC bridge bus numbers, command register, MEM_BASE/LIMIT. */
     bcm2712_program_rc_bridge();
 
+    /* 17c (Phase 8 #253). Disable ASPM L0s on the pcie1 RC side.
+     * Linux's hailo_pci clears LNKCTL.ASPM_L0S on BOTH the endpoint
+     * and the parent RC — endpoint already checks clean when SLM-OS
+     * probes (pi5_init logs "already off"), but the RC side is ours
+     * to own. ASPM L0s transitions have a history of silently
+     * dropping PCIe completion packets; leaving it enabled on the
+     * RC could plausibly explain the Phase 8 boundary-submit stall
+     * where fw's num_proc never advances.
+     *
+     * BCM2712 RC config is directly mapped at pcie1_regs (no
+     * EXT_CFG_INDEX indirection — see bcm2712_program_rc_bridge).
+     * Walk the cap list, find PCIe cap ID 0x10, clear bit 0 of
+     * LNKCTL at cap_base + 0x10. Cap list entries are dword-aligned
+     * per PCI spec so every config access here is a single 32-bit
+     * MMIO read/write with shifts for sub-dword extraction. */
+    {
+        volatile uint32_t *rc_cfg = (volatile uint32_t *)pcie1_regs;
+
+        uint32_t status_dw = rc_cfg[0x04 / 4];     /* cmd(low) + status(high) */
+        uint16_t cfg_status = (uint16_t)(status_dw >> 16);
+        if (cfg_status & 0x0010u) {                /* PCI_STATUS_CAP_LIST */
+            uint32_t capptr_dw = rc_cfg[0x34 / 4]; /* CAP_POINTER at 0x34 */
+            uint8_t  ptr = (uint8_t)(capptr_dw & 0xFCu);
+            for (int iter = 0; iter < 48 && ptr != 0; iter++) {
+                uint32_t cap_dw = rc_cfg[ptr / 4u];
+                uint8_t  cap_id = (uint8_t)(cap_dw & 0xFFu);
+                uint8_t  next   = (uint8_t)((cap_dw >> 8) & 0xFFu);
+                if (cap_id == 0x10) {              /* PCI Express cap */
+                    uint16_t lnkctl_off = (uint16_t)(ptr + 0x10u);
+                    uint32_t lnkctl_dw  = rc_cfg[lnkctl_off / 4u];
+                    uint16_t lnkctl     = (uint16_t)(lnkctl_dw & 0xFFFFu);
+                    if (lnkctl & 0x0001u) {
+                        INFO("pcie1: RC LNKCTL 0x%04x had ASPM_L0S set; "
+                             "clearing", lnkctl);
+                        rc_cfg[lnkctl_off / 4u] =
+                            (lnkctl_dw & 0xFFFF0000u) |
+                            (uint32_t)(lnkctl & ~0x0001u);
+                        uint32_t verify_dw = rc_cfg[lnkctl_off / 4u];
+                        INFO("pcie1: RC LNKCTL after clear: 0x%04x",
+                             (unsigned)(verify_dw & 0xFFFFu));
+                    } else {
+                        INFO("pcie1: RC LNKCTL 0x%04x ASPM_L0S already off",
+                             lnkctl);
+                    }
+                    break;
+                }
+                ptr = (uint8_t)(next & 0xFCu);
+            }
+            if (ptr == 0) {
+                INFO("pcie1: RC cap list walked without finding "
+                     "PCIe cap (0x10)");
+            }
+        } else {
+            INFO("pcie1: RC STATUS 0x%04x has no CAP_LIST bit — "
+                 "cannot gate ASPM", cfg_status);
+        }
+    }
+
     /*
      * 18. Post-link-up settling delay (see LINK_UP_SETTLE_US — 1 ms,
      *     kept short so boot time doesn't suffer while the
