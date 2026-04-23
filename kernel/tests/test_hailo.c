@@ -175,7 +175,20 @@ static uint32_t mock_dma_free_calls;
 static uint32_t mock_cache_clean_calls;
 static uint32_t mock_cache_invalidate_calls;
 static size_t   mock_last_cache_clean_size;
+static const void *mock_last_cache_clean_addr;
 static size_t   mock_last_cache_invalidate_size;
+
+/* Per-channel VDMA IRQ register write tracking (Phase 8 #253). The
+ * MSI handler is required to read+W1C the per-channel registers
+ * BCS_SOURCE_INTERRUPT_PER_CHANNEL (0x400) and
+ * BCS_DESTINATION_INTERRUPT_PER_CHANNEL (0x500) when the
+ * corresponding aggregate bits are set in ISTATUS_HOST. Tests verify
+ * the value written matches the seeded bits and that the writes are
+ * skipped when the aggregate bits aren't set. */
+static uint32_t mock_per_channel_src_write_count;
+static uint32_t mock_per_channel_src_last_value;
+static uint32_t mock_per_channel_dst_write_count;
+static uint32_t mock_per_channel_dst_last_value;
 
 /* Smart CONFIG_STREAM simulation. When enabled the mock synthesizes
  * a successful response carrying the supplied dataflow_manager_id,
@@ -220,9 +233,14 @@ static void mock_reset(void)
     mock_dma_alloc_calls = 0;
     mock_dma_free_calls = 0;
     mock_cache_clean_calls = 0;
+    mock_last_cache_clean_addr = NULL;
     mock_cache_invalidate_calls = 0;
     mock_last_cache_clean_size = 0;
     mock_last_cache_invalidate_size = 0;
+    mock_per_channel_src_write_count = 0;
+    mock_per_channel_src_last_value = 0;
+    mock_per_channel_dst_write_count = 0;
+    mock_per_channel_dst_last_value = 0;
     mock_fw_sim_config_stream_enabled = false;
     mock_fw_sim_config_stream_manager_id = 0;
     hailo_control_reset_state_for_tests();
@@ -285,6 +303,20 @@ static void mock_write32(uint8_t bar, uint32_t offset, uint32_t value)
     if (bar == HAILO_BAR_CONFIG && offset == HAILO_BSC_IMASK_HOST) {
         mock_imask_writes++;
         mock_imask_last_value = value;
+    }
+    /* Per-channel VDMA IRQ ack tracking (Phase 8 #253). MSI handler
+     * is required to read+W1C these when ISTATUS's VDMA aggregate
+     * bits are set. Tests verify the W1C value matches the seeded
+     * channel-bit pattern. */
+    if (bar == HAILO_BAR_CONFIG
+     && offset == HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL) {
+        mock_per_channel_src_write_count++;
+        mock_per_channel_src_last_value = value;
+    }
+    if (bar == HAILO_BAR_CONFIG
+     && offset == HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL) {
+        mock_per_channel_dst_write_count++;
+        mock_per_channel_dst_last_value = value;
     }
     /* Track ATR[0].trsl_addr_lo writes for the atr0 translation. */
     if (bar == HAILO_BAR_CONFIG
@@ -667,9 +699,9 @@ static void  mock_dma_free(void *ptr, size_t size, size_t align)
 }
 static void  mock_cache_clean(const void *a, size_t n)
 {
-    (void)a;
     mock_cache_clean_calls++;
     mock_last_cache_clean_size = n;
+    mock_last_cache_clean_addr = a;
 }
 static void  mock_cache_invalidate(void *a, size_t n)
 {
@@ -2453,6 +2485,38 @@ static void test_change_context_switch_status_enabled_carries_batch_params(void)
     TEST_ASSERT_EQUAL_UINT16(3, batch_cnt);
 }
 
+/* Phase 8 #253 (commit 7dc2a8c): production-mode ENABLED uses
+ * batch_size=0 (= IGNORE_DYNAMIC_BATCH_SIZE — fw uses pre-configured
+ * size) and batch_count=0 (= INIFINITE_BATCH_COUNT — fw runs until
+ * RESET). SLM-OS originally sent (1, 1) per a confused reading of
+ * the orchestration doc; that put fw into a "process exactly 1
+ * batch of 1 then stop" mode where the boundary credit state
+ * machine never armed for the IN submit. Pi OS wire capture (
+ * docs/reference/hailort-v4.23.0-wire-capture-mnist-pi5.txt,
+ * CHANGE_STATUS #2 body) is the ground truth: enables-for-real
+ * always (0, 0). */
+static void test_change_context_switch_status_enabled_zero_batch_means_infinite(void)
+{
+    control_setup_running();
+    seed_change_status_success_response();
+
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_ENABLED,
+            /*application_index=*/0,
+            /*batch_size=*/0, /*batch_count=*/0));
+
+    const uint8_t *req = mock_last_control_request;
+    TEST_ASSERT_EQUAL_UINT8(HAILO_CS_STATE_ENABLED, req[24]);
+    TEST_ASSERT_EQUAL_UINT8(0, req[29]);
+    uint16_t dyn_batch;
+    memcpy(&dyn_batch, req + 34, 2);
+    TEST_ASSERT_EQUAL_UINT16(0u, dyn_batch);
+    uint16_t batch_cnt;
+    memcpy(&batch_cnt, req + 40, 2);
+    TEST_ASSERT_EQUAL_UINT16(0u, batch_cnt);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Phase 6.4: MSI-driven response notification                                 */
 /* -------------------------------------------------------------------------- */
@@ -2529,6 +2593,123 @@ static void test_msi_handler_sets_pending_and_clears_istatus(void)
     uint32_t after = hailo_platform->read32(HAILO_BAR_CONFIG,
                                             HAILO_BCS_ISTATUS_HOST);
     TEST_ASSERT_EQUAL_UINT32(0u, after);
+}
+
+/* Phase 8 #253 (commit 909ae8f): when ISTATUS_HOST has the VDMA_SRC
+ * aggregate bit set, the MSI handler must also read+W1C the per-
+ * channel SOURCE_INTERRUPT_PER_CHANNEL register (offset 0x400). The
+ * value written back is the bitmap of channels that fired; fw uses
+ * this ack to advance its completion state machine. Linux's
+ * hailo_pcie_read_interrupt is the reference. */
+static void test_msi_handler_acks_per_channel_src_irq(void)
+{
+    control_setup_running();
+
+    /* Make the MSI handler register first via a no-op control RPC. */
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+
+    /* Reset counters so the IRQ-arm sequence's writes don't pollute. */
+    mock_per_channel_src_write_count = 0;
+    mock_per_channel_src_last_value = 0;
+    mock_per_channel_dst_write_count = 0;
+    mock_per_channel_dst_last_value = 0;
+
+    /* Seed: ISTATUS has VDMA_SRC bit (0x01 — ch 0 aggregate),
+     * SOURCE_INTERRUPT_PER_CHANNEL has bit 2 (ch=2 fired its IRQ). */
+    mock_istatus_one_shot_preload = HAILO_BCS_ISTATUS_HOST_VDMA_SRC_MASK;
+    uint32_t src_bits = (1u << 2);
+    memcpy(&mock_bar0[HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL],
+           &src_bits, sizeof(src_bits));
+
+    mock_msi_invoke();
+
+    /* Handler must have W1C'd the per-channel SRC register with the
+     * exact bits it read. */
+    TEST_ASSERT_TRUE(mock_per_channel_src_write_count >= 1u);
+    TEST_ASSERT_EQUAL_UINT32((1u << 2), mock_per_channel_src_last_value);
+
+    /* DEST side was NOT involved — handler must NOT have touched it. */
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_per_channel_dst_write_count);
+}
+
+static void test_msi_handler_acks_per_channel_dst_irq(void)
+{
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+
+    mock_per_channel_src_write_count = 0;
+    mock_per_channel_dst_write_count = 0;
+    mock_per_channel_dst_last_value = 0;
+
+    /* Seed: ISTATUS has VDMA_DEST bit (0x100 — ch 16 D2H aggregate),
+     * DEST_INTERRUPT_PER_CHANNEL has bit 16 (ch=16 fired). */
+    mock_istatus_one_shot_preload = HAILO_BCS_ISTATUS_HOST_VDMA_DEST_MASK;
+    uint32_t dst_bits = (1u << 16);
+    memcpy(&mock_bar0[HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL],
+           &dst_bits, sizeof(dst_bits));
+
+    mock_msi_invoke();
+
+    TEST_ASSERT_TRUE(mock_per_channel_dst_write_count >= 1u);
+    TEST_ASSERT_EQUAL_UINT32((1u << 16), mock_per_channel_dst_last_value);
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_per_channel_src_write_count);
+}
+
+/* Negative coverage: when ISTATUS has only FW_CONTROL bits (no VDMA
+ * aggregate bits), the handler must NOT touch the per-channel
+ * registers. Pre-fix the per-channel reads/writes happened
+ * unconditionally in some early drafts. */
+static void test_msi_handler_skips_per_channel_when_no_vdma_bits(void)
+{
+    control_setup_running();
+
+    struct {
+        struct hailo_control_response_header   header;
+        uint32_t                               parameter_count;
+        struct hailo_control_identify_response body;
+    } __attribute__((packed)) fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
+    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
+    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
+    mock_fw_sim_control_resp_len = sizeof(fake);
+    mock_fw_sim_control_enabled  = true;
+    struct hailo_control_identify_response resp;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+
+    mock_per_channel_src_write_count = 0;
+    mock_per_channel_dst_write_count = 0;
+
+    mock_istatus_one_shot_preload = HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT;
+    mock_msi_invoke();
+
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_per_channel_src_write_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_per_channel_dst_write_count);
 }
 
 /* CORE_IDENTIFY (opcode 0x2A, CPU_ID_CORE_CPU, empty-body request).
@@ -5098,6 +5279,49 @@ static void test_vdma_program_buffer_rejects_zero_size(void)
     hailo_vdma_desc_list_free(&list);
 }
 
+/* Phase 8 #253 (commit 7e62f82): cache_clean inside program_buffer
+ * previously used `list->descs` as the base, ignoring starting_desc.
+ * That was correct for the standard inference path (always writes at
+ * desc 0) but corrupted the OUT prefetch fill which programs
+ * desc[1..7]. The wrong cachelines got flushed; desc[1..7] sat dirty
+ * in cache while DRAM held stale zeros that fw could read on
+ * prefetch. Fix flushes from &descs[first_slot] for descs_needed
+ * slots. This test pins the corrected base address. */
+static void test_vdma_program_buffer_cache_clean_uses_correct_offset(void)
+{
+    vdma_setup();
+    struct hailo_vdma_desc_list list;
+    TEST_ASSERT_EQUAL_INT(HAILO_OK,
+        hailo_vdma_desc_list_alloc(8, 64, /*circular=*/false, &list));
+
+    mock_cache_clean_calls = 0;
+    mock_last_cache_clean_addr = NULL;
+    mock_last_cache_clean_size = 0;
+
+    /* Single-desc transfer at slot 5. Should flush exactly one
+     * descriptor's worth of bytes starting at &descs[5]. */
+    int rc = hailo_vdma_program_buffer(&list, /*start=*/5,
+        /*iova=*/0x4000, /*size=*/64, /*data_id=*/0);
+    TEST_ASSERT_EQUAL_INT(1, rc);
+    TEST_ASSERT_EQUAL_UINT32(1u, mock_cache_clean_calls);
+    TEST_ASSERT_EQUAL_PTR(&list.descs[5], mock_last_cache_clean_addr);
+    TEST_ASSERT_EQUAL_UINT64(sizeof(struct hailo_vdma_descriptor),
+                             mock_last_cache_clean_size);
+
+    /* And starting_desc=0 still cleans from descs[0]. */
+    mock_cache_clean_calls = 0;
+    mock_last_cache_clean_addr = NULL;
+    rc = hailo_vdma_program_buffer(&list, /*start=*/0,
+        /*iova=*/0x5000, /*size=*/128, /*data_id=*/0);
+    TEST_ASSERT_EQUAL_INT(2, rc);
+    TEST_ASSERT_EQUAL_UINT32(1u, mock_cache_clean_calls);
+    TEST_ASSERT_EQUAL_PTR(&list.descs[0], mock_last_cache_clean_addr);
+    TEST_ASSERT_EQUAL_UINT64(2u * sizeof(struct hailo_vdma_descriptor),
+                             mock_last_cache_clean_size);
+
+    hailo_vdma_desc_list_free(&list);
+}
+
 /* -------------------------------------------------------------------------- */
 /* VDMA channel start / stop / submit                                          */
 /* -------------------------------------------------------------------------- */
@@ -5217,6 +5441,75 @@ static void test_vdma_channel_stop_writes_abort_pause(void)
     uint32_t dword;
     memcpy(&dword, &mock_bar2[0x40], sizeof(dword));
     TEST_ASSERT_EQUAL_UINT32(0x02u, dword & 0xFFu);
+}
+
+/* Phase 8 #253 (commit cd51ccd): D2H channels (16..31) keep their
+ * host-side BASE_DWORD at offset +0x10 within the 32-byte channel
+ * register block, while H2D channels (0..15) keep theirs at +0x00.
+ * Per hailo-vdma-common.c:576 (get_channel_regs): the {host, device}
+ * sub-block ordering flips for D2H channels because src_channels
+ * bitmask is 0x0000FFFF on PCIe.
+ *
+ * Pre-fix, every num_avail write went to +0x00 — for the boundary
+ * OUTPUT (ch=16) that meant we were writing to the device-side
+ * mirror, not the host-side register fw watches, and num_proc never
+ * advanced. These tests pin the corrected mapping. */
+static void test_vdma_write_num_avail_h2d_targets_offset_zero(void)
+{
+    vdma_setup();
+
+    /* H2D channels: 0..15. Pick ch=2 (boundary input on the MNIST
+     * HEF). num_avail must land in BASE_DWORD's high 16 bits at
+     * channel_base(2) + 0x00 + BASE_DWORD_OFFSET (=0). */
+    int rc = hailo_vdma_write_num_avail(2, 0xABCDu);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, rc);
+
+    const uint32_t ch_base = 2u * HAILO_VDMA_CHANNEL_STRIDE;
+    uint32_t base_dword;
+    memcpy(&base_dword, &mock_bar2[ch_base + HAILO_VDMA_CHANNEL_BASE_DWORD],
+           sizeof(base_dword));
+    TEST_ASSERT_EQUAL_UINT16(0xABCDu,
+        (uint16_t)(base_dword >> HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT));
+
+    /* And the +0x10 (device-side for H2D) sub-block must be
+     * UNTOUCHED — pre-fix wrote to the wrong half AND the right
+     * half. */
+    uint32_t mirror_dword;
+    memcpy(&mirror_dword, &mock_bar2[ch_base + 0x10 + HAILO_VDMA_CHANNEL_BASE_DWORD],
+           sizeof(mirror_dword));
+    TEST_ASSERT_EQUAL_UINT32(0u, mirror_dword);
+}
+
+static void test_vdma_write_num_avail_d2h_targets_offset_ten(void)
+{
+    vdma_setup();
+
+    /* D2H channels: 16..31. Pick ch=16 (boundary output on the MNIST
+     * HEF). num_avail must land in BASE_DWORD at channel_base(16) +
+     * 0x10. The +0x00 (device-side mirror for D2H) must NOT be
+     * touched. */
+    int rc = hailo_vdma_write_num_avail(16, 0x4321u);
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, rc);
+
+    const uint32_t ch_base = 16u * HAILO_VDMA_CHANNEL_STRIDE;
+
+    uint32_t host_dword;
+    memcpy(&host_dword, &mock_bar2[ch_base + 0x10 + HAILO_VDMA_CHANNEL_BASE_DWORD],
+           sizeof(host_dword));
+    TEST_ASSERT_EQUAL_UINT16(0x4321u,
+        (uint16_t)(host_dword >> HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT));
+
+    uint32_t device_dword;
+    memcpy(&device_dword, &mock_bar2[ch_base + HAILO_VDMA_CHANNEL_BASE_DWORD],
+           sizeof(device_dword));
+    TEST_ASSERT_EQUAL_UINT32(0u, device_dword);
+}
+
+static void test_vdma_write_num_avail_rejects_invalid_channel(void)
+{
+    vdma_setup();
+    TEST_ASSERT_EQUAL_INT(HAILO_ERR_INVAL,
+        hailo_vdma_write_num_avail(HAILO_VDMA_MAX_CHANNELS, 1));
 }
 
 static void test_vdma_channel_stop_skips_if_already_abort_pause(void)
@@ -7475,9 +7768,13 @@ int test_suite_hailo(void)
     RUN_TEST(test_cs_builder_repeated_single_count);
     RUN_TEST(test_change_context_switch_status_reset_wire_layout);
     RUN_TEST(test_change_context_switch_status_enabled_carries_batch_params);
+    RUN_TEST(test_change_context_switch_status_enabled_zero_batch_means_infinite);
     RUN_TEST(test_control_core_identify_wire_layout);
     RUN_TEST(test_control_registers_msi_on_first_send);
     RUN_TEST(test_msi_handler_sets_pending_and_clears_istatus);
+    RUN_TEST(test_msi_handler_acks_per_channel_src_irq);
+    RUN_TEST(test_msi_handler_acks_per_channel_dst_irq);
+    RUN_TEST(test_msi_handler_skips_per_channel_when_no_vdma_bits);
     RUN_TEST(test_cs_translate_application_header_fills_defaults);
     RUN_TEST(test_cs_translate_application_header_boundary_bitmap);
     RUN_TEST(test_cs_translate_application_header_dual_cfg_channels);
@@ -7586,12 +7883,16 @@ int test_suite_hailo(void)
     RUN_TEST(test_vdma_program_buffer_rejects_overrun);
     RUN_TEST(test_vdma_program_buffer_rejects_null_list);
     RUN_TEST(test_vdma_program_buffer_rejects_zero_size);
+    RUN_TEST(test_vdma_program_buffer_cache_clean_uses_correct_offset);
     RUN_TEST(test_vdma_channel_start_programs_regs);
     RUN_TEST(test_vdma_channel_start_encodes_address_l);
     RUN_TEST(test_vdma_channel_start_rejects_misaligned_iova);
     RUN_TEST(test_vdma_channel_start_rejects_bad_channel);
     RUN_TEST(test_vdma_channel_start_rejects_null);
     RUN_TEST(test_vdma_channel_stop_writes_abort_pause);
+    RUN_TEST(test_vdma_write_num_avail_h2d_targets_offset_zero);
+    RUN_TEST(test_vdma_write_num_avail_d2h_targets_offset_ten);
+    RUN_TEST(test_vdma_write_num_avail_rejects_invalid_channel);
     RUN_TEST(test_vdma_channel_stop_skips_if_already_abort_pause);
     RUN_TEST(test_vdma_submit_and_wait_completes_fast);
     RUN_TEST(test_vdma_submit_and_wait_times_out);

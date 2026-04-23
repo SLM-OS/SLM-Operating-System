@@ -328,6 +328,32 @@ In order of how much time each one cost:
    consumed by firstboot services — they *should* disappear after
    the first successful Pi OS boot. Don't panic if you remount the
    card post-boot and find them gone.
+6. **`apt install hailo-all` will silently auto-update the Pi 5
+   EEPROM** to a recent (post-Jan 2025) bootloader, which then
+   breaks SLM-OS's RP1 UART access (kernel boots silently — no
+   serial output even though it's running). Per
+   `memory/pi5_eeprom_findings.md`. The fix dance, in order:
+   - Re-flash Sep 2024 image:
+     ```bash
+     wget -O /tmp/pieeprom.bin \
+       https://raw.githubusercontent.com/raspberrypi/rpi-eeprom/master/firmware-2712/old/default/pieeprom-2024-09-23.bin
+     sudo rpi-eeprom-update -d -f /tmp/pieeprom.bin
+     sudo reboot
+     ```
+   - Verify with `vcgencmd bootloader_version` (should show
+     `2024/09/23 14:02:56`).
+   - Lock down so it doesn't re-upgrade on the next boot:
+     ```bash
+     sudo systemctl mask rpi-eeprom-update.service
+     sudo apt-mark hold rpi-eeprom rpi-eeprom-images
+     sudo mv /usr/lib/firmware/raspberrypi/bootloader-2712/default \
+            /root/eeprom-backup-default
+     sudo mkdir /usr/lib/firmware/raspberrypi/bootloader-2712/default
+     ```
+   The lockdown is already applied on `pi-5-1`'s current Pi OS
+   install. If you re-build the card from scratch, do these steps
+   immediately after `apt install hailo-all` succeeds and BEFORE
+   the next reboot.
 
 ---
 

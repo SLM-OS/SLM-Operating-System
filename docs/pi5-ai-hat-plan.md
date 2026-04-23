@@ -1160,6 +1160,107 @@ offline via `test_cs_translate_*` — future work on the
 submit path can iterate without rebuilding the wire each
 round.
 
+#### Phase 8 progress — 2026-04-22b (instrumented Linux comparison + 6 structural fixes)
+
+Built a Pi OS dual-boot card so HailoRT v4.23 can run on the
+SAME pi-5-1 hardware between SLM-OS iterations
+(`docs/pi5-dual-boot-setup.md`). Confirmed MNIST runs at
+**21,610 FPS** on the AI HAT+ under HailoRT — proves the
+hardware + firmware are fine and any failure is on our side.
+
+Captured two reference traces during a working MNIST run:
+
+- `docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt` — kprobe
+  trace of `hailo_vdma_launch_transfer` showing the per-
+  transfer parameters (channel, starting_desc, IRQ domains).
+- `docs/reference/hailort-v4.23.0-mmio-trace-mnist-pi5.txt` —
+  ftrace of `hailo_resource_write32` / `hailo_pcie_read_interrupt`
+  capturing the full BAR0 MMIO sequence + IRQ timing during a
+  single inference (fw fires the ch=2 SRC IRQ within 17 μs of
+  launch_transfer).
+
+**Six structural fixes landed**, each derived from a specific
+divergence between SLM-OS and the Linux reference and verified
+either via wire trace or source diff:
+
+1. **D2H host_regs offset.** `hailo_vdma_write_num_avail` and
+   `hailo_vdma_submit_and_wait` for D2H channels (16-31) now
+   target host_regs at +0x10 within the 32-byte channel block.
+   Pre-fix went to +0x00 which is the device-side mirror; fw
+   never saw the OUT num_avail bumps. Per
+   `hailo-vdma-common.c:582 get_channel_regs`.
+2. **CHANGE_CONTEXT_SWITCH_STATUS(ENABLED) batch params.**
+   Production-mode ENABLED uses `batch_size=0`
+   (= IGNORE_DYNAMIC_BATCH_SIZE) and `batch_count=0`
+   (= INIFINITE_BATCH_COUNT). SLM-OS originally sent (1, 1)
+   per a confused reading of the orchestration doc.
+3. **NGH `config_channels_count = 2` for dual-cfg HEFs.**
+   When the HEF splits CCWs across two `cfg_channel_index`
+   values (MNIST does), SET_NETWORK_GROUP_HEADER must declare
+   both packed VDMA channel ids. Pre-fix declared only one;
+   fw's BURST_CREDITS_TASK then walked an incomplete channel
+   set.
+4. **NGH `boundary_channels_bitmap = 0`.** Fw v4.23 discovers
+   boundary channels via the ACTIVATE_BOUNDARY_{INPUT,OUTPUT}
+   actions in DYNAMIC, not from this bitmap. SLM-OS's earlier
+   draft populated bits there; matching the Pi OS wire capture
+   means leaving it zero regardless of which pads are present.
+5. **MSI handler acks per-channel VDMA IRQ registers.** When
+   ISTATUS_HOST has VDMA_SRC_MASK or VDMA_DEST_MASK set, the
+   handler now reads + W1Cs the per-channel registers
+   `BCS_SOURCE_INTERRUPT_PER_CHANNEL` (0x400) and
+   `BCS_DESTINATION_INTERRUPT_PER_CHANNEL` (0x500) so fw's
+   completion state machine can advance. Mirrors
+   `hailo_pcie_read_interrupt`.
+6. **`hailo_vdma_program_buffer` cache_clean offset.** The
+   `cache_clean` call after writing descriptors used
+   `list->descs` (the base) ignoring `starting_desc`. For the
+   prefetch fill path that programs descs at non-zero offsets,
+   the wrong cachelines got flushed; descs sat dirty in cache
+   while DRAM held stale zeros. Now flushes
+   `&list->descs[first_slot]..first_slot+descs_needed`.
+
+Also defensively landed: ASPM L0s clear on both the Hailo
+endpoint and the BCM2712 pcie1 RC at boot — both already read
+back as 0x0000 on the current setup so the writes are no-ops,
+but matches Linux's defensive pattern in case a future
+firmware/bootloader update starts leaving L0s on.
+
+**Submit still stalls.** All five hypotheses tested this
+session ruled out without unblocking the ch=2 stall:
+channel-number mismatch (Linux uses 2/16 like us), per-channel
+IRQ ack (no effect), endpoint ASPM (already off), RC ASPM
+(already off), OUT desc prefetch (no effect with 7 valid
+fill descs).
+
+Side-by-side source comparison
+(`docs/reference/hailort-vs-slmos-source-comparison.md`)
+walks the launch_transfer flow line-by-line against
+`hailo_pci`'s `vdma_common.c`. Every checkable layer matches.
+The bug is on our side per Pi OS proof, but lives at a layer
+this comparison doesn't cover. Highest-leverage next probes
+identified there:
+
+- BCM2712 PCIe RC inbound translation policy (MPS, MRRS, AXI
+  QoS, ATU windows) affecting fw's ability to DMA-fetch our
+  desc list.
+- A HailoRT userspace control RPC we're not replicating that
+  isn't visible in the captured wire log (an IOCTL or
+  CONFIG_STREAM/OPEN_STREAM-equivalent).
+
+**EEPROM trap discovered + locked down.** Installing
+`hailo-all` on Pi OS pulls in `rpi-eeprom` which auto-flashes
+new bootloader firmware. Per
+`memory/pi5_eeprom_findings.md`, post-Jan 2025 EEPROM breaks
+SLM-OS's RP1 UART access. Recovery: re-flash Sep 2024 image
+from
+`https://raw.githubusercontent.com/raspberrypi/rpi-eeprom/master/firmware-2712/old/default/pieeprom-2024-09-23.bin`,
+then `apt-mark hold rpi-eeprom rpi-eeprom-images`,
+`systemctl mask rpi-eeprom-update.service`, and empty
+`/usr/lib/firmware/raspberrypi/bootloader-2712/default/` so
+nothing is available for auto-upgrade. All three lockdowns
+applied to the current Pi OS install on the dual-boot card.
+
 ---
 
 ## 4. Risks & Open Questions
@@ -1205,4 +1306,4 @@ Per the project's post-change checklist (run on every phase):
 
 ---
 
-*Last updated: 2026-04-20 (Phase 6.9 RESOLVED — full handshake works)*
+*Last updated: 2026-04-22 (Phase 8 wire-match + 6 structural fixes complete; ch=2 submit still blocked, see "Phase 8 progress — 2026-04-22b" section above)*
