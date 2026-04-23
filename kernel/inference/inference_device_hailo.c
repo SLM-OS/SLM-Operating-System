@@ -226,6 +226,29 @@ static bool hailo_fw_dump_d2h_notification_once(void)
     return true;
 }
 
+/* Pre-submit drain cap. Sized for "any reasonable backlog from boot
+ * + RPC chatter": observed worst case post-handshake on Pi 5 is ~30
+ * events (boot ECC scrub, identify echoes, context-switch progress
+ * reports), so 128 leaves comfortable headroom while still bounding
+ * the wall-clock cost (each drained event sleeps ~5 ms, so a full
+ * 128 takes ~640 ms — only paid in the pathological "fw is spamming
+ * us" case). The post-failure drain uses a smaller cap because by
+ * then we just want the most recent error event, not full history. */
+#define HAILO_D2H_PRE_SUBMIT_DRAIN_CAP   128u
+#define HAILO_D2H_POST_FAIL_DRAIN_CAP    8u
+
+/* OUT boundary-channel descriptor pre-fill depth. Linux's HailoRT
+ * issues 8 sequential single-desc OUTPUT launch_transfer calls
+ * before the first INPUT submit (Pi OS wire capture, 2026-04-22:
+ * docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt). If fw pre-
+ * fetches OUT descriptors ahead of num_avail for pipelining and
+ * trips on zero entries at [1..N], pre-filling N descriptors with
+ * the same buffer keeps the prefetch window valid even though we
+ * only consume one per inference. 8 matches HailoRT's observed
+ * count exactly. Track in the Phase 8 follow-up to remove or
+ * formalize once the actual mechanism is understood. */
+#define HAILO_BOUNDARY_OUT_PREFETCH_DEPTH 8u
+
 /* Drain pending notifications: for each one, dump it, ACK the buffer,
  * then delay a little so fw can write the next queued event before we
  * re-check. Bounded by `max_events` so we don't loop forever on a fw
@@ -1145,10 +1168,22 @@ static int context_switch_load(struct hailo_model_slot *slot,
     }
 
     cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
+    /* Pi OS wire capture (2026-04-22, HailoRT v4.23.0 MNIST on pi-5-1
+     * instrumented driver — see docs/reference/hailort-v4.23.0-wire-
+     * capture-mnist-pi5.txt, CHANGE_STATUS #2 body):
+     *   state=ENABLED, app_index=0, batch_size=0, batch_count=0
+     * batch_size=0 = CONTROL_PROTOCOL__IGNORE_DYNAMIC_BATCH_SIZE (use
+     * pre-configured). batch_count=0 = CONTROL_PROTOCOL__INIFINITE_
+     * BATCH_COUNT — fw will keep processing submits until CHANGE_STATUS
+     * (RESET). Previously SLM-OS sent (1,1), which told fw "process
+     * exactly 1 batch of 1 and stop"; fw's action-list processor then
+     * gated the boundary dataflow on a state machine transition that
+     * never fired from our host writes, leaving num_proc pinned at 0
+     * on the boundary channels. */
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_ENABLED,
             /*application_index=*/0,
-            /*batch_size=*/1, /*batch_count=*/1);
+            /*batch_size=*/0, /*batch_count=*/0);
     if (rc != HAILO_OK) {
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(ENABLED) failed (rc=%d)", rc);
         goto fail;
@@ -1574,7 +1609,7 @@ static int hailo_backend_run(struct inference_device *dev,
      * ECC notification can sit in the buffer indefinitely, blocking
      * fw from delivering the event we actually want to see. */
     uart_printf("[d2h] pre-submit drain:\r\n");
-    hailo_fw_drain_d2h_notifications(4);
+    hailo_fw_drain_d2h_notifications(HAILO_D2H_PRE_SUBMIT_DRAIN_CAP);
 
     /* Copy caller's input into the pre-allocated DMA buffer +
      * cache-clean so the device picks up the fresh bytes.
@@ -1625,6 +1660,20 @@ static int hailo_backend_run(struct inference_device *dev,
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
+    /* Phase 8 experiment (2026-04-22): pre-fill descs 1..N-1 with
+     * the same output buffer so fw's prefetch window has valid
+     * entries past OUT[0]. See HAILO_BOUNDARY_OUT_PREFETCH_DEPTH
+     * for the reference-count rationale. A repeat OUT[0] overwrite
+     * is semantically harmless — for a single-inference run num_avail
+     * only ever reaches 1 so fw never advances past OUT[0]. */
+    for (uint32_t i = 1; i < HAILO_BOUNDARY_OUT_PREFETCH_DEPTH; i++) {
+        (void)hailo_vdma_program_buffer(
+            &slot->boundary_out_list, i,
+            slot->boundary_out_tensor.iova,
+            slot->boundary_out_tensor.tensor_bytes,
+            HAILO_VDMA_HOST_DMA_DATA_ID);
+    }
+
 #ifdef HAILO_WIRE_DEBUG
     /* Phase 8 #253: dump programmed descriptors + channel regs so we
      * can compare byte-for-byte against HailoRT's reference output.
@@ -1646,6 +1695,22 @@ static int hailo_backend_run(struct inference_device *dev,
     hailo_vdma_dump_channel_regs(out_channel, "OUT pre-submit");
 #endif /* HAILO_WIRE_DEBUG */
 
+    /* PHASE 8 KEY FINDING (2026-04-22, instrumented hailo_pci trace on
+     * Pi OS — see docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt):
+     * HailoRT submits the OUTPUT channel's num_avail BEFORE the
+     * INPUT. Every MNIST inference the Linux driver issued 8 OUTPUT
+     * transfers (ch=16 num_avail 1→8) and only THEN a single INPUT
+     * (ch=2 num_avail=2). Without output credits pre-armed fw's
+     * boundary-credit state machine has nowhere to land the result
+     * and refuses to begin consuming the INPUT descriptors — which
+     * is exactly the symptom we hit all the way through the wire-
+     * identical load path.
+     *
+     * Fix: write num_avail to the OUTPUT channel first (just the
+     * register RMW, no wait), then submit INPUT and wait for its
+     * completion, then wait for OUTPUT completion. */
+    (void)hailo_vdma_write_num_avail(out_channel, out_num_avail);
+
     int rc;
     uint64_t t_in_submit  = timer_get_count();
     rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
@@ -1661,7 +1726,7 @@ static int hailo_backend_run(struct inference_device *dev,
          * debug log is compact binary so less immediately useful, kept
          * for offset-advancement signals (chip_offset > last seen == fw
          * still writing). */
-        hailo_fw_drain_d2h_notifications(8);
+        hailo_fw_drain_d2h_notifications(HAILO_D2H_POST_FAIL_DRAIN_CAP);
         hailo_fw_dump_log(HAILO_FW_LOG_CORE_CPU_OFFSET, "CORE");
         hailo_fw_dump_log(HAILO_FW_LOG_APP_CPU_OFFSET,  "APP");
         goto run_out;
@@ -1670,12 +1735,17 @@ static int hailo_backend_run(struct inference_device *dev,
                 (unsigned long)((t_in_done - t_in_submit) * 1000000ULL
                                 / timer_get_frequency()));
 
+    /* OUTPUT num_avail was written pre-INPUT (see earlier comment on
+     * HailoRT's host-side submit ordering). At this point fw should
+     * have produced the output data and the channel's num_proc
+     * should equal num_avail. Poll for that without re-writing
+     * num_avail. */
     uint64_t t_out_submit = timer_get_count();
-    rc = hailo_vdma_submit_and_wait(out_channel, out_num_avail,
-                                    slot->cfg.timeout_us);
+    rc = hailo_vdma_channel_wait_proc(out_channel, out_num_avail,
+                                      slot->cfg.timeout_us);
     uint64_t t_out_done = timer_get_count();
     if (rc != HAILO_OK) {
-        uart_printf("[hailo] run: OUT submit_and_wait rc=%d (avail=%u)\r\n",
+        uart_printf("[hailo] run: OUT wait_proc rc=%d (target=%u)\r\n",
                     rc, (unsigned)out_num_avail);
         goto run_out;
     }

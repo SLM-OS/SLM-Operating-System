@@ -157,24 +157,72 @@ static volatile uint32_t control_msi_pending = 0;
 static void control_msi_handler(void *ctx)
 {
     (void)ctx;
-    /* Read + clear whatever ISTATUS bits fired. The SW_IRQ field's
-     * FW_CONTROL_IRQ bit is the one we care about; other sources
-     * (VDMA, notifications) still get W1C'd so they don't accumulate
-     * and confuse later polls.
+    /* Snapshot ISTATUS so the per-channel and aggregate acks below
+     * see a consistent view. Order matches reference
+     * hailo_pcie_read_interrupt (hailo-pcie-common.c:443-448): read
+     * the per-channel SRC/DST registers FIRST when their aggregate
+     * bits are set, then W1C the aggregate ISTATUS. Reversing the
+     * order would race fw — if the aggregate is cleared first and
+     * fw flips a per-channel bit before we read it, the next IRQ
+     * sees the per-channel bit but no aggregate, and we'd ignore
+     * it.
      *
-     * mb() after the W1C ensures the MMIO write is globally visible
-     * before control_msi_pending is set. Without it, a polling-path
-     * ISTATUS read on another CPU (in wait_for_response's fallback
-     * loop) could see the bit still set and W1C it again. Harmless
-     * but wasteful — the explicit barrier pairs cleanly with the
-     * atomic_store_release that follows. */
+     * mb() after the final W1C ensures the MMIO write is globally
+     * visible before control_msi_pending is set. Without it, a
+     * polling-path ISTATUS read on another CPU (in wait_for_response's
+     * fallback loop) could see the bit still set and W1C it again —
+     * harmless but wasteful — and the explicit barrier pairs cleanly
+     * with the atomic_store_release that follows. */
     uint32_t istatus = hailo_platform->read32(
         HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
+
+    /* Phase 8 #253: ack per-channel VDMA IRQ registers on every IRQ.
+     * Reference hailo_pcie_read_interrupt reads + clears
+     * BCS_SOURCE_INTERRUPT_PER_CHANNEL when the SRC aggregate bit is
+     * set and BCS_DESTINATION_INTERRUPT_PER_CHANNEL when the DEST
+     * aggregate bit is set. These are W1C status registers tracking
+     * which individual channels have fired since the last host read.
+     *
+     * Prior to this fix, SLM-OS only cleared the top-level
+     * ISTATUS_HOST aggregate bits and never touched the per-channel
+     * registers. The ftrace/kprobe capture of hailo_pci on Pi OS
+     * running MNIST showed ri (read_interrupt) firing hundreds of
+     * times per inference and consistently reading both per-channel
+     * registers — fw evidently expects the host to ack at this
+     * granularity. Without it, fw's internal completion state
+     * machine gets stuck and num_proc stops advancing on boundary
+     * channels, matching the Phase 8 stall symptom (ch=2 frozen
+     * with 0 register changes across the full wait window).
+     *
+     * Skipping the W1C when the read returns 0 avoids issuing a
+     * no-op MMIO that the PCIe RC still pays a round-trip for. */
+    if (istatus & HAILO_BCS_ISTATUS_HOST_VDMA_SRC_MASK) {
+        uint32_t src_bits = hailo_platform->read32(
+            HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL);
+        if (src_bits != 0) {
+            hailo_platform->write32(
+                HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL,
+                src_bits);
+        }
+    }
+    if (istatus & HAILO_BCS_ISTATUS_HOST_VDMA_DEST_MASK) {
+        uint32_t dst_bits = hailo_platform->read32(
+            HAILO_BAR_CONFIG, HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL);
+        if (dst_bits != 0) {
+            hailo_platform->write32(
+                HAILO_BAR_CONFIG,
+                HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
+                dst_bits);
+        }
+    }
+
+    /* Aggregate ISTATUS_HOST W1C last (see ordering note above). */
     if (istatus != 0) {
         hailo_platform->write32(
             HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST, istatus);
-        hailo_platform->mb();
     }
+    hailo_platform->mb();
+
     if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
         __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);
     }

@@ -30,6 +30,7 @@ This document describes how to interact with the embedded development lab hardwa
 | Power control | Kasa smart plug (via labctl) |
 | SD card deploy | SDWireC (Badgerd USB-C model) |
 | EEPROM | Sep 2024 firmware (do NOT update — see `docs/pi5-baremetal-status.md`) |
+| SD card | Dual-boot SLM-OS + Pi OS Lite — see `docs/pi5-dual-boot-setup.md` |
 
 ### Jetson Orin Nano (`jetson-nano-2`)
 

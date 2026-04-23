@@ -141,14 +141,23 @@ void hailo_vdma_desc_list_free(struct hailo_vdma_desc_list *list)
      HAILO_VDMA_DESC_REQUEST_IRQ_ERR)
 
 /* DOMAIN_BOTH: both device-side and host-side bitmasks set. 0x02 |
- * 0x10 | 0x20 | 0x04 | 0x08 = 0x3E. HailoRT uses this for async
- * transfers that both (a) signal the NPU that data arrived and
- * (b) signal the host when the transfer completes. Maximum-signal
- * variant — if DOMAIN_DEVICE alone doesn't unblock the submit, this
- * rules out "wrong domain selected" as a variable. */
+ * 0x10 | 0x20 | 0x04 | 0x08 = 0x3E. Not used on the current submit
+ * path; retained for reference. */
 #define HAILO_VDMA_LAST_DESC_CTRL_DOMAIN_BOTH \
     (HAILO_VDMA_DESC_DESC_CONTROL | \
      HAILO_VDMA_DESC_DEVICE_IRQ_BITMASK | \
+     HAILO_VDMA_DESC_HOST_IRQ_BITMASK | \
+     HAILO_VDMA_DESC_REQUEST_IRQ_PROCESSED | \
+     HAILO_VDMA_DESC_REQUEST_IRQ_ERR)
+
+/* DOMAIN_HOST: host-side IRQ bitmask + REQ_IRQ_{PROCESSED,ERR} +
+ * DESC_CONTROL. 0x20 | 0x04 | 0x08 | 0x02 = 0x2E. This is what
+ * HailoRT's hailo_pci driver actually emits on per-transfer last
+ * descriptors for Hailo-8L boundary channels (verified via
+ * instrumented pr_info on Pi OS 2026-04-22; see
+ * docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt). */
+#define HAILO_VDMA_LAST_DESC_CTRL_DOMAIN_HOST \
+    (HAILO_VDMA_DESC_DESC_CONTROL | \
      HAILO_VDMA_DESC_HOST_IRQ_BITMASK | \
      HAILO_VDMA_DESC_REQUEST_IRQ_PROCESSED | \
      HAILO_VDMA_DESC_REQUEST_IRQ_ERR)
@@ -212,34 +221,49 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
     hailo_vdma_program_descriptor(&list->descs[last_slot],
                                   dma_address, last_size, data_id);
 
-    /* #253 last-desc IRQ bits: OR the DOMAIN_DEVICE bitmask into the
-     * final descriptor's control byte, mirroring reference
-     * bind_and_program_descriptors_list (hailo-vdma-common.c:313-314).
-     * Hypothesis: firmware's BURST_CREDITS_TASK uses
-     * DESC_REQUEST_IRQ_PROCESSED (0x04) as the transfer-end marker
-     * even when the host is polling. Plain 0x02-only descriptors may
-     * get silently treated as "not last", which would explain why our
-     * num_proc stays at 0 despite num_avail being accepted. */
+    /* #253 last-desc IRQ bits: use DOMAIN_HOST (0x2E), not DEVICE
+     * (0x1E). Verified 2026-04-22 via instrumented hailo_pci on
+     * Pi OS (docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt):
+     * every per-transfer last-desc ps_ctrl ends in 0x2e, meaning
+     * HailoRT uses host_interrupts_bitmask (0x20) | REQ_IRQ_PROCESSED
+     * (0x04) | REQ_IRQ_ERR (0x08) | DESC_CONTROL (0x02). Our earlier
+     * DOMAIN_DEVICE pick was a mis-read of the reference domain
+     * enum. */
     {
         struct hailo_vdma_descriptor *last = &list->descs[last_slot];
         uint32_t ps_ctrl = last->page_size_desc_control;
         ps_ctrl = (ps_ctrl & ~0xFFu) |
-                  (uint32_t)HAILO_VDMA_LAST_DESC_CTRL_DOMAIN_DEVICE;
+                  (uint32_t)HAILO_VDMA_LAST_DESC_CTRL_DOMAIN_HOST;
         last->page_size_desc_control = ps_ctrl;
     }
 
     /* PMM allocates cacheable kernel memory, so descriptor writes land
      * in L1/L2. BCM2712's PCIe engine claims cache coherency via
      * ACE-Lite but empirically firmware reads stale zeros unless we
-     * push the writes to the PoC. One clean covers all programmed
-     * slots since they were written sequentially.
+     * push the writes to the PoC.
+     *
+     * Bug fix 2026-04-22: this flush previously used `list->descs` as
+     * the base, ignoring `starting_desc`. That worked for the standard
+     * single-shot inference path (starting_desc=0) but corrupted any
+     * caller that programs at a non-zero starting_desc — e.g. the
+     * Phase 8 OUT prefetch fill writes desc[1..7] then this flush
+     * cleans desc[0..0] for each of those calls, leaving desc[1..7]
+     * dirty in cache while DRAM holds stale zeros that fw would read
+     * on prefetch.
+     *
+     * Now correctly flushes the contiguous range
+     * [first_slot, first_slot + descs_needed). Wrapping (circular
+     * desc lists) is rare for boundary submits and would still be
+     * partially handled, but worth a follow-up if circular usage
+     * grows.
      *
      * TODO: if a future regression shows the PCIe window actually
      * snoops caches correctly, drop this flush — it costs ~microseconds
      * per submit. Today we can't distinguish "snoop works but fw logic
      * still wrong" from "snoop broken" without this baseline. */
     if (hailo_platform && hailo_platform->cache_clean) {
-        hailo_platform->cache_clean(list->descs,
+        uint32_t first_slot = starting_desc & list->desc_count_mask;
+        hailo_platform->cache_clean(&list->descs[first_slot],
             (size_t)descs_needed * sizeof(struct hailo_vdma_descriptor));
     }
 
@@ -269,18 +293,47 @@ static uint32_t channel_base(uint8_t index)
     return (uint32_t)index * HAILO_VDMA_CHANNEL_STRIDE;
 }
 
-/* Read the CHANNEL_BASE_DWORD and return the 32-bit value. */
+/* Return the offset WITHIN a channel's 32-byte register block for
+ * the HOST-side register half. Per hailo-vdma-common.c:576
+ * (get_channel_regs): H2D channels (the low HAILO_VDMA_H2D_CHANNEL_COUNT
+ * ids, i.e. in HAILO_PCIE_DMA_SRC_CHANNELS_BITMASK) keep host regs
+ * at HOST_REGS_OFFSET_H2D; D2H channels have host regs at
+ * HOST_REGS_OFFSET_D2H because the 32-byte window is laid out
+ * {device, host} for D2H vs {host, device} for H2D. Writes that
+ * should land on the host-side (num_avail, CONTROL, ALIGNED_ADDR_L,
+ * ADDR_H, NUM_PROC) go through this offset; missing it silently
+ * updates the device-side mirror and the transfer never starts
+ * (Phase 8 #253, 2026-04-22). */
+static uint32_t channel_host_regs_offset(uint8_t channel_index)
+{
+    return (channel_index < HAILO_VDMA_H2D_CHANNEL_COUNT)
+         ? HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_H2D
+         : HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_D2H;
+}
+
+/* Convenience: full BAR2 byte offset of the HOST-side `reg_off` for
+ * `channel_index`. Centralizes the channel_base + host_offset + reg
+ * arithmetic so call sites can't accidentally drop the host_offset
+ * adjustment (the exact bug class Phase 8 #253 introduced). */
+static uint32_t channel_host_reg(uint8_t channel_index, uint32_t reg_off)
+{
+    return channel_base(channel_index)
+         + channel_host_regs_offset(channel_index)
+         + reg_off;
+}
+
+/* Read the HOST-side BASE_DWORD. */
 static uint32_t channel_read_base_dword(uint8_t channel_index)
 {
     return hailo_platform->read32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + HAILO_VDMA_CHANNEL_BASE_DWORD);
+        channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_BASE_DWORD));
 }
 
-/* Write the CHANNEL_BASE_DWORD (control+depth_id+num_avail packed). */
+/* Write the HOST-side BASE_DWORD (control+depth_id+num_avail packed). */
 static void channel_write_base_dword(uint8_t channel_index, uint32_t value)
 {
     hailo_platform->write32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + HAILO_VDMA_CHANNEL_BASE_DWORD,
+        channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_BASE_DWORD),
         value);
 }
 
@@ -319,13 +372,13 @@ int hailo_vdma_channel_start(uint8_t channel_index,
     uint32_t addr_h = (uint32_t)(list->iova >> 32);
 
     uint32_t aligned = hailo_platform->read32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L);
+        channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L));
     aligned = (aligned & 0x0000FFFFu) | ((uint32_t)addr_l << 16);
     hailo_platform->write32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L,
+        channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L),
         aligned);
     hailo_platform->write32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + HAILO_VDMA_CHANNEL_ADDR_H,
+        channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_ADDR_H),
         addr_h);
 
     uint32_t depth_id_dword =
@@ -371,7 +424,7 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
     /* Diagnostic snapshot before num_avail write. */
     uint32_t base_pre = channel_read_base_dword(channel_index);
     uint32_t proc_pre = hailo_platform->read32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+        channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_NUM_PROC_DWORD));
 
     /* Write new_num_avail into bits [31:16] of the base dword.
      * Read-modify-write to preserve CONTROL and DEPTH_ID. */
@@ -395,13 +448,44 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
 #endif
 
     /* Poll NUM_PROC (low 16 bits of NUM_PROC_DWORD). Yield via
-     * udelay between polls to stay cooperative on Pi 5. */
+     * udelay between polls to stay cooperative on Pi 5.
+     *
+     * #253 diagnostic: on every change to proc_dword OR base_dword
+     * (either side of the channel block), log the transition. Also
+     * emit a heartbeat snapshot every 50 ms so long stalls show a
+     * flat-line pattern rather than silence. This lets us tell:
+     *   - whether fw moved ongoing/proc at all during the wait
+     *   - whether fw changed CONTROL (e.g. to PAUSE on error)
+     *   - whether avail somehow got clobbered
+     * Gated behind HAILO_WIRE_DEBUG; OFF builds keep the tight loop.
+     *
+     * Caveat: the WIRE_DEBUG path issues 4 MMIO reads per 100 µs
+     * iteration (host proc/base + device proc/base mirrors). Across
+     * a multi-second wait that is hundreds of thousands of PCIe
+     * round-trips to the NPU; each read is a posted-completion
+     * exchange and may itself perturb fw's internal state. For
+     * timing-sensitive bugs prefer adding a single targeted log
+     * over enabling this whole block. The merge-ready build does
+     * not define HAILO_WIRE_DEBUG. */
     const uint32_t poll_interval_us = 100u;
     uint32_t elapsed = 0;
+#ifdef HAILO_WIRE_DEBUG
+    uint32_t last_proc_dword = 0xFFFFFFFFu;
+    uint32_t last_base_dword_host = 0xFFFFFFFFu;
+    uint32_t last_proc_dword_dev  = 0xFFFFFFFFu;
+    uint32_t last_base_dword_dev  = 0xFFFFFFFFu;
+    uint32_t heartbeat_us = 0;
+    /* Device-side mirror lives in the OTHER half of the 32-byte
+     * channel block from where host regs sit. */
+    const uint32_t dev_off =
+        (channel_host_regs_offset(channel_index)
+            == HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_H2D)
+            ? HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_D2H
+            : HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_H2D;
+#endif
     while (elapsed < timeout_us) {
         uint32_t proc_dword = hailo_platform->read32(HAILO_BAR_VDMA,
-            channel_base(channel_index)
-            + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+            channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_NUM_PROC_DWORD));
         uint16_t num_proc = (uint16_t)(proc_dword & 0xFFFFu);
         if (num_proc == new_num_avail) {
             uart_printf("[vdma] ch=%u done after %u us proc=0x%08x\r\n",
@@ -409,11 +493,66 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
                         (unsigned)proc_dword);
             return HAILO_OK;
         }
+#ifdef HAILO_WIRE_DEBUG
+        /* Change-of-state logging. */
+        if (proc_dword != last_proc_dword) {
+            uart_printf("[vdma-poll] ch=%u t=%u us host proc_dword "
+                        "0x%08x -> 0x%08x (proc=%u ongoing=%u)\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)last_proc_dword, (unsigned)proc_dword,
+                        (unsigned)(proc_dword & 0xFFFFu),
+                        (unsigned)(proc_dword >> 16));
+            last_proc_dword = proc_dword;
+        }
+        uint32_t base_dword = channel_read_base_dword(channel_index);
+        if (base_dword != last_base_dword_host) {
+            uart_printf("[vdma-poll] ch=%u t=%u us host base_dword "
+                        "0x%08x -> 0x%08x (ctrl=0x%02x avail=%u)\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)last_base_dword_host, (unsigned)base_dword,
+                        (unsigned)(base_dword & 0xFFu),
+                        (unsigned)(base_dword >> HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT));
+            last_base_dword_host = base_dword;
+        }
+        /* Also sample the opposite-side (device-side) mirror to spot
+         * fw progress there — fw may advance its internal counters
+         * before publishing to the host-side window. */
+        uint32_t proc_dev = hailo_platform->read32(HAILO_BAR_VDMA,
+            channel_base(channel_index) + dev_off
+            + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+        uint32_t base_dev = hailo_platform->read32(HAILO_BAR_VDMA,
+            channel_base(channel_index) + dev_off
+            + HAILO_VDMA_CHANNEL_BASE_DWORD);
+        if (proc_dev != last_proc_dword_dev) {
+            uart_printf("[vdma-poll] ch=%u t=%u us dev  proc_dword "
+                        "0x%08x -> 0x%08x\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)last_proc_dword_dev, (unsigned)proc_dev);
+            last_proc_dword_dev = proc_dev;
+        }
+        if (base_dev != last_base_dword_dev) {
+            uart_printf("[vdma-poll] ch=%u t=%u us dev  base_dword "
+                        "0x%08x -> 0x%08x\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)last_base_dword_dev, (unsigned)base_dev);
+            last_base_dword_dev = base_dev;
+        }
+        /* 50 ms heartbeat so we can see poll density in the log. */
+        heartbeat_us += poll_interval_us;
+        if (heartbeat_us >= 50000u) {
+            uart_printf("[vdma-poll] ch=%u t=%u us heartbeat "
+                        "host(proc=0x%08x base=0x%08x) dev(proc=0x%08x base=0x%08x)\r\n",
+                        (unsigned)channel_index, (unsigned)elapsed,
+                        (unsigned)proc_dword, (unsigned)base_dword,
+                        (unsigned)proc_dev, (unsigned)base_dev);
+            heartbeat_us = 0;
+        }
+#endif
         hailo_platform->udelay(poll_interval_us);
         elapsed += poll_interval_us;
     }
     uint32_t proc_end = hailo_platform->read32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+        channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_NUM_PROC_DWORD));
     uint32_t base_end = channel_read_base_dword(channel_index);
     uart_printf("[vdma] ch=%u TIMEOUT proc_end=0x%08x base_end=0x%08x\r\n",
                 (unsigned)channel_index, (unsigned)proc_end,
@@ -506,6 +645,50 @@ int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us)
     return HAILO_ERR_TIMEOUT;
 }
 
+int hailo_vdma_write_num_avail(uint8_t channel_index, uint16_t num_avail)
+{
+    if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
+    if (!hailo_platform) return HAILO_ERR_NODEV;
+
+    /* channel_read_base_dword / channel_write_base_dword apply the
+     * host-regs offset internally (see channel_host_regs_offset). */
+    uint32_t base_pre  = channel_read_base_dword(channel_index);
+    uint32_t base_post = (base_pre & 0x0000FFFFu)
+        | ((uint32_t)num_avail << HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT);
+    channel_write_base_dword(channel_index, base_post);
+    hailo_platform->mb();
+
+#ifdef HAILO_WIRE_DEBUG
+    uart_printf("[vdma] ch=%u write_avail host_off=0x%02x pre=0x%08x "
+                "post=0x%08x avail=%u\r\n",
+                (unsigned)channel_index,
+                (unsigned)channel_host_regs_offset(channel_index),
+                (unsigned)base_pre, (unsigned)base_post,
+                (unsigned)num_avail);
+#else
+    (void)base_pre;
+    (void)base_post;
+#endif
+    return HAILO_OK;
+}
+
+int hailo_vdma_arm_first_desc_irq(struct hailo_vdma_desc_list *list,
+                                  uint32_t starting_desc,
+                                  uint32_t ctrl_mask)
+{
+    if (!list || !list->descs) return HAILO_ERR_INVAL;
+    if (starting_desc >= list->desc_count) return HAILO_ERR_INVAL;
+
+    uint32_t slot = starting_desc & list->desc_count_mask;
+    struct hailo_vdma_descriptor *d = &list->descs[slot];
+    d->page_size_desc_control |= (ctrl_mask & 0xFFu);
+
+    if (hailo_platform && hailo_platform->cache_clean) {
+        hailo_platform->cache_clean(d, sizeof(*d));
+    }
+    return HAILO_OK;
+}
+
 int hailo_vdma_channel_wait_proc(uint8_t channel_index,
                                  uint16_t target_num_proc,
                                  uint32_t timeout_us)
@@ -515,7 +698,7 @@ int hailo_vdma_channel_wait_proc(uint8_t channel_index,
 
 #ifdef HAILO_WIRE_DEBUG
     uint32_t proc_pre = hailo_platform->read32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+        channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_NUM_PROC_DWORD));
     uart_printf("[vdma] ch=%u wait_proc target=%u proc_pre=0x%08x\r\n",
                 (unsigned)channel_index, (unsigned)target_num_proc,
                 (unsigned)proc_pre);
@@ -529,7 +712,7 @@ int hailo_vdma_channel_wait_proc(uint8_t channel_index,
     uint32_t elapsed = 0;
     while (elapsed < timeout_us) {
         uint32_t proc_dword = hailo_platform->read32(HAILO_BAR_VDMA,
-            channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+            channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_NUM_PROC_DWORD));
         uint16_t num_proc = (uint16_t)(proc_dword & 0xFFFFu);
         if (num_proc >= target_num_proc
             || (target_num_proc > 0 && num_proc == target_num_proc - 1)) {
@@ -552,7 +735,7 @@ int hailo_vdma_channel_wait_proc(uint8_t channel_index,
         elapsed += poll_interval_us;
     }
     uint32_t proc_end = hailo_platform->read32(HAILO_BAR_VDMA,
-        channel_base(channel_index) + HAILO_VDMA_CHANNEL_NUM_PROC_DWORD);
+        channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_NUM_PROC_DWORD));
     uart_printf("[vdma] ch=%u wait_proc TIMEOUT proc_end=0x%08x\r\n",
                 (unsigned)channel_index, (unsigned)proc_end);
     return HAILO_ERR_TIMEOUT;
