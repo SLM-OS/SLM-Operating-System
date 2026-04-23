@@ -103,6 +103,7 @@ bool                  xhci_live;
 
 /* Non-static: DCBAA + ring state shared across TUs. */
 uint64_t             *xhci_dcbaa;          /* aligned(64), MaxSlots+1 entries */
+uintptr_t             xhci_inherited_slot3_devctx_phys;
 static uint64_t             *xhci_scratchpad_ptrs;
 static void                 *xhci_scratchpad_bufs; /* N pages × PAGESIZE */
 static uint32_t              xhci_num_scratchpads;
@@ -152,6 +153,63 @@ _Static_assert(sizeof(struct xhci_erst_entry) == 16, "ERST entry 16B");
  */
 
 static struct xhci_erst_entry *xhci_erst;
+
+static bool xhci_probe_ram_ptr(uintptr_t p)
+{
+    /*
+     * Jetson Orin Nano boot path here always reports DRAM starting at
+     * 0x80000000. Keep the inherited-DCBAA probe conservative: only
+     * dereference pointers that are naturally aligned and sit inside
+     * the observed DRAM aperture.
+     */
+    return p >= 0x80000000ULL &&
+           p <  0x280000000ULL &&
+           (p & 0x3FULL) == 0;
+}
+
+static void xhci_log_inherited_dcbaa(uint64_t dcbaap)
+{
+    uintptr_t dcbaa_ptr = (uintptr_t)(dcbaap & ~0x3FULL);
+    xhci_inherited_slot3_devctx_phys = 0;
+    if (dcbaa_ptr == 0 || !xhci_probe_ram_ptr(dcbaa_ptr)) {
+        INFO("xhci: inherited DCBAA probe skipped (ptr=0x%lx)",
+             (unsigned long)dcbaa_ptr);
+        return;
+    }
+
+    volatile uint64_t *old_dcbaa = (volatile uint64_t *)dcbaa_ptr;
+    uint32_t max_slots = xhci_caps_cached.max_slots;
+    if (max_slots > 8)
+        max_slots = 8;
+
+    for (uint32_t slot = 1; slot <= max_slots; slot++) {
+        uint64_t devctx = old_dcbaa[slot];
+        uintptr_t devctx_ptr = (uintptr_t)(devctx & ~0x3FULL);
+        if (devctx_ptr == 0 || !xhci_probe_ram_ptr(devctx_ptr))
+            continue;
+
+        if (slot == 3)
+            xhci_inherited_slot3_devctx_phys = devctx_ptr;
+
+        volatile uint32_t *slot_ctx = (volatile uint32_t *)devctx_ptr;
+        uint32_t dw0 = slot_ctx[0];
+        uint32_t dw1 = slot_ctx[1];
+        uint32_t dw2 = slot_ctx[2];
+        uint32_t dw3 = slot_ctx[3];
+        uint32_t addr = dw3 & XHCI_SLOT_DW3_ADDR_MASK;
+        uint32_t state = (dw3 & XHCI_SLOT_DW3_STATE_MASK) >>
+                         XHCI_SLOT_DW3_STATE_SHIFT;
+        uint32_t root = (dw1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >>
+                        XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+
+        INFO("xhci: inherited DCBAA slot %u devctx=0x%08x%08x root=%u addr=%u state=%u "
+             "slot_dw0=0x%08x slot_dw1=0x%08x slot_dw2=0x%08x slot_dw3=0x%08x",
+             (unsigned)slot,
+             (unsigned)(devctx >> 32), (unsigned)devctx,
+             (unsigned)root, (unsigned)addr, (unsigned)state,
+             (unsigned)dw0, (unsigned)dw1, (unsigned)dw2, (unsigned)dw3);
+    }
+}
 
 /* -------------------------------------------------------------------------- */
 /* Register access helpers                                                     */
@@ -727,6 +785,7 @@ static void xhci_program_registers(uint8_t max_slots)
          (unsigned)orig_crcr_hi, (unsigned)orig_crcr_lo,
          (unsigned)r32(xhci_op_base, XHCI_OP_CONFIG),
          (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+    xhci_log_inherited_dcbaa(((uint64_t)orig_dcbaap_hi << 32) | orig_dcbaap_lo);
 
     /*
      * ARM64 requires an explicit DSB between Normal-Non-Cacheable
@@ -1012,10 +1071,17 @@ static void xhci_scrub_inherited_slots(void)
 {
     uint32_t max_slots = xhci_caps_cached.max_slots;
     unsigned successes = 0;
+    const uint32_t keep_slot = 3;
 
     for (uint32_t slot = 1; slot <= max_slots; slot++) {
         struct xhci_trb cmd = {0};
         uint8_t cc = 0;
+
+        if (slot == keep_slot) {
+            INFO("xhci: inherited-slot scrub keeping slot %u for adoption probe",
+                 (unsigned)slot);
+            continue;
+        }
 
         cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_DISABLE_SLOT) |
                       ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
@@ -1036,6 +1102,15 @@ static void xhci_scrub_inherited_slots(void)
     } else {
         INFO("xhci: inherited-slot scrub cleared %u stale slot(s)",
              successes);
+    }
+}
+
+static void xhci_probe_inherited_slot_ep0(uint8_t slot)
+{
+    if (slot == 3) {
+        INFO("xhci: inherited-slot probe leaving slot %u EP0 untouched for adoption",
+             (unsigned)slot);
+        return;
     }
 }
 
@@ -1248,6 +1323,7 @@ int xhci_init(void)
     }
 
     xhci_live = true;
+    xhci_probe_inherited_slot_ep0(3);
     xhci_scrub_inherited_slots();
 
     /*

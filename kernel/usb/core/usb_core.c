@@ -35,6 +35,9 @@ static struct usb_device     root_device;
 static bool                  root_device_present;
 static struct usb_device     hub_device;
 static bool                  hub_device_present;
+static bool                  usb_probe_presetup_get_status = true;
+static bool                  usb_probe_presetup_bad_clear_feature = true;
+static bool                  usb_probe_presetup_set_address = true;
 
 /* -------------------------------------------------------------------------- */
 /* Minimal USB 2.0 hub support                                                */
@@ -698,6 +701,88 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
         uint64_t settle_start = timer_get_count();
         uint64_t settle_ticks = timer_get_frequency() / 10; /* 100 ms */
         while (timer_get_count() - settle_start < settle_ticks) { }
+
+        if (usb_probe_presetup_get_status &&
+            dev->route_string == 0 &&
+            dev->speed == USB_SPEED_FULL) {
+            uint16_t status_word = 0;
+            int status_rc = usb_control_msg(dev,
+                                            USB_DIR_IN | USB_TYPE_STANDARD |
+                                            USB_RECIP_DEVICE,
+                                            USB_REQ_GET_STATUS,
+                                            0, 0,
+                                            &status_word,
+                                            sizeof(status_word),
+                                            500);
+            INFO("usb_core: probe GET_STATUS(default addr) rc=%d status=0x%04x speed=%d route=0x%x root_port=%u",
+                 status_rc,
+                 (unsigned)status_word,
+                 (int)dev->speed,
+                 (unsigned)dev->route_string,
+                 (unsigned)dev->root_hub_port);
+            usb_probe_presetup_get_status = false;
+        }
+
+        if (usb_probe_presetup_bad_clear_feature &&
+            dev->route_string == 0 &&
+            dev->speed == USB_SPEED_FULL) {
+            /*
+             * Harmless discriminator for the very first default-address
+             * Setup Stage: an invalid standard no-data OUT request should
+             * be seen by the device and rejected with STALL, but it should
+             * not mutate device state. If this still dies with the same
+             * transport error as GET_STATUS, the problem is broader than
+             * "descriptor / IN request" semantics.
+             */
+            int clear_rc = usb_control_msg(dev,
+                                           USB_DIR_OUT | USB_TYPE_STANDARD |
+                                           USB_RECIP_DEVICE,
+                                           USB_REQ_CLEAR_FEATURE,
+                                           0xffffu, 0,
+                                           NULL, 0,
+                                           500);
+            INFO("usb_core: probe CLEAR_FEATURE(invalid, default addr) rc=%d speed=%d route=0x%x root_port=%u",
+                 clear_rc,
+                 (int)dev->speed,
+                 (unsigned)dev->route_string,
+                 (unsigned)dev->root_hub_port);
+            usb_probe_presetup_bad_clear_feature = false;
+        }
+
+        if (usb_probe_presetup_set_address &&
+            dev->route_string == 0 &&
+            dev->speed == USB_SPEED_FULL) {
+            /*
+             * Probe whether the inherited full-speed path can execute a
+             * real default-address SET_ADDRESS even though the earlier
+             * GET_STATUS / GET_DESCRIPTOR traffic is failing. Treat this
+             * as diagnostic only: if it succeeds, close the device and let
+             * the outer retry loop port-reset back to address 0 before the
+             * normal enumeration flow resumes.
+             */
+            int set_addr_rc = usb_control_msg(dev,
+                                              USB_DIR_OUT | USB_TYPE_STANDARD |
+                                              USB_RECIP_DEVICE,
+                                              USB_REQ_SET_ADDRESS,
+                                              target_address, 0,
+                                              NULL, 0,
+                                              500);
+            INFO("usb_core: probe SET_ADDRESS(default addr -> %u) rc=%d speed=%d route=0x%x root_port=%u",
+                 (unsigned)target_address,
+                 set_addr_rc,
+                 (int)dev->speed,
+                 (unsigned)dev->route_string,
+                 (unsigned)dev->root_hub_port);
+            usb_probe_presetup_set_address = false;
+            if (set_addr_rc >= 0) {
+                WARN("usb_core: probe SET_ADDRESS succeeded before initial descriptor; restarting from reset");
+                if (device_opened && active_hcd->device_close) {
+                    active_hcd->device_close(dev);
+                    device_opened = false;
+                }
+                continue;
+            }
+        }
 
         /*
          * Step 3: read the first bytes of the device descriptor while the

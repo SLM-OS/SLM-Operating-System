@@ -37,6 +37,7 @@
  */
 struct xhci_device {
     bool                valid;
+    bool                adopted_inherited;
     uint8_t             slot_id;
     uint8_t             root_port;       /* 1-based per xHCI §4.19 */
     void               *dev_ctx;         /* written to DCBAA[slot] */
@@ -66,6 +67,7 @@ extern volatile uint8_t       *xhci_db_base;
 extern struct xhci_ring        xhci_cmd_ring;
 extern struct xhci_event_ring  xhci_evt_ring;
 extern uint64_t               *xhci_dcbaa;
+extern uintptr_t               xhci_inherited_slot3_devctx_phys;
 
 /* -------------------------------------------------------------------------- */
 /* Low-level MMIO helpers exported by xhci.c                                   */
