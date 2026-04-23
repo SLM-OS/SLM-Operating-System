@@ -68,6 +68,42 @@ static int pi5_init(void)
      * the device responds to MMIO reads or issues DMA. */
     pcie_enable_bus_master(hailo_pcidev);
 
+    /* Disable ASPM L0s on the endpoint. Reference hailo_pcie.c:155-260
+     * (hailo_pcie_disable_aspm) does this unconditionally at probe,
+     * with a comment citing "Some devices *must* have certain ASPM
+     * states disabled per hardware errata". ASPM L0s transitions can
+     * silently drop PCIe completion transactions; for a design that
+     * polls num_proc and relies on in-order completions to advance
+     * VDMA state, a dropped completion looks exactly like "fw never
+     * advanced num_proc" — which is the Phase 8 boundary-submit
+     * symptom.
+     *
+     * PCI Express capability ID 0x10; LNKCTL is at cap_base + 0x10;
+     * ASPM_L0S is bit 0 of LNKCTL. Cleared here on the endpoint; the
+     * parent pcie1 RC side should also be cleared but is accessed
+     * via BCM2712-specific regs, tracked separately. */
+    uint8_t exp_cap = pcie_find_capability(hailo_pcidev, 0x10);
+    if (exp_cap != 0) {
+        uint16_t lnkctl = pcie_config_read16(hailo_pcidev,
+                                             (uint16_t)(exp_cap + 0x10));
+        if (lnkctl & 0x0001u) {
+            INFO("hailo: endpoint LNKCTL 0x%04x had ASPM_L0S set; "
+                 "clearing", lnkctl);
+            pcie_config_write16(hailo_pcidev,
+                                (uint16_t)(exp_cap + 0x10),
+                                (uint16_t)(lnkctl & ~0x0001u));
+            uint16_t verify = pcie_config_read16(hailo_pcidev,
+                                                 (uint16_t)(exp_cap + 0x10));
+            INFO("hailo: endpoint LNKCTL after clear: 0x%04x", verify);
+        } else {
+            INFO("hailo: endpoint LNKCTL 0x%04x ASPM_L0S already off",
+                 lnkctl);
+        }
+    } else {
+        WARN("hailo: no PCI Express capability on endpoint — "
+             "cannot gate ASPM");
+    }
+
     /* Map the three BARs we care about. pcie_map_bar calls through
      * to the BCM2712 backend which installs a Device-nGnRnE
      * translation via vmm_map_region. */
