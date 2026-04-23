@@ -83,9 +83,9 @@ static struct xhci_device xhci_dev_pool[2];
 #define XHCI_DEV_MAX_RINGS          8
 static struct xhci_ring xhci_ring_pool[XHCI_DEV_MAX_RINGS];
 static bool             xhci_ring_in_use[XHCI_DEV_MAX_RINGS];
-static bool             xhci_probe_adopt_inherited_slot3 = false;
-static bool             xhci_probe_force_freshslot_fullspeed = true;
-static bool             xhci_probe_freshslot_configure_ep0 = true;
+static bool             xhci_probe_adopt_inherited_slot3 = true;
+static bool             xhci_probe_force_freshslot_fullspeed = false;
+static bool             xhci_probe_freshslot_configure_ep0 = false;
 static bool             xhci_probe_fullspeed_power_cycle = true;
 
 static void xhci_try_power_cycle_port(uint8_t pidx, const char *why);
@@ -194,9 +194,9 @@ static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 static bool xhci_skip_next_port_reset = false;
 static bool xhci_force_connected_disabled_reset = false;
 static bool xhci_probe_prefer_fullspeed_port = true;
-static bool xhci_probe_fullspeed_addr3 = false;
-static bool xhci_probe_fullspeed_ep0_mps8 = true;
-static bool xhci_probe_fullspeed_eval_addr3 = true;
+static bool xhci_probe_fullspeed_addr3 = true;
+static bool xhci_probe_fullspeed_ep0_mps8 = false;
+static bool xhci_probe_fullspeed_eval_addr3 = false;
 static bool xhci_force_bsr0_on_open = false;
 static bool xhci_force_inherited_addr2_on_open = false;
 
@@ -1179,17 +1179,6 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
     struct xhci_trb cmd = {0};
     uint8_t cc = 0;
 
-    /*
-     * Adopted-slot commands still use the controller's current DCBAA.
-     * Publish our local output-context buffer for slot 3 before any
-     * endpoint-state refresh so EVAL_CONTEXT / CONFIGURE_EP have a
-     * place to write the resulting Slot/EP0 context image.
-     */
-    xhci_dcbaa[slot] = (uint64_t)d->dev_ctx_phys;
-    dsb(sy);
-    INFO("xhci: adopt slot %u published local DCBAA devctx=0x%lx",
-         (unsigned)slot, (unsigned long)d->dev_ctx_phys);
-
     cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
                   ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
                   ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
@@ -1213,48 +1202,19 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
         return -1;
     }
 
-    /*
-     * Reassert the slot/EP0 context on the adopted Linux slot using our
-     * own Input Context image. The retained-slot path times out rather
-     * than returning cc=4, which suggests the controller may accept the
-     * ring pointer but still need a context refresh before it will emit
-     * transfer events on EP0.
-     */
-    xhci_build_input_ctx_for_address(d, dev, ep0->phys);
-    uint32_t *slot3_dw = xhci_in_slot_dw(d->input_ctx, 3, xhci_caps_cached.ctx_64);
-    *slot3_dw = (0U & XHCI_SLOT_DW3_ADDR_MASK) |
-                (1U << XHCI_SLOT_DW3_STATE_SHIFT); /* default */
-    dsb(sy);
-
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
-    cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
-    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_EVAL_CONTEXT) |
-                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
-    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
-        WARN("xhci: adopt slot %u EVAL_CONTEXT(ep0 refresh) transport failed",
-             (unsigned)slot);
-    } else {
-        INFO("xhci: adopt slot %u EVAL_CONTEXT(ep0 refresh) cc=%u",
-             (unsigned)slot, (unsigned)cc);
-    }
-
-    memset(&cmd, 0, sizeof(cmd));
-    cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
-    cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
-    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_CONFIGURE_EP) |
-                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
-    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
-        WARN("xhci: adopt slot %u CONFIGURE_ENDPOINT(ep0 refresh) transport failed",
-             (unsigned)slot);
-    } else {
-        INFO("xhci: adopt slot %u CONFIGURE_ENDPOINT(ep0 refresh) cc=%u",
-             (unsigned)slot, (unsigned)cc);
-    }
-
     d->ep_rings[XHCI_DCI_EP0] = ep0;
     d->slot_id = slot;
     d->adopted_inherited = true;
+    /*
+     * Linux's live full-speed Bluetooth path keeps using slot/address 3
+     * after deauthorize/reauthorize. When we adopt that retained slot,
+     * keep usb_core's software model aligned with the controller's
+     * apparent state so enumeration can continue from the first
+     * successful descriptor read instead of trying a fresh
+     * default-address SET_ADDRESS on an already-addressed slot.
+     */
+    dev->address = slot;
+    dev->state = USB_STATE_ADDRESS;
     xhci_probe_adopt_inherited_slot3 = false;
     INFO("xhci: adopted inherited slot %u for full-speed root device "
          "(root_port=%u ring=0x%lx via on-demand SET_TR_DEQ)",
@@ -1333,6 +1293,17 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
           (1U       << XHCI_SLOT_DW0_CTXENT_SHIFT);
     /* Root Hub Port Number is 1-based per spec. */
     *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
+    if (xhci_probe_fullspeed_addr3 &&
+        dev->route_string == 0 &&
+        dev->speed == USB_SPEED_FULL &&
+        d->root_port == 7) {
+        uint32_t *s3 = xhci_in_slot_dw(d->input_ctx, 3, cz);
+        *s3 = (3U & XHCI_SLOT_DW3_ADDR_MASK) |
+              (2U << XHCI_SLOT_DW3_STATE_SHIFT);
+        INFO("xhci: probing retained address 3 in input ctx on root_port=%u slot_dw3=0x%08x",
+             (unsigned)d->root_port, (unsigned)*s3);
+        xhci_probe_fullspeed_addr3 = false;
+    }
 
     /* EP0 Context. */
     uint32_t *e0 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 0, cz);

@@ -184,6 +184,7 @@ static void xhci_prepare_first_control_transfer(const struct usb_urb *urb,
     INFO("xhci: pre-EP0 cleanup slot=%u drained=%d usbsts=0x%08x ack=0x%08x -> 0x%08x",
          (unsigned)d->slot_id, drained,
          (unsigned)before, (unsigned)ack, (unsigned)after);
+
 }
 
 static void xhci_log_control_urb(const char *tag, const struct usb_urb *urb,
@@ -439,24 +440,19 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
 
     struct usb_urb *urb = slot->urb;
     urb->status        = xhci_cc_to_urb_status(cc);
-    /* For control transfers the residual applies to the Data Stage;
-     * the Status Stage TRB we IOC'd always has its own status=0 and
-     * residual=0. To get bytes transferred for a control transfer we
-     * therefore report requested_len — the Data Stage short-packet
-     * case raises cc=SHORT_PACKET on the Data TRB, which we currently
-     * don't hook (Phase 3A doesn't exercise short control-IN for
-     * CDC-ECM). Tracked in #316 for when class drivers beyond
-     * CDC-ECM (HID, string descriptors) need the true byte count.
-     * For bulk, residual is the byte count not transferred;
-     * actual = requested - residual. */
-    if (urb->transfer_type == USB_XFER_CONTROL) {
-        urb->actual_length = (cc == XHCI_CC_SUCCESS) ? slot->requested_len : 0U;
-    } else {
-        uint32_t actual = (residual <= slot->requested_len)
-                          ? (slot->requested_len - residual)
-                          : 0U;
-        urb->actual_length = actual;
-    }
+    /* The transfer-event residual reports the byte count not transferred
+     * for the TRB that completed. For bulk transfers that is the full
+     * payload. For control transfers the IOC event may arrive on the Data
+     * Stage (short packet/error) or on the Status Stage (success). In both
+     * cases the requested payload is slot->requested_len, so the same
+     * "requested - residual" rule gives the right byte count: short
+     * control-IN data completions surface the bytes received, while a
+     * successful Status Stage with residual=0 reports the full request
+     * length. */
+    uint32_t actual = (residual <= slot->requested_len)
+                      ? (slot->requested_len - residual)
+                      : 0U;
+    urb->actual_length = actual;
 
     if (urb->transfer_type == USB_XFER_CONTROL && cc != XHCI_CC_SUCCESS)
         xhci_log_control_urb("event", urb, slot, trb_phys, cc, residual);

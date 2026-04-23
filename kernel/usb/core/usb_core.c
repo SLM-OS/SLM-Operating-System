@@ -35,9 +35,9 @@ static struct usb_device     root_device;
 static bool                  root_device_present;
 static struct usb_device     hub_device;
 static bool                  hub_device_present;
-static bool                  usb_probe_presetup_get_status = true;
-static bool                  usb_probe_presetup_bad_clear_feature = true;
-static bool                  usb_probe_presetup_set_address = true;
+static bool                  usb_probe_presetup_get_status = false;
+static bool                  usb_probe_presetup_bad_clear_feature = false;
+static bool                  usb_probe_presetup_set_address = false;
 
 /* -------------------------------------------------------------------------- */
 /* Minimal USB 2.0 hub support                                                */
@@ -672,6 +672,7 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
     int n;
     int rc;
     bool device_opened = false;
+    bool have_full_device_desc = false;
 
     /*
      * Some devices, especially hubs inherited across kexec, do not
@@ -800,6 +801,10 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
         if (n >= 8) {
             /* bMaxPacketSize0 is byte 7. Record it for the HCD if useful later. */
             dev->dev_desc.bMaxPacketSize0 = dd_stub[7];
+            if (n >= (int)sizeof(dev->dev_desc)) {
+                memcpy(&dev->dev_desc, dd_stub, sizeof(dev->dev_desc));
+                have_full_device_desc = true;
+            }
             goto got_initial_descriptor;
         }
 
@@ -817,25 +822,32 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
 got_initial_descriptor:
 
     /* Step 4: assign the device's non-zero USB address. */
-    rc = usb_control_msg(dev,
-                         USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-                         USB_REQ_SET_ADDRESS,
-                         target_address, 0, NULL, 0, 500);
-    if (rc < 0) {
-        WARN("usb_core: SET_ADDRESS failed: %s",
-             usb_urb_status_str((enum usb_urb_status)(-rc)));
-        goto err_close;
+    if (dev->state == USB_STATE_ADDRESS && dev->address != 0) {
+        INFO("usb_core: reusing inherited device address %u after initial descriptor",
+             (unsigned)dev->address);
+    } else {
+        rc = usb_control_msg(dev,
+                             USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                             USB_REQ_SET_ADDRESS,
+                             target_address, 0, NULL, 0, 500);
+        if (rc < 0) {
+            WARN("usb_core: SET_ADDRESS failed: %s",
+                 usb_urb_status_str((enum usb_urb_status)(-rc)));
+            goto err_close;
+        }
+        dev->address = target_address;
+        dev->state = USB_STATE_ADDRESS;
     }
-    dev->address = target_address;
-    dev->state = USB_STATE_ADDRESS;
 
     /* Step 5: full device descriptor. */
-    n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
-                           &dev->dev_desc,
-                           sizeof(dev->dev_desc));
-    if (n < (int)sizeof(dev->dev_desc)) {
-        WARN("usb_core: short GET_DESCRIPTOR(device) n=%d", n);
-        goto err_close;
+    if (!have_full_device_desc) {
+        n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
+                               &dev->dev_desc,
+                               sizeof(dev->dev_desc));
+        if (n < (int)sizeof(dev->dev_desc)) {
+            WARN("usb_core: short GET_DESCRIPTOR(device) n=%d", n);
+            goto err_close;
+        }
     }
 
     /* Step 6: 9-byte config header to learn wTotalLength. */
