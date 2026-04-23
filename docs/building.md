@@ -60,6 +60,31 @@ rustup target list --installed | grep aarch64
 # Should show: aarch64-unknown-none
 ```
 
+### Codex Worktrees
+
+If you use Codex for development, prefer launching it from a dedicated
+branch worktree instead of the main checkout. This keeps `main` clean
+and avoids accidental direct commits there.
+
+Repo helper:
+
+```bash
+scripts/codex-worktree.sh <branch-name> [base-ref]
+```
+
+Example:
+
+```bash
+scripts/codex-worktree.sh feature-eviction-loader
+```
+
+That will:
+
+- fetch `origin`
+- create a sibling worktree on a new branch from `origin/main` by default
+- `cd` into that worktree
+- launch `codex`
+
 ---
 
 ## Build Targets
