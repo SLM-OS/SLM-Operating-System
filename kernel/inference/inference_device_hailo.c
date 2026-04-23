@@ -1637,6 +1637,25 @@ static int hailo_backend_run(struct inference_device *dev,
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
+    /* Phase 8 experiment (2026-04-22): program OUT descs 1..7 to the
+     * same output buffer. Linux's HailoRT does 8 sequential single-desc
+     * OUTPUT launch_transfer calls before the first INPUT submit, so
+     * descs 0..7 are all valid when the first inference runs. If fw
+     * pre-fetches ahead of num_avail for pipelining, our single-desc
+     * setup (only OUT[0] valid) could trip on zero entries at [1..3]
+     * and stall. Filling in 7 spare descs pointing to the same buffer
+     * gives fw valid prefetch targets even though we only consume one
+     * per inference (num_avail stays at 1). A repeat OUT[0] overwrite
+     * is semantically harmless — for a single-inference run num_avail
+     * only ever reaches 1 so fw never advances past OUT[0]. */
+    for (uint32_t i = 1; i < 8; i++) {
+        (void)hailo_vdma_program_buffer(
+            &slot->boundary_out_list, i,
+            slot->boundary_out_tensor.iova,
+            slot->boundary_out_tensor.tensor_bytes,
+            HAILO_VDMA_HOST_DMA_DATA_ID);
+    }
+
 #ifdef HAILO_WIRE_DEBUG
     /* Phase 8 #253: dump programmed descriptors + channel regs so we
      * can compare byte-for-byte against HailoRT's reference output.
