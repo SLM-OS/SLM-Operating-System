@@ -1060,6 +1060,12 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(RESET) failed (rc=%d)", rc);
         goto fail;
     }
+    /* #253 (2026-04-23) ECC bisect: drain D2H mailbox between every
+     * step of the load so we can see exactly which RPC triggers the
+     * CPU_ECC_FATAL event (memory_bitmap=0x1000). The drain is cheap
+     * (~5 ms when empty); only kept while #253 is open. */
+    uart_printf("[bisect] post RESET:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
     cs_load_stage_set(51);
 
     /* Pre-configure handshake (matches ctxsmoke flow + HailoRT
@@ -1072,6 +1078,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CLEAR_CONFIGURED_APPS failed (rc=%d)", rc);
         goto fail;
     }
+    uart_printf("[bisect] post CLEAR_CONFIGURED_APPS:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
     cs_load_stage_set(52);
 
     uint32_t hw_consts_len = 0;
@@ -1080,6 +1088,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: GET_HW_CONSTS failed (rc=%d)", rc);
         goto fail;
     }
+    uart_printf("[bisect] post GET_HW_CONSTS:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
     cs_load_stage_set(53);
 
     rc = hailo_control_set_network_group_header(&hdr);
@@ -1087,6 +1097,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: SET_NETWORK_GROUP_HEADER failed (rc=%d)", rc);
         goto fail;
     }
+    uart_printf("[bisect] post SET_NETWORK_GROUP_HEADER:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
     cs_load_stage_set(53);
 
     const struct {
@@ -1182,6 +1194,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
                  ctxs[i].name, rc);
             goto fail;
         }
+        uart_printf("[bisect] post SET_CONTEXT_INFO(%s):\r\n", ctxs[i].name);
+        hailo_fw_drain_d2h_notifications(2);
         cs_load_stage_set(61 + (int)i * 2);
 
     }
@@ -1207,6 +1221,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(ENABLED) failed (rc=%d)", rc);
         goto fail;
     }
+    uart_printf("[bisect] post CHANGE_STATUS(ENABLED):\r\n");
+    hailo_fw_drain_d2h_notifications(2);
 
     /* #253: CHANGE_STATUS(ENABLED) returns synchronously but fw's
      * action-list processing (ACTIVATION → BATCH_SWITCHING →
@@ -1285,6 +1301,8 @@ static int context_switch_load(struct hailo_model_slot *slot,
         cs_load_stage_set(74);
     }
 
+    uart_printf("[bisect] post CCW DMA pull:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
     cs_load_stage_set(71);
     INFO("hailo backend: context-switch load OK (CCW=%u B, IN=%u B, OUT=%u B)",
          ccw_bytes,
