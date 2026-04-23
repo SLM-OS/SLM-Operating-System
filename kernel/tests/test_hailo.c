@@ -2595,17 +2595,14 @@ static void test_msi_handler_sets_pending_and_clears_istatus(void)
     TEST_ASSERT_EQUAL_UINT32(0u, after);
 }
 
-/* Phase 8 #253 (commit 909ae8f): when ISTATUS_HOST has the VDMA_SRC
- * aggregate bit set, the MSI handler must also read+W1C the per-
- * channel SOURCE_INTERRUPT_PER_CHANNEL register (offset 0x400). The
- * value written back is the bitmap of channels that fired; fw uses
- * this ack to advance its completion state machine. Linux's
- * hailo_pcie_read_interrupt is the reference. */
-static void test_msi_handler_acks_per_channel_src_irq(void)
+/* The MSI handler is registered lazily on the first control send.
+ * To exercise it from a test, we need to (a) prime the simulator
+ * with a fake response so the send completes synchronously and (b)
+ * issue any RPC. IDENTIFY is the cheapest. After this returns,
+ * mock_registered_irq_handler is non-NULL and mock_msi_invoke()
+ * will fire the registered handler. */
+static void msi_handler_register_via_identify(void)
 {
-    control_setup_running();
-
-    /* Make the MSI handler register first via a no-op control RPC. */
     struct {
         struct hailo_control_response_header   header;
         uint32_t                               parameter_count;
@@ -2619,6 +2616,18 @@ static void test_msi_handler_acks_per_channel_src_irq(void)
     mock_fw_sim_control_enabled  = true;
     struct hailo_control_identify_response resp;
     TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+}
+
+/* Phase 8 #253 (commit 909ae8f): when ISTATUS_HOST has the VDMA_SRC
+ * aggregate bit set, the MSI handler must also read+W1C the per-
+ * channel SOURCE_INTERRUPT_PER_CHANNEL register (offset 0x400). The
+ * value written back is the bitmap of channels that fired; fw uses
+ * this ack to advance its completion state machine. Linux's
+ * hailo_pcie_read_interrupt is the reference. */
+static void test_msi_handler_acks_per_channel_src_irq(void)
+{
+    control_setup_running();
+    msi_handler_register_via_identify();
 
     /* Reset counters so the IRQ-arm sequence's writes don't pollute. */
     mock_per_channel_src_write_count = 0;
@@ -2647,20 +2656,7 @@ static void test_msi_handler_acks_per_channel_src_irq(void)
 static void test_msi_handler_acks_per_channel_dst_irq(void)
 {
     control_setup_running();
-
-    struct {
-        struct hailo_control_response_header   header;
-        uint32_t                               parameter_count;
-        struct hailo_control_identify_response body;
-    } __attribute__((packed)) fake;
-    memset(&fake, 0, sizeof(fake));
-    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
-    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
-    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
-    mock_fw_sim_control_resp_len = sizeof(fake);
-    mock_fw_sim_control_enabled  = true;
-    struct hailo_control_identify_response resp;
-    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    msi_handler_register_via_identify();
 
     mock_per_channel_src_write_count = 0;
     mock_per_channel_dst_write_count = 0;
@@ -2687,20 +2683,7 @@ static void test_msi_handler_acks_per_channel_dst_irq(void)
 static void test_msi_handler_skips_per_channel_when_no_vdma_bits(void)
 {
     control_setup_running();
-
-    struct {
-        struct hailo_control_response_header   header;
-        uint32_t                               parameter_count;
-        struct hailo_control_identify_response body;
-    } __attribute__((packed)) fake;
-    memset(&fake, 0, sizeof(fake));
-    fake.header.common.version = __builtin_bswap32(HAILO_CONTROL_PROTOCOL_VERSION);
-    fake.header.common.opcode  = __builtin_bswap32(HAILO_CONTROL_OPCODE_IDENTIFY);
-    memcpy(mock_fw_sim_control_resp, &fake, sizeof(fake));
-    mock_fw_sim_control_resp_len = sizeof(fake);
-    mock_fw_sim_control_enabled  = true;
-    struct hailo_control_identify_response resp;
-    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_identify(&resp));
+    msi_handler_register_via_identify();
 
     mock_per_channel_src_write_count = 0;
     mock_per_channel_dst_write_count = 0;

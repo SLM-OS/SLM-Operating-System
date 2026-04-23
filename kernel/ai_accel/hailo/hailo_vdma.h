@@ -218,6 +218,24 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
 #define HAILO_VDMA_CHANNEL_ALIGNED_ADDR_L    0x08u
 #define HAILO_VDMA_CHANNEL_ADDR_H            0x0Cu
 
+/* H2D / D2H split point. Channels [0, HAILO_VDMA_H2D_CHANNEL_COUNT)
+ * are host-to-device (input boundary); channels
+ * [HAILO_VDMA_H2D_CHANNEL_COUNT, HAILO_VDMA_MAX_CHANNELS) are
+ * device-to-host. Mirrors HAILO_PCIE_DMA_SRC_CHANNELS_BITMASK =
+ * 0x0000FFFF in the reference driver — the low 16 channel ids are
+ * the H2D bank. */
+#define HAILO_VDMA_H2D_CHANNEL_COUNT         16u
+
+/* Each channel's 32-byte register window contains a {host, device}
+ * sub-block pair. The HOST-side regs sit at +0x00 for H2D channels
+ * and at +0x10 for D2H channels (the two halves swap order — see
+ * get_channel_regs in hailo-vdma-common.c:576). All host-side
+ * accesses (CONTROL, num_avail, num_proc, ALIGNED_ADDR_L, ADDR_H)
+ * must add this offset to channel_base; missing it silently writes
+ * the device-side mirror and the transfer never starts. */
+#define HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_H2D  0x00u
+#define HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_D2H  0x10u
+
 /* Bit shifts within BASE_DWORD. */
 #define HAILO_VDMA_CHANNEL_DATA_ID_SHIFT     8u     /* data_id bits */
 #define HAILO_VDMA_CHANNEL_DESC_DEPTH_SHIFT  11u    /* depth bits */

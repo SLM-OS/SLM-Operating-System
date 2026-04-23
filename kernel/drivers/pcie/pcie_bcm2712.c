@@ -807,23 +807,40 @@ static int bcm2712_train_link(void)
      * MMIO read/write with shifts for sub-dword extraction. */
     {
         volatile uint32_t *rc_cfg = (volatile uint32_t *)pcie1_regs;
+        /* Cap list lives in standard config space (256 B); 0xFC is
+         * the last dword-aligned offset that can host a 4-byte cap
+         * header. Anything beyond that (or unaligned) is a malformed
+         * pointer and we abort the walk. PCI spec also caps the chain
+         * at 48 entries (one per nibble of next-pointer space), used
+         * here as a belt-and-braces bound against a circular cap
+         * list. */
+        const uint8_t cap_offset_max = 0xFCu;
+        const int     cap_walk_max   = 48;
 
         uint32_t status_dw = rc_cfg[0x04 / 4];     /* cmd(low) + status(high) */
         uint16_t cfg_status = (uint16_t)(status_dw >> 16);
         if (cfg_status & 0x0010u) {                /* PCI_STATUS_CAP_LIST */
             uint32_t capptr_dw = rc_cfg[0x34 / 4]; /* CAP_POINTER at 0x34 */
             uint8_t  ptr = (uint8_t)(capptr_dw & 0xFCu);
-            for (int iter = 0; iter < 48 && ptr != 0; iter++) {
+            int      iter = 0;
+            bool     found = false;
+            while (ptr != 0 && ptr <= cap_offset_max && iter < cap_walk_max) {
                 uint32_t cap_dw = rc_cfg[ptr / 4u];
                 uint8_t  cap_id = (uint8_t)(cap_dw & 0xFFu);
                 uint8_t  next   = (uint8_t)((cap_dw >> 8) & 0xFFu);
                 if (cap_id == 0x10) {              /* PCI Express cap */
+                    found = true;
                     uint16_t lnkctl_off = (uint16_t)(ptr + 0x10u);
                     uint32_t lnkctl_dw  = rc_cfg[lnkctl_off / 4u];
                     uint16_t lnkctl     = (uint16_t)(lnkctl_dw & 0xFFFFu);
                     if (lnkctl & 0x0001u) {
                         INFO("pcie1: RC LNKCTL 0x%04x had ASPM_L0S set; "
                              "clearing", lnkctl);
+                        /* Dword-wide RMW. The upper 16 bits are
+                         * LNKSTA, which is RO/W1C — writing back
+                         * the previously-read value is a no-op for
+                         * its status bits, so this RMW does not
+                         * clobber link status accidentally. */
                         rc_cfg[lnkctl_off / 4u] =
                             (lnkctl_dw & 0xFFFF0000u) |
                             (uint32_t)(lnkctl & ~0x0001u);
@@ -837,10 +854,12 @@ static int bcm2712_train_link(void)
                     break;
                 }
                 ptr = (uint8_t)(next & 0xFCu);
+                iter++;
             }
-            if (ptr == 0) {
-                INFO("pcie1: RC cap list walked without finding "
-                     "PCIe cap (0x10)");
+            if (!found) {
+                INFO("pcie1: RC cap list ended without finding PCIe cap "
+                     "(0x10) — last ptr=0x%02x iter=%d (max=%d)",
+                     (unsigned)ptr, iter, cap_walk_max);
             }
         } else {
             INFO("pcie1: RC STATUS 0x%04x has no CAP_LIST bit — "

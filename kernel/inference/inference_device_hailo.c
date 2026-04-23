@@ -226,6 +226,29 @@ static bool hailo_fw_dump_d2h_notification_once(void)
     return true;
 }
 
+/* Pre-submit drain cap. Sized for "any reasonable backlog from boot
+ * + RPC chatter": observed worst case post-handshake on Pi 5 is ~30
+ * events (boot ECC scrub, identify echoes, context-switch progress
+ * reports), so 128 leaves comfortable headroom while still bounding
+ * the wall-clock cost (each drained event sleeps ~5 ms, so a full
+ * 128 takes ~640 ms — only paid in the pathological "fw is spamming
+ * us" case). The post-failure drain uses a smaller cap because by
+ * then we just want the most recent error event, not full history. */
+#define HAILO_D2H_PRE_SUBMIT_DRAIN_CAP   128u
+#define HAILO_D2H_POST_FAIL_DRAIN_CAP    8u
+
+/* OUT boundary-channel descriptor pre-fill depth. Linux's HailoRT
+ * issues 8 sequential single-desc OUTPUT launch_transfer calls
+ * before the first INPUT submit (Pi OS wire capture, 2026-04-22:
+ * docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt). If fw pre-
+ * fetches OUT descriptors ahead of num_avail for pipelining and
+ * trips on zero entries at [1..N], pre-filling N descriptors with
+ * the same buffer keeps the prefetch window valid even though we
+ * only consume one per inference. 8 matches HailoRT's observed
+ * count exactly. Track in the Phase 8 follow-up to remove or
+ * formalize once the actual mechanism is understood. */
+#define HAILO_BOUNDARY_OUT_PREFETCH_DEPTH 8u
+
 /* Drain pending notifications: for each one, dump it, ACK the buffer,
  * then delay a little so fw can write the next queued event before we
  * re-check. Bounded by `max_events` so we don't loop forever on a fw
@@ -1586,7 +1609,7 @@ static int hailo_backend_run(struct inference_device *dev,
      * ECC notification can sit in the buffer indefinitely, blocking
      * fw from delivering the event we actually want to see. */
     uart_printf("[d2h] pre-submit drain:\r\n");
-    hailo_fw_drain_d2h_notifications(128);
+    hailo_fw_drain_d2h_notifications(HAILO_D2H_PRE_SUBMIT_DRAIN_CAP);
 
     /* Copy caller's input into the pre-allocated DMA buffer +
      * cache-clean so the device picks up the fresh bytes.
@@ -1637,18 +1660,13 @@ static int hailo_backend_run(struct inference_device *dev,
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
-    /* Phase 8 experiment (2026-04-22): program OUT descs 1..7 to the
-     * same output buffer. Linux's HailoRT does 8 sequential single-desc
-     * OUTPUT launch_transfer calls before the first INPUT submit, so
-     * descs 0..7 are all valid when the first inference runs. If fw
-     * pre-fetches ahead of num_avail for pipelining, our single-desc
-     * setup (only OUT[0] valid) could trip on zero entries at [1..3]
-     * and stall. Filling in 7 spare descs pointing to the same buffer
-     * gives fw valid prefetch targets even though we only consume one
-     * per inference (num_avail stays at 1). A repeat OUT[0] overwrite
+    /* Phase 8 experiment (2026-04-22): pre-fill descs 1..N-1 with
+     * the same output buffer so fw's prefetch window has valid
+     * entries past OUT[0]. See HAILO_BOUNDARY_OUT_PREFETCH_DEPTH
+     * for the reference-count rationale. A repeat OUT[0] overwrite
      * is semantically harmless — for a single-inference run num_avail
      * only ever reaches 1 so fw never advances past OUT[0]. */
-    for (uint32_t i = 1; i < 8; i++) {
+    for (uint32_t i = 1; i < HAILO_BOUNDARY_OUT_PREFETCH_DEPTH; i++) {
         (void)hailo_vdma_program_buffer(
             &slot->boundary_out_list, i,
             slot->boundary_out_tensor.iova,
@@ -1708,7 +1726,7 @@ static int hailo_backend_run(struct inference_device *dev,
          * debug log is compact binary so less immediately useful, kept
          * for offset-advancement signals (chip_offset > last seen == fw
          * still writing). */
-        hailo_fw_drain_d2h_notifications(8);
+        hailo_fw_drain_d2h_notifications(HAILO_D2H_POST_FAIL_DRAIN_CAP);
         hailo_fw_dump_log(HAILO_FW_LOG_CORE_CPU_OFFSET, "CORE");
         hailo_fw_dump_log(HAILO_FW_LOG_APP_CPU_OFFSET,  "APP");
         goto run_out;
