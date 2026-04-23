@@ -1099,6 +1099,16 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    /* `hailo d2h` — drain whatever notifications fw has queued in the
+     * D2H mailbox without running an inference. Used to pinpoint when
+     * critical events (e.g., HEALTH_MONITOR_CPU_ECC_ERROR) actually
+     * fire — at boot, after load, or only on submit. */
+    if (argc >= 2 && strcmp(argv[1], "d2h") == 0) {
+        extern void hailo_fw_drain_d2h_notifications(uint32_t max_events);
+        hailo_fw_drain_d2h_notifications(8);
+        return 0;
+    }
+
 #ifdef CONFIG_AI_SCHEDULER
     /* Phase 8: run inference on a previously-loaded handle with
      * zeroed input. Measures end-to-end latency including our

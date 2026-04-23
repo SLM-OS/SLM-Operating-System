@@ -253,7 +253,7 @@ static bool hailo_fw_dump_d2h_notification_once(void)
  * then delay a little so fw can write the next queued event before we
  * re-check. Bounded by `max_events` so we don't loop forever on a fw
  * that re-writes the same event repeatedly. */
-static void hailo_fw_drain_d2h_notifications(uint32_t max_events)
+void hailo_fw_drain_d2h_notifications(uint32_t max_events)
 {
     for (uint32_t i = 0; i < max_events; i++) {
         bool had = hailo_fw_dump_d2h_notification_once();
