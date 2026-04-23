@@ -175,6 +175,46 @@ static void control_msi_handler(void *ctx)
             HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST, istatus);
         hailo_platform->mb();
     }
+
+    /* Phase 8 #253: ack per-channel VDMA IRQ registers on every IRQ.
+     * Reference hailo_pcie_read_interrupt (hailo-pcie-common.c:443-448)
+     * reads + clears BCS_SOURCE_INTERRUPT_PER_CHANNEL when the SRC
+     * aggregate bit is set and BCS_DESTINATION_INTERRUPT_PER_CHANNEL
+     * when the DEST aggregate bit is set. These are W1C status
+     * registers tracking which individual channels have fired since
+     * the last host read.
+     *
+     * Prior to this fix, SLM-OS only cleared the top-level ISTATUS_HOST
+     * aggregate bits and never touched the per-channel registers. The
+     * ftrace/kprobe capture of hailo_pci on Pi OS running MNIST showed
+     * ri (read_interrupt) firing hundreds of times per inference and
+     * consistently reading both per-channel registers — fw evidently
+     * expects the host to ack at this granularity. Without it, fw's
+     * internal completion state machine gets stuck and num_proc stops
+     * advancing on boundary channels, matching the Phase 8 stall
+     * symptom (ch=2 frozen with 0 register changes across the full
+     * wait window). */
+    if (istatus & HAILO_BCS_ISTATUS_HOST_VDMA_SRC_MASK) {
+        uint32_t src_bits = hailo_platform->read32(
+            HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL);
+        if (src_bits != 0) {
+            hailo_platform->write32(
+                HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL,
+                src_bits);
+        }
+    }
+    if (istatus & HAILO_BCS_ISTATUS_HOST_VDMA_DEST_MASK) {
+        uint32_t dst_bits = hailo_platform->read32(
+            HAILO_BAR_CONFIG, HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL);
+        if (dst_bits != 0) {
+            hailo_platform->write32(
+                HAILO_BAR_CONFIG,
+                HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
+                dst_bits);
+        }
+    }
+    hailo_platform->mb();
+
     if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
         __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);
     }
