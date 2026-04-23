@@ -79,6 +79,24 @@ void *pmm_alloc_page(void);
 void *pmm_alloc_pages(size_t count);
 
 /*
+ * Allocate contiguous physical pages, preferring the LOWEST-address
+ * free block large enough. Same shape as pmm_alloc_pages but walks
+ * every free list to pick the lowest-address candidate, splitting
+ * down as needed.
+ *
+ * Use case: PCIe inbound translation windows on some platforms only
+ * cover the bottom of physical RAM, so DMA buffers MUST live there.
+ * The buddy allocator's normal LIFO pop returns high-end blocks,
+ * which puts DMA targets out of reach. This helper is a directed
+ * "give me low memory" probe — slower than pmm_alloc_pages (linear
+ * scan of free lists) but used rarely (per-load, not per-submit).
+ *
+ * @count: Number of contiguous pages. Rounded up to next power of 2.
+ * Returns: Physical address of first page, or NULL on failure.
+ */
+void *pmm_alloc_pages_low(size_t count);
+
+/*
  * Free a single physical page.
  *
  * @page: Physical address of page to free (must be page-aligned).

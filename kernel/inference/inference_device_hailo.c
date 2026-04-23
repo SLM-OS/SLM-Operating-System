@@ -849,6 +849,18 @@ static int context_switch_load(struct hailo_model_slot *slot,
             ? (uint32_t)in_pad->height * in_pad->width * in_pad->features
             : bpb * bpf;
         if (in_bytes == 0) in_bytes = bpb * bpf;  /* shape-less fallback */
+
+#if defined(PLATFORM_RASPI5)
+        /* Phase 8 boundary-submit probe (2026-04-23 — see
+         * docs/reference/hailort-trace-findings-vdma-2026-04-23.md):
+         * route boundary IN/OUT tensors + desc lists through the
+         * low-PMM allocator so their IOVAs land in the bottom of
+         * physical RAM. Reverts to default after the boundary
+         * allocations finish so any subsequent control-channel
+         * allocations stay on the normal high-bias path. */
+        extern void hailo_pi5_force_low_dma(bool enable);
+        hailo_pi5_force_low_dma(true);
+#endif
         rc = hailo_tensor_alloc(in_bytes, &slot->boundary_in_tensor);
         if (rc != HAILO_OK) {
             WARN("hailo backend: boundary IN tensor alloc failed (rc=%d)", rc);
@@ -941,6 +953,13 @@ static int context_switch_load(struct hailo_model_slot *slot,
         }
         boundary_out_iova = slot->boundary_out_list.iova;
     }
+#if defined(PLATFORM_RASPI5)
+    /* Revert to default high-bias allocation for any subsequent
+     * non-boundary buffers (CCW etc. — though those are usually
+     * allocated earlier in load). */
+    extern void hailo_pi5_force_low_dma(bool enable);
+    hailo_pi5_force_low_dma(false);
+#endif
     cs_load_stage_set(21);
 
     /* Step 3: translate_cfg. The boundary IOVA fields are zero if the

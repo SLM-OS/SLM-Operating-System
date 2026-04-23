@@ -1,0 +1,1786 @@
+6,0,0,-;Booting Linux on physical CPU 0x0000000000 [0x414fd0b1]
+5,1,0,-;Linux version 6.12.75+rpt-rpi-2712 (serge@raspberrypi.com) (aarch64-linux-gnu-gcc-14 (Debian 14.2.0-19) 14.2.0, GNU ld (GNU Binutils for Debian) 2.44) #1 SMP PREEMPT Debian 1:6.12.75-1+rpt1 (2026-03-11)
+6,2,0,-;KASLR enabled
+5,3,0,-;random: crng init done
+6,4,0,-;Machine model: Raspberry Pi 5 Model B Rev 1.0
+6,5,0,-;efi: UEFI not found.
+6,6,0,-;Reserved memory: created CMA memory pool at 0x000000003a000000, size 64 MiB
+6,7,0,-;OF: reserved mem: initialized node linux,cma, compatible id shared-dma-pool
+6,8,0,-;OF: reserved mem: 0x000000003a000000..0x000000003dffffff (65536 KiB) map reusable linux,cma
+6,9,0,-;OF: reserved mem: 0x0000000000000000..0x000000000007ffff (512 KiB) nomap non-reusable atf@0
+6,10,0,-;OF: reserved mem: 0x000000003fd16780..0x000000003fd167b7 (0 KiB) nomap non-reusable nvram@0
+6,11,0,-;NUMA: Faking a node at [mem 0x0000000000000000-0x00000000ffffffff]
+6,12,0,-;NODE_DATA(0) allocated [mem 0xffd9c580-0xffd9f37f]
+6,13,0,-;Zone ranges:
+6,14,0,-;  DMA      [mem 0x0000000000000000-0x00000000ffffffff]
+6,15,0,-;  DMA32    empty
+6,16,0,-;  Normal   empty
+6,17,0,-;Movable zone start for each node
+6,18,0,-;Early memory node ranges
+6,19,0,-;  node   0: [mem 0x0000000000000000-0x000000000007ffff]
+6,20,0,-;  node   0: [mem 0x0000000000080000-0x000000003fbfffff]
+6,21,0,-;  node   0: [mem 0x0000000040000000-0x00000000ffffffff]
+6,22,0,-;Initmem setup node 0 [mem 0x0000000000000000-0x00000000ffffffff]
+6,23,0,-;On node 0, zone DMA: 256 pages in unavailable ranges
+6,24,0,-;psci: probing for conduit method from DT.
+6,25,0,-;psci: PSCIv1.1 detected in firmware.
+6,26,0,-;psci: Using standard PSCI v0.2 function IDs
+6,27,0,-;psci: MIGRATE_INFO_TYPE not supported.
+6,28,0,-;psci: SMC Calling Convention v1.2
+6,29,0,-;percpu: Embedded 15 pages/cpu s193560 r8192 d44008 u245760
+7,30,0,-;pcpu-alloc: s193560 r8192 d44008 u245760 alloc=15*16384
+7,31,0,-;pcpu-alloc: [0] 0 [0] 1 [0] 2 [0] 3 
+6,32,0,-;Detected PIPT I-cache on CPU0
+6,33,0,-;CPU features: detected: Virtualization Host Extensions
+6,34,0,-;CPU features: detected: Spectre-v4
+6,35,0,-;CPU features: detected: Spectre-BHB
+6,36,0,-;CPU features: kernel page table isolation forced ON by KASLR
+6,37,0,-;CPU features: detected: Kernel page table isolation (KPTI)
+6,38,0,-;CPU features: detected: SSBS not fully self-synchronizing
+6,39,0,-;alternatives: applying boot alternatives
+5,40,0,-;Kernel command line: reboot=w coherent_pool=1M 8250.nr_uarts=1 pci=pcie_bus_safe cgroup_disable=memory numa_policy=interleave nvme.max_host_mem_size_mb=0  smsc95xx.macaddr=2C:CF:67:24:BA:C5 vc_mem.mem_base=0x3fc00000 vc_mem.mem_size=0x40000000  console=ttyAMA10,115200 console=tty1 root=PARTUUID=1d0c498d-03 rootfstype=ext4 fsck.repair=yes rootwait
+6,41,0,-;cgroup: Disabling memory control group subsystem
+6,42,0,-;mempolicy: NUMA default policy overridden to 'interleave:0'
+6,43,0,-;Dentry cache hash table entries: 524288 (order: 8, 4194304 bytes, linear)
+6,44,0,-;Inode-cache hash table entries: 262144 (order: 7, 2097152 bytes, linear)
+6,45,0,-;Fallback order for Node 0: 0 
+6,46,0,-;Built 1 zonelists, mobility grouping on.  Total pages: 261888
+6,47,0,-;Policy zone: DMA
+6,48,0,-;mem auto-init: stack:all(zero), heap alloc:off, heap free:off
+6,49,0,-;SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=4, Nodes=1
+6,50,0,-;ftrace: allocating 45326 entries in 45 pages
+6,51,0,-;ftrace: allocated 45 pages with 4 groups
+6,52,0,-;rcu: Preemptible hierarchical RCU implementation.
+6,53,0,-;rcu: \x09RCU event tracing is enabled.
+6,54,0,-;\x09Trampoline variant of Tasks RCU enabled.
+6,55,0,-;\x09Rude variant of Tasks RCU enabled.
+6,56,0,-;\x09Tracing variant of Tasks RCU enabled.
+6,57,0,-;rcu: RCU calculated value of scheduler-enlistment delay is 25 jiffies.
+6,58,0,-;RCU Tasks: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+6,59,0,-;RCU Tasks Rude: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+6,60,0,-;RCU Tasks Trace: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+6,61,0,-;NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+6,62,0,-;Root IRQ handler: gic_handle_irq
+6,63,0,-;GIC: Using split EOI/Deactivate mode
+6,64,0,-;rcu: srcu_init: Setting srcu_struct sizes based on contention.
+6,65,0,-;arch_timer: cp15 timer(s) running at 54.00MHz (phys).
+6,66,0,-;clocksource: arch_sys_counter: mask: 0xffffffffffffff max_cycles: 0xc743ce346, max_idle_ns: 440795203123 ns
+6,67,0,-;sched_clock: 56 bits at 54MHz, resolution 18ns, wraps every 4398046511102ns
+6,68,110,-;Console: colour dummy device 80x25
+6,69,115,-;printk: legacy console [tty1] enabled
+6,70,309,-;Calibrating delay loop (skipped), value calculated using timer frequency.. 108.00 BogoMIPS (lpj=216000)
+6,71,318,-;pid_max: default: 32768 minimum: 301
+6,72,343,-;LSM: initializing lsm=capability
+6,73,425,-;Mount-cache hash table entries: 8192 (order: 2, 65536 bytes, linear)
+6,74,442,-;Mountpoint-cache hash table entries: 8192 (order: 2, 65536 bytes, linear)
+6,75,1247,-;rcu: Hierarchical SRCU implementation.
+6,76,1257,-;rcu: \x09Max phase no-delay instances is 1000.
+6,77,1322,-;Timer migration: 1 hierarchy levels; 8 children per group; 1 crossnode level
+6,78,1798,-;EFI services will not be available.
+6,79,1864,-;smp: Bringing up secondary CPUs ...
+6,80,2080,-;Detected PIPT I-cache on CPU1
+6,81,2120,-;CPU1: Booted secondary processor 0x0000000100 [0x414fd0b1]
+6,82,2354,-;Detected PIPT I-cache on CPU2
+6,83,2387,-;CPU2: Booted secondary processor 0x0000000200 [0x414fd0b1]
+6,84,2629,-;Detected PIPT I-cache on CPU3
+6,85,2657,-;CPU3: Booted secondary processor 0x0000000300 [0x414fd0b1]
+6,86,2693,-;smp: Brought up 1 node, 4 CPUs
+6,87,2713,-;SMP: Total of 4 processors activated.
+6,88,2716,-;CPU: All CPU(s) started at EL2
+6,89,2720,-;CPU features: detected: 32-bit EL0 Support
+6,90,2724,-;CPU features: detected: Data cache clean to the PoU not required for I/D coherence
+6,91,2730,-;CPU features: detected: Common not Private translations
+6,92,2733,-;CPU features: detected: CRC32 instructions
+6,93,2739,-;CPU features: detected: RCpc load-acquire (LDAPR)
+6,94,2742,-;CPU features: detected: LSE atomic instructions
+6,95,2746,-;CPU features: detected: Privileged Access Never
+6,96,2749,-;CPU features: detected: RAS Extension Support
+6,97,2754,-;CPU features: detected: Speculative Store Bypassing Safe (SSBS)
+6,98,2780,-;alternatives: applying system-wide alternatives
+6,99,4367,-;CPU features: detected: Hardware dirty bit management on CPU0-3
+6,100,4599,-;Memory: 4050384K/4190208K available (14336K kernel code, 2432K rwdata, 4944K rodata, 2304K init, 647K bss, 67296K reserved, 65536K cma-reserved)
+6,101,4769,-;devtmpfs: initialized
+5,102,7662,-;Enabled cp15_barrier support
+5,103,7672,-;Enabled setend support
+6,104,7735,-;clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645041785100000 ns
+6,105,7744,-;futex hash table entries: 1024 (order: 2, 65536 bytes, linear)
+6,106,7933,-;2G module region forced by RANDOMIZE_MODULE_REGION_FULL
+6,107,7937,-;0 pages in range for non-PLT usage
+6,108,7938,-;129508 pages in range for PLT usage
+6,109,7994,-;pinctrl core: initialized pinctrl subsystem
+6,110,8154,-;DMI not present or invalid.
+6,111,8806,-;NET: Registered PF_NETLINK/PF_ROUTE protocol family
+6,112,9322,-;DMA: preallocated 1024 KiB GFP_KERNEL pool for atomic allocations
+6,113,9410,-;DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
+6,114,9503,-;DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
+6,115,9525,-;audit: initializing netlink subsys (disabled)
+5,116,9581,-;audit: type=2000 audit(0.008:1): state=initialized audit_enabled=0 res=1
+6,117,9712,-;thermal_sys: Registered thermal governor 'step_wise'
+6,118,9724,-;cpuidle: using governor menu
+6,119,9783,-;hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
+6,120,9817,-;ASID allocator initialised with 32768 entries
+6,121,10146,-;Serial: AMBA PL011 UART driver
+6,122,11276,-;/soc@107c000000/interrupt-controller@7fff9000: Fixed dependency cycle(s) with /soc@107c000000/interrupt-controller@7fff9000
+6,123,11513,-;bcm2835-mbox 107c013880.mailbox: mailbox enabled
+ SUBSYSTEM=platform
+ DEVICE=+platform:107c013880.mailbox
+6,124,11679,-;107d001000.serial: ttyAMA10 at MMIO 0x107d001000 (irq = 16, base_baud = 0) is a PL011 AXI
+6,125,11695,-;printk: legacy console [ttyAMA10] enabled
+6,126,798357,-;raspberrypi-firmware soc@107c000000:firmware: Attached to firmware from 2024-09-23T13:02:56, variant start_cd
+ SUBSYSTEM=platform
+ DEVICE=+platform:soc@107c000000:firmware
+6,127,813374,-;raspberrypi-firmware soc@107c000000:firmware: Firmware hash is 2682625900000000000000000000000000000000
+ SUBSYSTEM=platform
+ DEVICE=+platform:soc@107c000000:firmware
+6,128,831223,-;bcm2835-dma 1000010000.dma: DMA legacy API manager, dmachans=0x1
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000010000.dma
+6,129,838914,-;iommu: Default domain type: Translated
+6,130,843857,-;iommu: DMA domain TLB invalidation policy: strict mode
+5,131,850218,-;SCSI subsystem initialized
+6,132,854023,-;usbcore: registered new interface driver usbfs
+6,133,859542,-;usbcore: registered new interface driver hub
+6,134,864880,-;usbcore: registered new device driver usb
+6,135,870046,-;pps_core: LinuxPPS API ver. 1 registered
+6,136,875031,-;pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+6,137,884206,-;PTP clock support registered
+6,138,888470,-;vgaarb: loaded
+6,139,891282,-;clocksource: Switched to clocksource arch_sys_counter
+5,140,1120732,-;VFS: Disk quotas dquot_6.6.0
+6,141,1124687,-;VFS: Dquot-cache hash table entries: 2048 (order 0, 16384 bytes)
+6,142,1133607,-;NET: Registered PF_INET protocol family
+6,143,1138601,-;IP idents hash table entries: 65536 (order: 5, 524288 bytes, linear)
+6,144,1147595,-;tcp_listen_portaddr_hash hash table entries: 2048 (order: 1, 32768 bytes, linear)
+6,145,1156195,-;Table-perturb hash table entries: 65536 (order: 4, 262144 bytes, linear)
+6,146,1163976,-;TCP established hash table entries: 32768 (order: 4, 262144 bytes, linear)
+6,147,1172064,-;TCP bind hash table entries: 32768 (order: 6, 1048576 bytes, linear)
+6,148,1180204,-;TCP: Hash tables configured (established 32768 bind 32768)
+6,149,1186879,-;MPTCP token hash table entries: 4096 (order: 3, 98304 bytes, linear)
+6,150,1194360,-;UDP hash table entries: 2048 (order: 2, 65536 bytes, linear)
+6,151,1201163,-;UDP-Lite hash table entries: 2048 (order: 2, 65536 bytes, linear)
+6,152,1208427,-;NET: Registered PF_UNIX/PF_LOCAL protocol family
+6,153,1214234,-;RPC: Registered named UNIX socket transport module.
+6,154,1220181,-;RPC: Registered udp transport module.
+6,155,1224901,-;RPC: Registered tcp transport module.
+6,156,1229621,-;RPC: Registered tcp-with-tls transport module.
+6,157,1235126,-;RPC: Registered tcp NFSv4.1 backchannel transport module.
+6,158,1241602,-;PCI: CLS 0 bytes, default 64
+6,159,1245643,-;Trying to unpack rootfs image as initramfs...
+6,160,1257361,-;kvm [1]: nv: 554 coarse grained trap handlers
+6,161,1263077,-;kvm [1]: IPA Size Limit: 40 bits
+6,162,1267414,-;kvm [1]: GICV region size/alignment is unsafe, using trapping (reduced performance)
+6,163,1276183,-;kvm [1]: vgic interrupt IRQ9
+6,164,1280138,-;kvm [1]: VHE mode initialized successfully
+5,165,1287808,-;Initialise system trusted keyrings
+6,166,1295388,-;workingset: timestamp_bits=42 max_order=18 bucket_order=0
+5,167,1302244,-;NFS: Registering the id_resolver key type
+5,168,1307344,-;Key type id_resolver registered
+5,169,1311544,-;Key type id_legacy registered
+6,170,1315575,-;nfs4filelayout_init: NFSv4 File Layout Driver Registering...
+6,171,1322310,-;nfs4flexfilelayout_init: NFSv4 Flexfile Layout Driver Registering...
+5,172,1329998,-;Key type asymmetric registered
+5,173,1334126,-;Asymmetric key parser 'x509' registered
+6,174,1339052,-;Block layer SCSI generic (bsg) driver version 0.4 loaded (major 247)
+6,175,1346584,-;io scheduler mq-deadline registered
+6,176,1351136,-;io scheduler kyber registered
+6,177,1355172,-;io scheduler bfq registered
+6,178,1359629,-;irq_brcmstb_l2: registered L2 intc (/soc@107c000000/interrupt-controller@7d510600, parent irq: 27)
+6,179,1369824,-;irq_brcmstb_l2: registered L2 intc (/soc@107c000000/interrupt-controller@7c502000, parent irq: 28)
+6,180,1379960,-;irq_brcmstb_l2: registered L2 intc (/soc@107c000000/intc@7d508380, parent irq: 29)
+6,181,1388708,-;irq_brcmstb_l2: registered L2 intc (/soc@107c000000/intc@7d508400, parent irq: 30)
+6,182,1397473,-;irq_brcmstb_l2: registered L2 intc (/soc@107c000000/intc@7d503000, parent irq: 31)
+6,183,1407825,-;ledtrig-cpu: registered to indicate activity on CPUs
+6,184,1423459,-;Freeing initrd memory: 15648K
+6,185,1462532,-;Serial: 8250/16550 driver, 1 ports, IRQ sharing enabled
+6,186,1469310,-;107d50c000.serial: ttyS0 at MMIO 0x107d50c000 (irq = 33, base_baud = 6000000) is a Broadcom BCM7271 UART
+6,187,1479948,-;serial serial0: tty port ttyS0 registered
+ SUBSYSTEM=serial
+ DEVICE=+serial:serial0
+6,188,1485423,-;iproc-rng200 107d208000.rng: hwrng registered
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d208000.rng
+6,189,1490893,-;vc-mem: phys_addr:0x00000000 mem_base=0x3fc00000 mem_size:0x40000000(1024 MiB)
+6,190,1499471,-;bcm2712-iommu-cache 1000005b00.iommuc: bcm2712_iommu_cache_probe
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000005b00.iommuc
+6,191,1508543,-;brd: module loaded
+6,192,1513039,-;loop: module loaded
+6,193,1516328,-;bcm2835-power bcm2835-power: Broadcom BCM2835 power domains driver
+ SUBSYSTEM=platform
+ DEVICE=+platform:bcm2835-power
+6,194,1523747,-;Loading iSCSI transport class v2.0-870.
+6,195,1529630,-;usbcore: registered new interface driver lan78xx
+6,196,1535331,-;usbcore: registered new interface driver smsc95xx
+6,197,1541171,-;dwc_otg: version 3.00a 10-AUG-2012 (platform bus)
+7,198,1546965,-;dwc_otg: FIQ enabled
+7,199,1546967,-;dwc_otg: NAK holdoff enabled
+7,200,1546968,-;dwc_otg: FIQ split-transaction FSM enabled
+7,201,1546971,-;Module dwc_common_port init
+6,202,1547271,-;usbcore: registered new interface driver uas
+6,203,1552616,-;usbcore: registered new interface driver usb-storage
+6,204,1558745,-;mousedev: PS/2 mouse device common for all mice
+6,205,1572688,-;rpi-rtc soc@107c000000:rpi_rtc: registered as rtc0
+ SUBSYSTEM=platform
+ DEVICE=+platform:soc@107c000000:rpi_rtc
+6,206,1580060,-;rpi-rtc soc@107c000000:rpi_rtc: setting system clock to 1970-01-01T00:00:11 UTC (11)
+ SUBSYSTEM=platform
+ DEVICE=+platform:soc@107c000000:rpi_rtc
+6,207,1589307,-;bcm2835-wdt bcm2835-wdt: Poweroff handler already present!
+ SUBSYSTEM=platform
+ DEVICE=+platform:bcm2835-wdt
+6,208,1595868,-;bcm2835-wdt bcm2835-wdt: Broadcom BCM2835 watchdog timer
+ SUBSYSTEM=platform
+ DEVICE=+platform:bcm2835-wdt
+6,209,1604654,-;sdhci: Secure Digital Host Controller Interface driver
+6,210,1610867,-;sdhci: Copyright(c) Pierre Ossman
+6,211,1615307,-;sdhci-pltfm: SDHCI platform and OF driver helper
+6,212,1621103,-;SMCCC: SOC_ID: ARCH_SOC_ID not implemented, skipping ....
+6,213,1627594,-;hid: raw HID events driver (C) Jiri Kosina
+6,214,1632790,-;usbcore: registered new interface driver usbhid
+6,215,1638388,-;usbhid: USB HID core driver
+6,216,1642528,-;hw perfevents: enabled with armv8_cortex_a76 PMU driver, 7 (0,8000003f) counters available
+6,217,1652109,-;NET: Registered PF_PACKET protocol family
+5,218,1657198,-;Key type dns_resolver registered
+6,219,1665259,-;registered taskstats version 1
+5,220,1669434,-;Loading compiled-in X.509 certificates
+6,221,1675992,-;Demotion targets for Node 0: null
+5,222,1680505,-;Key type .fscrypt registered
+5,223,1684459,-;Key type fscrypt-provisioning registered
+6,224,1690505,-;brcm-pcie 1000110000.pcie: host bridge /axi/pcie@1000110000 ranges:
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000110000.pcie
+6,225,1697864,-;brcm-pcie 1000110000.pcie:   No bus range found for /axi/pcie@1000110000, using [bus 00-ff]
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000110000.pcie
+6,226,1707533,-;brcm-pcie 1000110000.pcie:      MEM 0x1b80000000..0x1bffffffff -> 0x0080000000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000110000.pcie
+6,227,1715840,-;brcm-pcie 1000110000.pcie:      MEM 0x1800000000..0x1b7fffffff -> 0x0400000000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000110000.pcie
+6,228,1724146,-;brcm-pcie 1000110000.pcie:   IB MEM 0x0000000000..0x0fffffffff -> 0x1000000000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000110000.pcie
+6,229,1732449,-;brcm-pcie 1000110000.pcie:   IB MEM 0x1000131000..0x1000131fff -> 0xfffffff000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000110000.pcie
+6,230,1742144,-;brcm-pcie 1000110000.pcie: PCI host bridge to bus 0001:00
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000110000.pcie
+6,231,1748613,-;pci_bus 0001:00: root bus resource [bus 00-ff]
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0001:00
+6,232,1754137,-;pci_bus 0001:00: root bus resource [mem 0x1b80000000-0x1bffffffff] (bus address [0x80000000-0xffffffff])
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0001:00
+6,233,1764713,-;pci_bus 0001:00: root bus resource [mem 0x1800000000-0x1b7fffffff pref] (bus address [0x400000000-0x77fffffff])
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0001:00
+6,234,1775908,-;pci 0001:00:00.0: [14e4:2712] type 01 class 0x060400 PCIe Root Port
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,235,1783262,-;pci 0001:00:00.0: PCI bridge to [bus 00]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,236,1788252,-;pci 0001:00:00.0:   bridge window [mem 0x00000000-0x000fffff]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,237,1795081,-;pci 0001:00:00.0:   bridge window [mem 0x00000000-0x000fffff 64bit pref]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,238,1802880,-;pci 0001:00:00.0: PME# supported from D0 D3hot
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,239,1808974,-;pci 0001:00:00.0: bridge configuration invalid ([bus 00-00]), reconfiguring
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,240,1919283,-;brcm-pcie 1000110000.pcie: clkreq-mode set to safe
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000110000.pcie
+6,241,1925142,-;brcm-pcie 1000110000.pcie: link up, 5.0 GT/s PCIe x1 (!SSC)
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000110000.pcie
+6,242,1931810,-;pci 0001:01:00.0: [1e60:2864] type 00 class 0x0b4000 PCIe Endpoint
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,243,1939081,-;pci 0001:01:00.0: BAR 0 [mem 0x00000000-0x00003fff 64bit pref]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,244,1945996,-;pci 0001:01:00.0: BAR 2 [mem 0x00000000-0x00000fff 64bit pref]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,245,1952921,-;pci 0001:01:00.0: BAR 4 [mem 0x00000000-0x00003fff 64bit pref]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,246,1959904,-;pci 0001:01:00.0: PME# supported from D3hot
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,247,1965192,-;pci 0001:01:00.0: 4.000 Gb/s available PCIe bandwidth, limited by 5.0 GT/s PCIe x1 link at 0001:00:00.0 (capable of 31.504 Gb/s with 8.0 GT/s PCIe x4 link)
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,248,1987297,-;pci_bus 0001:01: busn_res: [bus 01-ff] end is updated to 01
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0001:01
+6,249,1993949,-;pci 0001:00:00.0: bridge window [mem 0x1800000000-0x18000fffff 64bit pref]: assigned
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,250,2002780,-;pci 0001:01:00.0: BAR 0 [mem 0x1800000000-0x1800003fff 64bit pref]: assigned
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,251,2010920,-;pci 0001:01:00.0: BAR 4 [mem 0x1800004000-0x1800007fff 64bit pref]: assigned
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,252,2019056,-;pci 0001:01:00.0: BAR 2 [mem 0x1800008000-0x1800008fff 64bit pref]: assigned
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,253,2027188,-;pci 0001:00:00.0: PCI bridge to [bus 01]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,254,2032169,-;pci 0001:00:00.0:   bridge window [mem 0x1800000000-0x18000fffff 64bit pref]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,255,2040295,-;pci_bus 0001:00: resource 4 [mem 0x1b80000000-0x1bffffffff]
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0001:00
+6,256,2046935,-;pci_bus 0001:00: resource 5 [mem 0x1800000000-0x1b7fffffff pref]
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0001:00
+6,257,2054012,-;pci_bus 0001:01: resource 2 [mem 0x1800000000-0x18000fffff 64bit pref]
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0001:01
+6,258,2061612,-;pci 0001:00:00.0: Max Payload Size set to  256/ 512 (was  128), Max Read Rq  512
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,259,2070093,-;pci 0001:01:00.0: Max Payload Size set to  256/ 256 (was  128), Max Read Rq  512
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,260,2078628,-;pcieport 0001:00:00.0: enabling device (0000 -> 0002)
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,261,2084773,-;pcieport 0001:00:00.0: PME: Signaling with IRQ 38
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,262,2090589,-;pcieport 0001:00:00.0: AER: enabled with IRQ 38
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:00:00.0
+6,263,2096310,-;brcm-pcie 1000120000.pcie: host bridge /axi/pcie@1000120000 ranges:
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,264,2103653,-;brcm-pcie 1000120000.pcie:   No bus range found for /axi/pcie@1000120000, using [bus 00-ff]
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,265,2113095,-;brcm-pcie 1000120000.pcie:      MEM 0x1f00000000..0x1ffffffffb -> 0x0000000000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,266,2121399,-;brcm-pcie 1000120000.pcie:      MEM 0x1c00000000..0x1effffffff -> 0x0400000000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,267,2129704,-;brcm-pcie 1000120000.pcie:   IB MEM 0x1f00000000..0x1f003fffff -> 0x0000000000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,268,2138008,-;brcm-pcie 1000120000.pcie:   IB MEM 0x0000000000..0x0fffffffff -> 0x1000000000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,269,2146314,-;brcm-pcie 1000120000.pcie:   IB MEM 0x1000130000..0x1000130fff -> 0xfffffff000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,270,2155754,-;brcm-pcie 1000120000.pcie: PCI host bridge to bus 0002:00
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,271,2162221,-;pci_bus 0002:00: root bus resource [bus 00-ff]
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0002:00
+6,272,2167735,-;pci_bus 0002:00: root bus resource [mem 0x1f00000000-0x1ffffffffb] (bus address [0x00000000-0xfffffffb])
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0002:00
+6,273,2178311,-;pci_bus 0002:00: root bus resource [mem 0x1c00000000-0x1effffffff pref] (bus address [0x400000000-0x6ffffffff])
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0002:00
+6,274,2189501,-;pci 0002:00:00.0: [14e4:2712] type 01 class 0x060400 PCIe Root Port
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,275,2196846,-;pci 0002:00:00.0: PCI bridge to [bus 00]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,276,2201837,-;pci 0002:00:00.0:   bridge window [mem 0x1ff8000000-0x1ff80fffff]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,277,2209019,-;pci 0002:00:00.0: PME# supported from D0 D3hot
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,278,2215103,-;pci 0002:00:00.0: bridge configuration invalid ([bus 00-00]), reconfiguring
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,279,2323287,-;brcm-pcie 1000120000.pcie: clkreq-mode set to default
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,280,2329402,-;brcm-pcie 1000120000.pcie: link up, 5.0 GT/s PCIe x4 (!SSC)
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000120000.pcie
+6,281,2336062,-;pci 0002:01:00.0: [1de4:0001] type 00 class 0x020000 PCIe Endpoint
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,282,2343323,-;pci 0002:01:00.0: BAR 0 [mem 0xffffc000-0xffffffff]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,283,2349270,-;pci 0002:01:00.0: BAR 1 [mem 0xffc00000-0xffffffff]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,284,2355214,-;pci 0002:01:00.0: BAR 2 [mem 0xffff0000-0xffffffff]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,285,2361218,-;pci 0002:01:00.0: supports D1
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,286,2365238,-;pci 0002:01:00.0: PME# supported from D0 D1 D3hot D3cold
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,287,2379292,-;pci_bus 0002:01: busn_res: [bus 01-ff] end is updated to 01
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0002:01
+6,288,2385942,-;pci 0002:00:00.0: bridge window [mem 0x1f00000000-0x1f005fffff]: assigned
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,289,2393812,-;pci 0002:01:00.0: BAR 1 [mem 0x1f00000000-0x1f003fffff]: assigned
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,290,2400985,-;pci 0002:01:00.0: BAR 2 [mem 0x1f00400000-0x1f0040ffff]: assigned
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,291,2408161,-;pci 0002:01:00.0: BAR 0 [mem 0x1f00410000-0x1f00413fff]: assigned
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,292,2415343,-;pci 0002:00:00.0: PCI bridge to [bus 01]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,293,2420326,-;pci 0002:00:00.0:   bridge window [mem 0x1f00000000-0x1f005fffff]
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,294,2427492,-;pci_bus 0002:00: resource 4 [mem 0x1f00000000-0x1ffffffffb]
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0002:00
+6,295,2434130,-;pci_bus 0002:00: resource 5 [mem 0x1c00000000-0x1effffffff pref]
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0002:00
+6,296,2441208,-;pci_bus 0002:01: resource 1 [mem 0x1f00000000-0x1f005fffff]
+ SUBSYSTEM=pci_bus
+ DEVICE=+pci_bus:0002:01
+6,297,2447849,-;pci 0002:00:00.0: Max Payload Size set to  256/ 512 (was  128), Max Read Rq  512
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,298,2456328,-;pci 0002:01:00.0: Max Payload Size set to  256/ 256 (was  128), Max Read Rq  512
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,299,2464859,-;pcieport 0002:00:00.0: enabling device (0000 -> 0002)
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,300,2471000,-;pcieport 0002:00:00.0: PME: Signaling with IRQ 39
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,301,2476818,-;pcieport 0002:00:00.0: AER: enabled with IRQ 39
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:00:00.0
+6,302,2482496,-;rp1 0002:01:00.0: bar0 len 0x4000, start 0x1f00410000, end 0x1f00413fff, flags, 0x40200
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,303,2491586,-;rp1 0002:01:00.0: bar1 len 0x400000, start 0x1f00000000, end 0x1f003fffff, flags, 0x40200
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,304,2500858,-;rp1 0002:01:00.0: enabling device (0000 -> 0002)
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,305,2507162,-;rp1 0002:01:00.0: chip_id 0x20001927
+ SUBSYSTEM=pci
+ DEVICE=+pci:0002:01:00.0
+6,306,2516252,-;bcm2712-iommu 1000005100.iommu: IOVA aperture 0xa00000000..0xb00000000 including DMA offset 0x0
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000005100.iommu
+6,307,2526062,-;bcm2712-iommu 1000005100.iommu: bcm2712_iommu_init: DEBUG_INFO = 0x20804774
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000005100.iommu
+6,308,2534177,-;bcm2712-iommu 1000005200.iommu: IOVA aperture 0xa00000000..0xa80000000 including DMA offset 0x0
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000005200.iommu
+6,309,2543978,-;bcm2712-iommu 1000005200.iommu: bcm2712_iommu_init: DEBUG_INFO = 0x20804774
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000005200.iommu
+6,310,2552080,-;bcm2712-iommu 1000005280.iommu: IOVA aperture 0x1a00000000..0x1a80000000 including DMA offset 0x1000000000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000005280.iommu
+6,311,2562859,-;bcm2712-iommu 1000005280.iommu: bcm2712_iommu_init: DEBUG_INFO = 0x20804774
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000005280.iommu
+4,312,2571232,-;genirq: irq_chip rp1_irq_chip did not update eff. affinity mask of irq 101
+6,313,2579348,-;sdhci-brcmstb 1000fff000.mmc: Got CD GPIO
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000fff000.mmc
+6,314,2579451,-;mmc1: CQHCI version 5.10
+6,315,2584551,-;mmc0: CQHCI version 5.10
+6,316,2602964,-;macb 1f00100000.ethernet eth0: Cadence GEM rev 0x00070109 at 0x1f00100000 irq 107 (2c:cf:67:24:ba:c5)
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f00100000.ethernet
+6,317,2615516,-;dw_axi_dmac_platform 1f00188000.dma: DesignWare AXI DMA Controller, 8 channels
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f00188000.dma
+6,318,2624034,-;xhci-hcd xhci-hcd.0: xHCI Host Controller
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.0
+6,319,2627529,-;mmc0: SDHCI controller on 1000fff000.mmc [1000fff000.mmc] using ADMA 64-bit
+6,320,2629109,-;xhci-hcd xhci-hcd.0: new USB bus registered, assigned bus number 1
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.0
+6,321,2644821,-;xhci-hcd xhci-hcd.0: hcc params 0x0240fe6d hci version 0x110 quirks 0x0000808000000810
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.0
+6,322,2653826,-;xhci-hcd xhci-hcd.0: irq 132, io mem 0x1f00200000
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.0
+6,323,2659654,-;xhci-hcd xhci-hcd.0: xHCI Host Controller
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.0
+6,324,2664723,-;xhci-hcd xhci-hcd.0: new USB bus registered, assigned bus number 2
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.0
+6,325,2671973,-;xhci-hcd xhci-hcd.0: Host supports USB 3.0 SuperSpeed
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.0
+6,326,2678124,-;usb usb1: New USB device found, idVendor=1d6b, idProduct=0002, bcdDevice= 6.12
+ SUBSYSTEM=usb
+ DEVICE=c189:0
+6,327,2686425,-;usb usb1: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+ SUBSYSTEM=usb
+ DEVICE=c189:0
+6,328,2693678,-;usb usb1: Product: xHCI Host Controller
+ SUBSYSTEM=usb
+ DEVICE=c189:0
+6,329,2698571,-;usb usb1: Manufacturer: Linux 6.12.75+rpt-rpi-2712 xhci-hcd
+ SUBSYSTEM=usb
+ DEVICE=c189:0
+6,330,2705209,-;usb usb1: SerialNumber: xhci-hcd.0
+ SUBSYSTEM=usb
+ DEVICE=c189:0
+6,331,2709772,-;hub 1-0:1.0: USB hub found
+ SUBSYSTEM=usb
+ DEVICE=+usb:1-0:1.0
+6,332,2713543,-;hub 1-0:1.0: 2 ports detected
+ SUBSYSTEM=usb
+ DEVICE=+usb:1-0:1.0
+6,333,2717656,-;usb usb2: New USB device found, idVendor=1d6b, idProduct=0003, bcdDevice= 6.12
+ SUBSYSTEM=usb
+ DEVICE=c189:128
+6,334,2725957,-;usb usb2: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+ SUBSYSTEM=usb
+ DEVICE=c189:128
+6,335,2733210,-;usb usb2: Product: xHCI Host Controller
+ SUBSYSTEM=usb
+ DEVICE=c189:128
+6,336,2738116,-;usb usb2: Manufacturer: Linux 6.12.75+rpt-rpi-2712 xhci-hcd
+ SUBSYSTEM=usb
+ DEVICE=c189:128
+6,337,2744767,-;usb usb2: SerialNumber: xhci-hcd.0
+ SUBSYSTEM=usb
+ DEVICE=c189:128
+6,338,2745000,-;mmc0: new ultra high speed SDR104 SDHC card at address 0001
+6,339,2755926,-;hub 2-0:1.0: USB hub found
+ SUBSYSTEM=usb
+ DEVICE=+usb:2-0:1.0
+6,340,2756972,-;mmcblk0: mmc0:0001 SD 29.1 GiB
+6,341,2759711,-;hub 2-0:1.0: 1 port detected
+ SUBSYSTEM=usb
+ DEVICE=+usb:2-0:1.0
+6,342,2767756,-; mmcblk0: p1 p2 p3
+6,343,2768071,-;xhci-hcd xhci-hcd.1: xHCI Host Controller
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.1
+6,344,2770905,-;mmcblk0: mmc0:0001 SD 29.1 GiB
+6,345,2775909,-;xhci-hcd xhci-hcd.1: new USB bus registered, assigned bus number 3
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.1
+6,346,2781822,-;mmc1: SDHCI controller on 1001100000.mmc [1001100000.mmc] using ADMA 64-bit
+6,347,2787737,-;xhci-hcd xhci-hcd.1: hcc params 0x0240fe6d hci version 0x110 quirks 0x0000808000000810
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.1
+6,348,2804334,-;xhci-hcd xhci-hcd.1: irq 137, io mem 0x1f00300000
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.1
+6,349,2810169,-;xhci-hcd xhci-hcd.1: xHCI Host Controller
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.1
+6,350,2815263,-;xhci-hcd xhci-hcd.1: new USB bus registered, assigned bus number 4
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.1
+6,351,2822522,-;xhci-hcd xhci-hcd.1: Host supports USB 3.0 SuperSpeed
+ SUBSYSTEM=platform
+ DEVICE=+platform:xhci-hcd.1
+6,352,2828667,-;usb usb3: New USB device found, idVendor=1d6b, idProduct=0002, bcdDevice= 6.12
+ SUBSYSTEM=usb
+ DEVICE=c189:256
+6,353,2836969,-;usb usb3: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+ SUBSYSTEM=usb
+ DEVICE=c189:256
+6,354,2844219,-;usb usb3: Product: xHCI Host Controller
+ SUBSYSTEM=usb
+ DEVICE=c189:256
+6,355,2849113,-;usb usb3: Manufacturer: Linux 6.12.75+rpt-rpi-2712 xhci-hcd
+ SUBSYSTEM=usb
+ DEVICE=c189:256
+6,356,2855755,-;usb usb3: SerialNumber: xhci-hcd.1
+ SUBSYSTEM=usb
+ DEVICE=c189:256
+6,357,2860291,-;hub 3-0:1.0: USB hub found
+ SUBSYSTEM=usb
+ DEVICE=+usb:3-0:1.0
+6,358,2864062,-;hub 3-0:1.0: 2 ports detected
+ SUBSYSTEM=usb
+ DEVICE=+usb:3-0:1.0
+6,359,2868178,-;usb usb4: New USB device found, idVendor=1d6b, idProduct=0003, bcdDevice= 6.12
+ SUBSYSTEM=usb
+ DEVICE=c189:384
+6,360,2876498,-;usb usb4: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+ SUBSYSTEM=usb
+ DEVICE=c189:384
+6,361,2883753,-;usb usb4: Product: xHCI Host Controller
+ SUBSYSTEM=usb
+ DEVICE=c189:384
+6,362,2888647,-;usb usb4: Manufacturer: Linux 6.12.75+rpt-rpi-2712 xhci-hcd
+ SUBSYSTEM=usb
+ DEVICE=c189:384
+6,363,2895360,-;usb usb4: SerialNumber: xhci-hcd.1
+ SUBSYSTEM=usb
+ DEVICE=c189:384
+6,364,2899880,-;hub 4-0:1.0: USB hub found
+ SUBSYSTEM=usb
+ DEVICE=+usb:4-0:1.0
+6,365,2903652,-;hub 4-0:1.0: 1 port detected
+ SUBSYSTEM=usb
+ DEVICE=+usb:4-0:1.0
+6,366,2908816,-;of_cfs_init
+6,367,2911298,-;of_cfs_init: OK
+6,368,2914157,-;clk: Disabling unused clocks
+6,369,2923960,-;mmc1: new ultra high speed DDR50 SDIO card at address 0001
+6,370,2926337,-;PM: genpd: Disabling unused power domains
+6,371,2937169,-;Freeing unused kernel memory: 2304K
+6,372,2941797,-;Run /init as init process
+7,373,2945483,-;  with arguments:
+7,374,2945484,-;    /init
+7,375,2945485,-;  with environment:
+7,376,2945486,-;    HOME=/
+7,377,2945487,-;    TERM=linux
+6,378,3041509,-;input: pwr_button as /devices/platform/pwr_button/input/input0
+6,379,3065953,-;brcmstb-i2c 107d508200.i2c:  @97500hz registered in interrupt mode
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d508200.i2c
+6,380,3074621,-;brcmstb-i2c 107d508280.i2c:  @97500hz registered in interrupt mode
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d508280.i2c
+6,381,3271409,-;EXT4-fs (mmcblk0p3): mounted filesystem 629617fe-5004-42ce-ae60-9f25b2b4a9e3 ro with ordered data mode. Quota mode: none.
+30,382,3568002,-;systemd[1]: System time advanced to timestamp on /var/lib/systemd/timesync/clock: Thu 2026-04-23 08:31:10 BST
+6,383,3637249,-;NET: Registered PF_INET6 protocol family
+6,384,3642574,-;Segment Routing with IPv6
+6,385,3646257,-;In-situ OAM (IOAM) with IPv6
+30,386,3680906,-;systemd[1]: systemd 257.9-1~deb13u1 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +IPE +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBCRYPTSETUP_PLUGINS +LIBFDISK +PCRE2 +PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD +BPF_FRAMEWORK +BTF -XKBCOMMON -UTMP +SYSVINIT +LIBARCHIVE)
+30,387,3715368,-;systemd[1]: Detected architecture arm64.
+30,388,3727363,-;systemd[1]: Hostname set to <raspberrypi>.
+30,389,3835353,-;systemd[1]: bpf-restrict-fs: BPF LSM hook not enabled in the kernel, BPF LSM not supported.
+30,390,3844936,-;systemd[1]: Using hardware watchdog 'Broadcom BCM2835 Watchdog timer', version 0, device /dev/watchdog0
+30,391,3855434,-;systemd[1]: Watchdog running with a hardware timeout of 1min.
+13,392,3946961,-;zram_generator::config[221]: zram0: system has too much memory (4043MB), limit is 0MB, ignoring.
+30,393,4513373,-;systemd[1]: Queued start job for default target multi-user.target.
+30,394,4544479,-;systemd[1]: Created slice system-getty.slice - Slice /system/getty.
+30,395,4552378,-;systemd[1]: Created slice system-modprobe.slice - Slice /system/modprobe.
+30,396,4560718,-;systemd[1]: Created slice system-rpi\x5cx2dsetup\x5cx2dloop.slice - Slice /system/rpi-setup-loop.
+30,397,4570528,-;systemd[1]: Created slice system-serial\x5cx2dgetty.slice - Slice /system/serial-getty.
+30,398,4579634,-;systemd[1]: Created slice system-systemd\x5cx2dfsck.slice - Slice /system/systemd-fsck.
+30,399,4588705,-;systemd[1]: Created slice system-systemd\x5cx2dzram\x5cx2dsetup.slice - Slice /system/systemd-zram-setup.
+30,400,4598996,-;systemd[1]: Created slice user.slice - User and Session Slice.
+30,401,4605994,-;systemd[1]: Started systemd-ask-password-console.path - Dispatch Password Requests to Console Directory Watch.
+30,402,4617160,-;systemd[1]: Started systemd-ask-password-wall.path - Forward Password Requests to Wall Directory Watch.
+30,403,4627831,-;systemd[1]: Set up automount proc-sys-fs-binfmt_misc.automount - Arbitrary Executable File Formats File System Automount Point.
+30,404,4640463,-;systemd[1]: Expecting device dev-disk-by\x5cx2dpartuuid-1d0c498d\x5cx2d02.device - /dev/disk/by-partuuid/1d0c498d-02...
+30,405,4651894,-;systemd[1]: Expecting device dev-ttyAMA10.device - /dev/ttyAMA10...
+30,406,4659303,-;systemd[1]: Expecting device dev-zram0.device - /dev/zram0...
+30,407,4666195,-;systemd[1]: Reached target paths.target - Path Units.
+30,408,4672382,-;systemd[1]: Reached target remote-fs.target - Remote File Systems.
+30,409,4679686,-;systemd[1]: Reached target slices.target - Slice Units.
+30,410,4687452,-;systemd[1]: Listening on systemd-creds.socket - Credential Encryption/Decryption.
+30,411,4696148,-;systemd[1]: Listening on systemd-initctl.socket - initctl Compatibility Named Pipe.
+30,412,4705004,-;systemd[1]: Listening on systemd-journald-dev-log.socket - Journal Socket (/dev/log).
+30,413,4714030,-;systemd[1]: Listening on systemd-journald.socket - Journal Sockets.
+30,414,4721427,-;systemd[1]: systemd-pcrextend.socket - TPM PCR Measurements was skipped because of an unmet condition check (ConditionSecurity=measured-uki).
+30,415,4735243,-;systemd[1]: systemd-pcrlock.socket - Make TPM PCR Policy was skipped because of an unmet condition check (ConditionSecurity=measured-uki).
+30,416,4748849,-;systemd[1]: Listening on systemd-udevd-control.socket - udev Control Socket.
+30,417,4757057,-;systemd[1]: Listening on systemd-udevd-kernel.socket - udev Kernel Socket.
+30,418,4765139,-;systemd[1]: dev-hugepages.mount - Huge Pages File System was skipped because of an unmet condition check (ConditionPathExists=/sys/kernel/mm/hugepages).
+30,419,4781451,-;systemd[1]: Mounting dev-mqueue.mount - POSIX Message Queue File System...
+30,420,4831510,-;systemd[1]: Mounting run-lock.mount - Legacy Locks Directory /run/lock...
+30,421,4840397,-;systemd[1]: Mounting sys-kernel-debug.mount - Kernel Debug File System...
+30,422,4849067,-;systemd[1]: Mounting sys-kernel-tracing.mount - Kernel Trace File System...
+30,423,4858268,-;systemd[1]: Starting keyboard-setup.service - Set the console keyboard layout...
+30,424,4867755,-;systemd[1]: Starting kmod-static-nodes.service - Create List of Static Device Nodes...
+30,425,4877792,-;systemd[1]: Starting modprobe@configfs.service - Load Kernel Module configfs...
+30,426,4887502,-;systemd[1]: Starting modprobe@drm.service - Load Kernel Module drm...
+30,427,4896361,-;systemd[1]: Starting modprobe@efi_pstore.service - Load Kernel Module efi_pstore...
+30,428,4906539,-;systemd[1]: Starting modprobe@fuse.service - Load Kernel Module fuse...
+30,429,4914490,-;systemd[1]: systemd-fsck-root.service - File System Check on Root Device was skipped because of an unmet condition check (ConditionPathExists=!/run/initramfs/fsck-root).
+30,430,4930828,-;systemd[1]: systemd-hibernate-clear.service - Clear Stale Hibernate Storage Info was skipped because of an unmet condition check (ConditionPathExists=/sys/firmware/efi/efivars/HibernateLocation-8cf2644b-4b0b-428f-9387-6d876050dc67).
+6,431,4931864,-;fuse: init (API version 7.41)
+30,432,4957443,-;systemd[1]: Starting systemd-journald.service - Journal Service...
+30,433,4968832,-;systemd[1]: Starting systemd-modules-load.service - Load Kernel Modules...
+30,434,4976954,-;systemd[1]: systemd-pcrmachine.service - TPM PCR Machine ID Measurement was skipped because of an unmet condition check (ConditionSecurity=measured-uki).
+30,435,4992752,-;systemd[1]: Starting systemd-remount-fs.service - Remount Root and Kernel File Systems...
+30,436,5002172,-;systemd[1]: systemd-tpm2-setup-early.service - Early TPM SRK Setup was skipped because of an unmet condition check (ConditionSecurity=measured-uki).
+46,437,5012744,-;systemd-journald[307]: Collecting audit messages is disabled.
+30,438,5017462,-;systemd[1]: Starting systemd-udev-load-credentials.service - Load udev Rules from Credentials...
+6,439,5034681,-;zram: Added device: zram0
+30,440,5035318,-;systemd[1]: Starting systemd-udev-trigger.service - Coldplug All udev Devices...
+30,441,5048663,-;systemd[1]: Mounted dev-mqueue.mount - POSIX Message Queue File System.
+6,442,5054233,-;EXT4-fs (mmcblk0p3): re-mounted 629617fe-5004-42ce-ae60-9f25b2b4a9e3 r/w.
+30,443,5068437,-;systemd[1]: Started systemd-journald.service - Journal Service.
+46,444,5132188,-;systemd-journald[307]: Received client request to flush runtime journal.
+6,445,5274522,-;loop0: detected capacity change from 0 to 4194304
+6,446,5357023,-;zram: setup backing device /dev/disk/by-backingfile/var-swap
+6,447,5359503,-;zram0: detected capacity change from 0 to 4194304
+6,448,5402911,-;Adding 2097136k swap on /dev/zram0.  Priority:100 extents:1 across:2097136k SS
+6,449,5425297,-;rpi-gpiomem 107d508500.gpiomem: window base 0x107d508500 size 0x00000040
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d508500.gpiomem
+6,450,5427050,-;rpi-gpiomem 107d508500.gpiomem: initialised 1 regions as /dev/gpiomem1
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d508500.gpiomem
+6,451,5427500,-;rpi-gpiomem 107d517c00.gpiomem: window base 0x107d517c00 size 0x00000040
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d517c00.gpiomem
+6,452,5428469,-;rpi-gpiomem 107d517c00.gpiomem: initialised 1 regions as /dev/gpiomem2
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d517c00.gpiomem
+6,453,5428511,-;rpi-gpiomem 107d504100.gpiomem: window base 0x107d504100 size 0x00000020
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d504100.gpiomem
+6,454,5428702,-;rpi-gpiomem 107d504100.gpiomem: initialised 1 regions as /dev/gpiomem3
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d504100.gpiomem
+6,455,5428732,-;rpi-gpiomem 107d510700.gpiomem: window base 0x107d510700 size 0x00000020
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d510700.gpiomem
+6,456,5428851,-;rpi-gpiomem 107d510700.gpiomem: initialised 1 regions as /dev/gpiomem4
+ SUBSYSTEM=platform
+ DEVICE=+platform:107d510700.gpiomem
+6,457,5428957,-;rpi-gpiomem 1f000d0000.gpiomem: window base 0x1f000d0000 size 0x00030000
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f000d0000.gpiomem
+6,458,5429018,-;rpi-gpiomem 1f000d0000.gpiomem: initialised 1 regions as /dev/gpiomem0
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f000d0000.gpiomem
+6,459,5498461,-;mc: Linux media interface: v0.10
+4,460,5541104,-;hailo_pci: loading out-of-tree module taints kernel.
+5,461,5541635,-;hailo: Init module. driver version 4.23.0
+5,462,5541738,-;hailo 0001:01:00.0: Probing on: 1e60:2864...
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,463,5541743,-;hailo 0001:01:00.0: Probing: Allocate memory for device extension, 9072
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,464,5541761,-;hailo 0001:01:00.0: enabling device (0000 -> 0002)
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,465,5541766,-;hailo 0001:01:00.0: Probing: Device enabled
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,466,5541782,-;hailo 0001:01:00.0: Probing: mapped bar 0 - 0000000053c6bdb3 16384
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,467,5541786,-;hailo 0001:01:00.0: Probing: mapped bar 2 - 000000009010743a 4096
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,468,5541789,-;hailo 0001:01:00.0: Probing: mapped bar 4 - 0000000069f8ddcf 16384
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,469,5541792,-;hailo 0001:01:00.0: Probing: Force setting max_desc_page_size to 4096 (recommended value is 16384)
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,470,5541801,-;hailo 0001:01:00.0: Probing: Enabled 64 bit dma
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,471,5541804,-;hailo 0001:01:00.0: Probing: Using userspace allocated vdma buffers
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,472,5541806,-;hailo 0001:01:00.0: Disabling ASPM L0s 
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,473,5541810,-;hailo 0001:01:00.0: Successfully disabled ASPM L0s 
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,474,5541893,-;hailo 0001:01:00.0: Writing file hailo/hailo8_fw.bin
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,475,5544929,-;v3d 1002000000.v3d: [drm] Transparent Hugepage support is recommended for optimal performance on this platform!
+ SUBSYSTEM=platform
+ DEVICE=+platform:1002000000.v3d
+6,476,5546565,-;[drm] Initialized v3d 1.0.0 for 1002000000.v3d on minor 0
+6,477,5562711,-;videodev: Linux video capture interface: v2.00
+5,478,5621323,-;hailo 0001:01:00.0: File hailo/hailo8_fw.bin written successfully
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,479,5621329,-;hailo 0001:01:00.0: Writing file hailo/hailo8_board_cfg.bin
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,480,5621350,-;hailo 0001:01:00.0: File hailo/hailo8_board_cfg.bin written successfully
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,481,5621352,-;hailo 0001:01:00.0: Writing file hailo/hailo8_fw_cfg.bin
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,482,5621359,-;hailo 0001:01:00.0: File hailo/hailo8_fw_cfg.bin written successfully
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,483,5737125,-;hailo-sub2: ISTATUS_HOST=0x06800000
+5,484,5737143,-;hailo 0001:01:00.0: NNC Firmware loaded successfully
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,485,5737148,-;hailo 0001:01:00.0: FW loaded, took 195 ms
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,486,5747395,-;hailo 0001:01:00.0: Probing: Added board 1e60-2864, /dev/hailo0
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,487,5865394,-;pispbe 1000880000.pisp_be: bcm2712_iommu_of_xlate: MMU 1000005100.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000880000.pisp_be
+6,488,5865418,-;pispbe 1000880000.pisp_be: bcm2712_iommu_probe_device: MMU 1000005100.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000880000.pisp_be
+6,489,5865437,-;pispbe 1000880000.pisp_be: bcm2712_iommu_device_group: MMU 1000005100.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000880000.pisp_be
+6,490,5865450,-;pispbe 1000880000.pisp_be: Adding to iommu group 0
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000880000.pisp_be
+6,491,5865458,-;pispbe 1000880000.pisp_be: bcm2712_iommu_attach_dev: MMU 1000005100.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000880000.pisp_be
+6,492,5865514,-;rpi-hevc-dec 1000800000.codec: bcm2712_iommu_of_xlate: MMU 1000005100.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000800000.codec
+6,493,5865524,-;rpi-hevc-dec 1000800000.codec: bcm2712_iommu_probe_device: MMU 1000005100.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000800000.codec
+6,494,5865529,-;rpi-hevc-dec 1000800000.codec: bcm2712_iommu_device_group: MMU 1000005100.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000800000.codec
+6,495,5865534,-;rpi-hevc-dec 1000800000.codec: Adding to iommu group 0
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000800000.codec
+6,496,5865536,-;rpi-hevc-dec 1000800000.codec: bcm2712_iommu_attach_dev: MMU 1000005100.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:1000800000.codec
+5,497,5865904,-;cfg80211: Loading compiled-in X.509 certificates for regulatory database
+5,498,5871576,-;Loaded X.509 cert 'benh@debian.org: 577e021cb980e0e820821ba7b54b4961b8b4fadf'
+5,499,5871792,-;Loaded X.509 cert 'romain.perier@gmail.com: 3abbc6ec146e09d1b6016ab9d6cf71dd233f0328'
+5,500,5872027,-;Loaded X.509 cert 'sforshee: 00b28ddf47aef9cea7'
+5,501,5872245,-;Loaded X.509 cert 'wens: 61c038651aabdcf94bd0ac7ff06c7248db18c600'
+6,502,5876020,-;rpi-hevc-dec 1000800000.codec: Device registered as /dev/video19
+6,503,5881233,-;Bluetooth: Core ver 2.22
+6,504,5881262,-;NET: Registered PF_BLUETOOTH protocol family
+6,505,5881264,-;Bluetooth: HCI device and connection manager initialized
+6,506,5881270,-;Bluetooth: HCI socket layer initialized
+6,507,5881274,-;Bluetooth: L2CAP socket layer initialized
+6,508,5881278,-;Bluetooth: SCO socket layer initialized
+6,509,5912879,-;Bluetooth: HCI UART driver ver 2.3
+6,510,5912890,-;Bluetooth: HCI UART protocol H4 registered
+6,511,5912936,-;Bluetooth: HCI UART protocol Three-wire (H5) registered
+4,512,5913127,-;hci_uart_bcm serial0-0: supply vbat not found, using dummy regulator
+ SUBSYSTEM=serial
+ DEVICE=+serial:serial0-0
+4,513,5913218,-;hci_uart_bcm serial0-0: supply vddio not found, using dummy regulator
+ SUBSYSTEM=serial
+ DEVICE=+serial:serial0-0
+6,514,5919708,-;Bluetooth: HCI UART protocol Broadcom registered
+7,515,5927912,-;brcmfmac: F1 signature read @0x18000000=0x15264345
+6,516,5933075,-;brcmfmac: brcmf_fw_alloc_request: using brcm/brcmfmac43455-sdio for chip BCM4345/6
+6,517,5933647,-;usbcore: registered new interface driver brcmfmac
+6,518,6161068,-;brcmfmac: brcmf_c_process_txcap_blob: no txcap_blob available (err=-2)
+6,519,6164568,-;brcmfmac: brcmf_c_preinit_dcmds: Firmware: BCM4345/6 wl0: Aug 29 2023 01:47:08 version 7.45.265 (28bca26 CY) FWID 01-b677b91b
+6,520,6186461,-;vc4_hvs 107c580000.hvs: bcm2712_iommu_of_xlate: MMU 1000005200.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:107c580000.hvs
+6,521,6186469,-;vc4_hvs 107c580000.hvs: bcm2712_iommu_probe_device: MMU 1000005200.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:107c580000.hvs
+6,522,6186475,-;vc4_hvs 107c580000.hvs: bcm2712_iommu_device_group: MMU 1000005200.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:107c580000.hvs
+6,523,6186497,-;vc4_hvs 107c580000.hvs: Adding to iommu group 1
+ SUBSYSTEM=platform
+ DEVICE=+platform:107c580000.hvs
+6,524,6186504,-;vc4_hvs 107c580000.hvs: bcm2712_iommu_attach_dev: MMU 1000005200.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:107c580000.hvs
+6,525,6189687,-;vc4-drm axi:gpu: bcm2712_iommu_of_xlate: MMU 1000005200.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,526,6189694,-;vc4-drm axi:gpu: bcm2712_iommu_probe_device: MMU 1000005200.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,527,6190262,-;vc4-drm axi:gpu: bcm2712_iommu_device_group: MMU 1000005200.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,528,6190273,-;vc4-drm axi:gpu: Adding to iommu group 1
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,529,6190276,-;vc4-drm axi:gpu: bcm2712_iommu_attach_dev: MMU 1000005200.iommu
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,530,6193019,-;vc4-drm axi:gpu: bound 107c580000.hvs (ops vc4_hvs_ops [vc4])
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,531,6194177,-;Registered IR keymap rc-cec
+6,532,6194901,-;rc rc0: vc4-hdmi-0 as /devices/platform/soc@107c000000/107c701400.hdmi/rc/rc0
+ SUBSYSTEM=rc
+ DEVICE=+rc:rc0
+6,533,6194966,-;input: vc4-hdmi-0 as /devices/platform/soc@107c000000/107c701400.hdmi/rc/rc0/input1
+6,534,6196766,-;input: vc4-hdmi-0 HDMI Jack as /devices/platform/soc@107c000000/107c701400.hdmi/sound/card0/input2
+6,535,6197731,-;vc4-drm axi:gpu: bound 107c701400.hdmi (ops vc4_hdmi_ops [vc4])
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,536,6200168,-;Registered IR keymap rc-cec
+6,537,6200219,-;rc rc1: vc4-hdmi-1 as /devices/platform/soc@107c000000/107c706400.hdmi/rc/rc1
+ SUBSYSTEM=rc
+ DEVICE=+rc:rc1
+6,538,6200267,-;input: vc4-hdmi-1 as /devices/platform/soc@107c000000/107c706400.hdmi/rc/rc1/input3
+6,539,6203827,-;input: vc4-hdmi-1 HDMI Jack as /devices/platform/soc@107c000000/107c706400.hdmi/sound/card1/input4
+6,540,6205734,-;vc4-drm axi:gpu: bound 107c706400.hdmi (ops vc4_hdmi_ops [vc4])
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,541,6205945,-;vc4-drm axi:gpu: bound 107c500000.mop (ops vc4_txp_ops [vc4])
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,542,6206010,-;vc4-drm axi:gpu: bound 107c501000.moplet (ops vc4_txp_ops [vc4])
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,543,6206061,-;vc4-drm axi:gpu: bound 107c410000.pixelvalve (ops vc4_crtc_ops [vc4])
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,544,6206113,-;vc4-drm axi:gpu: bound 107c411000.pixelvalve (ops vc4_crtc_ops [vc4])
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,545,6206866,-;[drm] Initialized vc4 0.0.0 for axi:gpu on minor 1
+6,546,6211087,-;vc4-drm axi:gpu: [drm] Cannot find any crtc or sizes
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,547,6213595,-;vc4-drm axi:gpu: [drm] Cannot find any crtc or sizes
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,548,6217854,-;vc4-drm axi:gpu: [drm] Cannot find any crtc or sizes
+ SUBSYSTEM=platform
+ DEVICE=+platform:axi:gpu
+6,549,6267737,-;Bluetooth: hci0: BCM: chip id 107
+6,550,6267938,-;Bluetooth: hci0: BCM: features 0x2f
+6,551,6268992,-;Bluetooth: hci0: BCM4345C0
+6,552,6268993,-;Bluetooth: hci0: BCM4345C0 (003.001.025) build 0000
+6,553,6272028,-;Bluetooth: hci0: BCM4345C0 'brcm/BCM4345C0.raspberrypi,5-model-b.hcd' Patch
+4,554,6446639,-;rp1-pio 1f00178000.pio: failed to contact RP1 firmware
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f00178000.pio
+3,555,6446645,-;rp1-pio 1f00178000.pio: probe with driver rp1-pio failed with error -2
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f00178000.pio
+6,556,6935920,-;Bluetooth: hci0: BCM: features 0x2f
+6,557,6937245,-;Bluetooth: hci0: BCM43455 37.4MHz Raspberry Pi 3+-0190
+6,558,6937247,-;Bluetooth: hci0: BCM4345C0 (003.001.025) build 0382
+6,559,6937528,-;Bluetooth: hci0: BCM: Using default device address (43:45:c0:00:1f:ac)
+6,560,7564543,-;Bluetooth: BNEP (Ethernet Emulation) ver 1.3
+6,561,7564550,-;Bluetooth: BNEP filters: protocol multicast
+6,562,7564555,-;Bluetooth: BNEP socket layer initialized
+6,563,7565854,-;Bluetooth: MGMT ver 1.23
+6,564,7572461,-;NET: Registered PF_ALG protocol family
+6,565,7618400,-;Bluetooth: RFCOMM TTY layer initialized
+6,566,7618418,-;Bluetooth: RFCOMM socket layer initialized
+6,567,7618426,-;Bluetooth: RFCOMM ver 1.11
+6,568,8610122,-;macb 1f00100000.ethernet eth0: PHY [1f00100000.ethernet-ffffffff:01] driver [Broadcom BCM54213PE] (irq=POLL)
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f00100000.ethernet
+6,569,8610131,-;macb 1f00100000.ethernet eth0: configuring for phy/rgmii-id link mode
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f00100000.ethernet
+6,570,8612926,-;macb 1f00100000.ethernet: gem-ptp-timer ptp clock registered.
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f00100000.ethernet
+6,571,12716986,-;macb 1f00100000.ethernet eth0: Link is Up - 1Gbps/Full - flow control off
+ SUBSYSTEM=platform
+ DEVICE=+platform:1f00100000.ethernet
+5,572,231886658,-;hailo: Exit module.
+5,573,231886680,-;hailo 0001:01:00.0: Remove: Releasing board
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,574,231890043,-;hailo 0001:01:00.0: Remove: Freed board, /dev/hailo0
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,575,231890099,-;hailo: Hailo PCIe driver unloaded.
+5,576,231939590,-;hailo: Init module. driver version 4.23.0
+5,577,231939730,-;hailo 0001:01:00.0: Probing on: 1e60:2864...
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,578,231939734,-;hailo 0001:01:00.0: Probing: Allocate memory for device extension, 9072
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,579,231949998,-;hailo 0001:01:00.0: Probing: Device enabled
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,580,231950013,-;hailo 0001:01:00.0: Probing: mapped bar 0 - 0000000031619ba9 16384
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,581,231950017,-;hailo 0001:01:00.0: Probing: mapped bar 2 - 0000000082a7aba7 4096
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,582,231950021,-;hailo 0001:01:00.0: Probing: mapped bar 4 - 000000003c43cbd7 16384
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,583,231950029,-;hailo 0001:01:00.0: Probing: Force setting max_desc_page_size to 4096 (recommended value is 16384)
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,584,231950037,-;hailo 0001:01:00.0: Probing: Enabled 64 bit dma
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,585,231950039,-;hailo 0001:01:00.0: Probing: Using userspace allocated vdma buffers
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,586,231950048,-;hailo 0001:01:00.0: Disabling ASPM L0s 
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,587,231950051,-;hailo 0001:01:00.0: Successfully disabled ASPM L0s 
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,588,231950754,-;hailo-sub2: ISTATUS_HOST=0x01800000
+5,589,231962018,-;hailo 0001:01:00.0: soft reset finished
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,590,231962021,-;hailo 0001:01:00.0: Soft reset done
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,591,231962023,-;hailo 0001:01:00.0: Writing file hailo/hailo8_fw.bin
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,592,232001133,-;hailo 0001:01:00.0: File hailo/hailo8_fw.bin written successfully
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,593,232001136,-;hailo 0001:01:00.0: Writing file hailo/hailo8_board_cfg.bin
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,594,232001144,-;hailo 0001:01:00.0: File hailo/hailo8_board_cfg.bin written successfully
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,595,232001146,-;hailo 0001:01:00.0: Writing file hailo/hailo8_fw_cfg.bin
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,596,232001152,-;hailo 0001:01:00.0: File hailo/hailo8_fw_cfg.bin written successfully
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,597,232116912,-;hailo-sub2: ISTATUS_HOST=0x06800000
+5,598,232116919,-;hailo 0001:01:00.0: NNC Firmware loaded successfully
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,599,232116921,-;hailo 0001:01:00.0: FW loaded, took 166 ms
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+5,600,232129042,-;hailo 0001:01:00.0: Probing: Added board 1e60-2864, /dev/hailo0
+ SUBSYSTEM=pci
+ DEVICE=+pci:0001:01:00.0
+6,601,245572055,-;hailo-trc: IOCTL type=g nr=2 dir=1 size=12 arg=0x7fffda0647d8
+6,602,245572067,-;hailo-trc: IOCTL type=g nr=1 dir=1 size=23 arg=0x7fffda0647f8
+6,603,245574130,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda062af0
+6,604,245574138,-;hailo-trc: IOCTL type=n nr=1 dir=1 size=1508 arg=0x7fff1710db80
+6,605,245574140,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,606,245574145,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 00
+6,607,245574149,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,608,245574255,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,609,245574335,-;hailo-trc: IOCTL type=v nr=12 dir=1 size=1 arg=0x7fffda0653d8
+6,610,245574446,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063810
+6,611,245574451,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,612,245574455,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 33
+6,613,245574458,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,614,245574933,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,615,245574993,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063430
+6,616,245574997,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,617,245575001,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 33
+6,618,245575004,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,619,245575131,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,620,245575181,-;hailo-trc: IOCTL type=v nr=12 dir=1 size=1 arg=0x7fffda065398
+6,621,245575186,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063720
+6,622,245575189,-;hailo-trc: FWCTL TX cpu=1 len=42 (showing 42)
+6,623,245575193,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 25
+6,624,245575197,-;hailo-trc: FWCTL[010]: 00 00 00 04 00 00 00 01 00 00 00 00 01 ff 00 00
+6,625,245575200,-;hailo-trc: FWCTL[020]: 00 02 00 00 00 00 00 02 00 00
+6,626,245575294,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,627,245575313,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063550
+6,628,245575316,-;hailo-trc: FWCTL TX cpu=1 len=20 (showing 20)
+6,629,245575320,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 47
+6,630,245575322,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,631,245579707,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,632,245581929,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda0631a0
+6,633,245581934,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,634,245581937,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 33
+6,635,245581940,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,636,245582068,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,637,245586572,-;hailo-trc: IOCTL type=v nr=7 dir=3 size=27 arg=0x7fffda0610b0
+6,638,245587744,-;hailo-trc: IOCTL type=v nr=7 dir=3 size=27 arg=0x7fffda0610b0
+6,639,245587834,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda05fde0
+6,640,245587838,-;hailo-trc: FWCTL TX cpu=1 len=20 (showing 20)
+6,641,245587841,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 48
+6,642,245587844,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,643,245587928,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,644,245588085,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda05fde0
+6,645,245588089,-;hailo-trc: FWCTL TX cpu=1 len=20 (showing 20)
+6,646,245588093,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 48
+6,647,245588095,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,648,245588180,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,649,245588273,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0602b0
+4,650,245588286,-;------------[ cut here ]------------
+4,651,245588288,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,652,245588299,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,653,245588398,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G           O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,654,245588404,-;Tainted: [O]=OOT_MODULE
+4,655,245588406,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,656,245588408,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,657,245588412,-;pc : find_vma+0x6c/0x80
+4,658,245588417,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,659,245588429,-;sp : ffffc00080cbbc30
+4,660,245588430,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,661,245588436,-;x26: 0000000000000000 x25: ffff800002edac00 x24: 00007fffda0602b0
+4,662,245588442,-;x23: 000000000000fc00 x22: 0000000000000001 x21: ffff8000030248c8
+4,663,245588447,-;x20: 0000000000000000 x19: 00007fff186c0000 x18: ffffffffffffffff
+4,664,245588452,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0602b0
+4,665,245588456,-;x14: ffffc00080cbb9d8 x13: 3062323036306164 x12: 6666663778303d67
+4,666,245588461,-;x11: ffffd06fcf988518 x10: 00007fffda0602b0 x9 : ffffd06fc6c83cd4
+4,667,245588466,-;x8 : ffff800002edac80 x7 : 0000000000000000 x6 : 000000000000003f
+4,668,245588471,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,669,245588476,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,670,245588481,-;Call trace:
+4,671,245588483,-; find_vma+0x6c/0x80
+4,672,245588487,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,673,245588494,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,674,245588501,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,675,245588508,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,676,245588515,-; __arm64_sys_ioctl+0xb4/0x100
+4,677,245588520,-; invoke_syscall+0x50/0x120
+4,678,245588525,-; el0_svc_common.constprop.0+0x48/0xf0
+4,679,245588530,-; do_el0_svc+0x24/0x38
+4,680,245588535,-; el0_svc+0x30/0xf8
+4,681,245588540,-; el0t_64_sync_handler+0x120/0x130
+4,682,245588544,-; el0t_64_sync+0x190/0x198
+4,683,245588548,-;---[ end trace 0000000000000000 ]---
+6,684,245588590,-;hailo-trc: IOCTL type=v nr=7 dir=3 size=27 arg=0x7fffda0604d0
+6,685,245588709,-;hailo-trc: IOCTL type=v nr=9 dir=2 size=51 arg=0x7fffda060838
+6,686,245588727,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0602b0
+4,687,245588736,-;------------[ cut here ]------------
+4,688,245588738,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,689,245588745,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,690,245588830,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,691,245588835,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,692,245588837,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,693,245588839,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,694,245588842,-;pc : find_vma+0x6c/0x80
+4,695,245588847,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,696,245588855,-;sp : ffffc00080cbbc30
+4,697,245588856,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,698,245588861,-;x26: 0000000000000000 x25: ffff800002eda980 x24: 00007fffda0602b0
+4,699,245588866,-;x23: 0000000000000e00 x22: 0000000000000001 x21: ffff8000030248c8
+4,700,245588871,-;x20: 0000000000000000 x19: 00007fff19244000 x18: ffffffffffffffff
+4,701,245588876,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0602b0
+4,702,245588880,-;x14: ffffc00080cbb9d8 x13: 3062323036306164 x12: 6666663778303d67
+4,703,245588885,-;x11: ffffd06fcf988518 x10: 00007fffda0602b0 x9 : ffffd06fc6c83cd4
+4,704,245588890,-;x8 : ffff800002edaa00 x7 : 0000000000000000 x6 : 000000000000003f
+4,705,245588895,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,706,245588900,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,707,245588904,-;Call trace:
+4,708,245588906,-; find_vma+0x6c/0x80
+4,709,245588910,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,710,245588917,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,711,245588923,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,712,245588930,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,713,245588936,-; __arm64_sys_ioctl+0xb4/0x100
+4,714,245588940,-; invoke_syscall+0x50/0x120
+4,715,245588945,-; el0_svc_common.constprop.0+0x48/0xf0
+4,716,245588949,-; do_el0_svc+0x24/0x38
+4,717,245588954,-; el0_svc+0x30/0xf8
+4,718,245588958,-; el0t_64_sync_handler+0x120/0x130
+4,719,245588962,-; el0t_64_sync+0x190/0x198
+4,720,245588965,-;---[ end trace 0000000000000000 ]---
+6,721,245588994,-;hailo-trc: IOCTL type=v nr=7 dir=3 size=27 arg=0x7fffda0604d0
+6,722,245589077,-;hailo-trc: IOCTL type=v nr=9 dir=2 size=51 arg=0x7fffda060838
+6,723,245589086,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda05f700
+6,724,245589089,-;hailo-trc: FWCTL TX cpu=1 len=20 (showing 20)
+6,725,245589094,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 48
+6,726,245589096,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,727,245589181,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,728,245589258,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,729,245589268,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,730,245589275,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,731,245589282,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,732,245589303,-;hailo-trc: IOCTL type=v nr=9 dir=2 size=51 arg=0x7fffda060f18
+6,733,245589317,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,734,245589324,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,735,245589331,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,736,245589337,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,737,245589342,-;hailo-trc: IOCTL type=v nr=9 dir=2 size=51 arg=0x7fffda060f18
+6,738,245589351,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,739,245589358,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,740,245589362,-;hailo-trc: IOCTL type=v nr=9 dir=2 size=51 arg=0x7fffda060f18
+6,741,245589371,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,742,245589378,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,743,245589390,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,744,245589402,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,745,245589409,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,746,245589439,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,747,245589451,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,748,245589463,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,749,245589470,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,750,245589477,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,751,245589484,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,752,245589491,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,753,245589498,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,754,245589504,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,755,245589511,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,756,245589517,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,757,245589524,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,758,245589530,-;hailo-trc: IOCTL type=v nr=6 dir=2 size=28 arg=0x7fffda060e70
+6,759,245589535,-;hailo-trc: IOCTL type=v nr=9 dir=2 size=51 arg=0x7fffda060f18
+6,760,245589696,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda05f640
+6,761,245589700,-;hailo-trc: FWCTL TX cpu=1 len=20 (showing 20)
+6,762,245589704,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 48
+6,763,245589706,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,764,245589790,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,765,245589852,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda05fd50
+6,766,245589855,-;hailo-trc: FWCTL TX cpu=1 len=56 (showing 56)
+6,767,245589859,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 20
+6,768,245589862,-;hailo-trc: FWCTL[010]: 00 00 00 01 00 00 00 20 01 00 01 00 01 00 01 00
+6,769,245589866,-;hailo-trc: FWCTL[020]: 02 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+6,770,245589868,-;hailo-trc: FWCTL[030]: 00 00 00 02 00 01 00 00
+6,771,245589969,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,772,245589988,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda05fc90
+6,773,245589990,-;hailo-trc: FWCTL TX cpu=1 len=102 (showing 102)
+6,774,245589994,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 21
+6,775,245589997,-;hailo-trc: FWCTL[010]: 00 00 00 04 00 00 00 01 01 00 00 00 01 01 00 00
+6,776,245590001,-;hailo-trc: FWCTL[020]: 00 01 03 00 00 00 3f 1e ff ff ff ff 21 ff ff ff
+6,777,245590005,-;hailo-trc: FWCTL[030]: ff 10 00 00 00 61 3a 10 00 00 00 40 00 20 00 00
+6,778,245590008,-;hailo-trc: FWCTL[040]: 00 10 00 00 00 20 ff ff ff ff 02 00 00 00 60 3a
+6,779,245590012,-;hailo-trc: FWCTL[050]: 10 00 00 00 00 02 20 00 00 00 10 03 00 00 01 00
+6,780,245590014,-;hailo-trc: FWCTL[060]: 10 03 10 03 00 00
+6,781,245590135,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,782,245590154,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda05fc90
+6,783,245590157,-;hailo-trc: FWCTL TX cpu=1 len=153 (showing 153)
+6,784,245590160,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 21
+6,785,245590164,-;hailo-trc: FWCTL[010]: 00 00 00 04 00 00 00 01 01 00 00 00 01 01 00 00
+6,786,245590167,-;hailo-trc: FWCTL[020]: 00 01 02 00 00 00 72 18 ff ff ff ff 0f 00 24 00
+6,787,245590171,-;hailo-trc: FWCTL[030]: 00 02 00 00 00 10 00 02 00 00 00 0e 00 02 00 00
+6,788,245590174,-;hailo-trc: FWCTL[040]: 00 13 00 02 00 00 00 08 00 02 00 00 00 05 00 02
+6,789,245590178,-;hailo-trc: FWCTL[050]: 00 00 00 03 00 02 00 00 00 04 00 02 00 00 00 0a
+6,790,245590181,-;hailo-trc: FWCTL[060]: 00 02 00 00 00 06 00 02 00 00 00 07 00 02 00 00
+6,791,245590185,-;hailo-trc: FWCTL[070]: 00 09 00 02 00 00 00 0b 00 02 00 00 00 0f 00 02
+6,792,245590188,-;hailo-trc: FWCTL[080]: 00 00 00 01 00 02 00 00 00 1f ff ff ff ff 25 ff
+6,793,245590191,-;hailo-trc: FWCTL[090]: ff ff ff 02 1d ff ff ff ff
+6,794,245590335,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,795,245590355,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda05fc90
+6,796,245590357,-;hailo-trc: FWCTL TX cpu=1 len=528 (showing 256)
+6,797,245590361,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 21
+6,798,245590364,-;hailo-trc: FWCTL[010]: 00 00 00 04 00 00 00 01 01 00 00 00 01 01 00 00
+6,799,245590368,-;hailo-trc: FWCTL[020]: 00 01 00 00 00 01 e9 16 ff ff ff ff 00 00 00 00
+6,800,245590371,-;hailo-trc: FWCTL[030]: 00 62 3a 10 00 00 00 00 02 7e 00 00 00 00 dc 00
+6,801,245590375,-;hailo-trc: FWCTL[040]: 00 16 ff ff ff ff 01 01 00 00 00 63 3a 10 00 00
+6,802,245590378,-;hailo-trc: FWCTL[050]: 00 00 02 07 00 00 00 00 04 00 00 05 ff ff ff ff
+6,803,245590382,-;hailo-trc: FWCTL[060]: 01 18 ff ff ff ff 02 00 00 01 00 00 01 00 01 18
+6,804,245590385,-;hailo-trc: FWCTL[070]: ff ff ff ff 0e 00 05 0f 0b 09 07 06 0a 04 03 05
+6,805,245590389,-;hailo-trc: FWCTL[080]: 08 13 0e 10 00 18 ff ff ff ff 02 00 00 01 00 01
+6,806,245590393,-;hailo-trc: FWCTL[090]: 6d 00 00 14 ff ff ff ff 05 01 ff ff ff ff 00 00
+6,807,245590396,-;hailo-trc: FWCTL[0a0]: c0 7f bf 3b 01 00 79 e5 13 80 70 e0 06 0a 53 40
+6,808,245590400,-;hailo-trc: FWCTL[0b0]: 00 20 30 40 06 02 01 00 00 00 00 0f 00 20 3c 00
+6,809,245590403,-;hailo-trc: FWCTL[0c0]: 0c 00 03 00 00 00 00 00 00 00 14 ff ff ff ff 06
+6,810,245590407,-;hailo-trc: FWCTL[0d0]: 01 ff ff ff ff 01 00 c0 7f 21 00 00 00 38 00 00
+6,811,245590410,-;hailo-trc: FWCTL[0e0]: 00 30 00 01 00 00 00 00 00 30 00 00 00 00 00 00
+6,812,245590414,-;hailo-trc: FWCTL[0f0]: 00 00 0f 00 00 00 00 00 00 00 00 00 00 00 00 00
+6,813,245590735,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,814,245590753,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda05fc90
+6,815,245590755,-;hailo-trc: FWCTL TX cpu=1 len=161 (showing 161)
+6,816,245590759,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 21
+6,817,245590762,-;hailo-trc: FWCTL[010]: 00 00 00 04 00 00 00 01 01 00 00 00 01 01 00 00
+6,818,245590766,-;hailo-trc: FWCTL[020]: 00 01 01 00 00 00 7a 07 ff ff ff ff 10 00 00 10
+6,819,245590769,-;hailo-trc: FWCTL[030]: 00 01 00 10 00 01 00 00 00 0a 00 00 00 06 00 01
+6,820,245590773,-;hailo-trc: FWCTL[040]: 00 00 00 61 3a 10 00 00 00 40 00 20 00 00 00 10
+6,821,245590782,-;hailo-trc: FWCTL[050]: 00 00 00 06 ff ff ff ff 02 01 20 00 1c 00 10 03
+6,822,245590785,-;hailo-trc: FWCTL[060]: 01 00 00 00 00 00 00 00 00 00 01 00 00 00 60 3a
+6,823,245590789,-;hailo-trc: FWCTL[070]: 10 00 00 00 00 02 20 00 00 00 10 03 00 00 00 00
+6,824,245590792,-;hailo-trc: FWCTL[080]: 01 00 27 ff ff ff ff 02 01 02 ff ff ff ff 02 01
+6,825,245590796,-;hailo-trc: FWCTL[090]: 00 10 03 00 00 01 00 1d ff ff ff ff 15 ff ff ff
+6,826,245590798,-;hailo-trc: FWCTL[0a0]: ff
+6,827,245590945,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,828,245591016,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda063be0
+4,829,245591027,-;------------[ cut here ]------------
+4,830,245591028,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,831,245591036,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,832,245591121,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,833,245591127,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,834,245591128,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,835,245591130,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,836,245591134,-;pc : find_vma+0x6c/0x80
+4,837,245591138,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,838,245591147,-;sp : ffffc00080cbbc30
+4,839,245591148,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,840,245591154,-;x26: 0000000000000000 x25: ffff800002eda700 x24: 00007fffda063be0
+4,841,245591159,-;x23: 0000000000000800 x22: 0000000000000002 x21: ffff8000030248c8
+4,842,245591164,-;x20: 0000000000000000 x19: 00007fff19240000 x18: ffffffffffffffff
+4,843,245591169,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda063be0
+4,844,245591173,-;x14: ffffc00080cbb9d8 x13: 3065623336306164 x12: 6666663778303d67
+4,845,245591178,-;x11: ffffd06fcf988518 x10: 00007fffda063be0 x9 : ffffd06fc6c83cd4
+4,846,245591183,-;x8 : ffff800002eda780 x7 : 0000000000000000 x6 : 000000000000003f
+4,847,245591188,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,848,245591193,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,849,245591198,-;Call trace:
+4,850,245591199,-; find_vma+0x6c/0x80
+4,851,245591204,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,852,245591210,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,853,245591216,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,854,245591223,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,855,245591229,-; __arm64_sys_ioctl+0xb4/0x100
+4,856,245591233,-; invoke_syscall+0x50/0x120
+4,857,245591238,-; el0_svc_common.constprop.0+0x48/0xf0
+4,858,245591243,-; do_el0_svc+0x24/0x38
+4,859,245591247,-; el0_svc+0x30/0xf8
+4,860,245591251,-; el0t_64_sync_handler+0x120/0x130
+4,861,245591255,-; el0t_64_sync+0x190/0x198
+4,862,245591258,-;---[ end trace 0000000000000000 ]---
+6,863,245591297,-;hailo-trc: IOCTL type=v nr=9 dir=2 size=51 arg=0x7fffda064088
+6,864,245591321,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0634f0
+4,865,245591329,-;------------[ cut here ]------------
+4,866,245591330,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,867,245591336,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,868,245591414,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,869,245591419,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,870,245591420,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,871,245591422,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,872,245591425,-;pc : find_vma+0x6c/0x80
+4,873,245591430,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,874,245591436,-;sp : ffffc00080cbbc30
+4,875,245591438,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,876,245591443,-;x26: 0000000000000000 x25: ffff800002eda680 x24: 00007fffda0634f0
+4,877,245591448,-;x23: 0000000000000310 x22: 0000000000000001 x21: ffff8000030248c8
+4,878,245591453,-;x20: 0000000000000000 x19: 00007fff186bc000 x18: ffffffffffffffff
+4,879,245591458,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0634f0
+4,880,245591463,-;x14: ffffc00080cbb9d8 x13: 3066343336306164 x12: 6666663778303d67
+4,881,245591468,-;x11: ffffd06fcf988518 x10: 00007fffda0634f0 x9 : ffffd06fc6c83cd4
+4,882,245591473,-;x8 : ffff800002eda700 x7 : 0000000000000000 x6 : 000000000000003f
+4,883,245591477,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,884,245591482,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,885,245591487,-;Call trace:
+4,886,245591488,-; find_vma+0x6c/0x80
+4,887,245591493,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,888,245591499,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,889,245591505,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,890,245591512,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,891,245591518,-; __arm64_sys_ioctl+0xb4/0x100
+4,892,245591521,-; invoke_syscall+0x50/0x120
+4,893,245591526,-; el0_svc_common.constprop.0+0x48/0xf0
+4,894,245591530,-; do_el0_svc+0x24/0x38
+4,895,245591534,-; el0_svc+0x30/0xf8
+4,896,245591538,-; el0t_64_sync_handler+0x120/0x130
+4,897,245591541,-; el0t_64_sync+0x190/0x198
+4,898,245591544,-;---[ end trace 0000000000000000 ]---
+6,899,245591567,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0634f0
+4,900,245591574,-;------------[ cut here ]------------
+4,901,245591576,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,902,245591582,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,903,245591659,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,904,245591663,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,905,245591665,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,906,245591667,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,907,245591670,-;pc : find_vma+0x6c/0x80
+4,908,245591674,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,909,245591681,-;sp : ffffc00080cbbc30
+4,910,245591682,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,911,245591687,-;x26: 0000000000000000 x25: ffff800002eda600 x24: 00007fffda0634f0
+4,912,245591692,-;x23: 0000000000000310 x22: 0000000000000001 x21: ffff8000030248c8
+4,913,245591697,-;x20: 0000000000000000 x19: 00007fff186b8000 x18: ffffffffffffffff
+4,914,245591702,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0634f0
+4,915,245591707,-;x14: ffffc00080cbb9d8 x13: 3066343336306164 x12: 6666663778303d67
+4,916,245591712,-;x11: ffffd06fcf988518 x10: 00007fffda0634f0 x9 : ffffd06fc6c83cd4
+4,917,245591717,-;x8 : ffff800002eda680 x7 : 0000000000000000 x6 : 000000000000003f
+4,918,245591721,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,919,245591726,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,920,245591731,-;Call trace:
+4,921,245591733,-; find_vma+0x6c/0x80
+4,922,245591737,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,923,245591743,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,924,245591749,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,925,245591756,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,926,245591762,-; __arm64_sys_ioctl+0xb4/0x100
+4,927,245591765,-; invoke_syscall+0x50/0x120
+4,928,245591769,-; el0_svc_common.constprop.0+0x48/0xf0
+4,929,245591774,-; do_el0_svc+0x24/0x38
+4,930,245591778,-; el0_svc+0x30/0xf8
+4,931,245591782,-; el0t_64_sync_handler+0x120/0x130
+4,932,245591785,-; el0t_64_sync+0x190/0x198
+4,933,245591788,-;---[ end trace 0000000000000000 ]---
+6,934,245591802,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0634f0
+4,935,245591810,-;------------[ cut here ]------------
+4,936,245591811,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,937,245591817,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,938,245591894,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,939,245591898,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,940,245591900,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,941,245591901,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,942,245591904,-;pc : find_vma+0x6c/0x80
+4,943,245591909,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,944,245591915,-;sp : ffffc00080cbbc30
+4,945,245591917,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,946,245591922,-;x26: 0000000000000000 x25: ffff800002eda580 x24: 00007fffda0634f0
+4,947,245591927,-;x23: 0000000000000310 x22: 0000000000000001 x21: ffff8000030248c8
+4,948,245591931,-;x20: 0000000000000000 x19: 00007fff186b4000 x18: ffffffffffffffff
+4,949,245591936,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0634f0
+4,950,245591941,-;x14: ffffc00080cbb9d8 x13: 3066343336306164 x12: 6666663778303d67
+4,951,245591946,-;x11: ffffd06fcf988518 x10: 00007fffda0634f0 x9 : ffffd06fc6c83cd4
+4,952,245591951,-;x8 : ffff800002eda600 x7 : 0000000000000000 x6 : 000000000000003f
+4,953,245591956,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,954,245591960,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,955,245591965,-;Call trace:
+4,956,245591967,-; find_vma+0x6c/0x80
+4,957,245591971,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,958,245591977,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,959,245591984,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,960,245591990,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,961,245591996,-; __arm64_sys_ioctl+0xb4/0x100
+4,962,245591999,-; invoke_syscall+0x50/0x120
+4,963,245592004,-; el0_svc_common.constprop.0+0x48/0xf0
+4,964,245592008,-; do_el0_svc+0x24/0x38
+4,965,245592012,-; el0_svc+0x30/0xf8
+4,966,245592016,-; el0t_64_sync_handler+0x120/0x130
+4,967,245592019,-; el0t_64_sync+0x190/0x198
+4,968,245592022,-;---[ end trace 0000000000000000 ]---
+6,969,245592034,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0634f0
+4,970,245592042,-;------------[ cut here ]------------
+4,971,245592043,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,972,245592048,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,973,245592125,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,974,245592129,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,975,245592131,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,976,245592133,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,977,245592136,-;pc : find_vma+0x6c/0x80
+4,978,245592140,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,979,245592146,-;sp : ffffc00080cbbc30
+4,980,245592148,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,981,245592153,-;x26: 0000000000000000 x25: ffff800002eda480 x24: 00007fffda0634f0
+4,982,245592157,-;x23: 0000000000000310 x22: 0000000000000001 x21: ffff8000030248c8
+4,983,245592162,-;x20: 0000000000000000 x19: 00007fff1868c000 x18: ffffffffffffffff
+4,984,245592167,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0634f0
+4,985,245592172,-;x14: ffffc00080cbb9d8 x13: 3066343336306164 x12: 6666663778303d67
+4,986,245592176,-;x11: ffffd06fcf988518 x10: 00007fffda0634f0 x9 : ffffd06fc6c83cd4
+4,987,245592181,-;x8 : ffff800002eda500 x7 : 0000000000000000 x6 : 000000000000003f
+4,988,245592186,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,989,245592191,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,990,245592196,-;Call trace:
+4,991,245592197,-; find_vma+0x6c/0x80
+4,992,245592201,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,993,245592207,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,994,245592214,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,995,245592220,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,996,245592226,-; __arm64_sys_ioctl+0xb4/0x100
+4,997,245592229,-; invoke_syscall+0x50/0x120
+4,998,245592234,-; el0_svc_common.constprop.0+0x48/0xf0
+4,999,245592238,-; do_el0_svc+0x24/0x38
+4,1000,245592242,-; el0_svc+0x30/0xf8
+4,1001,245592246,-; el0t_64_sync_handler+0x120/0x130
+4,1002,245592249,-; el0t_64_sync+0x190/0x198
+4,1003,245592252,-;---[ end trace 0000000000000000 ]---
+6,1004,245592264,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0634f0
+4,1005,245592271,-;------------[ cut here ]------------
+4,1006,245592272,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,1007,245592278,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,1008,245592355,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,1009,245592358,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,1010,245592360,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,1011,245592362,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,1012,245592364,-;pc : find_vma+0x6c/0x80
+4,1013,245592369,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1014,245592375,-;sp : ffffc00080cbbc30
+4,1015,245592377,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,1016,245592382,-;x26: 0000000000000000 x25: ffff800002eda400 x24: 00007fffda0634f0
+4,1017,245592387,-;x23: 0000000000000310 x22: 0000000000000001 x21: ffff8000030248c8
+4,1018,245592392,-;x20: 0000000000000000 x19: 00007fff18688000 x18: ffffffffffffffff
+4,1019,245592396,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0634f0
+4,1020,245592401,-;x14: ffffc00080cbb9d8 x13: 3066343336306164 x12: 6666663778303d67
+4,1021,245592406,-;x11: ffffd06fcf988518 x10: 00007fffda0634f0 x9 : ffffd06fc6c83cd4
+4,1022,245592411,-;x8 : ffff800002eda480 x7 : 0000000000000000 x6 : 000000000000003f
+4,1023,245592416,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,1024,245592420,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,1025,245592425,-;Call trace:
+4,1026,245592427,-; find_vma+0x6c/0x80
+4,1027,245592431,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1028,245592437,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,1029,245592444,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,1030,245592450,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,1031,245592456,-; __arm64_sys_ioctl+0xb4/0x100
+4,1032,245592459,-; invoke_syscall+0x50/0x120
+4,1033,245592464,-; el0_svc_common.constprop.0+0x48/0xf0
+4,1034,245592468,-; do_el0_svc+0x24/0x38
+4,1035,245592472,-; el0_svc+0x30/0xf8
+4,1036,245592476,-; el0t_64_sync_handler+0x120/0x130
+4,1037,245592479,-; el0t_64_sync+0x190/0x198
+4,1038,245592482,-;---[ end trace 0000000000000000 ]---
+6,1039,245592494,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0634f0
+4,1040,245592501,-;------------[ cut here ]------------
+4,1041,245592502,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,1042,245592508,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,1043,245592584,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,1044,245592588,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,1045,245592590,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,1046,245592591,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,1047,245592594,-;pc : find_vma+0x6c/0x80
+4,1048,245592598,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1049,245592605,-;sp : ffffc00080cbbc30
+4,1050,245592606,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,1051,245592611,-;x26: 0000000000000000 x25: ffff800002eda380 x24: 00007fffda0634f0
+4,1052,245592616,-;x23: 0000000000000310 x22: 0000000000000001 x21: ffff8000030248c8
+4,1053,245592621,-;x20: 0000000000000000 x19: 00007fff1841c000 x18: ffffffffffffffff
+4,1054,245592626,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0634f0
+4,1055,245592631,-;x14: ffffc00080cbb9d8 x13: 3066343336306164 x12: 6666663778303d67
+4,1056,245592636,-;x11: ffffd06fcf988518 x10: 00007fffda0634f0 x9 : ffffd06fc6c83cd4
+4,1057,245592640,-;x8 : ffff800002eda400 x7 : 0000000000000000 x6 : 000000000000003f
+4,1058,245592645,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,1059,245592650,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,1060,245592655,-;Call trace:
+4,1061,245592656,-; find_vma+0x6c/0x80
+4,1062,245592660,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1063,245592667,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,1064,245592673,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,1065,245592679,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,1066,245592685,-; __arm64_sys_ioctl+0xb4/0x100
+4,1067,245592688,-; invoke_syscall+0x50/0x120
+4,1068,245592692,-; el0_svc_common.constprop.0+0x48/0xf0
+4,1069,245592697,-; do_el0_svc+0x24/0x38
+4,1070,245592701,-; el0_svc+0x30/0xf8
+4,1071,245592705,-; el0t_64_sync_handler+0x120/0x130
+4,1072,245592708,-; el0t_64_sync+0x190/0x198
+4,1073,245592711,-;---[ end trace 0000000000000000 ]---
+6,1074,245592751,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0634f0
+4,1075,245592760,-;------------[ cut here ]------------
+4,1076,245592762,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,1077,245592767,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,1078,245592856,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,1079,245592860,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,1080,245592861,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,1081,245592863,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,1082,245592866,-;pc : find_vma+0x6c/0x80
+4,1083,245592870,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1084,245592876,-;sp : ffffc00080cbbc30
+4,1085,245592878,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,1086,245592883,-;x26: 0000000000000000 x25: ffff800002eda300 x24: 00007fffda0634f0
+4,1087,245592888,-;x23: 0000000000000310 x22: 0000000000000001 x21: ffff8000030248c8
+4,1088,245592893,-;x20: 0000000000000000 x19: 00007fff18418000 x18: ffffffffffffffff
+4,1089,245592897,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0634f0
+4,1090,245592902,-;x14: ffffc00080cbb9d8 x13: 3066343336306164 x12: 6666663778303d67
+4,1091,245592907,-;x11: ffffd06fcf988518 x10: 00007fffda0634f0 x9 : ffffd06fc6c83cd4
+4,1092,245592912,-;x8 : ffff800002eda380 x7 : 0000000000000000 x6 : 000000000000003f
+4,1093,245592917,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,1094,245592921,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,1095,245592926,-;Call trace:
+4,1096,245592928,-; find_vma+0x6c/0x80
+4,1097,245592932,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1098,245592938,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,1099,245592944,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,1100,245592951,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,1101,245592957,-; __arm64_sys_ioctl+0xb4/0x100
+4,1102,245592960,-; invoke_syscall+0x50/0x120
+4,1103,245592965,-; el0_svc_common.constprop.0+0x48/0xf0
+4,1104,245592969,-; do_el0_svc+0x24/0x38
+4,1105,245592973,-; el0_svc+0x30/0xf8
+4,1106,245592977,-; el0t_64_sync_handler+0x120/0x130
+4,1107,245592980,-; el0t_64_sync+0x190/0x198
+4,1108,245592983,-;---[ end trace 0000000000000000 ]---
+6,1109,245592997,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda0634f0
+4,1110,245593005,-;------------[ cut here ]------------
+4,1111,245593007,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,1112,245593012,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,1113,245593089,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,1114,245593092,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,1115,245593094,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,1116,245593096,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,1117,245593098,-;pc : find_vma+0x6c/0x80
+4,1118,245593103,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1119,245593109,-;sp : ffffc00080cbbc30
+4,1120,245593111,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,1121,245593116,-;x26: 0000000000000000 x25: ffff800002eda200 x24: 00007fffda0634f0
+4,1122,245593121,-;x23: 0000000000000310 x22: 0000000000000001 x21: ffff8000030248c8
+4,1123,245593126,-;x20: 0000000000000000 x19: 00007fff18414000 x18: ffffffffffffffff
+4,1124,245593131,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda0634f0
+4,1125,245593136,-;x14: ffffc00080cbb9d8 x13: 3066343336306164 x12: 6666663778303d67
+4,1126,245593140,-;x11: ffffd06fcf988518 x10: 00007fffda0634f0 x9 : ffffd06fc6c83cd4
+4,1127,245593145,-;x8 : ffff800002eda280 x7 : 0000000000000000 x6 : 000000000000003f
+4,1128,245593150,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,1129,245593154,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,1130,245593159,-;Call trace:
+4,1131,245593161,-; find_vma+0x6c/0x80
+4,1132,245593165,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1133,245593171,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,1134,245593177,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,1135,245593184,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,1136,245593190,-; __arm64_sys_ioctl+0xb4/0x100
+4,1137,245593193,-; invoke_syscall+0x50/0x120
+4,1138,245593197,-; el0_svc_common.constprop.0+0x48/0xf0
+4,1139,245593202,-; do_el0_svc+0x24/0x38
+4,1140,245593206,-; el0_svc+0x30/0xf8
+4,1141,245593209,-; el0t_64_sync_handler+0x120/0x130
+4,1142,245593213,-; el0t_64_sync+0x190/0x198
+4,1143,245593216,-;---[ end trace 0000000000000000 ]---
+6,1144,245593234,-;hailo-trc: IOCTL type=v nr=4 dir=3 size=40 arg=0x7fffda063c10
+4,1145,245593241,-;------------[ cut here ]------------
+4,1146,245593243,-;WARNING: CPU: 0 PID: 1343 at include/linux/rwsem.h:80 find_vma+0x6c/0x80
+4,1147,245593248,-;Modules linked in: hailo_pci(O) rfcomm algif_hash algif_skcipher af_alg bnep rp1_pio vc4 snd_soc_hdmi_codec drm_display_helper cec binfmt_misc brcmfmac_wcc drm_dma_helper brcmfmac hci_uart btbcm brcmutil aes_ce_blk snd_soc_core aes_ce_cipher ghash_ce gf128mul bluetooth pisp_be rpi_hevc_dec sha2_ce cfg80211 sha256_arm64 snd_compress sha1_ce snd_pcm_dmaengine v4l2_mem2mem videobuf2_dma_contig snd_pcm videobuf2_memops ecdh_generic ecc videobuf2_v4l2 rfkill libaes videodev sha1_generic snd_timer v3d snd raspberrypi_hwmon videobuf2_common gpu_sched mc drm_shmem_helper drm_kms_helper pwm_fan rp1_adc rp1_fw raspberrypi_gpiomem uio_pdrv_genirq uio sch_fq_codel zram lz4_compress drm fuse drm_panel_orientation_quirks backlight nfnetlink ip_tables x_tables ipv6 spidev i2c_brcmstb spi_bcm2835 rp1_mailbox gpio_keys nvmem_rmem [last unloaded: hailo_pci(O)]
+4,1148,245593325,-;CPU: 0 UID: 1000 PID: 1343 Comm: hailortcli Tainted: G        W  O       6.12.75+rpt-rpi-2712 #1  Debian 1:6.12.75-1+rpt1
+4,1149,245593329,-;Tainted: [W]=WARN, [O]=OOT_MODULE
+4,1150,245593330,-;Hardware name: Raspberry Pi 5 Model B Rev 1.0 (DT)
+4,1151,245593332,-;pstate: 80400009 (Nzcv daif +PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+4,1152,245593335,-;pc : find_vma+0x6c/0x80
+4,1153,245593339,-;lr : hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1154,245593345,-;sp : ffffc00080cbbc30
+4,1155,245593347,-;x29: ffffc00080cbbc40 x28: ffff8000076d0800 x27: 0000000000000000
+4,1156,245593352,-;x26: 0000000000000000 x25: ffff800002eda180 x24: 00007fffda063c10
+4,1157,245593357,-;x23: 0000000000004000 x22: 0000000000000001 x21: ffff8000030248c8
+4,1158,245593362,-;x20: 0000000000000000 x19: 00007fff1836c000 x18: ffffffffffffffff
+4,1159,245593366,-;x17: 0000000000000000 x16: ffffd06fcf19de80 x15: 00007fffda063c10
+4,1160,245593371,-;x14: ffffc00080cbb9d8 x13: 3031633336306164 x12: 6666663778303d67
+4,1161,245593376,-;x11: ffffd06fcf988518 x10: 00007fffda063c10 x9 : ffffd06fc6c83cd4
+4,1162,245593381,-;x8 : ffff800002eda200 x7 : 0000000000000000 x6 : 000000000000003f
+4,1163,245593385,-;x5 : 0000000000000040 x4 : 0000000000000000 x3 : 0000000000000000
+4,1164,245593390,-;x2 : ffff8000076d0800 x1 : 0000000000000000 x0 : ffff800008492f80
+4,1165,245593396,-;Call trace:
+4,1166,245593399,-; find_vma+0x6c/0x80
+4,1167,245593405,-; hailo_vdma_buffer_map+0x8c/0x5e8 [hailo_pci]
+4,1168,245593411,-; hailo_vdma_buffer_map_ioctl+0xdc/0x340 [hailo_pci]
+4,1169,245593417,-; hailo_vdma_ioctl+0xcc/0x260 [hailo_pci]
+4,1170,245593423,-; hailo_pcie_fops_unlockedioctl+0x188/0x640 [hailo_pci]
+4,1171,245593429,-; __arm64_sys_ioctl+0xb4/0x100
+4,1172,245593432,-; invoke_syscall+0x50/0x120
+4,1173,245593437,-; el0_svc_common.constprop.0+0x48/0xf0
+4,1174,245593441,-; do_el0_svc+0x24/0x38
+4,1175,245593445,-; el0_svc+0x30/0xf8
+4,1176,245593448,-; el0t_64_sync_handler+0x120/0x130
+4,1177,245593452,-; el0t_64_sync+0x190/0x198
+4,1178,245593455,-;---[ end trace 0000000000000000 ]---
+6,1179,245593481,-;hailo-trc: IOCTL type=v nr=9 dir=2 size=51 arg=0x7fffda0640b8
+6,1180,245595990,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063c10
+6,1181,245595995,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,1182,245595999,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 33
+6,1183,245596001,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,1184,245596129,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1185,245596181,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063f50
+6,1186,245596184,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,1187,245596188,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 00
+6,1188,245596190,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,1189,245596294,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1190,245596357,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063c10
+6,1191,245596360,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,1192,245596364,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 33
+6,1193,245596366,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,1194,245596493,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1195,245596543,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063f50
+6,1196,245596545,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,1197,245596549,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 00
+6,1198,245596551,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,1199,245596655,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1200,245596724,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063540
+6,1201,245596727,-;hailo-trc: FWCTL TX cpu=1 len=42 (showing 42)
+6,1202,245596731,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 25
+6,1203,245596734,-;hailo-trc: FWCTL[010]: 00 00 00 04 00 00 00 01 01 00 00 00 01 00 00 00
+6,1204,245596737,-;hailo-trc: FWCTL[020]: 00 02 00 00 00 00 00 02 00 00
+6,1205,245596851,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1206,245596880,-;hailo-trc: IOCTL type=v nr=0 dir=2 size=13 arg=0x7fffda063748
+6,1207,245596902,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fffda063b08
+6,1208,245596908,-;hailo-sub2: launch_transfer ch=16 starting_desc=0 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1209,245596919,-;hailo-sub2: ch=16 post-launch new_num_avail=1
+6,1210,245596927,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fffda063b08
+6,1211,245596930,-;hailo-sub2: launch_transfer ch=16 starting_desc=1 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1212,245596940,-;hailo-sub2: ch=16 post-launch new_num_avail=2
+6,1213,245596945,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fffda063b08
+6,1214,245596945,-;hailo-trc: IOCTL type=v nr=2 dir=3 size=301 arg=0x7fff168fdea0
+6,1215,245596948,-;hailo-sub2: launch_transfer ch=16 starting_desc=2 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1216,245596958,-;hailo-sub2: ch=16 post-launch new_num_avail=3
+6,1217,245596964,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fffda063b08
+6,1218,245596967,-;hailo-sub2: launch_transfer ch=16 starting_desc=3 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1219,245596977,-;hailo-sub2: ch=16 post-launch new_num_avail=4
+6,1220,245596981,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fffda063b08
+6,1221,245596984,-;hailo-sub2: launch_transfer ch=16 starting_desc=4 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1222,245596994,-;hailo-sub2: ch=16 post-launch new_num_avail=5
+6,1223,245596998,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fffda063b08
+6,1224,245597000,-;hailo-sub2: launch_transfer ch=16 starting_desc=5 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1225,245597011,-;hailo-sub2: ch=16 post-launch new_num_avail=6
+6,1226,245597015,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fffda063b08
+6,1227,245597017,-;hailo-sub2: launch_transfer ch=16 starting_desc=6 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1228,245597027,-;hailo-sub2: ch=16 post-launch new_num_avail=7
+6,1229,245597031,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fffda063b08
+6,1230,245597034,-;hailo-sub2: launch_transfer ch=16 starting_desc=7 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1231,245597044,-;hailo-sub2: ch=16 post-launch new_num_avail=8
+6,1232,245597114,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda0635a0
+6,1233,245597117,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,1234,245597121,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 33
+6,1235,245597124,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,1236,245597251,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1237,245597317,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda0638e0
+6,1238,245597320,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,1239,245597324,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 00
+6,1240,245597326,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,1241,245597430,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1242,245597492,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda0635a0
+6,1243,245597495,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,1244,245597498,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 33
+6,1245,245597501,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,1246,245597628,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1247,245597677,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda0638e0
+6,1248,245597679,-;hailo-trc: FWCTL TX cpu=0 len=20 (showing 20)
+6,1249,245597683,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 00
+6,1250,245597685,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,1251,245597789,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1252,245601889,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fff0efdcda8
+6,1253,245601898,-;hailo-sub2: launch_transfer ch=2 starting_desc=0 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1254,245601910,-;hailo-sub2: ch=2 post-launch new_num_avail=2
+6,1255,245601918,-;hailo-sub2: ISTATUS_HOST=0x00800001
+6,1256,245601923,-;hailo-sub2: SRC_IRQ bitmap=0x00000004
+6,1257,245601932,-;hailo-sub2: ISTATUS_HOST=0x00801000
+6,1258,245601935,-;hailo-sub2: DST_IRQ bitmap=0x00010000
+6,1259,245601945,-;hailo-trc: IOCTL type=v nr=2 dir=3 size=301 arg=0x7fff168fdea0
+6,1260,245601963,-;hailo-trc: IOCTL type=v nr=2 dir=3 size=301 arg=0x7fff168fdea0
+6,1261,245602013,-;hailo-trc: IOCTL type=v nr=15 dir=2 size=153 arg=0x7fff158dc8a8
+6,1262,245602018,-;hailo-sub2: launch_transfer ch=16 starting_desc=8 buffers=1 first_dom=0 last_dom=2 should_bind=0 desc_count=32
+6,1263,245602029,-;hailo-sub2: ch=16 post-launch new_num_avail=9
+6,1264,245606098,-;hailo-trc: IOCTL type=v nr=1 dir=2 size=12 arg=0x7fffda0649e8
+6,1265,245606126,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063560
+6,1266,245606130,-;hailo-trc: FWCTL TX cpu=1 len=42 (showing 42)
+6,1267,245606134,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 25
+6,1268,245606138,-;hailo-trc: FWCTL[010]: 00 00 00 04 00 00 00 01 00 00 00 00 01 ff 00 00
+6,1269,245606141,-;hailo-trc: FWCTL[020]: 00 02 00 00 00 00 00 02 00 00
+6,1270,245606656,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1271,245606718,-;hailo-trc: IOCTL type=v nr=8 dir=2 size=8 arg=0x7fffda065b58
+6,1272,245606730,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ae8
+6,1273,245606750,-;hailo-trc: IOCTL type=v nr=8 dir=2 size=8 arg=0x7fffda065b58
+6,1274,245606755,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ae8
+6,1275,245606771,-;hailo-trc: IOCTL type=v nr=8 dir=2 size=8 arg=0x7fffda065b68
+6,1276,245606778,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065b48
+6,1277,245606792,-;hailo-trc: IOCTL type=v nr=8 dir=2 size=8 arg=0x7fffda065b38
+6,1278,245606797,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ac8
+6,1279,245606808,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ac8
+6,1280,245606822,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ac8
+6,1281,245606832,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ac8
+6,1282,245606843,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ac8
+6,1283,245606852,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ac8
+6,1284,245606861,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ac8
+6,1285,245606871,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065ac8
+6,1286,245606881,-;hailo-trc: IOCTL type=v nr=5 dir=2 size=8 arg=0x7fffda065b18
+6,1287,245606900,-;hailo-trc: IOCTL type=n nr=2 dir=0 size=0 arg=0x0
+6,1288,245606940,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda064060
+6,1289,245606943,-;hailo-trc: FWCTL TX cpu=1 len=42 (showing 42)
+6,1290,245606947,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 25
+6,1291,245606951,-;hailo-trc: FWCTL[010]: 00 00 00 04 00 00 00 01 00 00 00 00 01 ff 00 00
+6,1292,245606953,-;hailo-trc: FWCTL[020]: 00 02 00 00 00 00 00 02 00 00
+6,1293,245607048,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1294,245607067,-;hailo-trc: IOCTL type=n nr=0 dir=3 size=1528 arg=0x7fffda063e90
+6,1295,245607070,-;hailo-trc: FWCTL TX cpu=1 len=20 (showing 20)
+6,1296,245607073,-;hailo-trc: FWCTL[000]: 00 00 00 02 00 00 00 00 00 00 00 00 00 00 00 47
+6,1297,245607076,-;hailo-trc: FWCTL[010]: 00 00 00 00
+6,1298,245611460,-;hailo-sub2: ISTATUS_HOST=0x04800000
+6,1299,245637348,-;hailo-sub2: ISTATUS_HOST=0x08800000

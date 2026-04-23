@@ -231,11 +231,28 @@ static inline size_t pi5_dma_pages(size_t size, size_t align)
     return (request + PAGE_SIZE - 1) / PAGE_SIZE;
 }
 
+/* Phase 8 boundary-submit probe (2026-04-23): when set, pi5_dma_alloc
+ * routes through pmm_alloc_pages_low instead of the default high-bias
+ * pmm_alloc_pages. Hypothesis: BCM2712's PCIe inbound translation
+ * only reaches the bottom of physical RAM, and our boundary tensors
+ * end up at ~4 GB-4 MB where fw can't DMA-read them. Toggled by the
+ * caller around boundary allocations only — control-channel/CCW
+ * allocations stay on the default path.
+ *
+ * Set by hailo_pi5_force_low_dma(true). Reverts on (false). */
+static bool pi5_force_low_dma = false;
+
+void hailo_pi5_force_low_dma(bool enable)
+{
+    pi5_force_low_dma = enable;
+}
+
 static void *pi5_dma_alloc(size_t size, size_t align, uint64_t *iova_out)
 {
     if (size == 0) return NULL;
     size_t pages = pi5_dma_pages(size, align);
-    void *va = pmm_alloc_pages(pages);
+    void *va = pi5_force_low_dma ? pmm_alloc_pages_low(pages)
+                                  : pmm_alloc_pages(pages);
     if (!va) return NULL;
 
     /* Defensive: pmm buddy alignment should already satisfy `align`.
