@@ -456,6 +456,39 @@ GA107-specific in `bringup.c`).
 
 ---
 
+## Jetson GA10B — Ampere compute dispatch uses PCAS2_B (April 2026)
+
+`kernel/gpu/nvidia/ga10b_bringup.c:ga10b_build_launch_kernel_pushbuffer`
+emits `SEND_SIGNALING_PCAS2_B` (method `0x02C0`) with `PCAS_ACTION
+= INVALIDATE_COPY_SCHEDULE` (`0xA`) as the dispatch-kick method.
+**Do not "unify" this with the Turing-era `SEND_SIGNALING_PCAS_B`
+(`0x02BC`) with `{INVALIDATE, SCHEDULE}` bits.** Using PCAS_B on
+GA10B is the quietest failure mode in the GPU stack: PBDMA
+consumes the pushbuffer, `GP_GET` advances, no dmesg error, no
+fault notifier — but the dispatch never reaches the SMs. The
+kernel silently does not run.
+
+Source: `docs/reference/mesa-nvk_cmd_dispatch.c:322-340` — NVK
+branches on `cls_compute <= TURING_COMPUTE_A`:
+
+```c
+if (cls_compute <= TURING_COMPUTE_A)
+    P_IMMD(p, NVA0C0, SEND_SIGNALING_PCAS_B,  {INVALIDATE, SCHEDULE});
+else
+    P_IMMD(p, NVC6C0, SEND_SIGNALING_PCAS2_B, INVALIDATE_COPY_SCHEDULE);
+```
+
+Ampere (`AMPERE_COMPUTE_B = 0xC7C0`) falls in the `else` branch.
+
+Regression protection:
+`host-tools/gsp-harness/test_ga10b_bringup.c:test_launch_kernel_pb_uses_ampere_pcas2_b`
+pins both the method id (`0x02C0 / 4`) and the action value (`0xA`)
+at build time. This test also decodes the opcode/subch/data fields
+independently so a refactor that changes the HDR macros but keeps
+the method/action combination still passes.
+
+---
+
 ## UART Lock on Pi 5 / Jetson
 
 On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).

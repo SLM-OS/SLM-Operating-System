@@ -626,19 +626,45 @@ FP32 only in G1. FP16 and INT8 deferred to G4 where they pair with quantization 
 
 ### Phase G6 — Thesis framing + GSP documentation
 
-**Goal:** the narrative for the capstone report. Explain GPU-detection infrastructure as foundation work and position CPU inference as the delivered capability.
+**Goal:** the narrative for the capstone report.
+
+**April 21 2026 rewrite.** The original framing (GPU compute is
+blocked by the GSP Falcon priv-lock, ship NEON CPU inference
+only) is no longer accurate for Jetson. GA10B compute now works
+end-to-end from SLM-OS post-kexec — the Linux-helper-assisted
+handoff sidesteps the GSP Falcon bringup by inheriting nvgpu's
+already-initialized state, and SLM-OS dispatches real compute
+kernels via `SEND_PCAS_A` + `SEND_SIGNALING_PCAS2_B`. Resolved:
+#297 (host-family SEMAPHORE_RELEASE), #291 (COMPUTE_B
+SEMAPHORE_RELEASE), #356 (QMD-based kernel launch).
+
+The x86-64 GSP-RM blocker (#185) remains unresolved and is the
+discrete-Ampere story. On Jetson, the narrative is "bare-metal
+compute kernel launch via Linux-helper handoff" — a novel
+achievement in its own right.
 
 **Prerequisites:** G5.
 
 **Steps:**
 
-1. Draft a thesis section "GPU Support and the GSP Blocker" explaining:
-   - What works: detection, unified memory, cache coherency.
-   - What doesn't: compute (blocked on GSP).
-   - Why: GSP firmware complexity, closed-source tooling, time budget.
-   - Alternative: NEON CPU inference.
-2. Update `docs/jetson-nvidia-support.md` with the final state.
-3. File a dedicated "Future Work: GSP bare-metal loader" issue referencing the full research in `docs/nvidia-gsp.md`.
+1. Draft a thesis section "GPU Support Across Three Platforms"
+   explaining:
+   - **Jetson (GA10B, integrated Ampere):** GPU compute
+     end-to-end, Linux-helper-assisted channel inherit, QMD
+     dispatch from bare metal. SM execution verified by
+     CUDA-compiled shader writing expected payload.
+   - **x86-64 (discrete GA10x):** blocked on SEC2 priv-lock
+     (#185). Nouveau unlocks via VBIOS DEVINIT replay; porting
+     that is next-session scope.
+   - **Pi 5 (VideoCore):** no public bare-metal compute
+     documentation. Ship NEON CPU inference instead; external
+     NPU via AI HAT+ is the extensibility story.
+2. Update `docs/jetson-nvidia-support.md` — already done
+   (April 21 2026 update note).
+3. File a "Future Work: SLM-OS-native compute-kernel compilation"
+   issue — replace CUDA-compiled shaders + Linux helper
+   setup with in-kernel NAK-equivalent + SLM-OS ioctl-free
+   channel bringup.
 
 **Exit criteria:**
 - Thesis section reviewed and approved.

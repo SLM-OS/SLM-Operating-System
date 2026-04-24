@@ -137,10 +137,16 @@ granularity.
 
 ### Summary
 
-All inference currently runs on CPU. The AI scheduler's MLP runs on CPU
-with NEON/SSE acceleration. Actual GPU compute is blocked on both
-Ampere platforms by hardware security boundaries:
+All production inference currently runs on CPU (NEON/SSE). The two
+Ampere platforms diverge as of **April 21 2026**:
 
+- **Jetson (GA10B, integrated Ampere):** GPU compute kernel launch
+  works end-to-end from SLM-OS post-kexec. Linux helper
+  (`scripts/gpu-kernel-launch.c --preserve-for-kexec`) allocates
+  the channel + uploads a CUDA-compiled shader + QMD; SLM-OS's
+  `nvgpu launch-kernel` dispatches via `SEND_PCAS_A` +
+  `SEND_SIGNALING_PCAS2_B` and reads the kernel output. Issues
+  #297, #291, #356 all resolved.
 - **x86-64 discrete GA107**: Booter Load blocked by SEC2 priv-lockdown
   raised by UEFI POST's VBIOS DEVINIT script (#185). Present on both
   VFIO and bare-metal paths — the "bare-metal bypasses FLR" hypothesis
@@ -185,9 +191,9 @@ stack than discrete Ampere.
 | Falcon v4 register protocol | `falcon.c` (500 lines) | 37 | Complete |
 | FWSEC/DMEMMAPPER/sig-index (discrete) | `bringup.c` (1050+ lines) | 25 | Complete |
 | RPC ring skeleton (discrete) | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
-| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (1050 lines) | **45** | Phases 1–7 wired; **Phase 7 host-family path fires sema on Jetson** — helper's pre-kexec isolation test writes 0xCAFE to the target VA after USERMODE doorbell. SEMAPHORE_RELEASE encoded correctly (method_id at [12:0] per nvgpu gv11b), class/subch/veid tuple correct (COMPUTE_B on subch 1 per NVK). COMPUTE_B method path still blocked on MME_FE1 (issue #291, needs MME program load); #273 resolved |
+| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (1500 lines) | **52** | Phases 1–8 wired and hardware-verified. **Phase 7 host-family + COMPUTE_B semaphore release fire from SLM-OS post-kexec** (issues #297, #291 closed). **Phase 8 compute kernel launch fires from SLM-OS post-kexec** (issue #356 closed) — GPU SMs execute a CUDA-compiled shader via `SEND_PCAS_A` + Ampere-specific `SEND_SIGNALING_PCAS2_B`, kernel writes 0xCAFE to output buffer, SLM-OS reads it back. Ampere requires PCAS2_B (method 0x02C0, action INVALIDATE_COPY_SCHEDULE = 0xA), not Turing's PCAS_B (0x02BC) — pinned by `test_launch_kernel_pb_uses_ampere_pcas2_b`. Linux helper (`scripts/gpu-kernel-launch.c --preserve-for-kexec`) uploads shader + QMD and writes a v3 handoff; SLM-OS inherits via Phase 6 scan and dispatches via Phase 8 builder |
 | **Jetson platform shim** | `nvidia_gsp_platform.c` (350 lines) | **15** | vtable dispatch + DMA align math host-tested |
-| **Total host-side tests** | | **182** | **All passing** |
+| **Total host-side tests** | | **189** | **All passing** |
 
 ### Platform-Specific Blockers
 
@@ -368,21 +374,42 @@ execution. Host regression tests added:
 - Literal-dword guards (`pb[N] == 0x20010017` etc.) in the host-family
   and COMPUTE_B layout tests — catch co-regression of
   `NVC56F_METHOD_HEADER_INC` and `EXPECT_INC_HDR` drifting together.
+- `test_launch_kernel_pb_uses_ampere_pcas2_b` — pins the
+  dispatch-kick method to `SEND_SIGNALING_PCAS2_B` (0x02C0) with
+  action `INVALIDATE_COPY_SCHEDULE` (0xA). Using the Turing-era
+  `SEND_SIGNALING_PCAS_B` (0x02BC) on GA10B silently no-ops
+  dispatch (PBDMA consumes the pushbuffer, no fault, kernel never
+  runs) — this test catches that regression at build time.
 
-**Remaining path to GPU inference:**
-- #291 (MME_FE1 exception on COMPUTE_B path): the
-  `ga10b_build_compute_sema_release_pushbuffer` builder has correct
-  encoding and subch, but executing it needs an MME program load
-  (NVK-style: 3D engine context on subch 0 + inline MME ucode via
-  `LOAD_MME_INSTRUCTION_RAM_POINTER`). Host-family path is
-  unaffected.
-- Post-kexec validation: the SLM-OS-side Phase 7 smoke test reads
-  the same handoff and submits the same encoded pushbuffer; needs
-  a fresh hardware run now that encoding is correct (prior "works
-  end-to-end" signal was based on GP_GET advance only).
-- Compute class binding + QMD dispatch (blocked on #291)
-- Compute kernel (SASS binary for `sm_87`)
-- Inference loop (GEMM → activation per layer)
+**Phase 7 → Phase 8 resolution (April 21 2026):**
+- #297 closed: Phase 7 host-family SEMAPHORE_RELEASE from SLM-OS.
+  `nvgpu inherit` → `nvgpu channel` → `poke sem=0` → `nvgpu submit`
+  reads back 0xCAFE on jetson-nano-1. The zero-before-submit step
+  gives unambiguous evidence (not GP_GET-advance false positive).
+- #291 closed: the MME_FE1 exception in the original filing was
+  a symptom of the pre-#295 method-header encoding, not a missing
+  MME init. Confirmed by `scripts/gpu-compute-smoke.c` on Linux —
+  bare `SET_OBJECT(COMPUTE_B) + SEMAPHORE_RELEASE` (experiment 0,
+  the "known-failing" baseline) fires the semaphore with the
+  corrected encoding; no MME IRAM upload required.
+  `ga10b_bringup_smoke_test_compute` + `nvgpu submit-compute`
+  reproduce the fire end-to-end from SLM-OS post-kexec.
+- #356 closed: Phase 8 compute kernel launch works end-to-end.
+  Linux helper (`scripts/gpu-kernel-launch.c --preserve-for-kexec`)
+  uploads a CUDA-compiled shader + QMD and writes a v3 handoff;
+  SLM-OS's `nvgpu launch-kernel` dispatches via SEND_PCAS_A +
+  SEND_SIGNALING_PCAS2_B, GPU SMs execute the shader, kernel
+  writes 0xCAFE to a known physical address.
+
+**What's left beyond the current demonstration:**
+- Fully SLM-OS-native shader compilation (current shader is
+  CUDA-compiled; would require porting NAK or writing an
+  Ampere SASS assembler).
+- SLM-OS-native channel + buffer setup (Linux helper currently
+  does all `nvgpu` ioctls pre-kexec).
+- Real inference kernels: MatMul / conv / activation at the
+  scales an SLM requires, with QMD fields tuned per-kernel.
+- Inference loop (GEMM → activation per layer).
 
 **x86-64:** FWSEC-FRTS succeeds on hardware (3/3 runs VFIO, 4/4 runs
 bare-metal SLM-OS — April 15 2026, WPR2 populated at 0x1ffffe00 on

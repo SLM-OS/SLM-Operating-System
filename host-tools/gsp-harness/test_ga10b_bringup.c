@@ -1323,6 +1323,205 @@ static void test_compute_sema_release_pb_zero_payload(void)
     REQUIRE_EQ(pb[11], 0x00000008u);                    /* EXECUTE unchanged */
 }
 
+/* ======================================================================
+ * ga10b_build_launch_kernel_pushbuffer (Phase 8 — compute kernel launch)
+ *
+ * Tests pin the 13-dword dispatch pushbuffer that SLM-OS emits after
+ * inheriting a v3 channel handoff. The crucial Ampere-vs-Turing split
+ * — SEND_SIGNALING_PCAS2_B at method 0x02C0 with PCAS_ACTION =
+ * INVALIDATE_COPY_SCHEDULE (0xA), NOT the Turing-era
+ * SEND_SIGNALING_PCAS_B at 0x02BC with {INVALIDATE, SCHEDULE} bits —
+ * is pinned by a dedicated test because using the older method on
+ * GA10B silently no-ops dispatch (PBDMA consumes the pushbuffer, no
+ * dmesg error, kernel never runs). Worth protecting aggressively so
+ * a well-meaning unification across arches can't regress it.
+ * ====================================================================== */
+
+/* Test-side immediate-header encoder — mirrors the kernel's
+ * ga10b_hdr_immd (SEC_OP = 4, 13-bit data at [28:16], subch at
+ * [15:13], method_id = byte_off / 4 at [12:0]). Kept independent of
+ * the kernel macro so a co-regression of both sides drifting
+ * together still fails a literal-dword guard below. */
+#define EXPECT_IMMD_HDR(subch, byte_off, data)                         \
+    ((4u << 29) | ((uint32_t)(data) << 16) |                           \
+     ((uint32_t)(subch) << 13) | (((uint32_t)(byte_off) >> 2) & 0x1FFFu))
+
+static void test_launch_kernel_pb_layout(void)
+{
+    printf("== test_launch_kernel_pb_layout ==\n");
+    uint32_t pb[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+    memset(pb, 0xAB, sizeof(pb));
+
+    /* 256 B-aligned QMD VA with non-zero upper bits so the shift tests
+     * both halves. qmd_gva = 0x1ffc013000 → qmd_gva >> 8 = 0x1ffc0130. */
+    uint64_t qmd_gva = 0x1ffc013000ULL;
+
+    uint32_t dwords = ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva);
+    REQUIRE_EQ(dwords, GA10B_LAUNCH_KERNEL_PB_DWORDS);
+
+    /* [0-1] SET_OBJECT binding AMPERE_COMPUTE_B on subch 1. Same shape
+     * as the compute-sema builder above; literal-dword guard mirrors. */
+    REQUIRE_EQ(pb[0], EXPECT_INC_HDR(1, 1, 0x00u));
+    REQUIRE_EQ(pb[0], 0x20012000u);
+    REQUIRE_EQ(pb[1], GA10B_AMPERE_COMPUTE_B_CLASS_ID);
+
+    /* [2-4] SET_SHADER_SHARED_MEMORY_WINDOW_A (0x02A0) count=2.
+     * Matches nvk_push_dispatch_state_init for cls_compute <
+     * HOPPER_COMPUTE_A (window base = 0xfe000000 with upper = 0). */
+    REQUIRE_EQ(pb[2], EXPECT_INC_HDR(2, 1, 0x02A0u));
+    REQUIRE_EQ(pb[2], 0x200220A8u);
+    REQUIRE_EQ(pb[3], 0u);                /* upper 17 bits */
+    REQUIRE_EQ(pb[4], 0xFE000000u);       /* shared-mem window base */
+
+    /* [5-7] SET_SHADER_LOCAL_MEMORY_WINDOW_A (0x07B0) count=2.
+     * Window base = 0xff000000. */
+    REQUIRE_EQ(pb[5], EXPECT_INC_HDR(2, 1, 0x07B0u));
+    REQUIRE_EQ(pb[5], 0x200221ECu);
+    REQUIRE_EQ(pb[6], 0u);
+    REQUIRE_EQ(pb[7], 0xFF000000u);       /* local-mem window base */
+
+    /* [8] INVALIDATE_SKED_CACHES (0x0298) immediate, data=0.
+     * [9] INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI (0x0244) immediate,
+     *     data=0 (= LINES_ALL). */
+    REQUIRE_EQ(pb[8], EXPECT_IMMD_HDR(1, 0x0298u, 0));
+    REQUIRE_EQ(pb[8], 0x800020A6u);
+    REQUIRE_EQ(pb[9], EXPECT_IMMD_HDR(1, 0x0244u, 0));
+    REQUIRE_EQ(pb[9], 0x80002091u);
+
+    /* [10-11] SEND_PCAS_A (0x02B4). Data = qmd_gva >> 8. */
+    REQUIRE_EQ(pb[10], EXPECT_INC_HDR(1, 1, 0x02B4u));
+    REQUIRE_EQ(pb[10], 0x200120ADu);
+    REQUIRE_EQ(pb[11], (uint32_t)(qmd_gva >> 8));
+    REQUIRE_EQ(pb[11], 0x1FFC0130u);      /* literal guard */
+
+    /* [12] SEND_SIGNALING_PCAS2_B (0x02C0) immediate, action=0xA.
+     * CRITICAL REGRESSION GUARD: this must be PCAS2_B at 0x02C0 with
+     * action 0xA (INVALIDATE_COPY_SCHEDULE), NOT PCAS_B at 0x02BC.
+     * See this test file's launch-kernel section doc for why. */
+    REQUIRE_EQ(pb[12], EXPECT_IMMD_HDR(1, 0x02C0u, 0xA));
+    REQUIRE_EQ(pb[12], 0x800A20B0u);
+}
+
+static void test_launch_kernel_pb_qmd_shift_lower(void)
+{
+    printf("== test_launch_kernel_pb_qmd_shift_lower ==\n");
+    uint32_t pb[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+
+    /* A QMD VA that fits entirely in the low 32 bits (plus the 8-bit
+     * shift). SEND_PCAS_A_QMD_ADDRESS_SHIFTED8 is a 32-bit field, so
+     * VAs above (1ULL << 40) cannot be represented — the helper
+     * doesn't try, it just stuffs the low 32 of (va >> 8). Test that
+     * the 256-byte-aligned zero-upper case works. */
+    uint64_t qmd_gva = 0x00000000FEDCBA00ULL;
+    ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva);
+
+    REQUIRE_EQ(pb[11], 0x00FEDCBAu);
+}
+
+static void test_launch_kernel_pb_qmd_shift_upper(void)
+{
+    printf("== test_launch_kernel_pb_qmd_shift_upper ==\n");
+    uint32_t pb[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+
+    /* QMD VA above 4 GB. SEND_PCAS_A_QMD_ADDRESS_SHIFTED8 is a
+     * 32-bit field, so only (va >> 8) & 0xFFFFFFFF survives — upper
+     * bits above (1ULL << 40) are silently dropped. Test the 40-bit
+     * boundary: 0x0000123456789A00 >> 8 = 0x000000123456789A, which
+     * truncates to 0x3456789A when cast to uint32. */
+    uint64_t qmd_gva = 0x0000123456789A00ULL;
+    ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva);
+
+    REQUIRE_EQ(pb[11], (uint32_t)((qmd_gva >> 8) & 0xFFFFFFFFu));
+    REQUIRE_EQ(pb[11], 0x3456789Au);      /* literal guard */
+}
+
+static void test_launch_kernel_pb_idempotent(void)
+{
+    printf("== test_launch_kernel_pb_idempotent ==\n");
+    uint32_t pb1[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+    uint32_t pb2[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+
+    /* Same input produces same output. Guards against future
+     * refactors that accidentally read stale state (globals, etc.). */
+    ga10b_build_launch_kernel_pushbuffer(pb1, 0x1ffc013000ULL);
+    memset(pb2, 0xCC, sizeof(pb2));
+    ga10b_build_launch_kernel_pushbuffer(pb2, 0x1ffc013000ULL);
+    REQUIRE_EQ(memcmp(pb1, pb2, sizeof(pb1)), 0);
+}
+
+static void test_launch_kernel_pb_uses_ampere_pcas2_b(void)
+{
+    printf("== test_launch_kernel_pb_uses_ampere_pcas2_b ==\n");
+    uint32_t pb[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+    ga10b_build_launch_kernel_pushbuffer(pb, 0x100000000ULL);
+
+    /* Ampere split guard. The dispatch-kick method MUST be
+     * SEND_SIGNALING_PCAS2_B (method_id = 0x02C0 / 4 = 0xB0). If a
+     * future refactor changes pb[12] to PCAS_B (0x02BC / 4 = 0xAF)
+     * or swaps the action to the PCAS_B-style bitfield, GA10B
+     * dispatch will silently no-op on hardware. This test shouts
+     * about that at build time, not at hardware-debug time. */
+    uint32_t pb12 = pb[12];
+    uint32_t method_id = pb12 & 0x1FFFu;
+    uint32_t sec_op    = (pb12 >> 29) & 0x7u;
+    uint32_t data      = (pb12 >> 16) & 0x1FFFu;
+    uint32_t subch     = (pb12 >> 13) & 0x7u;
+
+    REQUIRE_EQ(sec_op, 4u);                    /* IMMD opcode */
+    REQUIRE_EQ(subch, 1u);                     /* compute subch */
+    REQUIRE_EQ(method_id, 0x02C0u / 4u);       /* PCAS2_B, not PCAS_B */
+    REQUIRE_EQ(data, 0xAu);                    /* INVALIDATE_COPY_SCHEDULE */
+}
+
+/* ======================================================================
+ * Handoff v3 — channel + kernel-launch state
+ * ====================================================================== */
+
+static void test_handoff_v3_layout_size(void)
+{
+    printf("== test_handoff_v3_layout_size ==\n");
+    /* Belt-and-suspenders runtime check. The header pins the size with
+     * a _Static_assert but a fresh-eyes reader shouldn't have to dig
+     * into compile-time errors to discover that v2 was 120 and v3 is
+     * 192. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 192u);
+}
+
+static void test_handoff_validate_v3_accepted(void)
+{
+    printf("== test_handoff_validate_v3_accepted ==\n");
+    struct ga10b_channel_handoff h;
+
+    /* Both v2 and v3 are valid channel-inherit handoffs. Phase 8
+     * (launch_kernel) gates on version at dispatch time. */
+    fill_valid_handoff(&h);
+    h.version = 2;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+
+    h.version = 3;
+    /* Populate v3 extension fields — the validator doesn't inspect
+     * them but a realistic v3 handoff has them filled. */
+    h.shader_phys   = 0x1c0010000ULL;
+    h.shader_gpu_va = 0x1ffc010000ULL;
+    h.cbuf_phys     = 0x1c0011000ULL;
+    h.cbuf_gpu_va   = 0x1ffc011000ULL;
+    h.qmd_phys      = 0x1c0013000ULL;
+    h.qmd_gpu_va    = 0x1ffc013000ULL;
+    h.output_phys   = 0x1c0012000ULL;
+    h.output_gpu_va = 0x1ffc012000ULL;
+    h.shader_size   = 640u;
+    h.cbuf_size     = 512u;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+
+    /* v3 with zeroed extension fields also passes validation —
+     * Phase 8 will reject at dispatch time via its own zero-check. */
+    h.shader_phys = 0;
+    h.shader_gpu_va = 0;
+    h.qmd_gpu_va = 0;
+    h.output_phys = 0;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+}
+
 static void test_handoff_validate_null_addresses(void)
 {
     printf("== test_handoff_validate_null_addresses ==\n");
@@ -1515,6 +1714,15 @@ int main(void)
     test_compute_sema_release_pb_layout();
     test_compute_sema_release_pb_truncates_va_upper();
     test_compute_sema_release_pb_zero_payload();
+
+    test_launch_kernel_pb_layout();
+    test_launch_kernel_pb_qmd_shift_lower();
+    test_launch_kernel_pb_qmd_shift_upper();
+    test_launch_kernel_pb_idempotent();
+    test_launch_kernel_pb_uses_ampere_pcas2_b();
+
+    test_handoff_v3_layout_size();
+    test_handoff_validate_v3_accepted();
 
     test_scanner_finds_magic_at_start();
     test_scanner_finds_magic_midrange();
