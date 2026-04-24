@@ -43,7 +43,6 @@ static bool                  root_device_present;
 static struct usb_device     hub_device;
 static bool                  hub_device_present;
 static bool                  usb_disable_hotplug_retry_after_failure = true;
-static bool                  usb_probe_child_noop_before_close = false;
 static bool                  usb_child_address_sync_bsr0 = true;
 static bool                  usb_child_initial_desc_bounce = true;
 static bool                  usb_child_followup_desc_bounce = true;
@@ -158,35 +157,6 @@ static int usb_fetch_config_descriptor(struct usb_device *dev,
         return -1;
 
     return (int)total;
-}
-
-static bool usb_probe_preserve_child_failure(struct usb_device *dev,
-                                             const char *phase)
-{
-    if (!usb_probe_child_noop_before_close || dev == NULL || dev->route_string == 0)
-        return false;
-
-    usb_probe_child_noop_before_close = false;
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-    int noop_rc = xhci_cmd_noop_probe();
-    WARN("usb_core: preserving child failure boundary after %s "
-         "(route=0x%x root_port=%u addr=%u speed=%d) noop_rc=%d",
-         phase,
-         (unsigned)dev->route_string,
-         (unsigned)dev->root_hub_port,
-         (unsigned)dev->address,
-         (int)dev->speed,
-         noop_rc);
-#else
-    WARN("usb_core: preserving child failure boundary after %s "
-         "(route=0x%x root_port=%u addr=%u speed=%d)",
-         phase,
-         (unsigned)dev->route_string,
-         (unsigned)dev->root_hub_port,
-         (unsigned)dev->address,
-         (int)dev->speed);
-#endif
-    return true;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -995,8 +965,6 @@ got_initial_descriptor:
                 dev->state = USB_STATE_ADDRESS;
                 goto address_assigned;
             }
-            if (usb_probe_preserve_child_failure(dev, "ADDRESS_DEVICE(BSR=0)"))
-                return -1;
         }
 #endif
         rc = usb_control_msg(dev,
@@ -1006,8 +974,6 @@ got_initial_descriptor:
         if (rc < 0) {
             WARN("usb_core: SET_ADDRESS failed: %s",
                  usb_urb_status_str((enum usb_urb_status)(-rc)));
-            if (usb_probe_preserve_child_failure(dev, "SET_ADDRESS"))
-                return -1;
             goto err_close;
         }
         dev->address = target_address;
@@ -1038,8 +1004,6 @@ address_assigned:
                 memcpy(&dev->dev_desc, dd_full, sizeof(dev->dev_desc));
             } else {
                 WARN("usb_core: short GET_DESCRIPTOR(device, 64) n=%d", n);
-                if (usb_probe_preserve_child_failure(dev, "GET_DESCRIPTOR(device,64)"))
-                    return -1;
                 goto err_close;
             }
         } else {
@@ -1065,8 +1029,6 @@ address_assigned:
         }
         if (n < (int)sizeof(dev->dev_desc)) {
             WARN("usb_core: short GET_DESCRIPTOR(device) n=%d", n);
-            if (usb_probe_preserve_child_failure(dev, "GET_DESCRIPTOR(device)"))
-                return -1;
             goto err_close;
         }
     }
@@ -1081,8 +1043,6 @@ address_assigned:
                                     sizeof(dev->raw_config));
     if (n < (int)sizeof(cfg_head)) {
         WARN("usb_core: short GET_DESCRIPTOR(config, 0) n=%d", n);
-        if (usb_probe_preserve_child_failure(dev, "GET_DESCRIPTOR(config,0)"))
-            return -1;
         goto err_close;
     }
     dev->raw_config_len = (uint16_t)n;
@@ -1131,8 +1091,6 @@ address_assigned:
     if (rc < 0) {
         WARN("usb_core: SET_CONFIGURATION failed: %s",
              usb_urb_status_str((enum usb_urb_status)(-rc)));
-        if (usb_probe_preserve_child_failure(dev, "SET_CONFIGURATION"))
-            return -1;
         goto err_close;
     }
     dev->current_config = cfg_val;
