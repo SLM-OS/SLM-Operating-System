@@ -169,7 +169,7 @@ _Static_assert(sizeof(struct xhci_erst_entry) == 16, "ERST entry 16B");
 
 static struct xhci_erst_entry *xhci_erst;
 
-static bool xhci_probe_ram_ptr(uintptr_t p)
+static bool xhci_ram_ptr_valid(uintptr_t p)
 {
     /*
      * Jetson Orin Nano boot path here always reports DRAM starting at
@@ -197,7 +197,7 @@ static void xhci_log_inherited_dcbaa(uint64_t dcbaap)
     memset(xhci_inherited_slot3_slot_ctx_dw, 0, sizeof(xhci_inherited_slot3_slot_ctx_dw));
     memset(xhci_inherited_slot3_ep0_ctx_dw, 0, sizeof(xhci_inherited_slot3_ep0_ctx_dw));
     memset(xhci_inherited_slot3_ep_ctx_dw, 0, sizeof(xhci_inherited_slot3_ep_ctx_dw));
-    if (dcbaa_ptr == 0 || !xhci_probe_ram_ptr(dcbaa_ptr)) {
+    if (dcbaa_ptr == 0 || !xhci_ram_ptr_valid(dcbaa_ptr)) {
         INFO("xhci: inherited DCBAA probe skipped (ptr=0x%lx)",
              (unsigned long)dcbaa_ptr);
         return;
@@ -215,7 +215,7 @@ static void xhci_log_inherited_dcbaa(uint64_t dcbaap)
             xhci_inherited_slot1_devctx_raw_phys = devctx_ptr;
         if (slot == 3)
             xhci_inherited_slot3_devctx_raw_phys = devctx_ptr;
-        if (devctx_ptr == 0 || !xhci_probe_ram_ptr(devctx_ptr))
+        if (devctx_ptr == 0 || !xhci_ram_ptr_valid(devctx_ptr))
             continue;
 
         if (slot == 3)
@@ -1887,7 +1887,7 @@ static void xhci_scrub_inherited_slots(void)
     }
 }
 
-static void xhci_probe_inherited_slot_ep0(uint8_t slot)
+static void xhci_log_inherited_slot_ep0(uint8_t slot)
 {
     if (slot == 1 || slot == 3) {
         INFO("xhci: inherited-slot probe leaving slot %u EP0 untouched for adoption",
@@ -2105,8 +2105,8 @@ int xhci_init(void)
     }
 
     xhci_live = true;
-    xhci_probe_inherited_slot_ep0(1);
-    xhci_probe_inherited_slot_ep0(3);
+    xhci_log_inherited_slot_ep0(1);
+    xhci_log_inherited_slot_ep0(3);
     xhci_scrub_inherited_slots();
 
     /*
