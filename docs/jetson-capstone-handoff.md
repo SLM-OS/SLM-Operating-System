@@ -184,10 +184,26 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   pre-#295 method-header encoding, not a missing MME init.
   With the corrected encoding, nvgpu's `ALLOC_OBJ_CTX` primes
   enough of the golden context for compute method dispatch.
-  No MME IRAM upload required. What **is** still required for
-  actual compute kernel launch: QMD (Queue Manager Descriptor)
-  upload + shader binary — a separate, concrete next step
-  beyond this milestone.
+  No MME IRAM upload required.
+- **Phase 8 compute-kernel launch VERIFIED end-to-end
+  (April 21, #356):** SLM-OS dispatches an actual compute shader
+  on the GPU SMs and reads back the expected payload. Linux
+  helper (`scripts/gpu-kernel-launch.c --preserve-for-kexec`)
+  uploads a CUDA-compiled shader (640 B SASS, single-thread
+  `*out = 0xCAFE`), populates a QMD pointing at it, and writes a
+  v3 handoff block to DRAM. After kexec, SLM-OS's
+  `nvgpu launch-kernel` builds a 13-dword compute pushbuffer
+  (SET_OBJECT, shader shared/local memory windows at 0xfe000000 /
+  0xff000000, INVALIDATE_SKED_CACHES, INVALIDATE_TEXTURE_HEADER,
+  SEND_PCAS_A, SEND_SIGNALING_PCAS2_B), rings the doorbell, and
+  polls output_phys. The shader executes and writes `0x0000CAFE`;
+  SLM-OS reports `KERNEL LAUNCHED`. Critical Ampere requirement:
+  `SEND_SIGNALING_PCAS2_B` at method 0x02C0 with action
+  `INVALIDATE_COPY_SCHEDULE` (0xA) — the Turing-era PCAS_B at
+  0x02BC is silently no-oped on GA10B. Shader is still CUDA-
+  compiled and channel/QMD setup is still done by the Linux
+  helper; fully SLM-OS-native compile + channel creation remains
+  future work.
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)
