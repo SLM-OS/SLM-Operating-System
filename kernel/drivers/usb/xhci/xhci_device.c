@@ -84,10 +84,12 @@ static struct xhci_device xhci_dev_pool[2];
 #define XHCI_DEV_MAX_RINGS          8
 static struct xhci_ring xhci_ring_pool[XHCI_DEV_MAX_RINGS];
 static bool             xhci_ring_in_use[XHCI_DEV_MAX_RINGS];
-static bool             xhci_probe_adopt_inherited_slot1 = true;
-static bool             xhci_probe_adopt_inherited_slot3 = true;
-static bool             xhci_probe_reset_ep_on_adopt_slot3 = true;
-static bool             xhci_probe_fullspeed_power_cycle = true;
+/* These one-shot Jetson bring-up workarounds are now part of the normal
+ * inherited-slot path, so keep them named for behavior rather than probes. */
+static bool             xhci_adopt_inherited_slot1_once = true;
+static bool             xhci_adopt_inherited_slot3_once = true;
+static bool             xhci_reset_ep_on_adopt_slot3_once = true;
+static bool             xhci_fullspeed_power_cycle_once = true;
 
 static void xhci_try_power_cycle_port(uint8_t pidx, const char *why);
 static void xhci_build_input_ctx_for_address(struct xhci_device *d,
@@ -1353,7 +1355,7 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
                                          struct usb_device *dev,
                                          struct xhci_ring *ep0)
 {
-    if (!xhci_probe_adopt_inherited_slot3 || d == NULL || dev == NULL ||
+    if (!xhci_adopt_inherited_slot3_once || d == NULL || dev == NULL ||
         ep0 == NULL)
         return -1;
 
@@ -1386,7 +1388,7 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
         return -1;
     }
 
-    if (xhci_probe_reset_ep_on_adopt_slot3) {
+    if (xhci_reset_ep_on_adopt_slot3_once) {
         memset(&cmd, 0, sizeof(cmd));
         cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_RESET_EP) |
                       ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
@@ -1398,7 +1400,7 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
             WARN("xhci: adopt slot %u RESET_EP(ep0) transport failed",
                  (unsigned)slot);
         }
-        xhci_probe_reset_ep_on_adopt_slot3 = false;
+        xhci_reset_ep_on_adopt_slot3_once = false;
     }
 
     memset(&cmd, 0, sizeof(cmd));
@@ -1503,7 +1505,7 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
     xhci_dcbaa[slot] = (uint64_t)published_devctx_phys;
     dsb(sy);
 
-    xhci_probe_adopt_inherited_slot3 = false;
+    xhci_adopt_inherited_slot3_once = false;
     INFO("xhci: adopted inherited slot %u for full-speed root device "
          "(root_port=%u ring=0x%lx devctx=0x%lx retained_devctx=0x%lx "
          "dcbaa_devctx=0x%lx via on-demand SET_TR_DEQ)",
@@ -1519,7 +1521,7 @@ static int xhci_try_adopt_inherited_slot1(struct xhci_device *d,
                                           struct usb_device *dev,
                                           struct xhci_ring *ep0)
 {
-    if (!xhci_probe_adopt_inherited_slot1 || d == NULL || dev == NULL ||
+    if (!xhci_adopt_inherited_slot1_once || d == NULL || dev == NULL ||
         ep0 == NULL)
         return -1;
 
@@ -1571,7 +1573,7 @@ static int xhci_try_adopt_inherited_slot1(struct xhci_device *d,
     xhci_dcbaa[slot] = (uint64_t)xhci_inherited_slot1_devctx_raw_phys;
     dsb(sy);
 
-    xhci_probe_adopt_inherited_slot1 = false;
+    xhci_adopt_inherited_slot1_once = false;
     INFO("xhci: adopted inherited slot %u for high-speed root device "
          "(root_port=%u ring=0x%lx retained_devctx=0x%lx)",
          (unsigned)slot, (unsigned)d->root_port,
@@ -1871,11 +1873,11 @@ int xhci_hcd_device_open(struct usb_device *dev)
                                                      xhci_active_portsc,
                                                      "device_open pre-ep0");
 
-    if (xhci_probe_fullspeed_power_cycle &&
+    if (xhci_fullspeed_power_cycle_once &&
         dev->route_string == 0 &&
         dev->speed == USB_SPEED_FULL &&
         !(xhci_active_portsc & XHCI_PORTSC_PED)) {
-        xhci_probe_fullspeed_power_cycle = false;
+        xhci_fullspeed_power_cycle_once = false;
         tegra_xusb_utmi_pad_power_cycle_active_lane("full-speed pre-open");
         xhci_active_portsc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
         xhci_active_portsc = xhci_ack_port_changes(xhci_active_port,
