@@ -695,6 +695,23 @@ int hailo_control_core_identify(uint32_t *out_response_len);
 int hailo_control_get_device_information(uint32_t *out_response_len);
 
 /*
+ * Pre-boot interrupt-mask arming. Linux's hailo_pcie_enable_interrupts
+ * (called from hailo_activate_board BEFORE load_firmware) writes the
+ * IMASK_HOST + per-channel SRC/DST IRQ masks before triggering the
+ * fw boot, so fw boots with all IRQ infrastructure already armed. We
+ * previously only did this lazily on the first FW_CONTROL RPC, after
+ * fw was already running. Phase 8 #253: hypothesis is fw initializes
+ * differently when IRQ masks are/aren't armed at boot time. This
+ * function lets the boot path call it before triggering fw.
+ *
+ * Idempotent: if interrupts have already been armed, a re-call is
+ * cheap (the writes are the same value). MSI handler registration is
+ * NOT done here — that lives in control_post_boot_init since it
+ * needs fw to be RUNNING (handler may receive responses).
+ */
+int hailo_control_arm_irq_masks(void);
+
+/*
  * Reset internal control-channel state (sequence counter and the
  * "IMASK already armed" flag). Only used by unit tests to isolate
  * each send_recv round from the last. Safe to call at any time.

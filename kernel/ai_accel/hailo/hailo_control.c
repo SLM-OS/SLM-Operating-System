@@ -301,6 +301,37 @@ static int wait_for_response(uint32_t timeout_us)
  * flexibility.
  */
 static bool control_post_boot_init_done = false;
+static bool control_irq_masks_armed = false;
+
+int hailo_control_arm_irq_masks(void)
+{
+    if (control_irq_masks_armed) return HAILO_OK;
+    if (!hailo_platform || !hailo_platform->write32 || !hailo_platform->read32) {
+        return HAILO_ERR_NODEV;
+    }
+
+    /* Mirrors hailo_pcie_enable_interrupts (hailo-pcie-common.c:867):
+     * arm IMASK_HOST then W1C any stale ISTATUS bits, then arm ALL
+     * 32 SRC + 32 DST per-channel IRQ masks. Linux does this BEFORE
+     * the fw trigger so the device boots into a fully-armed IRQ
+     * state. */
+    uint32_t mask = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                           HAILO_BSC_IMASK_HOST);
+    mask |= HAILO_BSC_ISTATUS_HOST_MASK;
+    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
+    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
+                            0xFFFFFFFFu);
+    hailo_platform->write32(HAILO_BAR_CONFIG,
+                            HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL,
+                            0xFFFFFFFFu);
+    hailo_platform->write32(HAILO_BAR_CONFIG,
+                            HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
+                            0xFFFFFFFFu);
+    hailo_platform->mb();
+
+    control_irq_masks_armed = true;
+    return HAILO_OK;
+}
 
 static void control_post_boot_init(void)
 {
