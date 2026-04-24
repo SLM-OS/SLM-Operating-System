@@ -617,38 +617,101 @@ static int cmd_full_handshake(int fd)
     if (rc != 0) goto cleanup;
     printf("[6] CS handshake complete — channel 2 should be configured\n");
 
-    /* 7. LAUNCH_TRANSFER on channel 2. */
-    printf("[7] LAUNCH_TRANSFER on channel 2 (boundary input)...\n");
-    rc = hailo_dev_launch_transfer(fd, 2, bnd_in_dh, 0, bnd_in_buf, 784);
+    /* Brief sleep: fw sets each VDMA channel's CONTROL byte to START
+     * asynchronously after CHANGE_STATUS(ENABLED). LAUNCH_TRANSFER
+     * returns ECONNRESET while CONTROL is still 0. SLM-OS polls via
+     * hailo_vdma_channel_wait_armed(); userspace probe takes the
+     * cheap route and just sleeps 200 ms (plenty for Hailo-8L). */
+    usleep(200 * 1000);
+    printf("[6.5] waited 200 ms for fw to arm VDMA channels\n");
+
+    /* 7a. Enable CCW channel 1 + output channel 16 (ch=2 already
+     * enabled in step 4). SLM-OS's production hailo_backend_run
+     * flow writes num_avail on ch=1 to upload CCW weights, then
+     * pre-arms ch=16 for output, then LAUNCH_TRANSFERs ch=2. */
+    rc = hailo_dev_enable_channel(fd, 1, false);
+    if (rc < 0) { fprintf(stderr, "[7a] ENABLE ch=1: %s\n",
+        strerror(-rc)); goto cleanup; }
+    rc = hailo_dev_enable_channel(fd, 16, false);
+    if (rc < 0) { fprintf(stderr, "[7a] ENABLE ch=16: %s\n",
+        strerror(-rc)); goto cleanup; }
+    printf("[7a] enabled channels 1 (CCW) + 16 (bnd_out)\n");
+
+    /* 7b. Kick CCW upload on channel 1. Buffer content is garbage
+     * bytes (ctxsmoke doesn't carry real weights); the point is to
+     * give fw something to DMA-pull so the channel 1 state machine
+     * advances. For a real #253 apples-to-apples reproduction,
+     * this would want actual MNIST CCW bytes from the HEF. */
+    printf("[7b] LAUNCH_TRANSFER ch=1 (CCW upload)...\n");
+    rc = hailo_dev_launch_transfer(fd, 1, ccw_dh, 0, ccw_buf, 256);
     if (rc < 0) {
-        fprintf(stderr, "[7] LAUNCH_TRANSFER failed: %s\n", strerror(-rc));
+        fprintf(stderr, "[7b] ch=1 LAUNCH_TRANSFER: %s\n", strerror(-rc));
         goto cleanup;
     }
-    printf("[7] launched\n");
+    /* Wait briefly for CCW to process. If fw is healthy, this
+     * advances num_proc on ch=1 within tens of ms. */
+    uint8_t ccw_count = 0;
+    struct hailo_vdma_interrupts_channel_data ccw_irqs[8];
+    rc = hailo_dev_interrupts_wait(fd, (1u << 1), 1000, &ccw_count,
+                                   ccw_irqs,
+                                   sizeof(ccw_irqs)/sizeof(ccw_irqs[0]));
+    if (rc == -EINTR) {
+        printf("[7b] CCW wait timed out (num_proc on ch=1 didn't advance)\n");
+    } else if (rc == 0) {
+        printf("[7b] CCW completed: %u event(s)", ccw_count);
+        for (uint8_t i = 0; i < ccw_count; i++) {
+            printf(", ch=%u data=0x%02x", ccw_irqs[i].channel_index,
+                   ccw_irqs[i].data);
+        }
+        printf("\n");
+    }
 
-    /* 8. Wait for completion. */
+    /* 7c. Pre-arm output channel 16 with a LAUNCH_TRANSFER. HailoRT's
+     * order per the VDMA trace is: pre-arm output BEFORE input. */
+    printf("[7c] LAUNCH_TRANSFER ch=16 (bnd_out pre-arm)...\n");
+    rc = hailo_dev_launch_transfer(fd, 16, bnd_out_dh, 0, bnd_out_buf, 16);
+    if (rc < 0) {
+        fprintf(stderr, "[7c] ch=16 LAUNCH_TRANSFER: %s\n", strerror(-rc));
+        goto cleanup;
+    }
+
+    /* 8. LAUNCH_TRANSFER on channel 2. */
+    printf("[8] LAUNCH_TRANSFER on channel 2 (boundary input)...\n");
+    rc = hailo_dev_launch_transfer(fd, 2, bnd_in_dh, 0, bnd_in_buf, 784);
+    if (rc < 0) {
+        fprintf(stderr, "[8] LAUNCH_TRANSFER: %s\n", strerror(-rc));
+        goto cleanup;
+    }
+    printf("[8] launched\n");
+
+    /* 9. Wait for completion on ch=2 (and ch=16 while we're at it). */
     uint8_t count = 0;
     struct hailo_vdma_interrupts_channel_data irqs[8];
-    rc = hailo_dev_interrupts_wait(fd, (1u << 2), 5000, &count, irqs,
+    rc = hailo_dev_interrupts_wait(fd, (1u << 2) | (1u << 16),
+                                   5000, &count, irqs,
                                    sizeof(irqs)/sizeof(irqs[0]));
     if (rc == -EINTR) {
-        printf("[8] timeout — fw did NOT advance num_proc on ch=2 "
+        printf("[9] timeout — fw did NOT advance num_proc on ch=2 "
                "(this is the #253 reproduction!)\n");
         rc = 0;
     } else if (rc < 0) {
-        fprintf(stderr, "[8] INTERRUPTS_WAIT: %s\n", strerror(-rc));
+        fprintf(stderr, "[9] INTERRUPTS_WAIT: %s\n", strerror(-rc));
     } else {
-        printf("[8] %u completion(s):\n", count);
+        printf("[9] %u completion(s):\n", count);
         for (uint8_t i = 0; i < count; i++) {
             printf("    engine=%u channel=%u data=0x%02x\n",
                    irqs[i].engine_index, irqs[i].channel_index,
                    irqs[i].data);
         }
-        printf("    *** SLM-OS bytes work end-to-end via hailo_pci ***\n");
+        printf("    *** transfer completed — channel is alive ***\n");
     }
 
 cleanup:
+    /* Disable all three channels. Errors ignored — if they were
+     * never enabled the ioctl no-ops (or returns a harmless -EINVAL). */
     if (ch_in_enabled) hailo_dev_disable_channel(fd, 2);
+    hailo_dev_disable_channel(fd, 1);
+    hailo_dev_disable_channel(fd, 16);
     if (bnd_out_dh_set) hailo_dev_desc_list_release(fd, bnd_out_dh);
     if (bnd_in_dh_set)  hailo_dev_desc_list_release(fd, bnd_in_dh);
     if (ccw_dh_set)     hailo_dev_desc_list_release(fd, ccw_dh);
