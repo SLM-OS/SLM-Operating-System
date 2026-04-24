@@ -73,6 +73,7 @@ static uint32_t htobe32_(uint32_t x)
 /* PCIE_EXPECTED_MD5_LENGTH comes from hailo-ioctl-common.h */
 
 static int send_fw_control(int fd, uint32_t opcode,
+                           uint32_t parameter_count,
                            const void *req_body, uint32_t req_body_len,
                            void *resp_body, uint32_t *resp_body_len,
                            bool core_cpu)
@@ -81,10 +82,14 @@ static int send_fw_control(int fd, uint32_t opcode,
     memset(&cmd, 0, sizeof(cmd));
 
     /* Wire format for a request: [common_hdr (16)][parameter_count
-     * BE u32 (4)][body]. Even opcodes with no parameters (like
-     * IDENTIFY) still include parameter_count=0 — the fw's decoder
-     * reads past it before the body. Without it, all body fields
-     * read 4 bytes earlier than expected. */
+     * BE u32 (4)][body]. The body is parameter-count-specific:
+     *   parameter_count=0 → body is empty (IDENTIFY, CLEAR_APPS, ...)
+     *   parameter_count=1 → body is a single length-prefixed blob
+     *     (SET_CONTEXT_INFO pre-body: 4 BE length + raw bytes)
+     *   parameter_count=N → body is N length-prefixed values
+     *     (CHANGE_CONTEXT_SWITCH_STATUS has 4: state, app, batch_sz,
+     *     batch_cnt). Callers assemble the full body themselves;
+     *     this helper just prepends the common header + count. */
     struct ctrl_common_hdr *hdr = (struct ctrl_common_hdr *)cmd.buffer;
     static uint32_t seq = 0;
     hdr->version  = htobe32_(HAILO_CONTROL_PROTOCOL_VERSION);
@@ -92,10 +97,7 @@ static int send_fw_control(int fd, uint32_t opcode,
     hdr->sequence = htobe32_(++seq);
     hdr->opcode   = htobe32_(opcode);
 
-    /* parameter_count = (body_len > 0) ? 1 : 0. In practice we have
-     * one body blob per opcode for Phase 8 work, so match HailoRT's
-     * convention: 0 for empty requests, 1 for body-carrying ones. */
-    uint32_t param_count_be = htobe32_(req_body_len > 0 ? 1u : 0u);
+    uint32_t param_count_be = htobe32_(parameter_count);
     memcpy(cmd.buffer + sizeof(*hdr), &param_count_be, sizeof(param_count_be));
 
     if (req_body_len > 0 && req_body) {
@@ -136,6 +138,180 @@ static int send_fw_control(int fd, uint32_t opcode,
         memcpy(resp_body, cmd.buffer + body_off, rlen);
         *resp_body_len = rlen;
     }
+    return 0;
+}
+
+/*
+ * Decode and print the fw response status. The response buffer
+ * `resp` starts AFTER the 16-byte common_header — its first 8 bytes
+ * are fw's (major_status, minor_status) pair per SLM-OS's
+ * hailo_control.h response_header layout. major_status=0 means fw
+ * accepted the RPC; anything else is a fw-side error code (see
+ * hailo_errors.h for the taxonomy).
+ */
+static void print_resp_status(const char *prefix,
+                              const uint8_t *resp, uint32_t resp_len)
+{
+    printf("%sresp_len=%u", prefix, resp_len);
+    if (resp_len >= 8) {
+        uint32_t major_status, minor_status;
+        memcpy(&major_status, resp + 0, 4);
+        memcpy(&minor_status, resp + 4, 4);
+        printf(" major_status=0x%08x minor_status=0x%08x",
+               major_status, minor_status);
+        if (major_status == 0) {
+            printf(" [ACCEPTED]");
+        } else {
+            printf(" [REJECTED]");
+        }
+    }
+    printf("\n");
+}
+
+/* ------------------------------------------------------------------------ */
+/* Context-switch RPC opcodes                                                  */
+/* Extracted from kernel/ai_accel/hailo/hailo_control.h — SLM-OS uses the     */
+/* same values. All CS opcodes target CPU_ID_CORE_CPU (core_cpu=true).         */
+/* ------------------------------------------------------------------------ */
+#define OPCODE_CS_SET_NETWORK_GROUP_HEADER  0x20u
+#define OPCODE_CS_SET_CONTEXT_INFO          0x21u
+#define OPCODE_CS_CHANGE_STATUS             0x25u
+#define OPCODE_CS_CLEAR_CONFIGURED_APPS     0x47u
+#define OPCODE_GET_HW_CONSTS                0x48u
+
+/* CS state-machine targets — passed as the first parameter of
+ * CHANGE_CONTEXT_SWITCH_STATUS. Values match SLM-OS's
+ * hailo_cs_state enum in hailo_control.h:
+ *   RESET   = 0 — tear down any previous configuration
+ *   ENABLED = 1 — arm the network group for inference */
+#define CS_STATE_RESET    0u
+#define CS_STATE_ENABLED  1u
+
+/*
+ * CHANGE_CONTEXT_SWITCH_STATUS (opcode 0x25, CORE CPU).
+ *
+ * Wire body after common_hdr + parameter_count=4:
+ *   [BE u32 length=1][u8 state]
+ *   [BE u32 length=1][u8 application_index]
+ *   [BE u32 length=2][LE u16 dynamic_batch_size]
+ *   [BE u32 length=2][LE u16 batch_count]
+ *
+ * Total body bytes: 5+5+6+6 = 22.
+ *
+ * SLM-OS's ctxsmoke calls this twice:
+ *   RESET   — state=0, app=0xff, batch_size=0, batch_count=0
+ *   ENABLED — state=1, app=0,    batch_size=0, batch_count=0
+ * Both return rc=0 when fw is happy; fw rejects ENABLED if the four
+ * SET_CONTEXT_INFO calls haven't been fired first.
+ */
+static int cmd_cs_change_status(int fd, uint8_t state, uint8_t app_index,
+                                uint16_t batch_size, uint16_t batch_count,
+                                const char *label)
+{
+    uint8_t body[22];
+    size_t  off = 0;
+    #define EMIT_BE32(v)  do { \
+        uint32_t be = htobe32_((v)); \
+        memcpy(body + off, &be, 4); off += 4; \
+    } while (0)
+    #define EMIT_U8(v)    do { body[off++] = (uint8_t)(v); } while (0)
+    #define EMIT_LE16(v)  do { \
+        uint16_t le = (uint16_t)(v); \
+        body[off++] = (uint8_t)(le & 0xff); \
+        body[off++] = (uint8_t)(le >> 8); \
+    } while (0)
+
+    EMIT_BE32(1);  EMIT_U8(state);
+    EMIT_BE32(1);  EMIT_U8(app_index);
+    EMIT_BE32(2);  EMIT_LE16(batch_size);
+    EMIT_BE32(2);  EMIT_LE16(batch_count);
+
+    #undef EMIT_BE32
+    #undef EMIT_U8
+    #undef EMIT_LE16
+
+    uint8_t  resp[128];
+    uint32_t resp_len = sizeof(resp);
+    printf("  CHANGE_STATUS(%s, state=%u app=0x%02x bs=%u bc=%u) → ",
+           label, state, app_index, batch_size, batch_count);
+    fflush(stdout);
+    int rc = send_fw_control(fd, OPCODE_CS_CHANGE_STATUS,
+                             /*parameter_count=*/4u,
+                             body, (uint32_t)off,
+                             resp, &resp_len, /*core_cpu=*/true);
+    if (rc != 0) {
+        printf("ioctl rc=%d (%s)\n", rc, strerror(-rc));
+        return rc;
+    }
+    /* Response layout (fw side, post-common-header):
+     *   [0..3]  major_status (LE u32) — 0 = fw accepted
+     *   [4..7]  minor_status (LE u32)
+     *   [8..11] parameter_count (BE u32)
+     *   [12..] parameter values (empty for CHANGE_STATUS)
+     * Non-zero major_status = fw rejected even if the ioctl succeeded. */
+    print_resp_status("    ", resp, resp_len);
+    return 0;
+}
+
+/* CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS (opcode 0x47, CORE CPU) and
+ * GET_HW_CONSTS (opcode 0x48, CORE CPU) are both empty-body RPCs.
+ * Wire: [common_hdr][parameter_count=0]. fw always returns a small
+ * response. */
+static int cmd_empty_rpc(int fd, uint32_t opcode, const char *name)
+{
+    uint8_t  resp[256];
+    uint32_t resp_len = sizeof(resp);
+    printf("  %s(opcode 0x%02x) → ", name, opcode);
+    fflush(stdout);
+    int rc = send_fw_control(fd, opcode,
+                             /*parameter_count=*/0u,
+                             NULL, 0, resp, &resp_len, /*core_cpu=*/true);
+    if (rc != 0) {
+        printf("ioctl rc=%d (%s)\n", rc, strerror(-rc));
+        return rc;
+    }
+    print_resp_status("    ", resp, resp_len);
+    return 0;
+}
+
+/*
+ * --cs-handshake: fire SLM-OS's pre-context-info CS RPCs against a
+ * HailoRT-booted Hailo-8L and report each response. Does NOT replay
+ * SET_CONTEXT_INFO (that needs IOVA-patched action bytes — future
+ * work); this just tests the wire-format transport for the empty-
+ * body and 4-parameter opcodes.
+ *
+ * If fw accepts this sequence with rc=0 all the way through, the
+ * SLM-OS control-channel wire format is validated against the
+ * official driver path. Any rejection at this layer would point
+ * at a SLM-OS wire-format bug the ctxsmoke self-test missed.
+ */
+static int cmd_cs_handshake(int fd)
+{
+    printf("=== cs-handshake: SLM-OS pre-context-info CS RPCs via hailo_pci ===\n");
+
+    /* Step 1: CHANGE_CONTEXT_SWITCH_STATUS(RESET). SLM-OS uses
+     * app=0xff here (meaning "no specific app") because no
+     * network group is loaded yet. */
+    int rc = cmd_cs_change_status(fd, CS_STATE_RESET, 0xff, 0, 0, "RESET");
+    if (rc != 0) return rc;
+
+    /* Step 2: CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS. Expected rc=0;
+     * clears any leftover state from a previous run (HailoRT's boot
+     * may have left something configured). */
+    rc = cmd_empty_rpc(fd, OPCODE_CS_CLEAR_CONFIGURED_APPS,
+                       "CLEAR_CONFIGURED_APPS");
+    if (rc != 0) return rc;
+
+    /* Step 3: GET_HW_CONSTS. Returns hw-specific constants; we
+     * don't consume the response body but the rc tells us fw is
+     * still happy. */
+    rc = cmd_empty_rpc(fd, OPCODE_GET_HW_CONSTS, "GET_HW_CONSTS");
+    if (rc != 0) return rc;
+
+    printf("=== cs-handshake pre-context-info phase complete ===\n");
+    printf("(SET_NETWORK_GROUP_HEADER / SET_CONTEXT_INFO not yet "
+           "replayed — those need IOVA patching, next session)\n");
     return 0;
 }
 
@@ -351,7 +527,9 @@ static int cmd_identify(int fd)
     printf("sending IDENTIFY (opcode 0x%02x) to /dev/hailo0...\n",
            HAILO_CONTROL_OPCODE_IDENTIFY);
     int rc = send_fw_control(fd, HAILO_CONTROL_OPCODE_IDENTIFY,
-                             NULL, 0, resp, &resp_len, /*core_cpu=*/false);
+                             /*parameter_count=*/0,
+                             NULL, 0, resp, &resp_len,
+                             /*core_cpu=*/false);
     if (rc != 0) return rc;
 
     printf("response %u bytes:\n", resp_len);
@@ -373,7 +551,11 @@ static void usage(const char *prog)
         "  --identify       Send FW_CONTROL IDENTIFY to /dev/hailo0\n"
         "  --submit-probe   Replay SLM-OS boundary-input VDMA layout\n"
         "                   through hailo_pci ioctls (diagnostic probe\n"
-        "                   for #253; no HEF required)\n",
+        "                   for #253; no HEF required)\n"
+        "  --cs-handshake   Fire SLM-OS pre-context-info CS RPCs\n"
+        "                   (RESET, CLEAR_CONFIGURED_APPS, GET_HW_CONSTS)\n"
+        "                   through HAILO_FW_CONTROL; tests wire format\n"
+        "                   against the official driver path\n",
         prog);
 }
 
@@ -393,6 +575,8 @@ int main(int argc, char **argv)
         rc = cmd_identify(fd);
     } else if (strcmp(argv[1], "--submit-probe") == 0) {
         rc = cmd_submit_probe(fd);
+    } else if (strcmp(argv[1], "--cs-handshake") == 0) {
+        rc = cmd_cs_handshake(fd);
     } else {
         usage(argv[0]);
     }
