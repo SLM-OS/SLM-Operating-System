@@ -200,6 +200,25 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 #define NVC7C0_SEM_EXECUTE_OP_RELEASE               0x0u   /* bits [1:0] */
 #define NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD  (1u << 3)  /* bits [4:3] */
 
+/* ---- COMPUTE_B compute-kernel launch methods --------------------
+ * Used by ga10b_bringup_launch_kernel (Phase 8). Offsets from
+ * docs/reference/mesa-clc7c0.h. */
+#define NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI 0x0244u
+#define NVC7C0_INVALIDATE_SKED_CACHES                 0x0298u
+#define NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_A      0x02a0u
+#define NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_B      0x02a4u
+#define NVC7C0_SEND_PCAS_A                            0x02b4u
+#define NVC7C0_SEND_SIGNALING_PCAS2_B                 0x02c0u
+#define NVC7C0_SEND_SIGNALING_PCAS2_B_ACTION_INVALIDATE_COPY_SCHEDULE  0xAu
+#define NVC7C0_SET_SHADER_LOCAL_MEMORY_WINDOW_A       0x07b0u
+#define NVC7C0_SET_SHADER_LOCAL_MEMORY_WINDOW_B       0x07b4u
+
+/* Per-arch window base addresses for Ampere. Mesa NVK hardcodes these
+ * for `VOLTA_COMPUTE_A <= cls_compute < HOPPER_COMPUTE_A` in
+ * docs/reference/mesa-nvk_cmd_dispatch.c:63-79. */
+#define NVC7C0_SHARED_MEMORY_WINDOW_BASE 0xfe000000u
+#define NVC7C0_LOCAL_MEMORY_WINDOW_BASE  0xff000000u
+
 /* NVC56F_SET_OBJECT is at method byte offset 0 on every channel class.
  * (GA10B_AMPERE_COMPUTE_B_CLASS_ID is declared in ga10b_bringup.h so
  * host tests can reference it.) */
@@ -985,7 +1004,12 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
 {
     if (!h) return -1;
     if (h->magic != GA10B_CHANNEL_HANDOFF_MAGIC) return -1;
-    if (h->version != 2) return -1;
+    /* v2 is the channel-only layout consumed by Phase 6/7. v3 adds
+     * compute-kernel launch state (shader/cbuf/qmd/output) — those
+     * fields are optional from Phase 6's perspective; the inherit
+     * path doesn't read them. ga10b_bringup_launch_kernel checks the
+     * version at dispatch time and rejects v2 handoffs. */
+    if (h->version != 2 && h->version != 3) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
@@ -995,17 +1019,23 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
     return 0;
 }
 
-/* Production scan — uses the IOVMM heap range where nvmap allocates
- * on GA10B (0x100000000 - 0x180000000). Takes ~200 ms on hardware.
+/* Production scan — covers the IOVMM heap range where nvmap allocates
+ * on GA10B. Originally 0x100000000..0x180000000 based on early helper
+ * placements; kernel-launch helper (gpu-kernel-launch.c) allocates
+ * more buffers and nvmap has been observed to place the handoff
+ * dmabuf above 0x180000000 (e.g. 0x191523000 on 2026-04-21 with the
+ * v3 helper). Widened to 0x200000000 (8 GB cap = physical RAM
+ * ceiling on Orin Nano) to cover the full nvmap pool. ~300 ms scan
+ * on hardware.
  *
  * PRECONDITION: the Jetson VMM must identity-map DRAM through at
- * least 0x180000000 as cacheable Normal memory. Today this is true
+ * least 0x200000000 as cacheable Normal memory. Today this is true
  * (Jetson's PMM/VMM maps the full 6.7 GB of non-ECC DRAM). If a
  * future VMM change skips any 4 KB page in the scan range, this
  * function will take a synchronous data abort with no recovery. */
 static uint64_t find_handoff_scan(void)
 {
-    return ga10b_find_handoff_in_range(0x100000000ULL, 0x180000000ULL, 4096);
+    return ga10b_find_handoff_in_range(0x100000000ULL, 0x200000000ULL, 4096);
 }
 
 int ga10b_bringup_channel(struct ga10b_bringup *b)
@@ -1051,6 +1081,22 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     g_handoff.initial_gp_put     = hoff->initial_gp_put;
     g_handoff.initial_gp_get     = hoff->initial_gp_get;
     g_handoff.work_submit_token  = hoff->work_submit_token;
+
+    /* v3 extension: kernel launch state. Safe to read unconditionally
+     * because the on-disk struct is always 192 bytes (static_assert
+     * in the header), but only meaningful when version==3 — v2
+     * helpers leave these fields zero, which both Phase 8's version
+     * gate and the explicit non-zero checks in launch_kernel reject. */
+    g_handoff.shader_phys        = hoff->shader_phys;
+    g_handoff.shader_gpu_va      = hoff->shader_gpu_va;
+    g_handoff.cbuf_phys          = hoff->cbuf_phys;
+    g_handoff.cbuf_gpu_va        = hoff->cbuf_gpu_va;
+    g_handoff.qmd_phys           = hoff->qmd_phys;
+    g_handoff.qmd_gpu_va         = hoff->qmd_gpu_va;
+    g_handoff.output_phys        = hoff->output_phys;
+    g_handoff.output_gpu_va      = hoff->output_gpu_va;
+    g_handoff.shader_size        = hoff->shader_size;
+    g_handoff.cbuf_size          = hoff->cbuf_size;
 
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
@@ -1181,62 +1227,131 @@ uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
     return GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS;
 }
 
-int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
+/* Helper for IMMD-opcode method headers (SEC_OP = 4, 13-bit data
+ * field, subch at [15:13], method at [12:0]). The host-family builder
+ * above uses NVC56F_METHOD_HEADER_INC for increment-op methods; this
+ * is the complementary constructor for inline-immediate values.
+ * Kept static — the only caller is the kernel-launch builder below. */
+static inline uint32_t ga10b_hdr_immd(uint32_t subch, uint32_t byte_off,
+                                      uint32_t data)
 {
-    if (!b || b->state != GA10B_BRINGUP_CHANNEL_OPEN) return -1;
+    return (4u << 29) | ((data & 0x1FFFu) << 16) |
+           ((subch & 0x7u) << 13) | (((byte_off) >> 2) & 0x1FFFu);
+}
 
-    uart_puts("[GA10B-P7] pushbuffer smoke test — writing GPFIFO entry\n");
+uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
+                                              uint64_t qmd_gpu_va)
+{
+    /* Matches the Linux helper scripts/gpu-kernel-launch.c's dispatch
+     * pushbuffer exactly. Subch 1 = compute per NVK's nv_push.h and
+     * the #273 fix. The 4 prelude methods (SET_OBJECT + two windows +
+     * two cache invalidates) reproduce nvk_push_dispatch_state_init +
+     * nvk_cmd_buffer_begin_compute. They're emitted every launch
+     * because channel state resets across kexec cycles are
+     * conservative; steady-state these writes are cheap and harmless. */
+    pb[0]  = NVC56F_METHOD_HEADER_INC(1, 1, NVC56F_SET_OBJECT);
+    pb[1]  = GA10B_AMPERE_COMPUTE_B_CLASS_ID;
 
-    /* Clear the semaphore to 0 and flush the write to DRAM so the GPU
-     * sees "not yet released" if it reads before writing. */
-    volatile uint32_t *sem = (volatile uint32_t *)(uintptr_t)
-        g_handoff.semaphore_phys;
-    *sem = 0;
+    pb[2]  = NVC56F_METHOD_HEADER_INC(2, 1,
+                                      NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_A);
+    pb[3]  = 0u;                                /* upper 17 bits */
+    pb[4]  = NVC7C0_SHARED_MEMORY_WINDOW_BASE;  /* lower 32 */
+
+    pb[5]  = NVC56F_METHOD_HEADER_INC(2, 1,
+                                      NVC7C0_SET_SHADER_LOCAL_MEMORY_WINDOW_A);
+    pb[6]  = 0u;
+    pb[7]  = NVC7C0_LOCAL_MEMORY_WINDOW_BASE;
+
+    pb[8]  = ga10b_hdr_immd(1, NVC7C0_INVALIDATE_SKED_CACHES, 0);
+    pb[9]  = ga10b_hdr_immd(1, NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, 0);
+
+    pb[10] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SEND_PCAS_A);
+    pb[11] = (uint32_t)(qmd_gpu_va >> 8);
+
+    /* PCAS2_B on Ampere with INVALIDATE_COPY_SCHEDULE. The Turing-era
+     * SEND_SIGNALING_PCAS_B (at 0x02bc) silently no-ops dispatch on
+     * GA10B — see pb builder docstring in the header. */
+    pb[12] = ga10b_hdr_immd(1, NVC7C0_SEND_SIGNALING_PCAS2_B,
+                            NVC7C0_SEND_SIGNALING_PCAS2_B_ACTION_INVALIDATE_COPY_SCHEDULE);
+
+    return GA10B_LAUNCH_KERNEL_PB_DWORDS;
+}
+
+/* Copy a freshly-built pushbuffer into the inherited pb_phys region,
+ * post a GPFIFO entry pointing at it, advance GP_PUT, ring the USERMODE
+ * doorbell, and poll `poll_phys` for GA10B_SMOKETEST_SEM_PAYLOAD.
+ *
+ * `poll_phys` is the CPU-physical target the GPU writes via the
+ * submitted pushbuffer — `g_handoff.semaphore_phys` for the Phase 7
+ * host-family and COMPUTE_B SEMAPHORE_RELEASE builders (both of
+ * which encode the sema VA into the pushbuffer), or
+ * `g_handoff.output_phys` for the Phase 8 compute-kernel launch
+ * (where the shader itself stores the payload via STG.E to a VA
+ * that maps to output_phys).
+ *
+ * `error_phase` is written into `b->last_error_phase` on failure so
+ * the caller's phase-number logging stays accurate (Phase 7 for
+ * sema, Phase 8 for launch).
+ *
+ * `tag` is the logging prefix (e.g. "GA10B-P7", "GA10B-P7C",
+ * "GA10B-P8").
+ *
+ * Success criterion is strict: the payload must land at `poll_phys`
+ * within the 2 s timeout. `gp_advanced && !payload_matched` returns
+ * -1 — PBDMA consumed the pushbuffer but the GPU did not produce
+ * the expected side effect. That's the "silent no-op" failure mode
+ * (e.g. PCAS_B on Ampere silently dropping dispatch) and must not
+ * be reported as success; an earlier loose criterion was a
+ * now-resolved #273 workaround and has been dropped.
+ *
+ * GPFIFO bookkeeping: on any PBDMA progress (gp_advanced), update
+ * `g_handoff.initial_gp_put` / `initial_gp_get` so a subsequent
+ * submit targets a fresh slot. This is symmetric across success and
+ * partial-failure paths because the slot has been consumed either
+ * way; reusing it would overwrite a not-yet-drained entry only if
+ * PBDMA hadn't seen our submit at all, and that case (!gp_advanced)
+ * leaves the counters unchanged. */
+static int ga10b_submit_and_poll(struct ga10b_bringup *b,
+                                 const uint32_t *pb_buf,
+                                 uint32_t pb_dwords,
+                                 uint64_t poll_phys,
+                                 int error_phase,
+                                 const char *tag)
+{
+    uint32_t pb_bytes = pb_dwords * 4u;
+
+    /* Zero the poll target so a post-submit non-zero read is
+     * unambiguous proof the GPU wrote the payload (not residue
+     * from a prior run or from the Linux helper's pre-kexec
+     * validation). */
+    volatile uint32_t *poll = (volatile uint32_t *)(uintptr_t)poll_phys;
+    *poll = 0;
     if (gsp_platform->cache_clean) {
-        gsp_platform->cache_clean((const void *)sem, sizeof(uint32_t));
+        gsp_platform->cache_clean((const void *)poll, sizeof(uint32_t));
     }
     gsp_platform->mb();
 
-    uart_printf("[GA10B-P7] semaphore at phys 0x%lx cleared to 0 "
-                "(gpu_va=0x%lx, expected payload=0x%lx)\n",
-                (unsigned long)g_handoff.semaphore_phys,
-                (unsigned long)g_handoff.semaphore_gpu_va,
+    uart_printf("[%s] poll target at phys 0x%lx cleared to 0 "
+                "(expected payload=0x%lx)\n",
+                tag,
+                (unsigned long)poll_phys,
                 (unsigned long)GA10B_SMOKETEST_SEM_PAYLOAD);
-
-    /* Build a SEMAPHORE_RELEASE pushbuffer using the new Volta+ host
-     * semaphore interface (method indices 0x17..0x1b). See
-     * ga10b_build_sema_release_pushbuffer() above for encoding details;
-     * exposing the builder as a pure function lets the host harness
-     * regression-test the byte layout without needing GPU hardware. */
-    uint32_t pb_buf[GA10B_SEMA_RELEASE_PB_DWORDS];
-    uint32_t pb_dwords = ga10b_build_sema_release_pushbuffer(
-        pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
-    uint32_t pb_bytes = pb_dwords * 4u;
 
     volatile uint32_t *pb = (volatile uint32_t *)(uintptr_t)
         g_handoff.pushbuf_phys;
     for (uint32_t i = 0; i < pb_dwords; i++) pb[i] = pb_buf[i];
 
-    /* Flush the pushbuffer dwords to DRAM before advancing GP_PUT —
-     * PBDMA reads the method stream via SMMU and a plain DSB SY is
-     * not sufficient when the pb region is CPU-cacheable. */
     if (gsp_platform->cache_clean) {
         gsp_platform->cache_clean((const void *)pb, pb_bytes);
     }
     gsp_platform->mb();
 
-    /* Build the GPFIFO entry (Ampere format, 8 bytes):
-     *   entry0[31:2] = gpu_va[31:2] (low 32 bits, bottom 2 clear)
-     *   entry0[1:0]  = flags (0 = pushbuffer)
-     *   entry1[7:0]  = gpu_va[39:32] (high address bits)
-     *   entry1[30:10] = length in u32 words (NOT bytes)
-     *   entry1[31]   = sync bit (1 = wait for idle) */
+    /* GPFIFO entry (Ampere format, 8 bytes): see ga10b_bringup.h. */
     uint64_t pb_gpu_va = g_handoff.pushbuf_gpu_va;
     uint32_t gp_entry0 = (uint32_t)(pb_gpu_va & 0xFFFFFFFCu);
     uint32_t gp_entry1 = (uint32_t)((pb_gpu_va >> 32) & 0xFFu) |
                          (pb_dwords << 10);
 
-    /* Write the GPFIFO entry at the current GP_PUT index. */
     uint32_t gp_put = g_handoff.initial_gp_put;
     uint32_t gp_idx = gp_put & (g_handoff.gpfifo_entries - 1);
     volatile uint64_t *gpfifo = (volatile uint64_t *)(uintptr_t)
@@ -1249,20 +1364,14 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
     }
     gsp_platform->mb();
 
-    uart_printf("[GA10B-P7] GPFIFO[%lu] = 0x%08lx_%08lx (pb_va=0x%lx, %lu bytes)\n",
+    uart_printf("[%s] GPFIFO[%lu] = 0x%08lx_%08lx (pb_va=0x%lx, %lu bytes)\n",
+                tag,
                 (unsigned long)gp_idx,
                 (unsigned long)gp_entry1,
                 (unsigned long)gp_entry0,
                 (unsigned long)pb_gpu_va,
                 (unsigned long)pb_bytes);
 
-    /* Advance GP_PUT in USERD. PBDMA reads GP_PUT from this DRAM
-     * location (not a register). The `mb()` is a DSB SY barrier —
-     * on GA10B (integrated Ampere) the GPU shares the SoC memory
-     * controller with the CPU, so DSB SY pushes the write through
-     * to the coherency point that PBDMA observes. If a future
-     * regression shows PBDMA reading stale GP_PUT despite the
-     * barrier, switch to explicit cache_clean_range() before mb(). */
     uint32_t new_gp_put = gp_put + 1;
     volatile uint32_t *userd = (volatile uint32_t *)(uintptr_t)
         g_handoff.userd_phys;
@@ -1274,42 +1383,32 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
     }
     gsp_platform->mb();
 
-    uart_printf("[GA10B-P7] GP_PUT advanced: %lu → %lu (USERD word %lu)\n",
+    uart_printf("[%s] GP_PUT advanced: %lu → %lu (USERD word %lu)\n",
+                tag,
                 (unsigned long)gp_put,
                 (unsigned long)new_gp_put,
                 (unsigned long)gp_put_word);
 
-    /* Ring the USERMODE doorbell so PBDMA re-reads GP_PUT. Token is
-     * captured verbatim from NVGPU_IOCTL_CHANNEL_SETUP_BIND (opaque
-     * encoding of chid | runlist<<16, possibly adjusted for vGPU
-     * channel_base — treat as opaque). See
-     * GA10B_USERMODE_DOORBELL_PHYS above for the address derivation. */
     volatile uint32_t *doorbell =
         (volatile uint32_t *)(uintptr_t)GA10B_USERMODE_DOORBELL_PHYS;
     *doorbell = g_handoff.work_submit_token;
     gsp_platform->mb();
-    uart_printf("[GA10B-P7] doorbell 0x%lx <- 0x%08lx\n",
+    uart_printf("[%s] doorbell 0x%lx <- 0x%08lx\n",
+                tag,
                 (unsigned long)GA10B_USERMODE_DOORBELL_PHYS,
                 (unsigned long)g_handoff.work_submit_token);
 
-    /* Poll the semaphore for GA10B_SMOKETEST_SEM_PAYLOAD — GPU writes
-     * it after completing all prior work (RELEASE_WFI_EN). The DRAM
-     * cacheline may still hold our pre-submit 0, so invalidate each
-     * iteration before reading. */
-    uart_puts("[GA10B-P7] polling semaphore (2s timeout)...\n");
-    uint32_t sem_val = 0;
+    uart_printf("[%s] polling (2s timeout)...\n", tag);
+    uint32_t poll_val = 0;
     for (uint32_t us = 0; us < 2000000; us++) {
         if (gsp_platform->cache_invalidate) {
-            gsp_platform->cache_invalidate((void *)sem, sizeof(uint32_t));
+            gsp_platform->cache_invalidate((void *)poll, sizeof(uint32_t));
         }
-        sem_val = *sem;
-        if (sem_val == GA10B_SMOKETEST_SEM_PAYLOAD) break;
+        poll_val = *poll;
+        if (poll_val == GA10B_SMOKETEST_SEM_PAYLOAD) break;
         for (volatile int i = 0; i < 1500; i++) { }
     }
 
-    /* Read GP_GET to see if PBDMA consumed the entry. */
-    /* PBDMA writes GP_GET in USERD. Invalidate the cacheline so we
-     * don't see the stale initial value. */
     uint32_t gp_get_word = g_handoff.userd_gp_get_offset / 4;
     if (gsp_platform->cache_invalidate) {
         gsp_platform->cache_invalidate((void *)&userd[gp_get_word],
@@ -1317,35 +1416,155 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
     }
     uint32_t final_gp_get = userd[gp_get_word];
 
-    uart_printf("[GA10B-P7] result: sem=0x%08lx GP_GET=%lu (was %lu)\n",
-                (unsigned long)sem_val,
+    uart_printf("[%s] result: poll=0x%08lx GP_GET=%lu (was %lu)\n",
+                tag,
+                (unsigned long)poll_val,
                 (unsigned long)final_gp_get,
                 (unsigned long)g_handoff.initial_gp_get);
 
-    bool gp_advanced  = (final_gp_get != g_handoff.initial_gp_get);
-    bool sem_released = (sem_val == GA10B_SMOKETEST_SEM_PAYLOAD);
+    bool gp_advanced     = (final_gp_get != g_handoff.initial_gp_get);
+    bool payload_matched = (poll_val == GA10B_SMOKETEST_SEM_PAYLOAD);
 
-    /* Success criterion: GP_GET advanced — PBDMA consumed our entry.
-     * This matches PR #269's shipping signal; merging the tightened
-     * `gp_advanced && sem_released` version would regress that signal
-     * until the channel issue (#273) is resolved, so we log the
-     * semaphore value as a diagnostic instead. */
+    /* Symmetric bookkeeping: any PBDMA progress consumes the slot.
+     * Update the counters so the next submit lands in a fresh slot,
+     * regardless of whether the payload matched — even in the
+     * partial-failure case the entry is no longer pending. */
     if (gp_advanced) {
-        if (sem_released) {
-            uart_puts("[GA10B-P7] SEMAPHORE_RELEASE completed — "
-                      "GPU executed our method.\n");
-        } else {
-            uart_puts("[GA10B-P7] GP_GET advanced — PBDMA consumed "
-                      "our entry (semaphore not released; see #273)\n");
-        }
+        g_handoff.initial_gp_put = new_gp_put;
+        g_handoff.initial_gp_get = final_gp_get;
+    }
+
+    if (payload_matched) {
+        uart_printf("[%s] payload observed — GPU executed submit.\n", tag);
         b->state = GA10B_BRINGUP_METHOD_ACCEPTED;
         return 0;
     }
 
-    uart_puts("[GA10B-P7] GP_GET did not advance — "
-              "PBDMA didn't see our submit\n");
-    b->last_error_phase = 7;
+    if (gp_advanced) {
+        /* Generic diagnostic for the silent-no-op class: PBDMA
+         * consumed the pushbuffer but the expected side effect
+         * (semaphore release / kernel store) never landed. Caller-
+         * specific hypotheses (host-family sema encoding,
+         * COMPUTE_B class/subchannel binding, Ampere
+         * PCAS2_B/PCAS_B dispatch-kick selection, QMD shader
+         * address, etc.) are logged by the caller if it has more
+         * context than this helper does. */
+        uart_printf("[%s] GP_GET advanced but payload didn't land "
+                    "(got 0x%lx, want 0x%lx) — PBDMA consumed our "
+                    "submit but the GPU didn't produce the expected "
+                    "side effect. Inspect the caller's pushbuffer "
+                    "encoding.\n",
+                    tag,
+                    (unsigned long)poll_val,
+                    (unsigned long)GA10B_SMOKETEST_SEM_PAYLOAD);
+    } else {
+        uart_printf("[%s] GP_GET did not advance — PBDMA didn't see "
+                    "our submit\n", tag);
+    }
+    b->last_error_phase = error_phase;
     return -1;
+}
+
+int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
+{
+    /* Accept CHANNEL_OPEN (first submit) or METHOD_ACCEPTED (after a
+     * prior submit) — symmetric with smoke_test_compute. Re-submitting
+     * on the same channel is valid because submit_and_poll bumps
+     * g_handoff.initial_gp_put to the next GPFIFO slot on PBDMA
+     * progress, so back-to-back submits target distinct slots. */
+    if (!b || (b->state != GA10B_BRINGUP_CHANNEL_OPEN &&
+               b->state != GA10B_BRINGUP_METHOD_ACCEPTED)) return -1;
+
+    uart_puts("[GA10B-P7] pushbuffer smoke test — writing GPFIFO entry\n");
+
+    /* Host-family SEMAPHORE_RELEASE (Volta+ method indices 0x17..0x1b).
+     * PBDMA-decoded, bypasses GR entirely — doesn't require any class
+     * binding. See ga10b_build_sema_release_pushbuffer() for encoding.
+     * The GPU writes the payload to semaphore_gpu_va, which maps to
+     * semaphore_phys on the CPU side — that's our poll target. */
+    uint32_t pb_buf[GA10B_SEMA_RELEASE_PB_DWORDS];
+    uint32_t pb_dwords = ga10b_build_sema_release_pushbuffer(
+        pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
+
+    return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                 g_handoff.semaphore_phys, 7, "GA10B-P7");
+}
+
+int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
+{
+    /* Accept CHANNEL_OPEN (first submit) or METHOD_ACCEPTED (after a
+     * prior host-family submit) — a compute smoke test is valid on a
+     * channel that's either fresh-inherited or has already passed the
+     * host-family check. */
+    if (!b || (b->state != GA10B_BRINGUP_CHANNEL_OPEN &&
+               b->state != GA10B_BRINGUP_METHOD_ACCEPTED)) return -1;
+
+    uart_puts("[GA10B-P7C] compute pushbuffer smoke test — "
+              "AMPERE_COMPUTE_B SEMAPHORE_RELEASE\n");
+
+    /* Compute-class pushbuffer: SET_OBJECT(COMPUTE_B on subch 1) +
+     * REPORT_SEMAPHORE methods at clc7c0.h byte offsets. See
+     * ga10b_build_compute_sema_release_pushbuffer() for encoding.
+     *
+     * Issue #291 filed suspecting MME_FE1 was a missing-MME-init
+     * blocker; subsequent investigation (Linux gpu-compute-smoke
+     * 2026-04-21) showed the exception was a symptom of the
+     * pre-PR#295 header-encoding bug where byte offsets were
+     * placed at bits [11:0] instead of method_id at [12:0]. Under
+     * the broken encoding, COMPUTE_B methods decoded as method_ids
+     * beyond the class's defined range, and MME's method-track
+     * front-end faulted on the unknown method. With the corrected
+     * encoding the compute SEMAPHORE_RELEASE fires without any MME
+     * IRAM upload. No NVK-style MME init needed. */
+    uint32_t pb_buf[GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS];
+    uint32_t pb_dwords = ga10b_build_compute_sema_release_pushbuffer(
+        pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
+
+    return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                 g_handoff.semaphore_phys, 7, "GA10B-P7C");
+}
+
+int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
+{
+    if (!b || (b->state != GA10B_BRINGUP_CHANNEL_OPEN &&
+               b->state != GA10B_BRINGUP_METHOD_ACCEPTED)) return -1;
+
+    if (g_handoff.version < 3) {
+        uart_printf("[GA10B-P8] handoff version %lu — compute-kernel "
+                    "launch requires v3 (helper must be run with "
+                    "--preserve-for-kexec)\n",
+                    (unsigned long)g_handoff.version);
+        b->last_error_phase = 8;
+        return -1;
+    }
+    if (g_handoff.qmd_gpu_va == 0 || g_handoff.output_phys == 0) {
+        uart_puts("[GA10B-P8] handoff missing qmd_gpu_va/output_phys\n");
+        b->last_error_phase = 8;
+        return -1;
+    }
+
+    uart_puts("[GA10B-P8] compute-kernel launch — dispatching pre-"
+              "uploaded QMD\n");
+    uart_printf("[GA10B-P8]   qmd_gpu_va=0x%lx  output_phys=0x%lx\n",
+                (unsigned long)g_handoff.qmd_gpu_va,
+                (unsigned long)g_handoff.output_phys);
+
+    /* Build the launch pushbuffer. The builder is pure logic so host
+     * tests pin its bit layout; see host-tools/gsp-harness tests.
+     *
+     * The shader (uploaded pre-kexec by the Linux helper) stores the
+     * payload via STG.E to a VA that maps to output_phys on the CPU
+     * side — that's the poll target. Unlike the host-family and
+     * COMPUTE_B SEMAPHORE_RELEASE paths (which point PBDMA at
+     * semaphore_phys), the QMD path drives the SMs through the
+     * shader code; the "side effect" is whatever the shader
+     * writes. */
+    uint32_t pb_buf[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+    uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
+        pb_buf, g_handoff.qmd_gpu_va);
+
+    return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                 g_handoff.output_phys, 8, "GA10B-P8");
 }
 
 int ga10b_bringup_run(struct ga10b_bringup *b)

@@ -18,6 +18,22 @@ This document consolidates all findings related to running SLM-OS on the Jetson 
 > the full evidence chain. Future investigations should **verify clock state first**
 > (disable the clock from Linux via BPMP debugfs; does the access symptom reproduce?)
 > before assuming the CBB firewall is the culprit.
+>
+> **21 April 2026 Update:** GA10B GPU compute is working end-to-end from SLM-OS
+> via a Linux-helper-assisted kexec handoff. A pre-kexec Linux helper
+> (`scripts/gpu-kernel-launch.c --preserve-for-kexec`) allocates the channel,
+> uploads a CUDA-compiled shader and a QMD, and publishes a v3 handoff block
+> into DRAM. Post-kexec, SLM-OS inherits the channel via `nvgpu channel` and
+> launches the compute kernel via `nvgpu launch-kernel` — the GPU SMs execute
+> the shader and write 0xCAFE to a known physical address that SLM-OS reads
+> back. Resolves #297 (host-family SEMAPHORE_RELEASE), #291 (COMPUTE_B
+> SEMAPHORE_RELEASE — the MME_FE1 blocker was actually a symptom of the
+> pre-PR-#295 encoding bug, not a missing MME init), and #356 (QMD-based
+> compute kernel launch). Fully SLM-OS-native channel/shader bringup
+> (without libcuda pre-kexec) remains future work.
+> The "no GPU compute capability on bare metal" bullet under Solution 5
+> below is therefore outdated for Jetson — it still applies to Pi 5 whose
+> VideoCore GPU has no public bare-metal documentation.
 
 ---
 

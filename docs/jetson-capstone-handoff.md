@@ -157,19 +157,53 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   creates channel + writes handoff block (v2 wire format, carries
   `work_submit_token`); SLM-OS scans DRAM, finds magic, parses
   all addresses. E2E verified via `nvgpu inherit` → `nvgpu channel`.
-- **Phase 7 host-family sema VERIFIED (April 18):** Linux-side
-  helper writes a PBDMA-decoded SEMAPHORE_RELEASE pushbuffer,
-  advances GP_PUT, rings the USERMODE doorbell at physical
-  0x17BB0090, and observes `0x0000CAFE` at the target sem VA.
-  SLM-OS-side kernel builder (`ga10b_build_sema_release_pushbuffer`)
-  emits the same encoding. Two prior bugs fixed: (1) method-header
-  encoding — `method_id = byte_off / 4` at bits [12:0], not
-  byte_off at [11:0]; PBDMA advanced GP_GET on the malformed
-  header but silently discarded the method so the sema never
-  fired, (2) AMPERE_COMPUTE_B on subch 1 (not 0) per NVK
-  nv_push.h. See capstone-feature-status.md §Phase 7 for the
-  full investigation trail. COMPUTE_B path still blocked on
-  MME_FE1 exception (issue #291).
+- **Phase 7 host-family sema VERIFIED end-to-end (April 21, #297):**
+  Linux-side helper writes a PBDMA-decoded SEMAPHORE_RELEASE
+  pushbuffer, advances GP_PUT, rings the USERMODE doorbell at
+  physical 0x17BB0090, and observes `0x0000CAFE` at the target
+  sem VA. After kexec, the SLM-OS kernel builder
+  (`ga10b_build_sema_release_pushbuffer`) runs the same flow:
+  `nvgpu inherit` → `nvgpu channel` → zero the sema via `poke`
+  → `nvgpu submit` → sema reads `0x0000CAFE`. Verified on
+  jetson-nano-1 post-#295. Two prior bugs fixed in #295:
+  (1) method-header encoding — `method_id = byte_off / 4` at
+  bits [12:0], not byte_off at [11:0]; PBDMA advanced GP_GET
+  on the malformed header but silently discarded the method
+  so the sema never fired, (2) AMPERE_COMPUTE_B on subch 1
+  (not 0) per NVK nv_push.h. See capstone-feature-status.md
+  §Phase 7 for the full investigation trail.
+- **Phase 7 compute-class sema VERIFIED end-to-end (April 21, #291):**
+  `nvgpu submit-compute` shell command invokes
+  `ga10b_build_compute_sema_release_pushbuffer()` — an
+  AMPERE_COMPUTE_B-class SEMAPHORE_RELEASE on subch 1. Same flow
+  (`inherit` → `channel` → `poke 0` → `submit-compute`) produces
+  `sem=0x0000CAFE`, `GP_GET` advances, no MME_FE1 exception.
+  #291 was filed suspecting a missing NVK-style MME ucode upload
+  as a blocker; investigation via `scripts/gpu-compute-smoke.c`
+  on Linux showed the MME_FE1 exception was a symptom of the
+  pre-#295 method-header encoding, not a missing MME init.
+  With the corrected encoding, nvgpu's `ALLOC_OBJ_CTX` primes
+  enough of the golden context for compute method dispatch.
+  No MME IRAM upload required.
+- **Phase 8 compute-kernel launch VERIFIED end-to-end
+  (April 21, #356):** SLM-OS dispatches an actual compute shader
+  on the GPU SMs and reads back the expected payload. Linux
+  helper (`scripts/gpu-kernel-launch.c --preserve-for-kexec`)
+  uploads a CUDA-compiled shader (640 B SASS, single-thread
+  `*out = 0xCAFE`), populates a QMD pointing at it, and writes a
+  v3 handoff block to DRAM. After kexec, SLM-OS's
+  `nvgpu launch-kernel` builds a 13-dword compute pushbuffer
+  (SET_OBJECT, shader shared/local memory windows at 0xfe000000 /
+  0xff000000, INVALIDATE_SKED_CACHES, INVALIDATE_TEXTURE_HEADER,
+  SEND_PCAS_A, SEND_SIGNALING_PCAS2_B), rings the doorbell, and
+  polls output_phys. The shader executes and writes `0x0000CAFE`;
+  SLM-OS reports `KERNEL LAUNCHED`. Critical Ampere requirement:
+  `SEND_SIGNALING_PCAS2_B` at method 0x02C0 with action
+  `INVALIDATE_COPY_SCHEDULE` (0xA) — the Turing-era PCAS_B at
+  0x02BC is silently no-oped on GA10B. Shader is still CUDA-
+  compiled and channel/QMD setup is still done by the Linux
+  helper; fully SLM-OS-native compile + channel creation remains
+  future work.
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)

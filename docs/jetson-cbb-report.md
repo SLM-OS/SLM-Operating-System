@@ -202,7 +202,7 @@ Cross-walked to the five tracked features (see
 |---|---|---|
 | **SMP / cross-CPU dispatch** | ✅ 6 cores online, `bench smp` passes | No impact — GIC and CPU power are reachable. |
 | **Preemptive multitasking** | 🟡 Cooperative (`COOP_PREEMPT`) | Separate blocker: GIC Group config is locked by TF-A, not CBB. Timer IRQs don't deliver to NS EL2 regardless of CBB. See `kernel/CLAUDE.md` §"ARM64 Hardware Timer IRQs." |
-| **GPU inference** | 🟢 Detection + FECS gateway + Phase 7 host-family SEMAPHORE_RELEASE firing | No CBB wall in the submit path. Channel *creation* still requires the Linux-side helper (kernel-mode nvgpu ioctl surface), but once the channel exists, SLM-OS writes GP_PUT in DRAM and rings the USERMODE doorbell at BAR0+0xBB0090 directly from EL2. Pre-kexec isolation test on jetson-nano-2 writes 0xCAFE to target sem VA post-doorbell (2026-04-18). #258 and #273 closed; COMPUTE_B path blocked on #291 (MME program load). |
+| **GPU inference** | 🟢 Detection + FECS gateway + Phase 7 host-family + Phase 7 COMPUTE_B SEMAPHORE_RELEASE + **Phase 8 compute kernel launch** all firing from SLM-OS post-kexec (2026-04-21) | No CBB wall in the submit path. Channel *creation* still requires the Linux-side helper (kernel-mode nvgpu ioctl surface), but once the channel exists, SLM-OS writes GP_PUT in DRAM and rings the USERMODE doorbell at BAR0+0xBB0090 directly from EL2. Phase 8 dispatches a CUDA-compiled compute kernel via `SEND_PCAS_A` + `SEND_SIGNALING_PCAS2_B`; GPU SMs execute and write 0xCAFE to a known phys address. #258, #273, #297, #291, #356 all closed. |
 | **AI scheduler** | ✅ Running | No CBB dependency — pure CPU/NEON path. |
 | **AI page eviction** | ✅ Running | No CBB dependency. |
 | **Networking** | ❌ Not wired yet (#25) | Tentative impact. EQOS MAC is at `0x02310000`; need to verify EL2 reachability (§6.A first experiment). If blocked, Jetson networking is a hard no-go without one of the permanent fixes in §6. |
@@ -276,7 +276,10 @@ gv11b sema cmdbuf (method_id = byte_off / 4 at [12:0]) plus the
 AMPERE_COMPUTE_B subch 1 fix from NVK, the helper's pre-kexec
 isolation test writes `0x0000CAFE` to the target sem VA post-doorbell
 on jetson-nano-2, confirming actual method dispatch on the host-family
-path. The COMPUTE_B path is separately blocked on MME_FE1 (issue #291).
+path. The COMPUTE_B path also works end-to-end (#291 closed
+2026-04-21 — MME_FE1 was a symptom of the pre-PR-#295 encoding
+bug, not a missing MME init). Phase 8 compute kernel launch via
+QMD (#356) was added on top of this foundation.
 
 ### Why the inherit approach is still needed
 

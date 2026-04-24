@@ -30,9 +30,13 @@ The original proposal had two load-bearing claims:
    scheduler, memory manager, and runtime optimized for inference
    instead of general-purpose workloads.
 
-Claim 2 was fully delivered. Claim 1 was delivered only through CPU
-(NEON) paths; GPU compute remains blocked on NVIDIA's GSP firmware
-(see §GPU Support and the GSP Blocker).
+Claim 2 was fully delivered. Claim 1 was delivered through CPU
+(NEON) paths as the primary inference path plus, as of April 21
+2026, **bare-metal GPU compute kernel launch on Jetson GA10B via
+a Linux-helper-assisted kexec handoff** (#297, #291, #356 all
+resolved). The x86-64 discrete-Ampere GPU compute path remains
+blocked on NVIDIA's GSP firmware priv-lock (#185); see
+§GPU Support Across Three Platforms.
 
 ### Delivered
 
@@ -47,7 +51,7 @@ Claim 2 was fully delivered. Claim 1 was delivered only through CPU
 | FP16 matmul (dequant-then-FP32) | ✅ | ✅ | ✅ | ⚠️ build blocked |
 | INT8 matmul (scalar INT32 acc) | ✅ | ✅ | ✅ | ⚠️ build blocked |
 | GPU detection | ✅ (GA10B via CBB bypass) | n/a (no GPU) | n/a | ✅ (GA107 / RTX 3050) |
-| GPU compute | ❌ GSP blocker | n/a | n/a | ❌ GSP blocker |
+| GPU compute kernel launch | ✅ (bare-metal SEND_PCAS2_B dispatch, #356) | n/a | n/a | ❌ GSP blocker (#185) |
 
 ### Not delivered (and why)
 

@@ -18,6 +18,7 @@
 #ifndef GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H
 #define GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Magic value to detect a valid handoff block.
@@ -38,7 +39,11 @@
  */
 struct ga10b_channel_handoff {
     uint32_t magic;             /* GA10B_CHANNEL_HANDOFF_MAGIC */
-    uint32_t version;           /* 2 for this layout */
+    uint32_t version;           /* 2: channel only; 3: channel + compute-
+                                 * kernel launch state (shader, cbuf, qmd,
+                                 * output). SLM-OS channel inherit accepts
+                                 * both versions; `nvgpu launch-kernel`
+                                 * requires v3. */
     uint32_t channel_id;        /* Diagnostic only; never used as the
                                  * doorbell token. See work_submit_token
                                  * below — the kernel's allocation path
@@ -88,15 +93,62 @@ struct ga10b_channel_handoff {
      * reconstruct it from channel_id alone. */
     uint32_t work_submit_token;
     uint32_t _pad1;             /* align struct size to 8 bytes */
+
+    /* --- v3 extension: compute-kernel launch state. ---
+     * Zero on v2. Populated by scripts/gpu-kernel-launch.c when
+     * called with --preserve-for-kexec. SLM-OS's `nvgpu launch-kernel`
+     * uses these to build a compute pushbuffer pointing at the
+     * pre-uploaded shader + QMD and polls `output_phys` for the
+     * expected payload. */
+    uint64_t shader_phys;       /* CPU-physical of shader code */
+    uint64_t shader_gpu_va;     /* GPU VA of shader (== QMD PROGRAM_ADDRESS) */
+    uint64_t cbuf_phys;         /* CPU-physical of cbuf[0] */
+    uint64_t cbuf_gpu_va;       /* GPU VA of cbuf[0] (kernel arg area) */
+    uint64_t qmd_phys;          /* CPU-physical of the QMD page */
+    uint64_t qmd_gpu_va;        /* GPU VA of the QMD (SEND_PCAS_A data = >>8) */
+    uint64_t output_phys;       /* CPU-physical of kernel output buffer */
+    uint64_t output_gpu_va;     /* GPU VA of output buffer (stored in
+                                 * cbuf[0][0x160] for the kernel to read) */
+    uint32_t shader_size;       /* bytes — typically 640 for write_cafe */
+    uint32_t cbuf_size;         /* bytes — typically 512 */
 };
 
 /* Wire-format size is locked: both the Linux helper and SLM-OS
  * depend on this exact layout. Any struct reorder or field addition
  * breaks the handoff silently — the static_assert catches it at
  * compile time on both sides. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 120,
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 192,
                "ga10b_channel_handoff layout changed — update Linux "
-               "helper (scripts/gpu-channel-helper.c) and bump version");
+               "helper (scripts/gpu-channel-helper.c, "
+               "scripts/gpu-kernel-launch.c) and bump version");
+
+/* Field-offset pins for the v3 extension. A reorder that preserves
+ * sizeof() (e.g. swapping two uint64_t fields) wouldn't fire the
+ * size assert above but would silently mis-address the kernel-
+ * launch state. These catch that; the v2 fields are pinned
+ * implicitly by the identical layout on both sides of a v2 helper
+ * that only reads up to offset 120. `offsetof` needs <stddef.h>,
+ * included at the top of this header. */
+_Static_assert(offsetof(struct ga10b_channel_handoff, shader_phys)    == 120,
+               "v3 shader_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, shader_gpu_va)  == 128,
+               "v3 shader_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, cbuf_phys)      == 136,
+               "v3 cbuf_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, cbuf_gpu_va)    == 144,
+               "v3 cbuf_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, qmd_phys)       == 152,
+               "v3 qmd_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, qmd_gpu_va)     == 160,
+               "v3 qmd_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, output_phys)    == 168,
+               "v3 output_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, output_gpu_va)  == 176,
+               "v3 output_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, shader_size)    == 184,
+               "v3 shader_size offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, cbuf_size)      == 188,
+               "v3 cbuf_size offset drifted");
 
 /*
  * Validate a candidate handoff block. Returns 0 iff magic, version,
