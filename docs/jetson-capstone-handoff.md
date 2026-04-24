@@ -171,9 +171,23 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   on the malformed header but silently discarded the method
   so the sema never fired, (2) AMPERE_COMPUTE_B on subch 1
   (not 0) per NVK nv_push.h. See capstone-feature-status.md
-  §Phase 7 for the full investigation trail. COMPUTE_B path
-  still blocked on MME_FE1 exception (issue #291); see
-  #291 for the NVK MME-init scope estimate.
+  §Phase 7 for the full investigation trail.
+- **Phase 7 compute-class sema VERIFIED end-to-end (April 21, #291):**
+  `nvgpu submit-compute` shell command invokes
+  `ga10b_build_compute_sema_release_pushbuffer()` — an
+  AMPERE_COMPUTE_B-class SEMAPHORE_RELEASE on subch 1. Same flow
+  (`inherit` → `channel` → `poke 0` → `submit-compute`) produces
+  `sem=0x0000CAFE`, `GP_GET` advances, no MME_FE1 exception.
+  #291 was filed suspecting a missing NVK-style MME ucode upload
+  as a blocker; investigation via `scripts/gpu-compute-smoke.c`
+  on Linux showed the MME_FE1 exception was a symptom of the
+  pre-#295 method-header encoding, not a missing MME init.
+  With the corrected encoding, nvgpu's `ALLOC_OBJ_CTX` primes
+  enough of the golden context for compute method dispatch.
+  No MME IRAM upload required. What **is** still required for
+  actual compute kernel launch: QMD (Queue Manager Descriptor)
+  upload + shader binary — a separate, concrete next step
+  beyond this milestone.
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)
