@@ -1030,14 +1030,17 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 1;                  /* v1 lacked work_submit_token */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
-    /* v2 (channel-only) and v3 (channel + kernel-launch state) both
-     * accept — Phase 6/7 reads only v2 fields, Phase 8 checks the
-     * version at dispatch time before reading v3 fields. */
+    /* v2 (channel-only), v3 (+ kernel-launch state), and v4 (+
+     * expected_payload) all pass — Phase 6/7 reads only v2 fields,
+     * Phase 8 checks the version at dispatch time before reading
+     * v3/v4 fields. */
     h.version = 2;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 3;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
-    h.version = 4;                  /* future, not yet defined */
+    h.version = 4;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 5;                  /* future, not yet defined */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
@@ -1525,14 +1528,14 @@ static void test_launch_kernel_pb_uses_ampere_pcas2_b(void)
  * Handoff v3 — channel + kernel-launch state
  * ====================================================================== */
 
-static void test_handoff_v3_layout_size(void)
+static void test_handoff_v4_layout_size(void)
 {
-    printf("== test_handoff_v3_layout_size ==\n");
-    /* Belt-and-suspenders runtime check. The header pins the size with
-     * a _Static_assert but a fresh-eyes reader shouldn't have to dig
-     * into compile-time errors to discover that v2 was 120 and v3 is
-     * 192. */
-    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 192u);
+    printf("== test_handoff_v4_layout_size ==\n");
+    /* Belt-and-suspenders runtime check. The header pins the size
+     * with a _Static_assert but a fresh-eyes reader shouldn't have
+     * to dig into compile-time errors to discover that v2 was 120,
+     * v3 was 192, and v4 is 200. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 200u);
 }
 
 static void test_handoff_validate_v3_accepted(void)
@@ -1771,7 +1774,7 @@ int main(void)
     test_launch_kernel_pb_idempotent();
     test_launch_kernel_pb_uses_ampere_pcas2_b();
 
-    test_handoff_v3_layout_size();
+    test_handoff_v4_layout_size();
     test_handoff_validate_v3_accepted();
 
     test_scanner_finds_magic_at_start();

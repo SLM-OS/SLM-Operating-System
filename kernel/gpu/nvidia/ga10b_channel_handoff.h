@@ -39,11 +39,19 @@
  */
 struct ga10b_channel_handoff {
     uint32_t magic;             /* GA10B_CHANNEL_HANDOFF_MAGIC */
-    uint32_t version;           /* 2: channel only; 3: channel + compute-
-                                 * kernel launch state (shader, cbuf, qmd,
-                                 * output). SLM-OS channel inherit accepts
-                                 * both versions; `nvgpu launch-kernel`
-                                 * requires v3. */
+    uint32_t version;           /* 2: channel only.
+                                 * 3: channel + compute-kernel launch
+                                 *    state (shader, cbuf, qmd, output).
+                                 * 4: v3 + `expected_payload` so SLM-OS
+                                 *    can launch kernels other than the
+                                 *    hard-coded-to-0xCAFE write_cafe —
+                                 *    e.g. dot4 which writes 300.
+                                 * SLM-OS channel inherit accepts any of
+                                 * v2/v3/v4; `nvgpu launch-kernel` needs
+                                 * at least v3 for shader/QMD fields and
+                                 * falls back to GA10B_SMOKETEST_SEM_PAYLOAD
+                                 * for v3 handoffs that don't carry
+                                 * `expected_payload`. */
     uint32_t channel_id;        /* Diagnostic only; never used as the
                                  * doorbell token. See work_submit_token
                                  * below — the kernel's allocation path
@@ -111,16 +119,25 @@ struct ga10b_channel_handoff {
                                  * cbuf[0][0x160] for the kernel to read) */
     uint32_t shader_size;       /* bytes — typically 640 for write_cafe */
     uint32_t cbuf_size;         /* bytes — typically 512 */
+
+    /* --- v4 extension: expected-payload for generic launch_kernel. ---
+     * Zero on v2/v3. Populated by any helper running a kernel that
+     * doesn't write 0xCAFE (e.g. dot4 → 300). SLM-OS's
+     * `nvgpu launch-kernel` polls `output_phys` for this value;
+     * v3 handoffs fall back to GA10B_SMOKETEST_SEM_PAYLOAD. */
+    uint32_t expected_payload;  /* value the kernel writes to *output */
+    uint32_t _pad2;             /* align struct size to 8 bytes */
 };
 
 /* Wire-format size is locked: both the Linux helper and SLM-OS
  * depend on this exact layout. Any struct reorder or field addition
  * breaks the handoff silently — the static_assert catches it at
  * compile time on both sides. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 192,
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 200,
                "ga10b_channel_handoff layout changed — update Linux "
                "helper (scripts/gpu-channel-helper.c, "
-               "scripts/gpu-kernel-launch.c) and bump version");
+               "scripts/gpu-kernel-launch.c, scripts/gpu-launch-common.c) "
+               "and bump version");
 
 /* Field-offset pins for the v3 extension. A reorder that preserves
  * sizeof() (e.g. swapping two uint64_t fields) wouldn't fire the
@@ -149,6 +166,8 @@ _Static_assert(offsetof(struct ga10b_channel_handoff, shader_size)    == 184,
                "v3 shader_size offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, cbuf_size)      == 188,
                "v3 cbuf_size offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, expected_payload) == 192,
+               "v4 expected_payload offset drifted");
 
 /*
  * Validate a candidate handoff block. Returns 0 iff magic, version,

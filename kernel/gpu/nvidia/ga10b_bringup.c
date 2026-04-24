@@ -1004,12 +1004,13 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
 {
     if (!h) return -1;
     if (h->magic != GA10B_CHANNEL_HANDOFF_MAGIC) return -1;
-    /* v2 is the channel-only layout consumed by Phase 6/7. v3 adds
-     * compute-kernel launch state (shader/cbuf/qmd/output) — those
-     * fields are optional from Phase 6's perspective; the inherit
-     * path doesn't read them. ga10b_bringup_launch_kernel checks the
-     * version at dispatch time and rejects v2 handoffs. */
-    if (h->version != 2 && h->version != 3) return -1;
+    /* v2: channel-only layout consumed by Phase 6/7.
+     * v3: + compute-kernel launch state (shader/cbuf/qmd/output).
+     * v4: + expected_payload so launch_kernel can target any kernel,
+     *      not just one that writes 0xCAFE.
+     * Phase 6 inherit accepts all three; launch_kernel version-gates
+     * at dispatch time (v3 minimum; v4 unlocks arbitrary payloads). */
+    if (h->version != 2 && h->version != 3 && h->version != 4) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
@@ -1097,6 +1098,12 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     g_handoff.output_gpu_va      = hoff->output_gpu_va;
     g_handoff.shader_size        = hoff->shader_size;
     g_handoff.cbuf_size          = hoff->cbuf_size;
+
+    /* v4 extension. Safe to read unconditionally — on v2/v3 the
+     * helper leaves the field zero (struct is always 200 bytes on
+     * disk per the static_assert). launch_kernel falls back to
+     * GA10B_SMOKETEST_SEM_PAYLOAD when expected_payload is zero. */
+    g_handoff.expected_payload   = hoff->expected_payload;
 
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
@@ -1279,7 +1286,7 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
 
 /* Copy a freshly-built pushbuffer into the inherited pb_phys region,
  * post a GPFIFO entry pointing at it, advance GP_PUT, ring the USERMODE
- * doorbell, and poll `poll_phys` for GA10B_SMOKETEST_SEM_PAYLOAD.
+ * doorbell, and poll `poll_phys` for `expected_payload`.
  *
  * `poll_phys` is the CPU-physical target the GPU writes via the
  * submitted pushbuffer — `g_handoff.semaphore_phys` for the Phase 7
@@ -1288,6 +1295,14 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
  * `g_handoff.output_phys` for the Phase 8 compute-kernel launch
  * (where the shader itself stores the payload via STG.E to a VA
  * that maps to output_phys).
+ *
+ * `expected_payload` is what the GPU is supposed to write. For
+ * Phase 7 sema release this is always GA10B_SMOKETEST_SEM_PAYLOAD
+ * (0xCAFE). For Phase 8 launch_kernel it's whatever the v4 handoff
+ * says the kernel produces, or GA10B_SMOKETEST_SEM_PAYLOAD as a
+ * fallback for v3 handoffs. Making it a parameter rather than a
+ * hard-coded constant is what v4 unlocks — SLM-OS can now
+ * dispatch any kernel, not just write_cafe.
  *
  * `error_phase` is written into `b->last_error_phase` on failure so
  * the caller's phase-number logging stays accurate (Phase 7 for
@@ -1315,6 +1330,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                                  const uint32_t *pb_buf,
                                  uint32_t pb_dwords,
                                  uint64_t poll_phys,
+                                 uint32_t expected_payload,
                                  int error_phase,
                                  const char *tag)
 {
@@ -1335,7 +1351,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                 "(expected payload=0x%lx)\n",
                 tag,
                 (unsigned long)poll_phys,
-                (unsigned long)GA10B_SMOKETEST_SEM_PAYLOAD);
+                (unsigned long)expected_payload);
 
     volatile uint32_t *pb = (volatile uint32_t *)(uintptr_t)
         g_handoff.pushbuf_phys;
@@ -1405,7 +1421,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
             gsp_platform->cache_invalidate((void *)poll, sizeof(uint32_t));
         }
         poll_val = *poll;
-        if (poll_val == GA10B_SMOKETEST_SEM_PAYLOAD) break;
+        if (poll_val == expected_payload) break;
         for (volatile int i = 0; i < 1500; i++) { }
     }
 
@@ -1423,7 +1439,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                 (unsigned long)g_handoff.initial_gp_get);
 
     bool gp_advanced     = (final_gp_get != g_handoff.initial_gp_get);
-    bool payload_matched = (poll_val == GA10B_SMOKETEST_SEM_PAYLOAD);
+    bool payload_matched = (poll_val == expected_payload);
 
     /* Symmetric bookkeeping: any PBDMA progress consumes the slot.
      * Update the counters so the next submit lands in a fresh slot,
@@ -1456,7 +1472,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                     "encoding.\n",
                     tag,
                     (unsigned long)poll_val,
-                    (unsigned long)GA10B_SMOKETEST_SEM_PAYLOAD);
+                    (unsigned long)expected_payload);
     } else {
         uart_printf("[%s] GP_GET did not advance — PBDMA didn't see "
                     "our submit\n", tag);
@@ -1486,8 +1502,13 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
     uint32_t pb_dwords = ga10b_build_sema_release_pushbuffer(
         pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
 
+    /* Phase 7 host-family always writes GA10B_SMOKETEST_SEM_PAYLOAD
+     * — the encoding is hard-coded in the SEMAPHORE_RELEASE
+     * pushbuffer. */
     return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
-                                 g_handoff.semaphore_phys, 7, "GA10B-P7");
+                                 g_handoff.semaphore_phys,
+                                 GA10B_SMOKETEST_SEM_PAYLOAD,
+                                 7, "GA10B-P7");
 }
 
 int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
@@ -1520,8 +1541,12 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
     uint32_t pb_dwords = ga10b_build_compute_sema_release_pushbuffer(
         pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
 
+    /* Phase 7 COMPUTE_B also uses the fixed payload — the shader
+     * is the SEMAPHORE_RELEASE method itself, not arbitrary code. */
     return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
-                                 g_handoff.semaphore_phys, 7, "GA10B-P7C");
+                                 g_handoff.semaphore_phys,
+                                 GA10B_SMOKETEST_SEM_PAYLOAD,
+                                 7, "GA10B-P7C");
 }
 
 int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
@@ -1563,8 +1588,20 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
     uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
         pb_buf, g_handoff.qmd_gpu_va);
 
+    /* v4 handoffs carry a per-kernel expected payload; v3 handoffs
+     * (and v4 handoffs with expected_payload==0) fall back to the
+     * write_cafe constant so existing flows keep working. */
+    uint32_t expected = (g_handoff.version >= 4 &&
+                         g_handoff.expected_payload != 0u)
+                        ? g_handoff.expected_payload
+                        : GA10B_SMOKETEST_SEM_PAYLOAD;
+    uart_printf("[GA10B-P8]   expected_payload=0x%lx (handoff v%lu)\n",
+                (unsigned long)expected,
+                (unsigned long)g_handoff.version);
+
     return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
-                                 g_handoff.output_phys, 8, "GA10B-P8");
+                                 g_handoff.output_phys, expected,
+                                 8, "GA10B-P8");
 }
 
 int ga10b_bringup_run(struct ga10b_bringup *b)
