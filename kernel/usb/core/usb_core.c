@@ -42,15 +42,6 @@ static struct usb_device     root_device;
 static bool                  root_device_present;
 static struct usb_device     hub_device;
 static bool                  hub_device_present;
-static bool                  usb_probe_presetup_get_status = false;
-static bool                  usb_probe_presetup_bad_clear_feature = false;
-static bool                  usb_probe_presetup_set_address = false;
-static bool                  usb_probe_exact_first_retained_descriptor = false;
-static bool                  usb_probe_stop_after_first_retained_descriptor = false;
-static bool                  usb_probe_hub_noop = false;
-static bool                  usb_probe_hub_reprime_ep0 = false;
-static bool                  usb_probe_hub_post_config_device_desc = false;
-static bool                  usb_probe_hub_get_status = false;
 static bool                  usb_disable_hotplug_retry_after_failure = true;
 static bool                  usb_probe_child_noop_before_close = false;
 static bool                  usb_child_address_sync_bsr0 = true;
@@ -167,15 +158,6 @@ static int usb_fetch_config_descriptor(struct usb_device *dev,
         return -1;
 
     return (int)total;
-}
-
-static bool usb_is_retained_fullspeed_root(const struct usb_device *dev)
-{
-    return dev != NULL &&
-           dev->state == USB_STATE_ADDRESS &&
-           dev->address != 0 &&
-           dev->route_string == 0 &&
-           dev->speed == USB_SPEED_FULL;
 }
 
 static bool usb_probe_preserve_child_failure(struct usb_device *dev,
@@ -925,88 +907,6 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
         uint64_t settle_ticks = timer_get_frequency() / 10; /* 100 ms */
         while (timer_get_count() - settle_start < settle_ticks) { }
 
-        if (usb_probe_presetup_get_status &&
-            dev->route_string == 0 &&
-            dev->speed == USB_SPEED_FULL) {
-            uint16_t status_word = 0;
-            int status_rc = usb_control_msg(dev,
-                                            USB_DIR_IN | USB_TYPE_STANDARD |
-                                            USB_RECIP_DEVICE,
-                                            USB_REQ_GET_STATUS,
-                                            0, 0,
-                                            &status_word,
-                                            sizeof(status_word),
-                                            500);
-            INFO("usb_core: probe GET_STATUS(default addr) rc=%d status=0x%04x speed=%d route=0x%x root_port=%u",
-                 status_rc,
-                 (unsigned)status_word,
-                 (int)dev->speed,
-                 (unsigned)dev->route_string,
-                 (unsigned)dev->root_hub_port);
-            usb_probe_presetup_get_status = false;
-        }
-
-        if (usb_probe_presetup_bad_clear_feature &&
-            dev->route_string == 0 &&
-            dev->speed == USB_SPEED_FULL) {
-            /*
-             * Harmless discriminator for the very first default-address
-             * Setup Stage: an invalid standard no-data OUT request should
-             * be seen by the device and rejected with STALL, but it should
-             * not mutate device state. If this still dies with the same
-             * transport error as GET_STATUS, the problem is broader than
-             * "descriptor / IN request" semantics.
-             */
-            int clear_rc = usb_control_msg(dev,
-                                           USB_DIR_OUT | USB_TYPE_STANDARD |
-                                           USB_RECIP_DEVICE,
-                                           USB_REQ_CLEAR_FEATURE,
-                                           0xffffu, 0,
-                                           NULL, 0,
-                                           500);
-            INFO("usb_core: probe CLEAR_FEATURE(invalid, default addr) rc=%d speed=%d route=0x%x root_port=%u",
-                 clear_rc,
-                 (int)dev->speed,
-                 (unsigned)dev->route_string,
-                 (unsigned)dev->root_hub_port);
-            usb_probe_presetup_bad_clear_feature = false;
-        }
-
-        if (usb_probe_presetup_set_address &&
-            dev->route_string == 0 &&
-            dev->speed == USB_SPEED_FULL) {
-            /*
-             * Probe whether the inherited full-speed path can execute a
-             * real default-address SET_ADDRESS even though the earlier
-             * GET_STATUS / GET_DESCRIPTOR traffic is failing. Treat this
-             * as diagnostic only: if it succeeds, close the device and let
-             * the outer retry loop port-reset back to address 0 before the
-             * normal enumeration flow resumes.
-             */
-            int set_addr_rc = usb_control_msg(dev,
-                                              USB_DIR_OUT | USB_TYPE_STANDARD |
-                                              USB_RECIP_DEVICE,
-                                              USB_REQ_SET_ADDRESS,
-                                              target_address, 0,
-                                              NULL, 0,
-                                              500);
-            INFO("usb_core: probe SET_ADDRESS(default addr -> %u) rc=%d speed=%d route=0x%x root_port=%u",
-                 (unsigned)target_address,
-                 set_addr_rc,
-                 (int)dev->speed,
-                 (unsigned)dev->route_string,
-                 (unsigned)dev->root_hub_port);
-            usb_probe_presetup_set_address = false;
-            if (set_addr_rc >= 0) {
-                WARN("usb_core: probe SET_ADDRESS succeeded before initial descriptor; restarting from reset");
-                if (device_opened && active_hcd->device_close) {
-                    active_hcd->device_close(dev);
-                    device_opened = false;
-                }
-                continue;
-            }
-        }
-
         /*
          * Step 3: read the first bytes of the device descriptor while the
          * device is still at address 0.
@@ -1020,17 +920,6 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
         uint8_t dd_stub[64];
         uint8_t *dd_stub_buf = dd_stub;
         size_t initial_desc_len = sizeof(dd_stub);
-        if (usb_probe_exact_first_retained_descriptor &&
-            usb_is_retained_fullspeed_root(dev)) {
-            initial_desc_len = sizeof(dev->dev_desc);
-            usb_probe_exact_first_retained_descriptor = false;
-            INFO("usb_core: probing exact first retained descriptor len=%u addr=%u speed=%d route=0x%x root_port=%u",
-                 (unsigned)initial_desc_len,
-                 (unsigned)dev->address,
-                 (int)dev->speed,
-                 (unsigned)dev->route_string,
-                 (unsigned)dev->root_hub_port);
-        }
         if (usb_is_root_device(dev)) {
             uint8_t *bounce = usb_get_retained_desc_bounce(initial_desc_len);
             if (bounce != NULL) {
@@ -1087,12 +976,6 @@ got_initial_descriptor:
     if (dev->state == USB_STATE_ADDRESS && dev->address != 0) {
         INFO("usb_core: reusing inherited device address %u after initial descriptor",
              (unsigned)dev->address);
-        if (usb_probe_stop_after_first_retained_descriptor &&
-            usb_is_retained_fullspeed_root(dev)) {
-            usb_probe_stop_after_first_retained_descriptor = false;
-            WARN("usb_core: probe stopping after first retained descriptor on full-speed root path");
-            goto err_close;
-        }
     } else {
 #if defined(PLATFORM_JETSON_ORIN_NANO)
         if (usb_child_address_sync_bsr0 && dev->route_string != 0) {
@@ -1283,73 +1166,6 @@ err_close:
 static int usb_try_enumerate_via_hub(struct usb_device *hub)
 {
     struct usb_hub_descriptor desc = {0};
-    if (usb_probe_hub_noop) {
-        usb_probe_hub_noop = false;
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-        int noop_rc = xhci_cmd_noop_probe();
-        INFO("usb_core: probe NO_OP(configured hub) rc=%d", noop_rc);
-#else
-        INFO("usb_core: probe NO_OP(configured hub) skipped on this platform");
-#endif
-    }
-    if (usb_probe_hub_reprime_ep0) {
-        usb_probe_hub_reprime_ep0 = false;
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-        int reprime_rc = xhci_debug_reprime_adopted_ep0(hub);
-        INFO("usb_core: probe reprime adopted ep0 rc=%d", reprime_rc);
-        if (reprime_rc != 0) {
-            WARN("usb_core: stopping hub enumeration after adopted EP0 reprime failure");
-            return -1;
-        }
-#else
-        INFO("usb_core: probe reprime adopted ep0 skipped on this platform");
-#endif
-    }
-    if (usb_probe_hub_post_config_device_desc) {
-        struct usb_device_descriptor probe_desc = {0};
-        int desc_rc;
-        usb_probe_hub_post_config_device_desc = false;
-        desc_rc = usb_get_descriptor(hub, USB_DT_DEVICE, 0,
-                                     &probe_desc, sizeof(probe_desc));
-        INFO("usb_core: probe GET_DESCRIPTOR(device, 18) after config rc=%d "
-             "vid=0x%04x pid=0x%04x class=0x%02x",
-             desc_rc,
-             (unsigned)probe_desc.idVendor,
-             (unsigned)probe_desc.idProduct,
-             (unsigned)probe_desc.bDeviceClass);
-        if (desc_rc < (int)sizeof(probe_desc)) {
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-            int noop_rc = xhci_cmd_noop_probe();
-            INFO("usb_core: probe NO_OP(after post-config device-desc failure) rc=%d",
-                 noop_rc);
-#endif
-        }
-        WARN("usb_core: stopping hub enumeration after post-config device descriptor probe");
-        return -1;
-    }
-    if (usb_probe_hub_get_status) {
-        uint16_t hub_status = 0;
-        int status_rc;
-        usb_probe_hub_get_status = false;
-        status_rc = usb_control_msg(hub,
-                                    USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-                                    USB_REQ_GET_STATUS,
-                                    0, 0,
-                                    &hub_status, sizeof(hub_status),
-                                    500);
-        INFO("usb_core: probe GET_STATUS(configured hub) rc=%d status=0x%04x",
-             status_rc, (unsigned)hub_status);
-        if (status_rc < 0) {
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-            int noop_rc = xhci_cmd_noop_probe();
-            INFO("usb_core: probe NO_OP(after GET_STATUS timeout) rc=%d",
-                 noop_rc);
-#endif
-            WARN("usb_core: stopping hub enumeration after GET_STATUS probe failure");
-            return -1;
-        }
-    }
-
     int rc = usb_hub_get_descriptor(hub, &desc);
     if (rc < (int)sizeof(desc)) {
         WARN("usb_core: short GET_DESCRIPTOR(hub) n=%d", rc);
