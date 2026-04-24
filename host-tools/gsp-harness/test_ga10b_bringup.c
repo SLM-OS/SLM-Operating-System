@@ -584,6 +584,11 @@ static void test_phases_reject_wrong_state(void)
     REQUIRE_EQ(ga10b_bringup_address_space(&b), -1);
     REQUIRE_EQ(ga10b_bringup_channel(&b), -1);
     REQUIRE_EQ(ga10b_bringup_smoke_test(&b), -1);
+    /* smoke_test_compute + launch_kernel also reject the pre-channel
+     * state — both need CHANNEL_OPEN or METHOD_ACCEPTED before
+     * a pushbuffer submit is meaningful. */
+    REQUIRE_EQ(ga10b_bringup_smoke_test_compute(&b), -1);
+    REQUIRE_EQ(ga10b_bringup_launch_kernel(&b),      -1);
 
     /* State should not have changed. */
     REQUIRE_EQ(b.state, GA10B_BRINGUP_INIT);
@@ -592,13 +597,15 @@ static void test_phases_reject_wrong_state(void)
 static void test_phases_reject_null_bringup(void)
 {
     printf("== test_phases_reject_null_bringup ==\n");
-    REQUIRE_EQ(ga10b_bringup_acr(NULL),            -1);
-    REQUIRE_EQ(ga10b_bringup_fecs(NULL),           -1);
-    REQUIRE_EQ(ga10b_bringup_gpccs(NULL),          -1);
-    REQUIRE_EQ(ga10b_bringup_pmu(NULL),            -1);
-    REQUIRE_EQ(ga10b_bringup_address_space(NULL),  -1);
-    REQUIRE_EQ(ga10b_bringup_channel(NULL),        -1);
-    REQUIRE_EQ(ga10b_bringup_smoke_test(NULL),     -1);
+    REQUIRE_EQ(ga10b_bringup_acr(NULL),                 -1);
+    REQUIRE_EQ(ga10b_bringup_fecs(NULL),                -1);
+    REQUIRE_EQ(ga10b_bringup_gpccs(NULL),               -1);
+    REQUIRE_EQ(ga10b_bringup_pmu(NULL),                 -1);
+    REQUIRE_EQ(ga10b_bringup_address_space(NULL),       -1);
+    REQUIRE_EQ(ga10b_bringup_channel(NULL),             -1);
+    REQUIRE_EQ(ga10b_bringup_smoke_test(NULL),          -1);
+    REQUIRE_EQ(ga10b_bringup_smoke_test_compute(NULL),  -1);
+    REQUIRE_EQ(ga10b_bringup_launch_kernel(NULL),       -1);
 }
 
 /* ======================================================================

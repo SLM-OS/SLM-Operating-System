@@ -64,6 +64,16 @@
 #define USERD_GP_PUT_WORD 35u
 #define USERD_GP_GET_WORD 34u
 
+/* nvmap allocation knobs captured from CUDA's own ioctl stream via
+ * LD_PRELOAD snoop on L4T r36.4.7 (`nvgpu_ioctl_trace.so`). IOVMM
+ * heap places buffers behind the GPU's SMMU; the cacheable flag
+ * bundle matches what CUDA passes for its working allocations.
+ * Must stay in lock-step with scripts/gpu-channel-helper.c — SLM-OS
+ * inherits channels from either helper and expects nvmap buffers
+ * with the same caching properties either way. */
+#define NVMAP_IOVMM_HEAP_MASK  0x40000000u
+#define NVMAP_CACHEABLE_FLAGS  0x8000003u
+
 /* NVC7C0 methods we use (clc7c0.h offsets). */
 #define NVC7C0_SET_OBJECT                             0x0000
 #define NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI 0x0244
@@ -208,8 +218,8 @@ static int nvmap_alloc_dmabuf(int nvmap_fd, uint32_t size, uint32_t align)
 
     struct nvmap_alloc_handle al = {
         .handle = handle,
-        .heap_mask = 0x40000000,
-        .flags = 0x8000003,
+        .heap_mask = NVMAP_IOVMM_HEAP_MASK,
+        .flags = NVMAP_CACHEABLE_FLAGS,
         .align = (align < 0x1000) ? 0x1000 : align,
         .numa_nid = -1,
     };

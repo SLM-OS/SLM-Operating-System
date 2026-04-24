@@ -1441,12 +1441,19 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
     }
 
     if (gp_advanced) {
+        /* Generic diagnostic for the silent-no-op class: PBDMA
+         * consumed the pushbuffer but the expected side effect
+         * (semaphore release / kernel store) never landed. Caller-
+         * specific hypotheses (host-family sema encoding,
+         * COMPUTE_B class/subchannel binding, Ampere
+         * PCAS2_B/PCAS_B dispatch-kick selection, QMD shader
+         * address, etc.) are logged by the caller if it has more
+         * context than this helper does. */
         uart_printf("[%s] GP_GET advanced but payload didn't land "
                     "(got 0x%lx, want 0x%lx) — PBDMA consumed our "
                     "submit but the GPU didn't produce the expected "
-                    "side effect. Check pushbuffer encoding, class/"
-                    "subchannel binding, and (for compute) the "
-                    "PCAS2_B/PCAS_B arch split.\n",
+                    "side effect. Inspect the caller's pushbuffer "
+                    "encoding.\n",
                     tag,
                     (unsigned long)poll_val,
                     (unsigned long)GA10B_SMOKETEST_SEM_PAYLOAD);
