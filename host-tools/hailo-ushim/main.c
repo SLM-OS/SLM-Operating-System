@@ -274,6 +274,393 @@ static int cmd_empty_rpc(int fd, uint32_t opcode, const char *name)
     return 0;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Captured ctxsmoke action bodies (from SLM-OS HAILO_WIRE_DEBUG=ON, 2026-04-24) */
+/* ------------------------------------------------------------------------ */
+/* See host-tools/hailo-ushim/CAPTURED_CTXSMOKE_BYTES.md for the full        */
+/* documentation. These are the exact bytes SLM-OS sends — fw accepts each   */
+/* with rc=0. The IOVA fields are patched at runtime by patch_iova_le64()    */
+/* to point at desc-list IOVAs allocated through hailo_pci ioctls.           */
+
+/* SET_NETWORK_GROUP_HEADER body (32 bytes after the parameter_count + length
+ * prefix, which send_fw_control_with_lenprefix builds for us). Pulled from
+ * HailoRT MNIST trace (full bytes — the cap was on the ioctl trace, not the
+ * RPC body itself). HailoRT-equivalent ctxsmoke produces an identical 32-B
+ * body for the synthetic 1-network-group HEF SLM-OS uses. */
+static const uint8_t NG_HEADER_BODY[32] = {
+    0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00,
+    0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01,
+};
+
+static const uint8_t ACTIVATION_BODY[63] = {
+    /*  0 */ 0x1e, 0xff, 0xff, 0xff, 0xff,        /* BURST_CREDITS_TASK_RESET */
+    /*  5 */ 0x21, 0xff, 0xff, 0xff, 0xff,        /* OpenBoundaryOutput hdr */
+    /* 10 */ 0x10,                                /* packed_vdma_channel_id */
+    /* 11 */ 0x00,                                /* buffer_type */
+    /* 12 */ 0x00, 0x00, 0xaf, 0x00, 0x10, 0x00, 0x00, 0x00, /* IOVA bnd_out (PATCH) */
+    /* 20 */ 0x00, 0x10,                          /* desc_page_size = 4096 */
+    /* 22 */ 0x40, 0x00, 0x00, 0x00,              /* total_desc_count = 64 */
+    /* 26 */ 0x00, 0x01, 0x00, 0x00,              /* bytes_in_pattern = 256 */
+    /* 30 */ 0x20, 0xff, 0xff, 0xff, 0xff,        /* OpenBoundaryInput hdr */
+    /* 35 */ 0x02,                                /* packed_vdma_channel_id */
+    /* 36 */ 0x00,                                /* buffer_type */
+    /* 37 */ 0x00, 0x00, 0xae, 0x00, 0x10, 0x00, 0x00, 0x00, /* IOVA bnd_in (PATCH) */
+    /* 45 */ 0x00, 0x10,                          /* desc_page_size = 4096 */
+    /* 47 */ 0x40, 0x00, 0x00, 0x00,              /* total_desc_count = 64 */
+    /* 51 */ 0x00, 0x01, 0x00, 0x00,              /* bytes_in_pattern = 256 */
+    /* 55 */ 0x01,                                /* stream_index */
+    /* 56 */ 0x00,                                /* network_index */
+    /* 57 */ 0x00, 0x01,                          /* periph_bytes_per_buffer LE */
+    /* 59 */ 0x00, 0x01, 0x00, 0x00,              /* frame_periph_size LE = 256 */
+};
+#define ACTIVATION_OFFSET_BND_OUT_IOVA  12
+#define ACTIVATION_OFFSET_BND_IN_IOVA   37
+
+static const uint8_t BATCH_SWITCHING_BODY[16] = {
+    0x1f, 0xff, 0xff, 0xff, 0xff,
+    0x25, 0xff, 0xff, 0xff, 0xff, 0x02,
+    0x1d, 0xff, 0xff, 0xff, 0xff,
+};
+
+static const uint8_t PRELIMINARY_BODY[37] = {
+    /*  0 */ 0x16, 0xff, 0xff, 0xff, 0xff,        /* ACTIVATE_CFG_CHANNEL hdr */
+    /*  5 */ 0x01,                                /* packed_vdma_channel_id */
+    /*  6 */ 0x00,                                /* config_stream_index */
+    /*  7 */ 0x00,                                /* buffer_type */
+    /*  8 */ 0x00, 0x00, 0xab, 0x00, 0x10, 0x00, 0x00, 0x00, /* IOVA ccw (PATCH) */
+    /* 16 */ 0x00, 0x02,                          /* desc_page_size = 512 */
+    /* 18 */ 0x02, 0x00, 0x00, 0x00,              /* total_desc_count = 2 */
+    /* 22 */ 0x00, 0x00, 0x00, 0x00,              /* bytes_in_pattern */
+    /* 26 */ 0x18, 0xff, 0xff, 0xff, 0xff,        /* REPEATED_ACTION? hdr */
+    /* 31 */ 0x01, 0x00, 0x00, 0x02, 0x00, 0x01,
+};
+#define PRELIMINARY_OFFSET_CCW_IOVA     8
+
+static const uint8_t DYNAMIC_BODY[103] = {
+    /*  0 */ 0x07, 0xff, 0xff, 0xff, 0xff,        /* ACTIVATE_BOUNDARY_OUTPUT hdr */
+    /*  5 */ 0x10,                                /* packed_vdma_channel_id */
+    /*  6 */ 0x02,                                /* stream_index */
+    /*  7 */ 0x00,                                /* network_index */
+    /*  8 */ 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, /* stream_reg_info */
+    /* 16 */ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, /* stream_reg_info */
+    /* 25 */ 0x00,                                /* host_buffer_info.buffer_type */
+    /* 26 */ 0x00, 0x00, 0xaf, 0x00, 0x10, 0x00, 0x00, 0x00, /* IOVA bnd_out (PATCH) */
+    /* 34 */ 0x00, 0x10,                          /* desc_page_size = 4096 */
+    /* 36 */ 0x40, 0x00, 0x00, 0x00,              /* total_desc_count = 64 */
+    /* 40 */ 0x00, 0x01, 0x00, 0x00,              /* bytes_in_pattern = 256 */
+    /* 44 */ 0x06, 0xff, 0xff, 0xff, 0xff,        /* ACTIVATE_BOUNDARY_INPUT hdr */
+    /* 49 */ 0x02,                                /* packed_vdma_channel_id */
+    /* 50 */ 0x01,                                /* stream_index */
+    /* 51 */ 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, /* stream_reg_info */
+    /* 59 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, /* stream_reg_info */
+    /* 68 */ 0x00,                                /* buffer_type */
+    /* 69 */ 0x00, 0x00, 0xae, 0x00, 0x10, 0x00, 0x00, 0x00, /* IOVA bnd_in (PATCH) */
+    /* 77 */ 0x00, 0x10,                          /* desc_page_size = 4096 */
+    /* 79 */ 0x40, 0x00, 0x00, 0x00,              /* total_desc_count = 64 */
+    /* 83 */ 0x00, 0x01, 0x00, 0x00,              /* bytes_in_pattern = 256 */
+    /* 87 */ 0x00, 0x00, 0x01, 0x00,              /* initial_credit_size = 65536 */
+    /* 91 */ 0x27, 0xff, 0xff, 0xff, 0xff,        /* action 0x27 hdr */
+    /* 96 */ 0x02, 0x01,                          /* action 0x27 body */
+    /* 98 */ 0x15, 0xff, 0xff, 0xff, 0xff,        /* action 0x15 hdr (no body) */
+};
+_Static_assert(sizeof(DYNAMIC_BODY) == 103, "DYNAMIC body must be 103 bytes");
+#define DYNAMIC_OFFSET_BND_OUT_IOVA     26
+#define DYNAMIC_OFFSET_BND_IN_IOVA      69
+
+/* Patch a little-endian u64 IOVA into a byte buffer at the given
+ * offset. Used to overwrite the captured ctxsmoke IOVAs with
+ * hailo_pci-allocated desc-list IOVAs at runtime. */
+static void patch_iova_le64(uint8_t *body, size_t offset, uint64_t iova)
+{
+    for (int i = 0; i < 8; i++) {
+        body[offset + i] = (uint8_t)((iova >> (i * 8)) & 0xff);
+    }
+}
+
+/*
+ * SET_CONTEXT_INFO wire layout per SLM-OS hailo_control.c:1436-1447
+ * (struct hailo_cs_set_ctx_info_req_prefix_wire). 4-parameter body
+ * after the common header:
+ *   [BE u32 length=1][u8 is_first_chunk_per_context]
+ *   [BE u32 length=1][u8 is_last_chunk_per_context]
+ *   [BE u32 length=1][u8 context_type]
+ *   [BE u32 length=N][N raw context_network_data bytes]
+ *
+ * Note: there is NO application_index field — that's only in the
+ * CHANGE_CONTEXT_SWITCH_STATUS RPC. Earlier guess was wrong; first
+ * hardware run got UNEXPECTED_CONTEXT_ORDER from fw because the
+ * context_type byte was being read from a wrong offset.
+ */
+/* Authoritative values from SLM-OS hailo_control.h:491-495. The
+ * second-iteration probe run had DYNAMIC and BATCH_SWITCHING
+ * swapped, which made fw see ACTIVATION → DYNAMIC → ... and reject
+ * with UNEXPECTED_CONTEXT_ORDER. */
+enum {
+    CONTEXT_TYPE_PRELIMINARY     = 0,
+    CONTEXT_TYPE_DYNAMIC         = 1,
+    CONTEXT_TYPE_BATCH_SWITCHING = 2,
+    CONTEXT_TYPE_ACTIVATION      = 3,
+};
+
+static int cmd_set_context_info(int fd, uint8_t context_type,
+                                const uint8_t *body, uint32_t body_len,
+                                const char *label)
+{
+    uint8_t buf[2048];
+    size_t  off = 0;
+    #define EMIT_BE32(v)  do { uint32_t be = htobe32_((v)); \
+        memcpy(buf + off, &be, 4); off += 4; } while (0)
+    #define EMIT_U8(v)    do { buf[off++] = (uint8_t)(v); } while (0)
+
+    EMIT_BE32(1);  EMIT_U8(1);                /* is_first_chunk_per_context */
+    EMIT_BE32(1);  EMIT_U8(1);                /* is_last_chunk_per_context */
+    EMIT_BE32(1);  EMIT_U8(context_type);
+    EMIT_BE32(body_len);                       /* body length */
+    if (off + body_len > sizeof(buf)) return -EINVAL;
+    memcpy(buf + off, body, body_len);
+    off += body_len;
+
+    #undef EMIT_BE32
+    #undef EMIT_U8
+
+    uint8_t  resp[256];
+    uint32_t resp_len = sizeof(resp);
+    printf("  SET_CONTEXT_INFO(%s, type=%u, %u B body) → ",
+           label, context_type, body_len);
+    fflush(stdout);
+    int rc = send_fw_control(fd, OPCODE_CS_SET_CONTEXT_INFO,
+                             /*parameter_count=*/4u,
+                             buf, (uint32_t)off,
+                             resp, &resp_len, /*core_cpu=*/true);
+    if (rc != 0) {
+        printf("ioctl rc=%d (%s)\n", rc, strerror(-rc));
+        return rc;
+    }
+    print_resp_status("    ", resp, resp_len);
+    return 0;
+}
+
+/*
+ * SET_NETWORK_GROUP_HEADER (opcode 0x20). Wire body:
+ *   parameter_count = 1
+ *   [BE u32 length=N][N raw header bytes]
+ */
+static int cmd_set_network_group_header(int fd,
+                                        const uint8_t *body,
+                                        uint32_t body_len)
+{
+    uint8_t buf[256];
+    size_t  off = 0;
+    uint32_t be_len = htobe32_(body_len);
+    memcpy(buf + off, &be_len, 4); off += 4;
+    if (off + body_len > sizeof(buf)) return -EINVAL;
+    memcpy(buf + off, body, body_len);
+    off += body_len;
+
+    uint8_t  resp[128];
+    uint32_t resp_len = sizeof(resp);
+    printf("  SET_NETWORK_GROUP_HEADER(%u B) → ", body_len);
+    fflush(stdout);
+    int rc = send_fw_control(fd, OPCODE_CS_SET_NETWORK_GROUP_HEADER,
+                             /*parameter_count=*/1u,
+                             buf, (uint32_t)off,
+                             resp, &resp_len, /*core_cpu=*/true);
+    if (rc != 0) {
+        printf("ioctl rc=%d (%s)\n", rc, strerror(-rc));
+        return rc;
+    }
+    print_resp_status("    ", resp, resp_len);
+    return 0;
+}
+
+/*
+ * --full-handshake: end-to-end replay of SLM-OS's CS handshake +
+ * boundary submit through hailo_pci. Allocates 3 desc lists + buffers,
+ * patches the captured ctxsmoke action bodies with the IOVAs the
+ * driver returned, fires the full RPC sequence, then launches a
+ * boundary-input transfer. If LAUNCH_TRANSFER advances num_proc,
+ * SLM-OS's bytes are correct end-to-end and #253 lives in the
+ * bare-metal bringup. If it fails, we've localized to a specific
+ * RPC the driver path also rejects.
+ */
+static int cmd_full_handshake(int fd)
+{
+    int rc = 0;
+    void *ccw_buf = NULL, *bnd_in_buf = NULL, *bnd_out_buf = NULL;
+    uintptr_t ccw_mh = 0, bnd_in_mh = 0, bnd_out_mh = 0;
+    uintptr_t ccw_dh = 0, bnd_in_dh = 0, bnd_out_dh = 0;
+    uint64_t  ccw_iova = 0, bnd_in_iova = 0, bnd_out_iova = 0;
+    bool ccw_mh_set = false, bnd_in_mh_set = false, bnd_out_mh_set = false;
+    bool ccw_dh_set = false, bnd_in_dh_set = false, bnd_out_dh_set = false;
+    bool ch_in_enabled = false;
+
+    long page_sz = sysconf(_SC_PAGESIZE);
+    if (page_sz <= 0) page_sz = 4096;
+    size_t map_size = (size_t)page_sz;
+
+    printf("=== full-handshake: SLM-OS CS RPC chain + LAUNCH_TRANSFER ===\n");
+
+    /* 1. Allocate 3 buffers (CCW, bnd_in, bnd_out) + map them. */
+    #define MMAP_BUF(var) do { \
+        var = mmap(NULL, map_size, PROT_READ | PROT_WRITE, \
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); \
+        if (var == MAP_FAILED) { fprintf(stderr, "mmap " #var \
+            " failed: %s\n", strerror(errno)); rc = -errno; goto cleanup; } \
+        memset(var, 0xA5, map_size); \
+    } while (0)
+    MMAP_BUF(ccw_buf);
+    MMAP_BUF(bnd_in_buf);
+    MMAP_BUF(bnd_out_buf);
+    #undef MMAP_BUF
+
+    rc = hailo_dev_buffer_map(fd, ccw_buf, map_size,
+                              HAILO_DEV_DIR_H2D, &ccw_mh);
+    if (rc < 0) { fprintf(stderr, "[1] BUFFER_MAP ccw: %s\n",
+        strerror(-rc)); goto cleanup; }
+    ccw_mh_set = true;
+    rc = hailo_dev_buffer_map(fd, bnd_in_buf, map_size,
+                              HAILO_DEV_DIR_H2D, &bnd_in_mh);
+    if (rc < 0) { fprintf(stderr, "[1] BUFFER_MAP bnd_in: %s\n",
+        strerror(-rc)); goto cleanup; }
+    bnd_in_mh_set = true;
+    rc = hailo_dev_buffer_map(fd, bnd_out_buf, map_size,
+                              HAILO_DEV_DIR_D2H, &bnd_out_mh);
+    if (rc < 0) { fprintf(stderr, "[1] BUFFER_MAP bnd_out: %s\n",
+        strerror(-rc)); goto cleanup; }
+    bnd_out_mh_set = true;
+
+    /* 2. Create 3 desc lists matching SLM-OS's ctxsmoke geometry. */
+    rc = hailo_dev_desc_list_create(fd, /*count=*/2, /*page=*/512, false,
+                                    &ccw_dh, &ccw_iova);
+    if (rc < 0) { fprintf(stderr, "[2] DESC_LIST_CREATE ccw: %s\n",
+        strerror(-rc)); goto cleanup; }
+    ccw_dh_set = true;
+    rc = hailo_dev_desc_list_create(fd, /*count=*/64, /*page=*/4096, false,
+                                    &bnd_in_dh, &bnd_in_iova);
+    if (rc < 0) { fprintf(stderr, "[2] DESC_LIST_CREATE bnd_in: %s\n",
+        strerror(-rc)); goto cleanup; }
+    bnd_in_dh_set = true;
+    rc = hailo_dev_desc_list_create(fd, /*count=*/64, /*page=*/4096, false,
+                                    &bnd_out_dh, &bnd_out_iova);
+    if (rc < 0) { fprintf(stderr, "[2] DESC_LIST_CREATE bnd_out: %s\n",
+        strerror(-rc)); goto cleanup; }
+    bnd_out_dh_set = true;
+    printf("[1-2] allocated: ccw_iova=0x%lx bnd_in_iova=0x%lx bnd_out_iova=0x%lx\n",
+           (unsigned long)ccw_iova, (unsigned long)bnd_in_iova,
+           (unsigned long)bnd_out_iova);
+
+    /* 3. Program desc lists (binds buffer to channel). */
+    rc = hailo_dev_desc_list_program(fd, ccw_dh, ccw_mh, 0, 256,
+                                     /*ch=*/1, 0, true);
+    if (rc < 0) { fprintf(stderr, "[3] DESC_LIST_PROGRAM ccw: %s\n",
+        strerror(-rc)); goto cleanup; }
+    rc = hailo_dev_desc_list_program(fd, bnd_in_dh, bnd_in_mh, 0, 784,
+                                     /*ch=*/2, 0, true);
+    if (rc < 0) { fprintf(stderr, "[3] DESC_LIST_PROGRAM bnd_in: %s\n",
+        strerror(-rc)); goto cleanup; }
+    rc = hailo_dev_desc_list_program(fd, bnd_out_dh, bnd_out_mh, 0, 16,
+                                     /*ch=*/16, 0, true);
+    if (rc < 0) { fprintf(stderr, "[3] DESC_LIST_PROGRAM bnd_out: %s\n",
+        strerror(-rc)); goto cleanup; }
+
+    /* 4. Enable boundary input channel (ch=2) for the launch_transfer
+     * later. CCW + bnd_out are managed by fw via the CS actions. */
+    rc = hailo_dev_enable_channel(fd, 2, false);
+    if (rc < 0) { fprintf(stderr, "[4] ENABLE_CHANNELS: %s\n",
+        strerror(-rc)); goto cleanup; }
+    ch_in_enabled = true;
+
+    /* 5. Patch IOVAs into per-context body copies. */
+    uint8_t activation[63], preliminary[37], dynamic[103];
+    memcpy(activation,  ACTIVATION_BODY,  sizeof(activation));
+    memcpy(preliminary, PRELIMINARY_BODY, sizeof(preliminary));
+    memcpy(dynamic,     DYNAMIC_BODY,     sizeof(dynamic));
+    patch_iova_le64(activation,  ACTIVATION_OFFSET_BND_OUT_IOVA, bnd_out_iova);
+    patch_iova_le64(activation,  ACTIVATION_OFFSET_BND_IN_IOVA,  bnd_in_iova);
+    patch_iova_le64(preliminary, PRELIMINARY_OFFSET_CCW_IOVA,    ccw_iova);
+    patch_iova_le64(dynamic,     DYNAMIC_OFFSET_BND_OUT_IOVA,    bnd_out_iova);
+    patch_iova_le64(dynamic,     DYNAMIC_OFFSET_BND_IN_IOVA,     bnd_in_iova);
+    printf("[5] patched IOVAs into context bodies\n");
+
+    /* 6. Fire the full handshake. */
+    printf("[6] firing full CS handshake...\n");
+    rc = cmd_cs_change_status(fd, CS_STATE_RESET, 0xff, 0, 0, "RESET");
+    if (rc != 0) goto cleanup;
+    rc = cmd_empty_rpc(fd, OPCODE_CS_CLEAR_CONFIGURED_APPS,
+                       "CLEAR_CONFIGURED_APPS");
+    if (rc != 0) goto cleanup;
+    rc = cmd_empty_rpc(fd, OPCODE_GET_HW_CONSTS, "GET_HW_CONSTS");
+    if (rc != 0) goto cleanup;
+    rc = cmd_set_network_group_header(fd, NG_HEADER_BODY,
+                                      sizeof(NG_HEADER_BODY));
+    if (rc != 0) goto cleanup;
+    rc = cmd_set_context_info(fd, CONTEXT_TYPE_ACTIVATION,
+                              activation, sizeof(activation),
+                              "ACTIVATION");
+    if (rc != 0) goto cleanup;
+    rc = cmd_set_context_info(fd, CONTEXT_TYPE_BATCH_SWITCHING,
+                              BATCH_SWITCHING_BODY,
+                              sizeof(BATCH_SWITCHING_BODY),
+                              "BATCH_SWITCHING");
+    if (rc != 0) goto cleanup;
+    rc = cmd_set_context_info(fd, CONTEXT_TYPE_PRELIMINARY,
+                              preliminary, sizeof(preliminary),
+                              "PRELIMINARY");
+    if (rc != 0) goto cleanup;
+    rc = cmd_set_context_info(fd, CONTEXT_TYPE_DYNAMIC,
+                              dynamic, sizeof(dynamic),
+                              "DYNAMIC");
+    if (rc != 0) goto cleanup;
+    rc = cmd_cs_change_status(fd, CS_STATE_ENABLED, 0, 0, 0, "ENABLED");
+    if (rc != 0) goto cleanup;
+    printf("[6] CS handshake complete — channel 2 should be configured\n");
+
+    /* 7. LAUNCH_TRANSFER on channel 2. */
+    printf("[7] LAUNCH_TRANSFER on channel 2 (boundary input)...\n");
+    rc = hailo_dev_launch_transfer(fd, 2, bnd_in_dh, 0, bnd_in_buf, 784);
+    if (rc < 0) {
+        fprintf(stderr, "[7] LAUNCH_TRANSFER failed: %s\n", strerror(-rc));
+        goto cleanup;
+    }
+    printf("[7] launched\n");
+
+    /* 8. Wait for completion. */
+    uint8_t count = 0;
+    struct hailo_vdma_interrupts_channel_data irqs[8];
+    rc = hailo_dev_interrupts_wait(fd, (1u << 2), 5000, &count, irqs,
+                                   sizeof(irqs)/sizeof(irqs[0]));
+    if (rc == -EINTR) {
+        printf("[8] timeout — fw did NOT advance num_proc on ch=2 "
+               "(this is the #253 reproduction!)\n");
+        rc = 0;
+    } else if (rc < 0) {
+        fprintf(stderr, "[8] INTERRUPTS_WAIT: %s\n", strerror(-rc));
+    } else {
+        printf("[8] %u completion(s):\n", count);
+        for (uint8_t i = 0; i < count; i++) {
+            printf("    engine=%u channel=%u data=0x%02x\n",
+                   irqs[i].engine_index, irqs[i].channel_index,
+                   irqs[i].data);
+        }
+        printf("    *** SLM-OS bytes work end-to-end via hailo_pci ***\n");
+    }
+
+cleanup:
+    if (ch_in_enabled) hailo_dev_disable_channel(fd, 2);
+    if (bnd_out_dh_set) hailo_dev_desc_list_release(fd, bnd_out_dh);
+    if (bnd_in_dh_set)  hailo_dev_desc_list_release(fd, bnd_in_dh);
+    if (ccw_dh_set)     hailo_dev_desc_list_release(fd, ccw_dh);
+    if (bnd_out_mh_set) hailo_dev_buffer_unmap(fd, bnd_out_mh);
+    if (bnd_in_mh_set)  hailo_dev_buffer_unmap(fd, bnd_in_mh);
+    if (ccw_mh_set)     hailo_dev_buffer_unmap(fd, ccw_mh);
+    if (ccw_buf     && ccw_buf     != MAP_FAILED) munmap(ccw_buf,     map_size);
+    if (bnd_in_buf  && bnd_in_buf  != MAP_FAILED) munmap(bnd_in_buf,  map_size);
+    if (bnd_out_buf && bnd_out_buf != MAP_FAILED) munmap(bnd_out_buf, map_size);
+    return rc;
+}
+
 /*
  * --cs-handshake: fire SLM-OS's pre-context-info CS RPCs against a
  * HailoRT-booted Hailo-8L and report each response. Does NOT replay
@@ -555,7 +942,14 @@ static void usage(const char *prog)
         "  --cs-handshake   Fire SLM-OS pre-context-info CS RPCs\n"
         "                   (RESET, CLEAR_CONFIGURED_APPS, GET_HW_CONSTS)\n"
         "                   through HAILO_FW_CONTROL; tests wire format\n"
-        "                   against the official driver path\n",
+        "                   against the official driver path\n"
+        "  --full-handshake Replay SLM-OS's full CS handshake (RESET ->\n"
+        "                   ... -> ENABLED) plus LAUNCH_TRANSFER on\n"
+        "                   channel 2. Patches captured ctxsmoke action\n"
+        "                   bodies with hailo_pci-allocated IOVAs.\n"
+        "                   The decisive #253 bisect: if num_proc\n"
+        "                   advances, SLM-OS bytes are correct end-\n"
+        "                   to-end; the bug is in bare-metal bringup.\n",
         prog);
 }
 
@@ -577,6 +971,8 @@ int main(int argc, char **argv)
         rc = cmd_submit_probe(fd);
     } else if (strcmp(argv[1], "--cs-handshake") == 0) {
         rc = cmd_cs_handshake(fd);
+    } else if (strcmp(argv[1], "--full-handshake") == 0) {
+        rc = cmd_full_handshake(fd);
     } else {
         usage(argv[0]);
     }
