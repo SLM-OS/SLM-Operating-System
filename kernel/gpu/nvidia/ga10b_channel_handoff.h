@@ -18,6 +18,7 @@
 #ifndef GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H
 #define GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Magic value to detect a valid handoff block.
@@ -126,8 +127,8 @@ _Static_assert(sizeof(struct ga10b_channel_handoff) == 192,
  * size assert above but would silently mis-address the kernel-
  * launch state. These catch that; the v2 fields are pinned
  * implicitly by the identical layout on both sides of a v2 helper
- * that only reads up to offset 120. */
-#include <stddef.h>
+ * that only reads up to offset 120. `offsetof` needs <stddef.h>,
+ * included at the top of this header. */
 _Static_assert(offsetof(struct ga10b_channel_handoff, shader_phys)    == 120,
                "v3 shader_phys offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, shader_gpu_va)  == 128,

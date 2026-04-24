@@ -1440,13 +1440,14 @@ static void test_launch_kernel_pb_qmd_shift_at_40bit_boundary(void)
     printf("== test_launch_kernel_pb_qmd_shift_at_40bit_boundary ==\n");
     uint32_t pb[GA10B_LAUNCH_KERNEL_PB_DWORDS];
 
-    /* Exactly (1ULL << 40): the highest VA for which shifted form
-     * fits in the 32-bit PCAS_A_QMD_ADDRESS_SHIFTED8 field.
-     * 0x10000000000ULL >> 8 = 0x100000000, which overflows uint32
-     * by exactly one bit — the truncation drops that bit and pb[11]
-     * reads as zero. Documents the silent-overflow behavior so a
-     * future check added to reject out-of-range QMDs has a
-     * pre-existing test to contradict. */
+    /* Exactly (1ULL << 40): the first VA whose shifted form doesn't
+     * fit in the 32-bit PCAS_A_QMD_ADDRESS_SHIFTED8 field. The
+     * highest VA that DOES fit is (1ULL << 40) - 1; after >> 8 that
+     * becomes 0xFFFFFFFF (32 bits). (1ULL << 40) >> 8 = 0x100000000
+     * overflows uint32 by exactly one bit — the cast to uint32
+     * drops that bit and pb[11] reads as zero. Documents the
+     * silent-overflow behavior so a future check added to reject
+     * out-of-range QMDs has a pre-existing test to contradict. */
     uint64_t qmd_gva = 1ULL << 40;
     ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva);
 
