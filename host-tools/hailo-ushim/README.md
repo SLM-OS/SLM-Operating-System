@@ -35,25 +35,21 @@ This tool lets us:
 
 ## Scope
 
-**Currently implemented (v1, 2026-04-24):**
+**Currently implemented:**
 
-- Open `/dev/hailo0`
-- Issue `HAILO_FW_CONTROL` with the IDENTIFY opcode (`--identify`)
+- `--identify` — Issue `HAILO_FW_CONTROL` IDENTIFY via `/dev/hailo0`.
+  Sanity check that hailo_pci is loaded and the chip is reachable.
+- `--submit-probe` — Replay SLM-OS's boundary-input VDMA descriptor
+  layout (desc_count=64, page_size=512, channel=2, 784-byte buffer)
+  through the official hailo_pci ioctl path. Diagnostic for #253.
 
-**Planned (audit F-10, not yet implemented):**
+**Planned:**
 
-- Allocate DMA buffers via `HAILO_VDMA_BUFFER_MAP` (low + high
-  pools, to A/B-test the F-01 reachability hypothesis)
-- Create desc lists via `HAILO_DESC_LIST_CREATE`
-- Program descriptors via `HAILO_DESC_LIST_PROGRAM`
-- Submit transfers via `HAILO_VDMA_LAUNCH_TRANSFER` and report
-  whether `num_proc` advances (`--submit-probe`)
-
-The submit-probe path would be the fastest A/B oracle for #253 —
-it would let us isolate whether the boundary-input descriptor stall
-is caused by SLM-OS's bare-metal kernel context (not seeing the
-descriptor) or by the bytes themselves (which would also fail when
-submitted through the official `hailo_pci` IOCTLs).
+- Full CS-handshake replay: feed SLM-OS's exact FW_CONTROL sequence
+  (RESET → ACTIVATION → BATCH_SWITCHING → PRELIMINARY → DYNAMIC →
+  ENABLED) through HAILO_FW_CONTROL, THEN submit a boundary transfer
+  with real inference. This would answer definitively whether our
+  context bytes work when fed through libhailort's driver surface.
 
 ## Build
 
@@ -62,15 +58,66 @@ make hailo-ushim
 ```
 
 Produces `build/host-tools/hailo-ushim` — a regular Linux ELF.
+Requires `libcrypto` headers (`apt install libssl-dev`).
+
+**Cross-compilation note:** the default `$(CC)` is the host compiler.
+On an x86-64 dev box the produced ELF is x86-64 and cannot run on
+Pi 5. For pi-5-1 use either:
+
+1. SCP the sources to pi-5-1 (booted to Pi OS) and run `make
+   hailo-ushim` there, or
+2. Cross-compile: `make hailo-ushim CC=aarch64-linux-gnu-gcc` with
+   the matching `-lcrypto` staging sysroot.
+
+Option 1 is simpler for one-off diagnostic runs.
 
 ## Usage
 
 ```bash
-# Identify the board (sanity check that /dev/hailo0 is there)
+# Sanity check — fw must be booted (by HailoRT or the hailortcli
+# run command) before --identify works.
 sudo ./build/host-tools/hailo-ushim --identify
+
+# Diagnostic probe: replay SLM-OS's boundary-input descriptor
+# geometry through the hailo_pci ioctls. No HEF / fw configuration
+# required; the probe tests kernel-side parameter acceptance only.
+sudo ./build/host-tools/hailo-ushim --submit-probe
 ```
 
-`--submit-probe` is not yet implemented (see Scope above).
+### --submit-probe: what it does
+
+Seven-step sequence through the official ioctl surface:
+
+1. `mmap()` a 4 KB userspace buffer (rounded-up from 784 MNIST bytes)
+2. `HAILO_VDMA_BUFFER_MAP` — pin the page, get an IOVA mapping
+3. `HAILO_DESC_LIST_CREATE` — 64 descriptors × 512-byte page, non-
+   circular; matches SLM-OS's `HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE`
+   + `HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT`
+4. `HAILO_DESC_LIST_PROGRAM` — bind the buffer to channel 2 (which
+   is where ACTIVATION opens the boundary input channel)
+5. `HAILO_VDMA_ENABLE_CHANNELS` — arm channel 2
+6. `HAILO_VDMA_LAUNCH_TRANSFER` — the "kick" that writes num_avail
+7. `HAILO_VDMA_INTERRUPTS_WAIT` — 2 s timeout, then the probe
+   assumes fw wasn't configured and reports success if all prior
+   steps accepted parameters.
+
+### Interpreting results
+
+- **Any ioctl rejects a parameter (steps 2-6)** → we've localized a
+  bug in SLM-OS's descriptor geometry that the audit missed. The
+  error message names the offending field.
+- **All ioctls succeed; step 7 times out** → the kernel-side
+  parameter validation is happy with SLM-OS's layout. The #253 bug
+  is **not** in our descriptor geometry — it's deeper (firmware
+  configuration state, or something in our bare-metal MMIO/cache
+  path that the official driver handles differently).
+- **Step 7 reports a completion** → the fw had something listening
+  on channel 2 and our transfer went through. Most likely a leftover
+  from a previous HailoRT run; interpret with care.
+
+The diagnostic value is greatest when the probe produces a
+**decisive signal** (either rejection or timeout). A successful
+transfer is more ambiguous.
 
 Requires:
 - `hailo_pci` kernel module loaded (fine to be the instrumented
