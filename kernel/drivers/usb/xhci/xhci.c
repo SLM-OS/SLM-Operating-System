@@ -1533,6 +1533,7 @@ static uint8_t   xhci_cmd_completion_cc;
 static uint8_t   xhci_cmd_completion_slot;
 static bool      xhci_post_short_noop_pending;
 static uint8_t   xhci_post_short_noop_slot;
+static bool      xhci_verbose_cmd_logs;
 
 static void xhci_dump_event_ring_window(const char *tag)
 {
@@ -1675,7 +1676,7 @@ int xhci_event_ring_drain(void)
                 xhci_cmd_completion_cc   = XHCI_CC_GET(evt.status);
                 xhci_cmd_completion_slot = XHCI_TRB_SLOT_GET(evt.control);
                 xhci_cmd_completed       = true;
-            } else {
+            } else if (xhci_verbose_cmd_logs) {
                 INFO("xhci: stale command completion @0x%lx "
                      "(expected 0x%lx)",
                      (unsigned long)evt_phys,
@@ -1693,8 +1694,10 @@ int xhci_event_ring_drain(void)
         default:
             /* Bandwidth-request, doorbell, host-controller events are
              * informational — log at verbose level for diagnostics. */
-            INFO("xhci: unhandled event type %u (status=0x%08x)",
-                 type, (unsigned)evt.status);
+            if (xhci_verbose_cmd_logs) {
+                INFO("xhci: unhandled event type %u (status=0x%08x)",
+                     type, (unsigned)evt.status);
+            }
             break;
         }
         consumed++;
@@ -1714,7 +1717,8 @@ int xhci_event_ring_drain(void)
             w32(xhci_op_base, XHCI_OP_USBSTS, usbsts_ack);
         if ((iman_before & 0x1u) != 0)
             w32(ir0, XHCI_IR_IMAN, iman_ack);
-        if (usbsts_ack != 0 || (iman_before & 0x1u) != 0) {
+        if (xhci_verbose_cmd_logs &&
+            (usbsts_ack != 0 || (iman_before & 0x1u) != 0)) {
             uint32_t usbsts_after = r32(xhci_op_base, XHCI_OP_USBSTS);
             uint32_t iman_after = r32(ir0, XHCI_IR_IMAN);
             INFO("xhci: event-drain ack consumed=%d USBSTS 0x%08x->0x%08x "
@@ -1754,9 +1758,11 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
     xhci_last_cmd_diag.trb_phys = (uintptr_t)slot;
     xhci_last_cmd_diag.usbsts = r32(xhci_op_base, XHCI_OP_USBSTS);
 
-    xhci_dump_cmd_ring_state("pre-cmd-doorbell", cmd, slot);
+    if (xhci_verbose_cmd_logs)
+        xhci_dump_cmd_ring_state("pre-cmd-doorbell", cmd, slot);
     xhci_ring_doorbell(XHCI_DB_COMMAND, 0);
-    xhci_dump_cmd_ring_state("post-cmd-doorbell", cmd, slot);
+    if (xhci_verbose_cmd_logs)
+        xhci_dump_cmd_ring_state("post-cmd-doorbell", cmd, slot);
 
     uint64_t freq  = timer_get_frequency();
     uint64_t start = timer_get_count();
@@ -1781,7 +1787,8 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
         }
     }
 
-    xhci_dump_cmd_ring_state("cmd-complete", cmd, slot);
+    if (xhci_verbose_cmd_logs)
+        xhci_dump_cmd_ring_state("cmd-complete", cmd, slot);
     xhci_last_cmd_diag.completed = true;
     xhci_last_cmd_diag.timed_out = false;
     xhci_last_cmd_diag.cc = xhci_cmd_completion_cc;
