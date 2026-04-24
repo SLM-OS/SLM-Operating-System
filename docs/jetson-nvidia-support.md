@@ -34,6 +34,18 @@ This document consolidates all findings related to running SLM-OS on the Jetson 
 > The "no GPU compute capability on bare metal" bullet under Solution 5
 > below is therefore outdated for Jetson — it still applies to Pi 5 whose
 > VideoCore GPU has no public bare-metal documentation.
+>
+> **24 April 2026 Update:** Phase 8 scales up beyond the original
+> `write_cafe` scalar store. Three more CUDA-compiled kernels
+> (`scripts/cuda/dot4.cu` — 4-elem dot product, `matmul4x4.cu` —
+> single-thread 4×4 matmul, `matmul4x4_mt.cu` — 16-thread 4×4 matmul)
+> all dispatch SLM-OS-side post-kexec. Handoff v4 adds an
+> `expected_payload` field so `nvgpu launch-kernel` polls for
+> arbitrary values (300, 30, …), not just 0xCAFE. Per-kernel launchers
+> share scaffolding via `scripts/gpu-launch-common.{h,c}`; the
+> multi-threaded matmul is the first to override the default 1×1×1
+> CTA thread dims. All four kernels validated Linux-side and
+> SLM-OS-side on jetson-nano-1.
 
 ---
 

@@ -1538,6 +1538,80 @@ static void test_handoff_v4_layout_size(void)
     REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 200u);
 }
 
+static void test_handoff_v4_expected_payload_offset(void)
+{
+    printf("== test_handoff_v4_expected_payload_offset ==\n");
+    /* Pinned by _Static_assert at compile time but worth surfacing
+     * at runtime: the Linux helper and SLM-OS both byte-index into
+     * the struct; a silent reorder that preserved sizeof would
+     * cause SLM-OS to poll for the wrong value. */
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff,
+                        expected_payload), 192u);
+}
+
+/* --- Payload-selection fallback (v3 → 0xCAFE, v4 → per-kernel) --- */
+
+static void test_pick_launch_payload_v3_uses_fallback(void)
+{
+    printf("== test_pick_launch_payload_v3_uses_fallback ==\n");
+    /* v3 handoffs (pre-matmul era) don't carry expected_payload.
+     * The field is unused memory on the wire, so its value must
+     * not leak into the poll target — the caller-supplied fallback
+     * is the only correct answer. */
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version          = 3;
+    h.expected_payload = 0x12345678u;  /* garbage — must be ignored */
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 0xCAFEu);
+}
+
+static void test_pick_launch_payload_v4_zero_uses_fallback(void)
+{
+    printf("== test_pick_launch_payload_v4_zero_uses_fallback ==\n");
+    /* v4 handoffs where the helper didn't populate expected_payload
+     * (e.g. write_cafe routed through the new code path) must still
+     * poll for the legacy 0xCAFE constant — otherwise the SLM-OS
+     * nvgpu launch-kernel would time out waiting for zero. */
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version          = 4;
+    h.expected_payload = 0u;
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 0xCAFEu);
+}
+
+static void test_pick_launch_payload_v4_uses_field(void)
+{
+    printf("== test_pick_launch_payload_v4_uses_field ==\n");
+    /* The main v4 use case: dot4 sets 300, matmul4x4 sets 30, etc.
+     * Any non-zero value the helper wrote must flow through. */
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version          = 4;
+
+    h.expected_payload = 300u;  /* dot4 */
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 300u);
+
+    h.expected_payload = 30u;   /* matmul4x4 Gram diagonal C[0][0] */
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 30u);
+
+    h.expected_payload = 0xDEADBEEFu;  /* arbitrary non-zero */
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 0xDEADBEEFu);
+}
+
+static void test_pick_launch_payload_future_version_uses_field(void)
+{
+    printf("== test_pick_launch_payload_future_version_uses_field ==\n");
+    /* A v5 handoff that preserves the v4 expected_payload field
+     * (the normal forward-compatible extension pattern) should be
+     * treated like v4: non-zero field takes precedence over the
+     * fallback. The `version >= 4` predicate guarantees this. */
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version          = 5;
+    h.expected_payload = 42u;
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 42u);
+}
+
 static void test_handoff_validate_v3_accepted(void)
 {
     printf("== test_handoff_validate_v3_accepted ==\n");
@@ -1775,6 +1849,11 @@ int main(void)
     test_launch_kernel_pb_uses_ampere_pcas2_b();
 
     test_handoff_v4_layout_size();
+    test_handoff_v4_expected_payload_offset();
+    test_pick_launch_payload_v3_uses_fallback();
+    test_pick_launch_payload_v4_zero_uses_fallback();
+    test_pick_launch_payload_v4_uses_field();
+    test_pick_launch_payload_future_version_uses_field();
     test_handoff_validate_v3_accepted();
 
     test_scanner_finds_magic_at_start();

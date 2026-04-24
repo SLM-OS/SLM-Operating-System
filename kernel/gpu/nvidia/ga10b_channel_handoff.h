@@ -185,4 +185,24 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h);
 uint64_t ga10b_find_handoff_in_range(uint64_t start, uint64_t end,
                                      uint64_t stride);
 
+/*
+ * Pick the poll-target payload for `nvgpu launch-kernel`. v4 handoffs
+ * carry a per-kernel `expected_payload`; v3 (and v4 handoffs where
+ * the field is left zero) fall back to the caller-supplied default.
+ *
+ * `fallback` is typically GA10B_SMOKETEST_SEM_PAYLOAD (0xCAFE from
+ * the write_cafe era) so existing v3 flows keep working even after
+ * SLM-OS was taught to accept v4.
+ *
+ * Pure-logic — no MMIO, host-testable.
+ */
+static inline uint32_t
+ga10b_pick_launch_payload(const struct ga10b_channel_handoff *h,
+                          uint32_t fallback)
+{
+    return (h->version >= 4u && h->expected_payload != 0u)
+           ? h->expected_payload
+           : fallback;
+}
+
 #endif /* GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H */

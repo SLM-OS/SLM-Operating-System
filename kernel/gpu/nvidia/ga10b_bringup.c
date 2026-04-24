@@ -1590,11 +1590,11 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
 
     /* v4 handoffs carry a per-kernel expected payload; v3 handoffs
      * (and v4 handoffs with expected_payload==0) fall back to the
-     * write_cafe constant so existing flows keep working. */
-    uint32_t expected = (g_handoff.version >= 4 &&
-                         g_handoff.expected_payload != 0u)
-                        ? g_handoff.expected_payload
-                        : GA10B_SMOKETEST_SEM_PAYLOAD;
+     * write_cafe constant so existing flows keep working. Predicate
+     * lives in the shared header so host-test can pin the exact
+     * selection rule without re-encoding it. */
+    uint32_t expected = ga10b_pick_launch_payload(&g_handoff,
+                                                  GA10B_SMOKETEST_SEM_PAYLOAD);
     uart_printf("[GA10B-P8]   expected_payload=0x%lx (handoff v%lu)\n",
                 (unsigned long)expected,
                 (unsigned long)g_handoff.version);
