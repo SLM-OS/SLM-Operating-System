@@ -144,9 +144,19 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b);
 /* Phase 6: Channel + pushbuffer allocation. */
 int ga10b_bringup_channel(struct ga10b_bringup *b);
 
-/* Phase 7: Submit NOP + SEMAPHORE_RELEASE as smoke test. Returns 0
- * iff the semaphore is observed at its target VA within timeout. */
+/* Phase 7: Submit host-family SEMAPHORE_RELEASE as smoke test.
+ * Returns 0 iff the semaphore is observed at its target VA within
+ * timeout. PBDMA-decoded; bypasses GR. */
 int ga10b_bringup_smoke_test(struct ga10b_bringup *b);
+
+/* Phase 7 (compute variant): submit AMPERE_COMPUTE_B-class
+ * SEMAPHORE_RELEASE. Same success criterion. Validates that the GR
+ * engine's compute pipeline accepts method dispatch on the inherited
+ * channel — a prerequisite for future QMD-based compute kernel
+ * dispatch. Unblocked by PR #295 (method-header encoding fix); the
+ * earlier MME_FE1 blocker (#291) was a symptom of the broken
+ * encoding, not a missing MME init. */
+int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b);
 
 /* Size of the Phase 7 SEMAPHORE_RELEASE pushbuffer in dwords. */
 #define GA10B_SEMA_RELEASE_PB_DWORDS  10u

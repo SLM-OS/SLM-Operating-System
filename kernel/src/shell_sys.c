@@ -2788,9 +2788,19 @@ int cmd_nvgpu(int argc, char *argv[])
         shell_printf("submit: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
+    if (strcmp(argv[1], "submit-compute") == 0) {
+        /* Phase 7 (compute): COMPUTE_B SEMAPHORE_RELEASE smoke test.
+         * Requires `nvgpu inherit` + `nvgpu channel` first (same as
+         * the host-family `submit`). Unblocked by PR #295. */
+        int rc = ga10b_bringup_smoke_test_compute(&b);
+        shell_printf("submit-compute: rc=%d, state=%d\r\n",
+                     rc, (int)b.state);
+        return rc;
+    }
 
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
-              "channel | submit | fecs | gpccs | pmu | run]\r\n");
+              "channel | submit | submit-compute | fecs | gpccs | "
+              "pmu | run]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
