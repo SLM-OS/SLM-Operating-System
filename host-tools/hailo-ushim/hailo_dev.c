@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>  /* setitimer for the interrupts_wait timeout */
 #include <unistd.h>
 
 int hailo_dev_buffer_map(int fd,
@@ -182,26 +183,46 @@ int hailo_dev_interrupts_wait(int fd,
     memset(&p, 0, sizeof(p));
     p.channels_bitmap_per_engine[0] = channel_bitmap;
 
-    /* Install a one-shot SIGALRM handler so the ioctl returns -EINTR
-     * when the timeout elapses. Save + restore the previous handler
-     * to avoid clobbering any outer setup. */
+    /* Install a SIGALRM handler that interrupts the blocking ioctl.
+     * Save + restore the previous handler so we don't clobber
+     * caller signal setup. */
     struct sigaction sa, old_sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = alarm_noop;
     sigaction(SIGALRM, &sa, &old_sa);
 
-    /* Translate timeout_ms into setitimer ticks — alarm() has 1 s
-     * granularity, which is fine for a diagnostic probe. Round up
-     * so 0 < timeout_ms < 1000 still produces a 1 s ceiling. */
-    unsigned seconds = (timeout_ms + 999u) / 1000u;
-    if (seconds == 0) seconds = 1;
-    alarm(seconds);
+    /* Use setitimer(ITIMER_REAL) rather than alarm() for two reasons:
+     *   1. Millisecond granularity (alarm() is 1 s integer seconds).
+     *   2. Periodic re-fire defeats the signal-race hang: if the
+     *      very first SIGALRM arrives in the tiny window between
+     *      setitimer() returning and the ioctl entering the kernel,
+     *      the handler no-ops and the ioctl starts blocking. The
+     *      periodic it_interval retries at ~timeout_ms/4 so a
+     *      missed first signal is picked up on the next tick;
+     *      total wait stays within [timeout_ms, 1.25 * timeout_ms].
+     *
+     * This is a userspace diagnostic tool: we'd rather pay a tiny
+     * worst-case overshoot than risk a silent hang that needs
+     * Ctrl-C or a fresh SSH session to recover from. */
+    struct itimerval it = {0}, old_it = {0};
+    uint32_t clamped_ms = timeout_ms > 0 ? timeout_ms : 1u;
+    it.it_value.tv_sec   = (time_t)(clamped_ms / 1000u);
+    it.it_value.tv_usec  = (suseconds_t)((clamped_ms % 1000u) * 1000u);
+    uint32_t retry_ms    = clamped_ms / 4u;
+    if (retry_ms == 0) retry_ms = 1u;
+    it.it_interval.tv_sec  = (time_t)(retry_ms / 1000u);
+    it.it_interval.tv_usec = (suseconds_t)((retry_ms % 1000u) * 1000u);
+    setitimer(ITIMER_REAL, &it, &old_it);
 
     int rc = ioctl(fd, HAILO_VDMA_INTERRUPTS_WAIT, &p);
     int saved_errno = errno;
 
-    alarm(0);                               /* cancel pending alarm */
-    sigaction(SIGALRM, &old_sa, NULL);      /* restore prior handler */
+    /* Disarm the timer and restore the caller's state before we
+     * return, regardless of ioctl outcome. */
+    struct itimerval stop = {0};
+    setitimer(ITIMER_REAL, &stop, NULL);
+    setitimer(ITIMER_REAL, &old_it, NULL);
+    sigaction(SIGALRM, &old_sa, NULL);
 
     if (rc < 0) {
         errno = saved_errno;

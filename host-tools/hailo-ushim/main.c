@@ -177,6 +177,12 @@ static int cmd_submit_probe(int fd)
     uintptr_t desc_handle = 0;
     uint64_t  list_iova = 0;
     bool channel_enabled = false;
+    /* Track allocation explicitly rather than checking `handle != 0`.
+     * The Hailo kernel driver's handles are slab-pointer-backed and
+     * never zero in practice, but a defensive flag keeps the cleanup
+     * guard unambiguous. */
+    bool mapped_handle_set = false;
+    bool desc_handle_set   = false;
 
     printf("=== submit-probe: SLM-OS boundary-input layout via hailo_pci ioctls ===\n");
     printf("channel=%u desc_count=%u page_size=%u buffer_bytes=%u\n",
@@ -212,6 +218,7 @@ static int cmd_submit_probe(int fd)
                 strerror(-rc));
         goto cleanup;
     }
+    mapped_handle_set = true;
     printf("[2] mapped_handle=0x%lx\n", (unsigned long)mapped_handle);
 
     /* 3. DESC_LIST_CREATE — driver picks a 64 KB-aligned backing
@@ -225,6 +232,7 @@ static int cmd_submit_probe(int fd)
                 strerror(-rc));
         goto cleanup;
     }
+    desc_handle_set = true;
     printf("[3] desc_handle=0x%lx list_iova=0x%lx\n",
            (unsigned long)desc_handle, (unsigned long)list_iova);
     if ((list_iova & 0xFFFF) != 0) {
@@ -319,12 +327,12 @@ cleanup:
         if (drc < 0) fprintf(stderr, "cleanup: disable_channel: %s\n",
                              strerror(-drc));
     }
-    if (desc_handle) {
+    if (desc_handle_set) {
         int drc = hailo_dev_desc_list_release(fd, desc_handle);
         if (drc < 0) fprintf(stderr, "cleanup: desc_list_release: %s\n",
                              strerror(-drc));
     }
-    if (mapped_handle) {
+    if (mapped_handle_set) {
         int drc = hailo_dev_buffer_unmap(fd, mapped_handle);
         if (drc < 0) fprintf(stderr, "cleanup: buffer_unmap: %s\n",
                              strerror(-drc));
