@@ -357,10 +357,18 @@ static void *pi5_dma_alloc_common(size_t size, size_t align,
     /* Per-allocation address trace (F-01): every Hailo DMA buffer's
      * (phys, iova, tag) is logged so a hardware capture can show
      * exactly which DMA objects landed where, and whether the
-     * "low" tag is being honored end-to-end. */
-    INFO("hailo: dma_alloc%s phys=0x%lx iova=0x%llx pages=%lu align=%lu",
+     * "low" tag is being honored end-to-end.
+     *
+     * Format strings use %lx (not %llx) because SLM-OS's
+     * uart_printf only supports the `l` length modifier; `ll` gets
+     * parsed as unknown, consuming arguments out of position. On
+     * ARM64 `unsigned long` is 64-bit so %lx handles the full iova.
+     * Fix pushed on top of PR #355 after hardware capture on pi-5-1
+     * showed the original %llx format printing literal "%lx" in
+     * the IOVA field. */
+    INFO("hailo: dma_alloc%s phys=0x%lx iova=0x%lx pages=%lu align=%lu",
          low_bias ? "_low" : "", (unsigned long)phys,
-         (unsigned long long)iova,
+         (unsigned long)iova,
          (unsigned long)pages, (unsigned long)align);
     return va;
 }
