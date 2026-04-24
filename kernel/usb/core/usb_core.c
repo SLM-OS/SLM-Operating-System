@@ -51,11 +51,11 @@ static bool                  usb_probe_hub_noop = false;
 static bool                  usb_probe_hub_reprime_ep0 = false;
 static bool                  usb_probe_hub_post_config_device_desc = false;
 static bool                  usb_probe_hub_get_status = false;
-static bool                  usb_probe_disable_hotplug_retry_after_failure = true;
+static bool                  usb_disable_hotplug_retry_after_failure = true;
 static bool                  usb_probe_child_noop_before_close = false;
 static bool                  usb_child_address_sync_bsr0 = true;
-static bool                  usb_probe_child_initial_desc_bounce = true;
-static bool                  usb_probe_child_followup_desc_bounce = true;
+static bool                  usb_child_initial_desc_bounce = true;
+static bool                  usb_child_followup_desc_bounce = true;
 static bool                  usb_hotplug_retry_blocked;
 static bool                  usb_hotplug_retry_blocked_logged;
 static uint8_t              *usb_retained_desc_bounce;
@@ -543,7 +543,7 @@ int usb_core_hotplug_poll(void)
     int rc = usb_core_enumerate();
     if (rc != 0) {
         WARN("usb_core: hotplug enumerate failed rc=%d", rc);
-        if (usb_probe_disable_hotplug_retry_after_failure) {
+        if (usb_disable_hotplug_retry_after_failure) {
             usb_hotplug_retry_blocked = true;
             usb_hotplug_retry_blocked_logged = false;
         }
@@ -1041,14 +1041,14 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
                      (unsigned long)(uintptr_t)dd_stub_buf,
                      (unsigned)initial_desc_len);
             }
-        } else if (usb_probe_child_initial_desc_bounce &&
+        } else if (usb_child_initial_desc_bounce &&
                    dev->route_string != 0) {
             uint8_t *bounce = usb_get_retained_desc_bounce(initial_desc_len);
-            usb_probe_child_initial_desc_bounce = false;
+            usb_child_initial_desc_bounce = false;
             if (bounce != NULL) {
                 memset(bounce, 0, initial_desc_len);
                 dd_stub_buf = bounce;
-                INFO("usb_core: probing NC bounce for child initial descriptor "
+                INFO("usb_core: using NC bounce for child initial descriptor "
                      "buf=0x%lx len=%u route=0x%x root_port=%u",
                      (unsigned long)(uintptr_t)dd_stub_buf,
                      (unsigned)initial_desc_len,
@@ -1097,6 +1097,9 @@ got_initial_descriptor:
 #if defined(PLATFORM_JETSON_ORIN_NANO)
         if (usb_child_address_sync_bsr0 && dev->route_string != 0) {
             usb_child_address_sync_bsr0 = false;
+            /* Fresh child slots need one live ADDRESS_DEVICE(BSR=0) sync
+             * before follow-up control traffic and endpoint configure become
+             * reliable on the inherited Jetson xHCI handoff path. */
             int addr_rc = xhci_sync_child_address_bsr0(dev);
             INFO("usb_core: child ADDRESS_DEVICE(BSR=0) sync after initial "
                  "descriptor rc=%d route=0x%x root_port=%u target=%u",
@@ -1158,12 +1161,12 @@ address_assigned:
             }
         } else {
             struct usb_device_descriptor *dd_full_buf = &dev->dev_desc;
-            if (usb_probe_child_followup_desc_bounce && dev->route_string != 0) {
+            if (usb_child_followup_desc_bounce && dev->route_string != 0) {
                 uint8_t *bounce = usb_get_retained_desc_bounce(sizeof(dev->dev_desc));
                 if (bounce != NULL) {
                     memset(bounce, 0, sizeof(dev->dev_desc));
                     dd_full_buf = (struct usb_device_descriptor *)bounce;
-                    INFO("usb_core: probing NC bounce for child full device descriptor "
+                    INFO("usb_core: using NC bounce for child full device descriptor "
                          "buf=0x%lx len=%u route=0x%x root_port=%u",
                          (unsigned long)(uintptr_t)dd_full_buf,
                          (unsigned)sizeof(dev->dev_desc),
@@ -1423,7 +1426,7 @@ int usb_core_enumerate(void)
 
     int rc = usb_enumerate_one(&root_device, true);
     if (rc != 0) {
-        if (usb_probe_disable_hotplug_retry_after_failure) {
+        if (usb_disable_hotplug_retry_after_failure) {
             usb_hotplug_retry_blocked = true;
             usb_hotplug_retry_blocked_logged = false;
         }
@@ -1443,7 +1446,7 @@ int usb_core_enumerate(void)
     rc = usb_try_enumerate_via_hub(&hub_device);
     if (rc == 0)
         usb_hotplug_retry_blocked = false;
-    else if (usb_probe_disable_hotplug_retry_after_failure)
+    else if (usb_disable_hotplug_retry_after_failure)
         usb_hotplug_retry_blocked = true;
     return rc;
 }

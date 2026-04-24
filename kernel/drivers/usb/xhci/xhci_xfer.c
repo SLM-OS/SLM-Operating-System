@@ -69,6 +69,8 @@ static struct xhci_urb_slot xhci_urbs[XHCI_MAX_INFLIGHT_URBS];
 static bool xhci_verbose_ctrl_logs = false;
 static bool xhci_probe_advance_adopted_devctx_after_first_short = false;
 static bool xhci_probe_switch_adopted_dcbaa_after_first_short = false;
+/* Fresh routed child slots need one deferred NO_OP after the first short
+ * device-descriptor completion or later command/control progress stalls. */
 static bool xhci_child_post_short_noop = true;
 static bool xhci_probe_force_status_in_on_adopted_in_control = false;
 static bool xhci_probe_force_status_out_on_first_set_address = false;
