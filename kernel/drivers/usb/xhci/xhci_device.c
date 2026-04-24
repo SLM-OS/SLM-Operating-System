@@ -84,6 +84,8 @@ static struct xhci_device xhci_dev_pool[2];
 static struct xhci_ring xhci_ring_pool[XHCI_DEV_MAX_RINGS];
 static bool             xhci_ring_in_use[XHCI_DEV_MAX_RINGS];
 static bool             xhci_probe_adopt_inherited_slot3 = true;
+static bool             xhci_probe_reset_ep_on_adopt_slot3 = true;
+static bool             xhci_probe_configure_ep0_on_adopt_slot3 = true;
 static bool             xhci_probe_force_freshslot_fullspeed = false;
 static bool             xhci_probe_freshslot_configure_ep0 = false;
 static bool             xhci_probe_fullspeed_power_cycle = true;
@@ -812,6 +814,11 @@ void xhci_dump_device_state(void)
 {
     bool cz = xhci_caps_cached.ctx_64;
 
+    uart_printf("  inherited slot3: raw_devctx=0x%lx cpu_devctx=0x%lx dcbaa[3]=0x%llx\r\n",
+                (unsigned long)xhci_inherited_slot3_devctx_raw_phys,
+                (unsigned long)xhci_inherited_slot3_devctx_phys,
+                (unsigned long long)xhci_dcbaa[3]);
+
     for (unsigned i = 0; i < sizeof(xhci_dev_pool) / sizeof(xhci_dev_pool[0]); i++) {
         struct xhci_device *d = &xhci_dev_pool[i];
         if (!d->valid)
@@ -1176,6 +1183,7 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
      * the first default-address control transfer.
      */
     const uint8_t slot = 3;
+    uintptr_t controller_devctx_phys = xhci_inherited_slot3_devctx_raw_phys;
     struct xhci_trb cmd = {0};
     uint8_t cc = 0;
 
@@ -1187,6 +1195,21 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
         WARN("xhci: adopt slot %u STOP_EP(ep0) cc=%u",
              (unsigned)slot, (unsigned)cc);
         return -1;
+    }
+
+    if (xhci_probe_reset_ep_on_adopt_slot3) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_RESET_EP) |
+                      ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                      ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+        if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) == 0) {
+            INFO("xhci: adopt slot %u RESET_EP(ep0) cc=%u",
+                 (unsigned)slot, (unsigned)cc);
+        } else {
+            WARN("xhci: adopt slot %u RESET_EP(ep0) transport failed",
+                 (unsigned)slot);
+        }
+        xhci_probe_reset_ep_on_adopt_slot3 = false;
     }
 
     memset(&cmd, 0, sizeof(cmd));
@@ -1215,48 +1238,95 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
     d->slot_id = slot;
     d->ep_rings[XHCI_DCI_EP0] = ep0;
     d->adopted_inherited = true;
-    if (xhci_inherited_slot3_devctx_phys == 0 && d->dev_ctx != NULL) {
+    if (d->dev_ctx != NULL) {
         bool cz = xhci_caps_cached.ctx_64;
-        uint32_t speed_id = xhci_speed_to_id(dev->speed);
         uint32_t *s0 = xhci_dev_slot_dw(d->dev_ctx, 0);
         uint32_t *s1 = xhci_dev_slot_dw(d->dev_ctx, 1);
+        uint32_t *s2 = xhci_dev_slot_dw(d->dev_ctx, 2);
         uint32_t *s3 = xhci_dev_slot_dw(d->dev_ctx, 3);
-        uint32_t *e0 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
-        uint32_t *e1 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
-        uint32_t *e2 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
-        uint32_t *e3 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
-        uint32_t *e4 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 4, cz);
+        uint32_t ep_dw_count = cz ? 8u : 4u;
 
         memset(d->dev_ctx, 0, xhci_ctx_dev_bytes(cz));
-        *s0 = (dev->route_string & XHCI_SLOT_DW0_ROUTE_MASK) |
-              (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
-              (7U << XHCI_SLOT_DW0_CTXENT_SHIFT);
+        if (xhci_inherited_slot3_ctx_valid) {
+            for (unsigned i = 0; i < 4; i++)
+                *xhci_dev_slot_dw(d->dev_ctx, i) = xhci_inherited_slot3_slot_ctx_dw[i];
+            for (unsigned i = 0; i < ep_dw_count; i++)
+                *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, i, cz) =
+                    xhci_inherited_slot3_ep0_ctx_dw[i];
+            *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz) =
+                (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+            *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz) =
+                (uint32_t)(ep0->phys >> 32);
+            INFO("xhci: adopt slot %u copied local devctx mirror from handoff "
+                 "and patched EP0 tr=0x%lx",
+                 (unsigned)slot,
+                 (unsigned long)ep0->phys);
+        } else {
+            uint32_t speed_id = xhci_speed_to_id(dev->speed);
+            uint32_t *e0 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
+            uint32_t *e1 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
+            uint32_t *e2 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+            uint32_t *e3 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+            uint32_t *e4 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 4, cz);
+
+            *s0 = (dev->route_string & XHCI_SLOT_DW0_ROUTE_MASK) |
+                  (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
+                  (7U << XHCI_SLOT_DW0_CTXENT_SHIFT);
+            *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
+            *s3 = ((uint32_t)slot & XHCI_SLOT_DW3_ADDR_MASK) |
+                  (3U << XHCI_SLOT_DW3_STATE_SHIFT); /* configured */
+            *e0 = 1U; /* running */
+            *e1 = (3U << XHCI_EP_DW1_CERR_SHIFT) |
+                  (XHCI_EP_TYPE_CONTROL << XHCI_EP_DW1_EPTYPE_SHIFT) |
+                  ((uint32_t)xhci_ep0_max_packet(dev->speed) << XHCI_EP_DW1_MAXPKT_SHIFT);
+            *e2 = (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+            *e3 = (uint32_t)(ep0->phys >> 32);
+            *e4 = 0;
+            INFO("xhci: adopt slot %u seeded local devctx mirror route=0x%x speed=%u root=%u addr=%u state=configured tr=0x%lx",
+                 (unsigned)slot,
+                 (unsigned)dev->route_string,
+                 (unsigned)dev->speed,
+                 (unsigned)d->root_port,
+                 (unsigned)slot,
+                 (unsigned long)ep0->phys);
+        }
         *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
-        *s3 = ((uint32_t)slot & XHCI_SLOT_DW3_ADDR_MASK) |
-              (3U << XHCI_SLOT_DW3_STATE_SHIFT); /* configured */
-        *e0 = 1U; /* running */
-        *e1 = (3U << XHCI_EP_DW1_CERR_SHIFT) |
-              (XHCI_EP_TYPE_CONTROL << XHCI_EP_DW1_EPTYPE_SHIFT) |
-              ((uint32_t)xhci_ep0_max_packet(dev->speed) << XHCI_EP_DW1_MAXPKT_SHIFT);
-        *e2 = (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
-        *e3 = (uint32_t)(ep0->phys >> 32);
-        *e4 = 0;
-        INFO("xhci: adopt slot %u seeded local devctx mirror route=0x%x speed=%u root=%u addr=%u state=configured tr=0x%lx",
-             (unsigned)slot,
-             (unsigned)dev->route_string,
-             (unsigned)dev->speed,
-             (unsigned)d->root_port,
-             (unsigned)slot,
-             (unsigned long)ep0->phys);
+        *s2 = 0;
+        *s3 = ((uint32_t)(*s3 & ~XHCI_SLOT_DW3_ADDR_MASK) |
+               ((uint32_t)slot & XHCI_SLOT_DW3_ADDR_MASK));
+        *s3 = ((*s3 & ~XHCI_SLOT_DW3_STATE_MASK) |
+               (3U << XHCI_SLOT_DW3_STATE_SHIFT));
     }
-    xhci_dcbaa[slot] = (uint64_t)d->dev_ctx_phys;
+    if (controller_devctx_phys == 0)
+        controller_devctx_phys = d->dev_ctx_phys;
+    xhci_dcbaa[slot] = (uint64_t)controller_devctx_phys;
     dsb(sy);
+
+    if (xhci_probe_configure_ep0_on_adopt_slot3) {
+        xhci_build_input_ctx_for_address(d, dev, ep0->phys);
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
+        cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
+        cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_CONFIGURE_EP) |
+                      ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+        if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
+            WARN("xhci: adopt slot %u CONFIGURE_ENDPOINT(ep0) transport failed",
+                 (unsigned)slot);
+        } else {
+            INFO("xhci: adopt slot %u CONFIGURE_ENDPOINT(ep0) cc=%u",
+                 (unsigned)slot, (unsigned)cc);
+        }
+        xhci_probe_configure_ep0_on_adopt_slot3 = false;
+    }
+
     xhci_probe_adopt_inherited_slot3 = false;
     INFO("xhci: adopted inherited slot %u for full-speed root device "
-         "(root_port=%u ring=0x%lx devctx=0x%lx via on-demand SET_TR_DEQ)",
+         "(root_port=%u ring=0x%lx devctx=0x%lx controller_devctx=0x%lx via on-demand SET_TR_DEQ)",
          (unsigned)slot, (unsigned)d->root_port,
          (unsigned long)ep0->phys,
-         (unsigned long)d->dev_ctx_phys);
+         (unsigned long)d->dev_ctx_phys,
+         (unsigned long)controller_devctx_phys);
     return 0;
 }
 

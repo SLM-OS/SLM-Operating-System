@@ -66,7 +66,8 @@ struct xhci_urb_slot {
 };
 
 static struct xhci_urb_slot xhci_urbs[XHCI_MAX_INFLIGHT_URBS];
-static bool xhci_probe_advance_adopted_devctx_after_first_short = true;
+static bool xhci_probe_advance_adopted_devctx_after_first_short = false;
+static bool xhci_probe_switch_adopted_dcbaa_after_first_short = false;
 static bool xhci_probe_noop_after_first_short = true;
 
 static struct xhci_urb_slot *xhci_urb_slot_alloc(void)
@@ -624,6 +625,24 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
         }
     }
 
+    if (xhci_probe_switch_adopted_dcbaa_after_first_short &&
+        urb->transfer_type == USB_XFER_CONTROL &&
+        cc == XHCI_CC_SHORT_PACKET &&
+        trb_phys == slot->data_trb_phys) {
+        struct xhci_device *d = (struct xhci_device *)urb->dev->hcd_private;
+        if (d != NULL && d->adopted_inherited && d->slot_id != 0 &&
+            d->dev_ctx_phys != 0) {
+            uint8_t adopted_slot = d->slot_id;
+            xhci_dcbaa[adopted_slot] = (uint64_t)d->dev_ctx_phys;
+            dsb(sy);
+            xhci_probe_switch_adopted_dcbaa_after_first_short = false;
+            INFO("xhci: switched adopted slot %u DCBAA to local devctx mirror "
+                 "after first short packet (0x%lx)",
+                 (unsigned)adopted_slot,
+                 (unsigned long)d->dev_ctx_phys);
+        }
+    }
+
     if (xhci_probe_noop_after_first_short &&
         urb->transfer_type == USB_XFER_CONTROL &&
         cc == XHCI_CC_SHORT_PACKET &&
@@ -672,6 +691,18 @@ int xhci_hcd_cancel_urb(struct usb_urb *urb)
     if (slot == NULL) {
         /* Already completed or never submitted. */
         return 0;
+    }
+    if (urb->transfer_type == USB_XFER_CONTROL && urb->dev != NULL) {
+        struct xhci_device *d = (struct xhci_device *)urb->dev->hcd_private;
+        if (d != NULL && d->adopted_inherited) {
+            INFO("xhci: cancel_urb on adopted control slot=%u req=0x%02x len=%u trb=0x%lx",
+                 (unsigned)d->slot_id,
+                 (unsigned)urb->setup.bRequest,
+                 (unsigned)urb->length,
+                 (unsigned long)slot->last_trb_phys);
+            xhci_dump_runtime_state_slot("cancel-adopted", d->slot_id);
+            xhci_dump_device_state();
+        }
     }
     urb->status       = USB_URB_CANCELLED;
     urb->hcd_private  = NULL;

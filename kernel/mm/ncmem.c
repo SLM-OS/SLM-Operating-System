@@ -20,7 +20,8 @@ static size_t nc_total_allocated;
 
 void ncmem_init(void)
 {
-    nc_next_free = NC_MEM_BASE;
+    /* Reserve the first page for Linux -> SLM-OS handoff blocks. */
+    nc_next_free = NC_MEM_BASE + 0x1000;
     nc_total_allocated = 0;
 
     /* Don't zero entire 2MB region — callers zero their allocations.

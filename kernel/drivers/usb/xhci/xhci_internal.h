@@ -68,6 +68,10 @@ extern struct xhci_ring        xhci_cmd_ring;
 extern struct xhci_event_ring  xhci_evt_ring;
 extern uint64_t               *xhci_dcbaa;
 extern uintptr_t               xhci_inherited_slot3_devctx_phys;
+extern uintptr_t               xhci_inherited_slot3_devctx_raw_phys;
+extern bool                    xhci_inherited_slot3_ctx_valid;
+extern uint32_t                xhci_inherited_slot3_slot_ctx_dw[4];
+extern uint32_t                xhci_inherited_slot3_ep0_ctx_dw[8];
 
 /* -------------------------------------------------------------------------- */
 /* Low-level MMIO helpers exported by xhci.c                                   */

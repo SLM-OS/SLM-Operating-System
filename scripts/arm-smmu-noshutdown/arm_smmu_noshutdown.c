@@ -34,11 +34,158 @@
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/iommu.h>
+#include <linux/io.h>
+#include <linux/moduleparam.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
+#include <linux/version.h>
 
 #include "arm_smmu_noshutdown.h"
 
 static bool iommu_mapping_added;
+static char xhci_slot3_handoff_param[512];
+
+static int arm_smmu_noshutdown_param_get_slot3_handoff(char *buffer,
+                                                       const struct kernel_param *kp)
+{
+    return scnprintf(buffer, PAGE_SIZE, "%s", xhci_slot3_handoff_param);
+}
+
+static void arm_smmu_noshutdown_clear_slot3_handoff(void)
+{
+    void __iomem *handoff;
+
+    handoff = ioremap_wc(SLMOS_XHCI_SLOT3_HANDOFF_PHYS,
+                         sizeof(struct slmos_xhci_slot3_handoff));
+    if (!handoff) {
+        pr_warn("arm-smmu-noshutdown: failed to map slot3 handoff block at 0x%lx for clear\n",
+                SLMOS_XHCI_SLOT3_HANDOFF_PHYS);
+        return;
+    }
+
+    memset_io(handoff, 0, sizeof(struct slmos_xhci_slot3_handoff));
+    wmb();
+    iounmap(handoff);
+}
+
+static int arm_smmu_noshutdown_write_slot3_handoff(u64 dcbaap,
+                                                   u64 devctx_phys,
+                                                   u64 ep0_deq_phys,
+                                                   u32 root_port,
+                                                   const u32 slot_ctx_dw[4],
+                                                   const u32 ep0_ctx_dw[8])
+{
+    struct slmos_xhci_slot3_handoff block = {
+        .magic = SLMOS_XHCI_SLOT3_HANDOFF_MAGIC,
+        .version = SLMOS_XHCI_SLOT3_HANDOFF_VER,
+        .slot_id = 3,
+        .root_port = root_port,
+        .dcbaap = dcbaap,
+        .devctx_phys = devctx_phys,
+        .ep0_deq_phys = ep0_deq_phys,
+    };
+    struct slmos_xhci_slot3_handoff verify;
+    void __iomem *handoff;
+
+    memcpy(block.slot_ctx_dw, slot_ctx_dw, sizeof(block.slot_ctx_dw));
+    memcpy(block.ep0_ctx_dw, ep0_ctx_dw, sizeof(block.ep0_ctx_dw));
+
+    handoff = ioremap_wc(SLMOS_XHCI_SLOT3_HANDOFF_PHYS, sizeof(block));
+    if (!handoff) {
+        pr_warn("arm-smmu-noshutdown: failed to map slot3 handoff block at 0x%lx for write\n",
+                SLMOS_XHCI_SLOT3_HANDOFF_PHYS);
+        return -ENOMEM;
+    }
+
+    memcpy_toio(handoff, &block, sizeof(block));
+    wmb();
+
+    memset(&verify, 0, sizeof(verify));
+    memcpy_fromio(&verify, handoff, sizeof(verify));
+    iounmap(handoff);
+
+    pr_info("arm-smmu-noshutdown: wrote xhci slot3 handoff dcbaap=0x%016llx devctx=0x%016llx ep0_deq=0x%016llx root=%u slot_dw3=0x%08x ep0_dw2=0x%08x ep0_dw3=0x%08x verify_slot_dw3=0x%08x verify_ep0_dw2=0x%08x verify_ep0_dw3=0x%08x\n",
+            dcbaap, devctx_phys, ep0_deq_phys, root_port,
+            block.slot_ctx_dw[3], block.ep0_ctx_dw[2], block.ep0_ctx_dw[3],
+            verify.slot_ctx_dw[3], verify.ep0_ctx_dw[2], verify.ep0_ctx_dw[3]);
+    return 0;
+}
+
+static int arm_smmu_noshutdown_param_set_slot3_handoff(const char *val,
+                                                       const struct kernel_param *kp)
+{
+    u64 values[16];
+    u32 slot_ctx_dw[4];
+    u32 ep0_ctx_dw[8];
+    u64 dcbaap, devctx_phys, ep0_deq_phys;
+    u32 root_port;
+    char *dup, *p, *tok;
+    size_t i;
+    size_t count = 0;
+    int rc;
+
+    if (sysfs_streq(val, "clear")) {
+        strscpy(xhci_slot3_handoff_param, "clear",
+                sizeof(xhci_slot3_handoff_param));
+        arm_smmu_noshutdown_clear_slot3_handoff();
+        pr_info("arm-smmu-noshutdown: cleared xhci slot3 handoff block\n");
+        return 0;
+    }
+
+    dup = kstrdup(val, GFP_KERNEL);
+    if (!dup)
+        return -ENOMEM;
+
+    p = dup;
+    while ((tok = strsep(&p, ",")) != NULL) {
+        if (*tok == '\0')
+            continue;
+        if (count >= ARRAY_SIZE(values)) {
+            kfree(dup);
+            return -EINVAL;
+        }
+        rc = kstrtoull(tok, 0, &values[count]);
+        if (rc) {
+            kfree(dup);
+            return rc;
+        }
+        count++;
+    }
+    kfree(dup);
+
+    if (count != 16)
+        return -EINVAL;
+
+    dcbaap = values[0];
+    devctx_phys = values[1];
+    ep0_deq_phys = values[2];
+    root_port = (u32)values[3];
+    for (i = 0; i < ARRAY_SIZE(slot_ctx_dw); i++)
+        slot_ctx_dw[i] = (u32)values[4 + i];
+    for (i = 0; i < ARRAY_SIZE(ep0_ctx_dw); i++)
+        ep0_ctx_dw[i] = (u32)values[8 + i];
+
+    rc = arm_smmu_noshutdown_write_slot3_handoff(dcbaap, devctx_phys,
+                                                 ep0_deq_phys, root_port,
+                                                 slot_ctx_dw, ep0_ctx_dw);
+    if (rc)
+        return rc;
+
+    strscpy(xhci_slot3_handoff_param, val, sizeof(xhci_slot3_handoff_param));
+    return 0;
+}
+
+static const struct kernel_param_ops arm_smmu_noshutdown_slot3_handoff_ops = {
+    .set = arm_smmu_noshutdown_param_set_slot3_handoff,
+    .get = arm_smmu_noshutdown_param_get_slot3_handoff,
+};
+
+module_param_cb(xhci_slot3_handoff,
+                &arm_smmu_noshutdown_slot3_handoff_ops,
+                &xhci_slot3_handoff_param,
+                0600);
+MODULE_PARM_DESC(xhci_slot3_handoff,
+                 "CSV dcbaap,devctx_phys,ep0_deq_phys,root_port for the retained xHCI slot-3 handoff block, or 'clear'");
 
 /*
  * Ask Linux's iommu subsystem to add an identity mapping for SLM-OS's
@@ -79,8 +226,13 @@ static int arm_smmu_noshutdown_map_slmos_region(void)
             domain->type, IOMMU_DOMAIN_DMA, IOMMU_DOMAIN_IDENTITY,
             IOMMU_DOMAIN_UNMANAGED);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+    rc = iommu_map(domain, SLMOS_NC_BASE, SLMOS_NC_BASE, SLMOS_NC_SIZE,
+                   IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
+#else
     rc = iommu_map(domain, SLMOS_NC_BASE, SLMOS_NC_BASE, SLMOS_NC_SIZE,
                    IOMMU_READ | IOMMU_WRITE);
+#endif
     if (rc) {
         pr_warn("arm-smmu-noshutdown: iommu_map(IOVA=0x%lx PA=0x%lx "
                 "size=0x%lx) failed: %d\n",
@@ -132,6 +284,7 @@ static int __init arm_smmu_noshutdown_init(void)
      * we still want the shutdown-suppression half of the fix to take
      * effect, and the failure mode is observable in dmesg. */
     (void)arm_smmu_noshutdown_map_slmos_region();
+    arm_smmu_noshutdown_clear_slot3_handoff();
 
     return 0;
 }

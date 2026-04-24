@@ -67,6 +67,7 @@ NO_GPU_SUSPEND=0
 NO_USB_HOLD=0
 NO_SMMU_FIX=0
 KERNEL=""
+XHCI_SLOT3_HANDOFF_PAYLOAD=""
 for arg in "$@"; do
     case "$arg" in
         --no-gpu-suspend) NO_GPU_SUSPEND=1 ;;
@@ -93,6 +94,44 @@ find_smmu_fix_module() {
     return 1
 }
 
+prepare_kexec_dtb() {
+    local cmdline="$1"
+    local live_fdt=/sys/firmware/fdt
+    local out=/tmp/slmos-kexec.dtb
+
+    if ! command -v fdtput >/dev/null 2>&1; then
+        echo "Warning: fdtput not found; using kernel command line without explicit DTB patch" >&2
+        return 1
+    fi
+    if [[ ! -r "$live_fdt" ]]; then
+        echo "Warning: live FDT $live_fdt not readable; using kernel command line without explicit DTB patch" >&2
+        return 1
+    fi
+
+    cp "$live_fdt" "$out"
+    if ! fdtput -t s "$out" /chosen bootargs "$cmdline"; then
+        echo "Warning: failed to patch /chosen/bootargs in $out; using kernel command line without explicit DTB patch" >&2
+        rm -f "$out"
+        return 1
+    fi
+
+    if [[ -n "$XHCI_SLOT3_HANDOFF_PAYLOAD" ]]; then
+        if ! fdtput -c "$out" /slmos-handoff >/dev/null 2>&1; then
+            echo "Warning: failed to create /slmos-handoff in $out" >&2
+            rm -f "$out"
+            return 1
+        fi
+        if ! fdtput -t s "$out" /slmos-handoff xhci-slot3-handoff \
+              "$XHCI_SLOT3_HANDOFF_PAYLOAD"; then
+            echo "Warning: failed to patch /slmos-handoff/xhci-slot3-handoff in $out" >&2
+            rm -f "$out"
+            return 1
+        fi
+    fi
+
+    printf '%s\n' "$out"
+}
+
 verify_smmu_fix_effect() {
     local identity_line='added identity IOMMU mapping IOVA 0xbde00000..0xbe000000'
     local domain_line='xusb iommu_domain type='
@@ -113,6 +152,137 @@ verify_smmu_fix_effect() {
     echo "         recent arm-smmu-noshutdown lines:" >&2
     printf '%s\n' "$smmu_lines" | tail -n 12 >&2 || true
     return 1
+}
+
+stash_xhci_slot3_handoff() {
+    local dbg=/sys/kernel/debug/usb/xhci/3610000.usb
+    local slot_ctx="$dbg/devices/03/slot-context"
+    local ep_ctx="$dbg/devices/03/ep-context"
+    local ep0_deq="$dbg/devices/03/ep00/dequeue"
+    local reg_op="$dbg/reg-op"
+    local sysfs=/sys/module/arm_smmu_noshutdown/parameters/xhci_slot3_handoff
+    local py_out
+
+    if [[ ! -r "$slot_ctx" || ! -r "$ep_ctx" || ! -r "$ep0_deq" || ! -r "$reg_op" ]]; then
+        echo "       slot3 handoff skipped (debugfs state unavailable)"
+        return 0
+    fi
+
+    py_out="$(python3 - "$slot_ctx" "$ep_ctx" "$ep0_deq" "$reg_op" "$sysfs" <<'PY'
+import re, sys
+
+slot_ctx_path, ep_ctx_path, ep0_deq_path, reg_op_path, sysfs_path = sys.argv[1:6]
+slot_text = open(slot_ctx_path, "r", encoding="utf-8").read().strip()
+ep_text = open(ep_ctx_path, "r", encoding="utf-8").read().strip()
+ep0_text = open(ep0_deq_path, "r", encoding="utf-8").read().strip()
+reg_text = open(reg_op_path, "r", encoding="utf-8").read()
+
+slot_match = re.search(r'^0x([0-9a-fA-F]+):', slot_text)
+route_match = re.search(r'\bRS\s+([0-9a-fA-F]+)\b', slot_text)
+speed_match = re.search(r'\b(full-speed|low-speed|high-speed|super-speed)\b', slot_text, re.IGNORECASE)
+ctx_match = re.search(r'Ctx Entries\s+(\d+)', slot_text)
+port_match = re.search(r'Port#\s+(\d+)', slot_text)
+addr_match = re.search(r'Addr\s+(\d+)', slot_text)
+slot_state_match = re.search(r'State\s+([A-Za-z-]+)', slot_text)
+
+dcbaap_lo = re.search(r'DCBAAP_LOW = 0x([0-9a-fA-F]+)', reg_text)
+dcbaap_hi = re.search(r'DCBAAP_HIGH = 0x([0-9a-fA-F]+)', reg_text)
+ep0_match = re.search(r'0x([0-9a-fA-F]+)', ep0_text)
+
+ep_state_match = re.search(r'State\s+([A-Za-z-]+)', ep_text)
+cerr_match = re.search(r'CErr\s+(\d+)', ep_text)
+ep_type_match = re.search(r'Type\s+([A-Za-z]+)', ep_text)
+maxp_match = re.search(r'maxp\s+(\d+)', ep_text)
+avg_match = re.search(r'avg trb len\s+(\d+)', ep_text, re.IGNORECASE)
+
+if not all([
+    slot_match, route_match, speed_match, ctx_match, port_match, addr_match,
+    slot_state_match, dcbaap_lo, dcbaap_hi, ep0_match,
+    ep_state_match, cerr_match, ep_type_match, maxp_match, avg_match,
+]):
+    print("       slot3 handoff skipped (failed to parse debugfs state)")
+    sys.exit(0)
+
+speed_id = {
+    "full-speed": 1,
+    "low-speed": 2,
+    "high-speed": 3,
+    "super-speed": 4,
+}[speed_match.group(1).lower()]
+
+slot_state_id = {
+    "disabled": 0,
+    "default": 1,
+    "addressed": 2,
+    "configured": 3,
+}[slot_state_match.group(1).lower()]
+
+ep_state_id = {
+    "disabled": 0,
+    "running": 1,
+    "halted": 2,
+    "stopped": 3,
+    "error": 4,
+}[ep_state_match.group(1).lower()]
+
+ep_type_id = {
+    "ctrl": 4,
+    "control": 4,
+}[ep_type_match.group(1).lower()]
+
+devctx_phys = int(slot_match.group(1), 16) & ~0x3F
+route = int(route_match.group(1), 16) & 0xFFFFF
+ctx_entries = int(ctx_match.group(1), 10) & 0x1F
+root_port = int(port_match.group(1), 10)
+slot_addr = int(addr_match.group(1), 10) & 0xFF
+dcbaap = (int(dcbaap_hi.group(1), 16) << 32) | int(dcbaap_lo.group(1), 16)
+ep0_deq = int(ep0_match.group(1), 16) & ~0xF
+cerr = int(cerr_match.group(1), 10) & 0x3
+maxp = int(maxp_match.group(1), 10) & 0xFFFF
+avg = int(avg_match.group(1), 10) & 0xFFFF
+
+slot_dw = [
+    route | (speed_id << 20) | (ctx_entries << 27),
+    root_port << 16,
+    0,
+    slot_addr | (slot_state_id << 27),
+]
+ep_dw = [
+    ep_state_id,
+    (cerr << 1) | (ep_type_id << 3) | (maxp << 16),
+    (ep0_deq & 0xFFFFFFFF) | 0x1,
+    (ep0_deq >> 32) & 0xFFFFFFFF,
+    avg,
+    0,
+    0,
+    0,
+]
+payload = ",".join(
+    [f"0x{dcbaap:x}", f"0x{devctx_phys:x}", f"0x{ep0_deq:x}", str(root_port)] +
+    [f"0x{x:x}" for x in slot_dw] +
+    [f"0x{x:x}" for x in ep_dw]
+)
+
+if sysfs_path and sysfs_path != "-" and __import__("os").access(sysfs_path, __import__("os").W_OK):
+    with open(sysfs_path, "w", encoding="utf-8") as f:
+        f.write(payload)
+    print("       slot3 raw-page handoff updated")
+
+print("PAYLOAD=" + payload)
+print(
+    "       slot3 handoff: "
+    f"DCBAAP=0x{dcbaap:016x} slot3_devctx=0x{devctx_phys:016x} "
+    f"ep0_deq=0x{ep0_deq:016x} root={root_port} "
+    f"slot_dw0=0x{slot_dw[0]:08x} slot_dw1=0x{slot_dw[1]:08x} "
+    f"slot_dw3=0x{slot_dw[3]:08x} ep_dw0=0x{ep_dw[0]:08x} "
+    f"ep_dw1=0x{ep_dw[1]:08x} ep_dw2=0x{ep_dw[2]:08x} "
+    f"ep_dw3=0x{ep_dw[3]:08x} ep_dw4=0x{ep_dw[4]:08x}"
+)
+PY
+)"
+
+    XHCI_SLOT3_HANDOFF_PAYLOAD="$(printf '%s\n' "$py_out" | sed -n 's/^PAYLOAD=//p' | head -n1)"
+    printf '%s\n' "$py_out" | sed '/^PAYLOAD=/d'
 }
 
 if [[ ! -f "$KERNEL" ]]; then
@@ -312,12 +482,25 @@ if [[ "$NO_SMMU_FIX" == "0" ]]; then
             echo "         USB-A XHCI may wedge at RUN=1 without the SMMU fix" >&2
         fi
     fi
+    if [[ "$NO_USB_HOLD" == "0" ]]; then
+        stash_xhci_slot3_handoff
+    fi
 else
     echo "[6/8] SKIPPING arm-smmu fix (--no-smmu-fix)"
 fi
 
 echo "[7/8] Loading kernel: $KERNEL"
-kexec -l "$KERNEL" --reuse-cmdline
+KEXEC_CMDLINE="$(cat /proc/cmdline)"
+if [[ -n "$XHCI_SLOT3_HANDOFF_PAYLOAD" ]]; then
+    KEXEC_CMDLINE+=" slmos_xhci_slot3_handoff=$XHCI_SLOT3_HANDOFF_PAYLOAD"
+fi
+KEXEC_DTB="$(prepare_kexec_dtb "$KEXEC_CMDLINE" || true)"
+if [[ -n "$KEXEC_DTB" ]]; then
+    echo "       patched DTB: $KEXEC_DTB"
+    kexec -l "$KERNEL" --command-line="$KEXEC_CMDLINE" --dtb="$KEXEC_DTB"
+else
+    kexec -l "$KERNEL" --command-line="$KEXEC_CMDLINE"
+fi
 
 echo "[8/8] Executing kexec (serial console will take over)"
 exec kexec -e

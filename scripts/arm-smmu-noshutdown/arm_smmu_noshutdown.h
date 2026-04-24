@@ -25,4 +25,20 @@
 #define SLMOS_NC_BASE   0xBDE00000UL
 #define SLMOS_NC_SIZE   (2UL * 1024 * 1024)   /* 2 MB */
 
+#define SLMOS_XHCI_SLOT3_HANDOFF_PHYS   0xBDE00000UL
+#define SLMOS_XHCI_SLOT3_HANDOFF_MAGIC  0x58483348U
+#define SLMOS_XHCI_SLOT3_HANDOFF_VER    1U
+
+struct slmos_xhci_slot3_handoff {
+    u32 magic;
+    u32 version;
+    u32 slot_id;
+    u32 root_port;
+    u64 dcbaap;
+    u64 devctx_phys;
+    u64 ep0_deq_phys;
+    u32 slot_ctx_dw[4];
+    u32 ep0_ctx_dw[8];
+};
+
 #endif /* SLMOS_ARM_SMMU_NOSHUTDOWN_H */
