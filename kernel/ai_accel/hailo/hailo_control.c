@@ -655,6 +655,15 @@ int hailo_control_send_recv_cpu(enum hailo_control_cpu cpu_id,
 
 void hailo_control_reset_state_for_tests(void)
 {
+    /* Clear every static that gates idempotency — the tests re-boot
+     * the mock device between cases and expect each init path
+     * (sequence counter, MSI-pending latch, per-boot IRQ mask
+     * arming, MSI handler registration, post-boot init pipeline)
+     * to fire cleanly. Missing any one of these when a new static
+     * is added causes spurious test failures where the second
+     * test's control_setup_running skips a write or registration
+     * because the first test already set the flag. Add new statics
+     * here as they're introduced. */
     __atomic_store_n(&control_sequence, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELAXED);
     control_post_boot_init_done = false;
