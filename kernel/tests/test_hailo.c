@@ -30,11 +30,12 @@
 #include "../include/md5.h"
 #include "../include/uart.h"
 
-/* Backend registration + test hooks. The hailo_backend_* helpers
- * (model_sizes, in_use_slots, slots_max, reset_slots_for_tests,
- * get_boundary_iovas_for_tests, test_set_inflight) come from the
- * consolidated header (PR #355 review). */
+/* Production helpers from inference_device_hailo.h; test-only helpers
+ * (reset_slots_for_tests, get_boundary_iovas_for_tests,
+ * test_set_inflight) from the dedicated test-helpers header
+ * (PR #355 review round 2). */
 #include "inference_device_hailo.h"
+#include "inference_device_hailo_test_helpers.h"
 extern int inference_device_hailo_register(void);
 #include "test_harness.h"
 #include <stdbool.h>

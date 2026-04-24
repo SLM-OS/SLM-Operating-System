@@ -528,10 +528,16 @@ static int ai_schedule_mlp_via_hailo(const float *state,
          * back to the heuristic; warn ONCE so the operator sees the
          * policy demotion (PR #355 review). Subsequent loads/calls of
          * a too-big HEF stay silent — the WARN is to surface the
-         * downgrade, not flood the log on every assign_cpu. */
+         * downgrade, not flood the log on every assign_cpu.
+         *
+         * Atomic exchange (relaxed ordering — we don't need any
+         * memory barrier, just dedupe of the WARN call) so concurrent
+         * cross-CPU calls into this path emit the WARN exactly once
+         * total instead of once per CPU. Same `__atomic_*` style as
+         * the loaded flag above. */
         static bool transport_too_big_warned = false;
-        if (!transport_too_big_warned) {
-            transport_too_big_warned = true;
+        if (!__atomic_exchange_n(&transport_too_big_warned, true,
+                                 __ATOMIC_RELAXED)) {
             WARN("AI Hailo: HEF transport (in=%u out=%u) exceeds "
                  "HAILO_AI_TRANSPORT_MAX=%u; ai_hailo policy will "
                  "fall back to heuristic on every assign_cpu. Raise "

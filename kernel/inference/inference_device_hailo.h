@@ -35,14 +35,9 @@ uint32_t hailo_backend_in_use_slots(void);
 uint32_t hailo_backend_slots_max(void);
 
 /*
- * Test-only helpers. Always present so tests linked into both test
- * and non-test builds resolve, but only intended for use from
- * kernel/tests/.
+ * Test-only helpers (reset_slots_for_tests, get_boundary_iovas_for_tests,
+ * test_set_inflight) live in inference_device_hailo_test_helpers.h.
+ * Production code must NOT include that header.
  */
-void hailo_backend_reset_slots_for_tests(void);
-void hailo_backend_get_boundary_iovas_for_tests(
-    inference_model_handle_t h, uint64_t *in_iova, uint64_t *out_iova);
-uint32_t hailo_backend_test_set_inflight(
-    inference_model_handle_t h, uint32_t count);
 
 #endif /* INFERENCE_DEVICE_HAILO_H */
