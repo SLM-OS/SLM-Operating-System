@@ -306,7 +306,19 @@ static bool control_irq_masks_armed = false;
 /* Track whether the MSI handler is bound. Separate flag from
  * control_post_boot_init_done because pre-boot MSI registration can
  * happen *before* the post-boot init runs. control_post_boot_init
- * checks this flag and skips MSI registration if already done. */
+ * checks this flag and skips MSI registration if already done.
+ *
+ * Concurrency: this and control_irq_masks_armed are plain bool
+ * flags with no lock. That's safe under the current caller model
+ * because the setters all run from single-threaded init paths:
+ *   - hailo_boot() at device init (no other threads)
+ *   - control_post_boot_init() fires on first FW_CONTROL RPC, which
+ *     runs under control_lock, serializing any concurrent callers.
+ *   - hailo_control_signal_driver_shutdown() fires from cmd_reboot,
+ *     which runs on the shell task before psci_system_reset — no
+ *     concurrent state changes possible.
+ * Any future caller that could race one of these setters would need
+ * to promote the flag to atomic. */
 static bool control_msi_registered = false;
 
 int hailo_control_register_msi_for_boot(void)
@@ -400,30 +412,12 @@ static void control_post_boot_init(void)
                             HAILO_ATR_TRSL_AXI);
     hailo_platform->mb();
 
-    /* Arm interrupts. */
-    uint32_t mask = hailo_platform->read32(HAILO_BAR_CONFIG,
-                                           HAILO_BSC_IMASK_HOST);
-    mask |= HAILO_BSC_ISTATUS_HOST_MASK;
-    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
-    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
-                            0xFFFFFFFFu);
-    /* Per-channel VDMA interrupt enable. The reference driver arms
-     * ALL 32 source + 32 destination channels in `hailo_pcie_enable_interrupts`
-     * (hailo-pcie-common.c:873-874) as part of MSI setup. Without
-     * these writes the PCIe bridge aggregator silently drops VDMA
-     * completion interrupts and — more importantly on Hailo-8L —
-     * firmware's channel-processing loop observed num_avail on the
-     * host-side channel regs but never advanced num_proc because
-     * its own per-channel "interrupt armed" check failed. Register
-     * offsets: BCS_SOURCE_INTERRUPT_PER_CHANNEL=0x400 (H2D),
-     * BCS_DESTINATION_INTERRUPT_PER_CHANNEL=0x500 (D2H). */
-    hailo_platform->write32(HAILO_BAR_CONFIG,
-                            HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL,
-                            0xFFFFFFFFu);
-    hailo_platform->write32(HAILO_BAR_CONFIG,
-                            HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
-                            0xFFFFFFFFu);
-    hailo_platform->mb();
+    /* Arm interrupts. Delegated to hailo_control_arm_irq_masks so
+     * both the pre-boot path (hailo_boot) and this post-boot path
+     * share identical register writes and flag gating. The helper
+     * is idempotent — if the pre-boot path already armed masks,
+     * this call is a cheap early-return. */
+    (void)hailo_control_arm_irq_masks();
 
     /* Register the MSI handler — non-fatal on failure. Skip if the
      * boot path already registered it via
@@ -664,6 +658,8 @@ void hailo_control_reset_state_for_tests(void)
     __atomic_store_n(&control_sequence, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELAXED);
     control_post_boot_init_done = false;
+    control_irq_masks_armed     = false;
+    control_msi_registered      = false;
 }
 
 int hailo_control_identify(struct hailo_control_identify_response *out)
@@ -1746,6 +1742,7 @@ int hailo_control_get_hw_consts(uint32_t *out_response_len)
         out_response_len);
     if (rc != HAILO_OK) return rc;
 
+#ifdef HAILO_WIRE_DEBUG
     /* Phase 8 #253 (2026-04-23 probe): dump the raw response body so
      * we can decode the hw_consts struct on the host side. HailoRT's
      * upstream control_protocol.h v4.23 declares:
@@ -1776,6 +1773,7 @@ int hailo_control_get_hw_consts(uint32_t *out_response_len)
             uart_printf("\r\n");
         }
     }
+#endif /* HAILO_WIRE_DEBUG */
     return HAILO_OK;
 }
 

@@ -71,6 +71,81 @@ static void test_power_of_two_alloc(void)
 }
 
 /*
+ * Test: pmm_alloc_pages_low returns a valid non-NULL page
+ * of correct alignment. Same contract as pmm_alloc_pages for
+ * basic behavior — the "low bias" is best-effort and can't be
+ * asserted deterministically in a pmm_init'd test (the allocator's
+ * starting state doesn't guarantee any particular block at any
+ * particular address). Verify the allocation basics work.
+ */
+static void test_pmm_alloc_pages_low_basic(void)
+{
+    size_t free_before = pmm_get_free_pages();
+
+    void *pages = pmm_alloc_pages_low(4);
+    TEST_ASSERT_NOT_NULL(pages);
+
+    /* Order-2 (4 pages) alignment. */
+    TEST_ASSERT_EQUAL_UINT64(0, (uintptr_t)pages & ((4 * PAGE_SIZE) - 1));
+
+    /* Free-page accounting matches. */
+    TEST_ASSERT_EQUAL_UINT64(free_before - 4, pmm_get_free_pages());
+
+    pmm_free_pages(pages, 4);
+    TEST_ASSERT_EQUAL_UINT64(free_before, pmm_get_free_pages());
+}
+
+/*
+ * Test: pmm_alloc_pages_low biases toward lower addresses
+ * relative to pmm_alloc_pages when both are available.
+ *
+ * Not a strict requirement — the bias is best-effort and depends
+ * on free-list state. This test documents the expected behavior
+ * (same as pmm_alloc_pages for 0/MAX_ORDER+1 requests) and
+ * validates the "at-least-one-block-of-correct-size" contract.
+ */
+static void test_pmm_alloc_pages_low_edge_cases(void)
+{
+    /* count=0 → NULL */
+    TEST_ASSERT_NULL(pmm_alloc_pages_low(0));
+
+    /* Non-power-of-two rounds up — request 3, get order-2 (4 pages). */
+    size_t free_before = pmm_get_free_pages();
+    void *pages = pmm_alloc_pages_low(3);
+    TEST_ASSERT_NOT_NULL(pages);
+    TEST_ASSERT_EQUAL_UINT64(free_before - 4, pmm_get_free_pages());
+    pmm_free_pages(pages, 3);
+    TEST_ASSERT_EQUAL_UINT64(free_before, pmm_get_free_pages());
+}
+
+/*
+ * Test: pmm_alloc_pages_low under back-to-back allocation keeps
+ * the free-page count consistent. Regression guard against the
+ * split-down path mis-accounting block state.
+ */
+static void test_pmm_alloc_pages_low_accounting(void)
+{
+    size_t free_before = pmm_get_free_pages();
+    void *a = pmm_alloc_pages_low(2);
+    void *b = pmm_alloc_pages_low(4);
+    void *c = pmm_alloc_pages_low(1);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_NOT_NULL(b);
+    TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_EQUAL_UINT64(free_before - 2 - 4 - 1, pmm_get_free_pages());
+
+    /* All three distinct allocations. */
+    TEST_ASSERT_NOT_EQUAL(a, b);
+    TEST_ASSERT_NOT_EQUAL(a, c);
+    TEST_ASSERT_NOT_EQUAL(b, c);
+
+    pmm_free_pages(a, 2);
+    pmm_free_pages(b, 4);
+    pmm_free_pages(c, 1);
+    TEST_ASSERT_EQUAL_UINT64(free_before, pmm_get_free_pages());
+}
+
+/*
  * Test: Non-power-of-two allocation rounds up
  */
 static void test_non_power_of_two_rounds_up(void)
@@ -866,6 +941,11 @@ int test_suite_pmm(void)
     RUN_TEST(test_single_page_alloc);
     RUN_TEST(test_power_of_two_alloc);
     RUN_TEST(test_non_power_of_two_rounds_up);
+
+    /* Low-biased allocator (Phase 8 #253 DMA-window support) */
+    RUN_TEST(test_pmm_alloc_pages_low_basic);
+    RUN_TEST(test_pmm_alloc_pages_low_edge_cases);
+    RUN_TEST(test_pmm_alloc_pages_low_accounting);
 
     /* Alignment verification */
     RUN_TEST(test_alignment_all_orders);

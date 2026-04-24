@@ -682,8 +682,6 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
      * handler registration stays post-boot since it requires the
      * RUNNING state. */
     {
-        extern int hailo_control_arm_irq_masks(void);
-        extern int hailo_control_register_msi_for_boot(void);
         int irq_rc = hailo_control_arm_irq_masks();
         if (irq_rc != HAILO_OK) {
             INFO("hailo: pre-trigger IRQ mask arm failed (rc=%d)", irq_rc);

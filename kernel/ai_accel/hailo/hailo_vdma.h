@@ -114,6 +114,18 @@ int hailo_vdma_desc_list_alloc(uint32_t desc_count,
                                struct hailo_vdma_desc_list *out);
 
 /*
+ * Like hailo_vdma_desc_list_alloc but biases toward LOW physical
+ * addresses via the platform's optional dma_alloc_low op. Falls back
+ * to the default allocator on platforms without the low-bias variant.
+ * Use for boundary-channel desc lists when the platform's inbound
+ * translation window only reaches low physical RAM (Pi 5).
+ */
+int hailo_vdma_desc_list_alloc_low(uint32_t desc_count,
+                                   uint16_t desc_page_size,
+                                   bool is_circular,
+                                   struct hailo_vdma_desc_list *out);
+
+/*
  * Release a descriptor list previously returned by
  * hailo_vdma_desc_list_alloc. The handle is zeroed so stale uses
  * fault loudly. Safe to call on an already-zero handle (no-op).

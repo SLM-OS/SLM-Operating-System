@@ -45,10 +45,12 @@ uint32_t hailo_vdma_desc_list_alloc_size(uint32_t desc_count)
     return aligned;
 }
 
-int hailo_vdma_desc_list_alloc(uint32_t desc_count,
-                               uint16_t desc_page_size,
-                               bool is_circular,
-                               struct hailo_vdma_desc_list *out)
+/* Shared body — see hailo_vdma_desc_list_alloc{,_low} below. */
+static int desc_list_alloc_inner(uint32_t desc_count,
+                                 uint16_t desc_page_size,
+                                 bool is_circular,
+                                 bool prefer_low,
+                                 struct hailo_vdma_desc_list *out)
 {
     if (!out) return HAILO_ERR_INVAL;
     memset(out, 0, sizeof(*out));
@@ -73,9 +75,15 @@ int hailo_vdma_desc_list_alloc(uint32_t desc_count,
     uint32_t alloc_size = hailo_vdma_desc_list_alloc_size(desc_count);
 
     uint64_t iova = 0;
-    void *cpu = hailo_platform->dma_alloc((size_t)alloc_size,
-                                          (size_t)HAILO_VDMA_DESC_LIST_ALIGN,
-                                          &iova);
+    /* Pick allocator: low-bias variant if requested AND available,
+     * else fall back to default. */
+    void *(*alloc_fn)(size_t, size_t, uint64_t *) = hailo_platform->dma_alloc;
+    if (prefer_low && hailo_platform->dma_alloc_low) {
+        alloc_fn = hailo_platform->dma_alloc_low;
+    }
+    void *cpu = alloc_fn((size_t)alloc_size,
+                         (size_t)HAILO_VDMA_DESC_LIST_ALIGN,
+                         &iova);
     if (!cpu) return HAILO_ERR_NOMEM;
     /* Defensive: HOST_DESC_BASE_ADDR truncates low 16 bits, so an
      * unaligned return silently corrupts the device-side pointer.
@@ -100,6 +108,24 @@ int hailo_vdma_desc_list_alloc(uint32_t desc_count,
     out->desc_page_size   = desc_page_size;
     out->is_circular      = is_circular;
     return HAILO_OK;
+}
+
+int hailo_vdma_desc_list_alloc(uint32_t desc_count,
+                               uint16_t desc_page_size,
+                               bool is_circular,
+                               struct hailo_vdma_desc_list *out)
+{
+    return desc_list_alloc_inner(desc_count, desc_page_size, is_circular,
+                                 /*prefer_low=*/false, out);
+}
+
+int hailo_vdma_desc_list_alloc_low(uint32_t desc_count,
+                                   uint16_t desc_page_size,
+                                   bool is_circular,
+                                   struct hailo_vdma_desc_list *out)
+{
+    return desc_list_alloc_inner(desc_count, desc_page_size, is_circular,
+                                 /*prefer_low=*/true, out);
 }
 
 void hailo_vdma_desc_list_free(struct hailo_vdma_desc_list *list)

@@ -231,28 +231,20 @@ static inline size_t pi5_dma_pages(size_t size, size_t align)
     return (request + PAGE_SIZE - 1) / PAGE_SIZE;
 }
 
-/* Phase 8 boundary-submit probe (2026-04-23): when set, pi5_dma_alloc
- * routes through pmm_alloc_pages_low instead of the default high-bias
- * pmm_alloc_pages. Hypothesis: BCM2712's PCIe inbound translation
- * only reaches the bottom of physical RAM, and our boundary tensors
- * end up at ~4 GB-4 MB where fw can't DMA-read them. Toggled by the
- * caller around boundary allocations only — control-channel/CCW
- * allocations stay on the default path.
- *
- * Set by hailo_pi5_force_low_dma(true). Reverts on (false). */
-static bool pi5_force_low_dma = false;
-
-void hailo_pi5_force_low_dma(bool enable)
-{
-    pi5_force_low_dma = enable;
-}
-
-static void *pi5_dma_alloc(size_t size, size_t align, uint64_t *iova_out)
+/* Common alloc helper: validates + allocates via the chosen PMM
+ * function, then validates alignment and produces the IOVA.
+ * `low_bias` selects pmm_alloc_pages_low (DMA buffers that must
+ * land in low physical memory) over pmm_alloc_pages (everything
+ * else). No global state — bias is a per-call argument so
+ * concurrent allocations from different threads each request
+ * independently. */
+static void *pi5_dma_alloc_common(size_t size, size_t align,
+                                  uint64_t *iova_out, bool low_bias)
 {
     if (size == 0) return NULL;
     size_t pages = pi5_dma_pages(size, align);
-    void *va = pi5_force_low_dma ? pmm_alloc_pages_low(pages)
-                                  : pmm_alloc_pages(pages);
+    void *va = low_bias ? pmm_alloc_pages_low(pages)
+                        : pmm_alloc_pages(pages);
     if (!va) return NULL;
 
     /* Defensive: pmm buddy alignment should already satisfy `align`.
@@ -267,6 +259,16 @@ static void *pi5_dma_alloc(size_t size, size_t align, uint64_t *iova_out)
         *iova_out = (uint64_t)(uintptr_t)va + PCIE1_DMA_OFFSET;
     }
     return va;
+}
+
+static void *pi5_dma_alloc(size_t size, size_t align, uint64_t *iova_out)
+{
+    return pi5_dma_alloc_common(size, align, iova_out, /*low_bias=*/false);
+}
+
+static void *pi5_dma_alloc_low(size_t size, size_t align, uint64_t *iova_out)
+{
+    return pi5_dma_alloc_common(size, align, iova_out, /*low_bias=*/true);
 }
 
 static void pi5_dma_free(void *ptr, size_t size, size_t align)
@@ -389,6 +391,7 @@ static const struct hailo_platform_ops pi5_ops = {
     .bar4_write       = pi5_bar4_write,
     .bar4_read        = pi5_bar4_read,
     .dma_alloc        = pi5_dma_alloc,
+    .dma_alloc_low    = pi5_dma_alloc_low,
     .dma_free         = pi5_dma_free,
     .cache_clean      = pi5_cache_clean,
     .cache_invalidate = pi5_cache_invalidate,

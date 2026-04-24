@@ -34,7 +34,11 @@ uint32_t hailo_tensor_size_from_shape(uint32_t padded_height,
     return (uint32_t)acc;
 }
 
-int hailo_tensor_alloc(uint32_t tensor_bytes, struct hailo_tensor *out)
+/* Shared body of hailo_tensor_alloc and hailo_tensor_alloc_low. The
+ * two only differ in which platform allocator they invoke; everything
+ * else (size rounding, alignment validation, zero-init) is identical. */
+static int tensor_alloc_inner(uint32_t tensor_bytes, struct hailo_tensor *out,
+                              bool prefer_low)
 {
     if (!out) return HAILO_ERR_INVAL;
     memset(out, 0, sizeof(*out));
@@ -55,9 +59,17 @@ int hailo_tensor_alloc(uint32_t tensor_bytes, struct hailo_tensor *out)
     if (alloc_size < tensor_bytes) return HAILO_ERR_INVAL;
 
     uint64_t iova = 0;
-    void *cpu = hailo_platform->dma_alloc((size_t)alloc_size,
-                                          (size_t)HAILO_TENSOR_DMA_ALIGN,
-                                          &iova);
+    /* Pick allocator: low-bias variant if requested AND available,
+     * else fall back to default. Platforms without dma_alloc_low
+     * (e.g. coherent IOMMU systems) silently use dma_alloc — caller
+     * preference is best-effort, not a hard requirement. */
+    void *(*alloc_fn)(size_t, size_t, uint64_t *) = hailo_platform->dma_alloc;
+    if (prefer_low && hailo_platform->dma_alloc_low) {
+        alloc_fn = hailo_platform->dma_alloc_low;
+    }
+    void *cpu = alloc_fn((size_t)alloc_size,
+                         (size_t)HAILO_TENSOR_DMA_ALIGN,
+                         &iova);
     if (!cpu) return HAILO_ERR_NOMEM;
     /* Defensive: catch a mis-behaving platform allocator that
      * ignored the alignment hint. VDMA descriptors assume every
@@ -84,6 +96,16 @@ int hailo_tensor_alloc(uint32_t tensor_bytes, struct hailo_tensor *out)
     out->alloc_size   = alloc_size;
     out->align        = HAILO_TENSOR_DMA_ALIGN;
     return HAILO_OK;
+}
+
+int hailo_tensor_alloc(uint32_t tensor_bytes, struct hailo_tensor *out)
+{
+    return tensor_alloc_inner(tensor_bytes, out, /*prefer_low=*/false);
+}
+
+int hailo_tensor_alloc_low(uint32_t tensor_bytes, struct hailo_tensor *out)
+{
+    return tensor_alloc_inner(tensor_bytes, out, /*prefer_low=*/true);
 }
 
 void hailo_tensor_free(struct hailo_tensor *t)

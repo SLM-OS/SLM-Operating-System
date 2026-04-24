@@ -87,9 +87,14 @@ void *pmm_alloc_pages(size_t count);
  * Use case: PCIe inbound translation windows on some platforms only
  * cover the bottom of physical RAM, so DMA buffers MUST live there.
  * The buddy allocator's normal LIFO pop returns high-end blocks,
- * which puts DMA targets out of reach. This helper is a directed
- * "give me low memory" probe — slower than pmm_alloc_pages (linear
- * scan of free lists) but used rarely (per-load, not per-submit).
+ * which puts DMA targets out of reach.
+ *
+ * Performance: linear scan over free lists at every order >= the
+ * requested order, holding pmm_lock + IRQs-off for the full scan.
+ * Bounded by total-free-block count (the allocator coalesces
+ * aggressively on free, so typically a few dozen blocks across all
+ * orders). NOT safe for per-submit hot paths — intended for per-load
+ * or per-DMA-buffer setup only.
  *
  * @count: Number of contiguous pages. Rounded up to next power of 2.
  * Returns: Physical address of first page, or NULL on failure.

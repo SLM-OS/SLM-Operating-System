@@ -538,7 +538,16 @@ void *pmm_alloc_pages_low(size_t count)
 
     irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
 
-    /* Linear scan: find the lowest-address block at any order >= order. */
+    /* Linear scan: find the lowest-address block at any order >= order.
+     * Can't break early after finding a match at the requested order —
+     * a block at a higher order that lives at a lower address would
+     * split down to give us a lower result address (buddy-split puts
+     * the left half at the parent's addr). Scan cost is bounded by
+     * total-free-blocks, which the buddy allocator keeps small by
+     * coalescing on free (typically a few dozen across all orders);
+     * the scan completes in microseconds. pmm_lock stays held with
+     * IRQs off throughout — acceptable for the per-load caller, not
+     * safe for per-submit hot paths. */
     uintptr_t best_addr = (uintptr_t)~0UL;
     unsigned int best_order = 0;
     bool found = false;

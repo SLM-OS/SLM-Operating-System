@@ -1667,8 +1667,13 @@ int cmd_reboot(int argc, char *argv[])
      * we tear down. Linux writes FW_ACCESS_DRIVER_SHUTDOWN_MASK
      * (val=4) to the doorbell on device release; mirroring that
      * lets fw clear "active driver" state so the next boot starts
-     * fresh. Best-effort + weak symbol so this builds on platforms
-     * without the Hailo backend. */
+     * fresh.
+     *
+     * Weak extern so the call site compiles on every platform — on
+     * builds without the Hailo backend linked (QEMU ARM64, Jetson,
+     * x86-64), the symbol resolves to NULL at link time and the
+     * address check skips the call. No build-time conditional
+     * needed at the call site. */
     extern int hailo_control_signal_driver_shutdown(void) __attribute__((weak));
     if (&hailo_control_signal_driver_shutdown) {
         (void)hailo_control_signal_driver_shutdown();
