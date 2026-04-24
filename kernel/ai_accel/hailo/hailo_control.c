@@ -301,6 +301,91 @@ static int wait_for_response(uint32_t timeout_us)
  * flexibility.
  */
 static bool control_post_boot_init_done = false;
+static bool control_irq_masks_armed = false;
+
+/* Track whether the MSI handler is bound. Separate flag from
+ * control_post_boot_init_done because pre-boot MSI registration can
+ * happen *before* the post-boot init runs. control_post_boot_init
+ * checks this flag and skips MSI registration if already done.
+ *
+ * Concurrency: this and control_irq_masks_armed are plain bool
+ * flags with no lock. That's safe under the current caller model
+ * because the setters all run from single-threaded init paths:
+ *   - hailo_boot() at device init (no other threads)
+ *   - control_post_boot_init() fires on first FW_CONTROL RPC, which
+ *     runs under control_lock, serializing any concurrent callers.
+ *   - hailo_control_signal_driver_shutdown() fires from cmd_reboot,
+ *     which runs on the shell task before psci_system_reset — no
+ *     concurrent state changes possible.
+ * Any future caller that could race one of these setters would need
+ * to promote the flag to atomic. */
+static bool control_msi_registered = false;
+
+int hailo_control_register_msi_for_boot(void)
+{
+    if (control_msi_registered) return HAILO_OK;
+    if (!hailo_platform || !hailo_platform->register_irq) {
+        /* No MSI infrastructure on this platform — silently skip.
+         * Polling fallback will still work. */
+        return HAILO_OK;
+    }
+
+    int rc = hailo_platform->register_irq(control_msi_handler, NULL);
+    if (rc != HAILO_OK) {
+        WARN("hailo: pre-boot MSI registration failed (%d); polling fallback", rc);
+        /* Non-fatal: the existing ATR[1] poll in hailo_boot still works.
+         * Mark as "registered" so post-boot init doesn't retry. */
+    }
+    control_msi_registered = true;
+    return HAILO_OK;
+}
+
+int hailo_control_signal_driver_shutdown(void)
+{
+    if (!hailo_platform || !hailo_platform->bar4_write) return HAILO_ERR_NODEV;
+    if (hailo_get_state() != HAILO_STATE_RUNNING) return HAILO_OK;
+
+    /* Mirror Linux's finalize_doorbell write: doorbell at
+     * raise_ready_offset (0x1684) with FW_ACCESS_DRIVER_SHUTDOWN_MASK
+     * (0x4) so fw can clear active-driver state. Best-effort: any
+     * failure here is logged and ignored — we're tearing down. */
+    uint32_t val = HAILO_FW_ACCESS_DRIVER_SHUTDOWN_MASK;
+    hailo_platform->bar4_write(hailo_fw_addrs_hailo8.raise_ready_offset,
+                               &val, sizeof(val));
+    if (hailo_platform->mb) hailo_platform->mb();
+    INFO("hailo: signaled DRIVER_SHUTDOWN to fw");
+    return HAILO_OK;
+}
+
+int hailo_control_arm_irq_masks(void)
+{
+    if (control_irq_masks_armed) return HAILO_OK;
+    if (!hailo_platform || !hailo_platform->write32 || !hailo_platform->read32) {
+        return HAILO_ERR_NODEV;
+    }
+
+    /* Mirrors hailo_pcie_enable_interrupts (hailo-pcie-common.c:867):
+     * arm IMASK_HOST then W1C any stale ISTATUS bits, then arm ALL
+     * 32 SRC + 32 DST per-channel IRQ masks. Linux does this BEFORE
+     * the fw trigger so the device boots into a fully-armed IRQ
+     * state. */
+    uint32_t mask = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                           HAILO_BSC_IMASK_HOST);
+    mask |= HAILO_BSC_ISTATUS_HOST_MASK;
+    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
+    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
+                            0xFFFFFFFFu);
+    hailo_platform->write32(HAILO_BAR_CONFIG,
+                            HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL,
+                            0xFFFFFFFFu);
+    hailo_platform->write32(HAILO_BAR_CONFIG,
+                            HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
+                            0xFFFFFFFFu);
+    hailo_platform->mb();
+
+    control_irq_masks_armed = true;
+    return HAILO_OK;
+}
 
 static void control_post_boot_init(void)
 {
@@ -327,39 +412,24 @@ static void control_post_boot_init(void)
                             HAILO_ATR_TRSL_AXI);
     hailo_platform->mb();
 
-    /* Arm interrupts. */
-    uint32_t mask = hailo_platform->read32(HAILO_BAR_CONFIG,
-                                           HAILO_BSC_IMASK_HOST);
-    mask |= HAILO_BSC_ISTATUS_HOST_MASK;
-    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, mask);
-    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST,
-                            0xFFFFFFFFu);
-    /* Per-channel VDMA interrupt enable. The reference driver arms
-     * ALL 32 source + 32 destination channels in `hailo_pcie_enable_interrupts`
-     * (hailo-pcie-common.c:873-874) as part of MSI setup. Without
-     * these writes the PCIe bridge aggregator silently drops VDMA
-     * completion interrupts and — more importantly on Hailo-8L —
-     * firmware's channel-processing loop observed num_avail on the
-     * host-side channel regs but never advanced num_proc because
-     * its own per-channel "interrupt armed" check failed. Register
-     * offsets: BCS_SOURCE_INTERRUPT_PER_CHANNEL=0x400 (H2D),
-     * BCS_DESTINATION_INTERRUPT_PER_CHANNEL=0x500 (D2H). */
-    hailo_platform->write32(HAILO_BAR_CONFIG,
-                            HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL,
-                            0xFFFFFFFFu);
-    hailo_platform->write32(HAILO_BAR_CONFIG,
-                            HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
-                            0xFFFFFFFFu);
-    hailo_platform->mb();
+    /* Arm interrupts. Delegated to hailo_control_arm_irq_masks so
+     * both the pre-boot path (hailo_boot) and this post-boot path
+     * share identical register writes and flag gating. The helper
+     * is idempotent — if the pre-boot path already armed masks,
+     * this call is a cheap early-return. */
+    (void)hailo_control_arm_irq_masks();
 
-    /* Register the MSI handler — non-fatal on failure. */
-    if (hailo_platform->register_irq) {
+    /* Register the MSI handler — non-fatal on failure. Skip if the
+     * boot path already registered it via
+     * hailo_control_register_msi_for_boot. */
+    if (hailo_platform->register_irq && !control_msi_registered) {
         int rc = hailo_platform->register_irq(control_msi_handler, NULL);
         if (rc != HAILO_OK) {
             WARN("hailo: control MSI registration failed (%d); polling fallback", rc);
             /* Mark done anyway — retry wouldn't help, and the
              * polling fallback stays available. */
         }
+        control_msi_registered = true;
     }
 
     control_post_boot_init_done = true;
@@ -585,9 +655,20 @@ int hailo_control_send_recv_cpu(enum hailo_control_cpu cpu_id,
 
 void hailo_control_reset_state_for_tests(void)
 {
+    /* Clear every static that gates idempotency — the tests re-boot
+     * the mock device between cases and expect each init path
+     * (sequence counter, MSI-pending latch, per-boot IRQ mask
+     * arming, MSI handler registration, post-boot init pipeline)
+     * to fire cleanly. Missing any one of these when a new static
+     * is added causes spurious test failures where the second
+     * test's control_setup_running skips a write or registration
+     * because the first test already set the flag. Add new statics
+     * here as they're introduced. */
     __atomic_store_n(&control_sequence, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&control_msi_pending, 0, __ATOMIC_RELAXED);
     control_post_boot_init_done = false;
+    control_irq_masks_armed     = false;
+    control_msi_registered      = false;
 }
 
 int hailo_control_identify(struct hailo_control_identify_response *out)
@@ -1661,13 +1742,48 @@ int hailo_control_context_switch_clear_configured_apps(void)
 
 int hailo_control_get_hw_consts(uint32_t *out_response_len)
 {
-    return control_send_empty_body_core_rpc(
+    int rc = control_send_empty_body_core_rpc(
         HAILO_CONTROL_OPCODE_GET_HW_CONSTS,
         "GET_HW_CONSTS",
         &control_hw_consts_req,
         &control_hw_consts_resp,
         sizeof(control_hw_consts_resp),
         out_response_len);
+    if (rc != HAILO_OK) return rc;
+
+#ifdef HAILO_WIRE_DEBUG
+    /* Phase 8 #253 (2026-04-23 probe): dump the raw response body so
+     * we can decode the hw_consts struct on the host side. HailoRT's
+     * upstream control_protocol.h v4.23 declares:
+     *   uint32_t fifo_word_granularity_bytes;
+     *   uint16_t max_periph_buffers_per_frame;
+     *   uint16_t max_periph_bytes_per_buffer;
+     *   uint16_t max_acceptable_bytes_per_buffer;
+     *   uint32_t outbound_data_stream_size;
+     *   uint8_t  should_optimize_credits;
+     *   uint32_t default_initial_credit_size;
+     * Wire layout per param: 4 B BE length + value. We dump the raw
+     * bytes; future revision can parse fields once layout confirmed
+     * against what fw on Hailo-8L actually returns. */
+    if (out_response_len && *out_response_len > 0) {
+        uint32_t body_len = *out_response_len;
+        if (body_len > sizeof(control_hw_consts_resp.body)) {
+            body_len = sizeof(control_hw_consts_resp.body);
+        }
+        uart_printf("[hw_consts] response body %u bytes:\r\n",
+                    (unsigned)body_len);
+        const uint8_t *b = control_hw_consts_resp.body;
+        for (uint32_t i = 0; i < body_len; i += 16) {
+            uart_printf("[hw_consts] [%03x]:", (unsigned)i);
+            uint32_t end = (i + 16 > body_len) ? body_len : (i + 16);
+            for (uint32_t j = i; j < end; j++) {
+                uart_printf(" %02x", b[j]);
+            }
+            uart_printf("\r\n");
+        }
+    }
+#endif /* HAILO_WIRE_DEBUG */
+    return HAILO_OK;
 }
 
 int hailo_control_core_identify(uint32_t *out_response_len)
@@ -1679,6 +1795,60 @@ int hailo_control_core_identify(uint32_t *out_response_len)
         &control_core_identify_resp,
         sizeof(control_core_identify_resp),
         out_response_len);
+}
+
+/* GET_DEVICE_INFORMATION (opcode 0x33, APP_CPU). Empty-body
+ * request, returns a ~143-byte device info struct on fw v4.23.
+ * SLM-OS does not currently parse the body — the RPC is used
+ * purely as a HailoRT-style fw-settled handshake between load
+ * steps. See hailo_control.h comment for the #253 motivation. */
+struct hailo_cs_device_info_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                /* BE */
+    uint8_t  body[256];                      /* observed 143 B; 256 is defensive */
+} __attribute__((packed));
+
+static struct hailo_cs_empty_req_wire        control_device_info_req;
+static struct hailo_cs_device_info_resp_wire control_device_info_resp;
+
+int hailo_control_get_device_information(uint32_t *out_response_len)
+{
+    spin_lock(&control_lock);
+
+    struct hailo_cs_empty_req_wire *r = &control_device_info_req;
+    memset(r, 0, sizeof(*r));
+    r->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->common.flags    = 0;
+    r->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION);
+    r->parameter_count = 0;
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(r, sizeof(*r),
+                                             &control_device_info_resp,
+                                             sizeof(control_device_info_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_APP,
+                                            r, sizeof(*r),
+                                            &control_device_info_resp,
+                                            sizeof(control_device_info_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_device_info_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION,
+                                       "GET_DEVICE_INFORMATION");
+    if (rc == HAILO_OK && out_response_len) *out_response_len = resp_len;
+    spin_unlock(&control_lock);
+    return rc;
 }
 
 int hailo_control_set_context_info(

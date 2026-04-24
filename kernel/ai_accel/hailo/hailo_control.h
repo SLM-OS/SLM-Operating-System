@@ -61,6 +61,16 @@
  */
 #define HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK  (1u << 0)
 #define HAILO_FW_ACCESS_CORE_CPU_CONTROL_MASK (1u << 1)
+/* DRIVER_SHUTDOWN: signal fw that the host driver is releasing
+ * the device. Linux writes this from hailo_disable_interrupts on
+ * release. Lets fw clear "active driver" state so the next boot
+ * starts from a known fresh baseline. SOFT_RESET: ask fw to
+ * re-init in place without re-uploading the fw blob. Both
+ * defined to match hailo-ioctl-common.h:36-41 (NNC interrupt
+ * mask enum). #253 (2026-04-23): added so SLM-OS can mirror
+ * Linux's clean-shutdown signaling. */
+#define HAILO_FW_ACCESS_DRIVER_SHUTDOWN_MASK  (1u << 2)
+#define HAILO_FW_ACCESS_SOFT_RESET_MASK       (1u << 3)
 
 /*
  * Which firmware CPU the opcode targets. Used by the transport to
@@ -112,6 +122,7 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO      = 0x21,
     HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS         = 0x25,
     HAILO_CONTROL_OPCODE_CORE_IDENTIFY                        = 0x2A,
+    HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION               = 0x33,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS = 0x47,
     HAILO_CONTROL_OPCODE_GET_HW_CONSTS                        = 0x48,
     /* Full table in docs/reference/hailort-control-protocol.h. */
@@ -673,6 +684,65 @@ int hailo_control_get_hw_consts(uint32_t *out_response_len);
  * success; pass NULL to ignore.
  */
 int hailo_control_core_identify(uint32_t *out_response_len);
+
+/*
+ * GET_DEVICE_INFORMATION (opcode 0x33, CPU_ID_APP_CPU). Empty-body
+ * probe; firmware responds with a ~143-byte struct describing device
+ * state. HailoRT calls this multiple times during load (pre-RESET,
+ * post-CLEAR_APPS, post-SET_CONTEXT_INFO, post-ENABLED) as a
+ * fw-settled / liveness handshake. SLM-OS does not strictly need the
+ * response content — this wrapper just fires the RPC and checks
+ * rc=0.
+ *
+ * Added 2026-04-23 for the Phase 8 #253 investigation: HailoRT's
+ * wire capture shows 7 of these interspersed through the load
+ * sequence; SLM-OS sends none. Mirroring HailoRT's cadence is one
+ * of the cheapest ways to rule "post-ENABLED settling" in or out as
+ * the cause of the boundary-submit stall.
+ *
+ * `out_response_len` is set on success; pass NULL to ignore.
+ */
+int hailo_control_get_device_information(uint32_t *out_response_len);
+
+/*
+ * Pre-boot interrupt-mask arming. Linux's hailo_pcie_enable_interrupts
+ * (called from hailo_activate_board BEFORE load_firmware) writes the
+ * IMASK_HOST + per-channel SRC/DST IRQ masks before triggering the
+ * fw boot, so fw boots with all IRQ infrastructure already armed. We
+ * previously only did this lazily on the first FW_CONTROL RPC, after
+ * fw was already running. Phase 8 #253: hypothesis is fw initializes
+ * differently when IRQ masks are/aren't armed at boot time. This
+ * function lets the boot path call it before triggering fw.
+ *
+ * Idempotent: if interrupts have already been armed, a re-call is
+ * cheap (the writes are the same value). MSI handler registration is
+ * NOT done here — that lives in control_post_boot_init since it
+ * needs fw to be RUNNING (handler may receive responses).
+ */
+int hailo_control_arm_irq_masks(void);
+
+/*
+ * Pre-boot MSI registration. Linux's hailo_pcie_enable_interrupts
+ * (called BEFORE load_firmware) does pci_enable_msi + request_irq
+ * so MSI is configured by the time fw boots. SLM-OS previously only
+ * called register_irq on first FW_CONTROL RPC — long after boot.
+ * This function lets the boot path engage MSI early so fw observes
+ * a fully-configured interrupt environment when it comes up.
+ *
+ * Idempotent and non-fatal: on platforms without register_irq or on
+ * second call, returns HAILO_OK without re-registering.
+ */
+int hailo_control_register_msi_for_boot(void);
+
+/*
+ * Signal fw that the host driver is shutting down. Writes
+ * FW_ACCESS_DRIVER_SHUTDOWN_MASK (0x4) to the raise_ready
+ * doorbell so fw can clean up its "active driver" state. Mirrors
+ * Linux's hailo_pcie_finalize_doorbell_data path. Safe to call
+ * before reboot, before fw teardown, or when releasing the
+ * accelerator. No-op if fw is not running.
+ */
+int hailo_control_signal_driver_shutdown(void);
 
 /*
  * Reset internal control-channel state (sequence counter and the

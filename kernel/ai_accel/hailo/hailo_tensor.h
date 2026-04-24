@@ -99,6 +99,18 @@ uint32_t hailo_tensor_size_from_shape(uint32_t padded_height,
 int hailo_tensor_alloc(uint32_t tensor_bytes, struct hailo_tensor *out);
 
 /*
+ * Like hailo_tensor_alloc but biases toward LOW physical addresses
+ * via the platform's optional dma_alloc_low op. Falls back to the
+ * default allocator on platforms that don't expose a low-bias variant
+ * — the bias is best-effort, not a hard requirement.
+ *
+ * Use this for boundary I/O tensors when the platform's PCIe inbound
+ * translation only reaches the bottom of physical RAM (Pi 5).
+ * Per-call: no global state, safe under concurrent loads.
+ */
+int hailo_tensor_alloc_low(uint32_t tensor_bytes, struct hailo_tensor *out);
+
+/*
  * Release a tensor previously returned by hailo_tensor_alloc. The
  * handle is zeroed so stale uses fail loudly. Safe to call on an
  * already-zero handle (no-op).

@@ -114,6 +114,16 @@ int hailo_cs_translate_application_header(
     out->dynamic_contexts_count = 1;
     out->batch_size             = 1;
 
+    /* Phase 8 #253 (2026-04-23): HailoRT sets preliminary_run_asap=1
+     * and can_fast_batch_switch=1 for MNIST on v4.23 (verified via
+     * Pi OS trace docs/reference/hailort-v4.23.0-mnist-fwctl-pi5.txt).
+     * SLM-OS leaves both at 0. Tested setting them: did not fix the
+     * boundary-submit silence. Most likely they need to be paired
+     * with a corresponding host-side behavior (PRELIMINARY ASAP mode
+     * may require extra ActivateChannel actions in PRELIMINARY that
+     * SLM-OS doesn't emit). Leaving at 0 for now — TODO when
+     * ASAP-mode action emission lands. */
+
     /* csm_buffer_size must match the VDMA descriptor page size —
      * firmware validates this against the host_buffer_info fields
      * in ACTIVATE_CFG_CHANNEL. Use the caller-provided ccw_desc_page_size

@@ -249,11 +249,22 @@ static bool hailo_fw_dump_d2h_notification_once(void)
  * formalize once the actual mechanism is understood. */
 #define HAILO_BOUNDARY_OUT_PREFETCH_DEPTH 8u
 
+/* Phase-boundary wall-clock gaps observed in HailoRT's instrumented
+ * MMIO trace (docs/reference/hailort-v4.23.0-mmio-trace-*-pi5.txt).
+ * HailoRT leaves these gaps between major load-sequence RPCs — on
+ * SLM-OS we insert matching udelays under HAILO_WIRE_DEBUG to test
+ * whether the gaps themselves are load-bearing for #253. They are
+ * not (disconfirmed 2026-04-23), but the instrumentation stays for
+ * future bisect work. */
+#define HAILO_HAILORT_GAP_POST_CLEAR_APPS_US   5000u /* HailoRT: 4.5 ms */
+#define HAILO_HAILORT_GAP_POST_DYNAMIC_US      3000u /* HailoRT: 2.8 ms */
+#define HAILO_HAILORT_GAP_POST_SETTLE_PINGS_US 2000u /* HailoRT: 1.6 ms */
+
 /* Drain pending notifications: for each one, dump it, ACK the buffer,
  * then delay a little so fw can write the next queued event before we
  * re-check. Bounded by `max_events` so we don't loop forever on a fw
  * that re-writes the same event repeatedly. */
-static void hailo_fw_drain_d2h_notifications(uint32_t max_events)
+void hailo_fw_drain_d2h_notifications(uint32_t max_events)
 {
     for (uint32_t i = 0; i < max_events; i++) {
         bool had = hailo_fw_dump_d2h_notification_once();
@@ -849,7 +860,16 @@ static int context_switch_load(struct hailo_model_slot *slot,
             ? (uint32_t)in_pad->height * in_pad->width * in_pad->features
             : bpb * bpf;
         if (in_bytes == 0) in_bytes = bpb * bpf;  /* shape-less fallback */
-        rc = hailo_tensor_alloc(in_bytes, &slot->boundary_in_tensor);
+
+        /* Phase 8 boundary-submit probe (2026-04-23 — see
+         * docs/reference/hailort-trace-findings-vdma-2026-04-23.md):
+         * boundary IN/OUT tensors + desc lists go through the low-
+         * bias allocator so their IOVAs land in the bottom of
+         * physical RAM. Platforms without dma_alloc_low silently
+         * fall through to the default path, so the call is safe
+         * cross-platform. Per-allocation argument — no global state,
+         * safe under concurrent load_model calls. */
+        rc = hailo_tensor_alloc_low(in_bytes, &slot->boundary_in_tensor);
         if (rc != HAILO_OK) {
             WARN("hailo backend: boundary IN tensor alloc failed (rc=%d)", rc);
             goto fail;
@@ -871,10 +891,10 @@ static int context_switch_load(struct hailo_model_slot *slot,
         if (boundary_in_desc_count < HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT) {
             boundary_in_desc_count = HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT;
         }
-        rc = hailo_vdma_desc_list_alloc(boundary_in_desc_count,
-                                        HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
-                                        /*circular=*/false,
-                                        &slot->boundary_in_list);
+        rc = hailo_vdma_desc_list_alloc_low(boundary_in_desc_count,
+                                            HAILO_CS_DEFAULT_BOUNDARY_PAGE_SIZE,
+                                            /*circular=*/false,
+                                            &slot->boundary_in_list);
         if (rc != HAILO_OK) {
             WARN("hailo backend: boundary IN desc_list alloc failed (rc=%d)", rc);
             goto fail;
@@ -900,7 +920,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
         uint32_t obpf    = out_pad->core_buffers_per_frame
                              ? out_pad->core_buffers_per_frame : 1u;
         uint32_t out_bytes = obpb * obpf;
-        rc = hailo_tensor_alloc(out_bytes, &slot->boundary_out_tensor);
+        rc = hailo_tensor_alloc_low(out_bytes, &slot->boundary_out_tensor);
         if (rc != HAILO_OK) {
             WARN("hailo backend: boundary OUT tensor alloc failed (rc=%d)", rc);
             goto fail;
@@ -922,10 +942,10 @@ static int context_switch_load(struct hailo_model_slot *slot,
         if (boundary_out_desc_count < HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT) {
             boundary_out_desc_count = HAILO_CS_DEFAULT_BOUNDARY_DESC_COUNT;
         }
-        rc = hailo_vdma_desc_list_alloc(boundary_out_desc_count,
-                                        HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE,
-                                        /*circular=*/false,
-                                        &slot->boundary_out_list);
+        rc = hailo_vdma_desc_list_alloc_low(boundary_out_desc_count,
+                                            HAILO_CS_DEFAULT_BOUNDARY_OUTPUT_PAGE_SIZE,
+                                            /*circular=*/false,
+                                            &slot->boundary_out_list);
         if (rc != HAILO_OK) {
             WARN("hailo backend: boundary OUT desc_list alloc failed (rc=%d)", rc);
             goto fail;
@@ -1033,6 +1053,33 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * pre-configure handshake before accepting network-group-
      * level setup. */
     cs_load_stage_set(50);
+#ifdef HAILO_WIRE_DEBUG
+    /* #253 (2026-04-23): HailoRT wire capture shows IDENTIFY (0x00,
+     * APP_CPU) is sent before the first CORE_CPU RPC. SLM-OS's load
+     * jumps straight to CHANGE_STATUS(RESET), which triggers a
+     * CPU_ECC_ERROR on fw v4.23 (memory_bitmap=0x1000). Theory: the
+     * APP_CPU IDENTIFY warms up fw state that RESET depends on, and
+     * skipping it causes fw to access uninit memory during RESET
+     * processing. Tested and disconfirmed — kept under HAILO_WIRE_DEBUG
+     * for re-use in future bisect investigations. */
+    {
+        struct hailo_control_identify_response idr;
+        int warm_rc = hailo_control_identify(&idr);
+        uart_printf("[warmup] pre-RESET IDENTIFY rc=%d\r\n", warm_rc);
+        uint32_t gdi_len = 0;
+        warm_rc = hailo_control_get_device_information(&gdi_len);
+        uart_printf("[warmup] pre-RESET GET_DEV_INFO #1 rc=%d resp_len=%u\r\n",
+                    warm_rc, (unsigned)gdi_len);
+        gdi_len = 0;
+        warm_rc = hailo_control_get_device_information(&gdi_len);
+        uart_printf("[warmup] pre-RESET GET_DEV_INFO #2 rc=%d resp_len=%u\r\n",
+                    warm_rc, (unsigned)gdi_len);
+        /* Drain so we see if any of the pings fire notifications. */
+        uart_printf("[bisect] post pre-RESET pings:\r\n");
+        hailo_fw_drain_d2h_notifications(2);
+    }
+#endif /* HAILO_WIRE_DEBUG */
+
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
             HAILO_CS_IGNORE_APPLICATION_INDEX,
@@ -1041,6 +1088,15 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(RESET) failed (rc=%d)", rc);
         goto fail;
     }
+#ifdef HAILO_WIRE_DEBUG
+    /* #253 (2026-04-23) ECC bisect: drain D2H mailbox between every
+     * step of the load so we can see exactly which RPC triggers the
+     * CPU_ECC_FATAL event (memory_bitmap=0x1000). The drain is cheap
+     * (~5 ms when empty) but 6× per load adds ~30 ms per load in
+     * default builds — hence the HAILO_WIRE_DEBUG gate. */
+    uart_printf("[bisect] post RESET:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
+#endif
     cs_load_stage_set(51);
 
     /* Pre-configure handshake (matches ctxsmoke flow + HailoRT
@@ -1053,6 +1109,15 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CLEAR_CONFIGURED_APPS failed (rc=%d)", rc);
         goto fail;
     }
+#ifdef HAILO_WIRE_DEBUG
+    uart_printf("[bisect] post CLEAR_CONFIGURED_APPS:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
+    /* #253 (2026-04-23): HailoRT's wire capture shows a 4.5 ms wall-
+     * clock gap after CLEAR_APPS before the next RPC. Try matching. */
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(HAILO_HAILORT_GAP_POST_CLEAR_APPS_US);
+    }
+#endif
     cs_load_stage_set(52);
 
     uint32_t hw_consts_len = 0;
@@ -1061,6 +1126,10 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: GET_HW_CONSTS failed (rc=%d)", rc);
         goto fail;
     }
+#ifdef HAILO_WIRE_DEBUG
+    uart_printf("[bisect] post GET_HW_CONSTS:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
+#endif
     cs_load_stage_set(53);
 
     rc = hailo_control_set_network_group_header(&hdr);
@@ -1068,6 +1137,10 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: SET_NETWORK_GROUP_HEADER failed (rc=%d)", rc);
         goto fail;
     }
+#ifdef HAILO_WIRE_DEBUG
+    uart_printf("[bisect] post SET_NETWORK_GROUP_HEADER:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
+#endif
     cs_load_stage_set(53);
 
     const struct {
@@ -1163,9 +1236,27 @@ static int context_switch_load(struct hailo_model_slot *slot,
                  ctxs[i].name, rc);
             goto fail;
         }
+#ifdef HAILO_WIRE_DEBUG
+        uart_printf("[bisect] post SET_CONTEXT_INFO(%s):\r\n", ctxs[i].name);
+        hailo_fw_drain_d2h_notifications(2);
+#endif
         cs_load_stage_set(61 + (int)i * 2);
 
     }
+
+#ifdef HAILO_WIRE_DEBUG
+    /* #253 (2026-04-23): 2.8 ms wall-clock gap in HailoRT's wire
+     * capture between the 4th SET_CONTEXT_INFO (DYNAMIC) and the next
+     * RPC. Candidate: fw's CORE task is still finishing DYNAMIC's
+     * AllowInputDataflow action-list processing (the action that
+     * arms the boundary dataflow scheduler). Firing CHANGE_STATUS
+     * (ENABLED) before that completes may leave the scheduler in an
+     * incomplete state and never issue boundary credits. Tested and
+     * disconfirmed — kept under HAILO_WIRE_DEBUG for future bisects. */
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(HAILO_HAILORT_GAP_POST_DYNAMIC_US);
+    }
+#endif
 
     cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
     /* Pi OS wire capture (2026-04-22, HailoRT v4.23.0 MNIST on pi-5-1
@@ -1188,6 +1279,35 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(ENABLED) failed (rc=%d)", rc);
         goto fail;
     }
+#ifdef HAILO_WIRE_DEBUG
+    uart_printf("[bisect] post CHANGE_STATUS(ENABLED):\r\n");
+    hailo_fw_drain_d2h_notifications(2);
+
+    /* #253 (2026-04-23): HailoRT's wire capture shows 2× (GET_DEVICE_INFO
+     * + IDENTIFY) interleaved after CHANGE_STATUS(ENABLED) and before the
+     * first boundary submit. SLM-OS previously went straight from ENABLED
+     * to CCW upload + submit. Tested this pattern in case fw needs a
+     * specific settle handshake before accepting boundary credits —
+     * disconfirmed but kept here so the bisect infrastructure stays
+     * intact for future investigations. */
+    {
+        struct hailo_control_identify_response idr;
+        uint32_t gdi_len = 0;
+        int r1 = hailo_control_get_device_information(&gdi_len);
+        int r2 = hailo_control_identify(&idr);
+        int r3 = hailo_control_get_device_information(&gdi_len);
+        int r4 = hailo_control_identify(&idr);
+        uart_printf("[settle] post-ENABLED pings: GDI=%d ID=%d GDI=%d ID=%d\r\n",
+                    r1, r2, r3, r4);
+        uart_printf("[bisect] post-ENABLED settle pings:\r\n");
+        hailo_fw_drain_d2h_notifications(2);
+    }
+    /* #253 (2026-04-23): 1.6 ms wall-clock gap in HailoRT between the
+     * last settle ping and the next CHANGE_STATUS. Match it. */
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(HAILO_HAILORT_GAP_POST_SETTLE_PINGS_US);
+    }
+#endif /* HAILO_WIRE_DEBUG */
 
     /* #253: CHANGE_STATUS(ENABLED) returns synchronously but fw's
      * action-list processing (ACTIVATION → BATCH_SWITCHING →
@@ -1266,6 +1386,10 @@ static int context_switch_load(struct hailo_model_slot *slot,
         cs_load_stage_set(74);
     }
 
+#ifdef HAILO_WIRE_DEBUG
+    uart_printf("[bisect] post CCW DMA pull:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
+#endif
     cs_load_stage_set(71);
     INFO("hailo backend: context-switch load OK (CCW=%u B, IN=%u B, OUT=%u B)",
          ccw_bytes,
@@ -1660,20 +1784,6 @@ static int hailo_backend_run(struct inference_device *dev,
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
-    /* Phase 8 experiment (2026-04-22): pre-fill descs 1..N-1 with
-     * the same output buffer so fw's prefetch window has valid
-     * entries past OUT[0]. See HAILO_BOUNDARY_OUT_PREFETCH_DEPTH
-     * for the reference-count rationale. A repeat OUT[0] overwrite
-     * is semantically harmless — for a single-inference run num_avail
-     * only ever reaches 1 so fw never advances past OUT[0]. */
-    for (uint32_t i = 1; i < HAILO_BOUNDARY_OUT_PREFETCH_DEPTH; i++) {
-        (void)hailo_vdma_program_buffer(
-            &slot->boundary_out_list, i,
-            slot->boundary_out_tensor.iova,
-            slot->boundary_out_tensor.tensor_bytes,
-            HAILO_VDMA_HOST_DMA_DATA_ID);
-    }
-
 #ifdef HAILO_WIRE_DEBUG
     /* Phase 8 #253: dump programmed descriptors + channel regs so we
      * can compare byte-for-byte against HailoRT's reference output.
@@ -1695,21 +1805,41 @@ static int hailo_backend_run(struct inference_device *dev,
     hailo_vdma_dump_channel_regs(out_channel, "OUT pre-submit");
 #endif /* HAILO_WIRE_DEBUG */
 
-    /* PHASE 8 KEY FINDING (2026-04-22, instrumented hailo_pci trace on
-     * Pi OS — see docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt):
-     * HailoRT submits the OUTPUT channel's num_avail BEFORE the
-     * INPUT. Every MNIST inference the Linux driver issued 8 OUTPUT
-     * transfers (ch=16 num_avail 1→8) and only THEN a single INPUT
-     * (ch=2 num_avail=2). Without output credits pre-armed fw's
-     * boundary-credit state machine has nowhere to land the result
-     * and refuses to begin consuming the INPUT descriptors — which
-     * is exactly the symptom we hit all the way through the wire-
-     * identical load path.
+    /* PHASE 8 KEY FINDING #2 (2026-04-22, instrumented hailo_pci on
+     * Pi OS yolov6n — see docs/reference/hailort-trace-findings-2026
+     * -04-22.md): HailoRT pre-arms each output channel with N
+     * SEPARATE launch_transfer calls, each one programming desc[i]
+     * and bumping num_avail from i to i+1. Across 8 calls fw's
+     * channel-side num_avail register sees 1, 2, 3, 4, 5, 6, 7, 8
+     * as eight distinct MMIO writes — not a single 0→8 jump.
      *
-     * Fix: write num_avail to the OUTPUT channel first (just the
-     * register RMW, no wait), then submit INPUT and wait for its
-     * completion, then wait for OUTPUT completion. */
-    (void)hailo_vdma_write_num_avail(out_channel, out_num_avail);
+     * Hypothesis: firmware's boundary-credit state machine processes
+     * num_avail bumps incrementally and won't recognize a multi-
+     * credit jump in one MMIO write. PR #350's "program desc[1..7]
+     * + write num_avail=1 once" placed valid descriptors but fw
+     * never saw the credits arrive in the way it expects. This loop
+     * mirrors the HailoRT pattern exactly: one program_buffer +
+     * one num_avail bump per pre-armed credit, OUT first, IN last.
+     *
+     * out_num_avail from program_buffer above is the count for ONE
+     * descriptor; we ignore it here and pre-arm
+     * HAILO_BOUNDARY_OUT_PREFETCH_DEPTH credits sequentially. */
+    for (uint16_t i = 0; i < HAILO_BOUNDARY_OUT_PREFETCH_DEPTH; i++) {
+        if (i > 0) {
+            (void)hailo_vdma_program_buffer(
+                &slot->boundary_out_list, i,
+                slot->boundary_out_tensor.iova,
+                slot->boundary_out_tensor.tensor_bytes,
+                HAILO_VDMA_HOST_DMA_DATA_ID);
+        }
+        (void)hailo_vdma_write_num_avail(out_channel, (uint16_t)(i + 1));
+    }
+    /* `out_num_avail` from program_buffer above is the desc count fw
+     * is expected to *consume* for one inference (== 1 for our single-
+     * desc OUT). Keep that as the wait target — even though we
+     * primed 8 credits via the loop, only ONE descriptor's worth of
+     * data lands per input we submit. wait_proc(target=1) is the
+     * right downstream poll. */
 
     int rc;
     uint64_t t_in_submit  = timer_get_count();
@@ -1719,6 +1849,19 @@ static int hailo_backend_run(struct inference_device *dev,
     if (rc != HAILO_OK) {
         uart_printf("[hailo] run: IN submit_and_wait rc=%d (avail=%u)\r\n",
                     rc, (unsigned)in_num_avail);
+        /* #253 (2026-04-23): read back desc[0..7] status fields from
+         * DRAM. fw writes DESC_DONE / DESC_ERROR into the low byte
+         * when it processes a descriptor; the value tells us whether
+         * fw ever even tried to fetch our descriptors:
+         *   status==0 → fw never touched it (upstream problem:
+         *               channel arming, num_avail latch, scheduler
+         *               not assigning credits)
+         *   DONE      → fw fetched + processed (problem is downstream)
+         *   ERROR     → fw fetched but DMA-faulted (IOVA / inbound)
+         * This splits "fw never tried" from "fw tried and failed",
+         * which num_proc==0 alone can't distinguish. */
+        hailo_vdma_dump_desc_status(&slot->boundary_in_list, "IN", 8);
+        hailo_vdma_dump_desc_status(&slot->boundary_out_list, "OUT", 8);
         /* #253: dump fw debug log + D2H notification buffer on submit
          * failure. The D2H notification contains CONTEXT_SWITCH_RUN_TIME_ERROR
          * events that carry {exit_status, context_idx, action_idx} — exactly

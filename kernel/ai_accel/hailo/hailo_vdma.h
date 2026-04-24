@@ -114,6 +114,18 @@ int hailo_vdma_desc_list_alloc(uint32_t desc_count,
                                struct hailo_vdma_desc_list *out);
 
 /*
+ * Like hailo_vdma_desc_list_alloc but biases toward LOW physical
+ * addresses via the platform's optional dma_alloc_low op. Falls back
+ * to the default allocator on platforms without the low-bias variant.
+ * Use for boundary-channel desc lists when the platform's inbound
+ * translation window only reaches low physical RAM (Pi 5).
+ */
+int hailo_vdma_desc_list_alloc_low(uint32_t desc_count,
+                                   uint16_t desc_page_size,
+                                   bool is_circular,
+                                   struct hailo_vdma_desc_list *out);
+
+/*
  * Release a descriptor list previously returned by
  * hailo_vdma_desc_list_alloc. The handle is zeroed so stale uses
  * fault loudly. Safe to call on an already-zero handle (no-op).
@@ -291,6 +303,33 @@ void hailo_vdma_dump_desc_list(const struct hailo_vdma_desc_list *list,
                                const char *label,
                                uint32_t max_descs);
 void hailo_vdma_dump_channel_regs(uint8_t channel_index, const char *label);
+
+/*
+ * Diagnostic: read back per-descriptor status fields from DRAM after
+ * a stuck submit, so we can tell whether fw fetched our descriptors.
+ *
+ * VDMA hardware writes the per-descriptor status into bits [7:0] of
+ * `remaining_page_size_status` when it processes a descriptor (per
+ * hailo-vdma-common.c:121-137 in the reference driver):
+ *   bit 0 — DESC_DONE   (HW finished processing this descriptor)
+ *   bit 1 — DESC_ERROR  (HW tried but got a DMA error)
+ *
+ * Reading the field after a num_proc-stuck submit answers a key
+ * diagnostic question: did fw ever even try to fetch desc[0]?
+ *   - status == 0 → fw never touched it (problem is upstream:
+ *                    channel arming, num_avail latch, scheduler
+ *                    not assigning credits)
+ *   - DONE set    → fw fetched and processed it (problem is
+ *                    downstream — periph engine accepting data)
+ *   - ERROR set   → fw fetched but got a DMA fault (points at
+ *                    IOVA / inbound-window translation)
+ *
+ * Issues a cache_invalidate over the desc range first because
+ * descriptor write-backs come from device DMA and bypass host cache.
+ */
+void hailo_vdma_dump_desc_status(const struct hailo_vdma_desc_list *list,
+                                 const char *label,
+                                 uint32_t max_descs);
 
 /*
  * Poll `channel_index` until its CONTROL byte reads START (0x01), or

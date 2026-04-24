@@ -513,6 +513,81 @@ void *pmm_alloc_pages(size_t count)
 }
 
 /*
+ * Like pmm_alloc_pages but biased toward low physical addresses.
+ * Walks all free lists at order >= requested order, picks the
+ * lowest-address block, splits down. Used for DMA buffers on
+ * platforms where the PCIe inbound translation only reaches the
+ * bottom of physical RAM (e.g. Pi 5 boundary-submit hypothesis).
+ *
+ * O(n) over total free blocks per call — acceptable because callers
+ * use it for per-load setup, not per-submit.
+ */
+void *pmm_alloc_pages_low(size_t count)
+{
+    if (!buddy_state.initialized) {
+        ERROR("PMM not initialized");
+        return NULL;
+    }
+    if (count == 0) return NULL;
+
+    unsigned int order = log2_ceil(count);
+    if (order > MAX_ORDER) {
+        WARN("PMM: alloc_low %u pages exceeds max order", (unsigned)count);
+        return NULL;
+    }
+
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+
+    /* Linear scan: find the lowest-address block at any order >= order.
+     * Can't break early after finding a match at the requested order —
+     * a block at a higher order that lives at a lower address would
+     * split down to give us a lower result address (buddy-split puts
+     * the left half at the parent's addr). Scan cost is bounded by
+     * total-free-blocks, which the buddy allocator keeps small by
+     * coalescing on free (typically a few dozen across all orders);
+     * the scan completes in microseconds. pmm_lock stays held with
+     * IRQs off throughout — acceptable for the per-load caller, not
+     * safe for per-submit hot paths. */
+    uintptr_t best_addr = (uintptr_t)~0UL;
+    unsigned int best_order = 0;
+    bool found = false;
+    for (unsigned int o = order; o <= MAX_ORDER; o++) {
+        for (struct free_block *blk = buddy_state.free_lists[o];
+             blk != NULL;
+             blk = blk->next) {
+            uintptr_t a = (uintptr_t)blk;
+            if (!found || a < best_addr) {
+                best_addr = a;
+                best_order = o;
+                found = true;
+            }
+        }
+    }
+
+    if (!found) {
+        spin_unlock_irqrestore(&pmm_lock, flags);
+        WARN("PMM: alloc_low: no block of order %u or higher", order);
+        return NULL;
+    }
+
+    /* Remove from current free list, split down to requested order. */
+    free_list_remove(best_addr, best_order);
+    while (best_order > order) {
+        best_order--;
+        buddy_state.split_count++;
+        uintptr_t buddy = best_addr + order_to_size(best_order);
+        set_block_state(buddy, best_order, BLOCK_FREE);
+        free_list_add(buddy, best_order);
+    }
+    set_block_state(best_addr, order, BLOCK_ALLOCATED);
+    buddy_state.free_pages -= order_to_pages(order);
+    buddy_state.alloc_count++;
+
+    spin_unlock_irqrestore(&pmm_lock, flags);
+    return (void *)best_addr;
+}
+
+/*
  * Free a single physical page.
  */
 void pmm_free_page(void *page)

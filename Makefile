@@ -420,6 +420,37 @@ gsp-harness:
 gsp-harness-clean:
 	rm -f $(GSP_HARNESS_OUT)
 
+# ============================================================================
+# hailo-ushim — Linux userspace shim for Hailo Phase 8 debugging
+# ============================================================================
+# Builds a native Linux ELF that drives hailo_pci's ioctl surface
+# directly from userspace. Used to replay SLM-OS's exact boundary-
+# submit byte sequence against real Hailo-8L hardware on Pi 5 from a
+# debuggable Linux context, separating "bug is in our bytes" from
+# "bug is in SLM-OS's bare-metal kernel execution". See
+# host-tools/hailo-ushim/README.md for the motivation.
+
+HAILO_USHIM_OUT := build/host-tools/hailo-ushim
+HAILO_USHIM_SRCS := \
+    host-tools/hailo-ushim/main.c
+
+HAILO_USHIM_CFLAGS := \
+    -std=c11 -Wall -Wextra -O2 -g \
+    -Ihost-tools/hailo-ushim \
+    -D_GNU_SOURCE
+
+.PHONY: hailo-ushim
+hailo-ushim:
+	@mkdir -p $(dir $(HAILO_USHIM_OUT))
+	@echo "Building hailo-ushim (Linux userspace)..."
+	$(CC) $(HAILO_USHIM_CFLAGS) -o $(HAILO_USHIM_OUT) $(HAILO_USHIM_SRCS) -lcrypto
+	@echo "Built $(HAILO_USHIM_OUT)"
+	@echo "Run: sudo $(HAILO_USHIM_OUT) --identify"
+
+.PHONY: hailo-ushim-clean
+hailo-ushim-clean:
+	rm -f $(HAILO_USHIM_OUT)
+
 # Hailo toolchain artifacts (Phase 6.1). The three scripts under
 # scripts/hailo/ produce .onnx, .npy, .har, and .hef files plus
 # DFC-generated logs into $(HAILO_BUILD_DIR). No source files live

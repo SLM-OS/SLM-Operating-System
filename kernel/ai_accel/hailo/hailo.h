@@ -225,6 +225,20 @@ struct hailo_platform_ops {
     void *(*dma_alloc)(size_t size, size_t align, uint64_t *iova_out);
     void  (*dma_free)(void *ptr, size_t size, size_t align);
 
+    /* Optional: allocator variant that biases toward LOW physical
+     * addresses. NULL on platforms where the bias doesn't matter
+     * (e.g. coherent IOMMU systems where any address is reachable).
+     * Caller picks which allocator to invoke per-allocation — there
+     * is no hidden mode flag, so concurrent allocations from different
+     * threads can each request their own bias safely.
+     *
+     * Use case: PCIe inbound translation windows on some platforms
+     * only reach the bottom of physical RAM, so DMA buffers visible
+     * to the device must land there. `dma_free` is shared with
+     * dma_alloc — the buffer can be returned via the same free
+     * regardless of which allocator produced it. */
+    void *(*dma_alloc_low)(size_t size, size_t align, uint64_t *iova_out);
+
     /* Cache maintenance on DMA buffers. Safe no-op on coherent
      * platforms; real work on Pi 5. */
     void (*cache_clean)(const void *addr, size_t size);

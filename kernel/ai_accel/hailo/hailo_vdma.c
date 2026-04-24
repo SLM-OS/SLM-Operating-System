@@ -14,6 +14,17 @@
 #include "uart.h"
 #include <string.h>
 
+#ifdef HAILO_WIRE_DEBUG
+/* Phase 8 cache-flush verification probe (2026-04-23): need direct
+ * access to dc ivac (invalidate-only, no clean) so we can confirm
+ * the bytes fw will DMA-read are actually in DRAM after our
+ * cache_clean. The hailo_platform vtable only exposes clean +
+ * civac (clean-and-invalidate) — neither tells us if a clean
+ * propagated to DRAM, since civac would write back stale-cache
+ * content too. cache_discard_range uses dc ivac. */
+#include "cache.h"
+#endif
+
 /* Power-of-2 check: n is a power of 2 iff n != 0 and n & (n-1) == 0. */
 static inline bool is_power_of_two(uint32_t n)
 {
@@ -34,10 +45,12 @@ uint32_t hailo_vdma_desc_list_alloc_size(uint32_t desc_count)
     return aligned;
 }
 
-int hailo_vdma_desc_list_alloc(uint32_t desc_count,
-                               uint16_t desc_page_size,
-                               bool is_circular,
-                               struct hailo_vdma_desc_list *out)
+/* Shared body — see hailo_vdma_desc_list_alloc{,_low} below. */
+static int desc_list_alloc_inner(uint32_t desc_count,
+                                 uint16_t desc_page_size,
+                                 bool is_circular,
+                                 bool prefer_low,
+                                 struct hailo_vdma_desc_list *out)
 {
     if (!out) return HAILO_ERR_INVAL;
     memset(out, 0, sizeof(*out));
@@ -62,9 +75,15 @@ int hailo_vdma_desc_list_alloc(uint32_t desc_count,
     uint32_t alloc_size = hailo_vdma_desc_list_alloc_size(desc_count);
 
     uint64_t iova = 0;
-    void *cpu = hailo_platform->dma_alloc((size_t)alloc_size,
-                                          (size_t)HAILO_VDMA_DESC_LIST_ALIGN,
-                                          &iova);
+    /* Pick allocator: low-bias variant if requested AND available,
+     * else fall back to default. */
+    void *(*alloc_fn)(size_t, size_t, uint64_t *) = hailo_platform->dma_alloc;
+    if (prefer_low && hailo_platform->dma_alloc_low) {
+        alloc_fn = hailo_platform->dma_alloc_low;
+    }
+    void *cpu = alloc_fn((size_t)alloc_size,
+                         (size_t)HAILO_VDMA_DESC_LIST_ALIGN,
+                         &iova);
     if (!cpu) return HAILO_ERR_NOMEM;
     /* Defensive: HOST_DESC_BASE_ADDR truncates low 16 bits, so an
      * unaligned return silently corrupts the device-side pointer.
@@ -89,6 +108,24 @@ int hailo_vdma_desc_list_alloc(uint32_t desc_count,
     out->desc_page_size   = desc_page_size;
     out->is_circular      = is_circular;
     return HAILO_OK;
+}
+
+int hailo_vdma_desc_list_alloc(uint32_t desc_count,
+                               uint16_t desc_page_size,
+                               bool is_circular,
+                               struct hailo_vdma_desc_list *out)
+{
+    return desc_list_alloc_inner(desc_count, desc_page_size, is_circular,
+                                 /*prefer_low=*/false, out);
+}
+
+int hailo_vdma_desc_list_alloc_low(uint32_t desc_count,
+                                   uint16_t desc_page_size,
+                                   bool is_circular,
+                                   struct hailo_vdma_desc_list *out)
+{
+    return desc_list_alloc_inner(desc_count, desc_page_size, is_circular,
+                                 /*prefer_low=*/true, out);
 }
 
 void hailo_vdma_desc_list_free(struct hailo_vdma_desc_list *list)
@@ -265,6 +302,44 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
         uint32_t first_slot = starting_desc & list->desc_count_mask;
         hailo_platform->cache_clean(&list->descs[first_slot],
             (size_t)descs_needed * sizeof(struct hailo_vdma_descriptor));
+
+#ifdef HAILO_WIRE_DEBUG
+        /* Verify cache_clean propagated all the way to DRAM.
+         *
+         * The fw DMA-reads our descriptor list from physical RAM via
+         * the BCM2712 PCIe inbound translation. If our cacheline got
+         * cleaned only as far as L2 (not to DRAM), or if cache_clean
+         * silently no-op'd, fw would read stale zeros and silently
+         * give up — which exactly matches the Phase 8 ch=2 symptom.
+         *
+         * To probe: cache_discard_range uses `dc ivac` (invalidate
+         * WITHOUT clean). After cache_clean we issue dc ivac so the
+         * cached copy is gone; the next CPU read of the same address
+         * is then forced to fetch from DRAM. If the read returns
+         * what we wrote, cache_clean propagated correctly — DRAM
+         * has the right bytes for fw. If we see zeros or garbage,
+         * the cache flush isn't reaching DRAM and that's the bug.
+         *
+         * Snapshot first, since reading after dc ivac fetches from
+         * DRAM (which is what we're testing). */
+        struct hailo_vdma_descriptor expected = list->descs[first_slot];
+        cache_discard_range(&list->descs[first_slot],
+            sizeof(struct hailo_vdma_descriptor));
+        struct hailo_vdma_descriptor actual = list->descs[first_slot];
+        bool ok = (expected.page_size_desc_control == actual.page_size_desc_control)
+               && (expected.addr_l_rsvd_data_id   == actual.addr_l_rsvd_data_id)
+               && (expected.addr_h                == actual.addr_h)
+               && (expected.remaining_page_size_status == actual.remaining_page_size_status);
+        uart_printf("[vdma-cache] desc[%u] %s: ps_ctrl(c=0x%08x d=0x%08x) "
+                    "addr_l(c=0x%08x d=0x%08x) addr_h(c=0x%08x d=0x%08x)\r\n",
+                    first_slot, ok ? "DRAM-OK" : "DRAM-MISMATCH",
+                    expected.page_size_desc_control,
+                    actual.page_size_desc_control,
+                    expected.addr_l_rsvd_data_id,
+                    actual.addr_l_rsvd_data_id,
+                    expected.addr_h,
+                    actual.addr_h);
+#endif
     }
 
     return (int)descs_needed;
@@ -591,6 +666,34 @@ void hailo_vdma_dump_desc_list(const struct hailo_vdma_desc_list *list,
                     (unsigned)addr_l, (unsigned)data_id,
                     (unsigned)d->addr_h,
                     (unsigned)d->remaining_page_size_status);
+    }
+}
+
+void hailo_vdma_dump_desc_status(const struct hailo_vdma_desc_list *list,
+                                 const char *label,
+                                 uint32_t max_descs)
+{
+    if (!list || !list->descs || !label) return;
+    uint32_t n = (max_descs < list->desc_count) ? max_descs : list->desc_count;
+    if (n == 0) return;
+
+    /* Descriptor write-backs come from device DMA, bypassing host
+     * cache. Without invalidate, we'd see the zero we wrote at
+     * program time even if fw has since updated DRAM. */
+    if (hailo_platform && hailo_platform->cache_invalidate) {
+        hailo_platform->cache_invalidate(list->descs,
+            (size_t)n * sizeof(struct hailo_vdma_descriptor));
+    }
+
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t rps = list->descs[i].remaining_page_size_status;
+        uint8_t  status = (uint8_t)(rps & 0xFFu);
+        const char *done = (status & 0x01u) ? "DONE" : "    ";
+        const char *err  = (status & 0x02u) ? "ERR " : "    ";
+        uart_printf("[desc-status] %s desc[%u] status=0x%02x %s %s "
+                    "rps_full=0x%08x\r\n",
+                    label, (unsigned)i, (unsigned)status, done, err,
+                    (unsigned)rps);
     }
 }
 
