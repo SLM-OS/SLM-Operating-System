@@ -291,6 +291,11 @@ void hailo_fw_drain_d2h_notifications(uint32_t max_events)
 
 struct hailo_model_slot {
     bool                      in_use;
+    /* Audit F-07 (2026-04-24): inflight_runs lets free_model refuse
+     * to tear down a slot whose DMA buffers are currently being used
+     * by hailo_backend_run on another CPU. Mutated only under
+     * slots_lock; run() inc/dec around its per-call work. */
+    uint32_t                  inflight_runs;
     struct hailo_infer_config cfg;
     /* Pad-derived input/output tensor shapes for validate-on-run.
      * Stored as H x W x C to match the HEF pad layout exactly so the
@@ -709,7 +714,13 @@ static int context_switch_load(struct hailo_model_slot *slot,
     if (ccw_bytes == 0)
         ccw_bytes = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
 
-    rc = hailo_tensor_alloc(ccw_bytes, &slot->ccw_tensor);
+    /* Audit F-01 (2026-04-24): CCW tensor + desc list now use the
+     * low-DMA allocators (`_low` variants). The hard-bounded ceiling
+     * in pi5_dma_alloc_common will fail loudly if the request can't
+     * be satisfied below 1 GB. CCW worked from low memory in earlier
+     * traces, so this codifies that observation as a contract instead
+     * of leaving it to allocator luck. */
+    rc = hailo_tensor_alloc_low(ccw_bytes, &slot->ccw_tensor);
     if (rc != HAILO_OK) {
         WARN("hailo backend: CCW tensor alloc failed (rc=%d, bytes=%u)",
              rc, ccw_bytes);
@@ -745,9 +756,9 @@ static int context_switch_load(struct hailo_model_slot *slot,
         rc = HAILO_ERR_INVAL;
         goto fail;
     }
-    rc = hailo_vdma_desc_list_alloc(ccw_desc_count,
-                                    HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
-                                    /*circular=*/false, &slot->ccw_list);
+    rc = hailo_vdma_desc_list_alloc_low(ccw_desc_count,
+                                        HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
+                                        /*circular=*/false, &slot->ccw_list);
     if (rc != HAILO_OK) {
         WARN("hailo backend: CCW desc_list alloc failed (rc=%d)", rc);
         goto fail;
@@ -781,7 +792,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
         uint32_t bulk_bytes = ch_bytes[0];
         if (bulk_bytes == 0)
             bulk_bytes = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
-        rc = hailo_tensor_alloc(bulk_bytes, &slot->ccw_tensor_1);
+        rc = hailo_tensor_alloc_low(bulk_bytes, &slot->ccw_tensor_1);
         if (rc != HAILO_OK) {
             WARN("hailo backend: CCW bulk tensor alloc failed (rc=%d, bytes=%u)",
                  rc, bulk_bytes);
@@ -807,9 +818,9 @@ static int context_switch_load(struct hailo_model_slot *slot,
             rc = HAILO_ERR_INVAL;
             goto fail;
         }
-        rc = hailo_vdma_desc_list_alloc(bulk_dc,
-                                        HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
-                                        /*circular=*/false, &slot->ccw_list_1);
+        rc = hailo_vdma_desc_list_alloc_low(bulk_dc,
+                                            HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE,
+                                            /*circular=*/false, &slot->ccw_list_1);
         if (rc != HAILO_OK) {
             WARN("hailo backend: CCW bulk desc_list alloc failed (rc=%d)", rc);
             goto fail;
@@ -1496,55 +1507,34 @@ static int hailo_backend_load_model(struct inference_device *dev,
     }
 
     /* 3. Pick the largest pads in each direction. See pick_largest_pads
-     * for the multi-head rationale. */
+     * for the multi-head rationale.
+     *
+     * Audit F-05 (2026-04-24): the previous synthetic-pad fallback
+     * (1000-byte ImageNet shape with invented sys_index) is removed.
+     * If pick_largest_pads fails on a real HEF, the right fix is at
+     * the parser layer, not a runtime invention — synthetic transport
+     * geometry can produce OPEN_BOUNDARY_OUTPUT context bytes whose
+     * sys_index doesn't match anything firmware can route, masking
+     * the parser bug as a "no output ever" runtime symptom. */
     const struct hef_pad_info *in_pad, *out_pad;
     uint32_t input_bytes, output_bytes;
     if (pick_largest_pads(&info, &in_pad, &out_pad, &input_bytes, &output_bytes) != 0) {
-        uart_puts("[hailo] load_model: pick_largest_pads failed\r\n");
-        /* Per-pad dump removed — was corrupting UART mid-print under
-         * conditions not yet understood. Simpler puts() is enough to
-         * confirm we reached the fallback. */
-
-        /* Phase 8 diagnostic shortcut. If the parser found an input pad
-         * but no output pad (the DFC 3.33.1 partial_network_groups +
-         * fused_layers story isn't yet fully decoded), substitute a
-         * plausible ImageNet-classifier output shape so the rest of
-         * the load can proceed and hailo_backend_run can be exercised
-         * for performance measurement. The resulting output bytes are
-         * NOT semantically meaningful — this is a timing-only path. */
-        in_pad = NULL;
+        uart_printf("[hailo] load_model: pick_largest_pads failed "
+                    "(pad_count=%u). HEF parser must surface both an "
+                    "input pad and an output pad; refusing load.\r\n",
+                    (unsigned)info.pad_count);
         for (uint32_t i = 0; i < info.pad_count; i++) {
-            if (info.pads[i].is_input && pad_bytes(&info.pads[i]) > 0) {
-                in_pad = &info.pads[i];
-                input_bytes = pad_bytes(&info.pads[i]);
-                break;
-            }
+            const struct hef_pad_info *p = &info.pads[i];
+            uart_printf("  pad[%u] dir=%s sys=%u bytes=%u shape=%ux%ux%u\r\n",
+                        (unsigned)i,
+                        p->is_input ? "in" : "out",
+                        (unsigned)p->sys_index,
+                        (unsigned)pad_bytes(p),
+                        (unsigned)p->height, (unsigned)p->width,
+                        (unsigned)p->features);
         }
-        if (!in_pad) return INF_ERR_BAD_MODEL;
-
-        /* Synthesize a 1000-byte output pad (ImageNet 1000-class INT8
-         * softmax). Uses the input pad's sys_index + 100 as a distinct
-         * stream id so the DMA descriptor wiring doesn't collide. */
-        static struct hef_pad_info synthetic_out;
-        memset(&synthetic_out, 0, sizeof(synthetic_out));
-        synthetic_out.index                  = in_pad->index + 1;
-        synthetic_out.is_input               = false;
-        synthetic_out.has_tensor_shape       = true;
-        synthetic_out.height                 = 1;
-        synthetic_out.width                  = 1;
-        synthetic_out.features               = 1000;
-        synthetic_out.padded_height          = 1;
-        synthetic_out.padded_width           = 1;
-        synthetic_out.padded_features        = 1000;
-        synthetic_out.has_stream_info        = true;
-        synthetic_out.sys_index              = in_pad->sys_index + 100;
-        synthetic_out.core_bytes_per_buffer  = 1000;
-        synthetic_out.core_buffers_per_frame = 1;
-        out_pad      = &synthetic_out;
-        output_bytes = 1000;
-
-        uart_printf("[hailo] load_model: SYNTHETIC output pad (1000 bytes)\r\n");
-    } else
+        return INF_ERR_BAD_MODEL;
+    }
     uart_printf("[hailo] load_model: pads in=%u bytes out=%u bytes\r\n",
                 (unsigned)input_bytes, (unsigned)output_bytes);
 
@@ -1652,17 +1642,31 @@ static int hailo_backend_run(struct inference_device *dev,
     if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return INF_ERR_INVAL;
 
     struct hailo_model_slot *slot = &slots[h - 1];
-    if (!slot->in_use) return INF_ERR_INVAL;
+    /* Audit F-07: take a slot reference under the lock. From here
+     * until inflight_runs is decremented at the bottom, free_model
+     * will refuse and return BUSY rather than tearing down the DMA
+     * buffers, descriptor lists, and parsed HEF state we're about
+     * to touch. */
+    irq_flags_t run_flags = spin_lock_irqsave(&slots_lock);
+    if (!slot->in_use) {
+        spin_unlock_irqrestore(&slots_lock, run_flags);
+        return INF_ERR_INVAL;
+    }
+    slot->inflight_runs++;
+    spin_unlock_irqrestore(&slots_lock, run_flags);
+
+    int run_rc;
+    #define HAILO_RUN_RETURN(rc_) do { run_rc = (rc_); goto run_release; } while (0)
 
     /* Hailo operates on INT8 tensors after DFC quantization. FP32
      * callers need a pre/post quantization layer — that's the
      * ai_policy_hailo wrapper's job, not this backend's. */
     if (in->dtype != INF_DTYPE_INT8 || out->dtype != INF_DTYPE_INT8) {
-        return INF_ERR_BAD_TENSOR;
+        HAILO_RUN_RETURN(INF_ERR_BAD_TENSOR);
     }
     if (in->n_elems != slot->cfg.input_bytes
      || out->n_elems != slot->cfg.output_bytes) {
-        return INF_ERR_BAD_TENSOR;
+        HAILO_RUN_RETURN(INF_ERR_BAD_TENSOR);
     }
 
     /* #338: submit via the slot's load-bound boundary tensors +
@@ -1680,7 +1684,7 @@ static int hailo_backend_run(struct inference_device *dev,
     if (!slot->cs_loaded || slot->boundary_in_tensor.cpu_addr == NULL
                          || slot->boundary_out_tensor.cpu_addr == NULL) {
         int rc = hailo_infer_run(&slot->cfg, in->data, out->data, NULL);
-        return hailo_err_to_inf(rc);
+        HAILO_RUN_RETURN(hailo_err_to_inf(rc));
     }
 
     /* Bounds already checked against slot->cfg.input_bytes/output_bytes
@@ -1694,7 +1698,7 @@ static int hailo_backend_run(struct inference_device *dev,
         WARN("hailo backend: tensor size > boundary buffer (in=%u/%u, out=%u/%u)",
              in->n_elems,  slot->boundary_in_tensor.tensor_bytes,
              out->n_elems, slot->boundary_out_tensor.tensor_bytes);
-        return INF_ERR_BAD_TENSOR;
+        HAILO_RUN_RETURN(INF_ERR_BAD_TENSOR);
     }
 
     /* The VDMA channel indices that receive these submits must be
@@ -1770,7 +1774,7 @@ static int hailo_backend_run(struct inference_device *dev,
         slot->boundary_in_tensor.tensor_bytes,
         HAILO_VDMA_HOST_DMA_DATA_ID);
     if (programmed < 0) {
-        return INF_ERR_NOSUPPORT;
+        HAILO_RUN_RETURN(INF_ERR_NOSUPPORT);
     }
     uint16_t in_num_avail = (uint16_t)programmed;
 
@@ -1780,7 +1784,7 @@ static int hailo_backend_run(struct inference_device *dev,
         slot->boundary_out_tensor.tensor_bytes,
         HAILO_VDMA_HOST_DMA_DATA_ID);
     if (programmed < 0) {
-        return INF_ERR_NOSUPPORT;
+        HAILO_RUN_RETURN(INF_ERR_NOSUPPORT);
     }
     uint16_t out_num_avail = (uint16_t)programmed;
 
@@ -1906,7 +1910,30 @@ run_out:
      * running is also safe: the next submit will fail the same way
      * until the model is freed (which tears the channels down via
      * context_switch_unwind → hailo_backend_free_model). */
-    return hailo_err_to_inf(rc);
+    run_rc = hailo_err_to_inf(rc);
+
+run_release:
+    /* Audit F-07: drop the slot reference taken at function entry.
+     * Every code path between `inflight_runs++` and this label takes
+     * the matching decrement once — invariant `inflight_runs > 0` on
+     * entry to this block. WARN-and-skip on underflow rather than
+     * silently absorbing it: a hit here means a missing inc/dec pair
+     * elsewhere and the right response is a visible log, not a
+     * paper-over. */
+    {
+        irq_flags_t rel_flags = spin_lock_irqsave(&slots_lock);
+        if (slot->inflight_runs == 0) {
+            spin_unlock_irqrestore(&slots_lock, rel_flags);
+            WARN("hailo backend: run_release with inflight_runs==0 "
+                 "(inc/dec pairing bug; slot=%u)",
+                 (unsigned)(h - 1));
+        } else {
+            slot->inflight_runs--;
+            spin_unlock_irqrestore(&slots_lock, rel_flags);
+        }
+    }
+    #undef HAILO_RUN_RETURN
+    return run_rc;
 }
 
 static int hailo_backend_free_model(struct inference_device *dev,
@@ -1928,6 +1955,15 @@ static int hailo_backend_free_model(struct inference_device *dev,
     if (!slot->in_use) {
         spin_unlock_irqrestore(&slots_lock, flags);
         return INF_ERR_INVAL;
+    }
+    /* Audit F-07: refuse the free if a run() is in flight on this
+     * slot. Returning EBUSY (mapped to INF_ERR_BUSY) is correct
+     * behavior — the caller can retry after the inference completes,
+     * or the slot can stay loaded until the run releases its
+     * reference. We do NOT spin-wait under the IRQ-disabling lock. */
+    if (slot->inflight_runs > 0) {
+        spin_unlock_irqrestore(&slots_lock, flags);
+        return INF_ERR_BUSY;
     }
     stash = *slot;
     memset(slot, 0, sizeof(*slot));
@@ -1956,6 +1992,27 @@ uint32_t hailo_backend_in_use_slots(void)
         if (slots[i].in_use) n++;
     spin_unlock_irqrestore(&slots_lock, flags);
     return n;
+}
+
+/* Audit F-07: test-only inflight_runs poke. Lets a unit test simulate
+ * "run() is in flight" without actually firing the full inference
+ * path, so the free_model BUSY contract can be exercised in QEMU.
+ * Returns the previous count, or UINT32_MAX for an out-of-range or
+ * unloaded handle. */
+uint32_t hailo_backend_test_set_inflight(
+    inference_model_handle_t h, uint32_t count)
+{
+    if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return UINT32_MAX;
+    struct hailo_model_slot *slot = &slots[h - 1];
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
+    if (!slot->in_use) {
+        spin_unlock_irqrestore(&slots_lock, flags);
+        return UINT32_MAX;
+    }
+    uint32_t prev = slot->inflight_runs;
+    slot->inflight_runs = count;
+    spin_unlock_irqrestore(&slots_lock, flags);
+    return prev;
 }
 
 /* Test-only: expose load-time boundary IOVAs so run-path tests can

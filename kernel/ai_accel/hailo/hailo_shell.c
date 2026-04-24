@@ -47,6 +47,7 @@
 #include "vfs.h"
 #ifdef CONFIG_AI_SCHEDULER
 #include "inference_device.h"
+#include "inference_device_hailo.h"
 #include "ai_policy_hailo.h"
 #include "ai_types.h"
 #include "timer.h"
@@ -853,6 +854,32 @@ static int cmd_hailo(int argc, char *argv[])
                     if (lrc != INF_OK) {
                         shell_printf("hailo: sched: load_model failed (%d)\n", lrc);
                     } else {
+                        /* Audit F-08 (2026-04-24): query the backend for
+                         * the actual transport byte counts, instead of
+                         * pinning input_n/output_n to AI_STATE_DIM /
+                         * AI_SCHED_N_ACTIONS. The semantic policy
+                         * dimension stays AI_STATE_DIM/AI_SCHED_N_ACTIONS;
+                         * the backend's transport buffers can be larger
+                         * (HEF padding) and `ai_schedule_mlp_via_hailo`
+                         * already pads/clamps appropriately. */
+                        uint32_t in_b = AI_STATE_DIM;
+                        uint32_t out_b = AI_SCHED_N_ACTIONS;
+                        int sz_rc = hailo_backend_model_sizes(h, &in_b, &out_b);
+                        if (sz_rc != 0) {
+                            in_b = AI_STATE_DIM;
+                            out_b = AI_SCHED_N_ACTIONS;
+                        }
+                        if (in_b < AI_STATE_DIM || out_b < AI_SCHED_N_ACTIONS) {
+                            shell_printf("hailo: sched: HEF transport too "
+                                         "small for policy (in=%u<%u or "
+                                         "out=%u<%u); falling back to "
+                                         "policy dims\n",
+                                         in_b, AI_STATE_DIM,
+                                         out_b, AI_SCHED_N_ACTIONS);
+                            in_b = AI_STATE_DIM;
+                            out_b = AI_SCHED_N_ACTIONS;
+                        }
+
                         /* Prefer HEF-derived quant (Phase 6.2b) when
                          * the parser captured per-pad scale+zp. Walk
                          * the pads to find the first input + first
@@ -874,20 +901,21 @@ static int cmd_hailo(int argc, char *argv[])
                                 h,
                                 qin->qp_scale_raw,  qin->qp_zp_raw,
                                 qout->qp_scale_raw, qout->qp_zp_raw,
-                                AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+                                in_b, out_b);
                         }
                         if (rc_quant == 0) {
                             shell_printf("hailo: sched: model loaded "
                                          "(handle=%d), ai_policy_hailo armed "
-                                         "with HEF quant\n", (int)h);
+                                         "with HEF quant (in=%u out=%u)\n",
+                                         (int)h, in_b, out_b);
                         } else {
                             ai_policy_hailo_set_model_placeholder(
-                                h, AI_STATE_DIM, AI_SCHED_N_ACTIONS);
+                                h, in_b, out_b);
                             shell_printf("hailo: sched: model loaded "
                                          "(handle=%d), ai_policy_hailo armed "
-                                         "with placeholder quant "
-                                         "(HEF quant_info %s)\n",
-                                         (int)h,
+                                         "with placeholder quant (in=%u out=%u, "
+                                         "HEF quant_info %s)\n",
+                                         (int)h, in_b, out_b,
                                          (qin && qin->has_quant_info &&
                                           qout && qout->has_quant_info)
                                              ? "rejected (invalid scale)"
@@ -1123,9 +1151,6 @@ static int cmd_hailo(int argc, char *argv[])
      *   hailo runmodel <handle> [iterations]
      */
     if (argc >= 2 && strcmp(argv[1], "runmodel") == 0) {
-        extern int hailo_backend_model_sizes(int32_t h,
-                                             uint32_t *in_bytes,
-                                             uint32_t *out_bytes);
         if (argc < 3) {
             shell_puts("usage: hailo runmodel <handle> [iterations]\n");
             return 0;

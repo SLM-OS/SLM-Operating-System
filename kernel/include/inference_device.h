@@ -57,6 +57,7 @@
 #define INF_ERR_BAD_TENSOR      (-6)   /* tensor shape/dtype mismatch */
 #define INF_ERR_TIMEOUT         (-7)   /* device poll exceeded budget */
 #define INF_ERR_FULL            (-8)   /* registry or model table full */
+#define INF_ERR_BUSY            (-9)   /* slot in use; operation refused */
 
 /* -------------------------------------------------------------------------- */
 /* Tensors                                                                     */

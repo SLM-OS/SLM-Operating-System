@@ -34,6 +34,15 @@ struct ai_policy_stats {
     uint32_t action_hist[AI_SCHED_N_ACTIONS];  /* Per-action index counts */
 };
 
+/* Audit F-08 (2026-04-24): static stack budget for the Hailo policy
+ * transport buffers. Policy state quantizes to AI_STATE_DIM int8s but
+ * the HEF transport may pad up. 256 bytes each comfortably covers the
+ * known scheduler HEFs while keeping the per-call stack frame under 1
+ * KB combined with FP_CONTEXT_SAVE. Promoted to file scope per code
+ * review on PR #355 so the budget is discoverable from a single
+ * location instead of buried in a function. */
+#define HAILO_AI_TRANSPORT_MAX  256u
+
 static struct ai_policy_stats ai_mlp_stats;
 static struct ai_policy_stats ai_ppo_stats;
 
@@ -502,9 +511,45 @@ static int ai_schedule_mlp_via_hailo(const float *state,
         return -1;
     }
 
-    /* Stack buffers: 108 bytes in, 42 bytes out. No heap touch. */
-    int8_t in_int8[AI_STATE_DIM];
-    int8_t out_int8[AI_SCHED_N_ACTIONS];
+    /* Audit F-08 (2026-04-24): backend transport buffers can exceed
+     * the policy's logical AI_STATE_DIM / AI_SCHED_N_ACTIONS due to
+     * HEF padding. Size the stack buffers to a generous fixed cap so
+     * the HEF transport size determines the in/out byte count, not
+     * the policy semantic dim. quantize_fp32_to_int8 still only
+     * writes AI_STATE_DIM int8s; the trailing in_int8[AI_STATE_DIM..]
+     * stays zero (buffer is stack-zeroed below) which is the conservative
+     * pad value for HEFs whose extra input bytes are alignment slack. */
+    uint32_t in_n  = ai_hailo_model.input_n  ? ai_hailo_model.input_n
+                                             : (uint32_t)AI_STATE_DIM;
+    uint32_t out_n = ai_hailo_model.output_n ? ai_hailo_model.output_n
+                                             : (uint32_t)AI_SCHED_N_ACTIONS;
+    if (in_n > HAILO_AI_TRANSPORT_MAX || out_n > HAILO_AI_TRANSPORT_MAX) {
+        /* HEF demands more transport than we statically reserve. Fall
+         * back to the heuristic; warn ONCE so the operator sees the
+         * policy demotion (PR #355 review). Subsequent loads/calls of
+         * a too-big HEF stay silent — the WARN is to surface the
+         * downgrade, not flood the log on every assign_cpu.
+         *
+         * Atomic exchange (relaxed ordering — we don't need any
+         * memory barrier, just dedupe of the WARN call) so concurrent
+         * cross-CPU calls into this path emit the WARN exactly once
+         * total instead of once per CPU. Same `__atomic_*` style as
+         * the loaded flag above. */
+        static bool transport_too_big_warned = false;
+        if (!__atomic_exchange_n(&transport_too_big_warned, true,
+                                 __ATOMIC_RELAXED)) {
+            WARN("AI Hailo: HEF transport (in=%u out=%u) exceeds "
+                 "HAILO_AI_TRANSPORT_MAX=%u; ai_hailo policy will "
+                 "fall back to heuristic on every assign_cpu. Raise "
+                 "HAILO_AI_TRANSPORT_MAX in sched_ai.c if this HEF "
+                 "is intended for AI scheduling.",
+                 in_n, out_n, HAILO_AI_TRANSPORT_MAX);
+        }
+        return -1;
+    }
+
+    int8_t in_int8[HAILO_AI_TRANSPORT_MAX]  = {0};
+    int8_t out_int8[HAILO_AI_TRANSPORT_MAX] = {0};
 
     quantize_fp32_to_int8(state, in_int8, AI_STATE_DIM,
                           ai_hailo_model.input_scale,
@@ -512,17 +557,17 @@ static int ai_schedule_mlp_via_hailo(const float *state,
 
     inference_tensor_t in = {
         .data    = in_int8,
-        .n_elems = ai_hailo_model.input_n,
+        .n_elems = in_n,
         .dtype   = INF_DTYPE_INT8,
         .rank    = 1,
-        .shape   = { (uint16_t)ai_hailo_model.input_n, 0, 0, 0 },
+        .shape   = { (uint16_t)in_n, 0, 0, 0 },
     };
     inference_tensor_t out = {
         .data    = out_int8,
-        .n_elems = ai_hailo_model.output_n,
+        .n_elems = out_n,
         .dtype   = INF_DTYPE_INT8,
         .rank    = 1,
-        .shape   = { (uint16_t)ai_hailo_model.output_n, 0, 0, 0 },
+        .shape   = { (uint16_t)out_n, 0, 0, 0 },
     };
 
     int rc = inference_run(cached_hailo_dev, ai_hailo_model.handle, &in, &out);

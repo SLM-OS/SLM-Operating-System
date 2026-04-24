@@ -66,6 +66,37 @@ _Static_assert(sizeof(struct hailo_vdma_descriptor) == 16,
  * single contiguous 64 KB-aligned DMA buffer. The VDMA engine
  * reads from `iova`; we populate through `descs`. `desc_count_mask`
  * is `desc_count - 1` — used for `(idx & mask)` ring-buffer walks.
+ *
+ * Cache ownership contract (audit F-02, 2026-04-24):
+ *
+ * Each descriptor is a coherent object with both host-written fields
+ * (PageSize_DescControl, AddrL_rsvd_DataID, AddrH) and a device-
+ * written field (RemainingPageSize_Status). The list lives in
+ * cacheable PMM memory; manual maintenance bridges the host/device
+ * split:
+ *
+ *   1. CPU writes descriptor fields via `descs[i] = ...` or
+ *      hailo_vdma_program_descriptor / hailo_vdma_program_buffer.
+ *   2. CPU runs `cache_clean(&descs[i..i+n], n*sizeof(descriptor))`
+ *      to push the new bytes through to PoC. After this point the
+ *      CPU MUST NOT write the same descriptor without a paired
+ *      device-known-done synchronization (otherwise a dirty L2 line
+ *      can later be flushed and stomp a device write).
+ *   3. CPU publishes by ringing the channel doorbell (writing
+ *      num_avail). Device reads the descriptor.
+ *   4. Device writes RemainingPageSize_Status when it completes
+ *      (or errors).
+ *   5. CPU runs `cache_invalidate(&descs[i..i+n], ...)` before
+ *      reading status. Skipping this invalidate causes stale L1/L2
+ *      contents (e.g. the zero we wrote at allocation) to mask the
+ *      device's status update.
+ *
+ * Future migration: if a coherent or non-cacheable mapping becomes
+ * available for descriptor lists (Pi 5 has ncmem_alloc but it's a
+ * 2 MB bump-allocator with no free), the manual clean/invalidate
+ * dance can be eliminated. Tensors stay cacheable either way —
+ * they're one-way buffers and the existing prepare_for_device /
+ * prepare_for_host pattern is sufficient.
  */
 struct hailo_vdma_desc_list {
     struct hailo_vdma_descriptor *descs;   /* host-cpu pointer */
@@ -284,6 +315,19 @@ void hailo_vdma_channel_stop(uint8_t channel_index);
  *
  * Returns HAILO_OK on completion, HAILO_ERR_TIMEOUT if num_proc
  * didn't catch up, or HAILO_ERR_INVAL on bad args.
+ *
+ * Audit F-06 (2026-04-24) — known limitation: this API operates on
+ * ABSOLUTE `num_avail` / `num_proc` values, not on per-channel
+ * cursor deltas. That's correct for first-inference bring-up and
+ * for any sequence whose lifetime cumulative descriptor count stays
+ * below 65536 (the 16-bit register width). For long-lived steady-
+ * state inference where counters wrap, a software cursor that
+ * tracks (producer_idx, expected_completion_idx, wrap_count) is
+ * needed instead. Adding that cursor while #253 is unresolved would
+ * change the variable under test; once #253 lifts and steady-state
+ * throughput becomes the target, this absolute-counter API should
+ * be replaced by a cursor-aware path. Single-shot bring-up callers
+ * keep using the current API.
  */
 int hailo_vdma_submit_and_wait(uint8_t channel_index,
                                uint16_t new_num_avail,

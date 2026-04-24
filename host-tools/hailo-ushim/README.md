@@ -33,19 +33,27 @@ This tool lets us:
    in the bytes themselves (which would contradict the Pi OS wire
    capture finding — so a negative result here is also informative)
 
-## Scope (v1)
+## Scope
 
-Not a full port of the SLM-OS Hailo backend. Just enough to:
+**Currently implemented (v1, 2026-04-24):**
 
 - Open `/dev/hailo0`
-- Issue `HAILO_FW_CONTROL` with arbitrary payload
-- Allocate DMA buffers via `HAILO_VDMA_BUFFER_MAP`
+- Issue `HAILO_FW_CONTROL` with the IDENTIFY opcode (`--identify`)
+
+**Planned (audit F-10, not yet implemented):**
+
+- Allocate DMA buffers via `HAILO_VDMA_BUFFER_MAP` (low + high
+  pools, to A/B-test the F-01 reachability hypothesis)
 - Create desc lists via `HAILO_DESC_LIST_CREATE`
 - Program descriptors via `HAILO_DESC_LIST_PROGRAM`
-- Submit transfers via `HAILO_VDMA_LAUNCH_TRANSFER`
+- Submit transfers via `HAILO_VDMA_LAUNCH_TRANSFER` and report
+  whether `num_proc` advances (`--submit-probe`)
 
-That's enough to replay SLM-OS's `hailo_backend_run` flow end-to-end
-from Linux userspace.
+The submit-probe path would be the fastest A/B oracle for #253 —
+it would let us isolate whether the boundary-input descriptor stall
+is caused by SLM-OS's bare-metal kernel context (not seeing the
+descriptor) or by the bytes themselves (which would also fail when
+submitted through the official `hailo_pci` IOCTLs).
 
 ## Build
 
@@ -60,10 +68,9 @@ Produces `build/host-tools/hailo-ushim` — a regular Linux ELF.
 ```bash
 # Identify the board (sanity check that /dev/hailo0 is there)
 sudo ./build/host-tools/hailo-ushim --identify
-
-# Full MNIST-style boundary submit probe (replays SLM-OS's sequence)
-sudo ./build/host-tools/hailo-ushim --submit-probe
 ```
+
+`--submit-probe` is not yet implemented (see Scope above).
 
 Requires:
 - `hailo_pci` kernel module loaded (fine to be the instrumented
