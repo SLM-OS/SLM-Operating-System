@@ -139,7 +139,7 @@ int hailo_dev_launch_transfer(int fd,
                               uint8_t channel_index,
                               uintptr_t desc_handle,
                               uint32_t starting_desc,
-                              uintptr_t mapped_handle,
+                              const void *user_addr,
                               uint32_t transfer_size)
 {
     struct hailo_vdma_launch_transfer_params p;
@@ -153,7 +153,7 @@ int hailo_dev_launch_transfer(int fd,
                                            * should_bind=true */
     p.buffers_count            = 1;
     p.buffers[0].buffer_type   = HAILO_DMA_USER_PTR_BUFFER;
-    p.buffers[0].addr_or_fd    = mapped_handle;
+    p.buffers[0].addr_or_fd    = (uintptr_t)user_addr;
     p.buffers[0].size          = transfer_size;
     p.first_interrupts_domain  = HAILO_VDMA_INTERRUPTS_DOMAIN_NONE;
     p.last_interrupts_domain   = HAILO_VDMA_INTERRUPTS_DOMAIN_HOST;

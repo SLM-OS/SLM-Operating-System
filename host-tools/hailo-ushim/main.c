@@ -276,7 +276,7 @@ static int cmd_submit_probe(int fd)
      *    to fetch the descriptors. */
     rc = hailo_dev_launch_transfer(fd, PROBE_CHANNEL_INDEX,
                                    desc_handle, /*starting_desc=*/0,
-                                   mapped_handle,
+                                   user_buf,
                                    (uint32_t)buf_size);
     if (rc < 0) {
         fprintf(stderr, "[6] HAILO_VDMA_LAUNCH_TRANSFER failed: %s\n",

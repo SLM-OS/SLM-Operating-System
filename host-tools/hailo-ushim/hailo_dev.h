@@ -97,11 +97,14 @@ int hailo_dev_enable_channel(int fd, uint8_t channel_index,
 int hailo_dev_disable_channel(int fd, uint8_t channel_index);
 
 /*
- * Kick a transfer on `channel_index`. Driver computes num_avail
- * from the buffer size + desc_page_size. For a simple single-
- * buffer transfer: buffers_count=1, buffer_type=USER, addr_or_fd
- * is the mapped_handle (yes — same as the desc-list-program path,
- * the launch_transfer ioctl re-looks-up the buffer by handle).
+ * Kick a transfer on `channel_index`. For HAILO_DMA_USER_PTR_BUFFER
+ * (what this wrapper always uses), the driver's launch_transfer
+ * ioctl reads `addr_or_fd` as the USERSPACE POINTER — not the
+ * mapped_handle — to cross-check that the buffer matches what was
+ * bound via DESC_LIST_PROGRAM. Passing the mapped_handle in the
+ * addr_or_fd slot produces EFAULT because the kernel tries to
+ * copy_from_user on the (small-integer) handle value. Caller
+ * passes the same userspace buffer pointer it fed to buffer_map.
  *
  * Returns 0 if the ioctl accepted the launch parameters (not that
  * the device completed the transfer). Pair with interrupts_wait to
@@ -111,7 +114,7 @@ int hailo_dev_launch_transfer(int fd,
                               uint8_t channel_index,
                               uintptr_t desc_handle,
                               uint32_t starting_desc,
-                              uintptr_t mapped_handle,
+                              const void *user_addr,
                               uint32_t transfer_size);
 
 /*
