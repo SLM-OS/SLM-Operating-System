@@ -1052,6 +1052,23 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * pre-configure handshake before accepting network-group-
      * level setup. */
     cs_load_stage_set(50);
+    /* #253 (2026-04-23): HailoRT wire capture shows IDENTIFY (0x00,
+     * APP_CPU) is sent before the first CORE_CPU RPC. SLM-OS's load
+     * jumps straight to CHANGE_STATUS(RESET), which triggers a
+     * CPU_ECC_ERROR on fw v4.23 (memory_bitmap=0x1000). Theory: the
+     * APP_CPU IDENTIFY warms up fw state that RESET depends on, and
+     * skipping it causes fw to access uninit memory during RESET
+     * processing. Mirrors HailoRT's pre-RESET sequence exactly for
+     * this first call. */
+    {
+        struct hailo_control_identify_response idr;
+        int warm_rc = hailo_control_identify(&idr);
+        uart_printf("[warmup] pre-RESET IDENTIFY rc=%d\r\n", warm_rc);
+        /* Drain so we see if IDENTIFY itself fires anything. */
+        uart_printf("[bisect] post IDENTIFY (warmup):\r\n");
+        hailo_fw_drain_d2h_notifications(2);
+    }
+
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
             HAILO_CS_IGNORE_APPLICATION_INDEX,
