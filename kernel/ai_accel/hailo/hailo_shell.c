@@ -418,6 +418,18 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
 
     shell_printf("  [6/8] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes)\n",
                  (unsigned)bufs.batch_switching_len);
+#ifdef HAILO_WIRE_DEBUG
+    /* PR #359 follow-up: dump full BATCH_SWITCHING body so the
+     * userspace probe can replay the exact bytes. Cap at 256 B
+     * (BATCH_SWITCHING is typically tiny — 16 B for ctxsmoke). */
+    {
+        uint32_t dump_len = (bufs.batch_switching_len > 256u)
+                          ? 256u : (uint32_t)bufs.batch_switching_len;
+        shell_hex_dump_bytes("BSW",
+                             (const uint8_t *)bufs.batch_switching,
+                             dump_len);
+    }
+#endif
     rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_BATCH_SWITCHING,
                                         bufs.batch_switching,
                                         (uint32_t)bufs.batch_switching_len);
@@ -470,6 +482,15 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
                  (unsigned)bufs.preliminary_len);
     shell_printf("        CCW buffer iova=0x%lx\n",
                  (unsigned long)ccw_list.iova);
+#ifdef HAILO_WIRE_DEBUG
+    {
+        uint32_t dump_len = (bufs.preliminary_len > 256u)
+                          ? 256u : (uint32_t)bufs.preliminary_len;
+        shell_hex_dump_bytes("PRE",
+                             (const uint8_t *)bufs.preliminary,
+                             dump_len);
+    }
+#endif
     rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_PRELIMINARY,
                                         bufs.preliminary,
                                         (uint32_t)bufs.preliminary_len);
@@ -478,6 +499,17 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     if (!dcc0) {
         shell_printf("  [8/8] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
                      (unsigned)bufs.dynamic_len);
+#ifdef HAILO_WIRE_DEBUG
+        /* DYNAMIC can be large (528 B observed in HailoRT trace).
+         * Print all bytes — the probe needs the full sequence. */
+        {
+            uint32_t dump_len = (bufs.dynamic_len > 1024u)
+                              ? 1024u : (uint32_t)bufs.dynamic_len;
+            shell_hex_dump_bytes("DYN",
+                                 (const uint8_t *)bufs.dynamic,
+                                 dump_len);
+        }
+#endif
         rc = hailo_control_set_context_info(HAILO_CS_CONTEXT_TYPE_DYNAMIC,
                                             bufs.dynamic,
                                             (uint32_t)bufs.dynamic_len);
