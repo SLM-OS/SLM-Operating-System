@@ -252,6 +252,38 @@ D2H notification. This ordering has been consistent across ~50 runs.
    which fw task, which access address, which source instruction
    pointer? That would likely short-circuit the whole investigation.
 
+## Update 2026-04-24 (post-bisect): root cause identified — DO NOT SEND THIS TICKET AS-IS
+
+The bisect described below correctly localized #253 to "the
+relationship between the CS handshake bodies and the boundary-input
+data path". A subsequent capture of our production
+`hailo_backend_run` path with `HAILO_WIRE_DEBUG=ON` revealed that
+our context translator emits **zero** ENABLE_LCU, TRIGGER_SEQUENCER,
+WAIT_SEQUENCER, and DISABLE_LCU actions in the DYNAMIC context for
+MNIST. HailoRT's MNIST DYNAMIC body is 161 B with these actions;
+ours is 122 B with only ALLOW_INPUT_DATAFLOW. fw configures the
+input boundary correctly but never starts the compute graph, so
+ch=2 num_proc stays 0.
+
+**Fix is in our `hailo_cs_translator.c`. Tracking under #361.**
+
+If you do send this ticket to Hailo after fixing the LCU emission,
+the right ask is:
+
+> Is there documentation on which CS actions are required for a
+> minimum working compute graph (vs just configuring input/output
+> boundary channels)? Our translator was emitting OPEN_BOUNDARY and
+> ALLOW_INPUT_DATAFLOW correctly but missing ENABLE_LCU /
+> TRIGGER_SEQUENCER / WAIT_SEQUENCER. Bisecting this took several
+> months because fw accepts the incomplete bodies with
+> major_status=0 and silently waits at boundary submit.
+
+The bisect findings below remain accurate (descriptor geometry +
+CS wire format + CCW upload all work fine via your driver), but the
+"root cause unknown" framing is now wrong.
+
+---
+
 ## Userspace-shim bisect (2026-04-24)
 
 To narrow the problem space, we built a minimal Linux userspace
