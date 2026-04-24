@@ -33,8 +33,12 @@
 /* Production helpers from inference_device_hailo.h; test-only helpers
  * (reset_slots_for_tests, get_boundary_iovas_for_tests,
  * test_set_inflight) from the dedicated test-helpers header
- * (PR #355 review round 2). */
+ * (PR #355 review round 2). The HAILO_TEST_HELPERS_PERMITTED define
+ * is the test-helpers header's compile-time opt-in (PR #355 review
+ * round 3) — production code that accidentally includes the test
+ * header without this token gets a clear #error. */
 #include "inference_device_hailo.h"
+#define HAILO_TEST_HELPERS_PERMITTED 1
 #include "inference_device_hailo_test_helpers.h"
 extern int inference_device_hailo_register(void);
 #include "test_harness.h"

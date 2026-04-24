@@ -10,9 +10,24 @@
  * resolve in both test and non-test linkage, but normal callers
  * should depend on inference_device_hailo.h instead.
  *
- * Created PR #355 review round 2 (2026-04-24) to keep the production
- * header free of test-only declarations.
+ * Compile-time guard: callers MUST define HAILO_TEST_HELPERS_PERMITTED
+ * before including this header. The token isn't a build-system flag
+ * (test_hailo.c is always-compiled even outside ENABLE_BOOT_TESTS, so
+ * a CMake-level gate would break the non-test build). It's a per-file
+ * opt-in: a developer accidentally pulling test helpers into
+ * production code has to actively type the permission macro, which
+ * stands out in code review.
+ *
+ * Created PR #355 review round 2 (2026-04-24); compile-time guard
+ * added in round 3.
  */
+
+#ifndef HAILO_TEST_HELPERS_PERMITTED
+#  error "inference_device_hailo_test_helpers.h is test-only. " \
+         "Production callers should include inference_device_hailo.h " \
+         "instead. If this is genuinely test code, define " \
+         "HAILO_TEST_HELPERS_PERMITTED before including this header."
+#endif
 
 #ifndef INFERENCE_DEVICE_HAILO_TEST_HELPERS_H
 #define INFERENCE_DEVICE_HAILO_TEST_HELPERS_H
