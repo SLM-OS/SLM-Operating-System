@@ -142,6 +142,16 @@ ch=2 stays 0 indefinitely. Reading back the descriptor list (after a
 host cache invalidate) shows status=0x00 on every descriptor — fw
 never tried to fetch them.
 
+## Ordering of ECC events vs host RPCs
+
+To pre-empt the "is the ECC caused by your RPC or already in flight?"
+question: the `D2H_EVENT` mailbox at `BAR4 + 0x640` is drained and
+confirmed empty immediately before each RPC. The ECC notification
+appears only *after* the FW_CONTROL response has been read back and
+decoded. FW_CONTROL responses themselves report status=0 (success) —
+firmware acknowledges the RPC, then posts the ECC event as a separate
+D2H notification. This ordering has been consistent across ~50 runs.
+
 ## What we ruled out (confirmed identical to HailoRT)
 
 - **Wire bytes**: byte-for-byte identical for `CHANGE_STATUS(RESET)`
@@ -176,6 +186,18 @@ never tried to fetch them.
   programmed before we write to `0xE0980`.
 - **Per-channel IRQ masks armed before fw trigger**: yes,
   `BCS_SRC/DST_INTERRUPT_PER_CHANNEL = 0xFFFFFFFF` set pre-trigger.
+- **Boundary descriptor page size**: we use 512 B (input) / 64 B
+  (output) / 512 B (CCW) — all well under `hailo_pci`'s Pi 5
+  `max_desc_page_size=4096` cap (and under the recommended 16384),
+  matching HailoRT's observed values byte-for-byte from the wire
+  capture. 4-KB-page and 64-KB-alignment concerns ruled out.
+- **Thread #6601 context**: we saw Hailo engineer Nadav's forum
+  comment that `memory_bitmap` bit 12 can also fire under thermal
+  stress. Pi 5 + AI HAT+ is actively cooled (official case fan),
+  chip temp is steady under load, and the event fires on the *first*
+  RPC from cold boot before any sustained compute — so unless bit 12
+  is multiplexed across very different failure causes, thermal
+  doesn't fit our repro.
 
 ## Specific questions
 
@@ -184,26 +206,51 @@ never tried to fetch them.
    physical memory region, an L2 cache way, an SRAM bank? The
    consistent value across runs (always exactly `0x00001000`)
    suggests a single named region rather than uninitialized error
-   bits.
+   bits. If you can share the full bit → region mapping for fw
+   v4.23 on Hailo-8L, that would let us cross-reference other
+   `memory_bitmap` values we see (e.g. 0x02000054 in `body[1]`
+   of the notification — if that's also a region mask, it's a
+   much wider spread than bit 12 alone).
 
 2. **What host-side action is required for firmware to safely access
    that region?** Our `hailo_pci`-equivalent does the same probe-time
    register writes, the same fw upload sequence, the same trigger
    write, and signals the same MSI infrastructure. What's missing?
 
-3. **Are these CPU_ECC events ever harmless** (e.g., HailoRT triggers
+3. **Does `libhailort` issue a `DISABLE_NOTIFICATION` / health-monitor
+   mask RPC during init?** We see in `hailo-pcie.c` that the IOCTL
+   surface exposes `HAILO_DISABLE_NOTIFICATION`, but we haven't been
+   able to confirm whether HailoRT actually *uses* it during normal
+   inference init (vs. reserving it for diagnostics). If userspace
+   masks CPU_ECC notifications early in the load sequence, a bare-
+   metal driver that never issues that mask will see notifications
+   that HailoRT users never do — even if the underlying ECC
+   condition is present in both cases. Our MMIO-layer wire capture
+   can't decode FW_CONTROL payloads, so this is invisible to our
+   diff.
+
+4. **Are these CPU_ECC events ever harmless** (e.g., HailoRT triggers
    them too but the kernel driver silently ACKs them and inference
    still works)? Our reading of the open-source driver suggests not
    — the events are critical-priority and `hailo_pcie_handle_d2h_irq`
-   surfaces them — but we'd like to confirm.
+   surfaces them — but we'd like to confirm. Thread #6601 suggests
+   bit 12 can be set by thermal stress (see note in "What we ruled
+   out" above), which would imply at least one scenario where the
+   same bit means "non-fatal" vs "fatal" depending on context.
 
-4. **Is there any documentation for the post-fw-boot, pre-load-network
+5. **Is there any documentation for the post-fw-boot, pre-load-network
    handshake** beyond what's visible in the open-source `hailo_pci`
    driver (`hailo-pcie.c`, `hailo-pcie-common.c`, `hailo-vdma-common.c`)?
    We've line-by-line audited those and replicated the visible logic;
    if there's a step that lives only in `libhailort` userspace
    (closed source) and matters at the kernel-equivalent layer, that's
    probably where our gap is.
+
+6. **Firmware logger access**: is there a way to turn on verbose
+   firmware logging (beyond the `FW_LOGGER` RPC surface visible in
+   the driver) that would surface *why* the ECC event fires — e.g.,
+   which fw task, which access address, which source instruction
+   pointer? That would likely short-circuit the whole investigation.
 
 ## Artifacts
 
@@ -224,9 +271,10 @@ We can share (private channel preferred):
 This is a university capstone project building a small bare-metal
 operating system that targets AI accelerators directly without a
 host OS. We're not redistributing any Hailo IP — we link against the
-hailort firmware blob you ship via `apt install hailort-dkms` and our
-driver is published under MIT license. Happy to discuss further or
-provide whatever traces would help.
+hailort firmware blob you ship via `apt install hailort-pcie-driver`
+(`modinfo hailo_pci` reports version 4.23.0) and our driver is
+published under MIT license. Happy to discuss further or provide
+whatever traces would help.
 
 Best regards,
 [Your name]

@@ -15,11 +15,12 @@ PLATFORM ?= QEMU_VIRT
 AI_SCHED ?= OFF
 
 # Verbose Hailo wire-format diagnostic dumps (context hex rows, VDMA
-# register / descriptor dumps, per-submit chatter). Default ON while
-# Phase 8 #253 submit blocker is open — the dumps drive byte-level
-# diffs vs HailoRT's reference capture. Flip OFF for release kernels
-# once the blocker resolves: `make kernel HAILO_WIRE_DEBUG=OFF`.
-HAILO_WIRE_DEBUG ?= ON
+# register / descriptor dumps, per-submit chatter). Default OFF — the
+# verbose polling and descriptor readback paths can perturb timing
+# and cache ownership exactly where Phase 8 #253 is being measured.
+# Audit F-09 (2026-04-24) flipped the default. Enable explicitly when
+# capturing wire-byte diffs vs HailoRT: `make kernel HAILO_WIRE_DEBUG=ON`.
+HAILO_WIRE_DEBUG ?= OFF
 
 # Work-stealing scheduler (#59 Phase B).
 #
@@ -179,7 +180,7 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
 		-DPLATFORM=$(PLATFORM) \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
-		$(if $(filter OFF,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=OFF) \
+		$(if $(filter ON,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
@@ -216,7 +217,7 @@ $(KERNEL_KEXEC_BUILD_DIR)/Makefile:
 		-DPLATFORM=$(PLATFORM) \
 		-DKEXEC_BUILD=1 \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
-		$(if $(filter OFF,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=OFF) \
+		$(if $(filter ON,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
@@ -303,7 +304,7 @@ $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile:
 		-DPLATFORM=$(PLATFORM) \
 		-DBZIMAGE_BUILD=1 \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
-		$(if $(filter OFF,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=OFF) \
+		$(if $(filter ON,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \
@@ -770,7 +771,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		-DPLATFORM=$(PLATFORM) \
 		-DENABLE_BOOT_TESTS=ON \
 		$(if $(filter ON,$(AI_SCHED)),-DENABLE_AI_SCHEDULER=ON) \
-		$(if $(filter OFF,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=OFF) \
+		$(if $(filter ON,$(HAILO_WIRE_DEBUG)),-DHAILO_WIRE_DEBUG=ON) \
 		$(if $(filter ON,$(WORK_STEALING)),-DENABLE_WORK_STEALING=ON) \
 		$(if $(filter OFF,$(WORK_STEALING)),-DENABLE_WORK_STEALING=OFF) \
 		$(if $(filter ON,$(SECONDARY_PREEMPT)),-DSECONDARY_PREEMPT=ON) \

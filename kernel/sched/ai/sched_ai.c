@@ -502,9 +502,27 @@ static int ai_schedule_mlp_via_hailo(const float *state,
         return -1;
     }
 
-    /* Stack buffers: 108 bytes in, 42 bytes out. No heap touch. */
-    int8_t in_int8[AI_STATE_DIM];
-    int8_t out_int8[AI_SCHED_N_ACTIONS];
+    /* Audit F-08 (2026-04-24): backend transport buffers can exceed
+     * the policy's logical AI_STATE_DIM / AI_SCHED_N_ACTIONS due to
+     * HEF padding. Size the stack buffers to a generous fixed cap so
+     * the HEF transport size determines the in/out byte count, not
+     * the policy semantic dim. quantize_fp32_to_int8 still only
+     * writes AI_STATE_DIM int8s; the trailing in_int8[AI_STATE_DIM..]
+     * stays zero (buffer is stack-zeroed below) which is the conservative
+     * pad value for HEFs whose extra input bytes are alignment slack. */
+    #define HAILO_AI_TRANSPORT_MAX  256u
+    uint32_t in_n  = ai_hailo_model.input_n  ? ai_hailo_model.input_n
+                                             : (uint32_t)AI_STATE_DIM;
+    uint32_t out_n = ai_hailo_model.output_n ? ai_hailo_model.output_n
+                                             : (uint32_t)AI_SCHED_N_ACTIONS;
+    if (in_n > HAILO_AI_TRANSPORT_MAX || out_n > HAILO_AI_TRANSPORT_MAX) {
+        /* HEF demands more transport than we statically reserve.
+         * Fall back; the heuristic policy is correct, just slower. */
+        return -1;
+    }
+
+    int8_t in_int8[HAILO_AI_TRANSPORT_MAX]  = {0};
+    int8_t out_int8[HAILO_AI_TRANSPORT_MAX] = {0};
 
     quantize_fp32_to_int8(state, in_int8, AI_STATE_DIM,
                           ai_hailo_model.input_scale,
@@ -512,17 +530,17 @@ static int ai_schedule_mlp_via_hailo(const float *state,
 
     inference_tensor_t in = {
         .data    = in_int8,
-        .n_elems = ai_hailo_model.input_n,
+        .n_elems = in_n,
         .dtype   = INF_DTYPE_INT8,
         .rank    = 1,
-        .shape   = { (uint16_t)ai_hailo_model.input_n, 0, 0, 0 },
+        .shape   = { (uint16_t)in_n, 0, 0, 0 },
     };
     inference_tensor_t out = {
         .data    = out_int8,
-        .n_elems = ai_hailo_model.output_n,
+        .n_elems = out_n,
         .dtype   = INF_DTYPE_INT8,
         .rank    = 1,
-        .shape   = { (uint16_t)ai_hailo_model.output_n, 0, 0, 0 },
+        .shape   = { (uint16_t)out_n, 0, 0, 0 },
     };
 
     int rc = inference_run(cached_hailo_dev, ai_hailo_model.handle, &in, &out);

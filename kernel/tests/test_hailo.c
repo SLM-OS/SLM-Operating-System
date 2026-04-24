@@ -36,6 +36,8 @@ extern uint32_t hailo_backend_in_use_slots(void);
 extern void hailo_backend_reset_slots_for_tests(void);
 extern void hailo_backend_get_boundary_iovas_for_tests(
     inference_model_handle_t h, uint64_t *in_iova, uint64_t *out_iova);
+extern uint32_t hailo_backend_test_set_inflight(
+    inference_model_handle_t h, uint32_t count);
 /* Phase 7: sizes helper used by the Lua slm.hailo.infer binding. */
 extern int hailo_backend_model_sizes(inference_model_handle_t h,
                                      uint32_t *in_bytes,
@@ -7203,6 +7205,37 @@ static void test_inf_hailo_free_releases_slot(void)
         inference_free_model(dev, INF_BUILTIN_HANDLE));
 }
 
+/* Audit F-07 (2026-04-24): free_model must refuse a slot that has an
+ * inflight run() on it. The race in question is hailo_backend_run
+ * reading slot fields after lock-free in_use check while free_model
+ * tears down DMA buffers on another CPU. The fix is a per-slot
+ * inflight_runs counter; free_model returns INF_ERR_BUSY rather than
+ * proceeding with the teardown. We simulate "run is in flight" by
+ * direct test-only poke of the counter. */
+static void test_inf_hailo_free_refuses_inflight_runs(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    size_t  n = build_test_hef(blob, sizeof(blob));
+    inference_model_handle_t h;
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
+
+    /* Simulate one run() in flight. */
+    uint32_t prev = hailo_backend_test_set_inflight(h, 1);
+    TEST_ASSERT_EQUAL_UINT32(0, prev);
+
+    /* free_model must refuse with INF_ERR_BUSY; slot stays loaded. */
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BUSY, inference_free_model(dev, h));
+    TEST_ASSERT_EQUAL_UINT32(1, hailo_backend_in_use_slots());
+
+    /* Drop the simulated reference; free_model now succeeds. */
+    (void)hailo_backend_test_set_inflight(h, 0);
+    TEST_ASSERT_EQUAL_INT(INF_OK, inference_free_model(dev, h));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
+}
+
 #ifdef CONFIG_AI_SCHEDULER
 #include "../sched/ai/ai_policy_hailo.h"
 #include "../sched/ai/ai_types.h"
@@ -7941,6 +7974,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_inf_hailo_run_happy_path_via_auto_advance);
     RUN_TEST(test_inf_hailo_run_reuses_load_boundary_iovas);
     RUN_TEST(test_inf_hailo_free_releases_slot);
+    RUN_TEST(test_inf_hailo_free_refuses_inflight_runs);
     RUN_TEST(test_inf_hailo_shutdown_clears_slots);
 
     /* Phase 6.2b: edge-layer quant + stream extraction */

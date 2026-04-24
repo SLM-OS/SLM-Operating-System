@@ -107,11 +107,13 @@ endif()
 # Verbose per-load / per-submit Hailo context-switch wire dumps.
 # Default ON for the active Phase 8 investigation (#253) because the
 # full-context hex dump + per-descriptor VDMA state are what drive
-# byte-level diffs against HailoRT's reference capture. Flip OFF once
-# the submit blocker resolves to strip the chatter from release
-# kernels. Single-line error paths (timeouts, submit_and_wait rc,
-# load-stage markers) stay unconditional regardless of this flag.
-option(HAILO_WIRE_DEBUG "Emit verbose Hailo context-switch + VDMA diagnostic dumps" ON)
+# byte-level diffs against HailoRT's reference capture. Default OFF
+# (audit F-09, 2026-04-24) — verbose polling and descriptor readback
+# can perturb the timing/cache behavior #253 is trying to measure.
+# Single-line error paths (timeouts, submit_and_wait rc, load-stage
+# markers) stay unconditional regardless of this flag. Enable
+# explicitly with `make kernel HAILO_WIRE_DEBUG=ON` for byte diffs.
+option(HAILO_WIRE_DEBUG "Emit verbose Hailo context-switch + VDMA diagnostic dumps" OFF)
 if(HAILO_WIRE_DEBUG)
     add_compile_definitions(HAILO_WIRE_DEBUG=1)
 endif()

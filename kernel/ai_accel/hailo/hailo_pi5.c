@@ -99,6 +99,38 @@ static int pi5_init(void)
             INFO("hailo: endpoint LNKCTL 0x%04x ASPM_L0S already off",
                  lnkctl);
         }
+
+        /* Audit F-03 (2026-04-24): log negotiated PCIe geometry so we
+         * can compare against HailoRT-on-Pi-OS and against our chosen
+         * descriptor page sizes. The Hailo PCIe driver has a documented
+         * workaround that drops desc_max_page_size if MaxReadReq < 512;
+         * if MRRS comes up at 128/256 here, our 512-byte input desc
+         * page geometry is at odds with the actual link configuration.
+         *
+         * PCI Express Cap layout:
+         *   +0x08 DEVCTL: bits 7:5 = MPS, bits 14:12 = MRRS
+         *                 (encoded value v means 128 * 2^v bytes)
+         *   +0x12 LNKSTA: bits 3:0 = current link speed (1=Gen1,
+         *                 2=Gen2, 3=Gen3), bits 9:4 = link width. */
+        uint16_t devctl = pcie_config_read16(hailo_pcidev,
+                                             (uint16_t)(exp_cap + 0x08));
+        uint16_t lnksta = pcie_config_read16(hailo_pcidev,
+                                             (uint16_t)(exp_cap + 0x12));
+        unsigned mps_enc  = (devctl >> 5)  & 0x7u;
+        unsigned mrrs_enc = (devctl >> 12) & 0x7u;
+        unsigned mps_b    = 128u << mps_enc;
+        unsigned mrrs_b   = 128u << mrrs_enc;
+        unsigned spd      = lnksta & 0xFu;
+        unsigned wid      = (lnksta >> 4) & 0x3Fu;
+        INFO("hailo: endpoint DEVCTL=0x%04x MPS=%u MRRS=%u "
+             "LNKSTA=0x%04x speed=Gen%u width=x%u",
+             devctl, mps_b, mrrs_b, lnksta, spd, wid);
+        if (mrrs_b < 512u) {
+            WARN("hailo: MRRS=%u (<512) — Hailo driver normally caps "
+                 "desc_max_page_size to MRRS in this regime; our "
+                 "fixed 512-byte input desc page may not match the "
+                 "actual link", mrrs_b);
+        }
     } else {
         WARN("hailo: no PCI Express capability on endpoint — "
              "cannot gate ASPM");
@@ -231,6 +263,19 @@ static inline size_t pi5_dma_pages(size_t size, size_t align)
     return (request + PAGE_SIZE - 1) / PAGE_SIZE;
 }
 
+/* Hard ceiling on `low_bias` allocations. Audit F-01 (2026-04-24):
+ * pmm_alloc_pages_low returns the LOWEST currently-free block, which
+ * silently degrades to high memory once low memory is fragmented.
+ * For Hailo DMA we need a hard contract instead — if we can't satisfy
+ * the request below the ceiling, fail loudly so the caller (and the
+ * boot log) sees it instead of attributing the resulting "fw never
+ * fetched the descriptor" symptom to something else.
+ *
+ * 1 GB = 0x40000000 is conservative for the BCM2712 inbound window
+ * (which spans the full 4 GB on Pi 5 per dma-ranges) but matches the
+ * audit's recommended starting point for bisecting upward later. */
+#define HAILO_DMA_LOW_CEILING_PHYS  0x40000000ULL
+
 /* Common alloc helper: validates + allocates via the chosen PMM
  * function, then validates alignment and produces the IOVA.
  * `low_bias` selects pmm_alloc_pages_low (DMA buffers that must
@@ -255,9 +300,31 @@ static void *pi5_dma_alloc_common(size_t size, size_t align,
         pmm_free_pages(va, pages);
         return NULL;
     }
-    if (iova_out) {
-        *iova_out = (uint64_t)(uintptr_t)va + PCIE1_DMA_OFFSET;
+
+    /* Hard ceiling enforcement for low_bias requests (F-01). */
+    uintptr_t phys = (uintptr_t)va;
+    if (low_bias && (uint64_t)phys + (uint64_t)(pages * PAGE_SIZE)
+                        > HAILO_DMA_LOW_CEILING_PHYS) {
+        WARN("hailo: dma_alloc_low returned phys=0x%lx pages=%lu — "
+             "above ceiling 0x%llx; rejecting (low memory likely "
+             "fragmented; raise ceiling or run earlier in boot)",
+             (unsigned long)phys, (unsigned long)pages,
+             (unsigned long long)HAILO_DMA_LOW_CEILING_PHYS);
+        pmm_free_pages(va, pages);
+        return NULL;
     }
+
+    uint64_t iova = (uint64_t)phys + PCIE1_DMA_OFFSET;
+    if (iova_out) *iova_out = iova;
+
+    /* Per-allocation address trace (F-01): every Hailo DMA buffer's
+     * (phys, iova, tag) is logged so a hardware capture can show
+     * exactly which DMA objects landed where, and whether the
+     * "low" tag is being honored end-to-end. */
+    INFO("hailo: dma_alloc%s phys=0x%lx iova=0x%llx pages=%lu align=%lu",
+         low_bias ? "_low" : "", (unsigned long)phys,
+         (unsigned long long)iova,
+         (unsigned long)pages, (unsigned long)align);
     return va;
 }
 

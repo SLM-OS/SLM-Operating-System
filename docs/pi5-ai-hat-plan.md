@@ -2,7 +2,29 @@
 
 **Target:** GeeekPi AI HAT+ (Hailo-8L, 13 TOPS) and AI HAT+ 26 TOPS (Hailo-8) on Raspberry Pi 5, end-to-end to running AI inference workloads from SLM-OS.
 
-**Status:** Phase 0–4 landed in software (no-hardware work). The probe/boot path is compiled in but unexercised against a real HAT+ until the lab unit is available. Tracked in [#253](https://github.com/SLM-OS/SLM-Operating-System/issues/253).
+**Status:** Phase 0–7 software-complete; Phase 8 in progress with the
+boundary-input submit blocker still open (firmware does not advance
+`num_proc` on the H2D channel; descriptor status stays zero). Tracked
+in [#253](https://github.com/SLM-OS/SLM-Operating-System/issues/253).
+
+**Scope honesty (2026-04-24, audit F-04 / F-11):** The current Hailo
+backend should be characterized as a **Hailo-8L / MNIST bring-up
+backend**, not a general AI HAT+ inference backend. Concretely:
+
+- The context-switch translator (`hailo_cs_translator.c`) carries
+  MNIST-specific sequencer/LCU byte templates and a
+  `hef_matches_mnist_template()` matcher; non-MNIST HEFs hit a
+  partial path that may emit incomplete context bytes.
+- `pick_largest_pads()` selects exactly one input and one output;
+  multi-stream / multi-output HEFs are not supported.
+- `inference_device_hailo.c` carries hard-coded dual-channel CCW
+  constants matched to the MNIST/HailoRT trace.
+- The 26-TOPS Hailo-8 variant is not validated; only Hailo-8L on
+  pi-5-1 is exercised.
+
+The "general HAT+ support" framing returns once the translator is
+graph-derived (multi-stream, generic LCU sequencing, batch switching)
+and the slot model carries pad arrays instead of single-pad fields.
 
 **Phase summary (2026-04-18):**
 

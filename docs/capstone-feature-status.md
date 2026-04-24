@@ -195,9 +195,10 @@ stack than discrete Ampere.
 documentation. Accessing it would require reverse-engineering the
 VideoCore ISA and firmware. Not feasible within capstone scope.
 
-**Pi 5 Hailo-8 NPU (AI HAT+) — Phase 0–7 software-complete, end-to-end
-NPU inference verified on real hardware (2026-04-20), Lua bindings
-landed (2026-04-21):**
+**Pi 5 Hailo-8L NPU (AI HAT+) — Phase 0–7 software-complete, Phase 8
+boundary-input submit blocker still open (2026-04-24); current scope
+is a Hailo-8L / MNIST bring-up backend, not a general AI HAT+
+inference backend (audit F-04 / F-11):**
 A full alternative inference path via the Pi 5's external PCIe
 connector. Phase 0 research, Phase 1 ARM64 PCIe host controller
 (`kernel/drivers/pcie/`) with BCM2712 link training
