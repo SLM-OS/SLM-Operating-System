@@ -112,6 +112,7 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO      = 0x21,
     HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS         = 0x25,
     HAILO_CONTROL_OPCODE_CORE_IDENTIFY                        = 0x2A,
+    HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION               = 0x33,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS = 0x47,
     HAILO_CONTROL_OPCODE_GET_HW_CONSTS                        = 0x48,
     /* Full table in docs/reference/hailort-control-protocol.h. */
@@ -673,6 +674,25 @@ int hailo_control_get_hw_consts(uint32_t *out_response_len);
  * success; pass NULL to ignore.
  */
 int hailo_control_core_identify(uint32_t *out_response_len);
+
+/*
+ * GET_DEVICE_INFORMATION (opcode 0x33, CPU_ID_APP_CPU). Empty-body
+ * probe; firmware responds with a ~143-byte struct describing device
+ * state. HailoRT calls this multiple times during load (pre-RESET,
+ * post-CLEAR_APPS, post-SET_CONTEXT_INFO, post-ENABLED) as a
+ * fw-settled / liveness handshake. SLM-OS does not strictly need the
+ * response content — this wrapper just fires the RPC and checks
+ * rc=0.
+ *
+ * Added 2026-04-23 for the Phase 8 #253 investigation: HailoRT's
+ * wire capture shows 7 of these interspersed through the load
+ * sequence; SLM-OS sends none. Mirroring HailoRT's cadence is one
+ * of the cheapest ways to rule "post-ENABLED settling" in or out as
+ * the cause of the boundary-submit stall.
+ *
+ * `out_response_len` is set on success; pass NULL to ignore.
+ */
+int hailo_control_get_device_information(uint32_t *out_response_len);
 
 /*
  * Reset internal control-channel state (sequence counter and the

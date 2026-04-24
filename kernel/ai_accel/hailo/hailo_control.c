@@ -1714,6 +1714,60 @@ int hailo_control_core_identify(uint32_t *out_response_len)
         out_response_len);
 }
 
+/* GET_DEVICE_INFORMATION (opcode 0x33, APP_CPU). Empty-body
+ * request, returns a ~143-byte device info struct on fw v4.23.
+ * SLM-OS does not currently parse the body — the RPC is used
+ * purely as a HailoRT-style fw-settled handshake between load
+ * steps. See hailo_control.h comment for the #253 motivation. */
+struct hailo_cs_device_info_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                /* BE */
+    uint8_t  body[256];                      /* observed 143 B; 256 is defensive */
+} __attribute__((packed));
+
+static struct hailo_cs_empty_req_wire        control_device_info_req;
+static struct hailo_cs_device_info_resp_wire control_device_info_resp;
+
+int hailo_control_get_device_information(uint32_t *out_response_len)
+{
+    spin_lock(&control_lock);
+
+    struct hailo_cs_empty_req_wire *r = &control_device_info_req;
+    memset(r, 0, sizeof(*r));
+    r->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->common.flags    = 0;
+    r->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION);
+    r->parameter_count = 0;
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(r, sizeof(*r),
+                                             &control_device_info_resp,
+                                             sizeof(control_device_info_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_APP,
+                                            r, sizeof(*r),
+                                            &control_device_info_resp,
+                                            sizeof(control_device_info_resp),
+                                            &resp_len,
+                                            /* 1 s */ 1000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_device_info_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION,
+                                       "GET_DEVICE_INFORMATION");
+    if (rc == HAILO_OK && out_response_len) *out_response_len = resp_len;
+    spin_unlock(&control_lock);
+    return rc;
+}
+
 int hailo_control_set_context_info(
     enum hailo_cs_context_type context_type,
     const void                *network_data,

@@ -1064,8 +1064,16 @@ static int context_switch_load(struct hailo_model_slot *slot,
         struct hailo_control_identify_response idr;
         int warm_rc = hailo_control_identify(&idr);
         uart_printf("[warmup] pre-RESET IDENTIFY rc=%d\r\n", warm_rc);
-        /* Drain so we see if IDENTIFY itself fires anything. */
-        uart_printf("[bisect] post IDENTIFY (warmup):\r\n");
+        uint32_t gdi_len = 0;
+        warm_rc = hailo_control_get_device_information(&gdi_len);
+        uart_printf("[warmup] pre-RESET GET_DEV_INFO #1 rc=%d resp_len=%u\r\n",
+                    warm_rc, (unsigned)gdi_len);
+        gdi_len = 0;
+        warm_rc = hailo_control_get_device_information(&gdi_len);
+        uart_printf("[warmup] pre-RESET GET_DEV_INFO #2 rc=%d resp_len=%u\r\n",
+                    warm_rc, (unsigned)gdi_len);
+        /* Drain so we see if any of the pings fire notifications. */
+        uart_printf("[bisect] post pre-RESET pings:\r\n");
         hailo_fw_drain_d2h_notifications(2);
     }
 
@@ -1097,6 +1105,11 @@ static int context_switch_load(struct hailo_model_slot *slot,
     }
     uart_printf("[bisect] post CLEAR_CONFIGURED_APPS:\r\n");
     hailo_fw_drain_d2h_notifications(2);
+    /* #253 (2026-04-23): HailoRT's wire capture shows a 4.5 ms wall-
+     * clock gap after CLEAR_APPS before the next RPC. Try matching. */
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(5000u);
+    }
     cs_load_stage_set(52);
 
     uint32_t hw_consts_len = 0;
@@ -1217,6 +1230,17 @@ static int context_switch_load(struct hailo_model_slot *slot,
 
     }
 
+    /* #253 (2026-04-23): 2.8 ms wall-clock gap in HailoRT's wire
+     * capture between the 4th SET_CONTEXT_INFO (DYNAMIC) and the next
+     * RPC. Candidate: fw's CORE task is still finishing DYNAMIC's
+     * AllowInputDataflow action-list processing (the action that
+     * arms the boundary dataflow scheduler). Firing CHANGE_STATUS
+     * (ENABLED) before that completes may leave the scheduler in an
+     * incomplete state and never issue boundary credits. */
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(3000u);
+    }
+
     cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
     /* Pi OS wire capture (2026-04-22, HailoRT v4.23.0 MNIST on pi-5-1
      * instrumented driver — see docs/reference/hailort-v4.23.0-wire-
@@ -1240,6 +1264,33 @@ static int context_switch_load(struct hailo_model_slot *slot,
     }
     uart_printf("[bisect] post CHANGE_STATUS(ENABLED):\r\n");
     hailo_fw_drain_d2h_notifications(2);
+
+    /* #253 (2026-04-23): HailoRT's wire capture shows 2× (GET_DEVICE_INFO
+     * + IDENTIFY) interleaved after CHANGE_STATUS(ENABLED) and before the
+     * first boundary submit. SLM-OS previously went straight from ENABLED
+     * to CCW upload + submit. If fw's scheduler needs time (or a
+     * specific settle handshake) to transition from "ENABLED" to
+     * "accepting boundary credits", the pings give it that window.
+     * This is the next-cheapest test after IDENTIFY-warmup — if
+     * boundary submits start completing with these in place, the
+     * blocker was missing post-ENABLED settling RPCs. */
+    {
+        struct hailo_control_identify_response idr;
+        uint32_t gdi_len = 0;
+        int r1 = hailo_control_get_device_information(&gdi_len);
+        int r2 = hailo_control_identify(&idr);
+        int r3 = hailo_control_get_device_information(&gdi_len);
+        int r4 = hailo_control_identify(&idr);
+        uart_printf("[settle] post-ENABLED pings: GDI=%d ID=%d GDI=%d ID=%d\r\n",
+                    r1, r2, r3, r4);
+        uart_printf("[bisect] post-ENABLED settle pings:\r\n");
+        hailo_fw_drain_d2h_notifications(2);
+    }
+    /* #253 (2026-04-23): 1.6 ms wall-clock gap in HailoRT between the
+     * last settle ping and the next CHANGE_STATUS. Match it. */
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(2000u);
+    }
 
     /* #253: CHANGE_STATUS(ENABLED) returns synchronously but fw's
      * action-list processing (ACTIVATION → BATCH_SWITCHING →
