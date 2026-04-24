@@ -32,6 +32,11 @@
 #define NC_MEM_BASE     0xBDE00000UL    /* Last 2MB of region 1 (before OP-TEE carveout) */
 #endif
 #define NC_MEM_SIZE     0x00200000UL    /* 2 MB */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#define NC_MEM_RESERVED_BYTES 0x00005000UL
+#else
+#define NC_MEM_RESERVED_BYTES 0x00001000UL
+#endif
 
 /* Initialize NC memory allocator (call after vmm_init) */
 void ncmem_init(void);

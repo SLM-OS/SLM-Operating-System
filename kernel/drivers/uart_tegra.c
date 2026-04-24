@@ -241,6 +241,8 @@ static int tcu_rx_pos = 0;
  */
 char uart_getc(void)
 {
+    extern void yield(void);
+
     if (!g_uart_available) {
         /* UART not available, spin forever (kernel will halt) */
         while (1) {
@@ -262,8 +264,9 @@ char uart_getc(void)
         val = *mbox;
         if (val & TCU_MBOX_TAG_BIT)
             break;
-        /* Yield CPU briefly while waiting */
-        __asm__ volatile("yield");
+        /* Let equal-priority tasks such as net_pump run while the
+         * console blocks for input. */
+        yield();
     }
 
     /* Clear the mailbox so SPE can send more */
@@ -295,6 +298,7 @@ char uart_getc(void)
     for (;;) {
         __asm__ volatile("dsb sy" ::: "memory");
         if ((UART_REG(NS16550_LSR) & LSR_DR) != 0) break;
+        yield();
     }
 
     __asm__ volatile("dsb sy" ::: "memory");

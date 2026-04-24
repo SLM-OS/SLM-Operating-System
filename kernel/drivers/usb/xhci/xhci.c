@@ -106,11 +106,19 @@ bool                  xhci_live;
 
 /* Non-static: DCBAA + ring state shared across TUs. */
 uint64_t             *xhci_dcbaa;          /* aligned(64), MaxSlots+1 entries */
+uintptr_t             xhci_inherited_slot1_devctx_raw_phys;
+uintptr_t             xhci_inherited_slot1_ep0_deq_phys;
+bool                  xhci_inherited_slot1_ctx_valid;
+uint32_t              xhci_inherited_slot1_slot_ctx_dw[4];
+uint32_t              xhci_inherited_slot1_ep0_ctx_dw[8];
 uintptr_t             xhci_inherited_slot3_devctx_phys;
 uintptr_t             xhci_inherited_slot3_devctx_raw_phys;
+uintptr_t             xhci_inherited_slot3_ep0_deq_phys;
 bool                  xhci_inherited_slot3_ctx_valid;
 uint32_t              xhci_inherited_slot3_slot_ctx_dw[4];
 uint32_t              xhci_inherited_slot3_ep0_ctx_dw[8];
+uint32_t              xhci_inherited_slot3_ep_ctx_dw[8][8];
+struct xhci_cmd_diag  xhci_last_cmd_diag;
 static uint64_t             *xhci_scratchpad_ptrs;
 static void                 *xhci_scratchpad_bufs; /* N pages × PAGESIZE */
 static uint32_t              xhci_num_scratchpads;
@@ -177,11 +185,18 @@ static bool xhci_probe_ram_ptr(uintptr_t p)
 static void xhci_log_inherited_dcbaa(uint64_t dcbaap)
 {
     uintptr_t dcbaa_ptr = (uintptr_t)(dcbaap & ~0x3FULL);
+    xhci_inherited_slot1_devctx_raw_phys = 0;
+    xhci_inherited_slot1_ep0_deq_phys = 0;
+    xhci_inherited_slot1_ctx_valid = false;
+    memset(xhci_inherited_slot1_slot_ctx_dw, 0, sizeof(xhci_inherited_slot1_slot_ctx_dw));
+    memset(xhci_inherited_slot1_ep0_ctx_dw, 0, sizeof(xhci_inherited_slot1_ep0_ctx_dw));
     xhci_inherited_slot3_devctx_phys = 0;
     xhci_inherited_slot3_devctx_raw_phys = 0;
+    xhci_inherited_slot3_ep0_deq_phys = 0;
     xhci_inherited_slot3_ctx_valid = false;
     memset(xhci_inherited_slot3_slot_ctx_dw, 0, sizeof(xhci_inherited_slot3_slot_ctx_dw));
     memset(xhci_inherited_slot3_ep0_ctx_dw, 0, sizeof(xhci_inherited_slot3_ep0_ctx_dw));
+    memset(xhci_inherited_slot3_ep_ctx_dw, 0, sizeof(xhci_inherited_slot3_ep_ctx_dw));
     if (dcbaa_ptr == 0 || !xhci_probe_ram_ptr(dcbaa_ptr)) {
         INFO("xhci: inherited DCBAA probe skipped (ptr=0x%lx)",
              (unsigned long)dcbaa_ptr);
@@ -196,6 +211,8 @@ static void xhci_log_inherited_dcbaa(uint64_t dcbaap)
     for (uint32_t slot = 1; slot <= max_slots; slot++) {
         uint64_t devctx = old_dcbaa[slot];
         uintptr_t devctx_ptr = (uintptr_t)(devctx & ~0x3FULL);
+        if (slot == 1)
+            xhci_inherited_slot1_devctx_raw_phys = devctx_ptr;
         if (slot == 3)
             xhci_inherited_slot3_devctx_raw_phys = devctx_ptr;
         if (devctx_ptr == 0 || !xhci_probe_ram_ptr(devctx_ptr))
@@ -224,10 +241,42 @@ static void xhci_log_inherited_dcbaa(uint64_t dcbaap)
     }
 }
 
+static void xhci_set_inherited_slot1_context(const uint32_t slot_ctx_dw[4],
+                                             const uint32_t ep0_ctx_dw[8])
+{
+    memset(xhci_inherited_slot1_slot_ctx_dw, 0, sizeof(xhci_inherited_slot1_slot_ctx_dw));
+    memset(xhci_inherited_slot1_ep0_ctx_dw, 0, sizeof(xhci_inherited_slot1_ep0_ctx_dw));
+
+    for (unsigned i = 0; i < 4; i++)
+        xhci_inherited_slot1_slot_ctx_dw[i] = slot_ctx_dw[i];
+    for (unsigned i = 0; i < 8; i++)
+        xhci_inherited_slot1_ep0_ctx_dw[i] = ep0_ctx_dw[i];
+    xhci_inherited_slot1_ctx_valid = true;
+}
+
+static void xhci_set_inherited_slot3_contexts(const uint32_t slot_ctx_dw[4],
+                                              const uint32_t ep_ctx_dw[7][8])
+{
+    memset(xhci_inherited_slot3_slot_ctx_dw, 0, sizeof(xhci_inherited_slot3_slot_ctx_dw));
+    memset(xhci_inherited_slot3_ep0_ctx_dw, 0, sizeof(xhci_inherited_slot3_ep0_ctx_dw));
+    memset(xhci_inherited_slot3_ep_ctx_dw, 0, sizeof(xhci_inherited_slot3_ep_ctx_dw));
+
+    for (unsigned i = 0; i < 4; i++)
+        xhci_inherited_slot3_slot_ctx_dw[i] = slot_ctx_dw[i];
+    for (unsigned dci = 1; dci <= 7; dci++) {
+        for (unsigned i = 0; i < 8; i++)
+            xhci_inherited_slot3_ep_ctx_dw[dci][i] = ep_ctx_dw[dci - 1][i];
+    }
+    for (unsigned i = 0; i < 8; i++)
+        xhci_inherited_slot3_ep0_ctx_dw[i] = xhci_inherited_slot3_ep_ctx_dw[1][i];
+    xhci_inherited_slot3_ctx_valid = true;
+}
+
 static void xhci_load_slot3_handoff(void)
 {
     volatile struct xhci_slot3_handoff *h =
         (volatile struct xhci_slot3_handoff *)(uintptr_t)XHCI_SLOT3_HANDOFF_PHYS;
+    uint32_t ep_ctx_dw[7][8] = {{0}};
 
     INFO("xhci: slot3 handoff raw magic=0x%08x version=%u slot=%u root=%u "
          "devctx=0x%08x%08x dcbaap=0x%08x%08x",
@@ -247,12 +296,11 @@ static void xhci_load_slot3_handoff(void)
 
     if (xhci_inherited_slot3_devctx_raw_phys == 0)
         xhci_inherited_slot3_devctx_raw_phys = (uintptr_t)h->devctx_phys;
+    xhci_inherited_slot3_ep0_deq_phys = (uintptr_t)h->ep0_deq_phys;
 
-    for (unsigned i = 0; i < 4; i++)
-        xhci_inherited_slot3_slot_ctx_dw[i] = h->slot_ctx_dw[i];
     for (unsigned i = 0; i < 8; i++)
-        xhci_inherited_slot3_ep0_ctx_dw[i] = h->ep0_ctx_dw[i];
-    xhci_inherited_slot3_ctx_valid = true;
+        ep_ctx_dw[0][i] = h->ep0_ctx_dw[i];
+    xhci_set_inherited_slot3_contexts((const uint32_t *)h->slot_ctx_dw, ep_ctx_dw);
 
     INFO("xhci: slot3 handoff recovered raw devctx=0x%08x%08x dcbaap=0x%08x%08x ep0_deq=0x%08x%08x root=%u slot_dw3=0x%08x ep0_dw2=0x%08x ep0_dw3=0x%08x",
          (unsigned)(h->devctx_phys >> 32), (unsigned)h->devctx_phys,
@@ -273,6 +321,7 @@ static void xhci_load_slot3_handoff(void)
 
 #define XHCI_SLOT3_HANDOFF_BOOTARG "slmos_xhci_slot3_handoff="
 #define XHCI_SLOT3_HANDOFF_FDT_NODE "/slmos-handoff"
+#define XHCI_SLOT1_HANDOFF_FDT_PROP "xhci-slot1-handoff"
 #define XHCI_SLOT3_HANDOFF_FDT_PROP "xhci-slot3-handoff"
 
 static const char *xhci_find_bootarg_value(const char *bootargs, uint32_t len,
@@ -502,8 +551,11 @@ static void xhci_load_slot3_handoff_from_bootargs(void)
     const char *value;
     const char *p;
     const char *end;
-    uint64_t vals[16];
+    uint64_t vals[XHCI_SLOT3_HANDOFF_PAYLOAD_U64S];
+    uint32_t slot_ctx_dw[4] = {0};
+    uint32_t ep_ctx_dw[7][8] = {{0}};
     uint32_t chosen_off;
+    unsigned count = 0;
 
     if (!dtb) {
         INFO("xhci: slot3 bootarg handoff skipped code=1");
@@ -547,35 +599,42 @@ static void xhci_load_slot3_handoff_from_bootargs(void)
     while (end < ((const char *)prop + len) && *end != ' ' && *end != '\0')
         end++;
 
-    for (unsigned i = 0; i < 16; i++) {
-        if (!xhci_parse_u64_token(&p, end, &vals[i])) {
-            WARN("xhci: slot3 bootarg handoff parse failed at field %u",
-                 (unsigned)i);
-            return;
-        }
-        if (i != 15) {
-            if (p >= end || *p != ',') {
-                WARN("xhci: slot3 bootarg handoff missing comma at field %u",
-                     (unsigned)i);
-                return;
-            }
-            p++;
-        }
+    while (count < XHCI_SLOT3_HANDOFF_PAYLOAD_U64S) {
+        if (!xhci_parse_u64_token(&p, end, &vals[count]))
+            break;
+        count++;
+        if (p >= end || *p != ',')
+            break;
+        p++;
     }
 
     if (vals[1] == 0) {
         WARN("xhci: slot3 bootarg handoff missing devctx");
         return;
     }
+    if (count != 16 && count != XHCI_SLOT3_HANDOFF_PAYLOAD_U64S) {
+        WARN("xhci: slot3 bootarg handoff field count %u unsupported",
+             count);
+        return;
+    }
 
     if (xhci_inherited_slot3_devctx_raw_phys == 0)
         xhci_inherited_slot3_devctx_raw_phys = (uintptr_t)vals[1];
+    xhci_inherited_slot3_ep0_deq_phys = (uintptr_t)vals[2];
 
     for (unsigned i = 0; i < 4; i++)
-        xhci_inherited_slot3_slot_ctx_dw[i] = (uint32_t)vals[4 + i];
-    for (unsigned i = 0; i < 8; i++)
-        xhci_inherited_slot3_ep0_ctx_dw[i] = (uint32_t)vals[8 + i];
-    xhci_inherited_slot3_ctx_valid = true;
+        slot_ctx_dw[i] = (uint32_t)vals[4 + i];
+    if (count == 16) {
+        for (unsigned i = 0; i < 8; i++)
+            ep_ctx_dw[0][i] = (uint32_t)vals[8 + i];
+    } else {
+        unsigned idx = 8;
+        for (unsigned dci = 0; dci < 7; dci++) {
+            for (unsigned i = 0; i < 8; i++, idx++)
+                ep_ctx_dw[dci][i] = (uint32_t)vals[idx];
+        }
+    }
+    xhci_set_inherited_slot3_contexts(slot_ctx_dw, ep_ctx_dw);
 
     INFO("xhci: slot3 bootarg handoff devctx=0x%08x%08x dcbaap=0x%08x%08x ep0_deq=0x%08x%08x root=%u slot_dw3=0x%08x ep0_dw2=0x%08x ep0_dw3=0x%08x",
          (unsigned)(vals[1] >> 32), (unsigned)vals[1],
@@ -593,10 +652,13 @@ static void xhci_load_slot3_handoff_from_fdt_node(void)
     struct fdt_handle fdt;
     const void *prop;
     uint32_t len;
-    uint64_t vals[16];
+    uint64_t vals[XHCI_SLOT3_HANDOFF_PAYLOAD_U64S];
+    uint32_t slot_ctx_dw[4] = {0};
+    uint32_t ep_ctx_dw[7][8] = {{0}};
     const char *p;
     const char *end;
     uint32_t node_off;
+    unsigned count = 0;
 
     if (!dtb)
         return;
@@ -611,26 +673,36 @@ static void xhci_load_slot3_handoff_from_fdt_node(void)
 
     p = (const char *)prop;
     end = p + len;
-    for (unsigned i = 0; i < 16; i++) {
-        if (!xhci_parse_u64_token(&p, end, &vals[i])) {
-            INFO("xhci: slot3 fdt-node handoff rejected at field %u", i);
+    while (count < XHCI_SLOT3_HANDOFF_PAYLOAD_U64S) {
+        if (!xhci_parse_u64_token(&p, end, &vals[count])) {
+            INFO("xhci: slot3 fdt-node handoff rejected at field %u", count);
             return;
         }
-        if (i + 1 != 16) {
-            if (p >= end || *p != ',') {
-                INFO("xhci: slot3 fdt-node handoff rejected at delimiter %u", i);
-                return;
-            }
-            p++;
-        }
+        count++;
+        if (p >= end || *p != ',')
+            break;
+        p++;
+    }
+    if (count != 16 && count != XHCI_SLOT3_HANDOFF_PAYLOAD_U64S) {
+        INFO("xhci: slot3 fdt-node handoff rejected at field count %u", count);
+        return;
     }
 
     xhci_inherited_slot3_devctx_raw_phys = (uintptr_t)vals[1];
-    xhci_inherited_slot3_ctx_valid = true;
+    xhci_inherited_slot3_ep0_deq_phys = (uintptr_t)vals[2];
     for (unsigned i = 0; i < 4; i++)
-        xhci_inherited_slot3_slot_ctx_dw[i] = (uint32_t)vals[4 + i];
-    for (unsigned i = 0; i < 8; i++)
-        xhci_inherited_slot3_ep0_ctx_dw[i] = (uint32_t)vals[8 + i];
+        slot_ctx_dw[i] = (uint32_t)vals[4 + i];
+    if (count == 16) {
+        for (unsigned i = 0; i < 8; i++)
+            ep_ctx_dw[0][i] = (uint32_t)vals[8 + i];
+    } else {
+        unsigned idx = 8;
+        for (unsigned dci = 0; dci < 7; dci++) {
+            for (unsigned i = 0; i < 8; i++, idx++)
+                ep_ctx_dw[dci][i] = (uint32_t)vals[idx];
+        }
+    }
+    xhci_set_inherited_slot3_contexts(slot_ctx_dw, ep_ctx_dw);
 
     INFO("xhci: slot3 fdt-node handoff devctx=0x%lx root=%u slot_dw3=0x%08x ep0_dw2=0x%08x ep0_dw3=0x%08x",
          (unsigned long)xhci_inherited_slot3_devctx_raw_phys,
@@ -638,6 +710,65 @@ static void xhci_load_slot3_handoff_from_fdt_node(void)
          (unsigned)xhci_inherited_slot3_slot_ctx_dw[3],
          (unsigned)xhci_inherited_slot3_ep0_ctx_dw[2],
          (unsigned)xhci_inherited_slot3_ep0_ctx_dw[3]);
+}
+
+static void xhci_load_slot1_handoff_from_fdt_node(void)
+{
+    const void *dtb = dtb_get_blob();
+    struct fdt_handle fdt;
+    const void *prop;
+    uint32_t len;
+    uint64_t vals[16];
+    uint32_t slot_ctx_dw[4] = {0};
+    uint32_t ep0_ctx_dw[8] = {0};
+    const char *p;
+    const char *end;
+    uint32_t node_off;
+    unsigned count = 0;
+    const unsigned expected = (unsigned)(sizeof(vals) / sizeof(vals[0]));
+
+    if (!dtb)
+        return;
+    if (fdt_init(&fdt, dtb) != FDT_LIB_OK)
+        return;
+    if (fdt_find_node_by_path(&fdt, XHCI_SLOT3_HANDOFF_FDT_NODE,
+                              &node_off) != FDT_LIB_OK)
+        return;
+    if (fdt_get_property(&fdt, node_off, XHCI_SLOT1_HANDOFF_FDT_PROP,
+                         &prop, &len) != FDT_LIB_OK)
+        return;
+
+    p = (const char *)prop;
+    end = p + len;
+    while (count < expected) {
+        if (!xhci_parse_u64_token(&p, end, &vals[count])) {
+            INFO("xhci: slot1 fdt-node handoff rejected at field %u", count);
+            return;
+        }
+        count++;
+        if (p >= end || *p != ',')
+            break;
+        p++;
+    }
+    if (count != expected) {
+        INFO("xhci: slot1 fdt-node handoff rejected at field count %u", count);
+        return;
+    }
+
+    xhci_inherited_slot1_devctx_raw_phys = (uintptr_t)vals[1];
+    xhci_inherited_slot1_ep0_deq_phys = (uintptr_t)vals[2];
+    for (unsigned i = 0; i < 4; i++)
+        slot_ctx_dw[i] = (uint32_t)vals[4 + i];
+    for (unsigned i = 0; i < 8; i++)
+        ep0_ctx_dw[i] = (uint32_t)vals[8 + i];
+    xhci_set_inherited_slot1_context(slot_ctx_dw, ep0_ctx_dw);
+
+    INFO("xhci: slot1 fdt-node handoff devctx=0x%lx root=%u slot_dw3=0x%08x ep0_dw2=0x%08x ep0_dw3=0x%08x",
+         (unsigned long)xhci_inherited_slot1_devctx_raw_phys,
+         (unsigned)vals[3],
+         (unsigned)xhci_inherited_slot1_slot_ctx_dw[3],
+         (unsigned)xhci_inherited_slot1_ep0_ctx_dw[2],
+         (unsigned)xhci_inherited_slot1_ep0_ctx_dw[3]);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1215,6 +1346,7 @@ static void xhci_program_registers(uint8_t max_slots)
          (unsigned)r32(xhci_op_base, XHCI_OP_CONFIG),
          (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
     xhci_log_inherited_dcbaa(((uint64_t)orig_dcbaap_hi << 32) | orig_dcbaap_lo);
+    xhci_load_slot1_handoff_from_fdt_node();
     xhci_load_slot3_handoff_from_fdt_node();
     xhci_load_slot3_handoff_from_bootargs();
     if (!xhci_inherited_slot3_ctx_valid)
@@ -1517,10 +1649,10 @@ void xhci_run_deferred_probes(void)
     uint8_t cmd_cc = 0;
     cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_NOOP);
     if (xhci_cmd_submit_and_wait(&cmd, &cmd_cc, NULL, 200) == 0) {
-        INFO("xhci: deferred post-short NO_OP cc=%u (adopted slot=%u)",
+        INFO("xhci: child post-short NO_OP cc=%u (slot=%u)",
              (unsigned)cmd_cc, (unsigned)slot_id);
     } else {
-        WARN("xhci: deferred post-short NO_OP transport failed (adopted slot=%u)",
+        WARN("xhci: child post-short NO_OP transport failed (slot=%u)",
              (unsigned)slot_id);
         xhci_dump_event_ring_window("post-short timeout");
     }
@@ -1572,8 +1704,27 @@ int xhci_event_ring_drain(void)
         /* Bit 3 (EHB) is Event Handler Busy — write-1-to-clear in
          * polled mode, harmless either way. */
         uint64_t erdp = xhci_event_ring_dequeue_phys(&xhci_evt_ring) | (1u << 3);
+        uint32_t usbsts_before = r32(xhci_op_base, XHCI_OP_USBSTS);
+        uint32_t iman_before = r32(ir0, XHCI_IR_IMAN);
+        uint32_t usbsts_ack = usbsts_before & (XHCI_STS_EINT | XHCI_STS_PCD);
+        uint32_t iman_ack = (iman_before & 0x2u) | 0x1u; /* keep IE, clear IP */
         w32(ir0, XHCI_IR_ERDP,     (uint32_t)(erdp & 0xFFFFFFFFu));
         w32(ir0, XHCI_IR_ERDP + 4, (uint32_t)(erdp >> 32));
+        if (usbsts_ack != 0)
+            w32(xhci_op_base, XHCI_OP_USBSTS, usbsts_ack);
+        if ((iman_before & 0x1u) != 0)
+            w32(ir0, XHCI_IR_IMAN, iman_ack);
+        if (usbsts_ack != 0 || (iman_before & 0x1u) != 0) {
+            uint32_t usbsts_after = r32(xhci_op_base, XHCI_OP_USBSTS);
+            uint32_t iman_after = r32(ir0, XHCI_IR_IMAN);
+            INFO("xhci: event-drain ack consumed=%d USBSTS 0x%08x->0x%08x "
+                 "IMAN 0x%08x->0x%08x",
+                 consumed,
+                 (unsigned)usbsts_before,
+                 (unsigned)usbsts_after,
+                 (unsigned)iman_before,
+                 (unsigned)iman_after);
+        }
     }
 
     return consumed;
@@ -1597,6 +1748,11 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
     xhci_cmd_completed       = false;
     xhci_cmd_completion_cc   = 0;
     xhci_cmd_completion_slot = 0;
+    memset(&xhci_last_cmd_diag, 0, sizeof(xhci_last_cmd_diag));
+    xhci_last_cmd_diag.valid = true;
+    xhci_last_cmd_diag.type = (uint8_t)XHCI_TRB_TYPE_GET(cmd->control);
+    xhci_last_cmd_diag.trb_phys = (uintptr_t)slot;
+    xhci_last_cmd_diag.usbsts = r32(xhci_op_base, XHCI_OP_USBSTS);
 
     xhci_dump_cmd_ring_state("pre-cmd-doorbell", cmd, slot);
     xhci_ring_doorbell(XHCI_DB_COMMAND, 0);
@@ -1614,6 +1770,9 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
             WARN("xhci: command timeout (type=%u, USBSTS=0x%08x)",
                  (unsigned)XHCI_TRB_TYPE_GET(cmd->control),
                  (unsigned)r32(xhci_op_base, XHCI_OP_USBSTS));
+            xhci_last_cmd_diag.timed_out = true;
+            xhci_last_cmd_diag.completed = false;
+            xhci_last_cmd_diag.usbsts = r32(xhci_op_base, XHCI_OP_USBSTS);
             xhci_dump_cmd_ring_state("cmd-timeout", cmd, slot);
             xhci_dump_event_ring_window("cmd timeout");
             xhci_scan_event_ring_for_cmd("cmd timeout", xhci_cmd_pending_phys);
@@ -1623,6 +1782,11 @@ int xhci_cmd_submit_and_wait(const struct xhci_trb *cmd,
     }
 
     xhci_dump_cmd_ring_state("cmd-complete", cmd, slot);
+    xhci_last_cmd_diag.completed = true;
+    xhci_last_cmd_diag.timed_out = false;
+    xhci_last_cmd_diag.cc = xhci_cmd_completion_cc;
+    xhci_last_cmd_diag.slot_id = xhci_cmd_completion_slot;
+    xhci_last_cmd_diag.usbsts = r32(xhci_op_base, XHCI_OP_USBSTS);
     if (cc_out   != NULL) *cc_out   = xhci_cmd_completion_cc;
     if (slot_out != NULL) *slot_out = xhci_cmd_completion_slot;
     xhci_cmd_pending_phys = 0;
@@ -1660,6 +1824,13 @@ static int xhci_send_noop(void)
     return -1;
 }
 
+int xhci_cmd_noop_probe(void)
+{
+    if (!xhci_live)
+        return -1;
+    return xhci_send_noop();
+}
+
 /*
  * Tegra234 survives Linux->kexec without a full host-controller reset,
  * and the remaining EP0 failure still looks like stale controller-owned
@@ -1671,13 +1842,17 @@ static void xhci_scrub_inherited_slots(void)
 {
     uint32_t max_slots = xhci_caps_cached.max_slots;
     unsigned successes = 0;
-    const uint32_t keep_slot = 3;
+    bool keep_slot1 = xhci_inherited_slot1_ctx_valid &&
+                      xhci_inherited_slot1_devctx_raw_phys != 0;
+    bool keep_slot3 = xhci_inherited_slot3_ctx_valid &&
+                      xhci_inherited_slot3_devctx_raw_phys != 0;
 
     for (uint32_t slot = 1; slot <= max_slots; slot++) {
         struct xhci_trb cmd = {0};
         uint8_t cc = 0;
 
-        if (slot == keep_slot) {
+        if ((slot == 1 && keep_slot1) ||
+            (slot == 3 && keep_slot3)) {
             INFO("xhci: inherited-slot scrub keeping slot %u for adoption probe",
                  (unsigned)slot);
             continue;
@@ -1707,7 +1882,7 @@ static void xhci_scrub_inherited_slots(void)
 
 static void xhci_probe_inherited_slot_ep0(uint8_t slot)
 {
-    if (slot == 3) {
+    if (slot == 1 || slot == 3) {
         INFO("xhci: inherited-slot probe leaving slot %u EP0 untouched for adoption",
              (unsigned)slot);
         return;
@@ -1923,6 +2098,7 @@ int xhci_init(void)
     }
 
     xhci_live = true;
+    xhci_probe_inherited_slot_ep0(1);
     xhci_probe_inherited_slot_ep0(3);
     xhci_scrub_inherited_slots();
 

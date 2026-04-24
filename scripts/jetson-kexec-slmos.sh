@@ -67,6 +67,7 @@ NO_GPU_SUSPEND=0
 NO_USB_HOLD=0
 NO_SMMU_FIX=0
 KERNEL=""
+XHCI_SLOT1_HANDOFF_PAYLOAD=""
 XHCI_SLOT3_HANDOFF_PAYLOAD=""
 for arg in "$@"; do
     case "$arg" in
@@ -115,12 +116,22 @@ prepare_kexec_dtb() {
         return 1
     fi
 
-    if [[ -n "$XHCI_SLOT3_HANDOFF_PAYLOAD" ]]; then
+    if [[ -n "$XHCI_SLOT1_HANDOFF_PAYLOAD" || -n "$XHCI_SLOT3_HANDOFF_PAYLOAD" ]]; then
         if ! fdtput -c "$out" /slmos-handoff >/dev/null 2>&1; then
             echo "Warning: failed to create /slmos-handoff in $out" >&2
             rm -f "$out"
             return 1
         fi
+        if [[ -n "$XHCI_SLOT1_HANDOFF_PAYLOAD" ]]; then
+            if ! fdtput -t s "$out" /slmos-handoff xhci-slot1-handoff \
+                  "$XHCI_SLOT1_HANDOFF_PAYLOAD"; then
+                echo "Warning: failed to patch /slmos-handoff/xhci-slot1-handoff in $out" >&2
+                rm -f "$out"
+                return 1
+            fi
+        fi
+    fi
+    if [[ -n "$XHCI_SLOT3_HANDOFF_PAYLOAD" ]]; then
         if ! fdtput -t s "$out" /slmos-handoff xhci-slot3-handoff \
               "$XHCI_SLOT3_HANDOFF_PAYLOAD"; then
             echo "Warning: failed to patch /slmos-handoff/xhci-slot3-handoff in $out" >&2
@@ -130,6 +141,129 @@ prepare_kexec_dtb() {
     fi
 
     printf '%s\n' "$out"
+}
+
+stash_xhci_slot1_handoff() {
+    local dbg=/sys/kernel/debug/usb/xhci/3610000.usb
+    local slot_ctx="$dbg/devices/01/slot-context"
+    local ep_ctx="$dbg/devices/01/ep-context"
+    local ep0_deq="$dbg/devices/01/ep00/dequeue"
+    local reg_op="$dbg/reg-op"
+    local py_out
+
+    if [[ ! -r "$slot_ctx" || ! -r "$ep_ctx" || ! -r "$ep0_deq" || ! -r "$reg_op" ]]; then
+        echo "       slot1 handoff skipped (debugfs state unavailable)"
+        return 0
+    fi
+
+py_out="$(python3 - "$slot_ctx" "$ep_ctx" "$ep0_deq" "$reg_op" <<'PY'
+import re, sys
+
+slot_ctx_path, ep_ctx_path, ep0_deq_path, reg_op_path = sys.argv[1:5]
+slot_text = open(slot_ctx_path, "r", encoding="utf-8").read().strip()
+ep_text = open(ep_ctx_path, "r", encoding="utf-8").read().strip()
+ep0_text = open(ep0_deq_path, "r", encoding="utf-8").read().strip()
+reg_text = open(reg_op_path, "r", encoding="utf-8").read()
+
+slot_match = re.search(r'^0x([0-9a-fA-F]+):', slot_text)
+route_match = re.search(r'\bRS\s+([0-9a-fA-F]+)\b', slot_text)
+speed_match = re.search(r'\b(full-speed|low-speed|high-speed|super-speed)\b', slot_text, re.IGNORECASE)
+ctx_match = re.search(r'Ctx Entries\s+(\d+)', slot_text)
+port_match = re.search(r'Port#\s+(\d+)', slot_text)
+addr_match = re.search(r'Addr\s+(\d+)', slot_text)
+slot_state_match = re.search(r'State\s+([A-Za-z-]+)', slot_text)
+
+dcbaap_lo = re.search(r'DCBAAP_LOW = 0x([0-9a-fA-F]+)', reg_text)
+dcbaap_hi = re.search(r'DCBAAP_HIGH = 0x([0-9a-fA-F]+)', reg_text)
+ep0_match = re.search(r'0x([0-9a-fA-F]+)', ep0_text)
+
+ep_state_match = re.search(r'State\s+([A-Za-z-]+)', ep_text)
+cerr_match = re.search(r'CErr\s+(\d+)', ep_text)
+ep_type_match = re.search(r'Type\s+([A-Za-z]+)', ep_text)
+maxp_match = re.search(r'maxp\s+(\d+)', ep_text)
+avg_match = re.search(r'avg trb len\s+(\d+)', ep_text, re.IGNORECASE)
+
+if not all([
+    slot_match, route_match, speed_match, ctx_match, port_match, addr_match,
+    slot_state_match, dcbaap_lo, dcbaap_hi, ep0_match,
+    ep_state_match, cerr_match, ep_type_match, maxp_match, avg_match,
+]):
+    print("       slot1 handoff skipped (failed to parse debugfs state)")
+    sys.exit(0)
+
+if speed_match.group(1).lower() != "high-speed":
+    print("       slot1 handoff skipped (slot 1 is not high-speed)")
+    sys.exit(0)
+if int(port_match.group(1), 10) != 6:
+    print("       slot1 handoff skipped (slot 1 not on root port 6)")
+    sys.exit(0)
+
+speed_id = 3
+slot_state_id = {
+    "disabled": 0,
+    "default": 1,
+    "addressed": 2,
+    "configured": 3,
+}[slot_state_match.group(1).lower()]
+ep_state_id = {
+    "disabled": 0,
+    "running": 1,
+    "halted": 2,
+    "stopped": 3,
+    "error": 4,
+}[ep_state_match.group(1).lower()]
+ep_type_id = {
+    "ctrl": 4,
+    "control": 4,
+}[ep_type_match.group(1).lower()]
+
+devctx_phys = int(slot_match.group(1), 16) & ~0x3F
+route = int(route_match.group(1), 16) & 0xFFFFF
+ctx_entries = int(ctx_match.group(1), 10) & 0x1F
+root_port = int(port_match.group(1), 10)
+slot_addr = int(addr_match.group(1), 10) & 0xFF
+dcbaap = (int(dcbaap_hi.group(1), 16) << 32) | int(dcbaap_lo.group(1), 16)
+ep0_deq = int(ep0_match.group(1), 16) & ~0xF
+cerr = int(cerr_match.group(1), 10) & 0x3
+maxp = int(maxp_match.group(1), 10) & 0xFFFF
+avg = int(avg_match.group(1), 10) & 0xFFFF
+
+slot_dw = [
+    route | (speed_id << 20) | (ctx_entries << 27),
+    root_port << 16,
+    0,
+    slot_addr | (slot_state_id << 27),
+]
+ep_dw = [
+    ep_state_id,
+    (cerr << 1) | (ep_type_id << 3) | (maxp << 16),
+    (ep0_deq & 0xFFFFFFFF) | 0x1,
+    (ep0_deq >> 32) & 0xFFFFFFFF,
+    avg,
+    0,
+    0,
+    0,
+]
+payload = ",".join(
+    [f"0x{dcbaap:x}", f"0x{devctx_phys:x}", f"0x{ep0_deq:x}", str(root_port)] +
+    [f"0x{x:x}" for x in slot_dw] +
+    [f"0x{x:x}" for x in ep_dw]
+)
+
+print("PAYLOAD=" + payload)
+print(
+    "       slot1 handoff: "
+    f"DCBAAP=0x{dcbaap:016x} slot1_devctx=0x{devctx_phys:016x} "
+    f"ep0_deq=0x{ep0_deq:016x} root={root_port} "
+    f"slot_dw0=0x{slot_dw[0]:08x} slot_dw1=0x{slot_dw[1]:08x} "
+    f"slot_dw3=0x{slot_dw[3]:08x} ep0_dw0=0x{ep_dw[0]:08x} "
+    f"ep0_dw1=0x{ep_dw[1]:08x}"
+)
+PY
+)"
+
+    XHCI_SLOT1_HANDOFF_PAYLOAD="$(printf '%s\n' "$py_out" | sed -n 's/^PAYLOAD=//p' | head -n1)"
+    printf '%s\n' "$py_out" | sed '/^PAYLOAD=/d'
 }
 
 verify_smmu_fix_effect() {
@@ -168,7 +302,7 @@ stash_xhci_slot3_handoff() {
         return 0
     fi
 
-    py_out="$(python3 - "$slot_ctx" "$ep_ctx" "$ep0_deq" "$reg_op" "$sysfs" <<'PY'
+py_out="$(python3 - "$slot_ctx" "$ep_ctx" "$ep0_deq" "$reg_op" "$sysfs" <<'PY'
 import re, sys
 
 slot_ctx_path, ep_ctx_path, ep0_deq_path, reg_op_path, sysfs_path = sys.argv[1:6]
@@ -176,6 +310,7 @@ slot_text = open(slot_ctx_path, "r", encoding="utf-8").read().strip()
 ep_text = open(ep_ctx_path, "r", encoding="utf-8").read().strip()
 ep0_text = open(ep0_deq_path, "r", encoding="utf-8").read().strip()
 reg_text = open(reg_op_path, "r", encoding="utf-8").read()
+ep_lines = [line.strip() for line in ep_text.splitlines() if line.strip()]
 
 slot_match = re.search(r'^0x([0-9a-fA-F]+):', slot_text)
 route_match = re.search(r'\bRS\s+([0-9a-fA-F]+)\b', slot_text)
@@ -257,26 +392,102 @@ ep_dw = [
     0,
     0,
 ]
-payload = ",".join(
+payload_legacy = ",".join(
     [f"0x{dcbaap:x}", f"0x{devctx_phys:x}", f"0x{ep0_deq:x}", str(root_port)] +
     [f"0x{x:x}" for x in slot_dw] +
     [f"0x{x:x}" for x in ep_dw]
 )
+ep_state_ids = {
+    "disabled": 0,
+    "running": 1,
+    "halted": 2,
+    "stopped": 3,
+    "error": 4,
+}
+ep_type_ids = {
+    "invalid": 0,
+    "isoc out": 1,
+    "bulk out": 2,
+    "int out": 3,
+    "ctrl": 4,
+    "control": 4,
+    "isoc in": 5,
+    "bulk in": 6,
+    "int in": 7,
+}
+
+def encode_interval(us_text: str) -> int:
+    us = int(us_text)
+    if us <= 125:
+        return 0
+    quanta = max(1, us // 125)
+    shift = 0
+    while (1 << shift) < quanta and shift < 0xFF:
+        shift += 1
+    return shift
+
+ep_ctx_words = []
+for idx in range(7):
+    if idx >= len(ep_lines):
+        print("       slot3 handoff skipped (ep-context lines missing)")
+        sys.exit(0)
+    line = ep_lines[idx]
+    m = re.search(
+        r"State\s+([A-Za-z-]+)\s+mult\s+(\d+)\s+max P\. Streams\s+(\d+)\s+"
+        r"interval\s+(\d+)\s+us\s+max ESIT payload\s+(\d+)\s+CErr\s+(\d+)\s+"
+        r"Type\s+(.+?)\s+burst\s+(\d+)\s+maxp\s+(\d+)\s+deq\s+([0-9a-fA-F]+)\s+"
+        r"avg trb len\s+(\d+)",
+        line,
+        re.IGNORECASE,
+    )
+    if not m:
+        print(f"       slot3 handoff skipped (failed to parse ep-context line {idx + 1})")
+        sys.exit(0)
+
+    ep_state = ep_state_ids[m.group(1).lower()]
+    ep_mult = int(m.group(2), 10) & 0x3
+    ep_interval = encode_interval(m.group(4))
+    ep_cerr = int(m.group(6), 10) & 0x3
+    ep_type = ep_type_ids[m.group(7).strip().lower()]
+    ep_burst = int(m.group(8), 10) & 0xFF
+    ep_maxp = int(m.group(9), 10) & 0xFFFF
+    ep_deq = int(m.group(10), 16)
+    ep_avg = int(m.group(11), 10) & 0xFFFF
+
+    ep_ctx_words.append([
+        ep_state | (ep_mult << 8) | ((ep_interval & 0xFF) << 16),
+        (ep_cerr << 1) | (ep_type << 3) | (ep_burst << 8) | (ep_maxp << 16),
+        ep_deq & 0xFFFFFFFF,
+        (ep_deq >> 32) & 0xFFFFFFFF,
+        ep_avg,
+        0,
+        0,
+        0,
+    ])
+
+payload_out = ",".join(
+    [f"0x{dcbaap:x}", f"0x{devctx_phys:x}", f"0x{ep0_deq:x}", str(root_port)] +
+    [f"0x{x:x}" for x in slot_dw] +
+    [f"0x{x:x}" for ctx in ep_ctx_words for x in ctx]
+)
 
 if sysfs_path and sysfs_path != "-" and __import__("os").access(sysfs_path, __import__("os").W_OK):
-    with open(sysfs_path, "w", encoding="utf-8") as f:
-        f.write(payload)
-    print("       slot3 raw-page handoff updated")
+    try:
+        with open(sysfs_path, "w", encoding="utf-8") as f:
+            f.write(payload_legacy)
+        print("       slot3 alias handoff updated")
+    except OSError as exc:
+        print(f"       slot3 alias handoff skipped ({exc})")
 
-print("PAYLOAD=" + payload)
+print("PAYLOAD=" + payload_out)
 print(
     "       slot3 handoff: "
     f"DCBAAP=0x{dcbaap:016x} slot3_devctx=0x{devctx_phys:016x} "
     f"ep0_deq=0x{ep0_deq:016x} root={root_port} "
     f"slot_dw0=0x{slot_dw[0]:08x} slot_dw1=0x{slot_dw[1]:08x} "
-    f"slot_dw3=0x{slot_dw[3]:08x} ep_dw0=0x{ep_dw[0]:08x} "
-    f"ep_dw1=0x{ep_dw[1]:08x} ep_dw2=0x{ep_dw[2]:08x} "
-    f"ep_dw3=0x{ep_dw[3]:08x} ep_dw4=0x{ep_dw[4]:08x}"
+    f"slot_dw3=0x{slot_dw[3]:08x} ep0_dw0=0x{ep_ctx_words[0][0]:08x} "
+    f"ep0_dw1=0x{ep_ctx_words[0][1]:08x} ep3_dw2=0x{ep_ctx_words[2][2]:08x} "
+    f"ep4_dw2=0x{ep_ctx_words[3][2]:08x} ep5_dw2=0x{ep_ctx_words[4][2]:08x}"
 )
 PY
 )"
@@ -483,6 +694,7 @@ if [[ "$NO_SMMU_FIX" == "0" ]]; then
         fi
     fi
     if [[ "$NO_USB_HOLD" == "0" ]]; then
+        stash_xhci_slot1_handoff
         stash_xhci_slot3_handoff
     fi
 else

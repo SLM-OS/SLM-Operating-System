@@ -26,6 +26,7 @@
 #include "xhci_ring.h"
 #include "xhci_trb.h"
 #include "xhci_ctx.h"
+#include "xhci_slot3_handoff.h"
 #include "xhci_attach.h"
 #include "usb.h"
 #include "ncmem.h"
@@ -83,12 +84,17 @@ static struct xhci_device xhci_dev_pool[2];
 #define XHCI_DEV_MAX_RINGS          8
 static struct xhci_ring xhci_ring_pool[XHCI_DEV_MAX_RINGS];
 static bool             xhci_ring_in_use[XHCI_DEV_MAX_RINGS];
+static bool             xhci_probe_adopt_inherited_slot1 = true;
 static bool             xhci_probe_adopt_inherited_slot3 = true;
 static bool             xhci_probe_reset_ep_on_adopt_slot3 = true;
-static bool             xhci_probe_configure_ep0_on_adopt_slot3 = true;
+static bool             xhci_probe_configure_ep0_on_adopt_slot3 = false;
+static bool             xhci_probe_use_local_devctx_on_adopt_slot3 = false;
+static bool             xhci_probe_skip_stop_ep_on_adopt_slot3 = false;
 static bool             xhci_probe_force_freshslot_fullspeed = false;
 static bool             xhci_probe_freshslot_configure_ep0 = false;
 static bool             xhci_probe_fullspeed_power_cycle = true;
+static bool             xhci_probe_refresh_ep0_on_adopted_configure = false;
+static bool             xhci_probe_skip_configure_ep_on_adopted = false;
 
 static void xhci_try_power_cycle_port(uint8_t pidx, const char *why);
 static void xhci_build_input_ctx_for_address(struct xhci_device *d,
@@ -195,10 +201,11 @@ static uint32_t xhci_stale_portsc_initial = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 static bool xhci_skip_next_port_reset = false;
 static bool xhci_force_connected_disabled_reset = false;
-static bool xhci_probe_prefer_fullspeed_port = true;
+static bool xhci_probe_prefer_fullspeed_port = false;
 static bool xhci_probe_fullspeed_addr3 = true;
 static bool xhci_probe_fullspeed_ep0_mps8 = false;
 static bool xhci_probe_fullspeed_eval_addr3 = false;
+static bool xhci_probe_highspeed_eval_addr1 = true;
 static bool xhci_force_bsr0_on_open = false;
 static bool xhci_force_inherited_addr2_on_open = false;
 
@@ -430,21 +437,32 @@ static const char *xhci_ep_state_str(uint32_t state)
     }
 }
 
-static void xhci_log_devctx_snapshot(struct xhci_device *d, const char *tag)
+static const char *xhci_ctrl_stage_str(uint8_t stage)
 {
-    if (d == NULL || d->dev_ctx == NULL)
+    switch (stage) {
+    case 1: return "setup";
+    case 2: return "data";
+    case 3: return "status";
+    default: return "none";
+    }
+}
+
+static void xhci_log_one_devctx_snapshot(const char *tag, const char *which,
+                                         void *devctx)
+{
+    if (devctx == NULL)
         return;
 
     bool cz = xhci_caps_cached.ctx_64;
-    uint32_t slot0 = *xhci_dev_slot_dw(d->dev_ctx, 0);
-    uint32_t slot1 = *xhci_dev_slot_dw(d->dev_ctx, 1);
-    uint32_t slot2 = *xhci_dev_slot_dw(d->dev_ctx, 2);
-    uint32_t slot3 = *xhci_dev_slot_dw(d->dev_ctx, 3);
-    uint32_t ep00  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
-    uint32_t ep01  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
-    uint32_t ep02  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
-    uint32_t ep03  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
-    uint32_t ep04  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 4, cz);
+    uint32_t slot0 = *xhci_dev_slot_dw(devctx, 0);
+    uint32_t slot1 = *xhci_dev_slot_dw(devctx, 1);
+    uint32_t slot2 = *xhci_dev_slot_dw(devctx, 2);
+    uint32_t slot3 = *xhci_dev_slot_dw(devctx, 3);
+    uint32_t ep00  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 0, cz);
+    uint32_t ep01  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 1, cz);
+    uint32_t ep02  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 2, cz);
+    uint32_t ep03  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 3, cz);
+    uint32_t ep04  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 4, cz);
     uint32_t route = slot0 & XHCI_SLOT_DW0_ROUTE_MASK;
     uint32_t speed = (slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT;
     uint32_t ctxent = (slot0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT;
@@ -457,15 +475,61 @@ static void xhci_log_devctx_snapshot(struct xhci_device *d, const char *tag)
     uint64_t ep0_tr = ((uint64_t)ep03 << 32) | (ep02 & ~0xFULL);
     uint32_t ep0_dcs = ep02 & 0x1U;
 
-    INFO("xhci: %s devctx slot route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+    INFO("xhci: %s %s devctx=%p slot route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
          " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
-         tag,
+         tag, which, devctx,
          (unsigned)route, (unsigned)speed, (unsigned)ctxent,
          (unsigned)root_port, (unsigned)addr,
          xhci_slot_state_str(state),
          (unsigned)slot0, (unsigned)slot1,
          (unsigned)slot2, (unsigned)slot3);
-    INFO("xhci: %s devctx ep0 state=%s type=%u mps=%u tr=0x%lx dcs=%u avg=%u"
+    INFO("xhci: %s %s devctx ep0 state=%s type=%u mps=%u tr=0x%lx dcs=%u avg=%u"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x",
+         tag, which,
+         xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
+         (unsigned)ep0_mps, (unsigned long)ep0_tr,
+         (unsigned)ep0_dcs,
+         (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+         (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+         (unsigned)ep03, (unsigned)ep04);
+}
+
+static void xhci_log_inherited_slot3_handoff_snapshot(const char *tag,
+                                                      uintptr_t phys)
+{
+    if (!xhci_inherited_slot3_ctx_valid)
+        return;
+
+    uint32_t slot0 = xhci_inherited_slot3_slot_ctx_dw[0];
+    uint32_t slot1 = xhci_inherited_slot3_slot_ctx_dw[1];
+    uint32_t slot2 = xhci_inherited_slot3_slot_ctx_dw[2];
+    uint32_t slot3 = xhci_inherited_slot3_slot_ctx_dw[3];
+    uint32_t ep00  = xhci_inherited_slot3_ep0_ctx_dw[0];
+    uint32_t ep01  = xhci_inherited_slot3_ep0_ctx_dw[1];
+    uint32_t ep02  = xhci_inherited_slot3_ep0_ctx_dw[2];
+    uint32_t ep03  = xhci_inherited_slot3_ep0_ctx_dw[3];
+    uint32_t ep04  = xhci_inherited_slot3_ep0_ctx_dw[4];
+    uint32_t route = slot0 & XHCI_SLOT_DW0_ROUTE_MASK;
+    uint32_t speed = (slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT;
+    uint32_t ctxent = (slot0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT;
+    uint32_t root_port = (slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+    uint32_t addr = slot3 & XHCI_SLOT_DW3_ADDR_MASK;
+    uint32_t state = (slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT;
+    uint32_t ep0_state = ep00 & XHCI_EP_DW0_STATE_MASK;
+    uint32_t ep0_type = (ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT;
+    uint32_t ep0_mps = (ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT;
+    uint64_t ep0_tr = ((uint64_t)ep03 << 32) | (ep02 & ~0xFULL);
+    uint32_t ep0_dcs = ep02 & 0x1U;
+
+    INFO("xhci: %s inherited-slot3 phys=0x%lx slot route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
+         tag, (unsigned long)phys,
+         (unsigned)route, (unsigned)speed, (unsigned)ctxent,
+         (unsigned)root_port, (unsigned)addr,
+         xhci_slot_state_str(state),
+         (unsigned)slot0, (unsigned)slot1,
+         (unsigned)slot2, (unsigned)slot3);
+    INFO("xhci: %s inherited-slot3 ep0 state=%s type=%u mps=%u tr=0x%lx dcs=%u avg=%u"
          " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x",
          tag,
          xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
@@ -474,6 +538,64 @@ static void xhci_log_devctx_snapshot(struct xhci_device *d, const char *tag)
          (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
          (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
          (unsigned)ep03, (unsigned)ep04);
+}
+
+static void xhci_log_inherited_slot1_handoff_snapshot(const char *tag,
+                                                      uintptr_t phys)
+{
+    if (!xhci_inherited_slot1_ctx_valid)
+        return;
+
+    uint32_t slot0 = xhci_inherited_slot1_slot_ctx_dw[0];
+    uint32_t slot1 = xhci_inherited_slot1_slot_ctx_dw[1];
+    uint32_t slot2 = xhci_inherited_slot1_slot_ctx_dw[2];
+    uint32_t slot3 = xhci_inherited_slot1_slot_ctx_dw[3];
+    uint32_t ep00  = xhci_inherited_slot1_ep0_ctx_dw[0];
+    uint32_t ep01  = xhci_inherited_slot1_ep0_ctx_dw[1];
+    uint32_t ep02  = xhci_inherited_slot1_ep0_ctx_dw[2];
+    uint32_t ep03  = xhci_inherited_slot1_ep0_ctx_dw[3];
+    uint32_t ep04  = xhci_inherited_slot1_ep0_ctx_dw[4];
+    uint32_t route = slot0 & XHCI_SLOT_DW0_ROUTE_MASK;
+    uint32_t speed = (slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT;
+    uint32_t ctxent = (slot0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT;
+    uint32_t root_port = (slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+    uint32_t addr = slot3 & XHCI_SLOT_DW3_ADDR_MASK;
+    uint32_t state = (slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT;
+    uint32_t ep0_state = ep00 & XHCI_EP_DW0_STATE_MASK;
+    uint32_t ep0_type = (ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT;
+    uint32_t ep0_mps = (ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT;
+    uint64_t ep0_tr = ((uint64_t)ep03 << 32) | (ep02 & ~0xFULL);
+    uint32_t ep0_dcs = ep02 & 0x1U;
+
+    INFO("xhci: %s inherited-slot1 phys=0x%lx slot route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
+         tag, (unsigned long)phys,
+         (unsigned)route, (unsigned)speed, (unsigned)ctxent,
+         (unsigned)root_port, (unsigned)addr,
+         xhci_slot_state_str(state),
+         (unsigned)slot0, (unsigned)slot1,
+         (unsigned)slot2, (unsigned)slot3);
+    INFO("xhci: %s inherited-slot1 ep0 state=%s type=%u mps=%u tr=0x%lx dcs=%u avg=%u"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x",
+         tag,
+         xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
+         (unsigned)ep0_mps, (unsigned long)ep0_tr,
+         (unsigned)ep0_dcs,
+         (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+         (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+         (unsigned)ep03, (unsigned)ep04);
+}
+
+static void xhci_log_devctx_snapshot(struct xhci_device *d, const char *tag)
+{
+    if (d == NULL)
+        return;
+
+    xhci_log_one_devctx_snapshot(tag, "local", d->dev_ctx);
+    if (d->adopted_inherited && d->slot_id == 1 && d->controller_devctx_phys != 0)
+        xhci_log_inherited_slot1_handoff_snapshot(tag, d->controller_devctx_phys);
+    if (d->adopted_inherited && d->slot_id == 3 && d->controller_devctx_phys != 0)
+        xhci_log_inherited_slot3_handoff_snapshot(tag, d->controller_devctx_phys);
 }
 
 static bool xhci_stale_signature_changed(uint32_t initial, uint32_t current)
@@ -813,20 +935,66 @@ void xhci_dump_port_state(void)
 void xhci_dump_device_state(void)
 {
     bool cz = xhci_caps_cached.ctx_64;
+    uint64_t slot3_dcbaa = xhci_dcbaa[3];
 
-    uart_printf("  inherited slot3: raw_devctx=0x%lx cpu_devctx=0x%lx dcbaa[3]=0x%llx\r\n",
-                (unsigned long)xhci_inherited_slot3_devctx_raw_phys,
-                (unsigned long)xhci_inherited_slot3_devctx_phys,
-                (unsigned long long)xhci_dcbaa[3]);
+    uart_printf("  inherited slot3: raw_devctx=0x%08x%08x cpu_devctx=0x%08x%08x dcbaa[3]=0x%08x%08x\r\n",
+                (unsigned)(xhci_inherited_slot3_devctx_raw_phys >> 32),
+                (unsigned)xhci_inherited_slot3_devctx_raw_phys,
+                (unsigned)(xhci_inherited_slot3_devctx_phys >> 32),
+                (unsigned)xhci_inherited_slot3_devctx_phys,
+                (unsigned)(slot3_dcbaa >> 32),
+                (unsigned)slot3_dcbaa);
+    if (xhci_last_ctrl_diag.valid) {
+        uart_printf("  last ctrl: slot=%u dci=%u adopted=%u req=0x%02x type=0x%02x "
+                    "wValue=0x%04x wIndex=0x%04x wLength=%u stage=%s "
+                    "done=%u timeout=%u cc=%u status=%d actual=%u residual=%u "
+                    "trb=0x%08x%08x next=0x%08x%08x enqueue=%u pcs=%u\r\n",
+                    (unsigned)xhci_last_ctrl_diag.slot_id,
+                    (unsigned)xhci_last_ctrl_diag.dci,
+                    (unsigned)xhci_last_ctrl_diag.adopted,
+                    (unsigned)xhci_last_ctrl_diag.request,
+                    (unsigned)xhci_last_ctrl_diag.request_type,
+                    (unsigned)xhci_last_ctrl_diag.value,
+                    (unsigned)xhci_last_ctrl_diag.index,
+                    (unsigned)xhci_last_ctrl_diag.length,
+                    xhci_ctrl_stage_str(xhci_last_ctrl_diag.stage),
+                    (unsigned)xhci_last_ctrl_diag.completed,
+                    (unsigned)xhci_last_ctrl_diag.timed_out,
+                    (unsigned)xhci_last_ctrl_diag.cc,
+                    (int)xhci_last_ctrl_diag.status,
+                    (unsigned)xhci_last_ctrl_diag.actual,
+                    (unsigned)xhci_last_ctrl_diag.residual,
+                    (unsigned)(xhci_last_ctrl_diag.trb_phys >> 32),
+                    (unsigned)xhci_last_ctrl_diag.trb_phys,
+                    (unsigned)(xhci_last_ctrl_diag.next_trb_phys >> 32),
+                    (unsigned)xhci_last_ctrl_diag.next_trb_phys,
+                    (unsigned)xhci_last_ctrl_diag.enqueue,
+                    (unsigned)xhci_last_ctrl_diag.pcs);
+    }
+    if (xhci_last_cmd_diag.valid) {
+        uart_printf("  last cmd: type=%u done=%u timeout=%u cc=%u slot=%u "
+                    "USBSTS=0x%08x trb=0x%08x%08x\r\n",
+                    (unsigned)xhci_last_cmd_diag.type,
+                    (unsigned)xhci_last_cmd_diag.completed,
+                    (unsigned)xhci_last_cmd_diag.timed_out,
+                    (unsigned)xhci_last_cmd_diag.cc,
+                    (unsigned)xhci_last_cmd_diag.slot_id,
+                    (unsigned)xhci_last_cmd_diag.usbsts,
+                    (unsigned)(xhci_last_cmd_diag.trb_phys >> 32),
+                    (unsigned)xhci_last_cmd_diag.trb_phys);
+    }
 
     for (unsigned i = 0; i < sizeof(xhci_dev_pool) / sizeof(xhci_dev_pool[0]); i++) {
         struct xhci_device *d = &xhci_dev_pool[i];
         if (!d->valid)
             continue;
 
-        uart_printf("  dev[%u]: slot=%u root_port=%u dev_ctx=%p input_ctx=%p\r\n",
+        uart_printf("  dev[%u]: slot=%u root_port=%u dev_ctx=%p controller_devctx_phys=0x%08x%08x input_ctx=%p\r\n",
                     i, (unsigned)d->slot_id, (unsigned)d->root_port,
-                    d->dev_ctx, d->input_ctx);
+                    d->dev_ctx,
+                    (unsigned)(d->controller_devctx_phys >> 32),
+                    (unsigned)d->controller_devctx_phys,
+                    d->input_ctx);
 
         if (d->dev_ctx != NULL) {
             uint32_t slot0 = *xhci_dev_slot_dw(d->dev_ctx, 0);
@@ -857,14 +1025,47 @@ void xhci_dump_device_state(void)
                         xhci_slot_state_str(state),
                         (unsigned)slot0, (unsigned)slot1,
                         (unsigned)slot2, (unsigned)slot3);
-            uart_printf("    ep0ctx state=%s type=%u mps=%u tr=0x%llx dcs=%u avg=%u"
+            uart_printf("    ep0ctx state=%s type=%u mps=%u tr=0x%08x%08x dcs=%u avg=%u"
                         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x\r\n",
                         xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
-                        (unsigned)ep0_mps, (unsigned long long)ep0_tr,
+                        (unsigned)ep0_mps,
+                        (unsigned)(ep0_tr >> 32), (unsigned)ep0_tr,
                         (unsigned)ep0_dcs,
                         (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
                         (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
                         (unsigned)ep03, (unsigned)ep04);
+        }
+
+        if (d->adopted_inherited && d->slot_id == 3 && d->controller_devctx_phys != 0) {
+            uart_printf("    inherited-slot3 phys=0x%08x%08x\r\n",
+                        (unsigned)(d->controller_devctx_phys >> 32),
+                        (unsigned)d->controller_devctx_phys);
+            uart_printf("    inherited slotctx route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+                        " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x\r\n",
+                        (unsigned)(xhci_inherited_slot3_slot_ctx_dw[0] & XHCI_SLOT_DW0_ROUTE_MASK),
+                        (unsigned)((xhci_inherited_slot3_slot_ctx_dw[0] & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT),
+                        (unsigned)((xhci_inherited_slot3_slot_ctx_dw[0] & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT),
+                        (unsigned)((xhci_inherited_slot3_slot_ctx_dw[1] & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT),
+                        (unsigned)(xhci_inherited_slot3_slot_ctx_dw[3] & XHCI_SLOT_DW3_ADDR_MASK),
+                        xhci_slot_state_str((xhci_inherited_slot3_slot_ctx_dw[3] & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT),
+                        (unsigned)xhci_inherited_slot3_slot_ctx_dw[0],
+                        (unsigned)xhci_inherited_slot3_slot_ctx_dw[1],
+                        (unsigned)xhci_inherited_slot3_slot_ctx_dw[2],
+                        (unsigned)xhci_inherited_slot3_slot_ctx_dw[3]);
+            uart_printf("    inherited ep0ctx state=%s type=%u mps=%u tr=0x%08x%08x dcs=%u avg=%u"
+                        " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x\r\n",
+                        xhci_ep_state_str(xhci_inherited_slot3_ep0_ctx_dw[0] & XHCI_EP_DW0_STATE_MASK),
+                        (unsigned)((xhci_inherited_slot3_ep0_ctx_dw[1] & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT),
+                        (unsigned)((xhci_inherited_slot3_ep0_ctx_dw[1] & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT),
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[3],
+                        (unsigned)(xhci_inherited_slot3_ep0_ctx_dw[2] & ~0xFULL),
+                        (unsigned)(xhci_inherited_slot3_ep0_ctx_dw[2] & 0x1U),
+                        (unsigned)(xhci_inherited_slot3_ep0_ctx_dw[4] & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[0],
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[1],
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[2],
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[3],
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[4]);
         }
 
         if (d->input_ctx != NULL) {
@@ -1151,6 +1352,55 @@ static void xhci_probe_eval_slot_address(struct xhci_device *d, uint8_t addr)
          (unsigned)old, (unsigned)patched);
 }
 
+static uintptr_t xhci_slot3_ep0_alias_phys(void)
+{
+    uintptr_t off = xhci_inherited_slot3_ep0_deq_phys & 0xFFFu;
+
+    if (off + XHCI_SLOT3_EP0_RING_BYTES > XHCI_SLOT3_EP0_RING_SIZE) {
+        WARN("xhci: slot3 EP0 alias offset 0x%lx exceeds reserved ring window",
+             (unsigned long)off);
+        off = 0;
+    }
+
+    return (uintptr_t)XHCI_SLOT3_EP0_RING_PHYS + off;
+}
+
+static int xhci_prepare_slot3_fixed_mirror(struct xhci_device *d,
+                                           struct xhci_ring *ep0)
+{
+    bool cz = xhci_caps_cached.ctx_64;
+    uintptr_t ep0_cpu_phys = xhci_slot3_ep0_alias_phys();
+    uintptr_t ep0_controller_phys = ep0_cpu_phys;
+    uintptr_t devctx_controller_phys = (uintptr_t)XHCI_SLOT3_DEVCXT_MIRROR_PHYS;
+
+    if (d == NULL || ep0 == NULL)
+        return -1;
+
+    d->dev_ctx = (void *)(uintptr_t)XHCI_SLOT3_DEVCXT_MIRROR_PHYS;
+    d->dev_ctx_phys = devctx_controller_phys;
+    d->input_ctx = (void *)(uintptr_t)XHCI_SLOT3_INPUT_CTX_PHYS;
+    d->input_ctx_phys = (uintptr_t)XHCI_SLOT3_INPUT_CTX_PHYS;
+
+    memset(d->dev_ctx, 0, xhci_ctx_dev_bytes(cz));
+    memset(d->input_ctx, 0, xhci_ctx_in_bytes(cz));
+    if (xhci_ring_init(ep0, (struct xhci_trb *)(uintptr_t)ep0_cpu_phys,
+                       ep0_controller_phys,
+                       XHCI_SLOT3_EP0_RING_TRBS) != 0) {
+        WARN("xhci: slot3 fixed EP0 ring init failed (cpu=0x%lx ctrl=0x%lx)",
+             (unsigned long)ep0_cpu_phys,
+             (unsigned long)ep0_controller_phys);
+        return -1;
+    }
+
+    INFO("xhci: slot3 fixed mirror devctx_cpu=0x%lx devctx_ctrl=0x%lx input=0x%lx ep0_cpu=0x%lx ep0_ctrl=0x%lx",
+         (unsigned long)(uintptr_t)d->dev_ctx,
+         (unsigned long)d->dev_ctx_phys,
+         (unsigned long)d->input_ctx_phys,
+         (unsigned long)ep0_cpu_phys,
+         (unsigned long)ep0_controller_phys);
+    return 0;
+}
+
 static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
                                          struct usb_device *dev,
                                          struct xhci_ring *ep0)
@@ -1169,13 +1419,6 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
         return -1;
     }
 
-    if (xhci_inherited_slot3_devctx_phys != 0) {
-        d->dev_ctx = (void *)xhci_inherited_slot3_devctx_phys;
-        d->dev_ctx_phys = xhci_inherited_slot3_devctx_phys;
-        INFO("xhci: adopting live inherited slot 3 devctx @ 0x%lx",
-             (unsigned long)xhci_inherited_slot3_devctx_phys);
-    }
-
     /*
      * On nano-2's inherited full-speed Bluetooth path, Linux leaves a live
      * slot 3 EP0 object behind. Re-point that slot at one of our rings and
@@ -1183,18 +1426,27 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
      * the first default-address control transfer.
      */
     const uint8_t slot = 3;
-    uintptr_t controller_devctx_phys = xhci_inherited_slot3_devctx_raw_phys;
+    uintptr_t retained_devctx_phys = xhci_inherited_slot3_devctx_raw_phys;
+    uintptr_t published_devctx_phys = retained_devctx_phys;
     struct xhci_trb cmd = {0};
     uint8_t cc = 0;
 
-    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
-                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
-                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
-    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
-        cc != XHCI_CC_SUCCESS) {
-        WARN("xhci: adopt slot %u STOP_EP(ep0) cc=%u",
-             (unsigned)slot, (unsigned)cc);
+    if (xhci_prepare_slot3_fixed_mirror(d, ep0) != 0)
         return -1;
+
+    if (xhci_probe_skip_stop_ep_on_adopt_slot3) {
+        xhci_probe_skip_stop_ep_on_adopt_slot3 = false;
+        INFO("xhci: probing adopted slot %u without STOP_EP(ep0)", (unsigned)slot);
+    } else {
+        cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
+                      ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                      ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+        if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+            cc != XHCI_CC_SUCCESS) {
+            WARN("xhci: adopt slot %u STOP_EP(ep0) cc=%u",
+                 (unsigned)slot, (unsigned)cc);
+            return -1;
+        }
     }
 
     if (xhci_probe_reset_ep_on_adopt_slot3) {
@@ -1238,6 +1490,8 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
     d->slot_id = slot;
     d->ep_rings[XHCI_DCI_EP0] = ep0;
     d->adopted_inherited = true;
+    d->controller_devctx_phys = retained_devctx_phys;
+    d->controller_devctx = NULL;
     if (d->dev_ctx != NULL) {
         bool cz = xhci_caps_cached.ctx_64;
         uint32_t *s0 = xhci_dev_slot_dw(d->dev_ctx, 0);
@@ -1246,20 +1500,29 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
         uint32_t *s3 = xhci_dev_slot_dw(d->dev_ctx, 3);
         uint32_t ep_dw_count = cz ? 8u : 4u;
 
-        memset(d->dev_ctx, 0, xhci_ctx_dev_bytes(cz));
         if (xhci_inherited_slot3_ctx_valid) {
+            unsigned ctx_entries =
+                (unsigned)((xhci_inherited_slot3_slot_ctx_dw[0] &
+                            XHCI_SLOT_DW0_CTXENT_MASK) >>
+                           XHCI_SLOT_DW0_CTXENT_SHIFT);
+            if (ctx_entries > 7)
+                ctx_entries = 7;
             for (unsigned i = 0; i < 4; i++)
                 *xhci_dev_slot_dw(d->dev_ctx, i) = xhci_inherited_slot3_slot_ctx_dw[i];
-            for (unsigned i = 0; i < ep_dw_count; i++)
-                *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, i, cz) =
-                    xhci_inherited_slot3_ep0_ctx_dw[i];
+            for (unsigned dci = 1; dci <= ctx_entries; dci++) {
+                for (unsigned i = 0; i < ep_dw_count; i++) {
+                    *xhci_dev_ep_dw(d->dev_ctx, dci, i, cz) =
+                        xhci_inherited_slot3_ep_ctx_dw[dci][i];
+                }
+            }
             *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz) =
                 (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
             *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz) =
                 (uint32_t)(ep0->phys >> 32);
             INFO("xhci: adopt slot %u copied local devctx mirror from handoff "
-                 "and patched EP0 tr=0x%lx",
+                 "(ctx=%u) and patched EP0 tr=0x%lx",
                  (unsigned)slot,
+                 (unsigned)ctx_entries,
                  (unsigned long)ep0->phys);
         } else {
             uint32_t speed_id = xhci_speed_to_id(dev->speed);
@@ -1297,9 +1560,17 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
         *s3 = ((*s3 & ~XHCI_SLOT_DW3_STATE_MASK) |
                (3U << XHCI_SLOT_DW3_STATE_SHIFT));
     }
-    if (controller_devctx_phys == 0)
-        controller_devctx_phys = d->dev_ctx_phys;
-    xhci_dcbaa[slot] = (uint64_t)controller_devctx_phys;
+    if (xhci_probe_use_local_devctx_on_adopt_slot3) {
+        published_devctx_phys = d->dev_ctx_phys;
+        xhci_probe_use_local_devctx_on_adopt_slot3 = false;
+        INFO("xhci: adopt slot %u publishing local devctx mirror via DCBAA "
+             "(0x%lx) instead of retained controller devctx",
+             (unsigned)slot,
+             (unsigned long)published_devctx_phys);
+    } else if (published_devctx_phys == 0) {
+        published_devctx_phys = d->dev_ctx_phys;
+    }
+    xhci_dcbaa[slot] = (uint64_t)published_devctx_phys;
     dsb(sy);
 
     if (xhci_probe_configure_ep0_on_adopt_slot3) {
@@ -1322,11 +1593,131 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
 
     xhci_probe_adopt_inherited_slot3 = false;
     INFO("xhci: adopted inherited slot %u for full-speed root device "
-         "(root_port=%u ring=0x%lx devctx=0x%lx controller_devctx=0x%lx via on-demand SET_TR_DEQ)",
+         "(root_port=%u ring=0x%lx devctx=0x%lx retained_devctx=0x%lx "
+         "dcbaa_devctx=0x%lx via on-demand SET_TR_DEQ)",
          (unsigned)slot, (unsigned)d->root_port,
          (unsigned long)ep0->phys,
          (unsigned long)d->dev_ctx_phys,
-         (unsigned long)controller_devctx_phys);
+         (unsigned long)retained_devctx_phys,
+         (unsigned long)published_devctx_phys);
+    return 0;
+}
+
+static int xhci_try_adopt_inherited_slot1(struct xhci_device *d,
+                                          struct usb_device *dev,
+                                          struct xhci_ring *ep0)
+{
+    if (!xhci_probe_adopt_inherited_slot1 || d == NULL || dev == NULL ||
+        ep0 == NULL)
+        return -1;
+
+    if (dev->route_string != 0 || dev->speed != USB_SPEED_HIGH ||
+        d->root_port != 6)
+        return -1;
+
+    if (!xhci_inherited_slot1_ctx_valid ||
+        xhci_inherited_slot1_devctx_raw_phys == 0) {
+        INFO("xhci: retained slot1 handoff unavailable on high-speed root path");
+        return -1;
+    }
+
+    const uint8_t slot = 1;
+    bool cz = xhci_caps_cached.ctx_64;
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+
+    for (unsigned i = 0; i < 4; i++)
+        *xhci_dev_slot_dw(d->dev_ctx, i) = xhci_inherited_slot1_slot_ctx_dw[i];
+    for (unsigned i = 0; i < 8; i++)
+        *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, i, cz) =
+            xhci_inherited_slot1_ep0_ctx_dw[i];
+    *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz) =
+        (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+    *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz) =
+        (uint32_t)(ep0->phys >> 32);
+    dsb(sy);
+
+    cmd.param_lo = (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+    cmd.param_hi = (uint32_t)(ep0->phys >> 32);
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_SET_TR_DEQ) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: adopt slot %u SET_TR_DEQ(ep0, ring=0x%lx) cc=%u",
+             (unsigned)slot, (unsigned long)ep0->phys, (unsigned)cc);
+        return -1;
+    }
+
+    dev->address = slot;
+    dev->state = USB_STATE_ADDRESS;
+    d->slot_id = slot;
+    d->ep_rings[XHCI_DCI_EP0] = ep0;
+    d->adopted_inherited = true;
+    d->controller_devctx_phys = xhci_inherited_slot1_devctx_raw_phys;
+    d->controller_devctx = NULL;
+    xhci_dcbaa[slot] = (uint64_t)xhci_inherited_slot1_devctx_raw_phys;
+    dsb(sy);
+
+    xhci_probe_adopt_inherited_slot1 = false;
+    INFO("xhci: adopted inherited slot %u for high-speed root device "
+         "(root_port=%u ring=0x%lx retained_devctx=0x%lx)",
+         (unsigned)slot, (unsigned)d->root_port,
+         (unsigned long)ep0->phys,
+         (unsigned long)xhci_inherited_slot1_devctx_raw_phys);
+    return 0;
+}
+
+int xhci_debug_reprime_adopted_ep0(struct usb_device *dev)
+{
+    if (dev == NULL || dev->hcd_private == NULL)
+        return -1;
+
+    struct xhci_device *d = (struct xhci_device *)dev->hcd_private;
+    if (!d->valid || !d->adopted_inherited || d->slot_id == 0)
+        return -1;
+
+    struct xhci_ring *ep0 = d->ep_rings[XHCI_DCI_EP0];
+    if (ep0 == NULL || ep0->trbs == NULL || ep0->num_trbs == 0)
+        return -1;
+
+    uintptr_t next_tr_phys = ep0->phys +
+                             (uintptr_t)ep0->enqueue * sizeof(struct xhci_trb);
+    uint32_t dcs = ep0->cycle_state & 0x1U;
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+
+    INFO("xhci: debug reprime adopted ep0 slot=%u next=0x%lx enqueue=%u pcs=%u",
+         (unsigned)d->slot_id,
+         (unsigned long)next_tr_phys,
+         (unsigned)ep0->enqueue,
+         (unsigned)ep0->cycle_state);
+
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: debug reprime adopted ep0 slot=%u STOP_EP cc=%u",
+             (unsigned)d->slot_id, (unsigned)cc);
+        return -1;
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.param_lo = (uint32_t)(next_tr_phys & 0xFFFFFFFFu) | dcs;
+    cmd.param_hi = (uint32_t)(next_tr_phys >> 32);
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_SET_TR_DEQ) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: debug reprime adopted ep0 slot=%u SET_TR_DEQ cc=%u",
+             (unsigned)d->slot_id, (unsigned)cc);
+        return -1;
+    }
+
+    INFO("xhci: debug reprime adopted ep0 slot=%u SET_TR_DEQ ok",
+         (unsigned)d->slot_id);
     return 0;
 }
 
@@ -1468,6 +1859,48 @@ static void xhci_probe_configure_ep0_freshslot(struct xhci_device *d,
 
     INFO("xhci: fresh slot %u CONFIGURE_ENDPOINT(ep0) cc=%u",
          (unsigned)d->slot_id, (unsigned)cc);
+}
+
+int xhci_sync_child_address_bsr0(struct usb_device *dev)
+{
+    if (!xhci_live || dev == NULL)
+        return -1;
+
+    struct xhci_device *d = (struct xhci_device *)dev->hcd_private;
+    if (d == NULL || d->slot_id == 0 || d->adopted_inherited)
+        return -1;
+
+    struct xhci_ring *ep0 = d->ep_rings[XHCI_DCI_EP0];
+    if (ep0 == NULL)
+        return -1;
+
+    xhci_build_input_ctx_for_address(d, dev, ep0->phys);
+
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+    cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
+    cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
+    cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
+                   ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
+
+    INFO("xhci: syncing child slot %u with ADDRESS_DEVICE(BSR=0) "
+         "route=0x%x root_port=%u addr=%u",
+         (unsigned)d->slot_id,
+         (unsigned)dev->route_string,
+         (unsigned)d->root_port,
+         (unsigned)dev->address);
+
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: live ADDRESS_DEVICE(BSR=0) slot=%u cc=%u",
+             (unsigned)d->slot_id, (unsigned)cc);
+        return -1;
+    }
+
+    dev->address = d->slot_id;
+    dev->state = USB_STATE_ADDRESS;
+    xhci_log_devctx_snapshot(d, "post-live-address-bsr0");
+    return 0;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1622,6 +2055,12 @@ int xhci_hcd_device_open(struct usb_device *dev)
         }
     }
 
+    if (xhci_try_adopt_inherited_slot1(d, dev, ep0) == 0) {
+        xhci_log_devctx_snapshot(d, "post-adopt");
+        dev->hcd_private = d;
+        return 0;
+    }
+
     if (xhci_try_adopt_inherited_slot(d, dev, ep0) == 0) {
         xhci_log_devctx_snapshot(d, "post-adopt");
         dev->hcd_private = d;
@@ -1725,6 +2164,16 @@ int xhci_hcd_device_open(struct usb_device *dev)
         xhci_probe_fullspeed_eval_addr3 = false;
         xhci_probe_eval_slot_address(d, 3);
     }
+    if (!use_bsr0 &&
+        xhci_probe_highspeed_eval_addr1 &&
+        dev->route_string == 0 &&
+        dev->speed == USB_SPEED_HIGH &&
+        d->root_port == 6) {
+        xhci_probe_highspeed_eval_addr1 = false;
+        INFO("xhci: probing retained high-speed address 1 on root_port=%u",
+             (unsigned)d->root_port);
+        xhci_probe_eval_slot_address(d, 1);
+    }
     if (xhci_probe_freshslot_configure_ep0 &&
         dev->route_string == 0 &&
         dev->speed == USB_SPEED_FULL &&
@@ -1803,6 +2252,74 @@ static uint32_t xhci_ep_type_from_usb(uint8_t attributes, uint8_t address)
     }
 }
 
+static uint32_t xhci_interval_ceil_log2(uint32_t period)
+{
+    uint32_t shift = 0;
+    uint32_t value = 1;
+
+    while (value < period && shift < 0xFF) {
+        value <<= 1;
+        shift++;
+    }
+    return shift;
+}
+
+static uint32_t xhci_ep_interval_from_usb(const struct usb_device *dev,
+                                          const struct usb_endpoint *ep)
+{
+    uint8_t xfer = ep->attributes & USB_XFER_TYPE_MASK;
+    uint32_t interval = ep->interval;
+
+    if (interval == 0)
+        return 0;
+
+    if (xfer == USB_XFER_CONTROL || xfer == USB_XFER_BULK)
+        return 0;
+
+    /*
+     * xHCI stores the endpoint interval in 125 us quanta. For FS/LS
+     * interrupt endpoints the USB descriptor expresses bInterval in
+     * frames, so convert it to microframes and round up to the next
+     * power of two the same way Linux does.
+     */
+    if ((dev->speed == USB_SPEED_FULL || dev->speed == USB_SPEED_LOW) &&
+        xfer == USB_XFER_INTERRUPT)
+        return xhci_interval_ceil_log2(interval * 8U);
+
+    /*
+     * HS interrupt and HS/FS isochronous descriptors already encode
+     * the polling period as an exponent, and xHCI wants that exponent
+     * minus one.
+     */
+    return interval - 1U;
+}
+
+static uint32_t xhci_ep_dw4_from_usb(const struct usb_endpoint *ep)
+{
+    uint8_t xfer = ep->attributes & USB_XFER_TYPE_MASK;
+
+    switch (xfer) {
+    case USB_XFER_CONTROL:
+    case USB_XFER_BULK:
+        /*
+         * Linux leaves Avg TRB Length / Max ESIT Payload at 0 for the
+         * healthy USB2 control and bulk contexts on nano-2.
+         */
+        return 0;
+
+    case USB_XFER_INTERRUPT:
+    case USB_XFER_ISOC: {
+        uint32_t payload = ep->max_packet;
+        return (payload & XHCI_EP_DW4_AVG_TRB_LEN_MASK) |
+               ((payload << XHCI_EP_DW4_MAX_ESIT_SHIFT) &
+                XHCI_EP_DW4_MAX_ESIT_MASK);
+    }
+
+    default:
+        return 0;
+    }
+}
+
 int xhci_hcd_endpoint_configure(struct usb_device *dev,
                                 const struct usb_endpoint *ep)
 {
@@ -1817,61 +2334,223 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
     if (dci < 2 || dci > 31)
         return -1;
     if (d->ep_rings[dci] != NULL) {
-        /* Already configured — CDC-ECM doesn't trigger this in Phase 3A,
-         * so treat as a caller bug rather than silently succeeding. */
-        WARN("xhci: ep 0x%02x (dci %u) already configured", ep->address, dci);
-        return -1;
+        INFO("xhci: ep 0x%02x already configured (dci=%u)",
+             ep->address, dci);
+        return 0;
     }
 
-    /* Per-endpoint transfer ring. 64 TRBs is plenty for CDC-ECM bulk. */
-    struct xhci_ring *r = xhci_ring_pool_alloc();
-    if (r == NULL) {
-        WARN("xhci: out of transfer rings for ep 0x%02x", ep->address);
-        return -1;
+    const struct usb_endpoint *cfg_eps[USB_MAX_ENDPOINTS_PER_DEV] = {0};
+    struct xhci_ring *cfg_rings[USB_MAX_ENDPOINTS_PER_DEV] = {0};
+    unsigned cfg_dcis[USB_MAX_ENDPOINTS_PER_DEV] = {0};
+    unsigned cfg_count = 0;
+    unsigned max_dci = dci;
+    bool batch_all = false;
+
+    if (!d->adopted_inherited) {
+        bool any_non_ep0_configured = false;
+        unsigned valid_non_ep0 = 0;
+        for (unsigned i = 0; i < USB_MAX_ENDPOINTS_PER_DEV; i++) {
+            if (!dev->endpoints[i].valid)
+                continue;
+            unsigned ep_dci = xhci_dci_ep(dev->endpoints[i].address);
+            if (ep_dci < 2 || ep_dci > 31)
+                continue;
+            valid_non_ep0++;
+            if (d->ep_rings[ep_dci] != NULL)
+                any_non_ep0_configured = true;
+        }
+        batch_all = !any_non_ep0_configured && valid_non_ep0 > 1;
     }
-    if (xhci_ring_alloc(r, 64) != 0) {
-        xhci_ring_pool_free(r);
-        return -1;
+
+    if (batch_all) {
+        for (unsigned i = 0; i < USB_MAX_ENDPOINTS_PER_DEV; i++) {
+            const struct usb_endpoint *cfg_ep = &dev->endpoints[i];
+            if (!cfg_ep->valid)
+                continue;
+
+            unsigned cfg_dci_i = xhci_dci_ep(cfg_ep->address);
+            if (cfg_dci_i < 2 || cfg_dci_i > 31)
+                continue;
+
+            struct xhci_ring *cfg_ring = xhci_ring_pool_alloc();
+            if (cfg_ring == NULL) {
+                WARN("xhci: out of transfer rings for batched endpoint 0x%02x",
+                     cfg_ep->address);
+                goto err_free_cfg_rings;
+            }
+            if (xhci_ring_alloc(cfg_ring, 64) != 0) {
+                xhci_ring_pool_free(cfg_ring);
+                goto err_free_cfg_rings;
+            }
+
+            cfg_eps[cfg_count] = cfg_ep;
+            cfg_rings[cfg_count] = cfg_ring;
+            cfg_dcis[cfg_count] = cfg_dci_i;
+            if (cfg_dci_i > max_dci)
+                max_dci = cfg_dci_i;
+            cfg_count++;
+        }
+
+        INFO("xhci: batching CONFIGURE_ENDPOINT slot=%u endpoints=%u max_dci=%u first_ep=0x%02x",
+             (unsigned)d->slot_id,
+             (unsigned)cfg_count,
+             (unsigned)max_dci,
+             (unsigned)ep->address);
+    } else {
+        struct xhci_ring *cfg_ring = xhci_ring_pool_alloc();
+        if (cfg_ring == NULL) {
+            WARN("xhci: out of transfer rings for ep 0x%02x", ep->address);
+            return -1;
+        }
+        if (xhci_ring_alloc(cfg_ring, 64) != 0) {
+            xhci_ring_pool_free(cfg_ring);
+            return -1;
+        }
+        cfg_eps[0] = ep;
+        cfg_rings[0] = cfg_ring;
+        cfg_dcis[0] = dci;
+        cfg_count = 1;
     }
 
     /* Input Context: Add bit for this DCI, keep Slot Context, rewrite
      * EP context for this DCI. Zero the Drop flags (no de-configure). */
     memset(d->input_ctx, 0, xhci_ctx_in_bytes(cz));
     uint32_t *in_add  = xhci_in_control_dw(d->input_ctx, 1);
-    *in_add = XHCI_INPUT_ADD_SLOT | XHCI_INPUT_ADD_EP(dci);
+    *in_add = XHCI_INPUT_ADD_SLOT;
+    for (unsigned i = 0; i < cfg_count; i++)
+        *in_add |= XHCI_INPUT_ADD_EP(cfg_dcis[i]);
+    bool refresh_ep0 = false;
+    if (d->adopted_inherited &&
+        xhci_probe_refresh_ep0_on_adopted_configure &&
+        d->ep_rings[XHCI_DCI_EP0] != NULL) {
+        *in_add |= XHCI_INPUT_ADD_EP(XHCI_DCI_EP0);
+        refresh_ep0 = true;
+        xhci_probe_refresh_ep0_on_adopted_configure = false;
+        INFO("xhci: probing adopted slot %u CONFIGURE_ENDPOINT with EP0 refresh",
+             (unsigned)d->slot_id);
+    }
 
-    /* Update Slot Context: bump Context Entries to cover the new EP. */
+    /* Update Slot Context: start from the live slot image so retained
+     * addr/state survive, then bump Context Entries to cover the new EP. */
     uint32_t *s0 = xhci_in_slot_dw(d->input_ctx, 0, cz);
     uint32_t *s1 = xhci_in_slot_dw(d->input_ctx, 1, cz);
-    uint32_t speed_id = xhci_speed_to_id(dev->speed);
-    /* Context Entries in the Slot Context must cover every valid EP
-     * DCI. The Input Context was freshly zeroed above, so no prior
-     * CONFIGURE_ENDPOINT state survives — `dci` is the new high-water
-     * mark for this single-EP add. */
-    *s0 = (dev->route_string & XHCI_SLOT_DW0_ROUTE_MASK) |
-          (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
-          ((uint32_t)dci << XHCI_SLOT_DW0_CTXENT_SHIFT);
-    *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
+    uint32_t *s2 = xhci_in_slot_dw(d->input_ctx, 2, cz);
+    uint32_t *s3 = xhci_in_slot_dw(d->input_ctx, 3, cz);
+    if (d->dev_ctx != NULL) {
+        *s0 = *xhci_dev_slot_dw(d->dev_ctx, 0);
+        *s1 = *xhci_dev_slot_dw(d->dev_ctx, 1);
+        *s2 = *xhci_dev_slot_dw(d->dev_ctx, 2);
+        *s3 = *xhci_dev_slot_dw(d->dev_ctx, 3);
+    } else {
+        uint32_t speed_id = xhci_speed_to_id(dev->speed);
+        *s0 = (dev->route_string & XHCI_SLOT_DW0_ROUTE_MASK) |
+              (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT);
+        *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
+        *s2 = 0;
+        *s3 = 0;
+    }
+    *s0 = (*s0 & ~XHCI_SLOT_DW0_CTXENT_MASK) |
+          ((uint32_t)max_dci << XHCI_SLOT_DW0_CTXENT_SHIFT);
+    if (dev->state >= USB_STATE_ADDRESS && dev->address != 0) {
+        uint32_t slot_state = d->adopted_inherited
+                              ? ((dev->state == USB_STATE_CONFIGURED) ? 3U : 2U)
+                              : 2U;
+        if (!d->adopted_inherited) {
+            uint32_t old_addr = *s3 & XHCI_SLOT_DW3_ADDR_MASK;
+            uint32_t old_state = (*s3 & XHCI_SLOT_DW3_STATE_MASK) >>
+                                 XHCI_SLOT_DW3_STATE_SHIFT;
+            if (old_addr != dev->address || old_state != slot_state) {
+                INFO("xhci: patching fresh slot %u configure ctx addr/state "
+                     "(addr %u->%u state %u->%u ep=0x%02x)",
+                     (unsigned)d->slot_id,
+                     (unsigned)old_addr,
+                     (unsigned)dev->address,
+                     (unsigned)old_state,
+                     (unsigned)slot_state,
+                     (unsigned)ep->address);
+            }
+        }
+        *s3 = (*s3 & ~XHCI_SLOT_DW3_ADDR_MASK) |
+              ((uint32_t)dev->address & XHCI_SLOT_DW3_ADDR_MASK);
+        *s3 = (*s3 & ~XHCI_SLOT_DW3_STATE_MASK) |
+              (slot_state << XHCI_SLOT_DW3_STATE_SHIFT);
+        if (d->dev_ctx != NULL && !d->adopted_inherited) {
+            uint32_t *live_s3 = xhci_dev_slot_dw(d->dev_ctx, 3);
+            *live_s3 = (*live_s3 & ~XHCI_SLOT_DW3_ADDR_MASK) |
+                       ((uint32_t)dev->address & XHCI_SLOT_DW3_ADDR_MASK);
+            *live_s3 = (*live_s3 & ~XHCI_SLOT_DW3_STATE_MASK) |
+                       (slot_state << XHCI_SLOT_DW3_STATE_SHIFT);
+        }
+    }
 
-    /* Endpoint context. */
-    uint32_t *e0 = xhci_in_ep_dw(d->input_ctx, dci, 0, cz);
-    uint32_t *e1 = xhci_in_ep_dw(d->input_ctx, dci, 1, cz);
-    uint32_t *e2 = xhci_in_ep_dw(d->input_ctx, dci, 2, cz);
-    uint32_t *e3 = xhci_in_ep_dw(d->input_ctx, dci, 3, cz);
-    uint32_t *e4 = xhci_in_ep_dw(d->input_ctx, dci, 4, cz);
+    if (refresh_ep0) {
+        struct xhci_ring *ep0 = d->ep_rings[XHCI_DCI_EP0];
+        uint32_t *ep0_0 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 0, cz);
+        uint32_t *ep0_2 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 2, cz);
+        uint32_t *ep0_3 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 3, cz);
+        uint32_t *ep0_4 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 4, cz);
+        if (d->dev_ctx != NULL) {
+            for (unsigned i = 0; i < 5; i++)
+                *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, i, cz) =
+                    *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, i, cz);
+        }
+        *ep0_0 = (*ep0_0 & ~XHCI_EP_DW0_STATE_MASK) | 1U; /* running */
+        *ep0_2 = (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+        *ep0_3 = (uint32_t)(ep0->phys >> 32);
+        *ep0_4 = 0;
+        if (d->dev_ctx != NULL) {
+            uint32_t *live_ep0_0 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
+            uint32_t *live_ep0_2 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+            uint32_t *live_ep0_3 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+            *live_ep0_0 = (*live_ep0_0 & ~XHCI_EP_DW0_STATE_MASK) | 1U;
+            *live_ep0_2 = *ep0_2;
+            *live_ep0_3 = *ep0_3;
+        }
+    }
 
-    uint32_t ep_type = xhci_ep_type_from_usb(ep->attributes, ep->address);
-    uint32_t interval = ep->interval;
-    *e0 = (interval << XHCI_EP_DW0_INTERVAL_SHIFT) & XHCI_EP_DW0_INTERVAL_MASK;
-    *e1 = (3U << XHCI_EP_DW1_CERR_SHIFT) |
-          (ep_type << XHCI_EP_DW1_EPTYPE_SHIFT) |
-          ((uint32_t)ep->max_packet << XHCI_EP_DW1_MAXPKT_SHIFT);
-    *e2 = (uint32_t)(r->phys & 0xFFFFFFFFu) | 0x1U;  /* DCS = 1 */
-    *e3 = (uint32_t)(r->phys >> 32);
-    *e4 = (ep->attributes & USB_XFER_TYPE_MASK) == USB_XFER_BULK
-          ? ep->max_packet                /* reasonable avg for bulk */
-          : 8U;                           /* control / interrupt default */
+    for (unsigned i = 0; i < cfg_count; i++) {
+        const struct usb_endpoint *cfg_ep = cfg_eps[i];
+        struct xhci_ring *cfg_ring = cfg_rings[i];
+        unsigned cfg_dci_i = cfg_dcis[i];
+        uint32_t ep_type = xhci_ep_type_from_usb(cfg_ep->attributes, cfg_ep->address);
+        uint32_t interval = xhci_ep_interval_from_usb(dev, cfg_ep);
+        uint32_t *e0 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 0, cz);
+        uint32_t *e1 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 1, cz);
+        uint32_t *e2 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 2, cz);
+        uint32_t *e3 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 3, cz);
+        uint32_t *e4 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 4, cz);
+        uint32_t dw4 = xhci_ep_dw4_from_usb(cfg_ep);
+
+        *e0 = (interval << XHCI_EP_DW0_INTERVAL_SHIFT) & XHCI_EP_DW0_INTERVAL_MASK;
+        *e1 = (3U << XHCI_EP_DW1_CERR_SHIFT) |
+              (ep_type << XHCI_EP_DW1_EPTYPE_SHIFT) |
+              ((uint32_t)cfg_ep->max_packet << XHCI_EP_DW1_MAXPKT_SHIFT);
+        *e2 = (uint32_t)(cfg_ring->phys & 0xFFFFFFFFu) | 0x1U;
+        *e3 = (uint32_t)(cfg_ring->phys >> 32);
+        *e4 = dw4;
+        INFO("xhci: configure ep 0x%02x slot=%u dci=%u speed=%u raw_interval=%u encoded_interval=%u "
+             "ep_dw0=0x%08x ep_dw1=0x%08x ep_dw2=0x%08x ep_dw3=0x%08x ep_dw4=0x%08x",
+             (unsigned)cfg_ep->address,
+             (unsigned)d->slot_id,
+             (unsigned)cfg_dci_i,
+             (unsigned)dev->speed,
+             (unsigned)cfg_ep->interval,
+             (unsigned)interval,
+             (unsigned)*e0, (unsigned)*e1, (unsigned)*e2,
+             (unsigned)*e3, (unsigned)*e4);
+    }
     dsb(sy);
+
+    if (d->adopted_inherited &&
+        xhci_probe_skip_configure_ep_on_adopted &&
+        ep->address == 0x81) {
+        xhci_probe_skip_configure_ep_on_adopted = false;
+        for (unsigned i = 0; i < cfg_count; i++)
+            d->ep_rings[cfg_dcis[i]] = cfg_rings[i];
+        INFO("xhci: probing adopted slot %u by skipping CONFIGURE_ENDPOINT for ep 0x%02x",
+             (unsigned)d->slot_id, ep->address);
+        return 0;
+    }
 
     /* CONFIGURE_ENDPOINT. */
     struct xhci_trb cmd = {0};
@@ -1883,14 +2562,25 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
     if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
         cc != XHCI_CC_SUCCESS) {
         WARN("xhci: CONFIGURE_ENDPOINT ep 0x%02x cc=%u", ep->address, cc);
-        xhci_ring_pool_free(r);
-        return -1;
+        goto err_free_cfg_rings;
     }
 
-    d->ep_rings[dci] = r;
-    INFO("xhci: ep 0x%02x configured (dci=%u, type=%u, mps=%u)",
-         ep->address, dci, ep_type, ep->max_packet);
+    for (unsigned i = 0; i < cfg_count; i++) {
+        d->ep_rings[cfg_dcis[i]] = cfg_rings[i];
+        INFO("xhci: ep 0x%02x configured (dci=%u, type=%u, mps=%u)",
+             cfg_eps[i]->address,
+             cfg_dcis[i],
+             xhci_ep_type_from_usb(cfg_eps[i]->attributes, cfg_eps[i]->address),
+             cfg_eps[i]->max_packet);
+    }
     return 0;
+
+err_free_cfg_rings:
+    for (unsigned i = 0; i < cfg_count; i++) {
+        if (cfg_rings[i] != NULL)
+            xhci_ring_pool_free(cfg_rings[i]);
+    }
+    return -1;
 }
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */

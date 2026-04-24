@@ -42,8 +42,10 @@ struct xhci_device {
     uint8_t             root_port;       /* 1-based per xHCI §4.19 */
     void               *dev_ctx;         /* written to DCBAA[slot] */
     void               *input_ctx;       /* command input — reused for CONFIGURE_EP */
+    void               *controller_devctx; /* retained Linux output ctx, if any */
     uintptr_t           dev_ctx_phys;
     uintptr_t           input_ctx_phys;
+    uintptr_t           controller_devctx_phys;
 
     /*
      * One transfer ring per DCI we've enabled. Slot 0 is unused; EP0
@@ -67,11 +69,55 @@ extern volatile uint8_t       *xhci_db_base;
 extern struct xhci_ring        xhci_cmd_ring;
 extern struct xhci_event_ring  xhci_evt_ring;
 extern uint64_t               *xhci_dcbaa;
+extern uintptr_t               xhci_inherited_slot1_devctx_raw_phys;
+extern uintptr_t               xhci_inherited_slot1_ep0_deq_phys;
+extern bool                    xhci_inherited_slot1_ctx_valid;
+extern uint32_t                xhci_inherited_slot1_slot_ctx_dw[4];
+extern uint32_t                xhci_inherited_slot1_ep0_ctx_dw[8];
 extern uintptr_t               xhci_inherited_slot3_devctx_phys;
 extern uintptr_t               xhci_inherited_slot3_devctx_raw_phys;
+extern uintptr_t               xhci_inherited_slot3_ep0_deq_phys;
 extern bool                    xhci_inherited_slot3_ctx_valid;
 extern uint32_t                xhci_inherited_slot3_slot_ctx_dw[4];
 extern uint32_t                xhci_inherited_slot3_ep0_ctx_dw[8];
+extern uint32_t                xhci_inherited_slot3_ep_ctx_dw[8][8];
+
+struct xhci_ctrl_diag {
+    bool      valid;
+    bool      adopted;
+    bool      completed;
+    bool      timed_out;
+    uint8_t   slot_id;
+    uint8_t   dci;
+    uint8_t   request;
+    uint8_t   request_type;
+    uint8_t   stage;
+    uint8_t   cc;
+    uint16_t  value;
+    uint16_t  index;
+    uint16_t  length;
+    int32_t   status;
+    uint32_t  actual;
+    uint32_t  residual;
+    uintptr_t trb_phys;
+    uintptr_t next_trb_phys;
+    uint32_t  enqueue;
+    uint32_t  pcs;
+};
+
+struct xhci_cmd_diag {
+    bool      valid;
+    bool      completed;
+    bool      timed_out;
+    uint8_t   type;
+    uint8_t   cc;
+    uint8_t   slot_id;
+    uint32_t  usbsts;
+    uintptr_t trb_phys;
+};
+
+extern struct xhci_ctrl_diag   xhci_last_ctrl_diag;
+extern struct xhci_cmd_diag    xhci_last_cmd_diag;
 
 /* -------------------------------------------------------------------------- */
 /* Low-level MMIO helpers exported by xhci.c                                   */

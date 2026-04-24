@@ -31,6 +31,12 @@ int xhci_init(void);
 bool xhci_dump_info(void);
 
 /*
+ * Issue a command-ring NO_OP against the live controller. Returns 0 on
+ * success, negative on timeout / transport failure.
+ */
+int xhci_cmd_noop_probe(void);
+
+/*
  * Test-visible accessors (no test harness yet; these let unit tests
  * and the shell read parsed capabilities without touching MMIO).
  */

@@ -68,7 +68,11 @@ struct xhci_urb_slot {
 static struct xhci_urb_slot xhci_urbs[XHCI_MAX_INFLIGHT_URBS];
 static bool xhci_probe_advance_adopted_devctx_after_first_short = false;
 static bool xhci_probe_switch_adopted_dcbaa_after_first_short = false;
-static bool xhci_probe_noop_after_first_short = true;
+static bool xhci_child_post_short_noop = true;
+static bool xhci_probe_force_status_in_on_adopted_in_control = false;
+static bool xhci_probe_force_status_out_on_first_set_address = false;
+static bool xhci_probe_soft_complete_first_child_set_address = true;
+struct xhci_ctrl_diag xhci_last_ctrl_diag;
 
 static struct xhci_urb_slot *xhci_urb_slot_alloc(void)
 {
@@ -99,6 +103,29 @@ static struct xhci_urb_slot *xhci_urb_slot_find_by_trb(uintptr_t trb_phys)
             return &xhci_urbs[i];
     }
     return NULL;
+}
+
+static void xhci_dump_inflight_urbs(uint8_t slot_id, uint8_t ep_id)
+{
+    for (unsigned i = 0; i < XHCI_MAX_INFLIGHT_URBS; i++) {
+        if (!xhci_urbs[i].in_use)
+            continue;
+        struct usb_urb *urb = xhci_urbs[i].urb;
+        uint8_t urb_slot = 0;
+        if (urb != NULL && urb->dev != NULL && urb->dev->hcd_private != NULL)
+            urb_slot = ((struct xhci_device *)urb->dev->hcd_private)->slot_id;
+        INFO("xhci: inflight[%u] slot=%u dci=%u req_len=%u first=0x%lx data=0x%lx last=0x%lx urb=%p",
+             i,
+             (unsigned)urb_slot,
+             (unsigned)xhci_urbs[i].dci,
+             (unsigned)xhci_urbs[i].requested_len,
+             (unsigned long)xhci_urbs[i].first_trb_phys,
+             (unsigned long)xhci_urbs[i].data_trb_phys,
+             (unsigned long)xhci_urbs[i].last_trb_phys,
+             (void *)urb);
+    }
+    INFO("xhci: inflight dump for unmatched slot=%u ep=%u complete",
+         (unsigned)slot_id, (unsigned)ep_id);
 }
 
 static uint32_t xhci_ep0_mps_for_speed(enum usb_speed speed)
@@ -142,6 +169,129 @@ static uint32_t xhci_td_size_for_single_data_trb(const struct usb_urb *urb)
      */
     uint32_t packets = (urb->length + mps - 1U) / mps;
     return packets > 31U ? 31U : packets;
+}
+
+static uint8_t xhci_diag_stage_from_event(const struct xhci_urb_slot *slot,
+                                          uintptr_t event_trb_phys)
+{
+    if (slot == NULL)
+        return 0;
+    if (event_trb_phys == slot->first_trb_phys)
+        return 1;
+    if (slot->data_trb_phys != 0 && event_trb_phys == slot->data_trb_phys)
+        return 2;
+    if (event_trb_phys == slot->last_trb_phys)
+        return 3;
+    return 0;
+}
+
+static void xhci_diag_record_control_submit(const struct usb_urb *urb,
+                                            const struct xhci_device *d,
+                                            const struct xhci_urb_slot *slot,
+                                            const struct xhci_ring *r)
+{
+    if (urb == NULL || d == NULL || slot == NULL || r == NULL)
+        return;
+    if (urb->transfer_type != USB_XFER_CONTROL)
+        return;
+
+    memset(&xhci_last_ctrl_diag, 0, sizeof(xhci_last_ctrl_diag));
+    xhci_last_ctrl_diag.valid         = true;
+    xhci_last_ctrl_diag.adopted       = d->adopted_inherited;
+    xhci_last_ctrl_diag.slot_id       = d->slot_id;
+    xhci_last_ctrl_diag.dci           = (uint8_t)slot->dci;
+    xhci_last_ctrl_diag.request       = urb->setup.bRequest;
+    xhci_last_ctrl_diag.request_type  = urb->setup.bmRequestType;
+    xhci_last_ctrl_diag.value         = urb->setup.wValue;
+    xhci_last_ctrl_diag.index         = urb->setup.wIndex;
+    xhci_last_ctrl_diag.length        = urb->setup.wLength;
+    xhci_last_ctrl_diag.status        = urb->status;
+    xhci_last_ctrl_diag.actual        = urb->actual_length;
+    xhci_last_ctrl_diag.trb_phys      = slot->first_trb_phys;
+    xhci_last_ctrl_diag.next_trb_phys = r->phys +
+                                        (uintptr_t)r->enqueue *
+                                        sizeof(struct xhci_trb);
+    xhci_last_ctrl_diag.enqueue       = r->enqueue;
+    xhci_last_ctrl_diag.pcs           = r->cycle_state;
+}
+
+static void xhci_diag_record_control_event(struct usb_urb *urb,
+                                           const struct xhci_urb_slot *slot,
+                                           uintptr_t trb_phys,
+                                           uint8_t cc,
+                                           uint32_t residual)
+{
+    if (urb == NULL || slot == NULL || urb->transfer_type != USB_XFER_CONTROL)
+        return;
+
+    if (!xhci_last_ctrl_diag.valid)
+        memset(&xhci_last_ctrl_diag, 0, sizeof(xhci_last_ctrl_diag));
+
+    xhci_last_ctrl_diag.valid      = true;
+    xhci_last_ctrl_diag.completed  = true;
+    xhci_last_ctrl_diag.timed_out  = false;
+    xhci_last_ctrl_diag.stage      = xhci_diag_stage_from_event(slot, trb_phys);
+    xhci_last_ctrl_diag.cc         = cc;
+    xhci_last_ctrl_diag.residual   = residual;
+    xhci_last_ctrl_diag.actual     = urb->actual_length;
+    xhci_last_ctrl_diag.status     = urb->status;
+    xhci_last_ctrl_diag.trb_phys   = trb_phys;
+}
+
+static void xhci_diag_record_control_timeout(struct usb_urb *urb,
+                                             const struct xhci_urb_slot *slot)
+{
+    if (urb == NULL || slot == NULL || urb->transfer_type != USB_XFER_CONTROL)
+        return;
+
+    if (!xhci_last_ctrl_diag.valid) {
+        memset(&xhci_last_ctrl_diag, 0, sizeof(xhci_last_ctrl_diag));
+        xhci_last_ctrl_diag.valid = true;
+        xhci_last_ctrl_diag.dci = (uint8_t)slot->dci;
+        xhci_last_ctrl_diag.request = urb->setup.bRequest;
+        xhci_last_ctrl_diag.request_type = urb->setup.bmRequestType;
+        xhci_last_ctrl_diag.value = urb->setup.wValue;
+        xhci_last_ctrl_diag.index = urb->setup.wIndex;
+        xhci_last_ctrl_diag.length = urb->setup.wLength;
+    }
+
+    xhci_last_ctrl_diag.completed = false;
+    xhci_last_ctrl_diag.timed_out = true;
+    xhci_last_ctrl_diag.status = USB_URB_TIMEOUT;
+    xhci_last_ctrl_diag.trb_phys = slot->last_trb_phys;
+}
+
+static void xhci_diag_record_control_software_complete(const struct usb_urb *urb,
+                                                       const struct xhci_device *d,
+                                                       const struct xhci_ring *r)
+{
+    if (urb == NULL || d == NULL || r == NULL ||
+        urb->transfer_type != USB_XFER_CONTROL)
+        return;
+
+    memset(&xhci_last_ctrl_diag, 0, sizeof(xhci_last_ctrl_diag));
+    xhci_last_ctrl_diag.valid        = true;
+    xhci_last_ctrl_diag.adopted      = d->adopted_inherited;
+    xhci_last_ctrl_diag.completed    = true;
+    xhci_last_ctrl_diag.timed_out    = false;
+    xhci_last_ctrl_diag.slot_id      = d->slot_id;
+    xhci_last_ctrl_diag.dci          = XHCI_DCI_EP0;
+    xhci_last_ctrl_diag.request      = urb->setup.bRequest;
+    xhci_last_ctrl_diag.request_type = urb->setup.bmRequestType;
+    xhci_last_ctrl_diag.stage        = 3; /* synthesize success at Status Stage */
+    xhci_last_ctrl_diag.cc           = XHCI_CC_SUCCESS;
+    xhci_last_ctrl_diag.value        = urb->setup.wValue;
+    xhci_last_ctrl_diag.index        = urb->setup.wIndex;
+    xhci_last_ctrl_diag.length       = urb->setup.wLength;
+    xhci_last_ctrl_diag.status       = USB_URB_OK;
+    xhci_last_ctrl_diag.actual       = 0;
+    xhci_last_ctrl_diag.residual     = 0;
+    xhci_last_ctrl_diag.trb_phys     = 0;
+    xhci_last_ctrl_diag.next_trb_phys = r->phys +
+                                        (uintptr_t)r->enqueue *
+                                        sizeof(struct xhci_trb);
+    xhci_last_ctrl_diag.enqueue      = r->enqueue;
+    xhci_last_ctrl_diag.pcs          = r->cycle_state;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -200,15 +350,11 @@ static void xhci_log_control_urb(const char *tag, const struct usb_urb *urb,
         return;
 
     const char *stage = "unknown";
-    if (slot != NULL) {
-        if (event_trb_phys == slot->first_trb_phys) {
-            stage = "setup";
-        } else if (slot->data_trb_phys != 0 &&
-                   event_trb_phys == slot->data_trb_phys) {
-            stage = "data";
-        } else if (event_trb_phys == slot->last_trb_phys) {
-            stage = "status";
-        }
+    switch (xhci_diag_stage_from_event(slot, event_trb_phys)) {
+    case 1: stage = "setup"; break;
+    case 2: stage = "data"; break;
+    case 3: stage = "status"; break;
+    default: break;
     }
 
     INFO("xhci: %s ctrl req=0x%02x type=0x%02x wValue=0x%04x wIndex=0x%04x "
@@ -345,6 +491,32 @@ static void xhci_log_adopted_submit_state(const struct usb_urb *urb,
              (unsigned)(ep02 & 0x1U),
              (unsigned)ep00, (unsigned)ep01, (unsigned)ep02, (unsigned)ep03);
     }
+    if (d->adopted_inherited && d->slot_id == 3 &&
+        d->controller_devctx_phys != 0 && xhci_inherited_slot3_ctx_valid) {
+        INFO("xhci: adopted submit inherited-slot3 phys=0x%lx slot route=0x%x speed=%u root=%u addr=%u state=%u "
+             "dw0=0x%08x dw1=0x%08x dw3=0x%08x",
+             (unsigned long)d->controller_devctx_phys,
+             (unsigned)(xhci_inherited_slot3_slot_ctx_dw[0] & XHCI_SLOT_DW0_ROUTE_MASK),
+             (unsigned)((xhci_inherited_slot3_slot_ctx_dw[0] & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT),
+             (unsigned)((xhci_inherited_slot3_slot_ctx_dw[1] & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT),
+             (unsigned)(xhci_inherited_slot3_slot_ctx_dw[3] & XHCI_SLOT_DW3_ADDR_MASK),
+             (unsigned)((xhci_inherited_slot3_slot_ctx_dw[3] & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT),
+             (unsigned)xhci_inherited_slot3_slot_ctx_dw[0],
+             (unsigned)xhci_inherited_slot3_slot_ctx_dw[1],
+             (unsigned)xhci_inherited_slot3_slot_ctx_dw[3]);
+        INFO("xhci: adopted submit inherited-slot3 ep0 state=%u type=%u mps=%u tr=0x%lx dcs=%u "
+             "dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
+             (unsigned)(xhci_inherited_slot3_ep0_ctx_dw[0] & XHCI_EP_DW0_STATE_MASK),
+             (unsigned)((xhci_inherited_slot3_ep0_ctx_dw[1] & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT),
+             (unsigned)((xhci_inherited_slot3_ep0_ctx_dw[1] & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT),
+             (unsigned long)((((uint64_t)xhci_inherited_slot3_ep0_ctx_dw[3]) << 32) |
+                             (xhci_inherited_slot3_ep0_ctx_dw[2] & ~0xFULL)),
+             (unsigned)(xhci_inherited_slot3_ep0_ctx_dw[2] & 0x1U),
+             (unsigned)xhci_inherited_slot3_ep0_ctx_dw[0],
+             (unsigned)xhci_inherited_slot3_ep0_ctx_dw[1],
+             (unsigned)xhci_inherited_slot3_ep0_ctx_dw[2],
+             (unsigned)xhci_inherited_slot3_ep0_ctx_dw[3]);
+    }
 }
 
 /* TRB builders live in xhci_trb_build.h (shared with test_xhci_xfer.c). */
@@ -397,6 +569,26 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
                  (unsigned)urb->length);
             return -USB_URB_IO_ERROR;
         }
+    }
+
+    if (xhci_probe_soft_complete_first_child_set_address &&
+        !has_data &&
+        urb->setup.bRequest == USB_REQ_SET_ADDRESS &&
+        !d->adopted_inherited &&
+        urb->dev->route_string != 0) {
+        xhci_probe_soft_complete_first_child_set_address = false;
+        INFO("xhci: probing software-completed child SET_ADDRESS value=%u "
+             "slot=%u route=0x%x root_port=%u",
+             (unsigned)urb->setup.wValue,
+             (unsigned)d->slot_id,
+             (unsigned)urb->dev->route_string,
+             (unsigned)d->root_port);
+        urb->status = USB_URB_OK;
+        urb->actual_length = 0;
+        xhci_diag_record_control_software_complete(urb, d, r);
+        if (urb->complete)
+            urb->complete(urb);
+        return 0;
     }
 
     struct xhci_urb_slot *slot = xhci_urb_slot_alloc();
@@ -469,6 +661,44 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     /* 3. Status Stage — Direction is opposite of the Data Stage. For
      *    a no-data control transfer it must be IN per §4.11.2.2. */
     bool status_in = has_data ? !data_in : true;
+    if (xhci_probe_force_status_out_on_first_set_address &&
+        !has_data &&
+        urb->setup.bRequest == USB_REQ_SET_ADDRESS) {
+        status_in = false;
+        xhci_probe_force_status_out_on_first_set_address = false;
+        INFO("xhci: probing first SET_ADDRESS Status Stage as OUT on slot=%u "
+             "value=%u route=0x%x root_port=%u",
+             (unsigned)d->slot_id,
+             (unsigned)urb->setup.wValue,
+             (unsigned)urb->dev->route_string,
+             (unsigned)d->root_port);
+    }
+    if (!has_data && urb->setup.bRequest == USB_REQ_SET_ADDRESS) {
+        INFO("xhci: submit ctrl SET_ADDRESS value=%u addr=%u route=0x%x "
+             "root_port=%u status_dir_in=%u next=0x%lx enqueue=%u pcs=%u",
+             (unsigned)urb->setup.wValue,
+             (unsigned)urb->dev->address,
+             (unsigned)urb->dev->route_string,
+             (unsigned)d->root_port,
+             (unsigned)status_in,
+             (unsigned long)(r->phys +
+                             (uintptr_t)r->enqueue * sizeof(struct xhci_trb)),
+             (unsigned)r->enqueue,
+             (unsigned)r->cycle_state);
+    }
+    if (xhci_probe_force_status_in_on_adopted_in_control &&
+        d->adopted_inherited &&
+        has_data && data_in &&
+        xhci_urb_is_get_descriptor(urb)) {
+        status_in = true;
+        xhci_probe_force_status_in_on_adopted_in_control = false;
+        INFO("xhci: probing adopted control Status Stage as IN on slot=%u "
+             "req=0x%02x wValue=0x%04x len=%u",
+             (unsigned)d->slot_id,
+             (unsigned)urb->setup.bRequest,
+             (unsigned)urb->setup.wValue,
+             (unsigned)urb->setup.wLength);
+    }
     xhci_build_status_stage(&tmpl, status_in, 0);
     if (xhci_urb_is_get_descriptor(urb)) {
         INFO("xhci: status trb status=0x%08x control=0x%08x status_dir_in=%u",
@@ -480,6 +710,7 @@ static int xhci_submit_control(struct usb_urb *urb, struct xhci_device *d)
     slot->last_trb_phys = (uintptr_t)slot_trb;
 
     urb->hcd_private    = slot;
+    xhci_diag_record_control_submit(urb, d, slot, r);
 
     /* Kick EP0. */
     xhci_ring_doorbell(d->slot_id, XHCI_DCI_EP0);
@@ -527,7 +758,9 @@ static int xhci_submit_bulk_int(struct usb_urb *urb, struct xhci_device *d)
         xhci_urb_slot_free(slot);
         return -USB_URB_IO_ERROR;
     }
-    slot->last_trb_phys = (uintptr_t)slot_trb;
+    slot->first_trb_phys = (uintptr_t)slot_trb;
+    slot->data_trb_phys  = (uintptr_t)slot_trb;
+    slot->last_trb_phys  = (uintptr_t)slot_trb;
     urb->hcd_private    = slot;
 
     xhci_ring_doorbell(d->slot_id, (uint8_t)dci);
@@ -578,6 +811,7 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
              (unsigned)slot_id, (unsigned)ep_id,
              (unsigned)evt->status, (unsigned)evt->control,
              (unsigned)residual);
+        xhci_dump_inflight_urbs(slot_id, ep_id);
         return;
     }
 
@@ -599,6 +833,7 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
 
     if (urb->transfer_type == USB_XFER_CONTROL && cc != XHCI_CC_SUCCESS)
         xhci_log_control_urb("event", urb, slot, trb_phys, cc, residual);
+    xhci_diag_record_control_event(urb, slot, trb_phys, cc, residual);
 
     xhci_log_post_short_control_state(urb, slot, trb_phys, cc);
 
@@ -643,14 +878,16 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
         }
     }
 
-    if (xhci_probe_noop_after_first_short &&
+    if (xhci_child_post_short_noop &&
         urb->transfer_type == USB_XFER_CONTROL &&
         cc == XHCI_CC_SHORT_PACKET &&
         trb_phys == slot->data_trb_phys) {
         struct xhci_device *d = (struct xhci_device *)urb->dev->hcd_private;
-        xhci_probe_noop_after_first_short = false;
-        if (d != NULL) {
-            INFO("xhci: deferring post-short NO_OP until after event retirement "
+        if (d != NULL &&
+            !d->adopted_inherited &&
+            urb->dev->route_string != 0) {
+            xhci_child_post_short_noop = false;
+            INFO("xhci: queueing child post-short NO_OP after event retirement "
                  "(slot=%u)", (unsigned)d->slot_id);
             xhci_defer_post_short_noop(d->slot_id);
         }
@@ -694,6 +931,7 @@ int xhci_hcd_cancel_urb(struct usb_urb *urb)
     }
     if (urb->transfer_type == USB_XFER_CONTROL && urb->dev != NULL) {
         struct xhci_device *d = (struct xhci_device *)urb->dev->hcd_private;
+        xhci_diag_record_control_timeout(urb, slot);
         if (d != NULL && d->adopted_inherited) {
             INFO("xhci: cancel_urb on adopted control slot=%u req=0x%02x len=%u trb=0x%lx",
                  (unsigned)d->slot_id,

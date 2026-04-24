@@ -15,8 +15,15 @@
 
 #include "usb.h"
 #include "debug.h"
+#include "ncmem.h"
 #include "timer.h"
 #include <string.h>
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+int xhci_cmd_noop_probe(void);
+int xhci_debug_reprime_adopted_ep0(struct usb_device *dev);
+int xhci_sync_child_address_bsr0(struct usb_device *dev);
+#endif
 
 /* -------------------------------------------------------------------------- */
 /* Module state                                                                */
@@ -38,6 +45,167 @@ static bool                  hub_device_present;
 static bool                  usb_probe_presetup_get_status = false;
 static bool                  usb_probe_presetup_bad_clear_feature = false;
 static bool                  usb_probe_presetup_set_address = false;
+static bool                  usb_probe_exact_first_retained_descriptor = false;
+static bool                  usb_probe_stop_after_first_retained_descriptor = false;
+static bool                  usb_probe_hub_noop = false;
+static bool                  usb_probe_hub_reprime_ep0 = false;
+static bool                  usb_probe_hub_post_config_device_desc = false;
+static bool                  usb_probe_hub_get_status = false;
+static bool                  usb_probe_disable_hotplug_retry_after_failure = true;
+static bool                  usb_probe_child_noop_before_close = false;
+static bool                  usb_child_address_sync_bsr0 = true;
+static bool                  usb_probe_child_initial_desc_bounce = true;
+static bool                  usb_probe_child_followup_desc_bounce = true;
+static bool                  usb_hotplug_retry_blocked;
+static bool                  usb_hotplug_retry_blocked_logged;
+static uint8_t              *usb_retained_desc_bounce;
+static size_t                usb_retained_desc_bounce_len;
+
+static void *usb_get_retained_desc_bounce(size_t min_len)
+{
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    if (usb_retained_desc_bounce_len < min_len) {
+        size_t alloc_len = (min_len < 256u) ? 256u : min_len;
+        void *buf = ncmem_alloc(alloc_len, 64);
+        if (buf == NULL) {
+            WARN("usb_core: retained descriptor bounce alloc failed (%u bytes)",
+                 (unsigned)alloc_len);
+            return NULL;
+        }
+        memset(buf, 0, alloc_len);
+        usb_retained_desc_bounce = (uint8_t *)buf;
+        usb_retained_desc_bounce_len = alloc_len;
+        INFO("usb_core: retained descriptor bounce @0x%lx len=%u",
+             (unsigned long)(uintptr_t)buf,
+             (unsigned)alloc_len);
+    }
+    return usb_retained_desc_bounce;
+#else
+    (void)min_len;
+    return NULL;
+#endif
+}
+
+static bool usb_is_root_device(const struct usb_device *dev)
+{
+    return dev != NULL && dev->route_string == 0;
+}
+
+static bool usb_config_is_cdc_ecm_candidate(const uint8_t *buf, size_t len)
+{
+    if (buf == NULL || len < sizeof(struct usb_config_descriptor))
+        return false;
+
+    bool have_ctrl = false;
+    bool have_data = false;
+    const uint8_t *p = buf + sizeof(struct usb_config_descriptor);
+    const uint8_t *end = buf + len;
+
+    while (p + 2 <= end) {
+        uint8_t blen = p[0];
+        uint8_t btype = p[1];
+        if (blen < 2 || p + blen > end)
+            break;
+
+        if (btype == USB_DT_INTERFACE &&
+            blen >= sizeof(struct usb_interface_descriptor)) {
+            const struct usb_interface_descriptor *id = (const void *)p;
+            if (id->bInterfaceClass == 0x02 && id->bInterfaceSubClass == 0x06)
+                have_ctrl = true;
+            if (id->bInterfaceClass == 0x0A)
+                have_data = true;
+        }
+
+        p += blen;
+    }
+
+    return have_ctrl && have_data;
+}
+
+static int usb_fetch_config_descriptor(struct usb_device *dev,
+                                       uint8_t cfg_index,
+                                       struct usb_config_descriptor *cfg_head,
+                                       uint8_t *cfg_buf,
+                                       size_t cfg_buf_cap)
+{
+    if (dev == NULL || cfg_head == NULL || cfg_buf == NULL ||
+        cfg_buf_cap < sizeof(struct usb_config_descriptor))
+        return -1;
+
+    struct usb_config_descriptor *cfg_head_buf = cfg_head;
+    uint8_t *bounce = usb_get_retained_desc_bounce(sizeof(*cfg_head));
+    if (bounce != NULL) {
+        memset(bounce, 0, sizeof(*cfg_head));
+        cfg_head_buf = (struct usb_config_descriptor *)bounce;
+    }
+
+    int n = usb_get_descriptor(dev, USB_DT_CONFIG, cfg_index,
+                               cfg_head_buf, sizeof(*cfg_head));
+    if (n >= (int)sizeof(*cfg_head) && cfg_head_buf != cfg_head)
+        memcpy(cfg_head, cfg_head_buf, sizeof(*cfg_head));
+    if (n < (int)sizeof(*cfg_head))
+        return -1;
+
+    uint16_t total = cfg_head->wTotalLength;
+    if (total > cfg_buf_cap) {
+        WARN("usb_core: config[%u] total %u > cap %u — truncating",
+             (unsigned)cfg_index, total, (unsigned)cfg_buf_cap);
+        total = (uint16_t)cfg_buf_cap;
+    }
+
+    uint8_t *xfer_buf = cfg_buf;
+    bounce = usb_get_retained_desc_bounce(total);
+    if (bounce != NULL) {
+        memset(bounce, 0, total);
+        xfer_buf = bounce;
+    }
+
+    n = usb_get_descriptor(dev, USB_DT_CONFIG, cfg_index, xfer_buf, total);
+    if (n >= (int)total && xfer_buf != cfg_buf)
+        memcpy(cfg_buf, xfer_buf, total);
+    if (n < (int)total)
+        return -1;
+
+    return (int)total;
+}
+
+static bool usb_is_retained_fullspeed_root(const struct usb_device *dev)
+{
+    return dev != NULL &&
+           dev->state == USB_STATE_ADDRESS &&
+           dev->address != 0 &&
+           dev->route_string == 0 &&
+           dev->speed == USB_SPEED_FULL;
+}
+
+static bool usb_probe_preserve_child_failure(struct usb_device *dev,
+                                             const char *phase)
+{
+    if (!usb_probe_child_noop_before_close || dev == NULL || dev->route_string == 0)
+        return false;
+
+    usb_probe_child_noop_before_close = false;
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    int noop_rc = xhci_cmd_noop_probe();
+    WARN("usb_core: preserving child failure boundary after %s "
+         "(route=0x%x root_port=%u addr=%u speed=%d) noop_rc=%d",
+         phase,
+         (unsigned)dev->route_string,
+         (unsigned)dev->root_hub_port,
+         (unsigned)dev->address,
+         (int)dev->speed,
+         noop_rc);
+#else
+    WARN("usb_core: preserving child failure boundary after %s "
+         "(route=0x%x root_port=%u addr=%u speed=%d)",
+         phase,
+         (unsigned)dev->route_string,
+         (unsigned)dev->root_hub_port,
+         (unsigned)dev->address,
+         (int)dev->speed);
+#endif
+    return true;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Minimal USB 2.0 hub support                                                */
@@ -271,6 +439,8 @@ void usb_core_reset(void)
     memset(&hub_device, 0, sizeof(hub_device));
     root_device_present = false;
     hub_device_present = false;
+    usb_hotplug_retry_blocked = false;
+    usb_hotplug_retry_blocked_logged = false;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -355,6 +525,13 @@ int usb_core_hotplug_poll(void)
 {
     if (active_hcd == NULL || active_hcd->port_status == NULL)
         return 0;
+    if (usb_hotplug_retry_blocked) {
+        if (!usb_hotplug_retry_blocked_logged) {
+            INFO("usb_core: hotplug retry suppressed after prior enumeration failure");
+            usb_hotplug_retry_blocked_logged = true;
+        }
+        return 0;
+    }
     if (root_device_present)
         return 0;
 
@@ -366,6 +543,10 @@ int usb_core_hotplug_poll(void)
     int rc = usb_core_enumerate();
     if (rc != 0) {
         WARN("usb_core: hotplug enumerate failed rc=%d", rc);
+        if (usb_probe_disable_hotplug_retry_after_failure) {
+            usb_hotplug_retry_blocked = true;
+            usb_hotplug_retry_blocked_logged = false;
+        }
         return rc;
     }
     return root_device_present ? 1 : 0;
@@ -420,6 +601,27 @@ int usb_control_msg(struct usb_device *dev,
     if (dev == NULL)
         return -USB_URB_IO_ERROR;
 
+    void *xfer_buf = data;
+    void *bounce = NULL;
+    bool data_in = (bmRequestType & USB_DIR_IN) != 0;
+    /*
+     * On Jetson, xHCI data buffers are not hardware-coherent. The
+     * retained-descriptor work proved this for child-device control-IN
+     * traffic too, so use the NC bounce for any synchronous control
+     * payload, not just root-device descriptor fetches.
+     */
+    if (data != NULL && wLength > 0) {
+        bounce = usb_get_retained_desc_bounce(wLength);
+        if (bounce != NULL) {
+            if (data_in) {
+                memset(bounce, 0, wLength);
+            } else {
+                memcpy(bounce, data, wLength);
+            }
+            xfer_buf = bounce;
+        }
+    }
+
     struct usb_urb urb = {0};
     urb.dev           = dev;
     urb.endpoint      = 0;     /* control pipe */
@@ -429,7 +631,7 @@ int usb_control_msg(struct usb_device *dev,
     urb.setup.wValue        = wValue;
     urb.setup.wIndex        = wIndex;
     urb.setup.wLength       = wLength;
-    urb.buffer = data;
+    urb.buffer = xfer_buf;
     urb.length = wLength;
 
     int sub = usb_submit_urb(&urb);
@@ -437,8 +639,15 @@ int usb_control_msg(struct usb_device *dev,
         return sub;
 
     int status = usb_wait_urb(&urb, timeout_ms);
-    if (status == USB_URB_OK || status == USB_URB_SHORT)
+    if (status == USB_URB_OK || status == USB_URB_SHORT) {
+        if (bounce != NULL && data_in && data != NULL && urb.actual_length > 0) {
+            size_t copy_len = urb.actual_length;
+            if (copy_len > wLength)
+                copy_len = wLength;
+            memcpy(data, bounce, copy_len);
+        }
         return (int)urb.actual_length;
+    }
     if (urb.transfer_type == USB_XFER_CONTROL) {
         WARN("usb_core: control failed req=0x%02x type=0x%02x "
              "wValue=0x%04x wIndex=0x%04x wLength=%u status=%s actual=%u",
@@ -524,24 +733,35 @@ int usb_parse_configuration(struct usb_device *dev)
                 break;
             const struct usb_interface_descriptor *id = (const void *)p;
 
-            /* Skip alternate settings — Phase 1 only binds default (alt=0). */
-            if (id->bAlternateSetting != 0) {
-                cur_iface_slot = -1;
-                break;
-            }
-
             cur_iface_slot = -1;
             for (unsigned i = 0; i < USB_MAX_INTERFACES_PER_DEV; i++) {
-                if (!dev->ifaces[i].valid) {
+                if (dev->ifaces[i].valid &&
+                    dev->ifaces[i].number == id->bInterfaceNumber) {
                     cur_iface_slot = (int)i;
                     break;
                 }
             }
             if (cur_iface_slot < 0) {
-                WARN("usb_core: no iface slot for ifnum=%u", id->bInterfaceNumber);
+                for (unsigned i = 0; i < USB_MAX_INTERFACES_PER_DEV; i++) {
+                    if (!dev->ifaces[i].valid) {
+                        cur_iface_slot = (int)i;
+                        break;
+                    }
+                }
+            }
+            if (cur_iface_slot < 0) {
+                WARN("usb_core: no iface slot for ifnum=%u alt=%u",
+                     id->bInterfaceNumber, id->bAlternateSetting);
                 break;
             }
+
             struct usb_interface *slot = &dev->ifaces[cur_iface_slot];
+            if (slot->valid && slot->number == id->bInterfaceNumber &&
+                id->bAlternateSetting < slot->alt_setting) {
+                cur_iface_slot = -1;
+                break;
+            }
+
             slot->valid         = true;
             slot->number        = id->bInterfaceNumber;
             slot->alt_setting   = id->bAlternateSetting;
@@ -549,6 +769,8 @@ int usb_parse_configuration(struct usb_device *dev)
             slot->class_code    = id->bInterfaceClass;
             slot->subclass      = id->bInterfaceSubClass;
             slot->protocol      = id->bInterfaceProtocol;
+            for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++)
+                slot->ep_index[e] = -1;
             break;
         }
 
@@ -796,9 +1018,49 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
          * semantics match the working Linux path as closely as possible.
          */
         uint8_t dd_stub[64];
+        uint8_t *dd_stub_buf = dd_stub;
+        size_t initial_desc_len = sizeof(dd_stub);
+        if (usb_probe_exact_first_retained_descriptor &&
+            usb_is_retained_fullspeed_root(dev)) {
+            initial_desc_len = sizeof(dev->dev_desc);
+            usb_probe_exact_first_retained_descriptor = false;
+            INFO("usb_core: probing exact first retained descriptor len=%u addr=%u speed=%d route=0x%x root_port=%u",
+                 (unsigned)initial_desc_len,
+                 (unsigned)dev->address,
+                 (int)dev->speed,
+                 (unsigned)dev->route_string,
+                 (unsigned)dev->root_hub_port);
+        }
+        if (usb_is_root_device(dev)) {
+            uint8_t *bounce = usb_get_retained_desc_bounce(initial_desc_len);
+            if (bounce != NULL) {
+                memset(bounce, 0, initial_desc_len);
+                dd_stub_buf = bounce;
+                INFO("usb_core: using NC bounce for root initial descriptor "
+                     "buf=0x%lx len=%u",
+                     (unsigned long)(uintptr_t)dd_stub_buf,
+                     (unsigned)initial_desc_len);
+            }
+        } else if (usb_probe_child_initial_desc_bounce &&
+                   dev->route_string != 0) {
+            uint8_t *bounce = usb_get_retained_desc_bounce(initial_desc_len);
+            usb_probe_child_initial_desc_bounce = false;
+            if (bounce != NULL) {
+                memset(bounce, 0, initial_desc_len);
+                dd_stub_buf = bounce;
+                INFO("usb_core: probing NC bounce for child initial descriptor "
+                     "buf=0x%lx len=%u route=0x%x root_port=%u",
+                     (unsigned long)(uintptr_t)dd_stub_buf,
+                     (unsigned)initial_desc_len,
+                     (unsigned)dev->route_string,
+                     (unsigned)dev->root_hub_port);
+            }
+        }
         n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
-                               dd_stub, sizeof(dd_stub));
+                               dd_stub_buf, initial_desc_len);
         if (n >= 8) {
+            if (dd_stub_buf != dd_stub)
+                memcpy(dd_stub, dd_stub_buf, (size_t)n);
             /* bMaxPacketSize0 is byte 7. Record it for the HCD if useful later. */
             dev->dev_desc.bMaxPacketSize0 = dd_stub[7];
             if (n >= (int)sizeof(dev->dev_desc)) {
@@ -809,7 +1071,7 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
         }
 
         WARN("usb_core: short GET_DESCRIPTOR(device, %u) n=%d (attempt %u/3)",
-             (unsigned)sizeof(dd_stub), n, attempt + 1);
+             (unsigned)initial_desc_len, n, attempt + 1);
 
         if (device_opened && active_hcd->device_close) {
             active_hcd->device_close(dev);
@@ -825,21 +1087,32 @@ got_initial_descriptor:
     if (dev->state == USB_STATE_ADDRESS && dev->address != 0) {
         INFO("usb_core: reusing inherited device address %u after initial descriptor",
              (unsigned)dev->address);
-        /*
-         * On nano-2's retained full-speed slot-3 path, the first 64-byte
-         * descriptor read can succeed as an inherited-address short packet,
-         * but jumping straight to the first config-descriptor request stalls.
-         * Force the normal full device-descriptor step to run anyway so the
-         * next control transfer stays in-device-descriptor traffic instead of
-         * immediately switching descriptor types.
-         */
-        if (have_full_device_desc &&
-            dev->route_string == 0 &&
-            dev->speed == USB_SPEED_FULL) {
-            INFO("usb_core: forcing explicit full device-descriptor read after inherited-address short packet");
-            have_full_device_desc = false;
+        if (usb_probe_stop_after_first_retained_descriptor &&
+            usb_is_retained_fullspeed_root(dev)) {
+            usb_probe_stop_after_first_retained_descriptor = false;
+            WARN("usb_core: probe stopping after first retained descriptor on full-speed root path");
+            goto err_close;
         }
     } else {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+        if (usb_child_address_sync_bsr0 && dev->route_string != 0) {
+            usb_child_address_sync_bsr0 = false;
+            int addr_rc = xhci_sync_child_address_bsr0(dev);
+            INFO("usb_core: child ADDRESS_DEVICE(BSR=0) sync after initial "
+                 "descriptor rc=%d route=0x%x root_port=%u target=%u",
+                 addr_rc,
+                 (unsigned)dev->route_string,
+                 (unsigned)dev->root_hub_port,
+                 (unsigned)target_address);
+            if (addr_rc == 0) {
+                dev->address = target_address;
+                dev->state = USB_STATE_ADDRESS;
+                goto address_assigned;
+            }
+            if (usb_probe_preserve_child_failure(dev, "ADDRESS_DEVICE(BSR=0)"))
+                return -1;
+        }
+#endif
         rc = usb_control_msg(dev,
                              USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
                              USB_REQ_SET_ADDRESS,
@@ -847,61 +1120,115 @@ got_initial_descriptor:
         if (rc < 0) {
             WARN("usb_core: SET_ADDRESS failed: %s",
                  usb_urb_status_str((enum usb_urb_status)(-rc)));
+            if (usb_probe_preserve_child_failure(dev, "SET_ADDRESS"))
+                return -1;
             goto err_close;
         }
         dev->address = target_address;
         dev->state = USB_STATE_ADDRESS;
     }
 
+address_assigned:
+
     /* Step 5: full device descriptor. */
     if (!have_full_device_desc) {
-        if (dev->state == USB_STATE_ADDRESS &&
-            dev->address != 0 &&
-            dev->route_string == 0 &&
-            dev->speed == USB_SPEED_FULL) {
+        if (usb_is_root_device(dev)) {
             uint8_t dd_full[64];
+            uint8_t *dd_full_buf = dd_full;
+            uint8_t *bounce = usb_get_retained_desc_bounce(sizeof(dd_full));
+            if (bounce != NULL) {
+                memset(bounce, 0, sizeof(dd_full));
+                dd_full_buf = bounce;
+                INFO("usb_core: using NC bounce for root full device descriptor "
+                     "buf=0x%lx len=%u",
+                     (unsigned long)(uintptr_t)dd_full_buf,
+                     (unsigned)sizeof(dd_full));
+            }
             n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
-                                   dd_full, sizeof(dd_full));
+                                   dd_full_buf, sizeof(dd_full));
             if (n >= (int)sizeof(dev->dev_desc)) {
+                if (dd_full_buf != dd_full)
+                    memcpy(dd_full, dd_full_buf, sizeof(dd_full));
                 memcpy(&dev->dev_desc, dd_full, sizeof(dev->dev_desc));
             } else {
                 WARN("usb_core: short GET_DESCRIPTOR(device, 64) n=%d", n);
+                if (usb_probe_preserve_child_failure(dev, "GET_DESCRIPTOR(device,64)"))
+                    return -1;
                 goto err_close;
             }
         } else {
+            struct usb_device_descriptor *dd_full_buf = &dev->dev_desc;
+            if (usb_probe_child_followup_desc_bounce && dev->route_string != 0) {
+                uint8_t *bounce = usb_get_retained_desc_bounce(sizeof(dev->dev_desc));
+                if (bounce != NULL) {
+                    memset(bounce, 0, sizeof(dev->dev_desc));
+                    dd_full_buf = (struct usb_device_descriptor *)bounce;
+                    INFO("usb_core: probing NC bounce for child full device descriptor "
+                         "buf=0x%lx len=%u route=0x%x root_port=%u",
+                         (unsigned long)(uintptr_t)dd_full_buf,
+                         (unsigned)sizeof(dev->dev_desc),
+                         (unsigned)dev->route_string,
+                         (unsigned)dev->root_hub_port);
+                }
+            }
             n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
-                                   &dev->dev_desc,
+                                   dd_full_buf,
                                    sizeof(dev->dev_desc));
+            if (n >= (int)sizeof(dev->dev_desc) && dd_full_buf != &dev->dev_desc)
+                memcpy(&dev->dev_desc, dd_full_buf, sizeof(dev->dev_desc));
         }
         if (n < (int)sizeof(dev->dev_desc)) {
             WARN("usb_core: short GET_DESCRIPTOR(device) n=%d", n);
+            if (usb_probe_preserve_child_failure(dev, "GET_DESCRIPTOR(device)"))
+                return -1;
             goto err_close;
         }
     }
 
-    /* Step 6: 9-byte config header to learn wTotalLength. */
+    /* Step 6 + 7: fetch the selected config tree. Default to config
+     * index 0, but prefer a later CDC-ECM-capable config when the
+     * device exposes one (e.g. RTL8153 vendor config 1 vs CDC config 2). */
     struct usb_config_descriptor cfg_head;
-    n = usb_get_descriptor(dev, USB_DT_CONFIG, 0,
-                           &cfg_head, sizeof(cfg_head));
+    uint8_t selected_cfg_index = 0;
+    n = usb_fetch_config_descriptor(dev, 0, &cfg_head,
+                                    dev->raw_config,
+                                    sizeof(dev->raw_config));
     if (n < (int)sizeof(cfg_head)) {
-        WARN("usb_core: short GET_DESCRIPTOR(config, 9) n=%d", n);
+        WARN("usb_core: short GET_DESCRIPTOR(config, 0) n=%d", n);
+        if (usb_probe_preserve_child_failure(dev, "GET_DESCRIPTOR(config,0)"))
+            return -1;
         goto err_close;
     }
-    uint16_t total = cfg_head.wTotalLength;
-    if (total > USB_MAX_CONFIG_DESC_BYTES) {
-        WARN("usb_core: config total %u > cap %u — truncating",
-             total, USB_MAX_CONFIG_DESC_BYTES);
-        total = USB_MAX_CONFIG_DESC_BYTES;
-    }
+    dev->raw_config_len = (uint16_t)n;
 
-    /* Step 7: full config tree. */
-    n = usb_get_descriptor(dev, USB_DT_CONFIG, 0,
-                           dev->raw_config, total);
-    if (n < (int)total) {
-        WARN("usb_core: short GET_DESCRIPTOR(config, %u) n=%d", total, n);
-        goto err_close;
+    bool selected_is_cdc = usb_config_is_cdc_ecm_candidate(dev->raw_config,
+                                                            dev->raw_config_len);
+    if (!selected_is_cdc && dev->dev_desc.bNumConfigurations > 1) {
+        uint8_t cfg_candidate[USB_MAX_CONFIG_DESC_BYTES];
+        for (uint8_t cfg_index = 1;
+             cfg_index < dev->dev_desc.bNumConfigurations;
+             cfg_index++) {
+            struct usb_config_descriptor cand_head;
+            int cand_len = usb_fetch_config_descriptor(dev, cfg_index,
+                                                       &cand_head,
+                                                       cfg_candidate,
+                                                       sizeof(cfg_candidate));
+            if (cand_len < (int)sizeof(cand_head))
+                continue;
+            if (!usb_config_is_cdc_ecm_candidate(cfg_candidate, (size_t)cand_len))
+                continue;
+
+            memcpy(dev->raw_config, cfg_candidate, (size_t)cand_len);
+            dev->raw_config_len = (uint16_t)cand_len;
+            cfg_head = cand_head;
+            selected_cfg_index = cfg_index;
+            selected_is_cdc = true;
+            INFO("usb_core: selecting CDC-ECM config index %u value %u over default config index 0",
+                 (unsigned)selected_cfg_index,
+                 (unsigned)cfg_head.bConfigurationValue);
+            break;
+        }
     }
-    dev->raw_config_len = total;
 
     /* Step 8: parse. */
     if (usb_parse_configuration(dev) != 0) {
@@ -918,6 +1245,8 @@ got_initial_descriptor:
     if (rc < 0) {
         WARN("usb_core: SET_CONFIGURATION failed: %s",
              usb_urb_status_str((enum usb_urb_status)(-rc)));
+        if (usb_probe_preserve_child_failure(dev, "SET_CONFIGURATION"))
+            return -1;
         goto err_close;
     }
     dev->current_config = cfg_val;
@@ -951,6 +1280,73 @@ err_close:
 static int usb_try_enumerate_via_hub(struct usb_device *hub)
 {
     struct usb_hub_descriptor desc = {0};
+    if (usb_probe_hub_noop) {
+        usb_probe_hub_noop = false;
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+        int noop_rc = xhci_cmd_noop_probe();
+        INFO("usb_core: probe NO_OP(configured hub) rc=%d", noop_rc);
+#else
+        INFO("usb_core: probe NO_OP(configured hub) skipped on this platform");
+#endif
+    }
+    if (usb_probe_hub_reprime_ep0) {
+        usb_probe_hub_reprime_ep0 = false;
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+        int reprime_rc = xhci_debug_reprime_adopted_ep0(hub);
+        INFO("usb_core: probe reprime adopted ep0 rc=%d", reprime_rc);
+        if (reprime_rc != 0) {
+            WARN("usb_core: stopping hub enumeration after adopted EP0 reprime failure");
+            return -1;
+        }
+#else
+        INFO("usb_core: probe reprime adopted ep0 skipped on this platform");
+#endif
+    }
+    if (usb_probe_hub_post_config_device_desc) {
+        struct usb_device_descriptor probe_desc = {0};
+        int desc_rc;
+        usb_probe_hub_post_config_device_desc = false;
+        desc_rc = usb_get_descriptor(hub, USB_DT_DEVICE, 0,
+                                     &probe_desc, sizeof(probe_desc));
+        INFO("usb_core: probe GET_DESCRIPTOR(device, 18) after config rc=%d "
+             "vid=0x%04x pid=0x%04x class=0x%02x",
+             desc_rc,
+             (unsigned)probe_desc.idVendor,
+             (unsigned)probe_desc.idProduct,
+             (unsigned)probe_desc.bDeviceClass);
+        if (desc_rc < (int)sizeof(probe_desc)) {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+            int noop_rc = xhci_cmd_noop_probe();
+            INFO("usb_core: probe NO_OP(after post-config device-desc failure) rc=%d",
+                 noop_rc);
+#endif
+        }
+        WARN("usb_core: stopping hub enumeration after post-config device descriptor probe");
+        return -1;
+    }
+    if (usb_probe_hub_get_status) {
+        uint16_t hub_status = 0;
+        int status_rc;
+        usb_probe_hub_get_status = false;
+        status_rc = usb_control_msg(hub,
+                                    USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                                    USB_REQ_GET_STATUS,
+                                    0, 0,
+                                    &hub_status, sizeof(hub_status),
+                                    500);
+        INFO("usb_core: probe GET_STATUS(configured hub) rc=%d status=0x%04x",
+             status_rc, (unsigned)hub_status);
+        if (status_rc < 0) {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+            int noop_rc = xhci_cmd_noop_probe();
+            INFO("usb_core: probe NO_OP(after GET_STATUS timeout) rc=%d",
+                 noop_rc);
+#endif
+            WARN("usb_core: stopping hub enumeration after GET_STATUS probe failure");
+            return -1;
+        }
+    }
+
     int rc = usb_hub_get_descriptor(hub, &desc);
     if (rc < (int)sizeof(desc)) {
         WARN("usb_core: short GET_DESCRIPTOR(hub) n=%d", rc);
@@ -992,6 +1388,8 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub)
 
 int usb_core_enumerate(void)
 {
+    usb_hotplug_retry_blocked_logged = false;
+
     /* Start from a clean slate — a retry after a previous failure must
      * not leave the stale root_device visible via usb_core_first_device(). */
     root_device_present = false;
@@ -1024,10 +1422,16 @@ int usb_core_enumerate(void)
     root_device.port  = 0;
 
     int rc = usb_enumerate_one(&root_device, true);
-    if (rc != 0)
+    if (rc != 0) {
+        if (usb_probe_disable_hotplug_retry_after_failure) {
+            usb_hotplug_retry_blocked = true;
+            usb_hotplug_retry_blocked_logged = false;
+        }
         return rc;
+    }
 
     if (!usb_device_is_hub(&root_device)) {
+        usb_hotplug_retry_blocked = false;
         root_device_present = true;
         return 0;
     }
@@ -1036,7 +1440,12 @@ int usb_core_enumerate(void)
     memset(&root_device, 0, sizeof(root_device));
     hub_device_present = true;
     INFO("usb_core: root device is a USB hub — probing one downstream child");
-    return usb_try_enumerate_via_hub(&hub_device);
+    rc = usb_try_enumerate_via_hub(&hub_device);
+    if (rc == 0)
+        usb_hotplug_retry_blocked = false;
+    else if (usb_probe_disable_hotplug_retry_after_failure)
+        usb_hotplug_retry_blocked = true;
+    return rc;
 }
 
 int usb_core_start(void)
