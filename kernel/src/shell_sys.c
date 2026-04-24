@@ -2797,10 +2797,19 @@ int cmd_nvgpu(int argc, char *argv[])
                      rc, (int)b.state);
         return rc;
     }
+    if (strcmp(argv[1], "launch-kernel") == 0) {
+        /* Phase 8: launch a pre-uploaded compute kernel from a v3
+         * handoff (shader + QMD + cbuf + output pre-populated by
+         * scripts/gpu-kernel-launch.c --preserve-for-kexec). */
+        int rc = ga10b_bringup_launch_kernel(&b);
+        shell_printf("launch-kernel: rc=%d, state=%d\r\n",
+                     rc, (int)b.state);
+        return rc;
+    }
 
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
-              "channel | submit | submit-compute | fecs | gpccs | "
-              "pmu | run]\r\n");
+              "channel | submit | submit-compute | launch-kernel | "
+              "fecs | gpccs | pmu | run]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */

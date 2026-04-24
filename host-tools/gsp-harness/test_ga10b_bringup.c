@@ -1023,7 +1023,14 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 1;                  /* v1 lacked work_submit_token */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
+    /* v2 (channel-only) and v3 (channel + kernel-launch state) both
+     * accept — Phase 6/7 reads only v2 fields, Phase 8 checks the
+     * version at dispatch time before reading v3 fields. */
+    h.version = 2;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 3;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 4;                  /* future, not yet defined */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);

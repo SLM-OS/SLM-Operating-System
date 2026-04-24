@@ -226,6 +226,51 @@ uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
                                                      uint64_t sem_gpu_va,
                                                      uint32_t payload);
 
+/* Size of the compute-kernel-launch pushbuffer in dwords.
+ *
+ * Layout (13 dwords):
+ *   [0]     INC header SET_OBJECT
+ *   [1]     class_id (AMPERE_COMPUTE_B)
+ *   [2]     INC header count=2 SET_SHADER_SHARED_MEMORY_WINDOW_A
+ *   [3-4]   upper (0) / lower (0xfe000000) of shared-mem window base
+ *   [5]     INC header count=2 SET_SHADER_LOCAL_MEMORY_WINDOW_A
+ *   [6-7]   upper (0) / lower (0xff000000) of local-mem window base
+ *   [8]     IMMD INVALIDATE_SKED_CACHES
+ *   [9]     IMMD INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI
+ *   [10]    INC header SEND_PCAS_A
+ *   [11]    QMD address shifted right 8
+ *   [12]    IMMD SEND_SIGNALING_PCAS2_B action=INVALIDATE_COPY_SCHEDULE */
+#define GA10B_LAUNCH_KERNEL_PB_DWORDS 13u
+
+/* Pure-logic builder for the compute-kernel-launch pushbuffer. QMD
+ * must be 256-byte aligned so that qmd_gpu_va >> 8 fits the
+ * SEND_PCAS_A_QMD_ADDRESS_SHIFTED8 field.
+ *
+ * **Ampere vs Turing split:** Mesa's NVK uses SEND_SIGNALING_PCAS_B
+ * for `cls_compute <= TURING_COMPUTE_A` and SEND_SIGNALING_PCAS2_B
+ * for newer (Ampere+). GA10B is Ampere, so this builder always emits
+ * PCAS2_B with PCAS_ACTION = INVALIDATE_COPY_SCHEDULE (0xA). Using
+ * the Turing-era PCAS_B on Ampere silently no-ops the dispatch
+ * while still advancing GP_GET — observed empirically on
+ * jetson-nano-1 (2026-04-21) before the fix; documented here so a
+ * future cross-arch refactor doesn't regress.
+ *
+ * Buffer contract: `pb` must point to at least
+ * GA10B_LAUNCH_KERNEL_PB_DWORDS uint32_t slots. */
+uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
+                                              uint64_t qmd_gpu_va);
+
+/* Phase 8: launch a pre-uploaded compute kernel.
+ *
+ * Requires a v3 channel handoff (shader / QMD / output pre-populated
+ * by scripts/gpu-kernel-launch.c --preserve-for-kexec). Zeros the
+ * output buffer, posts the launch pushbuffer, rings the doorbell,
+ * and polls output_phys for GA10B_SMOKETEST_SEM_PAYLOAD.
+ *
+ * Returns 0 iff the kernel output reads back as the expected
+ * payload; -1 on handoff version mismatch or dispatch timeout. */
+int ga10b_bringup_launch_kernel(struct ga10b_bringup *b);
+
 /*
  * Top-level runner. Walks phases 1–7 in order and returns 0 iff the
  * smoke test passes. Equivalent to gsp_init() for the nvgpu path.

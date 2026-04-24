@@ -30,6 +30,7 @@
  *   # then rename to write_cafe_shader.sass next to the binary
  */
 #define _GNU_SOURCE
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,6 +48,9 @@
 #include "/usr/src/nvidia/nvgpu/include/uapi/linux/nvgpu-ctrl.h"
 #include "/usr/src/nvidia/nvidia-oot/include/uapi/linux/nvmap.h"
 
+#include "../kernel/gpu/nvidia/ga10b_channel_handoff.h"
+#include <signal.h>
+
 #define SEM_PAYLOAD 0x0000CAFEu
 
 #define CLASS_AMPERE_COMPUTE_B 0xC7C0
@@ -62,6 +66,14 @@
 #define NVC7C0_SEND_SIGNALING_PCAS_B                  0x02bc
 #define NVC7C0_SEND_SIGNALING_PCAS_B_INVALIDATE_TRUE  0x1
 #define NVC7C0_SEND_SIGNALING_PCAS_B_SCHEDULE_TRUE    0x2
+/* Ampere (cls_compute > TURING_COMPUTE_A) uses PCAS2_B with a
+ * composite action rather than PCAS_B's two-bit invalidate/schedule.
+ * See mesa-nvk_cmd_dispatch.c:322-340 — Ampere branch emits
+ * SEND_SIGNALING_PCAS2_B with action=INVALIDATE_COPY_SCHEDULE (0xA).
+ * Getting this wrong silently no-ops the dispatch on GA10B even
+ * though the pushbuffer is consumed. */
+#define NVC7C0_SEND_SIGNALING_PCAS2_B                 0x02c0
+#define NVC7C0_SEND_SIGNALING_PCAS2_B_ACTION_INVALIDATE_COPY_SCHEDULE  0xA
 #define NVC7C0_SET_SHADER_LOCAL_MEMORY_WINDOW_A       0x07b0
 #define NVC7C0_SET_SHADER_LOCAL_MEMORY_WINDOW_B       0x07b4
 
@@ -200,6 +212,25 @@ static int nvmap_alloc_dmabuf(int nvmap_fd, uint32_t size, uint32_t align)
     return gf.fd;
 }
 
+/* Resolve a process-virtual address to its physical via /proc/self/pagemap. */
+static uint64_t virt_to_phys(void *vaddr)
+{
+    int fd = open("/proc/self/pagemap", O_RDONLY);
+    if (fd < 0) { perror("pagemap"); return 0; }
+    uint64_t vpage = (uint64_t)vaddr / 4096;
+    uint64_t entry;
+    if (pread(fd, &entry, 8, vpage * 8) != 8) {
+        perror("pagemap read"); close(fd); return 0;
+    }
+    close(fd);
+    if (!(entry & (1ULL << 63))) return 0;
+    uint64_t pfn = entry & ((1ULL << 55) - 1);
+    return pfn * 4096 + ((uint64_t)vaddr & 0xFFF);
+}
+
+static volatile sig_atomic_t g_shutdown;
+static void on_term(int sig) { (void)sig; g_shutdown = 1; }
+
 static void *load_file(const char *path, size_t *out_size)
 {
     int fd = open(path, O_RDONLY);
@@ -221,7 +252,22 @@ int main(int argc, char **argv)
     setbuf(stdout, NULL);
 
     const char *shader_path = "./write_cafe_shader.sass";
-    if (argc > 1) shader_path = argv[1];
+    bool preserve = false;
+    int timeout_secs = 900;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--preserve-for-kexec") == 0) {
+            preserve = true;
+        } else if (strcmp(argv[i], "--timeout-secs") == 0 && i + 1 < argc) {
+            timeout_secs = atoi(argv[++i]);
+            if (timeout_secs <= 0) timeout_secs = 900;
+        } else if (argv[i][0] != '-') {
+            shader_path = argv[i];
+        }
+    }
+
+    struct sigaction sa = { .sa_handler = on_term };
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
 
     size_t shader_size;
     void *shader_bytes = load_file(shader_path, &shader_size);
@@ -543,9 +589,10 @@ int main(int argc, char **argv)
     *p++ = HDR_INC(1, SUBCH_COMPUTE, NVC7C0_SEND_PCAS_A);
     *p++ = (uint32_t)(qmd_gva >> 8);
 
-    *p++ = HDR_IMMD(SUBCH_COMPUTE, NVC7C0_SEND_SIGNALING_PCAS_B,
-                    NVC7C0_SEND_SIGNALING_PCAS_B_INVALIDATE_TRUE |
-                    NVC7C0_SEND_SIGNALING_PCAS_B_SCHEDULE_TRUE);
+    /* Ampere dispatches via PCAS2_B with INVALIDATE_COPY_SCHEDULE
+     * (action 0xA) per NVK's `cls_compute > TURING_COMPUTE_A` branch. */
+    *p++ = HDR_IMMD(SUBCH_COMPUTE, NVC7C0_SEND_SIGNALING_PCAS2_B,
+                    NVC7C0_SEND_SIGNALING_PCAS2_B_ACTION_INVALIDATE_COPY_SCHEDULE);
 
     size_t pb_dw = p - pb32;
     msync(pb_va, pb_dw * 4, MS_SYNC);
@@ -575,9 +622,15 @@ int main(int argc, char **argv)
     *doorbell = sb.work_submit_token;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Poll output for up to 2s. */
+    /* Poll output for up to 2s. `msync(MS_INVALIDATE)` flushes CPU
+     * caches before re-reading so a GPU-written value isn't masked by
+     * a stale CPU cacheline — on Jetson's integrated GPU the coherency
+     * between GPU writes and CPU reads is not automatic for nvmap
+     * IOVMM mappings. */
     uint32_t val = 0;
     for (int i = 0; i < 200; i++) {
+        msync(out_va, 4096, MS_INVALIDATE | MS_SYNC);
+        __asm__ volatile("dsb sy" ::: "memory");
         val = *(volatile uint32_t *)out_va;
         if (val == SEM_PAYLOAD) break;
         usleep(10000);
@@ -593,11 +646,114 @@ int main(int argc, char **argv)
         printf("[launch] FAIL: PBDMA did not advance\n");
     }
 
+    if (!preserve) {
+        close(ch_fd);
+        close(tsg_fd);
+        close(as_fd);
+        close(ctrl_fd);
+        close(nvmap_fd);
+        free(shader_bytes);
+        return (val == SEM_PAYLOAD) ? 0 : 1;
+    }
+
+    /* --- --preserve-for-kexec path ---
+     * Success means the kernel + QMD + channel state is all in working
+     * order. Publish a v3 handoff block into DRAM so SLM-OS can find
+     * it post-kexec and re-fire the kernel from bare metal. Keep all
+     * the nvgpu fds open so the channel + GPU mappings stay live
+     * through the kexec. */
+    if (val != SEM_PAYLOAD) {
+        fprintf(stderr, "[launch] kernel failed pre-kexec; refusing to "
+                "preserve (channel state is suspect)\n");
+        return 1;
+    }
+
+    int handoff_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
+    void *handoff = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+                         handoff_dmabuf, 0);
+    if (handoff == MAP_FAILED) { perror("mmap handoff"); return 1; }
+    memset(handoff, 0, 4096);
+    uint64_t handoff_phys = virt_to_phys(handoff);
+
+    /* Resolve physical addresses of the channel / kernel buffers. */
+    uint64_t userd_phys  = virt_to_phys(userd_va);
+    uint64_t gpfifo_phys = virt_to_phys(gpfifo_va);
+    uint64_t pb_phys     = virt_to_phys(pb_va);
+    uint64_t shader_phys = virt_to_phys(shader_va);
+    uint64_t cbuf_phys   = virt_to_phys(cbuf_va);
+    uint64_t qmd_phys    = virt_to_phys(qmd_va);
+    uint64_t out_phys    = virt_to_phys(out_va);
+
+    /* Populate handoff via the shared struct (v3 layout). */
+    struct ga10b_channel_handoff hoff = {
+        .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
+        .version            = 3,
+        .channel_id         = 0,
+        .tsg_id             = 0,
+        .userd_phys         = userd_phys,
+        .userd_gp_put_offset = 35 * 4,
+        .userd_gp_get_offset = 34 * 4,
+        .gpfifo_phys        = gpfifo_phys,
+        .gpfifo_gpu_va      = sb.gpfifo_gpu_va,
+        .gpfifo_entries     = 1024,
+        .gpfifo_entry_size  = 8,
+        .pushbuf_phys       = pb_phys,
+        .pushbuf_gpu_va     = pb_gva,
+        .pushbuf_size       = 65536,
+        /* Semaphore_phys reuses the kernel output buffer — `nvgpu
+         * channel` + `nvgpu submit` (host-family SEMAPHORE_RELEASE)
+         * writes the sema at this VA, which is the same location the
+         * compute kernel writes 0xCAFE into. Both flows coexist. */
+        .semaphore_phys     = out_phys,
+        .semaphore_gpu_va   = out_gva,
+        .inst_block_phys    = 0,
+        /* GP_PUT=1 after our pre-kexec launch bumped GPFIFO[0]. */
+        .initial_gp_put     = ((volatile uint32_t *)userd_va)[35],
+        .initial_gp_get     = ((volatile uint32_t *)userd_va)[34],
+        .work_submit_token  = sb.work_submit_token,
+        /* v3 extension: compute-kernel state. */
+        .shader_phys        = shader_phys,
+        .shader_gpu_va      = shader_gva,
+        .cbuf_phys          = cbuf_phys,
+        .cbuf_gpu_va        = cbuf_gva,
+        .qmd_phys           = qmd_phys,
+        .qmd_gpu_va         = qmd_gva,
+        .output_phys        = out_phys,
+        .output_gpu_va      = out_gva,
+        .shader_size        = (uint32_t)shader_size,
+        .cbuf_size          = 512,
+    };
+    memcpy(handoff, &hoff, sizeof(hoff));
+    msync(handoff, 4096, MS_SYNC);
+
+    printf("[launch] Handoff at phys 0x%llx (version=3)\n",
+           (unsigned long long)handoff_phys);
+    printf("[launch]   shader_phys=0x%llx  shader_gva=0x%llx (%zu B)\n",
+           (unsigned long long)shader_phys, (unsigned long long)shader_gva,
+           shader_size);
+    printf("[launch]   cbuf_phys=0x%llx  cbuf_gva=0x%llx\n",
+           (unsigned long long)cbuf_phys, (unsigned long long)cbuf_gva);
+    printf("[launch]   qmd_phys=0x%llx  qmd_gva=0x%llx\n",
+           (unsigned long long)qmd_phys, (unsigned long long)qmd_gva);
+    printf("[launch]   output_phys=0x%llx  output_gva=0x%llx\n",
+           (unsigned long long)out_phys, (unsigned long long)out_gva);
+    printf("[launch] Sleeping up to %d s — kexec now:\n", timeout_secs);
+    printf("[launch]   sudo slmos-kexec --no-gpu-suspend /tmp/slmos.elf\n");
+
+    /* Sleep in bounded slices so SIGTERM responsiveness stays snappy. */
+    for (int remaining = timeout_secs; remaining > 0 && !g_shutdown; ) {
+        int slice = remaining > 60 ? 60 : remaining;
+        sleep(slice);
+        remaining -= slice;
+    }
+    printf("[launch] Exiting (%s) — channel releasing.\n",
+           g_shutdown ? "signal" : "timeout");
+
     close(ch_fd);
     close(tsg_fd);
     close(as_fd);
     close(ctrl_fd);
     close(nvmap_fd);
     free(shader_bytes);
-    return (val == SEM_PAYLOAD) ? 0 : 1;
+    return 0;
 }
