@@ -1,0 +1,234 @@
+# Hailo Support Ticket Draft — Phase 8 #253
+
+> Draft for support@hailo.ai or community.hailo.ai forum post.
+> Edit the salutation and account/contact info before sending.
+
+---
+
+## Subject
+
+Hailo-8L on Pi 5: CPU_ECC_ERROR on every host RPC from a custom (non-HailoRT) driver — what does memory_bitmap=0x00001000 refer to in fw v4.23?
+
+## Summary
+
+We're driving a Hailo-8L on Pi 5 (AI HAT+) from a custom bare-metal driver
+(no Linux, no HailoRT userspace library). HailoRT runs MNIST inference on
+this exact chip + HEF correctly at 17.8 FPS. Our driver issues byte-for-byte
+identical FW_CONTROL request payloads and an equivalent MMIO sequence, but
+firmware emits a `HEALTH_MONITOR_CPU_ECC_ERROR` (event_id=7,
+priority=CRITICAL) with `memory_bitmap=0x00001000` on the very first
+`CHANGE_CONTEXT_SWITCH_STATUS(RESET)` RPC, and again on
+`SET_CONTEXT_INFO(ACTIVATION)` and `CCW DMA pull`. Subsequent inference
+submits time out: `num_proc` on the boundary input channel never
+advances, and reading the descriptor `RemainingPageSize_Status` field
+shows the firmware never even attempts to fetch our descriptors
+(status=0x00 across all entries).
+
+We've validated everything we can think of from the host side. We're
+asking for two specific things:
+
+1. **What memory region does bit 12 of `memory_bitmap` correspond to in
+   fw v4.23?** (i.e., what does `0x00001000` mean for the `D2H_EVENT_health_monitor_cpu_ecc_event_message_t.memory_bitmap` field on Hailo-8L?)
+2. **What host-side initialization step does `hailo_pci` perform such
+   that firmware can safely access that region?** Our driver does
+   everything we could find in the open-source `hailo_pci` source, but
+   evidently there's something that prevents the ECC trip when HailoRT
+   drives the device.
+
+## Hardware
+
+- Raspberry Pi 5, BCM2712, ARM Cortex-A76, 4 GB RAM
+- AI HAT+ daughterboard: Hailo-8L (vendor=0x1e60, device=0x2864, rev=0x01)
+- BAR0 (config), BAR2 (vDMA), BAR4 (fw access) — 16K/4K/16K
+- PCIe link: Gen2 x1 (downgraded by Pi 5; same on HailoRT working path)
+
+## Firmware
+
+- `hailort-pcie-driver 4.23.0` (Pi OS apt package)
+- Firmware blob: 164560 bytes, identifies as version 4.23, rev=0x20000000
+- HEF: `mnist.hef`, 240815 bytes, hw_arch=hailo8l, sdk_version=3.33.1
+  (single network group, 1 input pad 28×28×1, 1 output pad 1×1×10,
+  28 CCW actions)
+
+## Smoking-gun event
+
+After every host RPC that triggers the issue, draining the D2H
+notification mailbox at `BAR4 + 0x640` returns:
+
+```
+header: version=0 sequence=N priority=1 module_id=22
+        event_id=7 (HEALTH_MONITOR_CPU_ECC_ERROR_EVENT_ID) /
+                  or event_id=8 (CPU_ECC_FATAL on some runs)
+        param_count=1 payload_len=4
+body[0..3]: 0x00001000 0x02000054 0xeafff6fb 0xb77fff7f
+```
+
+Decoded per `D2H_EVENT_health_monitor_cpu_ecc_event_message_t`:
+
+```
+memory_bitmap = 0x00001000   (bit 12 set)
+```
+
+The same bit is set on every triggering RPC across power cycles, fresh
+or warm boots, with both our embedded firmware blob and Pi OS's shipped
+blob.
+
+## Reproducer
+
+The chip is correctly driven by HailoRT under Pi OS:
+
+```
+$ sudo hailortcli run mnist.hef --frames-count 1
+Network mnist/mnist: 100% | 1/1 | FPS: 17.81 | ETA: 00:00:00
+```
+
+`dmesg` is clean — zero ECC events.
+
+The chip fails under our driver, on the same hardware, with the same
+HEF. Power-cycling between sessions doesn't change the outcome. We've
+confirmed:
+
+- HailoRT clean shutdown → power off → SLM-OS boot: still fails
+- Cold boot → HailoRT's exact firmware blob embedded in our driver:
+  ECC pattern shifts (RESET clean) but boundary submit still fails
+- Cold boot → our originally-shipped firmware blob: original ECC
+  pattern, boundary submit fails
+
+## What our driver does (verified equivalent to `hailo_pci` source)
+
+Boot path (mirrors `hailo_pcie_write_firmware_batch` +
+`hailo_trigger_firmware_boot`):
+
+1. PCI enable, BAR0/2/4 mapping
+2. Disable ASPM L0s on RC and endpoint (matches Linux's
+   `hailo_pcie_disable_aspm`)
+3. Arm interrupts (`BSC_IMASK_HOST` |= mask, W1C `BCS_ISTATUS_HOST`,
+   write `0xFFFFFFFF` to `BCS_SOURCE_INTERRUPT_PER_CHANNEL` and
+   `BCS_DESTINATION_INTERRUPT_PER_CHANNEL`) — done before fw trigger
+4. Allocate MSI vector, register handler — done before fw trigger
+5. Validate fw header, decode app/cert/core blocks
+6. Write `boot_fw_header` to `0xE0030`
+7. Write `app_fw_code` to `0x60000` (chunked via 4 KB ATR window)
+8. Write `boot_key_cert` to `0xE0048`
+9. Write `boot_cont_cert` to `0xE0390`
+10. Write `core_code` to `0xC0000`
+11. Write `core_fw_header` to `0xA0000`
+12. Write `1` to `trigger_address = 0xE0980`
+13. Wait for `ATR[1].trsl_addr_lo` to read `PCIE_CONTROL_SECTION_ADDRESS_H8`
+    (5 s budget, 50 ms interval) — equivalent to
+    `hailo_pcie_is_firmware_loaded`
+
+Load path (mirrors `hailo_activate_board` post-fw-boot + first inference):
+
+1. `IDENTIFY` (opcode 0x00, APP_CPU)
+2. `GET_DEVICE_INFORMATION` (0x33, APP_CPU) ×2
+3. `CHANGE_CONTEXT_SWITCH_STATUS(state=RESET, app=0xff, batch_size=0, batch_count=0)`
+   (0x25, CORE_CPU) — **this is where the first ECC event fires**
+4. `CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS` (0x47, CORE_CPU)
+5. `GET_HW_CONSTS` (0x48, CORE_CPU)
+6. `SET_NETWORK_GROUP_HEADER` (0x20, CORE_CPU)
+7. `SET_CONTEXT_INFO(ACTIVATION)` (0x21, CORE_CPU) — **second ECC event fires**
+8. `SET_CONTEXT_INFO(BATCH_SWITCHING)`
+9. `SET_CONTEXT_INFO(PRELIMINARY)`
+10. `SET_CONTEXT_INFO(DYNAMIC)`
+11. `CHANGE_CONTEXT_SWITCH_STATUS(state=ENABLED, app=0, batch_size=0, batch_count=0)`
+12. CCW VDMA pull (write `num_avail` to bulk cfg channel, wait for
+    `num_proc` to catch up) — **on some runs, third ECC event fires here**
+
+We then submit one MNIST inference: pre-prime 8 OUTPUT descriptors on
+ch=16, then write `num_avail=2` to ch=2 (boundary input). HailoRT's
+trace shows ch=2 SRC_IRQ within 7 µs; on our driver, `num_proc` on
+ch=2 stays 0 indefinitely. Reading back the descriptor list (after a
+host cache invalidate) shows status=0x00 on every descriptor — fw
+never tried to fetch them.
+
+## What we ruled out (confirmed identical to HailoRT)
+
+- **Wire bytes**: byte-for-byte identical for `CHANGE_STATUS(RESET)`
+  request (42 B) and `SET_CONTEXT_INFO(ACTIVATION)` request (102 B
+  total: 39 B prefix + 63 B body). The only diffs in ACTIVATION are
+  the two `OPEN_BOUNDARY_{INPUT,OUTPUT}` `dma_address` fields, which
+  are expected to differ (different DMA allocators), and both are
+  inside the configured BAR2 inbound translation window.
+- **Periph values** (`periph_bytes_per_buffer=784`,
+  `periph_buffers_per_frame=1`): match HailoRT's wire capture exactly.
+- **`initial_credit_size=0x10000`**: matches.
+- **HEF parsing**: the HEF's intermediate decoded fields match
+  `libhailort`'s view (action types, packed_vdma channel ids, page
+  sizes, desc counts).
+- **CCW upload**: cfg channel `num_proc` reaches the expected count
+  (109 for cfg_channel[0], 1 for cfg_channel[1]) — the bulk weight
+  upload completes successfully.
+- **Cache flush to DRAM**: verified via `dc civac` probe — descriptor
+  contents are visible in DRAM after `dc cvac` flush.
+- **Firmware blob**: tested with both our originally-shipped blob and
+  Pi OS's `/lib/firmware/hailo/hailo8_fw.bin` (which differ in
+  content despite both reporting v4.23 — separate question worth
+  investigating).
+- **MMIO sequence**: trace_mmio capture from `hailo_pci` (1557
+  events) shows boot trigger and runtime doorbell writes match what
+  our driver does.
+- **HailoRT-style settle pings**: added 2× `GET_DEVICE_INFO` +
+  IDENTIFY before RESET, 4× more after ENABLED, plus 5/3/2 ms wall
+  delays at the same phase boundaries HailoRT shows in its capture.
+  No effect.
+- **MSI registered before fw trigger**: yes, host MSI capability is
+  programmed before we write to `0xE0980`.
+- **Per-channel IRQ masks armed before fw trigger**: yes,
+  `BCS_SRC/DST_INTERRUPT_PER_CHANNEL = 0xFFFFFFFF` set pre-trigger.
+
+## Specific questions
+
+1. **What is bit 12 of `memory_bitmap` in
+   `D2H_EVENT_health_monitor_cpu_ecc_event_message_t`?** Is it a
+   physical memory region, an L2 cache way, an SRAM bank? The
+   consistent value across runs (always exactly `0x00001000`)
+   suggests a single named region rather than uninitialized error
+   bits.
+
+2. **What host-side action is required for firmware to safely access
+   that region?** Our `hailo_pci`-equivalent does the same probe-time
+   register writes, the same fw upload sequence, the same trigger
+   write, and signals the same MSI infrastructure. What's missing?
+
+3. **Are these CPU_ECC events ever harmless** (e.g., HailoRT triggers
+   them too but the kernel driver silently ACKs them and inference
+   still works)? Our reading of the open-source driver suggests not
+   — the events are critical-priority and `hailo_pcie_handle_d2h_irq`
+   surfaces them — but we'd like to confirm.
+
+4. **Is there any documentation for the post-fw-boot, pre-load-network
+   handshake** beyond what's visible in the open-source `hailo_pci`
+   driver (`hailo-pcie.c`, `hailo-pcie-common.c`, `hailo-vdma-common.c`)?
+   We've line-by-line audited those and replicated the visible logic;
+   if there's a step that lives only in `libhailort` userspace
+   (closed source) and matters at the kernel-equivalent layer, that's
+   probably where our gap is.
+
+## Artifacts
+
+We can share (private channel preferred):
+
+- Boot-time MMIO trace from `hailo_pci` with `trace_mmio=Y` (1646
+  lines): full fw upload + boot trigger + first inference RPC sequence
+- Inference-time MMIO trace (1631 lines): all FWCTL TX bodies +
+  doorbell writes + ISTATUS reads
+- Side-by-side wire diff for `RESET` (byte-identical) and
+  `ACTIVATION` (byte-identical except IOVAs)
+- Our complete driver source (~5K LOC C in a public repo)
+- Serial captures of failing inference attempts including the full
+  D2H notification dump
+
+## Environment context
+
+This is a university capstone project building a small bare-metal
+operating system that targets AI accelerators directly without a
+host OS. We're not redistributing any Hailo IP — we link against the
+hailort firmware blob you ship via `apt install hailort-dkms` and our
+driver is published under MIT license. Happy to discuss further or
+provide whatever traces would help.
+
+Best regards,
+[Your name]
+[Your email]
+[Capstone affiliation]
