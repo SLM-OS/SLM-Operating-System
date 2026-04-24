@@ -43,6 +43,7 @@ static void md5_compute(const void *data, size_t len, uint8_t out[16])
 #include "hailo_dev.h"
 
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 
 static const char *HAILO_DEV_PATH = "/dev/hailo0";
@@ -515,6 +516,72 @@ static int cmd_full_handshake(int fd)
     MMAP_BUF(bnd_out_buf);
     #undef MMAP_BUF
 
+    /* Fill the CCW buffer with real MNIST CCW bytes from mnist.hef
+     * if the file is present alongside the probe. This closes the
+     * last apples-to-apples gap with SLM-OS's hailo_backend_run —
+     * with real microcode, fw configures a valid inference graph
+     * and subsequent boundary traffic actually processes. Without
+     * the HEF, falls back to 0xA5 filler (previous behavior).
+     *
+     * HEF V2 layout (confirmed from mnist.hef): common_header (12 B)
+     * + V2 trailer (20 B) = 32-byte header. Then proto (BE u32
+     * proto_size at bytes 8-11 of header). Then CCWS region runs
+     * to end-of-file. Match ctxsmoke's sizing — copy only the first
+     * 256 bytes so fw doesn't reject due to length mismatch vs
+     * PRELIMINARY's total_desc_count=2 × desc_page_size=512. */
+    const char *hef_paths[] = {
+        "mnist.hef",
+        "/home/pi/hailo-ushim/mnist.hef",
+        "/opt/hailort/models/mnist.hef",
+        NULL,
+    };
+    int hef_fd = -1;
+    for (int i = 0; hef_paths[i]; i++) {
+        hef_fd = open(hef_paths[i], O_RDONLY);
+        if (hef_fd >= 0) {
+            printf("[1.5] using MNIST HEF: %s\n", hef_paths[i]);
+            break;
+        }
+    }
+    if (hef_fd >= 0) {
+        struct stat st;
+        if (fstat(hef_fd, &st) == 0 && st.st_size > 32) {
+            void *hef = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE,
+                             hef_fd, 0);
+            if (hef != MAP_FAILED) {
+                const uint8_t *p = hef;
+                uint32_t magic = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+                               | ((uint32_t)p[2] <<  8) |  (uint32_t)p[3];
+                if (magic == 0x01484546u) {
+                    uint32_t proto_size =
+                        ((uint32_t)p[8] << 24) | ((uint32_t)p[9] << 16)
+                      | ((uint32_t)p[10] <<  8) |  (uint32_t)p[11];
+                    /* V2: 12-byte common + 20-byte trailer */
+                    size_t ccws_off = 32 + proto_size;
+                    /* Fill the full 4 KB page with real CCW microcode.
+                     * ctxsmoke's PRELIMINARY declares desc_count=2 ×
+                     * page_size=512 = 1024 B of CCW; our 4 KB buffer
+                     * comfortably holds that plus headroom if we
+                     * decide to upload more descriptors later. */
+                    size_t ccw_copy = (ccws_off + 4096 <= (size_t)st.st_size)
+                                        ? 4096
+                                        : (size_t)st.st_size - ccws_off;
+                    memcpy(ccw_buf, p + ccws_off, ccw_copy);
+                    printf("[1.5] copied %zu B real MNIST CCW (from HEF "
+                           "offset 0x%lx)\n", ccw_copy,
+                           (unsigned long)ccws_off);
+                } else {
+                    printf("[1.5] HEF magic mismatch, using filler\n");
+                }
+                munmap(hef, st.st_size);
+            }
+        }
+        close(hef_fd);
+    } else {
+        printf("[1.5] no mnist.hef found, using 0xA5 filler "
+               "(last apples-to-apples gap remains open)\n");
+    }
+
     rc = hailo_dev_buffer_map(fd, ccw_buf, map_size,
                               HAILO_DEV_DIR_H2D, &ccw_mh);
     if (rc < 0) { fprintf(stderr, "[1] BUFFER_MAP ccw: %s\n",
@@ -642,7 +709,14 @@ static int cmd_full_handshake(int fd)
      * give fw something to DMA-pull so the channel 1 state machine
      * advances. For a real #253 apples-to-apples reproduction,
      * this would want actual MNIST CCW bytes from the HEF. */
-    printf("[7b] LAUNCH_TRANSFER ch=1 (CCW upload)...\n");
+    /* 256 B upload fits 1 × 512 B descriptor. Empirically: hardware
+     * run with real MNIST CCW bytes at 256 B → fw processes, num_proc
+     * advances to 1 within 1 s. At 1024 B (2 descriptors) the wait
+     * timed out — fw may need a longer settle OR may reject multi-
+     * descriptor upload when the CS handshake's PRELIMINARY didn't
+     * declare enough buffering. Sticking with 256 B for the known-
+     * working case; tune later if needed. */
+    printf("[7b] LAUNCH_TRANSFER ch=1 (CCW upload, 256 B real MNIST)...\n");
     rc = hailo_dev_launch_transfer(fd, 1, ccw_dh, 0, ccw_buf, 256);
     if (rc < 0) {
         fprintf(stderr, "[7b] ch=1 LAUNCH_TRANSFER: %s\n", strerror(-rc));
