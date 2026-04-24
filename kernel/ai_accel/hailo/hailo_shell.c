@@ -47,6 +47,7 @@
 #include "vfs.h"
 #ifdef CONFIG_AI_SCHEDULER
 #include "inference_device.h"
+#include "inference_device_hailo.h"
 #include "ai_policy_hailo.h"
 #include "ai_types.h"
 #include "timer.h"
@@ -861,9 +862,6 @@ static int cmd_hailo(int argc, char *argv[])
                          * the backend's transport buffers can be larger
                          * (HEF padding) and `ai_schedule_mlp_via_hailo`
                          * already pads/clamps appropriately. */
-                        extern int hailo_backend_model_sizes(int32_t,
-                                                             uint32_t *,
-                                                             uint32_t *);
                         uint32_t in_b = AI_STATE_DIM;
                         uint32_t out_b = AI_SCHED_N_ACTIONS;
                         int sz_rc = hailo_backend_model_sizes(h, &in_b, &out_b);
@@ -1153,9 +1151,6 @@ static int cmd_hailo(int argc, char *argv[])
      *   hailo runmodel <handle> [iterations]
      */
     if (argc >= 2 && strcmp(argv[1], "runmodel") == 0) {
-        extern int hailo_backend_model_sizes(int32_t h,
-                                             uint32_t *in_bytes,
-                                             uint32_t *out_bytes);
         if (argc < 3) {
             shell_puts("usage: hailo runmodel <handle> [iterations]\n");
             return 0;

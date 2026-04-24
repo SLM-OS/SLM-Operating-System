@@ -2177,16 +2177,9 @@ static int l_telnetd_kick(lua_State *L) {
  * here.
  * ========================================================================== */
 
-/* Backend-specific helpers exposed by kernel/inference/inference_device_hailo.c.
- * Queries the loaded model's input/output tensor sizes (in bytes) by
- * handle, the current slot-in-use count, and the static slot cap.
- * Declared extern-at-use-site matching the existing hailo_backend_*
- * test helpers pattern (see kernel/tests/test_hailo.c:35). */
-extern int hailo_backend_model_sizes(int32_t h,
-                                     uint32_t *in_bytes,
-                                     uint32_t *out_bytes);
-extern uint32_t hailo_backend_in_use_slots(void);
-extern uint32_t hailo_backend_slots_max(void);
+/* Backend-specific helpers exposed by inference_device_hailo.h
+ * (consolidated PR #355 review). */
+#include "inference_device_hailo.h"
 
 /* Hard upper bound on HEF file size the load path will accept. HEFs
  * for Hailo-8/8L top out at a few MB (MobileNetV1 ≈ 4 MB, larger

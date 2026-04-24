@@ -118,18 +118,29 @@ static int pi5_init(void)
                                              (uint16_t)(exp_cap + 0x12));
         unsigned mps_enc  = (devctl >> 5)  & 0x7u;
         unsigned mrrs_enc = (devctl >> 12) & 0x7u;
-        unsigned mps_b    = 128u << mps_enc;
-        unsigned mrrs_b   = 128u << mrrs_enc;
         unsigned spd      = lnksta & 0xFu;
         unsigned wid      = (lnksta >> 4) & 0x3Fu;
-        INFO("hailo: endpoint DEVCTL=0x%04x MPS=%u MRRS=%u "
-             "LNKSTA=0x%04x speed=Gen%u width=x%u",
-             devctl, mps_b, mrrs_b, lnksta, spd, wid);
-        if (mrrs_b < 512u) {
-            WARN("hailo: MRRS=%u (<512) — Hailo driver normally caps "
-                 "desc_max_page_size to MRRS in this regime; our "
-                 "fixed 512-byte input desc page may not match the "
-                 "actual link", mrrs_b);
+        /* PCIe spec defines MPS/MRRS encodings 0..5 (128..4096 B);
+         * 6 and 7 are reserved. Print "reserved" instead of a bogus
+         * 8192/16384 figure if a malformed device returns them. */
+        if (mps_enc <= 5 && mrrs_enc <= 5) {
+            unsigned mps_b  = 128u << mps_enc;
+            unsigned mrrs_b = 128u << mrrs_enc;
+            INFO("hailo: endpoint DEVCTL=0x%04x MPS=%u MRRS=%u "
+                 "LNKSTA=0x%04x speed=Gen%u width=x%u",
+                 devctl, mps_b, mrrs_b, lnksta, spd, wid);
+            if (mrrs_b < 512u) {
+                WARN("hailo: MRRS=%u (<512) — Hailo driver normally "
+                     "caps desc_max_page_size to MRRS in this regime; "
+                     "our fixed 512-byte input desc page may not "
+                     "match the actual link", mrrs_b);
+            }
+        } else {
+            WARN("hailo: endpoint DEVCTL=0x%04x has reserved MPS/MRRS "
+                 "encoding (mps_enc=%u mrrs_enc=%u); LNKSTA=0x%04x "
+                 "speed=Gen%u width=x%u — device may be reporting "
+                 "malformed PCIe config", devctl, mps_enc, mrrs_enc,
+                 lnksta, spd, wid);
         }
     } else {
         WARN("hailo: no PCI Express capability on endpoint — "
@@ -301,9 +312,12 @@ static void *pi5_dma_alloc_common(size_t size, size_t align,
         return NULL;
     }
 
-    /* Hard ceiling enforcement for low_bias requests (F-01). */
+    /* Hard ceiling enforcement for low_bias requests (F-01).
+     * Explicit wide-multiply ((uint64_t)pages * PAGE_SIZE) to keep
+     * the size computation in 64-bit even if PMM_MAX_ORDER ever
+     * grows past today's 1 GB limit. */
     uintptr_t phys = (uintptr_t)va;
-    if (low_bias && (uint64_t)phys + (uint64_t)(pages * PAGE_SIZE)
+    if (low_bias && (uint64_t)phys + ((uint64_t)pages * PAGE_SIZE)
                         > HAILO_DMA_LOW_CEILING_PHYS) {
         WARN("hailo: dma_alloc_low returned phys=0x%lx pages=%lu — "
              "above ceiling 0x%llx; rejecting (low memory likely "

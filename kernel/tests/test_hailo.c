@@ -30,19 +30,12 @@
 #include "../include/md5.h"
 #include "../include/uart.h"
 
-/* Backend registration + test hooks from kernel/inference/inference_device_hailo.c. */
+/* Backend registration + test hooks. The hailo_backend_* helpers
+ * (model_sizes, in_use_slots, slots_max, reset_slots_for_tests,
+ * get_boundary_iovas_for_tests, test_set_inflight) come from the
+ * consolidated header (PR #355 review). */
+#include "inference_device_hailo.h"
 extern int inference_device_hailo_register(void);
-extern uint32_t hailo_backend_in_use_slots(void);
-extern void hailo_backend_reset_slots_for_tests(void);
-extern void hailo_backend_get_boundary_iovas_for_tests(
-    inference_model_handle_t h, uint64_t *in_iova, uint64_t *out_iova);
-extern uint32_t hailo_backend_test_set_inflight(
-    inference_model_handle_t h, uint32_t count);
-/* Phase 7: sizes helper used by the Lua slm.hailo.infer binding. */
-extern int hailo_backend_model_sizes(inference_model_handle_t h,
-                                     uint32_t *in_bytes,
-                                     uint32_t *out_bytes);
-extern uint32_t hailo_backend_slots_max(void);
 #include "test_harness.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -7205,6 +7198,31 @@ static void test_inf_hailo_free_releases_slot(void)
         inference_free_model(dev, INF_BUILTIN_HANDLE));
 }
 
+/* Audit F-05 (PR #355 review): load_model must refuse HEFs that
+ * don't surface a real output pad, instead of silently substituting
+ * an invented 1000-byte ImageNet output. A HEF parsed with one input
+ * pad and zero output pads is the simplest fixture that hits
+ * pick_largest_pads' failure path. */
+static void test_inf_hailo_load_refuses_no_output_pad(void)
+{
+    struct inference_device *dev = hailo_backend_ready();
+    TEST_ASSERT_NOT_NULL(dev);
+
+    uint8_t blob[512];
+    uint8_t proto[256];
+    /* num_in=1, num_out=0 — parser sees one input pad, no output. */
+    size_t plen = build_minimal_proto(proto, sizeof(proto),
+                                      /*num_in*/1, /*num_out*/0,
+                                      /*in_h,w,f*/1, 1, 64,
+                                      /*out_h,w,f*/0, 0, 0);
+    size_t n = wrap_hef_v0(blob, sizeof(blob), proto, plen);
+
+    inference_model_handle_t h = INF_INVALID_HANDLE;
+    TEST_ASSERT_EQUAL_INT(INF_ERR_BAD_MODEL,
+        inference_load_model(dev, blob, n, &h));
+    TEST_ASSERT_EQUAL_UINT32(0, hailo_backend_in_use_slots());
+}
+
 /* Audit F-07 (2026-04-24): free_model must refuse a slot that has an
  * inflight run() on it. The race in question is hailo_backend_run
  * reading slot fields after lock-free in_use check while free_model
@@ -7974,6 +7992,7 @@ int test_suite_hailo(void)
     RUN_TEST(test_inf_hailo_run_happy_path_via_auto_advance);
     RUN_TEST(test_inf_hailo_run_reuses_load_boundary_iovas);
     RUN_TEST(test_inf_hailo_free_releases_slot);
+    RUN_TEST(test_inf_hailo_load_refuses_no_output_pad);
     RUN_TEST(test_inf_hailo_free_refuses_inflight_runs);
     RUN_TEST(test_inf_hailo_shutdown_clears_slots);
 

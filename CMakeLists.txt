@@ -701,6 +701,7 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/tests
     ${CMAKE_SOURCE_DIR}/kernel/gpu
     ${CMAKE_SOURCE_DIR}/kernel/sched/ai
+    ${CMAKE_SOURCE_DIR}/kernel/inference
     ${CMAKE_SOURCE_DIR}/kernel/lib/littlefs
     ${CMAKE_SOURCE_DIR}/kernel/lib/lwip/src/include
     ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src

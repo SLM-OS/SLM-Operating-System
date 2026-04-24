@@ -1914,11 +1914,23 @@ run_out:
 
 run_release:
     /* Audit F-07: drop the slot reference taken at function entry.
-     * free_model can now proceed if it was waiting on us. */
+     * Every code path between `inflight_runs++` and this label takes
+     * the matching decrement once — invariant `inflight_runs > 0` on
+     * entry to this block. WARN-and-skip on underflow rather than
+     * silently absorbing it: a hit here means a missing inc/dec pair
+     * elsewhere and the right response is a visible log, not a
+     * paper-over. */
     {
         irq_flags_t rel_flags = spin_lock_irqsave(&slots_lock);
-        if (slot->inflight_runs > 0) slot->inflight_runs--;
-        spin_unlock_irqrestore(&slots_lock, rel_flags);
+        if (slot->inflight_runs == 0) {
+            spin_unlock_irqrestore(&slots_lock, rel_flags);
+            WARN("hailo backend: run_release with inflight_runs==0 "
+                 "(inc/dec pairing bug; slot=%u)",
+                 (unsigned)(h - 1));
+        } else {
+            slot->inflight_runs--;
+            spin_unlock_irqrestore(&slots_lock, rel_flags);
+        }
     }
     #undef HAILO_RUN_RETURN
     return run_rc;

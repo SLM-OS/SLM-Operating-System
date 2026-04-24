@@ -34,6 +34,15 @@ struct ai_policy_stats {
     uint32_t action_hist[AI_SCHED_N_ACTIONS];  /* Per-action index counts */
 };
 
+/* Audit F-08 (2026-04-24): static stack budget for the Hailo policy
+ * transport buffers. Policy state quantizes to AI_STATE_DIM int8s but
+ * the HEF transport may pad up. 256 bytes each comfortably covers the
+ * known scheduler HEFs while keeping the per-call stack frame under 1
+ * KB combined with FP_CONTEXT_SAVE. Promoted to file scope per code
+ * review on PR #355 so the budget is discoverable from a single
+ * location instead of buried in a function. */
+#define HAILO_AI_TRANSPORT_MAX  256u
+
 static struct ai_policy_stats ai_mlp_stats;
 static struct ai_policy_stats ai_ppo_stats;
 
@@ -510,14 +519,26 @@ static int ai_schedule_mlp_via_hailo(const float *state,
      * writes AI_STATE_DIM int8s; the trailing in_int8[AI_STATE_DIM..]
      * stays zero (buffer is stack-zeroed below) which is the conservative
      * pad value for HEFs whose extra input bytes are alignment slack. */
-    #define HAILO_AI_TRANSPORT_MAX  256u
     uint32_t in_n  = ai_hailo_model.input_n  ? ai_hailo_model.input_n
                                              : (uint32_t)AI_STATE_DIM;
     uint32_t out_n = ai_hailo_model.output_n ? ai_hailo_model.output_n
                                              : (uint32_t)AI_SCHED_N_ACTIONS;
     if (in_n > HAILO_AI_TRANSPORT_MAX || out_n > HAILO_AI_TRANSPORT_MAX) {
-        /* HEF demands more transport than we statically reserve.
-         * Fall back; the heuristic policy is correct, just slower. */
+        /* HEF demands more transport than we statically reserve. Fall
+         * back to the heuristic; warn ONCE so the operator sees the
+         * policy demotion (PR #355 review). Subsequent loads/calls of
+         * a too-big HEF stay silent — the WARN is to surface the
+         * downgrade, not flood the log on every assign_cpu. */
+        static bool transport_too_big_warned = false;
+        if (!transport_too_big_warned) {
+            transport_too_big_warned = true;
+            WARN("AI Hailo: HEF transport (in=%u out=%u) exceeds "
+                 "HAILO_AI_TRANSPORT_MAX=%u; ai_hailo policy will "
+                 "fall back to heuristic on every assign_cpu. Raise "
+                 "HAILO_AI_TRANSPORT_MAX in sched_ai.c if this HEF "
+                 "is intended for AI scheduling.",
+                 in_n, out_n, HAILO_AI_TRANSPORT_MAX);
+        }
         return -1;
     }
 
