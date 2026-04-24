@@ -268,7 +268,20 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
  * and polls output_phys for GA10B_SMOKETEST_SEM_PAYLOAD.
  *
  * Returns 0 iff the kernel output reads back as the expected
- * payload; -1 on handoff version mismatch or dispatch timeout. */
+ * payload. Returns -1 if:
+ *   - `b` is NULL or state is not CHANNEL_OPEN / METHOD_ACCEPTED;
+ *   - `g_handoff.version` is below 3 (v2 channel-only handoff —
+ *     Phase 8 needs the v3 kernel-state extension);
+ *   - `g_handoff.qmd_gpu_va` or `g_handoff.output_phys` is zero
+ *     (v3 handoff is present but its kernel-launch fields were
+ *     never populated — the helper was run without
+ *     --preserve-for-kexec, or the kernel pre-kexec run failed
+ *     before the handoff write);
+ *   - the payload does not land at `output_phys` within the
+ *     2 s poll timeout.
+ * On payload-timeout the shared submit helper logs whether PBDMA
+ * consumed the pushbuffer, so the caller can tell "GPU didn't see
+ * our submit" from "GPU saw it but the shader didn't fire". */
 int ga10b_bringup_launch_kernel(struct ga10b_bringup *b);
 
 /*

@@ -56,6 +56,14 @@
 #define CLASS_AMPERE_COMPUTE_B 0xC7C0
 #define SUBCH_COMPUTE 1
 
+/* Ampere USERD layout: GP_PUT at dword 35, GP_GET at dword 34 (from
+ * hw_ram_ga10b.h). Declared once at file scope so the offsets baked
+ * into the v3 handoff and the direct dword-array reads below use the
+ * same constants — drift would make the handoff's stored offsets
+ * disagree with what this helper actually read. */
+#define USERD_GP_PUT_WORD 35u
+#define USERD_GP_GET_WORD 34u
+
 /* NVC7C0 methods we use (clc7c0.h offsets). */
 #define NVC7C0_SET_OBJECT                             0x0000
 #define NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI 0x0244
@@ -609,8 +617,8 @@ int main(int argc, char **argv)
     ((uint32_t *)gpfifo_va)[1] = gp_e1;
     msync(gpfifo_va, 8, MS_SYNC);
 
-    /* GP_PUT = 1 in USERD word 35. */
-    ((uint32_t *)userd_va)[35] = 1;
+    /* GP_PUT = 1 in USERD. */
+    ((uint32_t *)userd_va)[USERD_GP_PUT_WORD] = 1;
     msync(userd_va, 4096, MS_SYNC);
 
     /* Doorbell. */
@@ -635,7 +643,7 @@ int main(int argc, char **argv)
         if (val == SEM_PAYLOAD) break;
         usleep(10000);
     }
-    uint32_t gp_get = ((volatile uint32_t *)userd_va)[34];
+    uint32_t gp_get = ((volatile uint32_t *)userd_va)[USERD_GP_GET_WORD];
     printf("[launch] result: out=0x%08x (want 0x%x) GP_GET=%u (want 1)\n",
            val, SEM_PAYLOAD, gp_get);
     if (val == SEM_PAYLOAD) {
@@ -684,15 +692,18 @@ int main(int argc, char **argv)
     uint64_t qmd_phys    = virt_to_phys(qmd_va);
     uint64_t out_phys    = virt_to_phys(out_va);
 
-    /* Populate handoff via the shared struct (v3 layout). */
+    /* Populate handoff via the shared struct (v3 layout).
+     * USERD_GP_{PUT,GET}_WORD come from the file-scope macros; the
+     * GP_*-snapshot reads below use the same constants so the
+     * handoff's stored offsets can't drift from what we observed. */
     struct ga10b_channel_handoff hoff = {
         .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
         .version            = 3,
         .channel_id         = 0,
         .tsg_id             = 0,
         .userd_phys         = userd_phys,
-        .userd_gp_put_offset = 35 * 4,
-        .userd_gp_get_offset = 34 * 4,
+        .userd_gp_put_offset = USERD_GP_PUT_WORD * 4u,
+        .userd_gp_get_offset = USERD_GP_GET_WORD * 4u,
         .gpfifo_phys        = gpfifo_phys,
         .gpfifo_gpu_va      = sb.gpfifo_gpu_va,
         .gpfifo_entries     = 1024,
@@ -707,9 +718,9 @@ int main(int argc, char **argv)
         .semaphore_phys     = out_phys,
         .semaphore_gpu_va   = out_gva,
         .inst_block_phys    = 0,
-        /* GP_PUT=1 after our pre-kexec launch bumped GPFIFO[0]. */
-        .initial_gp_put     = ((volatile uint32_t *)userd_va)[35],
-        .initial_gp_get     = ((volatile uint32_t *)userd_va)[34],
+        /* GP_PUT / GP_GET snapshot via the same word indices. */
+        .initial_gp_put     = ((volatile uint32_t *)userd_va)[USERD_GP_PUT_WORD],
+        .initial_gp_get     = ((volatile uint32_t *)userd_va)[USERD_GP_GET_WORD],
         .work_submit_token  = sb.work_submit_token,
         /* v3 extension: compute-kernel state. */
         .shader_phys        = shader_phys,

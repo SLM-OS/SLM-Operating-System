@@ -121,6 +121,34 @@ _Static_assert(sizeof(struct ga10b_channel_handoff) == 192,
                "helper (scripts/gpu-channel-helper.c, "
                "scripts/gpu-kernel-launch.c) and bump version");
 
+/* Field-offset pins for the v3 extension. A reorder that preserves
+ * sizeof() (e.g. swapping two uint64_t fields) wouldn't fire the
+ * size assert above but would silently mis-address the kernel-
+ * launch state. These catch that; the v2 fields are pinned
+ * implicitly by the identical layout on both sides of a v2 helper
+ * that only reads up to offset 120. */
+#include <stddef.h>
+_Static_assert(offsetof(struct ga10b_channel_handoff, shader_phys)    == 120,
+               "v3 shader_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, shader_gpu_va)  == 128,
+               "v3 shader_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, cbuf_phys)      == 136,
+               "v3 cbuf_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, cbuf_gpu_va)    == 144,
+               "v3 cbuf_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, qmd_phys)       == 152,
+               "v3 qmd_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, qmd_gpu_va)     == 160,
+               "v3 qmd_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, output_phys)    == 168,
+               "v3 output_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, output_gpu_va)  == 176,
+               "v3 output_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, shader_size)    == 184,
+               "v3 shader_size offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, cbuf_size)      == 188,
+               "v3 cbuf_size offset drifted");
+
 /*
  * Validate a candidate handoff block. Returns 0 iff magic, version,
  * addresses (all non-null), and gpfifo_entries (non-zero power of two)

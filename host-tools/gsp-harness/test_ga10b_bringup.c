@@ -1435,6 +1435,46 @@ static void test_launch_kernel_pb_qmd_shift_upper(void)
     REQUIRE_EQ(pb[11], 0x3456789Au);      /* literal guard */
 }
 
+static void test_launch_kernel_pb_qmd_shift_at_40bit_boundary(void)
+{
+    printf("== test_launch_kernel_pb_qmd_shift_at_40bit_boundary ==\n");
+    uint32_t pb[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+
+    /* Exactly (1ULL << 40): the highest VA for which shifted form
+     * fits in the 32-bit PCAS_A_QMD_ADDRESS_SHIFTED8 field.
+     * 0x10000000000ULL >> 8 = 0x100000000, which overflows uint32
+     * by exactly one bit — the truncation drops that bit and pb[11]
+     * reads as zero. Documents the silent-overflow behavior so a
+     * future check added to reject out-of-range QMDs has a
+     * pre-existing test to contradict. */
+    uint64_t qmd_gva = 1ULL << 40;
+    ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva);
+
+    REQUIRE_EQ(pb[11], 0u);
+}
+
+static void test_launch_kernel_pb_qmd_misalignment_truncates(void)
+{
+    printf("== test_launch_kernel_pb_qmd_misalignment_truncates ==\n");
+    uint32_t pb[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+
+    /* SEND_PCAS_A_QMD_ADDRESS_SHIFTED8 encodes va/256, so the
+     * low 8 bits of the QMD VA are lost silently — the builder
+     * doesn't assert alignment. Document this by feeding a
+     * misaligned VA and checking that only the top bits survive.
+     * Real callers must 256 B-align their QMD (the helper's nvmap
+     * allocator enforces this via 4 KB page alignment); this test
+     * exists so a future alignment assertion (if added) has a
+     * pre-existing reminder of the current contract. */
+    uint64_t qmd_gva_aligned = 0x1ffc013000ULL;
+    uint64_t qmd_gva_misaligned = qmd_gva_aligned | 0xABu;
+    ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva_misaligned);
+
+    /* Low 8 bits dropped — result matches the aligned case. */
+    REQUIRE_EQ(pb[11], (uint32_t)(qmd_gva_aligned >> 8));
+    REQUIRE_EQ(pb[11], 0x1FFC0130u);      /* literal guard */
+}
+
 static void test_launch_kernel_pb_idempotent(void)
 {
     printf("== test_launch_kernel_pb_idempotent ==\n");
@@ -1718,6 +1758,8 @@ int main(void)
     test_launch_kernel_pb_layout();
     test_launch_kernel_pb_qmd_shift_lower();
     test_launch_kernel_pb_qmd_shift_upper();
+    test_launch_kernel_pb_qmd_shift_at_40bit_boundary();
+    test_launch_kernel_pb_qmd_misalignment_truncates();
     test_launch_kernel_pb_idempotent();
     test_launch_kernel_pb_uses_ampere_pcas2_b();
 

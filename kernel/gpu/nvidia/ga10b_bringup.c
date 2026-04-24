@@ -1279,33 +1279,62 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
 
 /* Copy a freshly-built pushbuffer into the inherited pb_phys region,
  * post a GPFIFO entry pointing at it, advance GP_PUT, ring the USERMODE
- * doorbell, and poll for GA10B_SMOKETEST_SEM_PAYLOAD at semaphore_phys.
+ * doorbell, and poll `poll_phys` for GA10B_SMOKETEST_SEM_PAYLOAD.
  *
- * `tag` is the logging prefix (e.g. "GA10B-P7" for host-family,
- * "GA10B-P7C" for COMPUTE_B). Shared between the host-family and
- * compute-class smoke tests because the GPFIFO-and-doorbell protocol
- * is identical — only the pushbuffer contents differ. Updates the
- * caller-provided bringup state on success / failure. */
-static int ga10b_submit_and_poll_sema(struct ga10b_bringup *b,
-                                      const uint32_t *pb_buf,
-                                      uint32_t pb_dwords,
-                                      const char *tag)
+ * `poll_phys` is the CPU-physical target the GPU writes via the
+ * submitted pushbuffer — `g_handoff.semaphore_phys` for the Phase 7
+ * host-family and COMPUTE_B SEMAPHORE_RELEASE builders (both of
+ * which encode the sema VA into the pushbuffer), or
+ * `g_handoff.output_phys` for the Phase 8 compute-kernel launch
+ * (where the shader itself stores the payload via STG.E to a VA
+ * that maps to output_phys).
+ *
+ * `error_phase` is written into `b->last_error_phase` on failure so
+ * the caller's phase-number logging stays accurate (Phase 7 for
+ * sema, Phase 8 for launch).
+ *
+ * `tag` is the logging prefix (e.g. "GA10B-P7", "GA10B-P7C",
+ * "GA10B-P8").
+ *
+ * Success criterion is strict: the payload must land at `poll_phys`
+ * within the 2 s timeout. `gp_advanced && !payload_matched` returns
+ * -1 — PBDMA consumed the pushbuffer but the GPU did not produce
+ * the expected side effect. That's the "silent no-op" failure mode
+ * (e.g. PCAS_B on Ampere silently dropping dispatch) and must not
+ * be reported as success; an earlier loose criterion was a
+ * now-resolved #273 workaround and has been dropped.
+ *
+ * GPFIFO bookkeeping: on any PBDMA progress (gp_advanced), update
+ * `g_handoff.initial_gp_put` / `initial_gp_get` so a subsequent
+ * submit targets a fresh slot. This is symmetric across success and
+ * partial-failure paths because the slot has been consumed either
+ * way; reusing it would overwrite a not-yet-drained entry only if
+ * PBDMA hadn't seen our submit at all, and that case (!gp_advanced)
+ * leaves the counters unchanged. */
+static int ga10b_submit_and_poll(struct ga10b_bringup *b,
+                                 const uint32_t *pb_buf,
+                                 uint32_t pb_dwords,
+                                 uint64_t poll_phys,
+                                 int error_phase,
+                                 const char *tag)
 {
     uint32_t pb_bytes = pb_dwords * 4u;
 
-    volatile uint32_t *sem = (volatile uint32_t *)(uintptr_t)
-        g_handoff.semaphore_phys;
-    *sem = 0;
+    /* Zero the poll target so a post-submit non-zero read is
+     * unambiguous proof the GPU wrote the payload (not residue
+     * from a prior run or from the Linux helper's pre-kexec
+     * validation). */
+    volatile uint32_t *poll = (volatile uint32_t *)(uintptr_t)poll_phys;
+    *poll = 0;
     if (gsp_platform->cache_clean) {
-        gsp_platform->cache_clean((const void *)sem, sizeof(uint32_t));
+        gsp_platform->cache_clean((const void *)poll, sizeof(uint32_t));
     }
     gsp_platform->mb();
 
-    uart_printf("[%s] semaphore at phys 0x%lx cleared to 0 "
-                "(gpu_va=0x%lx, expected payload=0x%lx)\n",
+    uart_printf("[%s] poll target at phys 0x%lx cleared to 0 "
+                "(expected payload=0x%lx)\n",
                 tag,
-                (unsigned long)g_handoff.semaphore_phys,
-                (unsigned long)g_handoff.semaphore_gpu_va,
+                (unsigned long)poll_phys,
                 (unsigned long)GA10B_SMOKETEST_SEM_PAYLOAD);
 
     volatile uint32_t *pb = (volatile uint32_t *)(uintptr_t)
@@ -1369,14 +1398,14 @@ static int ga10b_submit_and_poll_sema(struct ga10b_bringup *b,
                 (unsigned long)GA10B_USERMODE_DOORBELL_PHYS,
                 (unsigned long)g_handoff.work_submit_token);
 
-    uart_printf("[%s] polling semaphore (2s timeout)...\n", tag);
-    uint32_t sem_val = 0;
+    uart_printf("[%s] polling (2s timeout)...\n", tag);
+    uint32_t poll_val = 0;
     for (uint32_t us = 0; us < 2000000; us++) {
         if (gsp_platform->cache_invalidate) {
-            gsp_platform->cache_invalidate((void *)sem, sizeof(uint32_t));
+            gsp_platform->cache_invalidate((void *)poll, sizeof(uint32_t));
         }
-        sem_val = *sem;
-        if (sem_val == GA10B_SMOKETEST_SEM_PAYLOAD) break;
+        poll_val = *poll;
+        if (poll_val == GA10B_SMOKETEST_SEM_PAYLOAD) break;
         for (volatile int i = 0; i < 1500; i++) { }
     }
 
@@ -1387,36 +1416,45 @@ static int ga10b_submit_and_poll_sema(struct ga10b_bringup *b,
     }
     uint32_t final_gp_get = userd[gp_get_word];
 
-    uart_printf("[%s] result: sem=0x%08lx GP_GET=%lu (was %lu)\n",
+    uart_printf("[%s] result: poll=0x%08lx GP_GET=%lu (was %lu)\n",
                 tag,
-                (unsigned long)sem_val,
+                (unsigned long)poll_val,
                 (unsigned long)final_gp_get,
                 (unsigned long)g_handoff.initial_gp_get);
 
-    bool gp_advanced  = (final_gp_get != g_handoff.initial_gp_get);
-    bool sem_released = (sem_val == GA10B_SMOKETEST_SEM_PAYLOAD);
+    bool gp_advanced     = (final_gp_get != g_handoff.initial_gp_get);
+    bool payload_matched = (poll_val == GA10B_SMOKETEST_SEM_PAYLOAD);
 
+    /* Symmetric bookkeeping: any PBDMA progress consumes the slot.
+     * Update the counters so the next submit lands in a fresh slot,
+     * regardless of whether the payload matched — even in the
+     * partial-failure case the entry is no longer pending. */
     if (gp_advanced) {
-        if (sem_released) {
-            uart_printf("[%s] SEMAPHORE_RELEASE completed — "
-                        "GPU executed our method.\n", tag);
-        } else {
-            uart_printf("[%s] GP_GET advanced — PBDMA consumed our "
-                        "entry but sema did not release\n", tag);
-        }
-        b->state = GA10B_BRINGUP_METHOD_ACCEPTED;
-        /* Track the post-submit GP_PUT so a subsequent submit (e.g.
-         * back-to-back host-family then compute) writes to the next
-         * GPFIFO slot instead of overwriting this one before PBDMA
-         * has drained it on very fast hardware. */
         g_handoff.initial_gp_put = new_gp_put;
         g_handoff.initial_gp_get = final_gp_get;
+    }
+
+    if (payload_matched) {
+        uart_printf("[%s] payload observed — GPU executed submit.\n", tag);
+        b->state = GA10B_BRINGUP_METHOD_ACCEPTED;
         return 0;
     }
 
-    uart_printf("[%s] GP_GET did not advance — PBDMA didn't see our "
-                "submit\n", tag);
-    b->last_error_phase = 7;
+    if (gp_advanced) {
+        uart_printf("[%s] GP_GET advanced but payload didn't land "
+                    "(got 0x%lx, want 0x%lx) — PBDMA consumed our "
+                    "submit but the GPU didn't produce the expected "
+                    "side effect. Check pushbuffer encoding, class/"
+                    "subchannel binding, and (for compute) the "
+                    "PCAS2_B/PCAS_B arch split.\n",
+                    tag,
+                    (unsigned long)poll_val,
+                    (unsigned long)GA10B_SMOKETEST_SEM_PAYLOAD);
+    } else {
+        uart_printf("[%s] GP_GET did not advance — PBDMA didn't see "
+                    "our submit\n", tag);
+    }
+    b->last_error_phase = error_phase;
     return -1;
 }
 
@@ -1424,9 +1462,9 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
 {
     /* Accept CHANNEL_OPEN (first submit) or METHOD_ACCEPTED (after a
      * prior submit) — symmetric with smoke_test_compute. Re-submitting
-     * on the same channel is valid because submit_and_poll_sema
-     * bumps g_handoff.initial_gp_put to the next GPFIFO slot on
-     * success, so back-to-back submits target distinct slots. */
+     * on the same channel is valid because submit_and_poll bumps
+     * g_handoff.initial_gp_put to the next GPFIFO slot on PBDMA
+     * progress, so back-to-back submits target distinct slots. */
     if (!b || (b->state != GA10B_BRINGUP_CHANNEL_OPEN &&
                b->state != GA10B_BRINGUP_METHOD_ACCEPTED)) return -1;
 
@@ -1434,12 +1472,15 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
 
     /* Host-family SEMAPHORE_RELEASE (Volta+ method indices 0x17..0x1b).
      * PBDMA-decoded, bypasses GR entirely — doesn't require any class
-     * binding. See ga10b_build_sema_release_pushbuffer() for encoding. */
+     * binding. See ga10b_build_sema_release_pushbuffer() for encoding.
+     * The GPU writes the payload to semaphore_gpu_va, which maps to
+     * semaphore_phys on the CPU side — that's our poll target. */
     uint32_t pb_buf[GA10B_SEMA_RELEASE_PB_DWORDS];
     uint32_t pb_dwords = ga10b_build_sema_release_pushbuffer(
         pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
 
-    return ga10b_submit_and_poll_sema(b, pb_buf, pb_dwords, "GA10B-P7");
+    return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                 g_handoff.semaphore_phys, 7, "GA10B-P7");
 }
 
 int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
@@ -1472,13 +1513,9 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
     uint32_t pb_dwords = ga10b_build_compute_sema_release_pushbuffer(
         pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
 
-    return ga10b_submit_and_poll_sema(b, pb_buf, pb_dwords, "GA10B-P7C");
+    return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                 g_handoff.semaphore_phys, 7, "GA10B-P7C");
 }
-
-/* v3 handoff field holds the kernel output VA; the Linux helper's
- * cache of `g_handoff` is written as a single struct by Phase 6. Pull
- * the v3-only fields via the same global, gated on version. */
-extern struct ga10b_channel_handoff g_handoff;
 
 int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
 {
@@ -1505,126 +1542,22 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
                 (unsigned long)g_handoff.qmd_gpu_va,
                 (unsigned long)g_handoff.output_phys);
 
-    /* Zero the kernel output buffer so a post-dispatch 0xCAFE is
-     * unambiguous proof the kernel ran (not residue from the Linux
-     * helper's pre-kexec validation run). */
-    volatile uint32_t *out = (volatile uint32_t *)(uintptr_t)
-        g_handoff.output_phys;
-    *out = 0;
-    if (gsp_platform->cache_clean) {
-        gsp_platform->cache_clean((const void *)out, sizeof(uint32_t));
-    }
-    gsp_platform->mb();
-
     /* Build the launch pushbuffer. The builder is pure logic so host
-     * tests pin its bit layout; see host-tools/gsp-harness tests. */
+     * tests pin its bit layout; see host-tools/gsp-harness tests.
+     *
+     * The shader (uploaded pre-kexec by the Linux helper) stores the
+     * payload via STG.E to a VA that maps to output_phys on the CPU
+     * side — that's the poll target. Unlike the host-family and
+     * COMPUTE_B SEMAPHORE_RELEASE paths (which point PBDMA at
+     * semaphore_phys), the QMD path drives the SMs through the
+     * shader code; the "side effect" is whatever the shader
+     * writes. */
     uint32_t pb_buf[GA10B_LAUNCH_KERNEL_PB_DWORDS];
     uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
         pb_buf, g_handoff.qmd_gpu_va);
-    uint32_t pb_bytes = pb_dwords * 4u;
 
-    volatile uint32_t *pb = (volatile uint32_t *)(uintptr_t)
-        g_handoff.pushbuf_phys;
-    for (uint32_t i = 0; i < pb_dwords; i++) pb[i] = pb_buf[i];
-    if (gsp_platform->cache_clean) {
-        gsp_platform->cache_clean((const void *)pb, pb_bytes);
-    }
-    gsp_platform->mb();
-
-    /* GPFIFO entry / GP_PUT / doorbell — same as submit_and_poll_sema
-     * but the poll target is the kernel output buffer (which may be
-     * the same VA as semaphore_phys if the helper aliases them, but
-     * the fields are separate in the v3 handoff for clarity). */
-    uint64_t pb_gpu_va = g_handoff.pushbuf_gpu_va;
-    uint32_t gp_entry0 = (uint32_t)(pb_gpu_va & 0xFFFFFFFCu);
-    uint32_t gp_entry1 = (uint32_t)((pb_gpu_va >> 32) & 0xFFu) |
-                         (pb_dwords << 10);
-
-    uint32_t gp_put = g_handoff.initial_gp_put;
-    uint32_t gp_idx = gp_put & (g_handoff.gpfifo_entries - 1);
-    volatile uint64_t *gpfifo = (volatile uint64_t *)(uintptr_t)
-        g_handoff.gpfifo_phys;
-    uint64_t entry = ((uint64_t)gp_entry1 << 32) | gp_entry0;
-    gpfifo[gp_idx] = entry;
-    if (gsp_platform->cache_clean) {
-        gsp_platform->cache_clean((const void *)&gpfifo[gp_idx],
-                                  sizeof(uint64_t));
-    }
-    gsp_platform->mb();
-
-    uart_printf("[GA10B-P8] GPFIFO[%lu] = 0x%08lx_%08lx (pb_va=0x%lx, "
-                "%lu bytes)\n",
-                (unsigned long)gp_idx,
-                (unsigned long)gp_entry1,
-                (unsigned long)gp_entry0,
-                (unsigned long)pb_gpu_va,
-                (unsigned long)pb_bytes);
-
-    uint32_t new_gp_put = gp_put + 1;
-    volatile uint32_t *userd = (volatile uint32_t *)(uintptr_t)
-        g_handoff.userd_phys;
-    uint32_t gp_put_word = g_handoff.userd_gp_put_offset / 4;
-    userd[gp_put_word] = new_gp_put;
-    if (gsp_platform->cache_clean) {
-        gsp_platform->cache_clean((const void *)&userd[gp_put_word],
-                                  sizeof(uint32_t));
-    }
-    gsp_platform->mb();
-
-    volatile uint32_t *doorbell =
-        (volatile uint32_t *)(uintptr_t)GA10B_USERMODE_DOORBELL_PHYS;
-    *doorbell = g_handoff.work_submit_token;
-    gsp_platform->mb();
-    uart_printf("[GA10B-P8] doorbell 0x%lx <- 0x%08lx\n",
-                (unsigned long)GA10B_USERMODE_DOORBELL_PHYS,
-                (unsigned long)g_handoff.work_submit_token);
-
-    /* Poll kernel output for GA10B_SMOKETEST_SEM_PAYLOAD. The GPU
-     * kernel writes it via STG.E after SEND_PCAS2_B dispatches. */
-    uart_puts("[GA10B-P8] polling kernel output (2s timeout)...\n");
-    uint32_t out_val = 0;
-    for (uint32_t us = 0; us < 2000000; us++) {
-        if (gsp_platform->cache_invalidate) {
-            gsp_platform->cache_invalidate((void *)out, sizeof(uint32_t));
-        }
-        out_val = *out;
-        if (out_val == GA10B_SMOKETEST_SEM_PAYLOAD) break;
-        for (volatile int i = 0; i < 1500; i++) { }
-    }
-
-    uint32_t gp_get_word = g_handoff.userd_gp_get_offset / 4;
-    if (gsp_platform->cache_invalidate) {
-        gsp_platform->cache_invalidate((void *)&userd[gp_get_word],
-                                       sizeof(uint32_t));
-    }
-    uint32_t final_gp_get = userd[gp_get_word];
-
-    uart_printf("[GA10B-P8] result: out=0x%08lx GP_GET=%lu (was %lu)\n",
-                (unsigned long)out_val,
-                (unsigned long)final_gp_get,
-                (unsigned long)g_handoff.initial_gp_get);
-
-    bool gp_advanced = (final_gp_get != g_handoff.initial_gp_get);
-    bool kernel_ran  = (out_val == GA10B_SMOKETEST_SEM_PAYLOAD);
-
-    if (kernel_ran) {
-        uart_puts("[GA10B-P8] KERNEL LAUNCHED — GPU executed compute "
-                  "shader and wrote expected payload.\n");
-        b->state = GA10B_BRINGUP_METHOD_ACCEPTED;
-        g_handoff.initial_gp_put = new_gp_put;
-        g_handoff.initial_gp_get = final_gp_get;
-        return 0;
-    }
-
-    if (gp_advanced) {
-        uart_puts("[GA10B-P8] dispatch consumed but kernel did not fire "
-                  "— check QMD contents / shader mapping.\n");
-    } else {
-        uart_puts("[GA10B-P8] GP_GET did not advance — PBDMA didn't see "
-                  "our submit.\n");
-    }
-    b->last_error_phase = 8;
-    return -1;
+    return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                 g_handoff.output_phys, 8, "GA10B-P8");
 }
 
 int ga10b_bringup_run(struct ga10b_bringup *b)
