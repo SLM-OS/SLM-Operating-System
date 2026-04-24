@@ -1663,6 +1663,17 @@ int cmd_reboot(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
+    /* #253 (2026-04-23): give Hailo fw a chance to clean up before
+     * we tear down. Linux writes FW_ACCESS_DRIVER_SHUTDOWN_MASK
+     * (val=4) to the doorbell on device release; mirroring that
+     * lets fw clear "active driver" state so the next boot starts
+     * fresh. Best-effort + weak symbol so this builds on platforms
+     * without the Hailo backend. */
+    extern int hailo_control_signal_driver_shutdown(void) __attribute__((weak));
+    if (&hailo_control_signal_driver_shutdown) {
+        (void)hailo_control_signal_driver_shutdown();
+    }
+
     shell_puts("Rebooting...\r\n");
 
     psci_system_reset();

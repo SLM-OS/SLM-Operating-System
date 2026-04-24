@@ -303,6 +303,48 @@ static int wait_for_response(uint32_t timeout_us)
 static bool control_post_boot_init_done = false;
 static bool control_irq_masks_armed = false;
 
+/* Track whether the MSI handler is bound. Separate flag from
+ * control_post_boot_init_done because pre-boot MSI registration can
+ * happen *before* the post-boot init runs. control_post_boot_init
+ * checks this flag and skips MSI registration if already done. */
+static bool control_msi_registered = false;
+
+int hailo_control_register_msi_for_boot(void)
+{
+    if (control_msi_registered) return HAILO_OK;
+    if (!hailo_platform || !hailo_platform->register_irq) {
+        /* No MSI infrastructure on this platform — silently skip.
+         * Polling fallback will still work. */
+        return HAILO_OK;
+    }
+
+    int rc = hailo_platform->register_irq(control_msi_handler, NULL);
+    if (rc != HAILO_OK) {
+        WARN("hailo: pre-boot MSI registration failed (%d); polling fallback", rc);
+        /* Non-fatal: the existing ATR[1] poll in hailo_boot still works.
+         * Mark as "registered" so post-boot init doesn't retry. */
+    }
+    control_msi_registered = true;
+    return HAILO_OK;
+}
+
+int hailo_control_signal_driver_shutdown(void)
+{
+    if (!hailo_platform || !hailo_platform->bar4_write) return HAILO_ERR_NODEV;
+    if (hailo_get_state() != HAILO_STATE_RUNNING) return HAILO_OK;
+
+    /* Mirror Linux's finalize_doorbell write: doorbell at
+     * raise_ready_offset (0x1684) with FW_ACCESS_DRIVER_SHUTDOWN_MASK
+     * (0x4) so fw can clear active-driver state. Best-effort: any
+     * failure here is logged and ignored — we're tearing down. */
+    uint32_t val = HAILO_FW_ACCESS_DRIVER_SHUTDOWN_MASK;
+    hailo_platform->bar4_write(hailo_fw_addrs_hailo8.raise_ready_offset,
+                               &val, sizeof(val));
+    if (hailo_platform->mb) hailo_platform->mb();
+    INFO("hailo: signaled DRIVER_SHUTDOWN to fw");
+    return HAILO_OK;
+}
+
 int hailo_control_arm_irq_masks(void)
 {
     if (control_irq_masks_armed) return HAILO_OK;
@@ -383,14 +425,17 @@ static void control_post_boot_init(void)
                             0xFFFFFFFFu);
     hailo_platform->mb();
 
-    /* Register the MSI handler — non-fatal on failure. */
-    if (hailo_platform->register_irq) {
+    /* Register the MSI handler — non-fatal on failure. Skip if the
+     * boot path already registered it via
+     * hailo_control_register_msi_for_boot. */
+    if (hailo_platform->register_irq && !control_msi_registered) {
         int rc = hailo_platform->register_irq(control_msi_handler, NULL);
         if (rc != HAILO_OK) {
             WARN("hailo: control MSI registration failed (%d); polling fallback", rc);
             /* Mark done anyway — retry wouldn't help, and the
              * polling fallback stays available. */
         }
+        control_msi_registered = true;
     }
 
     control_post_boot_init_done = true;

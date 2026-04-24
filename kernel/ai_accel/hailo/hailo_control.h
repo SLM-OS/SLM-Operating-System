@@ -61,6 +61,16 @@
  */
 #define HAILO_FW_ACCESS_APP_CPU_CONTROL_MASK  (1u << 0)
 #define HAILO_FW_ACCESS_CORE_CPU_CONTROL_MASK (1u << 1)
+/* DRIVER_SHUTDOWN: signal fw that the host driver is releasing
+ * the device. Linux writes this from hailo_disable_interrupts on
+ * release. Lets fw clear "active driver" state so the next boot
+ * starts from a known fresh baseline. SOFT_RESET: ask fw to
+ * re-init in place without re-uploading the fw blob. Both
+ * defined to match hailo-ioctl-common.h:36-41 (NNC interrupt
+ * mask enum). #253 (2026-04-23): added so SLM-OS can mirror
+ * Linux's clean-shutdown signaling. */
+#define HAILO_FW_ACCESS_DRIVER_SHUTDOWN_MASK  (1u << 2)
+#define HAILO_FW_ACCESS_SOFT_RESET_MASK       (1u << 3)
 
 /*
  * Which firmware CPU the opcode targets. Used by the transport to
@@ -710,6 +720,29 @@ int hailo_control_get_device_information(uint32_t *out_response_len);
  * needs fw to be RUNNING (handler may receive responses).
  */
 int hailo_control_arm_irq_masks(void);
+
+/*
+ * Pre-boot MSI registration. Linux's hailo_pcie_enable_interrupts
+ * (called BEFORE load_firmware) does pci_enable_msi + request_irq
+ * so MSI is configured by the time fw boots. SLM-OS previously only
+ * called register_irq on first FW_CONTROL RPC — long after boot.
+ * This function lets the boot path engage MSI early so fw observes
+ * a fully-configured interrupt environment when it comes up.
+ *
+ * Idempotent and non-fatal: on platforms without register_irq or on
+ * second call, returns HAILO_OK without re-registering.
+ */
+int hailo_control_register_msi_for_boot(void);
+
+/*
+ * Signal fw that the host driver is shutting down. Writes
+ * FW_ACCESS_DRIVER_SHUTDOWN_MASK (0x4) to the raise_ready
+ * doorbell so fw can clean up its "active driver" state. Mirrors
+ * Linux's hailo_pcie_finalize_doorbell_data path. Safe to call
+ * before reboot, before fw teardown, or when releasing the
+ * accelerator. No-op if fw is not running.
+ */
+int hailo_control_signal_driver_shutdown(void);
 
 /*
  * Reset internal control-channel state (sequence counter and the

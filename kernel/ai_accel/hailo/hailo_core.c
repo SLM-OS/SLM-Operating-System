@@ -683,12 +683,25 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
      * RUNNING state. */
     {
         extern int hailo_control_arm_irq_masks(void);
+        extern int hailo_control_register_msi_for_boot(void);
         int irq_rc = hailo_control_arm_irq_masks();
         if (irq_rc != HAILO_OK) {
             INFO("hailo: pre-trigger IRQ mask arm failed (rc=%d)", irq_rc);
             /* Non-fatal: leave fw to boot without armed masks (the
              * old behavior). control_post_boot_init still runs on
              * first RPC and will retry. */
+        }
+        /* #253 (2026-04-23): register MSI handler before fw trigger
+         * so the MSI cap is configured (host address+data programmed
+         * in the device's PCI cap) when fw observes its post-boot
+         * environment. Linux does this in hailo_pcie_enable_interrupts
+         * before load_firmware. We continue to use ATR[1] polling
+         * for the actual fw-loaded handshake — this is just to make
+         * the MSI cap visible to fw at boot. */
+        int msi_rc = hailo_control_register_msi_for_boot();
+        if (msi_rc != HAILO_OK) {
+            INFO("hailo: pre-trigger MSI registration failed (rc=%d)", msi_rc);
+            /* Also non-fatal — same fallback. */
         }
     }
 
