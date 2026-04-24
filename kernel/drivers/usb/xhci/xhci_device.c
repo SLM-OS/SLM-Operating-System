@@ -87,22 +87,12 @@ static bool             xhci_ring_in_use[XHCI_DEV_MAX_RINGS];
 static bool             xhci_probe_adopt_inherited_slot1 = true;
 static bool             xhci_probe_adopt_inherited_slot3 = true;
 static bool             xhci_probe_reset_ep_on_adopt_slot3 = true;
-static bool             xhci_probe_configure_ep0_on_adopt_slot3 = false;
-static bool             xhci_probe_use_local_devctx_on_adopt_slot3 = false;
-static bool             xhci_probe_skip_stop_ep_on_adopt_slot3 = false;
-static bool             xhci_probe_force_freshslot_fullspeed = false;
-static bool             xhci_probe_freshslot_configure_ep0 = false;
 static bool             xhci_probe_fullspeed_power_cycle = true;
-static bool             xhci_probe_refresh_ep0_on_adopted_configure = false;
-static bool             xhci_probe_skip_configure_ep_on_adopted = false;
 
 static void xhci_try_power_cycle_port(uint8_t pidx, const char *why);
 static void xhci_build_input_ctx_for_address(struct xhci_device *d,
                                              const struct usb_device *dev,
                                              uintptr_t ep0_ring_phys);
-static void xhci_probe_configure_ep0_freshslot(struct xhci_device *d,
-                                               const struct usb_device *dev,
-                                               uintptr_t ep0_ring_phys);
 
 static struct xhci_ring *xhci_ring_pool_alloc(void)
 {
@@ -201,13 +191,8 @@ static uint32_t xhci_stale_portsc_initial = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 static bool xhci_skip_next_port_reset = false;
 static bool xhci_force_connected_disabled_reset = false;
-static bool xhci_probe_prefer_fullspeed_port = false;
 static bool xhci_probe_fullspeed_addr3 = true;
-static bool xhci_probe_fullspeed_ep0_mps8 = false;
-static bool xhci_probe_fullspeed_eval_addr3 = false;
 static bool xhci_probe_highspeed_eval_addr1 = true;
-static bool xhci_force_bsr0_on_open = false;
-static bool xhci_force_inherited_addr2_on_open = false;
 
 static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
                                       const char *why);
@@ -726,27 +711,6 @@ static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
 
 static uint8_t xhci_locate_usb2_port(void)
 {
-    if (xhci_probe_prefer_fullspeed_port) {
-        for (uint8_t p = 0; p < xhci_caps_cached.max_ports; p++) {
-            uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(p));
-            bool c = false;
-            enum usb_speed s = USB_SPEED_UNKNOWN;
-            bool decoded = xhci_decode_portsc(sc, &c, &s);
-            if (c && decoded &&
-                (s == USB_SPEED_FULL || s == USB_SPEED_LOW)) {
-                xhci_probe_prefer_fullspeed_port = false;
-                xhci_active_portsc  = sc;
-                xhci_stale_portsc_initial = sc;
-                xhci_prereset_speed = s;
-                INFO("xhci: preferring non-Realtek USB2 port %u for probe "
-                     "(portsc=0x%08x speed=%u)",
-                     p, (unsigned)sc, (unsigned)s);
-                return p;
-            }
-        }
-        xhci_probe_prefer_fullspeed_port = false;
-    }
-
     for (uint8_t p = 0; p < xhci_caps_cached.max_ports; p++) {
         uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(p));
         bool c = false;
@@ -811,8 +775,6 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = false;
         xhci_force_connected_disabled_reset = true;
-        xhci_force_bsr0_on_open = false;
-        xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -827,8 +789,6 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = false;
         xhci_force_connected_disabled_reset = true;
-        xhci_force_bsr0_on_open = false;
-        xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -843,8 +803,6 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
-        xhci_force_bsr0_on_open = false;
-        xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -861,8 +819,6 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
-        xhci_force_bsr0_on_open = false;
-        xhci_force_inherited_addr2_on_open = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -881,8 +837,6 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
                  (unsigned)xhci_active_port);
             xhci_prereset_speed = s;
             xhci_force_connected_disabled_reset = false;
-            xhci_force_bsr0_on_open = false;
-            xhci_force_inherited_addr2_on_open = false;
         }
     }
 
@@ -1273,13 +1227,7 @@ static uint16_t xhci_ep0_max_packet(enum usb_speed s)
 {
     switch (s) {
     case USB_SPEED_LOW:   return 8;
-    case USB_SPEED_FULL:
-        /*
-         * Probe the stricter USB2 baseline on the inherited full-speed
-         * path: keep EP0 seeded at 8 bytes before the first descriptor
-         * read instead of assuming the eventual full-speed max packet.
-         */
-        return xhci_probe_fullspeed_ep0_mps8 ? 8 : 64;
+    case USB_SPEED_FULL:  return 64;
     case USB_SPEED_HIGH:  return 64;
     case USB_SPEED_SUPER: return 512;
     default:              return 8;
@@ -1413,12 +1361,6 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
         d->root_port != 7)
         return -1;
 
-    if (xhci_probe_force_freshslot_fullspeed) {
-        INFO("xhci: skipping inherited slot 3 once for fresh-slot EP0 configure probe");
-        xhci_probe_force_freshslot_fullspeed = false;
-        return -1;
-    }
-
     /*
      * On nano-2's inherited full-speed Bluetooth path, Linux leaves a live
      * slot 3 EP0 object behind. Re-point that slot at one of our rings and
@@ -1434,19 +1376,14 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
     if (xhci_prepare_slot3_fixed_mirror(d, ep0) != 0)
         return -1;
 
-    if (xhci_probe_skip_stop_ep_on_adopt_slot3) {
-        xhci_probe_skip_stop_ep_on_adopt_slot3 = false;
-        INFO("xhci: probing adopted slot %u without STOP_EP(ep0)", (unsigned)slot);
-    } else {
-        cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
-                      ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
-                      ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
-        if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
-            cc != XHCI_CC_SUCCESS) {
-            WARN("xhci: adopt slot %u STOP_EP(ep0) cc=%u",
-                 (unsigned)slot, (unsigned)cc);
-            return -1;
-        }
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: adopt slot %u STOP_EP(ep0) cc=%u",
+             (unsigned)slot, (unsigned)cc);
+        return -1;
     }
 
     if (xhci_probe_reset_ep_on_adopt_slot3) {
@@ -1560,36 +1497,11 @@ static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
         *s3 = ((*s3 & ~XHCI_SLOT_DW3_STATE_MASK) |
                (3U << XHCI_SLOT_DW3_STATE_SHIFT));
     }
-    if (xhci_probe_use_local_devctx_on_adopt_slot3) {
-        published_devctx_phys = d->dev_ctx_phys;
-        xhci_probe_use_local_devctx_on_adopt_slot3 = false;
-        INFO("xhci: adopt slot %u publishing local devctx mirror via DCBAA "
-             "(0x%lx) instead of retained controller devctx",
-             (unsigned)slot,
-             (unsigned long)published_devctx_phys);
-    } else if (published_devctx_phys == 0) {
+    if (published_devctx_phys == 0) {
         published_devctx_phys = d->dev_ctx_phys;
     }
     xhci_dcbaa[slot] = (uint64_t)published_devctx_phys;
     dsb(sy);
-
-    if (xhci_probe_configure_ep0_on_adopt_slot3) {
-        xhci_build_input_ctx_for_address(d, dev, ep0->phys);
-
-        memset(&cmd, 0, sizeof(cmd));
-        cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
-        cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
-        cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_CONFIGURE_EP) |
-                      ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
-        if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
-            WARN("xhci: adopt slot %u CONFIGURE_ENDPOINT(ep0) transport failed",
-                 (unsigned)slot);
-        } else {
-            INFO("xhci: adopt slot %u CONFIGURE_ENDPOINT(ep0) cc=%u",
-                 (unsigned)slot, (unsigned)cc);
-        }
-        xhci_probe_configure_ep0_on_adopt_slot3 = false;
-    }
 
     xhci_probe_adopt_inherited_slot3 = false;
     INFO("xhci: adopted inherited slot %u for full-speed root device "
@@ -1811,12 +1723,6 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
     uint32_t *e4 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 4, cz);
 
     uint16_t mps = xhci_ep0_max_packet(dev->speed);
-    if (dev->speed == USB_SPEED_FULL && xhci_probe_fullspeed_ep0_mps8) {
-        INFO("xhci: probing full-speed EP0 seed MPS=8 on root_port=%u route=0x%x",
-             (unsigned)d->root_port,
-             (unsigned)dev->route_string);
-        xhci_probe_fullspeed_ep0_mps8 = false;
-    }
     *e0 = 0;                                  /* state=Disabled, interval=0 */
     *e1 = (3U  << XHCI_EP_DW1_CERR_SHIFT) |   /* CErr = 3 retries */
           (XHCI_EP_TYPE_CONTROL << XHCI_EP_DW1_EPTYPE_SHIFT) |
@@ -1834,31 +1740,6 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
          (unsigned)*s0, (unsigned)*s1,
          (unsigned)*e0, (unsigned)*e1, (unsigned)*e2,
          (unsigned)*e3, (unsigned)*e4);
-}
-
-static void xhci_probe_configure_ep0_freshslot(struct xhci_device *d,
-                                               const struct usb_device *dev,
-                                               uintptr_t ep0_ring_phys)
-{
-    if (d == NULL || dev == NULL || d->slot_id == 0 || d->input_ctx == NULL)
-        return;
-
-    xhci_build_input_ctx_for_address(d, dev, ep0_ring_phys);
-
-    struct xhci_trb cmd = {0};
-    uint8_t cc = 0;
-    cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
-    cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
-    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_CONFIGURE_EP) |
-                  ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
-    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
-        WARN("xhci: fresh slot %u CONFIGURE_ENDPOINT(ep0) transport failed",
-             (unsigned)d->slot_id);
-        return;
-    }
-
-    INFO("xhci: fresh slot %u CONFIGURE_ENDPOINT(ep0) cc=%u",
-         (unsigned)d->slot_id, (unsigned)cc);
 }
 
 int xhci_sync_child_address_bsr0(struct usb_device *dev)
@@ -2116,14 +1997,11 @@ int xhci_hcd_device_open(struct usb_device *dev)
      * HC's internal SET_ADDRESS failed immediately with cc=4, while
      * BSR=1 gets far enough to exercise software-driven EP0 traffic.
      */
-    bool use_bsr0 = xhci_force_bsr0_on_open;
     uint8_t inherited_addr = 0;
     bool fullspeed_addr3_probe = false;
-    if (xhci_force_inherited_addr2_on_open) {
-        inherited_addr = (dev->speed == USB_SPEED_FULL) ? 3 : 2;
-    } else if (xhci_probe_fullspeed_addr3 &&
-               d->root_port == 7 &&
-               dev->route_string == 0) {
+    if (xhci_probe_fullspeed_addr3 &&
+        d->root_port == 7 &&
+        dev->route_string == 0) {
         /*
          * Diagnostic probe: the always-present full-speed Bluetooth path
          * on nano-2 hangs off root port 7 in Linux. Key the retained-
@@ -2141,31 +2019,19 @@ int xhci_hcd_device_open(struct usb_device *dev)
              (unsigned)dev->speed,
              (unsigned)dev->route_string);
     }
-    xhci_force_bsr0_on_open = false;
-    xhci_force_inherited_addr2_on_open = false;
     cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
-                   ((use_bsr0 ? 0u : 1u) << 9) |
+                   (1u << 9) |
                    ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
     if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
         cc != XHCI_CC_SUCCESS) {
-        WARN("xhci: ADDRESS_DEVICE(BSR=%u) cc=%u",
-             use_bsr0 ? 0u : 1u, cc);
+        WARN("xhci: ADDRESS_DEVICE(BSR=1) cc=%u", cc);
         goto err_slot;
     }
-    INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=%u)",
-         slot, (unsigned)dev->speed, d->root_port, use_bsr0 ? 0u : 1u);
-    if (inherited_addr != 0 && !use_bsr0)
+    INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=1)",
+         slot, (unsigned)dev->speed, d->root_port);
+    if (inherited_addr != 0)
         xhci_patch_inherited_address(d, inherited_addr);
-    if (!use_bsr0 &&
-        xhci_probe_fullspeed_eval_addr3 &&
-        dev->route_string == 0 &&
-        dev->speed == USB_SPEED_FULL &&
-        d->root_port == 7) {
-        xhci_probe_fullspeed_eval_addr3 = false;
-        xhci_probe_eval_slot_address(d, 3);
-    }
-    if (!use_bsr0 &&
-        xhci_probe_highspeed_eval_addr1 &&
+    if (xhci_probe_highspeed_eval_addr1 &&
         dev->route_string == 0 &&
         dev->speed == USB_SPEED_HIGH &&
         d->root_port == 6) {
@@ -2173,13 +2039,6 @@ int xhci_hcd_device_open(struct usb_device *dev)
         INFO("xhci: probing retained high-speed address 1 on root_port=%u",
              (unsigned)d->root_port);
         xhci_probe_eval_slot_address(d, 1);
-    }
-    if (xhci_probe_freshslot_configure_ep0 &&
-        dev->route_string == 0 &&
-        dev->speed == USB_SPEED_FULL &&
-        d->root_port == 7) {
-        xhci_probe_freshslot_configure_ep0 = false;
-        xhci_probe_configure_ep0_freshslot(d, dev, ep0->phys);
     }
     xhci_log_devctx_snapshot(d, "post-address");
 
@@ -2419,16 +2278,6 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
     *in_add = XHCI_INPUT_ADD_SLOT;
     for (unsigned i = 0; i < cfg_count; i++)
         *in_add |= XHCI_INPUT_ADD_EP(cfg_dcis[i]);
-    bool refresh_ep0 = false;
-    if (d->adopted_inherited &&
-        xhci_probe_refresh_ep0_on_adopted_configure &&
-        d->ep_rings[XHCI_DCI_EP0] != NULL) {
-        *in_add |= XHCI_INPUT_ADD_EP(XHCI_DCI_EP0);
-        refresh_ep0 = true;
-        xhci_probe_refresh_ep0_on_adopted_configure = false;
-        INFO("xhci: probing adopted slot %u CONFIGURE_ENDPOINT with EP0 refresh",
-             (unsigned)d->slot_id);
-    }
 
     /* Update Slot Context: start from the live slot image so retained
      * addr/state survive, then bump Context Entries to cover the new EP. */
@@ -2483,31 +2332,6 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
         }
     }
 
-    if (refresh_ep0) {
-        struct xhci_ring *ep0 = d->ep_rings[XHCI_DCI_EP0];
-        uint32_t *ep0_0 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 0, cz);
-        uint32_t *ep0_2 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 2, cz);
-        uint32_t *ep0_3 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 3, cz);
-        uint32_t *ep0_4 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 4, cz);
-        if (d->dev_ctx != NULL) {
-            for (unsigned i = 0; i < 5; i++)
-                *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, i, cz) =
-                    *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, i, cz);
-        }
-        *ep0_0 = (*ep0_0 & ~XHCI_EP_DW0_STATE_MASK) | 1U; /* running */
-        *ep0_2 = (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
-        *ep0_3 = (uint32_t)(ep0->phys >> 32);
-        *ep0_4 = 0;
-        if (d->dev_ctx != NULL) {
-            uint32_t *live_ep0_0 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
-            uint32_t *live_ep0_2 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
-            uint32_t *live_ep0_3 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
-            *live_ep0_0 = (*live_ep0_0 & ~XHCI_EP_DW0_STATE_MASK) | 1U;
-            *live_ep0_2 = *ep0_2;
-            *live_ep0_3 = *ep0_3;
-        }
-    }
-
     for (unsigned i = 0; i < cfg_count; i++) {
         const struct usb_endpoint *cfg_ep = cfg_eps[i];
         struct xhci_ring *cfg_ring = cfg_rings[i];
@@ -2540,17 +2364,6 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
              (unsigned)*e3, (unsigned)*e4);
     }
     dsb(sy);
-
-    if (d->adopted_inherited &&
-        xhci_probe_skip_configure_ep_on_adopted &&
-        ep->address == 0x81) {
-        xhci_probe_skip_configure_ep_on_adopted = false;
-        for (unsigned i = 0; i < cfg_count; i++)
-            d->ep_rings[cfg_dcis[i]] = cfg_rings[i];
-        INFO("xhci: probing adopted slot %u by skipping CONFIGURE_ENDPOINT for ep 0x%02x",
-             (unsigned)d->slot_id, ep->address);
-        return 0;
-    }
 
     /* CONFIGURE_ENDPOINT. */
     struct xhci_trb cmd = {0};
