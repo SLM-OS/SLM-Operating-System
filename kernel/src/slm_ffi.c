@@ -345,10 +345,12 @@ int slm_gpu_run_mnist(void *logits_bytes_out)
 }
 int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
 {
-    if (!bytes) return -1;
     /* Lazy-initialise the bringup state so callers can swap inputs
      * before the first run_mnist(). Mirrors slm_gpu_run_mnist's
-     * lazy-init logic. */
+     * lazy-init logic. NULL `bytes` falls through to the bringup
+     * helper, which returns -3 — keeps the error code mapping
+     * one-to-one with ga10b_bringup_set_input (-1 = no v6 handoff,
+     * -2 = cap too large, -3 = bad arg). */
     if (g_mnist_bringup.state != GA10B_BRINGUP_CHANNEL_OPEN &&
         g_mnist_bringup.state != GA10B_BRINGUP_METHOD_ACCEPTED) {
         int rc = ga10b_bringup_inherit(&g_mnist_bringup);

@@ -1555,6 +1555,137 @@ static void test_handoff_v6_input_buf_offsets(void)
                224u);
 }
 
+/* ======================================================================
+ * ga10b_bringup_set_input{,_fill} — exercises the runtime-input write
+ * path against a synthetic g_handoff. The harness exposes g_handoff
+ * non-static under SLM_HOST_HARNESS so the test can plumb a CPU-
+ * addressable buffer in without simulating the full Phase-6 inherit.
+ * ====================================================================== */
+
+extern struct ga10b_channel_handoff g_handoff;
+
+static void test_set_input_rejects_null_b(void)
+{
+    printf("== test_set_input_rejects_null_b ==\n");
+    char src[16] = {0};
+    REQUIRE_EQ(ga10b_bringup_set_input(NULL, src, sizeof(src)), -3);
+    REQUIRE_EQ(ga10b_bringup_set_input_fill(NULL, 0u, 0u), -3);
+}
+
+static void test_set_input_rejects_null_bytes(void)
+{
+    printf("== test_set_input_rejects_null_bytes ==\n");
+    struct ga10b_bringup b = (struct ga10b_bringup){0};
+    /* set_input only — set_input_fill has no `bytes` arg. */
+    REQUIRE_EQ(ga10b_bringup_set_input(&b, NULL, 16), -3);
+}
+
+static void test_set_input_rejects_no_handoff(void)
+{
+    printf("== test_set_input_rejects_no_handoff ==\n");
+    /* Phys = 0 in the handoff means "no v6 handoff loaded" — should
+     * return -1 regardless of what the caller passed. */
+    g_handoff.input_buf_phys = 0u;
+    g_handoff.input_buf_size = 0u;
+    struct ga10b_bringup b = (struct ga10b_bringup){0};
+    char src[16] = {0};
+    REQUIRE_EQ(ga10b_bringup_set_input(&b, src, sizeof(src)), -1);
+    REQUIRE_EQ(ga10b_bringup_set_input_fill(&b, 0x3F800000u, 4u), -1);
+}
+
+static void test_set_input_writes_bytes(void)
+{
+    printf("== test_set_input_writes_bytes ==\n");
+    /* Plumb a stack buffer in as the "GPU input" — host harness uses
+     * identity mapping (phys == VA) so this is sound. */
+    uint8_t backing[64];
+    memset(backing, 0xAB, sizeof(backing));
+    g_handoff.input_buf_phys = (uint64_t)(uintptr_t)backing;
+    g_handoff.input_buf_size = (uint32_t)sizeof(backing);
+
+    struct ga10b_bringup b = (struct ga10b_bringup){0};
+    static const uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    int rc = ga10b_bringup_set_input(&b, payload, sizeof(payload));
+    REQUIRE_EQ(rc, (int)sizeof(payload));
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        REQUIRE_EQ(backing[i], payload[i]);
+    }
+    /* Tail beyond `cap` must be untouched. */
+    for (size_t i = sizeof(payload); i < sizeof(backing); i++) {
+        REQUIRE_EQ(backing[i], 0xAB);
+    }
+
+    g_handoff.input_buf_phys = 0u;
+    g_handoff.input_buf_size = 0u;
+}
+
+static void test_set_input_rejects_oversize_cap(void)
+{
+    printf("== test_set_input_rejects_oversize_cap ==\n");
+    uint8_t backing[16] = {0};
+    g_handoff.input_buf_phys = (uint64_t)(uintptr_t)backing;
+    g_handoff.input_buf_size = (uint32_t)sizeof(backing);
+
+    struct ga10b_bringup b = (struct ga10b_bringup){0};
+    uint8_t payload[32] = {0};
+    /* cap > input_buf_size → -2 with no write. */
+    REQUIRE_EQ(ga10b_bringup_set_input(&b, payload, sizeof(payload)), -2);
+    for (size_t i = 0; i < sizeof(backing); i++) {
+        REQUIRE_EQ(backing[i], 0u);
+    }
+
+    g_handoff.input_buf_phys = 0u;
+    g_handoff.input_buf_size = 0u;
+}
+
+static void test_set_input_fill_writes_pattern(void)
+{
+    printf("== test_set_input_fill_writes_pattern ==\n");
+    uint32_t backing[8];
+    memset(backing, 0, sizeof(backing));
+    g_handoff.input_buf_phys = (uint64_t)(uintptr_t)backing;
+    g_handoff.input_buf_size = (uint32_t)sizeof(backing);
+
+    struct ga10b_bringup b = (struct ga10b_bringup){0};
+    /* Splat 4 copies of the +1.0f bit pattern. */
+    int rc = ga10b_bringup_set_input_fill(&b, 0x3F800000u, 4u);
+    REQUIRE_EQ(rc, 16);   /* 4 floats × 4 bytes */
+    for (uint32_t i = 0; i < 4u; i++) {
+        REQUIRE_EQ(backing[i], 0x3F800000u);
+    }
+    /* Tail beyond n_floats must be untouched. */
+    for (uint32_t i = 4u; i < 8u; i++) {
+        REQUIRE_EQ(backing[i], 0u);
+    }
+
+    g_handoff.input_buf_phys = 0u;
+    g_handoff.input_buf_size = 0u;
+}
+
+static void test_set_input_fill_rejects_oversize(void)
+{
+    printf("== test_set_input_fill_rejects_oversize ==\n");
+    uint32_t backing[4] = {0};
+    g_handoff.input_buf_phys = (uint64_t)(uintptr_t)backing;
+    g_handoff.input_buf_size = (uint32_t)sizeof(backing);
+
+    struct ga10b_bringup b = (struct ga10b_bringup){0};
+    /* 8 floats × 4 = 32 bytes > 16-byte buffer → -2 with no write. */
+    REQUIRE_EQ(ga10b_bringup_set_input_fill(&b, 0xDEADBEEFu, 8u), -2);
+    for (uint32_t i = 0; i < 4u; i++) {
+        REQUIRE_EQ(backing[i], 0u);
+    }
+    /* Boundary case: exactly capacity is allowed. */
+    int rc = ga10b_bringup_set_input_fill(&b, 0x12345678u, 4u);
+    REQUIRE_EQ(rc, 16);
+    for (uint32_t i = 0; i < 4u; i++) {
+        REQUIRE_EQ(backing[i], 0x12345678u);
+    }
+
+    g_handoff.input_buf_phys = 0u;
+    g_handoff.input_buf_size = 0u;
+}
+
 static void test_pipeline_op_layout(void)
 {
     printf("== test_pipeline_op_layout ==\n");
@@ -2120,6 +2251,13 @@ int main(void)
     test_handoff_v4_expected_payload_offset();
     test_handoff_v5_pipeline_offsets();
     test_handoff_v6_input_buf_offsets();
+    test_set_input_rejects_null_b();
+    test_set_input_rejects_null_bytes();
+    test_set_input_rejects_no_handoff();
+    test_set_input_writes_bytes();
+    test_set_input_rejects_oversize_cap();
+    test_set_input_fill_writes_pattern();
+    test_set_input_fill_rejects_oversize();
     test_pipeline_op_layout();
     test_pick_launch_payload_v3_uses_fallback();
     test_pick_launch_payload_v4_zero_uses_fallback();
