@@ -106,6 +106,13 @@ pub enum Backend {
 /// than batching the whole graph. The graph-level fast path
 /// (`run_mnist_gpu_fastpath`) takes precedence over per-op dispatch
 /// when the engine sees the MNIST signature.
+///
+/// Note: this threshold is currently inert in production. Per-op
+/// `gpu_execute_matmul` is still a stub returning `Err(NotReady)`,
+/// so for non-MNIST workloads the engine always falls through to
+/// the CPU path regardless of what `select_backend` returns. The
+/// threshold becomes load-bearing only when a per-op GPU dispatch
+/// path lands; it should be re-tuned on real hardware then.
 pub fn select_backend(
     op: OpType,
     input_elements: usize,

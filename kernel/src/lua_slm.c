@@ -491,8 +491,12 @@ static int l_model_infer(lua_State *L) {
  * the MNIST graph short-circuits through the GPU fastpath.
  *
  * Returns two values on success: a string of fp32 logits bytes (size
- * = output_count × 4) and the argmax index. On failure returns nil
- * and a negative error code.
+ * = output_count × 4) and the argmax index. On failure returns nil +
+ * a negative error code:
+ *   -1 = bytes empty or length not a multiple of 4
+ *   -2 = bytes longer than 32 KB
+ *   -3 = page allocation failed
+ *   <0 from rust_infer = inference engine error
  */
 static int l_model_infer_bytes(lua_State *L) {
     if (!L) return 0;
@@ -505,6 +509,30 @@ static int l_model_infer_bytes(lua_State *L) {
         lua_pushinteger(L, -1);
         return 2;
     }
+    /* Same 32 KB cap as model_infer_file. PMM allocation tops out at
+     * 8 pages with this cap; keeps the call from accidentally pinning
+     * megabytes if the caller passes a huge string. */
+    if (blen > 32u * 1024u) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -2);
+        return 2;
+    }
+
+    /* Lua strings have no alignment guarantee beyond `char`. The CPU
+     * fallback inside engine::run_inference dereferences the input
+     * as fp32 via NEON loads — under SCTLR.A=1 an unaligned f32 load
+     * would fault. Copy into a page-aligned PMM buffer so rust_infer
+     * (and the engine's downstream ops) sees a 4-byte-aligned input.
+     * pmm_alloc_pages returns 4096-byte-aligned memory, which trivially
+     * satisfies fp32 alignment. */
+    size_t pages = (blen + 4095u) / 4096u;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+    if (!buf) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -3);
+        return 2;
+    }
+    __builtin_memcpy(buf, bytes, blen);
 
     /* Stack-allocated 64-fp32 output buffer. Matches CLASSIFY_OUTPUT
      * in rust_infer_classify; 256 bytes is well under any reasonable
@@ -513,10 +541,12 @@ static int l_model_infer_bytes(lua_State *L) {
     __builtin_memset(output, 0, sizeof(output));
 
     int n = rust_infer((uint32_t)idx,
-                       (const float *)bytes,
+                       (const float *)buf,
                        blen / 4u,
                        (float *)output,
                        64u);
+    pmm_free_pages(buf, pages);
+
     if (n < 0) {
         lua_pushnil(L);
         lua_pushinteger(L, n);

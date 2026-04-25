@@ -43,10 +43,22 @@ struct digit_blob {
     const unsigned char  *end;
 };
 
+/* Each MNIST test digit is 1×1×28×28 fp32 = 3,136 bytes by the
+ * extraction script's contract. Pin it here so a build glitch (e.g.
+ * a renamed fixture file producing an empty .incbin range) fails
+ * loudly at boot rather than corrupting LittleFS. */
+#define MNIST_DIGIT_FIXTURE_BYTES  3136u
+
 static int write_blob(struct lfs_mount *mnt, const struct digit_blob *b)
 {
+    /* Pointer ordering check first — a linker-layout regression that
+     * inverted _start/_end would make the cast-to-size_t below wrap
+     * to a huge length, and littlefs_file_write would happily try to
+     * read gigabytes of arbitrary memory. Belt-and-suspenders. */
+    if (b->end <= b->start) return -1;
+
     size_t len = (size_t)(b->end - b->start);
-    if (len == 0) return -1;
+    if (len != MNIST_DIGIT_FIXTURE_BYTES) return -1;
 
     int f = littlefs_file_open(mnt, b->path,
                                LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
@@ -71,44 +83,34 @@ int mnist_digit_init(void)
      * idempotent for already-existing directories on this build. */
     (void)littlefs_mkdir(mnt, "/digits");
 
+    /* Extern array names are address constants — well-defined as
+     * static-storage-duration initializers in C99+. The .incbin'd
+     * symbols resolve at link time. */
     static const struct digit_blob blobs[] = {
-        {"/digits/digit_0.bin", NULL, NULL},
-        {"/digits/digit_1.bin", NULL, NULL},
-        {"/digits/digit_2.bin", NULL, NULL},
-        {"/digits/digit_3.bin", NULL, NULL},
-        {"/digits/digit_4.bin", NULL, NULL},
-        {"/digits/digit_5.bin", NULL, NULL},
-        {"/digits/digit_6.bin", NULL, NULL},
-        {"/digits/digit_7.bin", NULL, NULL},
-        {"/digits/digit_8.bin", NULL, NULL},
-        {"/digits/digit_9.bin", NULL, NULL},
+        {"/digits/digit_0.bin", mnist_digit_0_start, mnist_digit_0_end},
+        {"/digits/digit_1.bin", mnist_digit_1_start, mnist_digit_1_end},
+        {"/digits/digit_2.bin", mnist_digit_2_start, mnist_digit_2_end},
+        {"/digits/digit_3.bin", mnist_digit_3_start, mnist_digit_3_end},
+        {"/digits/digit_4.bin", mnist_digit_4_start, mnist_digit_4_end},
+        {"/digits/digit_5.bin", mnist_digit_5_start, mnist_digit_5_end},
+        {"/digits/digit_6.bin", mnist_digit_6_start, mnist_digit_6_end},
+        {"/digits/digit_7.bin", mnist_digit_7_start, mnist_digit_7_end},
+        {"/digits/digit_8.bin", mnist_digit_8_start, mnist_digit_8_end},
+        {"/digits/digit_9.bin", mnist_digit_9_start, mnist_digit_9_end},
     };
 
-    /* Patch the start/end pointers — extern arrays can't be used
-     * as compile-time initializers for a static struct table. */
-    struct digit_blob runtime_blobs[10];
-    runtime_blobs[0] = (struct digit_blob){blobs[0].path, mnist_digit_0_start, mnist_digit_0_end};
-    runtime_blobs[1] = (struct digit_blob){blobs[1].path, mnist_digit_1_start, mnist_digit_1_end};
-    runtime_blobs[2] = (struct digit_blob){blobs[2].path, mnist_digit_2_start, mnist_digit_2_end};
-    runtime_blobs[3] = (struct digit_blob){blobs[3].path, mnist_digit_3_start, mnist_digit_3_end};
-    runtime_blobs[4] = (struct digit_blob){blobs[4].path, mnist_digit_4_start, mnist_digit_4_end};
-    runtime_blobs[5] = (struct digit_blob){blobs[5].path, mnist_digit_5_start, mnist_digit_5_end};
-    runtime_blobs[6] = (struct digit_blob){blobs[6].path, mnist_digit_6_start, mnist_digit_6_end};
-    runtime_blobs[7] = (struct digit_blob){blobs[7].path, mnist_digit_7_start, mnist_digit_7_end};
-    runtime_blobs[8] = (struct digit_blob){blobs[8].path, mnist_digit_8_start, mnist_digit_8_end};
-    runtime_blobs[9] = (struct digit_blob){blobs[9].path, mnist_digit_9_start, mnist_digit_9_end};
-
     int written = 0;
-    for (int i = 0; i < 10; i++) {
-        if (write_blob(mnt, &runtime_blobs[i]) == 0) written++;
+    for (size_t i = 0; i < sizeof(blobs) / sizeof(blobs[0]); i++) {
+        if (write_blob(mnt, &blobs[i]) == 0) written++;
     }
 
-    if (written == 10) {
+    const int expected = (int)(sizeof(blobs) / sizeof(blobs[0]));
+    if (written == expected) {
         uart_puts("[INFO] mnist_digit_init: wrote 10 digits to /mnt/files/digits/\r\n");
     } else {
         uart_puts("[WARN] mnist_digit_init: partial write to /mnt/files/digits/\r\n");
     }
-    return written == 10 ? 0 : -1;
+    return written == expected ? 0 : -1;
 }
 
 #else /* !ENABLE_MNIST_DIGITS_EMBED */

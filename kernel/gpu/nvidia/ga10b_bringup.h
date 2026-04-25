@@ -268,14 +268,40 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
  *
  * The semaphore release on AMPERE_COMPUTE_B with default flags waits
  * for prior compute to drain and flushes L2 → DRAM before the release
- * write becomes visible. Using this instead of a value-sentinel poll
- * on the kernel's output buffer guarantees:
+ * write becomes visible. Reference: NVK's
+ * `nvk_cmd_dispatch.c::nvk_dispatch_signal_semaphore` on Volta+
+ * uses the same NVC7C0_REPORT_SEMAPHORE_EXECUTE encoding for kernel
+ * completion (mesa-nvk_cmd_dispatch.c around the `OPERATION_RELEASE`
+ * branch); the `STRUCTURE_SIZE_ONE_WORD` + default `FLUSH_DISABLE=0`
+ * combination is what triggers the L2 flush.
+ *
+ * Using this instead of a value-sentinel poll on the kernel's output
+ * buffer guarantees:
  *   - completion signal is independent of the kernel's output values
  *     (fixes the polling-zero deadlock for inputs whose sentinel cell
  *      computes to 0.0f, GH #372);
  *   - the full output reaches DRAM, not just the cells that happen
  *     to be in L2's writeback queue (fixes the 4 KB truncation, #390). */
 #define GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS 23u
+
+/* Byte offset within the channel-semaphore page used for per-op
+ * completion releases. The launcher's gpu_write_handoff_v6 sets
+ * `semaphore_phys = output_phys` (op 7's final-logits buffer); the
+ * channel sema and op 7's logits therefore live in the same 4 KB
+ * page. Op 7's logits are 10 fp32 = 40 bytes at offset 0; we put
+ * the per-op completion sema at offset 0x800 (2 KB in) so:
+ *   - op 7's logits write doesn't clobber the sema release;
+ *   - the sema release write doesn't fall outside the launcher's
+ *     allocated buffer (4 KB allocation, 2 KB + 4 bytes ≪ 4 KB).
+ * If a future launcher allocates the channel-semaphore page smaller
+ * than 4 KB, this offset must shrink to match. */
+#define GA10B_SEMA_PAGE_OFFSET             0x800u
+
+/* Magic payload value the per-op SEMAPHORE_RELEASE writes on
+ * completion. Polled by ga10b_submit_and_poll for an exact match.
+ * Pre-cleared to zero each iteration, so any reasonable non-zero
+ * sentinel works — picked something distinctive for trace clarity. */
+#define GA10B_SEMA_RELEASE_PAYLOAD         0xCAFEDEADu
 
 /* Builder for the launch-kernel-with-semaphore pushbuffer. Same QMD
  * dispatch as ga10b_build_launch_kernel_pushbuffer, with a trailing
