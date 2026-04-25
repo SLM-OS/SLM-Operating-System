@@ -23,15 +23,17 @@
  * with -lcrypto. HailoRT's fw_control requires MD5 of the request
  * buffer in the `expected_md5` field; fw validates it before parsing
  * the payload. SLM-OS does the same via its vendored md5.c.
+ *
+ * EVP_Q_digest is the OpenSSL 3.0 one-shot helper; the legacy
+ * MD5_Init/Update/Final API is deprecated since OpenSSL 3.0 and
+ * emits warnings on Pi OS bookworm.
  */
-#include <openssl/md5.h>
+#include <openssl/evp.h>
 
 static void md5_compute(const void *data, size_t len, uint8_t out[16])
 {
-    MD5_CTX ctx;
-    MD5_Init(&ctx);
-    MD5_Update(&ctx, data, len);
-    MD5_Final(out, &ctx);
+    size_t outlen = 16;
+    EVP_Q_digest(NULL, "MD5", NULL, data, len, out, &outlen);
 }
 
 /*
