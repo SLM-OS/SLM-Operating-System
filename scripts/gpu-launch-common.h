@@ -283,6 +283,22 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx);
  * ga10b_build_launch_kernel_pushbuffer(). */
 size_t gpu_build_launch_pushbuffer(uint32_t *pb, uint64_t qmd_gpu_va);
 
+/* Populate CUDA's built-in-variable region of cbuf[0] (offsets
+ * 0x00..0x14) with the dispatch's blockDim and gridDim. Without
+ * this, kernels that read `blockDim.x` etc. via the SASS sequence
+ *   IMAD R0, R0 (CTAID.X), c[0x0][0x0] (blockDim.x), R5 (TID.X)
+ * compute their global thread index as if blockDim were 0, so
+ * every CTA's threads collapse onto the same range and only
+ * CTA(0,0) appears to have run.
+ *
+ * Hardcoded-constant kernels (matmul4x4, matmul8x8_grid) don't need
+ * this because their CTA dims are folded into the SASS as literals;
+ * any kernel parameterized over blockDim/gridDim must call this
+ * after writing its own kernel args at cbuf[0][0x160+]. */
+void gpu_write_builtin_dims(struct gpu_launch_ctx *ctx,
+                             uint32_t block_x, uint32_t block_y, uint32_t block_z,
+                             uint32_t grid_x,  uint32_t grid_y,  uint32_t grid_z);
+
 /* Copy the built pushbuffer into ctx->pb_va, post a GPFIFO entry,
  * advance GP_PUT, ring the doorbell, and poll `*poll_va` for exact
  * equality with `expected_payload`. Returns 1 on match, 0 on timeout

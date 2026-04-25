@@ -215,7 +215,12 @@ void gpu_launch_setup(struct gpu_launch_ctx *ctx,
 
     /* Common per-kernel buffers. */
     ctx->pb_dmabuf     = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 65536, 4096);
-    ctx->shader_dmabuf = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
+    /* 64 KB shader buffer accommodates the larger kernels in the
+     * MNIST plan (MaxPool2D unrolls to ~17 KB SASS, Conv2D direct
+     * is ~6 KB). The shader_size field in the handoff still tells
+     * SLM-OS the actual code length; the unused tail is just
+     * zero-padded. */
+    ctx->shader_dmabuf = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 65536, 4096);
     ctx->cbuf_dmabuf   = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
     ctx->qmd_dmabuf    = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
 
@@ -266,7 +271,7 @@ void gpu_launch_setup(struct gpu_launch_ctx *ctx,
                           ctx->gpfifo_dmabuf, 0);
     ctx->pb_va     = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_SHARED,
                           ctx->pb_dmabuf, 0);
-    ctx->shader_va = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+    ctx->shader_va = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_SHARED,
                           ctx->shader_dmabuf, 0);
     ctx->cbuf_va   = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
                           ctx->cbuf_dmabuf, 0);
@@ -279,10 +284,17 @@ void gpu_launch_setup(struct gpu_launch_ctx *ctx,
         exit(1);
     }
 
-    /* Upload the shader. */
-    memset(ctx->shader_va, 0, 4096);
+    /* Upload the shader. Buffer is 64 KB; the actual shader size
+     * goes into the handoff so the GPU knows where the code ends. */
+    if (shader_size > 65536) {
+        fprintf(stderr,
+                "shader too large: %zu bytes (max 65536)\n",
+                shader_size);
+        exit(1);
+    }
+    memset(ctx->shader_va, 0, 65536);
     memcpy(ctx->shader_va, shader_bytes, shader_size);
-    msync(ctx->shader_va, 4096, MS_SYNC);
+    msync(ctx->shader_va, 65536, MS_SYNC);
     free(shader_bytes);
 
     /* Doorbell mmap: the USERMODE doorbell is at offset 0x90 within
@@ -448,6 +460,23 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
  * Pushbuffer builder + submit/poll
  * ============================================================ */
 
+void gpu_write_builtin_dims(struct gpu_launch_ctx *ctx,
+                             uint32_t block_x, uint32_t block_y, uint32_t block_z,
+                             uint32_t grid_x,  uint32_t grid_y,  uint32_t grid_z)
+{
+    /* CUDA reserves cbuf[0][0x00..0x14] for built-in dim variables.
+     * SASS reads of blockDim.x come from c[0x0][0x0]; blockDim.y
+     * from c[0x0][0x4]; etc. */
+    uint32_t *p = (uint32_t *)ctx->cbuf_va;
+    p[0] = block_x;   /* 0x00 blockDim.x */
+    p[1] = block_y;   /* 0x04 blockDim.y */
+    p[2] = block_z;   /* 0x08 blockDim.z */
+    p[3] = grid_x;    /* 0x0C gridDim.x  */
+    p[4] = grid_y;    /* 0x10 gridDim.y  */
+    p[5] = grid_z;    /* 0x14 gridDim.z  */
+    msync(ctx->cbuf_va, 4096, MS_SYNC);
+}
+
 size_t gpu_build_launch_pushbuffer(uint32_t *pb, uint64_t qmd_gpu_va)
 {
     uint32_t *p = pb;
@@ -538,7 +567,28 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
         msync((void *)poll_va, 4, MS_INVALIDATE | MS_SYNC);
         __asm__ volatile("dsb sy" ::: "memory");
         val = *poll_va;
-        if (val == expected_payload) return 1;
+        if (val == expected_payload) {
+            /* Multi-CTA dispatch hazard: a single-cell sentinel poll
+             * proves at least the polled cell was written, not that
+             * all CTAs finished. With imbalanced CTAs (e.g. tile-
+             * misaligned shapes where some CTAs have many fewer
+             * active threads than others), a fast CTA can write the
+             * sentinel before lagging CTAs finish their writes,
+             * leaving spurious zeros in those cells.
+             *
+             * The proper fix is a SEMAPHORE_RELEASE method appended
+             * to the dispatch pushbuffer — that semaphore writes
+             * only after all prior compute completes. Tracked for
+             * M6 (multi-op pipeline) in docs/jetson-gpu-mnist-plan.md.
+             *
+             * Until then, a 500 ms grace period after sentinel match
+             * covers any reasonable kernel running on these tiny
+             * MNIST-shape workloads. */
+            usleep(500000);
+            msync((void *)poll_va, 4, MS_INVALIDATE | MS_SYNC);
+            __asm__ volatile("dsb sy" ::: "memory");
+            return 1;
+        }
         usleep(10000);
     }
     return 0;
