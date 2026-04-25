@@ -257,6 +257,14 @@ struct hailo_platform_ops {
      * a negative error. May be NULL on platforms where only probe
      * and boot matter (no runtime inference). */
     int (*register_irq)(void (*handler)(void *ctx), void *ctx);
+
+    /* Bounce the PCIe device's power state. `state` matches the PCI
+     * D-state encoding: 0 = D0 (active), 3 = D3hot (deep idle but
+     * still on the bus). Linux's hailo_pcie does D0→D3hot at end of
+     * boot, then D3hot→D0 on user open; this op exposes the same
+     * capability so platform-independent code can replicate the
+     * round-trip. May be NULL on platforms without PCI PM cap. */
+    int (*set_power_state)(uint8_t state);
 };
 
 /* Installed by the platform before hailo_init(). */

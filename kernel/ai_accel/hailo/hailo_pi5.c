@@ -491,6 +491,62 @@ static int pi5_register_irq(void (*handler)(void *), void *ctx)
 }
 
 /* -------------------------------------------------------------------------- */
+/* PCI Power Management transitions                                            */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * #253 (2026-04-25): replicate Linux hailo_pcie's post-boot D3hot/D0
+ * round-trip. After fw boot, hailo_pcie:949 calls
+ * `pci_set_power_state(pDev, PCI_D3hot)`; on user open the kernel
+ * later transitions back to D0. The transitions touch the device's
+ * power-domain reset state — possibly initialising peripheral memory
+ * (including the SAGE1_ISP region that throws the bit-12 CPU_ECC) in
+ * a way SLM-OS skips.
+ *
+ * Implementation: use the standard PCI PM Capability (cap_id 0x01).
+ * PMCSR (PM Control/Status Register) is at PM_CAP_BASE + 0x04;
+ * bits[1:0] are the power state. PCI spec mandates a 10 ms wait
+ * after D3hot→D0 before the device is fully accessible.
+ */
+static int pi5_set_power_state(uint8_t state)
+{
+    if (!hailo_pcidev) return HAILO_ERR_NODEV;
+    if (state != 0 && state != 3) return HAILO_ERR_INVAL;
+
+    uint8_t pm_cap = pcie_find_capability(hailo_pcidev, 0x01);
+    if (pm_cap == 0) {
+        WARN("hailo: PCI PM cap not found — cannot set power state");
+        return HAILO_ERR_NODEV;
+    }
+
+    uint16_t pmcsr = pcie_config_read16(hailo_pcidev,
+                                        (uint16_t)(pm_cap + 0x04));
+    uint8_t cur = (uint8_t)(pmcsr & 0x3u);
+    if (cur == state) {
+        INFO("hailo: PMCSR already in D%u (PMCSR=0x%04x)", state, pmcsr);
+        return HAILO_OK;
+    }
+
+    uint16_t new_pmcsr = (uint16_t)((pmcsr & ~0x3u) | (state & 0x3u));
+    pcie_config_write16(hailo_pcidev, (uint16_t)(pm_cap + 0x04), new_pmcsr);
+
+    /* PCI spec §5.4.1: D-state transitions are not instant. D0→D3hot
+     * has no guaranteed delay, but D3hot→D0 needs at least 10 ms
+     * before the device responds to config-space accesses. Use 10 ms
+     * for both directions defensively (the device cycles between
+     * states only at boot — latency doesn't matter). */
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(10000u);
+    }
+
+    uint16_t verify = pcie_config_read16(hailo_pcidev,
+                                         (uint16_t)(pm_cap + 0x04));
+    INFO("hailo: PMCSR D%u→D%u (PMCSR=0x%04x→0x%04x)",
+         cur, state, pmcsr, verify);
+    return HAILO_OK;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Vtable + registration                                                       */
 /* -------------------------------------------------------------------------- */
 
@@ -510,6 +566,7 @@ static const struct hailo_platform_ops pi5_ops = {
     .mb               = pi5_mb,
     .udelay           = pi5_udelay,
     .register_irq     = pi5_register_irq,
+    .set_power_state  = pi5_set_power_state,
 };
 
 /*

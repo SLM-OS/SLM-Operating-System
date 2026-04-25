@@ -732,6 +732,37 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
      * decimals. */
     INFO("hailo: firmware %u.%u rev=0x%08x booted",
          hdr.firmware_major, hdr.firmware_minor, hdr.firmware_revision);
+
+#ifdef HAILO_D3HOT_AT_BOOT
+    /* Phase 8 #253 (2026-04-25): replicate Linux hailo_pcie's post-boot
+     * D0→D3hot→D0 round-trip. Linux puts the device into deep idle right
+     * after fw load, then the user-space open() bumps it back to D0
+     * before any traffic. Empirically (#253 testing) this shifts the
+     * bit-12 CPU_ECC trigger out of the load and pre-submit drain paths
+     * — fw stays in a cleaner state until the boundary submit attempt
+     * itself. Boundary submit still hangs (#253 has another root cause),
+     * but the cleaner state matches Linux's expected init flow.
+     *
+     * Gated behind HAILO_D3HOT_AT_BOOT (default ON) so we can A/B test
+     * vs. the no-cycle path. Turn OFF for direct comparison or if the
+     * PCI PM cap is unreliable on a future platform. Optional: only
+     * fires when the platform exposes set_power_state. Failure is
+     * logged but non-fatal — fw is already booted successfully. */
+    if (hailo_platform->set_power_state) {
+        int pm_rc = hailo_platform->set_power_state(3); /* D3hot */
+        if (pm_rc != HAILO_OK) {
+            WARN("hailo: post-boot D3hot transition failed (rc=%d) — "
+                 "skipping cycle", pm_rc);
+        } else {
+            pm_rc = hailo_platform->set_power_state(0); /* D0 */
+            if (pm_rc != HAILO_OK) {
+                WARN("hailo: D3hot→D0 restore failed (rc=%d) — device "
+                     "may be unresponsive", pm_rc);
+            }
+        }
+    }
+#endif /* HAILO_D3HOT_AT_BOOT */
+
     return HAILO_OK;
 
 fail:

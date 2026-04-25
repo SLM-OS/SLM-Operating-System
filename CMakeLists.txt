@@ -118,6 +118,21 @@ if(HAILO_WIRE_DEBUG)
     add_compile_definitions(HAILO_WIRE_DEBUG=1)
 endif()
 
+# Replicate Linux hailo_pcie's post-boot D0->D3hot->D0 power-state
+# round-trip. Linux does this between firmware load and user open;
+# SLM-OS's tests (2026-04-25) show it shifts the bit-12 CPU_ECC
+# trigger out of the load + pre-submit paths (cleaner state) but
+# does not by itself unblock the boundary submit. Default ON because
+# it brings SLM-OS closer to Linux's expected init flow at trivial
+# cost; turn OFF for A/B comparison or on platforms where the PCI
+# PM cap is unreliable. See kernel/ai_accel/hailo/hailo_core.c at
+# the post-boot site for the call-out, hailo_pi5.c:pi5_set_power_state
+# for the actual transition.
+option(HAILO_D3HOT_AT_BOOT "Replicate Linux's D0->D3hot->D0 cycle after fw boot" ON)
+if(HAILO_D3HOT_AT_BOOT)
+    add_compile_definitions(HAILO_D3HOT_AT_BOOT=1)
+endif()
+
 # Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1). Adds EL2 register
 # snapshot in boot.S, per-CPU per-vector exception counters in vectors.S,
 # a real el1_fiq handler that captures the FIQ source, and the `diag`
