@@ -229,8 +229,11 @@ static int cmd_cs_change_status(int fd, uint8_t state, uint8_t app_index,
     EMIT_BE32(2);  EMIT_LE16(batch_size);
     EMIT_BE32(2);  EMIT_LE16(batch_count);
 
-    /* Sanity check: any future edit to the EMIT macros above could
-     * silently overflow `body[22]`. Catch it loudly instead. */
+    /* Tripwire only — fires AFTER an EMIT-macro overflow has already
+     * corrupted the stack at `body[22]`. Real overflow protection
+     * comes from gcc's -fstack-protector (Linux default), which
+     * panics on the corrupted canary at function exit. This check
+     * gives a clean error code on first re-run after a regression. */
     if (off != sizeof(body)) {
         fprintf(stderr, "cmd_cs_change_status: body off=%zu != %zu\n",
                 off, sizeof(body));
@@ -425,14 +428,19 @@ enum {
     CONTEXT_TYPE_ACTIVATION      = 3,
 };
 
+/* Maximum req_body bytes any RPC may pass to send_fw_control:
+ * the wire ceiling in `struct hailo_fw_control.buffer`
+ * (MAX_CONTROL_LENGTH = 1500) minus the 16-byte common_hdr +
+ * 4-byte parameter_count that send_fw_control prepends. */
+#define MAX_FW_CONTROL_BODY  (MAX_CONTROL_LENGTH - 16 - 4)
+
 static int cmd_set_context_info(int fd, uint8_t context_type,
                                 const uint8_t *body, uint32_t body_len,
                                 const char *label)
 {
-    /* Cap matches the wire ceiling in `struct hailo_fw_control.buffer`
-     * (MAX_CONTROL_LENGTH = 1500) so over-sized requests fail at this
-     * call site rather than slipping through to send_fw_control. */
-    uint8_t buf[MAX_CONTROL_LENGTH];
+    /* Sized so over-sized requests fail at this call site rather than
+     * slipping through to send_fw_control's identical bounds check. */
+    uint8_t buf[MAX_FW_CONTROL_BODY];
     size_t  off = 0;
     #define EMIT_BE32(v)  do { uint32_t be = htobe32((v)); \
         memcpy(buf + off, &be, 4); off += 4; } while (0)
