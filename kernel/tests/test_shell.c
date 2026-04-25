@@ -75,6 +75,64 @@ static uint32_t test_fnv1a32(const uint8_t *data, size_t len)
     return hash;
 }
 
+static void write_u16_le(uint8_t *out, uint16_t value)
+{
+    out[0] = (uint8_t)(value & 0xFFu);
+    out[1] = (uint8_t)((value >> 8) & 0xFFu);
+}
+
+static void write_u32_le(uint8_t *out, uint32_t value)
+{
+    out[0] = (uint8_t)(value & 0xFFu);
+    out[1] = (uint8_t)((value >> 8) & 0xFFu);
+    out[2] = (uint8_t)((value >> 16) & 0xFFu);
+    out[3] = (uint8_t)((value >> 24) & 0xFFu);
+}
+
+static size_t build_valid_mlp_payload(uint32_t out_weight_bits, uint8_t *out, size_t out_cap)
+{
+    enum {
+        PAYLOAD_HEADER_LEN = 8,
+        L1_IN = 27,
+        L1_OUT = 64,
+        L2_OUT = 32,
+        L3_OUT = 16,
+        OUT = 1,
+        W_L1_LEN = L1_OUT * L1_IN,
+        B_L1_LEN = L1_OUT,
+        W_L2_LEN = L2_OUT * L1_OUT,
+        B_L2_LEN = L2_OUT,
+        W_L3_LEN = L3_OUT * L2_OUT,
+        B_L3_LEN = L3_OUT,
+        W_OUT_LEN = OUT * L3_OUT,
+        B_OUT_LEN = OUT,
+        FLOAT_COUNT = W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN +
+                      W_L3_LEN + B_L3_LEN + W_OUT_LEN + B_OUT_LEN,
+        PAYLOAD_LEN = PAYLOAD_HEADER_LEN + FLOAT_COUNT * 4
+    };
+    size_t cursor = PAYLOAD_HEADER_LEN;
+
+    if (out_cap < PAYLOAD_LEN) return 0;
+    memset(out, 0, PAYLOAD_LEN);
+
+    out[0] = 'M'; out[1] = 'L'; out[2] = 'P'; out[3] = '1';
+    write_u16_le(out + 4, 1);
+    write_u16_le(out + 6, 0);
+
+    write_u32_le(out + cursor, 0x3F800000u);
+    cursor += W_L1_LEN * 4;
+    cursor += B_L1_LEN * 4;
+    write_u32_le(out + cursor, 0x3F800000u);
+    cursor += W_L2_LEN * 4;
+    cursor += B_L2_LEN * 4;
+    write_u32_le(out + cursor, 0x3F800000u);
+    cursor += W_L3_LEN * 4;
+    cursor += B_L3_LEN * 4;
+    write_u32_le(out + cursor, out_weight_bits);
+
+    return PAYLOAD_LEN;
+}
+
 static int write_binary_file(const char *path, const uint8_t *data, size_t len)
 {
     const char *subpath = NULL;
@@ -513,8 +571,8 @@ static void test_shell_cmd_eviction_model_lifecycle(void)
 {
     static const char *path = "/mnt/files/test-eviction-mlp.blob";
     static uint8_t payload[18000];
-    static uint8_t blob[18064];
-    size_t payload_len = build_eviction_mlp_payload(0x3F800000u, payload, sizeof(payload));
+    static uint8_t blob[18100];
+    size_t payload_len = build_valid_mlp_payload(0x41200000u, payload, sizeof(payload));
     size_t blob_len = build_shell_test_blob(2, payload, payload_len, blob, sizeof(blob));
 
     TEST_ASSERT_TRUE(payload_len > 0);
