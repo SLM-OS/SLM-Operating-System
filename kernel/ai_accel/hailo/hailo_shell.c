@@ -1358,6 +1358,51 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    /* Phase 8 #253 CPU_ECC investigation (2026-04-25). Run RUN_BIST_TEST
+     * (opcode 0x3C) and dump the response payload. Usage:
+     *   hailo bist            — top test, no bypass (test all whitelist
+     *                            blocks: bits 2..5 = L4 banks)
+     *   hailo bist <bypass>   — top test, hex bypass mask
+     *
+     * BIST is destructive — fw scribbles patterns into memory then
+     * reads them back. Always reboot the chip after running BIST
+     * before doing anything else. */
+    if (argc >= 2 && strcmp(argv[1], "bist") == 0) {
+        uint32_t top_bypass = 0;
+        if (argc >= 3) {
+            if (parse_hex_u32(argv[2], &top_bypass) != 0) {
+                shell_printf("hailo: bist: bad hex bypass '%s'\n", argv[2]);
+                return 0;
+            }
+        }
+        uint8_t  body[256];
+        uint32_t body_len = 0;
+        shell_printf("hailo: bist top=true bypass=0x%08x cluster=0 "
+                     "cluster_bypass=(0,0)\n", top_bypass);
+        int rc = hailo_control_run_bist_test(/*is_top_test=*/true,
+                                             top_bypass,
+                                             /*cluster_index=*/0,
+                                             /*cluster_bypass_0=*/0,
+                                             /*cluster_bypass_1=*/0,
+                                             body, sizeof(body),
+                                             &body_len);
+        shell_printf("hailo: bist rc=%d body_len=%u\n", rc, body_len);
+        if (rc == HAILO_OK && body_len > 0) {
+            uint32_t cap = body_len > 64u ? 64u : body_len;
+            shell_printf("[bist] body[0..%u]:", cap);
+            for (uint32_t i = 0; i < cap; i++) {
+                if ((i & 0xf) == 0) shell_printf("\n  [%02x]", i);
+                shell_printf(" %02x", body[i]);
+            }
+            shell_puts("\n");
+        }
+#ifdef HAILO_WIRE_DEBUG
+        shell_puts("[bisect] post BIST:\n");
+        hailo_fw_drain_d2h_notifications(4);
+#endif
+        return 0;
+    }
+
     /* Phase 8: dump last firmware-reject reason. Populated by
      * control_check_response_header whenever a SET_CONTEXT_INFO /
      * CHANGE_STATUS / similar RPC returns a non-zero major_status.
