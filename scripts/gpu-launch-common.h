@@ -261,6 +261,18 @@ struct gpu_buffer gpu_alloc_buffer(struct gpu_launch_ctx *ctx,
                                     uint32_t size,
                                     uint32_t align);
 
+/* Load an additional shader (beyond the one gpu_launch_setup uploaded)
+ * into a fresh GPU buffer. Used by multi-shader pipelines (MNIST has
+ * 4 unique shaders chained together). Reads `shader_path`, allocates
+ * a 64 KB buffer, memcpys the file in, msyncs. Returns the buffer
+ * (gpu_va is the QMD's PROGRAM_ADDRESS for any QMD using this
+ * shader); the buffer's `size_bytes` field reflects the rounded
+ * allocation, but the actual shader length is set in
+ * `*out_shader_size` for handoff bookkeeping. */
+struct gpu_buffer gpu_load_shader_buffer(struct gpu_launch_ctx *ctx,
+                                          const char *shader_path,
+                                          size_t *out_shader_size);
+
 /* Populate the QMD with version + defaults suitable for a
  * single-thread single-CTA kernel. Specifically:
  *   - QMD_MAJOR_VERSION = 3, QMD_VERSION = 0
@@ -276,6 +288,15 @@ struct gpu_buffer gpu_alloc_buffer(struct gpu_launch_ctx *ctx,
  * Kernels needing > 1 CTA, > 1 thread, or different register count
  * should call gpu_qmd_set_bits() directly to override after this. */
 void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx);
+
+/* Lower-level: populate a QMD at an arbitrary address with explicit
+ * shader and cbuf GPU VAs. Used by multi-op pipelines where each op
+ * has its own QMD (and may use a different shader). Defaults are
+ * the same as gpu_launch_populate_qmd above. */
+void gpu_populate_qmd_at(uint32_t *qmd,
+                          uint64_t shader_gpu_va,
+                          uint64_t cbuf_gpu_va,
+                          uint32_t register_count_v);
 
 /* Build the 13-dword dispatch pushbuffer at `pb` (caller provides
  * storage ≥ 13 u32). qmd_gpu_va must be 256 B-aligned. Returns

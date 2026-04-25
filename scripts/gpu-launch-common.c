@@ -364,13 +364,39 @@ struct gpu_buffer gpu_alloc_buffer(struct gpu_launch_ctx *ctx,
     return buf;
 }
 
+struct gpu_buffer gpu_load_shader_buffer(struct gpu_launch_ctx *ctx,
+                                          const char *shader_path,
+                                          size_t *out_shader_size)
+{
+    size_t shader_size = 0;
+    void *shader_bytes = gpu_load_file(shader_path, &shader_size);
+    if (!shader_bytes) {
+        fprintf(stderr, "shader missing at %s\n", shader_path);
+        exit(2);
+    }
+    if (shader_size > 65536) {
+        fprintf(stderr, "shader %s too large: %zu bytes (max 65536)\n",
+                shader_path, shader_size);
+        exit(1);
+    }
+    struct gpu_buffer buf = gpu_alloc_buffer(ctx, 65536, 4096);
+    memset(buf.cpu_va, 0, buf.size_bytes);
+    memcpy(buf.cpu_va, shader_bytes, shader_size);
+    msync(buf.cpu_va, buf.size_bytes, MS_SYNC);
+    free(shader_bytes);
+    if (out_shader_size) *out_shader_size = shader_size;
+    return buf;
+}
+
 /* ============================================================
  * QMD population
  * ============================================================ */
 
-void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
+void gpu_populate_qmd_at(uint32_t *qmd,
+                          uint64_t shader_gpu_va,
+                          uint64_t cbuf_gpu_va,
+                          uint32_t register_count_v)
 {
-    uint32_t *qmd = (uint32_t *)ctx->qmd_va;
     memset(qmd, 0, 256);
 
     /* Version + enum defaults (matches NVK's qmd_init!). */
@@ -381,7 +407,7 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
     gpu_qmd_set_bits(qmd, QMD_SAMPLER_INDEX_BIT,
                      QMD_SAMPLER_INDEX_BIT, 0);
 
-    /* Single CTA, single thread — all kernels shipped so far. */
+    /* Single CTA, single thread by default — caller overrides. */
     gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_WIDTH_HI,
                      QMD_CTA_RASTER_WIDTH_LO, 1);
     gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
@@ -398,15 +424,15 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
     /* Shader program address (Ampere: absolute, no shift). */
     gpu_qmd_set_bits(qmd, QMD_PROGRAM_ADDRESS_LOWER_HI,
                      QMD_PROGRAM_ADDRESS_LOWER_LO,
-                     ctx->shader_gva & 0xFFFFFFFFu);
+                     shader_gpu_va & 0xFFFFFFFFu);
     gpu_qmd_set_bits(qmd, QMD_PROGRAM_ADDRESS_UPPER_HI,
                      QMD_PROGRAM_ADDRESS_UPPER_LO,
-                     (ctx->shader_gva >> 32) & 0x1FFFFu);
+                     (shader_gpu_va >> 32) & 0x1FFFFu);
 
     /* Registers / shmem / SLM / barriers. */
     gpu_qmd_set_bits(qmd, QMD_REGISTER_COUNT_V_HI,
                      QMD_REGISTER_COUNT_V_LO,
-                     GPU_LAUNCH_REGISTER_COUNT_V_DEFAULT);
+                     register_count_v);
     gpu_qmd_set_bits(qmd, QMD_SHARED_MEMORY_SIZE_HI,
                      QMD_SHARED_MEMORY_SIZE_LO, 0);
     gpu_qmd_set_bits(qmd, QMD_SHADER_LOCAL_MEM_LOW_SIZE_HI,
@@ -433,18 +459,18 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
     gpu_qmd_set_bits(qmd, QMD_INVALIDATE_SHADER_CONSTANT_CACHE_BIT,
                      QMD_INVALIDATE_SHADER_CONSTANT_CACHE_BIT, 1);
 
-    /* cbuf[0]: CUDA-compatible param area at cbuf_gva. size/16 in the
-     * field, VALID bit on. */
+    /* cbuf[0]: CUDA-compatible param area at cbuf_gpu_va. size/16 in
+     * the field, VALID bit on. */
     const unsigned cbuf_idx = 0;
     const uint32_t cbuf_size_B = GPU_LAUNCH_CBUF_SIZE_B;
     gpu_qmd_set_bits(qmd,
                      QMD_CBUF_ADDR_LO_BASE + cbuf_idx * 64 + 31,
                      QMD_CBUF_ADDR_LO_BASE + cbuf_idx * 64,
-                     ctx->cbuf_gva & 0xFFFFFFFFu);
+                     cbuf_gpu_va & 0xFFFFFFFFu);
     gpu_qmd_set_bits(qmd,
                      QMD_CBUF_ADDR_HI_BASE + cbuf_idx * 64 + 16,
                      QMD_CBUF_ADDR_HI_BASE + cbuf_idx * 64,
-                     (ctx->cbuf_gva >> 32) & 0x1FFFFu);
+                     (cbuf_gpu_va >> 32) & 0x1FFFFu);
     gpu_qmd_set_bits(qmd,
                      QMD_CBUF_SIZE_SHIFTED4_BASE + cbuf_idx * 64 + 12,
                      QMD_CBUF_SIZE_SHIFTED4_BASE + cbuf_idx * 64,
@@ -452,7 +478,14 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
     gpu_qmd_set_bits(qmd,
                      QMD_CBUF_VALID_BASE + cbuf_idx,
                      QMD_CBUF_VALID_BASE + cbuf_idx, 1);
+}
 
+void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
+{
+    gpu_populate_qmd_at((uint32_t *)ctx->qmd_va,
+                        ctx->shader_gva,
+                        ctx->cbuf_gva,
+                        GPU_LAUNCH_REGISTER_COUNT_V_DEFAULT);
     msync(ctx->qmd_va, 4096, MS_SYNC);
 }
 
@@ -573,14 +606,25 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
     *doorbell = ctx->work_submit_token;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Poll at 10 ms granularity up to timeout_ms. */
+    /* Poll at 10 ms granularity up to timeout_ms.
+     *
+     * Special semantics: `expected_payload == 0` means "wait for the
+     * cell to be written to *anything* non-zero". Used by multi-op
+     * pipelines where the per-op output value isn't known ahead of
+     * time (FP32 ordering between CPU reference and GPU FFMA can
+     * differ in the low bits, but any non-zero value indicates the
+     * op completed). Caller is responsible for pre-zeroing
+     * `*poll_va` so the transition is observable. */
     uint32_t iterations = (timeout_ms + 9) / 10;
     uint32_t val = 0;
+    bool match_nonzero = (expected_payload == 0u);
     for (uint32_t i = 0; i < iterations; i++) {
         msync((void *)poll_va, 4, MS_INVALIDATE | MS_SYNC);
         __asm__ volatile("dsb sy" ::: "memory");
         val = *poll_va;
-        if (val == expected_payload) {
+        bool matched = match_nonzero ? (val != 0u)
+                                      : (val == expected_payload);
+        if (matched) {
             /* Multi-CTA dispatch hazard: a single-cell sentinel poll
              * proves at least the polled cell was written, not that
              * all CTAs finished. With imbalanced CTAs (e.g. tile-

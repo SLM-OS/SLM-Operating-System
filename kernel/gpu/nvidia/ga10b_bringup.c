@@ -1427,7 +1427,16 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
             gsp_platform->cache_invalidate((void *)poll, sizeof(uint32_t));
         }
         poll_val = *poll;
-        if (poll_val == expected_payload) break;
+        /* expected_payload == 0 → "wait for non-zero" mode. Used by
+         * v5 multi-op pipelines where the per-op output bit pattern
+         * isn't known ahead of time (CPU reference and GPU FFMA can
+         * differ in low fp32 bits). Caller pre-zeroes the cell so
+         * any non-zero write signals completion. */
+        if (expected_payload == 0u) {
+            if (poll_val != 0u) break;
+        } else {
+            if (poll_val == expected_payload) break;
+        }
         for (volatile int i = 0; i < 1500; i++) { }
     }
 
@@ -1445,7 +1454,9 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                 (unsigned long)g_handoff.initial_gp_get);
 
     bool gp_advanced     = (final_gp_get != g_handoff.initial_gp_get);
-    bool payload_matched = (poll_val == expected_payload);
+    bool payload_matched = (expected_payload == 0u)
+                            ? (poll_val != 0u)
+                            : (poll_val == expected_payload);
 
     /* Symmetric bookkeeping: any PBDMA progress consumes the slot.
      * Update the counters so the next submit lands in a fresh slot,
@@ -1590,21 +1601,25 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
                     (unsigned long)g_handoff.pipeline_ops_phys);
         for (uint32_t i = 0; i < g_handoff.pipeline_n_ops; i++) {
             const struct ga10b_pipeline_op *op = &ops[i];
-            uint32_t expected = (op->expected_payload != 0u)
-                                 ? op->expected_payload
-                                 : GA10B_SMOKETEST_SEM_PAYLOAD;
+            /* expected_payload == 0 means "wait for non-zero" mode
+             * (handled inside ga10b_submit_and_poll). Used by
+             * model-inference helpers where per-op output bit
+             * patterns are not known a priori. */
             uart_printf("[GA10B-P8]   op[%lu/%lu] qmd=0x%lx out=0x%lx "
-                        "expected=0x%lx\n",
+                        "expected=0x%lx%s\n",
                         (unsigned long)(i + 1),
                         (unsigned long)g_handoff.pipeline_n_ops,
                         (unsigned long)op->qmd_gpu_va,
                         (unsigned long)op->output_phys,
-                        (unsigned long)expected);
+                        (unsigned long)op->expected_payload,
+                        op->expected_payload == 0u
+                            ? " (any-nonzero mode)" : "");
             uint32_t pb_buf[GA10B_LAUNCH_KERNEL_PB_DWORDS];
             uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
                 pb_buf, op->qmd_gpu_va);
             int rc = ga10b_submit_and_poll(b, pb_buf, pb_dwords,
-                                           op->output_phys, expected,
+                                           op->output_phys,
+                                           op->expected_payload,
                                            8, "GA10B-P8");
             if (rc < 0) {
                 uart_printf("[GA10B-P8] pipeline op %lu failed (rc=%d) "
