@@ -71,6 +71,7 @@ static uint32_t dhcp_timeout_ms = NET_DHCP_TIMEOUT_DEFAULT_MS;
 static uint32_t dhcp_start_time;
 static bool     dhcp_timeout_armed;
 static bool     dhcp_fallback_done;
+static bool     dhcp_test_force_start_fail;
 static uint32_t static_ip_fallback;
 static uint32_t static_nm_fallback;
 static uint32_t static_gw_fallback;
@@ -83,7 +84,21 @@ static int net_start_dhcp_client(const char *reason) {
     if (dhcp_started)
         return NET_OK;
 
+    if (dhcp_test_force_start_fail) {
+        dhcp_test_force_start_fail = false;
+        dhcp_requested = false;
+        dhcp_started = false;
+        dhcp_timeout_armed = false;
+        dhcp_fallback_done = false;
+        ERROR("Failed to start DHCP client");
+        return NET_E_NO_MEM;
+    }
+
     if (dhcp_start(&slm_netif) != ERR_OK) {
+        dhcp_requested = false;
+        dhcp_started = false;
+        dhcp_timeout_armed = false;
+        dhcp_fallback_done = false;
         ERROR("Failed to start DHCP client");
         return NET_E_NO_MEM;
     }
@@ -155,6 +170,10 @@ void net_test_force_boot_deferred_dhcp(void) {
     dhcp_timeout_armed = false;
     dhcp_fallback_done = false;
     dhcp_start_time = 0;
+}
+
+void net_test_force_dhcp_start_fail(void) {
+    dhcp_test_force_start_fail = true;
 }
 
 /*

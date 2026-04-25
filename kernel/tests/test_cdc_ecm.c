@@ -501,6 +501,30 @@ static void test_link_status_infers_up_from_speed_change(void)
     TEST_ASSERT_TRUE(net_get_driver()->link_status());
 }
 
+static void test_link_status_tracks_down_from_zero_speed_change(void)
+{
+    static const uint8_t up_payload[8] = {
+        0x00, 0xe1, 0xf5, 0x05,
+        0x00, 0xe1, 0xf5, 0x05,
+    };
+    static const uint8_t down_payload[8] = { 0 };
+
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
+
+    TEST_ASSERT_NOT_NULL(mock_complete_pending_notify(
+        CDC_NOTIFY_CONNECTION_SPEED_CHANGE, 0, up_payload, sizeof(up_payload)));
+    net_get_driver()->tx_reap();
+    TEST_ASSERT_TRUE(net_get_driver()->link_status());
+
+    TEST_ASSERT_NOT_NULL(mock_complete_pending_notify(
+        CDC_NOTIFY_CONNECTION_SPEED_CHANGE, 0, down_payload, sizeof(down_payload)));
+    net_get_driver()->tx_reap();
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
+}
+
 static void test_link_status_falls_back_after_silent_notification_timeout(void)
 {
     uint32_t saved_timeout = cdc_ecm_get_notify_silence_timeout_ms();
@@ -1018,6 +1042,7 @@ int test_suite_cdc_ecm(void)
     RUN_TEST(test_net_init_queues_notification_urb);
     RUN_TEST(test_link_status_tracks_network_connection_notification);
     RUN_TEST(test_link_status_infers_up_from_speed_change);
+    RUN_TEST(test_link_status_tracks_down_from_zero_speed_change);
     RUN_TEST(test_link_status_falls_back_after_silent_notification_timeout);
     RUN_TEST(test_link_status_falls_back_when_notification_endpoint_missing);
     RUN_TEST(test_send_goes_to_bulk_out);

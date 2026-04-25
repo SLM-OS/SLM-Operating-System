@@ -602,6 +602,7 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 #include "net_driver.h"
 #include "arch/sys_arch.h"  /* sys_now() for DHCP timeout polling */
 extern void net_test_force_boot_deferred_dhcp(void);
+extern void net_test_force_dhcp_start_fail(void);
 #if defined(PLATFORM_QEMU_VIRT)
 #include "../include/virtio_net.h"  /* virtio_net_get_irq_count (ARM64 MMIO) */
 #include "../include/virtio.h"      /* VIRTIO_DEVICE_IRQ */
@@ -1015,6 +1016,31 @@ static void test_net_boot_deferred_dhcp_waits_for_real_start(void)
     link_test_restore();
     net_poll();
     net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
+ * Test: if dhcp_start() fails, networking does not remain stuck in a
+ * fake DHCP(pending) state.
+ */
+static void test_net_dhcp_start_failure_clears_pending_state(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    net_test_force_dhcp_start_fail();
+    TEST_ASSERT_EQUAL_INT(NET_E_NO_MEM, net_enable_dhcp());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_DISABLED, info.dhcp_status);
+    TEST_ASSERT_FALSE(info.dhcp_enabled);
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
 }
 
 /*
@@ -1627,6 +1653,7 @@ int test_suite_net(void)
     RUN_TEST(test_net_dhcp_fallback);
     RUN_TEST(test_net_dhcp_fallback_while_link_down);
     RUN_TEST(test_net_boot_deferred_dhcp_waits_for_real_start);
+    RUN_TEST(test_net_dhcp_start_failure_clears_pending_state);
     RUN_TEST(test_net_dhcp_link_drop_restarts_timeout);
     RUN_TEST(test_net_driver_tx);
     RUN_TEST(test_net_driver_has_tx_reap);
