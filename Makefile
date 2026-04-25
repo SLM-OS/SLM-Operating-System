@@ -781,7 +781,30 @@ endif
 $(SDHCI_TEST_IMG): | $(KERNEL_TEST_BUILD_DIR)
 	@if [ ! -f $@ ]; then \
 		echo "Creating sparse $@ ($(SDHCI_TEST_IMG_SIZE), SDHC-sized)"; \
-		truncate -s $(SDHCI_TEST_IMG_SIZE) $@; \
+		if ! truncate -s $(SDHCI_TEST_IMG_SIZE) $@.tmp 2>/dev/null; then \
+			rm -f $@.tmp; \
+			fstype=$$(stat -f -c %T $$(dirname $@) 2>/dev/null || echo unknown); \
+			echo ""; \
+			echo "ERROR: cannot create $(SDHCI_TEST_IMG_SIZE) sparse image at $@"; \
+			echo "       build-dir filesystem: $$fstype"; \
+			case "$$fstype" in \
+				vfat|msdos|exfat) \
+					echo "       FAT-family filesystems don't support sparse files;" ;\
+					echo "       truncate would have to allocate the full size for real." ;; \
+				tmpfs) \
+					echo "       tmpfs likely hit its size cap on the truncate write."; \
+					echo "       Lower SDHCI_TEST_IMG_SIZE in the Makefile (≥ 2 GB to" ;\
+					echo "       keep QEMU's sd-card model in SDHC mode)." ;; \
+				*) \
+					echo "       Disk likely doesn't have $(SDHCI_TEST_IMG_SIZE) free, or a" ;\
+					echo "       file-size ulimit is restricting truncate." ;; \
+			esac; \
+			echo "       See https://github.com/SLM-OS/SLM-Operating-System/issues/392"; \
+			echo "       for the full failure-mode matrix and workarounds."; \
+			echo ""; \
+			exit 1; \
+		fi; \
+		mv $@.tmp $@; \
 	fi
 
 $(KERNEL_TEST_BUILD_DIR):
