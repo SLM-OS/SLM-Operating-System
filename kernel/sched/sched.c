@@ -24,6 +24,7 @@
 #include "ncmem.h"
 #include "preempt.h"
 #include "string.h"
+#include "runtime_model.h"
 #if CONFIG_WORK_STEALING
 #include "steal_deque.h"
 #endif
@@ -33,6 +34,12 @@
 #define DEADLINE_CRITICAL_NS    (10 * 1000000ULL)   /* 10ms - boost to CRITICAL */
 #define DEADLINE_HIGH_NS        (50 * 1000000ULL)   /* 50ms - boost to HIGH */
 #define DEADLINE_BOOST_NS       (100 * 1000000ULL)  /* 100ms - boost +1 */
+
+#define SCHED_BALANCE_DEFAULT_ENABLED          1u
+#define SCHED_BALANCE_DEFAULT_MIN_TARGET_READY 2u
+#define SCHED_BALANCE_DEFAULT_MIN_ACTIVE_CPUS  2u
+#define SCHED_BALANCE_DEFAULT_IMBALANCE_NUM    3u
+#define SCHED_BALANCE_DEFAULT_IMBALANCE_DEN    2u
 
 /* External functions from task.c */
 extern void task_set_current(struct task *task);
@@ -318,6 +325,7 @@ volatile uint32_t *sched_diag_steal_successes;     /* live task returned       *
 volatile uint32_t *sched_diag_steal_stale;         /* stale pointer discarded  */
 volatile uint32_t *sched_diag_steal_empty_victim;  /* victim had nothing to take */
 volatile uint32_t *sched_diag_steal_push_full;     /* push failed — deque full (#175) */
+static struct cpu_runqueue *nc_runqueues;
 /* Scheduler init flag — uses the SAME pattern as the working cpu_boot_flag
  * handshake: cacheline-aligned, atomic store + cache_invalidate polling
  * with delay for natural L2 eviction. */
@@ -339,9 +347,7 @@ volatile uint32_t sched_diag_steal_push_full[MAX_CPUS];
 static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
 {
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC memory at compile-time-known address — no cacheable pointer.
-     * Run queues are the first ncmem_alloc() in scheduler_init(). */
-    return &((struct cpu_runqueue *)NC_MEM_BASE)[cpu];
+    return &nc_runqueues[cpu];
 #else
     return &sched.cpu_fallback[cpu];
 #endif
@@ -622,10 +628,15 @@ void scheduler_init(void)
     sched.isolated_cores = 0;
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Initialize NC run queue region. cpu_rq() uses NC_MEM_BASE directly
-     * (compile-time constant) so no cacheable pointer is needed. */
-    ncmem_alloc(MAX_CPUS * sizeof(struct cpu_runqueue), CACHE_LINE_SIZE);
-    INFO("SMP: run queues in NC memory at 0x%lx", (unsigned long)NC_MEM_BASE);
+    nc_runqueues = ncmem_alloc(MAX_CPUS * sizeof(struct cpu_runqueue),
+                               CACHE_LINE_SIZE);
+    if (!nc_runqueues) {
+        INFO("SMP: NC run queue allocation failed");
+        for (;;)
+            ;
+    }
+    INFO("SMP: run queues in NC memory at 0x%lx",
+         (unsigned long)nc_runqueues);
 #endif
 
     /* Initialize task table (NC on Pi 5, BSS fallback otherwise) */
@@ -1037,6 +1048,20 @@ static uint32_t least_loaded_cpu(uint32_t fallback, uint32_t *out_sum,
     return best_cpu;
 }
 
+static void sched_balance_config_defaults(
+    struct sched_runtime_balance_config *cfg)
+{
+    if (!cfg) return;
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->feature_version = SCHED_MODEL_FEATURE_VERSION_V1;
+    cfg->action_version = SCHED_MODEL_ACTION_VERSION_V1;
+    cfg->enabled = SCHED_BALANCE_DEFAULT_ENABLED;
+    cfg->min_target_ready = SCHED_BALANCE_DEFAULT_MIN_TARGET_READY;
+    cfg->min_active_cpus = SCHED_BALANCE_DEFAULT_MIN_ACTIVE_CPUS;
+    cfg->imbalance_num = SCHED_BALANCE_DEFAULT_IMBALANCE_NUM;
+    cfg->imbalance_den = SCHED_BALANCE_DEFAULT_IMBALANCE_DEN;
+}
+
 /*
  * Add a task to the run queue (assigns to a CPU based on affinity/policy).
  *
@@ -1080,7 +1105,23 @@ void scheduler_add_task(struct task *task)
          * put it. The policy is authoritative for the first placement;
          * S5 only intervenes when the target is meaningfully more
          * loaded than the average across the non-isolated set. */
+#ifdef CONFIG_AI_SCHEDULER
+        struct sched_runtime_balance_config runtime_cfg;
+        const struct sched_runtime_balance_config *active_cfg = NULL;
+        sched_runtime_token_t cfg_token = 0;
+
+        sched_balance_config_defaults(&runtime_cfg);
+        if (sched_runtime_balance_config_acquire(&active_cfg, &cfg_token)) {
+            runtime_cfg = *active_cfg;
+            sched_runtime_balance_config_release(cfg_token);
+        }
+#else
+        struct sched_runtime_balance_config runtime_cfg;
+        sched_balance_config_defaults(&runtime_cfg);
+#endif
+
         if (cpu_count > 1 && target_cpu < cpu_count &&
+            runtime_cfg.enabled != 0 &&
             !(sched.isolated_cores & (1U << target_cpu))) {
             uint32_t target_ready = cpu_rq(target_cpu)->ready_count;
             /* Don't override on lightly-loaded systems — single-digit
@@ -1088,16 +1129,17 @@ void scheduler_add_task(struct task *task)
              * heuristics (cache affinity, deadline boost) pay off.
              * Threshold of 2 guarantees we only act after the target
              * actually starts building a backlog. */
-            if (target_ready >= 2) {
+            if (target_ready >= runtime_cfg.min_target_ready) {
                 uint32_t sum = 0;
                 uint32_t active = 0;
                 uint32_t idle = least_loaded_cpu(target_cpu, &sum, &active);
-                if (active >= 2 && idle != target_cpu) {
+                if (active >= runtime_cfg.min_active_cpus && idle != target_cpu) {
                     uint32_t idle_ready = cpu_rq(idle)->ready_count;
                     /* Predicate: target_ready > (sum / active) * 1.5.
                      * Integer form: 2 * target_ready * active > 3 * sum. */
                     if (idle_ready < target_ready &&
-                        2ULL * target_ready * active > 3ULL * sum) {
+                        (uint64_t)runtime_cfg.imbalance_den * target_ready * active >
+                            (uint64_t)runtime_cfg.imbalance_num * sum) {
                         target_cpu = idle;
                     }
                 }

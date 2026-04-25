@@ -13,6 +13,7 @@
 #include "sched_trace.h"
 #ifdef CONFIG_AI_SCHEDULER
 #include "ai_types.h"
+#include "runtime_model.h"
 #endif
 #include "pmm.h"
 #include "vmm.h"
@@ -2607,8 +2608,21 @@ int cmd_poke(int argc, char *argv[])
  */
 int cmd_xhci(int argc, char *argv[])
 {
-    (void)argc; (void)argv;
     extern bool xhci_dump_info(void);
+    extern int  xhci_cmd_noop_probe(void);
+
+    if (argc >= 2 && strcmp(argv[1], "noop") == 0) {
+        int rc = xhci_cmd_noop_probe();
+        shell_printf("xhci noop: %s (rc=%d)\r\n",
+                     rc == 0 ? "ok" : "failed", rc);
+        return rc;
+    }
+
+    if (argc >= 2) {
+        shell_puts("usage: xhci [noop]\r\n");
+        return -1;
+    }
+
     if (!xhci_dump_info())
         shell_puts("xhci: not live (clocks gated? check slmos-kexec)\r\n");
     return 0;
@@ -2806,10 +2820,45 @@ int cmd_nvgpu(int argc, char *argv[])
                      rc, (int)b.state);
         return rc;
     }
+    if (strcmp(argv[1], "run-mnist") == 0) {
+        /* M7: dispatch a v5 multi-op pipeline (the MNIST chain
+         * pre-uploaded by scripts/gpu-kernel-mnist.c) and read
+         * back the final op's 10 fp32 logits. Argmax over those
+         * logits is the predicted class. Requires `nvgpu inherit`
+         * + `nvgpu channel` to have run already.
+         *
+         * Output formatting prints the logits as raw fp32 bit
+         * patterns — the kernel target compiles with
+         * -mgeneral-regs-only and can't format fp32 as decimal.
+         * Use `slm.gpu_run_mnist()` from Lua for decimal output. */
+        int rc = ga10b_bringup_launch_kernel(&b);
+        if (rc < 0) {
+            shell_printf("run-mnist: launch failed rc=%d\r\n", rc);
+            return rc;
+        }
+        uint8_t logits_bytes[40];
+        int n = ga10b_bringup_read_pipeline_output(&b, logits_bytes,
+                                                    sizeof(logits_bytes));
+        if (n < 0) {
+            shell_printf("run-mnist: failed to read logits "
+                         "(no v5 handoff?)\r\n");
+            return -1;
+        }
+        int argmax = slm_fp32_argmax(logits_bytes, 10u);
+        shell_puts("run-mnist: logits (fp32 bit patterns):\r\n");
+        for (int i = 0; i < 10; i++) {
+            uint32_t bits;
+            __builtin_memcpy(&bits, logits_bytes + i * 4, 4);
+            shell_printf("  [%d] 0x%08x%s\r\n",
+                         i, bits, i == argmax ? "  <-- argmax" : "");
+        }
+        shell_printf("run-mnist: predicted class = %d\r\n", argmax);
+        return 0;
+    }
 
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | submit | submit-compute | launch-kernel | "
-              "fecs | gpccs | pmu | run]\r\n");
+              "run-mnist | fecs | gpccs | pmu | run]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
@@ -2821,6 +2870,151 @@ int cmd_nvgpu(int argc, char *argv[])
  *   sched policy       List all registered policies
  *   sched policy <name> Switch to named policy
  */
+#ifdef CONFIG_AI_SCHEDULER
+static const char *sched_model_state_name(uint16_t state)
+{
+    switch (state) {
+        case SCHED_MODEL_EMPTY: return "empty";
+        case SCHED_MODEL_STAGED: return "staged";
+        case SCHED_MODEL_ACTIVE: return "active";
+        case SCHED_MODEL_ROLLED_BACK: return "rolled_back";
+        default: return "unknown";
+    }
+}
+
+static uint16_t sched_model_kind_id(const char *name)
+{
+    if (strcmp(name, "mlp") == 0) return SCHED_MODEL_KIND_MLP;
+    if (strcmp(name, "ppo") == 0) return SCHED_MODEL_KIND_PPO;
+    if (strcmp(name, "config") == 0) return SCHED_MODEL_KIND_CONFIG;
+    return 0;
+}
+
+static const char *sched_model_kind_name(uint16_t kind_id)
+{
+    switch (kind_id) {
+        case SCHED_MODEL_KIND_MLP: return "mlp";
+        case SCHED_MODEL_KIND_PPO: return "ppo";
+        case SCHED_MODEL_KIND_CONFIG: return "config";
+        default: return "unknown";
+    }
+}
+
+static void sched_print_model_meta(const char *label,
+                                   uint32_t present,
+                                   const struct sched_model_meta *meta)
+{
+    if (!present || !meta) {
+        shell_printf("    %-8s %s\r\n", label, "(none)");
+        return;
+    }
+
+    shell_printf("    %-8s version=%u schema=%u features=%u actions=%u count=%u payload=%lu checksum=0x%08lx\r\n",
+                 label,
+                 (unsigned)meta->version,
+                 (unsigned)meta->schema_version,
+                 (unsigned)meta->feature_version,
+                 (unsigned)meta->action_version,
+                 (unsigned)meta->action_count,
+                 (unsigned long)meta->payload_len,
+                 (unsigned long)meta->checksum);
+}
+
+static void sched_print_balance_config(const char *label,
+                                       const struct sched_runtime_balance_config *cfg)
+{
+    if (!cfg) return;
+
+    shell_printf("    %-8s enabled=%lu min_target_ready=%lu min_active_cpus=%lu imbalance=%lu/%lu\r\n",
+                 label,
+                 (unsigned long)cfg->enabled,
+                 (unsigned long)cfg->min_target_ready,
+                 (unsigned long)cfg->min_active_cpus,
+                 (unsigned long)cfg->imbalance_num,
+                 (unsigned long)cfg->imbalance_den);
+}
+
+static int sched_model_status_one(uint16_t kind_id)
+{
+    struct sched_model_status status = {0};
+    struct sched_runtime_balance_config cfg = {0};
+    int have_cfg = 0;
+
+    if (sched_model_status(kind_id, &status) != 0) {
+        shell_printf("sched model status: invalid kind %u\r\n", (unsigned)kind_id);
+        return 1;
+    }
+
+    if (kind_id == SCHED_MODEL_KIND_CONFIG &&
+        sched_runtime_balance_config_snapshot(&cfg) == 0) {
+        have_cfg = 1;
+    }
+
+    shell_printf("  %s: %s\r\n",
+                 sched_model_kind_name(kind_id),
+                 sched_model_state_name(status.state));
+    sched_print_model_meta("staged", status.has_staged, &status.staged);
+    sched_print_model_meta("active", status.has_active, &status.active);
+    sched_print_model_meta("rollback", status.has_rollback, &status.rollback);
+    if (have_cfg) {
+        sched_print_balance_config("config", &cfg);
+    }
+    return 0;
+}
+
+static int sched_model_load_file(uint16_t kind_id, const char *path)
+{
+    char resolved[VFS_MAX_PATH];
+    struct vfs_entry_info info;
+    uint8_t *buf;
+    size_t pages_needed;
+    int bytes_read;
+
+    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        shell_puts("sched model load: path too long\r\n");
+        return 1;
+    }
+
+    if (vfs_stat_path(resolved, &info) != 0) {
+        shell_printf("sched model load: %s: file not found\r\n", resolved);
+        return 1;
+    }
+    if (info.type != 0) {
+        shell_printf("sched model load: %s: not a file\r\n", resolved);
+        return 1;
+    }
+    if (info.size == 0) {
+        shell_puts("sched model load: file is empty\r\n");
+        return 1;
+    }
+
+    pages_needed = (info.size + 4095u) / 4096u;
+    buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) {
+        shell_puts("sched model load: out of memory for read buffer\r\n");
+        return 1;
+    }
+
+    bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (bytes_read <= 0) {
+        shell_printf("sched model load: failed to read %s\r\n", resolved);
+        pmm_free_pages(buf, pages_needed);
+        return 1;
+    }
+
+    if (sched_model_stage_blob(kind_id, buf, (size_t)bytes_read) != 0) {
+        shell_printf("sched model load: failed to stage %s\r\n", resolved);
+        pmm_free_pages(buf, pages_needed);
+        return 1;
+    }
+
+    pmm_free_pages(buf, pages_needed);
+    shell_printf("Staged %s scheduler runtime blob from %s\r\n",
+                 sched_model_kind_name(kind_id), resolved);
+    return 0;
+}
+#endif
+
 int cmd_sched(int argc, char *argv[])
 {
     if (argc < 2) {
@@ -2861,6 +3055,75 @@ int cmd_sched(int argc, char *argv[])
         shell_printf("Switched to policy: %s\r\n", policy->name);
         return 0;
     }
+
+#ifdef CONFIG_AI_SCHEDULER
+    if (strcmp(argv[1], "model") == 0) {
+        if (argc < 3 || strcmp(argv[2], "status") == 0) {
+            shell_puts("Scheduler runtime blobs:\r\n");
+            if (sched_model_status_one(SCHED_MODEL_KIND_MLP) != 0) return 1;
+            if (sched_model_status_one(SCHED_MODEL_KIND_PPO) != 0) return 1;
+            if (sched_model_status_one(SCHED_MODEL_KIND_CONFIG) != 0) return 1;
+            if (argc < 3) {
+                shell_puts("\r\nUsage:\r\n");
+                shell_puts("  sched model status\r\n");
+                shell_puts("  sched model load <kind> <path>\r\n");
+                shell_puts("  sched model activate <kind>\r\n");
+                shell_puts("  sched model rollback <kind>\r\n");
+                shell_puts("  sched model clear <kind>\r\n");
+            }
+            return 0;
+        }
+
+        if (argc < 4) {
+            shell_puts("Usage: sched model <load|activate|rollback|clear> <kind> [path]\r\n");
+            return 1;
+        }
+
+        uint16_t kind_id = sched_model_kind_id(argv[3]);
+        if (kind_id == 0) {
+            shell_printf("Unknown scheduler model kind: '%s'\r\n", argv[3]);
+            return 1;
+        }
+
+        if (strcmp(argv[2], "load") == 0) {
+            if (argc < 5) {
+                shell_puts("Usage: sched model load <kind> <path>\r\n");
+                return 1;
+            }
+            return sched_model_load_file(kind_id, argv[4]);
+        }
+
+        if (strcmp(argv[2], "activate") == 0) {
+            if (sched_model_activate(kind_id) != 0) {
+                shell_printf("sched model activate: no staged blob for %s\r\n", argv[3]);
+                return 1;
+            }
+            shell_printf("Activated runtime blob for scheduler %s\r\n", argv[3]);
+            return 0;
+        }
+
+        if (strcmp(argv[2], "rollback") == 0) {
+            if (sched_model_rollback(kind_id) != 0) {
+                shell_printf("sched model rollback: no rollback blob for %s\r\n", argv[3]);
+                return 1;
+            }
+            shell_printf("Rolled back runtime blob for scheduler %s\r\n", argv[3]);
+            return 0;
+        }
+
+        if (strcmp(argv[2], "clear") == 0) {
+            if (sched_model_clear(kind_id) != 0) {
+                shell_printf("sched model clear: failed for %s\r\n", argv[3]);
+                return 1;
+            }
+            shell_printf("Cleared runtime blob state for scheduler %s\r\n", argv[3]);
+            return 0;
+        }
+
+        shell_puts("Usage: sched model <status|load|activate|rollback|clear> ...\r\n");
+        return 1;
+    }
+#endif
 
     if (strcmp(argv[1], "trace") == 0) {
         /* Subcommands:
@@ -3245,6 +3508,132 @@ static void eviction_print_stats(const RustEvictionStats *s, const char *name)
     }
 }
 
+static int eviction_blob_kind_id(const char *name)
+{
+    if (!name) return 0;
+    if (strcmp(name, "xgboost") == 0) return 1;
+    if (strcmp(name, "mlp") == 0) return 2;
+    if (strcmp(name, "cacheus_config") == 0) return 3;
+    return 0;
+}
+
+static const char *eviction_blob_kind_name(uint16_t kind_id)
+{
+    switch (kind_id) {
+        case 1: return "xgboost";
+        case 2: return "mlp";
+        case 3: return "cacheus_config";
+        default: return "unknown";
+    }
+}
+
+static const char *eviction_blob_state_name(uint16_t state)
+{
+    switch (state) {
+        case 0: return "empty";
+        case 1: return "staged";
+        case 2: return "active";
+        case 3: return "rolled_back";
+        default: return "unknown";
+    }
+}
+
+static void eviction_print_blob_meta(const char *label,
+                                     uint32_t present,
+                                     const RustEvictionBlobMeta *meta)
+{
+    if (!present || !meta) {
+        shell_printf("    %-8s %s\r\n", label, "(none)");
+        return;
+    }
+    shell_printf("    %-8s version=%u schema=%u payload=%lu checksum=0x%08lx\r\n",
+                label,
+                (unsigned)meta->version,
+                (unsigned)meta->feature_schema_version,
+                (unsigned long)meta->payload_len,
+                (unsigned long)meta->checksum);
+}
+
+static int eviction_model_status_one(uint16_t kind_id)
+{
+    RustEvictionBlobStatus status = {0};
+    int rc = rust_eviction_blob_status(kind_id, &status);
+    if (rc == -2) {
+        shell_puts("Eviction disabled — rebuild without DISABLE_EVICTION=ON\r\n");
+        return 1;
+    }
+    if (rc != 0) {
+        shell_printf("eviction model status: invalid kind %u\r\n", (unsigned)kind_id);
+        return 1;
+    }
+
+    shell_printf("  %s: %s\r\n",
+                eviction_blob_kind_name(kind_id),
+                eviction_blob_state_name(status.state));
+    eviction_print_blob_meta("staged", status.has_staged, &status.staged);
+    eviction_print_blob_meta("active", status.has_active, &status.active);
+    eviction_print_blob_meta("rollback", status.has_rollback, &status.rollback);
+    return 0;
+}
+
+static int eviction_model_load_file(uint16_t kind_id, const char *path)
+{
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        shell_puts("eviction model load: path too long\r\n");
+        return 1;
+    }
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0) {
+        shell_printf("eviction model load: %s: file not found\r\n", resolved);
+        return 1;
+    }
+    if (info.type != 0) {
+        shell_printf("eviction model load: %s: not a file\r\n", resolved);
+        return 1;
+    }
+    if (info.size == 0) {
+        shell_puts("eviction model load: file is empty\r\n");
+        return 1;
+    }
+
+    size_t pages_needed = (info.size + 4095) / 4096;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) {
+        shell_puts("eviction model load: out of memory for read buffer\r\n");
+        return 1;
+    }
+
+    int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (bytes_read <= 0) {
+        shell_printf("eviction model load: failed to read %s\r\n", resolved);
+        pmm_free_pages(buf, pages_needed);
+        return 1;
+    }
+
+    int rc = rust_eviction_blob_stage(kind_id, buf, (size_t)bytes_read);
+    pmm_free_pages(buf, pages_needed);
+
+    if (rc == -2) {
+        shell_puts("Eviction disabled — rebuild without DISABLE_EVICTION=ON\r\n");
+        return 1;
+    }
+    if (rc == -4) {
+        shell_printf("eviction model load: blob kind mismatch for %s\r\n",
+                    eviction_blob_kind_name(kind_id));
+        return 1;
+    }
+    if (rc != 0) {
+        shell_printf("eviction model load: failed to stage %s\r\n", resolved);
+        return 1;
+    }
+
+    shell_printf("Staged %s runtime blob from %s\r\n",
+                eviction_blob_kind_name(kind_id), resolved);
+    return 0;
+}
+
 int cmd_eviction(int argc, char *argv[])
 {
     char name_buf[32];
@@ -3316,6 +3705,96 @@ int cmd_eviction(int argc, char *argv[])
     if (strcmp(argv[1], "stats") == 0) {
         eviction_print_stats(&stats, name_buf);
         return 0;
+    }
+
+    if (strcmp(argv[1], "model") == 0) {
+        if (argc < 3 || strcmp(argv[2], "status") == 0) {
+            shell_puts("Eviction runtime blobs:\r\n");
+            if (eviction_model_status_one(1) != 0) return 1;
+            if (eviction_model_status_one(2) != 0) return 1;
+            if (eviction_model_status_one(3) != 0) return 1;
+            if (argc < 3) {
+                shell_puts("\r\nUsage:\r\n");
+                shell_puts("  eviction model status\r\n");
+                shell_puts("  eviction model load <kind> <path>\r\n");
+                shell_puts("  eviction model activate <kind>\r\n");
+                shell_puts("  eviction model rollback <kind>\r\n");
+                shell_puts("  eviction model clear <kind>\r\n");
+            }
+            return 0;
+        }
+
+        if (argc < 4) {
+            shell_puts("Usage: eviction model <load|activate|rollback|clear> <kind> [path]\r\n");
+            return 1;
+        }
+
+        int kind_id = eviction_blob_kind_id(argv[3]);
+        if (kind_id == 0) {
+            shell_printf("Unknown eviction model kind: '%s'\r\n", argv[3]);
+            return 1;
+        }
+
+        if (strcmp(argv[2], "load") == 0) {
+            if (argc < 5) {
+                shell_puts("Usage: eviction model load <kind> <path>\r\n");
+                return 1;
+            }
+            return eviction_model_load_file((uint16_t)kind_id, argv[4]);
+        }
+
+        if (strcmp(argv[2], "activate") == 0) {
+            int rc = rust_eviction_blob_activate((uint16_t)kind_id);
+            if (rc == -2) {
+                shell_puts("Eviction disabled — rebuild without DISABLE_EVICTION=ON\r\n");
+                return 1;
+            }
+            if (rc == -3) {
+                shell_printf("eviction model activate: no staged blob for %s\r\n", argv[3]);
+                return 1;
+            }
+            if (rc != 0) {
+                shell_printf("eviction model activate: failed for %s\r\n", argv[3]);
+                return 1;
+            }
+            shell_printf("Activated runtime blob for %s\r\n", argv[3]);
+            return 0;
+        }
+
+        if (strcmp(argv[2], "rollback") == 0) {
+            int rc = rust_eviction_blob_rollback((uint16_t)kind_id);
+            if (rc == -2) {
+                shell_puts("Eviction disabled — rebuild without DISABLE_EVICTION=ON\r\n");
+                return 1;
+            }
+            if (rc == -3) {
+                shell_printf("eviction model rollback: no rollback blob for %s\r\n", argv[3]);
+                return 1;
+            }
+            if (rc != 0) {
+                shell_printf("eviction model rollback: failed for %s\r\n", argv[3]);
+                return 1;
+            }
+            shell_printf("Rolled back runtime blob for %s\r\n", argv[3]);
+            return 0;
+        }
+
+        if (strcmp(argv[2], "clear") == 0) {
+            int rc = rust_eviction_blob_clear((uint16_t)kind_id);
+            if (rc == -2) {
+                shell_puts("Eviction disabled — rebuild without DISABLE_EVICTION=ON\r\n");
+                return 1;
+            }
+            if (rc != 0) {
+                shell_printf("eviction model clear: failed for %s\r\n", argv[3]);
+                return 1;
+            }
+            shell_printf("Cleared runtime blob state for %s\r\n", argv[3]);
+            return 0;
+        }
+
+        shell_puts("Usage: eviction model <status|load|activate|rollback|clear> ...\r\n");
+        return 1;
     }
 
     if (strcmp(argv[1], "trajectory") == 0) {

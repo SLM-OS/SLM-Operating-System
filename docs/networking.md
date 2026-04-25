@@ -761,8 +761,9 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
 | 5 (port scan, slot addressing) | ✅ | PR #308 — `xhci_hcd_port_status`, `xhci_hcd_port_reset`, `xhci_hcd_device_open` with ENABLE_SLOT + ADDRESS_DEVICE(BSR=1), intercepted SET_ADDRESS |
 | 6 (control transfers) | ✅ | PR #308 — Setup / Data / Status Stage TRB builders + EP0 dispatch |
 | 7 (CONFIGURE_ENDPOINT + bulk) | ✅ | PR #308 — per-endpoint transfer-ring allocation, Normal TRB for bulk/interrupt |
-| Post-kexec re-plug | ⚠️ | #309 — first EP0 control transfer after ADDRESS_DEVICE returns `cc=4` on a pre-kexec device. Workaround in PR #308: hide the stale device via a three-state attach machine until the user physically re-plugs; `usb_core_hotplug_poll` from `net_poll()` drives fresh enumeration. Permanent fix tracked |
-| Phase 4 (lwIP integration) | ✅ | `kernel/src/main.c` registers `cdc_ecm_probe_and_register` in place of the old `rtl8169_register` stub on Jetson. `net_poll()` retries the probe on every tick (idempotent once bound). A post-kexec re-plug now drives xHCI → usb_core → cdc_ecm → lwIP in one chain with no manual intervention beyond the physical re-insert |
+| Post-kexec retained hub handoff | ✅ | On `jetson-nano-2`, the Linux helper now deauthorizes the USB2 root hub before `kexec`, preserves the cleaned addressed slot-1 handoff, and skips only the stale slot-3 handoff. SLM-OS adopts the retained high-speed Realtek root hub with no manual re-plug. |
+| Minimal hub support | ✅ | `usb_core` now has one-tier USB 2.0 hub scaffolding, which is sufficient for the current Jetson lab path: retained root hub on slot 1, one downstream child on fresh slot 2. This is not general multi-tier hub support. |
+| Phase 4 (lwIP integration) | ✅ | On the validated `jetson-nano-2` path, the downstream RTL8153 now enumerates via the retained-root-hub path, `cdc_ecm` binds config 2, DHCP reaches `192.168.4.5/24` (`gw 192.168.4.1`), and `ping 192.168.4.1` succeeds after `kexec` with no manual unplug/replug. |
 
 Source layout in `kernel/drivers/usb/xhci/`:
 

@@ -252,6 +252,121 @@ D2H notification. This ordering has been consistent across ~50 runs.
    which fw task, which access address, which source instruction
    pointer? That would likely short-circuit the whole investigation.
 
+## Update 2026-04-24 (status: still investigating; safe to send)
+
+The "root cause identified — LCU under-emission" header that lived
+here briefly was a false alarm caused by comparing HailoRT's wire
+sizes (which include the 39-byte SET_CONTEXT_INFO framing prefix)
+against our body sizes. After byte-by-byte comparison, our
+production `hailo_backend_run` emits CS bodies that match HailoRT's
+byte-for-byte modulo IOVA fields. So the "we under-emit" theory
+is dead.
+
+The `host-tools/hailo-ushim` bisect findings below remain accurate.
+The remaining concrete asymmetries between HailoRT and our drive
+are:
+
+1. HailoRT calls `GET_HW_CONSTS` (opcode 0x48) four times per
+   session before `SET_NETWORK_GROUP_HEADER`. We call it once.
+2. HailoRT interleaves APP_CPU settle pings (`IDENTIFY` 0x00,
+   `GET_DEVICE_INFO` 0x33) between CS steps — specifically
+   between the four `SET_CONTEXT_INFO` calls and
+   `CHANGE_STATUS(ENABLED)`. We send the four CS calls
+   back-to-back, then ENABLED immediately.
+3. Our drive triggers `CPU_ECC_FATAL` (event_id=8) and
+   `CPU_ECC_ERROR` (event_id=7) D2H events with
+   `memory_bitmap=0x00001000` on every CORE-CPU RPC starting
+   from `CHANGE_STATUS(RESET)`. HailoRT-on-Pi-OS doesn't.
+
+Sending this ticket as-is is appropriate. The questions in the
+"Specific questions" section are still the right asks. We are
+trying the GET_HW_CONSTS-×4 change ourselves in parallel — if
+that fixes the ECC events and the boundary submit hang, we'll
+update the ticket; if it doesn't, the ticket is even more
+relevant.
+
+---
+
+## Userspace-shim bisect (2026-04-24)
+
+To narrow the problem space, we built a minimal Linux userspace
+tool (`host-tools/hailo-ushim`, ~600 lines of C) that drives your
+official `hailo_pci` kernel driver directly via its ioctl surface.
+The tool allocates buffers via `HAILO_VDMA_BUFFER_MAP`, descriptor
+lists via `HAILO_DESC_LIST_CREATE`, and sends `HAILO_FW_CONTROL`
+payloads byte-for-byte from our bare-metal driver. Running it on
+a HailoRT-booted Pi 5 + AI HAT+ exercises the exact kernel path
+your supported tooling uses, with our exact byte sequences.
+
+**Decisive results from four hardware iterations:**
+
+1. SLM-OS's **descriptor geometry** (desc_count=64, page_size=512,
+   non-circular, ch=2) is accepted by every `hailo_pci` validation
+   path without modification.
+
+2. SLM-OS's **CS RPC wire format** (parameter_count framing,
+   length-prefixed fields, LE/BE conventions) is byte-for-byte
+   accepted by fw. RESET, CLEAR_CONFIGURED_APPS, GET_HW_CONSTS,
+   SET_NETWORK_GROUP_HEADER, all 4 SET_CONTEXT_INFO contexts, and
+   ENABLED each return `major_status=0x00000000`.
+
+3. **Real MNIST CCW microcode** (from `mnist.hef`, file offset
+   0x1f623, 256 bytes = 1 × 512 B descriptor) uploaded via
+   `HAILO_VDMA_LAUNCH_TRANSFER` on ch=1 completes cleanly —
+   `num_proc` on ch=1 advances, confirming fw processes VDMA
+   traffic on the config channel.
+
+4. Subsequent **`LAUNCH_TRANSFER` on ch=2 (boundary input) times
+   out with `num_proc=0`** — byte-identical symptom to what our
+   bare-metal driver exhibits.
+
+**Interpretation:** given the same byte sequences produce the
+same hang through two completely independent software stacks
+(our bare-metal OS + your `hailo_pci`), the issue is not in our
+low-level MMIO/cache/IRQ path, not in our descriptor geometry,
+and not in our CS RPC wire format. It's in the relationship
+between the CS handshake bodies and what fw needs to unblock the
+boundary-input data path.
+
+## Observed differences vs HailoRT's MNIST trace
+
+The bisect surfaced three concrete asymmetries between our
+handshake and what we see HailoRT do in the `trace_mmio` /
+`trace_ioctl` capture from a successful MNIST run:
+
+1. **GET_HW_CONSTS call count.** HailoRT invokes opcode 0x48
+   four times in succession on the CORE CPU before issuing
+   SET_NETWORK_GROUP_HEADER. We invoke it once. Is there a
+   state machine requirement that reads stale data on the first
+   1-3 calls, or is this benign retry logic?
+
+2. **SET_CONTEXT_INFO body sizes.** From the fwctl wire trace,
+   HailoRT's four SET_CONTEXT_INFO bodies for MNIST are
+   102 / 153 / 528 / 161 bytes (before the 16-byte common
+   header + 4-byte parameter_count). Our ctxsmoke-derived
+   bodies for the same HEF are 102 / 16 / 37 / 103 bytes — a
+   very different distribution, especially the 528-vs-37 gap on
+   what we believe is PRELIMINARY / DYNAMIC. This suggests our
+   context translator is under-emitting actions (burst credits,
+   LCU sequencer, fetch_data_from_vdma, etc.) that a real MNIST
+   inference setup requires. fw accepts our bodies with
+   `major_status=0`, but perhaps those bodies don't fully
+   configure the NN-core state machine for real inference to
+   flow.
+
+3. **Settle pings between RPCs.** HailoRT interleaves APP_CPU
+   opcodes 0x00 (IDENTIFY) and 0x33 (GET_DEVICE_INFORMATION)
+   between CS steps — specifically between the 4 SET_CONTEXT_INFO
+   calls and CHANGE_STATUS(ENABLED). Our probe sends the 4
+   SET_CONTEXT_INFO calls back-to-back then ENABLED immediately.
+   Is fw expected to process SET_CONTEXT_INFO bodies
+   asynchronously, with APP_CPU RPCs acting as a sync barrier?
+
+The ticket's original questions still stand, but these three
+asymmetries are the most concrete handles we have for a fix.
+We can share the full fwctl capture + our probe source if the
+ticket process allows it.
+
 ## Artifacts
 
 We can share (private channel preferred):

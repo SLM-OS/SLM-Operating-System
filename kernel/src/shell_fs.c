@@ -15,6 +15,28 @@
 #include <stdint.h>
 #include <stddef.h>
 
+static uint32_t shell_checksum32_update(uint32_t checksum,
+                                        const uint8_t *data,
+                                        size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        checksum ^= data[i];
+        checksum *= 0x01000193u;
+    }
+    return checksum;
+}
+
+static void xput_session_reset(void)
+{
+    struct shell_session *session = shell_session_current();
+    memset(&session->xput, 0, sizeof(session->xput));
+}
+
+static struct shell_xput_session *xput_session_current(void)
+{
+    return &shell_session_current()->xput;
+}
+
 /*
  * Build file content from argv[2..argc-1], joining with spaces and translating
  * C-style escapes (\n, \t, \r, \\, \", \0, \xNN). Returns bytes written into
@@ -78,6 +100,52 @@ static int shell_build_content(int argc, char *argv[], int first_arg,
         }
     }
     out[pos] = '\0';
+    return pos;
+}
+
+static int shell_hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+/*
+ * Build binary content from argv[first_arg..argc-1], concatenating each
+ * argument and decoding it as hex. Returns bytes written, or:
+ *   -1 if `out_size` is exhausted
+ *   -2 for an odd number of hex digits
+ *   -3 for a non-hex character
+ */
+static int shell_build_hex(int argc, char *argv[], int first_arg,
+                           uint8_t *out, int out_size)
+{
+    int pos = 0;
+    int hi = -1;
+
+    for (int i = first_arg; i < argc; i++) {
+        const char *p = argv[i];
+        while (*p) {
+            int nibble = shell_hex_nibble(*p++);
+            if (nibble < 0) {
+                return -3;
+            }
+            if (hi < 0) {
+                hi = nibble;
+                continue;
+            }
+            if (pos >= out_size) {
+                return -1;
+            }
+            out[pos++] = (uint8_t)((hi << 4) | nibble);
+            hi = -1;
+        }
+    }
+
+    if (hi >= 0) {
+        return -2;
+    }
     return pos;
 }
 
@@ -415,6 +483,279 @@ int cmd_write(int argc, char *argv[])
 
     shell_printf("Wrote %d bytes to %s\r\n", written, resolved);
     return 0;
+}
+
+/*
+ * put [-a] <path> <hex...> - Write binary hex to a file
+ *
+ * Decodes raw hex bytes over the existing shell transport. This is a
+ * transport primitive for binary-safe file ingress over telnet or UART.
+ * Use `put` to overwrite and `put -a` to append another chunk.
+ */
+int cmd_put(int argc, char *argv[])
+{
+    bool append_mode = false;
+    int path_arg = 1;
+    int data_arg = 2;
+
+    if (argc >= 2 && strcmp(argv[1], "-a") == 0) {
+        append_mode = true;
+        path_arg = 2;
+        data_arg = 3;
+    }
+
+    if (argc <= data_arg) {
+        shell_puts("Usage: put <path> <hex...>\r\n");
+        shell_puts("       put -a <path> <hex...>\r\n");
+        shell_puts("  Decode hexadecimal bytes into a file.\r\n");
+        shell_puts("  Default mode overwrites; -a appends another chunk.\r\n");
+        shell_puts("  Example: put /mnt/files/blob.bin 000102ff\r\n");
+        shell_puts("  Example: put -a /mnt/files/blob.bin aabbccdd\r\n");
+        return -1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(argv[path_arg], resolved, sizeof(resolved)) < 0) {
+        shell_puts("put: path too long\r\n");
+        return -1;
+    }
+
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
+    if (!mnt) {
+        shell_printf("put: %s: Not a mounted filesystem\r\n", resolved);
+        return -1;
+    }
+
+    static uint8_t data[512];
+    int bytes = shell_build_hex(argc, argv, data_arg, data, (int)sizeof(data));
+    if (bytes == -1) {
+        shell_printf("put: hex payload too large (max %d bytes per command)\r\n",
+                    (int)sizeof(data));
+        return -1;
+    }
+    if (bytes == -2) {
+        shell_puts("put: odd number of hex digits\r\n");
+        return -1;
+    }
+    if (bytes == -3) {
+        shell_puts("put: invalid hex digit\r\n");
+        return -1;
+    }
+
+    int flags = LFS_O_WRONLY | LFS_O_CREAT;
+    flags |= append_mode ? LFS_O_APPEND : LFS_O_TRUNC;
+
+    int fd = littlefs_file_open(mnt, subpath, flags);
+    if (fd < 0) {
+        shell_printf("put: %s: Failed to open file\r\n", resolved);
+        return -1;
+    }
+
+    int written = littlefs_file_write(mnt, fd, data, bytes);
+    littlefs_file_close(mnt, fd);
+    if (written != bytes) {
+        shell_printf("put: %s: Write failed\r\n", resolved);
+        return -1;
+    }
+
+    shell_printf("%s %d bytes to %s\r\n",
+                append_mode ? "Appended" : "Wrote", written, resolved);
+    return 0;
+}
+
+/*
+ * xput begin|chunk|status|finish|abort - Framed upload session
+ *
+ * Session-oriented upload surface for host tools. begin declares the
+ * final size and truncates the target. chunk enforces an exact offset,
+ * finish validates the declared size, and status exposes the current
+ * remote offset for resume/recovery.
+ */
+int cmd_xput(int argc, char *argv[])
+{
+    struct shell_xput_session *xput = xput_session_current();
+
+    if (argc < 2) {
+        shell_puts("Usage: xput begin <path> <size>\r\n");
+        shell_puts("       xput chunk <offset> <hex...>\r\n");
+        shell_puts("       xput status\r\n");
+        shell_puts("       xput finish\r\n");
+        shell_puts("       xput abort\r\n");
+        return -1;
+    }
+
+    if (strcmp(argv[1], "status") == 0) {
+        if (!xput->active) {
+            shell_puts("XPUT inactive\r\n");
+            return 0;
+        }
+        shell_printf("XPUT active path=%s size=%lu received=%lu checksum=%lu\r\n",
+                     xput->path,
+                     (unsigned long)xput->expected_size,
+                     (unsigned long)xput->received_size,
+                     (unsigned long)xput->checksum);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "abort") == 0) {
+        xput_session_reset();
+        shell_puts("XPUT aborted\r\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "begin") == 0) {
+        char resolved[VFS_MAX_PATH];
+        const char *subpath = NULL;
+        struct lfs_mount *mnt;
+        uint32_t size;
+        int fd;
+
+        if (argc < 4) {
+            shell_puts("Usage: xput begin <path> <size>\r\n");
+            return -1;
+        }
+        if (shell_resolve_path(argv[2], resolved, sizeof(resolved)) < 0) {
+            shell_puts("xput begin: path too long\r\n");
+            return -1;
+        }
+        if (shell_parse_uint(argv[3], &size) != 0) {
+            shell_printf("xput begin: invalid size: %s\r\n", argv[3]);
+            return -1;
+        }
+        mnt = vfs_get_mount_ctx(resolved, &subpath);
+        if (!mnt) {
+            shell_printf("xput begin: %s: Not a mounted filesystem\r\n", resolved);
+            return -1;
+        }
+        fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+        if (fd < 0) {
+            shell_printf("xput begin: %s: Failed to open file\r\n", resolved);
+            return -1;
+        }
+        littlefs_file_close(mnt, fd);
+
+        xput_session_reset();
+        xput = xput_session_current();
+        xput->active = true;
+        strncpy(xput->path, resolved, sizeof(xput->path) - 1);
+        xput->path[sizeof(xput->path) - 1] = '\0';
+        xput->expected_size = size;
+        xput->received_size = 0;
+        xput->checksum = 0x811C9DC5u;
+        shell_printf("XPUT ok begin path=%s size=%lu\r\n",
+                     xput->path,
+                     (unsigned long)xput->expected_size);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "chunk") == 0) {
+        uint32_t offset;
+        const char *subpath = NULL;
+        struct lfs_mount *mnt;
+        static uint8_t data[512];
+        int bytes;
+        int fd;
+        int written;
+
+        if (argc < 4) {
+            shell_puts("Usage: xput chunk <offset> <hex...>\r\n");
+            return -1;
+        }
+        if (!xput->active) {
+            shell_puts("xput chunk: no active session\r\n");
+            return -1;
+        }
+        if (shell_parse_uint(argv[2], &offset) != 0) {
+            shell_printf("xput chunk: invalid offset: %s\r\n", argv[2]);
+            return -1;
+        }
+        if (offset != xput->received_size) {
+            shell_printf("xput chunk: offset mismatch expected=%lu got=%lu\r\n",
+                         (unsigned long)xput->received_size,
+                         (unsigned long)offset);
+            return -1;
+        }
+        bytes = shell_build_hex(argc, argv, 3, data, (int)sizeof(data));
+        if (bytes == -1) {
+            shell_printf("xput chunk: payload too large (max %d bytes)\r\n",
+                         (int)sizeof(data));
+            return -1;
+        }
+        if (bytes == -2) {
+            shell_puts("xput chunk: odd number of hex digits\r\n");
+            return -1;
+        }
+        if (bytes == -3) {
+            shell_puts("xput chunk: invalid hex digit\r\n");
+            return -1;
+        }
+        if ((uint64_t)xput->received_size + (uint32_t)bytes >
+            (uint64_t)xput->expected_size) {
+            shell_printf("xput chunk: exceeds declared size %lu\r\n",
+                         (unsigned long)xput->expected_size);
+            return -1;
+        }
+
+        mnt = vfs_get_mount_ctx(xput->path, &subpath);
+        if (!mnt) {
+            shell_printf("xput chunk: %s: Not a mounted filesystem\r\n",
+                         xput->path);
+            return -1;
+        }
+        fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT);
+        if (fd < 0) {
+            shell_printf("xput chunk: %s: Failed to open file\r\n",
+                         xput->path);
+            return -1;
+        }
+        if (littlefs_file_seek(mnt, fd, (int32_t)offset, 0) < 0) {
+            littlefs_file_close(mnt, fd);
+            shell_printf("xput chunk: %s: Seek failed\r\n", xput->path);
+            return -1;
+        }
+        written = littlefs_file_write(mnt, fd, data, (size_t)bytes);
+        littlefs_file_close(mnt, fd);
+        if (written != bytes) {
+            shell_printf("xput chunk: %s: Write failed\r\n", xput->path);
+            return -1;
+        }
+
+        xput->received_size += (uint32_t)bytes;
+        xput->checksum =
+            shell_checksum32_update(xput->checksum, data, (size_t)bytes);
+        shell_printf("XPUT ok chunk offset=%lu next=%lu checksum=%lu\r\n",
+                     (unsigned long)offset,
+                     (unsigned long)xput->received_size,
+                     (unsigned long)xput->checksum);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "finish") == 0) {
+        if (!xput->active) {
+            shell_puts("xput finish: no active session\r\n");
+            return -1;
+        }
+        if (xput->received_size != xput->expected_size) {
+            shell_printf("xput finish: size mismatch expected=%lu received=%lu\r\n",
+                         (unsigned long)xput->expected_size,
+                         (unsigned long)xput->received_size);
+            return -1;
+        }
+        shell_printf("XPUT ok finish path=%s size=%lu checksum=%lu\r\n",
+                     xput->path,
+                     (unsigned long)xput->received_size,
+                     (unsigned long)xput->checksum);
+        xput_session_reset();
+        return 0;
+    }
+
+    shell_puts("Usage: xput begin <path> <size>\r\n");
+    shell_puts("       xput chunk <offset> <hex...>\r\n");
+    shell_puts("       xput status\r\n");
+    shell_puts("       xput finish\r\n");
+    shell_puts("       xput abort\r\n");
+    return -1;
 }
 
 /*

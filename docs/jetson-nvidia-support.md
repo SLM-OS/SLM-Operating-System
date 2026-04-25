@@ -34,6 +34,35 @@ This document consolidates all findings related to running SLM-OS on the Jetson 
 > The "no GPU compute capability on bare metal" bullet under Solution 5
 > below is therefore outdated for Jetson — it still applies to Pi 5 whose
 > VideoCore GPU has no public bare-metal documentation.
+>
+> **24 April 2026 Update:** Phase 8 scales up beyond the original
+> `write_cafe` scalar store. Three more CUDA-compiled kernels
+> (`scripts/cuda/dot4.cu` — 4-elem dot product, `matmul4x4.cu` —
+> single-thread 4×4 matmul, `matmul4x4_mt.cu` — 16-thread 4×4 matmul)
+> all dispatch SLM-OS-side post-kexec. Handoff v4 adds an
+> `expected_payload` field so `nvgpu launch-kernel` polls for
+> arbitrary values (300, 30, …), not just 0xCAFE. Per-kernel launchers
+> share scaffolding via `scripts/gpu-launch-common.{h,c}`; the
+> multi-threaded matmul is the first to override the default 1×1×1
+> CTA thread dims. All four kernels validated Linux-side and
+> SLM-OS-side on jetson-nano-1.
+>
+> **25 April 2026 Update:** MNIST inference now runs end-to-end on
+> the GA10B GPU from SLM-OS post-kexec. `models/test/mnist.onnx`
+> dispatches as an 8-op chain (Conv1 → Add+ReLU → Pool1 → Conv2 →
+> Add+ReLU → Pool2 → MatMul → AddBias) producing 10 fp32 logits
+> whose argmax matches the existing CPU NEON reference. Eight
+> milestones (M0–M8 in `docs/jetson-gpu-mnist-plan.md`) cover
+> multi-CTA dispatch, fp32 SASS, parameterized GEMM/Conv2D/Pool/
+> Add+ReLU kernels, and the v5 multi-op handoff that lets one
+> `nvgpu launch-kernel` invocation chain N kernels. The previously-
+> outdated "no GPU compute capability on bare metal" framing was
+> already retired for Jetson at Phase 8; this milestone closes the
+> "demonstration vs real inference" gap as well. The remaining
+> future work is fully SLM-OS-native channel + buffer setup
+> (Linux helper still does the `nvgpu` ioctls pre-kexec) and Rust
+> runtime FFI integration so `slm.model_infer()` routes to GPU
+> automatically.
 
 ---
 

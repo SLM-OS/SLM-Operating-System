@@ -342,6 +342,44 @@ typedef struct {
 /* Populate `out` with the current eviction stats. Returns 0 on success. */
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 
+/* Runtime eviction-blob staging/activation backend (#dynamic-policy-loading).
+ * kind_id: 1 = xgboost, 2 = mlp, 3 = cacheus_config.
+ * state: 0 = empty, 1 = staged, 2 = active, 3 = rolled_back. */
+typedef struct {
+    uint16_t version;
+    uint16_t kind_id;
+    uint16_t feature_schema_version;
+    uint16_t _reserved0;
+    uint32_t payload_len;
+    uint32_t checksum;
+} RustEvictionBlobMeta;
+
+typedef struct {
+    uint16_t kind_id;
+    uint16_t state;
+    uint32_t has_staged;
+    uint32_t has_active;
+    uint32_t has_rollback;
+    RustEvictionBlobMeta staged;
+    RustEvictionBlobMeta active;
+    RustEvictionBlobMeta rollback;
+} RustEvictionBlobStatus;
+
+/* Stage a validated blob from `data[0..len)`. Returns 0 on success,
+ * -1 on invalid args / unknown kind, -2 when ai_eviction is disabled,
+ * -3 on parse/validation failure, -4 when the blob header kind does
+ * not match `kind_id`. */
+extern int32_t rust_eviction_blob_stage(uint16_t kind_id, const uint8_t *data, size_t len);
+
+/* Query, activate, roll back, or clear the runtime blob for `kind_id`.
+ * Status returns 0 on success, -1 on invalid args/kind, -2 when feature
+ * off. Activate returns -3 when no staged blob exists. Rollback returns
+ * -3 when no rollback blob exists. Clear returns 0 on success. */
+extern int32_t rust_eviction_blob_status(uint16_t kind_id, RustEvictionBlobStatus *out);
+extern int32_t rust_eviction_blob_activate(uint16_t kind_id);
+extern int32_t rust_eviction_blob_rollback(uint16_t kind_id);
+extern int32_t rust_eviction_blob_clear(uint16_t kind_id);
+
 /* Feature-name introspection (#112). */
 extern uint32_t rust_eviction_feature_count(void);
 extern size_t rust_eviction_feature_name(uint32_t index, uint8_t *buf, size_t buf_len);
@@ -629,6 +667,78 @@ int slm_gpu_available(void);
  * Returns: 0 on success, -1 on error. Fills info struct.
  */
 int slm_gpu_get_info(RustGpuInfo *info);
+
+/*
+ * Run the pre-loaded MNIST GPU pipeline. Requires a v5 channel
+ * handoff to be present in DRAM (set up by
+ * scripts/gpu-kernel-mnist.c --preserve-for-kexec pre-kexec) and
+ * for the channel to have been inherited (lazy-initialised on
+ * first call: nvgpu inherit + nvgpu channel run automatically).
+ *
+ * `logits_bytes_out` must point at a 40-byte buffer that receives
+ * the final op's output (10 fp32 values, little-endian). The
+ * buffer is delivered as raw bytes because the kernel target
+ * compiles with -mgeneral-regs-only and cannot manipulate
+ * floating-point types directly; callers (Lua, Rust, dedicated
+ * kernel modules with FP enabled) interpret as fp32. The argmax
+ * helper below provides FP-free predicted-class extraction.
+ *
+ * Returns 0 on success; negative rc on failure (no v5 handoff,
+ * channel inherit failed, dispatch timed out, etc.). On non-Jetson
+ * platforms returns -1 unconditionally.
+ */
+int slm_gpu_run_mnist(void *logits_bytes_out);
+
+/*
+ * FP-free argmax over an array of fp32 bit patterns. Used by
+ * Lua / shell callers that need the predicted class but can't do
+ * fp32 comparisons directly under -mgeneral-regs-only.
+ *
+ * `logits_bytes` must point at `n_logits` * 4 bytes of
+ * little-endian fp32 values. Returns the index of the largest
+ * value, or -1 if `n_logits == 0` or `logits_bytes == NULL`. On
+ * NaN inputs the comparison is undefined (no MNIST output should
+ * produce NaN).
+ */
+int slm_fp32_argmax(const void *logits_bytes, uint32_t n_logits);
+
+/*
+ * Write user-supplied input bytes into the GPU's MNIST input buffer
+ * at runtime. Pairs with slm_gpu_run_mnist() — call this first to
+ * swap in a different image, then call run_mnist() to classify it.
+ *
+ * Requires a v6 channel handoff (`scripts/gpu-kernel-mnist.c`
+ * --preserve-for-kexec writes one when v6 is enabled). The buffer is
+ * cache-cleaned after the write so the GPU sees the fresh tensor on
+ * the next dispatch.
+ *
+ * `bytes` is opaque to the kernel: for MNIST it should be
+ * 1×1×28×28 = 784 fp32 values (3,136 bytes), but the kernel just
+ * bounds-checks and memcpys. `cap` must be ≤ the handoff's
+ * `input_buf_size`.
+ *
+ * Returns 0 on success, or on Jetson:
+ *   -1 = no v6 handoff loaded (input_buf_phys == 0)
+ *   -2 = cap exceeds input_buf_size
+ *   -3 = NULL bytes pointer
+ * On non-Jetson platforms returns -1 unconditionally.
+ */
+int slm_gpu_set_mnist_input(const void *bytes, size_t cap);
+
+/*
+ * Fill the GPU's MNIST input buffer with `n_floats` copies of the
+ * fp32 bit pattern `value_bits` (e.g. 0x3F800000 for 1.0f). Built in
+ * to dodge serial-link corruption on long `lua-admin -e` commands —
+ * a uniform-fill is enough to prove that swapping the input changes
+ * the argmax, and the entire call fits in a 30-character Lua string.
+ *
+ * `n_floats` must be ≤ input_buf_size / 4 (3,136 / 4 = 784 for the
+ * MNIST pipeline). Cache-clean is issued after the fill.
+ *
+ * Returns 0 on success, negative rc on failure (no v6 handoff,
+ * n_floats too large, etc.). On non-Jetson platforms returns -1.
+ */
+int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats);
 
 /*
  * Print GPU status to UART (called from Rust shell command).

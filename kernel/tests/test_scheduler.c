@@ -25,6 +25,7 @@
 #ifdef CONFIG_AI_SCHEDULER
 #include "ai_inference.h"
 #include "ai_state.h"
+#include "runtime_model.h"
 #endif
 #include <limits.h>
 
@@ -3263,6 +3264,239 @@ static void test_proactive_load_balance_inert_when_light(void)
     sched_set_policy(sched_find_policy("heuristic"));
 }
 
+#ifdef CONFIG_AI_SCHEDULER
+static uint32_t test_sched_fnv1a32(const uint8_t *data, size_t len)
+{
+    uint32_t hash = 0x811C9DC5u;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= data[i];
+        hash *= 0x01000193u;
+    }
+    return hash;
+}
+
+static size_t build_sched_test_blob(uint16_t kind_id, const uint8_t *payload,
+                                    size_t payload_len, uint8_t *out,
+                                    size_t out_cap)
+{
+    uint32_t checksum = test_sched_fnv1a32(payload, payload_len);
+    size_t total = 24u + payload_len;
+    if (out_cap < total) return 0;
+
+    out[0] = 'S'; out[1] = 'E'; out[2] = 'M'; out[3] = 'B';
+    out[4] = 1; out[5] = 0;
+    out[6] = (uint8_t)(kind_id & 0xFF);
+    out[7] = (uint8_t)(kind_id >> 8);
+    out[8] = 1; out[9] = 0;
+    out[10] = 0; out[11] = 0;
+    out[12] = (uint8_t)(payload_len & 0xFF);
+    out[13] = (uint8_t)((payload_len >> 8) & 0xFF);
+    out[14] = (uint8_t)((payload_len >> 16) & 0xFF);
+    out[15] = (uint8_t)((payload_len >> 24) & 0xFF);
+    out[16] = (uint8_t)(checksum & 0xFF);
+    out[17] = (uint8_t)((checksum >> 8) & 0xFF);
+    out[18] = (uint8_t)((checksum >> 16) & 0xFF);
+    out[19] = (uint8_t)((checksum >> 24) & 0xFF);
+    out[20] = 0; out[21] = 0; out[22] = 0; out[23] = 0;
+    memcpy(out + 24, payload, payload_len);
+    return total;
+}
+
+static size_t build_sched_config_payload(uint32_t enabled,
+                                         uint32_t min_target_ready,
+                                         uint32_t min_active_cpus,
+                                         uint32_t imbalance_num,
+                                         uint32_t imbalance_den,
+                                         uint8_t *out, size_t out_cap)
+{
+    size_t cursor = 0;
+    if (out_cap < 32u) return 0;
+    memset(out, 0, 32u);
+    out[0] = 'S'; out[1] = 'C'; out[2] = 'F'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 1; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = 0; out[11] = 0;
+    cursor = 12;
+#define WRITE_CFG_U32(bits)                                                  \
+    do {                                                                    \
+        uint32_t bits_ = (bits);                                            \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                          \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                   \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                  \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                  \
+        cursor += 4;                                                        \
+    } while (0)
+    WRITE_CFG_U32(enabled);
+    WRITE_CFG_U32(min_target_ready);
+    WRITE_CFG_U32(min_active_cpus);
+    WRITE_CFG_U32(imbalance_num);
+    WRITE_CFG_U32(imbalance_den);
+#undef WRITE_CFG_U32
+    return cursor;
+}
+
+static void test_proactive_load_balance_runtime_config_disable(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 2");
+        return;
+    }
+
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+    sched_set_policy(&stub_policy);
+
+    uint8_t payload[64];
+    uint8_t blob[128];
+    size_t payload_len = build_sched_config_payload(0u, 2u, 2u, 3u, 2u,
+                                                    payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                            payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_CONFIG));
+
+    irq_flags_t flags = irq_save();
+    const int N = 6;
+    struct task *tasks[6];
+    for (int i = 0; i < N; i++) {
+        tasks[i] = task_create("s5_cfg_off", nop_entry, NULL);
+        TEST_ASSERT_NOT_NULL(tasks[i]);
+        scheduler_add_task(tasks[i]);
+        TEST_ASSERT_EQUAL_UINT32(0, tasks[i]->assigned_cpu);
+    }
+    for (int i = 0; i < N; i++) {
+        scheduler_remove_task(tasks[i]);
+        tasks[i]->id = 0;
+    }
+    irq_restore(flags);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+static void test_proactive_load_balance_runtime_config_aggressive(void)
+{
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 2");
+        return;
+    }
+
+    if (!sched_find_policy("test_stub")) {
+        sched_register_policy(&stub_policy);
+    }
+    sched_set_policy(&stub_policy);
+
+    uint8_t payload[64];
+    uint8_t blob[128];
+    size_t payload_len = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
+                                                    payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                            payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_CONFIG));
+
+    irq_flags_t flags = irq_save();
+    struct task *a = task_create("s5_cfg_on_a", nop_entry, NULL);
+    struct task *b = task_create("s5_cfg_on_b", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_NOT_NULL(b);
+    scheduler_add_task(a);
+    scheduler_add_task(b);
+    TEST_ASSERT_EQUAL_UINT32(0, a->assigned_cpu);
+    TEST_ASSERT_NOT_EQUAL(0u, b->assigned_cpu);
+    scheduler_remove_task(a);
+    scheduler_remove_task(b);
+    a->id = 0;
+    b->id = 0;
+    irq_restore(flags);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+    sched_set_policy(sched_find_policy("heuristic"));
+}
+
+static void test_sched_runtime_config_activation_sets_active_blob(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    struct sched_model_status status;
+    size_t payload_len = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
+                                                    payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                            payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_CONFIG, &status));
+    TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ACTIVE, status.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_active);
+    TEST_ASSERT_EQUAL_UINT32(0u, status.has_staged);
+    TEST_ASSERT_EQUAL_UINT32(0u, status.has_rollback);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)payload_len, status.active.payload_len);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+}
+
+static void test_sched_runtime_rollback_rejects_busy_active_slot(void)
+{
+    uint8_t payload_a[64];
+    uint8_t payload_b[64];
+    uint8_t blob_a[128];
+    uint8_t blob_b[128];
+    struct sched_model_status status;
+    const struct sched_runtime_balance_config *cfg = NULL;
+    sched_runtime_token_t token = 0;
+    size_t payload_len_a = build_sched_config_payload(0u, 2u, 2u, 3u, 2u,
+                                                      payload_a, sizeof(payload_a));
+    size_t payload_len_b = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
+                                                      payload_b, sizeof(payload_b));
+    size_t blob_len_a = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload_a,
+                                              payload_len_a, blob_a, sizeof(blob_a));
+    size_t blob_len_b = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload_b,
+                                              payload_len_b, blob_b, sizeof(blob_b));
+
+    TEST_ASSERT_TRUE(payload_len_a > 0);
+    TEST_ASSERT_TRUE(payload_len_b > 0);
+    TEST_ASSERT_TRUE(blob_len_a > 0);
+    TEST_ASSERT_TRUE(blob_len_b > 0);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob_a, blob_len_a));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob_b, blob_len_b));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_CONFIG));
+
+    TEST_ASSERT_EQUAL_INT(1, sched_runtime_balance_config_acquire(&cfg, &token));
+    TEST_ASSERT_NOT_NULL(cfg);
+    TEST_ASSERT_EQUAL_UINT32(1u, cfg->enabled);
+    TEST_ASSERT_NOT_EQUAL(0u, token);
+
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_rollback(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_CONFIG, &status));
+    TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ACTIVE, status.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_active);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_rollback);
+
+    sched_runtime_balance_config_release(token);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_rollback(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_CONFIG, &status));
+    TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ROLLED_BACK, status.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_active);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+}
+#endif
+
 /* Failing init policy: init() returns -1 */
 static int fail_init(void)
 {
@@ -3888,6 +4122,7 @@ static void test_ai_policy_switch_to_mlp_and_back(void)
     TEST_ASSERT_EQUAL_STRING("heuristic", sched_get_policy());
 }
 
+
 /*
  * Test: fp_save and fp_restore are callable and don't crash.
  * (Full FP register verification requires M6; this just tests linkage
@@ -4174,6 +4409,12 @@ int test_suite_scheduler(void)
     RUN_TEST(test_proactive_load_balance_redirect);
     RUN_TEST(test_proactive_load_balance_respects_isolation);
     RUN_TEST(test_proactive_load_balance_inert_when_light);
+#ifdef CONFIG_AI_SCHEDULER
+    RUN_TEST(test_proactive_load_balance_runtime_config_disable);
+    RUN_TEST(test_proactive_load_balance_runtime_config_aggressive);
+    RUN_TEST(test_sched_runtime_config_activation_sets_active_blob);
+    RUN_TEST(test_sched_runtime_rollback_rejects_busy_active_slot);
+#endif
     RUN_TEST(test_policy_init_failure_keeps_old);
     RUN_TEST(test_policy_tick_callback_invoked);
     RUN_TEST(test_policy_heuristic_distributes_tasks);

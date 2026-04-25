@@ -46,8 +46,8 @@ static inline void xhci_build_setup_stage(struct xhci_trb *out,
 /*
  * Data Stage TRB (§6.4.1.2.2). `param` is the data buffer physical
  * address. `status` carries the TRB Transfer Length. DIR bit (bit 16
- * of the control dword) is set for IN, cleared for OUT. ISP is set
- * so a short-packet IN raises an event.
+ * of the control dword) is set for IN, cleared for OUT. ISP is set so
+ * a short-packet IN raises an event.
  */
 static inline void xhci_build_data_stage(struct xhci_trb *out,
                                          uintptr_t buf_phys,

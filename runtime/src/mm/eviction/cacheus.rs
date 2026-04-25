@@ -34,11 +34,14 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use super::blob::BlobKind;
 use super::lru::LruPolicy;
 use super::lfu::LfuPolicy;
 use super::slm_heuristic::SlmHeuristicPolicy;
 use super::mlp::MlpPolicy;
+use super::store::active_blob;
 use super::policy::{BlockMeta, EvictionPolicy, TrajectoryEntry, MAX_EXPERTS};
+use super::runtime_cacheus::{ExpertPool, RuntimeCacheusConfig};
 use super::xgboost::XGBoostPolicy;
 
 /// Trajectory ring capacity (#111). Caps memory at
@@ -68,6 +71,10 @@ struct EvictionRecord {
 /// updates. Weights are non-negative, sum to 1, and are floored at
 /// `min_weight` after every update so no expert is silenced forever.
 pub struct CacheusSelector {
+    default_expert_pool: ExpertPool,
+    default_learning_rate: f32,
+    default_min_weight: f32,
+    default_window_size: usize,
     experts: Vec<Box<dyn EvictionPolicy + Send>>,
     weights: Vec<f32>,
     learning_rate: f32,
@@ -80,6 +87,7 @@ pub struct CacheusSelector {
     /// `update_weights` call. Pre-allocated to TRAJECTORY_CAPACITY so
     /// runtime push operations never hit the heap after init.
     trajectory: VecDeque<TrajectoryEntry>,
+    runtime_config_checksum: Option<u32>,
 }
 
 impl CacheusSelector {
@@ -91,10 +99,23 @@ impl CacheusSelector {
         learning_rate: f32,
         window_size: usize,
     ) -> Self {
+        Self::new_with_defaults(experts, learning_rate, window_size, ExpertPool::MlOnly)
+    }
+
+    fn new_with_defaults(
+        experts: Vec<Box<dyn EvictionPolicy + Send>>,
+        learning_rate: f32,
+        window_size: usize,
+        default_expert_pool: ExpertPool,
+    ) -> Self {
         debug_assert!(!experts.is_empty(), "CACHEUS requires at least one expert");
         let n = experts.len();
         let weights = alloc::vec![1.0 / n as f32; n];
         Self {
+            default_expert_pool,
+            default_learning_rate: learning_rate,
+            default_min_weight: DEFAULT_MIN_WEIGHT,
+            default_window_size: window_size,
             experts,
             weights,
             learning_rate,
@@ -104,6 +125,7 @@ impl CacheusSelector {
             expert_faults: alloc::vec![0; n],
             expert_decisions: alloc::vec![0; n],
             trajectory: VecDeque::with_capacity(TRAJECTORY_CAPACITY),
+            runtime_config_checksum: None,
         }
     }
 
@@ -114,7 +136,8 @@ impl CacheusSelector {
             Box::new(XGBoostPolicy::new()),
             Box::new(MlpPolicy::new()),
         ];
-        Self::new(experts, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW)
+        Self::new_with_defaults(
+            experts, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW, ExpertPool::MlOnly)
     }
 
     /// Ablation-experiment constructor: LRU + LFU + SLM-Heuristic +
@@ -128,7 +151,8 @@ impl CacheusSelector {
             Box::new(XGBoostPolicy::new()),
             Box::new(MlpPolicy::new()),
         ];
-        Self::new(experts, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW)
+        Self::new_with_defaults(
+            experts, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW, ExpertPool::All5)
     }
 
     pub fn weights(&self) -> &[f32] { &self.weights }
@@ -191,10 +215,57 @@ impl CacheusSelector {
         }
         self.trajectory.push_back(entry);
     }
+
+    fn rebuild_for_runtime_config(&mut self, cfg: RuntimeCacheusConfig, checksum: u32) {
+        let experts: Vec<Box<dyn EvictionPolicy + Send>> = match cfg.expert_pool {
+            ExpertPool::MlOnly => alloc::vec![
+                Box::new(XGBoostPolicy::new()),
+                Box::new(MlpPolicy::new()),
+            ],
+            ExpertPool::All5 => alloc::vec![
+                Box::new(LruPolicy::new()),
+                Box::new(LfuPolicy::new()),
+                Box::new(SlmHeuristicPolicy::new()),
+                Box::new(XGBoostPolicy::new()),
+                Box::new(MlpPolicy::new()),
+            ],
+        };
+        let n = experts.len();
+        self.experts = experts;
+        self.weights = alloc::vec![1.0 / n as f32; n];
+        self.learning_rate = cfg.learning_rate;
+        self.min_weight = cfg.min_weight;
+        self.window_size = cfg.window_size;
+        self.history = VecDeque::with_capacity(cfg.window_size);
+        self.expert_faults = alloc::vec![0; n];
+        self.expert_decisions = alloc::vec![0; n];
+        self.trajectory.clear();
+        self.runtime_config_checksum = Some(checksum);
+    }
+
+    fn ensure_runtime_config(&mut self) {
+        if let Some(blob) = active_blob(BlobKind::CacheusConfig) {
+            let checksum = blob.header.checksum;
+            if self.runtime_config_checksum != Some(checksum) {
+                if let Ok(cfg) = super::runtime_cacheus::parse_payload(&blob.payload) {
+                    self.rebuild_for_runtime_config(cfg, checksum);
+                }
+            }
+        } else if self.runtime_config_checksum.is_some() {
+            self.rebuild_for_runtime_config(RuntimeCacheusConfig {
+                expert_pool: self.default_expert_pool,
+                learning_rate: self.default_learning_rate,
+                window_size: self.default_window_size,
+                min_weight: self.default_min_weight,
+            }, 0);
+            self.runtime_config_checksum = None;
+        }
+    }
 }
 
 impl EvictionPolicy for CacheusSelector {
     fn select_victim(&mut self, candidates: &[BlockMeta]) -> usize {
+        self.ensure_runtime_config();
         debug_assert!(
             !candidates.is_empty(),
             "CACHEUS select_victim on empty list"
@@ -244,6 +315,7 @@ impl EvictionPolicy for CacheusSelector {
     /// lets CACHEUS nest inside another CACHEUS as an expert, though
     /// we don't exercise that today.
     fn score(&mut self, candidates: &[BlockMeta]) -> Vec<f32> {
+        self.ensure_runtime_config();
         let n = candidates.len();
         if n == 0 { return Vec::new(); }
         let mut combined = alloc::vec![0.0_f32; n];
@@ -257,6 +329,7 @@ impl EvictionPolicy for CacheusSelector {
     }
 
     fn update_feedback(&mut self, block_id: u32, was_fault: bool) {
+        self.ensure_runtime_config();
         // Search history newest-to-oldest for the matching eviction.
         let found = self
             .history

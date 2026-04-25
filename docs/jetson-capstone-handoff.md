@@ -204,6 +204,98 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   compiled and channel/QMD setup is still done by the Linux
   helper; fully SLM-OS-native compile + channel creation remains
   future work.
+- **Phase 8+ compute scale-up (April 24, branch
+  `jetson-gpu-dot-product`):** four follow-on kernels beyond
+  write_cafe, all dispatched SLM-OS-side post-kexec. Each uses
+  the same 13-dword pushbuffer and the same channel handoff
+  path; per-kernel differences are confined to the Linux helper
+  (shader, cbuf pointer layout, QMD CTA dims).
+    - **dot4** — 4-element integer dot product, 1 thread × 1 CTA.
+      First "real arithmetic" kernel: 4 multiplies + 3 adds + 8
+      global loads. Inputs `a={1,2,3,4}`, `b={10,20,30,40}`;
+      expected output 300.
+    - **matmul4x4** — 4×4 integer matmul, unrolled triple loop,
+      1 thread × 1 CTA. 64 multiplies + 48 adds + 32 global
+      loads + 16 global stores. Inputs `A = [1..16]` row-major,
+      `B = Aᵀ`; full Gram matrix validated Linux-side, C[0][0]=30
+      used as the SLM-OS-side sentinel.
+    - **matmul4x4_mt** — same math, 16 threads × 1 CTA (4×4
+      thread block). First launcher to override the default
+      1×1×1 CTA thread dims: sets `CTA_THREAD_DIMENSION0/1 = 4`
+      on the QMD after `gpu_launch_populate_qmd()`. Kernel
+      reads `SR_TID.X/Y` so each thread computes one `C[i][j]`
+      independently. First truly parallel dispatch in the tree.
+    - **Handoff v4** — adds `expected_payload` (+ 4 B pad)
+      after the v3 fields. SLM-OS's `nvgpu launch-kernel` polls
+      `output_phys` for whatever value the helper wrote; v2/v3
+      handoffs (or v4 with the field zeroed) fall back to
+      `GA10B_SMOKETEST_SEM_PAYLOAD` so existing write_cafe
+      flows keep working. Selection lives in
+      `ga10b_pick_launch_payload()` (shared header, pure-logic,
+      host-testable — 4 tests cover v3, v4-zero, v4-nonzero,
+      forward-compat).
+    - **Shared launcher scaffolding** — `scripts/gpu-launch-common.{h,c}`
+      holds channel setup, QMD population, dispatch pushbuffer
+      builder, submit+poll, and v4 handoff writer. Per-kernel
+      launchers (`gpu-kernel-launch.c`, `gpu-kernel-dot4.c`,
+      `gpu-kernel-matmul4x4.c`, `gpu-kernel-matmul4x4-mt.c`) are
+      thin orchestrators (~170–210 lines each) that only carry
+      kernel-specific concerns: shader path, cbuf pointer
+      layout, input/output buffers, expected output value. One
+      submit-path bug fixed here (nvmap-dmabuf pages don't
+      populate pagemap entries until first CPU access —
+      `gpu_alloc_buffer` now forces the fault-in before calling
+      `virt_to_phys`, otherwise `output_phys=0` in the handoff).
+- **MNIST inference end-to-end on GPU
+  (April 25, branch `jetson-gpu-multicta`):** the project's first
+  full neural-network inference running on the Jetson GA10B from
+  SLM-OS post-kexec. `models/test/mnist.onnx` is dispatched as an
+  8-op kernel chain (Conv1 → bias+ReLU → Pool1 → Conv2 → bias+ReLU
+  → Pool2 → MatMul → AddBias) producing 10 fp32 logits whose
+  argmax matches the existing CPU NEON reference. Eight milestones
+  cover the full distance from `matmul4x4_mt` to MNIST, all
+  hardware-validated on jetson-nano-1; see
+  `docs/jetson-gpu-mnist-plan.md` for the per-phase status.
+  Highlights:
+    - **Multi-CTA grid dispatch** (M0): the first kernel to use
+      more than one CTA per dispatch. Exercises QMD
+      `CTA_RASTER_WIDTH/HEIGHT` (which had been hardwired to 1 in
+      the populate-defaults path).
+    - **fp32 SASS** (M1): first FFMA kernel dispatched from raw
+      nvgpu in the tree.
+    - **Parameterized GEMM** (M2): one SASS handles every
+      `M × K × N` matmul shape MNIST and future SLMs need; shape
+      params come from `cbuf[0][0x178..0x180]`. Uncovered a
+      builtin-vars bug — the SASS reads `blockDim.x/y` from
+      `cbuf[0][0x0..0x8]`, which the launcher had been leaving
+      zero. Fixed via a new `gpu_write_builtin_dims()` helper.
+    - **Fused Add+ReLU**, **MaxPool2D**, **direct Conv2D** (M3,
+      M4, M5): one SASS per op with shape params from cbuf.
+      Conv2D's direct convolution (no im2col) was the largest
+      single piece — 6,272 + 3,136 = 9,408 cells across both
+      MNIST conv shapes, all matching the CPU reference.
+    - **Handoff v5 + multi-op pipeline dispatch** (M6): the
+      handoff now carries an array of `struct ga10b_pipeline_op`
+      describing N dispatches in sequence. SLM-OS's
+      `nvgpu launch-kernel` iterates the array, polling each op's
+      sentinel before advancing. v3/v4 single-shot path
+      preserved when `pipeline_n_ops == 0`. Two new shared
+      predicates land in the handoff header:
+      `ga10b_poll_match` (exact-match vs any-non-zero polling)
+      and `ga10b_pipeline_op_is_valid` (pre-dispatch sanity).
+    - **MNIST end-to-end** (M8): `scripts/gpu-kernel-mnist.c`
+      builds 8 QMDs, 8 cbufs, 6 weight buffers + input buffer + 8
+      activation buffers, fires the chain, and validates the
+      final logits against `expected_logits.bin` produced by
+      `scripts/mnist-extract-weights.py` (numpy reference). On
+      jetson-nano-1: max|err| = 0.000000 in fp32, argmax = 3 =
+      CPU argmax for the synthetic input. Same chain re-dispatched
+      from SLM-OS post-kexec via the v5 handoff produces the same
+      logits buffer (verified by `peek 0x...` reading 0xc003b6ca
+      = -2.058 = logits[0] and 0x3fa5ffc6 = 1.297 = logits[3]).
+  M7 (Rust runtime FFI integration) is deferred — the shell-only
+  path proves correctness; routing through `slm.model_infer()` is
+  scheduled work, not a correctness gap.
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)
@@ -263,8 +355,10 @@ during the S4 capture session — don't break it. A fresh agent can
 verify with `ssh 192.168.4.93 sudo -n -l /usr/local/bin/slmos-kexec`
 which should print the binary path with no password prompt.
 
-**Avoid pi-5-2** (status: unknown, power: on) — it likely belongs to
-another project.
+**pi-5-2 is now a supported Pi 5 board**, but it uses the
+no-SDWire / maintenance-OS dual-boot model rather than the SDWire-first
+workflow used by `pi-5-1`. Do not assume its deploy path matches
+`pi-5-1`; use the Pi 5 deploy docs to choose the right model.
 
 **Don't use `cd` between MCP serial commands** — `mcp__labctl__serial_send`
 and `mcp__labctl__serial_capture` are stateless and operate on the SBC

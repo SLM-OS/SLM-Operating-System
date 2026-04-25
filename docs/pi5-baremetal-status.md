@@ -17,7 +17,8 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 5. Cooperative preemption driven by `CNTPCT_EL0` (`PI5_COOP_PREEMPT`); `sched_diag_tick` advances on all 4 CPUs, AI scheduler `policy->tick` fires
 6. Cross-CPU dispatch (`bench smp`): 3/3 target CPUs complete
 7. All subsystems boot: PMM, VMM, GIC, scheduler, IPC, VFS, LittleFS, Rust, Lua
-8. Automated deploy via SDWireC + labctl
+8. Automated deploy via SDWireC + labctl on SDWire-equipped boards
+9. Dual-boot / maintenance-OS deploy model preserved for no-SDWire boards
 
 ## Hardware Setup
 
@@ -38,7 +39,8 @@ SLM-OS boots reliably (100%) to a fully interactive shell on Pi 5 hardware. All 
 | VMM (MMU) | ✅ Working | 1GB L1 block descriptors for RAM, L2 tables for MMIO |
 | GIC init | ✅ Working | GICv2 at 0x107FFF9000 |
 | Timer init | ✅ Working | 54 MHz, 100 Hz tick |
-| SDWireC deploy | ✅ Working | Automated flash/boot via sdwire CLI + labctl |
+| SDWireC deploy | ✅ Working | Automated flash/boot via sdwire CLI + labctl on SDWire-equipped boards |
+| No-SDWire deploy model | ✅ Supported | Use the maintenance-OS / dual-boot workflow documented in `docs/pi5-dual-boot-setup.md` and `docs/deploy/pi5-sdcard.md` |
 | Preemptive scheduler | ✅ Working | 100 Hz timer, DAIF-based context switch |
 | Shell prompt | ✅ Working | `slmos>` appears after full boot |
 | Performance benchmarks | ✅ Working | `bench all` — context switch, IRQ, IPC, stats |
@@ -302,7 +304,11 @@ cp build/kernel/slmos.bin /path/to/sd/kernel_2712.img
 
 ### Automated Deploy via SDWireC
 
-The Pi 5 SD card is connected through a Badgerd SDWireC (USB-C model), controlled by the `sdwire` Python CLI. The SDWireC serial is `20120501030900000.10.3`.
+On SDWire-equipped Pi 5 boards, the SLM-OS SD card can be updated through a
+Badgerd SDWireC (USB-C model), controlled by the `sdwire` Python CLI. The
+reference setup here is `pi-5-1`; no-SDWire boards such as `pi-5-2` should use
+the maintenance-OS / dual-boot workflow in `docs/deploy/pi5-sdcard.md` and
+`docs/pi5-dual-boot-setup.md`.
 
 ```bash
 # Switch SD card to host for flashing
@@ -312,7 +318,7 @@ sudo mount /dev/sdc1 /mnt
 sudo cp build/kernel/slmos.bin /mnt/kernel_2712.img
 sudo umount /mnt
 
-# Switch back to Pi 5 and boot
+# Switch back to the Pi 5 and boot
 sudo /tmp/sdwire-venv/bin/sdwire switch -s "20120501030900000.10.3" dut
 labctl power cycle Pi-5-1
 
@@ -325,6 +331,7 @@ labctl connect pi-5-1-console
 - A slower SD card (tested: 29 GB) is required — faster UHS-I cards negotiate SDR104 speeds that the SDWireC's analog MUX cannot handle
 - The Pi 5 EEPROM is at the original Sep 2024 firmware (no `SD_QUIRKS` needed with a slower card)
 - EEPROM firmware versions after Jan 2025 break bare-metal RP1 UART access (investigated but not resolved)
+- This section documents the SDWire-first deploy model only; it is not the only supported Pi 5 workflow
 
 ## Key Files Modified for Pi 5
 

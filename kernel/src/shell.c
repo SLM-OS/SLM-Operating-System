@@ -72,6 +72,8 @@ const shell_cmd_t builtin_commands[] = {
     {"pwd",    cmd_pwd,    "Print working directory", false},
     {"cat",    cmd_cat,    "Show file contents (cat <path>)", false},
     {"write",  cmd_write,  "Write to file (write <path> <content>)", false},  /* VFS locks internally */
+    {"put",    cmd_put,    "Write binary hex to file (put [-a] <path> <hex>)", false},
+    {"xput",   cmd_xput,   "Framed upload (xput begin|chunk|status|finish|abort)", false},
     {"mkdir",  cmd_mkdir,  "Create directory (mkdir <path>)", false},
     {"rm",     cmd_rm,     "Remove file/dir (rm <path>)", false},
     {"mv",     cmd_mv,     "Move/rename (mv <src> <dst>)", false},
@@ -90,7 +92,7 @@ const shell_cmd_t builtin_commands[] = {
     {"msg",       cmd_msg,       "Message router (send/list/subscribe)", true},
     {"sleep",  cmd_sleep,  "Sleep for N ms (sleep <ms>)", false},
     {"bench",  cmd_bench,  "Performance benchmarks (bench <context|irq|ipc|stats|all>)", true},
-    {"sched",  cmd_sched,  "Scheduler (sched [policy [<name>] | stats])", true},
+    {"sched",  cmd_sched,  "Scheduler (sched [policy [<name>] | model ... | stats])", true},
     {"eviction", cmd_eviction, "AI eviction (eviction [policy [<name>] | stats])", true},
     {"top",    cmd_top,    "Live dashboard (top [-n <iter>] [refresh_secs])", false},
     {"clear",  cmd_clear,  "Clear screen", false},

@@ -6,6 +6,7 @@
  */
 
 #include "lua_slm.h"
+#include "build_info.h"
 #include "debug.h"
 #include "timer.h"
 #include "pmm.h"
@@ -33,15 +34,13 @@
 #endif
 #if defined(CONFIG_AI_SCHEDULER)
 #include "ai_types.h"   /* ai_sched_action, ai_decode_action — #211 review fix */
+#include "runtime_model.h"
 #endif
 
 /* Lua headers - note: these may include stdio.h from newlib */
 #include "../lib/lua/src/lua.h"
 #include "../lib/lua/src/lauxlib.h"
 #include "../lib/lua/src/lualib.h"
-
-/* Version string */
-#define SLM_VERSION "0.1.0"
 
 /* Router-side component slots reserved for Lua states. Native components use
  * 0..COMPONENT_MAX_COUNT-1; Lua states get a disjoint fixed pool above that.
@@ -233,7 +232,7 @@ static int l_yield(lua_State *L) {
  */
 static int l_version(lua_State *L) {
     if (!L) return 0;
-    lua_pushstring(L, "SLM-OS " SLM_VERSION);
+    lua_pushstring(L, "SLM-OS " SLMOS_VERSION);
     return 1;
 }
 
@@ -501,6 +500,103 @@ static int l_model_load_mnist(lua_State *L) {
     if (!L) return 0;
     int idx = rust_model_load_builtin_mnist();
     lua_pushinteger(L, idx);
+    return 1;
+}
+
+/**
+ * slm.gpu_run_mnist() - Dispatch the MNIST inference pipeline on
+ * the Jetson GA10B GPU. Requires a v5 channel handoff to be
+ * present in DRAM (set up pre-kexec by
+ * scripts/gpu-kernel-mnist.c --preserve-for-kexec).
+ *
+ * Returns two values on success: a 40-byte string holding the 10
+ * fp32 logits (little-endian) and the argmax index (0..9, the
+ * predicted digit class). On failure returns nil + a negative
+ * error code.
+ *
+ * Float values are returned as raw bytes because the kernel target
+ * compiles with -mgeneral-regs-only (no fp32 in C). Decode in Lua:
+ *
+ *   local bytes, argmax = slm.gpu_run_mnist()
+ *   for i = 0, 9 do
+ *       local f = string.unpack("<f", bytes, 1 + i*4)
+ *       print(string.format("logits[%d] = %.4f", i, f))
+ *   end
+ *
+ * `string.unpack` lives in liblua (compiled with FP) so the
+ * conversion happens in library code, not in the kernel C
+ * compilation unit.
+ */
+static int l_gpu_run_mnist(lua_State *L) {
+    if (!L) return 0;
+    uint8_t logits_bytes[40];
+    int rc = slm_gpu_run_mnist(logits_bytes);
+    if (rc < 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, rc);
+        return 2;
+    }
+    int argmax = slm_fp32_argmax(logits_bytes, 10u);
+    lua_pushlstring(L, (const char *)logits_bytes, sizeof(logits_bytes));
+    lua_pushinteger(L, argmax);
+    return 2;
+}
+
+/**
+ * slm.gpu_set_mnist_input(bytes) - Swap the GPU's MNIST input buffer
+ * at runtime, ahead of the next slm.gpu_run_mnist() call.
+ *
+ * `bytes` is a Lua string of fp32 bit patterns (little-endian) — for
+ * MNIST that's 1×1×28×28 = 784 floats = 3,136 bytes. The kernel
+ * memcpys + cache-cleans into the v6 handoff's input_buf_phys.
+ *
+ * Typical Lua flow:
+ *
+ *   local digit_bytes = read_file_as_bytes("/mnt/files/digit_5.bin")
+ *   slm.gpu_set_mnist_input(digit_bytes)
+ *   local logits, argmax = slm.gpu_run_mnist()
+ *   print(string.format("predicted: %d", argmax))
+ *
+ * Returns 0 on success or a negative error code on failure
+ * (-1 = no v6 handoff, -2 = bytes too long, -3 = bad arg).
+ */
+static int l_gpu_set_mnist_input(lua_State *L) {
+    if (!L) return 0;
+    size_t len = 0;
+    const char *bytes = luaL_checklstring(L, 1, &len);
+    int rc = slm_gpu_set_mnist_input(bytes, len);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+/**
+ * slm.gpu_set_mnist_input_fill(value_bits, n_floats) - Splat the
+ * GPU's MNIST input buffer with `n_floats` copies of the fp32 bit
+ * pattern `value_bits`. Designed for hardware bring-up demos where
+ * sending 3 KB of explicit fp32 bytes through the serial console
+ * is unreliable (NULs and long runs of repeated bytes get
+ * corrupted on the test bench).
+ *
+ * Both args are integers (Lua doesn't have unsigned types, but the
+ * binding bottoms out in uint32_t — pass the bit pattern as a
+ * decimal or hex literal).
+ *
+ *   slm.gpu_set_mnist_input_fill(0x3F800000, 784)  -- all +1.0f
+ *   slm.gpu_set_mnist_input_fill(0xBF800000, 784)  -- all -1.0f
+ *   slm.gpu_set_mnist_input_fill(0, 784)            -- all  0.0f
+ *
+ * Returns 0 on success or a negative error code on failure.
+ */
+static int l_gpu_set_mnist_input_fill(lua_State *L) {
+    if (!L) return 0;
+    /* Lua integers are signed 64-bit. Narrow to uint32_t via C's
+     * well-defined modular truncation — this preserves the bit
+     * pattern of fp32 literals like 0xBF800000 that Lua sees as
+     * positive 64-bit integers. */
+    uint32_t value_bits = (uint32_t)luaL_checkinteger(L, 1);
+    uint32_t n_floats   = (uint32_t)luaL_checkinteger(L, 2);
+    int rc = slm_gpu_set_mnist_input_fill(value_bits, n_floats);
+    lua_pushinteger(L, rc);
     return 1;
 }
 
@@ -1582,6 +1678,117 @@ static int l_ipc_stats(lua_State *L) {
  * Eviction Policy Bindings (gated on CONFIG_AI_EVICTION)
  * ============================================================================ */
 
+static int eviction_blob_kind_id(const char *kind)
+{
+    if (!kind) return 0;
+    if (strcmp(kind, "xgboost") == 0) return 1;
+    if (strcmp(kind, "mlp") == 0) return 2;
+    if (strcmp(kind, "cacheus_config") == 0) return 3;
+    return 0;
+}
+
+static const char *eviction_blob_state_name(uint16_t state)
+{
+    switch (state) {
+        case 0: return "empty";
+        case 1: return "staged";
+        case 2: return "active";
+        case 3: return "rolled_back";
+        default: return "unknown";
+    }
+}
+
+static void lua_push_eviction_blob_meta(lua_State *L,
+                                        const RustEvictionBlobMeta *meta)
+{
+    lua_createtable(L, 0, 5);
+
+    lua_pushinteger(L, (lua_Integer)meta->version);
+    lua_setfield(L, -2, "version");
+
+    lua_pushinteger(L, (lua_Integer)meta->kind_id);
+    lua_setfield(L, -2, "kind_id");
+
+    lua_pushinteger(L, (lua_Integer)meta->feature_schema_version);
+    lua_setfield(L, -2, "feature_schema_version");
+
+    lua_pushinteger(L, (lua_Integer)meta->payload_len);
+    lua_setfield(L, -2, "payload_len");
+
+    lua_pushinteger(L, (lua_Integer)meta->checksum);
+    lua_setfield(L, -2, "checksum");
+}
+
+#if defined(CONFIG_AI_SCHEDULER)
+static int sched_model_kind_id(const char *kind)
+{
+    if (!kind) return 0;
+    if (strcmp(kind, "mlp") == 0) return SCHED_MODEL_KIND_MLP;
+    if (strcmp(kind, "ppo") == 0) return SCHED_MODEL_KIND_PPO;
+    if (strcmp(kind, "config") == 0) return SCHED_MODEL_KIND_CONFIG;
+    return 0;
+}
+
+static const char *sched_model_state_name(uint16_t state)
+{
+    switch (state) {
+        case SCHED_MODEL_EMPTY: return "empty";
+        case SCHED_MODEL_STAGED: return "staged";
+        case SCHED_MODEL_ACTIVE: return "active";
+        case SCHED_MODEL_ROLLED_BACK: return "rolled_back";
+        default: return "unknown";
+    }
+}
+
+static void lua_push_sched_model_meta(lua_State *L,
+                                      const struct sched_model_meta *meta)
+{
+    lua_createtable(L, 0, 7);
+
+    lua_pushinteger(L, (lua_Integer)meta->version);
+    lua_setfield(L, -2, "version");
+
+    lua_pushinteger(L, (lua_Integer)meta->schema_version);
+    lua_setfield(L, -2, "schema_version");
+
+    lua_pushinteger(L, (lua_Integer)meta->feature_version);
+    lua_setfield(L, -2, "feature_version");
+
+    lua_pushinteger(L, (lua_Integer)meta->action_version);
+    lua_setfield(L, -2, "action_version");
+
+    lua_pushinteger(L, (lua_Integer)meta->action_count);
+    lua_setfield(L, -2, "action_count");
+
+    lua_pushinteger(L, (lua_Integer)meta->payload_len);
+    lua_setfield(L, -2, "payload_len");
+
+    lua_pushinteger(L, (lua_Integer)meta->checksum);
+    lua_setfield(L, -2, "checksum");
+}
+
+static void lua_push_sched_balance_config(lua_State *L,
+                                          const struct sched_runtime_balance_config *cfg)
+{
+    lua_createtable(L, 0, 5);
+
+    lua_pushinteger(L, (lua_Integer)cfg->enabled);
+    lua_setfield(L, -2, "enabled");
+
+    lua_pushinteger(L, (lua_Integer)cfg->min_target_ready);
+    lua_setfield(L, -2, "min_target_ready");
+
+    lua_pushinteger(L, (lua_Integer)cfg->min_active_cpus);
+    lua_setfield(L, -2, "min_active_cpus");
+
+    lua_pushinteger(L, (lua_Integer)cfg->imbalance_num);
+    lua_setfield(L, -2, "imbalance_num");
+
+    lua_pushinteger(L, (lua_Integer)cfg->imbalance_den);
+    lua_setfield(L, -2, "imbalance_den");
+}
+#endif
+
 /**
  * slm.eviction_policy() - Get current eviction policy name
  * Returns string, or nil if eviction is disabled.
@@ -1613,6 +1820,322 @@ static int l_eviction_set_policy(lua_State *L) {
     lua_pushboolean(L, rc == 0);
 #else
     (void)name;
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/**
+ * slm.eviction_model_status(kind) - Query runtime blob state for one kind.
+ * Returns {kind, state, has_staged, has_active, has_rollback, staged,
+ * active, rollback} or nil if eviction is disabled / kind invalid /
+ * status unavailable.
+ */
+static int l_eviction_model_status(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+#if defined(CONFIG_AI_EVICTION)
+    int kind_id = eviction_blob_kind_id(kind);
+    RustEvictionBlobStatus st;
+    if (kind_id == 0 || rust_eviction_blob_status((uint16_t)kind_id, &st) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_createtable(L, 0, 8);
+
+    lua_pushstring(L, kind);
+    lua_setfield(L, -2, "kind");
+
+    lua_pushstring(L, eviction_blob_state_name(st.state));
+    lua_setfield(L, -2, "state");
+
+    lua_pushboolean(L, st.has_staged != 0);
+    lua_setfield(L, -2, "has_staged");
+
+    lua_pushboolean(L, st.has_active != 0);
+    lua_setfield(L, -2, "has_active");
+
+    lua_pushboolean(L, st.has_rollback != 0);
+    lua_setfield(L, -2, "has_rollback");
+
+    if (st.has_staged) {
+        lua_push_eviction_blob_meta(L, &st.staged);
+        lua_setfield(L, -2, "staged");
+    }
+    if (st.has_active) {
+        lua_push_eviction_blob_meta(L, &st.active);
+        lua_setfield(L, -2, "active");
+    }
+    if (st.has_rollback) {
+        lua_push_eviction_blob_meta(L, &st.rollback);
+        lua_setfield(L, -2, "rollback");
+    }
+#else
+    (void)kind;
+    lua_pushnil(L);
+#endif
+    return 1;
+}
+
+/**
+ * slm.eviction_model_load(kind, path) - Read and stage a runtime blob.
+ * Returns true on success, false on any error.
+ */
+static int l_eviction_model_load(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+    const char *path = luaL_checkstring(L, 2);
+#if defined(CONFIG_AI_EVICTION)
+    int kind_id = eviction_blob_kind_id(kind);
+    if (kind_id == 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0 || info.type != 0 || info.size == 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    size_t pages_needed = (info.size + 4095) / 4096;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (bytes_read <= 0) {
+        pmm_free_pages(buf, pages_needed);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    int rc = rust_eviction_blob_stage((uint16_t)kind_id, buf, (size_t)bytes_read);
+    pmm_free_pages(buf, pages_needed);
+    lua_pushboolean(L, rc == 0);
+#else
+    (void)kind;
+    (void)path;
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/**
+ * slm.eviction_model_activate(kind) - Promote staged runtime blob.
+ */
+static int l_eviction_model_activate(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+#if defined(CONFIG_AI_EVICTION)
+    int kind_id = eviction_blob_kind_id(kind);
+    lua_pushboolean(L, kind_id != 0 &&
+                       rust_eviction_blob_activate((uint16_t)kind_id) == 0);
+#else
+    (void)kind;
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/**
+ * slm.eviction_model_rollback(kind) - Roll back to prior runtime blob.
+ */
+static int l_eviction_model_rollback(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+#if defined(CONFIG_AI_EVICTION)
+    int kind_id = eviction_blob_kind_id(kind);
+    lua_pushboolean(L, kind_id != 0 &&
+                       rust_eviction_blob_rollback((uint16_t)kind_id) == 0);
+#else
+    (void)kind;
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/**
+ * slm.eviction_model_clear(kind) - Clear staged/active/rollback slots.
+ */
+static int l_eviction_model_clear(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+#if defined(CONFIG_AI_EVICTION)
+    int kind_id = eviction_blob_kind_id(kind);
+    lua_pushboolean(L, kind_id != 0 &&
+                       rust_eviction_blob_clear((uint16_t)kind_id) == 0);
+#else
+    (void)kind;
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/**
+ * slm.sched_model_status(kind) - Query runtime scheduler blob state.
+ * Returns {kind, state, has_staged, has_active, has_rollback, staged,
+ * active, rollback} or nil if unavailable / kind invalid.
+ */
+static int l_sched_model_status(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+#if defined(CONFIG_AI_SCHEDULER)
+    int kind_id = sched_model_kind_id(kind);
+    struct sched_model_status st;
+    struct sched_runtime_balance_config cfg;
+    if (kind_id == 0 || sched_model_status((uint16_t)kind_id, &st) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_createtable(L, 0, 8);
+
+    lua_pushstring(L, kind);
+    lua_setfield(L, -2, "kind");
+
+    lua_pushstring(L, sched_model_state_name(st.state));
+    lua_setfield(L, -2, "state");
+
+    lua_pushboolean(L, st.has_staged != 0);
+    lua_setfield(L, -2, "has_staged");
+
+    lua_pushboolean(L, st.has_active != 0);
+    lua_setfield(L, -2, "has_active");
+
+    lua_pushboolean(L, st.has_rollback != 0);
+    lua_setfield(L, -2, "has_rollback");
+
+    if (st.has_staged) {
+        lua_push_sched_model_meta(L, &st.staged);
+        lua_setfield(L, -2, "staged");
+    }
+    if (st.has_active) {
+        lua_push_sched_model_meta(L, &st.active);
+        lua_setfield(L, -2, "active");
+    }
+    if (st.has_rollback) {
+        lua_push_sched_model_meta(L, &st.rollback);
+        lua_setfield(L, -2, "rollback");
+    }
+    if (kind_id == SCHED_MODEL_KIND_CONFIG &&
+        sched_runtime_balance_config_snapshot(&cfg) == 0) {
+        lua_push_sched_balance_config(L, &cfg);
+        lua_setfield(L, -2, "config");
+    }
+#else
+    (void)kind;
+    lua_pushnil(L);
+#endif
+    return 1;
+}
+
+/**
+ * slm.sched_model_load(kind, path) - Read and stage a scheduler runtime blob.
+ */
+static int l_sched_model_load(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+    const char *path = luaL_checkstring(L, 2);
+#if defined(CONFIG_AI_SCHEDULER)
+    int kind_id = sched_model_kind_id(kind);
+    if (kind_id == 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0 || info.type != 0 || info.size == 0) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    size_t pages_needed = (info.size + 4095) / 4096;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (bytes_read <= 0) {
+        pmm_free_pages(buf, pages_needed);
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
+    int rc = sched_model_stage_blob((uint16_t)kind_id, buf, (size_t)bytes_read);
+    pmm_free_pages(buf, pages_needed);
+    lua_pushboolean(L, rc == 0);
+#else
+    (void)kind;
+    (void)path;
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/**
+ * slm.sched_model_activate(kind) - Promote staged scheduler runtime blob.
+ */
+static int l_sched_model_activate(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+#if defined(CONFIG_AI_SCHEDULER)
+    int kind_id = sched_model_kind_id(kind);
+    lua_pushboolean(L, kind_id != 0 &&
+                       sched_model_activate((uint16_t)kind_id) == 0);
+#else
+    (void)kind;
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/**
+ * slm.sched_model_rollback(kind) - Roll back to prior scheduler runtime blob.
+ */
+static int l_sched_model_rollback(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+#if defined(CONFIG_AI_SCHEDULER)
+    int kind_id = sched_model_kind_id(kind);
+    lua_pushboolean(L, kind_id != 0 &&
+                       sched_model_rollback((uint16_t)kind_id) == 0);
+#else
+    (void)kind;
+    lua_pushboolean(L, 0);
+#endif
+    return 1;
+}
+
+/**
+ * slm.sched_model_clear(kind) - Clear scheduler staged/active/rollback slots.
+ */
+static int l_sched_model_clear(lua_State *L) {
+    if (!L) return 0;
+    const char *kind = luaL_checkstring(L, 1);
+#if defined(CONFIG_AI_SCHEDULER)
+    int kind_id = sched_model_kind_id(kind);
+    lua_pushboolean(L, kind_id != 0 &&
+                       sched_model_clear((uint16_t)kind_id) == 0);
+#else
+    (void)kind;
     lua_pushboolean(L, 0);
 #endif
     return 1;
@@ -2177,6 +2700,13 @@ static int l_telnetd_kick(lua_State *L) {
  * here.
  * ========================================================================== */
 
+/* Hailo NPU bindings are gated on platforms that compile the backend.
+ * CMakeLists.txt skips inference_device_hailo.c on x86-64 (no NPU
+ * available there), so referencing hailo_backend_* helpers from this
+ * file would break the x86 link. The matching `#endif` closes the
+ * block right after slm_hailo_lib. */
+#if !defined(PLATFORM_X86_64)
+
 /* Backend-specific helpers exposed by inference_device_hailo.h
  * (consolidated PR #355 review). */
 #include "inference_device_hailo.h"
@@ -2377,6 +2907,8 @@ static const luaL_Reg slm_hailo_lib[] = {
     {NULL, NULL}
 };
 
+#endif /* !PLATFORM_X86_64 — Hailo bindings */
+
 /* SLM library functions */
 static const luaL_Reg slm_lib_safe[] = {
     {"print", l_print},
@@ -2447,6 +2979,10 @@ static const luaL_Reg slm_lib_admin[] = {
     {"model_unpin", l_model_unpin},
     {"model_bench", l_model_bench},
     {"model_load", l_model_load},
+    /* GPU inference (M7 + M9) */
+    {"gpu_run_mnist", l_gpu_run_mnist},
+    {"gpu_set_mnist_input", l_gpu_set_mnist_input},
+    {"gpu_set_mnist_input_fill", l_gpu_set_mnist_input_fill},
     /* Scheduler / task mutation */
     {"sched_set_policy", l_sched_set_policy},
     {"task_migrate", l_task_migrate},
@@ -2456,6 +2992,17 @@ static const luaL_Reg slm_lib_admin[] = {
     {"task_pin", l_task_pin},
     /* Eviction mutation */
     {"eviction_set_policy", l_eviction_set_policy},
+    {"eviction_model_status", l_eviction_model_status},
+    {"eviction_model_load", l_eviction_model_load},
+    {"eviction_model_activate", l_eviction_model_activate},
+    {"eviction_model_rollback", l_eviction_model_rollback},
+    {"eviction_model_clear", l_eviction_model_clear},
+    /* Scheduler runtime model mutation */
+    {"sched_model_status", l_sched_model_status},
+    {"sched_model_load", l_sched_model_load},
+    {"sched_model_activate", l_sched_model_activate},
+    {"sched_model_rollback", l_sched_model_rollback},
+    {"sched_model_clear", l_sched_model_clear},
     /* Shell integration */
     {"shell_exec", l_shell_exec},
 #if defined(ENABLE_NETWORKING)
@@ -2473,15 +3020,28 @@ static const luaL_Reg slm_lib_admin[] = {
 static void lua_push_slm_library(lua_State *L, bool admin)
 {
     luaL_newlib(L, slm_lib_safe);
+
+    /* String constants from build_info.h. slm.VERSION stays string-shaped
+     * for legacy scripts; BUILD_STAMP and BUILD_SHA are new (#360). */
+    lua_pushstring(L, SLMOS_VERSION);
+    lua_setfield(L, -2, "VERSION");
+    lua_pushstring(L, SLMOS_BUILD_STAMP);
+    lua_setfield(L, -2, "BUILD_STAMP");
+    lua_pushstring(L, SLMOS_BUILD_SHA);
+    lua_setfield(L, -2, "BUILD_SHA");
+
     if (admin) {
         for (const luaL_Reg *r = slm_lib_admin; r->name; r++) {
             lua_pushcfunction(L, r->func);
             lua_setfield(L, -2, r->name);
         }
+#if !defined(PLATFORM_X86_64)
         /* Keep the Hailo bindings on the admin surface until the
-         * device/backend concurrency contract is explicitly audited. */
+         * device/backend concurrency contract is explicitly audited.
+         * x86-64 builds skip the Hailo backend entirely. */
         luaL_newlib(L, slm_hailo_lib);
         lua_setfield(L, -2, "hailo");
+#endif
     }
 }
 

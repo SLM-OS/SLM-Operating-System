@@ -8,7 +8,9 @@
  * in Linux's drivers/usb/core/.
  *
  * Scope is deliberately narrow (docs/jetson-usb-networking-plan.md §6):
- *   - Single device at boot; no hubs, no dynamic topology.
+ *   - Single exposed device at boot; one upstream USB 2.0 hub is
+ *     allowed as an implementation detail so the real NIC can sit on
+ *     a downstream port.
  *   - USB 2.0 high/full speed only; no SuperSpeed handling here.
  *   - CDC-ECM is the only class the Phase 2 glue will target.
  *   - No hot-plug beyond connect-at-boot enumeration.
@@ -217,6 +219,8 @@ struct usb_device {
     enum usb_speed        speed;
     enum usb_device_state state;
     uint8_t               port;          /* root-port number on the HCD */
+    uint8_t               root_hub_port; /* 1-based xHCI root port */
+    uint32_t              route_string;  /* xHCI route string (0 = root) */
     struct usb_device_descriptor    dev_desc;
     uint8_t                         raw_config[USB_MAX_CONFIG_DESC_BYTES];
     uint16_t                        raw_config_len;

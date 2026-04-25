@@ -1331,6 +1331,215 @@ pub extern "C" fn rust_eviction_policy_name_pool(
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RustEvictionBlobMeta {
+    pub version: u16,
+    pub kind_id: u16,
+    pub feature_schema_version: u16,
+    pub _reserved0: u16,
+    pub payload_len: u32,
+    pub checksum: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RustEvictionBlobStatus {
+    pub kind_id: u16,
+    pub state: u16,
+    pub has_staged: u32,
+    pub has_active: u32,
+    pub has_rollback: u32,
+    pub staged: RustEvictionBlobMeta,
+    pub active: RustEvictionBlobMeta,
+    pub rollback: RustEvictionBlobMeta,
+}
+
+#[cfg(feature = "ai_eviction")]
+fn blob_kind_from_id(kind_id: u16) -> Option<mm::eviction::BlobKind> {
+    match kind_id {
+        1 => Some(mm::eviction::BlobKind::XGBoost),
+        2 => Some(mm::eviction::BlobKind::Mlp),
+        3 => Some(mm::eviction::BlobKind::CacheusConfig),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "ai_eviction")]
+fn blob_meta_to_c(meta: mm::eviction::BlobMetadata) -> RustEvictionBlobMeta {
+    RustEvictionBlobMeta {
+        version: meta.version,
+        kind_id: meta.kind as u16,
+        feature_schema_version: meta.feature_schema_version,
+        _reserved0: 0,
+        payload_len: meta.payload_len,
+        checksum: meta.checksum,
+    }
+}
+
+/// Stage a runtime eviction blob into the per-kind RAM store.
+///
+/// Returns:
+/// - `0` on success
+/// - `-1` on invalid args / unknown kind
+/// - `-2` when ai_eviction is disabled
+/// - `-3` on parse/validation failure
+/// - `-4` when the blob header kind mismatches `kind_id`
+///
+/// # Safety
+/// `data` must point to a readable buffer of `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_blob_stage(
+    kind_id: u16,
+    data: *const u8,
+    len: usize,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = (kind_id, data, len); -2 }
+    #[cfg(feature = "ai_eviction")]
+    {
+        let kind = match blob_kind_from_id(kind_id) {
+            Some(kind) => kind,
+            None => return -1,
+        };
+        if data.is_null() || len == 0 {
+            return -1;
+        }
+        let bytes = core::slice::from_raw_parts(data, len);
+        let parsed = match mm::eviction::parse_blob(bytes) {
+            Ok(blob) => blob,
+            Err(_) => return -3,
+        };
+        if parsed.header.kind != kind {
+            return -4;
+        }
+        let payload = parsed.payload.as_slice();
+        let payload_ok = match kind {
+            mm::eviction::BlobKind::XGBoost => {
+                mm::eviction::runtime_xgboost::parse_payload(payload).is_ok()
+            }
+            mm::eviction::BlobKind::Mlp => {
+                mm::eviction::runtime_mlp::parse_payload(payload).is_ok()
+            }
+            mm::eviction::BlobKind::CacheusConfig => {
+                mm::eviction::runtime_cacheus::parse_payload(payload).is_ok()
+            }
+        };
+        if !payload_ok {
+            return -3;
+        }
+        match mm::eviction::stage_parsed(parsed) {
+            Ok(_) => 0,
+            Err(_) => -3,
+        }
+    }
+}
+
+/// Fill `out` with the current runtime-blob status for `kind_id`.
+///
+/// Returns 0 on success, -1 on invalid args/kind, -2 when feature off.
+///
+/// # Safety
+/// `out` must point to writable storage for `RustEvictionBlobStatus`.
+#[no_mangle]
+pub unsafe extern "C" fn rust_eviction_blob_status(
+    kind_id: u16,
+    out: *mut RustEvictionBlobStatus,
+) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = kind_id; -2 }
+    #[cfg(feature = "ai_eviction")]
+    {
+        let kind = match blob_kind_from_id(kind_id) {
+            Some(kind) => kind,
+            None => return -1,
+        };
+        let status = mm::eviction::blob_status(kind);
+        let mut out_status = RustEvictionBlobStatus::default();
+        out_status.kind_id = kind_id;
+        out_status.state = status.state as u16;
+        if let Some(meta) = status.staged {
+            out_status.has_staged = 1;
+            out_status.staged = blob_meta_to_c(meta);
+        }
+        if let Some(meta) = status.active {
+            out_status.has_active = 1;
+            out_status.active = blob_meta_to_c(meta);
+        }
+        if let Some(meta) = status.rollback {
+            out_status.has_rollback = 1;
+            out_status.rollback = blob_meta_to_c(meta);
+        }
+        core::ptr::write(out, out_status);
+        0
+    }
+}
+
+/// Promote the staged runtime blob for `kind_id` to active.
+///
+/// Returns 0 on success, -1 on invalid kind, -2 when feature off, -3
+/// when no staged blob exists.
+#[no_mangle]
+pub extern "C" fn rust_eviction_blob_activate(kind_id: u16) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = kind_id; -2 }
+    #[cfg(feature = "ai_eviction")]
+    {
+        let kind = match blob_kind_from_id(kind_id) {
+            Some(kind) => kind,
+            None => return -1,
+        };
+        match mm::eviction::activate_blob(kind) {
+            Ok(()) => 0,
+            Err(mm::eviction::StoreError::NoStagedBlob) => -3,
+            Err(_) => -1,
+        }
+    }
+}
+
+/// Roll back `kind_id` to the prior active runtime blob.
+///
+/// Returns 0 on success, -1 on invalid kind, -2 when feature off, -3
+/// when no rollback blob exists.
+#[no_mangle]
+pub extern "C" fn rust_eviction_blob_rollback(kind_id: u16) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = kind_id; -2 }
+    #[cfg(feature = "ai_eviction")]
+    {
+        let kind = match blob_kind_from_id(kind_id) {
+            Some(kind) => kind,
+            None => return -1,
+        };
+        match mm::eviction::rollback_blob(kind) {
+            Ok(()) => 0,
+            Err(mm::eviction::StoreError::NoRollbackBlob) => -3,
+            Err(_) => -1,
+        }
+    }
+}
+
+/// Clear the runtime blob store for `kind_id`.
+///
+/// Returns 0 on success, -1 on invalid kind, -2 when feature off.
+#[no_mangle]
+pub extern "C" fn rust_eviction_blob_clear(kind_id: u16) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = kind_id; -2 }
+    #[cfg(feature = "ai_eviction")]
+    {
+        let kind = match blob_kind_from_id(kind_id) {
+            Some(kind) => kind,
+            None => return -1,
+        };
+        mm::eviction::clear_blob(kind);
+        0
+    }
+}
+
 /// Combined eviction-subsystem stats for the `eviction` shell command.
 /// Mirrors the layout used by `eviction_shell_stats` in slm_ffi.h.
 ///
@@ -2226,6 +2435,61 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             check!(b"blob_rejects_length_mismatch\0",
                    mm::eviction::parse_blob(&bad_length)
                        == Err(mm::eviction::BlobError::LengthMismatch));
+
+            mm::eviction::reset_blob_store();
+            check!(b"blob_store_initially_empty\0",
+                   mm::eviction::blob_status(mm::eviction::BlobKind::Mlp).state
+                       == mm::eviction::SlotState::Empty);
+
+            check!(b"blob_store_stage_valid_blob\0",
+                   mm::eviction::stage_blob(&blob)
+                       == Ok(mm::eviction::BlobKind::Mlp));
+            let staged = mm::eviction::blob_status(mm::eviction::BlobKind::Mlp);
+            check!(b"blob_store_reports_staged_state\0",
+                   staged.state == mm::eviction::SlotState::Staged);
+            check!(b"blob_store_reports_staged_metadata\0",
+                   staged.staged.map(|m| m.checksum)
+                       == Some(mm::eviction::checksum32(payload)));
+
+            check!(b"blob_store_activate_staged_blob\0",
+                   mm::eviction::activate_blob(mm::eviction::BlobKind::Mlp).is_ok());
+            let active = mm::eviction::blob_status(mm::eviction::BlobKind::Mlp);
+            check!(b"blob_store_reports_active_state\0",
+                   active.state == mm::eviction::SlotState::Active);
+            check!(b"blob_store_clears_staged_on_activate\0",
+                   active.staged.is_none());
+            check!(b"blob_store_preserves_active_payload\0",
+                   mm::eviction::active_blob(mm::eviction::BlobKind::Mlp)
+                       .map(|b| b.payload)
+                       == Some(payload.to_vec()));
+
+            let payload_v2 = b"\x05\x06replacement-mlp";
+            let blob_v2 = mm::eviction::blob::build_test_blob(
+                mm::eviction::BlobKind::Mlp,
+                payload_v2);
+            check!(b"blob_store_stage_replacement_blob\0",
+                   mm::eviction::stage_blob(&blob_v2).is_ok());
+            check!(b"blob_store_activate_replacement_blob\0",
+                   mm::eviction::activate_blob(mm::eviction::BlobKind::Mlp).is_ok());
+            let replaced = mm::eviction::blob_status(mm::eviction::BlobKind::Mlp);
+            check!(b"blob_store_tracks_rollback_metadata\0",
+                   replaced.rollback.map(|m| m.checksum)
+                       == Some(mm::eviction::checksum32(payload)));
+
+            check!(b"blob_store_rollback_restores_previous_active\0",
+                   mm::eviction::rollback_blob(mm::eviction::BlobKind::Mlp).is_ok());
+            let rolled_back = mm::eviction::blob_status(mm::eviction::BlobKind::Mlp);
+            check!(b"blob_store_reports_rollback_state\0",
+                   rolled_back.state == mm::eviction::SlotState::RolledBack);
+            check!(b"blob_store_rollback_restores_payload\0",
+                   mm::eviction::active_blob(mm::eviction::BlobKind::Mlp)
+                       .map(|b| b.payload)
+                       == Some(payload.to_vec()));
+
+            mm::eviction::clear_blob(mm::eviction::BlobKind::Mlp);
+            check!(b"blob_store_clear_resets_state\0",
+                   mm::eviction::blob_status(mm::eviction::BlobKind::Mlp).state
+                       == mm::eviction::SlotState::Empty);
         }
 
         puts(b"\n-- eviction: classical policies --\n\0");
@@ -2655,6 +2919,38 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             check!(b"xgboost_scores_finite_in_unit\0", s_ok);
         }
 
+        // Runtime-loaded XGBoost payloads override the compiled-in/stub
+        // path once activated. Use a tiny single-split tree that scores
+        // higher when feature[0] (recency_rank) is larger.
+        {
+            mm::eviction::clear_blob(mm::eviction::BlobKind::XGBoost);
+            let payload =
+                mm::eviction::runtime_xgboost::build_test_payload_first_feature_split(
+                    0.5, -2.0, 2.0);
+            let blob = mm::eviction::blob::build_test_blob(
+                mm::eviction::BlobKind::XGBoost,
+                &payload);
+            let parsed = mm::eviction::parse_blob(&blob);
+            check!(b"runtime_xgboost_blob_parses\0", parsed.is_ok());
+            if let Ok(parsed) = parsed {
+                check!(b"runtime_xgboost_blob_stages\0",
+                       mm::eviction::stage_parsed(parsed).is_ok());
+                check!(b"runtime_xgboost_blob_activates\0",
+                       mm::eviction::activate_blob(mm::eviction::BlobKind::XGBoost).is_ok());
+                let cands = [
+                    make_full(400, 100, 1, PoolType::Weight, 0),
+                    make_full(401, 200, 1, PoolType::Weight, 0),
+                ];
+                let mut p = XGBoostPolicy::new();
+                let scores = p.score(&cands);
+                check!(b"runtime_xgboost_scores_differentiate_candidates\0",
+                       scores.len() == 2 && scores[1] > scores[0]);
+                check!(b"runtime_xgboost_policy_prefers_active_runtime_payload\0",
+                       p.select_victim(&cands) == 1);
+            }
+            mm::eviction::clear_blob(mm::eviction::BlobKind::XGBoost);
+        }
+
         // MlpPolicy: same smoke tests.
         {
             let mut p = MlpPolicy::new();
@@ -2689,6 +2985,38 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                 if *x > s[max_i] { max_i = i; }
             }
             check!(b"mlp_victim_matches_argmax_of_scores\0", v == max_i);
+        }
+
+        // Runtime-loaded MLP payloads override the compiled-in/stub path
+        // once activated. Use a tiny deterministic model whose score
+        // increases with feature[0] (recency_rank normalised), so the
+        // newer candidate should win over the older one.
+        {
+            mm::eviction::clear_blob(mm::eviction::BlobKind::Mlp);
+            let payload =
+                mm::eviction::runtime_mlp::build_test_payload_first_feature_model(10.0);
+            let blob = mm::eviction::blob::build_test_blob(
+                mm::eviction::BlobKind::Mlp,
+                &payload);
+            let parsed = mm::eviction::parse_blob(&blob);
+            check!(b"runtime_mlp_blob_parses\0", parsed.is_ok());
+            if let Ok(parsed) = parsed {
+                check!(b"runtime_mlp_blob_stages\0",
+                       mm::eviction::stage_parsed(parsed).is_ok());
+                check!(b"runtime_mlp_blob_activates\0",
+                       mm::eviction::activate_blob(mm::eviction::BlobKind::Mlp).is_ok());
+                let cands = [
+                    make_full(500, 100, 1, PoolType::Weight, 0),
+                    make_full(501, 200, 1, PoolType::Weight, 0),
+                ];
+                let mut p = MlpPolicy::new();
+                let scores = p.score(&cands);
+                check!(b"runtime_mlp_scores_differentiate_candidates\0",
+                       scores.len() == 2 && scores[1] > scores[0]);
+                check!(b"runtime_mlp_policy_prefers_active_runtime_payload\0",
+                       p.select_victim(&cands) == 1);
+            }
+            mm::eviction::clear_blob(mm::eviction::BlobKind::Mlp);
         }
 
         // Int8 MLP vs Float32 MLP: agreement on feature vectors drawn
@@ -2842,6 +3170,35 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             let all = CacheusSelector::all_5();
             check!(b"cacheus_all_5_has_five_experts\0",
                    all.expert_names().len() == 5);
+        }
+
+        // Runtime-loaded CACHEUS config can switch the expert pool at
+        // runtime. Activating an `all_5` config against an `ml_only`
+        // selector should expand the expert set on the next scoring call.
+        {
+            mm::eviction::clear_blob(mm::eviction::BlobKind::CacheusConfig);
+            let payload = mm::eviction::runtime_cacheus::build_test_payload(
+                mm::eviction::runtime_cacheus::ExpertPool::All5,
+                0.25,
+                64,
+                0.02,
+            );
+            let blob = mm::eviction::blob::build_test_blob(
+                mm::eviction::BlobKind::CacheusConfig,
+                &payload);
+            let parsed = mm::eviction::parse_blob(&blob);
+            check!(b"runtime_cacheus_blob_parses\0", parsed.is_ok());
+            if let Ok(parsed) = parsed {
+                check!(b"runtime_cacheus_blob_stages\0",
+                       mm::eviction::stage_parsed(parsed).is_ok());
+                check!(b"runtime_cacheus_blob_activates\0",
+                       mm::eviction::activate_blob(mm::eviction::BlobKind::CacheusConfig).is_ok());
+                let mut c = CacheusSelector::ml_only();
+                let _ = c.score(&ml_cands);
+                check!(b"runtime_cacheus_config_switches_expert_pool\0",
+                       c.expert_names().len() == 5);
+            }
+            mm::eviction::clear_blob(mm::eviction::BlobKind::CacheusConfig);
         }
 
         // Default learning rate and window match Phase 5.

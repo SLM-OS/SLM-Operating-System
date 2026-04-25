@@ -936,8 +936,9 @@ slm.uptime() and reports p50/p95/p99.
 
 - Obtain a Hailo-8L-compiled HEF (mobilenet_v1 preferred for
   comparison against HailoRT reference numbers).
-- Stage via `labctl sdwire_update` onto the SLM-OS SD card
-  alongside the kernel image.
+- Stage onto the SLM-OS boot media through the board's supported
+  deploy model: `labctl sdwire_update` on SDWire-equipped boards, or
+  the maintenance-OS / dual-boot workflow on no-SDWire boards.
 - Run `lua /mnt/files/demo_hailo.lua /mnt/files/mobilenet_v1.hef
   200` — 200 iterations for reasonable percentiles, script
   auto-probes input sizes.
@@ -1311,7 +1312,9 @@ applied to the current Pi OS install on the dual-boot card.
 Per the project's post-change checklist (run on every phase):
 
 1. **QEMU unit tests** (`make test`) — PCIe enumeration, inference-device abstraction, Hailo core via mocked BAR vtable.
-2. **Pi 5 hardware smoke test** — `labctl sdwire_update` + `serial_send "hailo probe"` — must pass before every commit to Phase 3+.
+2. **Pi 5 hardware smoke test** — deploy through the board's supported Pi 5
+   path, then run `serial_send "hailo probe"` — must pass before every commit
+   to Phase 3+.
 3. **`make test-hailo`** — offline driver tests (added in Phase 3).
 4. **Demo script** — end-to-end from `slm.hailo.load()` to classification output (Phase 7).
 5. **Reliability** — `labctl boot_test --count 10` with a `hailo probe` step in the boot-verification script.

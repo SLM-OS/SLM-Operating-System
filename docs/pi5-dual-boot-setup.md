@@ -1,10 +1,15 @@
 # Pi 5 dual-boot setup: SLM-OS + Raspberry Pi OS on one SD card
 
-A single SD card in the `pi-5-1` SDWire that boots either SLM-OS (bare-metal,
-default) or Raspberry Pi OS Lite (Linux, via `tryboot`) without a physical
-card swap. This is useful when developing something like AI HAT+ support
-where a working Linux reference implementation (`hailo_pci`, HailoRT) can
-be instrumented on the same hardware SLM-OS targets.
+This guide describes the **maintenance-OS dual-boot model** for Pi 5:
+a single SD card that can boot either SLM-OS (bare metal) or Raspberry
+Pi OS Lite (Linux, via `tryboot`) without rewriting the card each time.
+This model is especially useful on boards **without SDWire**, but it is
+also valid on SDWire-equipped boards when you want a local Linux
+environment on the same card for recovery or instrumentation.
+
+It is complementary to the SDWire-first model in
+[`docs/deploy/pi5-sdwire.md`](deploy/pi5-sdwire.md); the project should
+preserve both.
 
 ---
 
@@ -118,9 +123,10 @@ release to release; check their site when needed).
 ## Creating a dual-boot card from scratch
 
 These steps assume you have a SLMOS-only card that you want to turn
-into a dual-boot card, and labctl access to `pi-5-1`'s SDWire. Adjust
-device paths if your host enumerates the card as something other than
-`/dev/sdX`.
+into a dual-boot card. If the board has SDWire, use that to expose the
+card to the host. If the board has no SDWire, do the same partitioning
+and copy steps through the host's SD-card reader or from the Linux
+maintenance OS already on the board.
 
 ### 0. Get the card onto the host
 
@@ -331,8 +337,9 @@ In order of how much time each one cost:
 6. **`apt install hailo-all` will silently auto-update the Pi 5
    EEPROM** to a recent (post-Jan 2025) bootloader, which then
    breaks SLM-OS's RP1 UART access (kernel boots silently — no
-   serial output even though it's running). Per
-   `memory/pi5_eeprom_findings.md`. The fix dance, in order:
+   serial output even though it's running). See
+   `docs/pi5-baremetal-status.md:402-408` for the EEPROM-firmware
+   investigation. The fix dance, in order:
    - Re-flash Sep 2024 image:
      ```bash
      wget -O /tmp/pieeprom.bin \

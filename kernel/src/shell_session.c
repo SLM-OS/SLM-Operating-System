@@ -57,6 +57,7 @@ static void session_reset_defaults(struct shell_session *s)
     s->window_rows        = SHELL_DEFAULT_ROWS;
     s->term_type[0]       = '\0';
     s->interrupt_requested = false;
+    memset(&s->xput, 0, sizeof(s->xput));
 }
 
 void shell_session_init(void)

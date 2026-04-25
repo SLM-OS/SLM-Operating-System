@@ -1157,54 +1157,34 @@ Key design choices:
   the stale post-reset value — control transfers at the wrong
   signalling speed raise `cc=4`.
 
-**Angle 3 — post-kexec re-plug workaround (#309).**
+**Angle 3 — retained root-hub handoff fix (#309).**
 
-The xHCI driver reaches ADDRESS_DEVICE successfully on the
-post-kexec Realtek dongle, but the first EP0
-`GET_DESCRIPTOR(device, 8)` returns `cc=4` (USB Transaction Error).
-The device's internal state is whatever Linux left behind and our
-bus reset doesn't bring it back to a clean enumerating state.
+The original re-plug workaround was useful during bring-up, but it is
+no longer the shipped `jetson-nano-2` path. The current solution is to
+normalize the inherited USB topology before `kexec`, then preserve only
+the cleaned pieces that SLM-OS can safely reuse:
 
-Workaround: hide the stale device from `usb_core` until the user
-physically unplugs and re-inserts the dongle. Implementation:
+1. Linux helper deauthorizes the USB2 root hub before `kexec`. That
+   tears down the stale downstream child while leaving the high-speed
+   Realtek root hub in a cleaner addressed state.
+2. The helper publishes the cleaned slot-1 handoff in the kexec DTB and
+   deliberately skips the stale downstream slot-3 handoff.
+3. SLM-OS preserves that slot-1 handoff, adopts the retained
+   high-speed root hub, and fresh-enumerates the downstream RTL8153 on a
+   new child slot.
+4. No manual unplug/replug is needed on the validated lab path.
 
-1. `xhci_attach.h` — three-state pure logic (`STALE` →
-   `WAIT_RECONNECT` → `FRESH`). Unit-tested in
-   `test_xhci_device.c`.
-2. `xhci_hcd_port_status` — advances the state machine on every
-   call, hides any pre-kexec device until `CCS=1→0→1` is observed.
-3. `usb_core_hotplug_poll` — new public entry point in
-   `kernel/include/usb.h`; called from `net_poll()` on every tick
-   so the re-plug is noticed without a dedicated task.
+Validated result on `jetson-nano-2`:
 
-Serial log after kexec:
+- Linux boots with the Realtek hub + RTL8153 chain already attached.
+- `slmos-kexec /root/slmos.elf` preserves the cleaned slot-1 handoff.
+- SLM-OS adopts the retained root hub and enumerates the downstream NIC.
+- `net init` succeeds.
+- DHCP binds `192.168.4.5/24` with gateway `192.168.4.1`.
+- `ping 192.168.4.1 2` succeeds with no manual USB interaction.
 
-```
-xhci: USB 2.0 device on PORTSC[5] (stale pre-kexec — please unplug
-      and re-insert the dongle to enumerate, see #309)
-xhci: hot-plug ready — re-insert the USB dongle to enumerate
-... user unplugs ...
-xhci: pre-kexec device detached — waiting for re-plug
-... user re-plugs ...
-xhci: fresh USB attach on PORTSC[5]
-... enumeration runs normally ...
-```
-
-Permanent fix candidates (all tracked under #309):
-
-1. **Linux-side pre-kexec quiesce.** Add a step to
-   `scripts/arm-smmu-noshutdown/` or a sibling module that
-   explicitly issues SET_CONFIGURATION(0) / device teardown on
-   the xusb bus before kexec, so SLM-OS inherits a defaulted
-   device.
-2. **SLM-OS-side Tegra PHY re-programming.** Re-run the padctl /
-   PHY init sequence during `xhci_init` before issuing the port
-   reset. This mirrors the approach `nvgpu` uses to recover from
-   stale kexec state on the GPU side.
-3. **xHCI RESET_DEVICE command** issued between `ENABLE_SLOT` and
-   `ADDRESS_DEVICE`. Per xHCI §4.6.11 this resets the slot's
-   device state independently of the bus reset — untried so far
-   and the simplest purely-HCD fix.
+The stale-attach / re-plug state machine remains in-tree and unit-tested
+as a fallback, but the current Jetson demo path no longer depends on it.
 
 **Known gaps (tracked separately):**
 
@@ -1246,37 +1226,32 @@ Permanent fix candidates (all tracked under #309):
 
 **What the chain looks like at runtime (Jetson, kexec boot):**
 
-1. xhci_init: controller up, NO_OP OK, usb_core_start runs but
-   Angle 3 hides the stale pre-kexec device. No enumeration yet.
-2. net_pump_task starts (spawned unconditionally when
-   `ENABLE_NETWORKING` is on). It calls `net_poll()` at ~100 Hz.
-3. Every tick: `usb_core_hotplug_poll()` reads PORTSC, advances
-   the STALE → WAIT_RECONNECT → FRESH state machine.
-4. User physically unplugs the dongle. Next tick sees CCS=0;
-   state advances to WAIT_RECONNECT.
-5. User re-plugs. Next tick sees CCS=1; state advances to FRESH
-   and `usb_core_hotplug_poll` drives `usb_core_enumerate()` →
-   ADDRESS_DEVICE(BSR=1) → GET_DESCRIPTOR → SET_CONFIGURATION →
-   `endpoint_configure` for each bulk endpoint.
-6. Same tick (or next): `cdc_ecm_probe_and_register()` finds
-   `usb_core_first_device()` non-NULL, binds, calls
-   `net_register_driver(&cdc_ecm_driver)`.
-7. User / script runs `net init` at the SLM-OS shell → lwIP
-   comes up via the cdc_ecm driver → DHCP or static IP → ping
-   flows through CDC-ECM's bulk endpoints.
+1. Linux helper widens the XUSB hold, preserves the SMMU state,
+   deauthorizes the USB2 root hub, and writes the cleaned slot-1
+   handoff into the kexec DTB.
+2. SLM-OS `xhci_init` brings the controller up, reads the slot-1
+   handoff, and adopts the retained Realtek root hub.
+3. `usb_core_start()` treats the retained root hub as transport
+   detail, then fresh-enumerates the downstream RTL8153 on slot 2.
+4. `cdc_ecm_probe_and_register()` binds the config-2 CDC-ECM path and
+   registers the lwIP-backed network driver.
+5. User / script runs `net init` at the SLM-OS shell. DHCP binds and
+   traffic flows without any manual USB unplug/replug.
 
-**What still needs hardware validation:**
+**Hardware validation status:**
 
-The Phase 4 wiring has been exercised end-to-end in unit tests
-(mock HCD + mock CDC-ECM device). On real Jetson hardware, the
-xHCI init + stale-transfer-event handling + NO_OP round-trip
-have been confirmed clean. The Angle-3 re-plug → enumeration
-chain has not yet been end-to-end validated because the prior
-hardware session hit a UEFI boot timing issue; a follow-up
-hardware run is planned. Unit tests give high confidence the
-code paths are correct but `ifconfig` / `ping` on a real
-Realtek dongle after re-plug is the final signoff.
+The Phase 4 wiring is exercised both in unit tests and on real Jetson
+hardware. On `jetson-nano-2`, the validated lab path is now:
+
+- Linux with the Realtek hub + RTL8153 chain already attached
+- `slmos-kexec /root/slmos.elf`
+- SLM-OS retained root-hub adoption, downstream child enumeration, and
+  `cdc_ecm` bind
+- `ifconfig` shows `192.168.4.5/24` and gateway `192.168.4.1`
+- `ping 192.168.4.1 2` succeeds
+
+This is the current signoff path for #309 on the Jetson kexec flow.
 
 ---
 
-*Last updated: 19 April 2026*
+*Last updated: 25 April 2026*

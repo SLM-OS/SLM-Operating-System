@@ -44,7 +44,8 @@ All six sessions can run in parallel. The only file-level overlap:
   1. Regression test covering the fix
   2. Update affected docs
   3. `make test` passes (QEMU)
-  4. For Pi 5-affecting changes: deploy via `labctl sdwire_update` and verify
+  4. For Pi 5-affecting changes: deploy and verify through the board's supported model
+     (`labctl sdwire_update` on SDWire-equipped boards, maintenance-OS / dual-boot on no-SDWire boards)
   5. Commit with descriptive message
 - If a review finding turns out to be a **false positive** or the fix is
   wrong, flag it and skip — don't force a broken change.
@@ -70,8 +71,9 @@ Each session should:
 
 For each fix:
 - QEMU build (`make test`) — non-negotiable baseline
-- Pi 5 (`make kernel PLATFORM=RASPI5` + `labctl sdwire_update` + `boot_test`) —
-  required for memory, scheduler, driver, or ARM64 boot changes
+- Pi 5 (`make kernel PLATFORM=RASPI5` + deploy through the board's supported
+  path + `boot_test`) — required for memory, scheduler, driver, or ARM64 boot
+  changes
 - Jetson (`make kernel PLATFORM=JETSON_ORIN_NANO`) — verify build; hardware
   testing optional unless the fix is Jetson-specific
 - x86-64 (`make test PLATFORM=X86_64`) — required for IDT, LAPIC, or x86 boot

@@ -23,10 +23,20 @@
 #   xusb_* clocks. Holding those clocks + the xusba / xusbc powergates
 #   on before kexec keeps the controller live for SLM-OS's XHCI driver.
 #
+#   On current L4T kernels the clock hold alone is not enough. Linux's
+#   kexec path also tears down the xusb stream's arm-smmu state, which
+#   makes SLM-OS's first XHCI DMA transaction wedge at USBCMD.RUN=1.
+#   If the arm_smmu_noshutdown module is installed, this helper now
+#   loads it automatically before kexec so the xusb stream keeps a live
+#   translation context plus an identity mapping over SLM-OS's NC memory
+#   region.
+#
 # Usage:
 #   sudo ./jetson-kexec-slmos.sh /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-gpu-suspend /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-usb-hold   /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --no-smmu-fix   /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --no-usb-root-cleanup /path/to/slmos.elf
 #
 # Or install to Jetson and run:
 #   sudo slmos-kexec /root/slmos.elf
@@ -47,19 +57,565 @@
 #                       XHCI controller; the held clocks are otherwise
 #                       harmless (they just keep the IP block alive).
 #
+#   --no-smmu-fix       Skip loading the optional arm_smmu_noshutdown
+#                       kernel module. Only use this if you are not
+#                       exercising the XHCI host path, or if you are
+#                       deliberately reproducing the pre-fix failure.
+#
+#   --no-usb-root-cleanup
+#                       Skip the Linux-side USB2 root-hub deauthorize
+#                       step before kexec. On nano-2, leaving the
+#                       high-speed root hub authorized across kexec can
+#                       preserve a poisoned retained slot-1 state in
+#                       SLM-OS; deauthorizing it leaves slot 1 in a
+#                       cleaner addressed state and skips only the
+#                       downstream slot-3 handoff for that run.
+#
 set -euo pipefail
 
 NO_GPU_SUSPEND=0
 NO_USB_HOLD=0
+NO_SMMU_FIX=0
+NO_USB_ROOT_CLEANUP=0
 KERNEL=""
+SKIP_XHCI_SLOT3_HANDOFF=0
+XHCI_SLOT1_HANDOFF_PAYLOAD=""
+XHCI_SLOT3_HANDOFF_PAYLOAD=""
 for arg in "$@"; do
     case "$arg" in
         --no-gpu-suspend) NO_GPU_SUSPEND=1 ;;
         --no-usb-hold)    NO_USB_HOLD=1 ;;
+        --no-smmu-fix)    NO_SMMU_FIX=1 ;;
+        --no-usb-root-cleanup) NO_USB_ROOT_CLEANUP=1 ;;
         *) KERNEL="$arg" ;;
     esac
 done
 KERNEL="${KERNEL:-/root/slmos.elf}"
+
+find_smmu_fix_module() {
+    local candidate
+    for candidate in \
+        "/usr/local/lib/slmos/arm_smmu_noshutdown.ko" \
+        "/opt/slmos/arm_smmu_noshutdown.ko" \
+        "/root/arm-smmu-noshutdown/arm_smmu_noshutdown.ko" \
+        "$(dirname "$0")/arm_smmu_noshutdown.ko"
+    do
+        if [[ -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+prepare_kexec_dtb() {
+    local cmdline="$1"
+    local live_fdt=/sys/firmware/fdt
+    local out=/tmp/slmos-kexec.dtb
+
+    if ! command -v fdtput >/dev/null 2>&1; then
+        echo "Warning: fdtput not found; using kernel command line without explicit DTB patch" >&2
+        return 1
+    fi
+    if [[ ! -r "$live_fdt" ]]; then
+        echo "Warning: live FDT $live_fdt not readable; using kernel command line without explicit DTB patch" >&2
+        return 1
+    fi
+
+    cp "$live_fdt" "$out"
+    if ! fdtput -t s "$out" /chosen bootargs "$cmdline"; then
+        echo "Warning: failed to patch /chosen/bootargs in $out; using kernel command line without explicit DTB patch" >&2
+        rm -f "$out"
+        return 1
+    fi
+
+    if [[ -n "$XHCI_SLOT1_HANDOFF_PAYLOAD" || -n "$XHCI_SLOT3_HANDOFF_PAYLOAD" ]]; then
+        if ! fdtput -c "$out" /slmos-handoff >/dev/null 2>&1; then
+            echo "Warning: failed to create /slmos-handoff in $out" >&2
+            rm -f "$out"
+            return 1
+        fi
+        if [[ -n "$XHCI_SLOT1_HANDOFF_PAYLOAD" ]]; then
+            if ! fdtput -t s "$out" /slmos-handoff xhci-slot1-handoff \
+                  "$XHCI_SLOT1_HANDOFF_PAYLOAD"; then
+                echo "Warning: failed to patch /slmos-handoff/xhci-slot1-handoff in $out" >&2
+                rm -f "$out"
+                return 1
+            fi
+        fi
+    fi
+    if [[ -n "$XHCI_SLOT3_HANDOFF_PAYLOAD" ]]; then
+        if ! fdtput -t s "$out" /slmos-handoff xhci-slot3-handoff \
+              "$XHCI_SLOT3_HANDOFF_PAYLOAD"; then
+            echo "Warning: failed to patch /slmos-handoff/xhci-slot3-handoff in $out" >&2
+            rm -f "$out"
+            return 1
+        fi
+    fi
+
+    printf '%s\n' "$out"
+}
+
+stash_xhci_slot1_handoff() {
+    local dbg=/sys/kernel/debug/usb/xhci/3610000.usb
+    local dev_dir=""
+    local slot_ctx=""
+    local ep_ctx=""
+    local ep0_deq=""
+    local reg_op="$dbg/reg-op"
+    local py_out
+
+    if [[ ! -r "$reg_op" || ! -d "$dbg/devices" ]]; then
+        echo "       slot1 handoff skipped (debugfs state unavailable)"
+        return 0
+    fi
+
+    for dev_dir in "$dbg"/devices/*; do
+        [[ -d "$dev_dir" ]] || continue
+        slot_ctx="$dev_dir/slot-context"
+        ep_ctx="$dev_dir/ep-context"
+        ep0_deq="$dev_dir/ep00/dequeue"
+        [[ -r "$slot_ctx" && -r "$ep_ctx" && -r "$ep0_deq" ]] || continue
+        if grep -Eqi '(^|[[:space:]])high-speed([[:space:]]|$)' "$slot_ctx" &&
+           grep -Eq '(^|[[:space:]])RS[[:space:]]+0+([[:space:]]|$)' "$slot_ctx" &&
+           grep -Eq 'Port#[[:space:]]+6/' "$slot_ctx"; then
+            break
+        fi
+        slot_ctx=""
+        ep_ctx=""
+        ep0_deq=""
+    done
+
+    if [[ -z "$slot_ctx" || -z "$ep_ctx" || -z "$ep0_deq" ]]; then
+        echo "       slot1 handoff skipped (no high-speed root device on port 6 in debugfs)"
+        return 0
+    fi
+
+py_out="$(python3 - "$slot_ctx" "$ep_ctx" "$ep0_deq" "$reg_op" <<'PY'
+import re, sys
+
+slot_ctx_path, ep_ctx_path, ep0_deq_path, reg_op_path = sys.argv[1:5]
+slot_text = open(slot_ctx_path, "r", encoding="utf-8").read().strip()
+ep_text = open(ep_ctx_path, "r", encoding="utf-8").read().strip()
+ep0_text = open(ep0_deq_path, "r", encoding="utf-8").read().strip()
+reg_text = open(reg_op_path, "r", encoding="utf-8").read()
+
+slot_match = re.search(r'^0x([0-9a-fA-F]+):', slot_text)
+route_match = re.search(r'\bRS\s+([0-9a-fA-F]+)\b', slot_text)
+speed_match = re.search(r'\b(full-speed|low-speed|high-speed|super-speed)\b', slot_text, re.IGNORECASE)
+ctx_match = re.search(r'Ctx Entries\s+(\d+)', slot_text)
+port_match = re.search(r'Port#\s+(\d+)', slot_text)
+addr_match = re.search(r'Addr\s+(\d+)', slot_text)
+slot_state_match = re.search(r'State\s+([A-Za-z-]+)', slot_text)
+
+dcbaap_lo = re.search(r'DCBAAP_LOW = 0x([0-9a-fA-F]+)', reg_text)
+dcbaap_hi = re.search(r'DCBAAP_HIGH = 0x([0-9a-fA-F]+)', reg_text)
+ep0_match = re.search(r'0x([0-9a-fA-F]+)', ep0_text)
+
+ep_state_match = re.search(r'State\s+([A-Za-z-]+)', ep_text)
+cerr_match = re.search(r'CErr\s+(\d+)', ep_text)
+ep_type_match = re.search(r'Type\s+([A-Za-z]+)', ep_text)
+maxp_match = re.search(r'maxp\s+(\d+)', ep_text)
+avg_match = re.search(r'avg trb len\s+(\d+)', ep_text, re.IGNORECASE)
+
+if not all([
+    slot_match, route_match, speed_match, ctx_match, port_match, addr_match,
+    slot_state_match, dcbaap_lo, dcbaap_hi, ep0_match,
+    ep_state_match, cerr_match, ep_type_match, maxp_match, avg_match,
+]):
+    print("       slot1 handoff skipped (failed to parse debugfs state)")
+    sys.exit(0)
+
+if speed_match.group(1).lower() != "high-speed":
+    print("       slot1 handoff skipped (slot 1 is not high-speed)")
+    sys.exit(0)
+if int(port_match.group(1), 10) != 6:
+    print("       slot1 handoff skipped (slot 1 not on root port 6)")
+    sys.exit(0)
+
+speed_id = 3
+slot_state_id = {
+    "disabled": 0,
+    "default": 1,
+    "addressed": 2,
+    "configured": 3,
+}[slot_state_match.group(1).lower()]
+ep_state_id = {
+    "disabled": 0,
+    "running": 1,
+    "halted": 2,
+    "stopped": 3,
+    "error": 4,
+}[ep_state_match.group(1).lower()]
+ep_type_id = {
+    "ctrl": 4,
+    "control": 4,
+}[ep_type_match.group(1).lower()]
+
+devctx_phys = int(slot_match.group(1), 16) & ~0x3F
+route = int(route_match.group(1), 16) & 0xFFFFF
+ctx_entries = int(ctx_match.group(1), 10) & 0x1F
+root_port = int(port_match.group(1), 10)
+slot_addr = int(addr_match.group(1), 10) & 0xFF
+dcbaap = (int(dcbaap_hi.group(1), 16) << 32) | int(dcbaap_lo.group(1), 16)
+ep0_deq = int(ep0_match.group(1), 16) & ~0xF
+cerr = int(cerr_match.group(1), 10) & 0x3
+maxp = int(maxp_match.group(1), 10) & 0xFFFF
+avg = int(avg_match.group(1), 10) & 0xFFFF
+
+slot_dw = [
+    route | (speed_id << 20) | (ctx_entries << 27),
+    root_port << 16,
+    0,
+    slot_addr | (slot_state_id << 27),
+]
+ep_dw = [
+    ep_state_id,
+    (cerr << 1) | (ep_type_id << 3) | (maxp << 16),
+    (ep0_deq & 0xFFFFFFFF) | 0x1,
+    (ep0_deq >> 32) & 0xFFFFFFFF,
+    avg,
+    0,
+    0,
+    0,
+]
+payload = ",".join(
+    [f"0x{dcbaap:x}", f"0x{devctx_phys:x}", f"0x{ep0_deq:x}", str(root_port)] +
+    [f"0x{x:x}" for x in slot_dw] +
+    [f"0x{x:x}" for x in ep_dw]
+)
+
+print("PAYLOAD=" + payload)
+print(
+    "       slot1 handoff: "
+    f"DCBAAP=0x{dcbaap:016x} slot1_devctx=0x{devctx_phys:016x} "
+    f"ep0_deq=0x{ep0_deq:016x} root={root_port} "
+    f"slot_dw0=0x{slot_dw[0]:08x} slot_dw1=0x{slot_dw[1]:08x} "
+    f"slot_dw3=0x{slot_dw[3]:08x} ep0_dw0=0x{ep_dw[0]:08x} "
+    f"ep0_dw1=0x{ep_dw[1]:08x}"
+)
+PY
+)"
+
+    XHCI_SLOT1_HANDOFF_PAYLOAD="$(printf '%s\n' "$py_out" | sed -n 's/^PAYLOAD=//p' | head -n1)"
+    echo "       slot1 handoff source: $(basename "$dev_dir")"
+    printf '%s\n' "$py_out" | sed '/^PAYLOAD=/d'
+}
+
+find_slot1_usb2_root_hub_sysfs() {
+    local dev=""
+    local fallback=""
+    local base=""
+    local speed=""
+    local cls=""
+    local vendor=""
+    local product=""
+
+    for dev in /sys/bus/usb/devices/*; do
+        [[ -d "$dev" ]] || continue
+        base="$(basename "$dev")"
+        [[ "$base" =~ ^[0-9]+-[0-9]+$ ]] || continue
+        [[ -r "$dev/speed" && -r "$dev/bDeviceClass" ]] || continue
+
+        speed="$(cat "$dev/speed" 2>/dev/null || true)"
+        cls="$(cat "$dev/bDeviceClass" 2>/dev/null || true)"
+        vendor="$(cat "$dev/idVendor" 2>/dev/null || true)"
+        product="$(cat "$dev/idProduct" 2>/dev/null || true)"
+
+        [[ "$speed" == "480" && "$cls" == "09" ]] || continue
+
+        if [[ "$vendor" == "0bda" && "$product" == "5489" ]]; then
+            printf '%s\n' "$dev"
+            return 0
+        fi
+
+        if [[ -z "$fallback" ]]; then
+            fallback="$dev"
+        fi
+    done
+
+    [[ -n "$fallback" ]] && printf '%s\n' "$fallback"
+}
+
+normalize_xhci_slot1_root_hub() {
+    local dev=""
+    local base=""
+    local vendor=""
+    local product=""
+    local speed=""
+    local auth_before=""
+    local auth_after=""
+
+    dev="$(find_slot1_usb2_root_hub_sysfs || true)"
+    if [[ -z "$dev" ]]; then
+        echo "       slot1 root cleanup skipped (no USB2 root-hub candidate in sysfs)"
+        return 1
+    fi
+
+    if [[ ! -w "$dev/authorized" ]]; then
+        echo "       slot1 root cleanup skipped ($(basename "$dev") authorized not writable)"
+        return 1
+    fi
+
+    base="$(basename "$dev")"
+    vendor="$(cat "$dev/idVendor" 2>/dev/null || echo '?')"
+    product="$(cat "$dev/idProduct" 2>/dev/null || echo '?')"
+    speed="$(cat "$dev/speed" 2>/dev/null || echo '?')"
+    auth_before="$(cat "$dev/authorized" 2>/dev/null || echo '?')"
+
+    echo "       slot1 root cleanup candidate: $base id=${vendor}:${product} speed=${speed} authorized=${auth_before}"
+
+    if ! echo 0 > "$dev/authorized"; then
+        echo "       slot1 root cleanup failed (echo 0 > $dev/authorized)" >&2
+        return 1
+    fi
+
+    sleep 1
+
+    auth_after="$(cat "$dev/authorized" 2>/dev/null || echo '?')"
+    echo "       slot1 root cleanup result: $base authorized ${auth_before} -> ${auth_after}"
+
+    if [[ "$auth_after" != "0" ]]; then
+        echo "       slot1 root cleanup did not stick; keeping retained handoffs enabled"
+        return 1
+    fi
+
+    XHCI_SLOT3_HANDOFF_PAYLOAD=""
+    SKIP_XHCI_SLOT3_HANDOFF=1
+    echo "       preserving slot1 handoff after USB2 root-hub deauthorize"
+    echo "       skipping slot3 handoff after USB2 root-hub deauthorize"
+    return 0
+}
+
+verify_smmu_fix_effect() {
+    local identity_line='added identity IOMMU mapping IOVA 0xbde00000..0xbe000000'
+    local domain_line='xusb iommu_domain type='
+    local smmu_lines
+
+    smmu_lines="$(dmesg | grep 'arm-smmu-noshutdown:' 2>/dev/null || true)"
+    if [[ "$smmu_lines" == *"$identity_line"* ]]; then
+        echo "       verified: $identity_line"
+        return 0
+    fi
+
+    echo "Warning: arm_smmu_noshutdown loaded but identity-map confirmation was not seen in dmesg" >&2
+    if [[ "$smmu_lines" == *"$domain_line"* ]]; then
+        echo "         xusb iommu_domain was found, but iommu_map success was not observed" >&2
+    else
+        echo "         xusb iommu_domain probe output was not observed either" >&2
+    fi
+    echo "         recent arm-smmu-noshutdown lines:" >&2
+    printf '%s\n' "$smmu_lines" | tail -n 12 >&2 || true
+    return 1
+}
+
+stash_xhci_slot3_handoff() {
+    local dbg=/sys/kernel/debug/usb/xhci/3610000.usb
+    local slot_ctx="$dbg/devices/03/slot-context"
+    local ep_ctx="$dbg/devices/03/ep-context"
+    local ep0_deq="$dbg/devices/03/ep00/dequeue"
+    local reg_op="$dbg/reg-op"
+    local sysfs=/sys/module/arm_smmu_noshutdown/parameters/xhci_slot3_handoff
+    local py_out
+
+    if [[ ! -r "$slot_ctx" || ! -r "$ep_ctx" || ! -r "$ep0_deq" || ! -r "$reg_op" ]]; then
+        echo "       slot3 handoff skipped (debugfs state unavailable)"
+        return 0
+    fi
+
+py_out="$(python3 - "$slot_ctx" "$ep_ctx" "$ep0_deq" "$reg_op" "$sysfs" <<'PY'
+import re, sys
+
+slot_ctx_path, ep_ctx_path, ep0_deq_path, reg_op_path, sysfs_path = sys.argv[1:6]
+slot_text = open(slot_ctx_path, "r", encoding="utf-8").read().strip()
+ep_text = open(ep_ctx_path, "r", encoding="utf-8").read().strip()
+ep0_text = open(ep0_deq_path, "r", encoding="utf-8").read().strip()
+reg_text = open(reg_op_path, "r", encoding="utf-8").read()
+ep_lines = [line.strip() for line in ep_text.splitlines() if line.strip()]
+
+slot_match = re.search(r'^0x([0-9a-fA-F]+):', slot_text)
+route_match = re.search(r'\bRS\s+([0-9a-fA-F]+)\b', slot_text)
+speed_match = re.search(r'\b(full-speed|low-speed|high-speed|super-speed)\b', slot_text, re.IGNORECASE)
+ctx_match = re.search(r'Ctx Entries\s+(\d+)', slot_text)
+port_match = re.search(r'Port#\s+(\d+)', slot_text)
+addr_match = re.search(r'Addr\s+(\d+)', slot_text)
+slot_state_match = re.search(r'State\s+([A-Za-z-]+)', slot_text)
+
+dcbaap_lo = re.search(r'DCBAAP_LOW = 0x([0-9a-fA-F]+)', reg_text)
+dcbaap_hi = re.search(r'DCBAAP_HIGH = 0x([0-9a-fA-F]+)', reg_text)
+ep0_match = re.search(r'0x([0-9a-fA-F]+)', ep0_text)
+
+ep_state_match = re.search(r'State\s+([A-Za-z-]+)', ep_text)
+cerr_match = re.search(r'CErr\s+(\d+)', ep_text)
+ep_type_match = re.search(r'Type\s+([A-Za-z]+)', ep_text)
+maxp_match = re.search(r'maxp\s+(\d+)', ep_text)
+avg_match = re.search(r'avg trb len\s+(\d+)', ep_text, re.IGNORECASE)
+
+if not all([
+    slot_match, route_match, speed_match, ctx_match, port_match, addr_match,
+    slot_state_match, dcbaap_lo, dcbaap_hi, ep0_match,
+    ep_state_match, cerr_match, ep_type_match, maxp_match, avg_match,
+]):
+    print("       slot3 handoff skipped (failed to parse debugfs state)")
+    sys.exit(0)
+
+speed_id = {
+    "full-speed": 1,
+    "low-speed": 2,
+    "high-speed": 3,
+    "super-speed": 4,
+}[speed_match.group(1).lower()]
+
+slot_state_id = {
+    "disabled": 0,
+    "default": 1,
+    "addressed": 2,
+    "configured": 3,
+}[slot_state_match.group(1).lower()]
+
+ep_state_id = {
+    "disabled": 0,
+    "running": 1,
+    "halted": 2,
+    "stopped": 3,
+    "error": 4,
+}[ep_state_match.group(1).lower()]
+
+ep_type_id = {
+    "ctrl": 4,
+    "control": 4,
+}[ep_type_match.group(1).lower()]
+
+devctx_phys = int(slot_match.group(1), 16) & ~0x3F
+route = int(route_match.group(1), 16) & 0xFFFFF
+ctx_entries = int(ctx_match.group(1), 10) & 0x1F
+root_port = int(port_match.group(1), 10)
+slot_addr = int(addr_match.group(1), 10) & 0xFF
+dcbaap = (int(dcbaap_hi.group(1), 16) << 32) | int(dcbaap_lo.group(1), 16)
+ep0_deq = int(ep0_match.group(1), 16) & ~0xF
+cerr = int(cerr_match.group(1), 10) & 0x3
+maxp = int(maxp_match.group(1), 10) & 0xFFFF
+avg = int(avg_match.group(1), 10) & 0xFFFF
+
+slot_dw = [
+    route | (speed_id << 20) | (ctx_entries << 27),
+    root_port << 16,
+    0,
+    slot_addr | (slot_state_id << 27),
+]
+ep_dw = [
+    ep_state_id,
+    (cerr << 1) | (ep_type_id << 3) | (maxp << 16),
+    (ep0_deq & 0xFFFFFFFF) | 0x1,
+    (ep0_deq >> 32) & 0xFFFFFFFF,
+    avg,
+    0,
+    0,
+    0,
+]
+payload_legacy = ",".join(
+    [f"0x{dcbaap:x}", f"0x{devctx_phys:x}", f"0x{ep0_deq:x}", str(root_port)] +
+    [f"0x{x:x}" for x in slot_dw] +
+    [f"0x{x:x}" for x in ep_dw]
+)
+ep_state_ids = {
+    "disabled": 0,
+    "running": 1,
+    "halted": 2,
+    "stopped": 3,
+    "error": 4,
+}
+ep_type_ids = {
+    "invalid": 0,
+    "isoc out": 1,
+    "bulk out": 2,
+    "int out": 3,
+    "ctrl": 4,
+    "control": 4,
+    "isoc in": 5,
+    "bulk in": 6,
+    "int in": 7,
+}
+
+def encode_interval(us_text: str) -> int:
+    us = int(us_text)
+    if us <= 125:
+        return 0
+    quanta = max(1, us // 125)
+    shift = 0
+    while (1 << shift) < quanta and shift < 0xFF:
+        shift += 1
+    return shift
+
+ep_ctx_words = []
+for idx in range(7):
+    if idx >= len(ep_lines):
+        print("       slot3 handoff skipped (ep-context lines missing)")
+        sys.exit(0)
+    line = ep_lines[idx]
+    m = re.search(
+        r"State\s+([A-Za-z-]+)\s+mult\s+(\d+)\s+max P\. Streams\s+(\d+)\s+"
+        r"interval\s+(\d+)\s+us\s+max ESIT payload\s+(\d+)\s+CErr\s+(\d+)\s+"
+        r"Type\s+(.+?)\s+burst\s+(\d+)\s+maxp\s+(\d+)\s+deq\s+([0-9a-fA-F]+)\s+"
+        r"avg trb len\s+(\d+)",
+        line,
+        re.IGNORECASE,
+    )
+    if not m:
+        print(f"       slot3 handoff skipped (failed to parse ep-context line {idx + 1})")
+        sys.exit(0)
+
+    ep_state = ep_state_ids[m.group(1).lower()]
+    ep_mult = int(m.group(2), 10) & 0x3
+    ep_interval = encode_interval(m.group(4))
+    ep_cerr = int(m.group(6), 10) & 0x3
+    ep_type = ep_type_ids[m.group(7).strip().lower()]
+    ep_burst = int(m.group(8), 10) & 0xFF
+    ep_maxp = int(m.group(9), 10) & 0xFFFF
+    ep_deq = int(m.group(10), 16)
+    ep_avg = int(m.group(11), 10) & 0xFFFF
+
+    ep_ctx_words.append([
+        ep_state | (ep_mult << 8) | ((ep_interval & 0xFF) << 16),
+        (ep_cerr << 1) | (ep_type << 3) | (ep_burst << 8) | (ep_maxp << 16),
+        ep_deq & 0xFFFFFFFF,
+        (ep_deq >> 32) & 0xFFFFFFFF,
+        ep_avg,
+        0,
+        0,
+        0,
+    ])
+
+payload_out = ",".join(
+    [f"0x{dcbaap:x}", f"0x{devctx_phys:x}", f"0x{ep0_deq:x}", str(root_port)] +
+    [f"0x{x:x}" for x in slot_dw] +
+    [f"0x{x:x}" for ctx in ep_ctx_words for x in ctx]
+)
+
+if sysfs_path and sysfs_path != "-" and __import__("os").access(sysfs_path, __import__("os").W_OK):
+    try:
+        with open(sysfs_path, "w", encoding="utf-8") as f:
+            f.write(payload_legacy)
+        print("       slot3 alias handoff updated")
+    except OSError as exc:
+        print(f"       slot3 alias handoff skipped ({exc})")
+
+print("PAYLOAD=" + payload_out)
+print(
+    "       slot3 handoff: "
+    f"DCBAAP=0x{dcbaap:016x} slot3_devctx=0x{devctx_phys:016x} "
+    f"ep0_deq=0x{ep0_deq:016x} root={root_port} "
+    f"slot_dw0=0x{slot_dw[0]:08x} slot_dw1=0x{slot_dw[1]:08x} "
+    f"slot_dw3=0x{slot_dw[3]:08x} ep0_dw0=0x{ep_ctx_words[0][0]:08x} "
+    f"ep0_dw1=0x{ep_ctx_words[0][1]:08x} ep3_dw2=0x{ep_ctx_words[2][2]:08x} "
+    f"ep4_dw2=0x{ep_ctx_words[3][2]:08x} ep5_dw2=0x{ep_ctx_words[4][2]:08x}"
+)
+PY
+)"
+
+    XHCI_SLOT3_HANDOFF_PAYLOAD="$(printf '%s\n' "$py_out" | sed -n 's/^PAYLOAD=//p' | head -n1)"
+    printf '%s\n' "$py_out" | sed '/^PAYLOAD=/d'
+}
 
 if [[ ! -f "$KERNEL" ]]; then
     echo "Error: kernel file not found: $KERNEL" >&2
@@ -145,23 +701,36 @@ else
 fi
 
 if [[ "$NO_USB_HOLD" == "0" ]]; then
-    echo "[4/7] Holding xusb clocks + powergates on for SLM-OS XHCI..."
-    # Clocks the tegra-xusb host controller actually runs on. Verified
-    # in the #266 Phase 0 probe (commit fb12937) as the set that
-    # corresponds to a live MMIO aperture at 0x03610000. xusb_core_dev
-    # and xusb_ss are deliberately NOT held — SLM-OS targets USB 2.0
-    # host only for Phase 3A.
-    for clk in xusb_core_host xusb_falcon xusb_fs xusb_hs_hsicp pex_usb_pad_pll0_mgmt utmi_pll; do
+    echo "[4/8] Holding xusb clocks + powergates on for SLM-OS XHCI..."
+    # Keep the full XUSB fabric live across kexec, not just the
+    # minimal USB2 host subset. On jetson-nano-2, RUN=1 still wedged
+    # the aperture with the narrower hold set; forcing the broader
+    # xusb_core_*/xusb_falcon_*/xusb_fs_host/xusb_ss* tree on let the
+    # controller reach "NO_OP round-trip OK".
+    for clk in \
+        xusb_core_dev \
+        xusb_core_host \
+        xusb_core_mux \
+        xusb_core_ss \
+        xusb_falcon \
+        xusb_falcon_host \
+        xusb_falcon_ss \
+        xusb_fs \
+        xusb_fs_host \
+        xusb_hs_hsicp \
+        xusb_ss \
+        xusb_ss_superspeed \
+        pex_usb_pad_pll0_mgmt \
+        utmi_pll; do
         if [[ -w "$BPMP/clk/$clk/state" ]]; then
             echo 1 > "$BPMP/clk/$clk/state" 2>/dev/null || \
                 echo "       ${clk}: write failed" >&2
         fi
     done
-    # Powergates: xusba is the USB 3 / padctl infrastructure (padctl
-    # is needed even for USB 2.0 to keep the PHY straps valid);
-    # xusbc is the host-controller domain. xusbb (device mode) stays
-    # off — SLM-OS is host-only.
-    for pg in xusba xusbc; do
+    # Keep the whole XUSB partition set alive. xusbb is nominally the
+    # device-mode domain, but on nano-2 the successful RUN=1/NO_OP
+    # handoff also had it forced on alongside xusba/xusbc.
+    for pg in xusba xusbb xusbc; do
         if [[ -w "$BPMP/powergate/$pg/state" ]]; then
             echo 1 > "$BPMP/powergate/$pg/state" 2>/dev/null || \
                 echo "       ${pg}: write failed" >&2
@@ -170,17 +739,22 @@ if [[ "$NO_USB_HOLD" == "0" ]]; then
 
     # Summarise the state we're handing off so the serial log makes
     # post-kexec debugging easier.
+    core_dev="$(cat "$BPMP/clk/xusb_core_dev/state" 2>/dev/null || echo '?')"
     core_host="$(cat "$BPMP/clk/xusb_core_host/state" 2>/dev/null || echo '?')"
+    core_ss="$(cat "$BPMP/clk/xusb_core_ss/state" 2>/dev/null || echo '?')"
     falcon="$(cat "$BPMP/clk/xusb_falcon/state" 2>/dev/null || echo '?')"
+    fs_host="$(cat "$BPMP/clk/xusb_fs_host/state" 2>/dev/null || echo '?')"
+    ss="$(cat "$BPMP/clk/xusb_ss/state" 2>/dev/null || echo '?')"
     pg_a="$(cat "$BPMP/powergate/xusba/state" 2>/dev/null || echo '?')"
+    pg_b="$(cat "$BPMP/powergate/xusbb/state" 2>/dev/null || echo '?')"
     pg_c="$(cat "$BPMP/powergate/xusbc/state" 2>/dev/null || echo '?')"
-    echo "       after hold: xusb_core_host=$core_host xusb_falcon=$falcon xusba=$pg_a xusbc=$pg_c"
+    echo "       after hold: xusb_core_dev=$core_dev xusb_core_host=$core_host xusb_core_ss=$core_ss xusb_falcon=$falcon xusb_fs_host=$fs_host xusb_ss=$ss xusba=$pg_a xusbb=$pg_b xusbc=$pg_c"
 else
-    echo "[4/7] SKIPPING xusb clock hold (--no-usb-hold)"
+    echo "[4/8] SKIPPING xusb clock hold (--no-usb-hold)"
 fi
 
 if [[ "$NO_USB_HOLD" == "0" ]]; then
-    echo "[5/7] Pinning tegra-xusb runtime PM so Linux doesn't idle-suspend..."
+    echo "[5/8] Pinning tegra-xusb runtime PM so Linux doesn't idle-suspend..."
     XUSB_DEV=/sys/devices/platform/bus@0/3610000.usb
     if [[ -d "$XUSB_DEV/power" ]]; then
         # 'on' disables runtime PM; low-cost pin that doesn't itself
@@ -205,15 +779,70 @@ if [[ "$NO_USB_HOLD" == "0" ]]; then
     #     address — SLM-OS mis-identifies free RAM and hangs early
     #     in boot. Incompatible without significant SLM-OS work.
     #
-    # Net: Linux's kexec-time shutdown of tegra-xusb is the live
-    # blocker. Until that is worked around (kernel module that
-    # NULLs the .shutdown pointer, or standalone firmware load per
-    # #286), SLM-OS can read the XHCI aperture but cannot run the
-    # controller — USBCMD.RUN=1 wedges the Falcon-stopped MMIO.
+    # Net: clock hold alone is insufficient on current L4T. The
+    # xusb stream's SMMU state must also survive into kexec; the
+    # helper handles that in the next step when the optional
+    # arm_smmu_noshutdown module is installed.
 fi
 
-echo "[6/7] Loading kernel: $KERNEL"
-kexec -l "$KERNEL" --reuse-cmdline
+if [[ "$NO_SMMU_FIX" == "0" ]]; then
+    echo "[6/8] Preparing xusb arm-smmu state for post-kexec XHCI..."
+    if [[ -d /sys/module/arm_smmu_noshutdown ]]; then
+        echo "       arm_smmu_noshutdown already loaded"
+        if ! verify_smmu_fix_effect; then
+            echo "Error: arm_smmu_noshutdown is present, but the xusb identity mapping is not confirmed" >&2
+            echo "       refusing to kexec into a known-bad XHCI handoff state" >&2
+            exit 1
+        fi
+    else
+        if smmu_mod="$(find_smmu_fix_module)"; then
+            echo "       loading $smmu_mod"
+            if insmod "$smmu_mod"; then
+                echo "       arm_smmu_noshutdown loaded"
+                if ! verify_smmu_fix_effect; then
+                    echo "Error: arm_smmu_noshutdown did not confirm the xusb identity mapping" >&2
+                    echo "       refusing to kexec into a known-bad XHCI handoff state" >&2
+                    exit 1
+                fi
+            else
+                echo "Warning: failed to load $smmu_mod" >&2
+                echo "         USB-A XHCI may wedge at RUN=1 without the SMMU fix" >&2
+            fi
+        else
+            echo "Warning: arm_smmu_noshutdown.ko not found" >&2
+            echo "         looked in /usr/local/lib/slmos, /opt/slmos, /root/arm-smmu-noshutdown, and $(dirname "$0")" >&2
+            echo "         USB-A XHCI may wedge at RUN=1 without the SMMU fix" >&2
+        fi
+    fi
+    if [[ "$NO_USB_HOLD" == "0" ]]; then
+        if [[ "$NO_USB_ROOT_CLEANUP" == "0" ]]; then
+            normalize_xhci_slot1_root_hub || true
+        else
+            echo "       skipping USB2 root-hub cleanup (--no-usb-root-cleanup)"
+        fi
+        stash_xhci_slot1_handoff
+        if [[ "$SKIP_XHCI_SLOT3_HANDOFF" == "1" ]]; then
+            echo "       slot3 handoff publication skipped"
+        else
+            stash_xhci_slot3_handoff
+        fi
+    fi
+else
+    echo "[6/8] SKIPPING arm-smmu fix (--no-smmu-fix)"
+fi
 
-echo "[7/7] Executing kexec (serial console will take over)"
+echo "[7/8] Loading kernel: $KERNEL"
+KEXEC_CMDLINE="$(cat /proc/cmdline)"
+if [[ -n "$XHCI_SLOT3_HANDOFF_PAYLOAD" ]]; then
+    KEXEC_CMDLINE+=" slmos_xhci_slot3_handoff=$XHCI_SLOT3_HANDOFF_PAYLOAD"
+fi
+KEXEC_DTB="$(prepare_kexec_dtb "$KEXEC_CMDLINE" || true)"
+if [[ -n "$KEXEC_DTB" ]]; then
+    echo "       patched DTB: $KEXEC_DTB"
+    kexec -l "$KERNEL" --command-line="$KEXEC_CMDLINE" --dtb="$KEXEC_DTB"
+else
+    kexec -l "$KERNEL" --command-line="$KEXEC_CMDLINE"
+fi
+
+echo "[8/8] Executing kexec (serial console will take over)"
 exec kexec -e

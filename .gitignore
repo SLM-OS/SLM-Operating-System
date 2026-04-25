@@ -12,6 +12,9 @@ cmake-build-*/
 .claude/worktrees
 .codex
 
+# Codex local state
+.codex
+
 # Temporary output file
 CLAUDE_OUTPUT.md
 
@@ -37,6 +40,9 @@ Desktop.ini
 *.elf
 *.bin
 *.hex
+*.ko
+*.mod
+*.mod.c
 
 # Debug files
 *.dSYM/
@@ -68,3 +74,8 @@ venv/
 *.tar
 *.zip
 build/nanopb-venv/
+
+# Linux module helper outputs
+scripts/arm-smmu-noshutdown/.*.cmd
+scripts/arm-smmu-noshutdown/Module.symvers
+scripts/arm-smmu-noshutdown/modules.order

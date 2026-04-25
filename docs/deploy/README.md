@@ -6,11 +6,36 @@ For build instructions, see `docs/getting-started.md`. For interactive lab opera
 
 ---
 
+## Pi 5 Deployment Models
+
+Pi 5 boards are intentionally supported in **two deployment models** and
+the project should preserve both:
+
+- **SDWire-first deploy model**:
+  - the boot card is exposed to the host through lab-managed SDWire
+  - iterative development updates the SLM-OS boot artifact directly
+  - this is the primary fast lab workflow when hardware supports it
+- **Maintenance-OS dual-boot model**:
+  - the card carries both SLM-OS and a Linux maintenance environment
+  - Linux is used for recovery, local kernel replacement, and one-shot
+    handoff into SLM-OS when no SDWire exists
+  - this is the supported workflow for boards such as `pi-5-2`
+
+These are complementary, not competing. SDWire is the fastest deploy
+path where available; dual boot is the resilient no-SDWire path.
+
+For file staging onto a running SLM-OS instance, see
+[`slm-put.md`](slm-put.md) for the first telnet-based host upload path.
+[`slm-modelctl.md`](slm-modelctl.md) for the first upload + load +
+activate wrapper around runtime model blobs.
+
+---
+
 ## Target × Media Matrix
 
 | Target | SD card | NVMe / SSD | USB drive | Notes |
 |---|---|---|---|---|
-| Raspberry Pi 5 | [`pi5-sdcard.md`](pi5-sdcard.md), [`pi5-sdwire.md`](pi5-sdwire.md) | **Gap** (#TBD) | — | SDWire path is the primary lab workflow; boards without SDWire can use sneakernet or a local Pi OS maintenance install if that OS is reachable. |
+| Raspberry Pi 5 | [`pi5-sdcard.md`](pi5-sdcard.md), [`pi5-sdwire.md`](pi5-sdwire.md), [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) | **Gap** (#TBD) | — | Preserve both Pi 5 models: SDWire-first deploy where hardware supports it, and maintenance-OS dual boot where it does not. |
 | Jetson Orin Nano | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SD rootfs) | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SSD rootfs) | — | No standalone bare-metal boot path yet — UEFI-direct is WIP (see `docs/jetson-uefi-direct-result.md`). |
 | x86-64 (test-pc) | — | [`x86-64-ssd.md`](x86-64-ssd.md) | **Gap** (#TBD) | UEFI disk image written to SSD via SDWire; kexec-from-Linux is WIP (see `docs/x86-64-gpu-inference-status.md` §4.2.k). |
 | QEMU (ARM64 / x86-64) | N/A | N/A | N/A | `make run` — no deploy step. See `docs/getting-started.md`. |
@@ -23,7 +48,7 @@ Gaps marked above represent paths that are known to work in principle but have n
 
 ### Hardware access
 
-All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The main exception is **sneakernet** — when a board lacks an SDWire interface (for example `pi-5-2`), the SD card may need to be physically removed and written via the host machine's built-in card reader. Some Pi 5 cards also keep a local Raspberry Pi OS maintenance install on the same card; that can update `kernel_2712.img` in place, but only when that Pi OS environment is reachable via SSH or an exclusive serial/login path.
+All lab hardware is managed by **labctl** (Embedded Lab Control). SD cards, power, and serial are accessed through labctl. The main exception is **sneakernet** — when a board lacks an SDWire interface (for example `pi-5-2`), the SD card may need to be physically removed and written via the host machine's built-in card reader. Some Pi 5 cards also keep a local Raspberry Pi OS maintenance install on the same card; that maintenance OS is part of the supported dual-boot model and can update `kernel_2712.img` in place when it is reachable via SSH or an exclusive serial/login path.
 
 Never bypass labctl by running `mount`/`cp`/`picocom`/`nc` directly against lab-managed SD cards or serial ports — doing so risks device conflicts with other sessions and can corrupt the wrong card. Sneakernet is the one sanctioned exception.
 

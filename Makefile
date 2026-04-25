@@ -78,6 +78,16 @@ ifeq ($(EVICTION_MODELS),ON)
     DISABLE_EVICTION := OFF
 endif
 
+# Optional escape hatch for kernel-oriented CMake cache entries that do
+# not yet have first-class Make variables. Intended for bring-up /
+# one-shot diagnostics such as `-DJETSON_XHCI_REBOOT_ON_NOOP=ON`.
+#
+# Example:
+#   make kernel-clean
+#   make kernel PLATFORM=JETSON_ORIN_NANO \
+#       EXTRA_KERNEL_CMAKE_ARGS=-DJETSON_XHCI_REBOOT_ON_NOOP=ON
+EXTRA_KERNEL_CMAKE_ARGS ?=
+
 # Cargo feature list built from the flags above.
 CARGO_FEATURES :=
 ifeq ($(EVICTION_MODELS),ON)
@@ -153,6 +163,10 @@ all: kernel
 # Kernel (C) targets
 # ============================================================================
 
+KERNEL_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS);JETSON_EL1_SMOKE=$(JETSON_EL1_SMOKE);HAILO_FW_BLOB=$(HAILO_FW_BLOB);SCHEDULER_HEF_BLOB=$(SCHEDULER_HEF_BLOB);USER_HEF_BLOB=$(USER_HEF_BLOB)
+KERNEL_KEXEC_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS)
+KERNEL_TEST_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS)
+
 # Check for stale file locks in build directory (Windows issue with ungraceful QEMU/GDB termination)
 # If we can't create slmos.elf, nuke the directory to clear the stale lock
 .PHONY: check-build-dir
@@ -168,8 +182,21 @@ check-build-dir:
 		fi \
 	fi
 
+.PHONY: kernel-config-check
+kernel-config-check:
+	@sig='$(KERNEL_BUILD_SIGNATURE)'; \
+	stamp="$(KERNEL_BUILD_DIR)/.build-config"; \
+	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
+		:; \
+	else \
+		echo "Kernel build options changed; reconfiguring $(KERNEL_BUILD_DIR)"; \
+		rm -rf "$(KERNEL_BUILD_DIR)"; \
+		mkdir -p "$(KERNEL_BUILD_DIR)"; \
+		printf '%s\n' "$$sig" > "$$stamp"; \
+	fi
+
 .PHONY: kernel
-kernel: check-build-dir runtime $(KERNEL_BUILD_DIR)/Makefile
+kernel: check-build-dir runtime kernel-config-check $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
@@ -192,6 +219,9 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		$(if $(HAILO_FW_BLOB),-DHAILO_FW_BLOB=$(HAILO_FW_BLOB)) \
 		$(if $(SCHEDULER_HEF_BLOB),-DSCHEDULER_HEF_BLOB=$(SCHEDULER_HEF_BLOB)) \
 		$(if $(USER_HEF_BLOB),-DUSER_HEF_BLOB=$(USER_HEF_BLOB)) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
+		$(if $(USER_HEF_BLOB),-DUSER_HEF_BLOB=$(USER_HEF_BLOB)) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 # kernel-kexec: X86_64-only parallel build of slmos.elf linked at
@@ -201,13 +231,26 @@ KERNEL_KEXEC_BUILD_DIR := $(BUILD_DIR)/kernel-kexec
 KERNEL_KEXEC_ELF := $(KERNEL_KEXEC_BUILD_DIR)/slmos.elf
 
 .PHONY: kernel-kexec
-kernel-kexec: runtime $(KERNEL_KEXEC_BUILD_DIR)/Makefile
+kernel-kexec: runtime kernel-kexec-config-check $(KERNEL_KEXEC_BUILD_DIR)/Makefile
 ifneq ($(PLATFORM),X86_64)
 	@echo "kernel-kexec requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
 endif
 	@echo "Building kernel (kexec variant, link address 0x20000000)..."
 	$(CMAKE) --build $(KERNEL_KEXEC_BUILD_DIR)
 	@echo "kexec ELF: $(KERNEL_KEXEC_ELF)"
+
+.PHONY: kernel-kexec-config-check
+kernel-kexec-config-check:
+	@sig='$(KERNEL_KEXEC_BUILD_SIGNATURE)'; \
+	stamp="$(KERNEL_KEXEC_BUILD_DIR)/.build-config"; \
+	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
+		:; \
+	else \
+		echo "Kernel kexec build options changed; reconfiguring $(KERNEL_KEXEC_BUILD_DIR)"; \
+		rm -rf "$(KERNEL_KEXEC_BUILD_DIR)"; \
+		mkdir -p "$(KERNEL_KEXEC_BUILD_DIR)"; \
+		printf '%s\n' "$$sig" > "$$stamp"; \
+	fi
 
 $(KERNEL_KEXEC_BUILD_DIR)/Makefile:
 	@echo "Configuring kexec kernel build..."
@@ -225,6 +268,7 @@ $(KERNEL_KEXEC_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
 		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-kexec-clean
@@ -274,6 +318,18 @@ ifneq ($(PLATFORM),X86_64)
 endif
 	@scripts/tests/verify-kexec-build.sh
 
+# test-build-stamp: build twice with sleep 1 between, assert
+# SLMOS_BUILD_STAMP advances. Exercises the gen_build_info.cmake
+# always-runs custom target end-to-end. Issue #360.
+#
+# Pass BUILD_DIR through so `make BUILD_DIR=out test-build-stamp` finds
+# the generated header in the right place. Invoke via `bash` so a missing
+# +x bit on the script (rare, but happens with some VCS export workflows)
+# does not break the target.
+.PHONY: test-build-stamp
+test-build-stamp:
+	@BUILD_DIR=$(BUILD_DIR) bash scripts/tests/test-build-stamp-advances.sh
+
 # kernel-bzimage: X86_64-only parallel build of a Linux-bzImage wrapper
 # around the kernel. Used as the third kexec loader path alongside
 # Multiboot2 (unblocked from "Invalid memory segment" but silent after
@@ -312,6 +368,7 @@ $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
 		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-bzimage-clean
@@ -433,7 +490,8 @@ gsp-harness-clean:
 
 HAILO_USHIM_OUT := build/host-tools/hailo-ushim
 HAILO_USHIM_SRCS := \
-    host-tools/hailo-ushim/main.c
+    host-tools/hailo-ushim/main.c \
+    host-tools/hailo-ushim/hailo_dev.c
 
 HAILO_USHIM_CFLAGS := \
     -std=c11 -Wall -Wextra -O2 -g \
@@ -759,9 +817,22 @@ QEMU_GUARD := $(shell if command -v systemd-run >/dev/null 2>&1 && systemd-run -
 
 # Build kernel with ENABLE_BOOT_TESTS (runs tests at boot and exits)
 .PHONY: kernel-test
-kernel-test: check-build-dir runtime $(KERNEL_TEST_BUILD_DIR)/Makefile
+kernel-test: check-build-dir runtime kernel-test-config-check $(KERNEL_TEST_BUILD_DIR)/Makefile
 	@echo "Building test kernel..."
 	$(CMAKE) --build $(KERNEL_TEST_BUILD_DIR)
+
+.PHONY: kernel-test-config-check
+kernel-test-config-check:
+	@sig='$(KERNEL_TEST_BUILD_SIGNATURE)'; \
+	stamp="$(KERNEL_TEST_BUILD_DIR)/.build-config"; \
+	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
+		:; \
+	else \
+		echo "Kernel test build options changed; reconfiguring $(KERNEL_TEST_BUILD_DIR)"; \
+		rm -rf "$(KERNEL_TEST_BUILD_DIR)"; \
+		mkdir -p "$(KERNEL_TEST_BUILD_DIR)"; \
+		printf '%s\n' "$$sig" > "$$stamp"; \
+	fi
 
 $(KERNEL_TEST_BUILD_DIR)/Makefile:
 	@echo "Configuring test kernel build..."
@@ -779,6 +850,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
 		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-test-clean

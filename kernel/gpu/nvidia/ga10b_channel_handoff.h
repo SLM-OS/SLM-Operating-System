@@ -18,6 +18,7 @@
 #ifndef GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H
 #define GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -39,11 +40,30 @@
  */
 struct ga10b_channel_handoff {
     uint32_t magic;             /* GA10B_CHANNEL_HANDOFF_MAGIC */
-    uint32_t version;           /* 2: channel only; 3: channel + compute-
-                                 * kernel launch state (shader, cbuf, qmd,
-                                 * output). SLM-OS channel inherit accepts
-                                 * both versions; `nvgpu launch-kernel`
-                                 * requires v3. */
+    uint32_t version;           /* 2: channel only.
+                                 * 3: channel + compute-kernel launch
+                                 *    state (shader, cbuf, qmd, output).
+                                 * 4: v3 + `expected_payload` so SLM-OS
+                                 *    can launch kernels other than the
+                                 *    hard-coded-to-0xCAFE write_cafe —
+                                 *    e.g. dot4 which writes 300.
+                                 * 5: v4 + a multi-op pipeline pointer
+                                 *    so SLM-OS can dispatch N kernels
+                                 *    in sequence from one launch-kernel
+                                 *    invocation (model-inference path).
+                                 * 6: v5 + input_buf_phys/size so SLM-OS
+                                 *    can swap the model's input tensor
+                                 *    at runtime (per-image MNIST
+                                 *    classification post-kexec).
+                                 * SLM-OS channel inherit accepts any of
+                                 * v2..v6; `nvgpu launch-kernel` needs
+                                 * at least v3 for shader/QMD fields,
+                                 * runs the v5 pipeline if
+                                 * `pipeline_n_ops > 0`, otherwise
+                                 * single-shot per the v4 path. The v6
+                                 * input swap path is opt-in via
+                                 * `slm_gpu_set_mnist_input` /
+                                 * `slm.gpu_set_mnist_input`. */
     uint32_t channel_id;        /* Diagnostic only; never used as the
                                  * doorbell token. See work_submit_token
                                  * below — the kernel's allocation path
@@ -111,16 +131,70 @@ struct ga10b_channel_handoff {
                                  * cbuf[0][0x160] for the kernel to read) */
     uint32_t shader_size;       /* bytes — typically 640 for write_cafe */
     uint32_t cbuf_size;         /* bytes — typically 512 */
+
+    /* --- v4 extension: expected-payload for generic launch_kernel. ---
+     * Zero on v2/v3. Populated by any helper running a kernel that
+     * doesn't write 0xCAFE (e.g. dot4 → 300). SLM-OS's
+     * `nvgpu launch-kernel` polls `output_phys` for this value;
+     * v3 handoffs fall back to GA10B_SMOKETEST_SEM_PAYLOAD. */
+    uint32_t expected_payload;  /* value the kernel writes to *output */
+    uint32_t _pad2;             /* align struct size to 8 bytes */
+
+    /* --- v5 extension: multi-op pipeline. ---
+     * Zero on v2/v3/v4. Populated by helpers that need to chain N
+     * kernel dispatches (model inference). When `pipeline_n_ops > 0`,
+     * `pipeline_ops_phys` points to an array of N
+     * struct ga10b_pipeline_op (defined below). SLM-OS's
+     * `nvgpu launch-kernel` runs the chain instead of the single-QMD
+     * path. */
+    uint32_t pipeline_n_ops;
+    uint32_t _pad3;
+    uint64_t pipeline_ops_phys;
+
+    /* --- v6 extension: runtime input buffer. ---
+     * Zero on v2..v5. Populated by helpers that want SLM-OS to be
+     * able to swap the model's input tensor at runtime (e.g. classify
+     * different MNIST digit images without re-running the launcher
+     * pre-kexec). `input_buf_phys` is the CPU-physical address of
+     * the input buffer the FIRST pipeline op reads from; SLM-OS
+     * writes the new tensor bytes there and the next dispatch
+     * picks them up. `input_buf_size` is the buffer's capacity in
+     * bytes — SLM-OS bounds-checks user writes against this. */
+    uint64_t input_buf_phys;
+    uint32_t input_buf_size;
+    uint32_t _pad4;
 };
+
+/* One entry per op in a v5 pipeline. SLM-OS reads this array from
+ * the DRAM page at handoff->pipeline_ops_phys. */
+struct ga10b_pipeline_op {
+    uint64_t qmd_gpu_va;        /* GPU VA of this op's QMD (256 B aligned) */
+    uint64_t output_phys;       /* CPU-physical sentinel target */
+    uint32_t expected_payload;  /* value to poll for; 0 → "any non-zero" */
+    uint32_t flags;             /* reserved (0 today) */
+};
+
+/* Upper bound on pipeline length, enforced by the kernel-side runner.
+ * The launcher allocates a single 4 KB page for the ops array
+ * (4096 / sizeof(struct ga10b_pipeline_op) = 170), so SLM-OS rejects
+ * any handoff that claims more — anything past that would dereference
+ * past the page into adjacent memory. MNIST currently uses 8 ops;
+ * real SLMs may need this raised, but a finite cap matters more than
+ * a generous one. */
+#define GA10B_PIPELINE_MAX_OPS 170u
 
 /* Wire-format size is locked: both the Linux helper and SLM-OS
  * depend on this exact layout. Any struct reorder or field addition
  * breaks the handoff silently — the static_assert catches it at
  * compile time on both sides. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 192,
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 232,
                "ga10b_channel_handoff layout changed — update Linux "
                "helper (scripts/gpu-channel-helper.c, "
-               "scripts/gpu-kernel-launch.c) and bump version");
+               "scripts/gpu-kernel-launch.c, scripts/gpu-launch-common.c) "
+               "and bump version");
+_Static_assert(sizeof(struct ga10b_pipeline_op) == 24,
+               "ga10b_pipeline_op layout changed — Linux + SLM-OS "
+               "must agree on the per-op size");
 
 /* Field-offset pins for the v3 extension. A reorder that preserves
  * sizeof() (e.g. swapping two uint64_t fields) wouldn't fire the
@@ -149,6 +223,22 @@ _Static_assert(offsetof(struct ga10b_channel_handoff, shader_size)    == 184,
                "v3 shader_size offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, cbuf_size)      == 188,
                "v3 cbuf_size offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, expected_payload) == 192,
+               "v4 expected_payload offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, pipeline_n_ops) == 200,
+               "v5 pipeline_n_ops offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, pipeline_ops_phys) == 208,
+               "v5 pipeline_ops_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, input_buf_phys) == 216,
+               "v6 input_buf_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, input_buf_size) == 224,
+               "v6 input_buf_size offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op, qmd_gpu_va) == 0,
+               "pipeline_op.qmd_gpu_va must be at offset 0");
+_Static_assert(offsetof(struct ga10b_pipeline_op, output_phys) == 8,
+               "pipeline_op.output_phys must be at offset 8");
+_Static_assert(offsetof(struct ga10b_pipeline_op, expected_payload) == 16,
+               "pipeline_op.expected_payload must be at offset 16");
 
 /*
  * Validate a candidate handoff block. Returns 0 iff magic, version,
@@ -165,5 +255,73 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h);
  */
 uint64_t ga10b_find_handoff_in_range(uint64_t start, uint64_t end,
                                      uint64_t stride);
+
+/*
+ * Pick the poll-target payload for `nvgpu launch-kernel`. v4 handoffs
+ * carry a per-kernel `expected_payload`; v3 (and v4 handoffs where
+ * the field is left zero) fall back to the caller-supplied default.
+ *
+ * `fallback` is typically GA10B_SMOKETEST_SEM_PAYLOAD (0xCAFE from
+ * the write_cafe era) so existing v3 flows keep working even after
+ * SLM-OS was taught to accept v4.
+ *
+ * Pure-logic — no MMIO, host-testable.
+ */
+static inline uint32_t
+ga10b_pick_launch_payload(const struct ga10b_channel_handoff *h,
+                          uint32_t fallback)
+{
+    return (h->version >= 4u && h->expected_payload != 0u)
+           ? h->expected_payload
+           : fallback;
+}
+
+/*
+ * Test whether a freshly-read poll value indicates the dispatched
+ * kernel has completed.
+ *
+ * Two modes, distinguished by `expected_payload`:
+ *
+ *   exact-match (expected_payload != 0): the kernel writes a known
+ *     bit pattern (0xCAFE, the dot4 sentinel 300, etc.) — used for
+ *     legacy v3/v4 single-shot dispatches where the launcher and
+ *     SLM-OS agree on the value ahead of time.
+ *
+ *   any-non-zero (expected_payload == 0): the kernel's output is
+ *     not predictable bit-for-bit (e.g. MNIST conv outputs whose
+ *     low fp32 bits depend on FFMA ordering vs CPU reference). The
+ *     caller pre-zeroes the poll target; any non-zero write counts
+ *     as completion. Used by v5 multi-op pipelines.
+ *
+ * Pure-logic — host-testable.
+ */
+static inline bool
+ga10b_poll_match(uint32_t poll_val, uint32_t expected_payload)
+{
+    return (expected_payload == 0u)
+           ? (poll_val != 0u)
+           : (poll_val == expected_payload);
+}
+
+/*
+ * Sanity-check a single entry in the v5 pipeline ops array. Returns
+ * true iff the op has plausible non-zero addresses (qmd_gpu_va,
+ * output_phys). Does NOT verify that those addresses are actually
+ * mapped or that the QMD content is sensible — those checks happen
+ * implicitly when SLM-OS dispatches the op and polls the output.
+ *
+ * Used by the kernel-side pipeline runner to fail fast on a
+ * malformed handoff rather than dispatching a QMD address of 0
+ * (which the GPU treats as a noop with no error reported).
+ *
+ * Pure-logic — host-testable.
+ */
+static inline bool
+ga10b_pipeline_op_is_valid(const struct ga10b_pipeline_op *op)
+{
+    return op != NULL
+        && op->qmd_gpu_va != 0u
+        && op->output_phys != 0u;
+}
 
 #endif /* GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H */

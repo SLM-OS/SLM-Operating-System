@@ -259,30 +259,34 @@ static u8_t ping_recv(void *arg, struct raw_pcb *pcb, struct pbuf *p,
         return 0;  /* Not expecting a reply */
     }
 
-    /* Check if this is an ICMP echo reply */
-    if (p->len >= sizeof(struct ip_hdr) + 8) {
+    /* raw_recv() delivers the IPv4 header in front of the ICMP payload.
+     * Remove it before examining the echo-reply header, then restore it
+     * if the packet is not ours so the rest of lwIP sees the original pbuf.
+     */
+    if (p->tot_len >= sizeof(struct ip_hdr) + 8) {
         struct ip_hdr *ip = (struct ip_hdr *)p->payload;
-        uint16_t ip_hlen = IPH_HL(ip) * 4;
+        uint16_t ip_hlen = (uint16_t)(IPH_HL(ip) * 4);
 
-        if (p->len >= ip_hlen + 8) {
-            uint8_t *icmp = (uint8_t *)p->payload + ip_hlen;
+        if (p->tot_len >= ip_hlen + 8 && pbuf_remove_header(p, ip_hlen) == 0) {
+            uint8_t *icmp = (uint8_t *)p->payload;
             uint8_t type = icmp[0];
-            uint16_t seq = (icmp[6] << 8) | icmp[7];
+            uint16_t seq = (uint16_t)((uint16_t)icmp[6] << 8) | icmp[7];
 
             if (type == 0 && seq == ping_state.seq) {
-                /* This is our reply */
                 uint32_t now = sys_now();
                 uint32_t rtt = now - ping_state.send_time;
 
                 if (ping_state.callback) {
                     ping_state.callback(seq, ping_state.addr, rtt, true,
-                                       ping_state.user);
+                                        ping_state.user);
                 }
 
                 ping_state.pending = false;
                 pbuf_free(p);
                 return 1;  /* Packet consumed */
             }
+
+            pbuf_add_header(p, ip_hlen);
         }
     }
 

@@ -13,6 +13,10 @@ pub mod policy;
 pub mod registry;
 pub mod generated;
 pub mod blob;
+pub mod store;
+pub mod runtime_mlp;
+pub mod runtime_cacheus;
+pub mod runtime_xgboost;
 
 // Classical policies (M3). Ports of the sibling `slm-os-page-sim`
 // reference crate + Python ARC. Decisions match the Python simulator
@@ -41,6 +45,12 @@ pub use blob::{
     BLOB_VERSION_V1, EVICTION_FEATURE_SCHEMA_V1, HEADER_LEN,
     checksum32, parse_blob,
 };
+pub use store::{
+    BlobMetadata, BlobStatus, SlotState, StoreError,
+    activate as activate_blob, active_blob, clear as clear_blob,
+    reset as reset_blob_store, rollback as rollback_blob,
+    stage_blob, stage_parsed, staged_blob, status as blob_status,
+};
 pub use registry::{
     get_eviction_policy_name, get_eviction_policy_name_for_pool,
     policy_counters, reset_to_default, score,
@@ -57,6 +67,19 @@ pub use features::{extract_features, AI_HORIZON_NS, FEATURE_NAMES};
 pub use xgboost::XGBoostPolicy;
 pub use mlp::MlpPolicy;
 pub use cacheus::{CacheusSelector, CACHEUS_DEFAULT_LR, CACHEUS_DEFAULT_WINDOW};
+pub use runtime_mlp::{
+    RuntimeMlpError, RuntimeMlpModel,
+    PAYLOAD_LEN_V1 as RUNTIME_MLP_PAYLOAD_LEN_V1,
+};
+pub use runtime_cacheus::{
+    ExpertPool as RuntimeCacheusExpertPool,
+    RuntimeCacheusConfig, RuntimeCacheusError,
+    PAYLOAD_LEN_V1 as RUNTIME_CACHEUS_PAYLOAD_LEN_V1,
+};
+pub use runtime_xgboost::{
+    RuntimeXGBoostError, RuntimeXGBoostModel,
+    PAYLOAD_LEN_V1 as RUNTIME_XGBOOST_PAYLOAD_LEN_V1,
+};
 pub use tracker::{
     ContentKey, EvictedContentTracker,
     EVICTION_FEEDBACK_WINDOW_NS, EVICTION_TRACKER_CAPACITY,

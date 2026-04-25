@@ -343,10 +343,10 @@ static void *pi5_dma_alloc_common(size_t size, size_t align,
     if (low_bias && (uint64_t)phys + ((uint64_t)pages * PAGE_SIZE)
                         > HAILO_DMA_LOW_CEILING_PHYS) {
         WARN("hailo: dma_alloc_low returned phys=0x%lx pages=%lu — "
-             "above ceiling 0x%llx; rejecting (low memory likely "
+             "above ceiling 0x%lx; rejecting (low memory likely "
              "fragmented; raise ceiling or run earlier in boot)",
              (unsigned long)phys, (unsigned long)pages,
-             (unsigned long long)HAILO_DMA_LOW_CEILING_PHYS);
+             (unsigned long)HAILO_DMA_LOW_CEILING_PHYS);
         pmm_free_pages(va, pages);
         return NULL;
     }

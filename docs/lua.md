@@ -98,6 +98,19 @@ The `slm` module provides access to kernel functionality:
 | `slm.cpu_count()` | Get number of CPUs |
 | `slm.cpu_id()` | Get current CPU ID |
 
+The `slm` module also exposes three string constants sourced from
+`build_info.h` (regenerated on every build under
+`${CMAKE_BINARY_DIR}/include/` from `version.txt` + git state + UTC):
+
+| Constant | Description |
+|----------|-------------|
+| `slm.VERSION` | Semantic version (e.g. `"0.4.0"`). Same value as `slm.version()` minus the `"SLM-OS "` prefix. |
+| `slm.BUILD_STAMP` | UTC build timestamp, exactly 14 ASCII digits in `YYYYMMDDhhmmss` form (string-sortable). |
+| `slm.BUILD_SHA` | Short git SHA of the source tree at build time, with a `-dirty` suffix when the working tree had uncommitted changes. |
+
+The same triple is printed in the boot banner and is reflected by
+`cat /sys/version`.
+
 ### Component Management
 
 | Function | Description |
@@ -157,6 +170,11 @@ without a compile-time guard.
 | `slm.eviction_policy()` | Current policy name string (`"lru"`, `"lfu"`, `"cacheus"`, `"xgboost"`, ...) or `nil`. |
 | `slm.eviction_set_policy(name)` | Admin surface only. Switch active eviction policy. Returns `true` on success, `false` on unknown name / feature off. |
 | `slm.eviction_stats()` | `{enabled, policy, weight_evictions, workspace_evictions, weight_allocated, weight_total, workspace_allocated, workspace_total, snapshot_candidates, expert_weights_bp}` or `nil`. CACHEUS expert weights are in basis points (0–10000). |
+| `slm.eviction_model_status(kind)` | Runtime blob status for one kind (`"xgboost"`, `"mlp"`, `"cacheus_config"`): `{kind, state, has_staged, has_active, has_rollback, staged?, active?, rollback?}` or `nil`. Each `*_meta` table contains `{version, kind_id, feature_schema_version, payload_len, checksum}`. |
+| `slm.eviction_model_load(kind, path)` | Admin surface only. Stage a blob from a VFS path into the RAM-backed eviction store. Returns `true` on success, `false` on invalid kind/path/blob. |
+| `slm.eviction_model_activate(kind)` | Admin surface only. Promote the staged blob for `kind` to active. Returns `true` on success, `false` when no staged blob exists or the feature is off. |
+| `slm.eviction_model_rollback(kind)` | Admin surface only. Restore the previous active blob for `kind`. Returns `true` on success, `false` when no rollback blob exists or the feature is off. |
+| `slm.eviction_model_clear(kind)` | Admin surface only. Clear staged, active, and rollback slots for `kind`. Returns `true` on success, `false` on invalid kind / feature off. |
 
 ### Model Memory and Inference
 

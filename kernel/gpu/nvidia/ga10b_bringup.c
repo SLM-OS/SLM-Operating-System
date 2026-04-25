@@ -977,8 +977,18 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
  * this. The shell-driven flow is inherently sequential (prepare →
  * inherit → channel → submit), so this is fine. If a future caller
  * needs multiple inherited channels, promote this to a per-channel
- * struct passed through b->. */
+ * struct passed through b->.
+ *
+ * Visibility: `static` in production, file-scope under
+ * SLM_HOST_HARNESS so the test harness can drive
+ * input_buf_phys/size synthetically without simulating the full
+ * Phase-6 inherit path. Production code does not declare an extern
+ * for this symbol. */
+#ifdef SLM_HOST_HARNESS
+struct ga10b_channel_handoff g_handoff;
+#else
 static struct ga10b_channel_handoff g_handoff;
+#endif
 
 /* Scan a physical-memory range for the handoff magic, at the given
  * stride. Returns the address of the first match, or 0 if not found.
@@ -1004,12 +1014,18 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
 {
     if (!h) return -1;
     if (h->magic != GA10B_CHANNEL_HANDOFF_MAGIC) return -1;
-    /* v2 is the channel-only layout consumed by Phase 6/7. v3 adds
-     * compute-kernel launch state (shader/cbuf/qmd/output) — those
-     * fields are optional from Phase 6's perspective; the inherit
-     * path doesn't read them. ga10b_bringup_launch_kernel checks the
-     * version at dispatch time and rejects v2 handoffs. */
-    if (h->version != 2 && h->version != 3) return -1;
+    /* v2: channel-only layout consumed by Phase 6/7.
+     * v3: + compute-kernel launch state (shader/cbuf/qmd/output).
+     * v4: + expected_payload so launch_kernel can target any kernel,
+     *      not just one that writes 0xCAFE.
+     * v5: + multi-op pipeline pointer for chaining N kernel dispatches
+     *      (model inference path).
+     * v6: + input_buf_phys/size so SLM-OS can swap the model's input
+     *      tensor at runtime (per-image MNIST classification).
+     * Phase 6 inherit accepts all five; launch_kernel version-gates
+     * at dispatch time (v3 minimum for single-shot, v5 for pipelines). */
+    if (h->version != 2 && h->version != 3 &&
+        h->version != 4 && h->version != 5 && h->version != 6) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
@@ -1097,6 +1113,21 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     g_handoff.output_gpu_va      = hoff->output_gpu_va;
     g_handoff.shader_size        = hoff->shader_size;
     g_handoff.cbuf_size          = hoff->cbuf_size;
+
+    /* v4 extension. Safe to read unconditionally — on v2/v3 the
+     * helper leaves the field zero. launch_kernel falls back to
+     * GA10B_SMOKETEST_SEM_PAYLOAD when expected_payload is zero. */
+    g_handoff.expected_payload   = hoff->expected_payload;
+
+    /* v5 extension: pipeline pointer + count. Zero on v2/v3/v4. */
+    g_handoff.pipeline_n_ops     = hoff->pipeline_n_ops;
+    g_handoff.pipeline_ops_phys  = hoff->pipeline_ops_phys;
+
+    /* v6 extension: runtime input buffer. Zero on v2..v5. SLM-OS's
+     * slm_gpu_set_mnist_input writes user-supplied bytes to
+     * input_buf_phys (with cache_clean) before the next dispatch. */
+    g_handoff.input_buf_phys     = hoff->input_buf_phys;
+    g_handoff.input_buf_size     = hoff->input_buf_size;
 
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
@@ -1279,7 +1310,7 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
 
 /* Copy a freshly-built pushbuffer into the inherited pb_phys region,
  * post a GPFIFO entry pointing at it, advance GP_PUT, ring the USERMODE
- * doorbell, and poll `poll_phys` for GA10B_SMOKETEST_SEM_PAYLOAD.
+ * doorbell, and poll `poll_phys` for `expected_payload`.
  *
  * `poll_phys` is the CPU-physical target the GPU writes via the
  * submitted pushbuffer — `g_handoff.semaphore_phys` for the Phase 7
@@ -1288,6 +1319,14 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
  * `g_handoff.output_phys` for the Phase 8 compute-kernel launch
  * (where the shader itself stores the payload via STG.E to a VA
  * that maps to output_phys).
+ *
+ * `expected_payload` is what the GPU is supposed to write. For
+ * Phase 7 sema release this is always GA10B_SMOKETEST_SEM_PAYLOAD
+ * (0xCAFE). For Phase 8 launch_kernel it's whatever the v4 handoff
+ * says the kernel produces, or GA10B_SMOKETEST_SEM_PAYLOAD as a
+ * fallback for v3 handoffs. Making it a parameter rather than a
+ * hard-coded constant is what v4 unlocks — SLM-OS can now
+ * dispatch any kernel, not just write_cafe.
  *
  * `error_phase` is written into `b->last_error_phase` on failure so
  * the caller's phase-number logging stays accurate (Phase 7 for
@@ -1315,6 +1354,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                                  const uint32_t *pb_buf,
                                  uint32_t pb_dwords,
                                  uint64_t poll_phys,
+                                 uint32_t expected_payload,
                                  int error_phase,
                                  const char *tag)
 {
@@ -1335,7 +1375,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                 "(expected payload=0x%lx)\n",
                 tag,
                 (unsigned long)poll_phys,
-                (unsigned long)GA10B_SMOKETEST_SEM_PAYLOAD);
+                (unsigned long)expected_payload);
 
     volatile uint32_t *pb = (volatile uint32_t *)(uintptr_t)
         g_handoff.pushbuf_phys;
@@ -1405,7 +1445,10 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
             gsp_platform->cache_invalidate((void *)poll, sizeof(uint32_t));
         }
         poll_val = *poll;
-        if (poll_val == GA10B_SMOKETEST_SEM_PAYLOAD) break;
+        /* Mode selector lives in ga10b_channel_handoff.h so host
+         * tests can pin the exact predicate without re-encoding it
+         * (and the Linux launcher uses the same helper). */
+        if (ga10b_poll_match(poll_val, expected_payload)) break;
         for (volatile int i = 0; i < 1500; i++) { }
     }
 
@@ -1423,7 +1466,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                 (unsigned long)g_handoff.initial_gp_get);
 
     bool gp_advanced     = (final_gp_get != g_handoff.initial_gp_get);
-    bool payload_matched = (poll_val == GA10B_SMOKETEST_SEM_PAYLOAD);
+    bool payload_matched = ga10b_poll_match(poll_val, expected_payload);
 
     /* Symmetric bookkeeping: any PBDMA progress consumes the slot.
      * Update the counters so the next submit lands in a fresh slot,
@@ -1456,7 +1499,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                     "encoding.\n",
                     tag,
                     (unsigned long)poll_val,
-                    (unsigned long)GA10B_SMOKETEST_SEM_PAYLOAD);
+                    (unsigned long)expected_payload);
     } else {
         uart_printf("[%s] GP_GET did not advance — PBDMA didn't see "
                     "our submit\n", tag);
@@ -1486,8 +1529,13 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
     uint32_t pb_dwords = ga10b_build_sema_release_pushbuffer(
         pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
 
+    /* Phase 7 host-family always writes GA10B_SMOKETEST_SEM_PAYLOAD
+     * — the encoding is hard-coded in the SEMAPHORE_RELEASE
+     * pushbuffer. */
     return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
-                                 g_handoff.semaphore_phys, 7, "GA10B-P7");
+                                 g_handoff.semaphore_phys,
+                                 GA10B_SMOKETEST_SEM_PAYLOAD,
+                                 7, "GA10B-P7");
 }
 
 int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
@@ -1520,8 +1568,12 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
     uint32_t pb_dwords = ga10b_build_compute_sema_release_pushbuffer(
         pb_buf, g_handoff.semaphore_gpu_va, GA10B_SMOKETEST_SEM_PAYLOAD);
 
+    /* Phase 7 COMPUTE_B also uses the fixed payload — the shader
+     * is the SEMAPHORE_RELEASE method itself, not arbitrary code. */
     return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
-                                 g_handoff.semaphore_phys, 7, "GA10B-P7C");
+                                 g_handoff.semaphore_phys,
+                                 GA10B_SMOKETEST_SEM_PAYLOAD,
+                                 7, "GA10B-P7C");
 }
 
 int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
@@ -1537,6 +1589,93 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
         b->last_error_phase = 8;
         return -1;
     }
+
+    /* v5 multi-op pipeline path. When pipeline_n_ops > 0, the handoff
+     * carries an array of struct ga10b_pipeline_op describing N
+     * dispatches to run in sequence. Used by model-inference helpers
+     * (MNIST and beyond) where each op's output is the next op's
+     * input. */
+    if (g_handoff.version >= 5 && g_handoff.pipeline_n_ops > 0) {
+        if (g_handoff.pipeline_ops_phys == 0) {
+            uart_puts("[GA10B-P8] pipeline_n_ops > 0 but pipeline_ops_phys "
+                      "is zero\n");
+            b->last_error_phase = 8;
+            return -1;
+        }
+        if (g_handoff.pipeline_n_ops > GA10B_PIPELINE_MAX_OPS) {
+            uart_printf("[GA10B-P8] pipeline_n_ops=%lu exceeds "
+                        "GA10B_PIPELINE_MAX_OPS=%u — refusing to "
+                        "dispatch (handoff likely corrupt)\n",
+                        (unsigned long)g_handoff.pipeline_n_ops,
+                        (unsigned)GA10B_PIPELINE_MAX_OPS);
+            b->last_error_phase = 8;
+            return -1;
+        }
+        /* Cast assumes Jetson's identity DRAM mapping at EL2: the
+         * physical address read from the handoff is also a valid
+         * virtual address SLM-OS can dereference. Same assumption
+         * the v3 path makes for shader_phys/qmd_phys. */
+        const struct ga10b_pipeline_op *ops =
+            (const struct ga10b_pipeline_op *)
+                (uintptr_t)g_handoff.pipeline_ops_phys;
+        /* Defensive: invalidate the array's cache range before the
+         * first read. In practice this is a no-op (Linux's pre-
+         * kexec msync cleaned the page; SLM-OS hasn't touched it
+         * yet) but avoids depending on that timing for correctness
+         * if a future change re-reads the array. */
+        if (gsp_platform->cache_invalidate) {
+            gsp_platform->cache_invalidate(
+                (void *)ops,
+                (size_t)g_handoff.pipeline_n_ops * sizeof(*ops));
+        }
+        uart_printf("[GA10B-P8] pipeline mode — %lu ops, "
+                    "ops_phys=0x%lx\n",
+                    (unsigned long)g_handoff.pipeline_n_ops,
+                    (unsigned long)g_handoff.pipeline_ops_phys);
+        for (uint32_t i = 0; i < g_handoff.pipeline_n_ops; i++) {
+            const struct ga10b_pipeline_op *op = &ops[i];
+            if (!ga10b_pipeline_op_is_valid(op)) {
+                uart_printf("[GA10B-P8] pipeline op %lu malformed "
+                            "(qmd=0x%lx out=0x%lx) — aborting\n",
+                            (unsigned long)(i + 1),
+                            (unsigned long)op->qmd_gpu_va,
+                            (unsigned long)op->output_phys);
+                b->last_error_phase = 8;
+                return -1;
+            }
+            /* expected_payload == 0 means "wait for non-zero" mode
+             * (handled inside ga10b_submit_and_poll). Used by
+             * model-inference helpers where per-op output bit
+             * patterns are not known a priori. */
+            uart_printf("[GA10B-P8]   op[%lu/%lu] qmd=0x%lx out=0x%lx "
+                        "expected=0x%lx%s\n",
+                        (unsigned long)(i + 1),
+                        (unsigned long)g_handoff.pipeline_n_ops,
+                        (unsigned long)op->qmd_gpu_va,
+                        (unsigned long)op->output_phys,
+                        (unsigned long)op->expected_payload,
+                        op->expected_payload == 0u
+                            ? " (any-nonzero mode)" : "");
+            uint32_t pb_buf[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+            uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
+                pb_buf, op->qmd_gpu_va);
+            int rc = ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                           op->output_phys,
+                                           op->expected_payload,
+                                           8, "GA10B-P8");
+            if (rc < 0) {
+                uart_printf("[GA10B-P8] pipeline op %lu failed (rc=%d) "
+                            "— aborting chain\n",
+                            (unsigned long)(i + 1), rc);
+                return rc;
+            }
+        }
+        uart_printf("[GA10B-P8] pipeline complete — %lu ops fired\n",
+                    (unsigned long)g_handoff.pipeline_n_ops);
+        return 0;
+    }
+
+    /* Single-shot path (v3/v4). */
     if (g_handoff.qmd_gpu_va == 0 || g_handoff.output_phys == 0) {
         uart_puts("[GA10B-P8] handoff missing qmd_gpu_va/output_phys\n");
         b->last_error_phase = 8;
@@ -1563,8 +1702,20 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
     uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
         pb_buf, g_handoff.qmd_gpu_va);
 
+    /* v4 handoffs carry a per-kernel expected payload; v3 handoffs
+     * (and v4 handoffs with expected_payload==0) fall back to the
+     * write_cafe constant so existing flows keep working. Predicate
+     * lives in the shared header so host-test can pin the exact
+     * selection rule without re-encoding it. */
+    uint32_t expected = ga10b_pick_launch_payload(&g_handoff,
+                                                  GA10B_SMOKETEST_SEM_PAYLOAD);
+    uart_printf("[GA10B-P8]   expected_payload=0x%lx (handoff v%lu)\n",
+                (unsigned long)expected,
+                (unsigned long)g_handoff.version);
+
     return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
-                                 g_handoff.output_phys, 8, "GA10B-P8");
+                                 g_handoff.output_phys, expected,
+                                 8, "GA10B-P8");
 }
 
 int ga10b_bringup_run(struct ga10b_bringup *b)
@@ -1597,4 +1748,105 @@ int ga10b_bringup_run(struct ga10b_bringup *b)
 
     uart_puts("[GA10B] bringup complete — channel open, method accepted\n");
     return 0;
+}
+
+/* Sanity ceiling on the v6 input buffer. The launcher allocates a
+ * page (4 KB) for MNIST today; cap at 1 MB so a corrupted handoff
+ * with bogus input_buf_size can't authorize a multi-megabyte memcpy
+ * into wherever input_buf_phys points. Real models will need this
+ * raised, but a hard ceiling beats trusting an arbitrary 32-bit
+ * field. */
+#define GA10B_INPUT_BUF_MAX_BYTES (1u * 1024u * 1024u)
+
+int ga10b_bringup_set_input(struct ga10b_bringup *b,
+                             const void *bytes, size_t cap)
+{
+    if (!b || !bytes) return -3;
+    if (g_handoff.input_buf_phys == 0u) return -1;
+    if (g_handoff.input_buf_size > GA10B_INPUT_BUF_MAX_BYTES) return -1;
+    if (cap > (size_t)g_handoff.input_buf_size) return -2;
+
+    /* Same identity-DRAM-mapping assumption as the pipeline reader:
+     * the physical address from the handoff is also a valid VA at EL2.
+     * Safe to memcpy through it. */
+    void *dst = (void *)(uintptr_t)g_handoff.input_buf_phys;
+    memcpy(dst, bytes, cap);
+
+    /* Clean the cache so the GPU sees the fresh input on the next
+     * dispatch. The mb() after cache_clean is the DSB that completes
+     * the cache maintenance — DC CVAC alone is not synchronizing on
+     * AArch64. Pattern matches `ga10b_submit_and_poll`'s pre-DMA
+     * sync for QMD/pushbuffer writes. */
+    if (gsp_platform && gsp_platform->cache_clean) {
+        gsp_platform->cache_clean(dst, cap);
+    }
+    if (gsp_platform && gsp_platform->mb) {
+        gsp_platform->mb();
+    }
+    return (int)cap;
+}
+
+int ga10b_bringup_set_input_fill(struct ga10b_bringup *b,
+                                  uint32_t value_bits, uint32_t n_floats)
+{
+    if (!b) return -3;
+    if (g_handoff.input_buf_phys == 0u) return -1;
+    if (g_handoff.input_buf_size > GA10B_INPUT_BUF_MAX_BYTES) return -1;
+    /* Wrap-safe size check: division side, not multiplication side
+     * (input_buf_size / 4 is at most ~256 K, can't overflow). */
+    if (n_floats > (g_handoff.input_buf_size / sizeof(uint32_t))) return -2;
+
+    /* Use byte-granular memcpy rather than uint32_t* stores: avoids
+     * an unaligned-pointer assumption on `input_buf_phys` (the
+     * launcher aligns to 4096, but a malformed handoff could break
+     * it). On AArch64 with SCTLR.A=1 a misaligned uint32_t store
+     * would fault — memcpy is alignment-safe. */
+    uint8_t *dst = (uint8_t *)(uintptr_t)g_handoff.input_buf_phys;
+    for (uint32_t i = 0u; i < n_floats; i++) {
+        memcpy(dst + i * sizeof(uint32_t), &value_bits, sizeof(uint32_t));
+    }
+
+    size_t bytes_written = (size_t)n_floats * sizeof(uint32_t);
+    if (gsp_platform && gsp_platform->cache_clean) {
+        gsp_platform->cache_clean(dst, bytes_written);
+    }
+    if (gsp_platform && gsp_platform->mb) {
+        gsp_platform->mb();
+    }
+    return (int)bytes_written;
+}
+
+int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
+                                        void *out, size_t cap)
+{
+    if (!b || !out) return -1;
+    if (g_handoff.version < 5u || g_handoff.pipeline_n_ops == 0u) {
+        return -1;
+    }
+    if (g_handoff.pipeline_ops_phys == 0u ||
+        g_handoff.pipeline_n_ops > GA10B_PIPELINE_MAX_OPS) {
+        return -1;
+    }
+
+    /* Resolve the LAST op's output_phys. Same identity-DRAM-mapping
+     * assumption as the pipeline runner — physical address read from
+     * DRAM is also a valid VA SLM-OS can dereference at EL2. */
+    const struct ga10b_pipeline_op *ops =
+        (const struct ga10b_pipeline_op *)
+            (uintptr_t)g_handoff.pipeline_ops_phys;
+    const struct ga10b_pipeline_op *last =
+        &ops[g_handoff.pipeline_n_ops - 1u];
+    if (last->output_phys == 0u) return -1;
+
+    /* Invalidate the buffer's cache range before the read. The GPU
+     * wrote the data via its own (uncached-from-CPU's-perspective)
+     * write path; without this, a stale cache line could mask the
+     * fresh data. Same pattern as ga10b_submit_and_poll's poll
+     * invalidate. */
+    const void *src = (const void *)(uintptr_t)last->output_phys;
+    if (gsp_platform && gsp_platform->cache_invalidate) {
+        gsp_platform->cache_invalidate((void *)src, cap);
+    }
+    memcpy(out, src, cap);
+    return (int)cap;
 }
