@@ -631,6 +631,40 @@ int slm_gpu_available(void);
 int slm_gpu_get_info(RustGpuInfo *info);
 
 /*
+ * Run the pre-loaded MNIST GPU pipeline. Requires a v5 channel
+ * handoff to be present in DRAM (set up by
+ * scripts/gpu-kernel-mnist.c --preserve-for-kexec pre-kexec) and
+ * for the channel to have been inherited (lazy-initialised on
+ * first call: nvgpu inherit + nvgpu channel run automatically).
+ *
+ * `logits_bytes_out` must point at a 40-byte buffer that receives
+ * the final op's output (10 fp32 values, little-endian). The
+ * buffer is delivered as raw bytes because the kernel target
+ * compiles with -mgeneral-regs-only and cannot manipulate
+ * floating-point types directly; callers (Lua, Rust, dedicated
+ * kernel modules with FP enabled) interpret as fp32. The argmax
+ * helper below provides FP-free predicted-class extraction.
+ *
+ * Returns 0 on success; negative rc on failure (no v5 handoff,
+ * channel inherit failed, dispatch timed out, etc.). On non-Jetson
+ * platforms returns -1 unconditionally.
+ */
+int slm_gpu_run_mnist(void *logits_bytes_out);
+
+/*
+ * FP-free argmax over an array of fp32 bit patterns. Used by
+ * Lua / shell callers that need the predicted class but can't do
+ * fp32 comparisons directly under -mgeneral-regs-only.
+ *
+ * `logits_bytes` must point at `n_logits` * 4 bytes of
+ * little-endian fp32 values. Returns the index of the largest
+ * value, or -1 if `n_logits == 0` or `logits_bytes == NULL`. On
+ * NaN inputs the comparison is undefined (no MNIST output should
+ * produce NaN).
+ */
+int slm_fp32_argmax(const void *logits_bytes, uint32_t n_logits);
+
+/*
  * Print GPU status to UART (called from Rust shell command).
  */
 extern void rust_gpu_print_status(void);

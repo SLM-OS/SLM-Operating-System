@@ -1731,3 +1731,38 @@ int ga10b_bringup_run(struct ga10b_bringup *b)
     uart_puts("[GA10B] bringup complete — channel open, method accepted\n");
     return 0;
 }
+
+int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
+                                        void *out, size_t cap)
+{
+    if (!b || !out) return -1;
+    if (g_handoff.version < 5u || g_handoff.pipeline_n_ops == 0u) {
+        return -1;
+    }
+    if (g_handoff.pipeline_ops_phys == 0u ||
+        g_handoff.pipeline_n_ops > GA10B_PIPELINE_MAX_OPS) {
+        return -1;
+    }
+
+    /* Resolve the LAST op's output_phys. Same identity-DRAM-mapping
+     * assumption as the pipeline runner — physical address read from
+     * DRAM is also a valid VA SLM-OS can dereference at EL2. */
+    const struct ga10b_pipeline_op *ops =
+        (const struct ga10b_pipeline_op *)
+            (uintptr_t)g_handoff.pipeline_ops_phys;
+    const struct ga10b_pipeline_op *last =
+        &ops[g_handoff.pipeline_n_ops - 1u];
+    if (last->output_phys == 0u) return -1;
+
+    /* Invalidate the buffer's cache range before the read. The GPU
+     * wrote the data via its own (uncached-from-CPU's-perspective)
+     * write path; without this, a stale cache line could mask the
+     * fresh data. Same pattern as ga10b_submit_and_poll's poll
+     * invalidate. */
+    const void *src = (const void *)(uintptr_t)last->output_phys;
+    if (gsp_platform && gsp_platform->cache_invalidate) {
+        gsp_platform->cache_invalidate((void *)src, cap);
+    }
+    memcpy(out, src, cap);
+    return (int)cap;
+}

@@ -290,4 +290,26 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b);
  */
 int ga10b_bringup_run(struct ga10b_bringup *b);
 
+/*
+ * Read the final pipeline op's output buffer into `out`. Used after a
+ * successful ga10b_bringup_launch_kernel() on a v5 handoff to extract
+ * the model's classifier output.
+ *
+ * The buffer copied from is the LAST op's `output_phys` in the v5
+ * pipeline_ops array. Per the launcher's convention this is the
+ * SENTINEL CELL address (= buffer base + sentinel_cell_idx × 4); for
+ * MNIST the final op (AddBias on logits) uses sentinel_cell_idx = 0
+ * so the sentinel address equals the logits buffer base, and reading
+ * `cap` bytes from it gets the full 10-element fp32 logits vector.
+ *
+ * Models whose final op picks a non-zero sentinel cell would need a
+ * separate "buffer base" carried in the v5 op struct; defer to a
+ * follow-up if any such model lands.
+ *
+ * Returns the number of bytes copied on success, -1 if no v5
+ * pipeline is loaded or `out`/`b` is NULL.
+ */
+int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
+                                        void *out, size_t cap);
+
 #endif /* GPU_NVIDIA_GA10B_BRINGUP_H */
