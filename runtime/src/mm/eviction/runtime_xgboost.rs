@@ -36,6 +36,7 @@ pub enum RuntimeXGBoostError {
     TooShort,
     BadMagic,
     UnsupportedVersion,
+    NonZeroReserved,
     BadLength,
     EmptyModel,
     RootOutOfRange,
@@ -50,6 +51,15 @@ const FEATURE_COUNT: usize = 27;
 
 fn read_u16_le(bytes: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([bytes[off], bytes[off + 1]])
+}
+
+fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[off],
+        bytes[off + 1],
+        bytes[off + 2],
+        bytes[off + 3],
+    ])
 }
 
 fn read_f32_le(bytes: &[u8], off: usize) -> f32 {
@@ -71,6 +81,9 @@ pub fn parse_payload(bytes: &[u8]) -> Result<RuntimeXGBoostModel, RuntimeXGBoost
     let version = read_u16_le(bytes, 4);
     if version != PAYLOAD_VERSION_V1 {
         return Err(RuntimeXGBoostError::UnsupportedVersion);
+    }
+    if read_u16_le(bytes, 6) != 0 || read_u32_le(bytes, 12) != 0 {
+        return Err(RuntimeXGBoostError::NonZeroReserved);
     }
 
     let tree_count = read_u16_le(bytes, 8) as usize;

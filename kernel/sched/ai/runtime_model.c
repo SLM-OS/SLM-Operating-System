@@ -197,6 +197,7 @@ static int parse_sched_balance_payload(const uint8_t *payload, size_t payload_le
     meta->feature_version = read_u16_le(payload + 6);
     meta->action_version = read_u16_le(payload + 8);
     meta->action_count = 0;
+    if (read_u16_le(payload + 10) != 0) return -1;
 
     if (meta->feature_version != SCHED_MODEL_FEATURE_VERSION_V1) return -1;
     if (meta->action_version != SCHED_MODEL_ACTION_VERSION_V1) return -1;
@@ -243,6 +244,7 @@ static int parse_sched_dense_blob(uint16_t expected_kind_id,
     if (version != SCHED_MODEL_BLOB_VERSION_V1) return -1;
     if (kind_id != expected_kind_id) return -1;
     if (schema_version != SCHED_MODEL_SCHEMA_VERSION_V1) return -1;
+    if (read_u16_le(data + 10) != 0 || read_u32_le(data + 20) != 0) return -1;
     if (len != OUTER_HEADER_LEN + payload_len) return -1;
     if (checksum32(payload, payload_len) != checksum) return -1;
 
@@ -282,6 +284,7 @@ static int parse_sched_balance_blob(uint16_t expected_kind_id,
     if (version != SCHED_MODEL_BLOB_VERSION_V1) return -1;
     if (kind_id != expected_kind_id) return -1;
     if (schema_version != SCHED_MODEL_SCHEMA_VERSION_V1) return -1;
+    if (read_u16_le(data + 10) != 0 || read_u32_le(data + 20) != 0) return -1;
     if (len != OUTER_HEADER_LEN + payload_len) return -1;
     if (checksum32(payload, payload_len) != checksum) return -1;
 

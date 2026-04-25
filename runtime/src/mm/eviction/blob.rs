@@ -60,6 +60,7 @@ pub enum BlobError {
     UnsupportedVersion,
     UnknownKind,
     UnsupportedFeatureSchema,
+    NonZeroReserved,
     LengthMismatch,
     ChecksumMismatch,
 }
@@ -109,6 +110,9 @@ pub fn parse_blob(bytes: &[u8]) -> Result<ParsedBlob, BlobError> {
     let feature_schema_version = read_u16_le(bytes, 8);
     if feature_schema_version != EVICTION_FEATURE_SCHEMA_V1 {
         return Err(BlobError::UnsupportedFeatureSchema);
+    }
+    if read_u16_le(bytes, 10) != 0 || read_u32_le(bytes, 20) != 0 {
+        return Err(BlobError::NonZeroReserved);
     }
 
     let payload_len = read_u32_le(bytes, 12);

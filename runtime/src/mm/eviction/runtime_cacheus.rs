@@ -23,6 +23,7 @@ pub enum RuntimeCacheusError {
     TooShort,
     BadMagic,
     UnsupportedVersion,
+    NonZeroReserved,
     BadLength,
     UnknownExpertPool,
     InvalidWindow,
@@ -52,6 +53,9 @@ pub fn parse_payload(bytes: &[u8]) -> Result<RuntimeCacheusConfig, RuntimeCacheu
     let version = read_u16_le(bytes, 4);
     if version != PAYLOAD_VERSION_V1 {
         return Err(RuntimeCacheusError::UnsupportedVersion);
+    }
+    if read_u16_le(bytes, 6) != 0 {
+        return Err(RuntimeCacheusError::NonZeroReserved);
     }
     if bytes.len() != PAYLOAD_LEN_V1 {
         return Err(RuntimeCacheusError::BadLength);

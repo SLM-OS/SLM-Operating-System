@@ -46,10 +46,10 @@ At-a-glance summary:
 
 | Area | State | Notes |
 |---|---|---|
-| Eviction blob format + store | ✅ partial | Parser, staging, activate, rollback, and clear exist; formats are still first-cut |
+| Eviction blob format + store | ✅ partial | Parser, staging, activate, rollback, and clear exist; first-cut formats are now documented, but still not generalized |
 | Eviction runtime policy use | ✅ partial | `xgboost`, `mlp`, and `cacheus_config` are live and hardware-validated on `pi-5-2` |
 | Eviction shell / Lua control | ✅ done | Shell + `lua-admin` surfaces exist and are tested |
-| Scheduler runtime models | ✅ partial | `mlp`, `ppo`, and `config` exist; dense-model + config behavior is hardware-validated |
+| Scheduler runtime models | ✅ partial | `mlp`, `ppo`, and `config` exist; dense-model + config behavior is hardware-validated, but the format family is still narrow |
 | Scheduler live behavior validation | ✅ done | Deterministic runtime blobs affect real `ai_mlp` / `ai_ppo` decisions on `pi-5-2` |
 | File ingress core transport | ✅ partial | `put`, `xput`, and `slm-put.py` are live; telnet + serial framed upload/resume are hardware-validated |
 | Operator workflow wrapper | ✅ partial | `slm-modelctl.py` now supports subcommands, legacy compatibility, scheduler probes, and HTTP fetch via `--http-url` |
@@ -153,6 +153,10 @@ Partially implemented:
 
 - **Eviction runtime blob format (E1):** parser and validation exist,
   and blobs can now be staged into the runtime store
+  - current outer and inner payload layouts are now documented in
+    `docs/specs/runtime-blob-formats.md`
+  - current parsers now reject non-zero reserved fields in both the
+    outer `SEMB` wrapper and the current inner payload headers
 - **Eviction staging and activation backend (E2/E3):** the in-memory
   store exists and is exposed through shell commands, and active blobs
   are now consumed by MLP / XGBoost / CACHEUS runtime paths; the
@@ -189,6 +193,10 @@ Partially implemented:
   loading now exists through the shell and Lua admin for both
   `sched_mlp` and `sched_ppo`, and both lifecycles have now been
   validated on hardware
+  - current scheduler payload layouts are now documented in
+    `docs/specs/runtime-blob-formats.md`
+  - current parsers now reject non-zero reserved fields in the outer
+    `SEMB` wrapper and in the current `sched_config` inner header
 - **Scheduler runtime config loading:** first-cut scheduler config
   blobs now exist for proactive load-balance override tuning, reusing
   the same stage / activate / rollback / clear lifecycle as scheduler
@@ -784,7 +792,7 @@ Mitigations:
 
 | Step | State | Notes |
 |---|---|---|
-| Harden and document runtime payload formats | ☐ pending | `mlp`, `xgboost`, `cacheus_config`, `sched_mlp`, `sched_ppo`, and `sched_config` are still first-cut formats |
+| Harden and document runtime payload formats | ✅ partial | Current outer/inner layouts are now documented and reserved fields are validated, but the formats are still first-cut and not generalized |
 | Polish `slm-modelctl.py` ergonomics | ✅ partial | Subcommand help and `apply --probe-raw` are in place; remaining work is UX convenience rather than core viability |
 | Validate both Pi 5 deploy models where practical | ✅ partial | Maintenance-OS path is validated on `pi-5-2`; keep the SDWire-first path in play too |
 | Reuse the architecture for more scheduler payloads | ☐ pending | Next likely slice is new scheduler blob families, not more dense-model mechanics |

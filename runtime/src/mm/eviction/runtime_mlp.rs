@@ -47,6 +47,7 @@ pub enum RuntimeMlpError {
     TooShort,
     BadMagic,
     UnsupportedVersion,
+    NonZeroReserved,
     BadLength,
 }
 
@@ -77,6 +78,9 @@ pub fn parse_payload(bytes: &[u8]) -> Result<RuntimeMlpModel, RuntimeMlpError> {
     let version = read_u16_le(bytes, 4);
     if version != PAYLOAD_VERSION_V1 {
         return Err(RuntimeMlpError::UnsupportedVersion);
+    }
+    if read_u16_le(bytes, 6) != 0 {
+        return Err(RuntimeMlpError::NonZeroReserved);
     }
     if bytes.len() != PAYLOAD_LEN_V1 {
         return Err(RuntimeMlpError::BadLength);

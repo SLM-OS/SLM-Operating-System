@@ -3447,6 +3447,31 @@ static void test_sched_runtime_config_activation_sets_active_blob(void)
     TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
 }
 
+static void test_sched_runtime_config_rejects_nonzero_reserved_fields(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    size_t payload_len = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
+                                                    payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                            payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+
+    blob[10] = 1u;
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+
+    blob[10] = 0u;
+    payload[10] = 1u;
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+}
+
 static void test_sched_runtime_rollback_rejects_busy_active_slot(void)
 {
     uint8_t payload_a[64];
@@ -4413,6 +4438,7 @@ int test_suite_scheduler(void)
     RUN_TEST(test_proactive_load_balance_runtime_config_disable);
     RUN_TEST(test_proactive_load_balance_runtime_config_aggressive);
     RUN_TEST(test_sched_runtime_config_activation_sets_active_blob);
+    RUN_TEST(test_sched_runtime_config_rejects_nonzero_reserved_fields);
     RUN_TEST(test_sched_runtime_rollback_rejects_busy_active_slot);
 #endif
     RUN_TEST(test_policy_init_failure_keeps_old);

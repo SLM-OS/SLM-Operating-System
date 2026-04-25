@@ -2467,6 +2467,12 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                    mm::eviction::parse_blob(&bad_schema)
                        == Err(mm::eviction::BlobError::UnsupportedFeatureSchema));
 
+            let mut bad_reserved = blob.clone();
+            bad_reserved[10] = 0x01;
+            check!(b"blob_rejects_nonzero_reserved\0",
+                   mm::eviction::parse_blob(&bad_reserved)
+                       == Err(mm::eviction::BlobError::NonZeroReserved));
+
             let mut bad_length = blob.clone();
             bad_length.truncate(bad_length.len() - 1);
             check!(b"blob_rejects_length_mismatch\0",
@@ -2964,6 +2970,13 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             let payload =
                 mm::eviction::runtime_xgboost::build_test_payload_first_feature_split(
                     0.5, -2.0, 2.0);
+            let mut bad_payload = payload.clone();
+            bad_payload[6] = 1;
+            check!(b"runtime_xgboost_payload_rejects_nonzero_reserved\0",
+                   matches!(
+                       mm::eviction::runtime_xgboost::parse_payload(&bad_payload),
+                       Err(mm::eviction::runtime_xgboost::RuntimeXGBoostError::NonZeroReserved)
+                   ));
             let blob = mm::eviction::blob::build_test_blob(
                 mm::eviction::BlobKind::XGBoost,
                 &payload);
@@ -3032,6 +3045,13 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
             mm::eviction::clear_blob(mm::eviction::BlobKind::Mlp);
             let payload =
                 mm::eviction::runtime_mlp::build_test_payload_first_feature_model(10.0);
+            let mut bad_payload = payload.clone();
+            bad_payload[6] = 1;
+            check!(b"runtime_mlp_payload_rejects_nonzero_reserved\0",
+                   matches!(
+                       mm::eviction::runtime_mlp::parse_payload(&bad_payload),
+                       Err(mm::eviction::runtime_mlp::RuntimeMlpError::NonZeroReserved)
+                   ));
             let blob = mm::eviction::blob::build_test_blob(
                 mm::eviction::BlobKind::Mlp,
                 &payload);
@@ -3220,6 +3240,11 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
                 64,
                 0.02,
             );
+            let mut bad_payload = payload.clone();
+            bad_payload[6] = 1;
+            check!(b"runtime_cacheus_payload_rejects_nonzero_reserved\0",
+                   mm::eviction::runtime_cacheus::parse_payload(&bad_payload)
+                       == Err(mm::eviction::runtime_cacheus::RuntimeCacheusError::NonZeroReserved));
             let blob = mm::eviction::blob::build_test_blob(
                 mm::eviction::BlobKind::CacheusConfig,
                 &payload);
