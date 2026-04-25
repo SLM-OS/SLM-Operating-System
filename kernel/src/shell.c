@@ -24,6 +24,7 @@
 #include "elf.h"
 #include "vfs.h"
 #include "component.h"
+#include "blob_autoload.h"
 #include "littlefs_slm.h"
 #include "help.h"
 #if defined(ENABLE_NETWORKING)
@@ -511,6 +512,7 @@ void shell_init(void)
     {
         extern void model_boot_preload(void);
         model_boot_preload();
+        blob_boot_autoload();
     }
 #endif
 

@@ -9,6 +9,8 @@ still preserves the old positional upload form as compatibility mode.
 ```bash
 python3 scripts/tools/slm-modelctl.py apply [options] <domain> <kind> <local_path> [remote_path]
 python3 scripts/tools/slm-modelctl.py load [options] <domain> <kind> <local_path> [remote_path]
+python3 scripts/tools/slm-modelctl.py apply [options] --http-url <url> <domain> <kind> [remote_path]
+python3 scripts/tools/slm-modelctl.py load [options] --http-url <url> <domain> <kind> [remote_path]
 python3 scripts/tools/slm-modelctl.py activate [options] <domain> <kind>
 python3 scripts/tools/slm-modelctl.py rollback [options] <domain> <kind>
 python3 scripts/tools/slm-modelctl.py clear [options] <domain> <kind>
@@ -71,6 +73,14 @@ python3 scripts/tools/slm-modelctl.py \
   --probe-raw 7 \
   sched mlp \
   /tmp/sched-mlp-probe.blob
+
+python3 scripts/tools/slm-modelctl.py \
+  apply \
+  --target pi-5-2 \
+  --labctl \
+  --http-url http://10.0.2.2:8080/cacheus.blob \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  eviction cacheus_config
 ```
 
 ## Useful flags
@@ -80,6 +90,8 @@ python3 scripts/tools/slm-modelctl.py \
 - `--protocol {auto,framed,legacy}` — upload protocol passed through to `slm-put.py`
 - `--labctl` — resolve telnet targets through `labctl info`
 - `--clear-first` — clear prior runtime state for that kind before loading
+- `--http-url <url>` — fetch the blob directly on-device with `http get`
+- `--sha256 <hex>` — expected SHA-256 for `--http-url`; the target verifies before accepting the file
 - `--tryboot` — reboot a Pi OS maintenance boot into one-shot SLM-OS first
 - `--expect-raw <n>` — for `probe`, fail unless the sampled raw action matches
 - `--probe-raw <n>` — for `apply`, activate and then run a scheduler probe that must match
@@ -90,6 +102,8 @@ python3 scripts/tools/slm-modelctl.py \
 ## Notes
 
 - Default remote path is `/mnt/files/policies/<filename>`.
+- For `--http-url`, the default remote path still uses the fetched
+  filename under `/mnt/files/policies/`.
 - `slm-put.py` now auto-caps chunk sizes to stay under the shell line
   limit while still allowing larger requested chunk sizes.
 - `--tryboot` is intended for dual-boot Pi maintenance workflows such as
@@ -101,6 +115,10 @@ python3 scripts/tools/slm-modelctl.py \
 - This wrapper intentionally does not hide the underlying shell
   contract. It is a workflow convenience layer, not a new control
   plane.
+- `--http-url` uses the target's own network path and the shell-level
+  `http get` command; it avoids host-side upload entirely.
+- With `--sha256`, the target computes the downloaded file's SHA-256
+  before the final rename and rejects the fetch on mismatch.
 
 ## Validation status
 
@@ -120,6 +138,10 @@ python3 scripts/tools/slm-modelctl.py \
   - trigger one-shot `sudo reboot '0 tryboot'`
   - wait for the SLM-OS shell to become ready
   - run the same upload + lifecycle flow automatically
+- hardware-validated on `pi-5-2` for on-device HTTP fetch:
+  - shell `http get ... <sha256>`
+  - Lua/admin `slm.http_get(..., sha256)`
+  - `slm-modelctl.py apply --http-url --sha256 ...`
 - `probe` is hardware-validated on `pi-5-2` for:
   - `ai_mlp` with a deterministic runtime `sched_mlp` blob forcing raw action `7`
   - `ai_ppo` with a deterministic runtime `sched_ppo` blob forcing raw action `13`

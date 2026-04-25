@@ -28,6 +28,7 @@
 #include "shell_io_tcp.h"
 #include "tcp_shell_server.h"
 #include "net.h"
+#include "net_http.h"
 #endif
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
@@ -2816,6 +2817,55 @@ static int l_telnetd_kick(lua_State *L) {
     lua_pushboolean(L, kicked);
     return 1;
 }
+
+/**
+ * slm.http_get(url, dest) — fetch one HTTP resource into the VFS.
+ * Returns a result table on success, nil on any error.
+ */
+static int l_http_get(lua_State *L) {
+    if (!L) return 0;
+    const char *url = luaL_checkstring(L, 1);
+    const char *path = luaL_checkstring(L, 2);
+    const char *expected_sha256 = luaL_optstring(L, 3, NULL);
+    struct net_http_get_result result;
+    char resolved[VFS_MAX_PATH];
+
+    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (!net_is_up()) {
+        if (net_init() != 0) {
+            lua_pushnil(L);
+            return 1;
+        }
+    }
+    if (net_http_get_file(url, resolved, expected_sha256, &result) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_createtable(L, 0, 8);
+    lua_pushinteger(L, (lua_Integer)result.http_status);
+    lua_setfield(L, -2, "status");
+    lua_pushinteger(L, (lua_Integer)result.bytes_received);
+    lua_setfield(L, -2, "bytes_received");
+    lua_pushinteger(L, (lua_Integer)result.content_length);
+    lua_setfield(L, -2, "content_length");
+    lua_pushinteger(L, (lua_Integer)result.httpc_result);
+    lua_setfield(L, -2, "httpc_result");
+    lua_pushinteger(L, (lua_Integer)result.lwip_err);
+    lua_setfield(L, -2, "lwip_err");
+    lua_pushboolean(L, result.hash_checked != 0);
+    lua_setfield(L, -2, "hash_checked");
+    lua_pushboolean(L, result.hash_verified != 0);
+    lua_setfield(L, -2, "hash_verified");
+    lua_pushstring(L, result.sha256_hex);
+    lua_setfield(L, -2, "sha256");
+    lua_pushstring(L, resolved);
+    lua_setfield(L, -2, "dest");
+    return 1;
+}
 #endif /* ENABLE_NETWORKING */
 
 /* =============================================================================
@@ -3163,6 +3213,7 @@ static const luaL_Reg slm_lib_admin[] = {
     {"telnetd_start",    l_telnetd_start},
     {"telnetd_stop",     l_telnetd_stop},
     {"telnetd_kick",     l_telnetd_kick},
+    {"http_get",         l_http_get},
 #endif
     {NULL, NULL}
 };

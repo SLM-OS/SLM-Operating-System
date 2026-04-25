@@ -149,6 +149,67 @@ static size_t build_test_blob(uint16_t kind_id,
     return total;
 }
 
+static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
+                                         uint8_t *out,
+                                         size_t out_cap)
+{
+    enum {
+        PAYLOAD_HEADER_LEN = 8,
+        L1_IN = 27,
+        L1_OUT = 64,
+        L2_OUT = 32,
+        L3_OUT = 16,
+        OUT_DIM = 1,
+        W_L1_LEN = L1_OUT * L1_IN,
+        B_L1_LEN = L1_OUT,
+        W_L2_LEN = L2_OUT * L1_OUT,
+        B_L2_LEN = L2_OUT,
+        W_L3_LEN = L3_OUT * L2_OUT,
+        B_L3_LEN = L3_OUT,
+        W_OUT_LEN = OUT_DIM * L3_OUT,
+        B_OUT_LEN = OUT_DIM,
+        FLOAT_COUNT = W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
+                    + W_L3_LEN + B_L3_LEN + W_OUT_LEN + B_OUT_LEN,
+        TOTAL = PAYLOAD_HEADER_LEN + FLOAT_COUNT * 4
+    };
+    size_t cursor = 0;
+    size_t idx = 0;
+
+    if (out_cap < TOTAL) return 0;
+    memset(out, 0, TOTAL);
+    out[0] = 'M'; out[1] = 'L'; out[2] = 'P'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 0; out[7] = 0;
+    cursor = PAYLOAD_HEADER_LEN;
+
+#define WRITE_U32_LE(bits)                                                   \
+    do {                                                                     \
+        uint32_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        cursor += 4;                                                         \
+    } while (0)
+
+    for (idx = 0; idx < FLOAT_COUNT; idx++) {
+        uint32_t bits = 0u;
+        if (idx == 0) bits = 0x3F800000u; /* W_L1[0][0] */
+        if (idx == W_L1_LEN + B_L1_LEN) bits = 0x3F800000u; /* W_L2[0][0] */
+        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN) {
+            bits = 0x3F800000u; /* W_L3[0][0] */
+        }
+        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
+                + W_L3_LEN + B_L3_LEN) {
+            bits = out_weight_bits; /* W_OUT[0][0] */
+        }
+        WRITE_U32_LE(bits);
+    }
+#undef WRITE_U32_LE
+
+    return cursor;
+}
+
 /* ============================================================================
  * M1: alloc seeds the tracking fields
  * ============================================================================ */
@@ -687,12 +748,17 @@ static void test_blob_stage_activate_rollback_round_trip(void)
         TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
     }
 
-    static uint8_t blob1[64];
-    static uint8_t blob2[64];
-    const uint8_t payload1[] = {0x01, 0x02, 0x03, 'm', 'l', 'p'};
-    const uint8_t payload2[] = {0x09, 0x08, 'n', 'e', 'w'};
-    size_t len1 = build_test_blob(2, payload1, sizeof(payload1), blob1, sizeof(blob1));
-    size_t len2 = build_test_blob(2, payload2, sizeof(payload2), blob2, sizeof(blob2));
+    static uint8_t payload1[18000];
+    static uint8_t payload2[18000];
+    static uint8_t blob1[18064];
+    static uint8_t blob2[18064];
+    size_t payload1_len = build_eviction_mlp_payload(0x3F800000u, payload1, sizeof(payload1));
+    size_t payload2_len = build_eviction_mlp_payload(0x40000000u, payload2, sizeof(payload2));
+    size_t len1 = build_test_blob(2, payload1, payload1_len, blob1, sizeof(blob1));
+    size_t len2 = build_test_blob(2, payload2, payload2_len, blob2, sizeof(blob2));
+    uint32_t checksum1 = fnv1a32(payload1, payload1_len);
+    TEST_ASSERT_TRUE(payload1_len > 0);
+    TEST_ASSERT_TRUE(payload2_len > 0);
     TEST_ASSERT_TRUE(len1 > 0);
     TEST_ASSERT_TRUE(len2 > 0);
 
@@ -703,7 +769,7 @@ static void test_blob_stage_activate_rollback_round_trip(void)
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(2, &st));
     TEST_ASSERT_EQUAL_UINT16(1, st.state);
     TEST_ASSERT_EQUAL_UINT32(1, st.has_staged);
-    TEST_ASSERT_EQUAL_UINT32(fnv1a32(payload1, sizeof(payload1)), st.staged.checksum);
+    TEST_ASSERT_EQUAL_UINT32(checksum1, st.staged.checksum);
 
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_activate(2));
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(2, &st));
@@ -715,13 +781,13 @@ static void test_blob_stage_activate_rollback_round_trip(void)
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_activate(2));
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(2, &st));
     TEST_ASSERT_EQUAL_UINT32(1, st.has_rollback);
-    TEST_ASSERT_EQUAL_UINT32(fnv1a32(payload1, sizeof(payload1)), st.rollback.checksum);
+    TEST_ASSERT_EQUAL_UINT32(checksum1, st.rollback.checksum);
 
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_rollback(2));
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(2, &st));
     TEST_ASSERT_EQUAL_UINT16(3, st.state);
     TEST_ASSERT_EQUAL_UINT32(1, st.has_active);
-    TEST_ASSERT_EQUAL_UINT32(fnv1a32(payload1, sizeof(payload1)), st.active.checksum);
+    TEST_ASSERT_EQUAL_UINT32(checksum1, st.active.checksum);
 
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_clear(2));
 }

@@ -509,6 +509,7 @@ static err_t
 httpc_init_connection_common(httpc_state_t **connection, const httpc_connection_t *settings, const char* server_name,
                       u16_t server_port, const char* uri, altcp_recv_fn recv_fn, void* callback_arg, int use_host)
 {
+  char req_len_probe[1];
   size_t alloc_len;
   mem_size_t mem_alloc_len;
   int req_len, req_len2;
@@ -520,7 +521,8 @@ httpc_init_connection_common(httpc_state_t **connection, const httpc_connection_
   LWIP_ASSERT("uri != NULL", uri != NULL);
 
   /* get request len */
-  req_len = httpc_create_request_string(settings, server_name, server_port, uri, use_host, NULL, 0);
+  req_len = httpc_create_request_string(settings, server_name, server_port, uri,
+    use_host, req_len_probe, sizeof(req_len_probe));
   if ((req_len < 0) || (req_len > 0xFFFF)) {
     return ERR_VAL;
   }

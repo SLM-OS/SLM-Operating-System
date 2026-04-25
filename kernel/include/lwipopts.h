@@ -9,8 +9,8 @@
  * - Static memory pools (no malloc)
  * - ICMP enabled for ping
  * - DHCP enabled for automatic configuration
- * - TCP/UDP enabled for future use
- * - DNS disabled (can enable later)
+ * - TCP/UDP enabled
+ * - DNS + altcp enabled for HTTP client support
  */
 
 #ifndef LWIPOPTS_H
@@ -99,8 +99,11 @@
 #define LWIP_UDP                    1
 #define MEMP_NUM_UDP_PCB            4
 
-/* DNS client (disabled for now) */
-#define LWIP_DNS                    0
+/* DNS client */
+#define LWIP_DNS                    1
+
+/* altcp layer required by lwIP http_client */
+#define LWIP_ALTCP                  1
 
 /* Autoip (link-local addressing) - disabled */
 #define LWIP_AUTOIP                 0

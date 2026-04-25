@@ -480,6 +480,8 @@ set(KERNEL_SOURCES
     # (linked via --whole-archive from Rust staticlib)
     kernel/src/help.c
     kernel/src/demo_init.c
+    kernel/src/blob_autoload.c
+    kernel/src/runtime_blob_file.c
     # .incbin'ed Lua demo scripts (gated on EMBED_DEMO_SCRIPTS)
     $<$<BOOL:${EMBED_DEMO_SCRIPTS}>:kernel/src/demo_scripts.S>
 
@@ -512,6 +514,7 @@ set(KERNEL_SOURCES
     # control channel for request/response stamping. NOT a security
     # primitive.
     kernel/lib/md5.c
+    kernel/lib/sha256.c
 
     # ==========================================================================
     # Filesystem
@@ -587,6 +590,7 @@ set(KERNEL_SOURCES
     # Platform-independent networking stack
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/sys_arch.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/net/lwip_slm.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/net_http.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/net_shell.c>
     # TCP shell (multi-session) — requires lwIP; Plan §1.3 + §2
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/shell_io_tcp.c>
@@ -613,6 +617,7 @@ set(TEST_SOURCES
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c
     kernel/tests/test_shell_session.c
+    kernel/tests/test_blob_autoload.c
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnet.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_config.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_cmd.c>
@@ -654,6 +659,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_component.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_vmm.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_net_http.c>
     # USB core tests (Phase 1 of #266). Platform-neutral — the mock
     # HCD has no real hardware dependency.
     kernel/tests/test_usb_core.c
@@ -681,8 +687,12 @@ set(TEST_SOURCES
 
 # lwIP library sources (QEMU networking only)
 set(LWIP_SOURCES
+    kernel/lib/lwip/src/core/altcp.c
+    kernel/lib/lwip/src/core/altcp_alloc.c
+    kernel/lib/lwip/src/core/altcp_tcp.c
     kernel/lib/lwip/src/core/init.c
     kernel/lib/lwip/src/core/def.c
+    kernel/lib/lwip/src/core/dns.c
     kernel/lib/lwip/src/core/inet_chksum.c
     kernel/lib/lwip/src/core/ip.c
     kernel/lib/lwip/src/core/mem.c
@@ -705,6 +715,7 @@ set(LWIP_SOURCES
     kernel/lib/lwip/src/core/ipv4/ip4.c
     kernel/lib/lwip/src/core/ipv4/ip4_addr.c
     kernel/lib/lwip/src/core/ipv4/ip4_frag.c
+    kernel/lib/lwip/src/apps/http/http_client.c
     kernel/lib/lwip/src/netif/ethernet.c
 )
 

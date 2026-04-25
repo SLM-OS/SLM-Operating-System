@@ -246,7 +246,15 @@ def add_domain_kind_args(p: argparse.ArgumentParser, *, include_kind: bool = Tru
 
 
 def add_upload_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("local_path", help="Local blob file to upload")
+    p.add_argument("local_path", nargs="?", help="Local blob file to upload")
+    p.add_argument(
+        "--http-url",
+        help="Fetch the blob directly on-device with `http get` instead of uploading it from the host",
+    )
+    p.add_argument(
+        "--sha256",
+        help="Expected SHA-256 for `--http-url`; the on-device fetch fails if it does not match",
+    )
     p.add_argument(
         "remote_path",
         nargs="?",
@@ -367,7 +375,15 @@ def parse_args() -> argparse.Namespace:
                 argv = [argv[idx]] + argv[:idx] + argv[idx + 1:]
         else:
             argv = ["apply"] + argv
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.command in ("apply", "load"):
+        has_local = getattr(args, "local_path", None) is not None
+        has_http = getattr(args, "http_url", None) is not None
+        if has_local == has_http:
+            parser.error("exactly one of LOCAL_PATH or --http-url is required for apply/load")
+        if getattr(args, "sha256", None) is not None and not has_http:
+            parser.error("--sha256 requires --http-url")
+    return args
 
 
 def log_response(debug: bool, label: str, output: bytes) -> None:
@@ -606,9 +622,20 @@ def upload_blob(args: argparse.Namespace, remote_path: str) -> None:
     run_upload(args, args.local_path, remote_path)
 
 
-def default_remote_path(local_path: str) -> str:
-    name = pathlib.Path(local_path).name
+def default_remote_path(source: str) -> str:
+    name = pathlib.PurePosixPath(source).name or pathlib.Path(source).name
+    if not name:
+        name = "blob.bin"
     return f"/mnt/files/policies/{name}"
+
+
+def fetch_blob(shell: Shell, args: argparse.Namespace, remote_path: str) -> None:
+    assert getattr(args, "http_url", None) is not None
+    ensure_parent_dir(shell, remote_path, args.debug)
+    command = f"http get {args.http_url} {remote_path}"
+    if getattr(args, "sha256", None):
+        command += f" {args.sha256}"
+    run_shell_command(shell, command, args.debug)
 
 
 def read_initial(shell: Shell, debug: bool) -> None:
@@ -782,8 +809,10 @@ def open_shell(shell_factory: Callable[[], Shell], debug: bool) -> Shell:
 def main() -> int:
     args = parse_args()
     remote_path = None
-    if getattr(args, "local_path", None) is not None:
-        remote_path = args.remote_path or default_remote_path(args.local_path)
+    if args.command in ("apply", "load"):
+        source = args.http_url if getattr(args, "http_url", None) is not None else args.local_path
+        assert source is not None
+        remote_path = args.remote_path or default_remote_path(source)
     prompt = args.prompt.encode("ascii")
     connect_retries = args.connect_retries
     retry_delay = args.retry_delay
@@ -819,7 +848,11 @@ def main() -> int:
 
     shell: Shell | None = None
     try:
-        if args.command in ("load", "apply") and args.transport == "serial":
+        if (
+            args.command in ("load", "apply")
+            and args.transport == "serial"
+            and getattr(args, "local_path", None) is not None
+        ):
             assert remote_path is not None
             shell = open_shell(shell_factory, args.debug)
             ensure_parent_dir(shell, remote_path, args.debug)
@@ -855,7 +888,9 @@ def main() -> int:
             return probe_scheduler(shell, args)
 
         assert remote_path is not None
-        if args.transport != "serial":
+        if getattr(args, "http_url", None) is not None:
+            fetch_blob(shell, args, remote_path)
+        elif args.transport != "serial":
             ensure_parent_dir(shell, remote_path, args.debug)
             upload_blob(args, remote_path)
 

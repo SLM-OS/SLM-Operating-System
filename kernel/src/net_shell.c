@@ -5,7 +5,9 @@
  */
 
 #include "net.h"
+#include "net_http.h"
 #include "shell.h"
+#include "shell_internal.h"
 #include "shell_session.h"   /* MAX_TCP_SHELL_SESSIONS */
 #include "tcp_shell_server.h"
 #include "shell_io_tcp.h"
@@ -307,6 +309,58 @@ static int cmd_netstat(int argc, char *argv[]) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* HTTP Command                                                                */
+/* -------------------------------------------------------------------------- */
+
+static int cmd_http(int argc, char *argv[])
+{
+    struct net_http_get_result result;
+    const char *expected_sha256 = NULL;
+    char resolved[VFS_MAX_PATH];
+    int rc;
+
+    if ((argc != 4 && argc != 5) || strcmp(argv[1], "get") != 0) {
+        shell_printf("Usage: http get <url> <dest> [sha256]\n");
+        shell_printf("  Example: http get http://10.0.2.2:8080/blob.bin /mnt/files/blob.bin\n");
+        return -1;
+    }
+    if (argc == 5) {
+        uint8_t digest[SHA256_DIGEST_LEN];
+        if (net_http_parse_sha256_hex(argv[4], digest) != 0) {
+            shell_printf("http: invalid sha256 digest\n");
+            return -1;
+        }
+        expected_sha256 = argv[4];
+    }
+    if (!net_is_up()) {
+        shell_printf("Network not initialized\n");
+        return -1;
+    }
+    if (shell_resolve_path(argv[3], resolved, sizeof(resolved)) < 0) {
+        shell_printf("http: destination path too long\n");
+        return -1;
+    }
+
+    rc = net_http_get_file(argv[2], resolved, expected_sha256, &result);
+    if (rc != 0) {
+        shell_printf("http: fetch failed (rc=%d status=%lu result=%d lwip=%d sha256=%s)\n",
+                     rc,
+                     (unsigned long)result.http_status,
+                     result.httpc_result,
+                     result.lwip_err,
+                     result.sha256_hex[0] ? result.sha256_hex : "(none)");
+        return -1;
+    }
+
+    shell_printf("http: downloaded %lu bytes to %s (status=%lu sha256=%s)\n",
+                 (unsigned long)result.bytes_received,
+                 resolved,
+                 (unsigned long)result.http_status,
+                 result.sha256_hex);
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
 /* telnetd Command (Phase 3)                                                   */
 /*                                                                            */
 /* The `telnetd` name supersedes `tcpsh` from Phases 1-2. `tcpsh` is still    */
@@ -476,6 +530,7 @@ static const shell_cmd_t net_commands[] = {
     {"ping",     cmd_ping,     "Send ICMP echo request",                     true},
     {"ifconfig", cmd_ifconfig, "Network interface config",                   true},
     {"netstat",  cmd_netstat,  "Network statistics",                         false},
+    {"http",     cmd_http,     "HTTP client (get <url> <dest>)",             true},
     {"telnetd",  cmd_telnetd,  "Telnet shell daemon (start|stop|status|sessions|kick)", true},
     {"tcpsh",    cmd_telnetd,  "Alias for telnetd (legacy name)",            true},
 };

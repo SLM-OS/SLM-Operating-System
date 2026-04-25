@@ -1389,6 +1389,50 @@ fn blob_meta_to_c(meta: mm::eviction::BlobMetadata) -> RustEvictionBlobMeta {
 /// # Safety
 /// `data` must point to a readable buffer of `len` bytes.
 #[no_mangle]
+pub unsafe extern "C" fn rust_eviction_blob_validate(
+    kind_id: u16,
+    data: *const u8,
+    len: usize,
+) -> i32 {
+    #[cfg(not(feature = "ai_eviction"))]
+    { let _ = (kind_id, data, len); -2 }
+    #[cfg(feature = "ai_eviction")]
+    {
+        let kind = match blob_kind_from_id(kind_id) {
+            Some(kind) => kind,
+            None => return -1,
+        };
+        if data.is_null() || len == 0 {
+            return -1;
+        }
+        let bytes = core::slice::from_raw_parts(data, len);
+        let parsed = match mm::eviction::parse_blob(bytes) {
+            Ok(blob) => blob,
+            Err(_) => return -3,
+        };
+        if parsed.header.kind != kind {
+            return -4;
+        }
+        let payload = parsed.payload.as_slice();
+        let payload_ok = match kind {
+            mm::eviction::BlobKind::XGBoost => {
+                mm::eviction::runtime_xgboost::parse_payload(payload).is_ok()
+            }
+            mm::eviction::BlobKind::Mlp => {
+                mm::eviction::runtime_mlp::parse_payload(payload).is_ok()
+            }
+            mm::eviction::BlobKind::CacheusConfig => {
+                mm::eviction::runtime_cacheus::parse_payload(payload).is_ok()
+            }
+        };
+        if !payload_ok {
+            return -3;
+        }
+        0
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn rust_eviction_blob_stage(
     kind_id: u16,
     data: *const u8,

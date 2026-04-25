@@ -27,6 +27,7 @@
 #include "ramdisk.h"
 #include "littlefs_slm.h"
 #include "littlefs_vfs.h"
+#include "blob_autoload.h"
 #include "help.h"
 #if defined(ENABLE_NETWORKING)
 #include "net.h"
@@ -361,6 +362,8 @@ void kernel_main(void *dtb)
                     extern int demo_init(void);
                     demo_init();
                 }
+
+                blob_autoload_init();
 
                 /* Phase 6.2c: write the embedded scheduler MLP .hef
                  * (if the kernel was built with SCHEDULER_HEF_BLOB=...)

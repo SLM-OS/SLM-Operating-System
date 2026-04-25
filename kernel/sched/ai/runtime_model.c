@@ -351,6 +351,24 @@ int sched_model_stage_blob(uint16_t kind_id, const uint8_t *data, size_t len)
     return 0;
 }
 
+int sched_model_validate_blob(uint16_t kind_id, const uint8_t *data, size_t len)
+{
+    int store_idx = sched_model_store_index(kind_id);
+    irq_flags_t stage_flags;
+
+    if (store_idx < 0) return -1;
+
+    stage_flags = spin_lock_irqsave(&sched_model_stage_lock);
+    memset(&stage_scratch_slot, 0, sizeof(stage_scratch_slot));
+    if (parse_sched_blob(kind_id, data, len, &stage_scratch_slot.meta,
+                         &stage_scratch_slot) != 0) {
+        spin_unlock_irqrestore(&sched_model_stage_lock, stage_flags);
+        return -1;
+    }
+    spin_unlock_irqrestore(&sched_model_stage_lock, stage_flags);
+    return 0;
+}
+
 int sched_model_activate(uint16_t kind_id)
 {
     int store_idx = sched_model_store_index(kind_id);

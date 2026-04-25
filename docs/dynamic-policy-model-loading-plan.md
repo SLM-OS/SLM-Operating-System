@@ -52,9 +52,9 @@ At-a-glance summary:
 | Scheduler runtime models | ✅ partial | `mlp`, `ppo`, and `config` exist; dense-model + config behavior is hardware-validated |
 | Scheduler live behavior validation | ✅ done | Deterministic runtime blobs affect real `ai_mlp` / `ai_ppo` decisions on `pi-5-2` |
 | File ingress core transport | ✅ partial | `put`, `xput`, and `slm-put.py` are live; telnet + serial framed upload/resume are hardware-validated |
-| Operator workflow wrapper | ✅ partial | `slm-modelctl.py` now defaults to subcommands, keeps legacy compatibility, and has a hardware-validated scheduler probe path |
-| Persistence / autoload | ☐ pending | Intentionally deferred from the first milestone |
-| HTTP / authenticated transport | ☐ pending | Still future work |
+| Operator workflow wrapper | ✅ partial | `slm-modelctl.py` now supports subcommands, legacy compatibility, scheduler probes, and HTTP fetch via `--http-url` |
+| Persistence / autoload | ✅ partial | Config-backed boot autoload exists for current eviction/scheduler blob kinds |
+| HTTP / authenticated transport | ✅ partial | Plain-HTTP download path exists in-kernel with shell, Lua/admin, and `slm-modelctl.py --http-url`; SHA-256 checked fetch is supported, while HTTPS and signed-artifact hardening are ticketed/deferred |
 
 Milestone summary:
 
@@ -128,6 +128,26 @@ Already implemented:
   - `slm.eviction_model_activate(kind)`
   - `slm.eviction_model_rollback(kind)`
   - `slm.eviction_model_clear(kind)`
+- **First-cut persistence / autoload path**:
+  - `/mnt/files/blob_autoload.conf` now records persisted autoload
+    entries for current eviction and scheduler blob kinds
+  - boot replay now stages and activates configured blobs during shell
+    initialization
+  - `autoload set` now validates that the target file exists and parses
+    correctly for the requested blob kind before persisting the entry
+  - autoload config writes now go through a temp file + rename path
+    instead of truncating the live config in place
+  - shell control now includes:
+    - `eviction model autoload status|set|clear ...`
+    - `sched model autoload status|set|clear ...`
+  - shared file-backed staging helpers now back both normal `load`
+    operations and boot autoload replay
+  - direct test coverage now exists in `kernel/tests/test_blob_autoload.c`
+  - `make kernel PLATFORM=RASPI5 AI_SCHED=ON EVICTION_MODELS=ON` builds
+    cleanly with the new path
+  - `make test AI_SCHED=ON EVICTION_MODELS=ON` still stops at the
+    existing QEMU test-kernel link failure (`Kernel image too large!`)
+    after compiling the new autoload test into the test image
 
 Partially implemented:
 
@@ -386,21 +406,36 @@ First cut:
 - RAM activation only
 - explicit reload after reboot
 
-Optional follow-up:
+Follow-up:
 
 - persist selected runtime payloads to filesystem
 - boot-time autoload from configured paths
 
-Status: `☐ pending`
+Status: `✅ partial`
 
-Rationale:
+Implemented now:
 
-- the first milestone should prove correctness of validation, staging,
-  activation, rollback, and policy fallback without also taking on
-  persistence semantics
-- persistence adds a larger design surface: authoritative path
-  selection, boot-time discovery/autoload policy, corruption handling,
-  and update atomicity across power loss
+- current eviction and scheduler blob kinds can persist an autoload
+  source path in `/mnt/files/blob_autoload.conf`
+- boot-time autoload replays those entries by staging from the
+  configured files and activating them
+- `autoload set` now rejects missing files, non-files, empty files, and
+  blobs that fail parse/kind validation for the requested slot
+- autoload config rewrites now use a temp-file rename path rather than
+  truncating the active config in place
+- shell admin can inspect/set/clear persisted autoload entries for:
+  - eviction: `xgboost`, `mlp`, `cacheus_config`
+  - scheduler: `mlp`, `ppo`, `config`
+
+Still missing:
+
+- power-loss-safe update semantics for the persisted blob files
+  themselves
+- stronger corruption/recovery policy than “log and skip failed entry”
+  during boot replay
+- an opinionated authoritative-payload lifecycle beyond “path points at
+  a blob file”
+- boot policy beyond replaying the configured paths
 
 ---
 
@@ -541,8 +576,8 @@ Current status:
 | F1 — Minimal device-local contract | ✅ partial | `/mnt/files` exists, but path conventions are not yet formalized |
 | F2 — Small native upload path | ✅ partial | `put`, `xput`, `slm-put.py`, and `slm-modelctl.py` are live; shell-line-aware chunking and resume are in place |
 | F3 — Serial upload fallback | ✅ partial | Same framed path works over serial and is hardware-validated |
-| F4 — HTTP client integration | ☐ pending | Not started |
-| F5 — Stronger authenticated transport | ☐ pending | Not started |
+| F4 — HTTP client integration | ✅ partial | Plain-HTTP fetch now has shell, Lua/admin, `slm-modelctl.py`, and optional SHA-256 verification |
+| F5 — Stronger authenticated transport | ☐ pending | Ticketed and deferred to broader security hardening (`#382`, `#383`) |
 
 ### Ingress principle
 
@@ -634,15 +669,41 @@ Implementation notes:
 
 #### Phase F4 — HTTP client integration
 
-Status: `☐ pending`
+Status: `✅ partial`
 
-Long-term win:
+Implemented in this slice:
 
-- pull files directly from an HTTP endpoint
-- useful for model distribution and general device provisioning
+- enabled lwIP DNS + `altcp` support needed for hostname-based HTTP fetches
+- added reusable `net_http_get_file(url, dest)` helper
+- added shell surface: `http get <url> <dest> [sha256]`
+- added Lua/admin surface: `slm.http_get(url, dest [, sha256])`
+- extended `slm-modelctl.py` so `apply` / `load` can fetch a blob
+  directly on-device with `--http-url` instead of uploading from the host
+- added optional SHA-256 verification before the temporary download is
+  renamed into place, so HTTP fetches can fail closed on content mismatch
+- downloads land through the existing filesystem contract, so HTTP is
+  now another ingress transport rather than a policy-specific path
+- added parser and shell-dispatch coverage in `kernel/tests/test_net_http.c`
+- added Lua binding coverage in `kernel/tests/test_lua.c`
+- added host-tool coverage for the `slm-modelctl.py --http-url` path in
+  `scripts/tools/test_slm_tooling.py`
+- hardware-validated on `pi-5-2` for:
+  - shell `http get <url> <dest> <sha256>` success path
+  - shell SHA-256 mismatch rejection, with no final file left behind
+  - Lua/admin `slm.http_get(url, dest, sha256)` success path
+  - `slm-modelctl.py apply --http-url --sha256 ...` for eviction blob activation
 
-This should be added after the local file-loader contract exists so the
-HTTP path is just another transport feeding the same activation commands.
+Current limits:
+
+- plain `http://` only
+- HTTPS transport hardening is ticketed and deferred to broader security work:
+  - `#383` Security hardening: HTTPS transport for runtime model fetches
+- signed-manifest / signed-blob integrity policy is ticketed and deferred
+  to broader security work:
+  - `#382` Security hardening: signed manifest or signed blob policy for runtime HTTP fetches
+
+These remaining items are security hardening, not blockers for the
+first usable dynamic-model workflow.
 
 #### Phase F5 — Stronger authenticated transport
 

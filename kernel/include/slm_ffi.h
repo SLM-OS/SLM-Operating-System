@@ -369,6 +369,7 @@ typedef struct {
  * -1 on invalid args / unknown kind, -2 when ai_eviction is disabled,
  * -3 on parse/validation failure, -4 when the blob header kind does
  * not match `kind_id`. */
+extern int32_t rust_eviction_blob_validate(uint16_t kind_id, const uint8_t *data, size_t len);
 extern int32_t rust_eviction_blob_stage(uint16_t kind_id, const uint8_t *data, size_t len);
 
 /* Query, activate, roll back, or clear the runtime blob for `kind_id`.

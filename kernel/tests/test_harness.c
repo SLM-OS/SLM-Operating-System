@@ -128,6 +128,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_vfs();
     total_failures += test_suite_shell();
     total_failures += test_suite_shell_session();
+    total_failures += test_suite_blob_autoload();
 #if defined(ENABLE_NETWORKING)
     total_failures += test_suite_telnet();
     total_failures += test_suite_telnetd_config();
@@ -164,6 +165,7 @@ int test_harness_run_all(void)
     /* Networking tests run on all platforms with ENABLE_NETWORKING */
 #if defined(ENABLE_NETWORKING)
     total_failures += test_suite_net();
+    total_failures += test_suite_net_http();
 #endif
 
     /* USB core tests (platform-neutral; mock HCD only). */

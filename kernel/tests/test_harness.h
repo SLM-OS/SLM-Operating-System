@@ -55,6 +55,9 @@ int test_suite_shell(void);
 /* Shell session pool / per-task binding tests */
 int test_suite_shell_session(void);
 
+/* Runtime blob autoload config + boot replay tests */
+int test_suite_blob_autoload(void);
+
 /* Telnet IAC state machine tests */
 int test_suite_telnet(void);
 
@@ -96,6 +99,9 @@ int test_suite_littlefs(void);
 
 /* Networking tests (QEMU only) */
 int test_suite_net(void);
+
+/* HTTP URL parsing + shell dispatch tests */
+int test_suite_net_http(void);
 
 /* USB core tests (platform-neutral; Phase 1 of #266) */
 int test_suite_usb_core(void);

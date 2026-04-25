@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <limits.h>
 #include "debug.h"  /* For uart_printf */
 
 /* -------------------------------------------------------------------------- */
@@ -65,8 +66,16 @@
 /* We have limits.h (freestanding) */
 #define LWIP_NO_LIMITS_H  0
 
-/* We don't have unistd.h - define ssize_t ourselves */
+/* We don't have unistd.h - provide ssize_t ourselves. Use ptrdiff_t so the
+ * type matches the toolchain's libc typedef on both AArch64 and x86-64. */
 #define LWIP_NO_UNISTD_H  1
+typedef ptrdiff_t ssize_t;
+
+/* newlib stdio.h provides ssize_t but not SSIZE_MAX, so publish the
+ * limit explicitly and keep lwIP's arch.h from typedef'ing ssize_t to int. */
+#ifndef SSIZE_MAX
+#define SSIZE_MAX LONG_MAX
+#endif
 
 /* We don't have ctype.h - use lwIP's built-in implementations */
 #define LWIP_NO_CTYPE_H   1

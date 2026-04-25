@@ -15,7 +15,9 @@
 #include "ai_types.h"
 #include "runtime_model.h"
 #endif
+#include "blob_autoload.h"
 #include "pmm.h"
+#include "runtime_blob_file.h"
 #include "vmm.h"
 #include "smp.h"
 #include "ipc.h"
@@ -2965,53 +2967,136 @@ static int sched_model_status_one(uint16_t kind_id)
 static int sched_model_load_file(uint16_t kind_id, const char *path)
 {
     char resolved[VFS_MAX_PATH];
-    struct vfs_entry_info info;
-    uint8_t *buf;
-    size_t pages_needed;
-    int bytes_read;
+    int rc = sched_blob_stage_file(kind_id, path, resolved, sizeof(resolved));
 
-    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+    if (rc == RUNTIME_BLOB_FILE_PATH_TOO_LONG) {
         shell_puts("sched model load: path too long\r\n");
         return 1;
     }
-
-    if (vfs_stat_path(resolved, &info) != 0) {
-        shell_printf("sched model load: %s: file not found\r\n", resolved);
+    if (rc == RUNTIME_BLOB_FILE_NOT_FOUND) {
+        shell_printf("sched model load: %s: file not found\r\n", path);
         return 1;
     }
-    if (info.type != 0) {
-        shell_printf("sched model load: %s: not a file\r\n", resolved);
+    if (rc == RUNTIME_BLOB_FILE_NOT_A_FILE) {
+        shell_printf("sched model load: %s: not a file\r\n", path);
         return 1;
     }
-    if (info.size == 0) {
+    if (rc == RUNTIME_BLOB_FILE_EMPTY) {
         shell_puts("sched model load: file is empty\r\n");
         return 1;
     }
-
-    pages_needed = (info.size + 4095u) / 4096u;
-    buf = (uint8_t *)pmm_alloc_pages(pages_needed);
-    if (!buf) {
+    if (rc == RUNTIME_BLOB_FILE_NOMEM) {
         shell_puts("sched model load: out of memory for read buffer\r\n");
         return 1;
     }
-
-    bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
-    if (bytes_read <= 0) {
-        shell_printf("sched model load: failed to read %s\r\n", resolved);
-        pmm_free_pages(buf, pages_needed);
+    if (rc == RUNTIME_BLOB_FILE_READ_FAILED) {
+        shell_printf("sched model load: failed to read %s\r\n", path);
         return 1;
     }
-
-    if (sched_model_stage_blob(kind_id, buf, (size_t)bytes_read) != 0) {
-        shell_printf("sched model load: failed to stage %s\r\n", resolved);
-        pmm_free_pages(buf, pages_needed);
+    if (rc != RUNTIME_BLOB_FILE_OK) {
+        shell_printf("sched model load: failed to stage %s\r\n", path);
         return 1;
     }
-
-    pmm_free_pages(buf, pages_needed);
     shell_printf("Staged %s scheduler runtime blob from %s\r\n",
                  sched_model_kind_name(kind_id), resolved);
     return 0;
+}
+
+static int sched_model_autoload_set_file(const char *kind, const char *path)
+{
+    char resolved[VFS_MAX_PATH];
+    int rc = blob_autoload_set("sched", kind, path);
+
+    if (rc == RUNTIME_BLOB_FILE_PATH_TOO_LONG) {
+        shell_puts("sched model autoload: path too long\r\n");
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_NOT_FOUND) {
+        shell_printf("sched model autoload: %s: file not found\r\n", path);
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_NOT_A_FILE) {
+        shell_printf("sched model autoload: %s: not a file\r\n", path);
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_EMPTY) {
+        shell_puts("sched model autoload: file is empty\r\n");
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_NOMEM) {
+        shell_puts("sched model autoload: out of memory for read buffer\r\n");
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_READ_FAILED) {
+        shell_printf("sched model autoload: failed to read %s\r\n", path);
+        return 1;
+    }
+    if (rc != 0 || blob_autoload_get("sched", kind, resolved, sizeof(resolved)) != 0) {
+        shell_printf("sched model autoload: invalid blob for %s\r\n", kind);
+        return 1;
+    }
+
+    shell_printf("Set scheduler autoload %s -> %s\r\n", kind, resolved);
+    return 0;
+}
+
+static int sched_model_autoload_cmd(int argc, char *argv[])
+{
+    static const uint16_t kinds[] = {
+        SCHED_MODEL_KIND_MLP, SCHED_MODEL_KIND_PPO, SCHED_MODEL_KIND_CONFIG
+    };
+    char path[VFS_MAX_PATH];
+
+    if (argc < 4 || strcmp(argv[3], "status") == 0) {
+        shell_puts("Scheduler blob autoload:\r\n");
+        for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+            const char *kind = sched_model_kind_name(kinds[i]);
+            if (blob_autoload_get("sched", kind, path, sizeof(path)) == 0) {
+                shell_printf("  %s -> %s\r\n", kind, path);
+            } else {
+                shell_printf("  %s -> (none)\r\n", kind);
+            }
+        }
+        if (argc < 4) {
+            shell_puts("\r\nUsage:\r\n");
+            shell_puts("  sched model autoload status\r\n");
+            shell_puts("  sched model autoload set <kind> <path>\r\n");
+            shell_puts("  sched model autoload clear <kind>\r\n");
+        }
+        return 0;
+    }
+
+    if (strcmp(argv[3], "set") == 0) {
+        if (argc < 6) {
+            shell_puts("Usage: sched model autoload set <kind> <path>\r\n");
+            return 1;
+        }
+        if (sched_model_kind_id(argv[4]) == 0) {
+            shell_printf("Unknown scheduler model kind: '%s'\r\n", argv[4]);
+            return 1;
+        }
+        return sched_model_autoload_set_file(argv[4], argv[5]);
+    }
+
+    if (strcmp(argv[3], "clear") == 0) {
+        if (argc < 5) {
+            shell_puts("Usage: sched model autoload clear <kind>\r\n");
+            return 1;
+        }
+        if (sched_model_kind_id(argv[4]) == 0) {
+            shell_printf("Unknown scheduler model kind: '%s'\r\n", argv[4]);
+            return 1;
+        }
+        if (blob_autoload_clear("sched", argv[4]) != 0) {
+            shell_printf("sched model autoload: failed to clear %s\r\n", argv[4]);
+            return 1;
+        }
+        shell_printf("Cleared scheduler autoload for %s\r\n", argv[4]);
+        return 0;
+    }
+
+    shell_puts("Usage: sched model autoload <status|set|clear> ...\r\n");
+    return 1;
 }
 #endif
 
@@ -3074,8 +3159,12 @@ int cmd_sched(int argc, char *argv[])
             return 0;
         }
 
+        if (strcmp(argv[2], "autoload") == 0) {
+            return sched_model_autoload_cmd(argc, argv);
+        }
+
         if (argc < 4) {
-            shell_puts("Usage: sched model <load|activate|rollback|clear> <kind> [path]\r\n");
+            shell_puts("Usage: sched model <load|activate|rollback|clear|autoload> <kind> [path]\r\n");
             return 1;
         }
 
@@ -3579,59 +3668,143 @@ static int eviction_model_status_one(uint16_t kind_id)
 static int eviction_model_load_file(uint16_t kind_id, const char *path)
 {
     char resolved[VFS_MAX_PATH];
-    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+    int rc = eviction_blob_stage_file(kind_id, path, resolved, sizeof(resolved));
+
+    if (rc == RUNTIME_BLOB_FILE_PATH_TOO_LONG) {
         shell_puts("eviction model load: path too long\r\n");
         return 1;
     }
-
-    struct vfs_entry_info info;
-    if (vfs_stat_path(resolved, &info) != 0) {
-        shell_printf("eviction model load: %s: file not found\r\n", resolved);
+    if (rc == RUNTIME_BLOB_FILE_NOT_FOUND) {
+        shell_printf("eviction model load: %s: file not found\r\n", path);
         return 1;
     }
-    if (info.type != 0) {
-        shell_printf("eviction model load: %s: not a file\r\n", resolved);
+    if (rc == RUNTIME_BLOB_FILE_NOT_A_FILE) {
+        shell_printf("eviction model load: %s: not a file\r\n", path);
         return 1;
     }
-    if (info.size == 0) {
+    if (rc == RUNTIME_BLOB_FILE_EMPTY) {
         shell_puts("eviction model load: file is empty\r\n");
         return 1;
     }
-
-    size_t pages_needed = (info.size + 4095) / 4096;
-    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
-    if (!buf) {
+    if (rc == RUNTIME_BLOB_FILE_NOMEM) {
         shell_puts("eviction model load: out of memory for read buffer\r\n");
         return 1;
     }
-
-    int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
-    if (bytes_read <= 0) {
-        shell_printf("eviction model load: failed to read %s\r\n", resolved);
-        pmm_free_pages(buf, pages_needed);
+    if (rc == RUNTIME_BLOB_FILE_READ_FAILED) {
+        shell_printf("eviction model load: failed to read %s\r\n", path);
         return 1;
     }
-
-    int rc = rust_eviction_blob_stage(kind_id, buf, (size_t)bytes_read);
-    pmm_free_pages(buf, pages_needed);
-
-    if (rc == -2) {
-        shell_puts("Eviction disabled — rebuild without DISABLE_EVICTION=ON\r\n");
-        return 1;
-    }
-    if (rc == -4) {
+    if (rc == RUNTIME_BLOB_FILE_KIND_MISMATCH) {
         shell_printf("eviction model load: blob kind mismatch for %s\r\n",
                     eviction_blob_kind_name(kind_id));
         return 1;
     }
-    if (rc != 0) {
-        shell_printf("eviction model load: failed to stage %s\r\n", resolved);
+    if (rc != RUNTIME_BLOB_FILE_OK) {
+        shell_printf("eviction model load: failed to stage %s\r\n", path);
         return 1;
     }
 
     shell_printf("Staged %s runtime blob from %s\r\n",
                 eviction_blob_kind_name(kind_id), resolved);
     return 0;
+}
+
+static int eviction_model_autoload_set_file(const char *kind, const char *path)
+{
+    char resolved[VFS_MAX_PATH];
+    int rc = blob_autoload_set("eviction", kind, path);
+
+    if (rc == RUNTIME_BLOB_FILE_PATH_TOO_LONG) {
+        shell_puts("eviction model autoload: path too long\r\n");
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_NOT_FOUND) {
+        shell_printf("eviction model autoload: %s: file not found\r\n", path);
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_NOT_A_FILE) {
+        shell_printf("eviction model autoload: %s: not a file\r\n", path);
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_EMPTY) {
+        shell_puts("eviction model autoload: file is empty\r\n");
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_NOMEM) {
+        shell_puts("eviction model autoload: out of memory for read buffer\r\n");
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_READ_FAILED) {
+        shell_printf("eviction model autoload: failed to read %s\r\n", path);
+        return 1;
+    }
+    if (rc == RUNTIME_BLOB_FILE_KIND_MISMATCH) {
+        shell_printf("eviction model autoload: blob kind mismatch for %s\r\n", kind);
+        return 1;
+    }
+    if (rc != 0 || blob_autoload_get("eviction", kind, resolved, sizeof(resolved)) != 0) {
+        shell_printf("eviction model autoload: invalid blob for %s\r\n", kind);
+        return 1;
+    }
+
+    shell_printf("Set eviction autoload %s -> %s\r\n", kind, resolved);
+    return 0;
+}
+
+static int eviction_model_autoload_cmd(int argc, char *argv[])
+{
+    static const char *kinds[] = {"xgboost", "mlp", "cacheus_config"};
+    char path[VFS_MAX_PATH];
+
+    if (argc < 4 || strcmp(argv[3], "status") == 0) {
+        shell_puts("Eviction blob autoload:\r\n");
+        for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+            if (blob_autoload_get("eviction", kinds[i], path, sizeof(path)) == 0) {
+                shell_printf("  %s -> %s\r\n", kinds[i], path);
+            } else {
+                shell_printf("  %s -> (none)\r\n", kinds[i]);
+            }
+        }
+        if (argc < 4) {
+            shell_puts("\r\nUsage:\r\n");
+            shell_puts("  eviction model autoload status\r\n");
+            shell_puts("  eviction model autoload set <kind> <path>\r\n");
+            shell_puts("  eviction model autoload clear <kind>\r\n");
+        }
+        return 0;
+    }
+
+    if (strcmp(argv[3], "set") == 0) {
+        if (argc < 6) {
+            shell_puts("Usage: eviction model autoload set <kind> <path>\r\n");
+            return 1;
+        }
+        if (eviction_blob_kind_id(argv[4]) == 0) {
+            shell_printf("Unknown eviction model kind: '%s'\r\n", argv[4]);
+            return 1;
+        }
+        return eviction_model_autoload_set_file(argv[4], argv[5]);
+    }
+
+    if (strcmp(argv[3], "clear") == 0) {
+        if (argc < 5) {
+            shell_puts("Usage: eviction model autoload clear <kind>\r\n");
+            return 1;
+        }
+        if (eviction_blob_kind_id(argv[4]) == 0) {
+            shell_printf("Unknown eviction model kind: '%s'\r\n", argv[4]);
+            return 1;
+        }
+        if (blob_autoload_clear("eviction", argv[4]) != 0) {
+            shell_printf("eviction model autoload: failed to clear %s\r\n", argv[4]);
+            return 1;
+        }
+        shell_printf("Cleared eviction autoload for %s\r\n", argv[4]);
+        return 0;
+    }
+
+    shell_puts("Usage: eviction model autoload <status|set|clear> ...\r\n");
+    return 1;
 }
 
 int cmd_eviction(int argc, char *argv[])
@@ -3724,8 +3897,12 @@ int cmd_eviction(int argc, char *argv[])
             return 0;
         }
 
+        if (strcmp(argv[2], "autoload") == 0) {
+            return eviction_model_autoload_cmd(argc, argv);
+        }
+
         if (argc < 4) {
-            shell_puts("Usage: eviction model <load|activate|rollback|clear> <kind> [path]\r\n");
+            shell_puts("Usage: eviction model <load|activate|rollback|clear|autoload> <kind> [path]\r\n");
             return 1;
         }
 

@@ -1,0 +1,106 @@
+#include "unity.h"
+
+#include "../include/net_http.h"
+#include "../include/shell.h"
+#include "../include/net.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+static void test_parse_http_url_basic(void)
+{
+    struct net_http_url url;
+
+    TEST_ASSERT_EQUAL_INT(0,
+        net_http_parse_url("http://example.com/models/a.bin", &url));
+    TEST_ASSERT_EQUAL_STRING("example.com", url.host);
+    TEST_ASSERT_EQUAL_UINT16(80, url.port);
+    TEST_ASSERT_EQUAL_STRING("/models/a.bin", url.uri);
+}
+
+static void test_parse_http_url_with_port_and_root_default(void)
+{
+    struct net_http_url url;
+
+    TEST_ASSERT_EQUAL_INT(0, net_http_parse_url("http://10.0.2.2:8080", &url));
+    TEST_ASSERT_EQUAL_STRING("10.0.2.2", url.host);
+    TEST_ASSERT_EQUAL_UINT16(8080, url.port);
+    TEST_ASSERT_EQUAL_STRING("/", url.uri);
+}
+
+static void test_parse_http_url_rejects_invalid_inputs(void)
+{
+    struct net_http_url url;
+
+    TEST_ASSERT_TRUE(net_http_parse_url("https://example.com/a", &url) < 0);
+    TEST_ASSERT_TRUE(net_http_parse_url("http:///a", &url) < 0);
+    TEST_ASSERT_TRUE(net_http_parse_url("http://:8080/a", &url) < 0);
+    TEST_ASSERT_TRUE(net_http_parse_url("http://example.com:0/a", &url) < 0);
+    TEST_ASSERT_TRUE(net_http_parse_url("http://example.com:abc/a", &url) < 0);
+}
+
+static void test_parse_sha256_hex_accepts_valid_and_rejects_invalid(void)
+{
+    uint8_t digest[SHA256_DIGEST_LEN];
+
+    TEST_ASSERT_EQUAL_INT(0,
+        net_http_parse_sha256_hex(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            digest));
+    TEST_ASSERT_EQUAL_HEX8(0x01, digest[0]);
+    TEST_ASSERT_EQUAL_HEX8(0xef, digest[15]);
+    TEST_ASSERT_EQUAL_HEX8(0x01, digest[16]);
+    TEST_ASSERT_EQUAL_HEX8(0xef, digest[31]);
+
+    TEST_ASSERT_TRUE(net_http_parse_sha256_hex("abc", digest) < 0);
+    TEST_ASSERT_TRUE(net_http_parse_sha256_hex(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg",
+        digest) < 0);
+}
+
+static void ensure_net_shell_commands_registered(void)
+{
+    static bool registered = false;
+
+    if (!registered) {
+        net_shell_init();
+        registered = true;
+    }
+}
+
+static void test_http_shell_usage_and_validation(void)
+{
+    ensure_net_shell_commands_registered();
+
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("http"));
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("http get"));
+    TEST_ASSERT_EQUAL_INT(-1,
+        shell_execute("http get https://example.com/a.bin /mnt/files/a.bin"));
+    TEST_ASSERT_EQUAL_INT(-1,
+        shell_execute("http get http://example.com/a.bin /mnt/files/a.bin badsha"));
+}
+
+static void test_http_shell_requires_network_for_valid_request(void)
+{
+    ensure_net_shell_commands_registered();
+
+    if (net_is_up()) {
+        TEST_IGNORE_MESSAGE("network already initialized in this test target");
+    }
+    TEST_ASSERT_EQUAL_INT(-1,
+        shell_execute("http get http://example.com/a.bin /mnt/files/a.bin"));
+}
+
+int test_suite_net_http(void)
+{
+    UNITY_BEGIN();
+
+    RUN_TEST(test_parse_http_url_basic);
+    RUN_TEST(test_parse_http_url_with_port_and_root_default);
+    RUN_TEST(test_parse_http_url_rejects_invalid_inputs);
+    RUN_TEST(test_parse_sha256_hex_accepts_valid_and_rejects_invalid);
+    RUN_TEST(test_http_shell_usage_and_validation);
+    RUN_TEST(test_http_shell_requires_network_for_valid_request);
+
+    return UNITY_END();
+}

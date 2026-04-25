@@ -604,6 +604,25 @@ static const struct help_entry help_entries[] = {
         "    TX errors:  0\n"
     ),
 
+    HELP_TEXT("http",
+        "http - Minimal HTTP client\n"
+        "\n"
+        "Usage:\n"
+        "  http get <url> <dest> [sha256]\n"
+        "\n"
+        "Downloads one file over plain HTTP into a mounted filesystem path.\n"
+        "Only http:// URLs are supported in this first cut. When a SHA-256\n"
+        "hex digest is provided, the download is rejected unless it matches.\n"
+        "\n"
+        "Examples:\n"
+        "  http get http://10.0.2.2:8080/blob.bin /mnt/files/blob.bin\n"
+        "  http get http://example.com/policies/a.blob /mnt/files/a.blob\n"
+        "  http get http://10.0.2.2:8080/blob.bin /mnt/files/blob.bin \\\n"
+        "    0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+        "\n"
+        "Note: Requires 'net init' first.\n"
+    ),
+
     HELP_TEXT("lua",
         "lua - Lua scripting environment\n"
         "\n"

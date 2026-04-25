@@ -70,6 +70,7 @@ struct sched_runtime_balance_config {
 };
 
 int sched_model_stage_blob(uint16_t kind_id, const uint8_t *data, size_t len);
+int sched_model_validate_blob(uint16_t kind_id, const uint8_t *data, size_t len);
 int sched_model_activate(uint16_t kind_id);
 int sched_model_rollback(uint16_t kind_id);
 int sched_model_clear(uint16_t kind_id);

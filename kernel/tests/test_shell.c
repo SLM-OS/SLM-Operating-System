@@ -116,6 +116,65 @@ static size_t build_shell_test_blob(uint16_t kind_id,
     return total;
 }
 
+static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
+                                         uint8_t *out,
+                                         size_t out_cap)
+{
+    enum {
+        PAYLOAD_HEADER_LEN = 8,
+        L1_IN = 27,
+        L1_OUT = 64,
+        L2_OUT = 32,
+        L3_OUT = 16,
+        OUT_DIM = 1,
+        W_L1_LEN = L1_OUT * L1_IN,
+        B_L1_LEN = L1_OUT,
+        W_L2_LEN = L2_OUT * L1_OUT,
+        B_L2_LEN = L2_OUT,
+        W_L3_LEN = L3_OUT * L2_OUT,
+        B_L3_LEN = L3_OUT,
+        W_OUT_LEN = OUT_DIM * L3_OUT,
+        B_OUT_LEN = OUT_DIM,
+        FLOAT_COUNT = W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
+                    + W_L3_LEN + B_L3_LEN + W_OUT_LEN + B_OUT_LEN,
+        TOTAL = PAYLOAD_HEADER_LEN + FLOAT_COUNT * 4
+    };
+    size_t cursor = 0;
+    size_t idx = 0;
+
+    if (out_cap < TOTAL) return 0;
+    memset(out, 0, TOTAL);
+    out[0] = 'M'; out[1] = 'L'; out[2] = 'P'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 0; out[7] = 0;
+    cursor = PAYLOAD_HEADER_LEN;
+
+#define WRITE_U32_LE(bits)                                                   \
+    do {                                                                     \
+        uint32_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        cursor += 4;                                                         \
+    } while (0)
+
+    for (idx = 0; idx < FLOAT_COUNT; idx++) {
+        uint32_t bits = 0u;
+        if (idx == 0) bits = 0x3F800000u;
+        if (idx == W_L1_LEN + B_L1_LEN) bits = 0x3F800000u;
+        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN) bits = 0x3F800000u;
+        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
+                + W_L3_LEN + B_L3_LEN) {
+            bits = out_weight_bits;
+        }
+        WRITE_U32_LE(bits);
+    }
+#undef WRITE_U32_LE
+
+    return cursor;
+}
+
 #ifdef CONFIG_AI_SCHEDULER
 static size_t build_sched_mlp_payload(uint32_t out_weight_bits,
                                       uint8_t *out,
@@ -453,10 +512,12 @@ static void test_shell_cmd_eviction_model_status(void)
 static void test_shell_cmd_eviction_model_lifecycle(void)
 {
     static const char *path = "/mnt/files/test-eviction-mlp.blob";
-    static uint8_t blob[64];
-    const uint8_t payload[] = {0x10, 0x20, 'm', 'l', 'p'};
-    size_t blob_len = build_shell_test_blob(2, payload, sizeof(payload), blob, sizeof(blob));
+    static uint8_t payload[18000];
+    static uint8_t blob[18064];
+    size_t payload_len = build_eviction_mlp_payload(0x3F800000u, payload, sizeof(payload));
+    size_t blob_len = build_shell_test_blob(2, payload, payload_len, blob, sizeof(blob));
 
+    TEST_ASSERT_TRUE(payload_len > 0);
     TEST_ASSERT_TRUE(blob_len > 0);
     TEST_ASSERT_EQUAL_INT(0, write_binary_file(path, blob, blob_len));
     TEST_ASSERT_EQUAL_INT(0, shell_execute("eviction model clear mlp"));

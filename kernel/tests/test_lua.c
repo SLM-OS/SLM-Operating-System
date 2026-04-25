@@ -235,6 +235,7 @@ static void test_slm_module_exists(void)
         "assert(type(slm.telnetd_status)   == 'function', 'slm.telnetd_status should be function')\n"
         "assert(type(slm.telnetd_sessions) == 'function', 'slm.telnetd_sessions should be function')\n"
         "assert(type(slm.telnetd_kick)     == 'function', 'slm.telnetd_kick should be function')\n"
+        "assert(type(slm.http_get)         == 'function', 'slm.http_get should be function')\n"
 #endif
         "";
 
@@ -275,6 +276,7 @@ static void test_slm_safe_state_lacks_admin_bindings(void)
         "assert(slm.shell_exec == nil, 'admin: slm.shell_exec leaked')\n"
 #if defined(ENABLE_NETWORKING)
         "assert(slm.telnetd_kick == nil, 'admin: slm.telnetd_kick leaked')\n"
+        "assert(slm.http_get == nil, 'admin: slm.http_get leaked')\n"
 #endif
         /* Hailo namespace is admin-only on platforms that have it; on
          * x86 the namespace is gone entirely. Either way it must not
@@ -331,6 +333,27 @@ static void test_slm_telnetd_sessions_empty_and_kick_nomatch(void)
         "assert(#arr == 0, 'no sessions expected')\n"
         "ok = slm.telnetd_kick(999)\n"
         "assert(ok == false, 'kick on missing session should return false')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.http_get is admin-only and returns nil on invalid /
+ * unsupported input rather than raising or returning garbage.
+ */
+static void test_slm_http_get_invalid_returns_nil(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local r = slm.http_get('https://example.com/blob.bin', '/mnt/files/http-test.blob')\n"
+        "assert(r == nil, 'http_get should return nil for unsupported https URL')\n"
+        "local bad = slm.http_get('http://example.com/blob.bin', '/mnt/files/http-test.blob', 'badsha')\n"
+        "assert(bad == nil, 'http_get should return nil for invalid sha256 input')\n";
 
     int result = lua_slm_dostring(L, code);
     TEST_ASSERT_EQUAL_INT(0, result);
@@ -3397,6 +3420,7 @@ int test_suite_lua(void)
 #if defined(ENABLE_NETWORKING)
     RUN_TEST(test_slm_telnetd_status_shape);
     RUN_TEST(test_slm_telnetd_sessions_empty_and_kick_nomatch);
+    RUN_TEST(test_slm_http_get_invalid_returns_nil);
 #endif
     RUN_TEST(test_slm_uptime);
     RUN_TEST(test_slm_uptime_us);
