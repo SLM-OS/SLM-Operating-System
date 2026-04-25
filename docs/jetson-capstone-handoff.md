@@ -204,6 +204,48 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   compiled and channel/QMD setup is still done by the Linux
   helper; fully SLM-OS-native compile + channel creation remains
   future work.
+- **Phase 8+ compute scale-up (April 24, branch
+  `jetson-gpu-dot-product`):** four follow-on kernels beyond
+  write_cafe, all dispatched SLM-OS-side post-kexec. Each uses
+  the same 13-dword pushbuffer and the same channel handoff
+  path; per-kernel differences are confined to the Linux helper
+  (shader, cbuf pointer layout, QMD CTA dims).
+    - **dot4** — 4-element integer dot product, 1 thread × 1 CTA.
+      First "real arithmetic" kernel: 4 multiplies + 3 adds + 8
+      global loads. Inputs `a={1,2,3,4}`, `b={10,20,30,40}`;
+      expected output 300.
+    - **matmul4x4** — 4×4 integer matmul, unrolled triple loop,
+      1 thread × 1 CTA. 64 multiplies + 48 adds + 32 global
+      loads + 16 global stores. Inputs `A = [1..16]` row-major,
+      `B = Aᵀ`; full Gram matrix validated Linux-side, C[0][0]=30
+      used as the SLM-OS-side sentinel.
+    - **matmul4x4_mt** — same math, 16 threads × 1 CTA (4×4
+      thread block). First launcher to override the default
+      1×1×1 CTA thread dims: sets `CTA_THREAD_DIMENSION0/1 = 4`
+      on the QMD after `gpu_launch_populate_qmd()`. Kernel
+      reads `SR_TID.X/Y` so each thread computes one `C[i][j]`
+      independently. First truly parallel dispatch in the tree.
+    - **Handoff v4** — adds `expected_payload` (+ 4 B pad)
+      after the v3 fields. SLM-OS's `nvgpu launch-kernel` polls
+      `output_phys` for whatever value the helper wrote; v2/v3
+      handoffs (or v4 with the field zeroed) fall back to
+      `GA10B_SMOKETEST_SEM_PAYLOAD` so existing write_cafe
+      flows keep working. Selection lives in
+      `ga10b_pick_launch_payload()` (shared header, pure-logic,
+      host-testable — 4 tests cover v3, v4-zero, v4-nonzero,
+      forward-compat).
+    - **Shared launcher scaffolding** — `scripts/gpu-launch-common.{h,c}`
+      holds channel setup, QMD population, dispatch pushbuffer
+      builder, submit+poll, and v4 handoff writer. Per-kernel
+      launchers (`gpu-kernel-launch.c`, `gpu-kernel-dot4.c`,
+      `gpu-kernel-matmul4x4.c`, `gpu-kernel-matmul4x4-mt.c`) are
+      thin orchestrators (~170–210 lines each) that only carry
+      kernel-specific concerns: shader path, cbuf pointer
+      layout, input/output buffers, expected output value. One
+      submit-path bug fixed here (nvmap-dmabuf pages don't
+      populate pagemap entries until first CPU access —
+      `gpu_alloc_buffer` now forces the fault-in before calling
+      `virt_to_phys`, otherwise `output_phys=0` in the handoff).
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)

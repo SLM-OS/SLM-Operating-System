@@ -44,6 +44,7 @@
 #include "../../kernel/gpu/nvidia/ga10b_bringup.h"
 #include "../../kernel/gpu/nvidia/ga10b_channel_handoff.h"
 #include "../../kernel/gpu/nvidia/gsp.h"
+#include "../../scripts/gpu-qmd-bits.h"
 
 /* nvidia_vbios_platform_load is referenced by the shared gsp bringup
  * link set, but not by ga10b_bringup.c. Provide a stub so the test
@@ -1030,14 +1031,17 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 1;                  /* v1 lacked work_submit_token */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
-    /* v2 (channel-only) and v3 (channel + kernel-launch state) both
-     * accept — Phase 6/7 reads only v2 fields, Phase 8 checks the
-     * version at dispatch time before reading v3 fields. */
+    /* v2 (channel-only), v3 (+ kernel-launch state), and v4 (+
+     * expected_payload) all pass — Phase 6/7 reads only v2 fields,
+     * Phase 8 checks the version at dispatch time before reading
+     * v3/v4 fields. */
     h.version = 2;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 3;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
-    h.version = 4;                  /* future, not yet defined */
+    h.version = 4;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 5;                  /* future, not yet defined */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
@@ -1525,14 +1529,88 @@ static void test_launch_kernel_pb_uses_ampere_pcas2_b(void)
  * Handoff v3 — channel + kernel-launch state
  * ====================================================================== */
 
-static void test_handoff_v3_layout_size(void)
+static void test_handoff_v4_layout_size(void)
 {
-    printf("== test_handoff_v3_layout_size ==\n");
-    /* Belt-and-suspenders runtime check. The header pins the size with
-     * a _Static_assert but a fresh-eyes reader shouldn't have to dig
-     * into compile-time errors to discover that v2 was 120 and v3 is
-     * 192. */
-    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 192u);
+    printf("== test_handoff_v4_layout_size ==\n");
+    /* Belt-and-suspenders runtime check. The header pins the size
+     * with a _Static_assert but a fresh-eyes reader shouldn't have
+     * to dig into compile-time errors to discover that v2 was 120,
+     * v3 was 192, and v4 is 200. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 200u);
+}
+
+static void test_handoff_v4_expected_payload_offset(void)
+{
+    printf("== test_handoff_v4_expected_payload_offset ==\n");
+    /* Pinned by _Static_assert at compile time but worth surfacing
+     * at runtime: the Linux helper and SLM-OS both byte-index into
+     * the struct; a silent reorder that preserved sizeof would
+     * cause SLM-OS to poll for the wrong value. */
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff,
+                        expected_payload), 192u);
+}
+
+/* --- Payload-selection fallback (v3 → 0xCAFE, v4 → per-kernel) --- */
+
+static void test_pick_launch_payload_v3_uses_fallback(void)
+{
+    printf("== test_pick_launch_payload_v3_uses_fallback ==\n");
+    /* v3 handoffs (pre-matmul era) don't carry expected_payload.
+     * The field is unused memory on the wire, so its value must
+     * not leak into the poll target — the caller-supplied fallback
+     * is the only correct answer. */
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version          = 3;
+    h.expected_payload = 0x12345678u;  /* garbage — must be ignored */
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 0xCAFEu);
+}
+
+static void test_pick_launch_payload_v4_zero_uses_fallback(void)
+{
+    printf("== test_pick_launch_payload_v4_zero_uses_fallback ==\n");
+    /* v4 handoffs where the helper didn't populate expected_payload
+     * (e.g. write_cafe routed through the new code path) must still
+     * poll for the legacy 0xCAFE constant — otherwise the SLM-OS
+     * nvgpu launch-kernel would time out waiting for zero. */
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version          = 4;
+    h.expected_payload = 0u;
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 0xCAFEu);
+}
+
+static void test_pick_launch_payload_v4_uses_field(void)
+{
+    printf("== test_pick_launch_payload_v4_uses_field ==\n");
+    /* The main v4 use case: dot4 sets 300, matmul4x4 sets 30, etc.
+     * Any non-zero value the helper wrote must flow through. */
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version          = 4;
+
+    h.expected_payload = 300u;  /* dot4 */
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 300u);
+
+    h.expected_payload = 30u;   /* matmul4x4 Gram diagonal C[0][0] */
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 30u);
+
+    h.expected_payload = 0xDEADBEEFu;  /* arbitrary non-zero */
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 0xDEADBEEFu);
+}
+
+static void test_pick_launch_payload_future_version_uses_field(void)
+{
+    printf("== test_pick_launch_payload_future_version_uses_field ==\n");
+    /* A v5 handoff that preserves the v4 expected_payload field
+     * (the normal forward-compatible extension pattern) should be
+     * treated like v4: non-zero field takes precedence over the
+     * fallback. The `version >= 4` predicate guarantees this. */
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version          = 5;
+    h.expected_payload = 42u;
+    REQUIRE_EQ(ga10b_pick_launch_payload(&h, 0xCAFEu), 42u);
 }
 
 static void test_handoff_validate_v3_accepted(void)
@@ -1705,6 +1783,124 @@ static void test_scanner_empty_range(void)
 }
 
 /* ======================================================================
+ * gpu_qmd_set_bits — pure-logic bit-range setter for QMDV03_00
+ * (scripts/gpu-qmd-bits.h). Exercised here because the production
+ * call-site (scripts/gpu-launch-common.c) only runs on Jetson and
+ * has no host-side smoke coverage; bit-twiddling regressions would
+ * otherwise only surface on hardware.
+ * ====================================================================== */
+
+static void test_qmd_set_bits_single_bit(void)
+{
+    printf("== test_qmd_set_bits_single_bit ==\n");
+    uint32_t qmd[64] = {0};
+    /* hi == lo: the simplest case, single-bit field. */
+    gpu_qmd_set_bits(qmd, 5, 5, 1);
+    REQUIRE_EQ(qmd[0], 1u << 5);
+
+    /* Setting the same bit to 0 clears it without disturbing
+     * neighbors. */
+    qmd[0] = 0xFFFFFFFFu;
+    gpu_qmd_set_bits(qmd, 5, 5, 0);
+    REQUIRE_EQ(qmd[0], 0xFFFFFFFFu & ~(1u << 5));
+}
+
+static void test_qmd_set_bits_within_one_word(void)
+{
+    printf("== test_qmd_set_bits_within_one_word ==\n");
+    uint32_t qmd[64] = {0};
+    /* 8-bit field at bits [15:8], value 0xAB. */
+    gpu_qmd_set_bits(qmd, 15, 8, 0xAB);
+    REQUIRE_EQ(qmd[0], 0xABu << 8);
+
+    /* Writing into a non-zero word: must mask out only the field's
+     * bits and OR in the new value. */
+    qmd[0] = 0x12345678u;
+    gpu_qmd_set_bits(qmd, 15, 8, 0xAB);
+    REQUIRE_EQ(qmd[0], (0x12345678u & ~(0xFFu << 8)) | (0xABu << 8));
+}
+
+static void test_qmd_set_bits_full_32_bit_word(void)
+{
+    printf("== test_qmd_set_bits_full_32_bit_word ==\n");
+    uint32_t qmd[64] = {0};
+    /* 32-bit field aligned to a word boundary. lo % 32 == 0,
+     * mask = 0xFFFFFFFF, no bit-shift quirks. */
+    gpu_qmd_set_bits(qmd, 31, 0, 0xDEADBEEFu);
+    REQUIRE_EQ(qmd[0], 0xDEADBEEFu);
+
+    /* Same field on a non-zero word should fully overwrite — the
+     * 32-bit mask covers the whole word. */
+    qmd[1] = 0xCAFEBABEu;
+    gpu_qmd_set_bits(qmd, 63, 32, 0x11223344u);
+    REQUIRE_EQ(qmd[1], 0x11223344u);
+}
+
+static void test_qmd_set_bits_spans_two_words(void)
+{
+    printf("== test_qmd_set_bits_spans_two_words ==\n");
+    uint32_t qmd[64] = {0};
+    /* 8-bit field at bits [35:28] — straddles the word_lo/word_hi
+     * boundary at bit 32. Low 4 bits go to qmd[0][31:28]; high 4
+     * bits go to qmd[1][3:0]. Pick a value where every nibble is
+     * distinct so any bit-mismatch shows up. */
+    gpu_qmd_set_bits(qmd, 35, 28, 0xC9);  /* 0b1100_1001 */
+    REQUIRE_EQ(qmd[0], 0x9u << 28);
+    REQUIRE_EQ(qmd[1], 0xCu);
+
+    /* Same span over a non-zero qmd: must preserve bits outside
+     * [35:28] in both qmd[0] and qmd[1]. */
+    memset(qmd, 0, sizeof(qmd));
+    qmd[0] = 0x0FFFFFFFu;  /* bits [27:0] set */
+    qmd[1] = 0xFFFFFFF0u;  /* bits [31:4] set */
+    gpu_qmd_set_bits(qmd, 35, 28, 0x55);  /* 0b0101_0101 */
+    REQUIRE_EQ(qmd[0], 0x0FFFFFFFu | (0x5u << 28));
+    REQUIRE_EQ(qmd[1], 0xFFFFFFF0u | 0x5u);
+}
+
+static void test_qmd_set_bits_truncates_excess_value(void)
+{
+    printf("== test_qmd_set_bits_truncates_excess_value ==\n");
+    uint32_t qmd[64] = {0};
+    /* 4-bit field at bits [3:0]; passing 0xFFu must truncate to
+     * 0xF — high bits silently dropped. */
+    gpu_qmd_set_bits(qmd, 3, 0, 0xFFu);
+    REQUIRE_EQ(qmd[0], 0xFu);
+
+    /* 16-bit field with a 17-bit-wide value — top bit must be
+     * dropped, not bleed into adjacent bits. */
+    memset(qmd, 0, sizeof(qmd));
+    gpu_qmd_set_bits(qmd, 23, 8, 0x1FFFFu);
+    REQUIRE_EQ(qmd[0], 0xFFFFu << 8);
+}
+
+static void test_qmd_set_bits_preserves_neighbors(void)
+{
+    printf("== test_qmd_set_bits_preserves_neighbors ==\n");
+    uint32_t qmd[64];
+    memset(qmd, 0xAB, sizeof(qmd));
+    /* Pick a real Ampere field: QMD_PROGRAM_ADDRESS_LOWER spans
+     * bits [1567:1536] (32 bits, word-aligned at qmd[48]). Writing
+     * into it must touch nothing else. */
+    uint32_t neighbor_lo = qmd[47];
+    uint32_t neighbor_hi = qmd[49];
+    gpu_qmd_set_bits(qmd, 1567, 1536, 0x1ffc010000ULL & 0xFFFFFFFFu);
+    REQUIRE_EQ(qmd[47], neighbor_lo);
+    REQUIRE_EQ(qmd[49], neighbor_hi);
+    REQUIRE_EQ(qmd[48], (uint32_t)(0x1ffc010000ULL & 0xFFFFFFFFu));
+
+    /* And a real two-word-spanning field: cbuf addr-lo BASE is at
+     * bit 1024 (qmd[32]) and runs 32 bits. Word-aligned, so
+     * single-word path — but useful sanity that we hit the right
+     * word index from a high bit number. */
+    memset(qmd, 0xAB, sizeof(qmd));
+    uint32_t pre = qmd[33];
+    gpu_qmd_set_bits(qmd, 1055, 1024, 0xDEADBEEFu);
+    REQUIRE_EQ(qmd[32], 0xDEADBEEFu);
+    REQUIRE_EQ(qmd[33], pre);
+}
+
+/* ======================================================================
  * Entry
  * ====================================================================== */
 
@@ -1771,7 +1967,12 @@ int main(void)
     test_launch_kernel_pb_idempotent();
     test_launch_kernel_pb_uses_ampere_pcas2_b();
 
-    test_handoff_v3_layout_size();
+    test_handoff_v4_layout_size();
+    test_handoff_v4_expected_payload_offset();
+    test_pick_launch_payload_v3_uses_fallback();
+    test_pick_launch_payload_v4_zero_uses_fallback();
+    test_pick_launch_payload_v4_uses_field();
+    test_pick_launch_payload_future_version_uses_field();
     test_handoff_validate_v3_accepted();
 
     test_scanner_finds_magic_at_start();
@@ -1779,6 +1980,13 @@ int main(void)
     test_scanner_returns_zero_on_miss();
     test_scanner_skips_between_pages();
     test_scanner_empty_range();
+
+    test_qmd_set_bits_single_bit();
+    test_qmd_set_bits_within_one_word();
+    test_qmd_set_bits_full_32_bit_word();
+    test_qmd_set_bits_spans_two_words();
+    test_qmd_set_bits_truncates_excess_value();
+    test_qmd_set_bits_preserves_neighbors();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);
