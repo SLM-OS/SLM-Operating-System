@@ -136,6 +136,8 @@ typedef struct _httpc_state
   ip_addr_t remote_addr;
   u16_t remote_port;
   int timeout_ticks;
+  u8_t dns_pending;
+  u8_t abort_requested;
   struct pbuf *request;
   struct pbuf *rx_hdrs;
   u16_t rx_http_version;
@@ -446,6 +448,12 @@ httpc_dns_found(const char* hostname, const ip_addr_t *ipaddr, void *arg)
   httpc_result_t result;
 
   LWIP_UNUSED_ARG(hostname);
+  req->dns_pending = 0;
+
+  if (req->abort_requested) {
+    (void)httpc_free_state(req);
+    return;
+  }
 
   if (ipaddr != NULL) {
     err = httpc_get_internal_addr(req, ipaddr);
@@ -478,8 +486,10 @@ httpc_get_internal_dns(httpc_state_t* req, const char* server_name)
 
   if (err == ERR_OK) {
     /* cached or IP-string */
+    req->dns_pending = 0;
     err = httpc_get_internal_addr(req, &req->remote_addr);
   } else if (err == ERR_INPROGRESS) {
+    req->dns_pending = 1;
     return ERR_OK;
   }
   return err;
@@ -710,12 +720,34 @@ httpc_get_file_dns(const char* server_name, u16_t port, const char* uri, const h
 void
 httpc_abort_connection(httpc_state_t *connection)
 {
+  struct altcp_pcb* tpcb;
+
   if (connection == NULL) {
     return;
   }
+
+  tpcb = connection->pcb;
+  connection->pcb = NULL;
   connection->conn_settings = NULL;
   connection->callback_arg = NULL;
-  (void)httpc_free_state(connection);
+  connection->abort_requested = 1;
+
+  if (tpcb != NULL) {
+    err_t r;
+    altcp_arg(tpcb, NULL);
+    altcp_recv(tpcb, NULL);
+    altcp_err(tpcb, NULL);
+    altcp_poll(tpcb, NULL, 0);
+    altcp_sent(tpcb, NULL);
+    r = altcp_close(tpcb);
+    if (r != ERR_OK) {
+      altcp_abort(tpcb);
+    }
+  }
+
+  if (!connection->dns_pending) {
+    (void)httpc_free_state(connection);
+  }
 }
 
 #if LWIP_HTTPC_HAVE_FILE_IO
