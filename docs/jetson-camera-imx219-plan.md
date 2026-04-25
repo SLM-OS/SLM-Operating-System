@@ -2,17 +2,17 @@
 
 **Tracking:** 🎫 #396
 
-**Status:** ☐ Phase 0 hardware recon not yet run; no driver code started. Pre-hardware code-read tasks unblocked and ready. QEMU-side mock + Lua bindings + integration test landed (#396 follow-up).
+**Status:** ☐ Phase 0 hardware recon not yet run; no driver code started. Code-reads of IMX219 / NVCSI / VI complete and several plan assumptions revised below (VI is RTCPU-only on T234; NVCSI has both direct-MMIO and via-RTCPU paths; recon targets shifted accordingly). QEMU-side mock + Lua bindings + integration test landed (#396 follow-up).
 
-**Progress:** 3 / 20 tasks complete.
+**Progress:** 8 / 21 tasks complete.
 
 | Section | ✅ done | ☐ open | ☐🔗 blocked | ⏸️ deferred |
 |---------|--------|---------|-------------|-------------|
-| Pre-Hardware Tasks | 0 | 7 | 0 | 0 |
+| Pre-Hardware Tasks | 5 | 3 | 0 | 0 |
 | Phase 0 — Hardware Recon | 0 | 0 | 4 | 0 |
 | Hardware Tasks (post-Phase-0) | 0 | 0 | 6 | 0 |
 | QEMU-Side Tasks | 3 | 0 | 0 | 0 |
-| **Total** | **3** | **7** | **10** | **0** |
+| **Total** | **8** | **3** | **10** | **0** |
 
 Icon legend (per project root `CLAUDE.md`): ✅ done · ☐ pending · ☐🔗 blocked on dependency · ⏸️ deferred to a future phase. The 🎫 above tracks the whole feature; per-bullet 🎫 is omitted as the convention allows.
 
@@ -195,38 +195,70 @@ Six new subsystems on top of what already exists.
 
 - Tegra234 MIPI CSI-2 receiver. Configures lane mapping, performs
   D-PHY calibration, and routes the stream to VI.
-- **No NVIDIA programmer's manual.** The programming sequence has to
-  be reverse-engineered from the L4T sources at
-  `drivers/media/platform/tegra/csi/nvcsi.c` and the Orin TRM's
-  partial register reference.
-- Scope:
+- **No NVIDIA programmer's manual.** The programming sequence comes
+  from the L4T sources cached at `docs/reference/l4t-csi*.c` /
+  `docs/reference/l4t-nvcsi*.c`. Distilled into
+  `docs/jetson-camera-nvcsi-driver-notes.md`, including the 20-step
+  direct-MMIO bring-up sequence and the RTCPU IPC fallback path.
+- **Two viable architectures** (per the code-read):
+  - **Option A — Direct MMIO** (preferred): use the dead-but-still-
+    valid `csi4_fops.c` sequence from L4T. The hardware register
+    layout is unchanged from T194 to T234 even though L4T R35 routes
+    everything through RTCPU. No new IPC stack required. *Gated on
+    Phase 0 confirming NS EL2 can reach `0x15A00000`.*
+  - **Option B — RTCPU IVC** (fallback): two-message setup
+    (`CAPTURE_PHY_STREAM_OPEN_REQ` +
+    `CAPTURE_CSI_STREAM_SET_CONFIG_REQ`) over a new HSP-based IVC
+    channel pair. Adds a camera-rtcpu IPC layer on top of the existing
+    BPMP IVC. Shares the same transport SLM-OS would need for VI
+    (which has no Option A — see §4 below).
+- Scope (both options):
   - Single CSI port (whichever J17 / J20 connector the camera is on).
   - 2 data lanes + 1 clock lane.
   - RAW10 datatype, no embedded data, no virtual channel switching.
   - Stream-on / stream-off only; no run-time reconfig.
-- BPMP clocks needed: `TEGRA234_CLK_NVCSI`,
-  `TEGRA234_CLK_NVCSILP`, plus reset deassert.
+- BPMP clocks needed: `TEGRA234_CLK_NVCSI` only — there is no
+  separate `NVCSILP` clock on T234 despite the upstream binding
+  defining the symbol. Reset is **per-CIL** via the
+  `NVCSI_CIL_*_SW_RESET` MMIO registers themselves; the L4T DT does
+  not consume `TEGRA234_RESET_NVCSI` (the symbol exists in
+  `kernel/include/tegra234_clocks.h` but is unused today).
 
 ### 4. VI driver
 
-- The Video Input engine. Reads NVCSI frames, DMAs them into DRAM.
-- **Even less documented than NVCSI.** Practical reference:
-  L4T `drivers/media/platform/tegra/vi/vi5.c` for Orin (Tegra234 is
-  the "VI5" generation).
+- The Video Input engine. Receives NVCSI frames, DMAs them into DRAM.
+- **VI5 is RTCPU-only on T234.** The code-read of L4T `vi5_fops.c`
+  (cached at `docs/reference/l4t-vi5_fops.c`, distilled in
+  `docs/jetson-camera-vi-driver-notes.md`) confirms there is **no
+  AP-programmable register interface** for VI5: zero `request_irq`,
+  zero MMIO peeks. Every operation (`CAPTURE_CHANNEL_SETUP_REQ`,
+  `CAPTURE_REQUEST_REQ`, `CAPTURE_STATUS_IND`) is an IVC round-trip
+  to the camera RTCPU (RCE), which drives the VI Falcon microcode.
+  The AP only sees mailbox messages and the descriptor memory it
+  shares with RCE.
+- **Consequence**: the original "program VI MMIO at ~0x15c00000"
+  scope collapses into IVC + descriptor construction work — same
+  shape as the existing BPMP IVC path. Only viable architecture is
+  via the camera-rtcpu IVC channel.
 - Scope:
   - Single channel, single capture.
   - No ISP pipeline; raw Bayer straight to memory.
-  - Programmed I/O for a single full-frame DMA (no ring, no double
-    buffer) — sufficient for "snap one picture."
-  - Frame-done interrupt on the GIC, drives a wait-for-completion
-    primitive.
-- DMA target: a contiguous identity-mapped DRAM region allocated up
-  front. **Does not** require a working SMMU translation if the
-  region is configured for bypass — same trick already used for NC
-  scheduler queues (see `kernel/CLAUDE.md` §"Non-Cacheable Shared
-  Memory"). If SMMU bypass is not possible for VI, see Risk 3.
+  - Single-shot capture descriptor submitted to RCE; one
+    `CAPTURE_STATUS_IND` returned on frame-done.
+  - **Completion is an HSP shared-mailbox doorbell SPI**, not a VI
+    peripheral IRQ on the GIC. Same family of interrupt SLM-OS
+    already handles for BPMP IVC.
+- DMA target: a contiguous DRAM region. The IOVA in the capture
+  descriptor is resolved by RCE through the **camera-rtcpu's** SMMU
+  domain, not VI's own stream-id (see Risk 3 for the reframed SMMU
+  question). The non-cacheable carveout pattern in
+  `kernel/CLAUDE.md` §"Non-Cacheable Shared Memory" still applies for
+  the descriptor memory shared with RCE.
 - BPMP clocks: `TEGRA234_CLK_VI`, plus power-domain
-  `TEGRA234_POWER_DOMAIN_VIC`.
+  `TEGRA234_POWER_DOMAIN_VI` (id 28). The original draft listed
+  `TEGRA234_POWER_DOMAIN_VIC` — that's the Video Image Compositor,
+  not Video Input. Both `kernel/include/tegra234_clocks.h` and the
+  notes doc use the corrected name.
 
 ### 5. Image preprocessing → MNIST input
 
@@ -271,35 +303,44 @@ Six new subsystems on top of what already exists.
 ## Effort Estimates
 
 Engineering days, solo focused work. **Conditioned on the CBB Phase 0
-recon coming back green.** If NVCSI or VI are blocked, see "Fallback
-Paths" below.
+recon coming back green.** Revised April 2026 after the NVCSI / VI /
+IMX219 code-reads — VI shrunk significantly (no AP MMIO; collapses
+into IVC + descriptor work), camera-rtcpu IVC added as a new
+load-bearing piece, and the QEMU-side rows are now done.
 
 | Piece | Low | High | Notes |
 |-------|-----|------|-------|
-| Phase 0: CBB recon — peek NVCSI + VI + I²C MMIO from EL2 | 1d | 2d | Single shell session: `mem peek <addr>` from running kernel; no driver work. Outputs go/no-go. |
-| Tegra HSI2C driver | 4d | 6d | Polled-only, no IRQ, single bus. Linux ref. ~1k lines; SLM-OS port maybe 400. |
-| IMX219 sensor driver | 3d | 5d | Reset GPIO + chip-id verify + mode table + stream-on. The mode table is the bulk; comes from Linux. |
-| NVCSI driver | 7d | 12d | Undocumented. Code-read of L4T `nvcsi.c` (~2k lines) + cross-reference Orin TRM is the long tail. |
-| VI driver (single-shot capture) | 8d | 12d | Even less documented. SMMU bypass investigation could blow up scope; see Risk 3. |
-| Image preprocessing | 2d | 3d | Pure compute. CPU is fine. |
-| Lua bindings + component wrapper | 1d | 2d | Mirrors existing component patterns. |
-| Demo script + embedded launcher | 0.5d | 1d | One Lua file via `.incbin`. |
-| Hardware bring-up iteration buffer | 4d | 8d | "It boots clean three times in a row" iteration. |
-| QEMU-side regression tests | 2d | 3d | Mock camera path so the preprocessing + Lua bindings have CI coverage even on QEMU. |
+| Phase 0: CBB recon — peek NVCSI + camera-rtcpu HSP + I²C MMIO from EL2 | 1d | 2d | Targets revised — see §"Phase 0". Decision matrix selects NVCSI Option A vs B. |
+| Camera-rtcpu IVC layer | 4d | 8d | NEW. Surfaced by the VI code-read: VI is RTCPU-only and NVCSI Option B is also via RTCPU. Bridge the existing BPMP IVC pattern to the `tegra-camera-rtcpu` HSP channel pair + capture wire format (`CAPTURE_*_REQ` / `CAPTURE_STATUS_IND`). Shared between NVCSI Option B and VI. |
+| Tegra HSI2C driver | 4d | 6d | Polled-only, no IRQ, single bus. Linux ref `i2c-tegra.c` cached; SLM-OS port ~400 lines. |
+| IMX219 sensor driver | 2d | 4d | Down from 3-5d — the 1640×1232 mode register table is already extracted in `docs/jetson-camera-imx219-driver-notes.md`, ready to drop into a header. |
+| NVCSI Option A (direct MMIO) | 5d | 8d | The 20-step direct-MMIO sequence is in `docs/jetson-camera-nvcsi-driver-notes.md`. Down from 7-12d because the code-read is done. Conditional on Phase 0 NVCSI MMIO being reachable. |
+| NVCSI Option B (via RTCPU) — fallback | 2d | 4d | Two IVC messages on top of the camera-rtcpu IVC layer above. Used iff Option A is blocked at Phase 0. |
+| VI driver (via RTCPU) | 3d | 6d | Down from 8-12d. Capture descriptor + `CAPTURE_REQUEST_REQ` / `CAPTURE_STATUS_IND` round-trip on the camera-rtcpu IVC layer. Was over-scoped under the (wrong) assumption of AP-programmable VI MMIO. |
+| Image preprocessing | ✅ | ✅ | Landed in #396 follow-up (`kernel/src/camera.c`). |
+| Lua bindings + component wrapper | ✅ | ✅ | Landed in #396 follow-up (`slm.camera.*` in `kernel/src/lua_slm.c`). |
+| Demo script + embedded launcher | 0.5d | 1d | One Lua file via `.incbin`. The QEMU e2e test (`test_slm_camera_e2e_mnist_mock`) plays the same role for CI; this row is for the user-facing demo wrapper. |
+| Hardware bring-up iteration buffer | 4d | 8d | "It boots clean three times in a row" iteration on the lab Jetson. |
+| QEMU-side regression tests | ✅ | ✅ | Landed in #396 follow-up. |
 
 **Totals**
 
-- **Realistic happy path: 32–54 d (~7–11 weeks elapsed).** Most of
-  the variance is in NVCSI + VI bring-up time, which is the
-  reverse-engineering-heavy portion.
-- **If Phase 0 reveals NVCSI or VI is CBB-blocked:** see fallbacks.
-  The full bare-metal driver path collapses to "not viable from
-  NS EL2 without bootloader BCT changes."
+- **Realistic happy path (NVCSI Option A): 23.5–43 d (~5-9 weeks
+  elapsed).** Down from 32-54d, mostly because VI shrunk by 5-6d and
+  the QEMU-side rows are already done.
+- **NVCSI Option B (CBB blocks NVCSI MMIO but not the camera-rtcpu
+  HSP region): 20.5–39 d.** Slightly faster than Option A because the
+  IVC two-message setup is smaller than the 20-step direct-MMIO
+  sequence — though the savings are eaten by the iteration cost of
+  debugging IVC over a fresh transport.
+- **If Phase 0 reveals the camera-rtcpu HSP region is CBB-blocked:**
+  see fallbacks. Both NVCSI Option B and VI become unreachable, and
+  the bare-metal-capture path collapses entirely.
 
-For a capstone project that's already in late stages, **this is a
-multi-month commitment** — comparable in scope to the GA10B GPU
-compute bring-up (#356) or the dynamic-kernel-replace plan
-(#369-family).
+For a capstone project that's already in late stages, **this is
+still a multi-week commitment** but no longer multi-month — the
+research pass cut about 9-11 days off the high estimate by digesting
+NVCSI / VI / IMX219 in advance and revealing VI's actual scope.
 
 ---
 
@@ -352,29 +393,43 @@ SLM-OS would also have to drive?
 
 **Hardware required:** no; code-read can answer it.
 
-### Risk 3 — SMMU translations for VI DMA
+### Risk 3 — SMMU translations for camera-rtcpu DMA
 
-**Question:** can VI's DMA writes target a DRAM buffer with no SMMU
-translation in place, or does the SMMU forcibly drop transactions
-from the VI stream-id?
+**Reframed by the VI code-read (April 2026).** The original Risk 3
+asked about VI's own SMMU stream-id. Because VI5 is RTCPU-only on
+T234 (see §"VI driver"), the relevant stream-id is the **camera
+RTCPU's**, not VI's. RCE resolves capture-buffer IOVAs through its
+own SMMU domain via `dma_buf_attach(buf, rtcpu_dev)` and then issues
+the bus-master transaction; VI hardware DMAs through a stream-id that
+aliases the same translation table.
+
+**Question:** can the camera-rtcpu's SMMU stream resolve IOVAs for a
+SLM-OS-supplied buffer post-kexec — either via inherited translation
+or stream-bypass?
 
 - `arm-smmu` is the same block that has caused #266 (USB networking)
   trouble. The SMMU on Orin is configured by Linux at boot; SLM-OS
   inherits whatever streams Linux had translated, and Linux's kexec
   path can drop translations.
-- For VI specifically, two scenarios:
-  - **Stream-bypass mode**: SMMU passes VI transactions
-    untranslated. If Linux sets this up for the VI stream-id (as it
-    does for some accelerators), SLM-OS gets DMA "for free" into any
-    physical address.
-  - **Translated**: SMMU has a translation for VI; if Linux didn't
-    leave a usable translation in place, VI writes drop and the
-    capture silently produces zeros.
+- Two scenarios for the camera-rtcpu stream:
+  - **Stream-bypass mode**: SMMU passes RCE transactions
+    untranslated. SLM-OS gets DMA "for free" into any physical
+    address. There is a fallback path in L4T's `capture-common.c:611`
+    that uses `sg_phys` when `sg_dma_address == 0`, which proves
+    stream-bypass is a real configuration RCE accepts.
+  - **Translated**: SMMU has a translation for RCE; if Linux didn't
+    leave a usable translation in place at kexec, the IOVAs SLM-OS
+    submits in the capture descriptor will fault.
+- Failure mode: SMMU drops writes (zeroed buffer) **and** raises a
+  context-bank fault SPI to the AP. So the failure is observable —
+  not silent corruption.
 - Mitigation:
-  - Code-read Linux DT to determine VI's `iommus =` property and
-    SMMU stream-id.
+  - The L4T DT `iommus =` property for `tegra-camera-rtcpu` pins the
+    stream-id; needs a runtime probe of the SMMU stream table at
+    `0x12000000` to confirm what's configured post-kexec (the L4T BSP
+    DT lives in a separate tarball not in the OE4T mirror).
   - Probe at runtime: capture into a known buffer, check whether the
-    pattern landed.
+    pattern landed; watch for the SMMU fault SPI in parallel.
   - If translated and broken: scope an SMMU programming layer,
     similar to what #266 chose to mothball. Significant.
 
@@ -422,43 +477,89 @@ when no userspace is using them?
 
 Items that can land before Phase 0 hardware probing.
 
-- ☐ Add Tegra234 clock-id and reset-id constants to a new
-  `kernel/include/tegra234_clocks.h`, sourced from Linux's
-  `dt-bindings/clock/tegra234-clock.h`. At minimum: I2C controllers,
-  NVCSI, NVCSILP, VI, VI memory clock, plus matching reset IDs.
-- ☐ Code-read NVCSI driver: pin which registers must be programmed,
-  in what order, and whether RTCPU IVC is required for single-shot
-  capture.
-- ☐ Code-read VI driver: same, plus identify SMMU stream-id and DMA
-  setup expectations.
-- ☐ Code-read IMX219 driver: extract the mode register table for
-  2-lane RAW10 1640×1232 mode into a header.
+- ✅ Tegra234 clock and reset IDs ported from Linux's
+  `dt-bindings/clock/tegra234-clock.h` to
+  `kernel/include/tegra234_clocks.h` (camera-relevant subset only:
+  every I²C controller, NVCSI / NVCSILP, VI / VI2, plus VI and ISPA
+  power-domain IDs). Three gotchas captured in the header comments:
+  I2C5 has no `MRQ_RESET` pair (BPMP-internal CAM_I2C); NVCSILP
+  shares the NVCSI reset; no `VI_M` clock exists upstream
+  (`VI_CONST` is the closest match).
+- ✅ Code-read NVCSI driver — see
+  `docs/jetson-camera-nvcsi-driver-notes.md`. Headline: L4T R35
+  routes 100% through Camera RTCPU IVC, but the dead `csi4_fops.c`
+  direct-MMIO sequence is still valid since the register layout is
+  unchanged T194→T234. Two viable architectures (Option A direct
+  MMIO, Option B via RTCPU); choice gated on Phase 0.
+- ✅ Code-read VI driver — see
+  `docs/jetson-camera-vi-driver-notes.md`. Headline: VI5 has **no**
+  AP-programmable register interface on T234; everything is RTCPU
+  IVC. Reframed Risk 3 (SMMU question is about camera-rtcpu's
+  stream-id, not VI's). Reframed Phase 0 recon targets.
+- ✅ Code-read IMX219 driver — see
+  `docs/jetson-camera-imx219-driver-notes.md`. Mode tables are
+  computed on the fly in Linux, not static; the notes doc translates
+  the 1640×1232 RAW10 binned-mode sequence into a copy-pastable C
+  array. Flags two non-obvious quirks: 12 mandatory "undocumented
+  registers" at 0x4540-0x479b, and a probe-time MODE_SELECT toggle
+  the D-PHY needs before it'll enter LP-11.
 - ☐ Identify the camera I²C bus, reset/PWDN GPIO assignments, and
   XCLK source from
   `arch/arm64/boot/dts/nvidia/tegra234-p3768-0000+p3767-0005.dts`
   (and any IMX219 DT overlay that ships with L4T).
 - ☐ Confirm with the lab whether an IMX219-160 module is on hand and
   on which connector it lives (J17 / J20).
-- ☐ Cache reference sources under `docs/reference/`:
-  Linux `imx219.c`, `i2c-tegra.c`, `nvcsi.c`, `vi5.c` for offline
-  read.
+- ☐ Code-read camera-rtcpu IVC bring-up. Surfaced by the VI code-read:
+  with VI mandatory-RTCPU and NVCSI's Option B also via RTCPU, the
+  bridge from the existing BPMP IVC pattern to a working
+  `tegra-camera-rtcpu` IVC channel pair (HSP-backed, two channels
+  per direction) is now load-bearing. References to cache:
+  `drivers/platform/tegra/rtcpu/` from the same OE4T mirror used by
+  the NVCSI/VI agents.
+- ✅ Cache reference sources under `docs/reference/`:
+  Linux `imx219.c`, `i2c-tegra.c`, the L4T `csi*.c` / `nvcsi*.c` /
+  `vi5*.c` files, and the camera-rtcpu IVC headers
+  (`camrtc-capture*.h`). 24 files cached during the four-agent code-
+  read pass.
 
 ## Phase 0 — Hardware Recon (CBB Probe)
 
 Before writing any driver code, the single most informative experiment
 is a one-shot MMIO peek. Run on `jetson-nano-2` (or `nano-1`) via the
-existing `mem peek <addr>` shell command:
+existing `mem peek <addr>` shell command. **Recon targets revised
+April 2026 after the NVCSI/VI code-reads** — VI MMIO is no longer a
+useful peek (VI5 is RTCPU-only on T234, the AP never touches the VI
+window) and the camera-rtcpu HSP region is the new gating reachability
+question. A CBB-blocked access will RAS-fault and power off the CPU,
+so each peek is one shot — no register scans.
 
 - ☐🔗 `mem peek 0x15a00000` (NVCSI base — first 32-bit word).
   Expected on EL2 access if reachable: a Tegra HW revision register
-  or `0x0`. A CBB-blocked access will RAS-fault and power off the
-  CPU.
-- ☐🔗 `mem peek 0x15c00000` (VI base).
+  or `0x0`. **Gates the NVCSI Option A (direct MMIO) path.** If
+  blocked, NVCSI must go via RTCPU (Option B), same as VI.
+- ☐🔗 `mem peek 0x03c00000` (camera-rtcpu HSP region — exact offset
+  TBD from L4T DT). **Gates both NVCSI Option B and VI** since both
+  paths send IVC over the camera-rtcpu HSP doorbell. If this is
+  blocked, neither RTCPU-mediated path works from NS EL2 and the
+  bare-metal capture stack collapses to "not viable" (see Fallback
+  Paths). The existing BPMP IVC at HSP region 0x03d00000 already
+  works at NS EL2, so reachability is plausible — but per-peripheral
+  CBB rules mean the camera-rtcpu HSP could still be different.
 - ☐🔗 `mem peek 0x031c0000` (HSI2C-3 — example camera bus; address
-  TBD from DT).
-- ☐🔗 If any of the above blocks: stop and switch to the fallback
-  evaluation phase. If all three return data: proceed with the
-  driver stack.
+  TBD from DT once the I²C bus identification task lands). Gates
+  the IMX219 sensor control path regardless of which capture
+  architecture wins.
+- ☐🔗 Decision matrix:
+  - All three readable: proceed with NVCSI Option A + VI via RTCPU
+    + IMX219. Smallest scope.
+  - NVCSI blocked, HSP + I²C readable: NVCSI Option B (camera-rtcpu
+    IVC) + VI via RTCPU + IMX219. Larger scope (a full camera-rtcpu
+    IVC layer in SLM-OS).
+  - HSP blocked: stop and switch to a Fallback Path. Either NVCSI
+    Option A alone is meaningless without VI to ingest the stream,
+    or the whole bare-metal-capture path is off the table.
+  - I²C blocked: cannot configure the sensor; same fallback
+    decision as the HSP-blocked branch.
 
 ## Hardware Tasks (post-Phase-0)
 
