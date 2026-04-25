@@ -23,14 +23,15 @@
 #include <stdint.h>
 #include <string.h>
 
-#define NET_HTTP_TMP_SUFFIX ".part"
+#define NET_HTTP_TMP_SUBPATH "/.http_get.part"
+#define NET_HTTP_BAK_SUBPATH "/.http_get.bak"
 #define NET_HTTP_OVERALL_TIMEOUT_MS 40000U
 #define NET_HTTP_CONTENT_LEN_UNKNOWN 0xFFFFFFFFU
 
 struct net_http_download {
     struct lfs_mount *mnt;
     int fd;
-    char temp_subpath[VFS_MAX_PATH];
+    char temp_subpath[sizeof(NET_HTTP_TMP_SUBPATH)];
     char final_subpath[VFS_MAX_PATH];
     bool done;
     bool success;
@@ -172,23 +173,6 @@ int net_http_parse_sha256_hex(const char *hex,
     return NET_OK;
 }
 
-static int build_temp_path(const char *dest_path, char *temp_path, size_t temp_path_size)
-{
-    size_t dest_len;
-    size_t suffix_len = sizeof(NET_HTTP_TMP_SUFFIX) - 1U;
-
-    if (!dest_path || !temp_path || temp_path_size == 0U) {
-        return NET_E_INVAL;
-    }
-    dest_len = strlen(dest_path);
-    if ((dest_len + suffix_len + 1U) > temp_path_size) {
-        return NET_E_INVAL;
-    }
-    memcpy(temp_path, dest_path, dest_len);
-    memcpy(temp_path + dest_len, NET_HTTP_TMP_SUFFIX, suffix_len + 1U);
-    return NET_OK;
-}
-
 static void http_result_cb(void *arg, httpc_result_t httpc_result,
                            u32_t rx_content_len, u32_t srv_res, err_t err)
 {
@@ -276,9 +260,7 @@ int net_http_get_file(const char *url, const char *dest_path,
     struct net_http_download dl;
     httpc_connection_t conn;
     struct net_info info;
-    char temp_path[VFS_MAX_PATH];
     const char *subpath = NULL;
-    const char *temp_subpath = NULL;
     httpc_state_t *httpc_conn = NULL;
     uint32_t start_ms;
     err_t err;
@@ -298,9 +280,6 @@ int net_http_get_file(const char *url, const char *dest_path,
         return NET_E_NOT_INIT;
     }
     if (net_http_parse_url(url, &parsed) != 0) {
-        return NET_E_INVAL;
-    }
-    if (build_temp_path(dest_path, temp_path, sizeof(temp_path)) != 0) {
         return NET_E_INVAL;
     }
 
@@ -324,13 +303,7 @@ int net_http_get_file(const char *url, const char *dest_path,
     }
     memcpy(dl.final_subpath, subpath, strlen(subpath) + 1U);
 
-    if (!vfs_get_mount_ctx(temp_path, &temp_subpath) || !temp_subpath) {
-        return NET_E_INVAL;
-    }
-    if (strlen(temp_subpath) >= sizeof(dl.temp_subpath)) {
-        return NET_E_INVAL;
-    }
-    memcpy(dl.temp_subpath, temp_subpath, strlen(temp_subpath) + 1U);
+    memcpy(dl.temp_subpath, NET_HTTP_TMP_SUBPATH, sizeof(NET_HTTP_TMP_SUBPATH));
 
     (void)littlefs_remove(dl.mnt, dl.temp_subpath);
     dl.fd = littlefs_file_open(dl.mnt, dl.temp_subpath,
@@ -413,11 +386,23 @@ int net_http_get_file(const char *url, const char *dest_path,
         }
     }
     if (littlefs_rename(dl.mnt, dl.temp_subpath, dl.final_subpath) != 0) {
-        if (littlefs_remove(dl.mnt, dl.final_subpath) != 0 ||
-            littlefs_rename(dl.mnt, dl.temp_subpath, dl.final_subpath) != 0) {
+        struct vfs_entry_info info;
+        int had_existing = (vfs_stat_path(dest_path, &info) == 0);
+        if (!had_existing) {
             (void)littlefs_remove(dl.mnt, dl.temp_subpath);
             return NET_E_GENERIC;
         }
+        (void)littlefs_remove(dl.mnt, NET_HTTP_BAK_SUBPATH);
+        if (littlefs_rename(dl.mnt, dl.final_subpath, NET_HTTP_BAK_SUBPATH) != 0) {
+            (void)littlefs_remove(dl.mnt, dl.temp_subpath);
+            return NET_E_GENERIC;
+        }
+        if (littlefs_rename(dl.mnt, dl.temp_subpath, dl.final_subpath) != 0) {
+            (void)littlefs_rename(dl.mnt, NET_HTTP_BAK_SUBPATH, dl.final_subpath);
+            (void)littlefs_remove(dl.mnt, dl.temp_subpath);
+            return NET_E_GENERIC;
+        }
+        (void)littlefs_remove(dl.mnt, NET_HTTP_BAK_SUBPATH);
     }
 
     if (out) {

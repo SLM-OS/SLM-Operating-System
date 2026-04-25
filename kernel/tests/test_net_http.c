@@ -3,6 +3,7 @@
 #include "../include/net_http.h"
 #include "../include/shell.h"
 #include "../include/net.h"
+#include "../include/vfs.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -128,6 +129,34 @@ static void test_http_shell_requires_network_for_valid_request(void)
         shell_execute("http get http://example.com/a.bin /mnt/files/a.bin"));
 }
 
+static void test_http_shell_accepts_max_length_destination_path(void)
+{
+    char path[VFS_MAX_PATH];
+    char cmd[1400];
+    size_t prefix_len = strlen("/mnt/files/");
+    size_t suffix_len = strlen(".bin");
+    size_t fill_len;
+    int n;
+
+    ensure_net_shell_commands_registered();
+
+    TEST_ASSERT_TRUE(VFS_MAX_PATH > (prefix_len + suffix_len + 1));
+    fill_len = (VFS_MAX_PATH - 1) - prefix_len - suffix_len;
+    memcpy(path, "/mnt/files/", prefix_len);
+    memset(path + prefix_len, 'x', fill_len);
+    memcpy(path + prefix_len + fill_len, ".bin", suffix_len);
+    path[VFS_MAX_PATH - 1] = '\0';
+
+    n = snprintf(cmd, sizeof(cmd), "http get http://example.com/a.bin %s", path);
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_TRUE((size_t)n < sizeof(cmd));
+
+    if (net_is_up()) {
+        TEST_IGNORE_MESSAGE("network already initialized in this test target");
+    }
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute(cmd));
+}
+
 int test_suite_net_http(void)
 {
     UNITY_BEGIN();
@@ -140,6 +169,7 @@ int test_suite_net_http(void)
     RUN_TEST(test_parse_sha256_hex_accepts_valid_and_rejects_invalid);
     RUN_TEST(test_http_shell_usage_and_validation);
     RUN_TEST(test_http_shell_requires_network_for_valid_request);
+    RUN_TEST(test_http_shell_accepts_max_length_destination_path);
 
     return UNITY_END();
 }
