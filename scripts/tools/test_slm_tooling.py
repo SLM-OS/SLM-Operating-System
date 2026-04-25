@@ -225,6 +225,33 @@ def test_put_main_auto_falls_back_to_legacy_when_xput_missing():
     assert legacy_calls == [("127.0.0.1", 3)]
 
 
+def test_put_main_preserves_relative_remote_path():
+    class MainShell(FakeShell):
+        def read_until_prompt(self) -> bytes:
+            return b"slmos> "
+
+    shell = MainShell({"xput status": [b"Unknown command: xput\nslmos> "]})
+    seen_remote_paths: list[str] = []
+
+    def fake_upload_legacy(shell_obj, args, data, total, target_desc, shell_factory):
+        assert shell_obj is shell
+        seen_remote_paths.append(args.remote_path)
+        assert data == b"abc"
+        return 0
+
+    with mock.patch.object(slm_put.pathlib.Path, "read_bytes", return_value=b"abc"):
+        with mock.patch.object(slm_put, "connect_telnet", return_value=shell):
+            with mock.patch.object(slm_put, "upload_legacy", side_effect=fake_upload_legacy):
+                with patched_argv(
+                    slm_put,
+                    ["127.0.0.1", "/tmp/local.bin", "blob.bin"],
+                ):
+                    rc = slm_put.main()
+
+    assert rc == 0
+    assert seen_remote_paths == ["blob.bin"]
+
+
 def test_put_main_serial_labctl_does_not_resolve_network():
     shell = FakeShell({"xput status": [b"Unknown command: xput\nslmos> "]})
 
@@ -563,6 +590,7 @@ def main() -> int:
     runner.run("put_framed_resume_requires_exact_path_match", test_put_framed_resume_requires_exact_path_match)
     runner.run("put_framed_resume_requires_matching_prefix_checksum", test_put_framed_resume_requires_matching_prefix_checksum)
     runner.run("put_main_auto_falls_back_to_legacy_when_xput_missing", test_put_main_auto_falls_back_to_legacy_when_xput_missing)
+    runner.run("put_main_preserves_relative_remote_path", test_put_main_preserves_relative_remote_path)
     runner.run("put_main_serial_labctl_does_not_resolve_network", test_put_main_serial_labctl_does_not_resolve_network)
     runner.run("put_legacy_no_resume_skips_truncate_for_absent_destination", test_put_legacy_no_resume_skips_truncate_for_absent_destination)
     runner.run("put_legacy_resume_restarts_when_destination_is_nonempty", test_put_legacy_resume_restarts_when_destination_is_nonempty)

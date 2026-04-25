@@ -747,7 +747,6 @@ def main() -> int:
     data = local_path.read_bytes()
     total = len(data)
     prompt = args.prompt.encode("ascii")
-    args.remote_path = normalize_remote_path(args.remote_path)
 
     if args.transport == "telnet":
         host = resolve_labctl_target(args.target) if args.labctl else args.target
