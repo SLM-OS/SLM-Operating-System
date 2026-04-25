@@ -25,6 +25,7 @@
 extern void sleep_ms(uint32_t ms);
 extern void cdc_ecm_set_notify_silence_timeout_ms(uint32_t ms);
 extern uint32_t cdc_ecm_get_notify_silence_timeout_ms(void);
+extern void cdc_ecm_test_force_notify_wait(uint32_t started_ms, bool active);
 
 /* -------------------------------------------------------------------------- */
 /* Canned device blob                                                          */
@@ -541,6 +542,21 @@ static void test_link_status_falls_back_after_silent_notification_timeout(void)
     cdc_ecm_set_notify_silence_timeout_ms(saved_timeout);
 }
 
+static void test_link_status_falls_back_when_notify_wait_started_at_zero(void)
+{
+    uint32_t saved_timeout = cdc_ecm_get_notify_silence_timeout_ms();
+
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
+    cdc_ecm_set_notify_silence_timeout_ms(0);
+    cdc_ecm_test_force_notify_wait(0, true);
+
+    TEST_ASSERT_TRUE(net_get_driver()->link_status());
+
+    cdc_ecm_set_notify_silence_timeout_ms(saved_timeout);
+}
+
 static void test_link_status_falls_back_when_notification_endpoint_missing(void)
 {
     reset_all();
@@ -1044,6 +1060,7 @@ int test_suite_cdc_ecm(void)
     RUN_TEST(test_link_status_infers_up_from_speed_change);
     RUN_TEST(test_link_status_tracks_down_from_zero_speed_change);
     RUN_TEST(test_link_status_falls_back_after_silent_notification_timeout);
+    RUN_TEST(test_link_status_falls_back_when_notify_wait_started_at_zero);
     RUN_TEST(test_link_status_falls_back_when_notification_endpoint_missing);
     RUN_TEST(test_send_goes_to_bulk_out);
     RUN_TEST(test_send_busy_when_pool_full);

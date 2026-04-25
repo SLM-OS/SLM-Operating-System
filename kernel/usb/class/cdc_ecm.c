@@ -164,6 +164,7 @@ static struct {
     const struct usb_endpoint *notif_in;
     struct cdc_notify_slot     notif;
     uint32_t          notif_wait_started_ms;
+    bool              notif_wait_active;
     bool              notif_silence_fallback_logged;
     bool              link_ready;
     bool              link_signal_valid;
@@ -552,9 +553,11 @@ static int cdc_ecm_net_init(void)
             WARN("cdc_ecm: continuing without notification-driven link state");
             cdc.notif_in = NULL;
             cdc.notif_wait_started_ms = 0;
+            cdc.notif_wait_active = false;
             cdc.notif_silence_fallback_logged = false;
         } else {
             cdc.notif_wait_started_ms = sys_now();
+            cdc.notif_wait_active = true;
             cdc.notif_silence_fallback_logged = false;
         }
     }
@@ -692,9 +695,9 @@ static bool cdc_ecm_net_link_status(void)
     if (cdc.notif_in == NULL)
         return true;
     if (!__atomic_load_n(&cdc.link_signal_valid, __ATOMIC_ACQUIRE)) {
-        uint32_t started = cdc.notif_wait_started_ms;
-        if (started == 0)
+        if (!cdc.notif_wait_active)
             return false;
+        uint32_t started = cdc.notif_wait_started_ms;
         if ((sys_now() - started) < cdc_notify_silence_timeout_ms)
             return false;
         if (!cdc.notif_silence_fallback_logged) {
@@ -857,6 +860,7 @@ int cdc_ecm_probe_and_register(void)
     cdc.bulk_out      = out;
     cdc.notif_in      = notif;
     cdc.notif_wait_started_ms = 0;
+    cdc.notif_wait_active = false;
     cdc.notif_silence_fallback_logged = false;
     cdc.link_ready    = false;
     cdc.link_signal_valid = false;
@@ -921,6 +925,7 @@ void cdc_ecm_reset(void)
     cdc_logged_no_device = false;
     cdc.notif_in = NULL;
     cdc.notif_wait_started_ms = 0;
+    cdc.notif_wait_active = false;
     cdc.notif_silence_fallback_logged = false;
     cdc_notify_silence_timeout_ms =
         CDC_ECM_NOTIFY_SILENCE_TIMEOUT_DEFAULT_MS;
@@ -956,4 +961,10 @@ void cdc_ecm_set_notify_silence_timeout_ms(uint32_t ms)
 uint32_t cdc_ecm_get_notify_silence_timeout_ms(void)
 {
     return cdc_notify_silence_timeout_ms;
+}
+
+void cdc_ecm_test_force_notify_wait(uint32_t started_ms, bool active)
+{
+    cdc.notif_wait_started_ms = started_ms;
+    cdc.notif_wait_active = active;
 }
