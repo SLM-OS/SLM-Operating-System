@@ -206,7 +206,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 need_cmd ssh
-need_cmd scp
+if [[ "$SKIP_COPY" != "1" ]]; then
+    need_cmd scp
+fi
 need_cmd nc
 need_cmd timeout
 need_cmd grep

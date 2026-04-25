@@ -29,12 +29,6 @@ echo "fake ssh invoked" >&2
 exit 1
 EOF
 
-cat >"$FAKEBIN/scp" <<'EOF'
-#!/bin/bash
-echo "fake scp invoked" >&2
-exit 1
-EOF
-
 cat >"$FAKEBIN/nc" <<'EOF'
 #!/bin/bash
 sleep 5
@@ -46,7 +40,7 @@ shift
 exec "$@"
 EOF
 
-chmod +x "$FAKEBIN/ssh" "$FAKEBIN/scp" "$FAKEBIN/nc" "$FAKEBIN/timeout"
+chmod +x "$FAKEBIN/ssh" "$FAKEBIN/nc" "$FAKEBIN/timeout"
 
 echo "=== test-jetson-kexec-networking-smoke.sh local functional tests ==="
 echo "Script: $SCRIPT"
@@ -89,8 +83,10 @@ elif grep -q "helper not found" <<<"$output"; then
     fail "--skip-copy still validates the local helper path"
 elif grep -q "kernel not found" <<<"$output"; then
     fail "--skip-copy still validates the local kernel path"
+elif grep -q "missing required command: scp" <<<"$output"; then
+    fail "--skip-copy still requires scp during preflight"
 else
-    pass "--skip-copy bypasses local kernel/helper validation"
+    pass "--skip-copy bypasses local kernel/helper validation and scp preflight"
 fi
 
 echo

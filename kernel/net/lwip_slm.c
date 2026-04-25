@@ -117,6 +117,20 @@ static void net_sync_link_state(void) {
             (void)net_start_dhcp_client("after link-ready");
         }
     } else {
+        if (dhcp_requested && dhcp_started &&
+            !dhcp_supplied_address(&slm_netif)) {
+            /*
+             * Mid-discovery link drop: stop lwIP's DHCP state machine
+             * and re-arm the timeout window from the drop point. When
+             * the link comes back, net_start_dhcp_client() restarts
+             * DHCP with a fresh deadline instead of immediately
+             * tripping the old timeout.
+             */
+            dhcp_stop(&slm_netif);
+            dhcp_started = false;
+            dhcp_start_time = sys_now();
+            INFO("DHCP paused waiting for link restore");
+        }
         netif_set_link_down(&slm_netif);
         INFO("Network link down");
     }
@@ -141,9 +155,7 @@ uint32_t net_get_dhcp_timeout_ms(void) {
  * fallback fired, 0 if no action was taken.
  */
 int net_dhcp_check_timeout(void) {
-    if (!dhcp_started || dhcp_fallback_done)
-        return 0;
-    if (!net_link_is_up())
+    if (!dhcp_requested || dhcp_fallback_done)
         return 0;
     if (dhcp_supplied_address(&slm_netif))
         return 0;
@@ -153,7 +165,8 @@ int net_dhcp_check_timeout(void) {
         return 0;
 
     WARN("DHCP timeout after %u ms; falling back to static IP", elapsed);
-    dhcp_stop(&slm_netif);
+    if (dhcp_started)
+        dhcp_stop(&slm_netif);
     dhcp_requested = false;
     dhcp_started = false;
     dhcp_fallback_done = true;
@@ -432,6 +445,7 @@ int net_init(void) {
             INFO("DHCP auto-start armed (timeout %u ms)", dhcp_timeout_ms);
         }
     } else {
+        dhcp_start_time = sys_now();
         INFO("DHCP auto-start deferred until link-ready (timeout %u ms)",
              dhcp_timeout_ms);
     }
@@ -628,6 +642,7 @@ int net_enable_dhcp(void) {
         return net_start_dhcp_client("manual request");
     }
 
+    dhcp_start_time = sys_now();
     INFO("DHCP request deferred until link-ready");
     return NET_OK;
 }

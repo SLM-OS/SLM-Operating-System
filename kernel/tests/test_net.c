@@ -611,6 +611,72 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 #include "../include/virtio_net_pci.h"  /* accessors + handler */
 #endif
 
+static const struct net_driver *link_test_base_driver;
+static bool link_test_force_up;
+
+static int link_test_driver_init(void)
+{
+    if (link_test_base_driver && link_test_base_driver->init)
+        return link_test_base_driver->init();
+    return NET_OK;
+}
+
+static int link_test_driver_send(const void *buf, size_t len)
+{
+    return link_test_base_driver->send(buf, len);
+}
+
+static int link_test_driver_recv(void *buf, size_t max_len)
+{
+    return link_test_base_driver->recv(buf, max_len);
+}
+
+static void link_test_driver_get_mac(uint8_t mac[6])
+{
+    link_test_base_driver->get_mac(mac);
+}
+
+static bool link_test_driver_link_status(void)
+{
+    return link_test_force_up;
+}
+
+static void link_test_driver_tx_reap(void)
+{
+    if (link_test_base_driver->tx_reap)
+        link_test_base_driver->tx_reap();
+}
+
+static const struct net_driver link_test_driver = {
+    .name = "test-link-wrapper",
+    .init = link_test_driver_init,
+    .send = link_test_driver_send,
+    .recv = link_test_driver_recv,
+    .get_mac = link_test_driver_get_mac,
+    .link_status = link_test_driver_link_status,
+    .tx_reap = link_test_driver_tx_reap,
+};
+
+static void link_test_install(bool link_up)
+{
+    link_test_base_driver = net_get_driver();
+    TEST_ASSERT_NOT_NULL(link_test_base_driver);
+    link_test_force_up = link_up;
+    net_register_driver(&link_test_driver);
+}
+
+static void link_test_set(bool link_up)
+{
+    link_test_force_up = link_up;
+}
+
+static void link_test_restore(void)
+{
+    TEST_ASSERT_NOT_NULL(link_test_base_driver);
+    net_register_driver(link_test_base_driver);
+    link_test_base_driver = NULL;
+}
+
 /*
  * Test: a network driver was registered during platform init.
  *
@@ -873,6 +939,85 @@ static void test_net_dhcp_fallback(void)
         "fallback should restore the original static IP");
 
     /* Restore default timeout for subsequent tests */
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
+ * Test: a manual DHCP request made while the link is down still times
+ * out and falls back to the static address instead of sitting in
+ * DHCP(pending) forever.
+ */
+static void test_net_dhcp_fallback_while_link_down(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    link_test_install(false);
+    net_poll();
+
+    net_set_dhcp_timeout_ms(0);
+    TEST_ASSERT_EQUAL_INT(0, net_enable_dhcp());
+    TEST_ASSERT_EQUAL_INT(1, net_dhcp_check_timeout());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_FAILED, info.dhcp_status);
+    TEST_ASSERT_FALSE(info.dhcp_enabled);
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+
+    link_test_restore();
+    net_poll();
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
+ * Test: a transient link drop during DHCP discovery resets the timeout
+ * window so reconnect does not immediately force a false fallback.
+ */
+static void test_net_dhcp_link_drop_restarts_timeout(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    extern void sleep_ms(uint32_t ms);
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    link_test_install(true);
+    net_poll();
+
+    net_set_dhcp_timeout_ms(20);
+    TEST_ASSERT_EQUAL_INT(0, net_enable_dhcp());
+
+    link_test_set(false);
+    net_poll();
+    sleep_ms(30);
+
+    link_test_set(true);
+    net_poll();
+
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_TRUE(info.dhcp_enabled);
+    TEST_ASSERT_NOT_EQUAL(NET_DHCP_FAILED, info.dhcp_status);
+
+    link_test_restore();
+    net_poll();
     net_set_dhcp_timeout_ms(saved_timeout);
 }
 
@@ -1441,6 +1586,8 @@ int test_suite_net(void)
     RUN_TEST(test_net_dhcp_binds);
     RUN_TEST(test_net_dhcp_bind_notification);
     RUN_TEST(test_net_dhcp_fallback);
+    RUN_TEST(test_net_dhcp_fallback_while_link_down);
+    RUN_TEST(test_net_dhcp_link_drop_restarts_timeout);
     RUN_TEST(test_net_driver_tx);
     RUN_TEST(test_net_driver_has_tx_reap);
     RUN_TEST(test_net_send_returns_quickly);
