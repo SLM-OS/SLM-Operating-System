@@ -154,6 +154,15 @@ struct ga10b_pipeline_op {
     uint32_t flags;             /* reserved (0 today) */
 };
 
+/* Upper bound on pipeline length, enforced by the kernel-side runner.
+ * The launcher allocates a single 4 KB page for the ops array
+ * (4096 / sizeof(struct ga10b_pipeline_op) = 170), so SLM-OS rejects
+ * any handoff that claims more — anything past that would dereference
+ * past the page into adjacent memory. MNIST currently uses 8 ops;
+ * real SLMs may need this raised, but a finite cap matters more than
+ * a generous one. */
+#define GA10B_PIPELINE_MAX_OPS 170u
+
 /* Wire-format size is locked: both the Linux helper and SLM-OS
  * depend on this exact layout. Any struct reorder or field addition
  * breaks the handoff silently — the static_assert catches it at

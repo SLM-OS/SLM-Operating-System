@@ -1584,9 +1584,32 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
             b->last_error_phase = 8;
             return -1;
         }
+        if (g_handoff.pipeline_n_ops > GA10B_PIPELINE_MAX_OPS) {
+            uart_printf("[GA10B-P8] pipeline_n_ops=%lu exceeds "
+                        "GA10B_PIPELINE_MAX_OPS=%u — refusing to "
+                        "dispatch (handoff likely corrupt)\n",
+                        (unsigned long)g_handoff.pipeline_n_ops,
+                        (unsigned)GA10B_PIPELINE_MAX_OPS);
+            b->last_error_phase = 8;
+            return -1;
+        }
+        /* Cast assumes Jetson's identity DRAM mapping at EL2: the
+         * physical address read from the handoff is also a valid
+         * virtual address SLM-OS can dereference. Same assumption
+         * the v3 path makes for shader_phys/qmd_phys. */
         const struct ga10b_pipeline_op *ops =
             (const struct ga10b_pipeline_op *)
                 (uintptr_t)g_handoff.pipeline_ops_phys;
+        /* Defensive: invalidate the array's cache range before the
+         * first read. In practice this is a no-op (Linux's pre-
+         * kexec msync cleaned the page; SLM-OS hasn't touched it
+         * yet) but avoids depending on that timing for correctness
+         * if a future change re-reads the array. */
+        if (gsp_platform->cache_invalidate) {
+            gsp_platform->cache_invalidate(
+                (void *)ops,
+                (size_t)g_handoff.pipeline_n_ops * sizeof(*ops));
+        }
         uart_printf("[GA10B-P8] pipeline mode — %lu ops, "
                     "ops_phys=0x%lx\n",
                     (unsigned long)g_handoff.pipeline_n_ops,

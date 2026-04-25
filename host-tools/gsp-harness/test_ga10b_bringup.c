@@ -1898,6 +1898,25 @@ static void test_pipeline_op_validator_rejects_null(void)
     REQUIRE(!ga10b_pipeline_op_is_valid(NULL));
 }
 
+/* The pipeline-runner caps `pipeline_n_ops` at GA10B_PIPELINE_MAX_OPS
+ * to prevent a malformed handoff (n_ops = 0xFFFFFFFF) from looping
+ * past the 4 KB ops array into adjacent memory. The cap matches the
+ * launcher's allocation budget — one 4 KB page of pipeline_op
+ * structs (170 of them at 24 bytes each). */
+static void test_pipeline_max_ops_constant(void)
+{
+    printf("== test_pipeline_max_ops_constant ==\n");
+    /* The constant must match the launcher's per-page capacity. */
+    REQUIRE_EQ((unsigned)GA10B_PIPELINE_MAX_OPS, 170u);
+    REQUIRE_EQ(GA10B_PIPELINE_MAX_OPS * sizeof(struct ga10b_pipeline_op),
+               4080u);  /* < 4096, so a 4 KB page holds all ops */
+    /* MNIST currently uses 8 ops — comfortably under the cap. If
+     * GA10B_PIPELINE_MAX_OPS is ever lowered, the MNIST launcher
+     * stops working without surfacing a clear build error; tests
+     * fail loudly instead. */
+    REQUIRE(GA10B_PIPELINE_MAX_OPS >= 8u);
+}
+
 /* ======================================================================
  * gpu_qmd_set_bits — pure-logic bit-range setter for QMDV03_00
  * (scripts/gpu-qmd-bits.h). Exercised here because the production
@@ -2105,6 +2124,7 @@ int main(void)
     test_pipeline_op_validator_rejects_zero_qmd();
     test_pipeline_op_validator_rejects_zero_output();
     test_pipeline_op_validator_rejects_null();
+    test_pipeline_max_ops_constant();
 
     test_qmd_set_bits_single_bit();
     test_qmd_set_bits_within_one_word();

@@ -609,7 +609,15 @@ int main(int argc, char **argv)
      * "any non-zero" mode. Kernel-side ga10b_submit_and_poll handles
      * this; with deterministic dispatch the GPU re-produces the
      * same bit patterns observed Linux-side, but exact-match polls
-     * across CPU/GPU rounding boundaries are unreliable in fp32. */
+     * across CPU/GPU rounding boundaries are unreliable in fp32.
+     *
+     * Note: per-op `output_phys` here is the SENTINEL CELL ADDRESS
+     * (= buffer base + sentinel_cell_idx * 4), not the output
+     * buffer base. SLM-OS polls this 4-byte location for the
+     * any-non-zero transition; the rest of the buffer's content is
+     * irrelevant to the dispatch loop. The full output is read
+     * back by the launcher (or by SLM-OS shell `peek` commands) to
+     * validate the activation values cell-for-cell. */
     struct gpu_buffer pipe_ops = gpu_alloc_buffer(&ctx, 4096, 4096);
     {
         memset(pipe_ops.cpu_va, 0, pipe_ops.size_bytes);

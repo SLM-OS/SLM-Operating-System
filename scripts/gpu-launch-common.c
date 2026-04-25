@@ -584,8 +584,9 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
      * each subsequent call advances to the next slot. */
     volatile uint32_t *userd = (volatile uint32_t *)ctx->userd_va;
     uint32_t cur_gp_put = userd[GPU_LAUNCH_USERD_GP_PUT_WORD];
-    uint32_t mask = ctx->gpfifo_entries
-                   ? (ctx->gpfifo_entries - 1) : 1023u;
+    /* gpu_launch_setup pins gpfifo_entries to 1024 (a power of two);
+     * the mask works as long as that contract holds. */
+    uint32_t mask = ctx->gpfifo_entries - 1u;
     uint32_t slot = cur_gp_put & mask;
 
     uint64_t pb_gva = ctx->pb_gva;
@@ -631,14 +632,23 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
              * sentinel before lagging CTAs finish their writes,
              * leaving spurious zeros in those cells.
              *
-             * The proper fix is a SEMAPHORE_RELEASE method appended
-             * to the dispatch pushbuffer — that semaphore writes
-             * only after all prior compute completes. Tracked for
-             * M6 (multi-op pipeline) in docs/jetson-gpu-mnist-plan.md.
+             * Workaround: 500 ms grace period after sentinel match
+             * covers any reasonable kernel running on the small
+             * MNIST-shape workloads we care about today.
              *
-             * Until then, a 500 ms grace period after sentinel match
-             * covers any reasonable kernel running on these tiny
-             * MNIST-shape workloads. */
+             * **This is a known throughput cost.** An 8-op pipeline
+             * pays 4 seconds in pure sleeps. The proper fix is to
+             * append a SEMAPHORE_RELEASE method to the dispatch
+             * pushbuffer (NVC7C0 method 0x6098/9C/A0/A4 family on
+             * Ampere) so the GPU writes a sentinel only after all
+             * SMs have drained. The launcher would then poll that
+             * semaphore — exact-match — without needing this sleep.
+             * That refactor touches `gpu_build_launch_pushbuffer`
+             * + the v5 ops array's poll target convention; track
+             * as a follow-up before any benchmark / production
+             * workload uses this path. See
+             * docs/jetson-gpu-mnist-plan.md §"Risks and open
+             * questions" for the design notes. */
             usleep(500000);
             msync((void *)poll_va, 4, MS_INVALIDATE | MS_SYNC);
             __asm__ volatile("dsb sy" ::: "memory");
@@ -740,10 +750,17 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
     uint64_t userd_phys  = gpu_virt_to_phys(ctx->userd_va);
     uint64_t gpfifo_phys = gpu_virt_to_phys(ctx->gpfifo_va);
     uint64_t pb_phys     = gpu_virt_to_phys(ctx->pb_va);
-    uint64_t shader_phys = gpu_virt_to_phys(ctx->shader_va);
-    uint64_t cbuf_phys   = gpu_virt_to_phys(ctx->cbuf_va);
-    uint64_t qmd_phys    = gpu_virt_to_phys(ctx->qmd_va);
 
+    /* v3 dispatch fields (qmd_gpu_va, output_phys, etc.) are
+     * intentionally left zero in a v5 handoff. The actual op state
+     * lives in the per-op pipeline_ops array; carrying stale "first
+     * op" addresses in the v3 fields would let a future bug that
+     * lost pipeline_n_ops silently fall through to the v3 single-
+     * shot path and dispatch op 0 alone. With the v3 fields zeroed,
+     * the launch_kernel pre-pipeline check `qmd_gpu_va == 0` fails
+     * loudly instead. The v2 channel fields (userd/gpfifo/pushbuf/
+     * semaphore/work_submit_token) stay populated because
+     * ga10b_validate_handoff requires them non-zero. */
     struct ga10b_channel_handoff hoff = {
         .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
         .version            = 5,
@@ -759,6 +776,8 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
         .pushbuf_phys       = pb_phys,
         .pushbuf_gpu_va     = ctx->pb_gva,
         .pushbuf_size       = 65536,
+        /* semaphore_phys must be non-zero for the validator;
+         * caller provides a meaningful (final-op) target. */
         .semaphore_phys     = output_phys,
         .semaphore_gpu_va   = output_gpu_va,
         .inst_block_phys    = 0,
@@ -767,19 +786,17 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
         .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
                                 [GPU_LAUNCH_USERD_GP_GET_WORD],
         .work_submit_token  = ctx->work_submit_token,
-        /* v3 fields point at the FIRST op's resources (so v3-only
-         * readers get something sensible) but the pipeline path
-         * doesn't use them. */
-        .shader_phys        = shader_phys,
-        .shader_gpu_va      = ctx->shader_gva,
-        .cbuf_phys          = cbuf_phys,
-        .cbuf_gpu_va        = ctx->cbuf_gva,
-        .qmd_phys           = qmd_phys,
-        .qmd_gpu_va         = ctx->qmd_gva,
-        .output_phys        = output_phys,
-        .output_gpu_va      = output_gpu_va,
-        .shader_size        = (uint32_t)ctx->shader_size_bytes,
-        .cbuf_size          = GPU_LAUNCH_CBUF_SIZE_B,
+        /* v3 dispatch fields zeroed (see comment above). */
+        .shader_phys        = 0,
+        .shader_gpu_va      = 0,
+        .cbuf_phys          = 0,
+        .cbuf_gpu_va        = 0,
+        .qmd_phys           = 0,
+        .qmd_gpu_va         = 0,
+        .output_phys        = 0,
+        .output_gpu_va      = 0,
+        .shader_size        = 0,
+        .cbuf_size          = 0,
         .expected_payload   = expected_payload,
         /* v5 extension. */
         .pipeline_n_ops     = pipeline_n_ops,
