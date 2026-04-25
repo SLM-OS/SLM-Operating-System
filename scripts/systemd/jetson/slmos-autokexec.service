@@ -1,0 +1,21 @@
+[Unit]
+Description=Automatically kexec from Linux into SLM-OS
+Documentation=https://github.com/SLM-OS/SLM-Operating-System/blob/main/docs/deploy/jetson-kexec.md
+ConditionKernelCommandLine=slmos.autokexec=1
+ConditionPathExists=/usr/local/bin/slmos-kexec
+After=multi-user.target
+Requires=multi-user.target
+Conflicts=shutdown.target rescue.target emergency.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/slmos-autokexec
+ExecStartPre=/usr/bin/test -n ${SLMOS_KERNEL}
+ExecStartPre=/usr/bin/test -f ${SLMOS_KERNEL}
+ExecStart=/usr/local/bin/slmos-kexec ${SLMOS_KEXEC_ARGS} ${SLMOS_KERNEL}
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=0
+
+[Install]
+WantedBy=slmos-autokexec.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Boot Linux far enough to auto-kexec into SLM-OS
+Documentation=https://github.com/SLM-OS/SLM-Operating-System/blob/main/docs/deploy/jetson-kexec.md
+Requires=multi-user.target
+After=multi-user.target
+AllowIsolate=yes
