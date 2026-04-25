@@ -606,6 +606,10 @@ set(TEST_SOURCES
     kernel/tests/test_littlefs.c
     kernel/tests/test_x86_boot.c
     kernel/tests/test_elf.c
+    # Platform-neutral protocol tests (the proto helpers are pure
+    # buffer construction and compile on every platform, even though
+    # the bcm_mailbox.c MMIO transport is RASPI5-only).
+    kernel/tests/test_bcm_mailbox.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for

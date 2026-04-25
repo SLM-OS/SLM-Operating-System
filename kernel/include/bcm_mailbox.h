@@ -55,6 +55,38 @@
  */
 int bcm_mailbox_get_board_mac(uint8_t mac[6]);
 
+/*
+ * Set the firmware reboot-flags register via tag 0x00038064. Bit 0
+ * is the tryboot flag, consumed by the Pi 5 bootloader on the next
+ * boot — when set, the bootloader applies the `[tryboot]` section
+ * of `autoboot.txt` / `config.txt` instead of `[all]`.
+ *
+ * Returns 0 on success, MBOX_E_GENERIC on transport / protocol
+ * failure. Pair with `bcm_mailbox_notify_reboot()` and a follow-up
+ * `psci_system_reset()` to perform a tryboot-armed reboot. See
+ * `docs/dynamic-kernel-replace-plan.md` Risk 2 for the trace from
+ * `reboot "0 tryboot"` to this tag.
+ *
+ * Not reentrant — shares the file-static 32-byte property buffer
+ * with `bcm_mailbox_get_board_mac` and `bcm_mailbox_notify_reboot`.
+ * Call from a single task context, never from an IRQ.
+ */
+int bcm_mailbox_set_reboot_flags(uint32_t flags);
+
+/*
+ * Notify the firmware that a reboot is intentional (tag 0x00030048,
+ * empty payload). Pi 5 firmware uses this to run its restart
+ * sequence after any reboot flags have been armed.
+ *
+ * Returns 0 on success, MBOX_E_GENERIC on transport / protocol
+ * failure.
+ *
+ * Not reentrant — shares the file-static 32-byte property buffer
+ * with `bcm_mailbox_get_board_mac` and `bcm_mailbox_set_reboot_flags`.
+ * Call from a single task context, never from an IRQ.
+ */
+int bcm_mailbox_notify_reboot(void);
+
 #endif /* PLATFORM_RASPI5 */
 
 #endif /* BCM_MAILBOX_H */

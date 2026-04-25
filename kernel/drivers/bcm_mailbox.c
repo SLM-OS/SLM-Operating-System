@@ -1,10 +1,27 @@
 /*
  * bcm_mailbox.c — BCM2712 VideoCore property-channel mailbox (Pi 5).
  *
- * Single-purpose today: fetch the board's factory MAC via tag
- * 0x00010003. The protocol is the same as earlier Pi SoCs — only
- * the MMIO base moves (0x107C013880 on BCM2712). Reachable from
- * EL1 with no RP1 indirection.
+ * Single shared transport (`mbox_property_call`) reused by every tag
+ * helper. Same protocol as earlier Pi SoCs — only the MMIO base
+ * moves (0x107C013880 on BCM2712). Reachable from EL1 with no RP1
+ * indirection.
+ *
+ * Tag helpers exposed today:
+ *   - bcm_mailbox_get_board_mac      (tag 0x00010003) — fetch the
+ *     board's factory MAC, consumed by macb_program_mac_address.
+ *   - bcm_mailbox_set_reboot_flags   (tag 0x00038064) — bit 0 arms
+ *     the firmware tryboot flag on the next boot. Used by the
+ *     dynamic-kernel-replace `kernel activate` command (#367).
+ *   - bcm_mailbox_notify_reboot      (tag 0x00030048) — empty
+ *     payload; tells firmware a reboot is intentional and triggers
+ *     the firmware-side restart sequence.
+ *
+ * Buffer construction for the reboot tags lives in
+ * kernel/include/bcm_mailbox_proto.h as platform-neutral pure-inline
+ * helpers, so the wire-level tag layout is unit-tested in QEMU virt
+ * (kernel/tests/test_bcm_mailbox.c). The MMIO transport here is
+ * `PLATFORM_RASPI5`-only — hardware verification of the round-trip
+ * is Stage 5 of the dynamic-kernel-replace plan (#371).
  *
  * References (cached under docs/reference/):
  *   - linux-bcm2835-mailbox.c      (register layout, status bits)
@@ -23,16 +40,16 @@
  * 28 bits = VC bus address of the property buffer, which is why the
  * buffer must be 16-byte aligned.
  *
- * Property buffer layout (GET_BOARD_MAC_ADDRESS):
+ * Property buffer layout (single tag, 32 bytes, 16-byte aligned):
  *
- *   offset  size  value
- *   0       u32   total_size = 32
- *   4       u32   request    = 0                 (VC writes 0x80000000)
- *   8       u32   tag_id     = 0x00010003
- *   12      u32   val_buf_sz = 8                 (6 MAC bytes, pad to 8)
- *   16      u32   tag_code   = 0                 (VC writes bit31|len=6)
- *   20      u8[8] MAC + 2 bytes pad
- *   28      u32   end_tag    = 0
+ *   word 0  total_size       (= 32, the buffer size)
+ *   word 1  request/response (0 on send; 0x80000000 = OK on receive)
+ *   word 2  tag_id           (e.g. 0x00010003 for GET_BOARD_MAC)
+ *   word 3  val_buf_sz       (size of the tag's payload in bytes)
+ *   word 4  tag_code         (0 on send; bit 31 + length on receive)
+ *   word 5+ tag payload (size = val_buf_sz, padded up to a word)
+ *   ...     end_tag (= 0) immediately after the payload
+ *   ...     tail pad (zero) up to total_size
  */
 
 #include "platform.h"
@@ -45,6 +62,7 @@
 #include <string.h>
 
 #include "bcm_mailbox.h"
+#include "bcm_mailbox_proto.h" /* pure buffer-build helpers (also unit-tested) */
 #include "debug.h"
 #include "timer.h"          /* timer_busy_wait_us, timer_get_count/_frequency */
 #include "cache.h"          /* cache_clean_range / cache_invalidate_range */
@@ -72,10 +90,17 @@
 
 /* MBOX_E_GENERIC / MBOX_E_TAG_UNSUPPORTED come from bcm_mailbox.h. */
 
-/* Fixed buffer size for the one tag we handle. 16-byte aligned so
- * the upper-28-bit bus-address encoding is clean. */
+/* Fixed buffer size shared across every tag we send. 16-byte
+ * aligned so the upper-28-bit bus-address encoding is clean. */
 #define PROP_BUF_WORDS          8
 #define PROP_BUF_BYTES          (PROP_BUF_WORDS * 4)
+
+/* Compile-time check that this driver and the proto header agree
+ * on buffer size. If someone shrinks `prop_buf` without revisiting
+ * the helpers in bcm_mailbox_proto.h, the build fails here instead
+ * of VideoCore silently rejecting a malformed buffer at runtime. */
+_Static_assert(BCM_PROP_BUF_WORDS == PROP_BUF_WORDS,
+               "bcm_mailbox_proto.h and bcm_mailbox.c disagree on buffer size");
 
 /* Property buffer.
  *
@@ -290,6 +315,45 @@ int bcm_mailbox_get_board_mac(uint8_t mac[6])
         return MBOX_E_GENERIC;
     }
 
+    return 0;
+}
+
+int bcm_mailbox_set_reboot_flags(uint32_t flags)
+{
+    bcm_mailbox_build_set_reboot_flags(prop_buf, flags);
+
+    int rc = mbox_property_call();
+    if (rc < 0) {
+        return rc;
+    }
+
+    /* Tag-level response check: bit 31 set means VC processed the tag
+     * successfully. The length field doesn't matter for a write tag,
+     * but bit 31 is the load-bearing bit. */
+    uint32_t tag_resp = prop_buf[4];
+    if (!(tag_resp & PROP_TAG_RESP_SUCCESS)) {
+        ERROR("mailbox: SET_REBOOT_FLAGS tag response not success (0x%08x)",
+              tag_resp);
+        return MBOX_E_GENERIC;
+    }
+    return 0;
+}
+
+int bcm_mailbox_notify_reboot(void)
+{
+    bcm_mailbox_build_notify_reboot(prop_buf);
+
+    int rc = mbox_property_call();
+    if (rc < 0) {
+        return rc;
+    }
+
+    uint32_t tag_resp = prop_buf[4];
+    if (!(tag_resp & PROP_TAG_RESP_SUCCESS)) {
+        ERROR("mailbox: NOTIFY_REBOOT tag response not success (0x%08x)",
+              tag_resp);
+        return MBOX_E_GENERIC;
+    }
     return 0;
 }
 
