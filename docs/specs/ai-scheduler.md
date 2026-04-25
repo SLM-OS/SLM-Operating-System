@@ -38,6 +38,6 @@ MLP and PPO scheduling policies running in the kernel scheduler.
 - `docs/cross-platform-inference-bench.md` — per-platform inference latency
 - `kernel/sched/ai/ai_types.h` — state/action encoding
 - `kernel/sched/ai/ai_inference.h` — forward-pass API
-- `docs/capstone-feature-status.md` §"AI Task Scheduling"
+- `docs/archive/plans/capstone-feature-status.md` §"AI Task Scheduling"
 
 *Last updated: 18 April 2026*

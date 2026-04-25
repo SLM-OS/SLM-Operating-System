@@ -115,7 +115,7 @@ Archived / historical material lives under [`docs/archive/`](docs/archive/).
 ## Status
 
 - Cross-platform capability matrix: [`docs/specs/README.md`](docs/specs/README.md)
-- Delivery narrative: [`docs/capstone-feature-status.md`](docs/capstone-feature-status.md)
+- Delivery narrative: [`docs/archive/plans/capstone-feature-status.md`](docs/archive/plans/capstone-feature-status.md)
 - Open blockers and investigations: `gh issue list`
 
 ---

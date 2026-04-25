@@ -6,7 +6,7 @@ sub-features across the four supported platforms, including anything
 that was attempted but blocked.
 
 **Not** a status report — these are stable facts about the codebase.
-For delivery narrative, see `docs/capstone-feature-status.md`.
+For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 
 **Platforms:**
 

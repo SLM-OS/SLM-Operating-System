@@ -2,18 +2,48 @@
 
 Design and implementation of GPU-accelerated inference in SLM-OS (Phase 5, Milestone 3).
 
-**Status:** Framework complete; all inference runs on CPU. GPU compute deferred pending GSP firmware.
+**Status (April 2026):** **GPU MNIST inference is working** on Jetson GA10B
+via an inherit-from-Linux kexec handoff. The graceful-CPU-fallback design
+described below is still in place; on Jetson the engine's `run_inference`
+short-circuits through `gpu::run_mnist_gpu_fastpath` for the MNIST graph
+and only falls back to CPU on dispatch failure.
+
+> **What changed in M10 (April 2026):**
+>
+> - `runtime/src/inference/engine.rs::run_inference` detects an active
+>   `mnist` model + `compute_ready=1` and routes the whole graph through
+>   `gpu::run_mnist_gpu_fastpath`, which hits `slm_gpu_set_mnist_input`
+>   + `slm_gpu_run_mnist`.
+> - The kernel-side dispatch in `kernel/gpu/nvidia/ga10b_bringup.c` uses
+>   `ga10b_build_launch_kernel_with_sema_pushbuffer` to append a
+>   `REPORT_SEMAPHORE_EXECUTE` (OP=RELEASE, ONE_WORD) to each op's
+>   pushbuffer. The GPU drains compute and flushes L2 → DRAM before
+>   the release fires, giving a real "all output is in DRAM" completion
+>   signal. Closes #372 (sentinel-zero polling deadlock) and #390
+>   (Conv1 truncation past 4 KB).
+> - On Jetson `slm_gpu_get_info`'s `compute_ready` is 1; on every other
+>   platform it stays 0 and the original CPU-only fallback runs unchanged.
+>
+> Demo: `slm.model_infer_file(slm.model_load_mnist(), '/mnt/files/digits/digit_3.bin')`
+> returns 3, with the full pipeline executing on GPU. See
+> `docs/archive/plans/jetson-gpu-mnist-plan.md` for the M0..M10 plan history
+> and `docs/gpu.md` for the broader GPU integration overview.
+>
+> The "deferred pending GSP firmware" framing below applies to **cold-boot
+> GPU bringup** (still tracked as #142 — bare-metal GSP loader). The
+> kexec-from-Linux path doesn't need a bare-metal GSP loader because Linux
+> bootstraps FECS/GPCCS/PMU before SLM-OS inherits the channel.
 
 ---
 
 ## Overview
 
-SLM-OS provides a GPU compute integration layer for accelerating inference workloads. The design acknowledges that modern NVIDIA GPUs (Ampere and later) require the GPU System Processor (GSP) firmware for actual compute operations, which is not yet implemented. The framework therefore implements a **graceful CPU fallback**: operator placement decisions are made at runtime based on GPU capabilities, and all operators currently execute on the CPU backend.
+SLM-OS provides a GPU compute integration layer for accelerating inference workloads. The design acknowledges that modern NVIDIA GPUs (Ampere and later) require the GPU System Processor (GSP) firmware for actual compute operations. The framework implements a **graceful CPU fallback**: operator placement decisions are made at runtime based on GPU capabilities. Where the GPU is unavailable or a dispatch fails, operators execute on the CPU backend.
 
 This approach ensures that:
-1. The inference engine works correctly today on all platforms (QEMU, Pi 5, Jetson)
-2. When GSP firmware support is added, GPU acceleration activates without changes to the inference pipeline
-3. Cache coherency protocols are already in place for CPU/GPU data sharing
+1. The inference engine works correctly on all platforms (QEMU, Pi 5, Jetson, x86-64).
+2. On Jetson with the inherit-from-Linux GPU path, the MNIST graph runs end-to-end on GPU; CPU fallback engages on any dispatch error.
+3. Cache coherency protocols are in place for CPU/GPU data sharing.
 
 ---
 

@@ -4,8 +4,8 @@ Consolidates everything SLM-OS has learned about the Tegra234 Control
 Backbone (CBB) firewall: what it is, what it blocks, what has been
 worked around, and what would close the gaps "officially." Pulls
 together material previously scattered across `docs/jetson-el2-bringup.md`,
-`docs/jetson-nvidia-support.md`, `docs/capstone-feature-status.md`,
-`docs/jetson-capstone-handoff.md`, and issues #9 / #24 / #25 / #31 / #258.
+`docs/archive/investigations/jetson-nvidia-support.md`, `docs/archive/plans/capstone-feature-status.md`,
+`docs/archive/handoff/jetson-capstone-handoff.md`, and issues #9 / #24 / #25 / #31 / #258.
 
 **Audience:** Future SLM-OS developers and anyone evaluating how much
 Jetson hardware is addressable from a bare-metal kernel at NS EL2.
@@ -196,7 +196,7 @@ configuration has to arrange it on the Linux side first.
 ## 4. Feature-Level Impact
 
 Cross-walked to the five tracked features (see
-`docs/capstone-feature-status.md`):
+`docs/archive/plans/capstone-feature-status.md`):
 
 | Feature | Status on Jetson | CBB impact |
 |---|---|---|
@@ -324,7 +324,7 @@ answer for bare-metal peripheral access on Jetson.
 - Successfully identify the `reg@XXXX` register IDs for each
   target peripheral — NVIDIA has **never published the decode** for
   these IDs, and the forum thread linked in
-  `docs/jetson-nvidia-support.md` closed without an answer. Reverse
+  `docs/archive/investigations/jetson-nvidia-support.md` closed without an answer. Reverse
   engineering this mapping is the bulk of the work.
 - Willingness to reflash MB2/BCT, which is reversible but has some
   brick risk on the dev kit if the replacement BCT is malformed.
@@ -457,7 +457,7 @@ effort, in rough priority order:
 None of paths A–D are what NVIDIA would call "officially supported" —
 NVIDIA's position is that kexec / bare-metal-on-Jetson is
 **not a validated workflow** (see the linked forum threads in
-`docs/jetson-nvidia-support.md` §"NVIDIA Forum Research"). "Officially
+`docs/archive/investigations/jetson-nvidia-support.md` §"NVIDIA Forum Research"). "Officially
 past CBB" for this project means "reaching a state where blocked
 apertures are no longer blocked by construction, and the fix is
 documented and reproducible," not "NVIDIA blessed us."
@@ -486,11 +486,11 @@ lost if it is repeated.
 
 - `docs/jetson-el2-bringup.md` — The EL2+VHE bypass and the peripheral
   reachability matrix.
-- `docs/jetson-nvidia-support.md` — Investigation history, NVIDIA
+- `docs/archive/investigations/jetson-nvidia-support.md` — Investigation history, NVIDIA
   forum citations, signing toolchain notes.
-- `docs/capstone-feature-status.md` §"GPU-Based Inference" —
+- `docs/archive/plans/capstone-feature-status.md` §"GPU-Based Inference" —
   per-aperture EL2 reachability for the GPU specifically.
-- `docs/jetson-capstone-handoff.md` — Session-level handoff state
+- `docs/archive/handoff/jetson-capstone-handoff.md` — Session-level handoff state
   including the April 17 channel-inherit work.
 - `docs/archive/investigations/jetson-nvgpu-bringup-research.md` —
   `nvgpu.ko` reference trace (blob 17 of 17 cached).

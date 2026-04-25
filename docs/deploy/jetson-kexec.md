@@ -1,6 +1,6 @@
 # Deploying SLM-OS to Jetson Orin Nano — kexec from Linux
 
-This guide covers the **primary deploy path** for Jetson Orin Nano boards: boot Linux (L4T / JetPack) from the normal rootfs, then `kexec` into SLM-OS. This inherits the NVIDIA boot chain's exception-level configuration (NS EL2 + VHE) and PCIe initialization, which SLM-OS needs — the UEFI-direct cold-boot path is still WIP (see `docs/jetson-uefi-direct-result.md` for blockers).
+This guide covers the **primary deploy path** for Jetson Orin Nano boards: boot Linux (L4T / JetPack) from the normal rootfs, then `kexec` into SLM-OS. This inherits the NVIDIA boot chain's exception-level configuration (NS EL2 + VHE) and PCIe initialization, which SLM-OS needs — the UEFI-direct cold-boot path is still WIP (see `docs/archive/investigations/jetson-uefi-direct-result.md` for blockers).
 
 For Jetson hardware, this guide applies regardless of whether Linux is installed on the microSD card (`jetson-nano-2` layout) or an NVMe SSD (`jetson-nano-1` layout) — the kexec-from-Linux flow is identical.
 
@@ -12,7 +12,7 @@ For Jetson hardware, this guide applies regardless of whether Linux is installed
 |---|---|
 | Jetson with L4T already installed | This guide |
 | Fresh Jetson, no OS installed | Flash L4T via NVIDIA SDK Manager first (out of scope here), then this |
-| Jetson cold-boot directly to SLM-OS (no Linux in the chain) | **Not yet working** — `docs/jetson-uefi-direct-result.md` |
+| Jetson cold-boot directly to SLM-OS (no Linux in the chain) | **Not yet working** — `docs/archive/investigations/jetson-uefi-direct-result.md` |
 
 ---
 
@@ -178,5 +178,5 @@ Confirm the `kexec -e` step actually fired. Sometimes `kexec_load` succeeds but 
 - `docs/lab-operations.md` — labctl setup, network / SSH / serial config for each Jetson board
 - `docs/jetson-boot.md` — low-level boot sequence reference
 - `docs/jetson-el2-bringup.md` — VHE / EL2 configuration after kexec
-- `docs/jetson-nvidia-support.md` — GPU / BPMP / PCIe state across kexec
+- `docs/archive/investigations/jetson-nvidia-support.md` — GPU / BPMP / PCIe state across kexec
 - `scripts/jetson-kexec-slmos.sh` — the helper itself, with detailed in-file comments

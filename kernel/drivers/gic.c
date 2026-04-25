@@ -448,7 +448,7 @@ static void gic_redist_init(uint32_t cpu)
      * deliver as FIQ). The Pi 5 capstone work at #99 hit the same
      * class of issue on GICv2. Both platforms instead rely on
      * cooperative preemption (`COOP_PREEMPT`) via CNTPCT polling at
-     * schedule() entry. See docs/jetson-capstone-execution-plan.md
+     * schedule() entry. See docs/archive/plans/jetson-capstone-execution-plan.md
      * revision notes v4 for the full chain of reasoning. */
     GICR_IGROUPR0(cpu)  = 0xFFFFFFFF;  /* Group 1 (best-effort) */
     GICR_IGRPMODR0(cpu) = 0x00000000;  /* Group 1 Non-secure */

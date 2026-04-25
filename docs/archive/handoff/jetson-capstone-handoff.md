@@ -255,7 +255,7 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
   argmax matches the existing CPU NEON reference. Eight milestones
   cover the full distance from `matmul4x4_mt` to MNIST, all
   hardware-validated on jetson-nano-1; see
-  `docs/jetson-gpu-mnist-plan.md` for the per-phase status.
+  `docs/archive/plans/jetson-gpu-mnist-plan.md` for the per-phase status.
   Highlights:
     - **Multi-CTA grid dispatch** (M0): the first kernel to use
       more than one CTA per dispatch. Exercises QMD

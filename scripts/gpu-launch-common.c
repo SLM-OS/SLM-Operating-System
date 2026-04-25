@@ -647,7 +647,7 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
              * + the v5 ops array's poll target convention; track
              * as a follow-up before any benchmark / production
              * workload uses this path. See
-             * docs/jetson-gpu-mnist-plan.md §"Risks and open
+             * docs/archive/plans/jetson-gpu-mnist-plan.md §"Risks and open
              * questions" for the design notes. */
             usleep(500000);
             msync((void *)poll_va, 4, MS_INVALIDATE | MS_SYNC);

@@ -189,7 +189,7 @@ make kernel PLATFORM=X86_64
 - `docs/benchmarks.md` — kernel benchmarks (context switch, IRQ
   latency, IPC). Platform-agnostic infrastructure numbers, not
   inference-specific.
-- `docs/jetson-capstone-execution-plan.md` §G5 — the capstone
+- `docs/archive/plans/jetson-capstone-execution-plan.md` §G5 — the capstone
   deliverable definition this doc fulfills.
 - `docs/x86-64-capstone-closure-plan.md` §C3 — x86-64 benchmark
   track that will contribute x86-64 rows once #141 is resolved.

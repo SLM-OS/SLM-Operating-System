@@ -36,7 +36,7 @@ activate wrapper around runtime model blobs.
 | Target | SD card | NVMe / SSD | USB drive | Notes |
 |---|---|---|---|---|
 | Raspberry Pi 5 | [`pi5-sdcard.md`](pi5-sdcard.md), [`pi5-sdwire.md`](pi5-sdwire.md), [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) | **Gap** (#TBD) | — | Preserve both Pi 5 models: SDWire-first deploy where hardware supports it, and maintenance-OS dual boot where it does not. |
-| Jetson Orin Nano | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SD rootfs) | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SSD rootfs) | — | No standalone bare-metal boot path yet — UEFI-direct is WIP (see `docs/jetson-uefi-direct-result.md`). |
+| Jetson Orin Nano | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SD rootfs) | [`jetson-kexec.md`](jetson-kexec.md) (kexec from Linux on the SSD rootfs) | — | No standalone bare-metal boot path yet — UEFI-direct is WIP (see `docs/archive/investigations/jetson-uefi-direct-result.md`). |
 | x86-64 (test-pc) | — | [`x86-64-ssd.md`](x86-64-ssd.md) | **Gap** (#TBD) | UEFI disk image written to SSD via SDWire; kexec-from-Linux is WIP (see `docs/x86-64-gpu-inference-status.md` §4.2.k). |
 | QEMU (ARM64 / x86-64) | N/A | N/A | N/A | `make run` — no deploy step. See `docs/getting-started.md`. |
 

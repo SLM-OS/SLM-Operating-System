@@ -5,7 +5,7 @@
 > authoritative — file an update here.
 >
 > **2026-04-17 update (post-P1/P2/P3 merged):** five investigation
-> deltas captured in `docs/jetson-uefi-direct-result.md`:
+> deltas captured in `docs/archive/investigations/jetson-uefi-direct-result.md`:
 > - §5b: UEFI enters at EL2 (not EL1 as PR #226 thought).
 > - §5c: `HCR_EL2 = 0x88000000` (E2H=0, no VHE). P3 fixes the
 >   resulting hang via an E2H-aware `efi_disable_mmu` + a RMW
@@ -34,8 +34,8 @@ and kexec entirely, and verify the GSP Falcon stays unlocked so GPU
 compute becomes reachable.
 
 This is **Path 2** of issue #190 (GSP Falcon priv-lockdown blocks ACR HS
-load). See `docs/capstone-feature-status.md` §"GPU-Based Inference" and
-`docs/jetson-capstone-handoff.md` §3d for the full context — the
+load). See `docs/archive/plans/capstone-feature-status.md` §"GPU-Based Inference" and
+`docs/archive/handoff/jetson-capstone-handoff.md` §3d for the full context — the
 short version is that our current kexec-from-Linux workflow somehow
 asserts `HWCFG2.RISCV_BR_PRIV_LOCKDOWN` (bit 13), preventing our ACR
 HS ucode load. A 2026-04-16 fast-test confirmed bit 13 is **0** in
@@ -150,7 +150,7 @@ doesn't.
   before Linux?** The fast-test was in live Linux. You need to verify
   `HWCFG2` bit 13 is still 0 right after `efi_stub_entry` returns.
 - **Does the Jetson's UEFI enforce secure-boot signature checks?**
-  Per `docs/jetson-nvidia-support.md`, production silicon has PK/KEK/db
+  Per `docs/archive/investigations/jetson-nvidia-support.md`, production silicon has PK/KEK/db
   keys. If secure boot is enforced, unsigned SLM-OS won't run without
   disabling secure boot in BIOS setup.
 
@@ -286,10 +286,10 @@ Makefile                                 top-level orchestration
 
 docs/
   jetson-el2-bringup.md         current state (authoritative)
-  jetson-nvidia-support.md      UEFI secure-boot notes
-  jetson-capstone-handoff.md    cross-project handoff, §3d summarizes GPU branch
-  capstone-feature-status.md    §"GPU-Based Inference" for the blocker narrative
-  jetson-uefi-direct-handoff.md (this file)
+  archive/investigations/jetson-nvidia-support.md   UEFI secure-boot notes
+  archive/handoff/jetson-capstone-handoff.md      cross-project handoff (April-15 snapshot, archived 2026-04-25)
+  archive/plans/capstone-feature-status.md         §"GPU-Based Inference" for the pre-M10 blocker narrative
+  jetson-uefi-direct-handoff.md                     (this file)
 ```
 
 ### Build commands
@@ -332,7 +332,7 @@ The resulting `build/kernel/slmos.elf` is the PE candidate. Rename to
 
 - Any `.reloc` generation machinery
 - Any UEFI boot entry setup scripts
-- A short `docs/jetson-uefi-direct-result.md` documenting your result
+- A short `docs/archive/investigations/jetson-uefi-direct-result.md` documenting your result
   — especially the `nvgpu acr` BR_RETCODE.result observation
 - Test coverage for any new C code you write (follow the pattern in
   `host-tools/gsp-harness/test_ga10b_bringup.c` for mock-vtable tests)
