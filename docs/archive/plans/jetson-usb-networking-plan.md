@@ -1,11 +1,20 @@
 # Jetson USB Networking Plan
 
+**Archived:** 25 April 2026
+
+This document is retained as the detailed bring-up and investigation
+record for Jetson USB networking issue #266. The shipped Jetson USB
+CDC-ECM path later landed on `main`; current status and follow-on work
+now live in `docs/networking.md`,
+`docs/networking-expansion-plan.md`,
+`docs/usb-host-generalization-plan.md`, and issues #384-#387.
+
 Detailed implementation plan for USB-based networking on Jetson Orin
 Nano. **Option A (USB-A host port + CDC-ECM dongle)** is the primary
 target. **Option B (USB-C device mode + CDC-ECM gadget)** is a fallback
 only pursued if the Phase 0 CBB probes rule Option A out.
 
-**Status:** Phases 0-2 landed on main; Phase 3A partially landed and
+**Historical status:** Phases 0-2 landed on main; Phase 3A partially landed and
 then mothballed after a blocker traced to Linux's kexec-time SMMU
 shutdown (#285, closed wontfix). See §8 for the full investigation
 writeup. Tracked in

@@ -4,16 +4,18 @@ Investigation of whether the current virtio-net cache maintenance
 contract correctly supports a DMA-capable NIC on platforms where
 secondary-CPU caches don't participate in coherency (Pi 5, Jetson).
 
-Tracking: **#203**. Blocks or shapes #202 (Pi 5 BCM GENET) and #25
-(Jetson EQOS).
+Tracking: **#203**. Shapes the landed Pi 5 MACB/GEM path, the shipped
+Jetson USB CDC-ECM path, and the remaining Jetson internal-Ethernet
+follow-on (#25).
 
-Status: **investigation only**. The `virtio_net.c` cache-maintenance
-calls were added for QEMU, which is trivially coherent — the path
-has never been exercised against a device that actually DMAs through
-the Point of Coherency (PoC) on Pi 5 or Jetson. This document
-captures the current model, the open questions, and the verification
-plan for the first real-hardware NIC driver (#202 or #25, whichever
-lands first).
+Status: **investigation / follow-on hardening**. The `virtio_net.c`
+cache-maintenance calls were added for QEMU, which is trivially
+coherent. Real-hardware networking now exists on Pi 5 and on the
+validated Jetson USB path, but the underlying DMA model still needs to
+be carried forward carefully into each additional real-hardware
+transport. This document captures the current model, the open
+questions, and the verification plan for the next real-hardware
+networking transport PR.
 
 ---
 
@@ -212,10 +214,11 @@ time; SLM-OS should do the same.
 
 ---
 
-## Verification plan (first real-hardware driver PR)
+## Verification plan (next real-hardware transport PR)
 
-When #202 (Pi 5 GENET) or #25 (Jetson EQOS) lands the first
-real-hardware NIC driver, the PR must include:
+When the next real-hardware networking transport lands (for example the
+Jetson internal-RJ45 / PCIe path in #25 or a broader Jetson USB
+networking follow-on), the PR must include:
 
 ### Instrumented tests
 
