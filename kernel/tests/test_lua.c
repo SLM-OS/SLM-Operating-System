@@ -2590,7 +2590,13 @@ static void test_slm_model_infer_bytes(void)
         "\n"
         "-- Bad arg: byte length not a multiple of 4\n"
         "local _, rc = slm.model_infer_bytes(idx, '\\0\\0\\0')\n"
-        "assert(rc == nil or rc < 0, 'odd-length bytes should error')\n";
+        "assert(rc == nil or rc < 0, 'odd-length bytes should error')\n"
+        "\n"
+        "-- Bad arg: byte length above the 32 KB cap. Forces the\n"
+        "-- second branch in l_model_infer_bytes (rc=-2) so a future\n"
+        "-- refactor that drops the cap or changes its rc gets caught.\n"
+        "local _, rc = slm.model_infer_bytes(idx, string.rep('\\0', 33 * 1024))\n"
+        "assert(rc == -2, 'oversize bytes should return -2, got ' .. tostring(rc))\n";
 
     int result = lua_slm_dostring(L, code);
     TEST_ASSERT_EQUAL_INT(0, result);
