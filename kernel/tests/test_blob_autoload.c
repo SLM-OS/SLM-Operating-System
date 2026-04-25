@@ -107,7 +107,119 @@ static size_t build_eviction_xgb_payload(uint8_t *out, size_t out_cap)
     return cursor;
 }
 
+static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
+                                         uint8_t *out,
+                                         size_t out_cap)
+{
+    enum {
+        PAYLOAD_HEADER_LEN = 8,
+        L1_IN = 27,
+        L1_OUT = 64,
+        L2_OUT = 32,
+        L3_OUT = 16,
+        OUT_DIM = 1,
+        W_L1_LEN = L1_OUT * L1_IN,
+        B_L1_LEN = L1_OUT,
+        W_L2_LEN = L2_OUT * L1_OUT,
+        B_L2_LEN = L2_OUT,
+        W_L3_LEN = L3_OUT * L2_OUT,
+        B_L3_LEN = L3_OUT,
+        W_OUT_LEN = OUT_DIM * L3_OUT,
+        B_OUT_LEN = OUT_DIM,
+        FLOAT_COUNT = W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
+                    + W_L3_LEN + B_L3_LEN + W_OUT_LEN + B_OUT_LEN,
+        TOTAL = PAYLOAD_HEADER_LEN + FLOAT_COUNT * 4
+    };
+    size_t cursor = 0;
+    size_t idx = 0;
+
+    if (out_cap < TOTAL) return 0;
+    memset(out, 0, TOTAL);
+    out[0] = 'M'; out[1] = 'L'; out[2] = 'P'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 0; out[7] = 0;
+    cursor = PAYLOAD_HEADER_LEN;
+
+#define WRITE_U32_LE(bits)                                                   \
+    do {                                                                     \
+        uint32_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        cursor += 4;                                                         \
+    } while (0)
+
+    for (idx = 0; idx < FLOAT_COUNT; idx++) {
+        uint32_t bits = 0u;
+        if (idx == 0) bits = 0x3F800000u;
+        if (idx == W_L1_LEN + B_L1_LEN) bits = 0x3F800000u;
+        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN) bits = 0x3F800000u;
+        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
+                + W_L3_LEN + B_L3_LEN) {
+            bits = out_weight_bits;
+        }
+        WRITE_U32_LE(bits);
+    }
+#undef WRITE_U32_LE
+
+    return cursor;
+}
+
 #ifdef CONFIG_AI_SCHEDULER
+static size_t build_sched_mlp_payload(uint32_t out_weight_bits,
+                                      uint8_t *out,
+                                      size_t out_cap)
+{
+    enum {
+        PAYLOAD_HEADER_LEN = 12,
+        W0 = AI_MLP_LAYER0_OUT * AI_MLP_LAYER0_IN,
+        B0 = AI_MLP_LAYER0_OUT,
+        W1 = AI_MLP_LAYER1_OUT * AI_MLP_LAYER1_IN,
+        B1 = AI_MLP_LAYER1_OUT,
+        W2 = AI_MLP_LAYER2_OUT * AI_MLP_LAYER2_IN,
+        B2 = AI_MLP_LAYER2_OUT,
+        W3 = AI_SCHED_N_ACTIONS * AI_MLP_LAYER3_IN,
+        B3 = AI_SCHED_N_ACTIONS,
+        FLOATS = W0 + B0 + W1 + B1 + W2 + B2 + W3 + B3,
+        TOTAL = PAYLOAD_HEADER_LEN + FLOATS * 4
+    };
+    size_t cursor = 0;
+    size_t idx = 0;
+
+    if (out_cap < TOTAL) return 0;
+    memset(out, 0, TOTAL);
+    out[0] = 'S'; out[1] = 'M'; out[2] = 'L'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 1; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = (uint8_t)(AI_SCHED_N_ACTIONS & 0xFF);
+    out[11] = (uint8_t)(AI_SCHED_N_ACTIONS >> 8);
+
+    cursor = PAYLOAD_HEADER_LEN;
+#define WRITE_U32_LE(bits)                                                   \
+    do {                                                                     \
+        uint32_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        cursor += 4;                                                         \
+    } while (0)
+
+    for (idx = 0; idx < FLOATS; idx++) {
+        uint32_t bits = 0u;
+        if (idx == 0) bits = 0x3F800000u;
+        if (idx == W0 + B0) bits = 0x3F800000u;
+        if (idx == W0 + B0 + W1 + B1) bits = 0x3F800000u;
+        if (idx == W0 + B0 + W1 + B1 + W2 + B2) bits = out_weight_bits;
+        WRITE_U32_LE(bits);
+    }
+#undef WRITE_U32_LE
+
+    return cursor;
+}
+
 static size_t build_sched_config_payload(uint8_t *out, size_t out_cap)
 {
     size_t cursor = 0;
@@ -159,6 +271,28 @@ static int read_text_file(const char *path, char *buf, size_t cap)
     if (n < 0) return n;
     buf[n] = '\0';
     return n;
+}
+
+static void build_long_path(char *out, size_t cap,
+                            const char *stem, char fill,
+                            const char *suffix)
+{
+    static const char prefix[] = "/mnt/files/";
+    size_t prefix_len = sizeof(prefix) - 1;
+    size_t stem_len = strlen(stem);
+    size_t suffix_len = strlen(suffix);
+    size_t target_len = VFS_MAX_PATH - 1;
+    size_t fill_len;
+
+    TEST_ASSERT_TRUE(cap >= VFS_MAX_PATH);
+    TEST_ASSERT_TRUE(target_len > prefix_len + stem_len + suffix_len);
+    fill_len = target_len - prefix_len - stem_len - suffix_len;
+
+    memcpy(out, prefix, prefix_len);
+    memcpy(out + prefix_len, stem, stem_len);
+    memset(out + prefix_len + stem_len, fill, fill_len);
+    memcpy(out + prefix_len + stem_len + fill_len, suffix, suffix_len);
+    out[target_len] = '\0';
 }
 
 static void test_blob_autoload_init_creates_conf(void)
@@ -321,6 +455,89 @@ static void test_blob_autoload_rejects_invalid_paths(void)
     TEST_ASSERT_EQUAL_INT(1, blob_autoload_get("sched", "config", path, sizeof(path)));
 }
 
+#ifdef CONFIG_AI_SCHEDULER
+static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
+{
+    char path_xgb[VFS_MAX_PATH];
+    char path_mlp[VFS_MAX_PATH];
+    char path_cacheus[VFS_MAX_PATH];
+    char path_sched_mlp[VFS_MAX_PATH];
+    char path_sched_ppo[VFS_MAX_PATH];
+    char path_sched_cfg[VFS_MAX_PATH];
+    char conf_buf[1400];
+    uint8_t ev_xgb_payload[80];
+    uint8_t ev_mlp_payload[2048];
+    uint8_t ev_cacheus_payload[24];
+    uint8_t sched_dense_payload[4096];
+    uint8_t sched_cfg_payload[40];
+    uint8_t blob[8192];
+    size_t payload_len;
+    size_t blob_len;
+    int conf_len;
+
+    build_long_path(path_xgb, sizeof(path_xgb), "xgb-", 'a', ".blob");
+    build_long_path(path_mlp, sizeof(path_mlp), "mlp-", 'b', ".blob");
+    build_long_path(path_cacheus, sizeof(path_cacheus), "cacheus-", 'c', ".blob");
+    build_long_path(path_sched_mlp, sizeof(path_sched_mlp), "sched-mlp-", 'd', ".blob");
+    build_long_path(path_sched_ppo, sizeof(path_sched_ppo), "sched-ppo-", 'e', ".blob");
+    build_long_path(path_sched_cfg, sizeof(path_sched_cfg), "sched-cfg-", 'f', ".blob");
+
+    payload_len = build_eviction_xgb_payload(ev_xgb_payload, sizeof(ev_xgb_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    blob_len = build_outer_blob(1, ev_xgb_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_xgb, blob, blob_len));
+
+    payload_len = build_eviction_mlp_payload(0x3F800000u, ev_mlp_payload, sizeof(ev_mlp_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    blob_len = build_outer_blob(2, ev_mlp_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_mlp, blob, blob_len));
+
+    memset(ev_cacheus_payload, 0, sizeof(ev_cacheus_payload));
+    ev_cacheus_payload[0] = 'C'; ev_cacheus_payload[1] = 'C';
+    ev_cacheus_payload[2] = 'F'; ev_cacheus_payload[3] = 'G';
+    ev_cacheus_payload[4] = 1; ev_cacheus_payload[5] = 0;
+    ev_cacheus_payload[8] = 1; /* all5 */
+    { uint32_t lr_bits = 0x3e4ccccdu; memcpy(ev_cacheus_payload + 12, &lr_bits, 4); }
+    { uint32_t window = 200u; memcpy(ev_cacheus_payload + 16, &window, 4); }
+    { uint32_t min_weight_bits = 0x3dcccccdu; memcpy(ev_cacheus_payload + 20, &min_weight_bits, 4); }
+    blob_len = build_outer_blob(3, ev_cacheus_payload, sizeof(ev_cacheus_payload), blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_cacheus, blob, blob_len));
+
+    payload_len = build_sched_mlp_payload(0x3F800000u, sched_dense_payload, sizeof(sched_dense_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    blob_len = build_outer_blob(SCHED_MODEL_KIND_MLP, sched_dense_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_sched_mlp, blob, blob_len));
+
+    blob_len = build_outer_blob(SCHED_MODEL_KIND_PPO, sched_dense_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_sched_ppo, blob, blob_len));
+
+    payload_len = build_sched_config_payload(sched_cfg_payload, sizeof(sched_cfg_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    blob_len = build_outer_blob(SCHED_MODEL_KIND_CONFIG, sched_cfg_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_sched_cfg, blob, blob_len));
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", path_xgb));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "mlp", path_mlp));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "cacheus_config", path_cacheus));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "mlp", path_sched_mlp));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "ppo", path_sched_ppo));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "config", path_sched_cfg));
+
+    conf_len = read_text_file(BLOB_AUTOLOAD_CONF_PATH, conf_buf, sizeof(conf_buf));
+    TEST_ASSERT_TRUE(conf_len > 1024);
+    TEST_ASSERT_NOT_NULL(find_substr(conf_buf, path_sched_cfg));
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("sched", "config"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "config", path_sched_cfg));
+}
+#endif
+
 int test_suite_blob_autoload(void)
 {
     UNITY_BEGIN();
@@ -329,5 +546,8 @@ int test_suite_blob_autoload(void)
     RUN_TEST(test_blob_boot_autoload_activates_runtime_blobs);
     RUN_TEST(test_blob_autoload_shell_commands);
     RUN_TEST(test_blob_autoload_rejects_invalid_paths);
+#ifdef CONFIG_AI_SCHEDULER
+    RUN_TEST(test_blob_autoload_accepts_max_length_paths_across_all_slots);
+#endif
     return UNITY_END();
 }

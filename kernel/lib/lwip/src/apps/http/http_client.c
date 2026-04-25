@@ -707,6 +707,17 @@ httpc_get_file_dns(const char* server_name, u16_t port, const char* uri, const h
   return ERR_OK;
 }
 
+void
+httpc_abort_connection(httpc_state_t *connection)
+{
+  if (connection == NULL) {
+    return;
+  }
+  connection->conn_settings = NULL;
+  connection->callback_arg = NULL;
+  (void)httpc_free_state(connection);
+}
+
 #if LWIP_HTTPC_HAVE_FILE_IO
 /* Implementation to disk via fopen/fwrite/fclose follows */
 

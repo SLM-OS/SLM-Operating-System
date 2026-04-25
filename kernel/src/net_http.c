@@ -346,7 +346,16 @@ int net_http_get_file(const char *url, const char *dest_path,
     while (!dl.done) {
         net_poll();
         if ((sys_now() - start_ms) > NET_HTTP_OVERALL_TIMEOUT_MS) {
+            if (httpc_conn != NULL) {
+                httpc_abort_connection(httpc_conn);
+                httpc_conn = NULL;
+            }
+            dl.result.httpc_result = HTTPC_RESULT_ERR_TIMEOUT;
+            dl.result.lwip_err = (int)ERR_TIMEOUT;
             (void)close_and_cleanup_temp(&dl, false);
+            if (out) {
+                *out = dl.result;
+            }
             return NET_E_TIMEOUT;
         }
     }

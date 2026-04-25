@@ -18,6 +18,7 @@ struct blob_autoload_entry {
 };
 
 #define BLOB_AUTOLOAD_CONF_TMP_PATH "/blob_autoload.conf.tmp"
+#define BLOB_AUTOLOAD_ENTRY_LINE_OVERHEAD 48u
 
 static struct blob_autoload_entry blob_entries[] = {
     {"eviction", "xgboost", 1, {0}, 0},
@@ -26,6 +27,18 @@ static struct blob_autoload_entry blob_entries[] = {
     {"sched", "mlp", SCHED_MODEL_KIND_MLP, {0}, 0},
     {"sched", "ppo", SCHED_MODEL_KIND_PPO, {0}, 0},
     {"sched", "config", SCHED_MODEL_KIND_CONFIG, {0}, 0},
+};
+
+enum {
+    BLOB_AUTOLOAD_ENTRY_COUNT =
+        (int)(sizeof(blob_entries) / sizeof(blob_entries[0])),
+    BLOB_AUTOLOAD_CONF_BUF_SIZE =
+        (int)(sizeof(
+            "# Runtime blob autoload config\n"
+            "# Format: <domain> <kind> <absolute-path>\n"
+            "# Entries listed here are staged and activated at boot.\n")) +
+        (int)(sizeof(blob_entries) / sizeof(blob_entries[0])) *
+            (int)(VFS_MAX_PATH + BLOB_AUTOLOAD_ENTRY_LINE_OVERHEAD)
 };
 
 static void blob_entries_reset(struct blob_autoload_entry *entries, size_t count)
@@ -50,7 +63,7 @@ static char *trim_ascii(char *s)
 
 static int blob_autoload_read_entries(struct blob_autoload_entry *entries, size_t count)
 {
-    static char buf[1024];
+    static char buf[BLOB_AUTOLOAD_CONF_BUF_SIZE];
     int bytes = vfs_read_path(BLOB_AUTOLOAD_CONF_PATH, buf, sizeof(buf) - 1, 0);
     if (bytes <= 0) {
         blob_entries_reset(entries, count);
@@ -112,7 +125,7 @@ static int blob_autoload_write_entries(const struct blob_autoload_entry *entries
         "# Runtime blob autoload config\n"
         "# Format: <domain> <kind> <absolute-path>\n"
         "# Entries listed here are staged and activated at boot.\n";
-    static char buf[1024];
+    static char buf[BLOB_AUTOLOAD_CONF_BUF_SIZE];
     const char *subpath = NULL;
     struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx("/mnt/files", &subpath);
     int fd;
