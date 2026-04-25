@@ -44,6 +44,7 @@
 #include "../../kernel/gpu/nvidia/ga10b_bringup.h"
 #include "../../kernel/gpu/nvidia/ga10b_channel_handoff.h"
 #include "../../kernel/gpu/nvidia/gsp.h"
+#include "../../scripts/gpu-qmd-bits.h"
 
 /* nvidia_vbios_platform_load is referenced by the shared gsp bringup
  * link set, but not by ga10b_bringup.c. Provide a stub so the test
@@ -1782,6 +1783,124 @@ static void test_scanner_empty_range(void)
 }
 
 /* ======================================================================
+ * gpu_qmd_set_bits — pure-logic bit-range setter for QMDV03_00
+ * (scripts/gpu-qmd-bits.h). Exercised here because the production
+ * call-site (scripts/gpu-launch-common.c) only runs on Jetson and
+ * has no host-side smoke coverage; bit-twiddling regressions would
+ * otherwise only surface on hardware.
+ * ====================================================================== */
+
+static void test_qmd_set_bits_single_bit(void)
+{
+    printf("== test_qmd_set_bits_single_bit ==\n");
+    uint32_t qmd[64] = {0};
+    /* hi == lo: the simplest case, single-bit field. */
+    gpu_qmd_set_bits(qmd, 5, 5, 1);
+    REQUIRE_EQ(qmd[0], 1u << 5);
+
+    /* Setting the same bit to 0 clears it without disturbing
+     * neighbors. */
+    qmd[0] = 0xFFFFFFFFu;
+    gpu_qmd_set_bits(qmd, 5, 5, 0);
+    REQUIRE_EQ(qmd[0], 0xFFFFFFFFu & ~(1u << 5));
+}
+
+static void test_qmd_set_bits_within_one_word(void)
+{
+    printf("== test_qmd_set_bits_within_one_word ==\n");
+    uint32_t qmd[64] = {0};
+    /* 8-bit field at bits [15:8], value 0xAB. */
+    gpu_qmd_set_bits(qmd, 15, 8, 0xAB);
+    REQUIRE_EQ(qmd[0], 0xABu << 8);
+
+    /* Writing into a non-zero word: must mask out only the field's
+     * bits and OR in the new value. */
+    qmd[0] = 0x12345678u;
+    gpu_qmd_set_bits(qmd, 15, 8, 0xAB);
+    REQUIRE_EQ(qmd[0], (0x12345678u & ~(0xFFu << 8)) | (0xABu << 8));
+}
+
+static void test_qmd_set_bits_full_32_bit_word(void)
+{
+    printf("== test_qmd_set_bits_full_32_bit_word ==\n");
+    uint32_t qmd[64] = {0};
+    /* 32-bit field aligned to a word boundary. lo % 32 == 0,
+     * mask = 0xFFFFFFFF, no bit-shift quirks. */
+    gpu_qmd_set_bits(qmd, 31, 0, 0xDEADBEEFu);
+    REQUIRE_EQ(qmd[0], 0xDEADBEEFu);
+
+    /* Same field on a non-zero word should fully overwrite — the
+     * 32-bit mask covers the whole word. */
+    qmd[1] = 0xCAFEBABEu;
+    gpu_qmd_set_bits(qmd, 63, 32, 0x11223344u);
+    REQUIRE_EQ(qmd[1], 0x11223344u);
+}
+
+static void test_qmd_set_bits_spans_two_words(void)
+{
+    printf("== test_qmd_set_bits_spans_two_words ==\n");
+    uint32_t qmd[64] = {0};
+    /* 8-bit field at bits [35:28] — straddles the word_lo/word_hi
+     * boundary at bit 32. Low 4 bits go to qmd[0][31:28]; high 4
+     * bits go to qmd[1][3:0]. Pick a value where every nibble is
+     * distinct so any bit-mismatch shows up. */
+    gpu_qmd_set_bits(qmd, 35, 28, 0xC9);  /* 0b1100_1001 */
+    REQUIRE_EQ(qmd[0], 0x9u << 28);
+    REQUIRE_EQ(qmd[1], 0xCu);
+
+    /* Same span over a non-zero qmd: must preserve bits outside
+     * [35:28] in both qmd[0] and qmd[1]. */
+    memset(qmd, 0, sizeof(qmd));
+    qmd[0] = 0x0FFFFFFFu;  /* bits [27:0] set */
+    qmd[1] = 0xFFFFFFF0u;  /* bits [31:4] set */
+    gpu_qmd_set_bits(qmd, 35, 28, 0x55);  /* 0b0101_0101 */
+    REQUIRE_EQ(qmd[0], 0x0FFFFFFFu | (0x5u << 28));
+    REQUIRE_EQ(qmd[1], 0xFFFFFFF0u | 0x5u);
+}
+
+static void test_qmd_set_bits_truncates_excess_value(void)
+{
+    printf("== test_qmd_set_bits_truncates_excess_value ==\n");
+    uint32_t qmd[64] = {0};
+    /* 4-bit field at bits [3:0]; passing 0xFFu must truncate to
+     * 0xF — high bits silently dropped. */
+    gpu_qmd_set_bits(qmd, 3, 0, 0xFFu);
+    REQUIRE_EQ(qmd[0], 0xFu);
+
+    /* 16-bit field with a 17-bit-wide value — top bit must be
+     * dropped, not bleed into adjacent bits. */
+    memset(qmd, 0, sizeof(qmd));
+    gpu_qmd_set_bits(qmd, 23, 8, 0x1FFFFu);
+    REQUIRE_EQ(qmd[0], 0xFFFFu << 8);
+}
+
+static void test_qmd_set_bits_preserves_neighbors(void)
+{
+    printf("== test_qmd_set_bits_preserves_neighbors ==\n");
+    uint32_t qmd[64];
+    memset(qmd, 0xAB, sizeof(qmd));
+    /* Pick a real Ampere field: QMD_PROGRAM_ADDRESS_LOWER spans
+     * bits [1567:1536] (32 bits, word-aligned at qmd[48]). Writing
+     * into it must touch nothing else. */
+    uint32_t neighbor_lo = qmd[47];
+    uint32_t neighbor_hi = qmd[49];
+    gpu_qmd_set_bits(qmd, 1567, 1536, 0x1ffc010000ULL & 0xFFFFFFFFu);
+    REQUIRE_EQ(qmd[47], neighbor_lo);
+    REQUIRE_EQ(qmd[49], neighbor_hi);
+    REQUIRE_EQ(qmd[48], (uint32_t)(0x1ffc010000ULL & 0xFFFFFFFFu));
+
+    /* And a real two-word-spanning field: cbuf addr-lo BASE is at
+     * bit 1024 (qmd[32]) and runs 32 bits. Word-aligned, so
+     * single-word path — but useful sanity that we hit the right
+     * word index from a high bit number. */
+    memset(qmd, 0xAB, sizeof(qmd));
+    uint32_t pre = qmd[33];
+    gpu_qmd_set_bits(qmd, 1055, 1024, 0xDEADBEEFu);
+    REQUIRE_EQ(qmd[32], 0xDEADBEEFu);
+    REQUIRE_EQ(qmd[33], pre);
+}
+
+/* ======================================================================
  * Entry
  * ====================================================================== */
 
@@ -1861,6 +1980,13 @@ int main(void)
     test_scanner_returns_zero_on_miss();
     test_scanner_skips_between_pages();
     test_scanner_empty_range();
+
+    test_qmd_set_bits_single_bit();
+    test_qmd_set_bits_within_one_word();
+    test_qmd_set_bits_full_32_bit_word();
+    test_qmd_set_bits_spans_two_words();
+    test_qmd_set_bits_truncates_excess_value();
+    test_qmd_set_bits_preserves_neighbors();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);

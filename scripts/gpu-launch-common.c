@@ -98,45 +98,9 @@ uint64_t gpu_virt_to_phys(void *vaddr)
     return pfn * 4096 + ((uint64_t)vaddr & 0xFFF);
 }
 
-/* ============================================================
- * QMD bit-range setter
- * ============================================================ */
-
-void gpu_qmd_set_bits(uint32_t *qmd, unsigned hi, unsigned lo, uint64_t val)
-{
-    unsigned nbits = hi - lo + 1;
-    /* The `nbits >= 64` branch isn't dead — it guards the full-width
-     * case against `1ULL << 64`, which is undefined behavior per C
-     * (shift by ≥ width). All Ampere QMDV03_00 fields used today are
-     * ≤ 32 bits, so the guard is precautionary, but cheap and
-     * correct, so leave it. */
-    uint64_t mask = (nbits >= 64) ? ~0ULL : ((1ULL << nbits) - 1ULL);
-    val &= mask;
-
-    unsigned word_lo = lo / 32;
-    unsigned word_hi = hi / 32;
-    unsigned shift_lo = lo % 32;
-
-    if (word_lo == word_hi) {
-        uint32_t wmask = (uint32_t)(mask) << shift_lo;
-        qmd[word_lo] = (qmd[word_lo] & ~wmask) |
-                       (((uint32_t)val << shift_lo) & wmask);
-    } else {
-        /* Range spans two 32-bit words: low bits of `val` go to
-         * word_lo[shift_lo..31]; high bits to word_hi[0..(hi%32)]. */
-        unsigned bits_in_lo = 32 - shift_lo;
-        uint32_t lo_mask = (0xFFFFFFFFu << shift_lo);
-        qmd[word_lo] = (qmd[word_lo] & ~lo_mask) |
-                       (((uint32_t)val << shift_lo) & lo_mask);
-
-        unsigned bits_in_hi = nbits - bits_in_lo;
-        uint32_t hi_mask = (bits_in_hi >= 32) ? 0xFFFFFFFFu :
-                           ((1u << bits_in_hi) - 1u);
-        uint64_t hi_val = val >> bits_in_lo;
-        qmd[word_hi] = (qmd[word_hi] & ~hi_mask) |
-                       ((uint32_t)hi_val & hi_mask);
-    }
-}
+/* gpu_qmd_set_bits is now `static inline` in scripts/gpu-qmd-bits.h
+ * so the host-test harness can pick it up directly. See that header
+ * for the implementation + UB-shift-guard rationale. */
 
 /* ============================================================
  * Channel setup + buffer allocation
@@ -529,6 +493,20 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
                          uint32_t expected_payload,
                          uint32_t timeout_ms)
 {
+    /* GPFIFO entry encodes the pushbuffer length at gp_e1[31:10] —
+     * 22 bits, max 0x3FFFFF dwords. Past that the high bits get
+     * silently truncated and PBDMA reads a too-short pushbuffer.
+     * All current launchers stay well under this (largest is 13
+     * dwords), but a fail-fast guard surfaces the failure mode at
+     * its source if a future caller balloons the pb. */
+    if (pb_dwords >= (1u << 22)) {
+        fprintf(stderr,
+                "gpu_submit_and_poll: pb_dwords=%zu exceeds GPFIFO "
+                "entry size field (max %u)\n",
+                pb_dwords, (1u << 22) - 1u);
+        exit(1);
+    }
+
     /* Copy pushbuffer into the mapped ring region. */
     uint32_t *pb32 = (uint32_t *)ctx->pb_va;
     memcpy(pb32, pb_buf, pb_dwords * sizeof(uint32_t));

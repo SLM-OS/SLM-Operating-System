@@ -35,6 +35,7 @@
 #include "/usr/src/nvidia/nvidia-oot/include/uapi/linux/nvmap.h"
 
 #include "../kernel/gpu/nvidia/ga10b_channel_handoff.h"
+#include "gpu-qmd-bits.h"  /* gpu_qmd_set_bits — pure-logic, host-testable */
 
 /* ============================================================
  * Class + subchannel mapping (per Mesa NVK's nv_push.h — compute
@@ -237,10 +238,6 @@ void *gpu_load_file(const char *path, size_t *out_size);
 /* Resolve a process-virtual address to its CPU-physical via
  * /proc/self/pagemap. Returns 0 on failure. */
 uint64_t gpu_virt_to_phys(void *vaddr);
-
-/* Pack `val` into bits [hi:lo] of the 256-byte QMD stored as
- * `qmd[64]` uint32s. Handles fields that span a dword boundary. */
-void gpu_qmd_set_bits(uint32_t *qmd, unsigned hi, unsigned lo, uint64_t val);
 
 /* Full channel bringup: alloc AS, open TSG + channel, bind
  * subcontext, SETUP_BIND, ALLOC_OBJ_CTX(COMPUTE_B),
