@@ -386,8 +386,9 @@ static void test_large_file_spans_clusters(void)
     mount_volume();
 
     /* Build a deterministic 64 KB pattern: each byte is its index
-     * mod 256. Easy to verify on read-back without storing two
-     * 64 KB buffers in BSS. */
+     * mod 256. Easy to verify on read-back. The buffers are static
+     * (BSS), not auto: the kernel test stack is 16 KB and these are
+     * 64 KB each — auto-locals would overflow the stack. */
     static uint8_t large_buf[64 * 1024];
     for (size_t i = 0; i < sizeof(large_buf); i++) {
         large_buf[i] = (uint8_t)(i & 0xFFu);
@@ -399,7 +400,7 @@ static void test_large_file_spans_clusters(void)
     TEST_ASSERT_EQUAL_INT(FR_OK, res);
     /* Read in two halves to exercise mid-file seek-less continuation,
      * which is what the staging-state-machine readers will do. */
-    static uint8_t verify_buf[64 * 1024];
+    static uint8_t verify_buf[64 * 1024];   /* static for the same reason */
     UINT got = 0;
     res = f_read(&fp, verify_buf, sizeof(verify_buf) / 2, &got);
     TEST_ASSERT_EQUAL_INT(FR_OK, res);

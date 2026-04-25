@@ -620,6 +620,9 @@ set(TEST_SOURCES
     kernel/tests/test_bcm_mailbox.c
     # FatFs / FAT32 integration tests — exercises the diskio shim
     # against the ramdisk stub block driver. Stage 2 of #368.
+    # Intentionally NOT platform-gated: FatFs and the ramdisk are
+    # platform-neutral (no MMIO, only PMM + memcpy), so the same
+    # tests are valuable on every test target including x86-64.
     kernel/tests/test_fat32.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>

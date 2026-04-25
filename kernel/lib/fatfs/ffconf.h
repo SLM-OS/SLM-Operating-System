@@ -92,8 +92,11 @@
  * existing lab card use. */
 
 #define FF_LBA64		0
-/* 32-bit LBA. 32 MB test ramdisk = 65536 sectors; production SD is
- * up to 2 TB at 512-byte sectors which is the LBA32 ceiling — fine. */
+/* 32-bit LBA. The lab card's largest production partition (the
+ * ~7.5 GB SLMOS partition) is ~15.7 M sectors at 512 B — orders of
+ * magnitude below the 2 TiB / 4 G-sector LBA32 ceiling. The 48 MB
+ * test ramdisk is only 98304 sectors. Bump to FF_LBA64=1 only if a
+ * future production SD partition exceeds 2 TiB. */
 
 #define FF_MIN_GPT		0x10000000
 #define FF_USE_TRIM		0
