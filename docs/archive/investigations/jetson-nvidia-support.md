@@ -98,20 +98,33 @@ SLM-OS successfully runs on QEMU and Raspberry Pi 5, but is blocked on Jetson Or
 
 ### What Works
 
-- UART clock can be enabled before kexec by opening `/dev/ttyTHS1`
-- Serial output works during early boot (UEFI, L4T bootloader)
-- Boot errors can be captured via 40-pin header UART
-- SLM-OS code executes (verified via PSCI reboot checkpoint)
+- ✅ UART clock can be enabled before kexec by opening `/dev/ttyTHS1`
+- ✅ Serial output works during early boot (UEFI, L4T bootloader)
+- ✅ Boot errors can be captured via 40-pin header UART
+- ✅ SLM-OS code executes (verified via PSCI reboot checkpoint)
+- ✅ NS EL2 + VHE bringup — UARTC, GICv3, timer, GPU MMIO, ~6.7 GB
+  DRAM all reachable. See `docs/jetson-el2-bringup.md`.
+- ✅ BPMP IPC re-initialization after kexec via `kernel/drivers/bpmp/`
+  (closed #190). See `docs/jetson-bpmp-ipc-plan.md`.
+- ✅ SMP — 6 cores on-line via PSCI `CPU_ON`; cross-CPU dispatch
+  validated by `bench smp`. See `docs/smp.md`.
+- ✅ GPU compute via inherit-from-Linux kexec handoff — MNIST
+  inference dispatching on GA10B (closed PRs #297, #291, #356, #364,
+  #376). See `docs/jetson-gpu-mnist-plan.md`.
 
 ### What Doesn't Work
 
-- Any peripheral access from SLM-OS (CBB firewall blocks it)
-- kexec (not validated by NVIDIA, triggers security errors)
-- Direct UEFI boot (same CBB restrictions)
-- ~~BPMP IPC re-initialization after kexec~~ — **WORKS** as of April 2026
-  via `kernel/drivers/bpmp/` port of edk2-nvidia's BpmpIpc. See
-  `docs/jetson-bpmp-ipc-plan.md` and `docs/jetson-pcie-investigation.md`
-  §"Step 2 landing".
+- ⏸️🎫 Direct UEFI boot — `Device-nGnRnE` DRAM access raises a CBB
+  Interface Error during early MMU bringup. Tracked in **#246**.
+- ⏸️🎫 Hardware timer IRQ delivery on secondary CPUs — same EL3-owned
+  GIC Group routing problem Pi 5 has. Cooperative preemption
+  (`COOP_PREEMPT`) is the working substitute. Tracked in **#380**.
+- ⏸️🎫 UARTA (40-pin header, `0x03100000`) — blocked by CBB firewall
+  even at EL2; UARTC at `0x0C280000` via TCU is the working serial
+  path. Tracked in **#381**.
+- ⏸️🎫 Bare-metal GSP loader for Ampere / Orin — required to bring
+  the GPU up from a cold boot without inheriting Linux's nvgpu
+  state. Tracked in **#142**.
 
 ---
 
@@ -346,9 +359,9 @@ This allowed accessing peripherals like UARTC (0xC280000) from bare-metal code.
 
 ## Potential Solutions
 
-### Solution 1: EL2 Hypervisor Approach — ✅ IMPLEMENTED (April 2026)
+### Solution 1: EL2 Hypervisor Approach — ✅ Implemented
 
-This approach was successfully implemented. See `docs/jetson-el2-bringup.md` for full details.
+See `docs/jetson-el2-bringup.md` for full details.
 
 **Requirements:**
 - Enable EL2 in UEFI/bootloader configuration
@@ -371,7 +384,7 @@ This approach was successfully implemented. See `docs/jetson-el2-bringup.md` for
 - Whether CBB firewall respects EL2 differently than EL1
 - Full page table configuration requirements
 
-### Solution 2: Secure Boot Integration
+### Solution 2: Secure Boot Integration — ⏸️ Not pursued
 
 Integrate SLM-OS into NVIDIA's secure boot chain so it receives proper CBB permissions.
 
@@ -391,7 +404,7 @@ Integrate SLM-OS into NVIDIA's secure boot chain so it receives proper CBB permi
 - No documentation for bare-metal OS integration
 - May require fuse burning for production
 
-### Solution 3: CBB Firewall Configuration
+### Solution 3: CBB Firewall Configuration — ⏸️ Not pursued
 
 Configure CBB firewall rules to allow SLM-OS peripheral access.
 
@@ -409,7 +422,7 @@ Configure CBB firewall rules to allow SLM-OS peripheral access.
 - NVIDIA did not respond to forum requests for this info
 - May require iterative trial-and-error
 
-### Solution 4: Linux Hypervisor with Device Passthrough
+### Solution 4: Linux Hypervisor with Device Passthrough — ⏸️ Not pursued
 
 Run Linux as host, pass through GPU and specific devices to SLM-OS guest.
 
@@ -427,9 +440,9 @@ Run Linux as host, pass through GPU and specific devices to SLM-OS guest.
 - May not support GPU passthrough
 - Defeats purpose of bare-metal OS
 
-### Solution 5: Focus on Raspberry Pi 5
+### Solution 5: Focus on Raspberry Pi 5 — ✅ Implemented in parallel
 
-Given the hardware security restrictions on Jetson Orin, Raspberry Pi 5 may be a more viable bare-metal target.
+Pi 5 is supported as a bare-metal target alongside Jetson.
 
 **Advantages:**
 - Well-documented peripherals
@@ -468,11 +481,9 @@ Given the hardware security restrictions on Jetson Orin, Raspberry Pi 5 may be a
 
 ### Context for Support Request
 
-**Project:** SLM-OS (Small Language Model Operating System)
-- Capstone project for Computer Science at Sonoma State University
-- Purpose-built OS for AI inference on edge devices
-- Successfully runs on QEMU (ARM64 virt) and Raspberry Pi 5
-- Blocked on Jetson by CBB firewall restrictions
+**Project:** SLM-OS — purpose-built OS for AI inference on edge devices.
+Runs on QEMU (ARM64 virt) and Raspberry Pi 5; blocked on Jetson by CBB
+firewall restrictions.
 
 **Goal:** Run SLM-OS bare-metal on Jetson Orin Nano to leverage:
 - 6-core ARM Cortex-A78AE CPU
@@ -489,12 +500,13 @@ Given the hardware security restrictions on Jetson Orin, Raspberry Pi 5 may be a
 
 | Peripheral | Address | Type | Status |
 |------------|---------|------|--------|
-| UARTA | 0x03100000 | NS16550 | Blocked by CBB |
-| UARTC | 0x0C280000 | NS16550 | Forum reports EL2 access works |
-| GIC Distributor (GICD) | 0x0F400000 | GICv3 | Unknown |
-| GIC Redistributor (GICR) | 0x0F440000 | GICv3 | Unknown |
-| Watchdog | 0x02190000 | Timer | Works (disabled successfully) |
-| BPMP IVC TX | 0x0C168000 | HSP Mailbox | IVC corrupted after kexec |
+| UARTA | 0x03100000 | NS16550 | ⏸️ Blocked by CBB even at EL2 |
+| UARTC | 0x0C280000 | NS16550 | ✅ Reachable from EL2 |
+| GIC Distributor (GICD) | 0x0F400000 | GICv3 | ✅ Reachable from EL2 |
+| GIC Redistributor (GICR) | 0x0F440000 | GICv3 | ✅ Reachable from EL2 |
+| Watchdog | 0x02190000 | Timer | ✅ Disabled successfully |
+| BPMP IVC TX | 0x0C168000 | HSP Mailbox | ✅ IVC handshake post-kexec works |
+| GPU BAR0 | 0x17000000 | GA10B | ✅ R/W from EL2 |
 
 ### CBB Error Decoding
 
@@ -517,39 +529,31 @@ Given the hardware security restrictions on Jetson Orin, Raspberry Pi 5 may be a
 
 ---
 
-## Final State (April 2026) — Capstone Delivery
+## Current Status (April 2026)
 
-> This section is authored during Phase G6 of the Jetson capstone
-> execution plan to consolidate the final Jetson support status for
-> the capstone report.
-
-**Boot & serial:** Resolved by running SLM-OS at **NS EL2 with VHE**
-after kexec from Linux. UARTC (0x0C280000) is reachable; TCU
-continues routing USB-C debug serial. UARTA on the 40-pin header
-remains blocked by the CBB firewall even at EL2 — no known workaround
-short of an L4T-side firewall reconfiguration, which is out of scope.
-See `docs/jetson-el2-bringup.md` for the full boot chain.
-
-**SMP:** 6 cores on-line via PSCI `CPU_ON` after the MPIDR encoding
-bug was fixed (`docs/smp.md`). Cross-CPU dispatch validated via
-`bench smp`. Secondary-core timer IRQ delivery is the same GIC
-Group-config problem Pi 5 has (see below) — cooperative preemption
-(`COOP_PREEMPT`) drives scheduler ticks at yield points on all 6
-cores.
-
-**GPU compute:** Blocked on GSP firmware loading. Detection and
-BAR / MMIO access through the non-engine register space work from
-EL2 (same path demonstrated on a discrete RTX 3050 in
-`docs/nvidia-gsp.md`). The Orin Nano uses the same Ampere GSP
-sequence; a bare-metal loader is out of capstone scope.
-
-**Thesis framing:** `docs/capstone-thesis-framing.md` explains how
-the GPU work splits into "infrastructure delivered" (memory, cache,
-detection, enumeration) vs. "compute blocked by proprietary firmware"
-for the capstone narrative.
-
-**Open for future work:** See GitHub issue #142 ("Future work: GSP
-bare-metal loader for Ampere / Orin").
+- ✅ **Boot & serial** — SLM-OS runs at NS EL2 with VHE after kexec
+  from Linux. UARTC (`0x0C280000`) is reachable; TCU continues
+  routing USB-C debug serial. UARTA on the 40-pin header remains
+  blocked by the CBB firewall even at EL2 (no known software
+  workaround). See `docs/jetson-el2-bringup.md`.
+- ✅ **SMP** — 6 cores on-line via PSCI `CPU_ON` after the MPIDR
+  encoding bug was fixed. Cross-CPU dispatch validated via
+  `bench smp`. See `docs/smp.md`.
+- ☐🎫 **Hardware timer IRQ delivery on secondary CPUs** — same
+  EL3-owned GIC Group-config problem Pi 5 has. `COOP_PREEMPT`
+  drives scheduler ticks at yield points on all 6 cores as the
+  working substitute. Tracked in **#380**.
+- ✅ **GPU compute via inherit-from-Linux kexec handoff** — A
+  pre-kexec Linux helper allocates the channel, uploads
+  CUDA-compiled SASS + a QMD, and publishes a v3..v6 handoff
+  block in DRAM. Post-kexec SLM-OS inherits the channel and
+  dispatches kernels. End-to-end MNIST inference on GA10B
+  validated on jetson-nano-1 (closed PRs **#297**, **#291**,
+  **#356**, **#364**, **#376**). See
+  `docs/jetson-gpu-mnist-plan.md`.
+- ⏸️🎫 **Bare-metal GSP loader for Ampere / Orin** — required to
+  cold-boot SLM-OS and bring the GPU up without inheriting Linux's
+  nvgpu/Falcon state. Tracked in **#142**.
 
 ---
 
@@ -560,10 +564,10 @@ bare-metal loader for Ampere / Orin").
 - `docs/jetson-el2-bringup.md` — Current EL2 implementation (April 2026)
 - `docs/jetson-boot.md` — Boot process overview
 - `docs/jetson-tcu.md` — TCU/HSP architecture research
+- `docs/jetson-gpu-mnist-plan.md` — MNIST GPU inference milestones (M0–M9)
 - `docs/platform-abstraction.md` — QEMU vs Jetson comparison
-- `docs/gpu.md` — GPU integration (blocked by GSP firmware requirement)
+- `docs/gpu.md` — GPU integration overview
 - `docs/nvidia-gsp.md` — GSP boot sequence research (Ampere / GA10x / GA10B)
-- `docs/capstone-thesis-framing.md` — Thesis narrative (Phase G6 draft)
 
 ### NVIDIA Forum Threads
 

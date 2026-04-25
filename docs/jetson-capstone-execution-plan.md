@@ -659,7 +659,7 @@ achievement in its own right.
    - **Pi 5 (VideoCore):** no public bare-metal compute
      documentation. Ship NEON CPU inference instead; external
      NPU via AI HAT+ is the extensibility story.
-2. Update `docs/jetson-nvidia-support.md` — already done
+2. Update `docs/archive/investigations/jetson-nvidia-support.md` — already done
    (April 21 2026 update note).
 3. File a "Future Work: SLM-OS-native compute-kernel compilation"
    issue — replace CUDA-compiled shaders + Linux helper
@@ -780,7 +780,7 @@ Each phase produces one or more of:
   - `docs/preemptive-multitasking.md` (P5)
   - `docs/work-stealing-bench.md` (S3)
   - `docs/cross-platform-inference-bench.md` (G5)
-  - `docs/jetson-nvidia-support.md` updates (G6)
+  - `docs/archive/investigations/jetson-nvidia-support.md` updates (G6)
 - **GH issues** — filed for each new track initiation; closed on phase completion.
 
 ---

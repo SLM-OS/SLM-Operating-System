@@ -301,7 +301,7 @@ are blocked by TF-A policy.
 | Scheduler architecture | `docs/architecture.md` §scheduling, `kernel/sched/sched.c` | Three-policy implementation |
 | AI scheduler experiments | `docs/ai-scheduler.md`, `kernel/sched_ai/` | MLP / RL vs. heuristic comparisons |
 | Inference runtime | `runtime/src/inference/ops.rs`, `runtime/src/inference/engine.rs` | NEON FP32/FP16/INT8 kernels |
-| GPU research | `docs/nvidia-gsp.md`, `docs/jetson-nvidia-support.md` | Why GPU compute was descoped |
+| GPU research | `docs/nvidia-gsp.md`, `docs/archive/investigations/jetson-nvidia-support.md` | Why GPU compute was descoped |
 | Thesis framing (this doc) | `docs/capstone-thesis-framing.md` | Narrative for the capstone report |
 
 ## Open questions for the advisor

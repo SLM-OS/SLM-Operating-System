@@ -55,7 +55,7 @@ The following are Pi 5 / BCM2712 capabilities observable in project documentatio
 ### Caveats for Part B
 
 - Where a feature is not named in tree documentation (HWRNG, watchdog, DMA, PMIC), the entry describes a generic Pi 5 capability rather than a tree-verified one. These should be read as "the SoC documentation lists this" rather than "the SLM-OS tree references it".
-- Status claims for Jetson and x86-64 are derived from `kernel/CLAUDE.md`, `docs/jetson-nvidia-support.md`, and `docs/x86-64-*.md`. No fresh deployment verification was performed against those platforms for this audit.
+- Status claims for Jetson and x86-64 are derived from `kernel/CLAUDE.md`, `docs/archive/investigations/jetson-nvidia-support.md`, and `docs/x86-64-*.md`. No fresh deployment verification was performed against those platforms for this audit.
 - Where this audit contradicts older status documents (for example, `docs/pi5-baremetal-status.md` claiming "preemptive scheduling active"), the audit reflects measurements taken in the session that filed issue #99; see that issue for the evidence.
 
 ---

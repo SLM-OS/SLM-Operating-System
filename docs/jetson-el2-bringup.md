@@ -9,7 +9,7 @@ This document records the successful bypass of the Tegra234 CBB firewall by runn
 
 ## Background
 
-SLM-OS bare-metal execution on Jetson was blocked by the CBB (Control Backbone) firewall since December 2025. All peripheral accesses from EL1 were rejected. See `docs/jetson-nvidia-support.md` for the full investigation history.
+SLM-OS bare-metal execution on Jetson was blocked by the CBB (Control Backbone) firewall since December 2025. All peripheral accesses from EL1 were rejected. See `docs/archive/investigations/jetson-nvidia-support.md` for the full investigation history.
 
 The breakthrough came from three key discoveries:
 

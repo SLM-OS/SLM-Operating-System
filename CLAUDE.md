@@ -240,7 +240,7 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 - PE/COFF loads when UEFI uses preferred address (ImageBase=0x80000000)
 - Blocked when UEFI can't use preferred address (no `.reloc` section for PE relocation)
 
-**Documentation:** `docs/jetson-nvidia-support.md`, `docs/jetson-el2-bringup.md`
+**Documentation:** `docs/archive/investigations/jetson-nvidia-support.md`, `docs/jetson-el2-bringup.md`
 
 ### Reference Documentation
 

@@ -150,7 +150,7 @@ doesn't.
   before Linux?** The fast-test was in live Linux. You need to verify
   `HWCFG2` bit 13 is still 0 right after `efi_stub_entry` returns.
 - **Does the Jetson's UEFI enforce secure-boot signature checks?**
-  Per `docs/jetson-nvidia-support.md`, production silicon has PK/KEK/db
+  Per `docs/archive/investigations/jetson-nvidia-support.md`, production silicon has PK/KEK/db
   keys. If secure boot is enforced, unsigned SLM-OS won't run without
   disabling secure boot in BIOS setup.
 
@@ -285,11 +285,11 @@ CMakeLists.txt                           build entry
 Makefile                                 top-level orchestration
 
 docs/
-  jetson-el2-bringup.md         current state (authoritative)
-  jetson-nvidia-support.md      UEFI secure-boot notes
-  jetson-capstone-handoff.md    cross-project handoff, §3d summarizes GPU branch
-  capstone-feature-status.md    §"GPU-Based Inference" for the blocker narrative
-  jetson-uefi-direct-handoff.md (this file)
+  jetson-el2-bringup.md                    current state (authoritative)
+  archive/investigations/jetson-nvidia-support.md   UEFI secure-boot notes
+  jetson-capstone-handoff.md               cross-project handoff, §3d summarizes GPU branch
+  capstone-feature-status.md               §"GPU-Based Inference" for the blocker narrative
+  jetson-uefi-direct-handoff.md            (this file)
 ```
 
 ### Build commands

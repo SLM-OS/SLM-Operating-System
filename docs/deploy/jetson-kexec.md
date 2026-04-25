@@ -178,5 +178,5 @@ Confirm the `kexec -e` step actually fired. Sometimes `kexec_load` succeeds but 
 - `docs/lab-operations.md` — labctl setup, network / SSH / serial config for each Jetson board
 - `docs/jetson-boot.md` — low-level boot sequence reference
 - `docs/jetson-el2-bringup.md` — VHE / EL2 configuration after kexec
-- `docs/jetson-nvidia-support.md` — GPU / BPMP / PCIe state across kexec
+- `docs/archive/investigations/jetson-nvidia-support.md` — GPU / BPMP / PCIe state across kexec
 - `scripts/jetson-kexec-slmos.sh` — the helper itself, with detailed in-file comments

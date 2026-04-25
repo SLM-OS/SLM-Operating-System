@@ -8,7 +8,7 @@
 - `docs/archive/handoff/x86-64-fwsec-frts-handoff.md` — session-by-session hardware diary that produced the current state (archived; superseded by this doc).
 - `docs/archive/handoff/x86-64-port.md` — architectural reference for the x86-64 port (archived).
 - `docs/nvidia-gsp.md` — general GSP-RM background.
-- `docs/jetson-nvidia-support.md` / `docs/jetson-el2-bringup.md` — Jetson-side GPU state.
+- `docs/archive/investigations/jetson-nvidia-support.md` / `docs/jetson-el2-bringup.md` — Jetson-side GPU state.
 
 This document is the single-page authoritative summary of where x86-64
 GPU inference actually is — what works on hardware, what's blocked,
