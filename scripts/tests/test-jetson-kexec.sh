@@ -85,6 +85,26 @@ else
     assert_fails_with "Non-root invocation is rejected" \
         1 "must run as root" \
         "$SCRIPT" "$tmpfile"
+
+    assert_fails_with "Non-root invocation with --no-gpu-suspend is rejected" \
+        1 "must run as root" \
+        "$SCRIPT" --no-gpu-suspend "$tmpfile"
+
+    assert_fails_with "Non-root invocation with --no-usb-hold is rejected" \
+        1 "must run as root" \
+        "$SCRIPT" --no-usb-hold "$tmpfile"
+
+    assert_fails_with "Non-root invocation with --no-smmu-fix is rejected" \
+        1 "must run as root" \
+        "$SCRIPT" --no-smmu-fix "$tmpfile"
+
+    assert_fails_with "Non-root invocation with --no-usb-root-cleanup is rejected" \
+        1 "must run as root" \
+        "$SCRIPT" --no-usb-root-cleanup "$tmpfile"
+
+    assert_fails_with "Non-root invocation with all supported flags is rejected" \
+        1 "must run as root" \
+        "$SCRIPT" --no-gpu-suspend --no-usb-hold --no-smmu-fix --no-usb-root-cleanup "$tmpfile"
 fi
 
 # Test 6: Script does not call kexec if preconditions fail

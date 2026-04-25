@@ -64,7 +64,7 @@ fresh-enumerates the downstream RTL8153, and brings networking up with
 no manual unplug/replug. Current validation on the lab path:
 
 - `net init` succeeds
-- DHCP binds `192.168.4.5/24` with gateway `192.168.4.1`
+- `ifconfig dhcp` binds `192.168.4.5/24` with gateway `192.168.4.1`
 - `ping 192.168.4.1 2` succeeds
 
 The helper script is reasonably well commented. Run it with `--help` on the Jetson for the full flag list, or read the script header for rationale on each step.
@@ -127,6 +127,28 @@ Expected output on serial:
 1. Kernel messages from SLM-OS's `uart_tegra.c` driver — via UARTC at `0x0C280000`, routed through the TCU HSP mailbox to the USB-C debug port.
 2. SMP bring-up on 6 cores (Jetson is dual-cluster 2+4; MPIDRs `0x000`, `0x100`, `0x200`, `0x300`, `0x10200`, `0x10300`).
 3. `slm>` shell prompt. Input works bidirectionally via the TCU mailbox.
+
+### Step 4a — Run the networking smoke test
+
+For the validated `jetson-nano-2` lab path, the host-side smoke script
+automates the current regression check end-to-end:
+
+```bash
+scripts/tests/test-jetson-kexec-networking-smoke.sh \
+    --ssh-target root@192.168.4.93 \
+    --console-port 4004
+```
+
+That script:
+
+- copies `build/kernel/slmos.elf` and `scripts/jetson-kexec-slmos.sh`
+- triggers `slmos-kexec`
+- waits for `slmos>` on serial
+- runs `net init`, `ifconfig dhcp`, `ifconfig`, and `ping 192.168.4.1 2`
+- verifies DHCP `192.168.4.5/24` with gateway `192.168.4.1`
+
+It is intentionally scoped to the current lab topology rather than a
+generic Jetson serial automation framework.
 
 ### Step 5 — Recovery back to Linux
 
