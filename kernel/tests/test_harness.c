@@ -145,6 +145,8 @@ int test_harness_run_all(void)
     total_failures += test_suite_littlefs();
     total_failures += test_suite_x86_boot();
     total_failures += test_suite_elf();
+    /* Platform-neutral protocol-layout tests (no MMIO). */
+    total_failures += test_suite_bcm_mailbox();
 #if !defined(PLATFORM_X86_64)
     total_failures += test_suite_dtb();
     total_failures += test_suite_fdt();
