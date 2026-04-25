@@ -29,6 +29,9 @@ python3 scripts/tools/slm-put.py --labctl pi-5-2 \
   /mnt/files/policies/xgb.blob
 ```
 
+The standard writable directory contract under `/mnt/files` is
+documented in `docs/specs/device-file-contract.md`.
+
 Serial fallback example:
 
 ```bash

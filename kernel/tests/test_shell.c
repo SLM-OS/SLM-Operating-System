@@ -1862,6 +1862,23 @@ static void test_shell_cmd_stat_dir(void)
 }
 
 /*
+ * Test: standard /mnt/files subdirectories exist for tooling contracts.
+ */
+static void test_shell_cmd_stat_standard_storage_dirs(void)
+{
+    struct vfs_entry_info info;
+
+    TEST_ASSERT_EQUAL_INT(0, vfs_stat_path("/mnt/files/policies", &info));
+    TEST_ASSERT_EQUAL_UINT8(1, info.type);
+
+    TEST_ASSERT_EQUAL_INT(0, vfs_stat_path("/mnt/files/models", &info));
+    TEST_ASSERT_EQUAL_UINT8(1, info.type);
+
+    TEST_ASSERT_EQUAL_INT(0, vfs_stat_path("/mnt/files/autoload", &info));
+    TEST_ASSERT_EQUAL_UINT8(1, info.type);
+}
+
+/*
  * Test: stat on nonexistent fails.
  */
 static void test_shell_cmd_stat_not_found(void)
@@ -3338,6 +3355,7 @@ int test_suite_shell(void)
     /* stat command tests */
     RUN_TEST(test_shell_cmd_stat_file);
     RUN_TEST(test_shell_cmd_stat_dir);
+    RUN_TEST(test_shell_cmd_stat_standard_storage_dirs);
     RUN_TEST(test_shell_cmd_stat_not_found);
     RUN_TEST(test_shell_cmd_stat_virtual);
     RUN_TEST(test_shell_cmd_stat_missing_args);

@@ -44,6 +44,7 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 | AI task scheduler | ✅ NEON | ✅ NEON | ✅ NEON | ✅ SSE | [ai-scheduler.md](ai-scheduler.md) |
 | AI page eviction | ✅ | ✅ | ✅ | ✅ | [ai-eviction.md](ai-eviction.md) |
 | Runtime model blob formats | ✅ | ✅ | ✅ | ✅ | [runtime-blob-formats.md](runtime-blob-formats.md) |
+| Device-local file contract | ✅ | ✅ | ✅ | ✅ | [device-file-contract.md](device-file-contract.md) |
 | IPC (message router) | ✅ | ✅ | ✅ | ✅ | [ipc.md](ipc.md) |
 | Components (hot-swap) | ✅ | ✅ | ✅ | 🟡 no EL0 yet | [components.md](components.md) |
 | Lua scripting | ✅ 5.4.7 | ✅ | ✅ | ✅ | [lua.md](lua.md) |

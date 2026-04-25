@@ -330,6 +330,12 @@ void kernel_main(void *dtb)
             if (lfs_mnt) {
                 INFO("  LittleFS mounted at /mnt/files (1 MB)");
 
+                /* Standard device-local storage layout for host tooling,
+                 * runtime policy blobs, and boot-managed copies. */
+                (void)littlefs_mkdir(lfs_mnt, "/policies");
+                (void)littlefs_mkdir(lfs_mnt, "/models");
+                (void)littlefs_mkdir(lfs_mnt, "/autoload");
+
                 /* Create a welcome file for testing */
                 int f = littlefs_file_open(lfs_mnt, "/hello.txt",
                                            LFS_O_WRONLY | LFS_O_CREAT);

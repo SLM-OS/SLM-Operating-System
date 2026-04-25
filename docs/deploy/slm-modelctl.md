@@ -104,6 +104,8 @@ python3 scripts/tools/slm-modelctl.py \
 - Default remote path is `/mnt/files/policies/<filename>`.
 - For `--http-url`, the default remote path still uses the fetched
   filename under `/mnt/files/policies/`.
+- Standard writable path conventions under `/mnt/files` are documented
+  in `docs/specs/device-file-contract.md`.
 - `slm-put.py` now auto-caps chunk sizes to stay under the shell line
   limit while still allowing larger requested chunk sizes.
 - `--tryboot` is intended for dual-boot Pi maintenance workflows such as

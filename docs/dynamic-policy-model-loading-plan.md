@@ -593,7 +593,7 @@ Current status:
 
 | Phase | State | Notes |
 |---|---|---|
-| F1 — Minimal device-local contract | ✅ partial | `/mnt/files` exists, but path conventions are not yet formalized |
+| F1 — Minimal device-local contract | ✅ done | `/mnt/files` now has formalized standard directories and a documented contract |
 | F2 — Small native upload path | ✅ partial | `put`, `xput`, `slm-put.py`, and `slm-modelctl.py` are live; shell-line-aware chunking and resume are in place |
 | F3 — Serial upload fallback | ✅ partial | Same framed path works over serial and is hardware-validated |
 | F4 — HTTP client integration | ✅ partial | Plain-HTTP fetch now has shell, Lua/admin, `slm-modelctl.py`, and optional SHA-256 verification |
@@ -615,13 +615,19 @@ Standardize on destination paths, for example:
 - `/mnt/files/policies/*.blob`
 - `/mnt/files/models/*`
 
-Status: `✅ partial`
+Status: `✅ done`
 
 Notes:
 
-- `/mnt/files` already exists and is the right first destination root
-- this phase should primarily formalize path conventions and shell/admin
-  expectations, not invent a new storage abstraction
+- `/mnt/files` remains the right first destination root
+- standard paths are now documented in
+  `docs/specs/device-file-contract.md`
+- the kernel now creates standard directories at boot:
+  - `/mnt/files/policies`
+  - `/mnt/files/models`
+  - `/mnt/files/autoload`
+- autoload-managed canonical copies now live under
+  `/mnt/files/autoload/`
 
 All future ingress methods target files first, not direct activation.
 
