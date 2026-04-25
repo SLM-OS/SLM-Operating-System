@@ -42,14 +42,18 @@ This tool lets us:
 - `--submit-probe` — Replay SLM-OS's boundary-input VDMA descriptor
   layout (desc_count=64, page_size=512, channel=2, 784-byte buffer)
   through the official hailo_pci ioctl path. Diagnostic for #253.
-
-**Planned:**
-
-- Full CS-handshake replay: feed SLM-OS's exact FW_CONTROL sequence
-  (RESET → ACTIVATION → BATCH_SWITCHING → PRELIMINARY → DYNAMIC →
-  ENABLED) through HAILO_FW_CONTROL, THEN submit a boundary transfer
-  with real inference. This would answer definitively whether our
-  context bytes work when fed through libhailort's driver surface.
+- `--cs-handshake` — Fire SLM-OS's pre-context-info CS RPCs
+  (CHANGE_STATUS RESET, CLEAR_CONFIGURED_APPS, GET_HW_CONSTS) through
+  HAILO_FW_CONTROL. Validates SLM-OS's CS wire format (parameter_count
+  framing + length-prefixed parameters + LE field conventions) against
+  the official driver's path.
+- `--full-handshake` — End-to-end replay: allocates 3 buffers + desc
+  lists, patches the captured ctxsmoke action bodies with the IOVAs
+  hailo_pci returned, fires the full handshake (RESET → CLEAR_APPS →
+  GET_HW_CONSTS → SET_NETWORK_GROUP_HEADER → 4× SET_CONTEXT_INFO →
+  ENABLED), kicks CCW upload on ch=1 and pre-arms ch=16, then
+  LAUNCH_TRANSFERs ch=2. Optionally loads real MNIST CCW microcode
+  from a co-located `mnist.hef` (see "MNIST HEF" below).
 
 ## Build
 
@@ -82,6 +86,15 @@ sudo ./build/host-tools/hailo-ushim --identify
 # geometry through the hailo_pci ioctls. No HEF / fw configuration
 # required; the probe tests kernel-side parameter acceptance only.
 sudo ./build/host-tools/hailo-ushim --submit-probe
+
+# Validate SLM-OS's CS wire format (RESET, CLEAR_CONFIGURED_APPS,
+# GET_HW_CONSTS) through HAILO_FW_CONTROL.
+sudo ./build/host-tools/hailo-ushim --cs-handshake
+
+# End-to-end replay of SLM-OS's full CS handshake + LAUNCH_TRANSFER.
+# Place mnist.hef in the working directory (or /opt/hailort/models/)
+# to upload real CCW microcode on ch=1.
+sudo ./build/host-tools/hailo-ushim --full-handshake
 ```
 
 ### --submit-probe: what it does

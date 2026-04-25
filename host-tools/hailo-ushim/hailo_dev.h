@@ -122,6 +122,10 @@ int hailo_dev_launch_transfer(int fd,
  * in `channel_bitmap`. On return, `*channels_count_out` is the number
  * of completing channels, and `channels_out[0..count-1]` describes
  * which channels fired and their transfer counts (or error flags).
+ *
+ * Single-threaded only: installs a process-global SIGALRM handler +
+ * setitimer to enforce the timeout. Two concurrent callers from
+ * different threads would race the itimer install/restore.
  */
 int hailo_dev_interrupts_wait(int fd,
                               uint32_t channel_bitmap,

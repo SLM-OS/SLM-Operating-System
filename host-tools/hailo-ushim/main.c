@@ -6,6 +6,7 @@
  * launch_transfer so we can replay SLM-OS's boundary-submit sequence.
  */
 
+#include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -61,14 +62,6 @@ struct ctrl_common_hdr {
     uint32_t opcode;
 } __attribute__((packed));
 
-static uint32_t htobe32_(uint32_t x)
-{
-    return  (x << 24)
-          | ((x & 0x0000FF00u) << 8)
-          | ((x & 0x00FF0000u) >> 8)
-          |  (x >> 24);
-}
-
 #define HAILO_CONTROL_PROTOCOL_VERSION        2u
 #define HAILO_CONTROL_OPCODE_IDENTIFY         0x00
 /* PCIE_EXPECTED_MD5_LENGTH comes from hailo-ioctl-common.h */
@@ -92,13 +85,22 @@ static int send_fw_control(int fd, uint32_t opcode,
      *     batch_cnt). Callers assemble the full body themselves;
      *     this helper just prepends the common header + count. */
     struct ctrl_common_hdr *hdr = (struct ctrl_common_hdr *)cmd.buffer;
-    static uint32_t seq = 0;
-    hdr->version  = htobe32_(HAILO_CONTROL_PROTOCOL_VERSION);
+    /* Sequence number per request. Seeded from time(NULL) so each invocation
+     * starts from a different base, matching HailoRT's non-zero seeding (fw
+     * v4.23 does not reject low values today, but matching libhailort
+     * keeps wire captures comparable). Single-threaded by construction. */
+    static uint32_t seq;
+    static bool seq_initialized;
+    if (!seq_initialized) {
+        seq = (uint32_t)time(NULL);
+        seq_initialized = true;
+    }
+    hdr->version  = htobe32(HAILO_CONTROL_PROTOCOL_VERSION);
     hdr->flags    = 0;
-    hdr->sequence = htobe32_(++seq);
-    hdr->opcode   = htobe32_(opcode);
+    hdr->sequence = htobe32(++seq);
+    hdr->opcode   = htobe32(opcode);
 
-    uint32_t param_count_be = htobe32_(parameter_count);
+    uint32_t param_count_be = htobe32(parameter_count);
     memcpy(cmd.buffer + sizeof(*hdr), &param_count_be, sizeof(param_count_be));
 
     if (req_body_len > 0 && req_body) {
@@ -212,7 +214,7 @@ static int cmd_cs_change_status(int fd, uint8_t state, uint8_t app_index,
     uint8_t body[22];
     size_t  off = 0;
     #define EMIT_BE32(v)  do { \
-        uint32_t be = htobe32_((v)); \
+        uint32_t be = htobe32((v)); \
         memcpy(body + off, &be, 4); off += 4; \
     } while (0)
     #define EMIT_U8(v)    do { body[off++] = (uint8_t)(v); } while (0)
@@ -226,6 +228,14 @@ static int cmd_cs_change_status(int fd, uint8_t state, uint8_t app_index,
     EMIT_BE32(1);  EMIT_U8(app_index);
     EMIT_BE32(2);  EMIT_LE16(batch_size);
     EMIT_BE32(2);  EMIT_LE16(batch_count);
+
+    /* Sanity check: any future edit to the EMIT macros above could
+     * silently overflow `body[22]`. Catch it loudly instead. */
+    if (off != sizeof(body)) {
+        fprintf(stderr, "cmd_cs_change_status: body off=%zu != %zu\n",
+                off, sizeof(body));
+        return -EINVAL;
+    }
 
     #undef EMIT_BE32
     #undef EMIT_U8
@@ -318,6 +328,10 @@ static const uint8_t ACTIVATION_BODY[63] = {
 };
 #define ACTIVATION_OFFSET_BND_OUT_IOVA  12
 #define ACTIVATION_OFFSET_BND_IN_IOVA   37
+_Static_assert(ACTIVATION_OFFSET_BND_OUT_IOVA + 8 <= sizeof(ACTIVATION_BODY),
+               "ACTIVATION bnd_out IOVA patch would overflow body");
+_Static_assert(ACTIVATION_OFFSET_BND_IN_IOVA  + 8 <= sizeof(ACTIVATION_BODY),
+               "ACTIVATION bnd_in IOVA patch would overflow body");
 
 static const uint8_t BATCH_SWITCHING_BODY[16] = {
     0x1f, 0xff, 0xff, 0xff, 0xff,
@@ -338,6 +352,8 @@ static const uint8_t PRELIMINARY_BODY[37] = {
     /* 31 */ 0x01, 0x00, 0x00, 0x02, 0x00, 0x01,
 };
 #define PRELIMINARY_OFFSET_CCW_IOVA     8
+_Static_assert(PRELIMINARY_OFFSET_CCW_IOVA + 8 <= sizeof(PRELIMINARY_BODY),
+               "PRELIMINARY CCW IOVA patch would overflow body");
 
 static const uint8_t DYNAMIC_BODY[103] = {
     /*  0 */ 0x07, 0xff, 0xff, 0xff, 0xff,        /* ACTIVATE_BOUNDARY_OUTPUT hdr */
@@ -369,6 +385,10 @@ static const uint8_t DYNAMIC_BODY[103] = {
 _Static_assert(sizeof(DYNAMIC_BODY) == 103, "DYNAMIC body must be 103 bytes");
 #define DYNAMIC_OFFSET_BND_OUT_IOVA     26
 #define DYNAMIC_OFFSET_BND_IN_IOVA      69
+_Static_assert(DYNAMIC_OFFSET_BND_OUT_IOVA + 8 <= sizeof(DYNAMIC_BODY),
+               "DYNAMIC bnd_out IOVA patch would overflow body");
+_Static_assert(DYNAMIC_OFFSET_BND_IN_IOVA  + 8 <= sizeof(DYNAMIC_BODY),
+               "DYNAMIC bnd_in IOVA patch would overflow body");
 
 /* Patch a little-endian u64 IOVA into a byte buffer at the given
  * offset. Used to overwrite the captured ctxsmoke IOVAs with
@@ -409,9 +429,12 @@ static int cmd_set_context_info(int fd, uint8_t context_type,
                                 const uint8_t *body, uint32_t body_len,
                                 const char *label)
 {
-    uint8_t buf[2048];
+    /* Cap matches the wire ceiling in `struct hailo_fw_control.buffer`
+     * (MAX_CONTROL_LENGTH = 1500) so over-sized requests fail at this
+     * call site rather than slipping through to send_fw_control. */
+    uint8_t buf[MAX_CONTROL_LENGTH];
     size_t  off = 0;
-    #define EMIT_BE32(v)  do { uint32_t be = htobe32_((v)); \
+    #define EMIT_BE32(v)  do { uint32_t be = htobe32((v)); \
         memcpy(buf + off, &be, 4); off += 4; } while (0)
     #define EMIT_U8(v)    do { buf[off++] = (uint8_t)(v); } while (0)
 
@@ -454,7 +477,7 @@ static int cmd_set_network_group_header(int fd,
 {
     uint8_t buf[256];
     size_t  off = 0;
-    uint32_t be_len = htobe32_(body_len);
+    uint32_t be_len = htobe32(body_len);
     memcpy(buf + off, &be_len, 4); off += 4;
     if (off + body_len > sizeof(buf)) return -EINVAL;
     memcpy(buf + off, body, body_len);
@@ -495,7 +518,7 @@ static int cmd_full_handshake(int fd)
     uint64_t  ccw_iova = 0, bnd_in_iova = 0, bnd_out_iova = 0;
     bool ccw_mh_set = false, bnd_in_mh_set = false, bnd_out_mh_set = false;
     bool ccw_dh_set = false, bnd_in_dh_set = false, bnd_out_dh_set = false;
-    bool ch_in_enabled = false;
+    bool ch_in_enabled = false, ch_ccw_enabled = false, ch_out_enabled = false;
 
     long page_sz = sysconf(_SC_PAGESIZE);
     if (page_sz <= 0) page_sz = 4096;
@@ -537,7 +560,7 @@ static int cmd_full_handshake(int fd)
     };
     int hef_fd = -1;
     for (int i = 0; hef_paths[i]; i++) {
-        hef_fd = open(hef_paths[i], O_RDONLY);
+        hef_fd = open(hef_paths[i], O_RDONLY | O_CLOEXEC);
         if (hef_fd >= 0) {
             printf("[1.5] using MNIST HEF: %s\n", hef_paths[i]);
             break;
@@ -558,18 +581,28 @@ static int cmd_full_handshake(int fd)
                       | ((uint32_t)p[10] <<  8) |  (uint32_t)p[11];
                     /* V2: 12-byte common + 20-byte trailer */
                     size_t ccws_off = 32 + proto_size;
-                    /* Fill the full 4 KB page with real CCW microcode.
-                     * ctxsmoke's PRELIMINARY declares desc_count=2 ×
-                     * page_size=512 = 1024 B of CCW; our 4 KB buffer
-                     * comfortably holds that plus headroom if we
-                     * decide to upload more descriptors later. */
-                    size_t ccw_copy = (ccws_off + 4096 <= (size_t)st.st_size)
-                                        ? 4096
-                                        : (size_t)st.st_size - ccws_off;
-                    memcpy(ccw_buf, p + ccws_off, ccw_copy);
-                    printf("[1.5] copied %zu B real MNIST CCW (from HEF "
-                           "offset 0x%lx)\n", ccw_copy,
-                           (unsigned long)ccws_off);
+                    /* Guard against a malformed HEF whose declared
+                     * proto_size pushes ccws_off past EOF — without
+                     * this, the size_t subtraction below wraps and
+                     * memcpy reads OOB from the mmap. */
+                    if (ccws_off >= (size_t)st.st_size) {
+                        printf("[1.5] HEF proto_size=%u pushes ccws past "
+                               "EOF (size=%lld); using filler\n",
+                               proto_size, (long long)st.st_size);
+                    } else {
+                        /* Fill the full 4 KB page with real CCW
+                         * microcode. ctxsmoke's PRELIMINARY declares
+                         * desc_count=2 × page_size=512 = 1024 B of
+                         * CCW; our 4 KB buffer comfortably holds that
+                         * plus headroom if we decide to upload more
+                         * descriptors later. */
+                        size_t avail = (size_t)st.st_size - ccws_off;
+                        size_t ccw_copy = avail < 4096 ? avail : 4096;
+                        memcpy(ccw_buf, p + ccws_off, ccw_copy);
+                        printf("[1.5] copied %zu B real MNIST CCW "
+                               "(from HEF offset 0x%lx)\n", ccw_copy,
+                               (unsigned long)ccws_off);
+                    }
                 } else {
                     printf("[1.5] HEF magic mismatch, using filler\n");
                 }
@@ -699,9 +732,11 @@ static int cmd_full_handshake(int fd)
     rc = hailo_dev_enable_channel(fd, 1, false);
     if (rc < 0) { fprintf(stderr, "[7a] ENABLE ch=1: %s\n",
         strerror(-rc)); goto cleanup; }
+    ch_ccw_enabled = true;
     rc = hailo_dev_enable_channel(fd, 16, false);
     if (rc < 0) { fprintf(stderr, "[7a] ENABLE ch=16: %s\n",
         strerror(-rc)); goto cleanup; }
+    ch_out_enabled = true;
     printf("[7a] enabled channels 1 (CCW) + 16 (bnd_out)\n");
 
     /* 7b. Kick CCW upload on channel 1. Buffer content is garbage
@@ -781,11 +816,12 @@ static int cmd_full_handshake(int fd)
     }
 
 cleanup:
-    /* Disable all three channels. Errors ignored — if they were
-     * never enabled the ioctl no-ops (or returns a harmless -EINVAL). */
-    if (ch_in_enabled) hailo_dev_disable_channel(fd, 2);
-    hailo_dev_disable_channel(fd, 1);
-    hailo_dev_disable_channel(fd, 16);
+    /* Disable channels we actually enabled. Calling disable on a
+     * never-enabled channel logs a harmless -EINVAL via dmesg, which
+     * is noise we'd rather not produce on early-failure paths. */
+    if (ch_in_enabled)  hailo_dev_disable_channel(fd, 2);
+    if (ch_ccw_enabled) hailo_dev_disable_channel(fd, 1);
+    if (ch_out_enabled) hailo_dev_disable_channel(fd, 16);
     if (bnd_out_dh_set) hailo_dev_desc_list_release(fd, bnd_out_dh);
     if (bnd_in_dh_set)  hailo_dev_desc_list_release(fd, bnd_in_dh);
     if (ccw_dh_set)     hailo_dev_desc_list_release(fd, ccw_dh);
@@ -1094,7 +1130,7 @@ int main(int argc, char **argv)
 {
     if (argc < 2) { usage(argv[0]); return 2; }
 
-    int fd = open(HAILO_DEV_PATH, O_RDWR);
+    int fd = open(HAILO_DEV_PATH, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
         fprintf(stderr, "open %s: %s\n", HAILO_DEV_PATH, strerror(errno));
         fprintf(stderr, "(is hailo_pci loaded? does the device exist?)\n");
