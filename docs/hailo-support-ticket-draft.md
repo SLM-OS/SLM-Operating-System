@@ -252,35 +252,38 @@ D2H notification. This ordering has been consistent across ~50 runs.
    which fw task, which access address, which source instruction
    pointer? That would likely short-circuit the whole investigation.
 
-## Update 2026-04-24 (post-bisect): root cause identified — DO NOT SEND THIS TICKET AS-IS
+## Update 2026-04-24 (status: still investigating; safe to send)
 
-The bisect described below correctly localized #253 to "the
-relationship between the CS handshake bodies and the boundary-input
-data path". A subsequent capture of our production
-`hailo_backend_run` path with `HAILO_WIRE_DEBUG=ON` revealed that
-our context translator emits **zero** ENABLE_LCU, TRIGGER_SEQUENCER,
-WAIT_SEQUENCER, and DISABLE_LCU actions in the DYNAMIC context for
-MNIST. HailoRT's MNIST DYNAMIC body is 161 B with these actions;
-ours is 122 B with only ALLOW_INPUT_DATAFLOW. fw configures the
-input boundary correctly but never starts the compute graph, so
-ch=2 num_proc stays 0.
+The "root cause identified — LCU under-emission" header that lived
+here briefly was a false alarm caused by comparing HailoRT's wire
+sizes (which include the 39-byte SET_CONTEXT_INFO framing prefix)
+against our body sizes. After byte-by-byte comparison, our
+production `hailo_backend_run` emits CS bodies that match HailoRT's
+byte-for-byte modulo IOVA fields. So the "we under-emit" theory
+is dead.
 
-**Fix is in our `hailo_cs_translator.c`. Tracking under #361.**
+The `host-tools/hailo-ushim` bisect findings below remain accurate.
+The remaining concrete asymmetries between HailoRT and our drive
+are:
 
-If you do send this ticket to Hailo after fixing the LCU emission,
-the right ask is:
+1. HailoRT calls `GET_HW_CONSTS` (opcode 0x48) four times per
+   session before `SET_NETWORK_GROUP_HEADER`. We call it once.
+2. HailoRT interleaves APP_CPU settle pings (`IDENTIFY` 0x00,
+   `GET_DEVICE_INFO` 0x33) between CS steps — specifically
+   between the four `SET_CONTEXT_INFO` calls and
+   `CHANGE_STATUS(ENABLED)`. We send the four CS calls
+   back-to-back, then ENABLED immediately.
+3. Our drive triggers `CPU_ECC_FATAL` (event_id=8) and
+   `CPU_ECC_ERROR` (event_id=7) D2H events with
+   `memory_bitmap=0x00001000` on every CORE-CPU RPC starting
+   from `CHANGE_STATUS(RESET)`. HailoRT-on-Pi-OS doesn't.
 
-> Is there documentation on which CS actions are required for a
-> minimum working compute graph (vs just configuring input/output
-> boundary channels)? Our translator was emitting OPEN_BOUNDARY and
-> ALLOW_INPUT_DATAFLOW correctly but missing ENABLE_LCU /
-> TRIGGER_SEQUENCER / WAIT_SEQUENCER. Bisecting this took several
-> months because fw accepts the incomplete bodies with
-> major_status=0 and silently waits at boundary submit.
-
-The bisect findings below remain accurate (descriptor geometry +
-CS wire format + CCW upload all work fine via your driver), but the
-"root cause unknown" framing is now wrong.
+Sending this ticket as-is is appropriate. The questions in the
+"Specific questions" section are still the right asks. We are
+trying the GET_HW_CONSTS-×4 change ourselves in parallel — if
+that fixes the ECC events and the boundary submit hang, we'll
+update the ticket; if it doesn't, the ticket is even more
+relevant.
 
 ---
 
