@@ -37,10 +37,9 @@ static const struct usb_device_descriptor mock_dev_desc = {
 /*
  * Raw config descriptor: 9 bytes config + 9 bytes iface0 (control) +
  * 7 bytes interrupt EP + 9 bytes iface1 alt0 (data, no EPs) + 9 bytes
- * iface1 alt1 (data, 2 EPs — deliberately skipped by the parser since
- * we only bind default settings) + 9 bytes iface1 alt0 data with 2
- * EPs + 7*2 bytes bulk EPs. The shape tests both the primary parse
- * path and the "skip alternate settings != 0" rule.
+ * iface1 alt1 (data, 2 EPs) + 7*2 bytes bulk EPs. The parser now keeps
+ * the highest alternate setting it sees for a given interface number, so
+ * iface1 ends up bound to alt1 with the two bulk endpoints.
  */
 #define MOCK_CONFIG_TOTAL_LENGTH 66
 static const uint8_t mock_config[MOCK_CONFIG_TOTAL_LENGTH] = {
@@ -59,12 +58,10 @@ static const uint8_t mock_config[MOCK_CONFIG_TOTAL_LENGTH] = {
     /* INTERFACE 1 alt 0 — CDC data (no endpoints) */
     0x09, USB_DT_INTERFACE, 0x01, 0x00, 0x00, 0x0A, 0x00, 0x00, 0x00,
 
-    /* INTERFACE 1 alt 1 — CDC data (bulk IN + bulk OUT, 2 EPs)
-     * The parser must SKIP this alt-setting per Phase-1 rules. */
+    /* INTERFACE 1 alt 1 — CDC data (bulk IN + bulk OUT, 2 EPs) */
     0x09, USB_DT_INTERFACE, 0x01, 0x01, 0x02, 0x0A, 0x00, 0x00, 0x00,
 
-    /* These endpoints belong to alt 1 — must NOT appear in the parsed
-     * endpoint table. */
+    /* These endpoints belong to the retained alt1 interface. */
     0x07, USB_DT_ENDPOINT, 0x88, USB_XFER_BULK, 0x00, 0x04, 0x00,
     0x07, USB_DT_ENDPOINT, 0x08, USB_XFER_BULK, 0x00, 0x04, 0x00,
 };
@@ -340,9 +337,9 @@ static void test_start_and_enumerate(void)
     TEST_ASSERT_EQUAL_INT(USB_STATE_CONFIGURED, dev->state);
     TEST_ASSERT_EQUAL_UINT16(0x0BDA, dev->dev_desc.idVendor);
     TEST_ASSERT_EQUAL_UINT16(0x8153, dev->dev_desc.idProduct);
-    /* Two alt-0 interfaces; iface0 has 1 EP (interrupt IN); iface1
-     * alt-0 has 0 EPs — the EPs hanging off alt 1 must be skipped. */
-    TEST_ASSERT_EQUAL_INT(1, mock.endpoints_configured);
+    /* iface0 contributes the interrupt endpoint; iface1 resolves to alt1
+     * and contributes the bulk IN + OUT endpoints. */
+    TEST_ASSERT_EQUAL_INT(3, mock.endpoints_configured);
 }
 
 static void test_enumerate_no_device(void)
@@ -485,19 +482,30 @@ static void test_descriptor_parse(void)
     TEST_ASSERT_EQUAL_UINT8(0x06, dev->ifaces[0].subclass);
     TEST_ASSERT_EQUAL_UINT8(1, dev->ifaces[0].num_endpoints);
 
-    /* Interface 1 alt 0: CDC data, 0 endpoints (alt 1 skipped). */
+    /* Interface 1 resolves to alt 1, which carries the two bulk endpoints. */
     TEST_ASSERT_TRUE(dev->ifaces[1].valid);
     TEST_ASSERT_EQUAL_UINT8(1, dev->ifaces[1].number);
-    TEST_ASSERT_EQUAL_UINT8(0, dev->ifaces[1].alt_setting);
+    TEST_ASSERT_EQUAL_UINT8(1, dev->ifaces[1].alt_setting);
     TEST_ASSERT_EQUAL_UINT8(0x0A, dev->ifaces[1].class_code);
+    TEST_ASSERT_EQUAL_UINT8(2, dev->ifaces[1].num_endpoints);
 
-    /* Only iface 0's interrupt IN endpoint should be present. */
+    /* iface 0 keeps the interrupt endpoint. */
     const struct usb_endpoint *intr_in =
         usb_find_endpoint(dev, 0, USB_DIR_IN, USB_XFER_INTERRUPT);
     TEST_ASSERT_NOT_NULL(intr_in);
     TEST_ASSERT_EQUAL_UINT8(0x81, intr_in->address);
     TEST_ASSERT_EQUAL_UINT16(16, intr_in->max_packet);
     TEST_ASSERT_EQUAL_UINT8(8, intr_in->interval);
+
+    /* iface 1 resolves to alt1 and exposes the bulk endpoints. */
+    const struct usb_endpoint *bulk_in =
+        usb_find_endpoint(dev, 1, USB_DIR_IN, USB_XFER_BULK);
+    const struct usb_endpoint *bulk_out =
+        usb_find_endpoint(dev, 1, USB_DIR_OUT, USB_XFER_BULK);
+    TEST_ASSERT_NOT_NULL(bulk_in);
+    TEST_ASSERT_NOT_NULL(bulk_out);
+    TEST_ASSERT_EQUAL_UINT8(0x88, bulk_in->address);
+    TEST_ASSERT_EQUAL_UINT8(0x08, bulk_out->address);
 }
 
 static void test_find_endpoint_direction_filter(void)
@@ -536,8 +544,8 @@ static void test_find_endpoint_mismatch(void)
 
     /* Iface 0 has no bulk endpoints — only interrupt IN. */
     TEST_ASSERT_NULL(usb_find_endpoint(dev, 0, USB_DIR_IN, USB_XFER_BULK));
-    /* Iface 1 (alt 0) has no endpoints at all. */
-    TEST_ASSERT_NULL(usb_find_endpoint(dev, 1, USB_DIR_IN, USB_XFER_BULK));
+    /* Iface 1 has bulk endpoints, but no interrupt endpoint. */
+    TEST_ASSERT_NULL(usb_find_endpoint(dev, 1, USB_DIR_IN, USB_XFER_INTERRUPT));
     /* Unknown iface number. */
     TEST_ASSERT_NULL(usb_find_endpoint(dev, 9, USB_DIR_IN, USB_XFER_BULK));
     /* NULL device — must not crash. */

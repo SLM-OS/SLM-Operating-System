@@ -74,16 +74,9 @@ static const struct usb_device_descriptor mock_dev_desc = {
  *  13   CS_INTERFACE — Ethernet Networking functional descriptor (iMAC=3)
  *   7   INTERRUPT IN endpoint 0x81
  *   9   INTERFACE 1 alt 0 — CDC data (no endpoints)
- *   9   INTERFACE 1 alt 1 — CDC data (2 bulk EPs; parser must SKIP alt 1)
- *   7   BULK IN  endpoint 0x82  (belongs to alt 1, not used by us)
- *   7   BULK OUT endpoint 0x02  (belongs to alt 1, not used by us)
- *
- * Plan §6 says Phase 1 only binds alt 0, so the primary data iface
- * ideally carries endpoints at alt 0. Real RTL8153 uses alt 0 for
- * the 2-EP data iface; we mirror that here to keep the probe
- * meaningful. Replace the "alt 0 empty + alt 1 real" layout above
- * with "alt 0 has the 2 bulk EPs" so our Phase-1 parser can bind
- * them.
+ *   9   INTERFACE 1 alt 0 — CDC data with 2 bulk endpoints
+ *   7   BULK IN  endpoint 0x82
+ *   7   BULK OUT endpoint 0x02
  */
 #define CFG_TOTAL 66
 static const uint8_t mock_config[CFG_TOTAL] = {
@@ -682,9 +675,14 @@ static void test_probe_rejects_non_cdc_device(void)
     struct usb_device *dev = usb_core_first_device();
     TEST_ASSERT_NOT_NULL(dev);
 
-    /* First prime the module with a successful probe so we can verify
-     * a subsequent failure clears link_status. */
+    /* First prime the module with a successful probe plus an explicit
+     * NETWORK_CONNECTION notification so we can verify a subsequent
+     * failure clears link_status. */
     TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
+    TEST_ASSERT_NOT_NULL(mock_complete_pending_notify(
+        CDC_NOTIFY_NETWORK_CONNECTION, 1, NULL, 0));
+    net_get_driver()->tx_reap();
     TEST_ASSERT_TRUE(net_get_driver()->link_status());
 
     for (unsigned i = 0; i < 4; i++) {
