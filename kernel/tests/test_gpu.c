@@ -825,6 +825,24 @@ static void test_slm_fp32_argmax_single_element(void)
     TEST_ASSERT_EQUAL_INT(0, slm_fp32_argmax(one, 1u));
 }
 
+static void test_slm_fp32_argmax_nan_does_not_crash(void)
+{
+    /* The doc string says NaN handling is undefined and that no GPU
+     * path we wire produces NaN. This test doesn't pin a specific
+     * outcome — it only confirms that a NaN-bearing array doesn't
+     * crash and the returned index is in-range (0..n-1), so external
+     * misuse can't take down the kernel. Bit pattern 0x7FC00000 is
+     * a quiet NaN. */
+    static const uint32_t logits[3] = {
+        0x3F800000u,  /* 1.0 */
+        0x7FC00000u,  /* qNaN */
+        0x40000000u,  /* 2.0 */
+    };
+    int idx = slm_fp32_argmax(logits, 3u);
+    TEST_ASSERT_TRUE(idx >= 0);
+    TEST_ASSERT_TRUE(idx < 3);
+}
+
 static void test_slm_gpu_run_mnist_returns_negative_off_jetson(void)
 {
     /* On non-Jetson the FFI is a stub returning -1. The kernel test
@@ -941,6 +959,7 @@ int test_suite_gpu(void)
     RUN_TEST(test_slm_fp32_argmax_handles_mixed_signs);
     RUN_TEST(test_slm_fp32_argmax_rejects_null_or_empty);
     RUN_TEST(test_slm_fp32_argmax_single_element);
+    RUN_TEST(test_slm_fp32_argmax_nan_does_not_crash);
     RUN_TEST(test_slm_gpu_run_mnist_returns_negative_off_jetson);
     RUN_TEST(test_slm_gpu_run_mnist_null_buf_fails);
     RUN_TEST(test_slm_gpu_set_mnist_input_returns_negative_off_jetson);
