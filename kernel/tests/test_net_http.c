@@ -5,7 +5,9 @@
 #include "../include/net.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdint.h>
+#include <string.h>
 
 static void test_parse_http_url_basic(void)
 {
@@ -37,6 +39,31 @@ static void test_parse_http_url_rejects_invalid_inputs(void)
     TEST_ASSERT_TRUE(net_http_parse_url("http://:8080/a", &url) < 0);
     TEST_ASSERT_TRUE(net_http_parse_url("http://example.com:0/a", &url) < 0);
     TEST_ASSERT_TRUE(net_http_parse_url("http://example.com:abc/a", &url) < 0);
+}
+
+static void test_parse_http_url_accepts_long_signed_uri(void)
+{
+    struct net_http_url url;
+    char query[700];
+    char long_url[900];
+    int n;
+
+    memset(query, 'a', sizeof(query) - 1);
+    query[sizeof(query) - 1] = '\0';
+
+    n = snprintf(
+        long_url,
+        sizeof(long_url),
+        "http://example.com/releases/model.blob?X-Amz-Signature=%s&X-Amz-Expires=3600",
+        query
+    );
+    TEST_ASSERT_TRUE(n > 0);
+    TEST_ASSERT_TRUE((size_t)n < sizeof(long_url));
+
+    TEST_ASSERT_EQUAL_INT(0, net_http_parse_url(long_url, &url));
+    TEST_ASSERT_EQUAL_STRING("example.com", url.host);
+    TEST_ASSERT_EQUAL_UINT16(80, url.port);
+    TEST_ASSERT_TRUE(strncmp(url.uri, "/releases/model.blob?X-Amz-Signature=", 39) == 0);
 }
 
 static void test_parse_sha256_hex_accepts_valid_and_rejects_invalid(void)
@@ -98,6 +125,7 @@ int test_suite_net_http(void)
     RUN_TEST(test_parse_http_url_basic);
     RUN_TEST(test_parse_http_url_with_port_and_root_default);
     RUN_TEST(test_parse_http_url_rejects_invalid_inputs);
+    RUN_TEST(test_parse_http_url_accepts_long_signed_uri);
     RUN_TEST(test_parse_sha256_hex_accepts_valid_and_rejects_invalid);
     RUN_TEST(test_http_shell_usage_and_validation);
     RUN_TEST(test_http_shell_requires_network_for_valid_request);

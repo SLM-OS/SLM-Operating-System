@@ -627,7 +627,13 @@ def upload_blob(args: argparse.Namespace, remote_path: str) -> None:
 
 
 def default_remote_path(source: str) -> str:
-    name = pathlib.PurePosixPath(source).name or pathlib.Path(source).name
+    if "://" in source:
+        trimmed = source.split("?", 1)[0].rstrip("/")
+        name = pathlib.PurePosixPath(trimmed).name
+    elif "\\" in source or (len(source) >= 2 and source[1] == ":"):
+        name = pathlib.PureWindowsPath(source).name
+    else:
+        name = pathlib.Path(source).name or pathlib.PurePosixPath(source).name
     if not name:
         name = "blob.bin"
     return f"/mnt/files/policies/{name}"

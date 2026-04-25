@@ -5,7 +5,7 @@
 #include "sha256.h"
 
 #define NET_HTTP_MAX_HOST 96
-#define NET_HTTP_MAX_URI  128
+#define NET_HTTP_MAX_URI  1024
 
 struct net_http_url {
     char host[NET_HTTP_MAX_HOST];

@@ -426,6 +426,18 @@ def test_modelctl_parse_args_rejects_sha256_without_http_url():
             assert False, "expected parse_args to reject --sha256 without --http-url"
 
 
+def test_modelctl_default_remote_path_handles_windows_local_source():
+    remote = slm_modelctl.default_remote_path(r"C:\tmp\model.blob")
+    assert remote == "/mnt/files/policies/model.blob"
+
+
+def test_modelctl_default_remote_path_uses_http_url_basename():
+    remote = slm_modelctl.default_remote_path(
+        "http://10.0.2.2/releases/model.blob?X-Amz-Signature=abcdef"
+    )
+    assert remote == "/mnt/files/policies/model.blob"
+
+
 def test_modelctl_parse_args_reorders_global_options_before_subcommand():
     with patched_argv(
         slm_modelctl,
@@ -737,6 +749,8 @@ def main() -> int:
     runner.run("modelctl_parse_args_accepts_http_source", test_modelctl_parse_args_accepts_http_source)
     runner.run("modelctl_parse_args_http_source_accepts_remote_path_override", test_modelctl_parse_args_http_source_accepts_remote_path_override)
     runner.run("modelctl_parse_args_rejects_sha256_without_http_url", test_modelctl_parse_args_rejects_sha256_without_http_url)
+    runner.run("modelctl_default_remote_path_handles_windows_local_source", test_modelctl_default_remote_path_handles_windows_local_source)
+    runner.run("modelctl_default_remote_path_uses_http_url_basename", test_modelctl_default_remote_path_uses_http_url_basename)
     runner.run("modelctl_parse_args_reorders_global_options_before_subcommand", test_modelctl_parse_args_reorders_global_options_before_subcommand)
     runner.run("modelctl_legacy_path_named_like_subcommand_stays_positional", test_modelctl_legacy_path_named_like_subcommand_stays_positional)
     runner.run("modelctl_infer_probe_policy_maps_scheduler_kinds", test_modelctl_infer_probe_policy_maps_scheduler_kinds)
