@@ -8,7 +8,9 @@
 
 #include "unity.h"
 #include "../include/lua_slm.h"
+#include "../include/camera.h"
 #include "../include/component.h"
+#include "../include/md5.h"
 #include "../include/slm_ffi.h"
 #include "../include/uart.h"
 #include "../include/task.h"   /* struct task, task_create_with_priority, task_destroy */
@@ -2707,6 +2709,186 @@ static void test_slm_model_pin_unpin(void)
 }
 
 /*
+ * Test: slm.camera namespace exposes the four expected functions.
+ */
+static void test_slm_camera_namespace(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "assert(type(slm.camera) == 'table', 'slm.camera should be a table')\n"
+        "assert(type(slm.camera.open) == 'function', 'open is a function')\n"
+        "assert(type(slm.camera.capture) == 'function', 'capture is a function')\n"
+        "assert(type(slm.camera.close) == 'function', 'close is a function')\n"
+        "assert(type(slm.camera.preprocess_mnist) == 'function',\n"
+        "       'preprocess_mnist is a function')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.camera.open with an unrecognised name returns nil. Real
+ * camera names ("imx219-0", etc.) belong to backends not yet built.
+ */
+static void test_slm_camera_open_unknown(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "assert(slm.camera.open('imx219-0') == nil, 'imx219 not built')\n"
+        "assert(slm.camera.open('') == nil, 'empty name is unknown')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: open("mock") + capture returns the IMX219 binned-mode geometry
+ * (1640x1232 RAW10 RGGB, frame_id=0). Pins the wire shape so future
+ * refactors can't silently change the tuple ordering.
+ */
+static void test_slm_camera_capture_mock(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local cam = slm.camera.open('mock')\n"
+        "assert(type(cam) == 'table', 'open(mock) returns handle')\n"
+        "assert(cam.name == 'mock', 'name field set')\n"
+        "local fid, w, h, bayer = cam:capture()\n"
+        "assert(fid == 0, 'mock frame_id is 0, got ' .. tostring(fid))\n"
+        "assert(w == 1640, 'width 1640, got ' .. tostring(w))\n"
+        "assert(h == 1232, 'height 1232, got ' .. tostring(h))\n"
+        "assert(bayer == 0, 'bayer RGGB(0), got ' .. tostring(bayer))\n"
+        "assert(cam:close() == true, 'close returns true')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: preprocess_mnist on the mock frame is deterministic. Pins the
+ * MD5 of the 3,136 output bytes so any change to the upscale → green-
+ * extract → box-average → fp32 pipeline shows up as a test failure.
+ *
+ * The 44x44 box-average exactly recovers the original 8-bit pixel
+ * value (the mock generator nearest-upsampled with the same factor),
+ * but the kernel-side fp32 conversion is integer-only IEEE 754 with
+ * truncation (-mgeneral-regs-only forbids float). The result differs
+ * from a Python `float(k/255)` round-to-nearest pin in the LSB for
+ * ~27% of pixels (1 ULP). If this MD5 changes, the regression is
+ * real.
+ */
+static void test_slm_camera_preprocess_mnist_md5(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local cam = slm.camera.open('mock')\n"
+        "assert(cam ~= nil, 'mock backend must be embedded for this test')\n"
+        "local fid, w, h, bayer = cam:capture()\n"
+        "result = slm.camera.preprocess_mnist(fid, w, h, bayer)\n"
+        "assert(type(result) == 'string', 'returns string')\n"
+        "assert(#result == 3136, '3136 bytes (28*28*4), got ' .. #result)";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_getglobal(L, "result");
+    size_t blen = 0;
+    const char *bytes = lua_tolstring(L, -1, &blen);
+    TEST_ASSERT_NOT_NULL(bytes);
+    TEST_ASSERT_EQUAL_UINT(CAMERA_MNIST_OUT_BYTES, (unsigned)blen);
+
+    uint8_t md5[MD5_DIGEST_LENGTH];
+    md5_compute(bytes, blen, md5);
+
+    /* MD5 of preprocess_mnist output for mock_camera_digit.bin
+     * (digit 3, MNIST test idx 18) under the kernel's truncating
+     * IEEE 754 path. See test header for why this differs from the
+     * source-digit MD5. */
+    static const uint8_t expected[MD5_DIGEST_LENGTH] = {
+        0x7c, 0x5f, 0xee, 0xda, 0x57, 0x88, 0x97, 0x84,
+        0x89, 0x46, 0xa9, 0x12, 0xaa, 0x6a, 0x80, 0xea,
+    };
+    TEST_ASSERT_EQUAL_MEMORY(expected, md5, MD5_DIGEST_LENGTH);
+
+    lua_pop(L, 1);
+    lua_slm_close(L);
+}
+
+/*
+ * Test: preprocess_mnist rejects mismatched geometry. frame_id != 0,
+ * wrong width/height, and unsupported Bayer pattern all return
+ * (nil, rc<0) without crashing the VM.
+ */
+static void test_slm_camera_preprocess_mnist_bad_args(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "-- Wrong frame_id\n"
+        "local _, rc = slm.camera.preprocess_mnist(99, 1640, 1232, 0)\n"
+        "assert(rc == -1, 'bad frame_id -> -1, got ' .. tostring(rc))\n"
+        "-- Wrong width/height\n"
+        "local _, rc = slm.camera.preprocess_mnist(0, 640, 480, 0)\n"
+        "assert(rc == -3, 'wrong geometry -> -3, got ' .. tostring(rc))\n"
+        "-- Unsupported Bayer\n"
+        "local _, rc = slm.camera.preprocess_mnist(0, 1640, 1232, 1)\n"
+        "assert(rc == -3, 'wrong bayer -> -3, got ' .. tostring(rc))";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: end-to-end mock-camera → MNIST classifier flow. Loads the
+ * MNIST model, captures the embedded mock frame, preprocesses it,
+ * runs inference, asserts the predicted class matches the baked
+ * digit (3). This is the QEMU CI gate for the camera pipeline.
+ */
+static void test_slm_camera_e2e_mnist_mock(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local idx = slm.model_load_mnist()\n"
+        "assert(idx >= 0, 'model_load_mnist should succeed')\n"
+        "local cam = slm.camera.open('mock')\n"
+        "assert(cam ~= nil, 'mock backend embedded')\n"
+        "local fid, w, h, bayer = cam:capture()\n"
+        "local mnist = slm.camera.preprocess_mnist(fid, w, h, bayer)\n"
+        "assert(#mnist == 3136, 'preprocess returns 3136 bytes')\n"
+        "local logits, argmax = slm.model_infer_bytes(idx, mnist)\n"
+        "assert(type(logits) == 'string', 'logits is a string')\n"
+        "assert(#logits == 40, 'logits 40 bytes (10 fp32)')\n"
+        "assert(argmax == 3, 'mock fixture is digit 3, got '\n"
+        "                    .. tostring(argmax))\n"
+        "cam:close()\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+    rust_model_unload(0);
+}
+
+/*
  * Test: digit_classifier preloads MNIST model via component manifest.
  * Running digit_classifier should auto-load the MNIST model if not present.
  */
@@ -3482,6 +3664,12 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_model_infer_bytes);
     RUN_TEST(test_slm_model_infer_file_missing);
     RUN_TEST(test_slm_model_pin_unpin);
+    RUN_TEST(test_slm_camera_namespace);
+    RUN_TEST(test_slm_camera_open_unknown);
+    RUN_TEST(test_slm_camera_capture_mock);
+    RUN_TEST(test_slm_camera_preprocess_mnist_md5);
+    RUN_TEST(test_slm_camera_preprocess_mnist_bad_args);
+    RUN_TEST(test_slm_camera_e2e_mnist_mock);
     RUN_TEST(test_digit_classifier_preloads_model);
     RUN_TEST(test_slm_component_hot_swap_stateful);
 

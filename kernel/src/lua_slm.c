@@ -7,6 +7,7 @@
 
 #include "lua_slm.h"
 #include "build_info.h"
+#include "camera.h"
 #include "debug.h"
 #include "timer.h"
 #include "pmm.h"
@@ -3111,6 +3112,173 @@ static const luaL_Reg slm_hailo_lib[] = {
 
 #endif /* !PLATFORM_X86_64 — Hailo bindings */
 
+/* =============================================================================
+ * Camera bindings (slm.camera.*)
+ *
+ * Surfaces the camera capture API from kernel/include/camera.h. Today only
+ * the mock backend is wired in (.rodata frame embedded by CMake when
+ * MOCK_CAMERA_FRAME=ON); the IMX219 driver will plug into the same surface
+ * once Phase 0+ hardware work lands. See docs/jetson-camera-imx219-plan.md.
+ *
+ *   slm.camera.open(name)            Returns a handle table {name, capture,
+ *                                    close} or nil if the backend is missing
+ *                                    or the name is unknown. Method-style:
+ *                                        local cam = slm.camera.open("mock")
+ *                                        local f, w, h, b = cam:capture()
+ *                                        cam:close()
+ *
+ *   slm.camera.capture(arg)          Procedural form. arg is either the camera
+ *                                    name (string) or a handle table whose
+ *                                    .name field is read. Returns
+ *                                    (frame_id, width, height, bayer) on
+ *                                    success, nil on failure. frame_id is a
+ *                                    small integer that names the kernel-side
+ *                                    buffer for preprocess_mnist (only 0 is
+ *                                    valid today — the mock's .rodata frame).
+ *
+ *   slm.camera.close(arg)            Procedural form. Returns true. The mock
+ *                                    backend owns no per-call resources;
+ *                                    real backends will release DMA buffers
+ *                                    here.
+ *
+ *   slm.camera.preprocess_mnist(frame_id, width, height, bayer)
+ *                                    Decode the frame named by frame_id into
+ *                                    3,136 bytes of fp32 in [0, 1] suitable
+ *                                    for slm.model_infer_bytes. Returns the
+ *                                    bytes string on success; (nil, rc<0) on
+ *                                    error. rc values:
+ *                                      -1 = bad frame_id (only 0 today)
+ *                                      -2 = mock backend not embedded
+ *                                      -3 = (w, h, bayer) don't match the
+ *                                           backing frame's geometry
+ *                                      <0 from camera_preprocess_mnist for
+ *                                          unsupported geometry
+ *
+ * Frame bytes are not exposed to Lua because the 1640x1232 RAW10 frame is
+ * 2.5 MB — well above the 1 MB Lua heap. preprocess_mnist therefore reads
+ * the bytes through the kernel-side frame_id; future small-mode captures
+ * (e.g. 640x480) could grow a string-bytes overload.
+ * ========================================================================== */
+
+/* Resolve the first argument of a camera method to a backend name.
+ * Accepts a Lua string OR a handle table with a .name string field
+ * (so cam:capture() works through Lua's a:b() == a.b(a) sugar). */
+static const char *l_camera_arg_name(lua_State *L, int idx) {
+    if (lua_type(L, idx) == LUA_TSTRING) {
+        return lua_tostring(L, idx);
+    }
+    if (lua_type(L, idx) == LUA_TTABLE) {
+        lua_getfield(L, idx, "name");
+        if (lua_type(L, -1) == LUA_TSTRING) {
+            const char *name = lua_tostring(L, -1);
+            lua_pop(L, 1);
+            return name;
+        }
+        lua_pop(L, 1);
+    }
+    return NULL;
+}
+
+static int l_camera_capture(lua_State *L);
+static int l_camera_close(lua_State *L);
+
+static int l_camera_open(lua_State *L) {
+    if (!L) return 0;
+    const char *name = luaL_checkstring(L, 1);
+    struct camera_frame frame;
+    if (camera_open(name, &frame) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    /* Build the handle table: {name=name, capture=fn, close=fn}.
+     * Plain table — no metatable needed. cam:capture() works because
+     * Lua passes the table as self into the function stored at .capture. */
+    lua_newtable(L);
+    lua_pushstring(L, name);
+    lua_setfield(L, -2, "name");
+    lua_pushcfunction(L, l_camera_capture);
+    lua_setfield(L, -2, "capture");
+    lua_pushcfunction(L, l_camera_close);
+    lua_setfield(L, -2, "close");
+    return 1;
+}
+
+static int l_camera_capture(lua_State *L) {
+    if (!L) return 0;
+    const char *name = l_camera_arg_name(L, 1);
+    if (!name) {
+        lua_pushnil(L);
+        return 1;
+    }
+    struct camera_frame frame;
+    if (camera_open(name, &frame) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushinteger(L, 0);                              /* frame_id */
+    lua_pushinteger(L, (lua_Integer)frame.width);
+    lua_pushinteger(L, (lua_Integer)frame.height);
+    lua_pushinteger(L, (lua_Integer)frame.bayer);
+    return 4;
+}
+
+static int l_camera_close(lua_State *L) {
+    if (!L) return 0;
+    /* Mock backend has no per-handle state to release. Argument is
+     * accepted (string or handle table) but unused. */
+    (void)l_camera_arg_name(L, 1);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_camera_preprocess_mnist(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer frame_id = luaL_checkinteger(L, 1);
+    lua_Integer width    = luaL_checkinteger(L, 2);
+    lua_Integer height   = luaL_checkinteger(L, 3);
+    lua_Integer bayer    = luaL_checkinteger(L, 4);
+
+    if (frame_id != 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -1);
+        return 2;
+    }
+    struct camera_frame frame;
+    if (camera_open("mock", &frame) != 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -2);
+        return 2;
+    }
+    if ((uint32_t)width  != frame.width
+     || (uint32_t)height != frame.height
+     || (uint32_t)bayer  != frame.bayer) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -3);
+        return 2;
+    }
+
+    /* 3,136 bytes on the shell-task stack — well within budget. */
+    uint8_t out[CAMERA_MNIST_OUT_BYTES];
+    int rc = camera_preprocess_mnist(frame.data, frame.size,
+                                     frame.width, frame.height, frame.bayer,
+                                     out, sizeof(out));
+    if (rc != 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, rc);
+        return 2;
+    }
+    lua_pushlstring(L, (const char *)out, sizeof(out));
+    return 1;
+}
+
+static const luaL_Reg slm_camera_lib[] = {
+    {"open",             l_camera_open},
+    {"capture",          l_camera_capture},
+    {"close",            l_camera_close},
+    {"preprocess_mnist", l_camera_preprocess_mnist},
+    {NULL, NULL}
+};
+
 /* SLM library functions */
 static const luaL_Reg slm_lib_safe[] = {
     {"print", l_print},
@@ -3234,6 +3402,12 @@ static void lua_push_slm_library(lua_State *L, bool admin)
     lua_setfield(L, -2, "BUILD_STAMP");
     lua_pushstring(L, SLMOS_BUILD_SHA);
     lua_setfield(L, -2, "BUILD_SHA");
+
+    /* slm.camera — read-only backend (mock-only today); fine on the safe
+     * surface. Real hardware backends with side effects can move to admin
+     * when they land. */
+    luaL_newlib(L, slm_camera_lib);
+    lua_setfield(L, -2, "camera");
 
     if (admin) {
         for (const luaL_Reg *r = slm_lib_admin; r->name; r++) {

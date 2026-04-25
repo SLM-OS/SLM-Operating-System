@@ -2,17 +2,17 @@
 
 **Tracking:** 🎫 #396
 
-**Status:** ☐ Phase 0 hardware recon not yet run; no driver code started. Pre-hardware code-read tasks unblocked and ready.
+**Status:** ☐ Phase 0 hardware recon not yet run; no driver code started. Pre-hardware code-read tasks unblocked and ready. QEMU-side mock + Lua bindings + integration test landed (#396 follow-up).
 
-**Progress:** 0 / 20 tasks complete.
+**Progress:** 3 / 20 tasks complete.
 
 | Section | ✅ done | ☐ open | ☐🔗 blocked | ⏸️ deferred |
 |---------|--------|---------|-------------|-------------|
 | Pre-Hardware Tasks | 0 | 7 | 0 | 0 |
 | Phase 0 — Hardware Recon | 0 | 0 | 4 | 0 |
 | Hardware Tasks (post-Phase-0) | 0 | 0 | 6 | 0 |
-| QEMU-Side Tasks | 0 | 3 | 0 | 0 |
-| **Total** | **0** | **10** | **10** | **0** |
+| QEMU-Side Tasks | 3 | 0 | 0 | 0 |
+| **Total** | **3** | **7** | **10** | **0** |
 
 Icon legend (per project root `CLAUDE.md`): ✅ done · ☐ pending · ☐🔗 blocked on dependency · ⏸️ deferred to a future phase. The 🎫 above tracks the whole feature; per-bullet 🎫 is omitted as the convention allows.
 
@@ -486,14 +486,22 @@ Blocked until Phase 0 returns green.
 Items that can run on QEMU alongside the existing test suite, so the
 non-hardware portions don't regress between bring-up sessions.
 
-- ☐ Add a mock camera component that returns a fixed 1640×1232 RAW10
-  buffer drawn from a baked-in test image. `slm.camera.open("mock")`
-  resolves to it.
-- ☐ Unit-test `preprocess_mnist`: pin the output bytes of the mock
-  image and assert the MD5 across runs.
-- ☐ Lua-level integration test: open mock camera, capture, preprocess,
-  feed to the embedded MNIST CPU path (no GPU required), assert
-  predicted class.
+- ✅ Mock camera backend that returns a fixed 1640×1232 RAW10 buffer
+  drawn from a baked-in test image. `slm.camera.open("mock")` resolves
+  to it. Source digit is `scripts/fixtures/mock_camera_digit.bin` (a
+  single MNIST test digit, class 3); `scripts/generate-mock-camera-frame.py`
+  upscales + RAW10-packs it into `build/mock_camera_frame.bin` at
+  build time, embedded via `kernel/src/camera_mock_embed.S`. Gated on
+  the `MOCK_CAMERA_FRAME` CMake option (default ON).
+- ✅ Unit-test `preprocess_mnist` (`test_slm_camera_preprocess_mnist_md5`
+  in `kernel/tests/test_lua.c`): pins the MD5 of the 3,136 output
+  bytes — `7c5feeda578897848946a912aa6a80ea` — so any drift in the
+  upscale → green-extract → box-average → fp32 pipeline is caught.
+- ✅ Lua-level integration test (`test_slm_camera_e2e_mnist_mock`):
+  open mock camera → `cam:capture()` → `slm.camera.preprocess_mnist`
+  → `slm.model_infer_bytes` → assert `argmax == 3` (the baked digit's
+  known class). Runs against the embedded MNIST CPU path; no GPU
+  required.
 
 ---
 
