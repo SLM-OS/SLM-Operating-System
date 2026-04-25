@@ -328,44 +328,121 @@ and not in our CS RPC wire format. It's in the relationship
 between the CS handshake bodies and what fw needs to unblock the
 boundary-input data path.
 
-## Observed differences vs HailoRT's MNIST trace
+## Update 2026-04-25 — all three asymmetries tested, all disconfirmed
 
-The bisect surfaced three concrete asymmetries between our
-handshake and what we see HailoRT do in the `trace_mmio` /
-`trace_ioctl` capture from a successful MNIST run:
+The earlier draft (2026-04-24) listed three concrete asymmetries vs
+HailoRT's MNIST trace. We've since tested each and ruled it out:
 
-1. **GET_HW_CONSTS call count.** HailoRT invokes opcode 0x48
-   four times in succession on the CORE CPU before issuing
-   SET_NETWORK_GROUP_HEADER. We invoke it once. Is there a
-   state machine requirement that reads stale data on the first
-   1-3 calls, or is this benign retry logic?
+1. **GET_HW_CONSTS call count.** Implemented 4× call as a tight
+   loop matching HailoRT's cadence. Result: CPU_ECC events shifted
+   distribution slightly, boundary submit still hangs identically.
+   Asymmetry is real but not load-bearing.
 
-2. **SET_CONTEXT_INFO body sizes.** From the fwctl wire trace,
-   HailoRT's four SET_CONTEXT_INFO bodies for MNIST are
-   102 / 153 / 528 / 161 bytes (before the 16-byte common
-   header + 4-byte parameter_count). Our ctxsmoke-derived
-   bodies for the same HEF are 102 / 16 / 37 / 103 bytes — a
-   very different distribution, especially the 528-vs-37 gap on
-   what we believe is PRELIMINARY / DYNAMIC. This suggests our
-   context translator is under-emitting actions (burst credits,
-   LCU sequencer, fetch_data_from_vdma, etc.) that a real MNIST
-   inference setup requires. fw accepts our bodies with
-   `major_status=0`, but perhaps those bodies don't fully
-   configure the NN-core state machine for real inference to
-   flow.
+2. **SET_CONTEXT_INFO body sizes.** The earlier draft claimed our
+   bodies were 102/16/37/103 vs HailoRT's 102/153/528/161 —
+   **this was a measurement error.** Our ctxsmoke probe path emits
+   minimal bodies (16/37/103 for the BSW/PRELIMINARY/DYNAMIC slots);
+   our production load path (`hailo_backend_run`) emits 63/114/489/122.
+   With the 39-byte SET_CONTEXT_INFO framing prefix added, that's
+   102/153/528/161 — **byte-for-byte match to HailoRT, modulo the
+   4 IOVA-bearing bytes per ACTIVATE_BOUNDARY action.** The
+   "we under-emit actions" theory is dead.
 
-3. **Settle pings between RPCs.** HailoRT interleaves APP_CPU
-   opcodes 0x00 (IDENTIFY) and 0x33 (GET_DEVICE_INFORMATION)
-   between CS steps — specifically between the 4 SET_CONTEXT_INFO
-   calls and CHANGE_STATUS(ENABLED). Our probe sends the 4
-   SET_CONTEXT_INFO calls back-to-back then ENABLED immediately.
-   Is fw expected to process SET_CONTEXT_INFO bodies
-   asynchronously, with APP_CPU RPCs acting as a sync barrier?
+3. **Settle pings between CS steps.** Tested at all three plausible
+   positions: pre-RESET (3 pings), post-ENABLED (4 pings), and
+   pre-ENABLED (4 pings, the position HailoRT actually uses per
+   the trace timeline). Each ping returned `rc=0` from fw. Boundary
+   submit still hangs in all three configurations. Asymmetry is real
+   but not load-bearing.
 
-The ticket's original questions still stand, but these three
-asymmetries are the most concrete handles we have for a fix.
-We can share the full fwctl capture + our probe source if the
-ticket process allows it.
+### Additional structural probes done 2026-04-25
+
+We continued investigating to narrow the gap further. Each probe
+is small, falsifiable, and tested on hardware:
+
+- **BIST (RUN_BIST_TEST opcode 0x3C).** Implemented to probe whether
+  bit 12 of `memory_bitmap` matches the BIST `top_bypass_bitmap`
+  enum. The BIST whitelist is hard-enforced to bits 2-5 (the L4
+  SRAM banks); bit 12 (which `CONTROL_PROTOCOL__bist_top_mem_block_t`
+  names `SAGE1_ISP_12`) is rejected with `major=0x400300b2`. We can
+  confirm L4 SRAM is healthy (rc=0 with all-zero result) but cannot
+  directly probe the SAGE1_ISP region. Also confirmed BIST itself
+  does not trigger ECC events.
+
+- **HailoRT SCB-style pre-trigger init sequence.** HailoRT's MMIO
+  trace at boot (lines 1463-1480) shows an 8-write sequence to BAR0
+  offsets 0x96c..0x988 — including `0x000005fa` written to 0x978
+  (the ARM Cortex-M `SCB->AIRCR` vector key). We replicated all 8
+  writes via dev_write32 before our trigger. Result: ECC distribution
+  shifted (load itself stays clean) but boundary submit still hangs
+  with same proc=0 / desc_status=0x00 signature.
+
+- **D3hot transition.** `hailo_pcie:949` puts the device in
+  `PCI_D3hot` after fw load; user open later transitions back to
+  D0. SLM-OS now does the same round-trip via the standard PCI PM
+  capability. Confirmed PMCSR transitions D0→D3→D0 (0x2008→0x200b
+  →0x2008). Result: bit-12 ECC shifts entirely out of the load and
+  pre-submit drain paths — but still fires the moment we attempt
+  the boundary submit on ch=2. The submit hang is unchanged.
+
+- **WRITE_MEMORY targeting audit.** Reviewed every host-side use of
+  `WRITE_MEMORY` (opcode 0x01) in our driver and HailoRT's MMIO
+  trace. Neither side issues `WRITE_MEMORY` during MNIST inference.
+  Our CCW upload uses VDMA descriptor lists, not FW_CONTROL.
+  Symmetric to HailoRT — not a host/device data-write divergence.
+
+- **MSI binding before fw trigger.** Already implemented prior to
+  this round. The MSI capability is programmed and handler bound
+  before the `0xE0980` trigger write. No structural difference vs
+  Linux's `hailo_pcie_enable_interrupts` flow.
+
+- **Stage-2 firmware upload.** `hailo-pcie-common.c:308-315` shows
+  Hailo-8 has only ONE upload stage — stage-2 exists only for
+  `HAILO_BOARD_TYPE_HAILO10H`. Verified there's no stage-2 to
+  replicate.
+
+### Net effect on the bit-12 ECC trigger
+
+Across the three structural changes that move state (D3hot, SCB
+sequence, settle pings), the bit-12 CPU_ECC trigger MOVES — but
+never disappears. Each change shifts which RPC or which timing
+window first surfaces it. The boundary submit on channel 2 fails
+identically in every configuration: `num_proc=0`, all
+`RemainingPageSize_Status` bytes 0x00, fw never fetches our
+descriptors.
+
+Our updated reading: the bit-12 ECC may be a **symptom** of fw
+state divergence, not the direct cause of the submit hang. Whatever
+internal state HailoRT's flow leaves the chip in lets channel 2
+proceed; ours doesn't, regardless of what host-observable bytes/
+MMIO/IRQ/power-state we replicate.
+
+### What we believe we've ruled out (host side)
+
+- Wire-format bytes (CS RPC headers, parameter framing, length prefixes)
+- Action body content (verified byte-for-byte vs HailoRT, IOVA-only diff)
+- Descriptor geometry (page size, count, channel index, alignment)
+- IOVA / inbound-window translation
+- Cache flushing (DRAM-OK probe via `dc civac` before reads)
+- Initial credit size, periph values, nn_stream_config
+- IRQ mask ordering (armed before fw trigger)
+- MSI capability programming (cap configured before trigger)
+- D3hot/D0 round-trip (now in our driver)
+- SCB/AIRCR pre-trigger init sequence
+- PCIe state (link speed, MPS, MRRS, ASPM L0s disabled both ends)
+- Firmware blob version (Pi OS blob and your distribution blob both tried)
+- Multi-stage firmware upload (Hailo-8 has only stage-1)
+
+We've published an end-to-end ushim probe that drives **your**
+`hailo_pci` ioctls with our exact byte sequences. The probe
+reproduces the boundary-submit hang identically — confirming the
+issue is not in our bare-metal kernel's MMIO/cache/IRQ paths but
+in something fw-side that our handshake fails to configure.
+
+We're out of host-side hypotheses. The questions in the
+"Specific questions" section are the right asks. Bit-12 decode is
+the highest-leverage answer — once we know what region SAGE1_ISP
+is, we can either probe it directly or stop chasing the symptom.
 
 ## Artifacts
 
