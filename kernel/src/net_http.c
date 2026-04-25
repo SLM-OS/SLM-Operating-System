@@ -77,6 +77,7 @@ int net_http_parse_url(const char *url, struct net_http_url *out)
     static const char prefix[] = "http://";
     const char *host_start;
     const char *path_start;
+    const char *query_start;
     const char *host_end;
     const char *colon;
     size_t host_len;
@@ -95,7 +96,13 @@ int net_http_parse_url(const char *url, struct net_http_url *out)
     }
 
     path_start = strchr(host_start, '/');
-    host_end = path_start ? path_start : (host_start + strlen(host_start));
+    query_start = strchr(host_start, '?');
+    if (query_start && (!path_start || query_start < path_start)) {
+        host_end = query_start;
+        path_start = query_start;
+    } else {
+        host_end = path_start ? path_start : (host_start + strlen(host_start));
+    }
     colon = NULL;
     for (const char *p = host_start; p < host_end; p++) {
         if (*p == ':') {
@@ -127,11 +134,20 @@ int net_http_parse_url(const char *url, struct net_http_url *out)
     }
 
     if (path_start) {
-        path_len = strlen(path_start);
-        if (path_len == 0 || path_len >= sizeof(out->uri)) {
-            return NET_E_INVAL;
+        if (*path_start == '?') {
+            path_len = strlen(path_start) + 1U;
+            if (path_len >= sizeof(out->uri)) {
+                return NET_E_INVAL;
+            }
+            out->uri[0] = '/';
+            memcpy(out->uri + 1, path_start, strlen(path_start) + 1U);
+        } else {
+            path_len = strlen(path_start);
+            if (path_len == 0 || path_len >= sizeof(out->uri)) {
+                return NET_E_INVAL;
+            }
+            memcpy(out->uri, path_start, path_len + 1U);
         }
-        memcpy(out->uri, path_start, path_len + 1U);
     } else {
         memcpy(out->uri, "/", 2U);
     }
@@ -259,6 +275,7 @@ int net_http_get_file(const char *url, const char *dest_path,
     struct net_http_url parsed;
     struct net_http_download dl;
     httpc_connection_t conn;
+    struct net_info info;
     char temp_path[VFS_MAX_PATH];
     const char *subpath = NULL;
     const char *temp_subpath = NULL;
@@ -274,6 +291,10 @@ int net_http_get_file(const char *url, const char *dest_path,
         return NET_E_INVAL;
     }
     if (!net_is_up()) {
+        return NET_E_NOT_INIT;
+    }
+    if (net_get_info(&info) != 0 || !info.link_up ||
+        (info.dhcp_enabled && info.dhcp_status == NET_DHCP_PENDING)) {
         return NET_E_NOT_INIT;
     }
     if (net_http_parse_url(url, &parsed) != 0) {

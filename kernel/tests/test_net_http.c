@@ -30,6 +30,16 @@ static void test_parse_http_url_with_port_and_root_default(void)
     TEST_ASSERT_EQUAL_STRING("/", url.uri);
 }
 
+static void test_parse_http_url_query_only_uses_root_path(void)
+{
+    struct net_http_url url;
+
+    TEST_ASSERT_EQUAL_INT(0, net_http_parse_url("http://example.com?sig=abc", &url));
+    TEST_ASSERT_EQUAL_STRING("example.com", url.host);
+    TEST_ASSERT_EQUAL_UINT16(80, url.port);
+    TEST_ASSERT_EQUAL_STRING("/?sig=abc", url.uri);
+}
+
 static void test_parse_http_url_rejects_invalid_inputs(void)
 {
     struct net_http_url url;
@@ -124,6 +134,7 @@ int test_suite_net_http(void)
 
     RUN_TEST(test_parse_http_url_basic);
     RUN_TEST(test_parse_http_url_with_port_and_root_default);
+    RUN_TEST(test_parse_http_url_query_only_uses_root_path);
     RUN_TEST(test_parse_http_url_rejects_invalid_inputs);
     RUN_TEST(test_parse_http_url_accepts_long_signed_uri);
     RUN_TEST(test_parse_sha256_hex_accepts_valid_and_rejects_invalid);
