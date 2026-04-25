@@ -464,17 +464,41 @@ path.
 Phases are tracked in GitHub issues via the **MNIST-on-GPU** label (creation:
 TODO).
 
-| Phase | Issue | Status |
+| Phase | Status | Result |
 |---|---|---|
-| M0 — multi-CTA grid | TBD | ☐ in progress |
-| M1 — fp32 SASS | TBD | ☐ pending |
-| M2 — parameterized GEMM | TBD | ☐ pending |
-| M3 — elementwise ops | TBD | ☐ pending |
-| M4 — MaxPool2D | TBD | ☐ pending |
-| M5 — Conv2D | TBD | ☐ pending |
-| M6 — pipeline + handoff v5 | TBD | ☐ pending |
-| M7 — Rust runtime wiring | TBD | ☐ pending |
-| M8 — end-to-end MNIST | TBD | ☐ pending |
+| M0 — multi-CTA grid | ✅ done | matmul8x8_grid: 64/64 cells correct, multi-CTA distributed across SMs |
+| M1 — fp32 SASS | ✅ done | matmul4x4_mt_fp32: first FFMA from raw nvgpu, sentinel 0x41F00000 = 30.0f |
+| M2 — parameterized GEMM | ✅ done | gemm_fp32: 4×4×4, 8×8×8, 1×256×10 (MNIST FC), 16×16×16, 17×17×17 — all shapes correct |
+| M3 — elementwise ops | ✅ done | add_bias_relu_fp32: conv1, conv2, fc shapes — all match CPU |
+| M4 — MaxPool2D | ✅ done | maxpool2d_fp32: pool1 (2×2/2), pool2 (3×3/3) — all match CPU |
+| M5 — Conv2D | ✅ done | conv2d_fp32_direct: conv1 (6,272 cells) + conv2 (3,136 cells) — all match CPU |
+| M6 — pipeline + handoff v5 | ✅ done | 2-op test pipeline + matmul4x4_mt_fp32 chain validates end-to-end |
+| M7 — Rust runtime wiring | ⏸ deferred | Shell-only path proves correctness; Lua/Rust integration is scheduled work |
+| M8 — end-to-end MNIST | ✅ done | 8-op chain produces logits matching CPU NEON, argmax = 3 |
 
-This document is the source of truth for phase ordering and exit criteria.
-Issue updates roll up to here, not the other way around.
+**Status as of 2026-04-25:** MNIST inference functioning on the
+Jetson GA10B GPU from SLM-OS post-kexec. The branch
+`jetson-gpu-multicta` carries M0, M1–M5 (one batched commit), M6,
+and M8 — see `git log` for hardware-validation traces.
+
+Two non-obvious bugs were uncovered along the way and are
+documented in commit messages:
+
+1. **Built-in CUDA dim variables.** Parameterized kernels read
+   `blockDim.x/y` from `cbuf[0][0x0..0x8]`. The original launcher
+   left that region zeroed, so every CTA computed
+   `i = blockIdx.y * 0 + threadIdx.y`, collapsing all multi-CTA
+   dispatches onto the (0,0) tile. Fix in
+   `gpu_write_builtin_dims()`; every parameterized launcher calls
+   it after QMD overrides.
+
+2. **Multi-submit GP_PUT advance.** The launcher-side
+   `gpu_submit_and_poll` originally hardcoded `GP_PUT = 1` and
+   wrote slot 0 every call. Single-shot kernels never tripped
+   over this; the M6 pipeline test exposed it because op 1's
+   submit was a silent no-op. Fix reads current GP_PUT, writes
+   the next slot, advances by 1 — same pattern the kernel-side
+   helper already used.
+
+This document is the source of truth for phase ordering and exit
+criteria. Issue updates roll up to here, not the other way around.

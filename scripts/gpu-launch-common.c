@@ -608,23 +608,21 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
 
     /* Poll at 10 ms granularity up to timeout_ms.
      *
-     * Special semantics: `expected_payload == 0` means "wait for the
-     * cell to be written to *anything* non-zero". Used by multi-op
-     * pipelines where the per-op output value isn't known ahead of
-     * time (FP32 ordering between CPU reference and GPU FFMA can
-     * differ in the low bits, but any non-zero value indicates the
-     * op completed). Caller is responsible for pre-zeroing
-     * `*poll_va` so the transition is observable. */
+     * Mode selector (ga10b_poll_match in ga10b_channel_handoff.h):
+     *   expected_payload != 0 → exact-match polling.
+     *   expected_payload == 0 → "wait for non-zero" — used by multi-
+     *     op pipelines where the per-op output value isn't known
+     *     ahead of time (FP32 ordering between CPU reference and
+     *     GPU FFMA can differ in the low bits, but any non-zero
+     *     value indicates the op completed). Caller pre-zeroes
+     *     `*poll_va` so the transition is observable. */
     uint32_t iterations = (timeout_ms + 9) / 10;
     uint32_t val = 0;
-    bool match_nonzero = (expected_payload == 0u);
     for (uint32_t i = 0; i < iterations; i++) {
         msync((void *)poll_va, 4, MS_INVALIDATE | MS_SYNC);
         __asm__ volatile("dsb sy" ::: "memory");
         val = *poll_va;
-        bool matched = match_nonzero ? (val != 0u)
-                                      : (val == expected_payload);
-        if (matched) {
+        if (ga10b_poll_match(val, expected_payload)) {
             /* Multi-CTA dispatch hazard: a single-cell sentinel poll
              * proves at least the polled cell was written, not that
              * all CTAs finished. With imbalanced CTAs (e.g. tile-

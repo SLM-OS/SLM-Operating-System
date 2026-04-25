@@ -18,6 +18,7 @@
 #ifndef GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H
 #define GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -240,6 +241,54 @@ ga10b_pick_launch_payload(const struct ga10b_channel_handoff *h,
     return (h->version >= 4u && h->expected_payload != 0u)
            ? h->expected_payload
            : fallback;
+}
+
+/*
+ * Test whether a freshly-read poll value indicates the dispatched
+ * kernel has completed.
+ *
+ * Two modes, distinguished by `expected_payload`:
+ *
+ *   exact-match (expected_payload != 0): the kernel writes a known
+ *     bit pattern (0xCAFE, the dot4 sentinel 300, etc.) — used for
+ *     legacy v3/v4 single-shot dispatches where the launcher and
+ *     SLM-OS agree on the value ahead of time.
+ *
+ *   any-non-zero (expected_payload == 0): the kernel's output is
+ *     not predictable bit-for-bit (e.g. MNIST conv outputs whose
+ *     low fp32 bits depend on FFMA ordering vs CPU reference). The
+ *     caller pre-zeroes the poll target; any non-zero write counts
+ *     as completion. Used by v5 multi-op pipelines.
+ *
+ * Pure-logic — host-testable.
+ */
+static inline bool
+ga10b_poll_match(uint32_t poll_val, uint32_t expected_payload)
+{
+    return (expected_payload == 0u)
+           ? (poll_val != 0u)
+           : (poll_val == expected_payload);
+}
+
+/*
+ * Sanity-check a single entry in the v5 pipeline ops array. Returns
+ * true iff the op has plausible non-zero addresses (qmd_gpu_va,
+ * output_phys). Does NOT verify that those addresses are actually
+ * mapped or that the QMD content is sensible — those checks happen
+ * implicitly when SLM-OS dispatches the op and polls the output.
+ *
+ * Used by the kernel-side pipeline runner to fail fast on a
+ * malformed handoff rather than dispatching a QMD address of 0
+ * (which the GPU treats as a noop with no error reported).
+ *
+ * Pure-logic — host-testable.
+ */
+static inline bool
+ga10b_pipeline_op_is_valid(const struct ga10b_pipeline_op *op)
+{
+    return op != NULL
+        && op->qmd_gpu_va != 0u
+        && op->output_phys != 0u;
 }
 
 #endif /* GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H */

@@ -1427,16 +1427,10 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
             gsp_platform->cache_invalidate((void *)poll, sizeof(uint32_t));
         }
         poll_val = *poll;
-        /* expected_payload == 0 → "wait for non-zero" mode. Used by
-         * v5 multi-op pipelines where the per-op output bit pattern
-         * isn't known ahead of time (CPU reference and GPU FFMA can
-         * differ in low fp32 bits). Caller pre-zeroes the cell so
-         * any non-zero write signals completion. */
-        if (expected_payload == 0u) {
-            if (poll_val != 0u) break;
-        } else {
-            if (poll_val == expected_payload) break;
-        }
+        /* Mode selector lives in ga10b_channel_handoff.h so host
+         * tests can pin the exact predicate without re-encoding it
+         * (and the Linux launcher uses the same helper). */
+        if (ga10b_poll_match(poll_val, expected_payload)) break;
         for (volatile int i = 0; i < 1500; i++) { }
     }
 
@@ -1454,9 +1448,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                 (unsigned long)g_handoff.initial_gp_get);
 
     bool gp_advanced     = (final_gp_get != g_handoff.initial_gp_get);
-    bool payload_matched = (expected_payload == 0u)
-                            ? (poll_val != 0u)
-                            : (poll_val == expected_payload);
+    bool payload_matched = ga10b_poll_match(poll_val, expected_payload);
 
     /* Symmetric bookkeeping: any PBDMA progress consumes the slot.
      * Update the counters so the next submit lands in a fresh slot,
@@ -1601,6 +1593,15 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
                     (unsigned long)g_handoff.pipeline_ops_phys);
         for (uint32_t i = 0; i < g_handoff.pipeline_n_ops; i++) {
             const struct ga10b_pipeline_op *op = &ops[i];
+            if (!ga10b_pipeline_op_is_valid(op)) {
+                uart_printf("[GA10B-P8] pipeline op %lu malformed "
+                            "(qmd=0x%lx out=0x%lx) — aborting\n",
+                            (unsigned long)(i + 1),
+                            (unsigned long)op->qmd_gpu_va,
+                            (unsigned long)op->output_phys);
+                b->last_error_phase = 8;
+                return -1;
+            }
             /* expected_payload == 0 means "wait for non-zero" mode
              * (handled inside ga10b_submit_and_poll). Used by
              * model-inference helpers where per-op output bit

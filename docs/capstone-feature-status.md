@@ -191,7 +191,7 @@ stack than discrete Ampere.
 | Falcon v4 register protocol | `falcon.c` (500 lines) | 37 | Complete |
 | FWSEC/DMEMMAPPER/sig-index (discrete) | `bringup.c` (1050+ lines) | 25 | Complete |
 | RPC ring skeleton (discrete) | `rpc.c` | 17 | Skeleton, needs GSP-RM payloads |
-| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (1637 lines) | **59** | Phases 1–8 wired and hardware-verified. **Phase 7 host-family + COMPUTE_B semaphore release fire from SLM-OS post-kexec** (issues #297, #291 closed). **Phase 8 compute kernel launch fires from SLM-OS post-kexec** (issue #356 closed) — GPU SMs execute a CUDA-compiled shader via `SEND_PCAS_A` + Ampere-specific `SEND_SIGNALING_PCAS2_B`, kernel writes 0xCAFE to output buffer, SLM-OS reads it back. Ampere requires PCAS2_B (method 0x02C0, action INVALIDATE_COPY_SCHEDULE = 0xA), not Turing's PCAS_B (0x02BC) — pinned by `test_launch_kernel_pb_uses_ampere_pcas2_b`. Linux helper (`scripts/gpu-kernel-launch.c --preserve-for-kexec`) uploads shader + QMD and writes a v3 handoff; SLM-OS inherits via Phase 6 scan and dispatches via Phase 8 builder. Phases 7 + 8 share one `ga10b_submit_and_poll` helper that requires the payload to land at the poll target (not just GP_GET advance) for success — tightened from a legacy loose criterion so silent-no-op regressions (e.g. Ampere PCAS_B used instead of PCAS2_B) are caught at dispatch time |
+| **GA10B nvgpu bringup (Jetson)** | `ga10b_bringup.c` (1700+ lines) | **73** | Phases 1–8 wired and hardware-verified. **Phase 7 host-family + COMPUTE_B semaphore release fire from SLM-OS post-kexec** (issues #297, #291 closed). **Phase 8 compute kernel launch fires from SLM-OS post-kexec** (issue #356 closed) — GPU SMs execute a CUDA-compiled shader via `SEND_PCAS_A` + Ampere-specific `SEND_SIGNALING_PCAS2_B`, kernel writes 0xCAFE to output buffer, SLM-OS reads it back. Ampere requires PCAS2_B (method 0x02C0, action INVALIDATE_COPY_SCHEDULE = 0xA), not Turing's PCAS_B (0x02BC) — pinned by `test_launch_kernel_pb_uses_ampere_pcas2_b`. Linux helper (`scripts/gpu-kernel-launch.c --preserve-for-kexec`) uploads shader + QMD and writes a v3 handoff; SLM-OS inherits via Phase 6 scan and dispatches via Phase 8 builder. Phases 7 + 8 share one `ga10b_submit_and_poll` helper that requires the payload to land at the poll target (not just GP_GET advance) for success — tightened from a legacy loose criterion so silent-no-op regressions (e.g. Ampere PCAS_B used instead of PCAS2_B) are caught at dispatch time |
 | **Jetson platform shim** | `nvidia_gsp_platform.c` (350 lines) | **15** | vtable dispatch + DMA align math host-tested |
 | **Total host-side tests** | | **191** | **All passing** |
 
@@ -446,6 +446,59 @@ SLM-OS-side (via `nvgpu launch-kernel` post-kexec). The sequence:
   The 4×4 matmul proof-of-concept maps the first stepping stone
   on this path.
 - Inference loop (GEMM → activation per layer).
+
+**MNIST end-to-end on GPU (April 25 2026, branch `jetson-gpu-multicta`):**
+The first complete neural-network inference running on the Jetson
+GA10B GPU. `models/test/mnist.onnx` is dispatched as an 8-op kernel
+chain producing 10 fp32 logits whose argmax matches the existing
+CPU NEON reference for a deterministic synthetic input.
+
+Eight milestones (M0–M8 in `docs/jetson-gpu-mnist-plan.md`) cover
+the distance from `matmul4x4_mt` to MNIST:
+
+| # | Milestone | Adds |
+|---|---|---|
+| M0 | Multi-CTA grid dispatch | First kernel using QMD `CTA_RASTER_*` (was hardwired to 1) |
+| M1 | fp32 SASS port | First FFMA kernel from raw nvgpu in the tree |
+| M2 | Parameterized GEMM | Shape M/K/N read from cbuf, one SASS handles every shape |
+| M3 | Fused Add+ReLU | Per-channel bias broadcast, optional ReLU |
+| M4 | MaxPool2D | Window/stride from cbuf |
+| M5 | Conv2D direct | SAME padding, the largest single op (200 MACs/cell on Conv2) |
+| M6 | Handoff v5 + multi-op pipeline | Dispatch N QMDs in sequence, "any-non-zero" polling for FFMA-vs-numpy ULP drift |
+| M8 | End-to-end MNIST | 8 chained ops, 4 unique shaders, full ONNX weights |
+
+**MNIST kernel chain:**
+
+```
+Conv1 → Add+ReLU → MaxPool → Conv2 → Add+ReLU → MaxPool → MatMul → AddBias
+[1×1×28×28] →                                                    → [1×10] logits
+```
+
+**Hardware validation (jetson-nano-1, 2026-04-25):**
+- Linux-side: max|err| = 0.000000 in fp32 vs CPU NEON, argmax = 3.
+- SLM-OS post-kexec via `nvgpu launch-kernel`: 8/8 ops fire,
+  GP_PUT advances 8 → 16, final logits buffer reads back
+  bit-identical to the Linux-side run (logits[0] = -2.058,
+  logits[3] = 1.297 = argmax).
+
+**One non-obvious bug uncovered along the way:** parameterized
+kernels (M2 GEMM, M3 Add+ReLU, M4 MaxPool, M5 Conv2D) all read
+`blockDim.x/y` from `cbuf[0][0x0..0x8]` (CUDA's built-in-vars
+region). The launcher had been leaving that region zero, so every
+CTA computed `i = blockIdx.y * 0 + threadIdx.y`, collapsing all
+multi-CTA dispatches onto the (0,0) tile. Hardcoded-shape kernels
+(matmul4x4_mt, matmul8x8_grid) didn't hit this because their CTA
+dims were folded into SASS as literals. Fix in
+`gpu_write_builtin_dims()` populates the region; every
+parameterized launcher calls it after QMD overrides.
+
+**Test counts:** 73 host tests pass (was 59 pre-MNIST plan; +14
+covering v5 layout, pipeline_op layout, poll-match predicate,
+pipeline-op validator, qmd_set_bits bit-twiddling).
+
+**M7 (Rust runtime → GPU FFI integration) deferred:** the shell-
+only path proves correctness; routing through `slm.model_infer()`
+is scheduled work, not a correctness gap.
 
 **x86-64:** FWSEC-FRTS succeeds on hardware (3/3 runs VFIO, 4/4 runs
 bare-metal SLM-OS — April 15 2026, WPR2 populated at 0x1ffffe00 on

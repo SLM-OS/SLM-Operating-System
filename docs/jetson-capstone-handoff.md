@@ -246,6 +246,56 @@ block is a hardware-level priv-lockdown on the GSP Falcon.
       populate pagemap entries until first CPU access —
       `gpu_alloc_buffer` now forces the fault-in before calling
       `virt_to_phys`, otherwise `output_phys=0` in the handoff).
+- **MNIST inference end-to-end on GPU
+  (April 25, branch `jetson-gpu-multicta`):** the project's first
+  full neural-network inference running on the Jetson GA10B from
+  SLM-OS post-kexec. `models/test/mnist.onnx` is dispatched as an
+  8-op kernel chain (Conv1 → bias+ReLU → Pool1 → Conv2 → bias+ReLU
+  → Pool2 → MatMul → AddBias) producing 10 fp32 logits whose
+  argmax matches the existing CPU NEON reference. Eight milestones
+  cover the full distance from `matmul4x4_mt` to MNIST, all
+  hardware-validated on jetson-nano-1; see
+  `docs/jetson-gpu-mnist-plan.md` for the per-phase status.
+  Highlights:
+    - **Multi-CTA grid dispatch** (M0): the first kernel to use
+      more than one CTA per dispatch. Exercises QMD
+      `CTA_RASTER_WIDTH/HEIGHT` (which had been hardwired to 1 in
+      the populate-defaults path).
+    - **fp32 SASS** (M1): first FFMA kernel dispatched from raw
+      nvgpu in the tree.
+    - **Parameterized GEMM** (M2): one SASS handles every
+      `M × K × N` matmul shape MNIST and future SLMs need; shape
+      params come from `cbuf[0][0x178..0x180]`. Uncovered a
+      builtin-vars bug — the SASS reads `blockDim.x/y` from
+      `cbuf[0][0x0..0x8]`, which the launcher had been leaving
+      zero. Fixed via a new `gpu_write_builtin_dims()` helper.
+    - **Fused Add+ReLU**, **MaxPool2D**, **direct Conv2D** (M3,
+      M4, M5): one SASS per op with shape params from cbuf.
+      Conv2D's direct convolution (no im2col) was the largest
+      single piece — 6,272 + 3,136 = 9,408 cells across both
+      MNIST conv shapes, all matching the CPU reference.
+    - **Handoff v5 + multi-op pipeline dispatch** (M6): the
+      handoff now carries an array of `struct ga10b_pipeline_op`
+      describing N dispatches in sequence. SLM-OS's
+      `nvgpu launch-kernel` iterates the array, polling each op's
+      sentinel before advancing. v3/v4 single-shot path
+      preserved when `pipeline_n_ops == 0`. Two new shared
+      predicates land in the handoff header:
+      `ga10b_poll_match` (exact-match vs any-non-zero polling)
+      and `ga10b_pipeline_op_is_valid` (pre-dispatch sanity).
+    - **MNIST end-to-end** (M8): `scripts/gpu-kernel-mnist.c`
+      builds 8 QMDs, 8 cbufs, 6 weight buffers + input buffer + 8
+      activation buffers, fires the chain, and validates the
+      final logits against `expected_logits.bin` produced by
+      `scripts/mnist-extract-weights.py` (numpy reference). On
+      jetson-nano-1: max|err| = 0.000000 in fp32, argmax = 3 =
+      CPU argmax for the synthetic input. Same chain re-dispatched
+      from SLM-OS post-kexec via the v5 handoff produces the same
+      logits buffer (verified by `peek 0x...` reading 0xc003b6ca
+      = -2.058 = logits[0] and 0x3fa5ffc6 = 1.297 = logits[3]).
+  M7 (Rust runtime FFI integration) is deferred — the shell-only
+  path proves correctness; routing through `slm.model_infer()` is
+  scheduled work, not a correctness gap.
 
 **Merge guidance:** the branch delivers:
 - Complete arm64 platform shim (11/11 vtable fns, 15 host tests)
