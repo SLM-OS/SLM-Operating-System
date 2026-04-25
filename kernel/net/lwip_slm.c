@@ -668,8 +668,13 @@ int net_enable_dhcp(void) {
     }
 
     dhcp_requested = true;
-    dhcp_timeout_armed = false;
     dhcp_fallback_done = false;
+
+    if (dhcp_started) {
+        return NET_OK;
+    }
+
+    dhcp_timeout_armed = false;
     if (net_link_is_up()) {
         return net_start_dhcp_client("manual request");
     }

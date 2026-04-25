@@ -996,6 +996,40 @@ static void test_net_dhcp_fallback_while_link_down(void)
 }
 
 /*
+ * Test: issuing a duplicate manual DHCP request while discovery is
+ * already running must not disable the existing timeout budget.
+ */
+static void test_net_dhcp_duplicate_request_preserves_timeout(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    /* Immediate timeout so the direct fallback check stays
+     * deterministic and avoids the live recv path. */
+    net_set_dhcp_timeout_ms(0);
+    TEST_ASSERT_EQUAL_INT(0, net_enable_dhcp());
+    TEST_ASSERT_EQUAL_INT(0, net_enable_dhcp());
+
+    TEST_ASSERT_EQUAL_INT(1, net_dhcp_check_timeout());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_FAILED, info.dhcp_status);
+    TEST_ASSERT_FALSE(info.dhcp_enabled);
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
  * Test: boot-time deferred DHCP does not consume its fallback budget
  * before the client actually starts.
  */
@@ -1667,6 +1701,7 @@ int test_suite_net(void)
     RUN_TEST(test_net_dhcp_bind_notification);
     RUN_TEST(test_net_dhcp_fallback);
     RUN_TEST(test_net_dhcp_fallback_while_link_down);
+    RUN_TEST(test_net_dhcp_duplicate_request_preserves_timeout);
     RUN_TEST(test_net_boot_deferred_dhcp_waits_for_real_start);
     RUN_TEST(test_net_dhcp_start_failure_clears_pending_state);
     RUN_TEST(test_net_dhcp_link_drop_restarts_timeout);
