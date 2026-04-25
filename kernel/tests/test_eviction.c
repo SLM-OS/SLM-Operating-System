@@ -845,6 +845,8 @@ static void test_blob_stage_activate_rollback_round_trip(void)
     TEST_ASSERT_EQUAL_UINT16(3, st.state);
     TEST_ASSERT_EQUAL_UINT32(1, st.has_active);
     TEST_ASSERT_EQUAL_UINT32(fnv1a32(payload1, payload_len1), st.active.checksum);
+    TEST_ASSERT_EQUAL_UINT32(1, st.has_rollback);
+    TEST_ASSERT_EQUAL_UINT32(fnv1a32(payload2, payload_len2), st.rollback.checksum);
 
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_clear(2));
 }

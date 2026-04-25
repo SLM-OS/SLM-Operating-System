@@ -42,6 +42,7 @@ class TelnetShell:
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(0.25)
         self.buf = bytearray()
+        self.iac_pending = bytearray()
 
     def close(self) -> None:
         try:
@@ -49,9 +50,9 @@ class TelnetShell:
         except OSError:
             pass
 
-    def _handle_iac(self, data: bytes, idx: int) -> int:
+    def _handle_iac(self, data: bytes, idx: int) -> int | None:
         if idx + 1 >= len(data):
-            return len(data)
+            return None
 
         cmd = data[idx + 1]
         if cmd == IAC:
@@ -60,7 +61,7 @@ class TelnetShell:
 
         if cmd in (DO, DONT, WILL, WONT):
             if idx + 2 >= len(data):
-                return len(data)
+                return None
             opt = data[idx + 2]
             if cmd in (DO, DONT):
                 reply = bytes([IAC, WONT, opt])
@@ -75,9 +76,27 @@ class TelnetShell:
                 if data[j] == IAC and data[j + 1] == SE:
                     return j + 2
                 j += 1
-            return len(data)
+            return None
 
         return idx + 2
+
+    def _consume_telnet(self, data: bytes) -> None:
+        if self.iac_pending:
+            data = bytes(self.iac_pending) + data
+            self.iac_pending.clear()
+
+        i = 0
+        while i < len(data):
+            if data[i] != IAC:
+                self.buf.append(data[i])
+                i += 1
+                continue
+
+            next_i = self._handle_iac(data, i)
+            if next_i is None:
+                self.iac_pending.extend(data[i:])
+                break
+            i = next_i
 
     def _recv_some(self) -> None:
         try:
@@ -86,13 +105,7 @@ class TelnetShell:
             return
         if not data:
             raise RuntimeError("connection closed by remote host")
-        i = 0
-        while i < len(data):
-            if data[i] == IAC:
-                i = self._handle_iac(data, i)
-            else:
-                self.buf.append(data[i])
-                i += 1
+        self._consume_telnet(data)
 
     def read_until_prompt(self) -> bytes:
         deadline = time.monotonic() + self.timeout
