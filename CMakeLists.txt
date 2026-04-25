@@ -666,6 +666,9 @@ set(TEST_SOURCES
     # `kernel` admin command surface tests — Stage 4 of #370. Same
     # ARM64-only gate as test_sdhci.c (it's the same backend stack).
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_kernel_cmd.c>
+    # Camera C-API tests + Tegra234 clock-id static_asserts (#396).
+    # Pure compile-time + small-buffer tests; runs on every platform.
+    kernel/tests/test_camera.c
     # SHA-256 NIST-vector tests for the vendored library — Stage 4
     # of #370 too, but platform-neutral (pure computation, no MMIO).
     kernel/tests/test_sha256.c
