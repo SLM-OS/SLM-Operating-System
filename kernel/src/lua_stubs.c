@@ -119,6 +119,47 @@ static const unsigned short *__ctype_ptr = &__ctype_table[128];
 const unsigned short **__ctype_b_loc(void) {
     return &__ctype_ptr;
 }
+
+/*
+ * x86-64 glibc ABI: `toupper(c)` / `tolower(c)` macros expand to
+ * `(*__ctype_toupper_loc())[c]` / `(*__ctype_tolower_loc())[c]`. The
+ * tables are indexed in [-128, 256), with the returned pointer offset
+ * by 128 entries. Lua's lstrlib + lbaselib pull this in for `string.upper`,
+ * `string.lower`, and pattern-class matching. Identity outside the
+ * letter range, paired conversion for ASCII letters. Lazy init is
+ * single-threaded because the first call happens during early shell
+ * boot before secondary CPUs run Lua.
+ */
+static int __ctype_toupper_table[384];
+static int __ctype_tolower_table[384];
+static const int *__ctype_toupper_ptr;
+static const int *__ctype_tolower_ptr;
+static int __ctype_to_inited;
+
+static void __ctype_to_init(void) {
+    for (int i = 0; i < 384; i++) {
+        int c = i - 128;
+        __ctype_toupper_table[i] = c;
+        __ctype_tolower_table[i] = c;
+    }
+    for (int c = 'a'; c <= 'z'; c++)
+        __ctype_toupper_table[128 + c] = c - 32;
+    for (int c = 'A'; c <= 'Z'; c++)
+        __ctype_tolower_table[128 + c] = c + 32;
+    __ctype_toupper_ptr = &__ctype_toupper_table[128];
+    __ctype_tolower_ptr = &__ctype_tolower_table[128];
+    __ctype_to_inited = 1;
+}
+
+const int **__ctype_toupper_loc(void) {
+    if (!__ctype_to_inited) __ctype_to_init();
+    return &__ctype_toupper_ptr;
+}
+
+const int **__ctype_tolower_loc(void) {
+    if (!__ctype_to_inited) __ctype_to_init();
+    return &__ctype_tolower_ptr;
+}
 #endif
 
 /* Define these so Lua's headers can find them */

@@ -2177,6 +2177,13 @@ static int l_telnetd_kick(lua_State *L) {
  * here.
  * ========================================================================== */
 
+/* Hailo NPU bindings are gated on platforms that compile the backend.
+ * CMakeLists.txt skips inference_device_hailo.c on x86-64 (no NPU
+ * available there), so referencing hailo_backend_* helpers from this
+ * file would break the x86 link. The matching `#endif` closes the
+ * block right after slm_hailo_lib. */
+#if !defined(PLATFORM_X86_64)
+
 /* Backend-specific helpers exposed by inference_device_hailo.h
  * (consolidated PR #355 review). */
 #include "inference_device_hailo.h"
@@ -2377,6 +2384,8 @@ static const luaL_Reg slm_hailo_lib[] = {
     {NULL, NULL}
 };
 
+#endif /* !PLATFORM_X86_64 — Hailo bindings */
+
 /* SLM library functions */
 static const luaL_Reg slm_lib_safe[] = {
     {"print", l_print},
@@ -2478,10 +2487,13 @@ static void lua_push_slm_library(lua_State *L, bool admin)
             lua_pushcfunction(L, r->func);
             lua_setfield(L, -2, r->name);
         }
+#if !defined(PLATFORM_X86_64)
         /* Keep the Hailo bindings on the admin surface until the
-         * device/backend concurrency contract is explicitly audited. */
+         * device/backend concurrency contract is explicitly audited.
+         * x86-64 builds skip the Hailo backend entirely. */
         luaL_newlib(L, slm_hailo_lib);
         lua_setfield(L, -2, "hailo");
+#endif
     }
 }
 
