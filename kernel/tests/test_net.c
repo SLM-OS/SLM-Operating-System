@@ -945,9 +945,9 @@ static void test_net_dhcp_fallback(void)
 }
 
 /*
- * Test: a manual DHCP request made while the link is down still times
- * out and falls back to the static address instead of sitting in
- * DHCP(pending) forever.
+ * Test: a manual DHCP request made while the link is down stays
+ * pending until the client can actually start, rather than burning
+ * its timeout budget before link-ready.
  */
 static void test_net_dhcp_fallback_while_link_down(void)
 {
@@ -965,16 +965,31 @@ static void test_net_dhcp_fallback_while_link_down(void)
     link_test_install(false);
     net_poll();
 
-    net_set_dhcp_timeout_ms(0);
+    net_set_dhcp_timeout_ms(20);
     TEST_ASSERT_EQUAL_INT(0, net_enable_dhcp());
-    TEST_ASSERT_EQUAL_INT(1, net_dhcp_check_timeout());
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
 
     struct net_info info;
     TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
-    TEST_ASSERT_EQUAL_INT(NET_DHCP_FAILED, info.dhcp_status);
-    TEST_ASSERT_FALSE(info.dhcp_enabled);
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_PENDING, info.dhcp_status);
+    TEST_ASSERT_TRUE(info.dhcp_enabled);
     TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
 
+    extern void sleep_ms(uint32_t ms);
+    sleep_ms(30);
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    link_test_set(true);
+    net_poll();
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_NOT_EQUAL(NET_DHCP_FAILED, info.dhcp_status);
+    TEST_ASSERT_TRUE(info.dhcp_enabled);
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
     link_test_restore();
     net_poll();
     net_set_dhcp_timeout_ms(saved_timeout);

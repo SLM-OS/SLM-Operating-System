@@ -674,8 +674,6 @@ int net_enable_dhcp(void) {
         return net_start_dhcp_client("manual request");
     }
 
-    dhcp_start_time = sys_now();
-    dhcp_timeout_armed = true;
     INFO("DHCP request deferred until link-ready");
     return NET_OK;
 }
