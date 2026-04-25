@@ -14,11 +14,11 @@ fifth is hardware-blocked on `pi-5-1`.
 | 4 — `kernel` admin command surface | #370 | #395 | ✅ Merged |
 | 5 — Hardware validation on `pi-5-1` | #371 | — | Hardware-blocked |
 
-Stage 5 sub-task 1 (Makefile band-aid for the SDHCI test-image
-sparse-file constraint, Scope A of #392) shipped alongside Stage 4
-in #395; the rest of #371 needs `pi-5-1`. The Scope B follow-up
-(auto-fallback to a smaller image) is tracked in #392 and stays
-open.
+Stage 5 sub-task 1 — the SDHCI test-image sparse-file ergonomics
+(#392) — is fully resolved: Scope A (clearer error message) shipped
+in #395; Scope B (auto-fallback to a 256 MB SDSC-sized image when
+the 4 GB sparse allocation fails) lands separately. The remaining
+#371 sub-tasks need `pi-5-1`.
 
 ---
 
