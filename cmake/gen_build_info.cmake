@@ -28,6 +28,10 @@ if(_version STREQUAL "")
 endif()
 
 # --- UTC build stamp (14 chars, string-sortable) ----------------------------
+# Wall-clock UTC; intentionally NOT honoring SOURCE_DATE_EPOCH. The point of
+# this header is to *distinguish* otherwise-identical builds, so reproducible
+# timestamps would defeat the purpose. Reproducible-builds work would need a
+# separate code path here.
 string(TIMESTAMP _stamp "%Y%m%d%H%M%S" UTC)
 string(LENGTH "${_stamp}" _stamp_len)
 if(NOT _stamp_len EQUAL 14)
@@ -35,30 +39,44 @@ if(NOT _stamp_len EQUAL 14)
 endif()
 
 # --- Git short SHA, with -dirty suffix when working tree is unclean --------
+# Untracked files count as dirty: an uncommitted source file changes what got
+# compiled, so the SHA alone would lie. Use .gitignore to exclude noise (build
+# artifacts, editor swap files) rather than masking the dirty bit here.
 find_package(Git QUIET)
 set(_sha "unknown")
-if(Git_FOUND)
+if(NOT Git_FOUND)
+    message(WARNING
+        "gen_build_info: git not found on PATH; SLMOS_BUILD_SHA = 'unknown'")
+else()
     execute_process(
         COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
         WORKING_DIRECTORY ${SRC_DIR}
         OUTPUT_VARIABLE _sha_out
         OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
+        ERROR_VARIABLE  _sha_err
         RESULT_VARIABLE _sha_result
     )
     if(_sha_result EQUAL 0 AND NOT "${_sha_out}" STREQUAL "")
         set(_sha "${_sha_out}")
+    else()
+        message(WARNING
+            "gen_build_info: git rev-parse failed (rc=${_sha_result}, err='${_sha_err}'); "
+            "SLMOS_BUILD_SHA = 'unknown'")
     endif()
 
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
+        COMMAND ${GIT_EXECUTABLE} status --porcelain
         WORKING_DIRECTORY ${SRC_DIR}
         OUTPUT_VARIABLE _git_status
         OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
+        ERROR_VARIABLE  _status_err
         RESULT_VARIABLE _status_result
     )
-    if(_status_result EQUAL 0 AND NOT "${_git_status}" STREQUAL "")
+    if(NOT _status_result EQUAL 0)
+        message(WARNING
+            "gen_build_info: git status failed (rc=${_status_result}, err='${_status_err}'); "
+            "cannot detect dirty tree")
+    elseif(NOT "${_git_status}" STREQUAL "")
         set(_sha "${_sha}-dirty")
     endif()
 endif()

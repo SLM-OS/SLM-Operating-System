@@ -2,15 +2,18 @@
 # test-build-stamp-advances.sh — verify SLMOS_BUILD_STAMP advances every build.
 #
 # Builds the kernel twice with a 1-second sleep between, then compares the
-# SLMOS_BUILD_STAMP value extracted from kernel/include/build_info.h. Issue #360.
+# SLMOS_BUILD_STAMP value extracted from the generated build_info.h. Issue #360.
 #
 # Runs against the QEMU_VIRT ARM64 default; the change is platform-independent
-# so this is sufficient to exercise the CMake glue.
+# so this is sufficient to exercise the CMake glue. Wired into `make
+# test-build-stamp` for CI.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-HEADER="${REPO_ROOT}/kernel/include/build_info.h"
+# build_info.h is generated under the kernel CMake build directory.
+# Mirrors `KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel` in the top-level Makefile.
+HEADER="${REPO_ROOT}/build/kernel/include/build_info.h"
 
 extract_stamp() {
     if [[ ! -f "${HEADER}" ]]; then
@@ -51,8 +54,11 @@ if [[ "${STAMP1}" == "${STAMP2}" ]]; then
     exit 1
 fi
 
-if [[ ! "${STAMP2}" > "${STAMP1}" ]]; then
-    echo "FAIL: stamp2 (${STAMP2}) is not strictly greater than stamp1 (${STAMP1})" >&2
+# Both stamps are zero-padded 14-digit numerics, so lexicographic and
+# numeric ordering coincide. Equality is already handled above; if stamp2
+# came out earlier than stamp1 the build clock went backwards.
+if [[ "${STAMP2}" < "${STAMP1}" ]]; then
+    echo "FAIL: stamp2 (${STAMP2}) is earlier than stamp1 (${STAMP1}) — build clock went backwards" >&2
     exit 1
 fi
 

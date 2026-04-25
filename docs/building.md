@@ -507,7 +507,6 @@ CS-496-SLM-Operating-System/
 ├── kernel/
 │   ├── kernel.ld            # Linker script
 │   ├── include/             # Header files
-│   │   ├── build_info.h     # Generated: VERSION + UTC stamp + git SHA (gitignored)
 │   │   └── slm_ffi.h        # FFI declarations for Rust
 │   ├── src/                 # C and assembly sources
 │   │   └── slm_ffi.c        # FFI implementations
@@ -521,6 +520,8 @@ CS-496-SLM-Operating-System/
 │       └── kernel_ffi.rs    # Rust FFI bindings
 ├── build/                   # Build output (generated)
 │   ├── kernel/              # Normal kernel build
+│   │   ├── include/
+│   │   │   └── build_info.h # Generated: VERSION + UTC stamp + git SHA
 │   │   ├── slmos.elf        # Kernel ELF (boots to shell)
 │   │   └── slmos.bin        # Raw binary
 │   ├── kernel-test/         # Test kernel build (ENABLE_BOOT_TESTS)

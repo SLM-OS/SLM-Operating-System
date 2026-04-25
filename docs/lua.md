@@ -99,8 +99,8 @@ The `slm` module provides access to kernel functionality:
 | `slm.cpu_id()` | Get current CPU ID |
 
 The `slm` module also exposes three string constants sourced from
-`kernel/include/build_info.h` (regenerated on every build from
-`version.txt` + git state + UTC):
+`build_info.h` (regenerated on every build under
+`${CMAKE_BINARY_DIR}/include/` from `version.txt` + git state + UTC):
 
 | Constant | Description |
 |----------|-------------|

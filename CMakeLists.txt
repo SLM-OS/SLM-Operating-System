@@ -727,13 +727,17 @@ target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
 
 # ---------------------------------------------------------------------------
 # build_info.h — version + UTC stamp + git SHA, regenerated every build.
-# Lives in kernel/include/ (gitignored) so the kernel sources can pick it
-# up via the normal include path. The custom target depends on no inputs,
+# Emitted under ${CMAKE_BINARY_DIR}/include/ so parallel multi-platform
+# builds (e.g. simultaneous QEMU_VIRT and RASPI5 from separate build dirs)
+# never race-write the same file. The custom target depends on no inputs,
 # so CMake re-runs the generator on every invocation; the script itself
 # only rewrites the file when the content changes (avoids no-op relinks
-# inside the same UTC second).
+# inside the same UTC second). Both `slmos.elf` and the `lua` static lib
+# pick it up via the build-dir include path added below.
 # ---------------------------------------------------------------------------
-set(BUILD_INFO_HEADER ${CMAKE_SOURCE_DIR}/kernel/include/build_info.h)
+set(BUILD_INFO_DIR    ${CMAKE_BINARY_DIR}/include)
+set(BUILD_INFO_HEADER ${BUILD_INFO_DIR}/build_info.h)
+file(MAKE_DIRECTORY ${BUILD_INFO_DIR})
 add_custom_target(generate_build_info ALL
     COMMAND ${CMAKE_COMMAND}
         -DSRC_DIR=${CMAKE_SOURCE_DIR}
@@ -744,6 +748,7 @@ add_custom_target(generate_build_info ALL
     VERBATIM
 )
 add_dependencies(slmos.elf generate_build_info)
+target_include_directories(slmos.elf PRIVATE ${BUILD_INFO_DIR})
 
 if(PLATFORM STREQUAL "X86_64")
     # x86-64: no -mgeneral-regs-only (ARM64-only flag)
@@ -924,7 +929,8 @@ else()
 endif()
 
 add_library(lua STATIC ${LUA_SOURCES} kernel/src/lua_stubs.c kernel/src/lua_slm.c kernel/src/lua_shell.c ${LUA_SETJMP})
-target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src)
+target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src ${BUILD_INFO_DIR})
+add_dependencies(lua generate_build_info)
 
 # Lua-specific compile flags (relaxed warnings for C99 Lua code)
 if(PLATFORM STREQUAL "X86_64")

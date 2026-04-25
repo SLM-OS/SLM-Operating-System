@@ -68,9 +68,10 @@ Three new capabilities on top of the F-series ingress work.
   - `kernel status` — current staged / active / previous image state.
     The *running* kernel's identity is reported via the
     `SLMOS_VERSION` / `SLMOS_BUILD_STAMP` / `SLMOS_BUILD_SHA` triple
-    from `kernel/include/build_info.h` (issue #360), already exposed
-    by the boot banner, `cat /sys/version`, and the `slm.VERSION` /
-    `slm.BUILD_STAMP` / `slm.BUILD_SHA` Lua bindings.
+    from `build_info.h` (generated into `${CMAKE_BINARY_DIR}/include/`
+    on every build, issue #360), already exposed by the boot banner,
+    `cat /sys/version`, and the `slm.VERSION` / `slm.BUILD_STAMP` /
+    `slm.BUILD_SHA` Lua bindings.
   - `kernel stage <vfs-path>` — copy VFS file into SD boot partition as
     `tryboot.img` + compute SHA-256 sidecar
   - `kernel activate` — set tryboot flag, `psci_system_reset()`
