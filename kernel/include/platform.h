@@ -467,6 +467,15 @@
  * vmm_setup_platform for RASPI5. */
 #define BCM_MAILBOX_BASE    0x107C013880UL
 
+/* BCM2712 EMMC2 — the SDHCI v3 controller behind the Pi 5's SD-card
+ * slot. From rpi-linux-bcm2712.dtsi:1188 (sdio1: mmc@fff000), the
+ * `reg = <0x10 0x00fff000  0x0 0x260>` resolves to CPU phys
+ * 0x10_00FF_F000, size 0x260. Used by `sdhci_create_bcm2712()` in
+ * the dynamic-kernel-replace Stage 5 hardware-bringup path (#371).
+ * The 2 MB block containing this address is mapped explicitly in
+ * vmm_setup_platform for RASPI5. */
+#define BCM2712_EMMC2_BASE  0x1000FFF000UL
+
 /* GPU bus-address encoding on Pi 5 matches the legacy VideoCore
  * convention — the VideoCore sees ARM DRAM via a 1 GB alias at
  * 0xC0000000. Used when passing a property buffer to the mailbox.

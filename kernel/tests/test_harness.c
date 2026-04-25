@@ -150,6 +150,8 @@ int test_harness_run_all(void)
     /* FatFs / FAT32 integration (uses ramdisk + PMM). */
     total_failures += test_suite_fat32();
 #if !defined(PLATFORM_X86_64)
+    /* SDHCI driver against QEMU sdhci-pci (skips cleanly if absent). */
+    total_failures += test_suite_sdhci();
     total_failures += test_suite_dtb();
     total_failures += test_suite_fdt();
     total_failures += test_suite_model_mem();

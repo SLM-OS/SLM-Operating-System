@@ -473,7 +473,17 @@ int pcie_init(void)
             uint64_t end  = win_base + win_size;
             for (uint32_t i = 0; i < pcie_device_count; i++) {
                 struct pcie_device *d = &pcie_devices[i];
-                if (d->bus == 0) continue;  /* don't re-assign the RC */
+                /* Skip bridges (PCI class 0x06: host bridge, PCI-to-PCI
+                 * bridge, etc.). Their config-space BARs back the
+                 * MEM/IO windows of their secondary bus and reassigning
+                 * them would relocate the entire downstream segment.
+                 *
+                 * The previous skip was `d->bus == 0`, which worked on
+                 * Pi 5 (RC at bus 0, endpoints behind the bridge on
+                 * bus 1) but excluded QEMU GPEX endpoints, which all
+                 * live on bus 0 alongside the host bridge. Keying on
+                 * class_code is correct for both topologies. */
+                if (d->class_code == 0x06) continue;
                 for (int b = 0; b < PCIE_NUM_BARS; b++) {
                     if (!(d->bar_flags[b] & PCIE_BAR_PRESENT)) continue;
                     if (d->bar_flags[b] & PCIE_BAR_IO) continue;
@@ -507,6 +517,26 @@ int pcie_init(void)
                     INFO("pcie: %02x:%02x.%x BAR%d assigned 0x%lx (size 0x%lx)",
                          d->bus, d->dev, d->func, b,
                          (unsigned long)addr, (unsigned long)size);
+
+                    /* Enable MEM_SPACE so the device actually decodes
+                     * accesses to the BAR we just programmed.
+                     * Without this, MMIO reads return all-ones and
+                     * map_bar() looks correct but yields garbage —
+                     * a regression surfaced by the dynamic-kernel-
+                     * replace Stage 3 SDHCI work (#369). UEFI does
+                     * this implicitly after BAR assignment; we
+                     * mirror it. BUS_MASTER is left for the driver
+                     * to enable explicitly via
+                     * pcie_enable_bus_master() since it controls
+                     * DMA, not MMIO. cfg_w16 (read-modify-write at
+                     * 32-bit boundary) avoids clobbering STATUS at
+                     * offset 0x06 above CMD's 0x04. */
+                    uint16_t cmd = cfg_r16(d->bus, d->dev, d->func,
+                                           CFG_COMMAND);
+                    if (!(cmd & CMD_MEMORY_SPACE)) {
+                        cfg_w16(d->bus, d->dev, d->func, CFG_COMMAND,
+                                (uint16_t)(cmd | CMD_MEMORY_SPACE));
+                    }
                 }
             }
         }
