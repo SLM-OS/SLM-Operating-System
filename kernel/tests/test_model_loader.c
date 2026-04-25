@@ -7,6 +7,7 @@
 
 #include "test_harness.h"
 #include "unity.h"
+#include "component.h"
 #include "slm_ffi.h"
 #include "uart.h"
 #include "string.h"
@@ -220,8 +221,17 @@ extern int component_run(const char *name);
 extern int component_hot_swap(const char *old_name, const char *new_name);
 extern void yield(void);
 
+static void cleanup_all_components(void)
+{
+    for (uint32_t i = 0; i < COMPONENT_MAX_COUNT; i++) {
+        component_unregister(i);
+    }
+}
+
 static void test_component_hot_swap(void)
 {
+    cleanup_all_components();
+
     /* Start sensor_monitor */
     int idx = component_run("sensor_monitor");
     TEST_ASSERT_TRUE(idx >= 0);
@@ -236,6 +246,8 @@ static void test_component_hot_swap(void)
 
     /* Give new instance a tick to run */
     yield();
+
+    cleanup_all_components();
 }
 
 int test_suite_components_m5(void)

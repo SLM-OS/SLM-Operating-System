@@ -107,11 +107,8 @@ static size_t build_eviction_xgb_payload(uint8_t *out, size_t out_cap)
     return cursor;
 }
 
-<<<<<<< HEAD
 /* Only used by the CONFIG_AI_SCHEDULER tests below; gate to silence
  * `-Werror=unused-function` on default builds (issue #399). */
-=======
->>>>>>> 36463ce (net: preserve dhcp timeout on duplicate requests)
 #ifdef CONFIG_AI_SCHEDULER
 static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
                                          uint8_t *out,
@@ -173,6 +170,7 @@ static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
 }
 #endif /* CONFIG_AI_SCHEDULER for build_eviction_mlp_payload */
 
+#ifdef CONFIG_AI_SCHEDULER
 static size_t build_sched_mlp_payload(uint32_t out_weight_bits,
                                       uint8_t *out,
                                       size_t out_cap)
@@ -253,7 +251,7 @@ static size_t build_sched_config_payload(uint8_t *out, size_t out_cap)
 #undef WRITE_U32_LE
     return cursor;
 }
-#endif
+#endif /* CONFIG_AI_SCHEDULER for sched helpers */
 
 static int write_binary_file(const char *path, const uint8_t *data, size_t len)
 {
@@ -279,7 +277,6 @@ static int read_text_file(const char *path, char *buf, size_t cap)
     return n;
 }
 
-<<<<<<< HEAD
 /* Only used by the CONFIG_AI_SCHEDULER tests below; gate to silence
  * `-Werror=unused-function` on default builds (issue #399). */
 #ifdef CONFIG_AI_SCHEDULER
@@ -305,9 +302,6 @@ static void build_long_path(char *out, size_t cap,
     out[target_len] = '\0';
 }
 #endif /* CONFIG_AI_SCHEDULER for build_long_path */
-
-=======
->>>>>>> 36463ce (net: preserve dhcp timeout on duplicate requests)
 static void test_blob_autoload_init_creates_conf(void)
 {
     char buf[256];

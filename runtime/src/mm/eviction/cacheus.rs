@@ -371,6 +371,10 @@ impl EvictionPolicy for CacheusSelector {
         let (front, _) = self.trajectory.as_slices();
         Some(front)
     }
+
+    fn ensemble_trajectory_snapshot(&self, out: &mut [TrajectoryEntry]) -> usize {
+        self.trajectory_snapshot(out)
+    }
 }
 
 impl CacheusSelector {
