@@ -1750,11 +1750,20 @@ int ga10b_bringup_run(struct ga10b_bringup *b)
     return 0;
 }
 
+/* Sanity ceiling on the v6 input buffer. The launcher allocates a
+ * page (4 KB) for MNIST today; cap at 1 MB so a corrupted handoff
+ * with bogus input_buf_size can't authorize a multi-megabyte memcpy
+ * into wherever input_buf_phys points. Real models will need this
+ * raised, but a hard ceiling beats trusting an arbitrary 32-bit
+ * field. */
+#define GA10B_INPUT_BUF_MAX_BYTES (1u * 1024u * 1024u)
+
 int ga10b_bringup_set_input(struct ga10b_bringup *b,
                              const void *bytes, size_t cap)
 {
     if (!b || !bytes) return -3;
     if (g_handoff.input_buf_phys == 0u) return -1;
+    if (g_handoff.input_buf_size > GA10B_INPUT_BUF_MAX_BYTES) return -1;
     if (cap > (size_t)g_handoff.input_buf_size) return -2;
 
     /* Same identity-DRAM-mapping assumption as the pipeline reader:
@@ -1764,11 +1773,15 @@ int ga10b_bringup_set_input(struct ga10b_bringup *b,
     memcpy(dst, bytes, cap);
 
     /* Clean the cache so the GPU sees the fresh input on the next
-     * dispatch. Without this, the CPU's writes can sit in L1/L2
-     * while the GPU reads stale DRAM. Pattern matches the pre-DMA
-     * sync we use for QMD writes. */
+     * dispatch. The mb() after cache_clean is the DSB that completes
+     * the cache maintenance — DC CVAC alone is not synchronizing on
+     * AArch64. Pattern matches `ga10b_submit_and_poll`'s pre-DMA
+     * sync for QMD/pushbuffer writes. */
     if (gsp_platform && gsp_platform->cache_clean) {
         gsp_platform->cache_clean(dst, cap);
+    }
+    if (gsp_platform && gsp_platform->mb) {
+        gsp_platform->mb();
     }
     return (int)cap;
 }
@@ -1778,18 +1791,29 @@ int ga10b_bringup_set_input_fill(struct ga10b_bringup *b,
 {
     if (!b) return -3;
     if (g_handoff.input_buf_phys == 0u) return -1;
-    /* Wrap-safe size check (n_floats * 4 must fit input_buf_size). */
-    if (n_floats > (g_handoff.input_buf_size / 4u)) return -2;
+    if (g_handoff.input_buf_size > GA10B_INPUT_BUF_MAX_BYTES) return -1;
+    /* Wrap-safe size check: division side, not multiplication side
+     * (input_buf_size / 4 is at most ~256 K, can't overflow). */
+    if (n_floats > (g_handoff.input_buf_size / sizeof(uint32_t))) return -2;
 
-    uint32_t *dst = (uint32_t *)(uintptr_t)g_handoff.input_buf_phys;
+    /* Use byte-granular memcpy rather than uint32_t* stores: avoids
+     * an unaligned-pointer assumption on `input_buf_phys` (the
+     * launcher aligns to 4096, but a malformed handoff could break
+     * it). On AArch64 with SCTLR.A=1 a misaligned uint32_t store
+     * would fault — memcpy is alignment-safe. */
+    uint8_t *dst = (uint8_t *)(uintptr_t)g_handoff.input_buf_phys;
     for (uint32_t i = 0u; i < n_floats; i++) {
-        dst[i] = value_bits;
+        memcpy(dst + i * sizeof(uint32_t), &value_bits, sizeof(uint32_t));
     }
 
+    size_t bytes_written = (size_t)n_floats * sizeof(uint32_t);
     if (gsp_platform && gsp_platform->cache_clean) {
-        gsp_platform->cache_clean(dst, (size_t)n_floats * 4u);
+        gsp_platform->cache_clean(dst, bytes_written);
     }
-    return (int)(n_floats * 4u);
+    if (gsp_platform && gsp_platform->mb) {
+        gsp_platform->mb();
+    }
+    return (int)bytes_written;
 }
 
 int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,

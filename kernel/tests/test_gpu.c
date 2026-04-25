@@ -19,6 +19,7 @@
 #include "uart.h"
 #include "spinlock.h"
 #include "platform.h"
+#include "slm_ffi.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -765,6 +766,116 @@ static void test_uart_output_no_hang(void)
 }
 
 /* ============================================================================
+ * MNIST GPU Inference FFI (M7 + M9)
+ *
+ * These tests validate the FFI surface that Lua / Rust call into for
+ * MNIST GPU inference. On non-Jetson platforms (the QEMU build that
+ * runs the test kernel) the MNIST entrypoints are stubs returning -1
+ * — the tests below pin that contract so a future change to the
+ * stubs can't silently break cross-platform builds.
+ *
+ * The fp32 argmax helper is platform-agnostic (operates on bit
+ * patterns under -mgeneral-regs-only) and gets full coverage here.
+ * ============================================================================ */
+
+static void test_slm_fp32_argmax_picks_largest_positive(void)
+{
+    /* 0.5, 1.0, 2.0, 1.5 — argmax is index 2. Bit patterns:
+     * 0x3F000000, 0x3F800000, 0x40000000, 0x3FC00000. */
+    static const uint32_t logits[4] = {
+        0x3F000000u, 0x3F800000u, 0x40000000u, 0x3FC00000u,
+    };
+    int idx = slm_fp32_argmax(logits, 4u);
+    TEST_ASSERT_EQUAL_INT(2, idx);
+}
+
+static void test_slm_fp32_argmax_handles_negative_values(void)
+{
+    /* -2.0, -1.0, -3.0 — argmax (largest) is index 1 = -1.0.
+     * Bit patterns: 0xC0000000, 0xBF800000, 0xC0400000. */
+    static const uint32_t logits[3] = {
+        0xC0000000u, 0xBF800000u, 0xC0400000u,
+    };
+    int idx = slm_fp32_argmax(logits, 3u);
+    TEST_ASSERT_EQUAL_INT(1, idx);
+}
+
+static void test_slm_fp32_argmax_handles_mixed_signs(void)
+{
+    /* -1.0, +0.5, -2.0 — argmax is index 1 (positive wins over any
+     * negative regardless of magnitude). */
+    static const uint32_t logits[3] = {
+        0xBF800000u, 0x3F000000u, 0xC0000000u,
+    };
+    int idx = slm_fp32_argmax(logits, 3u);
+    TEST_ASSERT_EQUAL_INT(1, idx);
+}
+
+static void test_slm_fp32_argmax_rejects_null_or_empty(void)
+{
+    static const uint32_t one[1] = { 0x3F800000u };
+    TEST_ASSERT_EQUAL_INT(-1, slm_fp32_argmax(NULL, 4u));
+    TEST_ASSERT_EQUAL_INT(-1, slm_fp32_argmax(one, 0u));
+}
+
+static void test_slm_fp32_argmax_single_element(void)
+{
+    /* One-element array: argmax is trivially 0. */
+    static const uint32_t one[1] = { 0xC0400000u };  /* -3.0 */
+    TEST_ASSERT_EQUAL_INT(0, slm_fp32_argmax(one, 1u));
+}
+
+static void test_slm_gpu_run_mnist_returns_negative_off_jetson(void)
+{
+    /* On non-Jetson the FFI is a stub returning -1. The kernel test
+     * kernel runs on QEMU_VIRT, so this is the always-active path
+     * here. (Jetson-side coverage is in scripts/gpu-kernel-mnist
+     * hardware tests.) */
+    uint8_t logits_bytes[40] = {0};
+#ifdef PLATFORM_JETSON_ORIN_NANO
+    /* On Jetson the FFI walks inherit + channel; without a real
+     * v5 handoff in DRAM that fails. Just assert the call returns
+     * a negative rc rather than crashing. */
+    int rc = slm_gpu_run_mnist(logits_bytes);
+    TEST_ASSERT_TRUE(rc < 0);
+#else
+    int rc = slm_gpu_run_mnist(logits_bytes);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+#endif
+}
+
+static void test_slm_gpu_run_mnist_null_buf_fails(void)
+{
+    /* NULL output buffer must be rejected (negative rc), regardless
+     * of platform. */
+    int rc = slm_gpu_run_mnist(NULL);
+    TEST_ASSERT_TRUE(rc < 0);
+}
+
+static void test_slm_gpu_set_mnist_input_returns_negative_off_jetson(void)
+{
+    static const uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+#ifdef PLATFORM_JETSON_ORIN_NANO
+    int rc = slm_gpu_set_mnist_input(payload, sizeof(payload));
+    TEST_ASSERT_TRUE(rc < 0);
+#else
+    int rc = slm_gpu_set_mnist_input(payload, sizeof(payload));
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+#endif
+}
+
+static void test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson(void)
+{
+#ifdef PLATFORM_JETSON_ORIN_NANO
+    int rc = slm_gpu_set_mnist_input_fill(0x3F800000u, 4u);
+    TEST_ASSERT_TRUE(rc < 0);
+#else
+    int rc = slm_gpu_set_mnist_input_fill(0x3F800000u, 4u);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+#endif
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -821,6 +932,19 @@ int test_suite_gpu(void)
     RUN_TEST(test_nv_gpu_not_present);
     RUN_TEST(test_nv_boot42_chip_id_ga106);
     RUN_TEST(test_nv_architecture_constants);
+
+    /* MNIST GPU inference FFI (M7 + M9) — argmax helper +
+     * cross-platform stub contract for slm_gpu_run_mnist /
+     * slm_gpu_set_mnist_input{,_fill}. */
+    RUN_TEST(test_slm_fp32_argmax_picks_largest_positive);
+    RUN_TEST(test_slm_fp32_argmax_handles_negative_values);
+    RUN_TEST(test_slm_fp32_argmax_handles_mixed_signs);
+    RUN_TEST(test_slm_fp32_argmax_rejects_null_or_empty);
+    RUN_TEST(test_slm_fp32_argmax_single_element);
+    RUN_TEST(test_slm_gpu_run_mnist_returns_negative_off_jetson);
+    RUN_TEST(test_slm_gpu_run_mnist_null_buf_fails);
+    RUN_TEST(test_slm_gpu_set_mnist_input_returns_negative_off_jetson);
+    RUN_TEST(test_slm_gpu_set_mnist_input_fill_returns_negative_off_jetson);
 
     return UnityEnd();
 }
