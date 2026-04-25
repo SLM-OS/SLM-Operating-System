@@ -761,9 +761,9 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
 | 5 (port scan, slot addressing) | ✅ | PR #308 — `xhci_hcd_port_status`, `xhci_hcd_port_reset`, `xhci_hcd_device_open` with ENABLE_SLOT + ADDRESS_DEVICE(BSR=1), intercepted SET_ADDRESS |
 | 6 (control transfers) | ✅ | PR #308 — Setup / Data / Status Stage TRB builders + EP0 dispatch |
 | 7 (CONFIGURE_ENDPOINT + bulk) | ✅ | PR #308 — per-endpoint transfer-ring allocation, Normal TRB for bulk/interrupt |
-| Post-kexec re-plug | ⚠️ | The stale-port state machine and hotplug retry path are in-tree, but on `jetson-nano-2` the inherited Realtek root hub still fails its first EP0 `GET_DESCRIPTOR(device, 8)` setup stage with `cc=4`. Physical re-plug has not yet produced a clean fresh-enumeration path on this hardware. |
-| Minimal hub support | ⚠️ | `usb_core` now has one-tier USB 2.0 hub scaffolding so a root hub can be treated as a transport detail, but the current Jetson Realtek path is still blocked before hub enumeration starts because the root hub never clears the initial EP0 setup failure. |
-| Phase 4 (lwIP integration) | ⚠️ | The `cdc_ecm`/lwIP retry chain remains wired up, but the lab's current Realtek RTL8153 adapters are not exposing a usable CDC-ECM device to SLM-OS yet. Even after the root-hub EP0 issue is fixed, this hardware likely needs hub-aware enumeration and a non-CDC Realtek NIC path rather than the old "re-plug and lwIP binds" expectation. |
+| Post-kexec retained hub handoff | ✅ | On `jetson-nano-2`, the Linux helper now deauthorizes the USB2 root hub before `kexec`, preserves the cleaned addressed slot-1 handoff, and skips only the stale slot-3 handoff. SLM-OS adopts the retained high-speed Realtek root hub with no manual re-plug. |
+| Minimal hub support | ✅ | `usb_core` now has one-tier USB 2.0 hub scaffolding, which is sufficient for the current Jetson lab path: retained root hub on slot 1, one downstream child on fresh slot 2. This is not general multi-tier hub support. |
+| Phase 4 (lwIP integration) | ✅ | On the validated `jetson-nano-2` path, the downstream RTL8153 now enumerates via the retained-root-hub path, `cdc_ecm` binds config 2, DHCP reaches `192.168.4.5/24` (`gw 192.168.4.1`), and `ping 192.168.4.1` succeeds after `kexec` with no manual unplug/replug. |
 
 Source layout in `kernel/drivers/usb/xhci/`:
 

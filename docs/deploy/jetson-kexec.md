@@ -57,12 +57,15 @@ If the `.ko` is not present, `slmos-kexec` still runs, but the Jetson
 USB-A host path may wedge at `USBCMD.RUN=1`.
 
 Current status on `jetson-nano-2`: with the helper's wider XUSB hold
-set and the SMMU preservation module installed, SLM-OS now reaches a
-live post-kexec XHCI controller (`USBSTS=0`, `NO_OP round-trip OK`).
-What is still not solved is full device enumeration of the lab's
-Realtek USB Ethernet adapter chain: the inherited root Realtek hub
-still fails on the first EP0 `GET_DESCRIPTOR(device, 8)` setup stage,
-so networking does not come up yet.
+set, the SMMU preservation module installed, and the helper's USB2
+root-hub cleanup enabled, SLM-OS now preserves a cleaned addressed
+slot-1 handoff across `kexec`, adopts the retained Realtek root hub,
+fresh-enumerates the downstream RTL8153, and brings networking up with
+no manual unplug/replug. Current validation on the lab path:
+
+- `net init` succeeds
+- DHCP binds `192.168.4.5/24` with gateway `192.168.4.1`
+- `ping 192.168.4.1 2` succeeds
 
 The helper script is reasonably well commented. Run it with `--help` on the Jetson for the full flag list, or read the script header for rationale on each step.
 
@@ -106,6 +109,11 @@ ssh root@<JETSON_IP> 'slmos-kexec /root/slmos.elf'
 
 The helper prints its progress as it runs — GPU suspend, BPMP clock force-on, USB hold, final `kexec -e`. The SSH session terminates at the `kexec -e` step (the kernel is replaced underneath the running userspace). Expected: network goes away within ~2 s of the final line.
 
+On the current `jetson-nano-2` lab setup, this path no longer needs a
+manual USB unplug/replug after `kexec`; the helper's root-hub cleanup
+and the retained slot-1 handoff are enough to get the Realtek USB
+Ethernet chain back in SLM-OS automatically.
+
 ### Step 4 — Observe via serial
 
 From the host (before or after issuing `kexec`):
@@ -141,6 +149,7 @@ The `slmos-kexec` helper's default behavior suits most cases. The common non-def
 | `--no-gpu-suspend` | Path 3 / issue #190: preserves the GPU's ACR / Falcon security state across kexec so SLM-OS inherits Linux's already-running FECS / GPCCS / PMU. Risk: stale DMA may still trigger a TF-A RAS error, though in practice it hasn't fired when GPU consumers are stopped first. |
 | `--no-usb-hold` | SLM-OS builds that don't drive the XHCI controller. The held clocks are otherwise harmless. |
 | `--no-smmu-fix` | Skip loading `arm_smmu_noshutdown.ko`. Only useful if you are not exercising the USB-A/XHCI path or are deliberately reproducing the pre-fix failure. |
+| `--no-usb-root-cleanup` | Skip the Linux-side USB2 root-hub `authorized=0` cleanup before `kexec`. Useful only if you are intentionally reproducing the old stale-slot path; the default cleanup is what makes the retained slot-1 handoff reproducible on `jetson-nano-2`. |
 
 Full flag list in the script header.
 

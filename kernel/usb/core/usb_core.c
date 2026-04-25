@@ -43,13 +43,17 @@ static bool                  root_device_present;
 static struct usb_device     hub_device;
 static bool                  hub_device_present;
 static bool                  usb_disable_hotplug_retry_after_failure = true;
+#if defined(PLATFORM_JETSON_ORIN_NANO)
 static bool                  usb_child_address_sync_bsr0 = true;
+#endif
 static bool                  usb_child_initial_desc_bounce = true;
 static bool                  usb_child_followup_desc_bounce = true;
 static bool                  usb_hotplug_retry_blocked;
 static bool                  usb_hotplug_retry_blocked_logged;
+#if defined(PLATFORM_HAS_NC_MEMORY)
 static uint8_t              *usb_retained_desc_bounce;
 static size_t                usb_retained_desc_bounce_len;
+#endif
 
 static void *usb_get_retained_desc_bounce(size_t min_len)
 {
@@ -963,24 +967,35 @@ got_initial_descriptor:
             if (addr_rc == 0) {
                 dev->address = target_address;
                 dev->state = USB_STATE_ADDRESS;
-                goto address_assigned;
+            } else {
+                rc = usb_control_msg(dev,
+                                     USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                                     USB_REQ_SET_ADDRESS,
+                                     target_address, 0, NULL, 0, 500);
+                if (rc < 0) {
+                    WARN("usb_core: SET_ADDRESS failed: %s",
+                         usb_urb_status_str((enum usb_urb_status)(-rc)));
+                    goto err_close;
+                }
+                dev->address = target_address;
+                dev->state = USB_STATE_ADDRESS;
             }
-        }
+        } else
 #endif
-        rc = usb_control_msg(dev,
-                             USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
-                             USB_REQ_SET_ADDRESS,
-                             target_address, 0, NULL, 0, 500);
-        if (rc < 0) {
-            WARN("usb_core: SET_ADDRESS failed: %s",
-                 usb_urb_status_str((enum usb_urb_status)(-rc)));
-            goto err_close;
+        {
+            rc = usb_control_msg(dev,
+                                 USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE,
+                                 USB_REQ_SET_ADDRESS,
+                                 target_address, 0, NULL, 0, 500);
+            if (rc < 0) {
+                WARN("usb_core: SET_ADDRESS failed: %s",
+                     usb_urb_status_str((enum usb_urb_status)(-rc)));
+                goto err_close;
+            }
+            dev->address = target_address;
+            dev->state = USB_STATE_ADDRESS;
         }
-        dev->address = target_address;
-        dev->state = USB_STATE_ADDRESS;
     }
-
-address_assigned:
 
     /* Step 5: full device descriptor. */
     if (!have_full_device_desc) {
