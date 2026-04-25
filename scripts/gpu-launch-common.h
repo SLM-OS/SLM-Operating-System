@@ -261,6 +261,18 @@ struct gpu_buffer gpu_alloc_buffer(struct gpu_launch_ctx *ctx,
                                     uint32_t size,
                                     uint32_t align);
 
+/* Load an additional shader (beyond the one gpu_launch_setup uploaded)
+ * into a fresh GPU buffer. Used by multi-shader pipelines (MNIST has
+ * 4 unique shaders chained together). Reads `shader_path`, allocates
+ * a 64 KB buffer, memcpys the file in, msyncs. Returns the buffer
+ * (gpu_va is the QMD's PROGRAM_ADDRESS for any QMD using this
+ * shader); the buffer's `size_bytes` field reflects the rounded
+ * allocation, but the actual shader length is set in
+ * `*out_shader_size` for handoff bookkeeping. */
+struct gpu_buffer gpu_load_shader_buffer(struct gpu_launch_ctx *ctx,
+                                          const char *shader_path,
+                                          size_t *out_shader_size);
+
 /* Populate the QMD with version + defaults suitable for a
  * single-thread single-CTA kernel. Specifically:
  *   - QMD_MAJOR_VERSION = 3, QMD_VERSION = 0
@@ -277,11 +289,36 @@ struct gpu_buffer gpu_alloc_buffer(struct gpu_launch_ctx *ctx,
  * should call gpu_qmd_set_bits() directly to override after this. */
 void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx);
 
+/* Lower-level: populate a QMD at an arbitrary address with explicit
+ * shader and cbuf GPU VAs. Used by multi-op pipelines where each op
+ * has its own QMD (and may use a different shader). Defaults are
+ * the same as gpu_launch_populate_qmd above. */
+void gpu_populate_qmd_at(uint32_t *qmd,
+                          uint64_t shader_gpu_va,
+                          uint64_t cbuf_gpu_va,
+                          uint32_t register_count_v);
+
 /* Build the 13-dword dispatch pushbuffer at `pb` (caller provides
  * storage ≥ 13 u32). qmd_gpu_va must be 256 B-aligned. Returns
  * the dword count written. Same shape as the kernel's
  * ga10b_build_launch_kernel_pushbuffer(). */
 size_t gpu_build_launch_pushbuffer(uint32_t *pb, uint64_t qmd_gpu_va);
+
+/* Populate CUDA's built-in-variable region of cbuf[0] (offsets
+ * 0x00..0x14) with the dispatch's blockDim and gridDim. Without
+ * this, kernels that read `blockDim.x` etc. via the SASS sequence
+ *   IMAD R0, R0 (CTAID.X), c[0x0][0x0] (blockDim.x), R5 (TID.X)
+ * compute their global thread index as if blockDim were 0, so
+ * every CTA's threads collapse onto the same range and only
+ * CTA(0,0) appears to have run.
+ *
+ * Hardcoded-constant kernels (matmul4x4, matmul8x8_grid) don't need
+ * this because their CTA dims are folded into the SASS as literals;
+ * any kernel parameterized over blockDim/gridDim must call this
+ * after writing its own kernel args at cbuf[0][0x160+]. */
+void gpu_write_builtin_dims(struct gpu_launch_ctx *ctx,
+                             uint32_t block_x, uint32_t block_y, uint32_t block_z,
+                             uint32_t grid_x,  uint32_t grid_y,  uint32_t grid_z);
 
 /* Copy the built pushbuffer into ctx->pb_va, post a GPFIFO entry,
  * advance GP_PUT, ring the doorbell, and poll `*poll_va` for exact
@@ -324,5 +361,27 @@ uint64_t gpu_write_handoff_v4(const struct gpu_launch_ctx *ctx,
                                uint64_t output_phys,
                                uint64_t output_gpu_va,
                                uint32_t expected_payload);
+
+/* Serialize a v5 channel handoff (pipeline of N ops). v5 extends v4
+ * with `pipeline_n_ops` + `pipeline_ops_phys`. SLM-OS dispatches the
+ * N ops in sequence, polling each op's `output_phys` for its
+ * `expected_payload` before advancing to the next.
+ *
+ * Memory contract: `pipeline_ops` is an array of N
+ * `struct ga10b_pipeline_op` (24 bytes each) sitting on its own
+ * DRAM page. The launcher allocates that page via nvmap (so SLM-OS
+ * can read it post-kexec) and passes the page's physical address.
+ *
+ * `output_phys` / `output_gpu_va` of the v4-compat fields point at
+ * the LAST op's output (SLM-OS's pre-pipeline single-shot path is
+ * never taken when `pipeline_n_ops > 0`, but populating them keeps
+ * the validator's non-zero requirement happy). */
+uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
+                               void *handoff_va,
+                               uint64_t output_phys,
+                               uint64_t output_gpu_va,
+                               uint32_t expected_payload,
+                               uint32_t pipeline_n_ops,
+                               uint64_t pipeline_ops_phys);
 
 #endif /* GPU_LAUNCH_COMMON_H */

@@ -215,7 +215,12 @@ void gpu_launch_setup(struct gpu_launch_ctx *ctx,
 
     /* Common per-kernel buffers. */
     ctx->pb_dmabuf     = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 65536, 4096);
-    ctx->shader_dmabuf = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
+    /* 64 KB shader buffer accommodates the larger kernels in the
+     * MNIST plan (MaxPool2D unrolls to ~17 KB SASS, Conv2D direct
+     * is ~6 KB). The shader_size field in the handoff still tells
+     * SLM-OS the actual code length; the unused tail is just
+     * zero-padded. */
+    ctx->shader_dmabuf = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 65536, 4096);
     ctx->cbuf_dmabuf   = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
     ctx->qmd_dmabuf    = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
 
@@ -266,7 +271,7 @@ void gpu_launch_setup(struct gpu_launch_ctx *ctx,
                           ctx->gpfifo_dmabuf, 0);
     ctx->pb_va     = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_SHARED,
                           ctx->pb_dmabuf, 0);
-    ctx->shader_va = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+    ctx->shader_va = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_SHARED,
                           ctx->shader_dmabuf, 0);
     ctx->cbuf_va   = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
                           ctx->cbuf_dmabuf, 0);
@@ -279,10 +284,17 @@ void gpu_launch_setup(struct gpu_launch_ctx *ctx,
         exit(1);
     }
 
-    /* Upload the shader. */
-    memset(ctx->shader_va, 0, 4096);
+    /* Upload the shader. Buffer is 64 KB; the actual shader size
+     * goes into the handoff so the GPU knows where the code ends. */
+    if (shader_size > 65536) {
+        fprintf(stderr,
+                "shader too large: %zu bytes (max 65536)\n",
+                shader_size);
+        exit(1);
+    }
+    memset(ctx->shader_va, 0, 65536);
     memcpy(ctx->shader_va, shader_bytes, shader_size);
-    msync(ctx->shader_va, 4096, MS_SYNC);
+    msync(ctx->shader_va, 65536, MS_SYNC);
     free(shader_bytes);
 
     /* Doorbell mmap: the USERMODE doorbell is at offset 0x90 within
@@ -352,13 +364,39 @@ struct gpu_buffer gpu_alloc_buffer(struct gpu_launch_ctx *ctx,
     return buf;
 }
 
+struct gpu_buffer gpu_load_shader_buffer(struct gpu_launch_ctx *ctx,
+                                          const char *shader_path,
+                                          size_t *out_shader_size)
+{
+    size_t shader_size = 0;
+    void *shader_bytes = gpu_load_file(shader_path, &shader_size);
+    if (!shader_bytes) {
+        fprintf(stderr, "shader missing at %s\n", shader_path);
+        exit(2);
+    }
+    if (shader_size > 65536) {
+        fprintf(stderr, "shader %s too large: %zu bytes (max 65536)\n",
+                shader_path, shader_size);
+        exit(1);
+    }
+    struct gpu_buffer buf = gpu_alloc_buffer(ctx, 65536, 4096);
+    memset(buf.cpu_va, 0, buf.size_bytes);
+    memcpy(buf.cpu_va, shader_bytes, shader_size);
+    msync(buf.cpu_va, buf.size_bytes, MS_SYNC);
+    free(shader_bytes);
+    if (out_shader_size) *out_shader_size = shader_size;
+    return buf;
+}
+
 /* ============================================================
  * QMD population
  * ============================================================ */
 
-void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
+void gpu_populate_qmd_at(uint32_t *qmd,
+                          uint64_t shader_gpu_va,
+                          uint64_t cbuf_gpu_va,
+                          uint32_t register_count_v)
 {
-    uint32_t *qmd = (uint32_t *)ctx->qmd_va;
     memset(qmd, 0, 256);
 
     /* Version + enum defaults (matches NVK's qmd_init!). */
@@ -369,7 +407,7 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
     gpu_qmd_set_bits(qmd, QMD_SAMPLER_INDEX_BIT,
                      QMD_SAMPLER_INDEX_BIT, 0);
 
-    /* Single CTA, single thread — all kernels shipped so far. */
+    /* Single CTA, single thread by default — caller overrides. */
     gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_WIDTH_HI,
                      QMD_CTA_RASTER_WIDTH_LO, 1);
     gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
@@ -386,15 +424,15 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
     /* Shader program address (Ampere: absolute, no shift). */
     gpu_qmd_set_bits(qmd, QMD_PROGRAM_ADDRESS_LOWER_HI,
                      QMD_PROGRAM_ADDRESS_LOWER_LO,
-                     ctx->shader_gva & 0xFFFFFFFFu);
+                     shader_gpu_va & 0xFFFFFFFFu);
     gpu_qmd_set_bits(qmd, QMD_PROGRAM_ADDRESS_UPPER_HI,
                      QMD_PROGRAM_ADDRESS_UPPER_LO,
-                     (ctx->shader_gva >> 32) & 0x1FFFFu);
+                     (shader_gpu_va >> 32) & 0x1FFFFu);
 
     /* Registers / shmem / SLM / barriers. */
     gpu_qmd_set_bits(qmd, QMD_REGISTER_COUNT_V_HI,
                      QMD_REGISTER_COUNT_V_LO,
-                     GPU_LAUNCH_REGISTER_COUNT_V_DEFAULT);
+                     register_count_v);
     gpu_qmd_set_bits(qmd, QMD_SHARED_MEMORY_SIZE_HI,
                      QMD_SHARED_MEMORY_SIZE_LO, 0);
     gpu_qmd_set_bits(qmd, QMD_SHADER_LOCAL_MEM_LOW_SIZE_HI,
@@ -421,18 +459,18 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
     gpu_qmd_set_bits(qmd, QMD_INVALIDATE_SHADER_CONSTANT_CACHE_BIT,
                      QMD_INVALIDATE_SHADER_CONSTANT_CACHE_BIT, 1);
 
-    /* cbuf[0]: CUDA-compatible param area at cbuf_gva. size/16 in the
-     * field, VALID bit on. */
+    /* cbuf[0]: CUDA-compatible param area at cbuf_gpu_va. size/16 in
+     * the field, VALID bit on. */
     const unsigned cbuf_idx = 0;
     const uint32_t cbuf_size_B = GPU_LAUNCH_CBUF_SIZE_B;
     gpu_qmd_set_bits(qmd,
                      QMD_CBUF_ADDR_LO_BASE + cbuf_idx * 64 + 31,
                      QMD_CBUF_ADDR_LO_BASE + cbuf_idx * 64,
-                     ctx->cbuf_gva & 0xFFFFFFFFu);
+                     cbuf_gpu_va & 0xFFFFFFFFu);
     gpu_qmd_set_bits(qmd,
                      QMD_CBUF_ADDR_HI_BASE + cbuf_idx * 64 + 16,
                      QMD_CBUF_ADDR_HI_BASE + cbuf_idx * 64,
-                     (ctx->cbuf_gva >> 32) & 0x1FFFFu);
+                     (cbuf_gpu_va >> 32) & 0x1FFFFu);
     gpu_qmd_set_bits(qmd,
                      QMD_CBUF_SIZE_SHIFTED4_BASE + cbuf_idx * 64 + 12,
                      QMD_CBUF_SIZE_SHIFTED4_BASE + cbuf_idx * 64,
@@ -440,13 +478,37 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
     gpu_qmd_set_bits(qmd,
                      QMD_CBUF_VALID_BASE + cbuf_idx,
                      QMD_CBUF_VALID_BASE + cbuf_idx, 1);
+}
 
+void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx)
+{
+    gpu_populate_qmd_at((uint32_t *)ctx->qmd_va,
+                        ctx->shader_gva,
+                        ctx->cbuf_gva,
+                        GPU_LAUNCH_REGISTER_COUNT_V_DEFAULT);
     msync(ctx->qmd_va, 4096, MS_SYNC);
 }
 
 /* ============================================================
  * Pushbuffer builder + submit/poll
  * ============================================================ */
+
+void gpu_write_builtin_dims(struct gpu_launch_ctx *ctx,
+                             uint32_t block_x, uint32_t block_y, uint32_t block_z,
+                             uint32_t grid_x,  uint32_t grid_y,  uint32_t grid_z)
+{
+    /* CUDA reserves cbuf[0][0x00..0x14] for built-in dim variables.
+     * SASS reads of blockDim.x come from c[0x0][0x0]; blockDim.y
+     * from c[0x0][0x4]; etc. */
+    uint32_t *p = (uint32_t *)ctx->cbuf_va;
+    p[0] = block_x;   /* 0x00 blockDim.x */
+    p[1] = block_y;   /* 0x04 blockDim.y */
+    p[2] = block_z;   /* 0x08 blockDim.z */
+    p[3] = grid_x;    /* 0x0C gridDim.x  */
+    p[4] = grid_y;    /* 0x10 gridDim.y  */
+    p[5] = grid_z;    /* 0x14 gridDim.z  */
+    msync(ctx->cbuf_va, 4096, MS_SYNC);
+}
 
 size_t gpu_build_launch_pushbuffer(uint32_t *pb, uint64_t qmd_gpu_va)
 {
@@ -507,22 +569,36 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
         exit(1);
     }
 
-    /* Copy pushbuffer into the mapped ring region. */
+    /* Copy pushbuffer into the mapped ring region.
+     *
+     * Single-page pb buffer is reused across submits — fine because
+     * the polling loop below ensures the prior dispatch finished
+     * before we overwrite. */
     uint32_t *pb32 = (uint32_t *)ctx->pb_va;
     memcpy(pb32, pb_buf, pb_dwords * sizeof(uint32_t));
     msync(ctx->pb_va, pb_dwords * 4, MS_SYNC);
 
-    /* GPFIFO entry 0 -> pushbuffer. */
+    /* Multi-submit support: read current GP_PUT, post the new
+     * GPFIFO entry to slot `cur & mask`, advance GP_PUT to
+     * `cur + 1`. The first call sees GP_PUT=0 and writes slot 0;
+     * each subsequent call advances to the next slot. */
+    volatile uint32_t *userd = (volatile uint32_t *)ctx->userd_va;
+    uint32_t cur_gp_put = userd[GPU_LAUNCH_USERD_GP_PUT_WORD];
+    /* gpu_launch_setup pins gpfifo_entries to 1024 (a power of two);
+     * the mask works as long as that contract holds. */
+    uint32_t mask = ctx->gpfifo_entries - 1u;
+    uint32_t slot = cur_gp_put & mask;
+
     uint64_t pb_gva = ctx->pb_gva;
     uint32_t gp_e0 = (uint32_t)(pb_gva & 0xFFFFFFFCu);
     uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) |
                      ((uint32_t)pb_dwords << 10);
-    ((uint32_t *)ctx->gpfifo_va)[0] = gp_e0;
-    ((uint32_t *)ctx->gpfifo_va)[1] = gp_e1;
-    msync(ctx->gpfifo_va, 8, MS_SYNC);
+    ((uint32_t *)ctx->gpfifo_va)[slot * 2 + 0] = gp_e0;
+    ((uint32_t *)ctx->gpfifo_va)[slot * 2 + 1] = gp_e1;
+    msync(ctx->gpfifo_va, ctx->gpfifo_entries * 8, MS_SYNC);
 
-    /* GP_PUT = 1. */
-    ((uint32_t *)ctx->userd_va)[GPU_LAUNCH_USERD_GP_PUT_WORD] = 1;
+    uint32_t new_gp_put = cur_gp_put + 1;
+    userd[GPU_LAUNCH_USERD_GP_PUT_WORD] = new_gp_put;
     msync(ctx->userd_va, 4096, MS_SYNC);
 
     /* Doorbell at ctrl-fd mmap + 0x90. */
@@ -531,14 +607,53 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
     *doorbell = ctx->work_submit_token;
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Poll at 10 ms granularity up to timeout_ms. */
+    /* Poll at 10 ms granularity up to timeout_ms.
+     *
+     * Mode selector (ga10b_poll_match in ga10b_channel_handoff.h):
+     *   expected_payload != 0 → exact-match polling.
+     *   expected_payload == 0 → "wait for non-zero" — used by multi-
+     *     op pipelines where the per-op output value isn't known
+     *     ahead of time (FP32 ordering between CPU reference and
+     *     GPU FFMA can differ in the low bits, but any non-zero
+     *     value indicates the op completed). Caller pre-zeroes
+     *     `*poll_va` so the transition is observable. */
     uint32_t iterations = (timeout_ms + 9) / 10;
     uint32_t val = 0;
     for (uint32_t i = 0; i < iterations; i++) {
         msync((void *)poll_va, 4, MS_INVALIDATE | MS_SYNC);
         __asm__ volatile("dsb sy" ::: "memory");
         val = *poll_va;
-        if (val == expected_payload) return 1;
+        if (ga10b_poll_match(val, expected_payload)) {
+            /* Multi-CTA dispatch hazard: a single-cell sentinel poll
+             * proves at least the polled cell was written, not that
+             * all CTAs finished. With imbalanced CTAs (e.g. tile-
+             * misaligned shapes where some CTAs have many fewer
+             * active threads than others), a fast CTA can write the
+             * sentinel before lagging CTAs finish their writes,
+             * leaving spurious zeros in those cells.
+             *
+             * Workaround: 500 ms grace period after sentinel match
+             * covers any reasonable kernel running on the small
+             * MNIST-shape workloads we care about today.
+             *
+             * **This is a known throughput cost.** An 8-op pipeline
+             * pays 4 seconds in pure sleeps. The proper fix is to
+             * append a SEMAPHORE_RELEASE method to the dispatch
+             * pushbuffer (NVC7C0 method 0x6098/9C/A0/A4 family on
+             * Ampere) so the GPU writes a sentinel only after all
+             * SMs have drained. The launcher would then poll that
+             * semaphore — exact-match — without needing this sleep.
+             * That refactor touches `gpu_build_launch_pushbuffer`
+             * + the v5 ops array's poll target convention; track
+             * as a follow-up before any benchmark / production
+             * workload uses this path. See
+             * docs/jetson-gpu-mnist-plan.md §"Risks and open
+             * questions" for the design notes. */
+            usleep(500000);
+            msync((void *)poll_va, 4, MS_INVALIDATE | MS_SYNC);
+            __asm__ volatile("dsb sy" ::: "memory");
+            return 1;
+        }
         usleep(10000);
     }
     return 0;
@@ -613,6 +728,79 @@ uint64_t gpu_write_handoff_v4(const struct gpu_launch_ctx *ctx,
         .cbuf_size          = GPU_LAUNCH_CBUF_SIZE_B,
         /* v4 extension: expected payload for generic launch_kernel. */
         .expected_payload   = expected_payload,
+    };
+    memcpy(handoff_va, &hoff, sizeof(hoff));
+    msync(handoff_va, 4096, MS_SYNC);
+
+    return handoff_phys;
+}
+
+uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
+                               void *handoff_va,
+                               uint64_t output_phys,
+                               uint64_t output_gpu_va,
+                               uint32_t expected_payload,
+                               uint32_t pipeline_n_ops,
+                               uint64_t pipeline_ops_phys)
+{
+    /* Same single-page invariant as v4. */
+    memset(handoff_va, 0, 4096);
+    uint64_t handoff_phys = gpu_virt_to_phys(handoff_va);
+
+    uint64_t userd_phys  = gpu_virt_to_phys(ctx->userd_va);
+    uint64_t gpfifo_phys = gpu_virt_to_phys(ctx->gpfifo_va);
+    uint64_t pb_phys     = gpu_virt_to_phys(ctx->pb_va);
+
+    /* v3 dispatch fields (qmd_gpu_va, output_phys, etc.) are
+     * intentionally left zero in a v5 handoff. The actual op state
+     * lives in the per-op pipeline_ops array; carrying stale "first
+     * op" addresses in the v3 fields would let a future bug that
+     * lost pipeline_n_ops silently fall through to the v3 single-
+     * shot path and dispatch op 0 alone. With the v3 fields zeroed,
+     * the launch_kernel pre-pipeline check `qmd_gpu_va == 0` fails
+     * loudly instead. The v2 channel fields (userd/gpfifo/pushbuf/
+     * semaphore/work_submit_token) stay populated because
+     * ga10b_validate_handoff requires them non-zero. */
+    struct ga10b_channel_handoff hoff = {
+        .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
+        .version            = 5,
+        .channel_id         = 0,
+        .tsg_id             = 0,
+        .userd_phys         = userd_phys,
+        .userd_gp_put_offset = GPU_LAUNCH_USERD_GP_PUT_WORD * 4u,
+        .userd_gp_get_offset = GPU_LAUNCH_USERD_GP_GET_WORD * 4u,
+        .gpfifo_phys        = gpfifo_phys,
+        .gpfifo_gpu_va      = ctx->gpfifo_gpu_va,
+        .gpfifo_entries     = ctx->gpfifo_entries,
+        .gpfifo_entry_size  = 8,
+        .pushbuf_phys       = pb_phys,
+        .pushbuf_gpu_va     = ctx->pb_gva,
+        .pushbuf_size       = 65536,
+        /* semaphore_phys must be non-zero for the validator;
+         * caller provides a meaningful (final-op) target. */
+        .semaphore_phys     = output_phys,
+        .semaphore_gpu_va   = output_gpu_va,
+        .inst_block_phys    = 0,
+        .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
+                                [GPU_LAUNCH_USERD_GP_PUT_WORD],
+        .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
+                                [GPU_LAUNCH_USERD_GP_GET_WORD],
+        .work_submit_token  = ctx->work_submit_token,
+        /* v3 dispatch fields zeroed (see comment above). */
+        .shader_phys        = 0,
+        .shader_gpu_va      = 0,
+        .cbuf_phys          = 0,
+        .cbuf_gpu_va        = 0,
+        .qmd_phys           = 0,
+        .qmd_gpu_va         = 0,
+        .output_phys        = 0,
+        .output_gpu_va      = 0,
+        .shader_size        = 0,
+        .cbuf_size          = 0,
+        .expected_payload   = expected_payload,
+        /* v5 extension. */
+        .pipeline_n_ops     = pipeline_n_ops,
+        .pipeline_ops_phys  = pipeline_ops_phys,
     };
     memcpy(handoff_va, &hoff, sizeof(hoff));
     msync(handoff_va, 4096, MS_SYNC);

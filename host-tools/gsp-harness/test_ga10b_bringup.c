@@ -1031,17 +1031,19 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 1;                  /* v1 lacked work_submit_token */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
-    /* v2 (channel-only), v3 (+ kernel-launch state), and v4 (+
-     * expected_payload) all pass — Phase 6/7 reads only v2 fields,
-     * Phase 8 checks the version at dispatch time before reading
-     * v3/v4 fields. */
+    /* v2 (channel-only), v3 (+ kernel-launch state), v4 (+
+     * expected_payload), and v5 (+ pipeline) all pass — Phase 6/7
+     * reads only v2 fields, Phase 8 checks the version at dispatch
+     * time before reading v3/v4/v5 fields. */
     h.version = 2;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 3;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 4;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
-    h.version = 5;                  /* future, not yet defined */
+    h.version = 5;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 6;                  /* future, not yet defined */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
@@ -1529,14 +1531,37 @@ static void test_launch_kernel_pb_uses_ampere_pcas2_b(void)
  * Handoff v3 — channel + kernel-launch state
  * ====================================================================== */
 
-static void test_handoff_v4_layout_size(void)
+static void test_handoff_v5_layout_size(void)
 {
-    printf("== test_handoff_v4_layout_size ==\n");
+    printf("== test_handoff_v5_layout_size ==\n");
     /* Belt-and-suspenders runtime check. The header pins the size
      * with a _Static_assert but a fresh-eyes reader shouldn't have
      * to dig into compile-time errors to discover that v2 was 120,
-     * v3 was 192, and v4 is 200. */
-    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 200u);
+     * v3 was 192, v4 was 200, and v5 is 216. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 216u);
+}
+
+static void test_pipeline_op_layout(void)
+{
+    printf("== test_pipeline_op_layout ==\n");
+    /* Per-op struct is wire-format shared between Linux helper and
+     * SLM-OS — same byte layout must be visible from both sides. */
+    REQUIRE_EQ(sizeof(struct ga10b_pipeline_op), 24u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op, qmd_gpu_va), 0u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op, output_phys), 8u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op, expected_payload), 16u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op, flags), 20u);
+}
+
+static void test_handoff_v5_pipeline_offsets(void)
+{
+    printf("== test_handoff_v5_pipeline_offsets ==\n");
+    /* The v5 pipeline pointer + count must extend the v4 layout
+     * without disturbing the existing fields. */
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, pipeline_n_ops),
+               200u);
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, pipeline_ops_phys),
+               208u);
 }
 
 static void test_handoff_v4_expected_payload_offset(void)
@@ -1783,6 +1808,116 @@ static void test_scanner_empty_range(void)
 }
 
 /* ======================================================================
+ * Pipeline poll-match predicate (ga10b_channel_handoff.h
+ * `ga10b_poll_match`). Used by both the kernel-side
+ * ga10b_submit_and_poll and the Linux launcher's gpu_submit_and_poll.
+ * Pin the two-mode contract so a future refactor doesn't silently
+ * collapse "any non-zero" to "exact match against 0", which would
+ * make an immediate (pre-cleared) buffer report success.
+ * ====================================================================== */
+
+static void test_poll_match_exact(void)
+{
+    printf("== test_poll_match_exact ==\n");
+    /* Exact-match path used by v3/v4 single-shot dispatches and any
+     * v5 op that pins a bit pattern. */
+    REQUIRE(ga10b_poll_match(0xCAFEu, 0xCAFEu));
+    REQUIRE(!ga10b_poll_match(0xCAFEu, 0xCAFFu));
+    REQUIRE(!ga10b_poll_match(0u, 0xCAFEu));
+    REQUIRE(ga10b_poll_match(0x41F00000u, 0x41F00000u));  /* 30.0f */
+    REQUIRE(ga10b_poll_match(0xC003B6C9u, 0xC003B6C9u));  /* MNIST logits[0] */
+}
+
+static void test_poll_match_any_nonzero(void)
+{
+    printf("== test_poll_match_any_nonzero ==\n");
+    /* expected_payload == 0 means "any non-zero". Used by v5 ops
+     * whose output bit pattern isn't predictable (FFMA-vs-numpy
+     * ULP drift in MNIST conv outputs). */
+    REQUIRE(ga10b_poll_match(0xCAFEu, 0u));
+    REQUIRE(ga10b_poll_match(0x00000001u, 0u));
+    REQUIRE(ga10b_poll_match(0xFFFFFFFFu, 0u));
+
+    /* Critical foot-gun guard: if the buffer is freshly cleared to
+     * 0, "any non-zero" must NOT match — otherwise the launcher
+     * would report success before the GPU actually wrote. */
+    REQUIRE(!ga10b_poll_match(0u, 0u));
+}
+
+/* ======================================================================
+ * Pipeline op array per-element validator
+ * (ga10b_channel_handoff.h `ga10b_pipeline_op_is_valid`). The kernel
+ * runner consults this before dispatching each op so a malformed
+ * handoff fails fast instead of submitting a QMD address of 0
+ * (which the GPU treats as a no-op with no error reported).
+ * ====================================================================== */
+
+static void test_pipeline_op_validator_accepts_well_formed(void)
+{
+    printf("== test_pipeline_op_validator_accepts_well_formed ==\n");
+    struct ga10b_pipeline_op op = {
+        .qmd_gpu_va       = 0x1ffc012000ULL,
+        .output_phys      = 0x180000000ULL,
+        .expected_payload = 0xCAFEu,
+        .flags            = 0u,
+    };
+    REQUIRE(ga10b_pipeline_op_is_valid(&op));
+
+    /* expected_payload == 0 (any-nonzero mode) is fine. */
+    op.expected_payload = 0u;
+    REQUIRE(ga10b_pipeline_op_is_valid(&op));
+}
+
+static void test_pipeline_op_validator_rejects_zero_qmd(void)
+{
+    printf("== test_pipeline_op_validator_rejects_zero_qmd ==\n");
+    struct ga10b_pipeline_op op = {
+        .qmd_gpu_va       = 0u,
+        .output_phys      = 0x180000000ULL,
+        .expected_payload = 0xCAFEu,
+        .flags            = 0u,
+    };
+    REQUIRE(!ga10b_pipeline_op_is_valid(&op));
+}
+
+static void test_pipeline_op_validator_rejects_zero_output(void)
+{
+    printf("== test_pipeline_op_validator_rejects_zero_output ==\n");
+    struct ga10b_pipeline_op op = {
+        .qmd_gpu_va       = 0x1ffc012000ULL,
+        .output_phys      = 0u,
+        .expected_payload = 0xCAFEu,
+        .flags            = 0u,
+    };
+    REQUIRE(!ga10b_pipeline_op_is_valid(&op));
+}
+
+static void test_pipeline_op_validator_rejects_null(void)
+{
+    printf("== test_pipeline_op_validator_rejects_null ==\n");
+    REQUIRE(!ga10b_pipeline_op_is_valid(NULL));
+}
+
+/* The pipeline-runner caps `pipeline_n_ops` at GA10B_PIPELINE_MAX_OPS
+ * to prevent a malformed handoff (n_ops = 0xFFFFFFFF) from looping
+ * past the 4 KB ops array into adjacent memory. The cap matches the
+ * launcher's allocation budget — one 4 KB page of pipeline_op
+ * structs (170 of them at 24 bytes each). */
+static void test_pipeline_max_ops_constant(void)
+{
+    printf("== test_pipeline_max_ops_constant ==\n");
+    /* The constant must match the launcher's per-page capacity. */
+    REQUIRE_EQ((unsigned)GA10B_PIPELINE_MAX_OPS, 170u);
+    REQUIRE_EQ(GA10B_PIPELINE_MAX_OPS * sizeof(struct ga10b_pipeline_op),
+               4080u);  /* < 4096, so a 4 KB page holds all ops */
+    /* MNIST currently uses 8 ops — comfortably under the cap. If
+     * GA10B_PIPELINE_MAX_OPS is ever lowered, the MNIST launcher
+     * stops working without surfacing a clear build error; tests
+     * fail loudly instead. */
+    REQUIRE(GA10B_PIPELINE_MAX_OPS >= 8u);
+}
+
+/* ======================================================================
  * gpu_qmd_set_bits — pure-logic bit-range setter for QMDV03_00
  * (scripts/gpu-qmd-bits.h). Exercised here because the production
  * call-site (scripts/gpu-launch-common.c) only runs on Jetson and
@@ -1967,8 +2102,10 @@ int main(void)
     test_launch_kernel_pb_idempotent();
     test_launch_kernel_pb_uses_ampere_pcas2_b();
 
-    test_handoff_v4_layout_size();
+    test_handoff_v5_layout_size();
     test_handoff_v4_expected_payload_offset();
+    test_handoff_v5_pipeline_offsets();
+    test_pipeline_op_layout();
     test_pick_launch_payload_v3_uses_fallback();
     test_pick_launch_payload_v4_zero_uses_fallback();
     test_pick_launch_payload_v4_uses_field();
@@ -1980,6 +2117,14 @@ int main(void)
     test_scanner_returns_zero_on_miss();
     test_scanner_skips_between_pages();
     test_scanner_empty_range();
+
+    test_poll_match_exact();
+    test_poll_match_any_nonzero();
+    test_pipeline_op_validator_accepts_well_formed();
+    test_pipeline_op_validator_rejects_zero_qmd();
+    test_pipeline_op_validator_rejects_zero_output();
+    test_pipeline_op_validator_rejects_null();
+    test_pipeline_max_ops_constant();
 
     test_qmd_set_bits_single_bit();
     test_qmd_set_bits_within_one_word();
