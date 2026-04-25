@@ -160,6 +160,9 @@ int test_suite_sdhci(void);
 /* `kernel` admin command surface tests (#370, dynamic-kernel-replace Stage 4) */
 int test_suite_kernel_cmd(void);
 
+/* SHA-256 vendored-library vector tests (#370, dynamic-kernel-replace Stage 4) */
+int test_suite_sha256(void);
+
 /* General-purpose FDT reader tests (kernel/lib/fdt) */
 int test_suite_fdt(void);
 

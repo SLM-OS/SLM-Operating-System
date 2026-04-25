@@ -55,30 +55,23 @@ static uint8_t source_payload[SOURCE_PAYLOAD_SIZE];
 /* SHA-256 of `source_payload` as initialized by build_source_payload().
  * Computed once at suite setup and reused across tests that verify
  * the sidecar matches. */
-static char expected_sha_hex[SHA256_DIGEST_LENGTH * 2 + 1];
+static char expected_sha_hex[SHA256_HEX_LEN + 1];
 
 static BYTE mkfs_work[4096];
 
 /* ---- helpers ---- */
-
-static void hex_encode(const uint8_t *in, size_t len, char *out)
-{
-    static const char chars[] = "0123456789abcdef";
-    for (size_t i = 0; i < len; i++) {
-        out[i * 2u + 0] = chars[(in[i] >> 4) & 0xFu];
-        out[i * 2u + 1] = chars[in[i] & 0xFu];
-    }
-    out[len * 2u] = '\0';
-}
 
 static void build_source_payload(void)
 {
     for (size_t i = 0; i < SOURCE_PAYLOAD_SIZE; i++) {
         source_payload[i] = (uint8_t)(i & 0xFFu);
     }
-    uint8_t digest[SHA256_DIGEST_LENGTH];
-    sha256_compute(source_payload, SOURCE_PAYLOAD_SIZE, digest);
-    hex_encode(digest, SHA256_DIGEST_LENGTH, expected_sha_hex);
+    uint8_t digest[SHA256_DIGEST_LEN];
+    struct sha256_ctx ctx;
+    sha256_init(&ctx);
+    sha256_update(&ctx, source_payload, SOURCE_PAYLOAD_SIZE);
+    sha256_final(&ctx, digest);
+    sha256_bytes_to_hex(digest, expected_sha_hex);
 }
 
 static bool sdhci_available(void)
@@ -205,7 +198,7 @@ static void check_staged(FATFS *fs)
     /* tryboot.sha exists and matches SHA-256 of payload. */
     FIL sha_fp;
     TEST_ASSERT_EQUAL_INT(FR_OK, f_open(&sha_fp, TRYBOOT_SHA_PATH, FA_READ));
-    char hex_buf[SHA256_DIGEST_LENGTH * 2 + 4];
+    char hex_buf[SHA256_HEX_LEN + 4];
     UINT got = 0;
     f_read(&sha_fp, hex_buf, sizeof(hex_buf) - 1, &got);
     f_close(&sha_fp);

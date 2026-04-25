@@ -662,6 +662,9 @@ set(TEST_SOURCES
     # `kernel` admin command surface tests — Stage 4 of #370. Same
     # ARM64-only gate as test_sdhci.c (it's the same backend stack).
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_kernel_cmd.c>
+    # SHA-256 NIST-vector tests for the vendored library — Stage 4
+    # of #370 too, but platform-neutral (pure computation, no MMIO).
+    kernel/tests/test_sha256.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for
