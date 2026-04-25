@@ -479,6 +479,31 @@ static void test_blob_autoload_overwrites_existing_conf(void)
     TEST_ASSERT_NOT_NULL(find_substr(conf_buf, "/mnt/files/second-xgb.blob"));
 }
 
+static void test_blob_autoload_recovers_from_backup_conf(void)
+{
+    char path[VFS_MAX_PATH];
+    const char *subpath = NULL;
+    struct lfs_mount *mnt;
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/recover-xgb.blob", ev_blob, ev_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/recover-xgb.blob"));
+
+    mnt = (struct lfs_mount *)vfs_get_mount_ctx("/mnt/files", &subpath);
+    TEST_ASSERT_NOT_NULL(mnt);
+    (void)littlefs_remove(mnt, "/blob_autoload.conf.bak");
+    TEST_ASSERT_EQUAL_INT(0, littlefs_rename(mnt, "/blob_autoload.conf", "/blob_autoload.conf.bak"));
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_init());
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("/mnt/files/recover-xgb.blob", path);
+}
+
 #ifdef CONFIG_AI_SCHEDULER
 static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
 {
@@ -571,6 +596,7 @@ int test_suite_blob_autoload(void)
     RUN_TEST(test_blob_autoload_shell_commands);
     RUN_TEST(test_blob_autoload_rejects_invalid_paths);
     RUN_TEST(test_blob_autoload_overwrites_existing_conf);
+    RUN_TEST(test_blob_autoload_recovers_from_backup_conf);
 #ifdef CONFIG_AI_SCHEDULER
     RUN_TEST(test_blob_autoload_accepts_max_length_paths_across_all_slots);
 #endif

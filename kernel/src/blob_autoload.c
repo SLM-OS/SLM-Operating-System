@@ -18,6 +18,7 @@ struct blob_autoload_entry {
 };
 
 #define BLOB_AUTOLOAD_CONF_TMP_PATH "/blob_autoload.conf.tmp"
+#define BLOB_AUTOLOAD_CONF_BAK_PATH "/blob_autoload.conf.bak"
 #define BLOB_AUTOLOAD_ENTRY_LINE_OVERHEAD 48u
 
 static struct blob_autoload_entry blob_entries[] = {
@@ -65,6 +66,9 @@ static int blob_autoload_read_entries(struct blob_autoload_entry *entries, size_
 {
     static char buf[BLOB_AUTOLOAD_CONF_BUF_SIZE];
     int bytes = vfs_read_path(BLOB_AUTOLOAD_CONF_PATH, buf, sizeof(buf) - 1, 0);
+    if (bytes <= 0) {
+        bytes = vfs_read_path(BLOB_AUTOLOAD_CONF_BAK_PATH, buf, sizeof(buf) - 1, 0);
+    }
     if (bytes <= 0) {
         blob_entries_reset(entries, count);
         return 0;
@@ -128,6 +132,7 @@ static int blob_autoload_write_entries(const struct blob_autoload_entry *entries
     static char buf[BLOB_AUTOLOAD_CONF_BUF_SIZE];
     const char *subpath = NULL;
     struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx("/mnt/files", &subpath);
+    struct vfs_entry_info info;
     int fd;
     int written;
     size_t pos = 0;
@@ -158,11 +163,22 @@ static int blob_autoload_write_entries(const struct blob_autoload_entry *entries
         return -1;
     }
     if (littlefs_rename(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH, "/blob_autoload.conf") != 0) {
-        (void)littlefs_remove(mnt, "/blob_autoload.conf");
-        if (littlefs_rename(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH, "/blob_autoload.conf") != 0) {
+        int had_existing = (vfs_stat_path(BLOB_AUTOLOAD_CONF_PATH, &info) == 0);
+        if (!had_existing) {
             littlefs_remove(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH);
             return -1;
         }
+        (void)littlefs_remove(mnt, BLOB_AUTOLOAD_CONF_BAK_PATH);
+        if (littlefs_rename(mnt, "/blob_autoload.conf", BLOB_AUTOLOAD_CONF_BAK_PATH) != 0) {
+            littlefs_remove(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH);
+            return -1;
+        }
+        if (littlefs_rename(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH, "/blob_autoload.conf") != 0) {
+            (void)littlefs_rename(mnt, BLOB_AUTOLOAD_CONF_BAK_PATH, "/blob_autoload.conf");
+            littlefs_remove(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH);
+            return -1;
+        }
+        (void)littlefs_remove(mnt, BLOB_AUTOLOAD_CONF_BAK_PATH);
     }
     return 0;
 }
@@ -171,6 +187,14 @@ int blob_autoload_init(void)
 {
     struct vfs_entry_info info;
     if (vfs_stat_path(BLOB_AUTOLOAD_CONF_PATH, &info) == 0) {
+        return 0;
+    }
+    if (vfs_stat_path(BLOB_AUTOLOAD_CONF_BAK_PATH, &info) == 0) {
+        const char *subpath = NULL;
+        struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx("/mnt/files", &subpath);
+        if (mnt && littlefs_rename(mnt, BLOB_AUTOLOAD_CONF_BAK_PATH, "/blob_autoload.conf") == 0) {
+            return 0;
+        }
         return 0;
     }
     blob_entries_reset(blob_entries, sizeof(blob_entries) / sizeof(blob_entries[0]));
