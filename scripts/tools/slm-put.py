@@ -393,6 +393,36 @@ def reconnect(factory: Callable[[], Shell], debug: bool) -> Shell:
     return shell
 
 
+def normalize_remote_path(remote_path: str, cwd: str = "/") -> str:
+    if not remote_path:
+        return cwd
+    path = pathlib.PurePosixPath(remote_path)
+    if path.is_absolute():
+        parts = list(path.parts)
+    else:
+        parts = list(pathlib.PurePosixPath(cwd, remote_path).parts)
+
+    normalized: list[str] = []
+    for part in parts:
+        if part in ("", "."):
+            continue
+        if part == "/":
+            normalized = ["/"]
+            continue
+        if part == "..":
+            if len(normalized) > 1:
+                normalized.pop()
+            continue
+        if not normalized:
+            normalized = ["/", part]
+        else:
+            normalized.append(part)
+
+    if not normalized or normalized == ["/"]:
+        return "/"
+    return "/" + "/".join(part for part in normalized if part != "/")
+
+
 def max_legacy_chunk_bytes(remote_path: str, offset: int) -> int:
     verb = "put" if offset == 0 else "put -a"
     prefix_len = len(verb) + 1 + len(remote_path) + 1
@@ -439,9 +469,16 @@ def upload_legacy(shell: Shell, args: argparse.Namespace, data: bytes,
                     file=sys.stderr,
                 )
                 return 1
-            offset = existing
-            if offset > 0:
-                print(f"resuming at {offset}/{total} bytes", file=sys.stderr)
+            if existing > 0:
+                print(
+                    "legacy protocol cannot verify an existing prefix; restarting upload from 0",
+                    file=sys.stderr,
+                )
+                out = shell.run_command(f"truncate {args.remote_path} 0")
+                log_response(args.debug, "truncate-reset", out)
+                if shell_command_failed(out):
+                    print("remote truncate command failed", file=sys.stderr)
+                    return 1
 
     while offset < total:
         base_offset = offset
@@ -562,7 +599,7 @@ def can_resume_framed(status: tuple[str, int, int, int] | None,
     if status is None:
         return (False, 0)
     path, size, received, checksum = status
-    if path != remote_path or size != total:
+    if path != normalize_remote_path(remote_path) or size != total:
         return (False, 0)
     if received < 0 or received > total:
         return (False, 0)
@@ -710,6 +747,7 @@ def main() -> int:
     data = local_path.read_bytes()
     total = len(data)
     prompt = args.prompt.encode("ascii")
+    args.remote_path = normalize_remote_path(args.remote_path)
 
     if args.transport == "telnet":
         host = resolve_labctl_target(args.target) if args.labctl else args.target

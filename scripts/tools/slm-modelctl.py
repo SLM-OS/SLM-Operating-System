@@ -28,6 +28,7 @@ WILL = 251
 WONT = 252
 SB = 250
 SE = 240
+TOOL_DIR = pathlib.Path(__file__).resolve().parent
 
 
 class TelnetShell:
@@ -574,7 +575,7 @@ def ensure_parent_dir(shell: Shell, remote_path: str, debug: bool) -> None:
 def run_upload(args: argparse.Namespace, local_path: str, remote_path: str) -> None:
     cmd = [
         "python3",
-        "scripts/tools/slm-put.py",
+        str(TOOL_DIR / "slm-put.py"),
         "--protocol",
         args.protocol,
         "--transport",

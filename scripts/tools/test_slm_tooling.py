@@ -273,6 +273,70 @@ def test_put_legacy_no_resume_skips_truncate_for_absent_destination():
     ]
 
 
+def test_put_legacy_resume_restarts_when_destination_is_nonempty():
+    shell = FakeShell(
+        {
+            "stat /tmp/blob": [
+                b"Size: 2 bytes\nslmos> ",
+                b"Size: 3 bytes\nslmos> ",
+            ],
+            "truncate /tmp/blob 0": [b"ok\nslmos> "],
+            "put /tmp/blob 616263": [b"ok\nslmos> "],
+        }
+    )
+    args = argparse.Namespace(
+        debug=False,
+        remote_path="/tmp/blob",
+        transport="telnet",
+        no_resume=False,
+        no_verify_size=False,
+        chunk_bytes=64,
+        chunk_retries=2,
+        retry_delay=0.0,
+    )
+
+    rc = slm_put.upload_legacy(shell, args, b"abc", 3, "pi-5-2", lambda: shell)
+
+    assert rc == 0
+    assert shell.commands == [
+        "stat /tmp/blob",
+        "truncate /tmp/blob 0",
+        "put /tmp/blob 616263",
+        "stat /tmp/blob",
+    ]
+
+
+def test_put_framed_resume_normalizes_relative_remote_path():
+    responses = {
+        "xput status": [b"XPUT active path=/tmp/blob size=20 received=10 checksum=797261938\nslmos> "],
+        "xput chunk 10 0a0b0c0d0e0f10111213": [b"XPUT ok next=20\nslmos> "],
+        "xput finish": [b"XPUT complete path=/tmp/blob size=20\nslmos> "],
+        "stat tmp/blob": [b"Size: 20 bytes\nslmos> "],
+    }
+    shell = FakeShell(responses)
+    args = argparse.Namespace(
+        debug=False,
+        remote_path="tmp/blob",
+        transport="telnet",
+        no_resume=False,
+        no_verify_size=False,
+        chunk_bytes=64,
+        chunk_retries=2,
+        retry_delay=0.0,
+    )
+    data = bytes(range(20))
+
+    rc = slm_put.upload_framed(shell, args, data, len(data), "pi-5-2", lambda: shell)
+
+    assert rc == 0
+    assert shell.commands == [
+        "xput status",
+        "xput chunk 10 0a0b0c0d0e0f10111213",
+        "xput finish",
+        "stat tmp/blob",
+    ]
+
+
 def test_modelctl_parse_args_supports_legacy_apply_form():
     with patched_argv(
         slm_modelctl,
@@ -468,6 +532,30 @@ def test_modelctl_apply_probe_raw_invokes_probe_with_inferred_policy():
     assert probes == [("ai_mlp", 7)]
 
 
+def test_modelctl_run_upload_uses_tool_dir_not_cwd():
+    args = argparse.Namespace(
+        protocol="auto",
+        transport="telnet",
+        port=2323,
+        prompt="slmos> ",
+        timeout=10.0,
+        connect_retries=1,
+        retry_delay=0.0,
+        chunk_bytes=128,
+        labctl=True,
+        debug=False,
+        target="pi-5-2",
+    )
+
+    with mock.patch.object(slm_modelctl.subprocess, "run") as run:
+        slm_modelctl.run_upload(args, "local.blob", "/mnt/files/blob")
+
+    cmd = run.call_args.args[0]
+    assert cmd[0] == "python3"
+    assert Path(cmd[1]).resolve() == (TOOLS_DIR / "slm-put.py").resolve()
+    assert cmd[-3:] == ["pi-5-2", "local.blob", "/mnt/files/blob"]
+
+
 def main() -> int:
     runner = TestRunner()
     runner.run("put_chunk_limits_respect_shell_line_budget", test_put_chunk_limits_respect_shell_line_budget)
@@ -477,6 +565,8 @@ def main() -> int:
     runner.run("put_main_auto_falls_back_to_legacy_when_xput_missing", test_put_main_auto_falls_back_to_legacy_when_xput_missing)
     runner.run("put_main_serial_labctl_does_not_resolve_network", test_put_main_serial_labctl_does_not_resolve_network)
     runner.run("put_legacy_no_resume_skips_truncate_for_absent_destination", test_put_legacy_no_resume_skips_truncate_for_absent_destination)
+    runner.run("put_legacy_resume_restarts_when_destination_is_nonempty", test_put_legacy_resume_restarts_when_destination_is_nonempty)
+    runner.run("put_framed_resume_normalizes_relative_remote_path", test_put_framed_resume_normalizes_relative_remote_path)
     runner.run("modelctl_parse_args_supports_legacy_apply_form", test_modelctl_parse_args_supports_legacy_apply_form)
     runner.run("modelctl_parse_args_reorders_global_options_before_subcommand", test_modelctl_parse_args_reorders_global_options_before_subcommand)
     runner.run("modelctl_legacy_path_named_like_subcommand_stays_positional", test_modelctl_legacy_path_named_like_subcommand_stays_positional)
@@ -484,6 +574,7 @@ def main() -> int:
     runner.run("modelctl_probe_scheduler_runs_create_sample_and_cleanup", test_modelctl_probe_scheduler_runs_create_sample_and_cleanup)
     runner.run("modelctl_probe_scheduler_serial_reuses_existing_shell", test_modelctl_probe_scheduler_serial_reuses_existing_shell)
     runner.run("modelctl_apply_probe_raw_invokes_probe_with_inferred_policy", test_modelctl_apply_probe_raw_invokes_probe_with_inferred_policy)
+    runner.run("modelctl_run_upload_uses_tool_dir_not_cwd", test_modelctl_run_upload_uses_tool_dir_not_cwd)
     return runner.summary()
 
 
