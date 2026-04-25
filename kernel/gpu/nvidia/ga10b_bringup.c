@@ -1681,19 +1681,15 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
              * signal. Fixes both #372 (sentinel-zero deadlock) and
              * #390 (Conv1 truncation past 4 KB).
              *
-             * The launcher's gpu_write_handoff_v6 sets
-             * `semaphore_phys = output_phys` (op 7's final-logits
-             * buffer). For ops 1..7 that's harmless — the sema page
-             * isn't the op-under-dispatch's output buffer. For op 8
-             * (the last op, which IS op 7 in 0-indexed terms), the
-             * sema and the logits would collide on the same address.
-             * Offset the sema by 2 KB within the (4 KB) page so it
-             * sits well past op 7's 40-byte logits payload. Same
-             * page → same TLB entry → no extra mapping cost. */
-            const uint32_t SEMA_PAYLOAD = 0xCAFEDEADu;
-            const uint32_t SEMA_PAGE_OFFSET = 0x800u;
-            uint64_t sema_gpu_va = g_handoff.semaphore_gpu_va + SEMA_PAGE_OFFSET;
-            uint64_t sema_phys   = g_handoff.semaphore_phys   + SEMA_PAGE_OFFSET;
+             * GA10B_SEMA_PAGE_OFFSET (header) documents why the
+             * per-op sema sits 2 KB into the channel-semaphore page:
+             * the launcher's gpu_write_handoff_v6 aliases that page
+             * with op 7's logits buffer, so we need a non-overlapping
+             * offset within the same 4 KB allocation. */
+            uint64_t sema_gpu_va =
+                g_handoff.semaphore_gpu_va + GA10B_SEMA_PAGE_OFFSET;
+            uint64_t sema_phys =
+                g_handoff.semaphore_phys + GA10B_SEMA_PAGE_OFFSET;
             uart_printf("[GA10B-P8]   op[%lu/%lu] qmd=0x%lx out=0x%lx "
                         "sema_phys=0x%lx (payload=0x%x)\n",
                         (unsigned long)(i + 1),
@@ -1701,16 +1697,16 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
                         (unsigned long)op->qmd_gpu_va,
                         (unsigned long)op->output_phys,
                         (unsigned long)sema_phys,
-                        (unsigned)SEMA_PAYLOAD);
+                        (unsigned)GA10B_SEMA_RELEASE_PAYLOAD);
             uint32_t pb_buf[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
             uint32_t pb_dwords =
                 ga10b_build_launch_kernel_with_sema_pushbuffer(
                     pb_buf, op->qmd_gpu_va,
                     sema_gpu_va,
-                    SEMA_PAYLOAD);
+                    GA10B_SEMA_RELEASE_PAYLOAD);
             int rc = ga10b_submit_and_poll(b, pb_buf, pb_dwords,
                                            sema_phys,
-                                           SEMA_PAYLOAD,
+                                           GA10B_SEMA_RELEASE_PAYLOAD,
                                            8, "GA10B-P8");
             if (rc < 0) {
                 uart_printf("[GA10B-P8] pipeline op %lu failed (rc=%d) "
