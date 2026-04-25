@@ -2889,6 +2889,7 @@ static uint16_t sched_model_kind_id(const char *name)
     if (strcmp(name, "mlp") == 0) return SCHED_MODEL_KIND_MLP;
     if (strcmp(name, "ppo") == 0) return SCHED_MODEL_KIND_PPO;
     if (strcmp(name, "config") == 0) return SCHED_MODEL_KIND_CONFIG;
+    if (strcmp(name, "thresholds") == 0) return SCHED_MODEL_KIND_THRESHOLDS;
     return 0;
 }
 
@@ -2898,6 +2899,7 @@ static const char *sched_model_kind_name(uint16_t kind_id)
         case SCHED_MODEL_KIND_MLP: return "mlp";
         case SCHED_MODEL_KIND_PPO: return "ppo";
         case SCHED_MODEL_KIND_CONFIG: return "config";
+        case SCHED_MODEL_KIND_THRESHOLDS: return "thresholds";
         default: return "unknown";
     }
 }
@@ -2936,11 +2938,26 @@ static void sched_print_balance_config(const char *label,
                  (unsigned long)cfg->imbalance_den);
 }
 
+static void sched_print_deadline_thresholds(
+    const char *label,
+    const struct sched_runtime_deadline_thresholds *cfg)
+{
+    if (!cfg) return;
+
+    shell_printf("    %-8s critical_ns=%lu high_ns=%lu boost_ns=%lu\r\n",
+                 label,
+                 (unsigned long)cfg->critical_ns,
+                 (unsigned long)cfg->high_ns,
+                 (unsigned long)cfg->boost_ns);
+}
+
 static int sched_model_status_one(uint16_t kind_id)
 {
     struct sched_model_status status = {0};
     struct sched_runtime_balance_config cfg = {0};
+    struct sched_runtime_deadline_thresholds thresholds = {0};
     int have_cfg = 0;
+    int have_thresholds = 0;
 
     if (sched_model_status(kind_id, &status) != 0) {
         shell_printf("sched model status: invalid kind %u\r\n", (unsigned)kind_id);
@@ -2951,6 +2968,10 @@ static int sched_model_status_one(uint16_t kind_id)
         sched_runtime_balance_config_snapshot(&cfg) == 0) {
         have_cfg = 1;
     }
+    if (kind_id == SCHED_MODEL_KIND_THRESHOLDS &&
+        sched_runtime_deadline_thresholds_snapshot(&thresholds) == 0) {
+        have_thresholds = 1;
+    }
 
     shell_printf("  %s: %s\r\n",
                  sched_model_kind_name(kind_id),
@@ -2960,6 +2981,9 @@ static int sched_model_status_one(uint16_t kind_id)
     sched_print_model_meta("rollback", status.has_rollback, &status.rollback);
     if (have_cfg) {
         sched_print_balance_config("config", &cfg);
+    }
+    if (have_thresholds) {
+        sched_print_deadline_thresholds("thresholds", &thresholds);
     }
     return 0;
 }
@@ -3043,7 +3067,8 @@ static int sched_model_autoload_set_file(const char *kind, const char *path)
 static int sched_model_autoload_cmd(int argc, char *argv[])
 {
     static const uint16_t kinds[] = {
-        SCHED_MODEL_KIND_MLP, SCHED_MODEL_KIND_PPO, SCHED_MODEL_KIND_CONFIG
+        SCHED_MODEL_KIND_MLP, SCHED_MODEL_KIND_PPO,
+        SCHED_MODEL_KIND_CONFIG, SCHED_MODEL_KIND_THRESHOLDS
     };
     char path[VFS_MAX_PATH];
 
@@ -3148,6 +3173,7 @@ int cmd_sched(int argc, char *argv[])
             if (sched_model_status_one(SCHED_MODEL_KIND_MLP) != 0) return 1;
             if (sched_model_status_one(SCHED_MODEL_KIND_PPO) != 0) return 1;
             if (sched_model_status_one(SCHED_MODEL_KIND_CONFIG) != 0) return 1;
+            if (sched_model_status_one(SCHED_MODEL_KIND_THRESHOLDS) != 0) return 1;
             if (argc < 3) {
                 shell_puts("\r\nUsage:\r\n");
                 shell_puts("  sched model status\r\n");

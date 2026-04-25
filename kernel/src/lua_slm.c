@@ -1879,6 +1879,7 @@ static int sched_model_kind_id(const char *kind)
     if (strcmp(kind, "mlp") == 0) return SCHED_MODEL_KIND_MLP;
     if (strcmp(kind, "ppo") == 0) return SCHED_MODEL_KIND_PPO;
     if (strcmp(kind, "config") == 0) return SCHED_MODEL_KIND_CONFIG;
+    if (strcmp(kind, "thresholds") == 0) return SCHED_MODEL_KIND_THRESHOLDS;
     return 0;
 }
 
@@ -1939,6 +1940,22 @@ static void lua_push_sched_balance_config(lua_State *L,
 
     lua_pushinteger(L, (lua_Integer)cfg->imbalance_den);
     lua_setfield(L, -2, "imbalance_den");
+}
+
+static void lua_push_sched_deadline_thresholds(
+    lua_State *L,
+    const struct sched_runtime_deadline_thresholds *cfg)
+{
+    lua_createtable(L, 0, 3);
+
+    lua_pushinteger(L, (lua_Integer)cfg->critical_ns);
+    lua_setfield(L, -2, "critical_ns");
+
+    lua_pushinteger(L, (lua_Integer)cfg->high_ns);
+    lua_setfield(L, -2, "high_ns");
+
+    lua_pushinteger(L, (lua_Integer)cfg->boost_ns);
+    lua_setfield(L, -2, "boost_ns");
 }
 #endif
 
@@ -2146,6 +2163,7 @@ static int l_sched_model_status(lua_State *L) {
     int kind_id = sched_model_kind_id(kind);
     struct sched_model_status st;
     struct sched_runtime_balance_config cfg;
+    struct sched_runtime_deadline_thresholds thresholds;
     if (kind_id == 0 || sched_model_status((uint16_t)kind_id, &st) != 0) {
         lua_pushnil(L);
         return 1;
@@ -2184,6 +2202,11 @@ static int l_sched_model_status(lua_State *L) {
         sched_runtime_balance_config_snapshot(&cfg) == 0) {
         lua_push_sched_balance_config(L, &cfg);
         lua_setfield(L, -2, "config");
+    }
+    if (kind_id == SCHED_MODEL_KIND_THRESHOLDS &&
+        sched_runtime_deadline_thresholds_snapshot(&thresholds) == 0) {
+        lua_push_sched_deadline_thresholds(L, &thresholds);
+        lua_setfield(L, -2, "thresholds");
     }
 #else
     (void)kind;

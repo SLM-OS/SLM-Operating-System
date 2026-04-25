@@ -19,6 +19,7 @@ struct sched_model_slot {
     union {
         struct sched_runtime_mlp_model dense;
         struct sched_runtime_balance_config balance;
+        struct sched_runtime_deadline_thresholds thresholds;
     } payload;
 };
 
@@ -34,12 +35,19 @@ enum {
     SCHED_MODEL_STORE_MLP = 0,
     SCHED_MODEL_STORE_PPO = 1,
     SCHED_MODEL_STORE_CONFIG = 2,
-    SCHED_MODEL_STORE_COUNT = 3,
+    SCHED_MODEL_STORE_THRESHOLDS = 3,
+    SCHED_MODEL_STORE_COUNT = 4,
 };
 
 static spinlock_t sched_model_lock = SPINLOCK_INIT;
 static spinlock_t sched_model_stage_lock = SPINLOCK_INIT;
 static struct sched_model_store sched_model_stores[SCHED_MODEL_STORE_COUNT] = {
+    {
+        .staged_idx = SCHED_MODEL_SLOT_STAGED,
+        .active_idx = SCHED_MODEL_SLOT_ACTIVE,
+        .rollback_idx = SCHED_MODEL_SLOT_ROLLBACK,
+        .current_state = SCHED_MODEL_EMPTY,
+    },
     {
         .staged_idx = SCHED_MODEL_SLOT_STAGED,
         .active_idx = SCHED_MODEL_SLOT_ACTIVE,
@@ -74,6 +82,12 @@ static uint32_t read_u32_le(const uint8_t *p)
         | ((uint32_t)p[3] << 24);
 }
 
+static uint64_t read_u64_le(const uint8_t *p)
+{
+    return (uint64_t)read_u32_le(p)
+        | ((uint64_t)read_u32_le(p + 4) << 32);
+}
+
 static float read_f32_le(const uint8_t *p)
 {
     union {
@@ -99,6 +113,7 @@ static int sched_model_store_index(uint16_t kind_id)
         case SCHED_MODEL_KIND_MLP: return SCHED_MODEL_STORE_MLP;
         case SCHED_MODEL_KIND_PPO: return SCHED_MODEL_STORE_PPO;
         case SCHED_MODEL_KIND_CONFIG: return SCHED_MODEL_STORE_CONFIG;
+        case SCHED_MODEL_KIND_THRESHOLDS: return SCHED_MODEL_STORE_THRESHOLDS;
         default: return -1;
     }
 }
@@ -122,6 +137,11 @@ static size_t sched_dense_payload_len(uint16_t action_count)
 static size_t sched_balance_payload_len(void)
 {
     return 32u;
+}
+
+static size_t sched_thresholds_payload_len(void)
+{
+    return 36u;
 }
 
 static int parse_sched_dense_payload(const uint8_t *payload, size_t payload_len,
@@ -217,6 +237,44 @@ static int parse_sched_balance_payload(const uint8_t *payload, size_t payload_le
     return 0;
 }
 
+static int parse_sched_thresholds_payload(
+    const uint8_t *payload, size_t payload_len,
+    struct sched_model_meta *meta,
+    struct sched_runtime_deadline_thresholds *out)
+{
+    if (!payload || !meta || !out) return -1;
+    if (payload_len != sched_thresholds_payload_len()) return -1;
+    if (payload[0] != 'S' || payload[1] != 'T'
+     || payload[2] != 'H' || payload[3] != '1') {
+        return -1;
+    }
+    if (read_u16_le(payload + 4) != SCHED_MODEL_BLOB_VERSION_V1) return -1;
+
+    memset(out, 0, sizeof(*out));
+    meta->feature_version = read_u16_le(payload + 6);
+    meta->action_version = read_u16_le(payload + 8);
+    meta->action_count = 0;
+    if (read_u16_le(payload + 10) != 0) return -1;
+
+    if (meta->feature_version != SCHED_MODEL_FEATURE_VERSION_V1) return -1;
+    if (meta->action_version != SCHED_MODEL_ACTION_VERSION_V1) return -1;
+
+    out->feature_version = meta->feature_version;
+    out->action_version = meta->action_version;
+    out->action_count = 0;
+    out->critical_ns = read_u64_le(payload + 12);
+    out->high_ns = read_u64_le(payload + 20);
+    out->boost_ns = read_u64_le(payload + 28);
+
+    if (out->critical_ns == 0u || out->high_ns == 0u || out->boost_ns == 0u) {
+        return -1;
+    }
+    if (!(out->critical_ns < out->high_ns && out->high_ns < out->boost_ns)) {
+        return -1;
+    }
+    return 0;
+}
+
 static int parse_sched_dense_blob(uint16_t expected_kind_id,
                                   const uint8_t *data, size_t len,
                                   struct sched_model_meta *meta,
@@ -297,6 +355,46 @@ static int parse_sched_balance_blob(uint16_t expected_kind_id,
     return parse_sched_balance_payload(payload, payload_len, meta, out);
 }
 
+static int parse_sched_thresholds_blob(
+    uint16_t expected_kind_id, const uint8_t *data, size_t len,
+    struct sched_model_meta *meta,
+    struct sched_runtime_deadline_thresholds *out)
+{
+    const uint8_t *payload = data + OUTER_HEADER_LEN;
+    uint16_t version;
+    uint16_t kind_id;
+    uint16_t schema_version;
+    uint32_t payload_len;
+    uint32_t checksum;
+
+    if (!data || !meta || !out) return -1;
+    if (len < OUTER_HEADER_LEN) return -1;
+    if (data[0] != 'S' || data[1] != 'E' || data[2] != 'M' || data[3] != 'B') {
+        return -1;
+    }
+
+    version = read_u16_le(data + 4);
+    kind_id = read_u16_le(data + 6);
+    schema_version = read_u16_le(data + 8);
+    payload_len = read_u32_le(data + 12);
+    checksum = read_u32_le(data + 16);
+
+    if (version != SCHED_MODEL_BLOB_VERSION_V1) return -1;
+    if (kind_id != expected_kind_id) return -1;
+    if (schema_version != SCHED_MODEL_SCHEMA_VERSION_V1) return -1;
+    if (read_u16_le(data + 10) != 0 || read_u32_le(data + 20) != 0) return -1;
+    if (len != OUTER_HEADER_LEN + payload_len) return -1;
+    if (checksum32(payload, payload_len) != checksum) return -1;
+
+    memset(meta, 0, sizeof(*meta));
+    meta->version = version;
+    meta->schema_version = schema_version;
+    meta->payload_len = payload_len;
+    meta->checksum = checksum;
+
+    return parse_sched_thresholds_payload(payload, payload_len, meta, out);
+}
+
 static int parse_sched_blob(uint16_t kind_id, const uint8_t *data, size_t len,
                             struct sched_model_meta *meta,
                             struct sched_model_slot *out)
@@ -309,6 +407,9 @@ static int parse_sched_blob(uint16_t kind_id, const uint8_t *data, size_t len,
         case SCHED_MODEL_KIND_CONFIG:
             return parse_sched_balance_blob(kind_id, data, len, meta,
                                             &out->payload.balance);
+        case SCHED_MODEL_KIND_THRESHOLDS:
+            return parse_sched_thresholds_blob(kind_id, data, len, meta,
+                                               &out->payload.thresholds);
         default:
             return -1;
     }
@@ -611,5 +712,40 @@ int sched_runtime_balance_config_snapshot(struct sched_runtime_balance_config *o
 
     *out = *active;
     sched_runtime_balance_config_release(token);
+    return 0;
+}
+
+int sched_runtime_deadline_thresholds_acquire(
+    const struct sched_runtime_deadline_thresholds **out,
+    sched_runtime_token_t *token)
+{
+    const struct sched_model_slot *slot = NULL;
+    if (!out) return 0;
+    if (!sched_runtime_acquire_slot(SCHED_MODEL_KIND_THRESHOLDS, &slot, token)) {
+        *out = NULL;
+        return 0;
+    }
+    *out = &slot->payload.thresholds;
+    return 1;
+}
+
+void sched_runtime_deadline_thresholds_release(sched_runtime_token_t token)
+{
+    sched_runtime_release(token);
+}
+
+int sched_runtime_deadline_thresholds_snapshot(
+    struct sched_runtime_deadline_thresholds *out)
+{
+    const struct sched_runtime_deadline_thresholds *active = NULL;
+    sched_runtime_token_t token = 0;
+
+    if (!out) return -1;
+    if (!sched_runtime_deadline_thresholds_acquire(&active, &token) || !active) {
+        return -1;
+    }
+
+    *out = *active;
+    sched_runtime_deadline_thresholds_release(token);
     return 0;
 }

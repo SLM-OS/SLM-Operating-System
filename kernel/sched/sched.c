@@ -41,6 +41,18 @@
 #define SCHED_BALANCE_DEFAULT_IMBALANCE_NUM    3u
 #define SCHED_BALANCE_DEFAULT_IMBALANCE_DEN    2u
 
+static void sched_set_default_deadline_thresholds(
+    struct sched_runtime_deadline_thresholds *cfg)
+{
+    if (!cfg) return;
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->feature_version = SCHED_MODEL_FEATURE_VERSION_V1;
+    cfg->action_version = SCHED_MODEL_ACTION_VERSION_V1;
+    cfg->critical_ns = DEADLINE_CRITICAL_NS;
+    cfg->high_ns = DEADLINE_HIGH_NS;
+    cfg->boost_ns = DEADLINE_BOOST_NS;
+}
+
 /* External functions from task.c */
 extern void task_set_current(struct task *task);
 extern void task_destroy(struct task *task);
@@ -550,6 +562,8 @@ static void idle_task_func(void *arg)
  */
 static void update_deadline_boost(struct task *task)
 {
+    struct sched_runtime_deadline_thresholds runtime_cfg;
+
     if (!task) {
         return;
     }
@@ -571,6 +585,8 @@ static void update_deadline_boost(struct task *task)
     uint64_t now = slm_get_time_ns();
     uint8_t base = task->priority;
     uint8_t boosted = base;
+    sched_set_default_deadline_thresholds(&runtime_cfg);
+    (void)sched_runtime_deadline_thresholds_snapshot(&runtime_cfg);
 
     if (now >= task->deadline_ns) {
         /* Deadline missed! Boost to critical to finish ASAP */
@@ -578,13 +594,13 @@ static void update_deadline_boost(struct task *task)
     } else {
         uint64_t remaining = task->deadline_ns - now;
 
-        if (remaining < DEADLINE_CRITICAL_NS) {
+        if (remaining < runtime_cfg.critical_ns) {
             /* < 10ms: boost to CRITICAL (7) */
             boosted = TASK_PRIORITY_CRITICAL;
-        } else if (remaining < DEADLINE_HIGH_NS) {
+        } else if (remaining < runtime_cfg.high_ns) {
             /* < 50ms: boost to HIGH (6) */
             boosted = TASK_PRIORITY_HIGH;
-        } else if (remaining < DEADLINE_BOOST_NS) {
+        } else if (remaining < runtime_cfg.boost_ns) {
             /* < 100ms: boost +1 (capped at max) */
             boosted = (base < TASK_PRIORITY_MAX) ? base + 1 : TASK_PRIORITY_MAX;
         }

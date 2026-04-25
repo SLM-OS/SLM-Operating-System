@@ -29,6 +29,7 @@ static struct blob_autoload_entry blob_entries[] = {
     {"sched", "mlp", SCHED_MODEL_KIND_MLP, {0}, 0},
     {"sched", "ppo", SCHED_MODEL_KIND_PPO, {0}, 0},
     {"sched", "config", SCHED_MODEL_KIND_CONFIG, {0}, 0},
+    {"sched", "thresholds", SCHED_MODEL_KIND_THRESHOLDS, {0}, 0},
 };
 
 enum {
@@ -241,6 +242,7 @@ int blob_autoload_set(const char *domain, const char *kind, const char *path)
         if (strcmp(kind, "mlp") == 0) kind_id = SCHED_MODEL_KIND_MLP;
         else if (strcmp(kind, "ppo") == 0) kind_id = SCHED_MODEL_KIND_PPO;
         else if (strcmp(kind, "config") == 0) kind_id = SCHED_MODEL_KIND_CONFIG;
+        else if (strcmp(kind, "thresholds") == 0) kind_id = SCHED_MODEL_KIND_THRESHOLDS;
         if (kind_id == 0) return -1;
         rc = sched_blob_validate_file(kind_id, path, resolved, sizeof(resolved));
     } else {

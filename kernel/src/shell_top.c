@@ -125,7 +125,11 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
     shell_printf("Memory: %lu / %lu KB used (%u%%)\r\n",
                 (unsigned long)used_kb, (unsigned long)total_kb, used_pct);
 
-    /* AI eviction — pool utilisation + eviction counts when available. */
+    /* AI eviction — pool utilisation + eviction counts when available.
+     * Skip the Rust-backed stats path on the x86 test kernel; it is
+     * diagnostic-only there and has historically been less stable than
+     * the ARM64 production path. */
+#if !defined(PLATFORM_X86_64)
     RustEvictionStats ev = {0};
     rust_eviction_get_stats(&ev);
     if (ev.feature_enabled) {
@@ -135,14 +139,17 @@ static void top_render_frame(uint32_t refresh_secs, uint32_t iter_idx)
             (uint32_t)(ev.workspace_allocated * 100 / ev.workspace_total) : 0;
         char policy_buf[32]; policy_buf[0] = 0;
         rust_eviction_policy_name((uint8_t *)policy_buf, sizeof(policy_buf));
-        shell_printf("Eviction (%s): weight %zu/%zu blk (%u%%) ev=%lu  "
-                    "workspace %zu/%zu blk (%u%%) ev=%lu\r\n",
+        shell_printf("Eviction (%s): weight %lu/%lu blk (%u%%) ev=%lu  "
+                    "workspace %lu/%lu blk (%u%%) ev=%lu\r\n",
                     policy_buf,
-                    ev.weight_allocated, ev.weight_total, wpct,
+                    (unsigned long)ev.weight_allocated,
+                    (unsigned long)ev.weight_total, wpct,
                     (unsigned long)ev.weight_evictions,
-                    ev.workspace_allocated, ev.workspace_total, spct,
+                    (unsigned long)ev.workspace_allocated,
+                    (unsigned long)ev.workspace_total, spct,
                     (unsigned long)ev.workspace_evictions);
     }
+#endif
 
     shell_printf("Context switches: %lu   Timer ticks: %lu\r\n",
                 (unsigned long)stats.context_switches,

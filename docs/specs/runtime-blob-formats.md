@@ -47,6 +47,7 @@ Current kind ids:
   - `0x1001` = `sched_mlp`
   - `0x1002` = `sched_ppo`
   - `0x1003` = `sched_config`
+  - `0x1004` = `sched_thresholds`
 
 ## Eviction Payloads
 
@@ -219,6 +220,37 @@ Validation rules:
 - `enabled` must be `0` or `1`
 - `min_active_cpus` must be non-zero
 - `imbalance_num` and `imbalance_den` must be non-zero
+
+### `sched_thresholds`
+
+Inner magic: `STH1`
+
+Header:
+
+| Offset | Size | Field | Notes |
+|---|---:|---|---|
+| `0` | 4 | magic | ASCII `STH1` |
+| `4` | 2 | payload version | currently `1` |
+| `6` | 2 | feature version | currently `1` |
+| `8` | 2 | action-space version | currently `1` |
+| `10` | 2 | reserved | must be `0` |
+
+Body:
+
+| Offset | Size | Field |
+|---|---:|---|
+| `12` | 8 | `critical_ns` |
+| `20` | 8 | `high_ns` |
+| `28` | 8 | `boost_ns` |
+
+Validation rules:
+
+- feature version must match
+- action-space version must match
+- reserved bytes must be zero
+- all thresholds must be non-zero
+- thresholds must be strictly ordered:
+  - `critical_ns < high_ns < boost_ns`
 
 ## Current Limits
 

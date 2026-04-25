@@ -263,6 +263,42 @@ static size_t build_sched_config_payload(uint32_t enabled,
 #undef WRITE_U32_LE
     return cursor;
 }
+
+static size_t build_sched_thresholds_payload(uint64_t critical_ns,
+                                             uint64_t high_ns,
+                                             uint64_t boost_ns,
+                                             uint8_t *out,
+                                             size_t out_cap)
+{
+    size_t cursor = 0;
+
+    if (out_cap < 36u) return 0;
+    memset(out, 0, 36u);
+    out[0] = 'S'; out[1] = 'T'; out[2] = 'H'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 1; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = 0; out[11] = 0;
+    cursor = 12;
+#define WRITE_THRESH_U64(bits)                                               \
+    do {                                                                     \
+        uint64_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        out[cursor + 4] = (uint8_t)((bits_ >> 32) & 0xFF);                   \
+        out[cursor + 5] = (uint8_t)((bits_ >> 40) & 0xFF);                   \
+        out[cursor + 6] = (uint8_t)((bits_ >> 48) & 0xFF);                   \
+        out[cursor + 7] = (uint8_t)((bits_ >> 56) & 0xFF);                   \
+        cursor += 8;                                                         \
+    } while (0)
+    WRITE_THRESH_U64(critical_ns);
+    WRITE_THRESH_U64(high_ns);
+    WRITE_THRESH_U64(boost_ns);
+#undef WRITE_THRESH_U64
+    return cursor;
+}
 #endif
 
 /* ============================================================================
@@ -634,6 +670,52 @@ static void test_shell_cmd_sched_model_lifecycle(void)
     shell_execute("rm /mnt/files/test-sched-ppo-b.blob");
     shell_execute("rm /mnt/files/test-sched-config-a.blob");
     shell_execute("rm /mnt/files/test-sched-config-b.blob");
+#endif
+}
+
+static void test_shell_cmd_sched_thresholds_lifecycle(void)
+{
+#ifdef CONFIG_AI_SCHEDULER
+    static const char *path_a = "/mnt/files/test-sched-thresholds-a.blob";
+    static const char *path_b = "/mnt/files/test-sched-thresholds-b.blob";
+    uint8_t payload_a[64];
+    uint8_t payload_b[64];
+    uint8_t blob_a[128];
+    uint8_t blob_b[128];
+    size_t payload_len_a = build_sched_thresholds_payload(10u * 1000000u,
+                                                          50u * 1000000u,
+                                                          100u * 1000000u,
+                                                          payload_a, sizeof(payload_a));
+    size_t payload_len_b = build_sched_thresholds_payload(20u * 1000000u,
+                                                          80u * 1000000u,
+                                                          150u * 1000000u,
+                                                          payload_b, sizeof(payload_b));
+    size_t blob_len_a;
+    size_t blob_len_b;
+
+    TEST_ASSERT_TRUE(payload_len_a > 0);
+    TEST_ASSERT_TRUE(payload_len_b > 0);
+    blob_len_a = build_shell_test_blob(0x1004u, payload_a, payload_len_a, blob_a, sizeof(blob_a));
+    blob_len_b = build_shell_test_blob(0x1004u, payload_b, payload_len_b, blob_b, sizeof(blob_b));
+    TEST_ASSERT_TRUE(blob_len_a > 0);
+    TEST_ASSERT_TRUE(blob_len_b > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_a, blob_a, blob_len_a));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_b, blob_b, blob_len_b));
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear thresholds"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load thresholds /mnt/files/test-sched-thresholds-a.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate thresholds"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load thresholds /mnt/files/test-sched-thresholds-b.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate thresholds"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model rollback thresholds"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear thresholds"));
+    shell_execute("rm /mnt/files/test-sched-thresholds-a.blob");
+    shell_execute("rm /mnt/files/test-sched-thresholds-b.blob");
 #endif
 }
 
@@ -3124,6 +3206,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_eviction_model_status);
     RUN_TEST(test_shell_cmd_eviction_model_lifecycle);
     RUN_TEST(test_shell_cmd_sched_model_lifecycle);
+    RUN_TEST(test_shell_cmd_sched_thresholds_lifecycle);
     RUN_TEST(test_shell_cmd_model_pin_lifecycle);
     RUN_TEST(test_shell_cmd_model_preload);
     RUN_TEST(test_shell_cmd_model_preload_wait);

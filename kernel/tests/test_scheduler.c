@@ -3336,6 +3336,41 @@ static size_t build_sched_config_payload(uint32_t enabled,
     return cursor;
 }
 
+static size_t build_sched_thresholds_payload(uint64_t critical_ns,
+                                             uint64_t high_ns,
+                                             uint64_t boost_ns,
+                                             uint8_t *out,
+                                             size_t out_cap)
+{
+    size_t cursor = 0;
+    if (out_cap < 36u) return 0;
+    memset(out, 0, 36u);
+    out[0] = 'S'; out[1] = 'T'; out[2] = 'H'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 1; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = 0; out[11] = 0;
+    cursor = 12;
+#define WRITE_THRESH_U64(bits)                                               \
+    do {                                                                     \
+        uint64_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        out[cursor + 4] = (uint8_t)((bits_ >> 32) & 0xFF);                   \
+        out[cursor + 5] = (uint8_t)((bits_ >> 40) & 0xFF);                   \
+        out[cursor + 6] = (uint8_t)((bits_ >> 48) & 0xFF);                   \
+        out[cursor + 7] = (uint8_t)((bits_ >> 56) & 0xFF);                   \
+        cursor += 8;                                                         \
+    } while (0)
+    WRITE_THRESH_U64(critical_ns);
+    WRITE_THRESH_U64(high_ns);
+    WRITE_THRESH_U64(boost_ns);
+#undef WRITE_THRESH_U64
+    return cursor;
+}
+
 static void test_proactive_load_balance_runtime_config_disable(void)
 {
     if (cpu_count < 2) {
@@ -3519,6 +3554,92 @@ static void test_sched_runtime_rollback_rejects_busy_active_slot(void)
     TEST_ASSERT_EQUAL_UINT32(1u, status.has_active);
 
     TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+}
+
+static void test_sched_runtime_thresholds_activation_sets_active_blob(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    struct sched_model_status status;
+    struct sched_runtime_deadline_thresholds cfg;
+    size_t payload_len = build_sched_thresholds_payload(5u * 1000000u,
+                                                        25u * 1000000u,
+                                                        150u * 1000000u,
+                                                        payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_THRESHOLDS, payload,
+                                            payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_THRESHOLDS));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_THRESHOLDS));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_THRESHOLDS, &status));
+    TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ACTIVE, status.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_active);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)payload_len, status.active.payload_len);
+    TEST_ASSERT_EQUAL_INT(0, sched_runtime_deadline_thresholds_snapshot(&cfg));
+    TEST_ASSERT_EQUAL_UINT64(5u * 1000000u, cfg.critical_ns);
+    TEST_ASSERT_EQUAL_UINT64(25u * 1000000u, cfg.high_ns);
+    TEST_ASSERT_EQUAL_UINT64(150u * 1000000u, cfg.boost_ns);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_THRESHOLDS));
+}
+
+static void test_sched_runtime_thresholds_override_deadline_boost(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    size_t payload_len = build_sched_thresholds_payload(20u * 1000000u,
+                                                        80u * 1000000u,
+                                                        150u * 1000000u,
+                                                        payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_THRESHOLDS, payload,
+                                            payload_len, blob, sizeof(blob));
+    struct task *t_critical;
+    struct task *t_high;
+    struct task *t_boost;
+    uint64_t now = slm_get_time_ns();
+    irq_flags_t flags;
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_THRESHOLDS));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_THRESHOLDS));
+
+    t_critical = task_create_with_priority("thr_crit", nop_entry, NULL, TASK_PRIORITY_LOW);
+    t_high = task_create_with_priority("thr_high", nop_entry, NULL, TASK_PRIORITY_LOW);
+    t_boost = task_create_with_priority("thr_boost", nop_entry, NULL, TASK_PRIORITY_LOW);
+    TEST_ASSERT_NOT_NULL(t_critical);
+    TEST_ASSERT_NOT_NULL(t_high);
+    TEST_ASSERT_NOT_NULL(t_boost);
+
+    task_set_deadline(t_critical, now + (15u * 1000000u));
+    task_set_deadline(t_high, now + (60u * 1000000u));
+    task_set_deadline(t_boost, now + (120u * 1000000u));
+
+    flags = irq_save();
+    scheduler_add_task_to_cpu(t_critical, 0);
+    scheduler_add_task_to_cpu(t_high, 0);
+    scheduler_add_task_to_cpu(t_boost, 0);
+
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_CRITICAL, t_critical->effective_priority);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_HIGH, t_high->effective_priority);
+    TEST_ASSERT_EQUAL_UINT8(TASK_PRIORITY_LOW + 1, t_boost->effective_priority);
+
+    scheduler_remove_task(t_critical);
+    scheduler_remove_task(t_high);
+    scheduler_remove_task(t_boost);
+    irq_restore(flags);
+
+    t_critical->state = TASK_TERMINATED;
+    t_high->state = TASK_TERMINATED;
+    t_boost->state = TASK_TERMINATED;
+    task_destroy(t_critical);
+    task_destroy(t_high);
+    task_destroy(t_boost);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_THRESHOLDS));
 }
 #endif
 
@@ -4440,6 +4561,8 @@ int test_suite_scheduler(void)
     RUN_TEST(test_sched_runtime_config_activation_sets_active_blob);
     RUN_TEST(test_sched_runtime_config_rejects_nonzero_reserved_fields);
     RUN_TEST(test_sched_runtime_rollback_rejects_busy_active_slot);
+    RUN_TEST(test_sched_runtime_thresholds_activation_sets_active_blob);
+    RUN_TEST(test_sched_runtime_thresholds_override_deadline_boost);
 #endif
     RUN_TEST(test_policy_init_failure_keeps_old);
     RUN_TEST(test_policy_tick_callback_invoked);

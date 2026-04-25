@@ -453,9 +453,9 @@ Scheduler reuses the same model-blob architecture after eviction is stable.
 
 | Phase | State | Notes |
 |---|---|---|
-| S1 — Scheduler blob format | ✅ partial | Dense models + `config` exist; the format family is not complete yet |
+| S1 — Scheduler blob format | ✅ partial | Dense models + `config` + `thresholds` exist; the format family is not complete yet |
 | S2 — Scheduler model staging | ✅ done | Stage / activate / rollback / clear exist for current kinds |
-| S3 — Scheduler runtime integration | ✅ partial | `ai_mlp`, `ai_ppo`, and proactive-balance config are live |
+| S3 — Scheduler runtime integration | ✅ partial | `ai_mlp`, `ai_ppo`, proactive-balance config, and deadline-threshold overrides are live |
 | S4 — Scheduler control surface | ✅ partial | Shell + Lua exist; richer operator tooling is still pending |
 
 ### Phase S1 — Scheduler blob format
@@ -466,7 +466,9 @@ Extend the blob format with scheduler kinds:
 
 - `sched_mlp`
 - `sched_ppo`
-- future `sched_thresholds` / `sched_config`
+- `sched_config`
+- `sched_thresholds`
+- future scheduler-specific payload families beyond those first kinds
 
 Scheduler payloads must also carry:
 
@@ -476,7 +478,8 @@ Scheduler payloads must also carry:
 
 Implementation notes:
 
-- the current implementation covers `sched_mlp` and `sched_ppo`
+- the current implementation covers `sched_mlp`, `sched_ppo`,
+  `sched_config`, and `sched_thresholds`
 - the current payload carries feature-vector version, action-space
   version, and action-count validation
 - the current outer blob reuses the same `SEMB` wrapper shape as the
@@ -512,6 +515,10 @@ Implementation notes:
   compiled-in weights
 - `ai_ppo` now consults the active runtime model before falling back to
   compiled-in weights
+- deadline boost now consults the active runtime `sched_thresholds`
+  payload before falling back to the compiled-in threshold constants
+- `sched_thresholds` lifecycle is hardware-validated on `pi-5-2`
+  through stage / activate / replacement / rollback / clear
 - the first hardware pass exposed a real bug: `sched_model_stage_blob()`
   was parsing a full runtime MLP model into a stack-local temporary,
   which was large enough to wedge the live shell on replacement load;
@@ -795,4 +802,4 @@ Mitigations:
 | Harden and document runtime payload formats | ✅ partial | Current outer/inner layouts are now documented and reserved fields are validated, but the formats are still first-cut and not generalized |
 | Polish `slm-modelctl.py` ergonomics | ✅ partial | Subcommand help and `apply --probe-raw` are in place; remaining work is UX convenience rather than core viability |
 | Validate both Pi 5 deploy models where practical | ✅ partial | Maintenance-OS path is validated on `pi-5-2`; keep the SDWire-first path in play too |
-| Reuse the architecture for more scheduler payloads | ☐ pending | Next likely slice is new scheduler blob families, not more dense-model mechanics |
+| Reuse the architecture for more scheduler payloads | ✅ partial | `sched_thresholds` now joins dense models plus `config`; more scheduler families are still pending |
