@@ -772,7 +772,12 @@ endif
 # Stage the SDHCI test image so QEMU's `sd-card` device has a
 # backing file. Idempotent: only re-creates if missing. The image
 # is sparse (truncate, not dd) so the on-disk footprint stays tiny
-# until QEMU actually writes blocks.
+# (~500 KB after a typical QEMU run) until QEMU actually writes
+# blocks. Requires a filesystem that supports sparse files — every
+# filesystem that ships with stock SLM-OS dev environments (ext4,
+# btrfs, zfs, xfs, NTFS via WSL2) does. tmpfs may refuse 4 GB
+# allocations; if so, lower SDHCI_TEST_IMG_SIZE to whatever the
+# tmpfs can hold (≥ 2 GB to keep QEMU's sd-card model in SDHC mode).
 $(SDHCI_TEST_IMG): | $(KERNEL_TEST_BUILD_DIR)
 	@if [ ! -f $@ ]; then \
 		echo "Creating sparse $@ ($(SDHCI_TEST_IMG_SIZE), SDHC-sized)"; \

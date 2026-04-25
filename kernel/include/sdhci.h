@@ -76,9 +76,24 @@ void sdhci_destroy(struct blkdev *dev);
  * Available on every platform that builds the PCIe core (i.e., not
  * x86-64-only). On RASPI5 / JETSON the pcie_core enumerates the
  * board's host controller, which doesn't expose an SDHCI function;
- * this helper returns NULL there. Use `sdhci_create()` directly with
- * the BCM2712 EMMC2 base on Pi 5.
+ * this helper returns NULL there. Use `sdhci_create_bcm2712()` on
+ * Pi 5 instead.
  */
 struct blkdev *sdhci_create_qemu_pci(const char *name);
+
+#if defined(PLATFORM_RASPI5)
+/*
+ * Convenience: call `sdhci_create()` against the Pi 5's BCM2712
+ * EMMC2 controller at the fixed MMIO base from `platform.h`
+ * (`BCM2712_EMMC2_BASE`). Returns NULL on init failure (no card
+ * inserted, controller dead, BCM2712 cfginit deferred to Stage 5,
+ * etc.).
+ *
+ * RASPI5-only because the BCM2712 EMMC2 base isn't a portable
+ * concept. Used by Stage 5 (#371) hardware-bringup paths once the
+ * Pi 5 cfginit / clock-gate work is in place.
+ */
+struct blkdev *sdhci_create_bcm2712(void);
+#endif
 
 #endif /* SDHCI_H */

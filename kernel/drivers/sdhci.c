@@ -11,8 +11,19 @@
  *     writes is small; DMA setup overhead isn't worth the win.
  *   - Polled status — no IRQ delivery, since hardware IRQs on Pi 5
  *     are still cooperative-only (see `docs/pi5-baremetal-status.md`).
- *   - SDHC / SDXC cards only (post-2008). SDSC support omitted —
- *     the lab's 29 GB card is SDHC.
+ *   - SDHC / SDXC primary target (real Pi 5 lab card is SDHC); SDSC
+ *     also supported via byte-offset addressing (CCS bit from
+ *     ACMD41 selects the addressing mode at probe time).
+ *
+ * Concurrency model:
+ *   - Single `spinlock_t` per controller, held across the full
+ *     command-issue + PIO-transfer window. Multi-block writes can
+ *     hold the lock for several ms on real hardware. This is fine
+ *     for the admin-speed kernel-staging workload the plan targets;
+ *     a high-throughput caller would need a sleep-capable mutex or
+ *     an IRQ-driven path.
+ *   - `spin_lock_irqsave` keeps IRQs disabled while the lock is
+ *     held — safe with polled status, no `yield()` reentrancy.
  *
  * References:
  *   - SD Host Controller Simplified Specification 3.0 (Feb 2014)
@@ -69,6 +80,13 @@
 #define SDHCI_CLOCK_CONTROL         0x2C    /* 16 */
 #define SDHCI_TIMEOUT_CONTROL       0x2E    /*  8 */
 #define SDHCI_SOFTWARE_RESET        0x2F    /*  8 */
+/* INT_STATUS / INT_ENABLE / SIGNAL_ENABLE are spec'd as paired
+ * 16-bit registers (Normal at +0x00, Error at +0x02), but every
+ * SDHCI v3 controller (BCM2712, QEMU's sdhci-pci, all the brcmstb
+ * SoCs) supports 32-bit access to the combined dword. Linux's
+ * sdhci.c reads them as 32-bit; we follow the same canonical
+ * pattern. Bits 0..15 are the Normal half, bits 16..31 are the
+ * Error half — see SDHCI_INT_TIMEOUT etc. below for the layout. */
 #define SDHCI_INT_STATUS            0x30    /* 32 — combined N+E */
 #define SDHCI_INT_ENABLE            0x34    /* 32 */
 #define SDHCI_SIGNAL_ENABLE         0x38    /* 32 */
@@ -194,6 +212,9 @@ struct sdhci_priv {
     uintptr_t mmio_base;
     uint32_t  rca;            /* Card relative address from CMD3 */
     uint32_t  capacity_blocks; /* From CMD9 CSD */
+    bool      is_high_capacity; /* SDHC/SDXC: arg is block index.
+                                 * SDSC:      arg is byte offset.
+                                 * Set from ACMD41's CCS response bit. */
     spinlock_t lock;
 };
 
@@ -642,6 +663,16 @@ static int sdhci_card_init(struct sdhci_priv *p)
         return -1;
     }
 
+    /* CCS bit (Card Capacity Status) shares bit 30 with the request's
+     * HCS (Host Capacity Support). Set in the response = SDHC/SDXC
+     * (block-addressed). Cleared = SDSC (byte-addressed within the
+     * block-length set by CMD16). The driver scales CMD17/18/24/25
+     * arguments accordingly in sdhci_blkdev_read/prog. */
+    p->is_high_capacity = (c.resp[0] & SD_OCR_HCS) != 0;
+    INFO("sdhci: card type = %s",
+         p->is_high_capacity ? "SDHC/SDXC (block-addressed)"
+                             : "SDSC (byte-addressed)");
+
     /* CMD2: ALL_SEND_CID (R2). We don't parse CID — just ack. */
     memset(&c, 0, sizeof(c));
     c.index = MMC_ALL_SEND_CID;
@@ -691,6 +722,29 @@ static int sdhci_card_init(struct sdhci_priv *p)
 
 /* ---- blkdev_ops backends. ---- */
 
+/*
+ * Translate a 512-byte-block index into the CMD17/18/24/25 argument
+ * for the connected card type:
+ *   SDHC/SDXC (high_capacity): argument is the block index directly.
+ *   SDSC: argument is the byte offset (block * SD_BLOCK_SIZE).
+ * Returns 0 on overflow (SDSC byte address > 4 GiB — the 32-bit
+ * argument wraps). Caller surfaces overflow as BLKDEV_ERR_INVAL.
+ */
+static bool sdhci_arg_for_block(struct sdhci_priv *p, uint32_t block,
+                                uint32_t *arg_out)
+{
+    if (p->is_high_capacity) {
+        *arg_out = block;
+        return true;
+    }
+    uint64_t byte_addr = (uint64_t)block * (uint64_t)SD_BLOCK_SIZE;
+    if (byte_addr > UINT32_MAX) {
+        return false;
+    }
+    *arg_out = (uint32_t)byte_addr;
+    return true;
+}
+
 static int sdhci_blkdev_read(struct blkdev *dev, uint32_t block,
                              uint32_t off, void *buffer, uint32_t size)
 {
@@ -708,6 +762,10 @@ static int sdhci_blkdev_read(struct blkdev *dev, uint32_t block,
     if ((uint64_t)block + blocks > p->capacity_blocks) {
         return BLKDEV_ERR_INVAL;
     }
+    uint32_t arg;
+    if (!sdhci_arg_for_block(p, block, &arg)) {
+        return BLKDEV_ERR_INVAL;
+    }
 
     irq_flags_t flags = spin_lock_irqsave(&p->lock);
 
@@ -715,7 +773,7 @@ static int sdhci_blkdev_read(struct blkdev *dev, uint32_t block,
     memset(&c, 0, sizeof(c));
     c.index = (blocks > 1) ? MMC_READ_MULTIPLE_BLOCK : MMC_READ_SINGLE_BLOCK;
     c.resp_type = SDHCI_CMD_RESP_48;
-    c.argument = block;        /* SDHC is block-addressable */
+    c.argument = arg;
     c.data = true;
     c.read = true;
     c.block_count = (uint16_t)blocks;
@@ -741,6 +799,10 @@ static int sdhci_blkdev_prog(struct blkdev *dev, uint32_t block,
     if ((uint64_t)block + blocks > p->capacity_blocks) {
         return BLKDEV_ERR_INVAL;
     }
+    uint32_t arg;
+    if (!sdhci_arg_for_block(p, block, &arg)) {
+        return BLKDEV_ERR_INVAL;
+    }
 
     irq_flags_t flags = spin_lock_irqsave(&p->lock);
 
@@ -748,7 +810,7 @@ static int sdhci_blkdev_prog(struct blkdev *dev, uint32_t block,
     memset(&c, 0, sizeof(c));
     c.index = (blocks > 1) ? MMC_WRITE_MULTIPLE_BLOCK : MMC_WRITE_BLOCK;
     c.resp_type = SDHCI_CMD_RESP_48;
-    c.argument = block;
+    c.argument = arg;
     c.data = true;
     c.read = false;
     c.block_count = (uint16_t)blocks;
@@ -957,3 +1019,20 @@ struct blkdev *sdhci_create_qemu_pci(const char *name)
 }
 
 #endif
+
+/* ---- Pi 5 BCM2712 EMMC2 convenience init. ---- */
+
+#if defined(PLATFORM_RASPI5)
+
+struct blkdev *sdhci_create_bcm2712(void)
+{
+    /* MMIO base is fixed by the BCM2712 SoC. Stage 5 (#371) will
+     * apply the BCM2712-specific cfginit (sdhci-brcmstb.c-style)
+     * and CPRMAN clock-gate before calling this — without those,
+     * the controller may still come up correctly on the firmware's
+     * left-behind state, but the Stage 1 plan-doc trace explicitly
+     * covers them as deferred work. */
+    return sdhci_create("emmc2", BCM2712_EMMC2_BASE);
+}
+
+#endif /* PLATFORM_RASPI5 */
