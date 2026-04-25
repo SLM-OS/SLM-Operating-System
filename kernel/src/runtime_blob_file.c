@@ -47,7 +47,7 @@ static int runtime_blob_read_file(const char *path,
     }
 
     bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
-    if (bytes_read <= 0) {
+    if (bytes_read <= 0 || (size_t)bytes_read != info.size) {
         pmm_free_pages(buf, pages_needed);
         return RUNTIME_BLOB_FILE_READ_FAILED;
     }

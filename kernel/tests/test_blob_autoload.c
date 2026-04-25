@@ -455,6 +455,30 @@ static void test_blob_autoload_rejects_invalid_paths(void)
     TEST_ASSERT_EQUAL_INT(1, blob_autoload_get("sched", "config", path, sizeof(path)));
 }
 
+static void test_blob_autoload_overwrites_existing_conf(void)
+{
+    char path[VFS_MAX_PATH];
+    char conf_buf[512];
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/first-xgb.blob", ev_blob, ev_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/second-xgb.blob", ev_blob, ev_blob_len));
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/first-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/second-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("/mnt/files/second-xgb.blob", path);
+
+    TEST_ASSERT_TRUE(read_text_file(BLOB_AUTOLOAD_CONF_PATH, conf_buf, sizeof(conf_buf)) > 0);
+    TEST_ASSERT_NULL(find_substr(conf_buf, "/mnt/files/first-xgb.blob"));
+    TEST_ASSERT_NOT_NULL(find_substr(conf_buf, "/mnt/files/second-xgb.blob"));
+}
+
 #ifdef CONFIG_AI_SCHEDULER
 static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
 {
@@ -546,6 +570,7 @@ int test_suite_blob_autoload(void)
     RUN_TEST(test_blob_boot_autoload_activates_runtime_blobs);
     RUN_TEST(test_blob_autoload_shell_commands);
     RUN_TEST(test_blob_autoload_rejects_invalid_paths);
+    RUN_TEST(test_blob_autoload_overwrites_existing_conf);
 #ifdef CONFIG_AI_SCHEDULER
     RUN_TEST(test_blob_autoload_accepts_max_length_paths_across_all_slots);
 #endif

@@ -158,8 +158,11 @@ static int blob_autoload_write_entries(const struct blob_autoload_entry *entries
         return -1;
     }
     if (littlefs_rename(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH, "/blob_autoload.conf") != 0) {
-        littlefs_remove(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH);
-        return -1;
+        (void)littlefs_remove(mnt, "/blob_autoload.conf");
+        if (littlefs_rename(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH, "/blob_autoload.conf") != 0) {
+            littlefs_remove(mnt, BLOB_AUTOLOAD_CONF_TMP_PATH);
+            return -1;
+        }
     }
     return 0;
 }
