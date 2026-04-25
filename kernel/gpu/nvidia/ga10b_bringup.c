@@ -1308,6 +1308,35 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
     return GA10B_LAUNCH_KERNEL_PB_DWORDS;
 }
 
+uint32_t ga10b_build_launch_kernel_with_sema_pushbuffer(uint32_t *pb,
+                                                         uint64_t qmd_gpu_va,
+                                                         uint64_t sem_gpu_va,
+                                                         uint32_t payload)
+{
+    /* First 13 dwords: same as the plain launch_kernel pushbuffer. */
+    (void)ga10b_build_launch_kernel_pushbuffer(pb, qmd_gpu_va);
+
+    /* Trailing 10 dwords: REPORT_SEMAPHORE_PAYLOAD/ADDRESS/EXECUTE
+     * on subch 1 (already bound to AMPERE_COMPUTE_B by the prelude).
+     * REPORT_SEMAPHORE_EXECUTE with OP=RELEASE waits for the prior
+     * compute work on this channel to drain, flushes L2 → DRAM, then
+     * stores `payload` at sem_gpu_va. Same encoding as
+     * ga10b_build_compute_sema_release_pushbuffer's tail (which we
+     * use for the smoke test). */
+    pb[13] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER);
+    pb[14] = payload;
+    pb[15] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER);
+    pb[16] = 0u;     /* 32-bit release; high payload ignored */
+    pb[17] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER);
+    pb[18] = (uint32_t)(sem_gpu_va & 0xFFFFFFFFu);
+    pb[19] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_UPPER);
+    pb[20] = (uint32_t)((sem_gpu_va >> 32) & 0xFFu);
+    pb[21] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_REPORT_SEMAPHORE_EXECUTE);
+    pb[22] = NVC7C0_SEM_EXECUTE_OP_RELEASE |
+             NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD;
+    return GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS;
+}
+
 /* Copy a freshly-built pushbuffer into the inherited pb_phys region,
  * post a GPFIFO entry pointing at it, advance GP_PUT, ring the USERMODE
  * doorbell, and poll `poll_phys` for `expected_payload`.
@@ -1643,25 +1672,45 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
                 b->last_error_phase = 8;
                 return -1;
             }
-            /* expected_payload == 0 means "wait for non-zero" mode
-             * (handled inside ga10b_submit_and_poll). Used by
-             * model-inference helpers where per-op output bit
-             * patterns are not known a priori. */
+            /* Use the channel's semaphore as the per-op completion
+             * signal instead of polling a value cell of the kernel's
+             * output. AMPERE_COMPUTE_B's REPORT_SEMAPHORE_EXECUTE
+             * with OP=RELEASE waits for the kernel to drain and
+             * flushes L2 → DRAM before writing the semaphore — so
+             * polling it gives a real "all output is in DRAM"
+             * signal. Fixes both #372 (sentinel-zero deadlock) and
+             * #390 (Conv1 truncation past 4 KB).
+             *
+             * The launcher's gpu_write_handoff_v6 sets
+             * `semaphore_phys = output_phys` (op 7's final-logits
+             * buffer). For ops 1..7 that's harmless — the sema page
+             * isn't the op-under-dispatch's output buffer. For op 8
+             * (the last op, which IS op 7 in 0-indexed terms), the
+             * sema and the logits would collide on the same address.
+             * Offset the sema by 2 KB within the (4 KB) page so it
+             * sits well past op 7's 40-byte logits payload. Same
+             * page → same TLB entry → no extra mapping cost. */
+            const uint32_t SEMA_PAYLOAD = 0xCAFEDEADu;
+            const uint32_t SEMA_PAGE_OFFSET = 0x800u;
+            uint64_t sema_gpu_va = g_handoff.semaphore_gpu_va + SEMA_PAGE_OFFSET;
+            uint64_t sema_phys   = g_handoff.semaphore_phys   + SEMA_PAGE_OFFSET;
             uart_printf("[GA10B-P8]   op[%lu/%lu] qmd=0x%lx out=0x%lx "
-                        "expected=0x%lx%s\n",
+                        "sema_phys=0x%lx (payload=0x%x)\n",
                         (unsigned long)(i + 1),
                         (unsigned long)g_handoff.pipeline_n_ops,
                         (unsigned long)op->qmd_gpu_va,
                         (unsigned long)op->output_phys,
-                        (unsigned long)op->expected_payload,
-                        op->expected_payload == 0u
-                            ? " (any-nonzero mode)" : "");
-            uint32_t pb_buf[GA10B_LAUNCH_KERNEL_PB_DWORDS];
-            uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
-                pb_buf, op->qmd_gpu_va);
+                        (unsigned long)sema_phys,
+                        (unsigned)SEMA_PAYLOAD);
+            uint32_t pb_buf[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
+            uint32_t pb_dwords =
+                ga10b_build_launch_kernel_with_sema_pushbuffer(
+                    pb_buf, op->qmd_gpu_va,
+                    sema_gpu_va,
+                    SEMA_PAYLOAD);
             int rc = ga10b_submit_and_poll(b, pb_buf, pb_dwords,
-                                           op->output_phys,
-                                           op->expected_payload,
+                                           sema_phys,
+                                           SEMA_PAYLOAD,
                                            8, "GA10B-P8");
             if (rc < 0) {
                 uart_printf("[GA10B-P8] pipeline op %lu failed (rc=%d) "

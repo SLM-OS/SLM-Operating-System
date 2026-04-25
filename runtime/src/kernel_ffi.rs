@@ -315,6 +315,27 @@ extern "C" {
     /// Get GPU info. Returns 0 on success, -1 on error.
     pub fn slm_gpu_get_info(info: *mut GpuInfoFfi) -> i32;
 
+    /// Dispatch the MNIST inference pipeline on the Jetson GA10B GPU.
+    ///
+    /// `logits_bytes_out` must point at 40 bytes; on success the buffer
+    /// is filled with 10 little-endian fp32 logits. Returns 0 on success,
+    /// negative rc on failure (no v5 handoff, dispatch timed out, etc.).
+    /// On non-Jetson platforms returns -1.
+    pub fn slm_gpu_run_mnist(logits_bytes_out: *mut u8) -> i32;
+
+    /// Write user-supplied input bytes into the GPU's MNIST input
+    /// buffer. Pairs with `slm_gpu_run_mnist`. `cap` must be ≤ the
+    /// v6 handoff's `input_buf_size`. Returns 0 on success, negative
+    /// rc on failure (-1 = no v6 handoff, -2 = cap too large, -3 =
+    /// NULL bytes pointer). On non-Jetson platforms returns -1.
+    pub fn slm_gpu_set_mnist_input(bytes: *const u8, cap: usize) -> i32;
+
+    /// FP-free argmax over fp32 bit patterns. `logits_bytes` points
+    /// at `n_logits * 4` bytes of little-endian fp32. Returns the
+    /// argmax index, or -1 on bad args. Used by callers that compile
+    /// without floating-point support.
+    pub fn slm_fp32_argmax(logits_bytes: *const u8, n_logits: u32) -> i32;
+
     // -------------------------------------------------------------------------
     // Task Management
     // -------------------------------------------------------------------------
@@ -491,6 +512,36 @@ pub fn gpu_get_info() -> GpuInfoFfi {
     let mut info = GpuInfoFfi::EMPTY;
     unsafe { slm_gpu_get_info(&mut info); }
     info
+}
+
+/// Dispatch the MNIST GPU inference pipeline. Fills `logits_out` with
+/// 10 fp32 values on success. Returns the kernel rc — 0 on success,
+/// negative on failure (no GPU handoff, dispatch timed out, non-Jetson
+/// platform, etc.).
+pub fn gpu_run_mnist(logits_out: &mut [f32; 10]) -> i32 {
+    // SAFETY: 10 f32 = 40 bytes, matches the FFI's required buffer size.
+    unsafe {
+        slm_gpu_run_mnist(logits_out.as_mut_ptr() as *mut u8)
+    }
+}
+
+/// Write user-supplied input bytes into the GPU's MNIST input buffer
+/// before the next `gpu_run_mnist`. Returns the kernel rc.
+pub fn gpu_set_mnist_input(bytes: &[u8]) -> i32 {
+    // SAFETY: passing a slice's pointer + length is the documented
+    // contract for the FFI's `bytes` / `cap` parameters.
+    unsafe {
+        slm_gpu_set_mnist_input(bytes.as_ptr(), bytes.len())
+    }
+}
+
+/// FP-free argmax over `n_logits` fp32 bit patterns.
+pub fn fp32_argmax(logits: &[f32]) -> i32 {
+    // SAFETY: f32 slice cast to u8 ptr; n_logits matches the
+    // f32-element count.
+    unsafe {
+        slm_fp32_argmax(logits.as_ptr() as *const u8, logits.len() as u32)
+    }
 }
 
 /// Send a message to a queue.
