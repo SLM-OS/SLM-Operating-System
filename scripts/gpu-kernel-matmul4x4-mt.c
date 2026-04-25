@@ -128,11 +128,16 @@ int main(int argc, char **argv)
     gpu_launch_populate_qmd(&ctx);
 
     /* Override CTA thread dims: 4×4×1 instead of the 1×1×1 default.
-     * Grid is still 1×1×1 (single CTA, 16 threads total). */
+     * Grid is still 1×1×1 (single CTA, 16 threads total).
+     *
+     * msync the full 4 KB page to match gpu_launch_populate_qmd's
+     * pattern — both reach the same kernel page granularity, but
+     * keeping the size identical avoids "did this msync miss
+     * something" reading questions later. */
     uint32_t *qmd = (uint32_t *)ctx.qmd_va;
     gpu_qmd_set_bits(qmd, QMD_CTA_THREAD_DIM0_HI, QMD_CTA_THREAD_DIM0_LO, 4);
     gpu_qmd_set_bits(qmd, QMD_CTA_THREAD_DIM1_HI, QMD_CTA_THREAD_DIM1_LO, 4);
-    msync(ctx.qmd_va, 256, MS_SYNC);
+    msync(ctx.qmd_va, 4096, MS_SYNC);
 
     uint32_t pb_buf[32];
     size_t pb_dwords = gpu_build_launch_pushbuffer(pb_buf, ctx.qmd_gva);

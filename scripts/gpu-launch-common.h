@@ -24,8 +24,6 @@
 #ifndef GPU_LAUNCH_COMMON_H
 #define GPU_LAUNCH_COMMON_H
 
-#define _GNU_SOURCE
-
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -289,12 +287,16 @@ void gpu_launch_populate_qmd(struct gpu_launch_ctx *ctx);
 size_t gpu_build_launch_pushbuffer(uint32_t *pb, uint64_t qmd_gpu_va);
 
 /* Copy the built pushbuffer into ctx->pb_va, post a GPFIFO entry,
- * advance GP_PUT, ring the doorbell, and poll `poll_va` for
- * `expected_payload`. Returns 1 on payload match, 0 on timeout
+ * advance GP_PUT, ring the doorbell, and poll `*poll_va` for exact
+ * equality with `expected_payload`. Returns 1 on match, 0 on timeout
  * (up to timeout_ms milliseconds, rounded to 10 ms granularity).
- * expected_payload = 0 means "wait for any non-zero value";
- * callers that want to tolerate a zero-valued expected result
- * should encode that with a sentinel at a different offset. */
+ *
+ * Caller's responsibility: ensure `*poll_va != expected_payload` at
+ * entry. Typical pattern is `memset(out, 0, ...) + msync` plus a
+ * non-zero `expected_payload`. There is NO special-case for
+ * `expected_payload == 0`: passing 0 against a freshly-zeroed buffer
+ * returns 1 on the first iteration without verifying that the GPU
+ * dispatched anything. */
 int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
                          const uint32_t *pb_buf,
                          size_t pb_dwords,

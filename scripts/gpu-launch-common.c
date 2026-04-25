@@ -8,6 +8,15 @@
  *   gcc -O2 -Wall -o gpu-kernel-foo \
  *       gpu-kernel-foo.c gpu-launch-common.c
  */
+
+/* `pread` (used in gpu_virt_to_phys) needs glibc's _GNU_SOURCE
+ * feature-test to expose the prototype. Defined here, before any
+ * include, so the macro applies to this TU only — keeping it out of
+ * the header avoids the failure mode where a launcher includes
+ * <stdio.h> ahead of "gpu-launch-common.h" and the macro never takes
+ * effect. */
+#define _GNU_SOURCE
+
 #include "gpu-launch-common.h"
 
 #include <stdio.h>
@@ -96,6 +105,11 @@ uint64_t gpu_virt_to_phys(void *vaddr)
 void gpu_qmd_set_bits(uint32_t *qmd, unsigned hi, unsigned lo, uint64_t val)
 {
     unsigned nbits = hi - lo + 1;
+    /* The `nbits >= 64` branch isn't dead — it guards the full-width
+     * case against `1ULL << 64`, which is undefined behavior per C
+     * (shift by ≥ width). All Ampere QMDV03_00 fields used today are
+     * ≤ 32 bits, so the guard is precautionary, but cheap and
+     * correct, so leave it. */
     uint64_t mask = (nbits >= 64) ? ~0ULL : ((1ULL << nbits) - 1ULL);
     val &= mask;
 
@@ -328,6 +342,11 @@ struct gpu_buffer gpu_alloc_buffer(struct gpu_launch_ctx *ctx,
 {
     struct gpu_buffer buf = {0};
 
+    if (size == 0) {
+        fprintf(stderr, "gpu_alloc_buffer: refusing zero-size alloc\n");
+        exit(1);
+    }
+
     /* Round size up to page. */
     uint32_t page_size = 4096;
     uint32_t rounded = (size + page_size - 1) & ~(page_size - 1);
@@ -557,6 +576,13 @@ uint64_t gpu_write_handoff_v4(const struct gpu_launch_ctx *ctx,
                                uint64_t output_gpu_va,
                                uint32_t expected_payload)
 {
+    /* The memset both zero-inits the page and forces its pagemap
+     * entry to materialize so the next gpu_virt_to_phys() returns a
+     * non-zero PFN. This works only because the handoff fits in a
+     * single 4 KB page; a future multi-page handoff would need the
+     * per-page touch loop seen in gpu_alloc_buffer. The
+     * sizeof-handoff static_assert at 200 B keeps that invariant
+     * easy to spot. */
     memset(handoff_va, 0, 4096);
     uint64_t handoff_phys = gpu_virt_to_phys(handoff_va);
 
