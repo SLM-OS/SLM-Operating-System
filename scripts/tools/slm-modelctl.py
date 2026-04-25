@@ -355,6 +355,7 @@ def parse_args() -> argparse.Namespace:
         global_opts_with_values = {
             "--target", "--transport", "--protocol", "--port", "--prompt",
             "--timeout", "--connect-retries", "--retry-delay", "--chunk-bytes",
+            "--http-url", "--sha256",
             "--probe-raw", "--probe-policy", "--probe-sleep-ms",
             "--expect-raw", "--sleep-ms",
         }

@@ -386,8 +386,8 @@ int net_http_get_file(const char *url, const char *dest_path,
         }
     }
     if (littlefs_rename(dl.mnt, dl.temp_subpath, dl.final_subpath) != 0) {
-        struct vfs_entry_info info;
-        int had_existing = (vfs_stat_path(dest_path, &info) == 0);
+        struct vfs_entry_info dest_info;
+        int had_existing = (vfs_stat_path(dest_path, &dest_info) == 0);
         if (!had_existing) {
             (void)littlefs_remove(dl.mnt, dl.temp_subpath);
             return NET_E_GENERIC;

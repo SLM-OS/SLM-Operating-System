@@ -452,6 +452,31 @@ def test_modelctl_parse_args_reorders_global_options_before_subcommand():
     assert args.kind == "mlp"
 
 
+def test_modelctl_parse_args_reorders_http_globals_before_subcommand():
+    with patched_argv(
+        slm_modelctl,
+        [
+            "--target",
+            "pi-5-2",
+            "--http-url",
+            "http://x",
+            "--sha256",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "load",
+            "sched",
+            "mlp",
+        ],
+    ):
+        args = slm_modelctl.parse_args()
+
+    assert args.command == "load"
+    assert args.target == "pi-5-2"
+    assert args.http_url == "http://x"
+    assert args.sha256 == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    assert args.domain == "sched"
+    assert args.kind == "mlp"
+
+
 def test_modelctl_legacy_path_named_like_subcommand_stays_positional():
     with patched_argv(
         slm_modelctl,
@@ -850,6 +875,7 @@ def main() -> int:
     runner.run("modelctl_default_remote_path_handles_windows_local_source", test_modelctl_default_remote_path_handles_windows_local_source)
     runner.run("modelctl_default_remote_path_uses_http_url_basename", test_modelctl_default_remote_path_uses_http_url_basename)
     runner.run("modelctl_parse_args_reorders_global_options_before_subcommand", test_modelctl_parse_args_reorders_global_options_before_subcommand)
+    runner.run("modelctl_parse_args_reorders_http_globals_before_subcommand", test_modelctl_parse_args_reorders_http_globals_before_subcommand)
     runner.run("modelctl_legacy_path_named_like_subcommand_stays_positional", test_modelctl_legacy_path_named_like_subcommand_stays_positional)
     runner.run("modelctl_infer_probe_policy_maps_scheduler_kinds", test_modelctl_infer_probe_policy_maps_scheduler_kinds)
     runner.run("modelctl_probe_scheduler_runs_create_sample_and_cleanup", test_modelctl_probe_scheduler_runs_create_sample_and_cleanup)
