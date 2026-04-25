@@ -48,7 +48,9 @@ Follow-up issues:
 
 ## Pi 5 hardware verification — April 12, 2026
 
-Built with Session D changes and deployed to `pi-5-1` via `labctl sdwire_update`.
+Built with Session D changes and deployed to `pi-5-1` via `labctl sdwire_update`
+on that board's SDWire-first path. This verification covered one Pi 5 deploy
+model, not the no-SDWire / maintenance-OS path preserved elsewhere in the lab.
 
 **Boot reliability** — `labctl boot_test --runs 10 --expect-pattern "Type 'help' for available commands"`: 9/10 successful boots (one Kasa power-plug auth flake, unrelated to kernel code).
 

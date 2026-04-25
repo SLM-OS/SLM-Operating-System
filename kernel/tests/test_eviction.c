@@ -69,6 +69,11 @@ extern size_t rust_eviction_policy_name(uint8_t *out_buf, size_t buf_len);
 extern const uint8_t *rust_eviction_policy_list(void);
 extern int32_t rust_eviction_policy_set(const uint8_t *name);
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
+extern int32_t rust_eviction_blob_stage(uint16_t kind_id, const uint8_t *data, size_t len);
+extern int32_t rust_eviction_blob_status(uint16_t kind_id, RustEvictionBlobStatus *out);
+extern int32_t rust_eviction_blob_activate(uint16_t kind_id);
+extern int32_t rust_eviction_blob_rollback(uint16_t kind_id);
+extern int32_t rust_eviction_blob_clear(uint16_t kind_id);
 
 /* Latency benchmark FFI (M9). */
 extern uint64_t rust_eviction_bench_latency_ns(
@@ -103,6 +108,45 @@ static void spin_a_bit(void)
         sink += i;
     }
     (void)sink;
+}
+
+static uint32_t fnv1a32(const uint8_t *data, size_t len)
+{
+    uint32_t hash = 0x811C9DC5u;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= data[i];
+        hash *= 0x01000193u;
+    }
+    return hash;
+}
+
+static size_t build_test_blob(uint16_t kind_id,
+                              const uint8_t *payload,
+                              size_t payload_len,
+                              uint8_t *out,
+                              size_t out_cap)
+{
+    uint32_t checksum = fnv1a32(payload, payload_len);
+    size_t total = 24 + payload_len;
+    if (out_cap < total) return 0;
+
+    out[0] = 'S'; out[1] = 'E'; out[2] = 'M'; out[3] = 'B';
+    out[4] = 1; out[5] = 0;                     /* version */
+    out[6] = (uint8_t)(kind_id & 0xFF);
+    out[7] = (uint8_t)(kind_id >> 8);
+    out[8] = 1; out[9] = 0;                     /* feature schema */
+    out[10] = 0; out[11] = 0;                   /* reserved */
+    out[12] = (uint8_t)(payload_len & 0xFF);
+    out[13] = (uint8_t)((payload_len >> 8) & 0xFF);
+    out[14] = (uint8_t)((payload_len >> 16) & 0xFF);
+    out[15] = (uint8_t)((payload_len >> 24) & 0xFF);
+    out[16] = (uint8_t)(checksum & 0xFF);
+    out[17] = (uint8_t)((checksum >> 8) & 0xFF);
+    out[18] = (uint8_t)((checksum >> 16) & 0xFF);
+    out[19] = (uint8_t)((checksum >> 24) & 0xFF);
+    out[20] = 0; out[21] = 0; out[22] = 0; out[23] = 0; /* reserved */
+    memcpy(out + 24, payload, payload_len);
+    return total;
 }
 
 /* ============================================================================
@@ -620,6 +664,83 @@ static void test_get_stats_populates_fields(void)
     }
 }
 
+static void test_blob_status_defaults_empty(void)
+{
+    RustEvictionBlobStatus st = {0};
+    int rc = rust_eviction_blob_status(2, &st);
+    if (!rust_eviction_enabled()) {
+        TEST_ASSERT_EQUAL_INT(-2, rc);
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_UINT16(2, st.kind_id);
+    TEST_ASSERT_EQUAL_UINT16(0, st.state);
+    TEST_ASSERT_EQUAL_UINT32(0, st.has_staged);
+    TEST_ASSERT_EQUAL_UINT32(0, st.has_active);
+    TEST_ASSERT_EQUAL_UINT32(0, st.has_rollback);
+}
+
+static void test_blob_stage_activate_rollback_round_trip(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_ASSERT_EQUAL_INT(-2, rust_eviction_blob_clear(2));
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    static uint8_t blob1[64];
+    static uint8_t blob2[64];
+    const uint8_t payload1[] = {0x01, 0x02, 0x03, 'm', 'l', 'p'};
+    const uint8_t payload2[] = {0x09, 0x08, 'n', 'e', 'w'};
+    size_t len1 = build_test_blob(2, payload1, sizeof(payload1), blob1, sizeof(blob1));
+    size_t len2 = build_test_blob(2, payload2, sizeof(payload2), blob2, sizeof(blob2));
+    TEST_ASSERT_TRUE(len1 > 0);
+    TEST_ASSERT_TRUE(len2 > 0);
+
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_clear(2));
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_stage(2, blob1, len1));
+
+    RustEvictionBlobStatus st = {0};
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(2, &st));
+    TEST_ASSERT_EQUAL_UINT16(1, st.state);
+    TEST_ASSERT_EQUAL_UINT32(1, st.has_staged);
+    TEST_ASSERT_EQUAL_UINT32(fnv1a32(payload1, sizeof(payload1)), st.staged.checksum);
+
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_activate(2));
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(2, &st));
+    TEST_ASSERT_EQUAL_UINT16(2, st.state);
+    TEST_ASSERT_EQUAL_UINT32(1, st.has_active);
+    TEST_ASSERT_EQUAL_UINT32(0, st.has_staged);
+
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_stage(2, blob2, len2));
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_activate(2));
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(2, &st));
+    TEST_ASSERT_EQUAL_UINT32(1, st.has_rollback);
+    TEST_ASSERT_EQUAL_UINT32(fnv1a32(payload1, sizeof(payload1)), st.rollback.checksum);
+
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_rollback(2));
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(2, &st));
+    TEST_ASSERT_EQUAL_UINT16(3, st.state);
+    TEST_ASSERT_EQUAL_UINT32(1, st.has_active);
+    TEST_ASSERT_EQUAL_UINT32(fnv1a32(payload1, sizeof(payload1)), st.active.checksum);
+
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_clear(2));
+}
+
+static void test_blob_stage_rejects_kind_mismatch(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_ASSERT_EQUAL_INT(-2, rust_eviction_blob_stage(2, (const uint8_t *)"x", 1));
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    static uint8_t blob[64];
+    const uint8_t payload[] = {0xAA, 0xBB, 0xCC};
+    size_t len = build_test_blob(1, payload, sizeof(payload), blob, sizeof(blob));
+    TEST_ASSERT_TRUE(len > 0);
+
+    TEST_ASSERT_EQUAL_INT(-4, rust_eviction_blob_stage(2, blob, len));
+}
+
 /* ============================================================================
  * M8: End-to-end workload stress — the alloc loop must not leak
  * blocks when eviction fires, and pool_stats accounts for every
@@ -817,6 +938,9 @@ int test_suite_eviction(void)
     RUN_TEST(test_policy_list_is_null_terminated);
     RUN_TEST(test_policy_set_switches_active);
     RUN_TEST(test_get_stats_populates_fields);
+    RUN_TEST(test_blob_status_defaults_empty);
+    RUN_TEST(test_blob_stage_activate_rollback_round_trip);
+    RUN_TEST(test_blob_stage_rejects_kind_mismatch);
 
     /* M8: end-to-end workload + mid-flight policy swap stress. */
     RUN_TEST(test_memory_pressure_no_leak);

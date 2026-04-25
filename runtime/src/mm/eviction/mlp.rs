@@ -17,13 +17,39 @@ use alloc::vec::Vec;
 
 use super::features::extract_features;
 use super::generated;
+use super::{active_blob, BlobKind, RuntimeMlpModel};
 use super::policy::{BlockMeta, EvictionPolicy};
 
+#[derive(Clone)]
+struct RuntimeCache {
+    checksum: u32,
+    model: RuntimeMlpModel,
+}
+
 #[derive(Default)]
-pub struct MlpPolicy;
+pub struct MlpPolicy {
+    runtime_cache: Option<RuntimeCache>,
+}
 
 impl MlpPolicy {
-    pub fn new() -> Self { Self }
+    pub fn new() -> Self { Self { runtime_cache: None } }
+
+    fn score_row(&mut self, row: &super::policy::BlockFeatures) -> f32 {
+        if let Some(blob) = active_blob(BlobKind::Mlp) {
+            let checksum = blob.header.checksum;
+            if self.runtime_cache.as_ref().map(|c| c.checksum) != Some(checksum) {
+                self.runtime_cache = super::runtime_mlp::parse_payload(&blob.payload)
+                    .ok()
+                    .map(|model| RuntimeCache { checksum, model });
+            }
+            if let Some(cache) = self.runtime_cache.as_ref() {
+                return cache.model.predict(row);
+            }
+        } else {
+            self.runtime_cache = None;
+        }
+        generated::mlp_predict(row)
+    }
 }
 
 impl EvictionPolicy for MlpPolicy {
@@ -37,7 +63,7 @@ impl EvictionPolicy for MlpPolicy {
         let mut best = 0usize;
         let mut best_score = f32::MIN;
         for (i, row) in features.iter().enumerate() {
-            let s = generated::mlp_predict(row);
+            let s = self.score_row(row);
             if s > best_score {
                 best_score = s;
                 best = i;
@@ -48,7 +74,7 @@ impl EvictionPolicy for MlpPolicy {
 
     fn score(&mut self, candidates: &[BlockMeta]) -> Vec<f32> {
         let features = extract_features(candidates);
-        features.iter().map(|row| generated::mlp_predict(row)).collect()
+        features.iter().map(|row| self.score_row(row)).collect()
     }
 
     fn name(&self) -> &'static str { "MLP" }

@@ -16,6 +16,7 @@
 
 #include "ai_inference.h"
 #include "ai_weights.h"
+#include "runtime_model.h"
 
 #if defined(__aarch64__) && defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -244,7 +245,22 @@ static int forward_pass(const float state[AI_STATE_DIM],
 void ai_mlp_forward_logits(const float state[AI_STATE_DIM],
                            float out[AI_SCHED_N_ACTIONS])
 {
+    const struct sched_runtime_mlp_model *runtime = NULL;
+    sched_runtime_token_t runtime_token = 0;
+
     if (!state || !out) return;
+
+    if (sched_runtime_mlp_acquire(&runtime, &runtime_token)) {
+        forward_logits(state,
+                       runtime->w0, runtime->b0,
+                       runtime->w1, runtime->b1,
+                       runtime->w2, runtime->b2,
+                       runtime->w3, runtime->b3,
+                       out);
+        sched_runtime_mlp_release(runtime_token);
+        return;
+    }
+
     forward_logits(state,
                    ai_mlp_w0, ai_mlp_b0,
                    ai_mlp_w1, ai_mlp_b1,
@@ -282,7 +298,21 @@ int ai_test_argmax(const float *x, int n)
 int ai_schedule_mlp(const float state[AI_STATE_DIM],
                     struct ai_sched_action *action)
 {
+    const struct sched_runtime_mlp_model *runtime = NULL;
+    sched_runtime_token_t runtime_token = 0;
+
     if (!state || !action) return -1;
+
+    if (sched_runtime_mlp_acquire(&runtime, &runtime_token)) {
+        int ret = forward_pass(state,
+                               runtime->w0, runtime->b0,
+                               runtime->w1, runtime->b1,
+                               runtime->w2, runtime->b2,
+                               runtime->w3, runtime->b3,
+                               action);
+        sched_runtime_mlp_release(runtime_token);
+        return ret;
+    }
 
     return forward_pass(state,
                         ai_mlp_w0, ai_mlp_b0,
@@ -295,7 +325,21 @@ int ai_schedule_mlp(const float state[AI_STATE_DIM],
 int ai_schedule_ppo(const float state[AI_STATE_DIM],
                     struct ai_sched_action *action)
 {
+    const struct sched_runtime_mlp_model *runtime = NULL;
+    sched_runtime_token_t runtime_token = 0;
+
     if (!state || !action) return -1;
+
+    if (sched_runtime_ppo_acquire(&runtime, &runtime_token)) {
+        int ret = forward_pass(state,
+                               runtime->w0, runtime->b0,
+                               runtime->w1, runtime->b1,
+                               runtime->w2, runtime->b2,
+                               runtime->w3, runtime->b3,
+                               action);
+        sched_runtime_ppo_release(runtime_token);
+        return ret;
+    }
 
     return forward_pass(state,
                         ai_ppo_w0, ai_ppo_b0,

@@ -1,8 +1,12 @@
-# Deploying SLM-OS to Raspberry Pi 5 — SDWire (Lab-Managed)
+# Deploying SLM-OS to Raspberry Pi 5 — SDWire-First Model
 
-This guide covers the **iterative kernel-update workflow** for a Pi 5 equipped with an SDWire (or SDWireC) SD-card multiplexer. The SDWire switches the SD card between the development host (for flashing) and the Pi 5 (for booting) without physical intervention, so a full build → deploy → serial-capture cycle is scripted and hands-free.
+This guide covers the **SDWire-first deploy model** for a Pi 5 equipped with an SDWire (or SDWireC) SD-card multiplexer. The SDWire switches the SD card between the development host (for flashing) and the Pi 5 (for booting) without physical intervention, so a full build → deploy → serial-capture cycle is scripted and hands-free.
 
 For first-time provisioning of a new SD card, see [`pi5-sdcard.md`](pi5-sdcard.md). That guide writes the initial FAT32 layout, Pi firmware, and bare-metal `config.txt`. This guide picks up from an already-provisioned card and only replaces `kernel_2712.img`.
+
+This model should be preserved even if a dual-boot maintenance-OS
+workflow also exists elsewhere in the lab. SDWire remains the preferred
+fast iteration path when the hardware supports it.
 
 ---
 
@@ -12,7 +16,7 @@ For first-time provisioning of a new SD card, see [`pi5-sdcard.md`](pi5-sdcard.m
 |---|---|
 | New Pi 5, blank SD card | [`pi5-sdcard.md`](pi5-sdcard.md) first, then this |
 | Pi 5 with SDWire, iterative development | This guide |
-| Pi 5 without SDWire (e.g. `pi-5-2`) | [`pi5-sdcard.md`](pi5-sdcard.md) — sneakernet every flash |
+| Pi 5 without SDWire (e.g. `pi-5-2`) | [`pi5-sdcard.md`](pi5-sdcard.md) or [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) |
 
 ---
 

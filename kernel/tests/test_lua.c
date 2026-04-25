@@ -1289,9 +1289,92 @@ static void test_slm_eviction_bindings(void)
         "local st = slm.eviction_stats()\n"
         "assert(st == nil or type(st) == 'table',\n"
         "       'eviction_stats returns nil or table')\n"
+        "local blob = slm.eviction_model_status('mlp')\n"
+        "assert(blob == nil or type(blob) == 'table',\n"
+        "       'eviction_model_status returns nil or table')\n"
+        "if blob ~= nil then\n"
+        "  assert(blob.kind == 'mlp', 'status kind round-trips')\n"
+        "  assert(type(blob.state) == 'string', 'status.state is string')\n"
+        "  assert(type(blob.has_staged) == 'boolean', 'has_staged is bool')\n"
+        "  assert(type(blob.has_active) == 'boolean', 'has_active is bool')\n"
+        "  assert(type(blob.has_rollback) == 'boolean', 'has_rollback is bool')\n"
+        "  assert(slm.eviction_model_activate('mlp') == false,\n"
+        "         'activate without staged blob should fail')\n"
+        "  assert(slm.eviction_model_rollback('mlp') == false,\n"
+        "         'rollback without prior blob should fail')\n"
+        "  assert(slm.eviction_model_clear('mlp') == true,\n"
+        "         'clear should succeed for known kind')\n"
+        "end\n"
+        "assert(slm.eviction_model_load('bogus_kind', '/mnt/files/nope') == false,\n"
+        "       'unknown kind should fail')\n"
+        "slm.shell_exec('write /mnt/files/bad_eviction.blob hello')\n"
+        "assert(slm.eviction_model_load('mlp', '/mnt/files/bad_eviction.blob') == false,\n"
+        "       'invalid blob should fail to stage')\n"
+        "slm.shell_exec('rm /mnt/files/bad_eviction.blob')\n"
         "-- set_policy always rejects unknown\n"
         "local ok = slm.eviction_set_policy('definitely_not_a_policy_xyz')\n"
         "assert(ok == false, 'unknown eviction policy should fail')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.sched_model_* bindings are callable and expose the
+ * scheduler runtime blob state shape when AI scheduler support is on.
+ */
+static void test_slm_sched_model_bindings(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local blob = slm.sched_model_status('mlp')\n"
+        "assert(blob == nil or type(blob) == 'table',\n"
+        "       'sched_model_status returns nil or table')\n"
+        "local ppo = slm.sched_model_status('ppo')\n"
+        "assert(ppo == nil or type(ppo) == 'table',\n"
+        "       'sched_model_status(ppo) returns nil or table')\n"
+        "local config = slm.sched_model_status('config')\n"
+        "assert(config == nil or type(config) == 'table',\n"
+        "       'sched_model_status(config) returns nil or table')\n"
+        "if blob ~= nil then\n"
+        "  assert(blob.kind == 'mlp', 'status kind round-trips')\n"
+        "  assert(type(blob.state) == 'string', 'status.state is string')\n"
+        "  assert(type(blob.has_staged) == 'boolean', 'has_staged is bool')\n"
+        "  assert(type(blob.has_active) == 'boolean', 'has_active is bool')\n"
+        "  assert(type(blob.has_rollback) == 'boolean', 'has_rollback is bool')\n"
+        "  assert(slm.sched_model_activate('mlp') == false,\n"
+        "         'activate without staged blob should fail')\n"
+        "  assert(slm.sched_model_rollback('mlp') == false,\n"
+        "         'rollback without prior blob should fail')\n"
+        "  assert(slm.sched_model_clear('mlp') == true,\n"
+        "         'clear should succeed for known kind')\n"
+        "  assert(ppo.kind == 'ppo', 'ppo status kind round-trips')\n"
+        "  assert(type(ppo.state) == 'string', 'ppo status.state is string')\n"
+        "  assert(slm.sched_model_activate('ppo') == false,\n"
+        "         'ppo activate without staged blob should fail')\n"
+        "  assert(slm.sched_model_rollback('ppo') == false,\n"
+        "         'ppo rollback without prior blob should fail')\n"
+        "  assert(slm.sched_model_clear('ppo') == true,\n"
+        "         'ppo clear should succeed for known kind')\n"
+        "  assert(config.kind == 'config', 'config status kind round-trips')\n"
+        "  assert(type(config.state) == 'string', 'config status.state is string')\n"
+        "  assert(slm.sched_model_activate('config') == false,\n"
+        "         'config activate without staged blob should fail')\n"
+        "  assert(slm.sched_model_rollback('config') == false,\n"
+        "         'config rollback without prior blob should fail')\n"
+        "  assert(slm.sched_model_clear('config') == true,\n"
+        "         'config clear should succeed for known kind')\n"
+        "end\n"
+        "assert(slm.sched_model_load('bogus_kind', '/mnt/files/nope') == false,\n"
+        "       'unknown kind should fail')\n"
+        "slm.shell_exec('write /mnt/files/bad_sched.blob hello')\n"
+        "assert(slm.sched_model_load('mlp', '/mnt/files/bad_sched.blob') == false,\n"
+        "       'invalid blob should fail to stage')\n"
+        "slm.shell_exec('rm /mnt/files/bad_sched.blob')\n";
 
     int result = lua_slm_dostring(L, code);
     TEST_ASSERT_EQUAL_INT(0, result);
@@ -3338,6 +3421,7 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_gpu_status);
     RUN_TEST(test_slm_ai_sched_stats);
     RUN_TEST(test_slm_eviction_bindings);
+    RUN_TEST(test_slm_sched_model_bindings);
 
     /* Phase 7: Hailo NPU bindings */
     RUN_TEST(test_slm_hailo_namespace);

@@ -1262,6 +1262,7 @@ if(ENABLE_AI_SCHEDULER)
         kernel/sched/ai/ai_inference.c
         kernel/sched/ai/ai_state.c
         kernel/sched/ai/sched_ai.c
+        kernel/sched/ai/runtime_model.c
         kernel/sched/ai/inference_cpu.c
         kernel/sched/ai/ai_weights_mlp.c
         kernel/sched/ai/ai_weights_ppo.c

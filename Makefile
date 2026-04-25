@@ -163,6 +163,10 @@ all: kernel
 # Kernel (C) targets
 # ============================================================================
 
+KERNEL_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS);JETSON_EL1_SMOKE=$(JETSON_EL1_SMOKE);HAILO_FW_BLOB=$(HAILO_FW_BLOB);SCHEDULER_HEF_BLOB=$(SCHEDULER_HEF_BLOB);USER_HEF_BLOB=$(USER_HEF_BLOB)
+KERNEL_KEXEC_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS)
+KERNEL_TEST_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS)
+
 # Check for stale file locks in build directory (Windows issue with ungraceful QEMU/GDB termination)
 # If we can't create slmos.elf, nuke the directory to clear the stale lock
 .PHONY: check-build-dir
@@ -178,8 +182,21 @@ check-build-dir:
 		fi \
 	fi
 
+.PHONY: kernel-config-check
+kernel-config-check:
+	@sig='$(KERNEL_BUILD_SIGNATURE)'; \
+	stamp="$(KERNEL_BUILD_DIR)/.build-config"; \
+	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
+		:; \
+	else \
+		echo "Kernel build options changed; reconfiguring $(KERNEL_BUILD_DIR)"; \
+		rm -rf "$(KERNEL_BUILD_DIR)"; \
+		mkdir -p "$(KERNEL_BUILD_DIR)"; \
+		printf '%s\n' "$$sig" > "$$stamp"; \
+	fi
+
 .PHONY: kernel
-kernel: check-build-dir runtime $(KERNEL_BUILD_DIR)/Makefile
+kernel: check-build-dir runtime kernel-config-check $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
@@ -214,13 +231,26 @@ KERNEL_KEXEC_BUILD_DIR := $(BUILD_DIR)/kernel-kexec
 KERNEL_KEXEC_ELF := $(KERNEL_KEXEC_BUILD_DIR)/slmos.elf
 
 .PHONY: kernel-kexec
-kernel-kexec: runtime $(KERNEL_KEXEC_BUILD_DIR)/Makefile
+kernel-kexec: runtime kernel-kexec-config-check $(KERNEL_KEXEC_BUILD_DIR)/Makefile
 ifneq ($(PLATFORM),X86_64)
 	@echo "kernel-kexec requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
 endif
 	@echo "Building kernel (kexec variant, link address 0x20000000)..."
 	$(CMAKE) --build $(KERNEL_KEXEC_BUILD_DIR)
 	@echo "kexec ELF: $(KERNEL_KEXEC_ELF)"
+
+.PHONY: kernel-kexec-config-check
+kernel-kexec-config-check:
+	@sig='$(KERNEL_KEXEC_BUILD_SIGNATURE)'; \
+	stamp="$(KERNEL_KEXEC_BUILD_DIR)/.build-config"; \
+	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
+		:; \
+	else \
+		echo "Kernel kexec build options changed; reconfiguring $(KERNEL_KEXEC_BUILD_DIR)"; \
+		rm -rf "$(KERNEL_KEXEC_BUILD_DIR)"; \
+		mkdir -p "$(KERNEL_KEXEC_BUILD_DIR)"; \
+		printf '%s\n' "$$sig" > "$$stamp"; \
+	fi
 
 $(KERNEL_KEXEC_BUILD_DIR)/Makefile:
 	@echo "Configuring kexec kernel build..."
@@ -787,9 +817,22 @@ QEMU_GUARD := $(shell if command -v systemd-run >/dev/null 2>&1 && systemd-run -
 
 # Build kernel with ENABLE_BOOT_TESTS (runs tests at boot and exits)
 .PHONY: kernel-test
-kernel-test: check-build-dir runtime $(KERNEL_TEST_BUILD_DIR)/Makefile
+kernel-test: check-build-dir runtime kernel-test-config-check $(KERNEL_TEST_BUILD_DIR)/Makefile
 	@echo "Building test kernel..."
 	$(CMAKE) --build $(KERNEL_TEST_BUILD_DIR)
+
+.PHONY: kernel-test-config-check
+kernel-test-config-check:
+	@sig='$(KERNEL_TEST_BUILD_SIGNATURE)'; \
+	stamp="$(KERNEL_TEST_BUILD_DIR)/.build-config"; \
+	if [ -f "$$stamp" ] && [ "$$(cat "$$stamp")" = "$$sig" ]; then \
+		:; \
+	else \
+		echo "Kernel test build options changed; reconfiguring $(KERNEL_TEST_BUILD_DIR)"; \
+		rm -rf "$(KERNEL_TEST_BUILD_DIR)"; \
+		mkdir -p "$(KERNEL_TEST_BUILD_DIR)"; \
+		printf '%s\n' "$$sig" > "$$stamp"; \
+	fi
 
 $(KERNEL_TEST_BUILD_DIR)/Makefile:
 	@echo "Configuring test kernel build..."

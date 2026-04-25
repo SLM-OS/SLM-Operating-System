@@ -170,6 +170,11 @@ without a compile-time guard.
 | `slm.eviction_policy()` | Current policy name string (`"lru"`, `"lfu"`, `"cacheus"`, `"xgboost"`, ...) or `nil`. |
 | `slm.eviction_set_policy(name)` | Admin surface only. Switch active eviction policy. Returns `true` on success, `false` on unknown name / feature off. |
 | `slm.eviction_stats()` | `{enabled, policy, weight_evictions, workspace_evictions, weight_allocated, weight_total, workspace_allocated, workspace_total, snapshot_candidates, expert_weights_bp}` or `nil`. CACHEUS expert weights are in basis points (0–10000). |
+| `slm.eviction_model_status(kind)` | Runtime blob status for one kind (`"xgboost"`, `"mlp"`, `"cacheus_config"`): `{kind, state, has_staged, has_active, has_rollback, staged?, active?, rollback?}` or `nil`. Each `*_meta` table contains `{version, kind_id, feature_schema_version, payload_len, checksum}`. |
+| `slm.eviction_model_load(kind, path)` | Admin surface only. Stage a blob from a VFS path into the RAM-backed eviction store. Returns `true` on success, `false` on invalid kind/path/blob. |
+| `slm.eviction_model_activate(kind)` | Admin surface only. Promote the staged blob for `kind` to active. Returns `true` on success, `false` when no staged blob exists or the feature is off. |
+| `slm.eviction_model_rollback(kind)` | Admin surface only. Restore the previous active blob for `kind`. Returns `true` on success, `false` when no rollback blob exists or the feature is off. |
+| `slm.eviction_model_clear(kind)` | Admin surface only. Clear staged, active, and rollback slots for `kind`. Returns `true` on success, `false` on invalid kind / feature off. |
 
 ### Model Memory and Inference
 

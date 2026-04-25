@@ -342,6 +342,44 @@ typedef struct {
 /* Populate `out` with the current eviction stats. Returns 0 on success. */
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 
+/* Runtime eviction-blob staging/activation backend (#dynamic-policy-loading).
+ * kind_id: 1 = xgboost, 2 = mlp, 3 = cacheus_config.
+ * state: 0 = empty, 1 = staged, 2 = active, 3 = rolled_back. */
+typedef struct {
+    uint16_t version;
+    uint16_t kind_id;
+    uint16_t feature_schema_version;
+    uint16_t _reserved0;
+    uint32_t payload_len;
+    uint32_t checksum;
+} RustEvictionBlobMeta;
+
+typedef struct {
+    uint16_t kind_id;
+    uint16_t state;
+    uint32_t has_staged;
+    uint32_t has_active;
+    uint32_t has_rollback;
+    RustEvictionBlobMeta staged;
+    RustEvictionBlobMeta active;
+    RustEvictionBlobMeta rollback;
+} RustEvictionBlobStatus;
+
+/* Stage a validated blob from `data[0..len)`. Returns 0 on success,
+ * -1 on invalid args / unknown kind, -2 when ai_eviction is disabled,
+ * -3 on parse/validation failure, -4 when the blob header kind does
+ * not match `kind_id`. */
+extern int32_t rust_eviction_blob_stage(uint16_t kind_id, const uint8_t *data, size_t len);
+
+/* Query, activate, roll back, or clear the runtime blob for `kind_id`.
+ * Status returns 0 on success, -1 on invalid args/kind, -2 when feature
+ * off. Activate returns -3 when no staged blob exists. Rollback returns
+ * -3 when no rollback blob exists. Clear returns 0 on success. */
+extern int32_t rust_eviction_blob_status(uint16_t kind_id, RustEvictionBlobStatus *out);
+extern int32_t rust_eviction_blob_activate(uint16_t kind_id);
+extern int32_t rust_eviction_blob_rollback(uint16_t kind_id);
+extern int32_t rust_eviction_blob_clear(uint16_t kind_id);
+
 /* Feature-name introspection (#112). */
 extern uint32_t rust_eviction_feature_count(void);
 extern size_t rust_eviction_feature_name(uint32_t index, uint8_t *buf, size_t buf_len);

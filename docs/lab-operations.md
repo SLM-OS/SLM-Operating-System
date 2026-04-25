@@ -30,7 +30,19 @@ This document describes how to interact with the embedded development lab hardwa
 | Power control | Kasa smart plug (via labctl) |
 | SD card deploy | SDWireC (Badgerd USB-C model) |
 | EEPROM | Sep 2024 firmware (do NOT update — see `docs/pi5-baremetal-status.md`) |
+| Deploy model | SDWire-first |
 | SD card | Dual-boot SLM-OS + Pi OS Lite — see `docs/pi5-dual-boot-setup.md` |
+
+### Raspberry Pi 5 (`pi-5-2`)
+
+| Component | Details |
+|-----------|---------|
+| Board | Raspberry Pi 5 (BCM2712), 4GB RAM |
+| Serial console | labctl-managed serial console |
+| Power control | labctl-managed smart plug |
+| Deploy model | No SDWire / maintenance-OS dual boot |
+| SD card deploy | No SDWire — preserve the dual-boot maintenance workflow |
+| Notes | Use `docs/deploy/pi5-sdcard.md` and `docs/pi5-dual-boot-setup.md` as the authoritative workflows |
 
 ### Jetson Orin Nano (`jetson-nano-2`)
 
@@ -95,7 +107,19 @@ ser2net provides TCP access to serial ports. Configuration is in `/etc/ser2net.y
 
 ## Deploying to Raspberry Pi 5
 
-The Pi 5 SD card is connected through a Badgerd SDWireC which allows the SD card to be switched between the host machine (for flashing) and the Pi 5 (for booting) without physical intervention.
+Pi 5 boards in the lab intentionally use **two** deploy models:
+
+- `pi-5-1`: SDWire-first deploy
+- `pi-5-2`: no-SDWire / maintenance-OS dual boot
+
+Preserve both models. Do not assume every Pi 5 workflow should be
+rewritten to match the other.
+
+### `pi-5-1`: SDWire-first deploy
+
+The `pi-5-1` SD card is connected through a Badgerd SDWireC which
+allows the SD card to be switched between the host machine (for
+flashing) and the Pi 5 (for booting) without physical intervention.
 
 ### SDWireC Commands
 
@@ -143,6 +167,20 @@ The boot partition (FAT32, labeled SLMOS) contains:
 - `armstub8-2712.bin` — EL3 stub for GIC group configuration
 - `config.txt` — bare-metal boot config
 - Standard Pi firmware: `bootcode.bin`, `start*.elf`, `fixup*.dat`, DTBs, `overlays/`
+
+### `pi-5-2`: no-SDWire / maintenance-OS dual boot
+
+`pi-5-2` should be treated as the lab reference for the no-SDWire Pi 5
+model. That means:
+
+- Linux maintenance access is a supported part of the workflow
+- dual-boot card layout is not an accident; it is a first-class deploy path
+- native ingress work should not erase the usefulness of this model
+
+Use these guides instead of trying to force an SDWire workflow onto it:
+
+- [`docs/deploy/pi5-sdcard.md`](deploy/pi5-sdcard.md)
+- [`docs/pi5-dual-boot-setup.md`](pi5-dual-boot-setup.md)
 
 ---
 

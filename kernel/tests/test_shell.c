@@ -16,6 +16,7 @@
 #include "../include/string.h"
 #include "../include/uart.h"
 #include "../include/slm_ffi.h"
+#include "ai_types.h"
 
 /* snprintf is part of the test kernel's runtime (kernel/lib) but isn't
  * pulled in by the headers above. Declare it once for all tests that
@@ -63,6 +64,148 @@ static int get_file_size(const char *path)
 
     return (int)info.size;
 }
+
+static uint32_t test_fnv1a32(const uint8_t *data, size_t len)
+{
+    uint32_t hash = 0x811C9DC5u;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= data[i];
+        hash *= 0x01000193u;
+    }
+    return hash;
+}
+
+static int write_binary_file(const char *path, const uint8_t *data, size_t len)
+{
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(path, &subpath);
+    if (!mnt || !subpath) return -1;
+    int fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (fd < 0) return -1;
+    int written = littlefs_file_write(mnt, fd, data, len);
+    littlefs_file_close(mnt, fd);
+    return written == (int)len ? 0 : -1;
+}
+
+static size_t build_shell_test_blob(uint16_t kind_id,
+                                    const uint8_t *payload,
+                                    size_t payload_len,
+                                    uint8_t *out,
+                                    size_t out_cap)
+{
+    uint32_t checksum = test_fnv1a32(payload, payload_len);
+    size_t total = 24 + payload_len;
+    if (out_cap < total) return 0;
+
+    out[0] = 'S'; out[1] = 'E'; out[2] = 'M'; out[3] = 'B';
+    out[4] = 1; out[5] = 0;
+    out[6] = (uint8_t)(kind_id & 0xFF);
+    out[7] = (uint8_t)(kind_id >> 8);
+    out[8] = 1; out[9] = 0;
+    out[10] = 0; out[11] = 0;
+    out[12] = (uint8_t)(payload_len & 0xFF);
+    out[13] = (uint8_t)((payload_len >> 8) & 0xFF);
+    out[14] = (uint8_t)((payload_len >> 16) & 0xFF);
+    out[15] = (uint8_t)((payload_len >> 24) & 0xFF);
+    out[16] = (uint8_t)(checksum & 0xFF);
+    out[17] = (uint8_t)((checksum >> 8) & 0xFF);
+    out[18] = (uint8_t)((checksum >> 16) & 0xFF);
+    out[19] = (uint8_t)((checksum >> 24) & 0xFF);
+    out[20] = 0; out[21] = 0; out[22] = 0; out[23] = 0;
+    memcpy(out + 24, payload, payload_len);
+    return total;
+}
+
+#ifdef CONFIG_AI_SCHEDULER
+static size_t build_sched_mlp_payload(uint32_t out_weight_bits,
+                                      uint8_t *out,
+                                      size_t out_cap)
+{
+    enum {
+        PAYLOAD_HEADER_LEN = 12,
+        W0 = AI_MLP_LAYER0_OUT * AI_MLP_LAYER0_IN,
+        B0 = AI_MLP_LAYER0_OUT,
+        W1 = AI_MLP_LAYER1_OUT * AI_MLP_LAYER1_IN,
+        B1 = AI_MLP_LAYER1_OUT,
+        W2 = AI_MLP_LAYER2_OUT * AI_MLP_LAYER2_IN,
+        B2 = AI_MLP_LAYER2_OUT,
+        W3 = AI_SCHED_N_ACTIONS * AI_MLP_LAYER3_IN,
+        B3 = AI_SCHED_N_ACTIONS,
+        FLOATS = W0 + B0 + W1 + B1 + W2 + B2 + W3 + B3,
+        TOTAL = PAYLOAD_HEADER_LEN + FLOATS * 4
+    };
+    size_t cursor = 0;
+    size_t idx = 0;
+
+    if (out_cap < TOTAL) return 0;
+    memset(out, 0, TOTAL);
+    out[0] = 'S'; out[1] = 'M'; out[2] = 'L'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 1; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = (uint8_t)(AI_SCHED_N_ACTIONS & 0xFF);
+    out[11] = (uint8_t)(AI_SCHED_N_ACTIONS >> 8);
+
+    cursor = PAYLOAD_HEADER_LEN;
+#define WRITE_U32_LE(bits)                                                   \
+    do {                                                                    \
+        uint32_t bits_ = (bits);                                            \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                          \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                   \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                  \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                  \
+        cursor += 4;                                                        \
+    } while (0)
+
+    for (idx = 0; idx < FLOATS; idx++) {
+        uint32_t bits = 0u;
+        if (idx == 0) bits = 0x3F800000u;
+        if (idx == W0 + B0) bits = 0x3F800000u;
+        if (idx == W0 + B0 + W1 + B1) bits = 0x3F800000u;
+        if (idx == W0 + B0 + W1 + B1 + W2 + B2) bits = out_weight_bits;
+        WRITE_U32_LE(bits);
+    }
+#undef WRITE_U32_LE
+
+    return cursor;
+}
+
+static size_t build_sched_config_payload(uint32_t enabled,
+                                         uint32_t min_target_ready,
+                                         uint32_t min_active_cpus,
+                                         uint32_t imbalance_num,
+                                         uint32_t imbalance_den,
+                                         uint8_t *out,
+                                         size_t out_cap)
+{
+    size_t cursor = 0;
+
+    if (out_cap < 32u) return 0;
+    memset(out, 0, 32u);
+    out[0] = 'S'; out[1] = 'C'; out[2] = 'F'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 1; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = 0; out[11] = 0;
+    cursor = 12;
+#define WRITE_U32_LE(bits)                                                   \
+    do {                                                                    \
+        uint32_t bits_ = (bits);                                            \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                          \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                   \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                  \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                  \
+        cursor += 4;                                                        \
+    } while (0)
+    WRITE_U32_LE(enabled);
+    WRITE_U32_LE(min_target_ready);
+    WRITE_U32_LE(min_active_cpus);
+    WRITE_U32_LE(imbalance_num);
+    WRITE_U32_LE(imbalance_den);
+#undef WRITE_U32_LE
+    return cursor;
+}
+#endif
 
 /* ============================================================================
  * Command Dispatch Tests
@@ -299,6 +442,139 @@ static void test_shell_cmd_eviction_features(void)
 {
     int ret = shell_execute("eviction features");
     TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_eviction_model_status(void)
+{
+    int ret = shell_execute("eviction model status");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+static void test_shell_cmd_eviction_model_lifecycle(void)
+{
+    static const char *path = "/mnt/files/test-eviction-mlp.blob";
+    static uint8_t blob[64];
+    const uint8_t payload[] = {0x10, 0x20, 'm', 'l', 'p'};
+    size_t blob_len = build_shell_test_blob(2, payload, sizeof(payload), blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("eviction model clear mlp"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("eviction model load mlp /mnt/files/test-eviction-mlp.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("eviction model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("eviction model activate mlp"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("eviction model status"));
+    TEST_ASSERT_NOT_EQUAL(0, shell_execute("eviction model rollback mlp"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("eviction model clear mlp"));
+    shell_execute("rm /mnt/files/test-eviction-mlp.blob");
+}
+
+static void test_shell_cmd_sched_model_lifecycle(void)
+{
+#ifndef CONFIG_AI_SCHEDULER
+    TEST_IGNORE_MESSAGE("CONFIG_AI_SCHEDULER not enabled");
+#else
+    static const char *path_a = "/mnt/files/test-sched-mlp-a.blob";
+    static const char *path_b = "/mnt/files/test-sched-mlp-b.blob";
+    static const char *path_c = "/mnt/files/test-sched-ppo-a.blob";
+    static const char *path_d = "/mnt/files/test-sched-ppo-b.blob";
+    static const char *path_e = "/mnt/files/test-sched-config-a.blob";
+    static const char *path_f = "/mnt/files/test-sched-config-b.blob";
+    static uint8_t payload_a[530000];
+    static uint8_t blob_a[530100];
+    static uint8_t payload_b[530000];
+    static uint8_t blob_b[530100];
+    static uint8_t payload_c[530000];
+    static uint8_t blob_c[530100];
+    static uint8_t payload_d[530000];
+    static uint8_t blob_d[530100];
+    static uint8_t payload_e[64];
+    static uint8_t blob_e[128];
+    static uint8_t payload_f[64];
+    static uint8_t blob_f[128];
+    size_t payload_len_a = build_sched_mlp_payload(0x40000000u, payload_a, sizeof(payload_a));
+    size_t payload_len_b = build_sched_mlp_payload(0x40400000u, payload_b, sizeof(payload_b));
+    size_t payload_len_c = build_sched_mlp_payload(0x3f000000u, payload_c, sizeof(payload_c));
+    size_t payload_len_d = build_sched_mlp_payload(0x40800000u, payload_d, sizeof(payload_d));
+    size_t payload_len_e = build_sched_config_payload(0u, 2u, 2u, 3u, 2u,
+                                                      payload_e, sizeof(payload_e));
+    size_t payload_len_f = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
+                                                      payload_f, sizeof(payload_f));
+    size_t blob_len_a;
+    size_t blob_len_b;
+    size_t blob_len_c;
+    size_t blob_len_d;
+    size_t blob_len_e;
+    size_t blob_len_f;
+
+    TEST_ASSERT_TRUE(payload_len_a > 0);
+    TEST_ASSERT_TRUE(payload_len_b > 0);
+    TEST_ASSERT_TRUE(payload_len_c > 0);
+    TEST_ASSERT_TRUE(payload_len_d > 0);
+    TEST_ASSERT_TRUE(payload_len_e > 0);
+    TEST_ASSERT_TRUE(payload_len_f > 0);
+    blob_len_a = build_shell_test_blob(0x1001u, payload_a, payload_len_a, blob_a, sizeof(blob_a));
+    blob_len_b = build_shell_test_blob(0x1001u, payload_b, payload_len_b, blob_b, sizeof(blob_b));
+    blob_len_c = build_shell_test_blob(0x1002u, payload_c, payload_len_c, blob_c, sizeof(blob_c));
+    blob_len_d = build_shell_test_blob(0x1002u, payload_d, payload_len_d, blob_d, sizeof(blob_d));
+    blob_len_e = build_shell_test_blob(0x1003u, payload_e, payload_len_e, blob_e, sizeof(blob_e));
+    blob_len_f = build_shell_test_blob(0x1003u, payload_f, payload_len_f, blob_f, sizeof(blob_f));
+    TEST_ASSERT_TRUE(blob_len_a > 0);
+    TEST_ASSERT_TRUE(blob_len_b > 0);
+    TEST_ASSERT_TRUE(blob_len_c > 0);
+    TEST_ASSERT_TRUE(blob_len_d > 0);
+    TEST_ASSERT_TRUE(blob_len_e > 0);
+    TEST_ASSERT_TRUE(blob_len_f > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_a, blob_a, blob_len_a));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_b, blob_b, blob_len_b));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_c, blob_c, blob_len_c));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_d, blob_d, blob_len_d));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_e, blob_e, blob_len_e));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_f, blob_f, blob_len_f));
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear mlp"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load mlp /mnt/files/test-sched-mlp-a.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate mlp"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load mlp /mnt/files/test-sched-mlp-b.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate mlp"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model rollback mlp"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear mlp"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear ppo"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load ppo /mnt/files/test-sched-ppo-a.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate ppo"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load ppo /mnt/files/test-sched-ppo-b.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate ppo"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model rollback ppo"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear ppo"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear config"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load config /mnt/files/test-sched-config-a.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate config"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load config /mnt/files/test-sched-config-b.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate config"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model rollback config"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear config"));
+    shell_execute("rm /mnt/files/test-sched-mlp-a.blob");
+    shell_execute("rm /mnt/files/test-sched-mlp-b.blob");
+    shell_execute("rm /mnt/files/test-sched-ppo-a.blob");
+    shell_execute("rm /mnt/files/test-sched-ppo-b.blob");
+    shell_execute("rm /mnt/files/test-sched-config-a.blob");
+    shell_execute("rm /mnt/files/test-sched-config-b.blob");
+#endif
 }
 
 /*
@@ -1969,6 +2245,114 @@ static void test_shell_cmd_write_large_content(void)
 }
 
 /*
+ * Test: put writes binary bytes decoded from hex.
+ */
+static void test_shell_cmd_put(void)
+{
+    const char *path = "/mnt/files/put_test.bin";
+    int ret = shell_execute("put /mnt/files/put_test.bin 000102ff4142");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    uint8_t buf[8];
+    int n = read_file_content(path, (char *)buf, sizeof(buf));
+    uint8_t expected[] = {0x00, 0x01, 0x02, 0xff, 0x41, 0x42};
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expected), n);
+    TEST_ASSERT_EQUAL_MEMORY(expected, buf, sizeof(expected));
+
+    shell_execute("rm /mnt/files/put_test.bin");
+}
+
+/*
+ * Test: put -a appends another binary chunk.
+ */
+static void test_shell_cmd_put_append(void)
+{
+    const char *path = "/mnt/files/put_append.bin";
+    int ret = shell_execute("put /mnt/files/put_append.bin aabb");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("put -a /mnt/files/put_append.bin ccdd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    uint8_t buf[8];
+    int n = read_file_content(path, (char *)buf, sizeof(buf));
+    uint8_t expected[] = {0xaa, 0xbb, 0xcc, 0xdd};
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expected), n);
+    TEST_ASSERT_EQUAL_MEMORY(expected, buf, sizeof(expected));
+
+    shell_execute("rm /mnt/files/put_append.bin");
+}
+
+/*
+ * Test: put rejects malformed hex.
+ */
+static void test_shell_cmd_put_invalid_hex(void)
+{
+    int ret = shell_execute("put /mnt/files/put_bad.bin 0xz1");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: put rejects missing arguments.
+ */
+static void test_shell_cmd_put_no_args(void)
+{
+    int ret = shell_execute("put");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: xput framed upload lifecycle writes exact bytes.
+ */
+static void test_shell_cmd_xput_lifecycle(void)
+{
+    const char *path = "/mnt/files/xput_test.bin";
+    int ret = shell_execute("xput begin /mnt/files/xput_test.bin 4");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput chunk 0 aabb");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput chunk 2 ccdd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput finish");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    uint8_t buf[8];
+    int n = read_file_content(path, (char *)buf, sizeof(buf));
+    uint8_t expected[] = {0xaa, 0xbb, 0xcc, 0xdd};
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expected), n);
+    TEST_ASSERT_EQUAL_MEMORY(expected, buf, sizeof(expected));
+
+    shell_execute("rm /mnt/files/xput_test.bin");
+}
+
+/*
+ * Test: xput rejects offset mismatch.
+ */
+static void test_shell_cmd_xput_offset_mismatch(void)
+{
+    int ret = shell_execute("xput begin /mnt/files/xput_bad.bin 4");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput chunk 1 aabb");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    ret = shell_execute("xput abort");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
+ * Test: xput finish rejects incomplete upload.
+ */
+static void test_shell_cmd_xput_incomplete_finish(void)
+{
+    int ret = shell_execute("xput begin /mnt/files/xput_short.bin 4");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput chunk 0 aabb");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput finish");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    ret = shell_execute("xput abort");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+}
+
+/*
  * Test: mkdir creates a directory.
  */
 static void test_shell_cmd_mkdir(void)
@@ -2630,6 +3014,9 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_bench_context_histogram_reinit);
     RUN_TEST(test_shell_cmd_bench_eviction);
     RUN_TEST(test_shell_cmd_eviction_features);
+    RUN_TEST(test_shell_cmd_eviction_model_status);
+    RUN_TEST(test_shell_cmd_eviction_model_lifecycle);
+    RUN_TEST(test_shell_cmd_sched_model_lifecycle);
     RUN_TEST(test_shell_cmd_model_pin_lifecycle);
     RUN_TEST(test_shell_cmd_model_preload);
     RUN_TEST(test_shell_cmd_model_preload_wait);
@@ -2819,6 +3206,13 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_write_escapes);
     RUN_TEST(test_shell_cmd_write_hex_escape);
     RUN_TEST(test_shell_cmd_write_large_content);
+    RUN_TEST(test_shell_cmd_put);
+    RUN_TEST(test_shell_cmd_put_append);
+    RUN_TEST(test_shell_cmd_put_invalid_hex);
+    RUN_TEST(test_shell_cmd_put_no_args);
+    RUN_TEST(test_shell_cmd_xput_lifecycle);
+    RUN_TEST(test_shell_cmd_xput_offset_mismatch);
+    RUN_TEST(test_shell_cmd_xput_incomplete_finish);
     RUN_TEST(test_shell_cmd_mkdir);
     RUN_TEST(test_shell_cmd_mkdir_no_args);
     RUN_TEST(test_shell_cmd_rm);

@@ -355,8 +355,10 @@ during the S4 capture session — don't break it. A fresh agent can
 verify with `ssh 192.168.4.93 sudo -n -l /usr/local/bin/slmos-kexec`
 which should print the binary path with no password prompt.
 
-**Avoid pi-5-2** (status: unknown, power: on) — it likely belongs to
-another project.
+**pi-5-2 is now a supported Pi 5 board**, but it uses the
+no-SDWire / maintenance-OS dual-boot model rather than the SDWire-first
+workflow used by `pi-5-1`. Do not assume its deploy path matches
+`pi-5-1`; use the Pi 5 deploy docs to choose the right model.
 
 **Don't use `cd` between MCP serial commands** — `mcp__labctl__serial_send`
 and `mcp__labctl__serial_capture` are stateless and operate on the SBC
