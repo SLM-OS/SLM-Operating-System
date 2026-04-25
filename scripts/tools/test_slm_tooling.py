@@ -624,6 +624,7 @@ def test_modelctl_apply_http_url_fetches_on_device():
         {
             "mkdir /mnt/files/policies": [b"Already exists\nslmos> "],
             "net init": [b"Network already initialized\nslmos> "],
+            "ifconfig": [b"sl0: flags=UP,DHCP(bound)\nslmos> "],
             "http get http://10.0.2.2/models/blob.bin /mnt/files/policies/blob.bin 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": [b"downloaded\nslmos> "],
             "eviction model clear xgboost": [b"cleared\nslmos> "],
             "eviction model load xgboost /mnt/files/policies/blob.bin": [b"loaded\nslmos> "],
@@ -658,6 +659,7 @@ def test_modelctl_apply_http_url_fetches_on_device():
     assert shell.commands == [
         "mkdir /mnt/files/policies",
         "net init",
+        "ifconfig",
         "http get http://10.0.2.2/models/blob.bin /mnt/files/policies/blob.bin 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "eviction model clear xgboost",
         "eviction model load xgboost /mnt/files/policies/blob.bin",
@@ -671,6 +673,10 @@ def test_modelctl_load_http_url_serial_initializes_network_first():
         {
             "mkdir /mnt/files/custom": [b"ok\nslmos> "],
             "net init": [b"DHCP bound 192.168.4.97\nslmos> "],
+            "ifconfig": [
+                b"sl0: flags=UP,DHCP(pending)\nslmos> ",
+                b"sl0: flags=UP,DHCP(bound)\nslmos> ",
+            ],
             "http get http://10.0.2.2/models/blob.bin /mnt/files/custom/blob.bin": [b"downloaded\nslmos> "],
             "sched model load mlp /mnt/files/custom/blob.bin": [b"loaded\nslmos> "],
             "sched model status": [b"mlp: staged\nslmos> "],
@@ -703,6 +709,8 @@ def test_modelctl_load_http_url_serial_initializes_network_first():
     assert shell.commands == [
         "mkdir /mnt/files/custom",
         "net init",
+        "ifconfig",
+        "ifconfig",
         "http get http://10.0.2.2/models/blob.bin /mnt/files/custom/blob.bin",
         "sched model load mlp /mnt/files/custom/blob.bin",
         "sched model status",

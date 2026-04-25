@@ -692,6 +692,11 @@ Implemented in this slice:
   - shell SHA-256 mismatch rejection, with no final file left behind
   - Lua/admin `slm.http_get(url, dest, sha256)` success path
   - `slm-modelctl.py apply --http-url --sha256 ...` for eviction blob activation
+- follow-up hardening in review fixes:
+  - `slm-modelctl.py --http-url` now waits for DHCP/static network
+    readiness before fetching
+  - `slm.http_get(...)` now requires the caller to bring networking up
+    first instead of racing asynchronous DHCP
 
 Current limits:
 

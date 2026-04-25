@@ -643,6 +643,19 @@ def fetch_blob(shell: Shell, args: argparse.Namespace, remote_path: str) -> None
     assert getattr(args, "http_url", None) is not None
     ensure_parent_dir(shell, remote_path, args.debug)
     run_shell_command(shell, "net init", args.debug)
+    deadline = time.monotonic() + max(args.timeout, 15.0)
+    while True:
+        status = run_shell_command(shell, "ifconfig", args.debug)
+        status_text = status.decode("utf-8", errors="replace")
+        if (
+            "DHCP(bound)" in status_text
+            or "DHCP(failed)" in status_text
+            or "STATIC" in status_text
+        ):
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError("network did not become usable before HTTP fetch")
+        time.sleep(0.5)
     command = f"http get {args.http_url} {remote_path}"
     if getattr(args, "sha256", None):
         command += f" {args.sha256}"

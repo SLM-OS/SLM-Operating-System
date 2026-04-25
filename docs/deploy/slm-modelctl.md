@@ -117,6 +117,8 @@ python3 scripts/tools/slm-modelctl.py \
   plane.
 - `--http-url` uses the target's own network path and the shell-level
   `http get` command; it avoids host-side upload entirely.
+- for shell-driven `--http-url` flows, `slm-modelctl.py` waits for the
+  target network stack to become usable before issuing `http get`
 - With `--sha256`, the target computes the downloaded file's SHA-256
   before the final rename and rejects the fetch on mismatch.
 

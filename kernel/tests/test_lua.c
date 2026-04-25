@@ -360,6 +360,21 @@ static void test_slm_http_get_invalid_returns_nil(void)
 
     lua_slm_close(L);
 }
+
+static void test_slm_http_get_requires_usable_network(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local r = slm.http_get('http://example.com/blob.bin', '/mnt/files/http-test.blob')\n"
+        "assert(r == nil, 'http_get should return nil when networking is not usable yet')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
 #endif /* ENABLE_NETWORKING */
 
 /*
@@ -3421,6 +3436,7 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_telnetd_status_shape);
     RUN_TEST(test_slm_telnetd_sessions_empty_and_kick_nomatch);
     RUN_TEST(test_slm_http_get_invalid_returns_nil);
+    RUN_TEST(test_slm_http_get_requires_usable_network);
 #endif
     RUN_TEST(test_slm_uptime);
     RUN_TEST(test_slm_uptime_us);

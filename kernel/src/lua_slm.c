@@ -2820,6 +2820,7 @@ static int l_telnetd_kick(lua_State *L) {
 
 /**
  * slm.http_get(url, dest) — fetch one HTTP resource into the VFS.
+ * Requires networking to already be initialized and usable.
  * Returns a result table on success, nil on any error.
  */
 static int l_http_get(lua_State *L) {
@@ -2828,17 +2829,17 @@ static int l_http_get(lua_State *L) {
     const char *path = luaL_checkstring(L, 2);
     const char *expected_sha256 = luaL_optstring(L, 3, NULL);
     struct net_http_get_result result;
+    struct net_info info;
     char resolved[VFS_MAX_PATH];
 
     if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
         lua_pushnil(L);
         return 1;
     }
-    if (!net_is_up()) {
-        if (net_init() != 0) {
-            lua_pushnil(L);
-            return 1;
-        }
+    if (!net_is_up() || net_get_info(&info) != 0 || !info.link_up ||
+        (info.dhcp_enabled && info.dhcp_status == NET_DHCP_PENDING)) {
+        lua_pushnil(L);
+        return 1;
     }
     if (net_http_get_file(url, resolved, expected_sha256, &result) != 0) {
         lua_pushnil(L);
