@@ -379,6 +379,15 @@ void kernel_main(void *dtb)
                     extern int user_hef_init(void);
                     user_hef_init();
                 }
+
+                /* Write the embedded MNIST test digits (if built with
+                 * MNIST_DIGITS_DIR=...) to /mnt/files/digits/ so
+                 * slm.model_infer_file() has a known-good demo set
+                 * out of the box. Stub is a no-op when not embedded. */
+                {
+                    extern int mnist_digit_init(void);
+                    mnist_digit_init();
+                }
             } else {
                 WARN("Failed to mount LittleFS");
             }

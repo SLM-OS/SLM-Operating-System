@@ -372,7 +372,8 @@ unchanged.
    the first op of the MNIST graph and skip the per-op CPU calls.
 3. Lower the `select_backend` matmul threshold from 4,096 to 256 so MNIST's
    FC layer routes to GPU. Threshold tuning is a hyperparameter — leave a
-   `TODO(M9)` for proper measurement.
+   follow-up note for proper hardware-measured tuning rather than reusing
+   an `M9` label (M9 is now claimed by the runtime input swap milestone).
 
 **Test plan:**
 - `slm.model_infer(mnist)` returns the same 10 logits as the CPU path on
@@ -434,7 +435,7 @@ on the GPU. They are the natural follow-ups but should not block M0–M8.
 |---|---|
 | **Conv2D SASS register pressure.** Direct conv with 25 MACs in the inner loop may want more than the default 128 registers per thread. | M5 first iteration: launch with `REGISTER_COUNT_V = 255` (max). If CUDA reports register spills (visible in `nvcc -Xptxas -v`), restructure the loop. |
 | **Multi-CTA scheduling on a single SM.** GA10B has 8 SMs but the kernel runs in one TPC's compute pipe today. M0 should reveal whether multi-CTA actually distributes across SMs or serializes onto one. | If serialized: investigate the QMD's `SM_DISABLE_MASK` and channel preempt mode settings. Should not block MNIST functioning, only perf. |
-| **fp32 sentinel polling exact-equality.** fp32 30.0 is an exact bit pattern (0x41F00000) so M1's `expected_payload = 0x41F00000` is exact. But Conv outputs (M5) won't be exact — they're sums of many fp32 muls and the rounding mode matters. | M5 onwards: don't use `expected_payload` for Conv-output validation. SLM-OS just polls "any non-zero write to the sentinel" then the Rust runtime cross-checks against CPU. M6's handoff v5 must support this "watchdog" mode. |
+| **~~fp32 sentinel polling exact-equality~~ (RESOLVED in M10).** ~~fp32 30.0 is an exact bit pattern (0x41F00000) so M1's `expected_payload = 0x41F00000` is exact. But Conv outputs (M5) won't be exact — they're sums of many fp32 muls and the rounding mode matters.~~ | ~~M5 onwards: don't use `expected_payload` for Conv-output validation. SLM-OS just polls "any non-zero write to the sentinel" then the Rust runtime cross-checks against CPU. M6's handoff v5 must support this "watchdog" mode.~~ M10 retired value-sentinel polling entirely on the SLM-OS side: each op's pushbuffer ends with a `REPORT_SEMAPHORE_EXECUTE` (RELEASE), and SLM-OS polls the semaphore for a magic payload (0xCAFEDEAD). No fp32 / sentinel-zero issues. The launcher's pre-kexec self-check still uses value-sentinel polling because Linux's nvgpu owns the GPU there. |
 | **Linux helper builds 10 QMDs pre-kexec — but the channel handoff only describes one.** | M6's handoff v5 explicitly carries an array of QMDs. |
 | **SAME padding semantics.** ONNX `SAME_UPPER` with odd kernel size pads more on bottom-right than top-left. Easy to get wrong. | M5 unit test: small input + known-padding-sensitive weight, compare against CPU. |
 | **Memory budget on jetson-nano-1.** Plenty of free RAM (~7 GB) and nvmap heap, but multi-CTA dispatches and Conv output buffers do grow. | Track total nvmap allocation; the largest single buffer is Conv1's 25 KB output. Far below any realistic limit. |
@@ -473,13 +474,34 @@ TODO).
 | M4 — MaxPool2D | ✅ done | maxpool2d_fp32: pool1 (2×2/2), pool2 (3×3/3) — all match CPU |
 | M5 — Conv2D | ✅ done | conv2d_fp32_direct: conv1 (6,272 cells) + conv2 (3,136 cells) — all match CPU |
 | M6 — pipeline + handoff v5 | ✅ done | 2-op test pipeline + matmul4x4_mt_fp32 chain validates end-to-end |
-| M7 — Rust runtime wiring | ⏸ deferred | Shell-only path proves correctness; Lua/Rust integration is scheduled work |
+| M7 — Lua/shell + Rust runtime wiring | ✅ done | `slm.gpu_run_mnist()` Lua binding + `nvgpu run-mnist` shell command (PR #373/#376); `engine::run_inference` short-circuits to `gpu::run_mnist_gpu_fastpath` when the active model is "mnist" and GPU compute is ready |
 | M8 — end-to-end MNIST | ✅ done | 8-op chain produces logits matching CPU NEON, argmax = 3 |
+| M9 — runtime input swap (handoff v6) | ✅ done | `slm.gpu_set_mnist_input{,_fill}` + `ga10b_bringup_set_input{,_fill}` overwrite the GPU's input tensor between dispatches; cache-clean + DSB sequence verified; PR #376 |
+| M10 — SEMAPHORE_RELEASE completion + custom-file demo | ✅ done | `ga10b_build_launch_kernel_with_sema_pushbuffer` appends a `REPORT_SEMAPHORE_EXECUTE` (OP=RELEASE) to each op's pushbuffer. AMPERE_COMPUTE_B drains the compute pipeline and flushes L2 → DRAM before the release fires, so polling the semaphore is a real "all output is in DRAM" signal. Closes #372 (sentinel-zero deadlock) and #390 (Conv1 truncation past 4 KB). Adds `slm.model_infer_bytes(idx, bytes)` and `slm.model_infer_file(idx, path)` Lua bindings + 10 MNIST test-digit fixtures embedded at `/mnt/files/digits/digit_N.bin` for demo-grade end-to-end GPU classification of arbitrary inputs |
 
 **Status as of 2026-04-25:** MNIST inference functioning on the
-Jetson GA10B GPU from SLM-OS post-kexec. The branch
-`jetson-gpu-multicta` carries M0, M1–M5 (one batched commit), M6,
-and M8 — see `git log` for hardware-validation traces.
+Jetson GA10B GPU from SLM-OS post-kexec for **arbitrary user-
+supplied digit images** via `slm.model_infer_file('/mnt/files/digits/digit_N.bin')`.
+Hardware-validated on jetson-nano-1: digit_3, digit_7, digit_0
+all classified correctly through the GPU fastpath. M0..M10 all
+landed; the `jetson-gpu-multicta` branch carries M0, M1–M5 (one
+batched commit), M6, and M8; M7 (Lua/shell + Rust-runtime wiring)
+ships across PR #373 and #376; M9 (runtime input swap, handoff v6)
+ships in PR #376; M10 (SEMAPHORE_RELEASE + custom-file demo) is
+the current PR. See `git log` for hardware-validation traces.
+
+**Completion-signal architecture (M10):** Per-op completion now
+uses AMPERE_COMPUTE_B's `REPORT_SEMAPHORE_EXECUTE` instead of
+polling a value-sentinel cell of the kernel's output. The
+launcher-pre-kexec self-check still uses the value-sentinel
+mode because Linux's nvgpu has its own L2 flush sequencing; the
+sentinel-cell calibration in `pipeline_sentinels.bin` is still
+read by SLM-OS only for `read_pipeline_output`'s base-address
+arithmetic (final op's `output_phys` = base + sentinel × 4, and
+the launcher pins the final op's sentinel to cell 0 so the
+read-back gets the full logits buffer). Future cleanup: add a
+dedicated `final_output_phys` field to v6+ handoffs so the
+sentinel-and-read-base concerns separate cleanly.
 
 Two non-obvious bugs were uncovered along the way and are
 documented in commit messages:
