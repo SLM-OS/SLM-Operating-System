@@ -99,8 +99,13 @@ pub enum Backend {
 
 /// Select the best backend for an operator.
 ///
-/// Heuristic: route large MatMul/Gemm/Conv to GPU (if available),
-/// keep small or element-wise ops on CPU to avoid transfer overhead.
+/// Heuristic: route MatMul/Gemm/Conv to GPU when input size justifies
+/// the dispatch overhead. Thresholds are deliberately low: MNIST's FC
+/// layer is 1×256×10 = 2,560 input elements, and routing it to GPU
+/// validates the M7 wiring even though a per-op dispatch costs more
+/// than batching the whole graph. The graph-level fast path
+/// (`run_mnist_gpu_fastpath`) takes precedence over per-op dispatch
+/// when the engine sees the MNIST signature.
 pub fn select_backend(
     op: OpType,
     input_elements: usize,
@@ -110,10 +115,9 @@ pub fn select_backend(
         return Backend::Cpu;
     }
 
-    // Thresholds for GPU offload (preliminary, to be tuned with real hardware)
     match op {
-        OpType::MatMul | OpType::Gemm if input_elements > 4096 => Backend::Gpu,
-        OpType::Conv if input_elements > 8192 => Backend::Gpu,
+        OpType::MatMul | OpType::Gemm if input_elements >= 256 => Backend::Gpu,
+        OpType::Conv if input_elements >= 256 => Backend::Gpu,
         _ => Backend::Cpu,
     }
 }
@@ -125,17 +129,15 @@ pub enum GpuError {
     NotReady,
     OutOfMemory,
     SyncFailed,
+    DispatchFailed(i32),
 }
 
-/// Stub: Execute MatMul on GPU.
-///
-/// When GSP firmware is loaded, this would:
-/// 1. Ensure inputs are synced for GPU (cache clean)
-/// 2. Submit matmul command via gpu_submit()
-/// 3. Wait for completion via gpu_wait()
-/// 4. Sync output for CPU (cache invalidate)
-///
-/// Currently always returns `Err(NotReady)`, forcing CPU fallback.
+/// Per-op MatMul on GPU. Today this is a stub: SLM-OS's GA10B
+/// dispatch path only exposes whole-graph MNIST inference via
+/// `run_mnist_gpu_fastpath`. Once a per-op dispatch lands (a
+/// dedicated GEMM kernel handoff that doesn't require pre-uploading
+/// the entire MNIST pipeline pre-kexec), this can call into it.
+/// Today returns `Err(NotReady)` so the engine falls back to CPU.
 pub fn gpu_execute_matmul(
     _a_ptr: *const f32,
     _b_ptr: *const f32,
@@ -145,6 +147,71 @@ pub fn gpu_execute_matmul(
     _n: usize,
 ) -> Result<(), GpuError> {
     Err(GpuError::NotReady)
+}
+
+/// Whole-graph MNIST GPU dispatch: swap the input tensor in via
+/// `slm_gpu_set_mnist_input`, then run the pre-uploaded 8-op pipeline
+/// via `slm_gpu_run_mnist`, then copy the resulting 10 logits to
+/// `output`. Returns the number of output floats written (always 10
+/// on success).
+///
+/// Preconditions enforced by the caller (`engine::run_inference`):
+/// the active model is `mnist`, GPU compute is ready, and the input
+/// is exactly 1×1×28×28 = 784 fp32 values.
+///
+/// On failure returns `Err(GpuError::DispatchFailed(rc))` so the
+/// caller can fall back to the CPU path.
+pub fn run_mnist_gpu_fastpath(
+    input: *const f32,
+    input_len: usize,
+    output: *mut f32,
+    output_len: usize,
+) -> Result<usize, GpuError> {
+    const MNIST_INPUT_FLOATS: usize = 1 * 1 * 28 * 28;
+    const MNIST_LOGIT_COUNT: usize = 10;
+
+    if input_len != MNIST_INPUT_FLOATS {
+        return Err(GpuError::NotReady);
+    }
+    if output_len < MNIST_LOGIT_COUNT {
+        return Err(GpuError::NotReady);
+    }
+    if input.is_null() || output.is_null() {
+        return Err(GpuError::NotReady);
+    }
+
+    // Reinterpret the f32 input slice as raw bytes for the FFI.
+    // SAFETY: input is non-null and we've checked it covers
+    // MNIST_INPUT_FLOATS f32 values. The byte view aliases the same
+    // memory for the duration of the FFI call.
+    let input_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            input as *const u8,
+            MNIST_INPUT_FLOATS * core::mem::size_of::<f32>(),
+        )
+    };
+    let rc = kernel_ffi::gpu_set_mnist_input(input_bytes);
+    if rc < 0 {
+        return Err(GpuError::DispatchFailed(rc));
+    }
+
+    let mut logits = [0f32; MNIST_LOGIT_COUNT];
+    let rc = kernel_ffi::gpu_run_mnist(&mut logits);
+    if rc < 0 {
+        return Err(GpuError::DispatchFailed(rc));
+    }
+
+    // SAFETY: output is non-null and output_len ≥ MNIST_LOGIT_COUNT
+    // (checked above). copy_nonoverlapping is sound because logits
+    // is a stack array distinct from the output buffer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            logits.as_ptr(),
+            output,
+            MNIST_LOGIT_COUNT,
+        );
+    }
+    Ok(MNIST_LOGIT_COUNT)
 }
 
 /// Make a model's weights GPU-accessible by flushing CPU caches.

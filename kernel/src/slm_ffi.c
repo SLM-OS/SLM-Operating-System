@@ -298,9 +298,16 @@ int slm_gpu_get_info(RustGpuInfo *info)
     info->memory_size = gi.memory_size;
     info->unified_memory = gi.unified_memory ? 1 : 0;
 
-    /* Check if compute is actually ready (submit function implemented) */
-    /* The gpu driver struct is internal; detect by checking capabilities */
-    info->compute_ready = 0;  /* Currently no driver has submit/wait */
+    /* Compute readiness: true on platforms that expose a working
+     * model-level GPU dispatch entrypoint via this FFI. Today only
+     * Jetson (GA10B inherit-from-Linux path) qualifies — see
+     * slm_gpu_run_mnist below. The Rust runtime treats this as a
+     * hint; actual dispatch failures fall back to the CPU path. */
+#ifdef PLATFORM_JETSON_ORIN_NANO
+    info->compute_ready = 1;
+#else
+    info->compute_ready = 0;
+#endif
 
     return 0;
 }

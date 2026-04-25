@@ -668,6 +668,30 @@ impl InferenceEngine {
 // Public API — uses the static engine with lock
 // =============================================================================
 
+/// Detect whether the given `model_index` is a registered "mnist"
+/// model and the GPU has compute ready. When true, the MNIST graph
+/// can be dispatched whole via `gpu::run_mnist_gpu_fastpath` rather
+/// than walked op-by-op. Per the M7 plan, this is the first end-to-
+/// end Backend::Gpu integration: the per-op dispatch path lacks a
+/// general GEMM/Conv FFI today.
+///
+/// Looks up the model's name by `model_index` (rather than asking the
+/// registry to resolve "mnist" → index) so repeated `model_load_mnist`
+/// calls — each producing a fresh registry slot — all qualify, not
+/// just the first one.
+fn mnist_gpu_fastpath_eligible(model_index: usize) -> bool {
+    let caps = super::gpu::GpuCapabilities::detect();
+    if !caps.has_compute() {
+        return false;
+    }
+    let info = match registry::get_info(model_index) {
+        Some(i) => i,
+        None => return false,
+    };
+    let name_len = info.name.iter().position(|&b| b == 0).unwrap_or(info.name.len());
+    &info.name[..name_len] == b"mnist"
+}
+
 /// Run inference on a loaded model using the static engine.
 ///
 /// Thread-safe: only one inference at a time via spinlock.
@@ -682,8 +706,32 @@ pub fn run_inference(
 
     let start = kernel_ffi::get_time_ns();
 
+    // GPU fast path: when the active model is "mnist" and the GPU
+    // is compute-ready, route the whole graph through the v6 handoff
+    // SLM-OS already pre-uploaded. Falls through to the CPU path on
+    // any error so the user still gets an answer.
+    let mut result: Result<usize, EngineError>;
+    if mnist_gpu_fastpath_eligible(model_index) {
+        crate::log::log_info(b"[engine] mnist GPU fastpath eligible -- dispatching\0");
+        match super::gpu::run_mnist_gpu_fastpath(input, input_len, output, output_len) {
+            Ok(n) => {
+                crate::log::log_info(b"[engine] mnist GPU fastpath success\0");
+                let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+                record_inference(elapsed);
+                engine_unlock();
+                return Ok(n);
+            }
+            Err(_) => {
+                crate::log::log_info(b"[engine] mnist GPU fastpath failed -- falling back to CPU\0");
+                // Fall through to CPU path. Caller still gets a valid
+                // result. The rc isn't surfaced today; once a diagnostic
+                // ring lands, log it here.
+            }
+        }
+    }
+
     // SAFETY: We hold the engine lock, exclusive access guaranteed.
-    let result = unsafe {
+    result = unsafe {
         let engine = &mut *ENGINE.get();
         match engine.init(model_index) {
             Ok(()) => engine.run(input, input_len, output, output_len),

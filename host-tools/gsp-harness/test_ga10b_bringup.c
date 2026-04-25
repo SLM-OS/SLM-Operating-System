@@ -1530,6 +1530,116 @@ static void test_launch_kernel_pb_uses_ampere_pcas2_b(void)
 }
 
 /* ======================================================================
+ * launch-kernel-with-semaphore pushbuffer layout (#372 + #390 fix)
+ * ====================================================================== */
+
+static void test_launch_kernel_with_sema_pb_size(void)
+{
+    printf("== test_launch_kernel_with_sema_pb_size ==\n");
+    /* 13 dwords for the launch_kernel prefix + 10 dwords for the
+     * REPORT_SEMAPHORE release tail (5 method headers, each followed
+     * by their data dword). 23 total. */
+    REQUIRE_EQ(GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS, 23u);
+}
+
+static void test_launch_kernel_with_sema_pb_layout(void)
+{
+    printf("== test_launch_kernel_with_sema_pb_layout ==\n");
+    /* Verify the first 13 dwords are bit-identical to the plain
+     * launch_kernel pushbuffer (same QMD), then the 10-dword sema
+     * release tail follows. Pin layout so a future refactor of
+     * either builder doesn't accidentally desync them. */
+    uint32_t pb_plain[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+    uint32_t pb_sema[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
+
+    const uint64_t qmd_va = 0x1ffc02b000ULL;
+    const uint64_t sem_va = 0x1ffc08b000ULL;
+    const uint32_t payload = 0xCAFEDEADu;
+
+    ga10b_build_launch_kernel_pushbuffer(pb_plain, qmd_va);
+    ga10b_build_launch_kernel_with_sema_pushbuffer(
+        pb_sema, qmd_va, sem_va, payload);
+
+    /* Prefix matches plain dispatch. */
+    REQUIRE_EQ(memcmp(pb_plain, pb_sema, sizeof(pb_plain)), 0);
+
+    /* Tail layout: REPORT_SEMAPHORE_PAYLOAD_LOWER/UPPER,
+     * REPORT_SEMAPHORE_ADDRESS_LOWER/UPPER, REPORT_SEMAPHORE_EXECUTE.
+     * Method headers are NVC56F_METHOD_HEADER_INC(count=1, subch=1),
+     * each followed by a single data dword.
+     *
+     * Method offsets (bytes, from clc7c0.h):
+     *   PAYLOAD_LOWER  = 0x0158 → method_id 0x56
+     *   PAYLOAD_UPPER  = 0x015C → method_id 0x57
+     *   ADDRESS_LOWER  = 0x0160 → method_id 0x58
+     *   ADDRESS_UPPER  = 0x0164 → method_id 0x59
+     *   EXECUTE        = 0x0168 → method_id 0x5A
+     */
+    /* pb[13]: PAYLOAD_LOWER header, pb[14]: payload value */
+    REQUIRE_EQ(pb_sema[13] & 0x1FFFu, 0x158u / 4u);  /* method_id */
+    REQUIRE_EQ((pb_sema[13] >> 13) & 0x7u, 1u);      /* subch 1 */
+    REQUIRE_EQ(pb_sema[14], payload);
+
+    /* pb[15]: PAYLOAD_UPPER header, pb[16]: high payload (0 for 1-word) */
+    REQUIRE_EQ(pb_sema[15] & 0x1FFFu, 0x15Cu / 4u);
+    REQUIRE_EQ(pb_sema[16], 0u);
+
+    /* pb[17]: ADDRESS_LOWER header, pb[18]: low 32 bits of sem_va */
+    REQUIRE_EQ(pb_sema[17] & 0x1FFFu, 0x160u / 4u);
+    REQUIRE_EQ(pb_sema[18], (uint32_t)(sem_va & 0xFFFFFFFFu));
+
+    /* pb[19]: ADDRESS_UPPER header, pb[20]: high bits of sem_va */
+    REQUIRE_EQ(pb_sema[19] & 0x1FFFu, 0x164u / 4u);
+    REQUIRE_EQ(pb_sema[20], (uint32_t)((sem_va >> 32) & 0xFFu));
+
+    /* pb[21]: EXECUTE header, pb[22]: OP=RELEASE | STRUCTURE=ONE_WORD.
+     * The exact bits ensure the GPU waits for prior compute to drain,
+     * flushes L2, then writes a 32-bit payload (no timestamp). */
+    REQUIRE_EQ(pb_sema[21] & 0x1FFFu, 0x168u / 4u);
+    /* OP_RELEASE=0 in [4:0]; STRUCTURE_SIZE_ONE_WORD=1 in bit 8 (per
+     * clc7c0.h NVC7C0_REPORT_SEMAPHORE_EXECUTE_STRUCTURE_SIZE
+     * field [4:3]; ONE_WORD = 1<<3 = 0x8). */
+    uint32_t exec = pb_sema[22];
+    REQUIRE_EQ(exec & 0x7u, 0u);                     /* OPERATION=RELEASE */
+    REQUIRE_EQ((exec >> 3) & 0x3u, 1u);              /* SIZE=ONE_WORD */
+}
+
+static void test_launch_kernel_with_sema_pb_idempotent(void)
+{
+    printf("== test_launch_kernel_with_sema_pb_idempotent ==\n");
+    uint32_t pb1[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
+    uint32_t pb2[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
+    memset(pb2, 0xCC, sizeof(pb2));
+
+    ga10b_build_launch_kernel_with_sema_pushbuffer(
+        pb1, 0x1ffc013000ULL, 0x1ffc08b000ULL, 0xDEADBEEFu);
+    ga10b_build_launch_kernel_with_sema_pushbuffer(
+        pb2, 0x1ffc013000ULL, 0x1ffc08b000ULL, 0xDEADBEEFu);
+    REQUIRE_EQ(memcmp(pb1, pb2, sizeof(pb1)), 0);
+}
+
+static void test_launch_kernel_with_sema_pb_payload_passthrough(void)
+{
+    printf("== test_launch_kernel_with_sema_pb_payload_passthrough ==\n");
+    /* Confirm the caller-supplied payload lands at pb[14] verbatim.
+     * The kernel uses 0xCAFEDEAD as the per-op completion payload —
+     * if a future refactor masked or transformed the payload, the
+     * polling loop would never match. */
+    uint32_t pb[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
+    ga10b_build_launch_kernel_with_sema_pushbuffer(
+        pb, 0x1ffc013000ULL, 0x1ffc08b000ULL, 0xDEADBEEFu);
+    REQUIRE_EQ(pb[14], 0xDEADBEEFu);
+
+    ga10b_build_launch_kernel_with_sema_pushbuffer(
+        pb, 0x1ffc013000ULL, 0x1ffc08b000ULL, 0xCAFEDEADu);
+    REQUIRE_EQ(pb[14], 0xCAFEDEADu);
+
+    ga10b_build_launch_kernel_with_sema_pushbuffer(
+        pb, 0x1ffc013000ULL, 0x1ffc08b000ULL, 0u);
+    REQUIRE_EQ(pb[14], 0u);
+}
+
+/* ======================================================================
  * Handoff v3 — channel + kernel-launch state
  * ====================================================================== */
 
@@ -2246,6 +2356,10 @@ int main(void)
     test_launch_kernel_pb_qmd_misalignment_truncates();
     test_launch_kernel_pb_idempotent();
     test_launch_kernel_pb_uses_ampere_pcas2_b();
+    test_launch_kernel_with_sema_pb_size();
+    test_launch_kernel_with_sema_pb_layout();
+    test_launch_kernel_with_sema_pb_idempotent();
+    test_launch_kernel_with_sema_pb_payload_passthrough();
 
     test_handoff_v6_layout_size();
     test_handoff_v4_expected_payload_offset();

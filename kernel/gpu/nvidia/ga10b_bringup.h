@@ -260,6 +260,42 @@ uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
 uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
                                               uint64_t qmd_gpu_va);
 
+/* Size of the launch-kernel-with-semaphore pushbuffer in dwords.
+ *
+ * Extends GA10B_LAUNCH_KERNEL_PB_DWORDS (13) with a REPORT_SEMAPHORE
+ * release tail (10 dwords: payload lower/upper, address lower/upper,
+ * execute, each as a 1-method-1-data pair). Total: 23 dwords.
+ *
+ * The semaphore release on AMPERE_COMPUTE_B with default flags waits
+ * for prior compute to drain and flushes L2 → DRAM before the release
+ * write becomes visible. Using this instead of a value-sentinel poll
+ * on the kernel's output buffer guarantees:
+ *   - completion signal is independent of the kernel's output values
+ *     (fixes the polling-zero deadlock for inputs whose sentinel cell
+ *      computes to 0.0f, GH #372);
+ *   - the full output reaches DRAM, not just the cells that happen
+ *     to be in L2's writeback queue (fixes the 4 KB truncation, #390). */
+#define GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS 23u
+
+/* Builder for the launch-kernel-with-semaphore pushbuffer. Same QMD
+ * dispatch as ga10b_build_launch_kernel_pushbuffer, with a trailing
+ * REPORT_SEMAPHORE release that fires `payload` to `sem_gpu_va` after
+ * the GPU's compute pipeline has drained for this op.
+ *
+ * Caller must:
+ *   1. Pre-clear the semaphore at sem_gpu_va to a known value
+ *      (typically 0) before submission.
+ *   2. After GP_PUT advances, poll the semaphore at the corresponding
+ *      CPU phys for a value matching `payload` (or any non-zero if
+ *      `payload` itself is non-zero and pre-clear was 0).
+ *
+ * `pb` must point at ≥ GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS uint32_t
+ * slots. */
+uint32_t ga10b_build_launch_kernel_with_sema_pushbuffer(uint32_t *pb,
+                                                         uint64_t qmd_gpu_va,
+                                                         uint64_t sem_gpu_va,
+                                                         uint32_t payload);
+
 /* Phase 8: launch a pre-uploaded compute kernel.
  *
  * Requires a v3 channel handoff (shader / QMD / output pre-populated
