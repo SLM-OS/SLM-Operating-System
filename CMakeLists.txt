@@ -519,6 +519,14 @@ set(KERNEL_SOURCES
     kernel/fs/littlefs_slm.c
     kernel/fs/littlefs_vfs.c
 
+    # FatFs library (Elm-Chan R0.16 vendored under kernel/lib/fatfs/).
+    # Used by the dynamic-kernel-replace path (#368) to read/write
+    # the FAT32 boot partition. Single-disk binding lives in
+    # diskio.c, which forwards FatFs sectors to a `struct blkdev`.
+    kernel/lib/fatfs/ff.c
+    kernel/lib/fatfs/ffunicode.c
+    kernel/lib/fatfs/diskio.c
+
     # Component system and FFI (x86-64 provides stubs in platform_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/component.c>
     kernel/src/slm_ffi.c
@@ -610,6 +618,12 @@ set(TEST_SOURCES
     # buffer construction and compile on every platform, even though
     # the bcm_mailbox.c MMIO transport is RASPI5-only).
     kernel/tests/test_bcm_mailbox.c
+    # FatFs / FAT32 integration tests — exercises the diskio shim
+    # against the ramdisk stub block driver. Stage 2 of #368.
+    # Intentionally NOT platform-gated: FatFs and the ramdisk are
+    # platform-neutral (no MMIO, only PMM + memcpy), so the same
+    # tests are valuable on every test target including x86-64.
+    kernel/tests/test_fat32.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for

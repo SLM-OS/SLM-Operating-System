@@ -145,6 +145,10 @@ int test_suite_dtb(void);
 /* BCM mailbox property-tag buffer tests (#367, dynamic-kernel-replace Stage 1) */
 int test_suite_bcm_mailbox(void);
 
+/* FatFs / FAT32 integration tests (#368, dynamic-kernel-replace Stage 2) */
+int test_suite_fat32(void);
+
+
 /* General-purpose FDT reader tests (kernel/lib/fdt) */
 int test_suite_fdt(void);
 
