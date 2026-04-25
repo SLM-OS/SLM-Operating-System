@@ -977,8 +977,18 @@ int ga10b_bringup_address_space(struct ga10b_bringup *b)
  * this. The shell-driven flow is inherently sequential (prepare →
  * inherit → channel → submit), so this is fine. If a future caller
  * needs multiple inherited channels, promote this to a per-channel
- * struct passed through b->. */
+ * struct passed through b->.
+ *
+ * Visibility: `static` in production, file-scope under
+ * SLM_HOST_HARNESS so the test harness can drive
+ * input_buf_phys/size synthetically without simulating the full
+ * Phase-6 inherit path. Production code does not declare an extern
+ * for this symbol. */
+#ifdef SLM_HOST_HARNESS
+struct ga10b_channel_handoff g_handoff;
+#else
 static struct ga10b_channel_handoff g_handoff;
+#endif
 
 /* Scan a physical-memory range for the handoff magic, at the given
  * stride. Returns the address of the first match, or 0 if not found.

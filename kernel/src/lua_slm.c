@@ -589,10 +589,12 @@ static int l_gpu_set_mnist_input(lua_State *L) {
  */
 static int l_gpu_set_mnist_input_fill(lua_State *L) {
     if (!L) return 0;
-    lua_Integer raw_bits = luaL_checkinteger(L, 1);
-    lua_Integer raw_n    = luaL_checkinteger(L, 2);
-    uint32_t value_bits = (uint32_t)(uint64_t)raw_bits;
-    uint32_t n_floats   = (uint32_t)(uint64_t)raw_n;
+    /* Lua integers are signed 64-bit. Narrow to uint32_t via C's
+     * well-defined modular truncation — this preserves the bit
+     * pattern of fp32 literals like 0xBF800000 that Lua sees as
+     * positive 64-bit integers. */
+    uint32_t value_bits = (uint32_t)luaL_checkinteger(L, 1);
+    uint32_t n_floats   = (uint32_t)luaL_checkinteger(L, 2);
     int rc = slm_gpu_set_mnist_input_fill(value_bits, n_floats);
     lua_pushinteger(L, rc);
     return 1;

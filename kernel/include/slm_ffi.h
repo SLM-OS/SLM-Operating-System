@@ -717,9 +717,11 @@ int slm_fp32_argmax(const void *logits_bytes, uint32_t n_logits);
  * bounds-checks and memcpys. `cap` must be ≤ the handoff's
  * `input_buf_size`.
  *
- * Returns 0 on success, negative rc on failure (no v6 handoff,
- * cap too large, NULL pointer, etc.). On non-Jetson platforms
- * returns -1 unconditionally.
+ * Returns 0 on success, or on Jetson:
+ *   -1 = no v6 handoff loaded (input_buf_phys == 0)
+ *   -2 = cap exceeds input_buf_size
+ *   -3 = NULL bytes pointer
+ * On non-Jetson platforms returns -1 unconditionally.
  */
 int slm_gpu_set_mnist_input(const void *bytes, size_t cap);
 
