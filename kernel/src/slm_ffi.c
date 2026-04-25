@@ -315,26 +315,50 @@ int slm_gpu_get_info(RustGpuInfo *info)
 #ifdef PLATFORM_JETSON_ORIN_NANO
 /* Persistent bringup state for repeat MNIST runs. First call walks
  * inherit + channel; subsequent calls reuse the channel-open state
- * and only re-dispatch the kernels. */
+ * and only re-dispatch the kernels.
+ *
+ * Concurrency: this file-scope static assumes single-threaded access
+ * — today only the shell task reaches it (cmd_lua → Lua VM → these
+ * FFIs, or `nvgpu` shell command via shell_sys.c). If a future
+ * caller (telnetd's TCP shell, a parallel kernel task) calls these
+ * concurrently, the lazy-init `ensure_mnist_bringup` below has a
+ * TOCTOU window: both callers can pass the state check, both run
+ * inherit+channel, and the second corrupts the first's bringup.
+ * Add a spinlock around `ensure_mnist_bringup` if that ever happens.
+ *
+ * Note: the `nvgpu` shell command (kernel/src/shell_sys.c) keeps
+ * its own function-local `struct ga10b_bringup b` that's separate
+ * from this `g_mnist_bringup`. Both ultimately mutate the same
+ * file-scope `g_handoff` in ga10b_bringup.c, so the underlying GPU
+ * state stays consistent — but the user-visible state machines are
+ * independent. A user who runs `nvgpu inherit; nvgpu channel; lua
+ * print(slm.gpu_run_mnist())` triggers a redundant inherit+channel
+ * walk on the FFI side. Idempotent, just wasteful. */
 static struct ga10b_bringup g_mnist_bringup;
+
+/* Walk inherit + channel if needed. Returns 0 on success, negative
+ * rc if either phase fails. Callers must already be inside the
+ * single-threaded assumption documented above. */
+static int ensure_mnist_bringup(void)
+{
+    if (g_mnist_bringup.state == GA10B_BRINGUP_CHANNEL_OPEN ||
+        g_mnist_bringup.state == GA10B_BRINGUP_METHOD_ACCEPTED) {
+        return 0;
+    }
+    int rc = ga10b_bringup_inherit(&g_mnist_bringup);
+    if (rc < 0) return rc;
+    rc = ga10b_bringup_channel(&g_mnist_bringup);
+    if (rc < 0) return rc;
+    return 0;
+}
 
 int slm_gpu_run_mnist(void *logits_bytes_out)
 {
     if (!logits_bytes_out) return -1;
+    int rc = ensure_mnist_bringup();
+    if (rc < 0) return rc;
 
-    /* Lazy-initialise the bringup state machine. CHANNEL_OPEN /
-     * METHOD_ACCEPTED are both valid prerequisites for
-     * launch_kernel; everything earlier needs us to walk the
-     * inherit + channel phases. */
-    if (g_mnist_bringup.state != GA10B_BRINGUP_CHANNEL_OPEN &&
-        g_mnist_bringup.state != GA10B_BRINGUP_METHOD_ACCEPTED) {
-        int rc = ga10b_bringup_inherit(&g_mnist_bringup);
-        if (rc < 0) return rc;
-        rc = ga10b_bringup_channel(&g_mnist_bringup);
-        if (rc < 0) return rc;
-    }
-
-    int rc = ga10b_bringup_launch_kernel(&g_mnist_bringup);
+    rc = ga10b_bringup_launch_kernel(&g_mnist_bringup);
     if (rc < 0) return rc;
 
     /* 4-byte * 10 = 40 bytes of fp32 bit patterns. */
@@ -345,33 +369,19 @@ int slm_gpu_run_mnist(void *logits_bytes_out)
 }
 int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
 {
-    /* Lazy-initialise the bringup state so callers can swap inputs
-     * before the first run_mnist(). Mirrors slm_gpu_run_mnist's
-     * lazy-init logic. NULL `bytes` falls through to the bringup
-     * helper, which returns -3 — keeps the error code mapping
-     * one-to-one with ga10b_bringup_set_input (-1 = no v6 handoff,
-     * -2 = cap too large, -3 = bad arg). */
-    if (g_mnist_bringup.state != GA10B_BRINGUP_CHANNEL_OPEN &&
-        g_mnist_bringup.state != GA10B_BRINGUP_METHOD_ACCEPTED) {
-        int rc = ga10b_bringup_inherit(&g_mnist_bringup);
-        if (rc < 0) return rc;
-        rc = ga10b_bringup_channel(&g_mnist_bringup);
-        if (rc < 0) return rc;
-    }
+    /* NULL `bytes` falls through to ga10b_bringup_set_input, which
+     * returns -3 — keeps the error code mapping one-to-one with the
+     * bringup helper (-1 = no v6 handoff, -2 = cap too large, -3 =
+     * bad arg). */
+    int rc = ensure_mnist_bringup();
+    if (rc < 0) return rc;
     int n = ga10b_bringup_set_input(&g_mnist_bringup, bytes, cap);
     return n < 0 ? n : 0;
 }
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
 {
-    /* Same lazy-init dance as set_input — caller may invoke this
-     * before any run_mnist(). */
-    if (g_mnist_bringup.state != GA10B_BRINGUP_CHANNEL_OPEN &&
-        g_mnist_bringup.state != GA10B_BRINGUP_METHOD_ACCEPTED) {
-        int rc = ga10b_bringup_inherit(&g_mnist_bringup);
-        if (rc < 0) return rc;
-        rc = ga10b_bringup_channel(&g_mnist_bringup);
-        if (rc < 0) return rc;
-    }
+    int rc = ensure_mnist_bringup();
+    if (rc < 0) return rc;
     int n = ga10b_bringup_set_input_fill(&g_mnist_bringup, value_bits, n_floats);
     return n < 0 ? n : 0;
 }
