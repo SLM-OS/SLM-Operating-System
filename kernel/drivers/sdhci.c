@@ -727,10 +727,11 @@ static int sdhci_card_init(struct sdhci_priv *p)
  * for the connected card type:
  *   SDHC/SDXC (high_capacity): argument is the block index directly.
  *   SDSC: argument is the byte offset (block * SD_BLOCK_SIZE).
- * Returns 0 on overflow (SDSC byte address > 4 GiB — the 32-bit
- * argument wraps). Caller surfaces overflow as BLKDEV_ERR_INVAL.
+ * Returns false on overflow (SDSC byte address > 4 GiB — the 32-bit
+ * argument wraps); `*arg_out` is undefined in that case. Caller
+ * surfaces overflow as BLKDEV_ERR_INVAL.
  */
-static bool sdhci_arg_for_block(struct sdhci_priv *p, uint32_t block,
+static bool sdhci_arg_for_block(const struct sdhci_priv *p, uint32_t block,
                                 uint32_t *arg_out)
 {
     if (p->is_high_capacity) {
