@@ -503,6 +503,45 @@ static int l_model_load_mnist(lua_State *L) {
 }
 
 /**
+ * slm.gpu_run_mnist() - Dispatch the MNIST inference pipeline on
+ * the Jetson GA10B GPU. Requires a v5 channel handoff to be
+ * present in DRAM (set up pre-kexec by
+ * scripts/gpu-kernel-mnist.c --preserve-for-kexec).
+ *
+ * Returns two values on success: a 40-byte string holding the 10
+ * fp32 logits (little-endian) and the argmax index (0..9, the
+ * predicted digit class). On failure returns nil + a negative
+ * error code.
+ *
+ * Float values are returned as raw bytes because the kernel target
+ * compiles with -mgeneral-regs-only (no fp32 in C). Decode in Lua:
+ *
+ *   local bytes, argmax = slm.gpu_run_mnist()
+ *   for i = 0, 9 do
+ *       local f = string.unpack("<f", bytes, 1 + i*4)
+ *       print(string.format("logits[%d] = %.4f", i, f))
+ *   end
+ *
+ * `string.unpack` lives in liblua (compiled with FP) so the
+ * conversion happens in library code, not in the kernel C
+ * compilation unit.
+ */
+static int l_gpu_run_mnist(lua_State *L) {
+    if (!L) return 0;
+    uint8_t logits_bytes[40];
+    int rc = slm_gpu_run_mnist(logits_bytes);
+    if (rc < 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, rc);
+        return 2;
+    }
+    int argmax = slm_fp32_argmax(logits_bytes, 10u);
+    lua_pushlstring(L, (const char *)logits_bytes, sizeof(logits_bytes));
+    lua_pushinteger(L, argmax);
+    return 2;
+}
+
+/**
  * slm.model_pin(index) - Pin a model to prevent LRU eviction
  * Returns 0 on success, -1 on error
  */
@@ -2454,6 +2493,8 @@ static const luaL_Reg slm_lib_admin[] = {
     {"model_unpin", l_model_unpin},
     {"model_bench", l_model_bench},
     {"model_load", l_model_load},
+    /* GPU inference (M7) */
+    {"gpu_run_mnist", l_gpu_run_mnist},
     /* Scheduler / task mutation */
     {"sched_set_policy", l_sched_set_policy},
     {"task_migrate", l_task_migrate},

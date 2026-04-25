@@ -2819,10 +2819,45 @@ int cmd_nvgpu(int argc, char *argv[])
                      rc, (int)b.state);
         return rc;
     }
+    if (strcmp(argv[1], "run-mnist") == 0) {
+        /* M7: dispatch a v5 multi-op pipeline (the MNIST chain
+         * pre-uploaded by scripts/gpu-kernel-mnist.c) and read
+         * back the final op's 10 fp32 logits. Argmax over those
+         * logits is the predicted class. Requires `nvgpu inherit`
+         * + `nvgpu channel` to have run already.
+         *
+         * Output formatting prints the logits as raw fp32 bit
+         * patterns — the kernel target compiles with
+         * -mgeneral-regs-only and can't format fp32 as decimal.
+         * Use `slm.gpu_run_mnist()` from Lua for decimal output. */
+        int rc = ga10b_bringup_launch_kernel(&b);
+        if (rc < 0) {
+            shell_printf("run-mnist: launch failed rc=%d\r\n", rc);
+            return rc;
+        }
+        uint8_t logits_bytes[40];
+        int n = ga10b_bringup_read_pipeline_output(&b, logits_bytes,
+                                                    sizeof(logits_bytes));
+        if (n < 0) {
+            shell_printf("run-mnist: failed to read logits "
+                         "(no v5 handoff?)\r\n");
+            return -1;
+        }
+        int argmax = slm_fp32_argmax(logits_bytes, 10u);
+        shell_puts("run-mnist: logits (fp32 bit patterns):\r\n");
+        for (int i = 0; i < 10; i++) {
+            uint32_t bits;
+            __builtin_memcpy(&bits, logits_bytes + i * 4, 4);
+            shell_printf("  [%d] 0x%08x%s\r\n",
+                         i, bits, i == argmax ? "  <-- argmax" : "");
+        }
+        shell_printf("run-mnist: predicted class = %d\r\n", argmax);
+        return 0;
+    }
 
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | submit | submit-compute | launch-kernel | "
-              "fecs | gpccs | pmu | run]\r\n");
+              "run-mnist | fecs | gpccs | pmu | run]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */

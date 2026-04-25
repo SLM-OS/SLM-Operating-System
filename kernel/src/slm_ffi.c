@@ -14,6 +14,9 @@
 #include "ipc.h"
 #include "spinlock.h"
 #include "../gpu/gpu.h"
+#ifdef PLATFORM_JETSON_ORIN_NANO
+#include "../gpu/nvidia/ga10b_bringup.h"
+#endif
 
 /*
  * Memory Management
@@ -300,6 +303,103 @@ int slm_gpu_get_info(RustGpuInfo *info)
     info->compute_ready = 0;  /* Currently no driver has submit/wait */
 
     return 0;
+}
+
+/*
+ * GPU Inference (M7) — model-level entrypoints. Today only MNIST
+ * is wired up; the dispatch path is the v5 multi-op pipeline that
+ * scripts/gpu-kernel-mnist.c builds pre-kexec. On non-Jetson
+ * platforms these are stubs returning -1.
+ */
+
+#ifdef PLATFORM_JETSON_ORIN_NANO
+/* Persistent bringup state for repeat MNIST runs. First call walks
+ * inherit + channel; subsequent calls reuse the channel-open state
+ * and only re-dispatch the kernels. */
+static struct ga10b_bringup g_mnist_bringup;
+
+int slm_gpu_run_mnist(void *logits_bytes_out)
+{
+    if (!logits_bytes_out) return -1;
+
+    /* Lazy-initialise the bringup state machine. CHANNEL_OPEN /
+     * METHOD_ACCEPTED are both valid prerequisites for
+     * launch_kernel; everything earlier needs us to walk the
+     * inherit + channel phases. */
+    if (g_mnist_bringup.state != GA10B_BRINGUP_CHANNEL_OPEN &&
+        g_mnist_bringup.state != GA10B_BRINGUP_METHOD_ACCEPTED) {
+        int rc = ga10b_bringup_inherit(&g_mnist_bringup);
+        if (rc < 0) return rc;
+        rc = ga10b_bringup_channel(&g_mnist_bringup);
+        if (rc < 0) return rc;
+    }
+
+    int rc = ga10b_bringup_launch_kernel(&g_mnist_bringup);
+    if (rc < 0) return rc;
+
+    /* 4-byte * 10 = 40 bytes of fp32 bit patterns. */
+    int n = ga10b_bringup_read_pipeline_output(&g_mnist_bringup,
+                                                logits_bytes_out,
+                                                40u);
+    return n < 0 ? -1 : 0;
+}
+#else
+int slm_gpu_run_mnist(void *logits_bytes_out)
+{
+    (void)logits_bytes_out;
+    return -1;
+}
+#endif
+
+/*
+ * FP-free argmax over fp32 bit patterns. The kernel target compiles
+ * with -mgeneral-regs-only on AArch64, which forbids floating-point
+ * comparisons in C. So we work on the fp32 bit patterns directly:
+ *
+ *   - sign bit is at bit 31 (1 = negative)
+ *   - if both operands have the same sign:
+ *       positive : larger magnitude → larger bits → use unsigned >
+ *       negative : larger magnitude → larger bits → "more negative",
+ *                   so larger value is the smaller-bits one
+ *   - if signs differ, the positive one is larger
+ *
+ * This handles +0/-0 (both compare equal because IEEE 754 +0.0 has
+ * bit pattern 0x00000000 and -0.0 has 0x80000000 — the algorithm
+ * picks the one with positive sign, matching `> -0.0 == true` for
+ * any positive value). NaN handling is undefined — none of the GPU
+ * paths we wire here can produce NaN given non-NaN inputs.
+ */
+int slm_fp32_argmax(const void *logits_bytes, uint32_t n_logits)
+{
+    if (!logits_bytes || n_logits == 0u) return -1;
+    const uint8_t *p = (const uint8_t *)logits_bytes;
+    uint32_t best_bits;
+    __builtin_memcpy(&best_bits, p, 4);
+    int best_idx = 0;
+    for (uint32_t i = 1u; i < n_logits; i++) {
+        uint32_t cur_bits;
+        __builtin_memcpy(&cur_bits, p + i * 4u, 4);
+
+        uint32_t cur_neg  = (cur_bits  >> 31) & 1u;
+        uint32_t best_neg = (best_bits >> 31) & 1u;
+
+        int cur_is_larger;
+        if (cur_neg != best_neg) {
+            /* Different signs: positive wins. */
+            cur_is_larger = !cur_neg;
+        } else if (cur_neg) {
+            /* Both negative: smaller bit pattern is less negative. */
+            cur_is_larger = (cur_bits < best_bits);
+        } else {
+            /* Both non-negative: larger bit pattern is larger value. */
+            cur_is_larger = (cur_bits > best_bits);
+        }
+        if (cur_is_larger) {
+            best_bits = cur_bits;
+            best_idx = (int)i;
+        }
+    }
+    return best_idx;
 }
 
 /*
