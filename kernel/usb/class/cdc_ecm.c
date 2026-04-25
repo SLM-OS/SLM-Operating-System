@@ -662,10 +662,18 @@ static bool cdc_ecm_net_link_status(void)
 {
     if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
         return false;
+    /*
+     * Preserve the historical "probed implies up" behaviour until we
+     * receive a real CDC notification. Some adapters expose the
+     * interrupt endpoint but never emit NETWORK_CONNECTION /
+     * CONNECTION_SPEED_CHANGE under our current control-request set;
+     * gating on the mere presence of notif_in would strand those
+     * devices link-down forever.
+     */
     if (cdc.notif_in == NULL)
         return true;
     if (!__atomic_load_n(&cdc.link_signal_valid, __ATOMIC_ACQUIRE))
-        return false;
+        return true;
     return __atomic_load_n(&cdc.link_ready, __ATOMIC_ACQUIRE);
 }
 

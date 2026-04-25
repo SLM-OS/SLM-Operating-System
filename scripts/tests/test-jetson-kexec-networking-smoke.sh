@@ -215,7 +215,7 @@ need_cmd wc
 need_cmd mktemp
 
 [[ "$SKIP_COPY" == "1" || -f "$KERNEL" ]] || die "kernel not found: $KERNEL"
-[[ "$SKIP_HELPER_COPY" == "1" || -f "$HELPER" ]] || die "helper not found: $HELPER"
+[[ "$SKIP_COPY" == "1" || "$SKIP_HELPER_COPY" == "1" || -f "$HELPER" ]] || die "helper not found: $HELPER"
 
 RUN_DIR="$(mktemp -d /tmp/jetson-kexec-net-smoke.XXXXXX)"
 CONSOLE_LOG="$RUN_DIR/console.log"
