@@ -331,8 +331,9 @@ In order of how much time each one cost:
 6. **`apt install hailo-all` will silently auto-update the Pi 5
    EEPROM** to a recent (post-Jan 2025) bootloader, which then
    breaks SLM-OS's RP1 UART access (kernel boots silently — no
-   serial output even though it's running). Per
-   `memory/pi5_eeprom_findings.md`. The fix dance, in order:
+   serial output even though it's running). See
+   `docs/pi5-baremetal-status.md:402-408` for the EEPROM-firmware
+   investigation. The fix dance, in order:
    - Re-flash Sep 2024 image:
      ```bash
      wget -O /tmp/pieeprom.bin \
