@@ -433,7 +433,8 @@ gsp-harness-clean:
 
 HAILO_USHIM_OUT := build/host-tools/hailo-ushim
 HAILO_USHIM_SRCS := \
-    host-tools/hailo-ushim/main.c
+    host-tools/hailo-ushim/main.c \
+    host-tools/hailo-ushim/hailo_dev.c
 
 HAILO_USHIM_CFLAGS := \
     -std=c11 -Wall -Wextra -O2 -g \
