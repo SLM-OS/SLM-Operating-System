@@ -1032,9 +1032,9 @@ static void test_handoff_validate_bad_version(void)
     h.version = 1;                  /* v1 lacked work_submit_token */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     /* v2 (channel-only), v3 (+ kernel-launch state), v4 (+
-     * expected_payload), and v5 (+ pipeline) all pass — Phase 6/7
-     * reads only v2 fields, Phase 8 checks the version at dispatch
-     * time before reading v3/v4/v5 fields. */
+     * expected_payload), v5 (+ pipeline), and v6 (+ input_buf) all
+     * pass — Phase 6/7 reads only v2 fields, Phase 8 checks the
+     * version at dispatch time before reading v3..v6 fields. */
     h.version = 2;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 3;
@@ -1043,7 +1043,9 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 5;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
-    h.version = 6;                  /* future, not yet defined */
+    h.version = 6;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 7;                  /* future, not yet defined */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
@@ -1531,14 +1533,26 @@ static void test_launch_kernel_pb_uses_ampere_pcas2_b(void)
  * Handoff v3 — channel + kernel-launch state
  * ====================================================================== */
 
-static void test_handoff_v5_layout_size(void)
+static void test_handoff_v6_layout_size(void)
 {
-    printf("== test_handoff_v5_layout_size ==\n");
+    printf("== test_handoff_v6_layout_size ==\n");
     /* Belt-and-suspenders runtime check. The header pins the size
      * with a _Static_assert but a fresh-eyes reader shouldn't have
      * to dig into compile-time errors to discover that v2 was 120,
-     * v3 was 192, v4 was 200, and v5 is 216. */
-    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 216u);
+     * v3 was 192, v4 was 200, v5 was 216, and v6 is 232. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 232u);
+}
+
+static void test_handoff_v6_input_buf_offsets(void)
+{
+    printf("== test_handoff_v6_input_buf_offsets ==\n");
+    /* v6 extends v5 with input_buf_phys + input_buf_size at offsets
+     * 216 / 224. SLM-OS's slm_gpu_set_mnist_input writes user-
+     * supplied bytes to input_buf_phys with cache_clean. */
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, input_buf_phys),
+               216u);
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, input_buf_size),
+               224u);
 }
 
 static void test_pipeline_op_layout(void)
@@ -2102,9 +2116,10 @@ int main(void)
     test_launch_kernel_pb_idempotent();
     test_launch_kernel_pb_uses_ampere_pcas2_b();
 
-    test_handoff_v5_layout_size();
+    test_handoff_v6_layout_size();
     test_handoff_v4_expected_payload_offset();
     test_handoff_v5_pipeline_offsets();
+    test_handoff_v6_input_buf_offsets();
     test_pipeline_op_layout();
     test_pick_launch_payload_v3_uses_fallback();
     test_pick_launch_payload_v4_zero_uses_fallback();

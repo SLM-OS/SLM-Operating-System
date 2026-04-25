@@ -807,3 +807,73 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
 
     return handoff_phys;
 }
+
+uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
+                               void *handoff_va,
+                               uint64_t output_phys,
+                               uint64_t output_gpu_va,
+                               uint32_t expected_payload,
+                               uint32_t pipeline_n_ops,
+                               uint64_t pipeline_ops_phys,
+                               uint64_t input_buf_phys,
+                               uint32_t input_buf_size)
+{
+    /* Same single-page invariant as v4/v5. Force-fault the page in
+     * via memset before reading the phys, then write the struct. */
+    memset(handoff_va, 0, 4096);
+    uint64_t handoff_phys = gpu_virt_to_phys(handoff_va);
+
+    uint64_t userd_phys  = gpu_virt_to_phys(ctx->userd_va);
+    uint64_t gpfifo_phys = gpu_virt_to_phys(ctx->gpfifo_va);
+    uint64_t pb_phys     = gpu_virt_to_phys(ctx->pb_va);
+
+    /* v6 = v5 + input_buf_phys/size. v3 dispatch fields stay zero
+     * (same defensive zeroing as v5 — forces the v5 pipeline path
+     * if pipeline_n_ops survives but other fields don't). */
+    struct ga10b_channel_handoff hoff = {
+        .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
+        .version            = 6,
+        .channel_id         = 0,
+        .tsg_id             = 0,
+        .userd_phys         = userd_phys,
+        .userd_gp_put_offset = GPU_LAUNCH_USERD_GP_PUT_WORD * 4u,
+        .userd_gp_get_offset = GPU_LAUNCH_USERD_GP_GET_WORD * 4u,
+        .gpfifo_phys        = gpfifo_phys,
+        .gpfifo_gpu_va      = ctx->gpfifo_gpu_va,
+        .gpfifo_entries     = ctx->gpfifo_entries,
+        .gpfifo_entry_size  = 8,
+        .pushbuf_phys       = pb_phys,
+        .pushbuf_gpu_va     = ctx->pb_gva,
+        .pushbuf_size       = 65536,
+        .semaphore_phys     = output_phys,
+        .semaphore_gpu_va   = output_gpu_va,
+        .inst_block_phys    = 0,
+        .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
+                                [GPU_LAUNCH_USERD_GP_PUT_WORD],
+        .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
+                                [GPU_LAUNCH_USERD_GP_GET_WORD],
+        .work_submit_token  = ctx->work_submit_token,
+        /* v3 dispatch fields zeroed. */
+        .shader_phys        = 0,
+        .shader_gpu_va      = 0,
+        .cbuf_phys          = 0,
+        .cbuf_gpu_va        = 0,
+        .qmd_phys           = 0,
+        .qmd_gpu_va         = 0,
+        .output_phys        = 0,
+        .output_gpu_va      = 0,
+        .shader_size        = 0,
+        .cbuf_size          = 0,
+        .expected_payload   = expected_payload,
+        /* v5 extension. */
+        .pipeline_n_ops     = pipeline_n_ops,
+        .pipeline_ops_phys  = pipeline_ops_phys,
+        /* v6 extension. */
+        .input_buf_phys     = input_buf_phys,
+        .input_buf_size     = input_buf_size,
+    };
+    memcpy(handoff_va, &hoff, sizeof(hoff));
+    msync(handoff_va, 4096, MS_SYNC);
+
+    return handoff_phys;
+}
