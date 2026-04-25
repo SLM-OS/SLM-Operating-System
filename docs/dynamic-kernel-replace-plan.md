@@ -61,8 +61,10 @@ Three new capabilities on top of the F-series ingress work.
   basename is 11 chars, which exceeds the 8.3 limit. `tryboot.img`
   and `config.txt` fit 8.3, but the rename target on `kernel promote`
   must produce the exact `kernel_2712.img` name the lab firmware
-  loads (the project pins this filename — see
-  `memory/pi5_deploy_filename.md`). Enable FatFs `FF_USE_LFN` in
+  loads (the project pins this filename via `config.txt`'s
+  `kernel=kernel_2712.img` line — see
+  `docs/pi5-baremetal-status.md:175` and
+  `docs/getting-started.md:67`). Enable FatFs `FF_USE_LFN` in
   ROM/buffer mode (~1–3 KB code).
 
 ### 3. Tryboot + Admin Command Surface
@@ -93,7 +95,7 @@ Engineering days, solo focused work.
 | SDHCI / EMMC2 driver | 3d | 5d | Legacy SDR only. Cold re-init from CMD0 is in scope (Linux does the same — Risk 1). |
 | FAT32 writer (FatFs) | 3d | 5d | Integrate + wire block glue. Includes FatFs LFN (`FF_USE_LFN`) — `kernel_2712.img` is not 8.3. |
 | FAT32 writer (from scratch) | +3d | +3d | Only if FatFs licensing blocks use. |
-| Tryboot tag helpers + write | 0d | 1d | Two new tag helpers (`SET_REBOOT_FLAGS`, `NOTIFY_REBOOT`) on top of the existing `kernel/drivers/bcm_mailbox.c` transport — see Risk 2. |
+| Tryboot tag helpers + write | 0.5d | 1d | Two new tag helpers (`SET_REBOOT_FLAGS`, `NOTIFY_REBOOT`) on top of the existing `kernel/drivers/bcm_mailbox.c` transport — see Risk 2. |
 | Staging state machine + commands | 2d | 3d | Mirrors the eviction-model shape. |
 | Image validation (magic, size) | 0.5d | 1d | Header check + free-space check. |
 | QEMU tests | 1d | 2d | `-drive if=sd` with a FAT image. |
@@ -102,7 +104,7 @@ Engineering days, solo focused work.
 
 **Totals**
 
-- Tryboot A/B, demo-quality: **13–23 d** (~3–5 weeks elapsed). Down
+- Tryboot A/B, demo-quality: **14–23 d** (~3–5 weeks elapsed). Down
   from 14–26 d after Risks 1 and 2 resolved (mailbox transport
   reusable, no surprise EMMC2 cold-init work).
 - Unsafe one-shot overwrite (no staging, no rollback): **8–12 d**
@@ -112,6 +114,10 @@ Engineering days, solo focused work.
 ---
 
 ## Risks
+
+*Linux file:line citations in the "Resolved" blocks below are
+pinned to the raspberrypi/linux `rpi-6.12.y` tree as of
+2026-04-24. Symbol names will outlive the line numbers.*
 
 ### Risk 1 — VC Firmware Handoff State of EMMC2
 
@@ -175,8 +181,8 @@ it a bare MMIO write or a VC mailbox RPC?
   `bcm_mailbox_get_board_mac` (tag `0x00010003`). Adding two new tag
   helpers (`bcm_mailbox_set_reboot_flags`, `bcm_mailbox_notify_reboot`)
   is incremental — no new transport work.
-- Impact: was +2–4 d if the driver had to be written; now ~0–1 d
-  for the two tag helpers + SHA-armed call site.
+- Impact: was +2–4 d if the driver had to be written; now ~0.5–1 d
+  for the two tag helpers.
 
 **Hardware required:** no for identification, yes for end-to-end
 verification of boot cycle behavior. Identification complete.
@@ -185,7 +191,8 @@ verification of boot cycle behavior. Identification complete.
 
 ## Pre-Hardware Tasks
 
-Items that can land before a Pi 5 is free.
+Items that can land before a Pi 5 is free. **All resolved as of
+2026-04-24** — see Risks 1 and 2 above for the substantive findings.
 
 - ✅ Trace Pi 5 restart handler in Linux mainline: identify register,
   offset, and magic value for `reboot "0 tryboot"`. Record whether it
@@ -212,16 +219,17 @@ Items that can land before a Pi 5 is free.
   §2 above.*
 - ✅ Identify the minimum Pi 5 bootloader EEPROM version required for
   tryboot support; confirm the lab Pi 5s meet it. *Result: tryboot
-  predates the lab's pinned firmware. The
-  rpi-eeprom firmware-2712 release notes show a TRYBOOT
-  secure-boot-mode bugfix on 2024-04-17 (so the feature itself is
-  older). Lab Pi 5s are pinned to `pieeprom-2024-09-23.bin`
-  (`memory/pi5_eeprom_findings.md`); newer EEPROMs break bare-metal
-  RP1 UART, so this pin is mandatory. Tryboot on the 2024-09-23
-  firmware is empirically working today on `pi-5-1` —
-  `docs/pi5-dual-boot-setup.md:17` documents `sudo reboot 0
-  tryboot` as the round-trip used to switch SLM-OS↔Pi OS on that
-  card. No EEPROM upgrade is needed.*
+  predates the lab's pinned firmware. The rpi-eeprom firmware-2712
+  release notes show a TRYBOOT secure-boot-mode bugfix on
+  2024-04-17 (so the feature itself is older). Lab Pi 5s are
+  pinned to `pieeprom-2024-09-23.bin` because newer EEPROMs break
+  bare-metal RP1 UART (see
+  `docs/pi5-baremetal-status.md:402-408` for the breakage notes
+  and `docs/pi5-dual-boot-setup.md:331-356` for the lockdown
+  procedure). Tryboot on the 2024-09-23 firmware is empirically
+  working today on `pi-5-1` — `docs/pi5-dual-boot-setup.md:17`
+  documents `sudo reboot 0 tryboot` as the round-trip used to
+  switch SLM-OS↔Pi OS on that card. No EEPROM upgrade is needed.*
 
 ## Hardware Tasks
 
