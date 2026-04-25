@@ -601,6 +601,8 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 
 #include "net_driver.h"
 #include "arch/sys_arch.h"  /* sys_now() for DHCP timeout polling */
+extern void net_test_force_boot_deferred_dhcp(void);
+extern void net_test_force_dhcp_start_fail(void);
 #if defined(PLATFORM_QEMU_VIRT)
 #include "../include/virtio_net.h"  /* virtio_net_get_irq_count (ARM64 MMIO) */
 #include "../include/virtio.h"      /* VIRTIO_DEVICE_IRQ */
@@ -610,6 +612,72 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 #if defined(PLATFORM_X86_64)
 #include "../include/virtio_net_pci.h"  /* accessors + handler */
 #endif
+
+static const struct net_driver *link_test_base_driver;
+static bool link_test_force_up;
+
+static int link_test_driver_init(void)
+{
+    if (link_test_base_driver && link_test_base_driver->init)
+        return link_test_base_driver->init();
+    return NET_OK;
+}
+
+static int link_test_driver_send(const void *buf, size_t len)
+{
+    return link_test_base_driver->send(buf, len);
+}
+
+static int link_test_driver_recv(void *buf, size_t max_len)
+{
+    return link_test_base_driver->recv(buf, max_len);
+}
+
+static void link_test_driver_get_mac(uint8_t mac[6])
+{
+    link_test_base_driver->get_mac(mac);
+}
+
+static bool link_test_driver_link_status(void)
+{
+    return link_test_force_up;
+}
+
+static void link_test_driver_tx_reap(void)
+{
+    if (link_test_base_driver->tx_reap)
+        link_test_base_driver->tx_reap();
+}
+
+static const struct net_driver link_test_driver = {
+    .name = "test-link-wrapper",
+    .init = link_test_driver_init,
+    .send = link_test_driver_send,
+    .recv = link_test_driver_recv,
+    .get_mac = link_test_driver_get_mac,
+    .link_status = link_test_driver_link_status,
+    .tx_reap = link_test_driver_tx_reap,
+};
+
+static void link_test_install(bool link_up)
+{
+    link_test_base_driver = net_get_driver();
+    TEST_ASSERT_NOT_NULL(link_test_base_driver);
+    link_test_force_up = link_up;
+    net_register_driver(&link_test_driver);
+}
+
+static void link_test_set(bool link_up)
+{
+    link_test_force_up = link_up;
+}
+
+static void link_test_restore(void)
+{
+    TEST_ASSERT_NOT_NULL(link_test_base_driver);
+    net_register_driver(link_test_base_driver);
+    link_test_base_driver = NULL;
+}
 
 /*
  * Test: a network driver was registered during platform init.
@@ -873,6 +941,199 @@ static void test_net_dhcp_fallback(void)
         "fallback should restore the original static IP");
 
     /* Restore default timeout for subsequent tests */
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
+ * Test: a manual DHCP request made while the link is down stays
+ * pending until the client can actually start, rather than burning
+ * its timeout budget before link-ready.
+ */
+static void test_net_dhcp_fallback_while_link_down(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    link_test_install(false);
+    net_poll();
+
+    net_set_dhcp_timeout_ms(20);
+    TEST_ASSERT_EQUAL_INT(0, net_enable_dhcp());
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_PENDING, info.dhcp_status);
+    TEST_ASSERT_TRUE(info.dhcp_enabled);
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+
+    extern void sleep_ms(uint32_t ms);
+    sleep_ms(30);
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    link_test_set(true);
+    net_poll();
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_NOT_EQUAL(NET_DHCP_FAILED, info.dhcp_status);
+    TEST_ASSERT_TRUE(info.dhcp_enabled);
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+    link_test_restore();
+    net_poll();
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
+ * Test: issuing a duplicate manual DHCP request while discovery is
+ * already running must not disable the existing timeout budget.
+ */
+static void test_net_dhcp_duplicate_request_preserves_timeout(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    /* Immediate timeout so the direct fallback check stays
+     * deterministic and avoids the live recv path. */
+    net_set_dhcp_timeout_ms(0);
+    TEST_ASSERT_EQUAL_INT(0, net_enable_dhcp());
+    TEST_ASSERT_EQUAL_INT(0, net_enable_dhcp());
+
+    TEST_ASSERT_EQUAL_INT(1, net_dhcp_check_timeout());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_FAILED, info.dhcp_status);
+    TEST_ASSERT_FALSE(info.dhcp_enabled);
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
+ * Test: boot-time deferred DHCP does not consume its fallback budget
+ * before the client actually starts.
+ */
+static void test_net_boot_deferred_dhcp_waits_for_real_start(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    link_test_install(false);
+    net_poll();
+
+    net_set_dhcp_timeout_ms(0);
+    net_test_force_boot_deferred_dhcp();
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_PENDING, info.dhcp_status);
+    TEST_ASSERT_TRUE(info.dhcp_enabled);
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+    link_test_restore();
+    net_poll();
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
+ * Test: if dhcp_start() fails, networking does not remain stuck in a
+ * fake DHCP(pending) state.
+ */
+static void test_net_dhcp_start_failure_clears_pending_state(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    net_test_force_dhcp_start_fail();
+    TEST_ASSERT_EQUAL_INT(NET_E_NO_MEM, net_enable_dhcp());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_DISABLED, info.dhcp_status);
+    TEST_ASSERT_FALSE(info.dhcp_enabled);
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+}
+
+/*
+ * Test: a transient link drop during DHCP discovery pauses the timeout
+ * while carrier is down, then restarts with a fresh budget on
+ * reconnect.
+ */
+static void test_net_dhcp_link_drop_restarts_timeout(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    extern void sleep_ms(uint32_t ms);
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    link_test_install(true);
+    net_poll();
+
+    net_set_dhcp_timeout_ms(20);
+    TEST_ASSERT_EQUAL_INT(0, net_enable_dhcp());
+
+    link_test_set(false);
+    net_poll();
+    sleep_ms(30);
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    link_test_set(true);
+    net_poll();
+
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_TRUE(info.dhcp_enabled);
+    TEST_ASSERT_NOT_EQUAL(NET_DHCP_FAILED, info.dhcp_status);
+
+    link_test_restore();
+    net_poll();
     net_set_dhcp_timeout_ms(saved_timeout);
 }
 
@@ -1441,6 +1702,11 @@ int test_suite_net(void)
     RUN_TEST(test_net_dhcp_binds);
     RUN_TEST(test_net_dhcp_bind_notification);
     RUN_TEST(test_net_dhcp_fallback);
+    RUN_TEST(test_net_dhcp_fallback_while_link_down);
+    RUN_TEST(test_net_dhcp_duplicate_request_preserves_timeout);
+    RUN_TEST(test_net_boot_deferred_dhcp_waits_for_real_start);
+    RUN_TEST(test_net_dhcp_start_failure_clears_pending_state);
+    RUN_TEST(test_net_dhcp_link_drop_restarts_timeout);
     RUN_TEST(test_net_driver_tx);
     RUN_TEST(test_net_driver_has_tx_reap);
     RUN_TEST(test_net_send_returns_quickly);

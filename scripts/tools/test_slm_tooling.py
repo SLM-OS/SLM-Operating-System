@@ -89,6 +89,64 @@ class FakeShell:
         self.closed = True
 
 
+class FakeSocket:
+    def __init__(self, recv_chunks: list[bytes]):
+        self.recv_chunks = list(recv_chunks)
+        self.sent: list[bytes] = []
+        self.closed = False
+        self.timeout: float | None = None
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeout = timeout
+
+    def recv(self, _size: int) -> bytes:
+        assert self.recv_chunks, "unexpected recv() with no data queued"
+        return self.recv_chunks.pop(0)
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.append(data)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _exercise_split_telnet_negotiation(module) -> None:
+    sock = FakeSocket(
+        [
+            b"he",
+            bytes([module.IAC]),
+            bytes([module.DO]),
+            bytes([1]) + b"llo\nslmos> ",
+        ]
+    )
+
+    with mock.patch.object(module.socket, "create_connection", return_value=sock):
+        shell = module.TelnetShell("127.0.0.1", 2323, b"slmos> ", 1.0)
+        out = shell.read_until_prompt()
+
+    assert out == b"hello\nslmos> "
+    assert sock.sent == [bytes([module.IAC, module.WONT, 1])]
+
+
+def _exercise_split_telnet_subnegotiation(module) -> None:
+    sock = FakeSocket(
+        [
+            b"o",
+            bytes([module.IAC, module.SB, 24, 1]),
+            b"\x00",
+            bytes([module.IAC]),
+            bytes([module.SE]) + b"k\nslmos> ",
+        ]
+    )
+
+    with mock.patch.object(module.socket, "create_connection", return_value=sock):
+        shell = module.TelnetShell("127.0.0.1", 2323, b"slmos> ", 1.0)
+        out = shell.read_until_prompt()
+
+    assert out == b"ok\nslmos> "
+    assert sock.sent == []
+
+
 def test_put_chunk_limits_respect_shell_line_budget():
     remote = "/mnt/files/policies/test.bin"
     line_bytes = slm_put.max_legacy_chunk_bytes(remote, 0)
@@ -362,6 +420,14 @@ def test_put_framed_resume_normalizes_relative_remote_path():
         "xput finish",
         "stat tmp/blob",
     ]
+
+
+def test_put_telnet_shell_buffers_split_iac_sequences():
+    _exercise_split_telnet_negotiation(slm_put)
+
+
+def test_put_telnet_shell_buffers_split_subnegotiation():
+    _exercise_split_telnet_subnegotiation(slm_put)
 
 
 def test_modelctl_parse_args_supports_legacy_apply_form():
@@ -856,6 +922,14 @@ def test_modelctl_run_upload_uses_tool_dir_not_cwd():
     assert cmd[-3:] == ["pi-5-2", "local.blob", "/mnt/files/blob"]
 
 
+def test_modelctl_telnet_shell_buffers_split_iac_sequences():
+    _exercise_split_telnet_negotiation(slm_modelctl)
+
+
+def test_modelctl_telnet_shell_buffers_split_subnegotiation():
+    _exercise_split_telnet_subnegotiation(slm_modelctl)
+
+
 def main() -> int:
     runner = TestRunner()
     runner.run("put_chunk_limits_respect_shell_line_budget", test_put_chunk_limits_respect_shell_line_budget)
@@ -868,6 +942,8 @@ def main() -> int:
     runner.run("put_legacy_no_resume_skips_truncate_for_absent_destination", test_put_legacy_no_resume_skips_truncate_for_absent_destination)
     runner.run("put_legacy_resume_restarts_when_destination_is_nonempty", test_put_legacy_resume_restarts_when_destination_is_nonempty)
     runner.run("put_framed_resume_normalizes_relative_remote_path", test_put_framed_resume_normalizes_relative_remote_path)
+    runner.run("put_telnet_shell_buffers_split_iac_sequences", test_put_telnet_shell_buffers_split_iac_sequences)
+    runner.run("put_telnet_shell_buffers_split_subnegotiation", test_put_telnet_shell_buffers_split_subnegotiation)
     runner.run("modelctl_parse_args_supports_legacy_apply_form", test_modelctl_parse_args_supports_legacy_apply_form)
     runner.run("modelctl_parse_args_accepts_http_source", test_modelctl_parse_args_accepts_http_source)
     runner.run("modelctl_parse_args_http_source_accepts_remote_path_override", test_modelctl_parse_args_http_source_accepts_remote_path_override)
@@ -886,6 +962,8 @@ def main() -> int:
     runner.run("modelctl_http_url_uses_lua_helper_when_command_too_long", test_modelctl_http_url_uses_lua_helper_when_command_too_long)
     runner.run("modelctl_http_url_rejects_dhcp_failed_state", test_modelctl_http_url_rejects_dhcp_failed_state)
     runner.run("modelctl_run_upload_uses_tool_dir_not_cwd", test_modelctl_run_upload_uses_tool_dir_not_cwd)
+    runner.run("modelctl_telnet_shell_buffers_split_iac_sequences", test_modelctl_telnet_shell_buffers_split_iac_sequences)
+    runner.run("modelctl_telnet_shell_buffers_split_subnegotiation", test_modelctl_telnet_shell_buffers_split_subnegotiation)
     return runner.summary()
 
 

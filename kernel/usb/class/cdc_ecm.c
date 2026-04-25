@@ -28,6 +28,7 @@
 #include "net_driver.h"
 #include "ncmem.h"
 #include "debug.h"
+#include "arch/sys_arch.h"
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -53,11 +54,25 @@
 /* 1514 Ethernet + a little headroom. Keep a power-of-two for clarity. */
 #define CDC_ECM_BUF_SIZE                2048
 
+/* 8-byte CDC notification header + 8-byte speed-change payload. */
+#define CDC_ECM_NOTIFY_BUF_SIZE         16
+
+/*
+ * Wait briefly for a real CDC notification before falling back to
+ * the historical "probed implies link-up" behaviour. Some adapters
+ * expose a notification endpoint but never emit link events.
+ */
+#define CDC_ECM_NOTIFY_SILENCE_TIMEOUT_DEFAULT_MS  2000
+
 /* Default MTU if the device omits / zero-fills wMaxSegmentSize. */
 #define CDC_ECM_DEFAULT_MTU             1514
 
 /* USB standard langid we ask the device for strings in. 0x0409 = en-US. */
 #define CDC_ECM_STRING_LANG_ID          0x0409
+
+/* CDC notification types (USB CDC 1.2). */
+#define CDC_NOTIFY_NETWORK_CONNECTION      0x00
+#define CDC_NOTIFY_CONNECTION_SPEED_CHANGE 0x2A
 
 /* -------------------------------------------------------------------------- */
 /* Internal slot state                                                         */
@@ -104,6 +119,25 @@ struct cdc_tx_slot {
     bool            completed;
 };
 
+struct cdc_notify_slot {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    uint8_t        *buf;
+#else
+    uint8_t         buf[CDC_ECM_NOTIFY_BUF_SIZE];
+#endif
+    struct usb_urb  urb;
+    bool            in_use;
+    bool            completed;
+};
+
+struct usb_cdc_notification {
+    uint8_t  bmRequestType;
+    uint8_t  bNotificationType;
+    uint16_t wValue;
+    uint16_t wIndex;
+    uint16_t wLength;
+} __attribute__((packed));
+
 /* -------------------------------------------------------------------------- */
 /* Module state                                                                */
 /* -------------------------------------------------------------------------- */
@@ -124,8 +158,18 @@ static struct {
     struct usb_device *dev;
     uint8_t           mac[6];
     uint16_t          max_segment;
+    uint8_t           ctrl_iface_num;
     const struct usb_endpoint *bulk_in;
     const struct usb_endpoint *bulk_out;
+    const struct usb_endpoint *notif_in;
+    struct cdc_notify_slot     notif;
+    uint32_t          notif_wait_started_ms;
+    bool              notif_wait_active;
+    bool              notif_silence_fallback_logged;
+    bool              link_ready;
+    bool              link_signal_valid;
+    uint32_t          upstream_bps;
+    uint32_t          downstream_bps;
 
     struct cdc_rx_slot rx[CDC_ECM_RX_SLOTS];
     struct cdc_tx_slot tx[CDC_ECM_TX_SLOTS];
@@ -146,6 +190,8 @@ static struct {
  * twice rely on that symmetry.
  */
 static bool cdc_logged_no_device;
+static uint32_t cdc_notify_silence_timeout_ms =
+    CDC_ECM_NOTIFY_SILENCE_TIMEOUT_DEFAULT_MS;
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
@@ -157,6 +203,11 @@ static uint8_t *cdc_rx_buf(struct cdc_rx_slot *slot)
 }
 
 static uint8_t *cdc_tx_buf(struct cdc_tx_slot *slot)
+{
+    return slot->buf;
+}
+
+static uint8_t *cdc_notify_buf(struct cdc_notify_slot *slot)
 {
     return slot->buf;
 }
@@ -188,11 +239,21 @@ static int cdc_ecm_dma_init(void)
         }
     }
 
+    if (cdc.notif.buf == NULL) {
+        cdc.notif.buf = ncmem_alloc(CDC_ECM_NOTIFY_BUF_SIZE, 64);
+        if (cdc.notif.buf == NULL) {
+            WARN("cdc_ecm: NC notify buffer alloc failed");
+            return NET_E_NO_MEM;
+        }
+        memset(cdc.notif.buf, 0, CDC_ECM_NOTIFY_BUF_SIZE);
+    }
+
     if (!logged_dma_pool) {
-        INFO("cdc_ecm: NC DMA pools ready (rx=%u tx=%u size=%u)",
+        INFO("cdc_ecm: NC DMA pools ready (rx=%u tx=%u size=%u notify=%u)",
              (unsigned)CDC_ECM_RX_SLOTS,
              (unsigned)CDC_ECM_TX_SLOTS,
-             (unsigned)CDC_ECM_BUF_SIZE);
+             (unsigned)CDC_ECM_BUF_SIZE,
+             (unsigned)CDC_ECM_NOTIFY_BUF_SIZE);
         logged_dma_pool = true;
     }
 #endif
@@ -202,6 +263,14 @@ static int cdc_ecm_dma_init(void)
 static uint16_t le16(const uint8_t *p)
 {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
 }
 
 /*
@@ -325,6 +394,13 @@ static void cdc_tx_complete(struct usb_urb *urb)
     __atomic_store_n(&slot->completed, true, __ATOMIC_RELEASE);
 }
 
+static void cdc_notify_complete(struct usb_urb *urb)
+{
+    struct cdc_notify_slot *slot = (struct cdc_notify_slot *)urb->context;
+    __atomic_store_n(&slot->in_use, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->completed, true, __ATOMIC_RELEASE);
+}
+
 /* -------------------------------------------------------------------------- */
 /* RX re-submission                                                            */
 /* -------------------------------------------------------------------------- */
@@ -341,6 +417,108 @@ static int cdc_rx_submit(struct cdc_rx_slot *slot)
     slot->urb.context       = slot;
     slot->urb.status        = USB_URB_PENDING;
     return usb_submit_urb(&slot->urb);
+}
+
+static int cdc_notify_submit(void)
+{
+    if (cdc.notif_in == NULL)
+        return NET_OK;
+
+    if (__atomic_load_n(&cdc.notif.in_use, __ATOMIC_ACQUIRE))
+        return NET_OK;
+
+    cdc.notif.urb.dev           = cdc.dev;
+    cdc.notif.urb.endpoint      = cdc.notif_in->address;
+    cdc.notif.urb.transfer_type = USB_XFER_INTERRUPT;
+    cdc.notif.urb.buffer        = cdc_notify_buf(&cdc.notif);
+    cdc.notif.urb.length        = CDC_ECM_NOTIFY_BUF_SIZE;
+    cdc.notif.urb.actual_length = 0;
+    cdc.notif.urb.complete      = cdc_notify_complete;
+    cdc.notif.urb.context       = &cdc.notif;
+    cdc.notif.urb.status        = USB_URB_PENDING;
+    __atomic_store_n(&cdc.notif.completed, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&cdc.notif.in_use, true, __ATOMIC_RELEASE);
+
+    int rc = usb_submit_urb(&cdc.notif.urb);
+    if (rc != 0) {
+        __atomic_store_n(&cdc.notif.in_use, false, __ATOMIC_RELAXED);
+        WARN("cdc_ecm: notify URB submit failed (ep=0x%02x rc=%d)",
+             cdc.notif_in->address, rc);
+        return NET_E_GENERIC;
+    }
+
+    return NET_OK;
+}
+
+static void cdc_notify_handle_event(void)
+{
+    if (!__atomic_load_n(&cdc.notif.completed, __ATOMIC_ACQUIRE))
+        return;
+
+    __atomic_store_n(&cdc.notif.completed, false, __ATOMIC_RELAXED);
+
+    if (cdc.notif.urb.status != USB_URB_OK &&
+        cdc.notif.urb.status != USB_URB_SHORT) {
+        WARN("cdc_ecm: notification URB completed with status %d",
+             cdc.notif.urb.status);
+        (void)cdc_notify_submit();
+        return;
+    }
+
+    if (cdc.notif.urb.actual_length < sizeof(struct usb_cdc_notification)) {
+        WARN("cdc_ecm: short notification (%u bytes)",
+             cdc.notif.urb.actual_length);
+        (void)cdc_notify_submit();
+        return;
+    }
+
+    const uint8_t *buf = cdc_notify_buf(&cdc.notif);
+    const struct usb_cdc_notification *n =
+        (const struct usb_cdc_notification *)buf;
+    uint16_t wValue  = le16(buf + 2);
+    uint16_t wLength = le16(buf + 6);
+
+    switch (n->bNotificationType) {
+    case CDC_NOTIFY_NETWORK_CONNECTION: {
+        bool up = (wValue != 0);
+        bool prev_valid = __atomic_load_n(&cdc.link_signal_valid, __ATOMIC_RELAXED);
+        bool prev_up    = __atomic_load_n(&cdc.link_ready, __ATOMIC_RELAXED);
+        __atomic_store_n(&cdc.link_ready, up, __ATOMIC_RELAXED);
+        __atomic_store_n(&cdc.link_signal_valid, true, __ATOMIC_RELEASE);
+        if (!prev_valid || prev_up != up) {
+            INFO("cdc_ecm: network connection %s (if=%u)",
+                 up ? "up" : "down",
+                 (unsigned)cdc.ctrl_iface_num);
+        }
+        break;
+    }
+
+    case CDC_NOTIFY_CONNECTION_SPEED_CHANGE:
+        if (wLength >= 8 &&
+            cdc.notif.urb.actual_length >= sizeof(struct usb_cdc_notification) + 8) {
+            bool prev_valid = __atomic_load_n(&cdc.link_signal_valid, __ATOMIC_RELAXED);
+            bool prev_up    = __atomic_load_n(&cdc.link_ready, __ATOMIC_RELAXED);
+            cdc.upstream_bps = le32(buf + 8);
+            cdc.downstream_bps = le32(buf + 12);
+            bool up = (cdc.upstream_bps != 0 || cdc.downstream_bps != 0);
+            __atomic_store_n(&cdc.link_ready, up, __ATOMIC_RELAXED);
+            __atomic_store_n(&cdc.link_signal_valid, true, __ATOMIC_RELEASE);
+            if (!prev_valid || prev_up != up) {
+                INFO("cdc_ecm: inferred link %s from speed change (%u/%u bps)",
+                     up ? "up" : "down",
+                     cdc.upstream_bps, cdc.downstream_bps);
+            } else {
+                INFO("cdc_ecm: speed change upstream=%u downstream=%u",
+                     cdc.upstream_bps, cdc.downstream_bps);
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    (void)cdc_notify_submit();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -366,6 +544,21 @@ static int cdc_ecm_net_init(void)
         if (rc != 0) {
             WARN("cdc_ecm: initial RX submit failed (slot %u rc=%d)", i, rc);
             return NET_E_GENERIC;
+        }
+    }
+
+    if (cdc.notif_in != NULL) {
+        int rc = cdc_notify_submit();
+        if (rc != NET_OK) {
+            WARN("cdc_ecm: continuing without notification-driven link state");
+            cdc.notif_in = NULL;
+            cdc.notif_wait_started_ms = 0;
+            cdc.notif_wait_active = false;
+            cdc.notif_silence_fallback_logged = false;
+        } else {
+            cdc.notif_wait_started_ms = sys_now();
+            cdc.notif_wait_active = true;
+            cdc.notif_silence_fallback_logged = false;
         }
     }
     return NET_OK;
@@ -464,6 +657,10 @@ static int cdc_ecm_net_recv(void *buf, size_t max_len)
 
 static void cdc_ecm_net_tx_reap(void)
 {
+    /* Drive the HCD so completions are visible on poll-only paths. */
+    usb_core_poll();
+    cdc_notify_handle_event();
+
     for (unsigned i = 0; i < CDC_ECM_TX_SLOTS; i++) {
         struct cdc_tx_slot *slot = &cdc.tx[i];
         /* ACQUIRE pairs with the RELEASE in cdc_tx_complete: once we
@@ -477,8 +674,6 @@ static void cdc_ecm_net_tx_reap(void)
         __atomic_store_n(&slot->completed, false, __ATOMIC_RELAXED);
         __atomic_store_n(&slot->in_use,    false, __ATOMIC_RELEASE);
     }
-    /* Drive the HCD so completions are visible on poll-only paths. */
-    usb_core_poll();
 }
 
 static void cdc_ecm_net_get_mac(uint8_t mac[6])
@@ -488,10 +683,31 @@ static void cdc_ecm_net_get_mac(uint8_t mac[6])
 
 static bool cdc_ecm_net_link_status(void)
 {
-    /* Phase 2 assumes the link is up once the device is probed. The
-     * interrupt-IN notification endpoint will drive a real status bit
-     * once it's wired in a later phase (#266 out-of-scope for now). */
-    return __atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE);
+    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
+        return false;
+    /*
+     * If the device exposes a usable notification endpoint, defer
+     * link-up until a real CDC signal arrives. This preserves the
+     * edge that lwIP needs to start DHCP only after carrier is
+     * actually available. Only the "no notification path" fallback
+     * retains the historical "probed implies up" behaviour.
+     */
+    if (cdc.notif_in == NULL)
+        return true;
+    if (!__atomic_load_n(&cdc.link_signal_valid, __ATOMIC_ACQUIRE)) {
+        if (!cdc.notif_wait_active)
+            return false;
+        uint32_t started = cdc.notif_wait_started_ms;
+        if ((sys_now() - started) < cdc_notify_silence_timeout_ms)
+            return false;
+        if (!cdc.notif_silence_fallback_logged) {
+            WARN("cdc_ecm: no link notification after %u ms; falling back to probe-based link up",
+                 cdc_notify_silence_timeout_ms);
+            cdc.notif_silence_fallback_logged = true;
+        }
+        return true;
+    }
+    return __atomic_load_n(&cdc.link_ready, __ATOMIC_ACQUIRE);
 }
 
 static const struct net_driver cdc_ecm_driver = {
@@ -580,6 +796,8 @@ int cdc_ecm_probe_and_register(void)
              data_iface->number, data_iface->alt_setting);
     }
 
+    const struct usb_endpoint *notif =
+        usb_find_endpoint(dev, ctrl_iface->number, USB_DIR_IN, USB_XFER_INTERRUPT);
     const struct usb_endpoint *in =
         usb_find_endpoint(dev, data_iface->number, USB_DIR_IN, USB_XFER_BULK);
     const struct usb_endpoint *out =
@@ -636,9 +854,20 @@ int cdc_ecm_probe_and_register(void)
     if (!have_mac)
         generate_fallback_mac(cdc.mac);
 
-    cdc.dev      = dev;
-    cdc.bulk_in  = in;
-    cdc.bulk_out = out;
+    cdc.dev           = dev;
+    cdc.ctrl_iface_num = ctrl_iface->number;
+    cdc.bulk_in       = in;
+    cdc.bulk_out      = out;
+    cdc.notif_in      = notif;
+    cdc.notif_wait_started_ms = 0;
+    cdc.notif_wait_active = false;
+    cdc.notif_silence_fallback_logged = false;
+    cdc.link_ready    = false;
+    cdc.link_signal_valid = false;
+    cdc.upstream_bps  = 0;
+    cdc.downstream_bps = 0;
+    cdc.notif.in_use  = false;
+    cdc.notif.completed = false;
     /* Zero slot state — fresh arrays on every probe. Probe runs from
      * single-threaded init context so plain stores are sufficient;
      * the atomic ops kick in once net_init queues the first URBs. */
@@ -661,6 +890,13 @@ int cdc_ecm_probe_and_register(void)
          cdc.mac[0], cdc.mac[1], cdc.mac[2],
          cdc.mac[3], cdc.mac[4], cdc.mac[5],
          cdc.max_segment, in->address, out->address);
+    if (notif != NULL) {
+        INFO("cdc_ecm: notification endpoint 0x%02x on ctrl iface %u",
+             notif->address, (unsigned)ctrl_iface->number);
+    } else {
+        WARN("cdc_ecm: no notification endpoint on ctrl iface %u; falling back to probe-based link up",
+             (unsigned)ctrl_iface->number);
+    }
 
     net_register_driver(&cdc_ecm_driver);
     return NET_OK;
@@ -668,8 +904,10 @@ int cdc_ecm_probe_and_register(void)
 
 void cdc_ecm_poll(void)
 {
-    if (__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
+    if (__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE)) {
         usb_core_poll();
+        cdc_notify_handle_event();
+    }
 }
 
 void cdc_ecm_reset(void)
@@ -681,8 +919,18 @@ void cdc_ecm_reset(void)
      * Also clears the "no device" log-once flag so a test that
      * re-probes an empty bus after reset sees the log message fire
      * again — keeps the reset/log-emit symmetry explicit. */
+    if (__atomic_load_n(&cdc.notif.in_use, __ATOMIC_ACQUIRE))
+        (void)usb_cancel_urb(&cdc.notif.urb);
     __atomic_store_n(&cdc.probed, false, __ATOMIC_RELEASE);
     cdc_logged_no_device = false;
+    cdc.notif_in = NULL;
+    cdc.notif_wait_started_ms = 0;
+    cdc.notif_wait_active = false;
+    cdc.notif_silence_fallback_logged = false;
+    cdc_notify_silence_timeout_ms =
+        CDC_ECM_NOTIFY_SILENCE_TIMEOUT_DEFAULT_MS;
+    __atomic_store_n(&cdc.link_signal_valid, false, __ATOMIC_RELAXED);
+    __atomic_store_n(&cdc.link_ready, false, __ATOMIC_RELAXED);
 }
 
 const uint8_t *cdc_ecm_get_mac(void)
@@ -703,4 +951,20 @@ uint32_t cdc_ecm_get_rx_count(void)
 uint32_t cdc_ecm_get_tx_count(void)
 {
     return cdc.tx_completions;
+}
+
+void cdc_ecm_set_notify_silence_timeout_ms(uint32_t ms)
+{
+    cdc_notify_silence_timeout_ms = ms;
+}
+
+uint32_t cdc_ecm_get_notify_silence_timeout_ms(void)
+{
+    return cdc_notify_silence_timeout_ms;
+}
+
+void cdc_ecm_test_force_notify_wait(uint32_t started_ms, bool active)
+{
+    cdc.notif_wait_started_ms = started_ms;
+    cdc.notif_wait_active = active;
 }

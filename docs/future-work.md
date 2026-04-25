@@ -89,7 +89,9 @@ Post-capstone development roadmap. These items were identified during Phases 1-6
 - Synchronization barriers for pipeline stages
 - Failover: migrate pipeline stages when a node fails
 
-**Prerequisite:** Networking stack (lwIP integration complete for QEMU; Jetson EQOS driver needed for hardware).
+**Prerequisite:** Networking stack on at least one real-hardware path
+(Pi 5 MACB/GEM and the current Jetson USB CDC-ECM path are landed);
+broader hardware/networking generalization remains follow-on work.
 
 ---
 

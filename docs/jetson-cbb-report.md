@@ -10,7 +10,7 @@ together material previously scattered across `docs/jetson-el2-bringup.md`,
 **Audience:** Future SLM-OS developers and anyone evaluating how much
 Jetson hardware is addressable from a bare-metal kernel at NS EL2.
 
-**Last updated:** 17 April 2026 (Phase 7 retest retracted the GPU doorbell finding)
+**Last updated:** 25 April 2026 (USB networking path shipped; historical blocker notes retained where still useful)
 
 ---
 
@@ -162,8 +162,8 @@ at the same EL as Linux was running at when kexec handed off.
 | HSP mailboxes (TCU) | `0x03C00000+` | ✅ | Serial input routing |
 | PSCI calls | SMC | ✅ | CPU power, SYSTEM_OFF |
 | XUSB pad controller | `0x03520000` | ✅ | USB networking UPHY config (#266 Phase 0) |
-| Tegra XHCI host | `0x03610000` | ⚠ MMIO readable, DMA blocked | #266 Phase 3A mothballed. Capability probe works post-kexec once `slmos-kexec` holds the `xusb_*` clocks on. But `USBCMD.RUN=1` wedges the aperture because `arm-smmu` drops the xusb stream's translations during Linux's kexec path (#285, closed). See `docs/jetson-usb-networking-plan.md` §8. |
-| Tegra XUDC device | `0x03550000` | ✅ (clock-dark) | USB networking Option B fallback (#266 Phase 0); expected to hit the same SMMU-at-kexec DMA blocker as XHCI if attempted. |
+| Tegra XHCI host | `0x03610000` | ✅ Reachable on the shipped Linux-cooperative handoff path | Used by the landed Jetson USB CDC-ECM path (#266): Linux-side `slmos-kexec` preserves the required XUSB/XHCI state, SLM-OS adopts the retained root-hub path, and downstream RTL8153 networking comes up without unplug/replug. The archived bring-up record is `docs/archive/plans/jetson-usb-networking-plan.md`; broader follow-on work is tracked in #385 and #386. |
+| Tegra XUDC device | `0x03550000` | ✅ (clock-dark unless Linux leaves it prepared) | Investigated early as USB networking Option B fallback (#266 Phase 0), but not pursued once the XHCI host path shipped. No current in-tree SLM-OS consumer. |
 
 ### Peripherals blocked even from NS EL2
 
@@ -205,12 +205,12 @@ Cross-walked to the five tracked features (see
 | **GPU inference** | 🟢 Detection + FECS gateway + Phase 7 host-family + Phase 7 COMPUTE_B SEMAPHORE_RELEASE + **Phase 8 compute kernel launch** all firing from SLM-OS post-kexec (2026-04-21) | No CBB wall in the submit path. Channel *creation* still requires the Linux-side helper (kernel-mode nvgpu ioctl surface), but once the channel exists, SLM-OS writes GP_PUT in DRAM and rings the USERMODE doorbell at BAR0+0xBB0090 directly from EL2. Phase 8 dispatches a CUDA-compiled compute kernel via `SEND_PCAS_A` + `SEND_SIGNALING_PCAS2_B`; GPU SMs execute and write 0xCAFE to a known phys address. #258, #273, #297, #291, #356 all closed. |
 | **AI scheduler** | ✅ Running | No CBB dependency — pure CPU/NEON path. |
 | **AI page eviction** | ✅ Running | No CBB dependency. |
-| **Networking** | ❌ Not wired yet (#25) | Tentative impact. EQOS MAC is at `0x02310000`; need to verify EL2 reachability (§6.A first experiment). If blocked, Jetson networking is a hard no-go without one of the permanent fixes in §6. |
-| **USB** | ⛔ Mothballed (#266, #285) | Not CBB-blocked — Phase 0 (2026-04-17) confirmed XHCI + XUDC + UPHY padctl are all NS-EL2-reachable. Clock-gate state fixed by `scripts/jetson-kexec-slmos.sh` holding `xusb_*` clocks + `xusba`/`xusbc` powergates through kexec (commit `66b7ad9`). Phase 3A reached working capability probe but blocked at `USBCMD.RUN=1`: Linux's kexec path disables `arm-smmu` translations for the xusb stream (dmesg `arm-smmu … disabling translation` immediately before `kexec_core: Starting new kernel`), and the controller's first DMA fault on RUN=1 bricks the MMIO aperture. Option A mothballed 2026-04-18 after four variants tested (#285, closed); #286 tracks the long-term standalone-firmware-load alternative. Full investigation in `docs/jetson-usb-networking-plan.md` §8. |
+| **Networking** | 🟢 USB CDC-ECM path shipped (#266); internal RJ45 still future work (#25) | The shipped Jetson networking path uses Linux-cooperative XUSB/XHCI handoff plus retained root-hub adoption, not the internal Ethernet. The remaining onboard-RJ45 gap is the separate PCIe RTL8168 path in `docs/jetson-pcie-investigation.md`. |
+| **USB** | 🟢 Shipped for the validated Jetson USB networking path; broader follow-on work open (#384, #385, #386, #387) | USB is not CBB-blocked on the shipped path. Earlier kexec/SMMU bring-up failures are now historical investigation notes captured in `docs/archive/plans/jetson-usb-networking-plan.md`; current work is about broadening and hardening the landed path rather than proving basic viability. |
 
-The CBB is the *root blocker* for two features (GPU inference full
-pipeline, and possibly networking) and several smaller items (UARTA,
-energy telemetry, USB).
+The CBB still blocks several secondary peripherals (UARTA, BPMP IVC,
+energy telemetry), but it is no longer the root blocker for Jetson USB
+networking on the shipped path.
 
 ---
 
@@ -428,10 +428,13 @@ aperture once the first is working.
 For SLM-OS specifically, the paths that buy the most for the least
 effort, in rough priority order:
 
-1. **First experiment (1 day):** probe EQOS at `0x02310000` from NS
-   EL2. If it's CBB-blocked, Jetson networking is gated on path A/B/C.
-   If it's reachable, proceed with the EQOS driver (#25) without
-   touching CBB — this is the cheapest thing to verify next.
+1. **First experiment (1 day):** probe the internal-Ethernet path only
+   if the project wants the separate onboard-RJ45 follow-on (#25). On
+   the Super Dev Kit in the lab that means the PCIe RTL8168 / Tegra
+   PCIe C8 path, not EQOS. The shipped Jetson USB networking path no
+   longer depends on this. If the internal-Ethernet path is reachable
+   enough to be useful, proceed without touching CBB — this is still
+   the cheapest next experiment for onboard RJ45.
 
 2. *(Was "build custom TF-A SMC for NV_USERMODE doorbell." Removed
    April 17: the doorbell write works directly from NS EL2; #258 is
@@ -470,7 +473,7 @@ documented and reproducible," not "NVIDIA blessed us."
 |---|---|---|
 | #258 | Jetson GPU Phase 7: PBDMA doesn't consume GPFIFO entries — doorbell mechanism blocked from EL2 | Closed 2026-04-17 as misdiagnosis; actual doorbell is at BAR0+0xBB0090 (TU104 layout) and is reachable from EL2. |
 | #31 | Secure Boot Chain (Jetson fuse-based signature verification) | Path B of §6 |
-| #25 | Jetson Ethernet driver (EQOS controller) | Assumes EQOS is reachable at EL2 — first experiment in §7 |
+| #25 | Jetson Ethernet driver / internal RJ45 follow-on | Still the tracker for the separate onboard-Ethernet path; first experiment in §7 |
 | #24 | Jetson USB Serial Console (TinyUSB + Tegra XUSB) | Blocked if XUSB needs clocks SLM-OS can't enable (BPMP unreachable) |
 
 Not tracked as an issue but worth filing once any of paths A/B/C/D is

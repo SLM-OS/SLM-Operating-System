@@ -602,8 +602,10 @@ exercises `virtqueue_add_buf` / `virtqueue_get_buf` bookkeeping (free
 list, avail-idx wrap, descriptor reuse) independent of any device, so
 regressions in the cache-maintenance calls surface in `make test`.
 
-The current model is validated on QEMU only. Real hardware (Pi 5
-GENET, Jetson EQOS) may require additional measures — see
+The current model is validated on QEMU and on the currently shipped real
+hardware paths (Pi 5 MACB/GEM and Jetson USB CDC-ECM). Additional
+real-hardware transports may still require platform-specific measures —
+see
 [`docs/net-dma-coherence.md`](net-dma-coherence.md) (#203) for the
 open questions and the verification plan for the first
 real-hardware NIC driver.
@@ -681,17 +683,18 @@ QEMU_NET := -device virtio-net-device,netdev=net0 \
 |----------|--------|-----------|--------|
 | QEMU virt (ARM64) | Implemented | VirtIO MMIO | `virtio_net.c` |
 | x86-64 QEMU | Implemented | VirtIO PCI | `virtio_net_pci.c` |
-| Raspberry Pi 5 | Not implemented | — | Requires RP1 gigabit Ethernet driver |
-| Jetson Orin Nano | Not implemented | — | EQOS (#25) or RTL8168 on Tegra PCIe C8 (#25) untried; USB networking (#266) mothballed 2026-04-18 — see §USB networking below. |
+| Raspberry Pi 5 | Implemented | Cadence MACB/GEM via RP1 | `macb.c` |
+| Jetson Orin Nano | Implemented | USB CDC-ECM over retained Tegra XHCI root-hub handoff | `cdc_ecm.c` + `kernel/drivers/usb/xhci/*` |
 
-### USB networking (Jetson, work in progress)
+### USB networking (Jetson, shipped path + archived bring-up)
 
-A USB-based network path for Jetson is tracked in #266 and scoped in
-[`docs/jetson-usb-networking-plan.md`](jetson-usb-networking-plan.md).
-The plan's Phase 0 CBB probe (commit `5d282b1`) confirmed that the
-Tegra234 XHCI host aperture at `0x03610000` is reachable from NS EL2
-post-kexec — clock-gated rather than firewalled — so Option A (XHCI
-host + CDC-ECM USB-A dongle) is viable.
+The Jetson USB CDC-ECM path tracked in #266 is now shipped for the
+validated `jetson-nano-2` lab topology: Linux with the Realtek hub +
+RTL8153 already attached, `kexec` into SLM-OS, no manual unplug/replug,
+then `net init`, DHCP, and ping all succeed. The detailed bring-up and
+dead-end investigation record is archived at
+[`docs/archive/plans/jetson-usb-networking-plan.md`](archive/plans/jetson-usb-networking-plan.md).
+Follow-on broadening work is tracked in #384, #385, #386, and #387.
 
 **Phase 1** landed a platform-neutral USB core:
 
@@ -763,6 +766,7 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
 | 7 (CONFIGURE_ENDPOINT + bulk) | ✅ | PR #308 — per-endpoint transfer-ring allocation, Normal TRB for bulk/interrupt |
 | Post-kexec retained hub handoff | ✅ | On `jetson-nano-2`, the Linux helper now deauthorizes the USB2 root hub before `kexec`, preserves the cleaned addressed slot-1 handoff, and skips only the stale slot-3 handoff. SLM-OS adopts the retained high-speed Realtek root hub with no manual re-plug. |
 | Minimal hub support | ✅ | `usb_core` now has one-tier USB 2.0 hub scaffolding, which is sufficient for the current Jetson lab path: retained root hub on slot 1, one downstream child on fresh slot 2. This is not general multi-tier hub support. |
+| General USB host support beyond the current NIC path | ☐ Planned | Tracked in #384. The next step is to replace the current one-tier/root-hub-specific model with generic multi-device topology, hotplug, alternate-setting, and class-binding support. See `docs/usb-host-generalization-plan.md`. |
 | Phase 4 (lwIP integration) | ✅ | On the validated `jetson-nano-2` path, the downstream RTL8153 now enumerates via the retained-root-hub path, `cdc_ecm` binds config 2, DHCP reaches `192.168.4.5/24` (`gw 192.168.4.1`), and `ping 192.168.4.1` succeeds after `kexec` with no manual unplug/replug. |
 
 Source layout in `kernel/drivers/usb/xhci/`:
@@ -1087,7 +1091,7 @@ harness builds for with `ENABLE_NETWORKING=ON`):
 
 **Tier 6 — XHCI ring primitives** (`kernel/tests/test_xhci_ring.c`,
 runs on every platform; Phase 3A mothballed code kept for regression
-coverage per `docs/jetson-usb-networking-plan.md` §8):
+coverage per `docs/archive/plans/jetson-usb-networking-plan.md` §8):
 
 | Test | Description |
 |------|-------------|
@@ -1113,7 +1117,7 @@ coverage per `docs/jetson-usb-networking-plan.md` §8):
 
 **Tier 7 — Tegra234 XHCI wrapper + CSB paging** (`kernel/tests/test_xhci_tegra.c`,
 runs on every platform; Phase 3A.2 of #266 IFR-bringup revival per
-`docs/jetson-usb-networking-plan.md` §9-10):
+`docs/archive/plans/jetson-usb-networking-plan.md` §9-10):
 
 | Test | Description |
 |------|-------------|
@@ -1193,4 +1197,4 @@ roadmap.
 
 ---
 
-*Last updated: April 2026*
+*Last updated: 25 April 2026*

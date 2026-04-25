@@ -66,7 +66,12 @@ struct xhci_urb_slot {
 };
 
 static struct xhci_urb_slot xhci_urbs[XHCI_MAX_INFLIGHT_URBS];
-static bool xhci_verbose_ctrl_logs = true;
+/*
+ * Bring-up left very detailed EP0/TRB logging enabled by default.
+ * Keep the hooks available for future controller debugging, but make the
+ * working Jetson success path quiet unless we explicitly re-enable them.
+ */
+static bool xhci_verbose_ctrl_logs = false;
 /* Fresh routed child slots need one deferred NO_OP after the first short
  * device-descriptor completion or later command/control progress stalls. */
 static bool xhci_child_post_short_noop = true;

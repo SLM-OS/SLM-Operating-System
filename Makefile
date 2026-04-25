@@ -167,10 +167,13 @@ KERNEL_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED
 KERNEL_KEXEC_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS)
 KERNEL_TEST_BUILD_SIGNATURE := PLATFORM=$(PLATFORM);BUILD_TYPE=$(BUILD_TYPE);AI_SCHED=$(AI_SCHED);HAILO_WIRE_DEBUG=$(HAILO_WIRE_DEBUG);WORK_STEALING=$(WORK_STEALING);SECONDARY_PREEMPT=$(SECONDARY_PREEMPT);DISABLE_EVICTION=$(DISABLE_EVICTION);EVICTION_MODELS=$(EVICTION_MODELS);EVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY);EMBED_DEMO_SCRIPTS=$(EMBED_DEMO_SCRIPTS)
 
-# Check for stale file locks in build directory (Windows issue with ungraceful QEMU/GDB termination)
-# If we can't create slmos.elf, nuke the directory to clear the stale lock
-.PHONY: check-build-dir
-check-build-dir:
+# Check for stale file locks in build directories (Windows issue with
+# ungraceful QEMU/GDB termination). If we can't create slmos.elf, nuke the
+# directory to clear the stale lock.
+.PHONY: check-build-dir check-kernel-build-dir check-kernel-test-build-dir
+check-build-dir: check-kernel-build-dir
+
+check-kernel-build-dir:
 	@if [ -d "$(KERNEL_BUILD_DIR)" ]; then \
 		if ! touch "$(KERNEL_BUILD_DIR)/slmos.elf.test" 2>/dev/null; then \
 			echo "WARNING: Stale lock detected in $(KERNEL_BUILD_DIR)"; \
@@ -179,6 +182,18 @@ check-build-dir:
 			rm -rf "$(KERNEL_BUILD_DIR)"; \
 		else \
 			rm -f "$(KERNEL_BUILD_DIR)/slmos.elf.test"; \
+		fi \
+	fi
+
+check-kernel-test-build-dir:
+	@if [ -d "$(KERNEL_TEST_BUILD_DIR)" ]; then \
+		if ! touch "$(KERNEL_TEST_BUILD_DIR)/slmos.elf.test" 2>/dev/null; then \
+			echo "WARNING: Stale lock detected in $(KERNEL_TEST_BUILD_DIR)"; \
+			echo "         (Usually from ungraceful QEMU/GDB termination)"; \
+			echo "         Cleaning build directory..."; \
+			rm -rf "$(KERNEL_TEST_BUILD_DIR)"; \
+		else \
+			rm -f "$(KERNEL_TEST_BUILD_DIR)/slmos.elf.test"; \
 		fi \
 	fi
 
@@ -727,12 +742,18 @@ QEMU_COMMON := -machine $(QEMU_MACHINE) -cpu $(QEMU_CPU) -smp cores=$(QEMU_CORES
 ifeq ($(PLATFORM),X86_64)
     QEMU_NET := -device virtio-net-pci,netdev=net0 \
                 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2323-:2323
+    QEMU_TEST_NET := -device virtio-net-pci,netdev=net0 \
+                     -netdev user,id=net0
 else ifeq ($(PLATFORM),QEMU_VIRT)
     QEMU_NET := -global virtio-mmio.force-legacy=false \
                 -device virtio-net-device,netdev=net0 \
                 -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2323-:2323
+    QEMU_TEST_NET := -global virtio-mmio.force-legacy=false \
+                     -device virtio-net-device,netdev=net0 \
+                     -netdev user,id=net0
 else
     QEMU_NET :=
+    QEMU_TEST_NET :=
 endif
 
 # PCIe test device for ARM64 virt — lets pcie_init() discover a
@@ -881,7 +902,7 @@ QEMU_GUARD := $(shell if command -v systemd-run >/dev/null 2>&1 && systemd-run -
 
 # Build kernel with ENABLE_BOOT_TESTS (runs tests at boot and exits)
 .PHONY: kernel-test
-kernel-test: check-build-dir runtime kernel-test-config-check $(KERNEL_TEST_BUILD_DIR)/Makefile
+kernel-test: check-kernel-test-build-dir runtime kernel-test-config-check $(KERNEL_TEST_BUILD_DIR)/Makefile
 	@echo "Building test kernel..."
 	$(CMAKE) --build $(KERNEL_TEST_BUILD_DIR)
 
@@ -943,7 +964,7 @@ ifeq ($(PLATFORM),X86_64)
 		-smp cores=$(QEMU_CORES) \
 		-m $(QEMU_TEST_MEMORY) \
 		-nographic \
-		$(QEMU_NET) \
+		$(QEMU_TEST_NET) \
 		-device isa-debug-exit,iobase=0x501,iosize=2 \
 		-cdrom $(KERNEL_TEST_ISO) \
 		> $(TEST_OUTPUT) 2>&1; \
@@ -984,7 +1005,7 @@ else
 		-smp cores=$(QEMU_CORES) \
 		-m $(QEMU_TEST_MEMORY) \
 		-nographic \
-		$(QEMU_NET) \
+		$(QEMU_TEST_NET) \
 		$(QEMU_PCIE_TEST) \
 		-semihosting \
 		-kernel $(KERNEL_TEST_ELF) \

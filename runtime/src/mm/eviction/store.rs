@@ -172,7 +172,8 @@ pub fn rollback(kind: BlobKind) -> Result<(), StoreError> {
         let store = &mut *store_mut(kind);
         let prior = store.rollback.take().ok_or(StoreError::NoRollbackBlob)?;
         store.staged = None;
-        store.active = Some(prior);
+        let displaced = store.active.replace(prior);
+        store.rollback = displaced;
         store.state = SlotState::RolledBack;
     }
     Ok(())

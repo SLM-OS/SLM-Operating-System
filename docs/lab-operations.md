@@ -232,6 +232,27 @@ labctl serial capture jetson-nano-1 --timeout 30
 labctl power cycle jetson-nano-1
 ```
 
+### End-to-End Smoke Validation
+
+For the current `jetson-nano-2` USB networking regression check, use:
+
+```bash
+scripts/tests/test-jetson-kexec-networking-smoke.sh \
+    --ssh-target root@192.168.4.93 \
+    --console-port 4004
+```
+
+This drives the working lab path end-to-end from the host:
+
+- deploy the current `slmos.elf` + `slmos-kexec`
+- trigger Linux -> `kexec` -> SLM-OS
+- wait for `slmos>` over ser2net
+- run `net init`, send one `ifconfig dhcp`, poll `ifconfig` until `DHCP(bound)`, and then run `ping 192.168.4.1 2`
+- verify DHCP `192.168.4.5/24` and gateway `192.168.4.1`
+
+It is not a generic Jetson automation harness; it is the repeatable
+smoke test for the validated `nano-2` USB hub + RTL8153 lab setup.
+
 The `slmos-kexec` helper script (`scripts/jetson-kexec-slmos.sh` in the repo)
 suspends the GPU via BPMP runtime PM before calling `kexec`. Without the GPU
 suspend, stale nvgpu DMA operations trigger a TF-A RAS Uncorrectable Error that

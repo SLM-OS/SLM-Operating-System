@@ -2,27 +2,36 @@
 
 Extend networking from QEMU-only to all four supported platforms.
 
-**Current state (April 2026):** Phases 1 and 2 have **landed**. Full
-TCP/IP networking (lwIP + VirtIO-Net) works on both QEMU ARM64 and
-QEMU x86-64 via the `net_driver` abstraction. Pi 5 (#202) and Jetson
-(#25) still need platform-specific NIC drivers — Phases 3 and 4
-below, blocked only on hardware access.
+**Current state (25 April 2026):** Phases 1 and 2 have **landed**.
+Full TCP/IP networking now works on QEMU ARM64, QEMU x86-64,
+Raspberry Pi 5, and the validated Jetson `jetson-nano-2` lab topology.
+The Jetson path landed through USB CDC-ECM over the Tegra XHCI host
+after Linux `kexec`; the remaining Jetson work now splits into:
+- internal Ethernet over the Super Dev Kit's PCIe RTL8168 path (#25)
+- broader validation of the shipped USB path (#385)
+- Jetson xHCI robustness follow-up work (#386)
+- broader USB networking and USB host generalization (#387, #384)
 
-Landed work summary (commits on branch `worktree-networking-no-hw`):
+Landed work summary:
 - `struct net_driver` abstraction (`kernel/include/net_driver.h`)
 - x86-64 VirtIO-Net PCI driver (`kernel/drivers/virtio_net_pci.c`)
 - `ENABLE_NETWORKING` CMake option (default ON for QEMU_VIRT and X86_64)
 - Auto-DHCP at boot with static-IP fallback (closes #197)
 - Live integration tests covering init, TX, RX, DHCP BOUND and FAILED
+- Pi 5 Cadence MACB/GEM driver (`kernel/drivers/macb.c`)
+- Jetson USB CDC-ECM over retained XHCI/root-hub handoff (#266)
 
-Follow-up tickets filed:
+Open follow-up tickets:
 - #200 — Scheduler + integration test flakiness (pre-existing, observed during this work)
 - #201 — Shell message when DHCP binds
-- #202 — Pi 5 BCM GENET driver (Phase 3 below)
 - #203 — DMA coherence verification for real-hardware NICs
-- #25 (updated) — Jetson EQOS driver (Phase 4 below)
+- #25 — Jetson internal Ethernet path via PCIe RTL8168
+- #384 — General USB host topology/class support beyond the current Jetson NIC path
+- #385 — Broaden Jetson USB networking validation beyond the current lab topology
+- #386 — Jetson xHCI robustness follow-up tracker
+- #387 — Generalize USB networking beyond the current Jetson CDC-ECM path
 
-**Last updated:** 17 April 2026
+**Last updated:** 25 April 2026
 
 ---
 
@@ -47,8 +56,8 @@ CMake structure:
   NETWORKING=ON  → lwIP core, sys_arch.c, lwip_slm.c, net_shell.c, net.h API
   PLATFORM=QEMU_VIRT  → virtio_net.c
   PLATFORM=X86_64     → virtio_net_pci.c (new)
-  PLATFORM=RASPI5     → (future: bcmgenet.c)
-  PLATFORM=JETSON     → (future: rtl8169.c or usb_net.c)
+  PLATFORM=RASPI5     → macb.c
+  PLATFORM=JETSON     → CDC-ECM over tegra_xhci retained handoff
 ```
 
 **Files to modify:**
@@ -228,81 +237,62 @@ the full driver walkthrough and register addresses.
 
 ---
 
-## Phase 4: Jetson Networking (Hardware Required — tracked in #25)
+## Phase 4: Jetson Networking (Hardware Required) — Partially landed
 
-**Status: blocked** (see `docs/jetson-pcie-investigation.md`). The
-plan below reflects what was **attempted** and what was **learned**
-in April 2026; the phase did not land. A hardware update captured
-during investigation is that the integrated Tegra Ethernet
-controllers (`nveqos@2310000` + 4× `mgbe@68[0-3]00000`) are all
-marked `status = "disabled"` in the **Super** Developer Kit carrier
-board device tree — the RJ45 actually routes through a **PCIe
-RTL8168** at `0008:01:00.0` (Tegra PCIe root complex C8). An earlier
-revision of this plan targeted EQOS+RTL8211F based on the Orin Nano
-Developer Kit spec; that target doesn't apply to the Super Dev Kit
-carrier in the lab.
+**Status:** Jetson networking is no longer blocked. The shipped path is
+USB CDC-ECM over the Tegra XHCI host, validated on `jetson-nano-2`
+with the Realtek hub + downstream RTL8153 already attached before
+`kexec`. The remaining Jetson work is now split between broader support
+for that USB path and the still-unlanded internal-RJ45 / PCIe route.
 
-### 4.1 Planned target — RTL8168 PCIe NIC
+### 4.1 Shipped path — USB CDC-ECM over the Tegra XHCI host (#266)
 
-Driver scaffolding landed on branch `jetson-rtl8169-driver` as
-`kernel/drivers/eth_rtl8169.c` + `kernel/include/eth_rtl8169.h`,
-with MMU mappings for Tegra PCIe C8 (APPL/CFG/DBI regions + BAR
-window), a `rtldiag` shell command, and cached Linux references
-(`linux-r8169-main.c`, `linux-r8169-phy-config.c`,
-`linux-pcie-tegra194.c` in `docs/reference/`).
+What landed:
+1. Linux-side `slmos-kexec` helper preserves the required XUSB/XHCI
+   state and publishes retained-slot handoff data into the next boot.
+2. SLM-OS adopts the retained root-hub topology, enumerates the
+   downstream RTL8153 via CDC-ECM, and brings up lwIP with DHCP and
+   ping without manual unplug/replug.
+3. CDC-ECM link readiness is now gated on the notification endpoint's
+   `NETWORK_CONNECTION` signal, so the first DHCP attempt no longer
+   depends on a retry race after `kexec`.
+4. Host-driven smoke coverage exists for repeated Linux → `kexec` →
+   SLM-OS networking checks on the lab Jetson path.
 
-**What the scaffolding is ready to do** if the blocker lifts:
-1. PCIe ECAM/DBI bus-0 config read to find the RC bridge.
-2. iATU-retargeted bus-1 config read for the RTL8168 endpoint.
-3. Standard r8169 register programming (~800-1200 LOC) with NC
-   memory for descriptor rings.
+For the detailed bring-up history and dead-end investigations, see the
+archived record at `docs/archive/plans/jetson-usb-networking-plan.md`.
 
-### 4.2 Fallback — USB CDC-ECM (also blocked)
+### 4.2 Remaining Jetson path — internal RJ45 via PCIe RTL8168 (#25)
 
-`xhcidiag` shell command verified that Tegra XHCI at `0x3610000`
-reads 0xFFFFFFFF from SLM-OS at EL2 post-kexec. Same symptom as
-PCIe. USB CDC-ECM is not a cheaper escape route on this platform.
+The Super Developer Kit carrier in the lab routes the RJ45 through a
+PCIe RTL8168 behind Tegra PCIe root complex C8, not through an active
+EQOS path. That PCIe path remains future work.
 
-### 4.3 Root cause of the blocker
+Current status:
+- driver scaffolding and diagnostics from the earlier investigation are
+  still useful infrastructure
+- standalone bare-metal access to the RC/NIC still depends on post-kexec
+  clock / bring-up behavior
+- USB networking removed the immediate product need, but the PCIe route
+  remains useful for a self-contained internal Ethernet path
 
-Not the CBB firewall (initial hypothesis, incorrect). **Linux's
-`pex2_c8_core` clock — managed by BPMP firmware — is gated during
-the kexec transition and cannot be preserved via any user-space
-mechanism tried** (refcount bumps via `/sys/kernel/debug/bpmp/...`,
-`power/control = on` runtime-PM override, `mrq_rate_locked = 1`).
-SLM-OS then sees the block as unresponsive, the same way Linux
-would see it if the clock were disabled deliberately.
+See `docs/jetson-pcie-investigation.md` for the evidence trail and
+remaining options.
 
-Full evidence chain in `docs/jetson-pcie-investigation.md`.
+### 4.3 Jetson follow-on work after the shipped USB path
 
-### 4.4 Remaining paths (all non-trivial)
+The shipped USB path is intentionally narrow. Remaining follow-on work:
+- **#385** — broaden the validation matrix beyond the current one-tier
+  lab topology and single validated adapter chain
+- **#386** — Jetson xHCI robustness follow-ups that improve recovery and
+  reduce reliance on bring-up-era diagnostics
+- **#387** — generalize USB networking beyond the current Jetson
+  CDC-ECM path
+- **#384** — broader USB host topology and class-driver support beyond
+  the current one-tier retained-root-hub flow
 
-- **Kernel module grabbing `clk_prepare_enable` / CLK_IS_CRITICAL
-  / `clk_force_enable`** — hypothesis: kernel-level clock flags may
-  outrank the user-space refcount-bump path and survive kexec.
-  Requires L4T kernel source or headers on the build host.
-- **Crash-kernel path (`kexec -p` + `sysrq-c`)** — skips
-  `device_shutdown()` entirely. Needs `crashkernel=N` on the
-  L4T cmdline and SLM-OS relocation into the reserved region.
-- **Port the Tegra PCIe RC bring-up sequence to SLM-OS** — depends
-  on fixing BPMP MRQs from SLM-OS (#190) or replacing the MRQ
-  steps with direct MMIO where that works.
-
-None of these reuses work done for Pi 5 or x86-64. The diagnostic
-shell commands (`rtldiag`, `xhcidiag`) and the `JETSON_EL1_SMOKE`
-test stay in the tree as infrastructure for whichever path gets
-picked up.
-
-### 4.5 Closed hypotheses (for future reference)
-
-| Hypothesis | Test | Result |
-|---|---|---|
-| tegra194-pcie `.shutdown` tears down RC during kexec | Binary-analyzed L4T `.ko`; `.rela.data` shows `.shutdown = NULL` | Ruled out |
-| CBB firewall blocks PCIe at EL2 only | `JETSON_EL1_SMOKE` test drops to EL1 before reading APPL | Ruled out — same 0xFFFFFFFF at EL1 |
-| CBB firewall blocks by EL regardless of kernel | Linux at EL1 reads real values; SLM-OS at EL1 sees 0xFFFFFFFF | Narrowed to "not EL-based" |
-| CBB firewall blocks by signed kernel | Clock-gate reproduction test | **Ruled out** — symptom reproduces with clock disabled, not firewall |
-| Tegra PCIe RC needs full re-init post-kexec | Linux pre-kexec reads RC fine; `.shutdown = NULL` | Ruled out for the RC itself; clocks do need re-init |
-| Clock refcount hold from userspace prevents teardown | Bumped to 108 via sysfs, kexec'd | Ruled out — doesn't survive kexec |
+This work is about turning a validated lab topology into a broader USB
+host/networking capability, not re-solving the original Jetson bring-up.
 
 ---
 
@@ -320,15 +310,17 @@ Phase 1 (no HW)          Phase 2 (no HW)
          ▼                                      ▼
 Phase 3 (Pi 5 HW)                   Phase 4 (Jetson HW)
 ┌──────────────────┐                ┌──────────────────┐
-│ 3.1 BCM GENET    │                │ 4.1 EQOS+RTL8211F│
-│ 3.2 HW testing   │                │ 4.2 (alt: USB)   │
-└──────────────────┘                │ 4.3 HW testing   │
+│ 3.1 Cadence GEM  │                │ 4.1 USB CDC-ECM  │
+│ 3.2 HW testing   │                │ 4.2 USB follow-on│
+└──────────────────┘                │ 4.3 PCIe RTL8168 │
                                     └──────────────────┘
 ```
 
 Phases 1 and 2 are independent of hardware and can be completed
-entirely in QEMU. Phases 3 and 4 depend on Phase 1 (driver interface)
-and require their respective hardware.
+entirely in QEMU. Phase 3 depends on the driver interface and real Pi 5
+hardware. Phase 4 now splits into a shipped Jetson USB path plus
+follow-on work on broader USB support and the separate internal-RJ45
+PCIe route.
 
 ---
 
@@ -342,13 +334,15 @@ and require their respective hardware.
 | 2.1 | x86-64 | QEMU launches with VirtIO-Net PCI device | No |
 | 2.2 | x86-64 | VirtIO-Net PCI driver, full networking in QEMU | No |
 | 2.3 | x86-64 | `ping`, `ifconfig`, `netstat` working in x86-64 QEMU | No |
-| 3.1 | Pi 5 | BCM GENET driver, networking on real Pi 5 | Yes |
+| 3.1 | Pi 5 | Cadence MACB/GEM driver, networking on real Pi 5 | Yes |
 | 3.2 | Pi 5 | Hardware-validated ping, DHCP, link status | Yes |
-| 4.1 | Jetson | RTL8168 PCIe driver scaffolding, blocked on clock preservation through kexec | Yes |
-| 4.3 | Jetson | Diagnostic infrastructure (`rtldiag`, `xhcidiag`, `JETSON_EL1_SMOKE`) stays in tree | Yes |
+| 4.1 | Jetson | USB CDC-ECM networking via retained XHCI/root-hub handoff (#266) | Yes |
+| 4.2 | Jetson | Broaden and harden the shipped USB networking path (#385, #386, #387, #384) | Yes |
+| 4.3 | Jetson | Optional future internal RJ45 path via PCIe RTL8168 (#25) | Yes |
 
 ---
 
-*Created: 15 April 2026. Phase 4 updated 17 April 2026 after
- empirical investigation: clock teardown during kexec, not CBB
- firewall, is the active blocker.*
+*Created: 15 April 2026. Jetson section re-scoped 25 April 2026 after
+ the USB CDC-ECM path landed: Jetson networking is no longer "blocked"
+ as a whole, but splits into a shipped USB path plus follow-on USB
+ generalization and the separate internal-RJ45 / PCIe route.*

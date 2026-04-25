@@ -3,15 +3,19 @@
 Bare-metal access to the Tegra T234 PCIe root complex C8 from SLM-OS
 at EL2, needed to drive the RTL8168 NIC on the Super Developer Kit.
 
-**Status (17 April 2026):** Blocked. Root cause is **clock gating
-during kexec**, not CBB firewall as initially assumed. Linux's
-`pex2_c8_core` clock (via BPMP) reads `0xFFFFFFFF` from APPL when
-disabled, matching exactly what SLM-OS sees post-kexec. User-space
-mitigations (refcount bumps, runtime-PM override, `mrq_rate_locked`)
-don't survive the kexec transition — something at the BPMP or TF-A
-firmware level re-gates the clock regardless of Linux's refcount.
-Both plan §4.1 (PCIe RTL8168) and §4.2 (USB CDC-ECM) remain
-infeasible. BCT firewall override no longer looks like the fix —
+**Status (25 April 2026):** Still blocked for the internal-RJ45 /
+PCIe route. Root cause remains **clock gating during kexec**, not CBB
+firewall as initially assumed. Linux's `pex2_c8_core` clock (via BPMP)
+reads `0xFFFFFFFF` from APPL when disabled, matching exactly what
+SLM-OS sees post-kexec. User-space mitigations (refcount bumps,
+runtime-PM override, `mrq_rate_locked`) don't survive the kexec
+transition — something at the BPMP or TF-A firmware level re-gates the
+clock regardless of Linux's refcount.
+
+Jetson USB CDC-ECM no longer belongs in the blocked set: that path later
+landed separately via retained XHCI/root-hub handoff (#266). This
+document now applies only to the internal Ethernet / PCIe RTL8168 path
+tracked in #25. BCT firewall override no longer looks like the fix —
 this is a kexec-shutdown-path issue, not a security-policy issue.
 
 **Update (20 April 2026, evening):** Step 2 landed on branch
@@ -48,10 +52,10 @@ Tegra MAC. All five integrated Ethernet controllers
 behind Tegra PCIe root complex C8 (`pcie@140a0000`), with the
 bridge at bus 0 dev 0 and the endpoint at bus 1 dev 0.
 
-This contradicts `docs/networking-expansion-plan.md` §4.1, which
-targeted an EQOS+RTL8211F MDI path. That plan is accurate for some
-Jetson Orin Nano Dev Kit variants but not for the Super Dev Kit in
-the lab.
+This supersedes an earlier revision of
+`docs/networking-expansion-plan.md`, which targeted an EQOS+RTL8211F
+MDI path. That target is accurate for some Jetson Orin Nano Dev Kit
+variants but not for the Super Dev Kit in the lab.
 
 ## Tegra PCIe register layout
 
