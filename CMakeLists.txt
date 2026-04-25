@@ -516,6 +516,13 @@ set(KERNEL_SOURCES
     kernel/lib/md5.c
     kernel/lib/sha256.c
 
+    # SHA-256 (public domain, Brad Conte / B-Con/crypto-algorithms).
+    # Used by the dynamic-kernel-replace `kernel stage` command (#370)
+    # to compute the `tryboot.sha` sidecar. Stored alongside the
+    # staged kernel image; not validated end-to-end today, so this is
+    # a content-checksum primitive, not a security boundary.
+    kernel/lib/sha256.c
+
     # ==========================================================================
     # Filesystem
     # ==========================================================================
@@ -541,6 +548,13 @@ set(KERNEL_SOURCES
     # unchanged. PIO data path; ADMA2 + BCM2712 cfginit deferred to
     # Stage 5 (#371).
     kernel/drivers/sdhci.c
+
+    # `kernel` admin shell command (#370, dynamic-kernel-replace
+    # Stage 4). Wires the Stage 1/2/3 building blocks into a
+    # status / stage / activate / promote / rollback subcommand
+    # surface. Compiles on every platform; non-Pi-5 platforms get
+    # the no-op activate path.
+    kernel/src/kernel_cmd.c
 
     # Component system and FFI (x86-64 provides stubs in platform_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/component.c>
@@ -645,6 +659,9 @@ set(TEST_SOURCES
     # path. ARM64-only (uses `pcie.h`, not the legacy x86 `pci.h`).
     # Skips cleanly if QEMU is started without `-device sdhci-pci`.
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_sdhci.c>
+    # `kernel` admin command surface tests — Stage 4 of #370. Same
+    # ARM64-only gate as test_sdhci.c (it's the same backend stack).
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_kernel_cmd.c>
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for

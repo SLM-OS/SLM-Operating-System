@@ -153,6 +153,8 @@ int test_harness_run_all(void)
 #if !defined(PLATFORM_X86_64)
     /* SDHCI driver against QEMU sdhci-pci (skips cleanly if absent). */
     total_failures += test_suite_sdhci();
+    /* `kernel` admin command surface (also relies on sdhci-pci). */
+    total_failures += test_suite_kernel_cmd();
     total_failures += test_suite_dtb();
     total_failures += test_suite_fdt();
     total_failures += test_suite_model_mem();

@@ -490,6 +490,12 @@ void shell_init(void)
     /* Register Lua scripting command */
     lua_shell_init();
 
+    /* Register `kernel` admin command (dynamic-kernel-replace #370). */
+    {
+        extern void kernel_cmd_register_shell(void);
+        kernel_cmd_register_shell();
+    }
+
     /* Register platform-specific commands */
 #if defined(PLATFORM_X86_64)
     {

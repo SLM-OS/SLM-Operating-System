@@ -157,6 +157,9 @@ int test_suite_fat32(void);
 /* SDHCI block driver integration tests (#369, dynamic-kernel-replace Stage 3) */
 int test_suite_sdhci(void);
 
+/* `kernel` admin command surface tests (#370, dynamic-kernel-replace Stage 4) */
+int test_suite_kernel_cmd(void);
+
 /* General-purpose FDT reader tests (kernel/lib/fdt) */
 int test_suite_fdt(void);
 
