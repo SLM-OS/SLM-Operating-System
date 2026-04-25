@@ -42,8 +42,10 @@ Three new capabilities on top of the F-series ingress work.
 - BCM2712 EMMC2 is SDHCI-compatible.
 - Legacy 25 MHz SDR is sufficient for admin-speed writes (an image-size
   kernel lands in a few seconds).
-- Reference sources: Linux `drivers/mmc/host/sdhci-iproc.c`, u-boot
-  BCM2712 board files.
+- Reference sources: Linux `drivers/mmc/host/sdhci-brcmstb.c` (the
+  `brcm,bcm2712-sdhci` variant — Pi 5 does *not* bind to
+  `sdhci-iproc.c`, that driver only matches `bcm2711-emmc2` on Pi 4),
+  u-boot BCM2712 board files.
 - Scope: CMD0 / CMD2 / CMD3 / CMD7 / CMD8 / CMD9 / CMD16 / CMD17 /
   CMD18 / CMD24 / CMD25 / CMD55 / ACMD41 only. No HS200, no HS400, no
   tuning, no CQE, no TRIM.
@@ -55,8 +57,13 @@ Three new capabilities on top of the F-series ingress work.
   `disk_read` / `disk_write` to the SDHCI driver.
 - Parse MBR, parse BPB on partition 1, create / overwrite a file in the
   partition 1 root directory.
-- Skip long filename support — `kernel_2712.img`, `tryboot.img`, and
-  `config.txt` all fit 8.3.
+- **Long filename (LFN) support is required** — `kernel_2712.img`'s
+  basename is 11 chars, which exceeds the 8.3 limit. `tryboot.img`
+  and `config.txt` fit 8.3, but the rename target on `kernel promote`
+  must produce the exact `kernel_2712.img` name the lab firmware
+  loads (the project pins this filename — see
+  `memory/pi5_deploy_filename.md`). Enable FatFs `FF_USE_LFN` in
+  ROM/buffer mode (~1–3 KB code).
 
 ### 3. Tryboot + Admin Command Surface
 
@@ -117,11 +124,24 @@ cold?
   trusts firmware-left state. This reveals what Linux *assumes*, not
   what firmware *does*, but if Linux re-inits unconditionally, the safe
   play is "SLM-OS re-inits too" and residual risk drops.
+- **Resolved (code-read, 2026-04-24):** Linux does a full cold re-init.
+  `drivers/mmc/host/sdhci-brcmstb.c:582` `sdhci_brcmstb_probe` calls
+  `devm_clk_get_optional_enabled` (line 596 — does not inherit clock
+  state), runs `sdhci_brcmstb_cfginit_2712` to rewrite `SDIO_CFG_*`
+  unconditionally, and routes `.reset` through `brcmstb_reset` →
+  `SDHCI_RESET_ALL` via `sdhci_init` (`sdhci.c:691`). The MMC core
+  then drives a full `mmc_power_up` → `mmc_hw_reset_for_init` →
+  `mmc_go_idle` (CMD0) sequence in `mmc_rescan_try_freq`
+  (`core.c:2641-2690`). No `SDHCI_QUIRK_NO_CARD_NO_RESET` and no
+  "trust firmware state" short-circuit anywhere on the bcm2712 path.
+  The plan's CMD0..CMD25 driver scope already matches this lower
+  bound.
 - Impact if hit: +1–3 d to add cold-start init and any required
-  clock / reset via VC mailbox.
+  clock / reset via VC mailbox. Now scoped at the low end — no
+  surprise re-init work to add on top of what's already planned.
 
 **Hardware required:** partial — code read bounds it, hardware
-confirms it.
+confirms it. Code read complete; hardware confirmation still pending.
 
 ### Risk 2 — Pi 5 Tryboot Register Mechanism
 
@@ -136,11 +156,28 @@ it a bare MMIO write or a VC mailbox RPC?
 - Can be answered entirely from Linux mainline: `drivers/power/reset/`,
   `drivers/watchdog/`, the Pi 5 device-tree at
   `arch/arm64/boot/dts/broadcom/bcm2712*.dts*`.
-- Impact if the flag requires a mailbox call and SLM-OS lacks a BCM
-  mailbox driver: +2–4 d.
+- **Resolved (code-read, 2026-04-24):** VC mailbox property-tag RPC,
+  not direct MMIO. Handler:
+  `drivers/firmware/raspberrypi.c:185-224` (`rpi_firmware_notify_reboot`).
+  When the reboot string contains `" tryboot"` (note the leading
+  space — userspace must pass `"0 tryboot"`), the handler issues two
+  property-tag calls on mailbox channel 8:
+  1. `RPI_FIRMWARE_SET_REBOOT_FLAGS = 0x00038064`, payload `u32 = 1`.
+  2. `RPI_FIRMWARE_NOTIFY_REBOOT = 0x00030048`, empty payload.
+  Mailbox MMIO physical: `0x10_7C01_3880`, size `0x40`
+  (`docs/reference/linux-bcm2712.dtsi:123-128` after applying SoC
+  `ranges` at line 90).
+- **SLM-OS already has the transport.** `kernel/drivers/bcm_mailbox.c`
+  + `kernel/include/bcm_mailbox.h` implement the property-channel
+  protocol at the same MMIO base; the only consumer today is
+  `bcm_mailbox_get_board_mac` (tag `0x00010003`). Adding two new tag
+  helpers (`bcm_mailbox_set_reboot_flags`, `bcm_mailbox_notify_reboot`)
+  is incremental — no new transport work.
+- Impact: was +2–4 d if the driver had to be written; now ~0–1 d
+  for the two tag helpers + SHA-armed call site.
 
 **Hardware required:** no for identification, yes for end-to-end
-verification of boot cycle behavior.
+verification of boot cycle behavior. Identification complete.
 
 ---
 
@@ -148,18 +185,41 @@ verification of boot cycle behavior.
 
 Items that can land before a Pi 5 is free.
 
-- ☐ Trace Pi 5 restart handler in Linux mainline: identify register,
+- ✅ Trace Pi 5 restart handler in Linux mainline: identify register,
   offset, and magic value for `reboot "0 tryboot"`. Record whether it
   is a direct MMIO write or a VC mailbox RPC (and the tag if mailbox).
-- ☐ Read the Pi 5 EMMC2 driver probe path and determine whether Linux
-  re-inits from CMD0 or trusts firmware-left state.
-- ☐ Check whether SLM-OS already has a BCM VC mailbox driver; if not,
+  *Result: VC mailbox property-tag RPC. Tags
+  `RPI_FIRMWARE_SET_REBOOT_FLAGS = 0x00038064` (payload `u32 = 1`) +
+  `RPI_FIRMWARE_NOTIFY_REBOOT = 0x00030048` (empty). See Risk 2.*
+- ✅ Read the Pi 5 EMMC2 driver probe path and determine whether Linux
+  re-inits from CMD0 or trusts firmware-left state. *Result: full
+  cold re-init from CMD0 in `sdhci-brcmstb.c` + MMC core. See
+  Risk 1.*
+- ✅ Check whether SLM-OS already has a BCM VC mailbox driver; if not,
   scope what a minimal one would look like (needed only if Risk 2
-  resolves to "mailbox").
-- ☐ Confirm Pi 5 boot partition layout the firmware expects (FAT32 on
-  MBR partition 1).
-- ☐ Identify the minimum Pi 5 bootloader EEPROM version required for
-  tryboot support; confirm the lab Pi 5s meet it.
+  resolves to "mailbox"). *Result: partial driver exists at
+  `kernel/drivers/bcm_mailbox.c` — transport complete, only the MAC
+  tag wired. Adding the two tryboot tag helpers is incremental.*
+- ✅ Confirm Pi 5 boot partition layout the firmware expects (FAT32 on
+  MBR partition 1). *Result: confirmed via
+  `docs/pi5-dual-boot-setup.md:29-35`. Today's lab card is three
+  MBR primary partitions; partition 1 (`SLMOS`, FAT32, 7.5 GB)
+  holds the firmware files, `kernel_2712.img`, `autoboot.txt`, and
+  `config.txt` — exactly the layout the Pi 5 bootloader expects.
+  Note: `kernel_2712.img` exceeds 8.3, so FatFs needs LFN — see
+  §2 above.*
+- ✅ Identify the minimum Pi 5 bootloader EEPROM version required for
+  tryboot support; confirm the lab Pi 5s meet it. *Result: tryboot
+  predates the lab's pinned firmware. The
+  rpi-eeprom firmware-2712 release notes show a TRYBOOT
+  secure-boot-mode bugfix on 2024-04-17 (so the feature itself is
+  older). Lab Pi 5s are pinned to `pieeprom-2024-09-23.bin`
+  (`memory/pi5_eeprom_findings.md`); newer EEPROMs break bare-metal
+  RP1 UART, so this pin is mandatory. Tryboot on the 2024-09-23
+  firmware is empirically working today on `pi-5-1` —
+  `docs/pi5-dual-boot-setup.md:17` documents `sudo reboot 0
+  tryboot` as the round-trip used to switch SLM-OS↔Pi OS on that
+  card. No EEPROM upgrade is needed.*
 
 ## Hardware Tasks
 
