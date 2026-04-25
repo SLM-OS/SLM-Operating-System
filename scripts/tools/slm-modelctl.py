@@ -667,6 +667,33 @@ def upload_probe_script(args: argparse.Namespace, script: str) -> None:
             pass
 
 
+def upload_bytes_via_shell(shell: Shell, remote_path: str, data: bytes, debug: bool,
+                           chunk_bytes: int) -> None:
+    if not data:
+        run_shell_command(shell, f"put {remote_path} 00", debug)
+        run_shell_command(shell, f"truncate {remote_path} 0", debug)
+        return
+
+    offset = 0
+    while offset < len(data):
+        chunk_limit = min(chunk_bytes, max(1, (1024 - 1 - 16 - (len("put -a") + 1 + len(remote_path) + 1)) // 2))
+        chunk = data[offset : offset + chunk_limit]
+        verb = "put" if offset == 0 else "put -a"
+        run_shell_command(shell, f"{verb} {remote_path} {chunk.hex()}", debug)
+        offset += len(chunk)
+
+
+def upload_probe_script_via_shell(shell: Shell, args: argparse.Namespace, script: str) -> None:
+    ensure_parent_dir(shell, PROBE_REMOTE_PATH, args.debug)
+    upload_bytes_via_shell(
+        shell,
+        PROBE_REMOTE_PATH,
+        script.encode("utf-8"),
+        args.debug,
+        args.chunk_bytes,
+    )
+
+
 def extract_line(text: str, prefix: str) -> str | None:
     for line in text.splitlines():
         if line.startswith(prefix):
@@ -691,7 +718,10 @@ def infer_probe_policy(domain: str, kind: str, override: str | None) -> str:
 
 def probe_scheduler(shell: Shell, args: argparse.Namespace) -> int:
     run_shell_command(shell, f"sched policy {args.policy}", args.debug)
-    upload_probe_script(args, make_probe_create_script())
+    if args.transport == "serial":
+        upload_probe_script_via_shell(shell, args, make_probe_create_script())
+    else:
+        upload_probe_script(args, make_probe_create_script())
     out = run_shell_command(shell, f"lua-admin {PROBE_REMOTE_PATH}", args.debug)
     text = out.decode("utf-8", errors="replace")
     tid_line = extract_line(text, "AI_PROBE_TID ")
@@ -704,7 +734,10 @@ def probe_scheduler(shell: Shell, args: argparse.Namespace) -> int:
     # Let the probe task run under the selected policy before sampling.
     run_shell_command(shell, f"sleep {args.sleep_ms}", args.debug)
 
-    upload_probe_script(args, make_probe_read_script(tid))
+    if args.transport == "serial":
+        upload_probe_script_via_shell(shell, args, make_probe_read_script(tid))
+    else:
+        upload_probe_script(args, make_probe_read_script(tid))
     out = run_shell_command(shell, f"lua-admin {PROBE_REMOTE_PATH}", args.debug)
     text = out.decode("utf-8", errors="replace")
     probe_line = extract_line(text, "AI_PROBE ")
@@ -714,7 +747,10 @@ def probe_scheduler(shell: Shell, args: argparse.Namespace) -> int:
     # Best-effort cleanup. A failed kill is informative but should not hide
     # a successful probe result.
     try:
-        upload_probe_script(args, make_probe_kill_script(tid))
+        if args.transport == "serial":
+            upload_probe_script_via_shell(shell, args, make_probe_kill_script(tid))
+        else:
+            upload_probe_script(args, make_probe_kill_script(tid))
         run_shell_command(shell, f"lua-admin {PROBE_REMOTE_PATH}", args.debug)
     except Exception:
         pass

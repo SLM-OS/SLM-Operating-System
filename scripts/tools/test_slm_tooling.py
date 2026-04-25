@@ -131,6 +131,39 @@ def test_put_upload_framed_resumes_and_finishes():
     ]
 
 
+def test_put_framed_resume_requires_exact_path_match():
+    responses = {
+        "xput status": [b"XPUT active path=/tmp/blob.bak size=20 received=10\nslmos> "],
+        "xput begin /tmp/blob 20": [b"XPUT begin path=/tmp/blob size=20\nslmos> "],
+        "xput chunk 0 000102030405060708090a0b0c0d0e0f10111213": [b"XPUT ok next=20\nslmos> "],
+        "xput finish": [b"XPUT complete path=/tmp/blob size=20\nslmos> "],
+        "stat /tmp/blob": [b"Size: 20 bytes\nslmos> "],
+    }
+    shell = FakeShell(responses)
+    args = argparse.Namespace(
+        debug=False,
+        remote_path="/tmp/blob",
+        transport="telnet",
+        no_resume=False,
+        no_verify_size=False,
+        chunk_bytes=64,
+        chunk_retries=2,
+        retry_delay=0.0,
+    )
+    data = bytes(range(20))
+
+    rc = slm_put.upload_framed(shell, args, data, len(data), "pi-5-2", lambda: shell)
+
+    assert rc == 0
+    assert shell.commands == [
+        "xput status",
+        "xput begin /tmp/blob 20",
+        "xput chunk 0 000102030405060708090a0b0c0d0e0f10111213",
+        "xput finish",
+        "stat /tmp/blob",
+    ]
+
+
 def test_put_main_auto_falls_back_to_legacy_when_xput_missing():
     legacy_calls: list[tuple[str, int]] = []
 
@@ -310,6 +343,53 @@ def test_modelctl_probe_scheduler_runs_create_sample_and_cleanup():
     ]
 
 
+def test_modelctl_probe_scheduler_serial_reuses_existing_shell():
+    shell = FakeShell(
+        {
+            "sched policy ai_mlp": [b"policy set\nslmos> "],
+            f"lua-admin {slm_modelctl.PROBE_REMOTE_PATH}": [
+                b"AI_PROBE_TID 23\nslmos> ",
+                b"AI_PROBE tid=23 raw=7 core=1 pri=0 preempt=1\nslmos> ",
+                b"AI_PROBE_KILL true\nslmos> ",
+            ],
+            "sleep 50": [b"ok\nslmos> "],
+            f"rm {slm_modelctl.PROBE_REMOTE_PATH}": [b"ok\nslmos> "],
+        }
+    )
+    args = argparse.Namespace(
+        policy="ai_mlp",
+        sleep_ms=50,
+        expect_raw=7,
+        debug=False,
+        target="pi-5-2",
+        transport="serial",
+        protocol="auto",
+        labctl=True,
+        port=2323,
+        prompt="slmos> ",
+        timeout=10.0,
+        connect_retries=1,
+        retry_delay=0.0,
+        chunk_bytes=512,
+        tryboot=False,
+    )
+
+    uploads: list[str] = []
+    with mock.patch.object(slm_modelctl, "upload_probe_script", side_effect=AssertionError("should not spawn slm-put over serial")):
+        with mock.patch.object(
+            slm_modelctl,
+            "upload_probe_script_via_shell",
+            side_effect=lambda _shell, _args, script: uploads.append(script),
+        ):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                rc = slm_modelctl.probe_scheduler(shell, args)
+
+    assert rc == 0
+    assert len(uploads) == 3
+    assert "AI_PROBE tid=23 raw=7 core=1 pri=0 preempt=1" in stdout.getvalue()
+
+
 def test_modelctl_apply_probe_raw_invokes_probe_with_inferred_policy():
     shell = FakeShell(
         {
@@ -359,6 +439,7 @@ def main() -> int:
     runner = TestRunner()
     runner.run("put_chunk_limits_respect_shell_line_budget", test_put_chunk_limits_respect_shell_line_budget)
     runner.run("put_upload_framed_resumes_and_finishes", test_put_upload_framed_resumes_and_finishes)
+    runner.run("put_framed_resume_requires_exact_path_match", test_put_framed_resume_requires_exact_path_match)
     runner.run("put_main_auto_falls_back_to_legacy_when_xput_missing", test_put_main_auto_falls_back_to_legacy_when_xput_missing)
     runner.run("put_main_serial_labctl_does_not_resolve_network", test_put_main_serial_labctl_does_not_resolve_network)
     runner.run("put_legacy_no_resume_skips_truncate_for_absent_destination", test_put_legacy_no_resume_skips_truncate_for_absent_destination)
@@ -367,6 +448,7 @@ def main() -> int:
     runner.run("modelctl_legacy_path_named_like_subcommand_stays_positional", test_modelctl_legacy_path_named_like_subcommand_stays_positional)
     runner.run("modelctl_infer_probe_policy_maps_scheduler_kinds", test_modelctl_infer_probe_policy_maps_scheduler_kinds)
     runner.run("modelctl_probe_scheduler_runs_create_sample_and_cleanup", test_modelctl_probe_scheduler_runs_create_sample_and_cleanup)
+    runner.run("modelctl_probe_scheduler_serial_reuses_existing_shell", test_modelctl_probe_scheduler_serial_reuses_existing_shell)
     runner.run("modelctl_apply_probe_raw_invokes_probe_with_inferred_policy", test_modelctl_apply_probe_raw_invokes_probe_with_inferred_policy)
     return runner.summary()
 
