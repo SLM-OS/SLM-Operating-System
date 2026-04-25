@@ -379,6 +379,10 @@ def parse_args() -> argparse.Namespace:
     if args.command in ("apply", "load"):
         has_local = getattr(args, "local_path", None) is not None
         has_http = getattr(args, "http_url", None) is not None
+        if has_http and getattr(args, "remote_path", None) is None and has_local:
+            args.remote_path = args.local_path
+            args.local_path = None
+            has_local = False
         if has_local == has_http:
             parser.error("exactly one of LOCAL_PATH or --http-url is required for apply/load")
         if getattr(args, "sha256", None) is not None and not has_http:
@@ -632,6 +636,7 @@ def default_remote_path(source: str) -> str:
 def fetch_blob(shell: Shell, args: argparse.Namespace, remote_path: str) -> None:
     assert getattr(args, "http_url", None) is not None
     ensure_parent_dir(shell, remote_path, args.debug)
+    run_shell_command(shell, "net init", args.debug)
     command = f"http get {args.http_url} {remote_path}"
     if getattr(args, "sha256", None):
         command += f" {args.sha256}"

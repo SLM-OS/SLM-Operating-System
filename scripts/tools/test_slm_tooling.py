@@ -391,6 +391,28 @@ def test_modelctl_parse_args_accepts_http_source():
     assert args.local_path is None
 
 
+def test_modelctl_parse_args_http_source_accepts_remote_path_override():
+    with patched_argv(
+        slm_modelctl,
+        [
+            "load",
+            "--target",
+            "pi-5-2",
+            "--http-url",
+            "http://10.0.2.2/blob.bin",
+            "sched",
+            "mlp",
+            "/mnt/files/custom/blob.bin",
+        ],
+    ):
+        args = slm_modelctl.parse_args()
+
+    assert args.command == "load"
+    assert args.http_url == "http://10.0.2.2/blob.bin"
+    assert args.local_path is None
+    assert args.remote_path == "/mnt/files/custom/blob.bin"
+
+
 def test_modelctl_parse_args_rejects_sha256_without_http_url():
     with patched_argv(
         slm_modelctl,
@@ -589,6 +611,7 @@ def test_modelctl_apply_http_url_fetches_on_device():
     shell = FakeShell(
         {
             "mkdir /mnt/files/policies": [b"Already exists\nslmos> "],
+            "net init": [b"Network already initialized\nslmos> "],
             "http get http://10.0.2.2/models/blob.bin /mnt/files/policies/blob.bin 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": [b"downloaded\nslmos> "],
             "eviction model clear xgboost": [b"cleared\nslmos> "],
             "eviction model load xgboost /mnt/files/policies/blob.bin": [b"loaded\nslmos> "],
@@ -622,11 +645,55 @@ def test_modelctl_apply_http_url_fetches_on_device():
     assert "xgboost: active" in stdout.getvalue()
     assert shell.commands == [
         "mkdir /mnt/files/policies",
+        "net init",
         "http get http://10.0.2.2/models/blob.bin /mnt/files/policies/blob.bin 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "eviction model clear xgboost",
         "eviction model load xgboost /mnt/files/policies/blob.bin",
         "eviction model activate xgboost",
         "eviction model status",
+    ]
+
+
+def test_modelctl_load_http_url_serial_initializes_network_first():
+    shell = FakeShell(
+        {
+            "mkdir /mnt/files/custom": [b"ok\nslmos> "],
+            "net init": [b"DHCP bound 192.168.4.97\nslmos> "],
+            "http get http://10.0.2.2/models/blob.bin /mnt/files/custom/blob.bin": [b"downloaded\nslmos> "],
+            "sched model load mlp /mnt/files/custom/blob.bin": [b"loaded\nslmos> "],
+            "sched model status": [b"mlp: staged\nslmos> "],
+        }
+    )
+
+    with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
+        with mock.patch.object(slm_modelctl, "run_upload", side_effect=AssertionError("should not upload when --http-url is used")):
+            with patched_argv(
+                slm_modelctl,
+                [
+                    "load",
+                    "--target",
+                    "pi-5-2",
+                    "--transport",
+                    "serial",
+                    "--http-url",
+                    "http://10.0.2.2/models/blob.bin",
+                    "sched",
+                    "mlp",
+                    "/mnt/files/custom/blob.bin",
+                ],
+            ):
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    rc = slm_modelctl.main()
+
+    assert rc == 0
+    assert "mlp: staged" in stdout.getvalue()
+    assert shell.commands == [
+        "mkdir /mnt/files/custom",
+        "net init",
+        "http get http://10.0.2.2/models/blob.bin /mnt/files/custom/blob.bin",
+        "sched model load mlp /mnt/files/custom/blob.bin",
+        "sched model status",
     ]
 
 
@@ -668,6 +735,7 @@ def main() -> int:
     runner.run("put_framed_resume_normalizes_relative_remote_path", test_put_framed_resume_normalizes_relative_remote_path)
     runner.run("modelctl_parse_args_supports_legacy_apply_form", test_modelctl_parse_args_supports_legacy_apply_form)
     runner.run("modelctl_parse_args_accepts_http_source", test_modelctl_parse_args_accepts_http_source)
+    runner.run("modelctl_parse_args_http_source_accepts_remote_path_override", test_modelctl_parse_args_http_source_accepts_remote_path_override)
     runner.run("modelctl_parse_args_rejects_sha256_without_http_url", test_modelctl_parse_args_rejects_sha256_without_http_url)
     runner.run("modelctl_parse_args_reorders_global_options_before_subcommand", test_modelctl_parse_args_reorders_global_options_before_subcommand)
     runner.run("modelctl_legacy_path_named_like_subcommand_stays_positional", test_modelctl_legacy_path_named_like_subcommand_stays_positional)
@@ -676,6 +744,7 @@ def main() -> int:
     runner.run("modelctl_probe_scheduler_serial_reuses_existing_shell", test_modelctl_probe_scheduler_serial_reuses_existing_shell)
     runner.run("modelctl_apply_probe_raw_invokes_probe_with_inferred_policy", test_modelctl_apply_probe_raw_invokes_probe_with_inferred_policy)
     runner.run("modelctl_apply_http_url_fetches_on_device", test_modelctl_apply_http_url_fetches_on_device)
+    runner.run("modelctl_load_http_url_serial_initializes_network_first", test_modelctl_load_http_url_serial_initializes_network_first)
     runner.run("modelctl_run_upload_uses_tool_dir_not_cwd", test_modelctl_run_upload_uses_tool_dir_not_cwd)
     return runner.summary()
 
