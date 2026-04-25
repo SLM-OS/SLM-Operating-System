@@ -725,6 +725,39 @@ else()
 endif()
 target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
 
+# ---------------------------------------------------------------------------
+# build_info.h — version + UTC stamp + git SHA, regenerated every build.
+# Emitted under ${CMAKE_BINARY_DIR}/include/ so parallel multi-platform
+# builds (e.g. simultaneous QEMU_VIRT and RASPI5 from separate build dirs)
+# never race-write the same file. The custom target depends on no inputs,
+# so CMake re-runs the generator on every invocation; the script itself
+# only rewrites the file when the content changes (avoids no-op relinks
+# inside the same UTC second). Both `slmos.elf` and the `lua` static lib
+# pick it up via the build-dir include path added below.
+#
+# Cost: when the UTC second has advanced since the previous build, the
+# stamp changes, the header is rewritten, and the three consumer TUs
+# (main.c, vfs.c, lua_slm.c) recompile, forcing a relink. That is by
+# design — the whole purpose of the stamp is to embed a fresh build
+# identity into the kernel image — and is the reason for the
+# copy-if-different write above (so back-to-back builds inside the same
+# UTC second do not pay the relink cost).
+# ---------------------------------------------------------------------------
+set(BUILD_INFO_DIR    ${CMAKE_BINARY_DIR}/include)
+set(BUILD_INFO_HEADER ${BUILD_INFO_DIR}/build_info.h)
+file(MAKE_DIRECTORY ${BUILD_INFO_DIR})
+add_custom_target(generate_build_info ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DSRC_DIR=${CMAKE_SOURCE_DIR}
+        -DOUT_FILE=${BUILD_INFO_HEADER}
+        -P ${CMAKE_SOURCE_DIR}/cmake/gen_build_info.cmake
+    BYPRODUCTS ${BUILD_INFO_HEADER}
+    COMMENT "Generating build_info.h"
+    VERBATIM
+)
+add_dependencies(slmos.elf generate_build_info)
+target_include_directories(slmos.elf PRIVATE ${BUILD_INFO_DIR})
+
 if(PLATFORM STREQUAL "X86_64")
     # x86-64: no -mgeneral-regs-only (ARM64-only flag)
     target_include_directories(slmos.elf PRIVATE ${CMAKE_SOURCE_DIR}/kernel/include/compat)
@@ -904,7 +937,8 @@ else()
 endif()
 
 add_library(lua STATIC ${LUA_SOURCES} kernel/src/lua_stubs.c kernel/src/lua_slm.c kernel/src/lua_shell.c ${LUA_SETJMP})
-target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src)
+target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src ${BUILD_INFO_DIR})
+add_dependencies(lua generate_build_info)
 
 # Lua-specific compile flags (relaxed warnings for C99 Lua code)
 if(PLATFORM STREQUAL "X86_64")

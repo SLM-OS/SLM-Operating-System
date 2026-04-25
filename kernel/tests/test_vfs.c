@@ -9,7 +9,21 @@
 #include "vfs.h"
 #include "uart.h"
 #include "dtb.h"
+#include <stddef.h>
 #include <stdint.h>
+
+/* Minimal in-test substring search — kernel tests have no libc. */
+static const char *test_vfs_strstr(const char *hay, const char *needle)
+{
+    if (!hay || !needle || !*needle) return hay;
+    for (; *hay; hay++) {
+        const char *h = hay;
+        const char *n = needle;
+        while (*h && *n && *h == *n) { h++; n++; }
+        if (!*n) return hay;
+    }
+    return NULL;
+}
 
 /* ============================================================================
  * Structure Tests
@@ -137,7 +151,13 @@ static void test_vfs_lookup_no_leading_slash(void)
  * ============================================================================ */
 
 /**
- * Test reading /sys/version produces content.
+ * Test reading /sys/version produces content with the four expected keys
+ * sourced from build_info.h (issue #360). The shape is:
+ *
+ *   name:    SLM-OS
+ *   version: X.Y.Z
+ *   build:   YYYYMMDDhhmmss
+ *   commit:  <short-sha>[-dirty]
  */
 static void test_vfs_read_version(void)
 {
@@ -150,9 +170,34 @@ static void test_vfs_read_version(void)
     TEST_ASSERT_GREATER_THAN(0, len);
     buf[len] = '\0';
 
-    /* Should contain version string */
-    TEST_ASSERT_NOT_NULL_MESSAGE(buf, "Version read returned empty");
-    /* Version should contain "SLM-OS" or version number */
+    /* Echo the content so it appears in the test log alongside the
+     * boot banner — useful for verifying issue #360 end-to-end. */
+    uart_puts("[test_vfs_read_version] /sys/version:\n");
+    uart_puts(buf);
+
+    /* All four keys must appear at line start (so any drift to a
+     * different layout — e.g. dropping a key — fails this test). */
+    TEST_ASSERT_TRUE(test_vfs_strstr(buf, "name:")    != NULL);
+    TEST_ASSERT_TRUE(test_vfs_strstr(buf, "version:") != NULL);
+    TEST_ASSERT_TRUE(test_vfs_strstr(buf, "build:")   != NULL);
+    TEST_ASSERT_TRUE(test_vfs_strstr(buf, "commit:")  != NULL);
+
+    /* Must still identify itself as SLM-OS. */
+    TEST_ASSERT_TRUE(test_vfs_strstr(buf, "SLM-OS") != NULL);
+
+    /* The drifted "phase: 4" line must be gone. */
+    TEST_ASSERT_TRUE(test_vfs_strstr(buf, "phase:") == NULL);
+
+    /* The build stamp is fixed-width (YYYYMMDDhhmmss, 14 chars).
+     * Locate it and confirm 14 digit characters follow. */
+    const char *stamp = test_vfs_strstr(buf, "build:");
+    TEST_ASSERT_NOT_NULL(stamp);
+    stamp += 6;  /* skip "build:" */
+    while (*stamp == ' ' || *stamp == '\t') stamp++;
+    for (int i = 0; i < 14; i++) {
+        TEST_ASSERT_TRUE(stamp[i] >= '0' && stamp[i] <= '9');
+    }
+    TEST_ASSERT_TRUE(stamp[14] == '\n');
 }
 
 /**

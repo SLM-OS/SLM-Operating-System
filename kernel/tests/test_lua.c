@@ -212,6 +212,10 @@ static void test_slm_module_exists(void)
         "assert(type(slm.mem_stats) == 'function', 'slm.mem_stats should be function')\n"
         "assert(type(slm.tasks) == 'function', 'slm.tasks should be function')\n"
         "assert(type(slm.version) == 'function', 'slm.version should be function')\n"
+        /* String constants from build_info.h (#360) */
+        "assert(type(slm.VERSION)     == 'string', 'slm.VERSION should be string')\n"
+        "assert(type(slm.BUILD_STAMP) == 'string', 'slm.BUILD_STAMP should be string')\n"
+        "assert(type(slm.BUILD_SHA)   == 'string', 'slm.BUILD_SHA should be string')\n"
         "assert(type(slm.cpu_count) == 'function', 'slm.cpu_count should be function')\n"
         "assert(type(slm.cpu_id) == 'function', 'slm.cpu_id should be function')\n"
         "assert(type(slm.sleep) == 'function', 'slm.sleep should be function')\n"
@@ -399,6 +403,40 @@ static void test_slm_version(void)
         "ver = slm.version()\n"
         "assert(type(ver) == 'string', 'version should return string')\n"
         "assert(#ver > 0, 'version should not be empty')";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
+/*
+ * Test: slm.VERSION / BUILD_STAMP / BUILD_SHA constants from build_info.h
+ * (issue #360). The constants must:
+ *   - exist as strings on every Lua state (safe and admin)
+ *   - be non-empty
+ *   - BUILD_STAMP is exactly 14 ASCII digits (YYYYMMDDhhmmss UTC, the same
+ *     shape pinned by the static_assert in main.c and the /sys/version
+ *     read in vfs.c)
+ *   - VERSION matches what slm.version() returns (single source of truth).
+ */
+static void test_slm_build_info_constants(void)
+{
+    lua_State *L = lua_slm_newstate();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "assert(type(slm.VERSION)     == 'string', 'slm.VERSION must be string')\n"
+        "assert(type(slm.BUILD_STAMP) == 'string', 'slm.BUILD_STAMP must be string')\n"
+        "assert(type(slm.BUILD_SHA)   == 'string', 'slm.BUILD_SHA must be string')\n"
+        "assert(#slm.VERSION     > 0, 'slm.VERSION must not be empty')\n"
+        "assert(#slm.BUILD_SHA   > 0, 'slm.BUILD_SHA must not be empty')\n"
+        "assert(#slm.BUILD_STAMP == 14, 'BUILD_STAMP must be 14 chars: ' .. slm.BUILD_STAMP)\n"
+        "assert(slm.BUILD_STAMP:match('^%d%d%d%d%d%d%d%d%d%d%d%d%d%d$') ~= nil,\n"
+        "       'BUILD_STAMP must be 14 ASCII digits: ' .. slm.BUILD_STAMP)\n"
+        /* slm.version() must agree with slm.VERSION — they share one source. */
+        "assert(slm.version() == 'SLM-OS ' .. slm.VERSION,\n"
+        "       'slm.version() must agree with slm.VERSION')\n";
 
     int result = lua_slm_dostring(L, code);
     TEST_ASSERT_EQUAL_INT(0, result);
@@ -3162,6 +3200,7 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_mem_stats);
     RUN_TEST(test_slm_tasks);
     RUN_TEST(test_slm_version);
+    RUN_TEST(test_slm_build_info_constants);
     RUN_TEST(test_slm_cpu_count);
     RUN_TEST(test_slm_cpu_id);
 
