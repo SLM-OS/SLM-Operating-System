@@ -66,7 +66,7 @@ struct xhci_urb_slot {
 };
 
 static struct xhci_urb_slot xhci_urbs[XHCI_MAX_INFLIGHT_URBS];
-static bool xhci_verbose_ctrl_logs = false;
+static bool xhci_verbose_ctrl_logs = true;
 /* Fresh routed child slots need one deferred NO_OP after the first short
  * device-descriptor completion or later command/control progress stalls. */
 static bool xhci_child_post_short_noop = true;

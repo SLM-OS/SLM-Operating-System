@@ -193,11 +193,27 @@ static uint32_t xhci_stale_portsc_initial = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
 static bool xhci_skip_next_port_reset = false;
 static bool xhci_force_connected_disabled_reset = false;
+static bool xhci_force_enabled_port_reset = false;
 static bool xhci_probe_fullspeed_addr3 = true;
 static bool xhci_probe_highspeed_eval_addr1 = true;
 
 static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
                                       const char *why);
+
+static bool xhci_inherited_slot1_matches_active_port(enum usb_speed speed)
+{
+    if (!xhci_inherited_slot1_ctx_valid ||
+        xhci_inherited_slot1_devctx_raw_phys == 0 ||
+        xhci_active_port == 0xFF ||
+        speed != USB_SPEED_HIGH) {
+        return false;
+    }
+
+    uint32_t root =
+        (xhci_inherited_slot1_slot_ctx_dw[1] & XHCI_SLOT_DW1_ROOT_PORT_MASK) >>
+        XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+    return root != 0 && root == (uint32_t)xhci_active_port + 1U;
+}
 
 static uint32_t xhci_port_state_to_neutral(uint32_t portsc)
 {
@@ -268,6 +284,55 @@ static uint32_t xhci_resume_usb2_port_to_u0(uint8_t pidx, uint32_t portsc,
     }
 
     return portsc;
+}
+
+static uint32_t xhci_nudge_disabled_port_to_u0(uint8_t pidx, uint32_t portsc,
+                                               const char *why)
+{
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    (void)xhci_decode_portsc(portsc, &connected, &speed);
+
+    if (!connected || (portsc & XHCI_PORTSC_PED) || speed > USB_SPEED_HIGH)
+        return portsc;
+
+    uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+    uint32_t write = (xhci_port_state_to_neutral(portsc) &
+                      ~XHCI_PORTSC_PLS_MASK) |
+                     (XHCI_PLS_RESUME << XHCI_PORTSC_PLS_SHIFT) |
+                     XHCI_PORTSC_LWS;
+    xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
+
+    uint64_t start = timer_get_count();
+    uint64_t ticks = timer_get_frequency() / 50; /* 20 ms */
+    while (timer_get_count() - start < ticks) { }
+
+    uint32_t resumed = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+    uint32_t resumed_pls =
+        (resumed & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+
+    if (resumed_pls == XHCI_PLS_RESUME) {
+        uint32_t u0 = (xhci_port_state_to_neutral(resumed) &
+                       ~XHCI_PORTSC_PLS_MASK) |
+                      (XHCI_PLS_U0 << XHCI_PORTSC_PLS_SHIFT) |
+                      XHCI_PORTSC_LWS;
+        xhci_op_w32(XHCI_OP_PORTSC(pidx), u0);
+
+        uint64_t u0_start = timer_get_count();
+        uint64_t u0_ticks = timer_get_frequency() / 100; /* 10 ms */
+        while (timer_get_count() - u0_start < u0_ticks) { }
+
+        resumed = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+        resumed_pls =
+            (resumed & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+    }
+
+    INFO("xhci: PORTSC[%u] disabled-port nudge for %s (0x%08x -> 0x%08x, pls %u -> %u, ped=%u)",
+         (unsigned)pidx, why ? why : "probe",
+         (unsigned)portsc, (unsigned)resumed,
+         (unsigned)pls, (unsigned)resumed_pls,
+         (unsigned)((resumed & XHCI_PORTSC_PED) ? 1u : 0u));
+    return xhci_ack_port_changes(pidx, resumed, why ? why : "disabled-port nudge");
 }
 
 static uint32_t xhci_padctl_r32(uint32_t off)
@@ -769,6 +834,22 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
 
     enum xhci_attach_phase prev = xhci_attach_state;
     if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_already_recovered(portsc, c) &&
+        xhci_inherited_slot1_matches_active_port(s)) {
+        INFO("xhci: stale port on PORTSC[%u] matches inherited slot1 handoff "
+             "(0x%08x) — skipping reset and reusing retained slot state",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
+        xhci_force_connected_disabled_reset = false;
+        xhci_force_enabled_port_reset = false;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE &&
         xhci_stale_port_already_recovered(portsc, c)) {
         INFO("xhci: stale port on PORTSC[%u] is connected with PED=0 "
              "and change latched (0x%08x) — forcing reset-backed recovery",
@@ -777,6 +858,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = false;
         xhci_force_connected_disabled_reset = true;
+        xhci_force_enabled_port_reset = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -791,6 +873,23 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = false;
         xhci_force_connected_disabled_reset = true;
+        xhci_force_enabled_port_reset = false;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_enabled_inherited(portsc, c, s) &&
+        xhci_inherited_slot1_matches_active_port(s)) {
+        INFO("xhci: stale port on PORTSC[%u] is already enabled and matches "
+             "inherited slot1 handoff (0x%08x) — skipping reset and reusing retained slot1 state",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
+        xhci_force_connected_disabled_reset = false;
+        xhci_force_enabled_port_reset = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -805,6 +904,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
+        xhci_force_enabled_port_reset = true;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -821,6 +921,7 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
         xhci_prereset_speed = s;
         xhci_skip_next_port_reset = true;
         xhci_force_connected_disabled_reset = false;
+        xhci_force_enabled_port_reset = false;
         if (connected) *connected = true;
         if (speed)     *speed     = s;
         return true;
@@ -1060,14 +1161,33 @@ int xhci_hcd_port_reset(uint8_t port)
     bool connected_enabled_u0 =
         (xhci_attach_state == XHCI_ATTACH_FRESH &&
          xhci_connected_enabled_u0_port(portsc));
+    bool connected_now = false;
+    enum usb_speed speed_now = USB_SPEED_UNKNOWN;
     bool force_connected_disabled_reset =
         connected_disabled && xhci_force_connected_disabled_reset;
+    bool force_enabled_port_reset = xhci_force_enabled_port_reset;
 
     xhci_force_connected_disabled_reset = false;
+    xhci_force_enabled_port_reset = false;
+    (void)xhci_decode_portsc(portsc, &connected_now, &speed_now);
 
-    if (connected_enabled_u0) {
+    if (connected_enabled_u0 && !force_enabled_port_reset) {
         xhci_active_portsc = portsc;
         INFO("xhci: reusing already-enabled U0 PORTSC[%u] (0x%08x)",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        return 0;
+    }
+
+    if (connected_disabled &&
+        xhci_inherited_slot1_matches_active_port(speed_now)) {
+        portsc = xhci_ack_port_changes(xhci_active_port, portsc,
+                                       "slot1 handoff reuse");
+        portsc = xhci_nudge_disabled_port_to_u0(xhci_active_port, portsc,
+                                                "slot1 handoff reuse");
+        xhci_skip_next_port_reset = false;
+        xhci_active_portsc = portsc;
+        INFO("xhci: reusing inherited slot1 on connected-disabled PORTSC[%u] "
+             "after change-ack (0x%08x)",
              (unsigned)xhci_active_port, (unsigned)portsc);
         return 0;
     }
@@ -1088,10 +1208,14 @@ int xhci_hcd_port_reset(uint8_t port)
                  (unsigned)xhci_active_port, (unsigned)portsc,
                  (unsigned)((portsc & XHCI_PORTSC_PED) ? 1u : 0u),
                  (unsigned)pls);
+        } else if (force_enabled_port_reset) {
+            INFO("xhci: forcing root-port reset on enabled inherited PORTSC[%u] (0x%08x, pls=%u)",
+                 (unsigned)xhci_active_port, (unsigned)xhci_active_portsc,
+                 (unsigned)pls);
         } else {
-        INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x, pls=%u)",
-             (unsigned)xhci_active_port, (unsigned)xhci_active_portsc,
-             (unsigned)pls);
+            INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x, pls=%u)",
+                 (unsigned)xhci_active_port, (unsigned)xhci_active_portsc,
+                 (unsigned)pls);
             return 0;
         }
     }
@@ -1539,6 +1663,8 @@ static int xhci_try_adopt_inherited_slot1(struct xhci_device *d,
     bool cz = xhci_caps_cached.ctx_64;
     struct xhci_trb cmd = {0};
     uint8_t cc = 0;
+    uint32_t inherited_ep0_state =
+        xhci_inherited_slot1_ep0_ctx_dw[0] & XHCI_EP_DW0_STATE_MASK;
 
     for (unsigned i = 0; i < 4; i++)
         *xhci_dev_slot_dw(d->dev_ctx, i) = xhci_inherited_slot1_slot_ctx_dw[i];
@@ -1550,6 +1676,24 @@ static int xhci_try_adopt_inherited_slot1(struct xhci_device *d,
     *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz) =
         (uint32_t)(ep0->phys >> 32);
     dsb(sy);
+
+    if (inherited_ep0_state == 1U) {
+        cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
+                      ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                      ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+        if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+            cc != XHCI_CC_SUCCESS) {
+            WARN("xhci: adopt slot %u STOP_EP(ep0) state=%s cc=%u",
+                 (unsigned)slot,
+                 xhci_ep_state_str(inherited_ep0_state),
+                 (unsigned)cc);
+            return -1;
+        }
+        memset(&cmd, 0, sizeof(cmd));
+    } else {
+        INFO("xhci: adopt slot %u skipping STOP_EP(ep0) because inherited state is %s",
+             (unsigned)slot, xhci_ep_state_str(inherited_ep0_state));
+    }
 
     cmd.param_lo = (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
     cmd.param_hi = (uint32_t)(ep0->phys >> 32);

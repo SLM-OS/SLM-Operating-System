@@ -36,6 +36,7 @@
 #   sudo ./jetson-kexec-slmos.sh --no-gpu-suspend /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-usb-hold   /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-smmu-fix   /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --no-usb-root-cleanup /path/to/slmos.elf
 #
 # Or install to Jetson and run:
 #   sudo slmos-kexec /root/slmos.elf
@@ -61,12 +62,23 @@
 #                       exercising the XHCI host path, or if you are
 #                       deliberately reproducing the pre-fix failure.
 #
+#   --no-usb-root-cleanup
+#                       Skip the Linux-side USB2 root-hub deauthorize
+#                       step before kexec. On nano-2, leaving the
+#                       high-speed root hub authorized across kexec can
+#                       preserve a poisoned retained slot-1 state in
+#                       SLM-OS; deauthorizing it leaves slot 1 in a
+#                       cleaner addressed state and skips only the
+#                       downstream slot-3 handoff for that run.
+#
 set -euo pipefail
 
 NO_GPU_SUSPEND=0
 NO_USB_HOLD=0
 NO_SMMU_FIX=0
+NO_USB_ROOT_CLEANUP=0
 KERNEL=""
+SKIP_XHCI_SLOT3_HANDOFF=0
 XHCI_SLOT1_HANDOFF_PAYLOAD=""
 XHCI_SLOT3_HANDOFF_PAYLOAD=""
 for arg in "$@"; do
@@ -74,6 +86,7 @@ for arg in "$@"; do
         --no-gpu-suspend) NO_GPU_SUSPEND=1 ;;
         --no-usb-hold)    NO_USB_HOLD=1 ;;
         --no-smmu-fix)    NO_SMMU_FIX=1 ;;
+        --no-usb-root-cleanup) NO_USB_ROOT_CLEANUP=1 ;;
         *) KERNEL="$arg" ;;
     esac
 done
@@ -145,14 +158,36 @@ prepare_kexec_dtb() {
 
 stash_xhci_slot1_handoff() {
     local dbg=/sys/kernel/debug/usb/xhci/3610000.usb
-    local slot_ctx="$dbg/devices/01/slot-context"
-    local ep_ctx="$dbg/devices/01/ep-context"
-    local ep0_deq="$dbg/devices/01/ep00/dequeue"
+    local dev_dir=""
+    local slot_ctx=""
+    local ep_ctx=""
+    local ep0_deq=""
     local reg_op="$dbg/reg-op"
     local py_out
 
-    if [[ ! -r "$slot_ctx" || ! -r "$ep_ctx" || ! -r "$ep0_deq" || ! -r "$reg_op" ]]; then
+    if [[ ! -r "$reg_op" || ! -d "$dbg/devices" ]]; then
         echo "       slot1 handoff skipped (debugfs state unavailable)"
+        return 0
+    fi
+
+    for dev_dir in "$dbg"/devices/*; do
+        [[ -d "$dev_dir" ]] || continue
+        slot_ctx="$dev_dir/slot-context"
+        ep_ctx="$dev_dir/ep-context"
+        ep0_deq="$dev_dir/ep00/dequeue"
+        [[ -r "$slot_ctx" && -r "$ep_ctx" && -r "$ep0_deq" ]] || continue
+        if grep -Eqi '(^|[[:space:]])high-speed([[:space:]]|$)' "$slot_ctx" &&
+           grep -Eq '(^|[[:space:]])RS[[:space:]]+0+([[:space:]]|$)' "$slot_ctx" &&
+           grep -Eq 'Port#[[:space:]]+6/' "$slot_ctx"; then
+            break
+        fi
+        slot_ctx=""
+        ep_ctx=""
+        ep0_deq=""
+    done
+
+    if [[ -z "$slot_ctx" || -z "$ep_ctx" || -z "$ep0_deq" ]]; then
+        echo "       slot1 handoff skipped (no high-speed root device on port 6 in debugfs)"
         return 0
     fi
 
@@ -263,7 +298,93 @@ PY
 )"
 
     XHCI_SLOT1_HANDOFF_PAYLOAD="$(printf '%s\n' "$py_out" | sed -n 's/^PAYLOAD=//p' | head -n1)"
+    echo "       slot1 handoff source: $(basename "$dev_dir")"
     printf '%s\n' "$py_out" | sed '/^PAYLOAD=/d'
+}
+
+find_slot1_usb2_root_hub_sysfs() {
+    local dev=""
+    local fallback=""
+    local base=""
+    local speed=""
+    local cls=""
+    local vendor=""
+    local product=""
+
+    for dev in /sys/bus/usb/devices/*; do
+        [[ -d "$dev" ]] || continue
+        base="$(basename "$dev")"
+        [[ "$base" =~ ^[0-9]+-[0-9]+$ ]] || continue
+        [[ -r "$dev/speed" && -r "$dev/bDeviceClass" ]] || continue
+
+        speed="$(cat "$dev/speed" 2>/dev/null || true)"
+        cls="$(cat "$dev/bDeviceClass" 2>/dev/null || true)"
+        vendor="$(cat "$dev/idVendor" 2>/dev/null || true)"
+        product="$(cat "$dev/idProduct" 2>/dev/null || true)"
+
+        [[ "$speed" == "480" && "$cls" == "09" ]] || continue
+
+        if [[ "$vendor" == "0bda" && "$product" == "5489" ]]; then
+            printf '%s\n' "$dev"
+            return 0
+        fi
+
+        if [[ -z "$fallback" ]]; then
+            fallback="$dev"
+        fi
+    done
+
+    [[ -n "$fallback" ]] && printf '%s\n' "$fallback"
+}
+
+normalize_xhci_slot1_root_hub() {
+    local dev=""
+    local base=""
+    local vendor=""
+    local product=""
+    local speed=""
+    local auth_before=""
+    local auth_after=""
+
+    dev="$(find_slot1_usb2_root_hub_sysfs || true)"
+    if [[ -z "$dev" ]]; then
+        echo "       slot1 root cleanup skipped (no USB2 root-hub candidate in sysfs)"
+        return 1
+    fi
+
+    if [[ ! -w "$dev/authorized" ]]; then
+        echo "       slot1 root cleanup skipped ($(basename "$dev") authorized not writable)"
+        return 1
+    fi
+
+    base="$(basename "$dev")"
+    vendor="$(cat "$dev/idVendor" 2>/dev/null || echo '?')"
+    product="$(cat "$dev/idProduct" 2>/dev/null || echo '?')"
+    speed="$(cat "$dev/speed" 2>/dev/null || echo '?')"
+    auth_before="$(cat "$dev/authorized" 2>/dev/null || echo '?')"
+
+    echo "       slot1 root cleanup candidate: $base id=${vendor}:${product} speed=${speed} authorized=${auth_before}"
+
+    if ! echo 0 > "$dev/authorized"; then
+        echo "       slot1 root cleanup failed (echo 0 > $dev/authorized)" >&2
+        return 1
+    fi
+
+    sleep 1
+
+    auth_after="$(cat "$dev/authorized" 2>/dev/null || echo '?')"
+    echo "       slot1 root cleanup result: $base authorized ${auth_before} -> ${auth_after}"
+
+    if [[ "$auth_after" != "0" ]]; then
+        echo "       slot1 root cleanup did not stick; keeping retained handoffs enabled"
+        return 1
+    fi
+
+    XHCI_SLOT3_HANDOFF_PAYLOAD=""
+    SKIP_XHCI_SLOT3_HANDOFF=1
+    echo "       preserving slot1 handoff after USB2 root-hub deauthorize"
+    echo "       skipping slot3 handoff after USB2 root-hub deauthorize"
+    return 0
 }
 
 verify_smmu_fix_effect() {
@@ -694,8 +815,17 @@ if [[ "$NO_SMMU_FIX" == "0" ]]; then
         fi
     fi
     if [[ "$NO_USB_HOLD" == "0" ]]; then
+        if [[ "$NO_USB_ROOT_CLEANUP" == "0" ]]; then
+            normalize_xhci_slot1_root_hub || true
+        else
+            echo "       skipping USB2 root-hub cleanup (--no-usb-root-cleanup)"
+        fi
         stash_xhci_slot1_handoff
-        stash_xhci_slot3_handoff
+        if [[ "$SKIP_XHCI_SLOT3_HANDOFF" == "1" ]]; then
+            echo "       slot3 handoff publication skipped"
+        else
+            stash_xhci_slot3_handoff
+        fi
     fi
 else
     echo "[6/8] SKIPPING arm-smmu fix (--no-smmu-fix)"
