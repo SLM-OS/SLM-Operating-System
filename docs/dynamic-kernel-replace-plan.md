@@ -1,5 +1,27 @@
 # Dynamic Kernel Replace Plan
 
+## Status (as of 2026-04-25)
+
+Implementation has been split into five sequential stages tracked in
+GitHub. The first four are pre-hardware and are now on `main`; the
+fifth is hardware-blocked on `pi-5-1`.
+
+| Stage | Issue | PR | Status |
+|---|---|---|---|
+| 1 — Mailbox tryboot tag helpers | #367 | #378 | ✅ Merged |
+| 2 — FatFs + LFN + ramdisk backend | #368 | #379 | ✅ Merged |
+| 3 — SDHCI / EMMC2 driver in QEMU | #369 | #389 | ✅ Merged |
+| 4 — `kernel` admin command surface | #370 | #395 | ✅ Merged |
+| 5 — Hardware validation on `pi-5-1` | #371 | — | Hardware-blocked |
+
+Stage 5 sub-task 1 (Makefile band-aid for the SDHCI test-image
+sparse-file constraint, Scope A of #392) shipped alongside Stage 4
+in #395; the rest of #371 needs `pi-5-1`. The Scope B follow-up
+(auto-fallback to a smaller image) is tracked in #392 and stays
+open.
+
+---
+
 ## Goal
 
 Replace the running SLM-OS kernel on the Pi 5 SD card from within a
@@ -239,34 +261,40 @@ Items that can land before a Pi 5 is free. **All resolved as of
 
 ## Hardware Tasks
 
-Blocked until a Pi 5 is available.
+Blocked until a Pi 5 is available. Tracked in detail in **#371**
+(see issue body for the live sub-task list — Pi 5 SDHCI smoke test
+first, full labctl round-trip last, plus a Jetson PCIe regression
+check gated on a nano-resource release from @johnjezl).
 
-- ☐🔗 Build a diagnostic kernel that dumps, at EL2 entry: EMMC2
-  controller clock gate state, reset-status register contents,
-  controller mode, and CMD0 response. Record what VC firmware leaves
-  behind after handoff.
-- ☐🔗 Verify that writing the tryboot register identified in the
-  pre-hardware trace causes firmware to honor the `[tryboot]` section
-  on the next boot. Run via `labctl boot_test --count 10` to catch
-  flakes.
-- ☐🔗 Implement SDHCI driver against the real card; run read / write /
-  verify loops against a scratch FAT image on the second partition (if
-  present) or a guarded region of the boot partition.
-- ☐🔗 Full round-trip on the lab Pi 5 through labctl: `kernel stage`,
-  `kernel activate`, `kernel promote`, `kernel rollback`.
+- ☐🔗🎫 Pi 5 SDHCI smoke test (`sdhci_create_bcm2712()` against the
+  lab card) — #371 sub-task 2.
+- ☐🔗🎫 Diagnostic kernel for EMMC2 firmware-handoff state — #371
+  sub-task 3.
+- ☐🔗🎫 Tryboot mailbox round-trip via `labctl boot_test` — #371
+  sub-task 4.
+- ☐🔗🎫 Real-card BCM2712 SDHCI quirks (cfginit, CPRMAN clock-gate)
+  — #371 sub-task 5.
+- ☐🔗🎫 Full `stage → activate → promote → rollback` cycle on
+  `pi-5-1` — #371 sub-task 6. Closes #35.
+- ☐🔗🎫 Jetson PCIe regression check (gated on nano release) —
+  #371 sub-task 7.
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-- Does the capstone demo target boot from SD, NVMe, or USB? SDHCI work
-  only helps SD-boot targets.
-- Should `config.txt` ship with the `[tryboot]` section baked in, or
-  should SLM-OS be able to edit it over FAT? Baked in is simpler and
-  sufficient for the first cut.
-- How is `promote` triggered after a successful tryboot boot? Explicit
-  admin command is simplest. Automatic promotion on a heartbeat would
-  be a follow-up.
+*Decided 2026-04-25.*
+
+- **Boot medium:** SD on all platforms; NVMe additionally supported but
+  not required on Pi 5. The Pi 5 path in this plan stays SD-only — the
+  SDHCI / EMMC2 driver in §1 is the right scope. NVMe ingress on
+  Jetson and x86-64 is separate work and not in scope here.
+- **`config.txt` editing:** ship the `[all]` and `[tryboot]` sections
+  baked into the lab card. SLM-OS does not need to write
+  `config.txt`; FatFs writes are limited to `kernel_2712.img` (on
+  promote) and `tryboot.img` (on stage).
+- **Promote trigger:** explicit admin command (`kernel promote`).
+  Automatic promotion on a heartbeat is a follow-up, not in scope.
 
 ---
 
