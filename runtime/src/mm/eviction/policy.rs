@@ -99,6 +99,19 @@ pub trait EvictionPolicy {
     /// the buffer is capped so the oldest entries are evicted. Default
     /// `None` — atomic policies have no weights to trace. See #111.
     fn ensemble_trajectory(&self) -> Option<&[TrajectoryEntry]> { None }
+
+    /// Copy the trajectory into caller-owned storage in oldest-first
+    /// order. Atomic policies have no trajectory and return 0.
+    fn ensemble_trajectory_snapshot(&self, out: &mut [TrajectoryEntry]) -> usize {
+        match self.ensemble_trajectory() {
+            Some(slice) => {
+                let n = slice.len().min(out.len());
+                out[..n].copy_from_slice(&slice[..n]);
+                n
+            }
+            None => 0,
+        }
+    }
 }
 
 /// One snapshot of ensemble weights at a point in time. Used by

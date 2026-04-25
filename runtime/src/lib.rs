@@ -1980,19 +1980,7 @@ pub unsafe extern "C" fn rust_eviction_get_trajectory(
             weights: [0.0; 5],
         }; 128];
         let copied = eviction::with_active_policy(|p| {
-            // Only CacheusSelector exposes a trajectory; others fall
-            // through to the default `None` impl.
-            let ensemble = p.ensemble_trajectory();
-            match ensemble {
-                Some(slice) => {
-                    // Fast path: the ring hasn't wrapped, so as_slices()
-                    // returned a single contiguous front half.
-                    let n = slice.len().min(staged.len());
-                    staged[..n].copy_from_slice(&slice[..n]);
-                    n
-                }
-                None => 0,
-            }
+            p.ensemble_trajectory_snapshot(&mut staged)
         }).unwrap_or(0);
 
         let to_copy = copied.min(max_entries as usize);
@@ -2327,11 +2315,16 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         // Re-install CACHEUS, make decisions, give feedback, and
         // expect trajectory entries to accumulate.
         eviction::set_eviction_policy(Box::new(mm::eviction::CacheusSelector::ml_only()));
+        let mut evicted_id = None;
         for _ in 0..3 {
-            let _ = eviction::select_victim(&cands);
+            evicted_id = eviction::select_victim(&cands)
+                .map(|idx| cands[idx].block_id);
         }
-        eviction::update_feedback(cands[0].block_id, true);
-        eviction::update_feedback(cands[0].block_id, false);
+        check!(b"trajectory_select_returns_victim\0", evicted_id.is_some());
+        if let Some(block_id) = evicted_id {
+            eviction::update_feedback(block_id, true);
+            eviction::update_feedback(block_id, false);
+        }
 
         let mut out: [RustTrajectoryEntry; 16] = [RustTrajectoryEntry {
             timestamp_ns: 0, n_experts: 0, _pad: 0, weights_bp: [0; 5],

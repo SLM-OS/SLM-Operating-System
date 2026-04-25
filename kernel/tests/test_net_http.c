@@ -57,6 +57,7 @@ static void test_parse_http_url_accepts_long_signed_uri(void)
     struct net_http_url url;
     char query[700];
     char long_url[900];
+    static const char prefix[] = "/releases/model.blob?X-Amz-Signature=";
     int n;
 
     memset(query, 'a', sizeof(query) - 1);
@@ -74,7 +75,7 @@ static void test_parse_http_url_accepts_long_signed_uri(void)
     TEST_ASSERT_EQUAL_INT(0, net_http_parse_url(long_url, &url));
     TEST_ASSERT_EQUAL_STRING("example.com", url.host);
     TEST_ASSERT_EQUAL_UINT16(80, url.port);
-    TEST_ASSERT_TRUE(strncmp(url.uri, "/releases/model.blob?X-Amz-Signature=", 39) == 0);
+    TEST_ASSERT_TRUE(strncmp(url.uri, prefix, strlen(prefix)) == 0);
 }
 
 static void test_parse_sha256_hex_accepts_valid_and_rejects_invalid(void)
