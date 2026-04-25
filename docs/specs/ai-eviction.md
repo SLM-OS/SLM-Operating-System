@@ -32,6 +32,6 @@ CACHEUS ensemble + classical + ML-based page-eviction policies.
 - `docs/eviction.md` (narrative, 550+ lines)
 - `docs/eviction-extended-features.md`
 - `docs/eviction-online-retraining.md`
-- `docs/capstone-feature-status.md` §"AI Page Eviction"
+- `docs/archive/plans/capstone-feature-status.md` §"AI Page Eviction"
 
 *Last updated: 18 April 2026*

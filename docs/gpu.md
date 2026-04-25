@@ -2,7 +2,26 @@
 
 Design and implementation documentation for GPU support in SLM-OS (Phase 3, Milestone 3).
 
-**Status:** Platform abstraction complete; NVIDIA GPU probe working on Jetson (GA10B accessible from EL2)
+**Status (April 2026):** GPU **compute** is working end-to-end on Jetson GA10B
+via the inherit-from-Linux kexec handoff path. Memory abstraction, NVIDIA GPU
+probe, and the platform-agnostic GPU HAL are all complete.
+
+> **GPU compute is live (April 2026):** MNIST inference dispatches end-to-end
+> on the GA10B GPU from SLM-OS post-kexec for arbitrary user-supplied digit
+> images. The dispatch architecture uses `REPORT_SEMAPHORE_EXECUTE` (Volta+
+> AMPERE_COMPUTE_B) for op completion — fixed both the polling-zero deadlock
+> (closed #372) and the apparent Conv1 4 KB truncation (closed #390) at the
+> same time. The whole 8-op pipeline (Conv1 → Add+ReLU → Pool1 → Conv2 →
+> Add+ReLU → Pool2 → MatMul → AddBias) runs on GPU with full L2 → DRAM flush
+> per op. Demo path: `slm.model_infer_file(slm.model_load_mnist(),
+> '/mnt/files/digits/digit_3.bin')` returns 3.
+>
+> Historical narrative below describes the pre-M10 state where compute was
+> deferred. The plan that took us from M0 (multi-CTA dispatch) to M10
+> (semaphore-release completion + custom-file demo) is preserved as
+> `docs/archive/plans/jetson-gpu-mnist-plan.md`. See also
+> `docs/jetson-el2-bringup.md` for the EL2 bringup that makes BAR0/MMIO
+> accessible.
 
 ---
 

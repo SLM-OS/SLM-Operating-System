@@ -245,7 +245,7 @@ static void efi_disable_mmu(void)
      *         tlbi vmalle1 invalidates EL2 TLB entries.
      *   (c) EL2 with VHE off (HCR_EL2.E2H=0, e.g. UEFI-direct on
      *       Jetson firmware v36.4.7 — see
-     *       docs/jetson-uefi-direct-result.md §5c and P1 dump):
+     *       docs/archive/investigations/jetson-uefi-direct-result.md §5c and P1 dump):
      *         SCTLR_EL1 is a SEPARATE, dormant register. Writing
      *         it here does NOT touch the active EL2 MMU — the
      *         MMU stays ON. That is the latent bug that made the
@@ -319,7 +319,7 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
      * Jetson USB-C serial via TCU) because UEFI's ConOut is still alive
      * here. Each marker is a distinct letter so the last one observed
      * on the wire localizes the failure without needing a debugger.
-     * See docs/jetson-uefi-direct-result.md §"Key findings" for why
+     * See docs/archive/investigations/jetson-uefi-direct-result.md §"Key findings" for why
      * direct UARTC MMIO isn't a viable tracing path from this context.
      */
     static const efi_char16_t m_entry[]     = u"[slmos] A efi_entry\r\n";
@@ -337,7 +337,7 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
      * Reading hcr_el2 requires EL2. At EL1 the mrs traps; handle
      * that by reading CurrentEL first and only mrs'ing hcr_el2 if
      * we're at EL2. PR #226 thought we were at EL1 on Jetson; this
-     * session's probes (see docs/jetson-uefi-direct-result.md §5b)
+     * session's probes (see docs/archive/investigations/jetson-uefi-direct-result.md §5b)
      * showed EL2. The dump here prints both values so a reader can
      * confirm without re-running brk probes.
      */
@@ -407,7 +407,7 @@ void *efi_stub_entry(efi_handle_t handle, efi_system_table_t *sys_table)
      * the Jetson EL2 block's HCR_EL2 write, UARTC probe) would
      * bounce to that now-invalid handler and hang silently — the
      * historical failure mode tracked in
-     * docs/jetson-uefi-direct-result.md §5c.
+     * docs/archive/investigations/jetson-uefi-direct-result.md §5c.
      *
      * `jetson_early_vbar_el2` is the SLM-OS-owned diagnostic table
      * defined at the end of boot.S. It saves ESR/ELR/FAR/SPSR/HCR to

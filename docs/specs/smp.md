@@ -34,6 +34,6 @@ Cross-platform symmetric-multiprocessing bring-up and runtime behavior.
 - `kernel/CLAUDE.md` §"Non-Cacheable Shared Memory"
 - `kernel/CLAUDE.md` §"Cross-CPU notification — `smp_notify_cpu()`"
 - `docs/smp.md` (narrative)
-- `docs/capstone-feature-status.md` §SMP
+- `docs/archive/plans/capstone-feature-status.md` §SMP
 
 *Last updated: 18 April 2026*

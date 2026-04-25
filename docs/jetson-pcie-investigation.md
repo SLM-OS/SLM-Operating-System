@@ -108,7 +108,7 @@ DBI bus0:    vendor=0xffff  device=0xffff  (expected 0x10DE:0x229c)
 
 No SError, no RAS report in the serial log — the reads *complete*
 with all-ones. This is the same pattern as the GPU read at
-`0x17000000`, documented in `CLAUDE.md` and `jetson-nvidia-support.md`
+`0x17000000`, documented in `CLAUDE.md` and `docs/archive/investigations/jetson-nvidia-support.md`
 as **CBB firewall** silently rejecting unauthenticated EL2 accesses.
 
 ### 4. Elimination
@@ -161,7 +161,7 @@ Linux and SLM-OS are both running at EL1 when they make that read
 different result → the firewall is **not** EL-gated; it's
 trust-chain-gated.
 
-The `jetson-nvidia-support.md` doc already phrased this correctly —
+The `docs/archive/investigations/jetson-nvidia-support.md` doc already phrased this correctly —
 "blocks all peripheral access from unsigned/unauthenticated code" —
 it was EL2-specific only by coincidence because SLM-OS happens to
 run at EL2. Rephrasing the boot model would have no effect.
@@ -192,7 +192,7 @@ same reason as the full r8169 port.
 
 ### Path C — OEM BCT firewall override
 
-NVIDIA Forum thread referenced in `jetson-nvidia-support.md`
+NVIDIA Forum thread referenced in `docs/archive/investigations/jetson-nvidia-support.md`
 (`tegra234-mb2-bct-scr-p3701-0000-override.dts`) documents
 per-peripheral firewall permission overrides. Adding PCIe C8 to the
 allow-list at EL2 would require a custom BCT flash. Out of scope for

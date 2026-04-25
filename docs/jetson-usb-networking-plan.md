@@ -414,7 +414,7 @@ already services virtio-net on QEMU and MACB on Pi 5.
   verify the netif goes down cleanly and comes back up when
   reconnected. (Basic hot-plug.)
 - **Doc updates:**
-  - `docs/capstone-feature-status.md` networking row for Jetson.
+  - `docs/archive/plans/capstone-feature-status.md` networking row for Jetson.
   - `docs/networking.md` — USB networking section.
   - `docs/jetson-cbb-report.md` §3 — fill in the USB row of the
     reachable-peripherals table with the Phase 0 findings.

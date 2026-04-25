@@ -1209,7 +1209,7 @@ void scheduler_terminate_task(struct task *task)
 #if CONFIG_WORK_STEALING
     /* Clear the task's pointer from its owner's steal deque so a thief
      * doesn't grab a stale entry that later refers to a recycled task
-     * slot (ABA race). See docs/jetson-capstone-execution-plan.md S1
+     * slot (ABA race). See docs/archive/plans/jetson-capstone-execution-plan.md S1
      * for the panic that surfaced this — became observable on Jetson
      * after cpu_steal_deques moved to NC memory in commit <pending>
      * (before that, incoherent caches hid the race by failing the

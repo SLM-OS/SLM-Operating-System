@@ -50,6 +50,6 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 - `docs/net-dma-coherence.md` (DMA coherence model)
 - `docs/multi-session-shell-plan.md` (TCP shell + telnet + telnetd)
 - `docs/jetson-usb-networking-plan.md` (USB networking option)
-- `docs/capstone-feature-status.md` §"Networking"
+- `docs/archive/plans/capstone-feature-status.md` §"Networking"
 
 *Last updated: 22 April 2026*

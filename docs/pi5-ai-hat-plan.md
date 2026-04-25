@@ -870,7 +870,7 @@ channels.
   eviction / inference / components sections.
 - `docs/demo.md` — new §"Hailo NPU demo" section with the usage
   block, per-step explanation, and QEMU vs hardware behavior notes.
-- `docs/capstone-feature-status.md` — Pi 5 Hailo entry bumped to
+- `docs/archive/plans/capstone-feature-status.md` — Pi 5 Hailo entry bumped to
   Phase 7 with a reference to the demo doc.
 - 10 new tests in `kernel/tests/test_lua.c` (6 binding, 1 embedded-
   file existence, 3 namespace / unload argument).

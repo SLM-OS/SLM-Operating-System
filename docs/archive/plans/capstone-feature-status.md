@@ -453,7 +453,7 @@ GA10B GPU. `models/test/mnist.onnx` is dispatched as an 8-op kernel
 chain producing 10 fp32 logits whose argmax matches the existing
 CPU NEON reference for a deterministic synthetic input.
 
-Eight milestones (M0–M8 in `docs/jetson-gpu-mnist-plan.md`) cover
+Eight milestones (M0–M8 in `docs/archive/plans/jetson-gpu-mnist-plan.md`) cover
 the distance from `matmul4x4_mt` to MNIST:
 
 | # | Milestone | Adds |

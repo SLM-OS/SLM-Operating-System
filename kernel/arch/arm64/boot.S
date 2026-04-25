@@ -242,7 +242,7 @@ real_start:
      * references inside the wider kernel (function-pointer tables,
      * globals) are a separate fix — approach B of the UEFI-direct
      * plan (real `.reloc` + PIC early boot). See
-     * docs/jetson-uefi-direct-result.md.
+     * docs/archive/investigations/jetson-uefi-direct-result.md.
      */
 
 .Lnot_efi:
@@ -592,7 +592,7 @@ real_start:
      * TF-A, and UEFI-direct boot on Jetson also enters at EL2+VHE
      * (contrary to PR #226's EL1 conclusion — that was misled by an
      * ArmCpuDxe PC-reporting quirk and DAIF.D masking brk probes; see
-     * docs/jetson-uefi-direct-result.md §§5/5a/5b). Both paths take
+     * docs/archive/investigations/jetson-uefi-direct-result.md §§5/5a/5b). Both paths take
      * the fall-through branch here.
      *
      * CurrentEL[3:2] encodes the EL: 0b00=EL0, 0b01=EL1, 0b10=EL2,
@@ -606,7 +606,7 @@ real_start:
      *   virtualization traps). Clobbering those mid-flight while
      *   UEFI's MMU is still configured for the prior regime is
      *   what hung PR #219 / #226 / #239's UEFI-direct probes
-     *   (docs/jetson-uefi-direct-result.md §5c).
+     *   (docs/archive/investigations/jetson-uefi-direct-result.md §5c).
      *
      *   Why this is safe here: efi_disable_mmu ran just before the
      *   return to boot.S and now actually disables the active EL2
@@ -835,7 +835,7 @@ secondary_spin:
  * ArmCpuDxe memory that may have been freed or may depend on Boot
  * Services state that no longer exists. A fault into that handler
  * is the current silent-hang failure mode on the UEFI-direct path
- * (docs/jetson-uefi-direct-result.md §5c).
+ * (docs/archive/investigations/jetson-uefi-direct-result.md §5c).
  *
  * At fault time the handler:
  *   1. Disables EL2 MMU so subsequent MMIO/DRAM accesses don't

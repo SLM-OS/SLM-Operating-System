@@ -257,7 +257,7 @@ Would require access to SPE firmware source (not publicly available) or deep rev
 
 ## See Also
 
-**`docs/jetson-nvidia-support.md`** — Comprehensive documentation of all Jetson blockers. Even with USB-serial adapter, bare-metal UART access is blocked by CBB firewall.
+**`docs/archive/investigations/jetson-nvidia-support.md`** — Comprehensive documentation of all Jetson blockers. Even with USB-serial adapter, bare-metal UART access is blocked by CBB firewall.
 
 ---
 

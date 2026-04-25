@@ -182,4 +182,4 @@ for the steal deque. The two fixes together unblocked S4 for Pi 5.
 - GitHub #166 — Jetson page fault during bench stealing, closed
   2026-04-15 by flipping Jetson off `SPINLOCK_SKIP_LOCKING` and onto
   the runtime `spinlock_hw_enabled` flag.
-- `docs/jetson-capstone-execution-plan.md` §S3, §S4.
+- `docs/archive/plans/jetson-capstone-execution-plan.md` §S3, §S4.

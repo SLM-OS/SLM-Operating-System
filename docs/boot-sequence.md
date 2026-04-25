@@ -270,7 +270,7 @@ When QEMU loads the kernel with `-kernel`:
 | Aspect | QEMU virt | Jetson Orin Nano |
 |--------|-----------|------------------|
 | Boot stages | Direct kernel load | BootROM → MB1 → MB2 → UEFI |
-| Initial EL | EL1 | EL2+VHE (after UEFI or kexec — see docs/jetson-uefi-direct-result.md §5b) |
+| Initial EL | EL1 | EL2+VHE (after UEFI or kexec — see docs/archive/investigations/jetson-uefi-direct-result.md §5b) |
 | Hardware init | Minimal needed | UEFI handles it |
 | DTB | Optional via -dtb | Required |
 

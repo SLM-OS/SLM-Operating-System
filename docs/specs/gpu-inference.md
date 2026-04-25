@@ -43,7 +43,7 @@ Current inference paths and what each platform delivers today.
 - `docs/nvidia-gsp.md` — Platform shim contract
 - `docs/jetson-cbb-report.md` — CBB firewall impact on GPU path
 - `docs/x86-64-gpu-inference-status.md` — x86-64 GPU status
-- `docs/capstone-feature-status.md` §GPU-Based Inference (narrative)
+- `docs/archive/plans/capstone-feature-status.md` §GPU-Based Inference (narrative)
 - Issues: #258 (Jetson), #185 (x86-64), #190 (resolved)
 
 *Last updated: 18 April 2026*

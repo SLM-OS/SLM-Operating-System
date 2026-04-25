@@ -23,7 +23,7 @@ How SLM-OS enters execution on each platform and reaches a running shell.
 
 ## Skipped / Blocked
 
-- **Jetson direct UEFI boot** — WIP. UEFI loads PE and enters at NS EL2 (not EL1 as originally assumed). Two remaining blockers: (a) boot.S's unconditional `msr hcr_el2` clobbers UEFI-set bits; (b) UARTC MMIO faults from EFI-app context even at EL2 (UEFI-app CBB permission profile differs from kexec-from-Linux). Full write-up in `docs/jetson-uefi-direct-result.md`.
+- **Jetson direct UEFI boot** — WIP. UEFI loads PE and enters at NS EL2 (not EL1 as originally assumed). Two remaining blockers: (a) boot.S's unconditional `msr hcr_el2` clobbers UEFI-set bits; (b) UARTC MMIO faults from EFI-app context even at EL2 (UEFI-app CBB permission profile differs from kexec-from-Linux). Full write-up in `docs/archive/investigations/jetson-uefi-direct-result.md`.
 - **Pi 5 `armstub8-2712.bin`** — disabled due to ~60% boot-garble rate. GIC Group 1 configuration moved into `boot.S` from EL2 (incompletely — suspected cause of #99 timer-IRQ delivery failure). Cooperative preemption works around it.
 - **Jetson OP-TEE carveout (0xBE000000–0xC2000000)** — cannot touch. PMM allocator uses three non-contiguous regions around it.
 - **Jetson BPMP IVC** — unreachable post-kexec, so SLM-OS inherits whatever clock/power state Linux left. No dynamic re-configuration possible.
@@ -32,7 +32,7 @@ How SLM-OS enters execution on each platform and reaches a running shell.
 
 - `docs/boot-sequence.md` (narrative)
 - `docs/jetson-el2-bringup.md` — EL2 + VHE specifics
-- `docs/jetson-uefi-direct-result.md` — UEFI direct boot status
+- `docs/archive/investigations/jetson-uefi-direct-result.md` — UEFI direct boot status
 - `docs/jetson-cbb-report.md` — CBB permissions by entry path
 
 *Last updated: 18 April 2026*

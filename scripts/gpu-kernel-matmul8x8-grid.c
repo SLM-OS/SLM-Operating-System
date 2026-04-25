@@ -1,7 +1,7 @@
 /*
  * gpu-kernel-matmul8x8-grid.c — Launch an 8×8 integer matrix multiply
  * on Jetson GA10B as a 2×2 grid of 4×4-thread CTAs (M0 of the
- * MNIST-on-GPU plan, docs/jetson-gpu-mnist-plan.md).
+ * MNIST-on-GPU plan, docs/archive/plans/jetson-gpu-mnist-plan.md).
  *
  * First multi-CTA dispatch in the tree: every prior kernel ran with
  * grid 1×1×1 and varied only the per-CTA thread count. Here the grid
