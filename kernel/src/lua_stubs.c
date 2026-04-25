@@ -119,6 +119,59 @@ static const unsigned short *__ctype_ptr = &__ctype_table[128];
 const unsigned short **__ctype_b_loc(void) {
     return &__ctype_ptr;
 }
+
+/*
+ * x86-64 glibc ABI: `toupper(c)` / `tolower(c)` macros expand to
+ * `(*__ctype_toupper_loc())[c]` / `(*__ctype_tolower_loc())[c]`. The
+ * tables are indexed in [-128, 256), with the returned pointer offset
+ * by CTYPE_NEG_OFFSET entries. Lua's lstrlib + lbaselib pull this in
+ * for `string.upper`, `string.lower`, and pattern-class matching.
+ * Identity outside the letter range, paired conversion for ASCII
+ * letters.
+ *
+ * Concurrency: the lazy init below is safe under SMP via __atomic_
+ * builtins. A reader that observes `__ctype_to_inited == true` after
+ * an acquire load is guaranteed to see all the table + pointer writes
+ * that happened before the matching release store. Two CPUs racing
+ * the first call may both run the fill loop — the writes are
+ * idempotent, so the worst case is duplicate work, never partial
+ * state.
+ */
+#define CTYPE_TABLE_SIZE 384
+#define CTYPE_NEG_OFFSET 128
+
+static int __ctype_toupper_table[CTYPE_TABLE_SIZE];
+static int __ctype_tolower_table[CTYPE_TABLE_SIZE];
+static const int *__ctype_toupper_ptr;
+static const int *__ctype_tolower_ptr;
+static bool __ctype_to_inited;
+
+static void __ctype_to_init(void) {
+    for (int i = 0; i < CTYPE_TABLE_SIZE; i++) {
+        int c = i - CTYPE_NEG_OFFSET;
+        __ctype_toupper_table[i] = c;
+        __ctype_tolower_table[i] = c;
+    }
+    for (int c = 'a'; c <= 'z'; c++)
+        __ctype_toupper_table[CTYPE_NEG_OFFSET + c] = c - 32;
+    for (int c = 'A'; c <= 'Z'; c++)
+        __ctype_tolower_table[CTYPE_NEG_OFFSET + c] = c + 32;
+    __ctype_toupper_ptr = &__ctype_toupper_table[CTYPE_NEG_OFFSET];
+    __ctype_tolower_ptr = &__ctype_tolower_table[CTYPE_NEG_OFFSET];
+    __atomic_store_n(&__ctype_to_inited, true, __ATOMIC_RELEASE);
+}
+
+const int **__ctype_toupper_loc(void) {
+    if (!__atomic_load_n(&__ctype_to_inited, __ATOMIC_ACQUIRE))
+        __ctype_to_init();
+    return &__ctype_toupper_ptr;
+}
+
+const int **__ctype_tolower_loc(void) {
+    if (!__atomic_load_n(&__ctype_to_inited, __ATOMIC_ACQUIRE))
+        __ctype_to_init();
+    return &__ctype_tolower_ptr;
+}
 #endif
 
 /* Define these so Lua's headers can find them */

@@ -26,7 +26,7 @@
  */
 static void test_lua_newstate_basic(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
     lua_slm_close(L);
 }
@@ -66,7 +66,7 @@ static void test_lua_close_null(void)
  */
 static void test_lua_arithmetic(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int result = lua_slm_dostring(L, "x = 1 + 2 + 3");
@@ -80,7 +80,7 @@ static void test_lua_arithmetic(void)
  */
 static void test_lua_strings(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int result = lua_slm_dostring(L, "s = 'Hello' .. ' ' .. 'World'");
@@ -94,7 +94,7 @@ static void test_lua_strings(void)
  */
 static void test_lua_tables(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int result = lua_slm_dostring(L, "t = {a=1, b=2, c=3}; sum = t.a + t.b + t.c");
@@ -108,7 +108,7 @@ static void test_lua_tables(void)
  */
 static void test_lua_functions(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -126,7 +126,7 @@ static void test_lua_functions(void)
  */
 static void test_lua_loops(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -149,7 +149,7 @@ static void test_lua_loops(void)
  */
 static void test_lua_syntax_error(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* Missing 'end' keyword */
@@ -164,7 +164,7 @@ static void test_lua_syntax_error(void)
  */
 static void test_lua_runtime_error(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* Call nil value */
@@ -179,7 +179,7 @@ static void test_lua_runtime_error(void)
  */
 static void test_lua_pcall_error(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -202,7 +202,7 @@ static void test_lua_pcall_error(void)
  */
 static void test_slm_module_exists(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -244,6 +244,49 @@ static void test_slm_module_exists(void)
     lua_slm_close(L);
 }
 
+/*
+ * Test: a non-admin Lua state exposes the safe surface but NOT the
+ * admin mutator surface. This is the security property of the
+ * lua_slm_newstate (safe) vs lua_slm_newstate_admin (full) split: a
+ * shell session running in non-admin mode must not be able to load
+ * models, hot-swap components, change scheduler policy, kick telnet
+ * sessions, or reach the Hailo namespace.
+ */
+static void test_slm_safe_state_lacks_admin_bindings(void)
+{
+    lua_State *L = lua_slm_newstate();  /* non-admin on purpose */
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "assert(type(slm) == 'table', 'slm should be a table')\n"
+        /* Safe surface present */
+        "assert(type(slm.uptime) == 'function', 'safe: slm.uptime')\n"
+        "assert(type(slm.mem_stats) == 'function', 'safe: slm.mem_stats')\n"
+        "assert(type(slm.component_list) == 'function', 'safe: slm.component_list')\n"
+        "assert(type(slm.model_stats) == 'function', 'safe: slm.model_stats')\n"
+        /* Admin surface absent */
+        "assert(slm.component_run == nil, 'admin: slm.component_run leaked')\n"
+        "assert(slm.component_hot_swap == nil, 'admin: slm.component_hot_swap leaked')\n"
+        "assert(slm.model_load == nil, 'admin: slm.model_load leaked')\n"
+        "assert(slm.model_pin == nil, 'admin: slm.model_pin leaked')\n"
+        "assert(slm.sched_set_policy == nil, 'admin: slm.sched_set_policy leaked')\n"
+        "assert(slm.task_create == nil, 'admin: slm.task_create leaked')\n"
+        "assert(slm.eviction_set_policy == nil, 'admin: slm.eviction_set_policy leaked')\n"
+        "assert(slm.shell_exec == nil, 'admin: slm.shell_exec leaked')\n"
+#if defined(ENABLE_NETWORKING)
+        "assert(slm.telnetd_kick == nil, 'admin: slm.telnetd_kick leaked')\n"
+#endif
+        /* Hailo namespace is admin-only on platforms that have it; on
+         * x86 the namespace is gone entirely. Either way it must not
+         * be reachable from a non-admin state. */
+        "assert(slm.hailo == nil, 'admin: slm.hailo namespace leaked')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+}
+
 #if defined(ENABLE_NETWORKING)
 /*
  * Test: slm.telnetd_status returns a table with the documented
@@ -252,7 +295,7 @@ static void test_slm_module_exists(void)
  */
 static void test_slm_telnetd_status_shape(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -279,7 +322,7 @@ static void test_slm_telnetd_status_shape(void)
  */
 static void test_slm_telnetd_sessions_empty_and_kick_nomatch(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -301,7 +344,7 @@ static void test_slm_telnetd_sessions_empty_and_kick_nomatch(void)
  */
 static void test_slm_uptime(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -323,7 +366,7 @@ static void test_slm_uptime(void)
  */
 static void test_slm_uptime_us(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -351,7 +394,7 @@ static void test_slm_uptime_us(void)
  */
 static void test_slm_mem_stats(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -373,7 +416,7 @@ static void test_slm_mem_stats(void)
  */
 static void test_slm_tasks(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -396,7 +439,7 @@ static void test_slm_tasks(void)
  */
 static void test_slm_version(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -449,7 +492,7 @@ static void test_slm_build_info_constants(void)
  */
 static void test_slm_cpu_count(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -469,7 +512,7 @@ static void test_slm_cpu_count(void)
  */
 static void test_slm_cpu_id(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -492,7 +535,7 @@ static void test_slm_cpu_id(void)
  */
 static void test_lua_string_lib(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -512,7 +555,7 @@ static void test_lua_string_lib(void)
  */
 static void test_lua_table_lib(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -532,7 +575,7 @@ static void test_lua_table_lib(void)
  */
 static void test_lua_math_lib(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -552,7 +595,7 @@ static void test_lua_math_lib(void)
  */
 static void test_lua_complex_script(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -590,7 +633,7 @@ static void test_lua_complex_script(void)
  */
 static void test_slm_component_count(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -609,7 +652,7 @@ static void test_slm_component_count(void)
  */
 static void test_slm_component_list(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -627,7 +670,7 @@ static void test_slm_component_list(void)
  */
 static void test_slm_component_find_nil(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -645,7 +688,7 @@ static void test_slm_component_find_nil(void)
  */
 static void test_slm_component_run_invalid(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -663,7 +706,7 @@ static void test_slm_component_run_invalid(void)
  */
 static void test_slm_component_run_and_find(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -684,7 +727,7 @@ static void test_slm_component_run_and_find(void)
  */
 static void test_slm_component_count_after_run(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -705,7 +748,7 @@ static void test_slm_component_count_after_run(void)
  */
 static void test_slm_component_list_fields(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* counter and echo components should be running from prior tests */
@@ -734,7 +777,7 @@ static void test_slm_component_list_fields(void)
  */
 static void test_slm_component_hot_swap(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* Start a listener, then hot-swap it with echo */
@@ -761,7 +804,7 @@ static void test_slm_component_hot_swap(void)
  */
 static void test_slm_component_hot_swap_invalid(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -783,7 +826,7 @@ static void test_slm_component_hot_swap_invalid(void)
  */
 static void test_slm_model_stats(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -829,7 +872,7 @@ static void test_slm_model_stats(void)
  */
 static void test_slm_msg_publish(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -848,7 +891,7 @@ static void test_slm_msg_publish(void)
  */
 static void test_slm_sched_policy(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -868,7 +911,7 @@ static void test_slm_sched_policy(void)
  */
 static void test_slm_shell_exec_success(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -887,7 +930,7 @@ static void test_slm_shell_exec_success(void)
  */
 static void test_slm_shell_exec_unknown(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -907,7 +950,7 @@ static void test_slm_shell_exec_unknown(void)
  */
 static void test_slm_shell_exec_too_long(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -931,7 +974,7 @@ static void test_slm_shell_exec_too_long(void)
  */
 static void test_slm_read_line_callable(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -949,7 +992,7 @@ static void test_slm_read_line_callable(void)
  */
 static void test_slm_try_getc_no_input_returns_nil(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int rc = lua_slm_dostring(L,
@@ -967,7 +1010,7 @@ static void test_slm_try_getc_no_input_returns_nil(void)
  */
 static void test_slm_term_size_shape(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int rc = lua_slm_dostring(L,
@@ -992,7 +1035,7 @@ static void test_slm_term_size_shape(void)
  */
 static void test_slm_sched_stats(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1016,7 +1059,7 @@ static void test_slm_sched_stats(void)
  */
 static void test_slm_sched_policy_list(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1043,7 +1086,7 @@ static void test_slm_sched_policy_list(void)
  */
 static void test_slm_sched_set_policy(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1066,7 +1109,7 @@ static void test_slm_sched_set_policy(void)
  */
 static void test_slm_cpu_info(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1095,7 +1138,7 @@ static void test_slm_cpu_info(void)
  */
 static void test_slm_ipc_stats(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1117,7 +1160,7 @@ static void test_slm_ipc_stats(void)
  */
 static void test_slm_vmm_stats(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* This test file is only built on ARM64 (see CMakeLists.txt), so
@@ -1143,7 +1186,7 @@ static void test_slm_vmm_stats(void)
  */
 static void test_slm_model_list(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1171,7 +1214,7 @@ static void test_slm_model_list(void)
  */
 static void test_slm_infer_stats(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1195,7 +1238,7 @@ static void test_slm_infer_stats(void)
  */
 static void test_slm_gpu_status(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1215,7 +1258,7 @@ static void test_slm_gpu_status(void)
  */
 static void test_slm_ai_sched_stats(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* Binding must at least be callable in either configuration. */
@@ -1236,7 +1279,7 @@ static void test_slm_ai_sched_stats(void)
  */
 static void test_slm_eviction_bindings(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1275,7 +1318,7 @@ static void test_slm_eviction_bindings(void)
  */
 static void test_slm_hailo_namespace(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1297,7 +1340,7 @@ static void test_slm_hailo_namespace(void)
  */
 static void test_slm_hailo_unload_bad_handle(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1316,7 +1359,7 @@ static void test_slm_hailo_unload_bad_handle(void)
  */
 static void test_slm_hailo_unload_bad_args(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1343,7 +1386,7 @@ static void test_slm_hailo_unload_bad_args(void)
  */
 static void test_slm_hailo_status_shape(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1375,7 +1418,7 @@ static void test_slm_hailo_status_shape(void)
  */
 static void test_slm_hailo_load_missing_file(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1396,7 +1439,7 @@ static void test_slm_hailo_load_missing_file(void)
  */
 static void test_slm_hailo_load_bad_args(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1422,7 +1465,7 @@ static void test_slm_hailo_load_bad_args(void)
  */
 static void test_slm_hailo_infer_bad_handle(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1445,7 +1488,7 @@ static void test_slm_hailo_infer_bad_handle(void)
  */
 static void test_slm_hailo_infer_bad_args(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1476,7 +1519,7 @@ static void test_slm_hailo_infer_bad_args(void)
  */
 static void test_slm_sched_stats_monotonic(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1501,7 +1544,7 @@ static void test_slm_sched_stats_monotonic(void)
  */
 static void test_slm_cpu_info_consistency(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1531,7 +1574,7 @@ static void test_slm_cpu_info_consistency(void)
  */
 static void test_slm_sched_set_policy_bad_arg(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1556,7 +1599,7 @@ static void test_slm_sched_set_policy_bad_arg(void)
  */
 static void test_slm_task_migrate_bad_args(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1605,7 +1648,7 @@ static void test_slm_task_migrate_succeeds(void)
     uint32_t tid = t->id;
     uint32_t cpu_before = t->assigned_cpu;
 
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     lua_pushinteger(L, (lua_Integer)tid);
@@ -1636,7 +1679,7 @@ static void test_slm_task_migrate_succeeds(void)
  */
 static void test_slm_model_info_invalid(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1655,7 +1698,7 @@ static void test_slm_model_info_invalid(void)
  */
 static void test_slm_model_bench_contract(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1683,7 +1726,7 @@ static void test_slm_model_bench_contract(void)
  */
 static void test_slm_task_create_basic(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1720,7 +1763,7 @@ static void test_slm_task_create_basic(void)
  */
 static void test_slm_task_create_bad_args(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1745,7 +1788,7 @@ static void test_slm_task_create_bad_args(void)
  */
 static void test_slm_task_lifecycle_bindings(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1783,7 +1826,7 @@ static void test_slm_task_lifecycle_bindings(void)
  */
 static void test_slm_msg_subscribe_basic(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -1970,7 +2013,7 @@ static void test_slm_msg_subscribe_close_one_state_preserves_other(void)
  */
 static void test_slm_msg_subscribe_wildcard(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2007,7 +2050,7 @@ static void test_slm_msg_subscribe_wildcard(void)
  */
 static void test_slm_msg_subscribe_error_isolation(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2038,7 +2081,7 @@ static void test_slm_msg_subscribe_error_isolation(void)
  */
 static void test_slm_msg_subscribe_mutation_during_drain(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2082,7 +2125,7 @@ static void test_slm_msg_subscribe_mutation_during_drain(void)
  */
 static void test_slm_msg_subscribe_bad_args(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2111,7 +2154,7 @@ static void test_slm_msg_subscribe_bad_args(void)
  */
 static void test_slm_ai_sched_decision(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2152,7 +2195,7 @@ static void test_slm_ai_sched_decision(void)
  */
 static void test_slm_ai_sched_decision_bad_arg(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2174,7 +2217,7 @@ static void test_slm_ai_sched_decision_bad_arg(void)
  */
 static void test_slm_model_load_bad_paths(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2209,7 +2252,7 @@ static void test_slm_model_load_bad_paths(void)
  */
 static void test_slm_model_load_non_onnx(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2231,7 +2274,7 @@ static void test_slm_model_load_non_onnx(void)
  */
 static void test_slm_ipc_stats_after_publish(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2255,7 +2298,7 @@ static void test_slm_ipc_stats_after_publish(void)
  */
 static void test_slm_sched_policy_list_has_heuristic(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2281,7 +2324,7 @@ static void test_demo_file_exists(void)
 #if !defined(EMBED_DEMO_SCRIPTS)
     TEST_IGNORE_MESSAGE("EMBED_DEMO_SCRIPTS=OFF — demo scripts not embedded");
 #else
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* Use dofile to check the demo script loads without error.
@@ -2374,7 +2417,7 @@ static void test_demo_hailo_file_dofile_runs_cleanly(void)
 #if !defined(EMBED_DEMO_SCRIPTS)
     TEST_IGNORE_MESSAGE("EMBED_DEMO_SCRIPTS=OFF — demo scripts not embedded");
 #else
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* No-op sleep/yield so the script doesn't stall the harness, and
@@ -2404,7 +2447,7 @@ static void test_demo_hailo_file_dofile_runs_cleanly(void)
 extern int rust_model_unload(uint32_t index);
 static void test_slm_model_load_find_infer(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2437,7 +2480,7 @@ static void test_slm_model_load_find_infer(void)
  */
 static void test_slm_model_pin_unpin(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2472,7 +2515,7 @@ static void test_slm_model_pin_unpin(void)
  */
 static void test_digit_classifier_preloads_model(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* Ensure no MNIST model is loaded */
@@ -2514,7 +2557,7 @@ static void test_digit_classifier_preloads_model(void)
  */
 static void test_slm_component_hot_swap_stateful(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2619,7 +2662,7 @@ static void test_wildcard_subscription(void)
 /* Test: msg_router_publish_priority accepts priority parameter. */
 static void test_msg_publish_priority_api(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     const char *code =
@@ -2723,7 +2766,7 @@ static void test_wildcard_matching_edge_cases(void)
  */
 static void test_slm_dofile_nonexistent(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int result = lua_slm_dofile(L, "/mnt/files/no_such_file.lua");
@@ -2737,7 +2780,7 @@ static void test_slm_dofile_nonexistent(void)
  */
 static void test_slm_dofile_null_safe(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     TEST_ASSERT_NOT_EQUAL(0, lua_slm_dofile(NULL, "/mnt/files/test.lua"));
@@ -2781,7 +2824,7 @@ static void test_slm_dofile_executes_script(void)
     littlefs_file_close(mnt, fd);
 
     /* Execute it via dofile */
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int result = lua_slm_dofile(L, path);
@@ -2814,7 +2857,7 @@ static void test_slm_dofile_syntax_error(void)
     littlefs_file_write(mnt, fd, script, 19);
     littlefs_file_close(mnt, fd);
 
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int result = lua_slm_dofile(L, path);
@@ -2842,7 +2885,7 @@ static void test_slm_dofile_empty_file(void)
     TEST_ASSERT_MESSAGE(fd >= 0, "Failed to create empty file");
     littlefs_file_close(mnt, fd);
 
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int result = lua_slm_dofile(L, path);
@@ -2881,7 +2924,7 @@ static void test_slm_dofile_uses_slm_api(void)
     littlefs_file_write(mnt, fd, script, len);
     littlefs_file_close(mnt, fd);
 
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int result = lua_slm_dofile(L, path);
@@ -2920,7 +2963,7 @@ static void test_slm_dofile_runtime_error(void)
     littlefs_file_write(mnt, fd, script, 30);
     littlefs_file_close(mnt, fd);
 
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int result = lua_slm_dofile(L, path);
@@ -3080,7 +3123,7 @@ static void test_lua_heap_reset_across_sessions(void)
 /* After a runtime error, the stack should be restored to the caller's top. */
 static void test_lua_dostring_stack_clean_after_error(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int top_before = lua_gettop(L);
@@ -3098,7 +3141,7 @@ static void test_lua_dostring_stack_clean_after_error(void)
  * restored — the wrapper doesn't expose return values to the C caller. */
 static void test_lua_dostring_stack_clean_after_success(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int top_before = lua_gettop(L);
@@ -3115,7 +3158,7 @@ static void test_lua_dostring_stack_clean_after_success(void)
  * original leak where error messages accumulated). */
 static void test_lua_dostring_no_stack_leak_over_iterations(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     int top_before = lua_gettop(L);
@@ -3144,7 +3187,7 @@ static void test_lua_dostring_null_state(void)
 
 static void test_lua_trig_stubs_return_zero(void)
 {
-    lua_State *L = lua_slm_newstate();
+    lua_State *L = lua_slm_newstate_admin();
     TEST_ASSERT_NOT_NULL(L);
 
     /* All four stubs should succeed and return 0. First call also emits
@@ -3191,6 +3234,7 @@ int test_suite_lua(void)
 
     /* SLM-OS bindings */
     RUN_TEST(test_slm_module_exists);
+    RUN_TEST(test_slm_safe_state_lacks_admin_bindings);
 #if defined(ENABLE_NETWORKING)
     RUN_TEST(test_slm_telnetd_status_shape);
     RUN_TEST(test_slm_telnetd_sessions_empty_and_kick_nomatch);
