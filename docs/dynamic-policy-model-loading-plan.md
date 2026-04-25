@@ -49,11 +49,11 @@ At-a-glance summary:
 | Eviction blob format + store | ✅ partial | Parser, staging, activate, rollback, and clear exist; first-cut formats are now documented, but still not generalized |
 | Eviction runtime policy use | ✅ partial | `xgboost`, `mlp`, and `cacheus_config` are live and hardware-validated on `pi-5-2` |
 | Eviction shell / Lua control | ✅ done | Shell + `lua-admin` surfaces exist and are tested |
-| Scheduler runtime models | ✅ partial | `mlp`, `ppo`, and `config` exist; dense-model + config behavior is hardware-validated, but the format family is still narrow |
+| Scheduler runtime models | ✅ partial | `mlp`, `ppo`, `config`, and `thresholds` exist; live behavior is validated, but the format family is still narrow |
 | Scheduler live behavior validation | ✅ done | Deterministic runtime blobs affect real `ai_mlp` / `ai_ppo` decisions on `pi-5-2` |
 | File ingress core transport | ✅ partial | `put`, `xput`, and `slm-put.py` are live; telnet + serial framed upload/resume are hardware-validated |
 | Operator workflow wrapper | ✅ partial | `slm-modelctl.py` now supports subcommands, legacy compatibility, scheduler probes, and HTTP fetch via `--http-url` |
-| Persistence / autoload | ✅ partial | Config-backed boot autoload exists for current eviction/scheduler blob kinds |
+| Persistence / autoload | ✅ partial | Managed boot autoload exists for current eviction/scheduler blob kinds, but current builds still store it on RAM-backed `/mnt/files` |
 | HTTP / authenticated transport | ✅ partial | Plain-HTTP download path exists in-kernel with shell, Lua/admin, and `slm-modelctl.py --http-url`; SHA-256 checked fetch is supported, while HTTPS and signed-artifact hardening are ticketed/deferred |
 
 Milestone summary:
@@ -61,7 +61,7 @@ Milestone summary:
 | Track | State | Notes |
 |---|---|---|
 | Eviction | ✅ partial | First usable runtime-loading path is in place end to end |
-| Scheduler | ✅ partial | First reusable scheduler path is in place for dense models + config |
+| Scheduler | ✅ partial | First reusable scheduler path is in place for dense models + config + thresholds |
 | Native ingress | ✅ partial | Practical shell-based ingress exists without removing the SD card |
 | Maintenance-OS workflow | ✅ done | `pi-5-2` dual-boot + `--tryboot` wrapper path is hardware-validated |
 
@@ -131,6 +131,8 @@ Already implemented:
 - **First-cut persistence / autoload path**:
   - `/mnt/files/blob_autoload.conf` now records persisted autoload
     entries for current eviction and scheduler blob kinds
+  - `autoload set` now snapshots the validated source blob into a
+    canonical managed path under `/mnt/files/autoload/`
   - boot replay now stages and activates configured blobs during shell
     initialization
   - `autoload set` now validates that the target file exists and parses
@@ -425,6 +427,9 @@ Implemented now:
 
 - current eviction and scheduler blob kinds can persist an autoload
   source path in `/mnt/files/blob_autoload.conf`
+- `autoload set` now snapshots the selected blob into a canonical
+  managed path under `/mnt/files/autoload/`, so boot replay no longer
+  depends on the caller leaving the original source file in place
 - boot-time autoload replays those entries by staging from the
   configured files and activating them
 - `autoload set` now rejects missing files, non-files, empty files, and
@@ -433,16 +438,16 @@ Implemented now:
   truncating the active config in place
 - shell admin can inspect/set/clear persisted autoload entries for:
   - eviction: `xgboost`, `mlp`, `cacheus_config`
-  - scheduler: `mlp`, `ppo`, `config`
+  - scheduler: `mlp`, `ppo`, `config`, `thresholds`
 
 Still missing:
 
-- power-loss-safe update semantics for the persisted blob files
-  themselves
+- true reboot persistence on current builds: `/mnt/files` is still a
+  RAM-backed LittleFS mount created in `main.c`, so autoload state does
+  not survive a full reboot until a non-volatile filesystem backend
+  exists
 - stronger corruption/recovery policy than “log and skip failed entry”
   during boot replay
-- an opinionated authoritative-payload lifecycle beyond “path points at
-  a blob file”
 - boot policy beyond replaying the configured paths
 
 ---

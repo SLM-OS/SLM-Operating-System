@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #define BLOB_AUTOLOAD_CONF_PATH "/mnt/files/blob_autoload.conf"
+#define BLOB_AUTOLOAD_STORE_DIR "/mnt/files/autoload"
 
 int blob_autoload_init(void);
 void blob_boot_autoload(void);

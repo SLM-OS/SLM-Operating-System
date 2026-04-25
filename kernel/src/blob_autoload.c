@@ -20,6 +20,7 @@ struct blob_autoload_entry {
 #define BLOB_AUTOLOAD_CONF_TMP_PATH "/blob_autoload.conf.tmp"
 #define BLOB_AUTOLOAD_CONF_BAK_LFS_PATH "/blob_autoload.conf.bak"
 #define BLOB_AUTOLOAD_CONF_BAK_VFS_PATH "/mnt/files/blob_autoload.conf.bak"
+#define BLOB_AUTOLOAD_STORE_LFS_DIR "/autoload"
 #define BLOB_AUTOLOAD_ENTRY_LINE_OVERHEAD 48u
 
 static struct blob_autoload_entry blob_entries[] = {
@@ -50,6 +51,155 @@ static void blob_entries_reset(struct blob_autoload_entry *entries, size_t count
         entries[i].path[0] = '\0';
         entries[i].present = 0;
     }
+}
+
+static struct blob_autoload_entry *blob_find_entry(struct blob_autoload_entry *entries,
+                                                   size_t count,
+                                                   const char *domain,
+                                                   const char *kind)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(entries[i].domain, domain) == 0 &&
+            strcmp(entries[i].kind, kind) == 0) {
+            return &entries[i];
+        }
+    }
+    return NULL;
+}
+
+static int blob_autoload_managed_path(const char *domain, const char *kind,
+                                      char *path_out, size_t path_out_cap)
+{
+    int n;
+    if (!path_out || path_out_cap == 0) return -1;
+    n = uart_snprintf(path_out, path_out_cap, BLOB_AUTOLOAD_STORE_DIR "/%s-%s.blob",
+                      domain, kind);
+    if (n <= 0 || (size_t)n >= path_out_cap) {
+        return -1;
+    }
+    return 0;
+}
+
+static int blob_autoload_managed_subpath(const char *domain, const char *kind,
+                                         const char *suffix,
+                                         char *path_out, size_t path_out_cap)
+{
+    int n;
+    if (!path_out || path_out_cap == 0) return -1;
+    n = uart_snprintf(path_out, path_out_cap, BLOB_AUTOLOAD_STORE_LFS_DIR "/%s-%s.blob%s",
+                      domain, kind, suffix ? suffix : "");
+    if (n <= 0 || (size_t)n >= path_out_cap) {
+        return -1;
+    }
+    return 0;
+}
+
+static int blob_autoload_ensure_store_dir(struct lfs_mount *mnt)
+{
+    int rc;
+    rc = littlefs_mkdir(mnt, BLOB_AUTOLOAD_STORE_LFS_DIR);
+    if (rc == 0 || rc == LFS_ERR_EXIST) {
+        return 0;
+    }
+    return -1;
+}
+
+static int blob_autoload_copy_managed_file(const char *source_path,
+                                           const char *domain,
+                                           const char *kind,
+                                           char *managed_path_out,
+                                           size_t managed_path_out_cap)
+{
+    struct vfs_entry_info source_info;
+    struct vfs_entry_info existing_info;
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(BLOB_AUTOLOAD_STORE_DIR, &subpath);
+    char final_vfs[VFS_MAX_PATH];
+    char final_lfs[VFS_MAX_PATH];
+    char temp_lfs[VFS_MAX_PATH];
+    char bak_lfs[VFS_MAX_PATH];
+    char buf[512];
+    int src_offset = 0;
+    int fd;
+
+    if (!mnt) return -1;
+    if (blob_autoload_ensure_store_dir(mnt) != 0) return -1;
+    if (blob_autoload_managed_path(domain, kind, final_vfs, sizeof(final_vfs)) != 0) return -1;
+    if (blob_autoload_managed_subpath(domain, kind, "", final_lfs, sizeof(final_lfs)) != 0) return -1;
+    if (blob_autoload_managed_subpath(domain, kind, ".tmp", temp_lfs, sizeof(temp_lfs)) != 0) return -1;
+    if (blob_autoload_managed_subpath(domain, kind, ".bak", bak_lfs, sizeof(bak_lfs)) != 0) return -1;
+
+    if (vfs_stat_path(source_path, &source_info) != 0 || source_info.type != 0 || source_info.size == 0) {
+        return -1;
+    }
+
+    fd = littlefs_file_open(mnt, temp_lfs, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (fd < 0) return -1;
+
+    while (src_offset < (int)source_info.size) {
+        size_t chunk = source_info.size - (uint32_t)src_offset;
+        int bytes_read;
+        int bytes_written;
+        if (chunk > sizeof(buf)) chunk = sizeof(buf);
+        bytes_read = vfs_read_path(source_path, buf, chunk, (size_t)src_offset);
+        if (bytes_read <= 0 || (size_t)bytes_read != chunk) {
+            littlefs_file_close(mnt, fd);
+            (void)littlefs_remove(mnt, temp_lfs);
+            return -1;
+        }
+        bytes_written = littlefs_file_write(mnt, fd, buf, (size_t)bytes_read);
+        if (bytes_written != bytes_read) {
+            littlefs_file_close(mnt, fd);
+            (void)littlefs_remove(mnt, temp_lfs);
+            return -1;
+        }
+        src_offset += bytes_read;
+    }
+
+    littlefs_file_close(mnt, fd);
+
+    if (littlefs_rename(mnt, temp_lfs, final_lfs) != 0) {
+        int had_existing = (vfs_stat_path(final_vfs, &existing_info) == 0);
+        if (!had_existing) {
+            (void)littlefs_remove(mnt, temp_lfs);
+            return -1;
+        }
+        (void)littlefs_remove(mnt, bak_lfs);
+        if (littlefs_rename(mnt, final_lfs, bak_lfs) != 0) {
+            (void)littlefs_remove(mnt, temp_lfs);
+            return -1;
+        }
+        if (littlefs_rename(mnt, temp_lfs, final_lfs) != 0) {
+            (void)littlefs_rename(mnt, bak_lfs, final_lfs);
+            (void)littlefs_remove(mnt, temp_lfs);
+            return -1;
+        }
+        (void)littlefs_remove(mnt, bak_lfs);
+    }
+
+    if (managed_path_out && managed_path_out_cap > 0) {
+        strncpy(managed_path_out, final_vfs, managed_path_out_cap - 1);
+        managed_path_out[managed_path_out_cap - 1] = '\0';
+    }
+    return 0;
+}
+
+static void blob_autoload_remove_managed_file(const char *domain, const char *kind)
+{
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(BLOB_AUTOLOAD_STORE_DIR, &subpath);
+    char final_lfs[VFS_MAX_PATH];
+    char temp_lfs[VFS_MAX_PATH];
+    char bak_lfs[VFS_MAX_PATH];
+
+    if (!mnt) return;
+    if (blob_autoload_managed_subpath(domain, kind, "", final_lfs, sizeof(final_lfs)) != 0) return;
+    if (blob_autoload_managed_subpath(domain, kind, ".tmp", temp_lfs, sizeof(temp_lfs)) != 0) return;
+    if (blob_autoload_managed_subpath(domain, kind, ".bak", bak_lfs, sizeof(bak_lfs)) != 0) return;
+
+    (void)littlefs_remove(mnt, final_lfs);
+    (void)littlefs_remove(mnt, temp_lfs);
+    (void)littlefs_remove(mnt, bak_lfs);
 }
 
 static char *trim_ascii(char *s)
@@ -188,12 +338,16 @@ static int blob_autoload_write_entries(const struct blob_autoload_entry *entries
 int blob_autoload_init(void)
 {
     struct vfs_entry_info info;
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(BLOB_AUTOLOAD_STORE_DIR, &subpath);
+
+    if (mnt) {
+        (void)blob_autoload_ensure_store_dir(mnt);
+    }
     if (vfs_stat_path(BLOB_AUTOLOAD_CONF_PATH, &info) == 0) {
         return 0;
     }
     if (vfs_stat_path(BLOB_AUTOLOAD_CONF_BAK_VFS_PATH, &info) == 0) {
-        const char *subpath = NULL;
-        struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx("/mnt/files", &subpath);
         if (mnt && littlefs_rename(mnt, BLOB_AUTOLOAD_CONF_BAK_LFS_PATH, "/blob_autoload.conf") == 0) {
             return 0;
         }
@@ -227,6 +381,7 @@ int blob_autoload_set(const char *domain, const char *kind, const char *path)
 {
     struct blob_autoload_entry entries[sizeof(blob_entries) / sizeof(blob_entries[0])];
     char resolved[VFS_MAX_PATH];
+    char managed_path[VFS_MAX_PATH];
     struct blob_autoload_entry *entry;
     int rc;
 
@@ -251,18 +406,15 @@ int blob_autoload_set(const char *domain, const char *kind, const char *path)
     if (rc != RUNTIME_BLOB_FILE_OK) {
         return rc;
     }
+    if (blob_autoload_copy_managed_file(resolved, domain, kind,
+                                        managed_path, sizeof(managed_path)) != 0) {
+        return RUNTIME_BLOB_FILE_STAGE_FAILED;
+    }
     memcpy(entries, blob_entries, sizeof(entries));
     blob_autoload_read_entries(entries, sizeof(entries) / sizeof(entries[0]));
-    entry = NULL;
-    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
-        if (strcmp(entries[i].domain, domain) == 0 &&
-            strcmp(entries[i].kind, kind) == 0) {
-            entry = &entries[i];
-            break;
-        }
-    }
+    entry = blob_find_entry(entries, sizeof(entries) / sizeof(entries[0]), domain, kind);
     if (!entry) return -1;
-    strncpy(entry->path, resolved, sizeof(entry->path) - 1);
+    strncpy(entry->path, managed_path, sizeof(entry->path) - 1);
     entry->path[sizeof(entry->path) - 1] = '\0';
     entry->present = 1;
     return blob_autoload_write_entries(entries, sizeof(entries) / sizeof(entries[0]));
@@ -278,6 +430,7 @@ int blob_autoload_clear(const char *domain, const char *kind)
             strcmp(entries[i].kind, kind) == 0) {
             entries[i].path[0] = '\0';
             entries[i].present = 0;
+            blob_autoload_remove_managed_file(domain, kind);
             return blob_autoload_write_entries(entries, sizeof(entries) / sizeof(entries[0]));
         }
     }
