@@ -11,9 +11,13 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Honor a BUILD_DIR override so `make BUILD_DIR=out test-build-stamp` (or a
+# direct invocation with `BUILD_DIR=out scripts/tests/...`) reads from and
+# writes to the same place. Mirrors `BUILD_DIR := build` in the Makefile.
+BUILD_DIR="${BUILD_DIR:-build}"
 # build_info.h is generated under the kernel CMake build directory.
 # Mirrors `KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel` in the top-level Makefile.
-HEADER="${REPO_ROOT}/build/kernel/include/build_info.h"
+HEADER="${REPO_ROOT}/${BUILD_DIR}/kernel/include/build_info.h"
 
 extract_stamp() {
     if [[ ! -f "${HEADER}" ]]; then
@@ -36,8 +40,11 @@ extract_stamp() {
 
 cd "${REPO_ROOT}"
 
+# The top-level Makefile assigns BUILD_DIR with `:=`, so env-based overrides
+# do not propagate to child make invocations — pass it explicitly on the
+# command line so a custom BUILD_DIR survives the recursion.
 echo "[1/2] Building kernel..."
-make kernel >/dev/null
+make kernel BUILD_DIR="${BUILD_DIR}" >/dev/null
 STAMP1=$(extract_stamp)
 echo "  stamp1: ${STAMP1}"
 
@@ -45,7 +52,7 @@ echo "Sleeping 1 second so the UTC stamp can advance..."
 sleep 1
 
 echo "[2/2] Building kernel again..."
-make kernel >/dev/null
+make kernel BUILD_DIR="${BUILD_DIR}" >/dev/null
 STAMP2=$(extract_stamp)
 echo "  stamp2: ${STAMP2}"
 

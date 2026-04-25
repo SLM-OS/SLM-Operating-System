@@ -734,6 +734,14 @@ target_include_directories(slmos.elf PRIVATE ${KERNEL_INCLUDES})
 # only rewrites the file when the content changes (avoids no-op relinks
 # inside the same UTC second). Both `slmos.elf` and the `lua` static lib
 # pick it up via the build-dir include path added below.
+#
+# Cost: when the UTC second has advanced since the previous build, the
+# stamp changes, the header is rewritten, and the three consumer TUs
+# (main.c, vfs.c, lua_slm.c) recompile, forcing a relink. That is by
+# design — the whole purpose of the stamp is to embed a fresh build
+# identity into the kernel image — and is the reason for the
+# copy-if-different write above (so back-to-back builds inside the same
+# UTC second do not pay the relink cost).
 # ---------------------------------------------------------------------------
 set(BUILD_INFO_DIR    ${CMAKE_BINARY_DIR}/include)
 set(BUILD_INFO_HEADER ${BUILD_INFO_DIR}/build_info.h)

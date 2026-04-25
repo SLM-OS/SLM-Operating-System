@@ -10,11 +10,15 @@ if(NOT DEFINED SRC_DIR OR NOT DEFINED OUT_FILE)
 endif()
 
 # --- Version: first non-blank line of version.txt --------------------------
+# ENCODING UTF-8 strips a leading BOM if a Windows editor saved the file as
+# UTF-8-with-BOM. Without it the BOM bytes would land inside SLMOS_VERSION.
+# CMake's file(STRINGS) already normalizes CRLF → LF and drops the line
+# terminator, so the only encoding gotcha left is the BOM.
 if(NOT EXISTS "${SRC_DIR}/version.txt")
     message(FATAL_ERROR "version.txt not found at ${SRC_DIR}/version.txt")
 endif()
 
-file(STRINGS "${SRC_DIR}/version.txt" _version_lines)
+file(STRINGS "${SRC_DIR}/version.txt" _version_lines ENCODING UTF-8)
 set(_version "")
 foreach(_line ${_version_lines})
     string(STRIP "${_line}" _stripped)

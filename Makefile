@@ -277,9 +277,14 @@ endif
 # test-build-stamp: build twice with sleep 1 between, assert
 # SLMOS_BUILD_STAMP advances. Exercises the gen_build_info.cmake
 # always-runs custom target end-to-end. Issue #360.
+#
+# Pass BUILD_DIR through so `make BUILD_DIR=out test-build-stamp` finds
+# the generated header in the right place. Invoke via `bash` so a missing
+# +x bit on the script (rare, but happens with some VCS export workflows)
+# does not break the target.
 .PHONY: test-build-stamp
 test-build-stamp:
-	@scripts/tests/test-build-stamp-advances.sh
+	@BUILD_DIR=$(BUILD_DIR) bash scripts/tests/test-build-stamp-advances.sh
 
 # kernel-bzimage: X86_64-only parallel build of a Linux-bzImage wrapper
 # around the kernel. Used as the third kexec loader path alongside
