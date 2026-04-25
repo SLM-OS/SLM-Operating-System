@@ -48,19 +48,34 @@ static const struct pcie_device *find_test_endpoint(void)
     return NULL;
 }
 
-/* Find the lowest-index BAR that is (a) present and (b) a memory
- * BAR, not an I/O BAR. Transitional virtio-rng-pci exposes BAR0 as
- * legacy I/O and BAR4 as the modern memory capability window — the
- * test scans until it hits the memory one. Returns -1 if none. */
+/* Find the largest memory BAR. Transitional virtio-rng-pci exposes:
+ *   BAR0  = legacy I/O          (skipped — IO bit set)
+ *   BAR1  = MSI-X table window  (~0x1000 — reads return 0xFFFFFFFF
+ *                                until MSI-X is enabled, which we
+ *                                don't do in this generic test)
+ *   BAR4  = modern config       (~0x4000 — virtio capability windows;
+ *                                reads return real device data even
+ *                                with MSI-X disabled).
+ * Picking the largest steers us at BAR4. The previous "lowest index"
+ * heuristic worked only because BARs were left unprogrammed by
+ * pcie_init() (no UEFI to assign), so map_bar(BAR1) returned NULL
+ * and the test took the NULL branch. Now that pcie_init's BAR
+ * allocator runs on QEMU GPEX too (via gpex_get_mmio_window — added
+ * during the dynamic-kernel-replace Stage 3 SDHCI work, #369), an
+ * explicit "actual readable memory window" pick is required. */
 static int find_mem_bar(const struct pcie_device *d)
 {
+    int best = -1;
+    uint64_t best_size = 0;
     for (int b = 0; b < PCIE_NUM_BARS; b++) {
-        if ((d->bar_flags[b] & PCIE_BAR_PRESENT)
-         && !(d->bar_flags[b] & PCIE_BAR_IO)) {
-            return b;
+        if (!(d->bar_flags[b] & PCIE_BAR_PRESENT)) continue;
+        if (d->bar_flags[b] & PCIE_BAR_IO) continue;
+        if (d->bar_size[b] > best_size) {
+            best = b;
+            best_size = d->bar_size[b];
         }
     }
-    return -1;
+    return best;
 }
 
 static void test_backend_registered(void)

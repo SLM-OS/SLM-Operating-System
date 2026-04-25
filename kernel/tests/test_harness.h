@@ -148,6 +148,8 @@ int test_suite_bcm_mailbox(void);
 /* FatFs / FAT32 integration tests (#368, dynamic-kernel-replace Stage 2) */
 int test_suite_fat32(void);
 
+/* SDHCI block driver integration tests (#369, dynamic-kernel-replace Stage 3) */
+int test_suite_sdhci(void);
 
 /* General-purpose FDT reader tests (kernel/lib/fdt) */
 int test_suite_fdt(void);

@@ -145,6 +145,27 @@ static void *gpex_map_bar(uint64_t pcie_addr, uint64_t size)
     return (void *)(uintptr_t)pcie_addr;
 }
 
+/*
+ * Expose the low-MMIO window to the pcie_core BAR allocator so it
+ * can assign endpoint BAR addresses on QEMU virt without UEFI.
+ * Without this, every PCIe BAR comes up at 0 and `map_bar` returns
+ * NULL — the path that surfaced when the dynamic-kernel-replace
+ * Stage 3 SDHCI driver tried to probe `-device sdhci-pci` (#369).
+ *
+ * The window is the GPEX low-MMIO outbound range. Reserving the
+ * first 0x10000 (64 KB) keeps the allocator out of the bus 0
+ * config-space-shadow region the QEMU GPEX model places at the
+ * window base (observed: virtio devices land cleanly above 0x10010000).
+ */
+static int gpex_get_mmio_window(uint64_t *base_out, uint64_t *size_out)
+{
+    if (!base_out || !size_out) return PCIE_ERR_INVAL;
+    *base_out = QEMU_GPEX_LOW_MMIO_BASE + 0x10000UL;
+    *size_out = (QEMU_GPEX_LOW_MMIO_END - QEMU_GPEX_LOW_MMIO_BASE)
+              - 0x10000UL;
+    return PCIE_OK;
+}
+
 static int gpex_alloc_msi(const struct pcie_device *dev, uint8_t cap_ptr,
                           bool is_msix, int count, struct pcie_msi_handle *out)
 {
@@ -171,6 +192,7 @@ static const struct pcie_host_ops gpex_ops = {
     .config_read32    = gpex_config_read32,
     .config_write32   = gpex_config_write32,
     .map_bar          = gpex_map_bar,
+    .get_mmio_window  = gpex_get_mmio_window,
     .alloc_msi        = gpex_alloc_msi,
     .bind_irq_handler = gpex_bind_irq_handler,
 };

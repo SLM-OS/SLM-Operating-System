@@ -527,6 +527,13 @@ set(KERNEL_SOURCES
     kernel/lib/fatfs/ffunicode.c
     kernel/lib/fatfs/diskio.c
 
+    # SDHCI / SD Host Controller driver (#369, dynamic-kernel-replace
+    # Stage 3). Targets QEMU `-device sdhci-pci` and BCM2712 EMMC2.
+    # Presents a `struct blkdev` so FatFs's diskio shim plugs in
+    # unchanged. PIO data path; ADMA2 + BCM2712 cfginit deferred to
+    # Stage 5 (#371).
+    kernel/drivers/sdhci.c
+
     # Component system and FFI (x86-64 provides stubs in platform_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/component.c>
     kernel/src/slm_ffi.c
@@ -624,6 +631,10 @@ set(TEST_SOURCES
     # platform-neutral (no MMIO, only PMM + memcpy), so the same
     # tests are valuable on every test target including x86-64.
     kernel/tests/test_fat32.c
+    # SDHCI block driver tests — exercise the QEMU `-device sdhci-pci`
+    # path. ARM64-only (uses `pcie.h`, not the legacy x86 `pci.h`).
+    # Skips cleanly if QEMU is started without `-device sdhci-pci`.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_sdhci.c>
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for

@@ -739,11 +739,48 @@ endif
 # PCIe test device for ARM64 virt — lets pcie_init() discover a
 # virtio endpoint on the GPEX root complex without depending on the
 # networking stack. virtio-rng is cheap and always available.
+#
+# Also attaches an `sdhci-pci` controller backed by a raw image so
+# the dynamic-kernel-replace Stage 3 SDHCI driver (#369) has
+# something to probe in QEMU. Image is created on demand below.
+#
+# Image is 2 GB to land squarely in QEMU's SDHC emulation regime —
+# the QEMU sd-card model emits CSD v1.0 / SDSC (byte-addressed)
+# below the 2 GB SDHC threshold per SD Physical Layer Spec, which
+# breaks FatFs's block-addressed reads. 2 GB is sparse on disk
+# (truncate, not dd), so it costs no real space until QEMU writes.
+SDHCI_TEST_IMG := $(KERNEL_TEST_BUILD_DIR)/sdhci-test.img
+SDHCI_TEST_IMG_SIZE := 4G
+
 ifeq ($(PLATFORM),QEMU_VIRT)
-    QEMU_PCIE_TEST := -device virtio-rng-pci,bus=pcie.0
+    # The virt machine has no default `sd` interface (that's a
+    # raspi-machine quirk), so we wire it up explicitly:
+    #   1. -drive id=...,if=none — define the backing file
+    #   2. -device sdhci-pci    — the SDHCI controller itself
+    #   3. -device sd-card,drive=... — attach the card to the
+    #                                  controller's auto-discovered
+    #                                  SD bus (sole bus, no
+    #                                  `bus=` arg needed).
+    QEMU_PCIE_TEST := -device virtio-rng-pci,bus=pcie.0 \
+                      -drive id=slmos-sd,if=none,format=raw,file=$(SDHCI_TEST_IMG) \
+                      -device sdhci-pci \
+                      -device sd-card,drive=slmos-sd
 else
     QEMU_PCIE_TEST :=
 endif
+
+# Stage the SDHCI test image so QEMU's `sd-card` device has a
+# backing file. Idempotent: only re-creates if missing. The image
+# is sparse (truncate, not dd) so the on-disk footprint stays tiny
+# until QEMU actually writes blocks.
+$(SDHCI_TEST_IMG): | $(KERNEL_TEST_BUILD_DIR)
+	@if [ ! -f $@ ]; then \
+		echo "Creating sparse $@ ($(SDHCI_TEST_IMG_SIZE), SDHC-sized)"; \
+		truncate -s $(SDHCI_TEST_IMG_SIZE) $@; \
+	fi
+
+$(KERNEL_TEST_BUILD_DIR):
+	@mkdir -p $@
 
 # x86-64 uses GRUB ISO (-cdrom); ARM64 uses direct kernel load (-kernel)
 ifeq ($(PLATFORM),X86_64)
@@ -862,7 +899,7 @@ kernel-test-clean:
 KERNEL_TEST_ISO := $(KERNEL_TEST_BUILD_DIR)/slmos-test.iso
 
 .PHONY: test
-test: kernel-test
+test: kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)
