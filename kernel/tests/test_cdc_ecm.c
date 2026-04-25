@@ -410,10 +410,10 @@ static void test_probe_binds_and_registers(void)
     TEST_ASSERT_NOT_NULL(drv->get_mac);
     TEST_ASSERT_NOT_NULL(drv->link_status);
     TEST_ASSERT_NOT_NULL(drv->tx_reap);
-    /* Until a real CDC notification arrives, preserve the probe-based
-     * "link up" fallback so adapters that never emit notifications
-     * remain usable. */
-    TEST_ASSERT_TRUE(drv->link_status());
+    /* Notification-capable adapters stay link-down until a real CDC
+     * notification arrives; the probe-based fallback is only for
+     * devices with no usable notification path. */
+    TEST_ASSERT_FALSE(drv->link_status());
 }
 
 static void test_probe_skips_when_no_device(void)
@@ -458,7 +458,7 @@ static void test_net_init_queues_notification_urb(void)
     int before = mock.interrupt_in_submits;
     TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
     TEST_ASSERT_EQUAL_INT(before + 1, mock.interrupt_in_submits);
-    TEST_ASSERT_TRUE(net_get_driver()->link_status());
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
 }
 
 static void test_link_status_tracks_network_connection_notification(void)
@@ -466,7 +466,7 @@ static void test_link_status_tracks_network_connection_notification(void)
     reset_all();
     TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
     TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
-    TEST_ASSERT_TRUE(net_get_driver()->link_status());
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
 
     TEST_ASSERT_NOT_NULL(mock_complete_pending_notify(
         CDC_NOTIFY_NETWORK_CONNECTION, 1, NULL, 0));
@@ -489,7 +489,7 @@ static void test_link_status_infers_up_from_speed_change(void)
     reset_all();
     TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
     TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
-    TEST_ASSERT_TRUE(net_get_driver()->link_status());
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
 
     TEST_ASSERT_NOT_NULL(mock_complete_pending_notify(
         CDC_NOTIFY_CONNECTION_SPEED_CHANGE, 0, speed_payload, sizeof(speed_payload)));
