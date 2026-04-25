@@ -247,7 +247,7 @@ This drives the working lab path end-to-end from the host:
 - deploy the current `slmos.elf` + `slmos-kexec`
 - trigger Linux -> `kexec` -> SLM-OS
 - wait for `slmos>` over ser2net
-- run `net init`, `ifconfig dhcp`, `ifconfig`, and `ping 192.168.4.1 2`
+- run `net init`, send one `ifconfig dhcp`, poll `ifconfig` until `DHCP(bound)`, and then run `ping 192.168.4.1 2`
 - verify DHCP `192.168.4.5/24` and gateway `192.168.4.1`
 
 It is not a generic Jetson automation harness; it is the repeatable

@@ -31,7 +31,7 @@ COMMAND_TIMEOUT="45"
 KEXEC_TRIGGER_TIMEOUT="30"
 DHCP_TIMEOUT="45"
 POST_BOOT_SETTLE="5"
-DHCP_RETRIES="1"
+DHCP_RETRIES="0"
 SKIP_COPY=0
 SKIP_HELPER_COPY=0
 KEEP_LOGS=0
@@ -58,7 +58,7 @@ Options:
   --kexec-trigger-timeout SEC Timeout for the SSH session to drop after triggering kexec (default: $KEXEC_TRIGGER_TIMEOUT)
   --dhcp-timeout SEC          Timeout waiting for DHCP(bound) after net init (default: $DHCP_TIMEOUT)
   --post-boot-settle SEC      Delay after the first SLM-OS prompt before net init (default: $POST_BOOT_SETTLE)
-  --dhcp-retries COUNT        Retry `ifconfig dhcp` after DHCP(failed) this many times (default: $DHCP_RETRIES)
+  --dhcp-retries COUNT        Reissue `ifconfig dhcp` after DHCP(failed) this many times for diagnostics (default: $DHCP_RETRIES)
   --skip-copy                 Reuse the already-installed kernel and helper on the Jetson
   --skip-helper-copy          Copy only the kernel, not the helper
   --keep-logs                 Keep the temporary console/SSH logs on success
@@ -311,7 +311,7 @@ wait_for_dhcp_bound() {
             return 1
         fi
 
-        info "DHCP still pending; retrying"
+        info "DHCP still pending; polling again"
         sleep 1
     done
 }

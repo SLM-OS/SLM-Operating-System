@@ -64,7 +64,7 @@ fresh-enumerates the downstream RTL8153, and brings networking up with
 no manual unplug/replug. Current validation on the lab path:
 
 - `net init` succeeds
-- `ifconfig dhcp` binds `192.168.4.5/24` with gateway `192.168.4.1`
+- a single `ifconfig dhcp` request binds `192.168.4.5/24` with gateway `192.168.4.1`
 - `ping 192.168.4.1 2` succeeds
 
 The helper script is reasonably well commented. Run it with `--help` on the Jetson for the full flag list, or read the script header for rationale on each step.
@@ -144,7 +144,7 @@ That script:
 - copies `build/kernel/slmos.elf` and `scripts/jetson-kexec-slmos.sh`
 - triggers `slmos-kexec`
 - waits for `slmos>` on serial
-- runs `net init`, `ifconfig dhcp`, `ifconfig`, and `ping 192.168.4.1 2`
+- runs `net init`, sends one `ifconfig dhcp`, polls `ifconfig` until `DHCP(bound)`, and then runs `ping 192.168.4.1 2`
 - verifies DHCP `192.168.4.5/24` with gateway `192.168.4.1`
 
 It is intentionally scoped to the current lab topology rather than a

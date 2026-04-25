@@ -50,6 +50,8 @@ const struct net_driver *net_get_driver(void) {
 static struct netif slm_netif;
 static bool net_initialized = false;
 static bool dhcp_started = false;
+static bool dhcp_requested = false;
+static bool last_was_bound = false;
 
 /* Auto-DHCP state (issue #197).
  *
@@ -73,6 +75,53 @@ static uint32_t static_ip_fallback;
 static uint32_t static_nm_fallback;
 static uint32_t static_gw_fallback;
 
+static bool net_link_is_up(void) {
+    return (slm_netif.flags & NETIF_FLAG_LINK_UP) != 0;
+}
+
+static int net_start_dhcp_client(const char *reason) {
+    if (dhcp_started)
+        return NET_OK;
+
+    if (dhcp_start(&slm_netif) != ERR_OK) {
+        ERROR("Failed to start DHCP client");
+        return NET_E_NO_MEM;
+    }
+
+    dhcp_requested = true;
+    dhcp_started = true;
+    dhcp_start_time = sys_now();
+    dhcp_fallback_done = false;
+    last_was_bound = false;  /* #201: announce on next BOUND */
+    if (reason != NULL) {
+        INFO("DHCP client started (%s)", reason);
+    } else {
+        INFO("DHCP client started");
+    }
+    return NET_OK;
+}
+
+static void net_sync_link_state(void) {
+    if (!net_initialized || active_driver == NULL || active_driver->link_status == NULL)
+        return;
+
+    bool driver_link_up = active_driver->link_status();
+    bool lwip_link_up = net_link_is_up();
+    if (driver_link_up == lwip_link_up)
+        return;
+
+    if (driver_link_up) {
+        netif_set_link_up(&slm_netif);
+        INFO("Network link up");
+        if (dhcp_requested && !dhcp_started) {
+            (void)net_start_dhcp_client("after link-ready");
+        }
+    } else {
+        netif_set_link_down(&slm_netif);
+        INFO("Network link down");
+    }
+}
+
 void net_set_dhcp_timeout_ms(uint32_t ms) {
     /* Accept any value including 0 — tests use 0 to trigger fallback
      * immediately on the next check. Production callers should use
@@ -94,6 +143,8 @@ uint32_t net_get_dhcp_timeout_ms(void) {
 int net_dhcp_check_timeout(void) {
     if (!dhcp_started || dhcp_fallback_done)
         return 0;
+    if (!net_link_is_up())
+        return 0;
     if (dhcp_supplied_address(&slm_netif))
         return 0;
 
@@ -103,6 +154,7 @@ int net_dhcp_check_timeout(void) {
 
     WARN("DHCP timeout after %u ms; falling back to static IP", elapsed);
     dhcp_stop(&slm_netif);
+    dhcp_requested = false;
     dhcp_started = false;
     dhcp_fallback_done = true;
     ip4_addr_t ip, nm, gw;
@@ -183,7 +235,6 @@ static err_t slm_netif_output(struct netif *netif, struct pbuf *p) {
  * future multi-CPU RX dispatch adds a second poll caller, the
  * false→true edge detection becomes racy — either serialise the
  * callers or convert to _Atomic + CAS. */
-static bool     last_was_bound = false;
 static uint32_t dhcp_bind_count = 0;
 
 static void net_check_dhcp_bind_transition(void) {
@@ -374,14 +425,15 @@ int net_init(void) {
      * server answers within NET_DHCP_TIMEOUT_MS, net_poll() falls back
      * to the static IP configured above. */
 #if defined(NET_DHCP_AT_BOOT)
-    if (dhcp_start(&slm_netif) == ERR_OK) {
-        dhcp_started = true;
-        dhcp_start_time = sys_now();
-        dhcp_fallback_done = false;
-        last_was_bound = false;  /* #201: announce on next BOUND */
-        INFO("DHCP client started at boot (timeout %u ms)", dhcp_timeout_ms);
+    dhcp_requested = true;
+    dhcp_fallback_done = false;
+    if (net_link_is_up()) {
+        if (net_start_dhcp_client("at boot") == NET_OK) {
+            INFO("DHCP auto-start armed (timeout %u ms)", dhcp_timeout_ms);
+        }
     } else {
-        WARN("DHCP auto-start failed; using static IP");
+        INFO("DHCP auto-start deferred until link-ready (timeout %u ms)",
+             dhcp_timeout_ms);
     }
 #endif
 
@@ -432,6 +484,8 @@ void net_poll(void) {
      * send() may leave it NULL. */
     if (active_driver->tx_reap)
         active_driver->tx_reap();
+
+    net_sync_link_state();
 
     /* Check for received packets */
     int len = active_driver->recv(rx_packet_buf, sizeof(rx_packet_buf));
@@ -519,15 +573,15 @@ int net_get_info(struct net_info *info) {
     info->netmask = slm_netif.netmask.addr;
     info->gateway = slm_netif.gw.addr;
     info->link_up = (slm_netif.flags & NETIF_FLAG_LINK_UP) != 0;
-    info->dhcp_enabled = dhcp_started;
+    info->dhcp_enabled = dhcp_requested;
 
     /* Derive detailed DHCP status from lwIP's view of the netif */
-    if (dhcp_started) {
+    if (dhcp_fallback_done) {
+        info->dhcp_status = NET_DHCP_FAILED;
+    } else if (dhcp_requested) {
         info->dhcp_status = dhcp_supplied_address(&slm_netif)
             ? NET_DHCP_BOUND
             : NET_DHCP_PENDING;
-    } else if (dhcp_fallback_done) {
-        info->dhcp_status = NET_DHCP_FAILED;
     } else {
         info->dhcp_status = NET_DHCP_DISABLED;
     }
@@ -545,6 +599,8 @@ int net_set_static_ip(uint32_t ip_addr, uint32_t netmask, uint32_t gateway) {
         dhcp_stop(&slm_netif);
         dhcp_started = false;
     }
+    dhcp_requested = false;
+    dhcp_fallback_done = false;
 
     /* Set static IP */
     ip4_addr_t ip, nm, gw;
@@ -566,20 +622,14 @@ int net_enable_dhcp(void) {
         return NET_E_NOT_INIT;
     }
 
-    if (!dhcp_started) {
-        if (dhcp_start(&slm_netif) == ERR_OK) {
-            dhcp_started = true;
-            dhcp_start_time = sys_now();
-            dhcp_fallback_done = false;
-            last_was_bound = false;  /* #201: announce on next BOUND */
-            INFO("DHCP client started");
-        } else {
-            ERROR("Failed to start DHCP client");
-            return NET_E_NO_MEM;
-        }
+    dhcp_requested = true;
+    dhcp_fallback_done = false;
+    if (net_link_is_up()) {
+        return net_start_dhcp_client("manual request");
     }
 
-    return 0;
+    INFO("DHCP request deferred until link-ready");
+    return NET_OK;
 }
 
 int net_ping(uint32_t addr, uint16_t seq, ping_callback_t callback, void *user) {

@@ -38,6 +38,8 @@ static const uint8_t EXPECTED_MAC[6] = {
  * in cdc_ecm.c.
  */
 #define CDC_ECM_FD_SUBTYPE 0x0F
+#define CDC_NOTIFY_NETWORK_CONNECTION      0x00
+#define CDC_NOTIFY_CONNECTION_SPEED_CHANGE 0x2A
 
 /* iMACAddress string descriptor (bLength=26, type=STRING, 12 UTF-16LE hex). */
 static const uint8_t mac_string_desc[26] = {
@@ -131,6 +133,7 @@ static struct {
     struct usb_urb  *in_flight[MOCK_MAX_INFLIGHT];
     int              bulk_in_submits;
     int              bulk_out_submits;
+    int              interrupt_in_submits;
     int              poll_count;
     /* Per-submission payload for the next bulk-IN to return. */
     const uint8_t   *next_rx_payload;
@@ -228,6 +231,15 @@ static int mock_submit_urb(struct usb_urb *urb)
             if (urb->complete) urb->complete(urb);
         }
         return 0;
+    case USB_XFER_INTERRUPT:
+        if (urb->endpoint & USB_DIR_IN) {
+            mock.interrupt_in_submits++;
+            mock_store(urb);
+            return 0;
+        }
+        urb->status = USB_URB_IO_ERROR;
+        if (urb->complete) urb->complete(urb);
+        return 0;
     default:
         urb->status = USB_URB_IO_ERROR;
         if (urb->complete) urb->complete(urb);
@@ -266,6 +278,40 @@ static struct usb_urb *mock_complete_pending_rx(const uint8_t *payload,
         uint32_t n = len > urb->length ? urb->length : len;
         if (payload && n > 0)
             memcpy(urb->buffer, payload, n);
+        urb->actual_length = n;
+        urb->status = USB_URB_OK;
+        mock.in_flight[i] = NULL;
+        if (urb->complete) urb->complete(urb);
+        return urb;
+    }
+    return NULL;
+}
+
+static struct usb_urb *mock_complete_pending_notify(uint8_t type,
+                                                    uint16_t wValue,
+                                                    const uint8_t *payload,
+                                                    uint16_t payload_len)
+{
+    for (int i = 0; i < MOCK_MAX_INFLIGHT; i++) {
+        struct usb_urb *urb = mock.in_flight[i];
+        if (urb == NULL) continue;
+        if (urb->transfer_type != USB_XFER_INTERRUPT) continue;
+        if (!(urb->endpoint & USB_DIR_IN)) continue;
+
+        uint8_t msg[16] = {
+            USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+            type,
+            (uint8_t)(wValue & 0xFF), (uint8_t)(wValue >> 8),
+            0x00, 0x00, /* wIndex = ctrl iface 0 in the mock */
+            (uint8_t)(payload_len & 0xFF), (uint8_t)(payload_len >> 8),
+        };
+        if (payload != NULL && payload_len > 0)
+            memcpy(&msg[8], payload, payload_len);
+
+        uint32_t n = (uint32_t)(8 + payload_len);
+        if (n > urb->length)
+            n = urb->length;
+        memcpy(urb->buffer, msg, n);
         urb->actual_length = n;
         urb->status = USB_URB_OK;
         mock.in_flight[i] = NULL;
@@ -371,7 +417,8 @@ static void test_probe_binds_and_registers(void)
     TEST_ASSERT_NOT_NULL(drv->get_mac);
     TEST_ASSERT_NOT_NULL(drv->link_status);
     TEST_ASSERT_NOT_NULL(drv->tx_reap);
-    TEST_ASSERT_TRUE(drv->link_status());
+    /* Link now follows the CDC notification endpoint, not mere probe. */
+    TEST_ASSERT_FALSE(drv->link_status());
 }
 
 static void test_probe_skips_when_no_device(void)
@@ -406,6 +453,65 @@ static void test_net_init_queues_rx_urbs(void)
     TEST_ASSERT_EQUAL_INT(0, rc);
     /* One submit per RX slot (4) — exact match, not approximate. */
     TEST_ASSERT_EQUAL_INT(before + 4, mock.bulk_in_submits);
+}
+
+static void test_net_init_queues_notification_urb(void)
+{
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+
+    int before = mock.interrupt_in_submits;
+    TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
+    TEST_ASSERT_EQUAL_INT(before + 1, mock.interrupt_in_submits);
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
+}
+
+static void test_link_status_tracks_network_connection_notification(void)
+{
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
+
+    TEST_ASSERT_NOT_NULL(mock_complete_pending_notify(
+        CDC_NOTIFY_NETWORK_CONNECTION, 1, NULL, 0));
+    net_get_driver()->tx_reap();
+    TEST_ASSERT_TRUE(net_get_driver()->link_status());
+
+    TEST_ASSERT_NOT_NULL(mock_complete_pending_notify(
+        CDC_NOTIFY_NETWORK_CONNECTION, 0, NULL, 0));
+    net_get_driver()->tx_reap();
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
+}
+
+static void test_link_status_infers_up_from_speed_change(void)
+{
+    static const uint8_t speed_payload[8] = {
+        0x00, 0xe1, 0xf5, 0x05, /* 100,000,000 upstream */
+        0x00, 0xe1, 0xf5, 0x05, /* 100,000,000 downstream */
+    };
+
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
+
+    TEST_ASSERT_NOT_NULL(mock_complete_pending_notify(
+        CDC_NOTIFY_CONNECTION_SPEED_CHANGE, 0, speed_payload, sizeof(speed_payload)));
+    net_get_driver()->tx_reap();
+    TEST_ASSERT_TRUE(net_get_driver()->link_status());
+}
+
+static void test_link_status_falls_back_when_notification_endpoint_missing(void)
+{
+    reset_all();
+    struct usb_device *dev = usb_core_first_device();
+    TEST_ASSERT_NOT_NULL(dev);
+    /* Remove the control notification endpoint from the parsed iface. */
+    dev->ifaces[0].ep_index[0] = -1;
+    dev->endpoints[0].valid = false;
+
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_TRUE(net_get_driver()->link_status());
 }
 
 static void test_send_goes_to_bulk_out(void)
@@ -888,6 +994,10 @@ int test_suite_cdc_ecm(void)
     RUN_TEST(test_probe_binds_and_registers);
     RUN_TEST(test_probe_skips_when_no_device);
     RUN_TEST(test_net_init_queues_rx_urbs);
+    RUN_TEST(test_net_init_queues_notification_urb);
+    RUN_TEST(test_link_status_tracks_network_connection_notification);
+    RUN_TEST(test_link_status_infers_up_from_speed_change);
+    RUN_TEST(test_link_status_falls_back_when_notification_endpoint_missing);
     RUN_TEST(test_send_goes_to_bulk_out);
     RUN_TEST(test_send_busy_when_pool_full);
     RUN_TEST(test_send_rejects_oversized);
