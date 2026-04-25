@@ -339,11 +339,31 @@ def parse_args() -> argparse.Namespace:
     argv = list(sys.argv[1:])
     if argv:
         subcommands = {"apply", "load", "activate", "rollback", "clear", "status", "probe"}
-        first_subcommand = next((arg for arg in argv if arg in subcommands), None)
-        if first_subcommand is not None:
-            if argv[0] != first_subcommand:
-                idx = argv.index(first_subcommand)
-                argv = [first_subcommand] + argv[:idx] + argv[idx + 1:]
+        global_flags = {"--labctl", "--tryboot", "--debug", "--clear-first"}
+        global_opts_with_values = {
+            "--target", "--transport", "--protocol", "--port", "--prompt",
+            "--timeout", "--connect-retries", "--retry-delay", "--chunk-bytes",
+            "--probe-raw", "--probe-policy", "--probe-sleep-ms",
+            "--expect-raw", "--sleep-ms",
+        }
+
+        idx = 0
+        while idx < len(argv):
+            arg = argv[idx]
+            if arg == "--":
+                idx += 1
+                break
+            if arg in global_flags:
+                idx += 1
+                continue
+            if arg in global_opts_with_values:
+                idx += 2
+                continue
+            break
+
+        if idx < len(argv) and argv[idx] in subcommands:
+            if idx != 0:
+                argv = [argv[idx]] + argv[:idx] + argv[idx + 1:]
         else:
             argv = ["apply"] + argv
     return parser.parse_args(argv)

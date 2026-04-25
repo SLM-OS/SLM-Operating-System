@@ -423,11 +423,13 @@ def upload_legacy(shell: Shell, args: argparse.Namespace, data: bytes,
 
     offset = 0
     if args.no_resume:
-        out = shell.run_command(f"truncate {args.remote_path} 0")
-        log_response(args.debug, "truncate-reset", out)
-        if shell_command_failed(out):
-            print("remote truncate command failed", file=sys.stderr)
-            return 1
+        existing = remote_stat(shell, args.remote_path, args.debug)
+        if existing is not None:
+            out = shell.run_command(f"truncate {args.remote_path} 0")
+            log_response(args.debug, "truncate-reset", out)
+            if shell_command_failed(out):
+                print("remote truncate command failed", file=sys.stderr)
+                return 1
     else:
         existing = remote_stat(shell, args.remote_path, args.debug)
         if existing is not None:
@@ -657,9 +659,9 @@ def main() -> int:
     data = local_path.read_bytes()
     total = len(data)
     prompt = args.prompt.encode("ascii")
-    host = resolve_labctl_target(args.target) if args.labctl else args.target
 
     if args.transport == "telnet":
+        host = resolve_labctl_target(args.target) if args.labctl else args.target
         target_desc = host
 
         def shell_factory() -> Shell:

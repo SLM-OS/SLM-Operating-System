@@ -159,6 +159,54 @@ def test_put_main_auto_falls_back_to_legacy_when_xput_missing():
     assert legacy_calls == [("127.0.0.1", 3)]
 
 
+def test_put_main_serial_labctl_does_not_resolve_network():
+    shell = FakeShell({"xput status": [b"Unknown command: xput\nslmos> "]})
+
+    with mock.patch.object(slm_put.pathlib.Path, "read_bytes", return_value=b"abc"):
+        with mock.patch.object(slm_put, "resolve_labctl_target", side_effect=AssertionError("should not resolve network")):
+            with mock.patch.object(slm_put, "connect_serial", return_value=shell):
+                with mock.patch.object(slm_put, "upload_legacy", return_value=0) as upload_legacy:
+                    with patched_argv(
+                        slm_put,
+                        ["--transport", "serial", "--labctl", "pi-5-2", "/tmp/local.bin", "/tmp/remote.bin"],
+                    ):
+                        rc = slm_put.main()
+
+    assert rc == 0
+    upload_legacy.assert_called_once()
+
+
+def test_put_legacy_no_resume_skips_truncate_for_absent_destination():
+    shell = FakeShell(
+        {
+            "stat /tmp/blob": [
+                b"Command returned error: No such file or directory\nslmos> ",
+                b"Size: 3 bytes\nslmos> ",
+            ],
+            "put /tmp/blob 616263": [b"ok\nslmos> "],
+        }
+    )
+    args = argparse.Namespace(
+        debug=False,
+        remote_path="/tmp/blob",
+        transport="telnet",
+        no_resume=True,
+        no_verify_size=False,
+        chunk_bytes=64,
+        chunk_retries=2,
+        retry_delay=0.0,
+    )
+
+    rc = slm_put.upload_legacy(shell, args, b"abc", 3, "pi-5-2", lambda: shell)
+
+    assert rc == 0
+    assert shell.commands == [
+        "stat /tmp/blob",
+        "put /tmp/blob 616263",
+        "stat /tmp/blob",
+    ]
+
+
 def test_modelctl_parse_args_supports_legacy_apply_form():
     with patched_argv(
         slm_modelctl,
@@ -185,6 +233,18 @@ def test_modelctl_parse_args_reorders_global_options_before_subcommand():
     assert args.labctl is True
     assert args.domain == "sched"
     assert args.kind == "mlp"
+
+
+def test_modelctl_legacy_path_named_like_subcommand_stays_positional():
+    with patched_argv(
+        slm_modelctl,
+        ["--target", "pi-5-2", "sched", "mlp", "status", "/mnt/files/policies/load"],
+    ):
+        args = slm_modelctl.parse_args()
+
+    assert args.command == "apply"
+    assert args.local_path == "status"
+    assert args.remote_path == "/mnt/files/policies/load"
 
 
 def test_modelctl_infer_probe_policy_maps_scheduler_kinds():
@@ -300,8 +360,11 @@ def main() -> int:
     runner.run("put_chunk_limits_respect_shell_line_budget", test_put_chunk_limits_respect_shell_line_budget)
     runner.run("put_upload_framed_resumes_and_finishes", test_put_upload_framed_resumes_and_finishes)
     runner.run("put_main_auto_falls_back_to_legacy_when_xput_missing", test_put_main_auto_falls_back_to_legacy_when_xput_missing)
+    runner.run("put_main_serial_labctl_does_not_resolve_network", test_put_main_serial_labctl_does_not_resolve_network)
+    runner.run("put_legacy_no_resume_skips_truncate_for_absent_destination", test_put_legacy_no_resume_skips_truncate_for_absent_destination)
     runner.run("modelctl_parse_args_supports_legacy_apply_form", test_modelctl_parse_args_supports_legacy_apply_form)
     runner.run("modelctl_parse_args_reorders_global_options_before_subcommand", test_modelctl_parse_args_reorders_global_options_before_subcommand)
+    runner.run("modelctl_legacy_path_named_like_subcommand_stays_positional", test_modelctl_legacy_path_named_like_subcommand_stays_positional)
     runner.run("modelctl_infer_probe_policy_maps_scheduler_kinds", test_modelctl_infer_probe_policy_maps_scheduler_kinds)
     runner.run("modelctl_probe_scheduler_runs_create_sample_and_cleanup", test_modelctl_probe_scheduler_runs_create_sample_and_cleanup)
     runner.run("modelctl_apply_probe_raw_invokes_probe_with_inferred_policy", test_modelctl_apply_probe_raw_invokes_probe_with_inferred_policy)
