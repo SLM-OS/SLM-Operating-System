@@ -46,12 +46,16 @@ struct ga10b_channel_handoff {
                                  *    can launch kernels other than the
                                  *    hard-coded-to-0xCAFE write_cafe —
                                  *    e.g. dot4 which writes 300.
+                                 * 5: v4 + a multi-op pipeline pointer
+                                 *    so SLM-OS can dispatch N kernels
+                                 *    in sequence from one launch-kernel
+                                 *    invocation (model-inference path).
                                  * SLM-OS channel inherit accepts any of
-                                 * v2/v3/v4; `nvgpu launch-kernel` needs
-                                 * at least v3 for shader/QMD fields and
-                                 * falls back to GA10B_SMOKETEST_SEM_PAYLOAD
-                                 * for v3 handoffs that don't carry
-                                 * `expected_payload`. */
+                                 * v2/v3/v4/v5; `nvgpu launch-kernel`
+                                 * needs at least v3 for shader/QMD
+                                 * fields, runs the v5 pipeline if
+                                 * `pipeline_n_ops > 0`, otherwise
+                                 * single-shot per the v4 path. */
     uint32_t channel_id;        /* Diagnostic only; never used as the
                                  * doorbell token. See work_submit_token
                                  * below — the kernel's allocation path
@@ -127,17 +131,40 @@ struct ga10b_channel_handoff {
      * v3 handoffs fall back to GA10B_SMOKETEST_SEM_PAYLOAD. */
     uint32_t expected_payload;  /* value the kernel writes to *output */
     uint32_t _pad2;             /* align struct size to 8 bytes */
+
+    /* --- v5 extension: multi-op pipeline. ---
+     * Zero on v2/v3/v4. Populated by helpers that need to chain N
+     * kernel dispatches (model inference). When `pipeline_n_ops > 0`,
+     * `pipeline_ops_phys` points to an array of N
+     * struct ga10b_pipeline_op (defined below). SLM-OS's
+     * `nvgpu launch-kernel` runs the chain instead of the single-QMD
+     * path. */
+    uint32_t pipeline_n_ops;
+    uint32_t _pad3;
+    uint64_t pipeline_ops_phys;
+};
+
+/* One entry per op in a v5 pipeline. SLM-OS reads this array from
+ * the DRAM page at handoff->pipeline_ops_phys. */
+struct ga10b_pipeline_op {
+    uint64_t qmd_gpu_va;        /* GPU VA of this op's QMD (256 B aligned) */
+    uint64_t output_phys;       /* CPU-physical sentinel target */
+    uint32_t expected_payload;  /* value to poll for; 0 → "any non-zero" */
+    uint32_t flags;             /* reserved (0 today) */
 };
 
 /* Wire-format size is locked: both the Linux helper and SLM-OS
  * depend on this exact layout. Any struct reorder or field addition
  * breaks the handoff silently — the static_assert catches it at
  * compile time on both sides. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 200,
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 216,
                "ga10b_channel_handoff layout changed — update Linux "
                "helper (scripts/gpu-channel-helper.c, "
                "scripts/gpu-kernel-launch.c, scripts/gpu-launch-common.c) "
                "and bump version");
+_Static_assert(sizeof(struct ga10b_pipeline_op) == 24,
+               "ga10b_pipeline_op layout changed — Linux + SLM-OS "
+               "must agree on the per-op size");
 
 /* Field-offset pins for the v3 extension. A reorder that preserves
  * sizeof() (e.g. swapping two uint64_t fields) wouldn't fire the
@@ -168,6 +195,16 @@ _Static_assert(offsetof(struct ga10b_channel_handoff, cbuf_size)      == 188,
                "v3 cbuf_size offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, expected_payload) == 192,
                "v4 expected_payload offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, pipeline_n_ops) == 200,
+               "v5 pipeline_n_ops offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, pipeline_ops_phys) == 208,
+               "v5 pipeline_ops_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op, qmd_gpu_va) == 0,
+               "pipeline_op.qmd_gpu_va must be at offset 0");
+_Static_assert(offsetof(struct ga10b_pipeline_op, output_phys) == 8,
+               "pipeline_op.output_phys must be at offset 8");
+_Static_assert(offsetof(struct ga10b_pipeline_op, expected_payload) == 16,
+               "pipeline_op.expected_payload must be at offset 16");
 
 /*
  * Validate a candidate handoff block. Returns 0 iff magic, version,

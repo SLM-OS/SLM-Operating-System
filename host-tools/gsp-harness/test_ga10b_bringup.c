@@ -1031,17 +1031,19 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 1;                  /* v1 lacked work_submit_token */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
-    /* v2 (channel-only), v3 (+ kernel-launch state), and v4 (+
-     * expected_payload) all pass — Phase 6/7 reads only v2 fields,
-     * Phase 8 checks the version at dispatch time before reading
-     * v3/v4 fields. */
+    /* v2 (channel-only), v3 (+ kernel-launch state), v4 (+
+     * expected_payload), and v5 (+ pipeline) all pass — Phase 6/7
+     * reads only v2 fields, Phase 8 checks the version at dispatch
+     * time before reading v3/v4/v5 fields. */
     h.version = 2;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 3;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 4;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
-    h.version = 5;                  /* future, not yet defined */
+    h.version = 5;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 6;                  /* future, not yet defined */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
@@ -1529,14 +1531,37 @@ static void test_launch_kernel_pb_uses_ampere_pcas2_b(void)
  * Handoff v3 — channel + kernel-launch state
  * ====================================================================== */
 
-static void test_handoff_v4_layout_size(void)
+static void test_handoff_v5_layout_size(void)
 {
-    printf("== test_handoff_v4_layout_size ==\n");
+    printf("== test_handoff_v5_layout_size ==\n");
     /* Belt-and-suspenders runtime check. The header pins the size
      * with a _Static_assert but a fresh-eyes reader shouldn't have
      * to dig into compile-time errors to discover that v2 was 120,
-     * v3 was 192, and v4 is 200. */
-    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 200u);
+     * v3 was 192, v4 was 200, and v5 is 216. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 216u);
+}
+
+static void test_pipeline_op_layout(void)
+{
+    printf("== test_pipeline_op_layout ==\n");
+    /* Per-op struct is wire-format shared between Linux helper and
+     * SLM-OS — same byte layout must be visible from both sides. */
+    REQUIRE_EQ(sizeof(struct ga10b_pipeline_op), 24u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op, qmd_gpu_va), 0u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op, output_phys), 8u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op, expected_payload), 16u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op, flags), 20u);
+}
+
+static void test_handoff_v5_pipeline_offsets(void)
+{
+    printf("== test_handoff_v5_pipeline_offsets ==\n");
+    /* The v5 pipeline pointer + count must extend the v4 layout
+     * without disturbing the existing fields. */
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, pipeline_n_ops),
+               200u);
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, pipeline_ops_phys),
+               208u);
 }
 
 static void test_handoff_v4_expected_payload_offset(void)
@@ -1967,8 +1992,10 @@ int main(void)
     test_launch_kernel_pb_idempotent();
     test_launch_kernel_pb_uses_ampere_pcas2_b();
 
-    test_handoff_v4_layout_size();
+    test_handoff_v5_layout_size();
     test_handoff_v4_expected_payload_offset();
+    test_handoff_v5_pipeline_offsets();
+    test_pipeline_op_layout();
     test_pick_launch_payload_v3_uses_fallback();
     test_pick_launch_payload_v4_zero_uses_fallback();
     test_pick_launch_payload_v4_uses_field();

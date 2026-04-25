@@ -1008,9 +1008,12 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
      * v3: + compute-kernel launch state (shader/cbuf/qmd/output).
      * v4: + expected_payload so launch_kernel can target any kernel,
      *      not just one that writes 0xCAFE.
-     * Phase 6 inherit accepts all three; launch_kernel version-gates
-     * at dispatch time (v3 minimum; v4 unlocks arbitrary payloads). */
-    if (h->version != 2 && h->version != 3 && h->version != 4) return -1;
+     * v5: + multi-op pipeline pointer for chaining N kernel dispatches
+     *      (model inference path).
+     * Phase 6 inherit accepts all four; launch_kernel version-gates
+     * at dispatch time (v3 minimum for single-shot, v5 for pipelines). */
+    if (h->version != 2 && h->version != 3 &&
+        h->version != 4 && h->version != 5) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
@@ -1100,10 +1103,13 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     g_handoff.cbuf_size          = hoff->cbuf_size;
 
     /* v4 extension. Safe to read unconditionally — on v2/v3 the
-     * helper leaves the field zero (struct is always 200 bytes on
-     * disk per the static_assert). launch_kernel falls back to
+     * helper leaves the field zero. launch_kernel falls back to
      * GA10B_SMOKETEST_SEM_PAYLOAD when expected_payload is zero. */
     g_handoff.expected_payload   = hoff->expected_payload;
+
+    /* v5 extension: pipeline pointer + count. Zero on v2/v3/v4. */
+    g_handoff.pipeline_n_ops     = hoff->pipeline_n_ops;
+    g_handoff.pipeline_ops_phys  = hoff->pipeline_ops_phys;
 
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
@@ -1562,6 +1568,57 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
         b->last_error_phase = 8;
         return -1;
     }
+
+    /* v5 multi-op pipeline path. When pipeline_n_ops > 0, the handoff
+     * carries an array of struct ga10b_pipeline_op describing N
+     * dispatches to run in sequence. Used by model-inference helpers
+     * (MNIST and beyond) where each op's output is the next op's
+     * input. */
+    if (g_handoff.version >= 5 && g_handoff.pipeline_n_ops > 0) {
+        if (g_handoff.pipeline_ops_phys == 0) {
+            uart_puts("[GA10B-P8] pipeline_n_ops > 0 but pipeline_ops_phys "
+                      "is zero\n");
+            b->last_error_phase = 8;
+            return -1;
+        }
+        const struct ga10b_pipeline_op *ops =
+            (const struct ga10b_pipeline_op *)
+                (uintptr_t)g_handoff.pipeline_ops_phys;
+        uart_printf("[GA10B-P8] pipeline mode — %lu ops, "
+                    "ops_phys=0x%lx\n",
+                    (unsigned long)g_handoff.pipeline_n_ops,
+                    (unsigned long)g_handoff.pipeline_ops_phys);
+        for (uint32_t i = 0; i < g_handoff.pipeline_n_ops; i++) {
+            const struct ga10b_pipeline_op *op = &ops[i];
+            uint32_t expected = (op->expected_payload != 0u)
+                                 ? op->expected_payload
+                                 : GA10B_SMOKETEST_SEM_PAYLOAD;
+            uart_printf("[GA10B-P8]   op[%lu/%lu] qmd=0x%lx out=0x%lx "
+                        "expected=0x%lx\n",
+                        (unsigned long)(i + 1),
+                        (unsigned long)g_handoff.pipeline_n_ops,
+                        (unsigned long)op->qmd_gpu_va,
+                        (unsigned long)op->output_phys,
+                        (unsigned long)expected);
+            uint32_t pb_buf[GA10B_LAUNCH_KERNEL_PB_DWORDS];
+            uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
+                pb_buf, op->qmd_gpu_va);
+            int rc = ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                           op->output_phys, expected,
+                                           8, "GA10B-P8");
+            if (rc < 0) {
+                uart_printf("[GA10B-P8] pipeline op %lu failed (rc=%d) "
+                            "— aborting chain\n",
+                            (unsigned long)(i + 1), rc);
+                return rc;
+            }
+        }
+        uart_printf("[GA10B-P8] pipeline complete — %lu ops fired\n",
+                    (unsigned long)g_handoff.pipeline_n_ops);
+        return 0;
+    }
+
+    /* Single-shot path (v3/v4). */
     if (g_handoff.qmd_gpu_va == 0 || g_handoff.output_phys == 0) {
         uart_puts("[GA10B-P8] handoff missing qmd_gpu_va/output_phys\n");
         b->last_error_phase = 8;

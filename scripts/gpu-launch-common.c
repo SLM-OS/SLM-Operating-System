@@ -536,22 +536,35 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
         exit(1);
     }
 
-    /* Copy pushbuffer into the mapped ring region. */
+    /* Copy pushbuffer into the mapped ring region.
+     *
+     * Single-page pb buffer is reused across submits — fine because
+     * the polling loop below ensures the prior dispatch finished
+     * before we overwrite. */
     uint32_t *pb32 = (uint32_t *)ctx->pb_va;
     memcpy(pb32, pb_buf, pb_dwords * sizeof(uint32_t));
     msync(ctx->pb_va, pb_dwords * 4, MS_SYNC);
 
-    /* GPFIFO entry 0 -> pushbuffer. */
+    /* Multi-submit support: read current GP_PUT, post the new
+     * GPFIFO entry to slot `cur & mask`, advance GP_PUT to
+     * `cur + 1`. The first call sees GP_PUT=0 and writes slot 0;
+     * each subsequent call advances to the next slot. */
+    volatile uint32_t *userd = (volatile uint32_t *)ctx->userd_va;
+    uint32_t cur_gp_put = userd[GPU_LAUNCH_USERD_GP_PUT_WORD];
+    uint32_t mask = ctx->gpfifo_entries
+                   ? (ctx->gpfifo_entries - 1) : 1023u;
+    uint32_t slot = cur_gp_put & mask;
+
     uint64_t pb_gva = ctx->pb_gva;
     uint32_t gp_e0 = (uint32_t)(pb_gva & 0xFFFFFFFCu);
     uint32_t gp_e1 = (uint32_t)((pb_gva >> 32) & 0xFFu) |
                      ((uint32_t)pb_dwords << 10);
-    ((uint32_t *)ctx->gpfifo_va)[0] = gp_e0;
-    ((uint32_t *)ctx->gpfifo_va)[1] = gp_e1;
-    msync(ctx->gpfifo_va, 8, MS_SYNC);
+    ((uint32_t *)ctx->gpfifo_va)[slot * 2 + 0] = gp_e0;
+    ((uint32_t *)ctx->gpfifo_va)[slot * 2 + 1] = gp_e1;
+    msync(ctx->gpfifo_va, ctx->gpfifo_entries * 8, MS_SYNC);
 
-    /* GP_PUT = 1. */
-    ((uint32_t *)ctx->userd_va)[GPU_LAUNCH_USERD_GP_PUT_WORD] = 1;
+    uint32_t new_gp_put = cur_gp_put + 1;
+    userd[GPU_LAUNCH_USERD_GP_PUT_WORD] = new_gp_put;
     msync(ctx->userd_va, 4096, MS_SYNC);
 
     /* Doorbell at ctrl-fd mmap + 0x90. */
@@ -663,6 +676,72 @@ uint64_t gpu_write_handoff_v4(const struct gpu_launch_ctx *ctx,
         .cbuf_size          = GPU_LAUNCH_CBUF_SIZE_B,
         /* v4 extension: expected payload for generic launch_kernel. */
         .expected_payload   = expected_payload,
+    };
+    memcpy(handoff_va, &hoff, sizeof(hoff));
+    msync(handoff_va, 4096, MS_SYNC);
+
+    return handoff_phys;
+}
+
+uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
+                               void *handoff_va,
+                               uint64_t output_phys,
+                               uint64_t output_gpu_va,
+                               uint32_t expected_payload,
+                               uint32_t pipeline_n_ops,
+                               uint64_t pipeline_ops_phys)
+{
+    /* Same single-page invariant as v4. */
+    memset(handoff_va, 0, 4096);
+    uint64_t handoff_phys = gpu_virt_to_phys(handoff_va);
+
+    uint64_t userd_phys  = gpu_virt_to_phys(ctx->userd_va);
+    uint64_t gpfifo_phys = gpu_virt_to_phys(ctx->gpfifo_va);
+    uint64_t pb_phys     = gpu_virt_to_phys(ctx->pb_va);
+    uint64_t shader_phys = gpu_virt_to_phys(ctx->shader_va);
+    uint64_t cbuf_phys   = gpu_virt_to_phys(ctx->cbuf_va);
+    uint64_t qmd_phys    = gpu_virt_to_phys(ctx->qmd_va);
+
+    struct ga10b_channel_handoff hoff = {
+        .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
+        .version            = 5,
+        .channel_id         = 0,
+        .tsg_id             = 0,
+        .userd_phys         = userd_phys,
+        .userd_gp_put_offset = GPU_LAUNCH_USERD_GP_PUT_WORD * 4u,
+        .userd_gp_get_offset = GPU_LAUNCH_USERD_GP_GET_WORD * 4u,
+        .gpfifo_phys        = gpfifo_phys,
+        .gpfifo_gpu_va      = ctx->gpfifo_gpu_va,
+        .gpfifo_entries     = ctx->gpfifo_entries,
+        .gpfifo_entry_size  = 8,
+        .pushbuf_phys       = pb_phys,
+        .pushbuf_gpu_va     = ctx->pb_gva,
+        .pushbuf_size       = 65536,
+        .semaphore_phys     = output_phys,
+        .semaphore_gpu_va   = output_gpu_va,
+        .inst_block_phys    = 0,
+        .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
+                                [GPU_LAUNCH_USERD_GP_PUT_WORD],
+        .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
+                                [GPU_LAUNCH_USERD_GP_GET_WORD],
+        .work_submit_token  = ctx->work_submit_token,
+        /* v3 fields point at the FIRST op's resources (so v3-only
+         * readers get something sensible) but the pipeline path
+         * doesn't use them. */
+        .shader_phys        = shader_phys,
+        .shader_gpu_va      = ctx->shader_gva,
+        .cbuf_phys          = cbuf_phys,
+        .cbuf_gpu_va        = ctx->cbuf_gva,
+        .qmd_phys           = qmd_phys,
+        .qmd_gpu_va         = ctx->qmd_gva,
+        .output_phys        = output_phys,
+        .output_gpu_va      = output_gpu_va,
+        .shader_size        = (uint32_t)ctx->shader_size_bytes,
+        .cbuf_size          = GPU_LAUNCH_CBUF_SIZE_B,
+        .expected_payload   = expected_payload,
+        /* v5 extension. */
+        .pipeline_n_ops     = pipeline_n_ops,
+        .pipeline_ops_phys  = pipeline_ops_phys,
     };
     memcpy(handoff_va, &hoff, sizeof(hoff));
     msync(handoff_va, 4096, MS_SYNC);

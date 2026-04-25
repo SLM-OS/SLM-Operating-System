@@ -341,4 +341,26 @@ uint64_t gpu_write_handoff_v4(const struct gpu_launch_ctx *ctx,
                                uint64_t output_gpu_va,
                                uint32_t expected_payload);
 
+/* Serialize a v5 channel handoff (pipeline of N ops). v5 extends v4
+ * with `pipeline_n_ops` + `pipeline_ops_phys`. SLM-OS dispatches the
+ * N ops in sequence, polling each op's `output_phys` for its
+ * `expected_payload` before advancing to the next.
+ *
+ * Memory contract: `pipeline_ops` is an array of N
+ * `struct ga10b_pipeline_op` (24 bytes each) sitting on its own
+ * DRAM page. The launcher allocates that page via nvmap (so SLM-OS
+ * can read it post-kexec) and passes the page's physical address.
+ *
+ * `output_phys` / `output_gpu_va` of the v4-compat fields point at
+ * the LAST op's output (SLM-OS's pre-pipeline single-shot path is
+ * never taken when `pipeline_n_ops > 0`, but populating them keeps
+ * the validator's non-zero requirement happy). */
+uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
+                               void *handoff_va,
+                               uint64_t output_phys,
+                               uint64_t output_gpu_va,
+                               uint32_t expected_payload,
+                               uint32_t pipeline_n_ops,
+                               uint64_t pipeline_ops_phys);
+
 #endif /* GPU_LAUNCH_COMMON_H */
