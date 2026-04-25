@@ -66,6 +66,10 @@ int bcm_mailbox_get_board_mac(uint8_t mac[6]);
  * `psci_system_reset()` to perform a tryboot-armed reboot. See
  * `docs/dynamic-kernel-replace-plan.md` Risk 2 for the trace from
  * `reboot "0 tryboot"` to this tag.
+ *
+ * Not reentrant — shares the file-static 32-byte property buffer
+ * with `bcm_mailbox_get_board_mac` and `bcm_mailbox_notify_reboot`.
+ * Call from a single task context, never from an IRQ.
  */
 int bcm_mailbox_set_reboot_flags(uint32_t flags);
 
@@ -76,6 +80,10 @@ int bcm_mailbox_set_reboot_flags(uint32_t flags);
  *
  * Returns 0 on success, MBOX_E_GENERIC on transport / protocol
  * failure.
+ *
+ * Not reentrant — shares the file-static 32-byte property buffer
+ * with `bcm_mailbox_get_board_mac` and `bcm_mailbox_set_reboot_flags`.
+ * Call from a single task context, never from an IRQ.
  */
 int bcm_mailbox_notify_reboot(void);
 

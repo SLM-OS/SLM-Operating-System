@@ -90,10 +90,17 @@
 
 /* MBOX_E_GENERIC / MBOX_E_TAG_UNSUPPORTED come from bcm_mailbox.h. */
 
-/* Fixed buffer size for the one tag we handle. 16-byte aligned so
- * the upper-28-bit bus-address encoding is clean. */
+/* Fixed buffer size shared across every tag we send. 16-byte
+ * aligned so the upper-28-bit bus-address encoding is clean. */
 #define PROP_BUF_WORDS          8
 #define PROP_BUF_BYTES          (PROP_BUF_WORDS * 4)
+
+/* Compile-time check that this driver and the proto header agree
+ * on buffer size. If someone shrinks `prop_buf` without revisiting
+ * the helpers in bcm_mailbox_proto.h, the build fails here instead
+ * of VideoCore silently rejecting a malformed buffer at runtime. */
+_Static_assert(BCM_PROP_BUF_WORDS == PROP_BUF_WORDS,
+               "bcm_mailbox_proto.h and bcm_mailbox.c disagree on buffer size");
 
 /* Property buffer.
  *
@@ -313,13 +320,6 @@ int bcm_mailbox_get_board_mac(uint8_t mac[6])
 
 int bcm_mailbox_set_reboot_flags(uint32_t flags)
 {
-    /* Static asserts both ends agree on buffer size. If someone shrinks
-     * the file-static `prop_buf` without revisiting these helpers, the
-     * mismatch is caught at compile time, not by VC silently rejecting
-     * a malformed buffer. */
-    _Static_assert(BCM_PROP_BUF_WORDS == PROP_BUF_WORDS,
-                   "bcm_mailbox_proto.h and bcm_mailbox.c disagree on buffer size");
-
     bcm_mailbox_build_set_reboot_flags(prop_buf, flags);
 
     int rc = mbox_property_call();

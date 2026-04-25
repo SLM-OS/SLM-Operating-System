@@ -52,14 +52,19 @@ static void test_set_reboot_flags_layout_with_flag_zero(void)
 
     bcm_mailbox_build_set_reboot_flags(buf, 0u);
 
-    /* Same layout, just `flags` payload differs. The "clear flags"
-     * case is a real call site (`kernel rollback` clears the tryboot
-     * flag if it was set) so cover it explicitly. */
-    TEST_ASSERT_EQUAL_HEX32(32u,                      buf[0]);
-    TEST_ASSERT_EQUAL_HEX32(BCM_TAG_SET_REBOOT_FLAGS, buf[2]);
-    TEST_ASSERT_EQUAL_HEX32(4u,                       buf[3]);
-    TEST_ASSERT_EQUAL_HEX32(0u,                       buf[5]);
-    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,         buf[6]);
+    /* Same layout as the flag-set case, just `flags` payload differs.
+     * Check every word — `kernel rollback` clears the tryboot flag if
+     * it was set, so this is a real call site, and a regression that
+     * accidentally splits the helper into two code paths needs to
+     * fail loudly. */
+    TEST_ASSERT_EQUAL_HEX32(32u,                       buf[0]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_REQUEST,          buf[1]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_TAG_SET_REBOOT_FLAGS,  buf[2]);
+    TEST_ASSERT_EQUAL_HEX32(4u,                        buf[3]);
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[4]);
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[5]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,          buf[6]);
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[7]);
 }
 
 static void test_set_reboot_flags_preserves_high_bits(void)
