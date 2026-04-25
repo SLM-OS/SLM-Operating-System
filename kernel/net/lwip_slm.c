@@ -137,15 +137,15 @@ static void net_sync_link_state(void) {
             !dhcp_supplied_address(&slm_netif)) {
             /*
              * Mid-discovery link drop: stop lwIP's DHCP state machine
-             * and re-arm the timeout window from the drop point. When
-             * the link comes back, net_start_dhcp_client() restarts
-             * DHCP with a fresh deadline instead of immediately
-             * tripping the old timeout.
+             * and pause the fallback timer entirely while carrier is
+             * down. When the link comes back, net_start_dhcp_client()
+             * restarts DHCP with a fresh deadline instead of letting
+             * the old timeout expire during the outage.
              */
             dhcp_stop(&slm_netif);
             dhcp_started = false;
-            dhcp_start_time = sys_now();
-            dhcp_timeout_armed = true;
+            dhcp_start_time = 0;
+            dhcp_timeout_armed = false;
             INFO("DHCP paused waiting for link restore");
         }
         netif_set_link_down(&slm_netif);

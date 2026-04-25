@@ -1093,8 +1093,9 @@ static void test_net_dhcp_start_failure_clears_pending_state(void)
 }
 
 /*
- * Test: a transient link drop during DHCP discovery resets the timeout
- * window so reconnect does not immediately force a false fallback.
+ * Test: a transient link drop during DHCP discovery pauses the timeout
+ * while carrier is down, then restarts with a fresh budget on
+ * reconnect.
  */
 static void test_net_dhcp_link_drop_restarts_timeout(void)
 {
@@ -1119,6 +1120,7 @@ static void test_net_dhcp_link_drop_restarts_timeout(void)
     link_test_set(false);
     net_poll();
     sleep_ms(30);
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
 
     link_test_set(true);
     net_poll();
