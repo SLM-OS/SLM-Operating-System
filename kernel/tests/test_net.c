@@ -601,6 +601,7 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 
 #include "net_driver.h"
 #include "arch/sys_arch.h"  /* sys_now() for DHCP timeout polling */
+extern void net_test_force_boot_deferred_dhcp(void);
 #if defined(PLATFORM_QEMU_VIRT)
 #include "../include/virtio_net.h"  /* virtio_net_get_irq_count (ARM64 MMIO) */
 #include "../include/virtio.h"      /* VIRTIO_DEVICE_IRQ */
@@ -973,6 +974,44 @@ static void test_net_dhcp_fallback_while_link_down(void)
     TEST_ASSERT_FALSE(info.dhcp_enabled);
     TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
 
+    link_test_restore();
+    net_poll();
+    net_set_dhcp_timeout_ms(saved_timeout);
+}
+
+/*
+ * Test: boot-time deferred DHCP does not consume its fallback budget
+ * before the client actually starts.
+ */
+static void test_net_boot_deferred_dhcp_waits_for_real_start(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    uint32_t saved_timeout = net_get_dhcp_timeout_ms();
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
+
+    link_test_install(false);
+    net_poll();
+
+    net_set_dhcp_timeout_ms(0);
+    net_test_force_boot_deferred_dhcp();
+    TEST_ASSERT_EQUAL_INT(0, net_dhcp_check_timeout());
+
+    struct net_info info;
+    TEST_ASSERT_EQUAL_INT(0, net_get_info(&info));
+    TEST_ASSERT_EQUAL_INT(NET_DHCP_PENDING, info.dhcp_status);
+    TEST_ASSERT_TRUE(info.dhcp_enabled);
+    TEST_ASSERT_EQUAL_HEX32(net_ip4_addr(10, 0, 2, 15), info.ip_addr);
+
+    TEST_ASSERT_EQUAL_INT(0, net_set_static_ip(net_ip4_addr(10, 0, 2, 15),
+                                               net_ip4_addr(255, 255, 255, 0),
+                                               net_ip4_addr(10, 0, 2, 2)));
     link_test_restore();
     net_poll();
     net_set_dhcp_timeout_ms(saved_timeout);
@@ -1587,6 +1626,7 @@ int test_suite_net(void)
     RUN_TEST(test_net_dhcp_bind_notification);
     RUN_TEST(test_net_dhcp_fallback);
     RUN_TEST(test_net_dhcp_fallback_while_link_down);
+    RUN_TEST(test_net_boot_deferred_dhcp_waits_for_real_start);
     RUN_TEST(test_net_dhcp_link_drop_restarts_timeout);
     RUN_TEST(test_net_driver_tx);
     RUN_TEST(test_net_driver_has_tx_reap);

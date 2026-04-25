@@ -55,12 +55,11 @@ static bool last_was_bound = false;
 
 /* Auto-DHCP state (issue #197).
  *
- * Set to the sys_now() timestamp when dhcp_start() is called at boot.
- * net_get_info() uses this to report NET_DHCP_PENDING vs BOUND.
- * When the elapsed time exceeds NET_DHCP_TIMEOUT_MS without a bind,
- * net_poll() stops DHCP, restores the static IP, and flips status to
- * NET_DHCP_FAILED so the system has a working IP even if no DHCP
- * server answered.
+ * `dhcp_start_time` is only meaningful while `dhcp_timeout_armed`
+ * is true. Boot-time auto-DHCP can be deferred until link-ready;
+ * that path intentionally leaves the timeout disarmed until the DHCP
+ * client actually starts so slow USB bring-up does not consume the
+ * entire fallback budget before the first DISCOVER is sent.
  */
 #ifndef NET_DHCP_TIMEOUT_DEFAULT_MS
 #define NET_DHCP_TIMEOUT_DEFAULT_MS  10000
@@ -70,6 +69,7 @@ static bool last_was_bound = false;
  * to touch this. */
 static uint32_t dhcp_timeout_ms = NET_DHCP_TIMEOUT_DEFAULT_MS;
 static uint32_t dhcp_start_time;
+static bool     dhcp_timeout_armed;
 static bool     dhcp_fallback_done;
 static uint32_t static_ip_fallback;
 static uint32_t static_nm_fallback;
@@ -91,6 +91,7 @@ static int net_start_dhcp_client(const char *reason) {
     dhcp_requested = true;
     dhcp_started = true;
     dhcp_start_time = sys_now();
+    dhcp_timeout_armed = true;
     dhcp_fallback_done = false;
     last_was_bound = false;  /* #201: announce on next BOUND */
     if (reason != NULL) {
@@ -129,6 +130,7 @@ static void net_sync_link_state(void) {
             dhcp_stop(&slm_netif);
             dhcp_started = false;
             dhcp_start_time = sys_now();
+            dhcp_timeout_armed = true;
             INFO("DHCP paused waiting for link restore");
         }
         netif_set_link_down(&slm_netif);
@@ -147,6 +149,14 @@ uint32_t net_get_dhcp_timeout_ms(void) {
     return dhcp_timeout_ms;
 }
 
+void net_test_force_boot_deferred_dhcp(void) {
+    dhcp_requested = true;
+    dhcp_started = false;
+    dhcp_timeout_armed = false;
+    dhcp_fallback_done = false;
+    dhcp_start_time = 0;
+}
+
 /*
  * Check whether DHCP has exceeded its bind timeout and fall back to
  * the static IP if so. Called from net_poll() once per poll; also
@@ -155,7 +165,7 @@ uint32_t net_get_dhcp_timeout_ms(void) {
  * fallback fired, 0 if no action was taken.
  */
 int net_dhcp_check_timeout(void) {
-    if (!dhcp_requested || dhcp_fallback_done)
+    if (!dhcp_requested || dhcp_fallback_done || !dhcp_timeout_armed)
         return 0;
     if (dhcp_supplied_address(&slm_netif))
         return 0;
@@ -169,6 +179,7 @@ int net_dhcp_check_timeout(void) {
         dhcp_stop(&slm_netif);
     dhcp_requested = false;
     dhcp_started = false;
+    dhcp_timeout_armed = false;
     dhcp_fallback_done = true;
     ip4_addr_t ip, nm, gw;
     ip.addr = static_ip_fallback;
@@ -439,13 +450,13 @@ int net_init(void) {
      * to the static IP configured above. */
 #if defined(NET_DHCP_AT_BOOT)
     dhcp_requested = true;
+    dhcp_timeout_armed = false;
     dhcp_fallback_done = false;
     if (net_link_is_up()) {
         if (net_start_dhcp_client("at boot") == NET_OK) {
             INFO("DHCP auto-start armed (timeout %u ms)", dhcp_timeout_ms);
         }
     } else {
-        dhcp_start_time = sys_now();
         INFO("DHCP auto-start deferred until link-ready (timeout %u ms)",
              dhcp_timeout_ms);
     }
@@ -614,6 +625,7 @@ int net_set_static_ip(uint32_t ip_addr, uint32_t netmask, uint32_t gateway) {
         dhcp_started = false;
     }
     dhcp_requested = false;
+    dhcp_timeout_armed = false;
     dhcp_fallback_done = false;
 
     /* Set static IP */
@@ -637,12 +649,14 @@ int net_enable_dhcp(void) {
     }
 
     dhcp_requested = true;
+    dhcp_timeout_armed = false;
     dhcp_fallback_done = false;
     if (net_link_is_up()) {
         return net_start_dhcp_client("manual request");
     }
 
     dhcp_start_time = sys_now();
+    dhcp_timeout_armed = true;
     INFO("DHCP request deferred until link-ready");
     return NET_OK;
 }

@@ -28,6 +28,7 @@
 #include "net_driver.h"
 #include "ncmem.h"
 #include "debug.h"
+#include "arch/sys_arch.h"
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -55,6 +56,13 @@
 
 /* 8-byte CDC notification header + 8-byte speed-change payload. */
 #define CDC_ECM_NOTIFY_BUF_SIZE         16
+
+/*
+ * Wait briefly for a real CDC notification before falling back to
+ * the historical "probed implies link-up" behaviour. Some adapters
+ * expose a notification endpoint but never emit link events.
+ */
+#define CDC_ECM_NOTIFY_SILENCE_TIMEOUT_DEFAULT_MS  2000
 
 /* Default MTU if the device omits / zero-fills wMaxSegmentSize. */
 #define CDC_ECM_DEFAULT_MTU             1514
@@ -155,6 +163,8 @@ static struct {
     const struct usb_endpoint *bulk_out;
     const struct usb_endpoint *notif_in;
     struct cdc_notify_slot     notif;
+    uint32_t          notif_wait_started_ms;
+    bool              notif_silence_fallback_logged;
     bool              link_ready;
     bool              link_signal_valid;
     uint32_t          upstream_bps;
@@ -179,6 +189,8 @@ static struct {
  * twice rely on that symmetry.
  */
 static bool cdc_logged_no_device;
+static uint32_t cdc_notify_silence_timeout_ms =
+    CDC_ECM_NOTIFY_SILENCE_TIMEOUT_DEFAULT_MS;
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
@@ -536,6 +548,11 @@ static int cdc_ecm_net_init(void)
         if (rc != NET_OK) {
             WARN("cdc_ecm: continuing without notification-driven link state");
             cdc.notif_in = NULL;
+            cdc.notif_wait_started_ms = 0;
+            cdc.notif_silence_fallback_logged = false;
+        } else {
+            cdc.notif_wait_started_ms = sys_now();
+            cdc.notif_silence_fallback_logged = false;
         }
     }
     return NET_OK;
@@ -671,8 +688,19 @@ static bool cdc_ecm_net_link_status(void)
      */
     if (cdc.notif_in == NULL)
         return true;
-    if (!__atomic_load_n(&cdc.link_signal_valid, __ATOMIC_ACQUIRE))
-        return false;
+    if (!__atomic_load_n(&cdc.link_signal_valid, __ATOMIC_ACQUIRE)) {
+        uint32_t started = cdc.notif_wait_started_ms;
+        if (started == 0)
+            return false;
+        if ((sys_now() - started) < cdc_notify_silence_timeout_ms)
+            return false;
+        if (!cdc.notif_silence_fallback_logged) {
+            WARN("cdc_ecm: no link notification after %u ms; falling back to probe-based link up",
+                 cdc_notify_silence_timeout_ms);
+            cdc.notif_silence_fallback_logged = true;
+        }
+        return true;
+    }
     return __atomic_load_n(&cdc.link_ready, __ATOMIC_ACQUIRE);
 }
 
@@ -825,6 +853,8 @@ int cdc_ecm_probe_and_register(void)
     cdc.bulk_in       = in;
     cdc.bulk_out      = out;
     cdc.notif_in      = notif;
+    cdc.notif_wait_started_ms = 0;
+    cdc.notif_silence_fallback_logged = false;
     cdc.link_ready    = false;
     cdc.link_signal_valid = false;
     cdc.upstream_bps  = 0;
@@ -887,6 +917,10 @@ void cdc_ecm_reset(void)
     __atomic_store_n(&cdc.probed, false, __ATOMIC_RELEASE);
     cdc_logged_no_device = false;
     cdc.notif_in = NULL;
+    cdc.notif_wait_started_ms = 0;
+    cdc.notif_silence_fallback_logged = false;
+    cdc_notify_silence_timeout_ms =
+        CDC_ECM_NOTIFY_SILENCE_TIMEOUT_DEFAULT_MS;
     __atomic_store_n(&cdc.link_signal_valid, false, __ATOMIC_RELAXED);
     __atomic_store_n(&cdc.link_ready, false, __ATOMIC_RELAXED);
 }
@@ -909,4 +943,14 @@ uint32_t cdc_ecm_get_rx_count(void)
 uint32_t cdc_ecm_get_tx_count(void)
 {
     return cdc.tx_completions;
+}
+
+void cdc_ecm_set_notify_silence_timeout_ms(uint32_t ms)
+{
+    cdc_notify_silence_timeout_ms = ms;
+}
+
+uint32_t cdc_ecm_get_notify_silence_timeout_ms(void)
+{
+    return cdc_notify_silence_timeout_ms;
 }

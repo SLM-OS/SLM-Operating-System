@@ -22,6 +22,10 @@
 #include "test_harness.h"
 #include <string.h>
 
+extern void sleep_ms(uint32_t ms);
+extern void cdc_ecm_set_notify_silence_timeout_ms(uint32_t ms);
+extern uint32_t cdc_ecm_get_notify_silence_timeout_ms(void);
+
 /* -------------------------------------------------------------------------- */
 /* Canned device blob                                                          */
 /* -------------------------------------------------------------------------- */
@@ -495,6 +499,22 @@ static void test_link_status_infers_up_from_speed_change(void)
         CDC_NOTIFY_CONNECTION_SPEED_CHANGE, 0, speed_payload, sizeof(speed_payload)));
     net_get_driver()->tx_reap();
     TEST_ASSERT_TRUE(net_get_driver()->link_status());
+}
+
+static void test_link_status_falls_back_after_silent_notification_timeout(void)
+{
+    uint32_t saved_timeout = cdc_ecm_get_notify_silence_timeout_ms();
+
+    reset_all();
+    TEST_ASSERT_EQUAL_INT(0, cdc_ecm_probe_and_register());
+    TEST_ASSERT_EQUAL_INT(0, net_get_driver()->init());
+    cdc_ecm_set_notify_silence_timeout_ms(10);
+
+    TEST_ASSERT_FALSE(net_get_driver()->link_status());
+    sleep_ms(20);
+    TEST_ASSERT_TRUE(net_get_driver()->link_status());
+
+    cdc_ecm_set_notify_silence_timeout_ms(saved_timeout);
 }
 
 static void test_link_status_falls_back_when_notification_endpoint_missing(void)
@@ -998,6 +1018,7 @@ int test_suite_cdc_ecm(void)
     RUN_TEST(test_net_init_queues_notification_urb);
     RUN_TEST(test_link_status_tracks_network_connection_notification);
     RUN_TEST(test_link_status_infers_up_from_speed_change);
+    RUN_TEST(test_link_status_falls_back_after_silent_notification_timeout);
     RUN_TEST(test_link_status_falls_back_when_notification_endpoint_missing);
     RUN_TEST(test_send_goes_to_bulk_out);
     RUN_TEST(test_send_busy_when_pool_full);
