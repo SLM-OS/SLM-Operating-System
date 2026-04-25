@@ -741,6 +741,31 @@ static void test_blob_stage_rejects_kind_mismatch(void)
     TEST_ASSERT_EQUAL_INT(-4, rust_eviction_blob_stage(2, blob, len));
 }
 
+static void test_blob_stage_rejects_invalid_payload_body(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_ASSERT_EQUAL_INT(-2, rust_eviction_blob_stage(2, (const uint8_t *)"x", 1));
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    static uint8_t xgb_blob[64];
+    static uint8_t mlp_blob[64];
+    static uint8_t cacheus_blob[64];
+    const uint8_t bad_payload[] = {0xAA, 0xBB, 0xCC, 0xDD};
+    size_t xgb_len = build_test_blob(1, bad_payload, sizeof(bad_payload), xgb_blob, sizeof(xgb_blob));
+    size_t mlp_len = build_test_blob(2, bad_payload, sizeof(bad_payload), mlp_blob, sizeof(mlp_blob));
+    size_t cacheus_len =
+        build_test_blob(3, bad_payload, sizeof(bad_payload), cacheus_blob, sizeof(cacheus_blob));
+
+    TEST_ASSERT_TRUE(xgb_len > 0);
+    TEST_ASSERT_TRUE(mlp_len > 0);
+    TEST_ASSERT_TRUE(cacheus_len > 0);
+
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(1, xgb_blob, xgb_len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, mlp_blob, mlp_len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, cacheus_blob, cacheus_len));
+}
+
 /* ============================================================================
  * M8: End-to-end workload stress — the alloc loop must not leak
  * blocks when eviction fires, and pool_stats accounts for every
@@ -941,6 +966,7 @@ int test_suite_eviction(void)
     RUN_TEST(test_blob_status_defaults_empty);
     RUN_TEST(test_blob_stage_activate_rollback_round_trip);
     RUN_TEST(test_blob_stage_rejects_kind_mismatch);
+    RUN_TEST(test_blob_stage_rejects_invalid_payload_body);
 
     /* M8: end-to-end workload + mid-flight policy swap stress. */
     RUN_TEST(test_memory_pressure_no_leak);

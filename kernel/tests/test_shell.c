@@ -2353,6 +2353,53 @@ static void test_shell_cmd_xput_incomplete_finish(void)
 }
 
 /*
+ * Test: xput state is scoped to the current shell session.
+ */
+static void test_shell_cmd_xput_isolated_per_session(void)
+{
+    struct task *t = task_current();
+    struct shell_session *orig = shell_session_current();
+    struct shell_session *a = shell_session_alloc();
+    struct shell_session *b = shell_session_alloc();
+    const char *path_a = "/mnt/files/xput_session_a.bin";
+    const char *path_b = "/mnt/files/xput_session_b.bin";
+    uint8_t buf[8];
+    uint8_t expect_a[] = {0xaa, 0xbb, 0xcc, 0xdd};
+    uint8_t expect_b[] = {0x11, 0x22, 0x33, 0x44};
+    int n;
+
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_NOT_NULL(b);
+
+    shell_session_bind(t, a);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("xput begin /mnt/files/xput_session_a.bin 4"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("xput chunk 0 aabb"));
+
+    shell_session_bind(t, b);
+    TEST_ASSERT_EQUAL_INT(-1, shell_execute("xput finish"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("xput begin /mnt/files/xput_session_b.bin 4"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("xput chunk 0 11223344"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("xput finish"));
+
+    shell_session_bind(t, a);
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("xput chunk 2 ccdd"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("xput finish"));
+
+    n = read_file_content(path_a, (char *)buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expect_a), n);
+    TEST_ASSERT_EQUAL_MEMORY(expect_a, buf, sizeof(expect_a));
+    n = read_file_content(path_b, (char *)buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expect_b), n);
+    TEST_ASSERT_EQUAL_MEMORY(expect_b, buf, sizeof(expect_b));
+
+    shell_execute("rm /mnt/files/xput_session_a.bin");
+    shell_execute("rm /mnt/files/xput_session_b.bin");
+    shell_session_bind(t, orig);
+    shell_session_free(a);
+    shell_session_free(b);
+}
+
+/*
  * Test: mkdir creates a directory.
  */
 static void test_shell_cmd_mkdir(void)
@@ -3213,6 +3260,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_xput_lifecycle);
     RUN_TEST(test_shell_cmd_xput_offset_mismatch);
     RUN_TEST(test_shell_cmd_xput_incomplete_finish);
+    RUN_TEST(test_shell_cmd_xput_isolated_per_session);
     RUN_TEST(test_shell_cmd_mkdir);
     RUN_TEST(test_shell_cmd_mkdir_no_args);
     RUN_TEST(test_shell_cmd_rm);

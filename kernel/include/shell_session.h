@@ -43,6 +43,14 @@ struct lua_State;
  * this header doesn't pull in telnet.h). */
 #define SHELL_TERM_TYPE_MAX 32
 
+struct shell_xput_session {
+    bool     active;
+    char     path[VFS_MAX_PATH];
+    uint32_t expected_size;
+    uint32_t received_size;
+    uint32_t checksum;
+};
+
 struct shell_session {
     uint32_t         id;                  /* 0 = console; 1..N = TCP */
     struct shell_io *io;                  /* input/output backend */
@@ -86,6 +94,11 @@ struct shell_session {
      * ^C at the prompt. Cleared by shell_clear_interrupt() once the
      * command has acted on it. */
     volatile bool     interrupt_requested;
+
+    /* Per-session framed upload state for `xput`. Scoped to the shell
+     * connection so concurrent operators cannot clobber each other's
+     * transfers. */
+    struct shell_xput_session xput;
 };
 
 /* Get the singleton console session (UART-backed). Always non-NULL

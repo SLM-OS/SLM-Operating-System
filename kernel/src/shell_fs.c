@@ -15,16 +15,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-struct xput_session {
-    int active;
-    char path[VFS_MAX_PATH];
-    uint32_t expected_size;
-    uint32_t received_size;
-    uint32_t checksum;
-};
-
-static struct xput_session g_xput_session;
-
 static uint32_t shell_checksum32_update(uint32_t checksum,
                                         const uint8_t *data,
                                         size_t len)
@@ -38,7 +28,13 @@ static uint32_t shell_checksum32_update(uint32_t checksum,
 
 static void xput_session_reset(void)
 {
-    memset(&g_xput_session, 0, sizeof(g_xput_session));
+    struct shell_session *session = shell_session_current();
+    memset(&session->xput, 0, sizeof(session->xput));
+}
+
+static struct shell_xput_session *xput_session_current(void)
+{
+    return &shell_session_current()->xput;
 }
 
 /*
@@ -578,6 +574,8 @@ int cmd_put(int argc, char *argv[])
  */
 int cmd_xput(int argc, char *argv[])
 {
+    struct shell_xput_session *xput = xput_session_current();
+
     if (argc < 2) {
         shell_puts("Usage: xput begin <path> <size>\r\n");
         shell_puts("       xput chunk <offset> <hex...>\r\n");
@@ -588,15 +586,15 @@ int cmd_xput(int argc, char *argv[])
     }
 
     if (strcmp(argv[1], "status") == 0) {
-        if (!g_xput_session.active) {
+        if (!xput->active) {
             shell_puts("XPUT inactive\r\n");
             return 0;
         }
         shell_printf("XPUT active path=%s size=%lu received=%lu checksum=%lu\r\n",
-                     g_xput_session.path,
-                     (unsigned long)g_xput_session.expected_size,
-                     (unsigned long)g_xput_session.received_size,
-                     (unsigned long)g_xput_session.checksum);
+                     xput->path,
+                     (unsigned long)xput->expected_size,
+                     (unsigned long)xput->received_size,
+                     (unsigned long)xput->checksum);
         return 0;
     }
 
@@ -638,15 +636,16 @@ int cmd_xput(int argc, char *argv[])
         littlefs_file_close(mnt, fd);
 
         xput_session_reset();
-        g_xput_session.active = 1;
-        strncpy(g_xput_session.path, resolved, sizeof(g_xput_session.path) - 1);
-        g_xput_session.path[sizeof(g_xput_session.path) - 1] = '\0';
-        g_xput_session.expected_size = size;
-        g_xput_session.received_size = 0;
-        g_xput_session.checksum = 0x811C9DC5u;
+        xput = xput_session_current();
+        xput->active = true;
+        strncpy(xput->path, resolved, sizeof(xput->path) - 1);
+        xput->path[sizeof(xput->path) - 1] = '\0';
+        xput->expected_size = size;
+        xput->received_size = 0;
+        xput->checksum = 0x811C9DC5u;
         shell_printf("XPUT ok begin path=%s size=%lu\r\n",
-                     g_xput_session.path,
-                     (unsigned long)g_xput_session.expected_size);
+                     xput->path,
+                     (unsigned long)xput->expected_size);
         return 0;
     }
 
@@ -663,7 +662,7 @@ int cmd_xput(int argc, char *argv[])
             shell_puts("Usage: xput chunk <offset> <hex...>\r\n");
             return -1;
         }
-        if (!g_xput_session.active) {
+        if (!xput->active) {
             shell_puts("xput chunk: no active session\r\n");
             return -1;
         }
@@ -671,9 +670,9 @@ int cmd_xput(int argc, char *argv[])
             shell_printf("xput chunk: invalid offset: %s\r\n", argv[2]);
             return -1;
         }
-        if (offset != g_xput_session.received_size) {
+        if (offset != xput->received_size) {
             shell_printf("xput chunk: offset mismatch expected=%lu got=%lu\r\n",
-                         (unsigned long)g_xput_session.received_size,
+                         (unsigned long)xput->received_size,
                          (unsigned long)offset);
             return -1;
         }
@@ -691,62 +690,62 @@ int cmd_xput(int argc, char *argv[])
             shell_puts("xput chunk: invalid hex digit\r\n");
             return -1;
         }
-        if ((uint64_t)g_xput_session.received_size + (uint32_t)bytes >
-            (uint64_t)g_xput_session.expected_size) {
+        if ((uint64_t)xput->received_size + (uint32_t)bytes >
+            (uint64_t)xput->expected_size) {
             shell_printf("xput chunk: exceeds declared size %lu\r\n",
-                         (unsigned long)g_xput_session.expected_size);
+                         (unsigned long)xput->expected_size);
             return -1;
         }
 
-        mnt = vfs_get_mount_ctx(g_xput_session.path, &subpath);
+        mnt = vfs_get_mount_ctx(xput->path, &subpath);
         if (!mnt) {
             shell_printf("xput chunk: %s: Not a mounted filesystem\r\n",
-                         g_xput_session.path);
+                         xput->path);
             return -1;
         }
         fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT);
         if (fd < 0) {
             shell_printf("xput chunk: %s: Failed to open file\r\n",
-                         g_xput_session.path);
+                         xput->path);
             return -1;
         }
         if (littlefs_file_seek(mnt, fd, (int32_t)offset, 0) < 0) {
             littlefs_file_close(mnt, fd);
-            shell_printf("xput chunk: %s: Seek failed\r\n", g_xput_session.path);
+            shell_printf("xput chunk: %s: Seek failed\r\n", xput->path);
             return -1;
         }
         written = littlefs_file_write(mnt, fd, data, (size_t)bytes);
         littlefs_file_close(mnt, fd);
         if (written != bytes) {
-            shell_printf("xput chunk: %s: Write failed\r\n", g_xput_session.path);
+            shell_printf("xput chunk: %s: Write failed\r\n", xput->path);
             return -1;
         }
 
-        g_xput_session.received_size += (uint32_t)bytes;
-        g_xput_session.checksum =
-            shell_checksum32_update(g_xput_session.checksum, data, (size_t)bytes);
+        xput->received_size += (uint32_t)bytes;
+        xput->checksum =
+            shell_checksum32_update(xput->checksum, data, (size_t)bytes);
         shell_printf("XPUT ok chunk offset=%lu next=%lu checksum=%lu\r\n",
                      (unsigned long)offset,
-                     (unsigned long)g_xput_session.received_size,
-                     (unsigned long)g_xput_session.checksum);
+                     (unsigned long)xput->received_size,
+                     (unsigned long)xput->checksum);
         return 0;
     }
 
     if (strcmp(argv[1], "finish") == 0) {
-        if (!g_xput_session.active) {
+        if (!xput->active) {
             shell_puts("xput finish: no active session\r\n");
             return -1;
         }
-        if (g_xput_session.received_size != g_xput_session.expected_size) {
+        if (xput->received_size != xput->expected_size) {
             shell_printf("xput finish: size mismatch expected=%lu received=%lu\r\n",
-                         (unsigned long)g_xput_session.expected_size,
-                         (unsigned long)g_xput_session.received_size);
+                         (unsigned long)xput->expected_size,
+                         (unsigned long)xput->received_size);
             return -1;
         }
         shell_printf("XPUT ok finish path=%s size=%lu checksum=%lu\r\n",
-                     g_xput_session.path,
-                     (unsigned long)g_xput_session.received_size,
-                     (unsigned long)g_xput_session.checksum);
+                     xput->path,
+                     (unsigned long)xput->received_size,
+                     (unsigned long)xput->checksum);
         xput_session_reset();
         return 0;
     }

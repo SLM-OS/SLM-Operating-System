@@ -102,7 +102,7 @@ def test_put_chunk_limits_respect_shell_line_budget():
 
 def test_put_upload_framed_resumes_and_finishes():
     responses = {
-        "xput status": [b"XPUT active path=/tmp/blob size=20 received=10\nslmos> "],
+        "xput status": [b"XPUT active path=/tmp/blob size=20 received=10 checksum=797261938\nslmos> "],
         "xput chunk 10 0a0b0c0d0e0f10111213": [b"XPUT ok next=20\nslmos> "],
         "xput finish": [b"XPUT complete path=/tmp/blob size=20\nslmos> "],
         "stat /tmp/blob": [b"  Size: 20 bytes\nslmos> "],
@@ -133,7 +133,40 @@ def test_put_upload_framed_resumes_and_finishes():
 
 def test_put_framed_resume_requires_exact_path_match():
     responses = {
-        "xput status": [b"XPUT active path=/tmp/blob.bak size=20 received=10\nslmos> "],
+        "xput status": [b"XPUT active path=/tmp/blob.bak size=20 received=10 checksum=797261938\nslmos> "],
+        "xput begin /tmp/blob 20": [b"XPUT begin path=/tmp/blob size=20\nslmos> "],
+        "xput chunk 0 000102030405060708090a0b0c0d0e0f10111213": [b"XPUT ok next=20\nslmos> "],
+        "xput finish": [b"XPUT complete path=/tmp/blob size=20\nslmos> "],
+        "stat /tmp/blob": [b"Size: 20 bytes\nslmos> "],
+    }
+    shell = FakeShell(responses)
+    args = argparse.Namespace(
+        debug=False,
+        remote_path="/tmp/blob",
+        transport="telnet",
+        no_resume=False,
+        no_verify_size=False,
+        chunk_bytes=64,
+        chunk_retries=2,
+        retry_delay=0.0,
+    )
+    data = bytes(range(20))
+
+    rc = slm_put.upload_framed(shell, args, data, len(data), "pi-5-2", lambda: shell)
+
+    assert rc == 0
+    assert shell.commands == [
+        "xput status",
+        "xput begin /tmp/blob 20",
+        "xput chunk 0 000102030405060708090a0b0c0d0e0f10111213",
+        "xput finish",
+        "stat /tmp/blob",
+    ]
+
+
+def test_put_framed_resume_requires_matching_prefix_checksum():
+    responses = {
+        "xput status": [b"XPUT active path=/tmp/blob size=20 received=10 checksum=12345\nslmos> "],
         "xput begin /tmp/blob 20": [b"XPUT begin path=/tmp/blob size=20\nslmos> "],
         "xput chunk 0 000102030405060708090a0b0c0d0e0f10111213": [b"XPUT ok next=20\nslmos> "],
         "xput finish": [b"XPUT complete path=/tmp/blob size=20\nslmos> "],
@@ -440,6 +473,7 @@ def main() -> int:
     runner.run("put_chunk_limits_respect_shell_line_budget", test_put_chunk_limits_respect_shell_line_budget)
     runner.run("put_upload_framed_resumes_and_finishes", test_put_upload_framed_resumes_and_finishes)
     runner.run("put_framed_resume_requires_exact_path_match", test_put_framed_resume_requires_exact_path_match)
+    runner.run("put_framed_resume_requires_matching_prefix_checksum", test_put_framed_resume_requires_matching_prefix_checksum)
     runner.run("put_main_auto_falls_back_to_legacy_when_xput_missing", test_put_main_auto_falls_back_to_legacy_when_xput_missing)
     runner.run("put_main_serial_labctl_does_not_resolve_network", test_put_main_serial_labctl_does_not_resolve_network)
     runner.run("put_legacy_no_resume_skips_truncate_for_absent_destination", test_put_legacy_no_resume_skips_truncate_for_absent_destination)

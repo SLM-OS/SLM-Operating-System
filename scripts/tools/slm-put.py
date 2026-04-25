@@ -515,11 +515,12 @@ def parse_xput_received(output: bytes) -> int | None:
     return status[2]
 
 
-def parse_xput_status(output: bytes) -> tuple[str, int, int] | None:
+def parse_xput_status(output: bytes) -> tuple[str, int, int, int] | None:
     text = output.decode("utf-8", errors="replace")
     path = None
     size = None
     received = None
+    checksum = None
     if "XPUT active" not in text:
         return None
     for token in text.replace("\r", " ").replace("\n", " ").split():
@@ -535,9 +536,39 @@ def parse_xput_status(output: bytes) -> tuple[str, int, int] | None:
                 received = int(token.split("=", 1)[1])
             except ValueError:
                 return None
-    if path is None or size is None or received is None:
+        elif token.startswith("checksum="):
+            raw = token.split("=", 1)[1]
+            try:
+                checksum = int(raw, 0)
+            except ValueError:
+                return None
+    if path is None or size is None or received is None or checksum is None:
         return None
-    return (path, size, received)
+    return (path, size, received, checksum)
+
+
+def fnv1a32(data: bytes) -> int:
+    checksum = 0x811C9DC5
+    for b in data:
+        checksum ^= b
+        checksum = (checksum * 0x01000193) & 0xFFFFFFFF
+    return checksum
+
+
+def can_resume_framed(status: tuple[str, int, int, int] | None,
+                      remote_path: str,
+                      total: int,
+                      data: bytes) -> tuple[bool, int]:
+    if status is None:
+        return (False, 0)
+    path, size, received, checksum = status
+    if path != remote_path or size != total:
+        return (False, 0)
+    if received < 0 or received > total:
+        return (False, 0)
+    if checksum != fnv1a32(data[:received]):
+        return (False, 0)
+    return (True, received)
 
 
 def parse_xput_next(output: bytes) -> int | None:
@@ -580,8 +611,8 @@ def upload_framed(shell: Shell, args: argparse.Namespace, data: bytes,
         status = shell.run_command("xput status")
         log_response(args.debug, "xput-status", status)
         status_info = parse_xput_status(status)
-        if status_info is not None and status_info[0] == args.remote_path and status_info[1] == total:
-            offset = status_info[2]
+        resume_ok, offset = can_resume_framed(status_info, args.remote_path, total, data)
+        if resume_ok:
             if offset > 0:
                 print(f"resuming framed upload at {offset}/{total} bytes", file=sys.stderr)
         else:
@@ -625,14 +656,17 @@ def upload_framed(shell: Shell, args: argparse.Namespace, data: bytes,
                 status = shell.run_command("xput status")
                 log_response(args.debug, "xput-status-recover", status)
                 status_info = parse_xput_status(status)
-                if status_info is None or status_info[0] != args.remote_path or status_info[1] != total:
+                resume_ok, remote_offset = can_resume_framed(
+                    status_info, args.remote_path, total, data
+                )
+                if not resume_ok:
                     out = xput_begin(shell, args, total)
                     if shell_command_failed(out):
                         print("xput begin failed during recovery", file=sys.stderr)
                         return 1
                     offset = 0
                 else:
-                    offset = status_info[2]
+                    offset = remote_offset
                 print(
                     f"recovered after chunk error; remote has {offset}/{total} bytes",
                     file=sys.stderr,

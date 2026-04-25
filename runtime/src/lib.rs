@@ -1413,6 +1413,21 @@ pub unsafe extern "C" fn rust_eviction_blob_stage(
         if parsed.header.kind != kind {
             return -4;
         }
+        let payload = parsed.payload.as_slice();
+        let payload_ok = match kind {
+            mm::eviction::BlobKind::XGBoost => {
+                mm::eviction::runtime_xgboost::parse_payload(payload).is_ok()
+            }
+            mm::eviction::BlobKind::Mlp => {
+                mm::eviction::runtime_mlp::parse_payload(payload).is_ok()
+            }
+            mm::eviction::BlobKind::CacheusConfig => {
+                mm::eviction::runtime_cacheus::parse_payload(payload).is_ok()
+            }
+        };
+        if !payload_ok {
+            return -3;
+        }
         match mm::eviction::stage_parsed(parsed) {
             Ok(_) => 0,
             Err(_) => -3,
