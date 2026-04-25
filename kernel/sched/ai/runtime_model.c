@@ -52,6 +52,12 @@ static struct sched_model_store sched_model_stores[SCHED_MODEL_STORE_COUNT] = {
         .rollback_idx = SCHED_MODEL_SLOT_ROLLBACK,
         .current_state = SCHED_MODEL_EMPTY,
     },
+    {
+        .staged_idx = SCHED_MODEL_SLOT_STAGED,
+        .active_idx = SCHED_MODEL_SLOT_ACTIVE,
+        .rollback_idx = SCHED_MODEL_SLOT_ROLLBACK,
+        .current_state = SCHED_MODEL_EMPTY,
+    },
 };
 static struct sched_model_slot stage_scratch_slot;
 
@@ -397,7 +403,8 @@ int sched_model_rollback(uint16_t kind_id)
         spin_unlock_irqrestore(&sched_model_lock, flags);
         return -1;
     }
-    if (sched_store_role_busy(store, store->staged_idx)) {
+    if (sched_store_role_busy(store, store->staged_idx)
+     || sched_store_role_busy(store, store->active_idx)) {
         spin_unlock_irqrestore(&sched_model_lock, flags);
         return -1;
     }
@@ -410,7 +417,6 @@ int sched_model_rollback(uint16_t kind_id)
     store->rollback_idx = old_active;
     store->staged_idx = old_staged;
     memset(&store->slots[store->staged_idx], 0, sizeof(store->slots[store->staged_idx]));
-    memset(&store->slots[store->rollback_idx], 0, sizeof(store->slots[store->rollback_idx]));
     store->current_state = SCHED_MODEL_ROLLED_BACK;
     spin_unlock_irqrestore(&sched_model_lock, flags);
     return 0;

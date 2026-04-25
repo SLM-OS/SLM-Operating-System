@@ -3421,6 +3421,80 @@ static void test_proactive_load_balance_runtime_config_aggressive(void)
     TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
     sched_set_policy(sched_find_policy("heuristic"));
 }
+
+static void test_sched_runtime_config_activation_sets_active_blob(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    struct sched_model_status status;
+    size_t payload_len = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
+                                                    payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                            payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_CONFIG, &status));
+    TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ACTIVE, status.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_active);
+    TEST_ASSERT_EQUAL_UINT32(0u, status.has_staged);
+    TEST_ASSERT_EQUAL_UINT32(0u, status.has_rollback);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)payload_len, status.active.payload_len);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+}
+
+static void test_sched_runtime_rollback_rejects_busy_active_slot(void)
+{
+    uint8_t payload_a[64];
+    uint8_t payload_b[64];
+    uint8_t blob_a[128];
+    uint8_t blob_b[128];
+    struct sched_model_status status;
+    const struct sched_runtime_balance_config *cfg = NULL;
+    sched_runtime_token_t token = 0;
+    size_t payload_len_a = build_sched_config_payload(0u, 2u, 2u, 3u, 2u,
+                                                      payload_a, sizeof(payload_a));
+    size_t payload_len_b = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
+                                                      payload_b, sizeof(payload_b));
+    size_t blob_len_a = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload_a,
+                                              payload_len_a, blob_a, sizeof(blob_a));
+    size_t blob_len_b = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload_b,
+                                              payload_len_b, blob_b, sizeof(blob_b));
+
+    TEST_ASSERT_TRUE(payload_len_a > 0);
+    TEST_ASSERT_TRUE(payload_len_b > 0);
+    TEST_ASSERT_TRUE(blob_len_a > 0);
+    TEST_ASSERT_TRUE(blob_len_b > 0);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob_a, blob_len_a));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob_b, blob_len_b));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_CONFIG));
+
+    TEST_ASSERT_EQUAL_INT(1, sched_runtime_balance_config_acquire(&cfg, &token));
+    TEST_ASSERT_NOT_NULL(cfg);
+    TEST_ASSERT_EQUAL_UINT32(1u, cfg->enabled);
+    TEST_ASSERT_NOT_EQUAL(0u, token);
+
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_rollback(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_CONFIG, &status));
+    TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ACTIVE, status.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_active);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_rollback);
+
+    sched_runtime_balance_config_release(token);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_rollback(SCHED_MODEL_KIND_CONFIG));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_CONFIG, &status));
+    TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ROLLED_BACK, status.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_active);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_CONFIG));
+}
 #endif
 
 /* Failing init policy: init() returns -1 */
@@ -4338,6 +4412,8 @@ int test_suite_scheduler(void)
 #ifdef CONFIG_AI_SCHEDULER
     RUN_TEST(test_proactive_load_balance_runtime_config_disable);
     RUN_TEST(test_proactive_load_balance_runtime_config_aggressive);
+    RUN_TEST(test_sched_runtime_config_activation_sets_active_blob);
+    RUN_TEST(test_sched_runtime_rollback_rejects_busy_active_slot);
 #endif
     RUN_TEST(test_policy_init_failure_keeps_old);
     RUN_TEST(test_policy_tick_callback_invoked);
