@@ -3151,6 +3151,7 @@ static const luaL_Reg slm_hailo_lib[] = {
  *                                      -2 = mock backend not embedded
  *                                      -3 = (w, h, bayer) don't match the
  *                                           backing frame's geometry
+ *                                      -4 = page allocation failed
  *                                      <0 from camera_preprocess_mnist for
  *                                          unsupported geometry
  *
@@ -3160,23 +3161,52 @@ static const luaL_Reg slm_hailo_lib[] = {
  * (e.g. 640x480) could grow a string-bytes overload.
  * ========================================================================== */
 
-/* Resolve the first argument of a camera method to a backend name.
- * Accepts a Lua string OR a handle table with a .name string field
- * (so cam:capture() works through Lua's a:b() == a.b(a) sugar). */
-static const char *l_camera_arg_name(lua_State *L, int idx) {
+/* Bound on every recognised backend name. Real names ("mock",
+ * "imx219-0", future "imx219-1") are short; cap at 31 chars + NUL. */
+#define LUA_CAMERA_NAME_MAX 32u
+
+/* Resolve the first argument of a camera method to a backend name and
+ * copy it into out_buf. Accepts a Lua string at idx OR a handle table
+ * whose .name field is a string (so cam:capture() works through Lua's
+ * a:b() == a.b(a) sugar). Copying — rather than returning a pointer
+ * into the Lua VM's string heap — keeps the result valid past any
+ * subsequent Lua API call without depending on the caller to leave the
+ * source string anchored on the stack. Returns 0 on success, -1 on
+ * any failure (wrong type, missing .name, name longer than the cap).
+ * out_buf is left zero-initialised on failure. */
+static int l_camera_arg_name(lua_State *L, int idx,
+                             char *out_buf, size_t out_n) {
+    if (out_n == 0u) return -1;
+    out_buf[0] = '\0';
+
+    const char *src = NULL;
+    size_t src_len  = 0;
+    int from_table  = 0;
+
     if (lua_type(L, idx) == LUA_TSTRING) {
-        return lua_tostring(L, idx);
-    }
-    if (lua_type(L, idx) == LUA_TTABLE) {
+        src = lua_tolstring(L, idx, &src_len);
+    } else if (lua_type(L, idx) == LUA_TTABLE) {
         lua_getfield(L, idx, "name");
         if (lua_type(L, -1) == LUA_TSTRING) {
-            const char *name = lua_tostring(L, -1);
+            src = lua_tolstring(L, -1, &src_len);
+            from_table = 1;
+        } else {
             lua_pop(L, 1);
-            return name;
+            return -1;
         }
-        lua_pop(L, 1);
+    } else {
+        return -1;
     }
-    return NULL;
+
+    int rc = 0;
+    if (!src || src_len + 1u > out_n) {
+        rc = -1;
+    } else {
+        __builtin_memcpy(out_buf, src, src_len);
+        out_buf[src_len] = '\0';
+    }
+    if (from_table) lua_pop(L, 1);
+    return rc;
 }
 
 static int l_camera_capture(lua_State *L);
@@ -3205,8 +3235,8 @@ static int l_camera_open(lua_State *L) {
 
 static int l_camera_capture(lua_State *L) {
     if (!L) return 0;
-    const char *name = l_camera_arg_name(L, 1);
-    if (!name) {
+    char name[LUA_CAMERA_NAME_MAX];
+    if (l_camera_arg_name(L, 1, name, sizeof(name)) != 0) {
         lua_pushnil(L);
         return 1;
     }
@@ -3225,8 +3255,10 @@ static int l_camera_capture(lua_State *L) {
 static int l_camera_close(lua_State *L) {
     if (!L) return 0;
     /* Mock backend has no per-handle state to release. Argument is
-     * accepted (string or handle table) but unused. */
-    (void)l_camera_arg_name(L, 1);
+     * accepted (string or handle table) but unused — call the resolver
+     * for its side effect of validating the input shape. */
+    char name[LUA_CAMERA_NAME_MAX];
+    (void)l_camera_arg_name(L, 1, name, sizeof(name));
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -3257,17 +3289,27 @@ static int l_camera_preprocess_mnist(lua_State *L) {
         return 2;
     }
 
-    /* 3,136 bytes on the shell-task stack — well within budget. */
-    uint8_t out[CAMERA_MNIST_OUT_BYTES];
+    /* 3,136 bytes is small but on the larger side for a kernel-task
+     * stack frame; mirror the PMM pattern in l_model_infer_bytes
+     * rather than burning ~20% of the shell-task stack. One page
+     * comfortably holds the 28*28*4 fp32 output. */
+    uint8_t *out = (uint8_t *)pmm_alloc_pages(1);
+    if (!out) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -4);
+        return 2;
+    }
     int rc = camera_preprocess_mnist(frame.data, frame.size,
                                      frame.width, frame.height, frame.bayer,
-                                     out, sizeof(out));
+                                     out, CAMERA_MNIST_OUT_BYTES);
     if (rc != 0) {
+        pmm_free_pages(out, 1);
         lua_pushnil(L);
         lua_pushinteger(L, rc);
         return 2;
     }
-    lua_pushlstring(L, (const char *)out, sizeof(out));
+    lua_pushlstring(L, (const char *)out, CAMERA_MNIST_OUT_BYTES);
+    pmm_free_pages(out, 1);
     return 1;
 }
 

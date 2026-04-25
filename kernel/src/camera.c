@@ -43,6 +43,17 @@ extern const uint8_t mock_camera_frame_end[]   __attribute__((weak));
 /* Half the RGGB grid is green: 44 * 44 / 2 = 968 samples per block. */
 #define MNIST_GREEN_PER_BLOCK ((MNIST_BLOCK * MNIST_BLOCK) / 2u)
 
+/* Geometry invariants. Pin them at compile time so a future tweak to
+ * MOCK_FRAME_W / MNIST_BLOCK can't silently break the algorithm in a
+ * way the tests would only catch as an opaque MD5 mismatch. */
+_Static_assert((MNIST_CROP_X_OFF & 1u) == 0u,
+    "Centred crop offset must be even to preserve RGGB Bayer phase");
+_Static_assert((MNIST_BLOCK & 1u) == 0u,
+    "Box-average block must be even so each row contains the same "
+    "number of green pixels");
+_Static_assert(MNIST_CROP == MOCK_FRAME_H,
+    "Centred crop assumes a square equal to the frame height");
+
 /*
  * Read the high 8 bits of pixel `pixel_index` from a RAW10 packed
  * buffer. In RAW10, 4 pixels live in 5 bytes: bytes 0..3 hold the
@@ -75,6 +86,14 @@ static inline uint32_t fp32_div_bits(uint32_t num, uint32_t den)
 
     /* mantissa_raw = (num * 2^32) / den, fits in u64 since num < den < 2^32. */
     uint64_t mantissa_raw = ((uint64_t)num << 32) / (uint64_t)den;
+    /* Guard against truncation-to-zero (num << 32 < den, e.g. callers
+     * passing tiny num with very large den). The normalising shift loop
+     * below would spin forever on mantissa_raw == 0. The current
+     * preprocess pipeline never hits this — its (num, den) is bounded
+     * by (246840, 246840) — but the helper is otherwise inviting an
+     * infinite loop on misuse. Round to zero, the IEEE 754 behaviour
+     * any new caller would expect. */
+    if (mantissa_raw == 0u) return 0u;
     /* (num << 32) / den == num/den * 2^32. The corresponding implicit-1
      * bit is at position 32 + (something). exp_unbiased = 23 - K where
      * K = 32 ⇒ -9 if mantissa_raw is already in [2^23, 2^24). */

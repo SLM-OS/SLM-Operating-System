@@ -981,6 +981,10 @@ if(MOCK_CAMERA_FRAME)
             "MOCK_CAMERA_FRAME_DIGIT does not exist: "
             "${MOCK_CAMERA_FRAME_DIGIT}")
     endif()
+    # The OBJECT_DEPENDS on camera_mock_embed.S below is what wires the
+    # generation into the build — CMake will fire this custom_command
+    # whenever the .bin output is missing or older than the digit
+    # fixture / the generator script.
     add_custom_command(
         OUTPUT  "${MOCK_CAMERA_FRAME_BIN}"
         COMMAND ${CMAKE_COMMAND} -E echo
@@ -993,8 +997,6 @@ if(MOCK_CAMERA_FRAME)
                 "${CMAKE_SOURCE_DIR}/scripts/generate-mock-camera-frame.py"
         VERBATIM
     )
-    add_custom_target(mock_camera_frame_gen
-        DEPENDS "${MOCK_CAMERA_FRAME_BIN}")
     target_sources(slmos.elf PRIVATE kernel/src/camera_mock_embed.S)
     set_source_files_properties(
         kernel/src/camera_mock_embed.S
