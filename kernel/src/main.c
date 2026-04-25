@@ -3,6 +3,7 @@
  */
 
 #include "platform.h"
+#include "build_info.h"
 #include "uart.h"
 #include "debug.h"
 #include "pmm.h"
@@ -36,6 +37,10 @@
 #endif
 #include <stdint.h>
 #include <stdbool.h>
+
+/* SLMOS_BUILD_STAMP is YYYYMMDDhhmmss UTC — fixed 14 chars, string-sortable. */
+static_assert(sizeof(SLMOS_BUILD_STAMP) - 1 == 14,
+              "SLMOS_BUILD_STAMP must be exactly 14 characters (YYYYMMDDhhmmss UTC)");
 
 /* External GPU drivers */
 extern const struct gpu_driver gpu_stub_driver;
@@ -219,7 +224,9 @@ void kernel_main(void *dtb)
     /* Banner */
     uart_puts("\n");
     uart_puts("========================================\n");
-    uart_puts("  SLM-OS v0.1.0\n");
+    uart_puts("  SLM-OS v" SLMOS_VERSION
+              " build " SLMOS_BUILD_STAMP
+              " (" SLMOS_BUILD_SHA ")\n");
     uart_puts("  Small Language Model Operating System\n");
     uart_puts("========================================\n\n");
 

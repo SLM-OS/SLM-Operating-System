@@ -500,11 +500,14 @@ end
 CS-496-SLM-Operating-System/
 ├── Makefile                 # Top-level build orchestration
 ├── CMakeLists.txt           # Kernel CMake configuration
+├── version.txt              # Single source of truth for SLMOS_VERSION
 ├── cmake/
-│   └── toolchain-aarch64-none-elf.cmake
+│   ├── toolchain-aarch64-none-elf.cmake
+│   └── gen_build_info.cmake # Generates build_info.h every build
 ├── kernel/
 │   ├── kernel.ld            # Linker script
 │   ├── include/             # Header files
+│   │   ├── build_info.h     # Generated: VERSION + UTC stamp + git SHA (gitignored)
 │   │   └── slm_ffi.h        # FFI declarations for Rust
 │   ├── src/                 # C and assembly sources
 │   │   └── slm_ffi.c        # FFI implementations

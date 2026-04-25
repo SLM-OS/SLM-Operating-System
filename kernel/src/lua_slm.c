@@ -6,6 +6,7 @@
  */
 
 #include "lua_slm.h"
+#include "build_info.h"
 #include "debug.h"
 #include "timer.h"
 #include "pmm.h"
@@ -39,9 +40,6 @@
 #include "../lib/lua/src/lua.h"
 #include "../lib/lua/src/lauxlib.h"
 #include "../lib/lua/src/lualib.h"
-
-/* Version string */
-#define SLM_VERSION "0.1.0"
 
 /* Router-side component slots reserved for Lua states. Native components use
  * 0..COMPONENT_MAX_COUNT-1; Lua states get a disjoint fixed pool above that.
@@ -233,7 +231,7 @@ static int l_yield(lua_State *L) {
  */
 static int l_version(lua_State *L) {
     if (!L) return 0;
-    lua_pushstring(L, "SLM-OS " SLM_VERSION);
+    lua_pushstring(L, "SLM-OS " SLMOS_VERSION);
     return 1;
 }
 
@@ -2473,6 +2471,16 @@ static const luaL_Reg slm_lib_admin[] = {
 static void lua_push_slm_library(lua_State *L, bool admin)
 {
     luaL_newlib(L, slm_lib_safe);
+
+    /* String constants from build_info.h. slm.VERSION stays string-shaped
+     * for legacy scripts; BUILD_STAMP and BUILD_SHA are new (#360). */
+    lua_pushstring(L, SLMOS_VERSION);
+    lua_setfield(L, -2, "VERSION");
+    lua_pushstring(L, SLMOS_BUILD_STAMP);
+    lua_setfield(L, -2, "BUILD_STAMP");
+    lua_pushstring(L, SLMOS_BUILD_SHA);
+    lua_setfield(L, -2, "BUILD_SHA");
+
     if (admin) {
         for (const luaL_Reg *r = slm_lib_admin; r->name; r++) {
             lua_pushcfunction(L, r->func);

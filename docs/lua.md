@@ -98,6 +98,19 @@ The `slm` module provides access to kernel functionality:
 | `slm.cpu_count()` | Get number of CPUs |
 | `slm.cpu_id()` | Get current CPU ID |
 
+The `slm` module also exposes three string constants sourced from
+`kernel/include/build_info.h` (regenerated on every build from
+`version.txt` + git state + UTC):
+
+| Constant | Description |
+|----------|-------------|
+| `slm.VERSION` | Semantic version (e.g. `"0.4.0"`). Same value as `slm.version()` minus the `"SLM-OS "` prefix. |
+| `slm.BUILD_STAMP` | UTC build timestamp, exactly 14 ASCII digits in `YYYYMMDDhhmmss` form (string-sortable). |
+| `slm.BUILD_SHA` | Short git SHA of the source tree at build time, with a `-dirty` suffix when the working tree had uncommitted changes. |
+
+The same triple is printed in the boot banner and is reflected by
+`cat /sys/version`.
+
 ### Component Management
 
 | Function | Description |

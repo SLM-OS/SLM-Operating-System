@@ -5,6 +5,7 @@
  */
 
 #include "vfs.h"
+#include "build_info.h"
 #include "pmm.h"
 #include "task.h"
 #include "sched.h"
@@ -184,7 +185,11 @@ static int read_sys_version(char *buf, size_t size, void *ctx)
 {
     (void)ctx;
 
-    return uart_snprintf(buf, size, "name: SLM-OS\nversion: 0.4.0\nphase: 4\n");
+    return uart_snprintf(buf, size,
+        "name:    SLM-OS\n"
+        "version: " SLMOS_VERSION "\n"
+        "build:   " SLMOS_BUILD_STAMP "\n"
+        "commit:  " SLMOS_BUILD_SHA "\n");
 }
 
 /*
