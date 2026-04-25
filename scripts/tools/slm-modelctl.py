@@ -29,6 +29,8 @@ WONT = 252
 SB = 250
 SE = 240
 TOOL_DIR = pathlib.Path(__file__).resolve().parent
+SHELL_MAX_LINE = 1024
+SHELL_LINE_HEADROOM = 16
 
 
 class TelnetShell:
@@ -189,6 +191,7 @@ class SerialShell:
 
 Shell = TelnetShell | SerialShell
 PROBE_REMOTE_PATH = "/mnt/files/slm-modelctl-probe.lua"
+HTTP_FETCH_REMOTE_PATH = "/mnt/files/slm-modelctl-http.lua"
 
 
 def add_common_args(p: argparse.ArgumentParser) -> None:
@@ -649,17 +652,60 @@ def fetch_blob(shell: Shell, args: argparse.Namespace, remote_path: str) -> None
         status_text = status.decode("utf-8", errors="replace")
         if (
             "DHCP(bound)" in status_text
-            or "DHCP(failed)" in status_text
             or "STATIC" in status_text
         ):
             break
+        if "DHCP(failed)" in status_text:
+            raise RuntimeError("network DHCP failed before HTTP fetch")
         if time.monotonic() >= deadline:
             raise RuntimeError("network did not become usable before HTTP fetch")
         time.sleep(0.5)
     command = f"http get {args.http_url} {remote_path}"
     if getattr(args, "sha256", None):
         command += f" {args.sha256}"
-    run_shell_command(shell, command, args.debug)
+    if len(command) + 1 + SHELL_LINE_HEADROOM <= SHELL_MAX_LINE:
+        run_shell_command(shell, command, args.debug)
+        return
+
+    def lua_quote(text: str) -> str:
+        return (
+            '"'
+            + text.replace("\\", "\\\\")
+                  .replace('"', '\\"')
+                  .replace("\n", "\\n")
+                  .replace("\r", "\\r")
+                  .replace("\t", "\\t")
+            + '"'
+        )
+
+    script = [
+        f"local r = slm.http_get({lua_quote(args.http_url)}, {lua_quote(remote_path)}, "
+        + (lua_quote(args.sha256) if getattr(args, "sha256", None) else "nil")
+        + ")",
+        "if r then",
+        "  print(string.format('HTTP_FETCH_OK %d', r.status or -1))",
+        "else",
+        "  print('HTTP_FETCH_FAIL')",
+        "end",
+    ]
+    ensure_parent_dir(shell, HTTP_FETCH_REMOTE_PATH, args.debug)
+    upload_bytes_via_shell(
+        shell,
+        HTTP_FETCH_REMOTE_PATH,
+        ("\n".join(script) + "\n").encode("utf-8"),
+        args.debug,
+        args.chunk_bytes,
+    )
+    try:
+        out = run_shell_command(shell, f"lua-admin {HTTP_FETCH_REMOTE_PATH}", args.debug)
+        text = out.decode("utf-8", errors="replace")
+        if "HTTP_FETCH_OK " not in text:
+            raise RuntimeError("HTTP fetch helper script did not report success")
+    finally:
+        try:
+            run_shell_command(shell, f"rm {HTTP_FETCH_REMOTE_PATH}", args.debug)
+        except Exception:
+            pass
 
 
 def read_initial(shell: Shell, debug: bool) -> None:

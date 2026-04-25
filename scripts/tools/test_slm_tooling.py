@@ -717,6 +717,96 @@ def test_modelctl_load_http_url_serial_initializes_network_first():
     ]
 
 
+def test_modelctl_http_url_uses_lua_helper_when_command_too_long():
+    long_url = "http://example.com/blob.bin?sig=" + ("a" * 1200)
+    shell = FakeShell(
+        {
+            "mkdir /mnt/files/policies": [b"Already exists\nslmos> "],
+            "mkdir /mnt/files": [b"Already exists\nslmos> "],
+            "net init": [b"Network already initialized\nslmos> "],
+            "ifconfig": [b"sl0: flags=UP,DHCP(bound)\nslmos> "],
+            f"put {slm_modelctl.HTTP_FETCH_REMOTE_PATH} ": [],
+            f"put -a {slm_modelctl.HTTP_FETCH_REMOTE_PATH} ": [],
+            f"lua-admin {slm_modelctl.HTTP_FETCH_REMOTE_PATH}": [b"HTTP_FETCH_OK 200\nslmos> "],
+            f"rm {slm_modelctl.HTTP_FETCH_REMOTE_PATH}": [b"ok\nslmos> "],
+            "eviction model load xgboost /mnt/files/policies/blob.bin": [b"loaded\nslmos> "],
+            "eviction model status": [b"xgboost: staged\nslmos> "],
+        }
+    )
+
+    def run_command(command: str) -> bytes:
+        shell.commands.append(command)
+        if command.startswith(f"put {slm_modelctl.HTTP_FETCH_REMOTE_PATH} "):
+            return b"ok\nslmos> "
+        if command.startswith(f"put -a {slm_modelctl.HTTP_FETCH_REMOTE_PATH} "):
+            return b"ok\nslmos> "
+        outputs = shell.responses.get(command)
+        assert outputs, f"unexpected command: {command}"
+        return outputs.pop(0)
+
+    shell.run_command = run_command  # type: ignore[assignment]
+
+    with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
+        with mock.patch.object(slm_modelctl, "run_upload", side_effect=AssertionError("should not upload when --http-url is used")):
+            with patched_argv(
+                slm_modelctl,
+                [
+                    "load",
+                    "--target",
+                    "pi-5-2",
+                    "--http-url",
+                    long_url,
+                    "eviction",
+                    "xgboost",
+                ],
+            ):
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    rc = slm_modelctl.main()
+
+    assert rc == 0
+    assert "xgboost: staged" in stdout.getvalue()
+    assert f"lua-admin {slm_modelctl.HTTP_FETCH_REMOTE_PATH}" in shell.commands
+    assert not any(cmd.startswith("http get ") for cmd in shell.commands)
+
+
+def test_modelctl_http_url_rejects_dhcp_failed_state():
+    shell = FakeShell(
+        {
+            "mkdir /mnt/files/custom": [b"ok\nslmos> "],
+            "net init": [b"Network initialized successfully\nslmos> "],
+            "ifconfig": [b"sl0: flags=UP,DHCP(failed)\nslmos> "],
+        }
+    )
+    args = [
+        "load",
+        "--target",
+        "pi-5-2",
+        "--transport",
+        "serial",
+        "--http-url",
+        "http://10.0.2.2/models/blob.bin",
+        "sched",
+        "mlp",
+        "/mnt/files/custom/blob.bin",
+    ]
+    with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
+        with mock.patch.object(slm_modelctl, "run_upload", side_effect=AssertionError("should not upload when --http-url is used")):
+            with patched_argv(slm_modelctl, args):
+                try:
+                    slm_modelctl.main()
+                except RuntimeError as e:
+                    assert "DHCP failed" in str(e)
+                else:
+                    assert False, "expected DHCP failure to raise"
+
+    assert shell.commands == [
+        "mkdir /mnt/files/custom",
+        "net init",
+        "ifconfig",
+    ]
+
+
 def test_modelctl_run_upload_uses_tool_dir_not_cwd():
     args = argparse.Namespace(
         protocol="auto",
@@ -767,6 +857,8 @@ def main() -> int:
     runner.run("modelctl_apply_probe_raw_invokes_probe_with_inferred_policy", test_modelctl_apply_probe_raw_invokes_probe_with_inferred_policy)
     runner.run("modelctl_apply_http_url_fetches_on_device", test_modelctl_apply_http_url_fetches_on_device)
     runner.run("modelctl_load_http_url_serial_initializes_network_first", test_modelctl_load_http_url_serial_initializes_network_first)
+    runner.run("modelctl_http_url_uses_lua_helper_when_command_too_long", test_modelctl_http_url_uses_lua_helper_when_command_too_long)
+    runner.run("modelctl_http_url_rejects_dhcp_failed_state", test_modelctl_http_url_rejects_dhcp_failed_state)
     runner.run("modelctl_run_upload_uses_tool_dir_not_cwd", test_modelctl_run_upload_uses_tool_dir_not_cwd)
     return runner.summary()
 

@@ -695,6 +695,8 @@ Implemented in this slice:
 - follow-up hardening in review fixes:
   - `slm-modelctl.py --http-url` now waits for DHCP/static network
     readiness before fetching
+  - long signed URLs in `slm-modelctl.py --http-url` now fall back to an
+    uploaded Lua helper instead of hitting the shell line-length limit
   - `slm.http_get(...)` now requires the caller to bring networking up
     first instead of racing asynchronous DHCP
 

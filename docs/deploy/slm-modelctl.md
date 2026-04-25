@@ -119,6 +119,9 @@ python3 scripts/tools/slm-modelctl.py \
   `http get` command; it avoids host-side upload entirely.
 - for shell-driven `--http-url` flows, `slm-modelctl.py` waits for the
   target network stack to become usable before issuing `http get`
+- if the generated `http get ...` shell line would exceed the shell
+  limit, `slm-modelctl.py` automatically uploads and runs a tiny Lua
+  helper instead so long signed URLs still work
 - With `--sha256`, the target computes the downloaded file's SHA-256
   before the final rename and rejects the fetch on mismatch.
 
