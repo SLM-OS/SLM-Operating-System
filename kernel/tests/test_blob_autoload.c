@@ -251,6 +251,40 @@ static size_t build_sched_config_payload(uint8_t *out, size_t out_cap)
 #undef WRITE_U32_LE
     return cursor;
 }
+static size_t build_sched_thresholds_payload(uint64_t critical_ns,
+                                             uint64_t high_ns,
+                                             uint64_t boost_ns,
+                                             uint8_t *out,
+                                             size_t out_cap)
+{
+    size_t cursor = 0;
+    if (out_cap < 36u) return 0;
+    memset(out, 0, 36u);
+    out[0] = 'S'; out[1] = 'T'; out[2] = 'H'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 1; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = (uint8_t)(AI_SCHED_N_ACTIONS & 0xFF);
+    out[11] = (uint8_t)(AI_SCHED_N_ACTIONS >> 8);
+    cursor = 12;
+#define WRITE_U64_LE(v) do {                               \
+    uint64_t value_ = (v);                                 \
+    out[cursor + 0] = (uint8_t)(value_ & 0xFF);            \
+    out[cursor + 1] = (uint8_t)((value_ >> 8) & 0xFF);     \
+    out[cursor + 2] = (uint8_t)((value_ >> 16) & 0xFF);    \
+    out[cursor + 3] = (uint8_t)((value_ >> 24) & 0xFF);    \
+    out[cursor + 4] = (uint8_t)((value_ >> 32) & 0xFF);    \
+    out[cursor + 5] = (uint8_t)((value_ >> 40) & 0xFF);    \
+    out[cursor + 6] = (uint8_t)((value_ >> 48) & 0xFF);    \
+    out[cursor + 7] = (uint8_t)((value_ >> 56) & 0xFF);    \
+    cursor += 8;                                           \
+} while (0)
+    WRITE_U64_LE(critical_ns);
+    WRITE_U64_LE(high_ns);
+    WRITE_U64_LE(boost_ns);
+#undef WRITE_U64_LE
+    return cursor;
+}
 #endif /* CONFIG_AI_SCHEDULER for sched helpers */
 
 static int write_binary_file(const char *path, const uint8_t *data, size_t len)
@@ -373,6 +407,32 @@ static void test_blob_autoload_set_get_clear_round_trip(void)
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("sched", "config", path, sizeof(path)));
     build_managed_path(managed_path, sizeof(managed_path), "sched", "config");
     TEST_ASSERT_EQUAL_STRING(managed_path, path);
+
+    {
+        uint8_t thresholds_payload[48];
+        uint8_t thresholds_blob[128];
+        size_t thresholds_payload_len =
+            build_sched_thresholds_payload(10u * 1000000u,
+                                          50u * 1000000u,
+                                          100u * 1000000u,
+                                          thresholds_payload,
+                                          sizeof(thresholds_payload));
+        size_t thresholds_blob_len =
+            build_outer_blob(SCHED_MODEL_KIND_THRESHOLDS,
+                             thresholds_payload,
+                             thresholds_payload_len,
+                             thresholds_blob,
+                             sizeof(thresholds_blob));
+
+        TEST_ASSERT_TRUE(thresholds_payload_len > 0);
+        TEST_ASSERT_TRUE(thresholds_blob_len > 0);
+        TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/sched.thresholds",
+                                                   thresholds_blob, thresholds_blob_len));
+    }
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "thresholds", "/mnt/files/sched.thresholds"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("sched", "thresholds", path, sizeof(path)));
+    build_managed_path(managed_path, sizeof(managed_path), "sched", "thresholds");
+    TEST_ASSERT_EQUAL_STRING(managed_path, path);
 #else
     TEST_ASSERT_NOT_EQUAL(0, blob_autoload_set("sched", "config", "/mnt/files/sched.cfg"));
 #endif
@@ -386,10 +446,12 @@ static void test_blob_boot_autoload_activates_runtime_blobs(void)
     uint8_t ev_payload[80];
 #ifdef CONFIG_AI_SCHEDULER
     uint8_t sched_payload[40];
+    uint8_t thresholds_payload[48];
 #endif
     uint8_t ev_blob[128];
 #ifdef CONFIG_AI_SCHEDULER
     uint8_t sched_blob[128];
+    uint8_t thresholds_blob[128];
 #endif
     size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
     size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
@@ -398,7 +460,17 @@ static void test_blob_boot_autoload_activates_runtime_blobs(void)
     size_t sched_payload_len = build_sched_config_payload(sched_payload, sizeof(sched_payload));
     size_t sched_blob_len = build_outer_blob(SCHED_MODEL_KIND_CONFIG, sched_payload, sched_payload_len,
                                              sched_blob, sizeof(sched_blob));
+    size_t thresholds_payload_len =
+        build_sched_thresholds_payload(10u * 1000000u,
+                                      50u * 1000000u,
+                                      100u * 1000000u,
+                                      thresholds_payload,
+                                      sizeof(thresholds_payload));
+    size_t thresholds_blob_len =
+        build_outer_blob(SCHED_MODEL_KIND_THRESHOLDS, thresholds_payload, thresholds_payload_len,
+                         thresholds_blob, sizeof(thresholds_blob));
     struct sched_model_status sched_status = {0};
+    struct sched_model_status thresholds_status = {0};
 #endif
 
     TEST_ASSERT_TRUE(ev_payload_len > 0);
@@ -406,19 +478,26 @@ static void test_blob_boot_autoload_activates_runtime_blobs(void)
 #ifdef CONFIG_AI_SCHEDULER
     TEST_ASSERT_TRUE(sched_payload_len > 0);
     TEST_ASSERT_TRUE(sched_blob_len > 0);
+    TEST_ASSERT_TRUE(thresholds_payload_len > 0);
+    TEST_ASSERT_TRUE(thresholds_blob_len > 0);
 #endif
     TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/autoload_xgb.blob", ev_blob, ev_blob_len));
 #ifdef CONFIG_AI_SCHEDULER
     TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/autoload_sched_cfg.blob", sched_blob, sched_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/autoload_sched_thresholds.blob",
+                                               thresholds_blob, thresholds_blob_len));
 #endif
 
     rust_eviction_blob_clear(1);
 #ifdef CONFIG_AI_SCHEDULER
     sched_model_clear(SCHED_MODEL_KIND_CONFIG);
+    sched_model_clear(SCHED_MODEL_KIND_THRESHOLDS);
 #endif
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/autoload_xgb.blob"));
 #ifdef CONFIG_AI_SCHEDULER
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "config", "/mnt/files/autoload_sched_cfg.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "thresholds",
+                                               "/mnt/files/autoload_sched_thresholds.blob"));
 #else
     TEST_ASSERT_NOT_EQUAL(0, blob_autoload_set("sched", "config", "/mnt/files/autoload_sched_cfg.blob"));
 #endif
@@ -426,6 +505,7 @@ static void test_blob_boot_autoload_activates_runtime_blobs(void)
     TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/autoload_xgb.blob"));
 #ifdef CONFIG_AI_SCHEDULER
     TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/autoload_sched_cfg.blob"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/autoload_sched_thresholds.blob"));
 #endif
 
     blob_boot_autoload();
@@ -435,6 +515,8 @@ static void test_blob_boot_autoload_activates_runtime_blobs(void)
 #ifdef CONFIG_AI_SCHEDULER
     TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_CONFIG, &sched_status));
     TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ACTIVE, sched_status.state);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_THRESHOLDS, &thresholds_status));
+    TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ACTIVE, thresholds_status.state);
 #endif
 }
 
@@ -473,6 +555,33 @@ static void test_blob_autoload_shell_commands(void)
         shell_execute("sched model autoload set config /mnt/files/cmd_sched_cfg.blob"));
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("sched", "config", path, sizeof(path)));
     build_managed_path(managed_path, sizeof(managed_path), "sched", "config");
+    TEST_ASSERT_EQUAL_STRING(managed_path, path);
+
+    {
+        uint8_t thresholds_payload[48];
+        uint8_t thresholds_blob[128];
+        size_t thresholds_payload_len =
+            build_sched_thresholds_payload(10u * 1000000u,
+                                          50u * 1000000u,
+                                          100u * 1000000u,
+                                          thresholds_payload,
+                                          sizeof(thresholds_payload));
+        size_t thresholds_blob_len =
+            build_outer_blob(SCHED_MODEL_KIND_THRESHOLDS,
+                             thresholds_payload,
+                             thresholds_payload_len,
+                             thresholds_blob,
+                             sizeof(thresholds_blob));
+
+        TEST_ASSERT_TRUE(thresholds_payload_len > 0);
+        TEST_ASSERT_TRUE(thresholds_blob_len > 0);
+        TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/cmd_sched_thresholds.blob",
+                                                   thresholds_blob, thresholds_blob_len));
+    }
+    TEST_ASSERT_EQUAL_INT(0,
+        shell_execute("sched model autoload set thresholds /mnt/files/cmd_sched_thresholds.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("sched", "thresholds", path, sizeof(path)));
+    build_managed_path(managed_path, sizeof(managed_path), "sched", "thresholds");
     TEST_ASSERT_EQUAL_STRING(managed_path, path);
 #else
     TEST_ASSERT_EQUAL_INT(1,
@@ -565,12 +674,14 @@ static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
     char path_sched_mlp[VFS_MAX_PATH];
     char path_sched_ppo[VFS_MAX_PATH];
     char path_sched_cfg[VFS_MAX_PATH];
+    char path_sched_thresholds[VFS_MAX_PATH];
     char conf_buf[1400];
     uint8_t ev_xgb_payload[80];
     uint8_t ev_mlp_payload[2048];
     uint8_t ev_cacheus_payload[24];
     uint8_t sched_dense_payload[4096];
     uint8_t sched_cfg_payload[40];
+    uint8_t sched_thresholds_payload[48];
     uint8_t blob[8192];
     char managed_path[VFS_MAX_PATH];
     size_t payload_len;
@@ -583,6 +694,7 @@ static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
     build_long_path(path_sched_mlp, sizeof(path_sched_mlp), "sched-mlp-", 'd', ".blob");
     build_long_path(path_sched_ppo, sizeof(path_sched_ppo), "sched-ppo-", 'e', ".blob");
     build_long_path(path_sched_cfg, sizeof(path_sched_cfg), "sched-cfg-", 'f', ".blob");
+    build_long_path(path_sched_thresholds, sizeof(path_sched_thresholds), "sched-thr-", 'g', ".blob");
 
     payload_len = build_eviction_xgb_payload(ev_xgb_payload, sizeof(ev_xgb_payload));
     TEST_ASSERT_TRUE(payload_len > 0);
@@ -624,17 +736,29 @@ static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
     TEST_ASSERT_TRUE(blob_len > 0);
     TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_sched_cfg, blob, blob_len));
 
+    payload_len = build_sched_thresholds_payload(10u * 1000000u,
+                                                 50u * 1000000u,
+                                                 100u * 1000000u,
+                                                 sched_thresholds_payload,
+                                                 sizeof(sched_thresholds_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    blob_len = build_outer_blob(SCHED_MODEL_KIND_THRESHOLDS, sched_thresholds_payload,
+                                payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_sched_thresholds, blob, blob_len));
+
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", path_xgb));
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "mlp", path_mlp));
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "cacheus_config", path_cacheus));
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "mlp", path_sched_mlp));
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "ppo", path_sched_ppo));
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "config", path_sched_cfg));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("sched", "thresholds", path_sched_thresholds));
 
     conf_len = read_text_file(BLOB_AUTOLOAD_CONF_PATH, conf_buf, sizeof(conf_buf));
     TEST_ASSERT_TRUE(conf_len > 0);
     TEST_ASSERT_NULL(find_substr(conf_buf, path_sched_cfg));
-    build_managed_path(managed_path, sizeof(managed_path), "sched", "config");
+    build_managed_path(managed_path, sizeof(managed_path), "sched", "thresholds");
     TEST_ASSERT_NOT_NULL(find_substr(conf_buf, managed_path));
 
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("sched", "config"));
