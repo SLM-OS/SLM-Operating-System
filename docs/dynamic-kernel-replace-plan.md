@@ -90,20 +90,22 @@ Engineering days, solo focused work.
 
 | Piece | Low | High | Notes |
 |-------|-----|------|-------|
-| SDHCI / EMMC2 driver | 3d | 5d | Legacy SDR only. +1–2 d if VC firmware hands off gated clocks. |
-| FAT32 writer (FatFs) | 3d | 5d | Integrate + wire block glue. |
+| SDHCI / EMMC2 driver | 3d | 5d | Legacy SDR only. Cold re-init from CMD0 is in scope (Linux does the same — Risk 1). |
+| FAT32 writer (FatFs) | 3d | 5d | Integrate + wire block glue. Includes FatFs LFN (`FF_USE_LFN`) — `kernel_2712.img` is not 8.3. |
 | FAT32 writer (from scratch) | +3d | +3d | Only if FatFs licensing blocks use. |
-| Tryboot register RE + write | 1d | 3d | +1–2 d if flag lives behind a VC mailbox RPC and mailbox driver must be added. |
+| Tryboot tag helpers + write | 0d | 1d | Two new tag helpers (`SET_REBOOT_FLAGS`, `NOTIFY_REBOOT`) on top of the existing `kernel/drivers/bcm_mailbox.c` transport — see Risk 2. |
 | Staging state machine + commands | 2d | 3d | Mirrors the eviction-model shape. |
 | Image validation (magic, size) | 0.5d | 1d | Header check + free-space check. |
 | QEMU tests | 1d | 2d | `-drive if=sd` with a FAT image. |
 | Hardware round-trip on lab Pi 5 | 2d | 3d | Mostly hardware-loop time. |
-| Buffer for Pi 5 surprises | 2d | 4d | BCM2712 delta vs Pi 4, VC firmware opacity, SDWire interactions. |
+| Buffer for Pi 5 surprises | 2d | 3d | BCM2712 delta vs Pi 4, VC firmware opacity, SDWire interactions. Two known surprises (brcmstb-not-iproc, LFN required) already folded in. |
 
 **Totals**
 
-- Tryboot A/B, demo-quality: **14–26 d** (~3–5 weeks elapsed).
-- Unsafe one-shot overwrite (no staging, no rollback): **8–13 d**
+- Tryboot A/B, demo-quality: **13–23 d** (~3–5 weeks elapsed). Down
+  from 14–26 d after Risks 1 and 2 resolved (mailbox transport
+  reusable, no surprise EMMC2 cold-init work).
+- Unsafe one-shot overwrite (no staging, no rollback): **8–12 d**
   (~2–3 weeks elapsed). Dropping tryboot trades rollback for speed;
   one bad write requires SDWire re-flash.
 
