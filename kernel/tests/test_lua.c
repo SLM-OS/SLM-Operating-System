@@ -2559,6 +2559,76 @@ static void test_slm_model_load_find_infer(void)
 }
 
 /*
+ * Test: slm.model_infer_bytes — caller-supplied input route.
+ *
+ * Pins the wire format: a Lua string of fp32 bytes goes in, two values
+ * come out (logits string + argmax integer). Crucially the byte-length
+ * validation: anything that isn't a multiple of 4 must be rejected
+ * cleanly without crashing the Lua VM. The happy path runs through
+ * rust_infer → engine::run_inference; on QEMU that's the CPU path.
+ */
+static void test_slm_model_infer_bytes(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "idx = slm.model_load_mnist()\n"
+        "assert(idx >= 0, 'model_load_mnist should succeed')\n"
+        "\n"
+        "-- Happy path: 784 floats of zeros = 3136 bytes\n"
+        "local zeros = string.rep('\\0', 3136)\n"
+        "local logits, argmax = slm.model_infer_bytes(idx, zeros)\n"
+        "assert(type(logits) == 'string', 'logits should be a string')\n"
+        "assert(#logits == 40, 'logits should be 10 fp32 = 40 bytes')\n"
+        "assert(type(argmax) == 'number', 'argmax should be a number')\n"
+        "assert(argmax >= 0 and argmax <= 9, 'argmax should be 0-9')\n"
+        "\n"
+        "-- Bad arg: empty bytes\n"
+        "local _, rc = slm.model_infer_bytes(idx, '')\n"
+        "assert(rc == nil or rc < 0, 'empty bytes should error')\n"
+        "\n"
+        "-- Bad arg: byte length not a multiple of 4\n"
+        "local _, rc = slm.model_infer_bytes(idx, '\\0\\0\\0')\n"
+        "assert(rc == nil or rc < 0, 'odd-length bytes should error')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+    rust_model_unload(0);
+}
+
+/*
+ * Test: slm.model_infer_file — VFS path route.
+ *
+ * Pins the contract: missing files return nil + negative rc rather
+ * than crashing or panicking the Lua VM. A real-file happy path is
+ * gated on MNIST_DIGITS_DIR being configured at build time (the
+ * /mnt/files/digits/digit_3.bin fixture only exists in builds with
+ * the digit fixtures embedded), so we test it conditionally.
+ */
+static void test_slm_model_infer_file_missing(void)
+{
+    lua_State *L = lua_slm_newstate_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "idx = slm.model_load_mnist()\n"
+        "assert(idx >= 0, 'model_load_mnist should succeed')\n"
+        "\n"
+        "-- Missing file: stat fails -> rc=-1\n"
+        "local _, rc = slm.model_infer_file(idx, '/mnt/files/does_not_exist.bin')\n"
+        "assert(rc < 0, 'missing file should error')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    lua_slm_close(L);
+    rust_model_unload(0);
+}
+
+/*
  * Test: slm.model_pin / slm.model_unpin for LRU cache management.
  */
 static void test_slm_model_pin_unpin(void)
@@ -3363,6 +3433,8 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_try_getc_no_input_returns_nil);
     RUN_TEST(test_slm_term_size_shape);
     RUN_TEST(test_slm_model_load_find_infer);
+    RUN_TEST(test_slm_model_infer_bytes);
+    RUN_TEST(test_slm_model_infer_file_missing);
     RUN_TEST(test_slm_model_pin_unpin);
     RUN_TEST(test_digit_classifier_preloads_model);
     RUN_TEST(test_slm_component_hot_swap_stateful);

@@ -481,6 +481,127 @@ static int l_model_infer(lua_State *L) {
 }
 
 /**
+ * slm.model_infer_bytes(index, bytes) - Run inference on a loaded
+ * model with caller-supplied input bytes.
+ *
+ * `bytes` is a Lua string of fp32 values (little-endian). For MNIST
+ * pass 1×1×28×28 = 784 floats = 3,136 bytes. The byte length must be
+ * a multiple of 4. Internally calls `rust_infer`, which routes through
+ * `engine::run_inference`; on Jetson with the v6 GPU handoff present
+ * the MNIST graph short-circuits through the GPU fastpath.
+ *
+ * Returns two values on success: a string of fp32 logits bytes (size
+ * = output_count × 4) and the argmax index. On failure returns nil
+ * and a negative error code.
+ */
+static int l_model_infer_bytes(lua_State *L) {
+    if (!L) return 0;
+    int idx = (int)luaL_checkinteger(L, 1);
+    size_t blen = 0;
+    const char *bytes = luaL_checklstring(L, 2, &blen);
+
+    if (blen == 0 || (blen % 4u) != 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -1);
+        return 2;
+    }
+
+    /* Stack-allocated 64-fp32 output buffer. Matches CLASSIFY_OUTPUT
+     * in rust_infer_classify; 256 bytes is well under any reasonable
+     * shell-task stack budget. */
+    uint8_t output[64 * 4] __attribute__((aligned(4)));
+    __builtin_memset(output, 0, sizeof(output));
+
+    int n = rust_infer((uint32_t)idx,
+                       (const float *)bytes,
+                       blen / 4u,
+                       (float *)output,
+                       64u);
+    if (n < 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, n);
+        return 2;
+    }
+
+    int argmax = slm_fp32_argmax(output, (uint32_t)n);
+    lua_pushlstring(L, (const char *)output, (size_t)n * 4u);
+    lua_pushinteger(L, argmax);
+    return 2;
+}
+
+/**
+ * slm.model_infer_file(index, path) - Convenience wrapper around
+ * model_infer_bytes that reads the input from VFS first.
+ *
+ * `path` should point at a file containing little-endian fp32 values
+ * matching the model's input shape. For MNIST that's 3,136 bytes
+ * (784 floats). Files are bounded at 32 KB so the bump-allocated
+ * staging buffer doesn't pressure PMM.
+ *
+ * Returns the same (logits_string, argmax) tuple as model_infer_bytes.
+ * On failure returns nil + negative rc:
+ *   -1 = stat failed / not a regular file / empty
+ *   -2 = file size not a multiple of 4 or > 32 KB
+ *   -3 = page allocation failed
+ *   -4 = read returned short
+ *   <0 from rust_infer = inference engine error
+ */
+static int l_model_infer_file(lua_State *L) {
+    if (!L) return 0;
+    int idx = (int)luaL_checkinteger(L, 1);
+    const char *path = luaL_checkstring(L, 2);
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(path, &info) != 0 || info.type != 0 || info.size == 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -1);
+        return 2;
+    }
+    if ((info.size % 4u) != 0 || info.size > 32u * 1024u) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -2);
+        return 2;
+    }
+
+    size_t pages = (info.size + 4095u) / 4096u;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+    if (!buf) {
+        lua_pushnil(L);
+        lua_pushinteger(L, -3);
+        return 2;
+    }
+
+    int rd = vfs_read_path(path, (char *)buf, info.size, 0);
+    if (rd != (int)info.size) {
+        pmm_free_pages(buf, pages);
+        lua_pushnil(L);
+        lua_pushinteger(L, -4);
+        return 2;
+    }
+
+    uint8_t output[64 * 4] __attribute__((aligned(4)));
+    __builtin_memset(output, 0, sizeof(output));
+
+    int n = rust_infer((uint32_t)idx,
+                       (const float *)buf,
+                       info.size / 4u,
+                       (float *)output,
+                       64u);
+    pmm_free_pages(buf, pages);
+
+    if (n < 0) {
+        lua_pushnil(L);
+        lua_pushinteger(L, n);
+        return 2;
+    }
+
+    int argmax = slm_fp32_argmax(output, (uint32_t)n);
+    lua_pushlstring(L, (const char *)output, (size_t)n * 4u);
+    lua_pushinteger(L, argmax);
+    return 2;
+}
+
+/**
  * slm.model_find(name) - Find a model by name
  * Returns model index or -1 if not found
  */
@@ -2972,6 +3093,8 @@ static const luaL_Reg slm_lib_admin[] = {
     {"component_hot_swap_stateful", l_component_hot_swap_stateful},
     /* Model memory and inference */
     {"model_infer", l_model_infer},
+    {"model_infer_bytes", l_model_infer_bytes},
+    {"model_infer_file", l_model_infer_file},
     {"model_load_mnist", l_model_load_mnist},
     {"model_pin", l_model_pin},
     {"model_preload", l_model_preload},

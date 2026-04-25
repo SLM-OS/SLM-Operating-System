@@ -492,6 +492,11 @@ set(KERNEL_SOURCES
     # pattern as the scheduler HEF above. Writes to /mnt/files/user.hef.
     kernel/src/user_hef_init.c
     $<$<BOOL:${USER_HEF_BLOB}>:kernel/src/user_hef_embed.S>
+    # MNIST test-digit fixtures (gated on MNIST_DIGITS_DIR). Same stub
+    # pattern. Writes 10 fp32 digit binaries to /mnt/files/digits/ so
+    # slm.model_infer_file() has a known-good demo set out of the box.
+    kernel/src/mnist_digit_init.c
+    $<$<BOOL:${MNIST_DIGITS_DIR}>:kernel/src/mnist_digit_embed.S>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
     # General-purpose FDT reader — path + property lookup for any
     # driver. Built on every ARM64 target; x86-64 builds skip it
@@ -884,6 +889,31 @@ if(SCHEDULER_HEF_BLOB)
         OBJECT_DEPENDS "${SCHEDULER_HEF_BLOB}"
     )
     message(STATUS "Embedding scheduler MLP .hef: ${SCHEDULER_HEF_BLOB}")
+endif()
+
+# ============================================================================
+# MNIST test-digit fixtures (optional .incbin — demo / model_infer_file)
+# ============================================================================
+#
+# Set -DMNIST_DIGITS_DIR=path/to/digits/ to embed 10 fp32 digit binaries
+# (one per class 0..9, named digit_<class>_idx<N>.bin and produced by
+# scripts/mnist-extract-test-digits.py). mnist_digit_init.c writes them
+# to /mnt/files/digits/digit_<n>.bin at boot so slm.model_infer_file()
+# has a known-good demo set immediately after kexec.
+set(MNIST_DIGITS_DIR "" CACHE PATH
+    "Path to a directory of digit_<class>_idx<N>.bin fp32 fixtures to embed")
+if(MNIST_DIGITS_DIR)
+    if(NOT IS_DIRECTORY "${MNIST_DIGITS_DIR}")
+        message(FATAL_ERROR "MNIST_DIGITS_DIR set but is not a directory: "
+                            "${MNIST_DIGITS_DIR}")
+    endif()
+    add_compile_definitions(ENABLE_MNIST_DIGITS_EMBED=1)
+    set_source_files_properties(
+        kernel/src/mnist_digit_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "MNIST_DIGITS_DIR=${MNIST_DIGITS_DIR}"
+    )
+    message(STATUS "Embedding MNIST test digits from: ${MNIST_DIGITS_DIR}")
 endif()
 
 # ============================================================================
