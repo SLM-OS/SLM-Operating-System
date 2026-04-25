@@ -665,6 +665,42 @@ int slm_gpu_run_mnist(void *logits_bytes_out);
 int slm_fp32_argmax(const void *logits_bytes, uint32_t n_logits);
 
 /*
+ * Write user-supplied input bytes into the GPU's MNIST input buffer
+ * at runtime. Pairs with slm_gpu_run_mnist() — call this first to
+ * swap in a different image, then call run_mnist() to classify it.
+ *
+ * Requires a v6 channel handoff (`scripts/gpu-kernel-mnist.c`
+ * --preserve-for-kexec writes one when v6 is enabled). The buffer is
+ * cache-cleaned after the write so the GPU sees the fresh tensor on
+ * the next dispatch.
+ *
+ * `bytes` is opaque to the kernel: for MNIST it should be
+ * 1×1×28×28 = 784 fp32 values (3,136 bytes), but the kernel just
+ * bounds-checks and memcpys. `cap` must be ≤ the handoff's
+ * `input_buf_size`.
+ *
+ * Returns 0 on success, negative rc on failure (no v6 handoff,
+ * cap too large, NULL pointer, etc.). On non-Jetson platforms
+ * returns -1 unconditionally.
+ */
+int slm_gpu_set_mnist_input(const void *bytes, size_t cap);
+
+/*
+ * Fill the GPU's MNIST input buffer with `n_floats` copies of the
+ * fp32 bit pattern `value_bits` (e.g. 0x3F800000 for 1.0f). Built in
+ * to dodge serial-link corruption on long `lua-admin -e` commands —
+ * a uniform-fill is enough to prove that swapping the input changes
+ * the argmax, and the entire call fits in a 30-character Lua string.
+ *
+ * `n_floats` must be ≤ input_buf_size / 4 (3,136 / 4 = 784 for the
+ * MNIST pipeline). Cache-clean is issued after the fill.
+ *
+ * Returns 0 on success, negative rc on failure (no v6 handoff,
+ * n_floats too large, etc.). On non-Jetson platforms returns -1.
+ */
+int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats);
+
+/*
  * Print GPU status to UART (called from Rust shell command).
  */
 extern void rust_gpu_print_status(void);

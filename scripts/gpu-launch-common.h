@@ -384,4 +384,19 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
                                uint32_t pipeline_n_ops,
                                uint64_t pipeline_ops_phys);
 
+/* Serialize a v6 channel handoff. Extends v5 with the model's input
+ * buffer CPU-physical address + size, so SLM-OS can write user-
+ * supplied input bytes there at runtime via slm_gpu_set_mnist_input
+ * (each MNIST inference can classify a different image without re-
+ * running the launcher pre-kexec). */
+uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
+                               void *handoff_va,
+                               uint64_t output_phys,
+                               uint64_t output_gpu_va,
+                               uint32_t expected_payload,
+                               uint32_t pipeline_n_ops,
+                               uint64_t pipeline_ops_phys,
+                               uint64_t input_buf_phys,
+                               uint32_t input_buf_size);
+
 #endif /* GPU_LAUNCH_COMMON_H */

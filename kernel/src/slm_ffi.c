@@ -343,10 +343,50 @@ int slm_gpu_run_mnist(void *logits_bytes_out)
                                                 40u);
     return n < 0 ? -1 : 0;
 }
+int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
+{
+    if (!bytes) return -1;
+    /* Lazy-initialise the bringup state so callers can swap inputs
+     * before the first run_mnist(). Mirrors slm_gpu_run_mnist's
+     * lazy-init logic. */
+    if (g_mnist_bringup.state != GA10B_BRINGUP_CHANNEL_OPEN &&
+        g_mnist_bringup.state != GA10B_BRINGUP_METHOD_ACCEPTED) {
+        int rc = ga10b_bringup_inherit(&g_mnist_bringup);
+        if (rc < 0) return rc;
+        rc = ga10b_bringup_channel(&g_mnist_bringup);
+        if (rc < 0) return rc;
+    }
+    int n = ga10b_bringup_set_input(&g_mnist_bringup, bytes, cap);
+    return n < 0 ? n : 0;
+}
+int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
+{
+    /* Same lazy-init dance as set_input — caller may invoke this
+     * before any run_mnist(). */
+    if (g_mnist_bringup.state != GA10B_BRINGUP_CHANNEL_OPEN &&
+        g_mnist_bringup.state != GA10B_BRINGUP_METHOD_ACCEPTED) {
+        int rc = ga10b_bringup_inherit(&g_mnist_bringup);
+        if (rc < 0) return rc;
+        rc = ga10b_bringup_channel(&g_mnist_bringup);
+        if (rc < 0) return rc;
+    }
+    int n = ga10b_bringup_set_input_fill(&g_mnist_bringup, value_bits, n_floats);
+    return n < 0 ? n : 0;
+}
 #else
 int slm_gpu_run_mnist(void *logits_bytes_out)
 {
     (void)logits_bytes_out;
+    return -1;
+}
+int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
+{
+    (void)bytes; (void)cap;
+    return -1;
+}
+int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
+{
+    (void)value_bits; (void)n_floats;
     return -1;
 }
 #endif

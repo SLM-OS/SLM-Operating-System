@@ -51,12 +51,19 @@ struct ga10b_channel_handoff {
                                  *    so SLM-OS can dispatch N kernels
                                  *    in sequence from one launch-kernel
                                  *    invocation (model-inference path).
+                                 * 6: v5 + input_buf_phys/size so SLM-OS
+                                 *    can swap the model's input tensor
+                                 *    at runtime (per-image MNIST
+                                 *    classification post-kexec).
                                  * SLM-OS channel inherit accepts any of
-                                 * v2/v3/v4/v5; `nvgpu launch-kernel`
-                                 * needs at least v3 for shader/QMD
-                                 * fields, runs the v5 pipeline if
+                                 * v2..v6; `nvgpu launch-kernel` needs
+                                 * at least v3 for shader/QMD fields,
+                                 * runs the v5 pipeline if
                                  * `pipeline_n_ops > 0`, otherwise
-                                 * single-shot per the v4 path. */
+                                 * single-shot per the v4 path. The v6
+                                 * input swap path is opt-in via
+                                 * `slm_gpu_set_mnist_input` /
+                                 * `slm.gpu_set_mnist_input`. */
     uint32_t channel_id;        /* Diagnostic only; never used as the
                                  * doorbell token. See work_submit_token
                                  * below — the kernel's allocation path
@@ -143,6 +150,19 @@ struct ga10b_channel_handoff {
     uint32_t pipeline_n_ops;
     uint32_t _pad3;
     uint64_t pipeline_ops_phys;
+
+    /* --- v6 extension: runtime input buffer. ---
+     * Zero on v2..v5. Populated by helpers that want SLM-OS to be
+     * able to swap the model's input tensor at runtime (e.g. classify
+     * different MNIST digit images without re-running the launcher
+     * pre-kexec). `input_buf_phys` is the CPU-physical address of
+     * the input buffer the FIRST pipeline op reads from; SLM-OS
+     * writes the new tensor bytes there and the next dispatch
+     * picks them up. `input_buf_size` is the buffer's capacity in
+     * bytes — SLM-OS bounds-checks user writes against this. */
+    uint64_t input_buf_phys;
+    uint32_t input_buf_size;
+    uint32_t _pad4;
 };
 
 /* One entry per op in a v5 pipeline. SLM-OS reads this array from
@@ -167,7 +187,7 @@ struct ga10b_pipeline_op {
  * depend on this exact layout. Any struct reorder or field addition
  * breaks the handoff silently — the static_assert catches it at
  * compile time on both sides. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 216,
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 232,
                "ga10b_channel_handoff layout changed — update Linux "
                "helper (scripts/gpu-channel-helper.c, "
                "scripts/gpu-kernel-launch.c, scripts/gpu-launch-common.c) "
@@ -209,6 +229,10 @@ _Static_assert(offsetof(struct ga10b_channel_handoff, pipeline_n_ops) == 200,
                "v5 pipeline_n_ops offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, pipeline_ops_phys) == 208,
                "v5 pipeline_ops_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, input_buf_phys) == 216,
+               "v6 input_buf_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, input_buf_size) == 224,
+               "v6 input_buf_size offset drifted");
 _Static_assert(offsetof(struct ga10b_pipeline_op, qmd_gpu_va) == 0,
                "pipeline_op.qmd_gpu_va must be at offset 0");
 _Static_assert(offsetof(struct ga10b_pipeline_op, output_phys) == 8,

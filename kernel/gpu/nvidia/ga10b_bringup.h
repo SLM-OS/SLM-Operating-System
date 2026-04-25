@@ -312,4 +312,41 @@ int ga10b_bringup_run(struct ga10b_bringup *b);
 int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
                                         void *out, size_t cap);
 
+/*
+ * Write `bytes` from caller memory into the GPU's input buffer at the
+ * v6 handoff's `input_buf_phys`. Used to swap the model's input tensor
+ * at runtime — e.g. classify a different MNIST digit image without
+ * re-running the launcher pre-kexec.
+ *
+ * Cache-clean is issued after the memcpy so the GPU sees the fresh
+ * data on the next dispatch. The caller passes `cap` bytes; the
+ * kernel rejects writes that exceed `g_handoff.input_buf_size`.
+ *
+ * Returns the number of bytes written on success, or:
+ *   -1 if no v6 handoff is loaded (input_buf_phys == 0)
+ *   -2 if `cap` exceeds input_buf_size
+ *   -3 if `bytes` or `b` is NULL
+ */
+int ga10b_bringup_set_input(struct ga10b_bringup *b,
+                             const void *bytes, size_t cap);
+
+/*
+ * Variant of ga10b_bringup_set_input that builds the input tensor
+ * server-side from a single fp32 bit pattern, repeated n_floats
+ * times. Avoids transferring multi-KB strings through the serial
+ * console (which corrupts NULs and long runs of repeated bytes on
+ * the test bench).
+ *
+ * `value_bits` is the fp32 bit pattern to splat (e.g. 0x3F800000
+ * = +1.0f, 0xBF800000 = -1.0f, 0x3F000000 = +0.5f). `n_floats`
+ * must be ≤ input_buf_size / 4.
+ *
+ * Returns bytes written on success, or:
+ *   -1 if no v6 handoff is loaded (input_buf_phys == 0)
+ *   -2 if n_floats × 4 exceeds input_buf_size
+ *   -3 if `b` is NULL
+ */
+int ga10b_bringup_set_input_fill(struct ga10b_bringup *b,
+                                  uint32_t value_bits, uint32_t n_floats);
+
 #endif /* GPU_NVIDIA_GA10B_BRINGUP_H */

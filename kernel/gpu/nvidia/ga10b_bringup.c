@@ -1010,10 +1010,12 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
      *      not just one that writes 0xCAFE.
      * v5: + multi-op pipeline pointer for chaining N kernel dispatches
      *      (model inference path).
-     * Phase 6 inherit accepts all four; launch_kernel version-gates
+     * v6: + input_buf_phys/size so SLM-OS can swap the model's input
+     *      tensor at runtime (per-image MNIST classification).
+     * Phase 6 inherit accepts all five; launch_kernel version-gates
      * at dispatch time (v3 minimum for single-shot, v5 for pipelines). */
     if (h->version != 2 && h->version != 3 &&
-        h->version != 4 && h->version != 5) return -1;
+        h->version != 4 && h->version != 5 && h->version != 6) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
@@ -1110,6 +1112,12 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     /* v5 extension: pipeline pointer + count. Zero on v2/v3/v4. */
     g_handoff.pipeline_n_ops     = hoff->pipeline_n_ops;
     g_handoff.pipeline_ops_phys  = hoff->pipeline_ops_phys;
+
+    /* v6 extension: runtime input buffer. Zero on v2..v5. SLM-OS's
+     * slm_gpu_set_mnist_input writes user-supplied bytes to
+     * input_buf_phys (with cache_clean) before the next dispatch. */
+    g_handoff.input_buf_phys     = hoff->input_buf_phys;
+    g_handoff.input_buf_size     = hoff->input_buf_size;
 
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
@@ -1730,6 +1738,48 @@ int ga10b_bringup_run(struct ga10b_bringup *b)
 
     uart_puts("[GA10B] bringup complete — channel open, method accepted\n");
     return 0;
+}
+
+int ga10b_bringup_set_input(struct ga10b_bringup *b,
+                             const void *bytes, size_t cap)
+{
+    if (!b || !bytes) return -3;
+    if (g_handoff.input_buf_phys == 0u) return -1;
+    if (cap > (size_t)g_handoff.input_buf_size) return -2;
+
+    /* Same identity-DRAM-mapping assumption as the pipeline reader:
+     * the physical address from the handoff is also a valid VA at EL2.
+     * Safe to memcpy through it. */
+    void *dst = (void *)(uintptr_t)g_handoff.input_buf_phys;
+    memcpy(dst, bytes, cap);
+
+    /* Clean the cache so the GPU sees the fresh input on the next
+     * dispatch. Without this, the CPU's writes can sit in L1/L2
+     * while the GPU reads stale DRAM. Pattern matches the pre-DMA
+     * sync we use for QMD writes. */
+    if (gsp_platform && gsp_platform->cache_clean) {
+        gsp_platform->cache_clean(dst, cap);
+    }
+    return (int)cap;
+}
+
+int ga10b_bringup_set_input_fill(struct ga10b_bringup *b,
+                                  uint32_t value_bits, uint32_t n_floats)
+{
+    if (!b) return -3;
+    if (g_handoff.input_buf_phys == 0u) return -1;
+    /* Wrap-safe size check (n_floats * 4 must fit input_buf_size). */
+    if (n_floats > (g_handoff.input_buf_size / 4u)) return -2;
+
+    uint32_t *dst = (uint32_t *)(uintptr_t)g_handoff.input_buf_phys;
+    for (uint32_t i = 0u; i < n_floats; i++) {
+        dst[i] = value_bits;
+    }
+
+    if (gsp_platform && gsp_platform->cache_clean) {
+        gsp_platform->cache_clean(dst, (size_t)n_floats * 4u);
+    }
+    return (int)(n_floats * 4u);
 }
 
 int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,

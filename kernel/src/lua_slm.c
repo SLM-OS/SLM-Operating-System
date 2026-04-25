@@ -542,6 +542,62 @@ static int l_gpu_run_mnist(lua_State *L) {
 }
 
 /**
+ * slm.gpu_set_mnist_input(bytes) - Swap the GPU's MNIST input buffer
+ * at runtime, ahead of the next slm.gpu_run_mnist() call.
+ *
+ * `bytes` is a Lua string of fp32 bit patterns (little-endian) — for
+ * MNIST that's 1×1×28×28 = 784 floats = 3,136 bytes. The kernel
+ * memcpys + cache-cleans into the v6 handoff's input_buf_phys.
+ *
+ * Typical Lua flow:
+ *
+ *   local digit_bytes = read_file_as_bytes("/mnt/files/digit_5.bin")
+ *   slm.gpu_set_mnist_input(digit_bytes)
+ *   local logits, argmax = slm.gpu_run_mnist()
+ *   print(string.format("predicted: %d", argmax))
+ *
+ * Returns 0 on success or a negative error code on failure
+ * (-1 = no v6 handoff, -2 = bytes too long, -3 = bad arg).
+ */
+static int l_gpu_set_mnist_input(lua_State *L) {
+    if (!L) return 0;
+    size_t len = 0;
+    const char *bytes = luaL_checklstring(L, 1, &len);
+    int rc = slm_gpu_set_mnist_input(bytes, len);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+/**
+ * slm.gpu_set_mnist_input_fill(value_bits, n_floats) - Splat the
+ * GPU's MNIST input buffer with `n_floats` copies of the fp32 bit
+ * pattern `value_bits`. Designed for hardware bring-up demos where
+ * sending 3 KB of explicit fp32 bytes through the serial console
+ * is unreliable (NULs and long runs of repeated bytes get
+ * corrupted on the test bench).
+ *
+ * Both args are integers (Lua doesn't have unsigned types, but the
+ * binding bottoms out in uint32_t — pass the bit pattern as a
+ * decimal or hex literal).
+ *
+ *   slm.gpu_set_mnist_input_fill(0x3F800000, 784)  -- all +1.0f
+ *   slm.gpu_set_mnist_input_fill(0xBF800000, 784)  -- all -1.0f
+ *   slm.gpu_set_mnist_input_fill(0, 784)            -- all  0.0f
+ *
+ * Returns 0 on success or a negative error code on failure.
+ */
+static int l_gpu_set_mnist_input_fill(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer raw_bits = luaL_checkinteger(L, 1);
+    lua_Integer raw_n    = luaL_checkinteger(L, 2);
+    uint32_t value_bits = (uint32_t)(uint64_t)raw_bits;
+    uint32_t n_floats   = (uint32_t)(uint64_t)raw_n;
+    int rc = slm_gpu_set_mnist_input_fill(value_bits, n_floats);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+/**
  * slm.model_pin(index) - Pin a model to prevent LRU eviction
  * Returns 0 on success, -1 on error
  */
@@ -2493,8 +2549,10 @@ static const luaL_Reg slm_lib_admin[] = {
     {"model_unpin", l_model_unpin},
     {"model_bench", l_model_bench},
     {"model_load", l_model_load},
-    /* GPU inference (M7) */
+    /* GPU inference (M7 + M9) */
     {"gpu_run_mnist", l_gpu_run_mnist},
+    {"gpu_set_mnist_input", l_gpu_set_mnist_input},
+    {"gpu_set_mnist_input_fill", l_gpu_set_mnist_input_fill},
     /* Scheduler / task mutation */
     {"sched_set_policy", l_sched_set_policy},
     {"task_migrate", l_task_migrate},

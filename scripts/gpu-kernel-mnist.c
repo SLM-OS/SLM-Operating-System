@@ -644,15 +644,24 @@ int main(int argc, char **argv)
                             MAP_SHARED, handoff_dmabuf, 0);
     if (handoff_va == MAP_FAILED) { perror("mmap handoff"); return 1; }
 
-    uint64_t handoff_phys = gpu_write_handoff_v5(&ctx, handoff_va,
+    /* v6 handoff: SLM-OS can swap the input tensor at runtime via
+     * slm_gpu_set_mnist_input(). The input buffer is the one Op 0
+     * (Conv1) reads from — same `input.phys` we memcpy'd the
+     * synthetic input into above. SLM-OS overwrites it with whatever
+     * bytes the user supplies before each run_mnist() call. */
+    uint64_t handoff_phys = gpu_write_handoff_v6(&ctx, handoff_va,
         ops[7].output.phys, ops[7].output.gpu_va,
         ops[7].sentinel_bits,
-        MNIST_OP_COUNT, pipe_ops.phys);
+        MNIST_OP_COUNT, pipe_ops.phys,
+        input.phys, (uint32_t)(1u * 1u * 28u * 28u * 4u));
 
-    printf("[mnist] Handoff at phys 0x%llx (version=5, %d ops)\n",
+    printf("[mnist] Handoff at phys 0x%llx (version=6, %d ops)\n",
            (unsigned long long)handoff_phys, MNIST_OP_COUNT);
     printf("[mnist]   pipeline_ops_phys=0x%llx\n",
            (unsigned long long)pipe_ops.phys);
+    printf("[mnist]   input_buf_phys=0x%llx (%u bytes — runtime swap target)\n",
+           (unsigned long long)input.phys,
+           (unsigned)(1u * 1u * 28u * 28u * 4u));
     for (int i = 0; i < MNIST_OP_COUNT; i++) {
         printf("[mnist]   op[%d %s] qmd_gva=0x%lx out_phys=0x%llx "
                "sentinel=cell %u (0x%08x)\n",
