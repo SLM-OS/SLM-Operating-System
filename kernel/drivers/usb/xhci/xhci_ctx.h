@@ -146,7 +146,9 @@ static inline uint32_t xhci_ctx_in_bytes(bool ctx_64)
  * DW3: high 32 of TR Dequeue Pointer. */
 
 /* DW4 */
-#define XHCI_EP_DW4_AVG_TRB_LEN_MASK  0xFFFFU
+#define XHCI_EP_DW4_AVG_TRB_LEN_MASK     0xFFFFU
+#define XHCI_EP_DW4_MAX_ESIT_SHIFT       16
+#define XHCI_EP_DW4_MAX_ESIT_MASK        (0xFFFFU << XHCI_EP_DW4_MAX_ESIT_SHIFT)
 
 /* -------------------------------------------------------------------------- */
 /* Input Control Context (§6.2.5.1) — first 32 bytes                          */

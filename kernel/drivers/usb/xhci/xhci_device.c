@@ -26,6 +26,7 @@
 #include "xhci_ring.h"
 #include "xhci_trb.h"
 #include "xhci_ctx.h"
+#include "xhci_slot3_handoff.h"
 #include "xhci_attach.h"
 #include "usb.h"
 #include "ncmem.h"
@@ -39,11 +40,43 @@
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
+/*
+ * Tegra234 exposes USB2 root-hub ports at xHCI ports 5..8
+ * (linux-xhci-tegra.c tegra234_soc.ports.usb2.offset = 4). Linux's
+ * tegra_xhci_hub_control() powers the matching UTMI pad back on
+ * around USB2 reset/resume operations; SLM-OS currently does not,
+ * so inherited post-kexec ports can stay logically connected while
+ * the USB2 pad remains powered down.
+ *
+ * This helper mirrors the narrow part of Linux's path that is easy to
+ * express locally: map the active USB2 lane to XUSB host mode and
+ * clear the bias/pad power-down bits before root-port recovery.
+ */
+#define TEGRA_XUSB_USB2_PORT_OFFSET         4u
+#define TEGRA_XUSB_USB2_PORT_COUNT          4u
+#define XUSB_PADCTL_USB2_PAD_MUX           0x004u
+#define XUSB_PADCTL_USB2_PORT_CAP          0x008u
+#define XUSB_PADCTL_USB2_OTG_PADX_CTL0(x)  (0x088u + ((x) * 0x40u))
+#define XUSB_PADCTL_USB2_OTG_PADX_CTL1(x)  (0x08cu + ((x) * 0x40u))
+#define XUSB_PADCTL_USB2_BIAS_PAD_CTL0     0x284u
+#define USB2_PORT_SHIFT(x)                 ((x) * 2u)
+#define USB2_PORT_MASK                     0x3u
+#define PORT_XUSB                          0x1u
+#define PORTX_CAP_SHIFT(x)                ((x) * 4u)
+#define PORT_CAP_MASK                      0x3u
+#define PORT_CAP_HOST                      0x1u
+#define TERM_SEL                           (1u << 25)
+#define USB2_OTG_PD                        (1u << 26)
+#define USB2_OTG_PD_DR                     (1u << 2)
+#define USB2_OTG_PD_ZI                     (1u << 29)
+#define BIAS_PAD_PD                        (1u << 11)
+
 /* -------------------------------------------------------------------------- */
-/* Per-device state pool (single-device Phase 3A)                              */
+/* Per-device state pool. Minimal hub support needs two live devices at once:
+ * the upstream hub and one downstream child. */
 /* -------------------------------------------------------------------------- */
 
-static struct xhci_device xhci_dev_pool[1];
+static struct xhci_device xhci_dev_pool[2];
 
 /* Scratch transfer-ring storage. Each ring occupies one entry here so
  * device_close has a stable teardown path without dynamic allocation.
@@ -51,6 +84,17 @@ static struct xhci_device xhci_dev_pool[1];
 #define XHCI_DEV_MAX_RINGS          8
 static struct xhci_ring xhci_ring_pool[XHCI_DEV_MAX_RINGS];
 static bool             xhci_ring_in_use[XHCI_DEV_MAX_RINGS];
+/* These one-shot Jetson bring-up workarounds are now part of the normal
+ * inherited-slot path, so keep them named for behavior rather than probes. */
+static bool             xhci_adopt_inherited_slot1_once = true;
+static bool             xhci_adopt_inherited_slot3_once = true;
+static bool             xhci_reset_ep_on_adopt_slot3_once = true;
+static bool             xhci_fullspeed_power_cycle_once = true;
+
+static void xhci_try_power_cycle_port(uint8_t pidx, const char *why);
+static void xhci_build_input_ctx_for_address(struct xhci_device *d,
+                                             const struct usb_device *dev,
+                                             uintptr_t ep0_ring_phys);
 
 static struct xhci_ring *xhci_ring_pool_alloc(void)
 {
@@ -145,7 +189,252 @@ bool xhci_decode_portsc(uint32_t portsc,
  */
 static uint8_t xhci_active_port = 0xFF;  /* 0xFF = not yet located */
 static uint32_t xhci_active_portsc = 0;
+static uint32_t xhci_stale_portsc_initial = 0;
 static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
+static bool xhci_skip_next_port_reset = false;
+static bool xhci_force_connected_disabled_reset = false;
+static bool xhci_force_enabled_port_reset = false;
+static bool xhci_probe_fullspeed_addr3 = true;
+static bool xhci_probe_highspeed_eval_addr1 = true;
+
+static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
+                                      const char *why);
+
+static bool xhci_inherited_slot1_matches_active_port(enum usb_speed speed)
+{
+    if (!xhci_inherited_slot1_ctx_valid ||
+        xhci_inherited_slot1_devctx_raw_phys == 0 ||
+        xhci_active_port == 0xFF ||
+        speed != USB_SPEED_HIGH) {
+        return false;
+    }
+
+    uint32_t root =
+        (xhci_inherited_slot1_slot_ctx_dw[1] & XHCI_SLOT_DW1_ROOT_PORT_MASK) >>
+        XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+    return root != 0 && root == (uint32_t)xhci_active_port + 1U;
+}
+
+static uint32_t xhci_port_state_to_neutral(uint32_t portsc)
+{
+    return portsc & XHCI_PORTSC_NEUTRAL_MASK;
+}
+
+static uint32_t xhci_resume_usb2_port_to_u0(uint8_t pidx, uint32_t portsc,
+                                            const char *why)
+{
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    (void)xhci_decode_portsc(portsc, &connected, &speed);
+
+    uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+    if (!connected || !(portsc & XHCI_PORTSC_PED) || speed > USB_SPEED_HIGH) {
+        return portsc;
+    }
+
+    if (pls == XHCI_PLS_U3) {
+        uint32_t write = (xhci_port_state_to_neutral(portsc) &
+                          ~XHCI_PORTSC_PLS_MASK) |
+                         (XHCI_PLS_RESUME << XHCI_PORTSC_PLS_SHIFT) |
+                         XHCI_PORTSC_LWS;
+        xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
+
+        uint64_t start = timer_get_count();
+        uint64_t ticks = timer_get_frequency() / 20; /* 50 ms USB2 resume signal */
+        while (timer_get_count() - start < ticks) { }
+
+        uint32_t resumed = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+        resumed = xhci_ack_port_changes(pidx, resumed, why);
+        uint32_t resumed_pls =
+            (resumed & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+        INFO("xhci: PORTSC[%u] request-resume for %s (0x%08x -> 0x%08x, pls %u -> %u)",
+             pidx, why, (unsigned)portsc, (unsigned)resumed,
+             (unsigned)pls, (unsigned)resumed_pls);
+        return resumed;
+    }
+
+    if (pls == XHCI_PLS_RESUME) {
+        uint32_t u0 = (xhci_port_state_to_neutral(portsc) &
+                       ~XHCI_PORTSC_PLS_MASK) |
+                      (XHCI_PLS_U0 << XHCI_PORTSC_PLS_SHIFT) |
+                      XHCI_PORTSC_LWS;
+        xhci_op_w32(XHCI_OP_PORTSC(pidx), u0);
+
+        uint64_t u0_start = timer_get_count();
+        uint64_t u0_ticks = timer_get_frequency() / 100; /* 10 ms settle */
+        while (timer_get_count() - u0_start < u0_ticks) { }
+
+        uint32_t final_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+        uint32_t final_pls =
+            (final_sc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+        INFO("xhci: PORTSC[%u] finish-resume for %s (0x%08x -> 0x%08x, pls %u -> %u)",
+             pidx, why, (unsigned)portsc, (unsigned)final_sc,
+             (unsigned)pls, (unsigned)final_pls);
+        if (final_pls != XHCI_PLS_U0) {
+            WARN("xhci: PORTSC[%u] did not reach U0 after finish-resume (%s, portsc=0x%08x)",
+                 pidx, why, (unsigned)final_sc);
+        }
+        uint32_t cleaned = xhci_ack_port_changes(pidx, final_sc, why);
+        if (cleaned != final_sc) {
+            INFO("xhci: PORTSC[%u] post-resume change-ack for %s "
+                 "(0x%08x -> 0x%08x)",
+                 pidx, why, (unsigned)final_sc, (unsigned)cleaned);
+        }
+        return cleaned;
+    }
+
+    return portsc;
+}
+
+static uint32_t xhci_nudge_disabled_port_to_u0(uint8_t pidx, uint32_t portsc,
+                                               const char *why)
+{
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    (void)xhci_decode_portsc(portsc, &connected, &speed);
+
+    if (!connected || (portsc & XHCI_PORTSC_PED) || speed > USB_SPEED_HIGH)
+        return portsc;
+
+    uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+    uint32_t write = (xhci_port_state_to_neutral(portsc) &
+                      ~XHCI_PORTSC_PLS_MASK) |
+                     (XHCI_PLS_RESUME << XHCI_PORTSC_PLS_SHIFT) |
+                     XHCI_PORTSC_LWS;
+    xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
+
+    uint64_t start = timer_get_count();
+    uint64_t ticks = timer_get_frequency() / 50; /* 20 ms */
+    while (timer_get_count() - start < ticks) { }
+
+    uint32_t resumed = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+    uint32_t resumed_pls =
+        (resumed & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+
+    if (resumed_pls == XHCI_PLS_RESUME) {
+        uint32_t u0 = (xhci_port_state_to_neutral(resumed) &
+                       ~XHCI_PORTSC_PLS_MASK) |
+                      (XHCI_PLS_U0 << XHCI_PORTSC_PLS_SHIFT) |
+                      XHCI_PORTSC_LWS;
+        xhci_op_w32(XHCI_OP_PORTSC(pidx), u0);
+
+        uint64_t u0_start = timer_get_count();
+        uint64_t u0_ticks = timer_get_frequency() / 100; /* 10 ms */
+        while (timer_get_count() - u0_start < u0_ticks) { }
+
+        resumed = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+        resumed_pls =
+            (resumed & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+    }
+
+    INFO("xhci: PORTSC[%u] disabled-port nudge for %s (0x%08x -> 0x%08x, pls %u -> %u, ped=%u)",
+         (unsigned)pidx, why ? why : "probe",
+         (unsigned)portsc, (unsigned)resumed,
+         (unsigned)pls, (unsigned)resumed_pls,
+         (unsigned)((resumed & XHCI_PORTSC_PED) ? 1u : 0u));
+    return xhci_ack_port_changes(pidx, resumed, why ? why : "disabled-port nudge");
+}
+
+static uint32_t xhci_padctl_r32(uint32_t off)
+{
+    volatile uint8_t *base = (volatile uint8_t *)TEGRA_XUSB_PADCTL_BASE;
+    return *(volatile uint32_t *)(base + off);
+}
+
+static void xhci_padctl_w32(uint32_t off, uint32_t v)
+{
+    volatile uint8_t *base = (volatile uint8_t *)TEGRA_XUSB_PADCTL_BASE;
+    *(volatile uint32_t *)(base + off) = v;
+}
+
+static bool xhci_active_usb2_lane(unsigned *lane_out)
+{
+    if (xhci_active_port < TEGRA_XUSB_USB2_PORT_OFFSET)
+        return false;
+
+    unsigned lane = (unsigned)xhci_active_port - TEGRA_XUSB_USB2_PORT_OFFSET;
+    if (lane >= TEGRA_XUSB_USB2_PORT_COUNT)
+        return false;
+
+    if (lane_out)
+        *lane_out = lane;
+    return true;
+}
+
+static void tegra_xusb_utmi_pad_power_on_active_lane(const char *why)
+{
+    unsigned lane = 0;
+    if (!xhci_active_usb2_lane(&lane))
+        return;
+
+    uint32_t mux_before  = xhci_padctl_r32(XUSB_PADCTL_USB2_PAD_MUX);
+    uint32_t cap_before  = xhci_padctl_r32(XUSB_PADCTL_USB2_PORT_CAP);
+    uint32_t bias_before = xhci_padctl_r32(XUSB_PADCTL_USB2_BIAS_PAD_CTL0);
+    uint32_t ctl0_before = xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL0(lane));
+    uint32_t ctl1_before = xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL1(lane));
+
+    uint32_t mux = mux_before;
+    mux &= ~(USB2_PORT_MASK << USB2_PORT_SHIFT(lane));
+    mux |= (PORT_XUSB << USB2_PORT_SHIFT(lane));
+    xhci_padctl_w32(XUSB_PADCTL_USB2_PAD_MUX, mux);
+
+    uint32_t cap = cap_before;
+    cap &= ~(PORT_CAP_MASK << PORTX_CAP_SHIFT(lane));
+    cap |= (PORT_CAP_HOST << PORTX_CAP_SHIFT(lane));
+    xhci_padctl_w32(XUSB_PADCTL_USB2_PORT_CAP, cap);
+
+    uint32_t bias = bias_before & ~BIAS_PAD_PD;
+    xhci_padctl_w32(XUSB_PADCTL_USB2_BIAS_PAD_CTL0, bias);
+
+    uint64_t start = timer_get_count();
+    uint64_t delay = (timer_get_frequency() + 499999ULL) / 500000ULL; /* ~2 us */
+    while (timer_get_count() - start < delay) { }
+
+    uint32_t ctl0 = ctl0_before & ~(USB2_OTG_PD | USB2_OTG_PD_ZI);
+    ctl0 |= TERM_SEL;
+    xhci_padctl_w32(XUSB_PADCTL_USB2_OTG_PADX_CTL0(lane), ctl0);
+
+    uint32_t ctl1 = ctl1_before & ~USB2_OTG_PD_DR;
+    xhci_padctl_w32(XUSB_PADCTL_USB2_OTG_PADX_CTL1(lane), ctl1);
+    dsb(sy);
+
+    INFO("xhci: %s UTMI lane %u mux 0x%08x->0x%08x cap 0x%08x->0x%08x "
+         "bias 0x%08x->0x%08x ctl0 0x%08x->0x%08x ctl1 0x%08x->0x%08x",
+         why ? why : "powered",
+         lane,
+         (unsigned)mux_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_PAD_MUX),
+         (unsigned)cap_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_PORT_CAP),
+         (unsigned)bias_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_BIAS_PAD_CTL0),
+         (unsigned)ctl0_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL0(lane)),
+         (unsigned)ctl1_before, (unsigned)xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL1(lane)));
+}
+
+static void tegra_xusb_utmi_pad_power_cycle_active_lane(const char *why)
+{
+    unsigned lane = 0;
+    if (!xhci_active_usb2_lane(&lane))
+        return;
+
+    uint32_t ctl0_before = xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL0(lane));
+    uint32_t ctl1_before = xhci_padctl_r32(XUSB_PADCTL_USB2_OTG_PADX_CTL1(lane));
+
+    uint32_t ctl0_off = ctl0_before | USB2_OTG_PD | USB2_OTG_PD_ZI;
+    uint32_t ctl1_off = ctl1_before | USB2_OTG_PD_DR;
+    xhci_padctl_w32(XUSB_PADCTL_USB2_OTG_PADX_CTL0(lane), ctl0_off);
+    xhci_padctl_w32(XUSB_PADCTL_USB2_OTG_PADX_CTL1(lane), ctl1_off);
+    dsb(sy);
+
+    uint64_t start = timer_get_count();
+    uint64_t ticks = timer_get_frequency() / 100; /* ~10 ms */
+    while (timer_get_count() - start < ticks) { }
+
+    tegra_xusb_utmi_pad_power_on_active_lane(why ? why : "power-cycled");
+
+    INFO("xhci: UTMI lane %u power-cycle ctl0 0x%08x->0x%08x ctl1 0x%08x->0x%08x",
+         lane,
+         (unsigned)ctl0_before, (unsigned)ctl0_off,
+         (unsigned)ctl1_before, (unsigned)ctl1_off);
+}
 
 /*
  * Hot-plug state: STALE at boot (assume pre-kexec stale device) →
@@ -154,6 +443,338 @@ static enum usb_speed xhci_prereset_speed = USB_SPEED_UNKNOWN;
  * Related: issue #309.
  */
 static enum xhci_attach_phase xhci_attach_state = XHCI_ATTACH_STALE;
+
+static const char *xhci_attach_phase_str(enum xhci_attach_phase state)
+{
+    switch (state) {
+    case XHCI_ATTACH_STALE:          return "STALE";
+    case XHCI_ATTACH_WAIT_RECONNECT: return "WAIT_RECONNECT";
+    case XHCI_ATTACH_FRESH:          return "FRESH";
+    }
+    return "UNKNOWN";
+}
+
+static const char *xhci_speed_str(enum usb_speed speed)
+{
+    switch (speed) {
+    case USB_SPEED_LOW:      return "low";
+    case USB_SPEED_FULL:     return "full";
+    case USB_SPEED_HIGH:     return "high";
+    case USB_SPEED_SUPER:    return "super";
+    case USB_SPEED_UNKNOWN:  return "unknown";
+    }
+    return "?";
+}
+
+static const char *xhci_slot_state_str(uint32_t state)
+{
+    switch (state) {
+    case 0: return "disabled";
+    case 1: return "default";
+    case 2: return "addressed";
+    case 3: return "configured";
+    default: return "?";
+    }
+}
+
+static const char *xhci_ep_state_str(uint32_t state)
+{
+    switch (state & XHCI_EP_DW0_STATE_MASK) {
+    case 0: return "disabled";
+    case 1: return "running";
+    case 2: return "halted";
+    case 3: return "stopped";
+    case 4: return "error";
+    default: return "?";
+    }
+}
+
+static const char *xhci_ctrl_stage_str(uint8_t stage)
+{
+    switch (stage) {
+    case 1: return "setup";
+    case 2: return "data";
+    case 3: return "status";
+    default: return "none";
+    }
+}
+
+static void xhci_log_one_devctx_snapshot(const char *tag, const char *which,
+                                         void *devctx)
+{
+    if (devctx == NULL)
+        return;
+
+    bool cz = xhci_caps_cached.ctx_64;
+    uint32_t slot0 = *xhci_dev_slot_dw(devctx, 0);
+    uint32_t slot1 = *xhci_dev_slot_dw(devctx, 1);
+    uint32_t slot2 = *xhci_dev_slot_dw(devctx, 2);
+    uint32_t slot3 = *xhci_dev_slot_dw(devctx, 3);
+    uint32_t ep00  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 0, cz);
+    uint32_t ep01  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 1, cz);
+    uint32_t ep02  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 2, cz);
+    uint32_t ep03  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 3, cz);
+    uint32_t ep04  = *xhci_dev_ep_dw(devctx, XHCI_DCI_EP0, 4, cz);
+    uint32_t route = slot0 & XHCI_SLOT_DW0_ROUTE_MASK;
+    uint32_t speed = (slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT;
+    uint32_t ctxent = (slot0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT;
+    uint32_t root_port = (slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+    uint32_t addr = slot3 & XHCI_SLOT_DW3_ADDR_MASK;
+    uint32_t state = (slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT;
+    uint32_t ep0_state = ep00 & XHCI_EP_DW0_STATE_MASK;
+    uint32_t ep0_type = (ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT;
+    uint32_t ep0_mps = (ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT;
+    uint64_t ep0_tr = ((uint64_t)ep03 << 32) | (ep02 & ~0xFULL);
+    uint32_t ep0_dcs = ep02 & 0x1U;
+
+    INFO("xhci: %s %s devctx=%p slot route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
+         tag, which, devctx,
+         (unsigned)route, (unsigned)speed, (unsigned)ctxent,
+         (unsigned)root_port, (unsigned)addr,
+         xhci_slot_state_str(state),
+         (unsigned)slot0, (unsigned)slot1,
+         (unsigned)slot2, (unsigned)slot3);
+    INFO("xhci: %s %s devctx ep0 state=%s type=%u mps=%u tr=0x%lx dcs=%u avg=%u"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x",
+         tag, which,
+         xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
+         (unsigned)ep0_mps, (unsigned long)ep0_tr,
+         (unsigned)ep0_dcs,
+         (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+         (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+         (unsigned)ep03, (unsigned)ep04);
+}
+
+static void xhci_log_inherited_slot3_handoff_snapshot(const char *tag,
+                                                      uintptr_t phys)
+{
+    if (!xhci_inherited_slot3_ctx_valid)
+        return;
+
+    uint32_t slot0 = xhci_inherited_slot3_slot_ctx_dw[0];
+    uint32_t slot1 = xhci_inherited_slot3_slot_ctx_dw[1];
+    uint32_t slot2 = xhci_inherited_slot3_slot_ctx_dw[2];
+    uint32_t slot3 = xhci_inherited_slot3_slot_ctx_dw[3];
+    uint32_t ep00  = xhci_inherited_slot3_ep0_ctx_dw[0];
+    uint32_t ep01  = xhci_inherited_slot3_ep0_ctx_dw[1];
+    uint32_t ep02  = xhci_inherited_slot3_ep0_ctx_dw[2];
+    uint32_t ep03  = xhci_inherited_slot3_ep0_ctx_dw[3];
+    uint32_t ep04  = xhci_inherited_slot3_ep0_ctx_dw[4];
+    uint32_t route = slot0 & XHCI_SLOT_DW0_ROUTE_MASK;
+    uint32_t speed = (slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT;
+    uint32_t ctxent = (slot0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT;
+    uint32_t root_port = (slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+    uint32_t addr = slot3 & XHCI_SLOT_DW3_ADDR_MASK;
+    uint32_t state = (slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT;
+    uint32_t ep0_state = ep00 & XHCI_EP_DW0_STATE_MASK;
+    uint32_t ep0_type = (ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT;
+    uint32_t ep0_mps = (ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT;
+    uint64_t ep0_tr = ((uint64_t)ep03 << 32) | (ep02 & ~0xFULL);
+    uint32_t ep0_dcs = ep02 & 0x1U;
+
+    INFO("xhci: %s inherited-slot3 phys=0x%lx slot route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
+         tag, (unsigned long)phys,
+         (unsigned)route, (unsigned)speed, (unsigned)ctxent,
+         (unsigned)root_port, (unsigned)addr,
+         xhci_slot_state_str(state),
+         (unsigned)slot0, (unsigned)slot1,
+         (unsigned)slot2, (unsigned)slot3);
+    INFO("xhci: %s inherited-slot3 ep0 state=%s type=%u mps=%u tr=0x%lx dcs=%u avg=%u"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x",
+         tag,
+         xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
+         (unsigned)ep0_mps, (unsigned long)ep0_tr,
+         (unsigned)ep0_dcs,
+         (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+         (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+         (unsigned)ep03, (unsigned)ep04);
+}
+
+static void xhci_log_inherited_slot1_handoff_snapshot(const char *tag,
+                                                      uintptr_t phys)
+{
+    if (!xhci_inherited_slot1_ctx_valid)
+        return;
+
+    uint32_t slot0 = xhci_inherited_slot1_slot_ctx_dw[0];
+    uint32_t slot1 = xhci_inherited_slot1_slot_ctx_dw[1];
+    uint32_t slot2 = xhci_inherited_slot1_slot_ctx_dw[2];
+    uint32_t slot3 = xhci_inherited_slot1_slot_ctx_dw[3];
+    uint32_t ep00  = xhci_inherited_slot1_ep0_ctx_dw[0];
+    uint32_t ep01  = xhci_inherited_slot1_ep0_ctx_dw[1];
+    uint32_t ep02  = xhci_inherited_slot1_ep0_ctx_dw[2];
+    uint32_t ep03  = xhci_inherited_slot1_ep0_ctx_dw[3];
+    uint32_t ep04  = xhci_inherited_slot1_ep0_ctx_dw[4];
+    uint32_t route = slot0 & XHCI_SLOT_DW0_ROUTE_MASK;
+    uint32_t speed = (slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT;
+    uint32_t ctxent = (slot0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT;
+    uint32_t root_port = (slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+    uint32_t addr = slot3 & XHCI_SLOT_DW3_ADDR_MASK;
+    uint32_t state = (slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT;
+    uint32_t ep0_state = ep00 & XHCI_EP_DW0_STATE_MASK;
+    uint32_t ep0_type = (ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT;
+    uint32_t ep0_mps = (ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT;
+    uint64_t ep0_tr = ((uint64_t)ep03 << 32) | (ep02 & ~0xFULL);
+    uint32_t ep0_dcs = ep02 & 0x1U;
+
+    INFO("xhci: %s inherited-slot1 phys=0x%lx slot route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x",
+         tag, (unsigned long)phys,
+         (unsigned)route, (unsigned)speed, (unsigned)ctxent,
+         (unsigned)root_port, (unsigned)addr,
+         xhci_slot_state_str(state),
+         (unsigned)slot0, (unsigned)slot1,
+         (unsigned)slot2, (unsigned)slot3);
+    INFO("xhci: %s inherited-slot1 ep0 state=%s type=%u mps=%u tr=0x%lx dcs=%u avg=%u"
+         " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x",
+         tag,
+         xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
+         (unsigned)ep0_mps, (unsigned long)ep0_tr,
+         (unsigned)ep0_dcs,
+         (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+         (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+         (unsigned)ep03, (unsigned)ep04);
+}
+
+static void xhci_log_devctx_snapshot(struct xhci_device *d, const char *tag)
+{
+    if (d == NULL)
+        return;
+
+    xhci_log_one_devctx_snapshot(tag, "local", d->dev_ctx);
+    if (d->adopted_inherited && d->slot_id == 1 && d->controller_devctx_phys != 0)
+        xhci_log_inherited_slot1_handoff_snapshot(tag, d->controller_devctx_phys);
+    if (d->adopted_inherited && d->slot_id == 3 && d->controller_devctx_phys != 0)
+        xhci_log_inherited_slot3_handoff_snapshot(tag, d->controller_devctx_phys);
+}
+
+static bool xhci_stale_signature_changed(uint32_t initial, uint32_t current)
+{
+    /*
+     * Ignore the RW1CS change bits when comparing snapshots; they can
+     * flicker transiently and aren't the structural "this is a different
+     * device/link state now" signal we care about. Everything else is
+     * fair game — on nano-2 the USB-C ethernet dongle changes PORTSC[5]
+     * without ever producing a full CCS 1->0->1 cycle, so the stale-hide
+     * logic needs another promotion path.
+     */
+    uint32_t mask = ~XHCI_PORTSC_RW1CS_MASK;
+    return (initial & mask) != (current & mask);
+}
+
+static bool xhci_stale_port_already_recovered(uint32_t portsc, bool connected)
+{
+    /*
+     * On nano-2, a USB-C ethernet dongle present across kexec can land
+     * in a "connected but deconfigured" state before SLM-OS ever polls
+     * the root port: CCS stays set, PED is clear, and PEC is already
+     * latched. In that case there is no later 1->0->1 transition for
+     * the stale-hide state machine to observe, but the controller has
+     * already told us the port changed. Surface it as a fresh attach so
+     * usb_core can drive the normal port-reset/enumeration sequence.
+     *
+     * Keep this narrow: the original stale inherited device path keeps
+     * PED set, so it still stays hidden until a real re-plug.
+     */
+    if (!connected)
+        return false;
+
+    return !(portsc & XHCI_PORTSC_PED) &&
+           !!(portsc & (XHCI_PORTSC_PEC | XHCI_PORTSC_PRC));
+}
+
+static bool xhci_stale_port_detached_in_linux(uint32_t portsc, bool connected,
+                                              enum usb_speed speed)
+{
+    /*
+     * A Linux-side usb-device "remove" before kexec can leave the
+     * physical device still connected but the root port no longer in the
+     * old Linux-enumerated state: CCS stays set, PED is clear, and no
+     * RW1CS change bits are latched anymore. That is materially different
+     * from the original stale inherited case and is a candidate for a
+     * fresh SLM-OS enumeration attempt without waiting for a manual
+     * unplug/replug.
+     */
+    if (!connected || (portsc & XHCI_PORTSC_PED) ||
+        (portsc & XHCI_PORTSC_RW1CS_MASK))
+        return false;
+
+    return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
+           speed == USB_SPEED_HIGH;
+}
+
+static bool xhci_stale_port_enabled_inherited(uint32_t portsc, bool connected,
+                                              enum usb_speed speed)
+{
+    /*
+     * Less-destructive Linux-side cleanup (for example authorized=0)
+     * can leave the pre-kexec device still physically present and the
+     * root port fully enabled at USB2 speed, without the poisoned
+     * connected-disabled 0x0c0006e1 state from usb-device remove.
+     *
+     * Treat that as a fresh enumeration candidate for experimentation:
+     * it gives SLM-OS a live high-speed link to work with instead of
+     * forcing the old unplug/replug path up front.
+     */
+    if (!connected || !(portsc & XHCI_PORTSC_PED) ||
+        (portsc & XHCI_PORTSC_RW1CS_MASK))
+        return false;
+
+    return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
+           speed == USB_SPEED_HIGH;
+}
+
+static bool xhci_connected_disabled_port(uint32_t portsc)
+{
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    bool decoded = xhci_decode_portsc(portsc, &connected, &speed);
+
+    if (!connected || (portsc & XHCI_PORTSC_PED) || !decoded)
+        return false;
+
+    return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
+           speed == USB_SPEED_HIGH;
+}
+
+static bool xhci_connected_enabled_u0_port(uint32_t portsc)
+{
+    bool connected = false;
+    enum usb_speed speed = USB_SPEED_UNKNOWN;
+    bool decoded = xhci_decode_portsc(portsc, &connected, &speed);
+    uint32_t pls = (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+
+    if (!connected || !(portsc & XHCI_PORTSC_PED) || !decoded)
+        return false;
+
+    if (pls != XHCI_PLS_U0)
+        return false;
+
+    return speed == USB_SPEED_FULL || speed == USB_SPEED_LOW ||
+           speed == USB_SPEED_HIGH;
+}
+
+static uint32_t xhci_ack_port_changes(uint8_t pidx, uint32_t portsc,
+                                      const char *why)
+{
+    uint32_t change = portsc & XHCI_PORTSC_RW1CS_MASK;
+    if (!change)
+        return portsc;
+
+    uint32_t ack = xhci_port_state_to_neutral(portsc) | change;
+    xhci_op_w32(XHCI_OP_PORTSC(pidx), ack);
+
+    uint64_t settle_start = timer_get_count();
+    uint64_t settle_ticks = timer_get_frequency() / 100;  /* 10 ms */
+    while (timer_get_count() - settle_start < settle_ticks) { }
+
+    uint32_t after = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+    INFO("xhci: PORTSC[%u] acked change bits for %s (0x%08x -> 0x%08x)",
+         (unsigned)pidx, why, (unsigned)portsc, (unsigned)after);
+    return after;
+}
 
 static uint8_t xhci_locate_usb2_port(void)
 {
@@ -168,6 +789,7 @@ static uint8_t xhci_locate_usb2_port(void)
             (s == USB_SPEED_FULL || s == USB_SPEED_LOW ||
              s == USB_SPEED_HIGH)) {
             xhci_active_portsc  = sc;
+            xhci_stale_portsc_initial = sc;
             xhci_prereset_speed = s;
             return p;
         }
@@ -211,6 +833,100 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
     (void)xhci_decode_portsc(portsc, &c, &s);
 
     enum xhci_attach_phase prev = xhci_attach_state;
+    if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_already_recovered(portsc, c) &&
+        xhci_inherited_slot1_matches_active_port(s)) {
+        INFO("xhci: stale port on PORTSC[%u] matches inherited slot1 handoff "
+             "(0x%08x) — skipping reset and reusing retained slot state",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
+        xhci_force_connected_disabled_reset = false;
+        xhci_force_enabled_port_reset = false;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_already_recovered(portsc, c)) {
+        INFO("xhci: stale port on PORTSC[%u] is connected with PED=0 "
+             "and change latched (0x%08x) — forcing reset-backed recovery",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = false;
+        xhci_force_connected_disabled_reset = true;
+        xhci_force_enabled_port_reset = false;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_detached_in_linux(portsc, c, s)) {
+        INFO("xhci: stale port on PORTSC[%u] is connected-disabled with "
+             "no change bits (0x%08x) — treating as fresh attach",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = false;
+        xhci_force_connected_disabled_reset = true;
+        xhci_force_enabled_port_reset = false;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_enabled_inherited(portsc, c, s) &&
+        xhci_inherited_slot1_matches_active_port(s)) {
+        INFO("xhci: stale port on PORTSC[%u] is already enabled and matches "
+             "inherited slot1 handoff (0x%08x) — skipping reset and reusing retained slot1 state",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
+        xhci_force_connected_disabled_reset = false;
+        xhci_force_enabled_port_reset = false;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE &&
+        xhci_stale_port_enabled_inherited(portsc, c, s)) {
+        INFO("xhci: stale port on PORTSC[%u] is already enabled at USB2 speed "
+             "(0x%08x) — reusing enabled inherited state",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
+        xhci_force_connected_disabled_reset = false;
+        xhci_force_enabled_port_reset = true;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
+    if (prev == XHCI_ATTACH_STALE && c &&
+        xhci_stale_signature_changed(xhci_stale_portsc_initial, portsc)) {
+        INFO("xhci: stale port signature changed on PORTSC[%u] "
+             "(0x%08x -> 0x%08x) — treating as fresh attach",
+             (unsigned)xhci_active_port,
+             (unsigned)xhci_stale_portsc_initial,
+             (unsigned)portsc);
+        xhci_attach_state = XHCI_ATTACH_FRESH;
+        xhci_prereset_speed = s;
+        xhci_skip_next_port_reset = true;
+        xhci_force_connected_disabled_reset = false;
+        xhci_force_enabled_port_reset = false;
+        if (connected) *connected = true;
+        if (speed)     *speed     = s;
+        return true;
+    }
+
     struct xhci_attach_result r = xhci_attach_step(prev, c, s);
     xhci_attach_state = r.next_state;
 
@@ -223,12 +939,210 @@ bool xhci_hcd_port_status(uint8_t port, bool *connected, enum usb_speed *speed)
             INFO("xhci: fresh USB attach on PORTSC[%u]",
                  (unsigned)xhci_active_port);
             xhci_prereset_speed = s;
+            xhci_force_connected_disabled_reset = false;
         }
     }
 
     if (connected) *connected = r.report_connected;
     if (speed)     *speed     = r.report_speed;
     return true;
+}
+
+void xhci_dump_port_state(void)
+{
+    if (!xhci_live)
+        return;
+
+    uart_printf("  attach_state=%s active_port=%s",
+                xhci_attach_phase_str(xhci_attach_state),
+                xhci_active_port == 0xFF ? "unset" : "");
+    if (xhci_active_port != 0xFF) {
+        uart_printf("%u stale_portsc=0x%08x last_portsc=0x%08x prereset_speed=%s",
+                    (unsigned)xhci_active_port,
+                    (unsigned)xhci_stale_portsc_initial,
+                    (unsigned)xhci_active_portsc,
+                    xhci_speed_str(xhci_prereset_speed));
+    }
+    uart_puts("\r\n");
+
+    for (uint8_t p = 0; p < xhci_caps_cached.max_ports; p++) {
+        uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(p));
+        bool connected = false;
+        enum usb_speed speed = USB_SPEED_UNKNOWN;
+        bool decoded = xhci_decode_portsc(sc, &connected, &speed);
+        uint32_t pls = (sc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+        uint32_t raw_speed = (sc & XHCI_PORTSC_SPEED_MASK) >> XHCI_PORTSC_SPEED_SHIFT;
+
+        uart_printf("  PORTSC[%u]=0x%08x ccs=%u ped=%u pp=%u csc=%u pec=%u prc=%u pls=%u raw_speed=%u decoded=%u speed=%s%s\r\n",
+                    (unsigned)p, (unsigned)sc,
+                    (sc & XHCI_PORTSC_CCS) ? 1u : 0u,
+                    (sc & XHCI_PORTSC_PED) ? 1u : 0u,
+                    (sc & XHCI_PORTSC_PP)  ? 1u : 0u,
+                    (sc & XHCI_PORTSC_CSC) ? 1u : 0u,
+                    (sc & XHCI_PORTSC_PEC) ? 1u : 0u,
+                    (sc & XHCI_PORTSC_PRC) ? 1u : 0u,
+                    (unsigned)pls,
+                    (unsigned)raw_speed,
+                    decoded ? 1u : 0u,
+                    xhci_speed_str(speed),
+                    p == xhci_active_port ? "  <active>" : "");
+    }
+}
+
+void xhci_dump_device_state(void)
+{
+    bool cz = xhci_caps_cached.ctx_64;
+    uint64_t slot3_dcbaa = xhci_dcbaa[3];
+
+    uart_printf("  inherited slot3: raw_devctx=0x%08x%08x cpu_devctx=0x%08x%08x dcbaa[3]=0x%08x%08x\r\n",
+                (unsigned)(xhci_inherited_slot3_devctx_raw_phys >> 32),
+                (unsigned)xhci_inherited_slot3_devctx_raw_phys,
+                (unsigned)(xhci_inherited_slot3_devctx_phys >> 32),
+                (unsigned)xhci_inherited_slot3_devctx_phys,
+                (unsigned)(slot3_dcbaa >> 32),
+                (unsigned)slot3_dcbaa);
+    if (xhci_last_ctrl_diag.valid) {
+        uart_printf("  last ctrl: slot=%u dci=%u adopted=%u req=0x%02x type=0x%02x "
+                    "wValue=0x%04x wIndex=0x%04x wLength=%u stage=%s "
+                    "done=%u timeout=%u cc=%u status=%d actual=%u residual=%u "
+                    "trb=0x%08x%08x next=0x%08x%08x enqueue=%u pcs=%u\r\n",
+                    (unsigned)xhci_last_ctrl_diag.slot_id,
+                    (unsigned)xhci_last_ctrl_diag.dci,
+                    (unsigned)xhci_last_ctrl_diag.adopted,
+                    (unsigned)xhci_last_ctrl_diag.request,
+                    (unsigned)xhci_last_ctrl_diag.request_type,
+                    (unsigned)xhci_last_ctrl_diag.value,
+                    (unsigned)xhci_last_ctrl_diag.index,
+                    (unsigned)xhci_last_ctrl_diag.length,
+                    xhci_ctrl_stage_str(xhci_last_ctrl_diag.stage),
+                    (unsigned)xhci_last_ctrl_diag.completed,
+                    (unsigned)xhci_last_ctrl_diag.timed_out,
+                    (unsigned)xhci_last_ctrl_diag.cc,
+                    (int)xhci_last_ctrl_diag.status,
+                    (unsigned)xhci_last_ctrl_diag.actual,
+                    (unsigned)xhci_last_ctrl_diag.residual,
+                    (unsigned)(xhci_last_ctrl_diag.trb_phys >> 32),
+                    (unsigned)xhci_last_ctrl_diag.trb_phys,
+                    (unsigned)(xhci_last_ctrl_diag.next_trb_phys >> 32),
+                    (unsigned)xhci_last_ctrl_diag.next_trb_phys,
+                    (unsigned)xhci_last_ctrl_diag.enqueue,
+                    (unsigned)xhci_last_ctrl_diag.pcs);
+    }
+    if (xhci_last_cmd_diag.valid) {
+        uart_printf("  last cmd: type=%u done=%u timeout=%u cc=%u slot=%u "
+                    "USBSTS=0x%08x trb=0x%08x%08x\r\n",
+                    (unsigned)xhci_last_cmd_diag.type,
+                    (unsigned)xhci_last_cmd_diag.completed,
+                    (unsigned)xhci_last_cmd_diag.timed_out,
+                    (unsigned)xhci_last_cmd_diag.cc,
+                    (unsigned)xhci_last_cmd_diag.slot_id,
+                    (unsigned)xhci_last_cmd_diag.usbsts,
+                    (unsigned)(xhci_last_cmd_diag.trb_phys >> 32),
+                    (unsigned)xhci_last_cmd_diag.trb_phys);
+    }
+
+    for (unsigned i = 0; i < sizeof(xhci_dev_pool) / sizeof(xhci_dev_pool[0]); i++) {
+        struct xhci_device *d = &xhci_dev_pool[i];
+        if (!d->valid)
+            continue;
+
+        uart_printf("  dev[%u]: slot=%u root_port=%u dev_ctx=%p controller_devctx_phys=0x%08x%08x input_ctx=%p\r\n",
+                    i, (unsigned)d->slot_id, (unsigned)d->root_port,
+                    d->dev_ctx,
+                    (unsigned)(d->controller_devctx_phys >> 32),
+                    (unsigned)d->controller_devctx_phys,
+                    d->input_ctx);
+
+        if (d->dev_ctx != NULL) {
+            uint32_t slot0 = *xhci_dev_slot_dw(d->dev_ctx, 0);
+            uint32_t slot1 = *xhci_dev_slot_dw(d->dev_ctx, 1);
+            uint32_t slot2 = *xhci_dev_slot_dw(d->dev_ctx, 2);
+            uint32_t slot3 = *xhci_dev_slot_dw(d->dev_ctx, 3);
+            uint32_t ep00  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
+            uint32_t ep01  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
+            uint32_t ep02  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+            uint32_t ep03  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+            uint32_t ep04  = *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 4, cz);
+            uint32_t route = slot0 & XHCI_SLOT_DW0_ROUTE_MASK;
+            uint32_t speed = (slot0 & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT;
+            uint32_t ctxent = (slot0 & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT;
+            uint32_t root_port = (slot1 & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT;
+            uint32_t addr = slot3 & XHCI_SLOT_DW3_ADDR_MASK;
+            uint32_t state = (slot3 & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT;
+            uint32_t ep0_state = ep00 & XHCI_EP_DW0_STATE_MASK;
+            uint32_t ep0_type = (ep01 & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT;
+            uint32_t ep0_mps = (ep01 & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT;
+            uint64_t ep0_tr = ((uint64_t)ep03 << 32) | (ep02 & ~0xFULL);
+            uint32_t ep0_dcs = ep02 & 0x1U;
+
+            uart_printf("    slotctx route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+                        " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x\r\n",
+                        (unsigned)route, (unsigned)speed, (unsigned)ctxent,
+                        (unsigned)root_port, (unsigned)addr,
+                        xhci_slot_state_str(state),
+                        (unsigned)slot0, (unsigned)slot1,
+                        (unsigned)slot2, (unsigned)slot3);
+            uart_printf("    ep0ctx state=%s type=%u mps=%u tr=0x%08x%08x dcs=%u avg=%u"
+                        " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x\r\n",
+                        xhci_ep_state_str(ep0_state), (unsigned)ep0_type,
+                        (unsigned)ep0_mps,
+                        (unsigned)(ep0_tr >> 32), (unsigned)ep0_tr,
+                        (unsigned)ep0_dcs,
+                        (unsigned)(ep04 & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+                        (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+                        (unsigned)ep03, (unsigned)ep04);
+        }
+
+        if (d->adopted_inherited && d->slot_id == 3 && d->controller_devctx_phys != 0) {
+            uart_printf("    inherited-slot3 phys=0x%08x%08x\r\n",
+                        (unsigned)(d->controller_devctx_phys >> 32),
+                        (unsigned)d->controller_devctx_phys);
+            uart_printf("    inherited slotctx route=0x%x speed=%u ctx=%u root=%u addr=%u state=%s"
+                        " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x\r\n",
+                        (unsigned)(xhci_inherited_slot3_slot_ctx_dw[0] & XHCI_SLOT_DW0_ROUTE_MASK),
+                        (unsigned)((xhci_inherited_slot3_slot_ctx_dw[0] & XHCI_SLOT_DW0_SPEED_MASK) >> XHCI_SLOT_DW0_SPEED_SHIFT),
+                        (unsigned)((xhci_inherited_slot3_slot_ctx_dw[0] & XHCI_SLOT_DW0_CTXENT_MASK) >> XHCI_SLOT_DW0_CTXENT_SHIFT),
+                        (unsigned)((xhci_inherited_slot3_slot_ctx_dw[1] & XHCI_SLOT_DW1_ROOT_PORT_MASK) >> XHCI_SLOT_DW1_ROOT_PORT_SHIFT),
+                        (unsigned)(xhci_inherited_slot3_slot_ctx_dw[3] & XHCI_SLOT_DW3_ADDR_MASK),
+                        xhci_slot_state_str((xhci_inherited_slot3_slot_ctx_dw[3] & XHCI_SLOT_DW3_STATE_MASK) >> XHCI_SLOT_DW3_STATE_SHIFT),
+                        (unsigned)xhci_inherited_slot3_slot_ctx_dw[0],
+                        (unsigned)xhci_inherited_slot3_slot_ctx_dw[1],
+                        (unsigned)xhci_inherited_slot3_slot_ctx_dw[2],
+                        (unsigned)xhci_inherited_slot3_slot_ctx_dw[3]);
+            uart_printf("    inherited ep0ctx state=%s type=%u mps=%u tr=0x%08x%08x dcs=%u avg=%u"
+                        " dw0=0x%08x dw1=0x%08x dw2=0x%08x dw3=0x%08x dw4=0x%08x\r\n",
+                        xhci_ep_state_str(xhci_inherited_slot3_ep0_ctx_dw[0] & XHCI_EP_DW0_STATE_MASK),
+                        (unsigned)((xhci_inherited_slot3_ep0_ctx_dw[1] & XHCI_EP_DW1_EPTYPE_MASK) >> XHCI_EP_DW1_EPTYPE_SHIFT),
+                        (unsigned)((xhci_inherited_slot3_ep0_ctx_dw[1] & XHCI_EP_DW1_MAXPKT_MASK) >> XHCI_EP_DW1_MAXPKT_SHIFT),
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[3],
+                        (unsigned)(xhci_inherited_slot3_ep0_ctx_dw[2] & ~0xFULL),
+                        (unsigned)(xhci_inherited_slot3_ep0_ctx_dw[2] & 0x1U),
+                        (unsigned)(xhci_inherited_slot3_ep0_ctx_dw[4] & XHCI_EP_DW4_AVG_TRB_LEN_MASK),
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[0],
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[1],
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[2],
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[3],
+                        (unsigned)xhci_inherited_slot3_ep0_ctx_dw[4]);
+        }
+
+        if (d->input_ctx != NULL) {
+            uint32_t add = *xhci_in_control_dw(d->input_ctx, 1);
+            uint32_t slot0 = *xhci_in_slot_dw(d->input_ctx, 0, cz);
+            uint32_t slot1 = *xhci_in_slot_dw(d->input_ctx, 1, cz);
+            uint32_t ep00  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 0, cz);
+            uint32_t ep01  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 1, cz);
+            uint32_t ep02  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 2, cz);
+            uint32_t ep03  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 3, cz);
+            uint32_t ep04  = *xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 4, cz);
+
+            uart_printf("    inputctx add=0x%08x slot_dw0=0x%08x slot_dw1=0x%08x"
+                        " ep0_dw0=0x%08x ep0_dw1=0x%08x ep0_dw2=0x%08x"
+                        " ep0_dw3=0x%08x ep0_dw4=0x%08x\r\n",
+                        (unsigned)add, (unsigned)slot0, (unsigned)slot1,
+                        (unsigned)ep00, (unsigned)ep01, (unsigned)ep02,
+                        (unsigned)ep03, (unsigned)ep04);
+        }
+    }
 }
 
 int xhci_hcd_port_reset(uint8_t port)
@@ -238,58 +1152,172 @@ int xhci_hcd_port_reset(uint8_t port)
     if (xhci_active_port == 0xFF)
         return -1;
 
-    uint8_t pidx = xhci_active_port;
-    uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+    tegra_xusb_utmi_pad_power_on_active_lane("pre-reset");
 
-    /*
-     * PORTSC write discipline per §5.4.8: read-modify-write, clear the
-     * RW1CS change bits we don't intend to touch (writing 1 would
-     * clear them), then set PR. The controller starts the reset and
-     * signals completion by setting PRC. We clear PRC at the end with
-     * a single RW1CS write.
-     *
-     * Known limitation: on jetson-nano-1 post-kexec with a Realtek
-     * USB hub / CDC-ECM dongle already enumerated by Linux, this
-     * plain PR sequence completes with PRC=1 but the first EP0
-     * control transfer after ADDRESS_DEVICE returns cc=4 (USB
-     * transaction error). A PP=0/PP=1 power-cycle variant was tried
-     * as a harder reset; it got the port stuck in PLS=Polling
-     * instead of U0 and made things worse. Follow-on investigation
-     * (see the PR description) owns fixing that — possible angles
-     * include tegra-xusb padctl/PHY re-programming, or gating the
-     * reset behind an explicit clear of pre-kexec SetPortFeature
-     * state that Linux may have latched in the hub's upstream port.
-     */
-    uint32_t write = portsc & ~XHCI_PORTSC_RW1CS_MASK;
-    write |= XHCI_PORTSC_PR;
-    xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
+    uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
+    bool connected_disabled =
+        (xhci_attach_state == XHCI_ATTACH_FRESH &&
+         xhci_connected_disabled_port(portsc));
+    bool connected_enabled_u0 =
+        (xhci_attach_state == XHCI_ATTACH_FRESH &&
+         xhci_connected_enabled_u0_port(portsc));
+    bool connected_now = false;
+    enum usb_speed speed_now = USB_SPEED_UNKNOWN;
+    bool force_connected_disabled_reset =
+        connected_disabled && xhci_force_connected_disabled_reset;
+    bool force_enabled_port_reset = xhci_force_enabled_port_reset;
 
-    uint64_t start = timer_get_count();
-    uint64_t freq  = timer_get_frequency();
-    uint64_t ticks = freq / 2;   /* 500 ms */
-    while (1) {
-        uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
-        if ((sc & XHCI_PORTSC_PRC) && !(sc & XHCI_PORTSC_PR)) {
-            uint32_t ack = (sc & ~XHCI_PORTSC_RW1CS_MASK) | XHCI_PORTSC_PRC;
-            xhci_op_w32(XHCI_OP_PORTSC(pidx), ack);
-            /* Let the link settle before reading back the final
-             * PORTSC speed field. Tegra234 post-reset speed bits
-             * occasionally lag PRC by a few ms. */
-            uint64_t settle_start = timer_get_count();
-            uint64_t settle_ticks = timer_get_frequency() / 100;  /* 10 ms */
-            while (timer_get_count() - settle_start < settle_ticks) { }
-            uint32_t final_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
-            INFO("xhci: PORTSC[%u] reset complete (portsc=0x%08x → 0x%08x)",
-                 pidx, (unsigned)sc, (unsigned)final_sc);
-            xhci_active_portsc = final_sc;
+    xhci_force_connected_disabled_reset = false;
+    xhci_force_enabled_port_reset = false;
+    (void)xhci_decode_portsc(portsc, &connected_now, &speed_now);
+
+    if (connected_enabled_u0 && !force_enabled_port_reset) {
+        xhci_active_portsc = portsc;
+        INFO("xhci: reusing already-enabled U0 PORTSC[%u] (0x%08x)",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        return 0;
+    }
+
+    if (connected_disabled &&
+        xhci_inherited_slot1_matches_active_port(speed_now)) {
+        portsc = xhci_ack_port_changes(xhci_active_port, portsc,
+                                       "slot1 handoff reuse");
+        portsc = xhci_nudge_disabled_port_to_u0(xhci_active_port, portsc,
+                                                "slot1 handoff reuse");
+        xhci_skip_next_port_reset = false;
+        xhci_active_portsc = portsc;
+        INFO("xhci: reusing inherited slot1 on connected-disabled PORTSC[%u] "
+             "after change-ack (0x%08x)",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        return 0;
+    }
+
+    if (xhci_skip_next_port_reset ||
+        (connected_disabled && !force_connected_disabled_reset)) {
+        portsc = xhci_ack_port_changes(xhci_active_port, portsc,
+                                       "connected-disabled reuse");
+        portsc = xhci_resume_usb2_port_to_u0(xhci_active_port, portsc,
+                                             "connected-disabled reuse");
+        xhci_skip_next_port_reset = false;
+        xhci_active_portsc = portsc;
+        uint32_t pls =
+            (portsc & XHCI_PORTSC_PLS_MASK) >> XHCI_PORTSC_PLS_SHIFT;
+        if (!(portsc & XHCI_PORTSC_PED) ||
+            (pls != XHCI_PLS_U0 && pls != XHCI_PLS_RESUME)) {
+            WARN("xhci: inherited reuse path degraded to PORTSC[%u]=0x%08x (ped=%u pls=%u) — falling back to reset-backed recovery",
+                 (unsigned)xhci_active_port, (unsigned)portsc,
+                 (unsigned)((portsc & XHCI_PORTSC_PED) ? 1u : 0u),
+                 (unsigned)pls);
+        } else if (force_enabled_port_reset) {
+            INFO("xhci: forcing root-port reset on enabled inherited PORTSC[%u] (0x%08x, pls=%u)",
+                 (unsigned)xhci_active_port, (unsigned)xhci_active_portsc,
+                 (unsigned)pls);
+        } else {
+            INFO("xhci: skipping root-port reset on connected-disabled PORTSC[%u] (0x%08x, pls=%u)",
+                 (unsigned)xhci_active_port, (unsigned)xhci_active_portsc,
+                 (unsigned)pls);
             return 0;
         }
-        if (timer_get_count() - start >= ticks) {
-            WARN("xhci: PORTSC[%u] reset timeout (portsc=0x%08x)",
-                 pidx, (unsigned)xhci_op_r32(XHCI_OP_PORTSC(pidx)));
-            return -1;
+    }
+
+    if (force_connected_disabled_reset) {
+        INFO("xhci: forcing root-port reset on Linux-detached PORTSC[%u] (0x%08x)",
+             (unsigned)xhci_active_port, (unsigned)portsc);
+        xhci_try_power_cycle_port(xhci_active_port, "pre-reset stale-port");
+    }
+
+    uint8_t pidx = xhci_active_port;
+    uint64_t freq  = timer_get_frequency();
+    uint64_t ticks = freq / 2;   /* 500 ms */
+
+    for (unsigned attempt = 1; attempt <= 3; attempt++) {
+        portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+        portsc = xhci_ack_port_changes(pidx, portsc, "pre-reset cleanup");
+
+        /*
+         * PORTSC write discipline per §5.4.8: read-modify-write, clear the
+         * RW1CS change bits we don't intend to touch (writing 1 would
+         * clear them), then set PR. The controller starts the reset and
+         * signals completion by setting PRC.
+         */
+        uint32_t write = portsc & ~XHCI_PORTSC_RW1CS_MASK;
+        write |= XHCI_PORTSC_PR;
+        xhci_op_w32(XHCI_OP_PORTSC(pidx), write);
+
+        uint64_t start = timer_get_count();
+        while (1) {
+            uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+            if ((sc & XHCI_PORTSC_PRC) && !(sc & XHCI_PORTSC_PR)) {
+                uint32_t ack = (sc & ~XHCI_PORTSC_RW1CS_MASK) |
+                               XHCI_PORTSC_PRC |
+                               ((sc & XHCI_PORTSC_PEC) ? XHCI_PORTSC_PEC : 0U) |
+                               ((sc & XHCI_PORTSC_CSC) ? XHCI_PORTSC_CSC : 0U);
+                xhci_op_w32(XHCI_OP_PORTSC(pidx), ack);
+
+                /* Let the link settle before reading back the final
+                 * PORTSC speed field. Tegra234 post-reset speed bits
+                 * occasionally lag PRC by a few ms. */
+                uint64_t settle_start = timer_get_count();
+                uint64_t settle_ticks = timer_get_frequency() / 100;  /* 10 ms */
+                while (timer_get_count() - settle_start < settle_ticks) { }
+                uint32_t final_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+                if (!(final_sc & XHCI_PORTSC_PED)) {
+                    /*
+                     * On the inherited-kexec path the first read after
+                     * PRC frequently lands in PED=0 / PLS=7. Give the link
+                     * a little longer to settle before declaring the reset
+                     * incomplete.
+                     */
+                    uint64_t extra_start = timer_get_count();
+                    uint64_t extra_ticks = timer_get_frequency() / 5; /* 200 ms */
+                    while (timer_get_count() - extra_start < extra_ticks) {
+                        uint32_t retry_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+                        uint32_t retry_pls =
+                            (retry_sc & XHCI_PORTSC_PLS_MASK) >>
+                            XHCI_PORTSC_PLS_SHIFT;
+                        if ((retry_sc & XHCI_PORTSC_PED) || retry_pls != 7U) {
+                            INFO("xhci: PORTSC[%u] post-reset settle (0x%08x -> 0x%08x)",
+                                 pidx, (unsigned)final_sc, (unsigned)retry_sc);
+                            final_sc = retry_sc;
+                            break;
+                        }
+                    }
+                }
+                INFO("xhci: PORTSC[%u] reset complete (attempt %u, portsc=0x%08x -> 0x%08x)",
+                     pidx, attempt, (unsigned)sc, (unsigned)final_sc);
+                if (final_sc & XHCI_PORTSC_PED) {
+                    xhci_active_portsc = final_sc;
+                    return 0;
+                }
+
+                xhci_tegra_restore_context("post-reset ped=0");
+
+                uint64_t restore_start = timer_get_count();
+                uint64_t restore_ticks = timer_get_frequency() / 100;  /* 10 ms */
+                while (timer_get_count() - restore_start < restore_ticks) { }
+
+                uint32_t restored_sc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+                INFO("xhci: PORTSC[%u] after Tegra context restore 0x%08x -> 0x%08x",
+                     pidx, (unsigned)final_sc, (unsigned)restored_sc);
+                if (restored_sc & XHCI_PORTSC_PED) {
+                    xhci_active_portsc = restored_sc;
+                    return 0;
+                }
+
+                WARN("xhci: PORTSC[%u] reset left PED=0 (0x%08x)%s",
+                     pidx, (unsigned)restored_sc,
+                     attempt < 3 ? " — retrying" : "");
+                break;
+            }
+            if (timer_get_count() - start >= ticks) {
+                WARN("xhci: PORTSC[%u] reset timeout (attempt %u, portsc=0x%08x)",
+                     pidx, attempt,
+                     (unsigned)xhci_op_r32(XHCI_OP_PORTSC(pidx)));
+                return -1;
+            }
         }
     }
+    return -1;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -314,11 +1342,10 @@ static uint32_t xhci_speed_to_id(enum usb_speed s)
 /*
  * Per §4.3 + §6.2.1.1: bMaxPacketSize0 depends on speed:
  *   low   -> 8
- *   full  -> 8, 16, 32, or 64 (we pick 8 as a safe lower bound; the
- *                              8-byte device-descriptor probe will
- *                              tell us the real value and the
- *                              ADDRESS_DEVICE evaluate-context step
- *                              will patch it)
+ *   full  -> 8, 16, 32, or 64. Linux/xHCI seeds EP0 with 64 here so the
+ *                              first 8-byte device-descriptor probe uses
+ *                              the controller's normal FS default-pipe
+ *                              programming rather than an undersized MPS.
  *   high  -> 64
  *   super -> 512 (out of scope; accept for forward compatibility)
  */
@@ -326,11 +1353,460 @@ static uint16_t xhci_ep0_max_packet(enum usb_speed s)
 {
     switch (s) {
     case USB_SPEED_LOW:   return 8;
-    case USB_SPEED_FULL:  return 8;
+    case USB_SPEED_FULL:  return 64;
     case USB_SPEED_HIGH:  return 64;
     case USB_SPEED_SUPER: return 512;
     default:              return 8;
     }
+}
+
+static void xhci_patch_inherited_address(struct xhci_device *d, uint8_t addr)
+{
+    if (d == NULL || d->dev_ctx == NULL)
+        return;
+
+    uint32_t *slot3 = xhci_dev_slot_dw(d->dev_ctx, 3);
+    uint32_t old = *slot3;
+    uint32_t patched = old & ~(XHCI_SLOT_DW3_ADDR_MASK |
+                               XHCI_SLOT_DW3_STATE_MASK);
+    patched |= ((uint32_t)addr & XHCI_SLOT_DW3_ADDR_MASK);
+    patched |= (2U << XHCI_SLOT_DW3_STATE_SHIFT); /* addressed */
+    *slot3 = patched;
+    dsb(sy);
+
+    INFO("xhci: patched inherited slot address %u (dw3 0x%08x -> 0x%08x)",
+         (unsigned)addr, (unsigned)old, (unsigned)patched);
+}
+
+static void xhci_probe_eval_slot_address(struct xhci_device *d, uint8_t addr)
+{
+    if (d == NULL || d->input_ctx == NULL || d->dev_ctx == NULL ||
+        d->slot_id == 0)
+        return;
+
+    bool cz = xhci_caps_cached.ctx_64;
+    memset(d->input_ctx, 0, xhci_ctx_in_bytes(cz));
+
+    uint32_t *in_add = xhci_in_control_dw(d->input_ctx, 1);
+    *in_add = XHCI_INPUT_ADD_SLOT;
+
+    /*
+     * Evaluate Context consumes the Input Context, not the cached
+     * Device Context memory we patched in earlier retained-address
+     * probes. Seed the live Slot Context image from the controller-
+     * written Device Context, then patch only addr/state for this
+     * one-shot experiment.
+     */
+    for (unsigned i = 0; i < 4; i++)
+        *xhci_in_slot_dw(d->input_ctx, i, cz) = *xhci_dev_slot_dw(d->dev_ctx, i);
+
+    uint32_t *slot3 = xhci_in_slot_dw(d->input_ctx, 3, cz);
+    uint32_t old = *slot3;
+    uint32_t patched = old & ~(XHCI_SLOT_DW3_ADDR_MASK |
+                               XHCI_SLOT_DW3_STATE_MASK);
+    patched |= ((uint32_t)addr & XHCI_SLOT_DW3_ADDR_MASK);
+    patched |= (2U << XHCI_SLOT_DW3_STATE_SHIFT); /* addressed */
+    *slot3 = patched;
+    dsb(sy);
+
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+    cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
+    cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_EVAL_CONTEXT) |
+                  ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0) {
+        WARN("xhci: EVAL_CONTEXT(slot=%u, retained addr %u) transport failed",
+             (unsigned)d->slot_id, (unsigned)addr);
+        return;
+    }
+
+    INFO("xhci: EVAL_CONTEXT(slot=%u, retained addr %u) cc=%u dw3 0x%08x -> 0x%08x",
+         (unsigned)d->slot_id, (unsigned)addr, (unsigned)cc,
+         (unsigned)old, (unsigned)patched);
+}
+
+static uintptr_t xhci_slot3_ep0_alias_phys(void)
+{
+    uintptr_t off = xhci_inherited_slot3_ep0_deq_phys & 0xFFFu;
+
+    if (off + XHCI_SLOT3_EP0_RING_BYTES > XHCI_SLOT3_EP0_RING_SIZE) {
+        WARN("xhci: slot3 EP0 alias offset 0x%lx exceeds reserved ring window",
+             (unsigned long)off);
+        off = 0;
+    }
+
+    return (uintptr_t)XHCI_SLOT3_EP0_RING_PHYS + off;
+}
+
+static int xhci_prepare_slot3_fixed_mirror(struct xhci_device *d,
+                                           struct xhci_ring *ep0)
+{
+    bool cz = xhci_caps_cached.ctx_64;
+    uintptr_t ep0_cpu_phys = xhci_slot3_ep0_alias_phys();
+    uintptr_t ep0_controller_phys = ep0_cpu_phys;
+    uintptr_t devctx_controller_phys = (uintptr_t)XHCI_SLOT3_DEVCXT_MIRROR_PHYS;
+
+    if (d == NULL || ep0 == NULL)
+        return -1;
+
+    d->dev_ctx = (void *)(uintptr_t)XHCI_SLOT3_DEVCXT_MIRROR_PHYS;
+    d->dev_ctx_phys = devctx_controller_phys;
+    d->input_ctx = (void *)(uintptr_t)XHCI_SLOT3_INPUT_CTX_PHYS;
+    d->input_ctx_phys = (uintptr_t)XHCI_SLOT3_INPUT_CTX_PHYS;
+
+    memset(d->dev_ctx, 0, xhci_ctx_dev_bytes(cz));
+    memset(d->input_ctx, 0, xhci_ctx_in_bytes(cz));
+    if (xhci_ring_init(ep0, (struct xhci_trb *)(uintptr_t)ep0_cpu_phys,
+                       ep0_controller_phys,
+                       XHCI_SLOT3_EP0_RING_TRBS) != 0) {
+        WARN("xhci: slot3 fixed EP0 ring init failed (cpu=0x%lx ctrl=0x%lx)",
+             (unsigned long)ep0_cpu_phys,
+             (unsigned long)ep0_controller_phys);
+        return -1;
+    }
+
+    INFO("xhci: slot3 fixed mirror devctx_cpu=0x%lx devctx_ctrl=0x%lx input=0x%lx ep0_cpu=0x%lx ep0_ctrl=0x%lx",
+         (unsigned long)(uintptr_t)d->dev_ctx,
+         (unsigned long)d->dev_ctx_phys,
+         (unsigned long)d->input_ctx_phys,
+         (unsigned long)ep0_cpu_phys,
+         (unsigned long)ep0_controller_phys);
+    return 0;
+}
+
+static int xhci_try_adopt_inherited_slot(struct xhci_device *d,
+                                         struct usb_device *dev,
+                                         struct xhci_ring *ep0)
+{
+    if (!xhci_adopt_inherited_slot3_once || d == NULL || dev == NULL ||
+        ep0 == NULL)
+        return -1;
+
+    if (dev->route_string != 0 || dev->speed != USB_SPEED_FULL ||
+        d->root_port != 7)
+        return -1;
+
+    /*
+     * On nano-2's inherited full-speed Bluetooth path, Linux leaves a live
+     * slot 3 EP0 object behind. Re-point that slot at one of our rings and
+     * try to use it directly instead of creating a fresh slot that wedges on
+     * the first default-address control transfer.
+     */
+    const uint8_t slot = 3;
+    uintptr_t retained_devctx_phys = xhci_inherited_slot3_devctx_raw_phys;
+    uintptr_t published_devctx_phys = retained_devctx_phys;
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+
+    if (xhci_prepare_slot3_fixed_mirror(d, ep0) != 0)
+        return -1;
+
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: adopt slot %u STOP_EP(ep0) cc=%u",
+             (unsigned)slot, (unsigned)cc);
+        return -1;
+    }
+
+    if (xhci_reset_ep_on_adopt_slot3_once) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_RESET_EP) |
+                      ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                      ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+        if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) == 0) {
+            INFO("xhci: adopt slot %u RESET_EP(ep0) cc=%u",
+                 (unsigned)slot, (unsigned)cc);
+        } else {
+            WARN("xhci: adopt slot %u RESET_EP(ep0) transport failed",
+                 (unsigned)slot);
+        }
+        xhci_reset_ep_on_adopt_slot3_once = false;
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.param_lo = (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+    cmd.param_hi = (uint32_t)(ep0->phys >> 32);
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_SET_TR_DEQ) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: adopt slot %u SET_TR_DEQ(ep0, ring=0x%lx) cc=%u",
+             (unsigned)slot, (unsigned long)ep0->phys, (unsigned)cc);
+        return -1;
+    }
+
+    /*
+     * Linux's live full-speed Bluetooth path keeps using slot/address 3
+     * after deauthorize/reauthorize. When we adopt that retained slot,
+     * keep usb_core's software model aligned with the controller's
+     * apparent state so enumeration can continue from the first
+     * successful descriptor read instead of trying a fresh
+     * default-address SET_ADDRESS on an already-addressed slot.
+     */
+    dev->address = slot;
+    dev->state = USB_STATE_ADDRESS;
+    d->slot_id = slot;
+    d->ep_rings[XHCI_DCI_EP0] = ep0;
+    d->adopted_inherited = true;
+    d->controller_devctx_phys = retained_devctx_phys;
+    d->controller_devctx = NULL;
+    if (d->dev_ctx != NULL) {
+        bool cz = xhci_caps_cached.ctx_64;
+        uint32_t *s0 = xhci_dev_slot_dw(d->dev_ctx, 0);
+        uint32_t *s1 = xhci_dev_slot_dw(d->dev_ctx, 1);
+        uint32_t *s2 = xhci_dev_slot_dw(d->dev_ctx, 2);
+        uint32_t *s3 = xhci_dev_slot_dw(d->dev_ctx, 3);
+        uint32_t ep_dw_count = cz ? 8u : 4u;
+
+        if (xhci_inherited_slot3_ctx_valid) {
+            unsigned ctx_entries =
+                (unsigned)((xhci_inherited_slot3_slot_ctx_dw[0] &
+                            XHCI_SLOT_DW0_CTXENT_MASK) >>
+                           XHCI_SLOT_DW0_CTXENT_SHIFT);
+            if (ctx_entries > 7)
+                ctx_entries = 7;
+            for (unsigned i = 0; i < 4; i++)
+                *xhci_dev_slot_dw(d->dev_ctx, i) = xhci_inherited_slot3_slot_ctx_dw[i];
+            for (unsigned dci = 1; dci <= ctx_entries; dci++) {
+                for (unsigned i = 0; i < ep_dw_count; i++) {
+                    *xhci_dev_ep_dw(d->dev_ctx, dci, i, cz) =
+                        xhci_inherited_slot3_ep_ctx_dw[dci][i];
+                }
+            }
+            *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz) =
+                (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+            *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz) =
+                (uint32_t)(ep0->phys >> 32);
+            INFO("xhci: adopt slot %u copied local devctx mirror from handoff "
+                 "(ctx=%u) and patched EP0 tr=0x%lx",
+                 (unsigned)slot,
+                 (unsigned)ctx_entries,
+                 (unsigned long)ep0->phys);
+        } else {
+            uint32_t speed_id = xhci_speed_to_id(dev->speed);
+            uint32_t *e0 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 0, cz);
+            uint32_t *e1 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 1, cz);
+            uint32_t *e2 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz);
+            uint32_t *e3 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz);
+            uint32_t *e4 = xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 4, cz);
+
+            *s0 = (dev->route_string & XHCI_SLOT_DW0_ROUTE_MASK) |
+                  (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
+                  (7U << XHCI_SLOT_DW0_CTXENT_SHIFT);
+            *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
+            *s3 = ((uint32_t)slot & XHCI_SLOT_DW3_ADDR_MASK) |
+                  (3U << XHCI_SLOT_DW3_STATE_SHIFT); /* configured */
+            *e0 = 1U; /* running */
+            *e1 = (3U << XHCI_EP_DW1_CERR_SHIFT) |
+                  (XHCI_EP_TYPE_CONTROL << XHCI_EP_DW1_EPTYPE_SHIFT) |
+                  ((uint32_t)xhci_ep0_max_packet(dev->speed) << XHCI_EP_DW1_MAXPKT_SHIFT);
+            *e2 = (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+            *e3 = (uint32_t)(ep0->phys >> 32);
+            *e4 = 0;
+            INFO("xhci: adopt slot %u seeded local devctx mirror route=0x%x speed=%u root=%u addr=%u state=configured tr=0x%lx",
+                 (unsigned)slot,
+                 (unsigned)dev->route_string,
+                 (unsigned)dev->speed,
+                 (unsigned)d->root_port,
+                 (unsigned)slot,
+                 (unsigned long)ep0->phys);
+        }
+        *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
+        *s2 = 0;
+        *s3 = ((uint32_t)(*s3 & ~XHCI_SLOT_DW3_ADDR_MASK) |
+               ((uint32_t)slot & XHCI_SLOT_DW3_ADDR_MASK));
+        *s3 = ((*s3 & ~XHCI_SLOT_DW3_STATE_MASK) |
+               (3U << XHCI_SLOT_DW3_STATE_SHIFT));
+    }
+    if (published_devctx_phys == 0) {
+        published_devctx_phys = d->dev_ctx_phys;
+    }
+    xhci_dcbaa[slot] = (uint64_t)published_devctx_phys;
+    dsb(sy);
+
+    xhci_adopt_inherited_slot3_once = false;
+    INFO("xhci: adopted inherited slot %u for full-speed root device "
+         "(root_port=%u ring=0x%lx devctx=0x%lx retained_devctx=0x%lx "
+         "dcbaa_devctx=0x%lx via on-demand SET_TR_DEQ)",
+         (unsigned)slot, (unsigned)d->root_port,
+         (unsigned long)ep0->phys,
+         (unsigned long)d->dev_ctx_phys,
+         (unsigned long)retained_devctx_phys,
+         (unsigned long)published_devctx_phys);
+    return 0;
+}
+
+static int xhci_try_adopt_inherited_slot1(struct xhci_device *d,
+                                          struct usb_device *dev,
+                                          struct xhci_ring *ep0)
+{
+    if (!xhci_adopt_inherited_slot1_once || d == NULL || dev == NULL ||
+        ep0 == NULL)
+        return -1;
+
+    if (dev->route_string != 0 || dev->speed != USB_SPEED_HIGH ||
+        d->root_port != 6)
+        return -1;
+
+    if (!xhci_inherited_slot1_ctx_valid ||
+        xhci_inherited_slot1_devctx_raw_phys == 0) {
+        INFO("xhci: retained slot1 handoff unavailable on high-speed root path");
+        return -1;
+    }
+
+    const uint8_t slot = 1;
+    bool cz = xhci_caps_cached.ctx_64;
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+    uint32_t inherited_ep0_state =
+        xhci_inherited_slot1_ep0_ctx_dw[0] & XHCI_EP_DW0_STATE_MASK;
+
+    for (unsigned i = 0; i < 4; i++)
+        *xhci_dev_slot_dw(d->dev_ctx, i) = xhci_inherited_slot1_slot_ctx_dw[i];
+    for (unsigned i = 0; i < 8; i++)
+        *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, i, cz) =
+            xhci_inherited_slot1_ep0_ctx_dw[i];
+    *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 2, cz) =
+        (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+    *xhci_dev_ep_dw(d->dev_ctx, XHCI_DCI_EP0, 3, cz) =
+        (uint32_t)(ep0->phys >> 32);
+    dsb(sy);
+
+    if (inherited_ep0_state == 1U) {
+        cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
+                      ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                      ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+        if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+            cc != XHCI_CC_SUCCESS) {
+            WARN("xhci: adopt slot %u STOP_EP(ep0) state=%s cc=%u",
+                 (unsigned)slot,
+                 xhci_ep_state_str(inherited_ep0_state),
+                 (unsigned)cc);
+            return -1;
+        }
+        memset(&cmd, 0, sizeof(cmd));
+    } else {
+        INFO("xhci: adopt slot %u skipping STOP_EP(ep0) because inherited state is %s",
+             (unsigned)slot, xhci_ep_state_str(inherited_ep0_state));
+    }
+
+    cmd.param_lo = (uint32_t)(ep0->phys & 0xFFFFFFFFu) | 0x1U;
+    cmd.param_hi = (uint32_t)(ep0->phys >> 32);
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_SET_TR_DEQ) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: adopt slot %u SET_TR_DEQ(ep0, ring=0x%lx) cc=%u",
+             (unsigned)slot, (unsigned long)ep0->phys, (unsigned)cc);
+        return -1;
+    }
+
+    dev->address = slot;
+    dev->state = USB_STATE_ADDRESS;
+    d->slot_id = slot;
+    d->ep_rings[XHCI_DCI_EP0] = ep0;
+    d->adopted_inherited = true;
+    d->controller_devctx_phys = xhci_inherited_slot1_devctx_raw_phys;
+    d->controller_devctx = NULL;
+    xhci_dcbaa[slot] = (uint64_t)xhci_inherited_slot1_devctx_raw_phys;
+    dsb(sy);
+
+    xhci_adopt_inherited_slot1_once = false;
+    INFO("xhci: adopted inherited slot %u for high-speed root device "
+         "(root_port=%u ring=0x%lx retained_devctx=0x%lx)",
+         (unsigned)slot, (unsigned)d->root_port,
+         (unsigned long)ep0->phys,
+         (unsigned long)xhci_inherited_slot1_devctx_raw_phys);
+    return 0;
+}
+
+int xhci_debug_reprime_adopted_ep0(struct usb_device *dev)
+{
+    if (dev == NULL || dev->hcd_private == NULL)
+        return -1;
+
+    struct xhci_device *d = (struct xhci_device *)dev->hcd_private;
+    if (!d->valid || !d->adopted_inherited || d->slot_id == 0)
+        return -1;
+
+    struct xhci_ring *ep0 = d->ep_rings[XHCI_DCI_EP0];
+    if (ep0 == NULL || ep0->trbs == NULL || ep0->num_trbs == 0)
+        return -1;
+
+    uintptr_t next_tr_phys = ep0->phys +
+                             (uintptr_t)ep0->enqueue * sizeof(struct xhci_trb);
+    uint32_t dcs = ep0->cycle_state & 0x1U;
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+
+    INFO("xhci: debug reprime adopted ep0 slot=%u next=0x%lx enqueue=%u pcs=%u",
+         (unsigned)d->slot_id,
+         (unsigned long)next_tr_phys,
+         (unsigned)ep0->enqueue,
+         (unsigned)ep0->cycle_state);
+
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_STOP_EP) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: debug reprime adopted ep0 slot=%u STOP_EP cc=%u",
+             (unsigned)d->slot_id, (unsigned)cc);
+        return -1;
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.param_lo = (uint32_t)(next_tr_phys & 0xFFFFFFFFu) | dcs;
+    cmd.param_hi = (uint32_t)(next_tr_phys >> 32);
+    cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_SET_TR_DEQ) |
+                  ((uint32_t)XHCI_DCI_EP0 << XHCI_TRB_EP_SHIFT) |
+                  ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: debug reprime adopted ep0 slot=%u SET_TR_DEQ cc=%u",
+             (unsigned)d->slot_id, (unsigned)cc);
+        return -1;
+    }
+
+    INFO("xhci: debug reprime adopted ep0 slot=%u SET_TR_DEQ ok",
+         (unsigned)d->slot_id);
+    return 0;
+}
+
+static void xhci_try_power_cycle_port(uint8_t pidx, const char *why)
+{
+    if (!XHCI_HCC1_PPC(xhci_caps_cached.hcc_params1))
+        return;
+
+    uint32_t portsc = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+    if ((portsc & XHCI_PORTSC_PP) == 0) {
+        INFO("xhci: PORTSC[%u] power-cycle skipped (%s, pp=0, portsc=0x%08x)",
+             (unsigned)pidx, why ? why : "probe", (unsigned)portsc);
+        return;
+    }
+
+    uint32_t off = portsc & ~(XHCI_PORTSC_PP | XHCI_PORTSC_RW1CS_MASK);
+    xhci_op_w32(XHCI_OP_PORTSC(pidx), off);
+    uint64_t start = timer_get_count();
+    uint64_t ticks = timer_get_frequency() / 20; /* 50 ms */
+    while (timer_get_count() - start < ticks) { }
+    uint32_t after_off = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+
+    uint32_t on = (after_off & ~XHCI_PORTSC_RW1CS_MASK) | XHCI_PORTSC_PP;
+    xhci_op_w32(XHCI_OP_PORTSC(pidx), on);
+    start = timer_get_count();
+    while (timer_get_count() - start < ticks) { }
+    uint32_t after_on = xhci_op_r32(XHCI_OP_PORTSC(pidx));
+
+    INFO("xhci: PORTSC[%u] power-cycle (%s) 0x%08x -> off 0x%08x -> on 0x%08x",
+         (unsigned)pidx, why ? why : "probe",
+         (unsigned)portsc, (unsigned)after_off, (unsigned)after_on);
 }
 
 /*
@@ -343,10 +1819,14 @@ static uint16_t xhci_ep0_max_packet(enum usb_speed s)
  *   - EP0 Ctx   DW1: CErr = 3, EP Type = CONTROL, Max Packet Size
  *   - EP0 Ctx   DW2: TR Dequeue Pointer (low) | DCS=1
  *   - EP0 Ctx   DW3: TR Dequeue Pointer (high)
- *   - EP0 Ctx   DW4: Average TRB Length = 8 (control-transfer rule-of-thumb)
+ *   - EP0 Ctx   DW4: Average TRB Length = 0
+ *
+ * Linux leaves EP0's Average TRB Length at 0 for the healthy Realtek
+ * hub path on nano-2. Keep that match here instead of carrying the
+ * earlier "8-byte control setup" heuristic into the context.
  */
 static void xhci_build_input_ctx_for_address(struct xhci_device *d,
-                                             enum usb_speed speed,
+                                             const struct usb_device *dev,
                                              uintptr_t ep0_ring_phys)
 {
     bool cz = xhci_caps_cached.ctx_64;
@@ -359,13 +1839,27 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
     /* Slot Context. */
     uint32_t *s0 = xhci_in_slot_dw(d->input_ctx, 0, cz);
     uint32_t *s1 = xhci_in_slot_dw(d->input_ctx, 1, cz);
-    uint32_t speed_id = xhci_speed_to_id(speed);
+    uint32_t speed_id = xhci_speed_to_id(dev->speed);
     /* Context Entries = 1 (only EP0 is valid until endpoint_configure
-     * adds more). Route string = 0 (root hub port, no hub ancestors). */
-    *s0 = (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
+     * adds more). Route string comes from usb_core; root devices keep
+     * it at 0, one-tier hub children use the downstream port number in
+     * the low nibble. */
+    *s0 = (dev->route_string & XHCI_SLOT_DW0_ROUTE_MASK) |
+          (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
           (1U       << XHCI_SLOT_DW0_CTXENT_SHIFT);
     /* Root Hub Port Number is 1-based per spec. */
     *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
+    if (xhci_probe_fullspeed_addr3 &&
+        dev->route_string == 0 &&
+        dev->speed == USB_SPEED_FULL &&
+        d->root_port == 7) {
+        uint32_t *s3 = xhci_in_slot_dw(d->input_ctx, 3, cz);
+        *s3 = (3U & XHCI_SLOT_DW3_ADDR_MASK) |
+              (2U << XHCI_SLOT_DW3_STATE_SHIFT);
+        INFO("xhci: probing retained address 3 in input ctx on root_port=%u slot_dw3=0x%08x",
+             (unsigned)d->root_port, (unsigned)*s3);
+        xhci_probe_fullspeed_addr3 = false;
+    }
 
     /* EP0 Context. */
     uint32_t *e0 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 0, cz);
@@ -374,14 +1868,66 @@ static void xhci_build_input_ctx_for_address(struct xhci_device *d,
     uint32_t *e3 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 3, cz);
     uint32_t *e4 = xhci_in_ep_dw(d->input_ctx, XHCI_DCI_EP0, 4, cz);
 
-    uint16_t mps = xhci_ep0_max_packet(speed);
+    uint16_t mps = xhci_ep0_max_packet(dev->speed);
     *e0 = 0;                                  /* state=Disabled, interval=0 */
     *e1 = (3U  << XHCI_EP_DW1_CERR_SHIFT) |   /* CErr = 3 retries */
           (XHCI_EP_TYPE_CONTROL << XHCI_EP_DW1_EPTYPE_SHIFT) |
           ((uint32_t)mps << XHCI_EP_DW1_MAXPKT_SHIFT);
     *e2 = (uint32_t)(ep0_ring_phys & 0xFFFFFFFFu) | 0x1U;  /* DCS = 1 */
     *e3 = (uint32_t)(ep0_ring_phys >> 32);
-    *e4 = 8U;                                 /* avg TRB length */
+    *e4 = 0U;
+
+    INFO("xhci: address ctx route=0x%x speed_id=%u root_port=%u "
+         "slot_dw0=0x%08x slot_dw1=0x%08x ep0_dw0=0x%08x ep0_dw1=0x%08x "
+         "ep0_dw2=0x%08x ep0_dw3=0x%08x ep0_dw4=0x%08x",
+         (unsigned)dev->route_string,
+         (unsigned)speed_id,
+         (unsigned)d->root_port,
+         (unsigned)*s0, (unsigned)*s1,
+         (unsigned)*e0, (unsigned)*e1, (unsigned)*e2,
+         (unsigned)*e3, (unsigned)*e4);
+}
+
+int xhci_sync_child_address_bsr0(struct usb_device *dev)
+{
+    if (!xhci_live || dev == NULL)
+        return -1;
+
+    struct xhci_device *d = (struct xhci_device *)dev->hcd_private;
+    if (d == NULL || d->slot_id == 0 || d->adopted_inherited)
+        return -1;
+
+    struct xhci_ring *ep0 = d->ep_rings[XHCI_DCI_EP0];
+    if (ep0 == NULL)
+        return -1;
+
+    xhci_build_input_ctx_for_address(d, dev, ep0->phys);
+
+    struct xhci_trb cmd = {0};
+    uint8_t cc = 0;
+    cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
+    cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
+    cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
+                   ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
+
+    INFO("xhci: syncing child slot %u with ADDRESS_DEVICE(BSR=0) "
+         "route=0x%x root_port=%u addr=%u",
+         (unsigned)d->slot_id,
+         (unsigned)dev->route_string,
+         (unsigned)d->root_port,
+         (unsigned)dev->address);
+
+    if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
+        cc != XHCI_CC_SUCCESS) {
+        WARN("xhci: live ADDRESS_DEVICE(BSR=0) slot=%u cc=%u",
+             (unsigned)d->slot_id, (unsigned)cc);
+        return -1;
+    }
+
+    dev->address = d->slot_id;
+    dev->state = USB_STATE_ADDRESS;
+    xhci_log_devctx_snapshot(d, "post-live-address-bsr0");
+    return 0;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -393,9 +1939,18 @@ int xhci_hcd_device_open(struct usb_device *dev)
     if (!xhci_live) return -1;
     if (dev == NULL) return -1;
 
+    if (dev->hcd_private != NULL) {
+        struct xhci_device *existing = (struct xhci_device *)dev->hcd_private;
+        if (existing->valid && existing->adopted_inherited) {
+            INFO("xhci: reusing adopted inherited slot %u on device_open retry",
+                 (unsigned)existing->slot_id);
+            return 0;
+        }
+    }
+
     struct xhci_device *d = xhci_dev_pool_alloc();
     if (d == NULL) {
-        WARN("xhci: device pool exhausted (Phase 3A supports 1 device)");
+        WARN("xhci: device pool exhausted");
         return -1;
     }
 
@@ -445,8 +2000,52 @@ int xhci_hcd_device_open(struct usb_device *dev)
         WARN("xhci: device_open before port scan located a USB 2 port");
         goto err;
     }
-    d->root_port = (uint8_t)(xhci_active_port + 1U);
-    (void)dev->port;  /* Phase 3A always uses the scanned port. */
+    if (dev->root_hub_port != 0) {
+        d->root_port = dev->root_hub_port;
+    } else {
+        d->root_port = (uint8_t)(xhci_active_port + 1U);
+        dev->root_hub_port = d->root_port;
+    }
+
+    /*
+     * On the Linux-authorized=0 path, Tegra sometimes inherits the
+     * USB2 root port still enabled but sitting in U3 (0x00000e63).
+     * Normalize that here as well, so the first default-address EP0
+     * transfer doesn't depend on the earlier reset policy branch.
+     */
+    xhci_active_portsc = xhci_resume_usb2_port_to_u0(xhci_active_port,
+                                                     xhci_active_portsc,
+                                                     "device_open pre-ep0");
+
+    if (xhci_fullspeed_power_cycle_once &&
+        dev->route_string == 0 &&
+        dev->speed == USB_SPEED_FULL &&
+        !(xhci_active_portsc & XHCI_PORTSC_PED)) {
+        xhci_fullspeed_power_cycle_once = false;
+        tegra_xusb_utmi_pad_power_cycle_active_lane("full-speed pre-open");
+        xhci_active_portsc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
+        xhci_active_portsc = xhci_ack_port_changes(xhci_active_port,
+                                                   xhci_active_portsc,
+                                                   "full-speed utmi power-cycle");
+        xhci_active_portsc = xhci_resume_usb2_port_to_u0(xhci_active_port,
+                                                         xhci_active_portsc,
+                                                         "full-speed utmi power-cycle");
+        uint64_t settle_start = timer_get_count();
+        uint64_t settle_ticks = timer_get_frequency() / 2; /* 500 ms */
+        while (timer_get_count() - settle_start < settle_ticks) {
+            uint32_t sc = xhci_op_r32(XHCI_OP_PORTSC(xhci_active_port));
+            if (sc != xhci_active_portsc) {
+                INFO("xhci: full-speed utmi power-cycle settle PORTSC[%u] 0x%08x -> 0x%08x",
+                     (unsigned)xhci_active_port,
+                     (unsigned)xhci_active_portsc,
+                     (unsigned)sc);
+                xhci_active_portsc = sc;
+            }
+        }
+        INFO("xhci: post power-cycle PORTSC[%u]=0x%08x",
+             (unsigned)xhci_active_port,
+             (unsigned)xhci_active_portsc);
+    }
 
     /*
      * Decide which speed to program into the Slot Context.
@@ -465,20 +2064,34 @@ int xhci_hcd_device_open(struct usb_device *dev)
      * If the pre-reset scan saw FULL / LOW the downgrade path is
      * trusted — we never observed those speeds renegotiate upward.
      */
-    bool connected_post = false;
-    enum usb_speed speed_post = USB_SPEED_UNKNOWN;
-    (void)xhci_decode_portsc(xhci_active_portsc,
-                              &connected_post, &speed_post);
-    if (xhci_prereset_speed == USB_SPEED_HIGH &&
-        speed_post != USB_SPEED_HIGH) {
-        INFO("xhci: pre-reset HIGH but PORTSC reads %d post-reset; "
-             "using HIGH (stale PORTSC on Tegra)", (int)speed_post);
-        dev->speed = USB_SPEED_HIGH;
-    } else if (speed_post != USB_SPEED_UNKNOWN &&
-               speed_post != dev->speed) {
-        INFO("xhci: post-reset speed %d (was %d on pre-reset scan)",
-             (int)speed_post, (int)dev->speed);
-        dev->speed = speed_post;
+    if (dev->route_string == 0) {
+        bool connected_post = false;
+        enum usb_speed speed_post = USB_SPEED_UNKNOWN;
+        (void)xhci_decode_portsc(xhci_active_portsc,
+                                  &connected_post, &speed_post);
+        if (xhci_prereset_speed == USB_SPEED_HIGH &&
+            speed_post != USB_SPEED_HIGH) {
+            INFO("xhci: pre-reset HIGH but PORTSC reads %d post-reset; "
+                 "using HIGH (stale PORTSC on Tegra)", (int)speed_post);
+            dev->speed = USB_SPEED_HIGH;
+        } else if (speed_post != USB_SPEED_UNKNOWN &&
+                   speed_post != dev->speed) {
+            INFO("xhci: post-reset speed %d (was %d on pre-reset scan)",
+                 (int)speed_post, (int)dev->speed);
+            dev->speed = speed_post;
+        }
+    }
+
+    if (xhci_try_adopt_inherited_slot1(d, dev, ep0) == 0) {
+        xhci_log_devctx_snapshot(d, "post-adopt");
+        dev->hcd_private = d;
+        return 0;
+    }
+
+    if (xhci_try_adopt_inherited_slot(d, dev, ep0) == 0) {
+        xhci_log_devctx_snapshot(d, "post-adopt");
+        dev->hcd_private = d;
+        return 0;
     }
 
     /* 1. ENABLE_SLOT. */
@@ -495,7 +2108,7 @@ int xhci_hcd_device_open(struct usb_device *dev)
     INFO("xhci: slot %u enabled for port %u", slot, d->root_port);
 
     /* 2. Build Input Context for ADDRESS_DEVICE and write DCBAA[slot]. */
-    xhci_build_input_ctx_for_address(d, dev->speed, ep0->phys);
+    xhci_build_input_ctx_for_address(d, dev, ep0->phys);
     xhci_dcbaa[slot] = (uint64_t)d->dev_ctx_phys;
     dsb(sy);
 
@@ -524,7 +2137,34 @@ int xhci_hcd_device_open(struct usb_device *dev)
     memset(&cmd, 0, sizeof(cmd));
     cmd.param_lo = (uint32_t)(d->input_ctx_phys & 0xFFFFFFFFu);
     cmd.param_hi = (uint32_t)(d->input_ctx_phys >> 32);
-    /* control DW, bit 9 = BSR (Block Set Address Request). */
+    /* control DW, bit 9 = BSR (Block Set Address Request).
+     *
+     * Keep BSR=1 here. The BSR=0 experiment was worse on nano-2: the
+     * HC's internal SET_ADDRESS failed immediately with cc=4, while
+     * BSR=1 gets far enough to exercise software-driven EP0 traffic.
+     */
+    uint8_t inherited_addr = 0;
+    bool fullspeed_addr3_probe = false;
+    if (xhci_probe_fullspeed_addr3 &&
+        d->root_port == 7 &&
+        dev->route_string == 0) {
+        /*
+         * Diagnostic probe: the always-present full-speed Bluetooth path
+         * on nano-2 hangs off root port 7 in Linux. Key the retained-
+         * address test off that port directly so the probe can't silently
+         * disappear if dev->speed bookkeeping changes while we are still
+         * narrowing the inherited-address hypothesis.
+         */
+        inherited_addr = 3;
+        fullspeed_addr3_probe = true;
+        xhci_probe_fullspeed_addr3 = false;
+    }
+    if (fullspeed_addr3_probe) {
+        INFO("xhci: forcing retained full-speed address 3 probe on root_port=%u speed=%u route=0x%x",
+             (unsigned)d->root_port,
+             (unsigned)dev->speed,
+             (unsigned)dev->route_string);
+    }
     cmd.control  = XHCI_TRB_TYPE(XHCI_TRB_CMD_ADDRESS_DEVICE) |
                    (1u << 9) |
                    ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
@@ -535,6 +2175,18 @@ int xhci_hcd_device_open(struct usb_device *dev)
     }
     INFO("xhci: slot %u addressed (speed=%u, port=%u, BSR=1)",
          slot, (unsigned)dev->speed, d->root_port);
+    if (inherited_addr != 0)
+        xhci_patch_inherited_address(d, inherited_addr);
+    if (xhci_probe_highspeed_eval_addr1 &&
+        dev->route_string == 0 &&
+        dev->speed == USB_SPEED_HIGH &&
+        d->root_port == 6) {
+        xhci_probe_highspeed_eval_addr1 = false;
+        INFO("xhci: probing retained high-speed address 1 on root_port=%u",
+             (unsigned)d->root_port);
+        xhci_probe_eval_slot_address(d, 1);
+    }
+    xhci_log_devctx_snapshot(d, "post-address");
 
     dev->hcd_private = d;
     return 0;
@@ -542,9 +2194,12 @@ int xhci_hcd_device_open(struct usb_device *dev)
 err_slot: {
         /* Best effort: DISABLE_SLOT so we don't leak the slot. */
         struct xhci_trb dis = {0};
+        uint8_t cc_dis = 0;
         dis.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_DISABLE_SLOT) |
                       ((uint32_t)slot << XHCI_TRB_SLOT_SHIFT);
-        (void)xhci_cmd_submit_and_wait(&dis, NULL, NULL, 500);
+        (void)xhci_cmd_submit_and_wait(&dis, &cc_dis, NULL, 500);
+        INFO("xhci: DISABLE_SLOT(slot=%u, err_slot) cc=%u",
+             (unsigned)slot, (unsigned)cc_dis);
         xhci_dcbaa[slot] = 0;
     }
 err:
@@ -565,11 +2220,18 @@ void xhci_hcd_device_close(struct usb_device *dev)
         return;
 
     if (d->slot_id != 0) {
+        if (d->adopted_inherited) {
+            INFO("xhci: preserving adopted inherited slot %u across device_close for inspection",
+                 (unsigned)d->slot_id);
+            return;
+        }
         struct xhci_trb cmd = {0};
+        uint8_t cc = 0;
         cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_DISABLE_SLOT) |
                       ((uint32_t)d->slot_id << XHCI_TRB_SLOT_SHIFT);
-        uint8_t cc = 0;
         (void)xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 500);
+        INFO("xhci: DISABLE_SLOT(slot=%u, device_close) cc=%u",
+             (unsigned)d->slot_id, (unsigned)cc);
         xhci_dcbaa[d->slot_id] = 0;
         d->slot_id = 0;
     }
@@ -595,6 +2257,74 @@ static uint32_t xhci_ep_type_from_usb(uint8_t attributes, uint8_t address)
     }
 }
 
+static uint32_t xhci_interval_ceil_log2(uint32_t period)
+{
+    uint32_t shift = 0;
+    uint32_t value = 1;
+
+    while (value < period && shift < 0xFF) {
+        value <<= 1;
+        shift++;
+    }
+    return shift;
+}
+
+static uint32_t xhci_ep_interval_from_usb(const struct usb_device *dev,
+                                          const struct usb_endpoint *ep)
+{
+    uint8_t xfer = ep->attributes & USB_XFER_TYPE_MASK;
+    uint32_t interval = ep->interval;
+
+    if (interval == 0)
+        return 0;
+
+    if (xfer == USB_XFER_CONTROL || xfer == USB_XFER_BULK)
+        return 0;
+
+    /*
+     * xHCI stores the endpoint interval in 125 us quanta. For FS/LS
+     * interrupt endpoints the USB descriptor expresses bInterval in
+     * frames, so convert it to microframes and round up to the next
+     * power of two the same way Linux does.
+     */
+    if ((dev->speed == USB_SPEED_FULL || dev->speed == USB_SPEED_LOW) &&
+        xfer == USB_XFER_INTERRUPT)
+        return xhci_interval_ceil_log2(interval * 8U);
+
+    /*
+     * HS interrupt and HS/FS isochronous descriptors already encode
+     * the polling period as an exponent, and xHCI wants that exponent
+     * minus one.
+     */
+    return interval - 1U;
+}
+
+static uint32_t xhci_ep_dw4_from_usb(const struct usb_endpoint *ep)
+{
+    uint8_t xfer = ep->attributes & USB_XFER_TYPE_MASK;
+
+    switch (xfer) {
+    case USB_XFER_CONTROL:
+    case USB_XFER_BULK:
+        /*
+         * Linux leaves Avg TRB Length / Max ESIT Payload at 0 for the
+         * healthy USB2 control and bulk contexts on nano-2.
+         */
+        return 0;
+
+    case USB_XFER_INTERRUPT:
+    case USB_XFER_ISOC: {
+        uint32_t payload = ep->max_packet;
+        return (payload & XHCI_EP_DW4_AVG_TRB_LEN_MASK) |
+               ((payload << XHCI_EP_DW4_MAX_ESIT_SHIFT) &
+                XHCI_EP_DW4_MAX_ESIT_MASK);
+    }
+
+    default:
+        return 0;
+    }
+}
+
 int xhci_hcd_endpoint_configure(struct usb_device *dev,
                                 const struct usb_endpoint *ep)
 {
@@ -609,59 +2339,176 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
     if (dci < 2 || dci > 31)
         return -1;
     if (d->ep_rings[dci] != NULL) {
-        /* Already configured — CDC-ECM doesn't trigger this in Phase 3A,
-         * so treat as a caller bug rather than silently succeeding. */
-        WARN("xhci: ep 0x%02x (dci %u) already configured", ep->address, dci);
-        return -1;
+        INFO("xhci: ep 0x%02x already configured (dci=%u)",
+             ep->address, dci);
+        return 0;
     }
 
-    /* Per-endpoint transfer ring. 64 TRBs is plenty for CDC-ECM bulk. */
-    struct xhci_ring *r = xhci_ring_pool_alloc();
-    if (r == NULL) {
-        WARN("xhci: out of transfer rings for ep 0x%02x", ep->address);
-        return -1;
+    const struct usb_endpoint *cfg_eps[USB_MAX_ENDPOINTS_PER_DEV] = {0};
+    struct xhci_ring *cfg_rings[USB_MAX_ENDPOINTS_PER_DEV] = {0};
+    unsigned cfg_dcis[USB_MAX_ENDPOINTS_PER_DEV] = {0};
+    unsigned cfg_count = 0;
+    unsigned max_dci = dci;
+    bool batch_all = false;
+
+    if (!d->adopted_inherited) {
+        bool any_non_ep0_configured = false;
+        unsigned valid_non_ep0 = 0;
+        for (unsigned i = 0; i < USB_MAX_ENDPOINTS_PER_DEV; i++) {
+            if (!dev->endpoints[i].valid)
+                continue;
+            unsigned ep_dci = xhci_dci_ep(dev->endpoints[i].address);
+            if (ep_dci < 2 || ep_dci > 31)
+                continue;
+            valid_non_ep0++;
+            if (d->ep_rings[ep_dci] != NULL)
+                any_non_ep0_configured = true;
+        }
+        batch_all = !any_non_ep0_configured && valid_non_ep0 > 1;
     }
-    if (xhci_ring_alloc(r, 64) != 0) {
-        xhci_ring_pool_free(r);
-        return -1;
+
+    if (batch_all) {
+        for (unsigned i = 0; i < USB_MAX_ENDPOINTS_PER_DEV; i++) {
+            const struct usb_endpoint *cfg_ep = &dev->endpoints[i];
+            if (!cfg_ep->valid)
+                continue;
+
+            unsigned cfg_dci_i = xhci_dci_ep(cfg_ep->address);
+            if (cfg_dci_i < 2 || cfg_dci_i > 31)
+                continue;
+
+            struct xhci_ring *cfg_ring = xhci_ring_pool_alloc();
+            if (cfg_ring == NULL) {
+                WARN("xhci: out of transfer rings for batched endpoint 0x%02x",
+                     cfg_ep->address);
+                goto err_free_cfg_rings;
+            }
+            if (xhci_ring_alloc(cfg_ring, 64) != 0) {
+                xhci_ring_pool_free(cfg_ring);
+                goto err_free_cfg_rings;
+            }
+
+            cfg_eps[cfg_count] = cfg_ep;
+            cfg_rings[cfg_count] = cfg_ring;
+            cfg_dcis[cfg_count] = cfg_dci_i;
+            if (cfg_dci_i > max_dci)
+                max_dci = cfg_dci_i;
+            cfg_count++;
+        }
+
+        INFO("xhci: batching CONFIGURE_ENDPOINT slot=%u endpoints=%u max_dci=%u first_ep=0x%02x",
+             (unsigned)d->slot_id,
+             (unsigned)cfg_count,
+             (unsigned)max_dci,
+             (unsigned)ep->address);
+    } else {
+        struct xhci_ring *cfg_ring = xhci_ring_pool_alloc();
+        if (cfg_ring == NULL) {
+            WARN("xhci: out of transfer rings for ep 0x%02x", ep->address);
+            return -1;
+        }
+        if (xhci_ring_alloc(cfg_ring, 64) != 0) {
+            xhci_ring_pool_free(cfg_ring);
+            return -1;
+        }
+        cfg_eps[0] = ep;
+        cfg_rings[0] = cfg_ring;
+        cfg_dcis[0] = dci;
+        cfg_count = 1;
     }
 
     /* Input Context: Add bit for this DCI, keep Slot Context, rewrite
      * EP context for this DCI. Zero the Drop flags (no de-configure). */
     memset(d->input_ctx, 0, xhci_ctx_in_bytes(cz));
     uint32_t *in_add  = xhci_in_control_dw(d->input_ctx, 1);
-    *in_add = XHCI_INPUT_ADD_SLOT | XHCI_INPUT_ADD_EP(dci);
+    *in_add = XHCI_INPUT_ADD_SLOT;
+    for (unsigned i = 0; i < cfg_count; i++)
+        *in_add |= XHCI_INPUT_ADD_EP(cfg_dcis[i]);
 
-    /* Update Slot Context: bump Context Entries to cover the new EP. */
+    /* Update Slot Context: start from the live slot image so retained
+     * addr/state survive, then bump Context Entries to cover the new EP. */
     uint32_t *s0 = xhci_in_slot_dw(d->input_ctx, 0, cz);
     uint32_t *s1 = xhci_in_slot_dw(d->input_ctx, 1, cz);
-    uint32_t speed_id = xhci_speed_to_id(dev->speed);
-    /* Context Entries in the Slot Context must cover every valid EP
-     * DCI. The Input Context was freshly zeroed above, so no prior
-     * CONFIGURE_ENDPOINT state survives — `dci` is the new high-water
-     * mark for this single-EP add. */
-    *s0 = (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT) |
-          ((uint32_t)dci << XHCI_SLOT_DW0_CTXENT_SHIFT);
-    *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
+    uint32_t *s2 = xhci_in_slot_dw(d->input_ctx, 2, cz);
+    uint32_t *s3 = xhci_in_slot_dw(d->input_ctx, 3, cz);
+    if (d->dev_ctx != NULL) {
+        *s0 = *xhci_dev_slot_dw(d->dev_ctx, 0);
+        *s1 = *xhci_dev_slot_dw(d->dev_ctx, 1);
+        *s2 = *xhci_dev_slot_dw(d->dev_ctx, 2);
+        *s3 = *xhci_dev_slot_dw(d->dev_ctx, 3);
+    } else {
+        uint32_t speed_id = xhci_speed_to_id(dev->speed);
+        *s0 = (dev->route_string & XHCI_SLOT_DW0_ROUTE_MASK) |
+              (speed_id << XHCI_SLOT_DW0_SPEED_SHIFT);
+        *s1 = ((uint32_t)d->root_port << XHCI_SLOT_DW1_ROOT_PORT_SHIFT);
+        *s2 = 0;
+        *s3 = 0;
+    }
+    *s0 = (*s0 & ~XHCI_SLOT_DW0_CTXENT_MASK) |
+          ((uint32_t)max_dci << XHCI_SLOT_DW0_CTXENT_SHIFT);
+    if (dev->state >= USB_STATE_ADDRESS && dev->address != 0) {
+        uint32_t slot_state = d->adopted_inherited
+                              ? ((dev->state == USB_STATE_CONFIGURED) ? 3U : 2U)
+                              : 2U;
+        if (!d->adopted_inherited) {
+            uint32_t old_addr = *s3 & XHCI_SLOT_DW3_ADDR_MASK;
+            uint32_t old_state = (*s3 & XHCI_SLOT_DW3_STATE_MASK) >>
+                                 XHCI_SLOT_DW3_STATE_SHIFT;
+            if (old_addr != dev->address || old_state != slot_state) {
+                INFO("xhci: patching fresh slot %u configure ctx addr/state "
+                     "(addr %u->%u state %u->%u ep=0x%02x)",
+                     (unsigned)d->slot_id,
+                     (unsigned)old_addr,
+                     (unsigned)dev->address,
+                     (unsigned)old_state,
+                     (unsigned)slot_state,
+                     (unsigned)ep->address);
+            }
+        }
+        *s3 = (*s3 & ~XHCI_SLOT_DW3_ADDR_MASK) |
+              ((uint32_t)dev->address & XHCI_SLOT_DW3_ADDR_MASK);
+        *s3 = (*s3 & ~XHCI_SLOT_DW3_STATE_MASK) |
+              (slot_state << XHCI_SLOT_DW3_STATE_SHIFT);
+        if (d->dev_ctx != NULL && !d->adopted_inherited) {
+            uint32_t *live_s3 = xhci_dev_slot_dw(d->dev_ctx, 3);
+            *live_s3 = (*live_s3 & ~XHCI_SLOT_DW3_ADDR_MASK) |
+                       ((uint32_t)dev->address & XHCI_SLOT_DW3_ADDR_MASK);
+            *live_s3 = (*live_s3 & ~XHCI_SLOT_DW3_STATE_MASK) |
+                       (slot_state << XHCI_SLOT_DW3_STATE_SHIFT);
+        }
+    }
 
-    /* Endpoint context. */
-    uint32_t *e0 = xhci_in_ep_dw(d->input_ctx, dci, 0, cz);
-    uint32_t *e1 = xhci_in_ep_dw(d->input_ctx, dci, 1, cz);
-    uint32_t *e2 = xhci_in_ep_dw(d->input_ctx, dci, 2, cz);
-    uint32_t *e3 = xhci_in_ep_dw(d->input_ctx, dci, 3, cz);
-    uint32_t *e4 = xhci_in_ep_dw(d->input_ctx, dci, 4, cz);
+    for (unsigned i = 0; i < cfg_count; i++) {
+        const struct usb_endpoint *cfg_ep = cfg_eps[i];
+        struct xhci_ring *cfg_ring = cfg_rings[i];
+        unsigned cfg_dci_i = cfg_dcis[i];
+        uint32_t ep_type = xhci_ep_type_from_usb(cfg_ep->attributes, cfg_ep->address);
+        uint32_t interval = xhci_ep_interval_from_usb(dev, cfg_ep);
+        uint32_t *e0 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 0, cz);
+        uint32_t *e1 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 1, cz);
+        uint32_t *e2 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 2, cz);
+        uint32_t *e3 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 3, cz);
+        uint32_t *e4 = xhci_in_ep_dw(d->input_ctx, cfg_dci_i, 4, cz);
+        uint32_t dw4 = xhci_ep_dw4_from_usb(cfg_ep);
 
-    uint32_t ep_type = xhci_ep_type_from_usb(ep->attributes, ep->address);
-    uint32_t interval = ep->interval;
-    *e0 = (interval << XHCI_EP_DW0_INTERVAL_SHIFT) & XHCI_EP_DW0_INTERVAL_MASK;
-    *e1 = (3U << XHCI_EP_DW1_CERR_SHIFT) |
-          (ep_type << XHCI_EP_DW1_EPTYPE_SHIFT) |
-          ((uint32_t)ep->max_packet << XHCI_EP_DW1_MAXPKT_SHIFT);
-    *e2 = (uint32_t)(r->phys & 0xFFFFFFFFu) | 0x1U;  /* DCS = 1 */
-    *e3 = (uint32_t)(r->phys >> 32);
-    *e4 = (ep->attributes & USB_XFER_TYPE_MASK) == USB_XFER_BULK
-          ? ep->max_packet                /* reasonable avg for bulk */
-          : 8U;                           /* control / interrupt default */
+        *e0 = (interval << XHCI_EP_DW0_INTERVAL_SHIFT) & XHCI_EP_DW0_INTERVAL_MASK;
+        *e1 = (3U << XHCI_EP_DW1_CERR_SHIFT) |
+              (ep_type << XHCI_EP_DW1_EPTYPE_SHIFT) |
+              ((uint32_t)cfg_ep->max_packet << XHCI_EP_DW1_MAXPKT_SHIFT);
+        *e2 = (uint32_t)(cfg_ring->phys & 0xFFFFFFFFu) | 0x1U;
+        *e3 = (uint32_t)(cfg_ring->phys >> 32);
+        *e4 = dw4;
+        INFO("xhci: configure ep 0x%02x slot=%u dci=%u speed=%u raw_interval=%u encoded_interval=%u "
+             "ep_dw0=0x%08x ep_dw1=0x%08x ep_dw2=0x%08x ep_dw3=0x%08x ep_dw4=0x%08x",
+             (unsigned)cfg_ep->address,
+             (unsigned)d->slot_id,
+             (unsigned)cfg_dci_i,
+             (unsigned)dev->speed,
+             (unsigned)cfg_ep->interval,
+             (unsigned)interval,
+             (unsigned)*e0, (unsigned)*e1, (unsigned)*e2,
+             (unsigned)*e3, (unsigned)*e4);
+    }
     dsb(sy);
 
     /* CONFIGURE_ENDPOINT. */
@@ -674,14 +2521,25 @@ int xhci_hcd_endpoint_configure(struct usb_device *dev,
     if (xhci_cmd_submit_and_wait(&cmd, &cc, NULL, 1000) != 0 ||
         cc != XHCI_CC_SUCCESS) {
         WARN("xhci: CONFIGURE_ENDPOINT ep 0x%02x cc=%u", ep->address, cc);
-        xhci_ring_pool_free(r);
-        return -1;
+        goto err_free_cfg_rings;
     }
 
-    d->ep_rings[dci] = r;
-    INFO("xhci: ep 0x%02x configured (dci=%u, type=%u, mps=%u)",
-         ep->address, dci, ep_type, ep->max_packet);
+    for (unsigned i = 0; i < cfg_count; i++) {
+        d->ep_rings[cfg_dcis[i]] = cfg_rings[i];
+        INFO("xhci: ep 0x%02x configured (dci=%u, type=%u, mps=%u)",
+             cfg_eps[i]->address,
+             cfg_dcis[i],
+             xhci_ep_type_from_usb(cfg_eps[i]->attributes, cfg_eps[i]->address),
+             cfg_eps[i]->max_packet);
+    }
     return 0;
+
+err_free_cfg_rings:
+    for (unsigned i = 0; i < cfg_count; i++) {
+        if (cfg_rings[i] != NULL)
+            xhci_ring_pool_free(cfg_rings[i]);
+    }
+    return -1;
 }
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */

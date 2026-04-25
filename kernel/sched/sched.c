@@ -318,6 +318,7 @@ volatile uint32_t *sched_diag_steal_successes;     /* live task returned       *
 volatile uint32_t *sched_diag_steal_stale;         /* stale pointer discarded  */
 volatile uint32_t *sched_diag_steal_empty_victim;  /* victim had nothing to take */
 volatile uint32_t *sched_diag_steal_push_full;     /* push failed — deque full (#175) */
+static struct cpu_runqueue *nc_runqueues;
 /* Scheduler init flag — uses the SAME pattern as the working cpu_boot_flag
  * handshake: cacheline-aligned, atomic store + cache_invalidate polling
  * with delay for natural L2 eviction. */
@@ -339,9 +340,7 @@ volatile uint32_t sched_diag_steal_push_full[MAX_CPUS];
 static inline struct cpu_runqueue *cpu_rq(uint32_t cpu)
 {
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC memory at compile-time-known address — no cacheable pointer.
-     * Run queues are the first ncmem_alloc() in scheduler_init(). */
-    return &((struct cpu_runqueue *)NC_MEM_BASE)[cpu];
+    return &nc_runqueues[cpu];
 #else
     return &sched.cpu_fallback[cpu];
 #endif
@@ -622,10 +621,15 @@ void scheduler_init(void)
     sched.isolated_cores = 0;
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    /* Initialize NC run queue region. cpu_rq() uses NC_MEM_BASE directly
-     * (compile-time constant) so no cacheable pointer is needed. */
-    ncmem_alloc(MAX_CPUS * sizeof(struct cpu_runqueue), CACHE_LINE_SIZE);
-    INFO("SMP: run queues in NC memory at 0x%lx", (unsigned long)NC_MEM_BASE);
+    nc_runqueues = ncmem_alloc(MAX_CPUS * sizeof(struct cpu_runqueue),
+                               CACHE_LINE_SIZE);
+    if (!nc_runqueues) {
+        INFO("SMP: NC run queue allocation failed");
+        for (;;)
+            ;
+    }
+    INFO("SMP: run queues in NC memory at 0x%lx",
+         (unsigned long)nc_runqueues);
 #endif
 
     /* Initialize task table (NC on Pi 5, BSS fallback otherwise) */

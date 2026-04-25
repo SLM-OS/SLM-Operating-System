@@ -78,6 +78,16 @@ ifeq ($(EVICTION_MODELS),ON)
     DISABLE_EVICTION := OFF
 endif
 
+# Optional escape hatch for kernel-oriented CMake cache entries that do
+# not yet have first-class Make variables. Intended for bring-up /
+# one-shot diagnostics such as `-DJETSON_XHCI_REBOOT_ON_NOOP=ON`.
+#
+# Example:
+#   make kernel-clean
+#   make kernel PLATFORM=JETSON_ORIN_NANO \
+#       EXTRA_KERNEL_CMAKE_ARGS=-DJETSON_XHCI_REBOOT_ON_NOOP=ON
+EXTRA_KERNEL_CMAKE_ARGS ?=
+
 # Cargo feature list built from the flags above.
 CARGO_FEATURES :=
 ifeq ($(EVICTION_MODELS),ON)
@@ -192,6 +202,9 @@ $(KERNEL_BUILD_DIR)/Makefile:
 		$(if $(HAILO_FW_BLOB),-DHAILO_FW_BLOB=$(HAILO_FW_BLOB)) \
 		$(if $(SCHEDULER_HEF_BLOB),-DSCHEDULER_HEF_BLOB=$(SCHEDULER_HEF_BLOB)) \
 		$(if $(USER_HEF_BLOB),-DUSER_HEF_BLOB=$(USER_HEF_BLOB)) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
+		$(if $(USER_HEF_BLOB),-DUSER_HEF_BLOB=$(USER_HEF_BLOB)) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 # kernel-kexec: X86_64-only parallel build of slmos.elf linked at
@@ -225,6 +238,7 @@ $(KERNEL_KEXEC_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
 		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-kexec-clean
@@ -324,6 +338,7 @@ $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
 		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-bzimage-clean
@@ -792,6 +807,7 @@ $(KERNEL_TEST_BUILD_DIR)/Makefile:
 		$(if $(filter ON,$(EVICTION_MODELS)),-DENABLE_EVICTION_MODELS=ON) \
 		-DEVICTION_DEFAULT_POLICY=$(EVICTION_DEFAULT_POLICY) \
 		$(if $(filter OFF,$(EMBED_DEMO_SCRIPTS)),-DEMBED_DEMO_SCRIPTS=OFF) \
+		$(EXTRA_KERNEL_CMAKE_ARGS) \
 		$(MAKE_PROGRAM_ARG)
 
 .PHONY: kernel-test-clean

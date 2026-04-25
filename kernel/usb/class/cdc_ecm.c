@@ -26,6 +26,7 @@
 #include "usb.h"
 #include "net.h"
 #include "net_driver.h"
+#include "ncmem.h"
 #include "debug.h"
 #include <string.h>
 
@@ -63,7 +64,11 @@
 /* -------------------------------------------------------------------------- */
 
 struct cdc_rx_slot {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    uint8_t        *buf;
+#else
     uint8_t         buf[CDC_ECM_BUF_SIZE];
+#endif
     struct usb_urb  urb;
     /*
      * `ready` is the producer / consumer synchronisation flag.
@@ -78,7 +83,11 @@ struct cdc_rx_slot {
 };
 
 struct cdc_tx_slot {
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    uint8_t        *buf;
+#else
     uint8_t         buf[CDC_ECM_BUF_SIZE];
+#endif
     struct usb_urb  urb;
     /*
      * `in_use`  — reservation flag. send() CAS-claims an idle slot
@@ -141,6 +150,54 @@ static bool cdc_logged_no_device;
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                     */
 /* -------------------------------------------------------------------------- */
+
+static uint8_t *cdc_rx_buf(struct cdc_rx_slot *slot)
+{
+    return slot->buf;
+}
+
+static uint8_t *cdc_tx_buf(struct cdc_tx_slot *slot)
+{
+    return slot->buf;
+}
+
+static int cdc_ecm_dma_init(void)
+{
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    static bool logged_dma_pool;
+
+    for (unsigned i = 0; i < CDC_ECM_RX_SLOTS; i++) {
+        if (cdc.rx[i].buf == NULL) {
+            cdc.rx[i].buf = ncmem_alloc(CDC_ECM_BUF_SIZE, 64);
+            if (cdc.rx[i].buf == NULL) {
+                WARN("cdc_ecm: NC RX buffer alloc failed (slot %u)", i);
+                return NET_E_NO_MEM;
+            }
+            memset(cdc.rx[i].buf, 0, CDC_ECM_BUF_SIZE);
+        }
+    }
+
+    for (unsigned i = 0; i < CDC_ECM_TX_SLOTS; i++) {
+        if (cdc.tx[i].buf == NULL) {
+            cdc.tx[i].buf = ncmem_alloc(CDC_ECM_BUF_SIZE, 64);
+            if (cdc.tx[i].buf == NULL) {
+                WARN("cdc_ecm: NC TX buffer alloc failed (slot %u)", i);
+                return NET_E_NO_MEM;
+            }
+            memset(cdc.tx[i].buf, 0, CDC_ECM_BUF_SIZE);
+        }
+    }
+
+    if (!logged_dma_pool) {
+        INFO("cdc_ecm: NC DMA pools ready (rx=%u tx=%u size=%u)",
+             (unsigned)CDC_ECM_RX_SLOTS,
+             (unsigned)CDC_ECM_TX_SLOTS,
+             (unsigned)CDC_ECM_BUF_SIZE);
+        logged_dma_pool = true;
+    }
+#endif
+    return NET_OK;
+}
 
 static uint16_t le16(const uint8_t *p)
 {
@@ -277,7 +334,7 @@ static int cdc_rx_submit(struct cdc_rx_slot *slot)
     slot->urb.dev           = cdc.dev;
     slot->urb.endpoint      = cdc.bulk_in->address;
     slot->urb.transfer_type = USB_XFER_BULK;
-    slot->urb.buffer        = slot->buf;
+    slot->urb.buffer        = cdc_rx_buf(slot);
     slot->urb.length        = CDC_ECM_BUF_SIZE;
     slot->urb.actual_length = 0;
     slot->urb.complete      = cdc_rx_complete;
@@ -301,6 +358,9 @@ static int cdc_ecm_net_init(void)
      */
     if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
         return NET_E_NOT_INIT;
+    int dma_rc = cdc_ecm_dma_init();
+    if (dma_rc != NET_OK)
+        return dma_rc;
     for (unsigned i = 0; i < CDC_ECM_RX_SLOTS; i++) {
         int rc = cdc_rx_submit(&cdc.rx[i]);
         if (rc != 0) {
@@ -343,11 +403,11 @@ static int cdc_ecm_net_send(const void *buf, size_t len)
                                          __ATOMIC_RELAXED))
             continue;
 
-        memcpy(slot->buf, buf, len);
+        memcpy(cdc_tx_buf(slot), buf, len);
         slot->urb.dev           = cdc.dev;
         slot->urb.endpoint      = cdc.bulk_out->address;
         slot->urb.transfer_type = USB_XFER_BULK;
-        slot->urb.buffer        = slot->buf;
+        slot->urb.buffer        = cdc_tx_buf(slot);
         slot->urb.length        = (uint32_t)len;
         slot->urb.actual_length = 0;
         slot->urb.complete      = cdc_tx_complete;
@@ -389,7 +449,7 @@ static int cdc_ecm_net_recv(void *buf, size_t max_len)
         if (len > max_len)
             len = (uint32_t)max_len;
         if (len > 0)
-            memcpy(buf, slot->buf, len);
+            memcpy(buf, cdc_rx_buf(slot), len);
         /* Release the slot before re-submitting so a fast completion
          * after re-submit doesn't race us into a double-processed
          * frame. RELAXED is fine — `ready = false` doesn't publish
@@ -484,29 +544,49 @@ int cdc_ecm_probe_and_register(void)
     /* Find a CDC-ECM control interface (class 0x02 + subclass 0x06)
      * and the CDC data interface (class 0x0A). CDC-ECM pairs them but
      * the interface numbers are device-specific, so scan. */
-    int ctrl_if = -1;
-    int data_if = -1;
+    const struct usb_interface *ctrl_iface = NULL;
+    const struct usb_interface *data_iface = NULL;
     for (unsigned i = 0; i < sizeof(dev->ifaces) / sizeof(dev->ifaces[0]); i++) {
         if (!dev->ifaces[i].valid) continue;
         uint8_t cls = dev->ifaces[i].class_code;
         uint8_t sub = dev->ifaces[i].subclass;
-        if (cls == 0x02 && sub == CDC_SUBCLASS_ECM && ctrl_if < 0)
-            ctrl_if = (int)dev->ifaces[i].number;
-        else if (cls == CDC_DATA_INTERFACE_CLASS && data_if < 0)
-            data_if = (int)dev->ifaces[i].number;
+        if (cls == 0x02 && sub == CDC_SUBCLASS_ECM && ctrl_iface == NULL)
+            ctrl_iface = &dev->ifaces[i];
+        else if (cls == CDC_DATA_INTERFACE_CLASS && data_iface == NULL)
+            data_iface = &dev->ifaces[i];
     }
-    if (ctrl_if < 0 || data_if < 0) {
+    if (ctrl_iface == NULL || data_iface == NULL) {
+        int ctrl_if = (ctrl_iface != NULL) ? (int)ctrl_iface->number : -1;
+        int data_if = (data_iface != NULL) ? (int)data_iface->number : -1;
         WARN("cdc_ecm: no CDC-ECM interface pair (ctrl=%d data=%d)",
              ctrl_if, data_if);
         return -1;
     }
 
+    if (data_iface->alt_setting != 0) {
+        int rc = usb_control_msg(dev,
+                                 USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_INTERFACE,
+                                 USB_REQ_SET_INTERFACE,
+                                 data_iface->alt_setting,
+                                 data_iface->number,
+                                 NULL, 0, 500);
+        if (rc < 0) {
+            WARN("cdc_ecm: SET_INTERFACE(if=%u alt=%u) failed: %s",
+                 data_iface->number, data_iface->alt_setting,
+                 usb_urb_status_str((enum usb_urb_status)(-rc)));
+            return rc;
+        }
+        INFO("cdc_ecm: activated interface %u alt %u",
+             data_iface->number, data_iface->alt_setting);
+    }
+
     const struct usb_endpoint *in =
-        usb_find_endpoint(dev, (uint8_t)data_if, USB_DIR_IN, USB_XFER_BULK);
+        usb_find_endpoint(dev, data_iface->number, USB_DIR_IN, USB_XFER_BULK);
     const struct usb_endpoint *out =
-        usb_find_endpoint(dev, (uint8_t)data_if, USB_DIR_OUT, USB_XFER_BULK);
+        usb_find_endpoint(dev, data_iface->number, USB_DIR_OUT, USB_XFER_BULK);
     if (in == NULL || out == NULL) {
-        WARN("cdc_ecm: data iface %d missing bulk IN or OUT", data_if);
+        WARN("cdc_ecm: data iface %u alt %u missing bulk IN or OUT",
+             data_iface->number, data_iface->alt_setting);
         return -1;
     }
 

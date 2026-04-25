@@ -2607,8 +2607,21 @@ int cmd_poke(int argc, char *argv[])
  */
 int cmd_xhci(int argc, char *argv[])
 {
-    (void)argc; (void)argv;
     extern bool xhci_dump_info(void);
+    extern int  xhci_cmd_noop_probe(void);
+
+    if (argc >= 2 && strcmp(argv[1], "noop") == 0) {
+        int rc = xhci_cmd_noop_probe();
+        shell_printf("xhci noop: %s (rc=%d)\r\n",
+                     rc == 0 ? "ok" : "failed", rc);
+        return rc;
+    }
+
+    if (argc >= 2) {
+        shell_puts("usage: xhci [noop]\r\n");
+        return -1;
+    }
+
     if (!xhci_dump_info())
         shell_puts("xhci: not live (clocks gated? check slmos-kexec)\r\n");
     return 0;

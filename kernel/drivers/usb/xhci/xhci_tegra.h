@@ -39,6 +39,15 @@
 #define  XUSB_BASE2_ADDR_SHIFT          16
 #define  XUSB_BASE2_ADDR_MASK           0xffffU
 
+#define XUSB_CFG_16                     0x040U
+#define XUSB_CFG_24                     0x060U
+#define XUSB_CFG_AXI_CFG                0x0f8U
+#define XUSB_CFG_ARU_CONTEXT            0x43cU
+#define XUSB_CFG_ARU_CONTEXT_HS_PLS     0x478U
+#define XUSB_CFG_ARU_CONTEXT_FS_PLS     0x47cU
+#define XUSB_CFG_ARU_CONTEXT_HSFS_SPEED 0x480U
+#define XUSB_CFG_ARU_CONTEXT_HSFS_PP    0x484U
+
 #define XUSB_CFG_ARU_C11_CSBRANGE       0x41cU
 #define XUSB_CFG_CSB_BASE_ADDR          0x800U
 

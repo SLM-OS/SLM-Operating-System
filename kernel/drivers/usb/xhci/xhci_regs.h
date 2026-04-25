@@ -90,19 +90,35 @@
 #define XHCI_PORTSC_PR              (1u << 4)   /* port reset */
 #define XHCI_PORTSC_PLS_SHIFT       5
 #define XHCI_PORTSC_PLS_MASK        (0xFu << XHCI_PORTSC_PLS_SHIFT)
+#define XHCI_PORTSC_LWS             (1u << 16)  /* link state write strobe */
 #define XHCI_PORTSC_PP              (1u << 9)   /* port power */
 #define XHCI_PORTSC_SPEED_SHIFT     10
 #define XHCI_PORTSC_SPEED_MASK      (0xFu << XHCI_PORTSC_SPEED_SHIFT)
 #define XHCI_PORTSC_CSC             (1u << 17)  /* connect status change */
 #define XHCI_PORTSC_PEC             (1u << 18)  /* port enable/disable change */
 #define XHCI_PORTSC_PRC             (1u << 21)  /* port reset change */
+#define XHCI_PORTSC_PLC             (1u << 22)  /* port link state change */
 /* Write-1-to-clear change bits (RW1CS in the spec). */
-#define XHCI_PORTSC_RW1CS_MASK      (XHCI_PORTSC_CSC | XHCI_PORTSC_PEC | XHCI_PORTSC_PRC)
+#define XHCI_PORTSC_RW1CS_MASK      (XHCI_PORTSC_CSC | XHCI_PORTSC_PEC | \
+                                     XHCI_PORTSC_PRC | XHCI_PORTSC_PLC)
+/*
+ * Minimal "neutral write-back" subset for the PORTSC fields this driver
+ * actually models. This intentionally excludes PED: on xHCI, carrying
+ * bit 1 through a link-state write is not neutral.
+ */
+#define XHCI_PORTSC_NEUTRAL_MASK    (XHCI_PORTSC_CCS | XHCI_PORTSC_PP | \
+                                     XHCI_PORTSC_PLS_MASK | \
+                                     XHCI_PORTSC_SPEED_MASK)
 
 /* PORTSC speed values (tegra-xusb reports 1 = full, 2 = low, 3 = high on USB 2). */
 #define XHCI_PORTSC_SPEED_FULL      1
 #define XHCI_PORTSC_SPEED_LOW       2
 #define XHCI_PORTSC_SPEED_HIGH      3
 #define XHCI_PORTSC_SPEED_SUPER     4
+
+/* PORTSC link-state values (xHCI 1.2 §5.4.8). */
+#define XHCI_PLS_U0                 0
+#define XHCI_PLS_U3                 3
+#define XHCI_PLS_RESUME             15
 
 #endif /* XHCI_REGS_H */

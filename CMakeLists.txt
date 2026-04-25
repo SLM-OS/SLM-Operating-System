@@ -217,6 +217,17 @@ if(JETSON_EL1_SMOKE)
     add_compile_definitions(JETSON_EL1_SMOKE=1)
 endif()
 
+# Jetson XHCI one-shot diagnostic: after a successful NO_OP round-trip,
+# immediately PSCI-reset back to Linux. Useful when serial capture is
+# unavailable but we still need to prove the post-kexec XHCI path reached
+# RUN=1 + command DMA on real hardware.
+option(JETSON_XHCI_REBOOT_ON_NOOP
+       "Reboot Jetson immediately after xHCI NO_OP succeeds (one-shot diagnostic)"
+       OFF)
+if(JETSON_XHCI_REBOOT_ON_NOOP)
+    add_compile_definitions(JETSON_XHCI_REBOOT_ON_NOOP=1)
+endif()
+
 # Auto-start DHCP at boot (issue #197).
 #
 # When ON, net_init() calls dhcp_start() before returning; the shell
