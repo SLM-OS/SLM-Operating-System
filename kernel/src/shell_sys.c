@@ -14,6 +14,9 @@
 #include "gpu_consumer.h"
 #include "admin_telemetry.h"
 #include "model_engine.h"
+#if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
+#include "cdc_ecm.h"
+#endif
 #ifdef CONFIG_AI_SCHEDULER
 #include "ai_types.h"
 #include "runtime_model.h"
@@ -5068,6 +5071,54 @@ int cmd_xhcidiag(int argc, char *argv[])
     uart_puts("=== End XHCI Probe ===\r\n");
     return 0;
 }
+
+/*
+ * cdcdiag — CDC-ECM TX path snapshot (#427 debug).
+ *
+ * Prints aggregate counters + per-slot state needed to localise
+ * the "telnet hangs after `model`" stall:
+ *
+ *   - tx_completions == tx_submits → completions arriving on time, no stall
+ *   - tx_submits >> tx_completions → completions stuck in flight
+ *   - tx_busy_returns growing → all 4 slots in_use, lwIP backpressure
+ *   - in_use_count saturated at 4 → confirmed slot exhaustion
+ *
+ * Run before/after the trigger ('cdcdiag', then 'model', then 'cdcdiag')
+ * to see the delta.
+ */
+int cmd_cdcdiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    struct cdc_ecm_tx_diag d;
+    cdc_ecm_get_tx_diag(&d);
+
+    /* Width of the diag struct's per-slot arrays (cdc_ecm.h) — pinned
+     * by a static_assert in cdc_ecm.c against CDC_ECM_TX_SLOTS. */
+    const unsigned slots = sizeof(d.slot_in_use) / sizeof(d.slot_in_use[0]);
+
+    shell_puts("CDC-ECM TX diag (#427):\r\n");
+    shell_printf("  tx_completions    %lu\r\n", (unsigned long)d.tx_completions);
+    shell_printf("  tx_submits        %lu\r\n", (unsigned long)d.tx_submits);
+    shell_printf("  tx_busy_returns   %lu\r\n", (unsigned long)d.tx_busy_returns);
+    shell_printf("  tx_submit_errors  %lu\r\n", (unsigned long)d.tx_submit_errors);
+    shell_printf("  in_use_count      %u of %u\r\n",
+                 (unsigned)d.in_use_count, slots);
+    shell_printf("  completed_count   %u (waiting reap)\r\n",
+                 (unsigned)d.completed_count);
+    shell_puts("  per-slot:\r\n");
+    for (unsigned i = 0; i < slots; i++) {
+        shell_printf("    [%u] in_use=%u completed=%u\r\n",
+                     i,
+                     (unsigned)d.slot_in_use[i],
+                     (unsigned)d.slot_completed[i]);
+    }
+    /* Inflight delta — non-zero means submits outpace completions. */
+    long inflight = (long)d.tx_submits - (long)d.tx_completions;
+    shell_printf("  inflight (submits - completions) = %ld\r\n", inflight);
+    return 0;
+}
+
 #endif /* PLATFORM_JETSON_ORIN_NANO && ENABLE_NETWORKING */
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)

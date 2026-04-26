@@ -68,6 +68,26 @@ uint32_t cdc_ecm_get_rx_count(void);
 /* Number of TX URB completions seen so far. */
 uint32_t cdc_ecm_get_tx_count(void);
 
+/* Diagnostic snapshot for the TX path (#427 debug). Captures
+ * per-slot state plus aggregate counters needed to localise a
+ * stall: are we hitting the 4-slot limit (busy_returns), are
+ * completions still arriving (tx_completions), are slots leaking
+ * (in_use_count vs completions vs busy_returns over time)? */
+struct cdc_ecm_tx_diag {
+    uint32_t tx_completions;     /* total cdc_tx_complete callbacks fired */
+    uint32_t tx_submits;         /* total successful usb_submit_urb calls */
+    uint32_t tx_busy_returns;    /* total NET_E_BUSY returns (all slots busy) */
+    uint32_t tx_submit_errors;   /* total usb_submit_urb failures */
+    uint8_t  in_use_count;       /* current in_use slot count (0..CDC_ECM_TX_SLOTS) */
+    uint8_t  completed_count;    /* current slots in_use && completed (waiting reap) */
+    uint8_t  slot_in_use[4];     /* per-slot in_use bool */
+    uint8_t  slot_completed[4];  /* per-slot completed bool */
+};
+
+/* Populate a diagnostic snapshot. Lock-free, safe to call from any
+ * context. */
+void cdc_ecm_get_tx_diag(struct cdc_ecm_tx_diag *out);
+
 /*
  * Test-only entry point: parse the 6-byte MAC out of a USB string
  * descriptor the way a real CDC-ECM device reports it (UTF-16LE of 12
