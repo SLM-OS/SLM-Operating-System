@@ -5338,84 +5338,66 @@ int cmd_pcietrain(int argc, char *argv[])
 }
 
 #include "i2c_tegra.h"
+#include "imx219.h"
 
 /*
- * imx219 — read CHIP_ID from the Sony IMX219 sensor over cam_i2c.
+ * imx219 — power up the Sony IMX219 sensor and read CHIP_ID.
  *
- * Hardware Task 1 verification gate: prove SLM-OS can speak I²C to
- * the sensor end-to-end. The IMX219 datasheet pins CHIP_ID at
- * registers 0x0000 (high byte) and 0x0001 (low byte); the combined
- * value is 0x0219. Linux's mainline IMX219 driver uses the same gate.
+ * #396 Hardware Task 2 verification gate. The full power-up sequence
+ * (extperiph1 XCLK, regulator GPIO, mux selector, reset GPIO release,
+ * datasheet settle) lives in `kernel/drivers/camera/imx219.c`. This
+ * shell command is a thin wrapper that calls `imx219_power_on`,
+ * prints the CHIP_ID it reads, and decodes the rc table for
+ * diagnostic clarity.
  *
  * Prerequisites:
  *   1. IMX219 module physically attached to connector A (J17).
  *   2. The IMX219-A DT overlay loaded by Linux pre-kexec (configure
  *      via `config-by-hardware.py -n 2='Camera IMX219-A'`). This
- *      positions the cam_i2cmux GPIO so the controller talks to the
- *      connector with the camera attached.
- *   3. **The sensor must be powered on at the moment SLM-OS reads
- *      CHIP_ID.** Linux's tegracam IMX219 driver runtime-suspends
- *      the sensor (XCLK off, reset GPIO LOW) when no v4l2 client is
- *      streaming — and the kexec orderly shutdown closes any active
- *      v4l2 fd, triggering the same teardown. There are two ways to
- *      satisfy this prerequisite today:
- *        a. Driving XCLK + reset from SLM-OS itself. This is the
- *           proper path and lives in the IMX219 sensor driver, which
- *           is Hardware Task 2 — not implemented yet. When it
- *           lands, the imx219 cmd should call into it before
- *           reading CHIP_ID.
- *        b. Patching slmos-kexec to hold the relevant BPMP clocks
- *           (extperiph1 for XCLK) and tegracam GPIO state across the
- *           kexec boundary. Same pattern slmos-kexec already uses
- *           for the GPU and USB clocks. Workable but fragile.
+ *      ensures Linux configures the cam_i2c controller, the i2c-mux
+ *      driver knows about the cam_i2cmux GPIO, and the sensor's
+ *      regulator topology is set up. SLM-OS inherits all of that.
  *
- * Today, this command verifies that the HSI2C controller path itself
- * works (init returns 0, transfers complete) regardless of the
- * sensor's power state. A NACK or RX-empty result with init=OK is
- * the expected diagnostic for "sensor is in reset / clock-gated";
- * not a driver bug.
+ * Expected output on a working setup:
+ *
+ *   === IMX219 power-up + CHIP_ID readback (cam_i2c, slave 0x10) ===
+ *     imx219_power_on:      rc=0
+ *     CHIP_ID:              0x0219 (expect 0x0219)
+ *     *** IMX219 detected — Hardware Task 2 GREEN ***
  */
 int cmd_imx219(int argc, char *argv[])
 {
     (void)argc; (void)argv;
 
-    uart_puts("\r\n=== IMX219 CHIP_ID readback (cam_i2c, slave 0x10) ===\r\n");
+    uart_puts("\r\n=== IMX219 power-up + CHIP_ID readback "
+              "(cam_i2c, slave 0x10) ===\r\n");
 
-    int rc = tegra_i2c_init(&tegra_i2c_cam_bus);
-    uart_printf("  tegra_i2c_init:       rc=%d\r\n", rc);
-    if (rc != 0) {
-        uart_puts("  *** controller init failed — see i2c_tegra.h rc table ***\r\n");
-        uart_puts("=== End ===\r\n");
-        return -1;
-    }
+    int rc = imx219_power_on();
+    uart_printf("  imx219_power_on:      rc=%d\r\n", rc);
 
-    uint8_t hi = 0, lo = 0;
-    int rc_hi = tegra_i2c_read_reg16(&tegra_i2c_cam_bus, 0x10u, 0x0000u, &hi);
-    int rc_lo = tegra_i2c_read_reg16(&tegra_i2c_cam_bus, 0x10u, 0x0001u, &lo);
-    uart_printf("  read CHIP_ID[0x0000]: rc=%d val=0x%02x\r\n",
-                rc_hi, (unsigned)hi);
-    uart_printf("  read CHIP_ID[0x0001]: rc=%d val=0x%02x\r\n",
-                rc_lo, (unsigned)lo);
-
-    if (rc_hi == 0 && rc_lo == 0) {
-        uint16_t chip_id = ((uint16_t)hi << 8) | lo;
-        uart_printf("  combined CHIP_ID:     0x%04x (expect 0x0219)\r\n",
+    if (rc == 0) {
+        uint16_t chip_id = 0;
+        int read_rc = imx219_read_chip_id(&chip_id);
+        uart_printf("  CHIP_ID:              0x%04x (expect 0x0219)\r\n",
                     (unsigned)chip_id);
-        if (chip_id == 0x0219u) {
-            uart_puts("  *** IMX219 detected — Hardware Task 1 GREEN ***\r\n");
+        if (read_rc == 0 && chip_id == 0x0219u) {
+            uart_puts("  *** IMX219 detected — Hardware Task 2 GREEN ***\r\n");
         } else {
-            uart_puts("  *** UNEXPECTED CHIP_ID — check cabling / mux state ***\r\n");
+            uart_printf("  *** Re-read CHIP_ID failed: read_rc=%d, "
+                        "chip_id=0x%04x (expected 0x0219). The sensor "
+                        "responded to the power-up read but went away "
+                        "between probes — check XCLK / mux state. ***\r\n",
+                        read_rc, (unsigned)chip_id);
         }
-    } else if (rc_hi == -3 || rc_lo == -3) {
-        uart_puts("  *** NACK from slave — sensor likely in reset (XCLK off) ***\r\n");
-        uart_puts("  *** Expected until Hardware Task 2 lands the IMX219    ***\r\n");
-        uart_puts("  *** sensor driver with reset/clock control. The HSI2C ***\r\n");
-        uart_puts("  *** controller path itself is OK (init succeeded).    ***\r\n");
-    } else if (rc_hi == -5 || rc_lo == -5) {
-        uart_puts("  *** Read FIFO empty — sensor stopped clock-stretching  ***\r\n");
-        uart_puts("  *** mid-transaction (similar root cause: powered down). ***\r\n");
+    } else if (rc == -2) {
+        uart_puts("  *** Power-up succeeded but CHIP_ID read failed —    ***\r\n");
+        uart_puts("  *** sensor not responding on I²C. Check overlay,    ***\r\n");
+        uart_puts("  *** I²C MUX state, and reset-GPIO timing.           ***\r\n");
+    } else if (rc == -3) {
+        uart_puts("  *** Power-up succeeded but CHIP_ID mismatch — wrong ***\r\n");
+        uart_puts("  *** sensor (IMX477?) or stuck on a different mux ch.***\r\n");
     } else {
-        uart_puts("  *** I²C transaction failed — see i2c_tegra.h rc table ***\r\n");
+        uart_puts("  *** Power-up failed — see WARN log lines above.     ***\r\n");
     }
 
     uart_puts("=== End ===\r\n");

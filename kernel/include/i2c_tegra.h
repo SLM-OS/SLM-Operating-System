@@ -49,11 +49,14 @@
  *              public call. Required because each call mutates
  *              controller state (FIFOs, INT_STATUS, CNFG) and any
  *              two concurrent transactions on the same bus would
- *              race. Held across the up-to-100 ms packet poll —
- *              long but acceptable for a polled driver, and the
- *              alternative (releasing across the wait) would
- *              reintroduce the race. BPMP IPC called during init
- *              is itself lock-free polled, so no deadlock window.
+ *              race. Held across the up-to-100 ms packet poll AND
+ *              the up-to-1 s I2C_CONFIG_LOAD self-clear poll inside
+ *              tegra_i2c_init — long but acceptable for a polled
+ *              driver, and the alternative (releasing across either
+ *              wait) would reintroduce the race. BPMP IPC called
+ *              during init is itself lock-free polled and the
+ *              CONFIG_LOAD poll only re-reads a single MMIO
+ *              register, so no deadlock window in either case.
  *
  *              Acquired with `spin_lock_irqsave` so IRQs stay
  *              disabled across the poll — fine today because the
@@ -124,3 +127,19 @@ int tegra_i2c_read_reg16(struct tegra_i2c_bus *bus,
                          uint8_t  slave_7bit,
                          uint16_t reg,
                          uint8_t *out);
+
+/*
+ * Diagnostic register dump. Reads the controller's status registers
+ * (CNFG, FIFO_STATUS, INT_STATUS, packet status if available) into
+ * `out` as up to `n` u32 values labelled by `out_names[i]`. Used by
+ * the imx219 shell command when a CHIP_ID readback fails to give a
+ * post-mortem of what the controller observed.
+ */
+struct tegra_i2c_regdump_entry {
+    const char *name;
+    uint32_t    value;
+};
+
+void tegra_i2c_dump_status(struct tegra_i2c_bus *bus,
+                           struct tegra_i2c_regdump_entry *out,
+                           uint32_t n);

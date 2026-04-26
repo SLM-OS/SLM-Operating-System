@@ -429,6 +429,45 @@ What SLM-OS does need to recreate from scratch:
   origin (0,0). The bring-up math in this doc assumes that
   convention.
 
+### Tegra HSI2C — T194/T234 register set vs T210 (April 2026)
+
+Live debugging of the CHIP_ID readback turned up a non-obvious
+register-set difference between the Tegra210-era and Tegra194/234
+HSI2C controllers. The original SLM-OS port mirrored Tegra210 — and
+that's why CHIP_ID reads completed with `PACKET_XFER_COMPLETE` set
+but `RX_FIFO` empty (rc=-5). Pinned regression is in
+`kernel/tests/test_camera.c` (`I2C_T194_*` constants); cross-
+checked against `docs/reference/linux-i2c-tegra.c` `tegra194_i2c_hw`.
+
+What changed on T194/T234:
+
+- **Master FIFO interface moved.** Legacy `FIFO_CONTROL`/`FIFO_STATUS`
+  at `0x05C`/`0x060` still exist but are unused — the controller now
+  reads `MST_FIFO_CONTROL`/`MST_FIFO_STATUS` at `0x0B4`/`0x0B8`.
+  Polling RX count from the legacy view returns 0 even when the
+  slave responded.
+- **Mandatory CONFIG_LOAD.** Writes to `I2C_CNFG`, `I2C_CLK_DIVISOR`,
+  and `I2C_INTERFACE_TIMING_*` land in staging registers and don't
+  take effect until you write `MSTR_CONFIG_LOAD` (bit 0) to
+  `I2C_CONFIG_LOAD` at `0x08C` and poll until it self-clears.
+  Skipping this leaves the bus-timing FSM running on whatever
+  Linux (or the chip default) had loaded — packets complete but
+  the RX path captures nothing.
+- **Different std-mode timing.** Tegra210 uses `clk_divisor_std_mode = 0x19`
+  with `tlow=4`, `thigh=2`. Tegra194/234 needs `0x4F` with
+  `tlow=8`, `thigh=7`, programmed into `I2C_INTERFACE_TIMING_0`
+  (`0x094`). The interface-timing register *must* be written
+  explicitly — chip default is 0 which is an invalid bus-timing
+  config.
+
+Symptom signature when this is wrong (preserve for future Tegra
+bring-up): `imx219` shell command logs `chip_id read rc=-5`, the
+diagnostic dump shows `INT_STATUS` with bit 1 (TX_FIFO_DATA_REQ)
+stuck on, `MST_FIFO_STATUS = 0x00800080` (RX count 0, TX 8 free),
+and `RX_FIFO` reads back 0x02 (residual or bus capacitance, not
+real data). All four signals together = "controller is alive but
+running on wrong timing config."
+
 ---
 
 ## Open questions

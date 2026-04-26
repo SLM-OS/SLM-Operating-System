@@ -101,6 +101,23 @@
 #define TEGRA234_RESET_VI2          115U
 
 /* ===================================================================== */
+/*  External-peripheral clocks (camera XCLK)                             */
+/* ===================================================================== */
+/*
+ * EXTPERIPH1..4 source the SoC's "EXT_PERIPH" pad outputs that
+ * camera modules use as their reference clock (XCLK / MCLK). The
+ * IMX219 on the Orin Nano carrier consumes EXTPERIPH1 at 24 MHz
+ * (`mclk_khz = 24000` per the L4T overlay).
+ *
+ * No matching reset ID — these are simple clock-divider outputs from
+ * pll_p, gated by the standard MRQ_CLK enable/disable.
+ */
+#define TEGRA234_CLK_EXTPERIPH1      36U
+#define TEGRA234_CLK_EXTPERIPH2      37U
+#define TEGRA234_CLK_EXTPERIPH3      38U
+#define TEGRA234_CLK_EXTPERIPH4      39U
+
+/* ===================================================================== */
 /*  Power domains (camera)                                               */
 /* ===================================================================== */
 /*
