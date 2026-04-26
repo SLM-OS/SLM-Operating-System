@@ -470,11 +470,11 @@ static int ai_hailo_init(void)
     ai_hailo_stats.decisions = 0;
     ai_hailo_stats.fallbacks = 0;
     ai_hailo_stats.total_latency_ns = 0;
+    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
+        ai_hailo_stats.action_hist[i] = 0;
     latency_hist_reset(&ai_hailo_stats.latency_hist);
     rate_ewma_init(&ai_hailo_stats.decision_rate, 0);
     rate_ewma_init(&ai_hailo_stats.fallback_rate, 0);
-    for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
-        ai_hailo_stats.action_hist[i] = 0;
 
     cached_hailo_dev = inference_device_find("hailo-8");
 
