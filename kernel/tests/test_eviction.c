@@ -18,6 +18,7 @@
 #include "../include/slm_ffi.h"
 #include "../include/string.h"
 #include "../include/uart.h"
+#include "test_blob_helpers.h"
 #include <stdint.h>
 
 /* ============================================================================
@@ -111,16 +112,6 @@ static void spin_a_bit(void)
     (void)sink;
 }
 
-static uint32_t fnv1a32(const uint8_t *data, size_t len)
-{
-    uint32_t hash = 0x811C9DC5u;
-    for (size_t i = 0; i < len; i++) {
-        hash ^= data[i];
-        hash *= 0x01000193u;
-    }
-    return hash;
-}
-
 static void write_u16_le(uint8_t *out, uint16_t value)
 {
     out[0] = (uint8_t)(value & 0xFFu);
@@ -177,120 +168,6 @@ static size_t build_valid_mlp_payload(uint32_t out_weight_bits, uint8_t *out, si
     write_u32_le(out + cursor, out_weight_bits);
 
     return PAYLOAD_LEN;
-}
-
-/* Outer-blob header size written by `build_test_blob`. Exposed so caller
- * buffers can size as `BLOB_TEST_OUTER_HEADER_BYTES + payload_len`
- * instead of relying on a magic literal. */
-#define BLOB_TEST_OUTER_HEADER_BYTES 24
-
-static size_t build_test_blob(uint16_t kind_id,
-                              const uint8_t *payload,
-                              size_t payload_len,
-                              uint8_t *out,
-                              size_t out_cap)
-{
-    /* The function writes header bytes at offsets 0..23 below. Any
-     * change to the layout (an extra reserved field, a wider counter,
-     * etc.) must also update BLOB_TEST_OUTER_HEADER_BYTES — this
-     * static_assert is the tripwire that catches drift between the
-     * constant and the literal offsets. */
-    static_assert(BLOB_TEST_OUTER_HEADER_BYTES == 24,
-                  "build_test_blob writes 24 bytes at out[0..23]; "
-                  "BLOB_TEST_OUTER_HEADER_BYTES and the writes below "
-                  "must move together");
-
-    uint32_t checksum = fnv1a32(payload, payload_len);
-    size_t total = BLOB_TEST_OUTER_HEADER_BYTES + payload_len;
-    if (out_cap < total) return 0;
-
-    out[0] = 'S'; out[1] = 'E'; out[2] = 'M'; out[3] = 'B';
-    out[4] = 1; out[5] = 0;                     /* version */
-    out[6] = (uint8_t)(kind_id & 0xFF);
-    out[7] = (uint8_t)(kind_id >> 8);
-    out[8] = 1; out[9] = 0;                     /* feature schema */
-    out[10] = 0; out[11] = 0;                   /* reserved */
-    out[12] = (uint8_t)(payload_len & 0xFF);
-    out[13] = (uint8_t)((payload_len >> 8) & 0xFF);
-    out[14] = (uint8_t)((payload_len >> 16) & 0xFF);
-    out[15] = (uint8_t)((payload_len >> 24) & 0xFF);
-    out[16] = (uint8_t)(checksum & 0xFF);
-    out[17] = (uint8_t)((checksum >> 8) & 0xFF);
-    out[18] = (uint8_t)((checksum >> 16) & 0xFF);
-    out[19] = (uint8_t)((checksum >> 24) & 0xFF);
-    out[20] = 0; out[21] = 0; out[22] = 0; out[23] = 0; /* reserved */
-    memcpy(out + BLOB_TEST_OUTER_HEADER_BYTES, payload, payload_len);
-    return total;
-}
-
-/* Exposed for callers so their static buffer sizing matches the helper.
- * 8-byte header + 4417 fp32 weights = 17676 bytes. The corresponding
- * static_assert inside build_eviction_mlp_payload pins the math; if a
- * future MLP topology widens the layer dimensions both have to move. */
-#define EVICTION_MLP_PAYLOAD_BYTES 17676
-
-static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
-                                         uint8_t *out,
-                                         size_t out_cap)
-{
-    enum {
-        PAYLOAD_HEADER_LEN = 8,
-        L1_IN = 27,
-        L1_OUT = 64,
-        L2_OUT = 32,
-        L3_OUT = 16,
-        OUT_DIM = 1,
-        W_L1_LEN = L1_OUT * L1_IN,
-        B_L1_LEN = L1_OUT,
-        W_L2_LEN = L2_OUT * L1_OUT,
-        B_L2_LEN = L2_OUT,
-        W_L3_LEN = L3_OUT * L2_OUT,
-        B_L3_LEN = L3_OUT,
-        W_OUT_LEN = OUT_DIM * L3_OUT,
-        B_OUT_LEN = OUT_DIM,
-        FLOAT_COUNT = W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
-                    + W_L3_LEN + B_L3_LEN + W_OUT_LEN + B_OUT_LEN,
-        TOTAL = PAYLOAD_HEADER_LEN + FLOAT_COUNT * 4
-    };
-    static_assert(TOTAL == EVICTION_MLP_PAYLOAD_BYTES,
-                  "EVICTION_MLP_PAYLOAD_BYTES is out of sync with the "
-                  "helper's layer dimensions; both must update together");
-    size_t cursor = 0;
-    size_t idx = 0;
-
-    if (out_cap < TOTAL) return 0;
-    memset(out, 0, TOTAL);
-    out[0] = 'M'; out[1] = 'L'; out[2] = 'P'; out[3] = '1';
-    out[4] = 1; out[5] = 0;
-    out[6] = 0; out[7] = 0;
-    cursor = PAYLOAD_HEADER_LEN;
-
-#define WRITE_U32_LE(bits)                                                   \
-    do {                                                                     \
-        uint32_t bits_ = (bits);                                             \
-        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
-        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
-        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
-        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
-        cursor += 4;                                                         \
-    } while (0)
-
-    for (idx = 0; idx < FLOAT_COUNT; idx++) {
-        uint32_t bits = 0u;
-        if (idx == 0) bits = 0x3F800000u; /* W_L1[0][0] */
-        if (idx == W_L1_LEN + B_L1_LEN) bits = 0x3F800000u; /* W_L2[0][0] */
-        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN) {
-            bits = 0x3F800000u; /* W_L3[0][0] */
-        }
-        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
-                + W_L3_LEN + B_L3_LEN) {
-            bits = out_weight_bits; /* W_OUT[0][0] */
-        }
-        WRITE_U32_LE(bits);
-    }
-#undef WRITE_U32_LE
-
-    return cursor;
 }
 
 static size_t build_eviction_xgb_payload(uint8_t *out, size_t out_cap)
@@ -908,8 +785,8 @@ static void test_blob_stage_activate_rollback_round_trip(void)
     static uint8_t blob2[18100];
     size_t payload_len1 = build_valid_mlp_payload(0x41200000u, payload1, sizeof(payload1));
     size_t payload_len2 = build_valid_mlp_payload(0x41A00000u, payload2, sizeof(payload2));
-    size_t len1 = build_test_blob(2, payload1, payload_len1, blob1, sizeof(blob1));
-    size_t len2 = build_test_blob(2, payload2, payload_len2, blob2, sizeof(blob2));
+    size_t len1 = build_outer_blob(2, payload1, payload_len1, blob1, sizeof(blob1));
+    size_t len2 = build_outer_blob(2, payload2, payload_len2, blob2, sizeof(blob2));
     TEST_ASSERT_TRUE(payload_len1 > 0);
     TEST_ASSERT_TRUE(payload_len2 > 0);
     TEST_ASSERT_TRUE(len1 > 0);
@@ -956,7 +833,7 @@ static void test_blob_stage_rejects_kind_mismatch(void)
 
     static uint8_t blob[64];
     const uint8_t payload[] = {0xAA, 0xBB, 0xCC};
-    size_t len = build_test_blob(1, payload, sizeof(payload), blob, sizeof(blob));
+    size_t len = build_outer_blob(1, payload, sizeof(payload), blob, sizeof(blob));
     TEST_ASSERT_TRUE(len > 0);
 
     TEST_ASSERT_EQUAL_INT(-4, rust_eviction_blob_stage(2, blob, len));
@@ -973,10 +850,10 @@ static void test_blob_stage_rejects_invalid_payload_body(void)
     static uint8_t mlp_blob[64];
     static uint8_t cacheus_blob[64];
     const uint8_t bad_payload[] = {0xAA, 0xBB, 0xCC, 0xDD};
-    size_t xgb_len = build_test_blob(1, bad_payload, sizeof(bad_payload), xgb_blob, sizeof(xgb_blob));
-    size_t mlp_len = build_test_blob(2, bad_payload, sizeof(bad_payload), mlp_blob, sizeof(mlp_blob));
+    size_t xgb_len = build_outer_blob(1, bad_payload, sizeof(bad_payload), xgb_blob, sizeof(xgb_blob));
+    size_t mlp_len = build_outer_blob(2, bad_payload, sizeof(bad_payload), mlp_blob, sizeof(mlp_blob));
     size_t cacheus_len =
-        build_test_blob(3, bad_payload, sizeof(bad_payload), cacheus_blob, sizeof(cacheus_blob));
+        build_outer_blob(3, bad_payload, sizeof(bad_payload), cacheus_blob, sizeof(cacheus_blob));
 
     TEST_ASSERT_TRUE(xgb_len > 0);
     TEST_ASSERT_TRUE(mlp_len > 0);
@@ -993,9 +870,9 @@ static void test_blob_validate_rejects_invalid_outer_header_fields(void)
      * blob adds a 24-byte header. Allocate generously in BSS — these are
      * `static` so they don't burden the 16 KB kernel stack. */
     static uint8_t payload[EVICTION_MLP_PAYLOAD_BYTES];
-    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + BLOB_TEST_OUTER_HEADER_BYTES];
+    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + BLOB_OUTER_HEADER_BYTES];
     size_t payload_len = build_eviction_mlp_payload(0x3F800000u, payload, sizeof(payload));
-    size_t len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
+    size_t len = build_outer_blob(2, payload, payload_len, blob, sizeof(blob));
 
     TEST_ASSERT_TRUE(payload_len > 0);
     TEST_ASSERT_TRUE(len > 0);
@@ -1004,17 +881,17 @@ static void test_blob_validate_rejects_invalid_outer_header_fields(void)
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
 
-    len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(2, payload, payload_len, blob, sizeof(blob));
     blob[8] = 2u;
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
 
-    len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(2, payload, payload_len, blob, sizeof(blob));
     blob[10] = 1u;
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
 
-    len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(2, payload, payload_len, blob, sizeof(blob));
     blob[len - 1] ^= 0x01u;
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
@@ -1026,14 +903,14 @@ static void test_blob_stage_rejects_invalid_payload_headers(void)
     static uint8_t xgb_payload[128];
     static uint8_t mlp_payload[EVICTION_MLP_PAYLOAD_BYTES];
     static uint8_t cacheus_payload[32];
-    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + BLOB_TEST_OUTER_HEADER_BYTES];
+    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + BLOB_OUTER_HEADER_BYTES];
     size_t payload_len;
     size_t len;
 
     payload_len = build_eviction_xgb_payload(xgb_payload, sizeof(xgb_payload));
     TEST_ASSERT_TRUE(payload_len > 0);
     xgb_payload[6] = 1u;
-    len = build_test_blob(1, xgb_payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(1, xgb_payload, payload_len, blob, sizeof(blob));
     TEST_ASSERT_TRUE(len > 0);
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(1, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(1, blob, len));
@@ -1041,7 +918,7 @@ static void test_blob_stage_rejects_invalid_payload_headers(void)
     payload_len = build_eviction_mlp_payload(0x3F800000u, mlp_payload, sizeof(mlp_payload));
     TEST_ASSERT_TRUE(payload_len > 0);
     mlp_payload[4] = 2u;
-    len = build_test_blob(2, mlp_payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(2, mlp_payload, payload_len, blob, sizeof(blob));
     TEST_ASSERT_TRUE(len > 0);
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
@@ -1050,7 +927,7 @@ static void test_blob_stage_rejects_invalid_payload_headers(void)
                                                  cacheus_payload, sizeof(cacheus_payload));
     TEST_ASSERT_TRUE(payload_len > 0);
     cacheus_payload[6] = 1u;
-    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
     TEST_ASSERT_TRUE(len > 0);
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
@@ -1068,7 +945,7 @@ static void test_blob_stage_rejects_invalid_payload_values(void)
     TEST_ASSERT_TRUE(payload_len > 0);
     xgb_payload[18] = 27u;
     xgb_payload[19] = 0u;
-    len = build_test_blob(1, xgb_payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(1, xgb_payload, payload_len, blob, sizeof(blob));
     TEST_ASSERT_TRUE(len > 0);
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(1, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(1, blob, len));
@@ -1076,7 +953,7 @@ static void test_blob_stage_rejects_invalid_payload_values(void)
     payload_len = build_eviction_cacheus_payload(7u, 0x3e800000u, 64u, 0x3ca3d70au,
                                                  cacheus_payload, sizeof(cacheus_payload));
     TEST_ASSERT_TRUE(payload_len > 0);
-    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
     TEST_ASSERT_TRUE(len > 0);
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
@@ -1084,7 +961,7 @@ static void test_blob_stage_rejects_invalid_payload_values(void)
     payload_len = build_eviction_cacheus_payload(1u, 0x3fc00000u, 64u, 0x3ca3d70au,
                                                  cacheus_payload, sizeof(cacheus_payload));
     TEST_ASSERT_TRUE(payload_len > 0);
-    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
     TEST_ASSERT_TRUE(len > 0);
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
@@ -1092,7 +969,7 @@ static void test_blob_stage_rejects_invalid_payload_values(void)
     payload_len = build_eviction_cacheus_payload(1u, 0x3e800000u, 0u, 0x3ca3d70au,
                                                  cacheus_payload, sizeof(cacheus_payload));
     TEST_ASSERT_TRUE(payload_len > 0);
-    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
     TEST_ASSERT_TRUE(len > 0);
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
@@ -1100,7 +977,7 @@ static void test_blob_stage_rejects_invalid_payload_values(void)
     payload_len = build_eviction_cacheus_payload(1u, 0x3e800000u, 64u, 0x3fc00000u,
                                                  cacheus_payload, sizeof(cacheus_payload));
     TEST_ASSERT_TRUE(payload_len > 0);
-    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    len = build_outer_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
     TEST_ASSERT_TRUE(len > 0);
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
