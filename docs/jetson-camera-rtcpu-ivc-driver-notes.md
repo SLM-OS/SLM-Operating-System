@@ -455,15 +455,28 @@ some other wake-up signal first (analogous to how the Linux
 `tegra_camrtc_fw_resume` sends `CAMRTC_HSP_RESUME` via mailbox AND
 asserts power-domain transitions via BPMP).
 
+Additional verification (2026-04-26, same session): tried sending
+`CAMRTC_HSP_MSG(IRQ=0x00, 1)` to SM[0] BEFORE the HELLO request, on
+the theory that RCE's HSP-VM ISR might need an IRQ wake-up before
+it processes higher-level opcodes. The IRQ wake message also stayed
+stuck with TX FULL=1 — RCE doesn't drain SM[0] at all, regardless
+of message ID. **This rules out hypotheses that depend on the
+specific message content** (HELLO session-state, opcode-specific
+firmware paths) and strongly points at the wake-up path itself
+being broken: RCE's SM[0] FULL → R5 IRQ wire isn't reaching the
+inherited firmware after Linux's runtime suspend, OR the firmware's
+HSP-VM ISR was unregistered during the suspend transition and
+needs a different signal to re-arm.
+
 Avenues for the next investigation cycle (each a 1-day deploy
 loop on jetson-nano-1):
 
-1. **Pre-kexec RCE suspend.** Mirror the GPU pattern in
+1. **Pre-kexec RCE keep-alive.** Mirror the GPU pattern in
    `scripts/jetson-kexec-slmos.sh` — explicitly write
    `power/control = on` for `tegra-camera-rtcpu` so Linux holds
-   RCE active across the kexec boundary. If HELLO succeeds with
-   that, the runtime-suspend hypothesis is confirmed and the fix
-   is to bake it into slmos-kexec.
+   RCE active (no autosuspend) across the kexec boundary. If HELLO
+   succeeds with that, the runtime-suspend hypothesis is
+   confirmed and the fix is to bake it into slmos-kexec.
 2. **Force pre-kexec camera activity.** Run a quick
    `gst-launch-1.0 nvarguscamerasrc num-buffers=1 ! fakesink` <30 s
    before kexec so the autosuspend timer hasn't fired. If HELLO

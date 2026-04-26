@@ -64,6 +64,7 @@
 
 /* CAMRTC_HSP_MSG opcodes (subset — full set in
  * docs/reference/l4t-camrtc-commands.h). */
+#define CAMRTC_HSP_IRQ            0x00u
 #define CAMRTC_HSP_HELLO          0x40u
 #define CAMRTC_HSP_BYE            0x41u
 #define CAMRTC_HSP_RESUME         0x42u
@@ -285,6 +286,28 @@ int camrtc_init(void)
              (unsigned)CAMRTC_VM_SS_IDX, (unsigned)ss_pre);
         mmio_write32(ss_addr + HSP_SS_SHRD_SEM_CLR, 0xFFFFFFFFu);
     }
+
+    /* IRQ wake first — RCE's HSP-VM ISR may need a "you have a
+     * message" wake before it processes higher-level opcodes after
+     * being idle in WFI. L4T's `camrtc_hsp_vm_send_irqmsg` uses
+     * this for IVC ring notifications; trying it before HELLO to
+     * see if it kicks RCE out of WFI without leaving a session-
+     * state record. The IRQ message is one-way (no response
+     * expected), so we just write it and immediately follow with
+     * HELLO. */
+    if (sm_tx_wait_empty(CAMRTC_HANDSHAKE_TIMEOUT_US) != 0) {
+        WARN("camrtc: VM-TX never drained for IRQ wake");
+        return -3;
+    }
+    sm_tx_send(camrtc_msg_pack(CAMRTC_HSP_IRQ, 1u));
+    /* Give RCE a moment to drain the IRQ message before posting
+     * HELLO. If RCE drains within 2ms, we know the wake-up path
+     * works and the HELLO that follows should also be processed. */
+    timer_busy_wait_us(2000u);
+    uint32_t tx_after_irq = mmio_read32(g_vm_tx_addr);
+    INFO("camrtc: 2ms after IRQ wake — TX=0x%08x (FULL=%u)",
+         (unsigned)tx_after_irq,
+         (unsigned)((tx_after_irq & HSP_SM_SHRD_MBOX_FULL) >> 31));
 
     if (sm_tx_wait_empty(CAMRTC_HANDSHAKE_TIMEOUT_US) != 0) {
         WARN("camrtc: VM-TX never drained for HELLO");
