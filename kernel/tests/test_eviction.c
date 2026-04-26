@@ -208,6 +208,12 @@ static size_t build_test_blob(uint16_t kind_id,
     return total;
 }
 
+/* Exposed for callers so their static buffer sizing matches the helper.
+ * 8-byte header + 4417 fp32 weights = 17676 bytes. The corresponding
+ * static_assert inside build_eviction_mlp_payload pins the math; if a
+ * future MLP topology widens the layer dimensions both have to move. */
+#define EVICTION_MLP_PAYLOAD_BYTES 17676
+
 static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
                                          uint8_t *out,
                                          size_t out_cap)
@@ -231,6 +237,9 @@ static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
                     + W_L3_LEN + B_L3_LEN + W_OUT_LEN + B_OUT_LEN,
         TOTAL = PAYLOAD_HEADER_LEN + FLOAT_COUNT * 4
     };
+    static_assert(TOTAL == EVICTION_MLP_PAYLOAD_BYTES,
+                  "EVICTION_MLP_PAYLOAD_BYTES is out of sync with the "
+                  "helper's layer dimensions; both must update together");
     size_t cursor = 0;
     size_t idx = 0;
 
@@ -965,8 +974,11 @@ static void test_blob_stage_rejects_invalid_payload_body(void)
 
 static void test_blob_validate_rejects_invalid_outer_header_fields(void)
 {
-    static uint8_t payload[2048];
-    static uint8_t blob[4096];
+    /* MLP payload is ~17.3 KB (see EVICTION_MLP_PAYLOAD_BYTES); the outer
+     * blob adds a 24-byte header. Allocate generously in BSS — these are
+     * `static` so they don't burden the 16 KB kernel stack. */
+    static uint8_t payload[EVICTION_MLP_PAYLOAD_BYTES];
+    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + 64];
     size_t payload_len = build_eviction_mlp_payload(0x3F800000u, payload, sizeof(payload));
     size_t len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
 
@@ -995,10 +1007,11 @@ static void test_blob_validate_rejects_invalid_outer_header_fields(void)
 
 static void test_blob_stage_rejects_invalid_payload_headers(void)
 {
+    /* See sibling test for the MLP buffer-sizing rationale. */
     static uint8_t xgb_payload[128];
-    static uint8_t mlp_payload[2048];
+    static uint8_t mlp_payload[EVICTION_MLP_PAYLOAD_BYTES];
     static uint8_t cacheus_payload[32];
-    static uint8_t blob[4096];
+    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + 64];
     size_t payload_len;
     size_t len;
 
