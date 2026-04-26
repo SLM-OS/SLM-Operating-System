@@ -444,6 +444,92 @@ We're out of host-side hypotheses. The questions in the
 the highest-leverage answer — once we know what region SAGE1_ISP
 is, we can either probe it directly or stop chasing the symptom.
 
+## Update 2026-04-25 (continued) — fw debug log capture
+
+After concluding the structural-suspect sweep, we instrumented our
+driver to dump the fw debug log buffers (`BAR4[0x2000]` for APP CPU,
+`BAR4[0x3000]` for CORE CPU, 4 KB rings) as raw hex. The `host_offset`
+/ `chip_offset` header advances cleanly, so the fw IS running and
+writing log entries; the format isn't documented but appears to be
+8-byte structured records:
+
+- bytes 0..3: u32 LE — PC pointer (or address being logged)
+- bytes 4..7: u32 LE — timestamp / counter / parameter
+
+PCs in the `0x9xxxxxxx` range correspond to CORE CPU code memory;
+`0x8xxxxxxx` for APP CPU.
+
+### Captured sequence (post-boot → post-load → post-failed-runmodel)
+
+CORE chip_offset advances 32 → 164 → 268 across the three states.
+
+**Smoking-gun finding:** in the post-runmodel CORE buffer (offsets
+0xa0..0x110), an 8-iteration poll loop is visible:
+
+```
+[00a0] ... 20 45 00 90 | 98 66 01 00 | 05 00 00 00
+[00b0] 01 00 00 00 | 20 45 00 90 | a8 8d 01 00 | 05 00 00 00
+[00c0] 02 00 00 00 | 20 45 00 90 | b8 b4 01 00 | 05 00 00 00
+[00d0] 03 00 00 00 | 20 45 00 90 | c8 db 01 00 | 05 00 00 00
+[00e0] 04 00 00 00 | 20 45 00 90 | d8 02 02 00 | 05 00 00 00
+[00f0] 05 00 00 00 | 20 45 00 90 | e8 29 02 00 | 05 00 00 00
+[0100] 06 00 00 00 | 8c 01 00 90 | 6d 47 02 00 | 20 45 00 90
+[0110] f8 50 02 00 | 05 00 00 00 | 07 00 00 00
+```
+
+- PC=`0x90004520` called 8 times (a 7-iteration loop with counter
+  going 0→7). Plausibly the boundary-credit / `num_avail` poll
+  on the CORE CPU.
+- Timestamps spaced uniformly ≈ 0x2710 (10000) per iteration —
+  ten "ticks" of some internal time unit.
+- **Between iterations 6 and 7 an exception fires at PC=`0x9000018c`**
+  with timestamp `0x0002476d`. Iteration 7 then completes and the
+  loop ends.
+
+The `0x00001000` CPU_ECC_ERROR D2H notification arrives after
+loop exit. This is the first concrete fw-side address tied to the
+bit-12 trigger.
+
+### Specific decoding asks
+
+In addition to the bit-12 region question, please decode against
+fw v4.23 symbols:
+
+1. **PC = `0x9000018c`** — what function is this? It's where the
+   exception (presumably the ECC fault) is taken or handled.
+2. **PC = `0x90004520`** — what's the loop body? Almost certainly
+   tied to boundary-input handling on VDMA channel 2.
+3. The earlier-fired CS RPC PCs for context: `0x90003e24`,
+   `0x90001fd8`, `0x90003d94`, `0x90003da4` (load), and the boot
+   init sequence `0x90000030 / 0x90008b80 / 0x90000b64 /
+   0x900003f4`.
+
+If the answer to (1) is "an `__exception_handler_ecc()` style
+catch-all," the line above it will tell us the actual instruction
+that faulted (likely a load from the SAGE1_ISP region). If (2) is
+named something like `wait_for_boundary_input_credit`, we know
+the loop is what we expect — and the fact that it never observes
+a credit confirms our reading that the boundary input pipeline
+is gated on something that requires SAGE1_ISP to be in a valid
+state.
+
+### Capture method (reproducer)
+
+```
+hailo probe
+hailo boot                 (PMCSR D0->D3->D0 cycle is now in our flow)
+hailo fwloghex 256         (snapshot 1: post-boot, pre-RPC)
+hailo load /mnt/files/user.hef sched
+hailo fwloghex 256         (snapshot 2: post-load)
+hailo runmodel 1 1
+hailo fwloghex 320         (snapshot 3: post-failed-runmodel)
+```
+
+Full hex output is captured and we can attach it to the ticket.
+The serial baud rate is 115200; `hailo fwloghex 0` to dump the
+full ring takes ~8 s and tends to overflow the labctl ser2net
+buffer, so we cap at 256-320 B per call.
+
 ## Artifacts
 
 We can share (private channel preferred):

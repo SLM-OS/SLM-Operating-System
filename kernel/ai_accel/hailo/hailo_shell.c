@@ -1358,6 +1358,36 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    /* Phase 8 #253 (2026-04-25): on-demand dump of the fw CORE + APP
+     * debug-log rings. Useful immediately post-boot (before any RPCs)
+     * to see what fw reports about its own init state — historically
+     * we only saw these after a runmodel timeout, which mixes init
+     * traffic with the failure path. */
+    if (argc >= 2 && strcmp(argv[1], "fwlog") == 0) {
+        extern void hailo_fw_dump_logs(void);
+        hailo_fw_dump_logs();
+        return 0;
+    }
+
+    /* Hex variant: dump raw bytes 16/line so a Hailo support engineer
+     * can decode the (opaque-binary) fwlog format. Default cap 256 B
+     * (HailoRT writes ~600 B post-boot to APP CPU, but printing 8 KB
+     * over UART blocks for ~8 s on the Pi 5 PL011 we use). Pass
+     * `hailo fwloghex 0` to dump the full ring. */
+    if (argc >= 2 && strcmp(argv[1], "fwloghex") == 0) {
+        uint32_t cap = 256;
+        if (argc >= 3) {
+            uint32_t v = 0;
+            for (const char *p = argv[2]; *p >= '0' && *p <= '9'; p++) {
+                v = v * 10u + (uint32_t)(*p - '0');
+            }
+            cap = v;  /* 0 → full ring */
+        }
+        extern void hailo_fw_dump_logs_hex(uint32_t max_bytes);
+        hailo_fw_dump_logs_hex(cap);
+        return 0;
+    }
+
     /* Phase 8 #253 CPU_ECC investigation (2026-04-25). Run RUN_BIST_TEST
      * (opcode 0x3C) and dump the response payload. Usage:
      *   hailo bist            — top test, no bypass (test all whitelist
