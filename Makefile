@@ -764,13 +764,30 @@ endif
 # the dynamic-kernel-replace Stage 3 SDHCI driver (#369) has
 # something to probe in QEMU. Image is created on demand below.
 #
-# Image is 2 GB to land squarely in QEMU's SDHC emulation regime —
-# the QEMU sd-card model emits CSD v1.0 / SDSC (byte-addressed)
-# below the 2 GB SDHC threshold per SD Physical Layer Spec, which
-# breaks FatFs's block-addressed reads. 2 GB is sparse on disk
-# (truncate, not dd), so it costs no real space until QEMU writes.
+# Image size is governed by SDHCI_TEST_IMG_SIZE (preferred) and
+# SDHCI_TEST_IMG_FALLBACK_SIZE (used when the preferred allocation
+# fails — issue #392 Scope B). The preferred size is chosen large
+# enough to land in QEMU's SDHC emulation regime; the fallback is
+# below QEMU's SDHC threshold so the SDSC code path runs instead.
+# On sparse-aware filesystems (ext4, btrfs, xfs, zfs, APFS, NTFS)
+# both sizes cost ~500 KB after a typical run. On FAT-family hosts
+# the preferred 4 GB allocation fails up front (no sparse support);
+# the fallback then allocates a real 256 MB file — that's the
+# expected trade-off, since 256 MB is what made allocation fit in
+# the first place.
 SDHCI_TEST_IMG := $(KERNEL_TEST_BUILD_DIR)/sdhci-test.img
+# Preferred size — large enough for QEMU's sd-card model to set CCS=1
+# in ACMD41 (SDHC, block-addressed). Sparse, so on-disk footprint is
+# ~500 KB after a typical run. Override on the command line if a
+# specific size is needed; the recipe falls back to
+# SDHCI_TEST_IMG_FALLBACK_SIZE when this can't be created.
 SDHCI_TEST_IMG_SIZE := 4G
+# Scope B fallback (issue #392) — small enough for FAT-family build
+# dirs and tightly-capped tmpfs, but still ≥ FatFs's FAT32 minimum
+# (~48 MB observed empirically). 256 MB triggers SDSC mode in QEMU's
+# sd-card model; the SDHCI driver's CCS-aware addressing handles
+# either side.
+SDHCI_TEST_IMG_FALLBACK_SIZE := 256M
 
 ifeq ($(PLATFORM),QEMU_VIRT)
     # The virt machine has no default `sd` interface (that's a
@@ -793,19 +810,32 @@ endif
 # backing file. Idempotent: only re-creates if missing. The image
 # is sparse (truncate, not dd) so the on-disk footprint stays tiny
 # (~500 KB after a typical QEMU run) until QEMU actually writes
-# blocks. Requires a filesystem that supports sparse files — every
-# filesystem that ships with stock SLM-OS dev environments (ext4,
-# btrfs, zfs, xfs, NTFS via WSL2) does. tmpfs may refuse 4 GB
-# allocations; if so, lower SDHCI_TEST_IMG_SIZE to whatever the
-# tmpfs can hold (≥ 2 GB to keep QEMU's sd-card model in SDHC mode).
+# blocks.
+#
+# Two-tier creation (issue #392 Scope B): try SDHCI_TEST_IMG_SIZE
+# first (preferred — exercises the SDHC code path); on failure
+# (FAT-family build dirs, capped tmpfs, ulimit), fall back to
+# SDHCI_TEST_IMG_FALLBACK_SIZE which exercises SDSC instead. The
+# driver supports either via the CCS bit returned by ACMD41, so
+# all 6 SDHCI tests still run on the fallback path.
 $(SDHCI_TEST_IMG): | $(KERNEL_TEST_BUILD_DIR)
 	@if [ ! -f $@ ]; then \
-		echo "Creating sparse $@ ($(SDHCI_TEST_IMG_SIZE), SDHC-sized)"; \
-		if ! truncate -s $(SDHCI_TEST_IMG_SIZE) $@.tmp 2>/dev/null; then \
+		if truncate -s $(SDHCI_TEST_IMG_SIZE) $@.tmp 2>/dev/null; then \
+			echo "Creating sparse $@ ($(SDHCI_TEST_IMG_SIZE), SDHC-sized)"; \
+		elif truncate -s $(SDHCI_TEST_IMG_FALLBACK_SIZE) $@.tmp 2>/dev/null; then \
+			echo ""; \
+			echo "WARN: cannot create $(SDHCI_TEST_IMG_SIZE) sparse image at $@;"; \
+			echo "      fell back to $(SDHCI_TEST_IMG_FALLBACK_SIZE) (SDSC-sized)."; \
+			echo "      All 6 SDHCI tests still run; the FatFs round-trip"; \
+			echo "      exercises the SDSC code path instead of SDHC."; \
+			echo "      See https://github.com/SLM-OS/SLM-Operating-System/issues/392"; \
+			echo "      for the full filesystem matrix."; \
+			echo ""; \
+		else \
 			rm -f $@.tmp; \
 			fstype=$$(stat -f -c %T $$(dirname $@) 2>/dev/null || echo unknown); \
 			echo ""; \
-			echo "ERROR: cannot create $(SDHCI_TEST_IMG_SIZE) sparse image at $@"; \
+			echo "ERROR: cannot create even a $(SDHCI_TEST_IMG_FALLBACK_SIZE) sparse image at $@"; \
 			echo "       build-dir filesystem: $$fstype"; \
 			case "$$fstype" in \
 				vfat|msdos|exfat) \
@@ -813,10 +843,9 @@ $(SDHCI_TEST_IMG): | $(KERNEL_TEST_BUILD_DIR)
 					echo "       truncate would have to allocate the full size for real." ;; \
 				tmpfs) \
 					echo "       tmpfs likely hit its size cap on the truncate write."; \
-					echo "       Lower SDHCI_TEST_IMG_SIZE in the Makefile (≥ 2 GB to" ;\
-					echo "       keep QEMU's sd-card model in SDHC mode)." ;; \
+					echo "       Increase the tmpfs cap or move the build dir." ;; \
 				*) \
-					echo "       Disk likely doesn't have $(SDHCI_TEST_IMG_SIZE) free, or a" ;\
+					echo "       Disk doesn't have $(SDHCI_TEST_IMG_FALLBACK_SIZE) free, or a" ;\
 					echo "       file-size ulimit is restricting truncate." ;; \
 			esac; \
 			echo "       See https://github.com/SLM-OS/SLM-Operating-System/issues/392"; \
@@ -1041,6 +1070,26 @@ else
 		exit 1; \
 	fi
 endif
+
+# Smoke-test the #392 Scope B fallback path. Forces the preferred
+# truncate to fail by requesting an absurd size, removes any cached
+# image so the recipe re-runs from scratch, and asserts:
+#   1. all tests still pass on the fallback image, and
+#   2. the SDHCI driver actually picked the SDSC code path
+#      (`card type = SDSC` appears in the test output).
+# Without this target a regression that broke the elif branch would
+# only surface on tmpfs/FAT32 build hosts.
+.PHONY: test-sdhci-fallback
+test-sdhci-fallback:
+	@echo "Forcing #392 Scope B fallback: SDHCI_TEST_IMG_SIZE=99999P"
+	@rm -f $(SDHCI_TEST_IMG)
+	@$(MAKE) test SDHCI_TEST_IMG_SIZE=99999P
+	@if grep -F "card type = SDSC" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "[OK] Fallback path exercised SDSC code path."; \
+	else \
+		echo "[FAIL] Fallback ran but SDSC log line missing — check test-output.log"; \
+		exit 1; \
+	fi
 
 # ============================================================================
 # Utility targets
