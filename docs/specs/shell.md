@@ -35,7 +35,7 @@ Interactive shell, command surface, observability commands, multi-session.
 
 ## Skipped / Blocked
 
-- **Unauthenticated telnet on hardware** — Pi 5 lab/demo builds now default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. That is acceptable only on trusted networks; SSH/authentication (#199) is still the real security boundary.
+- **Unauthenticated telnet on hardware** — Pi 5 lab/demo builds now default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. Lua sessions opened by telnet land on the safe binding surface (`lua_slm_newstate()`), so admin mutators (`slm.component_run`, `slm.model_load`, `slm.sched_set_policy`, `slm.task_create`, `slm.shell_exec`, `slm.hailo.*`, …) are unreachable from a remote session. That is acceptable only on trusted networks; SSH/authentication (#199) is still the real security boundary, and observability bindings remain visible.
 - **SSH** (#199) — deferred until wolfSSH integration; out of current scope.
 - **Jetson multi-session shell** — blocked on Jetson networking (#25 / #266). Single-session UARTC console works fine.
 - **Command completion / history / arrow-key editing** — not implemented. Raw-line mode only. Would require telnet IAC negotiation for server-side echo.
@@ -49,4 +49,4 @@ Interactive shell, command surface, observability commands, multi-session.
 - `docs/demo-readiness-backlog.md` (observability backlog — closed items)
 - Issues: #191-#196 (observability tickets), #199 (SSH)
 
-*Last updated: 22 April 2026*
+*Last updated: 25 April 2026*
