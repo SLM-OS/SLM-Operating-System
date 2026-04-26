@@ -372,6 +372,78 @@ static void test_net_rx_no_buffers_clean(void)
 }
 
 /*
+ * Test: RX-stall watchdog snapshot is NULL-safe.
+ *
+ * Mirrors test_net_get_stats_safety. A telemetry feed that wraps
+ * net_watchdog_get must not crash on a stale / NULL output buffer.
+ */
+static void test_net_watchdog_get_null_safe(void)
+{
+    /* Must not crash. There's no return value to check. */
+    net_watchdog_get(NULL);
+}
+
+/*
+ * Test: RX-stall watchdog reports a sane initial state.
+ *
+ * Before any RX has happened, the watchdog is disarmed (armed=false,
+ * alarmed=false), the threshold reads back as the configured value,
+ * and pool/heap fields fall inside lwIP's static maxima.
+ */
+static void test_net_watchdog_initial_state(void)
+{
+    struct net_watchdog_snapshot snap;
+    net_watchdog_get(&snap);
+
+    TEST_ASSERT_MESSAGE(!snap.alarmed,
+        "watchdog should not be alarmed at boot");
+
+    TEST_ASSERT_TRUE(snap.stall_threshold_ms >= 100u);
+    TEST_ASSERT_TRUE(snap.stall_threshold_ms <= 60u * 1000u);
+
+    /* used <= avail in both cases. Pre-`net_init` lwIP hasn't run
+     * memp_init yet so the pointers are NULL and the snapshot reads
+     * 0/0; post-init avail mirrors PBUF_POOL_SIZE / MEMP_NUM_TCP_PCB.
+     * Either way the invariant holds. */
+    TEST_ASSERT_TRUE(snap.pbuf_pool_used <= snap.pbuf_pool_avail);
+    TEST_ASSERT_TRUE(snap.tcp_pcb_used <= snap.tcp_pcb_avail);
+}
+
+/*
+ * Test: net_watchdog_set_threshold_ms clamps and restores correctly.
+ *
+ * Pinning the runtime knob: 0 -> default, sub-100 ms -> floor, larger
+ * values pass through. Restores the default before returning so it
+ * doesn't perturb subsequent tests.
+ */
+static void test_net_watchdog_threshold_clamps(void)
+{
+    struct net_watchdog_snapshot snap;
+
+    /* Capture default for restoration at end. */
+    net_watchdog_get(&snap);
+    uint32_t default_ms = snap.stall_threshold_ms;
+
+    /* 0 -> restore default. */
+    net_watchdog_set_threshold_ms(0);
+    net_watchdog_get(&snap);
+    TEST_ASSERT_EQUAL_UINT32(default_ms, snap.stall_threshold_ms);
+
+    /* Small values are clamped to 100 ms minimum. */
+    net_watchdog_set_threshold_ms(1);
+    net_watchdog_get(&snap);
+    TEST_ASSERT_EQUAL_UINT32(100u, snap.stall_threshold_ms);
+
+    /* Large values pass through. */
+    net_watchdog_set_threshold_ms(30000u);
+    net_watchdog_get(&snap);
+    TEST_ASSERT_EQUAL_UINT32(30000u, snap.stall_threshold_ms);
+
+    /* Restore. */
+    net_watchdog_set_threshold_ms(0);
+}
+
+/*
  * Test: Statistics start at zero
  */
 static void test_net_stats_initial_values(void)
@@ -1680,6 +1752,9 @@ int test_suite_net(void)
 
     /* Statistics tests */
     RUN_TEST(test_net_get_stats_safety);
+    RUN_TEST(test_net_watchdog_get_null_safe);
+    RUN_TEST(test_net_watchdog_initial_state);
+    RUN_TEST(test_net_watchdog_threshold_clamps);
     RUN_TEST(test_net_stats_initial_values);
 
     /* Virtqueue descriptor ring tests (MMIO driver, QEMU_VIRT only) */

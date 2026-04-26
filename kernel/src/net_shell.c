@@ -228,10 +228,33 @@ static int cmd_ifconfig(int argc, char *argv[]) {
  */
 static int cmd_net(int argc, char *argv[]) {
     if (argc < 2) {
-        shell_printf("Usage: net <init|status>\n");
-        shell_printf("  net init   - Initialize network subsystem\n");
-        shell_printf("  net status - Show network status\n");
+        shell_printf("Usage: net <init|status|watchdog>\n");
+        shell_printf("  net init               - Initialize network subsystem\n");
+        shell_printf("  net status             - Show network status\n");
+        shell_printf("  net watchdog [<ms>]    - Show or set RX-stall watchdog threshold\n");
         return -1;
+    }
+
+    if (strcmp(argv[1], "watchdog") == 0) {
+        if (argc >= 3) {
+            uint32_t ms;
+            if (shell_parse_uint(argv[2], &ms) < 0) {
+                shell_printf("net watchdog: invalid threshold '%s'\n", argv[2]);
+                return -1;
+            }
+            net_watchdog_set_threshold_ms(ms);
+            shell_printf("net: RX-stall watchdog threshold set"
+                         " (0 = restore default; sub-100 ms clamped to 100)\n");
+        }
+        struct net_watchdog_snapshot wd;
+        net_watchdog_get(&wd);
+        shell_printf("net: watchdog state=%s threshold=%u ms idle=%u ms\n",
+                     wd.alarmed ? "ALARMED" : (wd.armed ? "armed" : "disarmed"),
+                     (unsigned)wd.stall_threshold_ms,
+                     (unsigned)wd.ms_since_last_rx);
+        shell_printf("net:   stalls=%u recoveries=%u\n",
+                     (unsigned)wd.stall_events, (unsigned)wd.recovery_events);
+        return 0;
     }
 
     if (strcmp(argv[1], "init") == 0) {
@@ -304,6 +327,21 @@ static int cmd_netstat(int argc, char *argv[]) {
                (unsigned long long)stats.rx_no_buffers);
     shell_printf("  TX errors:  %llu\n",
                (unsigned long long)stats.tx_errors);
+
+    struct net_watchdog_snapshot wd;
+    net_watchdog_get(&wd);
+    shell_printf("RX-stall watchdog:\n");
+    shell_printf("  state:      %s  threshold: %u ms  idle: %u ms\n",
+                 wd.alarmed ? "ALARMED" : (wd.armed ? "armed" : "disarmed"),
+                 (unsigned)wd.stall_threshold_ms,
+                 (unsigned)wd.ms_since_last_rx);
+    shell_printf("  events:     stalls=%u  recoveries=%u\n",
+                 (unsigned)wd.stall_events, (unsigned)wd.recovery_events);
+    shell_printf("  pbuf pool:  %u/%u   tcp pcbs: %u/%u\n",
+                 (unsigned)wd.pbuf_pool_used, (unsigned)wd.pbuf_pool_avail,
+                 (unsigned)wd.tcp_pcb_used,   (unsigned)wd.tcp_pcb_avail);
+    shell_printf("  lwip heap:  %u/%u\n",
+                 (unsigned)wd.heap_used, (unsigned)wd.heap_avail);
 
     return 0;
 }
