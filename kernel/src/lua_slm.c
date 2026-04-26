@@ -25,6 +25,8 @@
 #include "ipc.h"
 #include "smp.h"
 #include "string.h"
+#include "latency_hist.h"
+#include "rate_ewma.h"
 #if defined(ENABLE_NETWORKING)
 #include "shell_io_tcp.h"
 #include "tcp_shell_server.h"
@@ -1328,6 +1330,169 @@ static int l_ai_sched_stats(lua_State *L) {
 #else
     lua_pushnil(L);
 #endif
+    return 1;
+}
+
+/**
+ * slm.sched_decision_rate() - Smoothed scheduler decision rate + percentile latencies.
+ *
+ * Returns table:
+ *   {
+ *     decisions_per_s, fallback_rate,
+ *     p50_latency_ns, p90_latency_ns, p99_latency_ns,
+ *     min_latency_ns, max_latency_ns, avg_latency_ns,
+ *     total_decisions, total_fallbacks, total_ns,
+ *     policy
+ *   }
+ *
+ * Returns nil if AI scheduler is not compiled in or the active policy is
+ * the heuristic (which doesn't populate the M1 stats — heuristic decisions
+ * still happen but are not counted in the per-policy histogram).
+ */
+static int l_sched_decision_rate(lua_State *L) {
+    if (!L) return 0;
+#if defined(CONFIG_AI_SCHEDULER)
+    extern int sched_ai_get_rate_stats(const char *,
+                                       struct latency_hist *,
+                                       uint64_t *, uint64_t *,
+                                       uint64_t *, uint64_t *, uint64_t *);
+
+    const char *policy = sched_get_policy();
+    struct latency_hist hist;
+    uint64_t decision_rate_q16 = 0, fallback_rate_q16 = 0;
+    uint64_t total_decisions = 0, total_fallbacks = 0, total_ns = 0;
+
+    if (sched_ai_get_rate_stats(policy, &hist,
+                                &decision_rate_q16, &fallback_rate_q16,
+                                &total_decisions, &total_fallbacks,
+                                &total_ns) != 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_createtable(L, 0, 12);
+
+    lua_pushstring(L, policy);
+    lua_setfield(L, -2, "policy");
+
+    /* Q16.16 → integer events/s. Sub-1/s rates report 0; that's the
+     * trade-off we accepted in §8.2 of the spec for an integer-only
+     * rate counter that doesn't pull libm into hot scheduler paths. */
+    lua_pushinteger(L, (lua_Integer)(decision_rate_q16 >> RATE_EWMA_Q16_SHIFT));
+    lua_setfield(L, -2, "decisions_per_s");
+
+    lua_pushinteger(L, (lua_Integer)(fallback_rate_q16 >> RATE_EWMA_Q16_SHIFT));
+    lua_setfield(L, -2, "fallback_rate");
+
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 50));
+    lua_setfield(L, -2, "p50_latency_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 90));
+    lua_setfield(L, -2, "p90_latency_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 99));
+    lua_setfield(L, -2, "p99_latency_ns");
+
+    lua_pushinteger(L, (lua_Integer)hist.min_ns);
+    lua_setfield(L, -2, "min_latency_ns");
+    lua_pushinteger(L, (lua_Integer)hist.max_ns);
+    lua_setfield(L, -2, "max_latency_ns");
+    lua_pushinteger(L, (lua_Integer)(hist.count > 0 ? hist.sum_ns / hist.count : 0));
+    lua_setfield(L, -2, "avg_latency_ns");
+
+    lua_pushinteger(L, (lua_Integer)total_decisions);
+    lua_setfield(L, -2, "total_decisions");
+    lua_pushinteger(L, (lua_Integer)total_fallbacks);
+    lua_setfield(L, -2, "total_fallbacks");
+    lua_pushinteger(L, (lua_Integer)total_ns);
+    lua_setfield(L, -2, "total_ns");
+#else
+    lua_pushnil(L);
+#endif
+    return 1;
+}
+
+/**
+ * slm.latency_histogram(consumer) - Bucketed latency histogram.
+ *
+ * Currently only "sched" is wired; "eviction" and "inference" return nil
+ * (they land in M3). Returns table:
+ *   {
+ *     buckets = { [low_ns_str] = count, ... },  -- only non-empty buckets
+ *     total, min_ns, max_ns,
+ *     p50_ns, p90_ns, p99_ns,
+ *     consumer = "sched"
+ *   }
+ */
+static int l_latency_histogram(lua_State *L) {
+    if (!L) return 0;
+    const char *consumer = luaL_checkstring(L, 1);
+
+#if defined(CONFIG_AI_SCHEDULER)
+    if (strcmp(consumer, "sched") == 0) {
+        extern int sched_ai_get_rate_stats(const char *,
+                                           struct latency_hist *,
+                                           uint64_t *, uint64_t *,
+                                           uint64_t *, uint64_t *, uint64_t *);
+        const char *policy = sched_get_policy();
+        struct latency_hist hist;
+        if (sched_ai_get_rate_stats(policy, &hist, NULL, NULL,
+                                    NULL, NULL, NULL) != 0) {
+            lua_pushnil(L);
+            return 1;
+        }
+
+        lua_createtable(L, 0, 7);
+        lua_pushstring(L, "sched");
+        lua_setfield(L, -2, "consumer");
+
+        /* Bucket sub-table keyed by lower-bound ns (as a string for
+         * Lua-friendly numeric keys outside lua_Integer range — bucket
+         * 31's lower bound is ~6.9e10, which fits in lua_Integer on
+         * 64-bit but we use strings for stable JSON-like rendering). */
+        lua_createtable(L, 0, LATENCY_HIST_BUCKETS);
+        for (uint32_t i = 0; i < LATENCY_HIST_BUCKETS; i++) {
+            if (hist.buckets[i] == 0) continue;
+            char key[32];
+            uint64_t low = latency_hist_bucket_low_ns(i);
+            /* Hand-format: avoid pulling snprintf into the hot path. */
+            int kpos = 0;
+            char tmp[24];
+            int t = 0;
+            uint64_t v = low;
+            if (v == 0) tmp[t++] = '0';
+            while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
+            while (t > 0) key[kpos++] = tmp[--t];
+            key[kpos] = '\0';
+            lua_pushinteger(L, (lua_Integer)hist.buckets[i]);
+            lua_setfield(L, -2, key);
+        }
+        lua_setfield(L, -2, "buckets");
+
+        lua_pushinteger(L, (lua_Integer)hist.count);
+        lua_setfield(L, -2, "total");
+        lua_pushinteger(L, (lua_Integer)hist.min_ns);
+        lua_setfield(L, -2, "min_ns");
+        lua_pushinteger(L, (lua_Integer)hist.max_ns);
+        lua_setfield(L, -2, "max_ns");
+        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 50));
+        lua_setfield(L, -2, "p50_ns");
+        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 90));
+        lua_setfield(L, -2, "p90_ns");
+        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 99));
+        lua_setfield(L, -2, "p99_ns");
+
+        return 1;
+    }
+#endif
+
+    if (strcmp(consumer, "eviction") == 0 ||
+        strcmp(consumer, "inference") == 0) {
+        /* M3 wires these consumers. Return nil for now so callers can
+         * detect "not yet available" without an error. */
+        lua_pushnil(L);
+        return 1;
+    }
+
+    lua_pushnil(L);
     return 1;
 }
 
@@ -3392,6 +3557,9 @@ static const luaL_Reg slm_lib_safe[] = {
     {"sched_policy_list", l_sched_policy_list},
     {"ai_sched_stats", l_ai_sched_stats},
     {"ai_sched_decision", l_ai_sched_decision},
+    /* Admin & telemetry suite (M1) */
+    {"sched_decision_rate", l_sched_decision_rate},
+    {"latency_histogram", l_latency_histogram},
     /* CPU info */
     {"cpu_info", l_cpu_info},
     {"term_size", l_term_size},

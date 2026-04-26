@@ -184,4 +184,7 @@ int test_suite_coop_preempt(void);
 /* Scheduler trace buffer tests (#195) */
 int test_suite_sched_trace(void);
 
+/* Latency histogram + EWMA rate tests (admin & telemetry suite, M1) */
+int test_suite_latency_hist(void);
+
 #endif /* TEST_HARNESS_H */

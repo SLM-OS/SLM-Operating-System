@@ -120,6 +120,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_pi_mutex();
     total_failures += test_suite_steal_deque();
     total_failures += test_suite_sched_trace();
+    total_failures += test_suite_latency_hist();
 #if !defined(PLATFORM_X86_64)
     total_failures += test_suite_msg_router();
     total_failures += test_suite_coop_preempt();
