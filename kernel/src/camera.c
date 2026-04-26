@@ -47,9 +47,10 @@ extern const uint8_t mock_camera_frame_end[]   __attribute__((weak));
  * MOCK_FRAME_W / MNIST_BLOCK can't silently break the algorithm in a
  * way the tests would only catch as an opaque MD5 mismatch. */
 _Static_assert((MNIST_CROP_X_OFF & 1u) == 0u,
-    "Centred crop offset must be even to preserve RGGB Bayer phase");
+    "Centred crop X offset must be even to preserve RGGB Bayer phase");
 _Static_assert((MNIST_BLOCK & 1u) == 0u,
-    "Box-average block must be even so each row contains the same "
+    "Box-average block must be even so r0 = i*MNIST_BLOCK stays even "
+    "(preserves Bayer row phase) and so each row contains the same "
     "number of green pixels");
 _Static_assert(MNIST_CROP == MOCK_FRAME_H,
     "Centred crop assumes a square equal to the frame height");

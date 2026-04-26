@@ -3151,7 +3151,6 @@ static const luaL_Reg slm_hailo_lib[] = {
  *                                      -2 = mock backend not embedded
  *                                      -3 = (w, h, bayer) don't match the
  *                                           backing frame's geometry
- *                                      -4 = page allocation failed
  *                                      <0 from camera_preprocess_mnist for
  *                                          unsupported geometry
  *
@@ -3176,7 +3175,7 @@ static const luaL_Reg slm_hailo_lib[] = {
  * out_buf is left zero-initialised on failure. */
 static int l_camera_arg_name(lua_State *L, int idx,
                              char *out_buf, size_t out_n) {
-    if (out_n == 0u) return -1;
+    if (!out_buf || out_n == 0u) return -1;
     out_buf[0] = '\0';
 
     const char *src = NULL;
@@ -3289,27 +3288,22 @@ static int l_camera_preprocess_mnist(lua_State *L) {
         return 2;
     }
 
-    /* 3,136 bytes is small but on the larger side for a kernel-task
-     * stack frame; mirror the PMM pattern in l_model_infer_bytes
-     * rather than burning ~20% of the shell-task stack. One page
-     * comfortably holds the 28*28*4 fp32 output. */
-    uint8_t *out = (uint8_t *)pmm_alloc_pages(1);
-    if (!out) {
-        lua_pushnil(L);
-        lua_pushinteger(L, -4);
-        return 2;
-    }
+    /* 3,136 bytes on the kernel-task stack — STACK_SIZE is 64 KB
+     * (kernel/include/config.h), so this is ~5% of budget. Stack
+     * intentional: a PMM page would have to live across
+     * lua_pushlstring, whose OOM path longjmps via LUAI_THROW
+     * (kernel/lib/lua/src/ldo.c) and would skip pmm_free_pages,
+     * leaking the page. Stack-resident output unwinds for free. */
+    uint8_t out[CAMERA_MNIST_OUT_BYTES];
     int rc = camera_preprocess_mnist(frame.data, frame.size,
                                      frame.width, frame.height, frame.bayer,
-                                     out, CAMERA_MNIST_OUT_BYTES);
+                                     out, sizeof(out));
     if (rc != 0) {
-        pmm_free_pages(out, 1);
         lua_pushnil(L);
         lua_pushinteger(L, rc);
         return 2;
     }
-    lua_pushlstring(L, (const char *)out, CAMERA_MNIST_OUT_BYTES);
-    pmm_free_pages(out, 1);
+    lua_pushlstring(L, (const char *)out, sizeof(out));
     return 1;
 }
 
