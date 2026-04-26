@@ -754,6 +754,76 @@ static void test_blob_autoload_overwrites_existing_conf(void)
     TEST_ASSERT_NOT_NULL(find_substr(conf_buf, " 90 "));
 }
 
+static void test_blob_autoload_set_preserves_existing_entry_on_write_failure(void)
+{
+    struct blob_autoload_info info_before;
+    struct blob_autoload_info info_after;
+    RustEvictionBlobStatus ev_status = {0};
+    uint8_t payload_a[80];
+    uint8_t payload_b[80];
+    uint8_t blob_a[128];
+    uint8_t blob_b[128];
+    size_t payload_len_a = build_eviction_xgb_payload(payload_a, sizeof(payload_a));
+    size_t payload_len_b = build_eviction_xgb_payload(payload_b, sizeof(payload_b));
+    size_t blob_len_a;
+    size_t blob_len_b;
+    uint32_t alt_leaf_bits = 0x3f19999au;
+
+    TEST_ASSERT_TRUE(payload_len_a > 0);
+    TEST_ASSERT_TRUE(payload_len_b > 0);
+    memcpy(payload_b + payload_len_b - 4, &alt_leaf_bits, sizeof(alt_leaf_bits));
+    blob_len_a = build_outer_blob(1, payload_a, payload_len_a, blob_a, sizeof(blob_a));
+    blob_len_b = build_outer_blob(1, payload_b, payload_len_b, blob_b, sizeof(blob_b));
+    TEST_ASSERT_TRUE(blob_len_a > 0);
+    TEST_ASSERT_TRUE(blob_len_b > 0);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/preserve-a.blob", blob_a, blob_len_a));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/preserve-b.blob", blob_b, blob_len_b));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/preserve-a.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "xgboost", &info_before));
+
+    blob_autoload_test_fail_next_write();
+    TEST_ASSERT_NOT_EQUAL(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/preserve-b.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "xgboost", &info_after));
+    TEST_ASSERT_EQUAL_STRING(info_before.path, info_after.path);
+    TEST_ASSERT_EQUAL_UINT32(info_before.size_bytes, info_after.size_bytes);
+    TEST_ASSERT_EQUAL_UINT32(info_before.checksum, info_after.checksum);
+
+    rust_eviction_blob_clear(1);
+    blob_boot_autoload();
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(1, &ev_status));
+    TEST_ASSERT_EQUAL_UINT32(1, ev_status.has_active);
+}
+
+static void test_blob_autoload_clear_preserves_existing_entry_on_write_failure(void)
+{
+    struct blob_autoload_info info_before;
+    struct blob_autoload_info info_after;
+    RustEvictionBlobStatus ev_status = {0};
+    uint8_t payload[80];
+    uint8_t blob[128];
+    size_t payload_len = build_eviction_xgb_payload(payload, sizeof(payload));
+    size_t blob_len = build_outer_blob(1, payload, payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/clear-preserve.blob", blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/clear-preserve.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "xgboost", &info_before));
+
+    blob_autoload_test_fail_next_write();
+    TEST_ASSERT_NOT_EQUAL(0, blob_autoload_clear("eviction", "xgboost"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "xgboost", &info_after));
+    TEST_ASSERT_EQUAL_STRING(info_before.path, info_after.path);
+    TEST_ASSERT_EQUAL_UINT32(info_before.size_bytes, info_after.size_bytes);
+    TEST_ASSERT_EQUAL_UINT32(info_before.checksum, info_after.checksum);
+
+    rust_eviction_blob_clear(1);
+    blob_boot_autoload();
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(1, &ev_status));
+    TEST_ASSERT_EQUAL_UINT32(1, ev_status.has_active);
+}
+
 static void test_blob_autoload_recovers_from_backup_conf(void)
 {
     char path[VFS_MAX_PATH];
@@ -930,6 +1000,8 @@ int test_suite_blob_autoload(void)
     RUN_TEST(test_blob_autoload_shell_commands);
     RUN_TEST(test_blob_autoload_rejects_invalid_paths);
     RUN_TEST(test_blob_autoload_overwrites_existing_conf);
+    RUN_TEST(test_blob_autoload_set_preserves_existing_entry_on_write_failure);
+    RUN_TEST(test_blob_autoload_clear_preserves_existing_entry_on_write_failure);
     RUN_TEST(test_blob_autoload_recovers_from_backup_conf);
     RUN_TEST(test_blob_boot_autoload_skips_tampered_managed_blob);
 #ifdef CONFIG_AI_SCHEDULER

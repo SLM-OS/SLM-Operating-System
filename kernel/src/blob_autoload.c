@@ -48,6 +48,17 @@ enum {
             (int)(VFS_MAX_PATH + BLOB_AUTOLOAD_ENTRY_LINE_OVERHEAD)
 };
 
+struct blob_autoload_managed_txn {
+    struct lfs_mount *mnt;
+    char final_lfs[VFS_MAX_PATH];
+    char temp_lfs[VFS_MAX_PATH];
+    char bak_lfs[VFS_MAX_PATH];
+    int had_existing;
+    int active;
+};
+
+static int g_blob_autoload_test_fail_next_write = 0;
+
 static void blob_entries_reset(struct blob_autoload_entry *entries, size_t count)
 {
     for (size_t i = 0; i < count; i++) {
@@ -170,36 +181,63 @@ static int blob_autoload_file_identity(const char *path,
     return 0;
 }
 
-static int blob_autoload_copy_managed_file(const char *source_path,
-                                           const char *domain,
-                                           const char *kind,
-                                           char *managed_path_out,
-                                           size_t managed_path_out_cap)
+static int blob_autoload_prepare_managed_txn(const char *domain,
+                                             const char *kind,
+                                             struct blob_autoload_managed_txn *txn)
+{
+    const char *subpath = NULL;
+    struct lfs_mount *mnt =
+        (struct lfs_mount *)vfs_get_mount_ctx(BLOB_AUTOLOAD_STORE_DIR, &subpath);
+    if (!txn || !mnt) return -1;
+    memset(txn, 0, sizeof(*txn));
+    txn->mnt = mnt;
+    if (blob_autoload_managed_subpath(domain, kind, "", txn->final_lfs, sizeof(txn->final_lfs)) != 0) {
+        return -1;
+    }
+    if (blob_autoload_managed_subpath(domain, kind, ".tmp", txn->temp_lfs, sizeof(txn->temp_lfs)) != 0) {
+        return -1;
+    }
+    if (blob_autoload_managed_subpath(domain, kind, ".bak", txn->bak_lfs, sizeof(txn->bak_lfs)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+static void blob_autoload_cleanup_managed_txn(struct blob_autoload_managed_txn *txn)
+{
+    if (!txn || !txn->mnt) return;
+    (void)littlefs_remove(txn->mnt, txn->temp_lfs);
+    if (!txn->active) {
+        (void)littlefs_remove(txn->mnt, txn->bak_lfs);
+    }
+}
+
+static int blob_autoload_stage_managed_replacement(const char *source_path,
+                                                   const char *domain,
+                                                   const char *kind,
+                                                   struct blob_autoload_managed_txn *txn,
+                                                   char *managed_path_out,
+                                                   size_t managed_path_out_cap,
+                                                   uint32_t *size_out,
+                                                   uint32_t *checksum_out)
 {
     struct vfs_entry_info source_info;
     struct vfs_entry_info existing_info;
-    const char *subpath = NULL;
-    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(BLOB_AUTOLOAD_STORE_DIR, &subpath);
     char final_vfs[VFS_MAX_PATH];
-    char final_lfs[VFS_MAX_PATH];
-    char temp_lfs[VFS_MAX_PATH];
-    char bak_lfs[VFS_MAX_PATH];
     char buf[512];
+    uint32_t checksum = 0x811C9DC5u;
     int src_offset = 0;
     int fd;
 
-    if (!mnt) return -1;
-    if (blob_autoload_ensure_store_dir(mnt) != 0) return -1;
+    if (!txn || !size_out || !checksum_out) return -1;
+    if (blob_autoload_prepare_managed_txn(domain, kind, txn) != 0) return -1;
+    if (blob_autoload_ensure_store_dir(txn->mnt) != 0) return -1;
     if (blob_autoload_managed_path(domain, kind, final_vfs, sizeof(final_vfs)) != 0) return -1;
-    if (blob_autoload_managed_subpath(domain, kind, "", final_lfs, sizeof(final_lfs)) != 0) return -1;
-    if (blob_autoload_managed_subpath(domain, kind, ".tmp", temp_lfs, sizeof(temp_lfs)) != 0) return -1;
-    if (blob_autoload_managed_subpath(domain, kind, ".bak", bak_lfs, sizeof(bak_lfs)) != 0) return -1;
-
     if (vfs_stat_path(source_path, &source_info) != 0 || source_info.type != 0 || source_info.size == 0) {
         return -1;
     }
 
-    fd = littlefs_file_open(mnt, temp_lfs, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    fd = littlefs_file_open(txn->mnt, txn->temp_lfs, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
     if (fd < 0) return -1;
 
     while (src_offset < (int)source_info.size) {
@@ -209,63 +247,89 @@ static int blob_autoload_copy_managed_file(const char *source_path,
         if (chunk > sizeof(buf)) chunk = sizeof(buf);
         bytes_read = vfs_read_path(source_path, buf, chunk, (size_t)src_offset);
         if (bytes_read <= 0 || (size_t)bytes_read != chunk) {
-            littlefs_file_close(mnt, fd);
-            (void)littlefs_remove(mnt, temp_lfs);
+            littlefs_file_close(txn->mnt, fd);
+            blob_autoload_cleanup_managed_txn(txn);
             return -1;
         }
-        bytes_written = littlefs_file_write(mnt, fd, buf, (size_t)bytes_read);
+        bytes_written = littlefs_file_write(txn->mnt, fd, buf, (size_t)bytes_read);
         if (bytes_written != bytes_read) {
-            littlefs_file_close(mnt, fd);
-            (void)littlefs_remove(mnt, temp_lfs);
+            littlefs_file_close(txn->mnt, fd);
+            blob_autoload_cleanup_managed_txn(txn);
             return -1;
         }
+        checksum = blob_autoload_fnv1a32_update(checksum, (const uint8_t *)buf, (size_t)bytes_read);
         src_offset += bytes_read;
     }
+    littlefs_file_close(txn->mnt, fd);
 
-    littlefs_file_close(mnt, fd);
-
-    if (littlefs_rename(mnt, temp_lfs, final_lfs) != 0) {
-        int had_existing = (vfs_stat_path(final_vfs, &existing_info) == 0);
-        if (!had_existing) {
-            (void)littlefs_remove(mnt, temp_lfs);
+    txn->had_existing = (vfs_stat_path(final_vfs, &existing_info) == 0);
+    (void)littlefs_remove(txn->mnt, txn->bak_lfs);
+    if (txn->had_existing) {
+        if (littlefs_rename(txn->mnt, txn->final_lfs, txn->bak_lfs) != 0) {
+            blob_autoload_cleanup_managed_txn(txn);
             return -1;
         }
-        (void)littlefs_remove(mnt, bak_lfs);
-        if (littlefs_rename(mnt, final_lfs, bak_lfs) != 0) {
-            (void)littlefs_remove(mnt, temp_lfs);
-            return -1;
-        }
-        if (littlefs_rename(mnt, temp_lfs, final_lfs) != 0) {
-            (void)littlefs_rename(mnt, bak_lfs, final_lfs);
-            (void)littlefs_remove(mnt, temp_lfs);
-            return -1;
-        }
-        (void)littlefs_remove(mnt, bak_lfs);
     }
-
+    if (littlefs_rename(txn->mnt, txn->temp_lfs, txn->final_lfs) != 0) {
+        if (txn->had_existing) {
+            (void)littlefs_rename(txn->mnt, txn->bak_lfs, txn->final_lfs);
+        }
+        blob_autoload_cleanup_managed_txn(txn);
+        return -1;
+    }
+    txn->active = 1;
     if (managed_path_out && managed_path_out_cap > 0) {
         strncpy(managed_path_out, final_vfs, managed_path_out_cap - 1);
         managed_path_out[managed_path_out_cap - 1] = '\0';
     }
+    *size_out = source_info.size;
+    *checksum_out = checksum;
     return 0;
 }
 
-static void blob_autoload_remove_managed_file(const char *domain, const char *kind)
+static int blob_autoload_stage_managed_clear(const char *domain,
+                                             const char *kind,
+                                             struct blob_autoload_managed_txn *txn)
 {
-    const char *subpath = NULL;
-    struct lfs_mount *mnt = (struct lfs_mount *)vfs_get_mount_ctx(BLOB_AUTOLOAD_STORE_DIR, &subpath);
-    char final_lfs[VFS_MAX_PATH];
-    char temp_lfs[VFS_MAX_PATH];
-    char bak_lfs[VFS_MAX_PATH];
+    char final_vfs[VFS_MAX_PATH];
+    struct vfs_entry_info existing_info;
+    if (!txn) return -1;
+    if (blob_autoload_prepare_managed_txn(domain, kind, txn) != 0) return -1;
+    if (blob_autoload_managed_path(domain, kind, final_vfs, sizeof(final_vfs)) != 0) return -1;
+    txn->had_existing = (vfs_stat_path(final_vfs, &existing_info) == 0);
+    (void)littlefs_remove(txn->mnt, txn->temp_lfs);
+    (void)littlefs_remove(txn->mnt, txn->bak_lfs);
+    if (!txn->had_existing) {
+        txn->active = 1;
+        return 0;
+    }
+    if (littlefs_rename(txn->mnt, txn->final_lfs, txn->bak_lfs) != 0) {
+        return -1;
+    }
+    txn->active = 1;
+    return 0;
+}
 
-    if (!mnt) return;
-    if (blob_autoload_managed_subpath(domain, kind, "", final_lfs, sizeof(final_lfs)) != 0) return;
-    if (blob_autoload_managed_subpath(domain, kind, ".tmp", temp_lfs, sizeof(temp_lfs)) != 0) return;
-    if (blob_autoload_managed_subpath(domain, kind, ".bak", bak_lfs, sizeof(bak_lfs)) != 0) return;
+static void blob_autoload_commit_managed_txn(struct blob_autoload_managed_txn *txn)
+{
+    if (!txn || !txn->mnt || !txn->active) return;
+    (void)littlefs_remove(txn->mnt, txn->temp_lfs);
+    (void)littlefs_remove(txn->mnt, txn->bak_lfs);
+    txn->active = 0;
+}
 
-    (void)littlefs_remove(mnt, final_lfs);
-    (void)littlefs_remove(mnt, temp_lfs);
-    (void)littlefs_remove(mnt, bak_lfs);
+static void blob_autoload_rollback_managed_txn(struct blob_autoload_managed_txn *txn)
+{
+    if (!txn || !txn->mnt || !txn->active) return;
+    (void)littlefs_remove(txn->mnt, txn->temp_lfs);
+    if (txn->had_existing) {
+        (void)littlefs_remove(txn->mnt, txn->final_lfs);
+        (void)littlefs_rename(txn->mnt, txn->bak_lfs, txn->final_lfs);
+    } else {
+        (void)littlefs_remove(txn->mnt, txn->final_lfs);
+    }
+    (void)littlefs_remove(txn->mnt, txn->bak_lfs);
+    txn->active = 0;
 }
 
 static char *trim_ascii(char *s)
@@ -387,6 +451,10 @@ static int blob_autoload_write_entries(const struct blob_autoload_entry *entries
     size_t pos = 0;
 
     if (!mnt) return -1;
+    if (g_blob_autoload_test_fail_next_write > 0) {
+        g_blob_autoload_test_fail_next_write--;
+        return -1;
+    }
     if (sizeof(header) - 1 >= sizeof(buf)) return -1;
     memcpy(buf, header, sizeof(header) - 1);
     pos = sizeof(header) - 1;
@@ -503,6 +571,7 @@ int blob_autoload_set(const char *domain, const char *kind, const char *path)
     struct blob_autoload_entry entries[sizeof(blob_entries) / sizeof(blob_entries[0])];
     char resolved[VFS_MAX_PATH];
     char managed_path[VFS_MAX_PATH];
+    struct blob_autoload_managed_txn txn;
     struct blob_autoload_entry *entry;
     uint32_t managed_size = 0;
     uint32_t managed_checksum = 0;
@@ -530,43 +599,63 @@ int blob_autoload_set(const char *domain, const char *kind, const char *path)
     if (rc != RUNTIME_BLOB_FILE_OK) {
         return rc;
     }
-    if (blob_autoload_copy_managed_file(resolved, domain, kind,
-                                        managed_path, sizeof(managed_path)) != 0) {
-        return RUNTIME_BLOB_FILE_STAGE_FAILED;
-    }
-    if (blob_autoload_file_identity(managed_path, &managed_size, &managed_checksum) != 0) {
-        blob_autoload_remove_managed_file(domain, kind);
+    if (blob_autoload_stage_managed_replacement(resolved, domain, kind,
+                                                &txn,
+                                                managed_path, sizeof(managed_path),
+                                                &managed_size, &managed_checksum) != 0) {
         return RUNTIME_BLOB_FILE_STAGE_FAILED;
     }
     memcpy(entries, blob_entries, sizeof(entries));
     blob_autoload_read_entries(entries, sizeof(entries) / sizeof(entries[0]));
     entry = blob_find_entry(entries, sizeof(entries) / sizeof(entries[0]), domain, kind);
-    if (!entry) return -1;
+    if (!entry) {
+        blob_autoload_rollback_managed_txn(&txn);
+        return -1;
+    }
     strncpy(entry->path, managed_path, sizeof(entry->path) - 1);
     entry->path[sizeof(entry->path) - 1] = '\0';
     entry->size_bytes = managed_size;
     entry->checksum = managed_checksum;
     entry->present = 1;
-    return blob_autoload_write_entries(entries, sizeof(entries) / sizeof(entries[0]));
+    rc = blob_autoload_write_entries(entries, sizeof(entries) / sizeof(entries[0]));
+    if (rc != 0) {
+        blob_autoload_rollback_managed_txn(&txn);
+        return rc;
+    }
+    blob_autoload_commit_managed_txn(&txn);
+    return 0;
 }
 
 int blob_autoload_clear(const char *domain, const char *kind)
 {
     struct blob_autoload_entry entries[sizeof(blob_entries) / sizeof(blob_entries[0])];
+    struct blob_autoload_managed_txn txn;
     memcpy(entries, blob_entries, sizeof(entries));
     blob_autoload_read_entries(entries, sizeof(entries) / sizeof(entries[0]));
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
         if (strcmp(entries[i].domain, domain) == 0 &&
             strcmp(entries[i].kind, kind) == 0) {
+            if (blob_autoload_stage_managed_clear(domain, kind, &txn) != 0) {
+                return -1;
+            }
             entries[i].path[0] = '\0';
             entries[i].size_bytes = 0;
             entries[i].checksum = 0;
             entries[i].present = 0;
-            blob_autoload_remove_managed_file(domain, kind);
-            return blob_autoload_write_entries(entries, sizeof(entries) / sizeof(entries[0]));
+            if (blob_autoload_write_entries(entries, sizeof(entries) / sizeof(entries[0])) != 0) {
+                blob_autoload_rollback_managed_txn(&txn);
+                return -1;
+            }
+            blob_autoload_commit_managed_txn(&txn);
+            return 0;
         }
     }
     return -1;
+}
+
+void blob_autoload_test_fail_next_write(void)
+{
+    g_blob_autoload_test_fail_next_write++;
 }
 
 void blob_boot_autoload(void)

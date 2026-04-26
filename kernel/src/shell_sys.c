@@ -2946,11 +2946,11 @@ static void sched_print_deadline_thresholds(
 {
     if (!cfg) return;
 
-    shell_printf("    %-8s critical_ns=%lu high_ns=%lu boost_ns=%lu\r\n",
+    shell_printf("    %-8s critical_ns=%llu high_ns=%llu boost_ns=%llu\r\n",
                  label,
-                 (unsigned long)cfg->critical_ns,
-                 (unsigned long)cfg->high_ns,
-                 (unsigned long)cfg->boost_ns);
+                 (unsigned long long)cfg->critical_ns,
+                 (unsigned long long)cfg->high_ns,
+                 (unsigned long long)cfg->boost_ns);
 }
 
 static void sched_print_rebalance_config(
