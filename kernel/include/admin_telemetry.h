@@ -56,7 +56,21 @@
 
 /* Called from Rust eviction registry after `select_victim` measures dt.
  * `dt_ns` is the wall-clock latency of the policy's victim selection.
- * Bumps the latency histogram and ticks the decision rate. */
+ * Bumps the latency histogram and ticks the decision rate.
+ *
+ * BLOCKING NOTE: this call publishes to the `tel.evi` msg_router topic.
+ * If a subscriber is registered but has stopped draining its mailbox
+ * (e.g. a wedged Lua script, a disconnected telnet shell that left a
+ * `slm.telemetry_subscribe` callback alive), `msg_router_publish` will
+ * stall up to ACK_TIMEOUT_SECS (5s) per call waiting for the ACK
+ * timeout. Eviction is allocator-driven, so a stalled record path
+ * stalls every allocation attempt that triggers victim selection.
+ *
+ * Mitigation: keep telemetry subscriptions short-lived. The
+ * `slm.telemetry_unsubscribe(handle)` call from Lua, or shell
+ * disconnect (which runs the per-state teardown helper at lua_slm.c),
+ * removes the subscription. If you observe eviction-path latency
+ * regressions, check `slm.msg_router` is not over-subscribed first. */
 void admin_telemetry_record_eviction_decision(uint64_t dt_ns);
 
 /* Called when an eviction is observed to have re-faulted (fallback).
