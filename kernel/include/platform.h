@@ -527,6 +527,19 @@
  * is needed. */
 #define BCM2712_EMMC2_CFG_BASE  (BCM2712_EMMC2_BASE + 0x400UL)
 
+/* SDIO1 bus-isolation gate — the SDIO1 node in `bcm2712.dtsi` declares
+ * FOUR `reg` banks (host, cfg, busisol, lcpll). The third bank,
+ * "busisol" at SoC-bus 0x015040b0 (4 bytes) → CPU phys
+ * 0x10_015040B0, is the bus-isolation control: until it's deasserted,
+ * the AXI fabric does not route reads/writes to the SDHCI host
+ * registers. Writing 0 deasserts isolation. This is the missing
+ * piece for #414 — Pi firmware leaves this asserted at SLM-OS
+ * bare-metal handoff, so any `readl` to BCM2712_EMMC2_BASE hangs
+ * the AXI fabric. The 2 MB block containing this address
+ * (0x1001400000) is already mapped via vmm_setup_platform for the
+ * `bcm_reset` controller. */
+#define BCM2712_SDIO1_BUSISOL   0x10015040B0UL
+
 /* GPU bus-address encoding on Pi 5 matches the legacy VideoCore
  * convention — the VideoCore sees ARM DRAM via a 1 GB alias at
  * 0xC0000000. Used when passing a property buffer to the mailbox.

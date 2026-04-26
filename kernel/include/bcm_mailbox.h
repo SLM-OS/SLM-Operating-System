@@ -110,6 +110,43 @@ int bcm_mailbox_notify_reboot(void);
  */
 int bcm_mailbox_set_power_state(uint32_t device_id, bool on, bool wait);
 
+/*
+ * Clock-domain control via tag 0x00038001 (SET_CLOCK_STATE). Asks
+ * the firmware to enable or disable a clock. This is the correct
+ * knob for Pi 5 EMMC2 (clock id 12) — SET_POWER_STATE doesn't have
+ * an SD/EMMC entry on Pi 5 firmware. Used by `sdhci_create_bcm2712`
+ * to bring EMMC2's clock + power domain up before the first MMIO
+ * touch.
+ *
+ * Returns 0 on success with the firmware reporting the requested
+ * state; MBOX_E_GENERIC if the firmware reports "no such clock" or
+ * the transition didn't take. Not reentrant — shares the
+ * file-static property buffer with the other tag helpers.
+ */
+int bcm_mailbox_set_clock_state(uint32_t clock_id, bool on);
+
+/*
+ * Set a firmware-managed clock's rate (tag 0x00038002). Returns the
+ * actual rate (Hz) the firmware programmed in `*actual_hz` if non-NULL,
+ * which may differ from `requested_hz` when the requested rate isn't
+ * representable. Returns 0 on success, MBOX_E_GENERIC on transport /
+ * protocol failure.
+ *
+ * Used after SET_CLOCK_STATE(on) to establish the operating frequency
+ * Linux's brcmstb-sdhci would pull from the device tree.
+ */
+int bcm_mailbox_set_clock_rate(uint32_t clock_id, uint32_t requested_hz,
+                               uint32_t *actual_hz);
+
+/* Diagnostic queries — return current firmware-reported state for a
+ * clock id. Used during #414 investigation to confirm whether the
+ * firmware actually enabled a clock after SET_CLOCK_STATE. The
+ * GET_CLOCK_RATE_MEASURED variant returns the measured rate
+ * (vs. the configured target) and is 0 when the clock isn't running. */
+int bcm_mailbox_get_clock_state(uint32_t clock_id, uint32_t *state_out);
+int bcm_mailbox_get_clock_rate(uint32_t clock_id, uint32_t *hz_out);
+int bcm_mailbox_get_clock_rate_measured(uint32_t clock_id, uint32_t *hz_out);
+
 #endif /* PLATFORM_RASPI5 */
 
 #endif /* BCM_MAILBOX_H */

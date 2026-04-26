@@ -44,13 +44,21 @@
 #define BCM_TAG_SET_REBOOT_FLAGS     0x00038064u
 #define BCM_TAG_NOTIFY_REBOOT        0x00030048u
 #define BCM_TAG_SET_POWER_STATE      0x00028001u
+#define BCM_TAG_GET_CLOCK_STATE      0x00030001u
+#define BCM_TAG_GET_CLOCK_RATE       0x00030002u
+#define BCM_TAG_SET_CLOCK_STATE      0x00038001u
+#define BCM_TAG_SET_CLOCK_RATE       0x00038002u
+#define BCM_TAG_GET_CLOCK_RATE_MEASURED  0x00030047u
 
 /* SET_POWER_STATE device IDs (subset — add more as needed). The
  * Pi firmware exposes power-domain control for these peripherals
- * via the mailbox interface; on Pi 5 / BCM2712 the SD card domain
- * (id 0) controls EMMC2's clock + power. The mapping is the same
- * across Pi generations — it's the firmware-side abstraction, not
- * a SoC-specific register layout. */
+ * via the mailbox interface. NOTE: device id 0 ("SD card") only
+ * controls EMMC on Pi 1-3. On Pi 4/5, EMMC has moved to a separate
+ * controller (EMMC2 on Pi 5) that is not in the SET_POWER_STATE
+ * device-id table — see Linux's
+ * `dt-bindings/power/raspberrypi-power.h` (the Pi 5 entries are
+ * 0..22 with no SD/EMMC). For Pi 5 EMMC2, use SET_CLOCK_STATE with
+ * BCM_CLOCK_EMMC2 (12) instead. */
 #define BCM_POWER_DEVICE_SDCARD      0u
 
 /* SET_POWER_STATE state-word bits. WAIT instructs the firmware to
@@ -61,6 +69,26 @@
 #define BCM_POWER_STATE_OFF          0u
 #define BCM_POWER_STATE_ON           (1u << 0)
 #define BCM_POWER_STATE_WAIT         (1u << 1)
+
+/* SET_CLOCK_STATE clock IDs. The Pi firmware's clock-id table is
+ * authoritative — `include/soc/bcm2835/raspberrypi-firmware.h`
+ * (rpi-6.12.y) and `drivers/clk/bcm/clk-raspberrypi.c` enumerate
+ * 1..16 plus a few above. EMMC2 on Pi 5 / BCM2712 is id 12; this
+ * matches Circle's `CLOCK_ID_EMMC2 = 12` in
+ * `docs/reference/circle-bcmpropertytags.h`. Linux's sdhci-brcmstb
+ * pulls EMMC2 up via `devm_clk_get_optional_enabled` which goes
+ * through the firmware-clock framework and ultimately issues
+ * SET_CLOCK_STATE(12, on) to the firmware. */
+#define BCM_CLOCK_EMMC               1u
+#define BCM_CLOCK_EMMC2              12u
+
+/* SET_CLOCK_STATE state-word bits. Same shape as SET_POWER_STATE —
+ * bit 0 is the requested on/off, bit 1 is "block until transition
+ * completes". A response with bit 1 set means "device does not
+ * exist" (firmware doesn't know that clock id). */
+#define BCM_CLOCK_STATE_OFF          0u
+#define BCM_CLOCK_STATE_ON           (1u << 0)
+#define BCM_CLOCK_STATE_NO_DEVICE    (1u << 1)
 
 /* Buffer size used by all helpers in this header. The transport in
  * bcm_mailbox.c uses a fixed 32-byte property buffer, so the helpers
@@ -162,6 +190,97 @@ static inline void bcm_mailbox_build_set_power_state(uint32_t buf[BCM_PROP_BUF_W
     buf[5] = device_id;
     buf[6] = state;
     buf[7] = BCM_PROP_TAG_END;
+}
+
+/*
+ * SET_CLOCK_STATE (tag 0x00038001): turn a firmware-managed clock on
+ * or off. Used by the BCM2712 SDHCI driver to bring up EMMC2's
+ * clock domain — the right knob on Pi 5 (SET_POWER_STATE has no SD
+ * entry on Pi 5).
+ *
+ * Layout: identical to SET_POWER_STATE (two u32 payload words).
+ *   [5] clock_id   (e.g. BCM_CLOCK_EMMC2 = 12)
+ *   [6] state      (bit 0: on/off; response bit 1 set = no device)
+ *
+ * The response (after `mbox_property_call` returns) writes the
+ * actual clock state back into [6]; check bit 0 to confirm the
+ * transition.
+ */
+static inline void bcm_mailbox_build_set_clock_state(uint32_t buf[BCM_PROP_BUF_WORDS],
+                                                     uint32_t clock_id,
+                                                     uint32_t state)
+{
+    buf[0] = 32u;
+    buf[1] = BCM_PROP_REQUEST;
+    buf[2] = BCM_TAG_SET_CLOCK_STATE;
+    buf[3] = 8u;
+    buf[4] = 0u;
+    buf[5] = clock_id;
+    buf[6] = state;
+    buf[7] = BCM_PROP_TAG_END;
+}
+
+/*
+ * SET_CLOCK_RATE (tag 0x00038002): set the firmware-managed clock
+ * frequency. 12-byte payload: clock_id, rate (Hz), skip_setting_turbo.
+ *
+ * Linux's brcmstb sdhci driver pulls clock-frequency from device-tree
+ * (or, for the bcm2712 fixed-clock, gets 200 MHz back from
+ * `clk_get_rate`) and sends it to the controller via this tag.
+ * On Pi 5 EMMC2, 200 MHz is the canonical value (matches the
+ * `bcm2712.dtsi` `clk_emmc2: clock-frequency = <200000000>` entry).
+ *
+ * The 8-word property buffer fits the 12-byte payload + end_tag with
+ * exactly one tail word free; layout:
+ *   [5] clock_id
+ *   [6] rate (Hz)
+ *   [7] skip_setting_turbo  (0 = honor turbo policy)
+ *   [...] end_tag overflows the 8-word buffer envelope, so this
+ *         helper does NOT write an end_tag — callers that batch
+ *         multiple tags must use a larger buffer. For the SLM-OS
+ *         single-tag transport this is fine because the response
+ *         field comes from word 4, not from the tail.
+ *
+ * In practice the Pi firmware tolerates a missing end_tag when the
+ * declared total_size matches the populated payload exactly; any
+ * tail bytes past `[7]` are not part of this 32-byte buffer at all.
+ */
+/* Query helpers — read-only; same payload shape as the SET versions. */
+static inline void bcm_mailbox_build_get_clock_state(uint32_t buf[BCM_PROP_BUF_WORDS],
+                                                     uint32_t clock_id)
+{
+    buf[0] = 32u; buf[1] = BCM_PROP_REQUEST; buf[2] = BCM_TAG_GET_CLOCK_STATE;
+    buf[3] = 8u; buf[4] = 0u; buf[5] = clock_id; buf[6] = 0u;
+    buf[7] = BCM_PROP_TAG_END;
+}
+static inline void bcm_mailbox_build_get_clock_rate(uint32_t buf[BCM_PROP_BUF_WORDS],
+                                                    uint32_t clock_id)
+{
+    buf[0] = 32u; buf[1] = BCM_PROP_REQUEST; buf[2] = BCM_TAG_GET_CLOCK_RATE;
+    buf[3] = 8u; buf[4] = 0u; buf[5] = clock_id; buf[6] = 0u;
+    buf[7] = BCM_PROP_TAG_END;
+}
+static inline void bcm_mailbox_build_get_clock_rate_measured(uint32_t buf[BCM_PROP_BUF_WORDS],
+                                                              uint32_t clock_id)
+{
+    buf[0] = 32u; buf[1] = BCM_PROP_REQUEST; buf[2] = BCM_TAG_GET_CLOCK_RATE_MEASURED;
+    buf[3] = 8u; buf[4] = 0u; buf[5] = clock_id; buf[6] = 0u;
+    buf[7] = BCM_PROP_TAG_END;
+}
+
+static inline void bcm_mailbox_build_set_clock_rate(uint32_t buf[BCM_PROP_BUF_WORDS],
+                                                    uint32_t clock_id,
+                                                    uint32_t rate_hz,
+                                                    uint32_t skip_setting_turbo)
+{
+    buf[0] = 32u;
+    buf[1] = BCM_PROP_REQUEST;
+    buf[2] = BCM_TAG_SET_CLOCK_RATE;
+    buf[3] = 12u;
+    buf[4] = 0u;
+    buf[5] = clock_id;
+    buf[6] = rate_hz;
+    buf[7] = skip_setting_turbo;
 }
 
 #endif /* BCM_MAILBOX_PROTO_H */

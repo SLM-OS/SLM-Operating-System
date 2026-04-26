@@ -390,4 +390,101 @@ int bcm_mailbox_set_power_state(uint32_t device_id, bool on, bool wait)
     return 0;
 }
 
+int bcm_mailbox_set_clock_state(uint32_t clock_id, bool on)
+{
+    uint32_t state = on ? BCM_CLOCK_STATE_ON : BCM_CLOCK_STATE_OFF;
+
+    bcm_mailbox_build_set_clock_state(prop_buf, clock_id, state);
+
+    int rc = mbox_property_call();
+    if (rc < 0) {
+        return rc;
+    }
+
+    uint32_t tag_resp = prop_buf[4];
+    if (!(tag_resp & PROP_TAG_RESP_SUCCESS)) {
+        ERROR("mailbox: SET_CLOCK_STATE tag response not success (0x%08x)",
+              tag_resp);
+        return MBOX_E_GENERIC;
+    }
+
+    /* Firmware reports actual state in word 6 with the same bit-0
+     * convention as the request, plus bit 1 = "no such clock id".
+     * Either condition is a hard failure for our caller — without
+     * the clock running, subsequent MMIO to the controller will
+     * hang the AXI fabric (#414 root cause). */
+    uint32_t actual_state = prop_buf[6];
+    if (actual_state & BCM_CLOCK_STATE_NO_DEVICE) {
+        ERROR("mailbox: SET_CLOCK_STATE(clk=%u) — firmware reports "
+              "no such clock (actual_state=0x%08x)",
+              clock_id, actual_state);
+        return MBOX_E_GENERIC;
+    }
+    if (((actual_state & BCM_CLOCK_STATE_ON) != 0) != on) {
+        ERROR("mailbox: SET_CLOCK_STATE(clk=%u, on=%d) returned "
+              "actual_state=0x%08x — clock did not transition",
+              clock_id, (int)on, actual_state);
+        return MBOX_E_GENERIC;
+    }
+    return 0;
+}
+
+int bcm_mailbox_get_clock_state(uint32_t clock_id, uint32_t *state_out)
+{
+    bcm_mailbox_build_get_clock_state(prop_buf, clock_id);
+    int rc = mbox_property_call();
+    if (rc < 0) return rc;
+    if (!(prop_buf[4] & PROP_TAG_RESP_SUCCESS)) return MBOX_E_GENERIC;
+    if (state_out) *state_out = prop_buf[6];
+    return 0;
+}
+
+int bcm_mailbox_get_clock_rate(uint32_t clock_id, uint32_t *hz_out)
+{
+    bcm_mailbox_build_get_clock_rate(prop_buf, clock_id);
+    int rc = mbox_property_call();
+    if (rc < 0) return rc;
+    if (!(prop_buf[4] & PROP_TAG_RESP_SUCCESS)) return MBOX_E_GENERIC;
+    if (hz_out) *hz_out = prop_buf[6];
+    return 0;
+}
+
+int bcm_mailbox_get_clock_rate_measured(uint32_t clock_id, uint32_t *hz_out)
+{
+    bcm_mailbox_build_get_clock_rate_measured(prop_buf, clock_id);
+    int rc = mbox_property_call();
+    if (rc < 0) return rc;
+    if (!(prop_buf[4] & PROP_TAG_RESP_SUCCESS)) return MBOX_E_GENERIC;
+    if (hz_out) *hz_out = prop_buf[6];
+    return 0;
+}
+
+int bcm_mailbox_set_clock_rate(uint32_t clock_id, uint32_t requested_hz,
+                               uint32_t *actual_hz)
+{
+    bcm_mailbox_build_set_clock_rate(prop_buf, clock_id, requested_hz,
+                                     /*skip_setting_turbo=*/0);
+
+    int rc = mbox_property_call();
+    if (rc < 0) {
+        return rc;
+    }
+
+    uint32_t tag_resp = prop_buf[4];
+    if (!(tag_resp & PROP_TAG_RESP_SUCCESS)) {
+        ERROR("mailbox: SET_CLOCK_RATE tag response not success (0x%08x)",
+              tag_resp);
+        return MBOX_E_GENERIC;
+    }
+
+    /* Response: word 5 = clock_id (echoed), word 6 = actual rate.
+     * 0 means "no such clock" or "rate is fixed and could not be
+     * changed" — caller can treat this as advisory. */
+    uint32_t programmed = prop_buf[6];
+    if (actual_hz != NULL) {
+        *actual_hz = programmed;
+    }
+    return 0;
+}
+
 #endif /* PLATFORM_RASPI5 */

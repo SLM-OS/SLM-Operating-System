@@ -183,6 +183,38 @@ static void test_set_power_state_state_bits_pinned(void)
     TEST_ASSERT_EQUAL_HEX32(0u, BCM_POWER_DEVICE_SDCARD);
 }
 
+static void test_set_clock_state_layout_emmc2_on(void)
+{
+    uint32_t buf[BCM_PROP_BUF_WORDS] = {0};
+
+    bcm_mailbox_build_set_clock_state(buf, BCM_CLOCK_EMMC2,
+                                      BCM_CLOCK_STATE_ON);
+
+    TEST_ASSERT_EQUAL_HEX32(32u,                       buf[0]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_REQUEST,          buf[1]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_TAG_SET_CLOCK_STATE,   buf[2]);
+    TEST_ASSERT_EQUAL_HEX32(8u,                        buf[3]);  /* val_buf_sz */
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[4]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_EMMC2,           buf[5]);  /* id 12 */
+    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_STATE_ON,        buf[6]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,          buf[7]);
+}
+
+static void test_set_clock_state_clock_ids_pinned(void)
+{
+    /* Pin the firmware clock-id values to the canonical
+     * raspberrypi-firmware.h table. EMMC2 = 12 is the load-bearing
+     * one for #414; if any future maintainer changes the constant
+     * the next Pi 5 boot will hang `kernel status` again. */
+    TEST_ASSERT_EQUAL_HEX32(1u,  BCM_CLOCK_EMMC);
+    TEST_ASSERT_EQUAL_HEX32(12u, BCM_CLOCK_EMMC2);
+    TEST_ASSERT_EQUAL_HEX32(0x00038001u, BCM_TAG_SET_CLOCK_STATE);
+    /* Same state-word bit semantics as SET_POWER_STATE. */
+    TEST_ASSERT_EQUAL_HEX32(0u, BCM_CLOCK_STATE_OFF);
+    TEST_ASSERT_EQUAL_HEX32(1u, BCM_CLOCK_STATE_ON);
+    TEST_ASSERT_EQUAL_HEX32(2u, BCM_CLOCK_STATE_NO_DEVICE);
+}
+
 int test_suite_bcm_mailbox(void)
 {
     UnityBegin("BCM Mailbox property-tag buffer tests");
@@ -197,6 +229,8 @@ int test_suite_bcm_mailbox(void)
     RUN_TEST(test_set_power_state_layout_on_with_wait);
     RUN_TEST(test_set_power_state_layout_off_no_wait);
     RUN_TEST(test_set_power_state_state_bits_pinned);
+    RUN_TEST(test_set_clock_state_layout_emmc2_on);
+    RUN_TEST(test_set_clock_state_clock_ids_pinned);
 
     return UnityEnd();
 }
