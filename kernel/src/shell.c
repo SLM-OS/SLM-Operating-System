@@ -36,18 +36,102 @@
 
 /* ============================================================================
  * Command table
+ *
+ * **CONVENTION (enforced by reviewers, mirrored by `cmd_help` output):**
+ *
+ *   1. Group entries by `category`. Categories appear in the order
+ *      defined by `shell_cmd_category_t` in shell.h.
+ *   2. **Alphabetize by `name` within each category.**
+ *   3. Each category gets a single-line separator comment of the form
+ *      "--- Category Name ---" (see below) so a human can scan the
+ *      list in the same order the `help` output produces.
+ *
+ * Adding a new command:
+ *   - Pick the closest category (see shell.h for the enum and what
+ *     each value covers).
+ *   - Insert it in strict alphabetical order within that category's
+ *     block. Conditional (`#if`-gated) entries are interleaved by
+ *     name like everything else — the gates go inline per-entry, not
+ *     in a "conditional block at the bottom".
+ *
+ * `cmd_help` groups + alphabetizes the output at runtime regardless,
+ * so violating this rule will not break user-visible behaviour — but
+ * it does defeat the point of having the source layout match the
+ * help output, and the test
+ * `test_builtin_commands_grouped_and_sorted` (kernel/tests/test_shell.c)
+ * fires when the source drifts out of compliance.
+ *
+ * External commands registered via `shell_register_command` (lua,
+ * net, hailo, kernel, gpu/pci on x86-64) follow the same convention
+ * in their respective registration files.
  * ============================================================================ */
 
 const shell_cmd_t builtin_commands[] = {
-    {"help",   cmd_help,   "List available commands", false},
-    {"mem",    cmd_mem,    "Show memory statistics", false},
-    {"tasks",  cmd_tasks,  "List all tasks", false},
-    {"cpu",    cmd_cpu,    "Show CPU status", false},
-    {"uptime", cmd_uptime, "Show system uptime", false},
-    {"vmm",    cmd_vmm,    "Show virtual memory info", false},
-    {"ipc",    cmd_ipc,    "Show IPC statistics", false},
-    {"model",  cmd_model,  "Model management (load/list/info/unload/pools)", true},
-    {"dtb",    cmd_dtb,    "Show device tree info", false},
+    /* --- Shell session --- */
+    {"clear",  cmd_clear,  "Clear screen",                                       false, SHELL_CAT_SHELL},
+    {"help",   cmd_help,   "List available commands",                            false, SHELL_CAT_SHELL},
+    {"reboot", cmd_reboot, "Restart the system",                                 true,  SHELL_CAT_SHELL},
+
+    /* --- Filesystem --- */
+    {"append",   cmd_append,   "Append to file (append <path> <content>)",          false, SHELL_CAT_FILESYSTEM},
+    {"cat",      cmd_cat,      "Show file contents (cat <path>)",                   false, SHELL_CAT_FILESYSTEM},
+    {"cd",       cmd_cd,       "Change directory (cd [path])",                      false, SHELL_CAT_FILESYSTEM},  /* per-session cwd only */
+    {"cp",       cmd_cp,       "Copy file (cp <src> <dst>)",                        false, SHELL_CAT_FILESYSTEM},
+    {"df",       cmd_df,       "Filesystem stats (df [path])",                      false, SHELL_CAT_FILESYSTEM},
+    {"find",     cmd_find,     "Find files (find <path> <pattern>)",                false, SHELL_CAT_FILESYSTEM},
+    {"grep",     cmd_grep,     "Search in file (grep <pattern> <path>)",            false, SHELL_CAT_FILESYSTEM},
+    {"hexdump",  cmd_hexdump,  "Hex dump file (hexdump <path> [offset] [len])",     false, SHELL_CAT_FILESYSTEM},
+    {"ls",       cmd_ls,       "List directory (ls [path])",                        false, SHELL_CAT_FILESYSTEM},
+    {"mkdir",    cmd_mkdir,    "Create directory (mkdir <path>)",                   false, SHELL_CAT_FILESYSTEM},
+    {"mv",       cmd_mv,       "Move/rename (mv <src> <dst>)",                      false, SHELL_CAT_FILESYSTEM},
+    {"put",      cmd_put,      "Write binary hex to file (put [-a] <path> <hex>)",  false, SHELL_CAT_FILESYSTEM},
+    {"pwd",      cmd_pwd,      "Print working directory",                           false, SHELL_CAT_FILESYSTEM},
+    {"rm",       cmd_rm,       "Remove file/dir (rm <path>)",                       false, SHELL_CAT_FILESYSTEM},
+    {"stat",     cmd_stat,     "Show file info (stat <path>)",                      false, SHELL_CAT_FILESYSTEM},
+    {"touch",    cmd_touch,    "Create empty file (touch <path>)",                  false, SHELL_CAT_FILESYSTEM},
+    {"tree",     cmd_tree,     "Recursive directory listing (tree [path])",         false, SHELL_CAT_FILESYSTEM},
+    {"truncate", cmd_truncate, "Truncate file (truncate <path> <size>)",            false, SHELL_CAT_FILESYSTEM},
+    {"wc",       cmd_wc,       "Count lines/words/bytes (wc <path>)",               false, SHELL_CAT_FILESYSTEM},
+    {"write",    cmd_write,    "Write to file (write <path> <content>)",            false, SHELL_CAT_FILESYSTEM},  /* VFS locks internally */
+    {"xput",     cmd_xput,     "Framed upload (xput begin|chunk|status|finish|abort)", false, SHELL_CAT_FILESYSTEM},
+
+    /* --- System info --- */
+    {"cpu",       cmd_cpu,       "Show CPU status",                                    false, SHELL_CAT_SYSINFO},
+    {"dtb",       cmd_dtb,       "Show device tree info",                              false, SHELL_CAT_SYSINFO},
+    {"ipc",       cmd_ipc,       "Show IPC statistics",                                false, SHELL_CAT_SYSINFO},
+    {"mem",       cmd_mem,       "Show memory statistics",                             false, SHELL_CAT_SYSINFO},
+    {"telemetry", cmd_telemetry, "Admin telemetry feed (telemetry [stats|list-topics])", false, SHELL_CAT_SYSINFO},
+    {"top",       cmd_top,       "Live dashboard (top [-n <iter>] [refresh_secs])",    false, SHELL_CAT_SYSINFO},
+    {"uptime",    cmd_uptime,    "Show system uptime",                                 false, SHELL_CAT_SYSINFO},
+    {"vmm",       cmd_vmm,       "Show virtual memory info",                           false, SHELL_CAT_SYSINFO},
+
+    /* --- Process / scheduling / AI runtime --- */
+    {"bench",    cmd_bench,    "Performance benchmarks (bench <context|irq|ipc|stats|all>)", true, SHELL_CAT_PROCESS},
+    {"eviction", cmd_eviction, "AI eviction (eviction [policy [<name>] | stats])",          true, SHELL_CAT_PROCESS},
+    {"kill",     cmd_kill,     "Terminate a task by ID",                                    true, SHELL_CAT_PROCESS},
+    {"model",    cmd_model,    "Model management (load/list/info/unload/pools)",            true, SHELL_CAT_PROCESS},
+    {"sched",    cmd_sched,    "Scheduler (sched [policy [<name>] | model ... | stats])",   true, SHELL_CAT_PROCESS},
+    {"sleep",    cmd_sleep,    "Sleep for N ms (sleep <ms>)",                               false, SHELL_CAT_PROCESS},
+    {"tasks",    cmd_tasks,    "List all tasks",                                            false, SHELL_CAT_PROCESS},
+
+    /* --- Components & message router --- */
+    {"component", cmd_component, "Component system (list/register/status)",                  true, SHELL_CAT_COMPONENTS},
+    {"msg",       cmd_msg,       "Message router (send/list/subscribe)",                     true, SHELL_CAT_COMPONENTS},
+
+    /* --- Scripting & programs --- */
+    {"elftest", cmd_elftest, "Test ELF loader",                                              true, SHELL_CAT_SCRIPTING},
+    {"run",     cmd_run,     "Run a program (run <name>)",                                   true, SHELL_CAT_SCRIPTING},
+
+    /* --- Hardware control & diagnostics ---
+     * Alphabetized strictly by name, with #if gates inline per-entry. The
+     * test_builtin_commands_grouped_and_sorted regression test enforces
+     * this ordering. */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    {"bpmp",      cmd_bpmp,      "BPMP IPC smoke test (PING + clock query)",                  false, SHELL_CAT_HARDWARE},
+#endif
+#if defined(PI5_IRQ_DIAG)
+    {"diag",      cmd_diag,      "Pi 5 IRQ-delivery diagnostics (diag <el2|vec|fiq|all>)",    false, SHELL_CAT_HARDWARE},
+#endif
 #if !defined(PLATFORM_X86_64)
     /* x86-64 registers a richer `gpu` command via
      * nvidia_gpu_register_shell_commands() with init/sec2/vram/regs
@@ -57,66 +141,32 @@ const shell_cmd_t builtin_commands[] = {
      * `gpu init` from PR #268's kexec-inheritance experiment until
      * this entry was guarded). On Jetson the built-in still carries
      * `gpu read <hex-offset>` for the integrated GA10B aperture. */
-    {"gpu",    cmd_gpu,    "Show GPU info (gpu [read <hex-offset>])", false},
+    {"gpu",       cmd_gpu,       "Show GPU info (gpu [read <hex-offset>])",                   false, SHELL_CAT_HARDWARE},
 #endif
-    {"peek",   cmd_peek,   "Read physical memory (peek <phys-hex> [count])", false},
-    {"poke",   cmd_poke,   "Write 32-bit word (poke <phys-hex> <val-hex>)", true},
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    {"nvgpu",  cmd_nvgpu,  "Jetson nvgpu bringup (nvgpu <prepare|run|info>)", true},
-    {"xhci",   cmd_xhci,   "Show Tegra XHCI controller info (#266 Phase 3A)", false},
-#endif
-    {"elftest", cmd_elftest, "Test ELF loader", true},
-    {"run",    cmd_run,    "Run a program (run <name>)", true},
-    {"kill",   cmd_kill,   "Terminate a task by ID", true},
-    {"ls",     cmd_ls,     "List directory (ls [path])", false},
-    {"cd",     cmd_cd,     "Change directory (cd [path])", false},  /* per-session cwd only */
-    {"pwd",    cmd_pwd,    "Print working directory", false},
-    {"cat",    cmd_cat,    "Show file contents (cat <path>)", false},
-    {"write",  cmd_write,  "Write to file (write <path> <content>)", false},  /* VFS locks internally */
-    {"put",    cmd_put,    "Write binary hex to file (put [-a] <path> <hex>)", false},
-    {"xput",   cmd_xput,   "Framed upload (xput begin|chunk|status|finish|abort)", false},
-    {"mkdir",  cmd_mkdir,  "Create directory (mkdir <path>)", false},
-    {"rm",     cmd_rm,     "Remove file/dir (rm <path>)", false},
-    {"mv",     cmd_mv,     "Move/rename (mv <src> <dst>)", false},
-    {"df",     cmd_df,     "Filesystem stats (df [path])", false},
-    {"truncate", cmd_truncate, "Truncate file (truncate <path> <size>)", false},
-    {"append", cmd_append, "Append to file (append <path> <content>)", false},
-    {"cp",     cmd_cp,     "Copy file (cp <src> <dst>)", false},
-    {"touch",  cmd_touch,  "Create empty file (touch <path>)", false},
-    {"stat",   cmd_stat,   "Show file info (stat <path>)", false},
-    {"tree",   cmd_tree,   "Recursive directory listing (tree [path])", false},
-    {"wc",     cmd_wc,     "Count lines/words/bytes (wc <path>)", false},
-    {"hexdump", cmd_hexdump, "Hex dump file (hexdump <path> [offset] [len])", false},
-    {"grep",   cmd_grep,   "Search in file (grep <pattern> <path>)", false},
-    {"find",   cmd_find,   "Find files (find <path> <pattern>)", false},
-    {"component", cmd_component, "Component system (list/register/status)", true},
-    {"msg",       cmd_msg,       "Message router (send/list/subscribe)", true},
-    {"telemetry", cmd_telemetry, "Admin telemetry feed (telemetry [stats|list-topics])", false},
-    {"sleep",  cmd_sleep,  "Sleep for N ms (sleep <ms>)", false},
-    {"bench",  cmd_bench,  "Performance benchmarks (bench <context|irq|ipc|stats|all>)", true},
-    {"sched",  cmd_sched,  "Scheduler (sched [policy [<name>] | model ... | stats])", true},
-    {"eviction", cmd_eviction, "AI eviction (eviction [policy [<name>] | stats])", true},
-    {"top",    cmd_top,    "Live dashboard (top [-n <iter>] [refresh_secs])", false},
-    {"clear",  cmd_clear,  "Clear screen", false},
-    {"reboot", cmd_reboot, "Restart the system", true},
-#if defined(PI5_IRQ_DIAG)
-    {"diag",   cmd_diag,   "Pi 5 IRQ-delivery diagnostics (diag <el2|vec|fiq|all>)", false},
-#endif
-#if !defined(PLATFORM_X86_64)
-    {"timdiag", cmd_timdiag, "Timer/interrupt delivery diagnostic", false},
+    {"hspdiag",   cmd_hspdiag,   "HSP dimensioning + BPMP doorbell probe",                    false, SHELL_CAT_HARDWARE},
+    {"imx219",    cmd_imx219,    "Read IMX219 CHIP_ID via cam_i2c (expect 0x0219)",           false, SHELL_CAT_HARDWARE},
 #endif
 #if defined(PLATFORM_RASPI5) && defined(ENABLE_NETWORKING)
-    {"macbdiag", cmd_macbdiag, "MACB IRQ delivery diagnostic", false},
-#endif
-#if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
-    {"rtldiag",  cmd_rtldiag,  "RTL8168 PCIe probe diagnostic", false},
-    {"xhcidiag", cmd_xhcidiag, "Tegra XHCI CBB-at-EL2 probe", false},
+    {"macbdiag",  cmd_macbdiag,  "MACB IRQ delivery diagnostic",                              false, SHELL_CAT_HARDWARE},
 #endif
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-    {"hspdiag",   cmd_hspdiag,   "HSP dimensioning + BPMP doorbell probe", false},
-    {"bpmp",      cmd_bpmp,      "BPMP IPC smoke test (PING + clock query)", false},
-    {"pcietrain", cmd_pcietrain, "Tegra PCIe C8 host init + link train + EP probe", false},
-    {"imx219",    cmd_imx219,    "Read IMX219 CHIP_ID via cam_i2c (expect 0x0219)", false},
+    {"nvgpu",     cmd_nvgpu,     "Jetson nvgpu bringup (nvgpu <prepare|run|info>)",           true,  SHELL_CAT_HARDWARE},
+    {"pcietrain", cmd_pcietrain, "Tegra PCIe C8 host init + link train + EP probe",           false, SHELL_CAT_HARDWARE},
+#endif
+    {"peek",      cmd_peek,      "Read physical memory (peek <phys-hex> [count])",            false, SHELL_CAT_HARDWARE},
+    {"poke",      cmd_poke,      "Write 32-bit word (poke <phys-hex> <val-hex>)",             true,  SHELL_CAT_HARDWARE},
+#if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
+    {"rtldiag",   cmd_rtldiag,   "RTL8168 PCIe probe diagnostic",                             false, SHELL_CAT_HARDWARE},
+#endif
+#if !defined(PLATFORM_X86_64)
+    {"timdiag",   cmd_timdiag,   "Timer/interrupt delivery diagnostic",                       false, SHELL_CAT_HARDWARE},
+#endif
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    {"xhci",      cmd_xhci,      "Show Tegra XHCI controller info (#266 Phase 3A)",           false, SHELL_CAT_HARDWARE},
+#endif
+#if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
+    {"xhcidiag",  cmd_xhcidiag,  "Tegra XHCI CBB-at-EL2 probe",                               false, SHELL_CAT_HARDWARE},
 #endif
 };
 

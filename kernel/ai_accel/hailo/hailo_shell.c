@@ -1453,10 +1453,11 @@ static int cmd_hailo(int argc, char *argv[])
 }
 
 static const shell_cmd_t hailo_cmd = {
-    .name    = "hailo",
-    .handler = cmd_hailo,
-    .help    = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke [min|out|in|full])",
-    .mutates = true,   /* probe/fw mutate driver state; status is a whole-command tag */
+    .name     = "hailo",
+    .handler  = cmd_hailo,
+    .help     = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke [min|out|in|full])",
+    .mutates  = true,   /* probe/fw mutate driver state; status is a whole-command tag */
+    .category = SHELL_CAT_HARDWARE,
 };
 
 void hailo_register_shell_commands(void)

@@ -44,9 +44,39 @@ extern int num_external_commands;
  * help - List available commands or show detailed help
  *
  * Usage:
- *   help          - List all commands with brief descriptions
+ *   help          - List all commands grouped by category, alphabetized
  *   help <cmd>    - Show detailed help for a specific command
+ *
+ * The grouped list draws from both `builtin_commands[]` (in shell.c) and
+ * `external_commands[]` (registered at runtime by lua/net/hailo/kernel/...).
+ * For each category in the order defined by `shell_cmd_category_t`, gather
+ * the matching entries from both tables, sort them alphabetically by name
+ * with a simple insertion sort (~70 entries — trivial), then print a
+ * category header and the entries beneath it.
+ *
+ * The source-side convention enforced by the comment block over
+ * builtin_commands[] keeps the array layout matching this output, so
+ * "where is command X registered" and "where does X show up in help"
+ * give the same answer.
  */
+
+/* Display labels for each category. Index by shell_cmd_category_t. */
+static const char *const shell_cat_labels[SHELL_CAT_COUNT] = {
+    [SHELL_CAT_SHELL]      = "Shell",
+    [SHELL_CAT_FILESYSTEM] = "Filesystem",
+    [SHELL_CAT_SYSINFO]    = "System info",
+    [SHELL_CAT_PROCESS]    = "Processes & scheduling",
+    [SHELL_CAT_COMPONENTS] = "Components & messaging",
+    [SHELL_CAT_SCRIPTING]  = "Scripting & programs",
+    [SHELL_CAT_NETWORK]    = "Network",
+    [SHELL_CAT_HARDWARE]   = "Hardware control & diagnostics",
+};
+
+/* Cap on the number of commands gathered into the per-category sort
+ * buffer. Sized for builtin_commands[] (~50) + MAX_EXTERNAL_COMMANDS (16)
+ * with headroom. */
+#define HELP_GATHER_MAX 96
+
 int cmd_help(int argc, char *argv[])
 {
     /* If a command name is given, show detailed help from file */
@@ -54,22 +84,46 @@ int cmd_help(int argc, char *argv[])
         return help_show(argv[1]);
     }
 
-    /* Otherwise, list all commands with brief descriptions */
     shell_puts("Available commands:\r\n");
-    shell_puts("\r\n");
 
-    /* Built-in commands */
-    for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
-        shell_printf("  %-10s %s\r\n",
-                    builtin_commands[i].name,
-                    builtin_commands[i].help);
-    }
+    for (int cat = 0; cat < SHELL_CAT_COUNT; cat++) {
+        /* Gather every entry whose category matches `cat`, then
+         * insertion-sort by name. Two-table walk (builtin + external)
+         * means the same category can pull from both. */
+        const shell_cmd_t *gathered[HELP_GATHER_MAX];
+        int n = 0;
 
-    /* External commands */
-    for (int i = 0; i < num_external_commands; i++) {
-        shell_printf("  %-10s %s\r\n",
-                    external_commands[i].name,
-                    external_commands[i].help);
+        for (int i = 0; i < NUM_BUILTIN_COMMANDS && n < HELP_GATHER_MAX; i++) {
+            if ((int)builtin_commands[i].category == cat) {
+                gathered[n++] = &builtin_commands[i];
+            }
+        }
+        for (int i = 0; i < num_external_commands && n < HELP_GATHER_MAX; i++) {
+            if ((int)external_commands[i].category == cat) {
+                gathered[n++] = &external_commands[i];
+            }
+        }
+
+        if (n == 0) {
+            continue;  /* category empty for this build (e.g. NETWORK off) */
+        }
+
+        /* Insertion sort by name. n <= ~70 — O(n²) is fine. */
+        for (int i = 1; i < n; i++) {
+            const shell_cmd_t *key = gathered[i];
+            int j = i - 1;
+            while (j >= 0 && strcmp(gathered[j]->name, key->name) > 0) {
+                gathered[j + 1] = gathered[j];
+                j--;
+            }
+            gathered[j + 1] = key;
+        }
+
+        shell_puts("\r\n");
+        shell_printf("%s:\r\n", shell_cat_labels[cat]);
+        for (int i = 0; i < n; i++) {
+            shell_printf("  %-12s %s\r\n", gathered[i]->name, gathered[i]->help);
+        }
     }
 
     shell_puts("\r\n");

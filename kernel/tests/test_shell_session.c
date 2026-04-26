@@ -488,12 +488,14 @@ static void test_nested_mutating_dispatch_no_deadlock(void)
         .handler = nested_inner_cmd,
         .help = "regression: inner mutating command",
         .mutates = true,
+        .category = SHELL_CAT_SHELL,  /* test fixture; category irrelevant */
     };
     shell_cmd_t outer = {
         .name = "t_nested_outer",
         .handler = nested_outer_cmd,
         .help = "regression: outer mutating command",
         .mutates = true,
+        .category = SHELL_CAT_SHELL,  /* test fixture; category irrelevant */
     };
     TEST_ASSERT_EQUAL_INT(0, shell_register_command(&inner));
     TEST_ASSERT_EQUAL_INT(0, shell_register_command(&outer));

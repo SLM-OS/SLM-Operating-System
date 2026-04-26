@@ -354,10 +354,20 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
             fmt++;
         }
 
-        /* Parse length modifier */
+        /* Parse length modifier. Accept one *or two* 'l's so that %llu /
+         * %lld / %llx parse as 64-bit (and don't fall through to the
+         * default-case "print literally" path, which previously made
+         * `netstat` and other %llu callers print "%lu" + "lu" verbatim).
+         * On both kernel targets (aarch64-elf, x86_64-elf) `long` and
+         * `long long` are 64-bit, so collapsing them is correct.
+         * `z` accepts size_t for the same reason. */
         int is_long = 0;
         if (*fmt == 'l') {
             is_long = 1;
+            fmt++;
+            if (*fmt == 'l') fmt++;  /* consume the second l of `%ll<spec>` */
+        } else if (*fmt == 'z') {
+            is_long = (sizeof(size_t) == sizeof(uint64_t));
             fmt++;
         }
 

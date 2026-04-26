@@ -114,11 +114,12 @@ static int cmd_admin(int argc, char *argv[]) {
     return cmd_lua_common(2, fake_argv, false);
 }
 
-/* Command registration */
+/* Command registration. Convention (see kernel/src/shell.c): grouped by
+ * category, alphabetized within. All entries are SCRIPTING. */
 static const shell_cmd_t lua_commands[] = {
-    {"lua", cmd_lua, "Lua scripting (concurrent-safe REPL or script)", false},
-    {"lua-admin", cmd_lua_admin, "Lua scripting with global admin bindings", true},
-    {"admin", cmd_admin, "Launch the admin & telemetry TUI (M6)", false},
+    {"admin",     cmd_admin,     "Launch the admin & telemetry TUI (M6)",          false, SHELL_CAT_SCRIPTING},
+    {"lua",       cmd_lua,       "Lua scripting (concurrent-safe REPL or script)", false, SHELL_CAT_SCRIPTING},
+    {"lua-admin", cmd_lua_admin, "Lua scripting with global admin bindings",       true,  SHELL_CAT_SCRIPTING},
 };
 
 void lua_shell_init(void) {
