@@ -2,7 +2,7 @@
  * model_engine.h - Model kind/engine registry (admin & telemetry, M5).
  *
  * Spec §10 promises a `model launch <name>` command that reads a
- * `/mnt/models/<name>.meta` sidecar, looks up the right engine for the
+ * `/mnt/files/models/<name>.meta` sidecar, looks up the right engine for the
  * declared `kind`, and instantiates the model. M5 ships the registry,
  * the .meta parser, and the launch surface; only the `mnist` and `raw`
  * kinds have real engine paths today. `hailo` and `ggml` are stubs
@@ -65,7 +65,7 @@ size_t model_engine_info_list(const struct model_engine_info *out[MODEL_KIND_COU
 
 /* Result codes for `model_engine_launch`. Negative for failure. */
 #define MODEL_LAUNCH_OK            0
-#define MODEL_LAUNCH_ERR_NOMETA   (-1)  /* /mnt/models/<name>.meta missing or unreadable */
+#define MODEL_LAUNCH_ERR_NOMETA   (-1)  /* /mnt/files/models/<name>.meta missing or unreadable */
 #define MODEL_LAUNCH_ERR_BADMETA  (-2)  /* meta file present but malformed */
 #define MODEL_LAUNCH_ERR_BADKIND  (-3)  /* meta declares an unknown kind */
 #define MODEL_LAUNCH_ERR_NOSYS    (-4)  /* engine for kind is a stub */
@@ -92,7 +92,7 @@ struct model_meta {
  * not write back. */
 int model_meta_parse(const char *buf, size_t len, struct model_meta *out);
 
-/* Read /mnt/models/<name>.meta from VFS and parse it.  Returns
+/* Read /mnt/files/models/<name>.meta from VFS and parse it.  Returns
  * MODEL_LAUNCH_OK on success or one of the negative codes above. */
 int model_meta_read(const char *name, struct model_meta *out);
 

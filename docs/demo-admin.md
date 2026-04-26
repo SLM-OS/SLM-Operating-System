@@ -195,11 +195,11 @@ the unified `model upload` flow lands when M6's host helper drives it).
 slmos> # Push the blob via the existing xput protocol. For demos a
 slmos> # 0-byte placeholder is fine because the `mnist` engine ignores
 slmos> # the on-disk blob and uses its built-in graph.
-slmos> xput begin /mnt/models/mnist.blob 1
-XPUT ok begin path=/mnt/models/mnist.blob size=1
+slmos> xput begin /mnt/files/models/mnist.blob 1
+XPUT ok begin path=/mnt/files/models/mnist.blob size=1
 slmos> xput chunk 0 00
 slmos> xput finish
-slmos> write /mnt/models/mnist.meta "kind=mnist
+slmos> write /mnt/files/models/mnist.meta "kind=mnist
 size=1
 "
 ```

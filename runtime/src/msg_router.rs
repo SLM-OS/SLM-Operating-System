@@ -601,7 +601,6 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
     const MAX_TARGETS: usize = MAX_SUBSCRIBERS + MAX_WILDCARD_SUBS;
     let mut targets: [*mut Mailbox; MAX_TARGETS] = [core::ptr::null_mut(); MAX_TARGETS];
     let mut target_count = 0usize;
-    let mut found_topic = false;
 
     // Gather target mailbox pointers under the lock, then release it
     // before the yield-wait loop.
@@ -615,7 +614,6 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
         // acceptable for current workloads).
         for i in 0..MAX_TOPICS {
             if TOPICS[i].is_active() && str_eq_cstr(&TOPICS[i].name, topic_name) {
-                found_topic = true;
                 for j in 0..MAX_SUBSCRIBERS {
                     if TOPICS[i].subs[j].component_idx == -1 {
                         continue;
@@ -640,9 +638,16 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
         }
     } // MSG_ROUTER_LOCK released
 
-    if !found_topic {
-        uart_printf(b"[msg] Topic '%s' not found\n\0".as_ptr(), topic_name);
-    }
+    // (M4) Pre-M4 this routine printed "Topic '%s' not found" whenever
+    // a publisher emitted to a topic that had no exact subscribers.
+    // The M4 telemetry feed (`admin_telemetry.c`) emits every event
+    // unconditionally — fire-and-forget — and operators only attach
+    // a wildcard subscriber when they want to look. The warning was
+    // removed entirely so the steady-state log stays clean; callers
+    // that care about delivery still get the count via the publish
+    // return value. `msg send` (shell_component.c) already prints
+    // "delivered to N" and returns -1 when 0; M4 telemetry doesn't
+    // care.
 
     // Deliver and wait for ack on each target. Mailbox atomics handle
     // cross-CPU sync on the ready/ack flags.
