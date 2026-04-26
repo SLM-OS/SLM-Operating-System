@@ -4886,18 +4886,7 @@ int cmd_timdiag(int argc, char *argv[])
 #if defined(PLATFORM_RASPI5)
 
 #include "bcm_mailbox.h"
-
-/* Print a u32 as 0xHHHHHHHH on the shell. */
-static void shell_print_hex32(uint32_t v)
-{
-    char hex[11] = "0x";
-    for (int i = 0; i < 8; i++) {
-        uint32_t n = (v >> ((7 - i) * 4)) & 0xFu;
-        hex[2 + i] = (char)(n < 10 ? ('0' + n) : ('a' + (n - 10)));
-    }
-    hex[10] = 0;
-    shell_puts(hex);
-}
+#include "string.h"
 
 /*
  * Diagnostic shell command for the Pi 5 firmware mailbox clock
@@ -4911,11 +4900,25 @@ static void shell_print_hex32(uint32_t v)
  *   mboxclk <id> on    - SET_CLOCK_STATE(id, 1) + show before/after
  *   mboxclk <id> off   - SET_CLOCK_STATE(id, 0) + show before/after
  *
- * Tied to #414: Pi firmware id 12 (the Pi 4 EMMC2 convention) returns
- * a measured rate of ~1.07 GHz, inconsistent with the dtsi's 200 MHz
- * fixed-clock declaration — so id 12 may not control EMMC2 on Pi 5.
- * Use this command to find which id's measured rate matches 200 MHz.
+ * Tied to #414: empirical evidence pinned Pi 5 EMMC to firmware id 1
+ * (cfg_rate=200000000 matches the dtsi `clk_emmc2: clock-frequency
+ * = <200000000>` fixed-clock). Pi 4-era id 12 doesn't drive EMMC on
+ * Pi 5. Use this command to discover the right id for any other
+ * peripheral whose firmware mapping isn't yet known.
  */
+
+/* Print one column with formatted hex on success, fixed-width "(err)"
+ * placeholder on failure — keeps the dump aligned regardless of
+ * which queries the firmware accepted. */
+static void mboxclk_print_field(int rc, uint32_t value)
+{
+    if (rc == 0) {
+        shell_printf("0x%08x", value);
+    } else {
+        shell_puts("(err)     ");
+    }
+}
+
 static void mboxclk_dump_one(uint32_t id)
 {
     uint32_t state = 0xFFFFFFFFu, cfg = 0xFFFFFFFFu, meas = 0xFFFFFFFFu;
@@ -4923,16 +4926,41 @@ static void mboxclk_dump_one(uint32_t id)
     int rc_cfg   = bcm_mailbox_get_clock_rate(id, &cfg);
     int rc_meas  = bcm_mailbox_get_clock_rate_measured(id, &meas);
 
-    shell_puts("  clk ");
-    if (id < 10) { char c = (char)('0' + id); shell_putc(c); shell_puts(" "); }
-    else { char c1 = (char)('0' + (id / 10)); char c2 = (char)('0' + (id % 10)); shell_putc(c1); shell_putc(c2); }
-    shell_puts(" state=");
-    if (rc_state == 0) shell_print_hex32(state); else shell_puts("(err)    ");
+    shell_printf("  clk %2u state=", id);
+    mboxclk_print_field(rc_state, state);
     shell_puts(" cfg=");
-    if (rc_cfg == 0) shell_print_hex32(cfg); else shell_puts("(err)    ");
+    mboxclk_print_field(rc_cfg, cfg);
     shell_puts(" meas=");
-    if (rc_meas == 0) shell_print_hex32(meas); else shell_puts("(err)    ");
+    mboxclk_print_field(rc_meas, meas);
     shell_puts("\r\n");
+}
+
+/*
+ * Strict decimal parser — accepts digit-only input. Returns 0 on
+ * success and writes the parsed value into *out, -1 on any non-digit
+ * character (including empty string and overflow past 32-bit).
+ */
+static int mboxclk_parse_id(const char *s, uint32_t *out)
+{
+    if (s == NULL || *s == '\0') return -1;
+    uint32_t v = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p < '0' || *p > '9') return -1;
+        uint32_t d = (uint32_t)(*p - '0');
+        /* Reject overflow before it produces a wrap-around value. */
+        if (v > 0xFFFFFFFFu / 10u || (v * 10u) > 0xFFFFFFFFu - d) return -1;
+        v = v * 10u + d;
+    }
+    *out = v;
+    return 0;
+}
+
+static void mboxclk_print_usage(void)
+{
+    shell_puts("usage: mboxclk            - dump clocks 1..16\r\n");
+    shell_puts("       mboxclk <id>       - dump one clock id\r\n");
+    shell_puts("       mboxclk <id> on    - enable clock id\r\n");
+    shell_puts("       mboxclk <id> off   - disable clock id\r\n");
 }
 
 int cmd_mboxclk(int argc, char *argv[])
@@ -4944,19 +4972,27 @@ int cmd_mboxclk(int argc, char *argv[])
         }
         return 0;
     }
-    /* Parse id (decimal). */
-    uint32_t id = 0;
-    const char *p = argv[1];
-    while (*p >= '0' && *p <= '9') {
-        id = id * 10u + (uint32_t)(*p - '0');
-        p++;
+    uint32_t id;
+    if (mboxclk_parse_id(argv[1], &id) != 0) {
+        shell_printf("mboxclk: invalid clock id '%s'\r\n", argv[1]);
+        mboxclk_print_usage();
+        return -1;
     }
     if (argc == 2) {
         mboxclk_dump_one(id);
         return 0;
     }
-    /* SET path: argv[2] = on/off. */
-    bool on = (argv[2][0] == 'o' && argv[2][1] == 'n');
+    /* SET path: argv[2] must be exactly "on" or "off". */
+    bool on;
+    if (strcmp(argv[2], "on") == 0) {
+        on = true;
+    } else if (strcmp(argv[2], "off") == 0) {
+        on = false;
+    } else {
+        shell_printf("mboxclk: invalid action '%s' (expected 'on' or 'off')\r\n", argv[2]);
+        mboxclk_print_usage();
+        return -1;
+    }
     shell_puts("Before:\r\n");
     mboxclk_dump_one(id);
     int rc = bcm_mailbox_set_clock_state(id, on);
