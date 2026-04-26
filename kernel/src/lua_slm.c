@@ -29,6 +29,7 @@
 #include "rate_ewma.h"
 #include "gpu_consumer.h"
 #include "admin_telemetry.h"
+#include "model_engine.h"
 #if defined(ENABLE_NETWORKING)
 #include "shell_io_tcp.h"
 #include "tcp_shell_server.h"
@@ -1672,6 +1673,97 @@ static int l_telemetry_stats(lua_State *L) {
     lua_pushinteger(L, (lua_Integer)(st.eviction_published +
                                      st.inference_published));
     lua_setfield(L, -2, "total_published");
+    return 1;
+}
+
+/* ============================================================================
+ * Model engine registry (admin & telemetry suite, M5)
+ * ============================================================================ */
+
+/**
+ * slm.model_engines() - List the registered engines + per-kind status.
+ *
+ * Returns an array-style table:
+ *   { { name=..., kind=..., state="READY"|"NOSYS"|"DISABLED", summary=... }, ... }
+ */
+static int l_model_engines(lua_State *L) {
+    if (!L) return 0;
+    const struct model_engine_info *engines[MODEL_KIND_COUNT];
+    size_t n = model_engine_info_list(engines);
+
+    lua_createtable(L, (int)n, 0);
+    for (size_t i = 0; i < n; i++) {
+        lua_createtable(L, 0, 4);
+        lua_pushstring(L, engines[i]->name);
+        lua_setfield(L, -2, "name");
+        lua_pushinteger(L, (lua_Integer)engines[i]->kind);
+        lua_setfield(L, -2, "kind");
+        const char *state =
+            engines[i]->state == MODEL_ENGINE_READY    ? "READY"
+          : engines[i]->state == MODEL_ENGINE_NOSYS    ? "NOSYS"
+          : engines[i]->state == MODEL_ENGINE_DISABLED ? "DISABLED"
+          :                                              "UNKNOWN";
+        lua_pushstring(L, state);
+        lua_setfield(L, -2, "state");
+        lua_pushstring(L, engines[i]->summary);
+        lua_setfield(L, -2, "summary");
+        lua_rawseti(L, -2, (int)(i + 1));
+    }
+    return 1;
+}
+
+/**
+ * slm.model_meta(name) - Read /mnt/models/<name>.meta and return the
+ * parsed sidecar.
+ *
+ * Returns table on success: { name, kind, size, sha256, uploaded_ts_ms }.
+ * Returns nil + error code on failure.
+ */
+static int l_model_meta(lua_State *L) {
+    if (!L) return 0;
+    const char *name = luaL_checkstring(L, 1);
+
+    struct model_meta meta;
+    int rc = model_meta_read(name, &meta);
+    if (rc != MODEL_LAUNCH_OK) {
+        lua_pushnil(L);
+        lua_pushinteger(L, rc);
+        return 2;
+    }
+
+    lua_createtable(L, 0, 5);
+    lua_pushstring(L, meta.name[0] ? meta.name : name);
+    lua_setfield(L, -2, "name");
+    const char *kn = model_kind_name(meta.kind);
+    lua_pushstring(L, kn ? kn : "");
+    lua_setfield(L, -2, "kind");
+    lua_pushinteger(L, (lua_Integer)meta.size);
+    lua_setfield(L, -2, "size");
+    lua_pushstring(L, meta.sha256);
+    lua_setfield(L, -2, "sha256");
+    lua_pushinteger(L, (lua_Integer)meta.uploaded_ts_ms);
+    lua_setfield(L, -2, "uploaded_ts_ms");
+    return 1;
+}
+
+/**
+ * slm.model_launch(name) - Launch the model registered at /mnt/models/<name>.
+ *
+ * On success returns task_id (integer) + nil error. On failure returns
+ * nil + a negative MODEL_LAUNCH_ERR_* code so callers can distinguish
+ * NOMETA / BADMETA / NOSYS.
+ */
+static int l_model_launch(lua_State *L) {
+    if (!L) return 0;
+    const char *name = luaL_checkstring(L, 1);
+    int task_id = -1;
+    int rc = model_engine_launch(name, &task_id);
+    if (rc != MODEL_LAUNCH_OK) {
+        lua_pushnil(L);
+        lua_pushinteger(L, rc);
+        return 2;
+    }
+    lua_pushinteger(L, task_id);
     return 1;
 }
 
@@ -3837,6 +3929,9 @@ static const luaL_Reg slm_lib_safe[] = {
     {"telemetry_subscribe", l_msg_subscribe},
     {"telemetry_unsubscribe", l_msg_unsubscribe},
     {"telemetry_stats", l_telemetry_stats},
+    /* Admin & telemetry suite (M5) — model engine registry */
+    {"model_engines", l_model_engines},
+    {"model_meta", l_model_meta},
     /* CPU info */
     {"cpu_info", l_cpu_info},
     {"term_size", l_term_size},
@@ -3884,6 +3979,8 @@ static const luaL_Reg slm_lib_admin[] = {
     {"gpu_set_mnist_input_fill", l_gpu_set_mnist_input_fill},
     /* Admin & telemetry suite (M2) — mutates global state */
     {"gpu_use_set", l_gpu_use_set},
+    /* Admin & telemetry suite (M5) — model launch (instantiates) */
+    {"model_launch", l_model_launch},
     /* Scheduler / task mutation */
     {"sched_set_policy", l_sched_set_policy},
     {"task_migrate", l_task_migrate},
