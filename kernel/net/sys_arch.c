@@ -76,21 +76,22 @@ _Static_assert(sizeof(sys_prot_t) == sizeof(irq_flags_t),
  * relies on every lwIP caller running on the same CPU so that
  * task-vs-task and task-vs-IRQ are both serialised.
  *
- * Today every lwIP-touching task is explicitly pinned to CPU 0:
- *   - net_pump          → kernel/src/main.c
- *   - shell             → kernel/src/shell.c
- *   - shell-tcp<N>      → kernel/src/tcp_shell_server.c
- *   - cmd_ping / cmd_telnetd / cmd_net all run on the shell task
+ * Today every lwIP-touching task is explicitly pinned to CPU 0
+ * via either `task_set_affinity(t, 0)` or `task->cpu_affinity = 0`
+ * at task creation (net_pump, shell, shell-tcp<N>); shell-side
+ * lwIP entrypoints (cmd_ping, cmd_telnetd, cmd_net) inherit the
+ * pinning from the shell task. Grep for those two anchors to find
+ * every site if you ever need to extend the set.
  *
  * If a future task creates pcbs or pbufs from another CPU, this
  * protection silently degrades to nothing and the heap race comes
  * back. Add a real cross-CPU lock (or pin the new task to CPU 0)
- * before doing that. The build-time assert below documents the
+ * before doing that. The build-time guard below documents the
  * required lwipopts.h flag. */
-_Static_assert(LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT == 1,
-               "lwIP heap protection requires LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT=1 — "
-               "without it sys_arch_protect() is never called and the heap races. "
-               "See kernel/include/lwipopts.h for the flag and the rationale.");
+#if !defined(LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT) || \
+    (LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT != 1)
+#error "lwIP heap protection requires LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT=1 in kernel/include/lwipopts.h — without it sys_arch_protect() is never called and the heap races. See the lwipopts.h comment for rationale."
+#endif
 
 /**
  * Enter a critical section (protect against concurrent access).
