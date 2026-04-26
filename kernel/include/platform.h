@@ -366,9 +366,10 @@
  * Tegra234 pinmux controllers. One 4-byte register per pad selects
  * the pad's function (GPIO vs SFIO peripheral), pull, drive enable,
  * input receiver, and other pad-level config. Per-pad register
- * offsets come from `tegra194_pingroups[]` in
- * `docs/reference/linux-pinctrl-tegra194.c` (Tegra234 reuses the
- * T194 pad table). Pinmux register layout (per PIN_PINGROUP_ENTRY_Y):
+ * offsets come from `tegra234_groups[]` in
+ * `docs/reference/linux-pinctrl-tegra234.c` — see the per-offset
+ * comment block below for why T194's table is *not* a safe source.
+ * Pinmux register layout (per PIN_PINGROUP_ENTRY_Y):
  *   bits[1:0]  PM       — special-function select (0..3 = SF1..SF4)
  *   bits[3:2]  PUPD     — 0=none, 1=pull-down, 2=pull-up
  *   bit[4]     TRISTATE — 1 = high-Z; must be 0 to drive output
@@ -386,7 +387,7 @@
 
 /*
  * Per-pad pinmux register offsets for the IMX219-related pads (live
- * verification on jetson-nano-1, sourced from pinctrl-tegra194.c).
+ * verification on jetson-nano-1, sourced from pinctrl-tegra234.c).
  * The pad names are misleading — these are conventional UART /
  * SPI pad names that happen to also be routable to GPIO.
  *

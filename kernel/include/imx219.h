@@ -66,10 +66,14 @@
 int imx219_power_on(void);
 
 /*
- * Power the sensor down: drive cam_reset LOW, drive cam_pwr LOW,
- * disable extperiph1 XCLK. Best-effort (errors logged but ignored;
- * we always run the full sequence so a partial failure doesn't leave
- * the sensor in a wedged state).
+ * Power the sensor down: drive cam_reset LOW, then disable
+ * extperiph1 XCLK. cam_pwr (PH.03) is intentionally NOT touched —
+ * see the file-level comment above for the carrier-specific reason
+ * (Linux leaves PH.03 LOW even during streaming, so the camera
+ * rails are always-on and PH.03 controls something else).
+ *
+ * Best-effort: errors logged but ignored, so a partial failure
+ * doesn't leave the sensor in a wedged state.
  */
 void imx219_power_off(void);
 

@@ -26,8 +26,10 @@
 #include "tegra234_clocks.h"
 #include "timer.h"
 
-/* IMX219 datasheet timing (max values). */
-#define IMX219_REGULATOR_SETTLE_US   1000u   /* ~1 ms after AVDD/DVDD up */
+/* IMX219 datasheet timing. The regulator-settle wait used in the
+ * Linux tegracam driver isn't applied here because we deliberately
+ * don't drive cam_pwr (PH.03) — see step 2b in `imx219_power_on`
+ * for the carrier-specific reason. */
 #define IMX219_XCLR_TO_I2C_READY_US  6200u   /* ≥6.2 ms after XCLR HIGH */
 
 /* IMX219 XCLK target. The L4T DT for the Orin Nano IMX219-A overlay

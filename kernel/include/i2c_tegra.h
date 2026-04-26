@@ -49,11 +49,14 @@
  *              public call. Required because each call mutates
  *              controller state (FIFOs, INT_STATUS, CNFG) and any
  *              two concurrent transactions on the same bus would
- *              race. Held across the up-to-100 ms packet poll —
- *              long but acceptable for a polled driver, and the
- *              alternative (releasing across the wait) would
- *              reintroduce the race. BPMP IPC called during init
- *              is itself lock-free polled, so no deadlock window.
+ *              race. Held across the up-to-100 ms packet poll AND
+ *              the up-to-1 s I2C_CONFIG_LOAD self-clear poll inside
+ *              tegra_i2c_init — long but acceptable for a polled
+ *              driver, and the alternative (releasing across either
+ *              wait) would reintroduce the race. BPMP IPC called
+ *              during init is itself lock-free polled and the
+ *              CONFIG_LOAD poll only re-reads a single MMIO
+ *              register, so no deadlock window in either case.
  *
  *              Acquired with `spin_lock_irqsave` so IRQs stay
  *              disabled across the poll — fine today because the

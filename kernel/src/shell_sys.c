@@ -5382,6 +5382,12 @@ int cmd_imx219(int argc, char *argv[])
                     (unsigned)chip_id);
         if (read_rc == 0 && chip_id == 0x0219u) {
             uart_puts("  *** IMX219 detected — Hardware Task 2 GREEN ***\r\n");
+        } else {
+            uart_printf("  *** Re-read CHIP_ID failed: read_rc=%d, "
+                        "chip_id=0x%04x (expected 0x0219). The sensor "
+                        "responded to the power-up read but went away "
+                        "between probes — check XCLK / mux state. ***\r\n",
+                        read_rc, (unsigned)chip_id);
         }
     } else if (rc == -2) {
         uart_puts("  *** Power-up succeeded but CHIP_ID read failed —    ***\r\n");
