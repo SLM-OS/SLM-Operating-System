@@ -13,8 +13,7 @@
 -- Keys:
 --   1-7    switch page
 --   r      force refresh
---   q      quit
---   ?      help (overlay)
+--   q      quit (also Q, Ctrl-C)
 --
 -- Refresh model: 1 Hz background loop using slm.sleep(1000) between
 -- paints; key reads use slm.try_getc() so the loop is non-blocking.
