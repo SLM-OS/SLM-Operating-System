@@ -27,6 +27,7 @@
 #include "string.h"
 #include "latency_hist.h"
 #include "rate_ewma.h"
+#include "gpu_consumer.h"
 #if defined(ENABLE_NETWORKING)
 #include "shell_io_tcp.h"
 #include "tcp_shell_server.h"
@@ -1493,6 +1494,93 @@ static int l_latency_histogram(lua_State *L) {
     }
 
     lua_pushnil(L);
+    return 1;
+}
+
+/* ============================================================================
+ * GPU consumer toggles (admin & telemetry suite, M2)
+ * ============================================================================ */
+
+/**
+ * slm.gpu_use_set(consumer, enabled) - Enable or disable GPU dispatch for a consumer.
+ *
+ * @consumer: "sched" | "eviction" | "inference"
+ * @enabled:  bool
+ *
+ * Returns (true) on success, or (false, "reason") on rejection. Disable
+ * (enabled=false) always succeeds.
+ */
+static int l_gpu_use_set(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    bool enabled = lua_toboolean(L, 2);
+
+    enum gpu_consumer c = gpu_consumer_from_name(name);
+    if (c == GPU_CONSUMER_COUNT) {
+        lua_pushboolean(L, 0);
+        lua_pushfstring(L, "unknown consumer '%s'", name);
+        return 2;
+    }
+
+    const char *reason = NULL;
+    int rc = gpu_consumer_set(c, enabled, &reason);
+    if (rc != 0) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, reason ? reason : "rejected");
+        return 2;
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+/**
+ * slm.gpu_use_get(consumer) - Read the current toggle state.
+ *
+ * Returns bool (or nil if `consumer` is unknown).
+ */
+static int l_gpu_use_get(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    enum gpu_consumer c = gpu_consumer_from_name(name);
+    if (c == GPU_CONSUMER_COUNT) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushboolean(L, gpu_consumer_enabled(c));
+    return 1;
+}
+
+/**
+ * slm.gpu_use_status() - Tabular status of all three consumers.
+ *
+ * Returns table:
+ *   { sched=bool, eviction=bool, inference=bool, gpu_ready=bool,
+ *     last_change_ms = { sched=N, eviction=N, inference=N } }
+ */
+static int l_gpu_use_status(lua_State *L) {
+    if (!L) return 0;
+    struct gpu_consumer_status st;
+    gpu_consumer_status_get(&st);
+
+    lua_createtable(L, 0, 5);
+
+    lua_pushboolean(L, st.sched);
+    lua_setfield(L, -2, "sched");
+    lua_pushboolean(L, st.eviction);
+    lua_setfield(L, -2, "eviction");
+    lua_pushboolean(L, st.inference);
+    lua_setfield(L, -2, "inference");
+    lua_pushboolean(L, st.gpu_ready);
+    lua_setfield(L, -2, "gpu_ready");
+
+    lua_createtable(L, 0, 3);
+    lua_pushinteger(L, (lua_Integer)st.sched_change_ms);
+    lua_setfield(L, -2, "sched");
+    lua_pushinteger(L, (lua_Integer)st.eviction_change_ms);
+    lua_setfield(L, -2, "eviction");
+    lua_pushinteger(L, (lua_Integer)st.inference_change_ms);
+    lua_setfield(L, -2, "inference");
+    lua_setfield(L, -2, "last_change_ms");
+
     return 1;
 }
 
@@ -3560,6 +3648,9 @@ static const luaL_Reg slm_lib_safe[] = {
     /* Admin & telemetry suite (M1) */
     {"sched_decision_rate", l_sched_decision_rate},
     {"latency_histogram", l_latency_histogram},
+    /* Admin & telemetry suite (M2) — read-only */
+    {"gpu_use_get", l_gpu_use_get},
+    {"gpu_use_status", l_gpu_use_status},
     /* CPU info */
     {"cpu_info", l_cpu_info},
     {"term_size", l_term_size},
@@ -3605,6 +3696,8 @@ static const luaL_Reg slm_lib_admin[] = {
     {"gpu_run_mnist", l_gpu_run_mnist},
     {"gpu_set_mnist_input", l_gpu_set_mnist_input},
     {"gpu_set_mnist_input_fill", l_gpu_set_mnist_input_fill},
+    /* Admin & telemetry suite (M2) — mutates global state */
+    {"gpu_use_set", l_gpu_use_set},
     /* Scheduler / task mutation */
     {"sched_set_policy", l_sched_set_policy},
     {"task_migrate", l_task_migrate},

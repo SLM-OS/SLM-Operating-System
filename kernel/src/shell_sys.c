@@ -11,6 +11,7 @@
 #include "sched.h"
 #include "sched_policy.h"
 #include "sched_trace.h"
+#include "gpu_consumer.h"
 #ifdef CONFIG_AI_SCHEDULER
 #include "ai_types.h"
 #include "runtime_model.h"
@@ -2638,8 +2639,73 @@ int cmd_xhci(int argc, char *argv[])
  *   gpu read <hex-offset>   Read 32-bit BAR0 register (Jetson-only —
  *                           uses the fixed 0x17000000 GPU MMIO base)
  */
+/* gpu use <consumer> <on|off|status>
+ *
+ * Per-consumer GPU enable toggle (admin & telemetry suite, M2). M3+
+ * unlocks each consumer in turn — until then `on` returns the
+ * configured rejection reason. `off` always succeeds. `status` (and
+ * the bare `gpu use`) prints a tabular summary of all three flags. */
+static int cmd_gpu_use(int argc, char *argv[])
+{
+    if (argc < 3 || strcmp(argv[2], "status") == 0) {
+        struct gpu_consumer_status st;
+        gpu_consumer_status_get(&st);
+        shell_puts("GPU consumer toggles:\r\n");
+        shell_printf("  gpu_ready    %s\r\n", st.gpu_ready ? "yes" : "no");
+        shell_printf("  sched        %s   (last change %lu ms)\r\n",
+                     st.sched ? "ON " : "off",
+                     (unsigned long)st.sched_change_ms);
+        shell_printf("  eviction     %s   (last change %lu ms)\r\n",
+                     st.eviction ? "ON " : "off",
+                     (unsigned long)st.eviction_change_ms);
+        shell_printf("  inference    %s   (last change %lu ms)\r\n",
+                     st.inference ? "ON " : "off",
+                     (unsigned long)st.inference_change_ms);
+        return 0;
+    }
+
+    if (argc < 4) {
+        shell_puts("usage: gpu use <sched|eviction|inference> <on|off>\r\n");
+        shell_puts("       gpu use status\r\n");
+        return -1;
+    }
+
+    enum gpu_consumer c = gpu_consumer_from_name(argv[2]);
+    if (c == GPU_CONSUMER_COUNT) {
+        shell_printf("gpu use: unknown consumer '%s' (want sched|eviction|inference)\r\n",
+                     argv[2]);
+        return -1;
+    }
+
+    bool enabled;
+    if (strcmp(argv[3], "on") == 0) {
+        enabled = true;
+    } else if (strcmp(argv[3], "off") == 0) {
+        enabled = false;
+    } else {
+        shell_printf("gpu use: unknown action '%s' (want on|off)\r\n", argv[3]);
+        return -1;
+    }
+
+    const char *reason = NULL;
+    int rc = gpu_consumer_set(c, enabled, &reason);
+    if (rc != 0) {
+        shell_printf("gpu use %s %s: rejected (%s)\r\n",
+                     argv[2], argv[3],
+                     reason ? reason : "unknown reason");
+        return rc;
+    }
+
+    shell_printf("gpu use %s: %s\r\n", argv[2], enabled ? "ON" : "off");
+    return 0;
+}
+
 int cmd_gpu(int argc, char *argv[])
 {
+    if (argc >= 2 && strcmp(argv[1], "use") == 0) {
+        return cmd_gpu_use(argc, argv);
+    }
+
     if (argc >= 2 && strcmp(argv[1], "read") == 0) {
 #if defined(PLATFORM_JETSON_ORIN_NANO)
         if (argc < 3) {

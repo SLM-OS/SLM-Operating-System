@@ -15,6 +15,7 @@
 #define SCHED_POLICY_H
 
 #include "task.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Maximum length of a policy name (including null terminator) */
@@ -71,6 +72,21 @@ struct sched_policy_ops {
      * @cpu: The CPU that received the timer tick
      */
     void (*tick)(uint32_t cpu);
+
+    /*
+     * Does this policy expose a GPU-accelerated inference backend?
+     *
+     * Read by `gpu_consumer_set(GPU_CONSUMER_SCHED, true)` to decide
+     * whether the toggle is allowed. False (the default for
+     * zero-initialized declarations) means "this policy has no GPU
+     * backend wired" — flipping the toggle ON is rejected with
+     * GPU_CONSUMER_ERR_NOTSUPP and a human-readable reason.
+     *
+     * No current policy declares true (M2). Kept here so M3+ can
+     * flip the field on a per-policy basis without touching the
+     * `gpu_consumer` validation logic.
+     */
+    bool has_gpu_backend;
 };
 
 /*
