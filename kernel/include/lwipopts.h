@@ -45,6 +45,21 @@
 /* Memory alignment (8-byte for AArch64) */
 #define MEM_ALIGNMENT               8
 
+/* Route the lwIP heap protection through SYS_ARCH_PROTECT (irq_save in
+ * sys_arch.c) instead of the sys_mutex_t path. With NO_SYS=1 the
+ * sys_mutex_* macros expand to empty no-ops (lwip/sys.h), so the default
+ * setting of 0 leaves `mem_malloc/mem_free/mem_trim` completely
+ * unprotected — every shell-task lwIP call (cmd_ping → raw_sendto,
+ * cmd_telnetd → tcp_listen/tcp_close) races against the net_pump task
+ * that drives `tcp_input`, `pbuf_alloc`, and the timer wheel. Setting
+ * this to 1 makes lwIP wrap each heap critical section in
+ * SYS_ARCH_PROTECT → sys_arch_protect() → irq_save(), which serialises
+ * task context against task context AND task against IRQ on the local
+ * CPU. Surfaced as `lwIP ASSERT: invalid next ptr at .../mem.c:790`
+ * after PR #430 bumped the pbuf and TCP segment pools — bigger pools
+ * meant more heap traffic which widened the race window. */
+#define LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT 1
+
 /* Allow sending without copying (zero-copy TX) */
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
 

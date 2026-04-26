@@ -115,8 +115,13 @@ uint32_t lwip_rand_slm(void);
 /* System Protection (NO_SYS mode)                                             */
 /* -------------------------------------------------------------------------- */
 
-/* Protection type for critical sections - not used in NO_SYS=1 mode
- * but must be defined for lwIP sys.h */
-typedef int sys_prot_t;
+/* Protection token for lwIP critical sections.
+ *
+ * `sys_arch_protect()` returns `irq_save()`'s value; on AArch64 that
+ * is the full 64-bit DAIF and on x86-64 it is the full 64-bit RFLAGS.
+ * Match `irq_flags_t` (uint64_t) so the round-trip through
+ * `sys_arch_unprotect()` carries every bit verbatim — no narrowing
+ * cast that future register extensions could quietly truncate. */
+typedef uint64_t sys_prot_t;
 
 #endif /* ARCH_CC_H */
