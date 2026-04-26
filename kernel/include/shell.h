@@ -68,6 +68,11 @@ typedef struct {
     shell_handler_t handler;            /* Handler function */
     const char *help;                   /* Short help text */
     bool mutates;                       /* True if serialization required */
+    /* REQUIRED — explicit `.category = SHELL_CAT_<X>` is mandatory.
+     * A 4-field positional initializer or designated init that omits
+     * .category will silently zero-init this to SHELL_CAT_SHELL (the
+     * first enum value) and the command will appear under the Shell
+     * heading in `help` regardless of where it actually belongs. */
     shell_cmd_category_t category;      /* Grouping for `help` output */
 } shell_cmd_t;
 

@@ -23,11 +23,14 @@
  * build command strings for shell_execute. */
 extern int snprintf(char *, size_t, const char *, ...);
 
-/* Defined in kernel/src/shell.c. Used by the help-output convention test
- * (test_builtin_commands_grouped_and_sorted) to walk the source-side
- * registration table. */
+/* Defined in kernel/src/shell.c. Used by the help-output convention tests
+ * (test_builtin_commands_grouped_and_sorted +
+ * test_external_commands_categories_in_range) to walk the source-side
+ * registration table and the runtime-registered external table. */
 extern const shell_cmd_t builtin_commands[];
 extern const int NUM_BUILTIN_COMMANDS;
+extern shell_cmd_t external_commands[];
+extern int num_external_commands;
 
 /* ============================================================================
  * Test Helpers
@@ -2407,6 +2410,35 @@ static void test_builtin_commands_grouped_and_sorted(void)
 }
 
 /*
+ * Convention test (externals): every shell_register_command() entry
+ * must have a `.category` value in the valid range.
+ *
+ * Why range-only (not grouping + alphabetization)?
+ *   - external_commands[] is a single flat array filled by
+ *     shell_register_command() calls scattered across many .c files
+ *     (lua_shell.c, net_shell.c, kernel_cmd.c, hailo_shell.c, ...).
+ *     Source-array provenance is lost at flatten time, so the
+ *     "grouped by category, alphabetized within" rule that applies
+ *     within each per-file array is not observable here.
+ *   - The thing this test does catch is the partial-init foot-gun:
+ *     a `shell_cmd_t` literal that omits `.category` zero-initialises
+ *     it to SHELL_CAT_SHELL. The struct-level comment in shell.h
+ *     warns about it; this test fires when the warning is missed and
+ *     a forgotten field ends up out of range (e.g. set to SHELL_CAT_COUNT
+ *     by a typo).
+ */
+static void test_external_commands_categories_in_range(void)
+{
+    for (int i = 0; i < num_external_commands; i++) {
+        const shell_cmd_t *cmd = &external_commands[i];
+        TEST_ASSERT_MESSAGE((unsigned)cmd->category < SHELL_CAT_COUNT,
+                            "external command category out of range — "
+                            "every shell_register_command() entry must "
+                            "set .category to a SHELL_CAT_* enum value");
+    }
+}
+
+/*
  * Test: help files exist in /mnt/files/help/ directory.
  */
 static void test_shell_help_files_exist(void)
@@ -3602,6 +3634,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_help_valid);
     RUN_TEST(test_shell_cmd_help_unknown);
     RUN_TEST(test_builtin_commands_grouped_and_sorted);
+    RUN_TEST(test_external_commands_categories_in_range);
     RUN_TEST(test_shell_help_files_exist);
     RUN_TEST(test_shell_help_file_content);
     RUN_TEST(test_shell_help_dir_listing);

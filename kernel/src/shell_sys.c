@@ -92,15 +92,27 @@ int cmd_help(int argc, char *argv[])
          * means the same category can pull from both. */
         const shell_cmd_t *gathered[HELP_GATHER_MAX];
         int n = 0;
+        bool truncated = false;
 
-        for (int i = 0; i < NUM_BUILTIN_COMMANDS && n < HELP_GATHER_MAX; i++) {
+        /* Cast to (int) on the enum side: under -Werror=sign-compare,
+         * GCC treats unscoped enums as unsigned and rejects an enum-vs-
+         * `int cat` comparison without an explicit conversion. */
+        for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
             if ((int)builtin_commands[i].category == cat) {
-                gathered[n++] = &builtin_commands[i];
+                if (n < HELP_GATHER_MAX) {
+                    gathered[n++] = &builtin_commands[i];
+                } else {
+                    truncated = true;
+                }
             }
         }
-        for (int i = 0; i < num_external_commands && n < HELP_GATHER_MAX; i++) {
+        for (int i = 0; i < num_external_commands; i++) {
             if ((int)external_commands[i].category == cat) {
-                gathered[n++] = &external_commands[i];
+                if (n < HELP_GATHER_MAX) {
+                    gathered[n++] = &external_commands[i];
+                } else {
+                    truncated = true;
+                }
             }
         }
 
@@ -123,6 +135,14 @@ int cmd_help(int argc, char *argv[])
         shell_printf("%s:\r\n", shell_cat_labels[cat]);
         for (int i = 0; i < n; i++) {
             shell_printf("  %-12s %s\r\n", gathered[i]->name, gathered[i]->help);
+        }
+        if (truncated) {
+            /* Help output should never silently swallow registered commands.
+             * Surface this loudly so a future maintainer increasing the
+             * builtin/external command count sees the cap. */
+            shell_printf("  [warning: this category exceeded HELP_GATHER_MAX=%d "
+                         "— increase the cap in shell_sys.c]\r\n",
+                         HELP_GATHER_MAX);
         }
     }
 
