@@ -139,6 +139,11 @@ static void test_tag_ids_match_pi_firmware_subset(void)
     TEST_ASSERT_EQUAL_HEX32(0x00038064u, BCM_TAG_SET_REBOOT_FLAGS);
     TEST_ASSERT_EQUAL_HEX32(0x00030048u, BCM_TAG_NOTIFY_REBOOT);
     TEST_ASSERT_EQUAL_HEX32(0x00028001u, BCM_TAG_SET_POWER_STATE);
+    TEST_ASSERT_EQUAL_HEX32(0x00030001u, BCM_TAG_GET_CLOCK_STATE);
+    TEST_ASSERT_EQUAL_HEX32(0x00030002u, BCM_TAG_GET_CLOCK_RATE);
+    TEST_ASSERT_EQUAL_HEX32(0x00038001u, BCM_TAG_SET_CLOCK_STATE);
+    TEST_ASSERT_EQUAL_HEX32(0x00038002u, BCM_TAG_SET_CLOCK_RATE);
+    TEST_ASSERT_EQUAL_HEX32(0x00030047u, BCM_TAG_GET_CLOCK_RATE_MEASURED);
 }
 
 static void test_set_power_state_layout_on_with_wait(void)
@@ -215,6 +220,80 @@ static void test_set_clock_state_clock_ids_pinned(void)
     TEST_ASSERT_EQUAL_HEX32(2u, BCM_CLOCK_STATE_NO_DEVICE);
 }
 
+static void test_set_clock_rate_layout_emmc2_200mhz(void)
+{
+    /* SET_CLOCK_RATE is the only tag with a 12-byte (3-word)
+     * payload, which forces the 12-word property buffer envelope.
+     * Pin the layout so a future buffer-size shrink doesn't quietly
+     * truncate the end-tag again (the original 8-word envelope
+     * could not fit one). */
+    uint32_t buf[BCM_PROP_BUF_WORDS] = {0};
+
+    bcm_mailbox_build_set_clock_rate(buf, BCM_CLOCK_EMMC2,
+                                     /*rate_hz=*/200000000u,
+                                     /*skip_setting_turbo=*/0u);
+
+    TEST_ASSERT_EQUAL_HEX32(48u,                       buf[0]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_REQUEST,          buf[1]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_TAG_SET_CLOCK_RATE,    buf[2]);
+    TEST_ASSERT_EQUAL_HEX32(12u,                       buf[3]);  /* val_buf_sz */
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[4]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_EMMC2,           buf[5]);
+    TEST_ASSERT_EQUAL_HEX32(200000000u,                buf[6]);
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[7]);  /* skip_setting_turbo */
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,          buf[8]);
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[9]);
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[10]);
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[11]);
+}
+
+/* Compact factory for the three GET_CLOCK_* builders — they share
+ * an identical wire layout (8-byte payload, end_tag at [7]). The
+ * helper writes the tag id as parameter so the test can iterate. */
+static void verify_get_clock_layout(uint32_t expected_tag_id,
+                                    void (*build_fn)(uint32_t buf[BCM_PROP_BUF_WORDS],
+                                                     uint32_t clock_id))
+{
+    uint32_t buf[BCM_PROP_BUF_WORDS] = {0};
+    build_fn(buf, BCM_CLOCK_EMMC2);
+
+    TEST_ASSERT_EQUAL_HEX32(32u,                buf[0]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_REQUEST,   buf[1]);
+    TEST_ASSERT_EQUAL_HEX32(expected_tag_id,    buf[2]);
+    TEST_ASSERT_EQUAL_HEX32(8u,                 buf[3]);  /* val_buf_sz */
+    TEST_ASSERT_EQUAL_HEX32(0u,                 buf[4]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_EMMC2,    buf[5]);
+    TEST_ASSERT_EQUAL_HEX32(0u,                 buf[6]);  /* response slot */
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,   buf[7]);
+}
+
+static void test_get_clock_state_layout(void)
+{
+    verify_get_clock_layout(BCM_TAG_GET_CLOCK_STATE,
+                            bcm_mailbox_build_get_clock_state);
+}
+
+static void test_get_clock_rate_layout(void)
+{
+    verify_get_clock_layout(BCM_TAG_GET_CLOCK_RATE,
+                            bcm_mailbox_build_get_clock_rate);
+}
+
+static void test_get_clock_rate_measured_layout(void)
+{
+    verify_get_clock_layout(BCM_TAG_GET_CLOCK_RATE_MEASURED,
+                            bcm_mailbox_build_get_clock_rate_measured);
+}
+
+static void test_buffer_word_count_is_12(void)
+{
+    /* The 12-word buffer envelope is load-bearing for the
+     * SET_CLOCK_RATE end_tag. If a future refactor shrinks
+     * BCM_PROP_BUF_WORDS, the build helper would silently truncate
+     * the end_tag and Pi firmware would read tail garbage. */
+    TEST_ASSERT_EQUAL_INT(12, BCM_PROP_BUF_WORDS);
+}
+
 int test_suite_bcm_mailbox(void)
 {
     UnityBegin("BCM Mailbox property-tag buffer tests");
@@ -231,6 +310,11 @@ int test_suite_bcm_mailbox(void)
     RUN_TEST(test_set_power_state_state_bits_pinned);
     RUN_TEST(test_set_clock_state_layout_emmc2_on);
     RUN_TEST(test_set_clock_state_clock_ids_pinned);
+    RUN_TEST(test_set_clock_rate_layout_emmc2_200mhz);
+    RUN_TEST(test_get_clock_state_layout);
+    RUN_TEST(test_get_clock_rate_layout);
+    RUN_TEST(test_get_clock_rate_measured_layout);
+    RUN_TEST(test_buffer_word_count_is_12);
 
     return UnityEnd();
 }

@@ -96,11 +96,13 @@ int bcm_mailbox_notify_reboot(void);
  * are stable, which defeats the purpose of using the mailbox to gate
  * subsequent MMIO.
  *
- * Used by `sdhci_create_bcm2712()` to power the EMMC2 controller
- * before its first register touch (issue #414 — Pi firmware does
- * NOT auto-power EMMC2 for SLM-OS bare-metal handoff the way it
- * does for a Linux launch). `device_id` constants in
- * `bcm_mailbox_proto.h` (e.g. `BCM_POWER_DEVICE_SDCARD`).
+ * **No production caller today.** Initially used in #414 to bring up
+ * EMMC2, but Pi 5 firmware has no SD/EMMC entry in its power-domain
+ * id table — the right knob there turned out to be `SET_CLOCK_STATE`.
+ * Retained as the canonical helper for future peripherals that DO
+ * appear in the firmware's power-domain table (USB HCD, I²C, SPI,
+ * etc.). `device_id` constants in `bcm_mailbox_proto.h`
+ * (e.g. `BCM_POWER_DEVICE_SDCARD`).
  *
  * Returns 0 on success, MBOX_E_GENERIC on transport / protocol
  * failure, MBOX_E_TAG_UNSUPPORTED if the EEPROM doesn't implement
@@ -140,9 +142,12 @@ int bcm_mailbox_set_clock_rate(uint32_t clock_id, uint32_t requested_hz,
 
 /* Diagnostic queries — return current firmware-reported state for a
  * clock id. Used during #414 investigation to confirm whether the
- * firmware actually enabled a clock after SET_CLOCK_STATE. The
- * GET_CLOCK_RATE_MEASURED variant returns the measured rate
- * (vs. the configured target) and is 0 when the clock isn't running. */
+ * firmware actually enabled a clock after SET_CLOCK_STATE; intended
+ * to back a future `clkdiag` shell command. **No production caller
+ * today** but kept as the canonical helpers so the next driver
+ * doesn't have to re-derive them. The GET_CLOCK_RATE_MEASURED
+ * variant returns the measured rate (vs. the configured target) and
+ * is 0 when the clock isn't running. */
 int bcm_mailbox_get_clock_state(uint32_t clock_id, uint32_t *state_out);
 int bcm_mailbox_get_clock_rate(uint32_t clock_id, uint32_t *hz_out);
 int bcm_mailbox_get_clock_rate_measured(uint32_t clock_id, uint32_t *hz_out);

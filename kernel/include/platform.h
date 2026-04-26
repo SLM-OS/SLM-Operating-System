@@ -527,18 +527,53 @@
  * is needed. */
 #define BCM2712_EMMC2_CFG_BASE  (BCM2712_EMMC2_BASE + 0x400UL)
 
-/* SDIO1 bus-isolation gate — the SDIO1 node in `bcm2712.dtsi` declares
- * FOUR `reg` banks (host, cfg, busisol, lcpll). The third bank,
- * "busisol" at SoC-bus 0x015040b0 (4 bytes) → CPU phys
- * 0x10_015040B0, is the bus-isolation control: until it's deasserted,
- * the AXI fabric does not route reads/writes to the SDHCI host
- * registers. Writing 0 deasserts isolation. This is the missing
- * piece for #414 — Pi firmware leaves this asserted at SLM-OS
- * bare-metal handoff, so any `readl` to BCM2712_EMMC2_BASE hangs
- * the AXI fabric. The 2 MB block containing this address
- * (0x1001400000) is already mapped via vmm_setup_platform for the
- * `bcm_reset` controller. */
+/* SDIO1 bus-isolation register — the SDIO1 node in `bcm2712.dtsi`
+ * declares FOUR `reg` banks (host, cfg, busisol, lcpll). The third
+ * bank, "busisol" at SoC-bus 0x015040b0 (4 bytes) → CPU phys
+ * 0x10_015040B0, is a strap register that controls SD-Express PCIe
+ * sideband isolation + SD pin tri-state — see Linux's
+ * `bcm2712_init_sd_express` in `sdhci-brcmstb.c` (the only Linux
+ * site that touches it).
+ *
+ * EMPIRICAL on the Pi 5 lab fixture: firmware leaves this register
+ * at 0x00006001 at SLM-OS handoff. Per the SD-Express init code,
+ * bits 13:14 (mask 0x6000) are PCIe-sideband isolation: SET =
+ * SD-card mode, CLEARED = PCIe-sideband mode. Bit 0 is the SD-clock
+ * isolation enable. Together 0x6001 is the correct "SD-card mode,
+ * controller live" state — the firmware-left value is what we want.
+ *
+ * **DO NOT WRITE TO THIS REGISTER from the SD-card driver path.**
+ * Clearing 0x6000 switches the controller to PCIe-sideband mode,
+ * which is the wrong direction for normal SD operation. The
+ * constant is exposed only so future SD-Express support can use it
+ * with the correct Linux-style sequence; the SDHCI driver does NOT
+ * touch it. The 2 MB block containing this address (0x1001400000)
+ * is already mapped via `vmm_setup_platform` for the `bcm_reset`
+ * controller, so reads of the firmware-left value (for diagnostic
+ * purposes) are safe. */
 #define BCM2712_SDIO1_BUSISOL   0x10015040B0UL
+
+/* BCM2712 AON GPIO bank 0 base — `gio_aon@7d517c00` per
+ * `bcm2712.dtsi`, mapped through the SoC ranges to CPU phys
+ * 0x107D517C00. The 2 MB block containing this address is already
+ * covered by `vmm_setup_platform` (used by the ACT LED on pin 9 in
+ * `kernel/src/main.c`, and by the SD card VCC + IO voltage
+ * regulators on pins 4 and 3 from `kernel/drivers/sdhci.c`).
+ *
+ * Bank 0 register layout matches Linux's
+ * `drivers/gpio/gpio-brcmstb.c`:
+ *   +0x00 ODEN   — open-drain enable (1 = open-drain; we want push-pull)
+ *   +0x04 DATA   — read/write pin levels
+ *   +0x08 IODIR  — 0 = output, 1 = input (brcmstb-specific; inverse
+ *                  of the legacy bcm2835 GPIO convention)
+ *
+ * SD-card pin assignments (from `bcm2712-rpi-5-b.dts`):
+ *   bit 3  sd_io_1v8_reg (0 = 3.3 V mode, 1 = 1.8 V mode)
+ *   bit 4  sd_vcc_reg    (1 = SD card VCC on, 0 = off)
+ *   bit 9  ACT LED */
+#define BCM2712_AON_GPIO_BASE   0x107D517C00UL
+#define BCM2712_AON_GPIO_DATA   (BCM2712_AON_GPIO_BASE + 0x04UL)
+#define BCM2712_AON_GPIO_IODIR  (BCM2712_AON_GPIO_BASE + 0x08UL)
 
 /* GPU bus-address encoding on Pi 5 matches the legacy VideoCore
  * convention — the VideoCore sees ARM DRAM via a 1 GB alias at

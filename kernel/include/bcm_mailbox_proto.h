@@ -82,19 +82,41 @@
 #define BCM_CLOCK_EMMC               1u
 #define BCM_CLOCK_EMMC2              12u
 
-/* SET_CLOCK_STATE state-word bits. Same shape as SET_POWER_STATE —
- * bit 0 is the requested on/off, bit 1 is "block until transition
- * completes". A response with bit 1 set means "device does not
- * exist" (firmware doesn't know that clock id). */
+/* SET_CLOCK_STATE state-word bits. Note bit-1's semantics are
+ * direction-dependent:
+ *   request:  bit 1 = WAIT (block until transition completes)
+ *   response: bit 1 = "no such clock id"
+ * Bit 0 is the on/off bit in both directions. The mailbox helpers
+ * use BCM_POWER_STATE_WAIT in the request and BCM_CLOCK_STATE_NO_DEVICE
+ * when reading the response — same numeric value, different intent. */
 #define BCM_CLOCK_STATE_OFF          0u
 #define BCM_CLOCK_STATE_ON           (1u << 0)
 #define BCM_CLOCK_STATE_NO_DEVICE    (1u << 1)
 
-/* Buffer size used by all helpers in this header. The transport in
- * bcm_mailbox.c uses a fixed 32-byte property buffer, so the helpers
- * size their content to fit within that envelope (with end_tag
- * placed correctly and any unused tail words zeroed). */
-#define BCM_PROP_BUF_WORDS           8u
+/* Buffer size used by all helpers in this header. The 5-word header
+ * (total_size, request, tag_id, val_buf_sz, tag_code) plus the
+ * largest single-tag payload we issue (SET_CLOCK_RATE: 12 bytes =
+ * 3 words) plus the trailing end_tag word adds up to 9 words; round
+ * up to 12 (48 bytes) for 16-byte alignment of `total_size`, which
+ * the BCM property-channel protocol requires. The matching static
+ * `prop_buf` in bcm_mailbox.c is sized to BCM_PROP_BUF_WORDS as well. */
+#define BCM_PROP_BUF_WORDS           12u
+
+/* Helper for builders: zero the 4 tail words past the canonical
+ * 32-byte buffer envelope. Smaller-payload tags only fill `buf[0..7]`;
+ * this clears `buf[8..11]` so the resulting buffer is fully defined
+ * and safe to compare byte-for-byte (`test_helpers_are_idempotent`
+ * relies on this) and is also safe to send to firmware regardless of
+ * what `total_size` declares — the firmware reads only up to that
+ * many bytes, but defined zeros make any future "raise total_size"
+ * change a one-line edit. */
+static inline void bcm_mailbox_pad_tail(uint32_t buf[BCM_PROP_BUF_WORDS])
+{
+    buf[8]  = 0u;
+    buf[9]  = 0u;
+    buf[10] = 0u;
+    buf[11] = 0u;
+}
 
 /*
  * SET_REBOOT_FLAGS (tag 0x00038064): set the firmware reboot-flags
@@ -126,6 +148,7 @@ static inline void bcm_mailbox_build_set_reboot_flags(uint32_t buf[BCM_PROP_BUF_
     buf[5] = flags;
     buf[6] = BCM_PROP_TAG_END;
     buf[7] = 0u;
+    bcm_mailbox_pad_tail(buf);
 }
 
 /*
@@ -154,6 +177,7 @@ static inline void bcm_mailbox_build_notify_reboot(uint32_t buf[BCM_PROP_BUF_WOR
     buf[5] = BCM_PROP_TAG_END;
     buf[6] = 0u;
     buf[7] = 0u;
+    bcm_mailbox_pad_tail(buf);
 }
 
 /*
@@ -190,6 +214,7 @@ static inline void bcm_mailbox_build_set_power_state(uint32_t buf[BCM_PROP_BUF_W
     buf[5] = device_id;
     buf[6] = state;
     buf[7] = BCM_PROP_TAG_END;
+    bcm_mailbox_pad_tail(buf);
 }
 
 /*
@@ -218,6 +243,7 @@ static inline void bcm_mailbox_build_set_clock_state(uint32_t buf[BCM_PROP_BUF_W
     buf[5] = clock_id;
     buf[6] = state;
     buf[7] = BCM_PROP_TAG_END;
+    bcm_mailbox_pad_tail(buf);
 }
 
 /*
@@ -226,24 +252,25 @@ static inline void bcm_mailbox_build_set_clock_state(uint32_t buf[BCM_PROP_BUF_W
  *
  * Linux's brcmstb sdhci driver pulls clock-frequency from device-tree
  * (or, for the bcm2712 fixed-clock, gets 200 MHz back from
- * `clk_get_rate`) and sends it to the controller via this tag.
- * On Pi 5 EMMC2, 200 MHz is the canonical value (matches the
+ * `clk_get_rate`) and sends it to the controller via this tag. On
+ * Pi 5 EMMC2, 200 MHz is the canonical value (matches the
  * `bcm2712.dtsi` `clk_emmc2: clock-frequency = <200000000>` entry).
  *
- * The 8-word property buffer fits the 12-byte payload + end_tag with
- * exactly one tail word free; layout:
+ * Buffer layout (12 words = 48 bytes total, all firmware-visible):
+ *   [0] total_size  = 48
+ *   [1] request     = 0
+ *   [2] tag_id      = 0x00038002
+ *   [3] val_buf_sz  = 12  (3 payload words)
+ *   [4] tag_code    = 0
  *   [5] clock_id
  *   [6] rate (Hz)
  *   [7] skip_setting_turbo  (0 = honor turbo policy)
- *   [...] end_tag overflows the 8-word buffer envelope, so this
- *         helper does NOT write an end_tag — callers that batch
- *         multiple tags must use a larger buffer. For the SLM-OS
- *         single-tag transport this is fine because the response
- *         field comes from word 4, not from the tail.
+ *   [8] end_tag     = 0
+ *   [9..11] tail pad = 0
  *
- * In practice the Pi firmware tolerates a missing end_tag when the
- * declared total_size matches the populated payload exactly; any
- * tail bytes past `[7]` are not part of this 32-byte buffer at all.
+ * The 12-word `BCM_PROP_BUF_WORDS` envelope is exactly the size the
+ * largest single-tag payload (this one) needs; smaller-payload tags
+ * still declare `total_size = 32` and only fill the first 8 words.
  */
 /* Query helpers — read-only; same payload shape as the SET versions. */
 static inline void bcm_mailbox_build_get_clock_state(uint32_t buf[BCM_PROP_BUF_WORDS],
@@ -252,6 +279,7 @@ static inline void bcm_mailbox_build_get_clock_state(uint32_t buf[BCM_PROP_BUF_W
     buf[0] = 32u; buf[1] = BCM_PROP_REQUEST; buf[2] = BCM_TAG_GET_CLOCK_STATE;
     buf[3] = 8u; buf[4] = 0u; buf[5] = clock_id; buf[6] = 0u;
     buf[7] = BCM_PROP_TAG_END;
+    bcm_mailbox_pad_tail(buf);
 }
 static inline void bcm_mailbox_build_get_clock_rate(uint32_t buf[BCM_PROP_BUF_WORDS],
                                                     uint32_t clock_id)
@@ -259,6 +287,7 @@ static inline void bcm_mailbox_build_get_clock_rate(uint32_t buf[BCM_PROP_BUF_WO
     buf[0] = 32u; buf[1] = BCM_PROP_REQUEST; buf[2] = BCM_TAG_GET_CLOCK_RATE;
     buf[3] = 8u; buf[4] = 0u; buf[5] = clock_id; buf[6] = 0u;
     buf[7] = BCM_PROP_TAG_END;
+    bcm_mailbox_pad_tail(buf);
 }
 static inline void bcm_mailbox_build_get_clock_rate_measured(uint32_t buf[BCM_PROP_BUF_WORDS],
                                                               uint32_t clock_id)
@@ -266,6 +295,7 @@ static inline void bcm_mailbox_build_get_clock_rate_measured(uint32_t buf[BCM_PR
     buf[0] = 32u; buf[1] = BCM_PROP_REQUEST; buf[2] = BCM_TAG_GET_CLOCK_RATE_MEASURED;
     buf[3] = 8u; buf[4] = 0u; buf[5] = clock_id; buf[6] = 0u;
     buf[7] = BCM_PROP_TAG_END;
+    bcm_mailbox_pad_tail(buf);
 }
 
 static inline void bcm_mailbox_build_set_clock_rate(uint32_t buf[BCM_PROP_BUF_WORDS],
@@ -273,14 +303,18 @@ static inline void bcm_mailbox_build_set_clock_rate(uint32_t buf[BCM_PROP_BUF_WO
                                                     uint32_t rate_hz,
                                                     uint32_t skip_setting_turbo)
 {
-    buf[0] = 32u;
-    buf[1] = BCM_PROP_REQUEST;
-    buf[2] = BCM_TAG_SET_CLOCK_RATE;
-    buf[3] = 12u;
-    buf[4] = 0u;
-    buf[5] = clock_id;
-    buf[6] = rate_hz;
-    buf[7] = skip_setting_turbo;
+    buf[0]  = 48u;
+    buf[1]  = BCM_PROP_REQUEST;
+    buf[2]  = BCM_TAG_SET_CLOCK_RATE;
+    buf[3]  = 12u;
+    buf[4]  = 0u;
+    buf[5]  = clock_id;
+    buf[6]  = rate_hz;
+    buf[7]  = skip_setting_turbo;
+    buf[8]  = BCM_PROP_TAG_END;
+    buf[9]  = 0u;
+    buf[10] = 0u;
+    buf[11] = 0u;
 }
 
 #endif /* BCM_MAILBOX_PROTO_H */

@@ -90,9 +90,17 @@
 
 /* MBOX_E_GENERIC / MBOX_E_TAG_UNSUPPORTED come from bcm_mailbox.h. */
 
-/* Fixed buffer size shared across every tag we send. 16-byte
- * aligned so the upper-28-bit bus-address encoding is clean. */
-#define PROP_BUF_WORDS          8
+/* Fixed buffer size shared across every tag we send. 12 words = 48
+ * bytes is the smallest 16-byte-aligned size that fits the largest
+ * single-tag payload we issue (SET_CLOCK_RATE: 12-byte payload plus
+ * end-tag word). 16-byte aligned so the upper-28-bit bus-address
+ * encoding is clean.
+ *
+ * Helpers that send tags with smaller payloads still declare
+ * `total_size = 32` in `prop_buf[0]` — VC firmware reads only up to
+ * `total_size` bytes, so the tail of the larger physical buffer is
+ * never visible to the firmware on those calls. */
+#define PROP_BUF_WORDS          12
 #define PROP_BUF_BYTES          (PROP_BUF_WORDS * 4)
 
 /* Compile-time check that this driver and the proto header agree
@@ -261,8 +269,11 @@ static int mbox_property_call(void)
 
 int bcm_mailbox_get_board_mac(uint8_t mac[6])
 {
-    /* Populate the property buffer with a single GET_BOARD_MAC tag. */
-    prop_buf[0] = PROP_BUF_BYTES;           /* total_size */
+    /* Populate the property buffer with a single GET_BOARD_MAC tag.
+     * total_size is fixed at 32 (header + 8-byte payload + end_tag);
+     * the physical buffer can be larger but firmware reads only up
+     * to `total_size` bytes. */
+    prop_buf[0] = 32u;                      /* total_size */
     prop_buf[1] = PROP_REQUEST;
     prop_buf[2] = TAG_GET_BOARD_MAC;
     prop_buf[3] = 8;                        /* tag value buffer size */

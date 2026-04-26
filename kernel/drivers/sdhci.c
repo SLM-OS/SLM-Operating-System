@@ -1029,24 +1029,10 @@ struct blkdev *sdhci_create_qemu_pci(const char *name)
 #include "bcm_mailbox_proto.h"
 #include "uart.h"
 
-/* BCM2712 AON ("always-on") GPIO bank — bcm2712.dtsi `gio_aon@7d517c00`,
- * mapped via the SoC's lower ranges to CPU phys 0x107D517C00. The 2 MB
- * block containing this address is already covered by `vmm_setup_platform`
- * (used by the ACT LED on pin 9; see `kernel/src/main.c`).
- *
- * Bank 0 layout matches Linux's `drivers/gpio/gpio-brcmstb.c`:
- *   +0x00 ODEN   — open-drain enable (1 = open-drain; we want push-pull)
- *   +0x04 DATA   — read/write pin levels
- *   +0x08 IODIR  — 0 = output, 1 = input (brcmstb-specific; inverse
- *                  of the legacy bcm2835 GPIO convention)
- *
- * Bit assignments (from bcm2712-rpi-5-b.dts):
- *   bit 3  sd_io_1v8_reg (0 = 3.3 V mode, 1 = 1.8 V mode)
- *   bit 4  sd_vcc_reg    (1 = SD card VCC on, 0 = off)
- *   bit 9  ACT LED (already used by main.c) */
-#define AON_GPIO_BASE          0x107D517C00UL
-#define AON_GPIO_DATA          (AON_GPIO_BASE + 0x04UL)
-#define AON_GPIO_IODIR         (AON_GPIO_BASE + 0x08UL)
+/* AON GPIO base + register offsets are in `platform.h` so this
+ * driver and `kernel/src/main.c` (ACT LED) reference one source of
+ * truth. SD-card-specific bit names live here — they're a
+ * driver-local detail. */
 #define AON_GPIO_BIT_SD_VCC    (1u << 4)
 #define AON_GPIO_BIT_SD_IO_1V8 (1u << 3)
 
@@ -1068,16 +1054,6 @@ struct blkdev *sdhci_create_qemu_pci(const char *name)
  * 200 MHz matches what cfginit_2712's `clk_get_rate(pltfm_host->clk)`
  * would return. */
 #define BCM2712_EMMC2_BASE_CLK_MHZ          200u
-
-/* MMIO writel — match the convention used elsewhere in this file. */
-static inline void cfg_writel(uintptr_t base, uint32_t off, uint32_t val)
-{
-    *(volatile uint32_t *)(base + off) = val;
-}
-static inline uint32_t cfg_readl(uintptr_t base, uint32_t off)
-{
-    return *(volatile uint32_t *)(base + off);
-}
 
 /*
  * Apply the BCM2712-specific SDHCI cfginit, mirroring Linux's
@@ -1105,23 +1081,25 @@ static inline uint32_t cfg_readl(uintptr_t base, uint32_t off)
  */
 static void bcm2712_emmc2_cfginit(void)
 {
-    uintptr_t cfg = BCM2712_EMMC2_CFG_BASE;
+    volatile uint32_t *ctrl_reg =
+        (volatile uint32_t *)(BCM2712_EMMC2_CFG_BASE + SDIO_CFG_CTRL);
+    volatile uint32_t *cqcap_reg =
+        (volatile uint32_t *)(BCM2712_EMMC2_CFG_BASE + SDIO_CFG_CQ_CAPABILITY);
 
     /* Force CD: enable the test-level override and clear the level
      * bit (i.e. report 'present', the active-low n_TEST_LEV bit
      * cleared). Read-modify-write so the Pi firmware's other strap
      * bits in this register stay intact. */
-    uint32_t ctrl = cfg_readl(cfg, SDIO_CFG_CTRL);
+    uint32_t ctrl = *ctrl_reg;
     ctrl &= ~SDIO_CFG_CTRL_SDCD_N_TEST_LEV;
     ctrl |=  SDIO_CFG_CTRL_SDCD_N_TEST_EN;
-    cfg_writel(cfg, SDIO_CFG_CTRL, ctrl);
+    *ctrl_reg = ctrl;
 
     /* Base-clock advisory in MHz, plus the FMUL hint Linux always
      * sets (3 << 12) — same constant as
      * sdhci_brcmstb_cfginit_2712. */
-    uint32_t cqcap = (3u << SDIO_CFG_CQ_CAPABILITY_FMUL_SHIFT)
-                   | BCM2712_EMMC2_BASE_CLK_MHZ;
-    cfg_writel(cfg, SDIO_CFG_CQ_CAPABILITY, cqcap);
+    *cqcap_reg = (3u << SDIO_CFG_CQ_CAPABILITY_FMUL_SHIFT)
+               | BCM2712_EMMC2_BASE_CLK_MHZ;
 }
 
 /*
@@ -1143,8 +1121,8 @@ static void bcm2712_emmc2_cfginit(void)
  */
 static void bcm2712_aon_gpio_drive_sd_regulators(void)
 {
-    volatile uint32_t *iodir = (volatile uint32_t *)AON_GPIO_IODIR;
-    volatile uint32_t *data  = (volatile uint32_t *)AON_GPIO_DATA;
+    volatile uint32_t *iodir = (volatile uint32_t *)BCM2712_AON_GPIO_IODIR;
+    volatile uint32_t *data  = (volatile uint32_t *)BCM2712_AON_GPIO_DATA;
 
     /* Drive: pin 4 high (VCC on), pin 3 low (3.3 V mode). Set DATA
      * before flipping IODIR so the pin doesn't briefly drive its
@@ -1217,9 +1195,10 @@ struct blkdev *sdhci_create_bcm2712(void)
      */
 
     /* Drive the SD card VCC + IO voltage regulators on the AON GPIO
-     * bank. Without this the SDHCI host bank stays unreachable even
-     * after bus-isolation is deasserted — VCC=off means the
-     * controller back-end is unpowered. */
+     * bank. On the lab Pi 5 the firmware already leaves these in
+     * the correct state, but this is belt-and-suspenders for boards
+     * / firmware revisions that don't honor the regulator-boot-on
+     * dts annotations. */
     uart_puts("[INFO] sdhci_bcm2712: driving AON GPIO regulators (SD VCC on, 3.3V)\n");
     bcm2712_aon_gpio_drive_sd_regulators();
 
