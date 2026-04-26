@@ -31,6 +31,7 @@
 
 #include "bpmp.h"
 #include "platform.h"
+#include "spinlock.h"
 #include "tegra234_clocks.h"
 #include "timer.h"
 #include "uart.h"
@@ -81,6 +82,10 @@
 
 /* I2C_HEADER (the third word of every transfer's packet header) */
 #define I2C_HEADER_REPEAT_START      (1u << 16)
+/* IE_ENABLE is set on every packet despite I2C_INT_MASK = 0 (we poll).
+ * Tegra TRM requires the IE bit for INT_STATUS to latch
+ * PACKET_XFER_COMPLETE / NO_ACK / ARBITRATION_LOST — the mask only
+ * suppresses CPU IRQ delivery, not the status register update. */
 #define I2C_HEADER_IE_ENABLE         (1u << 17)
 #define I2C_HEADER_READ              (1u << 19)
 #define I2C_HEADER_SLAVE_ADDR_SHIFT  1u             /* 7-bit addr in bits[7:1] */
@@ -118,6 +123,7 @@ struct tegra_i2c_bus tegra_i2c_cam_bus = {
     .clk_id   = TEGRA234_CLK_I2C2,
     .reset_id = (int32_t)TEGRA234_RESET_I2C2,
     .name     = "cam_i2c",
+    .lock     = SPINLOCK_INIT,
 };
 
 /* ---- Init helpers ---- */
@@ -168,15 +174,22 @@ int tegra_i2c_init(struct tegra_i2c_bus *bus)
 {
     if (!bus) return -1;
 
+    irq_flags_t flags = spin_lock_irqsave(&bus->lock);
+
     /* Idempotent — bpmp_clk_enable is a no-op if Linux already left the
-     * clock running, which is the normal post-kexec state for cam_i2c. */
+     * clock running, which is the normal post-kexec state for cam_i2c.
+     * BPMP IPC is itself lock-free polled, so holding `bus->lock`
+     * across the call is safe (no deadlock window). */
     int rc = bpmp_init();
-    if (rc != 0) return -2;
+    if (rc != 0) { spin_unlock_irqrestore(&bus->lock, flags); return -2; }
     rc = bpmp_clk_enable(bus->clk_id);
-    if (rc != 0) return -2;
+    if (rc != 0) { spin_unlock_irqrestore(&bus->lock, flags); return -2; }
     if (bus->reset_id >= 0) {
         rc = bpmp_reset_deassert((uint32_t)bus->reset_id);
-        if (rc != 0) return -3;
+        if (rc != 0) {
+            spin_unlock_irqrestore(&bus->lock, flags);
+            return -3;
+        }
     }
 
     /* Mask all interrupts (we poll). */
@@ -193,8 +206,9 @@ int tegra_i2c_init(struct tegra_i2c_bus *bus)
     /* Clear any latched interrupt status (write-1-to-clear semantics). */
     i2c_write(bus, I2C_INT_STATUS, 0xFFFFFFFFu);
 
-    if (flush_fifos(bus) != 0) return -4;
-    return 0;
+    int flush_rc = flush_fifos(bus);
+    spin_unlock_irqrestore(&bus->lock, flags);
+    return flush_rc != 0 ? -4 : 0;
 }
 
 /* ---- Packet-mode transfer engine ---- */
@@ -216,15 +230,25 @@ static void push_packet_header(struct tegra_i2c_bus *bus,
     i2c_write(bus, I2C_TX_FIFO, hdr2);
 }
 
-/* Push up to 4 bytes (one u32) of write payload, LE-packed. */
-static void push_payload_word(struct tegra_i2c_bus *bus,
-                              const uint8_t *buf, uint32_t len)
+/* Push `len` payload bytes into TX_FIFO, packed LE into u32 words.
+ * Tail bytes (len % 4 != 0) ride in the upper bits of the final word
+ * — the controller knows from the packet header how many bytes are
+ * actually meaningful and ignores the rest. No length cap; a future
+ * sensor-mode-set burst can call this with len up to 32 KB before
+ * the FIFO depth becomes a concern. */
+static void push_payload(struct tegra_i2c_bus *bus,
+                         const uint8_t *buf, uint32_t len)
 {
-    uint32_t w = 0u;
-    for (uint32_t i = 0; i < len && i < 4u; i++) {
-        w |= (uint32_t)buf[i] << (i * 8u);
+    uint32_t i = 0u;
+    while (i < len) {
+        uint32_t w = 0u;
+        uint32_t chunk = (len - i) > 4u ? 4u : (len - i);
+        for (uint32_t k = 0; k < chunk; k++) {
+            w |= (uint32_t)buf[i + k] << (k * 8u);
+        }
+        i2c_write(bus, I2C_TX_FIFO, w);
+        i += chunk;
     }
-    i2c_write(bus, I2C_TX_FIFO, w);
 }
 
 /* Wait for the current packet to complete. Returns 0 on success, or
@@ -244,16 +268,16 @@ static int wait_packet_complete(struct tegra_i2c_bus *bus)
 }
 
 /* Issue one write message. `repeat_start` controls whether the
- * controller follows this message with REPEAT-START (1) or STOP (0). */
+ * controller follows this message with REPEAT-START (1) or STOP (0).
+ * Payload size is bounded only by FIFO depth (64 bytes / 16 words);
+ * the IMX219 register-write path passes 3 bytes. */
 static int xfer_write(struct tegra_i2c_bus *bus, uint8_t slave,
                       const uint8_t *buf, uint32_t len, int repeat_start)
 {
+    if (len == 0u || len > 60u) return -1;
     if (flush_fifos(bus) != 0) return -2;
     push_packet_header(bus, slave, len, 0 /*is_read*/, repeat_start);
-    /* IMX219 writes are at most 3 bytes (reg_hi, reg_lo, val) — fits
-     * in one u32. Generalise when a future caller needs longer writes. */
-    if (len > 4u) return -1;
-    push_payload_word(bus, buf, len);
+    push_payload(bus, buf, len);
     return wait_packet_complete(bus);
 }
 
@@ -295,7 +319,10 @@ int tegra_i2c_write_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
         (uint8_t)(reg & 0xFFu),
         val,
     };
-    return xfer_write(bus, slave, buf, 3u, 0 /*final, send STOP*/);
+    irq_flags_t flags = spin_lock_irqsave(&bus->lock);
+    int rc = xfer_write(bus, slave, buf, 3u, 0 /*final, send STOP*/);
+    spin_unlock_irqrestore(&bus->lock, flags);
+    return rc;
 }
 
 int tegra_i2c_read_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
@@ -306,9 +333,11 @@ int tegra_i2c_read_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
         (uint8_t)(reg >> 8),
         (uint8_t)(reg & 0xFFu),
     };
+    irq_flags_t flags = spin_lock_irqsave(&bus->lock);
     int rc = xfer_write(bus, slave, addr, 2u, 1 /*REPEAT_START*/);
-    if (rc != 0) return rc;
-    return xfer_read(bus, slave, out, 1u);
+    if (rc == 0) rc = xfer_read(bus, slave, out, 1u);
+    spin_unlock_irqrestore(&bus->lock, flags);
+    return rc;
 }
 
 #else /* !PLATFORM_JETSON_ORIN_NANO — stubs for cross-platform builds */
@@ -316,7 +345,13 @@ int tegra_i2c_read_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
 /* No bus instance on non-Jetson; declare a placeholder so test files
  * that reference the symbol link cleanly when the test builds for
  * QEMU. The stubs return errors so a stray caller fails loudly. */
-struct tegra_i2c_bus tegra_i2c_cam_bus = { 0, 0, -1, "stub" };
+struct tegra_i2c_bus tegra_i2c_cam_bus = {
+    .base     = 0,
+    .clk_id   = 0,
+    .reset_id = -1,
+    .name     = "stub",
+    .lock     = SPINLOCK_INIT,
+};
 
 int tegra_i2c_init(struct tegra_i2c_bus *bus) { (void)bus; return -1; }
 int tegra_i2c_write_reg16(struct tegra_i2c_bus *bus, uint8_t slave,

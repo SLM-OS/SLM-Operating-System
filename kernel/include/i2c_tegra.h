@@ -29,6 +29,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "spinlock.h"
+
 /*
  * Description of one HSI2C controller instance. Constructed at module
  * scope (e.g. `tegra_i2c_cam_bus` for the camera bus) — callers don't
@@ -43,12 +45,22 @@
  *              see kernel/include/tegra234_clocks.h header comment).
  *   name       Short label, used in error messages and the `imx219`
  *              shell command.
+ *   lock       Per-bus spinlock taken around every tegra_i2c_*
+ *              public call. Required because each call mutates
+ *              controller state (FIFOs, INT_STATUS, CNFG) and any
+ *              two concurrent transactions on the same bus would
+ *              race. Held across the up-to-100 ms packet poll —
+ *              long but acceptable for a polled driver, and the
+ *              alternative (releasing across the wait) would
+ *              reintroduce the race. BPMP IPC called during init
+ *              is itself lock-free polled, so no deadlock window.
  */
 struct tegra_i2c_bus {
-    uintptr_t base;
-    uint32_t  clk_id;
-    int32_t   reset_id;
+    uintptr_t   base;
+    uint32_t    clk_id;
+    int32_t     reset_id;
     const char *name;
+    spinlock_t  lock;
 };
 
 /*

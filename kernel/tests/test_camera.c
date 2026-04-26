@@ -210,6 +210,7 @@ static void test_tegra_i2c_cam_bus_wiring(void)
 #else
     /* Stub instance: base 0, clk 0, reset_id -1 (no MRQ_RESET path). */
     TEST_ASSERT_EQUAL_HEX64(0u, (uint64_t)tegra_i2c_cam_bus.base);
+    TEST_ASSERT_EQUAL_UINT32(0u, tegra_i2c_cam_bus.clk_id);
     TEST_ASSERT_EQUAL_INT32(-1, tegra_i2c_cam_bus.reset_id);
 #endif
     TEST_ASSERT_NOT_NULL(tegra_i2c_cam_bus.name);
