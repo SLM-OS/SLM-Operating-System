@@ -167,6 +167,7 @@ const shell_cmd_t builtin_commands[] = {
 #endif
 #if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
     {"xhcidiag",  cmd_xhcidiag,  "Tegra XHCI CBB-at-EL2 probe",                               false, SHELL_CAT_HARDWARE},
+    {"cdcdiag",   cmd_cdcdiag,   "CDC-ECM TX path diagnostic (#427)",                         false, SHELL_CAT_HARDWARE},
 #endif
 };
 

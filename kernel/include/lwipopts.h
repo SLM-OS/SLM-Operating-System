@@ -52,8 +52,21 @@
 /* Buffer Pools (pbuf)                                                         */
 /* -------------------------------------------------------------------------- */
 
-/* Number of pbufs in the pool */
-#define PBUF_POOL_SIZE              16
+/* Number of pbufs in the pool.
+ *
+ * Increased from 16 to 64 for #427: under fast connect/disconnect
+ * cycles on the telnet shell port, lingering TCP TIME_WAIT PCBs
+ * each retain pbufs for retransmit / unACKed segments. With a 16-
+ * pbuf pool the pool would saturate after ~8 close-then-reopen
+ * cycles, at which point `pbuf_alloc` in the cdc_ecm RX path
+ * started failing — incoming frames (including ARP requests for
+ * our own IP) were dropped at the netif boundary. The host's ARP
+ * cache then went `(incomplete)` for SLM-OS's IP, breaking both
+ * ping and any new TCP connect from outside. 64 pbufs gives each
+ * of the 16 max-shell-sessions enough headroom for retransmit
+ * queues + a comfortable RX buffer without significantly bumping
+ * static memory footprint (64 × 1536 = 96 KB). */
+#define PBUF_POOL_SIZE              64
 
 /* Size of each pbuf in pool (standard Ethernet MTU + headers) */
 #define PBUF_POOL_BUFSIZE           1536
@@ -91,9 +104,23 @@
 #define TCP_WND                     (4 * TCP_MSS)
 #define TCP_SND_BUF                 (4 * TCP_MSS)
 #define TCP_SND_QUEUELEN            16
-#define MEMP_NUM_TCP_PCB            5
+/* MEMP_NUM_TCP_PCB is the *total* pool of active TCP PCBs:
+ *   - established connections
+ *   - half-open SYN_RCVD
+ *   - TIME_WAIT after close (default lifetime 2*MSL ≈ 60s)
+ *
+ * Bumped from 5 to 32 for #427: shell-tcp accepts up to
+ * MAX_TCP_SHELL_SESSIONS=16 concurrent telnet sessions, and a fast
+ * connect→disconnect cycle leaves each session in TIME_WAIT for ~60s.
+ * With the pool at 5, four close cycles in <60s permanently
+ * exhausted the table — `tcp_listen` could no longer hand a fresh
+ * connection a PCB. 32 = 16 active + 16 TIME_WAIT headroom. */
+#define MEMP_NUM_TCP_PCB            32
 #define MEMP_NUM_TCP_PCB_LISTEN     4
-#define MEMP_NUM_TCP_SEG            16
+/* TCP segment buffers: bumped 16 → 64 alongside PBUF_POOL_SIZE so
+ * 16 simultaneous sessions × 4 in-flight segments each have room
+ * without falling back to MEM heap allocs. */
+#define MEMP_NUM_TCP_SEG            64
 
 /* UDP support (for DNS, DHCP) */
 #define LWIP_UDP                    1

@@ -180,6 +180,11 @@ static struct {
      * shell's get_rx_count / get_tx_count accessors. */
     uint32_t          rx_completions;
     uint32_t          tx_completions;
+    /* #427 debug — count send-path observations to localise the
+     * "model command crashes telnet" stall. */
+    uint32_t          tx_submits;        /* successful usb_submit_urb */
+    uint32_t          tx_busy_returns;   /* all slots busy → NET_E_BUSY */
+    uint32_t          tx_submit_errors;  /* usb_submit_urb returned !=0 */
 } cdc;
 
 /*
@@ -619,10 +624,13 @@ static int cdc_ecm_net_send(const void *buf, size_t len)
              * the slot's buffer was written; a later claimant using
              * RELAXED CAS must see those writes done. */
             __atomic_store_n(&slot->in_use, false, __ATOMIC_RELEASE);
+            __atomic_fetch_add(&cdc.tx_submit_errors, 1, __ATOMIC_RELAXED);
             return NET_E_GENERIC;
         }
+        __atomic_fetch_add(&cdc.tx_submits, 1, __ATOMIC_RELAXED);
         return NET_OK;
     }
+    __atomic_fetch_add(&cdc.tx_busy_returns, 1, __ATOMIC_RELAXED);
     return NET_E_BUSY;
 }
 
@@ -954,6 +962,33 @@ uint32_t cdc_ecm_get_rx_count(void)
 uint32_t cdc_ecm_get_tx_count(void)
 {
     return cdc.tx_completions;
+}
+
+void cdc_ecm_get_tx_diag(struct cdc_ecm_tx_diag *out)
+{
+    if (out == NULL) return;
+    out->tx_completions   = __atomic_load_n(&cdc.tx_completions,   __ATOMIC_RELAXED);
+    out->tx_submits       = __atomic_load_n(&cdc.tx_submits,       __ATOMIC_RELAXED);
+    out->tx_busy_returns  = __atomic_load_n(&cdc.tx_busy_returns,  __ATOMIC_RELAXED);
+    out->tx_submit_errors = __atomic_load_n(&cdc.tx_submit_errors, __ATOMIC_RELAXED);
+
+    /* Snapshot per-slot state. The diag struct exposes 4 entries; the
+     * static_assert guards against silent drift if CDC_ECM_TX_SLOTS is
+     * bumped without widening the diag struct. */
+    _Static_assert(CDC_ECM_TX_SLOTS <= 4,
+        "cdc_ecm_tx_diag.slot_*[4] is too small — widen the diag struct");
+    uint8_t in_use_count = 0;
+    uint8_t completed_count = 0;
+    for (unsigned i = 0; i < CDC_ECM_TX_SLOTS; i++) {
+        bool in_use    = __atomic_load_n(&cdc.tx[i].in_use,    __ATOMIC_RELAXED);
+        bool completed = __atomic_load_n(&cdc.tx[i].completed, __ATOMIC_RELAXED);
+        out->slot_in_use[i]    = in_use ? 1 : 0;
+        out->slot_completed[i] = completed ? 1 : 0;
+        if (in_use)    in_use_count++;
+        if (in_use && completed) completed_count++;
+    }
+    out->in_use_count    = in_use_count;
+    out->completed_count = completed_count;
 }
 
 void cdc_ecm_set_notify_silence_timeout_ms(uint32_t ms)
