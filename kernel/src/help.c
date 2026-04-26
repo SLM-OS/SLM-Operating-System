@@ -442,9 +442,13 @@ static const struct help_entry help_entries[] = {
         "component - Component system management\n"
         "\n"
         "Usage:\n"
-        "  component list                           List all components\n"
+        "  component list                           List registered components\n"
+        "  component builtins                       List built-in components available to run\n"
+        "  component run <name>                     Run a built-in component\n"
+        "  component swap <old> <new>               Hot-swap: replace old with new\n"
+        "  component send <message>                 Send to the echo demo service\n"
         "  component register <name> <ver> <type> [pri]\n"
-        "                                           Register new component\n"
+        "                                           Register a new component\n"
         "  component unregister <idx>               Unregister by index\n"
         "  component status <name|idx>              Show component details\n"
         "\n"
@@ -452,8 +456,10 @@ static const struct help_entry help_entries[] = {
         "Priorities: idle, low, normal, high, critical\n"
         "\n"
         "Examples:\n"
+        "  component builtins\n"
+        "  component run counter\n"
+        "  component swap counter counter_v2\n"
         "  component register my-svc 1.0.0 service high\n"
-        "  component list\n"
         "  component status 0\n"
     ),
 
@@ -716,6 +722,465 @@ static const struct help_entry help_entries[] = {
         "  >>> exit\n"
         "\n"
         "  lua -e \"print(slm.sched_policy())\"\n"
+    ),
+
+    /* ====================================================================
+     * Entries below are kept alphabetized. The
+     * test_every_command_has_help_entry regression test in
+     * kernel/tests/test_shell.c walks the live builtin_commands[] +
+     * external_commands[] tables and fails if any registered command
+     * lacks an entry here, so this list is mechanically synchronised
+     * with what `help` enumerates.
+     * ==================================================================== */
+
+    HELP_TEXT("admin",
+        "admin - Seven-page operator TUI for live observability\n"
+        "\n"
+        "Usage:\n"
+        "  admin\n"
+        "\n"
+        "Launches a 1 Hz read-only dashboard backed by /mnt/files/admin.lua\n"
+        "(embedded in the kernel image and written at boot). Pages 1-7 walk\n"
+        "Overview, Tasks, Sched, Eviction, Models, Telemetry, REPL. Press a\n"
+        "digit 1-7 to switch pages, 'r' to force a repaint, 'q' or Ctrl-C\n"
+        "to exit.\n"
+        "\n"
+        "Uses the safe `slm.*` bindings only. For control-plane mutation\n"
+        "(policy swap, gpu_use_set, model_launch) drop into `lua-admin`.\n"
+    ),
+
+    HELP_TEXT("bench",
+        "bench - Performance benchmarks\n"
+        "\n"
+        "Usage:\n"
+        "  bench <subcommand> [args...]\n"
+        "\n"
+        "Subcommands:\n"
+        "  context        Context-switch latency (create/switch/destroy)\n"
+        "  irq            Interrupt latency (timer tick interval accuracy)\n"
+        "  ipc            IPC message round-trip latency\n"
+        "  eviction       Eviction-policy fault-rate comparison (#117)\n"
+        "  deadline       Deadline-accuracy benchmark\n"
+        "  isolate        Core-isolation benchmark\n"
+        "  shared         Shared-buffer throughput\n"
+        "  smp            Cross-CPU dispatch test (one task per CPU)\n"
+        "  stealing       Work-stealing scheduler exercise\n"
+        "  matmul [N]     NEON FP32 matmul (default 20 iters)\n"
+        "  conv           NEON FP32 conv2d\n"
+        "  quant          int8 quantization throughput\n"
+        "  gpu            GPU offload latency (where available)\n"
+        "  stats          Scheduler statistics dump\n"
+        "  all            Run every benchmark above\n"
+        "\n"
+        "Examples:\n"
+        "  bench context\n"
+        "  bench matmul 100\n"
+        "  bench all\n"
+    ),
+
+    HELP_TEXT("bpmp",
+        "bpmp - BPMP IPC smoke test (Jetson Orin Nano only)\n"
+        "\n"
+        "Usage:\n"
+        "  bpmp\n"
+        "\n"
+        "Sends an MRQ_PING to the BPMP via HSP doorbell + IVC ring buffers,\n"
+        "then queries a known clock id and prints the result. Verifies the\n"
+        "post-kexec BPMP path is alive — required for downstream features\n"
+        "(camera clocks, PCIe-C8 bring-up, USB networking).\n"
+    ),
+
+    HELP_TEXT("diag",
+        "diag - Pi 5 IRQ-delivery diagnostics (PI5_IRQ_DIAG build only)\n"
+        "\n"
+        "Usage:\n"
+        "  diag <el2|vec|fiq|all>\n"
+        "\n"
+        "Probes which path can deliver hardware timer IRQs to NS EL1/EL2\n"
+        "on Pi 5. See `docs/pi5-preemption-resolution.md` for the\n"
+        "interpretation of each subprobe. The `fiq` mode writes\n"
+        "ICC_IGRPEN0 — do NOT run on Jetson, it crashes the EL3 handler.\n"
+    ),
+
+    HELP_TEXT("eviction",
+        "eviction - AI page-eviction policy and statistics\n"
+        "\n"
+        "Usage:\n"
+        "  eviction                                 Show summary + per-pool policy\n"
+        "  eviction policy                          List policies + per-pool config\n"
+        "  eviction policy <name>                   Set both pools to <name>\n"
+        "  eviction policy weight <name>            Set weight pool only (#120)\n"
+        "  eviction policy workspace <name>         Set workspace pool only (#120)\n"
+        "  eviction stats                           Decisions, fallbacks, latency\n"
+        "  eviction trajectory [N]                  Last N CACHEUS weight snapshots\n"
+        "  eviction features                        Feature-name introspection\n"
+        "  eviction model status|load|...           Runtime blob workflow\n"
+        "\n"
+        "Policies include LRU, LFU, FirstCandidate, SlmHeuristic, XGBoost,\n"
+        "MLP, and CACHEUS (ensemble). Build with DISABLE_EVICTION=ON to\n"
+        "compile the framework out entirely.\n"
+    ),
+
+    HELP_TEXT("gpu",
+        "gpu - GPU information and control\n"
+        "\n"
+        "Usage on non-x86-64:\n"
+        "  gpu [read <hex-offset>]\n"
+        "    Show GPU driver/aperture status. With `read <off>`, dumps a\n"
+        "    32-bit word from BAR0 + offset (Jetson GA10B integrated GPU).\n"
+        "\n"
+        "Usage on x86-64 (richer external command, registered via\n"
+        "nvidia_gpu_register_shell_commands):\n"
+        "  gpu init       Initialise the NVIDIA GSP path\n"
+        "  gpu vram       Print VRAM region + WPR boundaries\n"
+        "  gpu regs       Dump key bringup registers\n"
+        "  gpu sec2       SEC2 / Booter-Load probe\n"
+    ),
+
+    HELP_TEXT("hailo",
+        "hailo - Hailo NPU control\n"
+        "\n"
+        "Usage:\n"
+        "  hailo                          Status\n"
+        "  hailo probe                    Drive PCIe probe + bring-up\n"
+        "  hailo boot                     Boot the firmware\n"
+        "  hailo load <path>              Load a .hef into the inference engine\n"
+        "  hailo fw [log|loghex]          Firmware control / log readback\n"
+        "  hailo bist                     Run the on-chip ECC BIST\n"
+        "  hailo peek <hex-off>           Read a 32-bit BAR0 register\n"
+        "  hailo poke <hex-off> <hex-val> Write a 32-bit BAR0 register\n"
+        "  hailo cfgstream <in|out> <ch>  Configure a context-switch stream\n"
+        "  hailo cfgdump                  Dump captured CS wire bytes\n"
+        "  hailo ctxsmoke [min|out|in|full] CS-translator smoke test\n"
+        "\n"
+        "Most subcommands mutate driver state. Available on Pi 5 + Jetson\n"
+        "when the Hailo NPU is wired up; PCIe enumeration is required\n"
+        "before `boot` / `load`.\n"
+    ),
+
+    HELP_TEXT("hspdiag",
+        "hspdiag - HSP dimensioning + BPMP doorbell probe (Jetson only)\n"
+        "\n"
+        "Usage:\n"
+        "  hspdiag\n"
+        "\n"
+        "Reads HSP_DIMENSIONING from the top-level HSP block to confirm\n"
+        "shared-mailbox / doorbell / shared-semaphore counts, then\n"
+        "exercises the BPMP_DOORBELL the BPMP IVC stack uses. Useful\n"
+        "when investigating BPMP IPC failure modes after kexec.\n"
+    ),
+
+    HELP_TEXT("kernel",
+        "kernel - Manage staged / active boot kernel image (Pi 5 tryboot)\n"
+        "\n"
+        "Usage:\n"
+        "  kernel status                    Show staged / active / previous state\n"
+        "  kernel stage <vfs-path>          Copy a VFS file into the SD boot\n"
+        "                                   partition as `tryboot.img` and\n"
+        "                                   compute its SHA-256 sidecar.\n"
+        "  kernel activate                  Set the Pi 5 tryboot flag and reboot\n"
+        "  kernel promote                   Rename `tryboot.img` over\n"
+        "                                   `kernel_2712.img` (commit current)\n"
+        "  kernel rollback                  Delete `tryboot.img`, clear flag\n"
+        "\n"
+        "Admin-gated. Drives the dynamic kernel-replace state machine\n"
+        "(empty -> staged -> armed -> promoted | rolled_back). The running\n"
+        "kernel's identity is reported via the SLMOS_VERSION /\n"
+        "SLMOS_BUILD_STAMP / SLMOS_BUILD_SHA triple from build_info.h —\n"
+        "see also `cat /sys/version`. Pi 5 only today.\n"
+    ),
+
+    HELP_TEXT("imx219",
+        "imx219 - Read IMX219 sensor CHIP_ID via cam_i2c (Jetson only)\n"
+        "\n"
+        "Usage:\n"
+        "  imx219\n"
+        "\n"
+        "Hardware Task 1 verification gate of the camera plan: drives the\n"
+        "Tegra234 HSI2C controller against the IMX219 sensor at slave 0x10\n"
+        "and reads CHIP_ID (registers 0x0000 high + 0x0001 low). Combined\n"
+        "value should be 0x0219.\n"
+        "\n"
+        "Prerequisites:\n"
+        "  1. IMX219 module attached to connector A (J17).\n"
+        "  2. The IMX219-A DT overlay loaded by Linux pre-kexec.\n"
+        "  3. Sensor powered on (XCLK + reset GPIO managed by Hardware\n"
+        "     Task 2 sensor driver, or held across kexec by slmos-kexec).\n"
+        "\n"
+        "A NACK or RX-empty result with init=OK is the expected diagnostic\n"
+        "for `sensor in reset / clock-gated`; not an HSI2C bug. See\n"
+        "`docs/jetson-camera-imx219-plan.md`.\n"
+    ),
+
+    HELP_TEXT("lua-admin",
+        "lua-admin - Lua REPL with admin/global-control bindings\n"
+        "\n"
+        "Usage:\n"
+        "  lua-admin              Enter admin REPL\n"
+        "  lua-admin -e \"code\"    Execute Lua code (admin surface)\n"
+        "  lua-admin <file>       Run script with admin surface\n"
+        "\n"
+        "Identical to `lua` (see `help lua` for the full slm.* binding\n"
+        "list) except the slm table also exposes mutating bindings:\n"
+        "scheduler policy swap, component hot-swap, model load/unload,\n"
+        "task lifecycle, telnetd start/stop, runtime blob activate, etc.\n"
+        "Use this REPL when you need to mutate global state; otherwise\n"
+        "prefer plain `lua` for safe observability.\n"
+    ),
+
+    HELP_TEXT("macbdiag",
+        "macbdiag - MACB IRQ delivery diagnostic (Pi 5 + networking only)\n"
+        "\n"
+        "Usage:\n"
+        "  macbdiag\n"
+        "\n"
+        "Probes whether the BCM2712 GENET MAC IRQ reaches the GIC at NS\n"
+        "EL1, then dumps RX/TX counters. Companion to the broader timer\n"
+        "IRQ work; Pi 5 cooperative-preemption issue (#99) made hardware\n"
+        "IRQ delivery a recurring blocker.\n"
+    ),
+
+    HELP_TEXT("msg",
+        "msg - Message router commands\n"
+        "\n"
+        "Usage:\n"
+        "  msg                              Show usage (no subcommand)\n"
+        "  msg list                         List topics and subscribers\n"
+        "  msg send <topic> <data...>       Publish message to topic\n"
+        "  msg subscribe <topic> <idx>      Subscribe component <idx> to topic\n"
+        "\n"
+        "Wildcard subscriptions: a topic ending in `/*` matches every\n"
+        "topic with that prefix. The Lua surface (`slm.msg_*`) exposes\n"
+        "the same router with per-session callbacks.\n"
+        "\n"
+        "Examples:\n"
+        "  msg list\n"
+        "  msg send /sensors/temp 75\n"
+        "  msg subscribe /sensors/* 2\n"
+    ),
+
+    HELP_TEXT("nvgpu",
+        "nvgpu - Jetson nvgpu bring-up (Jetson Orin Nano only)\n"
+        "\n"
+        "Usage:\n"
+        "  nvgpu prepare    Prepare GA10B GPU state (clocks, power)\n"
+        "  nvgpu run        Submit a smoke compute kernel\n"
+        "  nvgpu info       Print GPU revision / aperture status\n"
+        "\n"
+        "This command mutates GPU clock/power state via BPMP. Pre-kexec\n"
+        "GPU runtime-suspend (slmos-kexec helper) is required for the\n"
+        "post-kexec inheritance path to find a sane device.\n"
+    ),
+
+    HELP_TEXT("pci",
+        "pci - List PCI/PCIe devices (x86-64 only)\n"
+        "\n"
+        "Usage:\n"
+        "  pci\n"
+        "\n"
+        "Walks the PCI configuration space and prints bus:device.function\n"
+        "for every responding endpoint with vendor/device ids and the\n"
+        "matched device-class string. Read-only.\n"
+    ),
+
+    HELP_TEXT("pcietrain",
+        "pcietrain - Tegra PCIe C8 host init + link train + EP probe (Jetson only)\n"
+        "\n"
+        "Usage:\n"
+        "  pcietrain\n"
+        "\n"
+        "Drives the Tegra PCIe-C8 controller through host-mode init,\n"
+        "LTSSM training, and an iATU window probe of the attached\n"
+        "endpoint (typically the RTL8168 NIC). Used by #25 for the\n"
+        "Jetson networking path.\n"
+    ),
+
+    HELP_TEXT("peek",
+        "peek - Read physical memory\n"
+        "\n"
+        "Usage:\n"
+        "  peek <phys-hex> [count]\n"
+        "\n"
+        "Reads `count` 32-bit words (default 1) from physical address\n"
+        "<phys-hex>. The address is mapped through the kernel identity\n"
+        "map; reads to unmapped or CBB-firewalled regions can crash on\n"
+        "Jetson — start with one-word probes when bring-up is uncertain.\n"
+        "\n"
+        "Examples:\n"
+        "  peek 0x40000000          One word at start of RAM\n"
+        "  peek 0x17000000 4        First 4 words of GPU BAR0 (Jetson)\n"
+    ),
+
+    HELP_TEXT("poke",
+        "poke - Write a 32-bit word to physical memory\n"
+        "\n"
+        "Usage:\n"
+        "  poke <phys-hex> <val-hex>\n"
+        "\n"
+        "Writes the 32-bit value at `<phys-hex>`. Use with care: the\n"
+        "address is identity-mapped, so a wrong address can crash the\n"
+        "kernel or mutate hardware state. Mutating: serialised against\n"
+        "other shell sessions.\n"
+        "\n"
+        "Example:\n"
+        "  poke 0x10000000 deadbeef\n"
+    ),
+
+    HELP_TEXT("rtldiag",
+        "rtldiag - RTL8168 PCIe probe diagnostic (Jetson + networking)\n"
+        "\n"
+        "Usage:\n"
+        "  rtldiag\n"
+        "\n"
+        "Walks the post-LTSSM PCIe config space for the RTL8168 NIC,\n"
+        "prints BAR programming, link width/speed, and reports whether\n"
+        "the device is responsive to MMIO. Companion to `pcietrain`.\n"
+    ),
+
+    HELP_TEXT("sched",
+        "sched - Scheduler control\n"
+        "\n"
+        "Usage:\n"
+        "  sched                              Show current policy\n"
+        "  sched policy                       List all registered policies\n"
+        "  sched policy <name>                Switch active policy at runtime\n"
+        "  sched stats                        Per-CPU statistics + utilisation\n"
+        "  sched model status                 Runtime blob status (CONFIG_AI_SCHEDULER)\n"
+        "  sched model load <path>            Stage a runtime blob\n"
+        "  sched model activate <kind>        Activate a staged blob\n"
+        "  sched model rollback <kind>        Roll back to previous payload\n"
+        "  sched model autoload status|set|clear ...  Configure auto-load on boot\n"
+        "\n"
+        "The `model` subcommands are only present when the kernel is\n"
+        "built with `CONFIG_AI_SCHEDULER` (i.e. `make kernel AI_SCHED=ON`).\n"
+        "\n"
+        "Examples:\n"
+        "  sched policy                       List\n"
+        "  sched policy heuristic             Switch\n"
+        "  sched stats\n"
+    ),
+
+    HELP_TEXT("sleep",
+        "sleep - Sleep for N milliseconds\n"
+        "\n"
+        "Usage:\n"
+        "  sleep <ms>\n"
+        "\n"
+        "Suspends the shell task for the requested number of milliseconds\n"
+        "via the cooperative-tick path. Reports the actually-elapsed time\n"
+        "alongside the request — under heavy contention or coarse tick\n"
+        "granularity the actual sleep can overshoot the request.\n"
+        "\n"
+        "Example:\n"
+        "  sleep 250        Sleep 250 ms\n"
+    ),
+
+    HELP_TEXT("tcpsh",
+        "tcpsh - Deprecated alias for `telnetd`\n"
+        "\n"
+        "Usage:\n"
+        "  tcpsh ...\n"
+        "\n"
+        "Identical behaviour to `telnetd`; argv[0] is preserved for\n"
+        "self-consistent status output. New scripts should use\n"
+        "`telnetd`. See `help telnetd` for the subcommand list.\n"
+    ),
+
+    HELP_TEXT("telemetry",
+        "telemetry - Admin telemetry feed\n"
+        "\n"
+        "Usage:\n"
+        "  telemetry                Same as `telemetry stats`\n"
+        "  telemetry stats          Print per-topic publish counters + total\n"
+        "  telemetry list-topics    Show the eviction + inference topic names\n"
+        "\n"
+        "The kernel publishes structured events on message-router topics\n"
+        "from the eviction decision site and the inference call site. Any\n"
+        "Lua client can subscribe to the wildcard topic `tel.*` to\n"
+        "consume the whole feed — see the Lua binding\n"
+        "`slm.telemetry_subscribe(pattern, fn)`.\n"
+        "\n"
+        "Example:\n"
+        "  telemetry list-topics\n"
+        "  lua -e 'slm.telemetry_subscribe(\"tel.*\", function(t,d) print(t,d) end)'\n"
+    ),
+
+    HELP_TEXT("telnetd",
+        "telnetd - Telnet shell daemon\n"
+        "\n"
+        "Usage:\n"
+        "  telnetd start [port]            Start listener (default port 2323)\n"
+        "  telnetd stop                    Stop listener (existing sessions live on)\n"
+        "  telnetd status                  Listener state, port, session counts\n"
+        "  telnetd sessions                List active sessions (id, peer, age)\n"
+        "  telnetd kick <id>               Force-disconnect a session by id\n"
+        "\n"
+        "Each accepted connection runs an independent shell session with\n"
+        "its own line buffer and per-session cwd. The same Lua + admin\n"
+        "split applies as on the UART console.\n"
+        "\n"
+        "Requires `net init` (or DHCP) to have completed first.\n"
+    ),
+
+    HELP_TEXT("timdiag",
+        "timdiag - Timer / interrupt-delivery diagnostic (non-x86)\n"
+        "\n"
+        "Usage:\n"
+        "  timdiag [fiq]\n"
+        "\n"
+        "Dumps live ARM generic-timer and GIC state — Group register\n"
+        "configuration, CPU interface registers, SPI group bitmap,\n"
+        "PPI/SGI status — to help diagnose hardware-timer IRQ delivery.\n"
+        "Useful for investigating the cooperative-preemption blocker\n"
+        "(#99 on Pi 5, equivalent on Jetson).\n"
+        "\n"
+        "**Do not** pass `fiq` on Jetson. The optional FIQ delivery\n"
+        "test writes ICC_IGRPEN0; TF-A traps the access on Jetson and\n"
+        "crashes the EL3 handler. Pi 5 / QEMU only.\n"
+    ),
+
+    HELP_TEXT("top",
+        "top - Live system dashboard\n"
+        "\n"
+        "Usage:\n"
+        "  top [-n <iter>] [refresh_secs]\n"
+        "\n"
+        "Refreshes a fixed-screen dashboard with task table + per-CPU\n"
+        "load + memory + scheduler / eviction summary. Press `q` or\n"
+        "Ctrl+C to exit.\n"
+        "\n"
+        "Arguments:\n"
+        "  -n <iter>     Stop after N refreshes (default: run until quit)\n"
+        "  refresh_secs  Refresh interval, 1..N seconds (default 1)\n"
+        "\n"
+        "Examples:\n"
+        "  top              Dashboard, refresh once per second\n"
+        "  top 2            Refresh every 2 seconds\n"
+        "  top -n 10        Quit after 10 refreshes\n"
+    ),
+
+    HELP_TEXT("xhci",
+        "xhci - Tegra XHCI controller info (Jetson only)\n"
+        "\n"
+        "Usage:\n"
+        "  xhci\n"
+        "\n"
+        "Reads the Tegra XUSB host controller capability + operational\n"
+        "registers and prints HCS/HCC params, port count, and current\n"
+        "USBSTS. Read-only diagnostic for the post-kexec USB networking\n"
+        "path (#266 / #309).\n"
+    ),
+
+    HELP_TEXT("xhcidiag",
+        "xhcidiag - Tegra XHCI CBB-at-EL2 probe (Jetson + networking)\n"
+        "\n"
+        "Usage:\n"
+        "  xhcidiag\n"
+        "\n"
+        "Like `xhci`, but specifically targets the Tegra XHCI MMIO/SMMU\n"
+        "envelope to identify which sub-apertures CBB lets through at\n"
+        "NS EL2 vs which ones still raise RAS. See\n"
+        "`docs/jetson-cbb-report.md` and `docs/jetson-usb-networking-plan.md`.\n"
     ),
 };
 
