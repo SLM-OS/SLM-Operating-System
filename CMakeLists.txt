@@ -512,6 +512,7 @@ set(KERNEL_SOURCES
 
     # Shell (core + command modules)
     kernel/src/shell.c
+    kernel/src/shell_history.c
     kernel/src/shell_io.c
     kernel/src/shell_io_uart.c
     kernel/src/shell_session.c
@@ -685,6 +686,7 @@ set(TEST_SOURCES
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c
     kernel/tests/test_shell_session.c
+    kernel/tests/test_shell_history.c
     kernel/tests/test_blob_autoload.c
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnet.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_config.c>

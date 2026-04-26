@@ -1,6 +1,7 @@
 # Shell Command History — Plan
 
 **Tracking:** 🎫 [#434](https://github.com/SLM-OS/SLM-Operating-System/issues/434)
+**Status:** Implemented (kernel/src/shell_history.c, kernel/src/shell.c::shell_read_command, kernel/tests/test_shell_history.c).
 
 Add per-session command history with up/down arrow recall to the SLM-OS
 shell. Out of scope for the first cut: reverse search (Ctrl-R), prefix

@@ -55,6 +55,9 @@ int test_suite_shell(void);
 /* Shell session pool / per-task binding tests */
 int test_suite_shell_session(void);
 
+/* Per-session command-history ring + ESC[A/B parser tests (#434) */
+int test_suite_shell_history(void);
+
 /* Runtime blob autoload config + boot replay tests */
 int test_suite_blob_autoload(void);
 

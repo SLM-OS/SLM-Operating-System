@@ -466,6 +466,127 @@ int shell_read_line(char *buf, int max_len)
     return pos;
 }
 
+/*
+ * REPL line reader (#434). Same per-byte editing rules as
+ * shell_read_line but with two extras: it emits the prompt itself
+ * (so the caller does not double-print), and it runs an ESC-sequence
+ * parser that turns "ESC [ A" / "ESC [ B" into shell_history_prev /
+ * shell_history_next calls. A bare ESC followed by an unknown byte —
+ * or an unknown CSI parameter byte — is dropped from the parser and
+ * the trailing byte falls through to the existing data-byte path,
+ * matching the spec's "no Vi-mode toggle to break" rule.
+ *
+ * Repaint: \r ESC[K to move to column 0 and erase to end of line, then
+ * the prompt and the recalled text. The cursor lands at end-of-input
+ * (no in-line cursor support yet — left/right arrows are out of scope).
+ *
+ * One line-edit loop covers both the UART path and every TCP session:
+ * the telnet parser delivers ESC bytes (0x1B) to the RX ring as-is
+ * (telnet.c only filters IAC sequences starting at 0xFF), so the same
+ * ESC[A/B handling here works for telnet clients without changes to
+ * shell_io_tcp.c or telnet.c.
+ */
+int shell_read_command(const char *prompt, char *buf, int max_len)
+{
+    struct shell_session *s = shell_session_current();
+    if (!s || !s->io || max_len <= 0) {
+        if (buf && max_len > 0) {
+            buf[0] = '\0';
+        }
+        return -1;
+    }
+    struct shell_io *io = s->io;
+
+    if (prompt && *prompt) {
+        io->write(io, prompt, strlen(prompt));
+    }
+
+    enum { ES_DATA, ES_ESC, ES_CSI } esc_state = ES_DATA;
+    int pos = 0;
+
+    for (;;) {
+        if (pos >= max_len - 1) {
+            break;
+        }
+        int ch = io->read_char(io);
+        if (ch < 0) {
+            buf[pos] = '\0';
+            return -1;
+        }
+        char c = (char)ch;
+
+        /* ESC-sequence parser. Bare ESC and unknown CSI parameter
+         * bytes deliberately fall through to the data path so the
+         * trailing byte is processed exactly as if it had arrived
+         * standalone. */
+        if (esc_state == ES_ESC) {
+            if (c == '[') {
+                esc_state = ES_CSI;
+                continue;
+            }
+            esc_state = ES_DATA;
+            /* Bare ESC discarded; reprocess `c` as data. */
+        } else if (esc_state == ES_CSI) {
+            esc_state = ES_DATA;
+            if (c == 'A' || c == 'B') {
+                const char *recall = (c == 'A')
+                                   ? shell_history_prev(s)
+                                   : shell_history_next(s);
+                if (recall) {
+                    /* \r → column 0; ESC[K → erase to end of line. */
+                    io->write(io, "\r\x1b[K", 4);
+                    if (prompt && *prompt) {
+                        io->write(io, prompt, strlen(prompt));
+                    }
+                    size_t rl = strlen(recall);
+                    if (rl > (size_t)(max_len - 1)) {
+                        rl = (size_t)(max_len - 1);
+                    }
+                    if (rl > 0) {
+                        memcpy(buf, recall, rl);
+                        io->write(io, buf, rl);
+                    }
+                    buf[rl] = '\0';
+                    pos = (int)rl;
+                }
+                continue;
+            }
+            /* Unknown CSI; let the trailing byte fall through. */
+        }
+
+        if (c == 0x1B) {
+            esc_state = ES_ESC;
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            io->write(io, "\r\n", 2);
+            break;
+        }
+        if (c == '\b' || c == 0x7F) {
+            if (pos > 0) {
+                pos--;
+                io->write(io, "\b \b", 3);
+            }
+            continue;
+        }
+        if (c == 0x03) {
+            io->write(io, "^C\r\n", 4);
+            shell_history_reset_cursor(s);
+            pos = 0;
+            break;
+        }
+        if (c >= 0x20 && c < 0x7F) {
+            buf[pos++] = c;
+            io->write(io, &c, 1);
+            continue;
+        }
+        /* Other control bytes silently ignored, same as shell_read_line. */
+    }
+
+    buf[pos] = '\0';
+    return pos;
+}
+
 /* ============================================================================
  * Per-session I/O wrappers
  * ============================================================================ */
@@ -673,11 +794,11 @@ void shell_run(void)
     int argc;
 
     while (1) {
-        /* Print prompt */
-        shell_puts(SHELL_PROMPT);
-
-        /* Read line */
-        int len = shell_read_line(line_buffer, SHELL_MAX_LINE);
+        /* shell_read_command emits the prompt + runs the ESC[A/B
+         * history parser. Replaces the older shell_puts(SHELL_PROMPT)
+         * + shell_read_line() pair so the history parser sees the
+         * full byte stream including arrow-key sequences (#434). */
+        int len = shell_read_command(SHELL_PROMPT, line_buffer, SHELL_MAX_LINE);
 
         if (len < 0) {
             /* Session closed (peer disconnect). End the REPL. */
@@ -686,6 +807,12 @@ void shell_run(void)
         if (len == 0) {
             continue;  /* Empty line */
         }
+
+        /* Capture into history before parse_line shreds the buffer with
+         * in-place NUL terminators. shell_history_add itself filters
+         * whitespace-only and exact-duplicate-of-most-recent so this
+         * call site stays simple. */
+        shell_history_add(shell_session_current(), line_buffer);
 
         /* Parse into argc/argv */
         argc = parse_line(line_buffer, argv, SHELL_MAX_ARGS);

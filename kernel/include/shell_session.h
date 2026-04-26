@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include "config.h"
 #include "vfs.h"
+#include "shell.h"
 #include "shell_io.h"
 
 /* Maximum number of non-console sessions (e.g. TCP). Kept fixed so the
@@ -49,6 +50,19 @@ struct shell_xput_session {
     uint32_t expected_size;
     uint32_t received_size;
     uint32_t checksum;
+};
+
+/* Per-session command-history ring. Sized at 32 × 128 = 4 KB of payload
+ * plus three byte-sized counters; the entire suite (16 TCP slots +
+ * console) fits in ~64 KB of BSS. Indexed newest-first by browse
+ * cursor: cursor 0 selects the most recently added entry, cursor
+ * count-1 selects the oldest, cursor -1 means the user is on the
+ * live edit buffer (no recall). See docs/shell-command-history-plan.md. */
+struct shell_history {
+    char     entries[SHELL_HISTORY_DEPTH][SHELL_HISTORY_LINE_MAX];
+    uint8_t  count;     /* valid entries (saturates at SHELL_HISTORY_DEPTH) */
+    uint8_t  head;      /* slot the next add() overwrites (modulo DEPTH) */
+    int8_t   cursor;    /* -1 = live edit buffer; 0..count-1 = recalled */
 };
 
 struct shell_session {
@@ -99,6 +113,13 @@ struct shell_session {
      * connection so concurrent operators cannot clobber each other's
      * transfers. */
     struct shell_xput_session xput;
+
+    /* Per-session command history (#434). The REPL line reader pushes
+     * each non-blank, non-duplicate command in here, and up / down
+     * arrow recall walks the ring. Console + each TCP session has its
+     * own copy so two operators editing in parallel cannot see each
+     * other's recall buffer. */
+    struct shell_history history;
 };
 
 /* Get the singleton console session (UART-backed). Always non-NULL
