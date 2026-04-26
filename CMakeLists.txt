@@ -436,6 +436,12 @@ set(KERNEL_SOURCES
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp/ivc.c>
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/drivers/bpmp/mrq.c>
 
+    # Tegra234 HSI2C controller driver (#396 Hardware Task 1) — single
+    # file, gated on PLATFORM_JETSON_ORIN_NANO inside via #ifdef so a
+    # cross-platform build links a stub. Used for IMX219 sensor
+    # control over the cam_i2c bus.
+    kernel/drivers/i2c/i2c_tegra.c
+
     # Interrupt controller and timer (ARM64 only — x86-64 uses pic.c + timer_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/gic.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/timer.c>

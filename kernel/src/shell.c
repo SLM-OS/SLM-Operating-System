@@ -115,6 +115,7 @@ const shell_cmd_t builtin_commands[] = {
     {"hspdiag",   cmd_hspdiag,   "HSP dimensioning + BPMP doorbell probe", false},
     {"bpmp",      cmd_bpmp,      "BPMP IPC smoke test (PING + clock query)", false},
     {"pcietrain", cmd_pcietrain, "Tegra PCIe C8 host init + link train + EP probe", false},
+    {"imx219",    cmd_imx219,    "Read IMX219 CHIP_ID via cam_i2c (expect 0x0219)", false},
 #endif
 };
 
