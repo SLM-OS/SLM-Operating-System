@@ -761,6 +761,16 @@ def main() -> int:
     total = len(data)
     prompt = args.prompt.encode("ascii")
 
+    # If the remote path looks like a directory (trailing "/" or "/."),
+    # auto-append the local file's basename. The kernel's `xput begin`
+    # opens its path with O_WRONLY|O_CREAT|O_TRUNC, which fails on a
+    # directory — without this rewrite a `slm-put.py ... /mnt/files/.`
+    # invocation always returns "xput begin failed".
+    if args.remote_path.endswith("/."):
+        args.remote_path = args.remote_path[:-1] + local_path.name
+    elif args.remote_path.endswith("/"):
+        args.remote_path = args.remote_path + local_path.name
+
     if args.transport == "telnet":
         host = resolve_labctl_target(args.target) if args.labctl else args.target
         target_desc = host
