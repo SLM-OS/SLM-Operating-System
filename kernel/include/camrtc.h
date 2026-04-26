@@ -34,9 +34,22 @@
  *     is in WFI, idle waiting for an HSP message.
  *   - SM[0] / SM[1] / SS[0] all peek cleanly with FULL bit clear
  *     (no stale messages in flight).
- * Implication: SLM-OS does NOT need to re-load FW or run a full
- * power-on sequence. The HELLO handshake is enough to establish a
- * working session.
+ * The inheritance probes are GREEN — but HELLO writes to SM[0]
+ * still don't get a response. Holding `tegra-camera-rtcpu`
+ * `power/control = on` in slmos-kexec (so Linux's autosuspend
+ * never fires) does not change the failure mode either, ruling
+ * out the runtime-suspend hypothesis. The actual blocker is
+ * deeper — see `docs/jetson-camera-rtcpu-ivc-driver-notes.md`
+ * "Hardware Task 3 Option B" section + issue #438 for the
+ * working theory and investigation queue.
+ *
+ * Concurrency contract: the camrtc_* APIs are NOT thread-safe.
+ * Module-scope statics carry the SM addresses + initialised flag;
+ * two CPUs / two tasks calling `camrtc_init` or `camrtc_send_msg`
+ * concurrently would race the mailbox state. Today's only caller
+ * is the `rcediag` shell command (single-CPU shell context). If a
+ * future caller (Lua binding, capture-control pipeline) needs
+ * concurrent access, wrap the API calls in a per-bus mutex.
  *
  * Jetson-only (`PLATFORM_JETSON_ORIN_NANO`); other platforms link
  * stubs that return -1 from every function.

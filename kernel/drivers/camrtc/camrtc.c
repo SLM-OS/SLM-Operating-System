@@ -210,11 +210,19 @@ static int sm_rx_recv(uint32_t *out_msg, uint32_t timeout_us)
 /* Generate a 24-bit cookie. Anything random-ish is fine — RCE just
  * echoes it back so we can ignore stale messages from a previous
  * (Linux) session. timer_get_count() is monotonic and changes
- * frequently; the lower 24 bits are sufficiently entropic. */
+ * frequently; the lower 24 bits are sufficiently entropic.
+ *
+ * Avoid 0: L4T's `camrtc_hsp_vm_cookie` (cached at
+ * `docs/reference/l4t-rtcpu-hsp-combo.c:310`) explicitly increments
+ * past 0. Whether RCE treats cookie==0 specially is undocumented,
+ * so mirror the defensive check rather than discover an edge case
+ * the hard way. */
 static uint32_t camrtc_make_cookie(void)
 {
     uint64_t now = timer_get_count();
-    return (uint32_t)((now >> 5) & CAMRTC_HSP_MSG_PARAM_MASK);
+    uint32_t value = (uint32_t)((now >> 5) & CAMRTC_HSP_MSG_PARAM_MASK);
+    if (value == 0u) value = 1u;
+    return value;
 }
 
 /* ---- Public API: handshake ---- */

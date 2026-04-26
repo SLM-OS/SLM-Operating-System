@@ -445,15 +445,21 @@ What doesn't work (HELLO BLOCKED):
   match L4T's `tegra_hsp_sm_tx_write` /
   `camrtc_hsp_vm_send_irqmsg` paths verbatim.
 
-Working theory: **RCE's HSP IRQ routing was reconfigured by Linux's
-pre-kexec runtime suspend** (camera autosuspend after 5 s idle, see
+**ORIGINAL working theory** (now ruled out — see "Additional
+verification" + "Path A tried" below): RCE's HSP IRQ routing was
+reconfigured by Linux's pre-kexec runtime suspend (camera
+autosuspend after 5 s idle, see
 `tegra234-camera.dtsi:68 nvidia,autosuspend-delay-ms = <5000>`),
 leaving the SM[0] FULL → R5 IRQ path masked at the GIC even though
-the SM-side `FULL_INT_IE` bit is set. Or RCE's firmware is in a
-"suspended" state where it ignores HSP-VM messages until it sees
-some other wake-up signal first (analogous to how the Linux
-`tegra_camrtc_fw_resume` sends `CAMRTC_HSP_RESUME` via mailbox AND
-asserts power-domain transitions via BPMP).
+the SM-side `FULL_INT_IE` bit is set.
+
+**Refined working theory** (current best, captured in issue #438):
+the camera firmware's HSP-VM ISR is torn down by Linux's kexec
+`device_shutdown()` callback for `tegra-camera-rtcpu` (analogous to
+the tegra-xusb teardown documented in #285), or by a TF-A / SPE-side
+state change firing before SLM-OS's CPU sees the kexec. Holding
+runtime PM on doesn't prevent either of those, which matches the
+Path A null result below.
 
 Additional verification (2026-04-26, same session): tried sending
 `CAMRTC_HSP_MSG(IRQ=0x00, 1)` to SM[0] BEFORE the HELLO request, on
