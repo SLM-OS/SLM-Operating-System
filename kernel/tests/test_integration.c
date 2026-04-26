@@ -162,8 +162,17 @@ static bool     dormancy_reported[MAX_CPUS];
 /* Unity's weak default setUp is fine — all sampling happens in
  * tearDown, so we don't need to override the entry hook. */
 
+/* Forward decl: defined in test_lua.c. Closes any lua_State left in
+ * test_lua's per-test registry (issue #374). On non-Lua suites the
+ * registry is always empty, so this is a no-op. */
+extern void test_lua_teardown_reclaim(void);
+
 void tearDown(void)
 {
+    /* Reclaim any lua_State that escaped its test (#374). Runs on
+     * every platform — Lua suite is platform-neutral. */
+    test_lua_teardown_reclaim();
+
 #if defined(PLATFORM_RASPI5)
     if (!Unity.current_test) return;
 
