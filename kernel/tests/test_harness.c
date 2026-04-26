@@ -122,6 +122,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_sched_trace();
     total_failures += test_suite_latency_hist();
     total_failures += test_suite_gpu_consumer();
+    total_failures += test_suite_admin_telemetry();
 #if !defined(PLATFORM_X86_64)
     total_failures += test_suite_msg_router();
     total_failures += test_suite_coop_preempt();

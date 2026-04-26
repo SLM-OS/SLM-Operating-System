@@ -28,6 +28,7 @@
 #include "latency_hist.h"
 #include "rate_ewma.h"
 #include "gpu_consumer.h"
+#include "admin_telemetry.h"
 #if defined(ENABLE_NETWORKING)
 #include "shell_io_tcp.h"
 #include "tcp_shell_server.h"
@@ -480,7 +481,10 @@ static int l_model_stats(lua_State *L) {
 static int l_model_infer(lua_State *L) {
     if (!L) return 0;
     int idx = (int)luaL_checkinteger(L, 1);
+    uint64_t t0 = slm_get_time_ns();
     int result = rust_infer_classify((uint32_t)idx);
+    uint64_t t1 = slm_get_time_ns();
+    admin_telemetry_record_inference(t1 > t0 ? t1 - t0 : 0u, result >= 0);
     lua_pushinteger(L, result);
     return 1;
 }
@@ -545,11 +549,14 @@ static int l_model_infer_bytes(lua_State *L) {
     uint8_t output[64 * 4] __attribute__((aligned(4)));
     __builtin_memset(output, 0, sizeof(output));
 
+    uint64_t t0 = slm_get_time_ns();
     int n = rust_infer((uint32_t)idx,
                        (const float *)buf,
                        blen / 4u,
                        (float *)output,
                        64u);
+    uint64_t t1 = slm_get_time_ns();
+    admin_telemetry_record_inference(t1 > t0 ? t1 - t0 : 0u, n >= 0);
     pmm_free_pages(buf, pages);
 
     if (n < 0) {
@@ -617,11 +624,14 @@ static int l_model_infer_file(lua_State *L) {
     uint8_t output[64 * 4] __attribute__((aligned(4)));
     __builtin_memset(output, 0, sizeof(output));
 
+    uint64_t t0 = slm_get_time_ns();
     int n = rust_infer((uint32_t)idx,
                        (const float *)buf,
                        info.size / 4u,
                        (float *)output,
                        64u);
+    uint64_t t1 = slm_get_time_ns();
+    admin_telemetry_record_inference(t1 > t0 ? t1 - t0 : 0u, n >= 0);
     pmm_free_pages(buf, pages);
 
     if (n < 0) {
@@ -1411,21 +1421,73 @@ static int l_sched_decision_rate(lua_State *L) {
     return 1;
 }
 
+/* Push a histogram snapshot as a Lua table with the standard shape used
+ * by every `slm.latency_histogram(consumer)` branch. Keeps bucket-key
+ * formatting in one place so future consumers (M4 telemetry, etc.)
+ * don't multiply the duplication. */
+static void push_latency_hist_table(lua_State *L,
+                                    const struct latency_hist *hist,
+                                    const char *consumer)
+{
+    lua_createtable(L, 0, 7);
+    lua_pushstring(L, consumer);
+    lua_setfield(L, -2, "consumer");
+
+    /* Bucket sub-table keyed by lower-bound ns (as a string for
+     * Lua-friendly numeric keys outside lua_Integer range — bucket
+     * 31's lower bound is ~6.9e10, which fits in lua_Integer on
+     * 64-bit but we use strings for stable JSON-like rendering). */
+    lua_createtable(L, 0, LATENCY_HIST_BUCKETS);
+    for (uint32_t i = 0; i < LATENCY_HIST_BUCKETS; i++) {
+        if (hist->buckets[i] == 0) continue;
+        char key[32];
+        uint64_t low = latency_hist_bucket_low_ns(i);
+        /* Hand-format: avoid pulling snprintf into this path. */
+        int kpos = 0;
+        char tmp[24];
+        int t = 0;
+        uint64_t v = low;
+        if (v == 0) tmp[t++] = '0';
+        while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
+        while (t > 0) key[kpos++] = tmp[--t];
+        key[kpos] = '\0';
+        lua_pushinteger(L, (lua_Integer)hist->buckets[i]);
+        lua_setfield(L, -2, key);
+    }
+    lua_setfield(L, -2, "buckets");
+
+    lua_pushinteger(L, (lua_Integer)hist->count);
+    lua_setfield(L, -2, "total");
+    lua_pushinteger(L, (lua_Integer)hist->min_ns);
+    lua_setfield(L, -2, "min_ns");
+    lua_pushinteger(L, (lua_Integer)hist->max_ns);
+    lua_setfield(L, -2, "max_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(hist, 50));
+    lua_setfield(L, -2, "p50_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(hist, 90));
+    lua_setfield(L, -2, "p90_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(hist, 99));
+    lua_setfield(L, -2, "p99_ns");
+}
+
 /**
  * slm.latency_histogram(consumer) - Bucketed latency histogram.
  *
- * Currently only "sched" is wired; "eviction" and "inference" return nil
- * (they land in M3). Returns table:
+ * Consumer is one of: "sched", "eviction", "inference". Returns table:
  *   {
  *     buckets = { [low_ns_str] = count, ... },  -- only non-empty buckets
  *     total, min_ns, max_ns,
  *     p50_ns, p90_ns, p99_ns,
- *     consumer = "sched"
+ *     consumer = <string>
  *   }
+ *
+ * Returns nil if the consumer name is unknown or the underlying
+ * accessor fails (e.g., "sched" on a build without CONFIG_AI_SCHEDULER).
  */
 static int l_latency_histogram(lua_State *L) {
     if (!L) return 0;
     const char *consumer = luaL_checkstring(L, 1);
+    struct latency_hist hist;
 
 #if defined(CONFIG_AI_SCHEDULER)
     if (strcmp(consumer, "sched") == 0) {
@@ -1434,66 +1496,143 @@ static int l_latency_histogram(lua_State *L) {
                                            uint64_t *, uint64_t *,
                                            uint64_t *, uint64_t *, uint64_t *);
         const char *policy = sched_get_policy();
-        struct latency_hist hist;
         if (sched_ai_get_rate_stats(policy, &hist, NULL, NULL,
                                     NULL, NULL, NULL) != 0) {
             lua_pushnil(L);
             return 1;
         }
-
-        lua_createtable(L, 0, 7);
-        lua_pushstring(L, "sched");
-        lua_setfield(L, -2, "consumer");
-
-        /* Bucket sub-table keyed by lower-bound ns (as a string for
-         * Lua-friendly numeric keys outside lua_Integer range — bucket
-         * 31's lower bound is ~6.9e10, which fits in lua_Integer on
-         * 64-bit but we use strings for stable JSON-like rendering). */
-        lua_createtable(L, 0, LATENCY_HIST_BUCKETS);
-        for (uint32_t i = 0; i < LATENCY_HIST_BUCKETS; i++) {
-            if (hist.buckets[i] == 0) continue;
-            char key[32];
-            uint64_t low = latency_hist_bucket_low_ns(i);
-            /* Hand-format: avoid pulling snprintf into the hot path. */
-            int kpos = 0;
-            char tmp[24];
-            int t = 0;
-            uint64_t v = low;
-            if (v == 0) tmp[t++] = '0';
-            while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
-            while (t > 0) key[kpos++] = tmp[--t];
-            key[kpos] = '\0';
-            lua_pushinteger(L, (lua_Integer)hist.buckets[i]);
-            lua_setfield(L, -2, key);
-        }
-        lua_setfield(L, -2, "buckets");
-
-        lua_pushinteger(L, (lua_Integer)hist.count);
-        lua_setfield(L, -2, "total");
-        lua_pushinteger(L, (lua_Integer)hist.min_ns);
-        lua_setfield(L, -2, "min_ns");
-        lua_pushinteger(L, (lua_Integer)hist.max_ns);
-        lua_setfield(L, -2, "max_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 50));
-        lua_setfield(L, -2, "p50_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 90));
-        lua_setfield(L, -2, "p90_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 99));
-        lua_setfield(L, -2, "p99_ns");
-
+        push_latency_hist_table(L, &hist, "sched");
         return 1;
     }
 #endif
 
-    if (strcmp(consumer, "eviction") == 0 ||
-        strcmp(consumer, "inference") == 0) {
-        /* M3 wires these consumers. Return nil for now so callers can
-         * detect "not yet available" without an error. */
-        lua_pushnil(L);
+    if (strcmp(consumer, "eviction") == 0) {
+        if (admin_telemetry_get_eviction_stats(&hist, NULL, NULL,
+                                               NULL, NULL, NULL) != 0) {
+            lua_pushnil(L);
+            return 1;
+        }
+        push_latency_hist_table(L, &hist, "eviction");
+        return 1;
+    }
+
+    if (strcmp(consumer, "inference") == 0) {
+        if (admin_telemetry_get_inference_stats(&hist, NULL, NULL,
+                                                NULL, NULL, NULL) != 0) {
+            lua_pushnil(L);
+            return 1;
+        }
+        push_latency_hist_table(L, &hist, "inference");
         return 1;
     }
 
     lua_pushnil(L);
+    return 1;
+}
+
+/**
+ * slm.eviction_decision_rate() - Smoothed eviction rate + percentile latencies.
+ *
+ * Same shape as `slm.sched_decision_rate()` but for the eviction
+ * `select_victim` site (Rust runtime). Returns table:
+ *   { decisions_per_s, fallback_rate, p50_latency_ns, p90_latency_ns,
+ *     p99_latency_ns, min_latency_ns, max_latency_ns, avg_latency_ns,
+ *     total_decisions, total_fallbacks, total_ns }
+ */
+static int l_eviction_decision_rate(lua_State *L) {
+    if (!L) return 0;
+    struct latency_hist hist;
+    uint64_t decision_rate_q16 = 0, fallback_rate_q16 = 0;
+    uint64_t total_decisions = 0, total_fallbacks = 0, total_ns = 0;
+
+    admin_telemetry_get_eviction_stats(&hist,
+                                       &decision_rate_q16, &fallback_rate_q16,
+                                       &total_decisions, &total_fallbacks,
+                                       &total_ns);
+
+    lua_createtable(L, 0, 11);
+
+    lua_pushinteger(L, (lua_Integer)(decision_rate_q16 >> RATE_EWMA_Q16_SHIFT));
+    lua_setfield(L, -2, "decisions_per_s");
+    lua_pushinteger(L, (lua_Integer)(fallback_rate_q16 >> RATE_EWMA_Q16_SHIFT));
+    lua_setfield(L, -2, "fallback_rate");
+
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 50));
+    lua_setfield(L, -2, "p50_latency_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 90));
+    lua_setfield(L, -2, "p90_latency_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 99));
+    lua_setfield(L, -2, "p99_latency_ns");
+
+    lua_pushinteger(L, (lua_Integer)hist.min_ns);
+    lua_setfield(L, -2, "min_latency_ns");
+    lua_pushinteger(L, (lua_Integer)hist.max_ns);
+    lua_setfield(L, -2, "max_latency_ns");
+    lua_pushinteger(L, (lua_Integer)(hist.count > 0 ? hist.sum_ns / hist.count : 0));
+    lua_setfield(L, -2, "avg_latency_ns");
+
+    lua_pushinteger(L, (lua_Integer)total_decisions);
+    lua_setfield(L, -2, "total_decisions");
+    lua_pushinteger(L, (lua_Integer)total_fallbacks);
+    lua_setfield(L, -2, "total_fallbacks");
+    lua_pushinteger(L, (lua_Integer)total_ns);
+    lua_setfield(L, -2, "total_ns");
+
+    return 1;
+}
+
+/**
+ * slm.inference_rate() - Smoothed inference call rate + percentile latencies.
+ *
+ * M3 reports a single global series across all `slm.model_infer*`
+ * call sites. Per-model breakdown (spec §6.2) is deferred to M4 with
+ * the telemetry feed (per-topic counters give natural per-model
+ * aggregation without a kernel-side fixed-size map).
+ *
+ * Returns table:
+ *   { calls_per_s, errors_per_s, p50_ns, p99_ns, p50_latency_ns,
+ *     p90_latency_ns, p99_latency_ns, min_latency_ns, max_latency_ns,
+ *     avg_latency_ns, total_calls, total_errors, total_ns }
+ */
+static int l_inference_rate(lua_State *L) {
+    if (!L) return 0;
+    struct latency_hist hist;
+    uint64_t calls_q16 = 0, errors_q16 = 0;
+    uint64_t total_calls = 0, total_errors = 0, total_ns = 0;
+
+    admin_telemetry_get_inference_stats(&hist,
+                                        &calls_q16, &errors_q16,
+                                        &total_calls, &total_errors,
+                                        &total_ns);
+
+    lua_createtable(L, 0, 11);
+
+    lua_pushinteger(L, (lua_Integer)(calls_q16 >> RATE_EWMA_Q16_SHIFT));
+    lua_setfield(L, -2, "calls_per_s");
+    lua_pushinteger(L, (lua_Integer)(errors_q16 >> RATE_EWMA_Q16_SHIFT));
+    lua_setfield(L, -2, "errors_per_s");
+
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 50));
+    lua_setfield(L, -2, "p50_latency_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 90));
+    lua_setfield(L, -2, "p90_latency_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 99));
+    lua_setfield(L, -2, "p99_latency_ns");
+
+    lua_pushinteger(L, (lua_Integer)hist.min_ns);
+    lua_setfield(L, -2, "min_latency_ns");
+    lua_pushinteger(L, (lua_Integer)hist.max_ns);
+    lua_setfield(L, -2, "max_latency_ns");
+    lua_pushinteger(L, (lua_Integer)(hist.count > 0 ? hist.sum_ns / hist.count : 0));
+    lua_setfield(L, -2, "avg_latency_ns");
+
+    lua_pushinteger(L, (lua_Integer)total_calls);
+    lua_setfield(L, -2, "total_calls");
+    lua_pushinteger(L, (lua_Integer)total_errors);
+    lua_setfield(L, -2, "total_errors");
+    lua_pushinteger(L, (lua_Integer)total_ns);
+    lua_setfield(L, -2, "total_ns");
+
     return 1;
 }
 
@@ -3651,6 +3790,9 @@ static const luaL_Reg slm_lib_safe[] = {
     /* Admin & telemetry suite (M2) — read-only */
     {"gpu_use_get", l_gpu_use_get},
     {"gpu_use_status", l_gpu_use_status},
+    /* Admin & telemetry suite (M3) — read-only */
+    {"eviction_decision_rate", l_eviction_decision_rate},
+    {"inference_rate", l_inference_rate},
     /* CPU info */
     {"cpu_info", l_cpu_info},
     {"term_size", l_term_size},
