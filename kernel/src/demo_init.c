@@ -35,6 +35,8 @@ extern const unsigned char demo_multiproc_lua_start[];
 extern const unsigned char demo_multiproc_lua_end[];
 extern const unsigned char demo_hailo_lua_start[];
 extern const unsigned char demo_hailo_lua_end[];
+extern const unsigned char demo_admin_lua_start[];
+extern const unsigned char demo_admin_lua_end[];
 
 int demo_init(void)
 {
@@ -93,6 +95,18 @@ int demo_init(void)
         littlefs_file_write(mnt, fh, demo_hailo_lua_start,
                             (size_t)(demo_hailo_lua_end - demo_hailo_lua_start));
         littlefs_file_close(mnt, fh);
+    }
+
+    /* M6: admin & telemetry suite TUI. The `admin` shell command runs
+     * `lua /mnt/files/admin.lua` so this file must exist before the
+     * first `admin` invocation. demo_init runs early enough during
+     * shell init to satisfy that ordering. */
+    int fad = littlefs_file_open(mnt, "/admin.lua",
+                                 LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (fad >= 0) {
+        littlefs_file_write(mnt, fad, demo_admin_lua_start,
+                            (size_t)(demo_admin_lua_end - demo_admin_lua_start));
+        littlefs_file_close(mnt, fad);
     }
 
     /* #64: boot-time model preload config. One model name per line.

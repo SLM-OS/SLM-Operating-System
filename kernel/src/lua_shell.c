@@ -91,10 +91,34 @@ static int cmd_lua_admin(int argc, char *argv[]) {
     return cmd_lua_common(argc, argv, true);
 }
 
+/*
+ * admin - Launch the seven-page admin & telemetry suite TUI (M6).
+ *
+ * Thin wrapper around `lua /mnt/files/admin.lua`. The script is
+ * embedded in the kernel image (via demo_scripts.S) and written
+ * to /mnt/files/admin.lua at boot by demo_init().
+ *
+ * Uses the safe Lua bindings only — every mutating control plane
+ * (policy swap, gpu_use_set, model_launch) is reachable through
+ * a separate `lua-admin` session. Operators run `admin` over telnet
+ * for read-only observation; `lua-admin` for control surfaces.
+ */
+static int cmd_admin(int argc, char *argv[]) {
+    (void)argc;
+    (void)argv;
+    /* Forge an `argv` for cmd_lua_common: it expects argc>=2 with
+     * argv[1] as the script path. */
+    char *fake_argv[2];
+    fake_argv[0] = "admin";
+    fake_argv[1] = "/mnt/files/admin.lua";
+    return cmd_lua_common(2, fake_argv, false);
+}
+
 /* Command registration */
 static const shell_cmd_t lua_commands[] = {
     {"lua", cmd_lua, "Lua scripting (concurrent-safe REPL or script)", false},
     {"lua-admin", cmd_lua_admin, "Lua scripting with global admin bindings", true},
+    {"admin", cmd_admin, "Launch the admin & telemetry TUI (M6)", false},
 };
 
 void lua_shell_init(void) {
