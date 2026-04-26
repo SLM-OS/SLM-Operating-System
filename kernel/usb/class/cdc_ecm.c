@@ -498,6 +498,8 @@ static void cdc_notify_handle_event(void)
             cdc.notif.urb.actual_length >= sizeof(struct usb_cdc_notification) + 8) {
             bool prev_valid = __atomic_load_n(&cdc.link_signal_valid, __ATOMIC_RELAXED);
             bool prev_up    = __atomic_load_n(&cdc.link_ready, __ATOMIC_RELAXED);
+            uint32_t prev_upstream_bps = cdc.upstream_bps;
+            uint32_t prev_downstream_bps = cdc.downstream_bps;
             cdc.upstream_bps = le32(buf + 8);
             cdc.downstream_bps = le32(buf + 12);
             bool up = (cdc.upstream_bps != 0 || cdc.downstream_bps != 0);
@@ -507,7 +509,8 @@ static void cdc_notify_handle_event(void)
                 INFO("cdc_ecm: inferred link %s from speed change (%u/%u bps)",
                      up ? "up" : "down",
                      cdc.upstream_bps, cdc.downstream_bps);
-            } else {
+            } else if (prev_upstream_bps != cdc.upstream_bps ||
+                       prev_downstream_bps != cdc.downstream_bps) {
                 INFO("cdc_ecm: speed change upstream=%u downstream=%u",
                      cdc.upstream_bps, cdc.downstream_bps);
             }

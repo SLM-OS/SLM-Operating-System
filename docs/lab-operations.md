@@ -213,6 +213,32 @@ scp scripts/jetson-kexec-slmos.sh root@<JETSON_IP>:/usr/local/bin/slmos-kexec
 ssh root@<JETSON_IP> "chmod +x /usr/local/bin/slmos-kexec"
 ```
 
+### Optional: install the Jetson auto-kexec boot target
+
+For unattended bring-up, the repo also carries a `systemd` boot target that
+automatically runs `slmos-kexec` after Linux reaches `multi-user.target`.
+This does **not** replace the normal Linux boot; it is meant to back a
+second extlinux/boot-menu entry while leaving `primary` as the default.
+
+Install once:
+
+```bash
+scp scripts/systemd/jetson/slmos-autokexec.target root@<JETSON_IP>:/etc/systemd/system/
+scp scripts/systemd/jetson/slmos-autokexec.service root@<JETSON_IP>:/etc/systemd/system/
+scp scripts/systemd/jetson/slmos-autokexec.env root@<JETSON_IP>:/etc/default/slmos-autokexec
+ssh root@<JETSON_IP> 'systemctl daemon-reload && systemctl enable slmos-autokexec.service'
+```
+
+Then add a matching `LABEL slmos-autokexec` entry to
+`/boot/extlinux/extlinux.conf` that appends:
+
+```text
+systemd.unit=slmos-autokexec.target slmos.autokexec=1
+```
+
+See [`docs/deploy/jetson-kexec.md`](deploy/jetson-kexec.md) for the full
+entry and the expected behavior.
+
 ### Deploy Workflow
 
 ```bash

@@ -69,6 +69,58 @@ no manual unplug/replug. Current validation on the lab path:
 
 The helper script is reasonably well commented. Run it with `--help` on the Jetson for the full flag list, or read the script header for rationale on each step.
 
+### Optional: add an extlinux boot-menu entry that auto-kexecs into SLM-OS
+
+If you want a "no login step" deploy path but still want Linux to remain
+the default boot, install the repo's `systemd` target + service and add a
+second Linux boot entry that lands in that target.
+
+Install the units and default config once:
+
+```bash
+scp scripts/systemd/jetson/slmos-autokexec.target \
+    root@<JETSON_IP>:/etc/systemd/system/
+scp scripts/systemd/jetson/slmos-autokexec.service \
+    root@<JETSON_IP>:/etc/systemd/system/
+scp scripts/systemd/jetson/slmos-autokexec.env \
+    root@<JETSON_IP>:/etc/default/slmos-autokexec
+ssh root@<JETSON_IP> 'systemctl daemon-reload && systemctl enable slmos-autokexec.service'
+```
+
+The default config uses `/root/slmos.elf`. If you want a different path or
+helper flags, edit `/etc/default/slmos-autokexec` on the Jetson. `SLMOS_KEXEC_ARGS`
+may contain multiple helper flags separated by spaces.
+
+Then add a second extlinux entry in `/boot/extlinux/extlinux.conf`. Keep the
+existing `DEFAULT primary` line so normal boots still land in Linux.
+
+Important: do not hardcode the rootfs stanza from another board. Start from the
+working `primary` entry already on that Jetson, copy its `LINUX`, `INITRD`, and
+especially its full `APPEND` line unchanged, then append only the two autokexec
+markers shown below:
+
+```conf
+LABEL slmos-autokexec
+      MENU LABEL Linux -> auto-kexec SLM-OS
+      LINUX <same as primary>
+      INITRD <same as primary>
+      APPEND <copy the exact APPEND value from primary> \
+             systemd.unit=slmos-autokexec.target slmos.autokexec=1
+```
+
+Behavior:
+
+- `primary` remains the default Jetson boot path.
+- Selecting `slmos-autokexec` from the UEFI/extlinux menu boots Linux just
+  far enough to reach `multi-user.target`, then `systemd` runs
+  `/usr/local/bin/slmos-kexec`.
+- The serial console still shows the Linux boot first, then the usual
+  `slmos-kexec` handoff, then SLM-OS.
+
+This is the preferred unattended test path when you want the current Linux
+cooperative `kexec` handoff, but do not want to SSH in and trigger
+`slmos-kexec` manually.
+
 ---
 
 ## Deploy workflow
@@ -113,6 +165,19 @@ On the current `jetson-nano-2` lab setup, this path no longer needs a
 manual USB unplug/replug after `kexec`; the helper's root-hub cleanup
 and the retained slot-1 handoff are enough to get the Realtek USB
 Ethernet chain back in SLM-OS automatically.
+
+### Step 3a — Alternate: use the extlinux auto-kexec boot entry
+
+If you installed the optional `slmos-autokexec` target/service above, you
+can skip the SSH trigger step entirely:
+
+1. Reboot or power-cycle the Jetson.
+2. At the UEFI/extlinux menu, choose `Linux -> auto-kexec SLM-OS`.
+3. Wait for Linux to reach the custom target and invoke `slmos-kexec`.
+
+This keeps the default boot path unchanged (`primary`), but gives you a
+menu-selectable "Linux first, then auto-kexec" option for unattended test
+runs.
 
 ### Step 4 — Observe via serial
 
