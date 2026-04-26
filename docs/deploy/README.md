@@ -38,6 +38,12 @@ enforces the standard `/mnt/files/policies/` and `/mnt/files/models/`
 operator blob roots, and exposes a `doctor` check for those standard
 directories plus basic network readiness.
 
+For runtime policy replacement, authoritative boot-managed blob storage
+now lives persistently on the boot FAT volume under `0:/slmstore/`.
+`/mnt/files` remains the standard writable ingress and staging
+workspace used by `slm-put.py`, `slm-modelctl.py`, and shell upload
+flows.
+
 ---
 
 ## Target × Media Matrix

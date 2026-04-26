@@ -53,7 +53,7 @@ At-a-glance summary:
 | Scheduler live behavior validation | ✅ done | Deterministic runtime blobs affect real `ai_mlp` / `ai_ppo` decisions on `pi-5-2` |
 | File ingress core transport | ✅ partial | `put`, `xput`, and `slm-put.py` are live; telnet + serial framed upload/resume are hardware-validated |
 | Operator workflow wrapper | ✅ partial | `slm-modelctl.py` now supports subcommands, autoload management, legacy compatibility, scheduler probes, and HTTP fetch via `--http-url` |
-| Persistence / autoload | ✅ partial | Managed boot autoload exists for current eviction/scheduler blob kinds, but current builds still store it on RAM-backed `/mnt/files` |
+| Persistence / autoload | ✅ partial | Managed boot autoload exists for current eviction/scheduler blob kinds; authoritative managed copies and config now live persistently on boot FAT media under `0:/slmstore/`, while `/mnt/files` remains the staging/ingress workspace |
 | HTTP / authenticated transport | ✅ partial | Plain-HTTP download path exists in-kernel with shell, Lua/admin, and `slm-modelctl.py --http-url`; SHA-256 checked fetch is supported, while HTTPS and signed-artifact hardening are ticketed/deferred |
 | Pi 5 deploy-model validation | ✅ done | Maintenance-OS dual boot and SDWire-assisted host-driven kernel replacement have both been validated on `pi-5-2` |
 
@@ -474,10 +474,18 @@ Implemented now:
 
 Still missing:
 
-- true reboot persistence on current builds: `/mnt/files` is still a
-  RAM-backed LittleFS mount created in `main.c`, so autoload state does
-  not survive a full reboot until a non-volatile filesystem backend
-  exists
+- authoritative persistence is now solved separately from `/mnt/files`:
+  - boot-managed authoritative blob copies and `blob_autoload.conf`
+    now prefer the persistent boot FAT volume (`0:/slmstore/...`)
+  - `/mnt/files` is still useful as the writable ingress/staging
+    workspace, but it is no longer the source of truth for managed
+    autoload state when boot FAT is available
+  - this removes the prior “autoload is only RAM-backed” limitation for
+    ordinary Pi boot media
+- `/mnt/files` itself is still not a finished persistent general-purpose
+  store:
+  - the earlier MBR-partition LittleFS groundwork exists, but it is not
+    yet the authoritative production path for writable storage
 - stronger corruption/recovery policy than “log and skip failed entry”
   during boot replay
 - boot policy beyond replaying the configured paths

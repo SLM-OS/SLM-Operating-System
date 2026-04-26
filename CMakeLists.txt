@@ -597,6 +597,7 @@ set(KERNEL_SOURCES
     # unchanged. PIO data path; ADMA2 + BCM2712 cfginit deferred to
     # Stage 5 (#371).
     kernel/drivers/sdhci.c
+    kernel/src/boot_media.c
 
     # `kernel` admin shell command (#370, dynamic-kernel-replace
     # Stage 4). Wires the Stage 1/2/3 building blocks into a

@@ -1,5 +1,7 @@
 #include "runtime_blob_file.h"
 
+#include "boot_media.h"
+#include "fat32.h"
 #include "shell_internal.h"
 #include "slm_ffi.h"
 #ifdef CONFIG_AI_SCHEDULER
@@ -8,6 +10,124 @@
 #include "vfs.h"
 #include "pmm.h"
 #include "string.h"
+#include "../lib/fatfs/ff.h"
+
+#define RUNTIME_BLOB_FAT_VOL "0:"
+
+static int runtime_blob_is_fat_path(const char *path)
+{
+    return path && path[0] == '0' && path[1] == ':' && path[2] == '/';
+}
+
+static int runtime_blob_read_fat_path(const char *path,
+                                      char *resolved_out,
+                                      size_t resolved_out_cap,
+                                      uint8_t **buf_out,
+                                      size_t *buf_len_out,
+                                      size_t *pages_out)
+{
+    struct blkdev *dev = NULL;
+    FATFS fs;
+    FILINFO info;
+    FIL fp;
+    FRESULT res;
+    uint8_t *buf = NULL;
+    size_t pages_needed;
+    size_t total = 0;
+
+    if (!path || !buf_out || !buf_len_out || !pages_out) {
+        return RUNTIME_BLOB_FILE_STAGE_FAILED;
+    }
+
+    dev = boot_media_acquire();
+    if (!dev) {
+        return RUNTIME_BLOB_FILE_READ_FAILED;
+    }
+
+    fatfs_disk_attach(dev);
+    res = f_mount(&fs, RUNTIME_BLOB_FAT_VOL, 1);
+    if (res != FR_OK) {
+        fatfs_disk_detach();
+        boot_media_release(dev);
+        return RUNTIME_BLOB_FILE_READ_FAILED;
+    }
+
+    res = f_stat(path, &info);
+    if (res != FR_OK) {
+        (void)f_mount(NULL, RUNTIME_BLOB_FAT_VOL, 0);
+        fatfs_disk_detach();
+        boot_media_release(dev);
+        return res == FR_NO_FILE ? RUNTIME_BLOB_FILE_NOT_FOUND
+                                 : RUNTIME_BLOB_FILE_READ_FAILED;
+    }
+    if (info.fattrib & AM_DIR) {
+        (void)f_mount(NULL, RUNTIME_BLOB_FAT_VOL, 0);
+        fatfs_disk_detach();
+        boot_media_release(dev);
+        return RUNTIME_BLOB_FILE_NOT_A_FILE;
+    }
+    if (info.fsize == 0) {
+        (void)f_mount(NULL, RUNTIME_BLOB_FAT_VOL, 0);
+        fatfs_disk_detach();
+        boot_media_release(dev);
+        return RUNTIME_BLOB_FILE_EMPTY;
+    }
+
+    pages_needed = (info.fsize + 4095u) / 4096u;
+    buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) {
+        (void)f_mount(NULL, RUNTIME_BLOB_FAT_VOL, 0);
+        fatfs_disk_detach();
+        boot_media_release(dev);
+        return RUNTIME_BLOB_FILE_NOMEM;
+    }
+
+    res = f_open(&fp, path, FA_READ);
+    if (res != FR_OK) {
+        pmm_free_pages(buf, pages_needed);
+        (void)f_mount(NULL, RUNTIME_BLOB_FAT_VOL, 0);
+        fatfs_disk_detach();
+        boot_media_release(dev);
+        return res == FR_NO_FILE ? RUNTIME_BLOB_FILE_NOT_FOUND
+                                 : RUNTIME_BLOB_FILE_READ_FAILED;
+    }
+
+    while (total < info.fsize) {
+        UINT chunk_read = 0;
+        UINT chunk = (UINT)(info.fsize - total);
+        if (chunk > 512u) {
+            chunk = 512u;
+        }
+        res = f_read(&fp, buf + total, chunk, &chunk_read);
+        if (res != FR_OK || chunk_read == 0) {
+            (void)f_close(&fp);
+            pmm_free_pages(buf, pages_needed);
+            (void)f_mount(NULL, RUNTIME_BLOB_FAT_VOL, 0);
+            fatfs_disk_detach();
+            boot_media_release(dev);
+            return RUNTIME_BLOB_FILE_READ_FAILED;
+        }
+        total += chunk_read;
+    }
+    (void)f_close(&fp);
+    (void)f_mount(NULL, RUNTIME_BLOB_FAT_VOL, 0);
+    fatfs_disk_detach();
+    boot_media_release(dev);
+
+    if (total != info.fsize) {
+        pmm_free_pages(buf, pages_needed);
+        return RUNTIME_BLOB_FILE_READ_FAILED;
+    }
+
+    if (resolved_out && resolved_out_cap > 0) {
+        strncpy(resolved_out, path, resolved_out_cap - 1);
+        resolved_out[resolved_out_cap - 1] = '\0';
+    }
+    *buf_out = buf;
+    *buf_len_out = total;
+    *pages_out = pages_needed;
+    return RUNTIME_BLOB_FILE_OK;
+}
 
 static int runtime_blob_read_file(const char *path,
                                   char *resolved_out,
@@ -24,6 +144,11 @@ static int runtime_blob_read_file(const char *path,
 
     if (!path || !buf_out || !buf_len_out || !pages_out) {
         return RUNTIME_BLOB_FILE_STAGE_FAILED;
+    }
+
+    if (runtime_blob_is_fat_path(path)) {
+        return runtime_blob_read_fat_path(path, resolved_out, resolved_out_cap,
+                                          buf_out, buf_len_out, pages_out);
     }
 
     if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {

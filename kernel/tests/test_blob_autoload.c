@@ -1,18 +1,30 @@
 #include "unity.h"
 #include "../include/blob_autoload.h"
+#include "../include/blkdev.h"
+#include "../include/boot_media.h"
+#include "../include/fat32.h"
+#include "../include/ramdisk.h"
 #include "runtime_model.h"
 #include "../include/shell.h"
 #include "../include/slm_ffi.h"
+#include "../include/uart.h"
 #include "../include/vfs.h"
 #include "../include/littlefs_slm.h"
 #include "../include/string.h"
 #include "test_blob_helpers.h"
+#include "../lib/fatfs/ff.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 extern int32_t rust_eviction_blob_clear(uint16_t kind_id);
 extern int32_t rust_eviction_blob_status(uint16_t kind_id, RustEvictionBlobStatus *out);
+
+#define TEST_FAT32_BLOCK_SIZE   512u
+#define TEST_FAT32_BLOCK_COUNT  (48u * 1024u * 1024u / 512u)
+#define TEST_FAT32_VOL          "0:"
+
+static BYTE g_test_fat_mkfs_work[4096];
 
 static const char *find_substr(const char *haystack, const char *needle)
 {
@@ -272,6 +284,85 @@ static int remove_file(const char *path)
     return littlefs_remove(mnt, subpath);
 }
 
+static void make_boot_media_fat_volume(struct blkdev **out_dev)
+{
+    struct blkdev *dev;
+    LBA_t plist[] = { 100, 0, 0, 0 };
+    MKFS_PARM opt = {
+        .fmt     = FM_FAT32,
+        .n_fat   = 1,
+        .align   = 0,
+        .n_root  = 0,
+        .au_size = 0,
+    };
+    FATFS fs;
+
+    TEST_ASSERT_NOT_NULL(out_dev);
+    dev = ramdisk_create("autoload_fat",
+                         TEST_FAT32_BLOCK_SIZE,
+                         TEST_FAT32_BLOCK_COUNT);
+    TEST_ASSERT_NOT_NULL(dev);
+    fatfs_disk_attach(dev);
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_fdisk(0, plist, g_test_fat_mkfs_work));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mkfs(TEST_FAT32_VOL, &opt,
+                                        g_test_fat_mkfs_work,
+                                        sizeof(g_test_fat_mkfs_work)));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(&fs, TEST_FAT32_VOL, 1));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(NULL, TEST_FAT32_VOL, 0));
+    fatfs_disk_detach();
+    *out_dev = dev;
+}
+
+static void destroy_boot_media_fat_volume(struct blkdev *dev)
+{
+    boot_media_test_clear_device();
+    fatfs_disk_detach();
+    if (dev) {
+        ramdisk_destroy(dev);
+    }
+}
+
+static void write_boot_media_fat_file(const char *path, const void *data, UINT len)
+{
+    struct blkdev *dev = boot_media_acquire();
+    FATFS fs;
+    FIL fp;
+    UINT written = 0;
+
+    TEST_ASSERT_NOT_NULL(dev);
+    fatfs_disk_attach(dev);
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(&fs, TEST_FAT32_VOL, 1));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_open(&fp, path, FA_WRITE | FA_CREATE_ALWAYS));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_write(&fp, data, len, &written));
+    TEST_ASSERT_EQUAL_UINT(len, written);
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_close(&fp));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(NULL, TEST_FAT32_VOL, 0));
+    fatfs_disk_detach();
+    boot_media_release(dev);
+}
+
+static void write_boot_media_fat_autoload_conf(const char *text)
+{
+    struct blkdev *dev = boot_media_acquire();
+    FATFS fs;
+    FIL fp;
+    UINT written = 0;
+    UINT len = (UINT)strlen(text);
+
+    TEST_ASSERT_NOT_NULL(dev);
+    fatfs_disk_attach(dev);
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(&fs, TEST_FAT32_VOL, 1));
+    TEST_ASSERT_TRUE(f_mkdir("0:/slmstore") == FR_OK || f_mkdir("0:/slmstore") == FR_EXIST);
+    TEST_ASSERT_TRUE(f_mkdir("0:/slmstore/autoload") == FR_OK || f_mkdir("0:/slmstore/autoload") == FR_EXIST);
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_open(&fp, "0:/slmstore/blob_autoload.conf", FA_WRITE | FA_CREATE_ALWAYS));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_write(&fp, text, len, &written));
+    TEST_ASSERT_EQUAL_UINT(len, written);
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_close(&fp));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(NULL, TEST_FAT32_VOL, 0));
+    fatfs_disk_detach();
+    boot_media_release(dev);
+}
+
 /* Only used by the CONFIG_AI_SCHEDULER tests below; gate to silence
  * `-Werror=unused-function` on default builds (issue #399). */
 #ifdef CONFIG_AI_SCHEDULER
@@ -303,6 +394,157 @@ static void test_blob_autoload_init_creates_conf(void)
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_init());
     TEST_ASSERT_TRUE(read_text_file(BLOB_AUTOLOAD_CONF_PATH, buf, sizeof(buf)) > 0);
     TEST_ASSERT_NOT_NULL(find_substr(buf, "Runtime blob autoload config"));
+}
+
+static void test_blob_autoload_init_marks_existing_fat_config_authoritative(void)
+{
+    struct blkdev *fat_dev = NULL;
+    char path[VFS_MAX_PATH];
+    char fat_conf[256];
+    struct blob_autoload_info info;
+    uint8_t ev_payload[80];
+    uint8_t ev_payload_fat[80];
+    uint8_t ev_blob[128];
+    uint8_t ev_blob_fat[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_payload_fat_len = build_eviction_xgb_payload(ev_payload_fat, sizeof(ev_payload_fat));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+    size_t ev_blob_fat_len;
+    uint32_t fat_checksum;
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_payload_fat_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+    ev_payload_fat[ev_payload_fat_len - 1] ^= 0x01u;
+    ev_blob_fat_len = build_outer_blob(1, ev_payload_fat, ev_payload_fat_len,
+                                       ev_blob_fat, sizeof(ev_blob_fat));
+    TEST_ASSERT_TRUE(ev_blob_fat_len > 0);
+    fat_checksum = fnv1a32(ev_blob_fat, ev_blob_fat_len);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/init-fat-old.blob", ev_blob, ev_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/init-fat-old.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("/mnt/files/autoload/eviction-xgboost.blob", path);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    write_boot_media_fat_file("0:/slmstore/autoload/eviction-xgboost.blob",
+                              ev_blob_fat, (UINT)ev_blob_fat_len);
+    uart_snprintf(fat_conf, sizeof(fat_conf),
+                  "# Runtime blob autoload config\n"
+                  "eviction xgboost 0:/slmstore/autoload/eviction-xgboost.blob %u %08x\n",
+                  (unsigned)ev_blob_fat_len, (unsigned)fat_checksum);
+    write_boot_media_fat_autoload_conf(fat_conf);
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_init());
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "xgboost", &info));
+    TEST_ASSERT_EQUAL_UINT32(ev_blob_fat_len, info.size_bytes);
+    TEST_ASSERT_EQUAL_UINT32(fat_checksum, info.checksum);
+
+    blob_autoload_test_fail_next_fat_mount();
+    TEST_ASSERT_EQUAL_INT(1, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+
+    TEST_ASSERT_EQUAL_INT(0, remove_file(BLOB_AUTOLOAD_STORE_DIR "/.fat-authoritative"));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_init_recovers_missing_fat_blob_from_lfs(void)
+{
+    struct blkdev *fat_dev = NULL;
+    char path[VFS_MAX_PATH];
+    struct blob_autoload_info info;
+    char fat_conf[256];
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+    uint32_t checksum = fnv1a32(ev_blob, ev_blob_len);
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/init-fat-recover.blob", ev_blob, ev_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/init-fat-recover.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("/mnt/files/autoload/eviction-xgboost.blob", path);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    uart_snprintf(fat_conf, sizeof(fat_conf),
+                  "# Runtime blob autoload config\n"
+                  "eviction xgboost 0:/slmstore/autoload/eviction-xgboost.blob %u %08x\n",
+                  (unsigned)ev_blob_len, (unsigned)checksum);
+    write_boot_media_fat_autoload_conf(fat_conf);
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_init());
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "xgboost", &info));
+    TEST_ASSERT_EQUAL_UINT32(ev_blob_len, info.size_bytes);
+    TEST_ASSERT_EQUAL_UINT32(checksum, info.checksum);
+
+    TEST_ASSERT_EQUAL_INT(0, remove_file(BLOB_AUTOLOAD_STORE_DIR "/.fat-authoritative"));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_init_uses_fat_backup_when_primary_empty(void)
+{
+    struct blkdev *fat_dev = NULL;
+    char path[VFS_MAX_PATH];
+    struct blob_autoload_info info;
+    char fat_conf[256];
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+    uint32_t checksum = fnv1a32(ev_blob, ev_blob_len);
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    write_boot_media_fat_file("0:/slmstore/autoload/eviction-xgboost.blob",
+                              ev_blob, (UINT)ev_blob_len);
+    uart_snprintf(fat_conf, sizeof(fat_conf),
+                  "# Runtime blob autoload config\n"
+                  "eviction xgboost 0:/slmstore/autoload/eviction-xgboost.blob %u %08x\n",
+                  (unsigned)ev_blob_len, (unsigned)checksum);
+    write_boot_media_fat_file("0:/slmstore/blob_autoload.conf", "", 0);
+    write_boot_media_fat_file("0:/slmstore/blob_autoload.conf.bak",
+                              fat_conf, (UINT)strlen(fat_conf));
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_init());
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "xgboost", &info));
+    TEST_ASSERT_EQUAL_UINT32(ev_blob_len, info.size_bytes);
+    TEST_ASSERT_EQUAL_UINT32(checksum, info.checksum);
+
+    TEST_ASSERT_EQUAL_INT(0, remove_file(BLOB_AUTOLOAD_STORE_DIR "/.fat-authoritative"));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_init_drops_unusable_fat_entry_without_lfs_fallback(void)
+{
+    struct blkdev *fat_dev = NULL;
+    char path[VFS_MAX_PATH];
+    char fat_conf[256];
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    uart_snprintf(fat_conf, sizeof(fat_conf),
+                  "# Runtime blob autoload config\n"
+                  "eviction xgboost 0:/slmstore/autoload/eviction-xgboost.blob 123 89abcdef\n");
+    write_boot_media_fat_autoload_conf(fat_conf);
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_init());
+    TEST_ASSERT_EQUAL_INT(1, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+
+    TEST_ASSERT_EQUAL_INT(0, remove_file(BLOB_AUTOLOAD_STORE_DIR "/.fat-authoritative"));
+    destroy_boot_media_fat_volume(fat_dev);
 }
 
 static void test_blob_autoload_set_get_clear_round_trip(void)
@@ -510,6 +752,317 @@ static void test_blob_boot_autoload_activates_runtime_blobs(void)
     TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_REBALANCE, &rebalance_status));
     TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ACTIVE, rebalance_status.state);
 #endif
+}
+
+static void test_blob_autoload_persists_authoritative_copy_on_boot_fat(void)
+{
+    struct blkdev *fat_dev = NULL;
+    RustEvictionBlobStatus ev_status = {0};
+    struct blob_autoload_info info;
+    char path[VFS_MAX_PATH];
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_init());
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/persistent_xgb.blob", ev_blob, ev_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost",
+                                               "/mnt/files/persistent_xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_info_get("eviction", "xgboost", &info));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", info.path);
+    TEST_ASSERT_EQUAL_UINT32(ev_blob_len, info.size_bytes);
+    TEST_ASSERT_EQUAL_UINT32(fnv1a32(ev_blob, ev_blob_len), info.checksum);
+
+    rust_eviction_blob_clear(1);
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/persistent_xgb.blob"));
+    blob_boot_autoload();
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(1, &ev_status));
+    TEST_ASSERT_EQUAL_UINT32(1, ev_status.has_active);
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "xgboost"));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_rejects_fat_source_paths(void)
+{
+    struct blkdev *fat_dev = NULL;
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    write_boot_media_fat_file("0:/fat-src.blob", ev_blob, (UINT)ev_blob_len);
+
+    TEST_ASSERT_NOT_EQUAL(0, blob_autoload_set("eviction", "xgboost", "0:/fat-src.blob"));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_fat_update_invalidates_lfs_fallback(void)
+{
+    struct blkdev *fat_dev = NULL;
+    char path[VFS_MAX_PATH];
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/fallback-old.blob", ev_blob, ev_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/fallback-old.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("/mnt/files/autoload/eviction-xgboost.blob", path);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/fallback-new.blob", ev_blob, ev_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/fallback-new.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+
+    boot_media_test_clear_device();
+    TEST_ASSERT_EQUAL_INT(1, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_fat_authority_mount_failure_preserves_config(void)
+{
+    struct blkdev *fat_dev = NULL;
+    RustEvictionBlobStatus ev_status = {0};
+    char path[VFS_MAX_PATH];
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_init());
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/fat-authority-old.blob", ev_blob, ev_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/fat-authority-old.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/fat-authority-new.blob", ev_blob, ev_blob_len));
+    blob_autoload_test_fail_next_fat_mounts(2u);
+    TEST_ASSERT_NOT_EQUAL(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/fat-authority-new.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+
+    rust_eviction_blob_clear(1);
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/fat-authority-old.blob"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/fat-authority-new.blob"));
+    blob_boot_autoload();
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(1, &ev_status));
+    TEST_ASSERT_EQUAL_UINT32(1, ev_status.has_active);
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "xgboost"));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_set_ignores_unrelated_stale_lfs_entry(void)
+{
+    struct blkdev *fat_dev = NULL;
+    char path[VFS_MAX_PATH];
+    uint8_t xgb_payload[80];
+    uint8_t xgb_blob[128];
+    uint8_t cacheus_payload[24];
+    uint8_t cacheus_blob[128];
+    size_t xgb_payload_len = build_eviction_xgb_payload(xgb_payload, sizeof(xgb_payload));
+    size_t xgb_blob_len = build_outer_blob(1, xgb_payload, xgb_payload_len, xgb_blob, sizeof(xgb_blob));
+    size_t cacheus_payload_len =
+        build_eviction_cacheus_config_payload(cacheus_payload, sizeof(cacheus_payload));
+    size_t cacheus_blob_len =
+        build_outer_blob(3, cacheus_payload, cacheus_payload_len,
+                         cacheus_blob, sizeof(cacheus_blob));
+
+    TEST_ASSERT_TRUE(xgb_payload_len > 0);
+    TEST_ASSERT_TRUE(xgb_blob_len > 0);
+    TEST_ASSERT_TRUE(cacheus_payload_len > 0);
+    TEST_ASSERT_TRUE(cacheus_blob_len > 0);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/stale-cacheus.blob",
+                                               cacheus_blob, cacheus_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "cacheus_config",
+                                               "/mnt/files/stale-cacheus.blob"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/stale-cacheus.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "cacheus_config", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("/mnt/files/autoload/eviction-cacheus_config.blob", path);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/update-xgb.blob", xgb_blob, xgb_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/update-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+    TEST_ASSERT_EQUAL_INT(1, blob_autoload_get("eviction", "cacheus_config", path, sizeof(path)));
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "xgboost"));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_set_succeeds_with_existing_fat_backed_entry(void)
+{
+    struct blkdev *fat_dev = NULL;
+    char path[VFS_MAX_PATH];
+    uint8_t xgb_payload[80];
+    uint8_t xgb_blob[128];
+    uint8_t cacheus_payload[24];
+    uint8_t cacheus_blob[128];
+    size_t xgb_payload_len = build_eviction_xgb_payload(xgb_payload, sizeof(xgb_payload));
+    size_t xgb_blob_len = build_outer_blob(1, xgb_payload, xgb_payload_len, xgb_blob, sizeof(xgb_blob));
+    size_t cacheus_payload_len =
+        build_eviction_cacheus_config_payload(cacheus_payload, sizeof(cacheus_payload));
+    size_t cacheus_blob_len =
+        build_outer_blob(3, cacheus_payload, cacheus_payload_len,
+                         cacheus_blob, sizeof(cacheus_blob));
+
+    TEST_ASSERT_TRUE(xgb_payload_len > 0);
+    TEST_ASSERT_TRUE(xgb_blob_len > 0);
+    TEST_ASSERT_TRUE(cacheus_payload_len > 0);
+    TEST_ASSERT_TRUE(cacheus_blob_len > 0);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/existing-fat-xgb.blob",
+                                               xgb_blob, xgb_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost",
+                                               "/mnt/files/existing-fat-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/new-fat-cacheus.blob",
+                                               cacheus_blob, cacheus_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "cacheus_config",
+                                               "/mnt/files/new-fat-cacheus.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "cacheus_config", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-cacheus_config.blob", path);
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "xgboost"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "cacheus_config"));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_init_migrates_lfs_entries_to_fat(void)
+{
+    struct blkdev *fat_dev = NULL;
+    RustEvictionBlobStatus ev_status = {0};
+    char path[VFS_MAX_PATH];
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/init-migrate-xgb.blob", ev_blob, ev_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/init-migrate-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("/mnt/files/autoload/eviction-xgboost.blob", path);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_init());
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+
+    rust_eviction_blob_clear(1);
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/init-migrate-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/autoload/eviction-xgboost.blob"));
+    blob_boot_autoload();
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(1, &ev_status));
+    TEST_ASSERT_EQUAL_UINT32(1, ev_status.has_active);
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "xgboost"));
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_blob_autoload_set_migrates_all_lfs_entries_to_fat(void)
+{
+    struct blkdev *fat_dev = NULL;
+    RustEvictionBlobStatus xgb_status = {0};
+    RustEvictionBlobStatus cacheus_status = {0};
+    char path[VFS_MAX_PATH];
+    uint8_t xgb_payload_old[80];
+    uint8_t xgb_payload_new[80];
+    uint8_t xgb_blob_old[128];
+    uint8_t xgb_blob_new[128];
+    uint8_t cacheus_payload[24];
+    uint8_t cacheus_blob[128];
+    size_t xgb_payload_len = build_eviction_xgb_payload(xgb_payload_old, sizeof(xgb_payload_old));
+    size_t xgb_blob_old_len = build_outer_blob(1, xgb_payload_old, xgb_payload_len,
+                                               xgb_blob_old, sizeof(xgb_blob_old));
+    memcpy(xgb_payload_new, xgb_payload_old, xgb_payload_len);
+    xgb_payload_new[xgb_payload_len - 1] ^= 0x01u;
+    size_t xgb_blob_new_len = build_outer_blob(1, xgb_payload_new, xgb_payload_len,
+                                               xgb_blob_new, sizeof(xgb_blob_new));
+    size_t cacheus_payload_len =
+        build_eviction_cacheus_config_payload(cacheus_payload, sizeof(cacheus_payload));
+    size_t cacheus_blob_len =
+        build_outer_blob(3, cacheus_payload, cacheus_payload_len,
+                         cacheus_blob, sizeof(cacheus_blob));
+
+    TEST_ASSERT_TRUE(xgb_payload_len > 0);
+    TEST_ASSERT_TRUE(xgb_blob_old_len > 0);
+    TEST_ASSERT_TRUE(xgb_blob_new_len > 0);
+    TEST_ASSERT_TRUE(cacheus_payload_len > 0);
+    TEST_ASSERT_TRUE(cacheus_blob_len > 0);
+
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/migrate-old-xgb.blob",
+                                               xgb_blob_old, xgb_blob_old_len));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/migrate-cacheus.blob",
+                                               cacheus_blob, cacheus_blob_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/migrate-old-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "cacheus_config",
+                                               "/mnt/files/migrate-cacheus.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "cacheus_config", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("/mnt/files/autoload/eviction-cacheus_config.blob", path);
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file("/mnt/files/migrate-new-xgb.blob",
+                                               xgb_blob_new, xgb_blob_new_len));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/migrate-new-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "cacheus_config", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-cacheus_config.blob", path);
+
+    rust_eviction_blob_clear(1);
+    rust_eviction_blob_clear(3);
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/migrate-old-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/migrate-new-xgb.blob"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/migrate-cacheus.blob"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/autoload/eviction-xgboost.blob"));
+    TEST_ASSERT_EQUAL_INT(0, remove_file("/mnt/files/autoload/eviction-cacheus_config.blob"));
+    blob_boot_autoload();
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(1, &xgb_status));
+    TEST_ASSERT_EQUAL_UINT32(1, xgb_status.has_active);
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(3, &cacheus_status));
+    TEST_ASSERT_EQUAL_UINT32(1, cacheus_status.has_active);
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "xgboost"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "cacheus_config"));
+    destroy_boot_media_fat_volume(fat_dev);
 }
 
 static void test_blob_autoload_shell_commands(void)
@@ -971,8 +1524,20 @@ int test_suite_blob_autoload(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_blob_autoload_init_creates_conf);
+    RUN_TEST(test_blob_autoload_init_marks_existing_fat_config_authoritative);
+    RUN_TEST(test_blob_autoload_init_recovers_missing_fat_blob_from_lfs);
+    RUN_TEST(test_blob_autoload_init_uses_fat_backup_when_primary_empty);
+    RUN_TEST(test_blob_autoload_init_drops_unusable_fat_entry_without_lfs_fallback);
     RUN_TEST(test_blob_autoload_set_get_clear_round_trip);
     RUN_TEST(test_blob_boot_autoload_activates_runtime_blobs);
+    RUN_TEST(test_blob_autoload_persists_authoritative_copy_on_boot_fat);
+    RUN_TEST(test_blob_autoload_rejects_fat_source_paths);
+    RUN_TEST(test_blob_autoload_fat_update_invalidates_lfs_fallback);
+    RUN_TEST(test_blob_autoload_fat_authority_mount_failure_preserves_config);
+    RUN_TEST(test_blob_autoload_set_ignores_unrelated_stale_lfs_entry);
+    RUN_TEST(test_blob_autoload_set_succeeds_with_existing_fat_backed_entry);
+    RUN_TEST(test_blob_autoload_init_migrates_lfs_entries_to_fat);
+    RUN_TEST(test_blob_autoload_set_migrates_all_lfs_entries_to_fat);
     RUN_TEST(test_blob_autoload_shell_commands);
     RUN_TEST(test_blob_autoload_rejects_invalid_paths);
     RUN_TEST(test_blob_autoload_overwrites_existing_conf);

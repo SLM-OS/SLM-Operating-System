@@ -24,5 +24,7 @@ int blob_autoload_info_get(const char *domain, const char *kind,
 int blob_autoload_set(const char *domain, const char *kind, const char *path);
 int blob_autoload_clear(const char *domain, const char *kind);
 void blob_autoload_test_fail_next_write(void);
+void blob_autoload_test_fail_next_fat_mount(void);
+void blob_autoload_test_fail_next_fat_mounts(unsigned count);
 
 #endif /* BLOB_AUTOLOAD_H */
