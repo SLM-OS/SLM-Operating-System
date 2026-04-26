@@ -764,11 +764,13 @@ endif
 # the dynamic-kernel-replace Stage 3 SDHCI driver (#369) has
 # something to probe in QEMU. Image is created on demand below.
 #
-# Image is 2 GB to land squarely in QEMU's SDHC emulation regime —
-# the QEMU sd-card model emits CSD v1.0 / SDSC (byte-addressed)
-# below the 2 GB SDHC threshold per SD Physical Layer Spec, which
-# breaks FatFs's block-addressed reads. 2 GB is sparse on disk
-# (truncate, not dd), so it costs no real space until QEMU writes.
+# Image size is governed by SDHCI_TEST_IMG_SIZE (preferred) and
+# SDHCI_TEST_IMG_FALLBACK_SIZE (used when the preferred allocation
+# fails — issue #392 Scope B). The preferred size is chosen large
+# enough to land in QEMU's SDHC emulation regime; the fallback is
+# below QEMU's SDHC threshold so the SDSC code path runs instead.
+# Both rely on sparse files (truncate, not dd) so on-disk cost is
+# ~500 KB after a typical run on a sparse-aware filesystem.
 SDHCI_TEST_IMG := $(KERNEL_TEST_BUILD_DIR)/sdhci-test.img
 # Preferred size — large enough for QEMU's sd-card model to set CCS=1
 # in ACMD41 (SDHC, block-addressed). Sparse, so on-disk footprint is
@@ -839,7 +841,7 @@ $(SDHCI_TEST_IMG): | $(KERNEL_TEST_BUILD_DIR)
 					echo "       tmpfs likely hit its size cap on the truncate write."; \
 					echo "       Increase the tmpfs cap or move the build dir." ;; \
 				*) \
-					echo "       Disk doesn't have $(SDHCI_TEST_IMG_FALLBACK_SIZE) free, or a"; \
+					echo "       Disk doesn't have $(SDHCI_TEST_IMG_FALLBACK_SIZE) free, or a" ;\
 					echo "       file-size ulimit is restricting truncate." ;; \
 			esac; \
 			echo "       See https://github.com/SLM-OS/SLM-Operating-System/issues/392"; \
@@ -1064,6 +1066,26 @@ else
 		exit 1; \
 	fi
 endif
+
+# Smoke-test the #392 Scope B fallback path. Forces the preferred
+# truncate to fail by requesting an absurd size, removes any cached
+# image so the recipe re-runs from scratch, and asserts:
+#   1. all tests still pass on the fallback image, and
+#   2. the SDHCI driver actually picked the SDSC code path
+#      (`card type = SDSC` appears in the test output).
+# Without this target a regression that broke the elif branch would
+# only surface on tmpfs/FAT32 build hosts.
+.PHONY: test-sdhci-fallback
+test-sdhci-fallback:
+	@echo "Forcing #392 Scope B fallback: SDHCI_TEST_IMG_SIZE=99999P"
+	@rm -f $(SDHCI_TEST_IMG)
+	@$(MAKE) test SDHCI_TEST_IMG_SIZE=99999P
+	@if grep -F "card type = SDSC" $(TEST_OUTPUT) > /dev/null 2>&1; then \
+		echo "[OK] Fallback path exercised SDSC code path."; \
+	else \
+		echo "[FAIL] Fallback ran but SDSC log line missing — check test-output.log"; \
+		exit 1; \
+	fi
 
 # ============================================================================
 # Utility targets

@@ -17,7 +17,7 @@ fifth is hardware-blocked on `pi-5-1`.
 Stage 5 sub-task 1 — the SDHCI test-image sparse-file ergonomics
 (#392) — is fully resolved: Scope A (clearer error message) shipped
 in #395; Scope B (auto-fallback to a 256 MB SDSC-sized image when
-the 4 GB sparse allocation fails) lands separately. The remaining
+the 4 GB sparse allocation fails) lands in PR #406. The remaining
 #371 sub-tasks need `pi-5-1`.
 
 ---
