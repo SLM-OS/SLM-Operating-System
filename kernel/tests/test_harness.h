@@ -187,4 +187,7 @@ int test_suite_sched_trace(void);
 /* Latency histogram + EWMA rate tests (admin & telemetry suite, M1) */
 int test_suite_latency_hist(void);
 
+/* Per-consumer GPU toggle tests (admin & telemetry suite, M2) */
+int test_suite_gpu_consumer(void);
+
 #endif /* TEST_HARNESS_H */
