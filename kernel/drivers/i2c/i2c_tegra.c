@@ -267,14 +267,20 @@ static int wait_packet_complete(struct tegra_i2c_bus *bus)
     return -2;
 }
 
+/* Maximum payload bytes per packet, computed from the controller's
+ * FIFO depth: TX_FIFO is 64 bytes (16 words) and each packet header
+ * eats 12 bytes (3 words), leaving 52 bytes for data before the
+ * controller's hardware drain rate is the only thing keeping us from
+ * a FIFO overrun. The IMX219 register-write path passes 3 bytes; this
+ * cap is here to keep a future burst-write caller correct-by-default. */
+#define I2C_PACKET_PAYLOAD_MAX  52u
+
 /* Issue one write message. `repeat_start` controls whether the
- * controller follows this message with REPEAT-START (1) or STOP (0).
- * Payload size is bounded only by FIFO depth (64 bytes / 16 words);
- * the IMX219 register-write path passes 3 bytes. */
+ * controller follows this message with REPEAT-START (1) or STOP (0). */
 static int xfer_write(struct tegra_i2c_bus *bus, uint8_t slave,
                       const uint8_t *buf, uint32_t len, int repeat_start)
 {
-    if (len == 0u || len > 60u) return -1;
+    if (len == 0u || len > I2C_PACKET_PAYLOAD_MAX) return -1;
     if (flush_fifos(bus) != 0) return -2;
     push_packet_header(bus, slave, len, 0 /*is_read*/, repeat_start);
     push_payload(bus, buf, len);

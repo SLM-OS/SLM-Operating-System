@@ -54,6 +54,16 @@
  *              alternative (releasing across the wait) would
  *              reintroduce the race. BPMP IPC called during init
  *              is itself lock-free polled, so no deadlock window.
+ *
+ *              Acquired with `spin_lock_irqsave` so IRQs stay
+ *              disabled across the poll — fine today because the
+ *              shell command is the only caller and SLM-OS uses
+ *              cooperative preemption on Jetson, so no timer
+ *              preemption is missed. If a non-shell-task caller is
+ *              added later (Lua bindings, an interrupt-driven
+ *              completion path), relax to plain `spin_lock` and
+ *              audit any potential IRQ-handler that might want the
+ *              same lock for re-entrancy.
  */
 struct tegra_i2c_bus {
     uintptr_t   base;
