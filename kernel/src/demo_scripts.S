@@ -17,10 +17,10 @@
 
 #if !defined(DEMO_LUA_PATH) || !defined(DEMO_MENU_LUA_PATH) || \
     !defined(DEMO_AUTO_LUA_PATH) || !defined(DEMO_MULTIPROC_LUA_PATH) || \
-    !defined(DEMO_HAILO_LUA_PATH)
+    !defined(DEMO_HAILO_LUA_PATH) || !defined(DEMO_ADMIN_LUA_PATH)
 # error "DEMO_LUA_PATH, DEMO_MENU_LUA_PATH, DEMO_AUTO_LUA_PATH, "\
-        "DEMO_MULTIPROC_LUA_PATH, and DEMO_HAILO_LUA_PATH must be "\
-        "supplied by the build system"
+        "DEMO_MULTIPROC_LUA_PATH, DEMO_HAILO_LUA_PATH, and "\
+        "DEMO_ADMIN_LUA_PATH must be supplied by the build system"
 #endif
 
 #define xstr(s) str(s)
@@ -72,6 +72,17 @@ demo_multiproc_lua_end:
 demo_hailo_lua_start:
     .incbin xstr(DEMO_HAILO_LUA_PATH)
 demo_hailo_lua_end:
+
+    /* M6: scripts/admin.lua — the seven-page admin TUI launched by the
+     * `admin` shell command. Embedded into the kernel image so it's
+     * available the moment the shell starts; demo_init.c writes it to
+     * /scripts/admin.lua at boot for `lua /scripts/admin.lua` access. */
+    .global demo_admin_lua_start
+    .global demo_admin_lua_end
+    .align 4
+demo_admin_lua_start:
+    .incbin xstr(DEMO_ADMIN_LUA_PATH)
+demo_admin_lua_end:
 
 #if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__))
     .section .note.GNU-stack, "", @progbits
