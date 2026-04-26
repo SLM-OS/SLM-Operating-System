@@ -157,6 +157,9 @@ const shell_cmd_t builtin_commands[] = {
 #endif
     {"peek",      cmd_peek,      "Read physical memory (peek <phys-hex> [count])",            false, SHELL_CAT_HARDWARE},
     {"poke",      cmd_poke,      "Write 32-bit word (poke <phys-hex> <val-hex>)",             true,  SHELL_CAT_HARDWARE},
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    {"rcediag",   cmd_rcediag,   "Camera RTCPU (RCE) HSP-VM HELLO+PROTOCOL+RESUME handshake", false, SHELL_CAT_HARDWARE},
+#endif
 #if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
     {"rtldiag",   cmd_rtldiag,   "RTL8168 PCIe probe diagnostic",                             false, SHELL_CAT_HARDWARE},
 #endif

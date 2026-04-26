@@ -466,6 +466,13 @@ set(KERNEL_SOURCES
     # layout despite L4T R35 routing everything through RTCPU.
     kernel/drivers/camera/nvcsi.c
 
+    # Camera RTCPU (RCE) HSP-VM transport (#396 Hardware Task 3
+    # Option B) — the IPC layer SLM-OS needs to ask the camera
+    # firmware to do anything (NVCSI bring-up, VI capture, etc.).
+    # Implements the HELLO/PROTOCOL/RESUME boot-sync only; CH_SETUP
+    # + capture-control messages land in a follow-up commit.
+    kernel/drivers/camrtc/camrtc.c
+
     # Interrupt controller and timer (ARM64 only — x86-64 uses pic.c + timer_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/gic.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/timer.c>

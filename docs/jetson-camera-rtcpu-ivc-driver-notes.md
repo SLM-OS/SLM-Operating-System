@@ -414,6 +414,86 @@ inherits.
 
 ---
 
+## Hardware Task 3 Option B — Phase 0 + HELLO findings (2026-04-26)
+
+Live verification on jetson-nano-1 confirmed the **MMIO layer of the
+HSP-RCE IVC path is reachable from NS EL2** but the **HSP-VM HELLO
+handshake doesn't get a response** from the inherited RCE firmware.
+
+What works (Phase 0 GREEN):
+- `hsp_rce` MMIO at `0x0B950000` is fully readable from EL2.
+  `HSP_DIMENSIONING` reads `0x00080048` (8 SMs, 4 SSes, 0 ASes).
+- `rce-pm` MMIO at `0x0B9F0000` is readable.
+  `R5_CTRL_0 = 0x00000002` → `FWLOADDONE` set: bootloader released
+  the R5 from `nCPUHALT`.
+  `PWR_STATUS_0 = 0x04600000` → `WFIPIPESTOPPED` set: R5 is in WFI,
+  idle waiting for an interrupt.
+- `SM[0]` (VM-TX) and `SM[1]` (VM-RX) at `0x0B960000` and
+  `0x0B968000` peek cleanly. `FULL_INT_IE = 0x1` and
+  `EMPTY_INT_IE = 0x1` on both — left configured by Linux pre-kexec.
+- `SS[0]` at `0x0B9A0000` peeks cleanly with `0x00000001` (a
+  leftover FW→VM group bit from Linux's last activity).
+
+What doesn't work (HELLO BLOCKED):
+- `kernel/drivers/camrtc/camrtc.c::camrtc_init()` writes
+  `CAMRTC_HSP_MSG(HELLO, cookie)` to `SM[0]` with the FULL bit set.
+- 2 ms after the write, `SM[0]` still reads back with FULL=1 — RCE
+  never drained the mailbox. The HELLO times out at 100 ms.
+- Clearing `SS[0]` to flush stale FW-side group bits before sending
+  HELLO did not help (same TX-FULL-stuck symptom).
+- Cookie value, message encoding, and SM TX-write sequence all
+  match L4T's `tegra_hsp_sm_tx_write` /
+  `camrtc_hsp_vm_send_irqmsg` paths verbatim.
+
+Working theory: **RCE's HSP IRQ routing was reconfigured by Linux's
+pre-kexec runtime suspend** (camera autosuspend after 5 s idle, see
+`tegra234-camera.dtsi:68 nvidia,autosuspend-delay-ms = <5000>`),
+leaving the SM[0] FULL → R5 IRQ path masked at the GIC even though
+the SM-side `FULL_INT_IE` bit is set. Or RCE's firmware is in a
+"suspended" state where it ignores HSP-VM messages until it sees
+some other wake-up signal first (analogous to how the Linux
+`tegra_camrtc_fw_resume` sends `CAMRTC_HSP_RESUME` via mailbox AND
+asserts power-domain transitions via BPMP).
+
+Avenues for the next investigation cycle (each a 1-day deploy
+loop on jetson-nano-1):
+
+1. **Pre-kexec RCE suspend.** Mirror the GPU pattern in
+   `scripts/jetson-kexec-slmos.sh` — explicitly write
+   `power/control = on` for `tegra-camera-rtcpu` so Linux holds
+   RCE active across the kexec boundary. If HELLO succeeds with
+   that, the runtime-suspend hypothesis is confirmed and the fix
+   is to bake it into slmos-kexec.
+2. **Force pre-kexec camera activity.** Run a quick
+   `gst-launch-1.0 nvarguscamerasrc num-buffers=1 ! fakesink` <30 s
+   before kexec so the autosuspend timer hasn't fired. If HELLO
+   succeeds in this case but not after autosuspend, same
+   diagnosis as (1).
+3. **BPMP-side RCE re-enable.** Send `MRQ_PG` for camera RTCPU's
+   power domain, `MRQ_CLK_ENABLE` for the rce clocks, then
+   `MRQ_RESET_DEASSERT` for `TEGRA234_RESET_RCE_ALL` from SLM-OS
+   itself before the HELLO. Mirrors L4T's
+   `tegra_camrtc_poweron` (cached at
+   `docs/reference/l4t-tegra-camera-rtcpu.c:856`).
+4. **HSP common-region INT_STATUS readback.** Peek the HSP common
+   region's INT_STATUS register (per-shared-IRQ-output pending
+   mask, `linux-tegra-hsp.c:HSP_INT_STATUS`). If the shared-IRQ
+   output for SM[0] FULL is set in INT_STATUS but RCE doesn't
+   process, the IRQ is firing but RCE isn't running its HSP ISR
+   — confirms the firmware-state hypothesis.
+5. **Read TF-A's HSP IRQ routing config** via `peek` of the GIC
+   distributor IROUTER for the RCE_HSP_SHARED IRQs to confirm
+   they're targeted at RCE's MPIDR.
+
+The structurally-complete `kernel/drivers/camrtc/camrtc.c`
+HSP-VM transport (HELLO + PROTOCOL + RESUME state machine,
+mailbox accessors, SS read/clear) is kept as the diagnostic
+ground for this investigation. The `rcediag` shell command
+exposes the failure unambiguously and reports all the
+intermediate state needed to pick up the trail.
+
+---
+
 ## Open questions
 
 1. **RCE firmware ownership.** The L4T binding says the bootloader loads
