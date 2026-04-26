@@ -290,6 +290,47 @@
 #define TEGRA_XUDC_BASE          0x03550000UL    /* XUDC device controller */
 
 /*
+ * Tegra234 camera subsystem MMIO bases. Verified at NS EL2 from the
+ * #396 Phase 0 recon session on jetson-nano-1 (2026-04-25): all three
+ * primary apertures (NVCSI, RCE HSP, cam_i2c) returned data without
+ * raising a CBB external abort. The plan's earlier guesses
+ * (`~0x03c00000` for camera-rtcpu HSP, `0x031c0000` for the camera
+ * I²C bus) were both wrong — actual values come from the live
+ * jetson-nano-1 device tree. See `docs/jetson-camera-imx219-plan.md`
+ * §"Phase 0" for the recon results.
+ *
+ * `kernel/mm/vmm.c` identity-maps the 2 MB block containing each
+ * mapped base so the eventual driver code (and the `peek` shell
+ * command) can reach them; `kernel/tests/test_camera.c` pins these
+ * constants via `_Static_assert` so accidental drift breaks the build.
+ *
+ * Naming prefix: these new bases use `TEGRA234_*` (matching the
+ * already-established `TEGRA234_CLK_*` / `TEGRA234_RESET_*` pool in
+ * `kernel/include/tegra234_clocks.h`) rather than the older
+ * `TEGRA_*` prefix used by the PCIe-C8 / XHCI / XUSB bases above.
+ * The `TEGRA234_*` form is more accurate — these MMIO addresses do
+ * differ across Tegra generations (T194 vs T234) — and matches the
+ * upstream Linux dt-binding file names. Renaming the older
+ * `TEGRA_*` MMIO constants for consistency is a separate refactor;
+ * pick one prefix when adding more here.
+ */
+#define TEGRA234_NVCSI_BASE      0x15A00000UL    /* MIPI CSI-2 receiver */
+#define TEGRA234_RCE_HSP_BASE    0x0B950000UL    /* Camera-RTCPU HSP (mailbox/semaphore IPC) */
+#define TEGRA234_RCE_PM_BASE     0x0B9F0000UL    /* RCE power-management regs (R5_CTRL, PWR_STATUS) */
+/*
+ * RCE main MMIO (Falcon EVP, AST). Defined here for completeness and
+ * pinned by test_camera.c, but **not currently mapped** by
+ * vmm.c — SLM-OS only drives RCE through HSP IPC today, never via
+ * direct MMIO (the RCE Cortex-R5 is bootloader-loaded and stays
+ * alive across kexec, so SLM-OS has no reason to touch the EVP/AST
+ * apertures). If a future driver does need direct RCE access, add
+ * `TEGRA234_RCE_BASE` to the `cam_bases[]` array in vmm.c — the
+ * mapping pattern is one line.
+ */
+#define TEGRA234_RCE_BASE        0x0BC00000UL
+#define TEGRA234_CAM_I2C_BASE    0x03180000UL    /* HSI2C-2 = `cam_i2c` (J17/J20 via i2c-mux-gpio) */
+
+/*
  * Spinlock policy: use the runtime `spinlock_hw_enabled` flag, same as Pi 5.
  *
  * Before MMU enable, memory is non-cacheable and LSE atomics (SWPALB) cause

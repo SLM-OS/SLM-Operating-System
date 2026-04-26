@@ -18,6 +18,7 @@
 
 #include "unity.h"
 #include "../include/camera.h"
+#include "../include/platform.h"
 #include "../include/tegra234_clocks.h"
 
 #include <stdint.h>
@@ -208,3 +209,29 @@ _Static_assert(TEGRA234_POWER_DOMAIN_VI   == 28u,
     "TEGRA234_POWER_DOMAIN_VI drift (Video Input — distinct from VIC at id 29)");
 _Static_assert(TEGRA234_POWER_DOMAIN_ISPA == 22u,
     "TEGRA234_POWER_DOMAIN_ISPA drift");
+
+/* =============================================================================
+ * Tegra234 camera-subsystem MMIO bases — Phase 0 verified
+ *
+ * Compile-time pins for the constants in kernel/include/platform.h that
+ * gate the camera path. Each was probed live on jetson-nano-1 during
+ * the #396 Phase 0 recon (2026-04-25); changing any of these without
+ * a fresh recon would silently break the future driver. Constants are
+ * Jetson-only in platform.h, so the assertions are gated to match.
+ *
+ * The vmm.c camera-MMIO mapping block iterates this same set; if a
+ * future patch reorders or renames the constants, the build breaks
+ * here before the wrong block is mapped on hardware.
+ * ========================================================================== */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+_Static_assert(TEGRA234_NVCSI_BASE   == 0x15A00000UL,
+    "TEGRA234_NVCSI_BASE drift (Phase 0 verified address; CSI-2 receiver)");
+_Static_assert(TEGRA234_RCE_HSP_BASE == 0x0B950000UL,
+    "TEGRA234_RCE_HSP_BASE drift (Camera-RTCPU HSP — distinct from BPMP HSP at 0x03C00000)");
+_Static_assert(TEGRA234_RCE_PM_BASE  == 0x0B9F0000UL,
+    "TEGRA234_RCE_PM_BASE drift (R5_CTRL + PWR_STATUS state probes)");
+_Static_assert(TEGRA234_RCE_BASE     == 0x0BC00000UL,
+    "TEGRA234_RCE_BASE drift (RCE main MMIO — Falcon EVP, AST)");
+_Static_assert(TEGRA234_CAM_I2C_BASE == 0x03180000UL,
+    "TEGRA234_CAM_I2C_BASE drift (HSI2C-2 = cam_i2c — both J17 and J20 share via i2c-mux-gpio)");
+#endif
