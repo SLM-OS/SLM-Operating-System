@@ -243,8 +243,8 @@ static int cmd_net(int argc, char *argv[]) {
                 return -1;
             }
             net_watchdog_set_threshold_ms(ms);
-            shell_printf("net: RX-stall watchdog threshold set");
-            shell_printf(" (0 = restore default; sub-100 ms clamped to 100)\n");
+            shell_printf("net: RX-stall watchdog threshold set"
+                         " (0 = restore default; sub-100 ms clamped to 100)\n");
         }
         struct net_watchdog_snapshot wd;
         net_watchdog_get(&wd);

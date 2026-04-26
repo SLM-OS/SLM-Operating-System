@@ -122,11 +122,17 @@ def main() -> int:
         print(f"error: not a file: {args.local_path}", file=sys.stderr)
         return 1
 
+    # Pillow 10 moved the resize-filter constants under
+    # `Image.Resampling.*`; the bare `Image.LANCZOS` aliases still
+    # work in 10.x but are deprecation-warned and slated for removal.
+    # `getattr` falls back to the module itself on older Pillow so
+    # `RESAMPLING.LANCZOS` resolves to `Image.LANCZOS` there too.
+    RESAMPLING = getattr(Image, "Resampling", Image)
     filter_map = {
-        "lanczos":  Image.LANCZOS,
-        "bilinear": Image.BILINEAR,
-        "bicubic":  Image.BICUBIC,
-        "nearest":  Image.NEAREST,
+        "lanczos":  RESAMPLING.LANCZOS,
+        "bilinear": RESAMPLING.BILINEAR,
+        "bicubic":  RESAMPLING.BICUBIC,
+        "nearest":  RESAMPLING.NEAREST,
     }
     fp32_bytes = decode_to_fp32(args.local_path,
                                 args.side,

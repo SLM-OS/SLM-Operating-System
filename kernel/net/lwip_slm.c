@@ -255,6 +255,14 @@ static void net_watchdog_note_rx(void) {
     if (rx_watchdog_alarmed) {
         rx_watchdog_alarmed = false;
         rx_watchdog_recovery_events++;
+        /* One INFO line per stall→recovery edge. Bounded under the
+         * tested workload (10 cycles on the hardware verification
+         * pass produced 10 lines, paired with their stall WARNs).
+         * If a future failure mode causes flapping at hundreds of
+         * Hz, this could fight for UART bandwidth — gate behind a
+         * rate-limit then. Today the spam ceiling is "one line per
+         * threshold-ms while the network is marginal", which is
+         * the right diagnostic granularity. */
         INFO("net: RX recovered after stall (rx_packets=%llu)",
              (unsigned long long)net_statistics.rx_packets);
     }
@@ -271,6 +279,18 @@ void net_watchdog_set_threshold_ms(uint32_t ms) {
     rx_watchdog_threshold_ms = ms;
 }
 
+/*
+ * Diagnostic snapshot. Each individual field is read with a
+ * single-copy-atomic load (naturally aligned uint32 / uint64 on
+ * AArch64 and x86-64), but the snapshot as a *whole* is not
+ * transactional — a caller on a different CPU can observe an
+ * intermediate writer state (e.g. `alarmed` already cleared but
+ * `recovery_events` not yet incremented). That's intentional:
+ * nothing branches on this snapshot, it's only displayed by
+ * `netstat` and published by the M3 telemetry feed. If a future
+ * caller needs a transactional view, wrap the body in
+ * SYS_ARCH_PROTECT to serialise against the writer in net_poll.
+ */
 void net_watchdog_get(struct net_watchdog_snapshot *out) {
     if (!out) return;
 
