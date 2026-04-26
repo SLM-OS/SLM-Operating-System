@@ -151,6 +151,7 @@ const shell_cmd_t builtin_commands[] = {
     {"macbdiag",  cmd_macbdiag,  "MACB IRQ delivery diagnostic",                              false, SHELL_CAT_HARDWARE},
 #endif
 #if defined(PLATFORM_JETSON_ORIN_NANO)
+    {"nvcsi",     cmd_nvcsi,     "Bring up NVCSI receiver for IMX219-A and dump intr status", false, SHELL_CAT_HARDWARE},
     {"nvgpu",     cmd_nvgpu,     "Jetson nvgpu bringup (nvgpu <prepare|run|info>)",           true,  SHELL_CAT_HARDWARE},
     {"pcietrain", cmd_pcietrain, "Tegra PCIe C8 host init + link train + EP probe",           false, SHELL_CAT_HARDWARE},
 #endif

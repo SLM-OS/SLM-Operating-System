@@ -21,6 +21,7 @@
 #include "../include/gpio_tegra.h"
 #include "../include/i2c_tegra.h"
 #include "../include/imx219.h"
+#include "../include/nvcsi.h"
 #include "../include/platform.h"
 #include "../include/tegra234_clocks.h"
 
@@ -355,6 +356,82 @@ static void test_tegra_i2c_dump_status_bounds(void)
 #endif
 }
 
+/* ---- NVCSI receiver driver ---- */
+
+/*
+ * Test: nvcsi_stream_init / stop / get_intr_status reject NULL port
+ * pointers without dereferencing them. get_intr_status also rejects
+ * NULL out-pointers. Stub branch returns -1; Jetson branch validates
+ * the same arg-error paths before any MMIO touches.
+ */
+static void test_nvcsi_null_safe(void)
+{
+    uint32_t intr = 0xDEADBEEFu, err = 0xDEADBEEFu;
+    TEST_ASSERT_EQUAL_INT(-1, nvcsi_stream_init(NULL));
+    TEST_ASSERT_EQUAL_INT(-1, nvcsi_get_intr_status(NULL, &intr, &err));
+    TEST_ASSERT_EQUAL_INT(-1, nvcsi_get_intr_status(&nvcsi_imx219_a_port,
+                                                   NULL, &err));
+    TEST_ASSERT_EQUAL_INT(-1, nvcsi_get_intr_status(&nvcsi_imx219_a_port,
+                                                   &intr, NULL));
+    /* get_intr_status must not write through the out-pointers when
+     * it returns -1 due to bad args. */
+    TEST_ASSERT_EQUAL_HEX32(0xDEADBEEFu, intr);
+    TEST_ASSERT_EQUAL_HEX32(0xDEADBEEFu, err);
+    /* stream_stop is best-effort void — must compile / link / not
+     * crash on NULL. */
+    nvcsi_stream_stop(NULL);
+}
+
+/*
+ * Test: the pre-configured `nvcsi_imx219_a_port` matches the L4T
+ * IMX219-A overlay's CSI port mapping. The Orin Nano dev-kit DT
+ * exposes `port-index = <0x01>` for `rbpcv2_imx219_a@10`, which is
+ * NVCSI_PORT_B = (PHY brick 0, CIL_B). NOT CIL_A — the connector
+ * naming is independent of the underlying PHY half. Pinning this
+ * catches a future patch that swaps cil_half back to 0 thinking
+ * connector A == CIL_A.
+ */
+static void test_nvcsi_imx219_a_port_wiring(void)
+{
+    TEST_ASSERT_NOT_NULL(nvcsi_imx219_a_port.name);
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_EQUAL_UINT32(0u, nvcsi_imx219_a_port.phy_brick);
+    TEST_ASSERT_EQUAL_UINT32(1u, nvcsi_imx219_a_port.cil_half);  /* CIL_B */
+    TEST_ASSERT_EQUAL_UINT32(2u, nvcsi_imx219_a_port.num_data_lanes);
+    TEST_ASSERT_EQUAL_UINT32(456u, nvcsi_imx219_a_port.mipi_clk_mhz);
+#else
+    /* Stub: zeroed instance. */
+    TEST_ASSERT_EQUAL_UINT32(0u, nvcsi_imx219_a_port.num_data_lanes);
+#endif
+}
+
+/*
+ * Test: nvcsi_stream_init rejects unsupported lane counts, out-of-range
+ * cil_half, and out-of-range phy_brick. Important on Jetson where
+ * this is the only arg-validation gate before MMIO; on QEMU the stub
+ * returns -1 unconditionally so this is a link/compile check.
+ */
+static void test_nvcsi_stream_init_arg_validation(void)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    struct nvcsi_port bad_lanes = nvcsi_imx219_a_port;
+    bad_lanes.num_data_lanes = 4u;
+    TEST_ASSERT_EQUAL_INT(-1, nvcsi_stream_init(&bad_lanes));
+
+    /* cil_half must be 0 (CIL_A) or 1 (CIL_B). */
+    struct nvcsi_port bad_cil = nvcsi_imx219_a_port;
+    bad_cil.cil_half = 2u;
+    TEST_ASSERT_EQUAL_INT(-1, nvcsi_stream_init(&bad_cil));
+
+    /* phy_brick must be 0..3 (T234 has 4 PHY bricks). */
+    struct nvcsi_port bad_phy = nvcsi_imx219_a_port;
+    bad_phy.phy_brick = 4u;
+    TEST_ASSERT_EQUAL_INT(-1, nvcsi_stream_init(&bad_phy));
+#else
+    TEST_IGNORE_MESSAGE("Jetson-only — stub returns -1 for any input");
+#endif
+}
+
 int test_suite_camera(void)
 {
     UnityBegin("Camera C-API tests");
@@ -371,6 +448,9 @@ int test_suite_camera(void)
     RUN_TEST(test_imx219_read_chip_id_null_safe);
     RUN_TEST(test_imx219_power_off_safe);
     RUN_TEST(test_tegra_i2c_dump_status_bounds);
+    RUN_TEST(test_nvcsi_null_safe);
+    RUN_TEST(test_nvcsi_imx219_a_port_wiring);
+    RUN_TEST(test_nvcsi_stream_init_arg_validation);
     return UnityEnd();
 }
 
