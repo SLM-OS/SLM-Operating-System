@@ -150,6 +150,9 @@ const shell_cmd_t builtin_commands[] = {
 #if defined(PLATFORM_RASPI5) && defined(ENABLE_NETWORKING)
     {"macbdiag",  cmd_macbdiag,  "MACB IRQ delivery diagnostic",                              false, SHELL_CAT_HARDWARE},
 #endif
+#if defined(PLATFORM_RASPI5)
+    {"mboxclk",   cmd_mboxclk,   "Probe Pi firmware clocks (mboxclk [<id> [on|off]])",        true,  SHELL_CAT_HARDWARE},
+#endif
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     {"nvgpu",     cmd_nvgpu,     "Jetson nvgpu bringup (nvgpu <prepare|run|info>)",           true,  SHELL_CAT_HARDWARE},
     {"pcietrain", cmd_pcietrain, "Tegra PCIe C8 host init + link train + EP probe",           false, SHELL_CAT_HARDWARE},

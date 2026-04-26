@@ -4883,6 +4883,91 @@ int cmd_timdiag(int argc, char *argv[])
 
 #endif /* !PLATFORM_X86_64 */
 
+#if defined(PLATFORM_RASPI5)
+
+#include "bcm_mailbox.h"
+
+/* Print a u32 as 0xHHHHHHHH on the shell. */
+static void shell_print_hex32(uint32_t v)
+{
+    char hex[11] = "0x";
+    for (int i = 0; i < 8; i++) {
+        uint32_t n = (v >> ((7 - i) * 4)) & 0xFu;
+        hex[2 + i] = (char)(n < 10 ? ('0' + n) : ('a' + (n - 10)));
+    }
+    hex[10] = 0;
+    shell_puts(hex);
+}
+
+/*
+ * Diagnostic shell command for the Pi 5 firmware mailbox clock
+ * interface. Lets us iterate clock IDs interactively without
+ * rebuilding the kernel for each candidate.
+ *
+ * Usage:
+ *   mboxclk            - dump state for ids 1..16 (state + cfg rate
+ *                        + measured rate)
+ *   mboxclk <id>       - dump one id
+ *   mboxclk <id> on    - SET_CLOCK_STATE(id, 1) + show before/after
+ *   mboxclk <id> off   - SET_CLOCK_STATE(id, 0) + show before/after
+ *
+ * Tied to #414: Pi firmware id 12 (the Pi 4 EMMC2 convention) returns
+ * a measured rate of ~1.07 GHz, inconsistent with the dtsi's 200 MHz
+ * fixed-clock declaration — so id 12 may not control EMMC2 on Pi 5.
+ * Use this command to find which id's measured rate matches 200 MHz.
+ */
+static void mboxclk_dump_one(uint32_t id)
+{
+    uint32_t state = 0xFFFFFFFFu, cfg = 0xFFFFFFFFu, meas = 0xFFFFFFFFu;
+    int rc_state = bcm_mailbox_get_clock_state(id, &state);
+    int rc_cfg   = bcm_mailbox_get_clock_rate(id, &cfg);
+    int rc_meas  = bcm_mailbox_get_clock_rate_measured(id, &meas);
+
+    shell_puts("  clk ");
+    if (id < 10) { char c = (char)('0' + id); shell_putc(c); shell_puts(" "); }
+    else { char c1 = (char)('0' + (id / 10)); char c2 = (char)('0' + (id % 10)); shell_putc(c1); shell_putc(c2); }
+    shell_puts(" state=");
+    if (rc_state == 0) shell_print_hex32(state); else shell_puts("(err)    ");
+    shell_puts(" cfg=");
+    if (rc_cfg == 0) shell_print_hex32(cfg); else shell_puts("(err)    ");
+    shell_puts(" meas=");
+    if (rc_meas == 0) shell_print_hex32(meas); else shell_puts("(err)    ");
+    shell_puts("\r\n");
+}
+
+int cmd_mboxclk(int argc, char *argv[])
+{
+    if (argc == 1) {
+        shell_puts("Pi firmware clock-id state (state | cfg_rate | meas_rate)\r\n");
+        for (uint32_t id = 1; id <= 16; id++) {
+            mboxclk_dump_one(id);
+        }
+        return 0;
+    }
+    /* Parse id (decimal). */
+    uint32_t id = 0;
+    const char *p = argv[1];
+    while (*p >= '0' && *p <= '9') {
+        id = id * 10u + (uint32_t)(*p - '0');
+        p++;
+    }
+    if (argc == 2) {
+        mboxclk_dump_one(id);
+        return 0;
+    }
+    /* SET path: argv[2] = on/off. */
+    bool on = (argv[2][0] == 'o' && argv[2][1] == 'n');
+    shell_puts("Before:\r\n");
+    mboxclk_dump_one(id);
+    int rc = bcm_mailbox_set_clock_state(id, on);
+    shell_puts(rc == 0 ? "SET_CLOCK_STATE: OK\r\n" : "SET_CLOCK_STATE: FAILED\r\n");
+    shell_puts("After:\r\n");
+    mboxclk_dump_one(id);
+    return rc;
+}
+
+#endif /* PLATFORM_RASPI5 */
+
 #if defined(PLATFORM_RASPI5) && defined(ENABLE_NETWORKING)
 
 #include "macb.h"

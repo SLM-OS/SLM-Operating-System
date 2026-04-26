@@ -188,11 +188,11 @@ static void test_set_power_state_state_bits_pinned(void)
     TEST_ASSERT_EQUAL_HEX32(0u, BCM_POWER_DEVICE_SDCARD);
 }
 
-static void test_set_clock_state_layout_emmc2_on(void)
+static void test_set_clock_state_layout_emmc_on(void)
 {
     uint32_t buf[BCM_PROP_BUF_WORDS] = {0};
 
-    bcm_mailbox_build_set_clock_state(buf, BCM_CLOCK_EMMC2,
+    bcm_mailbox_build_set_clock_state(buf, BCM_CLOCK_EMMC,
                                       BCM_CLOCK_STATE_ON);
 
     TEST_ASSERT_EQUAL_HEX32(32u,                       buf[0]);
@@ -200,7 +200,7 @@ static void test_set_clock_state_layout_emmc2_on(void)
     TEST_ASSERT_EQUAL_HEX32(BCM_TAG_SET_CLOCK_STATE,   buf[2]);
     TEST_ASSERT_EQUAL_HEX32(8u,                        buf[3]);  /* val_buf_sz */
     TEST_ASSERT_EQUAL_HEX32(0u,                        buf[4]);
-    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_EMMC2,           buf[5]);  /* id 12 */
+    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_EMMC,            buf[5]);  /* id 1 */
     TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_STATE_ON,        buf[6]);
     TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,          buf[7]);
 }
@@ -208,11 +208,11 @@ static void test_set_clock_state_layout_emmc2_on(void)
 static void test_set_clock_state_clock_ids_pinned(void)
 {
     /* Pin the firmware clock-id values to the canonical
-     * raspberrypi-firmware.h table. EMMC2 = 12 is the load-bearing
-     * one for #414; if any future maintainer changes the constant
-     * the next Pi 5 boot will hang `kernel status` again. */
+     * raspberrypi-firmware.h table. Pi 5 EMMC = id 1 (the on-die
+     * EMMC2 controller's input clock; the Pi 4-era id 12 alias is
+     * a different peripheral on Pi 5 — see header comment). */
     TEST_ASSERT_EQUAL_HEX32(1u,  BCM_CLOCK_EMMC);
-    TEST_ASSERT_EQUAL_HEX32(12u, BCM_CLOCK_EMMC2);
+    TEST_ASSERT_EQUAL_HEX32(12u, BCM_CLOCK_EMMC2_PI4);
     TEST_ASSERT_EQUAL_HEX32(0x00038001u, BCM_TAG_SET_CLOCK_STATE);
     /* Same state-word bit semantics as SET_POWER_STATE. */
     TEST_ASSERT_EQUAL_HEX32(0u, BCM_CLOCK_STATE_OFF);
@@ -220,7 +220,7 @@ static void test_set_clock_state_clock_ids_pinned(void)
     TEST_ASSERT_EQUAL_HEX32(2u, BCM_CLOCK_STATE_NO_DEVICE);
 }
 
-static void test_set_clock_rate_layout_emmc2_200mhz(void)
+static void test_set_clock_rate_layout_emmc_200mhz(void)
 {
     /* SET_CLOCK_RATE is the only tag with a 12-byte (3-word)
      * payload, which forces the 12-word property buffer envelope.
@@ -229,7 +229,7 @@ static void test_set_clock_rate_layout_emmc2_200mhz(void)
      * could not fit one). */
     uint32_t buf[BCM_PROP_BUF_WORDS] = {0};
 
-    bcm_mailbox_build_set_clock_rate(buf, BCM_CLOCK_EMMC2,
+    bcm_mailbox_build_set_clock_rate(buf, BCM_CLOCK_EMMC,
                                      /*rate_hz=*/200000000u,
                                      /*skip_setting_turbo=*/0u);
 
@@ -238,7 +238,7 @@ static void test_set_clock_rate_layout_emmc2_200mhz(void)
     TEST_ASSERT_EQUAL_HEX32(BCM_TAG_SET_CLOCK_RATE,    buf[2]);
     TEST_ASSERT_EQUAL_HEX32(12u,                       buf[3]);  /* val_buf_sz */
     TEST_ASSERT_EQUAL_HEX32(0u,                        buf[4]);
-    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_EMMC2,           buf[5]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_EMMC,            buf[5]);
     TEST_ASSERT_EQUAL_HEX32(200000000u,                buf[6]);
     TEST_ASSERT_EQUAL_HEX32(0u,                        buf[7]);  /* skip_setting_turbo */
     TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,          buf[8]);
@@ -255,14 +255,14 @@ static void verify_get_clock_layout(uint32_t expected_tag_id,
                                                      uint32_t clock_id))
 {
     uint32_t buf[BCM_PROP_BUF_WORDS] = {0};
-    build_fn(buf, BCM_CLOCK_EMMC2);
+    build_fn(buf, BCM_CLOCK_EMMC);
 
     TEST_ASSERT_EQUAL_HEX32(32u,                buf[0]);
     TEST_ASSERT_EQUAL_HEX32(BCM_PROP_REQUEST,   buf[1]);
     TEST_ASSERT_EQUAL_HEX32(expected_tag_id,    buf[2]);
     TEST_ASSERT_EQUAL_HEX32(8u,                 buf[3]);  /* val_buf_sz */
     TEST_ASSERT_EQUAL_HEX32(0u,                 buf[4]);
-    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_EMMC2,    buf[5]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_CLOCK_EMMC,     buf[5]);
     TEST_ASSERT_EQUAL_HEX32(0u,                 buf[6]);  /* response slot */
     TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,   buf[7]);
 }
@@ -308,9 +308,9 @@ int test_suite_bcm_mailbox(void)
     RUN_TEST(test_set_power_state_layout_on_with_wait);
     RUN_TEST(test_set_power_state_layout_off_no_wait);
     RUN_TEST(test_set_power_state_state_bits_pinned);
-    RUN_TEST(test_set_clock_state_layout_emmc2_on);
+    RUN_TEST(test_set_clock_state_layout_emmc_on);
     RUN_TEST(test_set_clock_state_clock_ids_pinned);
-    RUN_TEST(test_set_clock_rate_layout_emmc2_200mhz);
+    RUN_TEST(test_set_clock_rate_layout_emmc_200mhz);
     RUN_TEST(test_get_clock_state_layout);
     RUN_TEST(test_get_clock_rate_layout);
     RUN_TEST(test_get_clock_rate_measured_layout);

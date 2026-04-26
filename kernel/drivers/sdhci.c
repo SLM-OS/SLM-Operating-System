@@ -1202,29 +1202,34 @@ struct blkdev *sdhci_create_bcm2712(void)
     uart_puts("[INFO] sdhci_bcm2712: driving AON GPIO regulators (SD VCC on, 3.3V)\n");
     bcm2712_aon_gpio_drive_sd_regulators();
 
-    uart_puts("[INFO] sdhci_bcm2712: enabling EMMC2 clock via mailbox\n");
-    int rc = bcm_mailbox_set_clock_state(BCM_CLOCK_EMMC2, /*on=*/true);
+    /* Note: empirically (via the `mboxclk` shell diagnostic) the Pi
+     * firmware leaves clock id 1 (EMMC) running at 200 MHz across
+     * SLM-OS handoff — this call is idempotent and verifies the
+     * mailbox is responsive, but does not actually toggle a gated
+     * clock on Pi 5. */
+    uart_puts("[INFO] sdhci_bcm2712: confirming EMMC clock state via mailbox\n");
+    int rc = bcm_mailbox_set_clock_state(BCM_CLOCK_EMMC, /*on=*/true);
     if (rc != 0) {
-        uart_puts("[ERROR] sdhci_bcm2712: mailbox SET_CLOCK_STATE(EMMC2, on) "
-                  "failed — controller stays unclocked, abort\n");
+        uart_puts("[ERROR] sdhci_bcm2712: mailbox SET_CLOCK_STATE(EMMC, on) "
+                  "failed — abort\n");
         return NULL;
     }
 
     /* Set the operating rate. Linux's brcmstb sdhci driver pulls
      * this from `clk_get_rate(pltfm_host->clk)` which on Pi 5 resolves
      * to a 200 MHz fixed-clock — and `bcm2712.dtsi` declares
-     * `clk_emmc2` as `fixed-clock`, so this rate is constant by
+     * `clk_emmc` as `fixed-clock`, so this rate is constant by
      * definition. The firmware accordingly rejects SET_CLOCK_RATE on
      * this id (no programmable PLL behind it). Treat the failure as
-     * advisory: log it but continue, since clock-state-on already
-     * gates the controller correctly and the rate is fixed. */
+     * advisory: log it but continue, since clock 1 is already
+     * running at 200 MHz at SLM-OS handoff. */
     uint32_t actual_hz = 0;
-    rc = bcm_mailbox_set_clock_rate(BCM_CLOCK_EMMC2,
+    rc = bcm_mailbox_set_clock_rate(BCM_CLOCK_EMMC,
                                     /*requested_hz=*/200000000u,
                                     &actual_hz);
     if (rc != 0) {
-        uart_puts("[INFO] sdhci_bcm2712: SET_CLOCK_RATE not supported for EMMC2 "
-                  "(fixed-clock per dtsi) — continuing on clock-state alone\n");
+        uart_puts("[INFO] sdhci_bcm2712: SET_CLOCK_RATE not supported for EMMC "
+                  "(fixed-clock per dtsi) — continuing on existing clock\n");
     } else {
         uart_puts("[INFO] sdhci_bcm2712: SET_CLOCK_RATE accepted; "
                   "applying SDIO_CFG cfginit\n");

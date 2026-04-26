@@ -70,17 +70,23 @@
 #define BCM_POWER_STATE_ON           (1u << 0)
 #define BCM_POWER_STATE_WAIT         (1u << 1)
 
-/* SET_CLOCK_STATE clock IDs. The Pi firmware's clock-id table is
- * authoritative — `include/soc/bcm2835/raspberrypi-firmware.h`
- * (rpi-6.12.y) and `drivers/clk/bcm/clk-raspberrypi.c` enumerate
- * 1..16 plus a few above. EMMC2 on Pi 5 / BCM2712 is id 12; this
- * matches Circle's `CLOCK_ID_EMMC2 = 12` in
- * `docs/reference/circle-bcmpropertytags.h`. Linux's sdhci-brcmstb
- * pulls EMMC2 up via `devm_clk_get_optional_enabled` which goes
- * through the firmware-clock framework and ultimately issues
- * SET_CLOCK_STATE(12, on) to the firmware. */
+/* Pi firmware clock IDs. Pi 4 / Pi 5 numbering differs:
+ *   id 1   "emmc"  — Pi 4 EMMC; on Pi 5 this is the EMMC2 controller
+ *                    clock. Empirical evidence (mboxclk diagnostic
+ *                    in shell_sys.c): cfg_rate=200000000 matches the
+ *                    Pi 5 dtsi `clk_emmc2: clock-frequency = <200000000>`
+ *                    fixed-clock declaration. State=on at SLM-OS
+ *                    handoff (firmware leaves it running).
+ *   id 12  "emmc2" — Pi 4 second SDHCI controller. On Pi 5 this id
+ *                    appears in firmware but doesn't correspond to
+ *                    any peripheral the SDHCI driver path reaches
+ *                    (cfg_rate=0, measured rate fluctuates with
+ *                    other system clocks). Earlier #414 work used
+ *                    id 12 based on Circle's table; that turned out
+ *                    to be the Pi 4 mapping and is not the right
+ *                    knob on Pi 5. */
 #define BCM_CLOCK_EMMC               1u
-#define BCM_CLOCK_EMMC2              12u
+#define BCM_CLOCK_EMMC2_PI4          12u  /* legacy alias; not Pi 5 EMMC2 */
 
 /* SET_CLOCK_STATE state-word bits. Note bit-1's semantics are
  * direction-dependent:

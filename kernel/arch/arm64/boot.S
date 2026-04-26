@@ -172,6 +172,17 @@ real_start:
  * to _start, which now points to the actual start of the executable code.
  *
  * This approach follows Circle's proven raw binary format for Pi 5.
+ *
+ * NOTE: a Linux ARM64 image header here (b real_start + magic at 0x38)
+ * was investigated as part of #414 (hypothesis: firmware does fuller
+ * peripheral init for "recognised Linux"). Empirically the header
+ * itself breaks Pi 5 boot — scheduler-init timeout, deterministic
+ * across power cycles. Likely cause: PSCI secondary-CPU launch
+ * targets `_start` as the entry, and the Linux header puts a `b`
+ * (one-shot branch) there instead of the start of the secondary
+ * bring-up code. Path is left documented but not enabled; if a
+ * future iteration revisits, the secondary entry point in
+ * `smp_boot.S` needs to also branch around the header.
  */
 _start:
 real_start:
