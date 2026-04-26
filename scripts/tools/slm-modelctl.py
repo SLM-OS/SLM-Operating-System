@@ -1017,8 +1017,12 @@ def run_doctor(shell: Shell, args: argparse.Namespace) -> int:
     log_response(args.debug, "ifconfig", net_out)
     if shell_command_failed(net_out):
         print("NETWORK unavailable")
+        rc = 1
     else:
-        print(f"NETWORK {summarize_network_state(net_out)}")
+        state = summarize_network_state(net_out)
+        print(f"NETWORK {state}")
+        if state != "ready":
+            rc = 1
     return rc
 
 

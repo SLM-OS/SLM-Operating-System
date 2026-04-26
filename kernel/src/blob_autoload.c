@@ -420,7 +420,13 @@ static int blob_autoload_read_entries(struct blob_autoload_entry *entries, size_
                             }
                             if (strcmp(entries[i].domain, domain) == 0 &&
                                 strcmp(entries[i].kind, kind) == 0) {
-                                if (!malformed_metadata) {
+                                if (path_end == path) {
+                                    strncpy(entries[i].path, path, sizeof(entries[i].path) - 1);
+                                    entries[i].path[sizeof(entries[i].path) - 1] = '\0';
+                                    entries[i].size_bytes = 0;
+                                    entries[i].checksum = 0;
+                                    entries[i].present = 1;
+                                } else if (!malformed_metadata) {
                                     strncpy(entries[i].path, path, sizeof(entries[i].path) - 1);
                                     entries[i].path[sizeof(entries[i].path) - 1] = '\0';
                                     entries[i].size_bytes = parsed_size;

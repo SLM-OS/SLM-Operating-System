@@ -1151,6 +1151,26 @@ def test_modelctl_doctor_reports_missing_directory():
     assert "NETWORK down" in text
 
 
+def test_modelctl_doctor_fails_when_network_not_ready():
+    shell = FakeShell(
+        {
+            "stat /mnt/files/policies": [b"Type: Directory\nslmos> "],
+            "stat /mnt/files/models": [b"Type: Directory\nslmos> "],
+            "stat /mnt/files/autoload": [b"Type: Directory\nslmos> "],
+            "ifconfig": [b"sl0: flags=UP,DHCP(pending)\nslmos> "],
+        }
+    )
+
+    with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
+        with patched_argv(slm_modelctl, ["doctor", "--target", "pi-5-2"]):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                rc = slm_modelctl.main()
+
+    assert rc == 1
+    assert "NETWORK pending" in stdout.getvalue()
+
+
 def test_modelctl_run_upload_uses_tool_dir_not_cwd():
     args = argparse.Namespace(
         protocol="auto",
@@ -1226,6 +1246,7 @@ def main() -> int:
     runner.run("modelctl_http_url_rejects_dhcp_failed_state", test_modelctl_http_url_rejects_dhcp_failed_state)
     runner.run("modelctl_doctor_checks_standard_paths_and_network", test_modelctl_doctor_checks_standard_paths_and_network)
     runner.run("modelctl_doctor_reports_missing_directory", test_modelctl_doctor_reports_missing_directory)
+    runner.run("modelctl_doctor_fails_when_network_not_ready", test_modelctl_doctor_fails_when_network_not_ready)
     runner.run("modelctl_run_upload_uses_tool_dir_not_cwd", test_modelctl_run_upload_uses_tool_dir_not_cwd)
     runner.run("modelctl_telnet_shell_buffers_split_iac_sequences", test_modelctl_telnet_shell_buffers_split_iac_sequences)
     runner.run("modelctl_telnet_shell_buffers_split_subnegotiation", test_modelctl_telnet_shell_buffers_split_subnegotiation)

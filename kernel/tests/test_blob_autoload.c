@@ -877,6 +877,42 @@ static void test_blob_boot_autoload_skips_tampered_managed_blob(void)
     TEST_ASSERT_EQUAL_UINT32(0, ev_status.has_active);
 }
 
+static void test_blob_autoload_accepts_legacy_entry_without_metadata(void)
+{
+    char managed_path[VFS_MAX_PATH];
+    char path[VFS_MAX_PATH];
+    char conf_buf[512];
+    RustEvictionBlobStatus ev_status = {0};
+    uint8_t ev_payload[80];
+    uint8_t ev_blob[128];
+    size_t ev_payload_len = build_eviction_xgb_payload(ev_payload, sizeof(ev_payload));
+    size_t ev_blob_len = build_outer_blob(1, ev_payload, ev_payload_len, ev_blob, sizeof(ev_blob));
+    int conf_len;
+
+    TEST_ASSERT_TRUE(ev_payload_len > 0);
+    TEST_ASSERT_TRUE(ev_blob_len > 0);
+    build_managed_path(managed_path, sizeof(managed_path), "eviction", "xgboost");
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(managed_path, ev_blob, ev_blob_len));
+
+    conf_len = snprintf(conf_buf, sizeof(conf_buf),
+                        "# Runtime blob autoload config\n"
+                        "# Format: <domain> <kind> <absolute-path> <size-bytes> <checksum-hex>\n"
+                        "# Entries listed here are staged and activated at boot.\n"
+                        "eviction xgboost %s\n",
+                        managed_path);
+    TEST_ASSERT_TRUE(conf_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(BLOB_AUTOLOAD_CONF_PATH,
+                                               (const uint8_t *)conf_buf,
+                                               (size_t)conf_len));
+
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING(managed_path, path);
+    rust_eviction_blob_clear(1);
+    blob_boot_autoload();
+    TEST_ASSERT_EQUAL_INT(0, rust_eviction_blob_status(1, &ev_status));
+    TEST_ASSERT_EQUAL_UINT32(1, ev_status.has_active);
+}
+
 static void test_blob_autoload_rejects_malformed_metadata_suffix(void)
 {
     char managed_path[VFS_MAX_PATH];
@@ -1039,6 +1075,7 @@ int test_suite_blob_autoload(void)
     RUN_TEST(test_blob_autoload_clear_preserves_existing_entry_on_write_failure);
     RUN_TEST(test_blob_autoload_recovers_from_backup_conf);
     RUN_TEST(test_blob_boot_autoload_skips_tampered_managed_blob);
+    RUN_TEST(test_blob_autoload_accepts_legacy_entry_without_metadata);
     RUN_TEST(test_blob_autoload_rejects_malformed_metadata_suffix);
 #ifdef CONFIG_AI_SCHEDULER
     RUN_TEST(test_blob_autoload_accepts_max_length_paths_across_all_slots);
