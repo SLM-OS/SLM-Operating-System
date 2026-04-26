@@ -405,6 +405,8 @@ set(KERNEL_SOURCES
     kernel/sched/sched_heuristic.c
     kernel/sched/steal_deque.c
     kernel/src/sched_trace.c
+    kernel/src/latency_hist.c
+    kernel/src/rate_ewma.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
     # preempt.c body is guarded by #if defined(SECONDARY_PREEMPT); compile
     # for any ARM64 platform so the Jetson SECONDARY_PREEMPT=ON build
@@ -652,6 +654,7 @@ set(TEST_SOURCES
     kernel/tests/test_pi_mutex.c
     kernel/tests/test_steal_deque.c
     kernel/tests/test_sched_trace.c
+    kernel/tests/test_latency_hist.c
     kernel/tests/test_gpu.c
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c

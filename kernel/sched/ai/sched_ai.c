@@ -20,6 +20,8 @@
 #include "ai_state.h"
 #include "ai_types.h"
 #include "inference_device.h"
+#include "latency_hist.h"
+#include "rate_ewma.h"
 #include "sched.h"
 #include "smp.h"
 #include "slm_ffi.h"
@@ -32,6 +34,13 @@ struct ai_policy_stats {
     uint32_t fallbacks;
     uint64_t total_latency_ns;
     uint32_t action_hist[AI_SCHED_N_ACTIONS];  /* Per-action index counts */
+    /* Admin & telemetry suite (M1): bucketed decision-latency
+     * histogram + smoothed events-per-second rate. Updated from
+     * `ai_assign_cpu_common`; surfaced via `sched_ai_get_rate_stats`
+     * + `slm.sched_decision_rate()` / `slm.latency_histogram()`. */
+    struct latency_hist latency_hist;
+    struct rate_ewma decision_rate;
+    struct rate_ewma fallback_rate;
 };
 
 /* Audit F-08 (2026-04-24): static stack budget for the Hailo policy
@@ -77,8 +86,14 @@ static uint32_t ai_assign_cpu_common(
     int ret = infer_fn(state, &action);
 
     uint64_t t1 = slm_get_time_ns();
-    stats->total_latency_ns += (t1 - t0);
+    uint64_t dt = (t1 > t0) ? (t1 - t0) : 0u;
+    stats->total_latency_ns += dt;
     stats->decisions++;
+    /* M1: bucketed latency + smoothed decision rate. Same write
+     * site as `decisions++`; see latency_hist.h for the
+     * single-writer contract. */
+    latency_hist_record(&stats->latency_hist, dt);
+    rate_ewma_tick(&stats->decision_rate, t1);
 
     /* Record action in histogram (inverse of ai_decode_action) and
      * stash on the task for slm.ai_sched_decision introspection (#211). */
@@ -94,6 +109,7 @@ static uint32_t ai_assign_cpu_common(
 
     if (ret < 0) {
         stats->fallbacks++;
+        rate_ewma_tick(&stats->fallback_rate, t1);
         FP_CONTEXT_RESTORE();
         return sched_policy_heuristic.assign_cpu(task);
     }
@@ -103,6 +119,7 @@ static uint32_t ai_assign_cpu_common(
         (sched_is_core_isolated(action.core_assignment) &&
          task->cpu_affinity == CPU_AFFINITY_ANY)) {
         stats->fallbacks++;
+        rate_ewma_tick(&stats->fallback_rate, t1);
         FP_CONTEXT_RESTORE();
         return sched_policy_heuristic.assign_cpu(task);
     }
@@ -138,6 +155,9 @@ static int ai_mlp_init(void)
     ai_mlp_stats.total_latency_ns = 0;
     for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
         ai_mlp_stats.action_hist[i] = 0;
+    latency_hist_reset(&ai_mlp_stats.latency_hist);
+    rate_ewma_init(&ai_mlp_stats.decision_rate, 0);
+    rate_ewma_init(&ai_mlp_stats.fallback_rate, 0);
 
     /* Validate weight dimensions match expected architecture */
     _Static_assert(AI_MLP_LAYER0_IN == AI_STATE_DIM,
@@ -266,6 +286,9 @@ static int ai_ppo_init(void)
     ai_ppo_stats.total_latency_ns = 0;
     for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
         ai_ppo_stats.action_hist[i] = 0;
+    latency_hist_reset(&ai_ppo_stats.latency_hist);
+    rate_ewma_init(&ai_ppo_stats.decision_rate, 0);
+    rate_ewma_init(&ai_ppo_stats.fallback_rate, 0);
 
     FP_CONTEXT_SAVE();
 
@@ -449,6 +472,9 @@ static int ai_hailo_init(void)
     ai_hailo_stats.total_latency_ns = 0;
     for (int i = 0; i < AI_SCHED_N_ACTIONS; i++)
         ai_hailo_stats.action_hist[i] = 0;
+    latency_hist_reset(&ai_hailo_stats.latency_hist);
+    rate_ewma_init(&ai_hailo_stats.decision_rate, 0);
+    rate_ewma_init(&ai_hailo_stats.fallback_rate, 0);
 
     cached_hailo_dev = inference_device_find("hailo-8");
 
@@ -632,6 +658,44 @@ void sched_ai_get_stats(const char *policy_name,
         ? stats->total_latency_ns / stats->decisions : 0;
     *action_hist = stats->action_hist;
     *n_actions = AI_SCHED_N_ACTIONS;
+}
+
+/* M1: per-policy decision-rate + bucketed latency snapshot. Exposed
+ * via `slm.sched_decision_rate()` and `slm.latency_histogram("sched")`.
+ * `out_hist` is filled by snapshot copy to give the reader a stable
+ * view while the scheduler may write on another CPU. Returns 0 on
+ * success, -1 if `policy_name` is not an AI policy. */
+int sched_ai_get_rate_stats(const char *policy_name,
+                            struct latency_hist *out_hist,
+                            uint64_t *out_decision_rate_q16,
+                            uint64_t *out_fallback_rate_q16,
+                            uint64_t *out_total_decisions,
+                            uint64_t *out_total_fallbacks,
+                            uint64_t *out_total_ns)
+{
+    if (!policy_name) return -1;
+
+    struct ai_policy_stats *stats = NULL;
+    if (policy_name[0] == 'a' && policy_name[3] == 'm')
+        stats = &ai_mlp_stats;
+    else if (policy_name[0] == 'a' && policy_name[3] == 'p')
+        stats = &ai_ppo_stats;
+    else if (policy_name[0] == 'a' && policy_name[3] == 'h')
+        stats = &ai_hailo_stats;
+
+    if (!stats) return -1;
+
+    uint64_t now_ns = slm_get_time_ns();
+
+    if (out_hist) latency_hist_snapshot(&stats->latency_hist, out_hist);
+    if (out_decision_rate_q16)
+        *out_decision_rate_q16 = rate_ewma_get_q16(&stats->decision_rate, now_ns);
+    if (out_fallback_rate_q16)
+        *out_fallback_rate_q16 = rate_ewma_get_q16(&stats->fallback_rate, now_ns);
+    if (out_total_decisions) *out_total_decisions = stats->decisions;
+    if (out_total_fallbacks) *out_total_fallbacks = stats->fallbacks;
+    if (out_total_ns) *out_total_ns = stats->total_latency_ns;
+    return 0;
 }
 
 /* ============================================================================

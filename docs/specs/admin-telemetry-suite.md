@@ -218,7 +218,7 @@ High-rate consumers (`sched/decision` can fire >10 kHz under load) publish raw o
 ```c
 struct latency_hist {
     uint64_t buckets[32];   // log2 buckets: bucket i covers [2^(i+5), 2^(i+6)) ns,
-                            // bucket 0 = [32 ns, 64 ns), bucket 31 = [~17 s, ~34 s)
+                            // bucket 0 = [32 ns, 64 ns), bucket 31 = [~68.7 s, ~137 s)
     uint64_t count;
     uint64_t sum_ns;
     uint64_t min_ns;
@@ -227,14 +227,14 @@ struct latency_hist {
 
 void latency_hist_record(struct latency_hist *h, uint64_t ns);
 void latency_hist_reset(struct latency_hist *h);
-uint64_t latency_hist_pct(const struct latency_hist *h, uint32_t pct);  /* 50, 90, 99 */
+uint64_t latency_hist_percentile(const struct latency_hist *h, uint32_t pct);  /* 50, 90, 99 */
 ```
 
 Lock-free single-writer (one consumer site per histogram); reader uses snapshot copy.
 
 ### 8.2 Per-consumer EWMA rates
 
-`struct rate_ewma { uint64_t last_ts_ns; double rate_per_s; double alpha; }`. Updated on each event by `rate_ewma_tick(r, now_ns)`. Lua reads computed value directly.
+`struct rate_ewma { uint64_t last_event_ns; uint64_t rate_per_s_q16; uint32_t alpha_q16; uint32_t _pad; }`. Q16.16 fixed-point — integer-only so the scheduler hot path doesn't need to FP-context-save just to update a counter. Updated on each event by `rate_ewma_tick(r, now_ns)`: it computes the instantaneous rate from inter-event time (`1e9 / dt_ns`, in Q16.16) and blends it into the smoothed value with `rate = alpha * inst + (1 - alpha) * rate`. A 5 s stale window decays an idle channel to zero so a once-busy stream that goes silent doesn't keep reporting its last rate forever. Lua reads `rate_per_s_q16 >> 16` directly.
 
 ### 8.3 Wiring
 
@@ -377,11 +377,20 @@ Each milestone is a separate PR. M1-M3 are pure infrastructure; M4-M7 stack on t
 
 ## 14. Open questions
 
+Each is annotated with the M1-time decision so M2+ work doesn't relitigate
+them. Anything marked "deferred" is a documented punt, not a forgotten
+loose end.
+
 1. **Per-task GPU toggle?** Spec is global. If demos need a per-task knob (e.g., one task uses GPU inference, another stays CPU), follow up in a v2.
+   * **Decided 2026-04-26 (M1):** ship global toggle; per-task deferred to v2 unless a demo surfaces the need. The global flag is per §1; M2 ships the surface.
 2. **Auth on `admin`.** None. Telnet is unauthenticated. Acceptable for the lab; will need TLS + a token before any deployment outside the lab.
+   * **Decided 2026-04-26 (M1):** explicit non-goal per §2. Network trust boundary is the lab. Out-of-lab deployment must add TLS + token before re-enabling `admin`.
 3. **Aggregation window for inference rate.** 1 s EWMA is a choice; a sliding-window p99 would be more accurate but more expensive. Ship with EWMA; reconsider if demo numbers feel laggy.
+   * **Decided 2026-04-26 (M1):** ship `rate_ewma` for *rate* (smoothed events/sec, integer-only Q16.16 to keep FP off the scheduler hot path) and `latency_hist` log2 buckets for *percentiles* (p50/p90/p99 read from cumulative counts — no smoothing, no decay). Two surfaces, two semantics, no overlap. Reconsider after M4 hardware test if numbers feel laggy or coarse.
 4. **Telemetry persistence.** Spec is in-memory only. A future "tee to LittleFS" sink can be added by subscribing to `/telemetry/**` from a kernel task and writing to a rotating file. Not in scope here.
+   * **Deferred:** revisit during M4 if a demo wants post-mortem playback. Not a blocker for any milestone in this spec.
 5. **Model engine for `ggml`.** Stubbed. Real implementation is its own spec; this one just promises the launch surface and a meaningful ENOSYS until then.
+   * **Deferred:** M5 lands the engine registry with `ggml` returning ENOSYS until a separate ggml-engine spec is written.
 
 ## 15. References
 
