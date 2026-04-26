@@ -258,6 +258,57 @@ void net_get_stats(struct net_stats *stats);
 void net_stats_rx_no_buffers_inc(void);
 
 /* -------------------------------------------------------------------------- */
+/* RX-stall watchdog                                                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Snapshot of the RX-stall watchdog state.
+ *
+ * Captured by `net_watchdog_get` and dumped automatically (one-shot)
+ * when the watchdog detects link-up but no RX for `stall_threshold_ms`.
+ * Exposes enough state to diagnose the four most common stall causes
+ * without needing to reach for serial: pbuf-pool exhaustion, TCP-PCB
+ * exhaustion, lwIP heap exhaustion, and "no RX coming in at all"
+ * (driver / link-layer wedge).
+ */
+struct net_watchdog_snapshot {
+    bool      armed;                /* watchdog enabled (link-up + RX seen at least once) */
+    bool      alarmed;               /* currently in stalled state */
+    uint32_t  ms_since_last_rx;      /* monotonic ms since last successful pbuf_alloc */
+    uint32_t  stall_threshold_ms;    /* config threshold */
+    uint64_t  rx_packets;            /* mirror of net_stats.rx_packets at sample time */
+    uint64_t  rx_dropped;            /* lwIP-layer drops */
+    uint64_t  rx_no_buffers;         /* driver-layer drops */
+    uint16_t  pbuf_pool_used;        /* lwip_stats.memp[MEMP_PBUF_POOL]->used */
+    uint16_t  pbuf_pool_avail;       /* configured PBUF_POOL_SIZE */
+    uint16_t  tcp_pcb_used;
+    uint16_t  tcp_pcb_avail;
+    uint32_t  heap_used;             /* lwip_stats.mem.used */
+    uint32_t  heap_avail;            /* lwip_stats.mem.avail */
+    uint32_t  stall_events;          /* count of stall→alarm transitions since boot */
+    uint32_t  recovery_events;       /* count of alarm→recovery transitions since boot */
+};
+
+/**
+ * Sample the watchdog state.
+ *
+ * Cheap (a handful of static loads). Safe to call from any task or
+ * from the M3 telemetry feed publisher.
+ */
+void net_watchdog_get(struct net_watchdog_snapshot *out);
+
+/**
+ * Override the stall threshold at runtime.
+ *
+ * Default is `NET_RX_STALL_THRESHOLD_MS` (10 s). Tests pass a smaller
+ * value (e.g. 200 ms) to drive the alarm path without sleeping the
+ * whole CI run; pass 0 to restore the default. Negative / wrap values
+ * are clamped to a minimum of 100 ms so a unit test cannot
+ * accidentally turn the watchdog into a busy log spammer.
+ */
+void net_watchdog_set_threshold_ms(uint32_t ms);
+
+/* -------------------------------------------------------------------------- */
 /* Utility Functions                                                           */
 /* -------------------------------------------------------------------------- */
 

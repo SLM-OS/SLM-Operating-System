@@ -22,6 +22,7 @@
 #include "lwip/ip4.h"
 #include "lwip/raw.h"
 #include "lwip/stats.h"
+#include "lwip/memp.h"
 
 #include "shell_io_tcp.h"
 #include "netif/ethernet.h"
@@ -223,6 +224,137 @@ static struct {
 
 /* Statistics */
 static struct net_stats net_statistics;
+
+/* -------------------------------------------------------------------------- */
+/* RX-stall watchdog                                                           */
+/* -------------------------------------------------------------------------- */
+
+/* Default stall threshold. 10 s with link up and zero RX is well outside
+ * any healthy network — even an idle subnet sees ARP traffic, gateway
+ * keep-alives, and DHCP renewals. Anything past this is one of the four
+ * known failure modes the snapshot is designed to surface (pbuf pool
+ * out, TCP PCB out, heap out, driver wedge). */
+#ifndef NET_RX_STALL_THRESHOLD_MS
+#define NET_RX_STALL_THRESHOLD_MS  10000u
+#endif
+
+/* Minimum override threshold. Prevents a misconfigured test from
+ * setting threshold=0 and turning the watchdog into a log spammer. */
+#define NET_RX_STALL_THRESHOLD_MIN_MS  100u
+
+static uint32_t  rx_watchdog_threshold_ms  = NET_RX_STALL_THRESHOLD_MS;
+static uint32_t  rx_watchdog_last_rx_ms    = 0;
+static bool      rx_watchdog_seen_first_rx = false;
+static bool      rx_watchdog_alarmed       = false;
+static uint32_t  rx_watchdog_stall_events  = 0;
+static uint32_t  rx_watchdog_recovery_events = 0;
+
+static void net_watchdog_note_rx(void) {
+    rx_watchdog_last_rx_ms = sys_now();
+    rx_watchdog_seen_first_rx = true;
+    if (rx_watchdog_alarmed) {
+        rx_watchdog_alarmed = false;
+        rx_watchdog_recovery_events++;
+        INFO("net: RX recovered after stall (rx_packets=%llu)",
+             (unsigned long long)net_statistics.rx_packets);
+    }
+}
+
+void net_watchdog_set_threshold_ms(uint32_t ms) {
+    if (ms == 0) {
+        rx_watchdog_threshold_ms = NET_RX_STALL_THRESHOLD_MS;
+        return;
+    }
+    if (ms < NET_RX_STALL_THRESHOLD_MIN_MS) {
+        ms = NET_RX_STALL_THRESHOLD_MIN_MS;
+    }
+    rx_watchdog_threshold_ms = ms;
+}
+
+void net_watchdog_get(struct net_watchdog_snapshot *out) {
+    if (!out) return;
+
+    uint32_t now = sys_now();
+    uint32_t since = rx_watchdog_seen_first_rx
+                     ? (uint32_t)(now - rx_watchdog_last_rx_ms)
+                     : 0u;
+
+    out->armed                = rx_watchdog_seen_first_rx && net_link_is_up();
+    out->alarmed              = rx_watchdog_alarmed;
+    out->ms_since_last_rx     = since;
+    out->stall_threshold_ms   = rx_watchdog_threshold_ms;
+    out->rx_packets           = net_statistics.rx_packets;
+    out->rx_dropped           = net_statistics.rx_dropped;
+    out->rx_no_buffers        = net_statistics.rx_no_buffers;
+    out->stall_events         = rx_watchdog_stall_events;
+    out->recovery_events      = rx_watchdog_recovery_events;
+
+    /* `lwip_stats.memp[i]` slots are NULL until `memp_init` runs as
+     * part of `lwip_init`. The watchdog snapshot must work on a fresh
+     * boot too — a unit test that calls net_watchdog_get before
+     * net_init must not data-abort. Treat NULL as "0/0". */
+#if MEMP_STATS
+    if (lwip_stats.memp[MEMP_PBUF_POOL] != NULL) {
+        out->pbuf_pool_used  = (uint16_t)lwip_stats.memp[MEMP_PBUF_POOL]->used;
+        out->pbuf_pool_avail = (uint16_t)lwip_stats.memp[MEMP_PBUF_POOL]->avail;
+    } else {
+        out->pbuf_pool_used  = 0;
+        out->pbuf_pool_avail = 0;
+    }
+    if (lwip_stats.memp[MEMP_TCP_PCB] != NULL) {
+        out->tcp_pcb_used  = (uint16_t)lwip_stats.memp[MEMP_TCP_PCB]->used;
+        out->tcp_pcb_avail = (uint16_t)lwip_stats.memp[MEMP_TCP_PCB]->avail;
+    } else {
+        out->tcp_pcb_used  = 0;
+        out->tcp_pcb_avail = 0;
+    }
+#else
+    out->pbuf_pool_used  = 0;
+    out->pbuf_pool_avail = 0;
+    out->tcp_pcb_used    = 0;
+    out->tcp_pcb_avail   = 0;
+#endif
+#if MEM_STATS
+    out->heap_used  = (uint32_t)lwip_stats.mem.used;
+    out->heap_avail = (uint32_t)lwip_stats.mem.avail;
+#else
+    out->heap_used  = 0;
+    out->heap_avail = 0;
+#endif
+}
+
+/* Called from net_poll(). Cheap when not alarmed. */
+static void net_watchdog_check(void) {
+    /* Don't fire before we've ever seen RX (boot-time link bring-up
+     * has its own DHCP timeout machinery). Don't fire while link is
+     * down — no RX is expected. */
+    if (!rx_watchdog_seen_first_rx) return;
+    if (!net_link_is_up()) return;
+    if (rx_watchdog_alarmed) return;
+
+    uint32_t since = (uint32_t)(sys_now() - rx_watchdog_last_rx_ms);
+    if (since < rx_watchdog_threshold_ms) return;
+
+    rx_watchdog_alarmed = true;
+    rx_watchdog_stall_events++;
+
+    struct net_watchdog_snapshot snap;
+    net_watchdog_get(&snap);
+
+    /* One-shot dump — `net_watchdog_note_rx` clears `alarmed` and
+     * logs the recovery line if traffic resumes. */
+    WARN("net: RX stalled (link up, %u ms idle, threshold %u ms)",
+         (unsigned)snap.ms_since_last_rx,
+         (unsigned)snap.stall_threshold_ms);
+    WARN("net:   rx_packets=%llu dropped=%llu no_buffers=%llu",
+         (unsigned long long)snap.rx_packets,
+         (unsigned long long)snap.rx_dropped,
+         (unsigned long long)snap.rx_no_buffers);
+    WARN("net:   pbuf_pool=%u/%u tcp_pcb=%u/%u heap=%u/%u",
+         (unsigned)snap.pbuf_pool_used, (unsigned)snap.pbuf_pool_avail,
+         (unsigned)snap.tcp_pcb_used,   (unsigned)snap.tcp_pcb_avail,
+         (unsigned)snap.heap_used,      (unsigned)snap.heap_avail);
+}
 
 /* -------------------------------------------------------------------------- */
 /* Network Interface (netif) Driver                                            */
@@ -541,6 +673,13 @@ void net_poll(void) {
             net_statistics.rx_packets++;
             net_statistics.rx_bytes += len;
 
+            /* Watchdog liveness ping. Note here (after pbuf_alloc
+             * succeeded) rather than after slm_netif.input() because
+             * "received a frame at the netif boundary" is the right
+             * granularity — even a frame the IP stack drops indicates
+             * the driver/USB/lwIP-pool path is alive. */
+            net_watchdog_note_rx();
+
             /* Pass to lwIP */
             if (slm_netif.input(p, &slm_netif) != ERR_OK) {
                 pbuf_free(p);
@@ -577,6 +716,9 @@ void net_poll(void) {
 
     /* Drain TX + complete teardown for any TCP shell sessions. */
     shell_io_tcp_poll();
+
+    /* RX-stall watchdog. Cheap when not alarmed (a load + compare). */
+    net_watchdog_check();
 }
 
 /*
