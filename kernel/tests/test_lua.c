@@ -58,7 +58,12 @@ static lua_State *test_lua_register(lua_State *L)
     /* Out of slots — caller exceeded LUA_GUARD_SLOTS concurrent
      * states. Don't crash; return the state un-tracked so the
      * test still runs (and the explicit `test_lua_close` will
-     * still close it). Bumping LUA_GUARD_SLOTS is the fix. */
+     * still close it). Print so a future regression that silently
+     * overflows the registry — and would therefore re-introduce
+     * the cascade pattern this guard exists to prevent — surfaces
+     * visibly in the test log. Bumping LUA_GUARD_SLOTS is the fix. */
+    uart_puts("[WARN] test_lua: registry full — state opened un-tracked, "
+              "tearDown will not reclaim it. Bump LUA_GUARD_SLOTS.\n");
     return L;
 }
 
@@ -3921,7 +3926,14 @@ int test_suite_lua(void)
     /* Math stubs (CORE-L1) */
     RUN_TEST(test_lua_trig_stubs_return_zero);
 
-    /* tearDown leak guard (issue #374) */
+    /* tearDown leak guard (issue #374). These two MUST stay paired
+     * and adjacent — the second test reads a static
+     * (`test_teardown_expected_increment`) that the first test sets,
+     * and asserts the close counter moved by exactly the expected
+     * delta after the intervening tearDown fires. Inserting another
+     * test between them, or reordering, will desync the snapshot and
+     * surface as a misleading "expected N got M" failure rather than
+     * the real bug. */
     RUN_TEST(test_teardown_reclaims_leaked_state);
     RUN_TEST(test_teardown_handles_no_open_states);
 
