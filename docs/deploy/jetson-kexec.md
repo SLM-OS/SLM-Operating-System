@@ -88,19 +88,23 @@ ssh root@<JETSON_IP> 'systemctl daemon-reload && systemctl enable slmos-autokexe
 ```
 
 The default config uses `/root/slmos.elf`. If you want a different path or
-helper flags, edit `/etc/default/slmos-autokexec` on the Jetson.
+helper flags, edit `/etc/default/slmos-autokexec` on the Jetson. `SLMOS_KEXEC_ARGS`
+may contain multiple helper flags separated by spaces.
 
 Then add a second extlinux entry in `/boot/extlinux/extlinux.conf`. Keep the
-existing `DEFAULT primary` line so normal boots still land in Linux:
+existing `DEFAULT primary` line so normal boots still land in Linux.
+
+Important: do not hardcode the rootfs stanza from another board. Start from the
+working `primary` entry already on that Jetson, copy its `LINUX`, `INITRD`, and
+especially its full `APPEND` line unchanged, then append only the two autokexec
+markers shown below:
 
 ```conf
 LABEL slmos-autokexec
       MENU LABEL Linux -> auto-kexec SLM-OS
-      LINUX /boot/Image
-      INITRD /boot/initrd
-      APPEND ${cbootargs} root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4 \
-             mminit_loglevel=4 console=ttyTCU0,115200 firmware_class.path=/etc/firmware \
-             fbcon=map:0 nospectre_bhb video=efifb:off console=tty0 \
+      LINUX <same as primary>
+      INITRD <same as primary>
+      APPEND <copy the exact APPEND value from primary> \
              systemd.unit=slmos-autokexec.target slmos.autokexec=1
 ```
 
