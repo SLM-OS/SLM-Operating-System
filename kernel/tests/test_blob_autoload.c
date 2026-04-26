@@ -39,11 +39,23 @@ static uint32_t fnv1a32(const uint8_t *data, size_t len)
     return hash;
 }
 
+/* Outer-blob header size written by `build_outer_blob`. Same value and
+ * intent as BLOB_TEST_OUTER_HEADER_BYTES in test_eviction.c — see the
+ * consolidation follow-up tracked in PR #432. */
+#define BLOB_OUTER_HEADER_BYTES 24
+
 static size_t build_outer_blob(uint16_t kind_id, const uint8_t *payload,
                                size_t payload_len, uint8_t *out, size_t out_cap)
 {
+    /* Tripwire: any new offset written below must bump
+     * BLOB_OUTER_HEADER_BYTES. */
+    static_assert(BLOB_OUTER_HEADER_BYTES == 24,
+                  "build_outer_blob writes 24 bytes at out[0..23]; "
+                  "BLOB_OUTER_HEADER_BYTES and the writes below "
+                  "must move together");
+
     uint32_t checksum = fnv1a32(payload, payload_len);
-    size_t total = 24 + payload_len;
+    size_t total = BLOB_OUTER_HEADER_BYTES + payload_len;
     if (out_cap < total) return 0;
 
     out[0] = 'S'; out[1] = 'E'; out[2] = 'M'; out[3] = 'B';
@@ -61,7 +73,7 @@ static size_t build_outer_blob(uint16_t kind_id, const uint8_t *payload,
     out[18] = (uint8_t)((checksum >> 16) & 0xFF);
     out[19] = (uint8_t)((checksum >> 24) & 0xFF);
     out[20] = 0; out[21] = 0; out[22] = 0; out[23] = 0;
-    memcpy(out + 24, payload, payload_len);
+    memcpy(out + BLOB_OUTER_HEADER_BYTES, payload, payload_len);
     return total;
 }
 
@@ -108,8 +120,15 @@ static size_t build_eviction_xgb_payload(uint8_t *out, size_t out_cap)
 }
 
 /* Only used by the CONFIG_AI_SCHEDULER tests below; gate to silence
- * `-Werror=unused-function` on default builds (issue #399). */
+ * `-Werror=unused-function` on default builds (issue #399).
+ *
+ * The constant + static_assert mirror the pattern in test_eviction.c
+ * (its independent copy of this helper). Both copies must update
+ * together — fixing this duplication in a shared test-utility header
+ * is a tracked follow-up (PR #432 review). */
 #ifdef CONFIG_AI_SCHEDULER
+#define EVICTION_MLP_PAYLOAD_BYTES 17676
+
 static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
                                          uint8_t *out,
                                          size_t out_cap)
@@ -133,6 +152,9 @@ static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
                     + W_L3_LEN + B_L3_LEN + W_OUT_LEN + B_OUT_LEN,
         TOTAL = PAYLOAD_HEADER_LEN + FLOAT_COUNT * 4
     };
+    static_assert(TOTAL == EVICTION_MLP_PAYLOAD_BYTES,
+                  "EVICTION_MLP_PAYLOAD_BYTES is out of sync with the "
+                  "helper's layer dimensions; both must update together");
     size_t cursor = 0;
     size_t idx = 0;
 
@@ -961,13 +983,20 @@ static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
     char path_sched_rebalance[VFS_MAX_PATH];
     char conf_buf[1400];
     uint8_t ev_xgb_payload[80];
-    uint8_t ev_mlp_payload[2048];
+    /* `static` so the ~17 KB buffer lives in BSS, not on the test's
+     * stack (kernel stacks are 16 KB fixed — this would have blown
+     * the stack if a maintainer ever flipped CONFIG_AI_SCHEDULER on
+     * for default test runs). Same rationale as the test_eviction.c
+     * sibling buffers. */
+    static uint8_t ev_mlp_payload[EVICTION_MLP_PAYLOAD_BYTES];
     uint8_t ev_cacheus_payload[24];
     uint8_t sched_dense_payload[4096];
     uint8_t sched_cfg_payload[40];
     uint8_t sched_thresholds_payload[48];
     uint8_t sched_rebalance_payload[32];
-    uint8_t blob[8192];
+    /* Sized for the worst-case payload (the MLP) plus the outer
+     * header. `static` per the same BSS rationale as ev_mlp_payload. */
+    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + BLOB_OUTER_HEADER_BYTES];
     char managed_path[VFS_MAX_PATH];
     size_t payload_len;
     size_t blob_len;

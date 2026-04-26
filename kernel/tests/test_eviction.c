@@ -179,14 +179,29 @@ static size_t build_valid_mlp_payload(uint32_t out_weight_bits, uint8_t *out, si
     return PAYLOAD_LEN;
 }
 
+/* Outer-blob header size written by `build_test_blob`. Exposed so caller
+ * buffers can size as `BLOB_TEST_OUTER_HEADER_BYTES + payload_len`
+ * instead of relying on a magic literal. */
+#define BLOB_TEST_OUTER_HEADER_BYTES 24
+
 static size_t build_test_blob(uint16_t kind_id,
                               const uint8_t *payload,
                               size_t payload_len,
                               uint8_t *out,
                               size_t out_cap)
 {
+    /* The function writes header bytes at offsets 0..23 below. Any
+     * change to the layout (an extra reserved field, a wider counter,
+     * etc.) must also update BLOB_TEST_OUTER_HEADER_BYTES — this
+     * static_assert is the tripwire that catches drift between the
+     * constant and the literal offsets. */
+    static_assert(BLOB_TEST_OUTER_HEADER_BYTES == 24,
+                  "build_test_blob writes 24 bytes at out[0..23]; "
+                  "BLOB_TEST_OUTER_HEADER_BYTES and the writes below "
+                  "must move together");
+
     uint32_t checksum = fnv1a32(payload, payload_len);
-    size_t total = 24 + payload_len;
+    size_t total = BLOB_TEST_OUTER_HEADER_BYTES + payload_len;
     if (out_cap < total) return 0;
 
     out[0] = 'S'; out[1] = 'E'; out[2] = 'M'; out[3] = 'B';
@@ -204,7 +219,7 @@ static size_t build_test_blob(uint16_t kind_id,
     out[18] = (uint8_t)((checksum >> 16) & 0xFF);
     out[19] = (uint8_t)((checksum >> 24) & 0xFF);
     out[20] = 0; out[21] = 0; out[22] = 0; out[23] = 0; /* reserved */
-    memcpy(out + 24, payload, payload_len);
+    memcpy(out + BLOB_TEST_OUTER_HEADER_BYTES, payload, payload_len);
     return total;
 }
 
@@ -978,7 +993,7 @@ static void test_blob_validate_rejects_invalid_outer_header_fields(void)
      * blob adds a 24-byte header. Allocate generously in BSS — these are
      * `static` so they don't burden the 16 KB kernel stack. */
     static uint8_t payload[EVICTION_MLP_PAYLOAD_BYTES];
-    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + 64];
+    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + BLOB_TEST_OUTER_HEADER_BYTES];
     size_t payload_len = build_eviction_mlp_payload(0x3F800000u, payload, sizeof(payload));
     size_t len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
 
@@ -1011,7 +1026,7 @@ static void test_blob_stage_rejects_invalid_payload_headers(void)
     static uint8_t xgb_payload[128];
     static uint8_t mlp_payload[EVICTION_MLP_PAYLOAD_BYTES];
     static uint8_t cacheus_payload[32];
-    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + 64];
+    static uint8_t blob[EVICTION_MLP_PAYLOAD_BYTES + BLOB_TEST_OUTER_HEADER_BYTES];
     size_t payload_len;
     size_t len;
 
