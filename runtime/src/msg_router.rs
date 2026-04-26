@@ -636,13 +636,29 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
             if target_count < MAX_TARGETS {
                 targets[target_count] = &mut WILDCARD_SUBS[i].mailbox;
                 target_count += 1;
+                // A matching wildcard counts as the topic being known.
+                // Without this flip the next block prints "Topic '%s'
+                // not found" even though we just queued a delivery to
+                // a wildcard subscriber, which is the canonical mode
+                // for the M4 telemetry feed (`tel.*` matches every
+                // emitter without anyone explicitly registering each
+                // emitter topic).
+                found_topic = true;
             }
         }
     } // MSG_ROUTER_LOCK released
 
-    if !found_topic {
-        uart_printf(b"[msg] Topic '%s' not found\n\0".as_ptr(), topic_name);
-    }
+    // (M4) Pre-M4 this branch printed "Topic '%s' not found" whenever
+    // a publisher emitted to a topic that had no exact subscribers.
+    // The M4 telemetry feed (`admin_telemetry.c`) emits every event
+    // unconditionally — fire-and-forget — and operators only attach
+    // a wildcard subscriber when they want to look. Silencing this
+    // warning entirely keeps the steady-state log clean. The wildcard
+    // delivery path above already counts genuine subscribers via
+    // `target_count`; the publish return value (`delivered`) lets a
+    // caller distinguish "nobody listening" from "delivered to N"
+    // without a UART warning. */
+    let _ = found_topic;  // intentionally unused; preserved for grep.
 
     // Deliver and wait for ack on each target. Mailbox atomics handle
     // cross-CPU sync on the ready/ack flags.

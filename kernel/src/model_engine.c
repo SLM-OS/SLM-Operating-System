@@ -194,14 +194,20 @@ int model_meta_read(const char *name, struct model_meta *out)
 {
     if (!name || !out) return MODEL_LAUNCH_ERR_BADMETA;
 
-    /* Build the path. /mnt/models/<name>.meta — bounded by VFS_MAX_PATH.
+    /* Build the path. /mnt/files/models/<name>.meta — bounded by
+     * VFS_MAX_PATH. The spec §10 originally drafted /mnt/models/ as a
+     * separate mount, but the only LittleFS mount at runtime is
+     * /mnt/files/, so the .meta sidecars live in a /mnt/files/models/
+     * subdirectory. Operators create the directory once via
+     * `mkdir /mnt/files/models` (or it pre-exists from a prior boot
+     * since LittleFS persists across reboots).
      *
      * `name` length is bounded by `VFS_MAX_PATH - 1` so a missing nul
      * terminator (defensive — current callers always nul-terminate)
      * cannot run the strlen scan off the end of the caller's buffer
      * into faulting memory. */
     char path[VFS_MAX_PATH];
-    const char prefix[] = "/mnt/models/";
+    const char prefix[] = "/mnt/files/models/";
     const char suffix[] = ".meta";
     size_t plen = sizeof(prefix) - 1;
     size_t slen = sizeof(suffix) - 1;

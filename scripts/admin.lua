@@ -230,15 +230,19 @@ local function paint()
     render_footer(cols)
 end
 
+-- slm.try_getc() returns a 1-character string (or nil when no
+-- character is buffered), NOT an integer. Convert to a byte code so
+-- the comparison logic below stays terse and integer-typed.
 local function dispatch_key(c)
-    if c == nil or c < 0 then return end
-    if c == string.byte('q') or c == string.byte('Q') or c == 3 then
+    if c == nil or #c == 0 then return end
+    local b = string.byte(c)
+    if b == string.byte('q') or b == string.byte('Q') or b == 3 then
         running = false
-    elseif c == string.byte('r') or c == string.byte('R') then
+    elseif b == string.byte('r') or b == string.byte('R') then
         -- force a repaint by zeroing the throttle
         last_refresh_ms = 0
-    elseif c >= string.byte('1') and c <= string.byte('7') then
-        current_page = c - string.byte('0')
+    elseif b >= string.byte('1') and b <= string.byte('7') then
+        current_page = b - string.byte('0')
         last_refresh_ms = 0
     end
 end
@@ -249,7 +253,7 @@ while running do
     -- Drain any pending keys.
     while true do
         local c = slm.try_getc()
-        if not c or c < 0 then break end
+        if c == nil or #c == 0 then break end
         dispatch_key(c)
     end
     -- Repaint at most once per second, or immediately on a forced refresh.

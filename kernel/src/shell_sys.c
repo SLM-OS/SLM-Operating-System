@@ -2328,7 +2328,16 @@ static int model_infer(int argc, char *argv[])
         return -1;
     }
 
+    /* M3 telemetry: same instrumentation the three Lua model_infer*
+     * bindings apply (kernel/src/lua_slm.c). Without it, shell-driven
+     * `model infer` calls would not increment the inference rate /
+     * latency-hist / `tel.inf` event counter — surfaced during M7
+     * hardware verification on jetson-nano-2. */
+    uint64_t t0 = slm_get_time_ns();
     int result = rust_infer_and_print((uint32_t)idx);
+    uint64_t t1 = slm_get_time_ns();
+    admin_telemetry_record_inference(t1 > t0 ? t1 - t0 : 0u, result >= 0);
+
     if (result < 0) {
         shell_printf("model infer: failed (error %d)\r\n", result);
         return -1;
@@ -2537,7 +2546,7 @@ int cmd_model(int argc, char *argv[])
         int rc = model_meta_read(argv[2], &meta);
         if (rc != MODEL_LAUNCH_OK) {
             const char *why =
-                rc == MODEL_LAUNCH_ERR_NOMETA   ? "no /mnt/models/<name>.meta sidecar"
+                rc == MODEL_LAUNCH_ERR_NOMETA   ? "no /mnt/files/models/<name>.meta sidecar"
               : rc == MODEL_LAUNCH_ERR_BADMETA  ? "malformed sidecar"
               : rc == MODEL_LAUNCH_ERR_BADKIND  ? "unknown kind"
               :                                   "unknown error";
@@ -2566,7 +2575,7 @@ int cmd_model(int argc, char *argv[])
         int rc = model_engine_launch(argv[2], &task_id);
         if (rc != MODEL_LAUNCH_OK) {
             const char *why =
-                rc == MODEL_LAUNCH_ERR_NOMETA   ? "no /mnt/models/<name>.meta sidecar"
+                rc == MODEL_LAUNCH_ERR_NOMETA   ? "no /mnt/files/models/<name>.meta sidecar"
               : rc == MODEL_LAUNCH_ERR_BADMETA  ? "malformed sidecar"
               : rc == MODEL_LAUNCH_ERR_BADKIND  ? "unknown kind"
               : rc == MODEL_LAUNCH_ERR_NOSYS    ? "engine for kind is a stub on this build"

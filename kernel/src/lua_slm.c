@@ -1713,7 +1713,7 @@ static int l_model_engines(lua_State *L) {
 }
 
 /**
- * slm.model_meta(name) - Read /mnt/models/<name>.meta and return the
+ * slm.model_meta(name) - Read /mnt/files/models/<name>.meta and return the
  * parsed sidecar.
  *
  * Returns table on success: { name, kind, size, sha256, uploaded_ts_ms }.
@@ -1747,7 +1747,7 @@ static int l_model_meta(lua_State *L) {
 }
 
 /**
- * slm.model_launch(name) - Launch the model registered at /mnt/models/<name>.
+ * slm.model_launch(name) - Launch the model registered at /mnt/files/models/<name>.
  *
  * On success returns task_id (integer) + nil error. On failure returns
  * nil + a negative MODEL_LAUNCH_ERR_* code so callers can distinguish

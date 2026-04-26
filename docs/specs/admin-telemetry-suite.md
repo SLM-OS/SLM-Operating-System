@@ -92,8 +92,8 @@ sched policy <name> [--backend cpu|gpu]   # extend existing command
 eviction policy <name> [--backend cpu|gpu]
 
 model upload <name> [--kind ggml|hailo|mnist|raw]
-                                          # opens an xput session bound to /mnt/models/<name>.blob,
-                                          # writes a sidecar /mnt/models/<name>.meta on finish
+                                          # opens an xput session bound to /mnt/files/models/<name>.blob,
+                                          # writes a sidecar /mnt/files/models/<name>.meta on finish
 model list                                # name, kind, size, sha256, ts, status
 model launch <name> [--task-name N] [--args "<json>"]
                                           # returns task id; emits /telemetry/model/<name>/launched
@@ -288,8 +288,8 @@ The existing `assign_cpu` becomes a thin wrapper that picks the right backend pe
 
 ```
 model upload <name> --kind <kind>
-  → opens xput session pointed at /mnt/models/<name>.blob
-  → on xput finish: writes /mnt/models/<name>.meta with {kind, size, sha256, uploaded_ts_ms}
+  → opens xput session pointed at /mnt/files/models/<name>.blob
+  → on xput finish: writes /mnt/files/models/<name>.meta with {kind, size, sha256, uploaded_ts_ms}
   → publishes /telemetry/model/<name>/status {status="uploaded", ...}
 ```
 
@@ -299,7 +299,7 @@ model upload <name> --kind <kind>
 
 ```
 model launch <name> [--task-name N] [--args "<json>"]
-  → reads /mnt/models/<name>.meta
+  → reads /mnt/files/models/<name>.meta
   → looks up engine for kind (ggml/hailo/mnist/raw)
   → engine instantiates: returns {task_id} or err
   → publishes /telemetry/model/<name>/status {status="launched", task_id}
@@ -398,8 +398,8 @@ loose end.
    * **Decided 2026-04-26 (M4):** for now operators subscribe via `lua -e 'slm.telemetry_subscribe("tel.*", function(t,d) print(t,d) end)'`, which uses the existing per-`lua_State` mailbox. Shell-side blocking subscribe lands when the per-shell mailbox slot allocator does.
 8. **1Hz aggregate topics + heartbeat (M4 deferral).** Spec §7.1 lists `/telemetry/<consumer>/aggregate/1s` topics emitted unconditionally, plus `/telemetry/system/heartbeat`. Both need a kernel-task scheduler.
    * **Decided 2026-04-26 (M4):** ship raw per-event topics only. The latency hist + rate from M1/M3 already give a 1Hz-equivalent view via `slm.*_rate()` and `slm.latency_histogram()`. Aggregator task lands alongside the M6 admin TUI's 1Hz refresh path.
-9. **`model upload <name>` xput integration (M5 deferral).** Spec §10.1 promises a single shell command that opens an xput session pointed at `/mnt/models/<name>.blob` and arms a finish-hook that writes the `.meta` sidecar.
-   * **Decided 2026-04-26 (M5):** ship the engine registry + `.meta` parser + `model launch <name>` dispatch first. Operators stage the blob via the existing `xput begin/chunk/finish` flow, and write the sidecar via `write /mnt/models/<name>.meta "kind=mnist size=N sha256=..."`. The unified `model upload` flow lands when the M6 admin TUI's host-side `slm-model-upload.py` helper actually drives it; both can land together.
+9. **`model upload <name>` xput integration (M5 deferral).** Spec §10.1 promises a single shell command that opens an xput session pointed at `/mnt/files/models/<name>.blob` and arms a finish-hook that writes the `.meta` sidecar.
+   * **Decided 2026-04-26 (M5):** ship the engine registry + `.meta` parser + `model launch <name>` dispatch first. Operators stage the blob via the existing `xput begin/chunk/finish` flow, and write the sidecar via `write /mnt/files/models/<name>.meta "kind=mnist size=N sha256=..."`. The unified `model upload` flow lands when the M6 admin TUI's host-side `slm-model-upload.py` helper actually drives it; both can land together.
 10. **`model unload <name>` ref-checked variant (M5 deferral).** Spec §10.3 promises `model unload` refuses with `EBUSY` if a task references the loaded model.
     * **Decided 2026-04-26 (M5):** the existing `model unload <name|idx>` command already refuses to unload pinned models. Ref-counted "running task references this model" tracking would require new bookkeeping in the runtime model loader; M6's per-task launch metadata is the natural place to add it. Until then, operators can `task kill <id>` followed by `model unload <name>` for a forced-stop workflow.
 
