@@ -5093,17 +5093,21 @@ int cmd_cdcdiag(int argc, char *argv[])
     struct cdc_ecm_tx_diag d;
     cdc_ecm_get_tx_diag(&d);
 
+    /* Width of the diag struct's per-slot arrays (cdc_ecm.h) — pinned
+     * by a static_assert in cdc_ecm.c against CDC_ECM_TX_SLOTS. */
+    const unsigned slots = sizeof(d.slot_in_use) / sizeof(d.slot_in_use[0]);
+
     shell_puts("CDC-ECM TX diag (#427):\r\n");
     shell_printf("  tx_completions    %lu\r\n", (unsigned long)d.tx_completions);
     shell_printf("  tx_submits        %lu\r\n", (unsigned long)d.tx_submits);
     shell_printf("  tx_busy_returns   %lu\r\n", (unsigned long)d.tx_busy_returns);
     shell_printf("  tx_submit_errors  %lu\r\n", (unsigned long)d.tx_submit_errors);
     shell_printf("  in_use_count      %u of %u\r\n",
-                 (unsigned)d.in_use_count, 4u);
+                 (unsigned)d.in_use_count, slots);
     shell_printf("  completed_count   %u (waiting reap)\r\n",
                  (unsigned)d.completed_count);
     shell_puts("  per-slot:\r\n");
-    for (unsigned i = 0; i < 4; i++) {
+    for (unsigned i = 0; i < slots; i++) {
         shell_printf("    [%u] in_use=%u completed=%u\r\n",
                      i,
                      (unsigned)d.slot_in_use[i],
