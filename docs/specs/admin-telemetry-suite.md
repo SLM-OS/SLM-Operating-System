@@ -218,7 +218,7 @@ High-rate consumers (`sched/decision` can fire >10 kHz under load) publish raw o
 ```c
 struct latency_hist {
     uint64_t buckets[32];   // log2 buckets: bucket i covers [2^(i+5), 2^(i+6)) ns,
-                            // bucket 0 = [32 ns, 64 ns), bucket 31 = [~17 s, ~34 s)
+                            // bucket 0 = [32 ns, 64 ns), bucket 31 = [~68.7 s, ~137 s)
     uint64_t count;
     uint64_t sum_ns;
     uint64_t min_ns;
@@ -227,14 +227,14 @@ struct latency_hist {
 
 void latency_hist_record(struct latency_hist *h, uint64_t ns);
 void latency_hist_reset(struct latency_hist *h);
-uint64_t latency_hist_pct(const struct latency_hist *h, uint32_t pct);  /* 50, 90, 99 */
+uint64_t latency_hist_percentile(const struct latency_hist *h, uint32_t pct);  /* 50, 90, 99 */
 ```
 
 Lock-free single-writer (one consumer site per histogram); reader uses snapshot copy.
 
 ### 8.2 Per-consumer EWMA rates
 
-`struct rate_ewma { uint64_t last_ts_ns; double rate_per_s; double alpha; }`. Updated on each event by `rate_ewma_tick(r, now_ns)`. Lua reads computed value directly.
+`struct rate_ewma { uint64_t last_event_ns; uint64_t rate_per_s_q16; uint32_t alpha_q16; uint32_t _pad; }`. Q16.16 fixed-point — integer-only so the scheduler hot path doesn't need to FP-context-save just to update a counter. Updated on each event by `rate_ewma_tick(r, now_ns)`: it computes the instantaneous rate from inter-event time (`1e9 / dt_ns`, in Q16.16) and blends it into the smoothed value with `rate = alpha * inst + (1 - alpha) * rate`. A 5 s stale window decays an idle channel to zero so a once-busy stream that goes silent doesn't keep reporting its last rate forever. Lua reads `rate_per_s_q16 >> 16` directly.
 
 ### 8.3 Wiring
 
