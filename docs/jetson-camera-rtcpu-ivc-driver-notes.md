@@ -463,20 +463,32 @@ stuck with TX FULL=1 — RCE doesn't drain SM[0] at all, regardless
 of message ID. **This rules out hypotheses that depend on the
 specific message content** (HELLO session-state, opcode-specific
 firmware paths) and strongly points at the wake-up path itself
-being broken: RCE's SM[0] FULL → R5 IRQ wire isn't reaching the
-inherited firmware after Linux's runtime suspend, OR the firmware's
-HSP-VM ISR was unregistered during the suspend transition and
-needs a different signal to re-arm.
+being broken.
+
+Also tried (Path A from the avenue list) — pre-kexec
+`echo on > /sys/devices/platform/bc00000.rtcpu/power/control` so
+Linux holds tegra-camera-rtcpu fully active across the kexec
+boundary, preventing the autosuspend transition from firing.
+Boot log confirms `rtcpu power/control=on runtime_status=active`
+at kexec time. **Same failure mode** — RCE still doesn't drain
+SM[0]. The autosuspend hypothesis is now **disproven**: even with
+RCE held actively running, post-kexec SLM-OS can't get its mailbox
+serviced. Whatever teardown disables the HSP-VM path runs even
+when runtime PM is pinned on. Likely candidates: Linux's kexec
+`device_shutdown()` callback for `tegra-camera-rtcpu` (analogous
+to the tegra-xusb teardown documented in #285), or a TF-A/SPE-side
+state change that fires before SLM-OS's CPU sees the kexec.
 
 Avenues for the next investigation cycle (each a 1-day deploy
 loop on jetson-nano-1):
 
-1. **Pre-kexec RCE keep-alive.** Mirror the GPU pattern in
-   `scripts/jetson-kexec-slmos.sh` — explicitly write
-   `power/control = on` for `tegra-camera-rtcpu` so Linux holds
-   RCE active (no autosuspend) across the kexec boundary. If HELLO
-   succeeds with that, the runtime-suspend hypothesis is
-   confirmed and the fix is to bake it into slmos-kexec.
+1. ~~**Pre-kexec RCE keep-alive.**~~ **TRIED 2026-04-26 — DOES NOT
+   FIX THE HELLO BLOCK.** `scripts/jetson-kexec-slmos.sh` now writes
+   `power/control = on` to `tegra-camera-rtcpu` before kexec (boot
+   log: `rtcpu power/control=on runtime_status=active`). RCE still
+   doesn't drain SM[0]. Hypothesis disproven; the script change is
+   kept because it's harmless and rules out the autosuspend axis
+   for any future investigation.
 2. **Force pre-kexec camera activity.** Run a quick
    `gst-launch-1.0 nvarguscamerasrc num-buffers=1 ! fakesink` <30 s
    before kexec so the autosuspend timer hasn't fired. If HELLO

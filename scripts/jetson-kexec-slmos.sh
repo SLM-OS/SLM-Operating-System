@@ -769,6 +769,25 @@ if [[ "$NO_USB_HOLD" == "0" ]]; then
         echo "       tegra-xusb device path not found"
     fi
 
+    # Pin tegra-camera-rtcpu runtime PM. Linux's tegra_camrtc autosuspend
+    # (5s by default per `tegra234-camera.dtsi nvidia,autosuspend-delay-ms`)
+    # leaves the R5 in WFI but unregisters its HSP-VM ISR, so SLM-OS's
+    # post-kexec HELLO writes to SM[0] never wake the firmware. Holding
+    # power/control = on disables runtime PM so RCE stays fully active
+    # across the kexec boundary. See PR #431 / Hardware Task 3 Option B.
+    # Note: rtcpu lives under /sys/devices/platform directly (not under
+    # bus@0/ like xusb) — different DT hierarchy.
+    RTCPU_DEV=/sys/devices/platform/bc00000.rtcpu
+    if [[ -d "$RTCPU_DEV/power" ]]; then
+        echo on > "$RTCPU_DEV/power/control" 2>/dev/null || \
+            echo "       rtcpu power/control: write failed" >&2
+        rt_status="$(cat "$RTCPU_DEV/power/control" 2>/dev/null || echo '?')"
+        rt_runtime="$(cat "$RTCPU_DEV/power/runtime_status" 2>/dev/null || echo '?')"
+        echo "       rtcpu power/control=$rt_status runtime_status=$rt_runtime"
+    else
+        echo "       tegra-camera-rtcpu device path not found"
+    fi
+
     # Experimentation notes from #285 (don't re-try these without a plan):
     #   * Unbinding tegra-xusb pre-kexec calls .remove() which halts
     #     the Falcon immediately — even DCBAAP writes wedge the
