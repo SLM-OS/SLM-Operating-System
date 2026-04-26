@@ -193,4 +193,7 @@ int test_suite_gpu_consumer(void);
 /* Eviction + inference latency/rate tests (admin & telemetry suite, M3) */
 int test_suite_admin_telemetry(void);
 
+/* Telemetry feed pub/sub event counter tests (admin & telemetry, M4) */
+int test_suite_telemetry_feed(void);
+
 #endif /* TEST_HARNESS_H */

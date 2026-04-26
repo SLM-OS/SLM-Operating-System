@@ -29,6 +29,29 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/*
+ * Telemetry topic naming (M4).
+ *
+ * Spec §7.1 calls for `/telemetry/<consumer>/<metric>` paths, but the
+ * underlying msg_router caps `TOPIC_NAME_LEN` at 16 bytes (including
+ * null terminator) — `/telemetry/sched/decision` doesn't fit.
+ *
+ * M4 ships a compact `tel.<consumer>` schema instead. Long-form topic
+ * names are deferred to a follow-up that bumps msg_router's buffer
+ * sizes (cross-cutting change). Documented in spec §14.
+ *
+ * Wildcard pattern: `tel.*` matches all telemetry topics. Subscribe
+ * via existing `slm.msg_subscribe` or `slm.telemetry_subscribe`.
+ *
+ * Sample payload format: short ASCII key=value pairs separated by
+ * single spaces, capped at 59 chars + nul to fit MAX_MSG_LEN=60.
+ *   tel.evi:  "dt=<ns> fb=<0|1>"           e.g. "dt=12345 fb=0"
+ *   tel.inf:  "dt=<ns> ok=<0|1>"           e.g. "dt=87654 ok=1"
+ */
+#define TELEMETRY_TOPIC_EVICTION   "tel.evi"
+#define TELEMETRY_TOPIC_INFERENCE  "tel.inf"
+#define TELEMETRY_TOPIC_PREFIX     "tel."
+
 /* ===== Eviction ====================================================== */
 
 /* Called from Rust eviction registry after `select_victim` measures dt.
@@ -75,5 +98,20 @@ int admin_telemetry_get_inference_stats(struct latency_hist *out_hist,
 
 /* Reset counters to zero. */
 void admin_telemetry_reset_inference(void);
+
+/* ===== Telemetry feed introspection (M4) ============================ */
+
+struct admin_telemetry_feed_stats {
+    /* Cumulative count of `tel.evi` payloads pushed to msg_router
+     * (regardless of whether anyone was subscribed). */
+    uint64_t eviction_published;
+    /* Cumulative count of `tel.inf` payloads pushed to msg_router. */
+    uint64_t inference_published;
+    /* Topic name strings the operator can subscribe to. */
+    const char *eviction_topic;
+    const char *inference_topic;
+};
+
+void admin_telemetry_get_feed_stats(struct admin_telemetry_feed_stats *out);
 
 #endif /* ADMIN_TELEMETRY_H */

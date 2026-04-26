@@ -91,6 +91,7 @@ const shell_cmd_t builtin_commands[] = {
     {"find",   cmd_find,   "Find files (find <path> <pattern>)", false},
     {"component", cmd_component, "Component system (list/register/status)", true},
     {"msg",       cmd_msg,       "Message router (send/list/subscribe)", true},
+    {"telemetry", cmd_telemetry, "Admin telemetry feed (telemetry [stats|list-topics])", false},
     {"sleep",  cmd_sleep,  "Sleep for N ms (sleep <ms>)", false},
     {"bench",  cmd_bench,  "Performance benchmarks (bench <context|irq|ipc|stats|all>)", true},
     {"sched",  cmd_sched,  "Scheduler (sched [policy [<name>] | model ... | stats])", true},
