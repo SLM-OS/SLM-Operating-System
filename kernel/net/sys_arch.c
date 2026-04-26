@@ -8,6 +8,7 @@
 
 #include "arch/cc.h"
 #include "arch/sys_arch.h"
+#include "lwipopts.h"   /* LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT for the build-time assert */
 #include "timer.h"
 #include "spinlock.h"
 
@@ -61,6 +62,36 @@ uint32_t lwip_rand_slm(void) {
 /* Critical Section Protection                                                 */
 /* -------------------------------------------------------------------------- */
 
+/* sys_prot_t aliases irq_flags_t (both uint64_t) so the protection
+ * token round-trips without truncation. Asserted at build time so a
+ * future cc.h change cannot silently re-introduce the int-narrowing
+ * bug it replaced. */
+_Static_assert(sizeof(sys_prot_t) == sizeof(irq_flags_t),
+               "sys_prot_t must hold a full irq_flags_t — see cc.h");
+
+/* Single-CPU pinning invariant.
+ *
+ * `irq_save()` masks IRQs on the LOCAL CPU only. The lwIP heap
+ * protection enabled by LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT=1
+ * relies on every lwIP caller running on the same CPU so that
+ * task-vs-task and task-vs-IRQ are both serialised.
+ *
+ * Today every lwIP-touching task is explicitly pinned to CPU 0:
+ *   - net_pump          → kernel/src/main.c
+ *   - shell             → kernel/src/shell.c
+ *   - shell-tcp<N>      → kernel/src/tcp_shell_server.c
+ *   - cmd_ping / cmd_telnetd / cmd_net all run on the shell task
+ *
+ * If a future task creates pcbs or pbufs from another CPU, this
+ * protection silently degrades to nothing and the heap race comes
+ * back. Add a real cross-CPU lock (or pin the new task to CPU 0)
+ * before doing that. The build-time assert below documents the
+ * required lwipopts.h flag. */
+_Static_assert(LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT == 1,
+               "lwIP heap protection requires LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT=1 — "
+               "without it sys_arch_protect() is never called and the heap races. "
+               "See kernel/include/lwipopts.h for the flag and the rationale.");
+
 /**
  * Enter a critical section (protect against concurrent access).
  *
@@ -71,7 +102,7 @@ uint32_t lwip_rand_slm(void) {
  * @return Protection value to pass to sys_arch_unprotect
  */
 sys_prot_t sys_arch_protect(void) {
-    return (sys_prot_t)irq_save();
+    return irq_save();
 }
 
 /**
@@ -80,5 +111,5 @@ sys_prot_t sys_arch_protect(void) {
  * @param pval Value returned by sys_arch_protect
  */
 void sys_arch_unprotect(sys_prot_t pval) {
-    irq_restore((irq_flags_t)pval);
+    irq_restore(pval);
 }
