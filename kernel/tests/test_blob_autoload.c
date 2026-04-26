@@ -84,6 +84,32 @@ static size_t build_eviction_xgb_payload(uint8_t *out, size_t out_cap)
     return cursor;
 }
 
+static size_t build_eviction_cacheus_config_payload(uint8_t *out, size_t out_cap)
+{
+    size_t cursor = 0;
+    if (out_cap < 24u) return 0;
+    memset(out, 0, 24u);
+    out[0] = 'C'; out[1] = 'C'; out[2] = 'F'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 0; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = 0; out[11] = 0;
+    cursor = 12;
+#define WRITE_CACHEUS_U32_LE(v) do {                  \
+    uint32_t value_ = (v);                            \
+    out[cursor + 0] = (uint8_t)(value_ & 0xFF);       \
+    out[cursor + 1] = (uint8_t)((value_ >> 8) & 0xFF);\
+    out[cursor + 2] = (uint8_t)((value_ >> 16) & 0xFF);\
+    out[cursor + 3] = (uint8_t)((value_ >> 24) & 0xFF);\
+    cursor += 4;                                      \
+} while (0)
+    WRITE_CACHEUS_U32_LE(0x3e4ccccdu);
+    WRITE_CACHEUS_U32_LE(200u);
+    WRITE_CACHEUS_U32_LE(0x3dcccccdu);
+#undef WRITE_CACHEUS_U32_LE
+    return cursor;
+}
+
 #ifdef CONFIG_AI_SCHEDULER
 static size_t build_sched_mlp_payload(uint32_t out_weight_bits,
                                       uint8_t *out,
@@ -1002,8 +1028,8 @@ static void test_blob_autoload_set_migrates_all_lfs_entries_to_fat(void)
     RustEvictionBlobStatus xgb_status = {0};
     RustEvictionBlobStatus cacheus_status = {0};
     char path[VFS_MAX_PATH];
-    uint8_t xgb_payload_old[80];
-    uint8_t xgb_payload_new[80];
+    uint8_t xgb_payload_old[128];
+    uint8_t xgb_payload_new[128];
     uint8_t xgb_blob_old[128];
     uint8_t xgb_blob_new[128];
     uint8_t cacheus_payload[24];
