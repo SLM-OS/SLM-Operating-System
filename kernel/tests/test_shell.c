@@ -299,6 +299,38 @@ static size_t build_sched_thresholds_payload(uint64_t critical_ns,
 #undef WRITE_THRESH_U64
     return cursor;
 }
+
+static size_t build_sched_rebalance_payload(uint32_t enabled,
+                                            uint32_t interval_ticks,
+                                            uint32_t imbalance_min,
+                                            uint8_t *out,
+                                            size_t out_cap)
+{
+    size_t cursor = 0;
+
+    if (out_cap < 24u) return 0;
+    memset(out, 0, 24u);
+    out[0] = 'S'; out[1] = 'R'; out[2] = 'B'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 1; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = 0; out[11] = 0;
+    cursor = 12;
+#define WRITE_REBAL_U32(bits)                                                \
+    do {                                                                     \
+        uint32_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        cursor += 4;                                                         \
+    } while (0)
+    WRITE_REBAL_U32(enabled);
+    WRITE_REBAL_U32(interval_ticks);
+    WRITE_REBAL_U32(imbalance_min);
+#undef WRITE_REBAL_U32
+    return cursor;
+}
 #endif
 
 /* ============================================================================
@@ -716,6 +748,48 @@ static void test_shell_cmd_sched_thresholds_lifecycle(void)
     TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear thresholds"));
     shell_execute("rm /mnt/files/test-sched-thresholds-a.blob");
     shell_execute("rm /mnt/files/test-sched-thresholds-b.blob");
+#endif
+}
+
+static void test_shell_cmd_sched_rebalance_lifecycle(void)
+{
+#ifdef CONFIG_AI_SCHEDULER
+    static const char *path_a = "/mnt/files/test-sched-rebalance-a.blob";
+    static const char *path_b = "/mnt/files/test-sched-rebalance-b.blob";
+    uint8_t payload_a[64];
+    uint8_t payload_b[64];
+    uint8_t blob_a[128];
+    uint8_t blob_b[128];
+    size_t payload_len_a = build_sched_rebalance_payload(1u, 7u, 2u,
+                                                         payload_a, sizeof(payload_a));
+    size_t payload_len_b = build_sched_rebalance_payload(0u, 13u, 4u,
+                                                         payload_b, sizeof(payload_b));
+    size_t blob_len_a;
+    size_t blob_len_b;
+
+    TEST_ASSERT_TRUE(payload_len_a > 0);
+    TEST_ASSERT_TRUE(payload_len_b > 0);
+    blob_len_a = build_shell_test_blob(0x1005u, payload_a, payload_len_a, blob_a, sizeof(blob_a));
+    blob_len_b = build_shell_test_blob(0x1005u, payload_b, payload_len_b, blob_b, sizeof(blob_b));
+    TEST_ASSERT_TRUE(blob_len_a > 0);
+    TEST_ASSERT_TRUE(blob_len_b > 0);
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_a, blob_a, blob_len_a));
+    TEST_ASSERT_EQUAL_INT(0, write_binary_file(path_b, blob_b, blob_len_b));
+
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear rebalance"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load rebalance /mnt/files/test-sched-rebalance-a.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate rebalance"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model load rebalance /mnt/files/test-sched-rebalance-b.blob"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model activate rebalance"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model rollback rebalance"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model status"));
+    TEST_ASSERT_EQUAL_INT(0, shell_execute("sched model clear rebalance"));
+    shell_execute("rm /mnt/files/test-sched-rebalance-a.blob");
+    shell_execute("rm /mnt/files/test-sched-rebalance-b.blob");
 #endif
 }
 
@@ -3224,6 +3298,7 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_eviction_model_lifecycle);
     RUN_TEST(test_shell_cmd_sched_model_lifecycle);
     RUN_TEST(test_shell_cmd_sched_thresholds_lifecycle);
+    RUN_TEST(test_shell_cmd_sched_rebalance_lifecycle);
     RUN_TEST(test_shell_cmd_model_pin_lifecycle);
     RUN_TEST(test_shell_cmd_model_preload);
     RUN_TEST(test_shell_cmd_model_preload_wait);

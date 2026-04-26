@@ -70,6 +70,7 @@ extern const uint8_t *rust_eviction_policy_list(void);
 extern int32_t rust_eviction_policy_set(const uint8_t *name);
 extern int32_t rust_eviction_get_stats(RustEvictionStats *out);
 extern int32_t rust_eviction_blob_stage(uint16_t kind_id, const uint8_t *data, size_t len);
+extern int32_t rust_eviction_blob_validate(uint16_t kind_id, const uint8_t *data, size_t len);
 extern int32_t rust_eviction_blob_status(uint16_t kind_id, RustEvictionBlobStatus *out);
 extern int32_t rust_eviction_blob_activate(uint16_t kind_id);
 extern int32_t rust_eviction_blob_rollback(uint16_t kind_id);
@@ -207,6 +208,138 @@ static size_t build_test_blob(uint16_t kind_id,
     return total;
 }
 
+static size_t build_eviction_mlp_payload(uint32_t out_weight_bits,
+                                         uint8_t *out,
+                                         size_t out_cap)
+{
+    enum {
+        PAYLOAD_HEADER_LEN = 8,
+        L1_IN = 27,
+        L1_OUT = 64,
+        L2_OUT = 32,
+        L3_OUT = 16,
+        OUT_DIM = 1,
+        W_L1_LEN = L1_OUT * L1_IN,
+        B_L1_LEN = L1_OUT,
+        W_L2_LEN = L2_OUT * L1_OUT,
+        B_L2_LEN = L2_OUT,
+        W_L3_LEN = L3_OUT * L2_OUT,
+        B_L3_LEN = L3_OUT,
+        W_OUT_LEN = OUT_DIM * L3_OUT,
+        B_OUT_LEN = OUT_DIM,
+        FLOAT_COUNT = W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
+                    + W_L3_LEN + B_L3_LEN + W_OUT_LEN + B_OUT_LEN,
+        TOTAL = PAYLOAD_HEADER_LEN + FLOAT_COUNT * 4
+    };
+    size_t cursor = 0;
+    size_t idx = 0;
+
+    if (out_cap < TOTAL) return 0;
+    memset(out, 0, TOTAL);
+    out[0] = 'M'; out[1] = 'L'; out[2] = 'P'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 0; out[7] = 0;
+    cursor = PAYLOAD_HEADER_LEN;
+
+#define WRITE_U32_LE(bits)                                                   \
+    do {                                                                     \
+        uint32_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        cursor += 4;                                                         \
+    } while (0)
+
+    for (idx = 0; idx < FLOAT_COUNT; idx++) {
+        uint32_t bits = 0u;
+        if (idx == 0) bits = 0x3F800000u; /* W_L1[0][0] */
+        if (idx == W_L1_LEN + B_L1_LEN) bits = 0x3F800000u; /* W_L2[0][0] */
+        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN) {
+            bits = 0x3F800000u; /* W_L3[0][0] */
+        }
+        if (idx == W_L1_LEN + B_L1_LEN + W_L2_LEN + B_L2_LEN
+                + W_L3_LEN + B_L3_LEN) {
+            bits = out_weight_bits; /* W_OUT[0][0] */
+        }
+        WRITE_U32_LE(bits);
+    }
+#undef WRITE_U32_LE
+
+    return cursor;
+}
+
+static size_t build_eviction_xgb_payload(uint8_t *out, size_t out_cap)
+{
+    uint8_t tmp[66];
+    size_t cursor = 0;
+    if (out_cap < sizeof(tmp)) return 0;
+
+    tmp[cursor++] = 'X'; tmp[cursor++] = 'G'; tmp[cursor++] = 'B'; tmp[cursor++] = '1';
+    tmp[cursor++] = 1; tmp[cursor++] = 0;
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+    tmp[cursor++] = 1; tmp[cursor++] = 0;
+    tmp[cursor++] = 3; tmp[cursor++] = 0;
+    tmp[cursor++] = 0; tmp[cursor++] = 0; tmp[cursor++] = 0; tmp[cursor++] = 0;
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+    tmp[cursor++] = 1; tmp[cursor++] = 0;
+    tmp[cursor++] = 2; tmp[cursor++] = 0;
+    { uint32_t bits = 0x3f000000u; memcpy(tmp + cursor, &bits, 4); cursor += 4; }
+    { uint32_t bits = 0u; memcpy(tmp + cursor, &bits, 4); cursor += 4; }
+
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+    tmp[cursor++] = 1; tmp[cursor++] = 0;
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+    { uint32_t bits = 0u; memcpy(tmp + cursor, &bits, 4); cursor += 4; }
+    { uint32_t bits = 0x3dcccccd; memcpy(tmp + cursor, &bits, 4); cursor += 4; }
+
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+    tmp[cursor++] = 1; tmp[cursor++] = 0;
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+    tmp[cursor++] = 0; tmp[cursor++] = 0;
+    { uint32_t bits = 0u; memcpy(tmp + cursor, &bits, 4); cursor += 4; }
+    { uint32_t bits = 0x3f4ccccd; memcpy(tmp + cursor, &bits, 4); cursor += 4; }
+
+    memcpy(out, tmp, cursor);
+    return cursor;
+}
+
+static size_t build_eviction_cacheus_payload(uint32_t expert_pool_id,
+                                             uint32_t learning_rate_bits,
+                                             uint32_t window_size,
+                                             uint32_t min_weight_bits,
+                                             uint8_t *out,
+                                             size_t out_cap)
+{
+    size_t cursor = 0;
+    if (out_cap < 24u) return 0;
+    memset(out, 0, 24u);
+    out[0] = 'C'; out[1] = 'C'; out[2] = 'F'; out[3] = 'G';
+    out[4] = 1; out[5] = 0;
+    out[6] = 0; out[7] = 0;
+    cursor = 8;
+#define WRITE_CACHEUS_U32(bits)                                              \
+    do {                                                                     \
+        uint32_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        cursor += 4;                                                         \
+    } while (0)
+    WRITE_CACHEUS_U32(expert_pool_id);
+    WRITE_CACHEUS_U32(learning_rate_bits);
+    WRITE_CACHEUS_U32(window_size);
+    WRITE_CACHEUS_U32(min_weight_bits);
+#undef WRITE_CACHEUS_U32
+    return cursor;
+}
 /* ============================================================================
  * M1: alloc seeds the tracking fields
  * ============================================================================ */
@@ -830,6 +963,121 @@ static void test_blob_stage_rejects_invalid_payload_body(void)
     TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, cacheus_blob, cacheus_len));
 }
 
+static void test_blob_validate_rejects_invalid_outer_header_fields(void)
+{
+    static uint8_t payload[2048];
+    static uint8_t blob[4096];
+    size_t payload_len = build_eviction_mlp_payload(0x3F800000u, payload, sizeof(payload));
+    size_t len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(len > 0);
+
+    blob[4] = 2u;
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
+
+    len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
+    blob[8] = 2u;
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
+
+    len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
+    blob[10] = 1u;
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
+
+    len = build_test_blob(2, payload, payload_len, blob, sizeof(blob));
+    blob[len - 1] ^= 0x01u;
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
+}
+
+static void test_blob_stage_rejects_invalid_payload_headers(void)
+{
+    static uint8_t xgb_payload[128];
+    static uint8_t mlp_payload[2048];
+    static uint8_t cacheus_payload[32];
+    static uint8_t blob[4096];
+    size_t payload_len;
+    size_t len;
+
+    payload_len = build_eviction_xgb_payload(xgb_payload, sizeof(xgb_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    xgb_payload[6] = 1u;
+    len = build_test_blob(1, xgb_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(len > 0);
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(1, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(1, blob, len));
+
+    payload_len = build_eviction_mlp_payload(0x3F800000u, mlp_payload, sizeof(mlp_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    mlp_payload[4] = 2u;
+    len = build_test_blob(2, mlp_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(len > 0);
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(2, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(2, blob, len));
+
+    payload_len = build_eviction_cacheus_payload(1u, 0x3e800000u, 64u, 0x3ca3d70au,
+                                                 cacheus_payload, sizeof(cacheus_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    cacheus_payload[6] = 1u;
+    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(len > 0);
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
+}
+
+static void test_blob_stage_rejects_invalid_payload_values(void)
+{
+    static uint8_t xgb_payload[128];
+    static uint8_t cacheus_payload[32];
+    static uint8_t blob[4096];
+    size_t payload_len;
+    size_t len;
+
+    payload_len = build_eviction_xgb_payload(xgb_payload, sizeof(xgb_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    xgb_payload[18] = 27u;
+    xgb_payload[19] = 0u;
+    len = build_test_blob(1, xgb_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(len > 0);
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(1, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(1, blob, len));
+
+    payload_len = build_eviction_cacheus_payload(7u, 0x3e800000u, 64u, 0x3ca3d70au,
+                                                 cacheus_payload, sizeof(cacheus_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(len > 0);
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
+
+    payload_len = build_eviction_cacheus_payload(1u, 0x3fc00000u, 64u, 0x3ca3d70au,
+                                                 cacheus_payload, sizeof(cacheus_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(len > 0);
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
+
+    payload_len = build_eviction_cacheus_payload(1u, 0x3e800000u, 0u, 0x3ca3d70au,
+                                                 cacheus_payload, sizeof(cacheus_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(len > 0);
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
+
+    payload_len = build_eviction_cacheus_payload(1u, 0x3e800000u, 64u, 0x3fc00000u,
+                                                 cacheus_payload, sizeof(cacheus_payload));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    len = build_test_blob(3, cacheus_payload, payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(len > 0);
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_validate(3, blob, len));
+    TEST_ASSERT_EQUAL_INT(-3, rust_eviction_blob_stage(3, blob, len));
+}
+
 /* ============================================================================
  * M8: End-to-end workload stress — the alloc loop must not leak
  * blocks when eviction fires, and pool_stats accounts for every
@@ -1031,6 +1279,9 @@ int test_suite_eviction(void)
     RUN_TEST(test_blob_stage_activate_rollback_round_trip);
     RUN_TEST(test_blob_stage_rejects_kind_mismatch);
     RUN_TEST(test_blob_stage_rejects_invalid_payload_body);
+    RUN_TEST(test_blob_validate_rejects_invalid_outer_header_fields);
+    RUN_TEST(test_blob_stage_rejects_invalid_payload_headers);
+    RUN_TEST(test_blob_stage_rejects_invalid_payload_values);
 
     /* M8: end-to-end workload + mid-flight policy swap stress. */
     RUN_TEST(test_memory_pressure_no_leak);

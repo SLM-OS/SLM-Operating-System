@@ -49,19 +49,20 @@ At-a-glance summary:
 | Eviction blob format + store | ✅ partial | Parser, staging, activate, rollback, and clear exist; first-cut formats are now documented, but still not generalized |
 | Eviction runtime policy use | ✅ partial | `xgboost`, `mlp`, and `cacheus_config` are live and hardware-validated on `pi-5-2` |
 | Eviction shell / Lua control | ✅ done | Shell + `lua-admin` surfaces exist and are tested |
-| Scheduler runtime models | ✅ partial | `mlp`, `ppo`, `config`, and `thresholds` exist; live behavior is validated, but the format family is still narrow |
+| Scheduler runtime models | ✅ partial | `mlp`, `ppo`, `config`, `thresholds`, and `rebalance` exist; live behavior is validated, but the format family is still narrow |
 | Scheduler live behavior validation | ✅ done | Deterministic runtime blobs affect real `ai_mlp` / `ai_ppo` decisions on `pi-5-2` |
 | File ingress core transport | ✅ partial | `put`, `xput`, and `slm-put.py` are live; telnet + serial framed upload/resume are hardware-validated |
-| Operator workflow wrapper | ✅ partial | `slm-modelctl.py` now supports subcommands, legacy compatibility, scheduler probes, and HTTP fetch via `--http-url` |
+| Operator workflow wrapper | ✅ partial | `slm-modelctl.py` now supports subcommands, autoload management, legacy compatibility, scheduler probes, and HTTP fetch via `--http-url` |
 | Persistence / autoload | ✅ partial | Managed boot autoload exists for current eviction/scheduler blob kinds, but current builds still store it on RAM-backed `/mnt/files` |
 | HTTP / authenticated transport | ✅ partial | Plain-HTTP download path exists in-kernel with shell, Lua/admin, and `slm-modelctl.py --http-url`; SHA-256 checked fetch is supported, while HTTPS and signed-artifact hardening are ticketed/deferred |
+| Pi 5 deploy-model validation | ✅ done | Maintenance-OS dual boot and SDWire-assisted host-driven kernel replacement have both been validated on `pi-5-2` |
 
 Milestone summary:
 
 | Track | State | Notes |
 |---|---|---|
 | Eviction | ✅ partial | First usable runtime-loading path is in place end to end |
-| Scheduler | ✅ partial | First reusable scheduler path is in place for dense models + config + thresholds |
+| Scheduler | ✅ partial | First reusable scheduler path is in place for dense models + config + thresholds + rebalance |
 | Native ingress | ✅ partial | Practical shell-based ingress exists without removing the SD card |
 | Maintenance-OS workflow | ✅ done | `pi-5-2` dual-boot + `--tryboot` wrapper path is hardware-validated |
 
@@ -133,6 +134,9 @@ Already implemented:
     entries for current eviction and scheduler blob kinds
   - `autoload set` now snapshots the validated source blob into a
     canonical managed path under `/mnt/files/autoload/`
+  - persisted autoload entries now also record the managed blob's size
+    and checksum, and boot replay refuses to activate a managed copy if
+    it no longer matches the recorded identity
   - boot replay now stages and activates configured blobs during shell
     initialization
   - `autoload set` now validates that the target file exists and parses
@@ -150,6 +154,15 @@ Already implemented:
   - `make test AI_SCHED=ON EVICTION_MODELS=ON` still stops at the
     existing QEMU test-kernel link failure (`Kernel image too large!`)
     after compiling the new autoload test into the test image
+- **Pi 5 deploy-model validation**:
+  - the maintenance-OS / dual-boot path remains hardware-validated on
+    `pi-5-2`
+  - the SDWire-assisted host-driven kernel replacement path has now
+    also been re-validated on `pi-5-2`:
+    - switch the card to host mode
+    - replace partition-1 `kernel_2712.img` directly from the host
+    - switch back to DUT mode
+    - boot the refreshed SLM image and verify the live shell
 
 Partially implemented:
 
@@ -167,6 +180,9 @@ Partially implemented:
 - **Eviction policy integration (E4):** MLP and XGBoost can now consume
   active runtime payloads, and CACHEUS can consume active runtime
   config payloads, but the payload formats are still first-cut
+  - the runtime blob spec now explicitly documents the current
+    fail-closed compatibility policy and the fixed-shape coupling for
+    dense-model payload version `1`
 - **Filesystem side of file ingress:** the running OS can already read
   and write files under `/mnt/files`, but there is no dedicated
   host-to-running-device upload transport yet
@@ -179,7 +195,9 @@ Partially implemented:
     `scripts/tools/test_slm_tooling.py`
 - **Operator wrapper for runtime blob workflows:** `scripts/tools/slm-modelctl.py`
   now supports explicit `apply`, `load`, `activate`, `rollback`,
-  `clear`, and `status` subcommands
+  `clear`, `autoload-status`, `autoload-set`, `autoload-clear`, and
+  `status` subcommands, plus a lightweight `doctor` command for
+  on-target directory/network checks
   - direct-run host-side functional coverage now exists in
     `scripts/tools/test_slm_tooling.py`
   - hardware-validated on `pi-5-2` for the live `eviction cacheus_config`
@@ -191,6 +209,13 @@ Partially implemented:
     - `ai_ppo` with deterministic raw action `13`
   - one-shot `apply --probe-raw` is also hardware-validated on
     `pi-5-2` for `sched mlp`
+  - `load/apply --autoload` and explicit autoload subcommands now cover
+    the common “make this blob active now and also use it at next boot”
+    workflow without dropping back to raw shell commands
+  - wrapper-managed blob destinations are now constrained to the
+    standard operator roots under `/mnt/files/policies/` and
+    `/mnt/files/models/`; `/mnt/files/autoload/` remains
+    system-managed
 - **Scheduler runtime model loading:** first-cut dense-network runtime
   loading now exists through the shell and Lua admin for both
   `sched_mlp` and `sched_ppo`, and both lifecycles have now been
@@ -199,6 +224,8 @@ Partially implemented:
     `docs/specs/runtime-blob-formats.md`
   - current parsers now reject non-zero reserved fields in the outer
     `SEMB` wrapper and in the current `sched_config` inner header
+  - the format spec now explicitly calls out the current compiled
+    feature/action coupling and the intended generalization targets
 - **Scheduler runtime config loading:** first-cut scheduler config
   blobs now exist for proactive load-balance override tuning, reusing
   the same stage / activate / rollback / clear lifecycle as scheduler
@@ -430,6 +457,11 @@ Implemented now:
 - `autoload set` now snapshots the selected blob into a canonical
   managed path under `/mnt/files/autoload/`, so boot replay no longer
   depends on the caller leaving the original source file in place
+  - persisted autoload entries now record the canonical managed blob's
+  size and checksum, so boot replay can refuse a tampered managed copy
+  instead of blindly attempting activation
+  - autoload status output now exposes that managed identity to
+    operators instead of only printing the managed path
 - boot-time autoload replays those entries by staging from the
   configured files and activating them
 - `autoload set` now rejects missing files, non-files, empty files, and
@@ -438,7 +470,7 @@ Implemented now:
   truncating the active config in place
 - shell admin can inspect/set/clear persisted autoload entries for:
   - eviction: `xgboost`, `mlp`, `cacheus_config`
-  - scheduler: `mlp`, `ppo`, `config`, `thresholds`
+  - scheduler: `mlp`, `ppo`, `config`, `thresholds`, `rebalance`
 
 Still missing:
 
@@ -458,7 +490,7 @@ Scheduler reuses the same model-blob architecture after eviction is stable.
 
 | Phase | State | Notes |
 |---|---|---|
-| S1 — Scheduler blob format | ✅ partial | Dense models + `config` + `thresholds` exist; the format family is not complete yet |
+| S1 — Scheduler blob format | ✅ partial | Dense models + `config` + `thresholds` + `rebalance` exist; the format family is not complete yet |
 | S2 — Scheduler model staging | ✅ done | Stage / activate / rollback / clear exist for current kinds |
 | S3 — Scheduler runtime integration | ✅ partial | `ai_mlp`, `ai_ppo`, proactive-balance config, and deadline-threshold overrides are live |
 | S4 — Scheduler control surface | ✅ partial | Shell + Lua exist; richer operator tooling is still pending |
@@ -473,6 +505,7 @@ Extend the blob format with scheduler kinds:
 - `sched_ppo`
 - `sched_config`
 - `sched_thresholds`
+- `sched_rebalance`
 - future scheduler-specific payload families beyond those first kinds
 
 Scheduler payloads must also carry:
@@ -484,11 +517,14 @@ Scheduler payloads must also carry:
 Implementation notes:
 
 - the current implementation covers `sched_mlp`, `sched_ppo`,
-  `sched_config`, and `sched_thresholds`
+  `sched_config`, `sched_thresholds`, and `sched_rebalance`
 - the current payload carries feature-vector version, action-space
   version, and action-count validation
 - the current outer blob reuses the same `SEMB` wrapper shape as the
   eviction path, but uses a scheduler-specific kind id
+- direct kernel regressions now cover malformed scheduler config blobs,
+  including bad version metadata and invalid value ranges for
+  `sched_config`, `sched_thresholds`, and `sched_rebalance`
 
 ### Phase S2 — Scheduler model staging
 
@@ -522,7 +558,12 @@ Implementation notes:
   compiled-in weights
 - deadline boost now consults the active runtime `sched_thresholds`
   payload before falling back to the compiled-in threshold constants
+- periodic queue rebalancing now consults the active runtime
+  `sched_rebalance` payload for `enabled`, `interval_ticks`, and
+  `imbalance_min` before falling back to the compiled-in defaults
 - `sched_thresholds` lifecycle is hardware-validated on `pi-5-2`
+  through stage / activate / replacement / rollback / clear
+- `sched_rebalance` lifecycle is hardware-validated on `pi-5-2`
   through stage / activate / replacement / rollback / clear
 - the first hardware pass exposed a real bug: `sched_model_stage_blob()`
   was parsing a full runtime MLP model into a stack-local temporary,
@@ -810,7 +851,7 @@ Mitigations:
 
 | Step | State | Notes |
 |---|---|---|
-| Harden and document runtime payload formats | ✅ partial | Current outer/inner layouts are now documented and reserved fields are validated, but the formats are still first-cut and not generalized |
-| Polish `slm-modelctl.py` ergonomics | ✅ partial | Subcommand help and `apply --probe-raw` are in place; remaining work is UX convenience rather than core viability |
-| Validate both Pi 5 deploy models where practical | ✅ partial | Maintenance-OS path is validated on `pi-5-2`; keep the SDWire-first path in play too |
-| Reuse the architecture for more scheduler payloads | ✅ partial | `sched_thresholds` now joins dense models plus `config`; more scheduler families are still pending |
+| Harden and document runtime payload formats | ✅ partial | Current outer/inner layouts are documented; reserved/version/value invariants now have direct regression coverage for scheduler config kinds and eviction blob kinds, but the formats are still first-cut and not generalized |
+| Polish `slm-modelctl.py` ergonomics | ✅ partial | Subcommand help, autoload management, and `apply --probe-raw` are in place; remaining work is UX convenience rather than core viability |
+| Validate both Pi 5 deploy models where practical | ✅ done | Maintenance-OS dual boot and SDWire-assisted host-driven kernel replacement are both validated on `pi-5-2` |
+| Reuse the architecture for more scheduler payloads | ✅ partial | `sched_thresholds` and `sched_rebalance` now join dense models plus `config`; more scheduler families are still pending |

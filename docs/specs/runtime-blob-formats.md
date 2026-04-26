@@ -13,6 +13,26 @@ The current implementation is versioned and usable, but still first-cut.
 This spec exists so future changes can be deliberate instead of inferred
 from scattered builders and parser code.
 
+## Compatibility Policy
+
+The current runtime blob policy is intentionally conservative:
+
+- unknown outer-wrapper versions are rejected
+- unknown inner payload versions are rejected
+- non-zero reserved fields are rejected
+- there is no negotiated forward-compatibility path yet
+- compatibility is currently defined as:
+  - exact outer-wrapper version match
+  - exact subsystem schema version match
+  - exact inner payload-version match
+  - exact compiled feature/action contract match where that payload kind
+    carries feature/action metadata
+
+In other words, the current system prefers fail-closed validation over
+best-effort compatibility. Future generalization work can add a richer
+compatibility policy, but the current milestone intentionally does not
+attempt partial decoding or field-level downgrade behavior.
+
 ## Common Outer Wrapper
 
 All current runtime blobs use the same 24-byte outer wrapper:
@@ -48,6 +68,7 @@ Current kind ids:
   - `0x1002` = `sched_ppo`
   - `0x1003` = `sched_config`
   - `0x1004` = `sched_thresholds`
+  - `0x1005` = `sched_rebalance`
 
 ## Eviction Payloads
 
@@ -129,6 +150,13 @@ Validation rules:
 - no shape metadata is carried; shape is implied by version
 - reserved bytes must be zero
 
+Current compiled coupling:
+
+- input feature count is fixed at `27`
+- hidden/output shapes are implied entirely by payload version `1`
+- a future format revision should move this toward an explicit tensor
+  table instead of hard-coded tensor order and shape inference
+
 ### `cacheus_config`
 
 Inner magic: `CCFG`
@@ -187,6 +215,14 @@ Validation rules:
 - action-space version must match the current action mapping
 - action count must match the current compiled scheduler action count
 - exact payload length match only
+
+Current compiled coupling:
+
+- tensor order and tensor shapes are implied by payload version `1`
+- scheduler feature layout is coupled to the compiled feature extractor
+- action count is coupled to the compiled scheduler action map
+- these blobs are therefore portable only across builds that share the
+  same scheduler feature/action contract
 
 ### `sched_config`
 
@@ -252,6 +288,37 @@ Validation rules:
 - thresholds must be strictly ordered:
   - `critical_ns < high_ns < boost_ns`
 
+### `sched_rebalance`
+
+Inner magic: `SRB1`
+
+Header:
+
+| Offset | Size | Field | Notes |
+|---|---:|---|---|
+| `0` | 4 | magic | ASCII `SRB1` |
+| `4` | 2 | payload version | currently `1` |
+| `6` | 2 | feature version | currently `1` |
+| `8` | 2 | action-space version | currently `1` |
+| `10` | 2 | reserved | must be `0` |
+
+Body:
+
+| Offset | Size | Field |
+|---|---:|---|
+| `12` | 4 | `enabled` |
+| `16` | 4 | `interval_ticks` |
+| `20` | 4 | `imbalance_min` |
+
+Validation rules:
+
+- feature version must match
+- action-space version must match
+- reserved bytes must be zero
+- `enabled` must be `0` or `1`
+- `interval_ticks` must be non-zero
+- `imbalance_min` must be non-zero
+
 ## Current Limits
 
 The current formats are still intentionally narrow:
@@ -265,3 +332,16 @@ The current formats are still intentionally narrow:
 
 Those are follow-on hardening/generalization tasks, not part of the
 first usable runtime-loading milestone.
+
+## Generalization Targets
+
+When these formats grow beyond the current first-cut milestone, the next
+intended improvements are:
+
+- explicit forward-compatibility policy instead of exact-version-only
+  acceptance
+- self-describing dense-model tensor tables instead of fixed tensor
+  order by version alone
+- clearer platform/CPU-topology constraint metadata for scheduler blobs
+- explicit statement of which fields are safe to extend in-place versus
+  requiring a new payload version

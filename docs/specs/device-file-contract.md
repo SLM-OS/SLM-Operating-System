@@ -21,10 +21,17 @@ for host tooling, runtime blob activation, and boot-managed copies.
   storage location.
 - Autoload does not point at arbitrary operator files after `autoload
   set`. The kernel snapshots the validated source blob into the managed
-  `/mnt/files/autoload/` area and records that canonical path.
+  `/mnt/files/autoload/` area and records that canonical path plus the
+  managed copy's size/checksum identity in `blob_autoload.conf`.
 - `/mnt/files/autoload/` is system-managed. Operators should treat its
   contents as implementation detail, not as the primary place to upload
   or edit blobs.
+- `scripts/tools/slm-modelctl.py` now enforces this contract for its
+  managed blob flows:
+  - `load`, `apply`, and `autoload-set` accept operator-managed blob
+    paths only under `/mnt/files/policies/` or `/mnt/files/models/`
+  - `/mnt/files/autoload/` is intentionally rejected there because it
+    is reserved for kernel-managed canonical autoload copies
 - Existing demo/test assets may still live elsewhere under `/mnt/files`
   for compatibility. This contract defines the standard destinations for
   new ingress and runtime-loading workflows.

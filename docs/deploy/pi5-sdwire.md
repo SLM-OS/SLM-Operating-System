@@ -2,6 +2,14 @@
 
 This guide covers the **SDWire-first deploy model** for a Pi 5 equipped with an SDWire (or SDWireC) SD-card multiplexer. The SDWire switches the SD card between the development host (for flashing) and the Pi 5 (for booting) without physical intervention, so a full build → deploy → serial-capture cycle is scripted and hands-free.
 
+This workflow has been re-validated on `pi-5-2` using the shared
+`pc-sdwire` path: the host replaced partition-1 `kernel_2712.img`
+directly, switched the card back to DUT mode, and the refreshed SLM-OS
+image booted successfully afterward. `pi-5-2` still keeps its
+maintenance-OS dual-boot path as the normal day-to-day recovery model;
+the point here is that the SDWire-assisted host-driven update path also
+works and should stay supported.
+
 For first-time provisioning of a new SD card, see [`pi5-sdcard.md`](pi5-sdcard.md). That guide writes the initial FAT32 layout, Pi firmware, and bare-metal `config.txt`. This guide picks up from an already-provisioned card and only replaces `kernel_2712.img`.
 
 This model should be preserved even if a dual-boot maintenance-OS
@@ -16,7 +24,8 @@ fast iteration path when the hardware supports it.
 |---|---|
 | New Pi 5, blank SD card | [`pi5-sdcard.md`](pi5-sdcard.md) first, then this |
 | Pi 5 with SDWire, iterative development | This guide |
-| Pi 5 without SDWire (e.g. `pi-5-2`) | [`pi5-sdcard.md`](pi5-sdcard.md) or [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) |
+| Pi 5 without a dedicated SDWire path | [`pi5-sdcard.md`](pi5-sdcard.md) or [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) |
+| `pi-5-2` with shared `pc-sdwire` attached | This guide for host-driven kernel replacement, plus [`../pi5-dual-boot-setup.md`](../pi5-dual-boot-setup.md) for normal maintenance-OS boot control |
 
 ---
 

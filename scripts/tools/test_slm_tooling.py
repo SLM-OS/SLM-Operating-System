@@ -457,6 +457,35 @@ def test_modelctl_parse_args_accepts_http_source():
     assert args.local_path is None
 
 
+def test_modelctl_parse_args_accepts_autoload_subcommands():
+    with patched_argv(
+        slm_modelctl,
+        ["autoload-set", "--target", "pi-5-2", "sched", "config", "/mnt/files/models/sched-config.blob"],
+    ):
+        args = slm_modelctl.parse_args()
+
+    assert args.command == "autoload-set"
+    assert args.target == "pi-5-2"
+    assert args.domain == "sched"
+    assert args.kind == "config"
+    assert args.remote_path == "/mnt/files/models/sched-config.blob"
+
+
+def test_modelctl_parse_args_reorders_autoload_before_subcommand():
+    with patched_argv(
+        slm_modelctl,
+        ["--target", "pi-5-2", "--autoload", "load", "sched", "mlp", "local.blob"],
+    ):
+        args = slm_modelctl.parse_args()
+
+    assert args.command == "load"
+    assert args.target == "pi-5-2"
+    assert args.autoload is True
+    assert args.domain == "sched"
+    assert args.kind == "mlp"
+    assert args.local_path == "local.blob"
+
+
 def test_modelctl_parse_args_http_source_accepts_remote_path_override():
     with patched_argv(
         slm_modelctl,
@@ -468,7 +497,7 @@ def test_modelctl_parse_args_http_source_accepts_remote_path_override():
             "http://10.0.2.2/blob.bin",
             "sched",
             "mlp",
-            "/mnt/files/custom/blob.bin",
+            "/mnt/files/models/blob.bin",
         ],
     ):
         args = slm_modelctl.parse_args()
@@ -476,7 +505,7 @@ def test_modelctl_parse_args_http_source_accepts_remote_path_override():
     assert args.command == "load"
     assert args.http_url == "http://10.0.2.2/blob.bin"
     assert args.local_path is None
-    assert args.remote_path == "/mnt/files/custom/blob.bin"
+    assert args.remote_path == "/mnt/files/models/blob.bin"
 
 
 def test_modelctl_parse_args_rejects_sha256_without_http_url():
@@ -502,6 +531,35 @@ def test_modelctl_default_remote_path_uses_http_url_basename():
         "http://10.0.2.2/releases/model.blob?X-Amz-Signature=abcdef"
     )
     assert remote == "/mnt/files/policies/model.blob"
+
+
+def test_modelctl_validate_operator_blob_path_accepts_standard_roots():
+    assert (
+        slm_modelctl.validate_operator_blob_path("/mnt/files/policies/model.blob")
+        == "/mnt/files/policies/model.blob"
+    )
+    assert (
+        slm_modelctl.validate_operator_blob_path("/mnt/files/models/model.blob")
+        == "/mnt/files/models/model.blob"
+    )
+
+
+def test_modelctl_validate_operator_blob_path_rejects_system_managed_autoload_root():
+    try:
+        slm_modelctl.validate_operator_blob_path("/mnt/files/autoload/model.blob")
+    except RuntimeError as e:
+        assert "system-managed" in str(e)
+    else:
+        assert False, "expected autoload path rejection"
+
+
+def test_modelctl_validate_operator_blob_path_rejects_nonstandard_root():
+    try:
+        slm_modelctl.validate_operator_blob_path("/mnt/files/custom/model.blob")
+    except RuntimeError as e:
+        assert "/mnt/files/policies/" in str(e)
+    else:
+        assert False, "expected nonstandard path rejection"
 
 
 def test_modelctl_parse_args_reorders_global_options_before_subcommand():
@@ -710,6 +768,133 @@ def test_modelctl_apply_probe_raw_invokes_probe_with_inferred_policy():
     assert probes == [("ai_mlp", 7)]
 
 
+def test_modelctl_load_with_autoload_sets_and_shows_autoload_status():
+    shell = FakeShell(
+        {
+            "sched model load mlp /mnt/files/policies/probe.blob": [b"loaded\nslmos> "],
+            "sched model autoload set mlp /mnt/files/policies/probe.blob": [b"autoload set\nslmos> "],
+            "sched model status": [b"mlp: staged\nslmos> "],
+            "sched model autoload status": [b"mlp: /mnt/files/autoload/sched-mlp.blob\nslmos> "],
+        }
+    )
+
+    with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
+        with mock.patch.object(slm_modelctl, "ensure_parent_dir") as ensure_parent_dir:
+            with mock.patch.object(slm_modelctl, "upload_blob") as upload_blob:
+                with patched_argv(
+                    slm_modelctl,
+                    [
+                        "load",
+                        "--target",
+                        "pi-5-2",
+                        "--autoload",
+                        "sched",
+                        "mlp",
+                        "local.blob",
+                        "/mnt/files/policies/probe.blob",
+                    ],
+                ):
+                    stdout = io.StringIO()
+                    with contextlib.redirect_stdout(stdout):
+                        rc = slm_modelctl.main()
+
+    assert rc == 0
+    ensure_parent_dir.assert_called_once()
+    upload_blob.assert_called_once()
+    assert "mlp: staged" in stdout.getvalue()
+    assert "mlp: /mnt/files/autoload/sched-mlp.blob" in stdout.getvalue()
+    assert shell.commands == [
+        "sched model load mlp /mnt/files/policies/probe.blob",
+        "sched model autoload set mlp /mnt/files/policies/probe.blob",
+        "sched model status",
+        "sched model autoload status",
+    ]
+
+
+def test_modelctl_autoload_set_shows_autoload_status():
+    shell = FakeShell(
+        {
+            "eviction model autoload set xgboost /mnt/files/models/xgb.blob": [b"autoload set\nslmos> "],
+            "eviction model autoload status": [b"xgboost: /mnt/files/autoload/eviction-xgboost.blob\nslmos> "],
+        }
+    )
+
+    with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
+        with patched_argv(
+            slm_modelctl,
+            [
+                "autoload-set",
+                "--target",
+                "pi-5-2",
+                "eviction",
+                "xgboost",
+                "/mnt/files/models/xgb.blob",
+            ],
+        ):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                rc = slm_modelctl.main()
+
+    assert rc == 0
+    assert "xgboost: /mnt/files/autoload/eviction-xgboost.blob" in stdout.getvalue()
+    assert shell.commands == [
+        "eviction model autoload set xgboost /mnt/files/models/xgb.blob",
+        "eviction model autoload status",
+    ]
+
+
+def test_modelctl_autoload_set_rejects_system_managed_autoload_path():
+    with mock.patch.object(slm_modelctl, "open_shell", side_effect=AssertionError("should not open shell")):
+        with patched_argv(
+            slm_modelctl,
+            [
+                "autoload-set",
+                "--target",
+                "pi-5-2",
+                "eviction",
+                "xgboost",
+                "/mnt/files/autoload/eviction-xgboost.blob",
+            ],
+        ):
+            try:
+                slm_modelctl.main()
+            except RuntimeError as e:
+                assert "system-managed" in str(e)
+            else:
+                assert False, "expected autoload-set to reject system-managed autoload path"
+
+
+def test_modelctl_autoload_clear_shows_autoload_status():
+    shell = FakeShell(
+        {
+            "sched model autoload clear config": [b"autoload cleared\nslmos> "],
+            "sched model autoload status": [b"config: (none)\nslmos> "],
+        }
+    )
+
+    with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
+        with patched_argv(
+            slm_modelctl,
+            [
+                "autoload-clear",
+                "--target",
+                "pi-5-2",
+                "sched",
+                "config",
+            ],
+        ):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                rc = slm_modelctl.main()
+
+    assert rc == 0
+    assert "config: (none)" in stdout.getvalue()
+    assert shell.commands == [
+        "sched model autoload clear config",
+        "sched model autoload status",
+    ]
+
+
 def test_modelctl_apply_http_url_fetches_on_device():
     shell = FakeShell(
         {
@@ -762,14 +947,14 @@ def test_modelctl_apply_http_url_fetches_on_device():
 def test_modelctl_load_http_url_serial_initializes_network_first():
     shell = FakeShell(
         {
-            "mkdir /mnt/files/custom": [b"ok\nslmos> "],
+            "mkdir /mnt/files/models": [b"Already exists\nslmos> "],
             "net init": [b"DHCP bound 192.168.4.97\nslmos> "],
             "ifconfig": [
                 b"sl0: flags=UP,DHCP(pending)\nslmos> ",
                 b"sl0: flags=UP,DHCP(bound)\nslmos> ",
             ],
-            "http get http://10.0.2.2/models/blob.bin /mnt/files/custom/blob.bin": [b"downloaded\nslmos> "],
-            "sched model load mlp /mnt/files/custom/blob.bin": [b"loaded\nslmos> "],
+            "http get http://10.0.2.2/models/blob.bin /mnt/files/models/blob.bin": [b"downloaded\nslmos> "],
+            "sched model load mlp /mnt/files/models/blob.bin": [b"loaded\nslmos> "],
             "sched model status": [b"mlp: staged\nslmos> "],
         }
     )
@@ -788,7 +973,7 @@ def test_modelctl_load_http_url_serial_initializes_network_first():
                     "http://10.0.2.2/models/blob.bin",
                     "sched",
                     "mlp",
-                    "/mnt/files/custom/blob.bin",
+                    "/mnt/files/models/blob.bin",
                 ],
             ):
                 stdout = io.StringIO()
@@ -798,12 +983,12 @@ def test_modelctl_load_http_url_serial_initializes_network_first():
     assert rc == 0
     assert "mlp: staged" in stdout.getvalue()
     assert shell.commands == [
-        "mkdir /mnt/files/custom",
+        "mkdir /mnt/files/models",
         "net init",
         "ifconfig",
         "ifconfig",
-        "http get http://10.0.2.2/models/blob.bin /mnt/files/custom/blob.bin",
-        "sched model load mlp /mnt/files/custom/blob.bin",
+        "http get http://10.0.2.2/models/blob.bin /mnt/files/models/blob.bin",
+        "sched model load mlp /mnt/files/models/blob.bin",
         "sched model status",
     ]
 
@@ -864,7 +1049,7 @@ def test_modelctl_http_url_uses_lua_helper_when_command_too_long():
 def test_modelctl_http_url_rejects_dhcp_failed_state():
     shell = FakeShell(
         {
-            "mkdir /mnt/files/custom": [b"ok\nslmos> "],
+            "mkdir /mnt/files/models": [b"Already exists\nslmos> "],
             "net init": [b"Network initialized successfully\nslmos> "],
             "ifconfig": [b"sl0: flags=UP,DHCP(failed)\nslmos> "],
         }
@@ -879,7 +1064,7 @@ def test_modelctl_http_url_rejects_dhcp_failed_state():
         "http://10.0.2.2/models/blob.bin",
         "sched",
         "mlp",
-        "/mnt/files/custom/blob.bin",
+        "/mnt/files/models/blob.bin",
     ]
     with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
         with mock.patch.object(slm_modelctl, "run_upload", side_effect=AssertionError("should not upload when --http-url is used")):
@@ -892,10 +1077,69 @@ def test_modelctl_http_url_rejects_dhcp_failed_state():
                     assert False, "expected DHCP failure to raise"
 
     assert shell.commands == [
-        "mkdir /mnt/files/custom",
+        "mkdir /mnt/files/models",
         "net init",
         "ifconfig",
     ]
+
+
+def test_modelctl_doctor_checks_standard_paths_and_network():
+    shell = FakeShell(
+        {
+            "stat /mnt/files/policies": [b"Type: Directory\nslmos> "],
+            "stat /mnt/files/models": [b"Type: Directory\nslmos> "],
+            "stat /mnt/files/autoload": [b"Type: Directory\nslmos> "],
+            "ifconfig": [b"sl0: flags=UP,DHCP(bound)\nslmos> "],
+        }
+    )
+
+    with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
+        with patched_argv(
+            slm_modelctl,
+            [
+                "doctor",
+                "--target",
+                "pi-5-2",
+            ],
+        ):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                rc = slm_modelctl.main()
+
+    assert rc == 0
+    text = stdout.getvalue()
+    assert "DIR OK /mnt/files/policies" in text
+    assert "DIR OK /mnt/files/models" in text
+    assert "DIR OK /mnt/files/autoload" in text
+    assert "NETWORK ready" in text
+    assert shell.commands == [
+        "stat /mnt/files/policies",
+        "stat /mnt/files/models",
+        "stat /mnt/files/autoload",
+        "ifconfig",
+    ]
+
+
+def test_modelctl_doctor_reports_missing_directory():
+    shell = FakeShell(
+        {
+            "stat /mnt/files/policies": [b"Type: Directory\nslmos> "],
+            "stat /mnt/files/models": [b"Command returned error: No such file or directory\nslmos> "],
+            "stat /mnt/files/autoload": [b"Type: Directory\nslmos> "],
+            "ifconfig": [b"sl0: flags=DOWN,DHCP(pending)\nslmos> "],
+        }
+    )
+
+    with mock.patch.object(slm_modelctl, "open_shell", return_value=shell):
+        with patched_argv(slm_modelctl, ["doctor", "--target", "pi-5-2"]):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                rc = slm_modelctl.main()
+
+    assert rc == 1
+    text = stdout.getvalue()
+    assert "DIR MISSING /mnt/files/models" in text
+    assert "NETWORK down" in text
 
 
 def test_modelctl_run_upload_uses_tool_dir_not_cwd():
@@ -946,10 +1190,15 @@ def main() -> int:
     runner.run("put_telnet_shell_buffers_split_subnegotiation", test_put_telnet_shell_buffers_split_subnegotiation)
     runner.run("modelctl_parse_args_supports_legacy_apply_form", test_modelctl_parse_args_supports_legacy_apply_form)
     runner.run("modelctl_parse_args_accepts_http_source", test_modelctl_parse_args_accepts_http_source)
+    runner.run("modelctl_parse_args_accepts_autoload_subcommands", test_modelctl_parse_args_accepts_autoload_subcommands)
+    runner.run("modelctl_parse_args_reorders_autoload_before_subcommand", test_modelctl_parse_args_reorders_autoload_before_subcommand)
     runner.run("modelctl_parse_args_http_source_accepts_remote_path_override", test_modelctl_parse_args_http_source_accepts_remote_path_override)
     runner.run("modelctl_parse_args_rejects_sha256_without_http_url", test_modelctl_parse_args_rejects_sha256_without_http_url)
     runner.run("modelctl_default_remote_path_handles_windows_local_source", test_modelctl_default_remote_path_handles_windows_local_source)
     runner.run("modelctl_default_remote_path_uses_http_url_basename", test_modelctl_default_remote_path_uses_http_url_basename)
+    runner.run("modelctl_validate_operator_blob_path_accepts_standard_roots", test_modelctl_validate_operator_blob_path_accepts_standard_roots)
+    runner.run("modelctl_validate_operator_blob_path_rejects_system_managed_autoload_root", test_modelctl_validate_operator_blob_path_rejects_system_managed_autoload_root)
+    runner.run("modelctl_validate_operator_blob_path_rejects_nonstandard_root", test_modelctl_validate_operator_blob_path_rejects_nonstandard_root)
     runner.run("modelctl_parse_args_reorders_global_options_before_subcommand", test_modelctl_parse_args_reorders_global_options_before_subcommand)
     runner.run("modelctl_parse_args_reorders_http_globals_before_subcommand", test_modelctl_parse_args_reorders_http_globals_before_subcommand)
     runner.run("modelctl_legacy_path_named_like_subcommand_stays_positional", test_modelctl_legacy_path_named_like_subcommand_stays_positional)
@@ -957,10 +1206,16 @@ def main() -> int:
     runner.run("modelctl_probe_scheduler_runs_create_sample_and_cleanup", test_modelctl_probe_scheduler_runs_create_sample_and_cleanup)
     runner.run("modelctl_probe_scheduler_serial_reuses_existing_shell", test_modelctl_probe_scheduler_serial_reuses_existing_shell)
     runner.run("modelctl_apply_probe_raw_invokes_probe_with_inferred_policy", test_modelctl_apply_probe_raw_invokes_probe_with_inferred_policy)
+    runner.run("modelctl_load_with_autoload_sets_and_shows_autoload_status", test_modelctl_load_with_autoload_sets_and_shows_autoload_status)
+    runner.run("modelctl_autoload_set_shows_autoload_status", test_modelctl_autoload_set_shows_autoload_status)
+    runner.run("modelctl_autoload_set_rejects_system_managed_autoload_path", test_modelctl_autoload_set_rejects_system_managed_autoload_path)
+    runner.run("modelctl_autoload_clear_shows_autoload_status", test_modelctl_autoload_clear_shows_autoload_status)
     runner.run("modelctl_apply_http_url_fetches_on_device", test_modelctl_apply_http_url_fetches_on_device)
     runner.run("modelctl_load_http_url_serial_initializes_network_first", test_modelctl_load_http_url_serial_initializes_network_first)
     runner.run("modelctl_http_url_uses_lua_helper_when_command_too_long", test_modelctl_http_url_uses_lua_helper_when_command_too_long)
     runner.run("modelctl_http_url_rejects_dhcp_failed_state", test_modelctl_http_url_rejects_dhcp_failed_state)
+    runner.run("modelctl_doctor_checks_standard_paths_and_network", test_modelctl_doctor_checks_standard_paths_and_network)
+    runner.run("modelctl_doctor_reports_missing_directory", test_modelctl_doctor_reports_missing_directory)
     runner.run("modelctl_run_upload_uses_tool_dir_not_cwd", test_modelctl_run_upload_uses_tool_dir_not_cwd)
     runner.run("modelctl_telnet_shell_buffers_split_iac_sequences", test_modelctl_telnet_shell_buffers_split_iac_sequences)
     runner.run("modelctl_telnet_shell_buffers_split_subnegotiation", test_modelctl_telnet_shell_buffers_split_subnegotiation)

@@ -24,10 +24,19 @@ the project should preserve both:
 These are complementary, not competing. SDWire is the fastest deploy
 path where available; dual boot is the resilient no-SDWire path.
 
+Current validation status:
+- `pi-5-2` has both paths working in practice:
+  - maintenance-OS dual boot for normal recovery / handoff
+  - SDWire-assisted host-driven `kernel_2712.img` replacement when the
+    shared `pc-sdwire` path is attached
+
 For file staging onto a running SLM-OS instance, see
 [`slm-put.md`](slm-put.md) for the first telnet-based host upload path.
 [`slm-modelctl.md`](slm-modelctl.md) for the first upload + load +
-activate wrapper around runtime model blobs.
+activate wrapper around runtime model blobs. `slm-modelctl.py` now also
+enforces the standard `/mnt/files/policies/` and `/mnt/files/models/`
+operator blob roots, and exposes a `doctor` check for those standard
+directories plus basic network readiness.
 
 ---
 

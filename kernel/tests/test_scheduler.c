@@ -26,6 +26,7 @@
 #include "ai_inference.h"
 #include "ai_state.h"
 #include "runtime_model.h"
+extern void sched_rebalance_tick(uint32_t cpu);
 #endif
 #include <limits.h>
 
@@ -3371,6 +3372,37 @@ static size_t build_sched_thresholds_payload(uint64_t critical_ns,
     return cursor;
 }
 
+static size_t build_sched_rebalance_payload(uint32_t enabled,
+                                            uint32_t interval_ticks,
+                                            uint32_t imbalance_min,
+                                            uint8_t *out,
+                                            size_t out_cap)
+{
+    size_t cursor = 0;
+    if (out_cap < 24u) return 0;
+    memset(out, 0, 24u);
+    out[0] = 'S'; out[1] = 'R'; out[2] = 'B'; out[3] = '1';
+    out[4] = 1; out[5] = 0;
+    out[6] = 1; out[7] = 0;
+    out[8] = 1; out[9] = 0;
+    out[10] = 0; out[11] = 0;
+    cursor = 12;
+#define WRITE_REBAL_U32(bits)                                                \
+    do {                                                                     \
+        uint32_t bits_ = (bits);                                             \
+        out[cursor + 0] = (uint8_t)(bits_ & 0xFF);                           \
+        out[cursor + 1] = (uint8_t)((bits_ >> 8) & 0xFF);                    \
+        out[cursor + 2] = (uint8_t)((bits_ >> 16) & 0xFF);                   \
+        out[cursor + 3] = (uint8_t)((bits_ >> 24) & 0xFF);                   \
+        cursor += 4;                                                         \
+    } while (0)
+    WRITE_REBAL_U32(enabled);
+    WRITE_REBAL_U32(interval_ticks);
+    WRITE_REBAL_U32(imbalance_min);
+#undef WRITE_REBAL_U32
+    return cursor;
+}
+
 static void test_proactive_load_balance_runtime_config_disable(void)
 {
     if (cpu_count < 2) {
@@ -3507,6 +3539,62 @@ static void test_sched_runtime_config_rejects_nonzero_reserved_fields(void)
     TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
 }
 
+static void test_sched_runtime_config_rejects_invalid_versions_and_values(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    size_t payload_len = build_sched_config_payload(1u, 1u, 2u, 1u, 1u,
+                                                    payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                            payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+
+    payload[6] = 2u;
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+
+    payload_len = build_sched_config_payload(2u, 1u, 2u, 1u, 1u,
+                                             payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+
+    payload_len = build_sched_config_payload(1u, 1u, 0u, 1u, 1u,
+                                             payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+
+    payload_len = build_sched_config_payload(1u, 1u, 2u, 0u, 1u,
+                                             payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+
+    payload_len = build_sched_config_payload(1u, 1u, 2u, 1u, 0u,
+                                             payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_CONFIG, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_CONFIG, blob, blob_len));
+}
+
 static void test_sched_runtime_rollback_rejects_busy_active_slot(void)
 {
     uint8_t payload_a[64];
@@ -3586,6 +3674,61 @@ static void test_sched_runtime_thresholds_activation_sets_active_blob(void)
     TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_THRESHOLDS));
 }
 
+static void test_sched_runtime_thresholds_reject_invalid_versions_and_ranges(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    size_t payload_len = build_sched_thresholds_payload(5u * 1000000u,
+                                                        25u * 1000000u,
+                                                        150u * 1000000u,
+                                                        payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_THRESHOLDS, payload,
+                                            payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+
+    payload[8] = 2u;
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_THRESHOLDS, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+
+    payload_len = build_sched_thresholds_payload(0u,
+                                                 25u * 1000000u,
+                                                 150u * 1000000u,
+                                                 payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_THRESHOLDS, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+
+    payload_len = build_sched_thresholds_payload(25u * 1000000u,
+                                                 25u * 1000000u,
+                                                 150u * 1000000u,
+                                                 payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_THRESHOLDS, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+
+    payload_len = build_sched_thresholds_payload(10u * 1000000u,
+                                                 50u * 1000000u,
+                                                 20u * 1000000u,
+                                                 payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_THRESHOLDS, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_THRESHOLDS, blob, blob_len));
+}
+
 static void test_sched_runtime_thresholds_override_deadline_boost(void)
 {
     uint8_t payload[64];
@@ -3640,6 +3783,143 @@ static void test_sched_runtime_thresholds_override_deadline_boost(void)
     task_destroy(t_high);
     task_destroy(t_boost);
     TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_THRESHOLDS));
+}
+
+static void test_sched_runtime_rebalance_activation_sets_active_blob(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    struct sched_model_status status;
+    struct sched_runtime_rebalance_config cfg;
+    size_t payload_len = build_sched_rebalance_payload(1u, 7u, 3u,
+                                                       payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_REBALANCE, payload,
+                                            payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_REBALANCE));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_REBALANCE));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_status(SCHED_MODEL_KIND_REBALANCE, &status));
+    TEST_ASSERT_EQUAL_UINT16(SCHED_MODEL_ACTIVE, status.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, status.has_active);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)payload_len, status.active.payload_len);
+    TEST_ASSERT_EQUAL_INT(0, sched_runtime_rebalance_config_snapshot(&cfg));
+    TEST_ASSERT_EQUAL_UINT32(1u, cfg.enabled);
+    TEST_ASSERT_EQUAL_UINT32(7u, cfg.interval_ticks);
+    TEST_ASSERT_EQUAL_UINT32(3u, cfg.imbalance_min);
+
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_REBALANCE));
+}
+
+static void test_sched_runtime_rebalance_rejects_invalid_versions_and_values(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    size_t payload_len = build_sched_rebalance_payload(1u, 7u, 3u,
+                                                       payload, sizeof(payload));
+    size_t blob_len = build_sched_test_blob(SCHED_MODEL_KIND_REBALANCE, payload,
+                                            payload_len, blob, sizeof(blob));
+
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+
+    payload[6] = 2u;
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_REBALANCE, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+
+    payload_len = build_sched_rebalance_payload(2u, 7u, 3u,
+                                                payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_REBALANCE, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+
+    payload_len = build_sched_rebalance_payload(1u, 0u, 3u,
+                                                payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_REBALANCE, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+
+    payload_len = build_sched_rebalance_payload(1u, 7u, 0u,
+                                                payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_REBALANCE, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_validate_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(-1, sched_model_stage_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+}
+
+static void test_sched_runtime_rebalance_controls_tick_migration(void)
+{
+    uint8_t payload[64];
+    uint8_t blob[128];
+    struct task *a;
+    struct task *b;
+    irq_flags_t flags;
+    size_t payload_len;
+    size_t blob_len;
+
+    if (cpu_count < 2) {
+        TEST_IGNORE_MESSAGE("Requires cpu_count >= 2");
+        return;
+    }
+
+    a = task_create("rebalance_a", nop_entry, NULL);
+    b = task_create("rebalance_b", nop_entry, NULL);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_NOT_NULL(b);
+
+    flags = irq_save();
+    scheduler_add_task_to_cpu(a, 0);
+    scheduler_add_task_to_cpu(b, 0);
+    TEST_ASSERT_EQUAL_UINT32(0u, a->assigned_cpu);
+    TEST_ASSERT_EQUAL_UINT32(0u, b->assigned_cpu);
+    irq_restore(flags);
+
+    payload_len = build_sched_rebalance_payload(0u, 1u, 1u,
+                                                payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_REBALANCE, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_REBALANCE));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_REBALANCE));
+    sched_rebalance_tick(0);
+    TEST_ASSERT_EQUAL_UINT32(0u, a->assigned_cpu);
+    TEST_ASSERT_EQUAL_UINT32(0u, b->assigned_cpu);
+
+    payload_len = build_sched_rebalance_payload(1u, 1u, 1u,
+                                                payload, sizeof(payload));
+    blob_len = build_sched_test_blob(SCHED_MODEL_KIND_REBALANCE, payload,
+                                     payload_len, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(payload_len > 0);
+    TEST_ASSERT_TRUE(blob_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_stage_blob(SCHED_MODEL_KIND_REBALANCE, blob, blob_len));
+    TEST_ASSERT_EQUAL_INT(0, sched_model_activate(SCHED_MODEL_KIND_REBALANCE));
+    sched_rebalance_tick(0);
+    TEST_ASSERT_TRUE(a->assigned_cpu != 0u || b->assigned_cpu != 0u);
+
+    flags = irq_save();
+    scheduler_remove_task(a);
+    scheduler_remove_task(b);
+    irq_restore(flags);
+    a->state = TASK_TERMINATED;
+    b->state = TASK_TERMINATED;
+    task_destroy(a);
+    task_destroy(b);
+    TEST_ASSERT_EQUAL_INT(0, sched_model_clear(SCHED_MODEL_KIND_REBALANCE));
 }
 #endif
 
@@ -4560,9 +4840,14 @@ int test_suite_scheduler(void)
     RUN_TEST(test_proactive_load_balance_runtime_config_aggressive);
     RUN_TEST(test_sched_runtime_config_activation_sets_active_blob);
     RUN_TEST(test_sched_runtime_config_rejects_nonzero_reserved_fields);
+    RUN_TEST(test_sched_runtime_config_rejects_invalid_versions_and_values);
     RUN_TEST(test_sched_runtime_rollback_rejects_busy_active_slot);
     RUN_TEST(test_sched_runtime_thresholds_activation_sets_active_blob);
+    RUN_TEST(test_sched_runtime_thresholds_reject_invalid_versions_and_ranges);
     RUN_TEST(test_sched_runtime_thresholds_override_deadline_boost);
+    RUN_TEST(test_sched_runtime_rebalance_activation_sets_active_blob);
+    RUN_TEST(test_sched_runtime_rebalance_rejects_invalid_versions_and_values);
+    RUN_TEST(test_sched_runtime_rebalance_controls_tick_migration);
 #endif
     RUN_TEST(test_policy_init_failure_keeps_old);
     RUN_TEST(test_policy_tick_callback_invoked);

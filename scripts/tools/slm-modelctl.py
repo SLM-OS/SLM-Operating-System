@@ -205,6 +205,14 @@ class SerialShell:
 Shell = TelnetShell | SerialShell
 PROBE_REMOTE_PATH = "/mnt/files/slm-modelctl-probe.lua"
 HTTP_FETCH_REMOTE_PATH = "/mnt/files/slm-modelctl-http.lua"
+POLICY_BLOB_ROOT = "/mnt/files/policies"
+MODEL_BLOB_ROOT = "/mnt/files/models"
+AUTOLOAD_BLOB_ROOT = "/mnt/files/autoload"
+STANDARD_BLOB_DIRS = (
+    POLICY_BLOB_ROOT,
+    MODEL_BLOB_ROOT,
+    AUTOLOAD_BLOB_ROOT,
+)
 
 
 def add_common_args(p: argparse.ArgumentParser) -> None:
@@ -281,6 +289,11 @@ def add_upload_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Run `<domain> model clear <kind>` before loading the new blob",
     )
+    p.add_argument(
+        "--autoload",
+        action="store_true",
+        help="After a successful load/apply, persist this blob for boot autoload too",
+    )
 
 
 def add_probe_args(p: argparse.ArgumentParser) -> None:
@@ -343,6 +356,31 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(clear_p)
     add_domain_kind_args(clear_p)
 
+    autoload_status_p = sub.add_parser(
+        "autoload-status",
+        help="Show persisted autoload configuration for a domain",
+    )
+    add_common_args(autoload_status_p)
+    add_domain_kind_args(autoload_status_p, include_kind=False)
+
+    autoload_set_p = sub.add_parser(
+        "autoload-set",
+        help="Persist an already-present on-device blob for boot autoload",
+    )
+    add_common_args(autoload_set_p)
+    add_domain_kind_args(autoload_set_p)
+    autoload_set_p.add_argument(
+        "remote_path",
+        help="Existing blob path on the SLM-OS VFS to record for boot autoload",
+    )
+
+    autoload_clear_p = sub.add_parser(
+        "autoload-clear",
+        help="Clear a persisted boot autoload entry and show autoload status",
+    )
+    add_common_args(autoload_clear_p)
+    add_domain_kind_args(autoload_clear_p)
+
     status_p = sub.add_parser("status", help="Show model status for a domain")
     add_common_args(status_p)
     add_domain_kind_args(status_p, include_kind=False)
@@ -356,6 +394,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_probe_args(probe_p)
 
+    doctor_p = sub.add_parser(
+        "doctor",
+        help="Check standard writable directories and basic network readiness",
+    )
+    add_common_args(doctor_p)
+
     return p
 
 
@@ -363,8 +407,20 @@ def parse_args() -> argparse.Namespace:
     parser = build_parser()
     argv = list(sys.argv[1:])
     if argv:
-        subcommands = {"apply", "load", "activate", "rollback", "clear", "status", "probe"}
-        global_flags = {"--labctl", "--tryboot", "--debug", "--clear-first"}
+        subcommands = {
+            "apply",
+            "load",
+            "activate",
+            "rollback",
+            "clear",
+            "autoload-status",
+            "autoload-set",
+            "autoload-clear",
+            "status",
+            "probe",
+            "doctor",
+        }
+        global_flags = {"--labctl", "--tryboot", "--debug", "--clear-first", "--autoload"}
         global_opts_with_values = {
             "--target", "--transport", "--protocol", "--port", "--prompt",
             "--timeout", "--connect-retries", "--retry-delay", "--chunk-bytes",
@@ -599,6 +655,15 @@ def run_shell_command(shell: Shell, command: str, debug: bool) -> bytes:
     return out
 
 
+def autoload_command(domain: str, action: str, kind: str | None = None, remote_path: str | None = None) -> str:
+    parts = [domain, "model", "autoload", action]
+    if kind is not None:
+        parts.append(kind)
+    if remote_path is not None:
+        parts.append(remote_path)
+    return " ".join(parts)
+
+
 def ensure_parent_dir(shell: Shell, remote_path: str, debug: bool) -> None:
     parent = str(pathlib.PurePosixPath(remote_path).parent)
     if not parent or parent == "." or parent == "/":
@@ -653,7 +718,35 @@ def default_remote_path(source: str) -> str:
         name = pathlib.Path(source).name or pathlib.PurePosixPath(source).name
     if not name:
         name = "blob.bin"
-    return f"/mnt/files/policies/{name}"
+    return f"{POLICY_BLOB_ROOT}/{name}"
+
+
+def normalize_blob_path(path: str) -> str:
+    normalized = str(pathlib.PurePosixPath(path))
+    if not normalized.startswith("/"):
+        raise RuntimeError(
+            "remote blob paths must be absolute device paths under "
+            f"{POLICY_BLOB_ROOT}/ or {MODEL_BLOB_ROOT}/"
+        )
+    return normalized
+
+
+def validate_operator_blob_path(path: str) -> str:
+    normalized = normalize_blob_path(path)
+    if normalized == AUTOLOAD_BLOB_ROOT or normalized.startswith(f"{AUTOLOAD_BLOB_ROOT}/"):
+        raise RuntimeError(
+            f"{AUTOLOAD_BLOB_ROOT}/ is system-managed; use "
+            f"{POLICY_BLOB_ROOT}/ or {MODEL_BLOB_ROOT}/ for operator-managed blobs"
+        )
+    if (
+        normalized.startswith(f"{POLICY_BLOB_ROOT}/")
+        or normalized.startswith(f"{MODEL_BLOB_ROOT}/")
+    ):
+        return normalized
+    raise RuntimeError(
+        "remote blob paths managed by slm-modelctl.py must live under "
+        f"{POLICY_BLOB_ROOT}/ or {MODEL_BLOB_ROOT}/"
+    )
 
 
 def fetch_blob(shell: Shell, args: argparse.Namespace, remote_path: str) -> None:
@@ -668,6 +761,11 @@ def fetch_blob(shell: Shell, args: argparse.Namespace, remote_path: str) -> None
             "DHCP(bound)" in status_text
             or "STATIC" in status_text
         ):
+            if "flags=UP" not in status_text and "UP," not in status_text:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("network link did not come up before HTTP fetch")
+                time.sleep(0.5)
+                continue
             break
         if "DHCP(failed)" in status_text:
             raise RuntimeError("network DHCP failed before HTTP fetch")
@@ -890,13 +988,50 @@ def open_shell(shell_factory: Callable[[], Shell], debug: bool) -> Shell:
     return shell
 
 
+def summarize_network_state(output: bytes) -> str:
+    text = output.decode("utf-8", errors="replace")
+    if "flags=UP" not in text and "UP," not in text:
+        return "down"
+    if "DHCP(bound)" in text or "STATIC" in text:
+        return "ready"
+    if "DHCP(pending)" in text:
+        return "pending"
+    if "DHCP(failed)" in text:
+        return "failed"
+    return "up"
+
+
+def run_doctor(shell: Shell, args: argparse.Namespace) -> int:
+    rc = 0
+    for path in STANDARD_BLOB_DIRS:
+        out = shell.run_command(f"stat {path}")
+        log_response(args.debug, f"stat {path}", out)
+        if shell_command_failed(out):
+            print(f"DIR MISSING {path}")
+            rc = 1
+        else:
+            print(f"DIR OK {path}")
+
+    net_out = shell.run_command("ifconfig")
+    log_response(args.debug, "ifconfig", net_out)
+    if shell_command_failed(net_out):
+        print("NETWORK unavailable")
+    else:
+        print(f"NETWORK {summarize_network_state(net_out)}")
+    return rc
+
+
 def main() -> int:
     args = parse_args()
     remote_path = None
     if args.command in ("apply", "load"):
         source = args.http_url if getattr(args, "http_url", None) is not None else args.local_path
         assert source is not None
-        remote_path = args.remote_path or default_remote_path(source)
+        remote_path = validate_operator_blob_path(
+            args.remote_path or default_remote_path(source)
+        )
+    elif args.command == "autoload-set":
+        args.remote_path = validate_operator_blob_path(args.remote_path)
     prompt = args.prompt.encode("ascii")
     connect_retries = args.connect_retries
     retry_delay = args.retry_delay
@@ -968,8 +1103,33 @@ def main() -> int:
             print_output(run_shell_command(shell, f"{args.domain} model status", args.debug))
             return 0
 
+        if args.command == "autoload-status":
+            print_output(run_shell_command(shell, autoload_command(args.domain, "status"), args.debug))
+            return 0
+
+        if args.command == "autoload-set":
+            run_shell_command(
+                shell,
+                autoload_command(args.domain, "set", args.kind, args.remote_path),
+                args.debug,
+            )
+            print_output(run_shell_command(shell, autoload_command(args.domain, "status"), args.debug))
+            return 0
+
+        if args.command == "autoload-clear":
+            run_shell_command(
+                shell,
+                autoload_command(args.domain, "clear", args.kind),
+                args.debug,
+            )
+            print_output(run_shell_command(shell, autoload_command(args.domain, "status"), args.debug))
+            return 0
+
         if args.command == "probe":
             return probe_scheduler(shell, args)
+
+        if args.command == "doctor":
+            return run_doctor(shell, args)
 
         assert remote_path is not None
         if getattr(args, "http_url", None) is not None:
@@ -984,8 +1144,16 @@ def main() -> int:
         run_shell_command(shell, f"{args.domain} model load {args.kind} {remote_path}", args.debug)
         if args.command == "apply":
             run_shell_command(shell, f"{args.domain} model activate {args.kind}", args.debug)
+        if getattr(args, "autoload", False):
+            run_shell_command(
+                shell,
+                autoload_command(args.domain, "set", args.kind, remote_path),
+                args.debug,
+            )
         status_out = run_shell_command(shell, f"{args.domain} model status", args.debug)
         print_output(status_out)
+        if getattr(args, "autoload", False):
+            print_output(run_shell_command(shell, autoload_command(args.domain, "status"), args.debug))
         if args.command == "apply" and getattr(args, "probe_raw", None) is not None:
             probe_args = argparse.Namespace(
                 policy=infer_probe_policy(args.domain, args.kind, args.probe_policy),

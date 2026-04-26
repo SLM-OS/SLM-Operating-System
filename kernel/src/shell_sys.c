@@ -2890,6 +2890,7 @@ static uint16_t sched_model_kind_id(const char *name)
     if (strcmp(name, "ppo") == 0) return SCHED_MODEL_KIND_PPO;
     if (strcmp(name, "config") == 0) return SCHED_MODEL_KIND_CONFIG;
     if (strcmp(name, "thresholds") == 0) return SCHED_MODEL_KIND_THRESHOLDS;
+    if (strcmp(name, "rebalance") == 0) return SCHED_MODEL_KIND_REBALANCE;
     return 0;
 }
 
@@ -2900,6 +2901,7 @@ static const char *sched_model_kind_name(uint16_t kind_id)
         case SCHED_MODEL_KIND_PPO: return "ppo";
         case SCHED_MODEL_KIND_CONFIG: return "config";
         case SCHED_MODEL_KIND_THRESHOLDS: return "thresholds";
+        case SCHED_MODEL_KIND_REBALANCE: return "rebalance";
         default: return "unknown";
     }
 }
@@ -2951,13 +2953,28 @@ static void sched_print_deadline_thresholds(
                  (unsigned long)cfg->boost_ns);
 }
 
+static void sched_print_rebalance_config(
+    const char *label,
+    const struct sched_runtime_rebalance_config *cfg)
+{
+    if (!cfg) return;
+
+    shell_printf("    %-8s enabled=%lu interval_ticks=%lu imbalance_min=%lu\r\n",
+                 label,
+                 (unsigned long)cfg->enabled,
+                 (unsigned long)cfg->interval_ticks,
+                 (unsigned long)cfg->imbalance_min);
+}
+
 static int sched_model_status_one(uint16_t kind_id)
 {
     struct sched_model_status status = {0};
     struct sched_runtime_balance_config cfg = {0};
     struct sched_runtime_deadline_thresholds thresholds = {0};
+    struct sched_runtime_rebalance_config rebalance = {0};
     int have_cfg = 0;
     int have_thresholds = 0;
+    int have_rebalance = 0;
 
     if (sched_model_status(kind_id, &status) != 0) {
         shell_printf("sched model status: invalid kind %u\r\n", (unsigned)kind_id);
@@ -2972,6 +2989,10 @@ static int sched_model_status_one(uint16_t kind_id)
         sched_runtime_deadline_thresholds_snapshot(&thresholds) == 0) {
         have_thresholds = 1;
     }
+    if (kind_id == SCHED_MODEL_KIND_REBALANCE &&
+        sched_runtime_rebalance_config_snapshot(&rebalance) == 0) {
+        have_rebalance = 1;
+    }
 
     shell_printf("  %s: %s\r\n",
                  sched_model_kind_name(kind_id),
@@ -2984,6 +3005,9 @@ static int sched_model_status_one(uint16_t kind_id)
     }
     if (have_thresholds) {
         sched_print_deadline_thresholds("thresholds", &thresholds);
+    }
+    if (have_rebalance) {
+        sched_print_rebalance_config("rebalance", &rebalance);
     }
     return 0;
 }
@@ -3068,16 +3092,18 @@ static int sched_model_autoload_cmd(int argc, char *argv[])
 {
     static const uint16_t kinds[] = {
         SCHED_MODEL_KIND_MLP, SCHED_MODEL_KIND_PPO,
-        SCHED_MODEL_KIND_CONFIG, SCHED_MODEL_KIND_THRESHOLDS
+        SCHED_MODEL_KIND_CONFIG, SCHED_MODEL_KIND_THRESHOLDS,
+        SCHED_MODEL_KIND_REBALANCE
     };
-    char path[VFS_MAX_PATH];
 
     if (argc < 4 || strcmp(argv[3], "status") == 0) {
         shell_puts("Scheduler blob autoload:\r\n");
         for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+            struct blob_autoload_info info;
             const char *kind = sched_model_kind_name(kinds[i]);
-            if (blob_autoload_get("sched", kind, path, sizeof(path)) == 0) {
-                shell_printf("  %s -> %s\r\n", kind, path);
+            if (blob_autoload_info_get("sched", kind, &info) == 0) {
+                shell_printf("  %s -> %s size=%u checksum=0x%08x\r\n",
+                             kind, info.path, info.size_bytes, info.checksum);
             } else {
                 shell_printf("  %s -> (none)\r\n", kind);
             }
@@ -3174,6 +3200,7 @@ int cmd_sched(int argc, char *argv[])
             if (sched_model_status_one(SCHED_MODEL_KIND_PPO) != 0) return 1;
             if (sched_model_status_one(SCHED_MODEL_KIND_CONFIG) != 0) return 1;
             if (sched_model_status_one(SCHED_MODEL_KIND_THRESHOLDS) != 0) return 1;
+            if (sched_model_status_one(SCHED_MODEL_KIND_REBALANCE) != 0) return 1;
             if (argc < 3) {
                 shell_puts("\r\nUsage:\r\n");
                 shell_puts("  sched model status\r\n");
@@ -3780,13 +3807,14 @@ static int eviction_model_autoload_set_file(const char *kind, const char *path)
 static int eviction_model_autoload_cmd(int argc, char *argv[])
 {
     static const char *kinds[] = {"xgboost", "mlp", "cacheus_config"};
-    char path[VFS_MAX_PATH];
 
     if (argc < 4 || strcmp(argv[3], "status") == 0) {
         shell_puts("Eviction blob autoload:\r\n");
         for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
-            if (blob_autoload_get("eviction", kinds[i], path, sizeof(path)) == 0) {
-                shell_printf("  %s -> %s\r\n", kinds[i], path);
+            struct blob_autoload_info info;
+            if (blob_autoload_info_get("eviction", kinds[i], &info) == 0) {
+                shell_printf("  %s -> %s size=%u checksum=0x%08x\r\n",
+                             kinds[i], info.path, info.size_bytes, info.checksum);
             } else {
                 shell_printf("  %s -> (none)\r\n", kinds[i]);
             }

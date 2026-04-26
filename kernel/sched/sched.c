@@ -1579,17 +1579,40 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
 #define REBALANCE_INTERVAL_TICKS   100
 #define REBALANCE_IMBALANCE_MIN    2
 
+#define SCHED_REBALANCE_DEFAULT_ENABLED       1u
+#define SCHED_REBALANCE_DEFAULT_INTERVAL_TICKS REBALANCE_INTERVAL_TICKS
+#define SCHED_REBALANCE_DEFAULT_IMBALANCE_MIN REBALANCE_IMBALANCE_MIN
+
 static uint64_t rebalance_tick_counter;
 static uint64_t rebalance_migrations;
 
+static void sched_rebalance_config_defaults(
+    struct sched_runtime_rebalance_config *cfg)
+{
+    if (!cfg) return;
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->feature_version = SCHED_MODEL_FEATURE_VERSION_V1;
+    cfg->action_version = SCHED_MODEL_ACTION_VERSION_V1;
+    cfg->enabled = SCHED_REBALANCE_DEFAULT_ENABLED;
+    cfg->interval_ticks = SCHED_REBALANCE_DEFAULT_INTERVAL_TICKS;
+    cfg->imbalance_min = SCHED_REBALANCE_DEFAULT_IMBALANCE_MIN;
+}
+
 void sched_rebalance_tick(uint32_t cpu)
 {
+    struct sched_runtime_rebalance_config runtime_cfg;
+
     /* Single-threaded: only BSP drives the rebalance decision. */
     if (cpu != 0)
         return;
 
+    sched_rebalance_config_defaults(&runtime_cfg);
+    (void)sched_runtime_rebalance_config_snapshot(&runtime_cfg);
+    if (runtime_cfg.enabled == 0u)
+        return;
+
     rebalance_tick_counter++;
-    if ((rebalance_tick_counter % REBALANCE_INTERVAL_TICKS) != 0)
+    if ((rebalance_tick_counter % runtime_cfg.interval_ticks) != 0)
         return;
 
     if (cpu_count < 2)
@@ -1615,7 +1638,7 @@ void sched_rebalance_tick(uint32_t cpu)
     }
     if (busy_cpu == idle_cpu)
         return;
-    if (max_ready < (uint32_t)(min_ready + REBALANCE_IMBALANCE_MIN))
+    if (max_ready < (uint32_t)(min_ready + runtime_cfg.imbalance_min))
         return;
 
     /* Walk busy CPU's queue under its rq_lock, pick first migratable

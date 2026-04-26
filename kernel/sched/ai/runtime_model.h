@@ -10,6 +10,7 @@
 #define SCHED_MODEL_KIND_PPO              0x1002u
 #define SCHED_MODEL_KIND_CONFIG           0x1003u
 #define SCHED_MODEL_KIND_THRESHOLDS       0x1004u
+#define SCHED_MODEL_KIND_REBALANCE        0x1005u
 #define SCHED_MODEL_BLOB_VERSION_V1       1u
 #define SCHED_MODEL_SCHEMA_VERSION_V1     1u
 #define SCHED_MODEL_FEATURE_VERSION_V1    1u
@@ -80,6 +81,16 @@ struct sched_runtime_deadline_thresholds {
     uint64_t boost_ns;
 };
 
+struct sched_runtime_rebalance_config {
+    uint16_t feature_version;
+    uint16_t action_version;
+    uint16_t action_count;
+    uint16_t reserved;
+    uint32_t enabled;
+    uint32_t interval_ticks;
+    uint32_t imbalance_min;
+};
+
 int sched_model_stage_blob(uint16_t kind_id, const uint8_t *data, size_t len);
 int sched_model_validate_blob(uint16_t kind_id, const uint8_t *data, size_t len);
 int sched_model_activate(uint16_t kind_id);
@@ -106,5 +117,11 @@ int sched_runtime_deadline_thresholds_acquire(
 void sched_runtime_deadline_thresholds_release(sched_runtime_token_t token);
 int sched_runtime_deadline_thresholds_snapshot(
     struct sched_runtime_deadline_thresholds *out);
+int sched_runtime_rebalance_config_acquire(
+    const struct sched_runtime_rebalance_config **out,
+    sched_runtime_token_t *token);
+void sched_runtime_rebalance_config_release(sched_runtime_token_t token);
+int sched_runtime_rebalance_config_snapshot(
+    struct sched_runtime_rebalance_config *out);
 
 #endif

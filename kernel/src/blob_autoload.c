@@ -14,6 +14,8 @@ struct blob_autoload_entry {
     const char *kind;
     uint16_t kind_id;
     char path[VFS_MAX_PATH];
+    uint32_t size_bytes;
+    uint32_t checksum;
     int present;
 };
 
@@ -21,16 +23,17 @@ struct blob_autoload_entry {
 #define BLOB_AUTOLOAD_CONF_BAK_LFS_PATH "/blob_autoload.conf.bak"
 #define BLOB_AUTOLOAD_CONF_BAK_VFS_PATH "/mnt/files/blob_autoload.conf.bak"
 #define BLOB_AUTOLOAD_STORE_LFS_DIR "/autoload"
-#define BLOB_AUTOLOAD_ENTRY_LINE_OVERHEAD 48u
+#define BLOB_AUTOLOAD_ENTRY_LINE_OVERHEAD 80u
 
 static struct blob_autoload_entry blob_entries[] = {
-    {"eviction", "xgboost", 1, {0}, 0},
-    {"eviction", "mlp", 2, {0}, 0},
-    {"eviction", "cacheus_config", 3, {0}, 0},
-    {"sched", "mlp", SCHED_MODEL_KIND_MLP, {0}, 0},
-    {"sched", "ppo", SCHED_MODEL_KIND_PPO, {0}, 0},
-    {"sched", "config", SCHED_MODEL_KIND_CONFIG, {0}, 0},
-    {"sched", "thresholds", SCHED_MODEL_KIND_THRESHOLDS, {0}, 0},
+    {"eviction", "xgboost", 1, {0}, 0, 0, 0},
+    {"eviction", "mlp", 2, {0}, 0, 0, 0},
+    {"eviction", "cacheus_config", 3, {0}, 0, 0, 0},
+    {"sched", "mlp", SCHED_MODEL_KIND_MLP, {0}, 0, 0, 0},
+    {"sched", "ppo", SCHED_MODEL_KIND_PPO, {0}, 0, 0, 0},
+    {"sched", "config", SCHED_MODEL_KIND_CONFIG, {0}, 0, 0, 0},
+    {"sched", "thresholds", SCHED_MODEL_KIND_THRESHOLDS, {0}, 0, 0, 0},
+    {"sched", "rebalance", SCHED_MODEL_KIND_REBALANCE, {0}, 0, 0, 0},
 };
 
 enum {
@@ -39,7 +42,7 @@ enum {
     BLOB_AUTOLOAD_CONF_BUF_SIZE =
         (int)(sizeof(
             "# Runtime blob autoload config\n"
-            "# Format: <domain> <kind> <absolute-path>\n"
+            "# Format: <domain> <kind> <absolute-path> <size-bytes> <checksum-hex>\n"
             "# Entries listed here are staged and activated at boot.\n")) +
         (int)(sizeof(blob_entries) / sizeof(blob_entries[0])) *
             (int)(VFS_MAX_PATH + BLOB_AUTOLOAD_ENTRY_LINE_OVERHEAD)
@@ -49,6 +52,8 @@ static void blob_entries_reset(struct blob_autoload_entry *entries, size_t count
 {
     for (size_t i = 0; i < count; i++) {
         entries[i].path[0] = '\0';
+        entries[i].size_bytes = 0;
+        entries[i].checksum = 0;
         entries[i].present = 0;
     }
 }
@@ -102,6 +107,67 @@ static int blob_autoload_ensure_store_dir(struct lfs_mount *mnt)
         return 0;
     }
     return -1;
+}
+
+static uint32_t blob_autoload_fnv1a32_update(uint32_t hash,
+                                             const uint8_t *data,
+                                             size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        hash ^= data[i];
+        hash *= 0x01000193u;
+    }
+    return hash;
+}
+
+static int blob_autoload_parse_u32(const char *text, int base, uint32_t *out)
+{
+    uint32_t value = 0;
+    const char *p = text;
+    if (!text || !*text || !out) return -1;
+    while (*p) {
+        uint32_t digit;
+        char c = *p++;
+        if (c >= '0' && c <= '9') digit = (uint32_t)(c - '0');
+        else if (base == 16 && c >= 'a' && c <= 'f') digit = 10u + (uint32_t)(c - 'a');
+        else if (base == 16 && c >= 'A' && c <= 'F') digit = 10u + (uint32_t)(c - 'A');
+        else return -1;
+        if (digit >= (uint32_t)base) return -1;
+        value = value * (uint32_t)base + digit;
+    }
+    *out = value;
+    return 0;
+}
+
+static int blob_autoload_file_identity(const char *path,
+                                       uint32_t *size_out,
+                                       uint32_t *checksum_out)
+{
+    struct vfs_entry_info info;
+    char buf[256];
+    uint32_t checksum = 0x811C9DC5u;
+    int offset = 0;
+
+    if (!path || !size_out || !checksum_out) return -1;
+    if (vfs_stat_path(path, &info) != 0 || info.type != 0 || info.size == 0) {
+        return -1;
+    }
+    while (offset < (int)info.size) {
+        size_t chunk = info.size - (uint32_t)offset;
+        int bytes_read;
+        if (chunk > sizeof(buf)) chunk = sizeof(buf);
+        bytes_read = vfs_read_path(path, buf, chunk, (size_t)offset);
+        if (bytes_read <= 0 || (size_t)bytes_read != chunk) {
+            return -1;
+        }
+        checksum = blob_autoload_fnv1a32_update(checksum,
+                                                (const uint8_t *)buf,
+                                                (size_t)bytes_read);
+        offset += bytes_read;
+    }
+    *size_out = info.size;
+    *checksum_out = checksum;
+    return 0;
 }
 
 static int blob_autoload_copy_managed_file(const char *source_path,
@@ -254,10 +320,41 @@ static int blob_autoload_read_entries(struct blob_autoload_entry *entries, size_
                     path = trim_ascii(path);
                     if (*path != '\0') {
                         for (size_t i = 0; i < count; i++) {
+                            uint32_t parsed_size = 0;
+                            uint32_t parsed_checksum = 0;
+                            char *size_text = path + strlen(path);
+                            char *checksum_text = NULL;
+
+                            while (size_text > path &&
+                                   size_text[-1] != ' ' &&
+                                   size_text[-1] != '\t') {
+                                size_text--;
+                            }
+                            if (size_text > path) {
+                                char *size_sep = size_text - 1;
+                                while (size_sep > path &&
+                                       size_sep[-1] != ' ' &&
+                                       size_sep[-1] != '\t') {
+                                    size_sep--;
+                                }
+                                if (size_sep > path) {
+                                    checksum_text = size_text;
+                                    size_text = size_sep;
+                                    checksum_text[-1] = '\0';
+                                    size_text[-1] = '\0';
+                                    if (blob_autoload_parse_u32(size_text, 10, &parsed_size) != 0 ||
+                                        blob_autoload_parse_u32(checksum_text, 16, &parsed_checksum) != 0) {
+                                        parsed_size = 0;
+                                        parsed_checksum = 0;
+                                    }
+                                }
+                            }
                             if (strcmp(entries[i].domain, domain) == 0 &&
                                 strcmp(entries[i].kind, kind) == 0) {
                                 strncpy(entries[i].path, path, sizeof(entries[i].path) - 1);
                                 entries[i].path[sizeof(entries[i].path) - 1] = '\0';
+                                entries[i].size_bytes = parsed_size;
+                                entries[i].checksum = parsed_checksum;
                                 entries[i].present = 1;
                                 break;
                             }
@@ -279,7 +376,7 @@ static int blob_autoload_write_entries(const struct blob_autoload_entry *entries
 {
     static const char header[] =
         "# Runtime blob autoload config\n"
-        "# Format: <domain> <kind> <absolute-path>\n"
+        "# Format: <domain> <kind> <absolute-path> <size-bytes> <checksum-hex>\n"
         "# Entries listed here are staged and activated at boot.\n";
     static char buf[BLOB_AUTOLOAD_CONF_BUF_SIZE];
     const char *subpath = NULL;
@@ -297,8 +394,9 @@ static int blob_autoload_write_entries(const struct blob_autoload_entry *entries
     for (size_t i = 0; i < count; i++) {
         int n;
         if (!entries[i].present) continue;
-        n = uart_snprintf(buf + pos, sizeof(buf) - pos, "%s %s %s\n",
-                          entries[i].domain, entries[i].kind, entries[i].path);
+        n = uart_snprintf(buf + pos, sizeof(buf) - pos, "%s %s %s %u %08x\n",
+                          entries[i].domain, entries[i].kind, entries[i].path,
+                          entries[i].size_bytes, entries[i].checksum);
         if (n <= 0 || (size_t)n >= sizeof(buf) - pos) {
             return -1;
         }
@@ -377,12 +475,37 @@ int blob_autoload_get(const char *domain, const char *kind,
     return -1;
 }
 
+int blob_autoload_info_get(const char *domain, const char *kind,
+                           struct blob_autoload_info *out)
+{
+    struct blob_autoload_entry entries[sizeof(blob_entries) / sizeof(blob_entries[0])];
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    memcpy(entries, blob_entries, sizeof(entries));
+    blob_autoload_read_entries(entries, sizeof(entries) / sizeof(entries[0]));
+    for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
+        if (strcmp(entries[i].domain, domain) == 0 &&
+            strcmp(entries[i].kind, kind) == 0) {
+            if (!entries[i].present) return 1;
+            strncpy(out->path, entries[i].path, sizeof(out->path) - 1);
+            out->path[sizeof(out->path) - 1] = '\0';
+            out->size_bytes = entries[i].size_bytes;
+            out->checksum = entries[i].checksum;
+            out->present = 1;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 int blob_autoload_set(const char *domain, const char *kind, const char *path)
 {
     struct blob_autoload_entry entries[sizeof(blob_entries) / sizeof(blob_entries[0])];
     char resolved[VFS_MAX_PATH];
     char managed_path[VFS_MAX_PATH];
     struct blob_autoload_entry *entry;
+    uint32_t managed_size = 0;
+    uint32_t managed_checksum = 0;
     int rc;
 
     if (strcmp(domain, "eviction") == 0) {
@@ -398,6 +521,7 @@ int blob_autoload_set(const char *domain, const char *kind, const char *path)
         else if (strcmp(kind, "ppo") == 0) kind_id = SCHED_MODEL_KIND_PPO;
         else if (strcmp(kind, "config") == 0) kind_id = SCHED_MODEL_KIND_CONFIG;
         else if (strcmp(kind, "thresholds") == 0) kind_id = SCHED_MODEL_KIND_THRESHOLDS;
+        else if (strcmp(kind, "rebalance") == 0) kind_id = SCHED_MODEL_KIND_REBALANCE;
         if (kind_id == 0) return -1;
         rc = sched_blob_validate_file(kind_id, path, resolved, sizeof(resolved));
     } else {
@@ -410,12 +534,18 @@ int blob_autoload_set(const char *domain, const char *kind, const char *path)
                                         managed_path, sizeof(managed_path)) != 0) {
         return RUNTIME_BLOB_FILE_STAGE_FAILED;
     }
+    if (blob_autoload_file_identity(managed_path, &managed_size, &managed_checksum) != 0) {
+        blob_autoload_remove_managed_file(domain, kind);
+        return RUNTIME_BLOB_FILE_STAGE_FAILED;
+    }
     memcpy(entries, blob_entries, sizeof(entries));
     blob_autoload_read_entries(entries, sizeof(entries) / sizeof(entries[0]));
     entry = blob_find_entry(entries, sizeof(entries) / sizeof(entries[0]), domain, kind);
     if (!entry) return -1;
     strncpy(entry->path, managed_path, sizeof(entry->path) - 1);
     entry->path[sizeof(entry->path) - 1] = '\0';
+    entry->size_bytes = managed_size;
+    entry->checksum = managed_checksum;
     entry->present = 1;
     return blob_autoload_write_entries(entries, sizeof(entries) / sizeof(entries[0]));
 }
@@ -429,6 +559,8 @@ int blob_autoload_clear(const char *domain, const char *kind)
         if (strcmp(entries[i].domain, domain) == 0 &&
             strcmp(entries[i].kind, kind) == 0) {
             entries[i].path[0] = '\0';
+            entries[i].size_bytes = 0;
+            entries[i].checksum = 0;
             entries[i].present = 0;
             blob_autoload_remove_managed_file(domain, kind);
             return blob_autoload_write_entries(entries, sizeof(entries) / sizeof(entries[0]));
@@ -449,8 +581,25 @@ void blob_boot_autoload(void)
 
     for (size_t i = 0; i < sizeof(entries) / sizeof(entries[0]); i++) {
         int rc;
+        uint32_t actual_size = 0;
+        uint32_t actual_checksum = 0;
         if (!entries[i].present) continue;
         resolved[0] = '\0';
+        if (entries[i].size_bytes != 0 || entries[i].checksum != 0) {
+            if (blob_autoload_file_identity(entries[i].path, &actual_size, &actual_checksum) != 0) {
+                uart_printf("[WARN] blob_autoload: identity check failed %s %s path=%s\r\n",
+                            entries[i].domain, entries[i].kind, entries[i].path);
+                continue;
+            }
+            if (actual_size != entries[i].size_bytes ||
+                actual_checksum != entries[i].checksum) {
+                uart_printf("[WARN] blob_autoload: identity mismatch %s %s path=%s expected=%u/%08x actual=%u/%08x\r\n",
+                            entries[i].domain, entries[i].kind, entries[i].path,
+                            entries[i].size_bytes, entries[i].checksum,
+                            actual_size, actual_checksum);
+                continue;
+            }
+        }
         if (strcmp(entries[i].domain, "eviction") == 0) {
             rc = eviction_blob_stage_file(entries[i].kind_id, entries[i].path,
                                           resolved, sizeof(resolved));
