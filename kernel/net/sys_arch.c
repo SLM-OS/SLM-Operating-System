@@ -8,7 +8,7 @@
 
 #include "arch/cc.h"
 #include "arch/sys_arch.h"
-#include "lwipopts.h"   /* LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT for the build-time assert */
+#include "lwipopts.h"   /* LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT for the build-time guard */
 #include "timer.h"
 #include "spinlock.h"
 
