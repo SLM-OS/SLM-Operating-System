@@ -194,14 +194,20 @@ int model_meta_read(const char *name, struct model_meta *out)
 {
     if (!name || !out) return MODEL_LAUNCH_ERR_BADMETA;
 
-    /* Build the path. /mnt/models/<name>.meta — bounded by VFS_MAX_PATH. */
+    /* Build the path. /mnt/models/<name>.meta — bounded by VFS_MAX_PATH.
+     *
+     * `name` length is bounded by `VFS_MAX_PATH - 1` so a missing nul
+     * terminator (defensive — current callers always nul-terminate)
+     * cannot run the strlen scan off the end of the caller's buffer
+     * into faulting memory. */
     char path[VFS_MAX_PATH];
     const char prefix[] = "/mnt/models/";
     const char suffix[] = ".meta";
     size_t plen = sizeof(prefix) - 1;
     size_t slen = sizeof(suffix) - 1;
     size_t nlen = 0;
-    while (name[nlen]) nlen++;
+    while (nlen < VFS_MAX_PATH && name[nlen]) nlen++;
+    if (nlen == VFS_MAX_PATH) return MODEL_LAUNCH_ERR_BADMETA;
 
     if (plen + nlen + slen + 1 > sizeof(path)) return MODEL_LAUNCH_ERR_BADMETA;
     for (size_t i = 0; i < plen; i++) path[i] = prefix[i];
