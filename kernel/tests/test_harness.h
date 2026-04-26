@@ -196,4 +196,7 @@ int test_suite_admin_telemetry(void);
 /* Telemetry feed pub/sub event counter tests (admin & telemetry, M4) */
 int test_suite_telemetry_feed(void);
 
+/* Model engine registry + .meta parser tests (admin & telemetry, M5) */
+int test_suite_model_engine(void);
+
 #endif /* TEST_HARNESS_H */

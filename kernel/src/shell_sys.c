@@ -13,6 +13,7 @@
 #include "sched_trace.h"
 #include "gpu_consumer.h"
 #include "admin_telemetry.h"
+#include "model_engine.h"
 #ifdef CONFIG_AI_SCHEDULER
 #include "ai_types.h"
 #include "runtime_model.h"
@@ -2437,8 +2438,75 @@ int cmd_model(int argc, char *argv[])
         return 0;
     }
 
+    if (strcmp(subcmd, "engines") == 0) {
+        const struct model_engine_info *engines[MODEL_KIND_COUNT];
+        size_t n = model_engine_info_list(engines);
+        shell_puts("Model engines:\r\n");
+        for (size_t i = 0; i < n; i++) {
+            const char *state =
+                engines[i]->state == MODEL_ENGINE_READY    ? "READY"
+              : engines[i]->state == MODEL_ENGINE_NOSYS    ? "NOSYS"
+              : engines[i]->state == MODEL_ENGINE_DISABLED ? "DISBL"
+              :                                              "?????";
+            shell_printf("  %-8s %-6s %s\r\n",
+                         engines[i]->name, state, engines[i]->summary);
+        }
+        return 0;
+    }
+
+    if (strcmp(subcmd, "meta") == 0) {
+        if (argc < 3) {
+            shell_puts("Usage: model meta <name>\r\n");
+            return -1;
+        }
+        struct model_meta meta;
+        int rc = model_meta_read(argv[2], &meta);
+        if (rc != MODEL_LAUNCH_OK) {
+            const char *why =
+                rc == MODEL_LAUNCH_ERR_NOMETA   ? "no /mnt/models/<name>.meta sidecar"
+              : rc == MODEL_LAUNCH_ERR_BADMETA  ? "malformed sidecar"
+              : rc == MODEL_LAUNCH_ERR_BADKIND  ? "unknown kind"
+              :                                   "unknown error";
+            shell_printf("model meta: %s: %s (rc=%d)\r\n", argv[2], why, rc);
+            return rc;
+        }
+        shell_printf("Meta for '%s':\r\n", argv[2]);
+        shell_printf("  name           %s\r\n",
+                     meta.name[0] ? meta.name : argv[2]);
+        shell_printf("  kind           %s\r\n", model_kind_name(meta.kind));
+        shell_printf("  size           %lu bytes\r\n", (unsigned long)meta.size);
+        if (meta.sha256[0])
+            shell_printf("  sha256         %s\r\n", meta.sha256);
+        if (meta.uploaded_ts_ms)
+            shell_printf("  uploaded_ts_ms %lu\r\n",
+                         (unsigned long)meta.uploaded_ts_ms);
+        return 0;
+    }
+
+    if (strcmp(subcmd, "launch") == 0) {
+        if (argc < 3) {
+            shell_puts("Usage: model launch <name>\r\n");
+            return -1;
+        }
+        int task_id = -1;
+        int rc = model_engine_launch(argv[2], &task_id);
+        if (rc != MODEL_LAUNCH_OK) {
+            const char *why =
+                rc == MODEL_LAUNCH_ERR_NOMETA   ? "no /mnt/models/<name>.meta sidecar"
+              : rc == MODEL_LAUNCH_ERR_BADMETA  ? "malformed sidecar"
+              : rc == MODEL_LAUNCH_ERR_BADKIND  ? "unknown kind"
+              : rc == MODEL_LAUNCH_ERR_NOSYS    ? "engine for kind is a stub on this build"
+              : rc == MODEL_LAUNCH_ERR_FAILED   ? "engine returned failure"
+              :                                   "unknown error";
+            shell_printf("model launch: %s: %s (rc=%d)\r\n", argv[2], why, rc);
+            return rc;
+        }
+        shell_printf("model launch %s: ok (task_id=%d)\r\n", argv[2], task_id);
+        return 0;
+    }
+
     shell_puts("Usage: model [load|list|info|unload|pin|unpin|preload|preload-status|"
-              "infer|bench|stats|pools|gpu]\r\n");
+              "infer|bench|stats|pools|gpu|engines|meta|launch]\r\n");
     return -1;
 }
 
