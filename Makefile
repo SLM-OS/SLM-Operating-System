@@ -769,8 +769,12 @@ endif
 # fails — issue #392 Scope B). The preferred size is chosen large
 # enough to land in QEMU's SDHC emulation regime; the fallback is
 # below QEMU's SDHC threshold so the SDSC code path runs instead.
-# Both rely on sparse files (truncate, not dd) so on-disk cost is
-# ~500 KB after a typical run on a sparse-aware filesystem.
+# On sparse-aware filesystems (ext4, btrfs, xfs, zfs, APFS, NTFS)
+# both sizes cost ~500 KB after a typical run. On FAT-family hosts
+# the preferred 4 GB allocation fails up front (no sparse support);
+# the fallback then allocates a real 256 MB file — that's the
+# expected trade-off, since 256 MB is what made allocation fit in
+# the first place.
 SDHCI_TEST_IMG := $(KERNEL_TEST_BUILD_DIR)/sdhci-test.img
 # Preferred size — large enough for QEMU's sd-card model to set CCS=1
 # in ACMD41 (SDHC, block-addressed). Sparse, so on-disk footprint is
