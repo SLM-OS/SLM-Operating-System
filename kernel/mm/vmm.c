@@ -1005,6 +1005,35 @@ static void vmm_setup_platform(void)
         DEBUG_PRINT("  XUDC + padctl L2[%lu] mapped", (unsigned long)xudc_l2);
     }
 
+    /* Camera-subsystem MMIO blocks for the #396 Phase 0 reachability
+     * probe: NVCSI receiver, RCE HSP (camera-rtcpu IPC doorbell + SM/SS),
+     * and the HSI2C controller wired to the J17/J20 camera connectors
+     * (cam_i2c → /bus@0/i2c@3180000 = i2c2 on the live nano-1 DT).
+     *
+     * These three peek targets together gate the IMX219 capture path
+     * (docs/jetson-camera-imx219-plan.md §"Phase 0 — Hardware Recon").
+     * Mappings stay in place so the future driver can reuse them
+     * without re-touching the VMM. */
+    {
+        uint64_t nvcsi_blk = 0x15A00000UL & ~(BLOCK_SIZE - 1);
+        uint64_t nvcsi_l2  = (nvcsi_blk >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[nvcsi_l2] = make_block_desc(nvcsi_blk, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  NVCSI L2[%lu] mapped", (unsigned long)nvcsi_l2);
+
+        uint64_t rce_hsp_blk = 0x0B950000UL & ~(BLOCK_SIZE - 1);
+        uint64_t rce_hsp_l2  = (rce_hsp_blk >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[rce_hsp_l2] = make_block_desc(rce_hsp_blk, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  RCE HSP L2[%lu] mapped", (unsigned long)rce_hsp_l2);
+
+        uint64_t cam_i2c_blk = 0x03180000UL & ~(BLOCK_SIZE - 1);
+        uint64_t cam_i2c_l2  = (cam_i2c_blk >> BLOCK_SHIFT) & 0x1FF;
+        l2_mmio[cam_i2c_l2] = make_block_desc(cam_i2c_blk, VMM_FLAGS_DEVICE);
+        vmm_state.blocks_mapped++;
+        DEBUG_PRINT("  cam_i2c L2[%lu] mapped", (unsigned long)cam_i2c_l2);
+    }
+
     /* RTL8168 BAR window at 0x35_2800_0000 (L1[212]). One 2 MB block
      * covers BAR2 (0x3528004000, 4 KB) and BAR4 (0x3528000000, 16 KB)
      * both — they land in the same 2 MB-aligned region. */

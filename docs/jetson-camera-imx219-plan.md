@@ -2,17 +2,17 @@
 
 **Tracking:** 🎫 #396
 
-**Status:** ☐ Phase 0 hardware recon not yet run; no driver code started. Code-reads of IMX219 / NVCSI / VI complete and several plan assumptions revised below (VI is RTCPU-only on T234; NVCSI has both direct-MMIO and via-RTCPU paths; recon targets shifted accordingly). QEMU-side mock + Lua bindings + integration test landed (#396 follow-up).
+**Status:** ✅ Phase 0 hardware recon **GREEN** (jetson-nano-1, 2026-04-25): NVCSI MMIO, RCE HSP, and the camera I²C bus are all reachable from NS EL2; RCE is actively running and quiescent (R5 in WFI), so SLM-OS inherits a usable camera RTCPU post-kexec. Decision-matrix outcome: NVCSI Option A (direct MMIO) is the planned path, VI goes via the camera RTCPU IVC, smallest scope. Pre-hardware code-reads (IMX219 / NVCSI / VI / camera-rtcpu IVC) all done. QEMU-side mock + Lua bindings + integration test landed (#404). Awaiting camera attachment to begin Hardware Tasks.
 
-**Progress:** 8 / 21 tasks complete.
+**Progress:** 13 / 21 tasks complete.
 
 | Section | ✅ done | ☐ open | ☐🔗 blocked | ⏸️ deferred |
 |---------|--------|---------|-------------|-------------|
-| Pre-Hardware Tasks | 5 | 3 | 0 | 0 |
-| Phase 0 — Hardware Recon | 0 | 0 | 4 | 0 |
-| Hardware Tasks (post-Phase-0) | 0 | 0 | 6 | 0 |
+| Pre-Hardware Tasks | 6 | 2 | 0 | 0 |
+| Phase 0 — Hardware Recon | 4 | 0 | 0 | 0 |
+| Hardware Tasks (post-Phase-0) | 0 | 6 | 0 | 0 |
 | QEMU-Side Tasks | 3 | 0 | 0 | 0 |
-| **Total** | **8** | **3** | **10** | **0** |
+| **Total** | **13** | **8** | **0** | **0** |
 
 Icon legend (per project root `CLAUDE.md`): ✅ done · ☐ pending · ☐🔗 blocked on dependency · ⏸️ deferred to a future phase. The 🎫 above tracks the whole feature; per-bullet 🎫 is omitted as the convention allows.
 
@@ -503,19 +503,44 @@ Items that can land before Phase 0 hardware probing.
   array. Flags two non-obvious quirks: 12 mandatory "undocumented
   registers" at 0x4540-0x479b, and a probe-time MODE_SELECT toggle
   the D-PHY needs before it'll enter LP-11.
-- ☐ Identify the camera I²C bus, reset/PWDN GPIO assignments, and
-  XCLK source from
-  `arch/arm64/boot/dts/nvidia/tegra234-p3768-0000+p3767-0005.dts`
-  (and any IMX219 DT overlay that ships with L4T).
+- ✅ Identify the camera I²C bus, reset/PWDN GPIO assignments from
+  the live `jetson-nano-1` device tree (2026-04-25 SSH session).
+  Findings:
+  - **Camera I²C bus = `0x03180000`** (Linux alias `i2c2`, DT label
+    `cam_i2c`, `nvidia,tegra194-i2c`). Plan previously guessed
+    `0x031c0000`/HSI2C-3 — that was wrong; HSI2C-3 is disabled.
+  - Both connectors (CAM-A / CAM-C in L4T overlay names) **share the
+    same I²C bus through a GPIO-controlled MUX** (compatible
+    `i2c-mux-gpio`, MUX selector on AON GPIO line 19). So the I²C
+    answer is identical regardless of physical connector choice.
+  - Reset GPIOs differ per connector: CAM-A on main GPIO line 62,
+    CAM-C on main GPIO line 160. Active-high.
+  - NVCSI port assignments differ: CAM-A on port-index 1
+    (`serial_b`), CAM-C on port-index 2 (`serial_c`). 2-lane RAW10.
+  - L4T already ships pre-built overlays in `/boot/`:
+    `tegra234-p3767-camera-p3768-imx219-{A,C,dual,...}.dtbo` —
+    just need extlinux to load one once a camera is attached.
+  - RCE HSP base **`0x0B950000`** (not the previously guessed
+    `~0x03c00000` — that's BPMP HSP). RCE main MMIO at `0x0BC00000`,
+    RCE PM at `0x0B9F0000`.
 - ☐ Confirm with the lab whether an IMX219-160 module is on hand and
-  on which connector it lives (J17 / J20).
-- ☐ Code-read camera-rtcpu IVC bring-up. Surfaced by the VI code-read:
-  with VI mandatory-RTCPU and NVCSI's Option B also via RTCPU, the
-  bridge from the existing BPMP IVC pattern to a working
-  `tegra-camera-rtcpu` IVC channel pair (HSP-backed, two channels
-  per direction) is now load-bearing. References to cache:
-  `drivers/platform/tegra/rtcpu/` from the same OE4T mirror used by
-  the NVCSI/VI agents.
+  on which connector it lives (J17 / J20). Pre-hardware Phase 0 work
+  doesn't need it; only the post-Phase-0 Hardware Tasks do.
+- ✅ Code-read camera-rtcpu IVC bring-up — see
+  `docs/jetson-camera-rtcpu-ivc-driver-notes.md`. Headlines:
+  - HSP wire format is shared-mailbox + shared-semaphore (not the
+    doorbell pattern BPMP uses); needs ~250 LoC of new SM TX/RX/SS
+    accessors plus a `CAMRTC_HSP_MSG` request/response state machine
+    (HELLO / PROTOCOL / RESUME / CH_SETUP).
+  - IVC ring layout itself is identical — SLM-OS's
+    `kernel/drivers/bpmp/ivc.c` lifts in directly.
+  - RCE firmware is bootloader-loaded; SLM-OS doesn't need to
+    `request_firmware`. AST regions are bootloader-programmed too.
+  - Default IVC topology is 1 region, 6 channels; the two
+    load-bearing for IMX219 are `ivccontrol@3` (capture-control,
+    64×320 B) and `ivccapture@4` (capture, 512×64 B).
+  - Total port estimate: **~600-900 LoC new** + reuse of existing
+    `bpmp/ivc.c` and `bpmp/hsp.c`.
 - ✅ Cache reference sources under `docs/reference/`:
   Linux `imx219.c`, `i2c-tegra.c`, the L4T `csi*.c` / `nvcsi*.c` /
   `vi5*.c` files, and the camera-rtcpu IVC headers
@@ -524,42 +549,42 @@ Items that can land before Phase 0 hardware probing.
 
 ## Phase 0 — Hardware Recon (CBB Probe)
 
-Before writing any driver code, the single most informative experiment
-is a one-shot MMIO peek. Run on `jetson-nano-2` (or `nano-1`) via the
-existing `mem peek <addr>` shell command. **Recon targets revised
-April 2026 after the NVCSI/VI code-reads** — VI MMIO is no longer a
-useful peek (VI5 is RTCPU-only on T234, the AP never touches the VI
-window) and the camera-rtcpu HSP region is the new gating reachability
-question. A CBB-blocked access will RAS-fault and power off the CPU,
-so each peek is one shot — no register scans.
+**Run on `jetson-nano-1` 2026-04-25. All three primary targets
+returned data; CBB does not block any of them at NS EL2.** Decision-
+matrix outcome: NVCSI Option A (direct MMIO) + VI via RTCPU + IMX219
+sensor — smallest scope.
 
-- ☐🔗 `mem peek 0x15a00000` (NVCSI base — first 32-bit word).
-  Expected on EL2 access if reachable: a Tegra HW revision register
-  or `0x0`. **Gates the NVCSI Option A (direct MMIO) path.** If
-  blocked, NVCSI must go via RTCPU (Option B), same as VI.
-- ☐🔗 `mem peek 0x03c00000` (camera-rtcpu HSP region — exact offset
-  TBD from L4T DT). **Gates both NVCSI Option B and VI** since both
-  paths send IVC over the camera-rtcpu HSP doorbell. If this is
-  blocked, neither RTCPU-mediated path works from NS EL2 and the
-  bare-metal capture stack collapses to "not viable" (see Fallback
-  Paths). The existing BPMP IVC at HSP region 0x03d00000 already
-  works at NS EL2, so reachability is plausible — but per-peripheral
-  CBB rules mean the camera-rtcpu HSP could still be different.
-- ☐🔗 `mem peek 0x031c0000` (HSI2C-3 — example camera bus; address
-  TBD from DT once the I²C bus identification task lands). Gates
-  the IMX219 sensor control path regardless of which capture
-  architecture wins.
-- ☐🔗 Decision matrix:
-  - All three readable: proceed with NVCSI Option A + VI via RTCPU
-    + IMX219. Smallest scope.
-  - NVCSI blocked, HSP + I²C readable: NVCSI Option B (camera-rtcpu
-    IVC) + VI via RTCPU + IMX219. Larger scope (a full camera-rtcpu
-    IVC layer in SLM-OS).
-  - HSP blocked: stop and switch to a Fallback Path. Either NVCSI
-    Option A alone is meaningless without VI to ingest the stream,
-    or the whole bare-metal-capture path is off the table.
-  - I²C blocked: cannot configure the sensor; same fallback
-    decision as the HSP-blocked branch.
+Peek targets and observed values (each measured one-shot via
+`peek <addr>` from the SLM-OS shell, with the addresses identity-
+mapped in `kernel/mm/vmm.c` under the `#396 Phase 0` block):
+
+- ✅ `peek 0x15A00000` (NVCSI base) → `0xFFFFFFFF`. Read completed
+  cleanly (no exception, no CBB external abort). The all-1s value is
+  expected: the L4T platform driver leaves NVCSI clock-gated when no
+  camera overlay is loaded, and clock-gated MMIO returns 0xFFFFFFFF.
+  **NVCSI MMIO is reachable from NS EL2.** Future driver code will
+  enable `TEGRA234_CLK_NVCSI` via BPMP before reading live values.
+- ✅ `peek 0x0B950380` (RCE HSP_DIMENSIONING) → `0x00080048`.
+  Decoded per `tegra186-hsp.c` field layout: 8 doorbells, 4 shared
+  mailboxes, 8 shared semaphores. Real read of a live RCE HSP
+  controller. **RCE HSP is reachable from NS EL2** — gates both
+  NVCSI Option B and VI (which both go through the RCE IVC).
+- ✅ `peek 0x03180000` (HSI2C-2 = `cam_i2c`) → `0x00022C00`.
+  The `I2C_CNFG` register, in the configuration Linux left after
+  enabling the controller. **Camera I²C bus is reachable.**
+- ✅ Bonus state probes (per the `tegra-camera-rtcpu` notes):
+  - `peek 0x0B9F0040` (RCE_PM R5_CTRL) → `0x00000002` — bit 1 set
+    means the Camera RTCPU R5 cluster is **actively running**.
+  - `peek 0x0B9F0020` (RCE_PM PWR_STATUS) → `0x04600000` — bit 21
+    set means the R5 is in WFI (idle, waiting for events).
+  - SLM-OS will inherit a live and quiescent RCE post-kexec —
+    no firmware load required, no R5 reset required.
+
+**Outcome summary**: every gating address is reachable, and the
+Camera RTCPU is in the ideal state for SLM-OS to attach to its IVC
+without re-bringup. The plan proceeds with **NVCSI Option A +
+VI-via-RTCPU + IMX219**; the Fallback Paths section below is now
+dormant.
 
 ## Hardware Tasks (post-Phase-0)
 
