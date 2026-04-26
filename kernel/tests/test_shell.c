@@ -1471,8 +1471,12 @@ static void test_shell_register_external_command(void)
 {
     test_custom_cmd_called = 0;
 
+    /* Test-fixture commands follow the `t_` prefix convention so the
+     * help-coverage regression test (test_every_command_has_help_entry)
+     * skips them without a per-name allow-list. See the comment in
+     * that test for the rationale. */
     shell_cmd_t cmd = {
-        .name = "testcmd",
+        .name = "t_testcmd",
         .handler = custom_cmd_handler,
         .help = "Test command",
         .category = SHELL_CAT_SHELL,  /* test fixture; category irrelevant */
@@ -1482,7 +1486,7 @@ static void test_shell_register_external_command(void)
     TEST_ASSERT_EQUAL_INT(0, ret);
 
     /* Execute the custom command */
-    ret = shell_execute("testcmd");
+    ret = shell_execute("t_testcmd");
     TEST_ASSERT_EQUAL_INT(42, ret);
     TEST_ASSERT_EQUAL_INT(1, test_custom_cmd_called);
 }
@@ -2505,12 +2509,14 @@ static void test_every_command_has_help_entry(void)
     }
     for (int i = 0; i < num_external_commands; i++) {
         const shell_cmd_t *cmd = &external_commands[i];
-        /* Skip the in-test fixture commands registered by other tests
-         * — they're transient and the convention only applies to
-         * production registrations. */
-        if (strcmp(cmd->name, "testcmd") == 0 ||
-            strcmp(cmd->name, "t_nested_inner") == 0 ||
-            strcmp(cmd->name, "t_nested_outer") == 0) {
+        /* Skip in-test fixture commands registered by other tests via
+         * the `t_` prefix convention. Fixtures are transient and the
+         * "every command has a help entry" rule only applies to
+         * production registrations. New test fixtures must use a `t_`
+         * prefix so this skip works without per-name maintenance —
+         * see test_shell_register_external_command and the entries in
+         * test_shell_session.c (t_nested_inner / t_nested_outer). */
+        if (strncmp(cmd->name, "t_", 2) == 0) {
             continue;
         }
         if (!help_exists(cmd->name)) {

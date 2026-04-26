@@ -814,7 +814,13 @@ static const struct help_entry help_entries[] = {
         "  eviction stats                           Decisions, fallbacks, latency\n"
         "  eviction trajectory [N]                  Last N CACHEUS weight snapshots\n"
         "  eviction features                        Feature-name introspection\n"
-        "  eviction model status|load|...           Runtime blob workflow\n"
+        "  eviction model status                    Runtime blob status (per kind)\n"
+        "  eviction model load <kind> <path>        Stage a runtime blob from VFS\n"
+        "  eviction model activate <kind>           Activate the staged blob\n"
+        "  eviction model rollback <kind>           Roll back to the previous payload\n"
+        "  eviction model clear <kind>              Clear staged + active for a kind\n"
+        "  eviction model autoload <status|set|clear> ...\n"
+        "                                           Configure boot-time auto-load\n"
         "\n"
         "Policies include LRU, LFU, FirstCandidate, SlmHeuristic, XGBoost,\n"
         "MLP, and CACHEUS (ensemble). Build with DISABLE_EVICTION=ON to\n"
@@ -870,26 +876,6 @@ static const struct help_entry help_entries[] = {
         "when investigating BPMP IPC failure modes after kexec.\n"
     ),
 
-    HELP_TEXT("kernel",
-        "kernel - Manage staged / active boot kernel image (Pi 5 tryboot)\n"
-        "\n"
-        "Usage:\n"
-        "  kernel status                    Show staged / active / previous state\n"
-        "  kernel stage <vfs-path>          Copy a VFS file into the SD boot\n"
-        "                                   partition as `tryboot.img` and\n"
-        "                                   compute its SHA-256 sidecar.\n"
-        "  kernel activate                  Set the Pi 5 tryboot flag and reboot\n"
-        "  kernel promote                   Rename `tryboot.img` over\n"
-        "                                   `kernel_2712.img` (commit current)\n"
-        "  kernel rollback                  Delete `tryboot.img`, clear flag\n"
-        "\n"
-        "Admin-gated. Drives the dynamic kernel-replace state machine\n"
-        "(empty -> staged -> armed -> promoted | rolled_back). The running\n"
-        "kernel's identity is reported via the SLMOS_VERSION /\n"
-        "SLMOS_BUILD_STAMP / SLMOS_BUILD_SHA triple from build_info.h —\n"
-        "see also `cat /sys/version`. Pi 5 only today.\n"
-    ),
-
     HELP_TEXT("imx219",
         "imx219 - Read IMX219 sensor CHIP_ID via cam_i2c (Jetson only)\n"
         "\n"
@@ -910,6 +896,26 @@ static const struct help_entry help_entries[] = {
         "A NACK or RX-empty result with init=OK is the expected diagnostic\n"
         "for `sensor in reset / clock-gated`; not an HSI2C bug. See\n"
         "`docs/jetson-camera-imx219-plan.md`.\n"
+    ),
+
+    HELP_TEXT("kernel",
+        "kernel - Manage staged / active boot kernel image (Pi 5 tryboot)\n"
+        "\n"
+        "Usage:\n"
+        "  kernel status                    Show staged / active / previous state\n"
+        "  kernel stage <vfs-path>          Copy a VFS file into the SD boot\n"
+        "                                   partition as `tryboot.img` and\n"
+        "                                   compute its SHA-256 sidecar.\n"
+        "  kernel activate                  Set the Pi 5 tryboot flag and reboot\n"
+        "  kernel promote                   Rename `tryboot.img` over\n"
+        "                                   `kernel_2712.img` (commit current)\n"
+        "  kernel rollback                  Delete `tryboot.img`, clear flag\n"
+        "\n"
+        "Admin-gated. Drives the dynamic kernel-replace state machine\n"
+        "(empty -> staged -> armed -> promoted | rolled_back). The running\n"
+        "kernel's identity is reported via the SLMOS_VERSION /\n"
+        "SLMOS_BUILD_STAMP / SLMOS_BUILD_SHA triple from build_info.h —\n"
+        "see also `cat /sys/version`. Pi 5 only today.\n"
     ),
 
     HELP_TEXT("lua-admin",
