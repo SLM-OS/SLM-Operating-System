@@ -148,6 +148,8 @@ int test_harness_run_all(void)
     total_failures += test_suite_elf();
     /* Platform-neutral protocol-layout tests (no MMIO). */
     total_failures += test_suite_bcm_mailbox();
+    /* Camera C-API + Tegra234 clock-id static_assert pins (#396). */
+    total_failures += test_suite_camera();
     /* FatFs / FAT32 integration (uses ramdisk + PMM). */
     total_failures += test_suite_fat32();
 #if !defined(PLATFORM_X86_64)

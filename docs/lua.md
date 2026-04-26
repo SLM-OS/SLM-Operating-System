@@ -241,6 +241,55 @@ assert(slm.hailo.unload(h))
 Full walkthrough with a rolling-FPS benchmark: `lua /mnt/files/demo_hailo.lua`
 (see `docs/demo.md` §"Hailo NPU demo").
 
+### Camera capture
+
+The `slm.camera` sub-table exposes the camera capture API. Available on
+both the safe and admin Lua surfaces — the bindings themselves perform no
+mutation; running inference on the captured frame still requires admin
+(`slm.model_infer_bytes` lives on the admin surface).
+
+Backends recognised:
+
+| Name | Status | Notes |
+|------|--------|-------|
+| `"mock"` | Always reachable when the kernel is built with `MOCK_CAMERA_FRAME=ON` (default). | Returns a baked-in 1640×1232 RAW10 RGGB frame produced from a single MNIST test digit at build time. Used for QEMU CI coverage and as a fallback on hardware where no IMX219 stack is wired up yet. |
+| `"imx219-0"` / `"imx219-1"` | Not yet implemented. | Reserved names for the J17 / J20 connectors on the Jetson Orin Nano dev kit. `open()` returns `nil` until the driver lands (`docs/jetson-camera-imx219-plan.md`). |
+
+| Function | Description |
+|----------|-------------|
+| `slm.camera.open(name)` | Resolve a camera by name. Returns a handle table `{name, capture, close}` on success, or `nil` if the backend is missing or the name is unknown. The returned table is method-callable (`cam:capture()`, `cam:close()`). |
+| `slm.camera.capture(arg)` | Procedural form. `arg` is the camera name (string) OR a handle table whose `.name` field is read — so `cam:capture()` works through Lua's `a:b()` sugar. Returns `(frame_id, width, height, bayer)` on success, `nil` on failure. `frame_id` is a kernel-side integer that names the captured buffer for `preprocess_mnist`; today only `0` is valid (the mock's `.rodata` frame). `bayer` is `0` for RGGB. |
+| `slm.camera.close(arg)` | Procedural form. Returns `true`. The mock backend owns no per-handle state; real backends will release DMA buffers here. |
+| `slm.camera.preprocess_mnist(frame_id, width, height, bayer)` | Decode the named frame into 3,136 bytes of fp32 in `[0, 1]` suitable for `slm.model_infer_bytes`. Pipeline is centred 1232×1232 crop → green-channel-only Bayer extract → 44×44 box-average → integer-only IEEE 754 normalise. Returns the bytes string on success; `(nil, rc<0)` on error: `-1` bad `frame_id`, `-2` mock backend not embedded, `-3` `(w, h, bayer)` don't match the backing frame. |
+
+Frame bytes are not exposed to Lua because the 1640×1232 RAW10 frame is
+2.5 MB — well above the Lua heap cap. `preprocess_mnist` therefore reads
+the bytes through the kernel-side `frame_id`. Future small-mode captures
+(e.g. 640×480) could grow a string-bytes overload.
+
+Typical lifecycle:
+
+```lua
+local cam = slm.camera.open("mock")
+if cam == nil then error("camera backend missing") end
+
+local fid, w, h, bayer = cam:capture()
+local mnist_bytes = slm.camera.preprocess_mnist(fid, w, h, bayer)
+
+local idx = slm.model_load_mnist()
+local logits, argmax = slm.model_infer_bytes(idx, mnist_bytes)
+slm.print("predicted digit: " .. argmax)
+
+cam:close()
+```
+
+The QEMU integration test (`test_slm_camera_e2e_mnist_mock` in
+`kernel/tests/test_lua.c`) runs this exact sequence against the mock
+frame and asserts `argmax == 3` (the baked digit's class). The full
+plan for the IMX219 hardware backend is in
+`docs/jetson-camera-imx219-plan.md`; per-driver code-read summaries are
+in `docs/jetson-camera-{imx219,nvcsi,vi}-driver-notes.md`.
+
 ### Memory Statistics
 
 ```lua

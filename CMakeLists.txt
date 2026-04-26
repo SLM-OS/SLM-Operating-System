@@ -499,6 +499,10 @@ set(KERNEL_SOURCES
     # slm.model_infer_file() has a known-good demo set out of the box.
     kernel/src/mnist_digit_init.c
     $<$<BOOL:${MNIST_DIGITS_DIR}>:kernel/src/mnist_digit_embed.S>
+    # Camera capture API + mock backend. The mock RAW10 frame embed
+    # itself (camera_mock_embed.S) is added later via target_sources
+    # because the MOCK_CAMERA_FRAME option is defined further down.
+    kernel/src/camera.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
     # General-purpose FDT reader — path + property lookup for any
     # driver. Built on every ARM64 target; x86-64 builds skip it
@@ -662,6 +666,9 @@ set(TEST_SOURCES
     # `kernel` admin command surface tests — Stage 4 of #370. Same
     # ARM64-only gate as test_sdhci.c (it's the same backend stack).
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_kernel_cmd.c>
+    # Camera C-API tests + Tegra234 clock-id static_asserts (#396).
+    # Pure compile-time + small-buffer tests; runs on every platform.
+    kernel/tests/test_camera.c
     # SHA-256 NIST-vector tests for the vendored library — Stage 4
     # of #370 too, but platform-neutral (pure computation, no MMIO).
     kernel/tests/test_sha256.c
@@ -945,6 +952,59 @@ if(MNIST_DIGITS_DIR)
         COMPILE_DEFINITIONS "MNIST_DIGITS_DIR=${MNIST_DIGITS_DIR}"
     )
     message(STATUS "Embedding MNIST test digits from: ${MNIST_DIGITS_DIR}")
+endif()
+
+# ============================================================================
+# Mock camera frame (.incbin — QEMU-side CI for camera Lua bindings)
+# ============================================================================
+#
+# Generated at build time by scripts/generate-mock-camera-frame.py from
+# scripts/fixtures/mock_camera_digit.bin (a 28x28 fp32 MNIST digit).
+# Output is 1640x1232 RAW10 RGGB packed, 2,525,600 bytes. The mock
+# backend in kernel/src/camera.c returns pointers into this .rodata
+# region so Lua scripts can exercise the capture + preprocess +
+# inference path on QEMU without IMX219 hardware
+# (docs/jetson-camera-imx219-plan.md "QEMU-Side Tasks").
+#
+# Default ON — production hardware builds that don't need the QEMU
+# coverage can drop the 2.5 MB by passing -DMOCK_CAMERA_FRAME=OFF.
+option(MOCK_CAMERA_FRAME
+    "Embed the QEMU mock camera RAW10 frame (default ON, ~2.5 MB)" ON)
+if(MOCK_CAMERA_FRAME)
+    set(MOCK_CAMERA_FRAME_DIGIT
+        "${CMAKE_SOURCE_DIR}/scripts/fixtures/mock_camera_digit.bin"
+        CACHE FILEPATH
+        "28x28 fp32 source digit for the mock camera frame")
+    set(MOCK_CAMERA_FRAME_BIN "${CMAKE_BINARY_DIR}/mock_camera_frame.bin")
+    if(NOT EXISTS "${MOCK_CAMERA_FRAME_DIGIT}")
+        message(FATAL_ERROR
+            "MOCK_CAMERA_FRAME_DIGIT does not exist: "
+            "${MOCK_CAMERA_FRAME_DIGIT}")
+    endif()
+    # The OBJECT_DEPENDS on camera_mock_embed.S below is what wires the
+    # generation into the build — CMake will fire this custom_command
+    # whenever the .bin output is missing or older than the digit
+    # fixture / the generator script.
+    add_custom_command(
+        OUTPUT  "${MOCK_CAMERA_FRAME_BIN}"
+        COMMAND ${CMAKE_COMMAND} -E echo
+                "[gen] mock_camera_frame.bin ← ${MOCK_CAMERA_FRAME_DIGIT}"
+        COMMAND python3
+                "${CMAKE_SOURCE_DIR}/scripts/generate-mock-camera-frame.py"
+                --digit  "${MOCK_CAMERA_FRAME_DIGIT}"
+                --output "${MOCK_CAMERA_FRAME_BIN}"
+        DEPENDS "${MOCK_CAMERA_FRAME_DIGIT}"
+                "${CMAKE_SOURCE_DIR}/scripts/generate-mock-camera-frame.py"
+        VERBATIM
+    )
+    target_sources(slmos.elf PRIVATE kernel/src/camera_mock_embed.S)
+    set_source_files_properties(
+        kernel/src/camera_mock_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "MOCK_CAMERA_FRAME_PATH=${MOCK_CAMERA_FRAME_BIN}"
+        OBJECT_DEPENDS      "${MOCK_CAMERA_FRAME_BIN}"
+    )
+    message(STATUS "Embedding mock camera frame from: ${MOCK_CAMERA_FRAME_DIGIT}")
 endif()
 
 # ============================================================================

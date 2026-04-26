@@ -39,6 +39,9 @@ Desktop.ini
 *.obj
 *.elf
 *.bin
+# Build inputs that ship with the repo (small, deterministic) — must
+# be tracked despite the *.bin rule above.
+!scripts/fixtures/*.bin
 *.hex
 *.ko
 *.mod

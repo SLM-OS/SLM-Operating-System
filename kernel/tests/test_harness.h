@@ -151,6 +151,9 @@ int test_suite_dtb(void);
 /* BCM mailbox property-tag buffer tests (#367, dynamic-kernel-replace Stage 1) */
 int test_suite_bcm_mailbox(void);
 
+/* Camera C-API + Tegra234 clock-id static_assert pins (#396) */
+int test_suite_camera(void);
+
 /* FatFs / FAT32 integration tests (#368, dynamic-kernel-replace Stage 2) */
 int test_suite_fat32(void);
 
