@@ -447,6 +447,18 @@ set(KERNEL_SOURCES
     # control over the cam_i2c bus.
     kernel/drivers/i2c/i2c_tegra.c
 
+    # Tegra234 per-pin GPIO driver (#396 Hardware Task 2) — same
+    # cross-platform-stub pattern. Used by the IMX219 sensor driver
+    # to release the sensor reset, enable the regulator GPIO, and
+    # position the cam_i2cmux selector.
+    kernel/drivers/gpio/gpio_tegra.c
+
+    # IMX219 camera sensor driver (#396 Hardware Task 2) — wraps
+    # HSI2C + GPIO + extperiph1 XCLK to power up the IMX219 and
+    # verify CHIP_ID = 0x0219. Cross-platform stub branch returns
+    # -1 from every function.
+    kernel/drivers/camera/imx219.c
+
     # Interrupt controller and timer (ARM64 only — x86-64 uses pic.c + timer_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/gic.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/timer.c>

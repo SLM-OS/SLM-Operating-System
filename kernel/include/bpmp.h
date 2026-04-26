@@ -91,6 +91,23 @@ int bpmp_clk_disable(uint32_t clock_id);
 int bpmp_clk_is_enabled(uint32_t clock_id, int *state_out);
 
 /*
+ * Set a clock's rate in Hz (CMD_CLK_SET_RATE). BPMP rounds to the
+ * closest hardware-supported rate; the actual rate it programmed is
+ * returned via *actual_hz_out (may be NULL if caller doesn't care).
+ *
+ *   clock_id        Tegra234 clock ID.
+ *   rate_hz         Requested rate in Hz (e.g. 24000000 for 24 MHz).
+ *   actual_hz_out   Optional: filled with the rate BPMP actually
+ *                   programmed (the closest supported value).
+ *
+ * Returns 0 on success, or the same error convention as
+ * bpmp_clk_enable. The clock must be enabled separately via
+ * bpmp_clk_enable; SET_RATE doesn't auto-enable.
+ */
+int bpmp_clk_set_rate(uint32_t clock_id, uint64_t rate_hz,
+                      uint64_t *actual_hz_out);
+
+/*
  * Reset control wrappers. Same error convention as bpmp_clk_*.
  */
 int bpmp_reset_assert(uint32_t reset_id);

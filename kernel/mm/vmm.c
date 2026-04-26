@@ -1024,6 +1024,10 @@ static void vmm_setup_platform(void)
             TEGRA234_RCE_HSP_BASE,
             TEGRA234_RCE_PM_BASE,
             TEGRA234_CAM_I2C_BASE,
+            TEGRA234_GPIO_MAIN_BASE,  /* PH.06 cam_reset, PH.03 cam regulator */
+            TEGRA234_GPIO_AON_BASE,   /* CC.3  cam_i2cmux selector */
+            TEGRA234_PINMUX_MAIN_BASE,/* per-pad function-select (PH.06 / PH.03) */
+            /* PINMUX_AON falls in the same 2MB block as GPIO_AON above */
         };
         for (size_t i = 0; i < sizeof(cam_bases) / sizeof(cam_bases[0]); i++) {
             uint64_t blk = cam_bases[i] & ~(BLOCK_SIZE - 1);

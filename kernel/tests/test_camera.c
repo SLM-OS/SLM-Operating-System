@@ -18,7 +18,9 @@
 
 #include "unity.h"
 #include "../include/camera.h"
+#include "../include/gpio_tegra.h"
 #include "../include/i2c_tegra.h"
+#include "../include/imx219.h"
 #include "../include/platform.h"
 #include "../include/tegra234_clocks.h"
 
@@ -246,6 +248,113 @@ static void test_tegra_i2c_api_arg_validation(void)
 #endif
 }
 
+/* ---- Tegra234 GPIO driver ---- */
+
+/*
+ * Test: gpio_tegra_drive_output / set_value / read_input reject NULL
+ * pins on every platform without dereferencing them. read_input also
+ * rejects NULL out-pointer.
+ */
+static void test_gpio_tegra_null_safe(void)
+{
+    int dummy = 42;
+    TEST_ASSERT_EQUAL_INT(-1, gpio_tegra_drive_output(NULL, 1));
+    TEST_ASSERT_EQUAL_INT(-1, gpio_tegra_set_value(NULL, 0));
+    TEST_ASSERT_EQUAL_INT(-1, gpio_tegra_read_input(NULL, &dummy));
+    TEST_ASSERT_EQUAL_INT(-1, gpio_tegra_read_input(&gpio_tegra_cam_reset,
+                                                   NULL));
+    /* read_input must not write through a NULL out-pointer. */
+    TEST_ASSERT_EQUAL_INT(42, dummy);
+}
+
+/*
+ * Test: the three pre-configured camera pin instances point at the
+ * MMIO addresses derived from platform.h. Catches a future refactor
+ * that desyncs the per-pin offsets from the pin definitions.
+ */
+static void test_gpio_tegra_cam_pin_wiring(void)
+{
+    TEST_ASSERT_NOT_NULL(gpio_tegra_cam_reset.name);
+    TEST_ASSERT_NOT_NULL(gpio_tegra_cam_pwr.name);
+    TEST_ASSERT_NOT_NULL(gpio_tegra_cam_mux_sel.name);
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(TEGRA234_GPIO_MAIN_BASE
+                                       + TEGRA234_GPIO_CAM_RESET_OFF),
+                            (uint64_t)gpio_tegra_cam_reset.base);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(TEGRA234_GPIO_MAIN_BASE
+                                       + TEGRA234_GPIO_CAM_PWR_OFF),
+                            (uint64_t)gpio_tegra_cam_pwr.base);
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)(TEGRA234_GPIO_AON_BASE
+                                       + TEGRA234_GPIO_CAM_MUX_OFF),
+                            (uint64_t)gpio_tegra_cam_mux_sel.base);
+#else
+    /* Stub instance: base 0. */
+    TEST_ASSERT_EQUAL_HEX64(0u, (uint64_t)gpio_tegra_cam_reset.base);
+    TEST_ASSERT_EQUAL_HEX64(0u, (uint64_t)gpio_tegra_cam_pwr.base);
+    TEST_ASSERT_EQUAL_HEX64(0u, (uint64_t)gpio_tegra_cam_mux_sel.base);
+#endif
+}
+
+/* ---- IMX219 sensor driver ---- */
+
+/*
+ * Test: imx219_read_chip_id rejects NULL out-pointer without touching
+ * the I²C bus. Real reads happen through the `imx219` shell command
+ * on Jetson; QEMU exercises the stub branch.
+ */
+static void test_imx219_read_chip_id_null_safe(void)
+{
+    TEST_ASSERT_EQUAL_INT(-1, imx219_read_chip_id(NULL));
+}
+
+/*
+ * Test: imx219_power_off is best-effort and returns void; calling it
+ * even without a prior power_on must not crash. On QEMU it short-
+ * circuits via the stub.
+ */
+static void test_imx219_power_off_safe(void)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_IGNORE_MESSAGE("Jetson build: power_off touches real BPMP/GPIO "
+                        "(verified via `imx219` shell command)");
+#else
+    /* Stub branch is a no-op — must compile and link, must not crash. */
+    imx219_power_off();
+#endif
+}
+
+/* ---- Tegra HSI2C diagnostic dump ---- */
+
+/*
+ * Test: tegra_i2c_dump_status fills the entries in the order written
+ * by the implementation, with non-NULL names and bounded by `n`. The
+ * stub branch is a no-op (no MMIO), so we only verify Jetson-side that
+ * the table size matches the imx219 driver's expectation (10 entries).
+ */
+static void test_tegra_i2c_dump_status_bounds(void)
+{
+    struct tegra_i2c_regdump_entry regs[10] = {0};
+    /* `n=0` must leave the array untouched on every platform. */
+    tegra_i2c_dump_status(&tegra_i2c_cam_bus, regs, 0u);
+    for (uint32_t i = 0; i < 10; i++) {
+        TEST_ASSERT_NULL(regs[i].name);
+        TEST_ASSERT_EQUAL_UINT32(0u, regs[i].value);
+    }
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* On Jetson the dump touches live MMIO — the imx219 shell command
+     * already exercises that path on every CHIP_ID failure. Here we
+     * just confirm the symbol resolves and the n-clamp logic doesn't
+     * write past the caller's buffer. */
+    tegra_i2c_dump_status(&tegra_i2c_cam_bus, regs, 999u);
+    /* At least the first entry should now have a name. */
+    TEST_ASSERT_NOT_NULL(regs[0].name);
+#else
+    /* Stub: still a no-op for any n. */
+    tegra_i2c_dump_status(&tegra_i2c_cam_bus, regs, 10u);
+    TEST_ASSERT_NULL(regs[0].name);
+#endif
+}
+
 int test_suite_camera(void)
 {
     UnityBegin("Camera C-API tests");
@@ -257,6 +366,11 @@ int test_suite_camera(void)
     RUN_TEST(test_tegra_i2c_stubs_return_minus_one);
     RUN_TEST(test_tegra_i2c_cam_bus_wiring);
     RUN_TEST(test_tegra_i2c_api_arg_validation);
+    RUN_TEST(test_gpio_tegra_null_safe);
+    RUN_TEST(test_gpio_tegra_cam_pin_wiring);
+    RUN_TEST(test_imx219_read_chip_id_null_safe);
+    RUN_TEST(test_imx219_power_off_safe);
+    RUN_TEST(test_tegra_i2c_dump_status_bounds);
     return UnityEnd();
 }
 
@@ -330,4 +444,48 @@ _Static_assert(TEGRA234_RCE_BASE     == 0x0BC00000UL,
     "TEGRA234_RCE_BASE drift (RCE main MMIO — Falcon EVP, AST)");
 _Static_assert(TEGRA234_CAM_I2C_BASE == 0x03180000UL,
     "TEGRA234_CAM_I2C_BASE drift (HSI2C-2 = cam_i2c — both J17 and J20 share via i2c-mux-gpio)");
+
+/* GPIO controller bases (data-window addresses, not the security
+ * window — the security window is TF-A-owned and reads return
+ * 0xFFFFFFFF from the CBB firewall). Discovered during Hardware
+ * Task 2: the MAIN security window at 0x02200000 is unmapped at
+ * EL2; the data window at 0x02210000 is what the per-pin offsets
+ * below are added to. */
+_Static_assert(TEGRA234_GPIO_MAIN_BASE == 0x02210000UL,
+    "TEGRA234_GPIO_MAIN_BASE drift (data window — security window 0x02200000 returns 0xFFFFFFFF)");
+_Static_assert(TEGRA234_GPIO_AON_BASE  == 0x0C2F1000UL,
+    "TEGRA234_GPIO_AON_BASE drift (data window — security window 0x0C2F0000 returns 0xFFFFFFFF)");
+
+/* Pinmux base addresses + per-pad offsets. Tegra234 reshuffled the
+ * pad offsets vs. Tegra194 — PH.06 moved from 0x4020 (T194) to 0x4008
+ * (T234) and PH.03 from 0x4038 to 0x4020. Reading the wrong offset
+ * leaves the pad routed to its default SFIO peripheral and the
+ * GPIO-controller writes are silently ignored (the IMX219 reset line
+ * stays LOW even though OUTPUT_VALUE reads back as 1). Reference:
+ * `docs/reference/linux-pinctrl-tegra234.c` `tegra234_pingroups[]`. */
+_Static_assert(TEGRA234_PINMUX_MAIN_BASE   == 0x02430000UL,
+    "TEGRA234_PINMUX_MAIN_BASE drift");
+_Static_assert(TEGRA234_PINMUX_AON_BASE    == 0x0C300000UL,
+    "TEGRA234_PINMUX_AON_BASE drift");
+_Static_assert(TEGRA234_PINMUX_CAM_RESET_OFF == 0x4008u,
+    "TEGRA234_PINMUX_CAM_RESET_OFF drift (T234 PH.06 moved from T194's 0x4020)");
+_Static_assert(TEGRA234_PINMUX_CAM_PWR_OFF == 0x4020u,
+    "TEGRA234_PINMUX_CAM_PWR_OFF drift (T234 PH.03 moved from T194's 0x4038)");
+_Static_assert(TEGRA234_PINMUX_CAM_MUX_OFF == 0x2038u,
+    "TEGRA234_PINMUX_CAM_MUX_OFF drift (T234 PCC.03; same as T194)");
+
+/* IMX219 carrier strapping: i2c-mux-gpio channel-0 selects connector A
+ * (the J17 socket on the Orin Nano dev kit, where the IMX219 ribbon
+ * plugs in by default). The L4T overlay
+ * `tegra234-p3767-camera-p3768-imx219-A.dtbo` enables `imx219_a@10`
+ * under `i2c@0` of the mux. Channel-0 corresponds to PCC.3 GPIO LOW
+ * because i2c-mux-gpio drives the selector to `chan->chan_id`. */
+_Static_assert(IMX219_I2C_ADDR == 0x10u,
+    "IMX219_I2C_ADDR drift (carrier straps SADDR LOW → 7-bit address 0x10)");
+_Static_assert(IMX219_REG_CHIP_ID_HI == 0x0000u,
+    "IMX219_REG_CHIP_ID_HI drift (per Sony IMX219 datasheet)");
+_Static_assert(IMX219_REG_CHIP_ID_LO == 0x0001u,
+    "IMX219_REG_CHIP_ID_LO drift (per Sony IMX219 datasheet)");
+_Static_assert(IMX219_CHIP_ID == 0x0219u,
+    "IMX219_CHIP_ID drift (per Sony IMX219 datasheet)");
 #endif

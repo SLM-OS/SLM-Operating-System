@@ -331,6 +331,123 @@
 #define TEGRA234_CAM_I2C_BASE    0x03180000UL    /* HSI2C-2 = `cam_i2c` (J17/J20 via i2c-mux-gpio) */
 
 /*
+ * Tegra234 GPIO controller bases (#396 Hardware Task 2 — IMX219
+ * sensor power-up). Two controllers: `gpio_main` (gpiochip0 in Linux)
+ * for the SoC's general-purpose pins, and `gpio_aon` (gpiochip1) for
+ * the always-on / DPD-survivable pins. Same per-pin register layout
+ * — every pin gets a 32-byte (0x20) MMIO window. The address arith
+ * is documented in `docs/jetson-camera-tegra-gpio-notes.md`:
+ *
+ *   pin_base = controller_base + bank*0x1000 + port*0x200 + pin*0x20
+ *   ENABLE_CONFIG = pin_base + 0x00
+ *   INPUT         = pin_base + 0x08
+ *   OUTPUT_CONTROL= pin_base + 0x0C
+ *   OUTPUT_VALUE  = pin_base + 0x10
+ *
+ * **Two MMIO regions per controller** (verified live on the
+ * jetson-nano-1 device tree, reg-names = "security gpio"):
+ *   - reg[0] (security): per-pin SCR / VM window — owned by TF-A /
+ *     bootloader, not consumed by SLM-OS. gpio_main 0x02200000,
+ *     gpio_aon 0x0C2F0000.
+ *   - reg[1] (gpio):      per-pin DATA window — what SLM-OS uses.
+ *     gpio_main 0x02210000, gpio_aon 0x0C2F1000.
+ * The bases below point at the *gpio* window. An earlier draft
+ * pointed at the *security* window and every read returned
+ * 0xFFFFFFFF (security regs are EL3-only at runtime).
+ *
+ * vmm.c maps the 2 MB block containing each base — both windows of
+ * each controller fall inside the same block. test_camera.c pins
+ * both addresses with _Static_assert.
+ */
+#define TEGRA234_GPIO_MAIN_BASE  0x02210000UL    /* gpiochip0 data window */
+#define TEGRA234_GPIO_AON_BASE   0x0C2F1000UL    /* gpiochip1 data window */
+
+/*
+ * Tegra234 pinmux controllers. One 4-byte register per pad selects
+ * the pad's function (GPIO vs SFIO peripheral), pull, drive enable,
+ * input receiver, and other pad-level config. Per-pad register
+ * offsets come from `tegra194_pingroups[]` in
+ * `docs/reference/linux-pinctrl-tegra194.c` (Tegra234 reuses the
+ * T194 pad table). Pinmux register layout (per PIN_PINGROUP_ENTRY_Y):
+ *   bits[1:0]  PM       — special-function select (0..3 = SF1..SF4)
+ *   bits[3:2]  PUPD     — 0=none, 1=pull-down, 2=pull-up
+ *   bit[4]     TRISTATE — 1 = high-Z; must be 0 to drive output
+ *   bit[6]     E_INPUT  — 1 = input receiver enabled
+ *   bit[10]    GPIO_SFIO_SEL — 0 = GPIO mode, 1 = SFIO mode
+ * "GPIO mode, output drive, input receiver on" = 0x00000040.
+ *
+ * The MAIN pinmux at 0x02430000 lives in the 2 MB block at
+ * 0x02400000; the AON pinmux at 0x0C300000 lives in the 2 MB block
+ * at 0x0C200000 (same block as TEGRA234_GPIO_AON_BASE — already
+ * mapped). vmm.c's cam_bases[] array adds the MAIN pinmux block.
+ */
+#define TEGRA234_PINMUX_MAIN_BASE  0x02430000UL  /* main pinmux controller */
+#define TEGRA234_PINMUX_AON_BASE   0x0C300000UL  /* AON  pinmux controller */
+
+/*
+ * Per-pad pinmux register offsets for the IMX219-related pads (live
+ * verification on jetson-nano-1, sourced from pinctrl-tegra194.c).
+ * The pad names are misleading — these are conventional UART /
+ * SPI pad names that happen to also be routable to GPIO.
+ *
+ *   PH.06  → uart4_cts_ph6   off 0x4008 (MAIN)  → 0x02434008
+ *   PH.03  → uart4_tx_ph3    off 0x4020 (MAIN)  → 0x02434020
+ *   PCC.03 → spi2_cs0_pcc3   off 0x2038 (AON)   → 0x0C302038
+ *
+ * "PCC.03" is the AON GPIO referred to as "CC.3" in the i2c-mux DT
+ * binding — Linux's GPIO core renames PCC bits to CC.* for the AON
+ * controller's 0..32 line range.
+ *
+ * **Don't trust pinmux offsets from Tegra194 source for T234.** The
+ * pad table layout was reshuffled between T194 and T234; same pad
+ * names but different register offsets. These values come from
+ * `tegra234_groups[]` in `docs/reference/linux-pinctrl-tegra234.c`,
+ * not the T194 table.
+ */
+#define TEGRA234_PINMUX_CAM_RESET_OFF  0x4008u   /* PH.06 (within MAIN) */
+#define TEGRA234_PINMUX_CAM_PWR_OFF    0x4020u   /* PH.03 (within MAIN) */
+#define TEGRA234_PINMUX_CAM_MUX_OFF    0x2038u   /* PCC.03 (within AON) */
+
+/*
+ * Pinmux register bit values for "GPIO output mode" (bit 6 = E_INPUT
+ * for read-back; bit 10 = 0 = GPIO mode; bit 4 = 0 = drive enabled;
+ * PM/PUPD = 0 = no pull). 0x00000000 also works for pure output
+ * without input loopback; 0x40 is the safer default.
+ */
+#define TEGRA234_PINMUX_GPIO_OUTPUT    0x00000040u
+
+/*
+ * Per-pin window offsets for the three IMX219-related GPIOs on the
+ * Jetson Orin Nano dev kit (carrier `p3768-0000+p3767-0005`,
+ * verified live on jetson-nano-1 with the IMX219-A overlay loaded).
+ * Each offset is the address of the pin's ENABLE_CONFIG register
+ * relative to its controller base; the four register offsets above
+ * apply on top.
+ *
+ *   PH.06 (cam_reset_gpio, gpiochip0 line 49 / global 62):
+ *       releases the IMX219 from reset when driven HIGH.
+ *   PH.03 (camera-control-output-low, gpiochip0 line 46 / global 59):
+ *       enables the camera AVDD/DVDD/DOVDD regulator chain when
+ *       driven HIGH (active-high regulator-fixed compatible).
+ *   CC.3 (cam_i2cmux selector, gpiochip1 line 19):
+ *       selects which physical CSI connector (A/J17 vs C/J20) the
+ *       cam_i2c bus routes to. Linux's i2c-mux-gpio driver toggles
+ *       this per-transaction; SLM-OS pre-positions it to channel-0
+ *       (the connector with the camera attached).
+ *
+ * Address arithmetic example (PH.06):
+ *   bank=4 (port H is in bank 4), port=1 (within bank 4), pin=6
+ *   offset = 4*0x1000 + 1*0x200 + 6*0x20 = 0x42C0
+ *   ENABLE_CONFIG absolute = TEGRA234_GPIO_MAIN_BASE + 0x42C0
+ *                          = 0x02210000 + 0x42C0 = 0x022142C0
+ *   (the security-window address 0x02200000 + 0x42C0 reads back
+ *   as 0xFFFFFFFF — that mistake is what cost a deploy round.)
+ */
+#define TEGRA234_GPIO_CAM_RESET_OFF   0x42C0u    /* PH.06 ENABLE_CONFIG (within MAIN) */
+#define TEGRA234_GPIO_CAM_PWR_OFF     0x4260u    /* PH.03 ENABLE_CONFIG (within MAIN) */
+#define TEGRA234_GPIO_CAM_MUX_OFF     0x0460u    /* CC.3  ENABLE_CONFIG (within AON)  */
+
+/*
  * Spinlock policy: use the runtime `spinlock_hw_enabled` flag, same as Pi 5.
  *
  * Before MMU enable, memory is non-cacheable and LSE atomics (SWPALB) cause

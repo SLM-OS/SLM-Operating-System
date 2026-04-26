@@ -124,3 +124,19 @@ int tegra_i2c_read_reg16(struct tegra_i2c_bus *bus,
                          uint8_t  slave_7bit,
                          uint16_t reg,
                          uint8_t *out);
+
+/*
+ * Diagnostic register dump. Reads the controller's status registers
+ * (CNFG, FIFO_STATUS, INT_STATUS, packet status if available) into
+ * `out` as up to `n` u32 values labelled by `out_names[i]`. Used by
+ * the imx219 shell command when a CHIP_ID readback fails to give a
+ * post-mortem of what the controller observed.
+ */
+struct tegra_i2c_regdump_entry {
+    const char *name;
+    uint32_t    value;
+};
+
+void tegra_i2c_dump_status(struct tegra_i2c_bus *bus,
+                           struct tegra_i2c_regdump_entry *out,
+                           uint32_t n);

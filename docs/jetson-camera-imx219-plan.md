@@ -621,12 +621,37 @@ Phase 0 is GREEN; tasks are unblocked.
   teardown. The HSI2C driver itself is sound; what's missing is the
   GPIO + extperiph1 (XCLK) power-up sequence, which properly belongs
   to the IMX219 sensor driver below.
-- ☐ IMX219 sensor driver: `init` + `stream_on`, plus the GPIO +
-  extperiph1 power-up sequence the HSI2C driver above relies on for
-  end-to-end CHIP_ID verification. After this lands, the `imx219`
-  shell command should print `chip_id = 0x0219` end-to-end without
-  any Linux-side keepalive. Verify with a logic analyzer or the
-  carrier's CSI status that the sensor is producing HSYNC/VSYNC.
+- ✅ IMX219 sensor driver — see `kernel/include/imx219.h` and
+  `kernel/drivers/camera/imx219.c`. Full power-up sequence: enable
+  extperiph1 XCLK at 24 MHz via BPMP, force PH.06/PCC.03 pinmux to
+  GPIO mode, position cam_i2cmux for connector A (channel-0 = LOW),
+  release cam_reset (PH.06 HIGH), wait 6.2 ms, init HSI2C, read
+  CHIP_ID. Skips cam_pwr (PH.03) — Linux keeps it LOW even during
+  active streaming on this carrier so the camera rails are
+  always-on; driving it would risk an unrelated side effect.
+
+  Companion: `kernel/include/gpio_tegra.h` + `kernel/drivers/gpio/gpio_tegra.c`
+  (per-pin Tegra234 GPIO API + pinmux helper). `kernel/include/bpmp.h`
+  picked up `bpmp_clk_set_rate` for the 24 MHz XCLK programming.
+
+  **Verification status (jetson-nano-1, 2026-04-26)**: GREEN.
+  `imx219` shell command prints `chip_id = 0x0219` end-to-end after
+  kexec-from-Linux, with no Linux-side keepalive (the kexec helper
+  doesn't restart the IMX219 v4l2 driver). HSYNC/VSYNC verification
+  with a logic analyzer is deferred to Hardware Task 3 / 4 (NVCSI +
+  VI bring-up) where the sensor is actually streaming.
+
+  **What unlocked it**: `kernel/drivers/i2c/i2c_tegra.c` was using
+  the Tegra210-era legacy FIFO_CONTROL/STATUS at 0x05C/0x060 and the
+  0x19 std-mode clock divisor. Tegra194/234 inherits a different
+  register set: MST_FIFO_CONTROL/STATUS at 0x0B4/0x0B8, std-mode
+  divisor 0x4F, and a mandatory MSTR_CONFIG_LOAD write to
+  I2C_CONFIG_LOAD (0x08C) after every CNFG/timing change. Without
+  CONFIG_LOAD the controller's bus-timing FSM keeps running on stale
+  defaults — packets complete with PACKET_XFER_COMPLETE but the
+  slave's response byte never lands in RX_FIFO. See
+  `docs/jetson-camera-imx219-driver-notes.md` for the full bug
+  story so future Tegra register-set ports don't repeat it.
 - ☐🔗 Implement NVCSI receiver. Verify with internal counters that
   packets are arriving on the configured port.
 - ☐🔗 Implement VI single-shot capture. Verify by hashing the

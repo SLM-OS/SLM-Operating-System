@@ -41,27 +41,49 @@
 #define I2C_CNFG                 0x000u
 #define I2C_TX_FIFO              0x050u
 #define I2C_RX_FIFO              0x054u
-#define I2C_FIFO_CONTROL         0x05Cu
-#define I2C_FIFO_STATUS          0x060u
 #define I2C_INT_MASK             0x064u
 #define I2C_INT_STATUS           0x068u
 #define I2C_CLK_DIVISOR          0x06Cu
+/* Tegra194/234-only: MST_FIFO_* replaces the legacy FIFO_CONTROL/STATUS
+ * at 0x05C/0x060. The legacy registers exist but stay zeroed; using them
+ * leaves the controller in an unconfigured state where a READ packet
+ * completes (PACKET_XFER_COMPLETE fires) without the controller ever
+ * popping the slave's response byte into RX_FIFO. */
+#define I2C_CONFIG_LOAD          0x08Cu
+#define I2C_INTERFACE_TIMING_0   0x094u
+#define I2C_MST_FIFO_CONTROL     0x0B4u
+#define I2C_MST_FIFO_STATUS      0x0B8u
 
 /* I2C_CNFG bits */
 #define I2C_CNFG_PACKET_MODE_EN  (1u << 10)
 #define I2C_CNFG_NEW_MASTER_FSM  (1u << 11)
 #define I2C_CNFG_DEBOUNCE_CNT_2  (2u << 12)         /* DEBOUNCE_CNT field, 2 cycles */
 
-/* I2C_FIFO_CONTROL bits */
-#define I2C_FIFO_CTRL_RX_FLUSH   (1u << 0)
-#define I2C_FIFO_CTRL_TX_FLUSH   (1u << 1)
-#define I2C_FIFO_CTRL_TX_TRIG_8  ((8u - 1u) << 5)
-#define I2C_FIFO_CTRL_RX_TRIG_1  ((1u - 1u) << 2)
+/* I2C_MST_FIFO_CONTROL bits (T194/T234) */
+#define I2C_MST_FIFO_CTRL_RX_FLUSH   (1u << 0)
+#define I2C_MST_FIFO_CTRL_TX_FLUSH   (1u << 1)
+#define I2C_MST_FIFO_CTRL_RX_TRIG(x) (((x) - 1u) << 4)   /* bits[10:4] */
+#define I2C_MST_FIFO_CTRL_TX_TRIG(x) (((x) - 1u) << 16)  /* bits[22:16] */
 
-/* I2C_FIFO_STATUS field decode */
-#define I2C_FIFO_STATUS_RX_MASK  0x0Fu              /* bits[3:0]: RX byte count */
-#define I2C_FIFO_STATUS_TX_MASK  0xF0u              /* bits[7:4]: TX byte count */
-#define I2C_FIFO_STATUS_TX_SHIFT 4u
+/* I2C_MST_FIFO_STATUS layout (T194/T234) */
+#define I2C_MST_FIFO_STATUS_RX_MASK  0xFFu              /* bits[7:0]: RX byte count */
+#define I2C_MST_FIFO_STATUS_TX_MASK  0xFF0000u          /* bits[23:16]: TX free count */
+#define I2C_MST_FIFO_STATUS_TX_SHIFT 16u
+
+/* I2C_CONFIG_LOAD: write MSTR_CONFIG_LOAD, poll until cleared. Required
+ * after writing CNFG/CLK_DIVISOR/INTERFACE_TIMING_* on T194/T234 — the
+ * controller staging registers don't take effect otherwise. */
+#define I2C_MSTR_CONFIG_LOAD     (1u << 0)
+
+/* I2C_INTERFACE_TIMING_0 layout: TLOW in bits[5:0], THIGH in bits[13:8]. */
+#define I2C_INTERFACE_TIMING_TLOW_SHIFT   0u
+#define I2C_INTERFACE_TIMING_THIGH_SHIFT  8u
+
+/* Standard-mode (100 kHz) clock-divisor / interface-timing values from
+ * Linux's tegra194_i2c_hw struct (`docs/reference/linux-i2c-tegra.c`). */
+#define I2C_T194_CLK_DIVISOR_STD_MODE  0x4Fu
+#define I2C_T194_TLOW_STD_MODE         0x08u
+#define I2C_T194_THIGH_STD_MODE        0x07u
 
 /* I2C_INT_STATUS / INT_MASK bits */
 #define I2C_INT_RX_FIFO_DATA_REQ      (1u << 0)
@@ -90,14 +112,17 @@
 #define I2C_HEADER_READ              (1u << 19)
 #define I2C_HEADER_SLAVE_ADDR_SHIFT  1u             /* 7-bit addr in bits[7:1] */
 
-/* Standard-mode (100 kHz) clock divisor for tegra194-i2c on Tegra234.
- * Empirical from the i2c-tegra mode tables: tlow=4, thigh=2, divisor 0x19
- * = 25, gives ~100 kHz from a ~136 MHz functional clock. The exact rate
- * isn't critical for IMX219 (sensor accepts 100-400 kHz); we just need a
- * sane non-zero value. STD_FAST_MODE goes in bits[31:16], HSMODE in
- * bits[15:0] (HS unused → 1). */
+/* Standard-mode clock-divisor word: STD_FAST_MODE goes in bits[31:16],
+ * HSMODE in bits[15:0]. Tegra194/234 standard-mode value is 0x4F (≈ 80);
+ * the older 0x19 (Tegra210 generation) leaves bus timing too fast for
+ * the controller's internal load-config to settle, so packet completion
+ * fires before the slave's response byte is captured into RX_FIFO. */
 #define I2C_CLK_DIVISOR_VALUE \
-    (((uint32_t)0x19u << 16) | 1u)
+    (((uint32_t)I2C_T194_CLK_DIVISOR_STD_MODE << 16) | 1u)
+
+#define I2C_INTERFACE_TIMING_VALUE \
+    (((uint32_t)I2C_T194_THIGH_STD_MODE << I2C_INTERFACE_TIMING_THIGH_SHIFT) \
+   | ((uint32_t)I2C_T194_TLOW_STD_MODE  << I2C_INTERFACE_TIMING_TLOW_SHIFT))
 
 #define POLL_TIMEOUT_US  100000u                    /* 100 ms — generous */
 
@@ -162,12 +187,29 @@ static int wait_until_set(struct tegra_i2c_bus *bus, uint32_t off,
 
 static int flush_fifos(struct tegra_i2c_bus *bus)
 {
-    i2c_write(bus, I2C_FIFO_CONTROL,
-              I2C_FIFO_CTRL_TX_FLUSH | I2C_FIFO_CTRL_RX_FLUSH
-              | I2C_FIFO_CTRL_TX_TRIG_8 | I2C_FIFO_CTRL_RX_TRIG_1);
-    return wait_until_clear(bus, I2C_FIFO_CONTROL,
-                            I2C_FIFO_CTRL_TX_FLUSH | I2C_FIFO_CTRL_RX_FLUSH,
+    /* Read-modify-write so we don't clobber TX_TRIG/RX_TRIG that
+     * tegra_i2c_init has already programmed. The flush bits are
+     * write-1-to-trigger, hardware-cleared when the flush completes. */
+    uint32_t v = i2c_read(bus, I2C_MST_FIFO_CONTROL);
+    v |= I2C_MST_FIFO_CTRL_TX_FLUSH | I2C_MST_FIFO_CTRL_RX_FLUSH;
+    i2c_write(bus, I2C_MST_FIFO_CONTROL, v);
+    return wait_until_clear(bus, I2C_MST_FIFO_CONTROL,
+                            I2C_MST_FIFO_CTRL_TX_FLUSH
+                          | I2C_MST_FIFO_CTRL_RX_FLUSH,
                             10000u);   /* 10 ms */
+}
+
+/* Tegra194/234: writes to I2C_CNFG / I2C_CLK_DIVISOR / I2C_INTERFACE_TIMING_*
+ * land in staging registers and don't take effect until MSTR_CONFIG_LOAD
+ * is written and self-clears. Skipping this is the bug that caused
+ * IMX219 reads to complete with PACKET_XFER_COMPLETE but RX_FIFO empty —
+ * the controller's bus-timing FSM was running on stale (zero) defaults. */
+static int wait_for_config_load(struct tegra_i2c_bus *bus)
+{
+    i2c_write(bus, I2C_CONFIG_LOAD, I2C_MSTR_CONFIG_LOAD);
+    return wait_until_clear(bus, I2C_CONFIG_LOAD,
+                            I2C_MSTR_CONFIG_LOAD,
+                            1000000u);  /* 1 s, matches Linux */
 }
 
 int tegra_i2c_init(struct tegra_i2c_bus *bus)
@@ -203,12 +245,32 @@ int tegra_i2c_init(struct tegra_i2c_bus *bus)
 
     i2c_write(bus, I2C_CLK_DIVISOR, I2C_CLK_DIVISOR_VALUE);
 
+    /* T194/T234 needs the interface-timing register written explicitly;
+     * the chip default is 0 which produces an invalid bus-timing FSM. */
+    i2c_write(bus, I2C_INTERFACE_TIMING_0, I2C_INTERFACE_TIMING_VALUE);
+
+    /* Program MST_FIFO trigger thresholds before issuing the flush —
+     * flush_fifos() does an RMW that preserves these. RX_TRIG=1 fires
+     * RX_FIFO_DATA_REQ as soon as one byte lands; TX_TRIG=8 fires
+     * TX_FIFO_DATA_REQ when ≥ 8 slots are free. */
+    i2c_write(bus, I2C_MST_FIFO_CONTROL,
+              I2C_MST_FIFO_CTRL_RX_TRIG(1) | I2C_MST_FIFO_CTRL_TX_TRIG(8));
+
     /* Clear any latched interrupt status (write-1-to-clear semantics). */
     i2c_write(bus, I2C_INT_STATUS, 0xFFFFFFFFu);
 
     int flush_rc = flush_fifos(bus);
+    if (flush_rc != 0) {
+        spin_unlock_irqrestore(&bus->lock, flags);
+        return -4;
+    }
+
+    /* Commit the staging-register writes above. Without this, the
+     * controller continues to run on whatever Linux (or the chip
+     * default) had loaded, and our timing/divisor values are ignored. */
+    int load_rc = wait_for_config_load(bus);
     spin_unlock_irqrestore(&bus->lock, flags);
-    return flush_rc != 0 ? -4 : 0;
+    return load_rc != 0 ? -4 : 0;
 }
 
 /* ---- Packet-mode transfer engine ---- */
@@ -303,8 +365,8 @@ static int xfer_read(struct tegra_i2c_bus *bus, uint8_t slave,
 
     /* RX FIFO has the response bytes packed LE in u32 words. We
      * always read exactly one word here because len ≤ 4. */
-    uint32_t fs = i2c_read(bus, I2C_FIFO_STATUS);
-    uint32_t rx_count = fs & I2C_FIFO_STATUS_RX_MASK;
+    uint32_t fs = i2c_read(bus, I2C_MST_FIFO_STATUS);
+    uint32_t rx_count = fs & I2C_MST_FIFO_STATUS_RX_MASK;
     if (rx_count == 0u) return -5;
 
     uint32_t w = i2c_read(bus, I2C_RX_FIFO);
@@ -346,6 +408,36 @@ int tegra_i2c_read_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
     return rc;
 }
 
+/* Live snapshot of the controller's status registers. No locking — the
+ * caller is expected to be the failure-path diagnostic in the IMX219
+ * shell command, single-CPU shell context, with the controller idle
+ * after a returned error. */
+void tegra_i2c_dump_status(struct tegra_i2c_bus *bus,
+                           struct tegra_i2c_regdump_entry *out, uint32_t n)
+{
+    static const struct {
+        const char *name;
+        uint32_t    off;
+    } regs[] = {
+        { "CNFG",            0x000 },
+        { "STATUS",          0x01C },  /* I2C controller bus state */
+        { "INT_STATUS",      0x068 },
+        { "CLK_DIVISOR",     0x06C },
+        { "CONFIG_LOAD",     0x08C },
+        { "INTERFACE_TIM_0", 0x094 },
+        { "MST_FIFO_CTRL",   0x0B4 },
+        { "MST_FIFO_STAT",   0x0B8 },
+        { "FIFO_STATUS",     0x060 },  /* legacy view, useful for diff */
+        { "INT_MASK",        0x064 },
+    };
+    uint32_t cap = (uint32_t)(sizeof(regs) / sizeof(regs[0]));
+    if (n > cap) n = cap;
+    for (uint32_t i = 0; i < n; i++) {
+        out[i].name  = regs[i].name;
+        out[i].value = i2c_read(bus, regs[i].off);
+    }
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO — stubs for cross-platform builds */
 
 /* No bus instance on non-Jetson; declare a placeholder so test files
@@ -366,5 +458,9 @@ int tegra_i2c_write_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
 int tegra_i2c_read_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
                          uint16_t reg, uint8_t *out)
 { (void)bus; (void)slave; (void)reg; (void)out; return -1; }
+
+void tegra_i2c_dump_status(struct tegra_i2c_bus *bus,
+                           struct tegra_i2c_regdump_entry *out, uint32_t n)
+{ (void)bus; (void)out; (void)n; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */
