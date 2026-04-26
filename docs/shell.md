@@ -25,51 +25,116 @@ The industrial IoT deployment doesn't involve humans typing commands, so this is
 
 ## Commands
 
+`help` (no argument) groups commands by category and alphabetizes
+within each category. Empty categories (e.g. `Network` on a build
+without `ENABLE_NETWORKING`) are skipped. Categories are defined by
+`shell_cmd_category_t` in `kernel/include/shell.h`; the order they
+appear here matches the enum order. The source-side
+`builtin_commands[]` array is also kept grouped + alphabetized so
+"where is command X registered" and "where does X show up in `help`"
+give the same answer; the regression test
+`test_builtin_commands_grouped_and_sorted` enforces that invariant.
+
 ```
 SLM-OS> help
 Available commands:
-  help      - List available commands
-  mem       - Show memory statistics
-  tasks     - List all tasks
-  cpu       - Show CPU status
-  uptime    - Show system uptime
-  vmm       - Show virtual memory info
-  ipc       - Show IPC statistics
-  model     - Model management (load/unload/info/list/gpu/pools/stats/bench)
-  dtb       - Show device tree info
-  elftest   - Test ELF loader
-  run       - Run a program (run <name>)
-  kill      - Terminate a task by ID
-  ls        - List directory (ls [path])
-  cd        - Change directory (cd [path])
-  pwd       - Print working directory
-  cat       - Show file contents (cat <path> [offset] [length])
-  write     - Write to file (write <path> <content>)
-  mkdir     - Create directory (mkdir <path>)
-  rm        - Remove file/dir (rm <path>)
-  mv        - Move/rename (mv <src> <dst>)
-  df        - Filesystem stats (df [path])
-  truncate  - Truncate file (truncate <path> <size>)
-  append    - Append to file (append <path> <content>)
-  cp        - Copy file (cp <src> <dst>)
-  touch     - Create empty file (touch <path>)
-  stat      - Show file info (stat <path>)
-  tree      - Recursive directory listing (tree [path])
-  wc        - Count lines/words/bytes (wc <path>)
-  hexdump   - Hex dump file (hexdump <path> [offset] [len])
-  grep      - Search in file (grep <pattern> <path>)
-  find      - Find files (find <path> <pattern>)
-  component - Component system (list/run/swap/register/status)
-  msg       - Message router (send/list/subscribe)
-  net       - Network control (init/status)
-  ping      - Send ICMP echo request
-  ifconfig  - Network interface config
-  netstat   - Network statistics
-  sched     - Scheduler policy management and stats
-  lua       - Lua scripting (REPL, -e "code", or script file)
-  clear     - Clear screen
-  reboot    - Restart the system
+
+Shell:
+  clear        Clear screen
+  help         List available commands
+  reboot       Restart the system
+
+Filesystem:
+  append       Append to file (append <path> <content>)
+  cat          Show file contents (cat <path>)
+  cd           Change directory (cd [path])
+  cp           Copy file (cp <src> <dst>)
+  df           Filesystem stats (df [path])
+  find         Find files (find <path> <pattern>)
+  grep         Search in file (grep <pattern> <path>)
+  hexdump      Hex dump file (hexdump <path> [offset] [len])
+  ls           List directory (ls [path])
+  mkdir        Create directory (mkdir <path>)
+  mv           Move/rename (mv <src> <dst>)
+  put          Write binary hex to file (put [-a] <path> <hex>)
+  pwd          Print working directory
+  rm           Remove file/dir (rm <path>)
+  stat         Show file info (stat <path>)
+  touch        Create empty file (touch <path>)
+  tree         Recursive directory listing (tree [path])
+  truncate     Truncate file (truncate <path> <size>)
+  wc           Count lines/words/bytes (wc <path>)
+  write        Write to file (write <path> <content>)
+  xput         Framed upload (xput begin|chunk|status|finish|abort)
+
+System info:
+  cpu          Show CPU status
+  dtb          Show device tree info
+  ipc          Show IPC statistics
+  mem          Show memory statistics
+  top          Live dashboard (top [-n <iter>] [refresh_secs])
+  uptime       Show system uptime
+  vmm          Show virtual memory info
+
+Processes & scheduling:
+  bench        Performance benchmarks (bench <context|irq|ipc|stats|all>)
+  eviction     AI eviction (eviction [policy [<name>] | stats])
+  kill         Terminate a task by ID
+  model        Model management (load/list/info/unload/pools)
+  sched        Scheduler (sched [policy [<name>] | model ... | stats])
+  sleep        Sleep for N ms (sleep <ms>)
+  tasks        List all tasks
+
+Components & messaging:
+  component    Component system (list/register/status)
+  msg          Message router (send/list/subscribe)
+
+Scripting & programs:
+  elftest      Test ELF loader
+  lua          Lua scripting (concurrent-safe REPL or script)
+  lua-admin    Lua scripting with global admin bindings
+  run          Run a program (run <name>)
+
+Network:                              # only when ENABLE_NETWORKING=ON
+  http         HTTP client (get <url> <dest>)
+  ifconfig     Network interface config
+  net          Network control (init/status)
+  netstat      Network statistics
+  ping         Send ICMP echo request
+  tcpsh        Alias for telnetd (legacy name)
+  telnetd      Telnet shell daemon (start|stop|status|sessions|kick)
+
+Hardware control & diagnostics:       # mix of always-available + platform-gated
+  bpmp         BPMP IPC smoke test (Jetson only)
+  diag         Pi 5 IRQ-delivery diagnostics (PI5_IRQ_DIAG only)
+  gpu          Show GPU info (non-x86); see also nvidia_gpu_register on x86-64
+  hailo        Hailo NPU control
+  hspdiag      HSP/BPMP doorbell probe (Jetson only)
+  kernel       Manage staged / active boot kernel
+  macbdiag     MACB IRQ delivery diagnostic (Pi 5 + networking)
+  nvgpu        Jetson nvgpu bringup (Jetson only)
+  pcietrain    Tegra PCIe C8 host init + link train (Jetson only)
+  peek         Read physical memory
+  poke         Write 32-bit word
+  rtldiag      RTL8168 PCIe probe (Jetson + networking)
+  timdiag      Timer/interrupt delivery diagnostic (non-x86)
+  xhci         Tegra XHCI controller info (Jetson only)
+  xhcidiag     Tegra XHCI CBB-at-EL2 probe (Jetson + networking)
 ```
+
+### Adding a new command
+
+1. Pick the right category from `shell_cmd_category_t` in
+   `kernel/include/shell.h`.
+2. Add the entry to the appropriate block in `builtin_commands[]`
+   (kernel/src/shell.c) in alphabetical order. `#if`-gated entries
+   are interleaved by name like everything else.
+3. Set `category = SHELL_CAT_<...>` in the struct literal. The
+   regression test `test_builtin_commands_grouped_and_sorted` will
+   fail at the next `make test` if the layout is wrong.
+4. External commands (registered via `shell_register_command` from
+   net/lua/hailo/kernel/etc.) follow the same convention — set the
+   `category` field on each `shell_cmd_t` literal.
 
 ### Command Descriptions
 
@@ -145,14 +210,21 @@ Available commands:
 
 The `help` command has two modes:
 
-**List all commands:**
+**List all commands** (grouped by category, alphabetized within each
+group — see the [Commands](#commands) section above for the full
+output):
 ```
 SLM-OS> help
 Available commands:
 
-  help       List available commands
-  mem        Show memory statistics
-  tasks      List all tasks
+Shell:
+  clear        Clear screen
+  help         List available commands
+  reboot       Restart the system
+
+Filesystem:
+  append       Append to file (append <path> <content>)
+  cat          Show file contents (cat <path>)
   ...
 
 Use 'help <cmd>' for detailed help on a command.
@@ -786,23 +858,37 @@ they always reach the physical console.
 
 ### Command Dispatch
 
-Table-driven dispatch with a `.mutates` flag. Mutating commands are
+Table-driven dispatch with a `.mutates` flag (mutating commands are
 serialized with a priority-inheriting mutex so TCP clients can't race
-each other's global-state changes:
+each other's global-state changes) and a `.category` field that drives
+the `help` output grouping:
 
 ```c
 static const shell_cmd_t builtin_commands[] = {
-    {"help",   cmd_help,   "List available commands", false},  /* read-only */
-    {"mem",    cmd_mem,    "Show memory statistics",  false},
-    {"run",    cmd_run,    "Run a program (run <name>)", true},  /* mutates task set */
-    {"sched",  cmd_sched,  "Scheduler (...)",           true},  /* mutates active policy */
-    ...
+    /* --- Shell session --- */
+    {"clear",  cmd_clear,  "Clear screen",            false, SHELL_CAT_SHELL},
+    {"help",   cmd_help,   "List available commands", false, SHELL_CAT_SHELL},
+    {"reboot", cmd_reboot, "Restart the system",      true,  SHELL_CAT_SHELL},
+
+    /* --- Filesystem (alphabetized) --- */
+    {"append", cmd_append, "Append to file ...",      false, SHELL_CAT_FILESYSTEM},
+    {"cat",    cmd_cat,    "Show file contents ...",  false, SHELL_CAT_FILESYSTEM},
+    /* ... */
+
+    /* --- Hardware control & diagnostics (with #if-gates inline) --- */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    {"bpmp",   cmd_bpmp,   "BPMP IPC smoke test ...", false, SHELL_CAT_HARDWARE},
+#endif
+    {"peek",   cmd_peek,   "Read physical memory",    false, SHELL_CAT_HARDWARE},
+    {"poke",   cmd_poke,   "Write 32-bit word",       true,  SHELL_CAT_HARDWARE},
+    /* ... */
 };
 ```
 
-`shell_register_command()` is still supported for runtime
-registration (net, pci, gpu, lua); the caller sets `.mutates`
-appropriately.
+`shell_register_command()` is still supported for runtime registration
+(net, pci, gpu, lua, hailo, kernel); the caller sets `.mutates` and
+`.category` appropriately. See `kernel/include/shell.h` for the full
+`shell_cmd_category_t` enum.
 
 ---
 

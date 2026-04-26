@@ -512,7 +512,7 @@ static const shell_cmd_t kernel_commands[] = {
      * negligible for an admin command. */
     { "kernel", cmd_kernel,
       "Manage staged / active boot kernel (status/stage/activate/promote/rollback)",
-      true },
+      true, SHELL_CAT_HARDWARE },
 };
 
 void kernel_cmd_register_shell(void)

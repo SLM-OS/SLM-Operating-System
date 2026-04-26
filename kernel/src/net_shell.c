@@ -525,14 +525,16 @@ static int cmd_telnetd(int argc, char *argv[])
  * and dispatches through the same handler as `telnetd`; the handler
  * uses argv[0] for its "Usage:" / status prefix so either name
  * produces self-consistent output. */
+/* Convention (see kernel/src/shell.c): grouped by category, alphabetized
+ * within. All entries are NETWORK. */
 static const shell_cmd_t net_commands[] = {
-    {"net",      cmd_net,      "Network control (init/status)",              true},
-    {"ping",     cmd_ping,     "Send ICMP echo request",                     true},
-    {"ifconfig", cmd_ifconfig, "Network interface config",                   true},
-    {"netstat",  cmd_netstat,  "Network statistics",                         false},
-    {"http",     cmd_http,     "HTTP client (get <url> <dest>)",             true},
-    {"telnetd",  cmd_telnetd,  "Telnet shell daemon (start|stop|status|sessions|kick)", true},
-    {"tcpsh",    cmd_telnetd,  "Alias for telnetd (legacy name)",            true},
+    {"http",     cmd_http,     "HTTP client (get <url> <dest>)",                       true,  SHELL_CAT_NETWORK},
+    {"ifconfig", cmd_ifconfig, "Network interface config",                             true,  SHELL_CAT_NETWORK},
+    {"net",      cmd_net,      "Network control (init/status)",                        true,  SHELL_CAT_NETWORK},
+    {"netstat",  cmd_netstat,  "Network statistics",                                   false, SHELL_CAT_NETWORK},
+    {"ping",     cmd_ping,     "Send ICMP echo request",                               true,  SHELL_CAT_NETWORK},
+    {"tcpsh",    cmd_telnetd,  "Alias for telnetd (legacy name)",                      true,  SHELL_CAT_NETWORK},
+    {"telnetd",  cmd_telnetd,  "Telnet shell daemon (start|stop|status|sessions|kick)", true,  SHELL_CAT_NETWORK},
 };
 
 /**

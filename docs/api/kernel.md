@@ -657,7 +657,7 @@ Send a null-terminated string. Synchronized. Converts `\n` to `\r\n`.
 ```c
 int uart_printf(const char *fmt, ...);
 ```
-Formatted output (synchronized). Supports `%c`, `%s`, `%d`, `%u`, `%x`, `%X`, `%p`, `%l` modifier, `%%`.
+Formatted output (synchronized). Supports `%c`, `%s`, `%d`/`%i`, `%u`, `%x`/`%X`, `%p`, `%%`. Length modifiers: `%l` and `%ll` (both treated as 64-bit on the kernel targets — `long` and `long long` are 64-bit on aarch64-elf and x86_64-elf), and `%z` for `size_t`. Width and zero-pad flags are supported (e.g. `%016llx`, `%-12s`).
 
 ```c
 int uart_snprintf(char *buf, size_t size, const char *fmt, ...);

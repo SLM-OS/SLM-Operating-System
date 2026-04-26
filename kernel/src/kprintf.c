@@ -354,10 +354,24 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
             fmt++;
         }
 
-        /* Parse length modifier */
-        int is_long = 0;
+        /* Parse length modifier. Accept one *or two* 'l's so that %llu /
+         * %lld / %llx parse as 64-bit (and don't fall through to the
+         * default-case "print literally" path, which previously made
+         * `netstat` and other %llu callers print "%lu" + "lu" verbatim).
+         * On both kernel targets (aarch64-elf, x86_64-elf) `long` and
+         * `long long` are 64-bit, so collapsing them is correct.
+         * `z` accepts size_t for the same reason.
+         *
+         * The flag is named for what it controls — extracting a 64-bit
+         * va_arg — rather than the literal `l` modifier, because three
+         * paths (%l, %ll, %z) feed into it. */
+        int arg_is_64bit = 0;
         if (*fmt == 'l') {
-            is_long = 1;
+            arg_is_64bit = 1;
+            fmt++;
+            if (*fmt == 'l') fmt++;  /* consume the second l of `%ll<spec>` */
+        } else if (*fmt == 'z') {
+            arg_is_64bit = (sizeof(size_t) == sizeof(uint64_t));
             fmt++;
         }
 
@@ -376,7 +390,7 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
 
         case 'd':
         case 'i':
-            if (is_long) {
+            if (arg_is_64bit) {
                 fmt_signed_width(out, va_arg(args, int64_t), 10, width,
                                  left_justify, zero_pad);
             } else {
@@ -386,7 +400,7 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
             break;
 
         case 'u':
-            if (is_long) {
+            if (arg_is_64bit) {
                 fmt_unsigned_width(out, va_arg(args, uint64_t), 10, 0,
                                    width, left_justify, zero_pad);
             } else {
@@ -396,7 +410,7 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
             break;
 
         case 'x':
-            if (is_long) {
+            if (arg_is_64bit) {
                 fmt_unsigned_width(out, va_arg(args, uint64_t), 16, 0,
                                    width, left_justify, zero_pad);
             } else {
@@ -406,7 +420,7 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
             break;
 
         case 'X':
-            if (is_long) {
+            if (arg_is_64bit) {
                 fmt_unsigned_width(out, va_arg(args, uint64_t), 16, 1,
                                    width, left_justify, zero_pad);
             } else {

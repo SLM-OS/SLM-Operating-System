@@ -23,23 +23,57 @@
 typedef int (*shell_handler_t)(int argc, char *argv[]);
 
 /*
+ * Command category — drives the grouping in `help` output.
+ *
+ * Pick the closest fit when adding a new command. Order of values
+ * here is also the order categories appear in `help`. cmd_help
+ * sorts entries alphabetically *within* each category, so the order
+ * of registration does not matter — pick any spot in the per-category
+ * block of builtin_commands[] / external_commands[].
+ */
+typedef enum {
+    SHELL_CAT_SHELL,        /* Shell session control: clear, help, reboot */
+    SHELL_CAT_FILESYSTEM,   /* File / directory ops: ls, cd, cat, write, ... */
+    SHELL_CAT_SYSINFO,      /* Read-only system info: mem, cpu, uptime, ... */
+    SHELL_CAT_PROCESS,      /* Tasks, scheduling, benchmarks, AI runtime */
+    SHELL_CAT_COMPONENTS,   /* Component lifecycle + IPC: component, msg */
+    SHELL_CAT_SCRIPTING,    /* Lua, ELF programs */
+    SHELL_CAT_NETWORK,      /* TCP/IP stack and apps: net, ping, http, ... */
+    SHELL_CAT_HARDWARE,     /* Device control + diagnostics: peek, gpu, ... */
+    SHELL_CAT_COUNT,        /* Sentinel: number of real categories */
+} shell_cmd_category_t;
+
+/*
  * Command definition.
  *
- * A command is `mutates = true` if any of its subcommands modify
- * global kernel state that lacks its own lock (task lifecycle,
- * active scheduler / eviction policy, component registry, network
- * config). Such commands are serialized by the dispatcher so that
- * two concurrent shell sessions cannot race each other's mutations.
+ * `mutates = true` if any of the command's subcommands modify global
+ * kernel state that lacks its own lock (task lifecycle, active
+ * scheduler / eviction policy, component registry, network config).
+ * Such commands are serialized by the dispatcher so two concurrent
+ * shell sessions cannot race each other's mutations. Read-only
+ * commands and commands that mutate through an already-locked
+ * subsystem (VFS, PMM, etc.) are `mutates = false` and bypass the
+ * lock.
  *
- * Read-only commands and commands that mutate through an already-
- * locked subsystem (VFS, PMM, etc.) are `mutates = false` so they
- * pass through without contention.
+ * `category` controls grouping in `help`. See shell_cmd_category_t
+ * above. cmd_help groups by category and alphabetizes within each
+ * group, so the array does not need to be sorted at registration
+ * time — but the convention enforced by the comment block above
+ * builtin_commands[] in shell.c is to keep the array grouped +
+ * alphabetized too, so a human reading the registration list sees
+ * the same ordering as the help output.
  */
 typedef struct {
-    const char *name;           /* Command name */
-    shell_handler_t handler;    /* Handler function */
-    const char *help;           /* Short help text */
-    bool mutates;               /* True if serialization is required */
+    const char *name;                   /* Command name */
+    shell_handler_t handler;            /* Handler function */
+    const char *help;                   /* Short help text */
+    bool mutates;                       /* True if serialization required */
+    /* REQUIRED — explicit `.category = SHELL_CAT_<X>` is mandatory.
+     * A 4-field positional initializer or designated init that omits
+     * .category will silently zero-init this to SHELL_CAT_SHELL (the
+     * first enum value) and the command will appear under the Shell
+     * heading in `help` regardless of where it actually belongs. */
+    shell_cmd_category_t category;      /* Grouping for `help` output */
 } shell_cmd_t;
 
 /*

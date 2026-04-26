@@ -478,6 +478,7 @@ static const shell_cmd_t pci_cmd = {
     .handler = cmd_pci,
     .help = "List PCI/PCIe devices",
     .mutates = false,
+    .category = SHELL_CAT_HARDWARE,
 };
 
 void pci_register_shell_commands(void)

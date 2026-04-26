@@ -23,6 +23,15 @@
  * build command strings for shell_execute. */
 extern int snprintf(char *, size_t, const char *, ...);
 
+/* Defined in kernel/src/shell.c. Used by the help-output convention tests
+ * (test_builtin_commands_grouped_and_sorted +
+ * test_external_commands_categories_in_range) to walk the source-side
+ * registration table and the runtime-registered external table. */
+extern const shell_cmd_t builtin_commands[];
+extern const int NUM_BUILTIN_COMMANDS;
+extern shell_cmd_t external_commands[];
+extern int num_external_commands;
+
 /* ============================================================================
  * Test Helpers
  * ============================================================================ */
@@ -1464,7 +1473,8 @@ static void test_shell_register_external_command(void)
     shell_cmd_t cmd = {
         .name = "testcmd",
         .handler = custom_cmd_handler,
-        .help = "Test command"
+        .help = "Test command",
+        .category = SHELL_CAT_SHELL,  /* test fixture; category irrelevant */
     };
 
     int ret = shell_register_command(&cmd);
@@ -2342,6 +2352,93 @@ static void test_shell_cmd_help_unknown(void)
 }
 
 /*
+ * Convention test: builtin_commands[] must be grouped by category and
+ * alphabetized within each group. This pins the source-side rule
+ * documented in the comment block over `builtin_commands[]` in
+ * kernel/src/shell.c.
+ *
+ * Why source-invariant (not just trust the runtime sort)?
+ *   - cmd_help re-sorts at runtime, so even a jumbled source produces
+ *     correct output. But the convention has a second purpose: a
+ *     human reading the registration list sees the same ordering as
+ *     the help output. This test catches drift where someone adds a
+ *     command to the wrong category block, or out of alphabetical
+ *     order, before that drift becomes a maintenance hazard.
+ *   - The runtime sort uses the same comparator, so by construction
+ *     "source is grouped+sorted" implies "runtime output is too".
+ */
+static void test_builtin_commands_grouped_and_sorted(void)
+{
+    /* Track which categories we've already seen close (i.e. the run
+     * of entries with that category has ended and a new category
+     * started). Re-encountering a closed category means entries are
+     * not contiguous. */
+    bool seen_closed[SHELL_CAT_COUNT] = {false};
+    shell_cmd_category_t prev_cat = (shell_cmd_category_t)-1;
+    const char *prev_name_in_cat = NULL;
+
+    for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
+        const shell_cmd_t *cmd = &builtin_commands[i];
+
+        /* Category must be in valid range. */
+        TEST_ASSERT_MESSAGE((unsigned)cmd->category < SHELL_CAT_COUNT,
+                            "category out of range");
+
+        if ((shell_cmd_category_t)cmd->category != prev_cat) {
+            /* Starting a new category. Must not have seen its
+             * "closed" mark — that would mean an interleaved entry. */
+            TEST_ASSERT_MESSAGE(!seen_closed[cmd->category],
+                "category run not contiguous in builtin_commands[] — "
+                "every category's entries must be in one block");
+
+            /* Mark the previous category closed (if there was one). */
+            if ((int)prev_cat >= 0) {
+                seen_closed[prev_cat] = true;
+            }
+            prev_cat = (shell_cmd_category_t)cmd->category;
+            prev_name_in_cat = NULL;
+        }
+
+        /* Within a category, names must be in strict ascending order. */
+        if (prev_name_in_cat != NULL) {
+            int cmp = unity_strcmp(prev_name_in_cat, cmd->name);
+            TEST_ASSERT_MESSAGE(cmp < 0,
+                "entries within a category must be alphabetized");
+        }
+        prev_name_in_cat = cmd->name;
+    }
+}
+
+/*
+ * Convention test (externals): every shell_register_command() entry
+ * must have a `.category` value in the valid range.
+ *
+ * Why range-only (not grouping + alphabetization)?
+ *   - external_commands[] is a single flat array filled by
+ *     shell_register_command() calls scattered across many .c files
+ *     (lua_shell.c, net_shell.c, kernel_cmd.c, hailo_shell.c, ...).
+ *     Source-array provenance is lost at flatten time, so the
+ *     "grouped by category, alphabetized within" rule that applies
+ *     within each per-file array is not observable here.
+ *   - The thing this test does catch is the partial-init foot-gun:
+ *     a `shell_cmd_t` literal that omits `.category` zero-initialises
+ *     it to SHELL_CAT_SHELL. The struct-level comment in shell.h
+ *     warns about it; this test fires when the warning is missed and
+ *     a forgotten field ends up out of range (e.g. set to SHELL_CAT_COUNT
+ *     by a typo).
+ */
+static void test_external_commands_categories_in_range(void)
+{
+    for (int i = 0; i < num_external_commands; i++) {
+        const shell_cmd_t *cmd = &external_commands[i];
+        TEST_ASSERT_MESSAGE((unsigned)cmd->category < SHELL_CAT_COUNT,
+                            "external command category out of range — "
+                            "every shell_register_command() entry must "
+                            "set .category to a SHELL_CAT_* enum value");
+    }
+}
+
+/*
  * Test: help files exist in /mnt/files/help/ directory.
  */
 static void test_shell_help_files_exist(void)
@@ -3031,6 +3128,64 @@ static void test_kprintf_long(void)
     TEST_ASSERT_EQUAL_STRING("4294967296", buf);
 }
 
+/* Regression: %llu / %lld / %llx must format as 64-bit, not print "%l..."
+ * literally. Pre-fix kprintf only consumed one 'l', so the second 'l'
+ * fell into the default case and emitted "%l" + "u" -> "%lu" verbatim
+ * (#netstat output bug, kprintf.c length-modifier loop). */
+static void test_kprintf_long_long(void)
+{
+    char buf[64];
+    uart_snprintf(buf, sizeof(buf), "%llu", (unsigned long long)4294967296ULL);
+    TEST_ASSERT_EQUAL_STRING("4294967296", buf);
+    uart_snprintf(buf, sizeof(buf), "%lld", (long long)-9000000001LL);
+    TEST_ASSERT_EQUAL_STRING("-9000000001", buf);
+    uart_snprintf(buf, sizeof(buf), "%llx", (unsigned long long)0xDEADBEEFCAFEULL);
+    TEST_ASSERT_EQUAL_STRING("deadbeefcafe", buf);
+    /* The original failing pattern from the netstat report. */
+    uart_snprintf(buf, sizeof(buf),
+                  "RX packets: %llu  bytes: %llu",
+                  (unsigned long long)42, (unsigned long long)6048);
+    TEST_ASSERT_EQUAL_STRING("RX packets: 42  bytes: 6048", buf);
+}
+
+/* Edge cases on top of the basic %ll fix: width modifiers, multiple
+ * %ll specifiers in one format string, mix with %d / %s. */
+static void test_kprintf_long_long_edge_cases(void)
+{
+    char buf[128];
+    /* Width on %llu — used by `top` / status displays. */
+    uart_snprintf(buf, sizeof(buf), "%12llu", (unsigned long long)123ULL);
+    TEST_ASSERT_EQUAL_STRING("         123", buf);
+    /* Zero-pad. */
+    uart_snprintf(buf, sizeof(buf), "%016llx",
+                  (unsigned long long)0xCAFEBABEULL);
+    TEST_ASSERT_EQUAL_STRING("00000000cafebabe", buf);
+    /* Multiple %llu in one format — exercises the parser state reset. */
+    uart_snprintf(buf, sizeof(buf), "%llu/%llu/%llu",
+                  (unsigned long long)1ULL,
+                  (unsigned long long)2ULL,
+                  (unsigned long long)3ULL);
+    TEST_ASSERT_EQUAL_STRING("1/2/3", buf);
+    /* Mix of widths: %d (32-bit), %llu (64-bit), %s. */
+    uart_snprintf(buf, sizeof(buf),
+                  "[%s] count=%d total=%llu",
+                  "INFO", 17, (unsigned long long)9000000000ULL);
+    TEST_ASSERT_EQUAL_STRING("[INFO] count=17 total=9000000000", buf);
+}
+
+/* %z (size_t) was added alongside the %ll fix in the same length-modifier
+ * loop. Pin its behaviour separately so a future regression is obvious. */
+static void test_kprintf_size_t(void)
+{
+    char buf[64];
+    uart_snprintf(buf, sizeof(buf), "%zu", (size_t)123456);
+    TEST_ASSERT_EQUAL_STRING("123456", buf);
+    /* size_t is 64-bit on the kernel targets; check a value that
+     * doesn't fit in 32-bit unsigned. */
+    uart_snprintf(buf, sizeof(buf), "%zu", (size_t)5000000000ULL);
+    TEST_ASSERT_EQUAL_STRING("5000000000", buf);
+}
+
 static void test_kprintf_percent(void)
 {
     char buf[64];
@@ -3478,6 +3633,8 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_help_list);
     RUN_TEST(test_shell_cmd_help_valid);
     RUN_TEST(test_shell_cmd_help_unknown);
+    RUN_TEST(test_builtin_commands_grouped_and_sorted);
+    RUN_TEST(test_external_commands_categories_in_range);
     RUN_TEST(test_shell_help_files_exist);
     RUN_TEST(test_shell_help_file_content);
     RUN_TEST(test_shell_help_dir_listing);
@@ -3540,6 +3697,9 @@ int test_suite_shell(void)
     RUN_TEST(test_kprintf_pointer);
     RUN_TEST(test_kprintf_width_pad);
     RUN_TEST(test_kprintf_long);
+    RUN_TEST(test_kprintf_long_long);
+    RUN_TEST(test_kprintf_long_long_edge_cases);
+    RUN_TEST(test_kprintf_size_t);
     RUN_TEST(test_kprintf_percent);
     RUN_TEST(test_kprintf_mixed);
 
