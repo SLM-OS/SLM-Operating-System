@@ -512,28 +512,6 @@ static void test_blob_autoload_recovers_from_backup_conf(void)
 }
 
 #ifdef CONFIG_AI_SCHEDULER
-static void build_long_path(char *out, size_t cap,
-                            const char *stem, char fill,
-                            const char *suffix)
-{
-    static const char prefix[] = "/mnt/files/";
-    size_t prefix_len = sizeof(prefix) - 1;
-    size_t stem_len = strlen(stem);
-    size_t suffix_len = strlen(suffix);
-    size_t target_len = VFS_MAX_PATH - 1;
-    size_t fill_len;
-
-    TEST_ASSERT_TRUE(cap >= VFS_MAX_PATH);
-    TEST_ASSERT_TRUE(target_len > prefix_len + stem_len + suffix_len);
-    fill_len = target_len - prefix_len - stem_len - suffix_len;
-
-    memcpy(out, prefix, prefix_len);
-    memcpy(out + prefix_len, stem, stem_len);
-    memset(out + prefix_len + stem_len, fill, fill_len);
-    memcpy(out + prefix_len + stem_len + fill_len, suffix, suffix_len);
-    out[target_len] = '\0';
-}
-
 static void test_blob_autoload_accepts_max_length_paths_across_all_slots(void)
 {
     char path_xgb[VFS_MAX_PATH];
