@@ -43,6 +43,24 @@
  * Risk 2 for the trace from `reboot "0 tryboot"` to these tags. */
 #define BCM_TAG_SET_REBOOT_FLAGS     0x00038064u
 #define BCM_TAG_NOTIFY_REBOOT        0x00030048u
+#define BCM_TAG_SET_POWER_STATE      0x00028001u
+
+/* SET_POWER_STATE device IDs (subset — add more as needed). The
+ * Pi firmware exposes power-domain control for these peripherals
+ * via the mailbox interface; on Pi 5 / BCM2712 the SD card domain
+ * (id 0) controls EMMC2's clock + power. The mapping is the same
+ * across Pi generations — it's the firmware-side abstraction, not
+ * a SoC-specific register layout. */
+#define BCM_POWER_DEVICE_SDCARD      0u
+
+/* SET_POWER_STATE state-word bits. WAIT instructs the firmware to
+ * block the response until the power-state transition has fully
+ * completed; without it, the response can return before the
+ * peripheral clocks are stable, which defeats the purpose of using
+ * the mailbox to gate subsequent MMIO. */
+#define BCM_POWER_STATE_OFF          0u
+#define BCM_POWER_STATE_ON           (1u << 0)
+#define BCM_POWER_STATE_WAIT         (1u << 1)
 
 /* Buffer size used by all helpers in this header. The transport in
  * bcm_mailbox.c uses a fixed 32-byte property buffer, so the helpers
@@ -108,6 +126,42 @@ static inline void bcm_mailbox_build_notify_reboot(uint32_t buf[BCM_PROP_BUF_WOR
     buf[5] = BCM_PROP_TAG_END;
     buf[6] = 0u;
     buf[7] = 0u;
+}
+
+/*
+ * SET_POWER_STATE (tag 0x00028001): turn a device's power domain on
+ * or off via the firmware. Used by the BCM2712 SDHCI driver to gate
+ * EMMC2's clock + power before the first register touch — issue #414
+ * documents the failure mode (one peek to the EMMC2 base hangs the
+ * AXI fabric until the firmware has powered the controller up).
+ *
+ * Layout:
+ *   [0] total_size  = 32
+ *   [1] request     = 0
+ *   [2] tag_id      = 0x00028001
+ *   [3] val_buf_sz  = 8           (two u32 payload words)
+ *   [4] tag_code    = 0
+ *   [5] device_id   = `device_id` (0 = SD card / EMMC2)
+ *   [6] state       = `state`     (bit 0: on/off, bit 1: wait)
+ *   [7] end_tag     = 0
+ *
+ * The 8-word buffer is the maximum the shared transport supports; the
+ * end-tag falls in the last word with no tail pad. Caller composes
+ * `state` from BCM_POWER_STATE_ON | BCM_POWER_STATE_WAIT to get a
+ * synchronous power-on.
+ */
+static inline void bcm_mailbox_build_set_power_state(uint32_t buf[BCM_PROP_BUF_WORDS],
+                                                     uint32_t device_id,
+                                                     uint32_t state)
+{
+    buf[0] = 32u;
+    buf[1] = BCM_PROP_REQUEST;
+    buf[2] = BCM_TAG_SET_POWER_STATE;
+    buf[3] = 8u;
+    buf[4] = 0u;
+    buf[5] = device_id;
+    buf[6] = state;
+    buf[7] = BCM_PROP_TAG_END;
 }
 
 #endif /* BCM_MAILBOX_PROTO_H */

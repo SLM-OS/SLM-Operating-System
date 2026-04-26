@@ -19,6 +19,7 @@
 #ifndef BCM_MAILBOX_H
 #define BCM_MAILBOX_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #if defined(PLATFORM_RASPI5)
@@ -86,6 +87,28 @@ int bcm_mailbox_set_reboot_flags(uint32_t flags);
  * Call from a single task context, never from an IRQ.
  */
 int bcm_mailbox_notify_reboot(void);
+
+/*
+ * Power-domain control via tag 0x00028001 (SET_POWER_STATE). Asks
+ * the firmware to power a peripheral on or off and (when `wait` is
+ * true) to block the response until the transition completes —
+ * without `wait`, the firmware may return before the device's clocks
+ * are stable, which defeats the purpose of using the mailbox to gate
+ * subsequent MMIO.
+ *
+ * Used by `sdhci_create_bcm2712()` to power the EMMC2 controller
+ * before its first register touch (issue #414 — Pi firmware does
+ * NOT auto-power EMMC2 for SLM-OS bare-metal handoff the way it
+ * does for a Linux launch). `device_id` constants in
+ * `bcm_mailbox_proto.h` (e.g. `BCM_POWER_DEVICE_SDCARD`).
+ *
+ * Returns 0 on success, MBOX_E_GENERIC on transport / protocol
+ * failure, MBOX_E_TAG_UNSUPPORTED if the EEPROM doesn't implement
+ * the tag (older firmware revisions). Not reentrant — shares the
+ * file-static property buffer with the other tags here. Call from a
+ * single task context, never from an IRQ.
+ */
+int bcm_mailbox_set_power_state(uint32_t device_id, bool on, bool wait);
 
 #endif /* PLATFORM_RASPI5 */
 

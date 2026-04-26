@@ -517,6 +517,16 @@
  * vmm_setup_platform for RASPI5. */
 #define BCM2712_EMMC2_BASE  0x1000FFF000UL
 
+/* SDIO_CFG bank — separate MMIO window adjacent to the SDHCI host
+ * registers. Linux's sdhci-brcmstb maps it as resource index 1 of
+ * the same DT node (`reg = <0x00fff400 0x200>`, alias "cfg"); SLM-OS
+ * computes it from the host base since it always lives at host+0x400
+ * on BCM2712. cfginit_2712 (force-CD, base-clock advisory) writes
+ * to this bank, NOT the SDHCI host registers. Falls in the same
+ * 2 MB MMIO block as BCM2712_EMMC2_BASE so no extra page-table entry
+ * is needed. */
+#define BCM2712_EMMC2_CFG_BASE  (BCM2712_EMMC2_BASE + 0x400UL)
+
 /* GPU bus-address encoding on Pi 5 matches the legacy VideoCore
  * convention — the VideoCore sees ARM DRAM via a 1 GB alias at
  * 0xC0000000. Used when passing a property buffer to the mailbox.

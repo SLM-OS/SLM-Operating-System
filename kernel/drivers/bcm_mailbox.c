@@ -357,4 +357,37 @@ int bcm_mailbox_notify_reboot(void)
     return 0;
 }
 
+int bcm_mailbox_set_power_state(uint32_t device_id, bool on, bool wait)
+{
+    uint32_t state = (on ? BCM_POWER_STATE_ON : BCM_POWER_STATE_OFF)
+                   | (wait ? BCM_POWER_STATE_WAIT : 0u);
+
+    bcm_mailbox_build_set_power_state(prop_buf, device_id, state);
+
+    int rc = mbox_property_call();
+    if (rc < 0) {
+        return rc;
+    }
+
+    uint32_t tag_resp = prop_buf[4];
+    if (!(tag_resp & PROP_TAG_RESP_SUCCESS)) {
+        ERROR("mailbox: SET_POWER_STATE tag response not success (0x%08x)",
+              tag_resp);
+        return MBOX_E_GENERIC;
+    }
+
+    /* Firmware returns the actual device state in word 6. With WAIT
+     * set, this should match the requested on/off bit. Treat a
+     * mismatch as failure — the device is not in the state we asked
+     * for, so subsequent MMIO will likely hang. */
+    uint32_t actual_state = prop_buf[6];
+    if (((actual_state & BCM_POWER_STATE_ON) != 0) != on) {
+        ERROR("mailbox: SET_POWER_STATE(dev=%u, on=%d) returned "
+              "actual_state=0x%08x — device did not transition",
+              device_id, (int)on, actual_state);
+        return MBOX_E_GENERIC;
+    }
+    return 0;
+}
+
 #endif /* PLATFORM_RASPI5 */

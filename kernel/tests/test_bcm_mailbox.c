@@ -138,6 +138,49 @@ static void test_tag_ids_match_pi_firmware_subset(void)
      * on hardware. */
     TEST_ASSERT_EQUAL_HEX32(0x00038064u, BCM_TAG_SET_REBOOT_FLAGS);
     TEST_ASSERT_EQUAL_HEX32(0x00030048u, BCM_TAG_NOTIFY_REBOOT);
+    TEST_ASSERT_EQUAL_HEX32(0x00028001u, BCM_TAG_SET_POWER_STATE);
+}
+
+static void test_set_power_state_layout_on_with_wait(void)
+{
+    uint32_t buf[BCM_PROP_BUF_WORDS] = {0};
+    uint32_t state = BCM_POWER_STATE_ON | BCM_POWER_STATE_WAIT;
+
+    bcm_mailbox_build_set_power_state(buf, BCM_POWER_DEVICE_SDCARD, state);
+
+    TEST_ASSERT_EQUAL_HEX32(32u,                       buf[0]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_REQUEST,          buf[1]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_TAG_SET_POWER_STATE,   buf[2]);
+    TEST_ASSERT_EQUAL_HEX32(8u,                        buf[3]);  /* val_buf_sz */
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[4]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_POWER_DEVICE_SDCARD,   buf[5]);
+    TEST_ASSERT_EQUAL_HEX32(0x3u,                      buf[6]);  /* on | wait */
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,          buf[7]);
+}
+
+static void test_set_power_state_layout_off_no_wait(void)
+{
+    uint32_t buf[BCM_PROP_BUF_WORDS] = {0};
+
+    bcm_mailbox_build_set_power_state(buf, BCM_POWER_DEVICE_SDCARD,
+                                      BCM_POWER_STATE_OFF);
+
+    TEST_ASSERT_EQUAL_HEX32(BCM_TAG_SET_POWER_STATE,   buf[2]);
+    TEST_ASSERT_EQUAL_HEX32(BCM_POWER_DEVICE_SDCARD,   buf[5]);
+    TEST_ASSERT_EQUAL_HEX32(0u,                        buf[6]);  /* off */
+    TEST_ASSERT_EQUAL_HEX32(BCM_PROP_TAG_END,          buf[7]);
+}
+
+static void test_set_power_state_state_bits_pinned(void)
+{
+    /* The state-word bit assignments are part of the Pi mailbox
+     * wire format, not arbitrary. Pin them so a typo in the header
+     * is caught at build time on every host, not on the next Pi 5
+     * boot attempt. */
+    TEST_ASSERT_EQUAL_HEX32(0u, BCM_POWER_STATE_OFF);
+    TEST_ASSERT_EQUAL_HEX32(1u, BCM_POWER_STATE_ON);
+    TEST_ASSERT_EQUAL_HEX32(2u, BCM_POWER_STATE_WAIT);
+    TEST_ASSERT_EQUAL_HEX32(0u, BCM_POWER_DEVICE_SDCARD);
 }
 
 int test_suite_bcm_mailbox(void)
@@ -151,6 +194,9 @@ int test_suite_bcm_mailbox(void)
     RUN_TEST(test_helpers_are_idempotent);
     RUN_TEST(test_helpers_overwrite_stale_buffer);
     RUN_TEST(test_tag_ids_match_pi_firmware_subset);
+    RUN_TEST(test_set_power_state_layout_on_with_wait);
+    RUN_TEST(test_set_power_state_layout_off_no_wait);
+    RUN_TEST(test_set_power_state_state_bits_pinned);
 
     return UnityEnd();
 }

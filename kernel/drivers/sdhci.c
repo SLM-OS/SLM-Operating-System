@@ -1025,14 +1025,117 @@ struct blkdev *sdhci_create_qemu_pci(const char *name)
 
 #if defined(PLATFORM_RASPI5)
 
+#include "bcm_mailbox.h"
+#include "bcm_mailbox_proto.h"
+#include "uart.h"
+
+/* SDIO_CFG bank register offsets (relative to BCM2712_EMMC2_CFG_BASE).
+ * Pinned to docs/reference/rpi-linux-sdhci-brcmstb.c (rpi-6.12.y)
+ * lines 37-51. Linux re-uses these offsets across all brcmstb-family
+ * SDHCI bindings; the bcm2712 path uses them via cfginit_2712. */
+#define SDIO_CFG_CTRL                       0x00u
+#define   SDIO_CFG_CTRL_SDCD_N_TEST_LEV     (1u << 30)  /* 0 = card present */
+#define   SDIO_CFG_CTRL_SDCD_N_TEST_EN      (1u << 31)  /* override CD line */
+#define SDIO_CFG_CQ_CAPABILITY              0x4Cu
+#define   SDIO_CFG_CQ_CAPABILITY_FMUL_SHIFT 12u
+
+/* Base clock advisory written into SDIO_CFG_CQ_CAPABILITY. The DT
+ * for bcm2712 declares `clk_emmc2` as a 200 MHz fixed-clock — there
+ * is no actual programmable PLL behind it on the Pi 5, just a
+ * constant the firmware leaves running. Linux passes this value to
+ * the controller in MHz so the timeout calculations come out right.
+ * 200 MHz matches what cfginit_2712's `clk_get_rate(pltfm_host->clk)`
+ * would return. */
+#define BCM2712_EMMC2_BASE_CLK_MHZ          200u
+
+/* MMIO writel — match the convention used elsewhere in this file. */
+static inline void cfg_writel(uintptr_t base, uint32_t off, uint32_t val)
+{
+    *(volatile uint32_t *)(base + off) = val;
+}
+static inline uint32_t cfg_readl(uintptr_t base, uint32_t off)
+{
+    return *(volatile uint32_t *)(base + off);
+}
+
+/*
+ * Apply the BCM2712-specific SDHCI cfginit, mirroring Linux's
+ * sdhci_brcmstb_cfginit_2712 (docs/reference/rpi-linux-sdhci-brcmstb.c
+ * lines 260-296), trimmed to what SLM-OS actually needs:
+ *
+ *   - Force card-detect via SDIO_CFG_CTRL — the lab fixture's SDWire
+ *     and any production card the admin command writes to are not
+ *     hot-removable from SLM-OS's point of view. Setting
+ *     SDCD_N_TEST_EN with SDCD_N_TEST_LEV cleared makes the
+ *     controller report "card present" regardless of the CD line.
+ *   - Write the controller's base-clock advisory in MHz to
+ *     SDIO_CFG_CQ_CAPABILITY. This is what the firmware tells the
+ *     SDHCI core to use for timeout calculations; without it the
+ *     core defaults to 0 and command timeouts come out wrong.
+ *
+ * Skipped vs. Linux's full cfginit:
+ *   - SDIO_CFG_MAX_50MHZ_MODE only matters for UHS-I / HS400, which
+ *     SLM-OS doesn't support (legacy 25 MHz SDR only — see this
+ *     file's header comment).
+ *   - The dynamic FMUL fields above the base-clock are derived from
+ *     a clock SLM-OS doesn't have a framework to query; the static
+ *     200 MHz from the DT fixed-clock is correct for both lab and
+ *     production Pi 5 boards.
+ */
+static void bcm2712_emmc2_cfginit(void)
+{
+    uintptr_t cfg = BCM2712_EMMC2_CFG_BASE;
+
+    /* Force CD: enable the test-level override and clear the level
+     * bit (i.e. report 'present', the active-low n_TEST_LEV bit
+     * cleared). Read-modify-write so the Pi firmware's other strap
+     * bits in this register stay intact. */
+    uint32_t ctrl = cfg_readl(cfg, SDIO_CFG_CTRL);
+    ctrl &= ~SDIO_CFG_CTRL_SDCD_N_TEST_LEV;
+    ctrl |=  SDIO_CFG_CTRL_SDCD_N_TEST_EN;
+    cfg_writel(cfg, SDIO_CFG_CTRL, ctrl);
+
+    /* Base-clock advisory in MHz, plus the FMUL hint Linux always
+     * sets (3 << 12) — same constant as
+     * sdhci_brcmstb_cfginit_2712. */
+    uint32_t cqcap = (3u << SDIO_CFG_CQ_CAPABILITY_FMUL_SHIFT)
+                   | BCM2712_EMMC2_BASE_CLK_MHZ;
+    cfg_writel(cfg, SDIO_CFG_CQ_CAPABILITY, cqcap);
+}
+
 struct blkdev *sdhci_create_bcm2712(void)
 {
-    /* MMIO base is fixed by the BCM2712 SoC. Stage 5 (#371) will
-     * apply the BCM2712-specific cfginit (sdhci-brcmstb.c-style)
-     * and CPRMAN clock-gate before calling this — without those,
-     * the controller may still come up correctly on the firmware's
-     * left-behind state, but the Stage 1 plan-doc trace explicitly
-     * covers them as deferred work. */
+    /*
+     * Issue #414: the Pi firmware does NOT auto-power EMMC2 for
+     * SLM-OS bare-metal handoff the way it does for a Linux launch
+     * (Linux's sdhci-brcmstb does not explicitly toggle anything
+     * either, it just inherits firmware-left state). On bare-metal
+     * the controller is power-/clock-gated; the very first MMIO
+     * read at BCM2712_EMMC2_BASE hangs the AXI fabric until the
+     * firmware powers it up. Empirically confirmed from the shell:
+     * `peek 0x1000FFF000` wedges the kernel without any driver code.
+     *
+     * The fix is to ask the firmware to enable the SD-card power
+     * domain via the mailbox SET_POWER_STATE tag BEFORE any
+     * register touch. WAIT=1 ensures the response only comes back
+     * after the transition is complete, so the cfginit + sdhci_create
+     * calls below run against a powered controller.
+     */
+    int rc = bcm_mailbox_set_power_state(BCM_POWER_DEVICE_SDCARD,
+                                         /*on=*/true, /*wait=*/true);
+    if (rc != 0) {
+        uart_puts("[ERROR] sdhci_bcm2712: mailbox SET_POWER_STATE(SD, on) "
+                  "failed — controller stays unpowered, abort\n");
+        return NULL;
+    }
+
+    /* Apply the BCM2712 SDIO_CFG_* writes. Linux does this in
+     * cfginit_2712 between mapping the controller and reading
+     * SDHCI capabilities; same order in SLM-OS — write the CFG
+     * bank first, then have sdhci_create() do the host-register
+     * probe. */
+    bcm2712_emmc2_cfginit();
+
     return sdhci_create("emmc2", BCM2712_EMMC2_BASE);
 }
 
