@@ -18,6 +18,7 @@
 
 #include "unity.h"
 #include "../include/camera.h"
+#include "../include/camrtc.h"
 #include "../include/gpio_tegra.h"
 #include "../include/i2c_tegra.h"
 #include "../include/imx219.h"
@@ -432,6 +433,47 @@ static void test_nvcsi_stream_init_arg_validation(void)
 #endif
 }
 
+/* ---- Camera RTCPU (RCE) HSP-VM transport ---- */
+
+/*
+ * Test: camrtc stubs return -1 on QEMU. The Jetson branch needs the
+ * RCE HSP block + a live RCE firmware to test for real — exercised
+ * via the `rcediag` shell command on hardware, not in QEMU CI.
+ *
+ * `camrtc_diag_dump` is a peek-only helper; on QEMU the stub returns
+ * -1 (no MMIO to dump), on Jetson it touches real hardware. The
+ * cross-platform test only verifies the symbol resolves and doesn't
+ * crash on the stub path.
+ */
+static void test_camrtc_stubs_return_minus_one(void)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_IGNORE_MESSAGE("Jetson build: stubs not active "
+                        "(driver runs on real hardware via `rcediag` cmd)");
+#else
+    TEST_ASSERT_EQUAL_INT(-1, camrtc_init());
+    TEST_ASSERT_EQUAL_INT(-1, camrtc_diag_dump());
+    uint32_t resp = 0xDEADBEEFu;
+    TEST_ASSERT_EQUAL_INT(-1, camrtc_send_msg(0x40, 0u, &resp, 1000u));
+    /* Stub must clear the out-pointer to a defined value. */
+    TEST_ASSERT_EQUAL_HEX32(0u, resp);
+#endif
+}
+
+/*
+ * Test: camrtc_send_msg with NULL resp_param is allowed (caller
+ * doesn't care about the response param). Both stub and Jetson
+ * branches must accept it without dereferencing NULL.
+ */
+static void test_camrtc_send_msg_null_resp_allowed(void)
+{
+    /* On QEMU the stub returns -1 immediately; on Jetson the call
+     * fails with -1 because camrtc_init wasn't run in the test
+     * harness. Either way the call must not crash on NULL resp. */
+    int rc = camrtc_send_msg(0x45u /* PING */, 0u, NULL, 1000u);
+    TEST_ASSERT_TRUE(rc < 0);
+}
+
 int test_suite_camera(void)
 {
     UnityBegin("Camera C-API tests");
@@ -451,6 +493,8 @@ int test_suite_camera(void)
     RUN_TEST(test_nvcsi_null_safe);
     RUN_TEST(test_nvcsi_imx219_a_port_wiring);
     RUN_TEST(test_nvcsi_stream_init_arg_validation);
+    RUN_TEST(test_camrtc_stubs_return_minus_one);
+    RUN_TEST(test_camrtc_send_msg_null_resp_allowed);
     return UnityEnd();
 }
 

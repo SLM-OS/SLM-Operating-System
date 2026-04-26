@@ -5652,4 +5652,66 @@ int cmd_nvcsi(int argc, char *argv[])
     uart_puts("=== End ===\r\n");
     return 0;
 }
+
+#include "camrtc.h"
+
+/*
+ * rcediag — Camera RTCPU (RCE) HSP-VM transport probe + handshake.
+ *
+ * #396 Hardware Task 3 Option B prerequisite. Dumps the hsp_rce
+ * controller state (DIMENSIONING + R5 power state + per-mailbox
+ * SHRD_MBOX values) so a user can confirm RCE is alive and reachable
+ * post-kexec, then runs the HELLO + PROTOCOL + RESUME handshake to
+ * establish a working session with the camera firmware. After this
+ * succeeds, follow-up commands (CH_SETUP, CAPTURE_PHY_STREAM_OPEN,
+ * CAPTURE_CSI_STREAM_SET_CONFIG) can use camrtc_send_msg() to
+ * configure NVCSI / VI through RCE — the only path that works on
+ * Tegra234 (NVCSI direct-MMIO is BLOCKED, see PR #426).
+ *
+ * Expected output on a working setup (kexec from Linux with no
+ * camera driver active so RCE is idle in WFI):
+ *
+ *   === RCE HSP-VM diag + handshake ===
+ *   [INFO] camrtc: hsp_rce DIMENSIONING=0x00080048 (SM=8 SS=4)
+ *   [INFO] camrtc: rce-pm R5_CTRL_0=0x00000002 (FWLOADDONE=1)
+ *   [INFO] camrtc: rce-pm PWR_STATUS_0=0x04600000 (WFIPIPESTOPPED=1)
+ *   [INFO] camrtc: VM-TX SHRD_MBOX=0x00000000 (FULL=0)
+ *   [INFO] camrtc: VM-RX SHRD_MBOX=0x00000000 (FULL=0)
+ *   [INFO] camrtc: HELLO echo matched (cookie=0x...)
+ *   [INFO] camrtc: RCE FW protocol version=6 (SM6 expected)
+ *   [INFO] camrtc: RESUME ack (status=0x...)
+ *     camrtc_init: rc=0
+ *     *** RCE HSP-VM session established ***
+ */
+int cmd_rcediag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== RCE HSP-VM diag + handshake ===\r\n");
+    (void)camrtc_diag_dump();
+
+    int rc = camrtc_init();
+    uart_printf("  camrtc_init:          rc=%d\r\n", rc);
+    if (rc == 0) {
+        uart_puts("  *** RCE HSP-VM session established ***\r\n");
+    } else if (rc == -1) {
+        uart_puts("  *** hsp_rce MMIO unreachable — CBB firewall  ***\r\n");
+        uart_puts("  *** or HSP block clock-gated.                ***\r\n");
+    } else if (rc == -2) {
+        uart_puts("  *** RCE firmware not loaded — bootloader did ***\r\n");
+        uart_puts("  *** not release the R5. Camera complex is    ***\r\n");
+        uart_puts("  *** unusable for this boot.                  ***\r\n");
+    } else if (rc == -3) {
+        uart_puts("  *** HELLO/PROTOCOL/RESUME timed out — RCE    ***\r\n");
+        uart_puts("  *** is not responding on the HSP mailbox.    ***\r\n");
+    } else if (rc == -4) {
+        uart_puts("  *** PROTOCOL mismatch — RCE FW version is    ***\r\n");
+        uart_puts("  *** not SM6. Update the driver-side version. ***\r\n");
+    } else {
+        uart_puts("  *** Handshake failed — see WARN log lines.   ***\r\n");
+    }
+
+    uart_puts("=== End ===\r\n");
+    return 0;
+}
 #endif /* PLATFORM_JETSON_ORIN_NANO */
