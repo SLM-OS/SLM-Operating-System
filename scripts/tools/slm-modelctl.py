@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import posixpath
 import pty
 import select
 import socket
@@ -722,7 +723,7 @@ def default_remote_path(source: str) -> str:
 
 
 def normalize_blob_path(path: str) -> str:
-    normalized = str(pathlib.PurePosixPath(path))
+    normalized = posixpath.normpath(str(pathlib.PurePosixPath(path)))
     if not normalized.startswith("/"):
         raise RuntimeError(
             "remote blob paths must be absolute device paths under "

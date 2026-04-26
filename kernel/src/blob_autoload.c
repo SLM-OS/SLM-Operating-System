@@ -386,40 +386,47 @@ static int blob_autoload_read_entries(struct blob_autoload_entry *entries, size_
                         for (size_t i = 0; i < count; i++) {
                             uint32_t parsed_size = 0;
                             uint32_t parsed_checksum = 0;
-                            char *size_text = path + strlen(path);
+                            int malformed_metadata = 0;
+                            char *path_end = path + strlen(path);
+                            char *size_text = NULL;
                             char *checksum_text = NULL;
 
-                            while (size_text > path &&
-                                   size_text[-1] != ' ' &&
-                                   size_text[-1] != '\t') {
-                                size_text--;
+                            while (path_end > path &&
+                                   path_end[-1] != ' ' &&
+                                   path_end[-1] != '\t') {
+                                path_end--;
                             }
-                            if (size_text > path) {
-                                char *size_sep = size_text - 1;
+                            if (path_end > path) {
+                                char *size_sep = path_end - 1;
                                 while (size_sep > path &&
                                        size_sep[-1] != ' ' &&
                                        size_sep[-1] != '\t') {
                                     size_sep--;
                                 }
-                                if (size_sep > path) {
-                                    checksum_text = size_text;
+                                if (size_sep <= path) {
+                                    malformed_metadata = 1;
+                                } else {
+                                    checksum_text = path_end;
                                     size_text = size_sep;
                                     checksum_text[-1] = '\0';
                                     size_text[-1] = '\0';
-                                    if (blob_autoload_parse_u32(size_text, 10, &parsed_size) != 0 ||
+                                    if (*size_text == '\0' ||
+                                        *checksum_text == '\0' ||
+                                        blob_autoload_parse_u32(size_text, 10, &parsed_size) != 0 ||
                                         blob_autoload_parse_u32(checksum_text, 16, &parsed_checksum) != 0) {
-                                        parsed_size = 0;
-                                        parsed_checksum = 0;
+                                        malformed_metadata = 1;
                                     }
                                 }
                             }
                             if (strcmp(entries[i].domain, domain) == 0 &&
                                 strcmp(entries[i].kind, kind) == 0) {
-                                strncpy(entries[i].path, path, sizeof(entries[i].path) - 1);
-                                entries[i].path[sizeof(entries[i].path) - 1] = '\0';
-                                entries[i].size_bytes = parsed_size;
-                                entries[i].checksum = parsed_checksum;
-                                entries[i].present = 1;
+                                if (!malformed_metadata) {
+                                    strncpy(entries[i].path, path, sizeof(entries[i].path) - 1);
+                                    entries[i].path[sizeof(entries[i].path) - 1] = '\0';
+                                    entries[i].size_bytes = parsed_size;
+                                    entries[i].checksum = parsed_checksum;
+                                    entries[i].present = 1;
+                                }
                                 break;
                             }
                         }

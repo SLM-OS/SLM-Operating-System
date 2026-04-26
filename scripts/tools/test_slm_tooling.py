@@ -553,6 +553,15 @@ def test_modelctl_validate_operator_blob_path_rejects_system_managed_autoload_ro
         assert False, "expected autoload path rejection"
 
 
+def test_modelctl_validate_operator_blob_path_rejects_parent_escape_into_autoload():
+    try:
+        slm_modelctl.validate_operator_blob_path("/mnt/files/models/../autoload/model.blob")
+    except RuntimeError as e:
+        assert "system-managed" in str(e)
+    else:
+        assert False, "expected parent escape rejection"
+
+
 def test_modelctl_validate_operator_blob_path_rejects_nonstandard_root():
     try:
         slm_modelctl.validate_operator_blob_path("/mnt/files/custom/model.blob")
@@ -1198,6 +1207,7 @@ def main() -> int:
     runner.run("modelctl_default_remote_path_uses_http_url_basename", test_modelctl_default_remote_path_uses_http_url_basename)
     runner.run("modelctl_validate_operator_blob_path_accepts_standard_roots", test_modelctl_validate_operator_blob_path_accepts_standard_roots)
     runner.run("modelctl_validate_operator_blob_path_rejects_system_managed_autoload_root", test_modelctl_validate_operator_blob_path_rejects_system_managed_autoload_root)
+    runner.run("modelctl_validate_operator_blob_path_rejects_parent_escape_into_autoload", test_modelctl_validate_operator_blob_path_rejects_parent_escape_into_autoload)
     runner.run("modelctl_validate_operator_blob_path_rejects_nonstandard_root", test_modelctl_validate_operator_blob_path_rejects_nonstandard_root)
     runner.run("modelctl_parse_args_reorders_global_options_before_subcommand", test_modelctl_parse_args_reorders_global_options_before_subcommand)
     runner.run("modelctl_parse_args_reorders_http_globals_before_subcommand", test_modelctl_parse_args_reorders_http_globals_before_subcommand)
