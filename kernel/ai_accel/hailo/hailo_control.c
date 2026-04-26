@@ -1892,6 +1892,11 @@ struct hailo_cs_run_bist_resp_wire {
     uint8_t  body[256];
 } __attribute__((packed));
 
+_Static_assert(sizeof(struct hailo_cs_run_bist_resp_wire) ==
+                   sizeof(struct hailo_control_response_header) + 4 + 256,
+               "RUN_BIST_TEST response wire layout drifted — check "
+               "header struct + parameter_count + body sizing");
+
 static struct hailo_cs_run_bist_req_wire  control_run_bist_req;
 static struct hailo_cs_run_bist_resp_wire control_run_bist_resp;
 

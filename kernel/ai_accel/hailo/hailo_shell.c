@@ -37,6 +37,7 @@
 #include "hailo_cs_builder.h"
 #include "hailo_cs_translator.h"
 #include "hailo_infer.h"
+#include "hailo_internal.h"
 #include "hailo_tensor.h"
 #include "hailo_vdma.h"
 #include "hef_header.h"
@@ -1164,7 +1165,6 @@ static int cmd_hailo(int argc, char *argv[])
      * critical events (e.g., HEALTH_MONITOR_CPU_ECC_ERROR) actually
      * fire — at boot, after load, or only on submit. */
     if (argc >= 2 && strcmp(argv[1], "d2h") == 0) {
-        extern void hailo_fw_drain_d2h_notifications(uint32_t max_events);
         hailo_fw_drain_d2h_notifications(8);
         return 0;
     }
@@ -1364,7 +1364,6 @@ static int cmd_hailo(int argc, char *argv[])
      * we only saw these after a runmodel timeout, which mixes init
      * traffic with the failure path. */
     if (argc >= 2 && strcmp(argv[1], "fwlog") == 0) {
-        extern void hailo_fw_dump_logs(void);
         hailo_fw_dump_logs();
         return 0;
     }
@@ -1383,7 +1382,6 @@ static int cmd_hailo(int argc, char *argv[])
             }
             cap = v;  /* 0 → full ring */
         }
-        extern void hailo_fw_dump_logs_hex(uint32_t max_bytes);
         hailo_fw_dump_logs_hex(cap);
         return 0;
     }
