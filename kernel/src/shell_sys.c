@@ -2698,6 +2698,51 @@ int cmd_peek(int argc, char *argv[])
 }
 
 /*
+ * dtb-dump - One-shot DTB hex dump for #414 firmware-fixup investigation.
+ *
+ * Prints the firmware-passed DTB as a hex stream. Capture the serial
+ * output between "DTB-START" and "DTB-END" markers, run through
+ * `xxd -r -p` to recover the binary blob, then `dtc -I dtb -O dts -`
+ * for a readable diff against the on-disk DTB.
+ *
+ * Removed once #414 is closed.
+ */
+int cmd_dtb_dump(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    extern const void *dtb_get_blob(void);
+    const uint8_t *p = (const uint8_t *)dtb_get_blob();
+    if (!p) { shell_puts("no DTB available\r\n"); return -1; }
+
+    /* FDT magic (big-endian 0xd00dfeed) at offset 0, totalsize at offset 4. */
+    uint32_t magic = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                     ((uint32_t)p[2] <<  8) | ((uint32_t)p[3] <<  0);
+    if (magic != 0xd00dfeed) {
+        shell_printf("not a DTB: magic=0x%08lx at %p\r\n",
+                     (unsigned long)magic, (const void *)p);
+        return -1;
+    }
+    uint32_t total = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) |
+                     ((uint32_t)p[6] <<  8) | ((uint32_t)p[7] <<  0);
+    if (total == 0 || total > (1U << 20)) {
+        shell_printf("DTB totalsize implausible: %lu\r\n", (unsigned long)total);
+        return -1;
+    }
+
+    shell_printf("DTB-START addr=%p size=%lu magic=0x%08lx\r\n",
+                 (const void *)p, (unsigned long)total, (unsigned long)magic);
+    static const char hex[] = "0123456789abcdef";
+    for (uint32_t i = 0; i < total; i++) {
+        char buf[3] = { hex[(p[i] >> 4) & 0xF], hex[p[i] & 0xF], 0 };
+        shell_puts(buf);
+        if ((i & 31) == 31) shell_puts("\r\n");
+    }
+    if ((total & 31) != 0) shell_puts("\r\n");
+    shell_puts("DTB-END\r\n");
+    return 0;
+}
+
+/*
  * poke - Write a 32-bit word to an arbitrary physical memory address.
  *
  *   poke <phys-hex> <val-hex>

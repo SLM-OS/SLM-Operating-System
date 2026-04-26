@@ -58,6 +58,21 @@ uint32_t lwip_rand_slm(void) {
     return rand_state;
 }
 
+void lwip_rand_seed(const void *bytes, uint32_t len) {
+    if (!bytes || len == 0) return;
+    /* Fold every byte into rand_state with a multiply-then-xor mix. The
+     * underlying generator is a non-cryptographic LCG, so this isn't a
+     * security boundary — the goal is just to make the boot-time state
+     * depend on firmware-supplied entropy (KASLR seed, RNG seed) instead
+     * of a hardcoded constant. Better than `0x12345678` for TCP ISN /
+     * ephemeral-port unpredictability across reboots. */
+    const uint8_t *p = (const uint8_t *)bytes;
+    for (uint32_t i = 0; i < len; i++) {
+        rand_state = rand_state * 1664525u + 1013904223u;
+        rand_state ^= (uint32_t)p[i] << ((i & 3) * 8);
+    }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Critical Section Protection                                                 */
 /* -------------------------------------------------------------------------- */

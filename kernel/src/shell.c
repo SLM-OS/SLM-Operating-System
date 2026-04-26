@@ -132,6 +132,7 @@ const shell_cmd_t builtin_commands[] = {
 #if defined(PI5_IRQ_DIAG)
     {"diag",      cmd_diag,      "Pi 5 IRQ-delivery diagnostics (diag <el2|vec|fiq|all>)",    false, SHELL_CAT_HARDWARE},
 #endif
+    {"dtb-dump",  cmd_dtb_dump,  "Dump firmware-passed DTB as hex (#414 investigation)",      false, SHELL_CAT_HARDWARE},
 #if !defined(PLATFORM_X86_64)
     /* x86-64 registers a richer `gpu` command via
      * nvidia_gpu_register_shell_commands() with init/sec2/vram/regs

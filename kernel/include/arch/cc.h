@@ -91,6 +91,12 @@ typedef ptrdiff_t ssize_t;
 uint32_t lwip_rand_slm(void);
 #define LWIP_RAND() lwip_rand_slm()
 
+/* Mix `len` bytes of additional entropy into the RNG state. Called once
+ * at boot with firmware-supplied /chosen/{rng-seed,kaslr-seed} values
+ * from the DTB. Safe to call from interrupt-disabled context; not safe
+ * to call concurrently with `lwip_rand_slm`. */
+void lwip_rand_seed(const void *bytes, uint32_t len);
+
 /* -------------------------------------------------------------------------- */
 /* Memory Alignment                                                            */
 /* -------------------------------------------------------------------------- */
