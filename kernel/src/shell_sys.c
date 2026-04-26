@@ -5425,8 +5425,9 @@ int cmd_imx219(int argc, char *argv[])
  *      sensor the INTR_STATUS will stay 0 forever (no packets ever
  *      arrive).
  *   2. NVCSI MMIO at TEGRA234_NVCSI_BASE is mapped (vmm.c).
- *   3. BPMP IPC is up (this command's call to bpmp_clk_enable
- *      asserts that).
+ *   3. BPMP IPC is up (this command's chain of MRQ calls — VI
+ *      power-domain enable, NVCSI clock enable, NVCSI reset
+ *      deassert — asserts that on entry).
  *
  * Expected output on a working setup:
  *   === NVCSI bring-up + intr-status dump (port imx219_a) ===
@@ -5446,8 +5447,9 @@ int cmd_nvcsi(int argc, char *argv[])
     uart_printf("  nvcsi_stream_init:    rc=%d\r\n", rc);
     if (rc != 0) {
         if (rc == -2) {
-            uart_puts("  *** BPMP clock enable failed —          ***\r\n");
-            uart_puts("  *** check BPMP IVC handshake healthy.   ***\r\n");
+            uart_puts("  *** BPMP power-domain or clock enable   ***\r\n");
+            uart_puts("  *** failed — check BPMP IVC handshake   ***\r\n");
+            uart_puts("  *** healthy via 'bpmp' shell command.   ***\r\n");
         } else if (rc == -3) {
             uart_puts("  *** CIL_CONFIG readback mismatch — NVCSI ***\r\n");
             uart_puts("  *** MMIO is being filtered by CBB or the ***\r\n");

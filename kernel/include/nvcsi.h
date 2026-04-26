@@ -24,8 +24,10 @@
  * The CSI port the IMX219 actually uses on the Orin Nano dev kit
  * carrier is determined by which connector the camera ribbon plugs
  * into. The L4T DT for the IMX219-A overlay maps connector A (J17)
- * to CSI-A on PHY brick 0 — the default configured by
- * `nvcsi_stream_init_imx219_a` below.
+ * to NVCSI_PORT_B = (PHY brick 0, CIL_B) — `port-index = <0x01>`
+ * in `/proc/device-tree/.../nvcsi@15a00000`. Despite the
+ * "connector A" label, the underlying PHY half is CIL_B, not CIL_A.
+ * Driven by `nvcsi_stream_init(&nvcsi_imx219_a_port)` below.
  *
  * Jetson-only (`PLATFORM_JETSON_ORIN_NANO`); other platforms link
  * stubs that return -1 from every function.
@@ -36,8 +38,9 @@
 #include <stdint.h>
 
 /* Identifies one CSI port at the NVCSI layer. The port maps onto a
- * (PHY brick, CIL half) pair: `{phy=0, cil=A}` is what the L4T
- * IMX219-A overlay uses on the Orin Nano dev kit (J17 connector). */
+ * (PHY brick, CIL half) pair: the L4T IMX219-A overlay on the Orin
+ * Nano dev kit uses `{phy=0, cil=B}` (NVCSI_PORT_B) for the J17
+ * connector — see the file-header comment above for the source. */
 struct nvcsi_port {
     uint32_t phy_brick;       /* 0..3 — which D-PHY brick */
     uint32_t cil_half;        /* 0 = CIL_A, 1 = CIL_B */
@@ -47,8 +50,10 @@ struct nvcsi_port {
     const char *name;         /* short label for diagnostic prints */
 };
 
-/* Pre-configured port matching the L4T IMX219-A overlay: CSI-A on
- * PHY brick 0, 2 lanes, 456 MHz link clock (912 Mbps/lane DPHY). */
+/* Pre-configured port matching the L4T IMX219-A overlay:
+ * NVCSI_PORT_B = (PHY brick 0, CIL_B), 2 lanes, 456 MHz link clock
+ * (912 Mbps/lane DPHY). The "_a" suffix is the connector name
+ * (J17 = camera-A), not the CIL half. */
 extern struct nvcsi_port nvcsi_imx219_a_port;
 
 /*
@@ -61,18 +66,26 @@ extern struct nvcsi_port nvcsi_imx219_a_port;
  *   - INTR_STATUS / ERR_INTR_STATUS are cleared of any latched bits.
  *
  * Pre-conditions:
- *   - BPMP has enabled `TEGRA234_CLK_NVCSI` (this function does so
- *     idempotently if not already enabled).
+ *   - BPMP IPC is up (this function calls `bpmp_pg_set_state(VI)` +
+ *     `bpmp_clk_enable(NVCSI)` + `bpmp_reset_deassert(NVCSI)`
+ *     idempotently — Linux's nvhost runtime PM idle-suspends the
+ *     camera subsystem when no v4l2 client is streaming, and
+ *     slmos-kexec doesn't keep it powered up across the handoff).
  *   - NVCSI MMIO at TEGRA234_NVCSI_BASE is mapped (vmm.c handles).
  *   - The sensor is out of reset and has stable XCLK
  *     (`imx219_power_on()` returned 0).
  *
  * Returns 0 on success, negative on error:
- *   -1  invalid port pointer or unsupported lane count
- *   -2  BPMP clock enable failed
+ *   -1  invalid port (NULL, unsupported lane count, cil_half > 1,
+ *       or phy_brick > 3)
+ *   -2  BPMP power-domain or clock enable failed
  *   -3  CIL register readback verification failed
- *      (the write was made but the value didn't latch — typically a
- *      CBB firewall block on a specific register window)
+ *      (the write was made but the value didn't latch — typically
+ *      a CBB firewall block, gated power domain, or NVCSI being
+ *      held in reset by the Camera RTCPU. On Tegra234 this is the
+ *      expected outcome for direct-MMIO access — see
+ *      `docs/jetson-camera-nvcsi-driver-notes.md` "Update —
+ *      2026-04-26: Option A is blocked".)
  */
 int nvcsi_stream_init(const struct nvcsi_port *port);
 
