@@ -530,6 +530,32 @@ The serial baud rate is 115200; `hailo fwloghex 0` to dump the
 full ring takes ~8 s and tends to overflow the labctl ser2net
 buffer, so we cap at 256-320 B per call.
 
+### Reproducibility — multiple runmodel attempts, deterministic fault PC
+
+Re-issuing `runmodel` (without reload) reproduces the same
+fault. Second runmodel CORE diff:
+
+```
+[00a0] iter 0  PC=0x90004520 ts=0x00007801
+[00b0] iter 1  PC=0x90004520 ts=0x00009f11
+[00c0] iter 2 + EXCEPTION PC=0x9000018c ts=0x0000a2c9
+[00d0] iter 3  PC=0x90004520 ts=0x0000c621
+[00e0] iter 4  PC=0x90004520 ts=0x0000ed31
+[00f0] iter 5  PC=0x90004520 ts=0x00011441
+[0100] iter 6 + EXCEPTION PC=0x9000018c ts=0x00015890
+[0110] iter 7  PC=0x90004520 ts=0x00016261
+```
+
+**The exception at PC=`0x9000018c` fires multiple times in a
+single 500 ms window.** fw catches it, returns to the loop,
+faults again a few iterations later. This rules out a one-off
+transient memory glitch and indicates SAGE1_ISP is in a
+persistent invalid state that fw keeps trying to access.
+
+Both runs produce the same D2H notification body
+`0x00001000 0x028xxxxx ...` with bit-12 set, confirming the
+exception correlates with the bit-12 ECC error notification.
+
 ## Artifacts
 
 We can share (private channel preferred):
