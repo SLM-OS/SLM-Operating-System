@@ -12,6 +12,7 @@
 #include "sched_policy.h"
 #include "sched_trace.h"
 #include "gpu_consumer.h"
+#include "admin_telemetry.h"
 #ifdef CONFIG_AI_SCHEDULER
 #include "ai_types.h"
 #include "runtime_model.h"
@@ -2751,6 +2752,57 @@ int cmd_gpu(int argc, char *argv[])
     shell_printf("  Unified mem:    %s\r\n", info.unified_memory ? "yes" : "no");
     shell_printf("  Memory size:    %lu\r\n", (unsigned long)info.memory_size);
     return 0;
+}
+
+/*
+ * telemetry - Telemetry feed introspection (admin & telemetry suite, M4).
+ *
+ *   telemetry             Same as `telemetry stats`.
+ *   telemetry stats       Print cumulative event counts per emitter
+ *                         topic plus the topic names operators can
+ *                         subscribe to.
+ *   telemetry list-topics List the known telemetry topics.
+ *
+ * `telemetry subscribe <pattern>` is intentionally deferred — Lua
+ * scripts subscribe via `slm.telemetry_subscribe(pattern, fn)` (an
+ * alias of `slm.msg_subscribe`); a shell-side blocking subscribe
+ * is M4-followup once a per-shell mailbox slot allocator lands.
+ */
+int cmd_telemetry(int argc, char *argv[])
+{
+    const char *sub = (argc >= 2) ? argv[1] : "stats";
+
+    if (strcmp(sub, "list-topics") == 0) {
+        struct admin_telemetry_feed_stats st;
+        admin_telemetry_get_feed_stats(&st);
+        shell_puts("Telemetry topics:\r\n");
+        shell_printf("  %-12s eviction decisions + fallbacks\r\n",
+                     st.eviction_topic);
+        shell_printf("  %-12s inference call results (ok=0|1)\r\n",
+                     st.inference_topic);
+        shell_puts("Wildcard: tel.* matches all telemetry topics.\r\n");
+        return 0;
+    }
+
+    if (strcmp(sub, "stats") == 0) {
+        struct admin_telemetry_feed_stats st;
+        admin_telemetry_get_feed_stats(&st);
+        shell_puts("Telemetry feed:\r\n");
+        shell_printf("  %-12s published %lu\r\n",
+                     st.eviction_topic, (unsigned long)st.eviction_published);
+        shell_printf("  %-12s published %lu\r\n",
+                     st.inference_topic, (unsigned long)st.inference_published);
+        shell_printf("  total                  %lu\r\n",
+                     (unsigned long)(st.eviction_published +
+                                     st.inference_published));
+        shell_puts("Subscribe via `lua -e 'slm.telemetry_subscribe(\"tel.*\", "
+                   "function(t,d) print(t,d) end)'`\r\n");
+        return 0;
+    }
+
+    shell_printf("telemetry: unknown subcommand '%s'\r\n", sub);
+    shell_puts("usage: telemetry [stats|list-topics]\r\n");
+    return -1;
 }
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)

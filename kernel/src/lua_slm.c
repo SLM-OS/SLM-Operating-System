@@ -1636,6 +1636,45 @@ static int l_inference_rate(lua_State *L) {
     return 1;
 }
 
+/**
+ * slm.telemetry_stats() - Telemetry feed introspection (M4).
+ *
+ * Returns a table with cumulative event counts per emitter topic plus
+ * the topic name strings the operator can subscribe to via
+ * `slm.telemetry_subscribe(topic, fn)`. Sample shape:
+ *   {
+ *     eviction = { topic = "tel.evi", published = 42 },
+ *     inference = { topic = "tel.inf", published = 1234 },
+ *     total_published = 1276,
+ *   }
+ */
+static int l_telemetry_stats(lua_State *L) {
+    if (!L) return 0;
+    struct admin_telemetry_feed_stats st;
+    admin_telemetry_get_feed_stats(&st);
+
+    lua_createtable(L, 0, 3);
+
+    lua_createtable(L, 0, 2);
+    lua_pushstring(L, st.eviction_topic);
+    lua_setfield(L, -2, "topic");
+    lua_pushinteger(L, (lua_Integer)st.eviction_published);
+    lua_setfield(L, -2, "published");
+    lua_setfield(L, -2, "eviction");
+
+    lua_createtable(L, 0, 2);
+    lua_pushstring(L, st.inference_topic);
+    lua_setfield(L, -2, "topic");
+    lua_pushinteger(L, (lua_Integer)st.inference_published);
+    lua_setfield(L, -2, "published");
+    lua_setfield(L, -2, "inference");
+
+    lua_pushinteger(L, (lua_Integer)(st.eviction_published +
+                                     st.inference_published));
+    lua_setfield(L, -2, "total_published");
+    return 1;
+}
+
 /* ============================================================================
  * GPU consumer toggles (admin & telemetry suite, M2)
  * ============================================================================ */
@@ -3793,6 +3832,11 @@ static const luaL_Reg slm_lib_safe[] = {
     /* Admin & telemetry suite (M3) — read-only */
     {"eviction_decision_rate", l_eviction_decision_rate},
     {"inference_rate", l_inference_rate},
+    /* Admin & telemetry suite (M4) — telemetry feed */
+    {"telemetry_publish", l_msg_publish},
+    {"telemetry_subscribe", l_msg_subscribe},
+    {"telemetry_unsubscribe", l_msg_unsubscribe},
+    {"telemetry_stats", l_telemetry_stats},
     /* CPU info */
     {"cpu_info", l_cpu_info},
     {"term_size", l_term_size},

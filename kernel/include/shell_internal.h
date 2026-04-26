@@ -131,4 +131,7 @@ int cmd_component(int argc, char **argv);
 /* Message router commands (shell_component.c) */
 int cmd_msg(int argc, char **argv);
 
+/* Telemetry feed introspection (shell_sys.c — admin & telemetry suite, M4) */
+int cmd_telemetry(int argc, char **argv);
+
 #endif /* SHELL_INTERNAL_H */

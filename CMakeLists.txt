@@ -659,6 +659,7 @@ set(TEST_SOURCES
     kernel/tests/test_latency_hist.c
     kernel/tests/test_gpu_consumer.c
     kernel/tests/test_admin_telemetry.c
+    kernel/tests/test_telemetry_feed.c
     kernel/tests/test_gpu.c
     kernel/tests/test_vfs.c
     kernel/tests/test_shell.c
