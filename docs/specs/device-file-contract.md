@@ -41,24 +41,35 @@ for host tooling, runtime blob activation, and boot-managed copies.
 
 ## Current Boot Behavior
 
-The kernel creates these standard directories at boot on the mounted
-LittleFS instance:
+The kernel mounts `/mnt/files` as LittleFS:
+
+- preferably from the persistent boot-FAT-backed image
+  `0:/slmstore/files.lfs`
+- otherwise from the legacy RAM-backed fallback when boot media is
+  unavailable or the persistent store cannot be mounted
+
+On the mounted LittleFS instance, the kernel creates these standard
+directories at boot:
 
 - `/mnt/files/policies`
 - `/mnt/files/models`
 - `/mnt/files/autoload`
 - `/mnt/files/help`
 
-## Current Limitation
+## Persistence Semantics
 
-`/mnt/files` itself is still a boot-session workspace, not yet the
-finished persistent general-purpose store.
+When boot FAT storage is available, ordinary files written under
+`/mnt/files` now persist through the LittleFS image at
+`0:/slmstore/files.lfs`.
 
-For policy replacement, that is no longer the critical limitation:
+When boot FAT storage is not available, `/mnt/files` falls back to the
+legacy RAM-backed LittleFS path and changes do not persist across
+reboot.
 
-- authoritative managed autoload blobs and `blob_autoload.conf` now
-  persist on the boot FAT volume under `0:/slmstore/` when boot media is
-  available
+The authoritative policy-autoload store remains separate:
+
+- managed autoload blobs and `blob_autoload.conf` persist under
+  `0:/slmstore/`
 - `/mnt/files` remains the standard writable ingress root for uploads,
   staging, and host-tool flows
 

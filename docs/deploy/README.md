@@ -42,7 +42,8 @@ For runtime policy replacement, authoritative boot-managed blob storage
 now lives persistently on the boot FAT volume under `0:/slmstore/`.
 `/mnt/files` remains the standard writable ingress and staging
 workspace used by `slm-put.py`, `slm-modelctl.py`, and shell upload
-flows.
+flows, and now prefers a persistent LittleFS image at
+`0:/slmstore/files.lfs` when boot FAT is available.
 
 ---
 

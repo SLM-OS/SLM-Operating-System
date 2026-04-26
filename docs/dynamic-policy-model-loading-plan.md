@@ -53,7 +53,7 @@ At-a-glance summary:
 | Scheduler live behavior validation | ✅ done | Deterministic runtime blobs affect real `ai_mlp` / `ai_ppo` decisions on `pi-5-2` |
 | File ingress core transport | ✅ partial | `put`, `xput`, and `slm-put.py` are live; telnet + serial framed upload/resume are hardware-validated |
 | Operator workflow wrapper | ✅ partial | `slm-modelctl.py` now supports subcommands, autoload management, legacy compatibility, scheduler probes, and HTTP fetch via `--http-url` |
-| Persistence / autoload | ✅ partial | Managed boot autoload exists for current eviction/scheduler blob kinds; authoritative managed copies and config now live persistently on boot FAT media under `0:/slmstore/`, while `/mnt/files` remains the staging/ingress workspace |
+| Persistence / autoload | ✅ partial | Managed boot autoload exists for current eviction/scheduler blob kinds; authoritative managed copies and config now live persistently on boot FAT media under `0:/slmstore/`, and `/mnt/files` now prefers a persistent LittleFS image at `0:/slmstore/files.lfs` with RAM fallback when boot FAT is unavailable |
 | HTTP / authenticated transport | ✅ partial | Plain-HTTP download path exists in-kernel with shell, Lua/admin, and `slm-modelctl.py --http-url`; SHA-256 checked fetch is supported, while HTTPS and signed-artifact hardening are ticketed/deferred |
 | Pi 5 deploy-model validation | ✅ done | Maintenance-OS dual boot and SDWire-assisted host-driven kernel replacement have both been validated on `pi-5-2` |
 

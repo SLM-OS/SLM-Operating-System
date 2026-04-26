@@ -614,6 +614,7 @@ set(KERNEL_SOURCES
     # unchanged. PIO data path; ADMA2 + BCM2712 cfginit deferred to
     # Stage 5 (#371).
     kernel/drivers/sdhci.c
+    kernel/drivers/persistent_lfs_store.c
     kernel/src/boot_media.c
 
     # `kernel` admin shell command (#370, dynamic-kernel-replace

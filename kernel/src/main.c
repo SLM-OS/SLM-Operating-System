@@ -24,6 +24,7 @@
 #include "vfs.h"
 #include "component.h"
 #include "blkdev.h"
+#include "persistent_lfs_store.h"
 #include "ramdisk.h"
 #include "littlefs_slm.h"
 #include "littlefs_vfs.h"
@@ -339,90 +340,112 @@ void kernel_main(void *dtb)
     blkdev_init();
     littlefs_init();
 
-    /* Create RAM disk for file storage (1 MB) */
-    struct blkdev *ramdisk = ramdisk_create_default("ramdisk0");
-    if (ramdisk) {
-        if (blkdev_register(ramdisk) == BLKDEV_OK) {
-            /* Mount LittleFS at /mnt/files */
-            struct lfs_mount *lfs_mnt = littlefs_mount_at("/mnt/files", ramdisk, true);
+    {
+        struct lfs_mount *lfs_mnt = NULL;
+        bool seed_defaults = true;
+        struct blkdev *files_dev =
+            persistent_lfs_store_create("filesstore0", &seed_defaults);
+
+        if (files_dev && blkdev_register(files_dev) == BLKDEV_OK) {
+            lfs_mnt = littlefs_mount_at("/mnt/files", files_dev, seed_defaults);
             if (lfs_mnt) {
-                INFO("  LittleFS mounted at /mnt/files (1 MB)");
+                INFO("  LittleFS mounted at /mnt/files (persistent boot-FAT image)");
+            } else {
+                WARN("Failed to mount persistent LittleFS store; falling back to RAM disk");
+            }
+        } else if (files_dev) {
+            WARN("Failed to register persistent LittleFS store; falling back to RAM disk");
+            persistent_lfs_store_destroy(files_dev);
+        }
 
-                /* Standard device-local storage layout for host tooling,
-                 * runtime policy blobs, and boot-managed copies. */
-                (void)littlefs_mkdir(lfs_mnt, "/policies");
-                (void)littlefs_mkdir(lfs_mnt, "/models");
-                (void)littlefs_mkdir(lfs_mnt, "/autoload");
+        if (!lfs_mnt) {
+            struct blkdev *ramdisk = ramdisk_create_default("ramdisk0");
+            seed_defaults = true;
+            if (ramdisk) {
+                if (blkdev_register(ramdisk) == BLKDEV_OK) {
+                    lfs_mnt = littlefs_mount_at("/mnt/files", ramdisk, true);
+                    if (lfs_mnt) {
+                        INFO("  LittleFS mounted at /mnt/files (1 MB RAM fallback)");
+                    } else {
+                        WARN("Failed to mount LittleFS");
+                    }
+                } else {
+                    WARN("Failed to register RAM disk");
+                }
+            } else {
+                WARN("Failed to create RAM disk");
+            }
+        }
 
-                /* Create a welcome file for testing */
+        if (lfs_mnt) {
+            /* Standard device-local storage layout for host tooling,
+             * runtime policy blobs, and boot-managed copies. */
+            (void)littlefs_mkdir(lfs_mnt, "/policies");
+            (void)littlefs_mkdir(lfs_mnt, "/models");
+            (void)littlefs_mkdir(lfs_mnt, "/autoload");
+
+            if (seed_defaults) {
                 int f = littlefs_file_open(lfs_mnt, "/hello.txt",
-                                           LFS_O_WRONLY | LFS_O_CREAT);
+                                           LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
                 if (f >= 0) {
                     const char *msg = "Hello from SLM-OS LittleFS!\n";
                     littlefs_file_write(lfs_mnt, f, msg, 28);
                     littlefs_file_close(lfs_mnt, f);
                 }
 
-                /* Create a readme file */
                 f = littlefs_file_open(lfs_mnt, "/readme.txt",
-                                       LFS_O_WRONLY | LFS_O_CREAT);
+                                       LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
                 if (f >= 0) {
                     const char *readme =
                         "SLM-OS LittleFS File System\n"
                         "===========================\n"
-                        "This is a RAM-backed filesystem for testing.\n"
-                        "Files will not persist across reboots.\n";
-                    littlefs_file_write(lfs_mnt, f, readme, 127);
+                        "This filesystem is persisted in 0:/slmstore/files.lfs\n"
+                        "on the boot FAT volume when that storage is available.\n";
+                    littlefs_file_write(lfs_mnt, f, readme, 158);
                     littlefs_file_close(lfs_mnt, f);
                 }
-
-                /* Initialize file-driven help system */
-                if (help_init() == 0) {
-                    INFO("  Help system initialized (/mnt/files/help/)");
-                }
-
-                /* Write demo script to filesystem */
-                {
-                    extern int demo_init(void);
-                    demo_init();
-                }
-
-                blob_autoload_init();
-
-                /* Phase 6.2c: write the embedded scheduler MLP .hef
-                 * (if the kernel was built with SCHEDULER_HEF_BLOB=...)
-                 * so `hailo load /mnt/files/scheduler_mlp.hef sched`
-                 * can reach it. Stub is a no-op when not embedded. */
-                {
-                    extern int sched_hef_init(void);
-                    sched_hef_init();
-                }
-
-                /* Phase 8: write the embedded user .hef (if built with
-                 * USER_HEF_BLOB=...) to /mnt/files/user.hef so Lua
-                 * scripts can reach it without a FAT driver. Stub is
-                 * a no-op when not embedded. */
-                {
-                    extern int user_hef_init(void);
-                    user_hef_init();
-                }
-
-                /* Write the embedded MNIST test digits (if built with
-                 * MNIST_DIGITS_DIR=...) to /mnt/files/digits/ so
-                 * slm.model_infer_file() has a known-good demo set
-                 * out of the box. Stub is a no-op when not embedded. */
-                {
-                    extern int mnist_digit_init(void);
-                    mnist_digit_init();
-                }
-            } else {
-                WARN("Failed to mount LittleFS");
             }
-        } else {
-            WARN("Failed to register RAM disk");
+
+            /* Initialize file-driven help system */
+            if (help_init() == 0) {
+                INFO("  Help system initialized (/mnt/files/help/)");
+            }
+
+            /* Write demo script to filesystem */
+            {
+                extern int demo_init(void);
+                demo_init();
+            }
+
+            blob_autoload_init();
+
+            /* Phase 6.2c: write the embedded scheduler MLP .hef
+             * (if the kernel was built with SCHEDULER_HEF_BLOB=...)
+             * so `hailo load /mnt/files/scheduler_mlp.hef sched`
+             * can reach it. Stub is a no-op when not embedded. */
+            {
+                extern int sched_hef_init(void);
+                sched_hef_init();
+            }
+
+            /* Phase 8: write the embedded user .hef (if built with
+             * USER_HEF_BLOB=...) to /mnt/files/user.hef so Lua
+             * scripts can reach it without a FAT driver. Stub is
+             * a no-op when not embedded. */
+            {
+                extern int user_hef_init(void);
+                user_hef_init();
+            }
+
+            /* Write the embedded MNIST test digits (if built with
+             * MNIST_DIGITS_DIR=...) to /mnt/files/digits/ so
+             * slm.model_infer_file() has a known-good demo set
+             * out of the box. Stub is a no-op when not embedded. */
+            {
+                extern int mnist_digit_init(void);
+                mnist_digit_init();
+            }
         }
-    } else {
-        WARN("Failed to create RAM disk");
     }
 
     /* Initialize Rust runtime */
