@@ -586,7 +586,9 @@ static void update_deadline_boost(struct task *task)
     uint8_t base = task->priority;
     uint8_t boosted = base;
     sched_set_default_deadline_thresholds(&runtime_cfg);
+#ifdef CONFIG_AI_SCHEDULER
     (void)sched_runtime_deadline_thresholds_snapshot(&runtime_cfg);
+#endif
 
     if (now >= task->deadline_ns) {
         /* Deadline missed! Boost to critical to finish ASAP */
@@ -1607,7 +1609,9 @@ void sched_rebalance_tick(uint32_t cpu)
         return;
 
     sched_rebalance_config_defaults(&runtime_cfg);
+#ifdef CONFIG_AI_SCHEDULER
     (void)sched_runtime_rebalance_config_snapshot(&runtime_cfg);
+#endif
     if (runtime_cfg.enabled == 0u)
         return;
 
