@@ -82,6 +82,15 @@ extern "C" {
     /// ARM generic timer / x86 TSC monotonic nanoseconds. Used to time
     /// `select_victim` calls for the policy-latency counter.
     fn slm_get_time_ns() -> u64;
+
+    /// M3: bucketed-histogram + EWMA rate hooks. Updates the global
+    /// eviction-consumer telemetry stored in `kernel/src/admin_telemetry.c`.
+    /// Same dt as the existing LATENCY_TOTAL_NS counter — these are
+    /// additive, not replacements. C-side no-ops if M3 hasn't built
+    /// in (won't happen — `admin_telemetry.c` is unconditionally
+    /// compiled into the kernel).
+    fn admin_telemetry_record_eviction_decision(dt_ns: u64);
+    fn admin_telemetry_record_eviction_fallback();
 }
 
 /// Construct a policy instance from a stable ASCII config name.
@@ -315,6 +324,11 @@ pub fn select_victim(candidates: &[BlockMeta]) -> Option<usize> {
         let dt = t1.saturating_sub(t0);
         LATENCY_TOTAL_NS.fetch_add(dt, Ordering::Relaxed);
         LATENCY_SAMPLES.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the C-side function is wait-free, takes only a scalar
+        // argument, and never returns an error. The admin_telemetry_*
+        // globals live in BSS so calling at any point post-boot is
+        // safe. No locks, no allocation.
+        unsafe { admin_telemetry_record_eviction_decision(dt); }
     }
     out
 }
@@ -330,6 +344,9 @@ pub fn select_victim(candidates: &[BlockMeta]) -> Option<usize> {
 pub fn update_feedback(block_id: u32, was_fault: bool) {
     if was_fault {
         FALLBACKS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: same contract as `admin_telemetry_record_eviction_decision`
+        // above — wait-free, scalar arg-less, BSS-resident.
+        unsafe { admin_telemetry_record_eviction_fallback(); }
     }
     with_active_policy(|p| p.update_feedback(block_id, was_fault));
 }
