@@ -1006,32 +1006,33 @@ static void vmm_setup_platform(void)
     }
 
     /* Camera-subsystem MMIO blocks for the #396 Phase 0 reachability
-     * probe: NVCSI receiver, RCE HSP (camera-rtcpu IPC doorbell + SM/SS),
-     * and the HSI2C controller wired to the J17/J20 camera connectors
-     * (cam_i2c → /bus@0/i2c@3180000 = i2c2 on the live nano-1 DT).
+     * probe: NVCSI receiver, RCE HSP (camera-rtcpu IPC mailbox + SS),
+     * RCE PM (R5_CTRL + PWR_STATUS state probes), and the HSI2C
+     * controller wired to the J17/J20 camera connectors via the
+     * cam_i2cmux GPIO mux. Constants in kernel/include/platform.h
+     * (TEGRA234_NVCSI_BASE etc.); pinned at compile time by
+     * kernel/tests/test_camera.c so accidental drift breaks the build.
      *
-     * These three peek targets together gate the IMX219 capture path
-     * (docs/jetson-camera-imx219-plan.md §"Phase 0 — Hardware Recon").
-     * Mappings stay in place so the future driver can reuse them
-     * without re-touching the VMM. */
+     * One 2 MB block per base — RCE_HSP and RCE_PM happen to share
+     * the 0x0B800000-aligned region above, but each gets its own
+     * block-descriptor write to keep the dependency obvious if a
+     * future change reorders the bases. l2_mmio writes are
+     * idempotent for matching descriptors. */
     {
-        uint64_t nvcsi_blk = 0x15A00000UL & ~(BLOCK_SIZE - 1);
-        uint64_t nvcsi_l2  = (nvcsi_blk >> BLOCK_SHIFT) & 0x1FF;
-        l2_mmio[nvcsi_l2] = make_block_desc(nvcsi_blk, VMM_FLAGS_DEVICE);
-        vmm_state.blocks_mapped++;
-        DEBUG_PRINT("  NVCSI L2[%lu] mapped", (unsigned long)nvcsi_l2);
-
-        uint64_t rce_hsp_blk = 0x0B950000UL & ~(BLOCK_SIZE - 1);
-        uint64_t rce_hsp_l2  = (rce_hsp_blk >> BLOCK_SHIFT) & 0x1FF;
-        l2_mmio[rce_hsp_l2] = make_block_desc(rce_hsp_blk, VMM_FLAGS_DEVICE);
-        vmm_state.blocks_mapped++;
-        DEBUG_PRINT("  RCE HSP L2[%lu] mapped", (unsigned long)rce_hsp_l2);
-
-        uint64_t cam_i2c_blk = 0x03180000UL & ~(BLOCK_SIZE - 1);
-        uint64_t cam_i2c_l2  = (cam_i2c_blk >> BLOCK_SHIFT) & 0x1FF;
-        l2_mmio[cam_i2c_l2] = make_block_desc(cam_i2c_blk, VMM_FLAGS_DEVICE);
-        vmm_state.blocks_mapped++;
-        DEBUG_PRINT("  cam_i2c L2[%lu] mapped", (unsigned long)cam_i2c_l2);
+        const uint64_t cam_bases[] = {
+            TEGRA234_NVCSI_BASE,
+            TEGRA234_RCE_HSP_BASE,
+            TEGRA234_RCE_PM_BASE,
+            TEGRA234_CAM_I2C_BASE,
+        };
+        for (size_t i = 0; i < sizeof(cam_bases) / sizeof(cam_bases[0]); i++) {
+            uint64_t blk = cam_bases[i] & ~(BLOCK_SIZE - 1);
+            uint64_t idx = (blk >> BLOCK_SHIFT) & 0x1FF;
+            l2_mmio[idx] = make_block_desc(blk, VMM_FLAGS_DEVICE);
+            vmm_state.blocks_mapped++;
+            DEBUG_PRINT("  camera MMIO 0x%lx → L2[%lu]",
+                        (unsigned long)blk, (unsigned long)idx);
+        }
     }
 
     /* RTL8168 BAR window at 0x35_2800_0000 (L1[212]). One 2 MB block

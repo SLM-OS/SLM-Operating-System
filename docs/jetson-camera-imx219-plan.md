@@ -2,17 +2,17 @@
 
 **Tracking:** 🎫 #396
 
-**Status:** ✅ Phase 0 hardware recon **GREEN** (jetson-nano-1, 2026-04-25): NVCSI MMIO, RCE HSP, and the camera I²C bus are all reachable from NS EL2; RCE is actively running and quiescent (R5 in WFI), so SLM-OS inherits a usable camera RTCPU post-kexec. Decision-matrix outcome: NVCSI Option A (direct MMIO) is the planned path, VI goes via the camera RTCPU IVC, smallest scope. Pre-hardware code-reads (IMX219 / NVCSI / VI / camera-rtcpu IVC) all done. QEMU-side mock + Lua bindings + integration test landed (#404). Awaiting camera attachment to begin Hardware Tasks.
+**Status:** ✅ Phase 0 hardware recon **GREEN** (jetson-nano-1, 2026-04-25): NVCSI MMIO, RCE HSP, and the camera I²C bus are all reachable from NS EL2; RCE is actively running and quiescent (R5 in WFI), so SLM-OS inherits a usable camera RTCPU post-kexec. IMX219 module physically attached to connector A (J17) and verified working under Linux. Decision-matrix outcome: NVCSI Option A (direct MMIO) is the planned path, VI goes via the camera RTCPU IVC, smallest scope. All Pre-Hardware Tasks done; ready to start Hardware Task 1 (Tegra HSI2C driver → IMX219 CHIP_ID readback from SLM-OS).
 
-**Progress:** 13 / 21 tasks complete.
+**Progress:** 15 / 21 tasks complete.
 
 | Section | ✅ done | ☐ open | ☐🔗 blocked | ⏸️ deferred |
 |---------|--------|---------|-------------|-------------|
-| Pre-Hardware Tasks | 6 | 2 | 0 | 0 |
+| Pre-Hardware Tasks | 8 | 0 | 0 | 0 |
 | Phase 0 — Hardware Recon | 4 | 0 | 0 | 0 |
 | Hardware Tasks (post-Phase-0) | 0 | 6 | 0 | 0 |
 | QEMU-Side Tasks | 3 | 0 | 0 | 0 |
-| **Total** | **13** | **8** | **0** | **0** |
+| **Total** | **15** | **6** | **0** | **0** |
 
 Icon legend (per project root `CLAUDE.md`): ✅ done · ☐ pending · ☐🔗 blocked on dependency · ⏸️ deferred to a future phase. The 🎫 above tracks the whole feature; per-bullet 🎫 is omitted as the convention allows.
 
@@ -523,9 +523,21 @@ Items that can land before Phase 0 hardware probing.
   - RCE HSP base **`0x0B950000`** (not the previously guessed
     `~0x03c00000` — that's BPMP HSP). RCE main MMIO at `0x0BC00000`,
     RCE PM at `0x0B9F0000`.
-- ☐ Confirm with the lab whether an IMX219-160 module is on hand and
-  on which connector it lives (J17 / J20). Pre-hardware Phase 0 work
-  doesn't need it; only the post-Phase-0 Hardware Tasks do.
+- ✅ IMX219 module attached to `jetson-nano-1` connector A (J17 /
+  CAM0) verified working under Linux 2026-04-25. dmesg confirms
+  `imx219 9-0010: tegracam sensor driver:imx219_v2.0.6` and
+  `tegra-camrtc-capture-vi: subdev imx219 9-0010 bound`; `/dev/video0`
+  is exposed. The Linux IMX219 driver wouldn't have probed without a
+  successful CHIP_ID read at I²C address 0x10, so the hardware path
+  end-to-end (carrier wiring → MUX → I²C → sensor) is good.
+
+  **Operational note** — on JetPack 5+ (R35.x / R36.x) the older
+  `FDTOVERLAYS` extlinux directive is silently ignored. Use
+  `/opt/nvidia/jetson-io/config-by-hardware.py -n 2='Camera IMX219-A'`
+  instead — it writes a separate `LABEL JetsonIO` block with the
+  supported `OVERLAYS` directive and bumps the `DEFAULT` to it.
+  Reboot to apply. (The lab nano-1 is now configured this way, so the
+  overlay loads automatically every boot until reverted.)
 - ✅ Code-read camera-rtcpu IVC bring-up — see
   `docs/jetson-camera-rtcpu-ivc-driver-notes.md`. Headlines:
   - HSP wire format is shared-mailbox + shared-semaphore (not the

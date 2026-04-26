@@ -290,6 +290,27 @@
 #define TEGRA_XUDC_BASE          0x03550000UL    /* XUDC device controller */
 
 /*
+ * Tegra234 camera subsystem MMIO bases. Verified at NS EL2 from the
+ * #396 Phase 0 recon session on jetson-nano-1 (2026-04-25): all three
+ * primary apertures (NVCSI, RCE HSP, cam_i2c) returned data without
+ * raising a CBB external abort. The plan's earlier guesses
+ * (`~0x03c00000` for camera-rtcpu HSP, `0x031c0000` for the camera
+ * I²C bus) were both wrong — actual values come from the live
+ * jetson-nano-1 device tree. See `docs/jetson-camera-imx219-plan.md`
+ * §"Phase 0" for the recon results.
+ *
+ * `kernel/mm/vmm.c` identity-maps the 2 MB block containing each
+ * base so the eventual driver code (and the `peek` shell command)
+ * can reach them; `kernel/tests/test_camera.c` pins these constants
+ * via `_Static_assert` so accidental drift breaks the build.
+ */
+#define TEGRA234_NVCSI_BASE      0x15A00000UL    /* MIPI CSI-2 receiver */
+#define TEGRA234_RCE_HSP_BASE    0x0B950000UL    /* Camera-RTCPU HSP (mailbox/semaphore IPC) */
+#define TEGRA234_RCE_PM_BASE     0x0B9F0000UL    /* RCE power-management regs (R5_CTRL, PWR_STATUS) */
+#define TEGRA234_RCE_BASE        0x0BC00000UL    /* RCE main MMIO (Falcon EVP, AST) */
+#define TEGRA234_CAM_I2C_BASE    0x03180000UL    /* HSI2C-2 = `cam_i2c` (J17/J20 via i2c-mux-gpio) */
+
+/*
  * Spinlock policy: use the runtime `spinlock_hw_enabled` flag, same as Pi 5.
  *
  * Before MMU enable, memory is non-cacheable and LSE atomics (SWPALB) cause
