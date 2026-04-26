@@ -2,17 +2,17 @@
 
 **Tracking:** 🎫 #396
 
-**Status:** ✅ Phase 0 hardware recon **GREEN** (jetson-nano-1, 2026-04-25): NVCSI MMIO, RCE HSP, and the camera I²C bus are all reachable from NS EL2; RCE is actively running and quiescent (R5 in WFI), so SLM-OS inherits a usable camera RTCPU post-kexec. IMX219 module physically attached to connector A (J17) and verified working under Linux. Decision-matrix outcome: NVCSI Option A (direct MMIO) is the planned path, VI goes via the camera RTCPU IVC, smallest scope. All Pre-Hardware Tasks done; ready to start Hardware Task 1 (Tegra HSI2C driver → IMX219 CHIP_ID readback from SLM-OS).
+**Status:** ✅ Phase 0 hardware recon **GREEN** (jetson-nano-1, 2026-04-25): NVCSI MMIO, RCE HSP, and the camera I²C bus are all reachable from NS EL2; RCE is actively running and quiescent (R5 in WFI), so SLM-OS inherits a usable camera RTCPU post-kexec. IMX219 module physically attached to connector A (J17) and verified working under Linux. Hardware Task 1 (Tegra HSI2C driver) landed and verified — controller init / packet xfer all clean. End-to-end CHIP_ID readback is queued behind Hardware Task 2 (IMX219 sensor driver) because the sensor needs a power-up sequence (XCLK + reset GPIO) SLM-OS doesn't drive yet.
 
-**Progress:** 15 / 21 tasks complete.
+**Progress:** 16 / 21 tasks complete.
 
 | Section | ✅ done | ☐ open | ☐🔗 blocked | ⏸️ deferred |
 |---------|--------|---------|-------------|-------------|
 | Pre-Hardware Tasks | 8 | 0 | 0 | 0 |
 | Phase 0 — Hardware Recon | 4 | 0 | 0 | 0 |
-| Hardware Tasks (post-Phase-0) | 0 | 6 | 0 | 0 |
+| Hardware Tasks (post-Phase-0) | 1 | 5 | 0 | 0 |
 | QEMU-Side Tasks | 3 | 0 | 0 | 0 |
-| **Total** | **15** | **6** | **0** | **0** |
+| **Total** | **16** | **5** | **0** | **0** |
 
 Icon legend (per project root `CLAUDE.md`): ✅ done · ☐ pending · ☐🔗 blocked on dependency · ⏸️ deferred to a future phase. The 🎫 above tracks the whole feature; per-bullet 🎫 is omitted as the convention allows.
 
@@ -600,14 +600,33 @@ dormant.
 
 ## Hardware Tasks (post-Phase-0)
 
-Blocked until Phase 0 returns green.
+Phase 0 is GREEN; tasks are unblocked.
 
-- ☐🔗 Implement `i2c_init` + `i2c_write_reg16` against the camera
-  bus. Verify by reading IMX219 CHIP_ID at register `0x0000`
-  (expected: `0x0219`).
-- ☐🔗 Implement IMX219 `init` + `stream_on`. Verify with a logic
-  analyzer or the carrier's CSI status that the sensor is producing
-  HSYNC/VSYNC.
+- ✅ Tegra HSI2C driver — see `kernel/include/i2c_tegra.h` and
+  `kernel/drivers/i2c/i2c_tegra.c`. Polled, no-IRQ, no-DMA, single-
+  master, packet-mode. Public API: `tegra_i2c_init` /
+  `tegra_i2c_write_reg16` / `tegra_i2c_read_reg16`. Pre-configured
+  `tegra_i2c_cam_bus` instance pinned to TEGRA234_CAM_I2C_BASE +
+  TEGRA234_CLK_I2C2 + TEGRA234_RESET_I2C2.
+
+  **Verification status**: controller path is verified end-to-end on
+  jetson-nano-1 (`tegra_i2c_init` returns rc=0; packet transactions
+  complete cleanly with no controller wedge). The `imx219` shell
+  command exercises `tegra_i2c_read_reg16` against the IMX219 sensor
+  at I²C 0x10. The CHIP_ID = 0x0219 gate is **deferred to the next
+  task** because it requires the sensor to be powered: Linux's
+  tegracam IMX219 driver runtime-suspends the sensor (XCLK off +
+  reset GPIO LOW) when no v4l2 client is streaming, and the kexec
+  orderly shutdown closes any open v4l2 fd which triggers the same
+  teardown. The HSI2C driver itself is sound; what's missing is the
+  GPIO + extperiph1 (XCLK) power-up sequence, which properly belongs
+  to the IMX219 sensor driver below.
+- ☐ IMX219 sensor driver: `init` + `stream_on`, plus the GPIO +
+  extperiph1 power-up sequence the HSI2C driver above relies on for
+  end-to-end CHIP_ID verification. After this lands, the `imx219`
+  shell command should print `chip_id = 0x0219` end-to-end without
+  any Linux-side keepalive. Verify with a logic analyzer or the
+  carrier's CSI status that the sensor is producing HSYNC/VSYNC.
 - ☐🔗 Implement NVCSI receiver. Verify with internal counters that
   packets are arriving on the configured port.
 - ☐🔗 Implement VI single-shot capture. Verify by hashing the

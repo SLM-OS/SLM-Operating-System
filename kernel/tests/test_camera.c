@@ -18,6 +18,7 @@
 
 #include "unity.h"
 #include "../include/camera.h"
+#include "../include/i2c_tegra.h"
 #include "../include/platform.h"
 #include "../include/tegra234_clocks.h"
 
@@ -153,6 +154,98 @@ static void test_camera_preprocess_mock_first_pixel(void)
     TEST_ASSERT_EQUAL_HEX32(0x00000000u, bits);
 }
 
+/* ---- Tegra HSI2C driver ----
+ *
+ * The driver is Jetson-only; on QEMU the included `i2c_tegra.h` resolves
+ * to a stub backend whose every function returns -1 with no MMIO access.
+ * The tests below exercise the cross-platform stub branch so a future
+ * patch that breaks the stub linkage trips QEMU CI before it reaches
+ * Jetson hardware.
+ *
+ * The `tegra_i2c_cam_bus` instance carries the bus base + BPMP IDs the
+ * future IMX219 sensor driver will consume. Pinning its fields
+ * compile-time on Jetson and runtime on QEMU guards against accidental
+ * reconfig (e.g. someone changing TEGRA234_CAM_I2C_BASE without also
+ * updating the bus instance — they currently share the constant via
+ * the struct initializer).
+ */
+
+/*
+ * Test: on non-Jetson builds the stubs return -1 cleanly. On Jetson,
+ * tegra_i2c_init runs against real hardware and is exercised by the
+ * `imx219` shell command — not by this unit test, which would hang
+ * if the BPMP IPC stack isn't initialised in the test harness.
+ */
+static void test_tegra_i2c_stubs_return_minus_one(void)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_IGNORE_MESSAGE("Jetson build: stubs not active "
+                        "(driver runs on real hardware via `imx219` cmd)");
+#else
+    TEST_ASSERT_EQUAL_INT(-1, tegra_i2c_init(&tegra_i2c_cam_bus));
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_write_reg16(&tegra_i2c_cam_bus, 0x10u, 0x0000u, 0u));
+    uint8_t out = 0xAAu;
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_read_reg16(&tegra_i2c_cam_bus, 0x10u, 0x0000u, &out));
+    /* Stubs must not write through the out-pointer. */
+    TEST_ASSERT_EQUAL_HEX8(0xAAu, out);
+#endif
+}
+
+/*
+ * Test: tegra_i2c_cam_bus is wired to the cam_i2c bus and the matching
+ * BPMP clock + reset IDs from kernel/include/tegra234_clocks.h. If
+ * a future patch desyncs them, the IMX219 sensor driver will appear to
+ * init successfully but talk to the wrong I²C controller.
+ */
+static void test_tegra_i2c_cam_bus_wiring(void)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_EQUAL_HEX64((uint64_t)TEGRA234_CAM_I2C_BASE,
+                            (uint64_t)tegra_i2c_cam_bus.base);
+    TEST_ASSERT_EQUAL_UINT32(TEGRA234_CLK_I2C2,   tegra_i2c_cam_bus.clk_id);
+    TEST_ASSERT_EQUAL_INT32 ((int32_t)TEGRA234_RESET_I2C2,
+                            tegra_i2c_cam_bus.reset_id);
+#else
+    /* Stub instance: base 0, clk 0, reset_id -1 (no MRQ_RESET path). */
+    TEST_ASSERT_EQUAL_HEX64(0u, (uint64_t)tegra_i2c_cam_bus.base);
+    TEST_ASSERT_EQUAL_UINT32(0u, tegra_i2c_cam_bus.clk_id);
+    TEST_ASSERT_EQUAL_INT32(-1, tegra_i2c_cam_bus.reset_id);
+#endif
+    TEST_ASSERT_NOT_NULL(tegra_i2c_cam_bus.name);
+}
+
+/*
+ * Test: the public API rejects NULL bus / NULL out / out-of-range slave
+ * addresses on every platform without needing hardware. The stub branch
+ * returns -1 unconditionally; the real driver returns -1 specifically
+ * for these argument errors per the rc table in i2c_tegra.h.
+ */
+static void test_tegra_i2c_api_arg_validation(void)
+{
+    /* NULL bus */
+    TEST_ASSERT_EQUAL_INT(-1, tegra_i2c_init(NULL));
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_write_reg16(NULL, 0x10u, 0x0000u, 0u));
+    uint8_t out = 0;
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_read_reg16(NULL, 0x10u, 0x0000u, &out));
+
+    /* read_reg16 also rejects NULL out_ptr */
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_read_reg16(&tegra_i2c_cam_bus, 0x10u, 0x0000u, NULL));
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Slave > 0x7F is invalid 7-bit address. The stub returns -1 for
+     * any input so this assertion is only meaningful on Jetson. */
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_write_reg16(&tegra_i2c_cam_bus, 0x80u, 0x0000u, 0u));
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_read_reg16(&tegra_i2c_cam_bus, 0xFFu, 0x0000u, &out));
+#endif
+}
+
 int test_suite_camera(void)
 {
     UnityBegin("Camera C-API tests");
@@ -161,6 +254,9 @@ int test_suite_camera(void)
     RUN_TEST(test_camera_open_null_safe);
     RUN_TEST(test_camera_preprocess_bad_args);
     RUN_TEST(test_camera_preprocess_mock_first_pixel);
+    RUN_TEST(test_tegra_i2c_stubs_return_minus_one);
+    RUN_TEST(test_tegra_i2c_cam_bus_wiring);
+    RUN_TEST(test_tegra_i2c_api_arg_validation);
     return UnityEnd();
 }
 
