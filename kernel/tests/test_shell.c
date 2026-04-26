@@ -16,6 +16,7 @@
 #include "../include/string.h"
 #include "../include/uart.h"
 #include "../include/slm_ffi.h"
+#include "../include/help.h"
 #include "ai_types.h"
 
 /* snprintf is part of the test kernel's runtime (kernel/lib) but isn't
@@ -1470,8 +1471,12 @@ static void test_shell_register_external_command(void)
 {
     test_custom_cmd_called = 0;
 
+    /* Test-fixture commands follow the `t_` prefix convention so the
+     * help-coverage regression test (test_every_command_has_help_entry)
+     * skips them without a per-name allow-list. See the comment in
+     * that test for the rationale. */
     shell_cmd_t cmd = {
-        .name = "testcmd",
+        .name = "t_testcmd",
         .handler = custom_cmd_handler,
         .help = "Test command",
         .category = SHELL_CAT_SHELL,  /* test fixture; category irrelevant */
@@ -1481,7 +1486,7 @@ static void test_shell_register_external_command(void)
     TEST_ASSERT_EQUAL_INT(0, ret);
 
     /* Execute the custom command */
-    ret = shell_execute("testcmd");
+    ret = shell_execute("t_testcmd");
     TEST_ASSERT_EQUAL_INT(42, ret);
     TEST_ASSERT_EQUAL_INT(1, test_custom_cmd_called);
 }
@@ -2470,6 +2475,58 @@ static void test_shell_help_file_content(void)
     /* Read help help file */
     bytes = vfs_read_path("/mnt/files/help/help.txt", buf, sizeof(buf) - 1, 0);
     TEST_ASSERT_TRUE(bytes > 50);  /* Should have substantial help text */
+}
+
+/*
+ * Coverage test: every registered command has a help_entries[] entry.
+ *
+ * Walks both builtin_commands[] (compiled-in) and external_commands[]
+ * (runtime-registered by lua/net/hailo/kernel/...) and asserts
+ * help_exists(name) returns 1 for each. Catches the failure mode where
+ * a new shell command is added without a matching HELP_TEXT entry —
+ * the user-visible symptom is `help <cmd>` printing "No help available
+ * for '<cmd>'" instead of the actual help. Pre-test, this had drifted
+ * to 27 missing entries (admin/bench/sched/eviction/imx219/telemetry/
+ * top/peek/poke/sleep/msg + the platform-specific diagnostics).
+ *
+ * Hailo / GPU / etc. external commands are only registered when their
+ * subsystem inits during boot, so the external_commands[] walk only
+ * verifies what's actually on this build's surface — fine, since
+ * help_exists() is a static lookup table not affected by which
+ * commands are live.
+ */
+static void test_every_command_has_help_entry(void)
+{
+    for (int i = 0; i < NUM_BUILTIN_COMMANDS; i++) {
+        const shell_cmd_t *cmd = &builtin_commands[i];
+        if (!help_exists(cmd->name)) {
+            uart_printf("  [FAIL] no help entry for built-in '%s'\r\n",
+                        cmd->name);
+        }
+        TEST_ASSERT_MESSAGE(help_exists(cmd->name),
+            "every built-in command must have a HELP_TEXT entry "
+            "in kernel/src/help.c");
+    }
+    for (int i = 0; i < num_external_commands; i++) {
+        const shell_cmd_t *cmd = &external_commands[i];
+        /* Skip in-test fixture commands registered by other tests via
+         * the `t_` prefix convention. Fixtures are transient and the
+         * "every command has a help entry" rule only applies to
+         * production registrations. New test fixtures must use a `t_`
+         * prefix so this skip works without per-name maintenance —
+         * see test_shell_register_external_command and the entries in
+         * test_shell_session.c (t_nested_inner / t_nested_outer). */
+        if (strncmp(cmd->name, "t_", 2) == 0) {
+            continue;
+        }
+        if (!help_exists(cmd->name)) {
+            uart_printf("  [FAIL] no help entry for external '%s'\r\n",
+                        cmd->name);
+        }
+        TEST_ASSERT_MESSAGE(help_exists(cmd->name),
+            "every shell_register_command() entry must have a "
+            "HELP_TEXT entry in kernel/src/help.c");
+    }
 }
 
 /*
@@ -3637,6 +3694,7 @@ int test_suite_shell(void)
     RUN_TEST(test_external_commands_categories_in_range);
     RUN_TEST(test_shell_help_files_exist);
     RUN_TEST(test_shell_help_file_content);
+    RUN_TEST(test_every_command_has_help_entry);
     RUN_TEST(test_shell_help_dir_listing);
     RUN_TEST(test_lua_shell_commands_registered_with_expected_mutation_modes);
 
