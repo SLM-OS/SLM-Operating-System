@@ -57,4 +57,16 @@ int hailo_decode_core_fw(const uint8_t *blob, size_t fw_size,
                          struct hailo_firmware_header *out_core_hdr,
                          const uint8_t **out_core_code);
 
+/*
+ * Diagnostic helpers implemented in kernel/inference/inference_device_hailo.c
+ * but exposed here so kernel/ai_accel/hailo/hailo_shell.c can drive
+ * them on demand (`hailo d2h`, `hailo fwlog`, `hailo fwloghex`). The
+ * shell previously redeclared each with an inline `extern`; gathered
+ * here so signature drift is a compile error rather than a silent
+ * link-time mismatch.
+ */
+void hailo_fw_drain_d2h_notifications(uint32_t max_events);
+void hailo_fw_dump_logs(void);
+void hailo_fw_dump_logs_hex(uint32_t max_bytes);
+
 #endif /* AI_ACCEL_HAILO_INTERNAL_H */

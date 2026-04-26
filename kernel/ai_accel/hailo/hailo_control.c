@@ -1851,6 +1851,132 @@ int hailo_control_get_device_information(uint32_t *out_response_len)
     return rc;
 }
 
+/* -------------------------------------------------------------------------- */
+/* RUN_BIST_TEST (opcode 0x3C, APP CPU). 5-parameter request.                 */
+/* -------------------------------------------------------------------------- */
+
+/* Wire layout matches CONTROL_PROTOCOL__pack_run_bist_test_request:
+ *   parameter_count = 5
+ *   is_top_test_length BE u32 (=1) + is_top_test u8
+ *   top_bypass_bitmap_length BE u32 (=4) + top_bypass_bitmap BE u32
+ *   cluster_index_length BE u32 (=1) + cluster_index u8
+ *   cluster_bypass_bitmap_0_length BE u32 (=4) + cluster_bypass_bitmap_0 BE u32
+ *   cluster_bypass_bitmap_1_length BE u32 (=4) + cluster_bypass_bitmap_1 BE u32
+ * Total wire body after common_header: 4 + 5 + 8 + 5 + 8 + 8 = 38 bytes. */
+struct hailo_cs_run_bist_req_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;                /* BE, = 5 */
+    uint32_t is_top_test_length;             /* BE, = 1 */
+    uint8_t  is_top_test;
+    uint32_t top_bypass_bitmap_length;       /* BE, = 4 */
+    uint32_t top_bypass_bitmap;              /* BE u32 */
+    uint32_t cluster_index_length;           /* BE, = 1 */
+    uint8_t  cluster_index;
+    uint32_t cluster_bypass_bitmap_0_length; /* BE, = 4 */
+    uint32_t cluster_bypass_bitmap_0;        /* BE u32 */
+    uint32_t cluster_bypass_bitmap_1_length; /* BE, = 4 */
+    uint32_t cluster_bypass_bitmap_1;        /* BE u32 */
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_run_bist_req_wire) == 54,
+               "RUN_BIST_TEST request wire must be 54 bytes "
+               "(16 hdr + 4 pcount + 38 body)");
+
+/* Response layout: header + parameter_count + opaque body. Public docs
+ * don't enumerate the response struct; the caller's job is to dump
+ * whatever bytes come back so we can pattern-match against the BIST
+ * top/cluster enums. */
+struct hailo_cs_run_bist_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                /* BE */
+    uint8_t  body[256];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_run_bist_resp_wire) ==
+                   sizeof(struct hailo_control_response_header) + 4 + 256,
+               "RUN_BIST_TEST response wire layout drifted — check "
+               "header struct + parameter_count + body sizing");
+
+static struct hailo_cs_run_bist_req_wire  control_run_bist_req;
+static struct hailo_cs_run_bist_resp_wire control_run_bist_resp;
+
+int hailo_control_run_bist_test(bool     is_top_test,
+                                uint32_t top_bypass_bitmap,
+                                uint8_t  cluster_index,
+                                uint32_t cluster_bypass_bitmap_0,
+                                uint32_t cluster_bypass_bitmap_1,
+                                uint8_t *out_resp,
+                                uint32_t out_resp_cap,
+                                uint32_t *out_resp_len)
+{
+    spin_lock(&control_lock);
+
+    struct hailo_cs_run_bist_req_wire *r = &control_run_bist_req;
+    memset(r, 0, sizeof(*r));
+
+    r->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->common.flags    = 0;
+    r->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_RUN_BIST_TEST);
+    r->parameter_count = hailo_cpu_to_be32(5u);
+
+    r->is_top_test_length             = hailo_cpu_to_be32(sizeof(r->is_top_test));
+    r->is_top_test                    = is_top_test ? 1u : 0u;
+    r->top_bypass_bitmap_length       = hailo_cpu_to_be32(sizeof(r->top_bypass_bitmap));
+    r->top_bypass_bitmap              = hailo_cpu_to_be32(top_bypass_bitmap);
+    r->cluster_index_length           = hailo_cpu_to_be32(sizeof(r->cluster_index));
+    r->cluster_index                  = cluster_index;
+    r->cluster_bypass_bitmap_0_length = hailo_cpu_to_be32(sizeof(r->cluster_bypass_bitmap_0));
+    r->cluster_bypass_bitmap_0        = hailo_cpu_to_be32(cluster_bypass_bitmap_0);
+    r->cluster_bypass_bitmap_1_length = hailo_cpu_to_be32(sizeof(r->cluster_bypass_bitmap_1));
+    r->cluster_bypass_bitmap_1        = hailo_cpu_to_be32(cluster_bypass_bitmap_1);
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(r, sizeof(*r),
+                                             &control_run_bist_resp,
+                                             sizeof(control_run_bist_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        /* BIST is genuinely slow — fw scribbles patterns into memory
+         * and reads them back. Give it 5 s; fw normally completes in
+         * well under that. */
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_APP,
+                                            r, sizeof(*r),
+                                            &control_run_bist_resp,
+                                            sizeof(control_run_bist_resp),
+                                            &resp_len,
+                                            /* 5 s */ 5000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_run_bist_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_RUN_BIST_TEST,
+                                       "RUN_BIST_TEST");
+    if (rc == HAILO_OK) {
+        /* Copy out the post-header body bytes for the caller to dump. */
+        if (out_resp && out_resp_cap > 0) {
+            uint32_t body_off = (uint32_t)sizeof(struct hailo_control_response_header);
+            uint32_t body_len = (resp_len > body_off) ? (resp_len - body_off) : 0;
+            if (body_len > out_resp_cap) body_len = out_resp_cap;
+            if (body_len > 0) {
+                memcpy(out_resp,
+                       (const uint8_t *)&control_run_bist_resp + body_off,
+                       body_len);
+            }
+            if (out_resp_len) *out_resp_len = body_len;
+        } else if (out_resp_len) {
+            *out_resp_len = 0;
+        }
+    }
+    spin_unlock(&control_lock);
+    return rc;
+}
+
 int hailo_control_set_context_info(
     enum hailo_cs_context_type context_type,
     const void                *network_data,

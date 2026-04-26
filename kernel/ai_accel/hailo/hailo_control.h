@@ -123,6 +123,7 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS         = 0x25,
     HAILO_CONTROL_OPCODE_CORE_IDENTIFY                        = 0x2A,
     HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION               = 0x33,
+    HAILO_CONTROL_OPCODE_RUN_BIST_TEST                        = 0x3C,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS = 0x47,
     HAILO_CONTROL_OPCODE_GET_HW_CONSTS                        = 0x48,
     /* Full table in docs/reference/hailort-control-protocol.h. */
@@ -703,6 +704,38 @@ int hailo_control_core_identify(uint32_t *out_response_len);
  * `out_response_len` is set on success; pass NULL to ignore.
  */
 int hailo_control_get_device_information(uint32_t *out_response_len);
+
+/*
+ * RUN_BIST_TEST (opcode 0x3C, CPU_ID_APP_CPU). Memory built-in
+ * self-test. The chip's BIST whitelist is bits 2..5 of the top
+ * memory bitmap (the four L4 SRAM banks); all other bits are
+ * silently ignored even when un-bypassed.
+ *
+ * Added 2026-04-25 for the Phase 8 #253 CPU_ECC investigation
+ * (`memory_bitmap=0x00001000` = bit 12 = SAGE1_ISP per the BIST
+ * top-block enum). Running BIST itself only exercises the L4
+ * banks, so it cannot directly probe bit 12 — but the response's
+ * pass/fail layout is the strongest available reference for how
+ * fw numbers chip-side memory blocks. If the response shows a
+ * bit-flagged result vector that lines up with the BIST enum, the
+ * CPU_ECC bitmap-to-block mapping is confirmed by analogy.
+ *
+ * Caller passes the request bitmap fields verbatim; this wrapper
+ * marshals them and dumps the raw response payload to `out_resp`
+ * (truncated to `out_resp_cap`). `out_resp_len` is the actual
+ * response payload size on the wire (post-common-header).
+ *
+ * BIST is destructive: fw scribbles patterns into memory then
+ * checks them. Plan to reboot the chip after running.
+ */
+int hailo_control_run_bist_test(bool     is_top_test,
+                                uint32_t top_bypass_bitmap,
+                                uint8_t  cluster_index,
+                                uint32_t cluster_bypass_bitmap_0,
+                                uint32_t cluster_bypass_bitmap_1,
+                                uint8_t *out_resp,
+                                uint32_t out_resp_cap,
+                                uint32_t *out_resp_len);
 
 /*
  * Pre-boot interrupt-mask arming. Linux's hailo_pcie_enable_interrupts

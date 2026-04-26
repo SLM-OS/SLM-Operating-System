@@ -37,6 +37,7 @@
 #include "hailo_cs_builder.h"
 #include "hailo_cs_translator.h"
 #include "hailo_infer.h"
+#include "hailo_internal.h"
 #include "hailo_tensor.h"
 #include "hailo_vdma.h"
 #include "hef_header.h"
@@ -1164,7 +1165,6 @@ static int cmd_hailo(int argc, char *argv[])
      * critical events (e.g., HEALTH_MONITOR_CPU_ECC_ERROR) actually
      * fire — at boot, after load, or only on submit. */
     if (argc >= 2 && strcmp(argv[1], "d2h") == 0) {
-        extern void hailo_fw_drain_d2h_notifications(uint32_t max_events);
         hailo_fw_drain_d2h_notifications(8);
         return 0;
     }
@@ -1355,6 +1355,79 @@ static int cmd_hailo(int argc, char *argv[])
                      hef_edge_layer_kept_h2d,
                      hef_edge_layer_kept_d2h,
                      hef_edge_layer_deduped);
+        return 0;
+    }
+
+    /* Phase 8 #253 (2026-04-25): on-demand dump of the fw CORE + APP
+     * debug-log rings. Useful immediately post-boot (before any RPCs)
+     * to see what fw reports about its own init state — historically
+     * we only saw these after a runmodel timeout, which mixes init
+     * traffic with the failure path. */
+    if (argc >= 2 && strcmp(argv[1], "fwlog") == 0) {
+        hailo_fw_dump_logs();
+        return 0;
+    }
+
+    /* Hex variant: dump raw bytes 16/line so a Hailo support engineer
+     * can decode the (opaque-binary) fwlog format. Default cap 256 B
+     * (HailoRT writes ~600 B post-boot to APP CPU, but printing 8 KB
+     * over UART blocks for ~8 s on the Pi 5 PL011 we use). Pass
+     * `hailo fwloghex 0` to dump the full ring. */
+    if (argc >= 2 && strcmp(argv[1], "fwloghex") == 0) {
+        uint32_t cap = 256;
+        if (argc >= 3) {
+            uint32_t v = 0;
+            for (const char *p = argv[2]; *p >= '0' && *p <= '9'; p++) {
+                v = v * 10u + (uint32_t)(*p - '0');
+            }
+            cap = v;  /* 0 → full ring */
+        }
+        hailo_fw_dump_logs_hex(cap);
+        return 0;
+    }
+
+    /* Phase 8 #253 CPU_ECC investigation (2026-04-25). Run RUN_BIST_TEST
+     * (opcode 0x3C) and dump the response payload. Usage:
+     *   hailo bist            — top test, no bypass (test all whitelist
+     *                            blocks: bits 2..5 = L4 banks)
+     *   hailo bist <bypass>   — top test, hex bypass mask
+     *
+     * BIST is destructive — fw scribbles patterns into memory then
+     * reads them back. Always reboot the chip after running BIST
+     * before doing anything else. */
+    if (argc >= 2 && strcmp(argv[1], "bist") == 0) {
+        uint32_t top_bypass = 0;
+        if (argc >= 3) {
+            if (parse_hex_u32(argv[2], &top_bypass) != 0) {
+                shell_printf("hailo: bist: bad hex bypass '%s'\n", argv[2]);
+                return 0;
+            }
+        }
+        uint8_t  body[256];
+        uint32_t body_len = 0;
+        shell_printf("hailo: bist top=true bypass=0x%08x cluster=0 "
+                     "cluster_bypass=(0,0)\n", top_bypass);
+        int rc = hailo_control_run_bist_test(/*is_top_test=*/true,
+                                             top_bypass,
+                                             /*cluster_index=*/0,
+                                             /*cluster_bypass_0=*/0,
+                                             /*cluster_bypass_1=*/0,
+                                             body, sizeof(body),
+                                             &body_len);
+        shell_printf("hailo: bist rc=%d body_len=%u\n", rc, body_len);
+        if (rc == HAILO_OK && body_len > 0) {
+            uint32_t cap = body_len > 64u ? 64u : body_len;
+            shell_printf("[bist] body[0..%u]:", cap);
+            for (uint32_t i = 0; i < cap; i++) {
+                if ((i & 0xf) == 0) shell_printf("\n  [%02x]", i);
+                shell_printf(" %02x", body[i]);
+            }
+            shell_puts("\n");
+        }
+#ifdef HAILO_WIRE_DEBUG
+        shell_puts("[bisect] post BIST:\n");
+        hailo_fw_drain_d2h_notifications(4);
+#endif
         return 0;
     }
 

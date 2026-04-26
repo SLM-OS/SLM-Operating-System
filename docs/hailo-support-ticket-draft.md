@@ -328,44 +328,233 @@ and not in our CS RPC wire format. It's in the relationship
 between the CS handshake bodies and what fw needs to unblock the
 boundary-input data path.
 
-## Observed differences vs HailoRT's MNIST trace
+## Update 2026-04-25 — all three asymmetries tested, all disconfirmed
 
-The bisect surfaced three concrete asymmetries between our
-handshake and what we see HailoRT do in the `trace_mmio` /
-`trace_ioctl` capture from a successful MNIST run:
+The earlier draft (2026-04-24) listed three concrete asymmetries vs
+HailoRT's MNIST trace. We've since tested each and ruled it out:
 
-1. **GET_HW_CONSTS call count.** HailoRT invokes opcode 0x48
-   four times in succession on the CORE CPU before issuing
-   SET_NETWORK_GROUP_HEADER. We invoke it once. Is there a
-   state machine requirement that reads stale data on the first
-   1-3 calls, or is this benign retry logic?
+1. **GET_HW_CONSTS call count.** Implemented 4× call as a tight
+   loop matching HailoRT's cadence. Result: CPU_ECC events shifted
+   distribution slightly, boundary submit still hangs identically.
+   Asymmetry is real but not load-bearing.
 
-2. **SET_CONTEXT_INFO body sizes.** From the fwctl wire trace,
-   HailoRT's four SET_CONTEXT_INFO bodies for MNIST are
-   102 / 153 / 528 / 161 bytes (before the 16-byte common
-   header + 4-byte parameter_count). Our ctxsmoke-derived
-   bodies for the same HEF are 102 / 16 / 37 / 103 bytes — a
-   very different distribution, especially the 528-vs-37 gap on
-   what we believe is PRELIMINARY / DYNAMIC. This suggests our
-   context translator is under-emitting actions (burst credits,
-   LCU sequencer, fetch_data_from_vdma, etc.) that a real MNIST
-   inference setup requires. fw accepts our bodies with
-   `major_status=0`, but perhaps those bodies don't fully
-   configure the NN-core state machine for real inference to
-   flow.
+2. **SET_CONTEXT_INFO body sizes.** The earlier draft claimed our
+   bodies were 102/16/37/103 vs HailoRT's 102/153/528/161 —
+   **this was a measurement error.** Our ctxsmoke probe path emits
+   minimal bodies (16/37/103 for the BSW/PRELIMINARY/DYNAMIC slots);
+   our production load path (`hailo_backend_run`) emits 63/114/489/122.
+   With the 39-byte SET_CONTEXT_INFO framing prefix added, that's
+   102/153/528/161 — **byte-for-byte match to HailoRT, modulo the
+   4 IOVA-bearing bytes per ACTIVATE_BOUNDARY action.** The
+   "we under-emit actions" theory is dead.
 
-3. **Settle pings between RPCs.** HailoRT interleaves APP_CPU
-   opcodes 0x00 (IDENTIFY) and 0x33 (GET_DEVICE_INFORMATION)
-   between CS steps — specifically between the 4 SET_CONTEXT_INFO
-   calls and CHANGE_STATUS(ENABLED). Our probe sends the 4
-   SET_CONTEXT_INFO calls back-to-back then ENABLED immediately.
-   Is fw expected to process SET_CONTEXT_INFO bodies
-   asynchronously, with APP_CPU RPCs acting as a sync barrier?
+3. **Settle pings between CS steps.** Tested at all three plausible
+   positions: pre-RESET (3 pings), post-ENABLED (4 pings), and
+   pre-ENABLED (4 pings, the position HailoRT actually uses per
+   the trace timeline). Each ping returned `rc=0` from fw. Boundary
+   submit still hangs in all three configurations. Asymmetry is real
+   but not load-bearing.
 
-The ticket's original questions still stand, but these three
-asymmetries are the most concrete handles we have for a fix.
-We can share the full fwctl capture + our probe source if the
-ticket process allows it.
+### Additional structural probes done 2026-04-25
+
+We continued investigating to narrow the gap further. Each probe
+is small, falsifiable, and tested on hardware:
+
+- **BIST (RUN_BIST_TEST opcode 0x3C).** Implemented to probe whether
+  bit 12 of `memory_bitmap` matches the BIST `top_bypass_bitmap`
+  enum. The BIST whitelist is hard-enforced to bits 2-5 (the L4
+  SRAM banks); bit 12 (which `CONTROL_PROTOCOL__bist_top_mem_block_t`
+  names `SAGE1_ISP_12`) is rejected with `major=0x400300b2`. We can
+  confirm L4 SRAM is healthy (rc=0 with all-zero result) but cannot
+  directly probe the SAGE1_ISP region. Also confirmed BIST itself
+  does not trigger ECC events.
+
+- **HailoRT SCB-style pre-trigger init sequence.** HailoRT's MMIO
+  trace at boot (lines 1463-1480) shows an 8-write sequence to BAR0
+  offsets 0x96c..0x988 — including `0x000005fa` written to 0x978
+  (the ARM Cortex-M `SCB->AIRCR` vector key). We replicated all 8
+  writes via dev_write32 before our trigger. Result: ECC distribution
+  shifted (load itself stays clean) but boundary submit still hangs
+  with same proc=0 / desc_status=0x00 signature.
+
+- **D3hot transition.** `hailo_pcie:949` puts the device in
+  `PCI_D3hot` after fw load; user open later transitions back to
+  D0. SLM-OS now does the same round-trip via the standard PCI PM
+  capability. Confirmed PMCSR transitions D0→D3→D0 (0x2008→0x200b
+  →0x2008). Result: bit-12 ECC shifts entirely out of the load and
+  pre-submit drain paths — but still fires the moment we attempt
+  the boundary submit on ch=2. The submit hang is unchanged.
+
+- **WRITE_MEMORY targeting audit.** Reviewed every host-side use of
+  `WRITE_MEMORY` (opcode 0x01) in our driver and HailoRT's MMIO
+  trace. Neither side issues `WRITE_MEMORY` during MNIST inference.
+  Our CCW upload uses VDMA descriptor lists, not FW_CONTROL.
+  Symmetric to HailoRT — not a host/device data-write divergence.
+
+- **MSI binding before fw trigger.** Already implemented prior to
+  this round. The MSI capability is programmed and handler bound
+  before the `0xE0980` trigger write. No structural difference vs
+  Linux's `hailo_pcie_enable_interrupts` flow.
+
+- **Stage-2 firmware upload.** `hailo-pcie-common.c:308-315` shows
+  Hailo-8 has only ONE upload stage — stage-2 exists only for
+  `HAILO_BOARD_TYPE_HAILO10H`. Verified there's no stage-2 to
+  replicate.
+
+### Net effect on the bit-12 ECC trigger
+
+Across the three structural changes that move state (D3hot, SCB
+sequence, settle pings), the bit-12 CPU_ECC trigger MOVES — but
+never disappears. Each change shifts which RPC or which timing
+window first surfaces it. The boundary submit on channel 2 fails
+identically in every configuration: `num_proc=0`, all
+`RemainingPageSize_Status` bytes 0x00, fw never fetches our
+descriptors.
+
+Our updated reading: the bit-12 ECC may be a **symptom** of fw
+state divergence, not the direct cause of the submit hang. Whatever
+internal state HailoRT's flow leaves the chip in lets channel 2
+proceed; ours doesn't, regardless of what host-observable bytes/
+MMIO/IRQ/power-state we replicate.
+
+### What we believe we've ruled out (host side)
+
+- Wire-format bytes (CS RPC headers, parameter framing, length prefixes)
+- Action body content (verified byte-for-byte vs HailoRT, IOVA-only diff)
+- Descriptor geometry (page size, count, channel index, alignment)
+- IOVA / inbound-window translation
+- Cache flushing (DRAM-OK probe via `dc civac` before reads)
+- Initial credit size, periph values, nn_stream_config
+- IRQ mask ordering (armed before fw trigger)
+- MSI capability programming (cap configured before trigger)
+- D3hot/D0 round-trip (now in our driver)
+- SCB/AIRCR pre-trigger init sequence
+- PCIe state (link speed, MPS, MRRS, ASPM L0s disabled both ends)
+- Firmware blob version (Pi OS blob and your distribution blob both tried)
+- Multi-stage firmware upload (Hailo-8 has only stage-1)
+
+We've published an end-to-end ushim probe that drives **your**
+`hailo_pci` ioctls with our exact byte sequences. The probe
+reproduces the boundary-submit hang identically — confirming the
+issue is not in our bare-metal kernel's MMIO/cache/IRQ paths but
+in something fw-side that our handshake fails to configure.
+
+We're out of host-side hypotheses. The questions in the
+"Specific questions" section are the right asks. Bit-12 decode is
+the highest-leverage answer — once we know what region SAGE1_ISP
+is, we can either probe it directly or stop chasing the symptom.
+
+## Update 2026-04-25 (continued) — fw debug log capture
+
+After concluding the structural-suspect sweep, we instrumented our
+driver to dump the fw debug log buffers (`BAR4[0x2000]` for APP CPU,
+`BAR4[0x3000]` for CORE CPU, 4 KB rings) as raw hex. The `host_offset`
+/ `chip_offset` header advances cleanly, so the fw IS running and
+writing log entries; the format isn't documented but appears to be
+8-byte structured records:
+
+- bytes 0..3: u32 LE — PC pointer (or address being logged)
+- bytes 4..7: u32 LE — timestamp / counter / parameter
+
+PCs in the `0x9xxxxxxx` range correspond to CORE CPU code memory;
+`0x8xxxxxxx` for APP CPU.
+
+### Captured sequence (post-boot → post-load → post-failed-runmodel)
+
+CORE chip_offset advances 32 → 164 → 268 across the three states.
+
+**Smoking-gun finding:** in the post-runmodel CORE buffer (offsets
+0xa0..0x110), an 8-iteration poll loop is visible:
+
+```
+[00a0] ... 20 45 00 90 | 98 66 01 00 | 05 00 00 00
+[00b0] 01 00 00 00 | 20 45 00 90 | a8 8d 01 00 | 05 00 00 00
+[00c0] 02 00 00 00 | 20 45 00 90 | b8 b4 01 00 | 05 00 00 00
+[00d0] 03 00 00 00 | 20 45 00 90 | c8 db 01 00 | 05 00 00 00
+[00e0] 04 00 00 00 | 20 45 00 90 | d8 02 02 00 | 05 00 00 00
+[00f0] 05 00 00 00 | 20 45 00 90 | e8 29 02 00 | 05 00 00 00
+[0100] 06 00 00 00 | 8c 01 00 90 | 6d 47 02 00 | 20 45 00 90
+[0110] f8 50 02 00 | 05 00 00 00 | 07 00 00 00
+```
+
+- PC=`0x90004520` called 8 times (a 7-iteration loop with counter
+  going 0→7). Plausibly the boundary-credit / `num_avail` poll
+  on the CORE CPU.
+- Timestamps spaced uniformly ≈ 0x2710 (10000) per iteration —
+  ten "ticks" of some internal time unit.
+- **Between iterations 6 and 7 an exception fires at PC=`0x9000018c`**
+  with timestamp `0x0002476d`. Iteration 7 then completes and the
+  loop ends.
+
+The `0x00001000` CPU_ECC_ERROR D2H notification arrives after
+loop exit. This is the first concrete fw-side address tied to the
+bit-12 trigger.
+
+### Specific decoding asks
+
+In addition to the bit-12 region question, please decode against
+fw v4.23 symbols:
+
+1. **PC = `0x9000018c`** — what function is this? It's where the
+   exception (presumably the ECC fault) is taken or handled.
+2. **PC = `0x90004520`** — what's the loop body? Almost certainly
+   tied to boundary-input handling on VDMA channel 2.
+3. The earlier-fired CS RPC PCs for context: `0x90003e24`,
+   `0x90001fd8`, `0x90003d94`, `0x90003da4` (load), and the boot
+   init sequence `0x90000030 / 0x90008b80 / 0x90000b64 /
+   0x900003f4`.
+
+If the answer to (1) is "an `__exception_handler_ecc()` style
+catch-all," the line above it will tell us the actual instruction
+that faulted (likely a load from the SAGE1_ISP region). If (2) is
+named something like `wait_for_boundary_input_credit`, we know
+the loop is what we expect — and the fact that it never observes
+a credit confirms our reading that the boundary input pipeline
+is gated on something that requires SAGE1_ISP to be in a valid
+state.
+
+### Capture method (reproducer)
+
+```
+hailo probe
+hailo boot                 (PMCSR D0->D3->D0 cycle is now in our flow)
+hailo fwloghex 256         (snapshot 1: post-boot, pre-RPC)
+hailo load /mnt/files/user.hef sched
+hailo fwloghex 256         (snapshot 2: post-load)
+hailo runmodel 1 1
+hailo fwloghex 320         (snapshot 3: post-failed-runmodel)
+```
+
+Full hex output is captured and we can attach it to the ticket.
+The serial baud rate is 115200; `hailo fwloghex 0` to dump the
+full ring takes ~8 s and tends to overflow the labctl ser2net
+buffer, so we cap at 256-320 B per call.
+
+### Reproducibility — multiple runmodel attempts, deterministic fault PC
+
+Re-issuing `runmodel` (without reload) reproduces the same
+fault. Second runmodel CORE diff:
+
+```
+[00a0] iter 0  PC=0x90004520 ts=0x00007801
+[00b0] iter 1  PC=0x90004520 ts=0x00009f11
+[00c0] iter 2 + EXCEPTION PC=0x9000018c ts=0x0000a2c9
+[00d0] iter 3  PC=0x90004520 ts=0x0000c621
+[00e0] iter 4  PC=0x90004520 ts=0x0000ed31
+[00f0] iter 5  PC=0x90004520 ts=0x00011441
+[0100] iter 6 + EXCEPTION PC=0x9000018c ts=0x00015890
+[0110] iter 7  PC=0x90004520 ts=0x00016261
+```
+
+**The exception at PC=`0x9000018c` fires multiple times in a
+single 500 ms window.** fw catches it, returns to the loop,
+faults again a few iterations later. This rules out a one-off
+transient memory glitch and indicates SAGE1_ISP is in a
+persistent invalid state that fw keeps trying to access.
+
+Both runs produce the same D2H notification body
+`0x00001000 0x028xxxxx ...` with bit-12 set, confirming the
+exception correlates with the bit-12 ECC error notification.
 
 ## Artifacts
 

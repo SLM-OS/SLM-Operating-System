@@ -125,6 +125,67 @@ static void hailo_fw_dump_log(uint32_t cpu_base_offset, const char *label)
     uart_printf("[fwlog:%s] --- end ---\r\n", label);
 }
 
+/* Public wrapper: dump CORE + APP fw debug log rings. Externally
+ * declared (via `extern`) from kernel/ai_accel/hailo/hailo_shell.c
+ * so the `hailo fwlog` shell command can drive it on demand —
+ * including immediately post-boot to see what fw says about its
+ * own initialisation, before any RPCs have run. */
+void hailo_fw_dump_logs(void)
+{
+    hailo_fw_dump_log(HAILO_FW_LOG_CORE_CPU_OFFSET, "CORE");
+    hailo_fw_dump_log(HAILO_FW_LOG_APP_CPU_OFFSET,  "APP");
+}
+
+/* Hex variant: same buffers as hailo_fw_dump_logs but emits raw bytes
+ * 16 per line. The fw log format is opaque binary (HailoRT's driver
+ * just copies bytes to userspace; the decoder lives in libhailort).
+ * The printable-replaced view in hailo_fw_dump_log is misleading
+ * because it merges multi-byte tokens at byte boundaries. The hex
+ * view preserves the bytes faithfully so a Hailo support engineer
+ * can decode them. Bounded by `max_bytes` to keep serial output
+ * tractable; pass 0 for the full ring (4088 B). */
+static void hailo_fw_dump_log_hex(uint32_t cpu_base_offset,
+                                  const char *label,
+                                  uint32_t max_bytes)
+{
+    if (!hailo_platform || !hailo_platform->bar4_read) return;
+
+    uint32_t header[2] = { 0, 0 };
+    hailo_platform->bar4_read(cpu_base_offset, header, sizeof(header));
+    uart_printf("[fwloghex:%s] header host_offset=%u chip_offset=%u\r\n",
+                label, (unsigned)header[0], (unsigned)header[1]);
+
+    uint32_t cap = max_bytes > 0 ? max_bytes : HAILO_FW_LOG_DATA_SIZE;
+    if (cap > HAILO_FW_LOG_DATA_SIZE) cap = HAILO_FW_LOG_DATA_SIZE;
+
+    /* Read into a stack buffer in 256 B chunks to keep stack usage
+     * bounded — the full 4088 B ring on the kernel stack would push
+     * us close to the 16 KB ceiling under a deep call chain. */
+    uint8_t chunk[256];
+    uint32_t printed = 0;
+    while (printed < cap) {
+        uint32_t take = (cap - printed) > sizeof(chunk)
+                        ? (uint32_t)sizeof(chunk) : (cap - printed);
+        hailo_platform->bar4_read(cpu_base_offset + HAILO_FW_LOG_HEADER_SIZE
+                                  + printed, chunk, take);
+        for (uint32_t i = 0; i < take; i += 16) {
+            uart_printf("[fwloghex:%s] [%04x]", label, printed + i);
+            uint32_t row = (take - i) > 16 ? 16 : (take - i);
+            for (uint32_t j = 0; j < row; j++) {
+                uart_printf(" %02x", chunk[i + j]);
+            }
+            uart_printf("\r\n");
+        }
+        printed += take;
+    }
+}
+
+void hailo_fw_dump_logs_hex(uint32_t max_bytes)
+{
+    hailo_fw_dump_log_hex(HAILO_FW_LOG_CORE_CPU_OFFSET, "CORE", max_bytes);
+    hailo_fw_dump_log_hex(HAILO_FW_LOG_APP_CPU_OFFSET,  "APP",  max_bytes);
+}
+
 /* Decode event_id to a short name so the output doesn't need a cross-
  * reference to d2h_events.h. Order matches D2H_EVENT_ID_t. */
 static const char *d2h_event_name(uint32_t event_id)
