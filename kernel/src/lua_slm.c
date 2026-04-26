@@ -1421,21 +1421,73 @@ static int l_sched_decision_rate(lua_State *L) {
     return 1;
 }
 
+/* Push a histogram snapshot as a Lua table with the standard shape used
+ * by every `slm.latency_histogram(consumer)` branch. Keeps bucket-key
+ * formatting in one place so future consumers (M4 telemetry, etc.)
+ * don't multiply the duplication. */
+static void push_latency_hist_table(lua_State *L,
+                                    const struct latency_hist *hist,
+                                    const char *consumer)
+{
+    lua_createtable(L, 0, 7);
+    lua_pushstring(L, consumer);
+    lua_setfield(L, -2, "consumer");
+
+    /* Bucket sub-table keyed by lower-bound ns (as a string for
+     * Lua-friendly numeric keys outside lua_Integer range — bucket
+     * 31's lower bound is ~6.9e10, which fits in lua_Integer on
+     * 64-bit but we use strings for stable JSON-like rendering). */
+    lua_createtable(L, 0, LATENCY_HIST_BUCKETS);
+    for (uint32_t i = 0; i < LATENCY_HIST_BUCKETS; i++) {
+        if (hist->buckets[i] == 0) continue;
+        char key[32];
+        uint64_t low = latency_hist_bucket_low_ns(i);
+        /* Hand-format: avoid pulling snprintf into this path. */
+        int kpos = 0;
+        char tmp[24];
+        int t = 0;
+        uint64_t v = low;
+        if (v == 0) tmp[t++] = '0';
+        while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
+        while (t > 0) key[kpos++] = tmp[--t];
+        key[kpos] = '\0';
+        lua_pushinteger(L, (lua_Integer)hist->buckets[i]);
+        lua_setfield(L, -2, key);
+    }
+    lua_setfield(L, -2, "buckets");
+
+    lua_pushinteger(L, (lua_Integer)hist->count);
+    lua_setfield(L, -2, "total");
+    lua_pushinteger(L, (lua_Integer)hist->min_ns);
+    lua_setfield(L, -2, "min_ns");
+    lua_pushinteger(L, (lua_Integer)hist->max_ns);
+    lua_setfield(L, -2, "max_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(hist, 50));
+    lua_setfield(L, -2, "p50_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(hist, 90));
+    lua_setfield(L, -2, "p90_ns");
+    lua_pushinteger(L, (lua_Integer)latency_hist_percentile(hist, 99));
+    lua_setfield(L, -2, "p99_ns");
+}
+
 /**
  * slm.latency_histogram(consumer) - Bucketed latency histogram.
  *
- * Currently only "sched" is wired; "eviction" and "inference" return nil
- * (they land in M3). Returns table:
+ * Consumer is one of: "sched", "eviction", "inference". Returns table:
  *   {
  *     buckets = { [low_ns_str] = count, ... },  -- only non-empty buckets
  *     total, min_ns, max_ns,
  *     p50_ns, p90_ns, p99_ns,
- *     consumer = "sched"
+ *     consumer = <string>
  *   }
+ *
+ * Returns nil if the consumer name is unknown or the underlying
+ * accessor fails (e.g., "sched" on a build without CONFIG_AI_SCHEDULER).
  */
 static int l_latency_histogram(lua_State *L) {
     if (!L) return 0;
     const char *consumer = luaL_checkstring(L, 1);
+    struct latency_hist hist;
 
 #if defined(CONFIG_AI_SCHEDULER)
     if (strcmp(consumer, "sched") == 0) {
@@ -1444,144 +1496,33 @@ static int l_latency_histogram(lua_State *L) {
                                            uint64_t *, uint64_t *,
                                            uint64_t *, uint64_t *, uint64_t *);
         const char *policy = sched_get_policy();
-        struct latency_hist hist;
         if (sched_ai_get_rate_stats(policy, &hist, NULL, NULL,
                                     NULL, NULL, NULL) != 0) {
             lua_pushnil(L);
             return 1;
         }
-
-        lua_createtable(L, 0, 7);
-        lua_pushstring(L, "sched");
-        lua_setfield(L, -2, "consumer");
-
-        /* Bucket sub-table keyed by lower-bound ns (as a string for
-         * Lua-friendly numeric keys outside lua_Integer range — bucket
-         * 31's lower bound is ~6.9e10, which fits in lua_Integer on
-         * 64-bit but we use strings for stable JSON-like rendering). */
-        lua_createtable(L, 0, LATENCY_HIST_BUCKETS);
-        for (uint32_t i = 0; i < LATENCY_HIST_BUCKETS; i++) {
-            if (hist.buckets[i] == 0) continue;
-            char key[32];
-            uint64_t low = latency_hist_bucket_low_ns(i);
-            /* Hand-format: avoid pulling snprintf into the hot path. */
-            int kpos = 0;
-            char tmp[24];
-            int t = 0;
-            uint64_t v = low;
-            if (v == 0) tmp[t++] = '0';
-            while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
-            while (t > 0) key[kpos++] = tmp[--t];
-            key[kpos] = '\0';
-            lua_pushinteger(L, (lua_Integer)hist.buckets[i]);
-            lua_setfield(L, -2, key);
-        }
-        lua_setfield(L, -2, "buckets");
-
-        lua_pushinteger(L, (lua_Integer)hist.count);
-        lua_setfield(L, -2, "total");
-        lua_pushinteger(L, (lua_Integer)hist.min_ns);
-        lua_setfield(L, -2, "min_ns");
-        lua_pushinteger(L, (lua_Integer)hist.max_ns);
-        lua_setfield(L, -2, "max_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 50));
-        lua_setfield(L, -2, "p50_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 90));
-        lua_setfield(L, -2, "p90_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 99));
-        lua_setfield(L, -2, "p99_ns");
-
+        push_latency_hist_table(L, &hist, "sched");
         return 1;
     }
 #endif
 
     if (strcmp(consumer, "eviction") == 0) {
-        struct latency_hist hist;
         if (admin_telemetry_get_eviction_stats(&hist, NULL, NULL,
                                                NULL, NULL, NULL) != 0) {
             lua_pushnil(L);
             return 1;
         }
-
-        lua_createtable(L, 0, 7);
-        lua_pushstring(L, "eviction");
-        lua_setfield(L, -2, "consumer");
-
-        lua_createtable(L, 0, LATENCY_HIST_BUCKETS);
-        for (uint32_t i = 0; i < LATENCY_HIST_BUCKETS; i++) {
-            if (hist.buckets[i] == 0) continue;
-            char key[32];
-            uint64_t low = latency_hist_bucket_low_ns(i);
-            int kpos = 0;
-            char tmp[24];
-            int t = 0;
-            uint64_t v = low;
-            if (v == 0) tmp[t++] = '0';
-            while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
-            while (t > 0) key[kpos++] = tmp[--t];
-            key[kpos] = '\0';
-            lua_pushinteger(L, (lua_Integer)hist.buckets[i]);
-            lua_setfield(L, -2, key);
-        }
-        lua_setfield(L, -2, "buckets");
-
-        lua_pushinteger(L, (lua_Integer)hist.count);
-        lua_setfield(L, -2, "total");
-        lua_pushinteger(L, (lua_Integer)hist.min_ns);
-        lua_setfield(L, -2, "min_ns");
-        lua_pushinteger(L, (lua_Integer)hist.max_ns);
-        lua_setfield(L, -2, "max_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 50));
-        lua_setfield(L, -2, "p50_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 90));
-        lua_setfield(L, -2, "p90_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 99));
-        lua_setfield(L, -2, "p99_ns");
+        push_latency_hist_table(L, &hist, "eviction");
         return 1;
     }
 
     if (strcmp(consumer, "inference") == 0) {
-        struct latency_hist hist;
         if (admin_telemetry_get_inference_stats(&hist, NULL, NULL,
                                                 NULL, NULL, NULL) != 0) {
             lua_pushnil(L);
             return 1;
         }
-
-        lua_createtable(L, 0, 7);
-        lua_pushstring(L, "inference");
-        lua_setfield(L, -2, "consumer");
-
-        lua_createtable(L, 0, LATENCY_HIST_BUCKETS);
-        for (uint32_t i = 0; i < LATENCY_HIST_BUCKETS; i++) {
-            if (hist.buckets[i] == 0) continue;
-            char key[32];
-            uint64_t low = latency_hist_bucket_low_ns(i);
-            int kpos = 0;
-            char tmp[24];
-            int t = 0;
-            uint64_t v = low;
-            if (v == 0) tmp[t++] = '0';
-            while (v > 0) { tmp[t++] = '0' + (v % 10); v /= 10; }
-            while (t > 0) key[kpos++] = tmp[--t];
-            key[kpos] = '\0';
-            lua_pushinteger(L, (lua_Integer)hist.buckets[i]);
-            lua_setfield(L, -2, key);
-        }
-        lua_setfield(L, -2, "buckets");
-
-        lua_pushinteger(L, (lua_Integer)hist.count);
-        lua_setfield(L, -2, "total");
-        lua_pushinteger(L, (lua_Integer)hist.min_ns);
-        lua_setfield(L, -2, "min_ns");
-        lua_pushinteger(L, (lua_Integer)hist.max_ns);
-        lua_setfield(L, -2, "max_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 50));
-        lua_setfield(L, -2, "p50_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 90));
-        lua_setfield(L, -2, "p90_ns");
-        lua_pushinteger(L, (lua_Integer)latency_hist_percentile(&hist, 99));
-        lua_setfield(L, -2, "p99_ns");
+        push_latency_hist_table(L, &hist, "inference");
         return 1;
     }
 
