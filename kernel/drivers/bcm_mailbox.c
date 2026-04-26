@@ -90,9 +90,17 @@
 
 /* MBOX_E_GENERIC / MBOX_E_TAG_UNSUPPORTED come from bcm_mailbox.h. */
 
-/* Fixed buffer size shared across every tag we send. 16-byte
- * aligned so the upper-28-bit bus-address encoding is clean. */
-#define PROP_BUF_WORDS          8
+/* Fixed buffer size shared across every tag we send. 12 words = 48
+ * bytes is the smallest 16-byte-aligned size that fits the largest
+ * single-tag payload we issue (SET_CLOCK_RATE: 12-byte payload plus
+ * end-tag word). 16-byte aligned so the upper-28-bit bus-address
+ * encoding is clean.
+ *
+ * Helpers that send tags with smaller payloads still declare
+ * `total_size = 32` in `prop_buf[0]` — VC firmware reads only up to
+ * `total_size` bytes, so the tail of the larger physical buffer is
+ * never visible to the firmware on those calls. */
+#define PROP_BUF_WORDS          12
 #define PROP_BUF_BYTES          (PROP_BUF_WORDS * 4)
 
 /* Compile-time check that this driver and the proto header agree
@@ -261,8 +269,11 @@ static int mbox_property_call(void)
 
 int bcm_mailbox_get_board_mac(uint8_t mac[6])
 {
-    /* Populate the property buffer with a single GET_BOARD_MAC tag. */
-    prop_buf[0] = PROP_BUF_BYTES;           /* total_size */
+    /* Populate the property buffer with a single GET_BOARD_MAC tag.
+     * total_size is fixed at 32 (header + 8-byte payload + end_tag);
+     * the physical buffer can be larger but firmware reads only up
+     * to `total_size` bytes. */
+    prop_buf[0] = 32u;                      /* total_size */
     prop_buf[1] = PROP_REQUEST;
     prop_buf[2] = TAG_GET_BOARD_MAC;
     prop_buf[3] = 8;                        /* tag value buffer size */
@@ -353,6 +364,136 @@ int bcm_mailbox_notify_reboot(void)
         ERROR("mailbox: NOTIFY_REBOOT tag response not success (0x%08x)",
               tag_resp);
         return MBOX_E_GENERIC;
+    }
+    return 0;
+}
+
+int bcm_mailbox_set_power_state(uint32_t device_id, bool on, bool wait)
+{
+    uint32_t state = (on ? BCM_POWER_STATE_ON : BCM_POWER_STATE_OFF)
+                   | (wait ? BCM_POWER_STATE_WAIT : 0u);
+
+    bcm_mailbox_build_set_power_state(prop_buf, device_id, state);
+
+    int rc = mbox_property_call();
+    if (rc < 0) {
+        return rc;
+    }
+
+    uint32_t tag_resp = prop_buf[4];
+    if (!(tag_resp & PROP_TAG_RESP_SUCCESS)) {
+        ERROR("mailbox: SET_POWER_STATE tag response not success (0x%08x)",
+              tag_resp);
+        return MBOX_E_GENERIC;
+    }
+
+    /* Firmware returns the actual device state in word 6. With WAIT
+     * set, this should match the requested on/off bit. Treat a
+     * mismatch as failure — the device is not in the state we asked
+     * for, so subsequent MMIO will likely hang. */
+    uint32_t actual_state = prop_buf[6];
+    if (((actual_state & BCM_POWER_STATE_ON) != 0) != on) {
+        ERROR("mailbox: SET_POWER_STATE(dev=%u, on=%d) returned "
+              "actual_state=0x%08x — device did not transition",
+              device_id, (int)on, actual_state);
+        return MBOX_E_GENERIC;
+    }
+    return 0;
+}
+
+int bcm_mailbox_set_clock_state(uint32_t clock_id, bool on)
+{
+    uint32_t state = on ? BCM_CLOCK_STATE_ON : BCM_CLOCK_STATE_OFF;
+
+    bcm_mailbox_build_set_clock_state(prop_buf, clock_id, state);
+
+    int rc = mbox_property_call();
+    if (rc < 0) {
+        return rc;
+    }
+
+    uint32_t tag_resp = prop_buf[4];
+    if (!(tag_resp & PROP_TAG_RESP_SUCCESS)) {
+        ERROR("mailbox: SET_CLOCK_STATE tag response not success (0x%08x)",
+              tag_resp);
+        return MBOX_E_GENERIC;
+    }
+
+    /* Firmware reports actual state in word 6 with the same bit-0
+     * convention as the request, plus bit 1 = "no such clock id".
+     * Either condition is a hard failure for our caller — without
+     * the clock running, subsequent MMIO to the controller will
+     * hang the AXI fabric (#414 root cause). */
+    uint32_t actual_state = prop_buf[6];
+    if (actual_state & BCM_CLOCK_STATE_NO_DEVICE) {
+        ERROR("mailbox: SET_CLOCK_STATE(clk=%u) — firmware reports "
+              "no such clock (actual_state=0x%08x)",
+              clock_id, actual_state);
+        return MBOX_E_GENERIC;
+    }
+    if (((actual_state & BCM_CLOCK_STATE_ON) != 0) != on) {
+        ERROR("mailbox: SET_CLOCK_STATE(clk=%u, on=%d) returned "
+              "actual_state=0x%08x — clock did not transition",
+              clock_id, (int)on, actual_state);
+        return MBOX_E_GENERIC;
+    }
+    return 0;
+}
+
+int bcm_mailbox_get_clock_state(uint32_t clock_id, uint32_t *state_out)
+{
+    bcm_mailbox_build_get_clock_state(prop_buf, clock_id);
+    int rc = mbox_property_call();
+    if (rc < 0) return rc;
+    if (!(prop_buf[4] & PROP_TAG_RESP_SUCCESS)) return MBOX_E_GENERIC;
+    if (state_out) *state_out = prop_buf[6];
+    return 0;
+}
+
+int bcm_mailbox_get_clock_rate(uint32_t clock_id, uint32_t *hz_out)
+{
+    bcm_mailbox_build_get_clock_rate(prop_buf, clock_id);
+    int rc = mbox_property_call();
+    if (rc < 0) return rc;
+    if (!(prop_buf[4] & PROP_TAG_RESP_SUCCESS)) return MBOX_E_GENERIC;
+    if (hz_out) *hz_out = prop_buf[6];
+    return 0;
+}
+
+int bcm_mailbox_get_clock_rate_measured(uint32_t clock_id, uint32_t *hz_out)
+{
+    bcm_mailbox_build_get_clock_rate_measured(prop_buf, clock_id);
+    int rc = mbox_property_call();
+    if (rc < 0) return rc;
+    if (!(prop_buf[4] & PROP_TAG_RESP_SUCCESS)) return MBOX_E_GENERIC;
+    if (hz_out) *hz_out = prop_buf[6];
+    return 0;
+}
+
+int bcm_mailbox_set_clock_rate(uint32_t clock_id, uint32_t requested_hz,
+                               uint32_t *actual_hz)
+{
+    bcm_mailbox_build_set_clock_rate(prop_buf, clock_id, requested_hz,
+                                     /*skip_setting_turbo=*/0);
+
+    int rc = mbox_property_call();
+    if (rc < 0) {
+        return rc;
+    }
+
+    uint32_t tag_resp = prop_buf[4];
+    if (!(tag_resp & PROP_TAG_RESP_SUCCESS)) {
+        ERROR("mailbox: SET_CLOCK_RATE tag response not success (0x%08x)",
+              tag_resp);
+        return MBOX_E_GENERIC;
+    }
+
+    /* Response: word 5 = clock_id (echoed), word 6 = actual rate.
+     * 0 means "no such clock" or "rate is fixed and could not be
+     * changed" — caller can treat this as advisory. */
+    uint32_t programmed = prop_buf[6];
+    if (actual_hz != NULL) {
+        *actual_hz = programmed;
     }
     return 0;
 }

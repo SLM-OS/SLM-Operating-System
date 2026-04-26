@@ -82,6 +82,10 @@ int cmd_timdiag(int argc, char **argv);
 int cmd_macbdiag(int argc, char **argv);
 #endif
 
+#if defined(PLATFORM_RASPI5)
+int cmd_mboxclk(int argc, char **argv);
+#endif
+
 #if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
 int cmd_rtldiag(int argc, char **argv);
 int cmd_xhcidiag(int argc, char **argv);
