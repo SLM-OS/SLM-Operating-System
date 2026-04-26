@@ -320,6 +320,42 @@ the camera channels, neither of which exists today). Phase 0 CBB
 recon (one read at `0x15A00000`) is the gate; if blocked, fall back
 to Option B.
 
+**Update — 2026-04-26: Option A is blocked.** Hardware verification
+on jetson-nano-1 shows that direct NVCSI MMIO is not accessible
+from any AP context, regardless of clock / power-domain / reset
+state:
+
+- From SLM-OS at NS EL2-VHE: `peek 0x15a00000` returns `0xFFFFFFFF`.
+  After enabling `TEGRA234_POWER_DOMAIN_VI` via `bpmp_pg_set_state`
+  AND `TEGRA234_CLK_NVCSI` via `bpmp_clk_enable`, the readback
+  remains `0xFFFFFFFF`. Writes silently fail —
+  `poke 0x15a18004 0xCAFEBABE` followed by `peek` returns
+  `0xFFFFFFFF`, the canonical "MMIO has no responder" pattern.
+- From Linux EL1: `devmem 0x15a00000` also returns `0xFFFFFFFF`
+  even while `gst-launch nvarguscamerasrc` is actively streaming
+  frames through the camera. Linux's NVCSI driver does not access
+  the MMIO directly either (csi5_fops on R35 is the only fops
+  that's actually wired up; csi4_fops is dead code).
+- `bpmp_reset_deassert(TEGRA234_RESET_NVCSI)` returns `-13`
+  (EACCES) — BPMP refuses to deassert NVCSI's reset for AP-side
+  callers, presumably because the camera RTCPU owns it.
+
+**Phase 0's "NVCSI MMIO reachable" was a false positive.** The
+recon probe almost certainly read a different address window or
+caught NVCSI in a brief post-suspend race; the conclusion does not
+hold under live verification. The architectural reality matches
+the L4T R35 code-read: **NVCSI is RTCPU-exclusive on T234**.
+
+Implication: SLM-OS must implement Option B (Camera RTCPU IVC) for
+the camera bring-up to proceed past the NVCSI gate. The
+existing `kernel/drivers/camera/nvcsi.c` direct-MMIO driver and
+the `nvcsi` shell command are kept as a diagnostic that surfaces
+the failure mode unambiguously (CIL_CONFIG readback mismatch with
+all-ones, log message naming the underlying cause) so a future
+maintainer doesn't re-walk this trail. The 20-step bring-up
+sequence above remains the canonical reference for what the RTCPU
+IVC will internally execute.
+
 ## Clocks and resets
 
 From `nvidia/drivers/video/tegra/host/t194/t194.c::t19_nvcsi_info`:

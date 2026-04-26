@@ -459,6 +459,13 @@ set(KERNEL_SOURCES
     # -1 from every function.
     kernel/drivers/camera/imx219.c
 
+    # NVCSI receiver driver (#396 Hardware Task 3) — direct-MMIO
+    # bring-up of the Tegra234 MIPI CSI-2 receiver for the IMX219's
+    # 2-lane DPHY RAW10 stream. Mirrors the historical T194 csi4_fops
+    # programming sequence; T234 keeps the same hardware register
+    # layout despite L4T R35 routing everything through RTCPU.
+    kernel/drivers/camera/nvcsi.c
+
     # Interrupt controller and timer (ARM64 only — x86-64 uses pic.c + timer_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/gic.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/timer.c>

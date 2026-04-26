@@ -654,6 +654,27 @@ Phase 0 is GREEN; tasks are unblocked.
   story so future Tegra register-set ports don't repeat it.
 - ☐🔗 Implement NVCSI receiver. Verify with internal counters that
   packets are arriving on the configured port.
+  - **Option A (direct MMIO) — BLOCKED 2026-04-26.** Hardware
+    verification on jetson-nano-1 confirmed NVCSI MMIO is not
+    accessible from any AP context: `peek 0x15a00000` returns
+    0xFFFFFFFF from both SLM-OS at NS EL2 and Linux at EL1
+    (`devmem`), even while gstreamer is actively streaming via the
+    Linux camera stack. `bpmp_reset_deassert(TEGRA234_RESET_NVCSI)`
+    returns -13 (EACCES). Phase 0's "NVCSI MMIO reachable" was a
+    false positive — the architectural reality matches the L4T R35
+    code-read: NVCSI is RTCPU-exclusive on T234.
+    `kernel/drivers/camera/nvcsi.c` and the `nvcsi` shell command
+    are kept as diagnostics that surface the failure mode
+    unambiguously. See `docs/jetson-camera-nvcsi-driver-notes.md`
+    "Update — 2026-04-26: Option A is blocked" for the evidence.
+  - **Option B (Camera RTCPU IVC) — required.** Reframes Hardware
+    Task 3 as a stand-up of the camera-rtcpu IVC layer plus the
+    `CAPTURE_PHY_STREAM_OPEN_REQ` /
+    `CAPTURE_CSI_STREAM_SET_CONFIG_REQ` two-message setup. Same IVC
+    transport SLM-OS will need for VI single-shot capture
+    (Hardware Task 4 has no Option A — VI is RTCPU-only). Estimated
+    1-2 weeks for the IVC layer, mirrors the existing BPMP IVC
+    pattern (`docs/jetson-bpmp-ipc-plan.md`).
 - ☐🔗 Implement VI single-shot capture. Verify by hashing the
   captured buffer; the hash must change between two captures of
   different scenes.

@@ -5403,4 +5403,81 @@ int cmd_imx219(int argc, char *argv[])
     uart_puts("=== End ===\r\n");
     return 0;
 }
+
+#include "nvcsi.h"
+
+/*
+ * nvcsi — bring up the Tegra234 NVCSI receiver for the IMX219-A
+ * port and dump the post-init interrupt status registers.
+ *
+ * #396 Hardware Task 3 verification gate. After this returns 0,
+ * NVCSI is armed (PP_EN_CTRL = 1) and waiting for D-PHY packets.
+ * Actual frame capture requires (a) the IMX219 to be told to start
+ * streaming over I²C — `imx219_stream_on` is a future task, the
+ * `imx219` shell command leaves MODE_SELECT = 0 — and (b) VI to
+ * accept the resulting frames. INTR_STATUS / ERR_INTR_STATUS are
+ * the smoke-test signal: 0 means the receiver came up clean, any
+ * non-zero value indicates a header/timing error.
+ *
+ * Prerequisites:
+ *   1. IMX219 has been powered up via `imx219` (XCLK + reset).
+ *      NVCSI itself doesn't need the sensor running, but without a
+ *      sensor the INTR_STATUS will stay 0 forever (no packets ever
+ *      arrive).
+ *   2. NVCSI MMIO at TEGRA234_NVCSI_BASE is mapped (vmm.c).
+ *   3. BPMP IPC is up (this command's chain of MRQ calls — VI
+ *      power-domain enable, NVCSI clock enable, NVCSI reset
+ *      deassert — asserts that on entry).
+ *
+ * Expected output on a working setup:
+ *   === NVCSI bring-up + intr-status dump (port imx219_a) ===
+ *     nvcsi_stream_init:    rc=0
+ *     INTR_STATUS:          0x00000000
+ *     ERR_INTR_STATUS:      0x00000000
+ *     *** NVCSI armed — Hardware Task 3 GREEN (idle baseline) ***
+ */
+int cmd_nvcsi(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    uart_puts("\r\n=== NVCSI bring-up + intr-status dump "
+              "(port imx219_a) ===\r\n");
+
+    int rc = nvcsi_stream_init(&nvcsi_imx219_a_port);
+    uart_printf("  nvcsi_stream_init:    rc=%d\r\n", rc);
+    if (rc != 0) {
+        if (rc == -2) {
+            uart_puts("  *** BPMP power-domain or clock enable   ***\r\n");
+            uart_puts("  *** failed — check BPMP IVC handshake   ***\r\n");
+            uart_puts("  *** healthy via 'bpmp' shell command.   ***\r\n");
+        } else if (rc == -3) {
+            uart_puts("  *** CIL_CONFIG readback mismatch — NVCSI ***\r\n");
+            uart_puts("  *** MMIO is being filtered by CBB or the ***\r\n");
+            uart_puts("  *** clock isn't actually running.        ***\r\n");
+        } else {
+            uart_puts("  *** Bad arguments — fix the port struct. ***\r\n");
+        }
+        uart_puts("=== End ===\r\n");
+        return -1;
+    }
+
+    uint32_t intr = 0, err = 0;
+    int sr = nvcsi_get_intr_status(&nvcsi_imx219_a_port, &intr, &err);
+    uart_printf("  INTR_STATUS:          0x%08x\r\n", (unsigned)intr);
+    uart_printf("  ERR_INTR_STATUS:      0x%08x\r\n", (unsigned)err);
+    if (sr == 0 && intr == 0u && err == 0u) {
+        uart_puts("  *** NVCSI armed — Hardware Task 3 GREEN "
+                  "(idle baseline) ***\r\n");
+    } else if (intr == 0xFFFFFFFFu || err == 0xFFFFFFFFu) {
+        uart_puts("  *** All-ones readback — NVCSI MMIO blocked  ***\r\n");
+        uart_puts("  *** by CBB firewall or address mismap.      ***\r\n");
+    } else {
+        uart_puts("  *** Non-zero INTR_STATUS — receiver saw a   ***\r\n");
+        uart_puts("  *** packet or fault during init. Inspect    ***\r\n");
+        uart_puts("  *** bits per docs/reference/l4t-csi4_registers.h ***\r\n");
+    }
+
+    uart_puts("=== End ===\r\n");
+    return 0;
+}
 #endif /* PLATFORM_JETSON_ORIN_NANO */

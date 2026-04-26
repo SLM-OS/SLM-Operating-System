@@ -92,6 +92,7 @@ int cmd_hspdiag(int argc, char **argv);
 int cmd_bpmp(int argc, char **argv);
 int cmd_pcietrain(int argc, char **argv);
 int cmd_imx219(int argc, char **argv);
+int cmd_nvcsi(int argc, char **argv);
 #endif
 
 /* Dashboard command (shell_top.c) */
