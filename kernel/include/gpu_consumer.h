@@ -15,9 +15,11 @@
  * human-readable reason in `out_reason`. Toggling OFF always succeeds.
  *
  * Storage is `atomic_bool[3]`; reads are lock-free for the dispatch
- * fast path. Writes serialise on a single spin-free CAS via the
- * atomic itself; only the `last_change_ms` bookkeeping needs an
- * ordered write.
+ * fast path. Writes use a plain `atomic_store_explicit` — concurrent
+ * writers race naturally, last-writer-wins. The `last_change_ms`
+ * bookkeeping is a separate plain-uint64 store; on 64-bit ARM/x86
+ * the hardware store is atomic, so a reader either sees the new
+ * toggle + new timestamp or the old toggle + old timestamp.
  */
 
 #ifndef GPU_CONSUMER_H
