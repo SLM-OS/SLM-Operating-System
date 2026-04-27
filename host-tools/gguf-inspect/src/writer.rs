@@ -102,6 +102,15 @@ impl GgufBuilder {
         if self.alignment.is_some() {
             // Avoid duplicating if caller already added it.
             if !self.kvs.iter().any(|(k, _)| k == "general.alignment") {
+                // The GGUF spec stores `general.alignment` as a u32 KV
+                // (and llama.cpp emits it that way). A caller asking
+                // for an alignment that doesn't fit is almost certainly
+                // a test bug — panic loudly rather than silently
+                // truncate.
+                assert!(
+                    alignment <= u32::MAX as u64,
+                    "alignment {alignment} must fit in u32",
+                );
                 self.kvs.push((
                     "general.alignment".to_string(),
                     MetaValue::Uint32(alignment as u32),
