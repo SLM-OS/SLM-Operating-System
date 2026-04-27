@@ -19,6 +19,7 @@
 #include "unity.h"
 #include "../include/camera.h"
 #include "../include/camrtc.h"
+#include "../include/camrtc_capture.h"
 #include "../include/camrtc_channels.h"
 #include "../include/gpio_tegra.h"
 #include "../include/i2c_tegra.h"
@@ -589,6 +590,35 @@ _Static_assert(TEGRA_IVC_HEADER_SIZE == 128u,
     "TEGRA_IVC_HEADER_SIZE drift (2 * 64 B per tegra-ivc spec)");
 _Static_assert(CAMRTC_HSP_CH_SETUP == 0x44u,
     "CAMRTC_HSP_CH_SETUP opcode drift (RCE protocol ID)");
+
+/* Capture-control message wire-format pins. The structs are
+ * exchanged byte-for-byte with RCE firmware over the IVC ring;
+ * these asserts catch field-reorder or struct-resize regressions
+ * at compile time. Header is 8 B, PHY_STREAM_OPEN_REQ body is
+ * 16 B, PHY_STREAM_OPEN_RESP body is 8 B per L4T's
+ * `docs/reference/l4t-camrtc-capture-messages.h`. */
+_Static_assert(sizeof(struct capture_msg_header) == 8,
+    "capture_msg_header must be exactly 8 bytes (RCE wire format)");
+_Static_assert(sizeof(struct capture_phy_stream_open_req) == 16,
+    "capture_phy_stream_open_req must be exactly 16 bytes (RCE wire format)");
+_Static_assert(sizeof(struct capture_phy_stream_open_resp) == 8,
+    "capture_phy_stream_open_resp must be exactly 8 bytes (RCE wire format)");
+_Static_assert(offsetof(struct capture_msg_header, msg_id) == 0,
+    "capture_msg_header.msg_id must be at offset 0");
+_Static_assert(offsetof(struct capture_msg_header, transaction) == 4,
+    "capture_msg_header.transaction must be at offset 4");
+_Static_assert(offsetof(struct capture_phy_stream_open_req, stream_id) == 0,
+    "capture_phy_stream_open_req.stream_id must be at offset 0");
+_Static_assert(offsetof(struct capture_phy_stream_open_req, csi_port) == 4,
+    "capture_phy_stream_open_req.csi_port must be at offset 4");
+_Static_assert(offsetof(struct capture_phy_stream_open_req, phy_type) == 8,
+    "capture_phy_stream_open_req.phy_type must be at offset 8");
+_Static_assert(CAPTURE_PHY_STREAM_OPEN_REQ == 0x36u,
+    "CAPTURE_PHY_STREAM_OPEN_REQ opcode drift (L4T msg id)");
+_Static_assert(CAPTURE_PHY_STREAM_OPEN_RESP == 0x37u,
+    "CAPTURE_PHY_STREAM_OPEN_RESP opcode drift (L4T msg id)");
+_Static_assert(CAMRTC_HSP_IRQ == 0x00u,
+    "CAMRTC_HSP_IRQ opcode drift (L4T uses 0x00 for unidirectional IVC notify)");
 
 /* =============================================================================
  * Tegra234 camera-subsystem MMIO bases — Phase 0 verified

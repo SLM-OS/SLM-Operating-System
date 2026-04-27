@@ -88,6 +88,7 @@ int camrtc_init(void);
  * `docs/reference/l4t-camrtc-commands.h:42-77`. Driver-internal
  * constants for HELLO / PROTOCOL / RESUME stay file-local.
  */
+#define CAMRTC_HSP_IRQ            0x00u
 #define CAMRTC_HSP_PING           0x45u
 #define CAMRTC_HSP_FW_HASH        0x46u
 #define CAMRTC_HSP_CH_SETUP       0x44u
@@ -119,6 +120,20 @@ int camrtc_init(void);
  */
 int camrtc_send_msg(uint32_t msg_id, uint32_t param,
                     uint32_t *resp_param, uint32_t timeout_us);
+
+/*
+ * Fire-and-forget mailbox send for the unidirectional opcodes
+ * (CAMRTC_HSP_IRQ in particular — used by the IVC ring transport
+ * to wake RCE after advancing a ring counter). Drains the TX
+ * mailbox first so the message lands cleanly, then writes
+ * `CAMRTC_HSP_MSG(msg_id, param)` to VM-TX and returns immediately
+ * — no response correlation, no RX read.
+ *
+ * Returns 0 on success, -1 if uninitialised, -2 on TX-drain
+ * timeout (also `WARN`-logged).
+ */
+int camrtc_send_irq(uint32_t msg_id, uint32_t param,
+                    uint32_t timeout_us);
 
 /*
  * Diagnostic dump: print HSP_DIMENSIONING, R5_CTRL_0 (FWLOADDONE bit),
