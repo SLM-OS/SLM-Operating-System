@@ -1239,6 +1239,12 @@ void scheduler_remove_task(struct task *task)
         rq_unlock_irqrestore(cpu, flags);
         return;
     }
+
+    /* Retry budget exhausted — assigned_cpu changed 8 times in our window,
+     * which should be effectively impossible. Log loudly so the dequeue
+     * miss is visible if it ever happens. */
+    WARN("scheduler_remove_task: gave up after 8 retries on task '%s'",
+         task->name);
 }
 
 /*
@@ -1287,7 +1293,14 @@ void scheduler_terminate_task(struct task *task)
         locked = 1;
     }
     if (!locked) {
-        return;  /* Gave up after 8 retries — extremely unlikely. */
+        /* Retry budget exhausted. The task is left in its prior state
+         * (NOT TASK_TERMINATED), which means task_destroy will refuse
+         * to reclaim it (per kernel/CLAUDE.md "Leaky tests"). Log so
+         * the leak is visible — should never happen in practice. */
+        WARN("scheduler_terminate_task: gave up after 8 retries on task '%s' "
+             "(state=%d) — leaking task slot",
+             task->name, (int)task->state);
+        return;
     }
 
 #if CONFIG_WORK_STEALING

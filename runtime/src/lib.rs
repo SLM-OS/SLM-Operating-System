@@ -4610,6 +4610,18 @@ pub extern "C" fn rust_infer_stats(stats: *mut inference::InferenceStats) -> i32
     0
 }
 
+/// RAII releaser for FFI-busy spinflags. Used by `rust_infer_bench`,
+/// `rust_infer_classify`, and `rust_infer_and_print` to serialise
+/// concurrent callers against the static-mut output buffers each owns
+/// (see those functions for the rationale).
+struct FfiBusyGuard<'a>(&'a core::sync::atomic::AtomicBool);
+
+impl Drop for FfiBusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Run inference benchmark: N iterations, print min/avg/max latency.
 #[no_mangle]
 pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
@@ -4635,13 +4647,7 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
     {
         return -1;
     }
-    struct Releaser<'a>(&'a AtomicBool);
-    impl Drop for Releaser<'_> {
-        fn drop(&mut self) {
-            self.0.store(false, Ordering::Release);
-        }
-    }
-    let _release = Releaser(&BENCH_FFI_BUSY);
+    let _release = FfiBusyGuard(&BENCH_FFI_BUSY);
 
     static BENCH_INPUT: [f32; 784] = [0.0; 784];
     static mut BENCH_OUTPUT: [f32; 64] = [0.0; 64];

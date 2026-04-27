@@ -546,15 +546,22 @@ impl InferenceEngine {
         let ph: u32 = 0;
         let pw: u32 = 0;
 
-        // Use checked subtraction so a kernel larger than the padded
-        // input doesn't underflow u32 to a giant h_out/w_out (which
-        // would then alloc_tensor a huge — and probably failed —
-        // workspace, or for unbounded sizes silently corrupt).
+        // Use checked arithmetic throughout so a kernel larger than
+        // the padded input doesn't underflow u32 to a giant h_out/
+        // w_out (which would then alloc_tensor a huge — and probably
+        // failed — workspace, or for unbounded sizes silently
+        // corrupt). `2 * ph` is also checked so a future caller
+        // threading a large `ph` through can't wrap before the add
+        // even reaches checked_add.
+        let two_ph = 2u32.checked_mul(ph)
+            .ok_or(EngineError::ShapeMismatch)?;
+        let two_pw = 2u32.checked_mul(pw)
+            .ok_or(EngineError::ShapeMismatch)?;
         let h_padded = input.dim(2)
-            .checked_add(2 * ph)
+            .checked_add(two_ph)
             .ok_or(EngineError::ShapeMismatch)?;
         let w_padded = input.dim(3)
-            .checked_add(2 * pw)
+            .checked_add(two_pw)
             .ok_or(EngineError::ShapeMismatch)?;
         let h_out = h_padded.checked_sub(kh)
             .ok_or(EngineError::ShapeMismatch)? / sh + 1;
