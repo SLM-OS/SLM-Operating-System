@@ -1055,7 +1055,7 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
         //     hard-codes the scan to the weight pool.
         eviction::set_eviction_policy(Box::new(Tagged("SelfTestC")));
         eviction::set_eviction_policy_for_pool(
-            mm::eviction::PoolType::Workspace,
+            eviction::PoolType::Workspace,
             Box::new(GpuBacked("SelfTestGpuS")),
         );
         if !eviction::registry::any_active_policy_has_gpu_backend() {
@@ -1067,7 +1067,7 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
         // (e) Revert workspace pool to a non-GPU policy. Both pools
         //     now non-GPU; scan must return false.
         eviction::set_eviction_policy_for_pool(
-            mm::eviction::PoolType::Workspace,
+            eviction::PoolType::Workspace,
             Box::new(Tagged("SelfTestD")),
         );
         if eviction::registry::any_active_policy_has_gpu_backend() {
@@ -2274,21 +2274,21 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         eviction::reset_to_default();
         check!(b"per_pool_default_weight_is_lru\0",
                eviction::get_eviction_policy_name_for_pool(
-                   mm::eviction::PoolType::Weight) == "LRU");
+                   eviction::PoolType::Weight) == "LRU");
         check!(b"per_pool_default_workspace_is_lru\0",
                eviction::get_eviction_policy_name_for_pool(
-                   mm::eviction::PoolType::Workspace) == "LRU");
+                   eviction::PoolType::Workspace) == "LRU");
 
         // Install FirstCandidate on workspace only — weight stays LRU.
         eviction::set_eviction_policy_for_pool(
-            mm::eviction::PoolType::Workspace,
+            eviction::PoolType::Workspace,
             Box::new(eviction::FirstCandidatePolicy));
         check!(b"per_pool_weight_still_lru\0",
                eviction::get_eviction_policy_name_for_pool(
-                   mm::eviction::PoolType::Weight) == "LRU");
+                   eviction::PoolType::Weight) == "LRU");
         check!(b"per_pool_workspace_is_first_candidate\0",
                eviction::get_eviction_policy_name_for_pool(
-                   mm::eviction::PoolType::Workspace) == "FirstCandidate");
+                   eviction::PoolType::Workspace) == "FirstCandidate");
 
         // select_victim with Weight candidates uses the weight policy.
         let w_cands = [make_block(1), make_block(2)];
@@ -2299,13 +2299,13 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         // policy (FirstCandidate always picks index 0).
         let ws_cands = [
             eviction::BlockMeta {
-                block_id: 10, pool_type: mm::eviction::PoolType::Workspace,
+                block_id: 10, pool_type: eviction::PoolType::Workspace,
                 model_id: 0, layer_idx: 0, last_access_time: 100,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,
             },
             eviction::BlockMeta {
-                block_id: 11, pool_type: mm::eviction::PoolType::Workspace,
+                block_id: 11, pool_type: eviction::PoolType::Workspace,
                 model_id: 0, layer_idx: 0, last_access_time: 50,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,
@@ -2318,7 +2318,7 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         // LRU on the same candidates would pick index 1 (older).
         // Verify by switching workspace back to LRU and re-checking.
         eviction::set_eviction_policy_for_pool(
-            mm::eviction::PoolType::Workspace,
+            eviction::PoolType::Workspace,
             Box::new(eviction::LruPolicy::new()));
         let ws_pick_lru = eviction::select_victim(&ws_cands);
         check!(b"per_pool_workspace_lru_picks_older\0",
@@ -2328,9 +2328,9 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         eviction::reset_to_default();
         check!(b"per_pool_reset_both_lru\0",
                eviction::get_eviction_policy_name_for_pool(
-                   mm::eviction::PoolType::Weight) == "LRU" &&
+                   eviction::PoolType::Weight) == "LRU" &&
                eviction::get_eviction_policy_name_for_pool(
-                   mm::eviction::PoolType::Workspace) == "LRU");
+                   eviction::PoolType::Workspace) == "LRU");
 
         puts(b"\n-- eviction: per-policy counters (#115) --\n\0");
 
@@ -2454,13 +2454,13 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         // "inactive" and the policy falls back to LRU (index 1, older).
         let cands_113 = [
             mm::eviction::BlockMeta {
-                block_id: 100, pool_type: mm::eviction::PoolType::Weight,
+                block_id: 100, pool_type: eviction::PoolType::Weight,
                 model_id: 0, layer_idx: 0, last_access_time: 500,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,
             },
             mm::eviction::BlockMeta {
-                block_id: 101, pool_type: mm::eviction::PoolType::Weight,
+                block_id: 101, pool_type: eviction::PoolType::Weight,
                 model_id: 1, layer_idx: 0, last_access_time: 100,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,

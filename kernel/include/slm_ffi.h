@@ -302,6 +302,12 @@ extern RustPoolStats rust_workspace_pool_stats(void);
  * Returns 1 when enabled, 0 when disabled. */
 extern int rust_eviction_enabled(void);
 
+/* True (1) if any active eviction policy declares
+ * `EvictionPolicy::has_gpu_backend() == true` across either pool;
+ * 0 otherwise. Wrapped by `eviction_active_policy_has_gpu_backend()`
+ * in slm_ffi.c which `gpu_consumer_set` consults. */
+extern int rust_eviction_active_policy_has_gpu_backend(void);
+
 /* Copy the active policy's name into a caller-owned buffer.
  * Returns number of bytes written (excluding the null terminator). */
 extern size_t rust_eviction_policy_name(uint8_t *out_buf, size_t buf_len);

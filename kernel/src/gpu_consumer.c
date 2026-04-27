@@ -122,10 +122,18 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
      *              is returned via `out_reason` to make the gap
      *              visible in `gpu use status`.
      *
-     *   eviction:  SCAFFOLDED ONLY. Eviction policies live in the
-     *              Rust runtime and don't expose a GPU dispatch
-     *              entry point yet. Same accept-with-warning
-     *              behavior as sched. */
+     *   eviction:  SCAFFOLDED ONLY. The eviction trait now exposes
+     *              `EvictionPolicy::has_gpu_backend()` (see
+     *              docs/specs/gpu-policy-models.md PR-4) and the
+     *              Rust→C trampoline `eviction_active_policy_has_gpu_backend`
+     *              scans both pools. Every shipped policy
+     *              (LRU/LFU/ARC/CACHEUS/MLP/XGBoost) returns false
+     *              today; the toggle accepts on/off so operators
+     *              can pre-configure intent before a GPU-capable
+     *              eviction policy + matching
+     *              `slm_gpu_run_eviction_inference` dispatch land
+     *              (PR-6). Symmetric accept-with-warning behavior
+     *              to sched. */
     switch (c) {
     case GPU_CONSUMER_SCHED:
         if (!active_sched_policy_has_gpu_backend()) {

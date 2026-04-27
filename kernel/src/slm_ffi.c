@@ -283,8 +283,6 @@ int slm_model_gpu_dispatch_enabled(uint32_t model_index)
     return rust_model_gpu_dispatch_enabled(model_index);
 }
 
-extern int rust_eviction_active_policy_has_gpu_backend(void);
-
 bool eviction_active_policy_has_gpu_backend(void)
 {
     /* Cross the Rust/C boundary once and surface the boolean. The
