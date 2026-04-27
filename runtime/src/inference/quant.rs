@@ -249,8 +249,23 @@ fn quantize_q8k_block(src: &[f32], dst: &mut [u8]) {
     dst[Q8K_OFF_D + 3] = d_bytes[3];
 }
 
-/// `(int)round_half_away_from_zero(f)` — matches `nearest_int` in
-/// llama.cpp. Used by the Q8_K quantizer.
+/// `(int)round_half_away_from_zero(f)` — round-half-AWAY-from-zero
+/// rounding for the Q8_K quantizer.
+///
+/// **Note on bit-identity with llama.cpp:** GGML's
+/// `ggml_vec_dot_q4_K_q8_K`-companion `nearest_int` uses the
+/// magic-add trick `fval + 12582912.f`, which on x86-64 with the
+/// default rounding mode is round-half-to-EVEN (banker's rounding).
+/// SLM-OS rounds away from zero. The two agree everywhere except
+/// at exact `iscale * x = ±k.5` ties — vanishingly rare with a
+/// real f32 multiply, so the practical impact on Q8_K inputs is
+/// nil. Bit-identity with HuggingFace / llama.cpp Q8_K outputs is
+/// therefore *not* guaranteed; numeric closeness within Q8_K's
+/// per-element noise floor (~1/127 of the block max) is.
+///
+/// If a future caller needs strict bit-equality, swap to the
+/// magic-add trick and update the `nearest_int_rounds_*` test to
+/// pin `nearest_int(0.5) == 0`, `nearest_int(1.5) == 2`.
 #[inline]
 fn nearest_int(f: f32) -> i32 {
     if f >= 0.0 {
