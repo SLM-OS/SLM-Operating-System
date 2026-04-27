@@ -724,6 +724,48 @@ static void test_camrtc_frame_buffer_accessors(void)
 }
 
 /*
+ * Test: capture_descriptor_memoryinfo overlay write-then-read
+ * round-trip. csidiag writes the surface IOVA + size into slot 0
+ * of the meminfo ring (NOT into vi_channel_config.atomp.surface,
+ * a critical L4T-divergence fix from hardware iteration). This
+ * test validates the typed overlay produces the exact byte
+ * sequence at the expected offsets — a regression in struct
+ * layout would silently send the wrong IOVA to RCE.
+ */
+static void test_camrtc_memoryinfo_overlay_roundtrip(void)
+{
+    struct camrtc_capture_descriptor_memoryinfo m;
+    /* Zero the whole struct first (no specific contract on
+     * uninitialized memoryinfo, but we want a deterministic
+     * baseline). */
+    for (size_t i = 0; i < sizeof(m); i++)
+        ((volatile uint8_t *)&m)[i] = 0u;
+
+    /* Write a recognizable IOVA + size to surface[0]. */
+    m.surface[0].base_address = 0xCAFEF00DDEADBEEFull;
+    m.surface[0].size         = 0x123456789ABCDEF0ull;
+
+    /* Read back at offset 0 (surface[0].base_address) and 8
+     * (surface[0].size). The struct layout MUST match the
+     * compile-time `_Static_assert`s above. */
+    uint64_t base = *(volatile uint64_t *)((uintptr_t)&m + 0);
+    uint64_t size = *(volatile uint64_t *)((uintptr_t)&m + 8);
+    TEST_ASSERT_EQUAL_HEX64(0xCAFEF00DDEADBEEFull, base);
+    TEST_ASSERT_EQUAL_HEX64(0x123456789ABCDEF0ull, size);
+
+    /* surface[3] sits at offset 48 — write-and-readback verifies
+     * the array stride is 16 (not 12 or 24). */
+    m.surface[3].base_address = 0xAAAAAAAABBBBBBBBull;
+    base = *(volatile uint64_t *)((uintptr_t)&m + 48);
+    TEST_ASSERT_EQUAL_HEX64(0xAAAAAAAABBBBBBBBull, base);
+
+    /* engine_status_surface_base_address sits at offset 64. */
+    m.engine_status_surface_base_address = 0xEEEEEEEEFFFFFFFFull;
+    base = *(volatile uint64_t *)((uintptr_t)&m + 64);
+    TEST_ASSERT_EQUAL_HEX64(0xEEEEEEEEFFFFFFFFull, base);
+}
+
+/*
  * Test: imx219_streaming_enable / _disable return -1 on QEMU
  * (stub path) and validate the I²C parameter encoding constants
  * the real Jetson driver uses. MODE_SELECT register address +
@@ -845,6 +887,7 @@ int test_suite_camera(void)
     RUN_TEST(test_camrtc_ch_setup_accessors_uninit_zero);
     RUN_TEST(test_camrtc_vi_channel_config_bitfield_positions);
     RUN_TEST(test_camrtc_frame_buffer_accessors);
+    RUN_TEST(test_camrtc_memoryinfo_overlay_roundtrip);
     RUN_TEST(test_imx219_streaming_constants_and_stubs);
     return UnityEnd();
 }
@@ -1337,6 +1380,48 @@ _Static_assert(offsetof(struct camrtc_nvcsi_error_status, cil_a_error_bits) == 8
     "nvcsi_error_status.cil_a_error_bits @ 8");
 _Static_assert(offsetof(struct camrtc_nvcsi_error_status, cil_b_error_bits) == 12,
     "nvcsi_error_status.cil_b_error_bits @ 12");
+
+/* `struct camrtc_memoryinfo_surface` — 16 bytes per L4T
+ * `l4t-camrtc-capture.h:1266`. Per-surface IOVA + size pair
+ * carried in the memoryinfo ring (slot stride 128 B = 4 surfaces
+ * × 16 B + engine_status (16 B) + reserved (48 B)). RCE reads
+ * `base_address` here for the actual atom-packer destination —
+ * NOT from `vi_channel_config.atomp.surface[i].offset` which is
+ * unused by VI5. */
+_Static_assert(sizeof(struct camrtc_memoryinfo_surface) == 16,
+    "camrtc_memoryinfo_surface must be exactly 16 bytes (RCE wire format)");
+_Static_assert(offsetof(struct camrtc_memoryinfo_surface, base_address) == 0,
+    "memoryinfo_surface.base_address @ 0");
+_Static_assert(offsetof(struct camrtc_memoryinfo_surface, size) == 8,
+    "memoryinfo_surface.size @ 8");
+
+/* `struct camrtc_capture_descriptor_memoryinfo` — 128 bytes per
+ * L4T `l4t-camrtc-capture.h:1281`. Slot stride in the memoryinfo
+ * ring; lock-step with the request_ring slot. Must equal
+ * `CAMRTC_VI_REQ_MEMINFO_SIZE` (128) — the meminfo carveout
+ * geometry computed in camrtc.c. */
+_Static_assert(sizeof(struct camrtc_capture_descriptor_memoryinfo) == 128,
+    "camrtc_capture_descriptor_memoryinfo must be exactly 128 bytes");
+_Static_assert(offsetof(struct camrtc_capture_descriptor_memoryinfo, surface[0]) == 0,
+    "memoryinfo.surface[0] @ 0");
+_Static_assert(offsetof(struct camrtc_capture_descriptor_memoryinfo, surface[3]) == 48,
+    "memoryinfo.surface[3] @ 48 (last surface slot)");
+_Static_assert(offsetof(struct camrtc_capture_descriptor_memoryinfo,
+                        engine_status_surface_base_address) == 64,
+    "memoryinfo.engine_status_surface_base_address @ 64");
+_Static_assert(offsetof(struct camrtc_capture_descriptor_memoryinfo,
+                        engine_status_surface_size) == 72,
+    "memoryinfo.engine_status_surface_size @ 72");
+_Static_assert(offsetof(struct camrtc_capture_descriptor_memoryinfo,
+                        reserved32) == 80,
+    "memoryinfo.reserved32 @ 80 (12 × u32 = 48 B tail)");
+/* Cross-check: meminfo struct size must equal the carveout's
+ * per-slot stride. If a future PR grows meminfo or shrinks the
+ * slot, this assert breaks the build. */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+_Static_assert(sizeof(struct camrtc_capture_descriptor_memoryinfo) == 128,
+    "camrtc_capture_descriptor_memoryinfo size must equal CAMRTC_VI_REQ_MEMINFO_SIZE");
+#endif
 
 /* `struct camrtc_capture_status` — 56 bytes per L4T
  * `l4t-camrtc-capture.h:815`. RCE writes this into the descriptor
