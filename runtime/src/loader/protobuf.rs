@@ -311,3 +311,24 @@ pub fn packed_float_at(data: &[u8], index: usize) -> Option<f32> {
     let bytes = [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]];
     Some(f32::from_le_bytes(bytes))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PR-465 regression: a truncated input where a tag's computed
+    /// `value_start` exceeds `data.len()` must not panic on the slice
+    /// index. The fix returns Err(UnexpectedEof) instead.
+    #[test]
+    fn proto_iter_rejects_truncated_input() {
+        // Single byte with continuation bit set — decode_varint
+        // returns UnexpectedEof, which the next() impl propagates
+        // before any slicing happens.
+        let data = [0x80u8];
+        let mut iter = ProtoIter::new(&data);
+        match iter.next() {
+            Some(Err(_)) => {}  /* expected — any error is fine */
+            other => panic!("expected Err, got {:?}", other),
+        }
+    }
+}

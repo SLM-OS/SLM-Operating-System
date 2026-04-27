@@ -226,6 +226,51 @@ Every place that touches `static mut` must take the corresponding lock.
 Mutable statics without a held lock are UB under the Rust memory model;
 the compiler warns `static_mut_refs` on any unguarded reference.
 
+### Module-level RAII guards (`EngineGuard`, `OpsGuard`, `FfiBusyGuard`)
+
+`runtime/src/inference/engine.rs` and `runtime/src/inference/ops.rs`
+each pair a hand-written `<thing>_lock()` / `<thing>_unlock()` with a
+matching RAII guard struct (`EngineGuard`, `OpsGuard`). Code paths
+with multiple early returns — especially around the FFI boundary in
+`run_inference` (GPU fastpath success → return Ok(n)) — should
+acquire the guard rather than the bare pair: any new error path
+benefits from Drop releasing the lock automatically.
+
+`runtime/src/lib.rs::FfiBusyGuard` is a single shared RAII helper
+used by `rust_infer_bench`, `rust_infer_classify`, and
+`rust_infer_and_print` to serialise concurrent FFI callers against
+their per-function `static mut` output buffers. Pattern:
+
+```rust
+static BENCH_FFI_BUSY: AtomicBool = AtomicBool::new(false);
+if BENCH_FFI_BUSY
+    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+    .is_err()
+{
+    return -1;
+}
+let _release = FfiBusyGuard(&BENCH_FFI_BUSY);
+```
+
+A second concurrent caller observes the flag set and returns -1
+instead of corrupting the static-mut output buffer. Add a new
+`FfiBusyGuard` site any time a new FFI entrypoint owns a
+`static mut` buffer the caller sees indirectly through the FFI
+return.
+
+### unsafe fn for raw-pointer escape hatches
+
+`runtime/src/mm/eviction/store.rs::store_mut` and `store_ref` are
+declared `unsafe fn` because they return a raw pointer to a slot in
+a `static mut` array. The `unsafe` marker forces callers to
+acknowledge that the lock must be held before the returned pointer
+is dereferenced — a previous "safe fn" form materialised an
+intermediate `&mut` reference that defeated the `addr_of_mut!`
+discipline. When you write a similar helper that returns a raw
+pointer derived from a `static mut`, mark the function `unsafe fn`
+and use `addr_of_mut!(STATIC) as *mut T` arithmetic, never
+`&mut (*addr_of_mut!(STATIC))[i] as *mut T`.
+
 ### Publish/ack deadlock avoidance
 
 `msg_router::publish_internal` holds `MSG_ROUTER_LOCK` only while it
