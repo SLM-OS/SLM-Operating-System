@@ -12,8 +12,10 @@
 
 #include "unity.h"
 #include "../include/pmm.h"
+#include "../include/pmm_internal.h"
 #include "../include/uart.h"
 #include "../include/ncmem.h"
+#include "../include/dtb.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -930,6 +932,132 @@ static void test_ncmem_overflow_rejected(void)
 #endif /* PLATFORM_HAS_NC_MEMORY */
 
 /* ============================================================================
+ * pmm_carve_reserves — pure carve helper (kernel/include/pmm_internal.h)
+ *
+ * Used by pmm_add_region_split to subtract firmware-supplied
+ * /memreserve/ ranges (typically the BCM2712 VPU shared-memory carveout)
+ * from the buddy allocator's free range. Tested in isolation; no PMM
+ * state mutation needed.
+ * ============================================================================ */
+
+static void test_carve_no_reserves_returns_full_region(void)
+{
+    uintptr_t s[4], e[4];
+    int n = pmm_carve_reserves(0x1000, 0x10000, NULL, 0, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(1, n);
+    TEST_ASSERT_EQUAL_UINT64(0x1000,  s[0]);
+    TEST_ASSERT_EQUAL_UINT64(0x10000, e[0]);
+}
+
+static void test_carve_empty_region_returns_zero(void)
+{
+    uintptr_t s[4], e[4];
+    int n = pmm_carve_reserves(0x10000, 0x10000, NULL, 0, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(0, n);
+    n = pmm_carve_reserves(0x10000, 0x1000, NULL, 0, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+static void test_carve_reserve_in_middle_splits(void)
+{
+    /* Pi 5 case: 4 GB heap minus 4 MB VPU carveout at 0x3fc00000. */
+    dtb_memreserve_t rsv = { .addr = 0x3fc00000, .size = 0x400000 };
+    uintptr_t s[4], e[4];
+    int n = pmm_carve_reserves(0xbf3000, 0xffe00000, &rsv, 1, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(2, n);
+    TEST_ASSERT_EQUAL_UINT64(0xbf3000,    s[0]);
+    TEST_ASSERT_EQUAL_UINT64(0x3fc00000,  e[0]);
+    TEST_ASSERT_EQUAL_UINT64(0x40000000,  s[1]);
+    TEST_ASSERT_EQUAL_UINT64(0xffe00000,  e[1]);
+}
+
+static void test_carve_reserve_at_start_truncates(void)
+{
+    dtb_memreserve_t rsv = { .addr = 0x1000, .size = 0x4000 };
+    uintptr_t s[4], e[4];
+    int n = pmm_carve_reserves(0x2000, 0x10000, &rsv, 1, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(1, n);
+    TEST_ASSERT_EQUAL_UINT64(0x5000,  s[0]);
+    TEST_ASSERT_EQUAL_UINT64(0x10000, e[0]);
+}
+
+static void test_carve_reserve_at_end_truncates(void)
+{
+    dtb_memreserve_t rsv = { .addr = 0xC000, .size = 0x8000 };
+    uintptr_t s[4], e[4];
+    int n = pmm_carve_reserves(0x2000, 0x10000, &rsv, 1, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(1, n);
+    TEST_ASSERT_EQUAL_UINT64(0x2000, s[0]);
+    TEST_ASSERT_EQUAL_UINT64(0xC000, e[0]);
+}
+
+static void test_carve_reserve_outside_region_no_effect(void)
+{
+    dtb_memreserve_t rsv[2] = {
+        { .addr = 0x100,    .size = 0x100  },
+        { .addr = 0x100000, .size = 0x1000 },
+    };
+    uintptr_t s[4], e[4];
+    int n = pmm_carve_reserves(0x10000, 0x20000, rsv, 2, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(1, n);
+    TEST_ASSERT_EQUAL_UINT64(0x10000, s[0]);
+    TEST_ASSERT_EQUAL_UINT64(0x20000, e[0]);
+}
+
+static void test_carve_reserve_swallows_region(void)
+{
+    dtb_memreserve_t rsv = { .addr = 0x0, .size = 0x100000 };
+    uintptr_t s[4], e[4];
+    int n = pmm_carve_reserves(0x10000, 0x20000, &rsv, 1, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+static void test_carve_multiple_unsorted_reserves(void)
+{
+    dtb_memreserve_t rsv[2] = {
+        { .addr = 0x8000, .size = 0x1000 },
+        { .addr = 0x4000, .size = 0x1000 },
+    };
+    uintptr_t s[8], e[8];
+    int n = pmm_carve_reserves(0x1000, 0x10000, rsv, 2, s, e, 8);
+    TEST_ASSERT_EQUAL_INT(3, n);
+    TEST_ASSERT_EQUAL_UINT64(0x1000, s[0]); TEST_ASSERT_EQUAL_UINT64(0x4000, e[0]);
+    TEST_ASSERT_EQUAL_UINT64(0x5000, s[1]); TEST_ASSERT_EQUAL_UINT64(0x8000, e[1]);
+    TEST_ASSERT_EQUAL_UINT64(0x9000, s[2]); TEST_ASSERT_EQUAL_UINT64(0x10000, e[2]);
+}
+
+static void test_carve_truncates_at_max_out(void)
+{
+    dtb_memreserve_t rsv[3] = {
+        { .addr = 0x2000, .size = 0x1000 },
+        { .addr = 0x4000, .size = 0x1000 },
+        { .addr = 0x6000, .size = 0x1000 },
+    };
+    uintptr_t s[2], e[2];
+    int n = pmm_carve_reserves(0x1000, 0x10000, rsv, 3, s, e, 2);
+    TEST_ASSERT_TRUE(n <= 2);
+    TEST_ASSERT_EQUAL_UINT64(0x1000, s[0]);
+    TEST_ASSERT_EQUAL_UINT64(0x2000, e[0]);
+}
+
+static void test_carve_zero_size_reserve_skipped(void)
+{
+    /* Zero-size reservation must be a no-op (re <= rs guard). */
+    dtb_memreserve_t rsv = { .addr = 0x4000, .size = 0 };
+    uintptr_t s[4], e[4];
+    int n = pmm_carve_reserves(0x1000, 0x10000, &rsv, 1, s, e, 4);
+    TEST_ASSERT_EQUAL_INT(1, n);
+    TEST_ASSERT_EQUAL_UINT64(0x1000,  s[0]);
+    TEST_ASSERT_EQUAL_UINT64(0x10000, e[0]);
+}
+
+static void test_carve_null_output_returns_zero(void)
+{
+    int n = pmm_carve_reserves(0x1000, 0x10000, NULL, 0, NULL, NULL, 4);
+    TEST_ASSERT_EQUAL_INT(0, n);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -989,6 +1117,19 @@ int test_suite_pmm(void)
     /* Stress tests */
     RUN_TEST(test_no_memory_leak);
     RUN_TEST(test_mixed_workload_stress);
+
+    /* /memreserve/ carve helper */
+    RUN_TEST(test_carve_no_reserves_returns_full_region);
+    RUN_TEST(test_carve_empty_region_returns_zero);
+    RUN_TEST(test_carve_reserve_in_middle_splits);
+    RUN_TEST(test_carve_reserve_at_start_truncates);
+    RUN_TEST(test_carve_reserve_at_end_truncates);
+    RUN_TEST(test_carve_reserve_outside_region_no_effect);
+    RUN_TEST(test_carve_reserve_swallows_region);
+    RUN_TEST(test_carve_multiple_unsorted_reserves);
+    RUN_TEST(test_carve_truncates_at_max_out);
+    RUN_TEST(test_carve_zero_size_reserve_skipped);
+    RUN_TEST(test_carve_null_output_returns_zero);
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* NC allocator (Pi 5 / Jetson only) */

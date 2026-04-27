@@ -15,6 +15,7 @@
  */
 
 #include "pmm.h"
+#include "pmm_internal.h"
 #include "platform.h"
 #include "uart.h"
 #include "debug.h"
@@ -382,31 +383,34 @@ static void buddy_free(uintptr_t addr, unsigned int order, unsigned int original
  */
 static void pmm_add_region(uintptr_t start, uintptr_t end);
 
-static void pmm_add_region_split(uintptr_t start, uintptr_t end)
+int pmm_carve_reserves(uintptr_t start, uintptr_t end,
+                       const dtb_memreserve_t *rsv, int n_rsv,
+                       uintptr_t *out_starts, uintptr_t *out_ends, int max_out)
 {
-    if (start >= end) return;
+    if (max_out <= 0 || !out_starts || !out_ends) return 0;
+    if (start >= end) return 0;
 
-    dtb_memreserve_t rsv[DTB_MAX_MEMRESERVES];
-    int n = dtb_get_memreserves(rsv, DTB_MAX_MEMRESERVES);
+    /* No reservations: one trivial subrange. */
+    if (n_rsv <= 0 || !rsv) {
+        out_starts[0] = start;
+        out_ends[0]   = end;
+        return 1;
+    }
 
-    /* No reservations or sentinel-only list: degenerate to direct add. */
-    if (n == 0) { pmm_add_region(start, end); return; }
-
-    /* Walk the region left-to-right, carving out every reserved sub-range
-     * we encounter. Reservations are not assumed sorted; we re-scan from
-     * `cursor` each iteration to find the next overlap. Bounded by `n`
-     * + 1 sub-region adds in the worst case. */
+    int n_out = 0;
     uintptr_t cursor = start;
     while (cursor < end) {
-        /* Find the earliest-starting reservation that overlaps [cursor, end). */
+        /* Find the earliest-starting reservation overlapping [cursor, end).
+         * Reservations are not assumed sorted; re-scan each iteration.
+         * Skip zero-size and degenerate (re <= rs) entries cleanly. */
         uintptr_t next_rsv_start = end;
         uintptr_t next_rsv_end   = end;
         bool found = false;
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < n_rsv; i++) {
             uintptr_t rs = (uintptr_t)rsv[i].addr;
             uintptr_t re = (uintptr_t)(rsv[i].addr + rsv[i].size);
-            /* Skip entries that don't intersect or end at/before cursor. */
-            if (re <= cursor || rs >= end) continue;
+            if (re <= rs) continue;                  /* size 0 / overflow */
+            if (re <= cursor || rs >= end) continue; /* outside cursor */
             if (!found || rs < next_rsv_start) {
                 next_rsv_start = rs > cursor ? rs : cursor;
                 next_rsv_end   = re < end ? re : end;
@@ -415,14 +419,36 @@ static void pmm_add_region_split(uintptr_t start, uintptr_t end)
         }
 
         if (!found) {
-            pmm_add_region(cursor, end);
-            return;
+            if (n_out >= max_out) return n_out;
+            out_starts[n_out] = cursor;
+            out_ends[n_out]   = end;
+            n_out++;
+            return n_out;
         }
 
         if (next_rsv_start > cursor) {
-            pmm_add_region(cursor, next_rsv_start);
+            if (n_out >= max_out) return n_out;
+            out_starts[n_out] = cursor;
+            out_ends[n_out]   = next_rsv_start;
+            n_out++;
         }
         cursor = next_rsv_end;
+    }
+    return n_out;
+}
+
+static void pmm_add_region_split(uintptr_t start, uintptr_t end)
+{
+    /* DTB_MAX_MEMRESERVES + 1 is the worst-case subrange count. */
+    uintptr_t starts[DTB_MAX_MEMRESERVES + 1];
+    uintptr_t ends  [DTB_MAX_MEMRESERVES + 1];
+    dtb_memreserve_t rsv[DTB_MAX_MEMRESERVES];
+    int n_rsv = dtb_get_memreserves(rsv, DTB_MAX_MEMRESERVES);
+    int n_out = pmm_carve_reserves(start, end, rsv, n_rsv,
+                                   starts, ends,
+                                   DTB_MAX_MEMRESERVES + 1);
+    for (int i = 0; i < n_out; i++) {
+        pmm_add_region(starts[i], ends[i]);
     }
 }
 

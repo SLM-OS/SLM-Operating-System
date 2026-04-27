@@ -553,6 +553,30 @@ void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
 // Returns free_counts[], alloc_count, free_count, split_count, merge_count
 ```
 
+### Firmware-supplied /memreserve/ ranges
+
+`pmm_init` calls `pmm_add_region_split` (not the bare `pmm_add_region`)
+for every memory region it adds to the buddy allocator. The wrapper
+queries `dtb_get_memreserves()` and carves any reservation out of
+the region before adding the surviving subranges.
+
+Two reserve encodings are honored — both produced by the same
+`dtb_get_memreserves` call:
+
+1. **FDT header reserve map** (`/memreserve/ <addr> <size>;` directive
+   at DTS file scope). Standard format; `dtc` emits 16-byte entries
+   (`uint64_t addr`, `uint64_t size`) at `off_mem_rsvmap`.
+2. **Root-node `memreserve` property** (Pi 5 firmware convention).
+   Property data is a sequence of `(uint32_t addr, uint32_t size)`
+   cells — half the width. Pi 5 uses this for its VPU shared-memory
+   carveout (typically 4 MB at `0x3fc00000`).
+
+The pure carve helper `pmm_carve_reserves` lives in `kernel/mm/pmm.c`
+and is exposed via `kernel/include/pmm_internal.h` for the regression
+tests in `kernel/tests/test_pmm.c`. It handles unsorted reservation
+lists, zero-size entries, reservations entirely outside the target
+region, and reservations that fully swallow the region.
+
 ### Testing
 
 Tests in `kernel/tests/test_pmm.c` verify:
@@ -562,6 +586,13 @@ Tests in `kernel/tests/test_pmm.c` verify:
 - Coalescing enables larger allocations
 - Exhaustion and recovery
 - Mixed workload stress
+- `pmm_carve_reserves` (memreserve carve helper) — 11 cases including
+  Pi 5's actual VPU carveout, multiple reservations, edge cases at
+  region/reservation boundaries, zero-size and unsorted entries
+
+`kernel/tests/test_dtb.c` covers the DTB-side parsers (FDT header
+reserve map vs root-node `memreserve` property, `/chosen` entropy,
+`/chosen/bootloader` metadata).
 
 ---
 

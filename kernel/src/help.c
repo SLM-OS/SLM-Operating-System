@@ -511,6 +511,28 @@ static const struct help_entry help_entries[] = {
         "if no DTB was provided by the bootloader.\n"
     ),
 
+    HELP_TEXT("dtb-dump",
+        "dtb-dump - Dump the firmware-passed DTB as hex\n"
+        "\n"
+        "Usage:\n"
+        "  dtb-dump\n"
+        "\n"
+        "Prints the runtime DTB (post firmware fix-ups) as a single hex\n"
+        "stream between 'DTB-START' and 'DTB-END' markers. Used to diff\n"
+        "what the firmware patches into the DTB at handoff vs the on-disk\n"
+        ".dtb file.\n"
+        "\n"
+        "Recovery on the host:\n"
+        "  awk '/^DTB-START/{f=1;next} /^DTB-END/{f=0} f' capture.txt \\\n"
+        "      | tr -d ' \\r\\n' | xxd -r -p > runtime.dtb\n"
+        "  dtc -I dtb -O dts runtime.dtb\n"
+        "\n"
+        "Originally added during the issue #414 EMMC2 investigation\n"
+        "to confirm whether firmware was tagging the DTB differently\n"
+        "for Linux vs non-Linux kernel handoff. Kept in tree because\n"
+        "DTB triage on Pi/Jetson recurs.\n"
+    ),
+
     HELP_TEXT("clear",
         "clear - Clear the screen\n"
         "\n"
