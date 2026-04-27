@@ -5777,7 +5777,7 @@ int cmd_rcediag(int argc, char *argv[])
          * CAPTURE_CSI_STREAM_SET_CONFIG_REQ). */
         uint32_t ping_param = 0xCAFE42u;  /* anything random-ish */
         uint32_t ping_resp  = 0;
-        int ping_rc = camrtc_send_msg(0x45u /* PING */, ping_param,
+        int ping_rc = camrtc_send_msg(CAMRTC_HSP_PING, ping_param,
                                        &ping_resp, 100000u);
         uart_printf("  PING:                 rc=%d echo=0x%06x "
                     "(sent=0x%06x)\r\n",
@@ -5786,7 +5786,8 @@ int cmd_rcediag(int argc, char *argv[])
             uart_puts("  *** PING round-trip OK — HSP-VM session  ***\r\n");
             uart_puts("  *** ready for arbitrary message traffic. ***\r\n");
         } else {
-            uart_puts("  *** PING failed — see WARN log lines.    ***\r\n");
+            uart_printf("  *** PING failed (rc=%d) — see WARN log "
+                        "lines for details. ***\r\n", ping_rc);
         }
     } else if (rc == -1) {
         uart_puts("  *** hsp_rce MMIO unreachable — CBB firewall  ***\r\n");
