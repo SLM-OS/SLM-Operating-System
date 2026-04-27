@@ -1321,6 +1321,87 @@ Per the project's post-change checklist (run on every phase):
 
 ---
 
+#### Phase 8 progress — 2026-04-26 (audit landing + ushim bisect + fault PC localized)
+
+Three landed PRs since 2026-04-22 narrowed the #253 search space substantially. The boundary submit on `ch=2` still hangs, but every host-observable behaviour has now been verified against HailoRT, and the fault has been localized to a specific firmware-side program counter.
+
+**PR #355 — audit findings F-01..F-11 (merged 2026-04-24)**
+
+11 findings from the architecture review (`docs/hailo-ai-hat-architecture-review.md`) addressed:
+
+- F-01: Hard-bounded DMA pool with explicit phys/IOVA logging
+- F-02: Descriptor lists moved to NC memory; cache contract tightened
+- F-03: PCIe MRRS/MPS/ASPM logged + reserved-encoding rejection
+- F-04: Backend reframed as MNIST/Hailo-8L bring-up (not a general AI HAT+ backend)
+- F-05: Synthetic output-pad fallback verified not hit on MNIST
+- F-06: Persistent VDMA ring state across submits
+- F-07: `run()` vs `free_model()` race fixed
+- F-08: Scheduler queries backend-reported transport sizes
+- F-09: `HAILO_WIRE_DEBUG` defaulted OFF
+- F-10: `host-tools/hailo-ushim` VDMA probe scaffold
+- F-11: Multi-input/multi-output pad arrays
+
+**PR #359 — `hailo-ushim --full-handshake` bisect (merged 2026-04-25)**
+
+Linux userspace tool that drives `hailo_pci`'s ioctl surface directly with SLM-OS's exact byte sequences. Decisive findings:
+
+- SLM-OS's descriptor geometry (`desc_count=64, page=512, ch=2`) is **byte-for-byte accepted** by every `hailo_pci` ioctl validation path.
+- SLM-OS's CS RPC wire format and all 4 SET_CONTEXT_INFO bodies are accepted by fw with `major_status=0x00000000`.
+- Real MNIST CCW microcode (256 B from `mnist.hef`) uploads cleanly via VDMA on `ch=1`.
+- Subsequent `LAUNCH_TRANSFER` on `ch=2` hangs **identically** through `hailo_pci`'s path.
+
+**Conclusion:** the issue is NOT in SLM-OS's wire format, descriptor geometry, action body encoding, or any bare-metal MMIO/cache/IRQ path. The same byte sequences fail through both stacks.
+
+**PR #405 — BIST + D3hot + fwlog probes (merged 2026-04-26)**
+
+Three new diagnostic capabilities, all in main:
+
+- **`hailo bist [hex_bypass]`** — `RUN_BIST_TEST` opcode 0x3C wire impl. Confirms BIST whitelist is bits 2-5 (the L4 SRAM banks); bit 12 (SAGE1_ISP, the bit set in our CPU_ECC bitmap) is outside the whitelist and rejected with `0x400300b2`. L4 banks pass cleanly.
+- **`HAILO_D3HOT_AT_BOOT`** (CMake option, default ON) — adds Linux-style D0→D3hot→D0 PCI PM cycle after fw boot. Empirically shifts the bit-12 ECC trigger out of the load and pre-submit drain paths. Boundary submit still hangs.
+- **`hailo fwlog` / `hailo fwloghex [N]`** — on-demand dump of the fw CORE + APP debug-log rings (BAR4[0x2000] / BAR4[0x3000]). Format empirically decoded as 8-byte (PC, timestamp) records.
+
+**Smoking-gun finding from fwloghex:** post-runmodel CORE buffer shows fw in a 7-iteration poll loop at PC=`0x90004520` with uniform timestamp spacing. Between iterations 6 and 7, an exception fires at PC=`0x9000018c` with timestamp `0x0002476d`. The bit-12 CPU_ECC notification arrives after loop exit. Reproducible across multiple runmodel attempts; PC=`0x9000018c` is invariant. Run 2 shows the fault firing **twice** within a single 500ms window — fw catches the exception, returns to the loop, faults again 3 iterations later.
+
+**Reframing:** the bit-12 ECC is a **symptom**, not the cause. Across three structural changes that move state (D3hot, SCB sequence, settle pings), the ECC trigger MOVES position but never disappears. The boundary submit hangs identically in every configuration. Whatever internal fw state HailoRT's flow leaves the chip in lets channel 2 proceed; ours doesn't, regardless of what host-observable bytes/MMIO/IRQ/power-state we replicate.
+
+**Eliminated as #253 causes (consolidated):**
+
+| Suspect | Status |
+|---|---|
+| Wire bytes / IOVA / cache / periph / credit | ✅ verified byte-for-byte vs HailoRT |
+| Settle pings (3 positions) | ✅ disconfirmed |
+| GET_HW_CONSTS call count | ✅ disconfirmed |
+| Body-size asymmetry | ✅ retracted (sizes match HailoRT byte-for-byte) |
+| FW blob version | ✅ partial (pattern shifts but persists) |
+| IRQ mask ordering | ✅ already implemented |
+| MSI-before-trigger | ✅ already implemented (commit `a648824`) |
+| WRITE_MEMORY targeting | ✅ not used in either path |
+| BIST L4 health | ✅ banks healthy; bit 12 not testable |
+| SCB pre-trigger sequence (BAR0+0x96c..0x988) | ✅ disconfirmed |
+| D3hot transition | ✅ implemented (default ON) but doesn't fix submit |
+| Stage-2 firmware upload | ✅ doesn't exist for Hailo-8 (only Hailo10H) |
+
+**Where the defect may still be (host-side uncertainties):**
+
+1. **Direct byte-for-byte MMIO trace diff vs HailoRT** — never captured an SLM-OS MMIO trace at the same fidelity as the cached HailoRT one and diffed.
+2. **PCIe config-space state at fw-boot time** — Linux's PCIe enumeration writes config-space values (DEVCTL `RELAXED_ORDERING`/`NO_SNOOP`, AER, ACS, MSI cap value/format) that we haven't audited.
+3. **DMA buffer cache attributes** — our PMM allocates Normal cacheable + we use `dc civac/cvac`; Linux's `dma_alloc_coherent` returns Normal Non-Cacheable. Different speculative-prefetch / out-of-order semantics.
+4. **PMM doesn't zero allocated pages.** If fw reads from one of our DMA buffers (CCW, boundary in/out, descriptor lists) at an offset we haven't written, it sees uninit garbage. If any of our buffers feeds bit 12 / SAGE1_ISP, that's a smoking-gun candidate.
+
+**Open path forward:**
+
+The Hailo support ticket draft at `docs/hailo-support-ticket-draft.md` is now substantially stronger:
+
+- Three explicit symbol-decode asks: PC=`0x9000018c`, PC=`0x90004520`, plus boot/load PC sequence
+- Comprehensive ruled-out list
+- Reproducer with `hailo bist`, `hailo fwloghex`, and `hailo runmodel`
+
+Ticket is ready to send to support@hailo.ai.
+
+In parallel, the cheapest still-untested fix on our side: **zero DMA buffers at allocation** (one-line change in PMM). If buffers feed bit 12 directly, this fixes #253 without needing Hailo's response.
+
+---
+
 ## 7. Out of Scope
 
 - Multi-context / multi-model concurrent inference (Hailo supports this, but adds significant driver complexity; follow-on issue).
@@ -1331,4 +1412,4 @@ Per the project's post-change checklist (run on every phase):
 
 ---
 
-*Last updated: 2026-04-22 (Phase 8 wire-match + 6 structural fixes complete; ch=2 submit still blocked, see "Phase 8 progress — 2026-04-22b" section above)*
+*Last updated: 2026-04-26 (PR #355 audit + PR #359 ushim bisect + PR #405 BIST/D3hot/fwlog merged; fault localized to fw PC=0x9000018c during boundary-credit poll; awaiting Hailo support response on bit-12 region decode)*
