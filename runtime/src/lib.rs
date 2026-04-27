@@ -618,31 +618,15 @@ extern "C" {
 
 /// Initialize model memory pools.
 ///
-/// Called by C kernel to set up Rust model memory allocator.
-/// Pool sizes are platform-specific to fit available QEMU RAM:
-///   * ARM64 / aarch64-unknown-none: 256 MB weights / 128 MB workspace
-///     (QEMU virt has 1 GB; this leaves headroom for kernel + PMM).
-///   * x86-64 / x86_64-unknown-none: 64 MB weights / 32 MB workspace.
-///     QEMU q35 only gets 256 MB total, of which the kernel + buddy
-///     allocator already eat a large chunk; a 256+128 MB request hits
-///     `PMM allocation failed` and leaves the model_mem allocator
-///     uninitialized. Subsequent `rust_model_alloc_weights` calls then
-///     silently return null handles, and tests that don't check the
-///     init status (e.g. `eviction demo`) silently no-op — the
-///     failure is invisible without the smoke test in
-///     `kernel/tests/test_model_mem_smoke.c`.
+/// Called by the C kernel boot path with platform-specific pool sizes
+/// from `<config.h>` (`MODEL_MEM_WEIGHT_MB` / `MODEL_MEM_WORKSPACE_MB`).
+/// Both values are megabytes and must be multiples of 2 (the pool block
+/// size is 2 MB; misaligned values return `-1`).
+///
+/// Returns 0 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn rust_model_mem_init() -> i32 {
-    // 64 + 32 = 96 MB. Leaves ~150 MB on x86-64 QEMU for the kernel
-    // image, PMM metadata, Rust heap, and lwip after `pmm_init`.
-    // Both values must stay multiples of 2 (the pool block size).
-    // See docs/model-memory.md §"Pool Sizing" before raising.
-    #[cfg(target_arch = "x86_64")]
-    let (weight_mb, workspace_mb): (usize, usize) = (64, 32);
-    #[cfg(not(target_arch = "x86_64"))]
-    let (weight_mb, workspace_mb): (usize, usize) = (256, 128);
-
-    match mm::model_mem_init(weight_mb, workspace_mb) {
+pub extern "C" fn rust_model_mem_init(weight_mb: u32, workspace_mb: u32) -> i32 {
+    match mm::model_mem_init(weight_mb as usize, workspace_mb as usize) {
         Ok(()) => 0,
         Err(e) => {
             unsafe {
