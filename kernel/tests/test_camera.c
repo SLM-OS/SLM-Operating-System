@@ -1368,11 +1368,25 @@ _Static_assert(offsetof(struct camrtc_capture_status, nvcsi_err_status) == 40,
     "capture_status.nvcsi_err_status @ 40");
 
 /* CAPTURE_STATUS_* code drift pins — RCE-side enum values that
- * csidiag's status decoder branches on. */
+ * csidiag's status decoder branches on. Numeric values verified
+ * against L4T `l4t-camrtc-capture.h:833-932` and observed in
+ * jetson-nano-1 hardware iteration (FALCON_ERROR=14 +
+ * FRAME_START_TIMEOUT notify bit on a sensor that needs full
+ * register-bank init). */
 _Static_assert(CAPTURE_STATUS_UNKNOWN == 0u,
     "CAPTURE_STATUS_UNKNOWN drift");
 _Static_assert(CAPTURE_STATUS_SUCCESS == 1u,
     "CAPTURE_STATUS_SUCCESS drift (RCE returns 1 on capture OK)");
+_Static_assert(CAPTURE_STATUS_ATOMP_FRAME_TOSSED == 10u,
+    "ATOMP_FRAME_TOSSED drift (memory back-pressure path)");
+_Static_assert(CAPTURE_STATUS_FALCON_ERROR == 14u,
+    "FALCON_ERROR drift (VI Falcon scheduler error — common first-light blocker)");
+_Static_assert(CAPTURE_STATUS_CHANSEL_NOMATCH == 15u,
+    "CHANSEL_NOMATCH drift (no VI channel selector matched the incoming frame)");
+_Static_assert(CAPTURE_STATUS_NOTIFY_BIT_FRAME_START_TIMEOUT == (1ULL << 25),
+    "FRAME_START_TIMEOUT notify bit drift");
+_Static_assert(CAPTURE_STATUS_NOTIFY_BIT_FRAME_COMPLETION_TIMEOUT == (1ULL << 26),
+    "FRAME_COMPLETION_TIMEOUT notify bit drift");
 
 /* Descriptor offsets used by csidiag — header is at offset 0,
  * ch_cfg (vi_channel_config) at 64, status (capture_status) at

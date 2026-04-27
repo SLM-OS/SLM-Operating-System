@@ -6298,8 +6298,12 @@ int cmd_csidiag(int argc, char *argv[])
     desc->sequence                 = 1u;
     desc->capture_flags            = CAPTURE_FLAG_STATUS_REPORT_ENABLE
                                    | CAPTURE_FLAG_ERROR_REPORT_ENABLE;
-    desc->frame_start_timeout      = 0u;   /* RCE channel default */
-    desc->frame_completion_timeout = 0u;
+    /* Cap RCE-side waits at 1500 ms each so STATUS_IND fires
+     * within our 2 s IVC poll even on a "no frame" path. The
+     * channel default is 5000 ms which is too long for first-
+     * light debugging. */
+    desc->frame_start_timeout      = 1500u;
+    desc->frame_completion_timeout = 1500u;
 
     /* vi_channel_config overlay — IMX219 binning-mode RAW10
      * (1640×1232) on NVCSI stream 0 / virtual channel 0, written
@@ -6313,17 +6317,22 @@ int cmd_csidiag(int argc, char *argv[])
         (desc_base + CAMRTC_DESC_CH_CFG_OFFSET);
 
     /* Channel selector: match RAW10 datatype (CSI-2 datatype
-     * 0x2B = 43) on stream 0 / VC 0. datatype_mask = 0x3f
-     * matches all 6 bits of the datatype field per L4T's
-     * `vi5_fops.c:412` convention. */
-    vi->match.datatype       = 43u;          /* NVCSI_DATATYPE_RAW10 */
+     * 0x2B = 43) on stream 0 / VC 0. Per L4T `vi5_fops.c:61-78`
+     * (capture_template) + `vi5_fops.c:407-412` (per-frame
+     * overrides), the masks are NOT zero — they enable matching
+     * on the corresponding fields:
+     *   stream_mask = 0x3f   (6 NVCSI streams)
+     *   vc_mask     = 0xffff (16-bit VC field)
+     *   datatype_mask = 0x3f (6-bit CSI-2 datatype field)
+     * `match.stream` and `match.vc` use ONE-HOT bit encoding
+     * (1 << id). frameid* / dol* stay zero — L4T's template
+     * doesn't set them. */
+    vi->match.datatype       = 43u;             /* NVCSI_DATATYPE_RAW10 */
     vi->match.datatype_mask  = 0x3fu;
-    vi->match.stream         = 0u;           /* NVCSI_STREAM_0 */
-    vi->match.stream_mask    = 0xFFu;
-    vi->match.vc             = 0u;           /* NVCSI_VIRTUAL_CHANNEL_0 */
+    vi->match.stream         = (uint8_t)(1u << 0); /* one-hot: NVCSI_STREAM_0 */
+    vi->match.stream_mask    = 0x3fu;
+    vi->match.vc             = (uint16_t)(1u << 0);/* one-hot: NVCSI_VIRTUAL_CHANNEL_0 */
     vi->match.vc_mask        = 0xFFFFu;
-    /* Frame-id / dol unused for IMX219 single-shot — masks=0
-     * disable matching on those fields. */
 
     /* Frame geometry — IMX219 binning mode 1640×1232. embed_*
      * = 0 disables embedded-data lines (we don't need sensor
@@ -6341,14 +6350,22 @@ int cmd_csidiag(int argc, char *argv[])
     vi->pixfmt.format          = 196u;       /* TEGRA_IMAGE_FORMAT_T_R16 */
     vi->pixfmt.pad0_en         = 0u;
 
-    /* Atomic packer — single destination surface at the frame
-     * buffer carveout. surface_stride is the byte distance
-     * between rows (= width × 2 for T_R16). */
+    /* Atomic packer stride — bytes between rows (= width × 2 for
+     * T_R16). The surface IOVA goes in the *memoryinfo* ring,
+     * NOT here in vi_channel_config — see below. */
     uintptr_t fb_iova               = camrtc_frame_buffer_iova();
-    vi->atomp.surface[0].offset     = (uint32_t)(fb_iova & 0xFFFFFFFFu);
-    vi->atomp.surface[0].offset_hi  = (uint32_t)((uint64_t)fb_iova >> 32);
     vi->atomp.surface_stride[0]     = camrtc_frame_buffer_stride();
-    vi->ispbufa_enable              = 1u;    /* ATOMP packer destination A */
+
+    /* memoryinfo ring slot 0 — RCE reads the per-surface IOVA +
+     * size from here in lock-step with the request_ring slot.
+     * Per L4T `vi5_fops.c:416-417`. The ring was zeroed inside
+     * camrtc_ch_setup_capture_control. */
+    volatile struct camrtc_capture_descriptor_memoryinfo *meminfo =
+        (volatile struct camrtc_capture_descriptor_memoryinfo *)
+        camrtc_vi_req_meminfo_iova();
+    meminfo->surface[0].base_address = (uint64_t)fb_iova;
+    meminfo->surface[0].size         = (uint64_t)camrtc_frame_buffer_stride()
+                                     * camrtc_frame_buffer_height();
 
     __asm__ volatile("dsb sy" ::: "memory");
 
@@ -6362,10 +6379,11 @@ int cmd_csidiag(int argc, char *argv[])
     uart_printf("  CAPTURE_REQUEST: send buffer_index=0 "
                 "(descriptor at 0x%lx)\r\n", (unsigned long)desc_base);
     uint32_t status_index = 0xDEADBEEFu;
-    /* Allow up to 250 ms for the request: ~33 ms first-frame
-     * latency × ~7 frame intervals as headroom for sensor warm-up
-     * and CSI training. */
-    rc = camrtc_capture_request(0u, &status_index, 250000u);
+    /* Allow up to 2 s for the request: ~33 ms first-frame
+     * latency on a streaming sensor, plus headroom for sensor
+     * warm-up + CSI training + the 1500 ms RCE-side timeouts to
+     * fire if no frame ever arrives. */
+    rc = camrtc_capture_request(0u, &status_index, 2000000u);
     uart_printf("  CAPTURE_REQUEST: rc=%d status_buffer_index=0x%x\r\n",
                 rc, (unsigned)status_index);
 
@@ -6393,12 +6411,46 @@ int cmd_csidiag(int argc, char *argv[])
                         (unsigned long)fb_iova,
                         (unsigned)(camrtc_frame_buffer_size() / 1024u));
         } else {
+            uint64_t notify = cap_status->notify_bits;
             uart_printf("  err_data=0x%x flags=0x%x notify_bits=0x%lx\r\n",
                         (unsigned)cap_status->err_data,
                         (unsigned)cap_status->flags,
-                        (unsigned long)cap_status->notify_bits);
-            uart_puts("  *** Capture FAILED — decode CAPTURE_STATUS_* ***\r\n");
-            uart_puts("  *** in l4t-camrtc-capture.h:830 onward.      ***\r\n");
+                        (unsigned long)notify);
+            /* Print symbolic name for the most common first-light
+             * failure paths (full enum in l4t-camrtc-capture.h:833). */
+            const char *name = "?";
+            switch (code) {
+            case CAPTURE_STATUS_CSIMUX_FRAME:          name = "CSIMUX_FRAME"; break;
+            case CAPTURE_STATUS_CSIMUX_STREAM:         name = "CSIMUX_STREAM"; break;
+            case CAPTURE_STATUS_CHANSEL_FAULT:         name = "CHANSEL_FAULT"; break;
+            case CAPTURE_STATUS_CHANSEL_FAULT_FE:      name = "CHANSEL_FAULT_FE"; break;
+            case CAPTURE_STATUS_CHANSEL_COLLISION:     name = "CHANSEL_COLLISION"; break;
+            case CAPTURE_STATUS_CHANSEL_SHORT_FRAME:   name = "CHANSEL_SHORT_FRAME"; break;
+            case CAPTURE_STATUS_ATOMP_PACKER_OVERFLOW: name = "ATOMP_PACKER_OVERFLOW"; break;
+            case CAPTURE_STATUS_ATOMP_FRAME_TRUNCATED: name = "ATOMP_FRAME_TRUNCATED"; break;
+            case CAPTURE_STATUS_ATOMP_FRAME_TOSSED:    name = "ATOMP_FRAME_TOSSED"; break;
+            case CAPTURE_STATUS_ISPBUF_FIFO_OVERFLOW:  name = "ISPBUF_FIFO_OVERFLOW"; break;
+            case CAPTURE_STATUS_SYNC_FAILURE:          name = "SYNC_FAILURE"; break;
+            case CAPTURE_STATUS_NOTIFIER_BACKEND_DOWN: name = "NOTIFIER_BACKEND_DOWN"; break;
+            case CAPTURE_STATUS_FALCON_ERROR:          name = "FALCON_ERROR"; break;
+            case CAPTURE_STATUS_CHANSEL_NOMATCH:       name = "CHANSEL_NOMATCH"; break;
+            }
+            uart_printf("  *** Capture FAILED — status=%u (%s).       ***\r\n",
+                        (unsigned)code, name);
+            if (notify & CAPTURE_STATUS_NOTIFY_BIT_FRAME_START_TIMEOUT) {
+                uart_puts("  *** notify: FRAME_START_TIMEOUT — sensor    ***\r\n");
+                uart_puts("  *** never produced an SOF on CSI-2.         ***\r\n");
+                uart_puts("  *** Likely fix: full IMX219 register-bank   ***\r\n");
+                uart_puts("  *** init (binning mode + format + AE)       ***\r\n");
+                uart_puts("  *** before MODE_SELECT=1.                   ***\r\n");
+            } else if (notify & CAPTURE_STATUS_NOTIFY_BIT_FRAME_COMPLETION_TIMEOUT) {
+                uart_puts("  *** notify: FRAME_COMPLETION_TIMEOUT —      ***\r\n");
+                uart_puts("  *** SOF arrived but EOF didn't.             ***\r\n");
+            } else if (notify & CAPTURE_STATUS_NOTIFY_BIT_CHANSEL_NO_MATCH) {
+                uart_puts("  *** notify: CHANSEL_NO_MATCH — frame        ***\r\n");
+                uart_puts("  *** received but no VI channel selector     ***\r\n");
+                uart_puts("  *** matched. Check vi_channel_config.match. ***\r\n");
+            }
         }
     } else {
         uart_puts("  *** CAPTURE_REQUEST failed at the IVC layer ***\r\n");

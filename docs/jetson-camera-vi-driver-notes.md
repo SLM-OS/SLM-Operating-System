@@ -39,23 +39,32 @@ round-trips at the wire level; `STATUS_IND` doesn't arrive because
 the descriptor's `vi_channel_config` is zero-init (no real frame
 format), so RCE bails before the IND-emission path.
 
-**What remains** (out of scope for the wire-format port; see
-`docs/jetson-camera-imx219-plan.md` for the full roadmap):
+**What's done** (first-light bundle 2026-04-27):
 
-1. ✅ Port `vi_channel_config` — DONE. `struct
-   camrtc_vi_channel_config` is now defined in
-   `kernel/include/camrtc_capture.h` (160 B exactly), with full
-   offset + bitfield-position coverage in `test_camera.c`. Not
-   yet populated by `csidiag`.
-2. Populate `vi_channel_config` in `csidiag` with IMX219 frame
-   format (frame_x=1640, frame_y=1232, RAW10 pixfmt, atomp
-   surface IOVA).
-3. IMX219 power-on + `MODE_SELECT = STREAMING` (extend `imx219`
-   shell command).
-4. 2.5 MB frame buffer in RCE-accessible DRAM (current 64 KB NC
-   carveouts insufficient for IMX219 1640×1232 RAW10).
-5. Inspect `capture_status.status` field in the descriptor for
-   `CAPTURE_STATUS_SUCCESS`.
+1. ✅ `struct camrtc_vi_channel_config` — 160 B, defined in
+   `kernel/include/camrtc_capture.h`, populated by csidiag with
+   IMX219 binning-mode RAW10 values.
+2. ✅ `imx219_streaming_enable()` — wraps the I²C write to
+   `MODE_SELECT = 0x01`.
+3. ✅ Frame buffer carveout — 4 MB at `0xA1000000`, carved out
+   of PMM region 1. Inside RCE's VM1 IOVA aperture.
+4. ✅ Atomp surface IOVA wired via the **memoryinfo ring** (not
+   `vi_channel_config.atomp.surface`).
+5. ✅ `struct camrtc_capture_status` decode — csidiag overlays
+   it on descriptor+272 and prints status code + decoded
+   notify_bits.
+
+**Hardware result on jetson-nano-1:** CAPTURE_REQUEST round-trips
+end-to-end. STATUS_IND arrives with `status=14 (FALCON_ERROR)`
+and `notify_bits=FRAME_START_TIMEOUT`. RCE programmed the VI
+hardware and waited for SOF; the IMX219 sensor never produced
+one.
+
+**Remaining blocker** (separate PR): the IMX219 sensor needs the
+full mode-table register init (binning resolution, format, PLL
+config, AGC defaults — ~70 registers) before `MODE_SELECT=0x01`.
+Linux's IMX219 driver does this in `imx219_set_mode`; SLM-OS
+currently only writes MODE_SELECT.
 
 Detailed wire-format reference (struct sizes / offsets / region
 layouts / verified outputs / test coverage list) lives in

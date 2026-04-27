@@ -444,20 +444,55 @@ struct camrtc_capture_status {
 } __attribute__((aligned(8)));
 
 /* CAPTURE_STATUS_* — per-frame outcome codes returned by RCE in
- * `capture_status.status`. Subset SLM-OS recognises; full list in
- * `l4t-camrtc-capture.h:830` onward. */
-#define CAPTURE_STATUS_UNKNOWN          0u
-#define CAPTURE_STATUS_SUCCESS          1u
-#define CAPTURE_STATUS_CSIMUX_FRAME     2u
-#define CAPTURE_STATUS_CSIMUX_STREAM    3u
-#define CAPTURE_STATUS_CHANSEL_FAULT    4u
-#define CAPTURE_STATUS_CHANSEL_NO_MATCH 6u
-#define CAPTURE_STATUS_CHANSEL_TIMEOUT  9u
-#define CAPTURE_STATUS_FRAME_DROPPED    10u
-#define CAPTURE_STATUS_PIXEL_RUNTIME_FAIL 11u
-#define CAPTURE_STATUS_ATOMP_PACKER_OVERFLOW 12u
-#define CAPTURE_STATUS_ATOMP_FRAME_TRUNCATED 13u
-#define CAPTURE_STATUS_ATOMP_FRAME_TOSSED 14u
+ * `capture_status.status`. Numeric values match L4T's
+ * `l4t-camrtc-capture.h:833-932` exactly. */
+#define CAPTURE_STATUS_UNKNOWN                  0u
+#define CAPTURE_STATUS_SUCCESS                  1u
+#define CAPTURE_STATUS_CSIMUX_FRAME             2u
+#define CAPTURE_STATUS_CSIMUX_STREAM            3u
+#define CAPTURE_STATUS_CHANSEL_FAULT            4u
+#define CAPTURE_STATUS_CHANSEL_FAULT_FE         5u
+#define CAPTURE_STATUS_CHANSEL_COLLISION        6u
+#define CAPTURE_STATUS_CHANSEL_SHORT_FRAME      7u
+#define CAPTURE_STATUS_ATOMP_PACKER_OVERFLOW    8u
+#define CAPTURE_STATUS_ATOMP_FRAME_TRUNCATED    9u
+#define CAPTURE_STATUS_ATOMP_FRAME_TOSSED       10u
+#define CAPTURE_STATUS_ISPBUF_FIFO_OVERFLOW     11u
+#define CAPTURE_STATUS_SYNC_FAILURE             12u
+#define CAPTURE_STATUS_NOTIFIER_BACKEND_DOWN    13u
+#define CAPTURE_STATUS_FALCON_ERROR             14u
+#define CAPTURE_STATUS_CHANSEL_NOMATCH          15u
+
+/* CAPTURE_STATUS_NOTIFY_BIT_* — finer-grained event bits in
+ * `capture_status.notify_bits`. Subset SLM-OS surfaces in csidiag
+ * for first-light diagnosis; full list in
+ * `l4t-camrtc-capture.h:972` onward. */
+#define CAPTURE_STATUS_NOTIFY_BIT_FRAME_START_TIMEOUT      (1ULL << 25)
+#define CAPTURE_STATUS_NOTIFY_BIT_FRAME_COMPLETION_TIMEOUT (1ULL << 26)
+#define CAPTURE_STATUS_NOTIFY_BIT_CHANSEL_NO_MATCH         (1ULL << 46)
+#define CAPTURE_STATUS_NOTIFY_BIT_ATOMP_FRAME_TOSSED       (1ULL << 51)
+
+/* `struct memoryinfo_surface` — 16 bytes
+ * (`l4t-camrtc-capture.h:1266`). Per-surface IOVA + size pair
+ * carried in the *memoryinfo* ring (NOT in vi_channel_config!).
+ * RCE reads `base_address` here for the actual atom-packer
+ * destination; the per-surface stride lives in
+ * `vi_channel_config.atomp.surface_stride[i]`. */
+struct camrtc_memoryinfo_surface {
+    uint64_t base_address;
+    uint64_t size;
+};
+
+/* `struct capture_descriptor_memoryinfo` — 128 bytes
+ * (`l4t-camrtc-capture.h:1281`). Slot stride in the memoryinfo
+ * ring. RCE reads slot `i` of this ring in lock-step with slot
+ * `i` of the request_ring. */
+struct camrtc_capture_descriptor_memoryinfo {
+    struct camrtc_memoryinfo_surface surface[VI_NUM_ATOMP_SURFACES];
+    uint64_t engine_status_surface_base_address;
+    uint64_t engine_status_surface_size;
+    uint32_t reserved32[12];
+} __attribute__((aligned(64)));
 
 /* Offset of `capture_status` within `struct capture_descriptor`
  * (per `l4t-camrtc-capture.h:1294`). Computed from the descriptor
