@@ -47,11 +47,21 @@ static uint32_t   g_hsp_dim_raw;
 static uintptr_t  g_bpmp_doorbell_addr;
 static uintptr_t  g_ccplex_doorbell_addr;
 
+/*
+ * MMIO accessors. The Tegra convention (see kernel CLAUDE.md "UART LSR
+ * Read After Kexec") is to issue `dsb sy` *before* every read so a
+ * speculatively-reordered earlier load can't return stale data —
+ * uart_tegra.c does this for LSR/RBR. Polling registers like
+ * HSP_DB_REG_PENDING / HSP_DB_REG_ENABLE need the same treatment to be
+ * reliable post-kexec on Jetson.
+ *
+ * Writes get a trailing `dsb sy` so subsequent code observes the side
+ * effect (e.g. doorbell ring) before continuing.
+ */
 static inline uint32_t hsp_read32(uintptr_t addr)
 {
-    uint32_t val = *(volatile uint32_t *)addr;
     __asm__ volatile("dsb sy" ::: "memory");
-    return val;
+    return *(volatile uint32_t *)addr;
 }
 
 static inline void hsp_write32(uintptr_t addr, uint32_t val)

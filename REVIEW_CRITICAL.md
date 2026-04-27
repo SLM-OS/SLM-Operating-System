@@ -123,16 +123,21 @@ Each finding is annotated with one of the following after disposition:
 
 ### kernel/drivers/bpmp/hsp.c
 - **lines 50-61** — `hsp_read32`/`hsp_write32` issue `dsb sy` *after* the access. For Tegra MMIO the project rule (per CLAUDE.md UART LSR fix) is `dsb sy` *before* a register read to defeat speculative MMIO and stale LSR-style reads. Post-access DSB only fences against subsequent ops; a speculatively reordered earlier read can still return stale data. Add `dsb sy` ahead of the load so reads of `HSP_DB_REG_PENDING`, `HSP_DB_REG_ENABLE`, etc. are serialized like `uart_tegra.c` does.
+  - ✅ **Fixed** — Moved `dsb sy` to before the read (matching the canonical pattern in `kernel/drivers/uart_tegra.c:298-305`). Writes keep their trailing barrier so subsequent code sees the side effect (e.g. doorbell ring) before continuing. Comment records the convention.
 
 ### kernel/drivers/camrtc/camrtc.c
 - **lines 134-136, 240-468, 470-533, 614-731** — Module state (`g_initialised`, `g_vm_tx_addr`, `g_vm_rx_addr`, `g_ch_setup_region_phys`) and the SHRD_MBOX TX/RX hardware registers are entirely unprotected. `camrtc_send_msg` and `camrtc_ch_setup_capture_control` may be called from any CPU; two concurrent senders can interleave `sm_tx_wait_empty` → `sm_tx_send` → `sm_rx_recv` and steal each other's responses (the response opcode filter at line 511 is no protection — both callers might send the same opcode). Add a `spinlock_t` around the entire send/recv round-trip, mirroring `mrq.c`'s `g_mrq_lock`.
+  - ✅ **Fixed** — Added `g_camrtc_lock` and wrapped `camrtc_send_msg`'s entire send/poll/recv path with `spin_lock_irqsave` / `spin_unlock_irqrestore`, matching the `g_mrq_lock` pattern in `mrq.c`. `camrtc_ch_setup_capture_control` calls `camrtc_send_msg` and is therefore covered transitively. Long IRQ-disabled window (up to 1 s on real hardware) is documented as a known limitation; splitting commit/poll into two phases is left for follow-up.
 - **lines 117-130** — `mmio_read32` uses `dsb sy` *after* the read; same Tegra-MMIO concern as `hsp.c`. The HSP-VM SHRD_MBOX FULL bit is exactly the kind of register that benefits from a pre-read DSB to avoid stale speculative loads (look-alike to UARTC LSR).
+  - ✅ **Fixed** — Same fix as `hsp.c`: pre-read DSB SY for `mmio_read32`. Comment cross-references the project convention.
 
 ### kernel/drivers/pcie/pcie_tegra194.c
 - **lines 166-210** — All `mmio_read32`/`mmio_write32`/`dbi_read16`/`dbi_write16` issue `dsb sy` *after* access. Same Tegra MMIO concern as hsp/camrtc — pre-read DSB needed to align with the project's UARTC fix pattern. APPL_DEBUG, APPL_LINK_STATUS, ATU_CTRL2 polling reads are exactly the kind of MMIO that returns stale speculative results without an upstream DSB.
+  - ✅ **Fixed** — Pre-read DSB SY for both `mmio_read32` and `dbi_read16`. Writes keep trailing barrier. Comment lists the specific polling registers (APPL_DEBUG, APPL_LINK_STATUS, ATU_CTRL2) that motivate the change.
 
 ### kernel/drivers/usb/xhci/xhci_xfer.c
 - **lines 55-96** — `xhci_urbs[XHCI_MAX_INFLIGHT_URBS]` and `xhci_urb_slot_alloc`/`xhci_urb_slot_find_by_trb`/`xhci_urb_slot_free` mutate the array with no lock. Submission path runs from task context; completion can run from the IRQ trampoline (the file `#include`s `spinlock.h` but never uses it). Two concurrent `urb_slot_alloc` callers can both observe the same `in_use==false` and grab the same slot. Even single-CPU, completion-vs-submission interleaving on the same CPU after IRQ delivery can corrupt `first_trb_phys`/`last_trb_phys` fields used by `find_by_trb`. Add a `spinlock_t` (IRQ-disable variant) around the alloc/find/free paths.
+  - ✅ **Fixed** — Added `xhci_urb_slot_lock` (IRQ-disable variant) and wrapped `xhci_urb_slot_alloc`, `xhci_urb_slot_free`, and `xhci_urb_slot_find_by_trb`. The lock is required even on a single CPU because of submission-vs-completion interleaving once ISR-driven completions land. Verified the Jetson build still compiles.
 
 ---
 

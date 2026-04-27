@@ -67,6 +67,17 @@ struct xhci_urb_slot {
 
 static struct xhci_urb_slot xhci_urbs[XHCI_MAX_INFLIGHT_URBS];
 /*
+ * Serialise the URB slot pool. The submission path runs from task
+ * context and the completion path runs from xhci_hcd_poll (which is
+ * driven from net_poll / usb_core_poll). Even on a single CPU, an IRQ
+ * delivered between an `if (!in_use)` check and the matching `in_use =
+ * true` store could cause the same slot to be allocated twice. Use the
+ * IRQ-disable variant so the pool is safe against future ISR-driven
+ * completion delivery on Jetson.
+ */
+static spinlock_t xhci_urb_slot_lock = SPINLOCK_INIT;
+
+/*
  * Bring-up left very detailed EP0/TRB logging enabled by default.
  * Keep the hooks available for future controller debugging, but make the
  * working Jetson success path quiet unless we explicitly re-enable them.
@@ -80,32 +91,41 @@ struct xhci_ctrl_diag xhci_last_ctrl_diag;
 
 static struct xhci_urb_slot *xhci_urb_slot_alloc(void)
 {
+    irq_flags_t flags = spin_lock_irqsave(&xhci_urb_slot_lock);
     for (unsigned i = 0; i < XHCI_MAX_INFLIGHT_URBS; i++) {
         if (!xhci_urbs[i].in_use) {
             xhci_urbs[i].in_use = true;
+            spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
             return &xhci_urbs[i];
         }
     }
+    spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
     return NULL;
 }
 
 static void xhci_urb_slot_free(struct xhci_urb_slot *s)
 {
     if (s == NULL) return;
+    irq_flags_t flags = spin_lock_irqsave(&xhci_urb_slot_lock);
     memset(s, 0, sizeof(*s));
+    spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
 }
 
 static struct xhci_urb_slot *xhci_urb_slot_find_by_trb(uintptr_t trb_phys)
 {
+    irq_flags_t flags = spin_lock_irqsave(&xhci_urb_slot_lock);
     for (unsigned i = 0; i < XHCI_MAX_INFLIGHT_URBS; i++) {
         if (!xhci_urbs[i].in_use)
             continue;
         if (xhci_urbs[i].first_trb_phys <= trb_phys &&
             trb_phys <= xhci_urbs[i].last_trb_phys &&
             ((trb_phys - xhci_urbs[i].first_trb_phys) %
-             sizeof(struct xhci_trb) == 0))
+             sizeof(struct xhci_trb) == 0)) {
+            spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
             return &xhci_urbs[i];
+        }
     }
+    spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
     return NULL;
 }
 
