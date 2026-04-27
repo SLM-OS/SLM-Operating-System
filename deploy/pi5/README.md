@@ -33,3 +33,13 @@ attempt regardless of success), or — if that wedges in firmware —
 re-flashing the SD card from the host. The `kernel rollback` shell
 command deletes `tryboot.img` so a future `kernel activate` fails
 the staging precondition rather than re-running a known-bad image.
+
+`kernel rollback` does **not** issue `SET_REBOOT_FLAGS(0)` —
+it only deletes the staged file. If a flag was armed by an earlier
+`kernel activate` and the system has not yet rebooted, the next
+boot still attempts the tryboot path (firmware reads the flag, looks
+for `tryboot.txt` → `tryboot.img`, fails to find the image, and
+falls back per its own rules; current Pi 5 firmware appears to halt
+boot rather than fall through). Always run `kernel activate` →
+reboot → verify, before issuing `kernel rollback` on the same
+boot.

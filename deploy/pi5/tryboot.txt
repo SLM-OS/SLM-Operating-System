@@ -23,6 +23,12 @@ auto_initramfs=0
 # Run AArch64 mode (Pi 5 default but explicit is safer).
 arm_64bit=1
 
+# Pin the kernel load address. Matches SLM-OS's link script; firmware
+# default for ARM64 bare-metal happens to be the same today, but pin
+# explicitly per docs/pi5-baremetal-status.md §Configuration so a
+# future firmware change can't move the kernel out from under us.
+kernel_address=0x80000
+
 # Run at full firmware-allowed clock.
 arm_boost=1
 

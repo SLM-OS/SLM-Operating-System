@@ -283,15 +283,14 @@ check gated on a nano-resource release from @johnjezl).
   `pi-5-1`: `kernel activate` issues
   `bcm_mailbox_set_reboot_flags(1)` + `bcm_mailbox_notify_reboot()`
   + `psci_system_reset()`; firmware honors the flag on the next
-  boot, loads `tryboot.txt` *instead of* `config.txt`, and from
-  `tryboot.txt` loads `tryboot.img`. Distinct kernels confirmed by
-  build-stamp swap (`kernel_2712.img` build `081608` →
-  `tryboot.img` build `095520` after activate, then back to
-  `081608` on the next natural power cycle, confirming one-shot
-  semantics). Mechanism is `tryboot.txt` (separate file), **not** a
-  `[tryboot]` filter section in `config.txt` — adding the latter
-  confused firmware on `pieeprom-2024-09-23.bin` and broke boot.
-  Canonical configs now live at `deploy/pi5/{config.txt,tryboot.txt}`.
+  boot and loads `tryboot.txt` *instead of* `config.txt`, which
+  in turn selects `tryboot.img`. The flag is genuinely one-shot
+  (subsequent natural power cycles fall back to `config.txt` /
+  `kernel_2712.img`). Mechanism is `tryboot.txt` (separate file),
+  **not** a `[tryboot]` filter section in `config.txt`. Canonical
+  configs now live at `deploy/pi5/{config.txt,tryboot.txt}`. See
+  [`docs/pi5-tryboot-verification.md`](pi5-tryboot-verification.md)
+  for the full hardware-test log.
 - ☐🔗🎫 Real-card BCM2712 SDHCI quirks (cfginit, CPRMAN clock-gate)
   — #371 sub-task 5.
 - ☐🔗🎫 Full `stage → activate → promote → rollback` cycle on

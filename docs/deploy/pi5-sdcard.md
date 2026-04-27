@@ -55,7 +55,7 @@ The card appears as a device with two partitions: `bootfs` (FAT32, ~512 MB) and 
 make kernel PLATFORM=RASPI5
 ```
 
-Output: `build/kernel/slmos.bin` (raw binary, ~1.6 MB).
+Output: `build/kernel/slmos.bin` (raw binary, ~5 MB with default features — networking + telnetd + Lua + lwIP + AI runtime; depends on which optional features are enabled at build time).
 
 ### Step 4 — Write SLM-OS to the boot partition
 
