@@ -7,3 +7,4 @@
 #![cfg(feature = "slm")]
 
 pub mod gguf;
+pub mod registry;
