@@ -1,7 +1,7 @@
 # Raspberry Pi 5 Bare-Metal Boot Status
 
 **Date:** 2026-04-13 (preemption resolution)
-**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC. **Cooperative preemption** active via `PI5_COOP_PREEMPT` (CNTPCT-driven `scheduler_tick` from `schedule()`); hardware timer IRQ delivery remains blocked by TF-A/GIC configuration — see `docs/pi5-preemption-resolution.md` and issue #99. 100% boot reliability (10/10 on latest `boot_test`). Context switch: 1.7 µs.
+**Status:** 4-CORE SMP — All 4 Cortex-A76 cores online via PSCI SMC. **Cooperative preemption** active via `PI5_COOP_PREEMPT` (CNTPCT-driven `scheduler_tick` from `schedule()`); hardware timer IRQ delivery remains blocked by TF-A/GIC configuration — see `docs/archive/investigations/pi5-preemption-resolution.md` and issue #99. 100% boot reliability (10/10 on latest `boot_test`). Context switch: 1.7 µs.
 
 ## Summary
 

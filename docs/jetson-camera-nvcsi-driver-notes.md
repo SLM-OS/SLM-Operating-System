@@ -290,7 +290,7 @@ options:
   send `CAPTURE_PHY_STREAM_OPEN_REQ` (msg id `0x36`) followed by
   `CAPTURE_CSI_STREAM_SET_CONFIG_REQ`, both wrapped in
   `CAPTURE_MSG_HEADER` (8 bytes, see `l4t-camrtc-capture-messages.h`).
-  Ports the existing BPMP IPC pattern (`docs/jetson-bpmp-ipc-plan.md`)
+  Ports the existing BPMP IPC pattern (`docs/archive/plans/jetson-bpmp-ipc-plan.md`)
   to the camera-control IVC channel.
 
 Practical IVC shape if SLM-OS goes Option B:
@@ -412,7 +412,7 @@ SLM-OS deliberately skips:
 What SLM-OS must recreate that Linux does pre-`probe()`:
 
 - BPMP-mediated clock enable for `TEGRA234_CLK_NVCSI` (see
-  `docs/jetson-bpmp-ipc-plan.md`). Already in scope.
+  `docs/archive/plans/jetson-bpmp-ipc-plan.md`). Already in scope.
 - MMIO mapping of `0x15A00000` (256 KB, non-cached, EL2).
 - If Option B (RTCPU IVC), allocation and registration of IVC
   channels with the camera RTCPU — substantial new code, not

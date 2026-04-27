@@ -1,7 +1,7 @@
 /*
  * shell_history.c — Per-session command-history ring (#434)
  *
- * Implements docs/shell-command-history-plan.md. Stores up to
+ * Implements docs/archive/plans/shell-command-history-plan.md. Stores up to
  * SHELL_HISTORY_DEPTH lines per shell session in a fixed-size circular
  * buffer; up arrow recalls older entries, down arrow walks back toward
  * the live edit buffer. State lives entirely on shell_session->history

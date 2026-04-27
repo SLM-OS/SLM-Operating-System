@@ -218,7 +218,7 @@ now default `NET_TELNETD_AUTOSTART=ON`; other platforms still need an
 explicit `-DNET_TELNETD_AUTOSTART=ON` plus `/etc/telnetd.conf` in the
 VFS to bring the daemon up automatically at boot. See
 `docs/shell.md` § Multi-Session Shell and
-`docs/multi-session-shell-plan.md` for the architecture.
+`docs/archive/plans/multi-session-shell-plan.md` for the architecture.
 
 ### telemetryd
 

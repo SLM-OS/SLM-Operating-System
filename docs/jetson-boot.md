@@ -2,7 +2,7 @@
 
 Boot documentation for SLM-OS on NVIDIA Jetson Orin Nano.
 
-**Status:** Working (April 2026) — SLM-OS boots via kexec at EL2 with VHE. See `docs/jetson-el2-bringup.md`.
+**Status:** Working (April 2026) — SLM-OS boots via kexec at EL2 with VHE. See `docs/archive/investigations/jetson-el2-bringup.md`.
 
 ---
 
@@ -133,7 +133,7 @@ The 40-pin GPIO header UART (UARTA at 0x03100000) is **blocked by the CBB firewa
 - **TX:** Direct write to UARTC THR at 0x0C280000 → SPE routes through TCU → USB-C debug port
 - **RX:** SPE reads USB-C input → writes to TCU HSP mailbox at 0x03C10000 → SLM-OS polls mailbox
 
-The SPE firmware continues running after kexec and handles the TCU multiplexing. See `docs/jetson-tcu.md` for TCU architecture details and `docs/jetson-el2-bringup.md` for the implementation.
+The SPE firmware continues running after kexec and handles the TCU multiplexing. See `docs/jetson-tcu.md` for TCU architecture details and `docs/archive/investigations/jetson-el2-bringup.md` for the implementation.
 
 ---
 
@@ -160,7 +160,7 @@ The SPE firmware continues running after kexec and handles the TCU multiplexing.
 | Watchdog | 0x02190000 | ✅ Works | Disabled early in boot |
 | ARM Timer | System register | ✅ Works | Generic Timer (CNTPCT_EL0), 100 Hz |
 
-See `docs/jetson-el2-bringup.md` for the full CBB firewall peripheral map.
+See `docs/archive/investigations/jetson-el2-bringup.md` for the full CBB firewall peripheral map.
 
 ---
 
@@ -238,7 +238,7 @@ labctl power cycle jetson-nano-2 --delay 10
 ### CBB Firewall Errors (RAS)
 
 - Accessing a blocked peripheral from EL2
-- Check `docs/jetson-el2-bringup.md` for the peripheral access map
+- Check `docs/archive/investigations/jetson-el2-bringup.md` for the peripheral access map
 - UARTA (0x03100000) is always blocked; use UARTC (0x0C280000)
 - UART driver issue (no output visible)
 

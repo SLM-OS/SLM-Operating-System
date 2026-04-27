@@ -53,7 +53,7 @@ This plan sits next to (not on top of) several Jetson-track items:
 - `docs/jetson-cbb-report.md` — defines the CBB firewall envelope at
   NS EL2. Reachability of NVCSI, VI, and the camera I2C bus is the
   single biggest unknown for this work.
-- `docs/jetson-bpmp-ipc-plan.md` + commits `6615da5`/`1f261e2` —
+- `docs/archive/plans/jetson-bpmp-ipc-plan.md` + commits `6615da5`/`1f261e2` —
   established a working BPMP MRQ stack, which now gives SLM-OS clock
   enable / power-domain set / reset deassert at runtime. Camera
   bring-up depends on those primitives.
@@ -674,7 +674,7 @@ Phase 0 is GREEN; tasks are unblocked.
     transport SLM-OS will need for VI single-shot capture
     (Hardware Task 4 has no Option A — VI is RTCPU-only). Estimated
     1-2 weeks for the IVC layer, mirrors the existing BPMP IVC
-    pattern (`docs/jetson-bpmp-ipc-plan.md`).
+    pattern (`docs/archive/plans/jetson-bpmp-ipc-plan.md`).
 - ☐🔗 Implement VI single-shot capture. Verify by hashing the
   captured buffer; the hash must change between two captures of
   different scenes.
@@ -797,7 +797,7 @@ alternatives.
 
 - `docs/jetson-cbb-report.md` — CBB firewall envelope and recon
   pattern.
-- `docs/jetson-bpmp-ipc-plan.md` + `kernel/drivers/bpmp/` — BPMP
+- `docs/archive/plans/jetson-bpmp-ipc-plan.md` + `kernel/drivers/bpmp/` — BPMP
   MRQ stack used for clock / reset / power control.
 - `kernel/CLAUDE.md` §"Non-Cacheable Shared Memory" — DMA-friendly
   memory carveout pattern that VI may be able to reuse.

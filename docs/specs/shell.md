@@ -48,8 +48,8 @@ Interactive shell, command surface, observability commands, multi-session.
 ## See also
 
 - `docs/shell.md` (narrative)
-- `docs/multi-session-shell-plan.md` (TCP shell + telnet + telnetd)
-- `docs/shell-command-history-plan.md` (#434 plan; implemented)
+- `docs/archive/plans/multi-session-shell-plan.md` (TCP shell + telnet + telnetd)
+- `docs/archive/plans/shell-command-history-plan.md` (#434 plan; implemented)
 - `docs/demo-readiness-backlog.md` (observability backlog — closed items)
 - Issues: #191-#196 (observability tickets), #199 (SSH), #434 (history)
 

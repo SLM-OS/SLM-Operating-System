@@ -20,7 +20,7 @@ probe, and the platform-agnostic GPU HAL are all complete.
 > deferred. The plan that took us from M0 (multi-CTA dispatch) to M10
 > (semaphore-release completion + custom-file demo) is preserved as
 > `docs/archive/plans/jetson-gpu-mnist-plan.md`. See also
-> `docs/jetson-el2-bringup.md` for the EL2 bringup that makes BAR0/MMIO
+> `docs/archive/investigations/jetson-el2-bringup.md` for the EL2 bringup that makes BAR0/MMIO
 > accessible.
 
 ---

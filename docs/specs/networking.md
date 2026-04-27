@@ -52,7 +52,7 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 - `docs/networking-expansion-plan.md` (phased plan)
 - `docs/net-driver-checklist.md` (driver implementor's checklist)
 - `docs/net-dma-coherence.md` (DMA coherence model)
-- `docs/multi-session-shell-plan.md` (TCP shell + telnet + telnetd)
+- `docs/archive/plans/multi-session-shell-plan.md` (TCP shell + telnet + telnetd)
 - `docs/specs/admin-telemetry-suite.md` §"Network feed" (telemetryd wire protocol)
 - `docs/archive/plans/jetson-usb-networking-plan.md` (archived Jetson USB bring-up record)
 - `docs/usb-host-generalization-plan.md` (general USB host follow-on after the current CDC-ECM path)

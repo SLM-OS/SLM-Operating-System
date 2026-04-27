@@ -49,7 +49,7 @@ This document describes how to interact with the embedded development lab hardwa
 | Component | Details |
 |-----------|---------|
 | Board | Jetson Orin Nano Super Developer Kit |
-| Status | 🟡 Partial — boots to shell at EL2 via UARTC (see `docs/jetson-el2-bringup.md`) |
+| Status | 🟡 Partial — boots to shell at EL2 via UARTC (see `docs/archive/investigations/jetson-el2-bringup.md`) |
 | Linux | Ubuntu 22.04.5, kernel 5.15.148-tegra, JetPack R36.4.7 |
 | Serial console | `/dev/lab/port-2-1` → TCP localhost:4004 (via ser2net) |
 | Power control | Kasa smart plug (via labctl) |

@@ -26,7 +26,7 @@ Timer-driven scheduler ticks, context switches, per-platform mode.
 ## Skipped / Blocked
 
 - **#99, #134 — Pi 5 hardware timer IRQs don't deliver.** GIC-400's Group register for PPI 30 is owned by EL3 firmware; Non-secure writes are silently ignored. Every NS-accessible path exhausted. `COOP_PREEMPT` is the permanent workaround; hardware restoration blocked on firmware change.
-- **Jetson hardware timer IRQs don't deliver** — same class of blocker as Pi 5 but different root cause. 8-path investigation (`docs/jetson-preemption-investigation.md`): PPIs, SGIs, SPIs all routed to Group 0; ICC_IGRPEN0 reads trap to EL3; SCR_EL3.FIQ=1 routes FIQ to EL3.
+- **Jetson hardware timer IRQs don't deliver** — same class of blocker as Pi 5 but different root cause. 8-path investigation (`docs/archive/investigations/jetson-preemption-investigation.md`): PPIs, SGIs, SPIs all routed to Group 0; ICC_IGRPEN0 reads trap to EL3; SCR_EL3.FIQ=1 routes FIQ to EL3.
 - **`SECONDARY_PREEMPT` on Jetson** — ELR-trampoline infrastructure compiled but unsafe due to MPIDR-fold collision on dual-cluster cores 4/5. Boot-time check (`preempt_check_cpu_mpidr`) panics if enabled. Would-be fix: rewrite fold to handle dual-cluster Aff2.Aff1 encoding.
 - **`SECONDARY_PREEMPT` on Pi 5** — compiled but inert (timer IRQs don't deliver, so the trampoline path never runs). Kept for future hardware-IRQ restoration.
 - **FIQ delivery experiment on Jetson** — `timdiag fiq` subcommand disabled; known to crash the EL3 handler by writing ICC_IGRPEN0.
@@ -36,8 +36,8 @@ Timer-driven scheduler ticks, context switches, per-platform mode.
 - `docs/scheduler.md` (narrative)
 - `kernel/CLAUDE.md` §"ARM64 Hardware Timer IRQs — cooperative preemption"
 - `kernel/CLAUDE.md` §"Secondary-CPU preemption — SECONDARY_PREEMPT"
-- `docs/pi5-preemption-resolution.md`
-- `docs/jetson-preemption-investigation.md`
+- `docs/archive/investigations/pi5-preemption-resolution.md`
+- `docs/archive/investigations/jetson-preemption-investigation.md`
 - `docs/archive/investigations/pi5-secondary-cpu-preemption.md`
 - Issues: #99, #134 (Pi 5); jetson-preemption-investigation issue set
 

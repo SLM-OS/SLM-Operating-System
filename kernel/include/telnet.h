@@ -7,7 +7,7 @@
  * records window size + terminal type on the session for commands
  * like `top` to consume.
  *
- * Scope (per docs/multi-session-shell-plan.md §2):
+ * Scope (per docs/archive/plans/multi-session-shell-plan.md §2):
  *   - Option negotiation: WILL / WONT / DO / DONT for
  *       ECHO (RFC 857), SUPPRESS-GO-AHEAD (RFC 858),
  *       NAWS (RFC 1073), TERMINAL-TYPE (RFC 1091)

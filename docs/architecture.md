@@ -117,7 +117,7 @@ This hybrid approach leverages:
 |----------|--------|-------|
 | QEMU virt | Primary development | Full feature set, VirtIO-Net networking |
 | Raspberry Pi 5 | Hardware target | 4-core SMP, boots to interactive shell, UART TX/RX working, preemptive scheduling at 100 Hz. See `docs/pi5-baremetal-status.md` |
-| Jetson Orin Nano | Working | EL2+VHE boot, UARTC serial, GICv3, 6.7GB RAM, GPU probe. Single-core (SMP needs UEFI boot). See `docs/jetson-el2-bringup.md` |
+| Jetson Orin Nano | Working | EL2+VHE boot, UARTC serial, GICv3, 6.7GB RAM, GPU probe. Single-core (SMP needs UEFI boot). See `docs/archive/investigations/jetson-el2-bringup.md` |
 | x86-64 | Capstone-complete | 8-core SMP via INIT-SIPI-SIPI, TSS+IST for timer ISR stack isolation, reschedule IPI for cross-CPU dispatch, FXSAVE/FXRSTOR context switch, SSE2 inference kernels, periodic load rebalance, work-stealing enabled by default. **FWSEC-FRTS succeeds on retail Ampere (RTX 3050) under VFIO.** Booter Load blocked by SEC2 priv-lock on this platform (#185). See `docs/x86-64-gpu-inference-status.md` (live handoff) + `docs/archive/handoff/x86-64-port.md` + `docs/archive/plans/x86-64-capstone-gap-closure-plan.md`. |
 
 **Phase 3 Learnings:**
@@ -235,7 +235,7 @@ Non-Jetson platforms get stubs — `bpmp.c` is compiled everywhere so callers li
 `kernel/tests/test_bpmp.c` pin the stub behaviour + cross-check clock/reset IDs
 against Linux's `tegra234-clock.h` / `tegra234-reset.h` bindings.
 
-See `docs/jetson-bpmp-ipc-plan.md` for the port design doc and
+See `docs/archive/plans/jetson-bpmp-ipc-plan.md` for the port design doc and
 `docs/jetson-pcie-investigation.md` for the hardware bring-up trail.
 
 ### Tegra PCIe C8 Root Complex (Jetson)
@@ -796,7 +796,7 @@ See `docs/ffi.md` for complete FFI documentation.
   - Multiboot2 boot sequence (32-bit trampoline to 64-bit long mode)
   - Serial console output
   - Basic subsystem initialization
-- **Jetson Orin Nano** EL2+VHE boot, UARTC serial, 6-core SMP, GICv3 (see `docs/jetson-el2-bringup.md`)
+- **Jetson Orin Nano** EL2+VHE boot, UARTC serial, 6-core SMP, GICv3 (see `docs/archive/investigations/jetson-el2-bringup.md`)
 - **Automated lab infrastructure** via labctl (power control, serial capture, SDWireC management)
 
 ### Phase 5 (Completed)

@@ -121,7 +121,7 @@ layout) is irrelevant here. Ramp up on PE/COFF + UEFI instead.
 
 ### What's known broken
 
-Per `docs/jetson-el2-bringup.md` §"Remaining Work" item 5
+Per `docs/archive/investigations/jetson-el2-bringup.md` §"Remaining Work" item 5
 (2026-04-13):
 
 > Direct UEFI boot — WIP. EFI stub handles ExitBootServices with
@@ -336,7 +336,7 @@ The resulting `build/kernel/slmos.elf` is the PE candidate. Rename to
   — especially the `nvgpu acr` BR_RETCODE.result observation
 - Test coverage for any new C code you write (follow the pattern in
   `host-tools/gsp-harness/test_ga10b_bringup.c` for mock-vtable tests)
-- Update `docs/jetson-el2-bringup.md` §"Remaining Work" item 5 with
+- Update `docs/archive/investigations/jetson-el2-bringup.md` §"Remaining Work" item 5 with
   the new state
 
 ### Don't check in

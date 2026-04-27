@@ -186,7 +186,7 @@ The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)`
 
 ## ARM64 Hardware Timer IRQs — cooperative preemption (April 2026)
 
-**Hardware timer IRQs do not deliver to EL1/EL2 on Pi 5 or Jetson.** The GIC in both platforms runs with two security states; the Group register that routes a PPI to IRQ vs FIQ is owned by EL3 firmware and Non-secure writes are silently ignored. Pi 5 evidence: `docs/pi5-preemption-resolution.md`. Jetson evidence: `docs/jetson-preemption-investigation.md` — an 8-path empirical investigation confirmed every NS-accessible route is blocked (PPIs/SGIs/SPIs all Group 0, ICC_IGRPEN0 reads trap to EL3, SCR_EL3.FIQ=1 routes FIQ to EL3).
+**Hardware timer IRQs do not deliver to EL1/EL2 on Pi 5 or Jetson.** The GIC in both platforms runs with two security states; the Group register that routes a PPI to IRQ vs FIQ is owned by EL3 firmware and Non-secure writes are silently ignored. Pi 5 evidence: `docs/archive/investigations/pi5-preemption-resolution.md`. Jetson evidence: `docs/archive/investigations/jetson-preemption-investigation.md` — an 8-path empirical investigation confirmed every NS-accessible route is blocked (PPIs/SGIs/SPIs all Group 0, ICC_IGRPEN0 reads trap to EL3, SCR_EL3.FIQ=1 routes FIQ to EL3).
 
 **Diagnostics:** The `timdiag` shell command (`kernel/src/shell_sys.c`) dumps live GIC and timer state on any ARM64 platform. Run after boot to see the current group configuration. The command deliberately skips `ICC_IGRPEN0_EL1` reads because TF-A traps them (causes EC=0x18 exception on Jetson). Optional `timdiag fiq` argument runs an additional FIQ delivery test — DO NOT use on Jetson, it writes ICC_IGRPEN0 which crashes the EL3 handler.
 

@@ -819,7 +819,7 @@ static const struct help_entry help_entries[] = {
         "  diag <el2|vec|fiq|all>\n"
         "\n"
         "Probes which path can deliver hardware timer IRQs to NS EL1/EL2\n"
-        "on Pi 5. See `docs/pi5-preemption-resolution.md` for the\n"
+        "on Pi 5. See `docs/archive/investigations/pi5-preemption-resolution.md` for the\n"
         "interpretation of each subprobe. The `fiq` mode writes\n"
         "ICC_IGRPEN0 — do NOT run on Jetson, it crashes the EL3 handler.\n"
     ),

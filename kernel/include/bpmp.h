@@ -11,7 +11,7 @@
  * per layer. Clients only need this header.
  *
  * References:
- *   docs/jetson-bpmp-ipc-plan.md            SLM-OS port design
+ *   docs/archive/plans/jetson-bpmp-ipc-plan.md            SLM-OS port design
  *   docs/reference/linux-bpmp-abi.h         MRQ opcodes + payload formats
  *   docs/reference/edk2-nvidia-bpmpipc*     UEFI port target
  */

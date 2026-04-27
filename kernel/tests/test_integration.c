@@ -36,7 +36,7 @@
  * Busy-wait for multi-core integration tests.
  *
  * On COOP_PREEMPT platforms (Pi 5, Jetson — no hardware timer IRQs, see
- * docs/pi5-preemption-resolution.md and the Jetson plan v4 resolution),
+ * docs/archive/investigations/pi5-preemption-resolution.md and the Jetson plan v4 resolution),
  * a task that never yields will never let the scheduler migrate it,
  * boost its priority, or observe another CPU's progress. Yield every
  * ~1k iterations under COOP_PREEMPT to give the scheduler a tick.

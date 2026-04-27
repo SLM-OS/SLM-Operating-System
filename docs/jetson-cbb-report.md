@@ -3,7 +3,7 @@
 Consolidates everything SLM-OS has learned about the Tegra234 Control
 Backbone (CBB) firewall: what it is, what it blocks, what has been
 worked around, and what would close the gaps "officially." Pulls
-together material previously scattered across `docs/jetson-el2-bringup.md`,
+together material previously scattered across `docs/archive/investigations/jetson-el2-bringup.md`,
 `docs/archive/investigations/jetson-nvidia-support.md`, `docs/archive/plans/capstone-feature-status.md`,
 `docs/archive/handoff/jetson-capstone-handoff.md`, and issues #9 / #24 / #25 / #31 / #258.
 
@@ -135,7 +135,7 @@ Two facts matter for the rest of this report:
 
 ## 3. The EL2 + VHE Partial Bypass (What Works Today)
 
-Per `docs/jetson-el2-bringup.md`, SLM-OS runs at **NS EL2 with VHE
+Per `docs/archive/investigations/jetson-el2-bringup.md`, SLM-OS runs at **NS EL2 with VHE
 (HCR_EL2.E2H=1, TGE=1, RW=1)** after kexec from Linux. Linux itself
 runs at EL2-VHE (verified via `CurrentEL` probe), and kexec's
 `HVC_SOFT_RESTART` preserves the privilege level.
@@ -487,7 +487,7 @@ lost if it is repeated.
 
 ### Internal docs (authoritative detail for each topic)
 
-- `docs/jetson-el2-bringup.md` — The EL2+VHE bypass and the peripheral
+- `docs/archive/investigations/jetson-el2-bringup.md` — The EL2+VHE bypass and the peripheral
   reachability matrix.
 - `docs/archive/investigations/jetson-nvidia-support.md` — Investigation history, NVIDIA
   forum citations, signing toolchain notes.

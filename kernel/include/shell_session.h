@@ -57,7 +57,7 @@ struct shell_xput_session {
  * console) fits in ~64 KB of BSS. Indexed newest-first by browse
  * cursor: cursor 0 selects the most recently added entry, cursor
  * count-1 selects the oldest, cursor -1 means the user is on the
- * live edit buffer (no recall). See docs/shell-command-history-plan.md. */
+ * live edit buffer (no recall). See docs/archive/plans/shell-command-history-plan.md. */
 struct shell_history {
     char     entries[SHELL_HISTORY_DEPTH][SHELL_HISTORY_LINE_MAX];
     uint8_t  count;     /* valid entries (saturates at SHELL_HISTORY_DEPTH) */

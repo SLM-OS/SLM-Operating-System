@@ -31,7 +31,7 @@ How SLM-OS enters execution on each platform and reaches a running shell.
 ## See also
 
 - `docs/boot-sequence.md` (narrative)
-- `docs/jetson-el2-bringup.md` — EL2 + VHE specifics
+- `docs/archive/investigations/jetson-el2-bringup.md` — EL2 + VHE specifics
 - `docs/archive/investigations/jetson-uefi-direct-result.md` — UEFI direct boot status
 - `docs/jetson-cbb-report.md` — CBB permissions by entry path
 

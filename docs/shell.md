@@ -6,7 +6,7 @@ connections over TCP so multiple users (or a user + a script) can
 share the same instance.
 
 **Status:** Implemented. Multi-session (TCP) support: Plans §1 + §2
-+ §3 complete (see `docs/multi-session-shell-plan.md`). Both `nc
++ §3 complete (see `docs/archive/plans/multi-session-shell-plan.md`). Both `nc
 localhost 2323` and `telnet localhost 2323` work with proper telnet
 IAC negotiation, per-session state, boot-time autostart (via
 `/etc/telnetd.conf` or the `NET_TELNETD_AUTOSTART` build flag),
@@ -204,7 +204,7 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
 | `sched policy` | List all registered scheduling policies |
 | `sched policy <name>` | Switch to a named scheduling policy |
 | `sched stats` | Show scheduler statistics and per-CPU utilization |
-| `timdiag` | Timer/interrupt delivery diagnostic — ARM64 only. Dumps timer state, GIC group configuration, CPU interface registers, and SPI group bitmap. Helps investigate whether hardware timer preemption is available on the platform. See `docs/jetson-preemption-investigation.md` for interpretation. |
+| `timdiag` | Timer/interrupt delivery diagnostic — ARM64 only. Dumps timer state, GIC group configuration, CPU interface registers, and SPI group bitmap. Helps investigate whether hardware timer preemption is available on the platform. See `docs/archive/investigations/jetson-preemption-investigation.md` for interpretation. |
 | `timdiag fiq` | Same diagnostic but also runs the FIQ delivery test (writes `ICC_IGRPEN0` and unmasks `DAIF.F`). **May crash on Jetson** if TF-A traps Group 0 register access. Use only for investigation. |
 | `lua` | Enter Lua REPL |
 | `lua -e "code"` | Execute Lua code directly |
@@ -668,7 +668,7 @@ hardware validation report.
 ## Multi-Session Shell
 
 The same REPL serves the physical UART and TCP clients. Plans §1–§3
-of `docs/multi-session-shell-plan.md` cover the architecture.
+of `docs/archive/plans/multi-session-shell-plan.md` cover the architecture.
 Phase 1 landed the TCP backend + REPL plumbing; Phase 2 added the
 telnet IAC state machine; Phase 3 wraps it in a `telnetd`-style
 daemon with config file, autostart, and Lua bindings. Phase 4
@@ -915,7 +915,7 @@ supports:
   buffer; once past the most recent entry the input region clears.
 - **Enter** — submits the (possibly edited) line. The submitted line
   is captured into history per the rules in
-  `docs/shell-command-history-plan.md`: empty / whitespace-only lines
+  `docs/archive/plans/shell-command-history-plan.md`: empty / whitespace-only lines
   and exact duplicates of the most recent entry are skipped, anything
   longer than 127 chars is truncated.
 

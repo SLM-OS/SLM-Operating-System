@@ -177,7 +177,7 @@ int  shell_try_getc(void);
  *
  * Out of scope: reverse search, prefix search, persistence across
  * reboot, in-line cursor movement, multi-line commands. See
- * docs/shell-command-history-plan.md.
+ * docs/archive/plans/shell-command-history-plan.md.
  * ============================================================================ */
 
 #define SHELL_HISTORY_DEPTH    32

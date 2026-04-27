@@ -34,7 +34,7 @@ Message routing, pub/sub, shared buffers, priority-inheritance mutexes.
 
 - `docs/ipc.md` (narrative)
 - `docs/m7-message-router.md` (design doc)
-- `docs/echo-ipc-debugging.md` (historical debugging notes)
+- `docs/archive/investigations/echo-ipc-debugging.md` (historical debugging notes)
 - `docs/component-development.md` §"Message router hookup"
 
 *Last updated: 18 April 2026*

@@ -8,7 +8,7 @@ This document captures research into using the TCU (Tegra Combined UART) for deb
 > TX: write directly to UARTC (0x0C280000), output routed through SPE/TCU to USB-C.
 > RX: read from TOP0_HSP shared mailbox 0 (0x03C10000), where SPE deposits incoming bytes.
 > The SPE firmware continues running after kexec and handles the USB-C ↔ UART multiplexing.
-> See `docs/jetson-el2-bringup.md` and `kernel/drivers/uart_tegra.c` for implementation.
+> See `docs/archive/investigations/jetson-el2-bringup.md` and `kernel/drivers/uart_tegra.c` for implementation.
 
 ---
 

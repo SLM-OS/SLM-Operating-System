@@ -452,7 +452,7 @@ All tasks are created with `DAIF.I=1` (IRQ masked). `task_create()` in `kernel/s
 
 Rationale: on real ARM64 hardware without SMPEN (Pi 5) or on post-kexec Jetson, a timer IRQ taken mid-context-restore causes the ISR to run on a partially-restored task context, corrupting state. Starting tasks with IRQs masked closes this window. Task code unmasks naturally on the first `spin_unlock_irqrestore` or the idle task's explicit `daifclr`. On QEMU the same masking applies for uniformity — QEMU delivers IRQs regardless, but the invariant matches real hardware behavior.
 
-Platform-specific consequence: timer IRQs do not fire at all on Pi 5 or Jetson — the GIC Group configuration is EL3-owned and cannot be changed from NS (`docs/pi5-preemption-resolution.md`, `docs/jetson-preemption-investigation.md`). Both platforms rely on COOP_PREEMPT (`coop_preempt_maybe_tick` in `kernel/sched/sched.c`) to synthesize ticks at `schedule()` entry via `CNTPCT_EL0` polling. Only QEMU and x86-64 have real timer-driven preemption. Run the `timdiag` shell command to inspect live GIC/timer state and confirm which mode is active.
+Platform-specific consequence: timer IRQs do not fire at all on Pi 5 or Jetson — the GIC Group configuration is EL3-owned and cannot be changed from NS (`docs/archive/investigations/pi5-preemption-resolution.md`, `docs/archive/investigations/jetson-preemption-investigation.md`). Both platforms rely on COOP_PREEMPT (`coop_preempt_maybe_tick` in `kernel/sched/sched.c`) to synthesize ticks at `schedule()` entry via `CNTPCT_EL0` polling. Only QEMU and x86-64 have real timer-driven preemption. Run the `timdiag` shell command to inspect live GIC/timer state and confirm which mode is active.
 
 ### Secondary-CPU Preemption (`SECONDARY_PREEMPT`)
 
