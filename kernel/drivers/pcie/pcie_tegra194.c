@@ -163,11 +163,17 @@
 
 static bool g_host_inited;
 
+/*
+ * Tegra MMIO accessors. Pre-read DSB matches the convention established
+ * by uart_tegra.c (see "UART LSR Read After Kexec" in the root
+ * CLAUDE.md): without it, a speculatively-issued earlier load can be
+ * satisfied from a stale buffer, returning the wrong value. Critical
+ * here for APPL_DEBUG / APPL_LINK_STATUS / ATU_CTRL2 polling.
+ */
 static inline uint32_t mmio_read32(uintptr_t addr)
 {
-    uint32_t v = *(volatile uint32_t *)addr;
     __asm__ volatile("dsb sy" ::: "memory");
-    return v;
+    return *(volatile uint32_t *)addr;
 }
 
 static inline void mmio_write32(uintptr_t addr, uint32_t val)
@@ -198,9 +204,8 @@ static inline void dbi_write32(uint32_t off, uint32_t val)
 
 static inline uint16_t dbi_read16(uint32_t off)
 {
-    uint16_t v = *(volatile uint16_t *)(TEGRA_PCIE_C8_DBI + off);
     __asm__ volatile("dsb sy" ::: "memory");
-    return v;
+    return *(volatile uint16_t *)(TEGRA_PCIE_C8_DBI + off);
 }
 
 static inline void dbi_write16(uint32_t off, uint16_t val)
