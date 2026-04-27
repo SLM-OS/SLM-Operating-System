@@ -681,8 +681,10 @@ __attribute__((weak)) int rust_init(void)
 
 __attribute__((weak)) void rust_hello(void) {}
 
-__attribute__((weak)) int rust_model_mem_init(void)
+__attribute__((weak)) int rust_model_mem_init(uint32_t weight_mb, uint32_t workspace_mb)
 {
+    (void)weight_mb;
+    (void)workspace_mb;
     return 0;
 }
 

@@ -12,6 +12,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "config.h"   /* MODEL_MEM_WEIGHT_MB / MODEL_MEM_WORKSPACE_MB defaults */
+
 /*
  * ==========================================================================
  * Error Codes (shared between C and Rust)
@@ -254,10 +256,17 @@ extern int rust_run_tests(void);
 
 /*
  * Initialize model memory pools.
- * Allocates memory from PMM for weight and workspace pools.
- * Returns: 0 on success, -1 on failure.
+ *
+ * `weight_mb` and `workspace_mb` are megabyte sizes for the two pools.
+ * Both must be multiples of 2 (each pool block is 2 MB); the Rust
+ * allocator rejects misaligned values with -1. Per-platform defaults
+ * live in <config.h> as MODEL_MEM_WEIGHT_MB / MODEL_MEM_WORKSPACE_MB
+ * — call sites should pass those constants rather than hard-coding.
+ *
+ * Returns: 0 on success, -1 on failure (alignment error or PMM out
+ * of memory).
  */
-extern int rust_model_mem_init(void);
+extern int rust_model_mem_init(uint32_t weight_mb, uint32_t workspace_mb);
 
 /*
  * Run model memory tests.
