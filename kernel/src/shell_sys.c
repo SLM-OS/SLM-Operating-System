@@ -37,6 +37,7 @@
 #include "ncmem.h"
 #include "dtb.h"
 #include "help.h"
+#include "sdhci.h"
 #include "string.h"
 #include "../gpu/gpu.h"
 #include <stdint.h>
@@ -2769,6 +2770,32 @@ int cmd_dtb_dump(int argc, char *argv[])
     shell_puts("DTB-END\r\n");
     return 0;
 }
+
+#if defined(PLATFORM_RASPI5)
+/* #414 diagnostic: trigger the Pi 5 SDHCI bring-up sequence on
+ * demand from the shell instead of from the boot path. Lets us
+ * discriminate "bring-up fails because hardware state is wrong"
+ * from "bring-up fails because boot-time firmware state is wrong." */
+int cmd_emmc_bringup(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    shell_puts("invoking sdhci_pi5_bringup_now()\r\n");
+    struct blkdev *dev = sdhci_pi5_bringup_now();
+    if (dev) {
+        shell_printf("emmc-bringup: succeeded (dev=%p)\r\n", (void *)dev);
+    } else {
+        shell_puts("emmc-bringup: returned NULL\r\n");
+    }
+    return 0;
+}
+#else
+int cmd_emmc_bringup(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    shell_puts("emmc-bringup: not supported on this platform\r\n");
+    return -1;
+}
+#endif
 
 /*
  * poke - Write a 32-bit word to an arbitrary physical memory address.

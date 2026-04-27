@@ -489,6 +489,53 @@ the method/action combination still passes.
 
 ---
 
+## Pi 5 SDHCI deferred bring-up + 50 ms settle delay (#414, April 2026)
+
+`sdhci_create_bcm2712()` runs **post-scheduler-init only**, gated by
+`boot_media_allow_creates()` (called from `kernel_main` right after
+`scheduler_init`). It also busy-waits 50 ms before its first MMIO
+touch (`BCM2712_EMMC2_SETTLE_US` in `kernel/drivers/sdhci.c`).
+
+**Why both gates exist:**
+
+- The VC firmware on `pieeprom-2024-09-23.bin` is still finishing the
+  EMMC2 unlock at kernel handoff. AON GPIO (`0x107D517C00` —
+  `sd_vcc_reg` pin 4, `sd_io_1v8_reg` pin 3), the property mailbox
+  (`0x107C013880`), and `SDIO_CFG_*` are all reachable but produce an
+  AXI fabric hang on the first read for ~50 ms. Empirically 50 ms
+  works; 500 ms also works; 10 ms does not.
+- The full bring-up (settle delay + AON regulator program + mailbox
+  RPC + `sdhci_brcmstb_cfginit_2712` + CMD0/CMD8/ACMD41/CMD2/CMD3/CMD9)
+  takes long enough that running it from the pre-scheduler VFS-init
+  path made secondary CPUs miss `scheduler_is_initialized` and hang
+  the boot. Deferring it past `scheduler_init` keeps the secondary
+  bring-up window clean.
+
+**Keep-alive ref.** `kernel/src/boot_media.c` initializes
+`g_boot_media_refs = 2` after the first successful create — one ref
+for the caller, one keep-alive ref pinning the device for the
+kernel's lifetime. This stops the 50 ms / full-init cost from being
+paid per acquire/release pair (e.g. `blob_autoload` walking several
+FAT entries back to back). Without it, every release dropped refcount
+to 0 and the device was destroyed and recreated.
+
+**Diagnostic shell command.** `emmc-bringup` (RASPI5-only, in
+`kernel/src/shell_sys.c`) calls `sdhci_pi5_bringup_now()` from the
+shell. Useful for differentiating "boot-time firmware state is wrong"
+from "hardware state is wrong" — if the shell-driven bring-up
+succeeds while a future regression breaks the boot-time path, the
+boot-time gate / delay needs adjusting; if both fail, suspect the
+hardware path itself.
+
+Regression coverage:
+`kernel/tests/test_boot_media.c:test_suite_boot_media` exercises the
+gate (`acquire` returns NULL pre-`allow_creates`), the keep-alive ref
+(repeated acquire/release pairs invoke `boot_media_create` exactly
+once), and the test-device override path that bypasses both gates so
+existing fixtures keep working.
+
+---
+
 ## UART Lock on Pi 5 / Jetson
 
 On platforms with `PLATFORM_HAS_NC_MEMORY`, the UART lock uses **IRQ-disable-only** (no cross-CPU lock). Standard `ldaxr`/`stxr` spinlocks deadlock under cross-CPU contention because per-core L2 caches are incoherent (no SMPEN). LSE atomics (`SWPALB`) also operate through L2 and have the same problem. NC memory atomic ops may fault (implementation-defined per ARM ARM).

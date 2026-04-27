@@ -1156,20 +1156,68 @@ static void bcm2712_aon_gpio_drive_sd_regulators(void)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
+/* Runtime-controllable bring-up gate. Default false (bring-up runs).
+ * sdhci_pi5_bringup_now() flips this around a single create call for
+ * the emmc-bringup shell diagnostic. Internal to this TU — external
+ * readers / writers would defeat the gate, so no extern. */
+static volatile bool g_sdhci_pi5_skip_bringup = false;
+
+/*
+ * Settle delay before the bring-up's first MMIO touch.
+ *
+ * Pi 5 firmware finishes unlocking EMMC2 ~50 ms after kernel handoff.
+ * Touching AON GPIO / mailbox / SDIO_CFG before that window hangs the
+ * AXI fabric and panics the kernel. Empirically 50 ms works on
+ * pi-5-1 (EEPROM pieeprom-2024-09-23.bin); 500 ms also works.
+ *
+ * Combined with `boot_media_allow_creates()` gating
+ * `sdhci_create_bcm2712()` to post-scheduler-init, this resolves the
+ * #414 "EMMC2 unreachable" symptom.
+ */
+#define BCM2712_EMMC2_SETTLE_US  (50u * 1000u)
+
 struct blkdev *sdhci_create_bcm2712(void)
 {
     int rc;
 
-    /* Linux enables the EMMC gate before probing and then programs the
-     * BCM2712 cfg window before touching the generic SDHCI host path. */
-    bcm2712_aon_gpio_drive_sd_regulators();
-    rc = bcm_mailbox_set_clock_state(BCM_CLOCK_EMMC, true);
-    if (rc < 0) {
-        ERROR("sdhci: bcm2712 emmc clock enable failed (%d)", rc);
+    if (g_sdhci_pi5_skip_bringup) {
+        INFO("sdhci_bcm2712: bring-up skipped (g_sdhci_pi5_skip_bringup=1)");
         return NULL;
     }
+
+    timer_busy_wait_us(BCM2712_EMMC2_SETTLE_US);
+
+    bcm2712_aon_gpio_drive_sd_regulators();
+
+    rc = bcm_mailbox_set_clock_state(BCM_CLOCK_EMMC, true);
+    if (rc < 0) {
+        ERROR("sdhci_bcm2712: emmc clock enable failed (%d)", rc);
+        return NULL;
+    }
+
     bcm2712_emmc2_cfginit();
     return sdhci_create("emmc2", BCM2712_EMMC2_BASE);
+}
+
+/*
+ * Shell-triggerable bring-up. Useful for diagnosing whether a
+ * future regression is "hardware state is wrong" (bring-up fails
+ * regardless of timing) vs "boot timing puts firmware/peripherals
+ * in a transient state" (bring-up works post-shell).
+ *
+ * Single-threaded by construction: only invoked from the shell on
+ * CPU 0 long after boot, when the boot-path bring-up has already
+ * either succeeded or been skipped. The save/restore around the
+ * skip flag is therefore not racy in practice; callers must not
+ * add a second concurrent path without adding a lock.
+ */
+struct blkdev *sdhci_pi5_bringup_now(void)
+{
+    bool prev = g_sdhci_pi5_skip_bringup;
+    g_sdhci_pi5_skip_bringup = false;
+    struct blkdev *dev = sdhci_create_bcm2712();
+    g_sdhci_pi5_skip_bringup = prev;
+    return dev;
 }
 
 #endif /* PLATFORM_RASPI5 */

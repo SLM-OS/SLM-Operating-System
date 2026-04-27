@@ -61,6 +61,9 @@ int test_suite_shell_history(void);
 /* Runtime blob autoload config + boot replay tests */
 int test_suite_blob_autoload(void);
 
+/* Boot-media gate + keep-alive ref tests (#414) */
+int test_suite_boot_media(void);
+
 /* Telnet IAC state machine tests */
 int test_suite_telnet(void);
 

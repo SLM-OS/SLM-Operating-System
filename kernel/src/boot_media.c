@@ -11,8 +11,19 @@ static unsigned g_boot_media_refs;
 static struct blkdev *g_boot_media_test_dev;
 static unsigned g_boot_media_test_refs;
 
+/* `volatile` to match `g_boot_media_creates_allowed`: read in
+ * boot_media_create() outside g_boot_media_lock (the lock is dropped
+ * before boot_media_create runs). Always NULL in production builds;
+ * tests are serialized by the harness so the unlocked read is safe.
+ * The volatile prevents the compiler from caching the value across
+ * the test setter / production read on weakly-ordered ARM64. */
+static boot_media_create_hook_t volatile g_test_create_hook;
+
 static struct blkdev *boot_media_create(void)
 {
+    if (g_test_create_hook) {
+        return g_test_create_hook();
+    }
 #if defined(PLATFORM_RASPI5)
     return sdhci_create_bcm2712();
 #elif defined(PLATFORM_QEMU_VIRT)
@@ -21,6 +32,15 @@ static struct blkdev *boot_media_create(void)
     return NULL;
 #endif
 }
+
+/* #414 gate: only run boot_media_create() after the kernel has
+ * cleared this. The SDHCI bring-up takes ~50 ms of busy-wait + a
+ * full SD card init, and pulling that into the pre-scheduler boot
+ * path makes secondary CPUs miss their `scheduler_is_initialized`
+ * deadline. Cleared by the kernel once scheduler is up. */
+static volatile bool g_boot_media_creates_allowed = false;
+
+void boot_media_allow_creates(void) { g_boot_media_creates_allowed = true; }
 
 struct blkdev *boot_media_acquire(void)
 {
@@ -42,6 +62,10 @@ struct blkdev *boot_media_acquire(void)
 
     spin_unlock_irqrestore(&g_boot_media_lock, flags);
 
+    if (!g_boot_media_creates_allowed) {
+        return NULL;
+    }
+
     struct blkdev *dev = boot_media_create();
     if (!dev) {
         return NULL;
@@ -56,8 +80,20 @@ struct blkdev *boot_media_acquire(void)
         return shared;
     }
 
+    /* Pin the production device for the kernel's lifetime: take a
+     * keep-alive ref alongside the caller's ref so refcount never
+     * drops to 0 once we've done the first create. boot_media_create()
+     * is expensive on Pi 5 (~50 ms settle delay + full SDHCI probe),
+     * so callers that acquire-use-release in tight loops (#414:
+     * runtime_blob_read_fat_path) should not pay that cost per call.
+     *
+     * Race-loser path above: when a second CPU loses the create race,
+     * its `g_boot_media_refs++` increments past this 2 (e.g. to 3 =
+     * keep-alive + winner caller + loser caller). That's correct; the
+     * keep-alive ref is taken once, by the create-winner, regardless
+     * of how many concurrent callers incremented past it. */
     g_boot_media_dev = dev;
-    g_boot_media_refs = 1;
+    g_boot_media_refs = 2;
     spin_unlock_irqrestore(&g_boot_media_lock, flags);
     return dev;
 }
@@ -106,5 +142,27 @@ void boot_media_test_clear_device(void)
     irq_flags_t flags = spin_lock_irqsave(&g_boot_media_lock);
     g_boot_media_test_dev = NULL;
     g_boot_media_test_refs = 0;
+    spin_unlock_irqrestore(&g_boot_media_lock, flags);
+}
+
+void boot_media_test_set_creates_allowed(bool allowed)
+{
+    irq_flags_t flags = spin_lock_irqsave(&g_boot_media_lock);
+    g_boot_media_creates_allowed = allowed;
+    spin_unlock_irqrestore(&g_boot_media_lock, flags);
+}
+
+void boot_media_test_set_create_hook(boot_media_create_hook_t hook)
+{
+    irq_flags_t flags = spin_lock_irqsave(&g_boot_media_lock);
+    g_test_create_hook = hook;
+    spin_unlock_irqrestore(&g_boot_media_lock, flags);
+}
+
+void boot_media_test_clear_production_cache(void)
+{
+    irq_flags_t flags = spin_lock_irqsave(&g_boot_media_lock);
+    g_boot_media_dev = NULL;
+    g_boot_media_refs = 0;
     spin_unlock_irqrestore(&g_boot_media_lock, flags);
 }

@@ -707,6 +707,7 @@ set(TEST_SOURCES
     kernel/tests/test_shell_session.c
     kernel/tests/test_shell_history.c
     kernel/tests/test_blob_autoload.c
+    kernel/tests/test_boot_media.c
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnet.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_config.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_cmd.c>
