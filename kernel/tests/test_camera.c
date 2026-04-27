@@ -21,6 +21,7 @@
 #include "../include/camrtc.h"
 #include "../include/camrtc_capture.h"
 #include "../include/camrtc_channels.h"
+#include "../include/camrtc_ivc.h"
 #include "../include/gpio_tegra.h"
 #include "../include/i2c_tegra.h"
 #include "../include/imx219.h"
@@ -476,6 +477,134 @@ static void test_camrtc_send_msg_null_resp_allowed(void)
     TEST_ASSERT_TRUE(rc < 0);
 }
 
+/*
+ * Test: camrtc_send_irq returns -1 when uninitialised (both QEMU
+ * stub and Jetson before camrtc_init). The IVC notify path uses
+ * this as a fire-and-forget kick; the contract is "never crashes,
+ * always returns negative until camrtc_init succeeds."
+ */
+static void test_camrtc_send_irq_uninit_returns_negative(void)
+{
+    int rc = camrtc_send_irq(CAMRTC_HSP_IRQ, 1u, 1000u);
+    TEST_ASSERT_TRUE(rc < 0);
+}
+
+/* ---- camrtc_ivc ---- */
+
+/*
+ * Test: camrtc_ivc_init rejects bad arguments before touching the
+ * (potentially invalid) IOVAs. NULL channel, zero rx/tx IOVAs,
+ * zero/non-power-of-two nframes, zero/non-64-aligned frame_size
+ * all return -1 on Jetson. On QEMU the stub returns -1 for any
+ * args. Either way rc must be negative without dereferencing
+ * `ch` when it is NULL.
+ */
+static void test_camrtc_ivc_init_arg_validation(void)
+{
+    struct camrtc_ivc_channel ch = {0};
+
+    /* NULL channel pointer. */
+    TEST_ASSERT_EQUAL_INT(-1,
+        camrtc_ivc_init(NULL, 0xa0001000u, 0xa0006080u, 64u, 320u, 1u));
+
+    /* Zero rx_iova / tx_iova. */
+    TEST_ASSERT_TRUE(camrtc_ivc_init(&ch, 0u, 0xa0006080u,
+                                      64u, 320u, 1u) < 0);
+    TEST_ASSERT_TRUE(camrtc_ivc_init(&ch, 0xa0001000u, 0u,
+                                      64u, 320u, 1u) < 0);
+
+    /* Zero / non-power-of-two nframes. */
+    TEST_ASSERT_TRUE(camrtc_ivc_init(&ch, 0xa0001000u, 0xa0006080u,
+                                      0u, 320u, 1u) < 0);
+    TEST_ASSERT_TRUE(camrtc_ivc_init(&ch, 0xa0001000u, 0xa0006080u,
+                                      3u, 320u, 1u) < 0);
+
+    /* Zero / non-64-aligned frame_size. */
+    TEST_ASSERT_TRUE(camrtc_ivc_init(&ch, 0xa0001000u, 0xa0006080u,
+                                      64u, 0u, 1u) < 0);
+    TEST_ASSERT_TRUE(camrtc_ivc_init(&ch, 0xa0001000u, 0xa0006080u,
+                                      64u, 32u, 1u) < 0);
+}
+
+/*
+ * Test: camrtc_ivc predicate functions are NULL-safe and return
+ * `false` for an uninitialised channel. Both stub and Jetson
+ * branches share this contract.
+ */
+static void test_camrtc_ivc_predicates_uninit_safe(void)
+{
+    struct camrtc_ivc_channel ch = {0};
+
+    TEST_ASSERT_FALSE(camrtc_ivc_can_send(NULL));
+    TEST_ASSERT_FALSE(camrtc_ivc_can_recv(NULL));
+    TEST_ASSERT_FALSE(camrtc_ivc_can_send(&ch));
+    TEST_ASSERT_FALSE(camrtc_ivc_can_recv(&ch));
+}
+
+/*
+ * Test: camrtc_ivc send/recv return negative on uninitialised
+ * channel without dereferencing NULL pointers.
+ */
+static void test_camrtc_ivc_send_recv_uninit_returns_negative(void)
+{
+    struct camrtc_ivc_channel ch = {0};
+    uint8_t buf[8] = {0};
+    uint32_t out_len = 0xDEADBEEFu;
+
+    /* NULL channel. */
+    TEST_ASSERT_TRUE(camrtc_ivc_send(NULL, buf, sizeof(buf)) < 0);
+    TEST_ASSERT_TRUE(camrtc_ivc_recv(NULL, buf, sizeof(buf), &out_len) < 0);
+    TEST_ASSERT_TRUE(camrtc_ivc_recv_wait(NULL, buf, sizeof(buf),
+                                          &out_len, 1000u) < 0);
+
+    /* Uninitialised channel. */
+    TEST_ASSERT_TRUE(camrtc_ivc_send(&ch, buf, sizeof(buf)) < 0);
+    TEST_ASSERT_TRUE(camrtc_ivc_recv(&ch, buf, sizeof(buf), &out_len) < 0);
+}
+
+/* ---- camrtc_capture ---- */
+
+/*
+ * Test: camrtc_capture stubs return -1 on QEMU. Same Jetson-skip
+ * pattern as test_camrtc_stubs_return_minus_one — the wrappers
+ * exercise real RCE hardware via the `csidiag` shell command.
+ */
+static void test_camrtc_capture_stubs_return_minus_one(void)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_IGNORE_MESSAGE("Jetson build: stubs not active "
+                        "(driver runs on real hardware via `csidiag` cmd)");
+#else
+    TEST_ASSERT_EQUAL_INT(-1, camrtc_capture_init());
+
+    uint32_t result = 0xDEADBEEFu;
+    TEST_ASSERT_EQUAL_INT(-1, camrtc_capture_phy_stream_open(0u, 0u, 0u,
+                                                              &result));
+    /* Stub must clear the out-pointer to a defined sentinel so callers
+     * that ignore rc don't read stack garbage. */
+    TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, result);
+
+    result = 0xDEADBEEFu;
+    TEST_ASSERT_EQUAL_INT(-1, camrtc_capture_csi_stream_set_config(
+        0u, 0u, 2u, 456000u, &result));
+    TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, result);
+#endif
+}
+
+/*
+ * Test: capture wrappers tolerate NULL out_result on both stub
+ * and Jetson branches. Useful for callers that only care about
+ * the transport-level rc and not the RCE-side `result` field.
+ */
+static void test_camrtc_capture_null_out_result_safe(void)
+{
+    int rc;
+    rc = camrtc_capture_phy_stream_open(0u, 0u, 0u, NULL);
+    TEST_ASSERT_TRUE(rc < 0);   /* Stub: -1, Jetson uninit: -1. */
+    rc = camrtc_capture_csi_stream_set_config(0u, 0u, 2u, 456000u, NULL);
+    TEST_ASSERT_TRUE(rc < 0);
+}
+
 int test_suite_camera(void)
 {
     UnityBegin("Camera C-API tests");
@@ -497,6 +626,12 @@ int test_suite_camera(void)
     RUN_TEST(test_nvcsi_stream_init_arg_validation);
     RUN_TEST(test_camrtc_stubs_return_minus_one);
     RUN_TEST(test_camrtc_send_msg_null_resp_allowed);
+    RUN_TEST(test_camrtc_send_irq_uninit_returns_negative);
+    RUN_TEST(test_camrtc_ivc_init_arg_validation);
+    RUN_TEST(test_camrtc_ivc_predicates_uninit_safe);
+    RUN_TEST(test_camrtc_ivc_send_recv_uninit_returns_negative);
+    RUN_TEST(test_camrtc_capture_stubs_return_minus_one);
+    RUN_TEST(test_camrtc_capture_null_out_result_safe);
     return UnityEnd();
 }
 

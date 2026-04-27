@@ -617,12 +617,173 @@ intermediate state needed to pick up the trail.
 5. **Trace and diagnostics IVC channels.** L4T allocates IVC ring buffers
    for `echo`, `dbg@1`, `dbg@2`, `diag@5` even when nothing uses them,
    because the per-region config block is shared and RCE expects a
-   complete TLV array. **Open:** does RCE accept a config block with
+   complete TLV array. ~~**Open:** does RCE accept a config block with
    only `capture-control` + `capture` channels declared, or does it
-   require all six? If the latter, SLM-OS must allocate dummy rings for
-   the four unused channels (~22 KB extra). The TLV array is
-   zero-terminated (`l4t-rtcpu-ivc-bus.c:211`), so partial declaration
-   *should* work, but this is unverified on hardware.
+   require all six?~~ **RESOLVED 2026-04-26 (PR #456):** zero-terminated
+   single-channel config block works — `CAMRTC_HSP_CH_SETUP` with one
+   `camrtc_tlv_ivc_setup` for capture-control plus the zero terminator
+   returned `RTCPU_CH_SUCCESS`. No dummy rings needed for the unused
+   channels.
+
+---
+
+## Hardware Task 3 Option B — IVC ring transport (2026-04-27, PRs #460/#461)
+
+After `CH_SETUP` binds the rings (PR #456), the next layer is the
+tegra-IVC ring transport itself: send/recv frame-sized messages,
+advance counters, notify the peer. Two non-obvious gotchas were
+discovered live on jetson-nano-1 between writing the first cut and
+getting RCE to actually consume frames.
+
+### Gotcha 1 — half-zero the queue headers, never full-zero
+
+Each 128-byte queue header is split into two 64-byte halves so AP↔RCE
+cache traffic doesn't false-share. Each side OWNS one half:
+
+| Queue              | AP half (writes)                            | RCE half (writes)                              |
+|--------------------|---------------------------------------------|------------------------------------------------|
+| TX (AP→RCE)        | bytes 0..63 — AP's `tx_count` + `tx_state`  | bytes 64..127 — RCE's `rx_count`               |
+| RX (RCE→AP)        | bytes 64..127 — AP's `rx_count`             | bytes 0..63 — RCE's `tx_count` + `tx_state`    |
+
+`CAMRTC_HSP_CH_SETUP` zero-init'd the entire region for SLM-OS, but
+RCE appears to write its own `tx_state` during CH_SETUP processing.
+The first cut of `camrtc_ivc_init` re-zeroed the full 128-byte header
+on both queues — clobbering RCE's `tx_state` writes — which left RCE
+silently ignoring frames (TX `tx_count` advanced to 1; RCE never
+consumed; `recv_wait` timed out at 1 s). The fix in
+`kernel/drivers/camrtc/camrtc_ivc.c:camrtc_ivc_init` is to zero only
+AP's halves: `tx_iova[0..63]` and `rx_iova[64..127]`. RCE's halves are
+left intact for the SYNC handshake to observe.
+
+### Gotcha 2 — rate-limit the SYNC handshake; RCE has a heartbeat watchdog
+
+L4T's `tegra_ivc_reset` + `tegra_ivc_notified`
+(`docs/reference/linux-tegra-ivc.c:398`) drives the IVC state machine
+on actual SS-bit interrupts — one notify per state transition. SLM-OS
+polls instead, and a tight no-spacing poll loop trips RCE's heartbeat
+watchdog (`BUG: core/watchdog/heartbeat-task.c:73 *** RCE WATCHDOG
+FAILURE: HALTING ***`) within milliseconds: each `notify_rce` writes
+the SS_SET bit AND sends a `CAMRTC_HSP_IRQ` mailbox message, and a
+hundred of those in a row floods RCE's mailbox-FULL ISR.
+
+The shape that works (`camrtc_ivc.c:camrtc_ivc_init`):
+
+1. **Kickoff:** write `tx_state = SYNC` once + `notify_rce` once.
+2. **Poll loop:** every 1 ms, read both `tx_state`s. Apply the L4T
+   transition table only when state has changed since the previous
+   poll. Notify only on actual transitions, never on a no-change
+   re-poll.
+3. **100 ms ceiling:** if EST/EST hasn't been observed by then,
+   return `-2`.
+
+In practice the handshake completes in 1 iteration on jetson-nano-1
+(RCE's response races our first poll), but the spacing is
+load-bearing for RCE's safety.
+
+### Region placement — NC mapping at 0xBDFE0000
+
+`CAMRTC_CTRL_REGION_PHYS = 0xBDFE0000` lives inside the existing 2 MB
+NC mapping at 0xBDE00000–0xBDFFFFFF (set up by `vmm_init`, MAIR index
+2 = Normal Non-Cacheable, Inner Shareable). The address is inside
+RCE's VM1 IOVA aperture (0xA0000000..0xC0000000) and bypasses AP's
+L1/L2 cache, so AP↔RCE memory ordering is just `dsb sy` — no
+`DC CVAC`, `DC CIVAC`, or `dma-coherent` SMMU programming needed. An
+earlier attempt with the region at 0xA0000000 cacheable + `DC CVAC`
+did NOT work (tracking issue #458, closed by PR #460).
+
+### Notify path
+
+`notify_rce(group)` in `camrtc_ivc.c` mirrors L4T
+`camrtc_hsp_vm_group_ring`
+(`docs/reference/l4t-rtcpu-hsp-combo.c:252`):
+
+```c
+mmio_write32(SS0 + SHRD_SEM_SET, (group & 0xFF) << 16);
+camrtc_send_irq(CAMRTC_HSP_IRQ, 1u, 1000u);
+```
+
+For `group=1` (capture-control) that's bit 16 of SS[0]. RCE clears
+the bit in its mailbox-FULL ISR, processes the IVC group, and (when
+it has data to send back) sets bit 0 of SS[0] (FW→VM, group 1) plus
+optionally sends a `CAMRTC_HSP_IRQ` of its own — which the
+`camrtc_send_msg` drain loop in `camrtc.c` handles transparently
+(opcodes < 0x40 are unidirectional notifications, drained while
+waiting for the matching response).
+
+### Capture-control message wrappers (PR #461)
+
+`kernel/include/camrtc_capture.h` defines the typed wire-format
+structs ported from `docs/reference/l4t-camrtc-capture-messages.h`,
+with sizes pinned by `_Static_assert`s in
+`kernel/tests/test_camera.c`:
+
+| Struct                                  | Size  | Reference                                  |
+|-----------------------------------------|-------|--------------------------------------------|
+| `capture_msg_header`                    | 8 B   | `l4t-camrtc-capture-messages.h:27`         |
+| `capture_phy_stream_open_req`           | 16 B  | `l4t-camrtc-capture-messages.h:337`        |
+| `capture_phy_stream_open_resp`          | 8 B   | `l4t-camrtc-capture-messages.h:352`        |
+| `nvcsi_brick_config`                    | 16 B  | `l4t-camrtc-capture.h:1531`                |
+| `nvcsi_cil_config`                      | 16 B  | `l4t-camrtc-capture.h:1551`                |
+| `vi_hsm_csimux_error_mask_config`       | 8 B   | `l4t-camrtc-capture.h:1585`                |
+| `nvcsi_error_config`                    | 56 B  | `l4t-camrtc-capture.h:1715`                |
+| `capture_csi_stream_set_config_req`     | 104 B | `l4t-camrtc-capture-messages.h:407`        |
+| `capture_csi_stream_set_config_resp`    | 8 B   | `l4t-camrtc-capture-messages.h:427`        |
+
+Wrappers in `kernel/drivers/camrtc/camrtc_capture.c`:
+
+- `camrtc_capture_init` — runs `camrtc_init` + `CH_SETUP` +
+  `camrtc_ivc_init` for the capture-control channel. Idempotent.
+- `camrtc_capture_phy_stream_open(stream_id, csi_port, phy_type)` —
+  sends `CAPTURE_PHY_STREAM_OPEN_REQ` (msg 0x36), waits for
+  `RESP` (0x37), validates the transaction id round-trip.
+- `camrtc_capture_csi_stream_set_config(stream_id, csi_port,
+  num_lanes, mipi_clock_rate)` — sends
+  `CAPTURE_CSI_STREAM_SET_CONFIG_REQ` (0x40), bulk-zeroes the 104-B
+  body so unused error masks land at 0 (= no error reporting), then
+  sets only stream/port/num_lanes/mipi_clock_rate.
+
+### Verified end-to-end
+
+`csidiag` shell command on jetson-nano-1:
+
+```
+=== NVCSI port A open via RCE IVC ===
+[INFO] camrtc_ivc: handshake EST/EST after kickoff
+[INFO] camrtc_ivc: channel up (group=1, rx=0xbdfe1000, tx=0xbdfe6080,
+                                nframes=64, frame_size=320)
+[INFO] capture_init: ready
+[INFO] phy_stream_open: send REQ tx=0x1 stream=0 port=0 phy=0
+[INFO] phy_stream_open: RESP tx=0x1 result=0x0
+[INFO] csi_stream_set_config: send REQ tx=0x2 stream=0 port=0
+                              lanes=2 mipi_kHz=456000
+[INFO] csi_stream_set_config: RESP tx=0x2 result=0x0
+*** NVCSI configured for IMX219 (2-lane D-PHY 456 MHz). ***
+```
+
+Ring counters confirm full round-trip in both directions:
+TX `tx_count=1, rx_count=1`; RX `tx_count=1`. Idempotent on repeat
+invocation (transaction id increments).
+
+### Test coverage
+
+`kernel/tests/test_camera.c` covers:
+- 11 `_Static_assert`s on the `camrtc_tlv_ivc_setup` wire format
+  (PR #456).
+- 11 pins on the `nvcsi_brick_config` / `nvcsi_cil_config` /
+  `nvcsi_error_config` / `capture_csi_stream_set_config_req` struct
+  sizes and field offsets (PR #461).
+- 8 pins on opcode IDs (`CAMRTC_HSP_IRQ` / `PING` / `FW_HASH` /
+  `CH_SETUP`, `CAPTURE_PHY_STREAM_OPEN_REQ` / `RESP`,
+  `CAPTURE_CSI_STREAM_SET_CONFIG_REQ` / `RESP`).
+- Cross-platform stub-path runtime tests (PR pending):
+  `test_camrtc_send_irq_uninit_returns_negative`,
+  `test_camrtc_ivc_init_arg_validation` (NULL ch, zero IOVAs,
+  non-power-of-two `nframes`, non-64-aligned `frame_size` — all
+  rejected), `test_camrtc_ivc_predicates_uninit_safe` (NULL/uninit
+  → false), `test_camrtc_ivc_send_recv_uninit_returns_negative`
+  (no NULL deref), `test_camrtc_capture_stubs_return_minus_one`
+  (out-pointer cleared to 0xFFFFFFFF sentinel), and
+  `test_camrtc_capture_null_out_result_safe`.
 
 ---
 
