@@ -26,6 +26,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* Provided by lua_stubs.c (kernel does not pull libc string.h, but
+ * strstr is exported for Lua and other in-kernel substring users).
+ * Declared extern here to keep the test self-contained — same pattern
+ * as test_shell.c. */
+extern char *strstr(const char *haystack, const char *needle);
+
 static void write_lfs_file(const char *path, const char *contents)
 {
     const char *subpath = NULL;
@@ -609,6 +615,72 @@ static void test_lua_default_surface_excludes_admin_bindings(void)
 }
 
 /* ============================================================================
+ * help <cmd> routing — regression for the uart_puts vs shell_puts bug
+ *
+ * `help_show` originally wrote the help text via `uart_puts` and the
+ * "No help available" line via `uart_printf`, which bypassed per-session
+ * I/O routing. UART users got correct output by accident (uart_puts
+ * still hits the same console). Telnet users got nothing — the help
+ * text went to the physical UART, not their socket.
+ *
+ * These tests bind a capture-mode shell_io to the current task and run
+ * `help cp` / `help nonexistent`, asserting the captured buffer is what
+ * the user sees. If `help_show` ever regresses to uart_puts, the
+ * capture buffer stays empty and the tests fail loudly.
+ * ============================================================================ */
+
+static void test_help_show_routes_to_bound_session(void)
+{
+    struct task *t = task_current();
+    struct shell_session *s = shell_session_alloc();
+    TEST_ASSERT_NOT_NULL(s);
+
+    struct shell_io io;
+    struct capture_ctx cap;
+    capture_init(&io, &cap);
+    s->io = &io;
+
+    shell_session_bind(t, s);
+    int rc = shell_execute("help cp");
+    shell_session_unbind(t);
+    s->io = NULL;
+    shell_session_free(s);
+
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    /* Capture must contain the body of the cp help entry, not be empty.
+     * The leading line "cp - Copy files" is unique to that entry, so a
+     * substring check is enough to prove routing landed in the session. */
+    TEST_ASSERT_NOT_EQUAL(0, cap.len);
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "cp - Copy files"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "Usage:"));
+}
+
+static void test_help_show_unknown_command_routes_to_bound_session(void)
+{
+    struct task *t = task_current();
+    struct shell_session *s = shell_session_alloc();
+    TEST_ASSERT_NOT_NULL(s);
+
+    struct shell_io io;
+    struct capture_ctx cap;
+    capture_init(&io, &cap);
+    s->io = &io;
+
+    shell_session_bind(t, s);
+    int rc = shell_execute("help nonexistent_xyz");
+    shell_session_unbind(t);
+    s->io = NULL;
+    shell_session_free(s);
+
+    /* Unknown command path returns -1 from help_show, propagated by
+     * cmd_help. The "No help available" diagnostic must reach the
+     * session, not silently disappear into the UART. */
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "No help available"));
+    TEST_ASSERT_NOT_NULL(strstr(cap.buf, "nonexistent_xyz"));
+}
+
+/* ============================================================================
  * Entry point
  * ============================================================================ */
 
@@ -643,6 +715,9 @@ int test_suite_shell_session(void)
     RUN_TEST(test_shell_puts_routes_to_bound_session);
     RUN_TEST(test_shell_putc_routes_to_bound_session);
     RUN_TEST(test_shell_getc_reads_from_bound_session);
+
+    RUN_TEST(test_help_show_routes_to_bound_session);
+    RUN_TEST(test_help_show_unknown_command_routes_to_bound_session);
 
     RUN_TEST(test_nested_mutating_dispatch_no_deadlock);
     RUN_TEST(test_lua_command_non_repl_state_does_not_persist_per_session);
