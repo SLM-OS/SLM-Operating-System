@@ -348,24 +348,71 @@ static void destroy_boot_media_fat_volume(struct blkdev *dev)
     }
 }
 
+/*
+ * `f_open(FA_CREATE_ALWAYS)` creates the file but NOT missing
+ * parent directories — passing a path whose parent doesn't exist
+ * returns FR_NO_PATH (#486). Walk the path's intermediate "/"
+ * separators and `f_mkdir` each ancestor under the volume root.
+ *
+ * Idempotent (FR_EXIST is treated as success). Skips the volume
+ * prefix (e.g. "0:") and the final filename. The caller must
+ * already have a FAT volume mounted.
+ *
+ * For "0:/slmstore/autoload/foo.bin" this `f_mkdir`s
+ * "0:/slmstore" then "0:/slmstore/autoload"; for "0:/foo.bin"
+ * (top-level), it's a no-op.
+ */
+static void ensure_fat_parent_dirs(const char *path)
+{
+    char buf[VFS_MAX_PATH];
+    size_t len = strlen(path);
+    TEST_ASSERT_MESSAGE(len > 0 && len < sizeof(buf),
+                        "ensure_fat_parent_dirs: path too long or empty");
+    memcpy(buf, path, len + 1);
+
+    /* Skip the "0:" volume prefix when looking for dir separators. */
+    char *cursor = buf;
+    if (buf[0] && buf[1] == ':') {
+        cursor = buf + 2;
+    }
+
+    /* mkdir each "/"-terminated prefix EXCEPT the final filename
+     * (which is everything after the last slash). */
+    char *last_slash = NULL;
+    for (char *p = cursor; *p; p++) {
+        if (*p == '/') last_slash = p;
+    }
+    if (!last_slash || last_slash == cursor) {
+        return;  /* "0:/foo.bin" or similar — no parent dirs to create. */
+    }
+
+    for (char *p = cursor + 1; p < last_slash; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            FRESULT r = f_mkdir(buf);
+            TEST_ASSERT_TRUE(r == FR_OK || r == FR_EXIST);
+            *p = '/';
+        }
+    }
+    /* The deepest parent — between the last interior slash and the
+     * final slash. */
+    *last_slash = '\0';
+    FRESULT r = f_mkdir(buf);
+    TEST_ASSERT_TRUE(r == FR_OK || r == FR_EXIST);
+    *last_slash = '/';
+}
+
 static void write_boot_media_fat_file(const char *path, const void *data, UINT len)
 {
     struct blkdev *dev = boot_media_acquire();
     FATFS fs;
     FIL fp;
-    FRESULT mkdir_res;
     UINT written = 0;
 
     TEST_ASSERT_NOT_NULL(dev);
     fatfs_disk_attach(dev);
     TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(&fs, TEST_FAT32_VOL, 1));
-    /* Ensure the slmstore/autoload tree exists before f_open with
-     * FA_CREATE_ALWAYS — f_open does not create missing parent
-     * directories and would otherwise return FR_NO_PATH (#486). */
-    mkdir_res = f_mkdir("0:/slmstore");
-    TEST_ASSERT_TRUE(mkdir_res == FR_OK || mkdir_res == FR_EXIST);
-    mkdir_res = f_mkdir("0:/slmstore/autoload");
-    TEST_ASSERT_TRUE(mkdir_res == FR_OK || mkdir_res == FR_EXIST);
+    ensure_fat_parent_dirs(path);
     TEST_ASSERT_EQUAL_INT(FR_OK, f_open(&fp, path, FA_WRITE | FA_CREATE_ALWAYS));
     TEST_ASSERT_EQUAL_INT(FR_OK, f_write(&fp, data, len, &written));
     TEST_ASSERT_EQUAL_UINT(len, written);
@@ -386,8 +433,7 @@ static void write_boot_media_fat_autoload_conf(const char *text)
     TEST_ASSERT_NOT_NULL(dev);
     fatfs_disk_attach(dev);
     TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(&fs, TEST_FAT32_VOL, 1));
-    TEST_ASSERT_TRUE(f_mkdir("0:/slmstore") == FR_OK || f_mkdir("0:/slmstore") == FR_EXIST);
-    TEST_ASSERT_TRUE(f_mkdir("0:/slmstore/autoload") == FR_OK || f_mkdir("0:/slmstore/autoload") == FR_EXIST);
+    ensure_fat_parent_dirs("0:/slmstore/autoload/.placeholder");
     TEST_ASSERT_EQUAL_INT(FR_OK, f_open(&fp, "0:/slmstore/blob_autoload.conf", FA_WRITE | FA_CREATE_ALWAYS));
     TEST_ASSERT_EQUAL_INT(FR_OK, f_write(&fp, text, len, &written));
     TEST_ASSERT_EQUAL_UINT(len, written);

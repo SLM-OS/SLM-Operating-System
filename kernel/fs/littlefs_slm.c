@@ -28,10 +28,13 @@
  * into "no slot available" for every subsequent littlefs_mount in
  * the same run, making unrelated test_lfs_* / test_persistent_lfs
  * tests fail downstream of the first failure. Bumped to 8 so a
- * handful of leaked slots don't break later tests; production
- * cost is `sizeof(struct lfs_mount) * 6` ≈ a few KB of BSS, which
- * is negligible compared to the LittleFS read/prog buffers each
- * mount carries. */
+ * handful of leaked slots don't break later tests.
+ *
+ * Memory cost: `struct lfs_mount` carries ~4 KB of embedded LittleFS
+ * state (`lfs_t` + `lfs_config` + 256 B read/prog buffers + 16 B
+ * lookahead + 4 file_handle slots × ~600 B + 4 dir_handle slots).
+ * Six extra mount slots ≈ ~30 KB extra BSS, negligible vs the 1 GB
+ * QEMU test build / 4 GB Pi 5. */
 #define LFS_MAX_MOUNTS 8
 
 /*
