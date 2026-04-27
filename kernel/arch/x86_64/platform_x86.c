@@ -606,6 +606,25 @@ const void *dtb_get_blob(void)
     return NULL;    /* No DTB on x86-64 */
 }
 
+/* x86-64 has no DTB, so /memreserve/ is empty: pmm.c sees zero
+ * reservations and adds the full RAM range as-is. */
+int dtb_get_memreserves(dtb_memreserve_t *out, int max)
+{
+    (void)out;
+    (void)max;
+    return 0;
+}
+
+/* /chosen entropy + bootloader metadata are DTB-only; on x86-64 the
+ * firmware path (multiboot2 / kexec) doesn't carry them, so return a
+ * pointer to a zero-initialised struct. Callers already treat
+ * all-zero fields as "absent". */
+const dtb_chosen_t *dtb_get_chosen(void)
+{
+    static const dtb_chosen_t empty = { 0 };
+    return &empty;
+}
+
 /* ---- Rust FFI stubs (weak — overridden by real Rust library when linked) ---- */
 
 __attribute__((weak)) void rust_heap_init(void *heap_start, size_t heap_size)
