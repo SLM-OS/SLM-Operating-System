@@ -8,6 +8,55 @@ translations for VI DMA"). Cached source files are in
 
 ---
 
+## Status — wire-format port complete (2026-04-27)
+
+The plan in this doc has now been executed end-to-end on
+jetson-nano-1 across PRs **#469 / #472 / #473 / #474 / #499**:
+
+| Layer                                    | SLM-OS code                                                            | PR    |
+|------------------------------------------|------------------------------------------------------------------------|-------|
+| Bind 2nd IVC channel ("capture")         | `kernel/drivers/camrtc/camrtc.c` (extended TLV array)                  | #469  |
+| `CAPTURE_CHANNEL_SETUP_REQ` (msg 0x1E)   | `camrtc_capture_channel_setup` in `camrtc_capture.c`                   | #472  |
+| VI request region (0xBDFD0000, 64 KB)    | `camrtc_vi_req_*` accessors in `camrtc.c`; csidiag wires real IOVAs    | #473  |
+| `CAPTURE_REQUEST_REQ` / `STATUS_IND`     | `camrtc_capture_request` over the *capture* IVC channel                | #474  |
+| Review fixes + tests + plan/IVC docs     | typed `capture_descriptor_header` overlay; 4 new runtime tests         | #499  |
+
+Verified `csidiag` chain on jetson-nano-1:
+
+```
+capture_init:    rc=0
+PHY_STREAM_OPEN: rc=0 result=0x0    (stream 0 / port A / D-PHY)
+CSI_SET_CONFIG:  rc=0 result=0x0    (2 lanes × 456 MHz)
+CHANNEL_SETUP:   rc=0 result=0x0 channel_id=0x0 vi_mask=0x800000000
+CAPTURE_REQUEST: send buffer_index=0 → RCE consumes + emits scheduler
+                                       errors via TCU (vi5.c:4063,
+                                       capture-scheduler.c:2179)
+```
+
+`vi_mask=0x800000000` (bit 35) is RCE's allocation of physical VI
+hardware channel #35 to our request ring. The CAPTURE_REQUEST
+round-trips at the wire level; `STATUS_IND` doesn't arrive because
+the descriptor's `vi_channel_config` is zero-init (no real frame
+format), so RCE bails before the IND-emission path.
+
+**What remains** (out of scope for the wire-format port; see
+`docs/jetson-camera-imx219-plan.md` for the full roadmap):
+
+1. Port `vi_channel_config` (~352 B with C bitfields).
+2. IMX219 power-on + `MODE_SELECT = STREAMING` (extend `imx219`
+   shell command).
+3. 2.5 MB frame buffer in RCE-accessible DRAM (current 64 KB NC
+   carveouts insufficient for IMX219 1640×1232 RAW10).
+4. Inspect `capture_status.status` field in the descriptor for
+   `CAPTURE_STATUS_SUCCESS`.
+
+Detailed wire-format reference (struct sizes / offsets / region
+layouts / verified outputs / test coverage list) lives in
+`docs/jetson-camera-rtcpu-ivc-driver-notes.md` §"Hardware Task 4 —
+VI capture wire-format port".
+
+---
+
 ## TL;DR — load-bearing answers up front
 
 1. **VI5 is not register-programmable from the AP CPU.** There is no
