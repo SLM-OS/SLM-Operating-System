@@ -263,10 +263,14 @@ endif()
 # if the resolved config says enabled it calls net_init + starts
 # the TCP listener on port 2323.
 #
-# Default is ON for Pi 5 lab/demo images and OFF elsewhere. This is a
-# cache default only: an explicit -DNET_TELNETD_AUTOSTART=OFF must win,
-# especially on real hardware where the listener is unauthenticated.
-if(PLATFORM STREQUAL "RASPI5")
+# Default is ON for Pi 5 + Jetson lab/demo images and OFF elsewhere.
+# This is a cache default only: an explicit -DNET_TELNETD_AUTOSTART=OFF
+# must win, especially on real hardware where the listener is
+# unauthenticated. Jetson is in the demo set because the canonical
+# kexec workflow leaves the device on a non-interactive serial
+# console, and telnet is the primary way the demo runbook
+# (`docs/demo-admin.md`) reaches the shell.
+if(PLATFORM STREQUAL "RASPI5" OR PLATFORM STREQUAL "JETSON_ORIN_NANO")
     if(NOT DEFINED NET_TELNETD_AUTOSTART)
         set(NET_TELNETD_AUTOSTART ON CACHE BOOL
             "Start telnetd at boot (unauthenticated TCP shell)")
@@ -1413,10 +1417,40 @@ endif()
 # The firmware lives on the Jetson at /lib/firmware/nvidia/ga10b/; pull it
 # to the build host with scripts/tools/fetch-ga10b-firmware.sh.
 #
-# Gate: set -DGA10B_FIRMWARE_DIR=<path> at configure time. Default off
-# (the tree builds without firmware; the bringup code will detect the
-# missing blobs and fail Phase 0 cleanly).
-set(GA10B_FIRMWARE_DIR "" CACHE PATH "Directory containing ga10b nvgpu firmware (see scripts/tools/fetch-ga10b-firmware.sh)")
+# Gate: set -DGA10B_FIRMWARE_DIR=<path> at configure time. Without
+# firmware the tree builds fine; the bringup code detects the missing
+# blobs and fails Phase 0 cleanly.
+#
+# First-configure auto-detect (Jetson only): if the user has not
+# already provided GA10B_FIRMWARE_DIR via -D or a prior cache entry,
+# and the canonical fetch-script destination
+# ($ENV{HOME}/jetson-ga10b-firmware, matching the default in
+# scripts/tools/fetch-ga10b-firmware.sh) exists on the build host,
+# seed the cache with that path so the canonical demo build picks it
+# up automatically. Explicit `-DGA10B_FIRMWARE_DIR=` (empty) keeps
+# the firmware embed disabled because the cache entry already exists
+# at that point — `DEFINED CACHE{NAME}` (CMake ≥ 3.14; this project
+# pins ≥ 3.20 at the top of the file) guards the auto-pick to the
+# truly-fresh-configure case. The else branch only runs when the
+# cache already holds a value, in which case the trailing
+# `set(... CACHE PATH ...)` without FORCE is a no-op — i.e. the
+# `_ga10b_initial = ""` assignment can never clobber a user override.
+if(PLATFORM STREQUAL "JETSON_ORIN_NANO" AND NOT DEFINED CACHE{GA10B_FIRMWARE_DIR})
+    set(_ga10b_default_dir "$ENV{HOME}/jetson-ga10b-firmware")
+    if(IS_DIRECTORY "${_ga10b_default_dir}")
+        set(_ga10b_initial "${_ga10b_default_dir}")
+        message(STATUS "  GA10B firmware: auto-detected at ${_ga10b_default_dir}")
+    else()
+        set(_ga10b_initial "")
+    endif()
+else()
+    set(_ga10b_initial "")
+endif()
+# CACHE without FORCE: writes only when the cache entry doesn't exist
+# yet, so a user-supplied -DGA10B_FIRMWARE_DIR=... (even empty) is
+# preserved across reconfigures.
+set(GA10B_FIRMWARE_DIR "${_ga10b_initial}" CACHE PATH
+    "Directory containing ga10b nvgpu firmware (see scripts/tools/fetch-ga10b-firmware.sh)")
 
 if(PLATFORM STREQUAL "JETSON_ORIN_NANO" AND GA10B_FIRMWARE_DIR)
     # Verify the required files exist. If the user points us at an empty or

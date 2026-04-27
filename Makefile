@@ -344,6 +344,18 @@ endif
 test-build-stamp:
 	@BUILD_DIR=$(BUILD_DIR) bash scripts/tests/test-build-stamp-advances.sh
 
+# test-build-defaults: configure-only matrix that locks in the Jetson
+# default-build-flags policy (NET_TELNETD_AUTOSTART=ON for Pi 5 +
+# Jetson, GA10B_FIRMWARE_DIR auto-detection at the canonical
+# fetch-script destination, and the explicit-empty override path).
+# Intentionally not part of `make test` — these are build-host
+# concerns, not kernel-runtime regressions. Run after touching
+# CMakeLists.txt's NET_TELNETD_AUTOSTART or GA10B_FIRMWARE_DIR
+# logic.
+.PHONY: test-build-defaults
+test-build-defaults:
+	@bash scripts/tests/test-jetson-build-defaults.sh
+
 # kernel-bzimage: X86_64-only parallel build of a Linux-bzImage wrapper
 # around the kernel. Used as the third kexec loader path alongside
 # Multiboot2 (unblocked from "Invalid memory segment" but silent after

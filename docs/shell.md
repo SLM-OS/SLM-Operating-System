@@ -767,8 +767,8 @@ as a deprecated alias. Subcommands:
 
 ### Autostart and `/etc/telnetd.conf`
 
-Pi 5 lab/demo builds now default `NET_TELNETD_AUTOSTART=ON`. Other
-platforms still need `cmake -DNET_TELNETD_AUTOSTART=ON` to start
+Pi 5 and Jetson lab/demo builds default `NET_TELNETD_AUTOSTART=ON`.
+Other platforms still need `cmake -DNET_TELNETD_AUTOSTART=ON` to start
 `telnetd` at boot. A `/etc/telnetd.conf` in the VFS can flip that
 on/off at runtime and tune the settings:
 

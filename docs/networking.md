@@ -213,10 +213,11 @@ telnetd: stopped
 ```
 
 The TCP shell uses the lwIP raw callback API (required because the
-port builds with `NO_SYS=1` / `LWIP_SOCKET=0`). Pi 5 lab/demo builds
-now default `NET_TELNETD_AUTOSTART=ON`; other platforms still need an
-explicit `-DNET_TELNETD_AUTOSTART=ON` plus `/etc/telnetd.conf` in the
-VFS to bring the daemon up automatically at boot. See
+port builds with `NO_SYS=1` / `LWIP_SOCKET=0`). Pi 5 and Jetson
+lab/demo builds default `NET_TELNETD_AUTOSTART=ON`; other platforms
+still need an explicit `-DNET_TELNETD_AUTOSTART=ON` plus
+`/etc/telnetd.conf` in the VFS to bring the daemon up automatically at
+boot. See
 `docs/shell.md` § Multi-Session Shell and
 `docs/archive/plans/multi-session-shell-plan.md` for the architecture.
 
