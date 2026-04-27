@@ -135,6 +135,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_shell_session();
     total_failures += test_suite_shell_history();
     total_failures += test_suite_blob_autoload();
+    total_failures += test_suite_boot_media();
 #if defined(ENABLE_NETWORKING)
     total_failures += test_suite_telnet();
     total_failures += test_suite_telnetd_config();
