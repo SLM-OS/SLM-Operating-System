@@ -176,6 +176,32 @@ static void test_enable_inference_accepts(void)
 }
 
 /*
+ * Calling with NULL out_reason on the inference success path must
+ * not fault. Pins the regression that would surface if the function
+ * dereferenced `*out_reason` unconditionally — a real risk because
+ * the prior implementation cleared `*out_reason = NULL` at the end
+ * of every accept (which would have crashed callers passing NULL).
+ */
+static void test_enable_inference_with_null_reason_ok(void)
+{
+    struct gpu_consumer_status st;
+    gpu_consumer_status_get(&st);
+    if (!st.gpu_ready) {
+        TEST_IGNORE_MESSAGE("GPU not available — covered by NODEV test");
+        return;
+    }
+    reset_all_consumers();
+
+    int rc = gpu_consumer_set(GPU_CONSUMER_INFERENCE, true, NULL);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_TRUE(gpu_consumer_enabled(GPU_CONSUMER_INFERENCE));
+
+    rc = gpu_consumer_set(GPU_CONSUMER_INFERENCE, false, NULL);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_FALSE(gpu_consumer_enabled(GPU_CONSUMER_INFERENCE));
+}
+
+/*
  * Enable sched / eviction when GPU is available -> rc=0 BUT
  * `*out_reason` is non-NULL with a "scaffold only" warning,
  * because no policy declares `has_gpu_backend = true` yet.
@@ -308,6 +334,7 @@ int test_suite_gpu_consumer(void)
     RUN_TEST(test_enable_unknown_consumer);
     RUN_TEST(test_enable_returns_nodev_when_gpu_unavailable);
     RUN_TEST(test_enable_inference_accepts);
+    RUN_TEST(test_enable_inference_with_null_reason_ok);
     RUN_TEST(test_enable_sched_accepts_with_scaffold_warning);
     RUN_TEST(test_enable_eviction_accepts_with_scaffold_warning);
     RUN_TEST(test_status_tracks_enable_disable);

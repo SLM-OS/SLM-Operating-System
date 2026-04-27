@@ -544,6 +544,50 @@ extern int rust_model_unpin(uint32_t index);
 extern int rust_model_share_weights(uint32_t index);
 
 /*
+ * Set the per-model GPU-dispatch toggle.
+ *
+ * `enabled` is treated as a boolean (0 = off, non-zero = on). The
+ * shell `model use-gpu <name|idx> on|off` command writes through this.
+ * Default at load is ON, so flipping the master `gpu use inference`
+ * flag enables every loaded model; this per-model override takes a
+ * specific model back to CPU without disturbing the master.
+ *
+ * Returns: 0 on success, -1 if `index` is not a loaded model.
+ */
+extern int rust_model_set_gpu_dispatch(uint32_t index, uint8_t enabled);
+
+/*
+ * Total flat fp32 element count expected for the model's input
+ * tensor(s).
+ *
+ * Used by the shell `model infer-file` command to reject shape-
+ * mismatched files before handing them to the engine — replaces
+ * the engine's opaque `EngineError::InvalidInput` with an operator-
+ * readable "expected N floats, got M" line.
+ *
+ * Returns: element count (>= 1) on success, -1 on invalid index
+ * or a degenerate (zero-product) input shape.
+ */
+extern int rust_model_expected_input_floats(uint32_t index);
+
+/*
+ * Run inference on a loaded model with caller-supplied fp32 input,
+ * printing logits and argmax to UART. Returns the argmax class
+ * index (>= 0) on success, or:
+ *   -1 : `model_index` not loaded
+ *   -2 : `input` is NULL or `input_floats` is 0
+ *   -3 : engine error (shape mismatch, ops failure, etc.)
+ *
+ * `input` must point to `input_floats` × 4 bytes of 4-byte-aligned
+ * fp32. The shell `model infer-file` command hands in a
+ * `pmm_alloc_pages` buffer; the page alignment satisfies the fp32
+ * load alignment the inference kernels assume.
+ */
+extern int rust_infer_buf_and_print(uint32_t model_index,
+                                    const float *input,
+                                    size_t input_floats);
+
+/*
  * Run model loader tests.
  * Returns: Number of failures (0 = all passed).
  */
@@ -672,7 +716,12 @@ int slm_gpu_available(void);
  * The Rust engine consults this in `mnist_gpu_fastpath_eligible`
  * before attempting GPU dispatch.
  *
- * Returns 0 on non-Jetson builds (no GPU dispatch path).
+ * Mirrors operator intent on every platform — flipping the flag
+ * succeeds whenever `slm_gpu_available()` is non-zero (stub or
+ * real). On platforms without an MNIST GA10x fastpath (everywhere
+ * except Jetson today) the engine still falls back to CPU even
+ * when this returns 1; the flag records intent, the dispatch
+ * decision lives in the Rust runtime.
  */
 int slm_gpu_inference_enabled(void);
 

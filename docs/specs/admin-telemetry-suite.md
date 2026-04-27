@@ -397,7 +397,7 @@ This is the same pattern as `scripts/slm-put.py` (from the dynamic-policy plan, 
 ## 12. Milestones
 
 - **M1** — `latency_hist` + `rate_ewma` headers; wire scheduler decision site; expose via `slm.sched_decision_rate()`, `slm.latency_histogram("sched")`. Test: QEMU bench shows non-zero p50/p99.
-- **M2** — `gpu_consumer` toggle, `slm.gpu_use_*`, `gpu use` shell command. M2-as-shipped rejected every `enable=true` with EOPNOTSUPP because no consumer had a wired backend yet; this was reworked in `feat/gpu-inference-toggles` (PR landed 2026-04-26) to accept-with-warning for sched/eviction and accept-cleanly for inference once the MNIST GA10B fastpath landed. Test: `kernel/tests/test_gpu_consumer.c` covers all four cases (NODEV, inference accepts cleanly, sched/eviction accept with `*out_reason` set, status snapshot tracks flips).
+- **M2** — `gpu_consumer` toggle, `slm.gpu_use_*`, `gpu use` shell command. Reworked 2026-04-26 to accept-with-warning for sched/eviction (no policy declares `has_gpu_backend = true`) and accept-cleanly for inference (consumed by the MNIST GA10B fastpath). Test: `kernel/tests/test_gpu_consumer.c` covers NODEV, inference accept, sched/eviction accept-with-warning, NULL out_reason, and status snapshots.
 - **M3** — Same pattern for eviction (Rust + Lua glue) and inference (lua_slm.c wrapper).
 - **M4** — Telemetry feed: topic emission at decision sites, `slm.telemetry_*`, `telemetry` shell command. Test: subscribing to `/telemetry/sched/*` from a second telnet session shows samples in real time.
 - **M5** — Model upload + launch shell + Lua. Test: `slm-model-upload.py` pushes a 1 MB blob, sha256 verifies, `model launch` returns a task id.

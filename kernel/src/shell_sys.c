@@ -2315,14 +2315,16 @@ static int model_unload(int argc, char *argv[])
 extern int rust_infer_and_print(uint32_t model_index);
 
 /*
- * File-input variant. C reads the bytes via VFS and hands them to Rust
- * as a fp32 buffer; Rust runs inference and prints logits + argmax.
- * The pointer cast `(const float *)buf` is just FFI shape — C never
- * dereferences as float, so the -mgeneral-regs-only constraint holds.
+ * Hard upper bound on `model infer-file` payload size. The largest
+ * input tensor expected today is the AI scheduler's feature vector
+ * (a few KB at most); MNIST sits at 3,136 bytes (1×1×28×28 fp32).
+ * 32 KB leaves comfortable headroom while keeping the temporary
+ * `pmm_alloc_pages` allocation small enough to never trigger
+ * eviction pressure on a freshly-booted system. The per-model
+ * shape check below is the real gate; this constant just rejects
+ * obviously bogus files before the alloc.
  */
-extern int rust_infer_buf_and_print(uint32_t model_index,
-                                    const float *input,
-                                    size_t input_floats);
+#define MODEL_INFER_FILE_MAX_BYTES (32u * 1024u)
 
 static int model_infer_file(int argc, char *argv[])
 {
@@ -2346,6 +2348,17 @@ static int model_infer_file(int argc, char *argv[])
         return -1;
     }
 
+    /* Look up the model's expected input element count up-front so a
+     * shape mismatch becomes "expected 784 floats (3136 bytes), got
+     * N" instead of the engine's opaque InvalidInput error. */
+    int expected_floats = rust_model_expected_input_floats((uint32_t)idx);
+    if (expected_floats <= 0) {
+        shell_printf("model infer-file: '%s' has no usable input shape\r\n",
+                     argv[2]);
+        return -1;
+    }
+    uint32_t expected_bytes = (uint32_t)expected_floats * 4u;
+
     /* Resolve path against cwd, like the other shell file commands. */
     char resolved[VFS_MAX_PATH];
     if (shell_resolve_path(argv[3], resolved, sizeof(resolved)) < 0) {
@@ -2358,10 +2371,17 @@ static int model_infer_file(int argc, char *argv[])
         shell_printf("model infer-file: cannot stat '%s'\r\n", resolved);
         return -1;
     }
-    if ((info.size % 4u) != 0 || info.size > 32u * 1024u) {
-        shell_printf("model infer-file: '%s' size %u — must be a multiple of 4 "
-                     "and <= 32 KB\r\n",
-                     resolved, (unsigned)info.size);
+    if (info.size > MODEL_INFER_FILE_MAX_BYTES) {
+        shell_printf("model infer-file: '%s' is %u bytes — exceeds the %u-byte cap\r\n",
+                     resolved, (unsigned)info.size,
+                     (unsigned)MODEL_INFER_FILE_MAX_BYTES);
+        return -1;
+    }
+    if (info.size != expected_bytes) {
+        shell_printf("model infer-file: '%s' is %u bytes; '%s' expects %d "
+                     "fp32 elements (%u bytes)\r\n",
+                     resolved, (unsigned)info.size, argv[2],
+                     expected_floats, (unsigned)expected_bytes);
         return -1;
     }
 
@@ -2396,7 +2416,18 @@ static int model_infer_file(int argc, char *argv[])
     pmm_free_pages(buf, pages);
 
     if (result < 0) {
-        shell_printf("model infer-file: failed (error %d)\r\n", result);
+        /* Map the contract codes from rust_infer_buf_and_print
+         * (slm_ffi.h) to operator-readable lines. The detailed
+         * UART trace from the Rust side has the exact failure;
+         * this just makes the shell output meaningful on its own. */
+        const char *why;
+        switch (result) {
+        case -1: why = "model not loaded";          break;
+        case -2: why = "empty / null input buffer"; break;
+        case -3: why = "engine error (see UART log)"; break;
+        default: why = "unknown error";             break;
+        }
+        shell_printf("model infer-file: %s (rc=%d)\r\n", why, result);
         return -1;
     }
     /* Echo the prediction to the active shell session — the detailed
@@ -2514,7 +2545,6 @@ int cmd_model(int argc, char *argv[])
             return -1;
         }
 
-        extern int rust_model_set_gpu_dispatch(uint32_t index, uint8_t enabled);
         if (rust_model_set_gpu_dispatch((uint32_t)idx, enabled ? 1 : 0) != 0) {
             shell_printf("model use-gpu: failed to set flag for slot %d\r\n", idx);
             return -1;

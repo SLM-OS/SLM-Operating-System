@@ -3668,6 +3668,20 @@ pub extern "C" fn rust_model_gpu_dispatch_enabled(index: u32) -> i32 {
     if loader::registry::gpu_dispatch_enabled(index as usize) { 1 } else { 0 }
 }
 
+/// Total flat fp32 element count expected by the model's input.
+///
+/// Used by the shell `model infer-file` command to reject shape-
+/// mismatched files before the engine sees them. Returns the count
+/// (>= 1) on success, -1 if the index is not a loaded model or the
+/// graph carries a degenerate (zero-product) input shape.
+#[no_mangle]
+pub extern "C" fn rust_model_expected_input_floats(index: u32) -> i32 {
+    match loader::registry::expected_input_floats(index as usize) {
+        Some(n) if n > 0 && n <= i32::MAX as usize => n as i32,
+        _ => -1,
+    }
+}
+
 /// Share a model's weight memory (increment refcount).
 ///
 /// Returns 0 on success, -1 on error. The caller must call
@@ -4449,6 +4463,44 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
         }
     }
 
+    // =========================================================================
+    // expected_input_floats — backs the shell `model infer-file` size check
+    //
+    // The shell hands raw fp32 from VFS to the engine; rejecting size
+    // mismatches at the shell layer (with the model's expected element
+    // count in the error message) is much friendlier than the engine's
+    // opaque `EngineError::InvalidInput`. These tests pin the registry
+    // helper that powers that check.
+    // =========================================================================
+
+    // Test: expected_input_floats matches MNIST's 1×1×28×28 = 784 floats.
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"shape_test", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            let elems = loader::registry::expected_input_floats(idx);
+            let passed = elems == Some(784);
+            print_test_result(b"shape: MNIST expects 784 fp32 input elements\0", passed);
+            if !passed { failures += 1; }
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"shape: MNIST expects 784 fp32 input elements\0", false);
+            failures += 1;
+        }
+    }
+
+    // Test: expected_input_floats returns None for inactive / OOB indices.
+    {
+        loader::registry::init();
+        // 999 is well past MAX_MODELS (= 8 today); 0 is in range but
+        // inactive after the bare init().
+        let oob = loader::registry::expected_input_floats(999);
+        let inactive = loader::registry::expected_input_floats(0);
+        let passed = oob.is_none() && inactive.is_none();
+        print_test_result(b"shape: inactive / OOB index returns None\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
@@ -4752,40 +4804,67 @@ pub extern "C" fn rust_infer_buf_and_print(
     }
 
     if input.is_null() || input_floats == 0 {
+        // SAFETY: pure FFI call, fmt has matching specifiers.
+        unsafe {
+            uart_printf(
+                b"[infer-buf] null/empty input buffer (model_index=%u floats=%lu)\r\n\0"
+                    .as_ptr(),
+                model_index,
+                input_floats as u64,
+            );
+        }
         return -2;
     }
 
     let idx = model_index as usize;
     let info = match loader::registry::get_info(idx) {
         Some(i) => i,
-        None => return -1,
+        None => {
+            // SAFETY: pure FFI call, fmt has matching specifiers.
+            unsafe {
+                uart_printf(
+                    b"[infer-buf] model index %u not loaded\r\n\0".as_ptr(),
+                    model_index,
+                );
+            }
+            return -1;
+        }
     };
 
-    // Static output buffer mirrors `rust_infer_and_print`'s pattern.
-    // The caller owns the input buffer's lifetime.
-    static mut OUTPUT: [f32; 64] = [0.0f32; 64];
+    // Stack-local output buffer (was previously `static mut`; lifted to
+    // the stack so two concurrent shell sessions calling this entry
+    // can't race the same array). 64 × 4 = 256 B fits the 16 KB kernel-
+    // task stack budget comfortably.
+    let mut output: [f32; 64] = [0.0f32; 64];
 
     let start = kernel_ffi::get_time_ns();
 
-    // SAFETY: shell is single-threaded; OUTPUT is touched only here.
-    let result = unsafe {
-        for o in OUTPUT.iter_mut() { *o = 0.0; }
-
-        match inference::run_inference(
-            idx,
-            input,
-            input_floats,
-            OUTPUT.as_mut_ptr(),
-            OUTPUT.len(),
-        ) {
-            Ok(n) => n,
-            Err(_) => return -3,
+    let result = match inference::run_inference(
+        idx,
+        input,
+        input_floats,
+        output.as_mut_ptr(),
+        output.len(),
+    ) {
+        Ok(n) => n,
+        Err(_) => {
+            // SAFETY: pure FFI call, fmt has matching specifiers.
+            unsafe {
+                uart_printf(
+                    b"[infer-buf] engine error on '%s' (input_floats=%lu)\r\n\0"
+                        .as_ptr(),
+                    info.name.as_ptr(),
+                    input_floats as u64,
+                );
+            }
+            return -3;
         }
     };
 
     let end = kernel_ffi::get_time_ns();
     let elapsed_us = (end - start) / 1000;
 
+    // SAFETY: pure FFI calls, formats match arg types.
     unsafe {
         uart_printf(
             b"Inference on '%s' completed in %lu us\r\n\0".as_ptr(),
@@ -4797,11 +4876,12 @@ pub extern "C" fn rust_infer_buf_and_print(
 
     // Find argmax and print outputs.
     let mut argmax: usize = 0;
-    let mut max_val = unsafe { OUTPUT[0] };
+    let mut max_val = output[0];
     for i in 0..result {
-        let val = unsafe { OUTPUT[i] };
+        let val = output[i];
         let pct = (val * 1000.0) as i32;
         let pct = if pct < 0 { 0 } else { pct };
+        // SAFETY: pure FFI call, fmt has matching specifiers.
         unsafe {
             uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
         }
@@ -4811,6 +4891,7 @@ pub extern "C" fn rust_infer_buf_and_print(
         }
     }
 
+    // SAFETY: pure FFI call, fmt has matching specifiers.
     unsafe {
         uart_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
     }
