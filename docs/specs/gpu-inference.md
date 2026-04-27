@@ -17,8 +17,9 @@ Current inference paths and what each platform delivers today.
 | Channel create / submit | — | — | ❌ (#258 — see Skipped) | ❌ (#185 — see Skipped) |
 | Compute dispatch | — | — | ❌ blocked at channel submit | ❌ blocked at Booter Load |
 | Host-side test count | — | — | 41 tests (26 bringup + 15 platform shim) | 117 tests across 5 suites |
-| Inference backend | CPU NEON (AI sched MLP) | CPU NEON | CPU NEON (GPU not in inference path) | CPU SSE (GPU not in inference path) |
+| Inference backend | CPU NEON (AI sched MLP) | CPU NEON | CPU NEON (default) + GA10B GPU fastpath for MNIST when `gpu use inference on` + `--no-gpu-suspend` kexec | CPU SSE (GPU not in inference path) |
 | Model formats supported | ONNX via rust runtime | Same | Same | Same |
+| Operator toggle surface | — | — | `gpu use inference on/off` (master), `model use-gpu <name> on/off` (per-model), `gpu use sched on/off` + `gpu use eviction on/off` (scaffold; warn) | Same toggle surface (master flag is no-op until GA10x dispatch lands) |
 
 ## Skipped / Blocked
 
@@ -43,7 +44,9 @@ Current inference paths and what each platform delivers today.
 - `docs/nvidia-gsp.md` — Platform shim contract
 - `docs/jetson-cbb-report.md` — CBB firewall impact on GPU path
 - `docs/x86-64-gpu-inference-status.md` — x86-64 GPU status
+- `docs/specs/gpu-policy-models.md` — Plan for wiring sched + eviction policy MLPs to GA10B compute dispatch (the `gpu use sched|eviction` toggles' missing backend)
+- `docs/specs/admin-telemetry-suite.md` §9 — `gpu use` shell command + `gpu_consumer_set` validation contract
 - `docs/archive/plans/capstone-feature-status.md` §GPU-Based Inference (narrative)
-- Issues: #258 (Jetson), #185 (x86-64), #190 (resolved)
+- Issues: #258 (Jetson — closed 2026-04-21), #185 (x86-64), #190 (resolved)
 
-*Last updated: 18 April 2026*
+*Last updated: 26 April 2026*

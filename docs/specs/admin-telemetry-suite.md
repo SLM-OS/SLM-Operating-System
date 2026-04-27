@@ -290,10 +290,14 @@ Lock-free single-writer (one consumer site per histogram); reader uses snapshot 
 enum gpu_consumer { GPU_CONSUMER_SCHED, GPU_CONSUMER_EVICTION, GPU_CONSUMER_INFERENCE, GPU_CONSUMER_COUNT };
 
 bool gpu_consumer_enabled(enum gpu_consumer c);
-int  gpu_consumer_set(enum gpu_consumer c, bool enabled);  /* returns 0 or -EOPNOTSUPP */
+int  gpu_consumer_set(enum gpu_consumer c, bool enabled, const char **out_reason);
 ```
 
-Backed by an `atomic_bool[3]`. Default: all OFF. Toggle ON requires `gpu_ready()` AND active policy declares `has_gpu_backend == true`.
+Backed by an `atomic_bool[3]`. Default: all OFF. Validation by consumer:
+
+- **inference** — accepts cleanly when `slm_gpu_available()` is non-zero. The Rust engine consults the flag in `mnist_gpu_fastpath_eligible`; flipping OFF forces CPU fallback even on Jetson with the v6 channel handoff present.
+- **sched / eviction** — accepts with a "scaffold only" warning written to `*out_reason`. The flag still flips so `gpu use status` reflects operator intent, but no policy declares `has_gpu_backend = true` yet (sched) and the Rust eviction trait doesn't expose a GPU dispatch path (eviction). The `gpu use` shell command renders `*out_reason` as a `note: …` line. Wiring up the actual GPU forward pass for these is `docs/specs/gpu-policy-models.md`.
+- All consumers — `slm_gpu_available() == 0` short-circuits to `GPU_CONSUMER_ERR_NODEV` with reason `"GPU not available on this build"`. Disable always succeeds.
 
 ### 9.2 Decision sites
 
@@ -393,7 +397,7 @@ This is the same pattern as `scripts/slm-put.py` (from the dynamic-policy plan, 
 ## 12. Milestones
 
 - **M1** — `latency_hist` + `rate_ewma` headers; wire scheduler decision site; expose via `slm.sched_decision_rate()`, `slm.latency_histogram("sched")`. Test: QEMU bench shows non-zero p50/p99.
-- **M2** — `gpu_consumer` toggle, `slm.gpu_use_*`, `gpu use` shell command. Test: toggle is rejected for heuristic policy.
+- **M2** — `gpu_consumer` toggle, `slm.gpu_use_*`, `gpu use` shell command. M2-as-shipped rejected every `enable=true` with EOPNOTSUPP because no consumer had a wired backend yet; this was reworked in `feat/gpu-inference-toggles` (PR landed 2026-04-26) to accept-with-warning for sched/eviction and accept-cleanly for inference once the MNIST GA10B fastpath landed. Test: `kernel/tests/test_gpu_consumer.c` covers all four cases (NODEV, inference accepts cleanly, sched/eviction accept with `*out_reason` set, status snapshot tracks flips).
 - **M3** — Same pattern for eviction (Rust + Lua glue) and inference (lua_slm.c wrapper).
 - **M4** — Telemetry feed: topic emission at decision sites, `slm.telemetry_*`, `telemetry` shell command. Test: subscribing to `/telemetry/sched/*` from a second telnet session shows samples in real time.
 - **M5** — Model upload + launch shell + Lua. Test: `slm-model-upload.py` pushes a 1 MB blob, sha256 verifies, `model launch` returns a task id.
@@ -408,7 +412,7 @@ Each milestone is a separate PR. M1-M3 are pure infrastructure; M4-M7 stack on t
 - **QEMU regression** — rate counters accumulate under `bench` workloads. Policy swap during a live workload does not crash. Telemetry subscribe/unsubscribe under fanout pressure (10 subscribers, 10 kHz emission) has bounded memory and reports drops.
 - **Hardware (Jetson)** — `gpu use sched on` succeeds with `ai_mlp` active; `gpu use eviction on` succeeds with `xgboost` active. `admin` over telnet renders all pages and refreshes for 10 min without leaks (track `slm.mem_stats()` delta).
 - **Soak** — `admin.lua` running 1 h, telemetry feed at sustained 1 kHz, no growth in `mem_stats().used_kb`.
-- **Negative** — `gpu use sched on` with `heuristic` active returns `EOPNOTSUPP`. `model launch` with corrupt sha256 in meta refuses. `model unload` of a referenced model returns `EBUSY` and prints holders.
+- **Negative** — `gpu use sched on` with `heuristic` active accepts but emits a `note: scaffold only — no scheduler policy declares a GPU backend yet` warning (post-`feat/gpu-inference-toggles` rework; pre-rework returned EOPNOTSUPP). `model launch` with corrupt sha256 in meta refuses. `model unload` of a referenced model returns `EBUSY` and prints holders.
 
 ## 14. Open questions
 

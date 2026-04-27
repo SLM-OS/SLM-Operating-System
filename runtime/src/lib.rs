@@ -4370,6 +4370,85 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
         }
     }
 
+    // =========================================================================
+    // Per-model GPU-dispatch toggle tests
+    //
+    // Pin the registry-side getter/setter for the
+    // `model use-gpu <name|idx> on|off` shell command. The C-side
+    // `rust_model_set_gpu_dispatch` / `rust_model_gpu_dispatch_enabled`
+    // FFI exports just delegate to these, so covering them here
+    // covers the FFI surface too.
+    // =========================================================================
+
+    // Test: Default ON at load
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"gpu_default_test", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            let passed = loader::registry::gpu_dispatch_enabled(idx);
+            print_test_result(b"gpu-toggle: default enabled at load\0", passed);
+            if !passed { failures += 1; }
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"gpu-toggle: default enabled at load\0", false);
+            failures += 1;
+        }
+    }
+
+    // Test: set_gpu_dispatch_enabled(false) flips and gpu_dispatch_enabled reads it
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"gpu_off_test", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            let set_ok = loader::registry::set_gpu_dispatch_enabled(idx, false);
+            let now_off = !loader::registry::gpu_dispatch_enabled(idx);
+            let passed = set_ok && now_off;
+            print_test_result(b"gpu-toggle: setter flips to OFF\0", passed);
+            if !passed { failures += 1; }
+
+            let set_ok2 = loader::registry::set_gpu_dispatch_enabled(idx, true);
+            let now_on = loader::registry::gpu_dispatch_enabled(idx);
+            let passed2 = set_ok2 && now_on;
+            print_test_result(b"gpu-toggle: setter flips back to ON\0", passed2);
+            if !passed2 { failures += 1; }
+
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"gpu-toggle: setter flips to OFF\0", false);
+            print_test_result(b"gpu-toggle: setter flips back to ON\0", false);
+            failures += 2;
+        }
+    }
+
+    // Test: set/get on invalid index doesn't panic, returns false
+    {
+        loader::registry::init();
+        // No models loaded — index 7 is past MAX_MODELS sentinels too.
+        let set_invalid = !loader::registry::set_gpu_dispatch_enabled(7, true);
+        let get_invalid = !loader::registry::gpu_dispatch_enabled(7);
+        let passed = set_invalid && get_invalid;
+        print_test_result(b"gpu-toggle: invalid index rejected cleanly\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: gpu_dispatch_enabled is FALSE for an unloaded slot, even if a
+    // previous tenant had it ON. Pins that the active-flag check guards
+    // the gpu_dispatch_enabled read.
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"gpu_unload_test", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            // Default is true; unload should make subsequent gets return false.
+            let _ = loader::registry::unload_model(idx);
+            let after_unload = !loader::registry::gpu_dispatch_enabled(idx);
+            print_test_result(b"gpu-toggle: unloaded slot reads FALSE\0", after_unload);
+            if !after_unload { failures += 1; }
+        } else {
+            print_test_result(b"gpu-toggle: unloaded slot reads FALSE\0", false);
+            failures += 1;
+        }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
