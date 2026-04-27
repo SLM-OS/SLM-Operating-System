@@ -505,6 +505,69 @@ static void test_persistent_lfs_store_recovers_delta_backup(void)
     destroy_boot_media_fat_volume(fat_dev);
 }
 
+static void test_persistent_lfs_store_reformats_after_mount_failure(void)
+{
+    struct blkdev *fat_dev = NULL;
+    struct blkdev *store = NULL;
+    struct lfs_mount *mnt = NULL;
+    FATFS fs;
+    FIL fp;
+    FILINFO fno;
+    UINT wrote = 0;
+    bool needs_format = false;
+    const char *data = "corrupt me later";
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+
+    store = persistent_lfs_store_create("persist_lfs11", &needs_format);
+    TEST_ASSERT_NOT_NULL(store);
+    TEST_ASSERT_TRUE(needs_format);
+    mnt = littlefs_mount(store, needs_format);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    int fd = littlefs_file_open(mnt, "/corrupt.txt",
+                                LFS_O_CREAT | LFS_O_WRONLY | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(fd >= 0);
+    TEST_ASSERT_EQUAL_INT((int)strlen(data),
+                          littlefs_file_write(mnt, fd, data, strlen(data)));
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+    TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));
+    persistent_lfs_store_destroy(store);
+
+    fatfs_disk_attach(fat_dev);
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(&fs, TEST_FAT32_VOL, 1));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_stat(PERSISTENT_LFS_STORE_PATH, &fno));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_open(&fp, PERSISTENT_LFS_STORE_PATH, FA_WRITE));
+    {
+        uint8_t zero[512];
+        memset(zero, 0, sizeof(zero));
+        FSIZE_t remaining = fno.fsize;
+        while (remaining > 0) {
+            UINT chunk = remaining > sizeof(zero) ? sizeof(zero) : (UINT)remaining;
+            TEST_ASSERT_EQUAL_INT(FR_OK, f_write(&fp, zero, chunk, &wrote));
+            TEST_ASSERT_EQUAL_UINT(chunk, wrote);
+            remaining -= chunk;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_close(&fp));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(NULL, TEST_FAT32_VOL, 0));
+    fatfs_disk_detach();
+
+    store = persistent_lfs_store_create("persist_lfs12", &needs_format);
+    TEST_ASSERT_NOT_NULL(store);
+    TEST_ASSERT_FALSE(needs_format);
+    TEST_ASSERT_NULL(littlefs_mount(store, needs_format));
+    TEST_ASSERT_EQUAL_INT(BLKDEV_OK, persistent_lfs_store_reset(store));
+
+    mnt = littlefs_mount(store, true);
+    TEST_ASSERT_NOT_NULL(mnt);
+    TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));
+
+    persistent_lfs_store_destroy(store);
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
 /* ============================================================================
  * File Operation Tests
  * ============================================================================ */
@@ -1172,6 +1235,7 @@ int test_suite_littlefs(void)
     RUN_TEST(test_persistent_lfs_store_incremental_update_round_trip);
     RUN_TEST(test_persistent_lfs_store_recovers_backup_image);
     RUN_TEST(test_persistent_lfs_store_recovers_delta_backup);
+    RUN_TEST(test_persistent_lfs_store_reformats_after_mount_failure);
 
     /* File operation tests */
     RUN_TEST(test_lfs_file_create_write);

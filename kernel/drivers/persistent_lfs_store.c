@@ -55,6 +55,51 @@ static bool persistent_lfs_valid_image_size(FSIZE_t size)
            (size % PERSISTENT_LFS_BLOCK_SIZE) == 0;
 }
 
+static bool persistent_lfs_load_image_file(FIL *fp,
+                                           struct persistent_lfs_store_priv *priv)
+{
+    FRESULT res;
+    UINT got = 0;
+    size_t remaining = priv->image_bytes;
+    uint8_t *dst = priv->data;
+
+    while (remaining > 0) {
+        UINT chunk = remaining > 32768u ? 32768u : (UINT)remaining;
+        res = f_read(fp, dst, chunk, &got);
+        if (res != FR_OK || got != chunk) {
+            return false;
+        }
+        dst += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+static bool persistent_lfs_try_load_image_path(const char *path,
+                                               struct persistent_lfs_store_priv *priv)
+{
+    FIL fp;
+    FRESULT res = f_open(&fp, path, FA_READ);
+    bool ok = false;
+
+    if (res != FR_OK) {
+        return false;
+    }
+    ok = persistent_lfs_load_image_file(&fp, priv);
+    (void)f_close(&fp);
+    return ok;
+}
+
+static void persistent_lfs_snapshot_range(struct persistent_lfs_store_priv *priv,
+                                          uint8_t *scratch,
+                                          size_t offset,
+                                          size_t bytes)
+{
+    irq_flags_t flags = spin_lock_irqsave(&priv->lock);
+    memcpy(scratch, priv->data + offset, bytes);
+    spin_unlock_irqrestore(&priv->lock, flags);
+}
+
 static bool persistent_lfs_load_delta_file(FIL *fp,
                                            FILINFO *fno,
                                            struct blkdev *store_dev,
@@ -169,6 +214,7 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
 {
     struct persistent_lfs_store_priv *priv = dev->priv;
     struct blkdev *boot_dev = NULL;
+    uint8_t *scratch = NULL;
     FATFS fs;
     FIL fp;
     FILINFO fno;
@@ -183,6 +229,7 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
     size_t first_offset = 0;
     size_t flush_bytes = 0;
     struct persistent_lfs_delta_header delta_hdr;
+    size_t scratch_pages = (32768u + PAGE_SIZE - 1) / PAGE_SIZE;
 
     irq_flags_t flags = spin_lock_irqsave(&priv->lock);
     if (!priv->dirty) {
@@ -211,9 +258,16 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
         return BLKDEV_ERR_IO;
     }
 
+    scratch = pmm_alloc_pages(scratch_pages);
+    if (!scratch) {
+        boot_media_release(boot_dev);
+        return BLKDEV_ERR_NOMEM;
+    }
+
     fatfs_disk_attach(boot_dev);
     res = f_mount(&fs, PERSISTENT_LFS_FAT_VOL, 1);
     if (res != FR_OK) {
+        pmm_free_pages(scratch, scratch_pages);
         fatfs_disk_detach();
         boot_media_release(boot_dev);
         return BLKDEV_ERR_IO;
@@ -245,20 +299,19 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
             goto fail;
         }
 
-        irq_flags_t write_flags = spin_lock_irqsave(&priv->lock);
-        const uint8_t *data = priv->data + first_offset;
+        size_t copied = 0;
         size_t remaining = flush_bytes;
         while (remaining > 0) {
             UINT chunk = remaining > 32768u ? 32768u : (UINT)remaining;
-            res = f_write(&fp, data, chunk, &written);
+            persistent_lfs_snapshot_range(priv, scratch, first_offset + copied,
+                                          chunk);
+            res = f_write(&fp, scratch, chunk, &written);
             if (res != FR_OK || written != chunk) {
-                spin_unlock_irqrestore(&priv->lock, write_flags);
                 goto fail;
             }
-            data += chunk;
+            copied += chunk;
             remaining -= chunk;
         }
-        spin_unlock_irqrestore(&priv->lock, write_flags);
         res = f_close(&fp);
         temp_open = false;
         if (res != FR_OK) {
@@ -291,20 +344,18 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
         }
         temp_open = true;
 
-        irq_flags_t write_flags = spin_lock_irqsave(&priv->lock);
-        const uint8_t *data = priv->data;
+        size_t copied = 0;
         size_t remaining = priv->image_bytes;
         while (remaining > 0) {
             UINT chunk = remaining > 32768u ? 32768u : (UINT)remaining;
-            res = f_write(&fp, data, chunk, &written);
+            persistent_lfs_snapshot_range(priv, scratch, copied, chunk);
+            res = f_write(&fp, scratch, chunk, &written);
             if (res != FR_OK || written != chunk) {
-                spin_unlock_irqrestore(&priv->lock, write_flags);
                 goto fail;
             }
-            data += chunk;
+            copied += chunk;
             remaining -= chunk;
         }
-        spin_unlock_irqrestore(&priv->lock, write_flags);
 
         res = f_close(&fp);
         temp_open = false;
@@ -333,6 +384,7 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
     }
 
     (void)f_mount(NULL, PERSISTENT_LFS_FAT_VOL, 0);
+    pmm_free_pages(scratch, scratch_pages);
     fatfs_disk_detach();
     boot_media_release(boot_dev);
 
@@ -355,6 +407,9 @@ fail:
     (void)f_unlink(PERSISTENT_LFS_DELTA_TMP_PATH);
     if (mounted) {
         (void)f_mount(NULL, PERSISTENT_LFS_FAT_VOL, 0);
+    }
+    if (scratch) {
+        pmm_free_pages(scratch, scratch_pages);
     }
     fatfs_disk_detach();
     boot_media_release(boot_dev);
@@ -433,17 +488,15 @@ struct blkdev *persistent_lfs_store_create(const char *name,
 {
     struct blkdev *boot_dev = NULL;
     struct blkdev *store_dev = NULL;
+    struct persistent_lfs_store_priv *priv = NULL;
     FATFS fs;
-    FIL fp;
     FILINFO fno;
     FRESULT res;
-    UINT got = 0;
     bool mounted = false;
     bool needs_format = false;
-    bool have_primary = false;
-    bool have_backup = false;
-    bool primary_invalid = false;
-    const char *image_path = PERSISTENT_LFS_STORE_PATH;
+    bool primary_size_valid = false;
+    bool backup_size_valid = false;
+    bool loaded_primary = false;
     size_t image_bytes = PERSISTENT_LFS_DEFAULT_BYTES;
 
     if (needs_format_out) {
@@ -465,43 +518,28 @@ struct blkdev *persistent_lfs_store_create(const char *name,
     mounted = true;
 
     if (f_stat(PERSISTENT_LFS_STORE_PATH, &fno) == FR_OK) {
-        have_primary = true;
         if (persistent_lfs_valid_image_size(fno.fsize)) {
+            primary_size_valid = true;
             image_bytes = fno.fsize;
         } else {
             WARN("persistent_lfs_store: ignoring invalid image size %lu",
                  (unsigned long)fno.fsize);
-            primary_invalid = true;
-            have_primary = false;
-            needs_format = true;
         }
     }
 
-    if (!have_primary || needs_format) {
-        if (f_stat(PERSISTENT_LFS_STORE_BAK_PATH, &fno) == FR_OK) {
-            have_backup = true;
-            if (persistent_lfs_valid_image_size(fno.fsize)) {
+    if (f_stat(PERSISTENT_LFS_STORE_BAK_PATH, &fno) == FR_OK) {
+        if (persistent_lfs_valid_image_size(fno.fsize)) {
+            backup_size_valid = true;
+            if (!primary_size_valid) {
                 image_bytes = fno.fsize;
-                image_path = PERSISTENT_LFS_STORE_BAK_PATH;
-                if (primary_invalid) {
-                    (void)f_unlink(PERSISTENT_LFS_STORE_PATH);
-                }
-                if (f_rename(PERSISTENT_LFS_STORE_BAK_PATH,
-                             PERSISTENT_LFS_STORE_PATH) == FR_OK) {
-                    image_path = PERSISTENT_LFS_STORE_PATH;
-                } else {
-                    WARN("persistent_lfs_store: using backup image in place");
-                }
-                have_primary = true;
-                needs_format = false;
-            } else {
-                WARN("persistent_lfs_store: ignoring invalid backup image size %lu",
-                     (unsigned long)fno.fsize);
             }
+        } else {
+            WARN("persistent_lfs_store: ignoring invalid backup image size %lu",
+                 (unsigned long)fno.fsize);
         }
     }
 
-    if (!have_primary && !have_backup) {
+    if (!primary_size_valid && !backup_size_valid) {
         needs_format = true;
     }
 
@@ -509,34 +547,46 @@ struct blkdev *persistent_lfs_store_create(const char *name,
     if (!store_dev) {
         goto fail;
     }
+    priv = store_dev->priv;
 
     if (!needs_format) {
-        struct persistent_lfs_store_priv *priv = store_dev->priv;
         bool loaded_delta = false;
 
-        res = f_open(&fp, image_path, FA_READ);
-        if (res != FR_OK) {
-            needs_format = true;
-        } else {
-            size_t remaining = priv->image_bytes;
-            uint8_t *dst = priv->data;
-            while (remaining > 0) {
-                UINT chunk = remaining > 32768u ? 32768u : (UINT)remaining;
-                res = f_read(&fp, dst, chunk, &got);
-                if (res != FR_OK || got != chunk) {
-                    needs_format = true;
-                    break;
-                }
-                dst += chunk;
-                remaining -= chunk;
-            }
-            (void)f_close(&fp);
-            if (!needs_format) {
-                priv->backing_valid = true;
+        if (primary_size_valid) {
+            loaded_primary =
+                persistent_lfs_try_load_image_path(PERSISTENT_LFS_STORE_PATH, priv);
+            if (!loaded_primary) {
+                WARN("persistent_lfs_store: failed to read primary image");
             }
         }
 
-        if (!needs_format && have_primary) {
+        if (!loaded_primary && backup_size_valid) {
+            if (persistent_lfs_try_load_image_path(PERSISTENT_LFS_STORE_BAK_PATH, priv)) {
+                priv->backing_valid = true;
+                if (primary_size_valid) {
+                    (void)f_unlink(PERSISTENT_LFS_STORE_PATH);
+                }
+                if (f_rename(PERSISTENT_LFS_STORE_BAK_PATH,
+                             PERSISTENT_LFS_STORE_PATH) == FR_OK) {
+                    loaded_primary = true;
+                } else {
+                    WARN("persistent_lfs_store: using backup image in place");
+                }
+            } else {
+                WARN("persistent_lfs_store: failed to read backup image");
+            }
+        }
+
+        if (loaded_primary) {
+            priv->backing_valid = true;
+        }
+        if (!priv->backing_valid) {
+            needs_format = true;
+        }
+
+        if (!needs_format && loaded_primary) {
+            FIL fp;
+
             if (f_stat(PERSISTENT_LFS_DELTA_PATH, &fno) == FR_OK) {
                 res = f_open(&fp, PERSISTENT_LFS_DELTA_PATH, FA_READ);
                 if (res == FR_OK) {
@@ -582,6 +632,28 @@ fail:
     fatfs_disk_detach();
     boot_media_release(boot_dev);
     return NULL;
+}
+
+int persistent_lfs_store_reset(struct blkdev *dev)
+{
+    struct persistent_lfs_store_priv *priv;
+
+    if (!dev || !dev->priv || dev->block_count == 0) {
+        return BLKDEV_ERR_INVAL;
+    }
+
+    priv = dev->priv;
+    irq_flags_t flags = spin_lock_irqsave(&priv->lock);
+    memset(priv->data, 0xFF, priv->image_bytes);
+    priv->dirty = true;
+    priv->backing_valid = false;
+    priv->journal_valid = false;
+    priv->dirty_first_block = 0;
+    priv->dirty_last_block = dev->block_count - 1u;
+    priv->journal_first_block = 0;
+    priv->journal_last_block = 0;
+    spin_unlock_irqrestore(&priv->lock, flags);
+    return BLKDEV_OK;
 }
 
 void persistent_lfs_store_destroy(struct blkdev *dev)

@@ -351,7 +351,16 @@ void kernel_main(void *dtb)
             if (lfs_mnt) {
                 INFO("  LittleFS mounted at /mnt/files (persistent boot-FAT image)");
             } else {
-                WARN("Failed to mount persistent LittleFS store; falling back to RAM disk");
+                WARN("Failed to mount persistent LittleFS store; reformatting backing image");
+                if (persistent_lfs_store_reset(files_dev) == BLKDEV_OK) {
+                    seed_defaults = true;
+                    lfs_mnt = littlefs_mount_at("/mnt/files", files_dev, true);
+                }
+                if (lfs_mnt) {
+                    INFO("  LittleFS mounted at /mnt/files (persistent boot-FAT image, reformatted)");
+                } else {
+                    WARN("Failed to recover persistent LittleFS store; falling back to RAM disk");
+                }
             }
         } else if (files_dev) {
             WARN("Failed to register persistent LittleFS store; falling back to RAM disk");

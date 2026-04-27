@@ -22,6 +22,13 @@ struct blkdev *persistent_lfs_store_create(const char *name,
                                            bool *needs_format_out);
 
 /*
+ * Reset the in-memory image to an erased state and mark it for a full
+ * rewrite on the next sync. Used when a persisted image is readable from
+ * FAT but its LittleFS metadata is not mountable.
+ */
+int persistent_lfs_store_reset(struct blkdev *dev);
+
+/*
  * Destroy a device previously returned by persistent_lfs_store_create().
  */
 void persistent_lfs_store_destroy(struct blkdev *dev);
