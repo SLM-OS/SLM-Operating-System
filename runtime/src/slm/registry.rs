@@ -140,7 +140,21 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     let vocab_size = vocab_size_of(&gguf)?;
     let tensor_count = u32::try_from(gguf.tensor_count())
         .map_err(|_| LoadError::CorruptedData)?;
-    let source_bytes = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    let source_bytes = match u32::try_from(data.len()) {
+        Ok(n) => n,
+        Err(_) => {
+            // Telemetry-only: a > 4 GiB GGUF saturates the u32 field.
+            // Log per the project's "warn on saturation" convention so
+            // the inflated source_bytes in `slm info` doesn't surprise
+            // a downstream reader.
+            unsafe {
+                kernel_ffi::uart_puts(
+                    b"[slm] source_bytes saturated to u32::MAX; GGUF > 4 GiB\n\0".as_ptr(),
+                );
+            }
+            u32::MAX
+        }
+    };
     let entry = LoadedSlm {
         name: clamp_name(name),
         info,
@@ -212,6 +226,11 @@ fn insert_entry(entry: LoadedSlm) -> Result<usize, LoadError> {
             return Ok(i);
         }
     }
+    // TODO(M5): replace with `LoadError::RegistryFull`. Reusing
+    // `ModelTooLarge` here keeps the FFI shape stable for M1.4 but
+    // misreads as "the model is too large" rather than "the
+    // registry is full" — once M5 widens `LoadError`, callers can
+    // discriminate.
     Err(LoadError::ModelTooLarge)
 }
 
@@ -228,7 +247,11 @@ fn clamp_name(name: &[u8]) -> String {
             }
             let mut out = String::with_capacity(bytes.len());
             for b in bytes {
-                if b.is_ascii() && (*b as char).is_ascii_graphic() || *b == b' ' {
+                // `is_ascii_graphic()` on a `char` already implies
+                // ASCII, so the previous `b.is_ascii() && …` was
+                // redundant. Parenthesize the disjunction explicitly
+                // so a future edit can't accidentally repartition it.
+                if (*b as char).is_ascii_graphic() || *b == b' ' {
                     out.push(*b as char);
                 } else {
                     out.push('?');
@@ -291,6 +314,42 @@ fn map_gguf_err(_e: GgufError) -> LoadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `cargo test` runs tests in parallel by default. All five
+    /// tests in this module mutate the global `SLOTS` table; without
+    /// serialization they race on `reset_for_tests()`. A separate
+    /// `TEST_SERIAL` flag (independent of `SLM_LOCK`, which is
+    /// reentered by every registry call) holds for the duration of
+    /// each test body. The guard's `Drop` releases it on every exit
+    /// path including assertion panics (panics still abort under
+    /// `panic = "abort"` per Cargo.toml, but `Drop` runs first).
+    static TEST_SERIAL: AtomicBool = AtomicBool::new(false);
+
+    struct TestSerialGuard;
+
+    impl TestSerialGuard {
+        fn new() -> Self {
+            while TEST_SERIAL
+                .compare_exchange_weak(
+                    false,
+                    true,
+                    Ordering::Acquire,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+            TestSerialGuard
+        }
+    }
+
+    impl Drop for TestSerialGuard {
+        fn drop(&mut self) {
+            TEST_SERIAL.store(false, Ordering::Release);
+        }
+    }
+
     use crate::slm::gguf::{
         DEFAULT_ALIGNMENT, GGUF_MAGIC, GGUF_VERSION, GgmlType, MetaArray, MetaType,
     };
@@ -381,6 +440,7 @@ mod tests {
 
     #[test]
     fn load_qwen_records_arch_info_and_returns_handle() {
+        let _serial = TestSerialGuard::new();
         reset_for_tests();
         let bytes = build_qwen_gguf_with_vocab(152_064);
         let idx = load_slm(b"qwen2.5-1.5b", &bytes).expect("load");
@@ -404,6 +464,7 @@ mod tests {
 
     #[test]
     fn unload_frees_slot_for_reuse() {
+        let _serial = TestSerialGuard::new();
         reset_for_tests();
         let bytes = build_qwen_gguf_with_vocab(64);
         let idx = load_slm(b"a", &bytes).expect("load a");
@@ -416,6 +477,7 @@ mod tests {
 
     #[test]
     fn registry_overflow_returns_error() {
+        let _serial = TestSerialGuard::new();
         reset_for_tests();
         let bytes = build_qwen_gguf_with_vocab(8);
         for i in 0..SLM_MAX_SLOTS {
@@ -430,6 +492,7 @@ mod tests {
 
     #[test]
     fn load_rejects_non_gguf_bytes() {
+        let _serial = TestSerialGuard::new();
         reset_for_tests();
         let mut bad = Vec::from(*b"NOTAFILE");
         bad.resize(64, 0);
@@ -441,6 +504,7 @@ mod tests {
 
     #[test]
     fn long_name_is_clamped_not_overflowed() {
+        let _serial = TestSerialGuard::new();
         reset_for_tests();
         let bytes = build_qwen_gguf_with_vocab(8);
         let long = vec![b'x'; SLM_NAME_LEN + 32];
