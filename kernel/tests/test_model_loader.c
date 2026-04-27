@@ -304,6 +304,30 @@ static void test_infer_classify_invalid_model(void)
 }
 
 /*
+ * rust_infer_classify success-path coverage. Mirrors the print-variant
+ * success tests above. This pins the post-hardening contract of
+ * rust_infer_classify after lifting CLASSIFY_OUTPUT off `static mut`
+ * and capping the argmax loop at output.len(). Because zero input
+ * produces a deterministic argmax for a given MNIST snapshot but not
+ * a stable one across model retraining, the assertion only pins the
+ * contract (non-negative AND inside the OUTPUT buffer length), not a
+ * specific class.
+ */
+static void test_infer_classify_success_path(void)
+{
+    int idx = rust_model_load_builtin_mnist();
+    TEST_ASSERT_MESSAGE(idx >= 0, "MNIST load must succeed");
+
+    int result = rust_infer_classify((uint32_t)idx);
+    TEST_ASSERT_MESSAGE(result >= 0,
+        "classify with valid model must return argmax >= 0");
+    TEST_ASSERT_MESSAGE(result < 64,
+        "argmax must be within the OUTPUT buffer length (64)");
+
+    (void)rust_model_unload((uint32_t)idx);
+}
+
+/*
  * Test hot-swap of components with subscription preservation.
  *
  * Starts sensor_monitor, swaps it with a new sensor_monitor instance,
@@ -352,6 +376,7 @@ int test_suite_components_m5(void)
     UnityBegin("Component FFI Tests");
 
     RUN_TEST(test_infer_classify_invalid_model);
+    RUN_TEST(test_infer_classify_success_path);
     RUN_TEST(test_component_hot_swap);
 
     failures += UnityEnd();

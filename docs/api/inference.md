@@ -63,8 +63,19 @@ Intended for kernel-mode callers that cannot handle floating-point types directl
 |------|------|-------------|
 | `model_index` | `uint32_t` | Registry index |
 
-**Returns:** Class index (>= 0) on success, `-1` on error. Uses a static 784-element
-input buffer (28x28 MNIST) and a 64-element output buffer.
+**Returns:** Class index (>= 0) on success, `-1` on error (model not found,
+engine error, or zero outputs).
+
+**Buffers:** 784-element input buffer is a `static` immutable zero array
+(safe to share across concurrent callers). The 64-element output buffer
+is stack-local — two concurrent callers cannot race the same array. The
+argmax loop is capped at the output buffer length so a future engine
+contract drift cannot panic-abort the kernel via an OOB index.
+
+**Thread safety:** Multiple CPUs can call this concurrently. The
+inference engine itself serialises with a spinlock; per-call output
+storage is per-stack so post-engine processing does not need additional
+synchronisation.
 
 ---
 

@@ -178,7 +178,7 @@ Run inference on a loaded model. Writes output floats to `output_buf`. Returns t
 ```rust
 pub extern "C" fn rust_infer_classify(model_index: u32) -> i32
 ```
-Run inference with zero input and return the argmax class index. Returns class index (>= 0) on success, -1 on error. Used by kernel-mode code that cannot use floating-point types.
+Run inference with zero input and return the argmax class index. Returns class index (>= 0) on success, -1 on error (invalid model, engine error, or zero outputs). Used by kernel-mode code that cannot use floating-point types. The output buffer is stack-local (no `static mut`), so concurrent callers don't race; argmax loop is capped at the output buffer length to defeat any future engine contract drift.
 
 ```rust
 pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32

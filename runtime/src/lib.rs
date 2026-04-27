@@ -4631,27 +4631,39 @@ pub extern "C" fn rust_infer_classify(model_index: u32) -> i32 {
     }
     let _decrement_on_exit = Guard(active_id);
 
+    // CLASSIFY_INPUT stays as `static` immutable — read-only zero
+    // buffer can be shared across concurrent callers harmlessly.
+    // OUTPUT was previously `static mut`, racing across two
+    // concurrent shells calling `model infer` / kernel-mode
+    // classify entry points simultaneously. Lifted to a stack-local
+    // [f32; 64] (256 B) for the same reason as the print variants;
+    // matches the post-hardening shape of rust_infer_and_print +
+    // rust_infer_buf_and_print.
     static CLASSIFY_INPUT: [f32; 784] = [0.0; 784];
-    static mut CLASSIFY_OUTPUT: [f32; 64] = [0.0; 64];
+    let mut classify_output: [f32; 64] = [0.0; 64];
 
-    let result = unsafe {
-        for o in CLASSIFY_OUTPUT.iter_mut() { *o = 0.0; }
-        inference::run_inference(
-            model_index as usize,
-            CLASSIFY_INPUT.as_ptr(),
-            CLASSIFY_INPUT.len(),
-            CLASSIFY_OUTPUT.as_mut_ptr(),
-            CLASSIFY_OUTPUT.len(),
-        )
-    };
+    let result = inference::run_inference(
+        model_index as usize,
+        CLASSIFY_INPUT.as_ptr(),
+        CLASSIFY_INPUT.len(),
+        classify_output.as_mut_ptr(),
+        classify_output.len(),
+    );
 
     match result {
         Ok(n) if n > 0 => {
-            // Find argmax
+            // Cap at output.len() as belt-and-braces — the engine
+            // contract says it caps to the supplied buffer length,
+            // but a future drift would otherwise panic-abort the
+            // kernel via an OOB index. With panic=abort that would
+            // hard-stop rather than truncate.
+            let cap = n.min(classify_output.len());
+            // Find argmax. Loop starts at 1 because index 0 is the
+            // initial seed for best_val.
             let mut best_idx: i32 = 0;
-            let mut best_val = unsafe { CLASSIFY_OUTPUT[0] };
-            for i in 1..n {
-                let v = unsafe { CLASSIFY_OUTPUT[i] };
+            let mut best_val = classify_output[0];
+            for i in 1..cap {
+                let v = classify_output[i];
                 if v > best_val {
                     best_val = v;
                     best_idx = i as i32;
@@ -4759,7 +4771,18 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
     let n = result.min(output.len());
     let mut argmax: usize = 0;
     let mut max_val = output[0];
-    for i in 0..n {
+    // Print the [0] entry once, then sweep [1..n] for argmax — saves
+    // a redundant compare against the seed in the first iteration
+    // and matches rust_infer_classify's idiom.
+    {
+        let pct = (max_val * 1000.0) as i32;
+        let pct = if pct < 0 { 0 } else { pct };
+        // SAFETY: pure FFI call, fmt has matching specifiers.
+        unsafe {
+            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), 0i32, pct);
+        }
+    }
+    for i in 1..n {
         let val = output[i];
         let pct = (val * 1000.0) as i32;
         let pct = if pct < 0 { 0 } else { pct };
@@ -4912,7 +4935,18 @@ pub extern "C" fn rust_infer_buf_and_print(
     let n = result.min(output.len());
     let mut argmax: usize = 0;
     let mut max_val = output[0];
-    for i in 0..n {
+    // Print the [0] entry once, then sweep [1..n] for argmax — saves
+    // a redundant compare against the seed in the first iteration
+    // and matches rust_infer_classify's idiom.
+    {
+        let pct = (max_val * 1000.0) as i32;
+        let pct = if pct < 0 { 0 } else { pct };
+        // SAFETY: pure FFI call, fmt has matching specifiers.
+        unsafe {
+            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), 0i32, pct);
+        }
+    }
+    for i in 1..n {
         let val = output[i];
         let pct = (val * 1000.0) as i32;
         let pct = if pct < 0 { 0 } else { pct };
