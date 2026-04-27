@@ -46,6 +46,36 @@ pub const GGUF_VERSION: u32 = 3;
 /// Default value of `general.alignment` per the GGUF spec.
 pub const DEFAULT_ALIGNMENT: u64 = 32;
 
+/// Sanity ceiling for `tensor_count` used when sizing a `Vec`. Real
+/// GGUFs ship well under 1024 tensors; capping `with_capacity` at
+/// `2^20` keeps a malicious header (e.g. `u64::MAX`) from aborting the
+/// process via OOM. The actual loop still runs `tensor_count`
+/// iterations, but each one only reserves what it needs and will
+/// EOF-out cleanly on truncated input.
+const MAX_PLAUSIBLE_TENSORS: u64 = 1 << 20;
+
+/// Minimum on-disk size of a single tensor descriptor. Used as a lower
+/// bound when checking that `tensor_count` doesn't exceed the bytes
+/// remaining in the file: name length prefix (8) + zero-byte name +
+/// n_dims (4) + ggml_type (4) + offset (8) = 24. Any real tensor will
+/// be larger.
+const MIN_TENSOR_RECORD_SIZE: u64 = 24;
+
+/// Minimum on-disk size of a single KV pair: 8 (key length) + 0 (zero
+/// byte name) + 4 (type tag) + 1 (smallest payload, e.g. u8/bool).
+const MIN_KV_RECORD_SIZE: u64 = 13;
+
+/// Reject any single tensor dimension > `2^40` (~1 trillion elements)
+/// — these only happen via corruption.
+const MAX_PLAUSIBLE_DIM: u64 = 1 << 40;
+
+/// Cap on initial `Vec::with_capacity` for metadata arrays. The loop
+/// will still push `len` elements (bounded by file size via
+/// [`MetaType::min_element_size`]), but the *initial* allocation stays
+/// modest so a 1 GB file with a billion 1-byte array can't pre-reserve
+/// a billion-entry Vec.
+const MAX_PLAUSIBLE_ARRAY_LEN: u64 = 1 << 20;
+
 /// GGUF metadata-value type tag (1 byte on the wire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -89,6 +119,25 @@ impl MetaType {
     pub fn as_u32(self) -> u32 {
         self as u32
     }
+
+    /// Lower bound on the on-disk size of one element of this type, in
+    /// bytes. Used to cap array lengths against the file size: an
+    /// `Array<String>` with claimed length `N` needs at least
+    /// `N * min_element_size(String) = N * 8` bytes (the u64 length
+    /// prefix; the string body and any payload follow). For nested
+    /// arrays we use 12 (4-byte elem-type tag + 8-byte length prefix).
+    fn min_element_size(self) -> u64 {
+        match self {
+            MetaType::Uint8 | MetaType::Int8 | MetaType::Bool => 1,
+            MetaType::Uint16 | MetaType::Int16 => 2,
+            MetaType::Uint32 | MetaType::Int32 | MetaType::Float32 => 4,
+            MetaType::Uint64 | MetaType::Int64 | MetaType::Float64 => 8,
+            // String: 8-byte length prefix, body may be empty.
+            MetaType::String => 8,
+            // Nested array: 4 (elem_type) + 8 (length prefix).
+            MetaType::Array => 12,
+        }
+    }
 }
 
 /// GGML tensor element type (a subset of the 30+ types `ggml` defines —
@@ -98,6 +147,15 @@ impl MetaType {
 pub struct GgmlType(pub u32);
 
 impl GgmlType {
+    /// `f32` — IEEE-754 single precision.
+    pub const F32: GgmlType = GgmlType(0);
+    /// `f16` — IEEE-754 half precision.
+    pub const F16: GgmlType = GgmlType(1);
+    /// `q4_K` — 4-bit K-quants. Common for Qwen2/Llama weight tensors.
+    pub const Q4_K: GgmlType = GgmlType(12);
+    /// `q8_K` — 8-bit K-quants. Used for high-precision activations.
+    pub const Q8_K: GgmlType = GgmlType(15);
+
     /// Human-readable label for the well-known types. Returns `None`
     /// for types this build doesn't have a name for.
     pub fn name(self) -> Option<&'static str> {
@@ -236,7 +294,20 @@ impl Gguf {
         let tensor_count = r.u64()?;
         let kv_count = r.u64()?;
 
-        // Metadata KV pairs.
+        // Cap declared counts against the bytes remaining in the file
+        // *before* allocating. A header that lies (e.g. `u64::MAX`)
+        // would otherwise OOM-abort the process via `Vec::with_capacity`.
+        let remaining = r.remaining_len() as u64;
+        if kv_count > remaining / MIN_KV_RECORD_SIZE {
+            return Err(GgufError::TooManyKvs(kv_count));
+        }
+        if tensor_count > remaining / MIN_TENSOR_RECORD_SIZE {
+            return Err(GgufError::TooManyTensors(tensor_count));
+        }
+
+        // Metadata KV pairs. `BTreeMap` has no `with_capacity` so no
+        // explicit clamp is needed here — the loop just iterates the
+        // (now bounded) `kv_count` and EOF-aborts cleanly on truncation.
         let mut metadata: BTreeMap<String, MetaValue> = BTreeMap::new();
         for _ in 0..kv_count {
             let key = r.string()?;
@@ -245,7 +316,7 @@ impl Gguf {
         }
 
         // Tensor descriptors.
-        let mut tensors = Vec::with_capacity(tensor_count as usize);
+        let mut tensors = Vec::with_capacity(tensor_count.min(MAX_PLAUSIBLE_TENSORS) as usize);
         for _ in 0..tensor_count {
             let name = r.string()?;
             let n_dims = r.u32()?;
@@ -256,7 +327,12 @@ impl Gguf {
             }
             let mut dims = Vec::with_capacity(n_dims as usize);
             for _ in 0..n_dims {
-                dims.push(r.u64()?);
+                let d = r.u64()?;
+                // Reject obviously-corrupt dimension values.
+                if d > MAX_PLAUSIBLE_DIM {
+                    return Err(GgufError::DimTooLarge(d));
+                }
+                dims.push(d);
             }
             let ggml_type = GgmlType(r.u32()?);
             let offset = r.u64()?;
@@ -319,37 +395,13 @@ impl Gguf {
 /// Recursive metadata-value reader.
 fn read_meta_value(r: &mut Reader<'_>) -> Result<MetaValue, GgufError> {
     let ty = MetaType::from_u32(r.u32()?)?;
-    Ok(match ty {
-        MetaType::Uint8 => MetaValue::Uint8(r.u8()?),
-        MetaType::Int8 => MetaValue::Int8(r.u8()? as i8),
-        MetaType::Uint16 => MetaValue::Uint16(r.u16()?),
-        MetaType::Int16 => MetaValue::Int16(r.u16()? as i16),
-        MetaType::Uint32 => MetaValue::Uint32(r.u32()?),
-        MetaType::Int32 => MetaValue::Int32(r.u32()? as i32),
-        MetaType::Uint64 => MetaValue::Uint64(r.u64()?),
-        MetaType::Int64 => MetaValue::Int64(r.u64()? as i64),
-        MetaType::Float32 => MetaValue::Float32(f32::from_bits(r.u32()?)),
-        MetaType::Float64 => MetaValue::Float64(f64::from_bits(r.u64()?)),
-        MetaType::Bool => MetaValue::Bool(r.u8()? != 0),
-        MetaType::String => MetaValue::String(r.string()?),
-        MetaType::Array => {
-            let elem_type = MetaType::from_u32(r.u32()?)?;
-            let len = r.u64()?;
-            // Plausibility check — refuse arrays bigger than the file.
-            if len > r.remaining_len() as u64 + 1 {
-                return Err(GgufError::ArrayTooLong(len));
-            }
-            let mut values = Vec::with_capacity(len.min(1 << 20) as usize);
-            for _ in 0..len {
-                values.push(read_meta_value_with_type(r, elem_type)?);
-            }
-            MetaValue::Array(MetaArray { elem_type, values })
-        }
-    })
+    read_meta_value_with_type(r, ty)
 }
 
-/// Read a value of a *known* type (used for array elements where the
-/// type tag is hoisted out of each element).
+/// Read a value of a *known* type. Used both for top-level KV values
+/// (after the type tag is consumed by [`read_meta_value`]) and for
+/// homogeneous array elements (where the type tag is hoisted out of
+/// each element).
 fn read_meta_value_with_type(r: &mut Reader<'_>, ty: MetaType) -> Result<MetaValue, GgufError> {
     Ok(match ty {
         MetaType::Uint8 => MetaValue::Uint8(r.u8()?),
@@ -365,16 +417,37 @@ fn read_meta_value_with_type(r: &mut Reader<'_>, ty: MetaType) -> Result<MetaVal
         MetaType::Bool => MetaValue::Bool(r.u8()? != 0),
         MetaType::String => MetaValue::String(r.string()?),
         MetaType::Array => {
-            // Nested array — element type tag is still at the start.
             let elem_type = MetaType::from_u32(r.u32()?)?;
-            let len = r.u64()?;
-            let mut values = Vec::with_capacity(len.min(1 << 20) as usize);
-            for _ in 0..len {
-                values.push(read_meta_value_with_type(r, elem_type)?);
-            }
-            MetaValue::Array(MetaArray { elem_type, values })
+            MetaValue::Array(read_array_of_type(r, elem_type)?)
         }
     })
+}
+
+/// Read a `[u64 length][N elements of type elem_type]` array body.
+/// The element-type tag is *not* read here — callers must consume it
+/// before calling. Centralizing the length sanity check here means
+/// both the top-level and nested-array code paths get the same bound.
+fn read_array_of_type(r: &mut Reader<'_>, elem_type: MetaType) -> Result<MetaArray, GgufError> {
+    let len = r.u64()?;
+    let min_elem = elem_type.min_element_size();
+    // Reject arrays whose element bodies couldn't possibly fit in the
+    // bytes remaining. `min_elem` is at least 1, so this also rejects
+    // `len > remaining` for byte-sized elements.
+    if min_elem > 0 && len > r.remaining_len() as u64 / min_elem {
+        return Err(GgufError::ArrayTooLong(len));
+    }
+    // After the bound check above, `len * min_elem ≤ remaining_bytes`,
+    // so `len` is at most file-size. Still cap the *initial* Vec
+    // capacity at `MAX_PLAUSIBLE_ARRAY_LEN` so a 1 GB file doesn't
+    // pre-allocate hundreds of MB up front; the Vec will grow if the
+    // file genuinely contains more, and truncated input falls out as
+    // `UnexpectedEof`.
+    let cap = len.min(MAX_PLAUSIBLE_ARRAY_LEN) as usize;
+    let mut values = Vec::with_capacity(cap);
+    for _ in 0..len {
+        values.push(read_meta_value_with_type(r, elem_type)?);
+    }
+    Ok(MetaArray { elem_type, values })
 }
 
 /// Cursor over a byte slice with little-endian primitive readers.
@@ -452,6 +525,13 @@ pub enum GgufError {
     InvalidUtf8,
     /// Tensor descriptor claims more dims than we accept (sanity cap).
     TooManyDims(u32),
+    /// A single tensor dimension exceeds the plausibility cap.
+    DimTooLarge(u64),
+    /// `tensor_count` exceeds the bytes remaining in the file (file is
+    /// corrupt or hostile).
+    TooManyTensors(u64),
+    /// `metadata_kv_count` exceeds the bytes remaining in the file.
+    TooManyKvs(u64),
     /// Array length exceeds remaining bytes — file is corrupt or
     /// hostile.
     ArrayTooLong(u64),
@@ -475,6 +555,18 @@ impl fmt::Display for GgufError {
             GgufError::InvalidUtf8 => f.write_str("string field is not valid UTF-8"),
             GgufError::TooManyDims(n) => {
                 write!(f, "tensor declares {n} dimensions (max 8)")
+            }
+            GgufError::DimTooLarge(d) => {
+                write!(f, "tensor dimension {d} exceeds sanity cap (2^40)")
+            }
+            GgufError::TooManyTensors(n) => {
+                write!(f, "header claims {n} tensors, exceeds remaining file size")
+            }
+            GgufError::TooManyKvs(n) => {
+                write!(
+                    f,
+                    "header claims {n} metadata KV pairs, exceeds remaining file size"
+                )
             }
             GgufError::ArrayTooLong(n) => {
                 write!(f, "metadata array claims {n} elements, exceeds file size")
