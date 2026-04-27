@@ -30,6 +30,8 @@ pub mod component;
 pub mod msg_router;
 pub mod loader;
 pub mod inference;
+#[cfg(feature = "slm")]
+pub mod slm;
 
 // Re-export commonly used types
 pub use kernel_ffi::{KernelError, KernelResult, MemFlags, ShmFlags, TaskId};
