@@ -111,6 +111,13 @@ struct LoadedModelEntry {
     last_used: u64,   // Timestamp from slm_get_time_ns for LRU eviction
     use_count: u32,   // Number of inference calls
     pinned: bool,     // If true, cannot be evicted by LRU
+    /// Per-model GPU-dispatch toggle. Layered on top of the master
+    /// `slm_gpu_inference_enabled()` flag — the engine fastpath
+    /// requires both to be true. Default ON at load so flipping
+    /// just the master switch enables every loaded model; flip
+    /// per-model OFF via `model use-gpu <name|idx> off` to force
+    /// a specific model back to CPU without disturbing the master.
+    gpu_dispatch_enabled: bool,
 }
 
 impl LoadedModelEntry {
@@ -126,6 +133,7 @@ impl LoadedModelEntry {
             last_used: 0,
             use_count: 0,
             pinned: false,
+            gpu_dispatch_enabled: true,
         }
     }
 }
@@ -426,6 +434,7 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
                     last_used: now,
                     use_count: 0,
                     pinned: false,
+                    gpu_dispatch_enabled: true,
                 };
                 Ok(idx)
             }
@@ -469,6 +478,36 @@ pub fn pin_model(index: usize) -> bool {
         } else {
             false
         }
+    }
+}
+
+/// Set the per-model GPU-dispatch toggle. Returns true if the index
+/// is a loaded model and the flag was updated; false otherwise.
+pub fn set_gpu_dispatch_enabled(index: usize, enabled: bool) -> bool {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to REGISTRY.
+    unsafe {
+        let reg = &mut *REGISTRY.get();
+        if index < MAX_MODELS && reg.entries[index].active {
+            reg.entries[index].gpu_dispatch_enabled = enabled;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Read the per-model GPU-dispatch toggle. Returns false (CPU-only)
+/// for any index outside the active set, so a stale call from a
+/// pre-unload code path can't accidentally enable GPU dispatch.
+pub fn gpu_dispatch_enabled(index: usize) -> bool {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
+        let reg = &*REGISTRY.get();
+        index < MAX_MODELS
+            && reg.entries[index].active
+            && reg.entries[index].gpu_dispatch_enabled
     }
 }
 

@@ -2384,6 +2384,51 @@ int cmd_model(int argc, char *argv[])
     if (strcmp(subcmd, "infer") == 0) {
         return model_infer(argc, argv);
     }
+    if (strcmp(subcmd, "use-gpu") == 0) {
+        if (argc < 4) {
+            shell_puts("Usage: model use-gpu <name|idx> <on|off>\r\n");
+            shell_puts("  Per-model GPU-dispatch toggle. Layered on top of the master\r\n");
+            shell_puts("  `gpu use inference` flag — both must be ON for the engine to\r\n");
+            shell_puts("  dispatch on the GPU. Default at load is ON.\r\n");
+            return -1;
+        }
+
+        int idx = -1;
+        uint32_t parsed_idx;
+        if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+            idx = (int)parsed_idx;
+        } else {
+            idx = rust_model_find(argv[2]);
+        }
+        if (idx < 0) {
+            shell_printf("model use-gpu: '%s' not found\r\n", argv[2]);
+            return -1;
+        }
+
+        bool enabled;
+        if (strcmp(argv[3], "on") == 0) {
+            enabled = true;
+        } else if (strcmp(argv[3], "off") == 0) {
+            enabled = false;
+        } else {
+            shell_printf("model use-gpu: unknown action '%s' (want on|off)\r\n",
+                         argv[3]);
+            return -1;
+        }
+
+        extern int rust_model_set_gpu_dispatch(uint32_t index, uint8_t enabled);
+        if (rust_model_set_gpu_dispatch((uint32_t)idx, enabled ? 1 : 0) != 0) {
+            shell_printf("model use-gpu: failed to set flag for slot %d\r\n", idx);
+            return -1;
+        }
+        shell_printf("model use-gpu: '%s' (slot %d): %s\r\n",
+                     argv[2], idx, enabled ? "ON" : "off");
+        if (enabled && !gpu_consumer_enabled(GPU_CONSUMER_INFERENCE)) {
+            shell_puts("           note: master `gpu use inference` is OFF — "
+                       "engine will still use CPU\r\n");
+        }
+        return 0;
+    }
     if (strcmp(subcmd, "gpu") == 0) {
         rust_gpu_print_status();
         return 0;
@@ -2596,7 +2641,7 @@ int cmd_model(int argc, char *argv[])
     }
 
     shell_puts("Usage: model [load|list|info|unload|pin|unpin|preload|preload-status|"
-              "infer|bench|stats|pools|gpu|engines|meta|launch]\r\n");
+              "infer|use-gpu|bench|stats|pools|gpu|engines|meta|launch]\r\n");
     return -1;
 }
 
@@ -2925,6 +2970,13 @@ static int cmd_gpu_use(int argc, char *argv[])
     }
 
     shell_printf("gpu use %s: %s\r\n", argv[2], enabled ? "ON" : "off");
+    if (enabled && reason) {
+        /* Accepted but the consumer's GPU dispatch path isn't
+         * actually wired yet (see gpu_consumer.c: sched/eviction
+         * are scaffold-only). Surface the caveat so the operator's
+         * expectation matches reality. */
+        shell_printf("           note: %s\r\n", reason);
+    }
     return 0;
 }
 

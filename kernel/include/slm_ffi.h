@@ -664,6 +664,33 @@ typedef struct {
 int slm_gpu_available(void);
 
 /*
+ * Operator-intent toggle for GPU inference dispatch.
+ *
+ * Returns 1 when `gpu use inference on` has been set (the default
+ * after boot is 0 = off; M2's `gpu_consumer` flag starts disabled
+ * so existing CPU behavior is preserved until an operator opts in).
+ * The Rust engine consults this in `mnist_gpu_fastpath_eligible`
+ * before attempting GPU dispatch.
+ *
+ * Returns 0 on non-Jetson builds (no GPU dispatch path).
+ */
+int slm_gpu_inference_enabled(void);
+
+/*
+ * Per-model GPU dispatch toggle.
+ *
+ * Layered on top of the master `gpu use inference` flag: the Rust
+ * engine must see master=ON AND per-model=ON to fire the GPU
+ * fastpath. Default after `model_load` is per-model=ON, so flipping
+ * the master flag alone is enough to opt in for every loaded model;
+ * `model use-gpu <name|idx> off` is the per-model override.
+ *
+ * Returns 1 if the per-model flag is on, 0 if off, 0 if `model_index`
+ * is out of range.
+ */
+int slm_model_gpu_dispatch_enabled(uint32_t model_index);
+
+/*
  * Get GPU info for Rust.
  * Returns: 0 on success, -1 on error. Fills info struct.
  */

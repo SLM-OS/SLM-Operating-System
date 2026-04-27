@@ -3642,6 +3642,32 @@ pub extern "C" fn rust_model_unpin(index: u32) -> i32 {
     if loader::registry::unpin_model(index as usize) { 0 } else { -1 }
 }
 
+/// Set the per-model GPU-dispatch toggle.
+///
+/// `enabled` is treated as a boolean: zero = off, non-zero = on.
+/// Returns 0 on success, -1 if the model index is invalid (no
+/// active model at that slot). Default at load is enabled, so
+/// flipping just the master `gpu use inference` flag opts every
+/// loaded model in; this per-model override is the way to force
+/// a specific model back to CPU without disturbing the master.
+#[no_mangle]
+pub extern "C" fn rust_model_set_gpu_dispatch(index: u32, enabled: u8) -> i32 {
+    if loader::registry::set_gpu_dispatch_enabled(index as usize, enabled != 0) {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Read the per-model GPU-dispatch toggle.
+///
+/// Returns 1 if the per-model flag is on for an active model,
+/// 0 otherwise (off, or invalid index).
+#[no_mangle]
+pub extern "C" fn rust_model_gpu_dispatch_enabled(index: u32) -> i32 {
+    if loader::registry::gpu_dispatch_enabled(index as usize) { 1 } else { 0 }
+}
+
 /// Share a model's weight memory (increment refcount).
 ///
 /// Returns 0 on success, -1 on error. The caller must call
