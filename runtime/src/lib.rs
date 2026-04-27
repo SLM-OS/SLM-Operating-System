@@ -4877,6 +4877,97 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
 }
 
 // =============================================================================
+// SLM Loader API (Phase SLM, M1)
+// =============================================================================
+//
+// Parallel to the ONNX rust_model_load family above. The SLM
+// registry stores GGUF metadata (architecture, dimensions, vocab
+// size) without copying weights into the model_mem pool — that
+// arrives in M5 once the decoder needs them. M7 wires `slm load`
+// in the shell to call rust_slm_load.
+
+/// Load a GGUF model from a buffer into the SLM registry.
+///
+/// Returns the slot index (>= 0) on success, -1 on error. Errors
+/// include malformed GGUF, missing required architecture metadata,
+/// unsupported architecture, and registry full.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated string pointer
+/// - `data` must point to `data_len` bytes of GGUF-format data
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_load(
+    name: *const u8,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || data.is_null() || data_len == 0 {
+        return -1;
+    }
+    // Bound the name length before deref per runtime/CLAUDE.md
+    // "C-string bounds-before-deref".
+    let mut name_len = 0usize;
+    while name_len < slm::registry::SLM_NAME_LEN {
+        let c = *name.add(name_len);
+        if c == 0 {
+            break;
+        }
+        name_len += 1;
+    }
+    let name_slice = core::slice::from_raw_parts(name, name_len);
+    let data_slice = core::slice::from_raw_parts(data, data_len);
+    match slm::registry::load_slm(name_slice, data_slice) {
+        Ok(idx) => idx as i32,
+        Err(_) => -1,
+    }
+}
+
+/// Unload a SLM by slot index.
+///
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_unload(index: u32) -> i32 {
+    match slm::registry::unload_slm(index as usize) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Read C-friendly metadata about a loaded SLM.
+///
+/// Returns 0 on success, -1 if the slot is empty / out of range or
+/// `info` is null.
+///
+/// # Safety
+/// - `info` must point to a `SlmModelInfoC`-sized buffer
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_get_info(
+    index: u32,
+    info: *mut slm::registry::SlmModelInfoC,
+) -> i32 {
+    if info.is_null() {
+        return -1;
+    }
+    match slm::registry::get_info(index as usize) {
+        Some(snap) => {
+            *info = snap;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Number of currently-loaded SLMs (for `slm list`).
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_count() -> u32 {
+    slm::registry::count() as u32
+}
+
+// =============================================================================
 // Inference API (Phase 5, M2)
 // =============================================================================
 
