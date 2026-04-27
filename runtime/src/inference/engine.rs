@@ -680,6 +680,26 @@ impl InferenceEngine {
 /// calls — each producing a fresh registry slot — all qualify, not
 /// just the first one.
 fn mnist_gpu_fastpath_eligible(model_index: usize) -> bool {
+    extern "C" {
+        fn slm_gpu_inference_enabled() -> i32;
+    }
+
+    // Master operator-intent toggle: `gpu use inference on` must be
+    // set. Default at boot is OFF so existing CPU behavior is the
+    // baseline until an operator opts in. SAFETY: pure FFI read,
+    // no aliasing/lifetime concerns.
+    let master_on = unsafe { slm_gpu_inference_enabled() } != 0;
+    if !master_on {
+        return false;
+    }
+
+    // Per-model toggle layered on top — flipping a single model
+    // back to CPU without disturbing others is `model use-gpu
+    // <name|idx> off`.
+    if !registry::gpu_dispatch_enabled(model_index) {
+        return false;
+    }
+
     let caps = super::gpu::GpuCapabilities::detect();
     if !caps.has_compute() {
         return false;

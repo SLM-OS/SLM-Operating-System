@@ -262,10 +262,27 @@ allocator-driven. Mitigation, in order of preference:
 
 ### 3.2 GPU consumer toggles
 
-`gpu use sched on` is rejected with `EOPNOTSUPP` until a scheduler
-policy declares `has_gpu_backend = true`. M2 ships the toggle
-infrastructure but no policy lights up the flag yet — see
-spec §14.1 for the deferral rationale.
+Three toggles, layered:
+
+```
+gpu use inference on|off          # master — controls all GPU inference dispatch
+model use-gpu <name|idx> on|off   # per-model override (default ON at load)
+gpu use sched on|off              # scaffold — no real backend yet
+gpu use eviction on|off           # scaffold — no real backend yet
+gpu use status                    # tabular view of all three flags
+```
+
+**inference** is wired through the MNIST GA10B fastpath
+(`engine::mnist_gpu_fastpath_eligible`); flipping it ON on Jetson
+with the v6 channel handoff present routes the model through the
+GPU. **sched / eviction** accept on/off as operator intent and
+emit a `note: scaffold only …` warning, because no policy
+declares a GPU forward pass yet — `docs/specs/gpu-policy-models.md`
+covers the actual wiring work.
+
+When the GPU isn't available at all (`slm_gpu_available() == 0`,
+e.g. QEMU or non-Jetson builds), every `enable=true` short-circuits
+to `EOPNOTSUPP` with reason `"GPU not available on this build"`.
 
 ### 3.3 What's not in this demo
 

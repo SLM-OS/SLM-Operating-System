@@ -2315,6 +2315,132 @@ static int model_unload(int argc, char *argv[])
  */
 extern int rust_infer_and_print(uint32_t model_index);
 
+/*
+ * Hard upper bound on `model infer-file` payload size. The largest
+ * input tensor expected today is the AI scheduler's feature vector
+ * (a few KB at most); MNIST sits at 3,136 bytes (1×1×28×28 fp32).
+ * 32 KB leaves comfortable headroom while keeping the temporary
+ * `pmm_alloc_pages` allocation small enough to never trigger
+ * eviction pressure on a freshly-booted system. The per-model
+ * shape check below is the real gate; this constant just rejects
+ * obviously bogus files before the alloc.
+ */
+#define MODEL_INFER_FILE_MAX_BYTES (32u * 1024u)
+
+static int model_infer_file(int argc, char *argv[])
+{
+    if (argc < 4) {
+        shell_puts("Usage: model infer-file <name|idx> <path>\r\n");
+        shell_puts("  Path must point to raw little-endian fp32 matching the\r\n");
+        shell_puts("  model's input shape (e.g. 3,136 bytes for MNIST 1x1x28x28).\r\n");
+        return -1;
+    }
+
+    /* Resolve model index. */
+    int idx = -1;
+    uint32_t parsed_idx;
+    if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+        idx = (int)parsed_idx;
+    } else {
+        idx = rust_model_find(argv[2]);
+    }
+    if (idx < 0) {
+        shell_printf("model infer-file: '%s' not found\r\n", argv[2]);
+        return -1;
+    }
+
+    /* Look up the model's expected input element count up-front so a
+     * shape mismatch becomes "expected 784 floats (3136 bytes), got
+     * N" instead of the engine's opaque InvalidInput error. */
+    int expected_floats = rust_model_expected_input_floats((uint32_t)idx);
+    if (expected_floats <= 0) {
+        shell_printf("model infer-file: '%s' has no usable input shape\r\n",
+                     argv[2]);
+        return -1;
+    }
+    uint32_t expected_bytes = (uint32_t)expected_floats * 4u;
+
+    /* Resolve path against cwd, like the other shell file commands. */
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(argv[3], resolved, sizeof(resolved)) < 0) {
+        shell_printf("model infer-file: path too long: %s\r\n", argv[3]);
+        return -1;
+    }
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0 || info.type != 0 || info.size == 0) {
+        shell_printf("model infer-file: cannot stat '%s'\r\n", resolved);
+        return -1;
+    }
+    if (info.size > MODEL_INFER_FILE_MAX_BYTES) {
+        shell_printf("model infer-file: '%s' is %u bytes — exceeds the %u-byte cap\r\n",
+                     resolved, (unsigned)info.size,
+                     (unsigned)MODEL_INFER_FILE_MAX_BYTES);
+        return -1;
+    }
+    if (info.size != expected_bytes) {
+        shell_printf("model infer-file: '%s' is %u bytes; '%s' expects %d "
+                     "fp32 elements (%u bytes)\r\n",
+                     resolved, (unsigned)info.size, argv[2],
+                     expected_floats, (unsigned)expected_bytes);
+        return -1;
+    }
+
+    /* Page-aligned PMM buffer guarantees fp32 alignment for the NEON
+     * loads inside the inference engine — same pattern Lua's
+     * `slm.model_infer_file` uses. */
+    size_t pages = (info.size + 4095u) / 4096u;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+    if (!buf) {
+        shell_printf("model infer-file: out of memory\r\n");
+        return -1;
+    }
+
+    int rd = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (rd != (int)info.size) {
+        pmm_free_pages(buf, pages);
+        shell_printf("model infer-file: short read (%d/%u)\r\n",
+                     rd, (unsigned)info.size);
+        return -1;
+    }
+
+    /* M3 telemetry: same hook the zero-input `model infer` command and
+     * the Lua model_infer* bindings call. Keeps the rate / latency-hist
+     * / tel.inf event counter consistent across entry points. */
+    uint64_t t0 = slm_get_time_ns();
+    int result = rust_infer_buf_and_print((uint32_t)idx,
+                                          (const float *)buf,
+                                          info.size / 4u);
+    uint64_t t1 = slm_get_time_ns();
+    admin_telemetry_record_inference(t1 > t0 ? t1 - t0 : 0u, result >= 0);
+
+    pmm_free_pages(buf, pages);
+
+    if (result < 0) {
+        /* Map the contract codes from rust_infer_buf_and_print
+         * (slm_ffi.h) to operator-readable lines. The detailed
+         * UART trace from the Rust side has the exact failure;
+         * this just makes the shell output meaningful on its own. */
+        const char *why;
+        switch (result) {
+        case -1: why = "model not loaded";          break;
+        case -2: why = "empty / null input buffer"; break;
+        case -3: why = "engine error (see UART log)"; break;
+        default: why = "unknown error";             break;
+        }
+        shell_printf("model infer-file: %s (rc=%d)\r\n", why, result);
+        return -1;
+    }
+    /* Echo the prediction to the active shell session — the detailed
+     * logits-per-bucket dump went to UART (kernel-Rust uses
+     * `uart_printf`); telnet operators wouldn't otherwise see the
+     * result. The Rust function returns argmax on success. */
+    uint64_t elapsed_us = (t1 > t0 ? t1 - t0 : 0u) / 1000u;
+    shell_printf("predicted: %d  (%lu us)\r\n",
+                 result, (unsigned long)elapsed_us);
+    return 0;
+}
+
 static int model_infer(int argc, char *argv[])
 {
     if (argc < 3) {
@@ -2384,6 +2510,53 @@ int cmd_model(int argc, char *argv[])
     }
     if (strcmp(subcmd, "infer") == 0) {
         return model_infer(argc, argv);
+    }
+    if (strcmp(subcmd, "infer-file") == 0) {
+        return model_infer_file(argc, argv);
+    }
+    if (strcmp(subcmd, "use-gpu") == 0) {
+        if (argc < 4) {
+            shell_puts("Usage: model use-gpu <name|idx> <on|off>\r\n");
+            shell_puts("  Per-model GPU-dispatch toggle. Layered on top of the master\r\n");
+            shell_puts("  `gpu use inference` flag — both must be ON for the engine to\r\n");
+            shell_puts("  dispatch on the GPU. Default at load is ON.\r\n");
+            return -1;
+        }
+
+        int idx = -1;
+        uint32_t parsed_idx;
+        if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+            idx = (int)parsed_idx;
+        } else {
+            idx = rust_model_find(argv[2]);
+        }
+        if (idx < 0) {
+            shell_printf("model use-gpu: '%s' not found\r\n", argv[2]);
+            return -1;
+        }
+
+        bool enabled;
+        if (strcmp(argv[3], "on") == 0) {
+            enabled = true;
+        } else if (strcmp(argv[3], "off") == 0) {
+            enabled = false;
+        } else {
+            shell_printf("model use-gpu: unknown action '%s' (want on|off)\r\n",
+                         argv[3]);
+            return -1;
+        }
+
+        if (rust_model_set_gpu_dispatch((uint32_t)idx, enabled ? 1 : 0) != 0) {
+            shell_printf("model use-gpu: failed to set flag for slot %d\r\n", idx);
+            return -1;
+        }
+        shell_printf("model use-gpu: '%s' (slot %d): %s\r\n",
+                     argv[2], idx, enabled ? "ON" : "off");
+        if (enabled && !gpu_consumer_enabled(GPU_CONSUMER_INFERENCE)) {
+            shell_puts("           note: master `gpu use inference` is OFF — "
+                       "engine will still use CPU\r\n");
+        }
+        return 0;
     }
     if (strcmp(subcmd, "gpu") == 0) {
         rust_gpu_print_status();
@@ -2597,7 +2770,7 @@ int cmd_model(int argc, char *argv[])
     }
 
     shell_puts("Usage: model [load|list|info|unload|pin|unpin|preload|preload-status|"
-              "infer|bench|stats|pools|gpu|engines|meta|launch]\r\n");
+              "infer|infer-file|use-gpu|bench|stats|pools|gpu|engines|meta|launch]\r\n");
     return -1;
 }
 
@@ -2952,6 +3125,13 @@ static int cmd_gpu_use(int argc, char *argv[])
     }
 
     shell_printf("gpu use %s: %s\r\n", argv[2], enabled ? "ON" : "off");
+    if (enabled && reason) {
+        /* Accepted but the consumer's GPU dispatch path isn't
+         * actually wired yet (see gpu_consumer.c: sched/eviction
+         * are scaffold-only). Surface the caveat so the operator's
+         * expectation matches reality. */
+        shell_printf("           note: %s\r\n", reason);
+    }
     return 0;
 }
 

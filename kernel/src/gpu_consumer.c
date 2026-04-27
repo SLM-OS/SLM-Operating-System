@@ -99,42 +99,72 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
         return GPU_CONSUMER_ERR_NODEV;
     }
 
-    /* Step 2: per-consumer backend declaration. */
+    /* Step 2: per-consumer accept-or-warn declaration.
+     *
+     * The toggles are now operator-intent flags: enabling the flag
+     * always succeeds when the GPU is available; the actual dispatch
+     * behavior depends on whether each consumer has a GPU backend
+     * actually wired up.
+     *
+     *   inference: WIRED. The MNIST whole-graph fastpath
+     *              (`engine::mnist_gpu_fastpath_eligible` in the Rust
+     *              runtime) consults this flag — flipping it OFF
+     *              forces CPU fallback even on Jetson with the v6
+     *              channel handoff present.
+     *
+     *   sched:     SCAFFOLDED ONLY. No `sched_policy_ops` declares
+     *              has_gpu_backend=true today (see
+     *              kernel/include/sched_policy.h §`has_gpu_backend`).
+     *              The toggle accepts on/off so operators can pre-
+     *              configure intent before a GPU-capable scheduler
+     *              policy lands; until then the dispatch path is
+     *              pure CPU regardless of the flag, and a warning
+     *              is returned via `out_reason` to make the gap
+     *              visible in `gpu use status`.
+     *
+     *   eviction:  SCAFFOLDED ONLY. Eviction policies live in the
+     *              Rust runtime and don't expose a GPU dispatch
+     *              entry point yet. Same accept-with-warning
+     *              behavior as sched. */
     switch (c) {
     case GPU_CONSUMER_SCHED:
         if (!active_sched_policy_has_gpu_backend()) {
             if (out_reason)
-                *out_reason = "active scheduler policy has no GPU backend";
-            return GPU_CONSUMER_ERR_NOTSUPP;
+                *out_reason = "scaffold only — no scheduler policy "
+                              "declares a GPU backend yet";
+            /* Fall through to the flip — operator intent is recorded
+             * even though dispatch is unaffected. */
         }
         break;
 
     case GPU_CONSUMER_EVICTION:
-        /* Eviction policies live in Rust; no policy declares a GPU
-         * backend in M2. Wire-up is M3+ work. */
         if (out_reason)
-            *out_reason = "active eviction policy has no GPU backend";
-        return GPU_CONSUMER_ERR_NOTSUPP;
+            *out_reason = "scaffold only — eviction policies have no "
+                          "GPU dispatch path yet";
+        break;
 
     case GPU_CONSUMER_INFERENCE:
-        /* General-inference dispatch through GPU is M5 (model engine
-         * registry). For M2, even when the GPU is available, the
-         * inference pipeline does not consult this flag yet. Refuse
-         * to enable it so the operator's expectation matches reality. */
-        if (out_reason)
-            *out_reason = "GPU inference dispatch not yet wired (M5)";
-        return GPU_CONSUMER_ERR_NOTSUPP;
+        /* MNIST GPU fastpath consults this flag in
+         * runtime/src/inference/engine.rs. */
+        break;
 
     default:
         if (out_reason) *out_reason = "unknown consumer";
         return GPU_CONSUMER_ERR_INVAL;
     }
 
-    /* All gates passed — flip it on. */
+    /* All gates passed — flip it on.
+     *
+     * Do NOT clear `*out_reason` here. The accept-with-warning cases
+     * above (sched / eviction with no real GPU backend wired) set
+     * `*out_reason` on the success path, and the shell renders that
+     * as a "note: …" line so the operator can see the gap between
+     * "intent recorded" and "dispatch actually changed". The fully
+     * wired inference case never writes `*out_reason`, so the
+     * caller's initial NULL persists. */
     atomic_store_explicit(&g_consumer_enabled[c], true,
                           memory_order_release);
     g_consumer_change_ms[c] = slm_get_time_ns() / 1000000ull;
-    if (out_reason) *out_reason = NULL;
     return 0;
 }
 

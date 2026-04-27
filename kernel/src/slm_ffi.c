@@ -14,6 +14,7 @@
 #include "ipc.h"
 #include "spinlock.h"
 #include "../gpu/gpu.h"
+#include "gpu_consumer.h"
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
 #endif
@@ -260,6 +261,26 @@ int slm_msg_recv(uint32_t queue_id, void *msg, size_t msg_size, int timeout_ms)
 int slm_gpu_available(void)
 {
     return gpu_available() ? 1 : 0;
+}
+
+int slm_gpu_inference_enabled(void)
+{
+    /* Mirror the master `gpu use inference` flag from gpu_consumer.c.
+     * Read by the Rust engine's `mnist_gpu_fastpath_eligible` ahead
+     * of any device probe to short-circuit the CPU/GPU choice
+     * cleanly. */
+    return gpu_consumer_enabled(GPU_CONSUMER_INFERENCE) ? 1 : 0;
+}
+
+extern int rust_model_gpu_dispatch_enabled(uint32_t index);
+
+int slm_model_gpu_dispatch_enabled(uint32_t model_index)
+{
+    /* Thin wrapper around the Rust registry getter. The master
+     * inference toggle is checked separately via
+     * slm_gpu_inference_enabled — both must be true for the engine
+     * to dispatch on GPU. */
+    return rust_model_gpu_dispatch_enabled(model_index);
 }
 
 int slm_gpu_get_info(RustGpuInfo *info)

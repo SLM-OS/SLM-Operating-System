@@ -111,6 +111,13 @@ struct LoadedModelEntry {
     last_used: u64,   // Timestamp from slm_get_time_ns for LRU eviction
     use_count: u32,   // Number of inference calls
     pinned: bool,     // If true, cannot be evicted by LRU
+    /// Per-model GPU-dispatch toggle. Layered on top of the master
+    /// `slm_gpu_inference_enabled()` flag — the engine fastpath
+    /// requires both to be true. Default ON at load so flipping
+    /// just the master switch enables every loaded model; flip
+    /// per-model OFF via `model use-gpu <name|idx> off` to force
+    /// a specific model back to CPU without disturbing the master.
+    gpu_dispatch_enabled: bool,
 }
 
 impl LoadedModelEntry {
@@ -126,6 +133,7 @@ impl LoadedModelEntry {
             last_used: 0,
             use_count: 0,
             pinned: false,
+            gpu_dispatch_enabled: true,
         }
     }
 }
@@ -414,19 +422,21 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
                 let mut entry_name = [0u8; MODEL_NAME_LEN];
                 entry_name[..name_len].copy_from_slice(&name[..name_len]);
 
-                let now = crate::kernel_ffi::get_time_ns();
-                reg.entries[idx] = LoadedModelEntry {
-                    name: entry_name,
-                    weights,
-                    workspace,
-                    graph,
-                    weight_table,
-                    info,
-                    active: true,
-                    last_used: now,
-                    use_count: 0,
-                    pinned: false,
-                };
+                // Start from `empty()` and override only the fields that
+                // differ — keeps the post-load default in one place
+                // (`LoadedModelEntry::empty`) so a future change to e.g.
+                // the per-model GPU-dispatch default doesn't have to be
+                // mirrored at both sites.
+                let mut entry = LoadedModelEntry::empty();
+                entry.name = entry_name;
+                entry.weights = weights;
+                entry.workspace = workspace;
+                entry.graph = graph;
+                entry.weight_table = weight_table;
+                entry.info = info;
+                entry.active = true;
+                entry.last_used = crate::kernel_ffi::get_time_ns();
+                reg.entries[idx] = entry;
                 Ok(idx)
             }
                 None => Err(LoadError::ModelTooLarge), // All slots pinned
@@ -469,6 +479,68 @@ pub fn pin_model(index: usize) -> bool {
         } else {
             false
         }
+    }
+}
+
+/// Set the per-model GPU-dispatch toggle. Returns true if the index
+/// is a loaded model and the flag was updated; false otherwise.
+pub fn set_gpu_dispatch_enabled(index: usize, enabled: bool) -> bool {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to REGISTRY.
+    unsafe {
+        let reg = &mut *REGISTRY.get();
+        if index < MAX_MODELS && reg.entries[index].active {
+            reg.entries[index].gpu_dispatch_enabled = enabled;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Read the per-model GPU-dispatch toggle. Returns false (CPU-only)
+/// for any index outside the active set, so a stale call from a
+/// pre-unload code path can't accidentally enable GPU dispatch.
+pub fn gpu_dispatch_enabled(index: usize) -> bool {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
+        let reg = &*REGISTRY.get();
+        index < MAX_MODELS
+            && reg.entries[index].active
+            && reg.entries[index].gpu_dispatch_enabled
+    }
+}
+
+/// Total flat fp32 element count expected for the model's input
+/// tensor(s). Used by the shell `model infer-file` command to reject
+/// shape-mismatched files before handing them to the engine, so an
+/// operator-readable error replaces the engine's opaque `EngineError`.
+///
+/// Returns `None` for an inactive index. Returns `Some(0)` only if
+/// the graph carries a zero-product shape, which the loader should
+/// have already rejected — callers should treat `Some(0)` the same
+/// as `None`.
+pub fn expected_input_floats(index: usize) -> Option<usize> {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+    unsafe {
+        let reg = &*REGISTRY.get();
+        if index >= MAX_MODELS || !reg.entries[index].active {
+            return None;
+        }
+        let graph = &reg.entries[index].graph;
+        let mut total: usize = 0;
+        for i in 0..graph.input_count {
+            let shape = &graph.input_shapes[i];
+            let ndim = shape.ndim as usize;
+            let mut elems: usize = 1;
+            for d in 0..ndim {
+                elems = elems.saturating_mul(shape.dims[d] as usize);
+            }
+            total = total.saturating_add(elems);
+        }
+        Some(total)
     }
 }
 

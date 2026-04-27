@@ -3642,6 +3642,46 @@ pub extern "C" fn rust_model_unpin(index: u32) -> i32 {
     if loader::registry::unpin_model(index as usize) { 0 } else { -1 }
 }
 
+/// Set the per-model GPU-dispatch toggle.
+///
+/// `enabled` is treated as a boolean: zero = off, non-zero = on.
+/// Returns 0 on success, -1 if the model index is invalid (no
+/// active model at that slot). Default at load is enabled, so
+/// flipping just the master `gpu use inference` flag opts every
+/// loaded model in; this per-model override is the way to force
+/// a specific model back to CPU without disturbing the master.
+#[no_mangle]
+pub extern "C" fn rust_model_set_gpu_dispatch(index: u32, enabled: u8) -> i32 {
+    if loader::registry::set_gpu_dispatch_enabled(index as usize, enabled != 0) {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Read the per-model GPU-dispatch toggle.
+///
+/// Returns 1 if the per-model flag is on for an active model,
+/// 0 otherwise (off, or invalid index).
+#[no_mangle]
+pub extern "C" fn rust_model_gpu_dispatch_enabled(index: u32) -> i32 {
+    if loader::registry::gpu_dispatch_enabled(index as usize) { 1 } else { 0 }
+}
+
+/// Total flat fp32 element count expected by the model's input.
+///
+/// Used by the shell `model infer-file` command to reject shape-
+/// mismatched files before the engine sees them. Returns the count
+/// (>= 1) on success, -1 if the index is not a loaded model or the
+/// graph carries a degenerate (zero-product) input shape.
+#[no_mangle]
+pub extern "C" fn rust_model_expected_input_floats(index: u32) -> i32 {
+    match loader::registry::expected_input_floats(index as usize) {
+        Some(n) if n > 0 && n <= i32::MAX as usize => n as i32,
+        _ => -1,
+    }
+}
+
 /// Share a model's weight memory (increment refcount).
 ///
 /// Returns 0 on success, -1 on error. The caller must call
@@ -4344,6 +4384,123 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
         }
     }
 
+    // =========================================================================
+    // Per-model GPU-dispatch toggle tests
+    //
+    // Pin the registry-side getter/setter for the
+    // `model use-gpu <name|idx> on|off` shell command. The C-side
+    // `rust_model_set_gpu_dispatch` / `rust_model_gpu_dispatch_enabled`
+    // FFI exports just delegate to these, so covering them here
+    // covers the FFI surface too.
+    // =========================================================================
+
+    // Test: Default ON at load
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"gpu_default_test", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            let passed = loader::registry::gpu_dispatch_enabled(idx);
+            print_test_result(b"gpu-toggle: default enabled at load\0", passed);
+            if !passed { failures += 1; }
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"gpu-toggle: default enabled at load\0", false);
+            failures += 1;
+        }
+    }
+
+    // Test: set_gpu_dispatch_enabled(false) flips and gpu_dispatch_enabled reads it
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"gpu_off_test", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            let set_ok = loader::registry::set_gpu_dispatch_enabled(idx, false);
+            let now_off = !loader::registry::gpu_dispatch_enabled(idx);
+            let passed = set_ok && now_off;
+            print_test_result(b"gpu-toggle: setter flips to OFF\0", passed);
+            if !passed { failures += 1; }
+
+            let set_ok2 = loader::registry::set_gpu_dispatch_enabled(idx, true);
+            let now_on = loader::registry::gpu_dispatch_enabled(idx);
+            let passed2 = set_ok2 && now_on;
+            print_test_result(b"gpu-toggle: setter flips back to ON\0", passed2);
+            if !passed2 { failures += 1; }
+
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"gpu-toggle: setter flips to OFF\0", false);
+            print_test_result(b"gpu-toggle: setter flips back to ON\0", false);
+            failures += 2;
+        }
+    }
+
+    // Test: set/get on invalid index doesn't panic, returns false
+    {
+        loader::registry::init();
+        // No models loaded — index 7 is past MAX_MODELS sentinels too.
+        let set_invalid = !loader::registry::set_gpu_dispatch_enabled(7, true);
+        let get_invalid = !loader::registry::gpu_dispatch_enabled(7);
+        let passed = set_invalid && get_invalid;
+        print_test_result(b"gpu-toggle: invalid index rejected cleanly\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test: gpu_dispatch_enabled is FALSE for an unloaded slot, even if a
+    // previous tenant had it ON. Pins that the active-flag check guards
+    // the gpu_dispatch_enabled read.
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"gpu_unload_test", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            // Default is true; unload should make subsequent gets return false.
+            let _ = loader::registry::unload_model(idx);
+            let after_unload = !loader::registry::gpu_dispatch_enabled(idx);
+            print_test_result(b"gpu-toggle: unloaded slot reads FALSE\0", after_unload);
+            if !after_unload { failures += 1; }
+        } else {
+            print_test_result(b"gpu-toggle: unloaded slot reads FALSE\0", false);
+            failures += 1;
+        }
+    }
+
+    // =========================================================================
+    // expected_input_floats — backs the shell `model infer-file` size check
+    //
+    // The shell hands raw fp32 from VFS to the engine; rejecting size
+    // mismatches at the shell layer (with the model's expected element
+    // count in the error message) is much friendlier than the engine's
+    // opaque `EngineError::InvalidInput`. These tests pin the registry
+    // helper that powers that check.
+    // =========================================================================
+
+    // Test: expected_input_floats matches MNIST's 1×1×28×28 = 784 floats.
+    {
+        loader::registry::init();
+        let load_result = loader::registry::load_model(b"shape_test", MNIST_ONNX);
+        if let Ok(idx) = load_result {
+            let elems = loader::registry::expected_input_floats(idx);
+            let passed = elems == Some(784);
+            print_test_result(b"shape: MNIST expects 784 fp32 input elements\0", passed);
+            if !passed { failures += 1; }
+            let _ = loader::registry::unload_model(idx);
+        } else {
+            print_test_result(b"shape: MNIST expects 784 fp32 input elements\0", false);
+            failures += 1;
+        }
+    }
+
+    // Test: expected_input_floats returns None for inactive / OOB indices.
+    {
+        loader::registry::init();
+        // 999 is well past MAX_MODELS (= 8 today); 0 is in range but
+        // inactive after the bare init().
+        let oob = loader::registry::expected_input_floats(999);
+        let inactive = loader::registry::expected_input_floats(0);
+        let passed = oob.is_none() && inactive.is_none();
+        print_test_result(b"shape: inactive / OOB index returns None\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
@@ -4607,6 +4764,139 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
     }
 
     0
+}
+
+/// Run inference on a loaded model with caller-supplied input and
+/// print results to UART.
+///
+/// Mirrors `rust_infer_and_print` but takes a caller-supplied input
+/// buffer instead of a hard-coded zero array. Used by the shell
+/// `model infer-file <name|idx> <path>` command — kernel C reads
+/// the file via VFS, passes the byte buffer through this function
+/// which calls `inference::run_inference` and prints logits +
+/// argmax in the same format as `rust_infer_and_print`.
+///
+/// `input` must point to `input_floats` × 4 bytes of fp32, matching
+/// the model's input shape. The buffer must be 4-byte aligned —
+/// the C caller hands in a `pmm_alloc_pages` result which always
+/// satisfies that.
+///
+/// The output side reuses an internal static buffer so the
+/// kernel-task stack stays small.
+///
+/// Return contract:
+///   >= 0  : argmax class index (0..output_count-1). The detailed
+///           logits-per-bucket dump still goes to UART; the C
+///           caller prints a session-visible "predicted: N" line
+///           from this return value via shell_printf so telnet
+///           operators can see the result without serial access.
+///   -1    : model_index not found in registry
+///   -2    : NULL / empty input
+///   -3    : inference engine error
+#[no_mangle]
+pub extern "C" fn rust_infer_buf_and_print(
+    model_index: u32,
+    input: *const f32,
+    input_floats: usize,
+) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if input.is_null() || input_floats == 0 {
+        // SAFETY: pure FFI call, fmt has matching specifiers.
+        unsafe {
+            uart_printf(
+                b"[infer-buf] null/empty input buffer (model_index=%u floats=%lu)\r\n\0"
+                    .as_ptr(),
+                model_index,
+                input_floats as u64,
+            );
+        }
+        return -2;
+    }
+
+    let idx = model_index as usize;
+    let info = match loader::registry::get_info(idx) {
+        Some(i) => i,
+        None => {
+            // SAFETY: pure FFI call, fmt has matching specifiers.
+            unsafe {
+                uart_printf(
+                    b"[infer-buf] model index %u not loaded\r\n\0".as_ptr(),
+                    model_index,
+                );
+            }
+            return -1;
+        }
+    };
+
+    // Stack-local output buffer (was previously `static mut`; lifted to
+    // the stack so two concurrent shell sessions calling this entry
+    // can't race the same array). 64 × 4 = 256 B fits the 16 KB kernel-
+    // task stack budget comfortably.
+    let mut output: [f32; 64] = [0.0f32; 64];
+
+    let start = kernel_ffi::get_time_ns();
+
+    let result = match inference::run_inference(
+        idx,
+        input,
+        input_floats,
+        output.as_mut_ptr(),
+        output.len(),
+    ) {
+        Ok(n) => n,
+        Err(_) => {
+            // SAFETY: pure FFI call, fmt has matching specifiers.
+            unsafe {
+                uart_printf(
+                    b"[infer-buf] engine error on '%s' (input_floats=%lu)\r\n\0"
+                        .as_ptr(),
+                    info.name.as_ptr(),
+                    input_floats as u64,
+                );
+            }
+            return -3;
+        }
+    };
+
+    let end = kernel_ffi::get_time_ns();
+    let elapsed_us = (end - start) / 1000;
+
+    // SAFETY: pure FFI calls, formats match arg types.
+    unsafe {
+        uart_printf(
+            b"Inference on '%s' completed in %lu us\r\n\0".as_ptr(),
+            info.name.as_ptr(),
+            elapsed_us as u64,
+        );
+        uart_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
+    }
+
+    // Find argmax and print outputs.
+    let mut argmax: usize = 0;
+    let mut max_val = output[0];
+    for i in 0..result {
+        let val = output[i];
+        let pct = (val * 1000.0) as i32;
+        let pct = if pct < 0 { 0 } else { pct };
+        // SAFETY: pure FFI call, fmt has matching specifiers.
+        unsafe {
+            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
+        }
+        if val > max_val {
+            max_val = val;
+            argmax = i;
+        }
+    }
+
+    // SAFETY: pure FFI call, fmt has matching specifiers.
+    unsafe {
+        uart_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
+    }
+
+    argmax as i32
 }
 
 /// Run inference engine tests.
