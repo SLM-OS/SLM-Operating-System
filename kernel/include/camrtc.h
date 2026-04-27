@@ -69,7 +69,12 @@
  * Returns 0 on success, negative on error:
  *   -1  HSP block not reachable (CBB firewall / bad MMIO mapping)
  *       — peek of HSP_DIMENSIONING returned 0xFFFFFFFF
- *   -2  RCE firmware not running (R5_CTRL_0 FWLOADDONE bit not set)
+ *   -2  BPMP MRQ failed during the poweron sequence (clock enable
+ *       on `RCE_CPU_NIC` / `RCE_NIC` / `RCE_CPU`, or reset deassert
+ *       on `RESET_RCE_ALL`), OR the post-poweron R5_CTRL_0
+ *       FWLOADDONE bit is not set (RCE firmware genuinely absent —
+ *       e.g. bootloader didn't load it). The WARN log line names
+ *       the specific failure.
  *   -3  HELLO timed out (RCE didn't echo the cookie within ~100 ms)
  *   -4  PROTOCOL mismatch (RCE replied with an unsupported version
  *       or RTCPU_FW_INVALID_VERSION = 0xFFFFFF)
