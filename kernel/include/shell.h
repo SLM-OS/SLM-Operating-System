@@ -183,6 +183,15 @@ int  shell_try_getc(void);
 #define SHELL_HISTORY_DEPTH    32
 #define SHELL_HISTORY_LINE_MAX 128
 
+/* Pin the load-bearing invariants here so every TU that includes the
+ * macros catches drift, not just kernel/src/shell_history.c. */
+_Static_assert((SHELL_HISTORY_DEPTH & (SHELL_HISTORY_DEPTH - 1)) == 0,
+              "SHELL_HISTORY_DEPTH must be a power of two");
+_Static_assert(SHELL_HISTORY_DEPTH > 0 && SHELL_HISTORY_DEPTH <= 128,
+              "SHELL_HISTORY_DEPTH must fit in a uint8_t with room for count saturation");
+_Static_assert(SHELL_HISTORY_LINE_MAX >= 2,
+              "SHELL_HISTORY_LINE_MAX must hold at least one char + NUL");
+
 struct shell_session;  /* Defined in shell_session.h. */
 
 /*

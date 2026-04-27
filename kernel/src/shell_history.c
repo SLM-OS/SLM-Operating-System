@@ -33,14 +33,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Local mask alias; the power-of-two invariant that makes this valid is
+ * pinned by static_assert in shell.h so every user of the macros sees
+ * the same constraint. */
 #define SHELL_HISTORY_MASK (SHELL_HISTORY_DEPTH - 1)
-
-static_assert((SHELL_HISTORY_DEPTH & SHELL_HISTORY_MASK) == 0,
-              "SHELL_HISTORY_DEPTH must be a power of two");
-static_assert(SHELL_HISTORY_DEPTH > 0 && SHELL_HISTORY_DEPTH <= 128,
-              "SHELL_HISTORY_DEPTH must fit in a uint8_t with room for count saturation");
-static_assert(SHELL_HISTORY_LINE_MAX >= 2,
-              "SHELL_HISTORY_LINE_MAX must hold at least one char + NUL");
 
 /* True for "" or any string consisting only of spaces and tabs. The
  * REPL passes raw input here; trimming is the history layer's job. */

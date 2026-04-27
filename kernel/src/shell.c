@@ -34,6 +34,19 @@
 #include "string.h"
 #include <stddef.h>
 
+/* The line-edit loop in shell_read_command auto-submits the line once
+ * `pos >= max_len - 1` — same behavior as shell_read_line, but the
+ * recall path can fill the buffer in a single keystroke. Pinning that
+ * SHELL_MAX_LINE strictly exceeds SHELL_HISTORY_LINE_MAX makes the
+ * recall always fit with at least one byte of headroom for further
+ * editing, so an arrow-key recall can never wedge the loop into the
+ * "auto-submit before the user can press Enter" path. If
+ * SHELL_HISTORY_LINE_MAX ever grows past SHELL_MAX_LINE this assert
+ * fires before the next user discovers it interactively. */
+static_assert(SHELL_MAX_LINE > SHELL_HISTORY_LINE_MAX,
+              "SHELL_MAX_LINE must strictly exceed SHELL_HISTORY_LINE_MAX so a"
+              " recalled history entry leaves room for further edits");
+
 /* ============================================================================
  * Command table
  *
@@ -544,6 +557,9 @@ int shell_read_command(const char *prompt, char *buf, int max_len)
                     }
                     if (rl > 0) {
                         memcpy(buf, recall, rl);
+                        /* Echo `buf` rather than `recall` so the visible
+                         * line and the in-memory buffer stay in lock-
+                         * step when the recall is clipped to fit. */
                         io->write(io, buf, rl);
                     }
                     buf[rl] = '\0';
@@ -793,6 +809,15 @@ void shell_run(void)
     char *argv[SHELL_MAX_ARGS];
     int argc;
 
+    /* Cache the bound session for the lifetime of this REPL. The shell
+     * task entry binds the session before calling and unbinds after
+     * shell_run returns, so the lookup is stable for the entire loop —
+     * doing it once here saves the per-iteration call that would
+     * otherwise feed shell_history_add. (shell_read_command still does
+     * its own internal lookup; the line-edit loop body is platform
+     * code and does not get a session-typed parameter.) */
+    struct shell_session *sess = shell_session_current();
+
     while (1) {
         /* shell_read_command emits the prompt + runs the ESC[A/B
          * history parser. Replaces the older shell_puts(SHELL_PROMPT)
@@ -812,7 +837,7 @@ void shell_run(void)
          * in-place NUL terminators. shell_history_add itself filters
          * whitespace-only and exact-duplicate-of-most-recent so this
          * call site stays simple. */
-        shell_history_add(shell_session_current(), line_buffer);
+        shell_history_add(sess, line_buffer);
 
         /* Parse into argc/argv */
         argc = parse_line(line_buffer, argv, SHELL_MAX_ARGS);

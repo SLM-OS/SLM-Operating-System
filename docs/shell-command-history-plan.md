@@ -77,9 +77,19 @@ small state machine:
 5. Any unexpected byte resets the state machine and is appended to the
    line buffer normally.
 
-A bare ESC followed by no second byte within ~50 ms (or a non-`[`
-follow-up byte) is treated as a literal ESC and discarded — there is
-no Vi-style mode toggle to break.
+A bare ESC followed by a non-`[` byte is treated as a literal ESC and
+discarded — there is no Vi-style mode toggle to break.
+
+**Implementation note (2026-04-25):** The original 50 ms ESC-timeout
+clause is **deferred**. The kernel does not have a clean
+read-with-timeout primitive, and every real terminal sends the second
+byte of an escape sequence with no perceptible delay. As implemented,
+`shell_read_command` blocks waiting for the byte after `ESC`. A telnet
+client that sends a lone `ESC` and nothing else can park its own
+session on that read; that session stays kickable from another shell
+via `telnetd kick`, so the impact is bounded. If a real symptom turns
+up, the timeout can be added later by polling `try_read_char` with a
+`sleep_ms(50)` budget — no caller-visible API change required.
 
 ---
 
