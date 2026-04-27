@@ -510,26 +510,37 @@ impl<'a> Gguf<'a> {
             .architecture()
             .ok_or(GgufError::MissingMetadataKey("general.architecture"))?;
 
-        // Each branch pins the architecture's metadata-key prefix so
-        // every required key is a `&'static str` literal — no runtime
-        // allocation, and the error variant carries the same string
-        // back to the caller.
-        let keys: &ArchKeys = match arch {
-            "qwen2" => &QWEN2_KEYS,
-            "llama" => &LLAMA_KEYS,
+        // Pair `(ArchKind, &ArchKeys)` so the kind is selected at the
+        // same site as the metadata-key prefix — no separate fallback
+        // matcher to drift out of sync.
+        let (kind, keys): (ArchKind, &ArchKeys) = match arch {
+            "qwen2" => (ArchKind::Qwen2, &QWEN2_KEYS),
+            "llama" => (ArchKind::Llama, &LLAMA_KEYS),
             _ => return Err(GgufError::UnsupportedArchitecture),
         };
 
-        let block_count = self.need_u64(keys.block_count)? as u32;
-        let embedding_length = self.need_u64(keys.embedding_length)? as u32;
-        let head_count = self.need_u64(keys.head_count)? as u32;
+        // `try_from` (not `as`) at every u64→u32 cast: a hostile
+        // GGUF that declares e.g. `embedding_length = u64::MAX` must
+        // surface as a typed error, not silently truncate to a
+        // plausible-looking value that downstream M5 KV-cache sizing
+        // would then multiply into an overflow. See runtime/CLAUDE.md
+        // "Checked arithmetic at boundaries".
+        let block_count = u32_or_bad(self.need_u64(keys.block_count)?, keys.block_count)?;
+        let embedding_length =
+            u32_or_bad(self.need_u64(keys.embedding_length)?, keys.embedding_length)?;
+        let head_count = u32_or_bad(self.need_u64(keys.head_count)?, keys.head_count)?;
         // GQA models pin head_count_kv; vanilla MHA models leave it
         // implicit and we fall back to head_count.
-        let head_count_kv = self
-            .opt_u64(keys.head_count_kv)?
-            .unwrap_or(u64::from(head_count)) as u32;
-        let feed_forward_length = self.need_u64(keys.feed_forward_length)? as u32;
-        let context_length = self.need_u64(keys.context_length)? as u32;
+        let head_count_kv = match self.opt_u64(keys.head_count_kv)? {
+            Some(v) => u32_or_bad(v, keys.head_count_kv)?,
+            None => head_count,
+        };
+        let feed_forward_length = u32_or_bad(
+            self.need_u64(keys.feed_forward_length)?,
+            keys.feed_forward_length,
+        )?;
+        let context_length =
+            u32_or_bad(self.need_u64(keys.context_length)?, keys.context_length)?;
         // Default matches LLaMA-2 (and HF transformers) when the key
         // is absent. Qwen2.5 sets rope_freq_base to 1_000_000.
         let rope_freq_base = self.opt_f32(keys.rope_freq_base)?.unwrap_or(10_000.0);
@@ -537,10 +548,16 @@ impl<'a> Gguf<'a> {
         if head_count == 0 {
             return Err(GgufError::BadMetadataType(keys.head_count));
         }
+        // Decoder-only transformers require `embedding_length` to
+        // divide evenly into `head_count` heads; otherwise RoPE and
+        // attention reshape silently stride-mismatch downstream.
+        if embedding_length % head_count != 0 {
+            return Err(GgufError::BadMetadataType(keys.embedding_length));
+        }
         let head_dim = embedding_length / head_count;
 
         Ok(ArchInfo {
-            architecture: ArchKind::from_str(arch),
+            architecture: kind,
             block_count,
             embedding_length,
             head_count,
@@ -662,21 +679,6 @@ pub enum ArchKind {
     Llama,
 }
 
-impl ArchKind {
-    /// Map `general.architecture` text to a known kind. Returns
-    /// `None` for unknown strings; `validate_for_inference` rejects
-    /// these before construction.
-    fn from_str(s: &str) -> Self {
-        match s {
-            "qwen2" => ArchKind::Qwen2,
-            "llama" => ArchKind::Llama,
-            // Caller already routed through ArchKeys → unreachable
-            // unless the validator ever gains a new prefix without
-            // updating from_str.
-            _ => ArchKind::Llama,
-        }
-    }
-}
 
 /// Inference-relevant dimensions extracted from a validated GGUF.
 /// These are exactly the values the M5 decoder needs to size the KV
@@ -740,6 +742,14 @@ const LLAMA_KEYS: ArchKeys = ArchKeys {
     context_length: "llama.context_length",
     rope_freq_base: "llama.rope.freq_base",
 };
+
+/// Narrow `u64` to `u32` or return `BadMetadataType(key)` if the
+/// value would truncate. Used by `validate_for_inference` to keep all
+/// inference-shape casts checked at the parser/FFI boundary per
+/// `runtime/CLAUDE.md`'s "Checked arithmetic at boundaries" rule.
+fn u32_or_bad(v: u64, key: &'static str) -> Result<u32, GgufError> {
+    u32::try_from(v).map_err(|_| GgufError::BadMetadataType(key))
+}
 
 /// Coerce a metadata value to `u64` if it's any unsigned integer
 /// width. Returns `None` for non-integer or signed-with-negative values.
@@ -1799,6 +1809,37 @@ mod tests {
         let g = Gguf::parse(&bytes).expect("parse");
         let info = g.validate_for_inference().expect("validate");
         assert_eq!(info.head_count_kv, info.head_count);
+    }
+
+    #[test]
+    fn rejects_oversized_u64_dimension() {
+        // Hostile metadata declares embedding_length = u64::MAX.
+        // `as u32` would silently truncate to 0xFFFFFFFF; `try_from`
+        // surfaces a typed BadMetadataType.
+        let mut b = qwen2_meta();
+        b.kvs.retain(|(k, _)| k != "qwen2.embedding_length");
+        b = b.kv("qwen2.embedding_length", MetaValue::Uint64(u64::MAX));
+        let bytes = b.build();
+        let g = Gguf::parse(&bytes).expect("parse");
+        match g.validate_for_inference() {
+            Err(GgufError::BadMetadataType(k)) => assert_eq!(k, "qwen2.embedding_length"),
+            other => panic!("expected BadMetadataType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_non_divisible_embedding_length() {
+        // 1537 / 12 = 128 with remainder 1 — RoPE/attention reshape
+        // would silently stride-mismatch downstream. Reject up-front.
+        let mut b = qwen2_meta();
+        b.kvs.retain(|(k, _)| k != "qwen2.embedding_length");
+        b = b.kv("qwen2.embedding_length", MetaValue::Uint32(1537));
+        let bytes = b.build();
+        let g = Gguf::parse(&bytes).expect("parse");
+        match g.validate_for_inference() {
+            Err(GgufError::BadMetadataType(k)) => assert_eq!(k, "qwen2.embedding_length"),
+            other => panic!("expected BadMetadataType, got {other:?}"),
+        }
     }
 
     #[test]
