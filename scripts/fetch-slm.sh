@@ -25,6 +25,15 @@
 
 set -euo pipefail
 
+# Bash 4+ is required for `declare -A` (associative arrays). macOS ships
+# bash 3.2 by default; install GNU bash via Homebrew or run from a Linux
+# host. Linux distributions have bash 4+ as default since ~2010.
+if (( BASH_VERSINFO[0] < 4 )); then
+    echo "fetch-slm.sh: bash 4+ required (current: $BASH_VERSION)." >&2
+    echo "  On macOS: brew install bash; then: /opt/homebrew/bin/bash $0 ..." >&2
+    exit 3
+fi
+
 # -----------------------------------------------------------------------------
 # Model registry. SHA256 strings marked `TBD-PIN-AFTER-FIRST-DOWNLOAD` are
 # placeholder pins; they must be replaced with a real hex digest before the
@@ -70,6 +79,10 @@ PRINT_SHA=0
 LIST_ONLY=0
 
 usage() {
+    # The leading comment block above runs from line 2 to the first blank
+    # line ahead of `set -euo pipefail`; this `sed` extracts that range.
+    # Keep at least one blank line between the comment block and the
+    # first executable statement, otherwise --help output is wrong.
     sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
     exit "${1:-0}"
 }
@@ -175,24 +188,63 @@ fi
 
 # -----------------------------------------------------------------------------
 # Idempotent download. If the file is already there and matches the pin,
-# we're done. Otherwise fetch, then verify.
+# we're done. Otherwise fetch to a `.part` sibling and atomically rename
+# only after SHA256 verification, so a half-finished transfer never gets
+# mistaken for a complete file on the next run.
 # -----------------------------------------------------------------------------
 if [[ -f "$DEST" ]]; then
-    if [[ "$EXPECTED_SHA" != "TBD-PIN-AFTER-FIRST-DOWNLOAD" ]]; then
+    if [[ "$EXPECTED_SHA" == "TBD-PIN-AFTER-FIRST-DOWNLOAD" ]]; then
+        # File already exists and the pin is unset. Re-downloading would
+        # clobber the on-disk copy a developer is about to hash-pin —
+        # which would silently swap them to a different upstream payload
+        # if it changed mid-flight. Refuse and force the developer to
+        # either pin or delete first.
         actual=$(compute_sha "$DEST")
-        if [[ "$actual" == "$EXPECTED_SHA" ]]; then
-            echo "OK: $DEST already present and verified (sha256=$EXPECTED_SHA)"
-            exit 0
-        fi
-        echo "fetch-slm.sh: $DEST exists but SHA256 mismatched ($actual); re-downloading." >&2
-        rm -f "$DEST"
+        echo "fetch-slm.sh: '$DEST' already exists but the SHA256 pin is unset." >&2
+        echo "  Actual SHA256 of the on-disk file:" >&2
+        echo "    $actual" >&2
+        echo "  Either:" >&2
+        echo "    1. Pin that hash by setting MODEL_SHA256[$MODEL_NAME] in scripts/fetch-slm.sh," >&2
+        echo "       commit, and re-run; OR" >&2
+        echo "    2. Delete '$DEST' to force a fresh download." >&2
+        exit 4
     fi
+
+    actual=$(compute_sha "$DEST")
+    if [[ "$actual" == "$EXPECTED_SHA" ]]; then
+        echo "OK: $DEST already present and verified (sha256=$EXPECTED_SHA)"
+        exit 0
+    fi
+    echo "fetch-slm.sh: $DEST exists but SHA256 mismatched ($actual); re-downloading." >&2
+    rm -f "$DEST"
 fi
+
+PART="${DEST}.part"
+trap 'rm -f "$PART"' EXIT
 
 echo "Downloading $MODEL_NAME (~${MODEL_SIZE_MB[$MODEL_NAME]} MB) → $DEST"
 echo "  URL: $URL"
-curl --fail --location --show-error --output "$DEST" "$URL"
-echo "Download complete: $(stat --format='%s' "$DEST") bytes"
+# --retry 3 / --retry-delay 5 / --connect-timeout 30 — Hugging Face's CDN
+# occasionally times out on ~1 GB transfers; transient failures shouldn't
+# leave the developer to manually retry.
+curl --fail --location --show-error \
+     --retry 3 --retry-delay 5 --connect-timeout 30 \
+     --output "$PART" "$URL"
+echo "Download complete: $(stat --format='%s' "$PART") bytes"
 
-verify_file "$DEST" "$EXPECTED_SHA"
+if [[ "$EXPECTED_SHA" == "TBD-PIN-AFTER-FIRST-DOWNLOAD" ]]; then
+    actual=$(compute_sha "$PART")
+    mv -f "$PART" "$DEST"
+    trap - EXIT
+    echo "DOWNLOADED: $DEST" >&2
+    echo "fetch-slm.sh: SHA256 pin is unset for '$MODEL_NAME' — file written to '$DEST' but NOT verified." >&2
+    echo "  Actual SHA256 of the downloaded file:" >&2
+    echo "    $actual" >&2
+    echo "  Update MODEL_SHA256[$MODEL_NAME] in scripts/fetch-slm.sh and re-run to verify." >&2
+    exit 4
+fi
+
+verify_file "$PART" "$EXPECTED_SHA"
+mv -f "$PART" "$DEST"
+trap - EXIT
 echo "OK: $DEST  (sha256=$EXPECTED_SHA)"
