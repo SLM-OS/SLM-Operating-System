@@ -1,0 +1,19 @@
+[package]
+name = "gguf-inspect"
+version = "0.1.0"
+edition = "2021"
+description = "Inspector for GGUF v3 model files (host-side dev tool for SLM-OS)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "gguf_inspect"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gguf-inspect"
+path = "src/main.rs"
+
+[dependencies]
+# Intentionally empty: zero external deps for a fast, reproducible host build.
+# CLI args, error types, and GGUF parsing are all hand-rolled.
