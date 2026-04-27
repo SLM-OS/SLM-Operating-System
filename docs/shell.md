@@ -892,6 +892,32 @@ static const shell_cmd_t builtin_commands[] = {
 
 ---
 
+## Line editing and history
+
+The REPL line reader (`shell_read_command` in `kernel/src/shell.c`)
+supports:
+
+- **Backspace / DEL** — removes the rightmost character from the
+  in-progress line.
+- **Ctrl+C** — cancels the current line, prints `^C`, and resets the
+  history browse cursor back to the live edit buffer.
+- **Up arrow (`ESC [ A`)** — recalls the previous command from the
+  per-session history ring; further up arrows walk older. Recall is
+  rendered by emitting `\r` + `ESC [ K` + the prompt + the recalled
+  text; the cursor lands at end-of-input.
+- **Down arrow (`ESC [ B`)** — walks back toward the live edit
+  buffer; once past the most recent entry the input region clears.
+- **Enter** — submits the (possibly edited) line. The submitted line
+  is captured into history per the rules in
+  `docs/shell-command-history-plan.md`: empty / whitespace-only lines
+  and exact duplicates of the most recent entry are skipped, anything
+  longer than 127 chars is truncated.
+
+Each session keeps its own 32-entry × 128-byte ring buffer
+(`SHELL_HISTORY_DEPTH` × `SHELL_HISTORY_LINE_MAX` in `shell.h`); two
+operators on different telnet sessions never see each other's
+recall.
+
 ## Not In Scope
 
 The following features are explicitly out of scope:
@@ -899,10 +925,11 @@ The following features are explicitly out of scope:
 - Scripting
 - Pipes
 - Job control
-- Command history (up arrow)
+- Reverse search (Ctrl-R), prefix-search history, history expansion
+  (`!!` / `!N`)
+- Persistent history across reboot
+- Left/right arrow in-line cursor movement
 - Tab completion
-
-Backspace and basic line editing are supported.
 
 ---
 

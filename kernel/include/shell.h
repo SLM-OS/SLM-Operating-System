@@ -166,4 +166,80 @@ int  shell_getc(void);
  * available right now (or the session has closed). */
 int  shell_try_getc(void);
 
+/* ============================================================================
+ * Per-session command history (#434)
+ *
+ * Up arrow recalls the previous command in the running session; down
+ * arrow walks back toward the live edit buffer. Storage lives on
+ * shell_session->history (see shell_session.h). The line-edit loop
+ * used by the REPL is shell_read_command(); it emits the prompt,
+ * runs the ESC-sequence parser, and calls into the APIs below.
+ *
+ * Out of scope: reverse search, prefix search, persistence across
+ * reboot, in-line cursor movement, multi-line commands. See
+ * docs/shell-command-history-plan.md.
+ * ============================================================================ */
+
+#define SHELL_HISTORY_DEPTH    32
+#define SHELL_HISTORY_LINE_MAX 128
+
+/* Pin the load-bearing invariants here so every TU that includes the
+ * macros catches drift, not just kernel/src/shell_history.c. */
+_Static_assert((SHELL_HISTORY_DEPTH & (SHELL_HISTORY_DEPTH - 1)) == 0,
+              "SHELL_HISTORY_DEPTH must be a power of two");
+_Static_assert(SHELL_HISTORY_DEPTH > 0 && SHELL_HISTORY_DEPTH <= 128,
+              "SHELL_HISTORY_DEPTH must fit in a uint8_t with room for count saturation");
+_Static_assert(SHELL_HISTORY_LINE_MAX >= 2,
+              "SHELL_HISTORY_LINE_MAX must hold at least one char + NUL");
+
+struct shell_session;  /* Defined in shell_session.h. */
+
+/*
+ * Capture a freshly entered command into the session's ring buffer.
+ * Skips empty / whitespace-only lines and exact duplicates of the
+ * most recent entry. Truncates at SHELL_HISTORY_LINE_MAX - 1 chars
+ * (NUL preserved). Always resets the browse cursor to "live buffer"
+ * so the next up arrow starts from the most recent entry.
+ *
+ * Safe to call with NULL session or NULL line — both no-op.
+ */
+void shell_history_add(struct shell_session *s, const char *line);
+
+/*
+ * Step the cursor toward older entries and return the entry now under
+ * the cursor. Returns NULL when the cursor cannot move (history empty
+ * or already at the oldest entry). The returned pointer aliases storage
+ * inside the session's ring; callers must copy before issuing another
+ * shell_history_add() against the same session.
+ */
+const char *shell_history_prev(struct shell_session *s);
+
+/*
+ * Step the cursor toward newer entries / the live edit buffer. Returns
+ * NULL when the cursor is already on the live buffer (no movement). When
+ * the cursor was at the most recent entry and a step would land back on
+ * the live buffer, returns an empty string sentinel — the caller treats
+ * that as "redraw the prompt with no recalled text".
+ */
+const char *shell_history_next(struct shell_session *s);
+
+/*
+ * Force the browse cursor back to the live edit buffer. Called by the
+ * line-edit loop after a Ctrl+C cancellation so the next prompt does
+ * not resume the previous browse position.
+ */
+void shell_history_reset_cursor(struct shell_session *s);
+
+/*
+ * REPL line reader with prompt + history. Emits `prompt` itself, then
+ * reads one line into `buf`, honoring backspace, Ctrl+C, and the up /
+ * down arrow recall sequences. Returns the same length / 0 / -1 codes
+ * as shell_read_line().
+ *
+ * Callers that need a plain line read without history (e.g. Lua's
+ * slm.read_line) should keep using shell_read_line(); only the REPL
+ * uses this entry point.
+ */
+int shell_read_command(const char *prompt, char *buf, int max_len);
+
 #endif /* SHELL_H */

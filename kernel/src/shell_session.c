@@ -58,6 +58,13 @@ static void session_reset_defaults(struct shell_session *s)
     s->term_type[0]       = '\0';
     s->interrupt_requested = false;
     memset(&s->xput, 0, sizeof(s->xput));
+
+    /* Wipe any stale recall ring left behind from a previous occupant
+     * of this pool slot, then put the cursor on the live edit buffer
+     * so the next up arrow starts from the most recent entry rather
+     * than mid-browse (#434). */
+    memset(&s->history, 0, sizeof(s->history));
+    s->history.cursor = -1;
 }
 
 void shell_session_init(void)
