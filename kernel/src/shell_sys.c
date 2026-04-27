@@ -6213,15 +6213,48 @@ int cmd_csidiag(int argc, char *argv[])
                                               &cfg_result);
     uart_printf("  CSI_SET_CONFIG:  rc=%d result=0x%x\r\n",
                 rc, (unsigned)cfg_result);
-    if (rc == 0 && cfg_result == 0u) {
-        uart_puts("  *** NVCSI configured for IMX219 (2-lane D-PHY ***\r\n");
-        uart_puts("  *** 456 MHz). Stream sensor + check NVCSI     ***\r\n");
-        uart_puts("  *** INTR_STATUS to confirm packets on wire.   ***\r\n");
+    if (rc != 0 || cfg_result != 0u) {
+        if (rc == 0) {
+            uart_puts("  *** RCE rejected SET_CONFIG; decode result   ***\r\n");
+            uart_puts("  *** via l4t-camrtc-capture-messages.h.       ***\r\n");
+        } else {
+            uart_puts("  *** SET_CONFIG failed at the IVC layer.      ***\r\n");
+        }
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+
+    /* CSI_SET_CONFIG succeeded — try CHANNEL_SETUP_REQ as a smoke
+     * test to verify the wire format is right. We pass null
+     * IOVAs / queue_depth=0; RCE will reject with
+     * CAPTURE_ERROR_INVALID_PARAMETER but the round-trip itself
+     * proves the 280-byte message structure parses cleanly.
+     * A later PR will allocate the request ring + memoryinfo
+     * descriptors in NC memory and wire CAPTURE_REQUEST_REQ. */
+    uint32_t ch_result = 0xDEADBEEFu;
+    uint32_t ch_id     = 0xDEADBEEFu;
+    uint64_t vi_mask   = 0xDEADBEEFDEADBEEFull;
+    rc = camrtc_capture_channel_setup(0u, 0u,
+                                      0u /* requests_iova */,
+                                      0u /* memoryinfo_iova */,
+                                      0u /* queue_depth */,
+                                      0u /* request_size */,
+                                      0u /* memoryinfo_size */,
+                                      &ch_result, &ch_id, &vi_mask);
+    uart_printf("  CHANNEL_SETUP:   rc=%d result=0x%x channel_id=0x%x "
+                "vi_mask=0x%lx\r\n",
+                rc, (unsigned)ch_result, (unsigned)ch_id,
+                (unsigned long)vi_mask);
+    if (rc == 0 && ch_result == 0u) {
+        uart_puts("  *** CHANNEL_SETUP OK — RCE allocated a VI    ***\r\n");
+        uart_puts("  *** capture channel for our request ring.    ***\r\n");
     } else if (rc == 0) {
-        uart_puts("  *** RCE rejected SET_CONFIG; decode result   ***\r\n");
-        uart_puts("  *** via l4t-camrtc-capture-messages.h.       ***\r\n");
+        uart_puts("  *** Round-trip OK; RCE rejected the          ***\r\n");
+        uart_puts("  *** smoke-test args (expected — we passed    ***\r\n");
+        uart_puts("  *** queue_depth=0). PR3 will land the real   ***\r\n");
+        uart_puts("  *** request ring + memoryinfo allocator.     ***\r\n");
     } else {
-        uart_puts("  *** SET_CONFIG failed at the IVC layer.      ***\r\n");
+        uart_puts("  *** CHANNEL_SETUP failed at the IVC layer.   ***\r\n");
     }
 
     uart_puts("=== End ===\r\n");

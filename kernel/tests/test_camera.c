@@ -826,6 +826,58 @@ _Static_assert(offsetof(struct capture_csi_stream_set_config_req, cil_config) ==
 _Static_assert(offsetof(struct capture_csi_stream_set_config_req, error_config) == 48,
     "capture_csi_stream_set_config_req.error_config must be at offset 48");
 
+/* CAPTURE_CHANNEL_SETUP_REQ wire-format pins (PR2 of HW Task 4).
+ * `capture_channel_config` is the request body — 272 B with the
+ * field offsets shown below. csi_stream_config is 16 B,
+ * syncpoint_info is 24 B, vi_gos_tables is 12*8 = 96 B.
+ * Per L4T `l4t-camrtc-capture.h:369/37/383`. */
+_Static_assert(sizeof(struct camrtc_csi_stream_config) == 16,
+    "camrtc_csi_stream_config must be exactly 16 bytes (RCE wire format)");
+_Static_assert(sizeof(struct camrtc_syncpoint_info) == 24,
+    "camrtc_syncpoint_info must be exactly 24 bytes (RCE wire format)");
+_Static_assert(VI_NUM_GOS_TABLES == 12u,
+    "VI_NUM_GOS_TABLES drift — capture_channel_config.vi_gos_tables array length");
+_Static_assert(sizeof(struct camrtc_capture_channel_config) == 272,
+    "camrtc_capture_channel_config must be exactly 272 bytes "
+    "(16 hdr + 16 vi_masks + 16 csi + 24 ring/queue + 8 slvsec/gos_count "
+    "+ 96 gos_tables + 72 syncpoints + 16 error + 8 stop)");
+_Static_assert(sizeof(struct camrtc_capture_channel_setup_req) == 272,
+    "camrtc_capture_channel_setup_req wraps channel_config (272 B)");
+_Static_assert(sizeof(struct camrtc_capture_channel_setup_resp) == 16,
+    "camrtc_capture_channel_setup_resp must be exactly 16 bytes (RCE wire format)");
+_Static_assert(offsetof(struct camrtc_capture_channel_config, vi_channel_mask) == 16,
+    "vi_channel_mask must be at offset 16");
+_Static_assert(offsetof(struct camrtc_capture_channel_config, csi_stream) == 32,
+    "csi_stream must be at offset 32");
+_Static_assert(offsetof(struct camrtc_capture_channel_config, requests) == 48,
+    "requests must be at offset 48");
+_Static_assert(offsetof(struct camrtc_capture_channel_config, queue_depth) == 64,
+    "queue_depth must be at offset 64");
+_Static_assert(offsetof(struct camrtc_capture_channel_config, num_vi_gos_tables) == 84,
+    "num_vi_gos_tables must be at offset 84");
+_Static_assert(offsetof(struct camrtc_capture_channel_config, vi_gos_tables) == 88,
+    "vi_gos_tables must be at offset 88 (compiler-padded after num_vi_gos_tables)");
+_Static_assert(offsetof(struct camrtc_capture_channel_config, progress_sp) == 184,
+    "progress_sp must be at offset 184");
+_Static_assert(offsetof(struct camrtc_capture_channel_config, error_mask_uncorrectable) == 256,
+    "error_mask_uncorrectable must be at offset 256");
+_Static_assert(offsetof(struct camrtc_capture_channel_config, stop_on_error_notify_bits) == 264,
+    "stop_on_error_notify_bits must be at offset 264");
+_Static_assert(CAPTURE_CHANNEL_SETUP_REQ == 0x1Eu,
+    "CAPTURE_CHANNEL_SETUP_REQ opcode drift (L4T msg id)");
+_Static_assert(CAPTURE_CHANNEL_SETUP_RESP == 0x11u,
+    "CAPTURE_CHANNEL_SETUP_RESP opcode drift (L4T msg id)");
+_Static_assert(VI_UNIT_VI == 0u,
+    "VI_UNIT_VI drift — Orin Nano has VI0 only");
+_Static_assert(SLVSEC_STREAM_DISABLED == 0xFFu,
+    "SLVSEC_STREAM_DISABLED drift — sentinel for non-SLVSEC sensors");
+_Static_assert(CAPTURE_CHANNEL_FLAG_VIDEO == 0x0001u,
+    "CAPTURE_CHANNEL_FLAG_VIDEO drift");
+_Static_assert(CAPTURE_CHANNEL_FLAG_RAW == 0x0002u,
+    "CAPTURE_CHANNEL_FLAG_RAW drift");
+_Static_assert(CAPTURE_CHANNEL_FLAG_CSI == 0x10000u,
+    "CAPTURE_CHANNEL_FLAG_CSI drift");
+
 /* =============================================================================
  * Tegra234 camera-subsystem MMIO bases — Phase 0 verified
  *
