@@ -873,4 +873,83 @@ uint64_t slm_irq_save(void);
  */
 void slm_irq_restore(uint64_t flags);
 
+/*
+ * ==========================================================================
+ * SLM (Small Language Model) Loader — Phase SLM, M1
+ * ==========================================================================
+ *
+ * Parallel API to rust_model_load (ONNX) for GGUF-format SLMs.
+ * The SLM registry stores parsed metadata (architecture,
+ * dimensions, vocab size) without copying weights into the
+ * model_mem pool — that arrives in M5 once the decoder needs them.
+ */
+
+#define SLM_ARCH_NAME_LEN 16  /* matches Rust SLM_ARCH_LEN */
+#define SLM_MODEL_NAME_LEN 32 /* matches Rust SLM_NAME_LEN */
+
+/*
+ * C-layout snapshot of an SLM registry entry. Returned by value via
+ * rust_slm_get_info; matches the field order of Rust's
+ * `SlmModelInfoC`.
+ */
+typedef struct {
+    uint8_t  architecture[SLM_ARCH_NAME_LEN]; /* null-padded ASCII */
+    uint8_t  name[SLM_MODEL_NAME_LEN];        /* null-padded ASCII */
+    uint32_t block_count;          /* n_layer            */
+    uint32_t embedding_length;     /* hidden width       */
+    uint32_t head_count;           /* attention heads    */
+    uint32_t head_count_kv;        /* GQA KV heads       */
+    uint32_t head_dim;             /* per-head dimension */
+    uint32_t feed_forward_length;  /* SwiGLU intermediate*/
+    uint32_t context_length;       /* trained ctx        */
+    uint32_t vocab_size;           /* tokenizer vocab    */
+    uint32_t tensor_count;         /* GGUF tensor count  */
+    uint32_t source_bytes;         /* on-disk size       */
+    float    rope_freq_base;       /* RoPE theta         */
+} SlmModelInfoC;
+
+/*
+ * Load a GGUF model into the SLM registry.
+ * @name: null-terminated model name (clamped to 31 bytes).
+ * @data: pointer to GGUF bytes.
+ * @data_len: number of bytes at @data.
+ * Returns slot index (>= 0) on success, -1 on error.
+ */
+extern int rust_slm_load(const uint8_t *name, const uint8_t *data, size_t data_len);
+
+/*
+ * Unload a SLM by slot index. Returns 0 on success, -1 on error.
+ */
+extern int rust_slm_unload(uint32_t index);
+
+/*
+ * Snapshot the registry entry at @index into @info.
+ * Returns 0 on success, -1 if the slot is empty / out of range.
+ */
+extern int rust_slm_get_info(uint32_t index, SlmModelInfoC *info);
+
+/*
+ * Number of currently-loaded SLMs.
+ */
+extern uint32_t rust_slm_count(void);
+
+/*
+ * Test-only: build a Qwen2.5-shaped GGUF fixture into @out_buf and
+ * record the bytes written via @out_size. Returns 0 on success or
+ * -1 if the buffer is too small / pointers are null. Used by
+ * kernel/tests/test_slm_load.c so the FFI surface can be exercised
+ * end-to-end without staging a real GGUF.
+ */
+extern int rust_slm_test_build_qwen_fixture(
+    uint32_t vocab_size,
+    uint8_t *out_buf,
+    size_t out_capacity,
+    size_t *out_size);
+
+/*
+ * Test-only: reset the SLM registry to empty. Tests call this
+ * between cases so each one starts with a known-empty slot table.
+ */
+extern void rust_slm_test_reset(void);
+
 #endif /* SLM_FFI_H */

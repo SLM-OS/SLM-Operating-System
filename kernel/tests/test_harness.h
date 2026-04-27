@@ -37,6 +37,9 @@ int test_suite_model_mem(void);
 /* Eviction policy tests (Phase AI-Eviction M1/M2 — calls into Rust) */
 int test_suite_eviction(void);
 
+/* SLM loader / GGUF FFI tests (Phase SLM, M1.5 — calls into Rust) */
+int test_suite_slm_load(void);
+
 /* Priority inheritance mutex tests */
 int test_suite_pi_mutex(void);
 

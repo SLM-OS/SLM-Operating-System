@@ -30,6 +30,8 @@ pub mod component;
 pub mod msg_router;
 pub mod loader;
 pub mod inference;
+#[cfg(feature = "slm")]
+pub mod slm;
 
 // Re-export commonly used types
 pub use kernel_ffi::{KernelError, KernelResult, MemFlags, ShmFlags, TaskId};
@@ -4511,6 +4513,145 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
     }
 
     failures
+}
+
+// =============================================================================
+// SLM Loader API (Phase SLM, M1)
+// =============================================================================
+//
+// Parallel to the ONNX rust_model_load family above. The SLM
+// registry stores GGUF metadata (architecture, dimensions, vocab
+// size) without copying weights into the model_mem pool — that
+// arrives in M5 once the decoder needs them. M7 wires `slm load`
+// in the shell to call rust_slm_load.
+
+/// Load a GGUF model from a buffer into the SLM registry.
+///
+/// Returns the slot index (>= 0) on success, -1 on error. Errors
+/// include malformed GGUF, missing required architecture metadata,
+/// unsupported architecture, and registry full.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated string pointer
+/// - `data` must point to `data_len` bytes of GGUF-format data
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_load(
+    name: *const u8,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || data.is_null() || data_len == 0 {
+        return -1;
+    }
+    // Bound the name length before deref per runtime/CLAUDE.md
+    // "C-string bounds-before-deref".
+    let mut name_len = 0usize;
+    while name_len < slm::registry::SLM_NAME_LEN {
+        let c = *name.add(name_len);
+        if c == 0 {
+            break;
+        }
+        name_len += 1;
+    }
+    let name_slice = core::slice::from_raw_parts(name, name_len);
+    let data_slice = core::slice::from_raw_parts(data, data_len);
+    match slm::registry::load_slm(name_slice, data_slice) {
+        Ok(idx) => idx as i32,
+        Err(_) => -1,
+    }
+}
+
+/// Unload a SLM by slot index.
+///
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_unload(index: u32) -> i32 {
+    match slm::registry::unload_slm(index as usize) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Read C-friendly metadata about a loaded SLM.
+///
+/// Returns 0 on success, -1 if the slot is empty / out of range or
+/// `info` is null.
+///
+/// # Safety
+/// - `info` must point to a `SlmModelInfoC`-sized buffer
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_get_info(
+    index: u32,
+    info: *mut slm::registry::SlmModelInfoC,
+) -> i32 {
+    if info.is_null() {
+        return -1;
+    }
+    match slm::registry::get_info(index as usize) {
+        Some(snap) => {
+            *info = snap;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Number of currently-loaded SLMs (for `slm list`).
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_count() -> u32 {
+    slm::registry::count() as u32
+}
+
+/// Test-only: build a Qwen2.5-shaped GGUF fixture into the caller's
+/// buffer and return the bytes-written count via `*out_size`.
+///
+/// Used by `kernel/tests/test_slm_load.c` to drive the FFI surface
+/// end-to-end without staging a real ~1 GB GGUF on disk. The shape
+/// matches Qwen2.5-1.5B-Instruct so every key
+/// `validate_for_inference` reads is exercised.
+///
+/// Returns 0 on success, -1 on null pointer / buffer-too-small.
+///
+/// # Safety
+/// - `out_buf` must point to `out_capacity` writable bytes.
+/// - `out_size` must be a valid `*mut usize`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_test_build_qwen_fixture(
+    vocab_size: u32,
+    out_buf: *mut u8,
+    out_capacity: usize,
+    out_size: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || out_size.is_null() {
+        return -1;
+    }
+    let buf = core::slice::from_raw_parts_mut(out_buf, out_capacity);
+    match slm::registry::build_qwen_test_fixture(vocab_size as usize, buf) {
+        Some(n) => {
+            *out_size = n;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Reset the SLM registry to its initial empty state. Test-only —
+/// `kernel/tests/test_slm_load.c` calls this between cases so each
+/// test sees a known empty slot table.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_test_reset() {
+    // Equivalent to `unload_slm` on every occupied slot; no
+    // separate Rust-side accessor needed beyond what the registry
+    // already exposes.
+    for idx in 0..slm::registry::SLM_MAX_SLOTS {
+        let _ = slm::registry::unload_slm(idx);
+    }
 }
 
 // =============================================================================
