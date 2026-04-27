@@ -29,6 +29,14 @@ struct blkdev *persistent_lfs_store_create(const char *name,
 int persistent_lfs_store_reset(struct blkdev *dev);
 
 /*
+ * Temporarily suppress FAT-backed syncs while higher-level code is already
+ * holding the boot FAT volume open. Dirty state is preserved until syncs are
+ * resumed and the caller explicitly flushes.
+ */
+void persistent_lfs_store_suspend_sync(struct blkdev *dev);
+void persistent_lfs_store_resume_sync(struct blkdev *dev);
+
+/*
  * Destroy a device previously returned by persistent_lfs_store_create().
  */
 void persistent_lfs_store_destroy(struct blkdev *dev);

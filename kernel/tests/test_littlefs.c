@@ -347,6 +347,7 @@ static void test_persistent_lfs_store_recovers_backup_image(void)
     bool needs_format = false;
     char buf[64];
     const char *data = "backup recovery payload";
+    const char *new_data = "post recovery payload";
 
     make_boot_media_fat_volume(&fat_dev);
     boot_media_test_set_device(fat_dev);
@@ -402,6 +403,38 @@ static void test_persistent_lfs_store_recovers_backup_image(void)
     TEST_ASSERT_EQUAL_INT((int)strlen(data),
                           littlefs_file_read(mnt, fd, buf, sizeof(buf) - 1));
     TEST_ASSERT_EQUAL_STRING(data, buf);
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+
+    fd = littlefs_file_open(mnt, "/after.txt",
+                            LFS_O_CREAT | LFS_O_WRONLY | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(fd >= 0);
+    TEST_ASSERT_EQUAL_INT((int)strlen(new_data),
+                          littlefs_file_write(mnt, fd, new_data, strlen(new_data)));
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+
+    TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));
+    persistent_lfs_store_destroy(store);
+
+    store = persistent_lfs_store_create("persist_lfs6b", &needs_format);
+    TEST_ASSERT_NOT_NULL(store);
+    TEST_ASSERT_FALSE(needs_format);
+    mnt = littlefs_mount(store, needs_format);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    fd = littlefs_file_open(mnt, "/recover.txt", LFS_O_RDONLY);
+    TEST_ASSERT_TRUE(fd >= 0);
+    memset(buf, 0, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT((int)strlen(data),
+                          littlefs_file_read(mnt, fd, buf, sizeof(buf) - 1));
+    TEST_ASSERT_EQUAL_STRING(data, buf);
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+
+    fd = littlefs_file_open(mnt, "/after.txt", LFS_O_RDONLY);
+    TEST_ASSERT_TRUE(fd >= 0);
+    memset(buf, 0, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT((int)strlen(new_data),
+                          littlefs_file_read(mnt, fd, buf, sizeof(buf) - 1));
+    TEST_ASSERT_EQUAL_STRING(new_data, buf);
     TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
 
     TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));

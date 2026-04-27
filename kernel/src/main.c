@@ -343,12 +343,14 @@ void kernel_main(void *dtb)
     {
         struct lfs_mount *lfs_mnt = NULL;
         bool seed_defaults = true;
+        bool persistent_files_mounted = false;
         struct blkdev *files_dev =
             persistent_lfs_store_create("filesstore0", &seed_defaults);
 
         if (files_dev && blkdev_register(files_dev) == BLKDEV_OK) {
             lfs_mnt = littlefs_mount_at("/mnt/files", files_dev, seed_defaults);
             if (lfs_mnt) {
+                persistent_files_mounted = true;
                 INFO("  LittleFS mounted at /mnt/files (persistent boot-FAT image)");
             } else {
                 WARN("Failed to mount persistent LittleFS store; reformatting backing image");
@@ -357,6 +359,7 @@ void kernel_main(void *dtb)
                     lfs_mnt = littlefs_mount_at("/mnt/files", files_dev, true);
                 }
                 if (lfs_mnt) {
+                    persistent_files_mounted = true;
                     INFO("  LittleFS mounted at /mnt/files (persistent boot-FAT image, reformatted)");
                 } else {
                     WARN("Failed to recover persistent LittleFS store; falling back to RAM disk");
@@ -429,7 +432,14 @@ void kernel_main(void *dtb)
                 demo_init();
             }
 
+            if (persistent_files_mounted) {
+                persistent_lfs_store_suspend_sync(files_dev);
+            }
             blob_autoload_init();
+            if (persistent_files_mounted) {
+                persistent_lfs_store_resume_sync(files_dev);
+                (void)files_dev->ops->sync(files_dev);
+            }
 
             /* Phase 6.2c: write the embedded scheduler MLP .hef
              * (if the kernel was built with SCHEDULER_HEF_BLOB=...)

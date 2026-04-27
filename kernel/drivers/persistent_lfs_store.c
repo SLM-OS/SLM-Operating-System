@@ -46,6 +46,7 @@ struct persistent_lfs_store_priv {
     uint32_t dirty_last_block;
     uint32_t journal_first_block;
     uint32_t journal_last_block;
+    uint32_t sync_suspend_depth;
     spinlock_t lock;
 };
 
@@ -421,9 +422,10 @@ static int persistent_lfs_sync(struct blkdev *dev)
     struct persistent_lfs_store_priv *priv = dev->priv;
     irq_flags_t flags = spin_lock_irqsave(&priv->lock);
     bool dirty = priv->dirty;
+    bool sync_suspended = priv->sync_suspend_depth != 0;
     spin_unlock_irqrestore(&priv->lock, flags);
 
-    if (!dirty) {
+    if (!dirty || sync_suspended) {
         return BLKDEV_OK;
     }
     return persistent_lfs_flush_image(dev);
@@ -466,6 +468,7 @@ static struct blkdev *persistent_lfs_store_alloc(const char *name, size_t image_
     priv->dirty_last_block = 0;
     priv->journal_first_block = 0;
     priv->journal_last_block = 0;
+    priv->sync_suspend_depth = 0;
     spin_init(&priv->lock);
 
     if (uart_snprintf(dev->name, sizeof(dev->name), "%s", name) < 0) {
@@ -494,6 +497,7 @@ struct blkdev *persistent_lfs_store_create(const char *name,
     FRESULT res;
     bool mounted = false;
     bool needs_format = false;
+    bool primary_present = false;
     bool primary_size_valid = false;
     bool backup_size_valid = false;
     bool loaded_primary = false;
@@ -518,6 +522,7 @@ struct blkdev *persistent_lfs_store_create(const char *name,
     mounted = true;
 
     if (f_stat(PERSISTENT_LFS_STORE_PATH, &fno) == FR_OK) {
+        primary_present = true;
         if (persistent_lfs_valid_image_size(fno.fsize)) {
             primary_size_valid = true;
             image_bytes = fno.fsize;
@@ -563,7 +568,7 @@ struct blkdev *persistent_lfs_store_create(const char *name,
         if (!loaded_primary && backup_size_valid) {
             if (persistent_lfs_try_load_image_path(PERSISTENT_LFS_STORE_BAK_PATH, priv)) {
                 priv->backing_valid = true;
-                if (primary_size_valid) {
+                if (primary_present) {
                     (void)f_unlink(PERSISTENT_LFS_STORE_PATH);
                 }
                 if (f_rename(PERSISTENT_LFS_STORE_BAK_PATH,
@@ -654,6 +659,34 @@ int persistent_lfs_store_reset(struct blkdev *dev)
     priv->journal_last_block = 0;
     spin_unlock_irqrestore(&priv->lock, flags);
     return BLKDEV_OK;
+}
+
+void persistent_lfs_store_suspend_sync(struct blkdev *dev)
+{
+    struct persistent_lfs_store_priv *priv;
+    if (!dev || !dev->priv) {
+        return;
+    }
+
+    priv = dev->priv;
+    irq_flags_t flags = spin_lock_irqsave(&priv->lock);
+    priv->sync_suspend_depth++;
+    spin_unlock_irqrestore(&priv->lock, flags);
+}
+
+void persistent_lfs_store_resume_sync(struct blkdev *dev)
+{
+    struct persistent_lfs_store_priv *priv;
+    if (!dev || !dev->priv) {
+        return;
+    }
+
+    priv = dev->priv;
+    irq_flags_t flags = spin_lock_irqsave(&priv->lock);
+    if (priv->sync_suspend_depth != 0) {
+        priv->sync_suspend_depth--;
+    }
+    spin_unlock_irqrestore(&priv->lock, flags);
 }
 
 void persistent_lfs_store_destroy(struct blkdev *dev)
