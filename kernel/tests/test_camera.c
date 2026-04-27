@@ -917,8 +917,26 @@ _Static_assert(offsetof(struct capture_csi_stream_set_config_req, error_config) 
  * Per L4T `l4t-camrtc-capture.h:369/37/383`. */
 _Static_assert(sizeof(struct camrtc_csi_stream_config) == 16,
     "camrtc_csi_stream_config must be exactly 16 bytes (RCE wire format)");
+_Static_assert(offsetof(struct camrtc_csi_stream_config, stream_id) == 0,
+    "csi_stream_config.stream_id must be at offset 0");
+_Static_assert(offsetof(struct camrtc_csi_stream_config, csi_port) == 4,
+    "csi_stream_config.csi_port must be at offset 4");
+_Static_assert(offsetof(struct camrtc_csi_stream_config, virtual_channel) == 8,
+    "csi_stream_config.virtual_channel must be at offset 8");
 _Static_assert(sizeof(struct camrtc_syncpoint_info) == 24,
     "camrtc_syncpoint_info must be exactly 24 bytes (RCE wire format)");
+_Static_assert(offsetof(struct camrtc_syncpoint_info, id) == 0,
+    "syncpoint_info.id must be at offset 0");
+_Static_assert(offsetof(struct camrtc_syncpoint_info, threshold) == 4,
+    "syncpoint_info.threshold must be at offset 4");
+_Static_assert(offsetof(struct camrtc_syncpoint_info, gos_sid) == 8,
+    "syncpoint_info.gos_sid must be at offset 8");
+_Static_assert(offsetof(struct camrtc_syncpoint_info, gos_index) == 9,
+    "syncpoint_info.gos_index must be at offset 9");
+_Static_assert(offsetof(struct camrtc_syncpoint_info, gos_offset) == 10,
+    "syncpoint_info.gos_offset must be at offset 10");
+_Static_assert(offsetof(struct camrtc_syncpoint_info, shim_addr) == 16,
+    "syncpoint_info.shim_addr must be at offset 16 (compiler-padded after pad_)");
 _Static_assert(VI_NUM_GOS_TABLES == 12u,
     "VI_NUM_GOS_TABLES drift — capture_channel_config.vi_gos_tables array length");
 _Static_assert(sizeof(struct camrtc_capture_channel_config) == 272,
@@ -929,6 +947,12 @@ _Static_assert(sizeof(struct camrtc_capture_channel_setup_req) == 272,
     "camrtc_capture_channel_setup_req wraps channel_config (272 B)");
 _Static_assert(sizeof(struct camrtc_capture_channel_setup_resp) == 16,
     "camrtc_capture_channel_setup_resp must be exactly 16 bytes (RCE wire format)");
+_Static_assert(offsetof(struct camrtc_capture_channel_setup_resp, result) == 0,
+    "channel_setup_resp.result must be at offset 0");
+_Static_assert(offsetof(struct camrtc_capture_channel_setup_resp, channel_id) == 4,
+    "channel_setup_resp.channel_id must be at offset 4");
+_Static_assert(offsetof(struct camrtc_capture_channel_setup_resp, vi_channel_mask) == 8,
+    "channel_setup_resp.vi_channel_mask must be at offset 8");
 _Static_assert(offsetof(struct camrtc_capture_channel_config, vi_channel_mask) == 16,
     "vi_channel_mask must be at offset 16");
 _Static_assert(offsetof(struct camrtc_capture_channel_config, csi_stream) == 32,
@@ -967,8 +991,12 @@ _Static_assert(CAPTURE_CHANNEL_FLAG_CSI == 0x10000u,
  * + pad). Per L4T `l4t-camrtc-capture-messages.h:905` and 918. */
 _Static_assert(sizeof(struct camrtc_capture_request_req) == 8,
     "camrtc_capture_request_req must be exactly 8 bytes (RCE wire format)");
+_Static_assert(offsetof(struct camrtc_capture_request_req, buffer_index) == 0,
+    "capture_request_req.buffer_index must be at offset 0");
 _Static_assert(sizeof(struct camrtc_capture_status_ind) == 8,
     "camrtc_capture_status_ind must be exactly 8 bytes (RCE wire format)");
+_Static_assert(offsetof(struct camrtc_capture_status_ind, buffer_index) == 0,
+    "capture_status_ind.buffer_index must be at offset 0");
 _Static_assert(CAPTURE_REQUEST_REQ == 0x01u,
     "CAPTURE_REQUEST_REQ opcode drift (L4T msg id)");
 _Static_assert(CAPTURE_STATUS_IND == 0x02u,
