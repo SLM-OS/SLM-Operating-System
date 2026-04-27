@@ -15,30 +15,18 @@
 #include "camrtc.h"
 #include "camrtc_channels.h"
 #include "camrtc_ivc.h"
+#include "camrtc_layout.h"
 #include "debug.h"
 #include "platform.h"
 
-/* CH_SETUP geometry mirrored from camrtc.c. The CH_SETUP region is
- * laid out as TLV (4 KB) + capture-control rx + tx + capture rx +
- * tx, with rx_iova at +CAMRTC_IVC_CONFIG_SIZE and successive queues
- * appended in declaration order. The control-channel rx/tx IOVAs
- * are computed locally; the capture-channel IOVAs come from
+/* CH_SETUP geometry comes from `camrtc_layout.h`, shared with
+ * `camrtc.c`. The control-channel rx/tx IOVAs are computed locally
+ * (`region_phys + CAMRTC_IVC_CONFIG_SIZE` and one queue further);
+ * the capture-channel IOVAs come from
  * `camrtc_ch_setup_capture_{rx,tx}_iova` accessors so this file
  * doesn't have to track the queue-size arithmetic. */
-#define CAPTURE_CTRL_NFRAMES      64u
-#define CAPTURE_CTRL_FRAME_SIZE   320u
-#define CAPTURE_CTRL_GROUP        1u
 #define CAPTURE_CTRL_QUEUE_BYTES \
-    (TEGRA_IVC_HEADER_SIZE + CAPTURE_CTRL_NFRAMES * CAPTURE_CTRL_FRAME_SIZE)
-
-/* "capture" channel parameters — match camrtc.c's
- * CAMRTC_CAP_{NFRAMES,FRAME_SIZE,GROUP}. Local copies (rather than
- * a shared header) because both files derive from the same L4T DT
- * fragment and changing one without the other would corrupt the
- * region layout — the static_asserts in test_camera.c pin both. */
-#define CAPTURE_CAP_NFRAMES       64u
-#define CAPTURE_CAP_FRAME_SIZE    64u
-#define CAPTURE_CAP_GROUP         1u
+    (TEGRA_IVC_HEADER_SIZE + CAMRTC_CTRL_NFRAMES * CAMRTC_CTRL_FRAME_SIZE)
 
 /* ---- Module state ---- */
 
@@ -81,9 +69,9 @@ int camrtc_capture_init(void)
     uintptr_t cap_tx_iova  = camrtc_ch_setup_capture_tx_iova();
 
     rc = camrtc_ivc_init(&g_ctrl_chan, ctrl_rx_iova, ctrl_tx_iova,
-                         CAPTURE_CTRL_NFRAMES,
-                         CAPTURE_CTRL_FRAME_SIZE,
-                         CAPTURE_CTRL_GROUP);
+                         CAMRTC_CTRL_NFRAMES,
+                         CAMRTC_CTRL_FRAME_SIZE,
+                         CAMRTC_CTRL_GROUP);
     if (rc != 0) {
         WARN("capture_init: ivc_init(capture-control) failed rc=%d",
              rc);
@@ -91,9 +79,9 @@ int camrtc_capture_init(void)
     }
 
     rc = camrtc_ivc_init(&g_cap_chan, cap_rx_iova, cap_tx_iova,
-                         CAPTURE_CAP_NFRAMES,
-                         CAPTURE_CAP_FRAME_SIZE,
-                         CAPTURE_CAP_GROUP);
+                         CAMRTC_CAP_NFRAMES,
+                         CAMRTC_CAP_FRAME_SIZE,
+                         CAMRTC_CAP_GROUP);
     if (rc != 0) {
         WARN("capture_init: ivc_init(capture) failed rc=%d", rc);
         return rc;
@@ -151,7 +139,7 @@ int camrtc_capture_phy_stream_open(uint32_t stream_id,
      * polls instead of waiting for an interrupt. 1 s ceiling
      * matches the L4T `cmd_timeout` default and is the same
      * upper bound `camrtc_send_msg` uses for CH_SETUP. */
-    uint8_t resp_buf[CAPTURE_CTRL_FRAME_SIZE];
+    uint8_t resp_buf[CAMRTC_CTRL_FRAME_SIZE];
     uint32_t resp_len = 0;
     rc = camrtc_ivc_recv_wait(&g_ctrl_chan, resp_buf, sizeof(resp_buf),
                               &resp_len, 1000000u);
@@ -247,7 +235,7 @@ int camrtc_capture_csi_stream_set_config(uint32_t stream_id,
         return -2;
     }
 
-    uint8_t resp_buf[CAPTURE_CTRL_FRAME_SIZE];
+    uint8_t resp_buf[CAMRTC_CTRL_FRAME_SIZE];
     uint32_t resp_len = 0;
     rc = camrtc_ivc_recv_wait(&g_ctrl_chan, resp_buf, sizeof(resp_buf),
                               &resp_len, 1000000u);

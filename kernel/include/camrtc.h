@@ -192,6 +192,11 @@ int camrtc_diag_dump(void);
  *   -3  RCE rejected the setup — see WARN log for the
  *       RTCPU_CH_ERR_* code (128..132 per camrtc_channels.h).
  *
+ * Idempotent: subsequent calls after a successful one return 0
+ * immediately without re-sending CH_SETUP — RCE returns
+ * RTCPU_CH_ERR_ALREADY (129) for a duplicate bind, which would
+ * make a partial-init recovery in the caller fail permanently.
+ *
  * Name kept as `_capture_control` for backward compatibility with the
  * existing `csidiag` shell command and the `camrtc_capture_init`
  * call site; the function actually binds *both* channels.

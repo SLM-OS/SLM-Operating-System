@@ -36,6 +36,7 @@
 
 #include "bpmp.h"
 #include "camrtc_channels.h"
+#include "camrtc_layout.h"
 #include "debug.h"
 #include "platform.h"
 #include "tegra234_clocks.h"
@@ -573,43 +574,11 @@ int camrtc_diag_dump(void)
 
 /* ---- CH_SETUP: capture-control IVC channel ---- */
 
-/* Wire-format channel parameters for the IMX219 capture path.
- *
- * Two channels share the same group=1 SS[0] notify bit but have
- * different rx/tx ring geometry:
- *
- *   capture-control (`tegra234-camera.dtsi` ivccontrol@3):
- *     nvidia,service     = "capture-control"
- *     nvidia,frame-count = <64>
- *     nvidia,frame-size  = <320>
- *
- *   capture (`tegra234-camera.dtsi` ivccapture@4):
- *     nvidia,service     = "capture"
- *     nvidia,frame-count = <64>     ← SLM-OS uses 64 (L4T uses 512)
- *     nvidia,frame-size  = <64>
- *
- * Both channels are bound by the same `CAMRTC_HSP_CH_SETUP` message:
- * RCE walks the TLV array in the region's first 4 KB and binds each
- * (group, service) tuple to its rx/tx ring IOVAs. SLM-OS uses 64
- * frames for the capture ring instead of L4T's 512 because we only
- * issue single-shot requests today; growing this when streaming
- * lands is a one-line change that fits inside the existing 64 KB
- * region carveout. */
-#define CAMRTC_GROUP_CAPTURE     1u
-#define CAMRTC_VERSION           0u
-
-#define CAMRTC_CTRL_GROUP        CAMRTC_GROUP_CAPTURE
-#define CAMRTC_CTRL_NFRAMES      64u
-#define CAMRTC_CTRL_FRAME_SIZE   320u
-#define CAMRTC_CTRL_VERSION      CAMRTC_VERSION
-
-#define CAMRTC_CAP_GROUP         CAMRTC_GROUP_CAPTURE
-#define CAMRTC_CAP_NFRAMES       64u
-#define CAMRTC_CAP_FRAME_SIZE    64u
-#define CAMRTC_CAP_VERSION       CAMRTC_VERSION
-
-/* Per-direction queue: header (128 B) + nframes * frame_size. Both
- * directions of a single channel are equal-sized in this protocol. */
+/* IVC channel geometry (CAMRTC_GROUP_CAPTURE / CAMRTC_CTRL_* /
+ * CAMRTC_CAP_*) lives in `kernel/include/camrtc_layout.h` so it
+ * stays in lockstep with `kernel/drivers/camrtc/camrtc_capture.c`.
+ * Per-direction queue sizes are derived locally because they
+ * depend on TEGRA_IVC_HEADER_SIZE from `camrtc_channels.h`. */
 #define CAMRTC_CTRL_QUEUE_BYTES  \
     (TEGRA_IVC_HEADER_SIZE + CAMRTC_CTRL_NFRAMES * CAMRTC_CTRL_FRAME_SIZE)
 #define CAMRTC_CAP_QUEUE_BYTES   \
@@ -677,6 +646,18 @@ int camrtc_ch_setup_capture_control(void)
     if (!g_initialised) {
         WARN("camrtc: ch_setup called before camrtc_init");
         return -2;
+    }
+
+    /* Idempotent — once RCE has bound the channels for this
+     * region, sending another `CAMRTC_HSP_CH_SETUP` with the same
+     * IOVA returns RTCPU_CH_ERR_ALREADY (129), which would make
+     * `camrtc_capture_init` fail permanently after a partial-init
+     * recovery (e.g. capture-control's ivc_init succeeded but the
+     * second ivc_init for capture timed out). The published region
+     * IOVA lives in `g_ch_setup_region_phys`; non-zero means RCE
+     * has bound this region and we can short-circuit. */
+    if (g_ch_setup_region_phys != 0u) {
+        return 0;
     }
 
     /* Region lives at a fixed physical address in RCE's VM1 IOVA
