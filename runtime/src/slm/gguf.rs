@@ -1128,7 +1128,7 @@ impl<'a> Q4KBlockView<'a> {
 /// handled, but with denormal flushing rounded to the nearest float
 /// — fine for GGUF metadata where we just need the f16 scale value
 /// to round-trip with bit equality.
-fn f16_to_f32(bits: u16) -> f32 {
+pub fn f16_to_f32(bits: u16) -> f32 {
     let sign = (bits >> 15) & 0x1;
     let exp = (bits >> 10) & 0x1F;
     let mant = bits & 0x3FF;
@@ -1159,6 +1159,92 @@ fn f16_to_f32(bits: u16) -> f32 {
         ((sign as u32) << 31) | (f32_exp << 23) | ((mant as u32) << 13)
     };
     f32::from_bits(f32_bits)
+}
+
+/// Convert an `f32` to an IEEE-754 binary16 bit pattern.
+///
+/// Round-to-nearest-even for the mantissa, with subnormal flush handling
+/// and explicit Inf / NaN passthrough. Pure software (same #141 motivation
+/// as `f16_to_f32`).
+///
+/// Used by the M4 transformer ops to write FP16 storage from FP32
+/// accumulators.
+pub fn f32_to_f16(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 31) & 0x1) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32;
+    let mant = bits & 0x007F_FFFF;
+
+    if exp == 0xFF {
+        // Inf or NaN. Preserve sign; collapse mantissa into the top
+        // 10 bits. A zero mantissa stays zero (Inf); a non-zero
+        // mantissa is forced non-zero (NaN) so we don't accidentally
+        // turn a NaN into an infinity.
+        let mant_h = (mant >> 13) as u16;
+        let mant_h = if mant != 0 && mant_h == 0 { 1 } else { mant_h };
+        return (sign << 15) | (0x1F << 10) | (mant_h & 0x3FF);
+    }
+
+    // Unbias f32, re-bias for f16. f16 exponent bias is 15.
+    let unbiased = exp - 127;
+    let f16_exp = unbiased + 15;
+
+    if f16_exp >= 0x1F {
+        // Overflow → signed infinity.
+        return (sign << 15) | (0x1F << 10);
+    }
+
+    if f16_exp <= 0 {
+        // Subnormal or underflow. Implicit 1.<mant> needs to be
+        // shifted into a denormal mantissa. f16 subnormal exponent
+        // is 0; the shift count grows as the value gets smaller.
+        if f16_exp < -10 {
+            // Even the implicit leading 1 has been shifted out —
+            // result rounds to signed zero.
+            return sign << 15;
+        }
+        // Restore the implicit 1, then shift into the f16 subnormal
+        // range. Round-to-nearest-even on the dropped bits.
+        let mant_with_implicit = mant | 0x0080_0000;
+        // Shift count: we need to drop (1 - f16_exp) extra bits
+        // beyond the normal 13-bit truncation.
+        let shift = 14 - f16_exp; // i32, in [14, 24]
+        let shift_u = shift as u32;
+        let truncated = mant_with_implicit >> shift_u;
+        // Round-to-nearest-even using the bit just below the cut
+        // and the sticky bits beyond it.
+        let round_bit = (mant_with_implicit >> (shift_u - 1)) & 0x1;
+        let sticky_mask = (1u32 << (shift_u - 1)).wrapping_sub(1);
+        let sticky = (mant_with_implicit & sticky_mask) != 0;
+        let mut out_mant = truncated as u16;
+        if round_bit == 1 && (sticky || (truncated & 0x1) == 1) {
+            out_mant = out_mant.wrapping_add(1);
+        }
+        // out_mant could overflow into the exponent on the carry —
+        // that's the natural transition from subnormal to the
+        // smallest normal, which is what we want.
+        return (sign << 15) | out_mant;
+    }
+
+    // Normal range. Truncate 13 mantissa bits with round-to-nearest-even.
+    let truncated = (mant >> 13) as u16;
+    let round_bit = (mant >> 12) & 0x1;
+    let sticky = (mant & 0x0FFF) != 0;
+    let mut out_mant = truncated;
+    let mut out_exp = f16_exp as u16;
+    if round_bit == 1 && (sticky || (truncated & 0x1) == 1) {
+        out_mant = out_mant.wrapping_add(1);
+        // Mantissa carry → bump exponent.
+        if out_mant == 0x0400 {
+            out_mant = 0;
+            out_exp += 1;
+            if out_exp >= 0x1F {
+                // Carry pushed us into infinity.
+                return (sign << 15) | (0x1F << 10);
+            }
+        }
+    }
+    (sign << 15) | (out_exp << 10) | (out_mant & 0x3FF)
 }
 
 // ---------------------------------------------------------------------------
@@ -1695,6 +1781,53 @@ mod tests {
         assert!(f16_to_f32(0xFC00).is_infinite() && f16_to_f32(0xFC00).is_sign_negative());
         // NaN
         assert!(f16_to_f32(0x7E00).is_nan());
+    }
+
+    #[test]
+    fn f32_to_f16_well_known_values() {
+        // Exact-representable values must round-trip bit-perfectly.
+        assert_eq!(f32_to_f16(0.0), 0x0000);
+        assert_eq!(f32_to_f16(-0.0), 0x8000);
+        assert_eq!(f32_to_f16(1.0), 0x3C00);
+        assert_eq!(f32_to_f16(-1.0), 0xBC00);
+        assert_eq!(f32_to_f16(2.0), 0x4000);
+        assert_eq!(f32_to_f16(0.5), 0x3800);
+        // Overflow → infinity (smallest power of two outside normal f16).
+        assert_eq!(f32_to_f16(1.0e9), 0x7C00);
+        assert_eq!(f32_to_f16(-1.0e9), 0xFC00);
+        // f32 inf passes through.
+        assert_eq!(f32_to_f16(f32::INFINITY), 0x7C00);
+        assert_eq!(f32_to_f16(f32::NEG_INFINITY), 0xFC00);
+        // f32 NaN → some f16 NaN (any non-zero mantissa with all-ones exp).
+        let nan_h = f32_to_f16(f32::NAN);
+        assert_eq!(nan_h & 0x7C00, 0x7C00);
+        assert!(nan_h & 0x03FF != 0);
+        // Underflow to zero.
+        assert_eq!(f32_to_f16(1.0e-30), 0x0000);
+    }
+
+    #[test]
+    fn f16_round_trip_for_normal_range() {
+        // Every normal f16 bit pattern except NaN must round-trip
+        // exactly through f16 → f32 → f16.
+        for bits in 0u16..=0xFFFF {
+            let exp = (bits >> 10) & 0x1F;
+            let mant = bits & 0x3FF;
+            // Skip NaN payloads — only Inf (mant == 0) survives the
+            // collapse to a canonical NaN bit pattern.
+            if exp == 0x1F && mant != 0 {
+                continue;
+            }
+            let f = f16_to_f32(bits);
+            // Canonicalize -0.0 to 0x8000 explicitly (round-trip is
+            // already correct for both signed zeros).
+            let back = f32_to_f16(f);
+            assert_eq!(
+                back, bits,
+                "round trip failed: bits=0x{:04x} f={} back=0x{:04x}",
+                bits, f, back
+            );
+        }
     }
 
     // -- Architecture validator (M1.3) -------------------------------
