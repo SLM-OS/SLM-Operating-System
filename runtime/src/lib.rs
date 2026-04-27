@@ -4625,9 +4625,17 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
 /// satisfies that.
 ///
 /// The output side reuses an internal static buffer so the
-/// kernel-task stack stays small. Returns 0 on success, negative
-/// on inference failure (-1 model not found, -2 NULL/empty input,
-/// -3 inference engine error).
+/// kernel-task stack stays small.
+///
+/// Return contract:
+///   >= 0  : argmax class index (0..output_count-1). The detailed
+///           logits-per-bucket dump still goes to UART; the C
+///           caller prints a session-visible "predicted: N" line
+///           from this return value via shell_printf so telnet
+///           operators can see the result without serial access.
+///   -1    : model_index not found in registry
+///   -2    : NULL / empty input
+///   -3    : inference engine error
 #[no_mangle]
 pub extern "C" fn rust_infer_buf_and_print(
     model_index: u32,
@@ -4702,7 +4710,7 @@ pub extern "C" fn rust_infer_buf_and_print(
         uart_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
     }
 
-    0
+    argmax as i32
 }
 
 /// Run inference engine tests.
