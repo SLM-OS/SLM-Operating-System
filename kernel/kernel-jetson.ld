@@ -121,8 +121,18 @@ SECTIONS
     }
 }
 
-/* Sanity checks */
-ASSERT(__kernel_end < 0x81000000, "Kernel image too large!")
+/* Sanity checks
+ *
+ * 32 MB image ceiling. The original 16 MB cap (0x81000000) was a
+ * defensive bound from before AI_SCHED's weight blobs (~6 MB across
+ * MLP + PPO) and the accumulated camera / network / telemetry
+ * drivers pushed the bare-metal image past 13 MB; the canonical
+ * demo build (`AI_SCHED=ON` + networking + GA10B firmware embed)
+ * now lands around 18-20 MB. 32 MB matches the headroom Pi 5
+ * already runs with (cap = 64 MB), stays well below the OP-TEE
+ * carveout at 0xBE000000, and leaves room for further driver work
+ * before the next bump is needed. */
+ASSERT(__kernel_end < 0x82000000, "Kernel image too large!")
 
 /* PE/COFF invariants (SectionAlignment=0x10000, FileAlignment=0x200).
  * These must hold for UEFI to accept the PE/COFF image built from
