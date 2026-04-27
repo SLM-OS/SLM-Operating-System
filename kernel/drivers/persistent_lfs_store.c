@@ -16,10 +16,23 @@
 
 #define PERSISTENT_LFS_STORE_TMP_PATH "0:/slmstore/files.lfs.tmp"
 #define PERSISTENT_LFS_STORE_BAK_PATH "0:/slmstore/files.lfs.bak"
+#define PERSISTENT_LFS_DELTA_PATH     "0:/slmstore/files.lfs.delta"
+#define PERSISTENT_LFS_DELTA_TMP_PATH "0:/slmstore/files.lfs.delta.tmp"
+#define PERSISTENT_LFS_DELTA_BAK_PATH "0:/slmstore/files.lfs.delta.bak"
 #define PERSISTENT_LFS_STORE_DIR      "0:/slmstore"
 #define PERSISTENT_LFS_BLOCK_SIZE     4096u
 #define PERSISTENT_LFS_DEFAULT_BYTES  (8u * 1024u * 1024u)
 #define PERSISTENT_LFS_FAT_VOL        "0:"
+#define PERSISTENT_LFS_DELTA_MAGIC    0x3146444Cu /* "LDF1" */
+
+struct persistent_lfs_delta_header {
+    uint32_t magic;
+    uint32_t image_bytes;
+    uint32_t block_size;
+    uint32_t first_block;
+    uint32_t block_count;
+    uint32_t reserved[3];
+};
 
 struct persistent_lfs_store_priv {
     uint8_t *data;
@@ -28,8 +41,11 @@ struct persistent_lfs_store_priv {
     size_t desc_pages;
     bool dirty;
     bool backing_valid;
+    bool journal_valid;
     uint32_t dirty_first_block;
     uint32_t dirty_last_block;
+    uint32_t journal_first_block;
+    uint32_t journal_last_block;
     spinlock_t lock;
 };
 
@@ -112,10 +128,12 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
     bool mounted = false;
     bool temp_open = false;
     bool full_rewrite = false;
+    bool journal_valid = false;
     uint32_t first_block = 0;
     uint32_t last_block = 0;
     size_t first_offset = 0;
     size_t flush_bytes = 0;
+    struct persistent_lfs_delta_header delta_hdr;
 
     irq_flags_t flags = spin_lock_irqsave(&priv->lock);
     if (!priv->dirty) {
@@ -125,6 +143,15 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
     first_block = priv->dirty_first_block;
     last_block = priv->dirty_last_block;
     full_rewrite = !priv->backing_valid;
+    journal_valid = priv->journal_valid;
+    if (!full_rewrite && journal_valid) {
+        if (priv->journal_first_block < first_block) {
+            first_block = priv->journal_first_block;
+        }
+        if (priv->journal_last_block > last_block) {
+            last_block = priv->journal_last_block;
+        }
+    }
     spin_unlock_irqrestore(&priv->lock, flags);
 
     first_offset = (size_t)first_block * dev->block_size;
@@ -149,17 +176,26 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
         goto fail;
     }
 
-    if (!full_rewrite && f_stat(PERSISTENT_LFS_STORE_PATH, &fno) == FR_OK &&
-        fno.fsize == priv->image_bytes) {
-        res = f_open(&fp, PERSISTENT_LFS_STORE_PATH, FA_WRITE);
+    if (!full_rewrite) {
+        memset(&delta_hdr, 0, sizeof(delta_hdr));
+        delta_hdr.magic = PERSISTENT_LFS_DELTA_MAGIC;
+        delta_hdr.image_bytes = (uint32_t)priv->image_bytes;
+        delta_hdr.block_size = dev->block_size;
+        delta_hdr.first_block = first_block;
+        delta_hdr.block_count = last_block - first_block + 1u;
+
+        (void)f_unlink(PERSISTENT_LFS_DELTA_TMP_PATH);
+        res = f_open(&fp, PERSISTENT_LFS_DELTA_TMP_PATH,
+                     FA_WRITE | FA_CREATE_ALWAYS);
         if (res != FR_OK) {
             goto fail;
         }
         temp_open = true;
-        res = f_lseek(&fp, first_offset);
-        if (res != FR_OK) {
+        res = f_write(&fp, &delta_hdr, sizeof(delta_hdr), &written);
+        if (res != FR_OK || written != sizeof(delta_hdr)) {
             goto fail;
         }
+
         irq_flags_t write_flags = spin_lock_irqsave(&priv->lock);
         const uint8_t *data = priv->data + first_offset;
         size_t remaining = flush_bytes;
@@ -179,6 +215,24 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
         if (res != FR_OK) {
             goto fail;
         }
+
+        (void)f_unlink(PERSISTENT_LFS_DELTA_BAK_PATH);
+        if (f_stat(PERSISTENT_LFS_DELTA_PATH, &fno) == FR_OK) {
+            res = f_rename(PERSISTENT_LFS_DELTA_PATH,
+                           PERSISTENT_LFS_DELTA_BAK_PATH);
+            if (res != FR_OK) {
+                goto fail;
+            }
+        }
+        res = f_rename(PERSISTENT_LFS_DELTA_TMP_PATH, PERSISTENT_LFS_DELTA_PATH);
+        if (res != FR_OK) {
+            if (f_stat(PERSISTENT_LFS_DELTA_BAK_PATH, &fno) == FR_OK) {
+                (void)f_rename(PERSISTENT_LFS_DELTA_BAK_PATH,
+                               PERSISTENT_LFS_DELTA_PATH);
+            }
+            goto fail;
+        }
+        (void)f_unlink(PERSISTENT_LFS_DELTA_BAK_PATH);
     } else {
         (void)f_unlink(PERSISTENT_LFS_STORE_TMP_PATH);
         res = f_open(&fp, PERSISTENT_LFS_STORE_TMP_PATH,
@@ -225,6 +279,8 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
             goto fail;
         }
         (void)f_unlink(PERSISTENT_LFS_STORE_BAK_PATH);
+        (void)f_unlink(PERSISTENT_LFS_DELTA_PATH);
+        (void)f_unlink(PERSISTENT_LFS_DELTA_BAK_PATH);
     }
 
     (void)f_mount(NULL, PERSISTENT_LFS_FAT_VOL, 0);
@@ -234,6 +290,11 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
     flags = spin_lock_irqsave(&priv->lock);
     priv->dirty = false;
     priv->backing_valid = true;
+    priv->journal_valid = !full_rewrite;
+    if (priv->journal_valid) {
+        priv->journal_first_block = first_block;
+        priv->journal_last_block = last_block;
+    }
     spin_unlock_irqrestore(&priv->lock, flags);
     return BLKDEV_OK;
 
@@ -242,6 +303,7 @@ fail:
         (void)f_close(&fp);
     }
     (void)f_unlink(PERSISTENT_LFS_STORE_TMP_PATH);
+    (void)f_unlink(PERSISTENT_LFS_DELTA_TMP_PATH);
     if (mounted) {
         (void)f_mount(NULL, PERSISTENT_LFS_FAT_VOL, 0);
     }
@@ -295,8 +357,11 @@ static struct blkdev *persistent_lfs_store_alloc(const char *name, size_t image_
     priv->desc_pages = desc_pages;
     priv->dirty = false;
     priv->backing_valid = false;
+    priv->journal_valid = false;
     priv->dirty_first_block = 0;
     priv->dirty_last_block = 0;
+    priv->journal_first_block = 0;
+    priv->journal_last_block = 0;
     spin_init(&priv->lock);
 
     if (uart_snprintf(dev->name, sizeof(dev->name), "%s", name) < 0) {
@@ -326,6 +391,7 @@ struct blkdev *persistent_lfs_store_create(const char *name,
     UINT got = 0;
     bool mounted = false;
     bool needs_format = false;
+    bool have_primary = false;
     size_t image_bytes = PERSISTENT_LFS_DEFAULT_BYTES;
 
     if (needs_format_out) {
@@ -347,6 +413,7 @@ struct blkdev *persistent_lfs_store_create(const char *name,
     mounted = true;
 
     if (f_stat(PERSISTENT_LFS_STORE_PATH, &fno) == FR_OK) {
+        have_primary = true;
         if (fno.fsize >= PERSISTENT_LFS_BLOCK_SIZE &&
             (fno.fsize % PERSISTENT_LFS_BLOCK_SIZE) == 0) {
             image_bytes = fno.fsize;
@@ -366,6 +433,9 @@ struct blkdev *persistent_lfs_store_create(const char *name,
 
     if (!needs_format) {
         struct persistent_lfs_store_priv *priv = store_dev->priv;
+        struct persistent_lfs_delta_header delta_hdr;
+        bool loaded_delta = false;
+
         res = f_open(&fp, PERSISTENT_LFS_STORE_PATH, FA_READ);
         if (res != FR_OK) {
             needs_format = true;
@@ -385,6 +455,62 @@ struct blkdev *persistent_lfs_store_create(const char *name,
             (void)f_close(&fp);
             if (!needs_format) {
                 priv->backing_valid = true;
+            }
+        }
+
+        if (!needs_format && have_primary) {
+            const char *delta_path = PERSISTENT_LFS_DELTA_PATH;
+
+            if (f_stat(delta_path, &fno) != FR_OK &&
+                f_stat(PERSISTENT_LFS_DELTA_BAK_PATH, &fno) == FR_OK) {
+                delta_path = PERSISTENT_LFS_DELTA_BAK_PATH;
+            }
+
+            if (f_stat(delta_path, &fno) == FR_OK) {
+                res = f_open(&fp, delta_path, FA_READ);
+                if (res == FR_OK) {
+                    res = f_read(&fp, &delta_hdr, sizeof(delta_hdr), &got);
+                    if (res == FR_OK &&
+                        got == sizeof(delta_hdr) &&
+                        delta_hdr.magic == PERSISTENT_LFS_DELTA_MAGIC &&
+                        delta_hdr.image_bytes == priv->image_bytes &&
+                        delta_hdr.block_size == store_dev->block_size &&
+                        delta_hdr.block_count > 0 &&
+                        delta_hdr.first_block < store_dev->block_count &&
+                        delta_hdr.block_count <= store_dev->block_count &&
+                        delta_hdr.first_block <=
+                            store_dev->block_count - delta_hdr.block_count &&
+                        fno.fsize == sizeof(delta_hdr) +
+                                     (FSIZE_t)delta_hdr.block_count * store_dev->block_size) {
+                        size_t remaining =
+                            (size_t)delta_hdr.block_count * store_dev->block_size;
+                        uint8_t *dst = priv->data +
+                                       (size_t)delta_hdr.first_block * store_dev->block_size;
+                        while (remaining > 0) {
+                            UINT chunk = remaining > 32768u ? 32768u : (UINT)remaining;
+                            res = f_read(&fp, dst, chunk, &got);
+                            if (res != FR_OK || got != chunk) {
+                                break;
+                            }
+                            dst += chunk;
+                            remaining -= chunk;
+                        }
+                        if (res == FR_OK && remaining == 0) {
+                            priv->journal_valid = true;
+                            priv->journal_first_block = delta_hdr.first_block;
+                            priv->journal_last_block =
+                                delta_hdr.first_block + delta_hdr.block_count - 1u;
+                            loaded_delta = true;
+                        }
+                    }
+                    (void)f_close(&fp);
+                }
+            }
+
+            if (!loaded_delta) {
+                priv->journal_valid = false;
+                priv->journal_first_block = 0;
+                priv->journal_last_block = 0;
             }
         }
     }

@@ -1158,10 +1158,16 @@ static void bcm2712_aon_gpio_drive_sd_regulators(void)
 
 struct blkdev *sdhci_create_bcm2712(void)
 {
+    int rc;
+
     /* Linux enables the EMMC gate before probing and then programs the
      * BCM2712 cfg window before touching the generic SDHCI host path. */
     bcm2712_aon_gpio_drive_sd_regulators();
-    (void)bcm_mailbox_set_clock_state(BCM_CLOCK_EMMC, true);
+    rc = bcm_mailbox_set_clock_state(BCM_CLOCK_EMMC, true);
+    if (rc < 0) {
+        ERROR("sdhci: bcm2712 emmc clock enable failed (%d)", rc);
+        return NULL;
+    }
     bcm2712_emmc2_cfginit();
     return sdhci_create("emmc2", BCM2712_EMMC2_BASE);
 }
