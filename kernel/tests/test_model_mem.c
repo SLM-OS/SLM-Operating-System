@@ -13,9 +13,16 @@
  * Constants (must match Rust side)
  * ============================================================================ */
 
-#define MODEL_BLOCK_SIZE    (2 * 1024 * 1024)  /* 2 MB */
-#define WEIGHT_POOL_BLOCKS  128                 /* 256 MB / 2 MB */
-#define WORKSPACE_POOL_BLOCKS 64                /* 128 MB / 2 MB */
+#define MODEL_BLOCK_SIZE      (2 * 1024 * 1024)  /* 2 MB */
+/*
+ * Pool sizes are platform-specific (set in <config.h>) but the test
+ * kernel always builds at the QEMU defaults — `make test` runs under
+ * QEMU regardless of `make kernel PLATFORM=...`. Derive the block
+ * counts from MODEL_MEM_*_MB so a future cross-platform test runner
+ * picks up the new sizing automatically.
+ */
+#define WEIGHT_POOL_BLOCKS    (MODEL_MEM_WEIGHT_MB / 2u)
+#define WORKSPACE_POOL_BLOCKS (MODEL_MEM_WORKSPACE_MB / 2u)
 
 /* ============================================================================
  * FFI Declarations for Model Memory
@@ -234,7 +241,7 @@ static void test_pool_exhaustion(void)
     int allocated = 0;
 
     /* Allocate until pool is exhausted */
-    for (int i = 0; i < WEIGHT_POOL_BLOCKS + 2; i++) {
+    for (unsigned int i = 0; i < WEIGHT_POOL_BLOCKS + 2; i++) {
         handles[i] = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
         if (handle_is_null(handles[i])) {
             break;
@@ -247,7 +254,7 @@ static void test_pool_exhaustion(void)
          * existing blocks on OOM. Every request succeeds until the
          * test array is full, and the last handle points at a freshly
          * allocated slot whose predecessor was evicted. */
-        TEST_ASSERT_EQUAL_INT(WEIGHT_POOL_BLOCKS + 2, allocated);
+        TEST_ASSERT_EQUAL_INT((int)(WEIGHT_POOL_BLOCKS + 2u), allocated);
         /* One of the original handles is now stale (its slot was the
          * eviction victim). Freeing it returns an error — we tolerate
          * that and free the rest. */
@@ -256,7 +263,7 @@ static void test_pool_exhaustion(void)
         }
     } else {
         /* Classic behaviour: pool fills, subsequent allocs fail. */
-        TEST_ASSERT_EQUAL_INT(WEIGHT_POOL_BLOCKS, allocated);
+        TEST_ASSERT_EQUAL_INT((int)WEIGHT_POOL_BLOCKS, allocated);
         ModelHandle overflow = rust_model_alloc_weights(MODEL_BLOCK_SIZE);
         TEST_ASSERT_TRUE(handle_is_null(overflow));
         for (int i = 0; i < allocated; i++) {
