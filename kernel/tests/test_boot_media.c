@@ -12,6 +12,12 @@
  * These tests verify both behaviors against the production code path
  * (not the boot_media_test_set_device override) by injecting a
  * caller-owned ramdisk via boot_media_test_set_create_hook.
+ *
+ * Test isolation: the helpers below use module-scope mutable state
+ * (g_hook_dev, g_hook_call_count). The SLM-OS Unity harness runs
+ * RUN_TEST cases serially on the harness CPU, so this is safe today.
+ * If the harness ever gains parallel execution, these need to move
+ * into a per-test struct or be guarded.
  */
 #include "unity.h"
 #include "../include/blkdev.h"

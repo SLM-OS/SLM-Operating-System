@@ -11,7 +11,13 @@ static unsigned g_boot_media_refs;
 static struct blkdev *g_boot_media_test_dev;
 static unsigned g_boot_media_test_refs;
 
-static boot_media_create_hook_t g_test_create_hook;
+/* `volatile` to match `g_boot_media_creates_allowed`: read in
+ * boot_media_create() outside g_boot_media_lock (the lock is dropped
+ * before boot_media_create runs). Always NULL in production builds;
+ * tests are serialized by the harness so the unlocked read is safe.
+ * The volatile prevents the compiler from caching the value across
+ * the test setter / production read on weakly-ordered ARM64. */
+static boot_media_create_hook_t volatile g_test_create_hook;
 
 static struct blkdev *boot_media_create(void)
 {
@@ -78,8 +84,14 @@ struct blkdev *boot_media_acquire(void)
      * keep-alive ref alongside the caller's ref so refcount never
      * drops to 0 once we've done the first create. boot_media_create()
      * is expensive on Pi 5 (~50 ms settle delay + full SDHCI probe),
-     * so callers that acquire-use-release in tight loops (#414 WIP:
-     * runtime_blob_read_fat_path) should not pay that cost per call. */
+     * so callers that acquire-use-release in tight loops (#414:
+     * runtime_blob_read_fat_path) should not pay that cost per call.
+     *
+     * Race-loser path above: when a second CPU loses the create race,
+     * its `g_boot_media_refs++` increments past this 2 (e.g. to 3 =
+     * keep-alive + winner caller + loser caller). That's correct; the
+     * keep-alive ref is taken once, by the create-winner, regardless
+     * of how many concurrent callers incremented past it. */
     g_boot_media_dev = dev;
     g_boot_media_refs = 2;
     spin_unlock_irqrestore(&g_boot_media_lock, flags);
@@ -135,7 +147,9 @@ void boot_media_test_clear_device(void)
 
 void boot_media_test_set_creates_allowed(bool allowed)
 {
+    irq_flags_t flags = spin_lock_irqsave(&g_boot_media_lock);
     g_boot_media_creates_allowed = allowed;
+    spin_unlock_irqrestore(&g_boot_media_lock, flags);
 }
 
 void boot_media_test_set_create_hook(boot_media_create_hook_t hook)

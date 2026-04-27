@@ -94,6 +94,14 @@ struct blkdev *sdhci_create_qemu_pci(const char *name);
  * Pi 5 cfginit / clock-gate work is in place.
  */
 struct blkdev *sdhci_create_bcm2712(void);
+
+/*
+ * On-demand BCM2712 EMMC2 bring-up for the `emmc-bringup` shell
+ * diagnostic (#414). Always runs the full bring-up sequence,
+ * temporarily clearing the internal skip-bringup gate around the
+ * call. Single-threaded by construction — see sdhci.c.
+ */
+struct blkdev *sdhci_pi5_bringup_now(void);
 #endif
 
 #endif /* SDHCI_H */

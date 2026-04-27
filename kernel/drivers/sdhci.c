@@ -1157,9 +1157,10 @@ static void bcm2712_aon_gpio_drive_sd_regulators(void)
 }
 
 /* Runtime-controllable bring-up gate. Default false (bring-up runs).
- * Tests can flip to true to skip the AXI-touching steps if a future
- * regression makes the controller unreachable again. */
-volatile bool g_sdhci_pi5_skip_bringup = false;
+ * sdhci_pi5_bringup_now() flips this around a single create call for
+ * the emmc-bringup shell diagnostic. Internal to this TU — external
+ * readers / writers would defeat the gate, so no extern. */
+static volatile bool g_sdhci_pi5_skip_bringup = false;
 
 /*
  * Settle delay before the bring-up's first MMIO touch.
@@ -1203,6 +1204,12 @@ struct blkdev *sdhci_create_bcm2712(void)
  * future regression is "hardware state is wrong" (bring-up fails
  * regardless of timing) vs "boot timing puts firmware/peripherals
  * in a transient state" (bring-up works post-shell).
+ *
+ * Single-threaded by construction: only invoked from the shell on
+ * CPU 0 long after boot, when the boot-path bring-up has already
+ * either succeeded or been skipped. The save/restore around the
+ * skip flag is therefore not racy in practice; callers must not
+ * add a second concurrent path without adding a lock.
  */
 struct blkdev *sdhci_pi5_bringup_now(void)
 {

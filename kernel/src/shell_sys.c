@@ -37,6 +37,7 @@
 #include "ncmem.h"
 #include "dtb.h"
 #include "help.h"
+#include "sdhci.h"
 #include "string.h"
 #include "../gpu/gpu.h"
 #include <stdint.h>
@@ -2771,12 +2772,10 @@ int cmd_dtb_dump(int argc, char *argv[])
 }
 
 #if defined(PLATFORM_RASPI5)
-extern struct blkdev *sdhci_pi5_bringup_now(void);
-
-/* WIP-414: trigger the Pi 5 SDHCI bring-up sequence on demand from
- * the shell instead of from the boot path. Lets us discriminate
- * "bring-up fails because hardware state is wrong" from "bring-up
- * fails because boot-time firmware state is wrong." */
+/* #414 diagnostic: trigger the Pi 5 SDHCI bring-up sequence on
+ * demand from the shell instead of from the boot path. Lets us
+ * discriminate "bring-up fails because hardware state is wrong"
+ * from "bring-up fails because boot-time firmware state is wrong." */
 int cmd_emmc_bringup(int argc, char *argv[])
 {
     (void)argc; (void)argv;

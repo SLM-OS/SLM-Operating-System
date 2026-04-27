@@ -147,7 +147,7 @@ const shell_cmd_t builtin_commands[] = {
 #endif
     {"dtb-dump",  cmd_dtb_dump,  "Dump firmware-passed DTB as hex (#414 investigation)",      false, SHELL_CAT_HARDWARE},
 #if defined(PLATFORM_RASPI5)
-    {"emmc-bringup", cmd_emmc_bringup, "Run Pi 5 SDHCI bring-up post-shell (#414 WIP)",       true,  SHELL_CAT_HARDWARE},
+    {"emmc-bringup", cmd_emmc_bringup, "Run Pi 5 SDHCI bring-up on demand (diag for #414)",   true,  SHELL_CAT_HARDWARE},
 #endif
 #if !defined(PLATFORM_X86_64)
     /* x86-64 registers a richer `gpu` command via
