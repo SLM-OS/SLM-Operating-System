@@ -1,0 +1,178 @@
+# Critical Findings — Full Codebase Review
+
+53 critical findings across 8 subsystems. Generated 2026-04-26 from parallel multi-agent review of `kernel/` and `runtime/` (excluding `kernel/lib/` vendored code and `kernel/tests/`).
+
+## Status legend
+
+Each finding is annotated with one of the following after disposition:
+
+- ✅ **Fixed** — defect confirmed, fix applied in this PR.
+- ❌ **Not a defect** — investigated and found to be a false positive, with reasoning.
+- ☐ **Pending** — confirmed valid; left for follow-up (reason given).
+- ⏸️ **Deferred** — out of scope for this PR (reason given).
+- 🎫 **Tracked in issue** — filed as a separate GitHub issue (number cited).
+
+---
+
+## kernel/src + kernel/include
+
+### kernel/src/syscall.c
+- **lines 187-201** — `sys_log_handler` truncates silently at 256 bytes regardless of `len`, and `validate_user_ptr` rejects len==0. Worse, `validate_user_ptr` accepts any kernel-mapped pointer (line 60 `return 1;`), so a user task can pass an arbitrary kernel address (e.g. inside scheduler structures) and dump it through the UART. Tighten `validate_user_ptr` to a real per-task region check (the comment already calls this out as Phase 5 TODO) before exposing more syscalls; until then explicitly reject pointers outside the task's stack range.
+  - 🎫 **Tracked in issue** — Architectural; the project runs in shared address space pre-TTBR-split (Phase 5). A pure "stack range" restriction would break every syscall that legitimately passes data buffers (log/send/recv/infer). The proper fix requires per-component memory descriptors. Tracked under existing issue #29 "User/Kernel Privilege Separation (EL0/EL1 + TTBR split)". Source comment already flags this as a Phase 5 TODO; no code change in this PR.
+- **lines 121-154** — `sys_recv_handler` writes `topic_out` and `buf` into user memory with no writability check (`validate_user_ptr` only confirms the address is "kernel-mapped"). A malicious user task can target `topic_out` at read-only kernel `.rodata` and crash, or at another task's stack. Same fix as above (real per-task validation).
+  - 🎫 **Tracked in issue** — Same architectural blocker as above; tracked under #29.
+
+### kernel/src/elf.c
+- **line 189** — `phdr[i].p_offset + phdr[i].p_filesz > size` can wrap around to a small value when both addends are crafted near `UINT64_MAX`, defeating the bounds check (the same overflow guard already exists at lines 133-138 for the program-header table). Re-check using subtraction, e.g. `if (phdr[i].p_offset > size || phdr[i].p_filesz > size - phdr[i].p_offset) return ELF_ERR_TRUNCATED;`.
+  - ✅ **Fixed** — Replaced with subtraction-form guard matching the program-header bounds-check idiom at lines 133-138.
+- **lines 197-199** — `phdr[i].p_vaddr + phdr[i].p_memsz` can wrap; a crafted ELF could set `min_vaddr=0`, `max_vaddr` small, leading to a truncated `load_size` and later vaddr→phys translation hitting unmapped pages. Add an overflow guard before computing `end`.
+  - ✅ **Fixed** — Added `if (p_memsz > UINT64_MAX - p_vaddr) return ELF_ERR_TRUNCATED;` before the addition.
+
+### kernel/src/component_runtime.c
+- **lines 694-706** — `component_direct_channel_create` walks `direct_channels[]` and writes to a slot without any lock. Two concurrent callers (Lua scripts on different tasks, or a future hot-swap path) can both observe `sender_idx == -1` for the same slot and overwrite each other. Add a spinlock or `__atomic_compare_exchange` on `sender_idx`.
+  - ✅ **Fixed** — Added `direct_channel_lock` spinlock around slot allocation, mirroring the `swap_state_lock` pattern used elsewhere in this file. IRQ-disable variant.
+
+---
+
+## kernel/arch (arm64 + x86_64)
+
+### kernel/arch/arm64/smp_boot.S
+- **lines 223-226** — Stack-size mismatch. `lsl x2, x2, #14` shifts cpu_id+1 by 14 bits = 16 KiB, but `STACK_SIZE` is `0x10000` (64 KiB) per `kernel/include/config.h:22`, and `cpu_stacks[MAX_CPUS][STACK_SIZE]` in `kernel/sched/smp.c:46` allocates 64 KiB per slot. Secondary CPU 1 ends up with `sp = cpu_stacks + 16 KiB` (inside CPU 0's stack region). With 4 secondaries, CPUs 1-3 share overlapping stack regions inside `cpu_stacks[0]` — every push/pop on a secondary stack corrupts the next CPU's stack frames. Concrete fix: change to `lsl x2, x2, #16` (×64 KiB) or compute via `mov x3, #STACK_SIZE; mul x2, x2, x3` to track config.h.
+- **lines 144-216** — Cache invalidate-by-set/way is run *after* SCTLR_EL1 enables `C` and `I`. From the moment `msr sctlr_el1, x1` retires (line 149) the CPU is free to allocate cache lines (page-table walks, speculative refills of secondary_mmu_* literals' lines, etc). The subsequent `dc isw` loop then drops those lines. ARM ARM B2.4.4 explicitly says set/way ops should run with caches disabled; the right order is: invalidate set/way → DSB → ISB → enable MMU+caches. Concrete fix: move the entire `Lsec_inv_l1_set` / `Lsec_inv_l2_set` block above the `mrs/orr/msr sctlr_el1` sequence, then enable MMU+C+I once and ISB.
+
+### kernel/arch/arm64/vectors.S
+- **lines 124-139 / 360-383** — `DIAG_BUMP_VEC` and `resched_trampoline` use `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` to compute logical CPU id. On Jetson Orin Nano dual-cluster (CPU 4 = `0x10200`, CPU 5 = `0x10300`), this folds to `0x02 | 0x02 = 2` and `0x03 | 0x03 = 3` — colliding with CPU 2/3 in cluster 0. The DIAG macro is gated on `PI5_IRQ_DIAG` so it's safe today (Jetson never sets that flag), but the `resched_trampoline` is gated on `SECONDARY_PREEMPT` only, which is documented in CLAUDE.md as compile-but-not-safe on Jetson. Concrete fix: replace the inline fold with a load from `cpu_logical_map[]` (NC memory) keyed off `(mpidr & 0xFFFF) | ((mpidr >> 16) & 0xFF) << 8` to disambiguate Aff2.
+
+### kernel/arch/arm64/user_entry.S
+- **lines 28-69** — Missing `isb` between `msr spsr_el1` / `msr elr_el1` writes and `eret`. ARM ARM D1.21.1 requires an ISB between context-altering MSRs and the exception-return instruction that consumes them. Without it the CPU is permitted to ERET with stale SPSR/ELR, faulting back to EL1 with corrupted PSTATE. Concrete fix: add `isb` immediately before the `eret` at line 69.
+
+### kernel/arch/x86_64/platform_x86.c
+- **lines 581-589** — `dtb_parse` writes to `((uint8_t *)info)[0] = 0` inside a loop iterating `i`. Index is hardcoded `[0]`, so only the first byte is ever zeroed; the rest of the struct is uninitialized stack memory. Concrete fix: `((uint8_t *)info)[i] = 0;` (or just `memset` if available).
+
+### kernel/arch/x86_64/idt.c
+- **lines 188-265** — `exception_handler` halts on CPU exceptions (vec < 32) by entering an infinite `hlt` loop *with interrupts still enabled* (trap gates don't clear IF, line 274 confirms `IDT_TRAP_GATE` for most exceptions). A page fault followed by an unrelated timer IRQ will drive the timer ISR into a kernel that has already torn down its task. Concrete fix: `__asm__ volatile("cli")` as the first instruction in the panic path, before the `serial_puts("\n*** EXCEPTION:")`.
+
+---
+
+## kernel/sched
+
+### kernel/sched/sched.c
+- **lines 1180-1182, 1210-1212, 1267** — `scheduler_remove_task`, `scheduler_terminate_task`, and `sched_migrate_task` read `task->assigned_cpu` outside any lock to choose which `rq_lock[cpu]` to acquire. On Pi 5 / Jetson, a concurrent `sched_migrate_task` (or a successful work-steal that updates `assigned_cpu` via `add_to_cpu_queue_locked`) can change this between the read and the lock acquire, causing the wrong CPU's rq_lock to be taken. `remove_from_cpu_queue_locked` then returns 0 and `task_count--` underflows / dequeue is silently missed. `sched_migrate_task` already acknowledges this race on its own path; the fix is to apply the same retry/recheck pattern in `scheduler_remove_task` and `scheduler_terminate_task` (snapshot, lock, re-check `task->assigned_cpu == cpu` under the lock, restart if it moved). Apply consistently.
+- **lines 1566-1569** — `coop_preempt_maybe_tick` does `prev_preempt_disabled = preempt_disabled[cpu]; preempt_disabled[cpu] = 1; scheduler_tick(); preempt_disabled[cpu] = prev_preempt_disabled;`. `scheduler_tick` calls `task_wake_sleepers` which calls `scheduler_add_task` → `smp_notify_cpu`. If the policy's tick callback (e.g. `sched_rebalance_tick`) calls `scheduler_add_task_to_cpu` for the local CPU, the eventual broadcast SEV is fine, but any code path inside `scheduler_tick` that itself calls `schedule()` (none today, but `active_policy->tick` is a function pointer) would be silently suppressed without warning. Add a comment or assert in `scheduler_tick` documenting that policy `tick()` callbacks must not invoke `schedule()`.
+- **lines 211-247 (`ai_update_top_tasks`)** — walks each CPU's run queue under `rq_lock_irqsave(c)` and dereferences `t->effective_priority` / `t->next` while another CPU may be running `add_to_cpu_queue_locked` (which only takes that CPU's own rq_lock). Since each rq is owned by its own lock, that part is fine, but the resulting `staging[]` array of raw `struct task *` pointers is then written (lines 243-244) to `ai_top_tasks.tasks[]` without any lock or generation capture. A subsequent `task_destroy` on one of those pointers leaves `ai_top_tasks` holding a stale pointer that `extract_per_task` then dereferences — classic use-after-free. Either capture `t->generation` and revalidate before deref in `extract_per_task`, or hold a global table-level lock during both publish and consume.
+
+### kernel/sched/task.c
+- **lines 528-535 (`task_set_current`)** — reads `cpu_id()` and writes `current_task[cpu]`. This is called from `schedule()` *while holding* `rq_lock` — so if a coop-preempt tick fires between `task_set_current(next)` and the actual `switch_to`, the `task_current()` calls in scheduler_tick observe `next` while we still execute on `current`'s stack. The `preempt_disabled` flag at line 1881 is set AFTER `task_set_current` (line 1845). On any platform where IRQs could deliver between these (the comment at 1874-1879 claims rq_lock_irqsave already closes the window — true for hardware IRQs, but not for COOP_PREEMPT which is driven inline by `schedule()` itself; that's why there's no race — but the comment is fragile). Move `preempt_disabled[this_cpu] = 1` to immediately before `task_set_current` to make the invariant locally obvious and robust against future reorderings.
+
+### kernel/sched/ai/sched_ai.c
+- **lines 79-114** — `ai_assign_cpu_common` allocates `float state[AI_STATE_DIM]` (108 × 4 = 432 B) on stack, plus `FP_CONTEXT_SAVE` adds another ~520 B (`struct fp_state` per fp_context.h:36-40). The forward pass in `forward_logits` then allocates `buf_a[256] + buf_b[256] = 2 KB` more on its own stack. Total ~3 KB consumed on top of any caller frame. This is invoked from `scheduler_add_task_to_cpu` which can be called from a timer ISR context (per `fp_context.h:14-17`). Verify worst-case stack depth is well under STACK_SIZE (16 KB), especially on the IRQ stack (which on some platforms is smaller). If COOP_PREEMPT is the only path, IRQ stack isn't used — but document.
+
+### kernel/sched/ai/ai_state.c
+- **lines 219-227** — Newton's iteration for sqrt is incorrect: initial guess `std_dev = variance` is far from sqrt(variance) for variance ≠ 1, and 2 iterations don't converge. For variance=0.04 the iteration produces ~0.298 instead of 0.2 (49% relative error). This corrupts the load_imbalance feature in the AI state vector → degrades scheduler decisions. Fix: use `std_dev = (variance + 1.0f) * 0.5f` initial guess, or just call `__builtin_sqrtf` (NEON has `vsqrtq_f32`; this file is built without `-mgeneral-regs-only`).
+
+---
+
+## kernel/mm + kernel/ipc + kernel/fs + kernel/net + kernel/inference + kernel/usb
+
+### kernel/mm/pmm.c
+- **lines 215-230** — `free_list_pop` does not clear the popped block's `prev` pointer. Subsequent `buddy_alloc`/split path zeroes the block via `set_block_state` (state byte only, not contents) and `free_list_add` of the buddy assumes a fresh header but the popped block's old `next/prev` linger in memory until the slot is overwritten. This is benign today because returned pages are owned by callers, but if `pmm_alloc_pages_low` (lines 700-707) or `buddy_alloc` ever leaks the popped header bytes back into a free-list (e.g. if a caller frees with the wrong order), a stale prev pointer can linkedlist-corrupt. Fix: in `free_list_pop` set `block->next = block->prev = NULL` before returning.
+
+### kernel/mm/vmm.c
+- **lines 287-311** — `vmm_map_block_locked` writes the L2 PTE then calls `vmm_invalidate_tlb(virt)` which issues `dsb ishst → tlbi → dsb ish → isb`. The TLBI is correct, but the PTE store itself is not preceded by a `dsb ishst`. On ARM64, before issuing TLBI you must guarantee the PTE write is observable to the TLB walker (which is on a different agent). The first `dsb ishst` inside `vmm_invalidate_tlb` does serve this purpose, but if a writer on CPU A maps a block and CPU B does a translation (via DC walker) before the TLBI on A reaches B's TLB, B can populate its TLB from a stale "invalid" entry. With the current code this is fine for the normal case, but `vmm_map_region` (382-408) loops and a concurrent reader of an in-progress region can see partial mappings. Consider one final `dsb ish` after the loop and before unlocking.
+
+### kernel/ipc/ipc.c
+- **lines 168-172** — `total_capacity = capacity * MSG_PRIO_COUNT` followed by `if (msg_size > SIZE_MAX / total_capacity)`. If `total_capacity == 0` (would require `MSG_PRIO_COUNT == 0` — unlikely but constant from a header) divides by zero. Guard `if (total_capacity == 0) return NULL;` even though `capacity != 0` is checked above — defensive against the constant changing.
+- **lines 754-852 (shared_buffer_destroy)** — `shared_buffer_unmap` takes `buffer->lock`, decrements `refcount`, frees the mapping. But `shared_buffer_destroy` (797-852) checks `refcount > 1`, then drops the lock, then frees the buffer. Race: between line 820 (`spin_unlock_irqrestore`) and line 847 (`pmm_free_page(buffer)`), another task can call `shared_buffer_map`/`unmap` on this buffer (lookup via global table at line 854 still finds it until line 826). Use-after-free / double-free. Fix: take `ipc_state.lock`, remove from global table, then take `buffer->lock` and re-check refcount with both held; alternatively reference-count the lookup itself.
+
+### kernel/ipc/pi_mutex.c
+- **lines 99-113** — Between setting `self->state = TASK_BLOCKED` (line 100) and calling `schedule()` (line 113), the lock is released (line 102). On a multi-CPU system, `pi_mutex_unlock` running on another CPU can pop this task from the wait queue, set `state = TASK_READY`, and call `scheduler_add_task_to_cpu` — all before the original CPU has called `schedule()`. The original CPU then calls `schedule()` which sees `TASK_BLOCKED` (cached cacheline, since unlock ran on a different CPU and the race window is tiny) and skips. The task then runs at next preemption — fine on QEMU, broken on Pi 5/Jetson where DAIF.I=1 means no preemption. The comment at lines 109-112 acknowledges this for QEMU but claims "Pi 5 / Jetson tasks run with DAIF.I=1 so the tick cannot deliver" — but the issue isn't IRQ delivery, it's that the woken-and-re-queued task can be picked by the *waker's* CPU before the original calls schedule, and if the original then calls schedule and picks the same task there's a double-dispatch. Fix: hold the guard across the state flip and the schedule decision; or use a wake-counter that schedule() can re-check.
+
+### kernel/inference/inference_device_hailo.c
+- **lines 1614-1693 (slot cfg race)** — `hailo_backend_load_model` claims the slot under lock (sets `in_use=true`), drops the lock, then writes `slot->cfg`, `slot->input_shape`, etc. without re-taking the lock. Comment acknowledges this is "safe because no caller has the handle yet", but `hailo_backend_in_use_slots` (line 2048) and `hailo_backend_model_sizes` (line 2106) iterate slots and read `cfg.input_bytes` under the lock — they will read uninitialised cfg between the unlock at line 1623 and the cfg writes that follow. Either keep the lock held across cfg init, or use a two-phase `claimed`/`ready` flag and have readers check both.
+- **lines 1614-1693 (context_switch_load constraint)** — Similarly, `context_switch_load` (line 1680) runs without the lock. If `hailo_backend_free_model` runs concurrently on this slot (caller drops the handle, races with another caller creating something), `in_use` is still true so free would refuse with EBUSY (good), but `inflight_runs` is 0 so it could free. Re-check the F-07 path: `free_model` line 2025 refuses on `inflight_runs > 0`. `load_model` doesn't bump `inflight_runs` — so if a malicious caller obtained the handle (impossible since `*out` not yet returned), it could crash. Document this constraint or bump `inflight_runs` for the duration of `context_switch_load`.
+
+### kernel/usb/core/usb_core.c
+- **lines 526-546 (usb_wait_urb)** — busy-loops `(timeout_ms ?: 1) * 1000` iterations calling `usb_core_poll`. The comment says "iteration count on a 2 GHz CPU completes in microseconds, not ms." This means a `timeout_ms = 1000` call returns after ~1 ms, not ~1 s — the timeout is effectively *broken*. On real XHCI, a 1 ms wait for a control transfer that takes 5 ms returns TIMEOUT, then `usb_cancel_urb` cancels a perfectly good in-flight transfer, then the response arrives and is dropped. Fix: replace iteration count with `timer_get_count()` deadline (`timer_get_frequency() / 1000 * timeout_ms`).
+
+---
+
+## kernel/drivers
+
+### kernel/drivers/bpmp/hsp.c
+- **lines 50-61** — `hsp_read32`/`hsp_write32` issue `dsb sy` *after* the access. For Tegra MMIO the project rule (per CLAUDE.md UART LSR fix) is `dsb sy` *before* a register read to defeat speculative MMIO and stale LSR-style reads. Post-access DSB only fences against subsequent ops; a speculatively reordered earlier read can still return stale data. Add `dsb sy` ahead of the load so reads of `HSP_DB_REG_PENDING`, `HSP_DB_REG_ENABLE`, etc. are serialized like `uart_tegra.c` does.
+
+### kernel/drivers/camrtc/camrtc.c
+- **lines 134-136, 240-468, 470-533, 614-731** — Module state (`g_initialised`, `g_vm_tx_addr`, `g_vm_rx_addr`, `g_ch_setup_region_phys`) and the SHRD_MBOX TX/RX hardware registers are entirely unprotected. `camrtc_send_msg` and `camrtc_ch_setup_capture_control` may be called from any CPU; two concurrent senders can interleave `sm_tx_wait_empty` → `sm_tx_send` → `sm_rx_recv` and steal each other's responses (the response opcode filter at line 511 is no protection — both callers might send the same opcode). Add a `spinlock_t` around the entire send/recv round-trip, mirroring `mrq.c`'s `g_mrq_lock`.
+- **lines 117-130** — `mmio_read32` uses `dsb sy` *after* the read; same Tegra-MMIO concern as `hsp.c`. The HSP-VM SHRD_MBOX FULL bit is exactly the kind of register that benefits from a pre-read DSB to avoid stale speculative loads (look-alike to UARTC LSR).
+
+### kernel/drivers/pcie/pcie_tegra194.c
+- **lines 166-210** — All `mmio_read32`/`mmio_write32`/`dbi_read16`/`dbi_write16` issue `dsb sy` *after* access. Same Tegra MMIO concern as hsp/camrtc — pre-read DSB needed to align with the project's UARTC fix pattern. APPL_DEBUG, APPL_LINK_STATUS, ATU_CTRL2 polling reads are exactly the kind of MMIO that returns stale speculative results without an upstream DSB.
+
+### kernel/drivers/usb/xhci/xhci_xfer.c
+- **lines 55-96** — `xhci_urbs[XHCI_MAX_INFLIGHT_URBS]` and `xhci_urb_slot_alloc`/`xhci_urb_slot_find_by_trb`/`xhci_urb_slot_free` mutate the array with no lock. Submission path runs from task context; completion can run from the IRQ trampoline (the file `#include`s `spinlock.h` but never uses it). Two concurrent `urb_slot_alloc` callers can both observe the same `in_use==false` and grab the same slot. Even single-CPU, completion-vs-submission interleaving on the same CPU after IRQ delivery can corrupt `first_trb_phys`/`last_trb_phys` fields used by `find_by_trb`. Add a `spinlock_t` (IRQ-disable variant) around the alloc/find/free paths.
+
+---
+
+## kernel/ai_accel/hailo + kernel/gpu/nvidia
+
+### kernel/ai_accel/hailo/hailo_cs_builder.c
+- **lines 30, 73** — `b->used + need > b->capacity` overflows when `used + need` wraps `size_t`. With `need` capped by `sub_total + 8` and `sub_total` overflow-checked, the practical attack surface is small, but a malicious/buggy caller passing large `body_len` to `hailo_cs_builder_append` (no per-call cap on `body_len` aside from this check) wraps the sum and silently writes past the buffer. Fix: rewrite as `if (body_len > b->capacity - b->used)` after a `b->used <= b->capacity` invariant check, or `if (need > b->capacity || b->used > b->capacity - need)`.
+
+### kernel/ai_accel/hailo/hailo_vdma.c
+- **lines 217-275** — `hailo_vdma_program_buffer` issues a `cache_clean` over `[first_slot, first_slot + descs_needed)` (lines 301-305) but does NOT issue a `dsb ishst` (or stronger barrier) between the descriptor stores (lines 248-258 / 270-275) and the cache clean. `cache_clean` ultimately runs `DC CVAC` which is data-side cache maintenance; it does not order normal stores against subsequent MMIO doorbells. The platform's `hailo_platform->mb()` (DSB SY) is invoked by the channel-start / num_avail-write paths *after* return, but the doorbell is in a different function. A reordering between the descriptor store and the `DC CVAC` could clean a stale cacheline. Add an explicit `dsb ishst` (or call `hailo_platform->mb()`) before `cache_clean` to publish the stores; the post-clean barrier (already present in `channel_start` / `submit_and_wait`) is the device-visibility fence.
+
+### kernel/gpu/nvidia/ga10b_bringup.c
+- **lines 1419-1429** — GPFIFO entry construction in `ga10b_submit_and_poll`: `gp_entry0 = (uint32_t)(pb_gpu_va & 0xFFFFFFFCu)` discards bits [63:32] of the GPU VA; `gp_entry1 = ((pb_gpu_va >> 32) & 0xFFu) | (pb_dwords << 10)` masks the high address to only 8 bits. If `pb_gpu_va` is allocated above 2^40, the device sees a wrong address with no validation error. Add a runtime check on `g_handoff.pushbuf_gpu_va < (1ULL << 40)` at handoff inherit (`ga10b_validate_handoff` line 1013) and on `qmd_gpu_va` / `sem_gpu_va` similarly. Same truncation in `ga10b_build_sema_release_pushbuffer` (lines 1209, 1211), `ga10b_build_compute_sema_release_pushbuffer` (lines 1252, 1254), and `ga10b_build_launch_kernel_with_sema_pushbuffer` (lines 1331, 1333) — they all encode `(va >> 32) & 0xFFu` for the address-upper word, silently dropping bits above 40.
+- **lines 1390-1416** — `ga10b_submit_and_poll` writes `pb_dwords * 4u` bytes into `g_handoff.pushbuf_phys` with no bounds check against `g_handoff.pushbuf_size`. Practically capped by `GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS = 23` from the only callers, but a future caller passing a larger `pb_dwords` overflows the inherited buffer. Add `if ((uint64_t)pb_dwords * 4u > g_handoff.pushbuf_size) return -1;`.
+
+---
+
+## runtime/src/mm
+
+### runtime/src/mm/model_mem.rs
+- **lines 489-500** — `static mut WEIGHT_POOL`/`WORKSPACE_POOL` plus `static mut EVICTED_CONTENT_TRACKER` (line 511) are accessed from cross-CPU contexts but `MemoryPool` contains no `Sync` bound. The doc says "only accessed under LOCK", but the spinlock at line 492 uses `Acquire`/`Release` only — sufficient for ARM64 inner-shareable, but you pre-existing know (CLAUDE.md "Pi 5 cache coherency") that DSU does NOT provide automatic coherency on Pi 5. Add a `core::sync::atomic::fence(Ordering::SeqCst)` after `compare_exchange` (or document that the single-CPU model is the only supported runtime contract) and add an explicit `unsafe impl Sync for MemoryPool {}` so the contract is visible. Per CLAUDE.md you'd normally rely on the kernel-side cache flush, but the Rust side does not invoke it.
+- **line 666** — `pool_alloc_raw` is declared `unsafe fn` with the SAFETY comment "callers must hold LOCK" but the body still uses `addr_of_mut!` without verifying that contract. The match-fallthrough at line 670 returns `InvalidHandle` for `_ => Err(...)` — if any caller ever passes a bad `pool_id`, the function silently degrades. Move the `LOCK`-held assertion to a `debug_assert!(LOCK.load(...))`.
+
+### runtime/src/mm/eviction/store.rs
+- **lines 123-129** — `store_mut`/`store_ref` are safe-fn wrappers that internally create `&mut (*addr_of_mut!(STORES))[idx]` and `&(*addr_of_mut!(STORES))[idx]` references to the static. These transient references exist independently of any lock — a caller that invokes `store_mut(kind)` without first taking `STORE_LOCK` produces UB even though the function is callable from safe code. The `addr_of_mut!` was chosen exactly to avoid this; the immediate `&mut … as *mut` re-borrow defeats it. Either make these `unsafe fn`s or rewrite as `unsafe { core::ptr::addr_of_mut!((*addr_of_mut!(STORES))[idx]) }` so no `&mut` is materialised.
+
+### runtime/src/mm/eviction/runtime_xgboost.rs
+- **lines 155-167** — `eval_tree` has no cycle detection: `left_idx`/`right_idx` are bounds-checked at parse time (line 132) but a parsed tree where node A points to node B which points back to A creates an infinite loop in kernel context. Add a max-depth cap (e.g. `for _ in 0..node_count { ... } return /* fallback */`) to prevent kernel hang from a malformed but checksum-valid blob.
+
+### runtime/src/mm/eviction/features.rs
+- **line 238** — `unsafe { rust_model_count() as f32 / MAX_MODELS }` — the `extern "C"` declaration at line 41 has no documented safety contract; the C side could (theoretically) call back into Rust while the allocator lock is already held by the caller of `extract_features` (called from `select_victim` under registry lock + via `evict_and_retry` after pool-lock release — but `weight_pool_stats()` at line 121 takes the pool lock). Document the lock ordering: feature extraction must NOT be called under the pool lock. Currently the call site at `model_mem.rs:704` (snapshot → registry → extract → weight_pool_stats) re-acquires the pool lock; this is a deadlock waiting to happen if any future change holds it across the eviction call. Verify that `evict_and_retry` releases the lock before `select_victim` runs (yes, line 700 vs 725); add a comment.
+
+---
+
+## runtime/src (sched, component, loader, inference, top-level)
+
+### runtime/src/lib.rs
+- **lines 4386-4407, 4477-4503** — `static mut BENCH_OUTPUT`, `static mut CLASSIFY_OUTPUT`, `static mut OUTPUT` are written from `rust_infer_bench` / `rust_infer_classify` / `rust_infer_and_print` with no lock held. The engine acquires `ENGINE_LOCK`, but these output buffers are owned by the caller, not the engine, and are `static mut`. If two CPUs (or even one CPU re-entering through different shell paths) ever invoke these concurrently, the writes race and the reads see torn data — UB under the Rust memory model, and `static_mut_refs` UB under `unsafe`. Fix: protect each with a dedicated `AtomicBool` spinlock acquired around the entire inference call, or move the buffers behind the existing `ENGINE_LOCK` via a `SyncWrapper`.
+
+### runtime/src/log.rs
+- **lines 71-80** — `extern "C" { static pit_ticks: u64; }` is read with `core::ptr::read_volatile` but is declared as a Rust `static`, not `static mut`. Rust 1.78+ deny-by-default warns this is UB because the C side mutates the value (it's incremented in the timer ISR). Change the declaration to `static mut pit_ticks: u64;` and the read to use `&raw const pit_ticks` (or accept the warning) — and document that the volatile read is the synchronization mechanism.
+
+### runtime/src/msg_router.rs
+- **line 161** — `static mut TOPICS: [Topic; MAX_TOPICS]` and `static mut TOPIC_COUNT`, `WILDCARD_SUBS`, `LAST_RECEIVED` rely on `MSG_ROUTER_LOCK` for synchronization, but the `Topic` struct contains plain `[Subscription; 4]` with `Mailbox { data: [u8; 60], topic: [u8; 16] }`. Inside `deliver()` (line 94), `data` and `topic` are written via `str_copy` (plain memory writes) while `ready`/`priority` are atomics. A receiver that loads `ready=1` (Acquire) sees the priority and the *atomic* parts of the data via the release on `ready`, but the `data` and `topic` byte arrays were written through ordinary stores; the Acquire-Release pair on `ready` does provide the synchronization edge here, so this is actually sound — but only because Acquire/Release fences carry the prior plain stores. Add a comment explicitly to that effect; a future maintainer who relaxes the `ready.store(... Release)` to `Relaxed` will introduce a data race silently.
+
+### runtime/src/component/registry.rs
+- **lines 175-200** — `find_by_name` early-returns `Some(i)` from inside an `unsafe { }` block. The control flow does call `unlock()` on line 189 before the return (good), but the `unlock()/return` pair is hand-written, and the surrounding `let result = unsafe { ... };` then runs `if result.is_none() { unlock(); }` — meaning if any future edit moves the unlock past the early return, the lock leaks. Replace lock/unlock with the `SpinGuard` RAII pattern used everywhere else in the runtime (this file already pre-dates the convention used in `loader/registry.rs`).
+
+### runtime/src/loader/protobuf.rs
+- **lines 166-167** — `let value_start = self.pos + tag_len;` and `let value_data = &self.data[value_start..]` — `self.pos + tag_len` can in theory exceed `self.data.len()` if `tag_len` is computed against a malformed varint. While `decode_varint` returns `tag_len <= 10` and `self.pos < self.data.len()` is checked at line 142, `value_start = self.pos + tag_len` can be `> self.data.len()` (which would panic on the slice index). Add `if value_start > self.data.len() { return Some(Err(ParseError::UnexpectedEof)); }` before the slice. Today this is reachable: a 10-byte continuation varint at position `data.len() - 1` causes panic = kernel hang.
+
+### runtime/src/loader/onnx_parser.rs
+- **line 107** — `let copy_len = if src.len() < NAME_LEN { src.len() } else { NAME_LEN - 1 };` — when `src.len() == NAME_LEN`, `copy_len = NAME_LEN - 1` (truncates to fit NUL). When `src.len() == NAME_LEN - 1`, `copy_len = NAME_LEN - 1` (full). When `src.len() < NAME_LEN - 1`, `copy_len = src.len()`. But then `name.bytes[..copy_len].copy_from_slice(&src[..copy_len])` and `name.len = copy_len as u8` — the trailing byte is never NUL'd because `bytes` was already zero-init. OK only because the buffer starts zeroed. If `Name::EMPTY` is later changed, this breaks. Set `name.bytes[copy_len] = 0` explicitly when `copy_len < NAME_LEN`.
+
+### runtime/src/loader/registry.rs
+- **lines 263-290** — `static mut I64_DECODE_BUF: [u8; 128]` is written without holding the registry lock (the comment says "load_model is serialized by the registry lock" but the lock is acquired LATER at line 378, after `I64_DECODE_BUF` is written at lines 282-286). Two concurrent `load_model` calls both writing to `I64_DECODE_BUF` race. Move the write inside the spinlock OR use a thread-local OR use `linked_list_allocator`'s `Box<[u8; 128]>`.
+- **lines 330-344** — `unsafe { weight_ptr.add(offset); ... *dest_f32.add(e) = fp16_to_f32(...); ... core::ptr::copy_nonoverlapping(src.as_ptr(), dest, src.len()); }` — bounds check is missing: `offset + stored_size` is never compared against `total_weight_size` (the actual allocated capacity). `total_weight_size` comes from `parsed.total_weight_size_expanded()` (line 232) which uses `saturating_mul` for FP16 elements (line 338) — but `num_elements()` itself saturates. If `num_elements()` saturates to `usize::MAX`, `total_weight_size_expanded` saturates again, and the allocator is asked for `usize::MAX` bytes (rejected). But a malformed tensor with `data_size() != num_elements * element_size()` (e.g., `raw_data.len() = 100` but inferred from shape would be 50) means `stored_size = 100` but only 50 bytes were budgeted in `total_weight_size`. This writes past the allocated weight block. **Add an explicit check** `if offset.checked_add(stored_size).map_or(true, |end| end > total_weight_size) { return Err(LoadError::CorruptedData); }` before each `copy_nonoverlapping`.
+
+### runtime/src/inference/engine.rs
+- **lines 145-155** — `static ENGINE: SyncWrapper<InferenceEngine>` with `engine_lock()`/`engine_unlock()` bare functions. Same RAII issue: any future early return between lock and unlock leaks the lock. `run_inference` (line 698) currently uses early-return `return Ok(n)` at line 722 — but does call `engine_unlock()` on line 721 first. Fragile. Convert to `SpinGuard`.
+- **lines 519-530** — `exec_conv` computes `h_out = (input.dim(2) + 2 * ph - kh) / sh + 1` — these are `u32` values. If `kh > input.dim(2) + 2 * ph` (kernel larger than padded input), this *underflows* `u32` and produces a huge `h_out`, causing the next `alloc_tensor` to either fail or — worse — succeed with a huge buffer that Conv writes past. Use `checked_sub` and return `ShapeMismatch`.
+- **lines 559-561** — `exec_maxpool` has the same `h_out = (input.dim(2) - kh) / sh + 1` underflow risk. `kh=2` and `input.dim(2)=1` → underflow. Same fix.
+
+### runtime/src/inference/ops.rs
+- **lines 261-303** — `static mut IM2COL_BUF: [f32; 16384]` and lines 675-686 `static mut FP16_BUF: [f32; 1024]` are protected by `OPS_LOCK`. The `ops_lock()`/`ops_unlock()` pattern (lines 40-48) is again hand-written; `conv2d` has multiple early-error paths AFTER `ops_lock()` (line 260) — actually no, the lock is acquired AFTER all error checks. OK. But `matmul` (line 674) acquires `ops_lock()` before calling `fp16_row_to_f32` and `simd_fma_row` — if either of those panics (e.g., NEON intrinsic on a misaligned pointer), the lock leaks. Convert to RAII `OpsGuard`.
+- **lines 109-115** — `quantize_fp32_to_int8` reads `*data` and `*data.add(i)` without checking `n > 0` or that `data` is non-null. If `n == 0`, line 109 dereferences invalid memory. Add `if n == 0 { return ... }`.

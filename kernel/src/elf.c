@@ -185,8 +185,10 @@ int elf_load(const void *buffer, size_t size, struct elf_info *info)
             return ELF_ERR_SEGMENTS;
         }
 
-        /* Validate segment data is within file */
-        if (phdr[i].p_offset + phdr[i].p_filesz > size) {
+        /* Validate segment data is within file. Subtract instead of add so
+         * a crafted phdr can't wrap p_offset+p_filesz to a small value. */
+        if (phdr[i].p_offset > size ||
+            phdr[i].p_filesz > size - phdr[i].p_offset) {
             return ELF_ERR_TRUNCATED;
         }
 
@@ -194,6 +196,13 @@ int elf_load(const void *buffer, size_t size, struct elf_info *info)
             min_vaddr = phdr[i].p_vaddr;
         }
 
+        /* Guard p_vaddr+p_memsz against 64-bit overflow before computing the
+         * region end. A crafted phdr could otherwise wrap to a small `end`,
+         * truncating load_size and causing later vaddr→phys translation to
+         * miss unmapped pages. */
+        if (phdr[i].p_memsz > UINT64_MAX - phdr[i].p_vaddr) {
+            return ELF_ERR_TRUNCATED;
+        }
         uint64_t end = phdr[i].p_vaddr + phdr[i].p_memsz;
         if (end > max_vaddr) {
             max_vaddr = end;
