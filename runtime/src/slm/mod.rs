@@ -6,5 +6,7 @@
 
 #![cfg(feature = "slm")]
 
+pub mod chat_template;
 pub mod gguf;
 pub mod registry;
+pub mod tokenizer;
