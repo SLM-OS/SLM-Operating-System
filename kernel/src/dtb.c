@@ -482,7 +482,14 @@ static void parse_memreserves_from_root_property(const void *dtb)
             break;  /* Found and processed; stop scanning. */
         }
 
-        p += fdt_align(plen);
+        /* Advance past the property value, padded to 4-byte alignment.
+         * Guard against `align4(plen) < plen` overflow on a malformed
+         * DTB — without this, a crafted plen near UINT32_MAX wraps to
+         * 0 and the outer walk spins forever. Matches the same guard
+         * `fdt_get_property` does in kernel/lib/fdt/fdt.c. */
+        uint32_t skip = fdt_align(plen);
+        if (skip < plen) break;
+        p += skip;
     }
 }
 

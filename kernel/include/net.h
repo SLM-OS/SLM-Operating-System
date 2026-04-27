@@ -361,8 +361,22 @@ bool net_is_up(void);
 void net_shell_init(void);
 
 /* -------------------------------------------------------------------------- */
-/* lwIP RNG entropy seeding                                                    */
+/* lwIP RNG                                                                    */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Generate a 32-bit pseudo-random number.
+ *
+ * Mixes the platform timer count into a Numerical-Recipes LCG state on
+ * every call. Used by lwIP for TCP ISN and ephemeral-port selection;
+ * also a convenient cheap RNG elsewhere in the kernel. NOT
+ * cryptographically secure.
+ *
+ * Defined in `kernel/net/sys_arch.c`. Also declared in
+ * `kernel/include/arch/cc.h` (the lwIP-side header) since lwIP wires
+ * `LWIP_RAND()` to it directly.
+ */
+uint32_t lwip_rand_slm(void);
 
 /**
  * Mix `len` bytes of additional entropy into the lwIP RNG state.
@@ -373,10 +387,6 @@ void net_shell_init(void);
  * ephemeral-port choices vary across reboots. Underlying RNG is still
  * non-cryptographic (LCG + timer mix) — this just removes the
  * constant-seed leak.
- *
- * Defined in `kernel/net/sys_arch.c`. Also declared in
- * `kernel/include/arch/cc.h` (the lwIP-side header) since lwIP's
- * critical-section code shares the same translation unit.
  *
  * Safe to call with interrupts disabled. NOT safe to call concurrently
  * with `lwip_rand_slm`.

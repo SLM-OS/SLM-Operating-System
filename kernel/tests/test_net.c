@@ -1730,8 +1730,7 @@ static void test_net_mmio_watchdog_fires_on_stall(void)
  * quality.
  * ============================================================================ */
 
-extern uint32_t lwip_rand_slm(void);
-extern void     lwip_rand_seed(const void *bytes, uint32_t len);
+/* lwip_rand_slm + lwip_rand_seed prototypes come from <net.h>. */
 
 static void test_lwip_rand_seed_changes_output(void)
 {
