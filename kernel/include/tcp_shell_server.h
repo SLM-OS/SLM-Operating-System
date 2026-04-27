@@ -67,23 +67,27 @@ struct tcp_shell_server_stats {
 void tcp_shell_server_get_stats(struct tcp_shell_server_stats *out);
 
 /*
- * Note a session-open event. Called from `on_accept` *after* the
- * session task is successfully spawned and the session struct is
- * fully wired up. Snapshots the heap onto sess->heap_used_at_open_bytes
- * and bumps the `sessions_opened` / `active` / `peak_active` counters.
- * Internal — exposed in the header only so the lwIP raw callback in
- * tcp_shell_server.c can call it without going through public API.
+ * Note a session-open event.
+ *
+ * Bumps `sessions_opened` / `active` / `peak_active`. The heap
+ * snapshot is owned by `shell_io_tcp` (it lives on `tcp_shell_ctx`,
+ * which outlives `shell_session` by one or two net_pump ticks)
+ * so the close-time measurement can run *after* tcp_close has
+ * actually released the pcb — see `tcp_shell_server_note_session_close`.
  */
-struct shell_session;
-void tcp_shell_server_note_session_open(struct shell_session *sess);
+void tcp_shell_server_note_session_open(uint32_t session_id);
 
 /*
- * Note a session-close event. Called from the session task right
- * before `task_exit` (after `shell_io_tcp_destroy` has marked the
- * io as closed). Computes the heap delta vs the open-time snapshot,
- * updates the rolling stats, and emits a WARN if the delta exceeds
- * NET_SHELL_TCP_LEAK_THRESHOLD_BYTES.
+ * Note a session-close event with a precomputed heap delta.
+ *
+ * Called from `shell_io_tcp_poll` right before the per-session ctx
+ * pool slot is freed (i.e. *after* `tcp_close(pcb)` and lwIP's
+ * unacked-TX free path). At that point any sustained positive
+ * delta is a real leak rather than TIME_WAIT residue, which is
+ * what makes the WARN here actionable. Updates rolling stats and
+ * emits a WARN when delta > NET_SHELL_TCP_LEAK_THRESHOLD_BYTES.
  */
-void tcp_shell_server_note_session_close(const struct shell_session *sess);
+void tcp_shell_server_note_session_close(uint32_t session_id,
+                                         int32_t  heap_delta_bytes);
 
 #endif /* TCP_SHELL_SERVER_H */
