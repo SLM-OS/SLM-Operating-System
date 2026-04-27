@@ -390,7 +390,8 @@ static void ensure_fat_parent_dirs(const char *path)
         if (*p == '/') {
             *p = '\0';
             FRESULT r = f_mkdir(buf);
-            TEST_ASSERT_TRUE(r == FR_OK || r == FR_EXIST);
+            TEST_ASSERT_MESSAGE(r == FR_OK || r == FR_EXIST,
+                                "ensure_fat_parent_dirs: f_mkdir of intermediate dir failed");
             *p = '/';
         }
     }
@@ -398,7 +399,8 @@ static void ensure_fat_parent_dirs(const char *path)
      * final slash. */
     *last_slash = '\0';
     FRESULT r = f_mkdir(buf);
-    TEST_ASSERT_TRUE(r == FR_OK || r == FR_EXIST);
+    TEST_ASSERT_MESSAGE(r == FR_OK || r == FR_EXIST,
+                        "ensure_fat_parent_dirs: f_mkdir of leaf parent dir failed");
     *last_slash = '/';
 }
 
@@ -433,6 +435,13 @@ static void write_boot_media_fat_autoload_conf(const char *text)
     TEST_ASSERT_NOT_NULL(dev);
     fatfs_disk_attach(dev);
     TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(&fs, TEST_FAT32_VOL, 1));
+    /* Sentinel path: the conf file itself only needs `0:/slmstore`,
+     * but the larger fixture also pre-creates `0:/slmstore/autoload`
+     * so subsequent `write_boot_media_fat_file` calls in the same
+     * test (which write blobs into autoload/) don't have to
+     * re-mkdir. The trailing `.placeholder` component is dropped
+     * by ensure_fat_parent_dirs's "skip the final filename" rule;
+     * only the two ancestors are created. */
     ensure_fat_parent_dirs("0:/slmstore/autoload/.placeholder");
     TEST_ASSERT_EQUAL_INT(FR_OK, f_open(&fp, "0:/slmstore/blob_autoload.conf", FA_WRITE | FA_CREATE_ALWAYS));
     TEST_ASSERT_EQUAL_INT(FR_OK, f_write(&fp, text, len, &written));
