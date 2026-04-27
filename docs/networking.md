@@ -220,6 +220,46 @@ VFS to bring the daemon up automatically at boot. See
 `docs/shell.md` § Multi-Session Shell and
 `docs/multi-session-shell-plan.md` for the architecture.
 
+### telemetryd
+
+Push-only TCP server on port 2325 that bridges the in-process `tel.*`
+msg_router topics out to the network. A host-side monitor subscribes
+once and reads newline-terminated samples; no shell semantics, no
+authentication. Same trust-the-LAN posture as `telnetd`.
+
+```
+SLM-OS> telemetry server start
+[TELD] Listening on 0.0.0.0:2325 (telemetry feed)
+telemetry server: listening on port 2325
+
+SLM-OS> telemetry server status
+telemetry server: running on port 2325 — active=1 opened=1 closed=0 rejects=0
+  samples dequeued=12 delivered=12 dropped=0
+```
+
+From the host:
+
+```
+$ nc 10.0.2.15 2325
+# SLM-OS telemetryd v1
+# subscribe with: SUB <pattern>
+# default filter: tel.*
+tel.inf seq=1 ts=120031 dt=42 ok=1
+tel.evi seq=2 ts=120052 dt=87 fb=0
+SUB tel.evi
+# filter=tel.evi
+tel.evi seq=3 ts=120120 dt=63 fb=0
+BYE
+```
+
+`SUB <pattern>` re-sets the per-client glob filter on the same
+connection (default `tel.*`); `BYE` closes gracefully. Slow-client
+back-pressure is per-client drop-oldest with line alignment — the
+publisher is never stalled. Build with `-DNET_TELEMETRYD_AUTOSTART=ON`
+to bring the listener up at boot. See
+`docs/specs/admin-telemetry-suite.md` § "Network feed" for the
+architecture and the wire-format specification.
+
 ---
 
 ## Implementation
@@ -1197,4 +1237,4 @@ roadmap.
 
 ---
 
-*Last updated: 25 April 2026*
+*Last updated: 26 April 2026*

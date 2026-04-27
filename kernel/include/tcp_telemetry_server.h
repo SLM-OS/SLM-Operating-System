@@ -134,6 +134,19 @@ size_t tcp_telemetry_server_test_drain(int slot, char *out, size_t out_cap);
 uint32_t tcp_telemetry_server_test_inject(const char *topic,
                                           const char *payload);
 
+/* Drive the inbound (peer → server) command parser for a synthetic
+ * session as if `bytes` had arrived from lwIP. Lets unit tests cover
+ * SUB / BYE / unknown-command handling without a live socket. */
+void tcp_telemetry_server_test_feed_input(int slot,
+                                          const char *bytes,
+                                          size_t len);
+
+/* Read back the per-session stored filter (post-SUB or default). */
+const char *tcp_telemetry_server_test_session_filter(int slot);
+
+/* True if the session has been marked closed (e.g. by `BYE`). */
+bool tcp_telemetry_server_test_session_closed(int slot);
+
 /* Tear down all synthetic sessions and reset counters. */
 void tcp_telemetry_server_test_reset(void);
 

@@ -720,6 +720,10 @@ int tcp_telemetry_server_test_open_session(const char *filter)
     if (filter && *filter) {
         tel_strcpy_bounded(s->filter, filter, sizeof(s->filter));
     }
+    /* Mirror the on_accept path: real sessions receive the banner as
+     * the first thing on the wire. Synthetic ones must too, otherwise
+     * the unit tests would miss a banner-format regression. */
+    session_emit_banner(s);
     /* Find the slot index. */
     for (uint32_t i = 0; i < MAX_TELEMETRY_SESSIONS; i++) {
         if (&g_sessions[i] == s) return (int)i;
@@ -754,6 +758,30 @@ uint32_t tcp_telemetry_server_test_inject(const char *topic,
     uint32_t delivered = fanout_sample(topic, line, line_len);
     if (delivered > 0) g_samples_delivered++;
     return delivered;
+}
+
+void tcp_telemetry_server_test_feed_input(int slot, const char *bytes, size_t len)
+{
+    if (slot < 0 || (uint32_t)slot >= MAX_TELEMETRY_SESSIONS) return;
+    struct tel_session *s = &g_sessions[slot];
+    if (!s->in_use || !s->synthetic || !bytes) return;
+    session_feed_input(s, (const uint8_t *)bytes, len);
+}
+
+const char *tcp_telemetry_server_test_session_filter(int slot)
+{
+    if (slot < 0 || (uint32_t)slot >= MAX_TELEMETRY_SESSIONS) return NULL;
+    struct tel_session *s = &g_sessions[slot];
+    if (!s->in_use || !s->synthetic) return NULL;
+    return s->filter;
+}
+
+bool tcp_telemetry_server_test_session_closed(int slot)
+{
+    if (slot < 0 || (uint32_t)slot >= MAX_TELEMETRY_SESSIONS) return false;
+    struct tel_session *s = &g_sessions[slot];
+    if (!s->in_use || !s->synthetic) return false;
+    return s->closed;
 }
 
 void tcp_telemetry_server_test_reset(void)

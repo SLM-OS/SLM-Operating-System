@@ -239,6 +239,233 @@ static void test_publisher_keeps_advancing_when_client_wedged(void)
 }
 
 /* ============================================================================
+ * Inbound command parser (SUB / BYE / unknown / overflow)
+ * ============================================================================ */
+
+static void test_default_filter_is_tel_star(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session(NULL);
+    TEST_ASSERT_TRUE(slot >= 0);
+    const char *f = tcp_telemetry_server_test_session_filter(slot);
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_STRING("tel.*", f);
+}
+
+static void test_banner_is_first_bytes_on_open(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+
+    char out[512];
+    size_t n = tcp_telemetry_server_test_drain(slot, out, sizeof(out));
+    TEST_ASSERT_TRUE(n > 0);
+    /* Must lead with `# SLM-OS telemetryd v1\n`. */
+    TEST_ASSERT_TRUE(contains(out, "# SLM-OS telemetryd v1\n"));
+    TEST_ASSERT_TRUE(contains(out, "# subscribe with: SUB <pattern>\n"));
+    TEST_ASSERT_TRUE(contains(out, "# default filter: tel.*\n"));
+    /* The banner must come BEFORE any sample line (no characters
+     * before the first `#`). */
+    TEST_ASSERT_EQUAL_INT8('#', out[0]);
+}
+
+static void test_sub_command_resubscribes_filter(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+
+    /* Drain banner. */
+    char tmp[256];
+    (void)tcp_telemetry_server_test_drain(slot, tmp, sizeof(tmp));
+
+    /* Narrow the filter to tel.evi only. */
+    static const char cmd[] = "SUB tel.evi\n";
+    tcp_telemetry_server_test_feed_input(slot, cmd, sizeof(cmd) - 1);
+
+    /* The filter field on the session must now be the new pattern. */
+    TEST_ASSERT_EQUAL_STRING("tel.evi",
+                             tcp_telemetry_server_test_session_filter(slot));
+
+    /* Server should also have echoed an ack comment. */
+    char ack[256];
+    (void)tcp_telemetry_server_test_drain(slot, ack, sizeof(ack));
+    TEST_ASSERT_TRUE(contains(ack, "# filter=tel.evi\n"));
+
+    /* And subsequent injects: tel.evi delivers, tel.inf does not. */
+    TEST_ASSERT_EQUAL_UINT32(1,
+        tcp_telemetry_server_test_inject("tel.evi", "dt=1 fb=0"));
+    TEST_ASSERT_EQUAL_UINT32(0,
+        tcp_telemetry_server_test_inject("tel.inf", "dt=2 ok=1"));
+}
+
+static void test_sub_with_crlf_line_ending(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+
+    /* CR-stripped before LF terminates the line. */
+    static const char cmd[] = "SUB tel.inf\r\n";
+    tcp_telemetry_server_test_feed_input(slot, cmd, sizeof(cmd) - 1);
+
+    TEST_ASSERT_EQUAL_STRING("tel.inf",
+                             tcp_telemetry_server_test_session_filter(slot));
+}
+
+static void test_bye_command_marks_session_closed(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+    TEST_ASSERT_FALSE(tcp_telemetry_server_test_session_closed(slot));
+
+    static const char cmd[] = "BYE\n";
+    tcp_telemetry_server_test_feed_input(slot, cmd, sizeof(cmd) - 1);
+    TEST_ASSERT_TRUE(tcp_telemetry_server_test_session_closed(slot));
+}
+
+static void test_unknown_command_echoes_comment(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+
+    /* Drain banner first. */
+    char banner[256];
+    (void)tcp_telemetry_server_test_drain(slot, banner, sizeof(banner));
+
+    static const char cmd[] = "WHATEVER\n";
+    tcp_telemetry_server_test_feed_input(slot, cmd, sizeof(cmd) - 1);
+
+    char out[256];
+    (void)tcp_telemetry_server_test_drain(slot, out, sizeof(out));
+    TEST_ASSERT_TRUE(contains(out, "# unknown: WHATEVER\n"));
+}
+
+static void test_oversized_input_does_not_overflow(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+
+    /* Drain banner. */
+    char banner[256];
+    (void)tcp_telemetry_server_test_drain(slot, banner, sizeof(banner));
+
+    /* Push a 200-byte command with no newline, then a newline. The
+     * RX buffer is RX_LINE_MAX (=32) bytes; the parser must mark the
+     * line as overflowed and emit a "<line too long>" comment instead
+     * of clobbering memory. */
+    char big[200];
+    for (size_t i = 0; i < sizeof(big); i++) big[i] = 'X';
+    tcp_telemetry_server_test_feed_input(slot, big, sizeof(big));
+    static const char term[] = "\n";
+    tcp_telemetry_server_test_feed_input(slot, term, 1);
+
+    char out[512];
+    (void)tcp_telemetry_server_test_drain(slot, out, sizeof(out));
+    TEST_ASSERT_TRUE(contains(out, "# unknown: <line too long>\n"));
+    /* And the session should still be alive (not closed). */
+    TEST_ASSERT_FALSE(tcp_telemetry_server_test_session_closed(slot));
+}
+
+static void test_blank_line_is_ignored(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+
+    /* Drain banner. */
+    char banner[256];
+    (void)tcp_telemetry_server_test_drain(slot, banner, sizeof(banner));
+
+    static const char cmd[] = "\n";
+    tcp_telemetry_server_test_feed_input(slot, cmd, 1);
+
+    char out[256];
+    size_t n = tcp_telemetry_server_test_drain(slot, out, sizeof(out));
+    TEST_ASSERT_EQUAL_INT(0, (int)n);   /* no echo, no ack, nothing */
+}
+
+/* ============================================================================
+ * Public API: kick / foreach / stats
+ * ============================================================================ */
+
+struct first_id_ctx {
+    uint32_t id;
+    bool     have;
+};
+
+static bool first_id_visitor(const struct tcp_telemetry_session_info *info,
+                             void *user)
+{
+    struct first_id_ctx *c = user;
+    if (!c->have) {
+        c->id = info->session_id;
+        c->have = true;
+    }
+    return true;
+}
+
+static void test_foreach_walks_active_synthetic_sessions(void)
+{
+    tcp_telemetry_server_test_reset();
+    /* foreach skips synthetic sessions by design (they're for tests
+     * only), so this test is the negative assertion: opening synthetic
+     * sessions should not pollute the public-API session list. */
+    int s1 = tcp_telemetry_server_test_open_session("tel.*");
+    int s2 = tcp_telemetry_server_test_open_session("tel.evi");
+    TEST_ASSERT_TRUE(s1 >= 0);
+    TEST_ASSERT_TRUE(s2 >= 0);
+
+    struct first_id_ctx c = {0};
+    tcp_telemetry_server_foreach(first_id_visitor, &c);
+    TEST_ASSERT_FALSE(c.have);
+
+    /* And get_stats's sessions_active also excludes synthetics so the
+     * lab's `telemetry server status` does not lie. */
+    struct tcp_telemetry_server_stats st;
+    tcp_telemetry_server_get_stats(&st);
+    TEST_ASSERT_EQUAL_UINT32(0, st.sessions_active);
+}
+
+static void test_kick_returns_false_for_unknown_id(void)
+{
+    tcp_telemetry_server_test_reset();
+    /* The synthetic-session pool is never reachable via the public
+     * kick API (which iterates over real sessions only). So any kick
+     * id should be rejected — confirms the synthetic test seam doesn't
+     * accidentally leak into the operator-visible kick path. */
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+    TEST_ASSERT_FALSE(tcp_telemetry_server_kick(0xDEADBEEFu));
+}
+
+static void test_stats_counters_track_dequeue_and_deliver(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+
+    /* Drain the banner so subsequent ring stays at known capacity. */
+    char tmp[256];
+    (void)tcp_telemetry_server_test_drain(slot, tmp, sizeof(tmp));
+
+    for (int i = 0; i < 5; i++) {
+        TEST_ASSERT_EQUAL_UINT32(1,
+            tcp_telemetry_server_test_inject("tel.inf", "dt=1 ok=1"));
+    }
+
+    struct tcp_telemetry_server_stats st;
+    tcp_telemetry_server_get_stats(&st);
+    TEST_ASSERT_EQUAL_UINT64(5, st.samples_dequeued);
+    TEST_ASSERT_EQUAL_UINT64(5, st.samples_delivered);
+    TEST_ASSERT_EQUAL_UINT64(0, st.samples_dropped);
+}
+
+/* ============================================================================
  * Entry point
  * ============================================================================ */
 
@@ -252,5 +479,18 @@ int test_suite_tcp_telemetry_server(void)
     RUN_TEST(test_drop_oldest_under_backpressure);
     RUN_TEST(test_pool_exhaustion_returns_minus_one);
     RUN_TEST(test_publisher_keeps_advancing_when_client_wedged);
+
+    RUN_TEST(test_default_filter_is_tel_star);
+    RUN_TEST(test_banner_is_first_bytes_on_open);
+    RUN_TEST(test_sub_command_resubscribes_filter);
+    RUN_TEST(test_sub_with_crlf_line_ending);
+    RUN_TEST(test_bye_command_marks_session_closed);
+    RUN_TEST(test_unknown_command_echoes_comment);
+    RUN_TEST(test_oversized_input_does_not_overflow);
+    RUN_TEST(test_blank_line_is_ignored);
+
+    RUN_TEST(test_foreach_walks_active_synthetic_sessions);
+    RUN_TEST(test_kick_returns_false_for_unknown_id);
+    RUN_TEST(test_stats_counters_track_dequeue_and_deliver);
     return UNITY_END();
 }

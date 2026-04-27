@@ -15,8 +15,8 @@ In-kernel Lua runtime, SLM bindings, REPL.
 | libc stubs | `kernel/src/lua_stubs.c` — fopen/fread/stdio + ARM64 math; x86-64 adds glibc `__ctype_b_loc` / `__ctype_to{upper,lower}_loc` | Same | Same | Same (x86 ctype tables have lazy SMP-safe init via `__atomic_*`) |
 | State factory — safe surface | `lua_slm_newstate()` loads `slm_lib_safe` only — read-only / observability bindings | Same | Same | Same |
 | State factory — admin surface | `lua_slm_newstate_admin()` loads safe + `slm_lib_admin` + `slm.hailo` namespace | Same | Same | Same (no `slm.hailo` — Hailo backend gated out) |
-| `slm.*` binding surface (safe) | print, uptime, uptime_us, mem_stats, tasks, sleep, yield, version, cpu_count, cpu_id, cpu_info, term_size, vmm_stats, ipc_stats, sched_policy, sched_stats, sched_policy_list, ai_sched_stats, ai_sched_decision, eviction_policy, eviction_stats, model_stats, model_find, model_list, model_info, infer_stats, gpu_status, component_count, component_list, component_find, msg_publish, msg_publish_priority, msg_subscribe, msg_unsubscribe, msg_drain, read_line, try_getc, telnetd_status, telnetd_sessions | Same | Same | Same |
-| `slm.*` binding surface (admin) | component_run, component_hot_swap, component_hot_swap_stateful, model_load, model_load_mnist, model_pin, model_unpin, model_preload, model_preload_wait, model_infer, model_bench, sched_set_policy, task_create, task_kill, task_set_priority, task_pin, task_migrate, eviction_set_policy, shell_exec, telnetd_start, telnetd_stop, telnetd_kick | Same | Same | Same |
+| `slm.*` binding surface (safe) | print, uptime, uptime_us, mem_stats, tasks, sleep, yield, version, cpu_count, cpu_id, cpu_info, term_size, vmm_stats, ipc_stats, sched_policy, sched_stats, sched_policy_list, ai_sched_stats, ai_sched_decision, eviction_policy, eviction_stats, model_stats, model_find, model_list, model_info, infer_stats, gpu_status, component_count, component_list, component_find, msg_publish, msg_publish_priority, msg_subscribe, msg_unsubscribe, msg_drain, read_line, try_getc, telnetd_status, telnetd_sessions, telemetryd_status, telemetryd_sessions | Same | Same | Same |
+| `slm.*` binding surface (admin) | component_run, component_hot_swap, component_hot_swap_stateful, model_load, model_load_mnist, model_pin, model_unpin, model_preload, model_preload_wait, model_infer, model_bench, sched_set_policy, task_create, task_kill, task_set_priority, task_pin, task_migrate, eviction_set_policy, shell_exec, telnetd_start, telnetd_stop, telnetd_kick, telemetryd_start, telemetryd_stop, telemetryd_kick | Same | Same | Same |
 | `slm.hailo.*` namespace | — (no Hailo) | ✅ admin-only: load, infer, status, unload | — (no Hailo) | — (gated out at compile time) |
 | Embedded scripts | Lua demos via `.incbin` (demo.lua and friends) | Same | Same | Same |
 | Boundary regression test | `test_slm_safe_state_lacks_admin_bindings` asserts non-admin states cannot reach admin bindings or `slm.hailo` | Same | Same | Same |
@@ -40,4 +40,4 @@ In-kernel Lua runtime, SLM bindings, REPL.
 - `kernel/tests/test_lua.c` — `test_slm_safe_state_lacks_admin_bindings` security boundary regression
 - Issues: #152 (Lua audit — closed), #374 (Unity tearDown follow-up)
 
-*Last updated: 25 April 2026*
+*Last updated: 26 April 2026*
