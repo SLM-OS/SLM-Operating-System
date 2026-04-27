@@ -37,8 +37,8 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 | SMP | ✅ 4 cores | ✅ 4 cores | ✅ 6 cores | ✅ 8 cores | [smp.md](smp.md) |
 | Memory management | ✅ | ✅ | ✅ | ✅ | [memory.md](memory.md) |
 | Preemptive multitasking | ✅ HW | 🟡 cooperative | 🟡 cooperative | ✅ HW | [preemption.md](preemption.md) |
-| Networking | ✅ DHCP + ping | ✅ DHCP + ping | ❌ (#25, #266) | ✅ DHCP + ping | [networking.md](networking.md) |
-| GPU / accelerator inference | — | ⏸️ (#260 AI HAT+) | 🟡 detect+FECS | 🟡 GSP partial | [gpu-inference.md](gpu-inference.md) |
+| Networking | ✅ DHCP + ping | ✅ DHCP + ping | ✅ DHCP + ping (USB CDC-ECM) | ✅ DHCP + ping | [networking.md](networking.md) |
+| GPU / accelerator inference | — | ✅ Hailo-8 NPU | ✅ | ✅ | [gpu-inference.md](gpu-inference.md) |
 | Storage / filesystem | ✅ RAM disk + LittleFS | ✅ | ✅ | ✅ | [storage.md](storage.md) |
 | Shell / observability | ✅ | ✅ | ✅ | ✅ | [shell.md](shell.md) |
 | AI task scheduler | ✅ NEON | ✅ NEON | ✅ NEON | ✅ SSE | [ai-scheduler.md](ai-scheduler.md) |
@@ -48,7 +48,7 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 | IPC (message router) | ✅ | ✅ | ✅ | ✅ | [ipc.md](ipc.md) |
 | Components (hot-swap) | ✅ | ✅ | ✅ | 🟡 no EL0 yet | [components.md](components.md) |
 | Lua scripting | ✅ 5.4.7 | ✅ | ✅ | ✅ | [lua.md](lua.md) |
-| Multi-session shell (TCP + telnet + telnetd) | ✅ | ✅ hw-capable, off by default | ❌ no network | ✅ | [shell.md](shell.md) |
+| Multi-session shell (TCP + telnet + telnetd) | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ | [shell.md](shell.md) |
 | Testing / CI | ✅ full | 🟡 HW-in-loop | 🟡 HW-in-loop | ✅ QEMU + HW | [testing.md](testing.md) |
 
 ---
@@ -60,4 +60,4 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 - **Update a sheet when delivering code** — every merged PR that adds/removes a capability updates the affected sheet in the same commit.
 - **Add a new sheet** when introducing a new top-level capability. Link it from this README.
 
-*Last updated: 18 April 2026*
+*Last updated: 27 April 2026*
