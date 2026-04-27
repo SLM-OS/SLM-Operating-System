@@ -303,18 +303,20 @@ beyond the kernel image itself. Standard layout:
 
 The Qwen GGUF is the M5 demo target for `slm load /mnt/files/...`. It
 is **not** embedded in the kernel image (kernel-image budget is 32 MB;
-the GGUF is ~1 GB). Stage it onto the SD card via labctl rather than
-manually mounting:
+the GGUF is ~1 GB). Staging is done through labctl rather than
+direct `mount`/`cp`/`umount` (see `CLAUDE.md` "labctl is the only
+hardware interface"). The current high-level flow:
 
 ```bash
 # Fetch + verify on the dev host
 scripts/fetch-slm.sh
 
-# Stage to the labctl-managed SD card (jetson-nano-1 example)
-labctl sdwire_to_host --sbc jetson-nano-1
-labctl sdwire_cp build/slm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
-                  /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
-labctl sdwire_to_dut --sbc jetson-nano-1
+# Switch the SDWire to the labctl host, place the GGUF onto the
+# LittleFS partition mounted at /mnt/files via the appropriate
+# labctl sdwire subcommand (see docs/lab-operations.md for the
+# current syntax — sdwire_update / sdwire_to_host / sdwire_to_dut),
+# then return the SD card to the DUT and reboot:
+labctl power cycle jetson-nano-1
 ```
 
 For background on the GGUF format and how SLM-OS parses it, see
