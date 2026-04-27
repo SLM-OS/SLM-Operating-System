@@ -588,6 +588,17 @@ extern int rust_infer_buf_and_print(uint32_t model_index,
                                     size_t input_floats);
 
 /*
+ * Run inference on a loaded model with an internal zero-input buffer
+ * and print logits + argmax to UART.
+ *
+ * Used by the shell `model infer` command (the no-input validation
+ * variant) so kernel C code never has to touch fp32 directly. Returns
+ * 0 on success, -1 if the model is not loaded, -3 if the engine
+ * returns 0 outputs or any error.
+ */
+extern int rust_infer_and_print(uint32_t model_index);
+
+/*
  * Run model loader tests.
  * Returns: Number of failures (0 = all passed).
  */

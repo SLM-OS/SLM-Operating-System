@@ -168,6 +168,31 @@ SLM-OS> model infer mnist
 
 The output includes per-class probabilities and the predicted class index. With zero input, the predicted class depends on the model's bias terms.
 
+### model infer-file
+
+Runs inference with a real input read from VFS — the file must hold raw little-endian fp32 in the model's expected input shape:
+
+```
+SLM-OS> model infer-file mnist /mnt/files/digits/digit_3.bin
+predicted: 3  (62341 us)
+```
+
+For MNIST that's 1×1×28×28 = 784 fp32 elements = 3,136 bytes. Anything else is rejected at the shell layer with `expected N fp32 elements (M bytes), got X bytes` before the engine sees the input. Tools that produce these blobs from PNG/JPEG live under `tools/` (see `slm-put-image`).
+
+### model use-gpu
+
+Per-model GPU-dispatch toggle, layered on top of the master `gpu use inference` flag:
+
+```
+SLM-OS> model use-gpu mnist on
+model use-gpu: 'mnist' (slot 0): ON
+
+SLM-OS> model use-gpu mnist off
+model use-gpu: 'mnist' (slot 0): off
+```
+
+Default at load is ON, so flipping just the master `gpu use inference` flag enables every loaded model. Use this to force a specific model back to CPU without disturbing the master. If the master is OFF when you flip a model ON, the shell prints a `note:` that the engine will still use CPU.
+
 ### model bench
 
 Runs multiple inference iterations and reports timing statistics:

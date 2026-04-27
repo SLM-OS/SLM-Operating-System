@@ -2310,12 +2310,6 @@ static int model_unload(int argc, char *argv[])
 }
 
 /*
- * Run inference and print results — implemented in Rust to avoid FP
- * operations in -mgeneral-regs-only kernel C code.
- */
-extern int rust_infer_and_print(uint32_t model_index);
-
-/*
  * Hard upper bound on `model infer-file` payload size. The largest
  * input tensor expected today is the AI scheduler's feature vector
  * (a few KB at most); MNIST sits at 3,136 bytes (1×1×28×28 fp32).

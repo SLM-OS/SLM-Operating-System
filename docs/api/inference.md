@@ -63,22 +63,74 @@ Intended for kernel-mode callers that cannot handle floating-point types directl
 |------|------|-------------|
 | `model_index` | `uint32_t` | Registry index |
 
-**Returns:** Class index (>= 0) on success, `-1` on error. Uses a static 784-element
-input buffer (28x28 MNIST) and a 64-element output buffer.
+**Returns:** Class index (>= 0) on success, `-1` on error (model not found,
+engine error, or zero outputs).
+
+**Buffers:** 784-element input buffer is a `static` immutable zero array
+(safe to share across concurrent callers). The 64-element output buffer
+is stack-local — two concurrent callers cannot race the same array. The
+argmax loop is capped at the output buffer length so a future engine
+contract drift cannot panic-abort the kernel via an OOB index.
+
+**Thread safety:** Multiple CPUs can call this concurrently. The
+inference engine itself serialises with a spinlock; per-call output
+storage is per-stack so post-engine processing does not need additional
+synchronisation.
 
 ---
 
 ### rust_infer_and_print
 
 ```c
-/* Declared in Rust, not in slm_ffi.h — called from shell dispatch */
 extern int rust_infer_and_print(uint32_t model_index);
 ```
 
-Run inference with zero input and print the output probabilities and predicted class
-to UART. Used by the `model infer` shell command.
+Run inference with an internal zero-filled 784-element input buffer
+and print logits + predicted class to UART. Backs the `model infer
+<name|idx>` shell command.
 
-**Returns:** `0` on success, `-1` on error.
+The output array is a stack-local `[f32; 64]` (256 B), so two
+concurrent shell sessions calling `model infer` can't race the same
+buffer. Loop bound is capped at the buffer length defensively in case
+the engine's per-call output count ever drifts past it.
+
+**Returns:**
+- `0` on success
+- `-1` if `model_index` is not a loaded model
+- `-3` if the engine errors or returns 0 outputs (treated as engine
+  failure rather than "predicted class 0", which would otherwise be
+  ambiguous)
+
+---
+
+### rust_infer_buf_and_print
+
+```c
+extern int rust_infer_buf_and_print(uint32_t model_index,
+                                    const float *input,
+                                    size_t input_floats);
+```
+
+Run inference on a loaded model with a caller-supplied fp32 input
+buffer and print logits + argmax to UART. Backs the `model
+infer-file <name|idx> <path>` shell command — kernel C reads the
+file via VFS, hands the byte buffer here, and this function calls
+the engine and prints the result.
+
+`input` must point to `input_floats × 4` bytes of 4-byte-aligned
+fp32. The shell hands in a `pmm_alloc_pages` buffer; the page
+alignment satisfies the fp32 load alignment the inference kernels
+assume. The output array is a stack-local `[f32; 64]` for the same
+reason as `rust_infer_and_print`.
+
+**Returns:**
+- argmax class index (>= 0) on success
+- `-1` if `model_index` is not loaded
+- `-2` if `input` is NULL or `input_floats` is 0
+- `-3` if the engine errors or returns 0 outputs
+
+The argmax loop is capped at the output buffer length so a contract
+drift can't panic-abort the kernel via an OOB index.
 
 ---
 

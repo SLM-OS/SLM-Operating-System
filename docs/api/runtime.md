@@ -178,12 +178,21 @@ Run inference on a loaded model. Writes output floats to `output_buf`. Returns t
 ```rust
 pub extern "C" fn rust_infer_classify(model_index: u32) -> i32
 ```
-Run inference with zero input and return the argmax class index. Returns class index (>= 0) on success, -1 on error. Used by kernel-mode code that cannot use floating-point types.
+Run inference with zero input and return the argmax class index. Returns class index (>= 0) on success, -1 on error (invalid model, engine error, or zero outputs). Used by kernel-mode code that cannot use floating-point types. The output buffer is stack-local (no `static mut`), so concurrent callers don't race; argmax loop is capped at the output buffer length to defeat any future engine contract drift.
 
 ```rust
 pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32
 ```
-Run inference and print results (outputs, timing, predicted class) to UART. Returns 0 on success.
+Run inference with an internal zero input and print results (outputs, timing, predicted class) to UART. Backs the `model infer` shell command. Returns 0 on success, -1 on invalid model index, -3 on engine error or zero outputs. The output buffer is stack-local (no `static mut`), so concurrent shell sessions don't race.
+
+```rust
+pub extern "C" fn rust_infer_buf_and_print(
+    model_index: u32,
+    input: *const f32,
+    input_floats: usize,
+) -> i32
+```
+Run inference with caller-supplied fp32 input and print results to UART. Backs the `model infer-file` shell command. Returns the argmax class index (>= 0) on success, -1 on invalid model index, -2 on NULL/zero-length input, -3 on engine error. Same stack-local output + OOB-cap defenses as `rust_infer_and_print`.
 
 ```rust
 pub extern "C" fn rust_infer_stats(stats: *mut InferenceStats) -> i32
