@@ -406,48 +406,47 @@ void kernel_main(void *dtb)
                 }
             }
 
-            if (seed_defaults) {
-                /* Initialize file-driven help system */
-                if (help_init() == 0) {
-                    INFO("  Help system initialized (/mnt/files/help/)");
-                }
+            /* Boot-managed files under /mnt/files/help, demo scripts,
+             * and embedded sample assets are refreshed every boot so
+             * built-in admin/demo commands continue to work even on an
+             * existing persistent filesystem. */
+            if (help_init() == 0) {
+                INFO("  Help system initialized (/mnt/files/help/)");
+            }
 
-                /* Write demo script to filesystem */
-                {
-                    extern int demo_init(void);
-                    demo_init();
-                }
+            /* Write demo script to filesystem */
+            {
+                extern int demo_init(void);
+                demo_init();
             }
 
             blob_autoload_init();
 
-            if (seed_defaults) {
-                /* Phase 6.2c: write the embedded scheduler MLP .hef
-                 * (if the kernel was built with SCHEDULER_HEF_BLOB=...)
-                 * so `hailo load /mnt/files/scheduler_mlp.hef sched`
-                 * can reach it. Stub is a no-op when not embedded. */
-                {
-                    extern int sched_hef_init(void);
-                    sched_hef_init();
-                }
+            /* Phase 6.2c: write the embedded scheduler MLP .hef
+             * (if the kernel was built with SCHEDULER_HEF_BLOB=...)
+             * so `hailo load /mnt/files/scheduler_mlp.hef sched`
+             * can reach it. Stub is a no-op when not embedded. */
+            {
+                extern int sched_hef_init(void);
+                sched_hef_init();
+            }
 
-                /* Phase 8: write the embedded user .hef (if built with
-                 * USER_HEF_BLOB=...) to /mnt/files/user.hef so Lua
-                 * scripts can reach it without a FAT driver. Stub is
-                 * a no-op when not embedded. */
-                {
-                    extern int user_hef_init(void);
-                    user_hef_init();
-                }
+            /* Phase 8: write the embedded user .hef (if built with
+             * USER_HEF_BLOB=...) to /mnt/files/user.hef so Lua
+             * scripts can reach it without a FAT driver. Stub is
+             * a no-op when not embedded. */
+            {
+                extern int user_hef_init(void);
+                user_hef_init();
+            }
 
-                /* Write the embedded MNIST test digits (if built with
-                 * MNIST_DIGITS_DIR=...) to /mnt/files/digits/ so
-                 * slm.model_infer_file() has a known-good demo set
-                 * out of the box. Stub is a no-op when not embedded. */
-                {
-                    extern int mnist_digit_init(void);
-                    mnist_digit_init();
-                }
+            /* Write the embedded MNIST test digits (if built with
+             * MNIST_DIGITS_DIR=...) to /mnt/files/digits/ so
+             * slm.model_infer_file() has a known-good demo set
+             * out of the box. Stub is a no-op when not embedded. */
+            {
+                extern int mnist_digit_init(void);
+                mnist_digit_init();
             }
         }
     }
