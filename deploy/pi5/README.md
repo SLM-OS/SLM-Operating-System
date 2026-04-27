@@ -33,8 +33,12 @@ attempt regardless of success), or — if that wedges in firmware —
 re-flashing the SD card from the host. The `kernel rollback` shell
 command deletes `tryboot.img` so a future `kernel activate` fails
 the staging precondition rather than re-running a known-bad image,
-AND issues the BCM mailbox `SET_REBOOT_FLAGS(0)` tag (when running
-on RASPI5) to disarm the firmware tryboot flag in case the user
-already called `kernel activate` but changed their mind before the
-actual reboot fired. Both clean-ups are best-effort — rollback
-converges on "no candidate" regardless of starting state.
+AND issues the BCM mailbox `SET_REBOOT_FLAGS(0)` tag (on RASPI5
+builds) as a defensive belt against any future code path that
+might arm the flag without firing the reset, or any firmware
+where `notify_reboot` returns without resetting. The current
+`kernel activate` path runs `psci_system_reset` immediately
+after arming the flag, so there's no in-vivo window for the
+flag-clear to matter — but having the call there means rollback
+converges on "no candidate, flag clear" regardless of starting
+state. Both clean-ups are best-effort.

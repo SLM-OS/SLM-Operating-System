@@ -15,13 +15,9 @@ round-trip is verified end-to-end (closes #35).
 | 4 — `kernel` admin command surface | #370 | #395 | ✅ Merged |
 | 5 — Hardware validation on `pi-5-1` | #371 | #468/#504/this | ✅ Merged |
 
-Stage 5 sub-task 1 — the SDHCI test-image sparse-file ergonomics
-(#392) — is fully resolved: Scope A (clearer error message) shipped
-in #395; Scope B (auto-fallback to a 256 MB SDSC-sized image when
-the 4 GB sparse allocation fails) lands in PR #406. Sub-tasks 2-6
-are complete; sub-task 7 (Jetson PCIe regression check) is gated
-on a nano-resource release from @johnjezl and is the only remaining
-item under #371.
+Sub-tasks 1-6 are complete; sub-task 7 (Jetson PCIe regression
+check) is gated on a nano-resource release from @johnjezl and is
+the only remaining item under #371.
 
 ---
 

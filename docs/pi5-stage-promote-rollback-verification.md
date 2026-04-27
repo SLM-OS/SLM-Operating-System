@@ -2,7 +2,7 @@
 
 Hardware-test log for #371 sub-task 6 — the full
 `kernel stage → activate → promote → rollback` round-trip on
-`pi-5-1`. Closes #35 when this passes.
+`pi-5-1`. Tracks #35.
 
 The earlier sub-tasks already verified individual pieces:
 
@@ -70,12 +70,12 @@ lifecycle works.
 | Step | Command | Pre-state | Observed result |
 |---|---|---|---|
 | Verify pre-state | `kernel status` | C running, D staged | "running … 213937", "staged: tryboot.img (4916608 bytes), tryboot.sha present", "active kernel: kernel_2712.img (4916608 bytes)" ✅ |
-| Activate | `kernel activate` | tryboot armed → reset | next boot banner = `build 20260427214003` (kernel D) ✅ |
-| Verify tryboot kernel | `kernel status` | D running from tryboot.img | "running … 214003", staged image still present | ✅ |
-| Promote | `kernel promote` | D running, D staged | log: `promote: tryboot.img → kernel_2712.img`; staged image cleared, kernel_2712.img is now D's content (verified via post-reboot stamp) ✅ |
+| Activate | `kernel activate` | C running, D staged | flag armed; psci reset; next boot banner = `build 20260427214003` (kernel D) ✅ |
+| Verify tryboot kernel | `kernel status` | D running from tryboot.img | "running … 214003", staged image still present ✅ |
+| Promote | `kernel promote` | D running, D staged | log: `promote: tryboot.img → kernel_2712.img`; staged image cleared; kernel_2712.img is now D's content (verified via post-reboot stamp) ✅ |
 | Natural power cycle | (no activate) | promote committed | next boot banner = `build 20260427214003` (kernel D) — fallback to `config.txt`/`kernel_2712.img`, which is now D ✅ |
-| Idempotent rollback | `kernel rollback` | nothing staged | `rollback: nothing was staged`; status shows no staged image ✅ |
-| Activate without stage | `kernel activate` | nothing staged | `activate: no tryboot.img staged — run \`kernel stage\` first` (error, no flag armed) ✅ |
+| Idempotent rollback | `kernel rollback` | D running, nothing staged | `rollback: nothing was staged`; status shows no staged image ✅ |
+| Activate without stage | `kernel activate` | D running, nothing staged | `activate: no tryboot.img staged — run \`kernel stage\` first` (error, no flag armed) ✅ |
 
 **6/6 lifecycle steps pass.** kernel_2712.img on the card is now
 kernel D — the promote was persistent, and the natural power
