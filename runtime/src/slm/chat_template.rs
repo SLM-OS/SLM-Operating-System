@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 use crate::slm::tokenizer::Bbpe;
 
 /// One conversation turn in a ChatML prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     System,
     User,
@@ -42,6 +43,7 @@ impl Role {
 
 /// One turn in a ChatML conversation. `content` is borrowed; the
 /// renderer copies it into the output buffer.
+#[derive(Debug, Clone, Copy)]
 pub struct ChatTurn<'a> {
     pub role: Role,
     pub content: &'a str,
@@ -54,8 +56,16 @@ pub struct ChatTurn<'a> {
 ///
 /// Useful for `slm prompt --show-prompt` and tokenizer-bypass tests.
 pub fn render_chatml(turns: &[ChatTurn<'_>]) -> String {
-    // Pre-size: 16 bytes of envelope per turn, plus content.
-    let estimate = turns.iter().map(|t| t.content.len() + 24).sum::<usize>() + 32;
+    // Pre-size: ~24 bytes of envelope per turn plus content. Use
+    // saturating arithmetic so a turn with `content.len()` near
+    // usize::MAX doesn't overflow String::with_capacity (which
+    // would panic). The capacity is a hint; the String grows as
+    // needed.
+    let estimate = turns
+        .iter()
+        .fold(32usize, |acc, t| {
+            acc.saturating_add(t.content.len()).saturating_add(24)
+        });
     let mut out = String::with_capacity(estimate);
     for turn in turns {
         out.push_str("<|im_start|>");

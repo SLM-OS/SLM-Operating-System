@@ -143,6 +143,15 @@ impl Bbpe {
                 MetaValue::String(s) => s,
                 _ => return Err(TokenizerError::MissingVocab),
             };
+            // Per-token byte-length ceiling. Without this gate, the
+            // upstream `MAX_PLAUSIBLE_STRING_LEN` of 16 MB combined
+            // with `MAX_PLAUSIBLE_VOCAB = 1<<20` would let a hostile
+            // metadata file demand ~16 TB of allocation. Real
+            // tokens (including specials like `<|endoftext|>` at
+            // 13 bytes) sit well under MAX_TOKEN_BYTES.
+            if s.as_bytes().len() > MAX_TOKEN_BYTES {
+                return Err(TokenizerError::VocabTooLarge);
+            }
             vocab.push(s.as_bytes().to_vec());
         }
 
@@ -199,7 +208,17 @@ impl Bbpe {
             .metadata("tokenizer.ggml.token_type")
             .and_then(|v| match v {
                 MetaValue::Array(a) => {
-                    let mut out = Vec::with_capacity(a.values.len());
+                    // Same DoS gate as the vocab itself: a hostile
+                    // metadata file mustn't get to allocate an
+                    // unbounded Vec via Vec::with_capacity. The
+                    // token_type array is supposed to mirror the
+                    // vocab one-for-one; reject anything larger
+                    // outright.
+                    if a.values.len() > MAX_PLAUSIBLE_VOCAB {
+                        return None;
+                    }
+                    let cap = a.values.len().min(MAX_PLAUSIBLE_VOCAB);
+                    let mut out = Vec::with_capacity(cap);
                     for elem in &a.values {
                         match *elem {
                             MetaValue::Int8(x) => out.push(i32::from(x)),
@@ -207,7 +226,15 @@ impl Bbpe {
                             MetaValue::Int32(x) => out.push(x),
                             MetaValue::Uint8(x) => out.push(i32::from(x)),
                             MetaValue::Uint16(x) => out.push(i32::from(x)),
-                            MetaValue::Uint32(x) => out.push(x as i32),
+                            // Use try_from per runtime/CLAUDE.md
+                            // "Checked arithmetic at boundaries" —
+                            // a Uint32 that doesn't fit in i32 means
+                            // the metadata is corrupt; reject the
+                            // whole array.
+                            MetaValue::Uint32(x) => match i32::try_from(x) {
+                                Ok(v) => out.push(v),
+                                Err(_) => return None,
+                            },
                             _ => return None,
                         }
                     }
@@ -308,7 +335,11 @@ impl Bbpe {
     }
 
     fn decode_inner(&self, ids: &[u32], render_specials: bool) -> String {
-        let mut bytes: Vec<u8> = Vec::with_capacity(ids.len() * 3);
+        // saturating_mul: a hostile caller passing an enormous slice
+        // shouldn't be able to overflow Vec::with_capacity (which
+        // panics on overflow). The cap is just a hint — the loop
+        // below grows as needed.
+        let mut bytes: Vec<u8> = Vec::with_capacity(ids.len().saturating_mul(3));
         for &id in ids {
             if !render_specials && self.special_ids_to_bytes.contains_key(&id) {
                 continue;
