@@ -308,12 +308,134 @@ fn map_gguf_err(_e: GgufError) -> LoadError {
 }
 
 // ---------------------------------------------------------------------------
+// Test-fixture builder (callable from kernel tests via FFI)
+// ---------------------------------------------------------------------------
+
+/// Build a synthetic Qwen2.5-shaped GGUF with the given vocab size
+/// and write the bytes into `out`. Returns the number of bytes
+/// written, or `None` if the buffer was too small.
+///
+/// Public so the kernel C tests can call it via an FFI shim
+/// (`rust_slm_test_build_qwen_fixture`). The shape exactly matches
+/// Qwen2.5-1.5B-Instruct so the same fixture exercises every key
+/// `validate_for_inference` reads.
+pub fn build_qwen_test_fixture(vocab_size: usize, out: &mut [u8]) -> Option<usize> {
+    use crate::slm::gguf::{
+        DEFAULT_ALIGNMENT, GGUF_MAGIC, GGUF_VERSION, MetaArray, MetaType,
+    };
+
+    // Build the wire format into a Vec, then memcpy into the
+    // caller's buffer if it fits.
+    let mut tokens = Vec::with_capacity(vocab_size);
+    for i in 0..vocab_size {
+        // Short ASCII tokens — keep the fixture compact for the
+        // typical 16-128 vocab the tests use.
+        let mut s = String::with_capacity(8);
+        s.push('t');
+        s.push_str(itoa_simple(i).as_str());
+        tokens.push(MetaValue::String(s));
+    }
+
+    let kvs: Vec<(&'static str, MetaValue)> = alloc::vec![
+        ("general.alignment", MetaValue::Uint32(DEFAULT_ALIGNMENT as u32)),
+        ("general.architecture", MetaValue::String(String::from("qwen2"))),
+        ("qwen2.block_count", MetaValue::Uint32(28)),
+        ("qwen2.embedding_length", MetaValue::Uint32(1536)),
+        ("qwen2.attention.head_count", MetaValue::Uint32(12)),
+        ("qwen2.attention.head_count_kv", MetaValue::Uint32(2)),
+        ("qwen2.feed_forward_length", MetaValue::Uint32(8960)),
+        ("qwen2.context_length", MetaValue::Uint32(32_768)),
+        ("qwen2.rope.freq_base", MetaValue::Float32(1_000_000.0)),
+        (
+            "tokenizer.ggml.tokens",
+            MetaValue::Array(MetaArray {
+                elem_type: MetaType::String,
+                values: tokens,
+            }),
+        ),
+    ];
+
+    let mut buf: Vec<u8> = Vec::with_capacity(512 + vocab_size * 12);
+    buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&GGUF_VERSION.to_le_bytes());
+    buf.extend_from_slice(&0u64.to_le_bytes()); // tensor_count = 0
+    buf.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+    for (k, v) in &kvs {
+        write_string(&mut buf, k);
+        write_meta_value(&mut buf, v);
+    }
+    let pad = (DEFAULT_ALIGNMENT - (buf.len() as u64 % DEFAULT_ALIGNMENT))
+        % DEFAULT_ALIGNMENT;
+    buf.extend(core::iter::repeat_n(0u8, pad as usize));
+
+    if out.len() < buf.len() {
+        return None;
+    }
+    out[..buf.len()].copy_from_slice(&buf);
+    Some(buf.len())
+}
+
+fn write_string(out: &mut Vec<u8>, s: &str) {
+    out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+    out.extend_from_slice(s.as_bytes());
+}
+
+fn write_meta_value(out: &mut Vec<u8>, v: &MetaValue) {
+    use crate::slm::gguf::MetaArray;
+    out.extend_from_slice(&v.meta_type().as_u32().to_le_bytes());
+    match v {
+        MetaValue::Uint32(x) => out.extend_from_slice(&x.to_le_bytes()),
+        MetaValue::Float32(x) => out.extend_from_slice(&x.to_le_bytes()),
+        MetaValue::String(s) => write_string(out, s),
+        MetaValue::Array(MetaArray { elem_type, values }) => {
+            out.extend_from_slice(&elem_type.as_u32().to_le_bytes());
+            out.extend_from_slice(&(values.len() as u64).to_le_bytes());
+            for elem in values {
+                if let MetaValue::String(s) = elem {
+                    write_string(out, s);
+                } else {
+                    // Fixture builder only emits string arrays.
+                    // Anything else is a programming error in the
+                    // builder itself, not a runtime input.
+                    return;
+                }
+            }
+        }
+        // Other variants aren't needed by the Qwen fixture; bail
+        // silently rather than write garbage.
+        _ => {}
+    }
+}
+
+/// Tiny integer-to-string for short token names. Avoids dragging in
+/// `format!` here just for token labels.
+fn itoa_simple(n: usize) -> String {
+    if n == 0 {
+        return String::from("0");
+    }
+    let mut digits: [u8; 20] = [0; 20];
+    let mut idx = digits.len();
+    let mut x = n;
+    while x > 0 {
+        idx -= 1;
+        digits[idx] = b'0' + (x % 10) as u8;
+        x /= 10;
+    }
+    let mut s = String::with_capacity(digits.len() - idx);
+    for &d in &digits[idx..] {
+        s.push(d as char);
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     /// `cargo test` runs tests in parallel by default. All five
     /// tests in this module mutate the global `SLOTS` table; without
@@ -330,12 +452,7 @@ mod tests {
     impl TestSerialGuard {
         fn new() -> Self {
             while TEST_SERIAL
-                .compare_exchange_weak(
-                    false,
-                    true,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                )
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
                 .is_err()
             {
                 core::hint::spin_loop();
@@ -350,90 +467,15 @@ mod tests {
         }
     }
 
-    use crate::slm::gguf::{
-        DEFAULT_ALIGNMENT, GGUF_MAGIC, GGUF_VERSION, GgmlType, MetaArray, MetaType,
-    };
-    use alloc::string::ToString;
-    use alloc::vec;
-
-    /// Test-only helper duplicating a small piece of `TestBuilder` to
-    /// keep the registry tests self-contained — the parser tests
-    /// already exercise the full builder; here we just need a valid
-    /// Qwen-shaped GGUF with a tokens array.
+    /// Build a Qwen-shaped fixture in a Vec for test convenience.
+    /// Wraps the public `build_qwen_test_fixture` (which takes a
+    /// caller-supplied buffer) so tests don't have to size it
+    /// themselves.
     fn build_qwen_gguf_with_vocab(vocab_size: usize) -> Vec<u8> {
-        // Re-use the parser's writer through the public type system:
-        // construct a builder via the parser-side API surface. The
-        // test module of gguf.rs has the writer; we'll mirror its
-        // wire-format calls inline.
-        let mut tokens = Vec::with_capacity(vocab_size);
-        for i in 0..vocab_size {
-            tokens.push(MetaValue::String(format!("tok{i}")));
-        }
-        let kvs: Vec<(String, MetaValue)> = vec![
-            ("general.alignment".to_string(), MetaValue::Uint32(DEFAULT_ALIGNMENT as u32)),
-            ("general.architecture".to_string(), MetaValue::String("qwen2".into())),
-            ("qwen2.block_count".to_string(), MetaValue::Uint32(28)),
-            ("qwen2.embedding_length".to_string(), MetaValue::Uint32(1536)),
-            ("qwen2.attention.head_count".to_string(), MetaValue::Uint32(12)),
-            ("qwen2.attention.head_count_kv".to_string(), MetaValue::Uint32(2)),
-            ("qwen2.feed_forward_length".to_string(), MetaValue::Uint32(8960)),
-            ("qwen2.context_length".to_string(), MetaValue::Uint32(32768)),
-            ("qwen2.rope.freq_base".to_string(), MetaValue::Float32(1_000_000.0)),
-            (
-                "tokenizer.ggml.tokens".to_string(),
-                MetaValue::Array(MetaArray {
-                    elem_type: MetaType::String,
-                    values: tokens,
-                }),
-            ),
-        ];
-
-        // Manually write the GGUF wire format. This duplicates the
-        // parser-side test writer minimally (no tensors needed).
-        let mut out: Vec<u8> = Vec::new();
-        out.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
-        out.extend_from_slice(&GGUF_VERSION.to_le_bytes());
-        out.extend_from_slice(&0u64.to_le_bytes()); // tensor_count = 0
-        out.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
-
-        for (k, v) in &kvs {
-            write_string(&mut out, k);
-            write_meta_value(&mut out, v);
-        }
-        // Pad to alignment, no tensor data.
-        let pad = (DEFAULT_ALIGNMENT - (out.len() as u64 % DEFAULT_ALIGNMENT))
-            % DEFAULT_ALIGNMENT;
-        out.extend(core::iter::repeat_n(0u8, pad as usize));
-        out
-    }
-
-    fn write_string(out: &mut Vec<u8>, s: &str) {
-        out.extend_from_slice(&(s.len() as u64).to_le_bytes());
-        out.extend_from_slice(s.as_bytes());
-    }
-
-    fn write_meta_value(out: &mut Vec<u8>, v: &MetaValue) {
-        out.extend_from_slice(&v.meta_type().as_u32().to_le_bytes());
-        match v {
-            MetaValue::Uint32(x) => out.extend_from_slice(&x.to_le_bytes()),
-            MetaValue::Float32(x) => out.extend_from_slice(&x.to_le_bytes()),
-            MetaValue::String(s) => write_string(out, s),
-            MetaValue::Array(arr) => {
-                out.extend_from_slice(&arr.elem_type.as_u32().to_le_bytes());
-                out.extend_from_slice(&(arr.values.len() as u64).to_le_bytes());
-                for elem in &arr.values {
-                    // Element-type tag is implicit in the array; only
-                    // payload bytes go on the wire (no per-element
-                    // type prefix). For tokens we have all strings.
-                    if let MetaValue::String(s) = elem {
-                        write_string(out, s);
-                    } else {
-                        panic!("test: only String tokens supported");
-                    }
-                }
-            }
-            _ => panic!("test: unsupported MetaValue write"),
-        }
+        let mut buf = vec![0u8; 1024 + vocab_size * 16];
+        let n = build_qwen_test_fixture(vocab_size, &mut buf).expect("fixture fits");
+        buf.truncate(n);
+        buf
     }
 
     // -- Tests --
