@@ -6191,18 +6191,37 @@ int cmd_csidiag(int argc, char *argv[])
     rc = camrtc_capture_phy_stream_open(0u, 0u, 0u, &result);
     uart_printf("  PHY_STREAM_OPEN: rc=%d result=0x%x\r\n",
                 rc, (unsigned)result);
-    if (rc == 0) {
-        if (result == 0u) {
-            uart_puts("  *** PHY_STREAM_OPEN OK — IVC ring round- ***\r\n");
-            uart_puts("  *** trip works AND RCE accepted port A.  ***\r\n");
+    if (rc != 0 || result != 0u) {
+        if (rc != 0) {
+            uart_puts("  *** PHY_STREAM_OPEN failed at the IVC layer  ***\r\n");
+            uart_puts("  *** (see WARN log); skipping SET_CONFIG.     ***\r\n");
         } else {
-            uart_puts("  *** IVC ring round-trip OK; RCE rejected ***\r\n");
-            uart_puts("  *** with the result code above (decode    ***\r\n");
-            uart_puts("  *** via l4t-camrtc-capture-messages.h).   ***\r\n");
+            uart_puts("  *** RCE rejected PHY_STREAM_OPEN; skipping   ***\r\n");
+            uart_puts("  *** SET_CONFIG. Decode result via            ***\r\n");
+            uart_puts("  *** l4t-camrtc-capture-messages.h.           ***\r\n");
         }
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+
+    /* PHY_STREAM_OPEN succeeded. Configure the brick + CIL for
+     * IMX219: 2 D-PHY lanes, 456 MHz MIPI clock (the IMX219
+     * default link freq from `docs/reference/linux-imx219.c:139`).
+     * SoC-default t_hs_settle / t_clk_settle (0). */
+    uint32_t cfg_result = 0xDEADBEEFu;
+    rc = camrtc_capture_csi_stream_set_config(0u, 0u, 2u, 456000u,
+                                              &cfg_result);
+    uart_printf("  CSI_SET_CONFIG:  rc=%d result=0x%x\r\n",
+                rc, (unsigned)cfg_result);
+    if (rc == 0 && cfg_result == 0u) {
+        uart_puts("  *** NVCSI configured for IMX219 (2-lane D-PHY ***\r\n");
+        uart_puts("  *** 456 MHz). Stream sensor + check NVCSI     ***\r\n");
+        uart_puts("  *** INTR_STATUS to confirm packets on wire.   ***\r\n");
+    } else if (rc == 0) {
+        uart_puts("  *** RCE rejected SET_CONFIG; decode result   ***\r\n");
+        uart_puts("  *** via l4t-camrtc-capture-messages.h.       ***\r\n");
     } else {
-        uart_puts("  *** PHY_STREAM_OPEN failed at the IVC layer  ***\r\n");
-        uart_puts("  *** (see WARN log).                          ***\r\n");
+        uart_puts("  *** SET_CONFIG failed at the IVC layer.      ***\r\n");
     }
 
     uart_puts("=== End ===\r\n");
