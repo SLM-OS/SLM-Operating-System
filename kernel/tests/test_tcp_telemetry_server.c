@@ -465,11 +465,46 @@ static void test_stats_counters_track_dequeue_and_deliver(void)
     TEST_ASSERT_EQUAL_UINT64(0, st.samples_dropped);
 }
 
-/* Regression for the slmos-review finding that the original
- * drops counter only incremented once per failed enqueue, regardless
- * of how many lines were evicted to make room. With the per-line
- * accounting, dropping ~N old lines to make room for one new one
- * must add ~N (not 1) to both s->drops and g_samples_dropped. */
+/* Regression for the round-2 review finding: the original
+ * tcp_telemetry_server_poll() short-circuited on `!g_listen_pcb`
+ * BEFORE running the per-session teardown loop. That meant a
+ * `telemetry server stop` followed by `telemetry server start`
+ * gradually starved the session pool — sessions were marked closed
+ * but never tcp_close'd, never session_free'd, and their slots
+ * stayed in_use. The fix splits poll() so the msg_router drain is
+ * gated on the listener but session teardown always runs.
+ *
+ * Test strategy: fill the entire pool with simulated "closed real"
+ * sessions (the test seam fakes the post-disconnect state without
+ * needing a live lwIP pcb). Without the fix, poll() does nothing
+ * because there's no listener; the slots stay occupied; the
+ * subsequent open returns -1. With the fix, poll() reclaims them all
+ * and the open succeeds. */
+static void test_poll_reclaims_closed_sessions_without_listener(void)
+{
+    tcp_telemetry_server_test_reset();
+
+    int slots[MAX_TELEMETRY_SESSIONS];
+    for (int i = 0; i < MAX_TELEMETRY_SESSIONS; i++) {
+        slots[i] = tcp_telemetry_server_test_open_session("tel.*");
+        TEST_ASSERT_TRUE(slots[i] >= 0);
+        tcp_telemetry_server_test_simulate_closed_real_session(slots[i]);
+    }
+
+    /* Pool is now full of "closed real" sessions and the listener is
+     * not running (test build never starts it). poll() must still
+     * reclaim them. */
+    tcp_telemetry_server_poll();
+
+    /* A fresh open should succeed because all slots got freed. Without
+     * the fix, this returns -1. */
+    int fresh = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_MESSAGE(fresh >= 0,
+        "poll() must reclaim closed sessions even when the listener is "
+        "stopped — otherwise telemetry server stop/start cycles starve "
+        "the session pool");
+}
+
 static void test_drops_count_per_line_evicted_not_per_call(void)
 {
     tcp_telemetry_server_test_reset();
@@ -544,5 +579,6 @@ int test_suite_tcp_telemetry_server(void)
     RUN_TEST(test_kick_returns_false_for_unknown_id);
     RUN_TEST(test_stats_counters_track_dequeue_and_deliver);
     RUN_TEST(test_drops_count_per_line_evicted_not_per_call);
+    RUN_TEST(test_poll_reclaims_closed_sessions_without_listener);
     return UNITY_END();
 }

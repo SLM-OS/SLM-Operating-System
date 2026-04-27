@@ -147,6 +147,13 @@ const char *tcp_telemetry_server_test_session_filter(int slot);
 /* True if the session has been marked closed (e.g. by `BYE`). */
 bool tcp_telemetry_server_test_session_closed(int slot);
 
+/* Convert a synthetic session into a "pseudo-real, already-closed"
+ * session so the unit tests can drive poll()'s teardown loop without a
+ * live lwIP pcb. After this call the slot looks like a real session
+ * whose peer disconnected: in_use=true, synthetic=false, pcb=NULL,
+ * closed=true. The next poll() must reclaim the slot via session_free. */
+void tcp_telemetry_server_test_simulate_closed_real_session(int slot);
+
 /* Tear down all synthetic sessions and reset counters. */
 void tcp_telemetry_server_test_reset(void);
 

@@ -539,31 +539,36 @@ static void drain_to_lwip(struct tel_session *s)
 
 void tcp_telemetry_server_poll(void)
 {
-    /* When the listener is not running there is nothing to drain — tests
-     * exercise the fanout path directly via tcp_telemetry_server_test_inject
-     * and do not depend on this tick. */
-    if (!g_listen_pcb) return;
+    /* Step 1: drain the msg_router subscription — gated on the listener
+     * because there is nothing to source samples from once the operator
+     * stops the server. (Tests exercise the fanout path directly via
+     * tcp_telemetry_server_test_inject and do not depend on this tick.) */
+    if (g_listen_pcb) {
+        char topic_buf[TELEMETRY_TOPIC_LEN];
+        for (;;) {
+            const char *payload = msg_router_receive(TELEMETRY_COMPONENT_IDX,
+                                                     topic_buf);
+            if (!payload) break;
+            g_samples_dequeued++;
 
-    /* Step 1: drain the msg_router subscription. */
-    char topic_buf[TELEMETRY_TOPIC_LEN];
-    for (;;) {
-        const char *payload = msg_router_receive(TELEMETRY_COMPONENT_IDX,
-                                                 topic_buf);
-        if (!payload) break;
-        g_samples_dequeued++;
+            uint8_t line[TELEMETRY_LINE_MAX];
+            uint32_t line_len = (uint32_t)format_sample((char *)line,
+                                                       sizeof(line),
+                                                       topic_buf, payload,
+                                                       ++g_seq, sys_now());
+            msg_router_ack(TELEMETRY_COMPONENT_IDX);
+            if (line_len == 0) continue;
 
-        uint8_t line[TELEMETRY_LINE_MAX];
-        uint32_t line_len = (uint32_t)format_sample((char *)line, sizeof(line),
-                                                   topic_buf, payload,
-                                                   ++g_seq, sys_now());
-        msg_router_ack(TELEMETRY_COMPONENT_IDX);
-        if (line_len == 0) continue;
-
-        uint32_t delivered = fanout_sample(topic_buf, line, line_len);
-        if (delivered > 0) g_samples_delivered++;
+            uint32_t delivered = fanout_sample(topic_buf, line, line_len);
+            if (delivered > 0) g_samples_delivered++;
+        }
     }
 
-    /* Step 2: drain client TX rings → lwIP, run lifecycle teardown. */
+    /* Step 2: drain client TX rings → lwIP, run lifecycle teardown.
+     * Always runs — even when the listener has been stopped — so that
+     * sessions left over from a previous `telemetry server stop` get
+     * tcp_close'd and their pool slots reclaimed instead of being
+     * orphaned until the next reboot. */
     for (uint32_t i = 0; i < MAX_TELEMETRY_SESSIONS; i++) {
         struct tel_session *s = &g_sessions[i];
         if (!s->in_use) continue;
@@ -804,6 +809,20 @@ bool tcp_telemetry_server_test_session_closed(int slot)
     struct tel_session *s = &g_sessions[slot];
     if (!s->in_use || !s->synthetic) return false;
     return s->closed;
+}
+
+void tcp_telemetry_server_test_simulate_closed_real_session(int slot)
+{
+    if (slot < 0 || (uint32_t)slot >= MAX_TELEMETRY_SESSIONS) return;
+    struct tel_session *s = &g_sessions[slot];
+    if (!s->in_use || !s->synthetic) return;
+    /* Pretend this slot was a real lwIP session whose peer just
+     * disconnected: drop the synthetic gate so poll()'s teardown loop
+     * processes it, null the pcb so drain_to_lwip is a no-op, and
+     * mark it closed so the lifecycle branch reaps it. */
+    s->synthetic = false;
+    s->pcb       = NULL;
+    s->closed    = true;
 }
 
 void tcp_telemetry_server_test_reset(void)
