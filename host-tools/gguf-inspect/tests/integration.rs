@@ -6,7 +6,9 @@
 //! spec defines.
 
 use gguf_inspect::{
-    GgmlType, Gguf, GgufBuilder, GgufError, MetaArray, MetaType, MetaValue, TensorInfo,
+    read_vocab_blob, write_vocab_blob, BlobError, GgmlType, Gguf, GgufBuilder, GgufError,
+    MetaArray, MetaType, MetaValue, SpecialTokenIds, TensorInfo, HEADER_SIZE, VOCB_MAGIC,
+    VOCB_VERSION,
 };
 
 /// Helper: assert a tensor descriptor matches the expected fields.
@@ -457,5 +459,231 @@ fn rejects_unknown_meta_type_tag() {
     match Gguf::parse(&bytes) {
         Err(GgufError::UnknownMetaType(0xFFFF)) => {}
         other => panic!("expected UnknownMetaType(0xFFFF), got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// M0.4 vocab-blob tests. Build a synthetic Qwen-like GGUF in memory,
+// extract vocab/merges/specials by walking the parsed metadata the same
+// way `dump-vocab` does, write a blob, parse it back, and assert exact
+// round-trip including the -1 sentinels for missing special-token IDs.
+// ---------------------------------------------------------------------
+
+/// Mirrors `extract_byte_array` in main.rs — we duplicate the few lines
+/// here to keep `main.rs` private to the binary. If this drifts, the
+/// round-trip test will fail.
+fn extract_byte_array(g: &Gguf, key: &str) -> Option<Vec<Vec<u8>>> {
+    match g.metadata().get(key)? {
+        MetaValue::Array(a) if a.elem_type == MetaType::String => {
+            let mut out = Vec::with_capacity(a.values.len());
+            for v in &a.values {
+                if let MetaValue::String(s) = v {
+                    out.push(s.as_bytes().to_vec());
+                } else {
+                    return None;
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn extract_token_id(g: &Gguf, key: &str) -> i32 {
+    match g.metadata().get(key) {
+        Some(MetaValue::Uint32(v)) => i32::try_from(*v).unwrap_or(-1),
+        Some(MetaValue::Uint64(v)) => i32::try_from(*v).unwrap_or(-1),
+        Some(MetaValue::Int32(v)) => *v,
+        Some(MetaValue::Int64(v)) => i32::try_from(*v).unwrap_or(-1),
+        _ => -1,
+    }
+}
+
+#[test]
+fn dump_vocab_round_trips_synthetic_qwen_tokenizer() {
+    // Synthetic Qwen2-like tokenizer metadata. The byte sequence "Ġcat"
+    // here is the literal UTF-8 of the BBPE space-marker glyph followed
+    // by ASCII; real Qwen vocabs include byte-fallback tokens that
+    // aren't valid UTF-8 on their own, but the GGUF layer always
+    // wraps tokens in UTF-8 strings and the runtime does the byte
+    // unmangling — so a UTF-8 string suffices here.
+    let bytes = GgufBuilder::new()
+        .add_string("general.architecture", "qwen2")
+        .add_string_array(
+            "tokenizer.ggml.tokens",
+            vec![
+                "<|endoftext|>".into(),
+                "Hello".into(),
+                "World".into(),
+                " ".into(),
+                "Ġcat".into(),
+            ],
+        )
+        .add_string_array("tokenizer.ggml.merges", vec!["Ġ a".into(), "h e".into()])
+        .add_u32("tokenizer.ggml.bos_token_id", 0)
+        .add_u32("tokenizer.ggml.eos_token_id", 0)
+        .build();
+
+    let g = Gguf::parse(&bytes).expect("parse");
+
+    let vocab = extract_byte_array(&g, "tokenizer.ggml.tokens").expect("tokens");
+    let merges = extract_byte_array(&g, "tokenizer.ggml.merges").expect("merges");
+    let specials = SpecialTokenIds {
+        bos: extract_token_id(&g, "tokenizer.ggml.bos_token_id"),
+        eos: extract_token_id(&g, "tokenizer.ggml.eos_token_id"),
+        pad: extract_token_id(&g, "tokenizer.ggml.padding_token_id"),
+        unk: extract_token_id(&g, "tokenizer.ggml.unknown_token_id"),
+        sep: extract_token_id(&g, "tokenizer.ggml.separator_token_id"),
+    };
+
+    // Sanity-check what we extracted before serialising.
+    assert_eq!(vocab.len(), 5);
+    assert_eq!(vocab[0], b"<|endoftext|>");
+    assert_eq!(vocab[4], "Ġcat".as_bytes());
+    assert_eq!(merges.len(), 2);
+    assert_eq!(merges[0], "Ġ a".as_bytes());
+    assert_eq!(specials.bos, 0);
+    assert_eq!(specials.eos, 0);
+    assert_eq!(specials.pad, -1);
+    assert_eq!(specials.unk, -1);
+    assert_eq!(specials.sep, -1);
+
+    let mut buf = Vec::new();
+    write_vocab_blob(&mut buf, &vocab, &merges, specials).expect("write");
+
+    // Header sanity.
+    assert_eq!(&buf[0..4], &VOCB_MAGIC);
+    assert_eq!(
+        u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+        VOCB_VERSION
+    );
+    assert_eq!(u32::from_le_bytes(buf[8..12].try_into().unwrap()), 5);
+    assert_eq!(u32::from_le_bytes(buf[12..16].try_into().unwrap()), 2);
+
+    let parsed = read_vocab_blob(&buf).expect("read");
+    assert_eq!(parsed.version, VOCB_VERSION);
+    assert_eq!(parsed.specials, specials);
+    assert_eq!(parsed.vocab, vocab);
+    assert_eq!(parsed.merges, merges);
+}
+
+#[test]
+fn dump_vocab_handles_missing_specials() {
+    // GGUF with vocab + merges but no special-token IDs at all.
+    let bytes = GgufBuilder::new()
+        .add_string("general.architecture", "qwen2")
+        .add_string_array(
+            "tokenizer.ggml.tokens",
+            vec!["a".into(), "b".into(), "c".into()],
+        )
+        .add_string_array("tokenizer.ggml.merges", vec!["a b".into()])
+        .build();
+
+    let g = Gguf::parse(&bytes).expect("parse");
+    let vocab = extract_byte_array(&g, "tokenizer.ggml.tokens").expect("tokens");
+    let merges = extract_byte_array(&g, "tokenizer.ggml.merges").expect("merges");
+    let specials = SpecialTokenIds {
+        bos: extract_token_id(&g, "tokenizer.ggml.bos_token_id"),
+        eos: extract_token_id(&g, "tokenizer.ggml.eos_token_id"),
+        pad: extract_token_id(&g, "tokenizer.ggml.padding_token_id"),
+        unk: extract_token_id(&g, "tokenizer.ggml.unknown_token_id"),
+        sep: extract_token_id(&g, "tokenizer.ggml.separator_token_id"),
+    };
+    // All five fields should be the -1 sentinel.
+    assert_eq!(specials, SpecialTokenIds::unset());
+
+    let mut buf = Vec::new();
+    write_vocab_blob(&mut buf, &vocab, &merges, specials).expect("write");
+
+    // Verify each i32 special slot in the header is exactly -1.
+    for off in [16, 20, 24, 28, 32] {
+        let raw = i32::from_le_bytes(buf[off..off + 4].try_into().unwrap());
+        assert_eq!(raw, -1, "special at offset {off} should be -1");
+    }
+
+    let parsed = read_vocab_blob(&buf).expect("read");
+    assert_eq!(parsed.specials, SpecialTokenIds::unset());
+    assert_eq!(parsed.vocab, vocab);
+    assert_eq!(parsed.merges, merges);
+}
+
+#[test]
+fn vocab_blob_rejects_truncated_input() {
+    // Build a real blob, then chop off half of it. Parsing should
+    // surface BlobError::Truncated rather than panicking.
+    // Use enough vocab/merge entries that buf.len() / 2 lands well
+    // past the 40-byte header but inside the body region.
+    let vocab: Vec<Vec<u8>> = (0..16).map(|i| vec![b'a' + (i as u8); 8]).collect();
+    let merges: Vec<Vec<u8>> = (0..8).map(|i| vec![b'm' + (i as u8); 4]).collect();
+    let mut buf = Vec::new();
+    write_vocab_blob(&mut buf, &vocab, &merges, SpecialTokenIds::unset()).expect("write");
+    let chop_at = HEADER_SIZE + (buf.len() - HEADER_SIZE) / 2;
+    assert!(
+        chop_at > HEADER_SIZE && chop_at < buf.len(),
+        "test fixture must have body to chop"
+    );
+    let truncated = &buf[..chop_at];
+    match read_vocab_blob(truncated) {
+        Err(BlobError::Truncated { .. }) => {}
+        other => panic!("expected Truncated, got {other:?}"),
+    }
+}
+
+#[test]
+fn vocab_blob_rejects_oversized_vocab_count() {
+    // Hand-craft a header that claims 10M vocab entries followed by
+    // only ~1 KB of body. The parser's pre-allocate gate (count >
+    // remaining / MIN_ENTRY_SIZE = 5) should reject this without
+    // entering the read loop.
+    let mut buf = Vec::with_capacity(HEADER_SIZE + 1024);
+    buf.extend_from_slice(&VOCB_MAGIC);
+    buf.extend_from_slice(&VOCB_VERSION.to_le_bytes());
+    let claimed_vocab: u32 = 10_000_000;
+    buf.extend_from_slice(&claimed_vocab.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // merges_count
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // bos
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // eos
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // pad
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // unk
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // sep
+    buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    assert_eq!(buf.len(), HEADER_SIZE);
+    // Append exactly 1 KB of body — far less than 10M * 5 bytes.
+    buf.extend(std::iter::repeat_n(0u8, 1024));
+
+    match read_vocab_blob(&buf) {
+        Err(BlobError::OversizedCount { count }) => assert_eq!(count, claimed_vocab),
+        other => panic!("expected OversizedCount, got {other:?}"),
+    }
+}
+
+#[test]
+fn vocab_blob_rejects_oversized_entry_len() {
+    // Hand-craft a single-vocab-entry blob whose entry-length prefix
+    // claims more than MAX_PLAUSIBLE_ENTRY_LEN (1 << 16). The
+    // per-entry gate at vocab_blob::read_entry must reject this even
+    // though the count gate above passes (one entry is plausible).
+    let mut buf = Vec::with_capacity(HEADER_SIZE + 4 + 8);
+    buf.extend_from_slice(&VOCB_MAGIC);
+    buf.extend_from_slice(&VOCB_VERSION.to_le_bytes());
+    buf.extend_from_slice(&1u32.to_le_bytes()); // vocab_count = 1
+    buf.extend_from_slice(&0u32.to_le_bytes()); // merges_count = 0
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // bos
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // eos
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // pad
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // unk
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // sep
+    buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    assert_eq!(buf.len(), HEADER_SIZE);
+    // Entry length-prefix claims 128 KiB (above the 64 KiB cap).
+    let claimed_len: u32 = (1u32 << 17) | 0xCAFE;
+    buf.extend_from_slice(&claimed_len.to_le_bytes());
+    // A handful of trailing bytes — fewer than claimed_len, but the
+    // gate fires on the prefix before any body read.
+    buf.extend(std::iter::repeat_n(0u8, 8));
+
+    match read_vocab_blob(&buf) {
+        Err(BlobError::OversizedToken { len }) => assert_eq!(len, claimed_len),
+        other => panic!("expected OversizedToken, got {other:?}"),
     }
 }
