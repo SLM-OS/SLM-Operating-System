@@ -2399,6 +2399,13 @@ static int model_infer_file(int argc, char *argv[])
         shell_printf("model infer-file: failed (error %d)\r\n", result);
         return -1;
     }
+    /* Echo the prediction to the active shell session — the detailed
+     * logits-per-bucket dump went to UART (kernel-Rust uses
+     * `uart_printf`); telnet operators wouldn't otherwise see the
+     * result. The Rust function returns argmax on success. */
+    uint64_t elapsed_us = (t1 > t0 ? t1 - t0 : 0u) / 1000u;
+    shell_printf("predicted: %d  (%lu us)\r\n",
+                 result, (unsigned long)elapsed_us);
     return 0;
 }
 
