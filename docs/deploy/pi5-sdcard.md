@@ -78,23 +78,11 @@ fi
 [ -f "$MNT/cmdline.txt.pios-bak" ] || sudo cp -a "$MNT/cmdline.txt" "$MNT/cmdline.txt.pios-bak"
 [ -f "$MNT/kernel_2712.img.pios-bak" ] || sudo cp -a "$MNT/kernel_2712.img" "$MNT/kernel_2712.img.pios-bak"
 
-# Install bare-metal config
-# Authoritative source: docs/pi5-baremetal-status.md §Configuration
-sudo tee "$MNT/config.txt" >/dev/null <<'EOF'
-# SLM-OS bare-metal boot — Pi 5
-# Original Pi OS config preserved in config.txt.pios-bak
-
-arm_64bit=1
-kernel_address=0x80000
-kernel=kernel_2712.img
-
-# Firmware pre-initializes PCIe/RP1 so the kernel can reach the UART.
-# Without pciex4_reset=0, the firmware resets PCIe after its banner and
-# takes RP1 (and with it GPIO + UART) offline before the kernel runs.
-pciex4_reset=0
-uart_2ndstage=1
-os_check=0
-EOF
+# Install bare-metal config + tryboot config
+# Source of truth: deploy/pi5/{config.txt,tryboot.txt}
+# Authoritative spec for individual keys: docs/pi5-baremetal-status.md §Configuration
+sudo cp -v deploy/pi5/config.txt   "$MNT/config.txt"
+sudo cp -v deploy/pi5/tryboot.txt  "$MNT/tryboot.txt"
 
 # Install the SLM-OS kernel
 sudo cp -v build/kernel/slmos.bin "$MNT/kernel_2712.img"
@@ -113,7 +101,8 @@ After this completes, the boot partition contains:
 | File | Purpose |
 |---|---|
 | `kernel_2712.img` | SLM-OS binary (the Pi firmware looks for this filename on Pi 5) |
-| `config.txt` | Bare-metal boot configuration — the one written above |
+| `config.txt` | Bare-metal boot configuration — copied from `deploy/pi5/config.txt` |
+| `tryboot.txt` | Tryboot config (loaded instead of `config.txt` when the bootloader tryboot flag is armed) — copied from `deploy/pi5/tryboot.txt`. See `deploy/pi5/README.md`. |
 | `config.txt.pios-bak` | Original Raspberry Pi OS `config.txt` |
 | `cmdline.txt.pios-bak` | Original kernel command line (unused by bare-metal SLM-OS) |
 | `kernel_2712.img.pios-bak` | Original Linux kernel |

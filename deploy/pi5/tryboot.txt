@@ -1,0 +1,42 @@
+# SLM-OS tryboot config for Raspberry Pi 5 (BCM2712).
+#
+# Pi 5 firmware loads this file INSTEAD OF config.txt when the
+# bootloader tryboot flag is armed (one-shot, set by `kernel activate`
+# via the bcm_mailbox SET_REBOOT_FLAGS / NOTIFY_REBOOT tag pair).
+#
+# `[tryboot]` is NOT a config.txt filter section on Pi 5 — the
+# documented mechanism is this separate tryboot.txt file. After the
+# tryboot.img boot succeeds, the flag clears and the next power cycle
+# falls back to config.txt + kernel_2712.img automatically.
+#
+# Mirror config.txt EXCEPT for the kernel filename — firmware does not
+# merge the two files. See docs/deploy/pi5-sdcard.md for provisioning,
+# docs/dynamic-kernel-replace-plan.md §Stage 5 for the round-trip.
+
+# Tell firmware not to validate the kernel as a Linux image — SLM-OS
+# is bare-metal AArch64 and won't pass Linux header checks.
+os_check=0
+
+# Don't try to load an initramfs (we have no Linux).
+auto_initramfs=0
+
+# Run AArch64 mode (Pi 5 default but explicit is safer).
+arm_64bit=1
+
+# Run at full firmware-allowed clock.
+arm_boost=1
+
+# Kill overscan (no display anyway, but keeps cmdline.txt-free behavior clean).
+disable_overscan=1
+
+# Firmware-stage UART output on the GPIO 14/15 PL011 (UART0). Lets the
+# Pi firmware print pre-kernel status to the serial console, useful for
+# diagnosing boot failures before SLM-OS's own UART comes up.
+uart_2ndstage=1
+
+# Keep PCIe x4 reset GPIO untouched at firmware time. SLM-OS handles
+# PCIe setup itself; firmware-side reset can wedge the BCM root complex.
+pciex4_reset=0
+
+# Load the candidate kernel image instead of the active one.
+kernel=tryboot.img
