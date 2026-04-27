@@ -36,7 +36,7 @@ Interactive shell, command surface, observability commands, multi-session.
 
 ## Skipped / Blocked
 
-- **Unauthenticated telnet on hardware** — Pi 5 lab/demo builds now default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. Lua sessions opened by telnet land on the safe binding surface (`lua_slm_newstate()`), so admin mutators (`slm.component_run`, `slm.model_load`, `slm.sched_set_policy`, `slm.task_create`, `slm.shell_exec`, `slm.hailo.*`, …) are unreachable from a remote session. That is acceptable only on trusted networks; SSH/authentication (#199) is still the real security boundary, and observability bindings remain visible.
+- **Unauthenticated telnet on hardware** — Pi 5 and Jetson lab/demo builds default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. Lua sessions opened by telnet land on the safe binding surface (`lua_slm_newstate()`), so admin mutators (`slm.component_run`, `slm.model_load`, `slm.sched_set_policy`, `slm.task_create`, `slm.shell_exec`, `slm.hailo.*`, …) are unreachable from a remote session. That is acceptable only on trusted networks; SSH/authentication (#199) is still the real security boundary, and observability bindings remain visible.
 - **SSH** (#199) — deferred until wolfSSH integration; out of current scope.
 - **Jetson multi-session shell** — blocked on Jetson networking (#25 / #266). Single-session UARTC console works fine.
 - **Command completion** — not implemented. Tab completion (#TBD) is out of scope for the current shell.

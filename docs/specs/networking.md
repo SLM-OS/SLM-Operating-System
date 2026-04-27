@@ -31,7 +31,7 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 - **#384 — General USB host support beyond the current Jetson NIC path.** Follow-on to the landed Jetson CDC-ECM path: generic multi-device topology, hub traversal, hotplug, alternate settings, and class binding. Plan written at `docs/usb-host-generalization-plan.md`.
 - **#243 — x86-64 Realtek RTL8168/8111 driver for bare-metal.** Works under QEMU x86-64 (virtio-pci); the test-pc dev board has a Realtek NIC that would need a native driver. Not blocking the capstone narrative because QEMU x86-64 demonstrates the full stack.
 - **#247 — Pi 5 RP1 MSIX_CFG engine doesn't fire TLPs.** MACB IRQ handler is registered but never runs. MACB falls back to polling (same pattern as UART RX). Functional at 2-4 ms RTT; not a correctness issue. Affects every RP1 peripheral.
-- **Unauthenticated telnet on Pi 5** — Pi 5 lab/demo builds now default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. That is an operator choice for trusted networks, not a security claim; SSH/authentication (#199) is still the real hardening path.
+- **Unauthenticated telnet on Pi 5 + Jetson** — Pi 5 and Jetson lab/demo builds default `NET_TELNETD_AUTOSTART=ON`, but an explicit `-DNET_TELNETD_AUTOSTART=OFF` still wins. That is an operator choice for trusted networks, not a security claim; SSH/authentication (#199) is still the real hardening path.
 - **Jetson networking over the internal Ethernet** — still requires solving #25. The current shipped Jetson networking path is USB CDC-ECM, not the internal RJ45.
 - **IPv6** — lwIP config option; not compiled in. Not a project priority.
 - **TLS** — not in-tree; follows after #199 SSH.
