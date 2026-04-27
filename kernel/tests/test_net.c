@@ -10,6 +10,7 @@
 
 #if defined(ENABLE_NETWORKING)
 #include "../include/net.h"
+#include "../include/tcp_shell_server.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -441,6 +442,89 @@ static void test_net_watchdog_threshold_clamps(void)
 
     /* Restore. */
     net_watchdog_set_threshold_ms(0);
+}
+
+/*
+ * Test: tcp_shell_server_get_stats is NULL-safe.
+ *
+ * Mirrors test_net_watchdog_get_null_safe. A telemetry feed that
+ * wraps the shell-tcp stats getter must not crash on a stale or
+ * NULL output buffer.
+ */
+static void test_tcp_shell_server_get_stats_null_safe(void)
+{
+    /* Must not crash. There's no return value to check. */
+    tcp_shell_server_get_stats(NULL);
+}
+
+/*
+ * Test: shell-tcp stats report sane values without any sessions.
+ *
+ * Order-independent: this test runs in whatever sequence the suite
+ * runner picks, and the static counters in tcp_shell_server.c
+ * persist across tests. The invariants checked here hold for any
+ * non-corrupted state — `closed <= opened`, `active == opened - closed`,
+ * `peak_active >= active`, and the leak counters are monotonic.
+ */
+static void test_tcp_shell_server_stats_invariants(void)
+{
+    struct tcp_shell_server_stats s;
+    tcp_shell_server_get_stats(&s);
+
+    TEST_ASSERT_MESSAGE(s.sessions_closed <= s.sessions_opened,
+        "closed must never exceed opened");
+    TEST_ASSERT_MESSAGE(s.active == s.sessions_opened - s.sessions_closed,
+        "active must equal opened - closed");
+    TEST_ASSERT_MESSAGE(s.peak_active >= s.active,
+        "peak_active must be >= current active");
+    /* leak_warnings counts events; each event accumulates a positive
+     * delta into total_suspicious_leak_bytes. So total >= warnings *
+     * threshold (1024 in default builds). Sanity-check that total is
+     * at least 1024 * warnings, allowing for the weakest-warning case. */
+    TEST_ASSERT_MESSAGE(
+        s.total_suspicious_leak_bytes >= s.leak_warnings * 1024u,
+        "total_suspicious_leak_bytes must be >= warnings * threshold");
+    /* max delta must be >= last delta when last is positive (max only
+     * tracks positive deltas via the same > comparison). */
+    if (s.last_session_heap_delta_bytes > 0) {
+        TEST_ASSERT_MESSAGE(
+            s.max_session_heap_delta_bytes >= s.last_session_heap_delta_bytes,
+            "max delta must be >= last positive delta");
+    }
+}
+
+/*
+ * Test: note_session_open + note_session_close move the counters as
+ * advertised. Captures stats before, calls open + close with a known
+ * delta, captures stats after, asserts deltas. Order-independent.
+ *
+ * Uses a delta below the leak threshold (256 < 1024) to avoid
+ * tripping the WARN — we don't want test runs to spam serial.
+ */
+static void test_tcp_shell_server_note_session_pair(void)
+{
+    struct tcp_shell_server_stats before;
+    tcp_shell_server_get_stats(&before);
+
+    tcp_shell_server_note_session_open(0xDEADBEEFu);
+    tcp_shell_server_note_session_close(0xDEADBEEFu, 256);
+
+    struct tcp_shell_server_stats after;
+    tcp_shell_server_get_stats(&after);
+
+    TEST_ASSERT_MESSAGE(after.sessions_opened == before.sessions_opened + 1,
+        "open hook must increment sessions_opened");
+    TEST_ASSERT_MESSAGE(after.sessions_closed == before.sessions_closed + 1,
+        "close hook must increment sessions_closed");
+    /* active should be unchanged after the matched pair. */
+    TEST_ASSERT_MESSAGE(after.active == before.active,
+        "active should be unchanged after open+close pair");
+    /* last_session_heap_delta should reflect our 256 input. */
+    TEST_ASSERT_MESSAGE(after.last_session_heap_delta_bytes == 256,
+        "last delta should be the value passed to note_session_close");
+    /* No leak warning at delta=256 (below 1024 threshold). */
+    TEST_ASSERT_MESSAGE(after.leak_warnings == before.leak_warnings,
+        "leak_warnings must not trip at delta below threshold");
 }
 
 /*
@@ -1755,6 +1839,9 @@ int test_suite_net(void)
     RUN_TEST(test_net_watchdog_get_null_safe);
     RUN_TEST(test_net_watchdog_initial_state);
     RUN_TEST(test_net_watchdog_threshold_clamps);
+    RUN_TEST(test_tcp_shell_server_get_stats_null_safe);
+    RUN_TEST(test_tcp_shell_server_stats_invariants);
+    RUN_TEST(test_tcp_shell_server_note_session_pair);
     RUN_TEST(test_net_stats_initial_values);
 
     /* Virtqueue descriptor ring tests (MMIO driver, QEMU_VIRT only) */

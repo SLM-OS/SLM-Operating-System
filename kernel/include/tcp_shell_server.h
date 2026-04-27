@@ -37,12 +37,13 @@ uint32_t tcp_shell_server_accepted(void);
 /*
  * Per-session lifecycle stats + heap-leak detection.
  *
- * Each successful accept snapshots `lwip_stats.mem.used` onto the
- * session struct; the session task computes the delta on teardown
- * and accumulates suspicious overshoot (delta > leak_threshold) into
- * `total_suspicious_leak_bytes` + `leak_warnings`. Use this with
- * the watchdog `heap_used_peak` to correlate session churn with
- * heap pressure.
+ * `shell_io_tcp_create` stamps `lwip_stats.mem.used` onto the
+ * per-connection `tcp_shell_ctx`; `shell_io_tcp_poll` computes the
+ * delta vs that snapshot *after* `tcp_close(pcb)` has run, then
+ * calls `tcp_shell_server_note_session_close`. Suspicious overshoot
+ * (delta > leak_threshold) accumulates into `total_suspicious_leak_bytes`
+ * + `leak_warnings`. Use this with the watchdog `heap_used_peak`
+ * to correlate session churn with heap pressure.
  *
  * `active = sessions_opened - sessions_closed`. `peak_active` is the
  * high-water mark seen since boot.

@@ -52,6 +52,17 @@ static uint32_t total_suspicious_leak    = 0;
 static int32_t  last_session_heap_delta  = 0;
 static int32_t  max_session_heap_delta   = 0;
 
+/*
+ * Diagnostic snapshot. Each individual field is read with a
+ * single-copy-atomic load (naturally aligned uint32_t / int32_t on
+ * AArch64 and x86-64), but the snapshot as a whole is not
+ * transactional — a reader on a different CPU can observe an
+ * intermediate writer state (e.g. `sessions_closed` already
+ * incremented but `last_session_heap_delta` not yet updated).
+ * Same shape and rationale as `net_watchdog_get`. Acceptable
+ * because nothing branches on this snapshot — `netstat` and the
+ * M3 telemetry feed are the only consumers.
+ */
 void tcp_shell_server_get_stats(struct tcp_shell_server_stats *out) {
     if (!out) return;
     out->sessions_opened              = sessions_opened;
