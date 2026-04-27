@@ -16,10 +16,12 @@
 #include "sched.h"
 #include "uart.h"
 #include "string.h"
+#include "debug.h"
 
 #include "lwip/tcp.h"
 #include "lwip/err.h"
 #include "lwip/ip_addr.h"
+#include "lwip/stats.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,6 +30,76 @@
 static struct tcp_pcb *listen_pcb   = NULL;
 static uint16_t         listen_port = 0;
 static uint32_t         accepted_count = 0;
+
+/* -------------------------------------------------------------------------- */
+/* Session lifecycle stats + leak detection                                   */
+/* -------------------------------------------------------------------------- */
+
+/* Per-session leak threshold. Sessions normally retain a bit of
+ * heap state until the pcb fully tears down (TIME_WAIT footprint
+ * is ~120 bytes); this threshold is set well above that so a clean
+ * close never trips the WARN. A real TX-COPY-buffer leak or pbuf
+ * reference-count off-by-one will show up as multi-KB deltas. */
+#ifndef NET_SHELL_TCP_LEAK_THRESHOLD_BYTES
+#define NET_SHELL_TCP_LEAK_THRESHOLD_BYTES  1024u
+#endif
+
+static uint32_t sessions_opened          = 0;
+static uint32_t sessions_closed          = 0;
+static uint32_t peak_active              = 0;
+static uint32_t leak_warnings            = 0;
+static uint32_t total_suspicious_leak    = 0;
+static int32_t  last_session_heap_delta  = 0;
+static int32_t  max_session_heap_delta   = 0;
+
+/*
+ * Diagnostic snapshot. Each individual field is read with a
+ * single-copy-atomic load (naturally aligned uint32_t / int32_t on
+ * AArch64 and x86-64), but the snapshot as a whole is not
+ * transactional — a reader on a different CPU can observe an
+ * intermediate writer state (e.g. `sessions_closed` already
+ * incremented but `last_session_heap_delta` not yet updated).
+ * Same shape and rationale as `net_watchdog_get`. Acceptable
+ * because nothing branches on this snapshot — `netstat` and the
+ * M3 telemetry feed are the only consumers.
+ */
+void tcp_shell_server_get_stats(struct tcp_shell_server_stats *out) {
+    if (!out) return;
+    out->sessions_opened              = sessions_opened;
+    out->sessions_closed              = sessions_closed;
+    out->active                       = sessions_opened - sessions_closed;
+    out->peak_active                  = peak_active;
+    out->leak_warnings                = leak_warnings;
+    out->total_suspicious_leak_bytes  = total_suspicious_leak;
+    out->last_session_heap_delta_bytes = last_session_heap_delta;
+    out->max_session_heap_delta_bytes  = max_session_heap_delta;
+}
+
+void tcp_shell_server_note_session_open(uint32_t session_id) {
+    (void)session_id;
+    sessions_opened++;
+    uint32_t active = sessions_opened - sessions_closed;
+    if (active > peak_active) peak_active = active;
+}
+
+void tcp_shell_server_note_session_close(uint32_t session_id,
+                                         int32_t  heap_delta_bytes) {
+    sessions_closed++;
+
+    last_session_heap_delta = heap_delta_bytes;
+    if (heap_delta_bytes > max_session_heap_delta) {
+        max_session_heap_delta = heap_delta_bytes;
+    }
+
+    if (heap_delta_bytes > (int32_t)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES) {
+        leak_warnings++;
+        total_suspicious_leak += (uint32_t)heap_delta_bytes;
+        WARN("shell-tcp: session %u closed with +%d bytes still on lwIP heap "
+             "(threshold=%u, measured post-tcp_close) — suspect leak",
+             (unsigned)session_id, (int)heap_delta_bytes,
+             (unsigned)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES);
+    }
+}
 
 /* -------------------------------------------------------------------------- */
 /* Session task body                                                          */
@@ -62,6 +134,13 @@ static void session_task_entry(void *arg)
     if (io) {
         io->close(io);   /* signals the TCP backend that we are done */
     }
+
+    /* Note: the leak-detector close hook is *not* called here — it
+     * fires from `shell_io_tcp_poll` immediately after `tcp_close(pcb)`
+     * + `ctx_free`, which is the only point where lwIP has actually
+     * released the unacked-TX state and the measurement reflects a
+     * true leak (not TIME_WAIT residue). */
+
     shell_session_free(sess);
 
     task_exit();
@@ -125,6 +204,12 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
         return ERR_MEM;
     }
     task_set_affinity(t, 0);
+
+    /* Bump the open counter. The heap-at-open snapshot is owned by
+     * shell_io_tcp_create (it lives on tcp_shell_ctx so it can be
+     * read at ctx_free time, after tcp_close has actually run). */
+    tcp_shell_server_note_session_open(sess->id);
+
     scheduler_add_task(t);
 
     accepted_count++;

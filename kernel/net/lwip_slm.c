@@ -335,11 +335,13 @@ void net_watchdog_get(struct net_watchdog_snapshot *out) {
     out->tcp_pcb_avail   = 0;
 #endif
 #if MEM_STATS
-    out->heap_used  = (uint32_t)lwip_stats.mem.used;
-    out->heap_avail = (uint32_t)lwip_stats.mem.avail;
+    out->heap_used      = (uint32_t)lwip_stats.mem.used;
+    out->heap_used_peak = (uint32_t)lwip_stats.mem.max;
+    out->heap_avail     = (uint32_t)lwip_stats.mem.avail;
 #else
-    out->heap_used  = 0;
-    out->heap_avail = 0;
+    out->heap_used      = 0;
+    out->heap_used_peak = 0;
+    out->heap_avail     = 0;
 #endif
 }
 

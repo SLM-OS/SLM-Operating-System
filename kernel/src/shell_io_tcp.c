@@ -26,6 +26,7 @@
 #include "spinlock.h"
 #include "string.h"
 #include "task.h"
+#include "tcp_shell_server.h"   /* tcp_shell_server_note_session_close */
 #include "telnet.h"
 #include "timer.h"
 
@@ -36,6 +37,7 @@
 #include "lwip/tcp.h"
 #include "lwip/err.h"
 #include "lwip/pbuf.h"
+#include "lwip/stats.h"        /* lwip_stats.mem.used for the heap snapshot */
 #include "arch/sys_arch.h"   /* sys_now() for connected_at timestamp */
 
 /* Per-direction buffer size. Must be a power of two. 4 KB matches
@@ -120,6 +122,15 @@ struct tcp_shell_ctx {
      * the ring via telnet_inject_rx and sends response IACs via
      * telnet_send_to_peer below. */
     struct telnet_parser telnet;
+
+    /* lwIP heap usage at the moment this session's lwIP wiring went
+     * live (end of shell_io_tcp_create, after the initial telnet
+     * negotiation has been queued). The close path measures
+     * `lwip_stats.mem.used - heap_used_at_open_bytes` *after*
+     * tcp_close + ctx_free have run, which is the only window where
+     * a sustained positive delta indicates a real leak rather than
+     * unacked-TX residue lwIP will free during TIME_WAIT. */
+    uint32_t          heap_used_at_open_bytes;
 
     /* io vtable embedded so we don't heap-allocate. io.ctx == this. */
     struct shell_io   io;
@@ -553,6 +564,17 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
     telnet_send_initial_negotiation(&ctx->telnet);
     tcp_output(pcb);
 
+    /* Snapshot the lwIP heap *after* the initial negotiation has
+     * been queued. Anything still on the heap at ctx_free time
+     * above this baseline is the per-session leak the detector
+     * is hunting for. MEM_STATS guards the field but lwip_stats
+     * is always defined; falls back to 0 when stats are off. */
+#if MEM_STATS
+    ctx->heap_used_at_open_bytes = (uint32_t)lwip_stats.mem.used;
+#else
+    ctx->heap_used_at_open_bytes = 0;
+#endif
+
     return &ctx->io;
 }
 
@@ -715,6 +737,20 @@ void shell_io_tcp_poll(void)
         /* Free the slot only once the shell task has released it AND
          * the pcb is fully gone. */
         if (ctx->shell_done && ctx->pcb == NULL) {
+            /* Compute and report the post-tcp_close heap delta before
+             * we recycle the slot. This is the right measurement
+             * window — tcp_close has run, lwIP has freed any acked
+             * TX state, and the pcb itself is no longer ours. A
+             * sustained positive delta here is a real leak (the
+             * earlier session-task-exit measurement was confounded
+             * by unacked-TX-still-in-flight noise). */
+#if MEM_STATS
+            uint32_t close_used = (uint32_t)lwip_stats.mem.used;
+#else
+            uint32_t close_used = 0;
+#endif
+            int32_t delta = (int32_t)(close_used - ctx->heap_used_at_open_bytes);
+            tcp_shell_server_note_session_close(ctx->session_id, delta);
             ctx_free(ctx);
         }
     }
