@@ -513,20 +513,27 @@ int usb_core_hotplug_poll(void)
 /* -------------------------------------------------------------------------- */
 
 /*
- * Spin-wait on urb->status. PLACEHOLDER implementation for Phase 1:
- * the caller's timeout_ms is converted to a fixed iteration cap, not
- * a wall-clock deadline. Good enough for the mock HCD (completes in
- * iteration 0) and for the synchronous control paths exercised by
- * the test suite. Phase 3A XHCI must replace this with a CNTPCT-based
- * deadline before relying on timeout_ms on real hardware — the
- * iteration count on a 2 GHz CPU completes in microseconds, not ms.
+ * Wait for an URB completion using a CNTPCT-based wall-clock deadline.
  * Each round calls hcd->poll so polled completions are observed even
  * when IRQs are not online.
+ *
+ * The previous iteration-count form (`max_rounds = timeout_ms * 1000`)
+ * was a Phase 1 placeholder: on a 2 GHz CPU it completed in
+ * microseconds rather than the requested milliseconds, so a 1 s
+ * timeout actually returned after ~1 ms — long-running real-hardware
+ * control transfers were spuriously cancelled and retried. Switching
+ * to timer_get_count() / timer_get_frequency() gives the requested
+ * wall-clock semantics on every platform that exposes the generic
+ * timer (ARM CNTPCT, x86 TSC).
  */
 static int usb_wait_urb(struct usb_urb *urb, uint32_t timeout_ms)
 {
-    const uint32_t max_rounds = (timeout_ms ? timeout_ms : 1) * 1000u;
-    for (uint32_t i = 0; i < max_rounds; i++) {
+    const uint32_t effective_ms = timeout_ms ? timeout_ms : 1u;
+    const uint64_t freq = timer_get_frequency();
+    const uint64_t deadline_ticks = (freq / 1000u) * effective_ms;
+    const uint64_t start = timer_get_count();
+
+    while ((timer_get_count() - start) < deadline_ticks) {
         usb_core_poll();
         if (urb->status != USB_URB_PENDING)
             return urb->status;
