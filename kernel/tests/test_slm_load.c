@@ -143,12 +143,15 @@ static void test_load_rejects_non_gguf_bytes(void)
 static void test_load_handles_null_args(void)
 {
     rust_slm_test_reset();
-    size_t n = 0;
-    build_fixture(8, &n);
 
-    /* All three null/zero args produce -1. */
+    /* All three null/zero args produce -1. The first two cases don't
+     * read fixture_buf at all (it's just a non-null pointer to satisfy
+     * the load signature), and the third short-circuits on the zero
+     * length before any data deref. Keeping these assertions before
+     * build_fixture means a hypothetical fixture-build failure can't
+     * silently skip them via Unity's `return;`-on-failure macros. */
     TEST_ASSERT_EQUAL_INT(-1,
-        rust_slm_load(NULL, fixture_buf, n));
+        rust_slm_load(NULL, fixture_buf, sizeof(fixture_buf)));
     TEST_ASSERT_EQUAL_INT(-1,
         rust_slm_load((const uint8_t *)"x", NULL, 16));
     TEST_ASSERT_EQUAL_INT(-1,
