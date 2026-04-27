@@ -267,32 +267,44 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         // Determine data source and handle varint-encoded int64_data specially.
         // int64_data is varint-encoded in protobuf, but we need raw little-endian
         // bytes for the inference engine to read directly as *const i64.
-        // Static buffer to avoid stack allocation (load_model already heavy on stack)
-        static mut I64_DECODE_BUF: [u8; 128] = [0u8; 128];
+        //
+        // The previous version stashed the decode buffer in a `static
+        // mut` for stack savings, but the comment claiming "load_model
+        // is serialized by the registry lock" was incorrect — the
+        // SpinGuard isn't acquired until much later in this function.
+        // Two concurrent loaders would race on the static buffer and
+        // corrupt each other's reshape shapes. A stack array of
+        // MAX_DIMS * 8 bytes is small enough to be safe (engine caps
+        // at MAX_DIMS = 8 → 64 bytes) and per-call.
+        let mut i64_decode_buf = [0u8; 64];
         let src = if let Some(raw) = tensor.raw_data {
             raw
         } else if let Some(floats) = tensor.float_data {
             floats
         } else if let Some(i64_packed) = tensor.int64_data {
-            // Decode varint-encoded int64 values to raw little-endian bytes.
-            // SAFETY: load_model is serialized by the registry lock, so
-            // I64_DECODE_BUF is not concurrently accessed.
-            unsafe {
-                let max_items = I64_DECODE_BUF.len() / 8;
-                let mut item_count: usize = 0;
-                for val in super::protobuf::packed_varint_i64(i64_packed) {
-                    if item_count >= max_items {
-                        break;
-                    }
-                    if let Ok(v) = val {
-                        let bytes = (v as i64).to_le_bytes();
-                        let off = item_count * 8;
-                        I64_DECODE_BUF[off..off + 8].copy_from_slice(&bytes);
-                        item_count += 1;
-                    }
+            let max_items = i64_decode_buf.len() / 8;
+            let mut item_count: usize = 0;
+            let mut had_overflow = false;
+            for val in super::protobuf::packed_varint_i64(i64_packed) {
+                if item_count >= max_items {
+                    had_overflow = true;
+                    break;
                 }
-                &I64_DECODE_BUF[..item_count * 8]
+                if let Ok(v) = val {
+                    let bytes = (v as i64).to_le_bytes();
+                    let off = item_count * 8;
+                    i64_decode_buf[off..off + 8].copy_from_slice(&bytes);
+                    item_count += 1;
+                }
             }
+            if had_overflow {
+                // The reshape op consumes this verbatim as the target
+                // shape. Silently dropping dims past the buffer cap
+                // would corrupt the model — fail the load instead.
+                let _ = mm::free(weights);
+                return Err(LoadError::CorruptedData);
+            }
+            &i64_decode_buf[..item_count * 8]
         } else {
             continue;
         };
@@ -334,7 +346,26 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
             weight_table.count += 1;
         }
 
-        // SAFETY: weight_ptr is valid for total_weight_size bytes from alloc_weights.
+        // Bounds-check `[offset, offset + stored_size)` against the
+        // allocation we got from alloc_weights. `total_weight_size`
+        // comes from `parsed.total_weight_size_expanded()` which uses
+        // `saturating_mul` over per-tensor sizes — but a malformed
+        // ONNX where `data_size != num_elements * element_size` (e.g.
+        // raw_data shorter than the shape implies, or int64_data
+        // packed varints expanding past the budgeted bytes) would
+        // produce `stored_size > budgeted`. Without this check the
+        // copy_nonoverlapping below writes past the allocation.
+        match offset.checked_add(stored_size) {
+            Some(end) if end <= total_weight_size => {}
+            _ => {
+                let _ = mm::free(weights);
+                return Err(LoadError::CorruptedData);
+            }
+        }
+
+        // SAFETY: weight_ptr is valid for total_weight_size bytes from
+        // alloc_weights, and the bounds check above confirms
+        // [offset, offset + stored_size) fits inside that block.
         unsafe {
             let dest = weight_ptr.add(offset);
             if is_fp16 {
