@@ -5872,6 +5872,7 @@ int cmd_nvcsi(int argc, char *argv[])
 }
 
 #include "camrtc.h"
+#include "camrtc_capture.h"
 
 /*
  * rcediag — Camera RTCPU (RCE) HSP-VM transport probe + handshake.
@@ -5970,6 +5971,58 @@ int cmd_rcediag(int argc, char *argv[])
         uart_puts("  *** not SM6. Update the driver-side version. ***\r\n");
     } else {
         uart_puts("  *** Handshake failed — see WARN log lines.   ***\r\n");
+    }
+
+    uart_puts("=== End ===\r\n");
+    return 0;
+}
+
+/*
+ * csidiag — first capture-control IVC round-trip:
+ *   1. camrtc_capture_init (HSP-VM session + CH_SETUP + IVC ring init)
+ *   2. CAPTURE_PHY_STREAM_OPEN_REQ (NVCSI port A, stream 0, D-PHY)
+ *   3. Print the response result.
+ *
+ * Result codes are in `docs/reference/l4t-camrtc-capture-messages.h`
+ * (CAPTURE_OK = 0, CAPTURE_ERROR_* otherwise). Anything other than
+ * 0 means the request reached RCE, came back, but RCE rejected it
+ * — e.g. NVCSI not powered, port already open, bad PHY type. The
+ * goal here is to *prove the IVC ring works end-to-end*; an
+ * RCE-side error is still a successful round-trip from SLM-OS's
+ * perspective.
+ */
+int cmd_csidiag(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    uart_puts("\r\n=== NVCSI port A open via RCE IVC ===\r\n");
+
+    int rc = camrtc_capture_init();
+    uart_printf("  capture_init:   rc=%d\r\n", rc);
+    if (rc != 0) {
+        uart_puts("  *** capture_init failed — see WARN log; ***\r\n");
+        uart_puts("  *** can't proceed without IVC channel.   ***\r\n");
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+
+    uint32_t result = 0xDEADBEEFu;
+    /* NVCSI_STREAM_0 = 0, NVCSI_PORT_A = 0, NVCSI_PHY_TYPE_DPHY = 0
+     * (`docs/reference/l4t-camrtc-capture.h:1372/1387/1443`). */
+    rc = camrtc_capture_phy_stream_open(0u, 0u, 0u, &result);
+    uart_printf("  PHY_STREAM_OPEN: rc=%d result=0x%x\r\n",
+                rc, (unsigned)result);
+    if (rc == 0) {
+        if (result == 0u) {
+            uart_puts("  *** PHY_STREAM_OPEN OK — IVC ring round- ***\r\n");
+            uart_puts("  *** trip works AND RCE accepted port A.  ***\r\n");
+        } else {
+            uart_puts("  *** IVC ring round-trip OK; RCE rejected ***\r\n");
+            uart_puts("  *** with the result code above (decode    ***\r\n");
+            uart_puts("  *** via l4t-camrtc-capture-messages.h).   ***\r\n");
+        }
+    } else {
+        uart_puts("  *** PHY_STREAM_OPEN failed at the IVC layer  ***\r\n");
+        uart_puts("  *** (see WARN log).                          ***\r\n");
     }
 
     uart_puts("=== End ===\r\n");

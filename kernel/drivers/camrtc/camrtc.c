@@ -532,6 +532,19 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
     }
 }
 
+int camrtc_send_irq(uint32_t msg_id, uint32_t param, uint32_t timeout_us)
+{
+    if (!g_initialised) return -1;
+
+    if (sm_tx_wait_empty(timeout_us) != 0) {
+        WARN("camrtc: VM-TX never drained for IRQ msg_id=0x%x "
+             "(timeout=%uus)", (unsigned)msg_id, (unsigned)timeout_us);
+        return -2;
+    }
+    sm_tx_send(camrtc_msg_pack(msg_id, param));
+    return 0;
+}
+
 int camrtc_diag_dump(void)
 {
     uintptr_t hsp_base = (uintptr_t)TEGRA234_RCE_HSP_BASE;
@@ -588,21 +601,31 @@ int camrtc_diag_dump(void)
     (CAMRTC_IVC_CONFIG_SIZE + 2u * CAMRTC_CTRL_QUEUE_BYTES)
 #define CAMRTC_CTRL_REGION_RESERVED  0x10000u  /* 64 KB */
 
-/* Fixed physical address for the IVC config + ring region. The RCE
- * firmware only accepts CH_SETUP IOVAs inside its compiled-in VM1
- * aperture 0xA0000000..0xC0000000 (per
- * `docs/reference/l4t-binding-nvidia-tegra194-rce.txt:51-53` and the
- * `iommu-resv-regions` cells in
- * `docs/reference/l4t-tegra234-camera.dtsi:59`). With SMMU
- * translation disabled by Linux pre-kexec, RCE sees physical
- * addresses directly, so the region must live in a *physical* page
- * inside that aperture. PMM carves 64 KB at this address out of
- * Jetson region 1 in `kernel/mm/pmm.c:540` so no other allocator
- * hands it out. The BSS-allocation approach (around 0x80700000)
- * reproducibly came back as RTCPU_CH_ERR_INVALID_IOVA on
- * jetson-nano-1 even though the address fit the 24-bit MSG param
- * — RCE is the gatekeeper, not the host-side validation. */
-#define CAMRTC_CTRL_REGION_PHYS    0xA0000000u
+/* Fixed physical address for the IVC config + ring region.
+ *
+ * Two constraints:
+ *  1. RCE only accepts CH_SETUP IOVAs inside its compiled-in VM1
+ *     aperture 0xA0000000..0xC0000000 (per
+ *     `docs/reference/l4t-binding-nvidia-tegra194-rce.txt:51-53`).
+ *     With SMMU translation disabled by Linux pre-kexec, RCE sees
+ *     physical addresses directly, so the region must be a
+ *     physical page in that aperture.
+ *  2. AP↔RCE coherency: cacheable kernel-linear mappings at
+ *     0xA0000000 didn't propagate AP writes to DRAM in time for
+ *     RCE to consume frames (verified by peeking the rx ring
+ *     after a send and seeing RCE's count stuck at 0 even though
+ *     the SS notify went through). The cacheable path with DC
+ *     CVAC also failed empirically. So the region lives at
+ *     0xBDFE0000 — inside the existing 2 MB NC (Normal Non-
+ *     Cacheable, MAIR index 2) mapping at 0xBDE00000-0xBDFFFFFF
+ *     set up by `vmm_init`. NC bypasses L1/L2 entirely; AP writes
+ *     hit DRAM immediately and RCE reads see them without any
+ *     cache maintenance. The 64 KB region sits well past the
+ *     scheduler's bump allocator high-water (~25 KB at
+ *     NC_MEM_BASE) and below the diagnostic trace slot at
+ *     NC_MEM_END - 256.
+ */
+#define CAMRTC_CTRL_REGION_PHYS    0xBDFE0000u
 
 static uintptr_t g_ch_setup_region_phys;
 
@@ -627,9 +650,10 @@ int camrtc_ch_setup_capture_control(void)
     /* CH_SETUP encodes the region IOVA shifted right by 8. The
      * 24-bit MSG param holds bits[31:8] of the IOVA. RCE rejects
      * addresses outside its built-in VM1 aperture
-     * 0xA0000000..0xC0000000 with RTCPU_CH_ERR_INVALID_IOVA. The
-     * fixed CAMRTC_CTRL_REGION_PHYS is set to 0xA0000000 — assert
-     * that future edits don't move it outside the aperture. */
+     * 0xA0000000..0xC0000000 with RTCPU_CH_ERR_INVALID_IOVA. Pin
+     * that the chosen `CAMRTC_CTRL_REGION_PHYS` falls inside both
+     * the RCE aperture *and* the existing NC mapping at
+     * 0xBDE00000-0xBDFFFFFF. */
     _Static_assert(CAMRTC_CTRL_REGION_PHYS >= 0xA0000000u,
                    "CH_SETUP region must lie at or above the RCE VM1 "
                    "aperture base (0xA0000000)");
@@ -637,6 +661,13 @@ int camrtc_ch_setup_capture_control(void)
                    <= 0xC0000000u,
                    "CH_SETUP region must end at or below the RCE VM1 "
                    "aperture top (0xC0000000)");
+    _Static_assert(CAMRTC_CTRL_REGION_PHYS >= 0xBDE00000u,
+                   "CH_SETUP region must lie inside the NC mapping "
+                   "(NC base = 0xBDE00000)");
+    _Static_assert(CAMRTC_CTRL_REGION_PHYS + CAMRTC_CTRL_REGION_RESERVED
+                   <= 0xBE000000u,
+                   "CH_SETUP region must lie inside the NC mapping "
+                   "(NC end = 0xBE000000)");
     uint64_t iova_shifted = (uint64_t)region_phys >> 8;
 
     /* Zero the entire region so the TLV terminator + IVC ring
@@ -738,6 +769,11 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
 {
     (void)msg_id; (void)param; (void)timeout_us;
     if (resp_param) *resp_param = 0;
+    return -1;
+}
+int camrtc_send_irq(uint32_t msg_id, uint32_t param, uint32_t timeout_us)
+{
+    (void)msg_id; (void)param; (void)timeout_us;
     return -1;
 }
 int camrtc_diag_dump(void) { return -1; }

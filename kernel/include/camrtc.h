@@ -121,6 +121,20 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
                     uint32_t *resp_param, uint32_t timeout_us);
 
 /*
+ * Fire-and-forget mailbox send for the unidirectional opcodes
+ * (CAMRTC_HSP_IRQ in particular — used by the IVC ring transport
+ * to wake RCE after advancing a ring counter). Drains the TX
+ * mailbox first so the message lands cleanly, then writes
+ * `CAMRTC_HSP_MSG(msg_id, param)` to VM-TX and returns immediately
+ * — no response correlation, no RX read.
+ *
+ * Returns 0 on success, -1 if uninitialised, -2 on TX-drain
+ * timeout (also `WARN`-logged).
+ */
+int camrtc_send_irq(uint32_t msg_id, uint32_t param,
+                    uint32_t timeout_us);
+
+/*
  * Diagnostic dump: print HSP_DIMENSIONING, R5_CTRL_0 (FWLOADDONE bit),
  * PWR_STATUS_0 (WFIPIPESTOPPED bit), VM-TX SM contents, VM-RX SM
  * contents, and SS[0] value. Used by the `rcediag` shell command.

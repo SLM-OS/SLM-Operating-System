@@ -478,9 +478,13 @@ set(KERNEL_SOURCES
     # Camera RTCPU (RCE) HSP-VM transport (#396 Hardware Task 3
     # Option B) — the IPC layer SLM-OS needs to ask the camera
     # firmware to do anything (NVCSI bring-up, VI capture, etc.).
-    # Implements the HELLO/PROTOCOL/RESUME boot-sync only; CH_SETUP
-    # + capture-control messages land in a follow-up commit.
+    # camrtc.c does HELLO/PROTOCOL/RESUME + CH_SETUP; camrtc_ivc.c
+    # rides on top, exposing tegra-IVC ring read/write helpers
+    # for the capture-control / capture / etc. channels CH_SETUP
+    # binds.
     kernel/drivers/camrtc/camrtc.c
+    kernel/drivers/camrtc/camrtc_ivc.c
+    kernel/drivers/camrtc/camrtc_capture.c
 
     # Interrupt controller and timer (ARM64 only — x86-64 uses pic.c + timer_x86.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/drivers/gic.c>
