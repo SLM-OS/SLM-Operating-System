@@ -589,6 +589,23 @@ static void test_camrtc_capture_stubs_return_minus_one(void)
     TEST_ASSERT_EQUAL_INT(-1, camrtc_capture_csi_stream_set_config(
         0u, 0u, 2u, 456000u, &result));
     TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, result);
+
+    /* CHANNEL_SETUP stub returns -1; out triple cleared. */
+    result = 0xDEADBEEFu;
+    uint32_t channel_id     = 0xDEADBEEFu;
+    uint64_t vi_channel_mask = 0xDEADBEEFDEADBEEFull;
+    TEST_ASSERT_EQUAL_INT(-1, camrtc_capture_channel_setup(
+        0u, 0u, 0u, 0u, 0u, 0u, 0u,
+        &result, &channel_id, &vi_channel_mask));
+    TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, result);
+    TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, channel_id);
+    TEST_ASSERT_EQUAL_HEX64(0u, vi_channel_mask);
+
+    /* CAPTURE_REQUEST stub returns -1; out_status_index sentinel. */
+    uint32_t status_index = 0xDEADBEEFu;
+    TEST_ASSERT_EQUAL_INT(-1, camrtc_capture_request(0u, &status_index,
+                                                      1000u));
+    TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, status_index);
 #endif
 }
 
@@ -604,6 +621,71 @@ static void test_camrtc_capture_null_out_result_safe(void)
     TEST_ASSERT_TRUE(rc < 0);   /* Stub: -1, Jetson uninit: -1. */
     rc = camrtc_capture_csi_stream_set_config(0u, 0u, 2u, 456000u, NULL);
     TEST_ASSERT_TRUE(rc < 0);
+    /* CHANNEL_SETUP accepts NULL for any/all of out_result,
+     * out_channel_id, out_vi_channel_mask. */
+    rc = camrtc_capture_channel_setup(0u, 0u, 0u, 0u, 0u, 0u, 0u,
+                                      NULL, NULL, NULL);
+    TEST_ASSERT_TRUE(rc < 0);
+    /* CAPTURE_REQUEST accepts NULL for out_status_index. */
+    rc = camrtc_capture_request(0u, NULL, 1000u);
+    TEST_ASSERT_TRUE(rc < 0);
+}
+
+/*
+ * Test: VI request region accessors return constant values that
+ * agree with the static_asserts in camrtc.c. On QEMU the stubs
+ * return 0; on Jetson they return the carveout's IOVAs / geometry
+ * directly. Either way the returned-IOVA-vs-region-end invariant
+ * (ring offset + queue * size <= meminfo offset; meminfo + queue *
+ * size <= region size) is enforced at compile time inside camrtc.c
+ * — this runtime test pins the cross-platform contract.
+ */
+static void test_camrtc_vi_req_accessors(void)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* On Jetson, the carveout sits at 0xBDFD0000 and the geometry
+     * is fixed: queue_depth=1, request_size=1024, meminfo_size=128. */
+    TEST_ASSERT_EQUAL_HEX64(0xBDFD0000ull,
+                            (uint64_t)camrtc_vi_req_ring_iova());
+    TEST_ASSERT_EQUAL_HEX64(0xBDFD4000ull,
+                            (uint64_t)camrtc_vi_req_meminfo_iova());
+    TEST_ASSERT_EQUAL_UINT32(1u,    camrtc_vi_req_queue_depth());
+    TEST_ASSERT_EQUAL_UINT32(1024u, camrtc_vi_req_request_size());
+    TEST_ASSERT_EQUAL_UINT32(128u,  camrtc_vi_req_meminfo_size());
+    /* Sanity: ring fits before meminfo offset and meminfo fits in
+     * the carveout. The static_asserts in camrtc.c pin these at
+     * build time; this runtime check protects against a future
+     * refactor that drops the asserts. */
+    TEST_ASSERT_TRUE(camrtc_vi_req_ring_iova()
+                     + camrtc_vi_req_queue_depth() * camrtc_vi_req_request_size()
+                     <= camrtc_vi_req_meminfo_iova());
+#else
+    /* QEMU stubs return 0 for everything. */
+    TEST_ASSERT_EQUAL_HEX64(0ull, (uint64_t)camrtc_vi_req_ring_iova());
+    TEST_ASSERT_EQUAL_HEX64(0ull, (uint64_t)camrtc_vi_req_meminfo_iova());
+    TEST_ASSERT_EQUAL_UINT32(0u, camrtc_vi_req_queue_depth());
+    TEST_ASSERT_EQUAL_UINT32(0u, camrtc_vi_req_request_size());
+    TEST_ASSERT_EQUAL_UINT32(0u, camrtc_vi_req_meminfo_size());
+#endif
+}
+
+/*
+ * Test: capture-channel-setup accessors return zero before
+ * camrtc_ch_setup_capture_control runs. On Jetson the diagnostic
+ * accessors stay zero until the first successful CH_SETUP; on
+ * QEMU they always return zero. Both branches share this
+ * uninit-safety contract.
+ */
+static void test_camrtc_ch_setup_accessors_uninit_zero(void)
+{
+    /* On QEMU the stubs always return 0. On Jetson, in the test
+     * harness camrtc_init was never called so g_ch_setup_*_iova
+     * stay 0. */
+    TEST_ASSERT_EQUAL_HEX64(0ull, (uint64_t)camrtc_ch_setup_region_phys());
+    TEST_ASSERT_EQUAL_HEX64(0ull,
+                            (uint64_t)camrtc_ch_setup_capture_rx_iova());
+    TEST_ASSERT_EQUAL_HEX64(0ull,
+                            (uint64_t)camrtc_ch_setup_capture_tx_iova());
 }
 
 int test_suite_camera(void)
@@ -633,6 +715,8 @@ int test_suite_camera(void)
     RUN_TEST(test_camrtc_ivc_send_recv_uninit_returns_negative);
     RUN_TEST(test_camrtc_capture_stubs_return_minus_one);
     RUN_TEST(test_camrtc_capture_null_out_result_safe);
+    RUN_TEST(test_camrtc_vi_req_accessors);
+    RUN_TEST(test_camrtc_ch_setup_accessors_uninit_zero);
     return UnityEnd();
 }
 
@@ -893,6 +977,24 @@ _Static_assert(CAPTURE_FLAG_STATUS_REPORT_ENABLE == 0x1u,
     "CAPTURE_FLAG_STATUS_REPORT_ENABLE drift (per-descriptor flag)");
 _Static_assert(CAPTURE_FLAG_ERROR_REPORT_ENABLE == 0x2u,
     "CAPTURE_FLAG_ERROR_REPORT_ENABLE drift (per-descriptor flag)");
+
+/* `capture_descriptor` leading-fields prefix. The full struct is
+ * ~448 B (with vi_channel_config + atomp surfaces + capture_status);
+ * SLM-OS only ports the 12-byte prefix RCE reads first. The
+ * offsets below match `l4t-camrtc-capture.h:1294` and a future
+ * struct reorder upstream will fail this assert before it
+ * silently writes the wrong fields in `csidiag`. */
+_Static_assert(sizeof(struct camrtc_capture_descriptor_header) == 12,
+    "camrtc_capture_descriptor_header must be exactly 12 bytes "
+    "(sequence:4 + capture_flags:4 + frame_start:2 + frame_completion:2)");
+_Static_assert(offsetof(struct camrtc_capture_descriptor_header, sequence) == 0,
+    "capture_descriptor.sequence must be at offset 0");
+_Static_assert(offsetof(struct camrtc_capture_descriptor_header, capture_flags) == 4,
+    "capture_descriptor.capture_flags must be at offset 4");
+_Static_assert(offsetof(struct camrtc_capture_descriptor_header, frame_start_timeout) == 8,
+    "capture_descriptor.frame_start_timeout must be at offset 8");
+_Static_assert(offsetof(struct camrtc_capture_descriptor_header, frame_completion_timeout) == 10,
+    "capture_descriptor.frame_completion_timeout must be at offset 10");
 
 /* =============================================================================
  * Tegra234 camera-subsystem MMIO bases — Phase 0 verified

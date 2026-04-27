@@ -243,6 +243,32 @@ struct camrtc_capture_channel_setup_resp {
     uint64_t vi_channel_mask;   /* bitmask of allocated VI channel(s) */
 };
 
+/* Leading 12 bytes of `struct capture_descriptor`
+ * (`l4t-camrtc-capture.h:1294`). The full struct is ~448 B and
+ * carries vi_channel_config / atomp surfaces / per-frame status
+ * — none of which SLM-OS sets today. RCE *does* read the first
+ * three fields directly to drive its scheduler:
+ *
+ *   sequence                   (u32) — caller-assigned frame number,
+ *                                       echoed back in the per-frame
+ *                                       capture_status.
+ *   capture_flags              (u32) — CAPTURE_FLAG_* bitmask
+ *                                       (STATUS_REPORT_ENABLE etc).
+ *   frame_start_timeout        (u16) — ms; 0 = use channel default.
+ *   frame_completion_timeout   (u16) — ms; 0 = use channel default.
+ *
+ * Exposing just this prefix gives `csidiag` and other callers
+ * field-name access to the bytes RCE reads, without porting the
+ * full capture_descriptor (which has C bitfields and is fragile
+ * for wire-format use). The remaining ~436 B of the slot stay
+ * zeroed by the caller's pre-write loop. */
+struct camrtc_capture_descriptor_header {
+    uint32_t sequence;
+    uint32_t capture_flags;
+    uint16_t frame_start_timeout;
+    uint16_t frame_completion_timeout;
+};
+
 /* CAPTURE_REQUEST_REQ_MSG body — 8 bytes
  * (`l4t-camrtc-capture-messages.h:905`). Identifies which slot in
  * the request_ring (set up by CAPTURE_CHANNEL_SETUP) RCE should
