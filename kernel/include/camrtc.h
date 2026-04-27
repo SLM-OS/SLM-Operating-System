@@ -147,44 +147,54 @@ int camrtc_send_irq(uint32_t msg_id, uint32_t param,
 int camrtc_diag_dump(void);
 
 /*
- * Hardware Task 3 sub-step: stand up the capture-control IVC channel
- * (camera-rtcpu service "capture-control", group 1, 64 frames × 320 B
- * — matches the L4T `tegra234-camera.dtsi` ivccontrol@3 binding).
+ * Hardware Task 3 / 4: stand up the IMX219 IVC channel pair.
+ * Single CH_SETUP message binds two channels with the same group=1
+ * SS[0] notify bit but different ring geometry:
+ *
+ *   - "capture-control" (`tegra234-camera.dtsi` ivccontrol@3)
+ *       64 frames × 320 B — carries CAPTURE_PHY_STREAM_OPEN_REQ /
+ *       CAPTURE_CSI_STREAM_SET_CONFIG_REQ / CAPTURE_CHANNEL_SETUP_REQ
+ *       and their RESP messages.
+ *
+ *   - "capture" (`tegra234-camera.dtsi` ivccapture@4)
+ *       64 frames × 64 B (L4T uses 512 frames; SLM-OS uses 64 to fit
+ *       the existing 64 KB region carveout — single-shot use today)
+ *       carries CAPTURE_REQUEST_REQ / CAPTURE_STATUS_IND.
  *
  * What this does:
- *   1. Uses a fixed 64 KB region at 0xA0000000 (carved out of PMM
- *      in `kernel/mm/pmm.c`) for the CH_SETUP TLV config block
- *      (4 KB) plus the rx + tx tegra-ivc queues (64*320 + 128 each).
- *      The address is hard-coded because RCE only accepts CH_SETUP
- *      IOVAs inside its VM1 aperture 0xA0000000..0xC0000000 — see
- *      `docs/reference/l4t-binding-nvidia-tegra194-rce.txt:51-53`.
- *   2. Builds one camrtc_tlv_ivc_setup entry at offset 0 + a
- *      zero-tag terminator, with rx/tx IOVAs pointing at the
- *      queue buffers later in the region.
- *   3. Zero-initialises the queue header fields (count + state).
+ *   1. Uses a fixed 64 KB region at 0xBDFE0000 (inside the existing
+ *      NC mapping at 0xBDE00000-0xBDFFFFFF) for the CH_SETUP TLV
+ *      config block (4 KB) plus four tegra-IVC queues (capture-
+ *      control rx + tx + capture rx + tx). Total ~52 KB used.
+ *   2. Builds two `camrtc_tlv_ivc_setup` entries (capture-control
+ *      then capture) plus a zero-tag terminator at offset 0 of the
+ *      region, with rx/tx IOVAs pointing at the queue buffers
+ *      later in the region.
+ *   3. Zero-initialises both queue headers (count + state).
  *   4. Sends `CAMRTC_HSP_CH_SETUP(region_phys >> 8)` over the
  *      established HSP-VM session and waits for RCE's response.
  *
- * On success, RCE has bound the (group=1, service="capture-control")
- * tuple to our rx/tx ring IOVAs and is ready to read/write frames.
- * The actual ring read/write helpers + first capture-control
- * message (CAPTURE_PHY_STREAM_OPEN_REQ) land in a follow-up commit.
+ * On success, RCE has bound both (group=1, service=...) tuples to
+ * the rx/tx ring IOVAs and is ready to read/write frames on either.
  *
  * Pre-condition: `camrtc_init()` has returned 0. The HSP-VM session
  * must be established — CH_SETUP travels over the same mailbox.
  *
  * On Tegra234 post-kexec, Linux disables SMMU translation as part
- * of the handoff (see `arm-smmu N0000000.iommu: disabling translation`
- * lines in the kexec dmesg), so RCE sees physical addresses
- * directly. The 0xA0000000 region is therefore a *physical*
- * address that lands inside the firmware's VM1 IOVA aperture by
- * construction — no SMMU programming needed from SLM-OS.
+ * of the handoff, so RCE sees physical addresses directly. The
+ * 0xBDFE0000 region is a *physical* address inside RCE's VM1 IOVA
+ * aperture (0xA0000000..0xC0000000) by construction — no SMMU
+ * programming needed from SLM-OS.
  *
  * Returns 0 on success, negative on error:
  *   -2  HSP-VM CH_SETUP round-trip failed (timeout or wrong msg_id),
  *       OR the function was called before `camrtc_init()` succeeded.
  *   -3  RCE rejected the setup — see WARN log for the
  *       RTCPU_CH_ERR_* code (128..132 per camrtc_channels.h).
+ *
+ * Name kept as `_capture_control` for backward compatibility with the
+ * existing `csidiag` shell command and the `camrtc_capture_init`
+ * call site; the function actually binds *both* channels.
  */
 int camrtc_ch_setup_capture_control(void);
 
@@ -196,3 +206,18 @@ int camrtc_ch_setup_capture_control(void);
  * inspection.
  */
 uintptr_t camrtc_ch_setup_region_phys(void);
+
+/*
+ * Diagnostic accessors: physical IOVAs of the "capture" channel's
+ * rx (RCE→AP) and tx (AP→RCE) ring buffers from the most recent
+ * successful `camrtc_ch_setup_capture_control` call, or 0 if not
+ * yet attempted / failed. The capture-control IOVAs are derivable
+ * from the region base (rx = region + 4096; tx = rx + control
+ * queue size); the capture IOVAs follow at offsets that depend on
+ * the control queue size, so it's cleaner to expose them directly.
+ *
+ * Used by `camrtc_capture_init` (in camrtc_capture.c) to drive
+ * `camrtc_ivc_init` for the second channel after CH_SETUP succeeds.
+ */
+uintptr_t camrtc_ch_setup_capture_rx_iova(void);
+uintptr_t camrtc_ch_setup_capture_tx_iova(void);

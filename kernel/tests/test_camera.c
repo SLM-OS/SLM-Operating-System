@@ -726,6 +726,24 @@ _Static_assert(TEGRA_IVC_HEADER_SIZE == 128u,
 _Static_assert(CAMRTC_HSP_CH_SETUP == 0x44u,
     "CAMRTC_HSP_CH_SETUP opcode drift (RCE protocol ID)");
 
+/* CH_SETUP region size sanity. The region holds the TLV array (4 KB)
+ * + capture-control rx (20608 B) + capture-control tx (20608 B) +
+ * capture rx (4224 B) + capture tx (4224 B) = 53760 B. The 64 KB
+ * carveout in `kernel/drivers/camrtc/camrtc.c:CAMRTC_CTRL_REGION_RESERVED`
+ * must comfortably contain it. The number is computed from upstream
+ * L4T constants (88 B/TLV, 128 B header, 64 frames per direction)
+ * so any future change to nframes/frame_size breaks this assert
+ * before it silently overflows the carveout.
+ *
+ * Calculation guard: 4096 + 2*(128 + 64*320) + 2*(128 + 64*64). */
+_Static_assert(
+    CAMRTC_IVC_CONFIG_SIZE
+    + 2u * (TEGRA_IVC_HEADER_SIZE + 64u * 320u)
+    + 2u * (TEGRA_IVC_HEADER_SIZE + 64u *  64u)
+    == 53760u,
+    "CH_SETUP region used-bytes calculation drift — review camrtc.c "
+    "CAMRTC_CTRL_REGION_BYTES vs the carveout reservation");
+
 /* Capture-control message wire-format pins. The structs are
  * exchanged byte-for-byte with RCE firmware over the IVC ring;
  * these asserts catch field-reorder or struct-resize regressions
