@@ -751,6 +751,19 @@ int slm_gpu_inference_enabled(void);
 int slm_model_gpu_dispatch_enabled(uint32_t model_index);
 
 /*
+ * True if any active eviction policy declares
+ * `EvictionPolicy::has_gpu_backend() == true` (Rust runtime hook).
+ *
+ * Mirrors `active_sched_policy_has_gpu_backend()` on the sched side.
+ * The C-side `gpu_consumer_set` uses this to decide whether
+ * `gpu use eviction on` accepts cleanly or with a "scaffold only"
+ * warning. Today every shipped policy returns false; flipping
+ * requires landing the matching `slm_gpu_run_eviction_inference`
+ * dispatch — see `docs/specs/gpu-policy-models.md` PR-6.
+ */
+bool eviction_active_policy_has_gpu_backend(void);
+
+/*
  * Get GPU info for Rust.
  * Returns: 0 on success, -1 on error. Fills info struct.
  */

@@ -138,9 +138,22 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
         break;
 
     case GPU_CONSUMER_EVICTION:
-        if (out_reason)
-            *out_reason = "scaffold only — eviction policies have no "
-                          "GPU dispatch path yet";
+        /* Symmetric to the sched case: consult the Rust runtime via
+         * `eviction_active_policy_has_gpu_backend()` (which scans
+         * both pools' installed policies). When no policy declares
+         * a GPU backend, accept-with-warning so operators can still
+         * record intent ahead of the PR-6 dispatch landing. The
+         * shipped policies (LRU/LFU/ARC/CACHEUS/MLP/XGBoost) all
+         * return false from `EvictionPolicy::has_gpu_backend()`
+         * today; this branch will start accepting cleanly the first
+         * time a policy flips that to true. */
+        if (!eviction_active_policy_has_gpu_backend()) {
+            if (out_reason)
+                *out_reason = "scaffold only — no eviction policy "
+                              "declares a GPU backend yet";
+            /* Fall through to the flip — operator intent is recorded
+             * even though dispatch is unaffected. */
+        }
         break;
 
     case GPU_CONSUMER_INFERENCE:

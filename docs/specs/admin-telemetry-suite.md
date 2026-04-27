@@ -296,7 +296,7 @@ int  gpu_consumer_set(enum gpu_consumer c, bool enabled, const char **out_reason
 Backed by an `atomic_bool[3]`. Default: all OFF. Validation by consumer:
 
 - **inference** — accepts cleanly when `slm_gpu_available()` is non-zero. The Rust engine consults the flag in `mnist_gpu_fastpath_eligible`; flipping OFF forces CPU fallback even on Jetson with the v6 channel handoff present.
-- **sched / eviction** — accepts with a "scaffold only" warning written to `*out_reason`. The flag still flips so `gpu use status` reflects operator intent, but no policy declares `has_gpu_backend = true` yet (sched) and the Rust eviction trait doesn't expose a GPU dispatch path (eviction). The `gpu use` shell command renders `*out_reason` as a `note: …` line. Wiring up the actual GPU forward pass for these is `docs/specs/gpu-policy-models.md`.
+- **sched / eviction** — accepts with a "scaffold only" warning written to `*out_reason`. The flag still flips so `gpu use status` reflects operator intent. Both sides query `has_gpu_backend()` on the active policy: sched via `sched_policy_ops::has_gpu_backend` (kernel C), eviction via `EvictionPolicy::has_gpu_backend()` (Rust trait, gpu-policy-models.md PR-4). No shipped policy returns true today. The `gpu use` shell command renders `*out_reason` as a `note: …` line. Wiring up the actual GPU forward pass for these is `docs/specs/gpu-policy-models.md`.
 - All consumers — `slm_gpu_available() == 0` short-circuits to `GPU_CONSUMER_ERR_NODEV` with reason `"GPU not available on this build"`. Disable always succeeds.
 
 ### 9.2 Decision sites

@@ -965,6 +965,24 @@ pub extern "C" fn rust_eviction_enabled() -> i32 {
     if cfg!(feature = "ai_eviction") { 1 } else { 0 }
 }
 
+/// Returns 1 if any active eviction policy declares
+/// `EvictionPolicy::has_gpu_backend() == true`, 0 otherwise.
+///
+/// Mirrors `active_sched_policy_has_gpu_backend` on the sched side.
+/// Backs the C-side `GPU_CONSUMER_EVICTION` validation in
+/// `gpu_consumer_set`: when this returns 0, the toggle accepts with
+/// a "scaffold only" warning. When the eviction subsystem is
+/// compiled out (`ai_eviction` feature off), returns 0.
+#[no_mangle]
+pub extern "C" fn rust_eviction_active_policy_has_gpu_backend() -> i32 {
+    #[cfg(feature = "ai_eviction")]
+    {
+        if mm::eviction::registry::any_active_policy_has_gpu_backend() { 1 } else { 0 }
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    { 0 }
+}
+
 /// Exercise the eviction registry swap path end to end.
 ///
 /// - When the feature is OFF: returns -2 (skipped).
@@ -991,6 +1009,16 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
             fn name(&self) -> &'static str { self.0 }
         }
 
+        // Mirror of `Tagged` but with a real GPU backend declared.
+        // Pins the registry-side scan in `any_active_policy_has_gpu_backend`:
+        // installing this should flip the global query to `true`.
+        struct GpuBacked(&'static str);
+        impl EvictionPolicy for GpuBacked {
+            fn select_victim(&mut self, _: &[BlockMeta]) -> usize { 0 }
+            fn name(&self) -> &'static str { self.0 }
+            fn has_gpu_backend(&self) -> bool { true }
+        }
+
         eviction::init();
         if eviction::get_eviction_policy_name() != "LRU" {
             return -1;
@@ -1003,9 +1031,32 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
         if eviction::get_eviction_policy_name() != "SelfTestB" {
             return -1;
         }
+
+        // PR-4: registry-side `has_gpu_backend()` scan.
+        // (a) Tagged returns false → query returns false.
+        if eviction::registry::any_active_policy_has_gpu_backend() {
+            return -1;
+        }
+        // (b) Install a GPU-backed policy → query returns true.
+        eviction::set_eviction_policy(Box::new(GpuBacked("SelfTestGpu")));
+        if !eviction::registry::any_active_policy_has_gpu_backend() {
+            return -1;
+        }
+        // (c) Same answer through the FFI export.
+        if rust_eviction_active_policy_has_gpu_backend() != 1 {
+            return -1;
+        }
+
         // Restore the default so real callers aren't surprised.
         eviction::reset_to_default();
         if eviction::get_eviction_policy_name() != "LRU" {
+            return -1;
+        }
+        // (d) Default LRU policy returns false again.
+        if eviction::registry::any_active_policy_has_gpu_backend() {
+            return -1;
+        }
+        if rust_eviction_active_policy_has_gpu_backend() != 0 {
             return -1;
         }
         0

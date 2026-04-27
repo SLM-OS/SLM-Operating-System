@@ -467,6 +467,26 @@ static void test_eviction_selftest_passes(void)
     TEST_ASSERT_EQUAL_INT(0, rust_eviction_selftest());
 }
 
+/*
+ * PR-4 of docs/specs/gpu-policy-models.md:
+ * `eviction_active_policy_has_gpu_backend()` exposes the Rust-side
+ * `EvictionPolicy::has_gpu_backend()` scan to C. Today every shipped
+ * policy returns false; this test pins that the C wrapper agrees.
+ * The selftest above already exercises the toggle (install a
+ * GpuBacked policy, observe true; revert, observe false) on the Rust
+ * side; this test catches a regression in the C-side trampoline
+ * specifically.
+ */
+static void test_eviction_active_policy_has_gpu_backend_default_false(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+    /* The selftest above leaves the registry on the LRU default. */
+    bool has_gpu = eviction_active_policy_has_gpu_backend();
+    TEST_ASSERT_FALSE(has_gpu);
+}
+
 static void test_eviction_run_tests_passes(void)
 {
     if (!rust_eviction_enabled()) {
@@ -1164,6 +1184,7 @@ int test_suite_eviction(void)
     RUN_TEST(test_eviction_enabled_probe);
     RUN_TEST(test_eviction_selftest_passes);
     RUN_TEST(test_eviction_run_tests_passes);
+    RUN_TEST(test_eviction_active_policy_has_gpu_backend_default_false);
 
     /* M6: allocator integration (skip cleanly when feature off). */
     RUN_TEST(test_alloc_evicts_when_full_weights);
