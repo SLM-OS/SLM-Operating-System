@@ -4621,6 +4621,28 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
         return -1;
     }
 
+    // Serialise concurrent rust_infer_bench callers. The static-mut
+    // BENCH_OUTPUT below would otherwise race if a second CPU entered
+    // this function while the first was still iterating. The shell
+    // contract is single-threaded, but a future caller (or an
+    // accidentally re-entrant test) shouldn't silently corrupt the
+    // bench results.
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static BENCH_FFI_BUSY: AtomicBool = AtomicBool::new(false);
+    if BENCH_FFI_BUSY
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return -1;
+    }
+    struct Releaser<'a>(&'a AtomicBool);
+    impl Drop for Releaser<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _release = Releaser(&BENCH_FFI_BUSY);
+
     static BENCH_INPUT: [f32; 784] = [0.0; 784];
     static mut BENCH_OUTPUT: [f32; 64] = [0.0; 64];
 

@@ -163,7 +163,18 @@ impl<'a> Iterator for ProtoIter<'a> {
             Err(e) => return Some(Err(e)),
         };
 
-        let value_start = self.pos + tag_len;
+        // Bound `value_start` against `self.data.len()` BEFORE indexing.
+        // `decode_varint` may have advanced the cursor up to 10 bytes
+        // forward; on a truncated input where `self.pos + tag_len ==
+        // self.data.len()`, the slice below is still valid (empty) —
+        // but a 10-byte continuation varint at `data.len() - 1` could
+        // produce `value_start > self.data.len()`, which would panic
+        // on the index. Untrusted-input parsing must never panic in
+        // kernel context.
+        let value_start = match self.pos.checked_add(tag_len) {
+            Some(v) if v <= self.data.len() => v,
+            _ => return Some(Err(ParseError::UnexpectedEof)),
+        };
         let value_data = &self.data[value_start..];
 
         let (data, consumed) = match wire_type {

@@ -106,6 +106,15 @@ impl Name {
         let mut name = Self::EMPTY;
         let copy_len = if src.len() < NAME_LEN { src.len() } else { NAME_LEN - 1 };
         name.bytes[..copy_len].copy_from_slice(&src[..copy_len]);
+        // Explicitly NUL-terminate the byte after the copy. Today this
+        // is redundant because `EMPTY` zero-fills `bytes`, but if a
+        // future change ever shortens `EMPTY` or reuses an existing
+        // `Name` instance the trailing byte could carry stale data
+        // through C string conversions. NAME_LEN > 0 is statically
+        // implied by `bytes: [u8; NAME_LEN]`.
+        if copy_len < NAME_LEN {
+            name.bytes[copy_len] = 0;
+        }
         name.len = copy_len as u8;
         name
     }

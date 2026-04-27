@@ -155,6 +155,26 @@ fn engine_unlock() {
     ENGINE_LOCK.store(false, Ordering::Release);
 }
 
+/// RAII guard for ENGINE_LOCK. Closes the early-return windows in
+/// `run_inference` (GPU fastpath success → return Ok(n)). The previous
+/// pattern called `engine_unlock()` immediately before each early
+/// return, which is correct today but easy to miss if a future edit
+/// adds a new path.
+struct EngineGuard;
+
+impl EngineGuard {
+    fn new() -> Self {
+        engine_lock();
+        EngineGuard
+    }
+}
+
+impl Drop for EngineGuard {
+    fn drop(&mut self) {
+        engine_unlock();
+    }
+}
+
 impl InferenceEngine {
     const fn empty() -> Self {
         Self {
@@ -526,8 +546,20 @@ impl InferenceEngine {
         let ph: u32 = 0;
         let pw: u32 = 0;
 
-        let h_out = (input.dim(2) + 2 * ph - kh) / sh + 1;
-        let w_out = (input.dim(3) + 2 * pw - kw) / sw + 1;
+        // Use checked subtraction so a kernel larger than the padded
+        // input doesn't underflow u32 to a giant h_out/w_out (which
+        // would then alloc_tensor a huge — and probably failed —
+        // workspace, or for unbounded sizes silently corrupt).
+        let h_padded = input.dim(2)
+            .checked_add(2 * ph)
+            .ok_or(EngineError::ShapeMismatch)?;
+        let w_padded = input.dim(3)
+            .checked_add(2 * pw)
+            .ok_or(EngineError::ShapeMismatch)?;
+        let h_out = h_padded.checked_sub(kh)
+            .ok_or(EngineError::ShapeMismatch)? / sh + 1;
+        let w_out = w_padded.checked_sub(kw)
+            .ok_or(EngineError::ShapeMismatch)? / sw + 1;
 
         let mut out = self.workspace.alloc_tensor(
             &[batch as u32, c_out as u32, h_out, w_out],
@@ -557,8 +589,12 @@ impl InferenceEngine {
         let sh: u32 = 2;
         let sw: u32 = 2;
 
-        let h_out = (input.dim(2) - kh) / sh + 1;
-        let w_out = (input.dim(3) - kw) / sw + 1;
+        // Same checked-subtraction pattern as exec_conv: a kh > input.dim(2)
+        // input would otherwise underflow u32 and produce a giant h_out.
+        let h_out = input.dim(2).checked_sub(kh)
+            .ok_or(EngineError::ShapeMismatch)? / sh + 1;
+        let w_out = input.dim(3).checked_sub(kw)
+            .ok_or(EngineError::ShapeMismatch)? / sw + 1;
 
         let mut out = self.workspace.alloc_tensor(
             &[batch as u32, channels as u32, h_out, w_out],
@@ -742,7 +778,7 @@ pub unsafe fn run_inference(
     output: *mut f32,
     output_len: usize,
 ) -> Result<usize, EngineError> {
-    engine_lock();
+    let _guard = EngineGuard::new();
 
     let start = kernel_ffi::get_time_ns();
 
@@ -758,7 +794,6 @@ pub unsafe fn run_inference(
                 crate::log::log_info(b"[engine] mnist GPU fastpath success\0");
                 let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
                 record_inference(elapsed);
-                engine_unlock();
                 return Ok(n);
             }
             Err(_) => {
@@ -770,7 +805,7 @@ pub unsafe fn run_inference(
         }
     }
 
-    // SAFETY: We hold the engine lock, exclusive access guaranteed.
+    // SAFETY: We hold the engine lock (via EngineGuard), exclusive access guaranteed.
     result = unsafe {
         let engine = &mut *ENGINE.get();
         match engine.init(model_index) {
@@ -786,6 +821,5 @@ pub unsafe fn run_inference(
         Err(_) => record_error(),
     }
 
-    engine_unlock();
     result
 }
