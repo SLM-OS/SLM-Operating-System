@@ -291,8 +291,21 @@ check gated on a nano-resource release from @johnjezl).
   configs now live at `deploy/pi5/{config.txt,tryboot.txt}`. See
   [`docs/pi5-tryboot-verification.md`](pi5-tryboot-verification.md)
   for the full hardware-test log.
-- ☐🔗🎫 Real-card BCM2712 SDHCI quirks (cfginit, CPRMAN clock-gate)
-  — #371 sub-task 5.
+- ✅ Real-card BCM2712 SDHCI quirks (cfginit, CPRMAN clock-gate)
+  — #371 sub-task 5. The cfginit / clock-gate code itself landed
+  via PR #422 + #457; verifying it on the real card surfaced an
+  unrelated bug in `kernel_cmd.c` — every `kernel stage` /
+  `rollback` was calling `sdhci_create_bcm2712()` directly,
+  bypassing `boot_media`'s keep-alive ref and reissuing
+  `RPI_FIRMWARE_SET_CLOCK_STATE` to firmware on every command.
+  The third-or-later rapid toggle returns code `0x00000000`
+  (failure) on `pieeprom-2024-09-23.bin`. Routed
+  `boot_volume_mount`/`unmount` through `boot_media_acquire`/
+  `release` (so the controller is pinned for the kernel's
+  lifetime). Verified post-fix: 5/5 stage→rollback cycles in one
+  boot, byte-for-byte SDHCI write content + SHA verification on
+  the card, plus 9/9 boot-reliability via `labctl boot_test`. See
+  [`docs/pi5-sdhci-real-card-verification.md`](pi5-sdhci-real-card-verification.md).
 - ☐🔗🎫 Full `stage → activate → promote → rollback` cycle on
   `pi-5-1` — #371 sub-task 6. Closes #35.
 - ☐🔗🎫 Jetson PCIe regression check (gated on nano release) —

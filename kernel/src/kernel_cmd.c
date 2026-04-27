@@ -6,21 +6,16 @@
  * subcommand contract; `docs/dynamic-kernel-replace-plan.md` for
  * the overall design.
  *
- * Backend wiring:
- *   PLATFORM_RASPI5  → sdhci_create_bcm2712()  (production)
- *   PLATFORM_QEMU_VIRT → sdhci_create_qemu_pci("kernel_boot")
- *                         (test path)
- *   other            → returns ENODEV; the command surface stays
- *                      registered for cross-platform tooling
- *                      consistency but every subcommand reports
- *                      "no boot partition" cleanly.
- *
- * Boot-partition lifecycle: each subcommand creates the SDHCI
- * blkdev, attaches it to FatFs, mounts partition 1, does its work,
- * and tears down before returning. The cost is ~10 ms in QEMU and
- * a few ms more on real hardware (full CMD0..CMD7 init each call).
- * Acceptable for admin pace. Sticky-mount across commands is a
- * future optimisation when the command frequency justifies it.
+ * Backend wiring goes through `boot_media_acquire/release`
+ * (kernel/src/boot_media.c) so the SDHCI controller is created
+ * once and pinned via the keep-alive ref for the kernel's
+ * lifetime. boot_media's platform dispatch picks the right
+ * sdhci_create_* function per platform; on platforms without an
+ * SDHCI backend acquire returns NULL and every subcommand reports
+ * "no boot partition" cleanly. The pin matters on Pi 5 — without
+ * it, repeated kernel_cmd subcommands wedge the firmware mailbox.
+ * See `docs/pi5-sdhci-real-card-verification.md` for the
+ * empirical trace and #371 sub-task 5 for the discovery.
  */
 
 #include "platform.h"
@@ -39,7 +34,7 @@
 #include "debug.h"
 #include "sha256.h"
 #include "fat32.h"
-#include "sdhci.h"
+#include "boot_media.h"
 #include "../lib/fatfs/ff.h"
 #include "smp.h"            /* psci_system_reset */
 #include "build_info.h"     /* SLMOS_VERSION etc. */
@@ -73,24 +68,16 @@
 static FATFS g_kernel_fs;
 static struct blkdev *g_kernel_dev;
 
-static struct blkdev *boot_partition_create(void)
-{
-#if defined(PLATFORM_RASPI5)
-    return sdhci_create_bcm2712();
-#elif defined(PLATFORM_QEMU_VIRT)
-    return sdhci_create_qemu_pci("kernel_boot");
-#else
-    return NULL;
-#endif
-}
-
 /*
  * Probe the SDHCI controller, attach to FatFs, and mount partition
  * 1. Returns 0 on success, negative on any failure (controller
  * absent, no card, no FAT32 partition). Caller MUST pair every
  * successful return with `boot_volume_unmount()` before returning
  * to the shell — even error paths after mount need to detach so
- * subsequent subcommands aren't fighting a stuck volume.
+ * subsequent subcommands aren't fighting a stuck volume. Goes
+ * through boot_media_acquire/release so the controller is
+ * created once and pinned via the keep-alive ref. See the
+ * file-level docblock for why this matters on Pi 5.
  */
 static int boot_volume_mount(void)
 {
@@ -98,7 +85,7 @@ static int boot_volume_mount(void)
         ERROR("kernel: boot volume already mounted (lifecycle bug)");
         return -1;
     }
-    g_kernel_dev = boot_partition_create();
+    g_kernel_dev = boot_media_acquire();
     if (!g_kernel_dev) {
         return -1;
     }
@@ -108,7 +95,7 @@ static int boot_volume_mount(void)
         ERROR("kernel: f_mount(\"%s\") = %d (no FAT32 on partition 1?)",
               VOL, res);
         fatfs_disk_detach();
-        sdhci_destroy(g_kernel_dev);
+        boot_media_release(g_kernel_dev);
         g_kernel_dev = NULL;
         return -1;
     }
@@ -122,7 +109,7 @@ static void boot_volume_unmount(void)
     }
     f_mount(NULL, VOL, 0);
     fatfs_disk_detach();
-    sdhci_destroy(g_kernel_dev);
+    boot_media_release(g_kernel_dev);
     g_kernel_dev = NULL;
 }
 
