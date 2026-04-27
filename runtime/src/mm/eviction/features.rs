@@ -38,6 +38,14 @@ use super::policy::{BlockFeatures, BlockMeta, PoolType};
 extern "C" {
     /// Number of loaded models in the model-loader registry.
     /// Used to populate feature slot 17 (num_loaded_models).
+    ///
+    /// Lock-ordering contract: `extract_features` (and therefore
+    /// `rust_model_count`) MUST NOT be called while the model-mem
+    /// `LOCK` is held. The current call site at
+    /// `model_mem::evict_and_retry` releases the pool lock before
+    /// calling `select_victim` → `extract_features`; if a future edit
+    /// inverts that ordering, this FFI call will deadlock against
+    /// `rust_model_count`'s own loader-registry lock.
     fn rust_model_count() -> u32;
 }
 

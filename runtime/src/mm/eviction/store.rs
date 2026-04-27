@@ -120,12 +120,20 @@ const fn kind_index(kind: BlobKind) -> usize {
     }
 }
 
-fn store_mut(kind: BlobKind) -> *mut KindStore {
-    unsafe { &mut (*addr_of_mut!(STORES))[kind_index(kind)] as *mut KindStore }
+// SAFETY: Marked `unsafe fn` so callers cannot accidentally invoke
+// these without acknowledging the lock requirement. They return raw
+// pointers; dereferencing requires the SpinGuard to be held. The
+// pointer arithmetic uses `addr_of_mut!` cast to *mut/*const without
+// ever materializing an intermediate reference, which is what the
+// previous implementation accidentally did via `&mut ... as *mut`.
+unsafe fn store_mut(kind: BlobKind) -> *mut KindStore {
+    let base = addr_of_mut!(STORES) as *mut KindStore;
+    base.add(kind_index(kind))
 }
 
-fn store_ref(kind: BlobKind) -> *const KindStore {
-    unsafe { &(*addr_of_mut!(STORES))[kind_index(kind)] as *const KindStore }
+unsafe fn store_ref(kind: BlobKind) -> *const KindStore {
+    let base = addr_of_mut!(STORES) as *const KindStore;
+    base.add(kind_index(kind))
 }
 
 pub fn reset() {

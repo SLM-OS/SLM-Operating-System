@@ -153,7 +153,16 @@ impl RuntimeXGBoostModel {
     }
 
     fn eval_tree(&self, mut idx: usize, features: &BlockFeatures) -> f32 {
-        loop {
+        // Cap depth to the number of nodes. parse-time bounds-check
+        // each child index against `node_count` but cannot detect a
+        // cycle (A→B→A) — and `eval_tree` runs in kernel context
+        // where a non-terminating loop on a malformed-but-checksum-
+        // valid blob would hang the runtime. Returning 0.0 on
+        // exhaustion produces a degraded prediction instead of a
+        // hang; an entire malformed blob will fail health checks
+        // upstream.
+        let max_depth = self.nodes.len().saturating_add(1);
+        for _ in 0..max_depth {
             let node = self.nodes[idx];
             if (node.flags & FLAG_LEAF) != 0 {
                 return node.value;
@@ -164,6 +173,7 @@ impl RuntimeXGBoostModel {
                 node.right_idx as usize
             };
         }
+        0.0_f32
     }
 }
 
