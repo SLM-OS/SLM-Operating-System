@@ -202,8 +202,9 @@ These are not required to boot but are present in `deploy/pi5/config.txt`:
 
 ### tryboot.txt — required when using `kernel activate`
 
-`tryboot.txt` mirrors `config.txt` byte-for-byte EXCEPT
-`kernel=tryboot.img`. Pi 5 firmware loads it INSTEAD OF
+`tryboot.txt` carries the same key/value pairs as `config.txt`
+except `kernel=tryboot.img` (the file-header comments differ to
+explain each file's role). Pi 5 firmware loads it INSTEAD OF
 `config.txt` when the bootloader tryboot flag is armed (one-shot,
 set by `kernel activate`). See `deploy/pi5/README.md`.
 
