@@ -622,6 +622,42 @@ int camrtc_diag_dump(void)
  */
 #define CAMRTC_CTRL_REGION_PHYS    0xBDFE0000u
 
+/* VI-capture per-request descriptor region. Sits 64 KB below the
+ * CH_SETUP region in the same NC mapping. Layout (set up by
+ * `kernel/drivers/camrtc/camrtc_capture.c`):
+ *
+ *   +0x0000  request[]     queue_depth × CAMRTC_VI_REQ_REQUEST_SIZE
+ *   +0x4000  memoryinfo[]  queue_depth × CAMRTC_VI_REQ_MEMINFO_SIZE
+ *
+ * Both arrays live in NC so RCE writes (status + sequence) on
+ * frame completion are visible to AP without cache maintenance.
+ *
+ * `CAMRTC_VI_REQ_REQUEST_SIZE = 1024` is a generous over-estimate
+ * of `sizeof(struct capture_descriptor)` (~448 B). Setting it
+ * larger than the real struct only wastes slot space — RCE uses
+ * `request_size` from `capture_channel_config` as the slot stride,
+ * not as a struct-size assertion.
+ *
+ * `CAMRTC_VI_REQ_MEMINFO_SIZE = 128` matches
+ * `sizeof(struct capture_descriptor_memoryinfo)` exactly
+ * (4 surfaces * 16 + 8 + 8 + 12*4 = 128).
+ *
+ * Today only `queue_depth=1` (single-shot) is used; growing this
+ * is a one-line change as long as the total stays inside the 64 KB
+ * carveout. The static_asserts below pin both the per-slot sizes
+ * and the worst-case per-queue_depth fit. */
+#define CAMRTC_VI_REQ_REGION_PHYS      0xBDFD0000u
+#define CAMRTC_VI_REQ_REGION_RESERVED  0x10000u    /* 64 KB */
+#define CAMRTC_VI_REQ_QUEUE_DEPTH      1u
+#define CAMRTC_VI_REQ_REQUEST_SIZE     1024u
+#define CAMRTC_VI_REQ_MEMINFO_SIZE     128u
+/* Sub-region offsets within VI_REQ_REGION_PHYS. The request_ring
+ * is at offset 0; the memoryinfo_ring is offset 0x4000 to leave
+ * space for queue_depth * REQUEST_SIZE plus headroom for future
+ * growth. */
+#define CAMRTC_VI_REQ_RING_OFFSET      0x0000u
+#define CAMRTC_VI_REQ_MEMINFO_OFFSET   0x4000u
+
 static uintptr_t g_ch_setup_region_phys;
 static uintptr_t g_ch_setup_cap_rx_iova;
 static uintptr_t g_ch_setup_cap_tx_iova;
@@ -639,6 +675,31 @@ uintptr_t camrtc_ch_setup_capture_rx_iova(void)
 uintptr_t camrtc_ch_setup_capture_tx_iova(void)
 {
     return g_ch_setup_cap_tx_iova;
+}
+
+uintptr_t camrtc_vi_req_ring_iova(void)
+{
+    return CAMRTC_VI_REQ_REGION_PHYS + CAMRTC_VI_REQ_RING_OFFSET;
+}
+
+uintptr_t camrtc_vi_req_meminfo_iova(void)
+{
+    return CAMRTC_VI_REQ_REGION_PHYS + CAMRTC_VI_REQ_MEMINFO_OFFSET;
+}
+
+uint32_t camrtc_vi_req_queue_depth(void)
+{
+    return CAMRTC_VI_REQ_QUEUE_DEPTH;
+}
+
+uint32_t camrtc_vi_req_request_size(void)
+{
+    return CAMRTC_VI_REQ_REQUEST_SIZE;
+}
+
+uint32_t camrtc_vi_req_meminfo_size(void)
+{
+    return CAMRTC_VI_REQ_MEMINFO_SIZE;
 }
 
 int camrtc_ch_setup_capture_control(void)
@@ -687,6 +748,29 @@ int camrtc_ch_setup_capture_control(void)
                    <= 0xBE000000u,
                    "CH_SETUP region must lie inside the NC mapping "
                    "(NC end = 0xBE000000)");
+    /* VI request region constraints: same RCE aperture + NC mapping;
+     * must not overlap CH_SETUP region (which sits at 0xBDFE0000); and
+     * the per-queue payload must fit inside the carveout. */
+    _Static_assert(CAMRTC_VI_REQ_REGION_PHYS >= 0xA0000000u,
+                   "VI request region must lie inside RCE VM1 aperture");
+    _Static_assert(CAMRTC_VI_REQ_REGION_PHYS + CAMRTC_VI_REQ_REGION_RESERVED
+                   <= 0xC0000000u,
+                   "VI request region must end inside RCE VM1 aperture");
+    _Static_assert(CAMRTC_VI_REQ_REGION_PHYS >= 0xBDE00000u
+                   && CAMRTC_VI_REQ_REGION_PHYS + CAMRTC_VI_REQ_REGION_RESERVED
+                      <= 0xBE000000u,
+                   "VI request region must lie inside the NC mapping");
+    _Static_assert(CAMRTC_VI_REQ_REGION_PHYS + CAMRTC_VI_REQ_REGION_RESERVED
+                   <= CAMRTC_CTRL_REGION_PHYS,
+                   "VI request region must not overlap the CH_SETUP region");
+    _Static_assert(CAMRTC_VI_REQ_RING_OFFSET
+                   + CAMRTC_VI_REQ_QUEUE_DEPTH * CAMRTC_VI_REQ_REQUEST_SIZE
+                   <= CAMRTC_VI_REQ_MEMINFO_OFFSET,
+                   "VI request ring overflows into the memoryinfo ring");
+    _Static_assert(CAMRTC_VI_REQ_MEMINFO_OFFSET
+                   + CAMRTC_VI_REQ_QUEUE_DEPTH * CAMRTC_VI_REQ_MEMINFO_SIZE
+                   <= CAMRTC_VI_REQ_REGION_RESERVED,
+                   "VI memoryinfo ring overflows the carveout");
     uint64_t iova_shifted = (uint64_t)region_phys >> 8;
 
     /* Zero the entire region so the TLV terminator + IVC ring
@@ -703,6 +787,21 @@ int camrtc_ch_setup_capture_control(void)
     volatile uint64_t *region_words = (volatile uint64_t *)region_phys;
     for (uint32_t i = 0; i < CAMRTC_CTRL_REGION_BYTES / sizeof(uint64_t); i++) {
         region_words[i] = 0;
+    }
+
+    /* Zero the VI request region (request ring + memoryinfo ring)
+     * so RCE sees an empty queue on the next CHANNEL_SETUP. The
+     * region is 8-byte aligned + size — pinned by static_assert
+     * above — so word-at-a-time stores are safe. */
+    volatile uint64_t *vi_req_words =
+        (volatile uint64_t *)CAMRTC_VI_REQ_REGION_PHYS;
+    _Static_assert((CAMRTC_VI_REQ_REGION_PHYS & 7u) == 0u,
+                   "VI request region must be 8-byte aligned");
+    _Static_assert((CAMRTC_VI_REQ_REGION_RESERVED & 7u) == 0u,
+                   "VI request region size must be 8-byte multiple");
+    for (uint32_t i = 0;
+         i < CAMRTC_VI_REQ_REGION_RESERVED / sizeof(uint64_t); i++) {
+        vi_req_words[i] = 0;
     }
 
     /* Build the TLV array at offset 0. Region layout:
@@ -832,5 +931,10 @@ int camrtc_ch_setup_capture_control(void) { return -1; }
 uintptr_t camrtc_ch_setup_region_phys(void) { return 0; }
 uintptr_t camrtc_ch_setup_capture_rx_iova(void) { return 0; }
 uintptr_t camrtc_ch_setup_capture_tx_iova(void) { return 0; }
+uintptr_t camrtc_vi_req_ring_iova(void) { return 0; }
+uintptr_t camrtc_vi_req_meminfo_iova(void) { return 0; }
+uint32_t  camrtc_vi_req_queue_depth(void) { return 0; }
+uint32_t  camrtc_vi_req_request_size(void) { return 0; }
+uint32_t  camrtc_vi_req_meminfo_size(void) { return 0; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

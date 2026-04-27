@@ -226,3 +226,29 @@ uintptr_t camrtc_ch_setup_region_phys(void);
  */
 uintptr_t camrtc_ch_setup_capture_rx_iova(void);
 uintptr_t camrtc_ch_setup_capture_tx_iova(void);
+
+/*
+ * VI capture per-request descriptor region accessors. The region
+ * is a fixed 64 KB carveout at 0xBDFD0000 (inside the same NC
+ * mapping as the CH_SETUP region) that holds the request ring
+ * (CAPTURE_REQUEST_REQ slots) and the memoryinfo ring (which
+ * tells RCE where each request's frame buffer lives).
+ *
+ * The IOVAs are returned as physical addresses inside RCE's VM1
+ * aperture (no SMMU translation post-kexec). The geometry
+ * accessors (queue_depth / request_size / memoryinfo_size) carry
+ * the values that `camrtc_capture_channel_setup` should pass to
+ * RCE so the slot stride agrees on both sides of the wire.
+ *
+ * The region is zeroed inside `camrtc_ch_setup_capture_control`
+ * (alongside the CH_SETUP region) so a re-init starts clean.
+ *
+ * Today queue_depth=1 (single-shot capture); growing it is a
+ * one-line change inside camrtc.c that the static_asserts in
+ * the same file will validate.
+ */
+uintptr_t camrtc_vi_req_ring_iova(void);
+uintptr_t camrtc_vi_req_meminfo_iova(void);
+uint32_t  camrtc_vi_req_queue_depth(void);
+uint32_t  camrtc_vi_req_request_size(void);
+uint32_t  camrtc_vi_req_meminfo_size(void);
