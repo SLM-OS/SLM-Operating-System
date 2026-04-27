@@ -6243,18 +6243,67 @@ int cmd_csidiag(int argc, char *argv[])
                 "vi_mask=0x%lx\r\n",
                 rc, (unsigned)ch_result, (unsigned)ch_id,
                 (unsigned long)vi_mask);
-    if (rc == 0 && ch_result == 0u) {
-        uart_printf("  *** CHANNEL_SETUP OK — RCE allocated VI      ***\r\n");
-        uart_printf("  *** channel %u (vi_mask=0x%lx). Ready for    ***\r\n",
-                    (unsigned)ch_id, (unsigned long)vi_mask);
-        uart_puts("  *** PR4: build capture_descriptor + send     ***\r\n");
-        uart_puts("  *** CAPTURE_REQUEST_REQ to fill a frame.     ***\r\n");
-    } else if (rc == 0) {
-        uart_puts("  *** Round-trip OK; RCE rejected the request   ***\r\n");
-        uart_puts("  *** — see WARN log + decode result via        ***\r\n");
-        uart_puts("  *** l4t-camrtc-capture-messages.h.            ***\r\n");
+    if (rc != 0 || ch_result != 0u) {
+        if (rc == 0) {
+            uart_puts("  *** Round-trip OK; RCE rejected the request   ***\r\n");
+            uart_puts("  *** — see WARN log + decode result via        ***\r\n");
+            uart_puts("  *** l4t-camrtc-capture-messages.h.            ***\r\n");
+        } else {
+            uart_puts("  *** CHANNEL_SETUP failed at the IVC layer.   ***\r\n");
+        }
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+    uart_printf("  *** CHANNEL_SETUP OK — RCE allocated VI      ***\r\n");
+    uart_printf("  *** channel %u (vi_mask=0x%lx).              ***\r\n",
+                (unsigned)ch_id, (unsigned long)vi_mask);
+
+    /* CHANNEL_SETUP succeeded — populate slot 0 of the request
+     * ring with a minimal capture_descriptor, then fire
+     * CAPTURE_REQUEST_REQ over the capture IVC channel.
+     *
+     * This is a wire-format smoke test, NOT a real capture: we
+     * leave vi_channel_config / atomp_surfaces / pfsd_config as
+     * zero, which means RCE will accept the request, try to
+     * configure the VI hardware, fail (no valid frame buffer
+     * IOVA, no atomp surface stride), and report the error
+     * back via CAPTURE_STATUS_IND. The wire round-trip + the
+     * STATUS_IND echo are the proof of life.
+     *
+     * The descriptor lives at the start of request_ring (slot
+     * 0). Set capture_flags=STATUS_REPORT_ENABLE so RCE always
+     * sends STATUS_IND, even on a successful path that wouldn't
+     * otherwise notify; sequence is for AP-side bookkeeping. */
+    volatile uint32_t *desc =
+        (volatile uint32_t *)camrtc_vi_req_ring_iova();
+    /* Zero the entire descriptor slot first so any RCE-side
+     * read of an unset field (vi_channel_config, atomp surfaces)
+     * lands as 0. */
+    uint32_t slot_words = camrtc_vi_req_request_size() / 4u;
+    for (uint32_t i = 0; i < slot_words; i++) desc[i] = 0u;
+    desc[0] = 1u;        /* sequence */
+    desc[1] = CAPTURE_FLAG_STATUS_REPORT_ENABLE
+            | CAPTURE_FLAG_ERROR_REPORT_ENABLE;     /* capture_flags */
+    /* desc[2] = frame_start_timeout (lo16) | frame_completion (hi16);
+     * leave at 0 — RCE has its own watchdog. */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    uart_printf("  CAPTURE_REQUEST: send buffer_index=0 "
+                "(descriptor at 0x%lx)\r\n",
+                (unsigned long)camrtc_vi_req_ring_iova());
+    uint32_t status_index = 0xDEADBEEFu;
+    rc = camrtc_capture_request(0u, &status_index, 1000000u);
+    uart_printf("  CAPTURE_REQUEST: rc=%d status_buffer_index=0x%x\r\n",
+                rc, (unsigned)status_index);
+    if (rc == 0) {
+        uart_puts("  *** CAPTURE_REQUEST round-trip OK — RCE     ***\r\n");
+        uart_puts("  *** processed our request and sent STATUS.  ***\r\n");
+        uart_puts("  *** Inspect descriptor capture_status field ***\r\n");
+        uart_puts("  *** for per-frame outcome (see L4T          ***\r\n");
+        uart_puts("  *** capture-messages.h CAPTURE_STATUS_*).   ***\r\n");
     } else {
-        uart_puts("  *** CHANNEL_SETUP failed at the IVC layer.   ***\r\n");
+        uart_puts("  *** CAPTURE_REQUEST failed at the IVC layer ***\r\n");
+        uart_puts("  *** — see WARN log for details.             ***\r\n");
     }
 
     uart_puts("=== End ===\r\n");
