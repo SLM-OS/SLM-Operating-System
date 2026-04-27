@@ -187,13 +187,14 @@ on-the-fly during MatMul into a transient FP16 column tile in workspace,
 which is the GGML pattern and keeps weight-side bandwidth at ~½ the FP16
 cost.
 
-> **Plumbing dependency:** `runtime/src/mm/model_mem.rs::model_mem_init`
-> already accepts `(weight_mb, workspace_mb)`, but the kernel callsite
-> (`rust_model_mem_init()` in `slm_ffi.h`) currently invokes it with no
-> arguments and the Phase-5 defaults (256 MB / 128 MB) are baked in. The
-> Jetson sizing above requires either (a) a per-platform `config.h`
-> override consumed inside the no-arg shim, or (b) extending the FFI to
-> take explicit sizes. Tracked as task M0-2 in the implementation plan.
+> **Plumbing landed in M0.2:** `rust_model_mem_init` now takes
+> `(uint32_t weight_mb, uint32_t workspace_mb)` and the kernel boot
+> path passes `MODEL_MEM_WEIGHT_MB` / `MODEL_MEM_WORKSPACE_MB` from
+> `<kernel/include/config.h>`. Per-platform defaults select 2 GB /
+> 256 MB on Jetson, 512 MB / 256 MB on Pi 5, and the original 256 MB /
+> 128 MB on QEMU and x86-64. The 512 MB KV-cache sub-pool is still M5
+> work — it carves out of the existing workspace pool rather than
+> requiring a third top-level pool.
 
 ---
 
