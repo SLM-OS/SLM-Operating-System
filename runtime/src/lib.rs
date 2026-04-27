@@ -5032,6 +5032,54 @@ pub extern "C" fn rust_slm_count() -> u32 {
     slm::registry::count() as u32
 }
 
+/// Test-only: build a Qwen2.5-shaped GGUF fixture into the caller's
+/// buffer and return the bytes-written count via `*out_size`.
+///
+/// Used by `kernel/tests/test_slm_load.c` to drive the FFI surface
+/// end-to-end without staging a real ~1 GB GGUF on disk. The shape
+/// matches Qwen2.5-1.5B-Instruct so every key
+/// `validate_for_inference` reads is exercised.
+///
+/// Returns 0 on success, -1 on null pointer / buffer-too-small.
+///
+/// # Safety
+/// - `out_buf` must point to `out_capacity` writable bytes.
+/// - `out_size` must be a valid `*mut usize`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_test_build_qwen_fixture(
+    vocab_size: u32,
+    out_buf: *mut u8,
+    out_capacity: usize,
+    out_size: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || out_size.is_null() {
+        return -1;
+    }
+    let buf = core::slice::from_raw_parts_mut(out_buf, out_capacity);
+    match slm::registry::build_qwen_test_fixture(vocab_size as usize, buf) {
+        Some(n) => {
+            *out_size = n;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Reset the SLM registry to its initial empty state. Test-only —
+/// `kernel/tests/test_slm_load.c` calls this between cases so each
+/// test sees a known empty slot table.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_test_reset() {
+    // Equivalent to `unload_slm` on every occupied slot; no
+    // separate Rust-side accessor needed beyond what the registry
+    // already exposes.
+    for idx in 0..slm::registry::SLM_MAX_SLOTS {
+        let _ = slm::registry::unload_slm(idx);
+    }
+}
+
 // =============================================================================
 // Inference API (Phase 5, M2)
 // =============================================================================
