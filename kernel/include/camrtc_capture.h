@@ -27,6 +27,38 @@
 
 #include <stdint.h>
 
+/* ---- Capture-control wire constants ----
+ *
+ * Pinned subset of `docs/reference/l4t-camrtc-capture-messages.h`.
+ * These are wire-format ABI between SLM-OS and the RCE firmware;
+ * `_Static_assert` block in `kernel/tests/test_camera.c` pins
+ * struct sizes and opcode values against accidental drift. */
+
+/* Standard 8-byte header at the front of every capture-control
+ * frame (`struct CAPTURE_MSG_HEADER` in the L4T reference). */
+struct capture_msg_header {
+    uint32_t msg_id;
+    uint32_t transaction;   /* anonymous union with channel_id */
+};
+
+/* CAPTURE_PHY_STREAM_OPEN_REQ_MSG body — 16 bytes. */
+struct capture_phy_stream_open_req {
+    uint32_t stream_id;
+    uint32_t csi_port;
+    uint32_t phy_type;
+    uint32_t pad32__;
+};
+
+/* CAPTURE_PHY_STREAM_OPEN_RESP_MSG body — 8 bytes. */
+struct capture_phy_stream_open_resp {
+    uint32_t result;
+    uint32_t pad32__;
+};
+
+/* Message IDs (request / response). */
+#define CAPTURE_PHY_STREAM_OPEN_REQ    0x36u
+#define CAPTURE_PHY_STREAM_OPEN_RESP   0x37u
+
 /*
  * Initialise the capture-control IVC channel:
  *   1. camrtc_init        — HSP-VM HELLO/PROTOCOL/RESUME (idempotent)

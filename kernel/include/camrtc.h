@@ -88,6 +88,7 @@ int camrtc_init(void);
  * `docs/reference/l4t-camrtc-commands.h:42-77`. Driver-internal
  * constants for HELLO / PROTOCOL / RESUME stay file-local.
  */
+#define CAMRTC_HSP_IRQ            0x00u
 #define CAMRTC_HSP_PING           0x45u
 #define CAMRTC_HSP_FW_HASH        0x46u
 #define CAMRTC_HSP_CH_SETUP       0x44u

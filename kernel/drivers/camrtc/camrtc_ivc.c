@@ -105,14 +105,35 @@ static inline uintptr_t slot_addr(uintptr_t queue, uint32_t which,
 
 /* ---- byte memcpy (kernel has no <string.h>) ---- */
 
+/* Copy `n` bytes src→dst. Uses 8-byte stores when both pointers and
+ * `n` are 8-aligned (the common case for IVC frame copies — slot
+ * base is 64-aligned, frame_size is 64-aligned), and falls back to
+ * single-byte stores for any unaligned head/tail. NC mapping makes
+ * either path land in DRAM directly; the word-at-a-time path is
+ * just ~8× fewer store instructions. */
 static void byte_copy(volatile uint8_t *dst, const uint8_t *src,
                       uint32_t n)
 {
+    uintptr_t da = (uintptr_t)dst;
+    uintptr_t sa = (uintptr_t)src;
+    if (((da | sa | n) & 7u) == 0u) {
+        volatile uint64_t *d = (volatile uint64_t *)dst;
+        const uint64_t *s = (const uint64_t *)src;
+        uint32_t words = n / 8u;
+        for (uint32_t i = 0; i < words; i++) d[i] = s[i];
+        return;
+    }
     for (uint32_t i = 0; i < n; i++) dst[i] = src[i];
 }
 
 static void byte_zero(volatile uint8_t *dst, uint32_t n)
 {
+    if ((((uintptr_t)dst | n) & 7u) == 0u) {
+        volatile uint64_t *d = (volatile uint64_t *)dst;
+        uint32_t words = n / 8u;
+        for (uint32_t i = 0; i < words; i++) d[i] = 0;
+        return;
+    }
     for (uint32_t i = 0; i < n; i++) dst[i] = 0;
 }
 
@@ -138,7 +159,7 @@ static void notify_rce(uint32_t group)
      * RCE's mailbox-FULL ISR which then reads SS[0] to learn which
      * IVC group has new traffic — without this the SS_SET write
      * sits unread until RCE's next unrelated wake. */
-    (void)camrtc_send_irq(0u /* CAMRTC_HSP_IRQ */, 1u, 1000u);
+    (void)camrtc_send_irq(CAMRTC_HSP_IRQ, 1u, 1000u);
 }
 
 /* ---- Public API ---- */

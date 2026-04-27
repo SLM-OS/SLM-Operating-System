@@ -35,11 +35,12 @@
  *     around naturally.
  *
  *   - State machine: writer's `state` is one of SYNC (1) / ACK (2) /
- *     ESTABLISHED (0). Either side can drive a reset by writing SYNC
- *     and waiting for the other to ACK. If both queues come up with
- *     state=ESTABLISHED and both counters at 0 (which is what the
- *     CH_SETUP region zeroing guarantees), the handshake is a no-op
- *     and frames flow immediately. SLM-OS skips it.
+ *     ESTABLISHED (0). `camrtc_ivc_init` drives the SYNC→ACK→EST
+ *     handshake matching L4T `tegra_ivc_reset` + `tegra_ivc_notified`:
+ *     write local=SYNC + notify (kickoff), then poll-and-transition
+ *     with 1 ms inter-poll spacing until both sides observe EST.
+ *     The spacing is load-bearing — without it, RCE's heartbeat
+ *     watchdog trips on IRQ-msg flood.
  *
  *   - Notification: when AP advances a write count and the queue
  *     transitioned from empty→non-empty, AP must wake RCE. The wake
@@ -48,11 +49,12 @@
  *     message. SLM-OS issues both to mirror L4T's
  *     `camrtc_hsp_vm_group_ring`.
  *
- *   - Memory ordering: cacheable kernel-linear mapping. The RCE node
- *     is `dma-coherent` per L4T DT, so `dsb sy` is sufficient — no
- *     cache maintenance (DC CVAC/CIVAC) required. AP→RCE writes
- *     get a write-then-DSB before counter bump; AP reads issue DSB
- *     after counter check.
+ *   - Memory ordering: the IVC region lives in the NC mapping at
+ *     0xBDFE0000 (`CAMRTC_CTRL_REGION_PHYS` in camrtc.c). AP writes
+ *     bypass L1/L2 and hit DRAM immediately, so `dsb sy` is the
+ *     only ordering needed — no cache maintenance (DC CVAC/CIVAC).
+ *     AP→RCE writes get a write-then-DSB before counter bump; AP
+ *     reads issue DSB before counter check.
  *
  * Concurrency: NOT thread-safe. Same constraint as `camrtc_send_msg`
  * — single shell-context caller today.
@@ -94,9 +96,9 @@ struct camrtc_ivc_channel {
 
 /*
  * Initialise an IVC channel using the rx/tx IOVAs RCE bound during
- * CH_SETUP. Zeros both queue headers (count=0, state=ESTABLISHED)
- * so the handshake is implicit, then issues a wake to RCE so the
- * remote side picks up the established state if it was waiting.
+ * CH_SETUP. Zeros AP's halves of both queue headers (only — RCE's
+ * halves carry state RCE wrote during CH_SETUP and must be left
+ * intact), then drives the SYNC→ACK→EST handshake with the remote.
  *
  *   ch          Caller-allocated channel state to populate.
  *   rx_iova     Phys address of the RCE→AP queue (the rx_iova
@@ -111,7 +113,8 @@ struct camrtc_ivc_channel {
  * for non-control channels) with success.
  *
  * Returns 0 on success, -1 on bad arguments (NULL ch, zero
- * geometry, frame_size not 64-aligned, nframes not power of two).
+ * geometry, frame_size not 64-aligned, nframes not power of two),
+ * -2 if the SYNC handshake doesn't reach EST/EST within ~100 ms.
  */
 int camrtc_ivc_init(struct camrtc_ivc_channel *ch,
                     uintptr_t rx_iova, uintptr_t tx_iova,

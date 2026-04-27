@@ -66,10 +66,9 @@
 #define RCE_PM_WFIPIPESTOPPED     (1u << 21)
 
 /* CAMRTC_HSP_MSG opcodes used only inside the driver (the boot-sync
- * sequence). Public opcodes that callers reference (PING, FW_HASH,
- * CH_SETUP) live in `camrtc.h`. Full set in
+ * sequence). Public opcodes that callers reference (IRQ, PING,
+ * FW_HASH, CH_SETUP) live in `camrtc.h`. Full set in
  * `docs/reference/l4t-camrtc-commands.h:42-77`. */
-#define CAMRTC_HSP_IRQ            0x00u
 #define CAMRTC_HSP_HELLO          0x40u
 #define CAMRTC_HSP_BYE            0x41u
 #define CAMRTC_HSP_RESUME         0x42u
