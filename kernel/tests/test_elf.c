@@ -148,6 +148,78 @@ static void test_elf_argv_copy_zero_argc(void)
     TEST_ASSERT_EQUAL_INT(ELF_OK, rc);
 }
 
+/* ===========================================================================
+ * elf_load segment-bounds overflow regressions
+ *
+ * The PR-465 review fix replaces unguarded `p_offset + p_filesz` and
+ * `p_vaddr + p_memsz` additions in elf_load with subtraction-form
+ * bounds checks. A crafted phdr with values near UINT64_MAX could
+ * previously wrap to a small sum and pass the naive bounds check,
+ * letting elf_load proceed with out-of-bounds reads or a truncated
+ * `load_size`. Tests below construct minimal in-memory ELF buffers
+ * exercising both overflow scenarios.
+ * =========================================================================== */
+
+/* Build a minimal ELF that elf_load will accept (header + N phdrs). The
+ * phdr table is placed immediately after the ehdr; trailing space for
+ * segment data is left out — these tests should fail in segment
+ * validation before any memory is allocated. */
+static void build_phdr_elf(uint8_t *buf, size_t cap, size_t *out_size,
+                           const Elf64_Phdr *phdrs, uint16_t n)
+{
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)buf;
+    fill_ehdr(ehdr, sizeof(Elf64_Ehdr), n);
+    size_t phdr_off = sizeof(Elf64_Ehdr);
+    size_t total = phdr_off + (size_t)n * sizeof(Elf64_Phdr);
+    TEST_ASSERT_TRUE(total <= cap);
+    for (uint16_t i = 0; i < n; i++) {
+        Elf64_Phdr *p = (Elf64_Phdr *)(buf + phdr_off + i * sizeof(Elf64_Phdr));
+        *p = phdrs[i];
+    }
+    *out_size = total;
+}
+
+/* p_offset near UINT64_MAX with non-zero p_filesz must be rejected
+ * even though the unsigned addition would wrap to a small sum. */
+static void test_elf_load_rejects_p_offset_overflow(void)
+{
+    uint8_t buf[sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr)];
+    Elf64_Phdr phdr;
+    for (size_t i = 0; i < sizeof(phdr); i++) ((uint8_t *)&phdr)[i] = 0;
+    phdr.p_type = PT_LOAD;
+    phdr.p_offset = (uint64_t)-32;   /* Near UINT64_MAX. */
+    phdr.p_filesz = 64;              /* Wraps to ~32 if added naively. */
+    phdr.p_vaddr = 0x40000000;
+    phdr.p_memsz = 64;
+
+    size_t size;
+    build_phdr_elf(buf, sizeof(buf), &size, &phdr, 1);
+    struct elf_info info;
+    int rc = elf_load(buf, size, &info);
+    TEST_ASSERT_EQUAL_INT(ELF_ERR_TRUNCATED, rc);
+}
+
+/* p_vaddr near UINT64_MAX with non-zero p_memsz must be rejected
+ * even though the unsigned addition would wrap to a small `end`,
+ * which would otherwise produce a small `load_size`. */
+static void test_elf_load_rejects_p_vaddr_overflow(void)
+{
+    uint8_t buf[sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr)];
+    Elf64_Phdr phdr;
+    for (size_t i = 0; i < sizeof(phdr); i++) ((uint8_t *)&phdr)[i] = 0;
+    phdr.p_type = PT_LOAD;
+    phdr.p_offset = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
+    phdr.p_filesz = 0;               /* Skip the file-bounds check. */
+    phdr.p_vaddr = (uint64_t)-32;    /* Near UINT64_MAX. */
+    phdr.p_memsz = 64;               /* Wraps to ~32 if added naively. */
+
+    size_t size;
+    build_phdr_elf(buf, sizeof(buf), &size, &phdr, 1);
+    struct elf_info info;
+    int rc = elf_load(buf, size, &info);
+    TEST_ASSERT_EQUAL_INT(ELF_ERR_TRUNCATED, rc);
+}
+
 int test_suite_elf(void)
 {
     UnityBegin("ELF Loader Tests");
@@ -162,6 +234,10 @@ int test_suite_elf(void)
     RUN_TEST(test_elf_argv_copy_rejects_single_oversize);
     RUN_TEST(test_elf_argv_copy_rejects_argc_over_limit);
     RUN_TEST(test_elf_argv_copy_zero_argc);
+
+    /* PR-465 segment-bounds overflow regressions. */
+    RUN_TEST(test_elf_load_rejects_p_offset_overflow);
+    RUN_TEST(test_elf_load_rejects_p_vaddr_overflow);
 
     return UnityEnd();
 }

@@ -110,6 +110,38 @@ static void test_buffer_map_unmap(void)
     shared_buffer_destroy(buf);
 }
 
+/* Regression: shared_buffer_destroy must refuse when refcount > 1 AND
+ * leave the buffer in the global lookup table afterwards (so other
+ * tasks that have the buffer mapped can still find it). The earlier
+ * review-fix iteration cleared the slot eagerly and tried to "restore"
+ * on BUSY, which lost the buffer to a concurrent shared_buffer_create
+ * reusing the slot. The corrected version holds both locks across the
+ * refcount check, keeping the slot populated on the BUSY path. */
+static void test_buffer_destroy_busy_keeps_slot(void)
+{
+    struct shared_buffer *buf = shared_buffer_create(4096, SHM_RDWR);
+    TEST_ASSERT_NOT_NULL(buf);
+    uint32_t id = buf->id;
+
+    /* Map a second time so refcount goes to 2. */
+    void *m = shared_buffer_map(buf, NULL, SHM_RDWR);
+    TEST_ASSERT_NOT_NULL(m);
+
+    /* Destroy must fail with BUSY because refcount > 1. */
+    int rc = shared_buffer_destroy(buf);
+    TEST_ASSERT_EQUAL_INT(IPC_ERR_BUSY, rc);
+
+    /* And the slot must still be in the global table — a follow-up
+     * lookup by id must still find the same buffer. */
+    struct shared_buffer *found = shared_buffer_lookup(id);
+    TEST_ASSERT_EQUAL_PTR(buf, found);
+
+    /* Cleanup. */
+    shared_buffer_unmap(buf, NULL);
+    shared_buffer_destroy(buf);
+    TEST_ASSERT_NULL(shared_buffer_lookup(id));
+}
+
 static void test_buffer_lookup_by_id(void)
 {
     struct shared_buffer *buf = shared_buffer_create(4096, SHM_RDWR);
@@ -734,6 +766,7 @@ int test_suite_ipc(void)
     /* Shared buffer tests */
     RUN_TEST(test_buffer_create_destroy);
     RUN_TEST(test_buffer_map_unmap);
+    RUN_TEST(test_buffer_destroy_busy_keeps_slot);
     RUN_TEST(test_buffer_lookup_by_id);
     RUN_TEST(test_buffer_gpu_accessible);
 

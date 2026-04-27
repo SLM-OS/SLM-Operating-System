@@ -1218,3 +1218,27 @@ pub fn gelu(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PR-465 regression: `quantize_fp32_to_int8` must short-circuit
+    /// on `n == 0` instead of dereferencing `*data`. The previous
+    /// form read `*data` unconditionally, which was UB for n=0.
+    #[test]
+    fn quantize_fp32_to_int8_rejects_zero_n() {
+        // Pass null and zero — must not dereference.
+        let qp = quantize_fp32_to_int8(core::ptr::null(), 0, core::ptr::null_mut());
+        assert_eq!(qp.scale, 1.0);
+        assert_eq!(qp.zero_point, 0);
+    }
+
+    /// And on null data even with non-zero n.
+    #[test]
+    fn quantize_fp32_to_int8_rejects_null_data() {
+        let qp = quantize_fp32_to_int8(core::ptr::null(), 16, core::ptr::null_mut());
+        assert_eq!(qp.scale, 1.0);
+        assert_eq!(qp.zero_point, 0);
+    }
+}

@@ -215,3 +215,50 @@ pub fn build_test_payload_first_feature_split(threshold: f32, left: f32, right: 
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PR-465 regression: a malformed-but-checksum-valid blob with a
+    /// cyclic tree (A→B→A) must not hang the kernel. The MAX_TREE_DEPTH
+    /// = 256 cap ensures `eval_tree` returns the 0.0 fallback after a
+    /// bounded number of iterations.
+    #[test]
+    fn eval_tree_breaks_cycle_with_fallback() {
+        // Build a 2-node graph by hand (skip parse_payload's
+        // child-bounds check — we want to inject a cycle).
+        let leaf_node = Node {
+            feature_idx: 0,
+            flags: FLAG_LEAF,
+            left_idx: 0,
+            right_idx: 0,
+            threshold: 0.0,
+            value: 1.0_f32,  // Non-zero leaf value to detect successful walk.
+        };
+        // node 0: branches to itself on both sides — guaranteed cycle.
+        let cyclic_node = Node {
+            feature_idx: 0,
+            flags: 0,            // Not a leaf.
+            left_idx: 0,
+            right_idx: 0,
+            threshold: 0.0,
+            value: 0.0,
+        };
+
+        // Sanity: a clean leaf returns its value.
+        let leaf_only = RuntimeXGBoostModel {
+            roots: alloc::vec![0u16],
+            nodes: alloc::vec![leaf_node],
+        };
+        let features: BlockFeatures = [0.0; 27];
+        assert_eq!(leaf_only.eval_tree(0, &features), 1.0);
+
+        // Cyclic tree returns the 0.0 fallback after MAX_TREE_DEPTH.
+        let cyclic = RuntimeXGBoostModel {
+            roots: alloc::vec![0u16],
+            nodes: alloc::vec![cyclic_node],
+        };
+        assert_eq!(cyclic.eval_tree(0, &features), 0.0);
+    }
+}

@@ -174,6 +174,26 @@ On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite
 
 **Leaky tests that block CPU 1 (fixed April 16, 2026):** `task_destroy` silently refuses to reclaim tasks that are not in state `TASK_TERMINATED` (it warns and returns). Test loops that time out waiting for a task to run and then call `task_destroy` therefore LEAK the unterminated task into its target CPU's run queue. On Pi 5, `test_isolated_core_latency` was the worst offender — 10+ `lat_iso` tasks at `TASK_PRIORITY_HIGH` pinned to CPU 1 could accumulate and block every subsequent multi-CPU integration test. When writing or modifying a test that creates a task it expects to run to completion, ALWAYS `scheduler_terminate_task(t)` on the timeout branch before `task_destroy(t)`. The same pattern applies to any code that drops a task reference it expected to finish.
 
+**Snapshot/lock/recheck pattern for `task->assigned_cpu` reads (April 2026):** Anywhere a function reads `task->assigned_cpu` outside `rq_lock` to choose which CPU's queue lock to take, follow the pattern below. A concurrent work-stealing thief or `sched_migrate_task` on another CPU can change `assigned_cpu` between the read and the lock acquire, causing the wrong CPU's lock to be taken silently. `sched_migrate_task`, `scheduler_remove_task`, and `scheduler_terminate_task` use this pattern; new code that touches `assigned_cpu` outside the lock must too.
+
+```c
+for (int attempts = 0; attempts < 8; attempts++) {
+    uint32_t cpu = task->assigned_cpu;
+    if (cpu >= cpu_count) return;       /* defensive */
+    irq_flags_t flags = rq_lock_irqsave(cpu);
+    if (task->assigned_cpu != cpu) {
+        rq_unlock_irqrestore(cpu, flags);
+        continue;                        /* moved between read and lock */
+    }
+    /* ... do the work under cpu's rq_lock ... */
+    rq_unlock_irqrestore(cpu, flags);
+    return;
+}
+WARN("retry budget exhausted");          /* should be unreachable */
+```
+
+The 8-attempt bound is generous: each successful steal/migrate moves a task at most once per scheduling cycle, so retries succeed in 1-2 attempts in practice. `WARN` on exhaustion makes any pathological wedge visible. Regression coverage: `test_buffer_destroy_busy_keeps_slot` in `kernel/tests/test_ipc.c` exercises a related lock-ordering invariant.
+
 ---
 
 ## Idle Task DAIF
