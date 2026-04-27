@@ -27,7 +27,7 @@ This design allows system state and configuration to coexist with persistent fil
 │   └── self            # Current task info
 ├── components/         # Component system (virtual)
 └── mnt/                # Mount points for real filesystems
-    └── files/          # LittleFS on RAM disk
+    └── files/          # LittleFS, preferably from 0:/slmstore/files.lfs
         ├── hello.txt
         └── readme.txt
 ```
@@ -278,7 +278,13 @@ SLM-OS> cat /mnt/files/hello.txt
 Hello from LittleFS!
 ```
 
-See `docs/filesystem.md` for details on LittleFS integration and the block device layer.
+`/mnt/files` now prefers a persistent LittleFS image at
+`0:/slmstore/files.lfs` on the boot FAT volume and falls back to the
+legacy RAM-backed LittleFS path only when boot media is unavailable or
+the persistent store cannot be recovered.
+
+See `docs/filesystem.md` for details on LittleFS integration, recovery,
+and the block device layer.
 
 ## Implementation Notes
 

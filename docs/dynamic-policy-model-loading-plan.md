@@ -129,20 +129,17 @@ Already implemented:
   - `slm.eviction_model_activate(kind)`
   - `slm.eviction_model_rollback(kind)`
   - `slm.eviction_model_clear(kind)`
-- **First-cut persistence / autoload path**:
-  - `/mnt/files/blob_autoload.conf` now records persisted autoload
-    entries for current eviction and scheduler blob kinds
-  - `autoload set` now snapshots the validated source blob into a
-    canonical managed path under `/mnt/files/autoload/`
-  - persisted autoload entries now also record the managed blob's size
-    and checksum, and boot replay refuses to activate a managed copy if
-    it no longer matches the recorded identity
-  - boot replay now stages and activates configured blobs during shell
-    initialization
-  - `autoload set` now validates that the target file exists and parses
-    correctly for the requested blob kind before persisting the entry
-  - autoload config writes now go through a temp file + rename path
-    instead of truncating the live config in place
+- **Current persistence / autoload path**:
+  - authoritative managed autoload blobs now live persistently under
+    `0:/slmstore/autoload/`
+  - authoritative `blob_autoload.conf` now lives at
+    `0:/slmstore/blob_autoload.conf`
+  - `autoload set` snapshots the validated source blob into that
+    canonical managed store and records size/checksum identity
+  - boot replay now stages and activates configured blobs from the
+    authoritative boot-FAT-backed store during shell initialization
+  - `/mnt/files/autoload/` remains only the fallback system-managed
+    area when boot FAT authority is unavailable
   - shell control now includes:
     - `eviction model autoload status|set|clear ...`
     - `sched model autoload status|set|clear ...`
@@ -152,8 +149,11 @@ Already implemented:
   - `make kernel PLATFORM=RASPI5 AI_SCHED=ON EVICTION_MODELS=ON` builds
     cleanly with the new path
   - `make test AI_SCHED=ON EVICTION_MODELS=ON` still stops at the
-    existing QEMU test-kernel link failure (`Kernel image too large!`)
-    after compiling the new autoload test into the test image
+    existing long-running QEMU runtime/test limitation after compiling
+    the autoload coverage into the test image
+  - `/mnt/files` itself now prefers a persistent LittleFS image at
+    `0:/slmstore/files.lfs` with RAM fallback when boot FAT storage is
+    unavailable or unrecoverable
 - **Pi 5 deploy-model validation**:
   - the maintenance-OS / dual-boot path remains hardware-validated on
     `pi-5-2`
@@ -452,18 +452,19 @@ Status: `✅ partial`
 
 Implemented now:
 
-- current eviction and scheduler blob kinds can persist an autoload
-  source path in `/mnt/files/blob_autoload.conf`
+- current eviction and scheduler blob kinds can persist autoload
+  entries in the authoritative boot-FAT-backed config at
+  `0:/slmstore/blob_autoload.conf`
 - `autoload set` now snapshots the selected blob into a canonical
-  managed path under `/mnt/files/autoload/`, so boot replay no longer
+  managed path under `0:/slmstore/autoload/`, so boot replay no longer
   depends on the caller leaving the original source file in place
   - persisted autoload entries now record the canonical managed blob's
-  size and checksum, so boot replay can refuse a tampered managed copy
-  instead of blindly attempting activation
+    size and checksum, so boot replay can refuse a tampered managed copy
+    instead of blindly attempting activation
   - autoload status output now exposes that managed identity to
     operators instead of only printing the managed path
 - boot-time autoload replays those entries by staging from the
-  configured files and activating them
+  authoritative managed store and activating them
 - `autoload set` now rejects missing files, non-files, empty files, and
   blobs that fail parse/kind validation for the requested slot
 - autoload config rewrites now use a temp-file rename path rather than
@@ -474,20 +475,10 @@ Implemented now:
 
 Still missing:
 
-- authoritative persistence is now solved separately from `/mnt/files`:
-  - boot-managed authoritative blob copies and `blob_autoload.conf`
-    now prefer the persistent boot FAT volume (`0:/slmstore/...`)
-  - `/mnt/files` is still useful as the writable ingress/staging
-    workspace, but it is no longer the source of truth for managed
-    autoload state when boot FAT is available
-  - this removes the prior “autoload is only RAM-backed” limitation for
-    ordinary Pi boot media
-- `/mnt/files` itself is still not a finished persistent general-purpose
-  store:
-  - the earlier MBR-partition LittleFS groundwork exists, but it is not
-    yet the authoritative production path for writable storage
 - stronger corruption/recovery policy than “log and skip failed entry”
   during boot replay
+- broader operational validation beyond the current boot-FAT-backed
+  production path for `/mnt/files`
 - boot policy beyond replaying the configured paths
 
 ---

@@ -12,6 +12,7 @@ SLM-OS provides a layered filesystem architecture designed for:
 - **Flash-friendly storage** via LittleFS (wear leveling, power-loss resilience)
 - **RAM disk testing** during development (no hardware dependencies)
 - **VFS integration** for unified namespace access
+- **Boot-media-backed persistence** via a LittleFS image stored on the boot FAT volume
 - **Easy extension** to real storage (eMMC, SD cards) via block device abstraction
 
 ```
@@ -28,7 +29,8 @@ SLM-OS provides a layered filesystem architecture designed for:
 │  Block Device Abstraction (blkdev.h)                            │
 │    read / prog / erase / sync operations                        │
 ├─────────────────────────────────────────────────────────────────┤
-│  RAM Disk (ramdisk.c)  →  Future: eMMC, SD card                 │
+│  persistent_lfs_store.c → 0:/slmstore/files.lfs on boot FAT     │
+│  RAM Disk (ramdisk.c)  → fallback when boot media unavailable   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -278,7 +280,7 @@ struct vfs_fs_ops {
 │   └── self
 ├── components/         # Component system (virtual)
 └── mnt/                # Mount points
-    └── files/          # LittleFS on RAM disk (persistent)
+    └── files/          # LittleFS, preferably from 0:/slmstore/files.lfs
         ├── hello.txt
         └── readme.txt
 ```
@@ -300,8 +302,10 @@ SLM-OS> cat /mnt/files/hello.txt
 Hello from LittleFS!
 
 SLM-OS> cat /mnt/files/readme.txt
-This file is stored on a RAM disk using LittleFS.
-It demonstrates persistent file storage.
+SLM-OS LittleFS File System
+===========================
+This filesystem is persisted in 0:/slmstore/files.lfs
+on the boot FAT volume when that storage is available.
 
 SLM-OS> df
 Filesystem      Blocks     Used     Free   Use%
@@ -353,6 +357,32 @@ When accessing paths under a mount point:
 3. Calls the filesystem's operations with the subpath
 4. Returns the result to the caller
 
+### Persistence Behavior
+
+`/mnt/files` is mounted as LittleFS with this preference order:
+
+1. persistent image at `0:/slmstore/files.lfs` on the boot FAT volume
+2. RAM-backed LittleFS fallback if boot media is unavailable or the
+   persistent image cannot be recovered
+
+When boot FAT storage is available, ordinary files written under
+`/mnt/files` persist across reboot through that `files.lfs` image.
+
+The kernel also refreshes certain boot-managed assets every boot so
+built-in demos and admin flows stay usable on a persistent filesystem:
+
+- `/mnt/files/help/*`
+- `/mnt/files/admin.lua` and related demo scripts
+- embedded HEFs and sample assets such as `/mnt/files/digits/*`
+
+The authoritative policy-autoload store is separate from the general
+`/mnt/files` workspace:
+
+- managed autoload blobs and `blob_autoload.conf` live under
+  `0:/slmstore/`
+- `/mnt/files/autoload/` is only the fallback system-managed area when
+  boot FAT authority is unavailable
+
 ---
 
 ## Initialization
@@ -364,18 +394,24 @@ LittleFS is initialized during kernel boot in `main.c`:
 blkdev_init();
 littlefs_init();
 
-/* Create RAM disk */
-struct blkdev *ramdisk = ramdisk_create_default("ramdisk0");
-blkdev_register(ramdisk);
+/* Prefer persistent LittleFS on boot FAT, fall back to RAM */
+bool seed_defaults = true;
+struct blkdev *files_dev =
+    persistent_lfs_store_create("filesstore0", &seed_defaults);
 
-/* Mount LittleFS at /mnt/files (format on first mount) */
-littlefs_mount_at("/mnt/files", ramdisk, true);
+if (files_dev && blkdev_register(files_dev) == BLKDEV_OK) {
+    if (!littlefs_mount_at("/mnt/files", files_dev, seed_defaults)) {
+        persistent_lfs_store_reset(files_dev);
+        littlefs_mount_at("/mnt/files", files_dev, true);
+    }
+}
 
-/* Create test files */
-struct lfs_mount *mnt = ...;  /* Retrieved from mount */
-int fd = littlefs_file_open(mnt, "/hello.txt", LFS_O_CREAT | LFS_O_WRONLY);
-littlefs_file_write(mnt, fd, "Hello from LittleFS!", 20);
-littlefs_file_close(mnt, fd);
+/* If boot media is unavailable, fall back to a RAM disk */
+if (!vfs_stat_path("/mnt/files", ...)) {
+    struct blkdev *ramdisk = ramdisk_create_default("ramdisk0");
+    blkdev_register(ramdisk);
+    littlefs_mount_at("/mnt/files", ramdisk, true);
+}
 ```
 
 ---
