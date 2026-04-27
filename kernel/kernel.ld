@@ -146,5 +146,12 @@ SECTIONS
 ASSERT(_kernel_data_va >= 0x10000 + _kernel_code_size,
     "PE error: .text and .data sections overlap")
 
-/* Sanity check: ensure kernel fits in first 16 MB */
-ASSERT(__kernel_end < 0x41000000, "Kernel image too large!")
+/* Sanity check: 32 MB ceiling. The original 16 MB ceiling
+ * (0x41000000) was a defensive cap chosen long before the AI
+ * scheduler weight blobs (~6 MB across MLP + PPO) and the
+ * accumulated platform driver code pushed the bare-metal image
+ * past 13 MB; with AI_SCHED=ON the link now needs ~14-18 MB.
+ * 32 MB matches the headroom Pi 5 already has (its cap is at
+ * 64 MB) and stays well below the QEMU virt RAM start
+ * + 1 GB allocation. */
+ASSERT(__kernel_end < 0x42000000, "Kernel image too large!")
