@@ -139,6 +139,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_telnet();
     total_failures += test_suite_telnetd_config();
     total_failures += test_suite_telnetd_cmd();
+    total_failures += test_suite_tcp_telemetry_server();
 #endif
     total_failures += test_suite_pmm();
 #if !defined(PLATFORM_X86_64)

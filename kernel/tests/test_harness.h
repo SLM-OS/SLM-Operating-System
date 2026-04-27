@@ -70,6 +70,9 @@ int test_suite_telnetd_config(void);
 /* `telnetd` shell command + shell_io_tcp enumeration / kick tests */
 int test_suite_telnetd_cmd(void);
 
+/* TCP telemetry-feed server: filter / fanout / drop-oldest / pool */
+int test_suite_tcp_telemetry_server(void);
+
 /* VMM/TLB tests */
 int test_suite_vmm(void);
 

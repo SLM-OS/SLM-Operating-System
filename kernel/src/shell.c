@@ -728,6 +728,14 @@ void shell_init(void)
         extern void telnetd_autostart(void);
         telnetd_autostart();
     }
+
+    /* Telemetry-feed TCP server (port 2325). Brings up the network
+     * bridge for `tel.*` msg_router topics if the build set
+     * NET_TELEMETRYD_AUTOSTART; no-op otherwise. */
+    {
+        extern void tcp_telemetry_server_autostart(void);
+        tcp_telemetry_server_autostart();
+    }
 #endif
 
     shell_puts("\r\n");

@@ -209,6 +209,41 @@ The msg_router has a finite queue per subscriber. Spec rule: **drop oldest** sam
 
 High-rate consumers (`sched/decision` can fire >10 kHz under load) publish raw on every decision **only if any subscriber is attached to the raw topic**. The 1 Hz aggregate topic is always emitted. This avoids spending cycles on a fanout no one listens to.
 
+### 7.4 Network feed (`telemetryd`)
+
+The in-process bus is bridged to TCP by a dedicated push server, allowing a host-side monitor (Python script, `nc`, dashboard backend) to subscribe over the network without speaking telnet shell semantics. Implemented as `kernel/src/tcp_telemetry_server.c`; see `kernel/include/tcp_telemetry_server.h` for the public API.
+
+**Wire protocol.** TCP, default port **2325**. ASCII, newline-terminated.
+
+```
+# SLM-OS telemetryd v1
+# subscribe with: SUB <pattern>
+# default filter: tel.*
+tel.inf seq=1 ts=120031 dt=42 ok=1
+tel.evi seq=2 ts=120052 dt=87 fb=0
+```
+
+The banner is emitted once on accept; comment lines start with `#` and consumers ignore them. Sample lines are `<topic> seq=<n> ts=<sys_now_ms> <payload>\n`, with `<payload>` being the msg_router payload verbatim (`dt=N fb=N` for eviction, `dt=N ok=N` for inference).
+
+**Client commands** (one per line, optional):
+- `SUB <pattern>\n` — re-set the per-client server-side glob filter (same prefix-match semantics as msg_router wildcard subscriptions). Default `tel.*`.
+- `BYE\n` — graceful close.
+- Anything else is echoed back as `# unknown: <input>\n` so a stray byte doesn't kill the session.
+
+**Server architecture.** One static lwIP listen pcb. One msg_router subscription on `tel.*` using a fixed component slot (`TELEMETRY_COMPONENT_IDX = 49`, parked above the Lua range). Per-client state in a fixed pool (`MAX_TELEMETRY_SESSIONS = 4`) with a 4 KB TX ring. The msg_router subscription is drained from `net_pump` context (`tcp_telemetry_server_poll`, called from `net_poll`).
+
+**Slow-client policy.** Per-client drop-oldest on the TX ring when full. Drops are line-aligned (the eviction walks forward to the next `\n`) so a consumer never sees a truncated record. Drop counts surface per-session via `tcp_telemetry_server_foreach` and as the global `samples_dropped` in `tcp_telemetry_server_get_stats`. **The server never blocks the publisher.** A wedged client stalls only on its own ring, not on `msg_router_publish` — the latter would propagate up to ACK_TIMEOUT_SECS=5 stalls into the eviction allocator.
+
+**Controls.**
+- Shell: `telemetry server [start [port] | stop | status | sessions | kick <id>]`.
+- Lua (safe table): `slm.telemetryd_status()`, `slm.telemetryd_sessions()`.
+- Lua (admin table): `slm.telemetryd_start(port?)`, `slm.telemetryd_stop()`, `slm.telemetryd_kick(id)`.
+- Build: CMake option `NET_TELEMETRYD_AUTOSTART` (default OFF). Set ON for lab/demo images.
+
+**Security.** Same posture as telnet: trust-the-LAN, no auth, no TLS. Lab-only. SSH or token auth is the right next step when telemetry leaves the lab; an SSH tunnel from the consumer host is the interim workaround.
+
+**Out of scope (deferred decisions, see plan).** No 1 Hz aggregator (§14.8 still deferred). No richer per-event fields — `MAX_MSG_LEN=60` stays. No UDP emitter; if a dashboard consumer arrives, a sibling `kernel/src/udp_telemetry_emitter.c` can subscribe to the same `tel.*` topics without touching this server.
+
 ## 8. Latency & rate measurement
 
 ### 8.1 New header

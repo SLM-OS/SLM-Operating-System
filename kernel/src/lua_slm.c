@@ -33,6 +33,7 @@
 #if defined(ENABLE_NETWORKING)
 #include "shell_io_tcp.h"
 #include "tcp_shell_server.h"
+#include "tcp_telemetry_server.h"
 #include "net.h"
 #include "net_http.h"
 #endif
@@ -3388,6 +3389,112 @@ static int l_telnetd_kick(lua_State *L) {
     return 1;
 }
 
+/* ============================================================================
+ * slm.telemetryd_* — TCP telemetry-feed bindings.
+ *
+ * Same flat-namespace convention as slm.telnetd_*. Mutators
+ * (start/stop/kick) live on the admin table; readers (status / sessions)
+ * live on the safe table so any operator console can poll counts.
+ * Header is pulled in at the top of the file alongside the other
+ * shell/TCP headers.
+ * ============================================================================ */
+
+static int l_telemetryd_start(lua_State *L) {
+    if (!L) return 0;
+    int port = luaL_optinteger(L, 1, TCP_TELEMETRY_DEFAULT_PORT);
+    if (port < 1 || port > 65535) {
+        return luaL_argerror(L, 1, "port must be 1..65535");
+    }
+    if (!net_is_up() && net_init() != 0) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+    int rc = tcp_telemetry_server_start((uint16_t)port);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+static int l_telemetryd_stop(lua_State *L) {
+    if (!L) return 0;
+    bool was = tcp_telemetry_server_running();
+    if (was) tcp_telemetry_server_stop();
+    lua_pushboolean(L, was);
+    return 1;
+}
+
+static int l_telemetryd_status(lua_State *L) {
+    if (!L) return 0;
+    struct tcp_telemetry_server_stats st;
+    tcp_telemetry_server_get_stats(&st);
+
+    lua_newtable(L);
+    lua_pushboolean(L, st.listening);          lua_setfield(L, -2, "running");
+    lua_pushinteger(L, st.port);               lua_setfield(L, -2, "port");
+    lua_pushinteger(L, st.sessions_active);    lua_setfield(L, -2, "active");
+    lua_pushinteger(L, st.sessions_opened);    lua_setfield(L, -2, "opened");
+    lua_pushinteger(L, st.sessions_closed);    lua_setfield(L, -2, "closed");
+    lua_pushinteger(L, MAX_TELEMETRY_SESSIONS); lua_setfield(L, -2, "max");
+    lua_pushinteger(L, (lua_Integer)st.samples_dequeued);
+    lua_setfield(L, -2, "samples_dequeued");
+    lua_pushinteger(L, (lua_Integer)st.samples_delivered);
+    lua_setfield(L, -2, "samples_delivered");
+    lua_pushinteger(L, (lua_Integer)st.samples_dropped);
+    lua_setfield(L, -2, "samples_dropped");
+    lua_pushinteger(L, (lua_Integer)st.accept_rejects);
+    lua_setfield(L, -2, "accept_rejects");
+    return 1;
+}
+
+struct telemetryd_sessions_ctx {
+    lua_State *L;
+    int        idx;
+};
+
+static bool telemetryd_sessions_visitor(
+    const struct tcp_telemetry_session_info *info, void *c) {
+    struct telemetryd_sessions_ctx *sc = c;
+    lua_State *L = sc->L;
+
+    lua_newtable(L);
+    lua_pushinteger(L, (lua_Integer)info->session_id);
+    lua_setfield(L, -2, "id");
+    lua_pushinteger(L, (lua_Integer)info->peer_ip);
+    lua_setfield(L, -2, "peer_ip");
+    lua_pushinteger(L, (lua_Integer)info->peer_port);
+    lua_setfield(L, -2, "peer_port");
+    lua_pushinteger(L, (lua_Integer)info->connected_at_ms);
+    lua_setfield(L, -2, "connected_at");
+    lua_pushinteger(L, (lua_Integer)info->samples_sent);
+    lua_setfield(L, -2, "samples_sent");
+    lua_pushinteger(L, (lua_Integer)info->bytes_sent);
+    lua_setfield(L, -2, "bytes_sent");
+    lua_pushinteger(L, (lua_Integer)info->drops);
+    lua_setfield(L, -2, "drops");
+    lua_pushstring(L, info->filter);
+    lua_setfield(L, -2, "filter");
+
+    lua_rawseti(L, -2, sc->idx++);
+    return true;
+}
+
+static int l_telemetryd_sessions(lua_State *L) {
+    if (!L) return 0;
+    lua_newtable(L);
+    struct telemetryd_sessions_ctx sc = { .L = L, .idx = 1 };
+    tcp_telemetry_server_foreach(telemetryd_sessions_visitor, &sc);
+    return 1;
+}
+
+static int l_telemetryd_kick(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer id = luaL_checkinteger(L, 1);
+    if (id < 0 || id > 0xFFFFFFFF) {
+        return luaL_argerror(L, 1, "id out of range");
+    }
+    lua_pushboolean(L, tcp_telemetry_server_kick((uint32_t)id));
+    return 1;
+}
+
 /**
  * slm.http_get(url, dest) — fetch one HTTP resource into the VFS.
  * Requires networking to already be initialized and usable.
@@ -3953,6 +4060,8 @@ static const luaL_Reg slm_lib_safe[] = {
     /* TCP shell daemon (Phase 3) */
     {"telnetd_status",   l_telnetd_status},
     {"telnetd_sessions", l_telnetd_sessions},
+    {"telemetryd_status",   l_telemetryd_status},
+    {"telemetryd_sessions", l_telemetryd_sessions},
 #endif
     {NULL, NULL}
 };
@@ -4008,6 +4117,9 @@ static const luaL_Reg slm_lib_admin[] = {
     {"telnetd_start",    l_telnetd_start},
     {"telnetd_stop",     l_telnetd_stop},
     {"telnetd_kick",     l_telnetd_kick},
+    {"telemetryd_start", l_telemetryd_start},
+    {"telemetryd_stop",  l_telemetryd_stop},
+    {"telemetryd_kick",  l_telemetryd_kick},
     {"http_get",         l_http_get},
 #endif
     {NULL, NULL}

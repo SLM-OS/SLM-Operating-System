@@ -102,6 +102,7 @@ Network:                              # only when ENABLE_NETWORKING=ON
   netstat      Network statistics
   ping         Send ICMP echo request
   tcpsh        Alias for telnetd (legacy name)
+  telemetry    Admin telemetry feed (stats / server start|stop|...)
   telnetd      Telnet shell daemon (start|stop|status|sessions|kick)
 
 Hardware control & diagnostics:       # mix of always-available + platform-gated
@@ -194,6 +195,11 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
 | `telnetd sessions` | List active sessions (id, peer ip/port, age) |
 | `telnetd kick <id>` | Force-disconnect a session by id |
 | `tcpsh ...` | Deprecated alias for `telnetd`; same behaviour |
+| `telemetry server start [port]` | Start the telemetry-feed listener (default port 2325). Push-only TCP server bridging `tel.*` msg_router topics to the network. |
+| `telemetry server stop` | Stop the telemetry-feed listener |
+| `telemetry server status` | Listener state + per-server counters (samples dequeued / delivered / dropped) |
+| `telemetry server sessions` | List connected telemetry peers |
+| `telemetry server kick <id>` | Force-disconnect a telemetry session |
 | `sched` | Show current scheduler policy name |
 | `sched policy` | List all registered scheduling policies |
 | `sched policy <name>` | Switch to a named scheduling policy |
