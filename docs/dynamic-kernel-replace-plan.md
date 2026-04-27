@@ -1,10 +1,11 @@
 # Dynamic Kernel Replace Plan
 
-## Status (as of 2026-04-25)
+## Status (as of 2026-04-27)
 
-Implementation has been split into five sequential stages tracked in
-GitHub. The first four are pre-hardware and are now on `main`; the
-fifth is hardware-blocked on `pi-5-1`.
+Implementation was split into five sequential stages tracked in
+GitHub. All five are now on `main`; Stage 5 ran on `pi-5-1` lab
+hardware and the full `stage → activate → promote → rollback`
+round-trip is verified end-to-end (closes #35).
 
 | Stage | Issue | PR | Status |
 |---|---|---|---|
@@ -12,13 +13,11 @@ fifth is hardware-blocked on `pi-5-1`.
 | 2 — FatFs + LFN + ramdisk backend | #368 | #379 | ✅ Merged |
 | 3 — SDHCI / EMMC2 driver in QEMU | #369 | #389 | ✅ Merged |
 | 4 — `kernel` admin command surface | #370 | #395 | ✅ Merged |
-| 5 — Hardware validation on `pi-5-1` | #371 | — | Hardware-blocked |
+| 5 — Hardware validation on `pi-5-1` | #371 | #468/#504/this | ✅ Merged |
 
-Stage 5 sub-task 1 — the SDHCI test-image sparse-file ergonomics
-(#392) — is fully resolved: Scope A (clearer error message) shipped
-in #395; Scope B (auto-fallback to a 256 MB SDSC-sized image when
-the 4 GB sparse allocation fails) lands in PR #406. The remaining
-#371 sub-tasks need `pi-5-1`.
+Sub-tasks 1-6 are complete; sub-task 7 (Jetson PCIe regression
+check) is gated on a nano-resource release from @johnjezl and is
+the only remaining item under #371.
 
 ---
 
@@ -306,8 +305,16 @@ check gated on a nano-resource release from @johnjezl).
   boot, byte-for-byte SDHCI write content + SHA verification on
   the card, plus 9/9 boot-reliability via `labctl boot_test`. See
   [`docs/pi5-sdhci-real-card-verification.md`](pi5-sdhci-real-card-verification.md).
-- ☐🔗🎫 Full `stage → activate → promote → rollback` cycle on
-  `pi-5-1` — #371 sub-task 6. Closes #35.
+- ✅ Full `stage → activate → promote → rollback` cycle on
+  `pi-5-1` — #371 sub-task 6. **Closes #35.** Verified end-to-end
+  on `pi-5-1` (EEPROM `pieeprom-2024-09-23.bin`, post-#504 build):
+  6/6 lifecycle steps including the `tryboot.img →
+  kernel_2712.img` promote rename and the natural-power-cycle
+  fallback to the promoted kernel. `kernel rollback` already
+  issues `bcm_mailbox_set_reboot_flags(0)` on RASPI5 builds (the
+  earlier #471 issue was based on a misread; the code has been
+  correct since #370). See
+  [`docs/pi5-stage-promote-rollback-verification.md`](pi5-stage-promote-rollback-verification.md).
 - ☐🔗🎫 Jetson PCIe regression check (gated on nano release) —
   #371 sub-task 7.
 

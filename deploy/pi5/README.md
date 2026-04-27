@@ -32,13 +32,13 @@ power cycle (the tryboot flag is one-shot and clears on the boot
 attempt regardless of success), or — if that wedges in firmware —
 re-flashing the SD card from the host. The `kernel rollback` shell
 command deletes `tryboot.img` so a future `kernel activate` fails
-the staging precondition rather than re-running a known-bad image.
-
-`kernel rollback` does **not** issue `SET_REBOOT_FLAGS(0)` —
-it only deletes the staged file. If a flag was armed by an earlier
-`kernel activate` and the system has not yet rebooted, the next
-boot still attempts the tryboot path: firmware reads the flag, looks
-for `tryboot.txt` → `tryboot.img`, fails to find the image, and on
-`pieeprom-2024-09-23.bin` wedges in firmware (see #462). Always run
-`kernel activate` → reboot → verify before issuing `kernel rollback`
-on the same boot.
+the staging precondition rather than re-running a known-bad image,
+AND issues the BCM mailbox `SET_REBOOT_FLAGS(0)` tag (on RASPI5
+builds) as a defensive belt against any future code path that
+might arm the flag without firing the reset, or any firmware
+where `notify_reboot` returns without resetting. The current
+`kernel activate` path runs `psci_system_reset` immediately
+after arming the flag, so there's no in-vivo window for the
+flag-clear to matter — but having the call there means rollback
+converges on "no candidate, flag clear" regardless of starting
+state. Both clean-ups are best-effort.
