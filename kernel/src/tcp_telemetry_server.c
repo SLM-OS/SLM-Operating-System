@@ -319,12 +319,14 @@ static void session_free(struct tel_session *s)
 
 static void session_emit_comment(struct tel_session *s, const char *line)
 {
-    /* Format: "# <line>\n". Use the same TX ring as samples. */
+    /* Format: "# <line>\n". Use the same TX ring as samples. tx_enqueue
+     * takes raw bytes + length, no NUL terminator, so the guard only
+     * needs room for the trailing '\n' itself. */
     char buf[64];
     size_t pos = 0;
     if (tel_append_str(buf, sizeof(buf), &pos, "# ") != 0) return;
     if (tel_append_str(buf, sizeof(buf), &pos, line) != 0) return;
-    if (pos + 2u > sizeof(buf)) return;
+    if (pos >= sizeof(buf)) return;
     buf[pos++] = '\n';
     (void)tx_enqueue(s, (const uint8_t *)buf, (uint32_t)pos);
 }
@@ -832,8 +834,16 @@ void tcp_telemetry_server_test_reset(void)
             memset(&g_sessions[i], 0, sizeof(g_sessions[i]));
         }
     }
-    g_seq = 0;
+    g_seq               = 0;
     g_samples_dequeued  = 0;
     g_samples_delivered = 0;
     g_samples_dropped   = 0;
+    /* Zero the lifecycle counters too so a subsequent test that reads
+     * sessions_opened / sessions_closed / accept_rejects starts from a
+     * known baseline rather than inheriting drift from earlier tests
+     * that ran simulate_closed_real_session + poll. */
+    g_sessions_opened   = 0;
+    g_sessions_closed   = 0;
+    g_accept_rejects    = 0;
+    g_next_session_id   = 1;
 }
