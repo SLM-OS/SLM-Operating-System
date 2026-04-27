@@ -656,3 +656,34 @@ fn vocab_blob_rejects_oversized_vocab_count() {
         other => panic!("expected OversizedCount, got {other:?}"),
     }
 }
+
+#[test]
+fn vocab_blob_rejects_oversized_entry_len() {
+    // Hand-craft a single-vocab-entry blob whose entry-length prefix
+    // claims more than MAX_PLAUSIBLE_ENTRY_LEN (1 << 16). The
+    // per-entry gate at vocab_blob::read_entry must reject this even
+    // though the count gate above passes (one entry is plausible).
+    let mut buf = Vec::with_capacity(HEADER_SIZE + 4 + 8);
+    buf.extend_from_slice(&VOCB_MAGIC);
+    buf.extend_from_slice(&VOCB_VERSION.to_le_bytes());
+    buf.extend_from_slice(&1u32.to_le_bytes()); // vocab_count = 1
+    buf.extend_from_slice(&0u32.to_le_bytes()); // merges_count = 0
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // bos
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // eos
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // pad
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // unk
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // sep
+    buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    assert_eq!(buf.len(), HEADER_SIZE);
+    // Entry length-prefix claims 128 KiB (above the 64 KiB cap).
+    let claimed_len: u32 = (1u32 << 17) | 0xCAFE;
+    buf.extend_from_slice(&claimed_len.to_le_bytes());
+    // A handful of trailing bytes — fewer than claimed_len, but the
+    // gate fires on the prefix before any body read.
+    buf.extend(std::iter::repeat_n(0u8, 8));
+
+    match read_vocab_blob(&buf) {
+        Err(BlobError::OversizedToken { len }) => assert_eq!(len, claimed_len),
+        other => panic!("expected OversizedToken, got {other:?}"),
+    }
+}
