@@ -25,6 +25,7 @@
 #include "lwip/memp.h"
 
 #include "shell_io_tcp.h"
+#include "tcp_telemetry_server.h"
 #include "netif/ethernet.h"
 #include "arch/sys_arch.h"
 
@@ -741,10 +742,7 @@ void net_poll(void) {
 
     /* Bridge `tel.*` msg_router topics to the telemetry-feed TCP server.
      * No-op when the server is not running. */
-    {
-        extern void tcp_telemetry_server_poll(void);
-        tcp_telemetry_server_poll();
-    }
+    tcp_telemetry_server_poll();
 
     /* RX-stall watchdog. Cheap when not alarmed (a load + compare). */
     net_watchdog_check();

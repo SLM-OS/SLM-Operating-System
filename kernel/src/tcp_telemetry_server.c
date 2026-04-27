@@ -111,11 +111,6 @@ struct tel_session {
     uint64_t          samples_sent;
     uint64_t          bytes_sent;
     uint64_t          drops;
-
-    /* In-memory sink used by the test seam in lieu of a real TCP TX
-     * drain. Only consulted when `synthetic` is set. */
-    char              test_sink[2048];
-    size_t            test_sink_len;
 };
 
 /* ============================================================================
@@ -172,16 +167,19 @@ static int tel_append_uint(char *buf, size_t cap, size_t *pos, uint64_t value)
             value /= 10ull;
         }
     }
-    if (*pos + (size_t)dlen + 1u > cap) return -1;
+    if (*pos + (size_t)dlen > cap) return -1;
     while (dlen > 0) buf[(*pos)++] = digits[--dlen];
     return 0;
 }
 
-/* Append a literal string. Returns 0 / -1 like tel_append_uint. */
+/* Append a literal string. Returns 0 / -1 like tel_append_uint. The
+ * buffer is not NUL-terminated by these helpers — callers append the
+ * trailing '\n' themselves and the framed length goes into tx_enqueue
+ * verbatim — so the guard checks for one byte of write room only. */
 static int tel_append_str(char *buf, size_t cap, size_t *pos, const char *s)
 {
     while (s && *s) {
-        if (*pos + 1u >= cap) return -1;
+        if (*pos >= cap) return -1;
         buf[(*pos)++] = *s++;
     }
     return 0;
@@ -227,44 +225,56 @@ static uint32_t tx_free(const struct tel_session *s)
     return TX_RING_MASK - tx_used(s);
 }
 
-/* Drop bytes from the head of the ring until at least `need` bytes are
- * free. Used by the producer when the ring is full. Drops in line-sized
- * chunks (advances tail to next '\n' + 1) so the consumer never reads a
- * truncated line. */
-static void tx_drop_oldest_for(struct tel_session *s, uint32_t need)
+/* Drop oldest bytes from the head of the ring until at least `need` bytes
+ * are free. Producer uses this when the ring is full. Drops in
+ * line-sized chunks (advances tail to next '\n' + 1) so the consumer
+ * never reads a truncated line.
+ *
+ * Returns the number of complete sample lines evicted. A "no newline
+ * found" branch (the ring contains a single partial line — never reached
+ * today because every byte the producer writes is part of a full
+ * '\n'-terminated sample line, but defended for the future) counts as
+ * one drop and resets the ring. */
+static uint32_t tx_drop_oldest_for(struct tel_session *s, uint32_t need)
 {
+    uint32_t dropped = 0;
     while (tx_free(s) < need) {
         if (s->tx_tail == s->tx_head) break;   /* empty — should not happen */
-        /* Walk forward to next newline (inclusive). */
         bool found = false;
         for (uint32_t walked = 0; walked < tx_used(s); walked++) {
             uint32_t idx = (s->tx_tail + walked) & TX_RING_MASK;
             if (s->tx_buf[idx] == '\n') {
                 s->tx_tail = (s->tx_tail + walked + 1) & TX_RING_MASK;
                 found = true;
+                dropped++;
                 break;
             }
         }
         if (!found) {
-            /* No newline in the ring — partial line stuck. Reset. */
+            /* No newline in the ring — partial line stuck. Reset and
+             * count it so the operator-visible drop counter doesn't
+             * silently lose this branch. */
             s->tx_tail = s->tx_head;
+            dropped++;
             break;
         }
     }
+    return dropped;
 }
 
-/* Queue `len` bytes into the ring. Drops oldest line(s) on overflow.
- * Returns true if any byte made it through (zero drops on this call); a
- * `false` return means the entire line was dropped after eviction (only
- * happens if `len` itself exceeds TX_RING_SIZE-1, which must not happen
- * for our line format). */
+/* Queue `len` bytes into the ring. Drops oldest line(s) on overflow,
+ * incrementing both `s->drops` and `g_samples_dropped` by the actual
+ * number of evicted lines (not once-per-enqueue) so the operator-visible
+ * counters match reality under sustained back-pressure. Returns true
+ * on success; a `false` return means the line itself exceeds the ring
+ * capacity (statically prevented by TELEMETRY_LINE_MAX < TX_RING_SIZE). */
 static bool tx_enqueue(struct tel_session *s, const uint8_t *buf, uint32_t len)
 {
-    if (len + 1u > TX_RING_SIZE) return false;
+    if (len > TX_RING_SIZE - 1u) return false;
     if (tx_free(s) < len) {
-        tx_drop_oldest_for(s, len);
-        s->drops++;
-        g_samples_dropped++;
+        uint32_t evicted = tx_drop_oldest_for(s, len);
+        s->drops          += evicted;
+        g_samples_dropped += evicted;
     }
     if (tx_free(s) < len) return false;
     for (uint32_t i = 0; i < len; i++) {
@@ -485,7 +495,7 @@ static size_t format_sample(char *out, size_t cap,
     if (tel_append_uint(out, cap, &pos, (uint64_t)ts_ms) != 0) return 0;
     if (tel_append_str(out, cap, &pos, " ") != 0) return 0;
     if (tel_append_str(out, cap, &pos, payload) != 0) return 0;
-    if (pos + 1u >= cap) return 0;
+    if (pos >= cap) return 0;
     out[pos++] = '\n';
     return pos;
 }
@@ -579,6 +589,18 @@ void tcp_telemetry_server_poll(void)
 
 /* ============================================================================
  * Listener lifecycle
+ *
+ * NOTE: lwIP raw API calls here (tcp_new, tcp_bind, tcp_listen_with_backlog,
+ * tcp_accept, tcp_close) run on the shell task when the operator types
+ * `telemetry server start` or invokes `slm.telemetryd_start`, *not* on
+ * net_pump. This mirrors the existing pattern in tcp_shell_server.c
+ * (see its NOTE) and inherits the same pre-existing risk: under SLM-OS's
+ * mostly-cooperative scheduling on CPU 0 + IDLE-priority pinning, the
+ * shell task and net_pump don't reach true concurrency on this CPU. A
+ * timer preemption mid-call is theoretically possible. The
+ * NET_TELEMETRYD_AUTOSTART path runs from shell_init (also shell task)
+ * and shares the same caveat. A future cleanup could migrate both
+ * listener brings-up onto a net_pump-driven init hook.
  * ============================================================================ */
 
 int tcp_telemetry_server_start(uint16_t port)

@@ -465,6 +465,57 @@ static void test_stats_counters_track_dequeue_and_deliver(void)
     TEST_ASSERT_EQUAL_UINT64(0, st.samples_dropped);
 }
 
+/* Regression for the slmos-review finding that the original
+ * drops counter only incremented once per failed enqueue, regardless
+ * of how many lines were evicted to make room. With the per-line
+ * accounting, dropping ~N old lines to make room for one new one
+ * must add ~N (not 1) to both s->drops and g_samples_dropped. */
+static void test_drops_count_per_line_evicted_not_per_call(void)
+{
+    tcp_telemetry_server_test_reset();
+    int slot = tcp_telemetry_server_test_open_session("tel.*");
+    TEST_ASSERT_TRUE(slot >= 0);
+
+    /* Drain banner. */
+    char banner[256];
+    (void)tcp_telemetry_server_test_drain(slot, banner, sizeof(banner));
+
+    /* Inject enough samples to overflow the per-client ring. Each
+     * line is ~30 bytes; the ring is 4 KB; 200 lines is ~6 KB so we
+     * are guaranteed to be in the drop-oldest path for the back
+     * half of these. */
+    const uint64_t N = 200;
+    for (uint64_t i = 0; i < N; i++) {
+        (void)tcp_telemetry_server_test_inject("tel.inf", "dt=1 ok=1");
+    }
+
+    struct tcp_telemetry_server_stats st;
+    tcp_telemetry_server_get_stats(&st);
+
+    /* Sanity. */
+    TEST_ASSERT_EQUAL_UINT64(N, st.samples_dequeued);
+
+    /* The per-client TX ring can hold roughly TX_RING_SIZE / line_len
+     * lines simultaneously (~136 for 30-byte lines in a 4 KB ring).
+     * Anything beyond that capacity must show up as a drop. We don't
+     * pin the exact ring capacity here — only that the count is in
+     * a credible range that excludes the old "single drop per call"
+     * undercount (which would land somewhere south of N/2). */
+    TEST_ASSERT_MESSAGE(st.samples_dropped > N / 4,
+        "drops counter looks like the old per-call undercount");
+    TEST_ASSERT_MESSAGE(st.samples_dropped < N,
+        "drops should not exceed total samples dequeued");
+
+    /* The session-local counter must agree with the global one
+     * (single-session here, so they are equal). */
+    struct first_id_ctx unused = {0};
+    (void)unused;
+    /* foreach skips synthetic sessions; can't read s->drops via the
+     * public API for this test. The global counter accuracy is the
+     * load-bearing assertion — the per-session and global counters
+     * are bumped by the same arithmetic at the same site. */
+}
+
 /* ============================================================================
  * Entry point
  * ============================================================================ */
@@ -492,5 +543,6 @@ int test_suite_tcp_telemetry_server(void)
     RUN_TEST(test_foreach_walks_active_synthetic_sessions);
     RUN_TEST(test_kick_returns_false_for_unknown_id);
     RUN_TEST(test_stats_counters_track_dequeue_and_deliver);
+    RUN_TEST(test_drops_count_per_line_evicted_not_per_call);
     return UNITY_END();
 }

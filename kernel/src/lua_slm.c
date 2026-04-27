@@ -33,6 +33,7 @@
 #if defined(ENABLE_NETWORKING)
 #include "shell_io_tcp.h"
 #include "tcp_shell_server.h"
+#include "tcp_telemetry_server.h"
 #include "net.h"
 #include "net_http.h"
 #endif
@@ -3389,14 +3390,14 @@ static int l_telnetd_kick(lua_State *L) {
 }
 
 /* ============================================================================
- * slm.telemetryd_* — TCP telemetry-feed bindings (#TBD).
+ * slm.telemetryd_* — TCP telemetry-feed bindings.
  *
  * Same flat-namespace convention as slm.telnetd_*. Mutators
  * (start/stop/kick) live on the admin table; readers (status / sessions)
  * live on the safe table so any operator console can poll counts.
+ * Header is pulled in at the top of the file alongside the other
+ * shell/TCP headers.
  * ============================================================================ */
-
-#include "tcp_telemetry_server.h"
 
 static int l_telemetryd_start(lua_State *L) {
     if (!L) return 0;
