@@ -83,6 +83,16 @@
 int camrtc_init(void);
 
 /*
+ * CAMRTC_HSP_MSG opcode subset that callers outside the driver
+ * actually use. Full set (and protocol comments) lives in
+ * `docs/reference/l4t-camrtc-commands.h:42-77`. Driver-internal
+ * constants for HELLO / PROTOCOL / RESUME stay file-local.
+ */
+#define CAMRTC_HSP_PING           0x45u
+#define CAMRTC_HSP_FW_HASH        0x46u
+#define CAMRTC_HSP_CH_SETUP       0x44u
+
+/*
  * Send a CAMRTC_HSP_MSG round-trip. Writes
  * `CAMRTC_HSP_MSG(msg_id, param)` to VM-TX, polls VM-RX until a
  * message with the same `msg_id` arrives or the timeout expires,
@@ -96,8 +106,9 @@ int camrtc_init(void);
  *   timeout_us      Max time to wait for the response, in microseconds.
  *
  * Returns 0 on success, -1 on bad arguments (uninitialised),
- * -2 on timeout, -3 if a wrong-msg_id response arrived first
- * (caller must drain stale traffic before retrying).
+ * -2 on timeout (TX-drain or RX-recv — both log a `WARN` line),
+ * -3 if a wrong-msg_id response arrived first (also `WARN`-logged;
+ * caller must drain stale traffic before retrying).
  */
 int camrtc_send_msg(uint32_t msg_id, uint32_t param,
                     uint32_t *resp_param, uint32_t timeout_us);

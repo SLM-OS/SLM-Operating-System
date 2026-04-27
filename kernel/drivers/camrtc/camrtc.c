@@ -64,16 +64,15 @@
 #define RCE_PM_FWLOADDONE         (1u << 1)
 #define RCE_PM_WFIPIPESTOPPED     (1u << 21)
 
-/* CAMRTC_HSP_MSG opcodes (subset — full set in
- * docs/reference/l4t-camrtc-commands.h). */
+/* CAMRTC_HSP_MSG opcodes used only inside the driver (the boot-sync
+ * sequence). Public opcodes that callers reference (PING, FW_HASH,
+ * CH_SETUP) live in `camrtc.h`. Full set in
+ * `docs/reference/l4t-camrtc-commands.h:42-77`. */
 #define CAMRTC_HSP_IRQ            0x00u
 #define CAMRTC_HSP_HELLO          0x40u
 #define CAMRTC_HSP_BYE            0x41u
 #define CAMRTC_HSP_RESUME         0x42u
 #define CAMRTC_HSP_SUSPEND        0x43u
-#define CAMRTC_HSP_CH_SETUP       0x44u
-#define CAMRTC_HSP_PING           0x45u
-#define CAMRTC_HSP_FW_HASH        0x46u
 #define CAMRTC_HSP_PROTOCOL       0x47u
 
 #define CAMRTC_HSP_MSG_ID_SHIFT   24u
@@ -465,11 +464,20 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
     if (!g_initialised) return -1;
 
     uint32_t request = camrtc_msg_pack(msg_id, param);
-    if (sm_tx_wait_empty(timeout_us) != 0) return -2;
+    if (sm_tx_wait_empty(timeout_us) != 0) {
+        WARN("camrtc: VM-TX never drained for msg_id=0x%x "
+             "(timeout=%uus)", (unsigned)msg_id, (unsigned)timeout_us);
+        return -2;
+    }
     sm_tx_send(request);
 
     uint32_t resp = 0;
-    if (sm_rx_recv(&resp, timeout_us) != 0) return -2;
+    if (sm_rx_recv(&resp, timeout_us) != 0) {
+        WARN("camrtc: VM-RX timeout waiting for response to "
+             "msg_id=0x%x (timeout=%uus)",
+             (unsigned)msg_id, (unsigned)timeout_us);
+        return -2;
+    }
 
     if (camrtc_msg_id(resp) != msg_id) {
         WARN("camrtc: unexpected response id 0x%x (sent 0x%x)",
