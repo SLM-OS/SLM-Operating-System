@@ -652,8 +652,7 @@ Phase 0 is GREEN; tasks are unblocked.
   slave's response byte never lands in RX_FIFO. See
   `docs/jetson-camera-imx219-driver-notes.md` for the full bug
   story so future Tegra register-set ports don't repeat it.
-- ☐🔗 Implement NVCSI receiver. Verify with internal counters that
-  packets are arriving on the configured port.
+- ✅ Implement NVCSI receiver via Camera RTCPU IVC.
   - **Option A (direct MMIO) — BLOCKED 2026-04-26.** Hardware
     verification on jetson-nano-1 confirmed NVCSI MMIO is not
     accessible from any AP context: `peek 0x15a00000` returns
@@ -667,14 +666,48 @@ Phase 0 is GREEN; tasks are unblocked.
     are kept as diagnostics that surface the failure mode
     unambiguously. See `docs/jetson-camera-nvcsi-driver-notes.md`
     "Update — 2026-04-26: Option A is blocked" for the evidence.
-  - **Option B (Camera RTCPU IVC) — required.** Reframes Hardware
-    Task 3 as a stand-up of the camera-rtcpu IVC layer plus the
-    `CAPTURE_PHY_STREAM_OPEN_REQ` /
-    `CAPTURE_CSI_STREAM_SET_CONFIG_REQ` two-message setup. Same IVC
-    transport SLM-OS will need for VI single-shot capture
-    (Hardware Task 4 has no Option A — VI is RTCPU-only). Estimated
-    1-2 weeks for the IVC layer, mirrors the existing BPMP IVC
-    pattern (`docs/archive/plans/jetson-bpmp-ipc-plan.md`).
+  - **Option B (Camera RTCPU IVC) — DONE 2026-04-27.** Brought up
+    in five PRs:
+    1. **PR #441 / #446** — HSP-VM transport
+       (`kernel/drivers/camrtc/camrtc.c`). HELLO / PROTOCOL /
+       RESUME boot-sync over the rce-hsp shared mailboxes. The
+       pre-HELLO BPMP poweron sequence (RCE_CPU_NIC + RCE_NIC +
+       RCE_CPU clk_enable + RESET_RCE_ALL deassert) recovers from
+       Linux's kexec teardown that asserted the RCE reset and
+       gated the rce clocks. Closes issue #438.
+    2. **PR #456** — `CAMRTC_HSP_CH_SETUP` capture-control channel
+       binding. The CH_SETUP region must lie in RCE's compiled-in
+       VM1 IOVA aperture (0xA0000000..0xC0000000); also wires the
+       drain-IRQ-before-response logic in `camrtc_send_msg` since
+       RCE emits unidirectional IRQ notifications interleaved with
+       command responses.
+    3. **PR #460** — `kernel/drivers/camrtc/camrtc_ivc.c` tegra-IVC
+       ring transport (init / can_send / can_recv / send / recv /
+       recv_wait + SS[0]+IRQ-msg notify) + `CAPTURE_PHY_STREAM_OPEN_REQ`
+       wrapper in `kernel/drivers/camrtc/camrtc_capture.c`. The
+       half-zero-queue-headers + rate-limited-SYNC-handshake gotchas
+       are documented in `docs/jetson-camera-rtcpu-ivc-driver-notes.md`.
+    4. **PR #461** — `CAPTURE_CSI_STREAM_SET_CONFIG_REQ` wrapper.
+       Configures the NVCSI brick + CIL + error masks (D-PHY,
+       2 lanes, 456 MHz MIPI clock for the IMX219 default link
+       freq).
+
+    `csidiag` shell command on jetson-nano-1 round-trips both
+    messages with `rc=0 result=0x0`:
+
+    ```
+    capture_init:    rc=0
+    PHY_STREAM_OPEN: rc=0 result=0x0
+    CSI_SET_CONFIG:  rc=0 result=0x0
+    *** NVCSI configured for IMX219 (2-lane D-PHY 456 MHz). ***
+    ```
+
+    NVCSI is now configured by RCE for the IMX219 wire. **Counting
+    received packets requires VI capture** (NVCSI INTR_STATUS is
+    not directly reachable from AP — it's behind the same CBB
+    firewall as NVCSI MMIO). The packet-count verification is
+    therefore folded into Hardware Task 4 (VI single-shot capture)
+    where the captured frame contents are the proof of life.
 - ☐🔗 Implement VI single-shot capture. Verify by hashing the
   captured buffer; the hash must change between two captures of
   different scenes.
