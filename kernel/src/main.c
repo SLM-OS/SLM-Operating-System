@@ -542,13 +542,14 @@ void kernel_main(void *dtb)
         INFO("  Message router: OK");
     }
 
-    /* Initialize model memory pools */
+    /* Initialize model memory pools (per-platform sizes from config.h) */
     INFO("Initializing model memory...");
-    int model_init = rust_model_mem_init();
+    int model_init = rust_model_mem_init(MODEL_MEM_WEIGHT_MB, MODEL_MEM_WORKSPACE_MB);
     if (model_init != 0) {
         WARN("Model memory init failed (code=%d)", model_init);
     } else {
-        INFO("  Model memory: OK (16 MB weights, 8 MB workspace)");
+        INFO("  Model memory: OK (%u MB weights, %u MB workspace)",
+             (unsigned)MODEL_MEM_WEIGHT_MB, (unsigned)MODEL_MEM_WORKSPACE_MB);
     }
 
     /* Initialize model loader registry */
