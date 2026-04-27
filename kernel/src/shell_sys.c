@@ -5763,6 +5763,31 @@ int cmd_rcediag(int argc, char *argv[])
     uart_printf("  camrtc_init:          rc=%d\r\n", rc);
     if (rc == 0) {
         uart_puts("  *** RCE HSP-VM session established ***\r\n");
+
+        /* Round-trip a CAMRTC_HSP_PING (opcode 0x45) to confirm
+         * the established session can carry arbitrary HSP-VM
+         * messages — not just the boot-sync HELLO/PROTOCOL/RESUME
+         * sequence. PING is documented in
+         * `docs/reference/l4t-camrtc-commands.h:64-66` as the
+         * "check aliveness of RCE FW and the HSP protocol" probe;
+         * RCE echoes the 24-bit param verbatim. This is the
+         * smallest pre-CH_SETUP gate proving `camrtc_send_msg` is
+         * usable for the upcoming Hardware Task 3 messages
+         * (CH_SETUP, CAPTURE_PHY_STREAM_OPEN_REQ,
+         * CAPTURE_CSI_STREAM_SET_CONFIG_REQ). */
+        uint32_t ping_param = 0xCAFE42u;  /* anything random-ish */
+        uint32_t ping_resp  = 0;
+        int ping_rc = camrtc_send_msg(0x45u /* PING */, ping_param,
+                                       &ping_resp, 100000u);
+        uart_printf("  PING:                 rc=%d echo=0x%06x "
+                    "(sent=0x%06x)\r\n",
+                    ping_rc, (unsigned)ping_resp, (unsigned)ping_param);
+        if (ping_rc == 0 && ping_resp == ping_param) {
+            uart_puts("  *** PING round-trip OK — HSP-VM session  ***\r\n");
+            uart_puts("  *** ready for arbitrary message traffic. ***\r\n");
+        } else {
+            uart_puts("  *** PING failed — see WARN log lines.    ***\r\n");
+        }
     } else if (rc == -1) {
         uart_puts("  *** hsp_rce MMIO unreachable — CBB firewall  ***\r\n");
         uart_puts("  *** or HSP block clock-gated.                ***\r\n");
