@@ -878,6 +878,22 @@ _Static_assert(CAPTURE_CHANNEL_FLAG_RAW == 0x0002u,
 _Static_assert(CAPTURE_CHANNEL_FLAG_CSI == 0x10000u,
     "CAPTURE_CHANNEL_FLAG_CSI drift");
 
+/* CAPTURE_REQUEST_REQ + CAPTURE_STATUS_IND wire-format pins
+ * (PR4 of HW Task 4). Both message bodies are 8 B (just buffer_index
+ * + pad). Per L4T `l4t-camrtc-capture-messages.h:905` and 918. */
+_Static_assert(sizeof(struct camrtc_capture_request_req) == 8,
+    "camrtc_capture_request_req must be exactly 8 bytes (RCE wire format)");
+_Static_assert(sizeof(struct camrtc_capture_status_ind) == 8,
+    "camrtc_capture_status_ind must be exactly 8 bytes (RCE wire format)");
+_Static_assert(CAPTURE_REQUEST_REQ == 0x01u,
+    "CAPTURE_REQUEST_REQ opcode drift (L4T msg id)");
+_Static_assert(CAPTURE_STATUS_IND == 0x02u,
+    "CAPTURE_STATUS_IND opcode drift (L4T msg id)");
+_Static_assert(CAPTURE_FLAG_STATUS_REPORT_ENABLE == 0x1u,
+    "CAPTURE_FLAG_STATUS_REPORT_ENABLE drift (per-descriptor flag)");
+_Static_assert(CAPTURE_FLAG_ERROR_REPORT_ENABLE == 0x2u,
+    "CAPTURE_FLAG_ERROR_REPORT_ENABLE drift (per-descriptor flag)");
+
 /* =============================================================================
  * Tegra234 camera-subsystem MMIO bases — Phase 0 verified
  *

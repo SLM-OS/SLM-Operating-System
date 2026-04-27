@@ -62,6 +62,13 @@ struct capture_phy_stream_open_resp {
 #define CAPTURE_CSI_STREAM_SET_CONFIG_RESP  0x41u
 #define CAPTURE_CHANNEL_SETUP_REQ      0x1Eu
 #define CAPTURE_CHANNEL_SETUP_RESP     0x11u
+#define CAPTURE_REQUEST_REQ            0x01u
+#define CAPTURE_STATUS_IND             0x02u
+
+/* Per-request capture_descriptor.capture_flags bits, subset SLM-OS
+ * uses. From `l4t-camrtc-capture.h:1258`. */
+#define CAPTURE_FLAG_STATUS_REPORT_ENABLE   0x1u  /* RCE sends STATUS_IND on completion */
+#define CAPTURE_FLAG_ERROR_REPORT_ENABLE    0x2u  /* RCE sends STATUS_IND on error */
 
 /* Number of lanes per NVCSI brick (CAMRTC_BRICK_NUM_LANES from
  * `docs/reference/l4t-camrtc-capture.h:1432`). Each brick covers
@@ -236,6 +243,27 @@ struct camrtc_capture_channel_setup_resp {
     uint64_t vi_channel_mask;   /* bitmask of allocated VI channel(s) */
 };
 
+/* CAPTURE_REQUEST_REQ_MSG body — 8 bytes
+ * (`l4t-camrtc-capture-messages.h:905`). Identifies which slot in
+ * the request_ring (set up by CAPTURE_CHANNEL_SETUP) RCE should
+ * pull a capture_descriptor from. */
+struct camrtc_capture_request_req {
+    uint32_t buffer_index;
+    uint32_t pad32__;
+};
+
+/* CAPTURE_STATUS_IND_MSG body — 8 bytes
+ * (`l4t-camrtc-capture-messages.h:918`). RCE sends one of these
+ * on the capture rx ring after a request completes (when
+ * CAPTURE_FLAG_STATUS_REPORT_ENABLE is set in the descriptor) or
+ * after an error (when CAPTURE_FLAG_ERROR_REPORT_ENABLE is set).
+ * The matching slot in the request_ring has its `status` field
+ * filled in by RCE before the IND is sent. */
+struct camrtc_capture_status_ind {
+    uint32_t buffer_index;
+    uint32_t pad32__;
+};
+
 /*
  * Initialise the capture-control IVC channel:
  *   1. camrtc_init        — HSP-VM HELLO/PROTOCOL/RESUME (idempotent)
@@ -371,3 +399,43 @@ int camrtc_capture_channel_setup(uint32_t stream_id,
                                  uint32_t *out_result,
                                  uint32_t *out_channel_id,
                                  uint64_t *out_vi_channel_mask);
+
+/*
+ * CAPTURE_REQUEST_REQ → CAPTURE_STATUS_IND wrapper. Submits a
+ * capture request that points at slot `buffer_index` in the
+ * request_ring set up by CAPTURE_CHANNEL_SETUP. The caller must
+ * have already populated the slot with a `capture_descriptor`
+ * (capture_flags / sequence / vi_channel_config / atomp surfaces
+ * etc).
+ *
+ * Sends over the **capture** IVC channel (NOT capture-control).
+ * Polls the capture rx ring for `CAPTURE_STATUS_IND` matching the
+ * same `buffer_index`, up to `timeout_us` microseconds.
+ *
+ * RCE writes the per-frame `capture_status` substruct of the
+ * descriptor (status code, frame ID, SOF/EOF timestamps, error
+ * notify bits) before sending the IND, so the caller can inspect
+ * the descriptor at slot `buffer_index` to get the full result.
+ *
+ *   buffer_index     Slot in the request_ring (0..queue_depth-1).
+ *   timeout_us       Max poll time for STATUS_IND.
+ *   out_status_index Optional: buffer_index from the IND (should
+ *                    equal the input on a clean round-trip).
+ *
+ * Returns 0 on success (IND received, buffer_index matched),
+ * negative on transport failure:
+ *   -1  Bad arguments OR camrtc_capture_init not yet successful.
+ *   -2  IVC send failed.
+ *   -3  IND not received within `timeout_us`.
+ *   -4  Wrong response opcode (msg_id != STATUS_IND).
+ *   -5  buffer_index mismatch (RCE replied for a different slot).
+ *
+ * NOTE: a successful return only means "RCE completed processing
+ * of the request and signalled us back". It does NOT mean "frame
+ * captured successfully" — the caller MUST inspect the slot's
+ * capture_status.status field for `CAPTURE_STATUS_SUCCESS` (1)
+ * vs error codes.
+ */
+int camrtc_capture_request(uint32_t buffer_index,
+                           uint32_t *out_status_index,
+                           uint32_t timeout_us);

@@ -389,6 +389,87 @@ int camrtc_capture_channel_setup(uint32_t stream_id,
     return 0;
 }
 
+int camrtc_capture_request(uint32_t buffer_index,
+                           uint32_t *out_status_index,
+                           uint32_t timeout_us)
+{
+    if (!g_ctrl_ready) {
+        WARN("capture_request: capture_init not run");
+        return -1;
+    }
+
+    /* CAPTURE_REQUEST_REQ uses the *capture* IVC channel (g_cap_chan),
+     * not the *capture-control* channel that PHY_STREAM_OPEN /
+     * CSI_SET_CONFIG / CHANNEL_SETUP ride on. The request frame is
+     * just an 8-byte header + 8-byte body — well within the capture
+     * channel's 64-byte slot. */
+    struct {
+        struct capture_msg_header        hdr;
+        struct camrtc_capture_request_req body;
+    } req;
+
+    req.hdr.msg_id      = CAPTURE_REQUEST_REQ;
+    req.hdr.transaction = buffer_index;  /* L4T uses buffer_index as
+                                          * the transaction id for
+                                          * REQUEST/STATUS pairs;
+                                          * RCE echoes it back. */
+    req.body.buffer_index = buffer_index;
+    req.body.pad32__      = 0u;
+
+    INFO("capture_request: send REQ buffer_index=%u",
+         (unsigned)buffer_index);
+
+    int rc = camrtc_ivc_send(&g_cap_chan, &req, sizeof(req));
+    if (rc != 0) {
+        WARN("capture_request: ivc_send failed rc=%d", rc);
+        return -2;
+    }
+
+    /* Poll the capture rx ring for STATUS_IND. The capture channel's
+     * frame size is 64 B (vs 320 B on capture-control), so the
+     * stack buffer is much smaller. */
+    uint8_t resp_buf[64];
+    uint32_t resp_len = 0;
+    rc = camrtc_ivc_recv_wait(&g_cap_chan, resp_buf, sizeof(resp_buf),
+                              &resp_len, timeout_us);
+    if (rc != 0) {
+        WARN("capture_request: ivc_recv_wait failed rc=%d "
+             "(timeout_us=%u)", rc, (unsigned)timeout_us);
+        return -3;
+    }
+    if (resp_len < sizeof(struct capture_msg_header)
+                   + sizeof(struct camrtc_capture_status_ind)) {
+        WARN("capture_request: short STATUS_IND (%u bytes)",
+             (unsigned)resp_len);
+        return -4;
+    }
+
+    struct capture_msg_header             resp_hdr;
+    struct camrtc_capture_status_ind      resp_body;
+    mem_copy(&resp_hdr, resp_buf, sizeof(resp_hdr));
+    mem_copy(&resp_body, resp_buf + sizeof(resp_hdr), sizeof(resp_body));
+
+    if (resp_hdr.msg_id != CAPTURE_STATUS_IND) {
+        WARN("capture_request: wrong msg_id 0x%x (expected 0x%x)",
+             (unsigned)resp_hdr.msg_id, (unsigned)CAPTURE_STATUS_IND);
+        return -4;
+    }
+    if (resp_body.buffer_index != buffer_index) {
+        WARN("capture_request: buffer_index mismatch %u (sent %u)",
+             (unsigned)resp_body.buffer_index,
+             (unsigned)buffer_index);
+        return -5;
+    }
+
+    if (out_status_index != (uint32_t *)0) {
+        *out_status_index = resp_body.buffer_index;
+    }
+    INFO("capture_request: STATUS_IND buffer_index=%u "
+         "(inspect descriptor.capture_status for the per-frame result)",
+         (unsigned)resp_body.buffer_index);
+    return 0;
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO — stubs for cross-platform builds */
 
 int camrtc_capture_init(void) { return -1; }
@@ -428,6 +509,14 @@ int camrtc_capture_channel_setup(uint32_t stream_id,
     if (out_result)          *out_result          = 0xFFFFFFFFu;
     if (out_channel_id)      *out_channel_id      = 0xFFFFFFFFu;
     if (out_vi_channel_mask) *out_vi_channel_mask = 0u;
+    return -1;
+}
+int camrtc_capture_request(uint32_t buffer_index,
+                           uint32_t *out_status_index,
+                           uint32_t timeout_us)
+{
+    (void)buffer_index; (void)timeout_us;
+    if (out_status_index) *out_status_index = 0xFFFFFFFFu;
     return -1;
 }
 
