@@ -154,10 +154,16 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
 | `model info <name\|idx>` | Show detailed information for a loaded model |
 | `model unload <name\|idx>` | Unload a model by name or registry index and free its memory |
 | `model infer <name\|idx>` | Run inference on model with zero input, print output probabilities and predicted class |
+| `model infer-file <name\|idx> <path>` | Run inference with raw little-endian fp32 input read from VFS — file size must match the model's expected input element count (e.g. 3,136 bytes for MNIST 1×1×28×28). Echoes "predicted: N (us)" to the active session and full logits to UART. |
+| `model use-gpu <name\|idx> <on\|off>` | Per-model GPU-dispatch toggle (default ON at load). Layered on top of the master `gpu use inference` flag — both must be ON for the engine to route through GPU. Useful for forcing a specific model back to CPU without disturbing the master. |
 | `model gpu` | Show GPU status, capabilities, and inference backend |
 | `model pools` | Show weight and workspace memory pool statistics |
 | `model stats` | Show inference performance statistics (latency, throughput, errors) |
 | `model bench <name> [N]` | Benchmark model inference latency (default 10 iterations) |
+| `gpu use status` | Tabular view of the three GPU consumer toggles (sched, eviction, inference) with last-change timestamps |
+| `gpu use inference <on\|off>` | Master toggle for GPU inference dispatch. Default OFF. On Jetson with `--no-gpu-suspend` kexec + a v6 channel handoff, flipping ON routes the MNIST model through the GA10B fastpath. Other platforms accept the flag but engine still uses CPU NEON. |
+| `gpu use sched <on\|off>` | Operator-intent flag for scheduler-policy GPU dispatch. Accepted with a "scaffold only" warning today — no scheduler policy declares a GPU backend yet. See `docs/specs/gpu-policy-models.md` for the wiring plan. |
+| `gpu use eviction <on\|off>` | Same shape as `gpu use sched`: scaffold flag, no GPU dispatch path wired today. |
 | `dtb` | Show Device Tree info (parsed or defaults) |
 | `elftest` | Run ELF loader validation tests (header parsing, architecture checks) |
 | `run <name>` | Run a program by name from the ELF table |

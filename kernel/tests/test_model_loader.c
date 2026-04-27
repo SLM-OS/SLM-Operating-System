@@ -203,6 +203,31 @@ static void test_infer_buf_and_print_invalid_model(void)
     TEST_ASSERT_EQUAL_INT(-1, result);
 }
 
+static void test_infer_buf_and_print_success_path(void)
+{
+    /* Zero-bit-pattern uint32_t array doubles as a 784-element fp32
+     * zero buffer; lets the test stay -mgeneral-regs-only-clean. */
+    static uint32_t mnist_zero_input[784];
+    memset(mnist_zero_input, 0, sizeof(mnist_zero_input));
+
+    int idx = rust_model_load_builtin_mnist();
+    TEST_ASSERT_MESSAGE(idx >= 0, "MNIST load must succeed");
+
+    int result = rust_infer_buf_and_print((uint32_t)idx,
+                                          (const float *)mnist_zero_input,
+                                          784);
+    /* Success returns argmax (>= 0). With zero input, the value
+     * depends on bias terms — pin only the contract (non-negative
+     * AND inside the OUTPUT buffer length) to keep the test stable
+     * across model retraining. */
+    TEST_ASSERT_MESSAGE(result >= 0,
+        "buf inference with valid model + 784 fp32 zeros must return argmax >= 0");
+    TEST_ASSERT_MESSAGE(result < 64,
+        "argmax must be within the OUTPUT buffer length (64)");
+
+    (void)rust_model_unload((uint32_t)idx);
+}
+
 int test_suite_inference(void)
 {
     /* Part 1: Rust-side inference tests */
@@ -219,6 +244,7 @@ int test_suite_inference(void)
     RUN_TEST(test_infer_buf_and_print_null_input);
     RUN_TEST(test_infer_buf_and_print_zero_floats);
     RUN_TEST(test_infer_buf_and_print_invalid_model);
+    RUN_TEST(test_infer_buf_and_print_success_path);
 
     failures += UnityEnd();
 
