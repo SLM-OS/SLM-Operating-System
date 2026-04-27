@@ -5,7 +5,9 @@
 //! fail if either side drifted from the on-disk encoding the GGUF v3
 //! spec defines.
 
-use gguf_inspect::{GgmlType, Gguf, GgufBuilder, MetaArray, MetaType, MetaValue, TensorInfo};
+use gguf_inspect::{
+    GgmlType, Gguf, GgufBuilder, GgufError, MetaArray, MetaType, MetaValue, TensorInfo,
+};
 
 /// Helper: assert a tensor descriptor matches the expected fields.
 fn assert_tensor(t: &TensorInfo, name: &str, dims: &[u64], ggml_type: u32) {
@@ -64,32 +66,37 @@ fn writes_then_parses_minimal_qwen2() {
         .add_tensor(
             "token_embd.weight",
             vec![1536, 152064],
-            GgmlType(12),
+            GgmlType::Q4_K,
             vec![0u8; 64],
         )
         .add_tensor(
             "output.weight",
             vec![1536, 152064],
-            GgmlType(12),
+            GgmlType::Q4_K,
             vec![0u8; 64],
         )
-        .add_tensor("output_norm.weight", vec![1536], GgmlType(0), vec![0u8; 16])
+        .add_tensor(
+            "output_norm.weight",
+            vec![1536],
+            GgmlType::F32,
+            vec![0u8; 16],
+        )
         .add_tensor(
             "blk.0.attn_q.weight",
             vec![1536, 1536],
-            GgmlType(1), // f16
+            GgmlType::F16,
             vec![0u8; 32],
         )
         .add_tensor(
             "blk.0.attn_k.weight",
             vec![1536, 256],
-            GgmlType(15), // q8_K
+            GgmlType::Q8_K,
             vec![0u8; 32],
         )
         .add_tensor(
             "blk.0.ffn_down.weight",
             vec![8960, 1536],
-            GgmlType(12), // q4_K
+            GgmlType::Q4_K,
             vec![0u8; 64],
         )
         .build();
@@ -214,26 +221,31 @@ fn writes_then_parses_minimal_llama() {
         .add_tensor(
             "token_embd.weight",
             vec![2048, 128256],
-            GgmlType(12),
+            GgmlType::Q4_K,
             vec![0u8; 64],
         )
-        .add_tensor("output_norm.weight", vec![2048], GgmlType(0), vec![0u8; 16])
+        .add_tensor(
+            "output_norm.weight",
+            vec![2048],
+            GgmlType::F32,
+            vec![0u8; 16],
+        )
         .add_tensor(
             "blk.0.attn_norm.weight",
             vec![2048],
-            GgmlType(0), // f32
+            GgmlType::F32,
             vec![0u8; 16],
         )
         .add_tensor(
             "blk.0.attn_q.weight",
             vec![2048, 2048],
-            GgmlType(12), // q4_K
+            GgmlType::Q4_K,
             vec![0u8; 48],
         )
         .add_tensor(
             "blk.0.ffn_gate.weight",
             vec![2048, 8192],
-            GgmlType(15), // q8_K
+            GgmlType::Q8_K,
             vec![0u8; 48],
         )
         .build();
@@ -295,4 +307,155 @@ fn writes_then_parses_minimal_llama() {
 
     // Tensor data start should be aligned.
     assert_eq!(g.tensor_data_start % gguf_inspect::DEFAULT_ALIGNMENT, 0);
+}
+
+// ---------------------------------------------------------------------
+// Negative-path tests. These exercise the parser's bounds checks
+// against deliberately-malformed inputs — they're the regression
+// safety net for the DoS-via-malformed-GGUF fixes (PR #487 review).
+// ---------------------------------------------------------------------
+
+/// Convenience: build a minimal but valid GGUF byte stream (header
+/// only, zero tensors, zero KVs) so each negative test can splice in
+/// just the malformation it cares about.
+fn minimal_header_bytes(tensor_count: u64, kv_count: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(24);
+    out.extend_from_slice(&gguf_inspect::GGUF_MAGIC.to_le_bytes());
+    out.extend_from_slice(&gguf_inspect::GGUF_VERSION.to_le_bytes());
+    out.extend_from_slice(&tensor_count.to_le_bytes());
+    out.extend_from_slice(&kv_count.to_le_bytes());
+    out
+}
+
+#[test]
+fn rejects_bad_magic() {
+    let mut bytes = minimal_header_bytes(0, 0);
+    bytes[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+    match Gguf::parse(&bytes) {
+        Err(GgufError::BadMagic(0xDEAD_BEEF)) => {}
+        other => panic!("expected BadMagic, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_bad_version() {
+    let mut bytes = minimal_header_bytes(0, 0);
+    bytes[4..8].copy_from_slice(&99u32.to_le_bytes());
+    match Gguf::parse(&bytes) {
+        Err(GgufError::UnsupportedVersion(99)) => {}
+        other => panic!("expected UnsupportedVersion(99), got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_truncated_string() {
+    // Header claims 1 KV pair; the KV body declares a huge key length
+    // (1 MB) but only 3 bytes of body follow. The per-KV minimum-size
+    // gate requires ≥ 13 bytes remaining for `kv_count = 1`; the body
+    // here is 11 bytes (8 length + 3 partial body), so we have to pad
+    // a bit to clear the gate. Once past it, reading the key string
+    // EOFs cleanly because 1 MB of body isn't there.
+    let mut bytes = minimal_header_bytes(0, 1);
+    // key length = 1 MB
+    let key_len: u64 = 1 << 20;
+    bytes.extend_from_slice(&key_len.to_le_bytes());
+    // body: only 3 bytes of "key" + 2 bytes of padding so total
+    // remaining-after-header is 13 bytes (clears MIN_KV_RECORD_SIZE).
+    bytes.extend_from_slice(b"key");
+    bytes.extend_from_slice(&[0u8; 2]);
+    match Gguf::parse(&bytes) {
+        Err(GgufError::UnexpectedEof { .. }) => {}
+        other => panic!("expected UnexpectedEof, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_oversized_tensor_count() {
+    // u64::MAX tensors in a 24-byte file. Pre-fix this aborts the
+    // process via Vec::with_capacity. Post-fix it's a typed error.
+    let bytes = minimal_header_bytes(u64::MAX, 0);
+    match Gguf::parse(&bytes) {
+        Err(GgufError::TooManyTensors(n)) if n == u64::MAX => {}
+        other => panic!("expected TooManyTensors(u64::MAX), got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_oversized_kv_count() {
+    let bytes = minimal_header_bytes(0, u64::MAX);
+    match Gguf::parse(&bytes) {
+        Err(GgufError::TooManyKvs(n)) if n == u64::MAX => {}
+        other => panic!("expected TooManyKvs(u64::MAX), got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_oversized_array_length() {
+    // 1 KV pair: key="a", value=Array<String> with claimed length
+    // u64::MAX. Each string element needs ≥ 8 bytes, so the bound
+    // check rejects this without ever entering the loop.
+    let mut bytes = minimal_header_bytes(0, 1);
+    // key
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    bytes.extend_from_slice(b"a");
+    // value type tag = Array (9)
+    bytes.extend_from_slice(&(MetaType::Array.as_u32()).to_le_bytes());
+    // elem type = String (8)
+    bytes.extend_from_slice(&(MetaType::String.as_u32()).to_le_bytes());
+    // length = u64::MAX
+    bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+    match Gguf::parse(&bytes) {
+        Err(GgufError::ArrayTooLong(n)) if n == u64::MAX => {}
+        other => panic!("expected ArrayTooLong, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_oversized_nested_array_length() {
+    // Same idea but the oversize is in a *nested* array, exercising
+    // the Critical-fix-#3 path that previously had no length check.
+    let mut bytes = minimal_header_bytes(0, 1);
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    bytes.extend_from_slice(b"a");
+    // value type tag = Array
+    bytes.extend_from_slice(&(MetaType::Array.as_u32()).to_le_bytes());
+    // outer elem type = Array
+    bytes.extend_from_slice(&(MetaType::Array.as_u32()).to_le_bytes());
+    // outer length = 1
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    // inner elem type = Uint64
+    bytes.extend_from_slice(&(MetaType::Uint64.as_u32()).to_le_bytes());
+    // inner length = u64::MAX
+    bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+    match Gguf::parse(&bytes) {
+        Err(GgufError::ArrayTooLong(n)) if n == u64::MAX => {}
+        other => panic!("expected ArrayTooLong (nested), got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_non_power_of_two_alignment() {
+    // Build a real file with general.alignment = 24 (not a power of
+    // two) — parser should reject before computing tensor_data_start.
+    let bytes = GgufBuilder::new()
+        .add_string("general.architecture", "test")
+        .add_u32("general.alignment", 24)
+        .build();
+    match Gguf::parse(&bytes) {
+        Err(GgufError::BadAlignment(24)) => {}
+        other => panic!("expected BadAlignment(24), got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_unknown_meta_type_tag() {
+    // 1 KV pair, key="a", value with type tag 0xFFFF (not a real type).
+    let mut bytes = minimal_header_bytes(0, 1);
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    bytes.extend_from_slice(b"a");
+    bytes.extend_from_slice(&0xFFFFu32.to_le_bytes());
+    match Gguf::parse(&bytes) {
+        Err(GgufError::UnknownMetaType(0xFFFF)) => {}
+        other => panic!("expected UnknownMetaType(0xFFFF), got {other:?}"),
+    }
 }
