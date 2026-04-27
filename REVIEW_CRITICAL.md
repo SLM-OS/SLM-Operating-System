@@ -38,19 +38,25 @@ Each finding is annotated with one of the following after disposition:
 
 ### kernel/arch/arm64/smp_boot.S
 - **lines 223-226** — Stack-size mismatch. `lsl x2, x2, #14` shifts cpu_id+1 by 14 bits = 16 KiB, but `STACK_SIZE` is `0x10000` (64 KiB) per `kernel/include/config.h:22`, and `cpu_stacks[MAX_CPUS][STACK_SIZE]` in `kernel/sched/smp.c:46` allocates 64 KiB per slot. Secondary CPU 1 ends up with `sp = cpu_stacks + 16 KiB` (inside CPU 0's stack region). With 4 secondaries, CPUs 1-3 share overlapping stack regions inside `cpu_stacks[0]` — every push/pop on a secondary stack corrupts the next CPU's stack frames. Concrete fix: change to `lsl x2, x2, #16` (×64 KiB) or compute via `mov x3, #STACK_SIZE; mul x2, x2, x3` to track config.h.
+  - ✅ **Fixed** — Confirmed `STACK_SIZE = 0x10000` in `kernel/include/config.h:22` and `cpu_stacks[MAX_CPUS][STACK_SIZE]` in `kernel/sched/smp.c:46`. Changed `lsl #14` → `lsl #16` and added a comment pinning the shift to `STACK_SIZE` so the link is visible to future maintainers.
 - **lines 144-216** — Cache invalidate-by-set/way is run *after* SCTLR_EL1 enables `C` and `I`. From the moment `msr sctlr_el1, x1` retires (line 149) the CPU is free to allocate cache lines (page-table walks, speculative refills of secondary_mmu_* literals' lines, etc). The subsequent `dc isw` loop then drops those lines. ARM ARM B2.4.4 explicitly says set/way ops should run with caches disabled; the right order is: invalidate set/way → DSB → ISB → enable MMU+caches. Concrete fix: move the entire `Lsec_inv_l1_set` / `Lsec_inv_l2_set` block above the `mrs/orr/msr sctlr_el1` sequence, then enable MMU+C+I once and ISB.
+  - ⏸️ **Deferred** — The architectural concern is real, but the in-source comment (lines 152-167) documents that the ordering is *intentional* to drop NS lines that were filled pre-MMU. Reordering is correct per ARM ARM but risks regressing Pi 5 / Jetson SMP, which currently boots and passes integration tests with this code. A safe reorder needs Pi 5 + Jetson hardware verification (boot_test --count 10 minimum on each), which is out of scope for this no-hardware PR. Worth revisiting once the SMP test surface stabilises.
 
 ### kernel/arch/arm64/vectors.S
 - **lines 124-139 / 360-383** — `DIAG_BUMP_VEC` and `resched_trampoline` use `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` to compute logical CPU id. On Jetson Orin Nano dual-cluster (CPU 4 = `0x10200`, CPU 5 = `0x10300`), this folds to `0x02 | 0x02 = 2` and `0x03 | 0x03 = 3` — colliding with CPU 2/3 in cluster 0. The DIAG macro is gated on `PI5_IRQ_DIAG` so it's safe today (Jetson never sets that flag), but the `resched_trampoline` is gated on `SECONDARY_PREEMPT` only, which is documented in CLAUDE.md as compile-but-not-safe on Jetson. Concrete fix: replace the inline fold with a load from `cpu_logical_map[]` (NC memory) keyed off `(mpidr & 0xFFFF) | ((mpidr >> 16) & 0xFF) << 8` to disambiguate Aff2.
+  - ❌ **Not a defect (in current builds)** — Confirmed limitation, but the in-source comment at lines 369-374 explicitly documents the Jetson incompatibility, and `preempt_check_cpu_mpidr` (per CLAUDE.md / closed issue #137) panics at boot if `SECONDARY_PREEMPT=ON` is built for Jetson. Pi 5 builds with `SECONDARY_PREEMPT=OFF` (default) never reach this code, and the cooperative-preempt path documented in `kernel/CLAUDE.md` is what runs in production. Replacing the fold with `cpu_logical_map[]` is the right long-term fix and is owned by Jetson plan P3 step 2; not in scope here.
 
 ### kernel/arch/arm64/user_entry.S
 - **lines 28-69** — Missing `isb` between `msr spsr_el1` / `msr elr_el1` writes and `eret`. ARM ARM D1.21.1 requires an ISB between context-altering MSRs and the exception-return instruction that consumes them. Without it the CPU is permitted to ERET with stale SPSR/ELR, faulting back to EL1 with corrupted PSTATE. Concrete fix: add `isb` immediately before the `eret` at line 69.
+  - ✅ **Fixed** — Added `isb` immediately before the `eret`, with a comment citing ARM ARM D1.21.1.
 
 ### kernel/arch/x86_64/platform_x86.c
 - **lines 581-589** — `dtb_parse` writes to `((uint8_t *)info)[0] = 0` inside a loop iterating `i`. Index is hardcoded `[0]`, so only the first byte is ever zeroed; the rest of the struct is uninitialized stack memory. Concrete fix: `((uint8_t *)info)[i] = 0;` (or just `memset` if available).
+  - ✅ **Fixed** — Index typo corrected to `[i]`. Added comment recording why.
 
 ### kernel/arch/x86_64/idt.c
 - **lines 188-265** — `exception_handler` halts on CPU exceptions (vec < 32) by entering an infinite `hlt` loop *with interrupts still enabled* (trap gates don't clear IF, line 274 confirms `IDT_TRAP_GATE` for most exceptions). A page fault followed by an unrelated timer IRQ will drive the timer ISR into a kernel that has already torn down its task. Concrete fix: `__asm__ volatile("cli")` as the first instruction in the panic path, before the `serial_puts("\n*** EXCEPTION:")`.
+  - ✅ **Fixed** — Added `__asm__ volatile("cli");` as the first instruction inside the `vec < 32` panic branch, with a comment explaining the trap-gate IF=1 hazard.
 
 ---
 

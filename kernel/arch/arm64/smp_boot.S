@@ -218,11 +218,17 @@ secondary_entry:
 .Lsec_skip_mmu:
     /*
      * Set up stack for this CPU.
-     * Stack = cpu_stacks[cpu_id] + STACK_SIZE
+     * Stack = cpu_stacks[cpu_id] + STACK_SIZE (top, grows down)
+     *
+     * STACK_SIZE in kernel/include/config.h is 0x10000 (64 KB), so the
+     * stride is `(cpu_id + 1) << 16`. The previous shift of #14 produced
+     * 16 KB strides, leaving secondaries 1-3 with overlapping stacks
+     * inside cpu_stacks[0] — every push/pop on a secondary corrupted
+     * the next CPU's frames. Keep this shift in sync with STACK_SIZE.
      */
     ldr     x1, =cpu_stacks
     add     x2, x19, #1            /* x2 = cpu_id + 1 */
-    lsl     x2, x2, #14            /* x2 = (cpu_id + 1) * 16KB */
+    lsl     x2, x2, #16            /* x2 = (cpu_id + 1) * 64KB */
     add     sp, x1, x2
 
     /*

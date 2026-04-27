@@ -65,6 +65,13 @@ user_task_enter:
     mov     x29, #0
     mov     x30, #0
 
+    /* ISB ensures the elr_el1/spsr_el1 writes above are observed by the
+     * upcoming ERET (ARM ARM D1.21.1 — context-altering MSRs require an
+     * ISB before the consuming exception-return instruction). Without
+     * this, ERET may use stale SPSR/ELR and immediately fault back to
+     * EL1 with corrupted PSTATE. */
+    isb
+
     /* Transition to EL0 */
     eret
 .size user_task_enter, . - user_task_enter
