@@ -269,6 +269,147 @@ struct camrtc_capture_descriptor_header {
     uint16_t frame_completion_timeout;
 };
 
+/* Number of atom-packer surface slots in `camrtc_vi_channel_config`
+ * — fixed at 4 for T194/T234 per L4T `l4t-camrtc-capture.h:231`. */
+#define VI_NUM_ATOMP_SURFACES   4u
+
+/* `struct vi_channel_config` — 160 bytes wire format
+ * (`l4t-camrtc-capture.h:538`). Per-frame VI-unit register
+ * programming RCE applies before triggering a capture: pixel-
+ * formatter setup, frame geometry, atom-packer surface IOVAs,
+ * DPCM strip layout, and channel-selector mask bits.
+ *
+ * Carried as the `ch_cfg` field of `struct capture_descriptor`
+ * at offset 88 (after the 12 B header + the 76 B deprecated
+ * prefence block). RCE reads it directly to drive its scheduler;
+ * a zero-init value is what makes today's `csidiag` capture
+ * trip RCE-side scheduler errors before any STATUS_IND can be
+ * emitted (see `docs/jetson-camera-vi-driver-notes.md`).
+ *
+ * Bitfield ABI: the leading 13 single-bit flags pack LSB-first
+ * into a 32-bit `unsigned` container, matching GCC's AArch64 +
+ * Cortex-R5F (RCE) layout. The trailing `pad_flags__:19` closes
+ * the container at 32 bits exactly. `_Static_assert`s in
+ * `kernel/tests/test_camera.c` pin the bit positions for every
+ * flag plus the size + offset of each substruct so a future
+ * upstream reorder breaks the build.
+ *
+ * Anonymous nested structs (C11/C23) keep struct-tag pollution
+ * out of file scope; tests reference fields via dotted member
+ * paths in `offsetof`.
+ *
+ * NOT YET POPULATED by `csidiag` — porting the type is one PR;
+ * wiring IMX219-specific values (frame_x=1640, frame_y=1232,
+ * pixfmt RAW10, atomp surface IOVA) is a follow-on PR. */
+struct camrtc_vi_channel_config {
+    /* Single-bit flags packed into a 32-bit container. */
+    unsigned dt_enable:1;
+    unsigned embdata_enable:1;
+    unsigned flush_enable:1;
+    unsigned flush_periodic:1;
+    unsigned line_timer_enable:1;
+    unsigned line_timer_periodic:1;
+    unsigned pixfmt_enable:1;
+    unsigned pixfmt_wide_enable:1;
+    unsigned pixfmt_wide_endian:1;
+    unsigned pixfmt_pdaf_replace_enable:1;
+    unsigned ispbufa_enable:1;
+    unsigned ispbufb_enable:1;       /* not valid for T186/T194; T234 OK */
+    unsigned compand_enable:1;
+    unsigned pad_flags__:19;
+
+    /* VI channel selector — RCE picks frames whose CSI-2 header
+     * matches every (value & mask) pair. */
+    struct {
+        uint8_t  datatype;
+        uint8_t  datatype_mask;
+        uint8_t  stream;
+        uint8_t  stream_mask;
+        uint16_t vc;
+        uint16_t vc_mask;
+        uint16_t frameid;
+        uint16_t frameid_mask;
+        uint16_t dol;
+        uint16_t dol_mask;
+    } match;
+
+    uint8_t  dol_header_sel;
+    uint8_t  dt_override;
+    uint8_t  dpcm_mode;
+    uint8_t  pad_dol_dt_dpcm__;
+
+    /* Frame geometry — pre-crop pixel dimensions, embedded-data
+     * lines, output skip + crop windows. */
+    struct {
+        uint16_t frame_x;
+        uint16_t frame_y;
+        uint32_t embed_x;
+        uint32_t embed_y;
+        struct {
+            uint16_t x;
+            uint16_t y;
+        } skip;
+        struct {
+            uint16_t x;
+            uint16_t y;
+        } crop;
+    } frame;
+
+    uint16_t flush;
+    uint16_t flush_first;
+    uint16_t line_timer;
+    uint16_t line_timer_first;
+
+    /* Pixel formatter + Phase Detection AF replacement window. */
+    struct {
+        uint16_t format;
+        uint8_t  pad0_en;
+        uint8_t  pad__;
+        struct {
+            uint16_t crop_left;
+            uint16_t crop_right;
+            uint16_t crop_top;
+            uint16_t crop_bottom;
+            uint16_t replace_crop_left;
+            uint16_t replace_crop_right;
+            uint16_t replace_crop_top;
+            uint16_t replace_crop_bottom;
+            uint16_t last_pixel_x;
+            uint16_t last_pixel_y;
+            uint16_t replace_value;
+            uint8_t  format;
+            uint8_t  pad_pdaf__;
+        } pdaf;
+    } pixfmt;
+
+    /* DPCM strip + chunk geometry. */
+    struct {
+        uint16_t strip_width;
+        uint16_t strip_overfetch;
+        uint16_t chunk_first;
+        uint16_t chunk_body;
+        uint16_t chunk_body_count;
+        uint16_t chunk_penultimate;
+        uint16_t chunk_last;
+        uint16_t pad__;
+        uint32_t clamp_high;
+        uint32_t clamp_low;
+    } dpcm;
+
+    /* Atom-packer destination surfaces (IOVA per plane) plus
+     * per-plane stride and DPCM chunk stride. */
+    struct {
+        struct {
+            uint32_t offset;        /* lo32 of IOVA */
+            uint32_t offset_hi;     /* hi32 of IOVA */
+        } surface[VI_NUM_ATOMP_SURFACES];
+        uint32_t surface_stride[VI_NUM_ATOMP_SURFACES];
+        uint32_t dpcm_chunk_stride;
+    } atomp;
+
+    uint16_t pad__[2];
+} __attribute__((aligned(8)));
+
 /* CAPTURE_REQUEST_REQ_MSG body — 8 bytes
  * (`l4t-camrtc-capture-messages.h:905`). Identifies which slot in
  * the request_ring (set up by CAPTURE_CHANNEL_SETUP) RCE should

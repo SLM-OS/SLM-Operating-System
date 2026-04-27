@@ -736,22 +736,32 @@ Phase 0 is GREEN; tasks are unblocked.
        diagnostic logs over TCU; the wire format is correct end-
        to-end.
 
-  **What remains for actual frame capture** (not yet started):
-  1. Port `vi_channel_config` (~352 B with C bitfields — fragile
-     for wire-format use). Required so RCE's VI register
-     programming finds a valid frame format.
-  2. Power-on the IMX219 sensor + write `MODE_SELECT = STREAMING`
+  **What remains for actual frame capture:**
+  1. ✅ **Port `vi_channel_config` — DONE.** Type ported in PR #N
+     as `struct camrtc_vi_channel_config` (160 B exactly, not the
+     earlier ~352 B estimate). 38 `_Static_assert`s pin the size
+     and every substruct field offset; a runtime test in
+     `kernel/tests/test_camera.c` verifies the 13 single-bit
+     flag positions match the L4T comment ordering. No `csidiag`
+     changes — populating the struct is a separate PR.
+  2. ☐ Populate `vi_channel_config` from `csidiag` with IMX219-
+     specific frame format (frame_x=1640, frame_y=1232, pixfmt
+     RAW10, atomp surface IOVA). Once non-zero, RCE's VI register
+     programming should reach the IND-emission path.
+  3. ☐ Power-on the IMX219 sensor + write `MODE_SELECT = STREAMING`
      (extend the existing `imx219` shell command).
-  3. Allocate a 2.5 MB frame buffer for IMX219 binned-mode RAW10
+  4. ☐ Allocate a 2.5 MB frame buffer for IMX219 binned-mode RAW10
      (1640×1232) inside RCE's VM1 IOVA aperture. The current 64 KB
      NC carveouts are too small; either grow the NC mapping or
      allocate from a different NC-mapped region.
-  4. Set the atomp surface IOVAs in the descriptor's `vi_channel_config`.
-  5. Inspect `capture_status.status` field in the descriptor for
+  5. ☐ Set the atomp surface IOVAs in the descriptor's
+     `vi_channel_config.atomp.surface[0]`.
+  6. ☐ Inspect `capture_status.status` field in the descriptor for
      `CAPTURE_STATUS_SUCCESS` after `STATUS_IND` arrives.
 
-  Each is a separate PR. The wire-format port is now complete;
-  what's left is the data-path / hardware-config surface.
+  Each remaining item is a separate PR. The wire-format port (msg
+  ABI + struct definitions) is now complete; what's left is the
+  data-path / hardware-config surface.
 - ☐🔗 Implement Lua bindings + preprocessing. Verify by capturing a
   known printed digit and asserting that
   `slm.model_infer_bytes` returns the expected class.

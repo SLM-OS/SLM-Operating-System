@@ -688,6 +688,49 @@ static void test_camrtc_ch_setup_accessors_uninit_zero(void)
                             (uint64_t)camrtc_ch_setup_capture_tx_iova());
 }
 
+/*
+ * Test: vi_channel_config bitfield bit positions match the L4T
+ * comment ordering. _Static_assert can pin offsets but cannot see
+ * inside bit-packed members, so this runtime test sets each flag
+ * individually on a zero-init struct and verifies the underlying
+ * 32-bit container word reads back as the expected (1u << bit_pos).
+ *
+ * If a future toolchain or struct reorder changes the bit packing,
+ * RCE will program VI registers with the wrong flags and capture
+ * silently does the wrong thing — this test catches it before any
+ * hardware deploy.
+ */
+static void test_camrtc_vi_channel_config_bitfield_positions(void)
+{
+    struct camrtc_vi_channel_config cfg;
+
+    /* Each iteration zeroes the whole struct, sets one bitfield to
+     * 1, and reads the underlying 4-byte container word. */
+    #define CHECK_BIT(field, bit) do {                              \
+        for (size_t _i = 0; _i < sizeof(cfg); _i++)                 \
+            ((volatile uint8_t *)&cfg)[_i] = 0u;                    \
+        cfg.field = 1u;                                             \
+        uint32_t _word = *(volatile uint32_t *)&cfg;                \
+        TEST_ASSERT_EQUAL_HEX32(((uint32_t)1u) << (bit), _word);    \
+    } while (0)
+
+    CHECK_BIT(dt_enable,                  0);
+    CHECK_BIT(embdata_enable,             1);
+    CHECK_BIT(flush_enable,               2);
+    CHECK_BIT(flush_periodic,             3);
+    CHECK_BIT(line_timer_enable,          4);
+    CHECK_BIT(line_timer_periodic,        5);
+    CHECK_BIT(pixfmt_enable,              6);
+    CHECK_BIT(pixfmt_wide_enable,         7);
+    CHECK_BIT(pixfmt_wide_endian,         8);
+    CHECK_BIT(pixfmt_pdaf_replace_enable, 9);
+    CHECK_BIT(ispbufa_enable,             10);
+    CHECK_BIT(ispbufb_enable,             11);
+    CHECK_BIT(compand_enable,             12);
+
+    #undef CHECK_BIT
+}
+
 int test_suite_camera(void)
 {
     UnityBegin("Camera C-API tests");
@@ -717,6 +760,7 @@ int test_suite_camera(void)
     RUN_TEST(test_camrtc_capture_null_out_result_safe);
     RUN_TEST(test_camrtc_vi_req_accessors);
     RUN_TEST(test_camrtc_ch_setup_accessors_uninit_zero);
+    RUN_TEST(test_camrtc_vi_channel_config_bitfield_positions);
     return UnityEnd();
 }
 
@@ -1023,6 +1067,156 @@ _Static_assert(offsetof(struct camrtc_capture_descriptor_header, frame_start_tim
     "capture_descriptor.frame_start_timeout must be at offset 8");
 _Static_assert(offsetof(struct camrtc_capture_descriptor_header, frame_completion_timeout) == 10,
     "capture_descriptor.frame_completion_timeout must be at offset 10");
+
+/* `struct camrtc_vi_channel_config` — full 160-byte VI register-
+ * programming substruct. Pinned per `l4t-camrtc-capture.h:538`.
+ * The assertions cover top-level field offsets plus every
+ * substruct's internal layout so a future upstream reorder can't
+ * silently shift one field into the wrong VI register slot. */
+_Static_assert(VI_NUM_ATOMP_SURFACES == 4u,
+    "VI_NUM_ATOMP_SURFACES drift — atomp surface array length (T194/T234)");
+_Static_assert(sizeof(struct camrtc_vi_channel_config) == 160,
+    "camrtc_vi_channel_config must be exactly 160 bytes (RCE wire format)");
+
+/* Top-level field offsets. */
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match) == 4,
+    "vi_channel_config.match must be at offset 4 (after 4 B bitfield container)");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dol_header_sel) == 20,
+    "vi_channel_config.dol_header_sel must be at offset 20");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dt_override) == 21,
+    "vi_channel_config.dt_override must be at offset 21");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm_mode) == 22,
+    "vi_channel_config.dpcm_mode must be at offset 22");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pad_dol_dt_dpcm__) == 23,
+    "vi_channel_config.pad_dol_dt_dpcm__ must be at offset 23");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, frame) == 24,
+    "vi_channel_config.frame must be at offset 24");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, flush) == 44,
+    "vi_channel_config.flush must be at offset 44");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, flush_first) == 46,
+    "vi_channel_config.flush_first must be at offset 46");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, line_timer) == 48,
+    "vi_channel_config.line_timer must be at offset 48");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, line_timer_first) == 50,
+    "vi_channel_config.line_timer_first must be at offset 50");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt) == 52,
+    "vi_channel_config.pixfmt must be at offset 52");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm) == 80,
+    "vi_channel_config.dpcm must be at offset 80");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, atomp) == 104,
+    "vi_channel_config.atomp must be at offset 104");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pad__) == 156,
+    "vi_channel_config.pad__ must be at offset 156");
+
+/* match substruct (16 bytes @ offset 4). */
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.datatype) == 4,
+    "vi_channel_config.match.datatype @ 4");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.datatype_mask) == 5,
+    "vi_channel_config.match.datatype_mask @ 5");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.stream) == 6,
+    "vi_channel_config.match.stream @ 6");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.stream_mask) == 7,
+    "vi_channel_config.match.stream_mask @ 7");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.vc) == 8,
+    "vi_channel_config.match.vc @ 8");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.vc_mask) == 10,
+    "vi_channel_config.match.vc_mask @ 10");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.frameid) == 12,
+    "vi_channel_config.match.frameid @ 12");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.frameid_mask) == 14,
+    "vi_channel_config.match.frameid_mask @ 14");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.dol) == 16,
+    "vi_channel_config.match.dol @ 16");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, match.dol_mask) == 18,
+    "vi_channel_config.match.dol_mask @ 18");
+
+/* frame substruct (20 bytes @ offset 24). */
+_Static_assert(offsetof(struct camrtc_vi_channel_config, frame.frame_x) == 24,
+    "vi_channel_config.frame.frame_x @ 24");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, frame.frame_y) == 26,
+    "vi_channel_config.frame.frame_y @ 26");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, frame.embed_x) == 28,
+    "vi_channel_config.frame.embed_x @ 28");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, frame.embed_y) == 32,
+    "vi_channel_config.frame.embed_y @ 32");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, frame.skip.x) == 36,
+    "vi_channel_config.frame.skip.x @ 36");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, frame.skip.y) == 38,
+    "vi_channel_config.frame.skip.y @ 38");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, frame.crop.x) == 40,
+    "vi_channel_config.frame.crop.x @ 40");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, frame.crop.y) == 42,
+    "vi_channel_config.frame.crop.y @ 42");
+
+/* pixfmt substruct (28 bytes @ offset 52) — 4 B header + 24 B pdaf. */
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.format) == 52,
+    "vi_channel_config.pixfmt.format @ 52");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pad0_en) == 54,
+    "vi_channel_config.pixfmt.pad0_en @ 54");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pad__) == 55,
+    "vi_channel_config.pixfmt.pad__ @ 55");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.crop_left) == 56,
+    "vi_channel_config.pixfmt.pdaf.crop_left @ 56");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.crop_right) == 58,
+    "vi_channel_config.pixfmt.pdaf.crop_right @ 58");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.crop_top) == 60,
+    "vi_channel_config.pixfmt.pdaf.crop_top @ 60");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.crop_bottom) == 62,
+    "vi_channel_config.pixfmt.pdaf.crop_bottom @ 62");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.replace_crop_left) == 64,
+    "vi_channel_config.pixfmt.pdaf.replace_crop_left @ 64");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.replace_crop_right) == 66,
+    "vi_channel_config.pixfmt.pdaf.replace_crop_right @ 66");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.replace_crop_top) == 68,
+    "vi_channel_config.pixfmt.pdaf.replace_crop_top @ 68");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.replace_crop_bottom) == 70,
+    "vi_channel_config.pixfmt.pdaf.replace_crop_bottom @ 70");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.last_pixel_x) == 72,
+    "vi_channel_config.pixfmt.pdaf.last_pixel_x @ 72");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.last_pixel_y) == 74,
+    "vi_channel_config.pixfmt.pdaf.last_pixel_y @ 74");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.replace_value) == 76,
+    "vi_channel_config.pixfmt.pdaf.replace_value @ 76");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.format) == 78,
+    "vi_channel_config.pixfmt.pdaf.format @ 78");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, pixfmt.pdaf.pad_pdaf__) == 79,
+    "vi_channel_config.pixfmt.pdaf.pad_pdaf__ @ 79");
+
+/* dpcm substruct (24 bytes @ offset 80). */
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.strip_width) == 80,
+    "vi_channel_config.dpcm.strip_width @ 80");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.strip_overfetch) == 82,
+    "vi_channel_config.dpcm.strip_overfetch @ 82");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.chunk_first) == 84,
+    "vi_channel_config.dpcm.chunk_first @ 84");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.chunk_body) == 86,
+    "vi_channel_config.dpcm.chunk_body @ 86");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.chunk_body_count) == 88,
+    "vi_channel_config.dpcm.chunk_body_count @ 88");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.chunk_penultimate) == 90,
+    "vi_channel_config.dpcm.chunk_penultimate @ 90");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.chunk_last) == 92,
+    "vi_channel_config.dpcm.chunk_last @ 92");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.pad__) == 94,
+    "vi_channel_config.dpcm.pad__ @ 94");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.clamp_high) == 96,
+    "vi_channel_config.dpcm.clamp_high @ 96");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, dpcm.clamp_low) == 100,
+    "vi_channel_config.dpcm.clamp_low @ 100");
+
+/* atomp substruct (52 bytes @ offset 104) — 4×8 surfaces + 4×4 strides + 4 chunk_stride. */
+_Static_assert(offsetof(struct camrtc_vi_channel_config, atomp.surface[0].offset) == 104,
+    "vi_channel_config.atomp.surface[0].offset @ 104");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, atomp.surface[0].offset_hi) == 108,
+    "vi_channel_config.atomp.surface[0].offset_hi @ 108");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, atomp.surface[3].offset_hi) == 132,
+    "vi_channel_config.atomp.surface[3].offset_hi @ 132 (last surface slot)");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, atomp.surface_stride[0]) == 136,
+    "vi_channel_config.atomp.surface_stride[0] @ 136");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, atomp.surface_stride[3]) == 148,
+    "vi_channel_config.atomp.surface_stride[3] @ 148");
+_Static_assert(offsetof(struct camrtc_vi_channel_config, atomp.dpcm_chunk_stride) == 152,
+    "vi_channel_config.atomp.dpcm_chunk_stride @ 152");
 
 /* =============================================================================
  * Tegra234 camera-subsystem MMIO bases — Phase 0 verified

@@ -42,12 +42,19 @@ format), so RCE bails before the IND-emission path.
 **What remains** (out of scope for the wire-format port; see
 `docs/jetson-camera-imx219-plan.md` for the full roadmap):
 
-1. Port `vi_channel_config` (~352 B with C bitfields).
-2. IMX219 power-on + `MODE_SELECT = STREAMING` (extend `imx219`
+1. ✅ Port `vi_channel_config` — DONE. `struct
+   camrtc_vi_channel_config` is now defined in
+   `kernel/include/camrtc_capture.h` (160 B exactly), with full
+   offset + bitfield-position coverage in `test_camera.c`. Not
+   yet populated by `csidiag`.
+2. Populate `vi_channel_config` in `csidiag` with IMX219 frame
+   format (frame_x=1640, frame_y=1232, RAW10 pixfmt, atomp
+   surface IOVA).
+3. IMX219 power-on + `MODE_SELECT = STREAMING` (extend `imx219`
    shell command).
-3. 2.5 MB frame buffer in RCE-accessible DRAM (current 64 KB NC
+4. 2.5 MB frame buffer in RCE-accessible DRAM (current 64 KB NC
    carveouts insufficient for IMX219 1640×1232 RAW10).
-4. Inspect `capture_status.status` field in the descriptor for
+5. Inspect `capture_status.status` field in the descriptor for
    `CAPTURE_STATUS_SUCCESS`.
 
 Detailed wire-format reference (struct sizes / offsets / region

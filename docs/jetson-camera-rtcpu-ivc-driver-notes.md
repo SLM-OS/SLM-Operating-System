@@ -916,4 +916,74 @@ emission path under the internal VI errors. A real
 
 ---
 
+## VI channel-config struct port (post-Task 4 follow-on)
+
+`struct camrtc_vi_channel_config` (160 B exactly, per
+`l4t-camrtc-capture.h:538`) is now defined in
+`kernel/include/camrtc_capture.h`. This is the per-frame VI-unit
+register-programming substruct that gets carried as the `ch_cfg`
+field of the full `capture_descriptor` at offset 88. RCE reads it
+to find the frame geometry, pixel format, channel-selector mask
+bits, and atom-packer destination IOVAs before triggering a
+capture.
+
+**Layout** (anonymous nested structs, `_Static_assert`s pin every
+offset):
+
+| Offset    | Size  | Field                               |
+|----------:|------:|--------------------------------------|
+| 0         | 4     | bitfield container (13 flags + 19 pad) |
+| 4         | 16    | `match` — channel selector (datatype/stream/vc/frameid/dol + masks) |
+| 20-23     | 4     | dol_header_sel / dt_override / dpcm_mode / pad |
+| 24        | 20    | `frame` — frame_x/y, embed_x/y, skip, crop |
+| 44-51     | 8     | flush, flush_first, line_timer, line_timer_first |
+| 52        | 28    | `pixfmt` — format + 24 B `pdaf` window |
+| 80        | 24    | `dpcm` — strip/chunk geometry + clamp |
+| 104       | 52    | `atomp` — 4 surface IOVAs + 4 strides + chunk_stride |
+| 156       | 4     | pad__[2]                             |
+| **Total** | **160** | — `__attribute__((aligned(8)))`     |
+
+**Bit-field positions** (LSB-first in 32-bit container, validated
+at runtime by `test_camrtc_vi_channel_config_bitfield_positions`):
+
+| Bit | Flag                        | Bit | Flag                          |
+|----:|------------------------------|----:|--------------------------------|
+| 0   | dt_enable                    | 7   | pixfmt_wide_enable             |
+| 1   | embdata_enable               | 8   | pixfmt_wide_endian             |
+| 2   | flush_enable                 | 9   | pixfmt_pdaf_replace_enable     |
+| 3   | flush_periodic               | 10  | ispbufa_enable                 |
+| 4   | line_timer_enable            | 11  | ispbufb_enable (T234 only)     |
+| 5   | line_timer_periodic          | 12  | compand_enable                 |
+| 6   | pixfmt_enable                |     |                                |
+
+**Test coverage** (added to `kernel/tests/test_camera.c`):
+
+- 1 `_Static_assert` on `VI_NUM_ATOMP_SURFACES == 4u`
+- 1 `_Static_assert` on `sizeof(camrtc_vi_channel_config) == 160`
+- 14 top-level field-offset asserts
+- 10 `match` substruct field-offset asserts
+- 8 `frame` substruct field-offset asserts (incl. nested skip/crop)
+- 15 `pixfmt` substruct field-offset asserts (incl. nested pdaf)
+- 10 `dpcm` substruct field-offset asserts
+- 6 `atomp` substruct field-offset asserts (incl. surface array)
+- `test_camrtc_vi_channel_config_bitfield_positions` runtime test:
+  zero the struct, set one flag at a time, read the underlying
+  4-byte container word, assert it equals `1u << bit_pos`.
+
+**NOT YET POPULATED.** No driver or shell code currently writes
+to the struct. `csidiag` zero-inits its descriptor slot which
+includes a zero `ch_cfg`. Once a follow-on PR populates this with
+IMX219-specific values (frame_x=1640, frame_y=1232, RAW10 pixfmt,
+atomp surface IOVA), RCE should reach the `STATUS_IND` emission
+path instead of bailing out under VI errors.
+
+**Why bitfields are safe here.** The bitfield ABI question — "do
+GCC AArch64 (host AP) and GCC ARMv7-R (RCE) pack `unsigned X:1`
+the same way?" — is answered yes by both being little-endian and
+both packing LSB-first into a 32-bit `unsigned` container. The
+runtime test above is the canary: if a future toolchain swap
+reorders bits, that test fails before any hardware deploy.
+
+---
+
 *End of notes.*
