@@ -22,6 +22,7 @@
 #include "../include/camrtc_capture.h"
 #include "../include/camrtc_channels.h"
 #include "../include/camrtc_ivc.h"
+#include "../include/camrtc_layout.h"
 #include "../include/gpio_tegra.h"
 #include "../include/i2c_tegra.h"
 #include "../include/imx219.h"
@@ -725,6 +726,45 @@ _Static_assert(TEGRA_IVC_HEADER_SIZE == 128u,
     "TEGRA_IVC_HEADER_SIZE drift (2 * 64 B per tegra-ivc spec)");
 _Static_assert(CAMRTC_HSP_CH_SETUP == 0x44u,
     "CAMRTC_HSP_CH_SETUP opcode drift (RCE protocol ID)");
+
+/* CH_SETUP region size sanity. The region holds the TLV array (4 KB)
+ * + capture-control rx (20608 B) + capture-control tx (20608 B) +
+ * capture rx (4224 B) + capture tx (4224 B) = 53760 B. The 64 KB
+ * carveout in `kernel/drivers/camrtc/camrtc.c:CAMRTC_CTRL_REGION_RESERVED`
+ * must comfortably contain it. The number is computed from upstream
+ * L4T constants (88 B/TLV, 128 B header, 64 frames per direction)
+ * so any future change to nframes/frame_size breaks this assert
+ * before it silently overflows the carveout.
+ *
+ * Calculation guard: 4096 + 2*(128 + 64*320) + 2*(128 + 64*64). */
+_Static_assert(
+    CAMRTC_IVC_CONFIG_SIZE
+    + 2u * (TEGRA_IVC_HEADER_SIZE + 64u * 320u)
+    + 2u * (TEGRA_IVC_HEADER_SIZE + 64u *  64u)
+    == 53760u,
+    "CH_SETUP region used-bytes calculation drift — review camrtc.c "
+    "CAMRTC_CTRL_REGION_BYTES vs the carveout reservation");
+
+/* IVC channel geometry pins. The constants in camrtc_layout.h are
+ * shared by camrtc.c (CH_SETUP TLV write) and camrtc_capture.c
+ * (camrtc_ivc_init) — the pair MUST agree per side, otherwise RCE
+ * binds the rings with one geometry while AP walks them with
+ * another. These pins fail at build time if any constant drifts
+ * from the L4T `tegra234-camera.dtsi` ivccontrol@3 / ivccapture@4
+ * defaults. */
+_Static_assert(CAMRTC_GROUP_CAPTURE  == 1u,
+    "CAMRTC_GROUP_CAPTURE drift — both channels must share group=1");
+_Static_assert(CAMRTC_VERSION        == 0u,
+    "CAMRTC_VERSION drift — capture-rtcpu protocol version is 0");
+_Static_assert(CAMRTC_CTRL_NFRAMES   == 64u,
+    "CAMRTC_CTRL_NFRAMES drift — capture-control ring depth");
+_Static_assert(CAMRTC_CTRL_FRAME_SIZE == 320u,
+    "CAMRTC_CTRL_FRAME_SIZE drift — capture-control frame size");
+_Static_assert(CAMRTC_CAP_NFRAMES    == 64u,
+    "CAMRTC_CAP_NFRAMES drift — capture ring depth (SLM-OS uses 64; "
+    "L4T uses 512 — review the region-size assert if growing this)");
+_Static_assert(CAMRTC_CAP_FRAME_SIZE == 64u,
+    "CAMRTC_CAP_FRAME_SIZE drift — capture frame size");
 
 /* Capture-control message wire-format pins. The structs are
  * exchanged byte-for-byte with RCE firmware over the IVC ring;

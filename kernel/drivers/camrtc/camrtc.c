@@ -36,6 +36,7 @@
 
 #include "bpmp.h"
 #include "camrtc_channels.h"
+#include "camrtc_layout.h"
 #include "debug.h"
 #include "platform.h"
 #include "tegra234_clocks.h"
@@ -573,31 +574,26 @@ int camrtc_diag_dump(void)
 
 /* ---- CH_SETUP: capture-control IVC channel ---- */
 
-/* Wire-format channel parameters for the IMX219 capture-control
- * channel. Match `tegra234-camera.dtsi` ivccontrol@3:
- *   nvidia,service     = "capture-control"
- *   nvidia,group       = <1>
- *   nvidia,frame-count = <64>
- *   nvidia,frame-size  = <320>
- *   nvidia,version     = (omitted → 0) */
-#define CAMRTC_CTRL_GROUP        1u
-#define CAMRTC_CTRL_NFRAMES      64u
-#define CAMRTC_CTRL_FRAME_SIZE   320u
-#define CAMRTC_CTRL_VERSION      0u
-
-/* Per-direction queue: header (128 B) + nframes * frame_size. Both
- * directions are equal-sized in this protocol. */
+/* IVC channel geometry (CAMRTC_GROUP_CAPTURE / CAMRTC_CTRL_* /
+ * CAMRTC_CAP_*) lives in `kernel/include/camrtc_layout.h` so it
+ * stays in lockstep with `kernel/drivers/camrtc/camrtc_capture.c`.
+ * Per-direction queue sizes are derived locally because they
+ * depend on TEGRA_IVC_HEADER_SIZE from `camrtc_channels.h`. */
 #define CAMRTC_CTRL_QUEUE_BYTES  \
     (TEGRA_IVC_HEADER_SIZE + CAMRTC_CTRL_NFRAMES * CAMRTC_CTRL_FRAME_SIZE)
+#define CAMRTC_CAP_QUEUE_BYTES   \
+    (TEGRA_IVC_HEADER_SIZE + CAMRTC_CAP_NFRAMES * CAMRTC_CAP_FRAME_SIZE)
 
-/* Region layout: 4 KB config block + rx queue + tx queue.
- *   = 4096 + 2 * (128 + 64*320)
- *   = 4096 + 2 * 20608
- *   = 45312 bytes
- * Round up to 64 KB so the region is aligned to the L4T-DT
- * `nvidia,ivc-channels = <... 0x10000>` size convention. */
+/* Region layout: 4 KB config block + capture-control rx + tx +
+ * capture rx + tx queues.
+ *   = 4096 + 2 * (128 + 64*320) + 2 * (128 + 64*64)
+ *   = 4096 + 2 * 20608           + 2 * 4224
+ *   = 4096 + 41216               + 8448
+ *   = 53760 bytes
+ * Still well within the 64 KB region carveout. */
 #define CAMRTC_CTRL_REGION_BYTES \
-    (CAMRTC_IVC_CONFIG_SIZE + 2u * CAMRTC_CTRL_QUEUE_BYTES)
+    (CAMRTC_IVC_CONFIG_SIZE + 2u * CAMRTC_CTRL_QUEUE_BYTES \
+                            + 2u * CAMRTC_CAP_QUEUE_BYTES)
 #define CAMRTC_CTRL_REGION_RESERVED  0x10000u  /* 64 KB */
 
 /* Fixed physical address for the IVC config + ring region.
@@ -627,10 +623,22 @@ int camrtc_diag_dump(void)
 #define CAMRTC_CTRL_REGION_PHYS    0xBDFE0000u
 
 static uintptr_t g_ch_setup_region_phys;
+static uintptr_t g_ch_setup_cap_rx_iova;
+static uintptr_t g_ch_setup_cap_tx_iova;
 
 uintptr_t camrtc_ch_setup_region_phys(void)
 {
     return g_ch_setup_region_phys;
+}
+
+uintptr_t camrtc_ch_setup_capture_rx_iova(void)
+{
+    return g_ch_setup_cap_rx_iova;
+}
+
+uintptr_t camrtc_ch_setup_capture_tx_iova(void)
+{
+    return g_ch_setup_cap_tx_iova;
 }
 
 int camrtc_ch_setup_capture_control(void)
@@ -638,6 +646,18 @@ int camrtc_ch_setup_capture_control(void)
     if (!g_initialised) {
         WARN("camrtc: ch_setup called before camrtc_init");
         return -2;
+    }
+
+    /* Idempotent — once RCE has bound the channels for this
+     * region, sending another `CAMRTC_HSP_CH_SETUP` with the same
+     * IOVA returns RTCPU_CH_ERR_ALREADY (129), which would make
+     * `camrtc_capture_init` fail permanently after a partial-init
+     * recovery (e.g. capture-control's ivc_init succeeded but the
+     * second ivc_init for capture timed out). The published region
+     * IOVA lives in `g_ch_setup_region_phys`; non-zero means RCE
+     * has bound this region and we can short-circuit. */
+    if (g_ch_setup_region_phys != 0u) {
+        return 0;
     }
 
     /* Region lives at a fixed physical address in RCE's VM1 IOVA
@@ -685,40 +705,66 @@ int camrtc_ch_setup_capture_control(void)
         region_words[i] = 0;
     }
 
-    /* Build the TLV entry at offset 0. The rx queue starts at
-     * +CAMRTC_IVC_CONFIG_SIZE, the tx queue starts at
-     * +CAMRTC_IVC_CONFIG_SIZE + CAMRTC_CTRL_QUEUE_BYTES. */
-    uintptr_t rx_iova = region_phys + CAMRTC_IVC_CONFIG_SIZE;
-    uintptr_t tx_iova = rx_iova + CAMRTC_CTRL_QUEUE_BYTES;
+    /* Build the TLV array at offset 0. Region layout:
+     *   +0x0000           TLV[0] (capture-control)         88 B
+     *   +0x0058           TLV[1] (capture)                 88 B
+     *   +0x00B0           zero terminator (no TLV write — region zeroed)
+     *   +CAMRTC_IVC_CONFIG_SIZE (=4096)
+     *                     capture-control rx queue        20608 B
+     *   +...              capture-control tx queue        20608 B
+     *   +...              capture rx queue                 4224 B
+     *   +...              capture tx queue                 4224 B
+     */
+    uintptr_t ctrl_rx_iova = region_phys + CAMRTC_IVC_CONFIG_SIZE;
+    uintptr_t ctrl_tx_iova = ctrl_rx_iova + CAMRTC_CTRL_QUEUE_BYTES;
+    uintptr_t cap_rx_iova  = ctrl_tx_iova + CAMRTC_CTRL_QUEUE_BYTES;
+    uintptr_t cap_tx_iova  = cap_rx_iova  + CAMRTC_CAP_QUEUE_BYTES;
 
+    /* TLV[0] — capture-control. */
     volatile struct camrtc_tlv_ivc_setup *tlv =
         (volatile struct camrtc_tlv_ivc_setup *)region_phys;
-    tlv->tag           = CAMRTC_TAG_IVC_SETUP;
-    tlv->len           = sizeof(struct camrtc_tlv_ivc_setup);
-    tlv->rx_iova       = (uint64_t)rx_iova;
-    tlv->rx_frame_size = CAMRTC_CTRL_FRAME_SIZE;
-    tlv->rx_nframes    = CAMRTC_CTRL_NFRAMES;
-    tlv->tx_iova       = (uint64_t)tx_iova;
-    tlv->tx_frame_size = CAMRTC_CTRL_FRAME_SIZE;
-    tlv->tx_nframes    = CAMRTC_CTRL_NFRAMES;
-    tlv->channel_group = CAMRTC_CTRL_GROUP;
-    tlv->ivc_version   = CAMRTC_CTRL_VERSION;
-    /* Inline strcpy: "capture-control\0" — 16 bytes including NUL,
-     * fits in the 32-byte field. Manual copy because <string.h> is
-     * libc-only on bare metal. The static_assert keeps a future
-     * rename to a longer service name from silently overflowing into
-     * the next TLV (today's terminator). */
+    tlv[0].tag           = CAMRTC_TAG_IVC_SETUP;
+    tlv[0].len           = sizeof(struct camrtc_tlv_ivc_setup);
+    tlv[0].rx_iova       = (uint64_t)ctrl_rx_iova;
+    tlv[0].rx_frame_size = CAMRTC_CTRL_FRAME_SIZE;
+    tlv[0].rx_nframes    = CAMRTC_CTRL_NFRAMES;
+    tlv[0].tx_iova       = (uint64_t)ctrl_tx_iova;
+    tlv[0].tx_frame_size = CAMRTC_CTRL_FRAME_SIZE;
+    tlv[0].tx_nframes    = CAMRTC_CTRL_NFRAMES;
+    tlv[0].channel_group = CAMRTC_CTRL_GROUP;
+    tlv[0].ivc_version   = CAMRTC_CTRL_VERSION;
+    /* Inline strcpy: service names — manual copy because <string.h>
+     * is libc-only on bare metal. The static_asserts keep a future
+     * rename from silently overflowing into the next TLV. */
     static const char ctrl_name[] = "capture-control";
+    static const char cap_name[]  = "capture";
     _Static_assert(sizeof(ctrl_name) <= sizeof(((struct camrtc_tlv_ivc_setup *)0)->ivc_service),
                    "capture-control service name must fit in the 32-byte ivc_service field");
+    _Static_assert(sizeof(cap_name) <= sizeof(((struct camrtc_tlv_ivc_setup *)0)->ivc_service),
+                   "capture service name must fit in the 32-byte ivc_service field");
     for (uint32_t i = 0; i < sizeof(ctrl_name); i++) {
-        tlv->ivc_service[i] = ctrl_name[i];
+        tlv[0].ivc_service[i] = ctrl_name[i];
     }
 
-    /* Terminator entry — tag = 0. The region was zeroed above so
-     * the terminator is already in place; this comment makes that
-     * explicit so a future maintainer doesn't add a redundant
-     * zero-write here that masks an upstream bug. */
+    /* TLV[1] — capture. */
+    tlv[1].tag           = CAMRTC_TAG_IVC_SETUP;
+    tlv[1].len           = sizeof(struct camrtc_tlv_ivc_setup);
+    tlv[1].rx_iova       = (uint64_t)cap_rx_iova;
+    tlv[1].rx_frame_size = CAMRTC_CAP_FRAME_SIZE;
+    tlv[1].rx_nframes    = CAMRTC_CAP_NFRAMES;
+    tlv[1].tx_iova       = (uint64_t)cap_tx_iova;
+    tlv[1].tx_frame_size = CAMRTC_CAP_FRAME_SIZE;
+    tlv[1].tx_nframes    = CAMRTC_CAP_NFRAMES;
+    tlv[1].channel_group = CAMRTC_CAP_GROUP;
+    tlv[1].ivc_version   = CAMRTC_CAP_VERSION;
+    for (uint32_t i = 0; i < sizeof(cap_name); i++) {
+        tlv[1].ivc_service[i] = cap_name[i];
+    }
+
+    /* Terminator entry (TLV[2].tag = 0). The region was zeroed
+     * above so the terminator is already in place; this comment
+     * makes that explicit so a future maintainer doesn't add a
+     * redundant zero-write here that masks an upstream bug. */
 
     /* Memory barrier: make sure all the TLV writes are visible
      * before RCE reads the region. RCE accesses physical memory
@@ -733,9 +779,10 @@ int camrtc_ch_setup_capture_control(void)
      * the same `cmd_timeout` (default 2 s) for all camrtc-hsp
      * commands; we use 1 s here. */
     INFO("camrtc: CH_SETUP region @ phys=0x%lx (>>8 = 0x%06lx) "
-         "rx@0x%lx tx@0x%lx",
+         "ctrl_rx@0x%lx ctrl_tx@0x%lx cap_rx@0x%lx cap_tx@0x%lx",
          (unsigned long)region_phys, (unsigned long)iova_shifted,
-         (unsigned long)rx_iova, (unsigned long)tx_iova);
+         (unsigned long)ctrl_rx_iova, (unsigned long)ctrl_tx_iova,
+         (unsigned long)cap_rx_iova,  (unsigned long)cap_tx_iova);
 
     uint32_t status = 0xFFFFFFu;
     int rc = camrtc_send_msg(CAMRTC_HSP_CH_SETUP,
@@ -753,10 +800,15 @@ int camrtc_ch_setup_capture_control(void)
     }
 
     g_ch_setup_region_phys = region_phys;
+    g_ch_setup_cap_rx_iova = cap_rx_iova;
+    g_ch_setup_cap_tx_iova = cap_tx_iova;
     INFO("camrtc: CH_SETUP OK — capture-control bound to "
+         "(group=%u, rx@0x%lx, tx@0x%lx); capture bound to "
          "(group=%u, rx@0x%lx, tx@0x%lx)",
          (unsigned)CAMRTC_CTRL_GROUP,
-         (unsigned long)rx_iova, (unsigned long)tx_iova);
+         (unsigned long)ctrl_rx_iova, (unsigned long)ctrl_tx_iova,
+         (unsigned)CAMRTC_CAP_GROUP,
+         (unsigned long)cap_rx_iova,  (unsigned long)cap_tx_iova);
     return 0;
 }
 
@@ -778,5 +830,7 @@ int camrtc_send_irq(uint32_t msg_id, uint32_t param, uint32_t timeout_us)
 int camrtc_diag_dump(void) { return -1; }
 int camrtc_ch_setup_capture_control(void) { return -1; }
 uintptr_t camrtc_ch_setup_region_phys(void) { return 0; }
+uintptr_t camrtc_ch_setup_capture_rx_iova(void) { return 0; }
+uintptr_t camrtc_ch_setup_capture_tx_iova(void) { return 0; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */
