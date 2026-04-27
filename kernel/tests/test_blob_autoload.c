@@ -353,11 +353,19 @@ static void write_boot_media_fat_file(const char *path, const void *data, UINT l
     struct blkdev *dev = boot_media_acquire();
     FATFS fs;
     FIL fp;
+    FRESULT mkdir_res;
     UINT written = 0;
 
     TEST_ASSERT_NOT_NULL(dev);
     fatfs_disk_attach(dev);
     TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(&fs, TEST_FAT32_VOL, 1));
+    /* Ensure the slmstore/autoload tree exists before f_open with
+     * FA_CREATE_ALWAYS — f_open does not create missing parent
+     * directories and would otherwise return FR_NO_PATH (#486). */
+    mkdir_res = f_mkdir("0:/slmstore");
+    TEST_ASSERT_TRUE(mkdir_res == FR_OK || mkdir_res == FR_EXIST);
+    mkdir_res = f_mkdir("0:/slmstore/autoload");
+    TEST_ASSERT_TRUE(mkdir_res == FR_OK || mkdir_res == FR_EXIST);
     TEST_ASSERT_EQUAL_INT(FR_OK, f_open(&fp, path, FA_WRITE | FA_CREATE_ALWAYS));
     TEST_ASSERT_EQUAL_INT(FR_OK, f_write(&fp, data, len, &written));
     TEST_ASSERT_EQUAL_UINT(len, written);
