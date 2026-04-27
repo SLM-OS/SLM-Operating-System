@@ -165,6 +165,100 @@ int camrtc_capture_phy_stream_open(uint32_t stream_id,
     return 0;
 }
 
+int camrtc_capture_csi_stream_set_config(uint32_t stream_id,
+                                         uint32_t csi_port,
+                                         uint8_t  num_lanes,
+                                         uint32_t mipi_clock_rate,
+                                         uint32_t *out_result)
+{
+    if (!g_ctrl_ready) {
+        WARN("csi_stream_set_config: capture_init not run");
+        return -1;
+    }
+    if (num_lanes == 0u || num_lanes > NVCSI_BRICK_NUM_LANES) {
+        WARN("csi_stream_set_config: invalid num_lanes=%u",
+             (unsigned)num_lanes);
+        return -1;
+    }
+
+    /* Build the request frame: header + body. The body is 104 B
+     * — see camrtc_capture.h for the layout. The IVC send path
+     * zero-pads the rest of the 320-byte slot. */
+    struct {
+        struct capture_msg_header                   hdr;
+        struct capture_csi_stream_set_config_req    body;
+    } req;
+
+    /* Zero everything first so any reserved/error-mask field we
+     * don't explicitly set lands as 0 (= no error reporting,
+     * SoC-default timing). */
+    uint8_t *req_bytes = (uint8_t *)&req;
+    for (uint32_t i = 0; i < sizeof(req); i++) req_bytes[i] = 0;
+
+    uint32_t tx = g_next_transaction++;
+    if (g_next_transaction == 0u) g_next_transaction = 1u;
+
+    req.hdr.msg_id      = CAPTURE_CSI_STREAM_SET_CONFIG_REQ;
+    req.hdr.transaction = tx;
+    req.body.stream_id  = stream_id;
+    req.body.csi_port   = csi_port;
+    /* config_flags=0, brick.phy_mode=0 (DPHY), lane_swizzle=0,
+     * lane_polarity[]=0, error_config zeroed — all correct from
+     * the bulk-zero above. */
+    req.body.cil_config.num_lanes       = num_lanes;
+    req.body.cil_config.mipi_clock_rate = mipi_clock_rate;
+    /* lp_bypass_mode=0, t_hs_settle=0/SoC default, t_clk_settle=0,
+     * cil_clock_rate=0 (deprecated upstream) — also from bulk zero. */
+
+    INFO("csi_stream_set_config: send REQ tx=0x%x stream=%u port=%u "
+         "lanes=%u mipi_kHz=%u",
+         (unsigned)tx, (unsigned)stream_id, (unsigned)csi_port,
+         (unsigned)num_lanes, (unsigned)mipi_clock_rate);
+
+    int rc = camrtc_ivc_send(&g_ctrl_chan, &req, sizeof(req));
+    if (rc != 0) {
+        WARN("csi_stream_set_config: ivc_send failed rc=%d", rc);
+        return -2;
+    }
+
+    uint8_t resp_buf[CAPTURE_CTRL_FRAME_SIZE];
+    uint32_t resp_len = 0;
+    rc = camrtc_ivc_recv_wait(&g_ctrl_chan, resp_buf, sizeof(resp_buf),
+                              &resp_len, 1000000u);
+    if (rc != 0) {
+        WARN("csi_stream_set_config: ivc_recv_wait failed rc=%d", rc);
+        return -3;
+    }
+    if (resp_len < sizeof(struct capture_msg_header)
+                   + sizeof(struct capture_csi_stream_set_config_resp)) {
+        WARN("csi_stream_set_config: short response (%u bytes)",
+             (unsigned)resp_len);
+        return -4;
+    }
+
+    struct capture_msg_header resp_hdr;
+    struct capture_csi_stream_set_config_resp resp_body;
+    mem_copy(&resp_hdr, resp_buf, sizeof(resp_hdr));
+    mem_copy(&resp_body, resp_buf + sizeof(resp_hdr), sizeof(resp_body));
+
+    if (resp_hdr.msg_id != CAPTURE_CSI_STREAM_SET_CONFIG_RESP) {
+        WARN("csi_stream_set_config: wrong msg_id 0x%x (expected 0x%x)",
+             (unsigned)resp_hdr.msg_id,
+             (unsigned)CAPTURE_CSI_STREAM_SET_CONFIG_RESP);
+        return -4;
+    }
+    if (resp_hdr.transaction != tx) {
+        WARN("csi_stream_set_config: tx mismatch 0x%x (sent 0x%x)",
+             (unsigned)resp_hdr.transaction, (unsigned)tx);
+        return -5;
+    }
+
+    if (out_result != (uint32_t *)0) *out_result = resp_body.result;
+    INFO("csi_stream_set_config: RESP tx=0x%x result=0x%x",
+         (unsigned)resp_hdr.transaction, (unsigned)resp_body.result);
+    return 0;
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO — stubs for cross-platform builds */
 
 int camrtc_capture_init(void) { return -1; }
@@ -174,6 +268,16 @@ int camrtc_capture_phy_stream_open(uint32_t stream_id,
                                    uint32_t *out_result)
 {
     (void)stream_id; (void)csi_port; (void)phy_type;
+    if (out_result) *out_result = 0xFFFFFFFFu;
+    return -1;
+}
+int camrtc_capture_csi_stream_set_config(uint32_t stream_id,
+                                         uint32_t csi_port,
+                                         uint8_t  num_lanes,
+                                         uint32_t mipi_clock_rate,
+                                         uint32_t *out_result)
+{
+    (void)stream_id; (void)csi_port; (void)num_lanes; (void)mipi_clock_rate;
     if (out_result) *out_result = 0xFFFFFFFFu;
     return -1;
 }

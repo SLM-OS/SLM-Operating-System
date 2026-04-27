@@ -620,6 +620,37 @@ _Static_assert(CAPTURE_PHY_STREAM_OPEN_RESP == 0x37u,
 _Static_assert(CAMRTC_HSP_IRQ == 0x00u,
     "CAMRTC_HSP_IRQ opcode drift (L4T uses 0x00 for unidirectional IVC notify)");
 
+/* CAPTURE_CSI_STREAM_SET_CONFIG_REQ wire-format pins. The brick +
+ * CIL + error_config substructs are RCE wire ABI; struct sizes
+ * (16 + 16 + 56 = 88 B body + 16 B header = 104 B request total)
+ * are pinned here. Per L4T `l4t-camrtc-capture.h:1531/1551/1715`
+ * and `l4t-camrtc-capture-messages.h:407`. */
+_Static_assert(NVCSI_BRICK_NUM_LANES == 4u,
+    "NVCSI_BRICK_NUM_LANES must be 4 (per-brick D-PHY lane count)");
+_Static_assert(sizeof(struct nvcsi_brick_config) == 16,
+    "nvcsi_brick_config must be exactly 16 bytes (RCE wire format)");
+_Static_assert(sizeof(struct nvcsi_cil_config) == 16,
+    "nvcsi_cil_config must be exactly 16 bytes (RCE wire format)");
+_Static_assert(sizeof(struct vi_hsm_csimux_error_mask_config) == 8,
+    "vi_hsm_csimux_error_mask_config must be exactly 8 bytes (RCE wire format)");
+_Static_assert(sizeof(struct nvcsi_error_config) == 56,
+    "nvcsi_error_config must be exactly 56 bytes (RCE wire format)");
+_Static_assert(sizeof(struct capture_csi_stream_set_config_req) == 104,
+    "capture_csi_stream_set_config_req must be exactly 104 bytes "
+    "(16 header + 16 brick + 16 cil + 56 error)");
+_Static_assert(sizeof(struct capture_csi_stream_set_config_resp) == 8,
+    "capture_csi_stream_set_config_resp must be exactly 8 bytes (RCE wire format)");
+_Static_assert(CAPTURE_CSI_STREAM_SET_CONFIG_REQ == 0x40u,
+    "CAPTURE_CSI_STREAM_SET_CONFIG_REQ opcode drift (L4T msg id)");
+_Static_assert(CAPTURE_CSI_STREAM_SET_CONFIG_RESP == 0x41u,
+    "CAPTURE_CSI_STREAM_SET_CONFIG_RESP opcode drift (L4T msg id)");
+_Static_assert(offsetof(struct capture_csi_stream_set_config_req, brick_config) == 16,
+    "capture_csi_stream_set_config_req.brick_config must be at offset 16");
+_Static_assert(offsetof(struct capture_csi_stream_set_config_req, cil_config) == 32,
+    "capture_csi_stream_set_config_req.cil_config must be at offset 32");
+_Static_assert(offsetof(struct capture_csi_stream_set_config_req, error_config) == 48,
+    "capture_csi_stream_set_config_req.error_config must be at offset 48");
+
 /* =============================================================================
  * Tegra234 camera-subsystem MMIO bases — Phase 0 verified
  *
