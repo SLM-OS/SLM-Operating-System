@@ -933,4 +933,23 @@ extern int rust_slm_get_info(uint32_t index, SlmModelInfoC *info);
  */
 extern uint32_t rust_slm_count(void);
 
+/*
+ * Test-only: build a Qwen2.5-shaped GGUF fixture into @out_buf and
+ * record the bytes written via @out_size. Returns 0 on success or
+ * -1 if the buffer is too small / pointers are null. Used by
+ * kernel/tests/test_slm_load.c so the FFI surface can be exercised
+ * end-to-end without staging a real GGUF.
+ */
+extern int rust_slm_test_build_qwen_fixture(
+    uint32_t vocab_size,
+    uint8_t *out_buf,
+    size_t out_capacity,
+    size_t *out_size);
+
+/*
+ * Test-only: reset the SLM registry to empty. Tests call this
+ * between cases so each one starts with a known-empty slot table.
+ */
+extern void rust_slm_test_reset(void);
+
 #endif /* SLM_FFI_H */
