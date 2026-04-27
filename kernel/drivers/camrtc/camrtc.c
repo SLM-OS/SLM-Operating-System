@@ -35,6 +35,7 @@
 #include <stdint.h>
 
 #include "bpmp.h"
+#include "camrtc_channels.h"
 #include "debug.h"
 #include "platform.h"
 #include "tegra234_clocks.h"
@@ -471,21 +472,56 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
     }
     sm_tx_send(request);
 
-    uint32_t resp = 0;
-    if (sm_rx_recv(&resp, timeout_us) != 0) {
-        WARN("camrtc: VM-RX timeout waiting for response to "
-             "msg_id=0x%x (timeout=%uus)",
-             (unsigned)msg_id, (unsigned)timeout_us);
-        return -2;
-    }
-
-    if (camrtc_msg_id(resp) != msg_id) {
+    /* Drain unidirectional traffic while waiting for the matching
+     * response. Per L4T `rtcpu-hsp-combo.c:151-159`, RX messages
+     * with opcode == CAMRTC_HSP_IRQ (0x00) are IVC-group
+     * notifications and any opcode < CAMRTC_HSP_HELLO (0x40) is a
+     * unidirectional notification — only opcodes >= 0x40 are
+     * responses to outbound commands. RCE commonly emits an IRQ
+     * before answering CH_SETUP (the SS[0] semaphore wake also
+     * triggers a mailbox-side IRQ message), so a single recv that
+     * insists on the matching opcode races against that path. */
+    uint64_t freq = timer_get_frequency();
+    uint64_t ticks_per_us = freq / 1000000u;
+    if (ticks_per_us == 0) ticks_per_us = 1u;
+    uint64_t deadline = timer_get_count()
+                      + (uint64_t)timeout_us * ticks_per_us;
+    for (;;) {
+        uint32_t resp = 0;
+        uint32_t remaining_us = 0;
+        uint64_t now = timer_get_count();
+        if (now < deadline) {
+            remaining_us = (uint32_t)((deadline - now) / ticks_per_us);
+            if (remaining_us == 0) remaining_us = 1u;
+        }
+        if (sm_rx_recv(&resp, remaining_us) != 0) {
+            WARN("camrtc: VM-RX timeout waiting for response to "
+                 "msg_id=0x%x (timeout=%uus)",
+                 (unsigned)msg_id, (unsigned)timeout_us);
+            return -2;
+        }
+        uint32_t resp_id = camrtc_msg_id(resp);
+        if (resp_id == msg_id) {
+            if (resp_param) *resp_param = camrtc_msg_param(resp);
+            return 0;
+        }
+        if (resp_id < CAMRTC_HSP_HELLO) {
+            /* Unidirectional notification (IRQ or other) — drain
+             * and keep waiting for the real response. */
+            INFO("camrtc: drained unidirectional RX 0x%x while "
+                 "waiting for response to 0x%x",
+                 (unsigned)resp, (unsigned)msg_id);
+            if (timer_get_count() >= deadline) {
+                WARN("camrtc: VM-RX timeout draining stale traffic "
+                     "for msg_id=0x%x", (unsigned)msg_id);
+                return -2;
+            }
+            continue;
+        }
         WARN("camrtc: unexpected response id 0x%x (sent 0x%x)",
-             (unsigned)camrtc_msg_id(resp), (unsigned)msg_id);
+             (unsigned)resp_id, (unsigned)msg_id);
         return -3;
     }
-    if (resp_param) *resp_param = camrtc_msg_param(resp);
-    return 0;
 }
 
 int camrtc_diag_dump(void)
@@ -515,6 +551,163 @@ int camrtc_diag_dump(void)
     return 0;
 }
 
+/* ---- CH_SETUP: capture-control IVC channel ---- */
+
+/* Wire-format channel parameters for the IMX219 capture-control
+ * channel. Match `tegra234-camera.dtsi` ivccontrol@3:
+ *   nvidia,service     = "capture-control"
+ *   nvidia,group       = <1>
+ *   nvidia,frame-count = <64>
+ *   nvidia,frame-size  = <320>
+ *   nvidia,version     = (omitted → 0) */
+#define CAMRTC_CTRL_GROUP        1u
+#define CAMRTC_CTRL_NFRAMES      64u
+#define CAMRTC_CTRL_FRAME_SIZE   320u
+#define CAMRTC_CTRL_VERSION      0u
+
+/* Per-direction queue: header (128 B) + nframes * frame_size. Both
+ * directions are equal-sized in this protocol. */
+#define CAMRTC_CTRL_QUEUE_BYTES  \
+    (TEGRA_IVC_HEADER_SIZE + CAMRTC_CTRL_NFRAMES * CAMRTC_CTRL_FRAME_SIZE)
+
+/* Region layout: 4 KB config block + rx queue + tx queue.
+ *   = 4096 + 2 * (128 + 64*320)
+ *   = 4096 + 2 * 20608
+ *   = 45312 bytes
+ * Round up to 64 KB so the region is aligned to the L4T-DT
+ * `nvidia,ivc-channels = <... 0x10000>` size convention. */
+#define CAMRTC_CTRL_REGION_BYTES \
+    (CAMRTC_IVC_CONFIG_SIZE + 2u * CAMRTC_CTRL_QUEUE_BYTES)
+#define CAMRTC_CTRL_REGION_RESERVED  0x10000u  /* 64 KB */
+
+/* Fixed physical address for the IVC config + ring region. The RCE
+ * firmware only accepts CH_SETUP IOVAs inside its compiled-in VM1
+ * aperture 0xA0000000..0xC0000000 (per
+ * `docs/reference/l4t-binding-nvidia-tegra194-rce.txt:51-53` and the
+ * `iommu-resv-regions` cells in
+ * `docs/reference/l4t-tegra234-camera.dtsi:59`). With SMMU
+ * translation disabled by Linux pre-kexec, RCE sees physical
+ * addresses directly, so the region must live in a *physical* page
+ * inside that aperture. PMM carves 64 KB at this address out of
+ * Jetson region 1 in `kernel/mm/pmm.c:540` so no other allocator
+ * hands it out. The BSS-allocation approach (around 0x80700000)
+ * reproducibly came back as RTCPU_CH_ERR_INVALID_IOVA on
+ * jetson-nano-1 even though the address fit the 24-bit MSG param
+ * — RCE is the gatekeeper, not the host-side validation. */
+#define CAMRTC_CTRL_REGION_PHYS    0xA0000000u
+
+static uintptr_t g_ch_setup_region_phys;
+
+uintptr_t camrtc_ch_setup_region_phys(void)
+{
+    return g_ch_setup_region_phys;
+}
+
+int camrtc_ch_setup_capture_control(void)
+{
+    if (!g_initialised) {
+        WARN("camrtc: ch_setup called before camrtc_init");
+        return -2;
+    }
+
+    /* Region lives at a fixed physical address in RCE's VM1 IOVA
+     * aperture (carved out of PMM in `kernel/mm/pmm.c`). The kernel
+     * linear map identity-maps low DRAM, so the physical address is
+     * also the virtual address callers can dereference. */
+    uintptr_t region_phys = CAMRTC_CTRL_REGION_PHYS;
+
+    /* CH_SETUP encodes the region IOVA shifted right by 8. The
+     * 24-bit MSG param holds bits[31:8] of the IOVA. RCE rejects
+     * addresses outside its built-in VM1 aperture
+     * 0xA0000000..0xC0000000 with RTCPU_CH_ERR_INVALID_IOVA. The
+     * fixed CAMRTC_CTRL_REGION_PHYS is set to 0xA0000000 — assert
+     * that future edits don't move it outside the aperture. */
+    _Static_assert(CAMRTC_CTRL_REGION_PHYS >= 0xA0000000u,
+                   "CH_SETUP region must lie at or above the RCE VM1 "
+                   "aperture base (0xA0000000)");
+    _Static_assert(CAMRTC_CTRL_REGION_PHYS + CAMRTC_CTRL_REGION_RESERVED
+                   <= 0xC0000000u,
+                   "CH_SETUP region must end at or below the RCE VM1 "
+                   "aperture top (0xC0000000)");
+    uint64_t iova_shifted = (uint64_t)region_phys >> 8;
+
+    /* Zero the entire region so the TLV terminator + IVC ring
+     * headers start clean. PMM doesn't guarantee zeroed pages. */
+    for (uint32_t i = 0; i < CAMRTC_CTRL_REGION_BYTES; i++) {
+        ((volatile uint8_t *)region_phys)[i] = 0;
+    }
+
+    /* Build the TLV entry at offset 0. The rx queue starts at
+     * +CAMRTC_IVC_CONFIG_SIZE, the tx queue starts at
+     * +CAMRTC_IVC_CONFIG_SIZE + CAMRTC_CTRL_QUEUE_BYTES. */
+    uintptr_t rx_iova = region_phys + CAMRTC_IVC_CONFIG_SIZE;
+    uintptr_t tx_iova = rx_iova + CAMRTC_CTRL_QUEUE_BYTES;
+
+    volatile struct camrtc_tlv_ivc_setup *tlv =
+        (volatile struct camrtc_tlv_ivc_setup *)region_phys;
+    tlv->tag           = CAMRTC_TAG_IVC_SETUP;
+    tlv->len           = sizeof(struct camrtc_tlv_ivc_setup);
+    tlv->rx_iova       = (uint64_t)rx_iova;
+    tlv->rx_frame_size = CAMRTC_CTRL_FRAME_SIZE;
+    tlv->rx_nframes    = CAMRTC_CTRL_NFRAMES;
+    tlv->tx_iova       = (uint64_t)tx_iova;
+    tlv->tx_frame_size = CAMRTC_CTRL_FRAME_SIZE;
+    tlv->tx_nframes    = CAMRTC_CTRL_NFRAMES;
+    tlv->channel_group = CAMRTC_CTRL_GROUP;
+    tlv->ivc_version   = CAMRTC_CTRL_VERSION;
+    /* Inline strcpy: "capture-control\0" — 16 bytes including NUL,
+     * fits in the 32-byte field. Manual copy because <string.h> is
+     * libc-only on bare metal. */
+    static const char ctrl_name[] = "capture-control";
+    for (uint32_t i = 0; i < sizeof(ctrl_name); i++) {
+        tlv->ivc_service[i] = ctrl_name[i];
+    }
+
+    /* Terminator entry — tag = 0. The region was zeroed above so
+     * the terminator is already in place; this comment makes that
+     * explicit so a future maintainer doesn't add a redundant
+     * zero-write here that masks an upstream bug. */
+
+    /* Memory barrier: make sure all the TLV writes are visible
+     * before RCE reads the region. RCE accesses physical memory
+     * through the (post-kexec, bypass) SMMU, so a DSB is sufficient
+     * — no cache maintenance needed here because PMM pages are in
+     * the cacheable kernel mapping and Tegra234 CCPLEX shares
+     * coherent fabric with RCE for system DRAM. */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Send CH_SETUP. Generous timeout: RCE has to walk the TLV
+     * array, validate IOVAs, allocate its bookkeeping. L4T uses
+     * the same `cmd_timeout` (default 2 s) for all camrtc-hsp
+     * commands; we use 1 s here. */
+    INFO("camrtc: CH_SETUP region @ phys=0x%lx (>>8 = 0x%06lx) "
+         "rx@0x%lx tx@0x%lx",
+         (unsigned long)region_phys, (unsigned long)iova_shifted,
+         (unsigned long)rx_iova, (unsigned long)tx_iova);
+
+    uint32_t status = 0xFFFFFFu;
+    int rc = camrtc_send_msg(CAMRTC_HSP_CH_SETUP,
+                             (uint32_t)iova_shifted,
+                             &status, 1000000u);
+    if (rc != 0) {
+        WARN("camrtc: CH_SETUP send failed rc=%d", rc);
+        return -2;
+    }
+    if (status != RTCPU_CH_SUCCESS) {
+        WARN("camrtc: CH_SETUP rejected by RCE — status=%u "
+             "(see RTCPU_CH_ERR_* in camrtc_channels.h)",
+             (unsigned)status);
+        return -3;
+    }
+
+    g_ch_setup_region_phys = region_phys;
+    INFO("camrtc: CH_SETUP OK — capture-control bound to "
+         "(group=%u, rx@0x%lx, tx@0x%lx)",
+         (unsigned)CAMRTC_CTRL_GROUP,
+         (unsigned long)rx_iova, (unsigned long)tx_iova);
+    return 0;
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO — stubs for cross-platform builds */
 
 int camrtc_init(void) { return -1; }
@@ -526,5 +719,7 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
     return -1;
 }
 int camrtc_diag_dump(void) { return -1; }
+int camrtc_ch_setup_capture_control(void) { return -1; }
+uintptr_t camrtc_ch_setup_region_phys(void) { return 0; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

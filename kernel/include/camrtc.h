@@ -105,10 +105,17 @@ int camrtc_init(void);
  *                   24-bit parameter.
  *   timeout_us      Max time to wait for the response, in microseconds.
  *
+ * RX messages with opcode < CAMRTC_HSP_HELLO (0x40) — including
+ * CAMRTC_HSP_IRQ (0x00) IVC notifications — are unidirectional per
+ * the L4T `rtcpu-hsp-combo.c:151-159` contract. They are drained
+ * transparently here while we wait for the matching response, so a
+ * coincident IRQ notification can't make the call return -3.
+ *
  * Returns 0 on success, -1 on bad arguments (uninitialised),
- * -2 on timeout (TX-drain or RX-recv — both log a `WARN` line),
- * -3 if a wrong-msg_id response arrived first (also `WARN`-logged;
- * caller must drain stale traffic before retrying).
+ * -2 on timeout (TX-drain, RX-recv, or RX-recv during stale drain
+ * — all three log a `WARN` line),
+ * -3 only if RCE replied with a *different* response opcode
+ * (>= 0x40, not the requested msg_id) — also `WARN`-logged.
  */
 int camrtc_send_msg(uint32_t msg_id, uint32_t param,
                     uint32_t *resp_param, uint32_t timeout_us);
@@ -123,3 +130,54 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
  * exception handler logs the abort and the caller resumes here).
  */
 int camrtc_diag_dump(void);
+
+/*
+ * Hardware Task 3 sub-step: stand up the capture-control IVC channel
+ * (camera-rtcpu service "capture-control", group 1, 64 frames × 320 B
+ * — matches the L4T `tegra234-camera.dtsi` ivccontrol@3 binding).
+ *
+ * What this does:
+ *   1. Uses a fixed 64 KB region at 0xA0000000 (carved out of PMM
+ *      in `kernel/mm/pmm.c`) for the CH_SETUP TLV config block
+ *      (4 KB) plus the rx + tx tegra-ivc queues (64*320 + 128 each).
+ *      The address is hard-coded because RCE only accepts CH_SETUP
+ *      IOVAs inside its VM1 aperture 0xA0000000..0xC0000000 — see
+ *      `docs/reference/l4t-binding-nvidia-tegra194-rce.txt:51-53`.
+ *   2. Builds one camrtc_tlv_ivc_setup entry at offset 0 + a
+ *      zero-tag terminator, with rx/tx IOVAs pointing at the
+ *      queue buffers later in the region.
+ *   3. Zero-initialises the queue header fields (count + state).
+ *   4. Sends `CAMRTC_HSP_CH_SETUP(region_phys >> 8)` over the
+ *      established HSP-VM session and waits for RCE's response.
+ *
+ * On success, RCE has bound the (group=1, service="capture-control")
+ * tuple to our rx/tx ring IOVAs and is ready to read/write frames.
+ * The actual ring read/write helpers + first capture-control
+ * message (CAPTURE_PHY_STREAM_OPEN_REQ) land in a follow-up commit.
+ *
+ * Pre-condition: `camrtc_init()` has returned 0. The HSP-VM session
+ * must be established — CH_SETUP travels over the same mailbox.
+ *
+ * On Tegra234 post-kexec, Linux disables SMMU translation as part
+ * of the handoff (see `arm-smmu N0000000.iommu: disabling translation`
+ * lines in the kexec dmesg), so RCE sees physical addresses
+ * directly. The 0xA0000000 region is therefore a *physical*
+ * address that lands inside the firmware's VM1 IOVA aperture by
+ * construction — no SMMU programming needed from SLM-OS.
+ *
+ * Returns 0 on success, negative on error:
+ *   -2  HSP-VM CH_SETUP round-trip failed (timeout or wrong msg_id),
+ *       OR the function was called before `camrtc_init()` succeeded.
+ *   -3  RCE rejected the setup — see WARN log for the
+ *       RTCPU_CH_ERR_* code (128..132 per camrtc_channels.h).
+ */
+int camrtc_ch_setup_capture_control(void);
+
+/*
+ * Diagnostic accessor: physical address of the CH_SETUP region from
+ * the most recent successful `camrtc_ch_setup_capture_control` call,
+ * or 0 if not yet attempted / failed. Used by the `rcediag` shell
+ * command to print the region's location for follow-up `peek`
+ * inspection.
+ */
+uintptr_t camrtc_ch_setup_region_phys(void);
