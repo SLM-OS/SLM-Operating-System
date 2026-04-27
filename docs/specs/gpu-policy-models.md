@@ -73,21 +73,98 @@ This is the same shape of work `gpu-kernel-mnist.c` did for inference
 
 ### A. Shaders
 
-Each policy needs the same op kit currently used by MNIST, plus
-whatever extra ops its forward pass uses. For both target policies
-the working set is small:
+PR-1 inspection result. Both policies are pure FFMA-fp32 matmul +
+ReLU chains; neither uses softmax. Sched does an argmax; eviction
+returns a sigmoid'd scalar score, no argmax. The MNIST shader kit
+already covers everything except the eviction output's sigmoid.
 
 | Op | Source | Notes |
 |---|---|---|
-| `gemm_fp32` | `scripts/cuda/gemm_fp32.cu` | already exists |
-| `add_bias_relu_fp32` | `scripts/cuda/add_bias_relu_fp32.cu` | already exists |
-| `softmax_fp32` (sched only) | new | small kernel; tile + reduction over N actions |
-| `argmax_fp32` (sched, eviction) | new | pure reduction; no fp arithmetic in result |
+| `gemm_fp32` | `scripts/cuda/gemm_fp32.cu` | already exists; covers every linear layer in both policies |
+| `add_bias_relu_fp32` | `scripts/cuda/add_bias_relu_fp32.cu` | already exists; covers L0-L2 of sched and L1-L3 of eviction |
+| `add_bias_fp32` (sched output, eviction output pre-sigmoid) | new (drop the ReLU branch from `add_bias_relu_fp32.cu`) | Or: pass an `apply_relu=0` flag on the existing kernel — MNIST's launcher already plumbs that bit |
+| `sigmoid_fp32` (eviction only) | new | scalar reduction over a single fp32; tiny kernel |
+| `argmax_fp32` (sched only — final decode) | optional | Pure reduction. Cheaper to leave the argmax CPU-side at 42 elements; only worth a kernel if the launcher needs it for sentinel verification. |
 
-For the spec we assume sched and eviction MLPs each fit into 3-5 ops
-(matmul → bias+relu → matmul → bias → softmax/argmax). Confirmed by
-reading `mlp_forward` in `runtime/src/sched/inference.rs` before
-the PR-1 work item below.
+#### Sched MLP — op DAG
+
+Source: `kernel/sched/ai/ai_inference.c::forward_logits`. Shape
+constants in `kernel/sched/ai/ai_types.h:105-115`.
+`AI_SCHED_N_ACTIONS = 42` on Jetson / x86-64 / QEMU (6 cores ×
+3 priorities × 2 GPU bits); `24` on Pi 5 (4 cores × 3 × 2). The
+spec assumes the Jetson value below — the only knob that varies
+across the action-count split is `N` in the Layer 3 weight tensor.
+
+| # | Op | In shape | Weight shape | Bias | Activation | Out shape |
+|---|---|---|---|---|---|---|
+| 0 | gemm | state [108] | W0 [256×108] | b0 [256] | ReLU | h0 [256] |
+| 1 | gemm | h0 [256] | W1 [256×256] | b1 [256] | ReLU | h1 [256] |
+| 2 | gemm | h1 [256] | W2 [128×256] | b2 [128] | ReLU | h2 [128] |
+| 3 | gemm | h2 [128] | W3 [42×128] | b3 [42] | none | logits [42] |
+
+After op 3 the kernel does `argmax(logits)` on CPU and decodes the
+action index via `ai_decode_action` (CPU, scheduler-internal — no GPU
+work). 4 GPU ops total; same pattern as MNIST's
+`gemm + add_bias_relu` pair, just three of them in series + one
+plain `gemm + add_bias` finalizer.
+
+Weight blob layout (for `gpu-kernel-sched-mlp.c` to load): the
+runtime accepts both compiled-in (`ai_mlp_w*` / `ai_mlp_b*` from
+`ai_weights_mlp.c`) and runtime-uploaded (`sched_runtime_mlp_*`)
+sources via the `sched_runtime_mlp_acquire/release` shim. For the
+launcher, dump the compiled-in arrays once and stage them under
+`scripts/sched-weights/` mirroring the MNIST layout.
+
+Total weight floats:
+`(108·256 + 256) + (256·256 + 256) + (256·128 + 128) + (128·42 + 42)
+ = 27,904 + 65,792 + 32,896 + 5,418
+ = 132,010 floats = 528,040 B ≈ 516 KB`.
+Workspace (h0 + h1 + h2 = 256+256+128 floats = 2,560 B) is trivial.
+
+#### Eviction MLP — op DAG
+
+Source: `runtime/src/mm/eviction/runtime_mlp.rs::predict`. Shape
+constants in the same file (lines 15-19). Note: this is the
+runtime-loaded `MLP1` payload format used by `model load` of an
+`.evi.bin` blob. The compiled-in default eviction policy on
+`PLATFORM_JETSON_ORIN_NANO` is XGBoost (`runtime_xgboost.rs`), not
+this MLP — but the toggle wiring is the same once the MLP is the
+active policy.
+
+| # | Op | In shape | Weight shape | Bias | Activation | Out shape |
+|---|---|---|---|---|---|---|
+| 0 | gemm | features [27] | W_L1 [64×27] | b_L1 [64] | ReLU | h1 [64] |
+| 1 | gemm | h1 [64] | W_L2 [32×64] | b_L2 [32] | ReLU | h2 [32] |
+| 2 | gemm | h2 [32] | W_L3 [16×32] | b_L3 [16] | ReLU | h3 [16] |
+| 3 | gemm | h3 [16] | W_OUT [1×16] | b_OUT [1] | sigmoid | score [1] |
+
+5 GPU ops if we keep sigmoid as a separate kernel; 4 if we inline
+the sigmoid into the final `add_bias` shader (a 1-element scalar
+op — cheap to specialize). Total weight floats:
+`(27·64 + 64) + (64·32 + 32) + (32·16 + 16) + (16·1 + 1)
+ = 1,792 + 2,080 + 528 + 17 = 4,417 floats = 17,668 B ≈ 17.3 KB`.
+Smaller than MNIST's weights — comfortably fits the same channel-
+handoff layout.
+
+`features[27]` is a `BlockFeatures` row from
+`runtime/src/mm/eviction/policy.rs`; the launcher needs to mirror
+that layout. The output is a single fp32 in `[0,1]` (eviction
+probability score) — the eviction loop ranks pages by this score
+and evicts the highest. Output decoding is CPU-side; no GPU
+argmax needed.
+
+#### Implications for shader work
+
+- The MNIST `gemm_fp32` kernel handles the M=1 row-vector case
+  already (used for the MNIST FC layer). Both policies need only
+  M=1 GEMMs against rectangular weight matrices, so no new GEMM
+  variant is required.
+- The MNIST `add_bias_relu_fp32` kernel's `apply_relu` bit covers
+  everything except the eviction sigmoid. That's the single new
+  shader needed — `sigmoid_fp32` (or an extension to the existing
+  bias kernel with an `activation_kind` enum).
+- Sched needs no new shaders at all if argmax stays CPU-side
+  (which it should, at N=42).
 
 Build pipeline matches MNIST:
 
@@ -198,8 +275,8 @@ For each policy:
 
 | PR | Content | Hardware needed |
 |---|---|---|
-| PR-1 | **Read-and-document.** Inspect `mlp_forward` in sched and the eviction Q-net forward pass; write the exact op DAG and shape table into this spec. No code changes. | none |
-| PR-2 | **Sched shaders.** Build any new SASS variants needed (likely just a small softmax/argmax). Linux-side `gpu-kernel-sched-mlp.c` producing a v6 handoff; ship CPU/GPU agreement check. | Jetson |
+| PR-1 | ✅ **Read-and-document — landed 2026-04-27.** Op DAGs and shape tables for both policies are in §A above. Key findings: both are FFMA-fp32 matmul + ReLU chains; the only new shader needed is `sigmoid_fp32` for the eviction output (sched stays in the existing MNIST shader kit, with argmax left CPU-side). The skeleton in `runtime/src/sched/inference.rs` is a Phase-5 placeholder — the real sched MLP forward lives in `kernel/sched/ai/ai_inference.c::forward_logits` (C, gated on `AI_SCHED=ON`). | none |
+| PR-2 | **Sched shaders + launcher.** No new shader work — reuse MNIST's `gemm_fp32` and `add_bias_relu_fp32`. Build `scripts/gpu-kernel-sched-mlp.c` that loads the four weight blobs from `scripts/sched-weights/` (extracted from `kernel/sched/ai/ai_weights_mlp.c`), constructs a 4-op pipeline (gemm+relu × 3, then gemm+bias), publishes a v6 handoff with `pipeline_kind = SCHED_MLP`, and self-checks GPU vs CPU logits. | Jetson |
 | PR-3 | **Sched dispatch.** SLM-OS-side `slm_gpu_run_sched_inference` + Rust eligibility wiring + flip `has_gpu_backend = true` on the active sched policy. `gpu use sched on` now actually moves work onto the GPU. | Jetson |
 | PR-4 | **Eviction trait + scaffold.** Add `has_gpu_backend` to the eviction trait, expose the getter, update `GPU_CONSUMER_EVICTION` validation. Pure plumbing; no GPU dispatch yet. | none |
 | PR-5 | **Eviction shaders + producer.** | Jetson |
@@ -237,4 +314,4 @@ the host-side launcher's CPU/GPU agreement self-check).
 - `kernel/gpu/nvidia/ga10b_bringup.c` §`launch_kernel` — the
   v5/v6 pipeline-mode dispatch this spec reuses
 
-*Last updated: 2026-04-26*
+*Last updated: 2026-04-27 — PR-1 (op DAG + shape tables) landed.*
