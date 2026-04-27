@@ -153,16 +153,20 @@ impl RuntimeXGBoostModel {
     }
 
     fn eval_tree(&self, mut idx: usize, features: &BlockFeatures) -> f32 {
-        // Cap depth to the number of nodes. parse-time bounds-check
-        // each child index against `node_count` but cannot detect a
-        // cycle (A→B→A) — and `eval_tree` runs in kernel context
-        // where a non-terminating loop on a malformed-but-checksum-
-        // valid blob would hang the runtime. Returning 0.0 on
-        // exhaustion produces a degraded prediction instead of a
-        // hang; an entire malformed blob will fail health checks
-        // upstream.
-        let max_depth = self.nodes.len().saturating_add(1);
-        for _ in 0..max_depth {
+        // Cap depth to detect cycles. Parse-time bounds-checks each
+        // child index against `node_count` but cannot detect a cycle
+        // (A→B→A) — and `eval_tree` runs in kernel context where a
+        // non-terminating loop on a malformed-but-checksum-valid blob
+        // would hang the runtime. Returning 0.0 on exhaustion
+        // produces a degraded prediction instead of a hang.
+        //
+        // 256 is a generous bound: realistic XGBoost trees rarely
+        // exceed depth 16-32, and 256 is well past any sensible
+        // production depth while still catching a malformed cyclic
+        // tree quickly (a 16k-node loop would otherwise burn 16k
+        // iterations per `predict`).
+        const MAX_TREE_DEPTH: usize = 256;
+        for _ in 0..MAX_TREE_DEPTH {
             let node = self.nodes[idx];
             if (node.flags & FLAG_LEAF) != 0 {
                 return node.value;

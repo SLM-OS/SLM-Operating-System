@@ -1625,6 +1625,18 @@ static int hailo_backend_load_model(struct inference_device *dev,
     uint16_t out_page_size = out_pad->has_stream_info && out_pad->core_bytes_per_buffer
                                ? (uint16_t)out_pad->core_bytes_per_buffer : 512;
 
+    /* Pre-compute the input/output shape values from in_pad/out_pad
+     * before taking slots_lock. pad_dim is `max(padded, raw)` today,
+     * but hoisting these reads keeps the lock-protected critical
+     * region as straight-line stores even if pad_dim ever grows
+     * non-trivial logic. */
+    uint16_t in_shape0  = (uint16_t)pad_dim(in_pad->padded_height,   in_pad->height);
+    uint16_t in_shape1  = (uint16_t)pad_dim(in_pad->padded_width,    in_pad->width);
+    uint16_t in_shape2  = (uint16_t)pad_dim(in_pad->padded_features, in_pad->features);
+    uint16_t out_shape0 = (uint16_t)pad_dim(out_pad->padded_height,   out_pad->height);
+    uint16_t out_shape1 = (uint16_t)pad_dim(out_pad->padded_width,    out_pad->width);
+    uint16_t out_shape2 = (uint16_t)pad_dim(out_pad->padded_features, out_pad->features);
+
     /* 4. Claim a slot AND populate cfg/shape atomically.
      *
      * Previously the populate happened outside the lock with only the
@@ -1659,12 +1671,12 @@ static int hailo_backend_load_model(struct inference_device *dev,
                  * latency and we don't yet know the real variance. */
                 .timeout_us       = 500000,     /* 500 ms */
             };
-            slots[i].input_shape[0]  = (uint16_t)pad_dim(in_pad->padded_height,   in_pad->height);
-            slots[i].input_shape[1]  = (uint16_t)pad_dim(in_pad->padded_width,    in_pad->width);
-            slots[i].input_shape[2]  = (uint16_t)pad_dim(in_pad->padded_features, in_pad->features);
-            slots[i].output_shape[0] = (uint16_t)pad_dim(out_pad->padded_height,   out_pad->height);
-            slots[i].output_shape[1] = (uint16_t)pad_dim(out_pad->padded_width,    out_pad->width);
-            slots[i].output_shape[2] = (uint16_t)pad_dim(out_pad->padded_features, out_pad->features);
+            slots[i].input_shape[0]  = in_shape0;
+            slots[i].input_shape[1]  = in_shape1;
+            slots[i].input_shape[2]  = in_shape2;
+            slots[i].output_shape[0] = out_shape0;
+            slots[i].output_shape[1] = out_shape1;
+            slots[i].output_shape[2] = out_shape2;
             idx = i;
             break;
         }
