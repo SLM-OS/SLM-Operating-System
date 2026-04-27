@@ -56,19 +56,32 @@ encoder-decoder, mixture-of-experts, vision-language) are not supported.
 ## Size Constraints
 
 The Rust runtime stores weights in the **weight pool** (Phase-3 model
-memory) and intermediate activations + the KV cache in the **workspace
-pool**. Per-platform pool sizes live in `kernel/include/config.h`:
+memory) and intermediate activations in the **workspace pool**. The
+M5 milestone will carve a per-session **KV-cache sub-pool** (~230 MB
+per Qwen2.5-1.5B session at 4 K context, sized for two concurrent
+sessions = ~512 MB) out of the workspace pool — until M5 lands the
+KV cache is just a workspace allocation, not a separate pool.
 
-| Platform | Weight pool | Workspace pool |
-|----------|-------------|----------------|
-| QEMU ARM64 | 256 MB | 128 MB |
-| Pi 5 | 512 MB | 256 MB |
-| **Jetson Orin Nano** | **2 048 MB** | **256 MB** |
-| x86-64 | 256 MB | 128 MB |
+Per-platform pool sizes are defined in `kernel/include/config.h`
+(M0.2) as `MODEL_MEM_WEIGHT_MB` / `MODEL_MEM_WORKSPACE_MB` and
+passed into `rust_model_mem_init` from the kernel boot path:
 
-Qwen2.5-1.5B-Q4_K_M needs ~1.0 GB for weights and ~230 MB for a 4 K
-KV cache, so only the Jetson sizing supports the demo. The QEMU /
-Pi 5 / x86-64 defaults are tuned for the smaller Phase-5 ONNX models.
+| Platform | Weight pool | Workspace pool | KV-cache sub-pool (M5) |
+|----------|-------------|----------------|------------------------|
+| QEMU ARM64 | 256 MB | 128 MB | n/a (no SLM workload) |
+| Pi 5 | 512 MB | 256 MB | (unsized; Pi 5 hosts vision models, not SLMs) |
+| **Jetson Orin Nano** | **2 048 MB** | **256 MB** | **~512 MB** (carved from workspace) |
+| x86-64 | 256 MB | 128 MB | n/a |
+
+Qwen2.5-1.5B-Q4_K_M needs ~1.0 GB for weights and ~230 MB for a
+4 K KV cache, so only the Jetson sizing supports the full demo.
+The QEMU / Pi 5 / x86-64 defaults are tuned for the smaller Phase-5
+ONNX models. The KV-cache sub-pool overlaps the workspace allocator
+arithmetically (≥ 256 MB for KV against a 256 MB workspace pool) —
+the spec resolves this in `docs/specs/slm-integration.md` "Memory
+Plan" by carving the KV pool out of an extended workspace allocator
+when M5 lands; the `MODEL_MEM_WORKSPACE_MB` constant will grow at
+that point if needed.
 
 Pool utilization is visible via the existing `model pools` shell
 command after `slm load` succeeds.
@@ -122,18 +135,23 @@ For a Qwen2.5-1.5B-Instruct GGUF the output should report
 ### Step 3: Stage onto the Jetson SD card
 
 GGUFs are ~1 GB; they live on the LittleFS partition mounted at
-`/mnt/files`, not embedded in the kernel image. Stage via labctl
-rather than mounting `/dev/sd*` directly:
+`/mnt/files`, not embedded in the kernel image. All SD-card writes
+go through labctl per `CLAUDE.md` "labctl is the only hardware
+interface" — never `mount` / `cp` / `umount` directly.
+
+The labctl workflow at a high level: switch the SDWire to the host
+side (`sdwire_to_host`), place the GGUF onto the LittleFS partition
+via the appropriate labctl `sdwire` subcommand, switch the SDWire
+back to the DUT (`sdwire_to_dut`), and reboot:
 
 ```bash
-labctl sdwire_to_host --sbc jetson-nano-1
-labctl sdwire_cp build/slm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
-                  /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
-labctl sdwire_to_dut --sbc jetson-nano-1
-labctl power_cycle --sbc jetson-nano-1
+labctl power cycle jetson-nano-1
 ```
 
-`docs/lab-operations.md` covers the wider labctl workflow.
+`docs/lab-operations.md` documents the current sdwire subcommand
+syntax (the command names have changed across labctl releases — pin
+to the version installed on the lab host before scripting any
+automation around them).
 
 ### Step 4: Load from the SLM-OS shell
 
