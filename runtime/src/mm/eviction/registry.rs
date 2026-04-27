@@ -287,6 +287,32 @@ pub fn with_active_policy_for_pool<R>(
     }
 }
 
+/// True if any pool's currently-installed eviction policy declares a
+/// real GPU forward pass via `EvictionPolicy::has_gpu_backend()`.
+///
+/// Backs the C-side `gpu use eviction on` validation in
+/// `kernel/src/gpu_consumer.c`: when this returns false, the toggle
+/// accepts the operator's intent but emits a "scaffold only" warning
+/// (mirroring the sched path). Today every shipped policy returns
+/// false from `has_gpu_backend`; flipping that requires landing the
+/// matching `slm_gpu_run_eviction_inference` dispatch
+/// (`docs/specs/gpu-policy-models.md` PR-6).
+pub fn any_active_policy_has_gpu_backend() -> bool {
+    let _g = SpinGuard::new();
+    // SAFETY: _g held — exclusive access to ACTIVE_POLICIES.
+    unsafe {
+        let p = addr_of_mut!(ACTIVE_POLICIES);
+        for slot in (*p).iter() {
+            if let Some(policy) = slot.as_ref() {
+                if policy.has_gpu_backend() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Drop the installed policies (test-only).
 #[cfg(test)]
 pub fn clear_for_test() {

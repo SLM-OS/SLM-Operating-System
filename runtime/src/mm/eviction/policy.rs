@@ -78,6 +78,20 @@ pub trait EvictionPolicy {
     /// Stable human-readable name used by the registry and shell.
     fn name(&self) -> &'static str;
 
+    /// Whether this policy has a real GPU forward pass wired through
+    /// the GA10B compute-dispatch path. Default `false` — atomic
+    /// policies (LRU, LFU, ARC, …) and the CPU MLP / XGBoost
+    /// implementations are FFMA-on-CPU only. The shell's
+    /// `gpu use eviction on` toggle consults the active pool's
+    /// policy via this hook (mirroring the sched path's
+    /// `sched_policy_ops::has_gpu_backend` field): when no policy
+    /// declares true, the toggle accepts with a "scaffold only"
+    /// warning, recording operator intent without changing dispatch.
+    /// Flipping a policy's return value to `true` requires the
+    /// matching `slm_gpu_run_eviction_inference()` plumbing on the
+    /// SLM-OS side — see `docs/specs/gpu-policy-models.md` PR-6.
+    fn has_gpu_backend(&self) -> bool { false }
+
     /// Per-expert weights for ensemble policies (CACHEUS). Default
     /// impl returns `None` — atomic policies don't have experts.
     /// The shell's `eviction stats` command uses this to surface

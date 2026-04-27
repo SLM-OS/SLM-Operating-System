@@ -122,10 +122,18 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
      *              is returned via `out_reason` to make the gap
      *              visible in `gpu use status`.
      *
-     *   eviction:  SCAFFOLDED ONLY. Eviction policies live in the
-     *              Rust runtime and don't expose a GPU dispatch
-     *              entry point yet. Same accept-with-warning
-     *              behavior as sched. */
+     *   eviction:  SCAFFOLDED ONLY. The eviction trait now exposes
+     *              `EvictionPolicy::has_gpu_backend()` (see
+     *              docs/specs/gpu-policy-models.md PR-4) and the
+     *              Rust→C trampoline `eviction_active_policy_has_gpu_backend`
+     *              scans both pools. Every shipped policy
+     *              (LRU/LFU/ARC/CACHEUS/MLP/XGBoost) returns false
+     *              today; the toggle accepts on/off so operators
+     *              can pre-configure intent before a GPU-capable
+     *              eviction policy + matching
+     *              `slm_gpu_run_eviction_inference` dispatch land
+     *              (PR-6). Symmetric accept-with-warning behavior
+     *              to sched. */
     switch (c) {
     case GPU_CONSUMER_SCHED:
         if (!active_sched_policy_has_gpu_backend()) {
@@ -138,9 +146,22 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
         break;
 
     case GPU_CONSUMER_EVICTION:
-        if (out_reason)
-            *out_reason = "scaffold only — eviction policies have no "
-                          "GPU dispatch path yet";
+        /* Symmetric to the sched case: consult the Rust runtime via
+         * `eviction_active_policy_has_gpu_backend()` (which scans
+         * both pools' installed policies). When no policy declares
+         * a GPU backend, accept-with-warning so operators can still
+         * record intent ahead of the PR-6 dispatch landing. The
+         * shipped policies (LRU/LFU/ARC/CACHEUS/MLP/XGBoost) all
+         * return false from `EvictionPolicy::has_gpu_backend()`
+         * today; this branch will start accepting cleanly the first
+         * time a policy flips that to true. */
+        if (!eviction_active_policy_has_gpu_backend()) {
+            if (out_reason)
+                *out_reason = "scaffold only — no eviction policy "
+                              "declares a GPU backend yet";
+            /* Fall through to the flip — operator intent is recorded
+             * even though dispatch is unaffected. */
+        }
         break;
 
     case GPU_CONSUMER_INFERENCE:

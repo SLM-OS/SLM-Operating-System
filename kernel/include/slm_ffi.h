@@ -302,6 +302,12 @@ extern RustPoolStats rust_workspace_pool_stats(void);
  * Returns 1 when enabled, 0 when disabled. */
 extern int rust_eviction_enabled(void);
 
+/* True (1) if any active eviction policy declares
+ * `EvictionPolicy::has_gpu_backend() == true` across either pool;
+ * 0 otherwise. Wrapped by `eviction_active_policy_has_gpu_backend()`
+ * in slm_ffi.c which `gpu_consumer_set` consults. */
+extern int rust_eviction_active_policy_has_gpu_backend(void);
+
 /* Copy the active policy's name into a caller-owned buffer.
  * Returns number of bytes written (excluding the null terminator). */
 extern size_t rust_eviction_policy_name(uint8_t *out_buf, size_t buf_len);
@@ -749,6 +755,19 @@ int slm_gpu_inference_enabled(void);
  * is out of range.
  */
 int slm_model_gpu_dispatch_enabled(uint32_t model_index);
+
+/*
+ * True if any active eviction policy declares
+ * `EvictionPolicy::has_gpu_backend() == true` (Rust runtime hook).
+ *
+ * Mirrors `active_sched_policy_has_gpu_backend()` on the sched side.
+ * The C-side `gpu_consumer_set` uses this to decide whether
+ * `gpu use eviction on` accepts cleanly or with a "scaffold only"
+ * warning. Today every shipped policy returns false; flipping
+ * requires landing the matching `slm_gpu_run_eviction_inference`
+ * dispatch — see `docs/specs/gpu-policy-models.md` PR-6.
+ */
+bool eviction_active_policy_has_gpu_backend(void);
 
 /*
  * Get GPU info for Rust.

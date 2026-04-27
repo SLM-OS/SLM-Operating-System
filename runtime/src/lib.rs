@@ -965,6 +965,24 @@ pub extern "C" fn rust_eviction_enabled() -> i32 {
     if cfg!(feature = "ai_eviction") { 1 } else { 0 }
 }
 
+/// Returns 1 if any active eviction policy declares
+/// `EvictionPolicy::has_gpu_backend() == true`, 0 otherwise.
+///
+/// Mirrors `active_sched_policy_has_gpu_backend` on the sched side.
+/// Backs the C-side `GPU_CONSUMER_EVICTION` validation in
+/// `gpu_consumer_set`: when this returns 0, the toggle accepts with
+/// a "scaffold only" warning. When the eviction subsystem is
+/// compiled out (`ai_eviction` feature off), returns 0.
+#[no_mangle]
+pub extern "C" fn rust_eviction_active_policy_has_gpu_backend() -> i32 {
+    #[cfg(feature = "ai_eviction")]
+    {
+        if mm::eviction::registry::any_active_policy_has_gpu_backend() { 1 } else { 0 }
+    }
+    #[cfg(not(feature = "ai_eviction"))]
+    { 0 }
+}
+
 /// Exercise the eviction registry swap path end to end.
 ///
 /// - When the feature is OFF: returns -2 (skipped).
@@ -991,6 +1009,16 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
             fn name(&self) -> &'static str { self.0 }
         }
 
+        // Mirror of `Tagged` but with a real GPU backend declared.
+        // Pins the registry-side scan in `any_active_policy_has_gpu_backend`:
+        // installing this should flip the global query to `true`.
+        struct GpuBacked(&'static str);
+        impl EvictionPolicy for GpuBacked {
+            fn select_victim(&mut self, _: &[BlockMeta]) -> usize { 0 }
+            fn name(&self) -> &'static str { self.0 }
+            fn has_gpu_backend(&self) -> bool { true }
+        }
+
         eviction::init();
         if eviction::get_eviction_policy_name() != "LRU" {
             return -1;
@@ -1003,9 +1031,62 @@ pub extern "C" fn rust_eviction_selftest() -> i32 {
         if eviction::get_eviction_policy_name() != "SelfTestB" {
             return -1;
         }
+
+        // PR-4: registry-side `has_gpu_backend()` scan.
+        // (a) Tagged returns false → query returns false.
+        if eviction::registry::any_active_policy_has_gpu_backend() {
+            return -1;
+        }
+        // (b) Install a GPU-backed policy on the weight pool →
+        //     query returns true.
+        eviction::set_eviction_policy(Box::new(GpuBacked("SelfTestGpuW")));
+        if !eviction::registry::any_active_policy_has_gpu_backend() {
+            return -1;
+        }
+        // (c) Same answer through the FFI export.
+        if rust_eviction_active_policy_has_gpu_backend() != 1 {
+            return -1;
+        }
+        // (d) Per-pool independence: revert weight to a non-GPU
+        //     policy, install GpuBacked on the workspace pool only.
+        //     Scan must still return true via the workspace slot —
+        //     pins that the registry walks ALL pools, not just
+        //     weight. Catches a regression where a future change
+        //     hard-codes the scan to the weight pool.
+        eviction::set_eviction_policy(Box::new(Tagged("SelfTestC")));
+        eviction::set_eviction_policy_for_pool(
+            eviction::PoolType::Workspace,
+            Box::new(GpuBacked("SelfTestGpuS")),
+        );
+        if !eviction::registry::any_active_policy_has_gpu_backend() {
+            return -1;
+        }
+        if rust_eviction_active_policy_has_gpu_backend() != 1 {
+            return -1;
+        }
+        // (e) Revert workspace pool to a non-GPU policy. Both pools
+        //     now non-GPU; scan must return false.
+        eviction::set_eviction_policy_for_pool(
+            eviction::PoolType::Workspace,
+            Box::new(Tagged("SelfTestD")),
+        );
+        if eviction::registry::any_active_policy_has_gpu_backend() {
+            return -1;
+        }
+        if rust_eviction_active_policy_has_gpu_backend() != 0 {
+            return -1;
+        }
+
         // Restore the default so real callers aren't surprised.
         eviction::reset_to_default();
         if eviction::get_eviction_policy_name() != "LRU" {
+            return -1;
+        }
+        // (f) Default LRU policy returns false again.
+        if eviction::registry::any_active_policy_has_gpu_backend() {
+            return -1;
+        }
+        if rust_eviction_active_policy_has_gpu_backend() != 0 {
             return -1;
         }
         0
@@ -2373,13 +2454,13 @@ pub extern "C" fn rust_eviction_run_tests() -> i32 {
         // "inactive" and the policy falls back to LRU (index 1, older).
         let cands_113 = [
             mm::eviction::BlockMeta {
-                block_id: 100, pool_type: mm::eviction::PoolType::Weight,
+                block_id: 100, pool_type: eviction::PoolType::Weight,
                 model_id: 0, layer_idx: 0, last_access_time: 500,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,
             },
             mm::eviction::BlockMeta {
-                block_id: 101, pool_type: mm::eviction::PoolType::Weight,
+                block_id: 101, pool_type: eviction::PoolType::Weight,
                 model_id: 1, layer_idx: 0, last_access_time: 100,
                 load_time: 0, access_count: 0, ref_count: 0,
                 gpu_mapped: false, is_dirty: false, model_priority: 0,
@@ -4642,13 +4723,20 @@ pub extern "C" fn rust_infer_classify(model_index: u32) -> i32 {
     static CLASSIFY_INPUT: [f32; 784] = [0.0; 784];
     let mut classify_output: [f32; 64] = [0.0; 64];
 
-    let result = inference::run_inference(
-        model_index as usize,
-        CLASSIFY_INPUT.as_ptr(),
-        CLASSIFY_INPUT.len(),
-        classify_output.as_mut_ptr(),
-        classify_output.len(),
-    );
+    // SAFETY: CLASSIFY_INPUT is a 784-element `static` (immutable
+    // shared zero buffer is fine across concurrent callers);
+    // classify_output is a stack-local 64-element array. Both pointers
+    // are 4-byte-aligned, point to the declared element counts, and
+    // remain live through the call.
+    let result = unsafe {
+        inference::run_inference(
+            model_index as usize,
+            CLASSIFY_INPUT.as_ptr(),
+            CLASSIFY_INPUT.len(),
+            classify_output.as_mut_ptr(),
+            classify_output.len(),
+        )
+    };
 
     match result {
         Ok(n) if n > 0 => {
@@ -4693,13 +4781,20 @@ pub unsafe extern "C" fn rust_infer(
     if input_data.is_null() || output_buf.is_null() {
         return -1;
     }
-    match inference::run_inference(
-        model_index as usize,
-        input_data,
-        input_len,
-        output_buf,
-        output_len,
-    ) {
+    // SAFETY: caller's preconditions on this `unsafe extern "C" fn`
+    // (input_data / output_buf valid for input_len / output_len floats,
+    // 4-byte aligned, unaliased) directly satisfy `run_inference`'s
+    // safety contract. Null-checked above.
+    let result = unsafe {
+        inference::run_inference(
+            model_index as usize,
+            input_data,
+            input_len,
+            output_buf,
+            output_len,
+        )
+    };
+    match result {
         Ok(n) => n as i32,
         Err(_) => -2,
     }
@@ -4779,13 +4874,19 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
 
     let start = kernel_ffi::get_time_ns();
 
-    let result = match inference::run_inference(
-        idx,
-        INPUT.as_ptr(),
-        INPUT.len(),
-        output.as_mut_ptr(),
-        output.len(),
-    ) {
+    // SAFETY: INPUT is a 784-element `static` (immutable shared zero
+    // buffer) and `output` is a stack-local 64-element array. Both
+    // pointers are 4-byte-aligned, point to the declared element
+    // counts, and remain live through the call.
+    let result = match unsafe {
+        inference::run_inference(
+            idx,
+            INPUT.as_ptr(),
+            INPUT.len(),
+            output.as_mut_ptr(),
+            output.len(),
+        )
+    } {
         Ok(n) => n,
         Err(_) => return -3,
     };
@@ -4900,13 +5001,20 @@ pub extern "C" fn rust_infer_buf_and_print(
 
     let start = kernel_ffi::get_time_ns();
 
-    let result = match inference::run_inference(
-        idx,
-        input,
-        input_floats,
-        output.as_mut_ptr(),
-        output.len(),
-    ) {
+    // SAFETY: `input` was null-checked above and is documented in the
+    // FFI contract (slm_ffi.h: `rust_infer_buf_and_print`) to be a
+    // 4-byte-aligned pointer to `input_floats` × 4 bytes — the shell
+    // hands in a `pmm_alloc_pages` buffer which guarantees alignment.
+    // `output` is a stack-local 64-element array, valid for writes.
+    let result = match unsafe {
+        inference::run_inference(
+            idx,
+            input,
+            input_floats,
+            output.as_mut_ptr(),
+            output.len(),
+        )
+    } {
         Ok(n) => n,
         Err(_) => {
             // SAFETY: pure FFI call, fmt has matching specifiers.

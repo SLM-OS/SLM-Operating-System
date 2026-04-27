@@ -244,14 +244,29 @@ to the toggle accept logic.
 
 ### D. Eviction policy plumbing
 
-The eviction trait in `runtime/src/eviction/` doesn't have a
-`has_gpu_backend` flag today. Add one, mirroring the
-`sched_policy_ops` field, plus a runtime getter the C side can
-expose via `slm_eviction_active_has_gpu_backend()`. Update
-`gpu_consumer.c`'s `GPU_CONSUMER_EVICTION` case to consult it
-(currently the case just records intent; promote to the same
-"reject when no policy declares it" check sched uses, OR keep the
-operator-intent semantics and surface the gap in `gpu use status`).
+✅ **Landed in PR-4 (2026-04-27).** The eviction trait
+(`runtime/src/mm/eviction/policy.rs::EvictionPolicy`) gained a
+default-`false` `has_gpu_backend(&self) -> bool` method, mirroring
+the sched-side `sched_policy_ops::has_gpu_backend` field. The
+runtime registry exposes `any_active_policy_has_gpu_backend()`
+which scans all installed pool policies; this is bridged to C via
+`rust_eviction_active_policy_has_gpu_backend()` (FFI) and
+`eviction_active_policy_has_gpu_backend()` (C-callable wrapper in
+`kernel/src/slm_ffi.c`, declared in `slm_ffi.h`).
+
+`gpu_consumer.c`'s `GPU_CONSUMER_EVICTION` validation now consults
+the C wrapper and emits an updated "scaffold only — no eviction
+policy declares a GPU backend yet" warning when no policy has
+flipped its return value. The toggle still flips so operators can
+record intent ahead of PR-6's dispatch landing — symmetric to the
+sched accept-with-warning path.
+
+Test coverage in `runtime/src/lib.rs::rust_eviction_selftest`
+installs a `GpuBacked` test policy, asserts the registry scan +
+FFI both report true, then reverts to the default and verifies
+both report false. C-side
+`test_eviction_active_policy_has_gpu_backend_default_false` pins
+the C wrapper.
 
 ### E. Test coverage
 
@@ -278,7 +293,7 @@ For each policy:
 | PR-1 | ✅ **Read-and-document — landed 2026-04-27.** Op DAGs and shape tables for both policies are in §A above. Key findings: both are FFMA-fp32 matmul + ReLU chains; the only new shader needed is `sigmoid_fp32` for the eviction output (sched stays in the existing MNIST shader kit, with argmax left CPU-side). The skeleton in `runtime/src/sched/inference.rs` is a Phase-5 placeholder — the real sched MLP forward lives in `kernel/sched/ai/ai_inference.c::forward_logits` (C, gated on `AI_SCHED=ON`). | none |
 | PR-2 | **Sched shaders + launcher.** No new shader work — reuse MNIST's `gemm_fp32` and `add_bias_relu_fp32`. Build `scripts/gpu-kernel-sched-mlp.c` that loads the four weight blobs from `scripts/sched-weights/` (extracted from `kernel/sched/ai/ai_weights_mlp.c`), constructs a 4-op pipeline (gemm+relu × 3, then gemm+bias), publishes a v6 handoff with `pipeline_kind = SCHED_MLP`, and self-checks GPU vs CPU logits. | Jetson |
 | PR-3 | **Sched dispatch.** SLM-OS-side `slm_gpu_run_sched_inference` + Rust eligibility wiring + flip `has_gpu_backend = true` on the active sched policy. `gpu use sched on` now actually moves work onto the GPU. | Jetson |
-| PR-4 | **Eviction trait + scaffold.** Add `has_gpu_backend` to the eviction trait, expose the getter, update `GPU_CONSUMER_EVICTION` validation. Pure plumbing; no GPU dispatch yet. | none |
+| PR-4 | ✅ **Eviction trait + scaffold — landed 2026-04-27.** Default-false `EvictionPolicy::has_gpu_backend()` method added; registry-side `any_active_policy_has_gpu_backend()` scans both pools; C-side `eviction_active_policy_has_gpu_backend()` wraps the FFI; `GPU_CONSUMER_EVICTION` validation in `gpu_consumer.c` now consults it and emits the updated "no eviction policy declares a GPU backend yet" warning. Tests cover both branches via the GpuBacked test-only policy. | none |
 | PR-5 | **Eviction shaders + producer.** | Jetson |
 | PR-6 | **Eviction dispatch.** Same shape as PR-3 for the eviction Q-net. | Jetson |
 
@@ -314,4 +329,4 @@ the host-side launcher's CPU/GPU agreement self-check).
 - `kernel/gpu/nvidia/ga10b_bringup.c` §`launch_kernel` — the
   v5/v6 pipeline-mode dispatch this spec reuses
 
-*Last updated: 2026-04-27 — PR-1 (op DAG + shape tables) landed.*
+*Last updated: 2026-04-27 — PR-1 (op DAG + shape tables) and PR-4 (eviction-trait scaffold) landed.*

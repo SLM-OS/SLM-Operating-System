@@ -283,6 +283,17 @@ int slm_model_gpu_dispatch_enabled(uint32_t model_index)
     return rust_model_gpu_dispatch_enabled(model_index);
 }
 
+bool eviction_active_policy_has_gpu_backend(void)
+{
+    /* Cross the Rust/C boundary once and surface the boolean. The
+     * Rust side scans both eviction pools (weight + workspace) and
+     * returns 1 if either pool's installed policy declares
+     * `EvictionPolicy::has_gpu_backend() == true`. Used by
+     * `gpu_consumer.c` to decide whether `gpu use eviction on`
+     * accepts cleanly or with a "scaffold only" warning. */
+    return rust_eviction_active_policy_has_gpu_backend() != 0;
+}
+
 int slm_gpu_get_info(RustGpuInfo *info)
 {
     if (!info) return -1;
