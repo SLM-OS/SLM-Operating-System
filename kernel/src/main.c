@@ -29,6 +29,7 @@
 #include "littlefs_slm.h"
 #include "littlefs_vfs.h"
 #include "blob_autoload.h"
+#include "boot_media.h"
 #include "help.h"
 #if defined(ENABLE_NETWORKING)
 #include "net.h"
@@ -649,6 +650,13 @@ void kernel_main(void *dtb)
      * CPU 0's allocations (ramdisk, Rust heap, model memory) are complete. */
     uart_puts("\n");
     scheduler_init();
+
+    /* WIP-414: now that scheduler is up and secondary CPUs have
+     * cleared their `scheduler_is_initialized` wait, boot media
+     * (Pi 5 SDHCI) is allowed to do its expensive bring-up. Without
+     * this gate, calling sdhci_create_bcm2712 from VFS init would
+     * busy-wait long enough that secondaries time out. */
+    boot_media_allow_creates();
 
 #ifdef CONFIG_AI_SCHEDULER
     /* Register the CPU-MLP inference-device backend BEFORE the AI
