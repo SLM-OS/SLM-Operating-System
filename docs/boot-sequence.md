@@ -375,6 +375,11 @@ Secondary CPU cores are brought online via PSCI (Power State Coordination Interf
 │  │   ├─ PSCI CPU_ON(2) ─────────► (same)                            │
 │  │   └─ PSCI CPU_ON(3) ─────────► (same)                            │
 │  ├─ scheduler_init()                                                │
+│  ├─ boot_media_allow_creates()  ◄── #414: opens the SDHCI gate so   │
+│  │                                  later VFS-init / blob_autoload  │
+│  │                                  acquires can do the 50 ms       │
+│  │                                  Pi 5 EMMC2 settle delay         │
+│  │                                  + bring-up off the boot path    │
 │  └─ scheduler_start()              scheduler_start() (each core)    │
 └─────────────────────────────────────────────────────────────────────┘
 ```

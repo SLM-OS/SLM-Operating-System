@@ -266,10 +266,19 @@ Blocked until a Pi 5 is available. Tracked in detail in **#371**
 first, full labctl round-trip last, plus a Jetson PCIe regression
 check gated on a nano-resource release from @johnjezl).
 
-- ☐🔗🎫 Pi 5 SDHCI smoke test (`sdhci_create_bcm2712()` against the
-  lab card) — #371 sub-task 2.
-- ☐🔗🎫 Diagnostic kernel for EMMC2 firmware-handoff state — #371
-  sub-task 3.
+- ✅ Pi 5 SDHCI smoke test (`sdhci_create_bcm2712()` against the
+  lab card) — #371 sub-task 2. Resolved via #414: the controller is
+  reachable on `pi-5-1` (EEPROM `pieeprom-2024-09-23.bin`) once
+  bring-up is deferred to post-scheduler init and a 50 ms settle
+  delay precedes the first MMIO touch. Card identifies (RCA=0x10000,
+  61069312 blocks / 29819 MB) on cold boot.
+- ✅ Diagnostic kernel for EMMC2 firmware-handoff state — #371
+  sub-task 3. Resolved via #414. Outcome: VC firmware is still
+  finishing the EMMC2 unlock at kernel handoff. Touching AON GPIO,
+  the property mailbox, or `SDIO_CFG_*` before ~50 ms after handoff
+  hangs the AXI fabric. After the settle delay the controller is in
+  Linux's expected state (clock gate off, regulators owned by the
+  AON GPIO block, no `SDHCI_RESET_ALL` short-circuit needed).
 - ☐🔗🎫 Tryboot mailbox round-trip via `labctl boot_test` — #371
   sub-task 4.
 - ☐🔗🎫 Real-card BCM2712 SDHCI quirks (cfginit, CPRMAN clock-gate)
