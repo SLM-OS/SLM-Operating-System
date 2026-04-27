@@ -711,6 +711,47 @@ Phase 0 is GREEN; tasks are unblocked.
 - ☐🔗 Implement VI single-shot capture. Verify by hashing the
   captured buffer; the hash must change between two captures of
   different scenes.
+  - **Wire-format port DONE 2026-04-27.** Four PRs landed the full
+    request/response wire format for VI capture:
+    1. **PR #469** — extend CH_SETUP TLV array to bind both IVC
+       channels (capture-control + capture). Capture channel = 64
+       frames × 64 B at `0xBDFEB100` rx / `0xBDFEC180` tx.
+    2. **PR #472** — `CAPTURE_CHANNEL_SETUP_REQ` (msg 0x1E) wrapper.
+       Ports `capture_channel_config` (272 B body) plus sub-structs
+       (`csi_stream_config`, `syncpoint_info`). Verified with a
+       smoke-test (queue_depth=0 → INVALID_PARAMETER expected) on
+       jetson-nano-1.
+    3. **PR #473** — VI request region carveout at `0xBDFD0000`
+       (64 KB inside the existing NC mapping). Holds the request
+       ring + memoryinfo ring. With real IOVAs, RCE accepts
+       CHANNEL_SETUP and assigns a physical VI channel:
+       ```
+       CHANNEL_SETUP: rc=0 result=0x0 channel_id=0x0 vi_mask=0x800000000
+       ```
+       (vi_mask bit 35 = VI hardware channel #35 allocated.)
+    4. **PR #474** — `CAPTURE_REQUEST_REQ` (msg 0x01) +
+       `CAPTURE_STATUS_IND` (msg 0x02) wrappers. Sends over the
+       *capture* IVC channel (not capture-control). Verified RCE
+       consumes the request and emits its own scheduler/VI
+       diagnostic logs over TCU; the wire format is correct end-
+       to-end.
+
+  **What remains for actual frame capture** (not yet started):
+  1. Port `vi_channel_config` (~352 B with C bitfields — fragile
+     for wire-format use). Required so RCE's VI register
+     programming finds a valid frame format.
+  2. Power-on the IMX219 sensor + write `MODE_SELECT = STREAMING`
+     (extend the existing `imx219` shell command).
+  3. Allocate a 2.5 MB frame buffer for IMX219 binned-mode RAW10
+     (1640×1232) inside RCE's VM1 IOVA aperture. The current 64 KB
+     NC carveouts are too small; either grow the NC mapping or
+     allocate from a different NC-mapped region.
+  4. Set the atomp surface IOVAs in the descriptor's `vi_channel_config`.
+  5. Inspect `capture_status.status` field in the descriptor for
+     `CAPTURE_STATUS_SUCCESS` after `STATUS_IND` arrives.
+
+  Each is a separate PR. The wire-format port is now complete;
+  what's left is the data-path / hardware-config surface.
 - ☐🔗 Implement Lua bindings + preprocessing. Verify by capturing a
   known printed digit and asserting that
   `slm.model_infer_bytes` returns the expected class.

@@ -775,7 +775,7 @@ invocation (transaction id increments).
 - 8 pins on opcode IDs (`CAMRTC_HSP_IRQ` / `PING` / `FW_HASH` /
   `CH_SETUP`, `CAPTURE_PHY_STREAM_OPEN_REQ` / `RESP`,
   `CAPTURE_CSI_STREAM_SET_CONFIG_REQ` / `RESP`).
-- Cross-platform stub-path runtime tests (PR pending):
+- Cross-platform stub-path runtime tests (PR #463):
   `test_camrtc_send_irq_uninit_returns_negative`,
   `test_camrtc_ivc_init_arg_validation` (NULL ch, zero IOVAs,
   non-power-of-two `nframes`, non-64-aligned `frame_size` — all
@@ -784,6 +784,135 @@ invocation (transaction id increments).
   (no NULL deref), `test_camrtc_capture_stubs_return_minus_one`
   (out-pointer cleared to 0xFFFFFFFF sentinel), and
   `test_camrtc_capture_null_out_result_safe`.
+
+---
+
+## Hardware Task 4 — VI capture wire-format port (2026-04-27, PRs #469/#472/#473/#474)
+
+Built on Task 3's CH_SETUP + IVC ring + capture-control-message
+infrastructure, this task adds the second IVC channel ("capture")
+plus the four capture-control messages that drive a VI capture:
+
+| Message                          | Opcode | Channel           | Body size  | Verifies                    |
+|----------------------------------|--------|-------------------|-----------:|------------------------------|
+| `CAPTURE_CHANNEL_SETUP_REQ`      | 0x1E   | capture-control   | 272 B      | RCE allocates a VI channel   |
+| `CAPTURE_CHANNEL_SETUP_RESP`     | 0x11   | capture-control   | 16 B       | RCE returns channel_id + vi_mask |
+| `CAPTURE_REQUEST_REQ`            | 0x01   | **capture**       | 8 B        | RCE picks up a request       |
+| `CAPTURE_STATUS_IND`             | 0x02   | **capture**       | 8 B        | RCE signals completion       |
+
+### Two-channel CH_SETUP region layout (PR #469)
+
+Single `CAMRTC_HSP_CH_SETUP` message now binds both channels in
+one TLV array. Region at `0xBDFE0000` (64 KB) layout:
+
+| Offset   | Size      | Contents                                |
+|---------:|----------:|------------------------------------------|
+| 0x0000   | 88 B      | TLV[0] capture-control                  |
+| 0x0058   | 88 B      | TLV[1] capture                          |
+| 0x00B0   | (rest)    | zero terminator (TLV.tag = 0)            |
+| 0x1000   | 20608 B   | capture-control rx (RCE→AP)              |
+| 0x60C0   | 20608 B   | capture-control tx (AP→RCE)              |
+| 0xB140   | 4224 B    | capture rx (RCE→AP)                      |
+| 0xC1C0   | 4224 B    | capture tx (AP→RCE)                      |
+| 0xD1E0   | (free)    | end of used bytes (53,760 / 65,536)      |
+
+Both channels share `group=1` per the L4T DT (`tegra234-camera.dtsi`
+ivccontrol@3 + ivccapture@4). Geometry constants live in
+`kernel/include/camrtc_layout.h` so `camrtc.c` (CH_SETUP TLV
+write) and `camrtc_capture.c` (`camrtc_ivc_init` for both rings)
+can't drift independently.
+
+### VI request region (PR #473)
+
+Separate 64 KB carveout at `0xBDFD0000` (just below the CH_SETUP
+region in the same NC mapping) for the per-request descriptors:
+
+| Offset   | Size                               | Contents                  |
+|---------:|------------------------------------:|----------------------------|
+| 0x0000   | queue_depth × 1024 = 1024 B        | request_ring (descriptors) |
+| 0x4000   | queue_depth × 128 = 128 B          | memoryinfo_ring            |
+
+Today `queue_depth=1` (single-shot). `request_size=1024` is a
+generous over-estimate of `sizeof(capture_descriptor)` (~448 B);
+RCE uses it as the slot stride, not a struct-size assertion.
+`memoryinfo_size=128` matches `sizeof(capture_descriptor_memoryinfo)`
+exactly. 5 `_Static_assert`s pin the geometry: inside RCE VM1
+aperture, inside NC mapping, no overlap with CH_SETUP region,
+ring fits before memoryinfo, memoryinfo fits in carveout.
+
+### CHANNEL_SETUP_REQ wrapper (PR #472)
+
+`camrtc_capture_channel_setup` builds a 280-byte request frame
+(8 B header + 272 B `capture_channel_config`), bulk-zeroes
+everything, then sets only the load-bearing fields:
+
+```
+channel_flags     = VIDEO | RAW | CSI    (0x10003)
+vi_unit_id        = VI_UNIT_VI           (0; T234 has no VI2)
+vi_channel_mask   = ~0ULL                 (let RCE pick any channel)
+csi_stream        = {stream_id, csi_port, vc=0}
+requests          = camrtc_vi_req_ring_iova()
+requests_memoryinfo = camrtc_vi_req_meminfo_iova()
+queue_depth / request_size / memoryinfo_size = camrtc_vi_req_*()
+slvsec_stream_*   = SLVSEC_STREAM_DISABLED (0xFF)
+num_vi_gos_tables = 0; vi_gos_tables[] = 0  (no GOS for first-light)
+progress_sp / embdata_sp / linetimer_sp = 0   (no Host1x syncpoints)
+error_mask_*       = 0
+stop_on_error_notify_bits = 0
+```
+
+Verified on jetson-nano-1 with the smoke-test (queue_depth=0)
+returning `INVALID_PARAMETER` — proving the 272-byte body parses
+cleanly. With real IOVAs (PR #473), RCE allocates VI channel and
+returns `result=0 channel_id=0 vi_mask=0x800000000` (bit 35 = VI
+hardware channel #35).
+
+### CAPTURE_REQUEST flow (PR #474)
+
+`camrtc_capture_request(buffer_index, *out_status_index, timeout_us)`:
+
+1. Caller pre-populates `request_ring[buffer_index]` with a
+   `capture_descriptor` (`camrtc_capture_descriptor_header` exposes
+   the leading 12 B — sequence + capture_flags + timeouts — that
+   RCE reads first).
+2. Wrapper builds a 16-byte `CAPTURE_REQUEST_REQ` frame on the
+   *capture* IVC channel (`g_cap_chan`).
+3. RCE walks the descriptor, programs VI, captures, fills the
+   per-frame `capture_status` substruct of the descriptor, sends
+   `CAPTURE_STATUS_IND` back on the capture rx ring.
+4. Wrapper polls `g_cap_chan` for `STATUS_IND`, validates msg_id +
+   buffer_index round-trip.
+
+A successful return only means "RCE responded"; the caller MUST
+inspect the slot's `capture_status.status` field for the actual
+per-frame outcome.
+
+Verified on jetson-nano-1: with a zero-init `vi_channel_config`
+(no real frame format set), RCE consumed the request and emitted
+its own scheduler errors over TCU (`vi5.c:4063`,
+`capture-scheduler.c:2179`/`2259`). Wire format is correct; the
+absence of `STATUS_IND` is expected because RCE bails before the
+emission path under the internal VI errors. A real
+`vi_channel_config` port lands in subsequent PRs.
+
+### Test coverage
+
+`kernel/tests/test_camera.c` adds (PR #475):
+- 6 new `_Static_assert`s on capture_request_req / status_ind
+  struct sizes (8 B each), opcodes (0x01 / 0x02), and per-
+  descriptor capture_flags bits.
+- 5 new `_Static_assert`s on the `capture_descriptor_header`
+  prefix struct (12 B total; offsets 0/4/8/10).
+- 19 `_Static_assert`s on `capture_channel_config` + sub-structs
+  (PR #472).
+- 5 `_Static_assert`s on the layout-constant agreement between
+  camrtc.c and camrtc_capture.c via `camrtc_layout.h` (PR #469).
+- New cross-platform stub-path runtime tests:
+  `test_camrtc_capture_stubs_return_minus_one` extended to cover
+  channel_setup + capture_request,
+  `test_camrtc_capture_null_out_result_safe` extended for the
+  same, `test_camrtc_vi_req_accessors` (Jetson values vs QEMU
+  zeros), and `test_camrtc_ch_setup_accessors_uninit_zero`.
 
 ---
 

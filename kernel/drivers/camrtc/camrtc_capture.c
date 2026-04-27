@@ -425,10 +425,11 @@ int camrtc_capture_request(uint32_t buffer_index,
         return -2;
     }
 
-    /* Poll the capture rx ring for STATUS_IND. The capture channel's
-     * frame size is 64 B (vs 320 B on capture-control), so the
-     * stack buffer is much smaller. */
-    uint8_t resp_buf[64];
+    /* Poll the capture rx ring for STATUS_IND. The capture channel
+     * frame size (CAMRTC_CAP_FRAME_SIZE in camrtc_layout.h) is
+     * 64 B vs the 320 B on capture-control, so the stack buffer
+     * is much smaller. */
+    uint8_t resp_buf[CAMRTC_CAP_FRAME_SIZE];
     uint32_t resp_len = 0;
     rc = camrtc_ivc_recv_wait(&g_cap_chan, resp_buf, sizeof(resp_buf),
                               &resp_len, timeout_us);

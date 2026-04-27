@@ -6274,18 +6274,28 @@ int cmd_csidiag(int argc, char *argv[])
      * 0). Set capture_flags=STATUS_REPORT_ENABLE so RCE always
      * sends STATUS_IND, even on a successful path that wouldn't
      * otherwise notify; sequence is for AP-side bookkeeping. */
-    volatile uint32_t *desc =
+    /* Zero the entire descriptor slot first so any RCE-side read
+     * of an unset field (vi_channel_config, atomp surfaces) lands
+     * as 0. */
+    volatile uint32_t *desc_words =
         (volatile uint32_t *)camrtc_vi_req_ring_iova();
-    /* Zero the entire descriptor slot first so any RCE-side
-     * read of an unset field (vi_channel_config, atomp surfaces)
-     * lands as 0. */
     uint32_t slot_words = camrtc_vi_req_request_size() / 4u;
-    for (uint32_t i = 0; i < slot_words; i++) desc[i] = 0u;
-    desc[0] = 1u;        /* sequence */
-    desc[1] = CAPTURE_FLAG_STATUS_REPORT_ENABLE
-            | CAPTURE_FLAG_ERROR_REPORT_ENABLE;     /* capture_flags */
-    /* desc[2] = frame_start_timeout (lo16) | frame_completion (hi16);
-     * leave at 0 — RCE has its own watchdog. */
+    for (uint32_t i = 0; i < slot_words; i++) desc_words[i] = 0u;
+
+    /* Overlay the typed leading-fields struct onto slot 0 — RCE
+     * reads sequence + capture_flags + the two timeout fields
+     * directly. The remaining ~436 B of the slot stay zeroed.
+     * Static_asserts in test_camera.c pin the prefix layout so
+     * a future field reorder upstream breaks the build instead
+     * of silently writing the wrong offsets. */
+    volatile struct camrtc_capture_descriptor_header *desc =
+        (volatile struct camrtc_capture_descriptor_header *)
+        camrtc_vi_req_ring_iova();
+    desc->sequence                 = 1u;
+    desc->capture_flags            = CAPTURE_FLAG_STATUS_REPORT_ENABLE
+                                   | CAPTURE_FLAG_ERROR_REPORT_ENABLE;
+    desc->frame_start_timeout      = 0u;   /* RCE channel default */
+    desc->frame_completion_timeout = 0u;
     __asm__ volatile("dsb sy" ::: "memory");
 
     uart_printf("  CAPTURE_REQUEST: send buffer_index=0 "
