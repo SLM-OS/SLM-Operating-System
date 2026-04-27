@@ -547,8 +547,36 @@ void pmm_init(void)
      *
      * Region 3 has internal reserved sub-regions above 0x240000000.
      * Use 0x240000000 as a conservative upper bound.
+     *
+     * 64 KB at 0xA0000000 is carved out of region 1 for the camera
+     * RTCPU CH_SETUP region (`kernel/drivers/camrtc/camrtc.c`). The
+     * RCE firmware only accepts CH_SETUP IOVAs inside its built-in
+     * VM1 aperture 0xA0000000..0xC0000000 — addresses outside that
+     * range come back as RTCPU_CH_ERR_INVALID_IOVA. With SMMU
+     * translation disabled by Linux pre-kexec, IOVA == phys, so the
+     * region needs to be a *physical* page in that aperture. See
+     * `docs/reference/l4t-binding-nvidia-tegra194-rce.txt:51-53`
+     * ("0xa000000..0xc000000 for RCE VM1 interface") and the
+     * `iommu-resv-regions` cells in
+     * `docs/reference/l4t-tegra234-camera.dtsi:59`. Empirical:
+     * BSS-allocated buffers around 0x80700000 reproducibly returned
+     * INVALID_IOVA (status=131) on jetson-nano-1, 2026-04-26.
      */
-    pmm_add_region_split(buddy_state.heap_start, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
+    /* Defensive: if a future kernel image grows past 0xA0000000,
+     * the first add_region call below would receive `start > end`
+     * and the camera CH_SETUP carveout would be inside the
+     * allocator, breaking RCE binding silently. Today the kernel
+     * ends near 0x80d10000 — ~480 MB of headroom — but the check
+     * is cheap and turns "silent failure on the next milestone"
+     * into "loud panic at boot". */
+    if (buddy_state.heap_start >= 0xA0000000UL) {
+        ERROR("PMM: kernel image extends into RCE CH_SETUP carveout "
+              "(__kernel_end=0x%lx >= 0xA0000000)",
+              (unsigned long)buddy_state.heap_start);
+        return;
+    }
+    pmm_add_region_split(buddy_state.heap_start, 0xA0000000UL);
+    pmm_add_region_split(0xA0010000UL, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
     pmm_add_region_split(0xC2000000UL, 0xFFFE0000UL);
     pmm_add_region_split(0x100000000UL, 0x240000000UL);
 #else

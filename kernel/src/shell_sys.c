@@ -5911,6 +5911,22 @@ int cmd_rcediag(int argc, char *argv[])
             uart_printf("  *** PING failed (rc=%d) — see WARN log "
                         "lines for details. ***\r\n", ping_rc);
         }
+
+        /* Hardware Task 3 sub-step: stand up the capture-control
+         * IVC channel via CAMRTC_HSP_CH_SETUP. After this returns
+         * 0, RCE is bound to the SLM-OS-allocated rx/tx ring
+         * IOVAs and the next milestone (sending
+         * CAPTURE_PHY_STREAM_OPEN_REQ over the ring) is unblocked. */
+        int chs_rc = camrtc_ch_setup_capture_control();
+        uintptr_t region = camrtc_ch_setup_region_phys();
+        uart_printf("  CH_SETUP capture-ctrl: rc=%d region=0x%lx\r\n",
+                    chs_rc, (unsigned long)region);
+        if (chs_rc == 0) {
+            uart_puts("  *** CH_SETUP OK — RCE bound the rx/tx     ***\r\n");
+            uart_puts("  *** rings; ready for capture-control IVC. ***\r\n");
+        } else {
+            uart_puts("  *** CH_SETUP failed — see WARN log lines. ***\r\n");
+        }
     } else if (rc == -1) {
         uart_puts("  *** hsp_rce MMIO unreachable — CBB firewall  ***\r\n");
         uart_puts("  *** or HSP block clock-gated.                ***\r\n");
