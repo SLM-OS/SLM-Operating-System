@@ -13,10 +13,15 @@
 //! binary's `main.rs`.
 
 pub mod gguf;
+pub mod vocab_blob;
 pub mod writer;
 
 pub use gguf::{
     GgmlType, Gguf, GgufError, MetaArray, MetaType, MetaValue, TensorInfo, DEFAULT_ALIGNMENT,
     GGUF_MAGIC, GGUF_VERSION,
+};
+pub use vocab_blob::{
+    read_vocab_blob, write_vocab_blob, BlobError, SpecialTokenIds, VocabBlob, HEADER_SIZE,
+    MAX_PLAUSIBLE_VOCAB, VOCB_MAGIC, VOCB_VERSION,
 };
 pub use writer::GgufBuilder;
