@@ -16,10 +16,12 @@
 #include "sched.h"
 #include "uart.h"
 #include "string.h"
+#include "debug.h"
 
 #include "lwip/tcp.h"
 #include "lwip/err.h"
 #include "lwip/ip_addr.h"
+#include "lwip/stats.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,6 +30,84 @@
 static struct tcp_pcb *listen_pcb   = NULL;
 static uint16_t         listen_port = 0;
 static uint32_t         accepted_count = 0;
+
+/* -------------------------------------------------------------------------- */
+/* Session lifecycle stats + leak detection                                   */
+/* -------------------------------------------------------------------------- */
+
+/* Per-session leak threshold. Sessions normally retain a bit of
+ * heap state until the pcb fully tears down (TIME_WAIT footprint
+ * is ~120 bytes); this threshold is set well above that so a clean
+ * close never trips the WARN. A real TX-COPY-buffer leak or pbuf
+ * reference-count off-by-one will show up as multi-KB deltas. */
+#ifndef NET_SHELL_TCP_LEAK_THRESHOLD_BYTES
+#define NET_SHELL_TCP_LEAK_THRESHOLD_BYTES  1024u
+#endif
+
+static uint32_t sessions_opened          = 0;
+static uint32_t sessions_closed          = 0;
+static uint32_t peak_active              = 0;
+static uint32_t leak_warnings            = 0;
+static uint32_t total_suspicious_leak    = 0;
+static int32_t  last_session_heap_delta  = 0;
+static int32_t  max_session_heap_delta   = 0;
+
+static uint32_t heap_used_now(void) {
+#if MEM_STATS
+    return (uint32_t)lwip_stats.mem.used;
+#else
+    return 0u;
+#endif
+}
+
+void tcp_shell_server_get_stats(struct tcp_shell_server_stats *out) {
+    if (!out) return;
+    out->sessions_opened              = sessions_opened;
+    out->sessions_closed              = sessions_closed;
+    out->active                       = sessions_opened - sessions_closed;
+    out->peak_active                  = peak_active;
+    out->leak_warnings                = leak_warnings;
+    out->total_suspicious_leak_bytes  = total_suspicious_leak;
+    out->last_session_heap_delta_bytes = last_session_heap_delta;
+    out->max_session_heap_delta_bytes  = max_session_heap_delta;
+}
+
+void tcp_shell_server_note_session_open(struct shell_session *sess) {
+    if (!sess) return;
+
+    sess->heap_used_at_open_bytes = heap_used_now();
+
+    sessions_opened++;
+    uint32_t active = sessions_opened - sessions_closed;
+    if (active > peak_active) peak_active = active;
+}
+
+void tcp_shell_server_note_session_close(const struct shell_session *sess) {
+    if (!sess) return;
+
+    sessions_closed++;
+
+    /* Compute delta. uint32_t subtraction yields a signed-meaningful
+     * result when reinterpreted: positive = heap grew during this
+     * session (suspicious), negative = heap shrank (a previously
+     * TIME_WAIT'd session's resources freed during this one). */
+    uint32_t open_used  = sess->heap_used_at_open_bytes;
+    uint32_t close_used = heap_used_now();
+    int32_t  delta      = (int32_t)(close_used - open_used);
+
+    last_session_heap_delta = delta;
+    if (delta > max_session_heap_delta) max_session_heap_delta = delta;
+
+    if (delta > (int32_t)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES) {
+        leak_warnings++;
+        total_suspicious_leak += (uint32_t)delta;
+        WARN("shell-tcp: session %u closed with +%d bytes still on lwIP heap "
+             "(open=%u close=%u, threshold=%u) — suspect leak",
+             (unsigned)sess->id, (int)delta,
+             (unsigned)open_used, (unsigned)close_used,
+             (unsigned)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES);
+    }
+}
 
 /* -------------------------------------------------------------------------- */
 /* Session task body                                                          */
@@ -62,6 +142,13 @@ static void session_task_entry(void *arg)
     if (io) {
         io->close(io);   /* signals the TCP backend that we are done */
     }
+
+    /* Snapshot the heap delta and emit any leak WARN before the
+     * session struct is recycled — the close hook reads
+     * `sess->heap_used_at_open_bytes`, which `shell_session_free`
+     * is free to clobber. */
+    tcp_shell_server_note_session_close(sess);
+
     shell_session_free(sess);
 
     task_exit();
@@ -125,6 +212,14 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
         return ERR_MEM;
     }
     task_set_affinity(t, 0);
+
+    /* Note the session-open *before* scheduler_add_task — once the
+     * task is runnable, it could begin executing on the next
+     * scheduler tick on another CPU and reach `note_session_close`
+     * before we'd snapshot heap-at-open. Cheap atomic-ish counters
+     * either way, but the ordering matters for the leak delta. */
+    tcp_shell_server_note_session_open(sess);
+
     scheduler_add_task(t);
 
     accepted_count++;

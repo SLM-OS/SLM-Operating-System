@@ -99,6 +99,14 @@ struct shell_session {
      * connection so concurrent operators cannot clobber each other's
      * transfers. */
     struct shell_xput_session xput;
+
+    /* lwIP heap usage at the moment this session's task entered.
+     * Subtracted from heap_used at session-task exit to surface
+     * per-session leaks (tcp_write COPY data not freed, lingering
+     * pbufs in the unsent queue, etc). Set by tcp_shell_server's
+     * accept callback; consumed by the session task on teardown.
+     * Zero on the console session (no leak detection there). */
+    uint32_t heap_used_at_open_bytes;
 };
 
 /* Get the singleton console session (UART-backed). Always non-NULL

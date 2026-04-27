@@ -39,8 +39,28 @@
 #define MEMP_MEM_MALLOC             0
 #define MEMP_MEM_INIT               1  /* Zero-initialize pools at startup */
 
-/* Heap size for variable-length allocations */
-#define MEM_SIZE                    (32 * 1024)  /* 32 KB */
+/* Heap size for variable-length allocations.
+ *
+ * Bumped 32 KB → 128 KB after the RX-stall watchdog (PR #439) caught
+ * heap exhaustion under multi-session telnet + slm-put load:
+ *
+ *   [WARN] net: RX stalled (link up, 10010 ms idle, threshold 10000 ms)
+ *   [WARN] net:   rx_packets=719 dropped=66 no_buffers=0
+ *   [WARN] net:   pbuf_pool=0/64 tcp_pcb=2/32 heap=32768/32768
+ *
+ * The 32 KB ceiling was the original VirtIO-net bringup default
+ * (DHCP + ping workload only) and never revisited as the workload
+ * grew. Multi-session telnet creates concurrent
+ * `tcp_write(... TCP_WRITE_FLAG_COPY)` allocations; per-frame
+ * `pbuf_alloc(PBUF_RAW, len, PBUF_RAM)` on RX is also heap-backed.
+ * 128 KB gives ~80 in-flight 1500-byte pbufs of headroom which is
+ * comfortable for 16 simultaneous shell-tcp sessions.
+ *
+ * Tradeoffs: BSS growth is +96 KB (negligible on 4-8 GB systems);
+ * a fragmented heap walk under SYS_ARCH_PROTECT (PR #435) holds
+ * IRQs off proportionally longer. The watchdog will catch it if
+ * IRQ latency starts dropping packets at this size; revisit if so. */
+#define MEM_SIZE                    (128 * 1024)  /* 128 KB */
 
 /* Memory alignment (8-byte for AArch64) */
 #define MEM_ALIGNMENT               8

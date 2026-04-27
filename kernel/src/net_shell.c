@@ -340,8 +340,22 @@ static int cmd_netstat(int argc, char *argv[]) {
     shell_printf("  pbuf pool:  %u/%u   tcp pcbs: %u/%u\n",
                  (unsigned)wd.pbuf_pool_used, (unsigned)wd.pbuf_pool_avail,
                  (unsigned)wd.tcp_pcb_used,   (unsigned)wd.tcp_pcb_avail);
-    shell_printf("  lwip heap:  %u/%u\n",
-                 (unsigned)wd.heap_used, (unsigned)wd.heap_avail);
+    shell_printf("  lwip heap:  %u/%u  (peak %u)\n",
+                 (unsigned)wd.heap_used, (unsigned)wd.heap_avail,
+                 (unsigned)wd.heap_used_peak);
+
+    struct tcp_shell_server_stats ts;
+    tcp_shell_server_get_stats(&ts);
+    shell_printf("Shell-tcp sessions:\n");
+    shell_printf("  opened:     %u  closed: %u  active: %u  peak: %u\n",
+                 (unsigned)ts.sessions_opened, (unsigned)ts.sessions_closed,
+                 (unsigned)ts.active, (unsigned)ts.peak_active);
+    shell_printf("  heap delta: last=%d max=%d\n",
+                 (int)ts.last_session_heap_delta_bytes,
+                 (int)ts.max_session_heap_delta_bytes);
+    shell_printf("  leaks:      warnings=%u  total=%u bytes\n",
+                 (unsigned)ts.leak_warnings,
+                 (unsigned)ts.total_suspicious_leak_bytes);
 
     return 0;
 }

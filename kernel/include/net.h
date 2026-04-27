@@ -284,6 +284,7 @@ struct net_watchdog_snapshot {
     uint16_t  tcp_pcb_used;
     uint16_t  tcp_pcb_avail;
     uint32_t  heap_used;             /* lwip_stats.mem.used */
+    uint32_t  heap_used_peak;        /* lwip_stats.mem.max — high-water mark since boot */
     uint32_t  heap_avail;            /* lwip_stats.mem.avail */
     uint32_t  stall_events;          /* count of stall→alarm transitions since boot */
     uint32_t  recovery_events;       /* count of alarm→recovery transitions since boot */
