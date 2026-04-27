@@ -104,12 +104,12 @@ typedef struct {
 
 #define DTB_MAX_MEMRESERVES 8
 
-/* /chosen entropy + bootloader metadata. Filled in lazily on first
- * dtb_get_chosen() call. */
+/* /chosen entropy + bootloader metadata. Populated by dtb_parse. */
 typedef struct {
     /* Firmware-supplied entropy. Each `*_len` is the byte length actually
-     * read from the DTB; `*_buf` may be partial if the property exceeds
-     * the static buffer. zero len means "absent or unreadable". */
+     * read from the DTB; the `rng_seed` / `kaslr_seed` arrays may hold a
+     * partial copy if the source property exceeds the static buffer.
+     * Zero `_len` means the property was absent or unreadable. */
     uint8_t  rng_seed[64];
     uint32_t rng_seed_len;
     uint8_t  kaslr_seed[16];

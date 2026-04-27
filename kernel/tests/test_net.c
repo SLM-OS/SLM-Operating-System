@@ -1753,9 +1753,17 @@ static void test_lwip_rand_seed_changes_output(void)
     TEST_ASSERT_TRUE(any_diff);
 }
 
-static void test_lwip_rand_seed_null_or_zero_len_is_noop(void)
+static void test_lwip_rand_seed_null_or_zero_len_does_not_crash(void)
 {
-    /* No crash on NULL / zero-length; smoke that the RNG still works. */
+    /* Smoke test: NULL bytes and zero length must be safe inputs.
+     *
+     * Note: a stricter "is observably a no-op on rand_state" assertion
+     * would need a state-readback hook in sys_arch.c, since
+     * `lwip_rand_slm` advances state and folds in a fresh timer count
+     * on every call — making "did the seed call write state?" hard to
+     * observe from outside. The function's body has an early
+     * `if (!bytes || len == 0) return;` guard; this test verifies the
+     * guard is reachable and downstream RNG usage still works. */
     lwip_rand_seed(NULL, 32);
     lwip_rand_seed("data", 0);
     (void)lwip_rand_slm();
@@ -1818,7 +1826,7 @@ int test_suite_net(void)
 
     /* lwIP RNG / lwip_rand_seed (DTB-driven entropy seeding) */
     RUN_TEST(test_lwip_rand_seed_changes_output);
-    RUN_TEST(test_lwip_rand_seed_null_or_zero_len_is_noop);
+    RUN_TEST(test_lwip_rand_seed_null_or_zero_len_does_not_crash);
     RUN_TEST(test_lwip_rand_seed_different_inputs_diverge);
 
     /* Virtqueue descriptor ring tests (MMIO driver, QEMU_VIRT only) */

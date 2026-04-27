@@ -365,7 +365,11 @@ static void extract_property(const char *node_name, const char *prop_name,
 
 /* Walk the FDT header's reserve map. Each entry is two big-endian uint64
  * (addr, size); the list ends with a (0, 0) pair. This is what `dtc`
- * emits for `/memreserve/` directives at DTS file scope. */
+ * emits for `/memreserve/` directives at DTS file scope.
+ *
+ * Bounds checks include explicit u32 overflow guards (`a + b < a`) so a
+ * crafted header with `off` near UINT32_MAX can't wrap past the totalsize
+ * limit. Mirrors the same checks `fdt_init` does (kernel/lib/fdt/fdt.c). */
 static void parse_memreserves_from_header(const void *dtb)
 {
     const struct fdt_header *hdr = dtb;
@@ -373,12 +377,16 @@ static void parse_memreserves_from_header(const void *dtb)
     if (off == 0) return;
 
     uint32_t total = be32_to_cpu(hdr->totalsize);
-    if (off + 16 > total) return;
+    if (off + 16 < off || off + 16 > total) return;
 
     const uint8_t *base = (const uint8_t *)dtb + off;
     while (g_n_memreserves < DTB_MAX_MEMRESERVES) {
+        uint32_t entry_off = off + (uint32_t)g_n_memreserves * 16;
+        /* entry_off must not wrap and (entry_off + 16) must be in-bounds. */
+        if (entry_off < off ||
+            entry_off + 16 < entry_off ||
+            entry_off + 16 > total) break;
         const uint8_t *p = base + (uint32_t)g_n_memreserves * 16;
-        if ((uint32_t)((p + 16) - (const uint8_t *)dtb) > total) break;
         uint64_t addr = be64_to_cpu(*(const uint64_t *)(p + 0));
         uint64_t size = be64_to_cpu(*(const uint64_t *)(p + 8));
         if (addr == 0 && size == 0) break;
@@ -414,9 +422,12 @@ static void parse_memreserves_from_root_property(const void *dtb)
     uint32_t off_strings = be32_to_cpu(hdr->off_dt_strings);
     uint32_t size_strings = be32_to_cpu(hdr->size_dt_strings);
 
-    /* Guard against malformed headers — same checks `fdt_init` does. */
-    if (off_struct + size_struct > total) return;
-    if (off_strings + size_strings > total) return;
+    /* Guard against malformed headers — same overflow-safe checks
+     * `fdt_init` does (off + size must not wrap and must fit in total). */
+    if (off_struct + size_struct < off_struct ||
+        off_struct + size_struct > total) return;
+    if (off_strings + size_strings < off_strings ||
+        off_strings + size_strings > total) return;
 
     const uint8_t *p   = (const uint8_t *)dtb + off_struct;
     const uint8_t *end = p + size_struct;
@@ -499,12 +510,17 @@ static void copy_chosen_bytes(const struct fdt_handle *h, const char *path,
 static void copy_chosen_string(const struct fdt_handle *h, const char *path,
                                const char *prop, char *out, uint32_t cap)
 {
+    /* Reject zero-cap before any write. The current callsite passes a
+     * compile-time positive cap, but the function should be defensive
+     * against future callers — out[0]='\0' on a zero-byte buffer would
+     * be an out-of-bounds write. */
+    if (cap == 0) return;
     out[0] = '\0';
     const void *data = NULL;
     uint32_t len = 0;
     if (fdt_get_property_by_path(h, path, prop, &data, &len) != FDT_LIB_OK)
         return;
-    if (len == 0 || cap == 0) return;
+    if (len == 0) return;
     uint32_t n = len < cap - 1 ? len : cap - 1;
     for (uint32_t i = 0; i < n; i++) out[i] = ((const char *)data)[i];
     out[n] = '\0';

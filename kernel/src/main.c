@@ -245,18 +245,23 @@ void kernel_main(void *dtb)
         INFO("DTB parsed successfully at %p", dtb);
         dtb_print_info(&fdt_info);
 
+#if defined(ENABLE_NETWORKING)
         /* Seed the lwIP RNG with firmware-supplied entropy from
          * /chosen/{rng-seed,kaslr-seed}. Folds in up to 80 bytes of
          * per-boot entropy that's otherwise discarded. Effect: TCP
          * initial-sequence numbers and ephemeral-port choices vary
          * across reboots instead of starting from a hardcoded LCG
-         * state. The underlying RNG is still non-cryptographic. */
+         * state. The underlying RNG is still non-cryptographic.
+         *
+         * Gated on ENABLE_NETWORKING because lwip_rand_seed lives in
+         * kernel/net/sys_arch.c, which is only compiled with
+         * networking enabled. */
         const dtb_chosen_t *ch = dtb_get_chosen();
-        extern void lwip_rand_seed(const void *bytes, uint32_t len);
         if (ch->rng_seed_len > 0)
             lwip_rand_seed(ch->rng_seed, ch->rng_seed_len);
         if (ch->kaslr_seed_len > 0)
             lwip_rand_seed(ch->kaslr_seed, ch->kaslr_seed_len);
+#endif
     } else {
         WARN("DTB parsing failed (code=%d), using platform defaults", dtb_ret);
     }

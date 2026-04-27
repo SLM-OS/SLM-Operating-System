@@ -2698,15 +2698,28 @@ int cmd_peek(int argc, char *argv[])
 }
 
 /*
- * dtb-dump - One-shot DTB hex dump for #414 firmware-fixup investigation.
+ * dtb-dump - Hex dump of the firmware-passed DTB for offline triage.
  *
- * Prints the firmware-passed DTB as a hex stream. Capture the serial
- * output between "DTB-START" and "DTB-END" markers, run through
- * `xxd -r -p` to recover the binary blob, then `dtc -I dtb -O dts -`
- * for a readable diff against the on-disk DTB.
+ * Prints the runtime DTB (post firmware fix-ups) as a hex stream
+ * between DTB-START and DTB-END markers. Capture the serial output,
+ * pipe through `xxd -r -p` to recover the binary, and `dtc -I dtb -O dts`
+ * for a readable diff against the on-disk .dtb file.
  *
- * Removed once #414 is closed.
+ * Originally added during the #414 EMMC2 investigation; kept in tree
+ * because DTB triage on Pi/Jetson recurs.
  */
+
+/* Sanity bound: refuse to dump a DTB that claims to be larger than this.
+ * Pi 5's runtime DTB is ~80 KB; Linux DTBs typically fit in 100 KB.
+ * 1 MB is generous but bounded — a corrupt totalsize won't make the
+ * shell stream gigabytes over UART. */
+#define DTB_DUMP_MAX_BYTES   (1U << 20)
+
+/* Hex encoding is done in chunks to avoid one shell_puts per byte (each
+ * call would acquire the UART lock). At 64 bytes per chunk, an 80 KB DTB
+ * needs ~1280 puts calls instead of ~80,000. */
+#define DTB_DUMP_CHUNK_BYTES 64
+
 int cmd_dtb_dump(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -2724,7 +2737,7 @@ int cmd_dtb_dump(int argc, char *argv[])
     }
     uint32_t total = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) |
                      ((uint32_t)p[6] <<  8) | ((uint32_t)p[7] <<  0);
-    if (total == 0 || total > (1U << 20)) {
+    if (total == 0 || total > DTB_DUMP_MAX_BYTES) {
         shell_printf("DTB totalsize implausible: %lu\r\n", (unsigned long)total);
         return -1;
     }
@@ -2732,12 +2745,23 @@ int cmd_dtb_dump(int argc, char *argv[])
     shell_printf("DTB-START addr=%p size=%lu magic=0x%08lx\r\n",
                  (const void *)p, (unsigned long)total, (unsigned long)magic);
     static const char hex[] = "0123456789abcdef";
-    for (uint32_t i = 0; i < total; i++) {
-        char buf[3] = { hex[(p[i] >> 4) & 0xF], hex[p[i] & 0xF], 0 };
-        shell_puts(buf);
-        if ((i & 31) == 31) shell_puts("\r\n");
+    char chunk[DTB_DUMP_CHUNK_BYTES * 2 + 3];   /* hex + "\r\n" + NUL */
+    uint32_t i = 0;
+    while (i < total) {
+        uint32_t take = total - i < DTB_DUMP_CHUNK_BYTES
+                        ? total - i : DTB_DUMP_CHUNK_BYTES;
+        uint32_t pos = 0;
+        for (uint32_t k = 0; k < take; k++) {
+            uint8_t b = p[i + k];
+            chunk[pos++] = hex[(b >> 4) & 0xF];
+            chunk[pos++] = hex[b & 0xF];
+        }
+        chunk[pos++] = '\r';
+        chunk[pos++] = '\n';
+        chunk[pos] = '\0';
+        shell_puts(chunk);
+        i += take;
     }
-    if ((total & 31) != 0) shell_puts("\r\n");
     shell_puts("DTB-END\r\n");
     return 0;
 }

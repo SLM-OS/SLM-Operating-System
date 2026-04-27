@@ -366,21 +366,10 @@ static void buddy_free(uintptr_t addr, unsigned int order, unsigned int original
 /*
  * Initialize the physical memory manager.
  */
-/*
- * Add a contiguous memory region to the buddy allocator, skipping any
- * sub-ranges declared in the firmware-supplied /memreserve/ list. Each
- * /memreserve/ entry is intersected against [start, end); on overlap,
- * the region is split so the reserved bytes are never freed.
- *
- * Why this matters: Pi firmware reserves the VPU shared memory carveout
- * (typically 4 MB at 0x3fc00000) via /memreserve/. The DTB advertises
- * the *full* RAM range in /memory@0/reg, so without this skip the buddy
- * allocator would happily hand out pages that the VPU writes to,
- * causing race-condition memory corruption the moment something on the
- * SLM-OS side issues a mailbox/firmwarekms call. The carveout is
- * outside the kernel image, so before this fix the bug was latent only
- * because we don't currently exercise the VPU.
- */
+
+/* Forward declaration so pmm_add_region_split can call it. The defn
+ * sits below pmm_carve_reserves to keep the carve logic above its only
+ * (file-scope) consumer. */
 static void pmm_add_region(uintptr_t start, uintptr_t end);
 
 int pmm_carve_reserves(uintptr_t start, uintptr_t end,
@@ -437,18 +426,39 @@ int pmm_carve_reserves(uintptr_t start, uintptr_t end,
     return n_out;
 }
 
+/*
+ * Add a contiguous memory region to the buddy allocator, skipping any
+ * sub-ranges declared in the firmware-supplied /memreserve/ list. Each
+ * /memreserve/ entry is intersected against [start, end); on overlap,
+ * the region is split so the reserved bytes are never freed.
+ *
+ * Why this matters: Pi firmware reserves the VPU shared memory carveout
+ * (typically 4 MB at 0x3fc00000) via /memreserve/. The DTB advertises
+ * the *full* RAM range in /memory@0/reg, so without this skip the buddy
+ * allocator would happily hand out pages that the VPU writes to,
+ * causing race-condition memory corruption the moment something on the
+ * SLM-OS side issues a mailbox/firmwarekms call. The carveout is
+ * outside the kernel image, so before this fix the bug was latent only
+ * because we don't currently exercise the VPU.
+ *
+ * Carve scratch arrays are file-static rather than on-stack: pmm_init
+ * runs single-threaded during boot (no concurrent split is ever in
+ * flight), and DTB_MAX_MEMRESERVES is intentionally low — but if the
+ * cap grows in the future, the worst-case ~1 KB stack footprint per
+ * call would otherwise scale with it.
+ */
+static uintptr_t        pmm_split_starts[DTB_MAX_MEMRESERVES + 1];
+static uintptr_t        pmm_split_ends  [DTB_MAX_MEMRESERVES + 1];
+static dtb_memreserve_t pmm_split_rsv   [DTB_MAX_MEMRESERVES];
+
 static void pmm_add_region_split(uintptr_t start, uintptr_t end)
 {
-    /* DTB_MAX_MEMRESERVES + 1 is the worst-case subrange count. */
-    uintptr_t starts[DTB_MAX_MEMRESERVES + 1];
-    uintptr_t ends  [DTB_MAX_MEMRESERVES + 1];
-    dtb_memreserve_t rsv[DTB_MAX_MEMRESERVES];
-    int n_rsv = dtb_get_memreserves(rsv, DTB_MAX_MEMRESERVES);
-    int n_out = pmm_carve_reserves(start, end, rsv, n_rsv,
-                                   starts, ends,
+    int n_rsv = dtb_get_memreserves(pmm_split_rsv, DTB_MAX_MEMRESERVES);
+    int n_out = pmm_carve_reserves(start, end, pmm_split_rsv, n_rsv,
+                                   pmm_split_starts, pmm_split_ends,
                                    DTB_MAX_MEMRESERVES + 1);
     for (int i = 0; i < n_out; i++) {
-        pmm_add_region(starts[i], ends[i]);
+        pmm_add_region(pmm_split_starts[i], pmm_split_ends[i]);
     }
 }
 

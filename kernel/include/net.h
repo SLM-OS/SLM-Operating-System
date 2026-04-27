@@ -360,4 +360,27 @@ bool net_is_up(void);
  */
 void net_shell_init(void);
 
+/* -------------------------------------------------------------------------- */
+/* lwIP RNG entropy seeding                                                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Mix `len` bytes of additional entropy into the lwIP RNG state.
+ *
+ * Called once at boot from kernel_main with firmware-supplied
+ * /chosen/{rng-seed,kaslr-seed} values from the DTB. Replaces the
+ * hardcoded LCG starting state with per-boot entropy so TCP ISN and
+ * ephemeral-port choices vary across reboots. Underlying RNG is still
+ * non-cryptographic (LCG + timer mix) — this just removes the
+ * constant-seed leak.
+ *
+ * Defined in `kernel/net/sys_arch.c`. Also declared in
+ * `kernel/include/arch/cc.h` (the lwIP-side header) since lwIP's
+ * critical-section code shares the same translation unit.
+ *
+ * Safe to call with interrupts disabled. NOT safe to call concurrently
+ * with `lwip_rand_slm`.
+ */
+void lwip_rand_seed(const void *bytes, uint32_t len);
+
 #endif /* NET_H */
