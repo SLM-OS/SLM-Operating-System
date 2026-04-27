@@ -279,8 +279,18 @@ check gated on a nano-resource release from @johnjezl).
   hangs the AXI fabric. After the settle delay the controller is in
   Linux's expected state (clock gate off, regulators owned by the
   AON GPIO block, no `SDHCI_RESET_ALL` short-circuit needed).
-- ☐🔗🎫 Tryboot mailbox round-trip via `labctl boot_test` — #371
-  sub-task 4.
+- ✅ Tryboot mailbox round-trip — #371 sub-task 4. Verified on
+  `pi-5-1`: `kernel activate` issues
+  `bcm_mailbox_set_reboot_flags(1)` + `bcm_mailbox_notify_reboot()`
+  + `psci_system_reset()`; firmware honors the flag on the next
+  boot and loads `tryboot.txt` *instead of* `config.txt`, which
+  in turn selects `tryboot.img`. The flag is genuinely one-shot
+  (subsequent natural power cycles fall back to `config.txt` /
+  `kernel_2712.img`). Mechanism is `tryboot.txt` (separate file),
+  **not** a `[tryboot]` filter section in `config.txt`. Canonical
+  configs now live at `deploy/pi5/{config.txt,tryboot.txt}`. See
+  [`docs/pi5-tryboot-verification.md`](pi5-tryboot-verification.md)
+  for the full hardware-test log.
 - ☐🔗🎫 Real-card BCM2712 SDHCI quirks (cfginit, CPRMAN clock-gate)
   — #371 sub-task 5.
 - ☐🔗🎫 Full `stage → activate → promote → rollback` cycle on

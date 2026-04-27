@@ -169,7 +169,13 @@ MSIX_CFG[25]: 0x9 (ENABLE + IACK_EN)
 
 ## Configuration
 
-### config.txt (required)
+The canonical `config.txt` and `tryboot.txt` live in `deploy/pi5/`
+and are the source of truth — `docs/deploy/pi5-sdcard.md`'s
+provisioning script `cp`s them onto the boot partition. The keys
+below document what each line does; diff against
+`deploy/pi5/config.txt` to check a card.
+
+### config.txt — required keys
 
 ```
 arm_64bit=1
@@ -183,6 +189,29 @@ os_check=0
 ```
 
 The `pciex4_reset=0` and `uart_2ndstage=1` settings tell the firmware to leave PCIe/RP1 initialized, eliminating the need for complex PCIe host bridge initialization from Circle.
+
+### config.txt — recommended (defensive) keys
+
+These are not required to boot but are present in `deploy/pi5/config.txt`:
+
+| Key | Effect | Why |
+|---|---|---|
+| `auto_initramfs=0` | Don't try to load an initramfs | Defensive — SLM-OS has no Linux, no initramfs. Without this, firmware can speculatively load `initramfs_2712` over the kernel load address and corrupt it. |
+| `arm_boost=1` | Run at full firmware-allowed CPU clock | Pi 5 normally clocks below max during early firmware; explicit `arm_boost=1` removes that throttle. |
+| `disable_overscan=1` | Turn off display overscan | Cosmetic — no display in lab use, but keeps `cmdline.txt`-free behavior consistent across cards. |
+
+### tryboot.txt — required when using `kernel activate`
+
+`tryboot.txt` carries the same key/value pairs as `config.txt`
+except `kernel=tryboot.img` (the file-header comments differ to
+explain each file's role). Pi 5 firmware loads it INSTEAD OF
+`config.txt` when the bootloader tryboot flag is armed (one-shot,
+set by `kernel activate`). See `deploy/pi5/README.md`.
+
+`[tryboot]` is **not** a config.txt filter section on Pi 5; the
+mechanism is the separate `tryboot.txt` file. Adding `[tryboot]`
+to `config.txt` confused firmware on `pieeprom-2024-09-23.bin`
+and broke boot.
 
 ## Known Limitations
 

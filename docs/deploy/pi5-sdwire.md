@@ -145,7 +145,7 @@ When multiple USB devices are plugged in or the system reboots, Linux may reassi
 Most common causes, in order:
 
 1. **`--kernel-name` not set to `kernel_2712.img`.** Pi firmware ignores `slmos.bin` as a filename; only `kernel_2712.img` is recognized.
-2. **`config.txt` missing required bare-metal keys.** Re-verify the card against [`pi5-sdcard.md`](pi5-sdcard.md) §First-time provisioning — all six of `arm_64bit=1`, `kernel_address=0x80000`, `kernel=kernel_2712.img`, `pciex4_reset=0`, `uart_2ndstage=1`, `os_check=0` must be present.
+2. **`config.txt` missing required bare-metal keys.** Diff the card's `config.txt` against [`deploy/pi5/config.txt`](../../deploy/pi5/config.txt) — that file is the source of truth. The required keys are `arm_64bit=1`, `kernel_address=0x80000`, `kernel=kernel_2712.img`, `pciex4_reset=0`, `uart_2ndstage=1`, `os_check=0` per [`docs/pi5-baremetal-status.md`](../pi5-baremetal-status.md) §Configuration; missing any of them produces total UART silence — no kernel output, no firmware banner.
 3. **Pi firmware on the card is newer than what the kernel was tested against.** Pi 5 firmware updates in 2025 changed the RP1 init sequence. Bare-metal SLM-OS has been validated against **March 2025 firmware** (see [`pi5-sdcard.md`](pi5-sdcard.md) §Troubleshooting for how to verify / revert). Newer firmware may silently break UART bring-up.
 
 ---
