@@ -19,6 +19,7 @@
 #include "unity.h"
 #include "../include/camera.h"
 #include "../include/camrtc.h"
+#include "../include/camrtc_channels.h"
 #include "../include/gpio_tegra.h"
 #include "../include/i2c_tegra.h"
 #include "../include/imx219.h"
@@ -557,6 +558,37 @@ _Static_assert(TEGRA234_POWER_DOMAIN_VI   == 28u,
     "TEGRA234_POWER_DOMAIN_VI drift (Video Input — distinct from VIC at id 29)");
 _Static_assert(TEGRA234_POWER_DOMAIN_ISPA == 22u,
     "TEGRA234_POWER_DOMAIN_ISPA drift");
+
+/* CAMRTC CH_SETUP wire-format ABI pins. These constants and struct
+ * sizes are exchanged with RCE firmware, so a typo or accidental
+ * field reorder must fail the build, not boot. The TLV tag spells
+ * 'IVC-SETU' little-endian; the struct is exactly 88 bytes. */
+_Static_assert(CAMRTC_TAG_IVC_SETUP
+    == ((uint64_t)0x55544553ULL << 32 | (uint64_t)0x2D435649ULL),
+    "CAMRTC_TAG_IVC_SETUP must encode 'IVC-SETU' little-endian");
+_Static_assert(sizeof(struct camrtc_tlv_ivc_setup) == 88,
+    "camrtc_tlv_ivc_setup must be exactly 88 bytes (RCE wire format)");
+_Static_assert(offsetof(struct camrtc_tlv_ivc_setup, tag) == 0,
+    "camrtc_tlv_ivc_setup.tag must be at offset 0");
+_Static_assert(offsetof(struct camrtc_tlv_ivc_setup, len) == 8,
+    "camrtc_tlv_ivc_setup.len must be at offset 8");
+_Static_assert(offsetof(struct camrtc_tlv_ivc_setup, rx_iova) == 16,
+    "camrtc_tlv_ivc_setup.rx_iova must be at offset 16");
+_Static_assert(offsetof(struct camrtc_tlv_ivc_setup, tx_iova) == 32,
+    "camrtc_tlv_ivc_setup.tx_iova must be at offset 32");
+_Static_assert(offsetof(struct camrtc_tlv_ivc_setup, channel_group) == 48,
+    "camrtc_tlv_ivc_setup.channel_group must be at offset 48");
+_Static_assert(offsetof(struct camrtc_tlv_ivc_setup, ivc_service) == 56,
+    "camrtc_tlv_ivc_setup.ivc_service must be at offset 56");
+_Static_assert(RTCPU_CH_SUCCESS == 0u, "RTCPU_CH_SUCCESS drift");
+_Static_assert(RTCPU_CH_ERR_INVALID_IOVA == 131u,
+    "RTCPU_CH_ERR_INVALID_IOVA drift (status returned for an out-of-aperture region)");
+_Static_assert(CAMRTC_IVC_CONFIG_SIZE == 4096u,
+    "CAMRTC_IVC_CONFIG_SIZE drift (RCE expects exactly 4 KB before the rings)");
+_Static_assert(TEGRA_IVC_HEADER_SIZE == 128u,
+    "TEGRA_IVC_HEADER_SIZE drift (2 * 64 B per tegra-ivc spec)");
+_Static_assert(CAMRTC_HSP_CH_SETUP == 0x44u,
+    "CAMRTC_HSP_CH_SETUP opcode drift (RCE protocol ID)");
 
 /* =============================================================================
  * Tegra234 camera-subsystem MMIO bases — Phase 0 verified

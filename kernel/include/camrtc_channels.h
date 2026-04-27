@@ -29,8 +29,9 @@
 
 /*
  * One IVC channel description in the CH_SETUP config block. Layout
- * is wire-format ABI — 80 bytes total, no padding manipulation
- * allowed. Fields in order:
+ * is wire-format ABI — 88 bytes total (8+8+8+4+4+8+4+4+4+4+32),
+ * pinned by `_Static_assert`s in `kernel/tests/test_camera.c`. No
+ * padding manipulation allowed. Fields in order:
  *
  *   tag             8 B  CAMRTC_TAG_IVC_SETUP per entry, 0 to terminate
  *   len             8 B  sizeof(struct) — RCE uses this to skip
