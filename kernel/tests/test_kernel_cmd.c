@@ -15,6 +15,7 @@
 #include "unity.h"
 #include "test_harness.h"
 #include "../include/blkdev.h"
+#include "../include/boot_media.h"
 #include "../include/ramdisk.h"
 #include "../include/sdhci.h"
 #include "../include/fat32.h"
@@ -122,10 +123,16 @@ static void teardown_source_vfs(void)
 /*
  * (Re-)format the SDHCI-backed FAT32 partition 1. Required because
  * the QEMU sd-card image persists across tests in the same run, so
- * each test starts from a clean known state.
+ * each test starts from a clean known state. Also drops any
+ * production blkdev that an earlier test's `kernel ...` subcommand
+ * pinned in boot_media's keep-alive cache (kernel_cmd.c routes
+ * through boot_media_acquire/release, see #371 sub-task 5) so each
+ * test gets a fresh acquire path rather than inheriting a cached
+ * dev that aliases this fixture's `kc_format` blkdev.
  */
 static void format_boot_partition(void)
 {
+    boot_media_test_clear_production_cache();
     struct blkdev *dev = sdhci_create_qemu_pci("kc_format");
     TEST_ASSERT_NOT_NULL(dev);
     /* Detach any prior FatFs binding before claiming the disk. */

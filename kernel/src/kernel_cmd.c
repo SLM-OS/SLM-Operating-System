@@ -9,19 +9,13 @@
  * Backend wiring goes through `boot_media_acquire/release`
  * (kernel/src/boot_media.c) so the SDHCI controller is created
  * once and pinned via the keep-alive ref for the kernel's
- * lifetime. boot_media's platform dispatch picks
- * `sdhci_create_bcm2712()` on Pi 5 and `sdhci_create_qemu_pci()` on
- * QEMU virt; on other platforms acquire returns NULL and every
- * subcommand reports "no boot partition" cleanly.
- *
- * Sub-task 5 of #371 surfaced the reason for routing through
- * boot_media: `sdhci_create_bcm2712()` issues a BCM mailbox
- * SET_CLOCK_STATE on every call, and on `pieeprom-2024-09-23.bin`
- * that mailbox tag starts returning code 0x00000000 (failure)
- * after a few rapid create→destroy cycles, breaking back-to-back
- * `kernel stage`/`rollback`. The keep-alive ref keeps the
- * controller created and the firmware mailbox quiet between
- * commands.
+ * lifetime. boot_media's platform dispatch picks the right
+ * sdhci_create_* function per platform; on platforms without an
+ * SDHCI backend acquire returns NULL and every subcommand reports
+ * "no boot partition" cleanly. The pin matters on Pi 5 — without
+ * it, repeated kernel_cmd subcommands wedge the firmware mailbox.
+ * See `docs/pi5-sdhci-real-card-verification.md` for the
+ * empirical trace and #371 sub-task 5 for the discovery.
  */
 
 #include "platform.h"
@@ -80,17 +74,10 @@ static struct blkdev *g_kernel_dev;
  * absent, no card, no FAT32 partition). Caller MUST pair every
  * successful return with `boot_volume_unmount()` before returning
  * to the shell — even error paths after mount need to detach so
- * subsequent subcommands aren't fighting a stuck volume.
- *
- * Goes through `boot_media_acquire()` rather than calling the
- * platform-specific create function directly. This matters on Pi 5
- * (#371 sub-task 5): the BCM mailbox `SET_CLOCK_STATE` request that
- * `sdhci_create_bcm2712()` issues to enable EMMC2 starts returning
- * code 0x00000000 (failure) after a few rapid create→destroy
- * cycles, which made back-to-back `kernel stage`/`rollback`
- * commands fail. `boot_media`'s keep-alive ref pins the controller
- * after the first successful create so subsequent acquires reuse
- * the cached device, and the firmware mailbox isn't re-toggled.
+ * subsequent subcommands aren't fighting a stuck volume. Goes
+ * through boot_media_acquire/release so the controller is
+ * created once and pinned via the keep-alive ref. See the
+ * file-level docblock for why this matters on Pi 5.
  */
 static int boot_volume_mount(void)
 {
