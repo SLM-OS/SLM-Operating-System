@@ -64,4 +64,42 @@
 #define SHELL_MAX_LINE      1024            /* Maximum command line length */
 #define SHELL_MAX_ARGS      16              /* Maximum arguments per command */
 
+/* ============================================================================
+ * Model Memory (Phase 3) — pool sizes consumed by rust_model_mem_init
+ * ============================================================================
+ *
+ * Per-platform default sizes for the model-memory weight and workspace
+ * pools. Both values are megabytes and must be multiples of 2 (the
+ * model-memory block size is 2 MB; the Rust pool allocator rejects
+ * misaligned sizes).
+ *
+ * Jetson hosts the SLM weight pool sized for Qwen2.5-1.5B-Q4_K_M
+ * (~1.0 GB resident) plus a second-slot headroom; workspace covers
+ * per-layer activations and the 512 MB KV-cache sub-pool that M5
+ * carves out (see docs/specs/slm-integration.md "Memory Plan").
+ *
+ * Pi 5 hosts smaller vision-class models. QEMU and x86-64 keep the
+ * original Phase-5 defaults so the test kernel boots inside
+ * `make test`'s 1 GB systemd MemoryMax cap.
+ */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#define MODEL_MEM_WEIGHT_MB     2048u
+#define MODEL_MEM_WORKSPACE_MB  256u
+#elif defined(PLATFORM_RASPI5)
+#define MODEL_MEM_WEIGHT_MB     512u
+#define MODEL_MEM_WORKSPACE_MB  256u
+#else /* PLATFORM_QEMU_VIRT, PLATFORM_X86_64, host harness */
+#define MODEL_MEM_WEIGHT_MB     256u
+#define MODEL_MEM_WORKSPACE_MB  128u
+#endif
+
+/* `_Static_assert` works in both C11+ and C23 without `<assert.h>` —
+ * config.h is also pulled in by the bundled Lua build (`lua_stubs.c`),
+ * which compiles with a pre-C23 standard, so the bare `static_assert`
+ * spelling is not portable here. */
+_Static_assert((MODEL_MEM_WEIGHT_MB    % 2u) == 0u,
+               "MODEL_MEM_WEIGHT_MB must be a multiple of 2 (pool block = 2 MB)");
+_Static_assert((MODEL_MEM_WORKSPACE_MB % 2u) == 0u,
+               "MODEL_MEM_WORKSPACE_MB must be a multiple of 2 (pool block = 2 MB)");
+
 #endif /* CONFIG_H */
