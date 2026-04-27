@@ -15,10 +15,12 @@
  */
 
 #include "pmm.h"
+#include "pmm_internal.h"
 #include "platform.h"
 #include "uart.h"
 #include "debug.h"
 #include "spinlock.h"
+#include "dtb.h"
 #include <stdbool.h>
 
 /* External symbols from linker script */
@@ -364,6 +366,102 @@ static void buddy_free(uintptr_t addr, unsigned int order, unsigned int original
 /*
  * Initialize the physical memory manager.
  */
+
+/* Forward declaration so pmm_add_region_split can call it. The defn
+ * sits below pmm_carve_reserves to keep the carve logic above its only
+ * (file-scope) consumer. */
+static void pmm_add_region(uintptr_t start, uintptr_t end);
+
+int pmm_carve_reserves(uintptr_t start, uintptr_t end,
+                       const dtb_memreserve_t *rsv, int n_rsv,
+                       uintptr_t *out_starts, uintptr_t *out_ends, int max_out)
+{
+    if (max_out <= 0 || !out_starts || !out_ends) return 0;
+    if (start >= end) return 0;
+
+    /* No reservations: one trivial subrange. */
+    if (n_rsv <= 0 || !rsv) {
+        out_starts[0] = start;
+        out_ends[0]   = end;
+        return 1;
+    }
+
+    int n_out = 0;
+    uintptr_t cursor = start;
+    while (cursor < end) {
+        /* Find the earliest-starting reservation overlapping [cursor, end).
+         * Reservations are not assumed sorted; re-scan each iteration.
+         * Skip zero-size and degenerate (re <= rs) entries cleanly. */
+        uintptr_t next_rsv_start = end;
+        uintptr_t next_rsv_end   = end;
+        bool found = false;
+        for (int i = 0; i < n_rsv; i++) {
+            uintptr_t rs = (uintptr_t)rsv[i].addr;
+            uintptr_t re = (uintptr_t)(rsv[i].addr + rsv[i].size);
+            if (re <= rs) continue;                  /* size 0 / overflow */
+            if (re <= cursor || rs >= end) continue; /* outside cursor */
+            if (!found || rs < next_rsv_start) {
+                next_rsv_start = rs > cursor ? rs : cursor;
+                next_rsv_end   = re < end ? re : end;
+                found = true;
+            }
+        }
+
+        if (!found) {
+            if (n_out >= max_out) return n_out;
+            out_starts[n_out] = cursor;
+            out_ends[n_out]   = end;
+            n_out++;
+            return n_out;
+        }
+
+        if (next_rsv_start > cursor) {
+            if (n_out >= max_out) return n_out;
+            out_starts[n_out] = cursor;
+            out_ends[n_out]   = next_rsv_start;
+            n_out++;
+        }
+        cursor = next_rsv_end;
+    }
+    return n_out;
+}
+
+/*
+ * Add a contiguous memory region to the buddy allocator, skipping any
+ * sub-ranges declared in the firmware-supplied /memreserve/ list. Each
+ * /memreserve/ entry is intersected against [start, end); on overlap,
+ * the region is split so the reserved bytes are never freed.
+ *
+ * Why this matters: Pi firmware reserves the VPU shared memory carveout
+ * (typically 4 MB at 0x3fc00000) via /memreserve/. The DTB advertises
+ * the *full* RAM range in /memory@0/reg, so without this skip the buddy
+ * allocator would happily hand out pages that the VPU writes to,
+ * causing race-condition memory corruption the moment something on the
+ * SLM-OS side issues a mailbox/firmwarekms call. The carveout is
+ * outside the kernel image, so before this fix the bug was latent only
+ * because we don't currently exercise the VPU.
+ *
+ * Carve scratch arrays are file-static rather than on-stack: pmm_init
+ * runs single-threaded during boot (no concurrent split is ever in
+ * flight), and DTB_MAX_MEMRESERVES is intentionally low — but if the
+ * cap grows in the future, the worst-case ~1 KB stack footprint per
+ * call would otherwise scale with it.
+ */
+static uintptr_t        pmm_split_starts[DTB_MAX_MEMRESERVES + 1];
+static uintptr_t        pmm_split_ends  [DTB_MAX_MEMRESERVES + 1];
+static dtb_memreserve_t pmm_split_rsv   [DTB_MAX_MEMRESERVES];
+
+static void pmm_add_region_split(uintptr_t start, uintptr_t end)
+{
+    int n_rsv = dtb_get_memreserves(pmm_split_rsv, DTB_MAX_MEMRESERVES);
+    int n_out = pmm_carve_reserves(start, end, pmm_split_rsv, n_rsv,
+                                   pmm_split_starts, pmm_split_ends,
+                                   DTB_MAX_MEMRESERVES + 1);
+    for (int i = 0; i < n_out; i++) {
+        pmm_add_region(pmm_split_starts[i], pmm_split_ends[i]);
+    }
+}
+
 /*
  * Add a contiguous memory region to the buddy allocator.
  * Breaks it into the largest power-of-two aligned blocks possible.
@@ -450,11 +548,11 @@ void pmm_init(void)
      * Region 3 has internal reserved sub-regions above 0x240000000.
      * Use 0x240000000 as a conservative upper bound.
      */
-    pmm_add_region(buddy_state.heap_start, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
-    pmm_add_region(0xC2000000UL, 0xFFFE0000UL);
-    pmm_add_region(0x100000000UL, 0x240000000UL);
+    pmm_add_region_split(buddy_state.heap_start, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
+    pmm_add_region_split(0xC2000000UL, 0xFFFE0000UL);
+    pmm_add_region_split(0x100000000UL, 0x240000000UL);
 #else
-    pmm_add_region(buddy_state.heap_start, buddy_state.heap_end);
+    pmm_add_region_split(buddy_state.heap_start, buddy_state.heap_end);
 #endif
 
     buddy_state.initialized = true;

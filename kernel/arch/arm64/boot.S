@@ -163,26 +163,34 @@ real_start:
 /*
  * Pi 5 Raw Binary Entry Point
  *
- * Pi 5 uses a raw binary format loaded at 0x80000 by the firmware.
- * No PE/COFF header is needed - the firmware jumps directly to the
- * first byte of the kernel image.
+ * Pi 5 firmware loads at 0x80000 and jumps to the first byte. No
+ * header needed for normal boot.
  *
- * By making _start = real_start (same address), all symbol offset
- * calculations work correctly. The literal pool uses offsets relative
- * to _start, which now points to the actual start of the executable code.
+ * NOTE: a Linux ARM64 image header here was tested as part of #414
+ * (hypothesis: firmware does fuller peripheral init for "recognised
+ * Linux" kernels, which would explain EMMC2 reachability from Linux
+ * but not SLM-OS). Result on EEPROM `pieeprom-2024-09-23.bin`:
  *
- * This approach follows Circle's proven raw binary format for Pi 5.
+ *   - With flags=0x0a (any-load) + text_offset=0: firmware relocates
+ *     the kernel to 0x200000. Kernel mostly survives via PC-relative
+ *     boot code, but absolute references (linker symbols, smp_boot.S
+ *     literals) point into pre-kernel memory and produce silent
+ *     corruption. As a side observation, `pcie1` link training fails
+ *     in this mode — the only confirmed peripheral-behavior change
+ *     across all #414 tests, but it's a regression not a fix.
  *
- * NOTE: a Linux ARM64 image header here (b real_start + magic at 0x38)
- * was investigated as part of #414 (hypothesis: firmware does fuller
- * peripheral init for "recognised Linux"). Empirically the header
- * itself breaks Pi 5 boot — scheduler-init timeout, deterministic
- * across power cycles. Likely cause: PSCI secondary-CPU launch
- * targets `_start` as the entry, and the Linux header puts a `b`
- * (one-shot branch) there instead of the start of the secondary
- * bring-up code. Path is left documented but not enabled; if a
- * future iteration revisits, the secondary entry point in
- * `smp_boot.S` needs to also branch around the header.
+ *   - With flags=0 + text_offset=0x80000 (force load at 0x80000):
+ *     kernel boots cleanly to shell, all peripherals work as on the
+ *     headerless build — and EMMC2 still hangs identically. The Linux
+ *     header alone does NOT trigger any EMMC2-relevant firmware path.
+ *
+ * The earlier reversion comment in this file blamed PSCI secondaries
+ * landing at `_start`. That diagnosis was wrong: `kernel/sched/smp.c`
+ * passes `secondary_entry` (in smp_boot.S) as the PSCI entry point.
+ * The original failure was the relocation issue described above.
+ *
+ * See `findings/2026-04-26-emmc2-followups.md` (firmware-RE repo) for
+ * the full cross-test summary and the surviving open hypotheses.
  */
 _start:
 real_start:

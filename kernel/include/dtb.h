@@ -91,6 +91,39 @@ typedef struct {
 #define FDT_ERR_BADPTR      -5  /* NULL pointer */
 
 /* ============================================================================
+ * Firmware-supplied side-band info (parsed at dtb_parse time)
+ * ============================================================================ */
+
+/* /memreserve/ entry from the FDT header reserve map. Firmware uses these
+ * to declare physical regions the kernel must NOT allocate from — typically
+ * VPU / firmware-shared carveouts. */
+typedef struct {
+    uint64_t addr;
+    uint64_t size;
+} dtb_memreserve_t;
+
+#define DTB_MAX_MEMRESERVES 8
+
+/* /chosen entropy + bootloader metadata. Populated by dtb_parse. */
+typedef struct {
+    /* Firmware-supplied entropy. Each `*_len` is the byte length actually
+     * read from the DTB; the `rng_seed` / `kaslr_seed` arrays may hold a
+     * partial copy if the source property exceeds the static buffer.
+     * Zero `_len` means the property was absent or unreadable. */
+    uint8_t  rng_seed[64];
+    uint32_t rng_seed_len;
+    uint8_t  kaslr_seed[16];
+    uint32_t kaslr_seed_len;
+
+    /* Bootloader metadata (Pi firmware /chosen/bootloader). Strings are
+     * NUL-terminated; numerics are 0 when absent. */
+    char     bootloader_version[80];
+    uint32_t bootloader_capabilities;
+    uint32_t bootloader_build_timestamp;
+    uint32_t bootloader_update_timestamp;
+} dtb_chosen_t;
+
+/* ============================================================================
  * Public Functions
  * ============================================================================ */
 
@@ -144,5 +177,22 @@ const void *dtb_get_blob(void);
  * @return     FDT_OK if valid header, negative error code otherwise
  */
 int dtb_validate(const void *dtb);
+
+/*
+ * Get the firmware-supplied /memreserve/ list. Filled in by dtb_parse.
+ *
+ * Copies up to `max` entries into `out` and returns the number written.
+ * Returns 0 if the DTB had no reserve map or dtb_parse hasn't run.
+ * Entries are physical [addr, addr+size) regions — pass to PMM init so
+ * those pages are never handed out.
+ */
+int dtb_get_memreserves(dtb_memreserve_t *out, int max);
+
+/*
+ * Get the firmware-supplied /chosen entropy + bootloader info. Returns
+ * a stable pointer to a static struct populated by dtb_parse. All fields
+ * are zero when the corresponding DTB property is absent.
+ */
+const dtb_chosen_t *dtb_get_chosen(void);
 
 #endif /* DTB_H */

@@ -423,7 +423,19 @@ SLM-OS includes a minimal DTB parser (`kernel/src/dtb.c`) that:
    - GIC addresses from `/intc@*`, `/gic@*` nodes
    - CPU count from `/cpus/cpu@*` nodes
    - Timer IRQ from `/timer` node
-3. **Falls back** to `platform.h` compile-time defaults if parsing fails
+3. **Reads firmware-supplied side-band info**:
+   - Memory reservations from the FDT header reserve map AND from a
+     non-standard root-node `memreserve` property (Pi firmware uses
+     the latter for its VPU shared-memory carveout). PMM excludes
+     both forms from the buddy allocator via `pmm_carve_reserves`
+     (`kernel/include/pmm_internal.h`).
+   - `/chosen/rng-seed` and `/chosen/kaslr-seed` — folded into the
+     lwIP RNG state at boot (`lwip_rand_seed` in
+     `kernel/net/sys_arch.c`).
+   - `/chosen/bootloader/{version, capabilities, build-timestamp,
+     update-timestamp}` — printed at boot and via the `dtb` shell
+     command for diagnostic provenance.
+4. **Falls back** to `platform.h` compile-time defaults if parsing fails
 
 **Boot flow:**
 

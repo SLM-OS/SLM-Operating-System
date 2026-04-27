@@ -182,6 +182,41 @@ The DTB parser (`kernel/src/dtb.c`) extracts hardware configuration from a Flatt
 | GIC CPU interface | `reg` property (second entry) | Per-CPU interrupt handling |
 | CPU count | `/cpus/cpu@*` node count | SMP initialization |
 | Timer IRQ | `/timer` `interrupts` property | Scheduler tick |
+| Memory reservations | FDT header reserve map + root-node `memreserve` property | PMM excludes reserved ranges from buddy allocator |
+| RNG entropy | `/chosen/rng-seed`, `/chosen/kaslr-seed` | Mixed into lwIP RNG state at boot |
+| Bootloader version | `/chosen/bootloader/{version, capabilities, build-timestamp, update-timestamp}` | Diagnostic display in `dtb` shell output |
+
+**Memory reservations:** Two encodings are supported because firmware
+in the wild uses both:
+
+1. *FDT header reserve map* — the standard `/memreserve/ <addr> <size>;`
+   directive in DTS source compiles to entries at `off_mem_rsvmap` in
+   the FDT header. Each entry is two big-endian `uint64_t` (addr,
+   size); the list ends with a `(0, 0)` terminator.
+
+2. *Root-node `memreserve` property* — Pi 5 firmware (EEPROM
+   `pieeprom-2024-09-23.bin` and similar) encodes its VPU shared-memory
+   carveout this way instead. Property data is a sequence of
+   (`uint32_t` addr, `uint32_t` size) cells — half the width of the
+   reserve-map encoding. On pi-5-1 the runtime DTB carries
+   `/ { memreserve = <0x3fc00000 0x400000>; }` (4 MB at 0x3fc00000).
+
+`dtb_parse` reads both and concatenates them into a single list
+exposed via `dtb_get_memreserves()`. PMM honors the list in
+`pmm_add_region_split` (`kernel/mm/pmm.c`), feeding each carved
+subrange to the buddy allocator via the pure helper
+`pmm_carve_reserves` (declared in `kernel/include/pmm_internal.h`,
+unit-tested in `kernel/tests/test_pmm.c`). Without this carve, the
+buddy could hand out reserved pages and a concurrent
+VPU/firmwarekms write would silently corrupt them.
+
+**RNG entropy:** Pi firmware supplies up to ~80 bytes per boot via
+`/chosen/{rng-seed, kaslr-seed}`. `dtb_parse` copies them into a
+static `dtb_chosen_t`; `kernel_main` calls `lwip_rand_seed()`
+(`kernel/net/sys_arch.c`) to fold them into the LCG state used for
+TCP ISN and ephemeral-port choices. The underlying RNG is still
+non-cryptographic; this just removes the constant-seed leak so values
+vary across reboots.
 
 ### Boot Flow
 
@@ -214,6 +249,15 @@ int dtb_validate(const void *dtb);
 
 /* Print parsed info (debug) */
 void dtb_print_info(const fdt_info_t *info);
+
+/* Get firmware-supplied /memreserve/ entries (header + root property) */
+int dtb_get_memreserves(dtb_memreserve_t *out, int max);
+
+/* Get /chosen entropy + bootloader metadata */
+const dtb_chosen_t *dtb_get_chosen(void);
+
+/* Raw blob pointer for ad-hoc fdt_init lookups by drivers */
+const void *dtb_get_blob(void);
 ```
 
 ### Fallback Behavior
@@ -225,24 +269,35 @@ Current status:
 - **Real hardware**: Bootloaders (U-Boot, UEFI) pass valid DTB pointer
 - **Fallback**: `platform.h` values used when parsing fails
 
-### Shell Command
+### Shell Commands
 
-The `dtb` shell command displays the current platform configuration:
+`dtb` displays the parsed platform configuration including the
+firmware-supplied side-band info (memreserve list, bootloader version,
+entropy lengths) when present:
 
 ```
 slmos> dtb
-Device Tree Information:
-
-  Status:       using defaults
-
-  Memory:
-    Base:       0x40000000
-    Size:       128 MB
-
-  UART:
-    Base:       0x9000000
-    IRQ:        33
+Device Tree Info:
+  Valid:     yes
+  RAM:       0x0 - 0x100000000 (4096 MB)
   ...
+  /memreserve/:
+    [0] 0x3fc00000 + 0x400000
+  Bootloader:
+    version:      2682625908f5585e5f4832bb82e74e7d757ec48f
+    capabilities: 0x7f
+    build-ts:     0x66f16700
+  Firmware entropy: rng-seed=64 B, kaslr-seed=8 B
+```
+
+`dtb-dump` prints the runtime (post-firmware-fixup) DTB as a hex
+stream between `DTB-START` and `DTB-END` markers. Useful for triaging
+DTB-related behavior — capture serial output, then on the host:
+
+```bash
+awk '/^DTB-START/{f=1;next} /^DTB-END/{f=0} f' capture.txt \
+    | tr -d ' \r\n' | xxd -r -p > runtime.dtb
+dtc -I dtb -O dts runtime.dtb
 ```
 
 ### Future Work

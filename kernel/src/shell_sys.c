@@ -2698,6 +2698,75 @@ int cmd_peek(int argc, char *argv[])
 }
 
 /*
+ * dtb-dump - Hex dump of the firmware-passed DTB for offline triage.
+ *
+ * Prints the runtime DTB (post firmware fix-ups) as a hex stream
+ * between DTB-START and DTB-END markers. Capture the serial output,
+ * pipe through `xxd -r -p` to recover the binary, and `dtc -I dtb -O dts`
+ * for a readable diff against the on-disk .dtb file.
+ *
+ * Originally added during the #414 EMMC2 investigation; kept in tree
+ * because DTB triage on Pi/Jetson recurs.
+ */
+
+/* Sanity bound: refuse to dump a DTB that claims to be larger than this.
+ * Pi 5's runtime DTB is ~80 KB; Linux DTBs typically fit in 100 KB.
+ * 1 MB is generous but bounded — a corrupt totalsize won't make the
+ * shell stream gigabytes over UART. */
+#define DTB_DUMP_MAX_BYTES   (1U << 20)
+
+/* Hex encoding is done in chunks to avoid one shell_puts per byte (each
+ * call would acquire the UART lock). At 64 bytes per chunk, an 80 KB DTB
+ * needs ~1280 puts calls instead of ~80,000. */
+#define DTB_DUMP_CHUNK_BYTES 64
+
+int cmd_dtb_dump(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    extern const void *dtb_get_blob(void);
+    const uint8_t *p = (const uint8_t *)dtb_get_blob();
+    if (!p) { shell_puts("no DTB available\r\n"); return -1; }
+
+    /* FDT magic (big-endian 0xd00dfeed) at offset 0, totalsize at offset 4. */
+    uint32_t magic = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                     ((uint32_t)p[2] <<  8) | ((uint32_t)p[3] <<  0);
+    if (magic != 0xd00dfeed) {
+        shell_printf("not a DTB: magic=0x%08lx at %p\r\n",
+                     (unsigned long)magic, (const void *)p);
+        return -1;
+    }
+    uint32_t total = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) |
+                     ((uint32_t)p[6] <<  8) | ((uint32_t)p[7] <<  0);
+    if (total == 0 || total > DTB_DUMP_MAX_BYTES) {
+        shell_printf("DTB totalsize implausible: %lu\r\n", (unsigned long)total);
+        return -1;
+    }
+
+    shell_printf("DTB-START addr=%p size=%lu magic=0x%08lx\r\n",
+                 (const void *)p, (unsigned long)total, (unsigned long)magic);
+    static const char hex[] = "0123456789abcdef";
+    char chunk[DTB_DUMP_CHUNK_BYTES * 2 + 3];   /* hex + "\r\n" + NUL */
+    uint32_t i = 0;
+    while (i < total) {
+        uint32_t take = total - i < DTB_DUMP_CHUNK_BYTES
+                        ? total - i : DTB_DUMP_CHUNK_BYTES;
+        uint32_t pos = 0;
+        for (uint32_t k = 0; k < take; k++) {
+            uint8_t b = p[i + k];
+            chunk[pos++] = hex[(b >> 4) & 0xF];
+            chunk[pos++] = hex[b & 0xF];
+        }
+        chunk[pos++] = '\r';
+        chunk[pos++] = '\n';
+        chunk[pos] = '\0';
+        shell_puts(chunk);
+        i += take;
+    }
+    shell_puts("DTB-END\r\n");
+    return 0;
+}
+
+/*
  * poke - Write a 32-bit word to an arbitrary physical memory address.
  *
  *   poke <phys-hex> <val-hex>

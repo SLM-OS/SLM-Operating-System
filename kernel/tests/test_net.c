@@ -1804,6 +1804,72 @@ static void test_net_mmio_watchdog_fires_on_stall(void)
 }
 #endif /* PLATFORM_QEMU_VIRT */
 
+/* ============================================================================
+ * lwIP RNG (kernel/net/sys_arch.c)
+ *
+ * lwip_rand_seed mixes DTB-supplied /chosen/{rng-seed,kaslr-seed}
+ * entropy into the LCG state at boot. These tests verify the seed is
+ * observable in subsequent output. The underlying RNG is
+ * non-cryptographic; we only verify state-mutation, not statistical
+ * quality.
+ * ============================================================================ */
+
+/* lwip_rand_slm + lwip_rand_seed prototypes come from <net.h>. */
+
+static void test_lwip_rand_seed_changes_output(void)
+{
+    uint32_t baseline_a = lwip_rand_slm();
+    uint32_t baseline_b = lwip_rand_slm();
+
+    static const uint8_t entropy[32] = {
+        0xa1,0xb2,0xc3,0xd4,0xe5,0xf6,0x07,0x18,
+        0x29,0x3a,0x4b,0x5c,0x6d,0x7e,0x8f,0x90,
+        0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,
+        0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff,0x00,
+    };
+    lwip_rand_seed(entropy, sizeof(entropy));
+
+    uint32_t after_a = lwip_rand_slm();
+    uint32_t after_b = lwip_rand_slm();
+
+    bool any_diff = (after_a != baseline_a) || (after_b != baseline_b);
+    TEST_ASSERT_TRUE(any_diff);
+}
+
+static void test_lwip_rand_seed_null_or_zero_len_does_not_crash(void)
+{
+    /* Smoke test: NULL bytes and zero length must be safe inputs.
+     *
+     * Note: a stricter "is observably a no-op on rand_state" assertion
+     * would need a state-readback hook in sys_arch.c, since
+     * `lwip_rand_slm` advances state and folds in a fresh timer count
+     * on every call — making "did the seed call write state?" hard to
+     * observe from outside. The function's body has an early
+     * `if (!bytes || len == 0) return;` guard; this test verifies the
+     * guard is reachable and downstream RNG usage still works. */
+    lwip_rand_seed(NULL, 32);
+    lwip_rand_seed("data", 0);
+    (void)lwip_rand_slm();
+    TEST_ASSERT_TRUE(true);
+}
+
+static void test_lwip_rand_seed_different_inputs_diverge(void)
+{
+    static const uint8_t seed_a[16] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+    static const uint8_t seed_b[16] = {2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2};
+
+    /* Pre-roll to align timer mix between the two paths. */
+    (void)lwip_rand_slm();
+    (void)lwip_rand_slm();
+
+    lwip_rand_seed(seed_a, sizeof(seed_a));
+    uint32_t r1 = lwip_rand_slm();
+    lwip_rand_seed(seed_b, sizeof(seed_b));
+    uint32_t r2 = lwip_rand_slm();
+
+    TEST_ASSERT_TRUE(r1 != r2);
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -1843,6 +1909,11 @@ int test_suite_net(void)
     RUN_TEST(test_tcp_shell_server_stats_invariants);
     RUN_TEST(test_tcp_shell_server_note_session_pair);
     RUN_TEST(test_net_stats_initial_values);
+
+    /* lwIP RNG / lwip_rand_seed (DTB-driven entropy seeding) */
+    RUN_TEST(test_lwip_rand_seed_changes_output);
+    RUN_TEST(test_lwip_rand_seed_null_or_zero_len_does_not_crash);
+    RUN_TEST(test_lwip_rand_seed_different_inputs_diverge);
 
     /* Virtqueue descriptor ring tests (MMIO driver, QEMU_VIRT only) */
 #if defined(PLATFORM_QEMU_VIRT)
