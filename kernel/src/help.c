@@ -10,7 +10,7 @@
  */
 
 #include "help.h"
-#include "uart.h"
+#include "shell.h"
 #include "vfs.h"
 #include "littlefs_slm.h"
 #include "string.h"
@@ -1316,7 +1316,13 @@ int help_show(const char *command)
         if (bytes <= 0) break;
 
         buf[bytes] = '\0';
-        uart_puts(buf);
+        /* shell_puts routes through the bound session's io backend;
+         * UART gets `\n` -> `\r\n` translation in shell_io_uart, and
+         * telnet gets the same translation in shell_io_tcp. Using
+         * uart_puts here would dump the help text to the physical
+         * UART even when the user is on a telnet session, leaving
+         * the telnet client with no visible output. */
+        shell_puts(buf);
         total += bytes;
         offset += bytes;
 
@@ -1324,7 +1330,7 @@ int help_show(const char *command)
     }
 
     if (total == 0) {
-        uart_printf("No help available for '%s'\n", command);
+        shell_printf("No help available for '%s'\n", command);
         return -1;
     }
 
