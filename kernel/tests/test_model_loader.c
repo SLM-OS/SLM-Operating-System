@@ -141,6 +141,68 @@ static void test_infer_invalid_model(void)
     TEST_ASSERT_TRUE(result < 0);
 }
 
+/*
+ * rust_infer_and_print error/success-path coverage.
+ *
+ * The function was reworked alongside rust_infer_buf_and_print to
+ * (a) lift its OUTPUT array off `static mut` so two concurrent shell
+ * sessions can't race it, (b) reject `result == 0` from the engine
+ * with -3 instead of a misleading "predicted class 0", and (c) cap
+ * the argmax loop at output.len() so a future engine drift can't
+ * panic-abort the kernel via an OOB index. Tests below pin the
+ * invalid-index and success-path contracts; the result==0 / OOB
+ * branches are dormant today (engine never produces those shapes
+ * for MNIST) but the cap + early-return are belt-and-braces.
+ */
+static void test_infer_and_print_invalid_model(void)
+{
+    int result = rust_infer_and_print(99);
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
+static void test_infer_and_print_success_path(void)
+{
+    /* Load built-in MNIST so model index returned by load is valid.
+     * rust_infer_and_print uses an internal zero-input buffer so we
+     * don't need to prepare features here. */
+    int idx = rust_model_load_builtin_mnist();
+    TEST_ASSERT_MESSAGE(idx >= 0, "MNIST load must succeed");
+
+    int result = rust_infer_and_print((uint32_t)idx);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    /* Clean up so subsequent tests start with a fresh registry. */
+    (void)rust_model_unload((uint32_t)idx);
+}
+
+/*
+ * rust_infer_buf_and_print contract checks. Same -1/-2/-3 mapping the
+ * shell `model infer-file` command uses; pin each input-validation
+ * branch.
+ */
+static void test_infer_buf_and_print_null_input(void)
+{
+    /* SAFETY: even with a non-existent model index, the NULL/0
+     * checks fire before the registry lookup, so -2 is expected
+     * before any model state is touched. */
+    int result = rust_infer_buf_and_print(0, NULL, 784);
+    TEST_ASSERT_EQUAL_INT(-2, result);
+}
+
+static void test_infer_buf_and_print_zero_floats(void)
+{
+    uint32_t buf[1] = { 0 };
+    int result = rust_infer_buf_and_print(0, (const float *)buf, 0);
+    TEST_ASSERT_EQUAL_INT(-2, result);
+}
+
+static void test_infer_buf_and_print_invalid_model(void)
+{
+    uint32_t buf[1] = { 0 };
+    int result = rust_infer_buf_and_print(99, (const float *)buf, 1);
+    TEST_ASSERT_EQUAL_INT(-1, result);
+}
+
 int test_suite_inference(void)
 {
     /* Part 1: Rust-side inference tests */
@@ -152,6 +214,11 @@ int test_suite_inference(void)
     RUN_TEST(test_infer_null_input);
     RUN_TEST(test_infer_null_output);
     RUN_TEST(test_infer_invalid_model);
+    RUN_TEST(test_infer_and_print_invalid_model);
+    RUN_TEST(test_infer_and_print_success_path);
+    RUN_TEST(test_infer_buf_and_print_null_input);
+    RUN_TEST(test_infer_buf_and_print_zero_floats);
+    RUN_TEST(test_infer_buf_and_print_invalid_model);
 
     failures += UnityEnd();
 

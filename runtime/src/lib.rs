@@ -4709,31 +4709,39 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
         None => return -1,
     };
 
-    // Use static buffers to avoid blowing the 32KB stack
+    // INPUT stays as a `static` immutable so concurrent callers share
+    // the same zero buffer harmlessly. OUTPUT was previously a
+    // `static mut` shared across calls — lifted to the stack so two
+    // concurrent shell sessions calling `model infer` can't race the
+    // same array. 64 × 4 = 256 B on a 16 KB kernel-task stack.
     static INPUT: [f32; 784] = [0.0f32; 784];
-    static mut OUTPUT: [f32; 64] = [0.0f32; 64];
+    let mut output: [f32; 64] = [0.0f32; 64];
 
     let start = kernel_ffi::get_time_ns();
 
-    // SAFETY: This function is only called from the single-threaded shell.
-    let result = unsafe {
-        for o in OUTPUT.iter_mut() { *o = 0.0; }
-
-        match inference::run_inference(
-            idx,
-            INPUT.as_ptr(),
-            INPUT.len(),
-            OUTPUT.as_mut_ptr(),
-            OUTPUT.len(),
-        ) {
-            Ok(n) => n,
-            Err(_) => return -3,
-        }
+    let result = match inference::run_inference(
+        idx,
+        INPUT.as_ptr(),
+        INPUT.len(),
+        output.as_mut_ptr(),
+        output.len(),
+    ) {
+        Ok(n) => n,
+        Err(_) => return -3,
     };
+
+    // Engine returned 0 outputs — treat as an engine error rather
+    // than letting the caller see "predicted class 0" (the for-loop
+    // below would skip the body and the function would return 0
+    // ambiguously).
+    if result == 0 {
+        return -3;
+    }
 
     let end = kernel_ffi::get_time_ns();
     let elapsed_us = (end - start) / 1000;
 
+    // SAFETY: pure FFI calls, formats match arg types.
     unsafe {
         uart_printf(
             b"Inference on '%s' completed in %lu us\r\n\0".as_ptr(),
@@ -4743,13 +4751,19 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
         uart_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
     }
 
-    // Find argmax and print outputs
+    // Find argmax and print outputs. Cap the loop at output.len() as
+    // belt-and-braces — the engine contract says it caps to the
+    // supplied buffer length, but a future drift would otherwise
+    // panic-abort on the [i] index. With panic=abort that would
+    // hard-stop the kernel rather than truncate.
+    let n = result.min(output.len());
     let mut argmax: usize = 0;
-    let mut max_val = unsafe { OUTPUT[0] };
-    for i in 0..result {
-        let val = unsafe { OUTPUT[i] };
+    let mut max_val = output[0];
+    for i in 0..n {
+        let val = output[i];
         let pct = (val * 1000.0) as i32;
         let pct = if pct < 0 { 0 } else { pct };
+        // SAFETY: pure FFI call, fmt has matching specifiers.
         unsafe {
             uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
         }
@@ -4759,6 +4773,7 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
         }
     }
 
+    // SAFETY: pure FFI call, fmt has matching specifiers.
     unsafe {
         uart_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
     }
@@ -4861,6 +4876,21 @@ pub extern "C" fn rust_infer_buf_and_print(
         }
     };
 
+    // Engine returned 0 outputs — treat as an engine error rather
+    // than letting the caller see "predicted class 0" (the for-loop
+    // below would skip the body and `argmax` would stay at 0
+    // ambiguously).
+    if result == 0 {
+        // SAFETY: pure FFI call, fmt has matching specifiers.
+        unsafe {
+            uart_printf(
+                b"[infer-buf] engine returned 0 outputs on '%s'\r\n\0".as_ptr(),
+                info.name.as_ptr(),
+            );
+        }
+        return -3;
+    }
+
     let end = kernel_ffi::get_time_ns();
     let elapsed_us = (end - start) / 1000;
 
@@ -4874,10 +4904,15 @@ pub extern "C" fn rust_infer_buf_and_print(
         uart_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
     }
 
-    // Find argmax and print outputs.
+    // Find argmax and print outputs. Cap at output.len() as
+    // belt-and-braces — the engine contract says it caps to the
+    // supplied buffer length, but a future drift would otherwise
+    // panic-abort on the [i] index. With panic=abort that would
+    // hard-stop the kernel rather than truncate.
+    let n = result.min(output.len());
     let mut argmax: usize = 0;
     let mut max_val = output[0];
-    for i in 0..result {
+    for i in 0..n {
         let val = output[i];
         let pct = (val * 1000.0) as i32;
         let pct = if pct < 0 { 0 } else { pct };
