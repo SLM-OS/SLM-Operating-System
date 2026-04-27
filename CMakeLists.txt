@@ -1429,8 +1429,12 @@ endif()
 # seed the cache with that path so the canonical demo build picks it
 # up automatically. Explicit `-DGA10B_FIRMWARE_DIR=` (empty) keeps
 # the firmware embed disabled because the cache entry already exists
-# at that point — DEFINED CACHE{...} guards the auto-pick to the
-# truly-fresh-configure case.
+# at that point — `DEFINED CACHE{NAME}` (CMake ≥ 3.14; this project
+# pins ≥ 3.20 at the top of the file) guards the auto-pick to the
+# truly-fresh-configure case. The else branch only runs when the
+# cache already holds a value, in which case the trailing
+# `set(... CACHE PATH ...)` without FORCE is a no-op — i.e. the
+# `_ga10b_initial = ""` assignment can never clobber a user override.
 if(PLATFORM STREQUAL "JETSON_ORIN_NANO" AND NOT DEFINED CACHE{GA10B_FIRMWARE_DIR})
     set(_ga10b_default_dir "$ENV{HOME}/jetson-ga10b-firmware")
     if(IS_DIRECTORY "${_ga10b_default_dir}")
@@ -1442,6 +1446,9 @@ if(PLATFORM STREQUAL "JETSON_ORIN_NANO" AND NOT DEFINED CACHE{GA10B_FIRMWARE_DIR
 else()
     set(_ga10b_initial "")
 endif()
+# CACHE without FORCE: writes only when the cache entry doesn't exist
+# yet, so a user-supplied -DGA10B_FIRMWARE_DIR=... (even empty) is
+# preserved across reconfigures.
 set(GA10B_FIRMWARE_DIR "${_ga10b_initial}" CACHE PATH
     "Directory containing ga10b nvgpu firmware (see scripts/tools/fetch-ga10b-firmware.sh)")
 

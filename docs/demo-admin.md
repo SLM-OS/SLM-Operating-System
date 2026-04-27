@@ -19,10 +19,14 @@ to file.
 * SLM-OS built with `make kernel PLATFORM=JETSON_ORIN_NANO AI_SCHED=ON`
   and deployed via `sudo slmos-kexec /root/slmos.elf` to `jetson-nano-2`.
   Networking, DHCP-at-boot, telnetd autostart, and GA10B firmware
-  embedding are all default-ON for `JETSON_ORIN_NANO` — the only
+  embedding are all default-ON for `JETSON_ORIN_NANO`. The only
   prerequisite outside the build itself is having the firmware blobs
-  staged at `$HOME/jetson-ga10b-firmware/` (run
-  `scripts/tools/fetch-ga10b-firmware.sh` once after a fresh clone).
+  staged at `$HOME/jetson-ga10b-firmware/`. Run
+  `scripts/tools/fetch-ga10b-firmware.sh` once after a fresh clone —
+  it scp's the 17-file GA10B nvgpu firmware set (~1 MB total) from
+  `/lib/firmware/nvidia/ga10b/` on a running Jetson into the build
+  host's `$HOME` (the script defaults match the CMake auto-detect
+  path). The firmware is NVIDIA-proprietary and not in the repo.
   Equivalent QEMU build works for everything except the GPU consumer
   toggle's success path (no Jetson GA10B in QEMU).
 * Telnet reachable: `nc 192.168.4.5 2323`. The shell prompt appears
