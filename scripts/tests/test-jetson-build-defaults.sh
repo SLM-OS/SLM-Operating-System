@@ -3,7 +3,9 @@
 #
 # Functional test for the Jetson default-build-flags policy:
 #   1. NET_TELNETD_AUTOSTART defaults ON for JETSON_ORIN_NANO and OFF
-#      for QEMU_VIRT (and X86_64 if available).
+#      for QEMU_VIRT. (X86_64 isn't covered today — it would need a
+#      separate cmake/toolchain-x86_64-none-elf.cmake invocation; add
+#      a Scenario 6 if/when an x86-64 default flips into scope.)
 #   2. GA10B_FIRMWARE_DIR auto-detects $HOME/jetson-ga10b-firmware on a
 #      first-time configure when the directory exists, and stays empty
 #      when the user explicitly passes -DGA10B_FIRMWARE_DIR= (empty).
@@ -45,11 +47,15 @@ PASSES=0
 FAILS=0
 
 # Synthesize a fake firmware dir holding the 17 blob filenames the
-# CMake required-files check looks for (kernel CMakeLists.txt
-# `_ga10b_required` list). Files are zero-byte; the build never reads
-# them at configure time. Used to exercise the auto-detect *positive*
-# branch deterministically regardless of whether the build host has
-# the real firmware staged.
+# CMake required-files check looks for. Mirrors the `_ga10b_required`
+# list in CMakeLists.txt — if CMake gains a new required filename and
+# this list isn't updated, Scenario 4a's compile-def assertion will
+# fail (CMake's per-file EXISTS check warns + disables firmware embed,
+# so ENABLE_GA10B_FIRMWARE goes missing from compile_commands.json),
+# which is the loud-failure signal we want. Drift in the other
+# direction (CMake removes a name still in this list) is silent but
+# harmless — the file just goes unused. Files are zero-byte; the
+# build never reads them at configure time.
 make_fake_firmware_dir() {
     local dir="$1"
     mkdir -p "$dir"
@@ -121,7 +127,12 @@ configure_case() {
     if [[ -n "$home_override" ]]; then
         cmake_env=(env "HOME=$home_override")
     fi
-    if ! "${cmake_env[@]}" cmake "$REPO_ROOT" \
+    # `${arr[@]+"${arr[@]}"}` is the canonical "expand only if defined"
+    # idiom — works on bash 3.x and survives `set -u` even when the
+    # array is empty. The simpler `"${arr[@]}"` form errors under
+    # `set -u` on bash ≤ 4.3. Keep this form so the script runs on
+    # any system bash CI lab boxes might have.
+    if ! ${cmake_env[@]+"${cmake_env[@]}"} cmake "$REPO_ROOT" \
             -DPLATFORM="$platform" \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_TOOLCHAIN_FILE="$REPO_ROOT/cmake/toolchain-aarch64-none-elf.cmake" \
