@@ -277,8 +277,8 @@ Verify `TASK_CONTEXT_OFFSET` in `context.S` matches actual offset of `context` f
 3. MMU mappings incomplete
 
 **Solutions:**
-1. Verify `rust_model_mem_init()` called during boot
-2. Check pool sizes in `model_mem.rs`
+1. Verify `rust_model_mem_init(MODEL_MEM_WEIGHT_MB, MODEL_MEM_WORKSPACE_MB)` is called during boot (call site in `kernel/src/main.c`)
+2. Check the per-platform pool sizes in `kernel/include/config.h` — Jetson Orin Nano needs 2048/256 for SLM workloads; QEMU defaults of 256/128 will under-fit a 1.5 B parameter Q4_K_M model
 3. Verify physical memory is mapped in page tables
 
 ### Memory leak detected
