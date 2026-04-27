@@ -694,6 +694,8 @@ static void test_camrtc_ch_setup_accessors_uninit_zero(void)
  * inside bit-packed members, so this runtime test sets each flag
  * individually on a zero-init struct and verifies the underlying
  * 32-bit container word reads back as the expected (1u << bit_pos).
+ * Also verifies the bitfield write doesn't bleed past byte 3 into
+ * `match.datatype` at offset 4.
  *
  * If a future toolchain or struct reorder changes the bit packing,
  * RCE will program VI registers with the wrong flags and capture
@@ -705,13 +707,16 @@ static void test_camrtc_vi_channel_config_bitfield_positions(void)
     struct camrtc_vi_channel_config cfg;
 
     /* Each iteration zeroes the whole struct, sets one bitfield to
-     * 1, and reads the underlying 4-byte container word. */
+     * 1, reads the underlying 4-byte container word, and checks
+     * that the adjacent `match.datatype` byte at offset 4 stays
+     * zero (no write-bleed past the container). */
     #define CHECK_BIT(field, bit) do {                              \
         for (size_t _i = 0; _i < sizeof(cfg); _i++)                 \
             ((volatile uint8_t *)&cfg)[_i] = 0u;                    \
         cfg.field = 1u;                                             \
         uint32_t _word = *(volatile uint32_t *)&cfg;                \
         TEST_ASSERT_EQUAL_HEX32(((uint32_t)1u) << (bit), _word);    \
+        TEST_ASSERT_EQUAL_HEX8(0u, cfg.match.datatype);             \
     } while (0)
 
     CHECK_BIT(dt_enable,                  0);
@@ -729,6 +734,28 @@ static void test_camrtc_vi_channel_config_bitfield_positions(void)
     CHECK_BIT(compand_enable,             12);
 
     #undef CHECK_BIT
+
+    /* Set all 13 single-bit flags simultaneously; underlying word
+     * must read back as bits 0..12 set (= 0x1FFF). pad_flags__:19
+     * stays untouched so bits 13..31 remain zero. */
+    for (size_t i = 0; i < sizeof(cfg); i++)
+        ((volatile uint8_t *)&cfg)[i] = 0u;
+    cfg.dt_enable                  = 1u;
+    cfg.embdata_enable             = 1u;
+    cfg.flush_enable               = 1u;
+    cfg.flush_periodic             = 1u;
+    cfg.line_timer_enable          = 1u;
+    cfg.line_timer_periodic        = 1u;
+    cfg.pixfmt_enable              = 1u;
+    cfg.pixfmt_wide_enable         = 1u;
+    cfg.pixfmt_wide_endian         = 1u;
+    cfg.pixfmt_pdaf_replace_enable = 1u;
+    cfg.ispbufa_enable             = 1u;
+    cfg.ispbufb_enable             = 1u;
+    cfg.compand_enable             = 1u;
+    TEST_ASSERT_EQUAL_HEX32(0x1FFFu, *(volatile uint32_t *)&cfg);
+    /* And `match.datatype` at offset 4 still zero. */
+    TEST_ASSERT_EQUAL_HEX8(0u, cfg.match.datatype);
 }
 
 int test_suite_camera(void)
@@ -1077,6 +1104,28 @@ _Static_assert(VI_NUM_ATOMP_SURFACES == 4u,
     "VI_NUM_ATOMP_SURFACES drift — atomp surface array length (T194/T234)");
 _Static_assert(sizeof(struct camrtc_vi_channel_config) == 160,
     "camrtc_vi_channel_config must be exactly 160 bytes (RCE wire format)");
+_Static_assert(_Alignof(struct camrtc_vi_channel_config) == 8,
+    "camrtc_vi_channel_config alignment must be 8 (CAPTURE_IVC_ALIGN)");
+
+/* Substruct sizes — pin each anonymous nested block. The
+ * `sizeof(((T *)0)->m)` idiom works at compile time on
+ * anonymous-typed members so we don't need named struct tags. */
+_Static_assert(sizeof(((struct camrtc_vi_channel_config *)0)->match) == 16,
+    "vi_channel_config.match must be exactly 16 bytes");
+_Static_assert(sizeof(((struct camrtc_vi_channel_config *)0)->frame) == 20,
+    "vi_channel_config.frame must be exactly 20 bytes");
+_Static_assert(sizeof(((struct camrtc_vi_channel_config *)0)->pixfmt) == 28,
+    "vi_channel_config.pixfmt must be exactly 28 bytes (4 B header + 24 B pdaf)");
+_Static_assert(sizeof(((struct camrtc_vi_channel_config *)0)->pixfmt.pdaf) == 24,
+    "vi_channel_config.pixfmt.pdaf must be exactly 24 bytes");
+_Static_assert(sizeof(((struct camrtc_vi_channel_config *)0)->dpcm) == 24,
+    "vi_channel_config.dpcm must be exactly 24 bytes");
+_Static_assert(sizeof(((struct camrtc_vi_channel_config *)0)->atomp) == 52,
+    "vi_channel_config.atomp must be exactly 52 bytes (4 surfaces + 4 strides + chunk_stride)");
+_Static_assert(sizeof(((struct camrtc_vi_channel_config *)0)->atomp.surface[0]) == 8,
+    "vi_channel_config.atomp.surface[i] must be exactly 8 bytes (offset:4 + offset_hi:4)");
+_Static_assert(sizeof(((struct camrtc_vi_channel_config *)0)->pad__) == 4,
+    "vi_channel_config.pad__[2] must be exactly 4 bytes");
 
 /* Top-level field offsets. */
 _Static_assert(offsetof(struct camrtc_vi_channel_config, match) == 4,

@@ -958,17 +958,32 @@ at runtime by `test_camrtc_vi_channel_config_bitfield_positions`):
 
 **Test coverage** (added to `kernel/tests/test_camera.c`):
 
-- 1 `_Static_assert` on `VI_NUM_ATOMP_SURFACES == 4u`
-- 1 `_Static_assert` on `sizeof(camrtc_vi_channel_config) == 160`
+Compile-time (`_Static_assert`):
+
+- 1 on `VI_NUM_ATOMP_SURFACES == 4u`
+- 1 on `sizeof(camrtc_vi_channel_config) == 160`
+- 1 on `_Alignof(camrtc_vi_channel_config) == 8`
+- 8 substruct sizeof asserts (match=16, frame=20, pixfmt=28,
+  pixfmt.pdaf=24, dpcm=24, atomp=52, atomp.surface[0]=8, pad__=4)
 - 14 top-level field-offset asserts
 - 10 `match` substruct field-offset asserts
 - 8 `frame` substruct field-offset asserts (incl. nested skip/crop)
 - 15 `pixfmt` substruct field-offset asserts (incl. nested pdaf)
 - 10 `dpcm` substruct field-offset asserts
-- 6 `atomp` substruct field-offset asserts (incl. surface array)
-- `test_camrtc_vi_channel_config_bitfield_positions` runtime test:
-  zero the struct, set one flag at a time, read the underlying
-  4-byte container word, assert it equals `1u << bit_pos`.
+- 6 `atomp` substruct field-offset asserts (incl. surface array
+  first + last element + last stride for stride-drift detection)
+
+Runtime (`test_camrtc_vi_channel_config_bitfield_positions`):
+
+- Zero the struct, set one of the 13 single-bit flags at a time,
+  read the underlying 4-byte container word, assert it equals
+  `1u << bit_pos`.
+- After each single-bit set, assert `match.datatype` (offset 4)
+  is still zero — proves the bitfield write doesn't bleed past
+  the container.
+- Set all 13 flags simultaneously, assert the container reads
+  back as `0x1FFFu` exactly (bits 0..12 set, pad_flags__:19
+  untouched). Verifies cumulative composition is clean.
 
 **NOT YET POPULATED.** No driver or shell code currently writes
 to the struct. `csidiag` zero-inits its descriptor slot which
