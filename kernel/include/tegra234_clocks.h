@@ -100,6 +100,18 @@
 #define TEGRA234_RESET_VI           112U
 #define TEGRA234_RESET_VI2          115U
 
+/* Camera RTCPU (RCE). Used by `camrtc_init` to re-engage RCE
+ * post-kexec — Linux's `.shutdown()` callback for
+ * `tegra-camera-rtcpu` asserts `RESET_RCE_ALL` and disables these
+ * three clocks; mirroring the inverse from SLM-OS restarts the
+ * firmware in place from its DRAM carveout. See
+ * `docs/jetson-camera-rtcpu-ivc-driver-notes.md` "Hardware Task 3
+ * Option B — RESOLVED" + closed issue #438. */
+#define TEGRA234_CLK_RCE_CPU_NIC    113U
+#define TEGRA234_CLK_RCE_NIC        114U
+#define TEGRA234_CLK_RCE_CPU        433U
+#define TEGRA234_RESET_RCE_ALL      81U
+
 /* ===================================================================== */
 /*  External-peripheral clocks (camera XCLK)                             */
 /* ===================================================================== */

@@ -5767,9 +5767,10 @@ int cmd_rcediag(int argc, char *argv[])
         uart_puts("  *** hsp_rce MMIO unreachable — CBB firewall  ***\r\n");
         uart_puts("  *** or HSP block clock-gated.                ***\r\n");
     } else if (rc == -2) {
-        uart_puts("  *** RCE firmware not loaded — bootloader did ***\r\n");
-        uart_puts("  *** not release the R5. Camera complex is    ***\r\n");
-        uart_puts("  *** unusable for this boot.                  ***\r\n");
+        uart_puts("  *** BPMP rejected a poweron MRQ, OR RCE       ***\r\n");
+        uart_puts("  *** firmware not loaded — check the WARN log  ***\r\n");
+        uart_puts("  *** line above for which step failed, then    ***\r\n");
+        uart_puts("  *** verify BPMP IPC via the `bpmp` command.   ***\r\n");
     } else if (rc == -3) {
         uart_puts("  *** HELLO/PROTOCOL/RESUME timed out — RCE    ***\r\n");
         uart_puts("  *** is not responding on the HSP mailbox.    ***\r\n");

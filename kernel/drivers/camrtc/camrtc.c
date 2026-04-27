@@ -34,8 +34,10 @@
 
 #include <stdint.h>
 
+#include "bpmp.h"
 #include "debug.h"
 #include "platform.h"
+#include "tegra234_clocks.h"
 #include "timer.h"
 
 /* ---- HSP layout constants (mirror kernel/drivers/bpmp/hsp.c) ---- */
@@ -231,6 +233,50 @@ int camrtc_init(void)
 {
     if (g_initialised) return 0;
 
+    /* Re-engage RCE before talking HSP-VM. Linux's kexec
+     * `.shutdown` callback for `tegra-camera-rtcpu` does the
+     * inverse of this: sends `CAMRTC_HSP_BYE` to RCE, then calls
+     * `tegra_camrtc_poweroff` which asserts `RESET_RCE_ALL` and
+     * disables the rce clocks (cached at
+     * `docs/reference/l4t-tegra-camera-rtcpu.c:893,1402`). After
+     * kexec, R5 stops executing (clock-gated) even though
+     * `R5_CTRL_0.FWLOADDONE` stays set. SLM-OS's HELLO writes to
+     * SM[0] then sit forever because the HSP-VM ISR isn't running.
+     *
+     * Mirroring `tegra_camrtc_poweron` (RCE clocks on, reset
+     * deasserted) restarts the firmware in place — no FW reload
+     * needed because the RCE carveout in DRAM is preserved across
+     * kexec. Verified live on jetson-nano-1: after this sequence
+     * the firmware prints its boot line ("Camera-FW on
+     * t234-rce-safe ready") on the shared console and the HELLO
+     * + PROTOCOL + RESUME handshake completes. Each MRQ is
+     * idempotent, so the cost on a healthy RCE is one BPMP
+     * round-trip per call. */
+    int rc = bpmp_clk_enable(TEGRA234_CLK_RCE_CPU_NIC);
+    if (rc != 0) {
+        WARN("camrtc: bpmp_clk_enable(RCE_CPU_NIC) rc=%d", rc);
+        return -2;
+    }
+    rc = bpmp_clk_enable(TEGRA234_CLK_RCE_NIC);
+    if (rc != 0) {
+        WARN("camrtc: bpmp_clk_enable(RCE_NIC) rc=%d", rc);
+        return -2;
+    }
+    rc = bpmp_clk_enable(TEGRA234_CLK_RCE_CPU);
+    if (rc != 0) {
+        WARN("camrtc: bpmp_clk_enable(RCE_CPU) rc=%d", rc);
+        return -2;
+    }
+    rc = bpmp_reset_deassert(TEGRA234_RESET_RCE_ALL);
+    if (rc != 0) {
+        WARN("camrtc: bpmp_reset_deassert(RCE_ALL) rc=%d", rc);
+        return -2;
+    }
+    /* Give the firmware a moment to re-initialise. ~10 ms is
+     * empirically generous — the live trace shows the boot line
+     * within 1.2 ms of clock-on on jetson-nano-1. */
+    timer_busy_wait_us(10000u);
+
     uintptr_t hsp_base = (uintptr_t)TEGRA234_RCE_HSP_BASE;
     uintptr_t pm_base  = (uintptr_t)TEGRA234_RCE_PM_BASE;
 
@@ -343,8 +389,8 @@ int camrtc_init(void)
                           / 1000000ULL;
     for (;;) {
         uint32_t resp = 0;
-        int rc = sm_rx_recv(&resp, 5000u);
-        if (rc != 0) {
+        int rx_rc = sm_rx_recv(&resp, 5000u);
+        if (rx_rc != 0) {
             if (timer_get_count() >= deadline) {
                 WARN("camrtc: HELLO response timeout (cookie=0x%x)",
                      (unsigned)cookie);

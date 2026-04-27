@@ -539,6 +539,20 @@ _Static_assert(TEGRA234_CLK_VI_CONST == 196u, "TEGRA234_CLK_VI_CONST drift");
 _Static_assert(TEGRA234_RESET_VI     == 112u, "TEGRA234_RESET_VI drift");
 _Static_assert(TEGRA234_RESET_VI2    == 115u, "TEGRA234_RESET_VI2 drift");
 
+/* Camera RTCPU (RCE). Used by `camrtc_init` to re-engage RCE
+ * post-kexec — see `kernel/drivers/camrtc/camrtc.c` + closed
+ * issue #438 for the BPMP poweron sequence that depends on these
+ * exact IDs. Pin them against
+ * `docs/reference/linux-dt-bindings-tegra234-{clock,reset}.h`. */
+_Static_assert(TEGRA234_CLK_RCE_CPU_NIC == 113u,
+    "TEGRA234_CLK_RCE_CPU_NIC drift");
+_Static_assert(TEGRA234_CLK_RCE_NIC     == 114u,
+    "TEGRA234_CLK_RCE_NIC drift");
+_Static_assert(TEGRA234_CLK_RCE_CPU     == 433u,
+    "TEGRA234_CLK_RCE_CPU drift");
+_Static_assert(TEGRA234_RESET_RCE_ALL   ==  81u,
+    "TEGRA234_RESET_RCE_ALL drift");
+
 _Static_assert(TEGRA234_POWER_DOMAIN_VI   == 28u,
     "TEGRA234_POWER_DOMAIN_VI drift (Video Input — distinct from VIC at id 29)");
 _Static_assert(TEGRA234_POWER_DOMAIN_ISPA == 22u,
