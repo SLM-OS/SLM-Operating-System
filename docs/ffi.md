@@ -263,8 +263,10 @@ uint8_t rust_select_inference_core(         // Recommend core for inference
 ### Model Memory (called from C)
 
 ```c
-// Initialize model memory pools (weight + workspace)
-int rust_model_mem_init(void);  // Returns 0 on success
+// Initialize model memory pools (weight + workspace).
+// Sizes come from MODEL_MEM_WEIGHT_MB / MODEL_MEM_WORKSPACE_MB in <config.h>;
+// both must be multiples of 2 (the pool block size).
+int rust_model_mem_init(uint32_t weight_mb, uint32_t workspace_mb);  // Returns 0 on success
 
 // Pool statistics structure (returned by value)
 typedef struct {
