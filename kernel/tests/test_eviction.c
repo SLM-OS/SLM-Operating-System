@@ -36,7 +36,7 @@ typedef struct {
 #define MODEL_BLOCK_SIZE (2u * 1024u * 1024u)
 
 /* Model-memory FFI (existing). */
-extern int         rust_model_mem_init(void);
+extern int         rust_model_mem_init(uint32_t weight_mb, uint32_t workspace_mb);
 extern ModelHandle rust_model_alloc_weights(size_t size);
 extern ModelHandle rust_model_alloc_workspace(size_t size);
 extern int         rust_model_free(ModelHandle handle);

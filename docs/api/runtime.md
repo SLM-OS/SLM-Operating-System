@@ -43,9 +43,13 @@ Run all Rust FFI integration tests. Returns the number of failures (0 = all pass
 Two-pool allocator for model weights and inference workspace. Pools are backed by 2 MB-aligned physical pages allocated from the C kernel's PMM.
 
 ```rust
-pub extern "C" fn rust_model_mem_init() -> i32
+pub extern "C" fn rust_model_mem_init(weight_mb: u32, workspace_mb: u32) -> i32
 ```
-Initialize model memory pools (256 MB weights, 128 MB workspace for 1 GB RAM). Returns 0 on success, -1 on failure.
+Initialize model memory pools. The C kernel boot path passes
+`MODEL_MEM_WEIGHT_MB` / `MODEL_MEM_WORKSPACE_MB` from `<config.h>`,
+which select per-platform sizes (Jetson 2048/256, Pi 5 512/256,
+QEMU and x86-64 256/128 — all in megabytes). Both arguments must be
+multiples of 2; misaligned values return -1. Returns 0 on success.
 
 ```rust
 pub extern "C" fn rust_model_alloc_weights(size: usize) -> ModelHandle
