@@ -27,8 +27,29 @@ struct persistent_lfs_store_priv {
     size_t data_pages;
     size_t desc_pages;
     bool dirty;
+    bool backing_valid;
+    uint32_t dirty_first_block;
+    uint32_t dirty_last_block;
     spinlock_t lock;
 };
+
+static void persistent_lfs_mark_dirty(struct persistent_lfs_store_priv *priv,
+                                      uint32_t first_block,
+                                      uint32_t last_block)
+{
+    if (!priv->dirty) {
+        priv->dirty = true;
+        priv->dirty_first_block = first_block;
+        priv->dirty_last_block = last_block;
+        return;
+    }
+    if (first_block < priv->dirty_first_block) {
+        priv->dirty_first_block = first_block;
+    }
+    if (last_block > priv->dirty_last_block) {
+        priv->dirty_last_block = last_block;
+    }
+}
 
 static int persistent_lfs_read(struct blkdev *dev, uint32_t block, uint32_t off,
                                void *buffer, uint32_t size)
@@ -58,7 +79,7 @@ static int persistent_lfs_prog(struct blkdev *dev, uint32_t block, uint32_t off,
 
     irq_flags_t flags = spin_lock_irqsave(&priv->lock);
     memcpy(priv->data + offset, buffer, size);
-    priv->dirty = true;
+    persistent_lfs_mark_dirty(priv, block, block);
     spin_unlock_irqrestore(&priv->lock, flags);
     return BLKDEV_OK;
 }
@@ -74,7 +95,7 @@ static int persistent_lfs_erase(struct blkdev *dev, uint32_t block)
 
     irq_flags_t flags = spin_lock_irqsave(&priv->lock);
     memset(priv->data + offset, 0xFF, dev->block_size);
-    priv->dirty = true;
+    persistent_lfs_mark_dirty(priv, block, block);
     spin_unlock_irqrestore(&priv->lock, flags);
     return BLKDEV_OK;
 }
@@ -90,6 +111,24 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
     UINT written = 0;
     bool mounted = false;
     bool temp_open = false;
+    bool full_rewrite = false;
+    uint32_t first_block = 0;
+    uint32_t last_block = 0;
+    size_t first_offset = 0;
+    size_t flush_bytes = 0;
+
+    irq_flags_t flags = spin_lock_irqsave(&priv->lock);
+    if (!priv->dirty) {
+        spin_unlock_irqrestore(&priv->lock, flags);
+        return BLKDEV_OK;
+    }
+    first_block = priv->dirty_first_block;
+    last_block = priv->dirty_last_block;
+    full_rewrite = !priv->backing_valid;
+    spin_unlock_irqrestore(&priv->lock, flags);
+
+    first_offset = (size_t)first_block * dev->block_size;
+    flush_bytes = ((size_t)(last_block - first_block) + 1u) * dev->block_size;
 
     boot_dev = boot_media_acquire();
     if (!boot_dev) {
@@ -110,51 +149,83 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
         goto fail;
     }
 
-    (void)f_unlink(PERSISTENT_LFS_STORE_TMP_PATH);
-    res = f_open(&fp, PERSISTENT_LFS_STORE_TMP_PATH,
-                 FA_WRITE | FA_CREATE_ALWAYS);
-    if (res != FR_OK) {
-        goto fail;
-    }
-    temp_open = true;
-
-    irq_flags_t flags = spin_lock_irqsave(&priv->lock);
-    const uint8_t *data = priv->data;
-    size_t remaining = priv->image_bytes;
-    while (remaining > 0) {
-        UINT chunk = remaining > 32768u ? 32768u : (UINT)remaining;
-        res = f_write(&fp, data, chunk, &written);
-        if (res != FR_OK || written != chunk) {
-            spin_unlock_irqrestore(&priv->lock, flags);
-            goto fail;
-        }
-        data += chunk;
-        remaining -= chunk;
-    }
-    spin_unlock_irqrestore(&priv->lock, flags);
-
-    res = f_close(&fp);
-    temp_open = false;
-    if (res != FR_OK) {
-        goto fail;
-    }
-
-    (void)f_unlink(PERSISTENT_LFS_STORE_BAK_PATH);
-    if (f_stat(PERSISTENT_LFS_STORE_PATH, &fno) == FR_OK) {
-        res = f_rename(PERSISTENT_LFS_STORE_PATH, PERSISTENT_LFS_STORE_BAK_PATH);
+    if (!full_rewrite && f_stat(PERSISTENT_LFS_STORE_PATH, &fno) == FR_OK &&
+        fno.fsize == priv->image_bytes) {
+        res = f_open(&fp, PERSISTENT_LFS_STORE_PATH, FA_WRITE);
         if (res != FR_OK) {
             goto fail;
         }
-    }
-
-    res = f_rename(PERSISTENT_LFS_STORE_TMP_PATH, PERSISTENT_LFS_STORE_PATH);
-    if (res != FR_OK) {
-        if (f_stat(PERSISTENT_LFS_STORE_BAK_PATH, &fno) == FR_OK) {
-            (void)f_rename(PERSISTENT_LFS_STORE_BAK_PATH, PERSISTENT_LFS_STORE_PATH);
+        temp_open = true;
+        res = f_lseek(&fp, first_offset);
+        if (res != FR_OK) {
+            goto fail;
         }
-        goto fail;
+        irq_flags_t write_flags = spin_lock_irqsave(&priv->lock);
+        const uint8_t *data = priv->data + first_offset;
+        size_t remaining = flush_bytes;
+        while (remaining > 0) {
+            UINT chunk = remaining > 32768u ? 32768u : (UINT)remaining;
+            res = f_write(&fp, data, chunk, &written);
+            if (res != FR_OK || written != chunk) {
+                spin_unlock_irqrestore(&priv->lock, write_flags);
+                goto fail;
+            }
+            data += chunk;
+            remaining -= chunk;
+        }
+        spin_unlock_irqrestore(&priv->lock, write_flags);
+        res = f_close(&fp);
+        temp_open = false;
+        if (res != FR_OK) {
+            goto fail;
+        }
+    } else {
+        (void)f_unlink(PERSISTENT_LFS_STORE_TMP_PATH);
+        res = f_open(&fp, PERSISTENT_LFS_STORE_TMP_PATH,
+                     FA_WRITE | FA_CREATE_ALWAYS);
+        if (res != FR_OK) {
+            goto fail;
+        }
+        temp_open = true;
+
+        irq_flags_t write_flags = spin_lock_irqsave(&priv->lock);
+        const uint8_t *data = priv->data;
+        size_t remaining = priv->image_bytes;
+        while (remaining > 0) {
+            UINT chunk = remaining > 32768u ? 32768u : (UINT)remaining;
+            res = f_write(&fp, data, chunk, &written);
+            if (res != FR_OK || written != chunk) {
+                spin_unlock_irqrestore(&priv->lock, write_flags);
+                goto fail;
+            }
+            data += chunk;
+            remaining -= chunk;
+        }
+        spin_unlock_irqrestore(&priv->lock, write_flags);
+
+        res = f_close(&fp);
+        temp_open = false;
+        if (res != FR_OK) {
+            goto fail;
+        }
+
+        (void)f_unlink(PERSISTENT_LFS_STORE_BAK_PATH);
+        if (f_stat(PERSISTENT_LFS_STORE_PATH, &fno) == FR_OK) {
+            res = f_rename(PERSISTENT_LFS_STORE_PATH, PERSISTENT_LFS_STORE_BAK_PATH);
+            if (res != FR_OK) {
+                goto fail;
+            }
+        }
+
+        res = f_rename(PERSISTENT_LFS_STORE_TMP_PATH, PERSISTENT_LFS_STORE_PATH);
+        if (res != FR_OK) {
+            if (f_stat(PERSISTENT_LFS_STORE_BAK_PATH, &fno) == FR_OK) {
+                (void)f_rename(PERSISTENT_LFS_STORE_BAK_PATH, PERSISTENT_LFS_STORE_PATH);
+            }
+            goto fail;
+        }
+        (void)f_unlink(PERSISTENT_LFS_STORE_BAK_PATH);
     }
-    (void)f_unlink(PERSISTENT_LFS_STORE_BAK_PATH);
 
     (void)f_mount(NULL, PERSISTENT_LFS_FAT_VOL, 0);
     fatfs_disk_detach();
@@ -162,6 +233,7 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
 
     flags = spin_lock_irqsave(&priv->lock);
     priv->dirty = false;
+    priv->backing_valid = true;
     spin_unlock_irqrestore(&priv->lock, flags);
     return BLKDEV_OK;
 
@@ -222,6 +294,9 @@ static struct blkdev *persistent_lfs_store_alloc(const char *name, size_t image_
     priv->data_pages = data_pages;
     priv->desc_pages = desc_pages;
     priv->dirty = false;
+    priv->backing_valid = false;
+    priv->dirty_first_block = 0;
+    priv->dirty_last_block = 0;
     spin_init(&priv->lock);
 
     if (uart_snprintf(dev->name, sizeof(dev->name), "%s", name) < 0) {
@@ -308,6 +383,9 @@ struct blkdev *persistent_lfs_store_create(const char *name,
                 remaining -= chunk;
             }
             (void)f_close(&fp);
+            if (!needs_format) {
+                priv->backing_valid = true;
+            }
         }
     }
 

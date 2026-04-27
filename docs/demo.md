@@ -308,7 +308,7 @@ The embedded demo is at `/mnt/files/demo.lua`, not a relative path. Use the full
 slmos> lua /mnt/files/demo.lua
 ```
 
-If the file is missing, the LittleFS ramdisk may not have mounted. Check boot output for `LittleFS mounted at /mnt/files`. A clean reboot should restore it (the demo is written at every boot by `demo_init()`).
+If the file is missing, the LittleFS filesystem may not have mounted. Check boot output for `LittleFS mounted at /mnt/files`. A clean reboot should restore it (the demo is written at every boot by `demo_init()`).
 
 ### Demo hangs after "Starting Sensor Monitor"
 

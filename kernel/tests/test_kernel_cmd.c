@@ -5,7 +5,7 @@
  * `kernel status / stage / activate / promote / rollback` against
  * the real driver stack:
  *
- *   /mnt/files (LittleFS-backed ramdisk)  → source for `kernel stage`
+ *   /mnt/files (LittleFS-backed filesystem)  → source for `kernel stage`
  *   QEMU sdhci-pci + FAT32 partition 1    → destination
  *
  * Tests skip cleanly with `TEST_IGNORE` when QEMU is started without

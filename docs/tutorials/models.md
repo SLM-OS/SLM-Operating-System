@@ -2,7 +2,7 @@
 
 Guide for preparing, loading, and verifying ONNX models in SLM-OS.
 
-**Prerequisites:** A running SLM-OS instance (QEMU or hardware). The LittleFS ramdisk must be mounted at `/mnt/files`.
+**Prerequisites:** A running SLM-OS instance (QEMU or hardware). The LittleFS filesystem must be mounted at `/mnt/files`.
 
 ---
 
@@ -82,9 +82,9 @@ Pool statistics can be viewed with `model pools` in the shell.
 
 ### Step 1: Place the Model on the Filesystem
 
-The ONNX model file must be accessible through the VFS. For QEMU, the LittleFS ramdisk is pre-populated during boot. The MNIST test model is available at `/mnt/files/mnist.onnx`.
+The ONNX model file must be accessible through the VFS. For QEMU, the LittleFS filesystem is pre-populated during boot. The MNIST test model is available at `/mnt/files/mnist.onnx`.
 
-For custom models, the file must be copied to the LittleFS ramdisk image before boot, or loaded through another VFS-accessible path.
+For custom models, the file must be copied into `/mnt/files` or loaded through another VFS-accessible path before `model load`.
 
 ### Step 2: Load the Model
 

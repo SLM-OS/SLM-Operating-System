@@ -263,6 +263,76 @@ static void test_persistent_lfs_store_round_trip(void)
     destroy_boot_media_fat_volume(fat_dev);
 }
 
+static void test_persistent_lfs_store_incremental_update_round_trip(void)
+{
+    struct blkdev *fat_dev = NULL;
+    struct blkdev *store = NULL;
+    struct lfs_mount *mnt = NULL;
+    bool needs_format = false;
+    char buf[64];
+    const char *data_a = "first persistent payload";
+    const char *data_b = "second payload after remount";
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+
+    store = persistent_lfs_store_create("persist_lfs2", &needs_format);
+    TEST_ASSERT_NOT_NULL(store);
+    TEST_ASSERT_TRUE(needs_format);
+    mnt = littlefs_mount(store, needs_format);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    int fd = littlefs_file_open(mnt, "/alpha.txt",
+                                LFS_O_CREAT | LFS_O_WRONLY | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(fd >= 0);
+    TEST_ASSERT_EQUAL_INT((int)strlen(data_a),
+                          littlefs_file_write(mnt, fd, data_a, strlen(data_a)));
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+    TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));
+    persistent_lfs_store_destroy(store);
+
+    store = persistent_lfs_store_create("persist_lfs3", &needs_format);
+    TEST_ASSERT_NOT_NULL(store);
+    TEST_ASSERT_FALSE(needs_format);
+    mnt = littlefs_mount(store, needs_format);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    fd = littlefs_file_open(mnt, "/beta.txt",
+                            LFS_O_CREAT | LFS_O_WRONLY | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(fd >= 0);
+    TEST_ASSERT_EQUAL_INT((int)strlen(data_b),
+                          littlefs_file_write(mnt, fd, data_b, strlen(data_b)));
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+    TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));
+    persistent_lfs_store_destroy(store);
+
+    store = persistent_lfs_store_create("persist_lfs4", &needs_format);
+    TEST_ASSERT_NOT_NULL(store);
+    TEST_ASSERT_FALSE(needs_format);
+    mnt = littlefs_mount(store, needs_format);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    fd = littlefs_file_open(mnt, "/alpha.txt", LFS_O_RDONLY);
+    TEST_ASSERT_TRUE(fd >= 0);
+    memset(buf, 0, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT((int)strlen(data_a),
+                          littlefs_file_read(mnt, fd, buf, sizeof(buf) - 1));
+    TEST_ASSERT_EQUAL_STRING(data_a, buf);
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+
+    fd = littlefs_file_open(mnt, "/beta.txt", LFS_O_RDONLY);
+    TEST_ASSERT_TRUE(fd >= 0);
+    memset(buf, 0, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT((int)strlen(data_b),
+                          littlefs_file_read(mnt, fd, buf, sizeof(buf) - 1));
+    TEST_ASSERT_EQUAL_STRING(data_b, buf);
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+
+    TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));
+    persistent_lfs_store_destroy(store);
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
 /* ============================================================================
  * File Operation Tests
  * ============================================================================ */
@@ -927,6 +997,7 @@ int test_suite_littlefs(void)
     RUN_TEST(test_lfs_remount);
     RUN_TEST(test_lfs_stat);
     RUN_TEST(test_persistent_lfs_store_round_trip);
+    RUN_TEST(test_persistent_lfs_store_incremental_update_round_trip);
 
     /* File operation tests */
     RUN_TEST(test_lfs_file_create_write);

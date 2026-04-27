@@ -21,7 +21,7 @@ This spec is **additive**. It extends existing substrate (policy vtable, evictio
 ## 2. Non-goals
 
 - New GPU bringup work. The GA10B inherit-from-Linux path is the substrate; if `nvgpu inherit` succeeds the GPU is usable, otherwise the suite degrades to CPU-only.
-- Persistent model store on eMMC/flash. Models live in `/mnt/files/` (LittleFS, RAM-backed). Persistence is tracked separately in `dynamic-kernel-replace-plan.md`.
+- Persistent model store semantics beyond the `/mnt/files/` workspace. `/mnt/files/` now prefers a persistent LittleFS image on boot FAT when available, but model lifecycle policy for this suite is still tracked separately in `dynamic-kernel-replace-plan.md`.
 - Multi-tenant policy isolation. There is one global scheduler and one global eviction policy at a time.
 - Auth on the telnet admin surface. This is a lab tool; trust boundary is the network. Documented in §11.
 

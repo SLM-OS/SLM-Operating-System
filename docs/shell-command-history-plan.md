@@ -166,8 +166,9 @@ Add to `kernel/tests/test_shell_session.c` (or a new
 
 - **Reverse search (Ctrl-R)** — out of scope; deferred.
 - **Prefix-search history** — out of scope.
-- **Persistent history across reboot** — `/mnt/files` is RAM-backed
-  today; revisit when persistent storage (#35) lands.
+- **Persistent history across reboot** — still out of scope for this
+  history feature even though `/mnt/files` can now persist when boot
+  FAT storage is available.
 - **Left/right arrow in-line cursor movement** — out of scope.
   Backspace-from-end is the only edit operation supported.
 - **Multi-line / heredoc commands** — out of scope.

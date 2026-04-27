@@ -470,10 +470,19 @@ static int sdhci_send_cmd(struct sdhci_priv *p, struct sdhci_cmd *cmd)
     /* Read response. Layout differs for R2 (long, 128b in RESP[3..0]
      * with bit shift) vs R1/R3/R6/R7 (48b in RESP0). */
     if (cmd->resp_type == SDHCI_CMD_RESP_136) {
-        cmd->resp[0] = sdhci_readl(p, SDHCI_RESPONSE0);
-        cmd->resp[1] = sdhci_readl(p, SDHCI_RESPONSE1);
-        cmd->resp[2] = sdhci_readl(p, SDHCI_RESPONSE2);
-        cmd->resp[3] = sdhci_readl(p, SDHCI_RESPONSE3);
+        /* SDHCI presents R2 responses stripped of the final CRC byte and
+         * shifted left by 8 bits across RESPONSE3..0. Reconstruct the
+         * original 128-bit payload so downstream CID/CSD parsers can treat
+         * cmd->resp[3:0] as CSD[127:96]..CSD[31:0]. */
+        uint32_t raw0 = sdhci_readl(p, SDHCI_RESPONSE0);
+        uint32_t raw1 = sdhci_readl(p, SDHCI_RESPONSE1);
+        uint32_t raw2 = sdhci_readl(p, SDHCI_RESPONSE2);
+        uint32_t raw3 = sdhci_readl(p, SDHCI_RESPONSE3);
+
+        cmd->resp[3] = (raw3 << 8) | (raw2 >> 24);
+        cmd->resp[2] = (raw2 << 8) | (raw1 >> 24);
+        cmd->resp[1] = (raw1 << 8) | (raw0 >> 24);
+        cmd->resp[0] = (raw0 << 8);
     } else if (cmd->resp_type != SDHCI_CMD_RESP_NONE) {
         cmd->resp[0] = sdhci_readl(p, SDHCI_RESPONSE0);
     }
@@ -1149,100 +1158,11 @@ static void bcm2712_aon_gpio_drive_sd_regulators(void)
 
 struct blkdev *sdhci_create_bcm2712(void)
 {
-    /*
-     * Issue #414: the Pi firmware does NOT auto-bring-up EMMC2 for
-     * SLM-OS bare-metal handoff the way it does for a Linux launch.
-     * On bare-metal the controller is gated; the first MMIO read at
-     * BCM2712_EMMC2_BASE hangs the AXI fabric until the firmware
-     * brings it up. Empirically confirmed from the shell — bare
-     * `peek 0x1000FFF000` wedges the kernel.
-     *
-     * This routine assembles the bring-up steps Linux's sdhci-brcmstb
-     * driver gets transparently from clock + regulator + pinctrl
-     * frameworks. Each step has been verified individually on the
-     * Pi 5 lab fixture:
-     *   1. AON GPIO regulators (sd_vcc on pin 4, 3.3 V on pin 3) —
-     *      firmware-left state was already correct on our boards
-     *      but we re-assert defensively.
-     *   2. Mailbox SET_CLOCK_STATE(clock_id=12 / EMMC2, on=1) —
-     *      firmware reports the clock toggled 0 → 1.
-     *   3. SDIO_CFG_* writes (force-CD, base-clock advisory).
-     *
-     * NOTE (#414 partial): even with all three steps, real-Pi-5
-     * `kernel status` still hangs in the CFG bank's first read
-     * (0x1000FFF400). Firmware reports the clock as on but
-     * GET_CLOCK_RATE_MEASURED returns ~1.07 GHz — inconsistent with
-     * the dtsi's `clk_emmc2: clock-frequency = <200000000>` fixed-
-     * clock declaration. The remaining gap is a Pi 5-specific
-     * gating mechanism not documented in upstream Linux's
-     * sdhci-brcmstb / clk-raspberrypi sources. Tracking under #414;
-     * the bring-up infrastructure here is correct for Pi 4 EMMC and
-     * a starting point for further Pi 5 investigation.
-     */
-    /* SDIO1 busisol register: do NOT touch.
-     *
-     * Empirical: Pi firmware leaves it at 0x00006001 (read live via
-     * an earlier diagnostic build). Per Linux's
-     * `bcm2712_init_sd_express`, bits 13:14 (the 0x6000 mask) are the
-     * PCIe-sideband isolation: SET = SD mode, CLEARED = PCIe mode.
-     * Bit 0 (the 0x0001) is the SD-clock isolation enable. Together
-     * 0x6001 is the correct "SD-card mode, controller live" value.
-     *
-     * Writing 0 to busisol (an earlier #414 attempt) clears bits
-     * 13:14 and switches the controller to PCIe-sideband mode, which
-     * is the WRONG direction for normal SD-card operation and is
-     * itself a possible cause of the AXI hang on the host bank.
-     */
-
-    /* Drive the SD card VCC + IO voltage regulators on the AON GPIO
-     * bank. On the lab Pi 5 the firmware already leaves these in
-     * the correct state, but this is belt-and-suspenders for boards
-     * / firmware revisions that don't honor the regulator-boot-on
-     * dts annotations. */
-    uart_puts("[INFO] sdhci_bcm2712: driving AON GPIO regulators (SD VCC on, 3.3V)\n");
+    /* Linux enables the EMMC gate before probing and then programs the
+     * BCM2712 cfg window before touching the generic SDHCI host path. */
     bcm2712_aon_gpio_drive_sd_regulators();
-
-    /* Note: empirically (via the `mboxclk` shell diagnostic) the Pi
-     * firmware leaves clock id 1 (EMMC) running at 200 MHz across
-     * SLM-OS handoff — this call is idempotent and verifies the
-     * mailbox is responsive, but does not actually toggle a gated
-     * clock on Pi 5. */
-    uart_puts("[INFO] sdhci_bcm2712: confirming EMMC clock state via mailbox\n");
-    int rc = bcm_mailbox_set_clock_state(BCM_CLOCK_EMMC, /*on=*/true);
-    if (rc != 0) {
-        uart_puts("[ERROR] sdhci_bcm2712: mailbox SET_CLOCK_STATE(EMMC, on) "
-                  "failed — abort\n");
-        return NULL;
-    }
-
-    /* Set the operating rate. Linux's brcmstb sdhci driver pulls
-     * this from `clk_get_rate(pltfm_host->clk)` which on Pi 5 resolves
-     * to a 200 MHz fixed-clock — and `bcm2712.dtsi` declares
-     * `clk_emmc` as `fixed-clock`, so this rate is constant by
-     * definition. The firmware accordingly rejects SET_CLOCK_RATE on
-     * this id (no programmable PLL behind it). Treat the failure as
-     * advisory: log it but continue, since clock 1 is already
-     * running at 200 MHz at SLM-OS handoff. */
-    uint32_t actual_hz = 0;
-    rc = bcm_mailbox_set_clock_rate(BCM_CLOCK_EMMC,
-                                    /*requested_hz=*/200000000u,
-                                    &actual_hz);
-    if (rc != 0) {
-        uart_puts("[INFO] sdhci_bcm2712: SET_CLOCK_RATE not supported for EMMC "
-                  "(fixed-clock per dtsi) — continuing on existing clock\n");
-    } else {
-        uart_puts("[INFO] sdhci_bcm2712: SET_CLOCK_RATE accepted; "
-                  "applying SDIO_CFG cfginit\n");
-    }
-
-    /* Apply the BCM2712 SDIO_CFG_* writes. Linux does this in
-     * cfginit_2712 between mapping the controller and reading
-     * SDHCI capabilities; same order in SLM-OS — write the CFG
-     * bank first, then have sdhci_create() do the host-register
-     * probe. */
+    (void)bcm_mailbox_set_clock_state(BCM_CLOCK_EMMC, true);
     bcm2712_emmc2_cfginit();
-    uart_puts("[INFO] sdhci_bcm2712: cfginit done; entering generic probe\n");
-
     return sdhci_create("emmc2", BCM2712_EMMC2_BASE);
 }
 

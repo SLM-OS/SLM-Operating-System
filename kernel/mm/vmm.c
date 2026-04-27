@@ -1174,6 +1174,15 @@ static void vmm_setup_platform(void)
                                                   VMM_FLAGS_DEVICE);
     vmm_state.blocks_mapped++;
 
+    /* BCM2712 EMMC2 host + cfg windows at 0x1000FFF000 / +0x400 sit in the
+     * 2MB block 0x1000E00000-0x1000FFFFFF (L1[64], L2 index 7). This block
+     * must be mapped explicitly or the first host/cfg MMIO touch faults/hangs
+     * even though the later SDIO1 sideband blocks are reachable. */
+    uint64_t emmc2_base = BCM2712_EMMC2_BASE & ~(BLOCK_SIZE - 1);
+    uint64_t emmc2_l2_idx = (BCM2712_EMMC2_BASE >> BLOCK_SHIFT) & 0x1FF;
+    l2_mmio_pcie[emmc2_l2_idx] = make_block_desc(emmc2_base, VMM_FLAGS_DEVICE);
+    vmm_state.blocks_mapped++;
+
     /* bcm_reset controller at 0x1001504318 (bcm2712.dtsi:1216).
      * Lives in a DIFFERENT 2 MB block than the pcie RCs — 0x1001400000
      * (L2 index 10 within L1[64]). Phase 1.5 of the AI HAT+ plan

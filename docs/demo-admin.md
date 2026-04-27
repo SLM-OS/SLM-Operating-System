@@ -25,9 +25,10 @@ to file.
   toggle's success path (no Jetson GA10B in QEMU).
 * Telnet reachable: `nc 192.168.4.5 2323`. The shell prompt appears
   immediately.
-* `/mnt/files` is mounted (LittleFS RAM-backed). `demo_init` populates
-  `/mnt/files/admin.lua` at boot — the `admin` shell command depends
-  on this.
+* `/mnt/files` is mounted (LittleFS, preferably from the persistent
+  boot-FAT-backed `0:/slmstore/files.lfs` image with RAM fallback).
+  `demo_init` populates `/mnt/files/admin.lua` at boot — the `admin`
+  shell command depends on this.
 
 ## 1. Tour: `admin` TUI
 
