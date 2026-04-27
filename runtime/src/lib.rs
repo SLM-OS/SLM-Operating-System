@@ -4705,6 +4705,54 @@ pub unsafe extern "C" fn rust_infer(
     }
 }
 
+/// Print every output element as `[i] = 0.NNN` and return the argmax
+/// index across the (already-bounded) `[0..n]` slice.
+///
+/// Shared between `rust_infer_and_print` and `rust_infer_buf_and_print`
+/// — both walk the same output shape and print the same way; this
+/// helper keeps the side-effect order in one place. Caller is
+/// responsible for clamping `n` to `output.len()` (both call sites do
+/// `n = result.min(output.len())` before invoking).
+///
+/// Pre-condition: `n >= 1` and `n <= output.len()`. The two callers
+/// each early-return with -3 on `result == 0`, so `output[0]` is
+/// always reachable.
+fn print_logits_and_argmax(output: &[f32], n: usize) -> usize {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    let mut argmax: usize = 0;
+    let mut max_val = output[0];
+
+    // Print [0] using the seed value, then sweep [1..n] for argmax —
+    // saves a redundant `output[0] > output[0]` compare in the first
+    // iteration and matches `rust_infer_classify`'s post-hardening
+    // idiom.
+    let pct = (max_val * 1000.0) as i32;
+    let pct = if pct < 0 { 0 } else { pct };
+    // SAFETY: pure FFI call, fmt has matching specifiers.
+    unsafe {
+        uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), 0i32, pct);
+    }
+
+    for i in 1..n {
+        let val = output[i];
+        let pct = (val * 1000.0) as i32;
+        let pct = if pct < 0 { 0 } else { pct };
+        // SAFETY: pure FFI call, fmt has matching specifiers.
+        unsafe {
+            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
+        }
+        if val > max_val {
+            max_val = val;
+            argmax = i;
+        }
+    }
+
+    argmax
+}
+
 /// Run inference on a loaded model with zero input and print results.
 ///
 /// Used by the shell `model infer` command to avoid FP operations in
@@ -4763,38 +4811,13 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
         uart_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
     }
 
-    // Find argmax and print outputs. Cap the loop at output.len() as
-    // belt-and-braces — the engine contract says it caps to the
-    // supplied buffer length, but a future drift would otherwise
-    // panic-abort on the [i] index. With panic=abort that would
-    // hard-stop the kernel rather than truncate.
+    // Cap the slice at output.len() as belt-and-braces — the engine
+    // contract says it caps to the supplied buffer length, but a
+    // future drift would otherwise panic-abort on the [i] index.
+    // With panic=abort that would hard-stop the kernel rather than
+    // truncate.
     let n = result.min(output.len());
-    let mut argmax: usize = 0;
-    let mut max_val = output[0];
-    // Print the [0] entry once, then sweep [1..n] for argmax — saves
-    // a redundant compare against the seed in the first iteration
-    // and matches rust_infer_classify's idiom.
-    {
-        let pct = (max_val * 1000.0) as i32;
-        let pct = if pct < 0 { 0 } else { pct };
-        // SAFETY: pure FFI call, fmt has matching specifiers.
-        unsafe {
-            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), 0i32, pct);
-        }
-    }
-    for i in 1..n {
-        let val = output[i];
-        let pct = (val * 1000.0) as i32;
-        let pct = if pct < 0 { 0 } else { pct };
-        // SAFETY: pure FFI call, fmt has matching specifiers.
-        unsafe {
-            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
-        }
-        if val > max_val {
-            max_val = val;
-            argmax = i;
-        }
-    }
+    let argmax = print_logits_and_argmax(&output, n);
 
     // SAFETY: pure FFI call, fmt has matching specifiers.
     unsafe {
@@ -4927,38 +4950,13 @@ pub extern "C" fn rust_infer_buf_and_print(
         uart_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
     }
 
-    // Find argmax and print outputs. Cap at output.len() as
-    // belt-and-braces — the engine contract says it caps to the
-    // supplied buffer length, but a future drift would otherwise
-    // panic-abort on the [i] index. With panic=abort that would
-    // hard-stop the kernel rather than truncate.
+    // Cap the slice at output.len() as belt-and-braces — the engine
+    // contract says it caps to the supplied buffer length, but a
+    // future drift would otherwise panic-abort on the [i] index.
+    // With panic=abort that would hard-stop the kernel rather than
+    // truncate.
     let n = result.min(output.len());
-    let mut argmax: usize = 0;
-    let mut max_val = output[0];
-    // Print the [0] entry once, then sweep [1..n] for argmax — saves
-    // a redundant compare against the seed in the first iteration
-    // and matches rust_infer_classify's idiom.
-    {
-        let pct = (max_val * 1000.0) as i32;
-        let pct = if pct < 0 { 0 } else { pct };
-        // SAFETY: pure FFI call, fmt has matching specifiers.
-        unsafe {
-            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), 0i32, pct);
-        }
-    }
-    for i in 1..n {
-        let val = output[i];
-        let pct = (val * 1000.0) as i32;
-        let pct = if pct < 0 { 0 } else { pct };
-        // SAFETY: pure FFI call, fmt has matching specifiers.
-        unsafe {
-            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
-        }
-        if val > max_val {
-            max_val = val;
-            argmax = i;
-        }
-    }
+    let argmax = print_logits_and_argmax(&output, n);
 
     // SAFETY: pure FFI call, fmt has matching specifiers.
     unsafe {
