@@ -26,29 +26,41 @@ TRYBOOT="deploy/pi5/tryboot.txt"
 
 fail=0
 
+# Color the OK/FAIL prefixes only when stdout is a TTY. Keeps CI logs
+# and grep'd output free of literal ANSI escape bytes.
+if [ -t 1 ]; then
+    C_RED=$'\033[31m'
+    C_GREEN=$'\033[32m'
+    C_RESET=$'\033[0m'
+else
+    C_RED=""; C_GREEN=""; C_RESET=""
+fi
+
 note() { printf '  %s\n' "$*"; }
 
 err() {
-    printf '\033[31mFAIL\033[0m %s\n' "$*" >&2
+    printf '%sFAIL%s %s\n' "$C_RED" "$C_RESET" "$*" >&2
     fail=1
 }
 
 ok() {
-    printf '\033[32mOK\033[0m   %s\n' "$*"
+    printf '%sOK%s   %s\n' "$C_GREEN" "$C_RESET" "$*"
 }
 
 # Check that a file contains a literal key=value line (allowing
-# leading whitespace; rejecting matches inside comments).
+# leading whitespace; rejecting matches inside comments). Uses awk
+# with literal-string equality on the trimmed line so values
+# containing regex metacharacters (`.`, `+`, `*`, `[`, etc.) match
+# only themselves — `kernel=kernel_2712.img` matches `kernel_2712.img`,
+# never `kernel_2712Ximg`.
 contains_kv() {
     local path="$1" key="$2" expected_value="$3"
-    # Strip comments, then look for "key=expected_value" as a whole
-    # token at start-of-line (after optional whitespace).
-    if grep -E "^[[:space:]]*${key}=${expected_value}([[:space:]]|$)" "$path" \
-            | grep -v '^[[:space:]]*#' >/dev/null; then
-        return 0
-    else
-        return 1
-    fi
+    awk -v k="$key" -v v="$expected_value" '
+        # Strip comments and surrounding whitespace.
+        { sub(/#.*$/, ""); sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "") }
+        $0 == k "=" v { found = 1 }
+        END { exit !found }
+    ' "$path"
 }
 
 # Pull "key=value" assignments out of a file, ignoring comments and

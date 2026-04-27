@@ -980,7 +980,9 @@ KERNEL_TEST_ISO := $(KERNEL_TEST_BUILD_DIR)/slmos-test.iso
 # required key, swaps `kernel=` between the two by mistake, or adds
 # the `[tryboot]` filter section that misparses on Pi 5 firmware.
 # Cheap (~ms), deterministic, no toolchain dependency — runs before
-# the QEMU test suite.
+# the QEMU test suite. Intentionally runs on every PLATFORM (not
+# just RASPI5): the canonical files are platform-neutral, checked-in
+# artifacts whose drift any platform's `make test` should surface.
 .PHONY: check-deploy-configs
 check-deploy-configs:
 	@./scripts/check-deploy-pi5-configs.sh

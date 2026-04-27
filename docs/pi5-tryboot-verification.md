@@ -26,8 +26,9 @@ swap could prove which file the firmware actually loaded:
 
 **Card state:** single FAT32 partition, the canonical Pi 5 firmware
 files plus `deploy/pi5/config.txt` (kernel=kernel_2712.img),
-`deploy/pi5/tryboot.txt` (kernel=tryboot.img), `kernel_2712.img`
-(build A), `tryboot.img` (build B).
+`deploy/pi5/tryboot.txt` (kernel=tryboot.img), and the two kernel
+images (build `081608` as `kernel_2712.img`, build `095520` as
+`tryboot.img`).
 
 ### Round-trip results — 10/10
 
