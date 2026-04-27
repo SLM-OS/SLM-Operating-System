@@ -4,6 +4,8 @@ Date: 2026-04-24
 Branch reviewed: `ai-hat-audit`
 Scope: static review only. No Hailo hardware was used, and no production code was changed.
 
+> **Status update 2026-04-26 (post-this-review):** all 11 audit findings (F-01..F-11) have been addressed and merged via PR #355. Subsequent hardware bisect work (PR #359 `hailo-ushim`, PR #405 BIST + D3hot + fwlog) has **disconfirmed the strongest hypothesis in this review** — DMA reachability/coherency for the descriptor list is no longer the leading suspect. Replaying SLM-OS's exact byte sequences through the official `hailo_pci` ioctl path on Pi OS produces the identical hang, so the issue is not in our wire format, descriptor geometry, or bare-metal MMIO/cache path. Firmware faults at PC=`0x9000018c` during a boundary-credit poll loop at PC=`0x90004520`; the CPU_ECC bit-12 region (SAGE1_ISP per the BIST top-block enum) is the believed root-cause locus, but it cannot be tested directly via BIST (whitelist excludes bit 12) and decoding the PC requires Hailo firmware symbols. See `docs/hailo-support-ticket-draft.md` for the consolidated state, and `docs/pi5-ai-hat-plan.md` §"Phase 8 progress — 2026-04-26" for the post-review investigation log. The recommendations in this document are still valid for code-quality reasons but are not, by themselves, expected to unblock #253.
+
 ## Executive summary
 
 The Hailo AI HAT+ work is significantly past "device detected" bring-up: it has BCM2712 `pcie1` link training, Hailo BAR mapping, firmware boot/control RPCs, context-switch command emission, CCW VDMA upload, boundary VDMA setup, Lua-facing model sizing, and a Raspberry Pi OS/HailoRT trace comparison. That is a large amount of difficult platform work.
