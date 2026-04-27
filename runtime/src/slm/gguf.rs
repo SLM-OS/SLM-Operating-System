@@ -766,7 +766,9 @@ impl fmt::Display for GgufError {
 //                            //                       (offset  16..144)
 //   }                                                                 144 B
 //
-// 5.625 bits/element including d/dmin overhead. Numeric dequantization
+// 4.5 bits/element overall: 4 bpw for `qs` (128 B = 1024 bits ÷ 256
+// elements) plus 0.5 bpw for the `d` / `dmin` / `scales` overhead
+// (16 B = 128 bits ÷ 256 elements). Numeric dequantization
 // (`dequantize_row_q4_K`, vec_dot, etc.) lands in M3 — for M1.2 we
 // only expose the layout and a read-only block view so M3 can drop
 // into place without reshuffling structs.
