@@ -164,27 +164,92 @@ int camrtc_ivc_init(struct camrtc_ivc_channel *ch,
     ch->group      = group;
     ch->initialised = false;
 
-    /* Zero both queue headers (count=0 each side, state=ESTABLISHED).
-     * The CH_SETUP region was already zeroed in
-     * `camrtc_ch_setup_capture_control`, but redo it here so a future
-     * caller that reuses this API for a non-CH_SETUP-zeroed region
-     * (e.g. a re-init after a soft reset) starts from a clean state.
-     * Both writers' state fields are now ESTABLISHED (0). Counters
-     * are 0/0 → queue empty, queue not full.
-     *
-     * Driving the SYNC→ACK→EST handshake explicitly was tried and
-     * triggered RCE's heartbeat watchdog (`RCE WATCHDOG FAILURE:
-     * HALTING`), so we trust CH_SETUP's zero-init.
-     *
-     * NC mapping ensures these zero stores reach DRAM immediately;
-     * a final DSB orders them before the wake. */
-    byte_zero((volatile uint8_t *)tx_iova, IVC_HDR_SIZE);
-    byte_zero((volatile uint8_t *)rx_iova, IVC_HDR_SIZE);
-    __asm__ volatile("dsb sy" ::: "memory");
+    /* Zero our half of each queue header. Don't touch RCE's halves
+     * — RCE may have written its own tx_state during CH_SETUP and
+     * we need to observe it for the SYNC handshake. AP owns
+     * tx_iova[0..63] (TX half of AP→RCE) and rx_iova[64..127]
+     * (RX half of RCE→AP). */
+    byte_zero((volatile uint8_t *)tx_iova, IVC_HDR_SIZE / 2u);
+    byte_zero((volatile uint8_t *)(rx_iova + IVC_HDR_SIZE / 2u),
+              IVC_HDR_SIZE / 2u);
 
-    /* Kick RCE so it picks up the established state if it had been
-     * waiting on the SS[0] semaphore for our side to come up. */
+    /* Drive the SYNC→ACK→EST handshake matching `linux-tegra-ivc.c`
+     * `tegra_ivc_reset` + `tegra_ivc_notified`. The earlier all-EST
+     * zero-init left RCE silently ignoring frames; an aggressive
+     * notify-every-iteration variant tripped RCE's heartbeat
+     * watchdog. The shape below mirrors L4T:
+     *   - kickoff: write local=SYNC + notify (single shot)
+     *   - poll: read both states; if changed since last iter,
+     *           apply the transition table ONCE and notify;
+     *           sleep 1 ms between polls so RCE's mailbox ISR
+     *           doesn't drown.
+     */
+    hdr_store_u32(tx_iova, IVC_HDR_TX_STATE_OFF, IVC_STATE_SYNC);
     notify_rce(group);
+
+    uint64_t freq = timer_get_frequency();
+    uint64_t ticks_per_us = freq / 1000000u;
+    if (ticks_per_us == 0) ticks_per_us = 1u;
+    uint64_t deadline = timer_get_count()
+                      + (uint64_t)100000u * ticks_per_us;
+
+    uint32_t prev_local  = 0xFFu;
+    uint32_t prev_remote = 0xFFu;
+
+    for (;;) {
+        if (timer_get_count() >= deadline) {
+            uint32_t l = hdr_load_u32(tx_iova, IVC_HDR_TX_STATE_OFF);
+            uint32_t r = hdr_load_u32(rx_iova, IVC_HDR_TX_STATE_OFF);
+            WARN("camrtc_ivc: handshake timeout (local=%u, remote=%u)",
+                 (unsigned)l, (unsigned)r);
+            return -2;
+        }
+
+        uint32_t local  = hdr_load_u32(tx_iova, IVC_HDR_TX_STATE_OFF);
+        uint32_t remote = hdr_load_u32(rx_iova, IVC_HDR_TX_STATE_OFF);
+
+        if (local == IVC_STATE_ESTABLISHED
+            && remote == IVC_STATE_ESTABLISHED) {
+            INFO("camrtc_ivc: handshake EST/EST after kickoff");
+            break;
+        }
+
+        /* Only act if state has changed since last iteration —
+         * otherwise we'd re-notify RCE without anything to ack. */
+        if (local == prev_local && remote == prev_remote) {
+            timer_busy_wait_us(1000u);
+            continue;
+        }
+        prev_local = local;
+        prev_remote = remote;
+
+        /* L4T `tegra_ivc_notified` transition table (subset):
+         *   remote==SYNC                  → reset counters; local=ACK
+         *   local==SYNC && remote==ACK    → reset counters; local=EST
+         *   local==ACK                    → local=EST  (no counter reset)
+         *   else                          → no-op (wait)
+         */
+        if (remote == IVC_STATE_SYNC) {
+            hdr_store_u32(tx_iova, IVC_HDR_TX_COUNT_OFF, 0u);
+            hdr_store_u32(rx_iova, IVC_HDR_RX_COUNT_OFF, 0u);
+            hdr_store_u32(tx_iova, IVC_HDR_TX_STATE_OFF, IVC_STATE_ACK);
+            notify_rce(group);
+        } else if (local == IVC_STATE_SYNC
+                   && remote == IVC_STATE_ACK) {
+            hdr_store_u32(tx_iova, IVC_HDR_TX_COUNT_OFF, 0u);
+            hdr_store_u32(rx_iova, IVC_HDR_RX_COUNT_OFF, 0u);
+            hdr_store_u32(tx_iova, IVC_HDR_TX_STATE_OFF,
+                          IVC_STATE_ESTABLISHED);
+            notify_rce(group);
+        } else if (local == IVC_STATE_ACK) {
+            hdr_store_u32(tx_iova, IVC_HDR_TX_STATE_OFF,
+                          IVC_STATE_ESTABLISHED);
+            notify_rce(group);
+        }
+        /* else: waiting for remote to advance; just keep polling. */
+
+        timer_busy_wait_us(1000u);
+    }
 
     ch->initialised = true;
     INFO("camrtc_ivc: channel up (group=%u, rx=0x%lx, tx=0x%lx, "
