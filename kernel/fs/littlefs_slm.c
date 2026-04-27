@@ -18,8 +18,24 @@
 #include "../include/spinlock.h"
 #include "../include/debug.h"
 
-/* Maximum simultaneous mounts */
-#define LFS_MAX_MOUNTS 2
+/* Maximum simultaneous mounts. Production needs 1 (the boot
+ * /mnt/files mount); persistent_lfs_store_create temporarily holds
+ * a second when migrating between primary + backup images. The
+ * test harness routinely cycles many persistent_lfs stores within
+ * one boot, and any TEST_ASSERT failure mid-test returns from the
+ * test function without unmounting — those slots leak until the
+ * next boot. Pre-#486 this was 2, so a single such leak cascaded
+ * into "no slot available" for every subsequent littlefs_mount in
+ * the same run, making unrelated test_lfs_* / test_persistent_lfs
+ * tests fail downstream of the first failure. Bumped to 8 so a
+ * handful of leaked slots don't break later tests.
+ *
+ * Memory cost: `struct lfs_mount` carries ~4 KB of embedded LittleFS
+ * state (`lfs_t` + `lfs_config` + 256 B read/prog buffers + 16 B
+ * lookahead + 4 file_handle slots × ~600 B + 4 dir_handle slots).
+ * Six extra mount slots ≈ ~30 KB extra BSS, negligible vs the 1 GB
+ * QEMU test build / 4 GB Pi 5. */
+#define LFS_MAX_MOUNTS 8
 
 /*
  * File handle state
