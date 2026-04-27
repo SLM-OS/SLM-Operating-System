@@ -286,6 +286,44 @@ driver and is open-redistribution licensed.
 
 ---
 
+## Jetson SD-Card Layout
+
+When SLM-OS boots on a Jetson Orin Nano (Super Dev Kit) the LittleFS
+partition mounted at `/mnt/files` carries every blob the kernel needs
+beyond the kernel image itself. Standard layout:
+
+```
+/mnt/files/
+├── blob_autoload.conf                          # registry of blobs to autoload
+├── scheduler_mlp.hef                           # AI scheduler weights (Hailo-compiled)
+├── models/
+│   └── *.onnx                                  # Phase-5 ONNX vision models
+└── qwen2.5-1.5b-instruct-q4_k_m.gguf           # SLM weights — Qwen2.5-1.5B Q4_K_M (~1.0 GB)
+```
+
+The Qwen GGUF is the M5 demo target for `slm load /mnt/files/...`. It
+is **not** embedded in the kernel image (kernel-image budget is 32 MB;
+the GGUF is ~1 GB). Stage it onto the SD card via labctl rather than
+manually mounting:
+
+```bash
+# Fetch + verify on the dev host
+scripts/fetch-slm.sh
+
+# Stage to the labctl-managed SD card (jetson-nano-1 example)
+labctl sdwire_to_host --sbc jetson-nano-1
+labctl sdwire_cp build/slm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+                  /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
+labctl sdwire_to_dut --sbc jetson-nano-1
+```
+
+For background on the GGUF format and how SLM-OS parses it, see
+`docs/tutorials/slm-models.md`. For the `model_mem` pool sizing on
+Jetson (2 GB weight + 256 MB workspace), see
+`docs/specs/slm-integration.md` §"Memory Plan".
+
+---
+
 ## Troubleshooting
 
 **`aarch64-none-elf-gcc: command not found`** — the ARM toolchain is
@@ -325,4 +363,4 @@ Hailo-10H, not Hailo-8/8L).
 
 ---
 
-*Last updated: 18 April 2026*
+*Last updated: 27 April 2026*
