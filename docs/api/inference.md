@@ -211,7 +211,7 @@ thread without locking.
 ### run_inference
 
 ```rust
-pub fn run_inference(
+pub unsafe fn run_inference(
     model_index: usize,
     input: *const f32,
     input_len: usize,
@@ -220,9 +220,17 @@ pub fn run_inference(
 ) -> Result<usize, EngineError>
 ```
 
-Top-level inference entry point. Acquires the engine spinlock, initializes the static
+Top-level inference entry point. Acquires the engine spinlock, initialises the static
 `InferenceEngine` for the specified model, executes the forward pass, records timing
 statistics, and releases the lock.
+
+**Safety:** caller must ensure `input` is non-null and points to ≥ `input_len` `f32`
+values (4-byte aligned, valid for reads, unaliased for the call duration); same for
+`output` against `output_len` slots, valid for writes. Both buffers must remain live
+across the spinlock-protected step. Callers holding typed Rust slice / array
+references (`as_ptr()` / `as_mut_ptr()` from a stack array or `static`) trivially
+satisfy these. The signature stays raw because the kernel C side passes
+`*const float` / `*mut float` from `pmm_alloc_pages` etc.
 
 **Returns:** `Ok(n)` where `n` is the number of output floats, or `Err(EngineError)`.
 

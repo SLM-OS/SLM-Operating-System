@@ -4693,13 +4693,20 @@ pub extern "C" fn rust_infer_classify(model_index: u32) -> i32 {
     static CLASSIFY_INPUT: [f32; 784] = [0.0; 784];
     let mut classify_output: [f32; 64] = [0.0; 64];
 
-    let result = inference::run_inference(
-        model_index as usize,
-        CLASSIFY_INPUT.as_ptr(),
-        CLASSIFY_INPUT.len(),
-        classify_output.as_mut_ptr(),
-        classify_output.len(),
-    );
+    // SAFETY: CLASSIFY_INPUT is a 784-element `static` (immutable
+    // shared zero buffer is fine across concurrent callers);
+    // classify_output is a stack-local 64-element array. Both pointers
+    // are 4-byte-aligned, point to the declared element counts, and
+    // remain live through the call.
+    let result = unsafe {
+        inference::run_inference(
+            model_index as usize,
+            CLASSIFY_INPUT.as_ptr(),
+            CLASSIFY_INPUT.len(),
+            classify_output.as_mut_ptr(),
+            classify_output.len(),
+        )
+    };
 
     match result {
         Ok(n) if n > 0 => {
@@ -4744,13 +4751,20 @@ pub unsafe extern "C" fn rust_infer(
     if input_data.is_null() || output_buf.is_null() {
         return -1;
     }
-    match inference::run_inference(
-        model_index as usize,
-        input_data,
-        input_len,
-        output_buf,
-        output_len,
-    ) {
+    // SAFETY: caller's preconditions on this `unsafe extern "C" fn`
+    // (input_data / output_buf valid for input_len / output_len floats,
+    // 4-byte aligned, unaliased) directly satisfy `run_inference`'s
+    // safety contract. Null-checked above.
+    let result = unsafe {
+        inference::run_inference(
+            model_index as usize,
+            input_data,
+            input_len,
+            output_buf,
+            output_len,
+        )
+    };
+    match result {
         Ok(n) => n as i32,
         Err(_) => -2,
     }
@@ -4830,13 +4844,19 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
 
     let start = kernel_ffi::get_time_ns();
 
-    let result = match inference::run_inference(
-        idx,
-        INPUT.as_ptr(),
-        INPUT.len(),
-        output.as_mut_ptr(),
-        output.len(),
-    ) {
+    // SAFETY: INPUT is a 784-element `static` (immutable shared zero
+    // buffer) and `output` is a stack-local 64-element array. Both
+    // pointers are 4-byte-aligned, point to the declared element
+    // counts, and remain live through the call.
+    let result = match unsafe {
+        inference::run_inference(
+            idx,
+            INPUT.as_ptr(),
+            INPUT.len(),
+            output.as_mut_ptr(),
+            output.len(),
+        )
+    } {
         Ok(n) => n,
         Err(_) => return -3,
     };
@@ -4951,13 +4971,20 @@ pub extern "C" fn rust_infer_buf_and_print(
 
     let start = kernel_ffi::get_time_ns();
 
-    let result = match inference::run_inference(
-        idx,
-        input,
-        input_floats,
-        output.as_mut_ptr(),
-        output.len(),
-    ) {
+    // SAFETY: `input` was null-checked above and is documented in the
+    // FFI contract (slm_ffi.h: `rust_infer_buf_and_print`) to be a
+    // 4-byte-aligned pointer to `input_floats` × 4 bytes — the shell
+    // hands in a `pmm_alloc_pages` buffer which guarantees alignment.
+    // `output` is a stack-local 64-element array, valid for writes.
+    let result = match unsafe {
+        inference::run_inference(
+            idx,
+            input,
+            input_floats,
+            output.as_mut_ptr(),
+            output.len(),
+        )
+    } {
         Ok(n) => n,
         Err(_) => {
             // SAFETY: pure FFI call, fmt has matching specifiers.

@@ -715,7 +715,27 @@ fn mnist_gpu_fastpath_eligible(model_index: usize) -> bool {
 /// Run inference on a loaded model using the static engine.
 ///
 /// Thread-safe: only one inference at a time via spinlock.
-pub fn run_inference(
+///
+/// # Safety
+///
+/// Caller must ensure that:
+/// - `input` is non-null and points to at least `input_len` `f32` values
+///   (4-byte aligned). The buffer must remain valid and unaliased for
+///   the duration of the call.
+/// - `output` is non-null and points to at least `output_len` `f32`
+///   slots (4-byte aligned), valid for writes and unaliased for the
+///   duration of the call.
+/// - Both buffers stay live across the spinlock-protected inference
+///   step (the engine reads `input` and writes up to `output_len`
+///   elements into `output`).
+///
+/// Callers that already hold typed Rust slice / array references
+/// (`as_ptr()` / `as_mut_ptr()` from a stack array or `static`) trivially
+/// satisfy these. The signature stays raw because the kernel C side
+/// passes through plain `*const float` / `*mut float` from
+/// `pmm_alloc_pages` etc. and a typed Rust wrapper would impose
+/// conversions for no benefit.
+pub unsafe fn run_inference(
     model_index: usize,
     input: *const f32,
     input_len: usize,
