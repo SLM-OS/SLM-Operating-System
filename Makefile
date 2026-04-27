@@ -975,8 +975,18 @@ kernel-test-clean:
 # x86-64 test ISO path
 KERNEL_TEST_ISO := $(KERNEL_TEST_BUILD_DIR)/slmos-test.iso
 
+# Validate the canonical Pi 5 boot configs at deploy/pi5/ — catches
+# drift if someone edits one of those files and silently drops a
+# required key, swaps `kernel=` between the two by mistake, or adds
+# the `[tryboot]` filter section that misparses on Pi 5 firmware.
+# Cheap (~ms), deterministic, no toolchain dependency — runs before
+# the QEMU test suite.
+.PHONY: check-deploy-configs
+check-deploy-configs:
+	@./scripts/check-deploy-pi5-configs.sh
+
 .PHONY: test
-test: kernel-test $(SDHCI_TEST_IMG)
+test: check-deploy-configs kernel-test $(SDHCI_TEST_IMG)
 	@echo "Running kernel tests..."
 	@rm -f $(TEST_OUTPUT)
 ifeq ($(PLATFORM),X86_64)

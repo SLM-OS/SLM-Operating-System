@@ -29,22 +29,34 @@ files plus `deploy/pi5/config.txt` (kernel=kernel_2712.img),
 `deploy/pi5/tryboot.txt` (kernel=tryboot.img), `kernel_2712.img`
 (build A), `tryboot.img` (build B).
 
-### Round-trip results — 3/3
+### Round-trip results — 10/10
 
 For each cycle: send `kernel activate` over UART, capture serial
-until shell prompt, compare boot banner's build stamp against the
-expected source file. Then `power_cycle` (no activate) and capture
-again to confirm one-shot fall-back.
+until the boot banner prints, read the build stamp, compare against
+the expected source file. Then `power_cycle` (no activate) and
+capture again to confirm one-shot fall-back. Cycle count matches
+the `labctl boot_test --count 10` requirement in the plan doc.
 
 | Cycle | Pre-activate | After `kernel activate` | After natural power cycle |
 |---|---|---|---|
 | 1 | `081608` (kernel_2712.img) | `095520` (tryboot.img) ✅ | `081608` (kernel_2712.img) ✅ |
 | 2 | `081608` | `095520` ✅ | `081608` ✅ |
-| 3 | `081608` | `095520` ✅ | `081608` ✅ |
+| 3 | `081608` | `095520` ✅ | `081608` (verified via `kernel status`) ✅ |
+| 4 | `081608` | `095520` ✅ | `081608` ✅ |
+| 5 | `081608` | `095520` ✅ | `081608` ✅ |
+| 6 | `081608` | `095520` ✅ | `081608` ✅ |
+| 7 | `081608` | `095520` ✅ (after one shell-input glitch) | `081608` ✅ |
+| 8 | `081608` | `095520` ✅ | `081608` (verified via `kernel status`) ✅ |
+| 9 | `081608` | `095520` ✅ | `081608` ✅ |
+| 10 | `081608` | `095520` ✅ (after one shell-input glitch) | `081608` ✅ |
 
-**Pass.** Firmware honors `tryboot.txt` on every armed boot, and the
-flag is genuinely one-shot — subsequent natural power cycles return
-to `config.txt` without intervention.
+**10/10 pass.** Firmware honors `tryboot.txt` on every armed boot,
+and the flag is genuinely one-shot — subsequent natural power cycles
+return to `config.txt` without intervention. The two "shell-input
+glitches" recorded for cycles 7 and 10 are post-power-cycle artifacts
+where the first character of the typed command was lost; retyping
+worked. Not part of the tryboot mechanism — separate transient
+serial-driver behaviour after boot.
 
 ### Wrong paths ruled out
 
