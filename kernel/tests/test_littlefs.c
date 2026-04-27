@@ -37,6 +37,7 @@ extern void *memcpy(void *dest, const void *src, size_t n);
 #define TEST_FAT32_BLOCK_SIZE   512u
 #define TEST_FAT32_BLOCK_COUNT  (32u * 1024u * 1024u / 512u)
 #define TEST_FAT32_VOL          "0:"
+#define TEST_PERSISTENT_LFS_BAK "0:/slmstore/files.lfs.bak"
 
 static BYTE g_test_fat_mkfs_work[4096];
 
@@ -326,6 +327,66 @@ static void test_persistent_lfs_store_incremental_update_round_trip(void)
     TEST_ASSERT_EQUAL_INT((int)strlen(data_b),
                           littlefs_file_read(mnt, fd, buf, sizeof(buf) - 1));
     TEST_ASSERT_EQUAL_STRING(data_b, buf);
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+
+    TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));
+    persistent_lfs_store_destroy(store);
+    destroy_boot_media_fat_volume(fat_dev);
+}
+
+static void test_persistent_lfs_store_recovers_backup_image(void)
+{
+    struct blkdev *fat_dev = NULL;
+    struct blkdev *store = NULL;
+    struct lfs_mount *mnt = NULL;
+    FATFS fs;
+    FILINFO fno;
+    FRESULT res;
+    bool needs_format = false;
+    char buf[64];
+    const char *data = "backup recovery payload";
+
+    make_boot_media_fat_volume(&fat_dev);
+    boot_media_test_set_device(fat_dev);
+
+    store = persistent_lfs_store_create("persist_lfs5", &needs_format);
+    TEST_ASSERT_NOT_NULL(store);
+    TEST_ASSERT_TRUE(needs_format);
+    mnt = littlefs_mount(store, needs_format);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    int fd = littlefs_file_open(mnt, "/recover.txt",
+                                LFS_O_CREAT | LFS_O_WRONLY | LFS_O_TRUNC);
+    TEST_ASSERT_TRUE(fd >= 0);
+    TEST_ASSERT_EQUAL_INT((int)strlen(data),
+                          littlefs_file_write(mnt, fd, data, strlen(data)));
+    TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
+    TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));
+    persistent_lfs_store_destroy(store);
+
+    fatfs_disk_attach(fat_dev);
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(&fs, TEST_FAT32_VOL, 1));
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_stat(PERSISTENT_LFS_STORE_PATH, &fno));
+    TEST_ASSERT_EQUAL_INT(FR_OK,
+                          f_rename(PERSISTENT_LFS_STORE_PATH,
+                                   TEST_PERSISTENT_LFS_BAK));
+    res = f_stat(PERSISTENT_LFS_STORE_PATH, &fno);
+    TEST_ASSERT_TRUE(res != FR_OK);
+    TEST_ASSERT_EQUAL_INT(FR_OK, f_mount(NULL, TEST_FAT32_VOL, 0));
+    fatfs_disk_detach();
+
+    store = persistent_lfs_store_create("persist_lfs6", &needs_format);
+    TEST_ASSERT_NOT_NULL(store);
+    TEST_ASSERT_FALSE(needs_format);
+    mnt = littlefs_mount(store, needs_format);
+    TEST_ASSERT_NOT_NULL(mnt);
+
+    fd = littlefs_file_open(mnt, "/recover.txt", LFS_O_RDONLY);
+    TEST_ASSERT_TRUE(fd >= 0);
+    memset(buf, 0, sizeof(buf));
+    TEST_ASSERT_EQUAL_INT((int)strlen(data),
+                          littlefs_file_read(mnt, fd, buf, sizeof(buf) - 1));
+    TEST_ASSERT_EQUAL_STRING(data, buf);
     TEST_ASSERT_EQUAL_INT(0, littlefs_file_close(mnt, fd));
 
     TEST_ASSERT_EQUAL_INT(0, littlefs_unmount(mnt));
@@ -998,6 +1059,7 @@ int test_suite_littlefs(void)
     RUN_TEST(test_lfs_stat);
     RUN_TEST(test_persistent_lfs_store_round_trip);
     RUN_TEST(test_persistent_lfs_store_incremental_update_round_trip);
+    RUN_TEST(test_persistent_lfs_store_recovers_backup_image);
 
     /* File operation tests */
     RUN_TEST(test_lfs_file_create_write);

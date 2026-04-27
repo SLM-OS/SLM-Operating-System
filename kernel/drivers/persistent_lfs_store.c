@@ -49,6 +49,12 @@ struct persistent_lfs_store_priv {
     spinlock_t lock;
 };
 
+static bool persistent_lfs_valid_image_size(FSIZE_t size)
+{
+    return size >= PERSISTENT_LFS_BLOCK_SIZE &&
+           (size % PERSISTENT_LFS_BLOCK_SIZE) == 0;
+}
+
 static void persistent_lfs_mark_dirty(struct persistent_lfs_store_priv *priv,
                                       uint32_t first_block,
                                       uint32_t last_block)
@@ -392,6 +398,7 @@ struct blkdev *persistent_lfs_store_create(const char *name,
     bool mounted = false;
     bool needs_format = false;
     bool have_primary = false;
+    bool have_backup = false;
     size_t image_bytes = PERSISTENT_LFS_DEFAULT_BYTES;
 
     if (needs_format_out) {
@@ -414,15 +421,36 @@ struct blkdev *persistent_lfs_store_create(const char *name,
 
     if (f_stat(PERSISTENT_LFS_STORE_PATH, &fno) == FR_OK) {
         have_primary = true;
-        if (fno.fsize >= PERSISTENT_LFS_BLOCK_SIZE &&
-            (fno.fsize % PERSISTENT_LFS_BLOCK_SIZE) == 0) {
+        if (persistent_lfs_valid_image_size(fno.fsize)) {
             image_bytes = fno.fsize;
         } else {
             WARN("persistent_lfs_store: ignoring invalid image size %lu",
                  (unsigned long)fno.fsize);
             needs_format = true;
         }
-    } else {
+    }
+
+    if (!have_primary || needs_format) {
+        if (f_stat(PERSISTENT_LFS_STORE_BAK_PATH, &fno) == FR_OK) {
+            have_backup = true;
+            if (persistent_lfs_valid_image_size(fno.fsize)) {
+                image_bytes = fno.fsize;
+                if (!have_primary ||
+                    f_rename(PERSISTENT_LFS_STORE_BAK_PATH,
+                             PERSISTENT_LFS_STORE_PATH) == FR_OK) {
+                    have_primary = true;
+                    needs_format = false;
+                } else {
+                    WARN("persistent_lfs_store: failed to restore backup image");
+                }
+            } else {
+                WARN("persistent_lfs_store: ignoring invalid backup image size %lu",
+                     (unsigned long)fno.fsize);
+            }
+        }
+    }
+
+    if (!have_primary && !have_backup) {
         needs_format = true;
     }
 
