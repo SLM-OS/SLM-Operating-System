@@ -2310,6 +2310,94 @@ static int model_unload(int argc, char *argv[])
  */
 extern int rust_infer_and_print(uint32_t model_index);
 
+/*
+ * File-input variant. C reads the bytes via VFS and hands them to Rust
+ * as a fp32 buffer; Rust runs inference and prints logits + argmax.
+ * The pointer cast `(const float *)buf` is just FFI shape — C never
+ * dereferences as float, so the -mgeneral-regs-only constraint holds.
+ */
+extern int rust_infer_buf_and_print(uint32_t model_index,
+                                    const float *input,
+                                    size_t input_floats);
+
+static int model_infer_file(int argc, char *argv[])
+{
+    if (argc < 4) {
+        shell_puts("Usage: model infer-file <name|idx> <path>\r\n");
+        shell_puts("  Path must point to raw little-endian fp32 matching the\r\n");
+        shell_puts("  model's input shape (e.g. 3,136 bytes for MNIST 1x1x28x28).\r\n");
+        return -1;
+    }
+
+    /* Resolve model index. */
+    int idx = -1;
+    uint32_t parsed_idx;
+    if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+        idx = (int)parsed_idx;
+    } else {
+        idx = rust_model_find(argv[2]);
+    }
+    if (idx < 0) {
+        shell_printf("model infer-file: '%s' not found\r\n", argv[2]);
+        return -1;
+    }
+
+    /* Resolve path against cwd, like the other shell file commands. */
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(argv[3], resolved, sizeof(resolved)) < 0) {
+        shell_printf("model infer-file: path too long: %s\r\n", argv[3]);
+        return -1;
+    }
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0 || info.type != 0 || info.size == 0) {
+        shell_printf("model infer-file: cannot stat '%s'\r\n", resolved);
+        return -1;
+    }
+    if ((info.size % 4u) != 0 || info.size > 32u * 1024u) {
+        shell_printf("model infer-file: '%s' size %u — must be a multiple of 4 "
+                     "and <= 32 KB\r\n",
+                     resolved, (unsigned)info.size);
+        return -1;
+    }
+
+    /* Page-aligned PMM buffer guarantees fp32 alignment for the NEON
+     * loads inside the inference engine — same pattern Lua's
+     * `slm.model_infer_file` uses. */
+    size_t pages = (info.size + 4095u) / 4096u;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+    if (!buf) {
+        shell_printf("model infer-file: out of memory\r\n");
+        return -1;
+    }
+
+    int rd = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (rd != (int)info.size) {
+        pmm_free_pages(buf, pages);
+        shell_printf("model infer-file: short read (%d/%u)\r\n",
+                     rd, (unsigned)info.size);
+        return -1;
+    }
+
+    /* M3 telemetry: same hook the zero-input `model infer` command and
+     * the Lua model_infer* bindings call. Keeps the rate / latency-hist
+     * / tel.inf event counter consistent across entry points. */
+    uint64_t t0 = slm_get_time_ns();
+    int result = rust_infer_buf_and_print((uint32_t)idx,
+                                          (const float *)buf,
+                                          info.size / 4u);
+    uint64_t t1 = slm_get_time_ns();
+    admin_telemetry_record_inference(t1 > t0 ? t1 - t0 : 0u, result >= 0);
+
+    pmm_free_pages(buf, pages);
+
+    if (result < 0) {
+        shell_printf("model infer-file: failed (error %d)\r\n", result);
+        return -1;
+    }
+    return 0;
+}
+
 static int model_infer(int argc, char *argv[])
 {
     if (argc < 3) {
@@ -2379,6 +2467,9 @@ int cmd_model(int argc, char *argv[])
     }
     if (strcmp(subcmd, "infer") == 0) {
         return model_infer(argc, argv);
+    }
+    if (strcmp(subcmd, "infer-file") == 0) {
+        return model_infer_file(argc, argv);
     }
     if (strcmp(subcmd, "gpu") == 0) {
         rust_gpu_print_status();
@@ -2592,7 +2683,7 @@ int cmd_model(int argc, char *argv[])
     }
 
     shell_puts("Usage: model [load|list|info|unload|pin|unpin|preload|preload-status|"
-              "infer|bench|stats|pools|gpu|engines|meta|launch]\r\n");
+              "infer|infer-file|bench|stats|pools|gpu|engines|meta|launch]\r\n");
     return -1;
 }
 

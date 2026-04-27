@@ -4609,6 +4609,102 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
     0
 }
 
+/// Run inference on a loaded model with caller-supplied input and
+/// print results to UART.
+///
+/// Mirrors `rust_infer_and_print` but takes a caller-supplied input
+/// buffer instead of a hard-coded zero array. Used by the shell
+/// `model infer-file <name|idx> <path>` command — kernel C reads
+/// the file via VFS, passes the byte buffer through this function
+/// which calls `inference::run_inference` and prints logits +
+/// argmax in the same format as `rust_infer_and_print`.
+///
+/// `input` must point to `input_floats` × 4 bytes of fp32, matching
+/// the model's input shape. The buffer must be 4-byte aligned —
+/// the C caller hands in a `pmm_alloc_pages` result which always
+/// satisfies that.
+///
+/// The output side reuses an internal static buffer so the
+/// kernel-task stack stays small. Returns 0 on success, negative
+/// on inference failure (-1 model not found, -2 NULL/empty input,
+/// -3 inference engine error).
+#[no_mangle]
+pub extern "C" fn rust_infer_buf_and_print(
+    model_index: u32,
+    input: *const f32,
+    input_floats: usize,
+) -> i32 {
+    extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
+    }
+
+    if input.is_null() || input_floats == 0 {
+        return -2;
+    }
+
+    let idx = model_index as usize;
+    let info = match loader::registry::get_info(idx) {
+        Some(i) => i,
+        None => return -1,
+    };
+
+    // Static output buffer mirrors `rust_infer_and_print`'s pattern.
+    // The caller owns the input buffer's lifetime.
+    static mut OUTPUT: [f32; 64] = [0.0f32; 64];
+
+    let start = kernel_ffi::get_time_ns();
+
+    // SAFETY: shell is single-threaded; OUTPUT is touched only here.
+    let result = unsafe {
+        for o in OUTPUT.iter_mut() { *o = 0.0; }
+
+        match inference::run_inference(
+            idx,
+            input,
+            input_floats,
+            OUTPUT.as_mut_ptr(),
+            OUTPUT.len(),
+        ) {
+            Ok(n) => n,
+            Err(_) => return -3,
+        }
+    };
+
+    let end = kernel_ffi::get_time_ns();
+    let elapsed_us = (end - start) / 1000;
+
+    unsafe {
+        uart_printf(
+            b"Inference on '%s' completed in %lu us\r\n\0".as_ptr(),
+            info.name.as_ptr(),
+            elapsed_us as u64,
+        );
+        uart_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
+    }
+
+    // Find argmax and print outputs.
+    let mut argmax: usize = 0;
+    let mut max_val = unsafe { OUTPUT[0] };
+    for i in 0..result {
+        let val = unsafe { OUTPUT[i] };
+        let pct = (val * 1000.0) as i32;
+        let pct = if pct < 0 { 0 } else { pct };
+        unsafe {
+            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
+        }
+        if val > max_val {
+            max_val = val;
+            argmax = i;
+        }
+    }
+
+    unsafe {
+        uart_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
+    }
+
+    0
+}
+
 /// Run inference engine tests.
 ///
 /// Returns number of test failures (0 = all passed).
