@@ -52,14 +52,6 @@ static uint32_t total_suspicious_leak    = 0;
 static int32_t  last_session_heap_delta  = 0;
 static int32_t  max_session_heap_delta   = 0;
 
-static uint32_t heap_used_now(void) {
-#if MEM_STATS
-    return (uint32_t)lwip_stats.mem.used;
-#else
-    return 0u;
-#endif
-}
-
 void tcp_shell_server_get_stats(struct tcp_shell_server_stats *out) {
     if (!out) return;
     out->sessions_opened              = sessions_opened;
@@ -72,39 +64,28 @@ void tcp_shell_server_get_stats(struct tcp_shell_server_stats *out) {
     out->max_session_heap_delta_bytes  = max_session_heap_delta;
 }
 
-void tcp_shell_server_note_session_open(struct shell_session *sess) {
-    if (!sess) return;
-
-    sess->heap_used_at_open_bytes = heap_used_now();
-
+void tcp_shell_server_note_session_open(uint32_t session_id) {
+    (void)session_id;
     sessions_opened++;
     uint32_t active = sessions_opened - sessions_closed;
     if (active > peak_active) peak_active = active;
 }
 
-void tcp_shell_server_note_session_close(const struct shell_session *sess) {
-    if (!sess) return;
-
+void tcp_shell_server_note_session_close(uint32_t session_id,
+                                         int32_t  heap_delta_bytes) {
     sessions_closed++;
 
-    /* Compute delta. uint32_t subtraction yields a signed-meaningful
-     * result when reinterpreted: positive = heap grew during this
-     * session (suspicious), negative = heap shrank (a previously
-     * TIME_WAIT'd session's resources freed during this one). */
-    uint32_t open_used  = sess->heap_used_at_open_bytes;
-    uint32_t close_used = heap_used_now();
-    int32_t  delta      = (int32_t)(close_used - open_used);
+    last_session_heap_delta = heap_delta_bytes;
+    if (heap_delta_bytes > max_session_heap_delta) {
+        max_session_heap_delta = heap_delta_bytes;
+    }
 
-    last_session_heap_delta = delta;
-    if (delta > max_session_heap_delta) max_session_heap_delta = delta;
-
-    if (delta > (int32_t)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES) {
+    if (heap_delta_bytes > (int32_t)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES) {
         leak_warnings++;
-        total_suspicious_leak += (uint32_t)delta;
+        total_suspicious_leak += (uint32_t)heap_delta_bytes;
         WARN("shell-tcp: session %u closed with +%d bytes still on lwIP heap "
-             "(open=%u close=%u, threshold=%u) — suspect leak",
-             (unsigned)sess->id, (int)delta,
-             (unsigned)open_used, (unsigned)close_used,
+             "(threshold=%u, measured post-tcp_close) — suspect leak",
+             (unsigned)session_id, (int)heap_delta_bytes,
              (unsigned)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES);
     }
 }
@@ -143,11 +124,11 @@ static void session_task_entry(void *arg)
         io->close(io);   /* signals the TCP backend that we are done */
     }
 
-    /* Snapshot the heap delta and emit any leak WARN before the
-     * session struct is recycled — the close hook reads
-     * `sess->heap_used_at_open_bytes`, which `shell_session_free`
-     * is free to clobber. */
-    tcp_shell_server_note_session_close(sess);
+    /* Note: the leak-detector close hook is *not* called here — it
+     * fires from `shell_io_tcp_poll` immediately after `tcp_close(pcb)`
+     * + `ctx_free`, which is the only point where lwIP has actually
+     * released the unacked-TX state and the measurement reflects a
+     * true leak (not TIME_WAIT residue). */
 
     shell_session_free(sess);
 
@@ -213,12 +194,10 @@ static err_t on_accept(void *arg, struct tcp_pcb *newpcb, err_t err)
     }
     task_set_affinity(t, 0);
 
-    /* Note the session-open *before* scheduler_add_task — once the
-     * task is runnable, it could begin executing on the next
-     * scheduler tick on another CPU and reach `note_session_close`
-     * before we'd snapshot heap-at-open. Cheap atomic-ish counters
-     * either way, but the ordering matters for the leak delta. */
-    tcp_shell_server_note_session_open(sess);
+    /* Bump the open counter. The heap-at-open snapshot is owned by
+     * shell_io_tcp_create (it lives on tcp_shell_ctx so it can be
+     * read at ctx_free time, after tcp_close has actually run). */
+    tcp_shell_server_note_session_open(sess->id);
 
     scheduler_add_task(t);
 
