@@ -100,6 +100,15 @@
 #define TEGRA234_RESET_VI           112U
 #define TEGRA234_RESET_VI2          115U
 
+/* Camera RTCPU (RCE) — needed for issue #438 investigation:
+ * post-kexec attempt to re-init RCE after Linux's .shutdown() sent
+ * BYE + asserted reset. Whether BPMP allows AP-side reset toggle of
+ * RESET_RCE_ALL is the open question. */
+#define TEGRA234_CLK_RCE_CPU_NIC    113U
+#define TEGRA234_CLK_RCE_NIC        114U
+#define TEGRA234_CLK_RCE_CPU        433U
+#define TEGRA234_RESET_RCE_ALL      81U
+
 /* ===================================================================== */
 /*  External-peripheral clocks (camera XCLK)                             */
 /* ===================================================================== */

@@ -34,14 +34,15 @@
  *     is in WFI, idle waiting for an HSP message.
  *   - SM[0] / SM[1] / SS[0] all peek cleanly with FULL bit clear
  *     (no stale messages in flight).
- * The inheritance probes are GREEN — but HELLO writes to SM[0]
- * still don't get a response. Holding `tegra-camera-rtcpu`
- * `power/control = on` in slmos-kexec (so Linux's autosuspend
- * never fires) does not change the failure mode either, ruling
- * out the runtime-suspend hypothesis. The actual blocker is
- * deeper — see `docs/jetson-camera-rtcpu-ivc-driver-notes.md`
- * "Hardware Task 3 Option B" section + issue #438 for the
- * working theory and investigation queue.
+ * Linux's kexec `.shutdown` callback for `tegra-camera-rtcpu`
+ * sends `CAMRTC_HSP_BYE` to RCE and then asserts `RESET_RCE_ALL`
+ * + disables the rce clocks (cached at
+ * `docs/reference/l4t-tegra-camera-rtcpu.c:893,1402`). Even though
+ * `R5_CTRL_0.FWLOADDONE` stays set, R5 is clock-gated and the
+ * HSP-VM ISR is dead. `camrtc_init` re-engages RCE by mirroring
+ * `tegra_camrtc_poweron` (RCE clocks on, `RESET_RCE_ALL`
+ * deasserted) — the firmware restarts in place from its
+ * unzeroed DRAM carveout and HELLO succeeds. Resolves issue #438.
  *
  * Concurrency contract: the camrtc_* APIs are NOT thread-safe.
  * Module-scope statics carry the SM addresses + initialised flag;

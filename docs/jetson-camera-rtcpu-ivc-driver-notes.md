@@ -414,6 +414,51 @@ inherits.
 
 ---
 
+## Hardware Task 3 Option B — RESOLVED (2026-04-26, issue #438)
+
+The HELLO block documented in the section below is **resolved** by
+mirroring L4T's `tegra_camrtc_poweron` from `camrtc_init` before
+sending HELLO. Specifically: `bpmp_clk_enable(RCE_CPU_NIC)` +
+`bpmp_clk_enable(RCE_NIC)` + `bpmp_clk_enable(RCE_CPU)` +
+`bpmp_reset_deassert(RESET_RCE_ALL)` + a 10 ms wait. The firmware
+restarts in place from its unzeroed DRAM carveout (no FW reload
+needed) and HELLO + PROTOCOL + RESUME complete cleanly.
+
+Verified live on jetson-nano-1 (kexec from Linux):
+
+```
+=== RCE HSP-VM diag + handshake ===
+[INFO] camrtc: hsp_rce DIMENSIONING=0x00080048 (SM=8 SS=4)
+[INFO] camrtc: rce-pm R5_CTRL_0=0x00000002 (FWLOADDONE=1)
+[INFO] camrtc: rce-pm PWR_STATUS_0=0x04600000 (WFIPIPESTOPPED=1)
+[Camera-FW on t234-rce-safe started]                  <- firmware restart
+[Camera-FW on t234-rce-safe ready SHA1=e2238...]      <- firmware ready
+[INFO] camrtc: HELLO echo matched (cookie=0xda5c29)
+[INFO] camrtc: RCE FW protocol version=6 (SM6 expected)
+[INFO] camrtc: RESUME ack (status=0x0)
+  camrtc_init:          rc=0
+  *** RCE HSP-VM session established ***
+```
+
+The investigation in the section below is **kept verbatim** for
+future reference — it documents the hypotheses that were tried and
+ruled out (SS-bit drain, IRQ-wake-then-HELLO, runtime-PM pin), so a
+maintainer who hits a similar HSP-VM block on a different RTCPU
+(SCE/APE/DCE) doesn't re-walk the wrong trails. The fix in
+`kernel/drivers/camrtc/camrtc.c::camrtc_init` is documented
+inline so the comment-vs-code-vs-doc story stays consistent.
+
+The next investigation step (filed issue #438 has now been closed
+by this PR) was originally to write a Linux-side
+`rtcpu_noshutdown.ko` inhibitor module, mirroring the
+`arm_smmu_noshutdown.ko` workaround for tegra-xusb (#285). Turned
+out the AP-side BPMP MRQs were sufficient — no kernel-module work
+needed. Lesson: try the "re-engage from the AP side via BPMP"
+path before reaching for kernel-module workarounds for similar
+RTCPU blocks in the future.
+
+---
+
 ## Hardware Task 3 Option B — Phase 0 + HELLO findings (2026-04-26)
 
 Live verification on jetson-nano-1 confirmed the **MMIO layer of the
