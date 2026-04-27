@@ -694,8 +694,8 @@ static void test_camrtc_ch_setup_accessors_uninit_zero(void)
  * inside bit-packed members, so this runtime test sets each flag
  * individually on a zero-init struct and verifies the underlying
  * 32-bit container word reads back as the expected (1u << bit_pos).
- * Also verifies the bitfield write doesn't bleed past byte 3 into
- * `match.datatype` at offset 4.
+ * Also verifies the bitfield write doesn't bleed into byte 4
+ * (`match.datatype`, which sits immediately after the container).
  *
  * If a future toolchain or struct reorder changes the bit packing,
  * RCE will program VI registers with the wrong flags and capture
