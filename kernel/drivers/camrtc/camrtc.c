@@ -104,6 +104,14 @@
 #define CAMRTC_HELLO_TIMEOUT_US      100000u
 #define CAMRTC_HANDSHAKE_TIMEOUT_US  100000u
 
+/* CH_SETUP needs a more generous ceiling than the boot-sync messages:
+ * RCE has to walk the TLV array, validate IOVAs against its VM1
+ * aperture, and allocate IVC bookkeeping. L4T's `cmd_timeout`
+ * defaults to 2 s for all camrtc-hsp commands; 1 s is enough headroom
+ * to absorb a once-in-a-blue-moon scheduling stall in RCE without
+ * making `rcediag` feel hung. */
+#define CAMRTC_CH_SETUP_TIMEOUT_US   1000000u
+
 /* ---- MMIO accessors ---- */
 
 static inline uint32_t mmio_read32(uintptr_t addr)
@@ -632,9 +640,19 @@ int camrtc_ch_setup_capture_control(void)
     uint64_t iova_shifted = (uint64_t)region_phys >> 8;
 
     /* Zero the entire region so the TLV terminator + IVC ring
-     * headers start clean. PMM doesn't guarantee zeroed pages. */
-    for (uint32_t i = 0; i < CAMRTC_CTRL_REGION_BYTES; i++) {
-        ((volatile uint8_t *)region_phys)[i] = 0;
+     * headers start clean. PMM doesn't guarantee zeroed pages.
+     * Region base is 4 KB aligned and the size is divisible by 8
+     * (45312 bytes = 4096 + 2*(128 + 64*320)) — pinned by the
+     * static_asserts below — so word-at-a-time writes are safe. */
+    _Static_assert((CAMRTC_CTRL_REGION_PHYS & 7u) == 0u,
+                   "CH_SETUP region must be 8-byte aligned for the zero loop");
+    _Static_assert((CAMRTC_CTRL_REGION_BYTES & 7u) == 0u,
+                   "CH_SETUP region size must be 8-byte multiple for the zero loop");
+    _Static_assert(CAMRTC_CTRL_REGION_BYTES <= CAMRTC_CTRL_REGION_RESERVED,
+                   "CH_SETUP region must fit inside its PMM carveout");
+    volatile uint64_t *region_words = (volatile uint64_t *)region_phys;
+    for (uint32_t i = 0; i < CAMRTC_CTRL_REGION_BYTES / sizeof(uint64_t); i++) {
+        region_words[i] = 0;
     }
 
     /* Build the TLV entry at offset 0. The rx queue starts at
@@ -657,8 +675,12 @@ int camrtc_ch_setup_capture_control(void)
     tlv->ivc_version   = CAMRTC_CTRL_VERSION;
     /* Inline strcpy: "capture-control\0" — 16 bytes including NUL,
      * fits in the 32-byte field. Manual copy because <string.h> is
-     * libc-only on bare metal. */
+     * libc-only on bare metal. The static_assert keeps a future
+     * rename to a longer service name from silently overflowing into
+     * the next TLV (today's terminator). */
     static const char ctrl_name[] = "capture-control";
+    _Static_assert(sizeof(ctrl_name) <= sizeof(((struct camrtc_tlv_ivc_setup *)0)->ivc_service),
+                   "capture-control service name must fit in the 32-byte ivc_service field");
     for (uint32_t i = 0; i < sizeof(ctrl_name); i++) {
         tlv->ivc_service[i] = ctrl_name[i];
     }
@@ -688,7 +710,7 @@ int camrtc_ch_setup_capture_control(void)
     uint32_t status = 0xFFFFFFu;
     int rc = camrtc_send_msg(CAMRTC_HSP_CH_SETUP,
                              (uint32_t)iova_shifted,
-                             &status, 1000000u);
+                             &status, CAMRTC_CH_SETUP_TIMEOUT_US);
     if (rc != 0) {
         WARN("camrtc: CH_SETUP send failed rc=%d", rc);
         return -2;

@@ -562,6 +562,19 @@ void pmm_init(void)
      * BSS-allocated buffers around 0x80700000 reproducibly returned
      * INVALID_IOVA (status=131) on jetson-nano-1, 2026-04-26.
      */
+    /* Defensive: if a future kernel image grows past 0xA0000000,
+     * the first add_region call below would receive `start > end`
+     * and the camera CH_SETUP carveout would be inside the
+     * allocator, breaking RCE binding silently. Today the kernel
+     * ends near 0x80d10000 — ~480 MB of headroom — but the check
+     * is cheap and turns "silent failure on the next milestone"
+     * into "loud panic at boot". */
+    if (buddy_state.heap_start >= 0xA0000000UL) {
+        ERROR("PMM: kernel image extends into RCE CH_SETUP carveout "
+              "(__kernel_end=0x%lx >= 0xA0000000)",
+              (unsigned long)buddy_state.heap_start);
+        return;
+    }
     pmm_add_region_split(buddy_state.heap_start, 0xA0000000UL);
     pmm_add_region_split(0xA0010000UL, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
     pmm_add_region_split(0xC2000000UL, 0xFFFE0000UL);
