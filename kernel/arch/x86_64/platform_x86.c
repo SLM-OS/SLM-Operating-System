@@ -582,9 +582,11 @@ int dtb_parse(const void *dtb, fdt_info_t *info)
 {
     (void)dtb;
     if (info) {
-        /* Zero out — main.c checks fields */
+        /* Zero out — main.c checks fields. The hardcoded [0] index was a
+         * typo: only byte 0 was being cleared on every iteration, leaving
+         * the rest of *info as uninitialized stack memory for callers. */
         for (unsigned i = 0; i < sizeof(*info); i++)
-            ((uint8_t *)info)[0] = 0;
+            ((uint8_t *)info)[i] = 0;
     }
     return FDT_ERR_BADPTR;  /* No DTB on x86-64 */
 }
