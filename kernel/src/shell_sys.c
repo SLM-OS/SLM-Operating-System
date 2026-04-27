@@ -6253,61 +6253,164 @@ int cmd_csidiag(int argc, char *argv[])
                 (unsigned)ch_id, (unsigned long)vi_mask);
 
     /* CHANNEL_SETUP succeeded — populate slot 0 of the request
-     * ring with a minimal capture_descriptor, then fire
-     * CAPTURE_REQUEST_REQ over the capture IVC channel.
+     * ring with a *full* capture_descriptor (header + populated
+     * vi_channel_config) and fire CAPTURE_REQUEST_REQ over the
+     * capture IVC channel.
      *
-     * This is a wire-format smoke test, NOT a real capture: we
-     * leave vi_channel_config / atomp_surfaces / pfsd_config as
-     * zero, which means RCE will accept the request, try to
-     * configure the VI hardware, fail (no valid frame buffer
-     * IOVA, no atomp surface stride), and report the error
-     * back via CAPTURE_STATUS_IND. The wire round-trip + the
-     * STATUS_IND echo are the proof of life.
-     *
-     * The descriptor lives at the start of request_ring (slot
-     * 0). Set capture_flags=STATUS_REPORT_ENABLE so RCE always
-     * sends STATUS_IND, even on a successful path that wouldn't
-     * otherwise notify; sequence is for AP-side bookkeeping. */
+     * vi_channel_config carries IMX219 binning-mode RAW10 frame
+     * geometry (1640×1232) and atomp surface[0] = the 4 MB
+     * frame-buffer carveout at 0xA1000000 (PMM-reserved in
+     * pmm.c). RCE programs the VI hardware, the sensor (newly
+     * told to STREAMING via I²C below) emits a frame, the VI
+     * pipeline writes ~4 MB of T_R16 pixels into the buffer, and
+     * RCE sends CAPTURE_STATUS_IND with `capture_status.status`
+     * = CAPTURE_STATUS_SUCCESS (1). */
+
+    /* Tell IMX219 to start streaming. MODE_SELECT (0x0100) goes
+     * 0 → 1; sensor begins emitting CSI-2 frames on the next
+     * frame boundary (~33 ms at 30 fps). Caller must have
+     * already powered the sensor with the `imx219` shell
+     * command, which leaves it in standby. */
+    rc = imx219_streaming_enable();
+    uart_printf("  imx219 stream-on: rc=%d (MODE_SELECT=0x01)\r\n", rc);
+    if (rc != 0) {
+        uart_puts("  *** I²C write to IMX219 MODE_SELECT failed.  ***\r\n");
+        uart_puts("  *** Run `imx219` first to power the sensor.  ***\r\n");
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+    /* Wait ~50 ms for the sensor to settle. At 30 fps the first
+     * SOF appears within 33 ms; one full frame interval gives the
+     * sensor's PLL time to lock and the AGC to converge. */
+    timer_busy_wait_us(50000u);
+
     /* Zero the entire descriptor slot first so any RCE-side read
-     * of an unset field (vi_channel_config, atomp surfaces) lands
-     * as 0. */
+     * of an unset field (pfsd_cfg, prefence, pad) lands as 0. */
     volatile uint32_t *desc_words =
         (volatile uint32_t *)camrtc_vi_req_ring_iova();
     uint32_t slot_words = camrtc_vi_req_request_size() / 4u;
     for (uint32_t i = 0; i < slot_words; i++) desc_words[i] = 0u;
+    uintptr_t desc_base = camrtc_vi_req_ring_iova();
 
-    /* Overlay the typed leading-fields struct onto slot 0 — RCE
-     * reads sequence + capture_flags + the two timeout fields
-     * directly. The remaining ~436 B of the slot stay zeroed.
-     * Static_asserts in test_camera.c pin the prefix layout so
-     * a future field reorder upstream breaks the build instead
-     * of silently writing the wrong offsets. */
+    /* Header overlay — sequence + capture_flags + timeouts. */
     volatile struct camrtc_capture_descriptor_header *desc =
-        (volatile struct camrtc_capture_descriptor_header *)
-        camrtc_vi_req_ring_iova();
+        (volatile struct camrtc_capture_descriptor_header *)desc_base;
     desc->sequence                 = 1u;
     desc->capture_flags            = CAPTURE_FLAG_STATUS_REPORT_ENABLE
                                    | CAPTURE_FLAG_ERROR_REPORT_ENABLE;
     desc->frame_start_timeout      = 0u;   /* RCE channel default */
     desc->frame_completion_timeout = 0u;
+
+    /* vi_channel_config overlay — IMX219 binning-mode RAW10
+     * (1640×1232) on NVCSI stream 0 / virtual channel 0, written
+     * to the frame-buffer carveout as 16-bit-per-pixel (T_R16).
+     * Layout: ch_cfg sits at offset 64 of the descriptor (per
+     * CAMRTC_DESC_CH_CFG_OFFSET in camrtc_capture.h, which is
+     * computed from header(12) + prefence_count(4) + prefence[2]
+     * (48) = 64). */
+    volatile struct camrtc_vi_channel_config *vi =
+        (volatile struct camrtc_vi_channel_config *)
+        (desc_base + CAMRTC_DESC_CH_CFG_OFFSET);
+
+    /* Channel selector: match RAW10 datatype (CSI-2 datatype
+     * 0x2B = 43) on stream 0 / VC 0. datatype_mask = 0x3f
+     * matches all 6 bits of the datatype field per L4T's
+     * `vi5_fops.c:412` convention. */
+    vi->match.datatype       = 43u;          /* NVCSI_DATATYPE_RAW10 */
+    vi->match.datatype_mask  = 0x3fu;
+    vi->match.stream         = 0u;           /* NVCSI_STREAM_0 */
+    vi->match.stream_mask    = 0xFFu;
+    vi->match.vc             = 0u;           /* NVCSI_VIRTUAL_CHANNEL_0 */
+    vi->match.vc_mask        = 0xFFFFu;
+    /* Frame-id / dol unused for IMX219 single-shot — masks=0
+     * disable matching on those fields. */
+
+    /* Frame geometry — IMX219 binning mode 1640×1232. embed_*
+     * = 0 disables embedded-data lines (we don't need sensor
+     * metadata). skip + crop = 0 means "emit the full frame". */
+    vi->frame.frame_x = (uint16_t)camrtc_frame_buffer_width();
+    vi->frame.frame_y = (uint16_t)camrtc_frame_buffer_height();
+
+    /* Pixel formatter — T_R16 (= 196 in L4T `vi5_formats.h:74`)
+     * is the standard memory format for any RAW8/10/12 sensor on
+     * VI5: each sample stored as a u16 with the upper 10 bits
+     * carrying the RAW10 value. pad0_en=0 means "leave the lower
+     * 6 bits untouched" — fine for first-light; setting pad0_en=1
+     * would zero them. */
+    vi->pixfmt_enable          = 1u;
+    vi->pixfmt.format          = 196u;       /* TEGRA_IMAGE_FORMAT_T_R16 */
+    vi->pixfmt.pad0_en         = 0u;
+
+    /* Atomic packer — single destination surface at the frame
+     * buffer carveout. surface_stride is the byte distance
+     * between rows (= width × 2 for T_R16). */
+    uintptr_t fb_iova               = camrtc_frame_buffer_iova();
+    vi->atomp.surface[0].offset     = (uint32_t)(fb_iova & 0xFFFFFFFFu);
+    vi->atomp.surface[0].offset_hi  = (uint32_t)((uint64_t)fb_iova >> 32);
+    vi->atomp.surface_stride[0]     = camrtc_frame_buffer_stride();
+    vi->ispbufa_enable              = 1u;    /* ATOMP packer destination A */
+
     __asm__ volatile("dsb sy" ::: "memory");
 
+    uart_printf("  vi_channel_config populated: %ux%u T_R16 → "
+                "surface[0]=0x%lx stride=%u\r\n",
+                (unsigned)camrtc_frame_buffer_width(),
+                (unsigned)camrtc_frame_buffer_height(),
+                (unsigned long)fb_iova,
+                (unsigned)camrtc_frame_buffer_stride());
+
     uart_printf("  CAPTURE_REQUEST: send buffer_index=0 "
-                "(descriptor at 0x%lx)\r\n",
-                (unsigned long)camrtc_vi_req_ring_iova());
+                "(descriptor at 0x%lx)\r\n", (unsigned long)desc_base);
     uint32_t status_index = 0xDEADBEEFu;
-    rc = camrtc_capture_request(0u, &status_index, 1000000u);
+    /* Allow up to 250 ms for the request: ~33 ms first-frame
+     * latency × ~7 frame intervals as headroom for sensor warm-up
+     * and CSI training. */
+    rc = camrtc_capture_request(0u, &status_index, 250000u);
     uart_printf("  CAPTURE_REQUEST: rc=%d status_buffer_index=0x%x\r\n",
                 rc, (unsigned)status_index);
+
     if (rc == 0) {
-        uart_puts("  *** CAPTURE_REQUEST round-trip OK — RCE     ***\r\n");
-        uart_puts("  *** processed our request and sent STATUS.  ***\r\n");
-        uart_puts("  *** Inspect descriptor capture_status field ***\r\n");
-        uart_puts("  *** for per-frame outcome (see L4T          ***\r\n");
-        uart_puts("  *** capture-messages.h CAPTURE_STATUS_*).   ***\r\n");
+        /* STATUS_IND received — RCE has filled the descriptor's
+         * `capture_status` substruct at offset 272 with the
+         * per-frame outcome. Decode it. */
+        volatile const struct camrtc_capture_status *cap_status =
+            (volatile const struct camrtc_capture_status *)
+            (desc_base + CAMRTC_DESC_STATUS_OFFSET);
+        uint32_t code = cap_status->status;
+        uart_printf("  capture_status: status=%u frame_id=%u "
+                    "src_stream=%u vc=%u\r\n",
+                    (unsigned)code,
+                    (unsigned)cap_status->frame_id,
+                    (unsigned)cap_status->src_stream,
+                    (unsigned)cap_status->virtual_channel);
+        if (code == CAPTURE_STATUS_SUCCESS) {
+            uint64_t sof = cap_status->sof_timestamp;
+            uint64_t eof = cap_status->eof_timestamp;
+            uart_printf("  sof_ts=0x%lx eof_ts=0x%lx (ticks)\r\n",
+                        (unsigned long)sof, (unsigned long)eof);
+            uart_puts("  *** CAPTURE SUCCESS — first frame in       ***\r\n");
+            uart_printf("  *** buffer at 0x%lx (~%u KB).             ***\r\n",
+                        (unsigned long)fb_iova,
+                        (unsigned)(camrtc_frame_buffer_size() / 1024u));
+        } else {
+            uart_printf("  err_data=0x%x flags=0x%x notify_bits=0x%lx\r\n",
+                        (unsigned)cap_status->err_data,
+                        (unsigned)cap_status->flags,
+                        (unsigned long)cap_status->notify_bits);
+            uart_puts("  *** Capture FAILED — decode CAPTURE_STATUS_* ***\r\n");
+            uart_puts("  *** in l4t-camrtc-capture.h:830 onward.      ***\r\n");
+        }
     } else {
         uart_puts("  *** CAPTURE_REQUEST failed at the IVC layer ***\r\n");
         uart_puts("  *** — see WARN log for details.             ***\r\n");
+    }
+
+    /* Stop streaming so the sensor doesn't keep firing CSI
+     * frames into a now-stale VI configuration. */
+    int stop_rc = imx219_streaming_disable();
+    if (stop_rc != 0) {
+        uart_printf("  imx219 stream-off: rc=%d (sensor still streaming)\r\n",
+                    stop_rc);
     }
 
     uart_puts("=== End ===\r\n");

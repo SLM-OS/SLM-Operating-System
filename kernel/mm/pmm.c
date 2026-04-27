@@ -554,8 +554,20 @@ void pmm_init(void)
      * for the rationale. PMM doesn't manage the NC region (already
      * excluded by `heap_end = 0xBDE00000`), so no extra carveout
      * is needed here.
+     *
+     * IMX219 frame buffer carveout: 4 MB at 0xA1000000-0xA1400000.
+     * Sized for IMX219 binning-mode RAW10 (1640×1232) written by
+     * VI5 as 16-bit-per-pixel (T_R16) = 1640 × 2 × 1232 ≈ 3.96 MB
+     * round-up to 4 MB. Must be inside the RCE VM1 IOVA aperture
+     * (0xA0000000..0xC0000000) since SMMU-bypass post-kexec means
+     * IOVA == phys. PMM splits region 1 around the carveout so the
+     * buddy allocator never hands out frame-buffer pages.
      */
-    pmm_add_region_split(buddy_state.heap_start, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
+    #define JETSON_FRAME_BUFFER_PHYS    0xA1000000UL
+    #define JETSON_FRAME_BUFFER_SIZE    0x00400000UL  /* 4 MB */
+    #define JETSON_FRAME_BUFFER_END     (JETSON_FRAME_BUFFER_PHYS + JETSON_FRAME_BUFFER_SIZE)
+    pmm_add_region_split(buddy_state.heap_start, JETSON_FRAME_BUFFER_PHYS);
+    pmm_add_region_split(JETSON_FRAME_BUFFER_END, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
     pmm_add_region_split(0xC2000000UL, 0xFFFE0000UL);
     pmm_add_region_split(0x100000000UL, 0x240000000UL);
 #else

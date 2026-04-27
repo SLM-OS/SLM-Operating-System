@@ -689,6 +689,62 @@ static void test_camrtc_ch_setup_accessors_uninit_zero(void)
 }
 
 /*
+ * Test: frame buffer accessors return the carveout's IOVA +
+ * geometry on Jetson and zero on QEMU. Pins both that the carveout
+ * is in RCE's VM1 IOVA aperture (0xA0000000-0xC0000000) and that
+ * the IMX219 binning-mode stride math (= width * 2 for T_R16) is
+ * the value csidiag will write to vi_channel_config.atomp.surface_stride[0].
+ */
+static void test_camrtc_frame_buffer_accessors(void)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_EQUAL_HEX64(0xA1000000ull,
+                            (uint64_t)camrtc_frame_buffer_iova());
+    TEST_ASSERT_EQUAL_UINT32(0x00400000u, camrtc_frame_buffer_size());  /* 4 MB */
+    TEST_ASSERT_EQUAL_UINT32(1640u,  camrtc_frame_buffer_width());
+    TEST_ASSERT_EQUAL_UINT32(1232u,  camrtc_frame_buffer_height());
+    TEST_ASSERT_EQUAL_UINT32(3280u,  camrtc_frame_buffer_stride());     /* 1640 * 2 */
+    /* Carveout must lie inside RCE's VM1 IOVA aperture
+     * 0xA0000000-0xC0000000 and end before the NC mapping
+     * (0xBDE00000). */
+    TEST_ASSERT_TRUE(camrtc_frame_buffer_iova() >= 0xA0000000ull);
+    TEST_ASSERT_TRUE(camrtc_frame_buffer_iova() + camrtc_frame_buffer_size()
+                     <= 0xBDE00000ull);
+    /* Stride * height must fit inside the carveout. */
+    TEST_ASSERT_TRUE((uint64_t)camrtc_frame_buffer_stride()
+                     * camrtc_frame_buffer_height()
+                     <= camrtc_frame_buffer_size());
+#else
+    TEST_ASSERT_EQUAL_HEX64(0ull, (uint64_t)camrtc_frame_buffer_iova());
+    TEST_ASSERT_EQUAL_UINT32(0u, camrtc_frame_buffer_size());
+    TEST_ASSERT_EQUAL_UINT32(0u, camrtc_frame_buffer_width());
+    TEST_ASSERT_EQUAL_UINT32(0u, camrtc_frame_buffer_height());
+    TEST_ASSERT_EQUAL_UINT32(0u, camrtc_frame_buffer_stride());
+#endif
+}
+
+/*
+ * Test: imx219_streaming_enable / _disable return -1 on QEMU
+ * (stub path) and validate the I²C parameter encoding constants
+ * the real Jetson driver uses. MODE_SELECT register address +
+ * STREAMING / STANDBY values are wire-format bytes the sensor
+ * latches directly; pin them so an accidental rename in
+ * imx219.h breaks the build.
+ */
+static void test_imx219_streaming_constants_and_stubs(void)
+{
+    /* Constants — pin the IMX219 datasheet values. */
+    TEST_ASSERT_EQUAL_HEX16(0x0100u, IMX219_REG_MODE_SELECT);
+    TEST_ASSERT_EQUAL_HEX8(0x00u,    IMX219_MODE_STANDBY);
+    TEST_ASSERT_EQUAL_HEX8(0x01u,    IMX219_MODE_STREAMING);
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+    /* QEMU stubs always return -1 (no I²C controller). */
+    TEST_ASSERT_EQUAL_INT(-1, imx219_streaming_enable());
+    TEST_ASSERT_EQUAL_INT(-1, imx219_streaming_disable());
+#endif
+}
+
+/*
  * Test: vi_channel_config bitfield bit positions match the L4T
  * comment ordering. _Static_assert can pin offsets but cannot see
  * inside bit-packed members, so this runtime test sets each flag
@@ -788,6 +844,8 @@ int test_suite_camera(void)
     RUN_TEST(test_camrtc_vi_req_accessors);
     RUN_TEST(test_camrtc_ch_setup_accessors_uninit_zero);
     RUN_TEST(test_camrtc_vi_channel_config_bitfield_positions);
+    RUN_TEST(test_camrtc_frame_buffer_accessors);
+    RUN_TEST(test_imx219_streaming_constants_and_stubs);
     return UnityEnd();
 }
 
@@ -1266,6 +1324,69 @@ _Static_assert(offsetof(struct camrtc_vi_channel_config, atomp.surface_stride[3]
     "vi_channel_config.atomp.surface_stride[3] @ 148");
 _Static_assert(offsetof(struct camrtc_vi_channel_config, atomp.dpcm_chunk_stride) == 152,
     "vi_channel_config.atomp.dpcm_chunk_stride @ 152");
+
+/* `struct camrtc_nvcsi_error_status` — 16 bytes embedded in
+ * capture_status. Pin sizeof + every field offset. */
+_Static_assert(sizeof(struct camrtc_nvcsi_error_status) == 16,
+    "camrtc_nvcsi_error_status must be exactly 16 bytes (RCE wire format)");
+_Static_assert(offsetof(struct camrtc_nvcsi_error_status, nvcsi_stream_bits) == 0,
+    "nvcsi_error_status.nvcsi_stream_bits @ 0");
+_Static_assert(offsetof(struct camrtc_nvcsi_error_status, nvcsi_virtual_channel_bits) == 4,
+    "nvcsi_error_status.nvcsi_virtual_channel_bits @ 4");
+_Static_assert(offsetof(struct camrtc_nvcsi_error_status, cil_a_error_bits) == 8,
+    "nvcsi_error_status.cil_a_error_bits @ 8");
+_Static_assert(offsetof(struct camrtc_nvcsi_error_status, cil_b_error_bits) == 12,
+    "nvcsi_error_status.cil_b_error_bits @ 12");
+
+/* `struct camrtc_capture_status` — 56 bytes per L4T
+ * `l4t-camrtc-capture.h:815`. RCE writes this into the descriptor
+ * after every capture; csidiag reads it to decode the per-frame
+ * outcome. Pin sizeof + every field offset. */
+_Static_assert(sizeof(struct camrtc_capture_status) == 56,
+    "camrtc_capture_status must be exactly 56 bytes (RCE wire format)");
+_Static_assert(_Alignof(struct camrtc_capture_status) == 8,
+    "camrtc_capture_status alignment must be 8 (CAPTURE_IVC_ALIGN)");
+_Static_assert(offsetof(struct camrtc_capture_status, src_stream) == 0,
+    "capture_status.src_stream @ 0");
+_Static_assert(offsetof(struct camrtc_capture_status, virtual_channel) == 1,
+    "capture_status.virtual_channel @ 1");
+_Static_assert(offsetof(struct camrtc_capture_status, frame_id) == 2,
+    "capture_status.frame_id @ 2");
+_Static_assert(offsetof(struct camrtc_capture_status, status) == 4,
+    "capture_status.status @ 4");
+_Static_assert(offsetof(struct camrtc_capture_status, sof_timestamp) == 8,
+    "capture_status.sof_timestamp @ 8");
+_Static_assert(offsetof(struct camrtc_capture_status, eof_timestamp) == 16,
+    "capture_status.eof_timestamp @ 16");
+_Static_assert(offsetof(struct camrtc_capture_status, err_data) == 24,
+    "capture_status.err_data @ 24");
+_Static_assert(offsetof(struct camrtc_capture_status, flags) == 28,
+    "capture_status.flags @ 28");
+_Static_assert(offsetof(struct camrtc_capture_status, notify_bits) == 32,
+    "capture_status.notify_bits @ 32");
+_Static_assert(offsetof(struct camrtc_capture_status, nvcsi_err_status) == 40,
+    "capture_status.nvcsi_err_status @ 40");
+
+/* CAPTURE_STATUS_* code drift pins — RCE-side enum values that
+ * csidiag's status decoder branches on. */
+_Static_assert(CAPTURE_STATUS_UNKNOWN == 0u,
+    "CAPTURE_STATUS_UNKNOWN drift");
+_Static_assert(CAPTURE_STATUS_SUCCESS == 1u,
+    "CAPTURE_STATUS_SUCCESS drift (RCE returns 1 on capture OK)");
+
+/* Descriptor offsets used by csidiag — header is at offset 0,
+ * ch_cfg (vi_channel_config) at 64, status (capture_status) at
+ * 272. Pin both so a future descriptor refactor can't silently
+ * shift the byte windows csidiag overlays. */
+_Static_assert(CAMRTC_DESC_CH_CFG_OFFSET == 64u,
+    "CAMRTC_DESC_CH_CFG_OFFSET drift — vi_channel_config in descriptor");
+_Static_assert(CAMRTC_DESC_STATUS_OFFSET == 272u,
+    "CAMRTC_DESC_STATUS_OFFSET drift — capture_status in descriptor");
+/* Sanity: status block must fit between its offset and the
+ * descriptor's pad32__ tail (offset 328 by L4T layout). */
+_Static_assert(CAMRTC_DESC_STATUS_OFFSET + sizeof(struct camrtc_capture_status)
+               == 328u,
+    "capture_status must end at offset 328 (start of pad32__ tail)");
 
 /* =============================================================================
  * Tegra234 camera-subsystem MMIO bases — Phase 0 verified

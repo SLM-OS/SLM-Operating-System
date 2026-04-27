@@ -410,6 +410,73 @@ struct camrtc_vi_channel_config {
     uint16_t pad__[2];
 } __attribute__((aligned(8)));
 
+/* `struct nvcsi_error_status` — 16 bytes
+ * (`l4t-camrtc-capture.h:739`). Embedded in `capture_status` to
+ * report NVCSI-side stream / virtual-channel / CIL errors that
+ * preceded the captured frame. SLM-OS reads this for diagnostics. */
+struct camrtc_nvcsi_error_status {
+    uint32_t nvcsi_stream_bits;
+    uint32_t nvcsi_virtual_channel_bits;
+    uint32_t cil_a_error_bits;
+    uint32_t cil_b_error_bits;
+};
+
+/* `struct capture_status` — 56 bytes
+ * (`l4t-camrtc-capture.h:815`). RCE fills this into the descriptor
+ * slot's `status` field after a capture completes (success or
+ * error), then sends `CAPTURE_STATUS_IND` to wake the AP. The
+ * `status` u32 carries the per-frame outcome — see the
+ * `CAPTURE_STATUS_*` defines below; SUCCESS == 1.
+ *
+ * `notify_bits` is a u64 bitmask of finer-grained event reasons
+ * (see `CAPTURE_STATUS_NOTIFY_BIT_*` in the L4T reference). */
+struct camrtc_capture_status {
+    uint8_t  src_stream;            /* CSI stream number */
+    uint8_t  virtual_channel;       /* CSI virtual channel */
+    uint16_t frame_id;              /* sequence echoed back from descriptor */
+    uint32_t status;                /* CAPTURE_STATUS_* code */
+    uint64_t sof_timestamp;         /* TSC ticks at start-of-frame */
+    uint64_t eof_timestamp;         /* TSC ticks at end-of-frame */
+    uint32_t err_data;              /* status-code-specific error payload */
+    uint32_t flags;                 /* CAPTURE_STATUS_FLAG_* bitmask */
+    uint64_t notify_bits;           /* CAPTURE_STATUS_NOTIFY_BIT_* mask */
+    struct camrtc_nvcsi_error_status nvcsi_err_status;
+} __attribute__((aligned(8)));
+
+/* CAPTURE_STATUS_* — per-frame outcome codes returned by RCE in
+ * `capture_status.status`. Subset SLM-OS recognises; full list in
+ * `l4t-camrtc-capture.h:830` onward. */
+#define CAPTURE_STATUS_UNKNOWN          0u
+#define CAPTURE_STATUS_SUCCESS          1u
+#define CAPTURE_STATUS_CSIMUX_FRAME     2u
+#define CAPTURE_STATUS_CSIMUX_STREAM    3u
+#define CAPTURE_STATUS_CHANSEL_FAULT    4u
+#define CAPTURE_STATUS_CHANSEL_NO_MATCH 6u
+#define CAPTURE_STATUS_CHANSEL_TIMEOUT  9u
+#define CAPTURE_STATUS_FRAME_DROPPED    10u
+#define CAPTURE_STATUS_PIXEL_RUNTIME_FAIL 11u
+#define CAPTURE_STATUS_ATOMP_PACKER_OVERFLOW 12u
+#define CAPTURE_STATUS_ATOMP_FRAME_TRUNCATED 13u
+#define CAPTURE_STATUS_ATOMP_FRAME_TOSSED 14u
+
+/* Offset of `capture_status` within `struct capture_descriptor`
+ * (per `l4t-camrtc-capture.h:1294`). Computed from the descriptor
+ * layout:
+ *   header              (offset 0,   12 B)
+ *   prefence_count      (offset 12,  4 B)
+ *   prefence[2]         (offset 16,  48 B)   2 × syncpoint_info(24)
+ *   ch_cfg              (offset 64,  160 B)  vi_channel_config
+ *   pfsd_cfg            (offset 224, 40 B)
+ *   engine_status       (offset 264, 8 B)
+ *   status              (offset 272, 56 B)   ← THIS
+ *   pad32__[14]         (offset 328, 56 B)
+ *
+ * Until the full `camrtc_capture_descriptor` type is ported,
+ * callers reach status via raw byte arithmetic on the descriptor
+ * base. */
+#define CAMRTC_DESC_CH_CFG_OFFSET       64u
+#define CAMRTC_DESC_STATUS_OFFSET       272u
+
 /* CAPTURE_REQUEST_REQ_MSG body — 8 bytes
  * (`l4t-camrtc-capture-messages.h:905`). Identifies which slot in
  * the request_ring (set up by CAPTURE_CHANNEL_SETUP) RCE should

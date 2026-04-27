@@ -179,6 +179,20 @@ int imx219_read_chip_id(uint16_t *out_chip_id)
     return 0;
 }
 
+int imx219_streaming_enable(void)
+{
+    return tegra_i2c_write_reg16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                                 IMX219_REG_MODE_SELECT,
+                                 IMX219_MODE_STREAMING);
+}
+
+int imx219_streaming_disable(void)
+{
+    return tegra_i2c_write_reg16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                                 IMX219_REG_MODE_SELECT,
+                                 IMX219_MODE_STANDBY);
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO — stubs for cross-platform builds */
 
 int imx219_power_on(void) { return -1; }
@@ -188,5 +202,7 @@ int imx219_read_chip_id(uint16_t *out)
     if (out) *out = 0;
     return -1;
 }
+int imx219_streaming_enable(void)  { return -1; }
+int imx219_streaming_disable(void) { return -1; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

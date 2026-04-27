@@ -49,6 +49,14 @@
 #define IMX219_REG_CHIP_ID_LO        0x0001u
 #define IMX219_CHIP_ID               0x0219u
 
+/* MODE_SELECT controls software standby (0x00) vs streaming (0x01).
+ * Per IMX219 datasheet §10. The transition from standby → streaming
+ * takes effect on the next frame's sensor clock; expect ~33 ms of
+ * settling at 30 fps before the first SOF appears on CSI-2. */
+#define IMX219_REG_MODE_SELECT       0x0100u
+#define IMX219_MODE_STANDBY          0x00u
+#define IMX219_MODE_STREAMING        0x01u
+
 /*
  * Power the sensor up through the full sequence described in the file
  * header. Idempotent — calling twice in a row is safe and runs the
@@ -88,3 +96,23 @@ void imx219_power_off(void);
  * to the combined u16 value.
  */
 int imx219_read_chip_id(uint16_t *out_chip_id);
+
+/*
+ * Write IMX219 MODE_SELECT (0x0100) to STREAMING (0x01). Sensor
+ * starts emitting CSI-2 frames on the next sensor-clock boundary
+ * (~33 ms at 30 fps). Caller must have already called
+ * `imx219_power_on()` successfully and the NVCSI / VI capture
+ * channel must be configured before frames will be received.
+ *
+ * Returns 0 on success, negative on I²C write error (see
+ * `tegra_i2c_write_reg16` for the rc table).
+ */
+int imx219_streaming_enable(void);
+
+/*
+ * Write IMX219 MODE_SELECT (0x0100) to STANDBY (0x00). Use
+ * before `imx219_power_off()` to stop CSI emission cleanly.
+ *
+ * Returns 0 on success, negative on I²C write error.
+ */
+int imx219_streaming_disable(void);
