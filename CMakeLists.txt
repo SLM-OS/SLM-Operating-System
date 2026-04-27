@@ -278,6 +278,15 @@ if(ENABLE_NETWORKING AND NET_TELNETD_AUTOSTART)
     add_compile_definitions(NET_TELNETD_AUTOSTART=1)
 endif()
 
+# Telemetry feed TCP server (port 2325). Bridges the in-process `tel.*`
+# msg_router topics out to the network so a host-side monitor can
+# subscribe over plain TCP. Default OFF — explicit opt-in for lab /
+# demo builds. Same trust-the-LAN posture as telnetd.
+option(NET_TELEMETRYD_AUTOSTART "Start telemetryd at boot (unauthenticated TCP telemetry feed)" OFF)
+if(ENABLE_NETWORKING AND NET_TELEMETRYD_AUTOSTART)
+    add_compile_definitions(NET_TELEMETRYD_AUTOSTART=1)
+endif()
+
 # Linker script - platform-specific
 if(PLATFORM STREQUAL "X86_64")
     # Three x86-64 layouts — KEXEC_BUILD and BZIMAGE_BUILD are mutually
@@ -667,6 +676,7 @@ set(KERNEL_SOURCES
     # TCP shell (multi-session) — requires lwIP; Plan §1.3 + §2
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/shell_io_tcp.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/tcp_shell_server.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/tcp_telemetry_server.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnet.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnetd_config.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/src/telnetd_autostart.c>
@@ -699,6 +709,7 @@ set(TEST_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnet.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_config.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_cmd.c>
+    $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_tcp_telemetry_server.c>
     kernel/tests/test_pmm.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_bpmp.c>

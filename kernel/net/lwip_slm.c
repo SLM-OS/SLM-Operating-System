@@ -739,6 +739,13 @@ void net_poll(void) {
     /* Drain TX + complete teardown for any TCP shell sessions. */
     shell_io_tcp_poll();
 
+    /* Bridge `tel.*` msg_router topics to the telemetry-feed TCP server.
+     * No-op when the server is not running. */
+    {
+        extern void tcp_telemetry_server_poll(void);
+        tcp_telemetry_server_poll();
+    }
+
     /* RX-stall watchdog. Cheap when not alarmed (a load + compare). */
     net_watchdog_check();
 }

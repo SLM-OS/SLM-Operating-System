@@ -13,6 +13,10 @@
 #include "sched_trace.h"
 #include "gpu_consumer.h"
 #include "admin_telemetry.h"
+#if defined(ENABLE_NETWORKING)
+#include "tcp_telemetry_server.h"
+#include "net.h"
+#endif
 #include "model_engine.h"
 #if defined(PLATFORM_JETSON_ORIN_NANO) && defined(ENABLE_NETWORKING)
 #include "cdc_ecm.h"
@@ -2922,6 +2926,26 @@ int cmd_gpu(int argc, char *argv[])
  * alias of `slm.msg_subscribe`); a shell-side blocking subscribe
  * is M4-followup once a per-shell mailbox slot allocator lands.
  */
+#if defined(ENABLE_NETWORKING)
+/* File-scope visitor used by `telemetry server sessions` to print one
+ * row per connected client. The `user` pointer carries a uint32_t row
+ * counter so the caller can detect "no sessions" without a second walk. */
+static bool telemetry_session_print_visitor(
+    const struct tcp_telemetry_session_info *info, void *user)
+{
+    uint32_t *count = (uint32_t *)user;
+    shell_printf("  %3u  0x%08x:%u  %-15s  %7lu  %5lu\r\n",
+                 (unsigned)info->session_id,
+                 (unsigned)info->peer_ip,
+                 (unsigned)info->peer_port,
+                 info->filter,
+                 (unsigned long)info->samples_sent,
+                 (unsigned long)info->drops);
+    if (count) (*count)++;
+    return true;
+}
+#endif
+
 int cmd_telemetry(int argc, char *argv[])
 {
     const char *sub = (argc >= 2) ? argv[1] : "stats";
@@ -2954,8 +2978,106 @@ int cmd_telemetry(int argc, char *argv[])
         return 0;
     }
 
+#if defined(ENABLE_NETWORKING)
+    if (strcmp(sub, "server") == 0) {
+        const char *act = (argc >= 3) ? argv[2] : "status";
+
+        if (strcmp(act, "start") == 0) {
+            if (!net_is_up()) {
+                shell_puts("telemetry server: network not initialized "
+                           "(run `net init` first)\r\n");
+                return -1;
+            }
+            uint16_t port = TCP_TELEMETRY_DEFAULT_PORT;
+            if (argc >= 4) {
+                uint32_t p = 0;
+                if (shell_parse_uint(argv[3], &p) != 0 || p == 0 || p > 0xFFFFu) {
+                    shell_puts("telemetry server: invalid port\r\n");
+                    return -1;
+                }
+                port = (uint16_t)p;
+            }
+            int rc = tcp_telemetry_server_start(port);
+            if (rc == 0) {
+                shell_printf("telemetry server: listening on port %u\r\n",
+                             (unsigned)port);
+                return 0;
+            }
+            shell_printf("telemetry server: start failed (%d)\r\n", rc);
+            return rc;
+        }
+        if (strcmp(act, "stop") == 0) {
+            if (!tcp_telemetry_server_running()) {
+                shell_puts("telemetry server: not running\r\n");
+                return 0;
+            }
+            tcp_telemetry_server_stop();
+            shell_puts("telemetry server: stopped\r\n");
+            return 0;
+        }
+        if (strcmp(act, "status") == 0) {
+            struct tcp_telemetry_server_stats st;
+            tcp_telemetry_server_get_stats(&st);
+            if (st.listening) {
+                shell_printf("telemetry server: running on port %u — "
+                             "active=%u opened=%u closed=%u rejects=%lu\r\n",
+                             (unsigned)st.port,
+                             (unsigned)st.sessions_active,
+                             (unsigned)st.sessions_opened,
+                             (unsigned)st.sessions_closed,
+                             (unsigned long)st.accept_rejects);
+                shell_printf("  samples dequeued=%lu delivered=%lu dropped=%lu\r\n",
+                             (unsigned long)st.samples_dequeued,
+                             (unsigned long)st.samples_delivered,
+                             (unsigned long)st.samples_dropped);
+            } else {
+                shell_puts("telemetry server: stopped\r\n");
+            }
+            return 0;
+        }
+        if (strcmp(act, "sessions") == 0) {
+            shell_printf("   ID  Peer (network-byte ip:port)  Filter           Sent     Drops\r\n");
+            shell_printf("  ---  --------------------------  ---------------  -------  -----\r\n");
+            uint32_t count = 0;
+            tcp_telemetry_server_foreach(telemetry_session_print_visitor,
+                                         &count);
+            if (count == 0) {
+                shell_puts("  (no active sessions)\r\n");
+            }
+            return 0;
+        }
+        if (strcmp(act, "kick") == 0) {
+            if (argc < 4) {
+                shell_puts("usage: telemetry server kick <session-id>\r\n");
+                return -1;
+            }
+            uint32_t id = 0;
+            if (shell_parse_uint(argv[3], &id) != 0) {
+                shell_puts("telemetry server: invalid session id\r\n");
+                return -1;
+            }
+            if (tcp_telemetry_server_kick(id)) {
+                shell_printf("telemetry server: kicked session %u\r\n",
+                             (unsigned)id);
+                return 0;
+            }
+            shell_printf("telemetry server: no active session with id %u\r\n",
+                         (unsigned)id);
+            return -1;
+        }
+        shell_printf("telemetry server: unknown action '%s'\r\n", act);
+        shell_puts("usage: telemetry server [start [port] | stop | status | "
+                   "sessions | kick <id>]\r\n");
+        return -1;
+    }
+#endif
+
     shell_printf("telemetry: unknown subcommand '%s'\r\n", sub);
+#if defined(ENABLE_NETWORKING)
+    shell_puts("usage: telemetry [stats|list-topics|server ...]\r\n");
+#else
     shell_puts("usage: telemetry [stats|list-topics]\r\n");
+#endif
     return -1;
 }
 
