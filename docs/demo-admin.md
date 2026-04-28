@@ -273,18 +273,23 @@ Three toggles, layered:
 ```
 gpu use inference on|off          # master — controls all GPU inference dispatch
 model use-gpu <name|idx> on|off   # per-model override (default ON at load)
-gpu use sched on|off              # scaffold — no real backend yet
-gpu use eviction on|off           # scaffold — no real backend yet
+gpu use sched on|off              # WIRED — ai_mlp policy on GA10B (PR-3)
+gpu use eviction on|off           # scaffold — no eviction policy declares GPU yet
 gpu use status                    # tabular view of all three flags
 ```
 
 **inference** is wired through the MNIST GA10B fastpath
 (`engine::mnist_gpu_fastpath_eligible`); flipping it ON on Jetson
-with the v6 channel handoff present routes the model through the
-GPU. **sched / eviction** accept on/off as operator intent and
-emit a `note: scaffold only …` warning, because no policy
-declares a GPU forward pass yet — `docs/specs/gpu-policy-models.md`
-covers the actual wiring work.
+with the v6 MNIST channel handoff present routes the model through
+the GPU. **sched** is wired through `slm_gpu_run_sched_inference`
+(PR-3 of `docs/specs/gpu-policy-models.md`): when ON, the active
+`ai_mlp` policy's `ai_mlp_forward_logits` runs on GA10B for every
+`assign_cpu` decision instead of CPU NEON, falling back to CPU
+on dispatch error. Requires the sched-MLP v6 handoff staged via
+`scripts/gpu-kernel-sched-mlp.c --preserve-for-kexec` pre-kexec.
+**eviction** still accepts on/off as operator intent and emits a
+`note: scaffold only …` warning — no eviction policy declares a
+GPU forward pass yet (PR-5/PR-6 follow-up).
 
 When the GPU isn't available at all (`slm_gpu_available() == 0`,
 e.g. QEMU or non-Jetson builds), every `enable=true` short-circuits

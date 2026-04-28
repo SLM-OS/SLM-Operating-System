@@ -1049,12 +1049,53 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
  * (Jetson's PMM/VMM maps the full 6.7 GB of non-ECC DRAM). If a
  * future VMM change skips any 4 KB page in the scan range, this
  * function will take a synchronous data abort with no recovery. */
-static uint64_t find_handoff_scan(void)
+/* Public, host-testable kind-aware scanner. Walks the same DRAM
+ * range as `ga10b_find_handoff_in_range` but skips matches whose
+ * pipeline_kind doesn't equal `wanted_kind`. Each magic-matching
+ * candidate is also passed through `ga10b_validate_handoff` so a
+ * pseudorandom 32-bit collision with the magic doesn't masquerade
+ * as a real handoff. Returns 0 if no kind-matching handoff exists.
+ * PR-3 of gpu-policy-models.md.
+ *
+ * Pure-logic — no MMIO, no globals. Pinned by host tests in
+ * host-tools/gsp-harness/test_ga10b_bringup.c. */
+uint64_t ga10b_find_handoff_of_kind_in_range(uint64_t start, uint64_t end,
+                                             uint64_t stride,
+                                             uint32_t wanted_kind)
 {
-    return ga10b_find_handoff_in_range(0x100000000ULL, 0x200000000ULL, 4096);
+    uint64_t cursor = start;
+    while (cursor < end) {
+        uint64_t found = ga10b_find_handoff_in_range(cursor, end, stride);
+        if (found == 0) return 0;
+        const struct ga10b_channel_handoff *h =
+            (const struct ga10b_channel_handoff *)(uintptr_t)found;
+        if (ga10b_validate_handoff(h) == 0 &&
+            h->pipeline_kind == wanted_kind) {
+            return found;
+        }
+        /* Magic matched but validation failed or kind didn't match;
+         * advance past this match and keep scanning. */
+        cursor = found + stride;
+    }
+    return 0;
+}
+
+static uint64_t find_handoff_scan_kind(uint32_t wanted_kind)
+{
+    return ga10b_find_handoff_of_kind_in_range(0x100000000ULL,
+                                                0x200000000ULL,
+                                                4096, wanted_kind);
 }
 
 int ga10b_bringup_channel(struct ga10b_bringup *b)
+{
+    /* Default: MNIST kind. Preserves the pre-PR-3 contract for
+     * existing callers (slm_gpu_run_mnist, the bringup-test shell
+     * cmd, host harness tests). */
+    return ga10b_bringup_channel_kind(b, GA10B_PIPELINE_KIND_MNIST);
+}
+
+int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
 {
     if (!b) return -1;
     /* Accept either PMU_UP (after inherit, skip Phase 5) or
@@ -1062,15 +1103,17 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     if (b->state != GA10B_BRINGUP_ENGINES_READY &&
         b->state != GA10B_BRINGUP_PMU_UP) return -1;
 
-    uart_puts("[GA10B-P6] Scanning DRAM for handoff magic...\n");
-    uint64_t handoff_phys = find_handoff_scan();
+    uart_printf("[GA10B-P6] Scanning DRAM for handoff magic (kind=%u)...\n",
+                (unsigned)wanted_kind);
+    uint64_t handoff_phys = find_handoff_scan_kind(wanted_kind);
     if (handoff_phys == 0) {
-        uart_puts("[GA10B-P6] Handoff not found. Was the Linux helper run?\n");
+        uart_printf("[GA10B-P6] Handoff (kind=%u) not found. Was the Linux "
+                    "helper run?\n", (unsigned)wanted_kind);
         b->last_error_phase = 6;
         return -1;
     }
-    uart_printf("[GA10B-P6] Found handoff at phys 0x%lx\n",
-                (unsigned long)handoff_phys);
+    uart_printf("[GA10B-P6] Found handoff at phys 0x%lx (kind=%u)\n",
+                (unsigned long)handoff_phys, (unsigned)wanted_kind);
 
     /* Read the handoff structure from the discovered location. */
     volatile struct ga10b_channel_handoff *hoff =
@@ -1129,6 +1172,12 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     g_handoff.input_buf_phys     = hoff->input_buf_phys;
     g_handoff.input_buf_size     = hoff->input_buf_size;
 
+    /* PR-3 extension: pipeline-kind discriminator. Validated above
+     * (find_handoff_scan_kind only returns matches), but we copy it
+     * into g_handoff so launch_kernel can re-check at dispatch time
+     * for defense-in-depth. */
+    g_handoff.pipeline_kind      = hoff->pipeline_kind;
+
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
                                 &g_handoff) < 0) {
@@ -1172,6 +1221,14 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     uart_puts("[GA10B-P6] channel handoff valid — inherited from Linux\n");
     b->state = GA10B_BRINGUP_CHANNEL_OPEN;
     return 0;
+}
+
+uint32_t ga10b_bringup_active_pipeline_kind(void)
+{
+    /* Reads the global g_handoff. Safe — single-threaded shell
+     * task is the only caller path today (slm_ffi.c's
+     * ensure_*_bringup helpers). */
+    return g_handoff.pipeline_kind;
 }
 
 /* ---- Phase 7: Pushbuffer submission (NOP + SEMAPHORE_RELEASE) ----

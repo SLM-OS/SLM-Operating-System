@@ -162,7 +162,27 @@ struct ga10b_channel_handoff {
      * bytes — SLM-OS bounds-checks user writes against this. */
     uint64_t input_buf_phys;
     uint32_t input_buf_size;
-    uint32_t _pad4;
+
+    /* Pipeline-kind discriminator. PR-3 of
+     * docs/specs/gpu-policy-models.md repurposes the previously-
+     * reserved `_pad4` slot as a `enum ga10b_pipeline_kind`. Default
+     * value 0 = MNIST keeps backward compatibility with v6 handoffs
+     * written before this field existed (Linux helpers wrote
+     * _pad4=0, which now reads as KIND_MNIST). The SLM-OS scanner
+     * branches on this when discriminating between handoffs of
+     * different kinds in DRAM (e.g. MNIST + sched-MLP coexisting
+     * across two host-side launchers running concurrently). */
+    uint32_t pipeline_kind;
+};
+
+/* Pipeline-kind discriminator values stored in
+ * `struct ga10b_channel_handoff::pipeline_kind`. Numbered to keep
+ * 0 as MNIST so legacy v6 handoffs continue to dispatch correctly
+ * without the producer having to set the field. */
+enum ga10b_pipeline_kind {
+    GA10B_PIPELINE_KIND_MNIST         = 0,
+    GA10B_PIPELINE_KIND_SCHED_MLP     = 1,
+    GA10B_PIPELINE_KIND_EVICTION_QNET = 2,
 };
 
 /* One entry per op in a v5 pipeline. SLM-OS reads this array from
@@ -233,6 +253,9 @@ _Static_assert(offsetof(struct ga10b_channel_handoff, input_buf_phys) == 216,
                "v6 input_buf_phys offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, input_buf_size) == 224,
                "v6 input_buf_size offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, pipeline_kind) == 228,
+               "PR-3 pipeline_kind offset drifted (must be 228 — last "
+               "u32 in the struct, was previously _pad4)");
 _Static_assert(offsetof(struct ga10b_pipeline_op, qmd_gpu_va) == 0,
                "pipeline_op.qmd_gpu_va must be at offset 0");
 _Static_assert(offsetof(struct ga10b_pipeline_op, output_phys) == 8,
@@ -255,6 +278,23 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h);
  */
 uint64_t ga10b_find_handoff_in_range(uint64_t start, uint64_t end,
                                      uint64_t stride);
+
+/*
+ * Same as `ga10b_find_handoff_in_range` but only returns a match
+ * whose `pipeline_kind` field equals `wanted_kind` (one of `enum
+ * ga10b_pipeline_kind`). Skips magic-matching candidates whose
+ * validation fails or whose kind doesn't match, continuing the
+ * scan past each. Returns 0 if no kind-matching handoff exists.
+ *
+ * PR-3 of docs/specs/gpu-policy-models.md. Production callers wrap
+ * this in `ga10b_bringup_channel_kind`; host tests pass mocked
+ * memory ranges to validate the kind-discriminator logic.
+ *
+ * Pure-logic — no MMIO, no globals, host-testable.
+ */
+uint64_t ga10b_find_handoff_of_kind_in_range(uint64_t start, uint64_t end,
+                                             uint64_t stride,
+                                             uint32_t wanted_kind);
 
 /*
  * Pick the poll-target payload for `nvgpu launch-kernel`. v4 handoffs

@@ -653,7 +653,8 @@ int main(int argc, char **argv)
         ops[7].output.phys, ops[7].output.gpu_va,
         ops[7].sentinel_bits,
         MNIST_OP_COUNT, pipe_ops.phys,
-        input.phys, (uint32_t)(1u * 1u * 28u * 28u * 4u));
+        input.phys, (uint32_t)(1u * 1u * 28u * 28u * 4u),
+        GA10B_PIPELINE_KIND_MNIST);
 
     printf("[mnist] Handoff at phys 0x%llx (version=6, %d ops)\n",
            (unsigned long long)handoff_phys, MNIST_OP_COUNT);

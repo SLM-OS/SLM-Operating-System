@@ -142,6 +142,20 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
                               "declares a GPU backend yet";
             /* Fall through to the flip — operator intent is recorded
              * even though dispatch is unaffected. */
+        } else if (out_reason) {
+            /* PR-3 of gpu-policy-models.md: when a GPU-backed sched
+             * policy is active (today: ai_mlp on Jetson), the next
+             * `assign_cpu` will route through GA10B and pay the
+             * dispatch cost. The CPU NEON forward is sub-millisecond;
+             * GPU dispatch (channel inherit + 8-op QMD chain) is
+             * about two orders of magnitude slower. Surface that as
+             * a "note:" line so operators flipping the flag for a
+             * demo aren't surprised by the latency cliff. The flag
+             * itself still flips cleanly — this is informational, not
+             * a refusal. */
+            *out_reason = "perf note — ai_mlp now dispatches each "
+                          "assign_cpu via GPU (~5 ms vs ~50 us CPU NEON); "
+                          "fallback to CPU on dispatch error";
         }
         break;
 

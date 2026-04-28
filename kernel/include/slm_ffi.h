@@ -848,6 +848,30 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap);
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats);
 
 /*
+ * Sched-MLP dispatch — PR-3 of docs/specs/gpu-policy-models.md.
+ *
+ * Runs the AI scheduler MLP forward pass on GA10B by dispatching
+ * the 8-op pipeline staged by `scripts/gpu-kernel-sched-mlp.c`
+ * (handoff tagged `pipeline_kind == GA10B_PIPELINE_KIND_SCHED_MLP`,
+ * so it can coexist in DRAM with an MNIST handoff from the same
+ * kexec generation). One-shot semantic: caller passes the fp32
+ * feature vector in `state_bytes` (length `state_bytes_len`,
+ * typically 432 = AI_STATE_DIM × 4), the engine writes the input
+ * into the v6 handoff's input buffer, fires the pipeline, and
+ * fills `logits_bytes_out` with 168 bytes (42 fp32 logits =
+ * AI_SCHED_N_ACTIONS on Jetson). Caller does argmax + decode.
+ *
+ * Returns 0 on success, negative rc on failure:
+ *   -1  bad pointer or no v6 handoff present
+ *   -2  state_bytes_len exceeds the v6 handoff's input buffer cap
+ *   -3  internal set_input error (kind mismatch in handoff)
+ * On non-Jetson platforms returns -1.
+ */
+int slm_gpu_run_sched_inference(const void *state_bytes,
+                                 size_t state_bytes_len,
+                                 void *logits_bytes_out);
+
+/*
  * Print GPU status to UART (called from Rust shell command).
  */
 extern void rust_gpu_print_status(void);

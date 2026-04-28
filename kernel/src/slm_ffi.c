@@ -17,6 +17,7 @@
 #include "gpu_consumer.h"
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
+#include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
 #endif
 
 /*
@@ -352,41 +353,94 @@ int slm_gpu_get_info(RustGpuInfo *info)
  */
 
 #ifdef PLATFORM_JETSON_ORIN_NANO
-/* Persistent bringup state for repeat MNIST runs. First call walks
- * inherit + channel; subsequent calls reuse the channel-open state
- * and only re-dispatch the kernels.
+/* Persistent bringup state for repeat MNIST + sched MLP runs. First
+ * call walks inherit + channel; subsequent calls reuse the
+ * channel-open state and only re-dispatch the kernels.
  *
- * Concurrency: this file-scope static assumes single-threaded access
- * — today only the shell task reaches it (cmd_lua → Lua VM → these
- * FFIs, or `nvgpu` shell command via shell_sys.c). If a future
- * caller (telnetd's TCP shell, a parallel kernel task) calls these
- * concurrently, the lazy-init `ensure_mnist_bringup` below has a
- * TOCTOU window: both callers can pass the state check, both run
- * inherit+channel, and the second corrupts the first's bringup.
- * Add a spinlock around `ensure_mnist_bringup` if that ever happens.
+ * Concurrency: PR-3 of gpu-policy-models.md widened the caller
+ * surface for the sched path to `ai_mlp_assign_cpu`, which the
+ * scheduler invokes from any CPU during `scheduler_add_task` (no
+ * scheduler-wide lock). Both `slm_gpu_run_mnist` and
+ * `slm_gpu_run_sched_inference` mutate the file-scope `g_handoff`
+ * (in ga10b_bringup.c) and their per-kind bringup globals. Without
+ * a lock, two CPUs concurrently in this code can:
+ *   1. Both pass the `ensure_*_bringup` state check, both walk
+ *      inherit + channel_kind, stomping each other's writes.
+ *   2. Even after first-time bringup, both write GP_PUT, ring the
+ *      doorbell, and race the semaphore poll inside
+ *      `ga10b_bringup_launch_kernel`.
+ * `g_gpu_dispatch_lock` serialises the entire dispatch — first-time
+ * setup AND steady-state launch — so only one CPU is in the
+ * critical section at a time. The lock spans both kinds because
+ * `g_handoff` is shared between them; the cost is that an MNIST run
+ * on one CPU briefly blocks a sched run on another, which is fine
+ * (the GPU has one channel either way).
+ *
+ * IRQ-off duration. `spin_lock_irqsave` disables local-CPU IRQs for
+ * the lock's hold time. Empirical durations on jetson-nano-2:
+ *   ~5 ms steady-state per dispatch (8-op QMD chain + per-op poll),
+ *   ~300 ms one-time on first call (inherit + channel scan +
+ *           embedded uart_printf calls busy-waiting the UART).
+ * Other CPUs spin on the lock but their local IRQs stay enabled.
+ * The toggle that flips this on (`gpu use sched on`) emits a
+ * perf-note line so operators see the latency cliff up front; on
+ * any GPU dispatch error the path falls back to CPU NEON which
+ * doesn't take the lock.
  *
  * Note: the `nvgpu` shell command (kernel/src/shell_sys.c) keeps
  * its own function-local `struct ga10b_bringup b` that's separate
- * from this `g_mnist_bringup`. Both ultimately mutate the same
- * file-scope `g_handoff` in ga10b_bringup.c, so the underlying GPU
- * state stays consistent — but the user-visible state machines are
- * independent. A user who runs `nvgpu inherit; nvgpu channel; lua
- * print(slm.gpu_run_mnist())` triggers a redundant inherit+channel
- * walk on the FFI side. Idempotent, just wasteful. */
+ * from these globals. Both ultimately mutate `g_handoff`, so a
+ * `nvgpu channel` from the shell raced against an `slm_gpu_run_*`
+ * call would still race. The shell command is operator-driven
+ * single-shot diagnostic and not meant to interleave with FFI
+ * dispatch; documenting rather than locking that path. */
+static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
 static struct ga10b_bringup g_mnist_bringup;
 
 /* Walk inherit + channel if needed. Returns 0 on success, negative
  * rc if either phase fails. Callers must already be inside the
- * single-threaded assumption documented above. */
+ * single-threaded assumption documented above.
+ *
+ * PR-3 of gpu-policy-models.md: also detects when a different bringup
+ * instance (e.g. g_sched_bringup) has overwritten the shared
+ * g_handoff with a different pipeline_kind — in that case our state
+ * is stale and we re-walk channel_kind to repopulate g_handoff with
+ * MNIST data. */
 static int ensure_mnist_bringup(void)
 {
-    if (g_mnist_bringup.state == GA10B_BRINGUP_CHANNEL_OPEN ||
-        g_mnist_bringup.state == GA10B_BRINGUP_METHOD_ACCEPTED) {
-        return 0;
-    }
+    bool channel_open = (g_mnist_bringup.state == GA10B_BRINGUP_CHANNEL_OPEN ||
+                         g_mnist_bringup.state == GA10B_BRINGUP_METHOD_ACCEPTED);
+    bool active_is_mnist = (ga10b_bringup_active_pipeline_kind() ==
+                            GA10B_PIPELINE_KIND_MNIST);
+    if (channel_open && active_is_mnist) return 0;
+
     int rc = ga10b_bringup_inherit(&g_mnist_bringup);
     if (rc < 0) return rc;
-    rc = ga10b_bringup_channel(&g_mnist_bringup);
+    rc = ga10b_bringup_channel_kind(&g_mnist_bringup,
+                                     GA10B_PIPELINE_KIND_MNIST);
+    if (rc < 0) return rc;
+    return 0;
+}
+
+/* Sched MLP dispatch — parallel to MNIST. Separate per-instance
+ * bringup state but shared g_handoff (kernel singleton); the
+ * pipeline_kind check in ensure_*_bringup detects stale state from
+ * cross-instance overwrites and re-runs channel_kind to repopulate
+ * g_handoff with the right kind. */
+static struct ga10b_bringup g_sched_bringup;
+
+static int ensure_sched_bringup(void)
+{
+    bool channel_open = (g_sched_bringup.state == GA10B_BRINGUP_CHANNEL_OPEN ||
+                         g_sched_bringup.state == GA10B_BRINGUP_METHOD_ACCEPTED);
+    bool active_is_sched = (ga10b_bringup_active_pipeline_kind() ==
+                            GA10B_PIPELINE_KIND_SCHED_MLP);
+    if (channel_open && active_is_sched) return 0;
+
+    int rc = ga10b_bringup_inherit(&g_sched_bringup);
+    if (rc < 0) return rc;
+    rc = ga10b_bringup_channel_kind(&g_sched_bringup,
+                                     GA10B_PIPELINE_KIND_SCHED_MLP);
     if (rc < 0) return rc;
     return 0;
 }
@@ -394,17 +448,19 @@ static int ensure_mnist_bringup(void)
 int slm_gpu_run_mnist(void *logits_bytes_out)
 {
     if (!logits_bytes_out) return -1;
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ensure_mnist_bringup();
-    if (rc < 0) return rc;
-
+    if (rc < 0) goto out;
     rc = ga10b_bringup_launch_kernel(&g_mnist_bringup);
-    if (rc < 0) return rc;
-
+    if (rc < 0) goto out;
     /* 4-byte * 10 = 40 bytes of fp32 bit patterns. */
     int n = ga10b_bringup_read_pipeline_output(&g_mnist_bringup,
                                                 logits_bytes_out,
                                                 40u);
-    return n < 0 ? -1 : 0;
+    rc = n < 0 ? -1 : 0;
+out:
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return rc;
 }
 int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
 {
@@ -412,17 +468,61 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
      * returns -3 — keeps the error code mapping one-to-one with the
      * bringup helper (-1 = no v6 handoff, -2 = cap too large, -3 =
      * bad arg). */
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ensure_mnist_bringup();
-    if (rc < 0) return rc;
+    if (rc < 0) goto out;
     int n = ga10b_bringup_set_input(&g_mnist_bringup, bytes, cap);
-    return n < 0 ? n : 0;
+    rc = n < 0 ? n : 0;
+out:
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return rc;
 }
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
 {
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ensure_mnist_bringup();
-    if (rc < 0) return rc;
+    if (rc < 0) goto out;
     int n = ga10b_bringup_set_input_fill(&g_mnist_bringup, value_bits, n_floats);
-    return n < 0 ? n : 0;
+    rc = n < 0 ? n : 0;
+out:
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return rc;
+}
+
+/* Sched MLP dispatch. Same shape as slm_gpu_run_mnist but reads
+ * a 42-element fp32 logits vector (AI_SCHED_N_ACTIONS = 42 on
+ * Jetson) instead of MNIST's 10-element output. The caller passes
+ * the 108-element fp32 feature vector as `state_bytes`; the engine
+ * does set_input + launch_kernel + read_output in one shot. */
+int slm_gpu_run_sched_inference(const void *state_bytes,
+                                 size_t state_bytes_len,
+                                 void *logits_bytes_out)
+{
+    if (!state_bytes || !logits_bytes_out) return -1;
+    /* Held across the whole set_input + launch_kernel + read_output
+     * sequence so two CPUs concurrently in `ai_mlp_assign_cpu` can't
+     * stomp the shared g_handoff or race the GPFIFO write + doorbell
+     * + semaphore poll. See the lock-comment block above
+     * g_gpu_dispatch_lock for full rationale. */
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+    int rc = ensure_sched_bringup();
+    if (rc < 0) goto out;
+
+    int n = ga10b_bringup_set_input(&g_sched_bringup, state_bytes,
+                                     state_bytes_len);
+    if (n < 0) { rc = n; goto out; }
+
+    rc = ga10b_bringup_launch_kernel(&g_sched_bringup);
+    if (rc < 0) goto out;
+
+    /* 4-byte * 42 = 168 bytes of fp32 bit patterns. */
+    n = ga10b_bringup_read_pipeline_output(&g_sched_bringup,
+                                            logits_bytes_out,
+                                            168u);
+    rc = n < 0 ? -1 : 0;
+out:
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return rc;
 }
 #else
 int slm_gpu_run_mnist(void *logits_bytes_out)
@@ -438,6 +538,13 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
 {
     (void)value_bits; (void)n_floats;
+    return -1;
+}
+int slm_gpu_run_sched_inference(const void *state_bytes,
+                                 size_t state_bytes_len,
+                                 void *logits_bytes_out)
+{
+    (void)state_bytes; (void)state_bytes_len; (void)logits_bytes_out;
     return -1;
 }
 #endif

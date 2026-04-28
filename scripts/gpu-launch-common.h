@@ -389,6 +389,13 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
  * supplied input bytes there at runtime via slm_gpu_set_mnist_input
  * (each MNIST inference can classify a different image without re-
  * running the launcher pre-kexec). */
+/* `pipeline_kind` is one of `enum ga10b_pipeline_kind` from
+ * kernel/gpu/nvidia/ga10b_channel_handoff.h:
+ *   0 = MNIST (default; legacy v6 producers wrote 0)
+ *   1 = SCHED_MLP
+ *   2 = EVICTION_QNET
+ * SLM-OS's handoff scanner branches on this when there are multiple
+ * handoffs of different kinds in DRAM. */
 uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
                                void *handoff_va,
                                uint64_t output_phys,
@@ -397,6 +404,7 @@ uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
                                uint32_t pipeline_n_ops,
                                uint64_t pipeline_ops_phys,
                                uint64_t input_buf_phys,
-                               uint32_t input_buf_size);
+                               uint32_t input_buf_size,
+                               uint32_t pipeline_kind);
 
 #endif /* GPU_LAUNCH_COMMON_H */
