@@ -48,3 +48,28 @@
 #define CAMRTC_CAP_NFRAMES       64u
 #define CAMRTC_CAP_FRAME_SIZE    64u
 #define CAMRTC_CAP_VERSION       CAMRTC_VERSION
+
+/* IMX219 frame buffer carveout — 4 MB at 0xA1000000.
+ *
+ * Visible to:
+ *   - `kernel/mm/pmm.c` — to split Jetson region 1 around the
+ *     carveout so the buddy allocator never hands these pages out.
+ *   - `kernel/drivers/camrtc/camrtc.c` — to expose the IOVA via
+ *     `camrtc_frame_buffer_iova()` and pin the in-aperture
+ *     constraints with `_Static_assert`.
+ *
+ * Sized for IMX219 binning-mode RAW10 (1640×1232) written by VI5
+ * as 16-bit-per-pixel via TEGRA_IMAGE_FORMAT_T_R16 = 1640 × 2 ×
+ * 1232 = 4,040,960 bytes round-up to 4 MB. Must lie inside RCE's
+ * VM1 IOVA aperture (0xA0000000..0xC0000000) since SMMU bypass
+ * post-kexec means IOVA == phys for the camera path. */
+#define CAMRTC_FRAME_BUFFER_PHYS  0xA1000000u
+#define CAMRTC_FRAME_BUFFER_SIZE  0x00400000u  /* 4 MB */
+#define CAMRTC_FRAME_BUFFER_END   (CAMRTC_FRAME_BUFFER_PHYS + CAMRTC_FRAME_BUFFER_SIZE)
+
+/* IMX219 binning-mode dimensions written as T_R16 (16 bpp). */
+#define IMX219_BINNED_WIDTH            1640u
+#define IMX219_BINNED_HEIGHT           1232u
+#define IMX219_BINNED_BYTES_PER_PIXEL  2u            /* T_R16 packs RAW10 into u16 */
+#define IMX219_BINNED_STRIDE           (IMX219_BINNED_WIDTH * IMX219_BINNED_BYTES_PER_PIXEL)
+#define IMX219_BINNED_FRAME_BYTES      (IMX219_BINNED_STRIDE * IMX219_BINNED_HEIGHT)

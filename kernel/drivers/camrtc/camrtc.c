@@ -658,27 +658,17 @@ int camrtc_diag_dump(void)
 #define CAMRTC_VI_REQ_RING_OFFSET      0x0000u
 #define CAMRTC_VI_REQ_MEMINFO_OFFSET   0x4000u
 
-/* IMX219 frame buffer carveout — 4 MB at 0xA1000000-0xA1400000.
- * Carved out of the Jetson PMM region 1 in `kernel/mm/pmm.c`
- * (between the kernel heap and the NC mapping at 0xBDE00000).
- * Sized for IMX219 binning-mode RAW10 (1640×1232) written by VI5
- * as 16-bit-per-pixel via TEGRA_IMAGE_FORMAT_T_R16 = 1640 × 2 ×
- * 1232 = 4,040,960 bytes round-up to 4 MB. Must lie inside RCE's
- * VM1 IOVA aperture (0xA0000000..0xC0000000) since SMMU bypass
- * post-kexec means IOVA == phys for the camera path.
+/* IMX219 frame buffer carveout (CAMRTC_FRAME_BUFFER_PHYS /
+ * _SIZE / IMX219_BINNED_* from camrtc_layout.h) is carved out
+ * of the Jetson PMM region 1 in `kernel/mm/pmm.c` (between the
+ * kernel heap and the NC mapping at 0xBDE00000). Sized for one
+ * IMX219 binning-mode RAW10 frame written by VI5 as T_R16 (16
+ * bpp) = ~3.96 MB.
  *
  * Single-surface single-shot for first-light: surface[0] only,
  * one frame, queue depth 1. Future PRs that grow to multi-shot
  * or multi-plane (Bayer demosaic surfaces) will subdivide this
  * carveout — the size assert below pins the upper bound. */
-#define CAMRTC_FRAME_BUFFER_PHYS       0xA1000000u
-#define CAMRTC_FRAME_BUFFER_SIZE       0x00400000u  /* 4 MB */
-/* IMX219 binning-mode RAW10 dimensions written as T_R16 (16 bpp). */
-#define IMX219_BINNED_WIDTH            1640u
-#define IMX219_BINNED_HEIGHT           1232u
-#define IMX219_BINNED_BYTES_PER_PIXEL  2u            /* T_R16 packs RAW10 into u16 */
-#define IMX219_BINNED_STRIDE           (IMX219_BINNED_WIDTH * IMX219_BINNED_BYTES_PER_PIXEL)
-#define IMX219_BINNED_FRAME_BYTES      (IMX219_BINNED_STRIDE * IMX219_BINNED_HEIGHT)
 
 static uintptr_t g_ch_setup_region_phys;
 static uintptr_t g_ch_setup_cap_rx_iova;

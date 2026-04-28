@@ -6417,24 +6417,30 @@ int cmd_csidiag(int argc, char *argv[])
                         (unsigned)cap_status->flags,
                         (unsigned long)notify);
             /* Print symbolic name for the most common first-light
-             * failure paths (full enum in l4t-camrtc-capture.h:833). */
-            const char *name = "?";
-            switch (code) {
-            case CAPTURE_STATUS_CSIMUX_FRAME:          name = "CSIMUX_FRAME"; break;
-            case CAPTURE_STATUS_CSIMUX_STREAM:         name = "CSIMUX_STREAM"; break;
-            case CAPTURE_STATUS_CHANSEL_FAULT:         name = "CHANSEL_FAULT"; break;
-            case CAPTURE_STATUS_CHANSEL_FAULT_FE:      name = "CHANSEL_FAULT_FE"; break;
-            case CAPTURE_STATUS_CHANSEL_COLLISION:     name = "CHANSEL_COLLISION"; break;
-            case CAPTURE_STATUS_CHANSEL_SHORT_FRAME:   name = "CHANSEL_SHORT_FRAME"; break;
-            case CAPTURE_STATUS_ATOMP_PACKER_OVERFLOW: name = "ATOMP_PACKER_OVERFLOW"; break;
-            case CAPTURE_STATUS_ATOMP_FRAME_TRUNCATED: name = "ATOMP_FRAME_TRUNCATED"; break;
-            case CAPTURE_STATUS_ATOMP_FRAME_TOSSED:    name = "ATOMP_FRAME_TOSSED"; break;
-            case CAPTURE_STATUS_ISPBUF_FIFO_OVERFLOW:  name = "ISPBUF_FIFO_OVERFLOW"; break;
-            case CAPTURE_STATUS_SYNC_FAILURE:          name = "SYNC_FAILURE"; break;
-            case CAPTURE_STATUS_NOTIFIER_BACKEND_DOWN: name = "NOTIFIER_BACKEND_DOWN"; break;
-            case CAPTURE_STATUS_FALCON_ERROR:          name = "FALCON_ERROR"; break;
-            case CAPTURE_STATUS_CHANSEL_NOMATCH:       name = "CHANSEL_NOMATCH"; break;
-            }
+             * failure paths (full enum in l4t-camrtc-capture.h:833).
+             * Indexed by status code 0..15; SUCCESS is unreachable
+             * here (handled in the if-branch above). */
+            static const char *const names[] = {
+                [CAPTURE_STATUS_UNKNOWN]               = "UNKNOWN",
+                [CAPTURE_STATUS_SUCCESS]               = "SUCCESS",
+                [CAPTURE_STATUS_CSIMUX_FRAME]          = "CSIMUX_FRAME",
+                [CAPTURE_STATUS_CSIMUX_STREAM]         = "CSIMUX_STREAM",
+                [CAPTURE_STATUS_CHANSEL_FAULT]         = "CHANSEL_FAULT",
+                [CAPTURE_STATUS_CHANSEL_FAULT_FE]      = "CHANSEL_FAULT_FE",
+                [CAPTURE_STATUS_CHANSEL_COLLISION]     = "CHANSEL_COLLISION",
+                [CAPTURE_STATUS_CHANSEL_SHORT_FRAME]   = "CHANSEL_SHORT_FRAME",
+                [CAPTURE_STATUS_ATOMP_PACKER_OVERFLOW] = "ATOMP_PACKER_OVERFLOW",
+                [CAPTURE_STATUS_ATOMP_FRAME_TRUNCATED] = "ATOMP_FRAME_TRUNCATED",
+                [CAPTURE_STATUS_ATOMP_FRAME_TOSSED]    = "ATOMP_FRAME_TOSSED",
+                [CAPTURE_STATUS_ISPBUF_FIFO_OVERFLOW]  = "ISPBUF_FIFO_OVERFLOW",
+                [CAPTURE_STATUS_SYNC_FAILURE]          = "SYNC_FAILURE",
+                [CAPTURE_STATUS_NOTIFIER_BACKEND_DOWN] = "NOTIFIER_BACKEND_DOWN",
+                [CAPTURE_STATUS_FALCON_ERROR]          = "FALCON_ERROR",
+                [CAPTURE_STATUS_CHANSEL_NOMATCH]       = "CHANSEL_NOMATCH",
+            };
+            const char *name = (code < (sizeof(names) / sizeof(names[0])))
+                             ? names[code] : "?";
+            if (name == NULL) name = "?";
             uart_printf("  *** Capture FAILED — status=%u (%s).       ***\r\n",
                         (unsigned)code, name);
             if (notify & CAPTURE_STATUS_NOTIFY_BIT_FRAME_START_TIMEOUT) {
