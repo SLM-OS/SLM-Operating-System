@@ -245,21 +245,28 @@ $ nc 10.0.2.15 2325
 # SLM-OS telemetryd v1
 # subscribe with: SUB <pattern>
 # default filter: tel.*
-tel.inf seq=1 ts=120031 dt=42 ok=1
-tel.evi seq=2 ts=120052 dt=87 fb=0
+tel.cpu seq=1 ts=120000 c0=42 c1=99 c2=18 c3=7
+tel.stl seq=2 ts=120000 att=12 ok=11 stl=0 emp=1 fll=0
+tel.mem seq=3 ts=120000 fp=10240 tp=12000 wev=0 xev=0
+tel.inf seq=4 ts=120031 dt=42 ok=1
+tel.evi seq=5 ts=120052 dt=87 fb=0
 SUB tel.evi
 # filter=tel.evi
-tel.evi seq=3 ts=120120 dt=63 fb=0
+tel.evi seq=6 ts=120120 dt=63 fb=0
 BYE
 ```
+
+Five topics share the `tel.*` namespace:
+- **Event-driven** (publish on each occurrence): `tel.evi` (eviction decision / re-fault), `tel.inf` (inference call).
+- **Periodic** (1 Hz from `net_poll`): `tel.cpu` (per-CPU load%), `tel.stl` (work-stealing deltas), `tel.mem` (memory pressure + eviction-count deltas).
 
 `SUB <pattern>` re-sets the per-client glob filter on the same
 connection (default `tel.*`); `BYE` closes gracefully. Slow-client
 back-pressure is per-client drop-oldest with line alignment — the
 publisher is never stalled. Build with `-DNET_TELEMETRYD_AUTOSTART=ON`
 to bring the listener up at boot. See
-`docs/specs/admin-telemetry-suite.md` § "Network feed" for the
-architecture and the wire-format specification.
+`docs/specs/admin-telemetry-suite.md` §7.1 for the per-topic payload
+field reference and §7.4 for the architecture and wire-format spec.
 
 ---
 

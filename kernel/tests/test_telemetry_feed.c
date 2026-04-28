@@ -244,6 +244,131 @@ static void test_periodic_get_stats_null_safe(void)
     admin_telemetry_get_periodic_stats(NULL);
 }
 
+/* ---------- Periodic payload-content (functional) -------------------- */
+
+static void test_periodic_steal_payload_format(void)
+{
+    /* tel.stl payload must contain all five aggregate keys in the
+     * documented order: att, ok, stl, emp, fll. Aggregated across
+     * CPUs so the payload is a fixed shape regardless of cpu_count. */
+    admin_telemetry_periodic_reset_for_tests();
+    admin_telemetry_periodic_pump(0u);
+    admin_telemetry_periodic_pump(TELEMETRY_PERIODIC_INTERVAL_MS);
+
+    char payload[64] = {0};
+    admin_telemetry_get_last_steal_payload_for_tests(payload, sizeof(payload));
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "att="),
+        "tel.stl must include 'att=' (steal attempts)");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "ok="),
+        "tel.stl must include 'ok=' (steal successes)");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "stl="),
+        "tel.stl must include 'stl=' (stale-pointer drops)");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "emp="),
+        "tel.stl must include 'emp=' (empty-victim count)");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "fll="),
+        "tel.stl must include 'fll=' (push-failed-deque-full)");
+
+    /* Documented order: att before ok before stl before emp before fll.
+     * If a future refactor reorders the appends, the network-wire
+     * compatibility breaks for any consumer that splits on column
+     * position. */
+    const char *att = strstr(payload, "att=");
+    const char *ok  = strstr(payload, "ok=");
+    const char *stl = strstr(payload, "stl=");
+    const char *emp = strstr(payload, "emp=");
+    const char *fll = strstr(payload, "fll=");
+    TEST_ASSERT_TRUE(att < ok && ok < stl && stl < emp && emp < fll);
+}
+
+static void test_periodic_memory_payload_format(void)
+{
+    /* tel.mem payload must contain fp, tp, wev, xev — the documented
+     * shape. Pin against schema regression. */
+    admin_telemetry_periodic_reset_for_tests();
+    admin_telemetry_periodic_pump(0u);
+    admin_telemetry_periodic_pump(TELEMETRY_PERIODIC_INTERVAL_MS);
+
+    char payload[64] = {0};
+    admin_telemetry_get_last_memory_payload_for_tests(payload, sizeof(payload));
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "fp="),
+        "tel.mem must include 'fp=' (free pages)");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "tp="),
+        "tel.mem must include 'tp=' (total pages)");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "wev="),
+        "tel.mem must include 'wev=' (weight-pool eviction delta)");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "xev="),
+        "tel.mem must include 'xev=' (workspace-pool eviction delta)");
+
+    const char *fp  = strstr(payload, "fp=");
+    const char *tp  = strstr(payload, "tp=");
+    const char *wev = strstr(payload, "wev=");
+    const char *xev = strstr(payload, "xev=");
+    TEST_ASSERT_TRUE(fp < tp && tp < wev && wev < xev);
+}
+
+static void test_periodic_payload_capped_at_max_msg_len(void)
+{
+    /* Every published payload must be < MAX_MSG_LEN=60 (msg_router cap)
+     * regardless of how many CPUs the publish_cpu_util loop iterated.
+     * The append_kv_uint helper enforces this internally; verify the
+     * post-publish length is in spec for every topic. */
+    admin_telemetry_periodic_reset_for_tests();
+    admin_telemetry_periodic_pump(0u);
+    admin_telemetry_periodic_pump(TELEMETRY_PERIODIC_INTERVAL_MS);
+
+    char buf[64] = {0};
+    admin_telemetry_get_last_cpu_payload_for_tests(buf, sizeof(buf));
+    TEST_ASSERT_MESSAGE(strlen(buf) < 60,
+        "tel.cpu payload must fit MAX_MSG_LEN=60");
+    admin_telemetry_get_last_steal_payload_for_tests(buf, sizeof(buf));
+    TEST_ASSERT_MESSAGE(strlen(buf) < 60,
+        "tel.stl payload must fit MAX_MSG_LEN=60");
+    admin_telemetry_get_last_memory_payload_for_tests(buf, sizeof(buf));
+    TEST_ASSERT_MESSAGE(strlen(buf) < 60,
+        "tel.mem payload must fit MAX_MSG_LEN=60");
+}
+
+static void test_periodic_payload_empty_before_publish(void)
+{
+    /* Before the first publish (only the baseline call has run), the
+     * captured-payload buffers must read as empty. Pins the baseline
+     * semantic at the test seam so tests reading content don't see
+     * stale data from a previous run. */
+    admin_telemetry_periodic_reset_for_tests();
+    admin_telemetry_periodic_pump(0u);  /* baseline only — no publish */
+
+    char buf[64];
+    memset(buf, 0xAA, sizeof(buf));
+    admin_telemetry_get_last_cpu_payload_for_tests(buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)'\0', (uint8_t)buf[0]);
+    memset(buf, 0xAA, sizeof(buf));
+    admin_telemetry_get_last_steal_payload_for_tests(buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)'\0', (uint8_t)buf[0]);
+    memset(buf, 0xAA, sizeof(buf));
+    admin_telemetry_get_last_memory_payload_for_tests(buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)'\0', (uint8_t)buf[0]);
+}
+
+static void test_periodic_payload_truncates_to_caller_cap(void)
+{
+    /* Test-seam read-back must respect the caller's `cap`, even when
+     * the underlying captured payload is longer. NUL-terminate within
+     * the cap. cap=0 / NULL must be no-ops (no crash). */
+    admin_telemetry_periodic_reset_for_tests();
+    admin_telemetry_periodic_pump(0u);
+    admin_telemetry_periodic_pump(TELEMETRY_PERIODIC_INTERVAL_MS);
+
+    char small[8];
+    memset(small, 0xAA, sizeof(small));
+    admin_telemetry_get_last_steal_payload_for_tests(small, sizeof(small));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)'\0', (uint8_t)small[sizeof(small) - 1]);
+
+    admin_telemetry_get_last_cpu_payload_for_tests(NULL, 0u);
+    admin_telemetry_get_last_cpu_payload_for_tests(small, 0u);
+}
+
 /* ---------- Suite registration --------------------------------------- */
 
 int test_suite_telemetry_feed(void)
@@ -263,5 +388,10 @@ int test_suite_telemetry_feed(void)
     RUN_TEST(test_periodic_handles_now_ms_wrap);
     RUN_TEST(test_periodic_topic_names_fit_msg_router);
     RUN_TEST(test_periodic_get_stats_null_safe);
+    RUN_TEST(test_periodic_steal_payload_format);
+    RUN_TEST(test_periodic_memory_payload_format);
+    RUN_TEST(test_periodic_payload_capped_at_max_msg_len);
+    RUN_TEST(test_periodic_payload_empty_before_publish);
+    RUN_TEST(test_periodic_payload_truncates_to_caller_cap);
     return UNITY_END();
 }

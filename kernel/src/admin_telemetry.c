@@ -281,6 +281,14 @@ static uint32_t g_prev_steal_push_full[MAX_CPUS];
 static uint64_t g_prev_evi_weight;
 static uint64_t g_prev_evi_workspace;
 
+/* Last-payload buffers for the test seam. Captured every time the
+ * corresponding publish_*() helper builds a payload string, regardless
+ * of whether msg_router has any subscribers. Tests verify the formatted
+ * shape without standing up an msg_router subscription. */
+static char g_last_cpu_payload[TELEMETRY_MAX_PAYLOAD];
+static char g_last_steal_payload[TELEMETRY_MAX_PAYLOAD];
+static char g_last_memory_payload[TELEMETRY_MAX_PAYLOAD];
+
 /* Wrap-safe delta helper. sched_diag_* are uint32_t and incremented
  * without saturation; if a counter wraps between samples we still want
  * a sensible delta (the unsigned subtraction does the right thing
@@ -334,6 +342,7 @@ static void publish_cpu_util(uint32_t cpus)
         g_prev_idle_loops[i] = idle_now[i];
     }
     payload[pos] = '\0';
+    memcpy(g_last_cpu_payload, payload, sizeof(g_last_cpu_payload));
     if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_CPU_UTIL,
                            (const uint8_t *)payload) == 0) {
         g_cpu_published += 1u;
@@ -373,6 +382,7 @@ static void publish_steal(uint32_t cpus)
     if (append_kv_uint(payload, sizeof(payload), &pos, "fll", fll) != 0) goto done;
 done:
     payload[pos] = '\0';
+    memcpy(g_last_steal_payload, payload, sizeof(g_last_steal_payload));
     if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_STEAL,
                            (const uint8_t *)payload) == 0) {
         g_steal_published += 1u;
@@ -408,6 +418,7 @@ static void publish_memory(void)
     if (append_kv_uint(payload, sizeof(payload), &pos, "xev", xev) != 0) goto done;
 done:
     payload[pos] = '\0';
+    memcpy(g_last_memory_payload, payload, sizeof(g_last_memory_payload));
     if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_MEMORY,
                            (const uint8_t *)payload) == 0) {
         g_memory_published += 1u;
@@ -481,4 +492,36 @@ void admin_telemetry_periodic_reset_for_tests(void)
     memset(g_prev_steal_push_full, 0, sizeof(g_prev_steal_push_full));
     g_prev_evi_weight = 0;
     g_prev_evi_workspace = 0;
+    g_last_cpu_payload[0]    = '\0';
+    g_last_steal_payload[0]  = '\0';
+    g_last_memory_payload[0] = '\0';
+}
+
+/* Test seam: copy the most recent payload string published on each
+ * periodic topic into `out`. Empty string when the topic has not been
+ * published since reset. Mirrors how the publish helpers truncate at
+ * TELEMETRY_MAX_PAYLOAD-1, so callers can safely use any cap >= 1. */
+static void copy_payload_truncating(char *out, size_t cap, const char *src)
+{
+    if (!out || cap == 0) return;
+    size_t i = 0;
+    for (; i + 1 < cap && src[i] != '\0'; i++) {
+        out[i] = src[i];
+    }
+    out[i] = '\0';
+}
+
+void admin_telemetry_get_last_cpu_payload_for_tests(char *out, size_t cap)
+{
+    copy_payload_truncating(out, cap, g_last_cpu_payload);
+}
+
+void admin_telemetry_get_last_steal_payload_for_tests(char *out, size_t cap)
+{
+    copy_payload_truncating(out, cap, g_last_steal_payload);
+}
+
+void admin_telemetry_get_last_memory_payload_for_tests(char *out, size_t cap)
+{
+    copy_payload_truncating(out, cap, g_last_memory_payload);
 }

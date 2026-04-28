@@ -27,6 +27,7 @@
 #include "rate_ewma.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /*
@@ -194,5 +195,14 @@ void admin_telemetry_get_periodic_stats(struct admin_telemetry_periodic_stats *o
 /* Test seam: reset the periodic-pump baseline so tests can drive a
  * fresh sequence without rebuilding the kernel. */
 void admin_telemetry_periodic_reset_for_tests(void);
+
+/* Test seam: read back the most recent payload published on each
+ * periodic topic. Capacity must be at least 64 (matches the publisher's
+ * scratch buffer); shorter is silently truncated. Empty string when
+ * the topic has not been published since reset. Lets unit tests pin
+ * the formatted payload string without subscribing through msg_router. */
+void admin_telemetry_get_last_cpu_payload_for_tests(char *out, size_t cap);
+void admin_telemetry_get_last_steal_payload_for_tests(char *out, size_t cap);
+void admin_telemetry_get_last_memory_payload_for_tests(char *out, size_t cap);
 
 #endif /* ADMIN_TELEMETRY_H */
