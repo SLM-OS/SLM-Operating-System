@@ -216,13 +216,19 @@ static void extract_global(float *out)
                 float diff = utils[c] - mean;
                 var_sum += diff * diff;
             }
-            /* Approximate sqrt via Newton's method (2 iterations, good enough) */
+            /* coefficient_of_variation = sqrt(variance) / mean. Use the
+             * hardware sqrt intrinsic so the runtime feature matches what
+             * scripts/hailo/generate_calibration_data.py emits during
+             * training (numpy's std()). The previous Newton's iteration
+             * used `std_dev = variance` as initial guess, which produces
+             * ~50% relative error after only two iterations for typical
+             * variances (e.g. variance=0.04 returns ~0.30, true sqrt 0.20).
+             * That skewed every load-imbalance feature fed to the AI
+             * scheduler away from the training distribution. */
             float variance = var_sum / (float)cpu_count;
-            float std_dev = variance;  /* initial guess */
+            float std_dev = 0.0f;
             if (variance > 0.0f) {
-                std_dev = variance;
-                std_dev = 0.5f * (std_dev + variance / std_dev);
-                std_dev = 0.5f * (std_dev + variance / std_dev);
+                std_dev = __builtin_sqrtf(variance);
             }
             out[6] = clamp01(std_dev / mean);
         } else {

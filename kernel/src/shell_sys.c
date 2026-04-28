@@ -3249,6 +3249,39 @@ int cmd_gpu(int argc, char *argv[])
         return cmd_gpu_use(argc, argv);
     }
 
+    if (argc >= 2 && strcmp(argv[1], "debug") == 0) {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+        /* Forward decls — the full ga10b_bringup.h include lives in
+         * a later JETSON-only block of this file (around the nvgpu
+         * shell command). Pulling that whole header up here would
+         * drag in the full bringup API for a two-function shell
+         * command; cheaper to declare the two we need inline. */
+        extern void ga10b_dispatch_verbose_set(bool on);
+        extern bool ga10b_dispatch_verbose_get(void);
+
+        if (argc < 3 || strcmp(argv[2], "status") == 0) {
+            shell_printf("gpu dispatch tracing: %s\r\n",
+                         ga10b_dispatch_verbose_get() ? "ON" : "OFF");
+            return 0;
+        }
+        if (strcmp(argv[2], "on") == 0) {
+            ga10b_dispatch_verbose_set(true);
+            shell_puts("gpu dispatch tracing: ON\r\n");
+            return 0;
+        }
+        if (strcmp(argv[2], "off") == 0) {
+            ga10b_dispatch_verbose_set(false);
+            shell_puts("gpu dispatch tracing: OFF\r\n");
+            return 0;
+        }
+        shell_puts("usage: gpu debug [on|off|status]\r\n");
+        return -1;
+#else
+        shell_puts("gpu debug: only supported on JETSON_ORIN_NANO\r\n");
+        return -1;
+#endif
+    }
+
     if (argc >= 2 && strcmp(argv[1], "read") == 0) {
 #if defined(PLATFORM_JETSON_ORIN_NANO)
         if (argc < 3) {

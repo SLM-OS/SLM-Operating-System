@@ -164,7 +164,11 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
      * capacity is already bounded by MSG_QUEUE_MAX_CAPACITY, so
      * `capacity * MSG_PRIO_COUNT` cannot overflow; the remaining risk is
      * `total_capacity * msg_size`.
+     *
+     * Pin MSG_PRIO_COUNT > 0 at compile time so the divide below stays
+     * safe even if the header constant is ever lowered.
      */
+    _Static_assert(MSG_PRIO_COUNT > 0, "MSG_PRIO_COUNT must be > 0");
     size_t total_capacity = capacity * MSG_PRIO_COUNT;
     if (msg_size > SIZE_MAX / total_capacity) {
         return NULL;
@@ -807,27 +811,58 @@ int shared_buffer_destroy(struct shared_buffer *buffer)
         return IPC_ERR_INVALID;
     }
 
+    /*
+     * Lock order: ipc_state.lock first, then buffer->lock; both are
+     * held until we know whether destroy proceeds.
+     *
+     * The original code checked refcount under buffer->lock then
+     * acquired ipc_state.lock separately, which let a concurrent
+     * shared_buffer_lookup → shared_buffer_map find the buffer between
+     * those two regions and race with our pmm_free_page below.
+     *
+     * Holding both locks across the refcount check makes the decision
+     * atomic with respect to lookup/unmap. Lock-ordering rules across
+     * the rest of the file:
+     *   - shared_buffer_create takes only ipc_state.lock — OK.
+     *   - shared_buffer_lookup takes only ipc_state.lock — OK.
+     *   - shared_buffer_map / unmap take only buffer->lock — OK.
+     * Nothing else takes buffer->lock then ipc_state.lock, so the
+     * ipc_state.lock → buffer->lock order here cannot deadlock.
+     *
+     * Earlier review iteration cleared the slot first and tried to
+     * "restore on BUSY"; that introduced a race against
+     * shared_buffer_create reusing the freed slot. Holding both locks
+     * avoids that entirely.
+     */
+    irq_flags_t s_flags = spin_lock_irqsave(&ipc_state.lock);
+    int slot = -1;
+    for (size_t i = 0; i < SHM_BUFFER_MAX; i++) {
+        if (ipc_state.buffers[i] == buffer) {
+            slot = (int)i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        spin_unlock_irqrestore(&ipc_state.lock, s_flags);
+        return IPC_ERR_INVALID;  /* Already destroyed or never registered. */
+    }
+
     irq_flags_t flags = spin_lock_irqsave(&buffer->lock);
 
-    /* Cannot destroy if other tasks have it mapped */
+    /* Cannot destroy if other tasks have it mapped. */
     if (buffer->refcount > 1) {
         spin_unlock_irqrestore(&buffer->lock, flags);
+        spin_unlock_irqrestore(&ipc_state.lock, s_flags);
         WARN("shared_buffer_destroy: buffer %u has %u references",
              buffer->id, buffer->refcount);
         return IPC_ERR_BUSY;
     }
 
+    /* Refcount OK — clear the slot under both locks so no new
+     * shared_buffer_lookup can find us, then drop both. */
+    ipc_state.buffers[slot] = NULL;
     spin_unlock_irqrestore(&buffer->lock, flags);
-
-    /* Remove from global table */
-    flags = spin_lock_irqsave(&ipc_state.lock);
-    for (size_t i = 0; i < SHM_BUFFER_MAX; i++) {
-        if (ipc_state.buffers[i] == buffer) {
-            ipc_state.buffers[i] = NULL;
-            break;
-        }
-    }
-    spin_unlock_irqrestore(&ipc_state.lock, flags);
+    spin_unlock_irqrestore(&ipc_state.lock, s_flags);
 
     /* Free physical memory */
     if (buffer->gpu_backed) {

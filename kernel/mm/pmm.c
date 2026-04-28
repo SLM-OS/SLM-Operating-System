@@ -228,6 +228,14 @@ static uintptr_t free_list_pop(unsigned int order)
         block->next->prev = NULL;
     }
 
+    /* Clear the popped block's link pointers. Callers (buddy_alloc /
+     * pmm_alloc_pages_low) treat the returned region as fresh memory and
+     * do not zero the header. If a caller ever frees this region back
+     * with the wrong order, the stale prev/next bytes would re-enter the
+     * free list as garbage and corrupt the doubly-linked list. */
+    block->next = NULL;
+    block->prev = NULL;
+
     buddy_state.free_counts[order]--;
     return (uintptr_t)block;
 }

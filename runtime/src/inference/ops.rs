@@ -47,6 +47,26 @@ fn ops_unlock() {
     OPS_LOCK.store(false, Ordering::Release);
 }
 
+/// RAII guard for OPS_LOCK. Use this anywhere a function holds the
+/// lock across calls that could fail or panic — without RAII, the
+/// lock would leak (panic = abort, but `?` early-returns or future
+/// edits adding error paths still benefit). Currently used by the
+/// im2col/matmul paths whose static scratch buffers it protects.
+struct OpsGuard;
+
+impl OpsGuard {
+    fn new() -> Self {
+        ops_lock();
+        OpsGuard
+    }
+}
+
+impl Drop for OpsGuard {
+    fn drop(&mut self) {
+        ops_unlock();
+    }
+}
+
 // =============================================================================
 // FP16 helpers
 // =============================================================================
@@ -104,6 +124,14 @@ unsafe fn matmul_int8(
 pub fn quantize_fp32_to_int8(
     data: *const f32, n: usize, out_buf: *mut i8,
 ) -> super::tensor::QuantParams {
+    // Reject empty / null inputs before dereferencing. The original
+    // form unconditionally read `*data` even for n == 0, which is
+    // either a NULL deref (caller passes a null sentinel pointer)
+    // or reads one byte past the buffer if `data` happens to point
+    // at a real but length-0 buffer.
+    if n == 0 || data.is_null() {
+        return super::tensor::QuantParams { scale: 1.0, zero_point: 0 };
+    }
     unsafe {
         // Find min/max
         let mut min_val = *data;
@@ -256,10 +284,14 @@ pub fn conv2d(
         zero_buf(outp, out.num_elements());
 
         if use_im2col {
-            // im2col + matmul path — lock protects static buffer from SMP races
-            ops_lock();
+            // im2col + matmul path — RAII guard protects static buffer
+            // from SMP races. If matmul_inner or add_scalar_simd ever
+            // grow a panicking branch, the guard releases the lock on
+            // unwind/return; the previous bare ops_lock()/ops_unlock()
+            // pair would have leaked the lock.
+            let _g = OpsGuard::new();
             static mut IM2COL_BUF: [f32; IM2COL_MAX] = [0.0; IM2COL_MAX];
-            // SAFETY: OPS_LOCK held — no concurrent access to IM2COL_BUF.
+            // SAFETY: OPS_LOCK held via OpsGuard — no concurrent access.
             let col = IM2COL_BUF.as_mut_ptr();
 
             for n in 0..batch {
@@ -300,7 +332,7 @@ pub fn conv2d(
                     }
                 }
             }
-            ops_unlock();
+            // _g (OpsGuard) drops here, releasing OPS_LOCK.
         } else {
             // Direct computation fallback for large convolutions
             for n in 0..batch {
@@ -670,8 +702,10 @@ pub fn matmul(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineErro
             // INT8 quantized matmul: accumulate in INT32, dequantize to FP32
             matmul_int8(a, b, cp, m, k, n);
         } else if b.is_fp16() && n <= FP16_ROW_BUF_SIZE {
-            // FP16 weight matrix — lock protects static buffer from SMP races
-            ops_lock();
+            // FP16 weight matrix — RAII guard protects FP16_BUF from
+            // SMP races even if fp16_row_to_f32 / simd_fma_row ever
+            // grow a panicking path.
+            let _g = OpsGuard::new();
             static mut FP16_BUF: [f32; FP16_ROW_BUF_SIZE] = [0.0; FP16_ROW_BUF_SIZE];
             let ap = a.data;
             let bp_u16 = b.data as *const u16;
@@ -683,7 +717,7 @@ pub fn matmul(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineErro
                     simd_fma_row(cp.add(i * n), bp_row, a_ik, n);
                 }
             }
-            ops_unlock();
+            // _g drops here, releasing OPS_LOCK.
         } else {
             // Standard FP32 matmul
             let ap = a.data;
@@ -1183,4 +1217,28 @@ pub fn gelu(input: &Tensor, out: &mut Tensor) -> Result<(), EngineError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PR-465 regression: `quantize_fp32_to_int8` must short-circuit
+    /// on `n == 0` instead of dereferencing `*data`. The previous
+    /// form read `*data` unconditionally, which was UB for n=0.
+    #[test]
+    fn quantize_fp32_to_int8_rejects_zero_n() {
+        // Pass null and zero — must not dereference.
+        let qp = quantize_fp32_to_int8(core::ptr::null(), 0, core::ptr::null_mut());
+        assert_eq!(qp.scale, 1.0);
+        assert_eq!(qp.zero_point, 0);
+    }
+
+    /// And on null data even with non-zero n.
+    #[test]
+    fn quantize_fp32_to_int8_rejects_null_data() {
+        let qp = quantize_fp32_to_int8(core::ptr::null(), 16, core::ptr::null_mut());
+        assert_eq!(qp.scale, 1.0);
+        assert_eq!(qp.zero_point, 0);
+    }
 }

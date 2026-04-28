@@ -71,13 +71,24 @@ pub fn get_log_level() -> LogLevel {
 extern "C" {
     fn slm_print(s: *const c_char);
     fn uart_puts(s: *const u8);
-    static pit_ticks: u64;
+    /// Per-tick counter. Declared `static mut` because the C side
+    /// mutates it from the timer ISR — declaring it as `static` (no
+    /// `mut`) is UB under modern Rust (1.78+ deny-by-default
+    /// `static_mut_refs`). The volatile read in `get_ticks` is the
+    /// synchronization mechanism.
+    static mut pit_ticks: u64;
 }
 
 /// Read `pit_ticks` using volatile access (modified by ISR at 100 Hz).
 #[inline]
 fn get_ticks() -> u64 {
-    unsafe { core::ptr::read_volatile(&pit_ticks) }
+    // SAFETY: pit_ticks is mutated by the timer ISR. We read it via
+    // `read_volatile` on a raw pointer obtained from `&raw const`,
+    // which never materialises a reference to the static-mut and so
+    // is sound under the Rust memory model. `&raw const` requires
+    // Rust 2024-edition / 1.82+; if the toolchain is older, fall
+    // back to `core::ptr::addr_of!`.
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(pit_ticks)) }
 }
 
 /// Print a null-terminated string to UART.

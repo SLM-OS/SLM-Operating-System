@@ -191,7 +191,13 @@ void exception_handler(struct interrupt_frame *frame)
     uint64_t vec = frame->vector;
 
     if (vec < 32) {
-        /* CPU exception */
+        /* CPU exception. Disable interrupts immediately: trap gates do not
+         * clear IF, so a stray IRQ between here and the final hlt loop
+         * could re-enter scheduler/timer code on a kernel that's already
+         * mid-panic. Once we're committed to halting, no other IRQs need
+         * to run. */
+        __asm__ volatile("cli");
+
         serial_puts("\n*** EXCEPTION: ");
         if (vec < sizeof(exception_names) / sizeof(exception_names[0]))
             serial_puts(exception_names[vec]);

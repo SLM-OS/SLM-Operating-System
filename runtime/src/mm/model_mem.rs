@@ -499,6 +499,14 @@ static INITIALIZED: AtomicU8 = AtomicU8::new(0);
 static mut WEIGHT_POOL: MemoryPool = MemoryPool::new();
 static mut WORKSPACE_POOL: MemoryPool = MemoryPool::new();
 
+// SAFETY: The static-mut pools above are accessed only while holding
+// `LOCK` (the SpinGuard pattern). MemoryPool itself contains plain
+// data (a free-list array of usizes plus block-state metadata) — no
+// interior mutability primitive is needed because the lock provides
+// exclusive access. Spelling out the impl makes the soundness
+// contract visible to callers and to future maintainers.
+unsafe impl Sync for MemoryPool {}
+
 /// Recently-evicted content tracker. `None` until `model_mem_init`
 /// constructs it; retained for the life of the runtime. Protected by
 /// the allocator's `LOCK` so callers holding the SpinGuard can
@@ -664,6 +672,13 @@ fn alloc_with_eviction(pool_id: u8) -> Result<ModelHandle, AllocError> {
 /// # Safety
 /// Callers must hold `LOCK` (via SpinGuard) before invoking.
 unsafe fn pool_alloc_raw(pool_id: u8) -> Result<ModelHandle, AllocError> {
+    // Enforce the SAFETY contract in debug builds. Cheap and catches
+    // a future caller that forgets to take the SpinGuard before
+    // invoking pool_alloc_raw — which would otherwise be silent UB.
+    debug_assert!(
+        LOCK.load(Ordering::Relaxed),
+        "pool_alloc_raw called without holding LOCK"
+    );
     match pool_id {
         POOL_WEIGHT => (*addr_of_mut!(WEIGHT_POOL)).alloc(pool_id),
         POOL_WORKSPACE => (*addr_of_mut!(WORKSPACE_POOL)).alloc(pool_id),

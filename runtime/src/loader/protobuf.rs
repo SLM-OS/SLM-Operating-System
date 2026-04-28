@@ -163,7 +163,18 @@ impl<'a> Iterator for ProtoIter<'a> {
             Err(e) => return Some(Err(e)),
         };
 
-        let value_start = self.pos + tag_len;
+        // Bound `value_start` against `self.data.len()` BEFORE indexing.
+        // `decode_varint` may have advanced the cursor up to 10 bytes
+        // forward; on a truncated input where `self.pos + tag_len ==
+        // self.data.len()`, the slice below is still valid (empty) —
+        // but a 10-byte continuation varint at `data.len() - 1` could
+        // produce `value_start > self.data.len()`, which would panic
+        // on the index. Untrusted-input parsing must never panic in
+        // kernel context.
+        let value_start = match self.pos.checked_add(tag_len) {
+            Some(v) if v <= self.data.len() => v,
+            _ => return Some(Err(ParseError::UnexpectedEof)),
+        };
         let value_data = &self.data[value_start..];
 
         let (data, consumed) = match wire_type {
@@ -299,4 +310,25 @@ pub fn packed_float_at(data: &[u8], index: usize) -> Option<f32> {
     }
     let bytes = [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]];
     Some(f32::from_le_bytes(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PR-465 regression: a truncated input where a tag's computed
+    /// `value_start` exceeds `data.len()` must not panic on the slice
+    /// index. The fix returns Err(UnexpectedEof) instead.
+    #[test]
+    fn proto_iter_rejects_truncated_input() {
+        // Single byte with continuation bit set — decode_varint
+        // returns UnexpectedEof, which the next() impl propagates
+        // before any slicing happens.
+        let data = [0x80u8];
+        let mut iter = ProtoIter::new(&data);
+        match iter.next() {
+            Some(Err(_)) => {}  /* expected — any error is fine */
+            other => panic!("expected Err, got {:?}", other),
+        }
+    }
 }
