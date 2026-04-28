@@ -85,6 +85,13 @@ typedef struct {
     uint32_t output_dim;
     uint32_t flags;               /* reserved; must be 0          */
     uint32_t _pad;
+    /*
+     * Reserved 8 bytes to round the struct to exactly 64 B so a
+     * MAX_OPS × desc array stays cache-friendly and the
+     * `_Static_assert` below has a clean numeric target. Future
+     * additions land here before bumping SLM_GPU_HANDOFF_VERSION.
+     */
+    uint64_t _reserved;
 } slm_gpu_op_desc_t;
 
 /*
@@ -168,6 +175,16 @@ typedef struct {
 _Static_assert(sizeof(slm_gpu_handoff_v1_t) <= 256,
                "slm_gpu_handoff_v1_t must stay <= 256 bytes; "
                "bump SLM_GPU_HANDOFF_VERSION when growing the header.");
+
+/*
+ * Pin the exact header size so the runtime-side Rust mirror's
+ * `const _: () = assert!(size_of::<HandoffHeader>() == ...)` can
+ * track it. Op-desc array offset = sizeof(header).
+ */
+_Static_assert(sizeof(slm_gpu_handoff_v1_t) == 120,
+               "slm_gpu_handoff_v1_t must be exactly 120 bytes; "
+               "if growing, update HANDOFF_HEADER_SIZE_BYTES in "
+               "runtime/src/inference/gpu_slm.rs and bump version.");
 
 /* Per-op descriptor must stay 64 bytes — keeps MAX_OPS × desc array
  * a clean 16 KB. */

@@ -75,20 +75,58 @@ pub enum BackendError {
 const SLM_GPU_HANDOFF_MAGIC: u32 = 0x534C4D47;
 const SLM_GPU_HANDOFF_VERSION: u32 = 1;
 
-/// Subset of `slm_gpu_handoff_v1_t` that the scaffolding accesses.
-/// The full layout lives in `kernel/include/gpu_handoff.h`; this
-/// struct intentionally mirrors only the leading fields the parser
-/// needs to validate the page.
+/// Full mirror of `slm_gpu_handoff_v1_t` from
+/// `kernel/include/gpu_handoff.h`. The C side pins the header at
+/// exactly 120 bytes via `_Static_assert(sizeof(...) == 120)`; the
+/// Rust mirror has a matching compile-time check below
+/// (`HANDOFF_HEADER_SIZE_BYTES`). The whole struct is reproduced —
+/// not just the leading fields — so `op_desc_ptr` arithmetic
+/// advances by the *real* header size, not a stale subset.
 #[repr(C)]
 struct HandoffHeader {
+    /* Schema gates. */
     magic: u32,
     version: u32,
     op_count: u32,
     arch_kind: u32,
-    /* … remaining fields not accessed in this scaffolding PR.
-     * The Rust side reads them via raw-pointer offsets in M6.A-2
-     * once the pushbuffer-construction code lands. */
+
+    /* Architecture dimensions (mirrors ArchInfo from gguf.rs). */
+    block_count: u32,
+    embedding_length: u32,
+    head_count: u32,
+    head_count_kv: u32,
+    head_dim: u32,
+    feed_forward_length: u32,
+    context_length: u32,
+    vocab_size: u32,
+
+    /* Channel resources (inherited from L4T's nvgpu). */
+    channel_id: u64,
+    pushbuffer_va: u64,
+    pushbuffer_size: u64,
+    semaphore_page_va: u64,
+    doorbell_page_va: u64,
+
+    /* Weight pool. */
+    weight_pool_va: u64,
+    weight_pool_size: u64,
+
+    /* SASS kernel pool. */
+    sass_kernel_pool_va: u64,
+    sass_kernel_pool_size: u64,
 }
+
+/// Size in bytes of the C `slm_gpu_handoff_v1_t`. Pinned by both
+/// `_Static_assert` on the C side and the const-assert below; if a
+/// future field addition trips this, bump `SLM_GPU_HANDOFF_VERSION`
+/// and update both anchors.
+pub const HANDOFF_HEADER_SIZE_BYTES: usize = 120;
+
+const _: () = {
+    if core::mem::size_of::<HandoffHeader>() != HANDOFF_HEADER_SIZE_BYTES {
+        panic!("HandoffHeader size drifted from C slm_gpu_handoff_v1_t");
+    }
+};
 
 /// Read-only view onto the staged handoff page.
 ///
@@ -391,11 +429,15 @@ mod tests {
     }
 
     #[test]
-    fn handoff_header_size_matches_assumption() {
-        // The C-side header is intentionally larger (256-byte cap),
-        // but the Rust subset must stay byte-aligned with the leading
-        // fields. Sanity-check the leading 16 bytes here:
-        //   magic (4) + version (4) + op_count (4) + arch_kind (4) = 16.
-        assert_eq!(core::mem::size_of::<HandoffHeader>(), 16);
+    fn handoff_header_size_matches_c_struct() {
+        // Pinned by `_Static_assert(sizeof(slm_gpu_handoff_v1_t) == 120)`
+        // in kernel/include/gpu_handoff.h and the const-assert at the
+        // top of this module. Catches drift early so `op_desc_ptr`
+        // arithmetic doesn't silently land inside the header.
+        assert_eq!(
+            core::mem::size_of::<HandoffHeader>(),
+            HANDOFF_HEADER_SIZE_BYTES
+        );
+        assert_eq!(HANDOFF_HEADER_SIZE_BYTES, 120);
     }
 }
