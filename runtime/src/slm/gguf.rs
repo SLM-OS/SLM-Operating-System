@@ -1583,14 +1583,22 @@ mod tests {
     #[test]
     fn rejects_truncated_string() {
         // Build a real header but lie about a metadata key length.
+        // The key-count plausibility gate (`kv_count > remaining /
+        // MIN_KV_RECORD_SIZE`) fires first if the file is too short,
+        // so pad enough bytes that kv_count=1 passes the gate but
+        // the claimed string length still walks past EOF.
         let mut out: Vec<u8> = Vec::new();
         out.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
         out.extend_from_slice(&GGUF_VERSION.to_le_bytes());
         out.extend_from_slice(&0u64.to_le_bytes());      // tensor_count
         out.extend_from_slice(&1u64.to_le_bytes());      // kv_count = 1
-        // Key with claimed length 999 999 but only 4 bytes follow.
+        // Key with claimed length 999 999 — well past the body size.
         out.extend_from_slice(&999_999u64.to_le_bytes());
-        out.extend_from_slice(b"abcd");
+        // Pad enough body bytes that kv_count=1 passes the gate
+        // (MIN_KV_RECORD_SIZE = 13). string_borrowed will read the
+        // u64 length, then `take(999_999)` walks past EOF and
+        // returns Truncated.
+        out.extend_from_slice(&[0u8; 32]);
         assert!(matches!(Gguf::parse(&out), Err(GgufError::Truncated)));
     }
 
