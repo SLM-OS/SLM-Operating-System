@@ -93,12 +93,34 @@ static int32_t slm_runner_token_cb(
      *
      * The router copies up to MAX_MSG_LEN bytes and looks for a NUL
      * terminator; the M5.2 decoder hands over &str.as_bytes() which
-     * is NOT NUL-terminated. The 60-byte cap matches MAX_MSG_LEN in
-     * runtime/src/msg_router.rs minus one for the terminator. */
+     * is NOT NUL-terminated. With sizeof(buf) == 60 the C-side cap
+     * is 59 payload bytes + 1 terminator (the router's own str_copy
+     * applies the same 60-1 = 59 cap on its end).
+     *
+     * Token bytes are valid UTF-8 (M2.1 BBPE decode invariant), so a
+     * naive truncation at 59 bytes can land mid-codepoint. Walk
+     * backward to the previous UTF-8 lead byte (one whose top two
+     * bits are not `10`) before NUL-terminating, so a downstream
+     * Lua/UI consumer never sees a half-encoded codepoint. Tokens
+     * larger than 59 bytes are rare (typical BPE tokens are under
+     * 8 bytes); the truncation policy is documented in
+     * docs/tutorials/slm-component.md. */
     uint8_t buf[60];
     size_t n = bytes_len;
     if (n > sizeof(buf) - 1) {
         n = sizeof(buf) - 1;
+        /* Pull back to a UTF-8 lead byte. Continuation bytes have
+         * the bit pattern 10xxxxxx; lead bytes are anything else
+         * (0xxxxxxx ASCII, 110xxxxx / 1110xxxx / 11110xxx multi-byte
+         * starts). Bound the walk at 4 bytes — the longest valid
+         * UTF-8 codepoint is 4 bytes, so we never need to backtrack
+         * further. */
+        for (size_t b = 0; b < 4 && n > 0; b++) {
+            if ((bytes[n] & 0xC0) != 0x80) {
+                break;
+            }
+            n--;
+        }
     }
     for (size_t i = 0; i < n; i++) {
         buf[i] = bytes[i];
