@@ -88,7 +88,14 @@ void tcp_shell_server_note_session_open(uint32_t session_id);
  * what makes the WARN here actionable. Updates rolling stats and
  * emits a WARN when delta > NET_SHELL_TCP_LEAK_THRESHOLD_BYTES.
  */
+/* `pool_attribution` is an optional human-readable suffix the caller
+ * computes from per-MEMP-pool deltas, e.g. " PBUF_POOL+2 TCP_SEG+1".
+ * NULL or empty means "no attribution available" (MEMP_STATS off, or
+ * all pools netted zero). When a leak warning fires, the attribution
+ * is appended verbatim so the operator can see which lwIP allocator
+ * the residual heap delta came from (#537 attribution work). */
 void tcp_shell_server_note_session_close(uint32_t session_id,
-                                         int32_t  heap_delta_bytes);
+                                         int32_t  heap_delta_bytes,
+                                         const char *pool_attribution);
 
 #endif /* TCP_SHELL_SERVER_H */

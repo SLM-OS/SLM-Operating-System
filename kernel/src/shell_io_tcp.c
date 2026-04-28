@@ -36,6 +36,7 @@
 
 #include "lwip/tcp.h"
 #include "lwip/err.h"
+#include "lwip/memp.h"         /* MEMP_MAX for per-pool delta snapshots (#537) */
 #include "lwip/pbuf.h"
 #include "lwip/stats.h"        /* lwip_stats.mem.used for the heap snapshot */
 #include "arch/sys_arch.h"   /* sys_now() for connected_at timestamp */
@@ -178,6 +179,16 @@ struct tcp_shell_ctx {
      * a sustained positive delta indicates a real leak rather than
      * unacked-TX residue lwIP will free during TIME_WAIT. */
     uint32_t          heap_used_at_open_bytes;
+
+    /* Per-MEMP-pool snapshot at session open (#537 attribution).
+     * Diffed at close to attribute any residual heap delta to the
+     * specific lwIP allocator (PBUF_POOL, TCP_SEG, etc.) — the
+     * heap-byte total alone doesn't tell us which allocation site
+     * is leaking. Only meaningful when MEMP_STATS is enabled in
+     * lwipopts.h; otherwise the array is unused. */
+#if MEMP_STATS
+    uint16_t          memp_used_at_open[MEMP_MAX];
+#endif
 
     /* Timer-counter value captured immediately after tcp_close (#537).
      * Zero when the close hasn't happened yet. The measurement +
@@ -817,6 +828,18 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
     ctx->heap_used_at_open_bytes = 0;
 #endif
 
+    /* Snapshot per-MEMP-pool used counts so the close path can
+     * attribute any heap-delta to a specific pool (#537). Each
+     * entry is `mem_size_t` (uint16 on this build), so the cast
+     * down is lossless. */
+#if MEMP_STATS
+    for (int i = 0; i < MEMP_MAX; i++) {
+        ctx->memp_used_at_open[i] = lwip_stats.memp[i]
+            ? (uint16_t)lwip_stats.memp[i]->used
+            : 0;
+    }
+#endif
+
     return &ctx->io;
 }
 
@@ -1014,7 +1037,36 @@ void shell_io_tcp_poll(void)
             uint32_t close_used = 0;
 #endif
             int32_t delta = (int32_t)(close_used - ctx->heap_used_at_open_bytes);
-            tcp_shell_server_note_session_close(ctx->session_id, delta);
+
+            /* Compute per-MEMP-pool deltas to attribute the leak to
+             * a specific allocator (#537 follow-up). Build a short
+             * string like " PBUF_POOL+2 TCP_SEG+1 PBUF+0" — only
+             * pools with non-zero deltas appear, capped to fit the
+             * fixed buffer. */
+            char pool_attribution[160];
+            pool_attribution[0] = '\0';
+#if MEMP_STATS
+            size_t attr_off = 0;
+            for (int p = 0;
+                 p < MEMP_MAX && attr_off + 32 < sizeof(pool_attribution);
+                 p++) {
+                if (!lwip_stats.memp[p]) continue;
+                int32_t pd = (int32_t)lwip_stats.memp[p]->used
+                           - (int32_t)ctx->memp_used_at_open[p];
+                if (pd == 0) continue;
+                const char *name = lwip_stats.memp[p]->name
+                    ? lwip_stats.memp[p]->name : "?";
+                int n = uart_snprintf(pool_attribution + attr_off,
+                                      sizeof(pool_attribution) - attr_off,
+                                      " %s%+d", name, (int)pd);
+                if (n <= 0) break;
+                attr_off += (size_t)n;
+            }
+#endif
+            tcp_shell_server_note_session_close(ctx->session_id, delta,
+                                                pool_attribution[0]
+                                                    ? pool_attribution
+                                                    : NULL);
             ctx_free(ctx);
         }
     }
