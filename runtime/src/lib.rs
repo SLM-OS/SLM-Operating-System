@@ -96,6 +96,10 @@ fn rust_panic(info: &PanicInfo) -> ! {
         buf[..len].copy_from_slice(&file[..len]);
         buf[len] = 0;
 
+        // SAFETY: pure C variadic FFI calls. `fmt` is a static null-
+        // terminated byte literal whose `%s/%u/%u` specifiers match
+        // the (c-string, u32, u32) argument types. `buf` is a 256-byte
+        // null-terminated stack array that outlives both calls.
         unsafe {
             uart_printf(
                 b"at %s:%u:%u\n\0".as_ptr(),
