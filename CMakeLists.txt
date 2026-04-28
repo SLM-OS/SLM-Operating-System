@@ -1226,7 +1226,7 @@ target_compile_definitions(lua PRIVATE
 # Pin the radix character to '.' (ASCII 46) so the float-to-string
 # path in lobject.c doesn't deref localeconv()->decimal_point. The
 # freestanding stub returns a static lconv with decimal_point=".",
-# but a runtime memory-corruption bug has been observed (#538)
+# but a runtime memory-corruption bug has been observed (#544)
 # overwriting default_lconv with a bogus pointer between boot and
 # the first Lua "%f" formatting call. Bypassing the deref entirely
 # makes Lua immune regardless of whether default_lconv is intact.
