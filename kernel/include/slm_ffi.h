@@ -827,6 +827,24 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap);
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats);
 
 /*
+ * Return the physical address of the staged `slm_gpu_handoff_v1_t`
+ * page, or 0 if no page is staged. Consumed by the Rust runtime's
+ * GPU SLM backend (`runtime/src/inference/gpu_slm.rs`).
+ *
+ * M6.A scaffolding stub: the real implementation in M6.A-2 will look
+ * up the address staged by the pre-kexec L4T loader
+ * (`scripts/slm-gpu-bringup.c`). Until that lands, the default weak
+ * implementation in `slm_ffi.c` returns 0 and the Rust side falls
+ * through to CPU.
+ *
+ * The returned page (when non-zero) is mapped read-only and contains
+ * exactly one `slm_gpu_handoff_v1_t` followed by `op_count`
+ * consecutive `slm_gpu_op_desc_t` entries — see
+ * `kernel/include/gpu_handoff.h`.
+ */
+uint64_t slm_gpu_get_handoff_phys(void);
+
+/*
  * Print GPU status to UART (called from Rust shell command).
  */
 extern void rust_gpu_print_status(void);
