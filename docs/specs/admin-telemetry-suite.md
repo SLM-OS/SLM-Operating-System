@@ -187,6 +187,8 @@ Pattern is a glob: `/telemetry/sched/*`, `/telemetry/inference/mnist/*`. Backed 
 
 ### 7.1 Topic schema
 
+The idealized long-form schema (slash-paths, structured payloads):
+
 | Topic | When | Sample fields |
 |---|---|---|
 | `/telemetry/sched/decision` | every assign_cpu | `{ts_ns, policy, action, latency_ns, fallback (bool), backend ("cpu"|"gpu")}` |
@@ -200,6 +202,24 @@ Pattern is a glob: `/telemetry/sched/*`, `/telemetry/inference/mnist/*`. Backed 
 | `/telemetry/model/<name>/status` | on lifecycle | `{ts_ns, name, status ("uploaded"|"launched"|"running"|"unloaded"|"error"), detail}` |
 | `/telemetry/gpu/use_changed` | on toggle | `{ts_ns, consumer, enabled, by}` |
 | `/telemetry/system/heartbeat` | 1 Hz | `{ts_ns, uptime_ms, free_kb, cpu_load[]}` |
+
+#### Compact (`tel.*`) implementation
+
+The actual on-the-wire topics are squeezed into the existing 16-byte
+`TOPIC_NAME_LEN` and 60-byte `MAX_MSG_LEN` (see §14.6 for the deferral
+rationale). Wildcard `tel.*` matches everything in this table.
+
+| Topic | When | Payload format |
+|---|---|---|
+| `tel.evi` | per eviction decision / re-fault | `dt=<ns> fb=<0\|1>` |
+| `tel.inf` | per inference call | `dt=<ns> ok=<0\|1>` |
+| `tel.cpu` | 1 Hz from `net_poll` | `c0=<load%> c1=<load%> ... c<n>=<load%>` |
+| `tel.stl` | 1 Hz from `net_poll` | `att=<n> ok=<n> stl=<n> emp=<n> fll=<n>` (work-stealing deltas across all CPUs) |
+| `tel.mem` | 1 Hz from `net_poll` | `fp=<n> tp=<n> wev=<n> xev=<n>` (free pages, total pages, weight/workspace eviction-count deltas) |
+
+`tel.cpu` / `tel.stl` / `tel.mem` are the M4-follow-up cohort that
+landed via the `net_poll` periodic pump — see §14.8 for the deferral
+note this work resolved.
 
 ### 7.2 Back-pressure
 
@@ -219,11 +239,14 @@ The in-process bus is bridged to TCP by a dedicated push server, allowing a host
 # SLM-OS telemetryd v1
 # subscribe with: SUB <pattern>
 # default filter: tel.*
-tel.inf seq=1 ts=120031 dt=42 ok=1
-tel.evi seq=2 ts=120052 dt=87 fb=0
+tel.cpu seq=1 ts=120000 c0=42 c1=99 c2=18 c3=7
+tel.stl seq=2 ts=120000 att=12 ok=11 stl=0 emp=1 fll=0
+tel.mem seq=3 ts=120000 fp=10240 tp=12000 wev=0 xev=0
+tel.inf seq=4 ts=120031 dt=42 ok=1
+tel.evi seq=5 ts=120052 dt=87 fb=0
 ```
 
-The banner is emitted once on accept; comment lines start with `#` and consumers ignore them. Sample lines are `<topic> seq=<n> ts=<sys_now_ms> <payload>\n`, with `<payload>` being the msg_router payload verbatim (`dt=N fb=N` for eviction, `dt=N ok=N` for inference).
+The banner is emitted once on accept; comment lines start with `#` and consumers ignore them. Sample lines are `<topic> seq=<n> ts=<sys_now_ms> <payload>\n`, with `<payload>` being the msg_router payload verbatim (see §7.1 compact-topic table for per-topic key shapes).
 
 **Client commands** (one per line, optional):
 - `SUB <pattern>\n` — re-set the per-client server-side glob filter (same prefix-match semantics as msg_router wildcard subscriptions). Default `tel.*`.
@@ -242,7 +265,7 @@ The banner is emitted once on accept; comment lines start with `#` and consumers
 
 **Security.** Same posture as telnet: trust-the-LAN, no auth, no TLS. Lab-only. SSH or token auth is the right next step when telemetry leaves the lab; an SSH tunnel from the consumer host is the interim workaround.
 
-**Out of scope (deferred decisions, see plan).** No 1 Hz aggregator (§14.8 still deferred). No richer per-event fields — `MAX_MSG_LEN=60` stays. No UDP emitter; if a dashboard consumer arrives, a sibling `kernel/src/udp_telemetry_emitter.c` can subscribe to the same `tel.*` topics without touching this server.
+**Out of scope (deferred decisions, see plan).** §14.8 partially shipped — `tel.cpu` / `tel.stl` / `tel.mem` are 1 Hz publishers driven from `net_poll` via `admin_telemetry_periodic_pump`. The original `/telemetry/<consumer>/aggregate/1s` p50/p99 aggregates remain deferred (those need histogram-snapshot publishers, not raw delta publishers). No richer per-event fields — `MAX_MSG_LEN=60` stays. No UDP emitter; if a dashboard consumer arrives, a sibling `kernel/src/udp_telemetry_emitter.c` can subscribe to the same `tel.*` topics without touching this server.
 
 ## 8. Latency & rate measurement
 
@@ -435,8 +458,13 @@ loose end.
    * **Decided 2026-04-26 (M4):** ship a compact `tel.<consumer>` schema that fits the existing buffer (`tel.evi`, `tel.inf`). Wildcard `tel.*` matches all telemetry topics. Sample payload format is short ASCII key=value (`dt=12345 ok=1`) capped at the 60-byte `MAX_MSG_LEN`. Long-form topic names + structured (JSON) sample payloads are a follow-up that bumps `TOPIC_NAME_LEN` and `MAX_MSG_LEN` together.
 7. **Per-shell `telemetry subscribe <pattern>` (M4 deferral).** Spec §5 promises a blocking shell command that streams matching events. Each shell session would need its own msg_router mailbox slot allocator — a small but separate piece of work.
    * **Decided 2026-04-26 (M4):** for now operators subscribe via `lua -e 'slm.telemetry_subscribe("tel.*", function(t,d) print(t,d) end)'`, which uses the existing per-`lua_State` mailbox. Shell-side blocking subscribe lands when the per-shell mailbox slot allocator does.
-8. **1Hz aggregate topics + heartbeat (M4 deferral).** Spec §7.1 lists `/telemetry/<consumer>/aggregate/1s` topics emitted unconditionally, plus `/telemetry/system/heartbeat`. Both need a kernel-task scheduler.
+8. **1Hz aggregate topics + heartbeat (M4 deferral, partially shipped).** Spec §7.1 lists `/telemetry/<consumer>/aggregate/1s` topics plus `/telemetry/system/heartbeat`. Both need a kernel-task scheduler.
    * **Decided 2026-04-26 (M4):** ship raw per-event topics only. The latency hist + rate from M1/M3 already give a 1Hz-equivalent view via `slm.*_rate()` and `slm.latency_histogram()`. Aggregator task lands alongside the M6 admin TUI's 1Hz refresh path.
+   * **Update 2026-04-28 (PR #565):** the heartbeat half of this deferral shipped via `admin_telemetry_periodic_pump`, called from `net_poll` at 1 Hz. Three topics:
+     * `tel.cpu` — per-CPU load% over the publish interval (covers what `system/heartbeat.cpu_load[]` was meant to carry).
+     * `tel.stl` — work-stealing aggregate deltas (`att/ok/stl/emp/fll`).
+     * `tel.mem` — free/total pages + weight/workspace eviction-count deltas (covers `system/heartbeat.free_kb` plus the eviction pressure side).
+     `net_poll` runs at TASK_PRIORITY_IDLE on the network pump task, which works as a "kernel-task scheduler" for low-cadence metrics without spawning a dedicated tick task. Per-consumer p50/p99 aggregate topics (`/telemetry/<consumer>/aggregate/1s`) still deferred — those need histogram-snapshot publishers and are still natural to pair with the M6 admin TUI's 1Hz refresh.
 9. **`model upload <name>` xput integration (M5 deferral).** Spec §10.1 promises a single shell command that opens an xput session pointed at `/mnt/files/models/<name>.blob` and arms a finish-hook that writes the `.meta` sidecar.
    * **Decided 2026-04-26 (M5):** ship the engine registry + `.meta` parser + `model launch <name>` dispatch first. Operators stage the blob via the existing `xput begin/chunk/finish` flow, and write the sidecar via `write /mnt/files/models/<name>.meta "kind=mnist size=N sha256=..."`. The unified `model upload` flow lands when the M6 admin TUI's host-side `slm-model-upload.py` helper actually drives it; both can land together.
 10. **`model unload <name>` ref-checked variant (M5 deferral).** Spec §10.3 promises `model unload` refuses with `EBUSY` if a task references the loaded model.
