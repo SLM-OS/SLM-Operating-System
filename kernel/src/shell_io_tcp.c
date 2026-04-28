@@ -402,6 +402,28 @@ static int tcp_try_read_char(struct shell_io *io)
  * when the drain has stalled past the cap. */
 static void mark_closed(struct tcp_shell_ctx *ctx);
 
+/* Cached timer-counter frequency. The timer is set up once at boot
+ * and the frequency is constant thereafter, but every tcp_write_buf
+ * call and every poll-cycle close-settling check needs to convert
+ * ticks to milliseconds. Reading the frequency once and caching it
+ * avoids a per-call register read (mrs CNTFRQ_EL0 on ARM64) that
+ * adds up under heavy shell traffic.
+ *
+ * Lazy init: zero means "not yet cached"; the read is racy across
+ * concurrent first callers but since the underlying frequency is
+ * a fixed constant, every CPU computes the same value, so the
+ * worst case is two redundant initialisations writing the same
+ * uint64_t. That's benign for our usage. */
+static uint64_t g_cached_timer_freq = 0;
+
+static inline uint64_t shell_io_tcp_timer_freq(void)
+{
+    if (g_cached_timer_freq == 0) {
+        g_cached_timer_freq = timer_get_frequency();
+    }
+    return g_cached_timer_freq;
+}
+
 /* Test hook — overridable via shell_io_tcp_test_set_write_timeout_ms.
  * Defaults to TCP_SHELL_WRITE_TIMEOUT_MS in production. The
  * regression test in test_net.c drives the timeout path with a
@@ -449,7 +471,7 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
     /* Bound the total wall-clock time spent waiting for ring space.
      * Per-iteration sleep_ms gives net_pump a chance to drain; if the
      * lwIP heap is exhausted we'd otherwise loop forever (#536). */
-    const uint64_t freq = timer_get_frequency();
+    const uint64_t freq = shell_io_tcp_timer_freq();
     const uint64_t timeout_ticks = (freq * (uint64_t)g_write_timeout_ms) / 1000ULL;
     const uint64_t deadline = timer_get_count() + timeout_ticks;
 
@@ -690,11 +712,18 @@ int shell_io_tcp_test_run_write_timeout(uint32_t timeout_override_ms)
 
     /* Buffer must exceed TCP_SHELL_RING_SIZE so the second pass
      * stalls on a full ring. The contents don't matter — the test
-     * is about the timeout, not about what got queued. */
-    char buf[TCP_SHELL_RING_SIZE + 256];
+     * is about the timeout, not about what got queued.
+     *
+     * `static` rather than stack-local: TCP_SHELL_RING_SIZE is
+     * 4 KB so this would otherwise consume ~4.4 KB of the 16 KB
+     * test-task stack in one local. The test runs single-threaded
+     * within the kernel-test main task, so the static is safe and
+     * keeps the stack pressure low for any future test that
+     * happens to nest inside this one. */
+    static char buf[TCP_SHELL_RING_SIZE + 256];
     for (size_t i = 0; i < sizeof(buf); i++) buf[i] = 'x';
 
-    uint64_t freq = timer_get_frequency();
+    uint64_t freq = shell_io_tcp_timer_freq();
     uint64_t t0 = timer_get_count();
     tcp_write_buf(&ctx->io, buf, sizeof(buf));
     uint64_t elapsed_ms = ((timer_get_count() - t0) * 1000ULL) / freq;
@@ -751,7 +780,7 @@ int shell_io_tcp_test_run_close_settling(void)
 
     /* Scenario 2: rewind close_completed_ticks far enough that the
      * settle window has elapsed. Poll must free. */
-    uint64_t freq = timer_get_frequency();
+    uint64_t freq = shell_io_tcp_timer_freq();
     uint64_t settle_ticks =
         (freq * (uint64_t)(TCP_SHELL_CLOSE_SETTLE_MS + 100)) / 1000ULL;
     /* Saturating subtract — older firmware on slow boards has tiny
@@ -1045,7 +1074,7 @@ void shell_io_tcp_poll(void)
          * were allocated by tcp_write(... TCP_WRITE_FLAG_COPY). */
         if (ctx->shell_done && ctx->pcb == NULL &&
             ctx->close_completed_ticks != 0) {
-            uint64_t freq = timer_get_frequency();
+            uint64_t freq = shell_io_tcp_timer_freq();
             uint64_t elapsed_ticks =
                 timer_get_count() - ctx->close_completed_ticks;
             uint64_t elapsed_ms = (elapsed_ticks * 1000ULL) / freq;

@@ -1490,7 +1490,14 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
     /* Bound pb_dwords against the inherited pushbuffer size before any
      * write. Today's callers cap at GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS
      * (= 23), but a future caller passing a larger value would
-     * overflow g_handoff.pushbuf_phys. Cheap up-front check. */
+     * overflow g_handoff.pushbuf_phys. Cheap up-front check.
+     *
+     * Note: this and the 40-bit-VA check below intentionally use
+     * unconditional `uart_printf`, not GA10B_DBG. Dispatch refusals
+     * are operator-actionable failures that must be visible without
+     * the verbose flag — the same pattern used by the
+     * `pipeline op N malformed` and `pipeline op N failed` paths
+     * later in this file. */
     if ((uint64_t)pb_dwords * 4u > g_handoff.pushbuf_size) {
         uart_printf("[%s] submit refused: pb_dwords=%lu exceeds "
                     "pushbuf size=%lu bytes\n",
