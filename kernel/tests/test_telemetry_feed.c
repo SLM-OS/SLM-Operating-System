@@ -493,6 +493,42 @@ static void test_ai_decision_topic_fits_msg_router(void)
                                     TELEMETRY_TOPIC_PREFIX, 4));
 }
 
+static void test_ai_decision_unknown_policy_id_falls_open_to_marker(void)
+{
+    /* Wire-format defense: any policy_id outside the documented set
+     * is replaced with '?'. The threat model is a future caller
+     * passing a typo, a new policy id that hasn't been added to
+     * sched_ai.c's dispatch yet, or worst-case a control char that
+     * would split the TCP-framed sample line at the wrong byte and
+     * corrupt host-side parsers. */
+    admin_telemetry_ai_decision_reset_for_tests();
+    char payload[64];
+
+    /* Plausible "looks valid but isn't documented" cases. */
+    admin_telemetry_record_ai_decision('g',  0u, 0u, 0u, 1u, false);
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=?"),
+        "unknown policy id 'g' must fail-open to '?'");
+    TEST_ASSERT_MESSAGE(strstr(payload, "p=g") == NULL,
+        "raw 'g' must NOT reach the wire");
+
+    /* Wire-format hostile: newline would split the TCP record. */
+    admin_telemetry_record_ai_decision('\n', 0u, 0u, 0u, 1u, false);
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_MESSAGE(strchr(payload, '\n') == NULL,
+        "no newline must reach the wire — would corrupt tcp framing");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=?"),
+        "newline policy id must fail-open to '?'");
+
+    /* Embedded nul would terminate the payload string mid-record. */
+    admin_telemetry_record_ai_decision('\0', 0u, 0u, 0u, 1u, false);
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=?"),
+        "nul policy id must fail-open to '?'");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "fb="),
+        "fb= field must still be present after the policy guard");
+}
+
 /* ---------- Suite registration --------------------------------------- */
 
 int test_suite_telemetry_feed(void)
@@ -523,5 +559,6 @@ int test_suite_telemetry_feed(void)
     RUN_TEST(test_ai_decision_policy_ids);
     RUN_TEST(test_ai_decision_payload_capped_at_max_msg_len);
     RUN_TEST(test_ai_decision_topic_fits_msg_router);
+    RUN_TEST(test_ai_decision_unknown_policy_id_falls_open_to_marker);
     return UNITY_END();
 }

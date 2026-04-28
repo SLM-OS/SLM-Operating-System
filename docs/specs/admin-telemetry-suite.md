@@ -216,7 +216,7 @@ rationale). Wildcard `tel.*` matches everything in this table.
 | `tel.cpu` | 1 Hz from `net_poll` | `c0=<load%> c1=<load%> ... c<n>=<load%>` |
 | `tel.stl` | 1 Hz from `net_poll` | `att=<n> ok=<n> stl=<n> emp=<n> fll=<n>` (work-stealing deltas across all CPUs) |
 | `tel.mem` | 1 Hz from `net_poll` | `fp=<n> tp=<n> wev=<n> xev=<n>` (free pages, total pages, weight/workspace eviction-count deltas) |
-| `tel.aix` | per AI scheduler decision | `p=<m\|p\|h> c=<core> pa=<0..2> pe=<0\|1> dt=<ns> fb=<0\|1>` — fallback (`fb=1`) omits `c/pa/pe` |
+| `tel.aix` | per AI scheduler decision | `p=<m\|p\|h\|?> c=<core> pa=<0..2> pe=<0\|1> dt=<ns> fb=<0\|1>` — fallback (`fb=1`) omits `c/pa/pe`; `p=?` is the wire-format fail-open marker for an unrecognised policy id |
 
 `tel.cpu` / `tel.stl` / `tel.mem` are the M4-follow-up cohort that
 landed via the `net_poll` periodic pump — see §14.8 for the deferral

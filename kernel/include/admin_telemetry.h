@@ -215,10 +215,13 @@ void admin_telemetry_get_last_memory_payload_for_tests(char *out, size_t cap);
 
 /* Policy identifiers carried in the `p=` field of tel.aix payloads.
  * One char so the whole payload fits MAX_MSG_LEN=60 with room to
- * spare. Match the dispatch in `sched_ai.c`. */
+ * spare. Match the dispatch in `sched_ai.c`. The publisher rejects
+ * any policy_id outside this set with a fail-open `?` marker — see
+ * admin_telemetry_record_ai_decision below for the rationale. */
 #define ADMIN_TEL_AI_POLICY_MLP    'm'
 #define ADMIN_TEL_AI_POLICY_PPO    'p'
 #define ADMIN_TEL_AI_POLICY_HAILO  'h'
+#define ADMIN_TEL_AI_POLICY_UNKNOWN '?'
 
 /*
  * Called from sched_ai.c's ai_assign_cpu_common() after each AI
@@ -252,6 +255,14 @@ void admin_telemetry_get_last_memory_payload_for_tests(char *out, size_t cap);
  * are dispatcher-rate (every yield point under COOP_PREEMPT), so a
  * stalled subscriber stalls every yield in the kernel. Mitigation:
  * keep telemetry subscriptions short-lived, same as for tel.evi/inf.
+ *
+ * WIRE-FORMAT GUARD: any `policy_id` outside the documented set
+ * ({MLP, PPO, HAILO}) is replaced with `'?'` (ADMIN_TEL_AI_POLICY_UNKNOWN)
+ * before publishing. Production callers always pass the documented
+ * constants; this defends against a future caller accidentally
+ * passing an invalid char (typo, new-policy collision) — control
+ * chars like `'\n'` would corrupt the per-line TCP framing in
+ * tcp_telemetry_server.
  */
 void admin_telemetry_record_ai_decision(char policy_id,
                                         uint8_t core_assignment,

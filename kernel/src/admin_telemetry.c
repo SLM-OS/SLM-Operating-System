@@ -556,6 +556,19 @@ void admin_telemetry_record_ai_decision(char policy_id,
     char payload[TELEMETRY_MAX_PAYLOAD];
     size_t pos = 0;
 
+    /* Wire-format guard. policy_id lands directly in the payload string
+     * which travels through msg_router → tcp_telemetry_server's
+     * newline-framed protocol; an out-of-set char (especially '\n' or
+     * '\0') would corrupt the per-line TCP framing seen by host
+     * consumers. Production callers all pass documented constants;
+     * fail-open with '?' so a future buggy caller is detectable in
+     * the wire stream rather than silently breaking it. */
+    if (policy_id != ADMIN_TEL_AI_POLICY_MLP   &&
+        policy_id != ADMIN_TEL_AI_POLICY_PPO   &&
+        policy_id != ADMIN_TEL_AI_POLICY_HAILO) {
+        policy_id = ADMIN_TEL_AI_POLICY_UNKNOWN;
+    }
+
     /* p=<one char>. Always present — the policy id is meaningful in
      * both success and fallback cases (which AI policy was active
      * when the decision was attempted). */
