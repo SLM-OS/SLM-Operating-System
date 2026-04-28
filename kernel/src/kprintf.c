@@ -470,10 +470,32 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
              * without -mgeneral-regs-only so it can do real `double`
              * arithmetic. We pass our va_list by pointer and let it
              * pull the FP arg off the variadic ABI's FP slot —
-             * kprintf.c itself never references `double`. */
+             * kprintf.c itself never references `double`.
+             *
+             * `arg_is_64bit` is parsed from the `l` / `ll` / `z`
+             * length modifiers above; for the float specifiers C99
+             * defines `L` (long double) and `l` is meaningless. Our
+             * helper always reads `double`, so any `l`/`ll`/`z`
+             * modifier on a float specifier is a no-op and we
+             * deliberately drop the flag. `L` (long double) is
+             * NOT supported and would silently format as double —
+             * acceptable for our use because the kernel never
+             * passes long double anyway, but worth flagging
+             * explicitly so a future caller doesn't assume it
+             * works. */
             (void)arg_is_64bit;
+            /* `va_list` is a struct on AArch64 but an array of one
+             * `__va_list_tag` on x86-64 (System V AMD64 ABI). The
+             * address-of an array yields `T(*)[1]`, which is not the
+             * same type as `va_list *` (= `T**`) under -Werror=
+             * incompatible-pointer-types even though the underlying
+             * pointee is identical. Casting silences the warning
+             * without changing semantics: dereferencing the array-
+             * pointer gets us back to the same `va_list` storage
+             * the caller's `args` refers to. */
             kprintf_float_emit(out, precision, *fmt,
-                               width, left_justify, zero_pad, &args);
+                               width, left_justify, zero_pad,
+                               (va_list *)&args);
             break;
 
         case '%':

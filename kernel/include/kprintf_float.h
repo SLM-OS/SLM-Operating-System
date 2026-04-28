@@ -57,4 +57,47 @@ size_t kprintf_float_test_format_bits(char *buf, size_t bufsize,
                                       uint64_t bits, int precision,
                                       char conv);
 
+/*
+ * Test-only: same as `kprintf_float_test_format_bits` but exercises
+ * the width / left-justify / zero-pad branches of `kprintf_float_emit`
+ * (the rest of the test seam bypasses `kprintf_float_emit` entirely
+ * and goes straight to `fmt_double_into_buf`). Routes through a
+ * buffer-backed `fmt_output` internally so the same `_value`-shaped
+ * helper that the real emit path uses is exercised by `make test`.
+ *
+ * Output is NUL-terminated up to `bufsize - 1` characters; the
+ * return value is the unclamped character count (matches snprintf
+ * semantics).
+ */
+size_t kprintf_float_test_format_bits_padded(char *buf, size_t bufsize,
+                                             uint64_t bits, int precision,
+                                             char conv, int width,
+                                             int left_justify, int zero_pad);
+
+/*
+ * Test-only: end-to-end exercise of the va_list-by-pointer
+ * crossing from `kprintf.c` (`-mgeneral-regs-only`) into this
+ * FP-enabled TU. Builds a runtime "%.Nf" (or "%g" / "%e")
+ * format string and calls `snprintf` (the lua_stubs.c wrapper,
+ * which is FP-enabled and so its `va_start` correctly saves
+ * FP arg registers) with the IEEE-754-decoded `bits` as a
+ * literal `double`. The wrapper forwards into `uart_vsnprintf`
+ * → `fmt_vprintf` → case 'f' → `kprintf_float_emit(va_list*)`,
+ * which is the same chain Lua's `string.format("%.4f", x)`
+ * exercises in production.
+ *
+ * The bit-pattern interface keeps callers under the kernel-side
+ * `-mgeneral-regs-only` flag while still exercising the real
+ * `va_arg(*ap, double)` path inside `kprintf_float_emit`. A
+ * regression in GCC's variadic FP spill behaviour or in our
+ * `(va_list *)&args` cast would surface here when the standalone
+ * `_format_bits` tests would still pass.
+ *
+ * Note: name kept as `_uart_snprintf` for backward compatibility
+ * even though the implementation now goes through `snprintf`.
+ */
+size_t kprintf_float_test_e2e_uart_snprintf(char *buf, size_t bufsize,
+                                            uint64_t bits, int precision,
+                                            char conv);
+
 #endif /* KPRINTF_FLOAT_H */

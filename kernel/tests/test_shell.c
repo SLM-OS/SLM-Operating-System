@@ -3273,7 +3273,17 @@ static void test_kprintf_mixed(void)
 
 #include "kprintf_float.h"
 
-/* Common IEEE-754 bit patterns. Each comment shows the value. */
+/* Common IEEE-754 bit patterns. Each comment shows the value.
+ *
+ * To derive a new constant, use:
+ *
+ *     python3 -c "import struct; print(hex(struct.unpack('>Q', struct.pack('>d', 1.5))[0]))"
+ *
+ * which gives 0x3ff8000000000000 for 1.5. The result fits straight
+ * into a `0x...ULL` literal here. (Avoid printf-roundtripping —
+ * different libc versions disagree on the exact rounding of some
+ * decimal-literal-to-double conversions, and we want bit-exact
+ * pinning across all platforms.) */
 #define DBL_BITS_0_0          0x0000000000000000ULL  /* +0.0          */
 #define DBL_BITS_1_0          0x3FF0000000000000ULL  /* 1.0           */
 #define DBL_BITS_1_5          0x3FF8000000000000ULL  /* 1.5           */
@@ -3367,6 +3377,94 @@ static void test_kprintf_g_format(void)
     /* zero stays as "0", not "0.000000". */
     kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_0_0, -1, 'g');
     TEST_ASSERT_EQUAL_STRING("0", buf);
+}
+
+/*
+ * Width / left-justify / zero-pad branches of kprintf_float_emit.
+ * These bypass the va_list path but exercise the bespoke padding
+ * logic at kprintf_float.c:emit_value (sign-then-zeros for negative
+ * numbers, space-pad for non-finite, left-justify with trailing
+ * spaces).
+ */
+static void test_kprintf_float_padded_zero_pad_negative(void)
+{
+    /* Negative number with zero-pad: sign should land first, then
+     * the zeros, then digits. Width 10 — "-3.14" is 5 chars, pad 5. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_NEG_3_14, 2, 'f',
+                                          /*width=*/10, /*lj=*/0, /*zp=*/1);
+    TEST_ASSERT_EQUAL_STRING("-000003.14", buf);
+}
+
+static void test_kprintf_float_padded_left_justify(void)
+{
+    /* Left-justify: digits first, then trailing spaces. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_3_14, 2, 'f',
+                                          /*width=*/10, /*lj=*/1, /*zp=*/0);
+    TEST_ASSERT_EQUAL_STRING("3.14      ", buf);
+}
+
+static void test_kprintf_float_padded_inf_uses_space_not_zero(void)
+{
+    /* glibc / musl space-pad nan / inf even when zero-pad is set —
+     * "0000000inf" is more confusing than informative. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_POS_INF, -1, 'f',
+                                          /*width=*/10, /*lj=*/0, /*zp=*/1);
+    TEST_ASSERT_EQUAL_STRING("       inf", buf);
+}
+
+static void test_kprintf_float_padded_neg_inf_uses_space_not_zero(void)
+{
+    /* Negative inf with zero-pad: same — space-pad, sign stays
+     * leading, no zeros emitted. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_NEG_INF, -1, 'f',
+                                          /*width=*/10, /*lj=*/0, /*zp=*/1);
+    TEST_ASSERT_EQUAL_STRING("      -inf", buf);
+}
+
+static void test_kprintf_float_padded_nan_uses_space_not_zero(void)
+{
+    /* NaN under zero-pad: no '0' prefix. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_NAN, -1, 'f',
+                                          /*width=*/10, /*lj=*/0, /*zp=*/1);
+    TEST_ASSERT_EQUAL_STRING("       nan", buf);
+}
+
+/*
+ * End-to-end test exercising the va_list crossing between
+ * kprintf.c (-mgeneral-regs-only) and kprintf_float.c (FP-enabled).
+ * The standalone `_format_bits` tests bypass the va_list path; this
+ * one routes through the real `uart_snprintf` → `fmt_vprintf` →
+ * case 'f' → `kprintf_float_emit(va_list*)` chain so a regression
+ * in the `(va_list *)&args` cast or in GCC's FP arg spilling under
+ * `-mgeneral-regs-only` would surface here.
+ */
+static void test_kprintf_float_e2e_va_list_crossing(void)
+{
+    char buf[64];
+    /* %.4f of pi-approx, identical to a real Lua-driven format. */
+    kprintf_float_test_e2e_uart_snprintf(buf, sizeof(buf),
+                                         DBL_BITS_PI_APPROX, 4, 'f');
+    TEST_ASSERT_EQUAL_STRING("3.1416", buf);
+    /* %g of 1.5 — exercises the trim path through the va_list call. */
+    kprintf_float_test_e2e_uart_snprintf(buf, sizeof(buf),
+                                         DBL_BITS_1_5, -1, 'g');
+    TEST_ASSERT_EQUAL_STRING("1.5", buf);
+    /* %e of 12345 — verifies the post-emit advance position too;
+     * if the va_list weren't being advanced correctly, follow-on
+     * args in real callers would silently misalign. */
+    kprintf_float_test_e2e_uart_snprintf(buf, sizeof(buf),
+                                         DBL_BITS_12345, -1, 'e');
+    TEST_ASSERT_EQUAL_STRING("1.234500e+04", buf);
 }
 
 /* ============================================================================
@@ -3883,6 +3981,15 @@ int test_suite_shell(void)
     RUN_TEST(test_kprintf_float_specials);
     RUN_TEST(test_kprintf_scientific);
     RUN_TEST(test_kprintf_g_format);
+
+    /* kprintf_float_emit padding branches + va_list crossing
+     * (review #554 round-1 follow-ups). */
+    RUN_TEST(test_kprintf_float_padded_zero_pad_negative);
+    RUN_TEST(test_kprintf_float_padded_left_justify);
+    RUN_TEST(test_kprintf_float_padded_inf_uses_space_not_zero);
+    RUN_TEST(test_kprintf_float_padded_neg_inf_uses_space_not_zero);
+    RUN_TEST(test_kprintf_float_padded_nan_uses_space_not_zero);
+    RUN_TEST(test_kprintf_float_e2e_va_list_crossing);
 
     return UNITY_END();
 }

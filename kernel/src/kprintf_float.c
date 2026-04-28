@@ -65,6 +65,30 @@ static int classify_double(double v, int *is_neg)
 
 /* Powers of 10 up to MAX_FLOAT_PREC, indexed by precision. */
 #define MAX_FLOAT_PREC 17
+
+/* Cap on `v` for the %f path. Above this we hand off to scientific
+ * to avoid overflowing the uint64 cast: UINT64_MAX ≈ 1.844e19, and
+ * `v * scale_d + 0.5` in fmt_fixed_into_buf needs headroom for the
+ * rounding bump and the precision multiplier. 1e18 leaves ~18× of
+ * margin, easily safe. */
+#define FIXED_PATH_MAX_VALUE 1e18
+
+/* Cap on `scaled_d = v * scale_d + 0.5` post-multiply, before the
+ * uint64 cast. Same UINT64_MAX rationale as above; this catches the
+ * narrow case where v itself is below FIXED_PATH_MAX_VALUE but the
+ * precision multiplier pushes the product past UINT64_MAX. */
+#define SCALED_CAST_LIMIT    1.8e19
+
+/* Required size for the `tmp[]` buffer that unsigned_to_decimal
+ * writes into. The helper writes a trailing NUL at offset 23 and
+ * fills backward, so the buffer MUST be ≥ 24 bytes; a smaller
+ * buffer would overflow the local and corrupt adjacent stack
+ * state. (uint64 max is 20 decimal digits + NUL + a few bytes of
+ * slack, so 24 is the minimum that fits all paths.) The same
+ * rule applies to every tmp[] in this file — both fmt_fixed and
+ * fmt_sci helpers reuse the same constant. */
+#define UNSIGNED_TO_DECIMAL_BUF_SIZE 24
+
 static const double k_pow10[MAX_FLOAT_PREC + 1] = {
     1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,
     1e9,  1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17,
@@ -99,7 +123,13 @@ static int fmt_sci_into_buf(char *buf, size_t bufsize, double v,
 
 /* Append a non-negative finite double in fixed-point ("%f") form to
  * `buf`. Returns characters written, not including any trailing NUL.
- * Caller has already emitted any sign character. */
+ * Caller has already emitted any sign character.
+ *
+ * Recursion bound: this function may tail-call fmt_sci_into_buf as
+ * an overflow fallback, and fmt_sci_into_buf calls back into us on
+ * a normalized value in [1, 10). Since the normalized value is far
+ * below FIXED_PATH_MAX_VALUE, the second entry never re-triggers
+ * the fallback — recursion depth is bounded at exactly 1. */
 static int fmt_fixed_into_buf(char *buf, size_t bufsize, double v,
                               int precision)
 {
@@ -107,16 +137,16 @@ static int fmt_fixed_into_buf(char *buf, size_t bufsize, double v,
     if (precision > MAX_FLOAT_PREC) precision = MAX_FLOAT_PREC;
     if (bufsize == 0) return 0;
 
-    /* Cap before the cast to uint64_t. UINT64_MAX ≈ 1.84e19; leave
-     * headroom for the +0.5 rounding bump and the precision scale.
-     * Anything past 1e18 hands off to scientific instead. */
-    if (v >= 1e18) {
+    /* Cap before the cast to uint64_t. See FIXED_PATH_MAX_VALUE
+     * comment near the top of the file for the UINT64_MAX
+     * derivation. */
+    if (v >= FIXED_PATH_MAX_VALUE) {
         return fmt_sci_into_buf(buf, bufsize, v, precision, 'e');
     }
 
     double scale_d  = k_pow10[precision];
     double scaled_d = v * scale_d + 0.5;
-    if (scaled_d >= 1.8e19) {
+    if (scaled_d >= SCALED_CAST_LIMIT) {
         return fmt_sci_into_buf(buf, bufsize, v, precision, 'e');
     }
     uint64_t scaled    = (uint64_t)scaled_d;
@@ -124,7 +154,7 @@ static int fmt_fixed_into_buf(char *buf, size_t bufsize, double v,
     uint64_t int_part  = scale_u ? (scaled / scale_u) : scaled;
     uint64_t frac_part = scale_u ? (scaled % scale_u) : 0u;
 
-    char tmp[24];
+    char tmp[UNSIGNED_TO_DECIMAL_BUF_SIZE];
     int int_len = unsigned_to_decimal(tmp, int_part);
 
     int written = 0;
@@ -170,11 +200,10 @@ static int fmt_sci_into_buf(char *buf, size_t bufsize, double v,
     } else {
         if (written < (int)bufsize - 1) buf[written++] = '+';
     }
-    /* Must be at least 24 bytes — unsigned_to_decimal writes the
-     * trailing NUL at buf[23] and walks backward from there. A
-     * smaller tmp would silently corrupt the caller's saved x30
-     * on the stack, breaking the return path. */
-    char tmp[24];
+    /* See UNSIGNED_TO_DECIMAL_BUF_SIZE comment at the top of the
+     * file for the size requirement. Same rule as the tmp[] in
+     * fmt_fixed_into_buf above. */
+    char tmp[UNSIGNED_TO_DECIMAL_BUF_SIZE];
     int elen = unsigned_to_decimal(tmp, (uint64_t)exp);
     if (elen < 2 && written < (int)bufsize - 1) {
         buf[written++] = '0';
@@ -290,23 +319,49 @@ static void emit_padding(struct fmt_output *out, char pad_char, int count)
     }
 }
 
-void kprintf_float_emit(struct fmt_output *out,
-                        int precision, char conv,
-                        int width, int left_justify, int zero_pad,
-                        va_list *ap)
+/* Returns true if the formatted output is one of nan / inf
+ * (possibly with a leading '-' sign). C99 6.3.1.7 leaves zero-pad
+ * behaviour with these values implementation-defined; we follow
+ * glibc / musl and force space-pad to avoid the "0000000inf" form
+ * which is more confusing than informative. The detection scans
+ * the post-sign character — buf[0] for unsigned, buf[1] when the
+ * formatter has emitted a leading '-'. */
+static bool fmt_double_is_non_finite(const char *buf, int len)
 {
-    double v = va_arg(*ap, double);
+    int i = (len > 0 && buf[0] == '-') ? 1 : 0;
+    if (i >= len) return false;
+    char c = buf[i];
+    return c == 'n' || c == 'N' || c == 'i' || c == 'I';
+}
+
+/* Format-and-emit a known `double` to `out`, with width / pad / left-
+ * justify handling. Split out from kprintf_float_emit so the test
+ * seam (kprintf_float_test_format_bits_padded) can drive the same
+ * padding code without having to fake a va_list with a specific
+ * double in it — which is awkward because va_list internal layout is
+ * implementation-defined. */
+static void kprintf_float_emit_value(struct fmt_output *out,
+                                     double v,
+                                     int precision, char conv,
+                                     int width, int left_justify,
+                                     int zero_pad)
+{
     char buf[48];
     int len = fmt_double_into_buf(buf, sizeof(buf), v, precision, conv);
     int pad = width > len ? width - len : 0;
 
+    /* Don't zero-pad nan / inf — the "0000000inf" form glibc /
+     * musl avoid is more confusing than informative. Sign-then-
+     * zeros only makes sense for numeric output. */
+    int eff_zero_pad = zero_pad && !fmt_double_is_non_finite(buf, len);
+
     if (!left_justify && pad > 0) {
-        if (zero_pad && len > 0 && buf[0] == '-') {
+        if (eff_zero_pad && len > 0 && buf[0] == '-') {
             out->putc(out, '-');
             emit_padding(out, '0', pad);
             for (int i = 1; i < len; i++) out->putc(out, buf[i]);
         } else {
-            emit_padding(out, zero_pad ? '0' : ' ', pad);
+            emit_padding(out, eff_zero_pad ? '0' : ' ', pad);
             for (int i = 0; i < len; i++) out->putc(out, buf[i]);
         }
     } else {
@@ -317,6 +372,16 @@ void kprintf_float_emit(struct fmt_output *out,
     }
 }
 
+void kprintf_float_emit(struct fmt_output *out,
+                        int precision, char conv,
+                        int width, int left_justify, int zero_pad,
+                        va_list *ap)
+{
+    double v = va_arg(*ap, double);
+    kprintf_float_emit_value(out, v, precision, conv,
+                             width, left_justify, zero_pad);
+}
+
 size_t kprintf_float_test_format_bits(char *buf, size_t bufsize,
                                       uint64_t bits, int precision,
                                       char conv)
@@ -325,4 +390,92 @@ size_t kprintf_float_test_format_bits(char *buf, size_t bufsize,
     union { double d; uint64_t u; } cv;
     cv.u = bits;
     return (size_t)fmt_double_into_buf(buf, bufsize, cv.d, precision, conv);
+}
+
+/* Tiny buffer-backed fmt_output for the padded-test seam. Mirrors
+ * the buf_out_putc behaviour from kprintf.c — writes one char at a
+ * time to a caller-supplied buffer, leaving room for a trailing NUL. */
+static void test_buf_putc(struct fmt_output *out, char c)
+{
+    out->count++;
+    if (out->pos > 1) {
+        *out->buf++ = c;
+        out->pos--;
+    }
+}
+
+size_t kprintf_float_test_format_bits_padded(char *buf, size_t bufsize,
+                                             uint64_t bits, int precision,
+                                             char conv, int width,
+                                             int left_justify, int zero_pad)
+{
+    if (!buf || bufsize == 0) return 0;
+    union { double d; uint64_t u; } cv;
+    cv.u = bits;
+    char *cursor = buf;
+    struct fmt_output out;
+    out.putc = test_buf_putc;
+    out.buf = cursor;
+    out.pos = bufsize;
+    out.size = bufsize;
+    out.count = 0;
+    out.crlf = 0;
+    kprintf_float_emit_value(&out, cv.d, precision, conv,
+                             width, left_justify, zero_pad);
+    /* Null-terminate. test_buf_putc reserves the last byte for the
+     * NUL by checking pos > 1 before writing. */
+    if (bufsize > 0) {
+        size_t written = (size_t)out.count;
+        if (written >= bufsize) written = bufsize - 1;
+        buf[written] = '\0';
+    }
+    return (size_t)out.count;
+}
+
+/* End-to-end test seam (#554 review warning): exercise the va_list
+ * crossing from this FP-enabled TU into `kprintf.c`'s `fmt_vprintf`
+ * (which is `-mgeneral-regs-only`) and back into `kprintf_float_emit`
+ * here. The literal `double` pulled off the variadic ABI's FP slot
+ * is what `kprintf_float_emit` reads via `va_arg(*ap, double)`.
+ * Without this test, a future GCC change to FP arg spilling could
+ * silently regress real Lua format calls while every other test
+ * stays green.
+ *
+ * Routes through `snprintf` (the lua_stubs.c wrapper, FP-enabled)
+ * rather than `uart_snprintf` (which lives in kprintf.c and is
+ * compiled `-mgeneral-regs-only`). Reason: `va_start` in a
+ * variadic function compiled with `-mgeneral-regs-only` doesn't
+ * reliably save FP arg registers, so calling `uart_snprintf` with
+ * an FP arg from any FP-enabled TU silently drops the value. The
+ * production path (Lua `string.format("%.4f", x)`) goes through
+ * `snprintf` — the wrapper does `va_start` in an FP-enabled TU and
+ * forwards the populated `va_list` into `uart_vsnprintf`, which
+ * passes it through to `fmt_vprintf` and finally to us. This test
+ * mirrors exactly that chain.
+ *
+ * `snprintf` is declared inline so we don't drag the lua_stubs
+ * header up; the prototype matches the C standard and lua_stubs.c
+ * exports the symbol. */
+extern int snprintf(char *str, size_t size, const char *fmt, ...);
+
+size_t kprintf_float_test_e2e_uart_snprintf(char *buf, size_t bufsize,
+                                            uint64_t bits, int precision,
+                                            char conv)
+{
+    if (!buf || bufsize == 0) return 0;
+    union { double d; uint64_t u; } cv;
+    cv.u = bits;
+
+    /* Build "%.Nf" / "%g" / "%e" etc. */
+    char fmt[16];
+    int n;
+    if (precision < 0) {
+        n = snprintf(fmt, sizeof(fmt), "%%%c", conv);
+    } else {
+        n = snprintf(fmt, sizeof(fmt), "%%.%d%c", precision, conv);
+    }
+    if (n <= 0 || n >= (int)sizeof(fmt)) return 0;
+
+    int written = snprintf(buf, bufsize, fmt, cv.d);
+    return written < 0 ? 0 : (size_t)written;
 }

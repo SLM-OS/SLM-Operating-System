@@ -1233,9 +1233,14 @@ target_compile_definitions(lua PRIVATE
 #
 # Function-like macro defines aren't supported by
 # target_compile_definitions (CMake silently strips the parens), so
-# pass the -D directly via target_compile_options.
+# pass the -D directly via target_compile_options. The right-hand
+# side is the character literal `'.'` (C 6.4.4.4 — an integer
+# constant of type int), kept readable instead of the equivalent
+# decimal 46. CMake list-mode element passes the string verbatim
+# without shell interpretation, so the single quotes survive into
+# the gcc command line.
 target_compile_options(lua PRIVATE
-    "-Dlua_getlocaledecpoint()=46"
+    "-Dlua_getlocaledecpoint()='.'"
 )
 
 # Link with Lua library
