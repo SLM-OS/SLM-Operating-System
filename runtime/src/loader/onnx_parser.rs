@@ -106,6 +106,15 @@ impl Name {
         let mut name = Self::EMPTY;
         let copy_len = if src.len() < NAME_LEN { src.len() } else { NAME_LEN - 1 };
         name.bytes[..copy_len].copy_from_slice(&src[..copy_len]);
+        // Explicitly NUL-terminate the byte after the copy. Today this
+        // is redundant because `EMPTY` zero-fills `bytes`, but if a
+        // future change ever shortens `EMPTY` or reuses an existing
+        // `Name` instance the trailing byte could carry stale data
+        // through C string conversions. NAME_LEN > 0 is statically
+        // implied by `bytes: [u8; NAME_LEN]`.
+        if copy_len < NAME_LEN {
+            name.bytes[copy_len] = 0;
+        }
         name.len = copy_len as u8;
         name
     }
@@ -329,13 +338,22 @@ impl<'a> ParsedOnnx<'a> {
     ///
     /// FP16 tensors are converted to FP32 at load time, so they need
     /// twice the storage of their on-disk representation.
+    ///
+    /// Int64 tensors that come in via the protobuf `int64_data` field
+    /// are stored as varints on disk (1-10 bytes each) but decoded to
+    /// raw little-endian 8-byte values at load time. Budget the
+    /// decoded size (num_elements * 8) so the loader's per-tensor
+    /// bounds check sees a budget that matches the actual write.
     pub fn total_weight_size_expanded(&self) -> usize {
         let mut total = 0usize;
         for i in 0..self.initializer_count {
             let t = &self.initializers[i];
             if t.data_type == OnnxDataType::Float16 {
                 // FP16 weights will be expanded to FP32 (2 bytes → 4 bytes)
-                total = total.saturating_add(t.num_elements() * 4);
+                total = total.saturating_add(t.num_elements().saturating_mul(4));
+            } else if t.data_type == OnnxDataType::Int64 && t.int64_data.is_some() {
+                // Varint-packed int64 expands to 8 bytes per element.
+                total = total.saturating_add(t.num_elements().saturating_mul(8));
             } else {
                 total = total.saturating_add(t.data_size());
             }

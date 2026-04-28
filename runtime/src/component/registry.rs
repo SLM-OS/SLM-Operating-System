@@ -73,6 +73,26 @@ fn unlock() {
     REGISTRY_LOCK.store(false, Ordering::Release);
 }
 
+/// RAII guard for REGISTRY_LOCK. Used by paths with multiple early
+/// returns where hand-rolled `lock()/unlock()` is fragile (an edit
+/// that introduces a new early-return path easily forgets the
+/// matching unlock). Other functions in this file still use the
+/// explicit pair where the control flow is straight-line.
+struct SpinGuard;
+
+impl SpinGuard {
+    fn new() -> Self {
+        lock();
+        SpinGuard
+    }
+}
+
+impl Drop for SpinGuard {
+    fn drop(&mut self) {
+        unlock();
+    }
+}
+
 /// Initialize the component registry.
 pub fn init() {
     lock();
@@ -171,11 +191,12 @@ pub fn get_by_index(index: usize) -> Option<ComponentInfo> {
 
 /// Find a component by name.
 ///
-/// Returns the slot index if found.
+/// Returns the slot index if found. Uses RAII SpinGuard so the
+/// early-return path can't leak the registry lock.
 pub fn find_by_name(name: &[u8]) -> Option<usize> {
-    lock();
-    // SAFETY: We hold the lock, SyncUnsafeCell guarantees no other access
-    let result = unsafe {
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to REGISTRY.
+    unsafe {
         let reg = &*REGISTRY.get();
         for (i, slot) in reg.components.iter().enumerate() {
             if slot.is_active() {
@@ -186,17 +207,12 @@ pub fn find_by_name(name: &[u8]) -> Option<usize> {
                 let slot_name = &slot.name[..slot_name_len];
 
                 if slot_name.len() == name.len() && slot_name == name {
-                    unlock();
                     return Some(i);
                 }
             }
         }
         None
-    };
-    if result.is_none() {
-        unlock();
     }
-    result
 }
 
 /// Set component state.

@@ -88,6 +88,16 @@ impl Mailbox {
     /// then priority (Release), then ready=1 (Release) so the receiver
     /// sees consistent data when it reads ready=1 (Acquire).
     ///
+    /// IMPORTANT (memory ordering invariant): the `data` and `topic`
+    /// arrays are written with plain (non-atomic) stores, but they are
+    /// published to the receiver via the Release on `ready` below.
+    /// The receiver's Acquire load on `ready` carries the prior plain
+    /// stores into its observation, so this is sound as long as
+    /// `ready.store(1, Release)` remains the single publication point.
+    /// If a future change relaxes that store to `Relaxed`, the data
+    /// will become a true data race and the receiver will see torn /
+    /// stale bytes. Keep ready, priority, and ack as Release stores.
+    ///
     /// # Safety
     /// Caller promises `topic_name` and `data` are NUL-terminated within
     /// `TOPIC_NAME_LEN` and `MAX_MSG_LEN` bytes respectively.

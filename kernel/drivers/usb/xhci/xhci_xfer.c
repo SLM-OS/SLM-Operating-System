@@ -35,6 +35,7 @@
 #include "xhci_ring.h"
 #include "xhci_trb.h"
 #include "xhci_trb_build.h"
+#include "xhci_xfer_helpers.h"
 #include "xhci_ctx.h"
 #include "usb.h"
 #include "debug.h"
@@ -67,6 +68,17 @@ struct xhci_urb_slot {
 
 static struct xhci_urb_slot xhci_urbs[XHCI_MAX_INFLIGHT_URBS];
 /*
+ * Serialise the URB slot pool. The submission path runs from task
+ * context and the completion path runs from xhci_hcd_poll (which is
+ * driven from net_poll / usb_core_poll). Even on a single CPU, an IRQ
+ * delivered between an `if (!in_use)` check and the matching `in_use =
+ * true` store could cause the same slot to be allocated twice. Use the
+ * IRQ-disable variant so the pool is safe against future ISR-driven
+ * completion delivery on Jetson.
+ */
+static spinlock_t xhci_urb_slot_lock = SPINLOCK_INIT;
+
+/*
  * Bring-up left very detailed EP0/TRB logging enabled by default.
  * Keep the hooks available for future controller debugging, but make the
  * working Jetson success path quiet unless we explicitly re-enable them.
@@ -80,32 +92,41 @@ struct xhci_ctrl_diag xhci_last_ctrl_diag;
 
 static struct xhci_urb_slot *xhci_urb_slot_alloc(void)
 {
+    irq_flags_t flags = spin_lock_irqsave(&xhci_urb_slot_lock);
     for (unsigned i = 0; i < XHCI_MAX_INFLIGHT_URBS; i++) {
         if (!xhci_urbs[i].in_use) {
             xhci_urbs[i].in_use = true;
+            spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
             return &xhci_urbs[i];
         }
     }
+    spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
     return NULL;
 }
 
 static void xhci_urb_slot_free(struct xhci_urb_slot *s)
 {
     if (s == NULL) return;
+    irq_flags_t flags = spin_lock_irqsave(&xhci_urb_slot_lock);
     memset(s, 0, sizeof(*s));
+    spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
 }
 
 static struct xhci_urb_slot *xhci_urb_slot_find_by_trb(uintptr_t trb_phys)
 {
+    irq_flags_t flags = spin_lock_irqsave(&xhci_urb_slot_lock);
     for (unsigned i = 0; i < XHCI_MAX_INFLIGHT_URBS; i++) {
         if (!xhci_urbs[i].in_use)
             continue;
         if (xhci_urbs[i].first_trb_phys <= trb_phys &&
             trb_phys <= xhci_urbs[i].last_trb_phys &&
             ((trb_phys - xhci_urbs[i].first_trb_phys) %
-             sizeof(struct xhci_trb) == 0))
+             sizeof(struct xhci_trb) == 0)) {
+            spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
             return &xhci_urbs[i];
+        }
     }
+    spin_unlock_irqrestore(&xhci_urb_slot_lock, flags);
     return NULL;
 }
 
@@ -807,19 +828,12 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
 
     struct usb_urb *urb = slot->urb;
     urb->status        = xhci_cc_to_urb_status(cc);
-    /* The transfer-event residual reports the byte count not transferred
-     * for the TRB that completed. For bulk transfers that is the full
-     * payload. For control transfers the IOC event may arrive on the Data
-     * Stage (short packet/error) or on the Status Stage (success). In both
-     * cases the requested payload is slot->requested_len, so the same
-     * "requested - residual" rule gives the right byte count: short
-     * control-IN data completions surface the bytes received, while a
-     * successful Status Stage with residual=0 reports the full request
-     * length. */
-    uint32_t actual = (residual <= slot->requested_len)
-                      ? (slot->requested_len - residual)
-                      : 0U;
-    urb->actual_length = actual;
+    /* "requested - residual" handles both Status-Stage success and
+     * Data-Stage short-packet events with one formula. See
+     * xhci_xfer_helpers.h for the full rationale and the #316
+     * regression-test pin. */
+    urb->actual_length = xhci_xfer_actual_from_residual(slot->requested_len,
+                                                        residual);
 
     if (urb->transfer_type == USB_XFER_CONTROL && cc != XHCI_CC_SUCCESS)
         xhci_log_control_urb("event", urb, slot, trb_phys, cc, residual);

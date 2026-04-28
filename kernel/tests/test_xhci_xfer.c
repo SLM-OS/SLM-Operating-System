@@ -12,6 +12,7 @@
 #include "test_harness.h"
 #include "../drivers/usb/xhci/xhci_trb.h"
 #include "../drivers/usb/xhci/xhci_trb_build.h"
+#include "../drivers/usb/xhci/xhci_xfer_helpers.h"
 #include "../include/usb.h"
 
 #include <stdint.h>
@@ -220,6 +221,69 @@ static void test_builders_zero_scratch(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* actual_length-from-residual formula (#316)                                  */
+/*                                                                            */
+/* Pins the post-Transfer-Event accounting rule that turned a successful      */
+/* short-packet control-IN from "actual_length=requested" (over-report) into  */
+/* "actual_length = requested - residual". Lives in xhci_xfer_helpers.h so    */
+/* the formula is reachable from the host test build (the surrounding event   */
+/* dispatcher in xhci_xfer.c is gated under PLATFORM_JETSON_ORIN_NANO).       */
+/* -------------------------------------------------------------------------- */
+
+static void test_actual_from_residual_status_stage_success(void)
+{
+    /* Status Stage success: TRB carries no payload so residual=0, and
+     * actual_length must equal the originally-requested wLength. */
+    TEST_ASSERT_EQUAL_UINT32(64U,
+        xhci_xfer_actual_from_residual(64U, 0U));
+    TEST_ASSERT_EQUAL_UINT32(18U,
+        xhci_xfer_actual_from_residual(18U, 0U));
+}
+
+static void test_actual_from_residual_data_stage_short_packet(void)
+{
+    /* The original #316 bug: wLength=64, device returns 18 bytes (e.g.
+     * truncated GET_DESCRIPTOR), Data Stage SHORT_PACKET event arrives
+     * with residual = 64 - 18 = 46. Pre-fix code reported 64; post-fix
+     * must report 18. */
+    TEST_ASSERT_EQUAL_UINT32(18U,
+        xhci_xfer_actual_from_residual(64U, 46U));
+    /* String-descriptor-style: requested 255, device returned 24. */
+    TEST_ASSERT_EQUAL_UINT32(24U,
+        xhci_xfer_actual_from_residual(255U, 231U));
+}
+
+static void test_actual_from_residual_zero_received(void)
+{
+    /* Full-short: device returned no payload at all. residual ==
+     * requested → actual=0 (still distinguishable from "completed
+     * successfully with N bytes" because urb->status carries the cc). */
+    TEST_ASSERT_EQUAL_UINT32(0U,
+        xhci_xfer_actual_from_residual(64U, 64U));
+}
+
+static void test_actual_from_residual_clamps_overflow(void)
+{
+    /* Defensive: a malformed event whose residual exceeds the request
+     * (hardware bug or a stale event matched against a recycled slot)
+     * must clamp to 0 rather than wrap into a multi-GB unsigned value. */
+    TEST_ASSERT_EQUAL_UINT32(0U,
+        xhci_xfer_actual_from_residual(64U, 65U));
+    TEST_ASSERT_EQUAL_UINT32(0U,
+        xhci_xfer_actual_from_residual(0U, 1U));
+    TEST_ASSERT_EQUAL_UINT32(0U,
+        xhci_xfer_actual_from_residual(8U, 0xFFFFFFu));
+}
+
+static void test_actual_from_residual_zero_requested(void)
+{
+    /* Zero-length control transfer (e.g. SET_ADDRESS with no Data
+     * Stage): residual must also be 0 and actual must be 0. */
+    TEST_ASSERT_EQUAL_UINT32(0U,
+        xhci_xfer_actual_from_residual(0U, 0U));
+}
+
+/* -------------------------------------------------------------------------- */
 /* Suite entry                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -240,5 +304,10 @@ int test_suite_xhci_xfer(void)
     RUN_TEST(test_normal_64bit_address);
     RUN_TEST(test_normal_cycle_0);
     RUN_TEST(test_builders_zero_scratch);
+    RUN_TEST(test_actual_from_residual_status_stage_success);
+    RUN_TEST(test_actual_from_residual_data_stage_short_packet);
+    RUN_TEST(test_actual_from_residual_zero_received);
+    RUN_TEST(test_actual_from_residual_clamps_overflow);
+    RUN_TEST(test_actual_from_residual_zero_requested);
     return UnityEnd();
 }

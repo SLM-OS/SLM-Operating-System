@@ -153,7 +153,20 @@ impl RuntimeXGBoostModel {
     }
 
     fn eval_tree(&self, mut idx: usize, features: &BlockFeatures) -> f32 {
-        loop {
+        // Cap depth to detect cycles. Parse-time bounds-checks each
+        // child index against `node_count` but cannot detect a cycle
+        // (A→B→A) — and `eval_tree` runs in kernel context where a
+        // non-terminating loop on a malformed-but-checksum-valid blob
+        // would hang the runtime. Returning 0.0 on exhaustion
+        // produces a degraded prediction instead of a hang.
+        //
+        // 256 is a generous bound: realistic XGBoost trees rarely
+        // exceed depth 16-32, and 256 is well past any sensible
+        // production depth while still catching a malformed cyclic
+        // tree quickly (a 16k-node loop would otherwise burn 16k
+        // iterations per `predict`).
+        const MAX_TREE_DEPTH: usize = 256;
+        for _ in 0..MAX_TREE_DEPTH {
             let node = self.nodes[idx];
             if (node.flags & FLAG_LEAF) != 0 {
                 return node.value;
@@ -164,6 +177,7 @@ impl RuntimeXGBoostModel {
                 node.right_idx as usize
             };
         }
+        0.0_f32
     }
 }
 
@@ -200,4 +214,51 @@ pub fn build_test_payload_first_feature_split(threshold: f32, left: f32, right: 
     out.extend_from_slice(&right.to_le_bytes());
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PR-465 regression: a malformed-but-checksum-valid blob with a
+    /// cyclic tree (A→B→A) must not hang the kernel. The MAX_TREE_DEPTH
+    /// = 256 cap ensures `eval_tree` returns the 0.0 fallback after a
+    /// bounded number of iterations.
+    #[test]
+    fn eval_tree_breaks_cycle_with_fallback() {
+        // Build a 2-node graph by hand (skip parse_payload's
+        // child-bounds check — we want to inject a cycle).
+        let leaf_node = Node {
+            feature_idx: 0,
+            flags: FLAG_LEAF,
+            left_idx: 0,
+            right_idx: 0,
+            threshold: 0.0,
+            value: 1.0_f32,  // Non-zero leaf value to detect successful walk.
+        };
+        // node 0: branches to itself on both sides — guaranteed cycle.
+        let cyclic_node = Node {
+            feature_idx: 0,
+            flags: 0,            // Not a leaf.
+            left_idx: 0,
+            right_idx: 0,
+            threshold: 0.0,
+            value: 0.0,
+        };
+
+        // Sanity: a clean leaf returns its value.
+        let leaf_only = RuntimeXGBoostModel {
+            roots: alloc::vec![0u16],
+            nodes: alloc::vec![leaf_node],
+        };
+        let features: BlockFeatures = [0.0; 27];
+        assert_eq!(leaf_only.eval_tree(0, &features), 1.0);
+
+        // Cyclic tree returns the 0.0 fallback after MAX_TREE_DEPTH.
+        let cyclic = RuntimeXGBoostModel {
+            roots: alloc::vec![0u16],
+            nodes: alloc::vec![cyclic_node],
+        };
+        assert_eq!(cyclic.eval_tree(0, &features), 0.0);
+    }
 }

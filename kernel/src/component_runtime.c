@@ -690,18 +690,27 @@ struct direct_channel {
 };
 
 static struct direct_channel direct_channels[DIRECT_CHANNEL_MAX];
+static spinlock_t direct_channel_lock = SPINLOCK_INIT;
 
 int component_direct_channel_create(int sender_idx, int receiver_idx)
 {
+    /* Serialise slot allocation. Without the lock, two callers (e.g. Lua
+     * scripts on different CPUs) could both observe sender_idx == -1 for
+     * the same slot and overwrite each other's binding. */
+    irq_flags_t f = spin_lock_irqsave(&direct_channel_lock);
+
     for (int i = 0; i < DIRECT_CHANNEL_MAX; i++) {
         if (direct_channels[i].sender_idx == -1) {
             direct_channels[i].sender_idx = sender_idx;
             direct_channels[i].receiver_idx = receiver_idx;
             direct_channels[i].ready = 0;
             direct_channels[i].ack = 0;
+            spin_unlock_irqrestore(&direct_channel_lock, f);
             return i;
         }
     }
+
+    spin_unlock_irqrestore(&direct_channel_lock, f);
     return -1;  /* No free channels */
 }
 
