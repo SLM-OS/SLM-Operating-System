@@ -155,6 +155,12 @@ impl KvCache {
         let layer_base = layer.checked_mul(self.per_layer())?;
         let span = self.len.checked_mul(self.per_pos())?;
         let end = layer_base.checked_add(span)?;
+        // Guard against `len` having been mutated past `max_ctx` via
+        // the `pub len` field. Without this the indexed slice panics
+        // instead of returning `None` cleanly.
+        if end > self.k.len() {
+            return None;
+        }
         Some(&self.k[layer_base..end])
     }
 
@@ -167,6 +173,10 @@ impl KvCache {
         let layer_base = layer.checked_mul(self.per_layer())?;
         let span = self.len.checked_mul(self.per_pos())?;
         let end = layer_base.checked_add(span)?;
+        // See `k_view` for rationale on this `end > buf_len` guard.
+        if end > self.v.len() {
+            return None;
+        }
         Some(&self.v[layer_base..end])
     }
 
