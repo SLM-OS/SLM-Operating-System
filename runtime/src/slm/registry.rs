@@ -23,9 +23,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::kernel_ffi;
-use crate::mm;
 use crate::mm::model_loader::LoadError;
-use crate::mm::ModelHandle;
 use crate::slm::gguf::{
     q4_k_byte_size, ArchInfo, ArchKind, GgmlType, Gguf, GgufError, MetaValue,
 };
@@ -44,11 +42,14 @@ pub const SLM_ARCH_LEN: usize = 16;
 /// Maximum length of a model's user-facing name.
 pub const SLM_NAME_LEN: usize = 32;
 
-/// Reject GGUFs whose source-byte size exceeds 2 GB. Mirrors the
-/// shell-side cap (`docs/plans/slm-integration-plan.md` §M7) and the
-/// telemetry `source_bytes: u32` field. Anything above this is almost
-/// certainly a corrupted header field rather than a genuine model.
-pub const MAX_PLAUSIBLE_GGUF_BYTES: usize = 2 * 1024 * 1024 * 1024;
+/// 1 GiB ceiling on a single GGUF buffer. Matches the PMM buddy
+/// allocator's max order (18 = 256 K pages = 1 GiB on the Jetson
+/// kernel) — anything larger fails inside
+/// [`crate::kernel_ffi::alloc_pages`] regardless. Catching it at
+/// this gate gives a clearer error than the buddy walk's "no
+/// contiguous run". 1 GiB also covers the production demo target
+/// Qwen2.5-1.5B-Q4_K_M (~1.0 GB).
+pub const MAX_PLAUSIBLE_GGUF_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Snapshot of one tensor descriptor, owned by the registry slot.
 ///
@@ -87,18 +88,26 @@ pub struct LoadedSlm {
     /// "complexity" the shell can surface to the user.
     tensor_count: u32,
 
-    /// Owned copy of the entire GGUF byte buffer in the weight pool.
-    /// Held for the lifetime of this slot; freed in
-    /// [`unload_slm`]. Allocated via [`mm::alloc_weights`], which
-    /// returns a 2 MB-aligned block. The first
-    /// [`Self::weight_data_len`] bytes are valid; the rest is padding
-    /// up to the next 2 MB block boundary.
+    /// Owned copy of the entire GGUF byte buffer in PMM-allocated
+    /// pages.
     ///
-    /// `None` only in degenerate states (allocation failed during
-    /// load and the slot was never inserted) — once a slot is
-    /// occupied, this is always `Some`.
-    weight_block: Option<ModelHandle>,
-    /// Number of valid bytes inside [`Self::weight_block`].
+    /// Allocated directly via [`crate::kernel_ffi::alloc_pages`]
+    /// rather than [`mm::alloc_weights`]. The Phase-3 model_mem
+    /// allocator returns a fixed 2 MB single block regardless of
+    /// the requested size — too small for production GGUFs
+    /// (Qwen2.5-1.5B-Q4_K_M is ~1 GB). Multi-block model_mem
+    /// allocation is tracked separately as a Phase-3 enhancement;
+    /// the registry bypasses it via the PMM until that lands.
+    ///
+    /// Stored as `Option<NonNull<u8>>` so `unload_slm` can detect
+    /// the "not yet allocated" state explicitly. The first
+    /// [`Self::weight_data_len`] bytes are valid; the rest is
+    /// padding up to the rounded page count.
+    weight_pages: Option<core::ptr::NonNull<u8>>,
+    /// Number of 4 KB pages held by [`Self::weight_pages`]. Required
+    /// by [`crate::kernel_ffi::free_pages`] on unload.
+    weight_pages_count: u32,
+    /// Number of valid bytes inside [`Self::weight_pages`].
     weight_data_len: usize,
 
     /// Pre-built tokenizer for this model. Sessions reuse this via
@@ -111,7 +120,7 @@ pub struct LoadedSlm {
     tensors: Vec<OwnedTensorInfo>,
 
     /// File-absolute offset where the tensor-data section begins in
-    /// [`Self::weight_block`]. Adding a tensor's relative `offset`
+    /// [`Self::weight_pages`]. Adding a tensor's relative `offset`
     /// gives the absolute byte address of that tensor's data.
     tensor_data_start: usize,
 }
@@ -144,7 +153,7 @@ impl LoadedSlm {
 
     /// Borrow this tensor's raw bytes from the owned weight buffer.
     /// Returns `None` if the tensor is missing, the slot's
-    /// [`Self::weight_block`] isn't backed (degenerate state), or
+    /// [`Self::weight_pages`] isn't backed (degenerate state), or
     /// the computed byte range falls outside the buffer.
     pub fn tensor_bytes(&self, name: &str) -> Option<&[u8]> {
         let info = self.tensor_info(name)?;
@@ -166,6 +175,17 @@ impl LoadedSlm {
         self.weight_buffer()
     }
 
+    /// Resident byte cost of this slot, including page-rounding
+    /// padding. `slm status` aggregates this across slots so the
+    /// shell can show a "real" memory footprint rather than just
+    /// the on-disk source size — the bypass'd PMM allocation is
+    /// not visible to `model pools` (M9 follow-up #N could
+    /// surface it via the model-mem stats path too).
+    pub fn bytes_resident(&self) -> usize {
+        const PAGE_SIZE: usize = 4096;
+        (self.weight_pages_count as usize).saturating_mul(PAGE_SIZE)
+    }
+
     /// File-absolute offset where the tensor-data section begins.
     /// Useful for tests; callers usually prefer
     /// [`Self::tensor_bytes`].
@@ -174,20 +194,32 @@ impl LoadedSlm {
     }
 
     fn weight_buffer(&self) -> Option<&[u8]> {
-        let handle = self.weight_block.as_ref()?;
-        let ptr = mm::get_ptr(*handle)?;
-        if ptr.is_null() {
-            return None;
-        }
-        // SAFETY: the ModelHandle was returned by `mm::alloc_weights`
-        // and lives until `unload_slm` frees it. `weight_data_len`
-        // bytes were written by `load_slm` via `copy_nonoverlapping`
-        // and remain valid + initialized for the slot's lifetime.
-        // The slice is read-only and never mutated through this view.
-        let slice = unsafe { core::slice::from_raw_parts(ptr, self.weight_data_len) };
+        let ptr = self.weight_pages?;
+        // SAFETY: the NonNull was returned by
+        // `crate::kernel_ffi::alloc_pages(weight_pages_count)` and
+        // lives until `unload_slm` frees it. The first
+        // `weight_data_len` bytes were written by `load_slm` via
+        // `copy_nonoverlapping` and remain valid + initialized for
+        // the slot's lifetime (PMM pages are pinned — no swap, no
+        // compaction). The slice is read-only and never mutated
+        // through this view.
+        let slice = unsafe {
+            core::slice::from_raw_parts(ptr.as_ptr(), self.weight_data_len)
+        };
         Some(slice)
     }
 }
+
+// SAFETY: `LoadedSlm` is reachable only through the SLOTS table
+// guarded by SLM_LOCK. `weight_pages` is a raw pointer into PMM
+// pages that are stable for the lifetime of the slot; the table
+// guard guarantees no two CPUs read or mutate the same slot
+// concurrently. Marking the type Send + Sync lets the static
+// table compile in Rust 2024 edition without introducing the
+// `*mut`-based race hazards those auto-traits normally guard
+// against.
+unsafe impl Send for LoadedSlm {}
+unsafe impl Sync for LoadedSlm {}
 
 /// Empty slot constant — usable in `static` initializers because
 /// `Option::None` is `const`. A method form (`LoadedSlm::empty()`)
@@ -313,54 +345,51 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         });
     }
 
-    // Allocate a weight-pool block for the source bytes. As of
-    // Phase 3 the model-mem pool returns a fixed 2 MB single block
-    // regardless of the requested size — multi-block allocation is
-    // tracked as a follow-up for real Qwen-sized GGUFs (~1 GB). The
-    // explicit bounds check below catches the discrepancy at load
-    // time so a real GGUF fails fast with a clear error instead of
-    // silently overrunning the block during `copy_nonoverlapping`.
-    let block = mm::alloc_weights(data.len()).map_err(map_alloc_err)?;
-    let block_size = match mm::get_size(block) {
-        Some(s) => s,
-        None => {
-            let _ = mm::free(block);
-            return Err(LoadError::AllocFailed);
-        }
-    };
-    if data.len() > block_size {
-        // Reject before any unsafe copy — see runtime/CLAUDE.md
-        // "Checked arithmetic at boundaries". `ModelTooLarge`
-        // surfaces back through the FFI as -1 with a UART log.
-        unsafe {
-            kernel_ffi::uart_puts(
-                b"[slm] GGUF too large for current single-block weight pool;\n  multi-block allocator landing in M5.3.3 follow-up.\n\0"
-                    .as_ptr(),
-            );
-        }
-        let _ = mm::free(block);
-        return Err(LoadError::ModelTooLarge);
-    }
-    let block_ptr = match mm::get_ptr(block) {
-        Some(p) if !p.is_null() => p,
-        _ => {
-            let _ = mm::free(block);
+    // Allocate the GGUF buffer directly from the PMM. The Phase-3
+    // `mm::alloc_weights` is single-block-only (fixed 2 MB) and
+    // would silently truncate any real-sized GGUF. Bypassing it via
+    // `kernel_ffi::alloc_pages` gives us the buddy allocator's full
+    // ceiling (order 18 = 1 GiB on Jetson) — enough for
+    // Qwen2.5-1.5B-Q4_K_M (~1 GB). The model_mem multi-block
+    // allocator is tracked separately; the SLM registry doesn't
+    // currently use any of model_mem's higher-level features
+    // (refcounting, eviction, eviction metadata) for SLM slots, so
+    // the bypass is functionally equivalent today.
+    const PAGE_SIZE: usize = 4096;
+    let pages = data
+        .len()
+        .checked_add(PAGE_SIZE - 1)
+        .map(|n| n / PAGE_SIZE)
+        .ok_or(LoadError::AllocFailed)?;
+    let pages_u32 = u32::try_from(pages).map_err(|_| LoadError::ModelTooLarge)?;
+    let weight_ptr = match kernel_ffi::alloc_pages(pages) {
+        Ok(p) => p,
+        Err(_) => {
+            // The buddy allocator failed (out of memory or no
+            // contiguous run at the requested order). The cap above
+            // catches the order-overflow case; this branch covers
+            // genuine pressure / fragmentation.
+            unsafe {
+                kernel_ffi::uart_puts(
+                    b"[slm] alloc_pages refused: PMM has no contiguous run for this GGUF\n\0"
+                        .as_ptr(),
+                );
+            }
             return Err(LoadError::AllocFailed);
         }
     };
 
-    // Copy `data` into the owned block. Once this returns the caller
-    // can drop the source buffer; everything the registry/decoder
-    // touches lives inside the pool block from here on.
+    // Copy `data` into the owned pages. Once this returns the
+    // caller can drop the source buffer; everything the registry
+    // and decoder touch lives inside the PMM allocation from here.
     //
-    // SAFETY: `block_ptr` was just returned by `mm::alloc_weights`
-    // and the bounds check above guarantees `block_size >= data.len()`,
-    // so writing `data.len()` bytes stays inside the allocation.
-    // Source and destination cannot overlap (the pool block is
-    // distinct from the caller's input buffer). `data` is
+    // SAFETY: `weight_ptr` was just returned by `alloc_pages(pages)`
+    // which guarantees `pages * PAGE_SIZE >= data.len()` writable
+    // bytes (rounded up). Source and destination cannot overlap
+    // (PMM pages vs. caller's heap-side input). `data` is
     // initialized for `data.len()` bytes per the caller's contract.
     unsafe {
-        core::ptr::copy_nonoverlapping(data.as_ptr(), block_ptr, data.len());
+        core::ptr::copy_nonoverlapping(data.as_ptr(), weight_ptr.as_ptr(), data.len());
     }
 
     // Drop the temporary `Gguf<'a>` parser before stashing the entry
@@ -374,7 +403,8 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         vocab_size,
         source_bytes,
         tensor_count,
-        weight_block: Some(block),
+        weight_pages: Some(weight_ptr),
+        weight_pages_count: pages_u32,
         weight_data_len: data.len(),
         tokenizer: Some(tokenizer),
         tensors,
@@ -383,9 +413,15 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     match insert_entry(entry) {
         Ok(idx) => Ok(idx),
         Err(e) => {
-            // Insert failed (registry full); release the pool block
+            // Insert failed (registry full); release the PMM pages
             // we just took so we don't leak the allocation.
-            let _ = mm::free(block);
+            // SAFETY: `weight_ptr` was returned by `alloc_pages(pages)`;
+            // free with the same page count. The bytes haven't been
+            // exposed to any other reader yet (the slot was never
+            // inserted), so no aliasing concerns.
+            unsafe {
+                kernel_ffi::free_pages(weight_ptr, pages);
+            }
             Err(e)
         }
     }
@@ -397,9 +433,8 @@ pub fn unload_slm(index: usize) -> Result<(), LoadError> {
     if index >= SLM_MAX_SLOTS {
         return Err(LoadError::InvalidFormat);
     }
-    // Take the slot out under the lock so we can free its weight
-    // block without holding the registry lock during the
-    // `mm::free` call (the pool has its own lock).
+    // Take the slot out under the lock so the page free runs
+    // without the registry lock held.
     let taken = {
         let _g = SpinGuard::new();
         // SAFETY: SpinGuard held — exclusive access to SLOTS.
@@ -410,8 +445,14 @@ pub fn unload_slm(index: usize) -> Result<(), LoadError> {
         Some(e) => e,
         None => return Err(LoadError::InvalidFormat),
     };
-    if let Some(block) = entry.weight_block {
-        let _ = mm::free(block);
+    if let Some(ptr) = entry.weight_pages {
+        // SAFETY: `ptr` was returned by `alloc_pages(weight_pages_count)`
+        // in `load_slm` and has not been freed since. The slot was
+        // taken out of the table above, so no concurrent reader can
+        // observe the now-stale pointer.
+        unsafe {
+            kernel_ffi::free_pages(ptr, entry.weight_pages_count as usize);
+        }
     }
     Ok(())
 }
@@ -469,11 +510,16 @@ pub(crate) fn reset_for_tests() {
         let slot = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS) };
         for s in slot.iter_mut() {
             if let Some(entry) = s.take() {
-                if let Some(handle) = entry.weight_block {
-                    // Release outside the slot, but we still hold the
-                    // registry lock — `mm::free` takes its own lock,
-                    // so the order doesn't deadlock.
-                    let _ = mm::free(handle);
+                if let Some(ptr) = entry.weight_pages {
+                    // SAFETY: ptr came from `alloc_pages(count)` in
+                    // `load_slm`. The slot was just taken out of the
+                    // table so nobody else holds the pointer.
+                    unsafe {
+                        kernel_ffi::free_pages(
+                            ptr,
+                            entry.weight_pages_count as usize,
+                        );
+                    }
                 }
             }
         }
@@ -591,10 +637,6 @@ fn copy_into(dst: &mut [u8], src: &[u8]) {
 
 fn map_gguf_err(_e: GgufError) -> LoadError {
     LoadError::CorruptedData
-}
-
-fn map_alloc_err(_e: crate::mm::AllocError) -> LoadError {
-    LoadError::AllocFailed
 }
 
 /// On-disk byte size of a GGML tensor with `n_elements` of type
@@ -987,9 +1029,9 @@ mod tests {
         reset_for_tests();
         let bytes = build_qwen_gguf_with_vocab(64);
         let idx = load_slm(b"qwen-test", &bytes).expect("load");
-        let backed = with_loaded_slm(idx, |slm| slm.weight_block.is_some())
+        let backed = with_loaded_slm(idx, |slm| slm.weight_pages.is_some())
             .expect("with_loaded_slm");
-        assert!(backed, "expected weight_block to be allocated");
+        assert!(backed, "expected weight_pages to be allocated");
         // The owned buffer round-trips the GGUF prologue (magic+version).
         let header_ok = with_loaded_slm(idx, |slm| {
             let buf = slm.weight_bytes().expect("weight_bytes");
