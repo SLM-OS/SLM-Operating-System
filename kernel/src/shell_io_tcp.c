@@ -58,6 +58,49 @@ _Static_assert(TCP_SHELL_RING_SIZE <= 0xFFFF,
 #define TCP_SHELL_POLL_INTERVAL_MS 10
 
 /*
+ * Settling delay between `tcp_close(pcb)` and the post-close heap
+ * measurement (#537). The measurement was previously taken in the
+ * same poll cycle as tcp_close, before lwIP had a chance to ACK
+ * outbound data and free the corresponding pbufs. That falsely
+ * accounted for in-flight TCP_WRITE_FLAG_COPY bytes as a "leak"
+ * (typically several KB depending on session output volume).
+ *
+ * After tcp_close we hold the ctx slot in a "settling" state for
+ * this many milliseconds. The slot stays unusable to new sessions,
+ * but pcb is already NULL on our side and lwIP is free to drain
+ * TX. When the timer expires we measure `lwip_stats.mem.used`
+ * against the open-time baseline — a positive delta now reflects
+ * a real leak, not unacked TX residue.
+ *
+ * 1500 ms is comfortably above the lwIP retransmit timeout (~1 s)
+ * so even one retransmit cycle has time to clear, but well below
+ * the 16-slot pool's exhaustion point at typical close cadences.
+ */
+#define TCP_SHELL_CLOSE_SETTLE_MS 1500
+
+/*
+ * Total wall-clock cap on `tcp_write_buf` waiting for ring space (#536).
+ *
+ * When the lwIP heap is exhausted (#537 leak path or a transient burst),
+ * tcp_write returns ERR_MEM forever, the drain in shell_io_tcp_poll
+ * can't free TX-ring slots, and tcp_write_buf would otherwise loop
+ * indefinitely in sleep_ms. The user-visible symptom is any multi-line
+ * shell command (model stats, model gpu, tasks, mem, ...) freezing
+ * the telnet session.
+ *
+ * Once this cap is exceeded we mark the session degraded — subsequent
+ * writes short-circuit, the session is closed so the user sees a clean
+ * disconnect, and a one-shot warning is logged. The shell command
+ * returns to its caller; the caller may print a short error and the
+ * REPL exits cleanly.
+ *
+ * 2000 ms is comfortably above any plausible legitimate stall (one
+ * lwIP retransmit timeout is ~1 s) but well below the user's
+ * patience threshold for "is the box dead?".
+ */
+#define TCP_SHELL_WRITE_TIMEOUT_MS 2000
+
+/*
  * Lifecycle:
  *
  *   shell_io_tcp_create sets in_use=true, closed=false, shell_done=false
@@ -86,6 +129,10 @@ struct tcp_shell_ctx {
     bool              in_use;
     volatile bool     closed;        /* set on any close path */
     volatile bool     shell_done;    /* set by shell_io_tcp_destroy */
+    /* Set by tcp_write_buf when the wall-clock cap is exceeded (#536).
+     * Subsequent writes short-circuit instead of busy-waiting on a
+     * drain that lwIP can't service. */
+    volatile bool     write_degraded;
 
     /* lwIP pcb — net_pump context only. NULL after close. */
     struct tcp_pcb   *pcb;
@@ -131,6 +178,12 @@ struct tcp_shell_ctx {
      * a sustained positive delta indicates a real leak rather than
      * unacked-TX residue lwIP will free during TIME_WAIT. */
     uint32_t          heap_used_at_open_bytes;
+
+    /* Timer-counter value captured immediately after tcp_close (#537).
+     * Zero when the close hasn't happened yet. The measurement +
+     * ctx_free is deferred until at least TCP_SHELL_CLOSE_SETTLE_MS
+     * after this point so unacked TX bytes have a chance to drain. */
+    uint64_t          close_completed_ticks;
 
     /* io vtable embedded so we don't heap-allocate. io.ctx == this. */
     struct shell_io   io;
@@ -310,9 +363,44 @@ static int tcp_try_read_char(struct shell_io *io)
     return (int)c;
 }
 
+/* Forward decl — defined in the lwIP-callback section below. The
+ * tcp_write_buf timeout path calls it to mark the session closed
+ * when the drain has stalled past the cap. */
+static void mark_closed(struct tcp_shell_ctx *ctx);
+
+/* Test hook — overridable via shell_io_tcp_test_set_write_timeout_ms.
+ * Defaults to TCP_SHELL_WRITE_TIMEOUT_MS in production. The
+ * regression test in test_net.c drives the timeout path with a
+ * tiny override (e.g. 50 ms) so it doesn't have to wait 2 seconds
+ * to assert the bound. */
+static uint32_t g_write_timeout_ms = TCP_SHELL_WRITE_TIMEOUT_MS;
+
+void shell_io_tcp_test_set_write_timeout_ms(uint32_t ms)
+{
+    g_write_timeout_ms = ms ? ms : TCP_SHELL_WRITE_TIMEOUT_MS;
+}
+
+#include "uart.h"
+
 static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
 {
     struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
+
+    /* Once the session has hit the write-timeout (#536) all further
+     * writes drop on the floor — the lwIP path is wedged and trying
+     * again would just hang the next command too. The session is
+     * already marked closed by the timeout path so the REPL will
+     * unwind and the slot will be freed by the poll path. */
+    if (ctx->write_degraded || ctx->closed) {
+        return;
+    }
+
+    /* Bound the total wall-clock time spent waiting for ring space.
+     * Per-iteration sleep_ms gives net_pump a chance to drain; if the
+     * lwIP heap is exhausted we'd otherwise loop forever (#536). */
+    const uint64_t freq = timer_get_frequency();
+    const uint64_t timeout_ticks = (freq * (uint64_t)g_write_timeout_ms) / 1000ULL;
+    const uint64_t deadline = timer_get_count() + timeout_ticks;
 
     /* Match the UART backend's line discipline: emit CRLF on output so
      * telnet clients don't render bare LF as "move down but stay in the
@@ -333,6 +421,24 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
 
         if (avail == 0) {
             spin_unlock_irqrestore(&ctx->tx_lock, flags);
+            if (timer_get_count() >= deadline) {
+                /* Drain hasn't progressed — lwIP is wedged. Mark the
+                 * session degraded so subsequent shell_printf calls
+                 * from the same command bail immediately, then close
+                 * the session so the user sees a disconnect rather
+                 * than a black hole. The shell command returns to
+                 * its REPL caller, which sees `closed` and exits. */
+                ctx->write_degraded = true;
+                size_t dropped = len - src;
+                uart_printf("[WARN] shell-tcp: session %u write timeout "
+                            "(>=%u ms drain stall, dropping %u bytes) "
+                            "— marking degraded, closing\n",
+                            (unsigned)ctx->session_id,
+                            (unsigned)g_write_timeout_ms,
+                            (unsigned)dropped);
+                mark_closed(ctx);
+                return;
+            }
             /* Yield so net_pump can drain the buffer. */
             sleep_ms(TCP_SHELL_POLL_INTERVAL_MS);
             continue;
@@ -359,7 +465,21 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
         if (queued == 0) {
             /* A bare '\n' needs two bytes of ring space. If only one
              * slot is free, we must yield here rather than immediately
-             * retrying and spinning forever on CPU 0. */
+             * retrying and spinning forever on CPU 0. The same wall-
+             * clock cap applies — if the ring stays one-byte-free
+             * forever we still bail. */
+            if (timer_get_count() >= deadline) {
+                ctx->write_degraded = true;
+                size_t dropped = len - src;
+                uart_printf("[WARN] shell-tcp: session %u write timeout "
+                            "(>=%u ms drain stall, dropping %u bytes) "
+                            "— marking degraded, closing\n",
+                            (unsigned)ctx->session_id,
+                            (unsigned)g_write_timeout_ms,
+                            (unsigned)dropped);
+                mark_closed(ctx);
+                return;
+            }
             sleep_ms(TCP_SHELL_POLL_INTERVAL_MS);
         }
     }
@@ -446,6 +566,16 @@ static void on_err(void *arg, err_t err)
     struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)arg;
     /* lwIP has already freed the pcb by the time tcp_err fires. */
     ctx->pcb = NULL;
+    /* Start the post-close settling timer (#537). The poll path
+     * normally sets this immediately after its own tcp_close, but
+     * on_err is the abrupt-close path (peer RST, ABRT) — the pcb
+     * is already gone by the time we get here, so the poll path's
+     * close branch will never fire. Set the timestamp here so the
+     * slot isn't held indefinitely. */
+    if (ctx->close_completed_ticks == 0) {
+        uint64_t now = timer_get_count();
+        ctx->close_completed_ticks = now ? now : 1;
+    }
     mark_closed(ctx);
 }
 
@@ -471,12 +601,15 @@ static struct tcp_shell_ctx *ctx_alloc(void)
         if (!c->in_use) {
             c->in_use  = true;
             c->closed  = false;
+            c->shell_done = false;
+            c->write_degraded = false;
             c->pcb     = NULL;
             c->rx_lock = (spinlock_t)SPINLOCK_INIT;
             c->tx_lock = (spinlock_t)SPINLOCK_INIT;
             c->rx_head = c->rx_tail = 0;
             c->tx_head = c->tx_tail = 0;
             c->tx_prev_was_cr = false;
+            c->close_completed_ticks = 0;
             spin_unlock_irqrestore(&pool_lock, flags);
             return c;
         }
@@ -490,6 +623,115 @@ static void ctx_free(struct tcp_shell_ctx *ctx)
     irq_flags_t flags = spin_lock_irqsave(&pool_lock);
     ctx->in_use = false;
     spin_unlock_irqrestore(&pool_lock, flags);
+}
+
+/*
+ * Test-only driver for the #536 timeout path.
+ *
+ * Allocates a slot from the pool, primes it as if a session were
+ * active (no pcb — net_pump's drain therefore won't run, simulating
+ * the lwIP-wedged state), then issues a tcp_write_buf large enough
+ * to overflow the TX ring. The function is expected to return after
+ * roughly `timeout_override_ms` (one `sleep_ms` step of slop) with
+ * `write_degraded` set on the ctx and `closed` true.
+ *
+ * Returns 0 on success (the bound was respected), -1 if no slot
+ * could be allocated, -2 if the timeout was not honored.
+ */
+int shell_io_tcp_test_run_write_timeout(uint32_t timeout_override_ms)
+{
+    struct tcp_shell_ctx *ctx = ctx_alloc();
+    if (!ctx) {
+        return -1;
+    }
+
+    /* Wire just enough vtable to call write — the rest of the
+     * tcp_shell_ctx fields are zero-initialised by ctx_alloc. */
+    ctx->io.write = tcp_write_buf;
+    ctx->io.ctx   = ctx;
+    ctx->session_id = 0xDEADBEEF;   /* visible in the warning log */
+
+    shell_io_tcp_test_set_write_timeout_ms(timeout_override_ms);
+
+    /* Buffer must exceed TCP_SHELL_RING_SIZE so the second pass
+     * stalls on a full ring. The contents don't matter — the test
+     * is about the timeout, not about what got queued. */
+    char buf[TCP_SHELL_RING_SIZE + 256];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = 'x';
+
+    uint64_t freq = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    tcp_write_buf(&ctx->io, buf, sizeof(buf));
+    uint64_t elapsed_ms = ((timer_get_count() - t0) * 1000ULL) / freq;
+
+    /* Restore the production default before any other tests run. */
+    shell_io_tcp_test_set_write_timeout_ms(0);
+
+    bool ok = ctx->write_degraded && ctx->closed
+              && elapsed_ms >= timeout_override_ms
+              && elapsed_ms < timeout_override_ms + 1000ULL;
+
+    ctx_free(ctx);
+    return ok ? 0 : -2;
+}
+
+/*
+ * Test-only driver for the #537 close-settling path.
+ *
+ * Drives two controlled scenarios:
+ *   1. close_completed_ticks set to "now" — poll must NOT free the
+ *      slot (settling delay hasn't elapsed).
+ *   2. close_completed_ticks rewound past TCP_SHELL_CLOSE_SETTLE_MS —
+ *      poll must free the slot on the next call.
+ *
+ * Returns 0 on success, -1 if no slot could be allocated, -2 if
+ * the "hold" assertion failed, -3 if the "release" assertion failed.
+ */
+int shell_io_tcp_test_run_close_settling(void)
+{
+    struct tcp_shell_ctx *ctx = ctx_alloc();
+    if (!ctx) {
+        return -1;
+    }
+
+    /* Mimic the post-tcp_close state: pcb already NULL, shell task
+     * has signaled done, baseline heap snapshot in place. */
+    ctx->shell_done = true;
+    ctx->pcb = NULL;
+    ctx->session_id = 0xCAFEBABE;
+    ctx->heap_used_at_open_bytes = 0;
+
+    /* Scenario 1: settling timer just started. Poll must NOT free. */
+    uint64_t now = timer_get_count();
+    ctx->close_completed_ticks = now ? now : 1;
+    shell_io_tcp_poll();
+    if (!ctx->in_use) {
+        /* Poll prematurely freed the slot — but we have no slot to
+         * release back since it's already gone. Return the failure. */
+        return -2;
+    }
+
+    /* Scenario 2: rewind close_completed_ticks far enough that the
+     * settle window has elapsed. Poll must free. */
+    uint64_t freq = timer_get_frequency();
+    uint64_t settle_ticks =
+        (freq * (uint64_t)(TCP_SHELL_CLOSE_SETTLE_MS + 100)) / 1000ULL;
+    /* Saturating subtract — older firmware on slow boards has tiny
+     * tick counters at this point in boot; just clamp to 1 (the
+     * "set" sentinel) if we'd underflow. */
+    uint64_t cur = timer_get_count();
+    ctx->close_completed_ticks = (cur > settle_ticks)
+        ? (cur - settle_ticks)
+        : 1ULL;
+    shell_io_tcp_poll();
+    if (ctx->in_use) {
+        /* Poll didn't free. Release manually so the test cleanup
+         * doesn't leak the slot. */
+        ctx_free(ctx);
+        return -3;
+    }
+
+    return 0;
 }
 
 size_t shell_io_tcp_test_normalize_output(const char *first,
@@ -731,19 +973,41 @@ void shell_io_tcp_poll(void)
                 tcp_sent(ctx->pcb, NULL);
                 (void)tcp_close(ctx->pcb);
                 ctx->pcb = NULL;
+                /* Start the post-close settling timer (#537). The
+                 * measurement + ctx_free below is gated on
+                 * TCP_SHELL_CLOSE_SETTLE_MS elapsing so any unacked
+                 * TX bytes still on the lwIP heap have a chance to
+                 * be ACKed and freed first — otherwise they're
+                 * incorrectly counted as a leak. timer_get_count()
+                 * never returns 0 in normal operation, but be
+                 * defensive: bias to 1 so the "0 means unset" check
+                 * below is unambiguous. */
+                uint64_t now = timer_get_count();
+                ctx->close_completed_ticks = now ? now : 1;
             }
         }
 
         /* Free the slot only once the shell task has released it AND
-         * the pcb is fully gone. */
-        if (ctx->shell_done && ctx->pcb == NULL) {
-            /* Compute and report the post-tcp_close heap delta before
-             * we recycle the slot. This is the right measurement
-             * window — tcp_close has run, lwIP has freed any acked
-             * TX state, and the pcb itself is no longer ours. A
-             * sustained positive delta here is a real leak (the
-             * earlier session-task-exit measurement was confounded
-             * by unacked-TX-still-in-flight noise). */
+         * the pcb is fully gone AND the post-close settling delay
+         * (#537) has elapsed. The settling delay gives lwIP time to
+         * receive the FIN-ACK and release any unacked TX pbufs that
+         * were allocated by tcp_write(... TCP_WRITE_FLAG_COPY). */
+        if (ctx->shell_done && ctx->pcb == NULL &&
+            ctx->close_completed_ticks != 0) {
+            uint64_t freq = timer_get_frequency();
+            uint64_t elapsed_ticks =
+                timer_get_count() - ctx->close_completed_ticks;
+            uint64_t elapsed_ms = (elapsed_ticks * 1000ULL) / freq;
+            if (elapsed_ms < TCP_SHELL_CLOSE_SETTLE_MS) {
+                continue;   /* not yet — let lwIP drain */
+            }
+
+            /* Settling complete. Compute and report the post-close
+             * heap delta. After TCP_SHELL_CLOSE_SETTLE_MS, any
+             * remaining positive delta against `heap_used_at_open_bytes`
+             * is a real leak — TIME_WAIT pcbs live in their own
+             * memp pool, not the heap, and unacked TX retransmits
+             * have completed by now. */
 #if MEM_STATS
             uint32_t close_used = (uint32_t)lwip_stats.mem.used;
 #else
