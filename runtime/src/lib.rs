@@ -62,8 +62,22 @@ pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
 
 #[panic_handler]
 fn rust_panic(info: &PanicInfo) -> ! {
+    // Postmortem output goes to BOTH UART and the bound shell.
+    // - uart_printf is the always-on path: lab serial capture (per the
+    //   project's serial_capture workflow) is the canonical place a
+    //   panic gets read after the fact, and the UART driver does not
+    //   depend on TCP / lwIP / scheduler state that may be wedged
+    //   precisely when a panic is most informative.
+    // - shell_printf additionally surfaces the panic in the operator's
+    //   active session if one is bound (e.g. the engineer who ran
+    //   `model bench` over telnet and tripped the panic). When no
+    //   session is bound, shell_printf falls back to UART, so the
+    //   double-emit is safe and idempotent on the fallback path.
+    // Order: UART first so the most reliable channel always sees the
+    // line, even if shell_printf later wedges in the lwIP TX ring.
     extern "C" {
         fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     unsafe {
@@ -82,8 +96,18 @@ fn rust_panic(info: &PanicInfo) -> ! {
         buf[..len].copy_from_slice(&file[..len]);
         buf[len] = 0;
 
+        // SAFETY: pure C variadic FFI calls. `fmt` is a static null-
+        // terminated byte literal whose `%s/%u/%u` specifiers match
+        // the (c-string, u32, u32) argument types. `buf` is a 256-byte
+        // null-terminated stack array that outlives both calls.
         unsafe {
             uart_printf(
+                b"at %s:%u:%u\n\0".as_ptr(),
+                buf.as_ptr(),
+                loc.line(),
+                loc.column(),
+            );
+            shell_printf(
                 b"at %s:%u:%u\n\0".as_ptr(),
                 buf.as_ptr(),
                 loc.line(),
@@ -4862,7 +4886,7 @@ pub extern "C" fn rust_infer_stats(stats: *mut inference::InferenceStats) -> i32
 #[no_mangle]
 pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
     extern "C" {
-        fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     if iterations == 0 {
@@ -4913,7 +4937,7 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
         // Print progress every 10 iterations
         if (i + 1) % 10 == 0 || i + 1 == iterations {
             unsafe {
-                uart_printf(b"  [%lu/%lu] last=%lu us\r\n\0".as_ptr(),
+                shell_printf(b"  [%lu/%lu] last=%lu us\r\n\0".as_ptr(),
                     (i + 1) as u64, iterations as u64, elapsed / 1000);
             }
         }
@@ -4921,7 +4945,7 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
 
     if success == 0 {
         unsafe {
-            uart_printf(b"Benchmark failed: 0/%lu inferences succeeded\r\n\0".as_ptr(),
+            shell_printf(b"Benchmark failed: 0/%lu inferences succeeded\r\n\0".as_ptr(),
                 iterations as u64);
         }
         return -1;
@@ -4933,12 +4957,12 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
     let max_us = max_ns / 1000;
 
     unsafe {
-        uart_printf(b"\r\nBenchmark Results (%lu iterations):\r\n\0".as_ptr(),
+        shell_printf(b"\r\nBenchmark Results (%lu iterations):\r\n\0".as_ptr(),
             success as u64);
-        uart_printf(b"  Min latency:  %lu us\r\n\0".as_ptr(), min_us);
-        uart_printf(b"  Avg latency:  %lu us\r\n\0".as_ptr(), avg_us);
-        uart_printf(b"  Max latency:  %lu us\r\n\0".as_ptr(), max_us);
-        uart_printf(b"  Throughput:   %lu infer/sec\r\n\0".as_ptr(),
+        shell_printf(b"  Min latency:  %lu us\r\n\0".as_ptr(), min_us);
+        shell_printf(b"  Avg latency:  %lu us\r\n\0".as_ptr(), avg_us);
+        shell_printf(b"  Max latency:  %lu us\r\n\0".as_ptr(), max_us);
+        shell_printf(b"  Throughput:   %lu infer/sec\r\n\0".as_ptr(),
             if avg_us > 0 { 1_000_000 / avg_us } else { 0 });
     }
 
@@ -5072,9 +5096,20 @@ pub unsafe extern "C" fn rust_infer(
 /// Pre-condition: `n >= 1` and `n <= output.len()`. The two callers
 /// each early-return with -3 on `result == 0`, so `output[0]` is
 /// always reachable.
+///
+/// Output channel: each row is one `shell_printf` call. With a TCP
+/// session bound, that enqueues into the per-session 4 KB TX ring
+/// in `shell_io_tcp.c`; if the operator's terminal can't drain fast
+/// enough, the drop-oldest policy will silently elide rows. For the
+/// 10-element MNIST output that's a non-issue (~280 bytes total —
+/// well under the ring). When this helper starts being used by larger
+/// outputs (sched-MLP at 42 logits, future N-class models), batch
+/// into a single stack buffer + one `shell_printf` to avoid the
+/// drop hazard, or accept the partial-output trade-off explicitly
+/// at the new call site. (PR #557 round-2 review.)
 fn print_logits_and_argmax(output: &[f32], n: usize) -> usize {
     extern "C" {
-        fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     let mut argmax: usize = 0;
@@ -5088,7 +5123,7 @@ fn print_logits_and_argmax(output: &[f32], n: usize) -> usize {
     let pct = if pct < 0 { 0 } else { pct };
     // SAFETY: pure FFI call, fmt has matching specifiers.
     unsafe {
-        uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), 0i32, pct);
+        shell_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), 0i32, pct);
     }
 
     for i in 1..n {
@@ -5097,7 +5132,7 @@ fn print_logits_and_argmax(output: &[f32], n: usize) -> usize {
         let pct = if pct < 0 { 0 } else { pct };
         // SAFETY: pure FFI call, fmt has matching specifiers.
         unsafe {
-            uart_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
+            shell_printf(b"    [%d] = 0.%03d\r\n\0".as_ptr(), i as i32, pct);
         }
         if val > max_val {
             max_val = val;
@@ -5115,7 +5150,7 @@ fn print_logits_and_argmax(output: &[f32], n: usize) -> usize {
 #[no_mangle]
 pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
     extern "C" {
-        fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     let idx = model_index as usize;
@@ -5164,12 +5199,12 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
 
     // SAFETY: pure FFI calls, formats match arg types.
     unsafe {
-        uart_printf(
+        shell_printf(
             b"Inference on '%s' completed in %lu us\r\n\0".as_ptr(),
             info.name.as_ptr(),
             elapsed_us as u64,
         );
-        uart_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
+        shell_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
     }
 
     // Cap the slice at output.len() as belt-and-braces — the engine
@@ -5182,7 +5217,7 @@ pub extern "C" fn rust_infer_and_print(model_index: u32) -> i32 {
 
     // SAFETY: pure FFI call, fmt has matching specifiers.
     unsafe {
-        uart_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
+        shell_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
     }
 
     0
@@ -5222,13 +5257,13 @@ pub extern "C" fn rust_infer_buf_and_print(
     input_floats: usize,
 ) -> i32 {
     extern "C" {
-        fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     if input.is_null() || input_floats == 0 {
         // SAFETY: pure FFI call, fmt has matching specifiers.
         unsafe {
-            uart_printf(
+            shell_printf(
                 b"[infer-buf] null/empty input buffer (model_index=%u floats=%lu)\r\n\0"
                     .as_ptr(),
                 model_index,
@@ -5244,7 +5279,7 @@ pub extern "C" fn rust_infer_buf_and_print(
         None => {
             // SAFETY: pure FFI call, fmt has matching specifiers.
             unsafe {
-                uart_printf(
+                shell_printf(
                     b"[infer-buf] model index %u not loaded\r\n\0".as_ptr(),
                     model_index,
                 );
@@ -5279,7 +5314,7 @@ pub extern "C" fn rust_infer_buf_and_print(
         Err(_) => {
             // SAFETY: pure FFI call, fmt has matching specifiers.
             unsafe {
-                uart_printf(
+                shell_printf(
                     b"[infer-buf] engine error on '%s' (input_floats=%lu)\r\n\0"
                         .as_ptr(),
                     info.name.as_ptr(),
@@ -5297,7 +5332,7 @@ pub extern "C" fn rust_infer_buf_and_print(
     if result == 0 {
         // SAFETY: pure FFI call, fmt has matching specifiers.
         unsafe {
-            uart_printf(
+            shell_printf(
                 b"[infer-buf] engine returned 0 outputs on '%s'\r\n\0".as_ptr(),
                 info.name.as_ptr(),
             );
@@ -5310,12 +5345,12 @@ pub extern "C" fn rust_infer_buf_and_print(
 
     // SAFETY: pure FFI calls, formats match arg types.
     unsafe {
-        uart_printf(
+        shell_printf(
             b"Inference on '%s' completed in %lu us\r\n\0".as_ptr(),
             info.name.as_ptr(),
             elapsed_us as u64,
         );
-        uart_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
+        shell_printf(b"  Outputs (%d values):\r\n\0".as_ptr(), result as i32);
     }
 
     // Cap the slice at output.len() as belt-and-braces — the engine
@@ -5328,7 +5363,7 @@ pub extern "C" fn rust_infer_buf_and_print(
 
     // SAFETY: pure FFI call, fmt has matching specifiers.
     unsafe {
-        uart_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
+        shell_printf(b"  Predicted class: %d\r\n\0".as_ptr(), argmax as i32);
     }
 
     argmax as i32
@@ -6033,8 +6068,8 @@ pub extern "C" fn rust_inference_test() -> i32 {
                 // Print the error code for debugging
                 if let Err(e) = result {
                     unsafe {
-                        extern "C" { fn uart_printf(fmt: *const u8, ...); }
-                        uart_printf(b"  [DBG] e2e failed: err=%d\n\0".as_ptr(), e as i32);
+                        extern "C" { fn shell_printf(fmt: *const u8, ...); }
+                        shell_printf(b"  [DBG] e2e failed: err=%d\n\0".as_ptr(), e as i32);
                     }
                 }
             }
@@ -6380,30 +6415,30 @@ pub extern "C" fn rust_inference_test() -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_gpu_print_status() {
     extern "C" {
-        fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     let caps = inference::gpu::GpuCapabilities::detect();
 
     unsafe {
-        uart_printf(b"GPU Status:\r\n\0".as_ptr());
+        shell_printf(b"GPU Status:\r\n\0".as_ptr());
 
         // Driver name
-        uart_printf(b"  Driver:         %s\r\n\0".as_ptr(), caps.name.as_ptr());
-        uart_printf(b"  Device:         %s\r\n\0".as_ptr(), caps.device.as_ptr());
+        shell_printf(b"  Driver:         %s\r\n\0".as_ptr(), caps.name.as_ptr());
+        shell_printf(b"  Device:         %s\r\n\0".as_ptr(), caps.device.as_ptr());
 
         let status_str = match caps.status {
             inference::gpu::GpuStatus::NotAvailable => b"Not available\0".as_ptr(),
             inference::gpu::GpuStatus::DetectedNoCompute => b"Detected (compute not ready - GSP required)\0".as_ptr(),
             inference::gpu::GpuStatus::ComputeReady => b"Compute ready\0".as_ptr(),
         };
-        uart_printf(b"  Compute:        %s\r\n\0".as_ptr(), status_str);
+        shell_printf(b"  Compute:        %s\r\n\0".as_ptr(), status_str);
 
         if caps.cuda_cores > 0 {
-            uart_printf(b"  CUDA cores:     %lu\r\n\0".as_ptr(), caps.cuda_cores as u64);
-            uart_printf(b"  Tensor cores:   %lu\r\n\0".as_ptr(), caps.tensor_cores as u64);
+            shell_printf(b"  CUDA cores:     %lu\r\n\0".as_ptr(), caps.cuda_cores as u64);
+            shell_printf(b"  Tensor cores:   %lu\r\n\0".as_ptr(), caps.tensor_cores as u64);
         }
-        uart_printf(b"  Unified memory: %s\r\n\0".as_ptr(),
+        shell_printf(b"  Unified memory: %s\r\n\0".as_ptr(),
             if caps.unified_memory { b"yes\0".as_ptr() } else { b"no\0".as_ptr() });
 
         let backend_str = if caps.has_compute() {
@@ -6411,7 +6446,7 @@ pub extern "C" fn rust_gpu_print_status() {
         } else {
             b"CPU only\0".as_ptr()
         };
-        uart_printf(b"  Inference:      %s\r\n\0".as_ptr(), backend_str);
+        shell_printf(b"  Inference:      %s\r\n\0".as_ptr(), backend_str);
     }
 }
 
@@ -6637,8 +6672,8 @@ pub extern "C" fn rust_component_test() -> i32 {
             let min_us = stats.min_time_ns / 1000;
             let max_us = stats.max_time_ns / 1000;
             unsafe {
-                extern "C" { fn uart_printf(fmt: *const u8, ...); }
-                uart_printf(
+                extern "C" { fn shell_printf(fmt: *const u8, ...); }
+                shell_printf(
                     b"  [INFO] Pipeline latency: avg=%lu us, min=%lu us, max=%lu us (%lu inferences)\n\0".as_ptr(),
                     avg_us, min_us, max_us, stats.total_inferences,
                 );
@@ -6688,7 +6723,7 @@ pub extern "C" fn rust_component_test() -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_matmul_bench_fp32(iterations: u32) -> i32 {
     extern "C" {
-        fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     if iterations == 0 {
@@ -6754,14 +6789,14 @@ pub extern "C" fn rust_matmul_bench_fp32(iterations: u32) -> i32 {
     };
 
     unsafe {
-        uart_printf(b"  Size:        %lux%lux%lu FP32\n\0".as_ptr(),
+        shell_printf(b"  Size:        %lux%lux%lu FP32\n\0".as_ptr(),
                     SIZE as u64, SIZE as u64, SIZE as u64);
-        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+        shell_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
                     iterations as u64, success as u64);
-        uart_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
-        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+        shell_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        shell_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
                     min_ns / 1000, avg_ns / 1000, max_ns / 1000);
-        uart_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
+        shell_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
                     avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
                     min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
     }
@@ -6787,7 +6822,7 @@ pub extern "C" fn rust_matmul_bench_fp32(iterations: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_conv_bench_fp32(iterations: u32) -> i32 {
     extern "C" {
-        fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     if iterations == 0 {
@@ -6859,18 +6894,18 @@ pub extern "C" fn rust_conv_bench_fp32(iterations: u32) -> i32 {
     };
 
     unsafe {
-        uart_printf(b"  Input:       %lux%lux%lux%lu FP32\n\0".as_ptr(),
+        shell_printf(b"  Input:       %lux%lux%lux%lu FP32\n\0".as_ptr(),
                     BATCH as u64, CIN as u64, H as u64, W as u64);
-        uart_printf(b"  Weight:      %lux%lux%lux%lu (C_out x C_in x kH x kW)\n\0".as_ptr(),
+        shell_printf(b"  Weight:      %lux%lux%lux%lu (C_out x C_in x kH x kW)\n\0".as_ptr(),
                     COUT as u64, CIN as u64, KH as u64, KW as u64);
-        uart_printf(b"  Output:      %lux%lux%lux%lu  stride=1 pad=1\n\0".as_ptr(),
+        shell_printf(b"  Output:      %lux%lux%lux%lu  stride=1 pad=1\n\0".as_ptr(),
                     BATCH as u64, COUT as u64, HOUT as u64, WOUT as u64);
-        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+        shell_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
                     iterations as u64, success as u64);
-        uart_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
-        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+        shell_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        shell_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
                     min_ns / 1000, avg_ns / 1000, max_ns / 1000);
-        uart_printf(b"  Throughput:  avg=%lu.%03lu MFLOPS  peak=%lu.%03lu MFLOPS\n\0".as_ptr(),
+        shell_printf(b"  Throughput:  avg=%lu.%03lu MFLOPS  peak=%lu.%03lu MFLOPS\n\0".as_ptr(),
                     avg_mflops_x1000 / 1_000_000, (avg_mflops_x1000 / 1000) % 1000,
                     min_mflops_x1000 / 1_000_000, (min_mflops_x1000 / 1000) % 1000);
     }
@@ -6918,7 +6953,7 @@ fn f32_to_fp16(v: f32) -> u16 {
 #[no_mangle]
 pub extern "C" fn rust_matmul_bench_fp16(iterations: u32) -> i32 {
     extern "C" {
-        fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     if iterations == 0 {
@@ -6980,14 +7015,14 @@ pub extern "C" fn rust_matmul_bench_fp16(iterations: u32) -> i32 {
     let min_gflops_x1000 = if min_ns > 0 { (flops_per_call * 1000) / min_ns } else { 0 };
 
     unsafe {
-        uart_printf(b"  Size:        %lux%lux%lu  A=FP32 B=FP16\n\0".as_ptr(),
+        shell_printf(b"  Size:        %lux%lux%lu  A=FP32 B=FP16\n\0".as_ptr(),
                     SIZE as u64, SIZE as u64, SIZE as u64);
-        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+        shell_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
                     iterations as u64, success as u64);
-        uart_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
-        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+        shell_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        shell_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
                     min_ns / 1000, avg_ns / 1000, max_ns / 1000);
-        uart_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
+        shell_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
                     avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
                     min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
     }
@@ -7005,7 +7040,7 @@ pub extern "C" fn rust_matmul_bench_fp16(iterations: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn rust_matmul_bench_int8(iterations: u32) -> i32 {
     extern "C" {
-        fn uart_printf(fmt: *const u8, ...);
+        fn shell_printf(fmt: *const u8, ...);
     }
 
     if iterations == 0 {
@@ -7072,14 +7107,14 @@ pub extern "C" fn rust_matmul_bench_int8(iterations: u32) -> i32 {
     let min_gops_x1000 = if min_ns > 0 { (ops_per_call * 1000) / min_ns } else { 0 };
 
     unsafe {
-        uart_printf(b"  Size:        %lux%lux%lu  INT8 (dequant -> FP32 output)\n\0".as_ptr(),
+        shell_printf(b"  Size:        %lux%lux%lu  INT8 (dequant -> FP32 output)\n\0".as_ptr(),
                     SIZE as u64, SIZE as u64, SIZE as u64);
-        uart_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+        shell_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
                     iterations as u64, success as u64);
-        uart_printf(b"  Ops/call:    %lu\n\0".as_ptr(), ops_per_call);
-        uart_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
+        shell_printf(b"  Ops/call:    %lu\n\0".as_ptr(), ops_per_call);
+        shell_printf(b"  Latency:     min=%lu us  avg=%lu us  max=%lu us\n\0".as_ptr(),
                     min_ns / 1000, avg_ns / 1000, max_ns / 1000);
-        uart_printf(b"  Throughput:  avg=%lu.%03lu GOPS  peak=%lu.%03lu GOPS\n\0".as_ptr(),
+        shell_printf(b"  Throughput:  avg=%lu.%03lu GOPS  peak=%lu.%03lu GOPS\n\0".as_ptr(),
                     avg_gops_x1000 / 1000, avg_gops_x1000 % 1000,
                     min_gops_x1000 / 1000, min_gops_x1000 % 1000);
     }
