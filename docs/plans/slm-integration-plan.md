@@ -6,8 +6,26 @@ Phased delivery plan for the spec in
 upload → CLI launch → prompt → streaming response → live perf monitoring →
 GPU-accelerated inference.
 
-**Status:** Not started. Ready to begin once Phase 6 (Demo & Polish) wraps
-or in parallel with it on a feature branch.
+**Status (2026-04-27):** M0 through M9 structurally complete on the
+SLM feature branch (`worktree-slm-for-slmos`). End-to-end real text
+generation gated on **M5.3** (real `forward_step` — registry storing
+GGUF tensor data + per-session tokenizer + weight-pool wiring through
+the M4 op chain) and the Jetson hardware deploy. Tracked via the
+umbrella issue and the M5.3 / M6.A-2+ / M6.B/C/D / NEON follow-up
+issues filed at M9 close-out.
+
+| Milestone | Status                                                 |
+|-----------|--------------------------------------------------------|
+| M0        | ✅ Shipped (PR #492)                                   |
+| M1        | ✅ Shipped (PR #497)                                   |
+| M2        | ✅ Shipped (PR #502)                                   |
+| M3        | ✅ Shipped (PR #505) — NEON deferred to M9 follow-up   |
+| M4        | ✅ Shipped (PR #520) — NEON deferred to M9 follow-up   |
+| M5        | ✅ Shipped (PR #524) — `forward_step` is a stub; M5.3 lands the real per-layer op chain |
+| M6        | ✅ Scaffolding shipped (PR #526) — SASS authoring (M6.B/C/D) and the L4T loader (M6.A-2+) deferred |
+| M7        | ✅ Shipped (PR #528)                                   |
+| M8        | ✅ Shipped (PR #530) — hot-swap-safe handle preservation deferred |
+| M9        | ✅ Shipped (this PR) — capstone polish + cargo-test enablement |
 
 **Estimated calendar time:** 9–11 weeks (one engineer at the project's
 historical Phase-3/4/5 cadence). Milestones M1, M2, M3, and M5 are largely
