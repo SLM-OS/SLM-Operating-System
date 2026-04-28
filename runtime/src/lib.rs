@@ -5016,6 +5016,364 @@ pub extern "C" fn rust_slm_test_reset() {
 }
 
 // =============================================================================
+// SLM Session / Decoder FFI (Phase SLM, M5.2)
+// =============================================================================
+//
+// Wires `Session` (per-conversation state) and `decoder::run_prompt`
+// (prefill + autoregressive generation) to the C kernel. The 4-slot
+// session table lives in `runtime/src/slm/session.rs`; FFI handles
+// are slot indices.
+
+/// Sampler-kind tag used by `rust_slm_session_open`.
+const SLM_SAMPLER_GREEDY: u32 = 0;
+const SLM_SAMPLER_TEMPERATURE: u32 = 1;
+const SLM_SAMPLER_TOP_K: u32 = 2;
+const SLM_SAMPLER_TOP_P: u32 = 3;
+const SLM_SAMPLER_TOP_K_TOP_P: u32 = 4;
+
+/// C-layout snapshot of session telemetry. Mirrors `SlmStatsC` in
+/// the kernel header.
+#[cfg(feature = "slm")]
+#[repr(C)]
+pub struct SlmStatsC {
+    pub prompts_completed: u32,
+    pub tokens_in: u32,
+    pub tokens_out: u32,
+    pub last_ttft_ns: u64,
+    pub last_decode_ns: u64,
+}
+
+/// Open a session over a loaded SLM.
+///
+/// `model_handle` is the slot index returned by `rust_slm_load`.
+/// `max_ctx` is the caller-chosen ceiling (capped at the model's
+/// trained context length). Sampler kind is one of the
+/// `SLM_SAMPLER_*` constants in the C header.
+///
+/// Returns the session id (>= 0) on success, -1 on error
+/// (model not loaded, KV-cache allocation failed, session table
+/// full, unknown sampler kind).
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_open(
+    model_handle: u32,
+    max_ctx: u32,
+    sampler_kind: u32,
+    temperature: f32,
+    top_k: u32,
+    top_p: f32,
+    seed: u64,
+) -> i32 {
+    let max_ctx_us = match usize::try_from(max_ctx) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
+    let top_k_us = match usize::try_from(top_k) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
+
+    let sampler = match sampler_kind {
+        SLM_SAMPLER_GREEDY => slm::sampler::Sampler::Greedy,
+        SLM_SAMPLER_TEMPERATURE => slm::sampler::Sampler::Temperature { temperature },
+        SLM_SAMPLER_TOP_K => slm::sampler::Sampler::TopK {
+            temperature,
+            k: top_k_us,
+        },
+        SLM_SAMPLER_TOP_P => slm::sampler::Sampler::TopP { temperature, p: top_p },
+        SLM_SAMPLER_TOP_K_TOP_P => slm::sampler::Sampler::TopKTopP {
+            temperature,
+            k: top_k_us,
+            p: top_p,
+        },
+        _ => return -1,
+    };
+
+    let session = match slm::session::Session::open(model_handle, max_ctx_us, sampler, seed)
+    {
+        Some(s) => s,
+        None => return -1,
+    };
+    match slm::session::insert(session) {
+        Some(idx) => idx as i32,
+        None => -1,
+    }
+}
+
+/// Close a session, releasing its slot. Returns 0 on success, -1 if
+/// the slot was empty or out of range.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_close(session_id: u32) -> i32 {
+    // Mark closed first (best-effort; ignored if slot is empty), then
+    // free the slot. The two steps don't have to be atomic — a
+    // racing FFI call against the same id is invalid usage.
+    let _ = slm::session::with_session(session_id as usize, |s| s.close());
+    match slm::session::remove(session_id as usize) {
+        Some(_) => 0,
+        None => -1,
+    }
+}
+
+/// Reset a session's KV cache and counters for a fresh conversation.
+/// Returns 0 on success, -1 if the slot is empty / out of range.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_reset(session_id: u32) -> i32 {
+    match slm::session::with_session(session_id as usize, |s| s.reset()) {
+        Some(()) => 0,
+        None => -1,
+    }
+}
+
+/// C-callable token callback: receives `user`, `token_id`, the UTF-8
+/// `bytes` pointer and length. Returns non-zero to continue, zero to
+/// stop generation early.
+#[cfg(feature = "slm")]
+pub type RustSlmTokenCb = unsafe extern "C" fn(
+    user: *mut core::ffi::c_void,
+    token_id: u32,
+    bytes: *const u8,
+    bytes_len: usize,
+) -> i32;
+
+/// Pointer-typed bridge so the static `TokenCallback` (which has a
+/// `fn(...) -> bool` signature) can dispatch to a caller's
+/// `RustSlmTokenCb` via thread-local context. Storing the C
+/// callback + user pointer in atomics keeps the bridge `no_std`
+/// without `lazy_static` / `OnceCell` machinery.
+#[cfg(feature = "slm")]
+mod ffi_cb {
+    use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
+    static CB: AtomicUsize = AtomicUsize::new(0);
+    static USER: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(core::ptr::null_mut());
+
+    pub fn install(
+        cb: super::RustSlmTokenCb,
+        user: *mut core::ffi::c_void,
+    ) {
+        CB.store(cb as usize, Ordering::SeqCst);
+        USER.store(user, Ordering::SeqCst);
+    }
+
+    pub fn clear() {
+        CB.store(0, Ordering::SeqCst);
+        USER.store(core::ptr::null_mut(), Ordering::SeqCst);
+    }
+
+    pub fn dispatch(token_id: u32, bytes: &[u8]) -> bool {
+        let raw = CB.load(Ordering::SeqCst);
+        if raw == 0 {
+            return false;
+        }
+        // SAFETY: `raw` was installed via `install` from a valid
+        // function pointer of `RustSlmTokenCb` type. The type
+        // matches the cast.
+        let cb: super::RustSlmTokenCb = unsafe { core::mem::transmute(raw) };
+        let user = USER.load(Ordering::SeqCst);
+        // SAFETY: `bytes` is a Rust slice lent to the C callback for
+        // the duration of the call only. The callback documented
+        // contract is "do not retain the pointer past return".
+        let rc = unsafe { cb(user, token_id, bytes.as_ptr(), bytes.len()) };
+        rc != 0
+    }
+}
+
+#[cfg(feature = "slm")]
+fn ffi_cb_trampoline(token_id: u32, bytes: &[u8]) -> bool {
+    ffi_cb::dispatch(token_id, bytes)
+}
+
+/// Run a prompt against an open session.
+///
+/// `prompt` / `prompt_len` is a UTF-8 string (not necessarily
+/// null-terminated; the length is authoritative).
+/// `max_new_tokens == 0` means "until EOS or stop flag".
+/// `cb` is called once per emitted token; returning 0 stops
+/// generation. `user` is passed through opaquely.
+///
+/// Returns 0 on success, -1 on error (invalid pointers, session
+/// not in `Open` state, etc.).
+///
+/// # Safety
+/// - `prompt` must be a valid pointer to `prompt_len` bytes of UTF-8
+///   data, or null when `prompt_len == 0`.
+/// - `cb` must be a valid C function pointer of type
+///   [`RustSlmTokenCb`].
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_prompt(
+    session_id: u32,
+    prompt: *const u8,
+    prompt_len: usize,
+    max_new_tokens: u32,
+    cb: RustSlmTokenCb,
+    user: *mut core::ffi::c_void,
+) -> i32 {
+    if prompt.is_null() && prompt_len != 0 {
+        return -1;
+    }
+    let prompt_slice: &[u8] = if prompt_len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller's contract — pointer + length are valid.
+        unsafe { core::slice::from_raw_parts(prompt, prompt_len) }
+    };
+    let prompt_str = match core::str::from_utf8(prompt_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    // The decoder needs a tokenizer. M5.2 doesn't yet stash a
+    // per-session tokenizer (the registry only stores metadata —
+    // M5.3 plumbs the GGUF bytes through), so for now we synthesize
+    // an empty tokenizer-less path: the decoder still exercises its
+    // state machine, but it can't tokenize the prompt. A proper
+    // wire-up is part of M5.3. To keep the FFI shape stable we
+    // reject the call here and have the M7 shell layer decode
+    // tokens itself for the parity tests until M5.3 lands.
+    //
+    // For tests that bypass tokenization entirely (the kernel C
+    // tests pass an empty prompt to drive the state machine), the
+    // empty path below stays valid.
+    if !prompt_str.is_empty() {
+        // Currently no in-runtime tokenizer for the loaded model.
+        // Surface a clean error so the caller knows to wait on M5.3.
+        return -1;
+    }
+
+    let cfg = slm::decoder::DecodeConfig {
+        max_new_tokens,
+        eos_token_id: 2,
+        prefill_chunk: 64,
+    };
+
+    ffi_cb::install(cb, user);
+    let result = slm::session::with_session(session_id as usize, |s| {
+        slm::decoder::run_prompt(
+            s,
+            // Tokenizer placeholder — see comment above. With an
+            // empty prompt the decoder never calls `encode`.
+            &empty_tokenizer(),
+            prompt_str,
+            &cfg,
+            ffi_cb_trampoline,
+        )
+    });
+    ffi_cb::clear();
+
+    match result {
+        Some(Some(_stats)) => 0,
+        _ => -1,
+    }
+}
+
+/// Build a placeholder tokenizer for the M5.2 FFI path.
+///
+/// M5.3 will replace this with a per-session tokenizer fetched
+/// from the loaded GGUF (the registry will store the parsed
+/// `Bbpe`). For now the tokenizer is only used through `encode` /
+/// `decode` calls inside `run_prompt`; with an empty prompt the
+/// decoder never reaches them.
+#[cfg(feature = "slm")]
+fn empty_tokenizer() -> slm::tokenizer::Bbpe {
+    use slm::gguf::{
+        DEFAULT_ALIGNMENT, GGUF_MAGIC, GGUF_VERSION, MetaArray, MetaType, MetaValue,
+    };
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    // Build a tiny GGUF with one token + zero merges, then parse it
+    // into a `Bbpe`. This keeps the FFI path callable without
+    // panicking; the produced tokenizer is intentionally trivial.
+    let kvs: alloc::vec::Vec<(&'static str, MetaValue)> = alloc::vec![
+        (
+            "tokenizer.ggml.tokens",
+            MetaValue::Array(MetaArray {
+                elem_type: MetaType::String,
+                values: alloc::vec![MetaValue::String(String::from("<unk>"))],
+            }),
+        ),
+        (
+            "tokenizer.ggml.merges",
+            MetaValue::Array(MetaArray {
+                elem_type: MetaType::String,
+                values: Vec::new(),
+            }),
+        ),
+    ];
+
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&GGUF_VERSION.to_le_bytes());
+    buf.extend_from_slice(&0u64.to_le_bytes());
+    buf.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+    for (k, v) in &kvs {
+        buf.extend_from_slice(&(k.len() as u64).to_le_bytes());
+        buf.extend_from_slice(k.as_bytes());
+        // Type tag.
+        buf.extend_from_slice(&v.meta_type().as_u32().to_le_bytes());
+        if let MetaValue::Array(MetaArray { elem_type, values }) = v {
+            buf.extend_from_slice(&elem_type.as_u32().to_le_bytes());
+            buf.extend_from_slice(&(values.len() as u64).to_le_bytes());
+            for elem in values {
+                if let MetaValue::String(s) = elem {
+                    buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+                    buf.extend_from_slice(s.as_bytes());
+                }
+            }
+        }
+    }
+    let pad = (DEFAULT_ALIGNMENT - (buf.len() as u64 % DEFAULT_ALIGNMENT)) % DEFAULT_ALIGNMENT;
+    buf.extend(core::iter::repeat_n(0u8, pad as usize));
+
+    let g = slm::gguf::Gguf::parse(&buf).expect("placeholder gguf parses");
+    slm::tokenizer::Bbpe::from_gguf(&g).expect("placeholder bbpe builds")
+}
+
+/// Cooperative-cancel signal for an in-flight `rust_slm_prompt` call.
+/// Sets the session's stop flag; the decoder loop notices at the
+/// next yield boundary. Returns 0 on success, -1 on bad index.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_stop(session_id: u32) -> i32 {
+    match slm::session::with_session(session_id as usize, |s| s.request_stop()) {
+        Some(()) => 0,
+        None => -1,
+    }
+}
+
+/// Snapshot a session's telemetry counters into `*out`. Returns 0
+/// on success, -1 on null pointer / unknown session id.
+///
+/// # Safety
+/// - `out` must point to writable memory of at least
+///   `sizeof(SlmStatsC)`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_stats(session_id: u32, out: *mut SlmStatsC) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    let snap = slm::session::with_session(session_id as usize, |s| SlmStatsC {
+        prompts_completed: s.prompts_completed,
+        tokens_in: s.tokens_in,
+        tokens_out: s.tokens_out,
+        last_ttft_ns: s.last_ttft_ns,
+        last_decode_ns: s.last_decode_ns,
+    });
+    match snap {
+        Some(stats) => {
+            // SAFETY: caller's contract — `out` is writable.
+            unsafe { *out = stats; }
+            0
+        }
+        None => -1,
+    }
+}
+
+// =============================================================================
 // Inference API (Phase 5, M2)
 // =============================================================================
 
