@@ -787,6 +787,19 @@ pub unsafe fn run_inference(
 ) -> Result<usize, EngineError> {
     let _guard = EngineGuard::new();
 
+    // Pin the weight block for the duration of the call. If a
+    // concurrent `unload` or `swap_model` retargets the registry slot
+    // mid-flight, the OLD weight block stays allocated until this
+    // lease drops at function exit — no torn reads, no use-after-free.
+    let _weight_lease = match registry::WeightLease::acquire(model_index) {
+        Some(l) => l,
+        None => {
+            engine_unlock();
+            record_error();
+            return Err(EngineError::ModelNotFound);
+        }
+    };
+
     let start = kernel_ffi::get_time_ns();
 
     // GPU fast path: when the active model is "mnist" and the GPU

@@ -3119,6 +3119,82 @@ static int l_model_load(lua_State *L) {
 }
 
 /**
+ * slm.model_swap(index, path [, name]) - Atomically swap a loaded
+ * model's weights with a new ONNX file.
+ *
+ * Mirrors the `model swap <name|idx> <path>` shell command. In-flight
+ * inferences continue to read the OLD weights via a refcount lease;
+ * subsequent inferences see the NEW weights.
+ *
+ * Args:
+ *   index : registry slot to replace (integer)
+ *   path  : ONNX file path on the VFS (string)
+ *   name  : optional new model name; if omitted derives from filename
+ *
+ * Returns:
+ *    0  on success
+ *   -1  invalid argument / path resolution / read / oom
+ *   -2  slot empty
+ *   -3  backend does not support swap (Hailo CCW; tracked in #532)
+ *   -4  parse / alloc failure
+ */
+static int l_model_swap(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer raw_idx = luaL_checkinteger(L, 1);
+    if (raw_idx < 0 || raw_idx > 0x7FFFFFFF) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+    uint32_t idx = (uint32_t)raw_idx;
+    const char *path = luaL_checkstring(L, 2);
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(path, resolved, sizeof(resolved)) < 0) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0 || info.type != 0 || info.size == 0) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    size_t pages_needed = (info.size + 4095) / 4096;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (bytes_read <= 0) {
+        pmm_free_pages(buf, pages_needed);
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    char derived[32];
+    const char *name = luaL_optstring(L, 3, NULL);
+    if (!name) {
+        const char *base = resolved;
+        for (const char *p = resolved; *p; p++)
+            if (*p == '/') base = p + 1;
+        size_t n = 0;
+        for (const char *p = base; *p && *p != '.' && n < 31; p++)
+            derived[n++] = *p;
+        derived[n] = '\0';
+        name = derived;
+    }
+
+    int rc = rust_model_swap(idx, name, buf, (size_t)bytes_read);
+    pmm_free_pages(buf, pages_needed);
+
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+/**
  * slm.infer_stats() - Get inference performance statistics
  * Returns table: {total, total_ns, min_ns, max_ns, last_ns, errors}
  * Returns nil on error (e.g., stats unavailable).
@@ -4082,6 +4158,7 @@ static const luaL_Reg slm_lib_admin[] = {
     {"model_unpin", l_model_unpin},
     {"model_bench", l_model_bench},
     {"model_load", l_model_load},
+    {"model_swap", l_model_swap},
     /* GPU inference (M7 + M9) */
     {"gpu_run_mnist", l_gpu_run_mnist},
     {"gpu_set_mnist_input", l_gpu_set_mnist_input},

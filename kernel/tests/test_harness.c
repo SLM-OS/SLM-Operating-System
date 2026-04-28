@@ -219,6 +219,13 @@ int test_harness_run_all(void)
     uart_puts("========================================\n");
     total_failures += test_suite_inference();
 
+    /* Model hot-swap tests (registry::swap_model + rust_model_swap) */
+    uart_puts("\n");
+    uart_puts("========================================\n");
+    uart_puts("Model Hot-Swap Tests (#232)\n");
+    uart_puts("========================================\n");
+    total_failures += test_suite_model_swap();
+
     /* GPU compute integration tests */
     uart_puts("\n");
     uart_puts("========================================\n");

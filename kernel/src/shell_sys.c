@@ -2280,6 +2280,117 @@ static int model_info(int argc, char *argv[])
     return 0;
 }
 
+static int model_swap(int argc, char *argv[])
+{
+    if (argc < 4) {
+        shell_puts("Usage: model swap <name|idx> <path>\r\n");
+        shell_puts("  Atomically replace the weights of an existing model with\r\n");
+        shell_puts("  a new ONNX file. In-flight inferences continue against the\r\n");
+        shell_puts("  OLD weights; subsequent inferences see the NEW weights.\r\n");
+        return -1;
+    }
+
+    int idx = -1;
+    uint32_t parsed_idx;
+    if (shell_parse_uint(argv[2], &parsed_idx) == 0) {
+        idx = (int)parsed_idx;
+    } else {
+        idx = rust_model_find(argv[2]);
+    }
+    if (idx < 0) {
+        shell_printf("model swap: '%s' not found\r\n", argv[2]);
+        return -1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(argv[3], resolved, sizeof(resolved)) < 0) {
+        shell_puts("model swap: path too long\r\n");
+        return -1;
+    }
+
+    struct vfs_entry_info info;
+    if (vfs_stat_path(resolved, &info) != 0) {
+        shell_printf("model swap: %s: file not found\r\n", resolved);
+        return -1;
+    }
+    if (info.type != 0) {
+        shell_printf("model swap: %s: not a file\r\n", resolved);
+        return -1;
+    }
+    if (info.size == 0) {
+        shell_puts("model swap: file is empty\r\n");
+        return -1;
+    }
+
+    size_t pages_needed = (info.size + 4095) / 4096;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages_needed);
+    if (!buf) {
+        shell_puts("model swap: out of memory for read buffer\r\n");
+        return -1;
+    }
+
+    int bytes_read = vfs_read_path(resolved, (char *)buf, info.size, 0);
+    if (bytes_read <= 0) {
+        shell_printf("model swap: failed to read %s\r\n", resolved);
+        pmm_free_pages(buf, pages_needed);
+        return -1;
+    }
+
+    /* Derive the new model's name from the file (matches `model load`). */
+    const char *base = resolved;
+    for (const char *p = resolved; *p; p++)
+        if (*p == '/') base = p + 1;
+    char model_name[32];
+    size_t name_len = 0;
+    for (const char *p = base; *p && *p != '.' && name_len < 31; p++)
+        model_name[name_len++] = *p;
+    model_name[name_len] = '\0';
+
+    int rc = rust_model_swap((uint32_t)idx, model_name,
+                             buf, (size_t)bytes_read);
+    pmm_free_pages(buf, pages_needed);
+
+    switch (rc) {
+    case 0:
+        break;
+    case -1:
+        /* Unreachable from this caller: we already validated path,
+         * buf, bytes_read, and capped model_name to 31 chars before
+         * the FFI call. -1 here means the kernel passed bad inputs
+         * to rust_model_swap — a kernel bug, not user error. */
+        shell_puts("model swap: internal: rust_model_swap rejected our inputs (kernel bug)\r\n");
+        return -1;
+    case -2:
+        shell_printf("model swap: slot %d is empty\r\n", idx);
+        return -1;
+    case -3:
+        shell_printf("model swap: slot %d backend does not support swap "
+                     "(Hailo CCW re-upload tracked in #532)\r\n", idx);
+        return -1;
+    case -4:
+        shell_printf("model swap: failed to load %s (parse or alloc error)\r\n",
+                     model_name);
+        return -1;
+    default:
+        shell_printf("model swap: unexpected error %d\r\n", rc);
+        return -1;
+    }
+
+    /* Echo the new metadata so the operator can verify the swap. */
+    RustModelInfo minfo;
+    if (rust_model_get_info((uint32_t)idx, &minfo) == 0) {
+        shell_printf("Swapped model at slot %d -> '%s'\r\n",
+                     idx, model_name);
+        shell_printf("  Format:     ONNX\r\n");
+        shell_printf("  Parameters: %lu\r\n", (unsigned long)minfo.param_count);
+        shell_printf("  Weights:    %lu bytes\r\n", (unsigned long)minfo.weight_size);
+        shell_printf("  Nodes:      %lu\r\n", (unsigned long)minfo.node_count);
+    } else {
+        shell_printf("Swapped model at slot %d -> '%s'\r\n", idx, model_name);
+    }
+    return 0;
+}
+
 static int model_unload(int argc, char *argv[])
 {
     if (argc < 3) {
@@ -2497,6 +2608,9 @@ int cmd_model(int argc, char *argv[])
     }
     if (strcmp(subcmd, "unload") == 0) {
         return model_unload(argc, argv);
+    }
+    if (strcmp(subcmd, "swap") == 0) {
+        return model_swap(argc, argv);
     }
     if (strcmp(subcmd, "pools") == 0) {
         model_show_pools();
@@ -2763,7 +2877,7 @@ int cmd_model(int argc, char *argv[])
         return 0;
     }
 
-    shell_puts("Usage: model [load|list|info|unload|pin|unpin|preload|preload-status|"
+    shell_puts("Usage: model [load|list|info|unload|swap|pin|unpin|preload|preload-status|"
               "infer|infer-file|use-gpu|bench|stats|pools|gpu|engines|meta|launch]\r\n");
     return -1;
 }

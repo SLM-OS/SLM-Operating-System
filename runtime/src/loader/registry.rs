@@ -14,6 +14,27 @@ use super::graph::{OperatorGraph, WeightTable, WeightEntry, TensorName, TensorSh
 /// Maximum simultaneously loaded models.
 pub const MAX_MODELS: usize = 8;
 
+/// Backend that owns a registry slot's weights. Set at load time and
+/// consulted by `swap_model` to decide between the trivial CPU-pool
+/// replace path and a backend-specific swap (which today only exists
+/// as a stub for Hailo, tracked in #532).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    /// CPU-only ONNX inference; weights live in the model_mem
+    /// weight pool and the engine consumes them through `mm::get_ptr`.
+    /// Hot-swap is the trivial registry-replace path.
+    CpuOnnx,
+    /// Hailo accelerator backend. Weights are the on-device CCW image;
+    /// the registry slot's `weights` handle is a host-side staging
+    /// buffer. `swap_model` returns `LoadError::SwapNotSupported` until
+    /// #532 lands the CCW re-upload path.
+    Hailo,
+    /// GSP-based GPU compute (placeholder; reserved for future GA10x
+    /// dispatch). Today no slot ever loads with this kind, but the
+    /// variant exists so backend dispatch is forward-compatible.
+    Gpu,
+}
+
 /// Convert an IEEE 754 half-precision (FP16) value to single-precision (FP32).
 ///
 /// FP16: 1 sign + 5 exponent (bias 15) + 10 mantissa
@@ -118,6 +139,10 @@ struct LoadedModelEntry {
     /// per-model OFF via `model use-gpu <name|idx> off` to force
     /// a specific model back to CPU without disturbing the master.
     gpu_dispatch_enabled: bool,
+    /// Backend that owns this slot. Populated at load. `swap_model`
+    /// short-circuits to `LoadError::SwapNotSupported` for any kind
+    /// other than `CpuOnnx`.
+    backend_kind: BackendKind,
 }
 
 impl LoadedModelEntry {
@@ -134,6 +159,7 @@ impl LoadedModelEntry {
             use_count: 0,
             pinned: false,
             gpu_dispatch_enabled: true,
+            backend_kind: BackendKind::CpuOnnx,
         }
     }
 }
@@ -226,26 +252,37 @@ pub fn init() {
     }
 }
 
-/// Load an ONNX model from a buffer.
-///
-/// Returns the registry slot index on success.
-pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
-    // Parse the ONNX protobuf
-    let parsed = onnx_parser::parse_onnx(data).map_err(|_| LoadError::CorruptedData)?;
+/// Prepared payload returned by `prepare_onnx_payload`. Owns the
+/// freshly allocated weight + workspace blocks and the parsed
+/// graph/weight-table/info, ready to be installed into a registry
+/// slot. The caller is responsible for either moving the contents
+/// into a `LoadedModelEntry` (success) or freeing `weights` /
+/// `workspace` (failure of the install step).
+struct PreparedPayload {
+    weights: ModelHandle,
+    workspace: ModelHandle,
+    graph: OperatorGraph,
+    weight_table: WeightTable,
+    info: ModelInfoC,
+    name_buf: [u8; MODEL_NAME_LEN],
+}
 
-    // Build the operator graph
+/// Parse an ONNX buffer, allocate weight + workspace blocks, populate
+/// the weight memory, and assemble the metadata. Frees its own
+/// allocations on any error before returning. Holds no registry lock —
+/// callers may invoke this outside any critical section so the
+/// multi-MB allocation + memcpy doesn't extend the registry's
+/// serialization window.
+fn prepare_onnx_payload(name: &[u8], data: &[u8]) -> Result<PreparedPayload, LoadError> {
+    let parsed = onnx_parser::parse_onnx(data).map_err(|_| LoadError::CorruptedData)?;
     let graph = onnx_parser::build_graph(&parsed)?;
 
-    // Calculate total weight size (expanded for FP16→FP32 conversion)
     let total_weight_size = parsed.total_weight_size_expanded();
     if total_weight_size == 0 {
         return Err(LoadError::InvalidFormat);
     }
 
-    // Allocate weight memory from pool
     let weights = mm::alloc_weights(total_weight_size)?;
-
-    // Copy weight data into allocated block
     let weight_ptr = match mm::get_ptr(weights) {
         Some(ptr) => ptr,
         None => {
@@ -254,7 +291,6 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         }
     };
 
-    // Copy each initializer's data into the weight block and build weight table
     let mut weight_table = WeightTable::EMPTY;
     let mut offset: usize = 0;
     for i in 0..parsed.initializer_count {
@@ -268,14 +304,12 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         // int64_data is varint-encoded in protobuf, but we need raw little-endian
         // bytes for the inference engine to read directly as *const i64.
         //
-        // The previous version stashed the decode buffer in a `static
-        // mut` for stack savings, but the comment claiming "load_model
-        // is serialized by the registry lock" was incorrect — the
-        // SpinGuard isn't acquired until much later in this function.
-        // Two concurrent loaders would race on the static buffer and
-        // corrupt each other's reshape shapes. A stack array of
-        // MAX_DIMS * 8 bytes is small enough to be safe (engine caps
-        // at MAX_DIMS = 8 → 64 bytes) and per-call.
+        // Stack-allocated decode buffer (per-call). A prior version
+        // stashed this in a `static mut` for stack savings under the
+        // assumption that load was serialized — that assumption was
+        // wrong (SpinGuard is acquired much later) and concurrent
+        // loaders / swaps would have raced on the buffer. MAX_DIMS=8
+        // → 64 bytes is small enough to be safe on the kernel stack.
         let mut i64_decode_buf = [0u8; 64];
         let src = if let Some(raw) = tensor.raw_data {
             raw
@@ -309,16 +343,13 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
             continue;
         };
 
-        // Check if FP16→FP32 conversion is needed
         let is_fp16 = tensor.data_type == super::onnx_parser::OnnxDataType::Float16;
         let stored_size = if is_fp16 {
-            // FP16: each 2-byte element becomes 4 bytes
             (src.len() / 2) * 4
         } else {
             src.len()
         };
 
-        // Record weight entry in table
         if weight_table.count < super::graph::MAX_WEIGHT_ENTRIES {
             let mut shape = TensorShape::EMPTY;
             let ndim = core::cmp::min(tensor.shape.ndim as usize, 8);
@@ -330,7 +361,6 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
                 };
             }
             shape.ndim = ndim as u8;
-            // FP16 weights are stored as FP32 after conversion
             shape.elem_type = if is_fp16 {
                 ElemType::Float
             } else {
@@ -369,7 +399,6 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         unsafe {
             let dest = weight_ptr.add(offset);
             if is_fp16 {
-                // Convert FP16 → FP32 in-place during copy
                 let n_elements = src.len() / 2;
                 let dest_f32 = dest as *mut f32;
                 for e in 0..n_elements {
@@ -383,8 +412,7 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         offset += stored_size;
     }
 
-    // Estimate workspace: max intermediate tensor size (rough heuristic)
-    // Use 25% of weight size or minimum 64KB
+    // Workspace: 25% of weight size or minimum 64KB.
     let workspace_size = core::cmp::max(total_weight_size / 4, 64 * 1024);
     let workspace = match mm::alloc_workspace(workspace_size) {
         Ok(w) => w,
@@ -394,13 +422,11 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         }
     };
 
-    // Count total parameters
     let mut param_count: u64 = 0;
     for i in 0..parsed.initializer_count {
         param_count += parsed.initializers[i].num_elements() as u64;
     }
 
-    // Build metadata
     let mut info = ModelInfoC::EMPTY;
     let name_len = core::cmp::min(name.len(), MODEL_NAME_LEN - 1);
     info.name[..name_len].copy_from_slice(&name[..name_len]);
@@ -412,76 +438,200 @@ pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     info.input_count = graph.input_count as u32;
     info.output_count = graph.output_count as u32;
 
-    // Store in registry
+    let mut name_buf = [0u8; MODEL_NAME_LEN];
+    name_buf[..name_len].copy_from_slice(&name[..name_len]);
+
+    Ok(PreparedPayload {
+        weights,
+        workspace,
+        graph,
+        weight_table,
+        info,
+        name_buf,
+    })
+}
+
+/// Load an ONNX model from a buffer.
+///
+/// Returns the registry slot index on success.
+pub fn load_model(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
+    let payload = prepare_onnx_payload(name, data)?;
+    // Save handles up-front so the install-failure cleanup path
+    // doesn't need to keep payload alive after partial moves.
+    let payload_weights = payload.weights;
+    let payload_workspace = payload.workspace;
+
     let result = {
         let _g = SpinGuard::new();
         // SAFETY: SpinGuard held — exclusive access to REGISTRY.
         unsafe {
             let reg = &mut *REGISTRY.get();
 
-        // Find a free slot
-        let mut slot_idx = None;
-        for (i, entry) in reg.entries.iter().enumerate() {
-            if !entry.active {
-                slot_idx = Some(i);
-                break;
-            }
-        }
-
-        // If no free slot, try LRU eviction
-        if slot_idx.is_none() {
-            let mut lru_idx: Option<usize> = None;
-            let mut lru_time: u64 = u64::MAX;
+            let mut slot_idx = None;
             for (i, entry) in reg.entries.iter().enumerate() {
-                if entry.active && !entry.pinned && entry.last_used < lru_time {
-                    lru_time = entry.last_used;
-                    lru_idx = Some(i);
+                if !entry.active {
+                    slot_idx = Some(i);
+                    break;
                 }
             }
-            if let Some(evict_idx) = lru_idx {
-                // Evict: free memory
-                let evicted = &mut reg.entries[evict_idx];
-                let _ = mm::free(evicted.weights);
-                let _ = mm::free(evicted.workspace);
-                *evicted = LoadedModelEntry::empty();
-                slot_idx = Some(evict_idx);
-            }
-        }
 
-        match slot_idx {
-            Some(idx) => {
-                let mut entry_name = [0u8; MODEL_NAME_LEN];
-                entry_name[..name_len].copy_from_slice(&name[..name_len]);
-
-                // Start from `empty()` and override only the fields that
-                // differ — keeps the post-load default in one place
-                // (`LoadedModelEntry::empty`) so a future change to e.g.
-                // the per-model GPU-dispatch default doesn't have to be
-                // mirrored at both sites.
-                let mut entry = LoadedModelEntry::empty();
-                entry.name = entry_name;
-                entry.weights = weights;
-                entry.workspace = workspace;
-                entry.graph = graph;
-                entry.weight_table = weight_table;
-                entry.info = info;
-                entry.active = true;
-                entry.last_used = crate::kernel_ffi::get_time_ns();
-                reg.entries[idx] = entry;
-                Ok(idx)
+            if slot_idx.is_none() {
+                let mut lru_idx: Option<usize> = None;
+                let mut lru_time: u64 = u64::MAX;
+                for (i, entry) in reg.entries.iter().enumerate() {
+                    if entry.active && !entry.pinned && entry.last_used < lru_time {
+                        lru_time = entry.last_used;
+                        lru_idx = Some(i);
+                    }
+                }
+                if let Some(evict_idx) = lru_idx {
+                    let evicted = &mut reg.entries[evict_idx];
+                    let _ = mm::free(evicted.weights);
+                    let _ = mm::free(evicted.workspace);
+                    *evicted = LoadedModelEntry::empty();
+                    slot_idx = Some(evict_idx);
+                }
             }
+
+            match slot_idx {
+                Some(idx) => {
+                    // Start from `empty()` and override only the fields
+                    // that differ — keeps the post-load default in one
+                    // place (`LoadedModelEntry::empty`) so a future
+                    // change to e.g. the per-model GPU-dispatch default
+                    // doesn't have to be mirrored at both sites.
+                    let mut entry = LoadedModelEntry::empty();
+                    entry.name = payload.name_buf;
+                    entry.weights = payload.weights;
+                    entry.workspace = payload.workspace;
+                    entry.graph = payload.graph;
+                    entry.weight_table = payload.weight_table;
+                    entry.info = payload.info;
+                    entry.active = true;
+                    entry.last_used = crate::kernel_ffi::get_time_ns();
+                    entry.backend_kind = BackendKind::CpuOnnx;
+                    reg.entries[idx] = entry;
+                    Ok(idx)
+                }
                 None => Err(LoadError::ModelTooLarge), // All slots pinned
             }
         }
     };
 
     if result.is_err() {
-        // Clean up on failure
-        let _ = mm::free(weights);
-        let _ = mm::free(workspace);
+        let _ = mm::free(payload_weights);
+        let _ = mm::free(payload_workspace);
     }
 
     result
+}
+
+/// Atomically replace the weights, workspace, graph, and metadata at
+/// a registry slot with a freshly parsed ONNX payload.
+///
+/// The new payload is parsed and allocated *outside* the registry
+/// lock, so the heavy work (multi-MB `mm::alloc_weights` + memcpy)
+/// does not extend the lock-hold window. Inside the lock we snapshot
+/// the OLD handles, swap in the new ones, and release. The OLD
+/// `mm::free` then runs after the lock is released.
+///
+/// **In-flight inferences are safe.** `run_inference` and the GPU
+/// map/unmap helpers each hold a `WeightLease` for the duration of
+/// the call, which bumps the weight block's refcount. The
+/// `mm::free(old_weights)` at the bottom of this function decrements
+/// the refcount, but the actual deallocation is deferred until every
+/// outstanding lease drops — so a swap arriving mid-flight cannot
+/// invalidate a `*mut u8` an inference is currently reading.
+///
+/// Slot identity is preserved across the swap: `pinned`,
+/// `gpu_dispatch_enabled`, and the slot's `active` flag carry over.
+/// `use_count` resets to 0 (this is a different model now) and
+/// `last_used` updates to the current time.
+///
+/// Returns `LoadError::InvalidIndex` if the slot is empty,
+/// `LoadError::SwapNotSupported` if the slot's backend is not
+/// `BackendKind::CpuOnnx` (Hailo CCW re-upload swap is tracked in
+/// #532), and the parser's error for malformed payloads.
+pub fn swap_model(index: usize, name: &[u8], data: &[u8]) -> Result<(), LoadError> {
+    if index >= MAX_MODELS {
+        return Err(LoadError::InvalidIndex);
+    }
+
+    // Quick pre-flight check: reject obvious failures before doing
+    // the expensive parse + allocate.
+    //
+    // The lock is dropped between this check and the atomic swap
+    // below, so the slot's `active` and `backend_kind` are read
+    // again under the second lock acquisition. Today nothing in the
+    // codebase mutates `backend_kind` on an existing slot
+    // (`load_model` only writes to empty slots; `swap_model` never
+    // changes the kind), so the pre-flight is effectively
+    // race-free. If a future operation ever changes a slot's
+    // backend in place, the inside-lock recheck still catches the
+    // race correctly — at the cost of one wasted multi-MB parse.
+    {
+        let _g = SpinGuard::new();
+        // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
+        unsafe {
+            let reg = &*REGISTRY.get();
+            let entry = &reg.entries[index];
+            if !entry.active {
+                return Err(LoadError::InvalidIndex);
+            }
+            if entry.backend_kind != BackendKind::CpuOnnx {
+                return Err(LoadError::SwapNotSupported);
+            }
+        }
+    }
+
+    // Build the new payload OUTSIDE the lock.
+    let payload = prepare_onnx_payload(name, data)?;
+    let new_weights = payload.weights;
+    let new_workspace = payload.workspace;
+
+    // Atomic replacement under the lock. Re-check active + backend
+    // because the slot could have been unloaded between the
+    // pre-flight read and now.
+    let outcome: Result<(ModelHandle, ModelHandle), LoadError> = {
+        let _g = SpinGuard::new();
+        // SAFETY: SpinGuard held — exclusive access to REGISTRY.
+        unsafe {
+            let reg = &mut *REGISTRY.get();
+            let entry = &mut reg.entries[index];
+            if !entry.active {
+                Err(LoadError::InvalidIndex)
+            } else if entry.backend_kind != BackendKind::CpuOnnx {
+                Err(LoadError::SwapNotSupported)
+            } else {
+                let old_weights = entry.weights;
+                let old_workspace = entry.workspace;
+                entry.name = payload.name_buf;
+                entry.weights = payload.weights;
+                entry.workspace = payload.workspace;
+                entry.graph = payload.graph;
+                entry.weight_table = payload.weight_table;
+                entry.info = payload.info;
+                entry.last_used = crate::kernel_ffi::get_time_ns();
+                entry.use_count = 0;
+                Ok((old_weights, old_workspace))
+            }
+        }
+    };
+
+    match outcome {
+        Ok((old_w, old_ws)) => {
+            // Free the OLD allocations. Refcount semantics keep them
+            // alive for any in-flight WeightLease.
+            let _ = mm::free(old_w);
+            let _ = mm::free(old_ws);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = mm::free(new_weights);
+            let _ = mm::free(new_workspace);
+            Err(e)
+        }
+    }
 }
 
 /// Touch a model (update last_used timestamp and use_count).
@@ -676,6 +826,50 @@ pub fn share_weights(index: usize) -> Option<ModelHandle> {
         } else {
             mm::share(reg.entries[index].weights).ok()
         }
+    }
+}
+
+/// RAII lease that pins a model's weight block in memory for the
+/// duration of an inference (or any other slot consumer that holds a
+/// raw pointer into the weights). Constructed via `WeightLease::acquire`,
+/// it bumps the refcount on construction and unshares on drop, so an
+/// `unload` or `swap_model` racing against the call freezes the OLD
+/// weight block in place until every outstanding lease releases. The
+/// underlying memory only goes back on the pool's free list once the
+/// last lease drops.
+///
+/// The handle is exposed via `handle()` so callers can resolve it to
+/// a `*mut u8` through `mm::get_ptr`. The struct auto-impls `Send`
+/// and `Sync` (it wraps a `Copy` `ModelHandle`); both are sound — the
+/// only side effect is the `Drop` impl, which runs once when the
+/// lease falls out of scope and goes through the model_mem allocator
+/// lock.
+pub struct WeightLease {
+    handle: ModelHandle,
+}
+
+impl WeightLease {
+    /// Acquire a lease on the given model slot. Returns `None` if the
+    /// slot is empty or the underlying refcount bump fails.
+    pub fn acquire(index: usize) -> Option<Self> {
+        share_weights(index).map(|h| Self { handle: h })
+    }
+
+    /// Returns the underlying handle. The lease keeps the refcount
+    /// bumped until it is dropped, so the caller may freely use this
+    /// handle with `mm::get_ptr` for the lease's lifetime.
+    pub fn handle(&self) -> ModelHandle {
+        self.handle
+    }
+}
+
+impl Drop for WeightLease {
+    fn drop(&mut self) {
+        // The handle is non-null because acquire only returns Some on
+        // a successful share. unshare's only failure modes here are
+        // "already-freed" or "stale generation", both of which are
+        // benign at drop time and intentionally swallowed.
+        let _ = mm::unshare(self.handle);
     }
 }
 
