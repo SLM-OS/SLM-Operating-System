@@ -2062,6 +2062,144 @@ static void test_scanner_empty_range(void)
     REQUIRE_EQ(found, 0);
 }
 
+/* ============================================================================
+ * PR-3 of gpu-policy-models.md: kind-aware scanner tests
+ *
+ * `ga10b_find_handoff_of_kind_in_range` walks the same DRAM range as
+ * the magic-only scanner but only returns matches whose pipeline_kind
+ * field equals `wanted_kind`. Plant N handoffs of various kinds in a
+ * single buffer and verify the kind discriminator selects correctly.
+ * ============================================================================ */
+
+/* Place a fully-valid handoff at `buf + page * 4096`, tagged with
+ * the given pipeline_kind. Caller pre-zeroed the buffer and supplied
+ * its CPU-physical-mapped base; this just installs the bytes. */
+static void plant_handoff(uint32_t *buf, size_t page, uint32_t kind)
+{
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version = 6;
+    h.pipeline_kind = kind;
+    memcpy((char *)buf + page * 4096, &h, sizeof(h));
+}
+
+static void test_scanner_kind_finds_first_matching(void)
+{
+    printf("== test_scanner_kind_finds_first_matching ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    /* Plant MNIST at page 1, SCHED_MLP at page 4, EVICTION at page 8. */
+    plant_handoff(buf, 1, GA10B_PIPELINE_KIND_MNIST);
+    plant_handoff(buf, 4, GA10B_PIPELINE_KIND_SCHED_MLP);
+    plant_handoff(buf, 8, GA10B_PIPELINE_KIND_EVICTION_QNET);
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t end   = start + 65536;
+
+    /* Each kind should resolve to its planted address. */
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_MNIST),
+               start + 1 * 4096);
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_SCHED_MLP),
+               start + 4 * 4096);
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_EVICTION_QNET),
+               start + 8 * 4096);
+    free(buf);
+}
+
+static void test_scanner_kind_returns_zero_when_kind_absent(void)
+{
+    printf("== test_scanner_kind_returns_zero_when_kind_absent ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+    /* Only an MNIST handoff is in DRAM. Asking for SCHED_MLP must
+     * return 0 — pins the discriminator skipping past wrong-kind
+     * matches without falling back to the first magic match. */
+    plant_handoff(buf, 1, GA10B_PIPELINE_KIND_MNIST);
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t end   = start + 65536;
+
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_SCHED_MLP),
+               0);
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_EVICTION_QNET),
+               0);
+    /* But MNIST is still findable. */
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_MNIST),
+               start + 1 * 4096);
+    free(buf);
+}
+
+static void test_scanner_kind_skips_invalid_handoff(void)
+{
+    printf("== test_scanner_kind_skips_invalid_handoff ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+
+    /* Page 1 has the magic but is otherwise zero (validation fails:
+     * userd/gpfifo/pushbuf/semaphore all 0). The scanner must skip
+     * it and find the real handoff at page 4. */
+    buf[1024] = GA10B_CHANNEL_HANDOFF_MAGIC;  /* page 1 word 0 */
+    plant_handoff(buf, 4, GA10B_PIPELINE_KIND_SCHED_MLP);
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t end   = start + 65536;
+
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_SCHED_MLP),
+               start + 4 * 4096);
+    free(buf);
+}
+
+static void test_scanner_kind_legacy_zero_is_mnist(void)
+{
+    printf("== test_scanner_kind_legacy_zero_is_mnist ==\n");
+    uint32_t *buf;
+    if (posix_memalign((void **)&buf, 4096, 65536) != 0) {
+        REQUIRE(0 && "posix_memalign");
+        return;
+    }
+    memset(buf, 0, 65536);
+
+    /* Plant a handoff with pipeline_kind explicitly zero — equivalent
+     * to a v6 producer that didn't set the field. The scanner should
+     * still find it under wanted_kind = MNIST = 0. Pins the back-
+     * compat invariant called out in the field's doc-comment. */
+    struct ga10b_channel_handoff h;
+    fill_valid_handoff(&h);
+    h.version = 6;
+    h.pipeline_kind = 0;  /* legacy / un-set */
+    memcpy((char *)buf + 1 * 4096, &h, sizeof(h));
+
+    uint64_t start = (uint64_t)(uintptr_t)buf;
+    uint64_t end   = start + 65536;
+
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_MNIST),
+               start + 1 * 4096);
+    REQUIRE_EQ(ga10b_find_handoff_of_kind_in_range(start, end, 4096,
+                                GA10B_PIPELINE_KIND_SCHED_MLP),
+               0);
+    free(buf);
+}
+
 /* ======================================================================
  * Pipeline poll-match predicate (ga10b_channel_handoff.h
  * `ga10b_poll_match`). Used by both the kernel-side
@@ -2384,6 +2522,10 @@ int main(void)
     test_scanner_returns_zero_on_miss();
     test_scanner_skips_between_pages();
     test_scanner_empty_range();
+    test_scanner_kind_finds_first_matching();
+    test_scanner_kind_returns_zero_when_kind_absent();
+    test_scanner_kind_skips_invalid_handoff();
+    test_scanner_kind_legacy_zero_is_mnist();
 
     test_poll_match_exact();
     test_poll_match_any_nonzero();

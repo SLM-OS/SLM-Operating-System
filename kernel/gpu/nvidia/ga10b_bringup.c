@@ -1049,19 +1049,23 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
  * (Jetson's PMM/VMM maps the full 6.7 GB of non-ECC DRAM). If a
  * future VMM change skips any 4 KB page in the scan range, this
  * function will take a synchronous data abort with no recovery. */
-/* Scan for a handoff whose `pipeline_kind` matches `wanted_kind`. The
- * underlying scanner walks the same DRAM range looking for the magic;
- * we wrap it in a loop that validates each candidate and rejects ones
- * whose kind doesn't match (or whose validation fails outright).
- * `wanted_kind` accepts `enum ga10b_pipeline_kind`; passing
- * `GA10B_PIPELINE_KIND_MNIST` (= 0) finds legacy v6 handoffs that
- * didn't set the field too. PR-3 of gpu-policy-models.md. */
-static uint64_t find_handoff_scan_kind(uint32_t wanted_kind)
+/* Public, host-testable kind-aware scanner. Walks the same DRAM
+ * range as `ga10b_find_handoff_in_range` but skips matches whose
+ * pipeline_kind doesn't equal `wanted_kind`. Each magic-matching
+ * candidate is also passed through `ga10b_validate_handoff` so a
+ * pseudorandom 32-bit collision with the magic doesn't masquerade
+ * as a real handoff. Returns 0 if no kind-matching handoff exists.
+ * PR-3 of gpu-policy-models.md.
+ *
+ * Pure-logic — no MMIO, no globals. Pinned by host tests in
+ * host-tools/gsp-harness/test_ga10b_bringup.c. */
+uint64_t ga10b_find_handoff_of_kind_in_range(uint64_t start, uint64_t end,
+                                             uint64_t stride,
+                                             uint32_t wanted_kind)
 {
-    uint64_t cursor = 0x100000000ULL;
-    const uint64_t end = 0x200000000ULL;
+    uint64_t cursor = start;
     while (cursor < end) {
-        uint64_t found = ga10b_find_handoff_in_range(cursor, end, 4096);
+        uint64_t found = ga10b_find_handoff_in_range(cursor, end, stride);
         if (found == 0) return 0;
         const struct ga10b_channel_handoff *h =
             (const struct ga10b_channel_handoff *)(uintptr_t)found;
@@ -1070,10 +1074,17 @@ static uint64_t find_handoff_scan_kind(uint32_t wanted_kind)
             return found;
         }
         /* Magic matched but validation failed or kind didn't match;
-         * advance one page and keep scanning. */
-        cursor = found + 4096;
+         * advance past this match and keep scanning. */
+        cursor = found + stride;
     }
     return 0;
+}
+
+static uint64_t find_handoff_scan_kind(uint32_t wanted_kind)
+{
+    return ga10b_find_handoff_of_kind_in_range(0x100000000ULL,
+                                                0x200000000ULL,
+                                                4096, wanted_kind);
 }
 
 int ga10b_bringup_channel(struct ga10b_bringup *b)

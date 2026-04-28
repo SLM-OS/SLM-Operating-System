@@ -253,6 +253,9 @@ _Static_assert(offsetof(struct ga10b_channel_handoff, input_buf_phys) == 216,
                "v6 input_buf_phys offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, input_buf_size) == 224,
                "v6 input_buf_size offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, pipeline_kind) == 228,
+               "PR-3 pipeline_kind offset drifted (must be 228 — last "
+               "u32 in the struct, was previously _pad4)");
 _Static_assert(offsetof(struct ga10b_pipeline_op, qmd_gpu_va) == 0,
                "pipeline_op.qmd_gpu_va must be at offset 0");
 _Static_assert(offsetof(struct ga10b_pipeline_op, output_phys) == 8,
@@ -275,6 +278,23 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h);
  */
 uint64_t ga10b_find_handoff_in_range(uint64_t start, uint64_t end,
                                      uint64_t stride);
+
+/*
+ * Same as `ga10b_find_handoff_in_range` but only returns a match
+ * whose `pipeline_kind` field equals `wanted_kind` (one of `enum
+ * ga10b_pipeline_kind`). Skips magic-matching candidates whose
+ * validation fails or whose kind doesn't match, continuing the
+ * scan past each. Returns 0 if no kind-matching handoff exists.
+ *
+ * PR-3 of docs/specs/gpu-policy-models.md. Production callers wrap
+ * this in `ga10b_bringup_channel_kind`; host tests pass mocked
+ * memory ranges to validate the kind-discriminator logic.
+ *
+ * Pure-logic — no MMIO, no globals, host-testable.
+ */
+uint64_t ga10b_find_handoff_of_kind_in_range(uint64_t start, uint64_t end,
+                                             uint64_t stride,
+                                             uint32_t wanted_kind);
 
 /*
  * Pick the poll-target payload for `nvgpu launch-kernel`. v4 handoffs

@@ -19,7 +19,7 @@ Current inference paths and what each platform delivers today.
 | Host-side test count | — | — | 41 tests (26 bringup + 15 platform shim) | 117 tests across 5 suites |
 | Inference backend | CPU NEON (AI sched MLP) | CPU NEON | CPU NEON (default) + GA10B GPU fastpath for MNIST when `gpu use inference on` + `--no-gpu-suspend` kexec | CPU SSE (GPU not in inference path) |
 | Model formats supported | ONNX via rust runtime | Same | Same | Same |
-| Operator toggle surface | — | — | `gpu use inference on/off` (master), `model use-gpu <name> on/off` (per-model), `gpu use sched on/off` + `gpu use eviction on/off` (scaffold; warn) | Same toggle surface (master flag is no-op until GA10x dispatch lands) |
+| Operator toggle surface | — | — | `gpu use inference on/off` (master, MNIST), `model use-gpu <name> on/off` (per-model), `gpu use sched on/off` (WIRED — ai_mlp on GA10B via `slm_gpu_run_sched_inference`, PR-3 of `gpu-policy-models.md`), `gpu use eviction on/off` (scaffold; warn) | Same toggle surface (master flag is no-op until GA10x dispatch lands) |
 
 ## Skipped / Blocked
 
