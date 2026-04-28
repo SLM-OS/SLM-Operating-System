@@ -289,21 +289,11 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     let vocab_size = vocab_size_of(&gguf)?;
     let tensor_count = u32::try_from(gguf.tensor_count())
         .map_err(|_| LoadError::CorruptedData)?;
-    let source_bytes = match u32::try_from(data.len()) {
-        Ok(n) => n,
-        Err(_) => {
-            // Telemetry-only: a > 4 GiB GGUF saturates the u32 field.
-            // Log per the project's "warn on saturation" convention so
-            // the inflated source_bytes in `slm info` doesn't surprise
-            // a downstream reader.
-            unsafe {
-                kernel_ffi::uart_puts(
-                    b"[slm] source_bytes saturated to u32::MAX; GGUF > 4 GiB\n\0".as_ptr(),
-                );
-            }
-            u32::MAX
-        }
-    };
+    // `data.len()` is already bounded above by `MAX_PLAUSIBLE_GGUF_BYTES`
+    // (2 GiB), so the u32 cast is provably loss-free. Earlier revisions
+    // had a saturating fallback for > 4 GiB inputs; the M5.3.1 review
+    // pointed out it was dead code now that the upstream cap is 2 GiB.
+    let source_bytes = data.len() as u32;
 
     // Build the tokenizer up-front. If this fails the GGUF lacked a
     // tokens/merges array — surface as CorruptedData rather than a
@@ -323,13 +313,34 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         });
     }
 
-    // Allocate a weight-pool block for the source bytes. The pool
-    // returns a 2 MB-aligned block; the allocator only needs the
-    // requested size to pick a block count, but as of M5.3.1 the
-    // pool is single-block-only so the size mostly serves as a
-    // bounds check. Rounded-up byte capacity is opaque to the
-    // caller — they only ever see `weight_data_len` valid bytes.
+    // Allocate a weight-pool block for the source bytes. As of
+    // Phase 3 the model-mem pool returns a fixed 2 MB single block
+    // regardless of the requested size — multi-block allocation is
+    // tracked as a follow-up for real Qwen-sized GGUFs (~1 GB). The
+    // explicit bounds check below catches the discrepancy at load
+    // time so a real GGUF fails fast with a clear error instead of
+    // silently overrunning the block during `copy_nonoverlapping`.
     let block = mm::alloc_weights(data.len()).map_err(map_alloc_err)?;
+    let block_size = match mm::get_size(block) {
+        Some(s) => s,
+        None => {
+            let _ = mm::free(block);
+            return Err(LoadError::AllocFailed);
+        }
+    };
+    if data.len() > block_size {
+        // Reject before any unsafe copy — see runtime/CLAUDE.md
+        // "Checked arithmetic at boundaries". `ModelTooLarge`
+        // surfaces back through the FFI as -1 with a UART log.
+        unsafe {
+            kernel_ffi::uart_puts(
+                b"[slm] GGUF too large for current single-block weight pool;\n  multi-block allocator landing in M5.3.3 follow-up.\n\0"
+                    .as_ptr(),
+            );
+        }
+        let _ = mm::free(block);
+        return Err(LoadError::ModelTooLarge);
+    }
     let block_ptr = match mm::get_ptr(block) {
         Some(p) if !p.is_null() => p,
         _ => {
@@ -343,12 +354,11 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     // touches lives inside the pool block from here on.
     //
     // SAFETY: `block_ptr` was just returned by `mm::alloc_weights`
-    // and is valid for at least `data.len()` bytes (the pool block
-    // is rounded up to 2 MB, far past `data.len()` for the test
-    // fixtures and well-sized for production GGUFs). Source and
-    // destination cannot overlap (heap-allocated pool vs. caller's
-    // input buffer). `data` is initialized for `data.len()` bytes by
-    // the caller's contract.
+    // and the bounds check above guarantees `block_size >= data.len()`,
+    // so writing `data.len()` bytes stays inside the allocation.
+    // Source and destination cannot overlap (the pool block is
+    // distinct from the caller's input buffer). `data` is
+    // initialized for `data.len()` bytes per the caller's contract.
     unsafe {
         core::ptr::copy_nonoverlapping(data.as_ptr(), block_ptr, data.len());
     }
@@ -881,7 +891,14 @@ mod tests {
         let _serial = TestSerialGuard::new();
         ensure_mm_initialized();
         reset_for_tests();
-        let bytes = build_qwen_gguf_with_vocab(152_064);
+        // M5.3.1: trimmed vocab from the production 152 064 down to
+        // a value whose serialized GGUF fits in the single-block
+        // (2 MB) weight pool. The full Qwen vocab needs the
+        // multi-block allocator (M5.3.3 follow-up). The shape
+        // assertions below pin the architecture metadata, which is
+        // what the test was originally exercising — vocab size is
+        // an architecture-independent dial.
+        let bytes = build_qwen_gguf_with_vocab(2048);
         let idx = load_slm(b"qwen2.5-1.5b", &bytes).expect("load");
         assert_eq!(idx, 0);
 
@@ -895,7 +912,7 @@ mod tests {
         assert_eq!(info.head_dim, 128);
         assert_eq!(info.feed_forward_length, 8960);
         assert_eq!(info.context_length, 32768);
-        assert_eq!(info.vocab_size, 152_064);
+        assert_eq!(info.vocab_size, 2048);
         assert_eq!(info.rope_freq_base, 1_000_000.0);
         // M5.3.1: fixture now ships output_norm.weight + token_embd.weight.
         assert_eq!(info.tensor_count, 2);
@@ -1045,6 +1062,29 @@ mod tests {
             unload_slm(idx).expect("unload");
         }
         assert_eq!(count(), 0);
+    }
+
+    #[test]
+    fn unload_already_empty_slot_is_invalid_format() {
+        let _serial = TestSerialGuard::new();
+        ensure_mm_initialized();
+        reset_for_tests();
+        let bytes = build_qwen_gguf_with_vocab(16);
+        let idx = load_slm(b"x", &bytes).expect("load");
+        // First unload succeeds.
+        assert!(matches!(unload_slm(idx), Ok(())));
+        // Second unload on the now-empty slot must NOT double-free
+        // the weight block; the slot table's `take()` returns None
+        // and the registry surfaces InvalidFormat.
+        assert!(matches!(
+            unload_slm(idx),
+            Err(LoadError::InvalidFormat)
+        ));
+        // And an out-of-range index is rejected the same way.
+        assert!(matches!(
+            unload_slm(SLM_MAX_SLOTS),
+            Err(LoadError::InvalidFormat)
+        ));
     }
 
     #[test]
