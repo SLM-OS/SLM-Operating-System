@@ -275,6 +275,23 @@ static const struct imx219_reg_seq imx219_mode_binning_1640x1232[] = {
 #define IMX219_REG_CSI_LANE_MODE     0x0114u
 #define IMX219_LANE_MODE_2LANE       0x01u
 
+/* Default control values L4T applies via __v4l2_ctrl_handler_setup
+ * (`linux-imx219.c:705`) AFTER the mode-init table and BEFORE
+ * MODE_SELECT=1. Without these the sensor uses internal defaults
+ * that prevent streaming — specifically VTS=0 means "can't compute
+ * frame timing", so the sensor never emits a SOF.
+ *
+ * For binning mode 1640×1232, VTS=1763 (per supported_modes[2]
+ * .vts_def in L4T). EXPOSURE=0x640 (1600 lines, IMX219_EXPOSURE_DEFAULT).
+ * DIGITAL_GAIN=0x0100 ("1.0x", IMX219_DGTL_GAIN_DEFAULT).
+ * ANALOG_GAIN=0 (IMX219_ANA_GAIN_DEFAULT). */
+static const struct imx219_reg_seq imx219_default_ctrls_binning[] = {
+    R8 (0x0157, 0),                         /* ANALOG_GAIN */
+    R16(0x0158, 0x0100),                    /* DIGITAL_GAIN = 1.0x */
+    R16(0x015a, 0x0640),                    /* EXPOSURE = 1600 lines */
+    R16(0x0160, 1763),                      /* VTS — binning-mode 30 fps frame timing */
+};
+
 #undef R8
 #undef R16
 
@@ -329,6 +346,15 @@ int imx219_set_mode_binning_1640x1232(void)
     rc = imx219_write_table(imx219_mode_binning_1640x1232,
                             sizeof(imx219_mode_binning_1640x1232)
                             / sizeof(imx219_mode_binning_1640x1232[0]));
+    if (rc != 0) return rc;
+
+    /* 4. Default controls (4 writes) — VTS for frame timing,
+     * EXPOSURE / GAIN / DIGITAL_GAIN for AE baseline. Without
+     * VTS the sensor never produces a SOF (verified blocker on
+     * jetson-nano-1, this PR's iteration 1). */
+    rc = imx219_write_table(imx219_default_ctrls_binning,
+                            sizeof(imx219_default_ctrls_binning)
+                            / sizeof(imx219_default_ctrls_binning[0]));
     if (rc != 0) return rc;
 
     INFO("imx219: mode-init OK — 1640x1232 RAW10 binning, MODE_SELECT=standby");
