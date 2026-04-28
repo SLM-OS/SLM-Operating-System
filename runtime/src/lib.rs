@@ -121,6 +121,61 @@ mod test_ffi_stubs {
     /// during host unit tests it's harmless to drop the message.
     #[no_mangle]
     pub extern "C" fn uart_puts(_s: *const u8) {}
+
+    // M5.3.1: registry tests want to allocate from the weight pool
+    // (`mm::alloc_weights` → `kernel_ffi::alloc_pages`
+    // → `slm_alloc_pages`). The host has no kernel PMM; route the
+    // call through `std::alloc` so `cargo test` can exercise the
+    // weight-pool path with real allocations.
+    //
+    // The stubs only need to satisfy `model_mem_init`'s contract: a
+    // 2 MB-aligned base address. Allocations from `std::alloc` aren't
+    // page-aligned by default on all platforms, so we manually round
+    // up to a 2 MB boundary and remember the original pointer.
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static TEST_ALLOC_BUMP: AtomicUsize = AtomicUsize::new(0);
+
+    #[no_mangle]
+    pub extern "C" fn slm_alloc_pages(count: usize) -> *mut u8 {
+        // 4 KB pages → bytes.
+        let bytes = count.saturating_mul(4096);
+        let align = 2 * 1024 * 1024usize; // 2 MB
+        // Over-allocate by `align - 1` to give ourselves slack for
+        // manual alignment.
+        let total = bytes.saturating_add(align);
+        let layout = match core::alloc::Layout::from_size_align(total, 8) {
+            Ok(l) => l,
+            Err(_) => return core::ptr::null_mut(),
+        };
+        // SAFETY: layout is non-zero size; we own the returned ptr.
+        let raw = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        if raw.is_null() {
+            return core::ptr::null_mut();
+        }
+        let raw_addr = raw as usize;
+        let aligned = (raw_addr + align - 1) & !(align - 1);
+        // Track usage for sanity (optional).
+        TEST_ALLOC_BUMP.fetch_add(bytes, Ordering::Relaxed);
+        aligned as *mut u8
+    }
+
+    #[no_mangle]
+    pub extern "C" fn slm_free_pages(_addr: *mut u8, _count: usize) {
+        // Host stub: leak the allocation. The host process exits
+        // shortly after each test invocation; tests that loop alloc/
+        // free pairs are bounded and the OS reclaims everything on
+        // exit. Implementing real free would require remembering the
+        // original (pre-alignment) pointer, which is more bookkeeping
+        // than tests need.
+    }
+
+    /// Host stub for `slm_task_current`. The model_mem allocator
+    /// stamps `owner_task` on every allocation; tests don't care
+    /// about the value, so any constant works.
+    #[no_mangle]
+    pub extern "C" fn slm_task_current() -> u32 {
+        0
+    }
 }
 
 // =============================================================================
@@ -4913,29 +4968,11 @@ pub unsafe extern "C" fn rust_slm_prompt(
         Err(_) => return -1,
     };
 
-    // The decoder needs a tokenizer. M5.2 doesn't yet stash a
-    // per-session tokenizer (the registry only stores metadata —
-    // M5.3 plumbs the GGUF bytes through), so for now we synthesize
-    // an empty tokenizer-less path: the decoder still exercises its
-    // state machine, but it can't tokenize the prompt. A proper
-    // wire-up is part of M5.3. To keep the FFI shape stable we
-    // reject the call here and have the M7 shell layer decode
-    // tokens itself for the parity tests until M5.3 lands.
-    //
-    // For tests that bypass tokenization entirely (the kernel C
-    // tests pass an empty prompt to drive the state machine), the
-    // empty path below stays valid.
-    if !prompt_str.is_empty() {
-        // Currently no in-runtime tokenizer for the loaded model.
-        // Surface a clean error so the caller knows to wait on M5.3.
-        // Distinct from -1 ("session not Open / overflow / ...") so
-        // shell layers can branch on it. Keeping -1 for now to avoid
-        // widening the error-code surface mid-milestone; M5.3 introduces
-        // a typed error-code enum (`SLM_ERR_NOT_IMPLEMENTED = -2`) per
-        // the M5.3 spec section.
-        return -1;
-    }
-
+    // M5.3.1: the decoder fetches the tokenizer from the registry
+    // via `with_loaded_slm` — the FFI shim no longer needs to
+    // synthesize one. Empty prompts go straight through and exit
+    // cleanly without entering the decode loop; non-empty prompts
+    // tokenize against the loaded model's `Bbpe`.
     let cfg = slm::decoder::DecodeConfig {
         max_new_tokens,
         eos_token_id: 2,
@@ -4948,23 +4985,8 @@ pub unsafe extern "C" fn rust_slm_prompt(
     if !ffi_cb::try_install(cb, user) {
         return -1;
     }
-    let tokenizer = match try_empty_tokenizer() {
-        Some(t) => t,
-        None => {
-            ffi_cb::clear();
-            return -1;
-        }
-    };
     let result = slm::session::with_session(session_id as usize, |s| {
-        slm::decoder::run_prompt(
-            s,
-            // Tokenizer placeholder — see comment above. With an
-            // empty prompt the decoder never calls `encode`.
-            &tokenizer,
-            prompt_str,
-            &cfg,
-            ffi_cb_trampoline,
-        )
+        slm::decoder::run_prompt(s, prompt_str, &cfg, ffi_cb_trampoline)
     });
     ffi_cb::clear();
 
@@ -4972,73 +4994,6 @@ pub unsafe extern "C" fn rust_slm_prompt(
         Some(Some(_stats)) => 0,
         _ => -1,
     }
-}
-
-/// Build a placeholder tokenizer for the M5.2 FFI path.
-///
-/// M5.3 will replace this with a per-session tokenizer fetched
-/// from the loaded GGUF (the registry will store the parsed
-/// `Bbpe`). For now the tokenizer is only used through `encode` /
-/// `decode` calls inside `run_prompt`; with an empty prompt the
-/// decoder never reaches them.
-///
-/// Returns `None` instead of panicking on construction failure —
-/// FFI entry points must never panic into a halt under
-/// `runtime/CLAUDE.md`'s safety posture.
-#[cfg(feature = "slm")]
-fn try_empty_tokenizer() -> Option<slm::tokenizer::Bbpe> {
-    use slm::gguf::{
-        DEFAULT_ALIGNMENT, GGUF_MAGIC, GGUF_VERSION, MetaArray, MetaType, MetaValue,
-    };
-    use alloc::string::String;
-    use alloc::vec::Vec;
-
-    // Build a tiny GGUF with one token + zero merges, then parse it
-    // into a `Bbpe`. The produced tokenizer is intentionally trivial
-    // and is only sound for the empty-prompt path of M5.2.
-    let kvs: alloc::vec::Vec<(&'static str, MetaValue)> = alloc::vec![
-        (
-            "tokenizer.ggml.tokens",
-            MetaValue::Array(MetaArray {
-                elem_type: MetaType::String,
-                values: alloc::vec![MetaValue::String(String::from("<unk>"))],
-            }),
-        ),
-        (
-            "tokenizer.ggml.merges",
-            MetaValue::Array(MetaArray {
-                elem_type: MetaType::String,
-                values: Vec::new(),
-            }),
-        ),
-    ];
-
-    let mut buf: Vec<u8> = Vec::with_capacity(256);
-    buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
-    buf.extend_from_slice(&GGUF_VERSION.to_le_bytes());
-    buf.extend_from_slice(&0u64.to_le_bytes());
-    buf.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
-    for (k, v) in &kvs {
-        buf.extend_from_slice(&(k.len() as u64).to_le_bytes());
-        buf.extend_from_slice(k.as_bytes());
-        // Type tag.
-        buf.extend_from_slice(&v.meta_type().as_u32().to_le_bytes());
-        if let MetaValue::Array(MetaArray { elem_type, values }) = v {
-            buf.extend_from_slice(&elem_type.as_u32().to_le_bytes());
-            buf.extend_from_slice(&(values.len() as u64).to_le_bytes());
-            for elem in values {
-                if let MetaValue::String(s) = elem {
-                    buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
-                    buf.extend_from_slice(s.as_bytes());
-                }
-            }
-        }
-    }
-    let pad = (DEFAULT_ALIGNMENT - (buf.len() as u64 % DEFAULT_ALIGNMENT)) % DEFAULT_ALIGNMENT;
-    buf.extend(core::iter::repeat_n(0u8, pad as usize));
-
-    let g = slm::gguf::Gguf::parse(&buf).ok()?;
-    slm::tokenizer::Bbpe::from_gguf(&g).ok()
 }
 
 /// Cooperative-cancel signal for an in-flight `rust_slm_prompt` call.
