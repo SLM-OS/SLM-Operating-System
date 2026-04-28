@@ -659,13 +659,25 @@ int tolower(int c) { return isupper(c) ? c + 32 : c; }
  * Locale Stubs
  * ============================================================================ */
 
-static struct lconv default_lconv = {
+/* Marked const so it lands in .rodata (read-only) instead of .data.
+ * A prior crash report had `default_lconv.decimal_point` overwritten
+ * with a bogus pointer at runtime, hard-faulting Lua's float-to-string
+ * locale path. With the storage in .rodata, any rogue write to this
+ * symbol now faults at the write rather than silently corrupting the
+ * struct — turning an "occasional Lua page fault" into a deterministic
+ * crash that points at the culprit. The Lua-side dereference is also
+ * eliminated via -Dlua_getlocaledecpoint()=46 in CMakeLists.txt, so
+ * the readers no longer touch this struct anyway. */
+static const struct lconv default_lconv = {
     .decimal_point = ".",
     .thousands_sep = "",
 };
 
 struct lconv *localeconv(void) {
-    return &default_lconv;
+    /* Cast away const at the API boundary. The POSIX prototype is
+     * non-const, but no caller in the freestanding build writes to
+     * the returned struct. */
+    return (struct lconv *)&default_lconv;
 }
 
 char *setlocale(int category, const char *locale) {

@@ -16,6 +16,7 @@
  */
 
 #include "kprintf.h"
+#include "kprintf_float.h"
 #include "uart.h"
 #include "spinlock.h"
 #include "ncmem.h"
@@ -313,15 +314,22 @@ static void fmt_signed_width(struct fmt_output *out, int64_t value,
 /*
  * Common formatted output with va_list and output abstraction.
  *
- * Supported format: %[flags][width][length]specifier
- *   Flags:  - (left-justify), 0 (zero-pad)
- *   Width:  minimum field width (decimal number)
- *   Length: l (long)
- *   Specifiers: c, s, d, i, u, x, X, p, %
+ * Supported format: %[flags][width][.precision][length]specifier
+ *   Flags:      - (left-justify), 0 (zero-pad)
+ *   Width:      minimum field width (decimal number)
+ *   Precision:  `.N` decimal digits — affects %f / %F / %e / %E / %g / %G;
+ *               ignored for the integer / string specifiers.
+ *   Length:     l (long), ll (long long), z (size_t) — collapses to 64-bit
+ *               on both kernel targets.
+ *   Specifiers: c, s, d, i, u, x, X, p, %, f, F, e, E, g, G.
  *
  * Bare text characters (outside format specifiers) get \r\n conversion
  * when out->crlf is set (UART output). %s strings also get conversion.
  * %c does NOT get \r\n conversion (preserving existing behavior).
+ *
+ * Float formatting is freestanding (no libc / libm) and uses '.' as the
+ * decimal — no locale plumbing. NaN renders as "nan"/"NAN", ±Inf as
+ * "inf"/"INF" matching the case of the conversion letter.
  */
 static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
 {
@@ -352,6 +360,20 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
         while (*fmt >= '0' && *fmt <= '9') {
             width = width * 10 + (*fmt - '0');
             fmt++;
+        }
+
+        /* Parse precision (`.N`). -1 means "default for the conversion"
+         * (e.g., 6 decimals for %f). 0 is a real value (no fractional
+         * part for %f). Only the float specifiers honor this — %d /
+         * %s / %x ignore it for now. */
+        int precision = -1;
+        if (*fmt == '.') {
+            fmt++;
+            precision = 0;
+            while (*fmt >= '0' && *fmt <= '9') {
+                precision = precision * 10 + (*fmt - '0');
+                fmt++;
+            }
         }
 
         /* Parse length modifier. Accept one *or two* 'l's so that %llu /
@@ -436,6 +458,22 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
             fmt_unsigned_width(out, (uint64_t)(uintptr_t)va_arg(args, void *),
                                16, 0, width > 2 ? width - 2 : 0,
                                left_justify, zero_pad);
+            break;
+
+        case 'f':
+        case 'F':
+        case 'e':
+        case 'E':
+        case 'g':
+        case 'G':
+            /* Float formatting lives in kprintf_float.c, compiled
+             * without -mgeneral-regs-only so it can do real `double`
+             * arithmetic. We pass our va_list by pointer and let it
+             * pull the FP arg off the variadic ABI's FP slot —
+             * kprintf.c itself never references `double`. */
+            (void)arg_is_64bit;
+            kprintf_float_emit(out, precision, *fmt,
+                               width, left_justify, zero_pad, &args);
             break;
 
         case '%':
