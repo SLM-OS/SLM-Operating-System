@@ -1064,6 +1064,17 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
     /* gpfifo_entries must be a non-zero power of two. */
     if (h->gpfifo_entries == 0 ||
         (h->gpfifo_entries & (h->gpfifo_entries - 1)) != 0) return -1;
+    /* GPFIFO and pushbuffer-builder helpers encode the upper VA byte
+     * as `(va >> 32) & 0xFF`, giving 40 bits of address. Reject any
+     * handoff whose VAs spill past that — silent truncation produces
+     * a "PBDMA advanced but nothing executed" failure mode that is
+     * very hard to diagnose. v3+ adds qmd/sem; check whichever fields
+     * the version provides. */
+    if (h->pushbuf_gpu_va >= (1ULL << 40)) return -1;
+    if (h->semaphore_gpu_va >= (1ULL << 40)) return -1;
+    if (h->version >= 3) {
+        if (h->qmd_gpu_va >= (1ULL << 40)) return -1;
+    }
     return 0;
 }
 
@@ -1476,7 +1487,31 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                                  int error_phase,
                                  const char *tag)
 {
+    /* Bound pb_dwords against the inherited pushbuffer size before any
+     * write. Today's callers cap at GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS
+     * (= 23), but a future caller passing a larger value would
+     * overflow g_handoff.pushbuf_phys. Cheap up-front check. */
+    if ((uint64_t)pb_dwords * 4u > g_handoff.pushbuf_size) {
+        uart_printf("[%s] submit refused: pb_dwords=%lu exceeds "
+                    "pushbuf size=%lu bytes\n",
+                    tag,
+                    (unsigned long)pb_dwords,
+                    (unsigned long)g_handoff.pushbuf_size);
+        return error_phase;
+    }
     uint32_t pb_bytes = pb_dwords * 4u;
+
+    /* GPFIFO encoding (below) packs the GPU VA into 32 + 8 bits = 40
+     * bits of address. Reject any handoff whose pushbuf VA spills past
+     * that without complaining loudly — silent truncation produces
+     * "PBDMA advanced but nothing executed" mysteries. */
+    if (g_handoff.pushbuf_gpu_va >= (1ULL << 40)) {
+        uart_printf("[%s] submit refused: pushbuf_gpu_va=0x%llx "
+                    "exceeds 40-bit GPFIFO encoding\n",
+                    tag,
+                    (unsigned long long)g_handoff.pushbuf_gpu_va);
+        return error_phase;
+    }
 
     /* Zero the poll target so a post-submit non-zero read is
      * unambiguous proof the GPU wrote the payload (not residue
