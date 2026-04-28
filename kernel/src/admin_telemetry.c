@@ -7,11 +7,16 @@
 
 #include "admin_telemetry.h"
 #include "latency_hist.h"
+#include "platform.h"
+#include "pmm.h"
 #include "rate_ewma.h"
 #include "slm_ffi.h"
+#include "smp.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 /* Forward decl — implemented in runtime/src/msg_router.rs. We cannot
  * pull `kernel/include/msg_router.h` here without dragging in the
@@ -221,4 +226,257 @@ void admin_telemetry_reset_inference(void)
     g_inference_calls = 0;
     g_inference_errors = 0;
     g_inference_total_ns = 0;
+}
+
+/* ===== Periodic publishers (tel.cpu / tel.stl / tel.mem) =============
+ *
+ * Runs from net_poll() at ~100 Hz; emits at TELEMETRY_PERIODIC_INTERVAL_MS
+ * boundaries (default 1 Hz). Cheap when not yet time to publish (one
+ * timestamp compare + arithmetic).
+ *
+ * The first call after boot establishes the snapshot baseline and does
+ * not publish — deltas are meaningless on the first sample. Subsequent
+ * calls publish the per-CPU and aggregate-eviction deltas.
+ *
+ * sched_diag_* counters live in NC memory on PLATFORM_HAS_NC_MEMORY
+ * (Pi 5, Jetson) and in BSS otherwise. The pointer-vs-array distinction
+ * doesn't matter at the indexing site (both index uniformly), but the
+ * extern declarations have to match the underlying definition or the
+ * linker quietly resolves the wrong type. Mirrors the existing pattern
+ * in kernel/src/shell_sys.c.
+ */
+#if defined(PLATFORM_HAS_NC_MEMORY)
+extern volatile uint32_t *sched_diag_picked;
+extern volatile uint32_t *sched_diag_idle_loops;
+extern volatile uint32_t *sched_diag_steal_attempts;
+extern volatile uint32_t *sched_diag_steal_successes;
+extern volatile uint32_t *sched_diag_steal_stale;
+extern volatile uint32_t *sched_diag_steal_empty_victim;
+extern volatile uint32_t *sched_diag_steal_push_full;
+#else
+extern volatile uint32_t sched_diag_picked[];
+extern volatile uint32_t sched_diag_idle_loops[];
+extern volatile uint32_t sched_diag_steal_attempts[];
+extern volatile uint32_t sched_diag_steal_successes[];
+extern volatile uint32_t sched_diag_steal_stale[];
+extern volatile uint32_t sched_diag_steal_empty_victim[];
+extern volatile uint32_t sched_diag_steal_push_full[];
+#endif
+
+static uint32_t g_periodic_last_pump_ms;
+static bool     g_periodic_baseline;
+static uint64_t g_cpu_published;
+static uint64_t g_steal_published;
+static uint64_t g_memory_published;
+
+/* Per-CPU snapshots from prior tick. MAX_CPUS sized so we can run on
+ * any platform without compile-time dependence on cpu_count. */
+static uint32_t g_prev_picked[MAX_CPUS];
+static uint32_t g_prev_idle_loops[MAX_CPUS];
+static uint32_t g_prev_steal_attempts[MAX_CPUS];
+static uint32_t g_prev_steal_successes[MAX_CPUS];
+static uint32_t g_prev_steal_stale[MAX_CPUS];
+static uint32_t g_prev_steal_empty_victim[MAX_CPUS];
+static uint32_t g_prev_steal_push_full[MAX_CPUS];
+static uint64_t g_prev_evi_weight;
+static uint64_t g_prev_evi_workspace;
+
+/* Wrap-safe delta helper. sched_diag_* are uint32_t and incremented
+ * without saturation; if a counter wraps between samples we still want
+ * a sensible delta (the unsigned subtraction does the right thing
+ * mod 2^32 — at 1 Hz publish + one increment per scheduler decision,
+ * a wrap takes ≥4 billion decisions ≥ months of uptime, so this
+ * mostly just guards against future counter-type changes). */
+static inline uint32_t delta_u32(uint32_t now, uint32_t prev)
+{
+    return (uint32_t)(now - prev);
+}
+
+static void publish_cpu_util(uint32_t cpus)
+{
+    char payload[TELEMETRY_MAX_PAYLOAD];
+    size_t pos = 0;
+
+    /* Read every counter once before computing — minimises skew from
+     * concurrent updates by other CPUs. NC-allocated pointers are
+     * non-NULL by the time net_poll() drives this (scheduler_init
+     * runs first); BSS arrays are always valid. */
+    uint32_t picked_now[MAX_CPUS];
+    uint32_t idle_now[MAX_CPUS];
+    for (uint32_t i = 0; i < cpus && i < MAX_CPUS; i++) {
+        picked_now[i] = sched_diag_picked[i];
+        idle_now[i]   = sched_diag_idle_loops[i];
+    }
+
+    for (uint32_t i = 0; i < cpus && i < MAX_CPUS; i++) {
+        uint32_t dp = delta_u32(picked_now[i], g_prev_picked[i]);
+        uint32_t di = delta_u32(idle_now[i],   g_prev_idle_loops[i]);
+        /* Load% over the interval. dp counts task-picks (active work);
+         * di counts idle-loop iterations (CPU was idle). The ratio
+         * approximates "fraction of scheduler decisions that found
+         * work to run" — a coarse but cheap proxy for utilization
+         * that doesn't need wall-clock timing per CPU. Returns 0 when
+         * neither counter advanced (CPU offline / dormant — see #216). */
+        uint64_t denom = (uint64_t)dp + (uint64_t)di;
+        uint32_t load = denom > 0 ? (uint32_t)(((uint64_t)dp * 100ull) / denom) : 0u;
+
+        char key[4] = { 'c', '0', '\0', '\0' };
+        if (i < 10) {
+            key[1] = (char)('0' + i);
+        } else {
+            key[1] = (char)('0' + (i / 10));
+            key[2] = (char)('0' + (i % 10));
+        }
+        if (append_kv_uint(payload, sizeof(payload), &pos, key, load) != 0)
+            break; /* payload full — drop remaining CPUs from this sample */
+
+        g_prev_picked[i]     = picked_now[i];
+        g_prev_idle_loops[i] = idle_now[i];
+    }
+    payload[pos] = '\0';
+    if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_CPU_UTIL,
+                           (const uint8_t *)payload) == 0) {
+        g_cpu_published += 1u;
+    }
+}
+
+static void publish_steal(uint32_t cpus)
+{
+    char payload[TELEMETRY_MAX_PAYLOAD];
+    size_t pos = 0;
+    uint64_t att = 0, ok = 0, stl = 0, emp = 0, fll = 0;
+
+    for (uint32_t i = 0; i < cpus && i < MAX_CPUS; i++) {
+        uint32_t a_now = sched_diag_steal_attempts[i];
+        uint32_t s_now = sched_diag_steal_successes[i];
+        uint32_t t_now = sched_diag_steal_stale[i];
+        uint32_t e_now = sched_diag_steal_empty_victim[i];
+        uint32_t f_now = sched_diag_steal_push_full[i];
+
+        att += delta_u32(a_now, g_prev_steal_attempts[i]);
+        ok  += delta_u32(s_now, g_prev_steal_successes[i]);
+        stl += delta_u32(t_now, g_prev_steal_stale[i]);
+        emp += delta_u32(e_now, g_prev_steal_empty_victim[i]);
+        fll += delta_u32(f_now, g_prev_steal_push_full[i]);
+
+        g_prev_steal_attempts[i]     = a_now;
+        g_prev_steal_successes[i]    = s_now;
+        g_prev_steal_stale[i]        = t_now;
+        g_prev_steal_empty_victim[i] = e_now;
+        g_prev_steal_push_full[i]    = f_now;
+    }
+
+    if (append_kv_uint(payload, sizeof(payload), &pos, "att", att) != 0) goto done;
+    if (append_kv_uint(payload, sizeof(payload), &pos, "ok",  ok)  != 0) goto done;
+    if (append_kv_uint(payload, sizeof(payload), &pos, "stl", stl) != 0) goto done;
+    if (append_kv_uint(payload, sizeof(payload), &pos, "emp", emp) != 0) goto done;
+    if (append_kv_uint(payload, sizeof(payload), &pos, "fll", fll) != 0) goto done;
+done:
+    payload[pos] = '\0';
+    if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_STEAL,
+                           (const uint8_t *)payload) == 0) {
+        g_steal_published += 1u;
+    }
+}
+
+static void publish_memory(void)
+{
+    char payload[TELEMETRY_MAX_PAYLOAD];
+    size_t pos = 0;
+    struct pmm_stats pst;
+    pmm_get_stats(&pst);
+
+    RustEvictionStats est;
+    memset(&est, 0, sizeof(est));
+    int32_t evi_rc = rust_eviction_get_stats(&est);
+
+    uint64_t wev = 0, xev = 0;
+    if (evi_rc == 0) {
+        wev = delta_u32((uint32_t)est.weight_evictions,
+                        (uint32_t)g_prev_evi_weight);
+        xev = delta_u32((uint32_t)est.workspace_evictions,
+                        (uint32_t)g_prev_evi_workspace);
+        g_prev_evi_weight    = est.weight_evictions;
+        g_prev_evi_workspace = est.workspace_evictions;
+    }
+
+    if (append_kv_uint(payload, sizeof(payload), &pos, "fp",  (uint64_t)pst.free_pages)  != 0) goto done;
+    if (append_kv_uint(payload, sizeof(payload), &pos, "tp",  (uint64_t)pst.total_pages) != 0) goto done;
+    if (append_kv_uint(payload, sizeof(payload), &pos, "wev", wev) != 0) goto done;
+    if (append_kv_uint(payload, sizeof(payload), &pos, "xev", xev) != 0) goto done;
+done:
+    payload[pos] = '\0';
+    if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_MEMORY,
+                           (const uint8_t *)payload) == 0) {
+        g_memory_published += 1u;
+    }
+}
+
+void admin_telemetry_periodic_pump(uint32_t now_ms)
+{
+    if (!g_periodic_baseline) {
+        /* First call: capture the baseline snapshot but don't publish.
+         * A delta needs two samples; the first one establishes "prev". */
+        uint32_t cpus = cpu_count;
+        if (cpus > MAX_CPUS) cpus = MAX_CPUS;
+        for (uint32_t i = 0; i < cpus; i++) {
+            g_prev_picked[i]             = sched_diag_picked[i];
+            g_prev_idle_loops[i]         = sched_diag_idle_loops[i];
+            g_prev_steal_attempts[i]     = sched_diag_steal_attempts[i];
+            g_prev_steal_successes[i]    = sched_diag_steal_successes[i];
+            g_prev_steal_stale[i]        = sched_diag_steal_stale[i];
+            g_prev_steal_empty_victim[i] = sched_diag_steal_empty_victim[i];
+            g_prev_steal_push_full[i]    = sched_diag_steal_push_full[i];
+        }
+        RustEvictionStats est;
+        memset(&est, 0, sizeof(est));
+        if (rust_eviction_get_stats(&est) == 0) {
+            g_prev_evi_weight    = est.weight_evictions;
+            g_prev_evi_workspace = est.workspace_evictions;
+        }
+        g_periodic_last_pump_ms = now_ms;
+        g_periodic_baseline = true;
+        return;
+    }
+
+    /* Wrap-safe interval check. sys_now() rolls over every ~49 days
+     * (uint32_t ms); the unsigned subtraction handles that case. */
+    uint32_t elapsed = now_ms - g_periodic_last_pump_ms;
+    if (elapsed < TELEMETRY_PERIODIC_INTERVAL_MS) return;
+    g_periodic_last_pump_ms = now_ms;
+
+    uint32_t cpus = cpu_count;
+    if (cpus > MAX_CPUS) cpus = MAX_CPUS;
+
+    publish_cpu_util(cpus);
+    publish_steal(cpus);
+    publish_memory();
+}
+
+void admin_telemetry_get_periodic_stats(struct admin_telemetry_periodic_stats *out)
+{
+    if (!out) return;
+    out->cpu_published    = g_cpu_published;
+    out->steal_published  = g_steal_published;
+    out->memory_published = g_memory_published;
+    out->last_pump_ms     = g_periodic_last_pump_ms;
+    out->baseline_set     = g_periodic_baseline;
+}
+
+void admin_telemetry_periodic_reset_for_tests(void)
+{
+    g_periodic_last_pump_ms = 0;
+    g_periodic_baseline = false;
+    g_cpu_published = 0;
+    g_steal_published = 0;
+    g_memory_published = 0;
+    memset(g_prev_picked, 0, sizeof(g_prev_picked));
+    memset(g_prev_idle_loops, 0, sizeof(g_prev_idle_loops));
+    memset(g_prev_steal_attempts, 0, sizeof(g_prev_steal_attempts));
+    memset(g_prev_steal_successes, 0, sizeof(g_prev_steal_successes));
+    memset(g_prev_steal_stale, 0, sizeof(g_prev_steal_stale));
+    memset(g_prev_steal_empty_victim, 0, sizeof(g_prev_steal_empty_victim));
+    memset(g_prev_steal_push_full, 0, sizeof(g_prev_steal_push_full));
+    g_prev_evi_weight = 0;
+    g_prev_evi_workspace = 0;
 }

@@ -26,6 +26,7 @@
 
 #include "shell_io_tcp.h"
 #include "tcp_telemetry_server.h"
+#include "admin_telemetry.h"
 #include "netif/ethernet.h"
 #include "arch/sys_arch.h"
 
@@ -743,6 +744,12 @@ void net_poll(void) {
     /* Bridge `tel.*` msg_router topics to the telemetry-feed TCP server.
      * No-op when the server is not running. */
     tcp_telemetry_server_poll();
+
+    /* Drive the 1-Hz periodic publishers (tel.cpu / tel.stl / tel.mem).
+     * Cheap when the publish window hasn't elapsed. Runs before the
+     * server poll above on the next tick so a freshly-published sample
+     * gets fanned out without an extra pump round-trip. */
+    admin_telemetry_periodic_pump(sys_now());
 
     /* RX-stall watchdog. Cheap when not alarmed (a load + compare). */
     net_watchdog_check();

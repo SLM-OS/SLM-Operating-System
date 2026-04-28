@@ -47,10 +47,22 @@
  * single spaces, capped at 59 chars + nul to fit MAX_MSG_LEN=60.
  *   tel.evi:  "dt=<ns> fb=<0|1>"           e.g. "dt=12345 fb=0"
  *   tel.inf:  "dt=<ns> ok=<0|1>"           e.g. "dt=87654 ok=1"
+ *   tel.cpu:  "c0=<ld> c1=<ld> ... c<n>=<ld>"  e.g. "c0=42 c1=99 c2=18 c3=7"
+ *             — per-CPU load percent (0..100) over the publish interval.
+ *   tel.stl:  "att=<n> ok=<n> stl=<n> emp=<n> fll=<n>"
+ *             — work-stealing deltas across all CPUs since last publish.
+ *   tel.mem:  "fp=<n> tp=<n> wev=<n> xev=<n>"
+ *             — free pages, total pages, weight/workspace eviction deltas.
  */
 #define TELEMETRY_TOPIC_EVICTION   "tel.evi"
 #define TELEMETRY_TOPIC_INFERENCE  "tel.inf"
+#define TELEMETRY_TOPIC_CPU_UTIL   "tel.cpu"
+#define TELEMETRY_TOPIC_STEAL      "tel.stl"
+#define TELEMETRY_TOPIC_MEMORY     "tel.mem"
 #define TELEMETRY_TOPIC_PREFIX     "tel."
+
+/* Default publish interval for the periodic pump (1 Hz). */
+#define TELEMETRY_PERIODIC_INTERVAL_MS  1000u
 
 /* ===== Eviction ====================================================== */
 
@@ -127,5 +139,43 @@ struct admin_telemetry_feed_stats {
 };
 
 void admin_telemetry_get_feed_stats(struct admin_telemetry_feed_stats *out);
+
+/* ===== Periodic publishers (tel.cpu / tel.stl / tel.mem) ============= */
+
+/*
+ * Drive the 1-Hz periodic publisher. Cheap when the publish window
+ * hasn't elapsed (one timestamp compare). The caller passes the
+ * current monotonic millisecond timestamp; production wires this to
+ * `sys_now()` from `net_poll`. Tests pass a synthetic value to drive
+ * the rate-limit deterministically.
+ *
+ * On each elapsed window:
+ *   - Snapshot per-CPU sched_diag_picked / sched_diag_idle_loops and
+ *     publish `tel.cpu` (per-CPU load percent).
+ *   - Snapshot sched_diag_steal_* and publish `tel.stl` (work-stealing
+ *     deltas across all CPUs).
+ *   - Snapshot pmm + Rust eviction stats and publish `tel.mem` (free
+ *     pages, total pages, weight/workspace eviction count deltas).
+ *
+ * The first call after boot establishes the snapshot baseline and
+ * does not publish. Subsequent calls publish when ≥ interval_ms have
+ * elapsed since the last publish.
+ */
+void admin_telemetry_periodic_pump(uint32_t now_ms);
+
+/* Counters surfaced for observability + the test seam. */
+struct admin_telemetry_periodic_stats {
+    uint64_t cpu_published;       /* tel.cpu samples sent */
+    uint64_t steal_published;     /* tel.stl samples sent */
+    uint64_t memory_published;    /* tel.mem samples sent */
+    uint32_t last_pump_ms;        /* most recent tick that emitted */
+    bool     baseline_set;        /* true after first call */
+};
+
+void admin_telemetry_get_periodic_stats(struct admin_telemetry_periodic_stats *out);
+
+/* Test seam: reset the periodic-pump baseline so tests can drive a
+ * fresh sequence without rebuilding the kernel. */
+void admin_telemetry_periodic_reset_for_tests(void);
 
 #endif /* ADMIN_TELEMETRY_H */
