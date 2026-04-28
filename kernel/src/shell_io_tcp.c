@@ -29,6 +29,7 @@
 #include "tcp_shell_server.h"   /* tcp_shell_server_note_session_close */
 #include "telnet.h"
 #include "timer.h"
+#include "uart.h"               /* uart_printf for the timeout WARN (#536) */
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -53,6 +54,24 @@ _Static_assert((TCP_SHELL_RING_SIZE & TCP_SHELL_RING_MASK) == 0,
  * 64 K silently truncating. */
 _Static_assert(TCP_SHELL_RING_SIZE <= 0xFFFF,
                "TCP_SHELL_RING_SIZE must fit in uint16_t for tcp_write()");
+
+/* The per-session memp snapshot stores `lwip_stats.memp[i]->used`
+ * losslessly so close-time deltas are accurate (#537). lwIP's
+ * `mem_size_t` is configurable: u16_t for builds with
+ * MEM_SIZE <= 64000, u32_t otherwise. Our build defaults to
+ * MEM_SIZE = 131072 (PR #440), so `mem_size_t == u32_t`. The
+ * snapshot array was uint16_t in the original commit; that
+ * truncated the counter on our build (no observed harm in
+ * practice — pool used-counts are tens at most — but a latent
+ * bug). The assert pins the snapshot width to mem_size_t so any
+ * future lwipopts.h change either compiles cleanly or breaks
+ * loudly here. */
+#if MEMP_STATS
+_Static_assert(sizeof(((struct stats_mem *)0)->used) <= sizeof(uint32_t),
+               "memp_used_at_open[] storage assumes mem_size_t fits "
+               "in uint32_t; widen the field in struct tcp_shell_ctx "
+               "to match a wider mem_size_t");
+#endif
 
 /* How long read_char sleeps between empty-ring checks. 10 ms matches
  * the net_pump cadence so we don't sleep longer than one pump cycle. */
@@ -185,9 +204,13 @@ struct tcp_shell_ctx {
      * specific lwIP allocator (PBUF_POOL, TCP_SEG, etc.) — the
      * heap-byte total alone doesn't tell us which allocation site
      * is leaking. Only meaningful when MEMP_STATS is enabled in
-     * lwipopts.h; otherwise the array is unused. */
+     * lwipopts.h; otherwise the array is unused.
+     *
+     * uint32_t to fit `mem_size_t` losslessly across both lwIP
+     * configurations (u16 below MEM_SIZE=64000, u32 above). See
+     * the static_assert above the struct. */
 #if MEMP_STATS
-    uint16_t          memp_used_at_open[MEMP_MAX];
+    uint32_t          memp_used_at_open[MEMP_MAX];
 #endif
 
     /* Timer-counter value captured immediately after tcp_close (#537).
@@ -391,7 +414,24 @@ void shell_io_tcp_test_set_write_timeout_ms(uint32_t ms)
     g_write_timeout_ms = ms ? ms : TCP_SHELL_WRITE_TIMEOUT_MS;
 }
 
-#include "uart.h"
+/* Common bail path for tcp_write_buf when the configured wall-clock
+ * cap (#536) has elapsed without ring-space progress. Marks the
+ * session degraded so subsequent writes short-circuit, marks it
+ * closed so the REPL unwinds, logs a one-shot WARN naming the
+ * dropped byte count, and returns to the caller. Two separate
+ * timeout-trigger sites in tcp_write_buf both delegate here — keeps
+ * the warning text and the degrade/close ordering single-source. */
+static void tcp_write_timeout_bail(struct tcp_shell_ctx *ctx, size_t dropped)
+{
+    ctx->write_degraded = true;
+    uart_printf("[WARN] shell-tcp: session %u write timeout "
+                "(>=%u ms drain stall, dropping %u bytes) "
+                "— marking degraded, closing\n",
+                (unsigned)ctx->session_id,
+                (unsigned)g_write_timeout_ms,
+                (unsigned)dropped);
+    mark_closed(ctx);
+}
 
 static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
 {
@@ -439,15 +479,7 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
                  * the session so the user sees a disconnect rather
                  * than a black hole. The shell command returns to
                  * its REPL caller, which sees `closed` and exits. */
-                ctx->write_degraded = true;
-                size_t dropped = len - src;
-                uart_printf("[WARN] shell-tcp: session %u write timeout "
-                            "(>=%u ms drain stall, dropping %u bytes) "
-                            "— marking degraded, closing\n",
-                            (unsigned)ctx->session_id,
-                            (unsigned)g_write_timeout_ms,
-                            (unsigned)dropped);
-                mark_closed(ctx);
+                tcp_write_timeout_bail(ctx, len - src);
                 return;
             }
             /* Yield so net_pump can drain the buffer. */
@@ -480,15 +512,7 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
              * clock cap applies — if the ring stays one-byte-free
              * forever we still bail. */
             if (timer_get_count() >= deadline) {
-                ctx->write_degraded = true;
-                size_t dropped = len - src;
-                uart_printf("[WARN] shell-tcp: session %u write timeout "
-                            "(>=%u ms drain stall, dropping %u bytes) "
-                            "— marking degraded, closing\n",
-                            (unsigned)ctx->session_id,
-                            (unsigned)g_write_timeout_ms,
-                            (unsigned)dropped);
-                mark_closed(ctx);
+                tcp_write_timeout_bail(ctx, len - src);
                 return;
             }
             sleep_ms(TCP_SHELL_POLL_INTERVAL_MS);
@@ -712,14 +736,17 @@ int shell_io_tcp_test_run_close_settling(void)
     ctx->session_id = 0xCAFEBABE;
     ctx->heap_used_at_open_bytes = 0;
 
+    int rc;
+
     /* Scenario 1: settling timer just started. Poll must NOT free. */
     uint64_t now = timer_get_count();
     ctx->close_completed_ticks = now ? now : 1;
     shell_io_tcp_poll();
     if (!ctx->in_use) {
-        /* Poll prematurely freed the slot — but we have no slot to
-         * release back since it's already gone. Return the failure. */
-        return -2;
+        /* Poll prematurely freed the slot — already gone, just
+         * report and skip the second scenario. */
+        rc = -2;
+        goto out;
     }
 
     /* Scenario 2: rewind close_completed_ticks far enough that the
@@ -735,14 +762,15 @@ int shell_io_tcp_test_run_close_settling(void)
         ? (cur - settle_ticks)
         : 1ULL;
     shell_io_tcp_poll();
-    if (ctx->in_use) {
-        /* Poll didn't free. Release manually so the test cleanup
-         * doesn't leak the slot. */
-        ctx_free(ctx);
-        return -3;
-    }
+    rc = ctx->in_use ? -3 : 0;
 
-    return 0;
+out:
+    /* `ctx_free` is idempotent (just clears `in_use` under
+     * pool_lock), so calling it on an already-freed slot is a
+     * harmless no-op. Single cleanup point keeps the test path
+     * symmetric across success and both failure modes. */
+    ctx_free(ctx);
+    return rc;
 }
 
 size_t shell_io_tcp_test_normalize_output(const char *first,
@@ -829,14 +857,14 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
 #endif
 
     /* Snapshot per-MEMP-pool used counts so the close path can
-     * attribute any heap-delta to a specific pool (#537). Each
-     * entry is `mem_size_t` (uint16 on this build), so the cast
-     * down is lossless. */
+     * attribute any heap-delta to a specific pool (#537). Stored
+     * as uint32_t so the snapshot is lossless regardless of
+     * whether `mem_size_t` is u16_t or u32_t on this build. */
 #if MEMP_STATS
     for (int i = 0; i < MEMP_MAX; i++) {
         ctx->memp_used_at_open[i] = lwip_stats.memp[i]
-            ? (uint16_t)lwip_stats.memp[i]->used
-            : 0;
+            ? (uint32_t)lwip_stats.memp[i]->used
+            : 0u;
     }
 #endif
 
