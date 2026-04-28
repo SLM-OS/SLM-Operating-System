@@ -35,6 +35,7 @@
 #include "xhci_ring.h"
 #include "xhci_trb.h"
 #include "xhci_trb_build.h"
+#include "xhci_xfer_helpers.h"
 #include "xhci_ctx.h"
 #include "usb.h"
 #include "debug.h"
@@ -807,19 +808,12 @@ void xhci_xfer_on_transfer_event(const struct xhci_trb *evt)
 
     struct usb_urb *urb = slot->urb;
     urb->status        = xhci_cc_to_urb_status(cc);
-    /* The transfer-event residual reports the byte count not transferred
-     * for the TRB that completed. For bulk transfers that is the full
-     * payload. For control transfers the IOC event may arrive on the Data
-     * Stage (short packet/error) or on the Status Stage (success). In both
-     * cases the requested payload is slot->requested_len, so the same
-     * "requested - residual" rule gives the right byte count: short
-     * control-IN data completions surface the bytes received, while a
-     * successful Status Stage with residual=0 reports the full request
-     * length. */
-    uint32_t actual = (residual <= slot->requested_len)
-                      ? (slot->requested_len - residual)
-                      : 0U;
-    urb->actual_length = actual;
+    /* "requested - residual" handles both Status-Stage success and
+     * Data-Stage short-packet events with one formula. See
+     * xhci_xfer_helpers.h for the full rationale and the #316
+     * regression-test pin. */
+    urb->actual_length = xhci_xfer_actual_from_residual(slot->requested_len,
+                                                        residual);
 
     if (urb->transfer_type == USB_XFER_CONTROL && cc != XHCI_CC_SUCCESS)
         xhci_log_control_urb("event", urb, slot, trb_phys, cc, residual);
