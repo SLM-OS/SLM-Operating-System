@@ -2354,7 +2354,11 @@ static int model_swap(int argc, char *argv[])
     case 0:
         break;
     case -1:
-        shell_puts("model swap: invalid argument (parser-side)\r\n");
+        /* Unreachable from this caller: we already validated path,
+         * buf, bytes_read, and capped model_name to 31 chars before
+         * the FFI call. -1 here means the kernel passed bad inputs
+         * to rust_model_swap — a kernel bug, not user error. */
+        shell_puts("model swap: internal: rust_model_swap rejected our inputs (kernel bug)\r\n");
         return -1;
     case -2:
         shell_printf("model swap: slot %d is empty\r\n", idx);

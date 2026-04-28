@@ -530,6 +530,16 @@ pub fn swap_model(index: usize, name: &[u8], data: &[u8]) -> Result<(), LoadErro
 
     // Quick pre-flight check: reject obvious failures before doing
     // the expensive parse + allocate.
+    //
+    // The lock is dropped between this check and the atomic swap
+    // below, so the slot's `active` and `backend_kind` are read
+    // again under the second lock acquisition. Today nothing in the
+    // codebase mutates `backend_kind` on an existing slot
+    // (`load_model` only writes to empty slots; `swap_model` never
+    // changes the kind), so the pre-flight is effectively
+    // race-free. If a future operation ever changes a slot's
+    // backend in place, the inside-lock recheck still catches the
+    // race correctly — at the cost of one wasted multi-MB parse.
     {
         let _g = SpinGuard::new();
         // SAFETY: SpinGuard held — exclusive read access to REGISTRY.
@@ -800,8 +810,11 @@ pub fn share_weights(index: usize) -> Option<ModelHandle> {
 /// last lease drops.
 ///
 /// The handle is exposed via `handle()` so callers can resolve it to
-/// a `*mut u8` through `mm::get_ptr`. The lease is `Send` but not
-/// `Sync` — multiple threads should each acquire their own.
+/// a `*mut u8` through `mm::get_ptr`. The struct auto-impls `Send`
+/// and `Sync` (it wraps a `Copy` `ModelHandle`); both are sound — the
+/// only side effect is the `Drop` impl, which runs once when the
+/// lease falls out of scope and goes through the model_mem allocator
+/// lock.
 pub struct WeightLease {
     handle: ModelHandle,
 }

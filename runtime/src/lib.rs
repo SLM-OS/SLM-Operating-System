@@ -3633,9 +3633,12 @@ pub unsafe extern "C" fn rust_model_load(
         return -1;
     }
 
-    // Find name length (null-terminated)
+    // Find name length (null-terminated). Bound-check FIRST so a
+    // caller that violates the null-termination contract can't cause
+    // an out-of-bounds read past `name + 31`. See runtime/CLAUDE.md
+    // §"C-string bounds-before-deref".
     let mut name_len = 0;
-    while *name.add(name_len) != 0 && name_len < 31 {
+    while name_len < 31 && *name.add(name_len) != 0 {
         name_len += 1;
     }
     let name_slice = core::slice::from_raw_parts(name, name_len);
@@ -3806,8 +3809,11 @@ pub unsafe extern "C" fn rust_model_swap(
         return -1;
     }
 
+    // Bound-check before deref so a non-null-terminated `name` can't
+    // walk past `name + 31`. See runtime/CLAUDE.md §"C-string
+    // bounds-before-deref".
     let mut name_len = 0;
-    while *name.add(name_len) != 0 && name_len < 31 {
+    while name_len < 31 && *name.add(name_len) != 0 {
         name_len += 1;
     }
     let name_slice = core::slice::from_raw_parts(name, name_len);
@@ -3917,6 +3923,14 @@ pub extern "C" fn rust_model_swap_test() -> i32 {
     // Capture the pre-swap weight handle by sharing it. Hold this
     // lease across the swap and check below that the OLD pointer is
     // still valid after the swap completes.
+    //
+    // Weights only — workspace has no analogous lease. The engine
+    // writes scratch into the workspace block, but it doesn't hold a
+    // raw pointer to it across `run_inference` boundaries the way it
+    // does for weights. So `mm::free(old_workspace)` inside
+    // `swap_model` is allowed to take effect immediately. If a future
+    // change ever stashes a workspace pointer past `run_inference`,
+    // a parallel `WorkspaceLease` will need to land too.
     let pre_lease = loader::registry::WeightLease::acquire(slot_idx);
     let pre_ok = pre_lease.is_some();
     print_test_result(b"swap: pre-swap WeightLease acquire\0", pre_ok);

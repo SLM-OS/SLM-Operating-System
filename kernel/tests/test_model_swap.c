@@ -51,6 +51,17 @@ static void test_swap_zero_len(void)
  * payload would otherwise parse. We use `rust_model_loader_init` to
  * drain — `rust_model_loader_test` and prior tests may have left
  * models loaded.
+ *
+ * WARNING: this test mutates global registry state (drains every
+ * slot) and never restores it. Tests that run after
+ * `test_suite_model_swap` and depend on a preloaded model must load
+ * it themselves. As of 2026-04-28 the only post-swap suite that
+ * touches the registry is `test_suite_components_m5`, and its
+ * `test_infer_classify_success_path` already calls
+ * `rust_model_load_builtin_mnist` first, so it's unaffected. If
+ * test ordering ever changes such that a "model is preloaded"
+ * assumption arrives later, save/restore in this test instead of
+ * leaving the registry empty.
  */
 static void test_swap_empty_slot_after_init(void)
 {
