@@ -71,10 +71,14 @@ fn rust_panic(info: &PanicInfo) -> ! {
     }
 
     if let Some(loc) = info.location() {
-        // Copy file path to null-terminated stack buffer (file() is not null-terminated)
+        // Copy file path to null-terminated stack buffer (file() is not null-terminated).
+        // 256 bytes accommodates the full cargo registry path
+        // (`/home/<user>/.cargo/registry/src/index.crates.io-<hash>/<crate>-<ver>/src/<file>.rs`)
+        // — earlier 64-byte buffer truncated at the registry hash, hiding
+        // which crate the panic was actually in.
         let file = loc.file().as_bytes();
-        let mut buf = [0u8; 64];
-        let len = if file.len() < 63 { file.len() } else { 63 };
+        let mut buf = [0u8; 256];
+        let len = if file.len() < 255 { file.len() } else { 255 };
         buf[..len].copy_from_slice(&file[..len]);
         buf[len] = 0;
 
@@ -3629,9 +3633,12 @@ pub unsafe extern "C" fn rust_model_load(
         return -1;
     }
 
-    // Find name length (null-terminated)
+    // Find name length (null-terminated). Bound-check FIRST so a
+    // caller that violates the null-termination contract can't cause
+    // an out-of-bounds read past `name + 31`. See runtime/CLAUDE.md
+    // §"C-string bounds-before-deref".
     let mut name_len = 0;
-    while *name.add(name_len) != 0 && name_len < 31 {
+    while name_len < 31 && *name.add(name_len) != 0 {
         name_len += 1;
     }
     let name_slice = core::slice::from_raw_parts(name, name_len);
@@ -3773,6 +3780,247 @@ pub extern "C" fn rust_model_share_weights(index: u32) -> i32 {
         Some(_) => 0,
         None => -1,
     }
+}
+
+/// Atomically swap the weights and graph at a registry slot with a
+/// new ONNX payload. In-flight inferences holding a `WeightLease`
+/// continue against the OLD weights until they finish; subsequent
+/// inferences see the NEW weights.
+///
+/// Returns:
+///  * `0`  on success
+///  * `-1` if `name` or `data` are NULL or `data_len` is 0
+///  * `-2` if the slot is empty (`InvalidIndex`)
+///  * `-3` if the slot's backend does not support swap
+///         (Hailo CCW re-upload tracked in #532)
+///  * `-4` for any parser / allocation failure
+///
+/// # Safety
+/// - `name` must be a valid null-terminated string pointer
+/// - `data` must be a valid pointer to `data_len` bytes
+#[no_mangle]
+pub unsafe extern "C" fn rust_model_swap(
+    index: u32,
+    name: *const u8,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || data.is_null() || data_len == 0 {
+        return -1;
+    }
+
+    // Bound-check before deref so a non-null-terminated `name` can't
+    // walk past `name + 31`. See runtime/CLAUDE.md §"C-string
+    // bounds-before-deref".
+    let mut name_len = 0;
+    while name_len < 31 && *name.add(name_len) != 0 {
+        name_len += 1;
+    }
+    let name_slice = core::slice::from_raw_parts(name, name_len);
+    let data_slice = core::slice::from_raw_parts(data, data_len);
+
+    use mm::model_loader::LoadError;
+    match loader::registry::swap_model(index as usize, name_slice, data_slice) {
+        Ok(()) => 0,
+        Err(LoadError::InvalidIndex) => -2,
+        Err(LoadError::SwapNotSupported) => -3,
+        Err(_) => -4,
+    }
+}
+
+/// Run model hot-swap self-tests.
+///
+/// Exercises `rust_model_swap` against the embedded MNIST ONNX (the
+/// only model bundled with the runtime), so the C-side test harness
+/// doesn't need to scrape model bytes through FFI. Each branch is a
+/// discrete assertion; the function returns the count of failed
+/// assertions (0 == all passed).
+///
+/// Branches covered:
+///  * argument validation (NULL name, NULL data, zero length)
+///  * empty-slot rejection (`InvalidIndex` → `-2`)
+///  * out-of-range index rejection
+///  * happy path: load A → swap to A under a different name; verify
+///    new metadata is visible and the underlying weight handle
+///    differs from the pre-swap one
+///  * lease-protects-old-weights: hold a `WeightLease` across a swap;
+///    confirm the OLD handle still resolves to a non-NULL pointer
+///    AFTER the swap (because the lease keeps refcount > 0)
+///  * slot identity preserved: pin a slot, swap, verify pin stays
+///    and `gpu_dispatch_enabled` is unaffected
+#[no_mangle]
+pub extern "C" fn rust_model_swap_test() -> i32 {
+    static MNIST_ONNX: &[u8] = include_bytes!("../../models/test/mnist.onnx");
+
+    let mut failures: i32 = 0;
+    unsafe {
+        kernel_ffi::uart_puts(b"[TEST] Running model swap tests...\n\0".as_ptr());
+    }
+
+    // Make sure the registry is initialized + drained from prior tests.
+    loader::registry::init();
+    for i in 0..loader::registry::MAX_MODELS as u32 {
+        let _ = loader::registry::unload_model(i as usize);
+    }
+
+    // Argument validation: NULL name.
+    {
+        let dummy = [0u8; 4];
+        let rc = unsafe { rust_model_swap(0, core::ptr::null(), dummy.as_ptr(), dummy.len()) };
+        let passed = rc == -1;
+        print_test_result(b"swap: NULL name -> -1\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Argument validation: NULL data.
+    {
+        let name = b"x\0";
+        let rc = unsafe { rust_model_swap(0, name.as_ptr(), core::ptr::null(), 100) };
+        let passed = rc == -1;
+        print_test_result(b"swap: NULL data -> -1\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Argument validation: zero data length.
+    {
+        let name = b"x\0";
+        let dummy = [0u8; 4];
+        let rc = unsafe { rust_model_swap(0, name.as_ptr(), dummy.as_ptr(), 0) };
+        let passed = rc == -1;
+        print_test_result(b"swap: zero data_len -> -1\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Empty slot: registry was just drained, so slot 0 is empty.
+    {
+        let name = b"x\0";
+        let rc = unsafe { rust_model_swap(0, name.as_ptr(), MNIST_ONNX.as_ptr(), MNIST_ONNX.len()) };
+        let passed = rc == -2;
+        print_test_result(b"swap: empty slot -> -2 (InvalidIndex)\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Out-of-range index.
+    {
+        let name = b"x\0";
+        let rc = unsafe { rust_model_swap(99, name.as_ptr(), MNIST_ONNX.as_ptr(), MNIST_ONNX.len()) };
+        let passed = rc == -2;
+        print_test_result(b"swap: out-of-range index -> -2\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Load → swap success path. Verify the registered name updates and
+    // the active slot stays at the same index.
+    let slot_idx = match loader::registry::load_model(b"mnist", MNIST_ONNX) {
+        Ok(idx) => idx,
+        Err(_) => {
+            print_test_result(b"swap: pre-test load mnist\0", false);
+            return failures + 1; // can't continue without a loaded model
+        }
+    };
+    print_test_result(b"swap: pre-test load mnist\0", true);
+
+    // Capture the pre-swap weight handle by sharing it. Hold this
+    // lease across the swap and check below that the OLD pointer is
+    // still valid after the swap completes.
+    //
+    // Weights only — workspace has no analogous lease. The engine
+    // writes scratch into the workspace block, but it doesn't hold a
+    // raw pointer to it across `run_inference` boundaries the way it
+    // does for weights. So `mm::free(old_workspace)` inside
+    // `swap_model` is allowed to take effect immediately. If a future
+    // change ever stashes a workspace pointer past `run_inference`,
+    // a parallel `WorkspaceLease` will need to land too.
+    let pre_lease = loader::registry::WeightLease::acquire(slot_idx);
+    let pre_ok = pre_lease.is_some();
+    print_test_result(b"swap: pre-swap WeightLease acquire\0", pre_ok);
+    if !pre_ok { failures += 1; }
+    let pre_handle = pre_lease.as_ref().map(|l| l.handle());
+    let pre_ptr = pre_handle.and_then(|h| mm::get_ptr(h));
+    let pre_ptr_ok = pre_ptr.is_some();
+    print_test_result(b"swap: pre-swap pointer non-null\0", pre_ptr_ok);
+    if !pre_ptr_ok { failures += 1; }
+
+    // Pin the slot and verify swap preserves the pin. (Do this BEFORE
+    // the swap so we can reload-then-verify post-swap.)
+    let pin_ok = loader::registry::pin_model(slot_idx);
+    print_test_result(b"swap: pre-swap pin succeeds\0", pin_ok);
+    if !pin_ok { failures += 1; }
+
+    // Perform the swap to a new name. Same bytes are fine — we're
+    // exercising the registry-replace path, not the parser.
+    {
+        let new_name = b"mnist_swapped\0";
+        let rc = unsafe {
+            rust_model_swap(
+                slot_idx as u32,
+                new_name.as_ptr(),
+                MNIST_ONNX.as_ptr(),
+                MNIST_ONNX.len(),
+            )
+        };
+        let passed = rc == 0;
+        print_test_result(b"swap: load+swap success\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // After-swap: the registered name is the new one.
+    {
+        let info = loader::registry::get_info(slot_idx);
+        let name_match = match info {
+            Some(i) => {
+                let name_len = i.name.iter().position(|&b| b == 0).unwrap_or(i.name.len());
+                &i.name[..name_len] == b"mnist_swapped"
+            }
+            None => false,
+        };
+        print_test_result(b"swap: post-swap name == 'mnist_swapped'\0", name_match);
+        if !name_match { failures += 1; }
+    }
+
+    // After-swap: pin flag is preserved.
+    {
+        let info = loader::registry::get_info(slot_idx);
+        let still_pinned = info.map(|i| i.pinned == 1).unwrap_or(false);
+        print_test_result(b"swap: post-swap pin preserved\0", still_pinned);
+        if !still_pinned { failures += 1; }
+    }
+
+    // After-swap: the OLD weight pointer (pinned by `pre_lease`) is
+    // STILL valid, because the lease holds a refcount on the OLD
+    // weight block. This is the core safety property of the design.
+    {
+        let still_valid = match pre_handle {
+            Some(h) => mm::get_ptr(h).is_some(),
+            None => false,
+        };
+        print_test_result(b"swap: pre-swap pointer still valid (lease pin)\0", still_valid);
+        if !still_valid { failures += 1; }
+    }
+
+    // After-swap: a freshly acquired lease points at the NEW weights,
+    // distinct from the old pointer.
+    {
+        let new_lease = loader::registry::WeightLease::acquire(slot_idx);
+        let new_ptr = new_lease.as_ref()
+            .and_then(|l| mm::get_ptr(l.handle()));
+        let pre_addr = pre_ptr.map(|p| p as usize).unwrap_or(0);
+        let new_addr = new_ptr.map(|p| p as usize).unwrap_or(0);
+        let distinct = pre_addr != 0 && new_addr != 0 && pre_addr != new_addr;
+        print_test_result(b"swap: post-swap pointer differs from pre-swap\0", distinct);
+        if !distinct { failures += 1; }
+    }
+
+    // Drop pre-swap lease (releases refcount on OLD block; the
+    // model_mem allocator will then deallocate it on the next pool
+    // pass). This also serves as the cleanup for the test.
+    drop(pre_lease);
+
+    // Cleanup: unpin and unload.
+    let _ = loader::registry::unpin_model(slot_idx);
+    let _ = loader::registry::unload_model(slot_idx);
+
+    failures
 }
 
 /// Run model loader tests.

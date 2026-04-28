@@ -108,4 +108,24 @@ size_t shell_io_tcp_test_normalize_output(const char *first,
                                           char *out,
                                           size_t out_len);
 
+/* Test-only helper: override the wall-clock cap used by tcp_write_buf
+ * before it bails out when the drain is stuck (#536). Pass 0 to restore
+ * the production default. Production builds never call this. */
+void shell_io_tcp_test_set_write_timeout_ms(uint32_t ms);
+
+/* Test-only driver for #536: allocate a pool slot, force the TX ring
+ * full with no pcb to drain it, call tcp_write_buf, and verify the
+ * caller returns within `timeout_override_ms` (+ ~1 s of slop) with
+ * the session marked degraded + closed. Returns 0 on success, -1 if
+ * no pool slot could be allocated, -2 if the timeout was violated. */
+int shell_io_tcp_test_run_write_timeout(uint32_t timeout_override_ms);
+
+/* Test-only driver for #537: allocate a pool slot, mimic the
+ * post-tcp_close state, and verify shell_io_tcp_poll defers
+ * freeing the slot until the close-settle window has elapsed.
+ * Returns 0 on success, -1 if no slot could be allocated, -2 if
+ * poll freed prematurely, -3 if poll failed to free after the
+ * settle period elapsed. */
+int shell_io_tcp_test_run_close_settling(void);
+
 #endif /* SHELL_IO_TCP_H */

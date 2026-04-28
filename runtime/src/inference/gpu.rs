@@ -226,11 +226,13 @@ pub fn gpu_map_weights(model_index: usize) -> Result<(), GpuError> {
     use crate::loader::registry;
     use crate::mm;
 
-    let weight_handle = registry::get_weights(model_index)
+    // RAII lease keeps the block alive across the cache flush — an
+    // unload racing this call can't free the memory until we drop.
+    let lease = registry::WeightLease::acquire(model_index)
         .ok_or(GpuError::NotAvailable)?;
-    let ptr = mm::get_ptr(weight_handle)
+    let ptr = mm::get_ptr(lease.handle())
         .ok_or(GpuError::NotAvailable)?;
-    let size = mm::get_size(weight_handle)
+    let size = mm::get_size(lease.handle())
         .ok_or(GpuError::NotAvailable)?;
 
     // Flush CPU caches so GPU sees current weight data
@@ -245,11 +247,11 @@ pub fn gpu_unmap_weights(model_index: usize) -> Result<(), GpuError> {
     use crate::loader::registry;
     use crate::mm;
 
-    let weight_handle = registry::get_weights(model_index)
+    let lease = registry::WeightLease::acquire(model_index)
         .ok_or(GpuError::NotAvailable)?;
-    let ptr = mm::get_ptr(weight_handle)
+    let ptr = mm::get_ptr(lease.handle())
         .ok_or(GpuError::NotAvailable)?;
-    let size = mm::get_size(weight_handle)
+    let size = mm::get_size(lease.handle())
         .ok_or(GpuError::NotAvailable)?;
 
     // Invalidate CPU caches in case GPU modified data

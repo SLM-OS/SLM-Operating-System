@@ -2,6 +2,8 @@
 
 Plan for [issue #232](https://github.com/SLM-OS/SLM-Operating-System/issues/232) — atomic weight replacement for models held in CPU-visible memory pools. Hailo-backend swap is split out to [#532](https://github.com/SLM-OS/SLM-Operating-System/issues/532).
 
+**Status (2026-04-27): QEMU implementation landed.** All seven steps below are implemented and a `make test` run shows the new `test_suite_model_swap` (Rust self-test + C-side FFI tests) passing. Hardware bring-up on Jetson → Pi 5 → x86-64 is the next phase. See `kernel/tests/test_model_swap.c`, `runtime/src/lib.rs::rust_model_swap_test`, `runtime/src/loader/registry.rs::swap_model`.
+
 ## Pre-flight finding
 
 The inference path (`runtime/src/inference/engine.rs:184`, `runtime/src/inference/gpu.rs:229`/`:248`) currently calls `registry::get_weights(idx)`, which returns a clone of the `ModelHandle` **without bumping the refcount**. That means today an `unload` while inference is in flight would already be a use-after-free — the swap work surfaces a latent bug. Fixing the inference path to use `share_weights` / `unshare` is a prerequisite, not an add-on.

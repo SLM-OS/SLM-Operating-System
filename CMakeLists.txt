@@ -574,6 +574,10 @@ set(KERNEL_SOURCES
     # because the MOCK_CAMERA_FRAME option is defined further down.
     kernel/src/camera.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
+    # x86-64 has no DTB; provide minimal stubs for the two symbols
+    # platform-neutral code still references (dtb_get_memreserves /
+    # dtb_get_chosen).
+    $<$<STREQUAL:${PLATFORM},X86_64>:kernel/src/dtb_x86_stub.c>
     # General-purpose FDT reader — path + property lookup for any
     # driver. Built on every ARM64 target; x86-64 builds skip it
     # because there's no DTB there.
@@ -763,6 +767,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_mem.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_eviction.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_loader.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_swap.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_syscall.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_component.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_vmm.c>
