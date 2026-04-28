@@ -322,9 +322,10 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     let tensor_count = u32::try_from(gguf.tensor_count())
         .map_err(|_| LoadError::CorruptedData)?;
     // `data.len()` is already bounded above by `MAX_PLAUSIBLE_GGUF_BYTES`
-    // (2 GiB), so the u32 cast is provably loss-free. Earlier revisions
-    // had a saturating fallback for > 4 GiB inputs; the M5.3.1 review
-    // pointed out it was dead code now that the upstream cap is 2 GiB.
+    // (1 GiB — see the const above for why), so the u32 cast is
+    // provably loss-free. Earlier revisions had a saturating fallback
+    // for > 4 GiB inputs; the M5.3.1 review pointed out it was dead
+    // code, and the M5.3.3 cap-tighten makes it doubly so.
     let source_bytes = data.len() as u32;
 
     // Build the tokenizer up-front. If this fails the GGUF lacked a
