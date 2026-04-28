@@ -11,6 +11,7 @@
 #if defined(ENABLE_NETWORKING)
 #include "../include/net.h"
 #include "../include/tcp_shell_server.h"
+#include "../include/shell_io_tcp.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -494,6 +495,49 @@ static void test_tcp_shell_server_stats_invariants(void)
 }
 
 /*
+ * Test: shell_io_tcp_poll defers freeing the slot until the
+ * post-close settle window has elapsed (#537).
+ *
+ * The previous behaviour measured the lwIP heap delta in the same
+ * poll cycle as tcp_close, before unacked TCP_WRITE_FLAG_COPY pbufs
+ * had a chance to be ACKed and freed — that produced multi-KB false-
+ * positive "leak" warnings (#442 closure was incomplete). The fix
+ * holds the slot in a "settling" state for TCP_SHELL_CLOSE_SETTLE_MS
+ * before measuring + freeing.
+ */
+static void test_shell_io_tcp_close_settling(void)
+{
+    int rc = shell_io_tcp_test_run_close_settling();
+    TEST_ASSERT_MESSAGE(rc != -1,
+        "test_run_close_settling: pool slot allocation failed");
+    TEST_ASSERT_MESSAGE(rc != -2,
+        "test_run_close_settling: poll freed slot before settle window elapsed");
+    TEST_ASSERT_MESSAGE(rc != -3,
+        "test_run_close_settling: poll failed to free slot after settle window");
+    TEST_ASSERT_EQUAL_INT(0, rc);
+}
+
+/*
+ * Test: tcp_write_buf bails within the configured wall-clock cap when
+ * the drain is wedged (#536).
+ *
+ * Drives shell_io_tcp_test_run_write_timeout with a 100 ms override
+ * so the test doesn't have to wait the production 2 s. The helper
+ * allocates a pool slot, primes a tcp_shell_ctx with no pcb (no
+ * net_pump drain will fire), pushes more bytes than the ring can
+ * hold, and asserts that tcp_write_buf returned with the session
+ * marked degraded + closed and elapsed time inside [override, +1 s].
+ */
+static void test_shell_io_tcp_write_buf_timeout(void)
+{
+    int rc = shell_io_tcp_test_run_write_timeout(100);
+    TEST_ASSERT_MESSAGE(rc != -1,
+        "test_run_write_timeout: pool slot allocation failed");
+    TEST_ASSERT_MESSAGE(rc == 0,
+        "test_run_write_timeout: tcp_write_buf did not respect the cap");
+}
+
+/*
  * Test: note_session_open + note_session_close move the counters as
  * advertised. Captures stats before, calls open + close with a known
  * delta, captures stats after, asserts deltas. Order-independent.
@@ -507,7 +551,7 @@ static void test_tcp_shell_server_note_session_pair(void)
     tcp_shell_server_get_stats(&before);
 
     tcp_shell_server_note_session_open(0xDEADBEEFu);
-    tcp_shell_server_note_session_close(0xDEADBEEFu, 256);
+    tcp_shell_server_note_session_close(0xDEADBEEFu, 256, NULL);
 
     struct tcp_shell_server_stats after;
     tcp_shell_server_get_stats(&after);
@@ -1908,6 +1952,8 @@ int test_suite_net(void)
     RUN_TEST(test_tcp_shell_server_get_stats_null_safe);
     RUN_TEST(test_tcp_shell_server_stats_invariants);
     RUN_TEST(test_tcp_shell_server_note_session_pair);
+    RUN_TEST(test_shell_io_tcp_write_buf_timeout);
+    RUN_TEST(test_shell_io_tcp_close_settling);
     RUN_TEST(test_net_stats_initial_values);
 
     /* lwIP RNG / lwip_rand_seed (DTB-driven entropy seeding) */

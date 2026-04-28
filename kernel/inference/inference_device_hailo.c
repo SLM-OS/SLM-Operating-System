@@ -1599,30 +1599,6 @@ static int hailo_backend_load_model(struct inference_device *dev,
     uart_printf("[hailo] load_model: pads in=%u bytes out=%u bytes\r\n",
                 (unsigned)input_bytes, (unsigned)output_bytes);
 
-    /* 4. Claim a slot atomically — the check-then-set must be
-     * lock-protected so concurrent loaders don't pick the same index.
-     * Set in_use=true under the lock so later scanners skip us; the
-     * cfg + shape fields fill in while other load/free callers still
-     * see in_use=true (so they won't touch this slot). run() only
-     * dereferences slot->cfg when in_use is true, and we publish
-     * in_use=true BEFORE writing cfg, but that's safe because:
-     *   - a concurrent run() with h pointing at this freshly-claimed
-     *     slot would require the caller to already have the handle
-     *     we haven't returned yet — can't happen;
-     *   - an unrelated run() with a different h never reads this
-     *     slot's cfg. */
-    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
-    int idx = -1;
-    for (int i = 0; i < HAILO_MAX_MODELS; i++) {
-        if (!slots[i].in_use) {
-            slots[i].in_use = true;
-            idx = i;
-            break;
-        }
-    }
-    spin_unlock_irqrestore(&slots_lock, flags);
-    if (idx < 0) return INF_ERR_FULL;
-
     /* Stream parameters — prefer HEF-derived values (Phase 6.2b),
      * fall back to placeholders that work under the mock but time
      * out on real hardware. Channel indices are host-chosen; we use
@@ -1636,7 +1612,10 @@ static int hailo_backend_load_model(struct inference_device *dev,
      * page_size is core_bytes_per_buffer for the input and the
      * periph side for the output; without HEF values we fall back
      * to 512 B which only happens to work for models whose real
-     * buffer size is a multiple of it. */
+     * buffer size is a multiple of it.
+     *
+     * Computed before the slot is claimed so the lock-protected
+     * region below stays short. */
     uint8_t  in_data_id   = in_pad->has_stream_info  ? (uint8_t) in_pad->sys_index
                                                      : 0;
     uint8_t  out_data_id  = out_pad->has_stream_info ? (uint8_t)out_pad->sys_index
@@ -1646,31 +1625,64 @@ static int hailo_backend_load_model(struct inference_device *dev,
     uint16_t out_page_size = out_pad->has_stream_info && out_pad->core_bytes_per_buffer
                                ? (uint16_t)out_pad->core_bytes_per_buffer : 512;
 
-    /* in_use was set above; now populate the config + shapes. */
-    slots[idx].cfg = (struct hailo_infer_config){
-        .input_bytes      = input_bytes,
-        .output_bytes     = output_bytes,
-        .input_channel    = 0,
-        .output_channel   = 1,
-        .input_data_id    = in_data_id,
-        .output_data_id   = out_data_id,
-        .input_page_size  = in_page_size,
-        .output_page_size = out_page_size,
-        /* Deliberately tight: scheduler-policy path (ai_hailo) invokes
-         * run() from contexts that may have IRQs disabled. A 500 ms
-         * poll would stall the CPU and drop timer ticks. A real
-         * Hailo-8 MLP inference completes in microseconds; 10 ms was
-         * the original 500x safety margin but bumping to 500 ms for
-         * real-HEF bring-up — first inference may include one-time
-         * CCW upload latency and we don't yet know the real variance. */
-        .timeout_us       = 500000,     /* 500 ms */
-    };
-    slots[idx].input_shape[0]  = (uint16_t)pad_dim(in_pad->padded_height,   in_pad->height);
-    slots[idx].input_shape[1]  = (uint16_t)pad_dim(in_pad->padded_width,    in_pad->width);
-    slots[idx].input_shape[2]  = (uint16_t)pad_dim(in_pad->padded_features, in_pad->features);
-    slots[idx].output_shape[0] = (uint16_t)pad_dim(out_pad->padded_height,   out_pad->height);
-    slots[idx].output_shape[1] = (uint16_t)pad_dim(out_pad->padded_width,    out_pad->width);
-    slots[idx].output_shape[2] = (uint16_t)pad_dim(out_pad->padded_features, out_pad->features);
+    /* Pre-compute the input/output shape values from in_pad/out_pad
+     * before taking slots_lock. pad_dim is `max(padded, raw)` today,
+     * but hoisting these reads keeps the lock-protected critical
+     * region as straight-line stores even if pad_dim ever grows
+     * non-trivial logic. */
+    uint16_t in_shape0  = (uint16_t)pad_dim(in_pad->padded_height,   in_pad->height);
+    uint16_t in_shape1  = (uint16_t)pad_dim(in_pad->padded_width,    in_pad->width);
+    uint16_t in_shape2  = (uint16_t)pad_dim(in_pad->padded_features, in_pad->features);
+    uint16_t out_shape0 = (uint16_t)pad_dim(out_pad->padded_height,   out_pad->height);
+    uint16_t out_shape1 = (uint16_t)pad_dim(out_pad->padded_width,    out_pad->width);
+    uint16_t out_shape2 = (uint16_t)pad_dim(out_pad->padded_features, out_pad->features);
+
+    /* 4. Claim a slot AND populate cfg/shape atomically.
+     *
+     * Previously the populate happened outside the lock with only the
+     * in_use=true flip protected. That left a window where
+     * hailo_backend_in_use_slots() / hailo_backend_model_sizes() (which
+     * also iterate slots under slots_lock) could observe in_use=true
+     * with cfg.input_bytes / output_bytes still zero from the prior
+     * occupant. context_switch_load remains outside the lock — its
+     * descriptor allocation and HEF translation are too long to hold
+     * a spinlock across. */
+    irq_flags_t flags = spin_lock_irqsave(&slots_lock);
+    int idx = -1;
+    for (int i = 0; i < HAILO_MAX_MODELS; i++) {
+        if (!slots[i].in_use) {
+            slots[i].in_use = true;
+            slots[i].cfg = (struct hailo_infer_config){
+                .input_bytes      = input_bytes,
+                .output_bytes     = output_bytes,
+                .input_channel    = 0,
+                .output_channel   = 1,
+                .input_data_id    = in_data_id,
+                .output_data_id   = out_data_id,
+                .input_page_size  = in_page_size,
+                .output_page_size = out_page_size,
+                /* Deliberately tight: scheduler-policy path (ai_hailo)
+                 * invokes run() from contexts that may have IRQs
+                 * disabled. A 500 ms poll would stall the CPU and drop
+                 * timer ticks. A real Hailo-8 MLP inference completes
+                 * in microseconds; 10 ms was the original 500x safety
+                 * margin but bumping to 500 ms for real-HEF bring-up —
+                 * first inference may include one-time CCW upload
+                 * latency and we don't yet know the real variance. */
+                .timeout_us       = 500000,     /* 500 ms */
+            };
+            slots[i].input_shape[0]  = in_shape0;
+            slots[i].input_shape[1]  = in_shape1;
+            slots[i].input_shape[2]  = in_shape2;
+            slots[i].output_shape[0] = out_shape0;
+            slots[i].output_shape[1] = out_shape1;
+            slots[i].output_shape[2] = out_shape2;
+            idx = i;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&slots_lock, flags);
+    if (idx < 0) return INF_ERR_FULL;
 
     /* 5. Context-switch load: replaces the prior best-effort
      * WRITE_MEMORY + CONFIG_STREAM path. Allocates VDMA desc lists

@@ -29,6 +29,7 @@
  */
 
 #include "camrtc.h"
+#include "spinlock.h"
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
@@ -112,15 +113,20 @@
  * making `rcediag` feel hung. */
 #define CAMRTC_CH_SETUP_TIMEOUT_US   1000000u
 
-/* ---- MMIO accessors ---- */
+/* ---- MMIO accessors ----
+ *
+ * The pre-read DSB matches the Tegra convention used by uart_tegra.c
+ * for LSR polling (see "UART LSR Read After Kexec" in the root
+ * CLAUDE.md). Without it, a speculatively-issued earlier load can be
+ * satisfied from a stale buffer and return the wrong value — this
+ * matters for the SHRD_MBOX FULL bit polled here, which is the same
+ * style of edge-triggered status flag.
+ */
 
 static inline uint32_t mmio_read32(uintptr_t addr)
 {
-    uint32_t v = *(volatile uint32_t *)addr;
-    /* Order MMIO read against any subsequent write. Mirrors the
-     * BPMP-side HSP accessor pattern. */
     __asm__ volatile("dsb sy" ::: "memory");
-    return v;
+    return *(volatile uint32_t *)addr;
 }
 
 static inline void mmio_write32(uintptr_t addr, uint32_t v)
@@ -134,6 +140,22 @@ static inline void mmio_write32(uintptr_t addr, uint32_t v)
 static bool       g_initialised;
 static uintptr_t  g_vm_tx_addr;   /* SHRD_MBOX of TX mailbox */
 static uintptr_t  g_vm_rx_addr;   /* SHRD_MBOX of RX mailbox */
+
+/*
+ * Serialises the entire camrtc_send_msg / camrtc_ch_setup_capture_control
+ * round trip. Without this lock, two callers on different CPUs would
+ * interleave sm_tx_send / sm_rx_recv pairs and steal each other's
+ * responses (the resp_id == msg_id filter inside camrtc_send_msg is not
+ * a substitute — both callers might use the same opcode). Mirrors the
+ * g_mrq_lock pattern in kernel/drivers/bpmp/mrq.c.
+ *
+ * IRQ-disabled (spin_lock_irqsave) because the underlying poll runs
+ * with timeouts up to 1 s on real hardware. That's a long IRQ-disabled
+ * window if RCE wedges, but matches the existing BPMP driver's
+ * behaviour and is acceptable for the bring-up phase. Splitting commit
+ * vs poll into two separately-locked phases is left for follow-up.
+ */
+static spinlock_t g_camrtc_lock = SPINLOCK_INIT;
 
 static uintptr_t hsp_sm_addr(uintptr_t hsp_base, uint32_t idx)
 {
@@ -472,10 +494,15 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
 {
     if (!g_initialised) return -1;
 
+    /* Serialise the entire send/wait/recv round trip. See g_camrtc_lock
+     * declaration for rationale. */
+    irq_flags_t cl_flags = spin_lock_irqsave(&g_camrtc_lock);
+
     uint32_t request = camrtc_msg_pack(msg_id, param);
     if (sm_tx_wait_empty(timeout_us) != 0) {
         WARN("camrtc: VM-TX never drained for msg_id=0x%x "
              "(timeout=%uus)", (unsigned)msg_id, (unsigned)timeout_us);
+        spin_unlock_irqrestore(&g_camrtc_lock, cl_flags);
         return -2;
     }
     sm_tx_send(request);
@@ -506,11 +533,13 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
             WARN("camrtc: VM-RX timeout waiting for response to "
                  "msg_id=0x%x (timeout=%uus)",
                  (unsigned)msg_id, (unsigned)timeout_us);
+            spin_unlock_irqrestore(&g_camrtc_lock, cl_flags);
             return -2;
         }
         uint32_t resp_id = camrtc_msg_id(resp);
         if (resp_id == msg_id) {
             if (resp_param) *resp_param = camrtc_msg_param(resp);
+            spin_unlock_irqrestore(&g_camrtc_lock, cl_flags);
             return 0;
         }
         if (resp_id < CAMRTC_HSP_HELLO) {
@@ -522,12 +551,14 @@ int camrtc_send_msg(uint32_t msg_id, uint32_t param,
             if (timer_get_count() >= deadline) {
                 WARN("camrtc: VM-RX timeout draining stale traffic "
                      "for msg_id=0x%x", (unsigned)msg_id);
+                spin_unlock_irqrestore(&g_camrtc_lock, cl_flags);
                 return -2;
             }
             continue;
         }
         WARN("camrtc: unexpected response id 0x%x (sent 0x%x)",
              (unsigned)resp_id, (unsigned)msg_id);
+        spin_unlock_irqrestore(&g_camrtc_lock, cl_flags);
         return -3;
     }
 }

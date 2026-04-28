@@ -4621,8 +4621,15 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
         return -1;
     }
 
+    // BENCH_INPUT stays as a `static` immutable so concurrent callers
+    // share the same zero buffer harmlessly. The output buffer was
+    // previously a `static mut` shared across calls — lifted to the
+    // stack so two concurrent shells calling `model bench` can't race
+    // the same array. 64 × 4 = 256 B on a 64 KB kernel-task stack —
+    // matches the post-hardening shape of rust_infer_classify and
+    // rust_infer_and_print.
     static BENCH_INPUT: [f32; 784] = [0.0; 784];
-    static mut BENCH_OUTPUT: [f32; 64] = [0.0; 64];
+    let mut bench_output: [f32; 64] = [0.0; 64];
 
     let mut min_ns: u64 = u64::MAX;
     let mut max_ns: u64 = 0;
@@ -4631,14 +4638,19 @@ pub extern "C" fn rust_infer_bench(model_index: u32, iterations: u32) -> i32 {
 
     for i in 0..iterations {
         let start = kernel_ffi::get_time_ns();
+        for o in bench_output.iter_mut() { *o = 0.0; }
+        // SAFETY: BENCH_INPUT is a 784-element `static` (immutable
+        // shared zero buffer) and `bench_output` is a stack-local
+        // 64-element array. Both pointers are 4-byte-aligned, point
+        // to the declared element counts, and remain live through
+        // the call.
         let result = unsafe {
-            for o in BENCH_OUTPUT.iter_mut() { *o = 0.0; }
             inference::run_inference(
                 model_index as usize,
                 BENCH_INPUT.as_ptr(),
                 BENCH_INPUT.len(),
-                BENCH_OUTPUT.as_mut_ptr(),
-                BENCH_OUTPUT.len(),
+                bench_output.as_mut_ptr(),
+                bench_output.len(),
             )
         };
         let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);

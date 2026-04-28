@@ -279,6 +279,14 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
      * ACE-Lite but empirically firmware reads stale zeros unless we
      * push the writes to the PoC.
      *
+     * Order the descriptor stores against the upcoming cache_clean.
+     * `dsb ishst` publishes the prior writes in the Inner-Shareable
+     * domain so DC CVAC operates on the values we just wrote (a
+     * subsequent doorbell ring then provides the device-visibility
+     * barrier — see hailo_vdma_channel_start). Without this, an
+     * out-of-order CVAC could clean a stale cacheline whose updated
+     * contents are still pending in the store buffer.
+     *
      * Bug fix 2026-04-22: this flush previously used `list->descs` as
      * the base, ignoring `starting_desc`. That worked for the standard
      * single-shot inference path (starting_desc=0) but corrupted any
@@ -298,6 +306,9 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
      * snoops caches correctly, drop this flush — it costs ~microseconds
      * per submit. Today we can't distinguish "snoop works but fw logic
      * still wrong" from "snoop broken" without this baseline. */
+#if defined(__aarch64__)
+    __asm__ volatile("dsb ishst" ::: "memory");
+#endif
     if (hailo_platform && hailo_platform->cache_clean) {
         uint32_t first_slot = starting_desc & list->desc_count_mask;
         hailo_platform->cache_clean(&list->descs[first_slot],

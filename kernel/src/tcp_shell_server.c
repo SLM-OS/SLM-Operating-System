@@ -83,7 +83,8 @@ void tcp_shell_server_note_session_open(uint32_t session_id) {
 }
 
 void tcp_shell_server_note_session_close(uint32_t session_id,
-                                         int32_t  heap_delta_bytes) {
+                                         int32_t  heap_delta_bytes,
+                                         const char *pool_attribution) {
     sessions_closed++;
 
     last_session_heap_delta = heap_delta_bytes;
@@ -94,10 +95,12 @@ void tcp_shell_server_note_session_close(uint32_t session_id,
     if (heap_delta_bytes > (int32_t)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES) {
         leak_warnings++;
         total_suspicious_leak += (uint32_t)heap_delta_bytes;
+        const char *attr = (pool_attribution && pool_attribution[0])
+            ? pool_attribution : "";
         WARN("shell-tcp: session %u closed with +%d bytes still on lwIP heap "
-             "(threshold=%u, measured post-tcp_close) — suspect leak",
+             "(threshold=%u, measured post-tcp_close) — suspect leak%s",
              (unsigned)session_id, (int)heap_delta_bytes,
-             (unsigned)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES);
+             (unsigned)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES, attr);
     }
 }
 

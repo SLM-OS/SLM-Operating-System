@@ -188,10 +188,20 @@ static struct {
     uint32_t count;                   /* Number of completions */
 } ai_latency_stats;
 
-/* Top-8 task cache: updated periodically in scheduler_tick() */
+/* Top-8 task cache: updated periodically in scheduler_tick().
+ *
+ * Each entry stores the task pointer alongside the captured `generation`
+ * value at publish time. `task_destroy` (kernel/sched/task.c) bumps
+ * `task->generation` when a slot is freed, so a stale entry whose
+ * captured generation no longer matches the slot's current generation is
+ * silently filtered out by `sched_ai_get_top_tasks` before any field is
+ * dereferenced by AI feature extraction. Without that check the
+ * extractor would read fields belonging to a recycled task (or zeros
+ * post-destroy), feeding stale features to the AI scheduler. */
 #include "ai_types.h"
 static struct {
     struct task *tasks[AI_STATE_NUM_TASKS];
+    uint32_t generations[AI_STATE_NUM_TASKS];
     uint32_t count;
     uint64_t last_update_tick;
 } ai_top_tasks;
@@ -211,6 +221,7 @@ static struct {
 static void ai_update_top_tasks(void)
 {
     struct task *staging[AI_STATE_NUM_TASKS];
+    uint32_t staging_gen[AI_STATE_NUM_TASKS];
     uint32_t count = 0;
 
     for (uint32_t c = 0; c < cpu_count; c++) {
@@ -220,7 +231,14 @@ static void ai_update_top_tasks(void)
 
         while (t) {
             if (count < AI_STATE_NUM_TASKS) {
-                staging[count++] = t;
+                staging[count] = t;
+                /* Capture generation under rq_lock so it pairs with the
+                 * task pointer; task_destroy bumps generation while
+                 * holding task_lock + the owning rq_lock, so a captured
+                 * (t, gen) pair is consistent with the task's identity at
+                 * this instant. */
+                staging_gen[count] = t->generation;
+                count++;
             } else {
                 uint32_t min_idx = 0;
                 uint8_t min_pri = staging[0]->effective_priority;
@@ -232,6 +250,7 @@ static void ai_update_top_tasks(void)
                 }
                 if (t->effective_priority > min_pri) {
                     staging[min_idx] = t;
+                    staging_gen[min_idx] = t->generation;
                 }
             }
             t = t->next;
@@ -240,8 +259,10 @@ static void ai_update_top_tasks(void)
         rq_unlock_irqrestore(c, flags);
     }
 
-    for (uint32_t i = 0; i < count; i++)
+    for (uint32_t i = 0; i < count; i++) {
         ai_top_tasks.tasks[i] = staging[i];
+        ai_top_tasks.generations[i] = staging_gen[i];
+    }
     ai_top_tasks.count = count;
     ai_top_tasks.last_update_tick = sched.timer_ticks;
 }
@@ -311,9 +332,19 @@ uint32_t sched_ai_get_top_tasks(struct task **out, uint32_t max)
 {
     uint32_t n = ai_top_tasks.count;
     if (n > max) n = max;
-    for (uint32_t i = 0; i < n; i++)
-        out[i] = ai_top_tasks.tasks[i];
-    return n;
+    uint32_t valid = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        struct task *t = ai_top_tasks.tasks[i];
+        uint32_t captured_gen = ai_top_tasks.generations[i];
+        /* Skip entries whose owning task slot has been recycled since the
+         * last ai_update_top_tasks() snapshot. task_destroy bumps
+         * generation, so a mismatch here means the pointer no longer
+         * refers to the task that was on the run queue when we sampled. */
+        if (t && __atomic_load_n(&t->generation, __ATOMIC_ACQUIRE) == captured_gen) {
+            out[valid++] = t;
+        }
+    }
+    return valid;
 }
 
 #endif /* CONFIG_AI_SCHEDULER */
@@ -1170,6 +1201,12 @@ void scheduler_add_task(struct task *task)
 
 /*
  * Remove a task from the run queue.
+ *
+ * Snapshot/lock/recheck mirrors sched_migrate_task: a work-stealing thief
+ * on another CPU can update task->assigned_cpu between our unlocked read
+ * and the rq_lock acquire. If we just trusted the first read, we'd take
+ * the wrong CPU's rq_lock, remove_from_cpu_queue_locked would return 0
+ * silently, and the task would stay queued on its new owner.
  */
 void scheduler_remove_task(struct task *task)
 {
@@ -1177,22 +1214,37 @@ void scheduler_remove_task(struct task *task)
         return;
     }
 
-    uint32_t cpu = task->assigned_cpu;
-    struct cpu_runqueue *rq __attribute__((unused)) = cpu_rq(cpu);
-    irq_flags_t flags = rq_lock_irqsave(cpu);
+    /* Bounded retry: each successful steal/migrate moves the task at most
+     * once per scheduling cycle, so a small cap is plenty. */
+    for (int attempts = 0; attempts < 8; attempts++) {
+        uint32_t cpu = task->assigned_cpu;
+        if (cpu >= cpu_count) {
+            return;  /* Defensive: corrupt assigned_cpu — bail. */
+        }
+        struct cpu_runqueue *rq __attribute__((unused)) = cpu_rq(cpu);
+        irq_flags_t flags = rq_lock_irqsave(cpu);
 
-    /*
-     * Task might already have been removed from the queue when it
-     * started running (schedule() removes from queue before switching).
-     * Only decrement task_count if task was actually in the queue.
-     */
-    if (remove_from_cpu_queue_locked(task, cpu)) {
-        sched.task_count--;  /* Racy but acceptable for stats */
-        DEBUG_PRINT("Removed task '%s' from CPU %u run queue (ready=%u)",
-                    task->name, cpu, rq->ready_count);
+        if (task->assigned_cpu != cpu) {
+            /* Moved between read and lock; release and try again. */
+            rq_unlock_irqrestore(cpu, flags);
+            continue;
+        }
+
+        if (remove_from_cpu_queue_locked(task, cpu)) {
+            sched.task_count--;  /* Racy but acceptable for stats */
+            DEBUG_PRINT("Removed task '%s' from CPU %u run queue (ready=%u)",
+                        task->name, cpu, rq->ready_count);
+        }
+
+        rq_unlock_irqrestore(cpu, flags);
+        return;
     }
 
-    rq_unlock_irqrestore(cpu, flags);
+    /* Retry budget exhausted — assigned_cpu changed 8 times in our window,
+     * which should be effectively impossible. Log loudly so the dequeue
+     * miss is visible if it ever happens. */
+    WARN("scheduler_remove_task: gave up after 8 retries on task '%s'",
+         task->name);
 }
 
 /*
@@ -1207,22 +1259,49 @@ void scheduler_terminate_task(struct task *task)
         return;
     }
 
+    /* Same snapshot/lock/recheck pattern as scheduler_remove_task: a
+     * concurrent steal can change task->assigned_cpu under us. We pin
+     * `cpu` once we successfully recheck under the lock so the post-loop
+     * steal_deque_remove targets the same CPU whose rq_lock we held. */
     uint32_t cpu = task->assigned_cpu;
-    struct cpu_runqueue *rq __attribute__((unused)) = cpu_rq(cpu);
-    irq_flags_t flags = rq_lock_irqsave(cpu);
+    int locked = 0;
+    for (int attempts = 0; attempts < 8 && !locked; attempts++) {
+        cpu = task->assigned_cpu;
+        if (cpu >= cpu_count) {
+            return;
+        }
+        irq_flags_t flags = rq_lock_irqsave(cpu);
+        if (task->assigned_cpu != cpu) {
+            rq_unlock_irqrestore(cpu, flags);
+            continue;
+        }
 
-    task->state = TASK_TERMINATED;
+        struct cpu_runqueue *rq __attribute__((unused)) = cpu_rq(cpu);
+
+        task->state = TASK_TERMINATED;
 #if !defined(PLATFORM_HAS_NC_MEMORY) && !defined(PLATFORM_X86_64)
-    cache_clean(&task->state);
+        cache_clean(&task->state);
 #endif
 
-    if (remove_from_cpu_queue_locked(task, cpu)) {
-        sched.task_count--;
-        DEBUG_PRINT("Terminated task '%s' on CPU %u (ready=%u)",
-                    task->name, cpu, rq->ready_count);
-    }
+        if (remove_from_cpu_queue_locked(task, cpu)) {
+            sched.task_count--;
+            DEBUG_PRINT("Terminated task '%s' on CPU %u (ready=%u)",
+                        task->name, cpu, rq->ready_count);
+        }
 
-    rq_unlock_irqrestore(cpu, flags);
+        rq_unlock_irqrestore(cpu, flags);
+        locked = 1;
+    }
+    if (!locked) {
+        /* Retry budget exhausted. The task is left in its prior state
+         * (NOT TASK_TERMINATED), which means task_destroy will refuse
+         * to reclaim it (per kernel/CLAUDE.md "Leaky tests"). Log so
+         * the leak is visible — should never happen in practice. */
+        WARN("scheduler_terminate_task: gave up after 8 retries on task '%s' "
+             "(state=%d) — leaking task slot",
+             task->name, (int)task->state);
+        return;
+    }
 
 #if CONFIG_WORK_STEALING
     /* Clear the task's pointer from its owner's steal deque so a thief
@@ -2099,7 +2178,15 @@ void scheduler_tick(void)
     }
 #endif
 
-    /* Policy tick callback (stats collection, rebalancing) */
+    /* Policy tick callback (stats collection, rebalancing).
+     *
+     * Contract: tick() MUST NOT call schedule() directly. The cooperative-
+     * preemption path (coop_preempt_maybe_tick) invokes scheduler_tick()
+     * from inside schedule() with preempt_disabled[cpu] = 1; a tick
+     * callback that re-entered schedule() would either deadlock on
+     * rq_lock or run with stale current/next state. Policies should
+     * publish work via scheduler_add_task* and let the next preemption
+     * point pick it up. */
     if (active_policy && active_policy->tick)
         active_policy->tick(cpu);
 
