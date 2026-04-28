@@ -1,0 +1,1089 @@
+//! Transformer operator kernels (M4 of the SLM integration plan).
+//! Forms the per-layer building blocks the M5 decoder composes.
+//!
+//! All ops follow the `(input: &[u16], weight/state: &..., output: &mut [u16])`
+//! shape: borrowed FP16-as-bits inputs, borrowed-or-owned mutable outputs.
+//! Numeric accumulators are FP32; storage is FP16. FP16 storage shrinks the
+//! activation footprint to fit Qwen2.5-1.5B's ~230 MB KV cache; FP32
+//! accumulators preserve numerical fidelity through long reduction chains
+//! (RMS, attention softmax, etc.).
+//!
+//! Includes the simpler ops (RMSNorm, RoPE, FP16 embedding lookup, SiLU)
+//! from M4.1 plus the matmul-heavy `gqa_decode_step`, `swiglu_mlp`,
+//! `lm_head`, and `matmul_q4k_*` kernels from M4.2 — together the full
+//! per-layer building blocks the M5 decoder composes.
+//!
+//! # Numeric conventions
+//!
+//! - Storage:    FP16 bit pattern as `u16` (stable Rust has no `f16` type).
+//! - Accumulators: `f32`.
+//! - Conversion: `crate::slm::gguf::{f16_to_f32, f32_to_f16}`.
+//!
+//! # `no_std`
+//!
+//! All ops are scalar and `no_std`. NEON acceleration is M4.3 / M9.
+
+#![cfg(feature = "slm")]
+
+use alloc::vec;
+use alloc::vec::Vec;
+
+use crate::inference::mathf::sqrtf;
+use crate::inference::quant::{q8_k_byte_size, quantize_row_q8_k, vec_dot_q4_k_q8_k};
+use crate::slm::gguf::{Q4_K_BLOCK_ELEMENTS, f16_to_f32, f32_to_f16, q4_k_byte_size};
+
+// ---------------------------------------------------------------------------
+// RMSNorm
+// ---------------------------------------------------------------------------
+
+/// Root Mean Square layer norm with per-channel learned scale (`gamma`).
+///
+/// `x` is one row of FP16 storage of length `n`; `gamma` is the learned
+/// per-channel scale of the same length. `out` is the pre-allocated FP16
+/// output of the same length. `eps` is a small number (Qwen2.5 uses 1e-6)
+/// added inside the sqrt to avoid division by zero.
+///
+/// Computes:
+///
+/// ```text
+/// rms_inv = 1 / sqrt(mean(x_i^2) + eps)
+/// out_i   = x_i * rms_inv * gamma_i
+/// ```
+///
+/// Accumulator is FP32. `mathf::sqrtf` is used (see `runtime/CLAUDE.md`
+/// "mathf — scalar libm replacements" for why we don't call `libm::sqrtf`).
+///
+/// Returns `Some(())` on success, `None` if `x`, `gamma`, and `out` don't
+/// all have the same length (or are empty).
+pub fn rmsnorm(x: &[u16], gamma: &[u16], eps: f32, out: &mut [u16]) -> Option<()> {
+    let n = x.len();
+    if n == 0 || gamma.len() != n || out.len() != n {
+        return None;
+    }
+
+    // Sum of squares in FP32 to avoid the precision loss that would
+    // come from accumulating ~thousands of FP16 values.
+    let mut acc_sq: f32 = 0.0;
+    for &bits in x.iter() {
+        let v = f16_to_f32(bits);
+        acc_sq += v * v;
+    }
+
+    let mean_sq = acc_sq / (n as f32);
+    let rms_inv = 1.0 / sqrtf(mean_sq + eps);
+
+    for i in 0..n {
+        let xv = f16_to_f32(x[i]);
+        let gv = f16_to_f32(gamma[i]);
+        out[i] = f32_to_f16(xv * rms_inv * gv);
+    }
+
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
+// RoPE
+// ---------------------------------------------------------------------------
+
+/// Precomputed RoPE cos/sin table for a given `head_dim` and `theta_base`.
+///
+/// Built once per session (head_dim is per-arch, theta_base comes from the
+/// GGUF metadata `*.rope.freq_base`). The table stores cos/sin pairs as
+/// `f32` since head_dim is small (~128) and the LUT footprint is tiny
+/// even at long context: 128 dims × 4096 positions × 4 B ≈ 2 MB.
+///
+/// # Convention
+///
+/// This implementation uses the GPT-NeoX / Llama / Qwen2 pair-interleave
+/// convention: pair `i` is `(vec[2i], vec[2i+1])`, **not** the alternate
+/// `(vec[i], vec[i + head_dim/2])` half-split convention some reference
+/// implementations use.
+///
+/// # Layout
+///
+/// `cos_sin` is a flat `f32` vector of length `max_pos * head_dim`.
+/// For position `pos` and pair index `i` (i in `0..head_dim/2`):
+///
+/// ```text
+/// cos_sin[pos * head_dim + 2*i]     = cos(pos * theta_i)
+/// cos_sin[pos * head_dim + 2*i + 1] = sin(pos * theta_i)
+/// ```
+///
+/// where `theta_i = theta_base ^ (-2 * i / head_dim)`.
+pub struct RopeTable {
+    /// Per-position cos/sin pairs. Layout: `[pos][i]` interleaved cos at
+    /// even idx, sin at odd idx; total `max_pos * head_dim` entries.
+    pub cos_sin: Vec<f32>,
+    pub head_dim: usize,
+    pub max_pos: usize,
+}
+
+impl RopeTable {
+    /// Precompute cos and sin for every (position, pair) combination.
+    ///
+    /// `head_dim` must be even (RoPE rotates pairs); odd head_dim is
+    /// rejected via an empty table to keep the API infallible.
+    ///
+    /// `head_dim * max_pos` is checked for `usize` overflow before
+    /// allocation.
+    pub fn new(head_dim: usize, max_pos: usize, theta_base: f32) -> Self {
+        // Reject odd head_dim or zero dims by returning an empty table
+        // — `apply` will then fall through with no-op behaviour.
+        if head_dim == 0 || max_pos == 0 || head_dim % 2 != 0 {
+            return Self {
+                cos_sin: Vec::new(),
+                head_dim,
+                max_pos,
+            };
+        }
+
+        let total = match head_dim.checked_mul(max_pos) {
+            Some(v) => v,
+            None => {
+                return Self {
+                    cos_sin: Vec::new(),
+                    head_dim,
+                    max_pos,
+                };
+            }
+        };
+
+        let mut cos_sin = vec![0.0f32; total];
+        let half = head_dim / 2;
+
+        for pos in 0..max_pos {
+            for i in 0..half {
+                // theta_i = theta_base ^ (-2*i / head_dim).
+                let exponent = -2.0 * (i as f32) / (head_dim as f32);
+                // libm::powf is allowed (mathf only replaces sqrtf/tanhf).
+                let theta_i = libm::powf(theta_base, exponent);
+                let angle = (pos as f32) * theta_i;
+                // libm::cosf / sinf are allowed for the same reason.
+                let c = libm::cosf(angle);
+                let s = libm::sinf(angle);
+                let base = pos * head_dim + 2 * i;
+                cos_sin[base] = c;
+                cos_sin[base + 1] = s;
+            }
+        }
+
+        Self {
+            cos_sin,
+            head_dim,
+            max_pos,
+        }
+    }
+
+    /// Apply rotary embedding to `vec` in-place.
+    ///
+    /// `vec` is a single query or key vector of length `head_dim`; pairs
+    /// `(vec[2i], vec[2i+1])` get rotated by the position's angle. FP16
+    /// storage, FP32 trig already baked into the LUT.
+    ///
+    /// No-op when `pos >= max_pos`, `vec.len() != head_dim`, or the LUT
+    /// is empty (degenerate `head_dim` / overflow).
+    pub fn apply(&self, pos: usize, vec: &mut [u16]) {
+        if self.cos_sin.is_empty()
+            || pos >= self.max_pos
+            || vec.len() != self.head_dim
+            || self.head_dim % 2 != 0
+        {
+            return;
+        }
+        let half = self.head_dim / 2;
+        let base = pos * self.head_dim;
+        for i in 0..half {
+            let c = self.cos_sin[base + 2 * i];
+            let s = self.cos_sin[base + 2 * i + 1];
+            let v0 = f16_to_f32(vec[2 * i]);
+            let v1 = f16_to_f32(vec[2 * i + 1]);
+            vec[2 * i] = f32_to_f16(v0 * c - v1 * s);
+            vec[2 * i + 1] = f32_to_f16(v0 * s + v1 * c);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Embedding lookup (FP16 path)
+// ---------------------------------------------------------------------------
+
+/// Gather one row from an FP16 embedding table.
+///
+/// `table` is the `vocab_size * embedding_dim` FP16 weight matrix in
+/// row-major order. `token_id` selects which row. `out` is the
+/// `embedding_dim`-length FP16 destination.
+///
+/// Returns `None` on any of:
+///   - `embedding_dim == 0`
+///   - `out.len() != embedding_dim`
+///   - `table.len()` is not a multiple of `embedding_dim`
+///   - `token_id` is out of range (`>= vocab_size`)
+///   - row offset arithmetic overflows `usize`
+///
+/// # Note on Q4_K embeddings
+///
+/// For Qwen2.5-1.5B the embedding table is **Q4_K-quantized**, not FP16.
+/// The Q4_K variant is M4.2 / M5 territory; this PR ships the FP16
+/// reference for testing and the M5 GPU path's fallback. The function
+/// is named with the `_fp16` suffix to make the storage format explicit.
+pub fn embedding_lookup_fp16(
+    table: &[u16],
+    embedding_dim: usize,
+    token_id: u32,
+    out: &mut [u16],
+) -> Option<()> {
+    if embedding_dim == 0 || out.len() != embedding_dim {
+        return None;
+    }
+    if table.len() % embedding_dim != 0 {
+        return None;
+    }
+    let vocab_size = table.len() / embedding_dim;
+    // `usize::try_from` keeps hygiene on 32-bit hosts even though
+    // bare-metal targets are 64-bit.
+    let tok = match usize::try_from(token_id) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    if tok >= vocab_size {
+        return None;
+    }
+
+    let start = tok.checked_mul(embedding_dim)?;
+    let end = start.checked_add(embedding_dim)?;
+    if end > table.len() {
+        return None;
+    }
+
+    out.copy_from_slice(&table[start..end]);
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
+// SiLU activation
+// ---------------------------------------------------------------------------
+
+/// SiLU activation in-place: `x = x * sigmoid(x)`.
+///
+/// `sigmoid(x) = 1 / (1 + exp(-x))`. FP16 storage, FP32 internally.
+///
+/// `libm::expf` is allowed (only `sqrtf` and `tanhf` triggered the #141
+/// f16 soften crash and were moved to `mathf`).
+pub fn silu(x: &mut [u16]) {
+    for slot in x.iter_mut() {
+        let xf = f16_to_f32(*slot);
+        let s = xf / (1.0 + libm::expf(-xf));
+        *slot = f32_to_f16(s);
+    }
+}
+
+/// SiLU with a separate output buffer, leaving `x` untouched.
+///
+/// Returns `None` when `x` and `out` differ in length.
+pub fn silu_out(x: &[u16], out: &mut [u16]) -> Option<()> {
+    if x.len() != out.len() {
+        return None;
+    }
+    for (i, &bits) in x.iter().enumerate() {
+        let xf = f16_to_f32(bits);
+        let s = xf / (1.0 + libm::expf(-xf));
+        out[i] = f32_to_f16(s);
+    }
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
+// Q4_K matmul (M4.2)
+// ---------------------------------------------------------------------------
+
+/// Single-row Q4_K-weight × FP16-activation matmul.
+///
+/// `weights` is one Q4_K-packed row of `cols` elements (`cols` must be a
+/// multiple of 256 — Qwen2.5-1.5B uses {1536, 8960}). `acts_fp16` is the
+/// FP16 activation row of `cols` elements. `q8k_scratch` is caller-owned
+/// scratch of `q8_k_byte_size(cols)` bytes used to quantize the
+/// activations into Q8_K before the dot product.
+///
+/// Routes through M3's `quantize_row_q8_k` + `vec_dot_q4_k_q8_k`.
+///
+/// Returns `None` on shape mismatch.
+pub fn matmul_q4k_row(
+    weights: &[u8],
+    acts_fp16: &[u16],
+    q8k_scratch: &mut [u8],
+    cols: usize,
+) -> Option<f32> {
+    if cols == 0 || cols % Q4_K_BLOCK_ELEMENTS != 0 {
+        return None;
+    }
+    if acts_fp16.len() != cols {
+        return None;
+    }
+    if weights.len() != q4_k_byte_size(cols)? {
+        return None;
+    }
+    if q8k_scratch.len() < q8_k_byte_size(cols)? {
+        return None;
+    }
+
+    // Widen activations FP16 → FP32 once, on the stack-friendly path:
+    // an alloc::Vec<f32> here. The M5 decoder will pre-allocate a
+    // session-scoped scratch buffer to avoid this allocation per call.
+    let mut acts_f32: Vec<f32> = Vec::with_capacity(cols);
+    for &bits in acts_fp16.iter() {
+        acts_f32.push(f16_to_f32(bits));
+    }
+
+    let q8k_len = q8_k_byte_size(cols)?;
+    quantize_row_q8_k(&acts_f32, &mut q8k_scratch[..q8k_len])?;
+    vec_dot_q4_k_q8_k(weights, &q8k_scratch[..q8k_len])
+}
+
+/// Multi-row Q4_K-weight × FP16-activation matmul.
+///
+/// `weights` is `rows * q4_k_byte_size(cols)` packed bytes laid out
+/// row-major. `acts_fp16` is the FP16 input vector of `cols` elements
+/// (shared across all output rows). `out_fp32` receives the per-row
+/// dot products. `q8k_scratch` is reused across rows so the activation
+/// quantization is paid once.
+///
+/// Returns `None` on shape mismatch.
+pub fn matmul_q4k_rows(
+    weights: &[u8],
+    rows: usize,
+    cols: usize,
+    acts_fp16: &[u16],
+    q8k_scratch: &mut [u8],
+    out_fp32: &mut [f32],
+) -> Option<()> {
+    if cols == 0 || cols % Q4_K_BLOCK_ELEMENTS != 0 {
+        return None;
+    }
+    if acts_fp16.len() != cols || out_fp32.len() != rows {
+        return None;
+    }
+    let row_bytes = q4_k_byte_size(cols)?;
+    let total = row_bytes.checked_mul(rows)?;
+    if weights.len() != total {
+        return None;
+    }
+    let q8k_len = q8_k_byte_size(cols)?;
+    if q8k_scratch.len() < q8k_len {
+        return None;
+    }
+
+    // Quantize the shared activations once.
+    let mut acts_f32: Vec<f32> = Vec::with_capacity(cols);
+    for &bits in acts_fp16.iter() {
+        acts_f32.push(f16_to_f32(bits));
+    }
+    quantize_row_q8_k(&acts_f32, &mut q8k_scratch[..q8k_len])?;
+
+    // Loop over weight rows, calling the dot kernel directly so we
+    // skip the per-row activation re-quantization that
+    // `matmul_q4k_row` would otherwise pay.
+    for r in 0..rows {
+        let start = r.checked_mul(row_bytes)?;
+        let end = start.checked_add(row_bytes)?;
+        let row = &weights[start..end];
+        out_fp32[r] = vec_dot_q4_k_q8_k(row, &q8k_scratch[..q8k_len])?;
+    }
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
+// Grouped-Query Attention (decode step)
+// ---------------------------------------------------------------------------
+
+/// One-step grouped-query attention for the decode loop.
+///
+/// At decode time the model has just produced one new token. For that
+/// position we have:
+/// - one query row per attention head (`n_head_q × head_dim`),
+/// - the cumulative key/value cache covering positions `0..seq_len`
+///   (`seq_len × n_head_kv × head_dim` for each of K and V),
+/// - we want the attention output (`n_head_q × head_dim`) that the
+///   subsequent output projection consumes.
+///
+/// **GQA pairing:** every `g = n_head_q / n_head_kv` query heads share one
+/// KV head. Qwen2.5-1.5B has `g = 6` (12 query heads, 2 KV heads).
+///
+/// **Causal mask:** implicit. `seq_len` is the count of past+current
+/// positions to attend to; future positions simply aren't passed in.
+///
+/// `scratch_logits` is a per-head FP32 scratch buffer of length
+/// `seq_len`, reused across heads.
+///
+/// Returns `None` on shape mismatch or when `n_head_q % n_head_kv != 0`.
+pub fn gqa_decode_step(
+    q: &[u16],
+    k: &[u16],
+    v: &[u16],
+    n_head_q: usize,
+    n_head_kv: usize,
+    head_dim: usize,
+    seq_len: usize,
+    scratch_logits: &mut [f32],
+    out: &mut [u16],
+) -> Option<()> {
+    if head_dim == 0
+        || n_head_q == 0
+        || n_head_kv == 0
+        || seq_len == 0
+        || n_head_q % n_head_kv != 0
+    {
+        return None;
+    }
+    let q_len = n_head_q.checked_mul(head_dim)?;
+    let kv_per_pos = n_head_kv.checked_mul(head_dim)?;
+    let kv_len = seq_len.checked_mul(kv_per_pos)?;
+    if q.len() != q_len || k.len() != kv_len || v.len() != kv_len || out.len() != q_len {
+        return None;
+    }
+    if scratch_logits.len() < seq_len {
+        return None;
+    }
+
+    let group = n_head_q / n_head_kv;
+    let inv_sqrt_head = 1.0 / sqrtf(head_dim as f32);
+
+    for hq in 0..n_head_q {
+        let hkv = hq / group;
+        let q_off = hq.checked_mul(head_dim)?;
+        let q_row = &q[q_off..q_off + head_dim];
+
+        // 1. Logits[t] = (q · k_t) / sqrt(head_dim) for t in 0..seq_len.
+        let mut max_logit = f32::NEG_INFINITY;
+        for t in 0..seq_len {
+            let k_off = t * kv_per_pos + hkv * head_dim;
+            let mut acc: f32 = 0.0;
+            for d in 0..head_dim {
+                acc += f16_to_f32(q_row[d]) * f16_to_f32(k[k_off + d]);
+            }
+            let logit = acc * inv_sqrt_head;
+            scratch_logits[t] = logit;
+            if logit > max_logit {
+                max_logit = logit;
+            }
+        }
+
+        // 2. Softmax (numerically stable: subtract max, exp, normalize).
+        let mut denom: f32 = 0.0;
+        for t in 0..seq_len {
+            let e = libm::expf(scratch_logits[t] - max_logit);
+            scratch_logits[t] = e;
+            denom += e;
+        }
+        // `denom` is strictly positive after at least one finite
+        // exp() call, but keep the guard for the degenerate case.
+        let inv_denom = if denom > 0.0 { 1.0 / denom } else { 0.0 };
+        for t in 0..seq_len {
+            scratch_logits[t] *= inv_denom;
+        }
+
+        // 3. out[hq] = sum_t softmax[t] * v[t, hkv].
+        let out_off = hq * head_dim;
+        for d in 0..head_dim {
+            let mut acc: f32 = 0.0;
+            for t in 0..seq_len {
+                let v_off = t * kv_per_pos + hkv * head_dim;
+                acc += scratch_logits[t] * f16_to_f32(v[v_off + d]);
+            }
+            out[out_off + d] = f32_to_f16(acc);
+        }
+    }
+
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
+// SwiGLU MLP block
+// ---------------------------------------------------------------------------
+
+/// SwiGLU MLP block: `down(silu(gate(x)) * up(x))`.
+///
+/// Three Q4_K matmuls plus an element-wise SiLU and an element-wise
+/// multiply. `gate_w` and `up_w` project from `hidden_size` to
+/// `intermediate_size`; `down_w` projects back. `gate_scratch` and
+/// `up_scratch` hold the intermediate FP16 vectors. `q8k_scratch`
+/// must be `q8_k_byte_size(max(hidden_size, intermediate_size))`
+/// bytes.
+///
+/// Returns `None` on shape mismatch.
+pub fn swiglu_mlp(
+    x: &[u16],
+    gate_w: &[u8],
+    up_w: &[u8],
+    down_w: &[u8],
+    hidden_size: usize,
+    intermediate_size: usize,
+    gate_scratch: &mut [u16],
+    up_scratch: &mut [u16],
+    q8k_scratch: &mut [u8],
+    out: &mut [u16],
+) -> Option<()> {
+    if hidden_size == 0
+        || intermediate_size == 0
+        || hidden_size % Q4_K_BLOCK_ELEMENTS != 0
+        || intermediate_size % Q4_K_BLOCK_ELEMENTS != 0
+    {
+        return None;
+    }
+    if x.len() != hidden_size
+        || out.len() != hidden_size
+        || gate_scratch.len() != intermediate_size
+        || up_scratch.len() != intermediate_size
+    {
+        return None;
+    }
+
+    // gate = matmul(x, gate_w) [intermediate_size]
+    // up   = matmul(x, up_w)   [intermediate_size]
+    let mut tmp_f32: Vec<f32> = vec![0.0; intermediate_size];
+    matmul_q4k_rows(
+        gate_w,
+        intermediate_size,
+        hidden_size,
+        x,
+        q8k_scratch,
+        &mut tmp_f32,
+    )?;
+    for i in 0..intermediate_size {
+        gate_scratch[i] = f32_to_f16(tmp_f32[i]);
+    }
+    matmul_q4k_rows(
+        up_w,
+        intermediate_size,
+        hidden_size,
+        x,
+        q8k_scratch,
+        &mut tmp_f32,
+    )?;
+    for i in 0..intermediate_size {
+        up_scratch[i] = f32_to_f16(tmp_f32[i]);
+    }
+
+    // gate ← silu(gate); gate ← gate ⊙ up
+    silu(gate_scratch);
+    for i in 0..intermediate_size {
+        let gv = f16_to_f32(gate_scratch[i]);
+        let uv = f16_to_f32(up_scratch[i]);
+        gate_scratch[i] = f32_to_f16(gv * uv);
+    }
+
+    // out = matmul(gate, down_w) [hidden_size]
+    let mut out_f32: Vec<f32> = vec![0.0; hidden_size];
+    matmul_q4k_rows(
+        down_w,
+        hidden_size,
+        intermediate_size,
+        gate_scratch,
+        q8k_scratch,
+        &mut out_f32,
+    )?;
+    for i in 0..hidden_size {
+        out[i] = f32_to_f16(out_f32[i]);
+    }
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
+// LM head
+// ---------------------------------------------------------------------------
+
+/// Final FP16 hidden → FP32 logits projection over the vocab.
+///
+/// `x` is the post-final-RMSNorm hidden state of `hidden_size` floats
+/// (FP16). `weight` is the Q4_K-packed `[vocab_size, hidden_size]`
+/// matrix. `q8k_scratch` is `q8_k_byte_size(hidden_size)` bytes.
+/// `logits` receives `vocab_size` FP32 outputs.
+///
+/// Returns `None` on shape mismatch.
+pub fn lm_head(
+    x: &[u16],
+    weight: &[u8],
+    hidden_size: usize,
+    vocab_size: usize,
+    q8k_scratch: &mut [u8],
+    logits: &mut [f32],
+) -> Option<()> {
+    if hidden_size == 0 || vocab_size == 0 {
+        return None;
+    }
+    matmul_q4k_rows(weight, vocab_size, hidden_size, x, q8k_scratch, logits)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    /// Helper: build an FP16 buffer from an `f32` slice.
+    fn from_f32(values: &[f32]) -> Vec<u16> {
+        values.iter().copied().map(f32_to_f16).collect()
+    }
+
+    /// Helper: convert an FP16 buffer back to FP32 for assertions.
+    fn to_f32(values: &[u16]) -> Vec<f32> {
+        values.iter().copied().map(f16_to_f32).collect()
+    }
+
+    fn approx_eq(a: f32, b: f32, eps: f32) -> bool {
+        (a - b).abs() <= eps
+    }
+
+    // ---- RMSNorm ------------------------------------------------------
+
+    #[test]
+    fn rmsnorm_zero_input_returns_zero() {
+        let x = from_f32(&[0.0, 0.0, 0.0, 0.0]);
+        let g = from_f32(&[1.0, 2.0, 3.0, 4.0]);
+        let mut out = vec![0u16; 4];
+        // rms_inv = 1/sqrt(0 + eps), but each x_i is 0 so the product
+        // x_i * rms_inv * g_i is 0 regardless of gamma.
+        rmsnorm(&x, &g, 1e-6, &mut out).expect("shape ok");
+        for v in to_f32(&out) {
+            assert!(approx_eq(v, 0.0, 1e-6), "expected 0, got {}", v);
+        }
+    }
+
+    #[test]
+    fn rmsnorm_unit_input_with_unit_gamma_is_one() {
+        // rms = sqrt(mean(1)) = 1, rms_inv = 1, so out_i = 1 * 1 * 1 = 1.
+        let x = from_f32(&[1.0; 8]);
+        let g = from_f32(&[1.0; 8]);
+        let mut out = vec![0u16; 8];
+        rmsnorm(&x, &g, 1e-6, &mut out).expect("shape ok");
+        for v in to_f32(&out) {
+            // FP16 epsilon is ~1e-3; eps=1e-6 inside the sqrt nudges
+            // the result very slightly below 1.0.
+            assert!(approx_eq(v, 1.0, 2e-3), "expected 1, got {}", v);
+        }
+    }
+
+    #[test]
+    fn rmsnorm_known_vector() {
+        // Input [1, 2, 3, 4]. mean(x^2) = (1+4+9+16)/4 = 7.5.
+        // rms = sqrt(7.5) ≈ 2.7386. rms_inv ≈ 0.3651.
+        // With gamma all-ones, out ≈ [0.3651, 0.7303, 1.0954, 1.4606].
+        let x = from_f32(&[1.0, 2.0, 3.0, 4.0]);
+        let g = from_f32(&[1.0, 1.0, 1.0, 1.0]);
+        let mut out = vec![0u16; 4];
+        rmsnorm(&x, &g, 1e-6, &mut out).expect("shape ok");
+        let result = to_f32(&out);
+        let expected = [0.3651f32, 0.7303, 1.0954, 1.4606];
+        for (i, (&got, &want)) in result.iter().zip(expected.iter()).enumerate() {
+            // 1e-2 tolerance per the spec; FP16 storage is the dominant
+            // error term here.
+            assert!(
+                approx_eq(got, want, 1e-2),
+                "index {}: got {}, want {}",
+                i,
+                got,
+                want
+            );
+        }
+    }
+
+    #[test]
+    fn rmsnorm_rejects_shape_mismatch() {
+        let x = from_f32(&[1.0, 2.0, 3.0, 4.0]);
+        let g = from_f32(&[1.0, 1.0, 1.0]); // wrong length
+        let mut out = vec![0u16; 4];
+        assert!(rmsnorm(&x, &g, 1e-6, &mut out).is_none());
+    }
+
+    // ---- RoPE ---------------------------------------------------------
+
+    #[test]
+    fn rope_table_position_zero_is_identity() {
+        // At pos=0, every angle is 0, so every cos=1 and sin=0.
+        // Applying RoPE leaves the vector unchanged.
+        let head_dim = 8usize;
+        let table = RopeTable::new(head_dim, 16, 10000.0);
+        let original = from_f32(&[0.5, -1.5, 2.0, -0.25, 0.75, 1.0, -0.5, 0.125]);
+        let mut vec_buf = original.clone();
+        table.apply(0, &mut vec_buf);
+        // Compare in FP32 — bit-for-bit equality holds here too, but
+        // the FP32 path is the one the spec gives a tolerance for.
+        let before = to_f32(&original);
+        let after = to_f32(&vec_buf);
+        for (i, (&a, &b)) in before.iter().zip(after.iter()).enumerate() {
+            assert!(
+                approx_eq(a, b, 1e-3),
+                "index {}: before {} after {}",
+                i,
+                a,
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn rope_norm_preserved() {
+        // RoPE is a rotation: ||apply(pos, v)|| == ||v||.
+        let head_dim = 8usize;
+        let table = RopeTable::new(head_dim, 32, 10000.0);
+        let original = from_f32(&[0.5, -1.5, 2.0, -0.25, 0.75, 1.0, -0.5, 0.125]);
+        let norm_before: f32 = to_f32(&original).iter().map(|x| x * x).sum::<f32>();
+
+        for &pos in &[0usize, 1, 5, 17, 31] {
+            let mut v = original.clone();
+            table.apply(pos, &mut v);
+            let norm_after: f32 = to_f32(&v).iter().map(|x| x * x).sum::<f32>();
+            // FP16 storage gives ~1e-3 relative error; the squared norm
+            // amplifies that by roughly 2x.
+            let rel = (norm_after - norm_before).abs() / norm_before;
+            assert!(rel < 5e-3, "pos {}: norm drift {} (rel)", pos, rel);
+        }
+    }
+
+    #[test]
+    fn rope_table_rejects_odd_head_dim() {
+        let table = RopeTable::new(7, 16, 10000.0);
+        assert!(table.cos_sin.is_empty(), "odd head_dim should yield empty LUT");
+        // apply() with mismatched head_dim is a no-op.
+        let mut v = from_f32(&[1.0; 7]);
+        table.apply(0, &mut v);
+        // Buffer should be untouched.
+        for &b in &v {
+            assert_eq!(f16_to_f32(b), 1.0);
+        }
+    }
+
+    // ---- Embedding lookup --------------------------------------------
+
+    #[test]
+    fn embedding_lookup_returns_correct_row() {
+        // 8x4 synthetic table: row r is [10*r, 10*r+1, 10*r+2, 10*r+3].
+        let mut table_f32 = Vec::with_capacity(8 * 4);
+        for r in 0..8u32 {
+            for c in 0..4u32 {
+                table_f32.push((10 * r + c) as f32);
+            }
+        }
+        let table = from_f32(&table_f32);
+        let mut out = vec![0u16; 4];
+        embedding_lookup_fp16(&table, 4, 5, &mut out).expect("in range");
+        let got = to_f32(&out);
+        let want = [50.0, 51.0, 52.0, 53.0];
+        for (i, (&a, &b)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(approx_eq(a, b, 1e-1), "idx {}: got {} want {}", i, a, b);
+        }
+    }
+
+    #[test]
+    fn embedding_lookup_rejects_oob_token() {
+        let table = from_f32(&[0.0; 8 * 4]);
+        let mut out = vec![0u16; 4];
+        // vocab_size = 8, so token_id == 8 is out of range.
+        assert!(embedding_lookup_fp16(&table, 4, 8, &mut out).is_none());
+        // And anything beyond.
+        assert!(embedding_lookup_fp16(&table, 4, 100, &mut out).is_none());
+    }
+
+    #[test]
+    fn embedding_lookup_rejects_bad_shape() {
+        let table = from_f32(&[0.0; 8 * 4]);
+        let mut out = vec![0u16; 3]; // wrong length
+        assert!(embedding_lookup_fp16(&table, 4, 0, &mut out).is_none());
+
+        let mut out_ok = vec![0u16; 4];
+        // Table not a multiple of embedding_dim.
+        let bad_table = from_f32(&[0.0; 31]);
+        assert!(embedding_lookup_fp16(&bad_table, 4, 0, &mut out_ok).is_none());
+    }
+
+    // ---- SiLU --------------------------------------------------------
+
+    #[test]
+    fn silu_zero_returns_zero() {
+        let mut buf = from_f32(&[0.0]);
+        silu(&mut buf);
+        assert!(approx_eq(f16_to_f32(buf[0]), 0.0, 1e-4));
+    }
+
+    #[test]
+    fn silu_known_value() {
+        // silu(1.0) = 1.0 * sigmoid(1.0) = 1.0 / (1 + e^-1) ≈ 0.7311.
+        let mut buf = from_f32(&[1.0]);
+        silu(&mut buf);
+        let got = f16_to_f32(buf[0]);
+        assert!(
+            approx_eq(got, 0.7311, 1e-2),
+            "silu(1.0) ≈ 0.7311, got {}",
+            got
+        );
+    }
+
+    #[test]
+    fn silu_negative_pulls_toward_zero() {
+        // silu(-2.0) is negative but |silu(-x)| < |x| for x > 0.
+        // silu(-2.0) ≈ -2.0 * sigmoid(-2.0) ≈ -2.0 * 0.1192 ≈ -0.2384.
+        let mut buf = from_f32(&[-2.0]);
+        silu(&mut buf);
+        let got = f16_to_f32(buf[0]);
+        assert!(got < 0.0, "expected negative, got {}", got);
+        assert!(got.abs() < 2.0, "|silu(-2.0)| < 2.0, got {}", got.abs());
+        assert!(
+            approx_eq(got, -0.2384, 1e-2),
+            "silu(-2.0) ≈ -0.2384, got {}",
+            got
+        );
+    }
+
+    #[test]
+    fn silu_out_preserves_input() {
+        let x = from_f32(&[1.0, -2.0, 0.0, 3.0]);
+        let original = x.clone();
+        let mut out = vec![0u16; 4];
+        silu_out(&x, &mut out).expect("shape ok");
+        // Input untouched.
+        assert_eq!(x, original);
+        // Output matches in-place SiLU.
+        let mut inplace = original.clone();
+        silu(&mut inplace);
+        assert_eq!(out, inplace);
+    }
+
+    #[test]
+    fn silu_out_rejects_shape_mismatch() {
+        let x = from_f32(&[1.0; 4]);
+        let mut out = vec![0u16; 3];
+        assert!(silu_out(&x, &mut out).is_none());
+    }
+
+    // ---- M4.2: Q4_K matmul + GQA + SwiGLU + LMHead --------------------
+
+    use crate::inference::quant::{Q4_K_BLOCK_SIZE, q8_k_byte_size};
+
+    /// Build a Q4_K-encoded weight row of `cols` elements from a
+    /// known FP32 vector. Reuses M3's vec_dot test fixture builder
+    /// approach: dequantize-then-quantize would be lossy, so we
+    /// construct a block with d=1.0, dmin=0, scales=[1; 8], mins=[0; 8]
+    /// and qs encoding the integers 0..15 per nibble. That gives a
+    /// known integer dot product for the activation pattern below.
+    fn q4k_block_zeros() -> [u8; Q4_K_BLOCK_SIZE] {
+        // d = +0.0 (f16 0x0000) → dequant always = 0.
+        [0u8; Q4_K_BLOCK_SIZE]
+    }
+
+    #[test]
+    fn matmul_q4k_row_zero_weights_zero_dot() {
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let weights = q4k_block_zeros();
+        let acts = from_f32(&vec![1.0; cols]);
+        let mut q8k = vec![0u8; q8_k_byte_size(cols).unwrap()];
+        let dot = matmul_q4k_row(&weights, &acts, &mut q8k, cols).expect("matmul");
+        assert!(dot.abs() < 1e-3, "zero weights → zero dot, got {}", dot);
+    }
+
+    #[test]
+    fn matmul_q4k_row_zero_acts_zero_dot() {
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let weights = q4k_block_zeros();
+        // Even with zero weights, the path still has to handle
+        // zero activations cleanly (no div-by-zero in iscale).
+        let acts = vec![0u16; cols];
+        let mut q8k = vec![0u8; q8_k_byte_size(cols).unwrap()];
+        let dot = matmul_q4k_row(&weights, &acts, &mut q8k, cols).expect("matmul");
+        assert!(dot.abs() < 1e-3);
+    }
+
+    #[test]
+    fn matmul_q4k_row_rejects_shape_mismatch() {
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let weights = q4k_block_zeros();
+        let acts_short = from_f32(&vec![1.0; cols - 1]);
+        let mut q8k = vec![0u8; q8_k_byte_size(cols).unwrap()];
+        assert!(matmul_q4k_row(&weights, &acts_short, &mut q8k, cols).is_none());
+    }
+
+    #[test]
+    fn matmul_q4k_row_rejects_non_block_cols() {
+        // 200 isn't a multiple of 256.
+        let weights = vec![0u8; 200];
+        let acts = vec![0u16; 200];
+        let mut q8k = vec![0u8; 200];
+        assert!(matmul_q4k_row(&weights, &acts, &mut q8k, 200).is_none());
+    }
+
+    #[test]
+    fn matmul_q4k_rows_consistent_with_per_row() {
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let rows = 3;
+        // Three identical zero-weight blocks → zero dot for each row.
+        let mut weights: Vec<u8> = Vec::with_capacity(rows * Q4_K_BLOCK_SIZE);
+        for _ in 0..rows {
+            weights.extend_from_slice(&q4k_block_zeros());
+        }
+        let acts = from_f32(&vec![1.0; cols]);
+        let mut q8k = vec![0u8; q8_k_byte_size(cols).unwrap()];
+        let mut out = vec![0.0f32; rows];
+        matmul_q4k_rows(&weights, rows, cols, &acts, &mut q8k, &mut out).expect("rows");
+        for v in &out {
+            assert!(v.abs() < 1e-3, "zero-weight row → 0 dot");
+        }
+
+        // Compare against per-row matmul.
+        for r in 0..rows {
+            let row = &weights[r * Q4_K_BLOCK_SIZE..(r + 1) * Q4_K_BLOCK_SIZE];
+            let mut q8k_each = vec![0u8; q8_k_byte_size(cols).unwrap()];
+            let single = matmul_q4k_row(row, &acts, &mut q8k_each, cols).expect("single");
+            assert!((single - out[r]).abs() < 1e-3);
+        }
+    }
+
+    // ---- GQA --------------------------------------------------------
+
+    #[test]
+    fn gqa_decode_single_position_returns_v() {
+        // n_head_q=2, n_head_kv=1 (group=2), head_dim=4, seq_len=1.
+        // With seq_len=1, softmax([logit]) = [1.0], so out == v.
+        let n_head_q = 2;
+        let n_head_kv = 1;
+        let head_dim = 4;
+        let seq_len = 1;
+        let q = from_f32(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]); // 2 heads × 4 dims
+        let k = from_f32(&[0.5, 0.5, 0.5, 0.5]); // 1 kv-head × 4 dims × 1 pos
+        let v = from_f32(&[0.1, 0.2, 0.3, 0.4]);
+        let mut scratch = vec![0.0f32; seq_len];
+        let mut out = vec![0u16; n_head_q * head_dim];
+        gqa_decode_step(
+            &q, &k, &v, n_head_q, n_head_kv, head_dim, seq_len, &mut scratch, &mut out,
+        )
+        .expect("gqa");
+        let out_f32 = to_f32(&out);
+        // Both query heads share the single KV head; output is v
+        // for both.
+        for h in 0..n_head_q {
+            for d in 0..head_dim {
+                let expected = [0.1, 0.2, 0.3, 0.4][d];
+                assert!(
+                    approx_eq(out_f32[h * head_dim + d], expected, 1e-2),
+                    "head {h} dim {d} = {} expected {expected}",
+                    out_f32[h * head_dim + d]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gqa_decode_two_positions_softmax_blends_v() {
+        // 1 head, 1 kv-head, head_dim=2, seq_len=2.
+        // q=[1,0]; k0=[0,1] (logit≈0); k1=[1,0] (logit≈1/sqrt(2)).
+        // Softmax favours k1, so output blends toward v1.
+        let q = from_f32(&[1.0, 0.0]);
+        let k = from_f32(&[0.0, 1.0, 1.0, 0.0]); // pos 0, pos 1
+        let v = from_f32(&[1.0, 1.0, 10.0, 10.0]); // v0=[1,1], v1=[10,10]
+        let mut scratch = vec![0.0f32; 2];
+        let mut out = vec![0u16; 2];
+        gqa_decode_step(&q, &k, &v, 1, 1, 2, 2, &mut scratch, &mut out).expect("gqa");
+        let got = to_f32(&out);
+        // Expected: softmax([0, 1/sqrt(2)]) = [α, β], β > α, output ≈ α*1 + β*10.
+        let inv = 1.0 / sqrtf(2.0);
+        let e0 = libm::expf(0.0 - inv);
+        let e1 = libm::expf(inv - inv);
+        let denom = e0 + e1;
+        let alpha = e0 / denom;
+        let beta = e1 / denom;
+        let expected = alpha * 1.0 + beta * 10.0;
+        assert!(approx_eq(got[0], expected, 5e-2));
+        assert!(approx_eq(got[1], expected, 5e-2));
+    }
+
+    #[test]
+    fn gqa_decode_rejects_bad_head_ratio() {
+        // 5 query heads, 2 kv heads → 5 % 2 != 0.
+        let q = vec![0u16; 5 * 4];
+        let k = vec![0u16; 1 * 2 * 4];
+        let v = vec![0u16; 1 * 2 * 4];
+        let mut scratch = vec![0.0f32; 1];
+        let mut out = vec![0u16; 5 * 4];
+        assert!(
+            gqa_decode_step(&q, &k, &v, 5, 2, 4, 1, &mut scratch, &mut out).is_none()
+        );
+    }
+
+    // ---- SwiGLU MLP -------------------------------------------------
+
+    #[test]
+    fn swiglu_mlp_zero_input_zero_output() {
+        // x=0 ⇒ gate=up=0 ⇒ silu(0)*0 = 0 ⇒ down(0) = 0.
+        let hidden = Q4_K_BLOCK_ELEMENTS;
+        let inter = Q4_K_BLOCK_ELEMENTS;
+        let row = Q4_K_BLOCK_SIZE;
+        let gate_w = vec![0u8; inter * row];
+        let up_w = vec![0u8; inter * row];
+        let down_w = vec![0u8; hidden * row];
+        let x = vec![0u16; hidden];
+        let mut gate_s = vec![0u16; inter];
+        let mut up_s = vec![0u16; inter];
+        let mut q8k =
+            vec![0u8; q8_k_byte_size(hidden.max(inter)).unwrap()];
+        let mut out = vec![0u16; hidden];
+        swiglu_mlp(
+            &x, &gate_w, &up_w, &down_w, hidden, inter, &mut gate_s, &mut up_s, &mut q8k,
+            &mut out,
+        )
+        .expect("swiglu");
+        for &b in &out {
+            assert_eq!(f16_to_f32(b), 0.0);
+        }
+    }
+
+    #[test]
+    fn swiglu_mlp_rejects_non_block_dims() {
+        let bad_hidden = 200;
+        let inter = Q4_K_BLOCK_ELEMENTS;
+        let mut q8k = vec![0u8; 4096];
+        let mut gate_s = vec![0u16; inter];
+        let mut up_s = vec![0u16; inter];
+        let mut out = vec![0u16; bad_hidden];
+        let res = swiglu_mlp(
+            &vec![0u16; bad_hidden],
+            &[],
+            &[],
+            &[],
+            bad_hidden,
+            inter,
+            &mut gate_s,
+            &mut up_s,
+            &mut q8k,
+            &mut out,
+        );
+        assert!(res.is_none());
+    }
+
+    // ---- LM head ----------------------------------------------------
+
+    #[test]
+    fn lm_head_returns_logit_per_vocab() {
+        // 8-vocab × 256-hidden, all zero weights → all-zero logits.
+        let hidden = Q4_K_BLOCK_ELEMENTS;
+        let vocab = 8;
+        let row = Q4_K_BLOCK_SIZE;
+        let weight = vec![0u8; vocab * row];
+        let x = from_f32(&vec![1.0; hidden]);
+        let mut q8k = vec![0u8; q8_k_byte_size(hidden).unwrap()];
+        let mut logits = vec![1.0f32; vocab]; // pre-fill non-zero
+        lm_head(&x, &weight, hidden, vocab, &mut q8k, &mut logits).expect("lm_head");
+        for &v in &logits {
+            assert!(v.abs() < 1e-3, "zero weight → zero logit, got {v}");
+        }
+    }
+
+    #[test]
+    fn lm_head_rejects_zero_dims() {
+        let mut q8k = vec![0u8; 256];
+        let mut logits = vec![0.0f32; 4];
+        assert!(lm_head(&[], &[], 0, 4, &mut q8k, &mut logits).is_none());
+        assert!(
+            lm_head(&[0u16; 4], &[], 4, 0, &mut q8k, &mut logits).is_none()
+        );
+    }
+}
