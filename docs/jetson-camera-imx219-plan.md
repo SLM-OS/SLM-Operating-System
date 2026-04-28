@@ -777,11 +777,23 @@ Phase 0 is GREEN; tasks are unblocked.
   writes ~70 mode-table registers (binning, output format, PLL
   config, AGC defaults) before streaming.
 
-  **Next PR scope:** port the IMX219 binning-mode register-init
-  table from `docs/reference/linux-imx219.c` and write it before
-  `MODE_SELECT=0x01`. Expected outcome: `CAPTURE_STATUS_SUCCESS`
-  with the frame buffer at 0xA1000000 carrying ~4 MB of T_R16
-  RAW10 pixels.
+  **PR #N (mode-init) status:** The L4T IMX219 register-init
+  table (31 common-init + lane-mode + 12 mode-specific + 4
+  default-controls = 48 writes) is ported and verified to write
+  cleanly on jetson-nano-1 — every individual `tegra_i2c_*`
+  call returns rc=0; `imx219_set_mode_binning_1640x1232()`
+  returns 0; csidiag chains all the way through CAPTURE_REQUEST
+  with no I²C errors.
+
+  However the CSI-2 capture still returns
+  `CAPTURE_STATUS_FALCON_ERROR + FRAME_START_TIMEOUT` — the
+  sensor isn't producing a SOF on the CSI-2 lanes despite all
+  init writes succeeding. The remaining symptom is at the
+  CSI-2 PHY / lane-clock / sensor-power level, not the
+  register-bank init that PR #N completes. Follow-on
+  investigation needs oscilloscope + carrier-board check
+  (CSI-2 ribbon, cam_pwr GPIO behavior, NVCSI lane-mapping
+  vs sensor PLL output rate).
 - ☐🔗 Implement Lua bindings + preprocessing. Verify by capturing a
   known printed digit and asserting that
   `slm.model_infer_bytes` returns the expected class.
