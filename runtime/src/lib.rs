@@ -5,8 +5,8 @@
 //! - Memory allocator integration
 //! - Future: Model loading and inference scheduling
 
-#![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
 
 // `alloc` provides `Box`, `Vec`, `VecDeque`, `BTreeMap`, etc. We enable
 // it unconditionally; it links fine without a global allocator, and
@@ -15,7 +15,9 @@
 // `core` + static arrays as they do today.
 extern crate alloc;
 
+#[cfg(not(test))]
 use core::panic::PanicInfo;
+#[cfg(not(test))]
 use linked_list_allocator::LockedHeap;
 
 // =============================================================================
@@ -44,6 +46,7 @@ pub use component::{ComponentState, ComponentInfo, ComponentType, Priority as Co
 // Global Allocator
 // =============================================================================
 
+#[cfg(not(test))]
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
@@ -53,6 +56,7 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 /// - `heap_start` must be a valid pointer to allocatable memory
 /// - `heap_size` must accurately reflect the available memory
 /// - This function must only be called once
+#[cfg(not(test))]
 #[no_mangle]
 pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
     ALLOCATOR.lock().init(heap_start, heap_size);
@@ -62,6 +66,7 @@ pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
 // Panic Handler
 // =============================================================================
 
+#[cfg(not(test))]
 #[panic_handler]
 fn rust_panic(info: &PanicInfo) -> ! {
     // Postmortem output goes to BOTH UART and the bound shell.
@@ -125,6 +130,25 @@ fn rust_panic(info: &PanicInfo) -> ! {
     unsafe {
         kernel_ffi::panic(b"Rust panic - halting\0".as_ptr());
     }
+}
+
+// =============================================================================
+// FFI Stubs (cargo test on host)
+// =============================================================================
+//
+// When running `cargo test --target x86_64-unknown-linux-gnu`, the kernel
+// C symbols are not present (we link only the Rust crate against std). The
+// stubs below let the host test harness link cleanly. They are wired in
+// only under `#[cfg(test)]` and are no-ops, since unit tests don't depend
+// on real UART output or kernel state.
+#[cfg(test)]
+#[allow(non_camel_case_types)]
+mod test_ffi_stubs {
+    /// Host-side stub for the kernel's `uart_puts`. Some `slm` runtime
+    /// code paths (e.g. registry diagnostic prints) call this directly;
+    /// during host unit tests it's harmless to drop the message.
+    #[no_mangle]
+    pub extern "C" fn uart_puts(_s: *const u8) {}
 }
 
 // =============================================================================
