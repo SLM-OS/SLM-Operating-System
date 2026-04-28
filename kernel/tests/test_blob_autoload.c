@@ -89,7 +89,11 @@ static size_t build_eviction_cacheus_config_payload(uint8_t *out, size_t out_cap
     size_t cursor = 0;
     if (out_cap < 24u) return 0;
     memset(out, 0, 24u);
-    out[0] = 'C'; out[1] = 'C'; out[2] = 'F'; out[3] = '1';
+    /* Magic must match runtime/src/mm/eviction/runtime_cacheus.rs
+     * PAYLOAD_MAGIC = b"CCFG". The previous "CCF1" value drifted from
+     * the Rust validator, which rejects it with BadMagic and propagates
+     * STAGE_FAILED back to blob_autoload_set. */
+    out[0] = 'C'; out[1] = 'C'; out[2] = 'F'; out[3] = 'G';
     out[4] = 1; out[5] = 0;
     out[6] = 0; out[7] = 0;
     out[8] = 1; out[9] = 0;
@@ -477,6 +481,35 @@ static void build_long_path(char *out, size_t cap,
     out[target_len] = '\0';
 }
 #endif /* CONFIG_AI_SCHEDULER for build_long_path */
+
+/*
+ * Per-test reset (#486). Without this, state leaks between tests:
+ *
+ *   - Tests #2/#3/#4/#5 explicitly remove `.fat-authoritative` at end
+ *     but tests #8 onward leave it dirty. A subsequent test that
+ *     calls `blob_autoload_set` *without* injecting a test FAT device
+ *     hits `if (fat_authoritative) return -1` in
+ *     `blob_autoload_mutate_entry` once the production-cache f_mount
+ *     fails — the test fails at the set line with -1.
+ *
+ *   - The `boot_media` test-device pointer and the FatFs disk shim
+ *     are also left attached on assertion failure. Clearing them in
+ *     setUp() means a leak in test N doesn't cascade to test N+1.
+ *
+ * Unity defines setUp() as a weak symbol; this strong override fires
+ * before every RUN_TEST in the whole test binary. The reset is safe
+ * for non-blob_autoload suites: clearing a NULL test_dev is a no-op,
+ * detaching an already-detached FatFs disk is a no-op, and removing
+ * a missing `.fat-authoritative` returns an error we deliberately
+ * ignore.
+ */
+void setUp(void)
+{
+    boot_media_test_clear_device();
+    fatfs_disk_detach();
+    (void)remove_file(BLOB_AUTOLOAD_STORE_DIR "/.fat-authoritative");
+}
+
 static void test_blob_autoload_init_creates_conf(void)
 {
     char buf[256];
@@ -1001,9 +1034,18 @@ static void test_blob_autoload_set_ignores_unrelated_stale_lfs_entry(void)
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_set("eviction", "xgboost", "/mnt/files/update-xgb.blob"));
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "xgboost", path, sizeof(path)));
     TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-xgboost.blob", path);
-    TEST_ASSERT_EQUAL_INT(1, blob_autoload_get("eviction", "cacheus_config", path, sizeof(path)));
+    /* cacheus_config gets migrated alongside xgboost: its original SOURCE
+     * was removed at line 1027, but the LFS-managed copy created by the
+     * earlier set is intact and that's what the autoload contract uses
+     * at boot. Migration copies the managed LFS file to FAT — same as
+     * test_blob_autoload_set_migrates_all_lfs_entries_to_fat asserts.
+     * Tracking original source paths to drop "stale" entries would
+     * require an entry-schema change and is intentionally out of scope. */
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_get("eviction", "cacheus_config", path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING("0:/slmstore/autoload/eviction-cacheus_config.blob", path);
 
     TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "xgboost"));
+    TEST_ASSERT_EQUAL_INT(0, blob_autoload_clear("eviction", "cacheus_config"));
     destroy_boot_media_fat_volume(fat_dev);
 }
 

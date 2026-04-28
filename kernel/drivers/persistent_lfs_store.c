@@ -335,7 +335,12 @@ static int persistent_lfs_flush_image(struct blkdev *dev)
             }
             goto fail;
         }
-        (void)f_unlink(PERSISTENT_LFS_DELTA_BAK_PATH);
+        /* Keep DELTA_BAK after a successful rotate. It holds the
+         * previous delta and is the recovery copy used by
+         * persistent_lfs_store_create at lines 604-611 when DELTA
+         * itself is corrupt. The next delta flush rotates it again
+         * via the f_unlink at line 322 above, so it never accumulates
+         * — but it must persist BETWEEN flushes. */
     } else {
         (void)f_unlink(PERSISTENT_LFS_STORE_TMP_PATH);
         res = f_open(&fp, PERSISTENT_LFS_STORE_TMP_PATH,
