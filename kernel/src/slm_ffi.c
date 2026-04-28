@@ -5,6 +5,10 @@
  */
 
 #include "slm_ffi.h"
+/* Pull gpu_handoff.h into a translation unit so its _Static_assert
+ * sizes are actually exercised on every kernel build (catches struct
+ * drift the moment the C header is touched). */
+#include "gpu_handoff.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "uart.h"
