@@ -202,12 +202,17 @@ static void test_enable_inference_with_null_reason_ok(void)
 }
 
 /*
- * Enable sched / eviction when GPU is available -> rc=0 BUT
- * `*out_reason` is non-NULL with a "scaffold only" warning,
- * because no policy declares `has_gpu_backend = true` yet.
- * The shell renders this as a "note: …" line.
+ * Enable sched when GPU is available -> rc=0 with `*out_reason` set.
+ * Two branches both set the reason string:
+ *   - if no sched policy declares has_gpu_backend = true → "scaffold
+ *     only — no scheduler policy declares a GPU backend yet"
+ *   - if ai_mlp (or any policy with has_gpu_backend = true) is active
+ *     → "perf note — ai_mlp now dispatches each assign_cpu via
+ *     GPU..." (PR-3 of gpu-policy-models.md)
+ * Either way reason != NULL on success; the shell renders it as a
+ * "note: …" line.
  */
-static void test_enable_sched_accepts_with_scaffold_warning(void)
+static void test_enable_sched_accepts_with_reason(void)
 {
     struct gpu_consumer_status st;
     gpu_consumer_status_get(&st);
@@ -222,7 +227,7 @@ static void test_enable_sched_accepts_with_scaffold_warning(void)
     int rc = gpu_consumer_set(GPU_CONSUMER_SCHED, true, &reason);
     TEST_ASSERT_EQUAL_INT(0, rc);
     TEST_ASSERT_MESSAGE(reason != NULL,
-        "sched should warn — no policy declares has_gpu_backend yet");
+        "sched accept always sets reason — scaffold warning OR perf note");
     TEST_ASSERT_TRUE(gpu_consumer_enabled(GPU_CONSUMER_SCHED));
 }
 
@@ -335,7 +340,7 @@ int test_suite_gpu_consumer(void)
     RUN_TEST(test_enable_returns_nodev_when_gpu_unavailable);
     RUN_TEST(test_enable_inference_accepts);
     RUN_TEST(test_enable_inference_with_null_reason_ok);
-    RUN_TEST(test_enable_sched_accepts_with_scaffold_warning);
+    RUN_TEST(test_enable_sched_accepts_with_reason);
     RUN_TEST(test_enable_eviction_accepts_with_scaffold_warning);
     RUN_TEST(test_status_tracks_enable_disable);
     RUN_TEST(test_status_reports_all_consumers_off);

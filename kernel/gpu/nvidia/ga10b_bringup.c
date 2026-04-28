@@ -1220,10 +1220,6 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
 
     uart_puts("[GA10B-P6] channel handoff valid — inherited from Linux\n");
     b->state = GA10B_BRINGUP_CHANNEL_OPEN;
-    /* Record which pipeline_kind this instance bound to so callers
-     * can detect a stale state when a different bringup instance
-     * has since overwritten g_handoff with a different kind. */
-    b->bound_pipeline_kind = wanted_kind;
     return 0;
 }
 

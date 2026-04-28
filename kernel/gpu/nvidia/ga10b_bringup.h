@@ -98,19 +98,6 @@ struct ga10b_bringup {
     enum ga10b_bringup_state state;
     int last_error_phase;       /* -1 = no failure */
 
-    /* Pipeline-kind of the handoff this bringup instance is bound to.
-     * Set by `ga10b_bringup_channel_kind` after a successful scan.
-     * Used by callers (slm_ffi.c's per-kind ensure_*_bringup helpers)
-     * to detect when the shared `g_handoff` has been overwritten by
-     * a different bringup instance — at that point this instance's
-     * `state` is stale and channel_kind needs to re-run. PR-3 of
-     * gpu-policy-models.md. Default 0 (MNIST) on a fresh struct.
-     * Note: this lives on the per-instance struct, but the kernel
-     * only has one global `g_handoff`, so two bringup instances
-     * can't both be "live" at the same time — the second
-     * channel_kind call wins. */
-    uint32_t bound_pipeline_kind;
-
     /* WPR region carved out of FB/unified memory for ACR */
     uint64_t wpr_phys;          /* GPU-visible base */
     uint32_t wpr_size;          /* bytes */
