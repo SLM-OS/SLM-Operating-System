@@ -4783,22 +4783,39 @@ pub type RustSlmTokenCb = unsafe extern "C" fn(
 /// without `lazy_static` / `OnceCell` machinery.
 #[cfg(feature = "slm")]
 mod ffi_cb {
-    use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
     static CB: AtomicUsize = AtomicUsize::new(0);
     static USER: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(core::ptr::null_mut());
+    /// Single-prompt-at-a-time gate. The cb + user pointer pair is a
+    /// shared mutable static; without serialization, two concurrent
+    /// `rust_slm_prompt` calls (different sessions, possibly different
+    /// CPUs) would race on `install` and deliver tokens to the wrong
+    /// user pointer. `try_install` returns `false` if a prompt is
+    /// already in flight; the caller surfaces `-1`.
+    static BUSY: AtomicBool = AtomicBool::new(false);
 
-    pub fn install(
+    /// Acquire the bridge or return `false` if another prompt is in
+    /// flight. Pairs with [`clear`].
+    pub fn try_install(
         cb: super::RustSlmTokenCb,
         user: *mut core::ffi::c_void,
-    ) {
+    ) -> bool {
+        if BUSY
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
         CB.store(cb as usize, Ordering::SeqCst);
         USER.store(user, Ordering::SeqCst);
+        true
     }
 
     pub fn clear() {
         CB.store(0, Ordering::SeqCst);
         USER.store(core::ptr::null_mut(), Ordering::SeqCst);
+        BUSY.store(false, Ordering::Release);
     }
 
     pub fn dispatch(token_id: u32, bytes: &[u8]) -> bool {
@@ -4806,7 +4823,7 @@ mod ffi_cb {
         if raw == 0 {
             return false;
         }
-        // SAFETY: `raw` was installed via `install` from a valid
+        // SAFETY: `raw` was installed via `try_install` from a valid
         // function pointer of `RustSlmTokenCb` type. The type
         // matches the cast.
         let cb: super::RustSlmTokenCb = unsafe { core::mem::transmute(raw) };
@@ -4853,6 +4870,14 @@ pub unsafe extern "C" fn rust_slm_prompt(
     if prompt.is_null() && prompt_len != 0 {
         return -1;
     }
+    // Cap prompt length at 1 MiB. The kernel side caller is in-process
+    // so this isn't a hard exploit boundary, but `runtime/CLAUDE.md`
+    // requires explicit bounds at every FFI entry. 1 MiB is well past
+    // Qwen2.5-1.5B's 32 K context-token budget × ~4 bytes/token.
+    const MAX_PROMPT_BYTES: usize = 1 << 20;
+    if prompt_len > MAX_PROMPT_BYTES {
+        return -1;
+    }
     let prompt_slice: &[u8] = if prompt_len == 0 {
         &[]
     } else {
@@ -4879,6 +4904,11 @@ pub unsafe extern "C" fn rust_slm_prompt(
     if !prompt_str.is_empty() {
         // Currently no in-runtime tokenizer for the loaded model.
         // Surface a clean error so the caller knows to wait on M5.3.
+        // Distinct from -1 ("session not Open / overflow / ...") so
+        // shell layers can branch on it. Keeping -1 for now to avoid
+        // widening the error-code surface mid-milestone; M5.3 introduces
+        // a typed error-code enum (`SLM_ERR_NOT_IMPLEMENTED = -2`) per
+        // the M5.3 spec section.
         return -1;
     }
 
@@ -4888,13 +4918,25 @@ pub unsafe extern "C" fn rust_slm_prompt(
         prefill_chunk: 64,
     };
 
-    ffi_cb::install(cb, user);
+    // Acquire the FFI bridge — fails (returns -1) if another prompt
+    // is already in flight on a different session, so the cb + user
+    // pointer pair can't get clobbered cross-CPU.
+    if !ffi_cb::try_install(cb, user) {
+        return -1;
+    }
+    let tokenizer = match try_empty_tokenizer() {
+        Some(t) => t,
+        None => {
+            ffi_cb::clear();
+            return -1;
+        }
+    };
     let result = slm::session::with_session(session_id as usize, |s| {
         slm::decoder::run_prompt(
             s,
             // Tokenizer placeholder — see comment above. With an
             // empty prompt the decoder never calls `encode`.
-            &empty_tokenizer(),
+            &tokenizer,
             prompt_str,
             &cfg,
             ffi_cb_trampoline,
@@ -4915,8 +4957,12 @@ pub unsafe extern "C" fn rust_slm_prompt(
 /// `Bbpe`). For now the tokenizer is only used through `encode` /
 /// `decode` calls inside `run_prompt`; with an empty prompt the
 /// decoder never reaches them.
+///
+/// Returns `None` instead of panicking on construction failure —
+/// FFI entry points must never panic into a halt under
+/// `runtime/CLAUDE.md`'s safety posture.
 #[cfg(feature = "slm")]
-fn empty_tokenizer() -> slm::tokenizer::Bbpe {
+fn try_empty_tokenizer() -> Option<slm::tokenizer::Bbpe> {
     use slm::gguf::{
         DEFAULT_ALIGNMENT, GGUF_MAGIC, GGUF_VERSION, MetaArray, MetaType, MetaValue,
     };
@@ -4924,8 +4970,8 @@ fn empty_tokenizer() -> slm::tokenizer::Bbpe {
     use alloc::vec::Vec;
 
     // Build a tiny GGUF with one token + zero merges, then parse it
-    // into a `Bbpe`. This keeps the FFI path callable without
-    // panicking; the produced tokenizer is intentionally trivial.
+    // into a `Bbpe`. The produced tokenizer is intentionally trivial
+    // and is only sound for the empty-prompt path of M5.2.
     let kvs: alloc::vec::Vec<(&'static str, MetaValue)> = alloc::vec![
         (
             "tokenizer.ggml.tokens",
@@ -4967,8 +5013,8 @@ fn empty_tokenizer() -> slm::tokenizer::Bbpe {
     let pad = (DEFAULT_ALIGNMENT - (buf.len() as u64 % DEFAULT_ALIGNMENT)) % DEFAULT_ALIGNMENT;
     buf.extend(core::iter::repeat_n(0u8, pad as usize));
 
-    let g = slm::gguf::Gguf::parse(&buf).expect("placeholder gguf parses");
-    slm::tokenizer::Bbpe::from_gguf(&g).expect("placeholder bbpe builds")
+    let g = slm::gguf::Gguf::parse(&buf).ok()?;
+    slm::tokenizer::Bbpe::from_gguf(&g).ok()
 }
 
 /// Cooperative-cancel signal for an in-flight `rust_slm_prompt` call.
