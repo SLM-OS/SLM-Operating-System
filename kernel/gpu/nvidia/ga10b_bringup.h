@@ -163,6 +163,16 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind);
  * zero-initialised, kind=0=MNIST). */
 uint32_t ga10b_bringup_active_pipeline_kind(void);
 
+/* Per-op dispatch tracing toggle. Default OFF. When ON, every
+ * `ga10b_submit_and_poll` call and every pipeline op emits ~7
+ * lines of qmd / GPFIFO / doorbell / poll / payload state — useful
+ * for debugging a wedged dispatch but ~64 lines per inference,
+ * which drowns the console at steady state. Exposed via the
+ * `gpu debug [on|off|status]` shell command. Errors and pipeline-
+ * level summary lines bypass this gate and always print. */
+void ga10b_dispatch_verbose_set(bool on);
+bool ga10b_dispatch_verbose_get(void);
+
 /* Phase 7: Submit host-family SEMAPHORE_RELEASE as smoke test.
  * Returns 0 iff the semaphore is observed at its target VA within
  * timeout. PBDMA-decoded; bypasses GR. */

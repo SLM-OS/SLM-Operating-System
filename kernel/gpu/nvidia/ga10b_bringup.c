@@ -14,9 +14,38 @@
 #include "falcon.h"
 #include "../../include/uart.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
+
+/* Per-op chatter flag. Default OFF so steady-state inference
+ * doesn't drown the serial console (every dispatch produces
+ * roughly 64 lines × 8 ops × 2 helpers when fully verbose).
+ * Toggle from the shell with `gpu debug on|off`. Errors and
+ * one-shot summaries (pipeline mode, pipeline complete,
+ * channel-inherit decisions) bypass this gate and always print —
+ * only the per-op trace path is quieted. */
+static atomic_bool g_ga10b_dispatch_verbose = false;
+
+void ga10b_dispatch_verbose_set(bool on)
+{
+    atomic_store_explicit(&g_ga10b_dispatch_verbose, on,
+                          memory_order_relaxed);
+}
+
+bool ga10b_dispatch_verbose_get(void)
+{
+    return atomic_load_explicit(&g_ga10b_dispatch_verbose,
+                                memory_order_relaxed);
+}
+
+#define GA10B_DBG(...)                                              \
+    do {                                                            \
+        if (atomic_load_explicit(&g_ga10b_dispatch_verbose,         \
+                                 memory_order_relaxed))             \
+            uart_printf(__VA_ARGS__);                               \
+    } while (0)
 
 extern const struct gsp_platform_ops *gsp_platform;
 
@@ -1457,11 +1486,11 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
     }
     gsp_platform->mb();
 
-    uart_printf("[%s] poll target at phys 0x%lx cleared to 0 "
-                "(expected payload=0x%lx)\n",
-                tag,
-                (unsigned long)poll_phys,
-                (unsigned long)expected_payload);
+    GA10B_DBG("[%s] poll target at phys 0x%lx cleared to 0 "
+              "(expected payload=0x%lx)\n",
+              tag,
+              (unsigned long)poll_phys,
+              (unsigned long)expected_payload);
 
     volatile uint32_t *pb = (volatile uint32_t *)(uintptr_t)
         g_handoff.pushbuf_phys;
@@ -1490,13 +1519,13 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
     }
     gsp_platform->mb();
 
-    uart_printf("[%s] GPFIFO[%lu] = 0x%08lx_%08lx (pb_va=0x%lx, %lu bytes)\n",
-                tag,
-                (unsigned long)gp_idx,
-                (unsigned long)gp_entry1,
-                (unsigned long)gp_entry0,
-                (unsigned long)pb_gpu_va,
-                (unsigned long)pb_bytes);
+    GA10B_DBG("[%s] GPFIFO[%lu] = 0x%08lx_%08lx (pb_va=0x%lx, %lu bytes)\n",
+              tag,
+              (unsigned long)gp_idx,
+              (unsigned long)gp_entry1,
+              (unsigned long)gp_entry0,
+              (unsigned long)pb_gpu_va,
+              (unsigned long)pb_bytes);
 
     uint32_t new_gp_put = gp_put + 1;
     volatile uint32_t *userd = (volatile uint32_t *)(uintptr_t)
@@ -1509,22 +1538,22 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
     }
     gsp_platform->mb();
 
-    uart_printf("[%s] GP_PUT advanced: %lu → %lu (USERD word %lu)\n",
-                tag,
-                (unsigned long)gp_put,
-                (unsigned long)new_gp_put,
-                (unsigned long)gp_put_word);
+    GA10B_DBG("[%s] GP_PUT advanced: %lu → %lu (USERD word %lu)\n",
+              tag,
+              (unsigned long)gp_put,
+              (unsigned long)new_gp_put,
+              (unsigned long)gp_put_word);
 
     volatile uint32_t *doorbell =
         (volatile uint32_t *)(uintptr_t)GA10B_USERMODE_DOORBELL_PHYS;
     *doorbell = g_handoff.work_submit_token;
     gsp_platform->mb();
-    uart_printf("[%s] doorbell 0x%lx <- 0x%08lx\n",
-                tag,
-                (unsigned long)GA10B_USERMODE_DOORBELL_PHYS,
-                (unsigned long)g_handoff.work_submit_token);
+    GA10B_DBG("[%s] doorbell 0x%lx <- 0x%08lx\n",
+              tag,
+              (unsigned long)GA10B_USERMODE_DOORBELL_PHYS,
+              (unsigned long)g_handoff.work_submit_token);
 
-    uart_printf("[%s] polling (2s timeout)...\n", tag);
+    GA10B_DBG("[%s] polling (2s timeout)...\n", tag);
     uint32_t poll_val = 0;
     for (uint32_t us = 0; us < 2000000; us++) {
         if (gsp_platform->cache_invalidate) {
@@ -1545,11 +1574,11 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
     }
     uint32_t final_gp_get = userd[gp_get_word];
 
-    uart_printf("[%s] result: poll=0x%08lx GP_GET=%lu (was %lu)\n",
-                tag,
-                (unsigned long)poll_val,
-                (unsigned long)final_gp_get,
-                (unsigned long)g_handoff.initial_gp_get);
+    GA10B_DBG("[%s] result: poll=0x%08lx GP_GET=%lu (was %lu)\n",
+              tag,
+              (unsigned long)poll_val,
+              (unsigned long)final_gp_get,
+              (unsigned long)g_handoff.initial_gp_get);
 
     bool gp_advanced     = (final_gp_get != g_handoff.initial_gp_get);
     bool payload_matched = ga10b_poll_match(poll_val, expected_payload);
@@ -1564,7 +1593,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
     }
 
     if (payload_matched) {
-        uart_printf("[%s] payload observed — GPU executed submit.\n", tag);
+        GA10B_DBG("[%s] payload observed — GPU executed submit.\n", tag);
         b->state = GA10B_BRINGUP_METHOD_ACCEPTED;
         return 0;
     }
@@ -1747,14 +1776,14 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
                 g_handoff.semaphore_gpu_va + GA10B_SEMA_PAGE_OFFSET;
             uint64_t sema_phys =
                 g_handoff.semaphore_phys + GA10B_SEMA_PAGE_OFFSET;
-            uart_printf("[GA10B-P8]   op[%lu/%lu] qmd=0x%lx out=0x%lx "
-                        "sema_phys=0x%lx (payload=0x%x)\n",
-                        (unsigned long)(i + 1),
-                        (unsigned long)g_handoff.pipeline_n_ops,
-                        (unsigned long)op->qmd_gpu_va,
-                        (unsigned long)op->output_phys,
-                        (unsigned long)sema_phys,
-                        (unsigned)GA10B_SEMA_RELEASE_PAYLOAD);
+            GA10B_DBG("[GA10B-P8]   op[%lu/%lu] qmd=0x%lx out=0x%lx "
+                      "sema_phys=0x%lx (payload=0x%x)\n",
+                      (unsigned long)(i + 1),
+                      (unsigned long)g_handoff.pipeline_n_ops,
+                      (unsigned long)op->qmd_gpu_va,
+                      (unsigned long)op->output_phys,
+                      (unsigned long)sema_phys,
+                      (unsigned)GA10B_SEMA_RELEASE_PAYLOAD);
             uint32_t pb_buf[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
             uint32_t pb_dwords =
                 ga10b_build_launch_kernel_with_sema_pushbuffer(
