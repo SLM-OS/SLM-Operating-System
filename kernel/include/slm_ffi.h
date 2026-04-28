@@ -8,6 +8,7 @@
 #ifndef SLM_FFI_H
 #define SLM_FFI_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -899,6 +900,35 @@ int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats);
 int slm_gpu_run_sched_inference(const void *state_bytes,
                                  size_t state_bytes_len,
                                  void *logits_bytes_out);
+
+/*
+ * GPU dispatch circuit breaker (#552 mitigation).
+ *
+ * `slm_gpu_run_mnist` and `slm_gpu_run_sched_inference` track
+ * consecutive failures of the post-launch semaphore poll. After
+ * 3 back-to-back failures the breaker trips and both entry
+ * points return -1 immediately, before taking the IRQ-off
+ * dispatch lock — preventing the 2-s-per-iteration starvation
+ * that wedges the shell when the GPU enters a degraded state
+ * (PBDMA accepts the submit, shader silently no-ops).
+ *
+ * Reset paths:
+ *   - any successful dispatch zeroes the counter automatically;
+ *   - `gpu use inference on` calls `slm_gpu_dispatch_breaker_reset`
+ *     so the operator can manually retry.
+ *
+ * On non-Jetson platforms `_reset` is a no-op and `_is_tripped`
+ * returns false.
+ */
+void slm_gpu_dispatch_breaker_reset(void);
+bool slm_gpu_dispatch_breaker_is_tripped(void);
+
+/* Test-only seams (`slm_gpu_dispatch_breaker_test_record` /
+ * `_test_count`) are intentionally NOT declared here. They live in
+ * `kernel/include/slm_ffi_test.h` so production translation units
+ * that include slm_ffi.h can't reach them by accident. The unit
+ * tests in `kernel/tests/test_gpu_dispatch_breaker.c` include the
+ * test header directly. (PR #555 round-3 review.) */
 
 /*
  * Print GPU status to UART (called from Rust shell command).

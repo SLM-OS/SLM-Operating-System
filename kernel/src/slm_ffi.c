@@ -15,6 +15,8 @@
 #include "spinlock.h"
 #include "../gpu/gpu.h"
 #include "gpu_consumer.h"
+#include <stdatomic.h>
+#include <stdbool.h>
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
@@ -397,6 +399,156 @@ int slm_gpu_get_info(RustGpuInfo *info)
 static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
 static struct ga10b_bringup g_mnist_bringup;
 
+/* Consecutive-dispatch-failure circuit breaker.
+ *
+ * `ga10b_submit_and_poll` busy-waits up to 2 s with the dispatch
+ * lock held IRQ-off. Once the GPU enters a degraded state (GR-
+ * engine drift, GPFIFO ring-wrap aftermath: PBDMA accepts the
+ * submit but the shader never runs to completion), every
+ * subsequent dispatch eats the full 2 s before returning -1 and
+ * falling back to CPU. With a tight inference loop, this stacks
+ * up: 10 inferences/pass × 2 s = 20 s of IRQ-off per pass, which
+ * starves net_pump on CPU 0 and makes the entire telnet+serial
+ * shell appear wedged.
+ *
+ * The breaker tracks consecutive failures of either MNIST or
+ * sched-MLP dispatch. After K back-to-back failures, both entry
+ * points short-circuit to -1 *before* taking the lock, so the
+ * engine's Rust fastpath falls back to CPU NEON immediately and
+ * the IRQ-off poll is skipped entirely.
+ *
+ * Reset paths:
+ *   1. Any successful dispatch zeroes the counter — useful if the
+ *      GPU recovers on its own (channel-inherit doesn't, today,
+ *      but the path is here for when we add a recovery routine).
+ *   2. `gpu use inference on` calls `slm_gpu_dispatch_breaker_reset`
+ *      so the operator can manually retry after a reboot/kexec.
+ *
+ * Shared-counter assumption: the same atomic counter spans both
+ * MNIST and sched-MLP because they share `g_gpu_dispatch_lock` and
+ * the same GPU channel; if MNIST starts failing because the
+ * channel has degraded, sched-MLP will too. The static_assert
+ * below pins this invariant — if a future bringup splits these
+ * paths onto separate channels, the breaker must split into
+ * two counters at the same time or the healthy path will be
+ * silently quenched. (#552 review S5.)
+ *
+ * Tracking issue for the architectural fix that supersedes this
+ * mitigation is in MEMORY (and the issue tracker); the WARN
+ * below intentionally describes only the observable behaviour
+ * so the message doesn't bit-rot when the issue closes. */
+
+/* Threshold is overridable from the command line via
+ *   make kernel GPU_DISPATCH_BREAKER_THRESHOLD=N
+ * (or `cmake -DGPU_DISPATCH_BREAKER_THRESHOLD=N`). Default 3 —
+ * high enough that one transient timeout doesn't disable the
+ * fastpath, low enough that a real wedge is contained within
+ * ~6 s of IRQ-off time. */
+#ifndef GPU_DISPATCH_BREAKER_THRESHOLD
+#define GPU_DISPATCH_BREAKER_THRESHOLD 3
+#endif
+
+/* `memory_order_relaxed` everywhere the counter is touched: the
+ * counter is a *hint*, not a synchroniser. A transient stale read
+ * either causes one extra IRQ-off attempt (we miss a recent
+ * trip) or one premature short-circuit (we see a trip that's
+ * about to be reset) — both are already-tolerated outcomes since
+ * the dispatch path falls back to CPU on either. Don't "fix" this
+ * to seq_cst without understanding the trade-off. */
+static atomic_int g_gpu_consecutive_failures = 0;
+
+static inline bool gpu_dispatch_breaker_is_tripped_inner(void)
+{
+    return atomic_load_explicit(&g_gpu_consecutive_failures,
+                                memory_order_relaxed)
+        >= GPU_DISPATCH_BREAKER_THRESHOLD;
+}
+
+/* Update the failure counter after a dispatch attempt. Emits a
+ * one-shot WARN exactly when the threshold is crossed (not on
+ * every subsequent failure), so the serial log isn't flooded once
+ * the breaker is tripped.
+ *
+ * Called from `slm_gpu_run_*` AFTER `spin_unlock_irqrestore` on
+ * `g_gpu_dispatch_lock` — uart_printf takes its own UART lock,
+ * and printing while holding the dispatch lock would create a
+ * lock-order inversion with any path that already holds UART. */
+static void gpu_dispatch_record_result(int rc)
+{
+    if (rc >= 0) {
+        atomic_store_explicit(&g_gpu_consecutive_failures, 0,
+                              memory_order_relaxed);
+        return;
+    }
+    int prev = atomic_fetch_add_explicit(&g_gpu_consecutive_failures, 1,
+                                          memory_order_relaxed);
+    if (prev + 1 == GPU_DISPATCH_BREAKER_THRESHOLD) {
+        uart_printf("[WARN] gpu-dispatch: %d consecutive failures — "
+                    "circuit breaker tripped, fastpath disabled until "
+                    "next successful dispatch or `gpu use inference on`\n",
+                    GPU_DISPATCH_BREAKER_THRESHOLD);
+    }
+}
+
+void slm_gpu_dispatch_breaker_reset(void)
+{
+    int prev = atomic_exchange_explicit(&g_gpu_consecutive_failures, 0,
+                                         memory_order_relaxed);
+    if (prev >= GPU_DISPATCH_BREAKER_THRESHOLD) {
+        uart_printf("[INFO] gpu-dispatch: circuit breaker reset "
+                    "(was tripped at %d consecutive failures)\n", prev);
+    }
+}
+
+/* Public mirror of the static `_inner` predicate. Exposed for an
+ * upcoming `gpu use status` shell extension that will surface the
+ * breaker state alongside the consumer toggles; today no caller
+ * exists outside the test seam below. The wrapper exists so the
+ * external symbol matches the `slm_gpu_*` naming used by the rest
+ * of the FFI surface, while the hot path inside this TU keeps the
+ * unprefixed name. */
+bool slm_gpu_dispatch_breaker_is_tripped(void)
+{
+    return gpu_dispatch_breaker_is_tripped_inner();
+}
+
+/* Set-input wrapper around gpu_dispatch_record_result that filters
+ * out caller-side validation errors. `slm_gpu_set_mnist_input` /
+ * `_fill` return -1 (no v6 handoff / GPU dispatch failure — counts
+ * toward the breaker), -2 (cap too large) or -3 (bad arg) — both
+ * caller-side bugs. Recording -2/-3 would let a misbehaving caller
+ * (e.g. Rust passing NULL three times in a row) trip the breaker
+ * spuriously and take the GPU offline for a reason unrelated to GPU
+ * health. The breaker's contract is "consecutive GPU dispatch
+ * failures", so keep -2/-3 out of the counter entirely — neither
+ * increment nor reset. (PR #555 round-3 review.) */
+static void gpu_dispatch_record_set_input_result(int rc)
+{
+    if (rc == 0 || rc == -1) {
+        gpu_dispatch_record_result(rc);
+    }
+}
+
+/* Test-only seam: drive the breaker state machine without going
+ * through a real GPU dispatch. The unit tests in
+ * `kernel/tests/test_gpu_dispatch_breaker.c` exercise the
+ * threshold trip, single-success reset, manual reset clears, and
+ * the one-shot WARN invariants. Wraps `gpu_dispatch_record_result`
+ * which is otherwise only reachable from inside this TU. */
+void slm_gpu_dispatch_breaker_test_record(int rc)
+{
+    gpu_dispatch_record_result(rc);
+}
+
+/* Test-only seam: read the raw counter so tests can assert exact
+ * values. Atomically loaded for safety even though tests run
+ * single-threaded. */
+int slm_gpu_dispatch_breaker_test_count(void)
+{
+    return atomic_load_explicit(&g_gpu_consecutive_failures,
+                                memory_order_relaxed);
+}
+
 /* Walk inherit + channel if needed. Returns 0 on success, negative
  * rc if either phase fails. Callers must already be inside the
  * single-threaded assumption documented above.
@@ -448,6 +600,11 @@ static int ensure_sched_bringup(void)
 int slm_gpu_run_mnist(void *logits_bytes_out)
 {
     if (!logits_bytes_out) return -1;
+    /* Short-circuit before taking the IRQ-off lock if the breaker
+     * has been tripped. Engine.rs handles -1 by falling back to
+     * CPU NEON, so we just produce that rc. */
+    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
+
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ensure_mnist_bringup();
     if (rc < 0) goto out;
@@ -460,6 +617,7 @@ int slm_gpu_run_mnist(void *logits_bytes_out)
     rc = n < 0 ? -1 : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    gpu_dispatch_record_result(rc);
     return rc;
 }
 int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
@@ -467,7 +625,15 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
     /* NULL `bytes` falls through to ga10b_bringup_set_input, which
      * returns -3 — keeps the error code mapping one-to-one with the
      * bringup helper (-1 = no v6 handoff, -2 = cap too large, -3 =
-     * bad arg). */
+     * bad arg).
+     *
+     * Engine.rs calls this FIRST in the MNIST fastpath; if it fails
+     * the run_mnist call below is never reached. Without this
+     * breaker hook, the trip-path was unreachable in production
+     * because `ensure_mnist_bringup` failures here happened *before*
+     * any failure could be recorded against `slm_gpu_run_mnist`.
+     * Mirror the breaker discipline used in run_mnist / run_sched. */
+    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ensure_mnist_bringup();
     if (rc < 0) goto out;
@@ -475,10 +641,14 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    /* Filtered: only -1 / 0 reach the breaker counter. -2 (cap too
+     * large) and -3 (bad arg) are caller-side validation errors. */
+    gpu_dispatch_record_set_input_result(rc);
     return rc;
 }
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
 {
+    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ensure_mnist_bringup();
     if (rc < 0) goto out;
@@ -486,6 +656,8 @@ int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    /* Same filter as set_mnist_input above. */
+    gpu_dispatch_record_set_input_result(rc);
     return rc;
 }
 
@@ -499,6 +671,11 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
                                  void *logits_bytes_out)
 {
     if (!state_bytes || !logits_bytes_out) return -1;
+    /* Same circuit-breaker short-circuit as the MNIST path. The
+     * counter is shared between MNIST + sched-MLP because they
+     * use the same channel and degrade together. */
+    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
+
     /* Held across the whole set_input + launch_kernel + read_output
      * sequence so two CPUs concurrently in `ai_mlp_assign_cpu` can't
      * stomp the shared g_handoff or race the GPFIFO write + doorbell
@@ -522,6 +699,7 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
     rc = n < 0 ? -1 : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    gpu_dispatch_record_result(rc);
     return rc;
 }
 #else
@@ -547,6 +725,10 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
     (void)state_bytes; (void)state_bytes_len; (void)logits_bytes_out;
     return -1;
 }
+void slm_gpu_dispatch_breaker_reset(void) { }
+bool slm_gpu_dispatch_breaker_is_tripped(void) { return false; }
+void slm_gpu_dispatch_breaker_test_record(int rc) { (void)rc; }
+int  slm_gpu_dispatch_breaker_test_count(void) { return 0; }
 #endif
 
 /*

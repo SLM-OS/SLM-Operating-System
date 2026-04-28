@@ -180,7 +180,13 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
 
     case GPU_CONSUMER_INFERENCE:
         /* MNIST GPU fastpath consults this flag in
-         * runtime/src/inference/engine.rs. */
+         * runtime/src/inference/engine.rs. Also reset the
+         * dispatch circuit breaker (#552 mitigation): a stuck
+         * GPU degrades over sustained inference and trips the
+         * breaker, after which every dispatch short-circuits
+         * to CPU. The operator clears it by toggling inference
+         * back on. */
+        slm_gpu_dispatch_breaker_reset();
         break;
 
     default:
