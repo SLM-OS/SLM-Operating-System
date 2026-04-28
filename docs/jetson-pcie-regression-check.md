@@ -127,14 +127,16 @@ training out-of-band, exposed via the shell `pcietrain` /
   / RTL8168 connector); C1 (WiFi) and C4 (NVMe) — visible to
   Linux at `0001:00.0` and `0004:00.0` — are not driven.
 
-These are tracked elsewhere (search "iATU setup pending" + the
-PCIe Tegra investigation history under
-`docs/archive/investigations/jetson-*`) and are independent of
-PR #389.
+These are tracked in
+[`docs/jetson-pcie-investigation.md`](jetson-pcie-investigation.md)
+(LTSSM, iATU, and bus-1 enumeration scope are the Stage-2+
+work items there) and are independent of PR #389.
 
 ### Hardware identity check via Linux lspci (pre-kexec)
 
-For posterity — what's actually on jetson-nano-1's PCIe today:
+Captured from L4T pre-kexec for hardware-inventory reference —
+this is host-OS state, not SLM-OS post-kexec state. For
+posterity, what's actually on jetson-nano-1's PCIe today:
 
 ```
 0001:00:00.0 PCI bridge [0604]: NVIDIA Corporation Device [10de:229e]
