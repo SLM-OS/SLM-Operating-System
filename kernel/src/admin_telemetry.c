@@ -392,10 +392,12 @@ static void publish_memory(void)
 
     uint64_t wev = 0, xev = 0;
     if (evi_rc == 0) {
-        wev = delta_u32((uint32_t)est.weight_evictions,
-                        (uint32_t)g_prev_evi_weight);
-        xev = delta_u32((uint32_t)est.workspace_evictions,
-                        (uint32_t)g_prev_evi_workspace);
+        /* u64 unsigned subtraction is wrap-safe the same way u32 is
+         * (mod 2^64) — same rationale as delta_u32, just at the
+         * native counter width so we don't lose info if eviction
+         * counts ever exceed UINT32_MAX. */
+        wev = est.weight_evictions    - g_prev_evi_weight;
+        xev = est.workspace_evictions - g_prev_evi_workspace;
         g_prev_evi_weight    = est.weight_evictions;
         g_prev_evi_workspace = est.workspace_evictions;
     }

@@ -160,6 +160,23 @@ void admin_telemetry_get_feed_stats(struct admin_telemetry_feed_stats *out);
  * The first call after boot establishes the snapshot baseline and
  * does not publish. Subsequent calls publish when ≥ interval_ms have
  * elapsed since the last publish.
+ *
+ * BLOCKING NOTE: each elapsed window fires THREE `msg_router_publish`
+ * calls back-to-back (one per topic). If any subscriber to `tel.cpu`,
+ * `tel.stl`, or `tel.mem` has stopped draining its mailbox (wedged
+ * Lua script, leaked telnet subscription, etc.), `msg_router_publish`
+ * will stall up to ACK_TIMEOUT_SECS (5 s). With three publishes per
+ * tick that's up to 15 s of stall in the net_poll task per window —
+ * larger amplification than the existing event-driven publishers.
+ * Stalls in net_poll block lwIP timers, DHCP renewals, RX-stall
+ * watchdog, CDC-ECM polling, and any other consumer of net_poll
+ * cadence.
+ *
+ * Mitigation is the same as for `tel.evi` / `tel.inf`: keep telemetry
+ * subscriptions short-lived. `slm.telemetry_unsubscribe(handle)` and
+ * the per-state shell-disconnect teardown helper in `lua_slm.c`
+ * remove subscriptions cleanly. If net-pump latency regresses after a
+ * session leak, check `slm.msg_router` for orphan subscribers first.
  */
 void admin_telemetry_periodic_pump(uint32_t now_ms);
 
