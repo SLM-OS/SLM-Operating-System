@@ -162,7 +162,27 @@ struct ga10b_channel_handoff {
      * bytes — SLM-OS bounds-checks user writes against this. */
     uint64_t input_buf_phys;
     uint32_t input_buf_size;
-    uint32_t _pad4;
+
+    /* Pipeline-kind discriminator. PR-3 of
+     * docs/specs/gpu-policy-models.md repurposes the previously-
+     * reserved `_pad4` slot as a `enum ga10b_pipeline_kind`. Default
+     * value 0 = MNIST keeps backward compatibility with v6 handoffs
+     * written before this field existed (Linux helpers wrote
+     * _pad4=0, which now reads as KIND_MNIST). The SLM-OS scanner
+     * branches on this when discriminating between handoffs of
+     * different kinds in DRAM (e.g. MNIST + sched-MLP coexisting
+     * across two host-side launchers running concurrently). */
+    uint32_t pipeline_kind;
+};
+
+/* Pipeline-kind discriminator values stored in
+ * `struct ga10b_channel_handoff::pipeline_kind`. Numbered to keep
+ * 0 as MNIST so legacy v6 handoffs continue to dispatch correctly
+ * without the producer having to set the field. */
+enum ga10b_pipeline_kind {
+    GA10B_PIPELINE_KIND_MNIST         = 0,
+    GA10B_PIPELINE_KIND_SCHED_MLP     = 1,
+    GA10B_PIPELINE_KIND_EVICTION_QNET = 2,
 };
 
 /* One entry per op in a v5 pipeline. SLM-OS reads this array from

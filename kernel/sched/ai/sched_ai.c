@@ -273,6 +273,14 @@ const struct sched_policy_ops sched_policy_ai_mlp = {
     .shutdown   = ai_mlp_shutdown,
     .assign_cpu = ai_mlp_assign_cpu,
     .tick       = NULL,
+    /* PR-3 of gpu-policy-models.md: ai_mlp_forward_logits routes
+     * through `slm_gpu_run_sched_inference` when `gpu use sched on`
+     * is set and a v6 handoff with kind=SCHED_MLP is in DRAM.
+     * Falls back to CPU NEON otherwise, so this stays true even on
+     * non-Jetson builds where the GPU path is a stub returning -1
+     * — the operator just won't see the warning at toggle time, and
+     * the dispatch still works (CPU). */
+    .has_gpu_backend = true,
 };
 
 /* ============================================================================

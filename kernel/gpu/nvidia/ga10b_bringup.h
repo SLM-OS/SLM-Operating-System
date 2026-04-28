@@ -98,6 +98,19 @@ struct ga10b_bringup {
     enum ga10b_bringup_state state;
     int last_error_phase;       /* -1 = no failure */
 
+    /* Pipeline-kind of the handoff this bringup instance is bound to.
+     * Set by `ga10b_bringup_channel_kind` after a successful scan.
+     * Used by callers (slm_ffi.c's per-kind ensure_*_bringup helpers)
+     * to detect when the shared `g_handoff` has been overwritten by
+     * a different bringup instance — at that point this instance's
+     * `state` is stale and channel_kind needs to re-run. PR-3 of
+     * gpu-policy-models.md. Default 0 (MNIST) on a fresh struct.
+     * Note: this lives on the per-instance struct, but the kernel
+     * only has one global `g_handoff`, so two bringup instances
+     * can't both be "live" at the same time — the second
+     * channel_kind call wins. */
+    uint32_t bound_pipeline_kind;
+
     /* WPR region carved out of FB/unified memory for ACR */
     uint64_t wpr_phys;          /* GPU-visible base */
     uint32_t wpr_size;          /* bytes */
@@ -141,8 +154,27 @@ int ga10b_bringup_pmu(struct ga10b_bringup *b);
  * ENGINES_READY on success. */
 int ga10b_bringup_address_space(struct ga10b_bringup *b);
 
-/* Phase 6: Channel + pushbuffer allocation. */
+/* Phase 6: Channel + pushbuffer allocation.
+ *
+ * The default form scans DRAM for a handoff with
+ * `pipeline_kind == GA10B_PIPELINE_KIND_MNIST` (kind 0; legacy v6
+ * handoffs from launchers that didn't set the field, or current
+ * launchers that explicitly tag MNIST). The `_kind` form takes an
+ * explicit `enum ga10b_pipeline_kind` and finds the matching
+ * handoff — used by the sched / eviction dispatch paths so multiple
+ * handoffs of different kinds can coexist in DRAM (one per Linux-
+ * side launcher running --preserve-for-kexec). */
 int ga10b_bringup_channel(struct ga10b_bringup *b);
+int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind);
+
+/* Returns the `pipeline_kind` of the handoff currently loaded into
+ * the file-scope `g_handoff`. Callers use this to detect when a
+ * different bringup instance has since overwritten g_handoff
+ * (since g_handoff is shared, two bringup instances of different
+ * kinds can't both be "live" — the most-recent channel_kind wins).
+ * Returns 0 (MNIST) if no handoff has been loaded yet (g_handoff is
+ * zero-initialised, kind=0=MNIST). */
+uint32_t ga10b_bringup_active_pipeline_kind(void);
 
 /* Phase 7: Submit host-family SEMAPHORE_RELEASE as smoke test.
  * Returns 0 iff the semaphore is observed at its target VA within

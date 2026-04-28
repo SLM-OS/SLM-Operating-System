@@ -1049,12 +1049,42 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
  * (Jetson's PMM/VMM maps the full 6.7 GB of non-ECC DRAM). If a
  * future VMM change skips any 4 KB page in the scan range, this
  * function will take a synchronous data abort with no recovery. */
-static uint64_t find_handoff_scan(void)
+/* Scan for a handoff whose `pipeline_kind` matches `wanted_kind`. The
+ * underlying scanner walks the same DRAM range looking for the magic;
+ * we wrap it in a loop that validates each candidate and rejects ones
+ * whose kind doesn't match (or whose validation fails outright).
+ * `wanted_kind` accepts `enum ga10b_pipeline_kind`; passing
+ * `GA10B_PIPELINE_KIND_MNIST` (= 0) finds legacy v6 handoffs that
+ * didn't set the field too. PR-3 of gpu-policy-models.md. */
+static uint64_t find_handoff_scan_kind(uint32_t wanted_kind)
 {
-    return ga10b_find_handoff_in_range(0x100000000ULL, 0x200000000ULL, 4096);
+    uint64_t cursor = 0x100000000ULL;
+    const uint64_t end = 0x200000000ULL;
+    while (cursor < end) {
+        uint64_t found = ga10b_find_handoff_in_range(cursor, end, 4096);
+        if (found == 0) return 0;
+        const struct ga10b_channel_handoff *h =
+            (const struct ga10b_channel_handoff *)(uintptr_t)found;
+        if (ga10b_validate_handoff(h) == 0 &&
+            h->pipeline_kind == wanted_kind) {
+            return found;
+        }
+        /* Magic matched but validation failed or kind didn't match;
+         * advance one page and keep scanning. */
+        cursor = found + 4096;
+    }
+    return 0;
 }
 
 int ga10b_bringup_channel(struct ga10b_bringup *b)
+{
+    /* Default: MNIST kind. Preserves the pre-PR-3 contract for
+     * existing callers (slm_gpu_run_mnist, the bringup-test shell
+     * cmd, host harness tests). */
+    return ga10b_bringup_channel_kind(b, GA10B_PIPELINE_KIND_MNIST);
+}
+
+int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
 {
     if (!b) return -1;
     /* Accept either PMU_UP (after inherit, skip Phase 5) or
@@ -1062,15 +1092,17 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     if (b->state != GA10B_BRINGUP_ENGINES_READY &&
         b->state != GA10B_BRINGUP_PMU_UP) return -1;
 
-    uart_puts("[GA10B-P6] Scanning DRAM for handoff magic...\n");
-    uint64_t handoff_phys = find_handoff_scan();
+    uart_printf("[GA10B-P6] Scanning DRAM for handoff magic (kind=%u)...\n",
+                (unsigned)wanted_kind);
+    uint64_t handoff_phys = find_handoff_scan_kind(wanted_kind);
     if (handoff_phys == 0) {
-        uart_puts("[GA10B-P6] Handoff not found. Was the Linux helper run?\n");
+        uart_printf("[GA10B-P6] Handoff (kind=%u) not found. Was the Linux "
+                    "helper run?\n", (unsigned)wanted_kind);
         b->last_error_phase = 6;
         return -1;
     }
-    uart_printf("[GA10B-P6] Found handoff at phys 0x%lx\n",
-                (unsigned long)handoff_phys);
+    uart_printf("[GA10B-P6] Found handoff at phys 0x%lx (kind=%u)\n",
+                (unsigned long)handoff_phys, (unsigned)wanted_kind);
 
     /* Read the handoff structure from the discovered location. */
     volatile struct ga10b_channel_handoff *hoff =
@@ -1129,6 +1161,12 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
     g_handoff.input_buf_phys     = hoff->input_buf_phys;
     g_handoff.input_buf_size     = hoff->input_buf_size;
 
+    /* PR-3 extension: pipeline-kind discriminator. Validated above
+     * (find_handoff_scan_kind only returns matches), but we copy it
+     * into g_handoff so launch_kernel can re-check at dispatch time
+     * for defense-in-depth. */
+    g_handoff.pipeline_kind      = hoff->pipeline_kind;
+
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
                                 &g_handoff) < 0) {
@@ -1171,7 +1209,19 @@ int ga10b_bringup_channel(struct ga10b_bringup *b)
 
     uart_puts("[GA10B-P6] channel handoff valid — inherited from Linux\n");
     b->state = GA10B_BRINGUP_CHANNEL_OPEN;
+    /* Record which pipeline_kind this instance bound to so callers
+     * can detect a stale state when a different bringup instance
+     * has since overwritten g_handoff with a different kind. */
+    b->bound_pipeline_kind = wanted_kind;
     return 0;
+}
+
+uint32_t ga10b_bringup_active_pipeline_kind(void)
+{
+    /* Reads the global g_handoff. Safe — single-threaded shell
+     * task is the only caller path today (slm_ffi.c's
+     * ensure_*_bringup helpers). */
+    return g_handoff.pipeline_kind;
 }
 
 /* ---- Phase 7: Pushbuffer submission (NOP + SEMAPHORE_RELEASE) ----

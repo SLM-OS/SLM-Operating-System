@@ -816,7 +816,8 @@ uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
                                uint32_t pipeline_n_ops,
                                uint64_t pipeline_ops_phys,
                                uint64_t input_buf_phys,
-                               uint32_t input_buf_size)
+                               uint32_t input_buf_size,
+                               uint32_t pipeline_kind)
 {
     /* Same single-page invariant as v4/v5. Force-fault the page in
      * via memset before reading the phys, then write the struct. */
@@ -871,6 +872,8 @@ uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
         /* v6 extension. */
         .input_buf_phys     = input_buf_phys,
         .input_buf_size     = input_buf_size,
+        /* PR-3 extension: pipeline-kind discriminator (was _pad4). */
+        .pipeline_kind      = pipeline_kind,
     };
     memcpy(handoff_va, &hoff, sizeof(hoff));
     msync(handoff_va, 4096, MS_SYNC);

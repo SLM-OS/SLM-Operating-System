@@ -18,6 +18,16 @@
 #include "ai_weights.h"
 #include "runtime_model.h"
 
+/* PR-3 of gpu-policy-models.md: GPU dispatch path. The MLP forward
+ * pass routes through `slm_gpu_run_sched_inference` when the
+ * `gpu use sched on` toggle is set AND a v6 handoff with
+ * `pipeline_kind == GA10B_PIPELINE_KIND_SCHED_MLP` is present in
+ * DRAM (typically published by `scripts/gpu-kernel-sched-mlp.c`
+ * pre-kexec). On any error the path falls back to the CPU NEON
+ * forward below — the scheduler always gets a valid logits vector. */
+#include "gpu_consumer.h"
+#include "slm_ffi.h"
+
 #if defined(__aarch64__) && defined(__ARM_NEON)
 #include <arm_neon.h>
 #define USE_NEON 1
@@ -249,6 +259,35 @@ void ai_mlp_forward_logits(const float state[AI_STATE_DIM],
     sched_runtime_token_t runtime_token = 0;
 
     if (!state || !out) return;
+
+#ifdef PLATFORM_JETSON_ORIN_NANO
+    /* GPU fastpath. When `gpu use sched on` is set AND the GA10B
+     * sched-MLP handoff is present in DRAM, dispatch the forward
+     * pass on the GPU. Sub-millisecond cost via QMD chain (~few
+     * hundred ms first run, includes channel inherit; subsequent
+     * runs amortize). On any error, fall through to CPU NEON.
+     *
+     * Caveat: GPU dispatch is ~6× slower than CPU NEON (post-handoff)
+     * because the v6 channel-inherit path serializes per QMD. The
+     * toggle is a deliberate operator-intent flag, not a perf default.
+     * See docs/specs/gpu-policy-models.md §"Why this matters".
+     *
+     * Also note that the per-call `slm_gpu_run_sched_inference` does
+     * an inherit + channel scan on its first invocation (one-time
+     * ~300 ms cost), then reuses g_sched_bringup state for steady-
+     * state dispatch. */
+    if (gpu_consumer_enabled(GPU_CONSUMER_SCHED)) {
+        int rc = slm_gpu_run_sched_inference(state,
+                                              AI_STATE_DIM * sizeof(float),
+                                              out);
+        if (rc == 0) return;
+        /* Fall through to CPU on GPU failure (no v6 handoff present,
+         * or transient dispatch error). The scheduler always gets a
+         * valid logits vector — silent fallback is the right call
+         * here because the alternative is "scheduler stops working
+         * if you fat-finger the toggle". */
+    }
+#endif
 
     if (sched_runtime_mlp_acquire(&runtime, &runtime_token)) {
         forward_logits(state,

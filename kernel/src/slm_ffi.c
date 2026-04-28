@@ -17,6 +17,7 @@
 #include "gpu_consumer.h"
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
+#include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
 #endif
 
 /*
@@ -377,16 +378,48 @@ static struct ga10b_bringup g_mnist_bringup;
 
 /* Walk inherit + channel if needed. Returns 0 on success, negative
  * rc if either phase fails. Callers must already be inside the
- * single-threaded assumption documented above. */
+ * single-threaded assumption documented above.
+ *
+ * PR-3 of gpu-policy-models.md: also detects when a different bringup
+ * instance (e.g. g_sched_bringup) has overwritten the shared
+ * g_handoff with a different pipeline_kind — in that case our state
+ * is stale and we re-walk channel_kind to repopulate g_handoff with
+ * MNIST data. */
 static int ensure_mnist_bringup(void)
 {
-    if (g_mnist_bringup.state == GA10B_BRINGUP_CHANNEL_OPEN ||
-        g_mnist_bringup.state == GA10B_BRINGUP_METHOD_ACCEPTED) {
-        return 0;
-    }
+    bool channel_open = (g_mnist_bringup.state == GA10B_BRINGUP_CHANNEL_OPEN ||
+                         g_mnist_bringup.state == GA10B_BRINGUP_METHOD_ACCEPTED);
+    bool active_is_mnist = (ga10b_bringup_active_pipeline_kind() ==
+                            GA10B_PIPELINE_KIND_MNIST);
+    if (channel_open && active_is_mnist) return 0;
+
     int rc = ga10b_bringup_inherit(&g_mnist_bringup);
     if (rc < 0) return rc;
-    rc = ga10b_bringup_channel(&g_mnist_bringup);
+    rc = ga10b_bringup_channel_kind(&g_mnist_bringup,
+                                     GA10B_PIPELINE_KIND_MNIST);
+    if (rc < 0) return rc;
+    return 0;
+}
+
+/* Sched MLP dispatch — parallel to MNIST. Separate per-instance
+ * bringup state but shared g_handoff (kernel singleton); the
+ * pipeline_kind check in ensure_*_bringup detects stale state from
+ * cross-instance overwrites and re-runs channel_kind to repopulate
+ * g_handoff with the right kind. */
+static struct ga10b_bringup g_sched_bringup;
+
+static int ensure_sched_bringup(void)
+{
+    bool channel_open = (g_sched_bringup.state == GA10B_BRINGUP_CHANNEL_OPEN ||
+                         g_sched_bringup.state == GA10B_BRINGUP_METHOD_ACCEPTED);
+    bool active_is_sched = (ga10b_bringup_active_pipeline_kind() ==
+                            GA10B_PIPELINE_KIND_SCHED_MLP);
+    if (channel_open && active_is_sched) return 0;
+
+    int rc = ga10b_bringup_inherit(&g_sched_bringup);
+    if (rc < 0) return rc;
+    rc = ga10b_bringup_channel_kind(&g_sched_bringup,
+                                     GA10B_PIPELINE_KIND_SCHED_MLP);
     if (rc < 0) return rc;
     return 0;
 }
@@ -424,6 +457,33 @@ int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
     int n = ga10b_bringup_set_input_fill(&g_mnist_bringup, value_bits, n_floats);
     return n < 0 ? n : 0;
 }
+
+/* Sched MLP dispatch. Same shape as slm_gpu_run_mnist but reads
+ * a 42-element fp32 logits vector (AI_SCHED_N_ACTIONS = 42 on
+ * Jetson) instead of MNIST's 10-element output. The caller passes
+ * the 108-element fp32 feature vector as `state_bytes`; the engine
+ * does set_input + launch_kernel + read_output in one shot. */
+int slm_gpu_run_sched_inference(const void *state_bytes,
+                                 size_t state_bytes_len,
+                                 void *logits_bytes_out)
+{
+    if (!state_bytes || !logits_bytes_out) return -1;
+    int rc = ensure_sched_bringup();
+    if (rc < 0) return rc;
+
+    int n = ga10b_bringup_set_input(&g_sched_bringup, state_bytes,
+                                     state_bytes_len);
+    if (n < 0) return n;
+
+    rc = ga10b_bringup_launch_kernel(&g_sched_bringup);
+    if (rc < 0) return rc;
+
+    /* 4-byte * 42 = 168 bytes of fp32 bit patterns. */
+    n = ga10b_bringup_read_pipeline_output(&g_sched_bringup,
+                                            logits_bytes_out,
+                                            168u);
+    return n < 0 ? -1 : 0;
+}
 #else
 int slm_gpu_run_mnist(void *logits_bytes_out)
 {
@@ -438,6 +498,13 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
 {
     (void)value_bits; (void)n_floats;
+    return -1;
+}
+int slm_gpu_run_sched_inference(const void *state_bytes,
+                                 size_t state_bytes_len,
+                                 void *logits_bytes_out)
+{
+    (void)state_bytes; (void)state_bytes_len; (void)logits_bytes_out;
     return -1;
 }
 #endif

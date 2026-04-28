@@ -424,17 +424,13 @@ int main(int argc, char **argv)
 
     if (!preserve) return 0;
 
-    /* --- v6 handoff for SLM-OS PR-3 to consume post-kexec. ---
+    /* --- v6 handoff for SLM-OS post-kexec consumption. ---
      *
-     * NOTE: today's handoff format has no `pipeline_kind` discriminator
-     * (the spec calls for adding one but the field doesn't exist on
-     * v6 yet). If two handoffs (MNIST + sched-MLP) coexist in DRAM,
-     * SLM-OS's magic scan will find the first one and dispatch it as
-     * MNIST. PR-3 will add the discriminator OR change the magic per
-     * pipeline kind; until then, only ONE launcher should run with
-     * --preserve-for-kexec at a time. The SUCCESS print above is the
-     * actionable PR-2 verification — operators wanting to stage this
-     * launcher for a kexec demo should wait for PR-3. */
+     * Tagged with `pipeline_kind = GA10B_PIPELINE_KIND_SCHED_MLP` (PR-3
+     * of gpu-policy-models.md). SLM-OS's per-kind handoff scan in
+     * `ga10b_bringup_channel(b, KIND_SCHED_MLP)` finds this in DRAM
+     * even when an MNIST handoff coexists from a separately-staged
+     * `gpu-kernel-mnist --preserve-for-kexec` run. */
     struct gpu_buffer pipe_ops = gpu_alloc_buffer(&ctx, 4096, 4096);
     {
         memset(pipe_ops.cpu_va, 0, pipe_ops.size_bytes);
@@ -463,7 +459,8 @@ int main(int argc, char **argv)
         ops[7].output.phys, ops[7].output.gpu_va,
         ops[7].sentinel_bits,
         SCHED_OP_COUNT, pipe_ops.phys,
-        input.phys, (uint32_t)(SCHED_INPUT_DIM * 4u));
+        input.phys, (uint32_t)(SCHED_INPUT_DIM * 4u),
+        GA10B_PIPELINE_KIND_SCHED_MLP);
 
     printf("[sched] Handoff at phys 0x%llx (version=6, %d ops)\n",
            (unsigned long long)handoff_phys, SCHED_OP_COUNT);
