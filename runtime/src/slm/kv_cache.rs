@@ -180,6 +180,50 @@ impl KvCache {
         Some(&self.v[layer_base..end])
     }
 
+    /// Borrow the K cache for `layer` covering positions
+    /// `0..=self.len` — i.e. positions already committed PLUS the
+    /// in-flight slot just written by [`KvCache::append`] but not yet
+    /// committed via [`KvCache::commit_position`].
+    ///
+    /// This is the view the decoder hands to `gqa_decode_step`: the
+    /// per-layer pipeline appends K and V at position `len`, then
+    /// computes attention over `0..=len` (inclusive) before any layer
+    /// commits. `commit_position` runs once after all layers, so
+    /// `k_view`/`v_view` (which return `0..len`, exclusive) are the
+    /// wrong shape during a forward pass.
+    ///
+    /// Returns `None` if `layer >= n_layers` or the cache is already
+    /// at capacity (no in-flight slot exists).
+    pub fn k_view_with_pending(&self, layer: usize) -> Option<&[u16]> {
+        if layer >= self.n_layers || self.len >= self.max_ctx {
+            return None;
+        }
+        let layer_base = layer.checked_mul(self.per_layer())?;
+        let pending_len = self.len.checked_add(1)?;
+        let span = pending_len.checked_mul(self.per_pos())?;
+        let end = layer_base.checked_add(span)?;
+        if end > self.k.len() {
+            return None;
+        }
+        Some(&self.k[layer_base..end])
+    }
+
+    /// Borrow the V cache including the in-flight slot. See
+    /// [`KvCache::k_view_with_pending`] for the contract.
+    pub fn v_view_with_pending(&self, layer: usize) -> Option<&[u16]> {
+        if layer >= self.n_layers || self.len >= self.max_ctx {
+            return None;
+        }
+        let layer_base = layer.checked_mul(self.per_layer())?;
+        let pending_len = self.len.checked_add(1)?;
+        let span = pending_len.checked_mul(self.per_pos())?;
+        let end = layer_base.checked_add(span)?;
+        if end > self.v.len() {
+            return None;
+        }
+        Some(&self.v[layer_base..end])
+    }
+
     /// Advance `len` by one. Called by the decoder after appending KV
     /// slices for **all** layers at the current position.
     ///
@@ -271,6 +315,59 @@ mod tests {
         let v_layer1 = cache.v_view(1).expect("v view");
         assert_eq!(k_layer1, &k1);
         assert_eq!(v_layer1, &v1);
+    }
+
+    #[test]
+    fn view_with_pending_includes_just_appended_slot() {
+        // Reproduces the M5.3.2-review-Critical scenario: forward_one
+        // calls `append(layer, k, v)` then `gqa_decode_step(... seq_len
+        // = pos + 1, ...)`. The pre-commit `k_view` returns slots
+        // [0..len) which is one slot SHORT of seq_len; the new
+        // `*_view_with_pending` returns slots [0..=len] inclusive,
+        // matching what gqa expects.
+        let mut cache = KvCache::new(1, 4, 1, 2).expect("alloc");
+        let k_first: [u16; 2] = [10, 11];
+        let v_first: [u16; 2] = [110, 111];
+        cache.append(0, &k_first, &v_first).expect("append");
+
+        // Pre-commit: plain k_view returns the empty 0..0 prefix.
+        let k_pre = cache.k_view(0).expect("k_view");
+        assert_eq!(k_pre.len(), 0);
+
+        // The "with pending" view sees the just-appended slot too.
+        let k_pending = cache.k_view_with_pending(0).expect("k_view_with_pending");
+        let v_pending = cache.v_view_with_pending(0).expect("v_view_with_pending");
+        assert_eq!(k_pending, &k_first);
+        assert_eq!(v_pending, &v_first);
+
+        // After commit, pre-commit view catches up; "with pending"
+        // would now require slot index 1 which is also writable.
+        cache.commit_position().expect("commit");
+        let k_post = cache.k_view(0).expect("k_view post");
+        assert_eq!(k_post, &k_first);
+
+        // Append at position 1 and verify the pending view is the
+        // 2-slot slice covering both positions.
+        let k_second: [u16; 2] = [22, 23];
+        let v_second: [u16; 2] = [222, 223];
+        cache.append(0, &k_second, &v_second).expect("append 2");
+        let k_pending2 = cache.k_view_with_pending(0).expect("pending 2");
+        assert_eq!(k_pending2.len(), 4);
+        assert_eq!(&k_pending2[0..2], &k_first);
+        assert_eq!(&k_pending2[2..4], &k_second);
+    }
+
+    #[test]
+    fn view_with_pending_rejects_full_cache() {
+        let mut cache = KvCache::new(1, 1, 1, 2).expect("alloc");
+        let k: [u16; 2] = [0, 0];
+        let v: [u16; 2] = [0, 0];
+        cache.append(0, &k, &v).expect("append");
+        cache.commit_position().expect("commit");
+        // Cache is full (max_ctx = 1, len = 1). No pending slot
+        // exists; the view should refuse rather than overrun.
+        assert!(cache.k_view_with_pending(0).is_none());
+        assert!(cache.v_view_with_pending(0).is_none());
     }
 
     #[test]

@@ -322,8 +322,8 @@ pub(crate) fn reset_for_tests() {
 mod tests {
     use super::*;
     use crate::slm::registry::{
-        build_qwen_test_fixture, load_slm, reset_for_tests as reset_registry,
-        SLM_MAX_SLOTS,
+        build_qwen_test_fixture, ensure_mm_initialized_for_tests, load_slm,
+        reset_for_tests as reset_registry, SLM_MAX_SLOTS,
     };
     use alloc::vec;
 
@@ -354,6 +354,7 @@ mod tests {
     }
 
     fn load_test_model() -> u32 {
+        ensure_mm_initialized_for_tests();
         let mut buf = vec![0u8; 8192];
         let n = build_qwen_test_fixture(64, &mut buf).expect("fixture fits");
         buf.truncate(n);
