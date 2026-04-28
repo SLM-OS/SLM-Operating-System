@@ -859,7 +859,8 @@ mod tests {
 
     // ---- M4.2: Q4_K matmul + GQA + SwiGLU + LMHead --------------------
 
-    use crate::inference::quant::{Q4_K_BLOCK_SIZE, q8_k_byte_size};
+    use crate::inference::quant::q8_k_byte_size;
+    use crate::slm::gguf::Q4_K_BLOCK_SIZE;
 
     /// Build a Q4_K-encoded weight row of `cols` elements from a
     /// known FP32 vector. Reuses M3's vec_dot test fixture builder

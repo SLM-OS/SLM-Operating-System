@@ -169,6 +169,12 @@ mod tests {
     fn test_missing_name() {
         let manifest = b"version: 1.0.0\ntype: service\n";
         let result = parse_manifest(manifest);
-        assert_eq!(result, Err(ParseError::MissingField("name")));
+        match result {
+            Err(ParseError::MissingField("name")) => {}
+            other => panic!(
+                "expected Err(MissingField(\"name\")), got {:?}",
+                other.is_err()
+            ),
+        }
     }
 }
