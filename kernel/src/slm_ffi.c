@@ -608,7 +608,15 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
     /* NULL `bytes` falls through to ga10b_bringup_set_input, which
      * returns -3 — keeps the error code mapping one-to-one with the
      * bringup helper (-1 = no v6 handoff, -2 = cap too large, -3 =
-     * bad arg). */
+     * bad arg).
+     *
+     * Engine.rs calls this FIRST in the MNIST fastpath; if it fails
+     * the run_mnist call below is never reached. Without this
+     * breaker hook, the trip-path was unreachable in production
+     * because `ensure_mnist_bringup` failures here happened *before*
+     * any failure could be recorded against `slm_gpu_run_mnist`.
+     * Mirror the breaker discipline used in run_mnist / run_sched. */
+    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ensure_mnist_bringup();
     if (rc < 0) goto out;
@@ -616,10 +624,12 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    gpu_dispatch_record_result(rc);
     return rc;
 }
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
 {
+    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
     int rc = ensure_mnist_bringup();
     if (rc < 0) goto out;
@@ -627,6 +637,7 @@ int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    gpu_dispatch_record_result(rc);
     return rc;
 }
 
