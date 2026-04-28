@@ -710,6 +710,7 @@ set(TEST_SOURCES
     kernel/tests/test_sched_trace.c
     kernel/tests/test_latency_hist.c
     kernel/tests/test_gpu_consumer.c
+    kernel/tests/test_gpu_dispatch_breaker.c
     kernel/tests/test_admin_telemetry.c
     kernel/tests/test_telemetry_feed.c
     kernel/tests/test_model_engine.c
