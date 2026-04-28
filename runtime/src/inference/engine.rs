@@ -808,10 +808,11 @@ pub unsafe fn run_inference(
     // any error so the user still gets an answer.
     let mut result: Result<usize, EngineError>;
     if mnist_gpu_fastpath_eligible(model_index) {
-        crate::log::log_info(b"[engine] mnist GPU fastpath eligible -- dispatching\0");
+        // Successful dispatch is the steady-state happy path; logging
+        // it every iteration drowns the console at >1 inf/s. The
+        // failure path is rare and operator-actionable, so it stays.
         match super::gpu::run_mnist_gpu_fastpath(input, input_len, output, output_len) {
             Ok(n) => {
-                crate::log::log_info(b"[engine] mnist GPU fastpath success\0");
                 let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
                 record_inference(elapsed);
                 return Ok(n);
