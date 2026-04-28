@@ -26,6 +26,9 @@
 
 #include "unity.h"
 #include "../include/slm_ffi.h"
+/* Test-only seams live in their own header so production TUs that
+ * include slm_ffi.h can't reach them. See slm_ffi_test.h. */
+#include "../include/slm_ffi_test.h"
 
 #include <stdbool.h>
 #include <stdint.h>

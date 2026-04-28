@@ -512,6 +512,23 @@ bool slm_gpu_dispatch_breaker_is_tripped(void)
     return gpu_dispatch_breaker_is_tripped_inner();
 }
 
+/* Set-input wrapper around gpu_dispatch_record_result that filters
+ * out caller-side validation errors. `slm_gpu_set_mnist_input` /
+ * `_fill` return -1 (no v6 handoff / GPU dispatch failure — counts
+ * toward the breaker), -2 (cap too large) or -3 (bad arg) — both
+ * caller-side bugs. Recording -2/-3 would let a misbehaving caller
+ * (e.g. Rust passing NULL three times in a row) trip the breaker
+ * spuriously and take the GPU offline for a reason unrelated to GPU
+ * health. The breaker's contract is "consecutive GPU dispatch
+ * failures", so keep -2/-3 out of the counter entirely — neither
+ * increment nor reset. (PR #555 round-3 review.) */
+static void gpu_dispatch_record_set_input_result(int rc)
+{
+    if (rc == 0 || rc == -1) {
+        gpu_dispatch_record_result(rc);
+    }
+}
+
 /* Test-only seam: drive the breaker state machine without going
  * through a real GPU dispatch. The unit tests in
  * `kernel/tests/test_gpu_dispatch_breaker.c` exercise the
@@ -624,7 +641,9 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
-    gpu_dispatch_record_result(rc);
+    /* Filtered: only -1 / 0 reach the breaker counter. -2 (cap too
+     * large) and -3 (bad arg) are caller-side validation errors. */
+    gpu_dispatch_record_set_input_result(rc);
     return rc;
 }
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
@@ -637,7 +656,8 @@ int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
-    gpu_dispatch_record_result(rc);
+    /* Same filter as set_mnist_input above. */
+    gpu_dispatch_record_set_input_result(rc);
     return rc;
 }
 

@@ -923,13 +923,12 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
 void slm_gpu_dispatch_breaker_reset(void);
 bool slm_gpu_dispatch_breaker_is_tripped(void);
 
-/* Test-only seams. Drive the breaker state machine and inspect
- * the raw counter without going through a real GPU dispatch.
- * Used by `kernel/tests/test_gpu_dispatch_breaker.c`; production
- * code must not call these. On non-Jetson platforms the record
- * function is a no-op and the count is always zero. */
-void slm_gpu_dispatch_breaker_test_record(int rc);
-int  slm_gpu_dispatch_breaker_test_count(void);
+/* Test-only seams (`slm_gpu_dispatch_breaker_test_record` /
+ * `_test_count`) are intentionally NOT declared here. They live in
+ * `kernel/include/slm_ffi_test.h` so production translation units
+ * that include slm_ffi.h can't reach them by accident. The unit
+ * tests in `kernel/tests/test_gpu_dispatch_breaker.c` include the
+ * test header directly. (PR #555 round-3 review.) */
 
 /*
  * Print GPU status to UART (called from Rust shell command).
