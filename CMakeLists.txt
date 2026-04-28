@@ -1262,7 +1262,6 @@ if(PLATFORM STREQUAL "X86_64")
         -nostdlib
         -mno-red-zone -fno-stack-protector -fno-pic
         -msse -msse2
-        -O2
     )
     target_include_directories(slm_shell PRIVATE
         ${CMAKE_SOURCE_DIR}/kernel/include/compat)
@@ -1273,9 +1272,12 @@ else()
         -nostdlib
         -mcpu=${TARGET_CPU}
         -fno-pie
-        -O2
     )
 endif()
+# Optimization level inherits from CMAKE_BUILD_TYPE (Debug → -O0,
+# Release → -O2). Earlier versions hardcoded -O2 here, which forced
+# `-O0` Debug kernels to link against an `-O2` slm_shell.o; the Lua
+# / nanopb sibling libraries already inherit, so match that pattern.
 
 target_compile_definitions(slm_shell PRIVATE
     $<$<STREQUAL:${PLATFORM},X86_64>:PLATFORM_X86_64=1>
