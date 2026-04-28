@@ -172,10 +172,16 @@ static void test_slm_runner_publishes_done_after_empty_prompt(void)
     TEST_ASSERT_EQUAL_INT(0, memcmp(data, "rc=0", 4));
 
     /* Find tokens_out=0 in the payload. memcmp can't search; do a
-     * simple scan over the (NUL-terminated, < 60 byte) message. */
+     * simple scan over the (NUL-terminated, < 60 byte) message.
+     * Bound: the inner test inspects `data[i + 12]`, so i + 12 must
+     * stay strictly below 60 (i.e. i + 12 < 60 → i + 13 <= 60 is
+     * off-by-one — the 13th byte at index i+12 must be a valid
+     * payload slot). Use `i + 12 < 60` to keep the lookahead
+     * in-bounds even if the router ever stops NUL-padding past the
+     * payload. */
     int found_zero_tokens = 0;
     for (size_t i = 0; data[i] != '\0' && i < 60; i++) {
-        if (i + 13 <= 60 &&
+        if (i + 12 < 60 &&
             memcmp(&data[i], "tokens_out=0", 12) == 0 &&
             (data[i + 12] == ' ' || data[i + 12] == '\0')) {
             found_zero_tokens = 1;
