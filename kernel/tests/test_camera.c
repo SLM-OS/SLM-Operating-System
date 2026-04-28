@@ -779,10 +779,44 @@ static void test_imx219_streaming_constants_and_stubs(void)
     TEST_ASSERT_EQUAL_HEX16(0x0100u, IMX219_REG_MODE_SELECT);
     TEST_ASSERT_EQUAL_HEX8(0x00u,    IMX219_MODE_STANDBY);
     TEST_ASSERT_EQUAL_HEX8(0x01u,    IMX219_MODE_STREAMING);
+    /* Pixel array geometry — IMX219 datasheet §6.1. */
+    TEST_ASSERT_EQUAL_UINT32(8u,    IMX219_PIXEL_ARRAY_LEFT);
+    TEST_ASSERT_EQUAL_UINT32(8u,    IMX219_PIXEL_ARRAY_TOP);
+    TEST_ASSERT_EQUAL_UINT32(3280u, IMX219_PIXEL_ARRAY_WIDTH);
+    TEST_ASSERT_EQUAL_UINT32(2464u, IMX219_PIXEL_ARRAY_HEIGHT);
+    TEST_ASSERT_EQUAL_UINT32(24000000u, IMX219_XCLK_FREQ_HZ);
+    /* Binning mode register values. */
+    TEST_ASSERT_EQUAL_HEX8(0x00u, IMX219_BINNING_NONE);
+    TEST_ASSERT_EQUAL_HEX8(0x01u, IMX219_BINNING_X2);
+    TEST_ASSERT_EQUAL_HEX8(0x03u, IMX219_BINNING_X2_ANALOG);
 #if !defined(PLATFORM_JETSON_ORIN_NANO)
     /* QEMU stubs always return -1 (no I²C controller). */
     TEST_ASSERT_EQUAL_INT(-1, imx219_streaming_enable());
     TEST_ASSERT_EQUAL_INT(-1, imx219_streaming_disable());
+    TEST_ASSERT_EQUAL_INT(-1, imx219_set_mode_binning_1640x1232());
+#endif
+}
+
+/*
+ * Test: tegra_i2c_write_reg16_val16 returns -1 on QEMU (stub
+ * path) and validates argument-validation symmetry with
+ * tegra_i2c_write_reg16. The Jetson big-endian wire format
+ * is exercised on hardware via imx219_set_mode_binning_1640x1232.
+ */
+static void test_tegra_i2c_write_reg16_val16_arg_validation(void)
+{
+    /* NULL bus → -1. */
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_write_reg16_val16(NULL, 0x10u, 0x0000u, 0x0000u));
+    /* Invalid 8-bit slave → -1 (slave > 0x7F). */
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_write_reg16_val16(&tegra_i2c_cam_bus, 0x80u,
+                                    0x0000u, 0x0000u));
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+    /* QEMU stub always -1 even with valid args. */
+    TEST_ASSERT_EQUAL_INT(-1,
+        tegra_i2c_write_reg16_val16(&tegra_i2c_cam_bus, 0x10u,
+                                    0x016cu, 1640u));
 #endif
 }
 
@@ -889,6 +923,7 @@ int test_suite_camera(void)
     RUN_TEST(test_camrtc_frame_buffer_accessors);
     RUN_TEST(test_camrtc_memoryinfo_overlay_roundtrip);
     RUN_TEST(test_imx219_streaming_constants_and_stubs);
+    RUN_TEST(test_tegra_i2c_write_reg16_val16_arg_validation);
     return UnityEnd();
 }
 

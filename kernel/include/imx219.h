@@ -57,6 +57,22 @@
 #define IMX219_MODE_STANDBY          0x00u
 #define IMX219_MODE_STREAMING        0x01u
 
+/* Pixel array geometry (IMX219 datasheet §6.1).
+ * Full active-pixel array is 3280×2464 starting at (8,8). */
+#define IMX219_PIXEL_ARRAY_LEFT      8u
+#define IMX219_PIXEL_ARRAY_TOP       8u
+#define IMX219_PIXEL_ARRAY_WIDTH     3280u
+#define IMX219_PIXEL_ARRAY_HEIGHT    2464u
+
+/* Required external clock frequency. The PLL multipliers in
+ * `imx219_common_regs` assume exactly 24 MHz at EXTPERIPH1. */
+#define IMX219_XCLK_FREQ_HZ          24000000u
+
+/* Binning mode register values for BINNING_MODE_H / BINNING_MODE_V. */
+#define IMX219_BINNING_NONE          0x00u
+#define IMX219_BINNING_X2            0x01u  /* 2× digital binning, RAW10 path */
+#define IMX219_BINNING_X2_ANALOG     0x03u  /* 2× analog binning, RAW8 path */
+
 /*
  * Power the sensor up through the full sequence described in the file
  * header. Idempotent — calling twice in a row is safe and runs the
@@ -98,11 +114,43 @@ void imx219_power_off(void);
 int imx219_read_chip_id(uint16_t *out_chip_id);
 
 /*
+ * Apply the full register-bank init sequence for IMX219 binning
+ * mode: 1640×1232 RAW10 @ 30 fps. Writes ~45 registers in three
+ * groups (per L4T's `imx219_start_streaming` callback in
+ * `docs/reference/linux-imx219.c:671`):
+ *
+ *   1. Common init (31 writes) — PLL clock table, undocumented
+ *      tuning registers, frame-bank baseline. Registers in this
+ *      block are sensor-mode-independent.
+ *   2. Lane mode (1 write) — IMX219 on the Orin Nano dev kit
+ *      uses 2 D-PHY lanes (CSI_LANE_MODE = 0x01).
+ *   3. Mode-specific (12 writes) — crop window, binning factor,
+ *      output dimensions, pixel format, OPPXCK divider for
+ *      1640×1232 RAW10 binning mode.
+ *
+ * Caller must have:
+ *   - Run `imx219_power_on()` so the sensor responds on I²C.
+ *   - NOT yet called `imx219_streaming_enable()` — this routine
+ *     leaves MODE_SELECT at 0 (standby); enable streaming
+ *     separately with `imx219_streaming_enable()`.
+ *
+ * Total runtime: ~45 × ~100 µs = ~5 ms at 400 kHz I²C.
+ *
+ * Returns 0 on success, negative on the first failing I²C write
+ * (see `tegra_i2c_write_reg16` for the rc table). Partial writes
+ * leave the sensor in a half-configured state — caller should
+ * power-cycle and retry on failure.
+ */
+int imx219_set_mode_binning_1640x1232(void);
+
+/*
  * Write IMX219 MODE_SELECT (0x0100) to STREAMING (0x01). Sensor
  * starts emitting CSI-2 frames on the next sensor-clock boundary
  * (~33 ms at 30 fps). Caller must have already called
- * `imx219_power_on()` successfully and the NVCSI / VI capture
- * channel must be configured before frames will be received.
+ * `imx219_power_on()` AND `imx219_set_mode_binning_1640x1232()`
+ * successfully — without the mode-init the sensor stays in
+ * default state and never produces a SOF (verified hardware
+ * blocker on jetson-nano-1, PR #513).
  *
  * Returns 0 on success, negative on I²C write error (see
  * `tegra_i2c_write_reg16` for the rc table).

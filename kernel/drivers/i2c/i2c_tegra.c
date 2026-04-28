@@ -393,6 +393,26 @@ int tegra_i2c_write_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
     return rc;
 }
 
+int tegra_i2c_write_reg16_val16(struct tegra_i2c_bus *bus, uint8_t slave,
+                                uint16_t reg, uint16_t val)
+{
+    if (!bus || slave > 0x7Fu) return -1;
+    /* IMX219 (and most CCI sensors) latch multi-byte values
+     * big-endian: high byte at the lower-numbered register, low
+     * byte at reg+1. Same wire pattern L4T's `cci_write` uses
+     * via CCI_REG16. */
+    uint8_t buf[4] = {
+        (uint8_t)(reg >> 8),
+        (uint8_t)(reg & 0xFFu),
+        (uint8_t)(val >> 8),
+        (uint8_t)(val & 0xFFu),
+    };
+    irq_flags_t flags = spin_lock_irqsave(&bus->lock);
+    int rc = xfer_write(bus, slave, buf, 4u, 0 /*final, send STOP*/);
+    spin_unlock_irqrestore(&bus->lock, flags);
+    return rc;
+}
+
 int tegra_i2c_read_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
                          uint16_t reg, uint8_t *out)
 {
@@ -454,6 +474,9 @@ struct tegra_i2c_bus tegra_i2c_cam_bus = {
 int tegra_i2c_init(struct tegra_i2c_bus *bus) { (void)bus; return -1; }
 int tegra_i2c_write_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
                           uint16_t reg, uint8_t val)
+{ (void)bus; (void)slave; (void)reg; (void)val; return -1; }
+int tegra_i2c_write_reg16_val16(struct tegra_i2c_bus *bus, uint8_t slave,
+                                uint16_t reg, uint16_t val)
 { (void)bus; (void)slave; (void)reg; (void)val; return -1; }
 int tegra_i2c_read_reg16(struct tegra_i2c_bus *bus, uint8_t slave,
                          uint16_t reg, uint8_t *out)
