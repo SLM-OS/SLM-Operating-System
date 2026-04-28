@@ -1228,6 +1228,26 @@ target_compile_definitions(lua PRIVATE
     $<$<STREQUAL:${PLATFORM},X86_64>:PLATFORM_X86_64=1>
 )
 
+# Pin the radix character to '.' (ASCII 46) so the float-to-string
+# path in lobject.c doesn't deref localeconv()->decimal_point. The
+# freestanding stub returns a static lconv with decimal_point=".",
+# but a runtime memory-corruption bug has been observed (#544)
+# overwriting default_lconv with a bogus pointer between boot and
+# the first Lua "%f" formatting call. Bypassing the deref entirely
+# makes Lua immune regardless of whether default_lconv is intact.
+#
+# Function-like macro defines aren't supported by
+# target_compile_definitions (CMake silently strips the parens), so
+# pass the -D directly via target_compile_options. The right-hand
+# side is the character literal `'.'` (C 6.4.4.4 — an integer
+# constant of type int), kept readable instead of the equivalent
+# decimal 46. CMake list-mode element passes the string verbatim
+# without shell interpretation, so the single quotes survive into
+# the gcc command line.
+target_compile_options(lua PRIVATE
+    "-Dlua_getlocaledecpoint()='.'"
+)
+
 # Link with Lua library
 target_link_libraries(slmos.elf PRIVATE lua)
 
@@ -1285,6 +1305,38 @@ endif()
 # Uses floating-point/NEON — compiled WITHOUT -mgeneral-regs-only.
 # Same pattern as Lua library.
 # ==========================================================================
+# ==========================================================================
+# kprintf_float — freestanding %f/%g/%e formatter for kprintf.
+#
+# Compiled WITHOUT -mgeneral-regs-only so it can do real `double`
+# arithmetic. Linked into slmos.elf so the rest of the kernel can
+# stay under the FP-register ban (no save/restore on context switch
+# or IRQ entry). Float formatting fires only from diagnostic /
+# Lua-driven output paths, where the FP-register touch is acceptable.
+# ==========================================================================
+add_library(kprintf_float STATIC kernel/src/kprintf_float.c)
+target_include_directories(kprintf_float PRIVATE ${KERNEL_INCLUDES})
+
+if(PLATFORM STREQUAL "X86_64")
+    target_compile_options(kprintf_float PRIVATE
+        -ffreestanding
+        -nostdlib
+        -mno-red-zone -fno-stack-protector -fno-pic
+        -msse -msse2
+        -O2
+    )
+else()
+    # ARM64: omit -mgeneral-regs-only so FP/NEON is available.
+    target_compile_options(kprintf_float PRIVATE
+        -ffreestanding
+        -nostdlib
+        -mcpu=${TARGET_CPU}
+        -fno-pie
+        -O2
+    )
+endif()
+target_link_libraries(slmos.elf PRIVATE kprintf_float)
+
 option(ENABLE_AI_SCHEDULER "Include AI scheduling models (MLP/PPO)" OFF)
 
 # Work-stealing scheduler (#59 Phase B, S4 default flip).

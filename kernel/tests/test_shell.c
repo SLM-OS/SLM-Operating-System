@@ -3258,6 +3258,216 @@ static void test_kprintf_mixed(void)
 }
 
 /* ============================================================================
+ * Floating-point format tests
+ *
+ * Verify the freestanding %f / %e / %g implementations added so that
+ * Lua's `string.format("%.4f", ...)` works through our snprintf stub.
+ *
+ * Test code is built with -mgeneral-regs-only so it can't touch FP
+ * registers — that means literal `1.5` in a uart_snprintf call is
+ * forbidden, since the variadic call would pass the double in V0.
+ * The kprintf_float test helper takes the value as IEEE-754 bits
+ * (uint64_t) and bit-casts on the FP-allowed side. The constants
+ * below were generated with `printf "%016lx" $(python -c ...)`.
+ * ============================================================================ */
+
+#include "kprintf_float.h"
+
+/* Common IEEE-754 bit patterns. Each comment shows the value.
+ *
+ * To derive a new constant, use:
+ *
+ *     python3 -c "import struct; print(hex(struct.unpack('>Q', struct.pack('>d', 1.5))[0]))"
+ *
+ * which gives 0x3ff8000000000000 for 1.5. The result fits straight
+ * into a `0x...ULL` literal here. (Avoid printf-roundtripping —
+ * different libc versions disagree on the exact rounding of some
+ * decimal-literal-to-double conversions, and we want bit-exact
+ * pinning across all platforms.) */
+#define DBL_BITS_0_0          0x0000000000000000ULL  /* +0.0          */
+#define DBL_BITS_1_0          0x3FF0000000000000ULL  /* 1.0           */
+#define DBL_BITS_1_5          0x3FF8000000000000ULL  /* 1.5           */
+#define DBL_BITS_NEG_2_25     0xC002000000000000ULL  /* -2.25         */
+#define DBL_BITS_PI_APPROX    0x400921FB53C8D4F1ULL  /* 3.14159265    */
+#define DBL_BITS_0_999        0x3FEFF7CED916872BULL  /* 0.999         */
+#define DBL_BITS_1_999        0x3FFFFDF3B645A1CBULL  /* 1.999         */
+#define DBL_BITS_NEG_0_005    0xBF747AE147AE147BULL  /* -0.005        */
+#define DBL_BITS_3_14         0x40091EB851EB851FULL  /* 3.14          */
+#define DBL_BITS_NEG_3_14     0xC0091EB851EB851FULL  /* -3.14         */
+#define DBL_BITS_12345        0x40C81C8000000000ULL  /* 12345.0       */
+#define DBL_BITS_0_0012345    0x3F543A22DAB9CB75ULL  /* 0.0012345     */
+#define DBL_BITS_1234567      0x4132D687E0000000ULL  /* 1234567.0     */
+#define DBL_BITS_0_00001      0x3EE4F8B588E368F1ULL  /* 0.00001       */
+#define DBL_BITS_NAN          0x7FF8000000000000ULL  /* quiet NaN     */
+#define DBL_BITS_POS_INF      0x7FF0000000000000ULL  /* +Inf          */
+#define DBL_BITS_NEG_INF      0xFFF0000000000000ULL  /* -Inf          */
+
+static void test_kprintf_float_default_precision(void)
+{
+    char buf[64];
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_1_5, -1, 'f');
+    TEST_ASSERT_EQUAL_STRING("1.500000", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_NEG_2_25, -1, 'f');
+    TEST_ASSERT_EQUAL_STRING("-2.250000", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_0_0, -1, 'f');
+    TEST_ASSERT_EQUAL_STRING("0.000000", buf);
+}
+
+static void test_kprintf_float_explicit_precision(void)
+{
+    char buf[64];
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_PI_APPROX, 4, 'f');
+    TEST_ASSERT_EQUAL_STRING("3.1416", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_1_5, 0, 'f');
+    TEST_ASSERT_EQUAL_STRING("2", buf);   /* round-half-up */
+    /* round-half-away-from-zero: -0.005 → -0.01 */
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_NEG_0_005, 2, 'f');
+    TEST_ASSERT_EQUAL_STRING("-0.01", buf);
+}
+
+static void test_kprintf_float_rounding_carry(void)
+{
+    char buf[64];
+    /* 0.999 with precision 2 should round up to 1.00. */
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_0_999, 2, 'f');
+    TEST_ASSERT_EQUAL_STRING("1.00", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_1_999, 2, 'f');
+    TEST_ASSERT_EQUAL_STRING("2.00", buf);
+}
+
+static void test_kprintf_float_specials(void)
+{
+    char buf[64];
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_NAN, -1, 'f');
+    TEST_ASSERT_EQUAL_STRING("nan", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_NAN, -1, 'F');
+    TEST_ASSERT_EQUAL_STRING("NAN", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_POS_INF, -1, 'f');
+    TEST_ASSERT_EQUAL_STRING("inf", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_NEG_INF, -1, 'f');
+    TEST_ASSERT_EQUAL_STRING("-inf", buf);
+}
+
+static void test_kprintf_scientific(void)
+{
+    char buf[64];
+    /* default precision 6: 1.234500e+04 */
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_12345, -1, 'e');
+    TEST_ASSERT_EQUAL_STRING("1.234500e+04", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_0_0012345, 2, 'E');
+    TEST_ASSERT_EQUAL_STRING("1.23E-03", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_1_0, 0, 'e');
+    TEST_ASSERT_EQUAL_STRING("1e+00", buf);
+}
+
+static void test_kprintf_g_format(void)
+{
+    char buf[64];
+    /* %g should trim trailing zeros and the decimal when bare. */
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_1_0, -1, 'g');
+    TEST_ASSERT_EQUAL_STRING("1", buf);
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_1_5, -1, 'g');
+    TEST_ASSERT_EQUAL_STRING("1.5", buf);
+    /* exp >= precision (6) — switches to %e. */
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_1234567, -1, 'g');
+    TEST_ASSERT_EQUAL_STRING("1.23457e+06", buf);
+    /* exp < -4 — switches to %e too. */
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_0_00001, -1, 'g');
+    TEST_ASSERT_EQUAL_STRING("1e-05", buf);
+    /* zero stays as "0", not "0.000000". */
+    kprintf_float_test_format_bits(buf, sizeof(buf), DBL_BITS_0_0, -1, 'g');
+    TEST_ASSERT_EQUAL_STRING("0", buf);
+}
+
+/*
+ * Width / left-justify / zero-pad branches of kprintf_float_emit.
+ * These bypass the va_list path but exercise the bespoke padding
+ * logic at kprintf_float.c:emit_value (sign-then-zeros for negative
+ * numbers, space-pad for non-finite, left-justify with trailing
+ * spaces).
+ */
+static void test_kprintf_float_padded_zero_pad_negative(void)
+{
+    /* Negative number with zero-pad: sign should land first, then
+     * the zeros, then digits. Width 10 — "-3.14" is 5 chars, pad 5. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_NEG_3_14, 2, 'f',
+                                          /*width=*/10, /*lj=*/0, /*zp=*/1);
+    TEST_ASSERT_EQUAL_STRING("-000003.14", buf);
+}
+
+static void test_kprintf_float_padded_left_justify(void)
+{
+    /* Left-justify: digits first, then trailing spaces. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_3_14, 2, 'f',
+                                          /*width=*/10, /*lj=*/1, /*zp=*/0);
+    TEST_ASSERT_EQUAL_STRING("3.14      ", buf);
+}
+
+static void test_kprintf_float_padded_inf_uses_space_not_zero(void)
+{
+    /* glibc / musl space-pad nan / inf even when zero-pad is set —
+     * "0000000inf" is more confusing than informative. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_POS_INF, -1, 'f',
+                                          /*width=*/10, /*lj=*/0, /*zp=*/1);
+    TEST_ASSERT_EQUAL_STRING("       inf", buf);
+}
+
+static void test_kprintf_float_padded_neg_inf_uses_space_not_zero(void)
+{
+    /* Negative inf with zero-pad: same — space-pad, sign stays
+     * leading, no zeros emitted. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_NEG_INF, -1, 'f',
+                                          /*width=*/10, /*lj=*/0, /*zp=*/1);
+    TEST_ASSERT_EQUAL_STRING("      -inf", buf);
+}
+
+static void test_kprintf_float_padded_nan_uses_space_not_zero(void)
+{
+    /* NaN under zero-pad: no '0' prefix. */
+    char buf[32];
+    kprintf_float_test_format_bits_padded(buf, sizeof(buf),
+                                          DBL_BITS_NAN, -1, 'f',
+                                          /*width=*/10, /*lj=*/0, /*zp=*/1);
+    TEST_ASSERT_EQUAL_STRING("       nan", buf);
+}
+
+/*
+ * End-to-end test exercising the va_list crossing between
+ * kprintf.c (-mgeneral-regs-only) and kprintf_float.c (FP-enabled).
+ * The standalone `_format_bits` tests bypass the va_list path; this
+ * one routes through the real `uart_snprintf` → `fmt_vprintf` →
+ * case 'f' → `kprintf_float_emit(va_list*)` chain so a regression
+ * in the `(va_list *)&args` cast or in GCC's FP arg spilling under
+ * `-mgeneral-regs-only` would surface here.
+ */
+static void test_kprintf_float_e2e_va_list_crossing(void)
+{
+    char buf[64];
+    /* %.4f of pi-approx, identical to a real Lua-driven format. */
+    kprintf_float_test_e2e_uart_snprintf(buf, sizeof(buf),
+                                         DBL_BITS_PI_APPROX, 4, 'f');
+    TEST_ASSERT_EQUAL_STRING("3.1416", buf);
+    /* %g of 1.5 — exercises the trim path through the va_list call. */
+    kprintf_float_test_e2e_uart_snprintf(buf, sizeof(buf),
+                                         DBL_BITS_1_5, -1, 'g');
+    TEST_ASSERT_EQUAL_STRING("1.5", buf);
+    /* %e of 12345 — verifies the post-emit advance position too;
+     * if the va_list weren't being advanced correctly, follow-on
+     * args in real callers would silently misalign. */
+    kprintf_float_test_e2e_uart_snprintf(buf, sizeof(buf),
+                                         DBL_BITS_12345, -1, 'e');
+    TEST_ASSERT_EQUAL_STRING("1.234500e+04", buf);
+}
+
+/* ============================================================================
  * Hailo shell command tests (PLATFORM_X86_64 omits the Hailo driver,
  * so these are gated off that build).
  *
@@ -3760,6 +3970,26 @@ int test_suite_shell(void)
     RUN_TEST(test_kprintf_size_t);
     RUN_TEST(test_kprintf_percent);
     RUN_TEST(test_kprintf_mixed);
+
+    /* Float-format coverage (added with %f / %e / %g support).
+     * Width / left-justify / zero-pad coverage rides on the integer
+     * specifiers' tests above — the float padding code uses the same
+     * fmt_padding helper. */
+    RUN_TEST(test_kprintf_float_default_precision);
+    RUN_TEST(test_kprintf_float_explicit_precision);
+    RUN_TEST(test_kprintf_float_rounding_carry);
+    RUN_TEST(test_kprintf_float_specials);
+    RUN_TEST(test_kprintf_scientific);
+    RUN_TEST(test_kprintf_g_format);
+
+    /* kprintf_float_emit padding branches + va_list crossing
+     * (review #554 round-1 follow-ups). */
+    RUN_TEST(test_kprintf_float_padded_zero_pad_negative);
+    RUN_TEST(test_kprintf_float_padded_left_justify);
+    RUN_TEST(test_kprintf_float_padded_inf_uses_space_not_zero);
+    RUN_TEST(test_kprintf_float_padded_neg_inf_uses_space_not_zero);
+    RUN_TEST(test_kprintf_float_padded_nan_uses_space_not_zero);
+    RUN_TEST(test_kprintf_float_e2e_va_list_crossing);
 
     return UNITY_END();
 }
