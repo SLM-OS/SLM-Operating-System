@@ -77,6 +77,17 @@ Each guide has two sections:
 
 Iterative development uses the update path. Full provisioning is rare — typically only when a card is wiped, a new SBC is added, or the boot config schema changes.
 
+On Pi 5 there is also a third option: **in-place kernel
+replacement from a running SLM-OS**, using the `kernel
+stage`/`activate`/`promote`/`rollback` admin command surface and
+the Pi 5 tryboot one-shot mechanism. This requires no host SD
+access, no maintenance OS, and no SDWire — only telnet (or
+serial) into the running board. See [`pi5-sdcard.md`](pi5-sdcard.md)
+§"In-place update from a running SLM-OS",
+`../dynamic-kernel-replace-plan.md` for design, and
+`../pi5-stage-promote-rollback-verification.md` for a hardware
+round-trip log.
+
 ### Post-deploy verification
 
 Every guide ends with a serial-console verification step. Successful boot means the shell prompt is reachable, not just "no obvious crash message" — the shell is the hand-off point from boot/HAL to userland.

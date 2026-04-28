@@ -205,6 +205,37 @@ Typical updater behavior:
 
 If you cannot reach the Pi OS maintenance install, fall back to the host-driven [Kernel update](#kernel-update) path above.
 
+## In-place update from a running SLM-OS
+
+If SLM-OS is already running and reachable over the multi-session
+shell (telnet on port 2323), the kernel can be replaced without
+touching the host or the maintenance OS. The flow uses the
+`kernel` admin command surface and the Pi 5 tryboot one-shot
+mechanism:
+
+```bash
+# From host: upload the new image to /mnt/files
+scripts/tools/slm-put.py pi-5-1 build/kernel/slmos.bin /mnt/files/slmos.bin
+
+# In the SLM-OS shell over telnet:
+slmos> kernel stage /mnt/files/slmos.bin     # → 0:/slmstore/staged.img
+slmos> kernel activate                        # arm tryboot one-shot
+slmos> reboot
+# Pi firmware loads tryboot.txt instead of config.txt for ONE boot.
+# After SLM-OS comes back up:
+slmos> kernel status                          # confirm the staged image booted
+slmos> kernel promote                         # copy staged.img → kernel_2712.img
+# OR, if anything looked wrong:
+slmos> kernel rollback                        # clear flag + remove staged.img
+```
+
+This requires `tryboot.txt` to be present on the FAT boot
+partition (the first-time provisioning step above installs it
+from `deploy/pi5/tryboot.txt`). See
+`docs/dynamic-kernel-replace-plan.md` for the design and
+`docs/pi5-stage-promote-rollback-verification.md` for a full
+hardware round-trip log.
+
 ---
 
 ## Reverting to Raspberry Pi OS
