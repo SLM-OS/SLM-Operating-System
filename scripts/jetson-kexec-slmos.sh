@@ -134,12 +134,33 @@ start_one_helper() {
     local helper_dir="${SLMOS_HELPER_DIR:-/root/gpu-mnist}"
     local helper_path="$helper_dir/$helper_name"
 
-    # Exact-match the full argv ("-fx" forces a fixed string match
-    # against the entire command line). Plain `-f` does a regex
-    # substring match against the joined argv, which would also fire
-    # on e.g. `tail -f gpu-kernel-mnist --preserve-for-kexec.log`.
-    if pgrep -fx "$helper_path --preserve-for-kexec.*" >/dev/null 2>&1 ||
-       pgrep -fx "./$helper_name --preserve-for-kexec.*" >/dev/null 2>&1; then
+    # Ordered failure modes: directory → binary → weights. The
+    # post-launch `[[ -d "$helper_dir" ]]` check used to live before
+    # the `(cd ... && nohup ...)` subshell as belt-and-braces, but
+    # by then `[[ -x "$helper_path" ]]` had already implied the
+    # directory exists. Checking the dir first gives a cleaner
+    # progression and removes the dead post-check. (#556 round-2.)
+    if [[ ! -d "$helper_dir" ]]; then
+        echo "       $helper_name: helper_dir $helper_dir missing (skipping)"
+        return 1
+    fi
+
+    # Build a regex-escaped pattern for `pgrep -fx`. `-fx` matches
+    # against the full argv but interprets the pattern as POSIX ERE,
+    # so unescaped dots in `$helper_path` would match any character
+    # — a theoretical false-match risk like
+    # `/rootXgpu-mnistXgpu-kernel-mnist`. Escape the ERE specials so
+    # the comparison is literal even if SLMOS_HELPER_DIR contains a
+    # metachar. (#556 round-2 review.)
+    #
+    # Plain `pgrep -f` (without `-x`) was also wrong because the
+    # regex matches as a substring — `tail -f gpu-kernel-mnist
+    # --preserve-for-kexec.log` would have triggered a false hit.
+    local helper_path_re helper_name_re
+    helper_path_re=$(printf '%s' "$helper_path" | sed 's/[][\\.*^$()+?{}|]/\\&/g')
+    helper_name_re=$(printf '%s' "$helper_name" | sed 's/[][\\.*^$()+?{}|]/\\&/g')
+    if pgrep -fx "$helper_path_re --preserve-for-kexec.*" >/dev/null 2>&1 ||
+       pgrep -fx "\\./$helper_name_re --preserve-for-kexec.*" >/dev/null 2>&1; then
         echo "       $helper_name: already running"
         return 0
     fi
@@ -153,16 +174,6 @@ start_one_helper() {
     fi
 
     : > "$log"
-    # `set -e` does not propagate into a backgrounded subshell, so a
-    # silent `cd` failure here would leak through as "helper started
-    # successfully but never logged anything" 60 seconds later. Verify
-    # the directory explicitly before launch — `helper_path` checked
-    # `-x` above so this should always succeed in practice, but the
-    # explicit test makes the failure mode loud rather than mysterious.
-    if [[ ! -d "$helper_dir" ]]; then
-        echo "Warning: $helper_name: helper_dir $helper_dir missing at launch" >&2
-        return 2
-    fi
     (cd "$helper_dir" && \
         nohup setsid "./$helper_name" \
             --preserve-for-kexec \
