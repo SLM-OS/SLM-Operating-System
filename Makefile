@@ -715,6 +715,17 @@ runtime-clean:
 .PHONY: runtime-rebuild
 runtime-rebuild: runtime-clean runtime
 
+# Run the host-side `cargo test` for the runtime crate. Forces
+# --test-threads=1 because several test modules touch global static
+# tables (slm::registry SLOTS, mm::eviction registry, etc.) and the
+# default parallel runner races on shared state. The kernel build
+# stays cfg(not(test)) so the panic_handler / no_main / global
+# allocator setup is unchanged.
+.PHONY: runtime-test
+runtime-test:
+	@echo "Running runtime cargo test (--features slm, --test-threads=1)..."
+	cd runtime && cargo test --target x86_64-unknown-linux-gnu --features slm -- --test-threads=1
+
 .PHONY: rustdoc
 rustdoc:
 	@echo "Generating Rust documentation..."
