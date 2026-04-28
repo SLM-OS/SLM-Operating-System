@@ -26,9 +26,30 @@
 
 #include "unity.h"
 #include "../include/gpu_consumer.h"
+#include "../include/sched_policy.h"
 
 #include <stdint.h>
 #include <string.h>
+
+/* Test-only stub policy used by the perf-note branch test. Returns
+ * a fixed CPU and declares has_gpu_backend = true — the C-side
+ * forward pass that ai_mlp_forward_logits would normally call is
+ * never invoked here (the test only exercises gpu_consumer_set),
+ * so the assign_cpu callback can be a trivial stub. */
+static uint32_t stub_assign_cpu(struct task *task)
+{
+    (void)task;
+    return 0;
+}
+
+static const struct sched_policy_ops stub_gpu_backed_policy = {
+    .name             = "test_gpu_backed",
+    .init             = NULL,
+    .shutdown         = NULL,
+    .assign_cpu       = stub_assign_cpu,
+    .tick             = NULL,
+    .has_gpu_backend  = true,
+};
 
 /* Reset all three toggles to OFF before each scenario so order
  * sensitivity doesn't leak between tests. */
@@ -202,17 +223,11 @@ static void test_enable_inference_with_null_reason_ok(void)
 }
 
 /*
- * Enable sched when GPU is available -> rc=0 with `*out_reason` set.
- * Two branches both set the reason string:
- *   - if no sched policy declares has_gpu_backend = true → "scaffold
- *     only — no scheduler policy declares a GPU backend yet"
- *   - if ai_mlp (or any policy with has_gpu_backend = true) is active
- *     → "perf note — ai_mlp now dispatches each assign_cpu via
- *     GPU..." (PR-3 of gpu-policy-models.md)
- * Either way reason != NULL on success; the shell renders it as a
- * "note: …" line.
+ * Enable sched when GPU is available and the active policy does NOT
+ * declare a GPU backend → rc=0 with a "scaffold only" warning. This
+ * is the QEMU default (heuristic active, has_gpu_backend = false).
  */
-static void test_enable_sched_accepts_with_reason(void)
+static void test_enable_sched_accepts_with_scaffold_warning(void)
 {
     struct gpu_consumer_status st;
     gpu_consumer_status_get(&st);
@@ -221,14 +236,61 @@ static void test_enable_sched_accepts_with_reason(void)
                             "path requires gpu_ready");
         return;
     }
+    /* Make sure no GPU-backed policy is active. The heuristic policy
+     * is always registered with has_gpu_backend = false (sched_policy.h);
+     * any AI policies are only present on Jetson with AI_SCHED=ON. */
+    (void)sched_set_policy(&sched_policy_heuristic);
+
     reset_all_consumers();
     const char *reason = NULL;
-
     int rc = gpu_consumer_set(GPU_CONSUMER_SCHED, true, &reason);
     TEST_ASSERT_EQUAL_INT(0, rc);
     TEST_ASSERT_MESSAGE(reason != NULL,
-        "sched accept always sets reason — scaffold warning OR perf note");
+        "sched should warn — heuristic doesn't declare has_gpu_backend");
+    /* Match by prefix — the kernel doesn't ship strstr; both reason
+     * strings have stable leading bytes. */
+    TEST_ASSERT_MESSAGE(strncmp(reason, "scaffold only", 13) == 0,
+        "expected scaffold-only warning when active policy has no GPU backend");
     TEST_ASSERT_TRUE(gpu_consumer_enabled(GPU_CONSUMER_SCHED));
+}
+
+/*
+ * Enable sched when a policy with `has_gpu_backend = true` is active
+ * → rc=0 with a "perf note" instead of the scaffold warning.
+ * PR-3 of `docs/specs/gpu-policy-models.md`. Uses a test-only stub
+ * policy so this test runs the same on QEMU and Jetson — no
+ * dependency on AI_SCHED build flag or whether ai_mlp is registered.
+ */
+static void test_enable_sched_emits_perf_note_when_gpu_backed(void)
+{
+    struct gpu_consumer_status st;
+    gpu_consumer_status_get(&st);
+    if (!st.gpu_ready) {
+        TEST_IGNORE_MESSAGE("GPU not available — perf-note branch requires "
+                            "gpu_ready");
+        return;
+    }
+    /* Register + activate the GPU-backed stub. */
+    int reg = sched_register_policy(&stub_gpu_backed_policy);
+    TEST_ASSERT_MESSAGE(reg == 0,
+        "test stub policy must register successfully");
+    int act = sched_set_policy(&stub_gpu_backed_policy);
+    TEST_ASSERT_MESSAGE(act == 0,
+        "test stub policy must activate successfully");
+
+    reset_all_consumers();
+    const char *reason = NULL;
+    int rc = gpu_consumer_set(GPU_CONSUMER_SCHED, true, &reason);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_MESSAGE(reason != NULL,
+        "sched accept must set reason — perf note expected");
+    TEST_ASSERT_MESSAGE(strncmp(reason, "perf note", 9) == 0,
+        "expected perf-note warning when active policy has GPU backend");
+    TEST_ASSERT_TRUE(gpu_consumer_enabled(GPU_CONSUMER_SCHED));
+
+    /* Restore the heuristic policy so subsequent tests don't see a
+     * GPU-backed-active state. */
+    (void)sched_set_policy(&sched_policy_heuristic);
 }
 
 static void test_enable_eviction_accepts_with_scaffold_warning(void)
@@ -340,7 +402,8 @@ int test_suite_gpu_consumer(void)
     RUN_TEST(test_enable_returns_nodev_when_gpu_unavailable);
     RUN_TEST(test_enable_inference_accepts);
     RUN_TEST(test_enable_inference_with_null_reason_ok);
-    RUN_TEST(test_enable_sched_accepts_with_reason);
+    RUN_TEST(test_enable_sched_accepts_with_scaffold_warning);
+    RUN_TEST(test_enable_sched_emits_perf_note_when_gpu_backed);
     RUN_TEST(test_enable_eviction_accepts_with_scaffold_warning);
     RUN_TEST(test_status_tracks_enable_disable);
     RUN_TEST(test_status_reports_all_consumers_off);

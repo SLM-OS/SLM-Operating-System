@@ -77,14 +77,18 @@ struct sched_policy_ops {
      * Does this policy expose a GPU-accelerated inference backend?
      *
      * Read by `gpu_consumer_set(GPU_CONSUMER_SCHED, true)` to decide
-     * whether the toggle is allowed. False (the default for
+     * which `*out_reason` to surface. False (the default for
      * zero-initialized declarations) means "this policy has no GPU
-     * backend wired" — flipping the toggle ON is rejected with
-     * GPU_CONSUMER_ERR_NOTSUPP and a human-readable reason.
+     * backend wired" — the toggle accepts but emits a "scaffold
+     * only" warning. True means the toggle accepts cleanly with a
+     * "perf note" warning describing the latency cliff.
      *
-     * No current policy declares true (M2). Kept here so M3+ can
-     * flip the field on a per-policy basis without touching the
-     * `gpu_consumer` validation logic.
+     * `sched_policy_ai_mlp` declares true (PR-3 of
+     * `docs/specs/gpu-policy-models.md`); `ai_mlp_forward_logits`
+     * routes through `slm_gpu_run_sched_inference` when the toggle
+     * is on. Other shipped policies (heuristic, ai_ppo, ai_hailo)
+     * still default to false. Flipping a policy's value to true
+     * commits it to having a working GPU dispatch path.
      */
     bool has_gpu_backend;
 };

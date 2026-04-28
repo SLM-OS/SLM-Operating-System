@@ -376,6 +376,17 @@ int slm_gpu_get_info(RustGpuInfo *info)
  * on one CPU briefly blocks a sched run on another, which is fine
  * (the GPU has one channel either way).
  *
+ * IRQ-off duration. `spin_lock_irqsave` disables local-CPU IRQs for
+ * the lock's hold time. Empirical durations on jetson-nano-2:
+ *   ~5 ms steady-state per dispatch (8-op QMD chain + per-op poll),
+ *   ~300 ms one-time on first call (inherit + channel scan +
+ *           embedded uart_printf calls busy-waiting the UART).
+ * Other CPUs spin on the lock but their local IRQs stay enabled.
+ * The toggle that flips this on (`gpu use sched on`) emits a
+ * perf-note line so operators see the latency cliff up front; on
+ * any GPU dispatch error the path falls back to CPU NEON which
+ * doesn't take the lock.
+ *
  * Note: the `nvgpu` shell command (kernel/src/shell_sys.c) keeps
  * its own function-local `struct ga10b_bringup b` that's separate
  * from these globals. Both ultimately mutate `g_handoff`, so a
