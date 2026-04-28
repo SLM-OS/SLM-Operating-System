@@ -952,4 +952,131 @@ extern int rust_slm_test_build_qwen_fixture(
  */
 extern void rust_slm_test_reset(void);
 
+/*
+ * ==========================================================================
+ * SLM Session / Decoder FFI - Phase SLM, M5.2
+ * ==========================================================================
+ *
+ * Per-conversation state and the prefill+decode loop. Builds on the
+ * model registry (rust_slm_load above) plus M5.1's KV cache and
+ * sampler. The forward pass is structurally complete but operates
+ * on placeholder zero weights for M5.2 - real per-tensor lookup
+ * lands in M5.3 once the GGUF weights are mmap'd into the model
+ * memory pool.
+ *
+ * Sampler-kind tags - keep in sync with rust_slm_session_open():
+ *   0 = Greedy (argmax; ignores temperature/top_k/top_p)
+ *   1 = Temperature
+ *   2 = TopK
+ *   3 = TopP
+ *   4 = TopKTopP (the demo default per the spec)
+ */
+#define SLM_SAMPLER_GREEDY        0u
+#define SLM_SAMPLER_TEMPERATURE   1u
+#define SLM_SAMPLER_TOP_K         2u
+#define SLM_SAMPLER_TOP_P         3u
+#define SLM_SAMPLER_TOP_K_TOP_P   4u
+
+/*
+ * Per-session telemetry snapshot. Populated by rust_slm_stats().
+ */
+typedef struct {
+    uint32_t prompts_completed;
+    uint32_t tokens_in;        /* cumulative prefill tokens         */
+    uint32_t tokens_out;       /* cumulative decoded tokens         */
+    uint64_t last_ttft_ns;     /* time-to-first-token, last prompt  */
+    uint64_t last_decode_ns;   /* total decode time, last prompt    */
+} SlmStatsC;
+
+/*
+ * Token-emission callback. Invoked once per decoded token (prefill
+ * is silent). `user` is the opaque pointer the caller passed to
+ * rust_slm_prompt. `bytes`/`bytes_len` is the UTF-8 form of the
+ * sampled token (do NOT retain the pointer past return). Return
+ * non-zero to continue, zero to stop generation early.
+ */
+typedef int32_t (*RustSlmTokenCb)(
+    void *user,
+    uint32_t token_id,
+    const uint8_t *bytes,
+    size_t bytes_len);
+
+/*
+ * Open a session over a loaded SLM.
+ *
+ * @model_handle: slot index returned by rust_slm_load().
+ * @max_ctx: caller-chosen context ceiling (capped at the model's
+ *           trained context_length).
+ * @sampler_kind: one of the SLM_SAMPLER_* constants.
+ * @temperature, @top_k, @top_p: sampler parameters (ignored by
+ *           Greedy).
+ * @seed: PRNG seed for reproducibility (xorshift64; 0 is replaced
+ *           with 1 because the algorithm has a fixed point at 0).
+ * Returns the session id (>= 0) on success, -1 on error
+ * (model not loaded, KV-cache allocation failed, session table
+ * full, unknown sampler kind).
+ */
+extern int32_t rust_slm_session_open(
+    uint32_t model_handle,
+    uint32_t max_ctx,
+    uint32_t sampler_kind,
+    float temperature,
+    uint32_t top_k,
+    float top_p,
+    uint64_t seed);
+
+/*
+ * Close a session, releasing its slot.
+ * Returns 0 on success, -1 on bad session id.
+ */
+extern int32_t rust_slm_session_close(uint32_t session_id);
+
+/*
+ * Reset a session's KV cache and counters for a fresh
+ * conversation. Returns 0 on success, -1 on bad session id.
+ */
+extern int32_t rust_slm_session_reset(uint32_t session_id);
+
+/*
+ * Run a prompt against an open session. The decoder calls `cb`
+ * once per emitted token; returning 0 from the callback stops
+ * generation early.
+ *
+ * @prompt / @prompt_len: UTF-8 prompt bytes. `prompt` may be NULL
+ *           when @prompt_len == 0.
+ * @max_new_tokens: cap on decoded tokens. 0 = unlimited (until
+ *           EOS, the cooperative stop flag, or the cache fills).
+ * @cb: token callback (see RustSlmTokenCb above).
+ * @user: opaque cookie passed to the callback.
+ *
+ * Returns 0 on success, -1 on error (NULL pointer when length is
+ * non-zero, invalid UTF-8, session not in Open state, etc.).
+ *
+ * NOTE (M5.2): non-empty prompts currently return -1 because the
+ * runtime doesn't yet stash a per-session tokenizer (M5.3 plumbs
+ * the GGUF bytes through). The state machine and stop-flag path
+ * are exercisable via empty prompts.
+ */
+extern int32_t rust_slm_prompt(
+    uint32_t session_id,
+    const uint8_t *prompt,
+    size_t prompt_len,
+    uint32_t max_new_tokens,
+    RustSlmTokenCb cb,
+    void *user);
+
+/*
+ * Cooperative-cancel signal for an in-flight rust_slm_prompt call.
+ * Sets the session's stop flag; the decoder loop honours it at
+ * the next yield boundary. Returns 0 on success, -1 on bad
+ * session id.
+ */
+extern int32_t rust_slm_stop(uint32_t session_id);
+
+/*
+ * Snapshot a session's telemetry counters into *out.
+ * Returns 0 on success, -1 on NULL pointer / bad session id.
+ */
+extern int32_t rust_slm_stats(uint32_t session_id, SlmStatsC *out);
+
 #endif /* SLM_FFI_H */

@@ -7,8 +7,10 @@
 #![cfg(feature = "slm")]
 
 pub mod chat_template;
+pub mod decoder;
 pub mod gguf;
 pub mod kv_cache;
 pub mod registry;
 pub mod sampler;
+pub mod session;
 pub mod tokenizer;
