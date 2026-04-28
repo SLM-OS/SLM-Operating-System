@@ -22,10 +22,13 @@
 /* Per-op chatter flag. Default OFF so steady-state inference
  * doesn't drown the serial console (every dispatch produces
  * roughly 64 lines × 8 ops × 2 helpers when fully verbose).
- * Toggle from the shell with `gpu debug on|off`. Errors and
- * one-shot summaries (pipeline mode, pipeline complete,
- * channel-inherit decisions) bypass this gate and always print —
- * only the per-op trace path is quieted. */
+ * Toggle from the shell with `gpu debug on|off`. Both the
+ * per-op submit/poll trace AND the pipeline-mode/complete
+ * summary lines are gated together — at 2 inf/s steady-state,
+ * even the 2-line summary chatter is too much over telnet
+ * uploads. Errors (failed dispatch, payload-mismatch, GP_GET
+ * stalled) bypass the gate and always print so a wedged GPU
+ * is still visible without flipping the flag first. */
 static atomic_bool g_ga10b_dispatch_verbose = false;
 
 void ga10b_dispatch_verbose_set(bool on)
@@ -1743,10 +1746,10 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
                 (void *)ops,
                 (size_t)g_handoff.pipeline_n_ops * sizeof(*ops));
         }
-        uart_printf("[GA10B-P8] pipeline mode — %lu ops, "
-                    "ops_phys=0x%lx\n",
-                    (unsigned long)g_handoff.pipeline_n_ops,
-                    (unsigned long)g_handoff.pipeline_ops_phys);
+        GA10B_DBG("[GA10B-P8] pipeline mode — %lu ops, "
+                  "ops_phys=0x%lx\n",
+                  (unsigned long)g_handoff.pipeline_n_ops,
+                  (unsigned long)g_handoff.pipeline_ops_phys);
         for (uint32_t i = 0; i < g_handoff.pipeline_n_ops; i++) {
             const struct ga10b_pipeline_op *op = &ops[i];
             if (!ga10b_pipeline_op_is_valid(op)) {
@@ -1801,8 +1804,8 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
                 return rc;
             }
         }
-        uart_printf("[GA10B-P8] pipeline complete — %lu ops fired\n",
-                    (unsigned long)g_handoff.pipeline_n_ops);
+        GA10B_DBG("[GA10B-P8] pipeline complete — %lu ops fired\n",
+                  (unsigned long)g_handoff.pipeline_n_ops);
         return 0;
     }
 
