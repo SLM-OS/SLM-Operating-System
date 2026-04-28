@@ -550,6 +550,24 @@ extern int rust_model_unpin(uint32_t index);
 extern int rust_model_share_weights(uint32_t index);
 
 /*
+ * Atomically swap the weights and graph at a registry slot with a
+ * new ONNX payload. In-flight inferences (`run_inference`,
+ * `gpu_map_weights`) hold a refcount lease on the OLD weight block
+ * for the duration of the call, so the swap never invalidates a
+ * pointer being read.
+ *
+ * Returns:
+ *   0  on success
+ *  -1  invalid argument (NULL pointer, zero length, name too long)
+ *  -2  slot is empty / index out of range (InvalidIndex)
+ *  -3  backend at this slot does not support swap (Hailo, GPU);
+ *      Hailo CCW re-upload swap is tracked in #532
+ *  -4  ONNX parse failure / allocation failure / shape error
+ */
+extern int rust_model_swap(uint32_t index, const char *name,
+                           const uint8_t *data, size_t data_len);
+
+/*
  * Set the per-model GPU-dispatch toggle.
  *
  * `enabled` is treated as a boolean (0 = off, non-zero = on). The
@@ -609,6 +627,17 @@ extern int rust_infer_and_print(uint32_t model_index);
  * Returns: Number of failures (0 = all passed).
  */
 extern int rust_model_loader_test(void);
+
+/*
+ * Run model hot-swap self-tests (Rust-side, exercises rust_model_swap
+ * against the embedded MNIST ONNX). Covers argument validation, the
+ * empty-slot / invalid-index branches, the success path, the
+ * pin-preserved-across-swap path, and the lease-keeps-old-weights-
+ * alive safety property.
+ *
+ * Returns: Number of failures (0 = all passed).
+ */
+extern int rust_model_swap_test(void);
 
 /*
  * ==========================================================================

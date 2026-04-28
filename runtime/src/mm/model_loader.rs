@@ -124,6 +124,14 @@ pub enum LoadError {
     CorruptedData,
     /// Feature not implemented
     NotImplemented,
+    /// Registry index does not point at an active slot. Distinct from
+    /// `InvalidFormat` so swap_model can report "no model in this slot"
+    /// without conflating it with a malformed payload.
+    InvalidIndex,
+    /// The backend at this slot does not implement weight hot-swap.
+    /// Currently only the CPU ONNX backend supports it; Hailo's
+    /// CCW-reupload swap path is tracked separately in #532.
+    SwapNotSupported,
 }
 
 impl From<AllocError> for LoadError {

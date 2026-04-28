@@ -145,6 +145,9 @@ int test_suite_model_loader(void);
 /* Inference engine tests (tensor ops, end-to-end MNIST - calls into Rust) */
 int test_suite_inference(void);
 
+/* Model hot-swap tests (registry::swap_model + rust_model_swap FFI) */
+int test_suite_model_swap(void);
+
 /* GPU compute integration tests (capability detection, fallback - calls into Rust) */
 int test_suite_gpu_compute(void);
 
