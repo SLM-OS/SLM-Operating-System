@@ -8,8 +8,10 @@
 //! accumulators preserve numerical fidelity through long reduction chains
 //! (RMS, attention softmax, etc.).
 //!
-//! This module ships the simpler ops (RMSNorm, RoPE, FP16 embedding lookup,
-//! SiLU). The matmul-heavy GQA / SwiGLU MLP / LMHead path is M4.2.
+//! Includes the simpler ops (RMSNorm, RoPE, FP16 embedding lookup, SiLU)
+//! from M4.1 plus the matmul-heavy `gqa_decode_step`, `swiglu_mlp`,
+//! `lm_head`, and `matmul_q4k_*` kernels from M4.2 — together the full
+//! per-layer building blocks the M5 decoder composes.
 //!
 //! # Numeric conventions
 //!
@@ -27,7 +29,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::inference::mathf::sqrtf;
-use crate::slm::gguf::{f16_to_f32, f32_to_f16};
+use crate::inference::quant::{q8_k_byte_size, quantize_row_q8_k, vec_dot_q4_k_q8_k};
+use crate::slm::gguf::{Q4_K_BLOCK_ELEMENTS, f16_to_f32, f32_to_f16, q4_k_byte_size};
 
 // ---------------------------------------------------------------------------
 // RMSNorm
@@ -290,6 +293,327 @@ pub fn silu_out(x: &[u16], out: &mut [u16]) -> Option<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Q4_K matmul (M4.2)
+// ---------------------------------------------------------------------------
+
+/// Single-row Q4_K-weight × FP16-activation matmul.
+///
+/// `weights` is one Q4_K-packed row of `cols` elements (`cols` must be a
+/// multiple of 256 — Qwen2.5-1.5B uses {1536, 8960}). `acts_fp16` is the
+/// FP16 activation row of `cols` elements. `q8k_scratch` is caller-owned
+/// scratch of `q8_k_byte_size(cols)` bytes used to quantize the
+/// activations into Q8_K before the dot product.
+///
+/// Routes through M3's `quantize_row_q8_k` + `vec_dot_q4_k_q8_k`.
+///
+/// Returns `None` on shape mismatch.
+pub fn matmul_q4k_row(
+    weights: &[u8],
+    acts_fp16: &[u16],
+    q8k_scratch: &mut [u8],
+    cols: usize,
+) -> Option<f32> {
+    if cols == 0 || cols % Q4_K_BLOCK_ELEMENTS != 0 {
+        return None;
+    }
+    if acts_fp16.len() != cols {
+        return None;
+    }
+    if weights.len() != q4_k_byte_size(cols)? {
+        return None;
+    }
+    if q8k_scratch.len() < q8_k_byte_size(cols)? {
+        return None;
+    }
+
+    // Widen activations FP16 → FP32 once, on the stack-friendly path:
+    // an alloc::Vec<f32> here. The M5 decoder will pre-allocate a
+    // session-scoped scratch buffer to avoid this allocation per call.
+    let mut acts_f32: Vec<f32> = Vec::with_capacity(cols);
+    for &bits in acts_fp16.iter() {
+        acts_f32.push(f16_to_f32(bits));
+    }
+
+    let q8k_len = q8_k_byte_size(cols)?;
+    quantize_row_q8_k(&acts_f32, &mut q8k_scratch[..q8k_len])?;
+    vec_dot_q4_k_q8_k(weights, &q8k_scratch[..q8k_len])
+}
+
+/// Multi-row Q4_K-weight × FP16-activation matmul.
+///
+/// `weights` is `rows * q4_k_byte_size(cols)` packed bytes laid out
+/// row-major. `acts_fp16` is the FP16 input vector of `cols` elements
+/// (shared across all output rows). `out_fp32` receives the per-row
+/// dot products. `q8k_scratch` is reused across rows so the activation
+/// quantization is paid once.
+///
+/// Returns `None` on shape mismatch.
+pub fn matmul_q4k_rows(
+    weights: &[u8],
+    rows: usize,
+    cols: usize,
+    acts_fp16: &[u16],
+    q8k_scratch: &mut [u8],
+    out_fp32: &mut [f32],
+) -> Option<()> {
+    if cols == 0 || cols % Q4_K_BLOCK_ELEMENTS != 0 {
+        return None;
+    }
+    if acts_fp16.len() != cols || out_fp32.len() != rows {
+        return None;
+    }
+    let row_bytes = q4_k_byte_size(cols)?;
+    let total = row_bytes.checked_mul(rows)?;
+    if weights.len() != total {
+        return None;
+    }
+    let q8k_len = q8_k_byte_size(cols)?;
+    if q8k_scratch.len() < q8k_len {
+        return None;
+    }
+
+    // Quantize the shared activations once.
+    let mut acts_f32: Vec<f32> = Vec::with_capacity(cols);
+    for &bits in acts_fp16.iter() {
+        acts_f32.push(f16_to_f32(bits));
+    }
+    quantize_row_q8_k(&acts_f32, &mut q8k_scratch[..q8k_len])?;
+
+    // Loop over weight rows, calling the dot kernel directly so we
+    // skip the per-row activation re-quantization that
+    // `matmul_q4k_row` would otherwise pay.
+    for r in 0..rows {
+        let start = r.checked_mul(row_bytes)?;
+        let end = start.checked_add(row_bytes)?;
+        let row = &weights[start..end];
+        out_fp32[r] = vec_dot_q4_k_q8_k(row, &q8k_scratch[..q8k_len])?;
+    }
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
+// Grouped-Query Attention (decode step)
+// ---------------------------------------------------------------------------
+
+/// One-step grouped-query attention for the decode loop.
+///
+/// At decode time the model has just produced one new token. For that
+/// position we have:
+/// - one query row per attention head (`n_head_q × head_dim`),
+/// - the cumulative key/value cache covering positions `0..seq_len`
+///   (`seq_len × n_head_kv × head_dim` for each of K and V),
+/// - we want the attention output (`n_head_q × head_dim`) that the
+///   subsequent output projection consumes.
+///
+/// **GQA pairing:** every `g = n_head_q / n_head_kv` query heads share one
+/// KV head. Qwen2.5-1.5B has `g = 6` (12 query heads, 2 KV heads).
+///
+/// **Causal mask:** implicit. `seq_len` is the count of past+current
+/// positions to attend to; future positions simply aren't passed in.
+///
+/// `scratch_logits` is a per-head FP32 scratch buffer of length
+/// `seq_len`, reused across heads.
+///
+/// Returns `None` on shape mismatch or when `n_head_q % n_head_kv != 0`.
+pub fn gqa_decode_step(
+    q: &[u16],
+    k: &[u16],
+    v: &[u16],
+    n_head_q: usize,
+    n_head_kv: usize,
+    head_dim: usize,
+    seq_len: usize,
+    scratch_logits: &mut [f32],
+    out: &mut [u16],
+) -> Option<()> {
+    if head_dim == 0
+        || n_head_q == 0
+        || n_head_kv == 0
+        || seq_len == 0
+        || n_head_q % n_head_kv != 0
+    {
+        return None;
+    }
+    let q_len = n_head_q.checked_mul(head_dim)?;
+    let kv_per_pos = n_head_kv.checked_mul(head_dim)?;
+    let kv_len = seq_len.checked_mul(kv_per_pos)?;
+    if q.len() != q_len || k.len() != kv_len || v.len() != kv_len || out.len() != q_len {
+        return None;
+    }
+    if scratch_logits.len() < seq_len {
+        return None;
+    }
+
+    let group = n_head_q / n_head_kv;
+    let inv_sqrt_head = 1.0 / sqrtf(head_dim as f32);
+
+    for hq in 0..n_head_q {
+        let hkv = hq / group;
+        let q_off = hq.checked_mul(head_dim)?;
+        let q_row = &q[q_off..q_off + head_dim];
+
+        // 1. Logits[t] = (q · k_t) / sqrt(head_dim) for t in 0..seq_len.
+        let mut max_logit = f32::NEG_INFINITY;
+        for t in 0..seq_len {
+            let k_off = t * kv_per_pos + hkv * head_dim;
+            let mut acc: f32 = 0.0;
+            for d in 0..head_dim {
+                acc += f16_to_f32(q_row[d]) * f16_to_f32(k[k_off + d]);
+            }
+            let logit = acc * inv_sqrt_head;
+            scratch_logits[t] = logit;
+            if logit > max_logit {
+                max_logit = logit;
+            }
+        }
+
+        // 2. Softmax (numerically stable: subtract max, exp, normalize).
+        let mut denom: f32 = 0.0;
+        for t in 0..seq_len {
+            let e = libm::expf(scratch_logits[t] - max_logit);
+            scratch_logits[t] = e;
+            denom += e;
+        }
+        // `denom` is strictly positive after at least one finite
+        // exp() call, but keep the guard for the degenerate case.
+        let inv_denom = if denom > 0.0 { 1.0 / denom } else { 0.0 };
+        for t in 0..seq_len {
+            scratch_logits[t] *= inv_denom;
+        }
+
+        // 3. out[hq] = sum_t softmax[t] * v[t, hkv].
+        let out_off = hq * head_dim;
+        for d in 0..head_dim {
+            let mut acc: f32 = 0.0;
+            for t in 0..seq_len {
+                let v_off = t * kv_per_pos + hkv * head_dim;
+                acc += scratch_logits[t] * f16_to_f32(v[v_off + d]);
+            }
+            out[out_off + d] = f32_to_f16(acc);
+        }
+    }
+
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
+// SwiGLU MLP block
+// ---------------------------------------------------------------------------
+
+/// SwiGLU MLP block: `down(silu(gate(x)) * up(x))`.
+///
+/// Three Q4_K matmuls plus an element-wise SiLU and an element-wise
+/// multiply. `gate_w` and `up_w` project from `hidden_size` to
+/// `intermediate_size`; `down_w` projects back. `gate_scratch` and
+/// `up_scratch` hold the intermediate FP16 vectors. `q8k_scratch`
+/// must be `q8_k_byte_size(max(hidden_size, intermediate_size))`
+/// bytes.
+///
+/// Returns `None` on shape mismatch.
+pub fn swiglu_mlp(
+    x: &[u16],
+    gate_w: &[u8],
+    up_w: &[u8],
+    down_w: &[u8],
+    hidden_size: usize,
+    intermediate_size: usize,
+    gate_scratch: &mut [u16],
+    up_scratch: &mut [u16],
+    q8k_scratch: &mut [u8],
+    out: &mut [u16],
+) -> Option<()> {
+    if hidden_size == 0
+        || intermediate_size == 0
+        || hidden_size % Q4_K_BLOCK_ELEMENTS != 0
+        || intermediate_size % Q4_K_BLOCK_ELEMENTS != 0
+    {
+        return None;
+    }
+    if x.len() != hidden_size
+        || out.len() != hidden_size
+        || gate_scratch.len() != intermediate_size
+        || up_scratch.len() != intermediate_size
+    {
+        return None;
+    }
+
+    // gate = matmul(x, gate_w) [intermediate_size]
+    // up   = matmul(x, up_w)   [intermediate_size]
+    let mut tmp_f32: Vec<f32> = vec![0.0; intermediate_size];
+    matmul_q4k_rows(
+        gate_w,
+        intermediate_size,
+        hidden_size,
+        x,
+        q8k_scratch,
+        &mut tmp_f32,
+    )?;
+    for i in 0..intermediate_size {
+        gate_scratch[i] = f32_to_f16(tmp_f32[i]);
+    }
+    matmul_q4k_rows(
+        up_w,
+        intermediate_size,
+        hidden_size,
+        x,
+        q8k_scratch,
+        &mut tmp_f32,
+    )?;
+    for i in 0..intermediate_size {
+        up_scratch[i] = f32_to_f16(tmp_f32[i]);
+    }
+
+    // gate ← silu(gate); gate ← gate ⊙ up
+    silu(gate_scratch);
+    for i in 0..intermediate_size {
+        let gv = f16_to_f32(gate_scratch[i]);
+        let uv = f16_to_f32(up_scratch[i]);
+        gate_scratch[i] = f32_to_f16(gv * uv);
+    }
+
+    // out = matmul(gate, down_w) [hidden_size]
+    let mut out_f32: Vec<f32> = vec![0.0; hidden_size];
+    matmul_q4k_rows(
+        down_w,
+        hidden_size,
+        intermediate_size,
+        gate_scratch,
+        q8k_scratch,
+        &mut out_f32,
+    )?;
+    for i in 0..hidden_size {
+        out[i] = f32_to_f16(out_f32[i]);
+    }
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
+// LM head
+// ---------------------------------------------------------------------------
+
+/// Final FP16 hidden → FP32 logits projection over the vocab.
+///
+/// `x` is the post-final-RMSNorm hidden state of `hidden_size` floats
+/// (FP16). `weight` is the Q4_K-packed `[vocab_size, hidden_size]`
+/// matrix. `q8k_scratch` is `q8_k_byte_size(hidden_size)` bytes.
+/// `logits` receives `vocab_size` FP32 outputs.
+///
+/// Returns `None` on shape mismatch.
+pub fn lm_head(
+    x: &[u16],
+    weight: &[u8],
+    hidden_size: usize,
+    vocab_size: usize,
+    q8k_scratch: &mut [u8],
+    logits: &mut [f32],
+) -> Option<()> {
+    if hidden_size == 0 || vocab_size == 0 {
+        return None;
+    }
+    matmul_q4k_rows(weight, vocab_size, hidden_size, x, q8k_scratch, logits)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -531,5 +855,235 @@ mod tests {
         let x = from_f32(&[1.0; 4]);
         let mut out = vec![0u16; 3];
         assert!(silu_out(&x, &mut out).is_none());
+    }
+
+    // ---- M4.2: Q4_K matmul + GQA + SwiGLU + LMHead --------------------
+
+    use crate::inference::quant::{Q4_K_BLOCK_SIZE, q8_k_byte_size};
+
+    /// Build a Q4_K-encoded weight row of `cols` elements from a
+    /// known FP32 vector. Reuses M3's vec_dot test fixture builder
+    /// approach: dequantize-then-quantize would be lossy, so we
+    /// construct a block with d=1.0, dmin=0, scales=[1; 8], mins=[0; 8]
+    /// and qs encoding the integers 0..15 per nibble. That gives a
+    /// known integer dot product for the activation pattern below.
+    fn q4k_block_zeros() -> [u8; Q4_K_BLOCK_SIZE] {
+        // d = +0.0 (f16 0x0000) → dequant always = 0.
+        [0u8; Q4_K_BLOCK_SIZE]
+    }
+
+    #[test]
+    fn matmul_q4k_row_zero_weights_zero_dot() {
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let weights = q4k_block_zeros();
+        let acts = from_f32(&vec![1.0; cols]);
+        let mut q8k = vec![0u8; q8_k_byte_size(cols).unwrap()];
+        let dot = matmul_q4k_row(&weights, &acts, &mut q8k, cols).expect("matmul");
+        assert!(dot.abs() < 1e-3, "zero weights → zero dot, got {}", dot);
+    }
+
+    #[test]
+    fn matmul_q4k_row_zero_acts_zero_dot() {
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let weights = q4k_block_zeros();
+        // Even with zero weights, the path still has to handle
+        // zero activations cleanly (no div-by-zero in iscale).
+        let acts = vec![0u16; cols];
+        let mut q8k = vec![0u8; q8_k_byte_size(cols).unwrap()];
+        let dot = matmul_q4k_row(&weights, &acts, &mut q8k, cols).expect("matmul");
+        assert!(dot.abs() < 1e-3);
+    }
+
+    #[test]
+    fn matmul_q4k_row_rejects_shape_mismatch() {
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let weights = q4k_block_zeros();
+        let acts_short = from_f32(&vec![1.0; cols - 1]);
+        let mut q8k = vec![0u8; q8_k_byte_size(cols).unwrap()];
+        assert!(matmul_q4k_row(&weights, &acts_short, &mut q8k, cols).is_none());
+    }
+
+    #[test]
+    fn matmul_q4k_row_rejects_non_block_cols() {
+        // 200 isn't a multiple of 256.
+        let weights = vec![0u8; 200];
+        let acts = vec![0u16; 200];
+        let mut q8k = vec![0u8; 200];
+        assert!(matmul_q4k_row(&weights, &acts, &mut q8k, 200).is_none());
+    }
+
+    #[test]
+    fn matmul_q4k_rows_consistent_with_per_row() {
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let rows = 3;
+        // Three identical zero-weight blocks → zero dot for each row.
+        let mut weights: Vec<u8> = Vec::with_capacity(rows * Q4_K_BLOCK_SIZE);
+        for _ in 0..rows {
+            weights.extend_from_slice(&q4k_block_zeros());
+        }
+        let acts = from_f32(&vec![1.0; cols]);
+        let mut q8k = vec![0u8; q8_k_byte_size(cols).unwrap()];
+        let mut out = vec![0.0f32; rows];
+        matmul_q4k_rows(&weights, rows, cols, &acts, &mut q8k, &mut out).expect("rows");
+        for v in &out {
+            assert!(v.abs() < 1e-3, "zero-weight row → 0 dot");
+        }
+
+        // Compare against per-row matmul.
+        for r in 0..rows {
+            let row = &weights[r * Q4_K_BLOCK_SIZE..(r + 1) * Q4_K_BLOCK_SIZE];
+            let mut q8k_each = vec![0u8; q8_k_byte_size(cols).unwrap()];
+            let single = matmul_q4k_row(row, &acts, &mut q8k_each, cols).expect("single");
+            assert!((single - out[r]).abs() < 1e-3);
+        }
+    }
+
+    // ---- GQA --------------------------------------------------------
+
+    #[test]
+    fn gqa_decode_single_position_returns_v() {
+        // n_head_q=2, n_head_kv=1 (group=2), head_dim=4, seq_len=1.
+        // With seq_len=1, softmax([logit]) = [1.0], so out == v.
+        let n_head_q = 2;
+        let n_head_kv = 1;
+        let head_dim = 4;
+        let seq_len = 1;
+        let q = from_f32(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]); // 2 heads × 4 dims
+        let k = from_f32(&[0.5, 0.5, 0.5, 0.5]); // 1 kv-head × 4 dims × 1 pos
+        let v = from_f32(&[0.1, 0.2, 0.3, 0.4]);
+        let mut scratch = vec![0.0f32; seq_len];
+        let mut out = vec![0u16; n_head_q * head_dim];
+        gqa_decode_step(
+            &q, &k, &v, n_head_q, n_head_kv, head_dim, seq_len, &mut scratch, &mut out,
+        )
+        .expect("gqa");
+        let out_f32 = to_f32(&out);
+        // Both query heads share the single KV head; output is v
+        // for both.
+        for h in 0..n_head_q {
+            for d in 0..head_dim {
+                let expected = [0.1, 0.2, 0.3, 0.4][d];
+                assert!(
+                    approx_eq(out_f32[h * head_dim + d], expected, 1e-2),
+                    "head {h} dim {d} = {} expected {expected}",
+                    out_f32[h * head_dim + d]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gqa_decode_two_positions_softmax_blends_v() {
+        // 1 head, 1 kv-head, head_dim=2, seq_len=2.
+        // q=[1,0]; k0=[0,1] (logit≈0); k1=[1,0] (logit≈1/sqrt(2)).
+        // Softmax favours k1, so output blends toward v1.
+        let q = from_f32(&[1.0, 0.0]);
+        let k = from_f32(&[0.0, 1.0, 1.0, 0.0]); // pos 0, pos 1
+        let v = from_f32(&[1.0, 1.0, 10.0, 10.0]); // v0=[1,1], v1=[10,10]
+        let mut scratch = vec![0.0f32; 2];
+        let mut out = vec![0u16; 2];
+        gqa_decode_step(&q, &k, &v, 1, 1, 2, 2, &mut scratch, &mut out).expect("gqa");
+        let got = to_f32(&out);
+        // Expected: softmax([0, 1/sqrt(2)]) = [α, β], β > α, output ≈ α*1 + β*10.
+        let inv = 1.0 / sqrtf(2.0);
+        let e0 = libm::expf(0.0 - inv);
+        let e1 = libm::expf(inv - inv);
+        let denom = e0 + e1;
+        let alpha = e0 / denom;
+        let beta = e1 / denom;
+        let expected = alpha * 1.0 + beta * 10.0;
+        assert!(approx_eq(got[0], expected, 5e-2));
+        assert!(approx_eq(got[1], expected, 5e-2));
+    }
+
+    #[test]
+    fn gqa_decode_rejects_bad_head_ratio() {
+        // 5 query heads, 2 kv heads → 5 % 2 != 0.
+        let q = vec![0u16; 5 * 4];
+        let k = vec![0u16; 1 * 2 * 4];
+        let v = vec![0u16; 1 * 2 * 4];
+        let mut scratch = vec![0.0f32; 1];
+        let mut out = vec![0u16; 5 * 4];
+        assert!(
+            gqa_decode_step(&q, &k, &v, 5, 2, 4, 1, &mut scratch, &mut out).is_none()
+        );
+    }
+
+    // ---- SwiGLU MLP -------------------------------------------------
+
+    #[test]
+    fn swiglu_mlp_zero_input_zero_output() {
+        // x=0 ⇒ gate=up=0 ⇒ silu(0)*0 = 0 ⇒ down(0) = 0.
+        let hidden = Q4_K_BLOCK_ELEMENTS;
+        let inter = Q4_K_BLOCK_ELEMENTS;
+        let row = Q4_K_BLOCK_SIZE;
+        let gate_w = vec![0u8; inter * row];
+        let up_w = vec![0u8; inter * row];
+        let down_w = vec![0u8; hidden * row];
+        let x = vec![0u16; hidden];
+        let mut gate_s = vec![0u16; inter];
+        let mut up_s = vec![0u16; inter];
+        let mut q8k =
+            vec![0u8; q8_k_byte_size(hidden.max(inter)).unwrap()];
+        let mut out = vec![0u16; hidden];
+        swiglu_mlp(
+            &x, &gate_w, &up_w, &down_w, hidden, inter, &mut gate_s, &mut up_s, &mut q8k,
+            &mut out,
+        )
+        .expect("swiglu");
+        for &b in &out {
+            assert_eq!(f16_to_f32(b), 0.0);
+        }
+    }
+
+    #[test]
+    fn swiglu_mlp_rejects_non_block_dims() {
+        let bad_hidden = 200;
+        let inter = Q4_K_BLOCK_ELEMENTS;
+        let mut q8k = vec![0u8; 4096];
+        let mut gate_s = vec![0u16; inter];
+        let mut up_s = vec![0u16; inter];
+        let mut out = vec![0u16; bad_hidden];
+        let res = swiglu_mlp(
+            &vec![0u16; bad_hidden],
+            &[],
+            &[],
+            &[],
+            bad_hidden,
+            inter,
+            &mut gate_s,
+            &mut up_s,
+            &mut q8k,
+            &mut out,
+        );
+        assert!(res.is_none());
+    }
+
+    // ---- LM head ----------------------------------------------------
+
+    #[test]
+    fn lm_head_returns_logit_per_vocab() {
+        // 8-vocab × 256-hidden, all zero weights → all-zero logits.
+        let hidden = Q4_K_BLOCK_ELEMENTS;
+        let vocab = 8;
+        let row = Q4_K_BLOCK_SIZE;
+        let weight = vec![0u8; vocab * row];
+        let x = from_f32(&vec![1.0; hidden]);
+        let mut q8k = vec![0u8; q8_k_byte_size(hidden).unwrap()];
+        let mut logits = vec![1.0f32; vocab]; // pre-fill non-zero
+        lm_head(&x, &weight, hidden, vocab, &mut q8k, &mut logits).expect("lm_head");
+        for &v in &logits {
+            assert!(v.abs() < 1e-3, "zero weight → zero logit, got {v}");
+        }
+    }
+
+    #[test]
+    fn lm_head_rejects_zero_dims() {
+        let mut q8k = vec![0u8; 256];
+        let mut logits = vec![0.0f32; 4];
+        assert!(lm_head(&[], &[], 0, 4, &mut q8k, &mut logits).is_none());
+        assert!(
+            lm_head(&[0u16; 4], &[], 4, 0, &mut q8k, &mut logits).is_none()
+        );
     }
 }
