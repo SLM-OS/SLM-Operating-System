@@ -691,6 +691,59 @@ unsafe fn publish_internal(topic_name: *const u8, data: *const u8, priority: u8)
     delivered
 }
 
+/// Fire-and-forget delivery — same gather-then-deliver shape as
+/// `publish_internal`, just without the ack-wait. See the
+/// `msg_router_publish_nowait` doc-comment for when this is required.
+unsafe fn publish_internal_nowait(
+    topic_name: *const u8,
+    data: *const u8,
+    priority: u8,
+) -> i32 {
+    const MAX_TARGETS: usize = MAX_SUBSCRIBERS + MAX_WILDCARD_SUBS;
+    let mut targets: [*mut Mailbox; MAX_TARGETS] = [core::ptr::null_mut(); MAX_TARGETS];
+    let mut target_count = 0usize;
+
+    {
+        let _g = SpinGuard::new();
+        // SAFETY: MSG_ROUTER_LOCK held — exclusive access to TOPICS /
+        // WILDCARD_SUBS. Mailbox addresses remain valid across the
+        // unlock because they live in static storage.
+        for i in 0..MAX_TOPICS {
+            if TOPICS[i].is_active() && str_eq_cstr(&TOPICS[i].name, topic_name) {
+                for j in 0..MAX_SUBSCRIBERS {
+                    if TOPICS[i].subs[j].component_idx == -1 {
+                        continue;
+                    }
+                    targets[target_count] = &mut TOPICS[i].subs[j].mailbox;
+                    target_count += 1;
+                }
+                break;
+            }
+        }
+        for i in 0..MAX_WILDCARD_SUBS {
+            if !WILDCARD_SUBS[i].is_active() || WILDCARD_SUBS[i].component_idx == -1 {
+                continue;
+            }
+            if !wildcard_matches(&WILDCARD_SUBS[i].pattern, topic_name) {
+                continue;
+            }
+            if target_count < MAX_TARGETS {
+                targets[target_count] = &mut WILDCARD_SUBS[i].mailbox;
+                target_count += 1;
+            }
+        }
+    }
+
+    let mut delivered = 0i32;
+    for t in 0..target_count {
+        // SAFETY: pointer into stable static storage.
+        let mb = &mut *targets[t];
+        mb.deliver(topic_name, data, priority);
+        delivered += 1;
+    }
+    delivered
+}
+
 /// Publish a message to a topic with normal priority.
 /// Delivers to all subscribers (exact and wildcard) and waits for ack.
 /// Returns the number of subscribers that received the message.
@@ -736,6 +789,46 @@ pub extern "C" fn msg_router_publish_priority(
         return 0;
     }
     unsafe { publish_internal(topic_name, data, priority) }
+}
+
+/// Fire-and-forget publish: deliver to every matching mailbox but do
+/// NOT wait for ack. Returns the number of mailboxes the message was
+/// dropped into (not the number of subscribers that have consumed it).
+///
+/// Required for publishers that run on the same task as their
+/// subscribers' drain path. The default `msg_router_publish` spins for
+/// up to ACK_TIMEOUT_SECS (5 s) waiting for `msg_router_ack`. If the
+/// ack only fires from a poll loop on the same task that called
+/// publish, that's a self-deadlock — the loop never re-enters until
+/// publish_internal returns, and publish_internal is waiting for the
+/// loop to ack. Symptom: net_pump wedges for 15+ seconds (3 publishes
+/// × 5 s) every time admin_telemetry's 1 Hz pump fires while a
+/// telemetry-feed TCP server has the matching wildcard subscription
+/// active.
+///
+/// `Mailbox::deliver` already overwrites unconditionally (no flow-
+/// control check on the previous ack), so skipping the wait is safe:
+/// a fast publisher can overwrite an unread message, but the pumps
+/// that need this variant are 1 Hz while the server drain runs at
+/// 100 Hz from net_pump — the server picks up every sample.
+#[no_mangle]
+pub extern "C" fn msg_router_publish_nowait(
+    topic_name: *const u8,
+    data: *const u8,
+) -> i32 {
+    if topic_name.is_null() || data.is_null() {
+        return 0;
+    }
+    if unsafe { cstr_len_bounded(topic_name, TOPIC_NAME_LEN).is_none() } {
+        unsafe {
+            uart_printf(
+                b"[msg] publish_nowait: topic name too long (max %d bytes)\n\0".as_ptr(),
+                (TOPIC_NAME_LEN - 1) as i32,
+            );
+        }
+        return 0;
+    }
+    unsafe { publish_internal_nowait(topic_name, data, MSG_PRIORITY_NORMAL) }
 }
 
 /// Check if a subscriber has a pending message.

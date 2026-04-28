@@ -24,6 +24,19 @@
  * graph small. */
 extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
 
+/* Fire-and-forget variant. The periodic publishers below run on
+ * net_pump (the same task that drains `tcp_telemetry_server`'s
+ * subscription); the default `msg_router_publish` blocks for up to
+ * 5 s waiting for an ack that can only come from a poll loop on the
+ * SAME task — a self-deadlock that wedges net_pump for ~15 s every
+ * second the pump fires while a wildcard "tel.*" subscriber is
+ * active. The nowait variant skips the ack-wait. Mailbox.deliver
+ * already overwrites unconditionally, and the server polls at
+ * 100 Hz vs the 1 Hz publish rate, so no samples are lost in
+ * practice. */
+extern int msg_router_publish_nowait(const uint8_t *topic_name,
+                                      const uint8_t *data);
+
 /* Append a `key=value` pair to `buf[*pos..cap]`, with `value` formatted
  * as decimal uint64. Inserts a leading space when `*pos > 0`. Returns
  * 0 on success, -1 if the formatted text would exceed cap-1 (leaves
@@ -343,8 +356,10 @@ static void publish_cpu_util(uint32_t cpus)
     }
     payload[pos] = '\0';
     memcpy(g_last_cpu_payload, payload, sizeof(g_last_cpu_payload));
-    if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_CPU_UTIL,
-                           (const uint8_t *)payload) == 0) {
+    /* nowait: do NOT block waiting for ack — see the extern comment at
+     * the top of this file for the self-deadlock rationale. */
+    if (msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_CPU_UTIL,
+                                   (const uint8_t *)payload) > 0) {
         g_cpu_published += 1u;
     }
 }
@@ -383,8 +398,8 @@ static void publish_steal(uint32_t cpus)
 done:
     payload[pos] = '\0';
     memcpy(g_last_steal_payload, payload, sizeof(g_last_steal_payload));
-    if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_STEAL,
-                           (const uint8_t *)payload) == 0) {
+    if (msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_STEAL,
+                                   (const uint8_t *)payload) > 0) {
         g_steal_published += 1u;
     }
 }
@@ -419,8 +434,8 @@ static void publish_memory(void)
 done:
     payload[pos] = '\0';
     memcpy(g_last_memory_payload, payload, sizeof(g_last_memory_payload));
-    if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_MEMORY,
-                           (const uint8_t *)payload) == 0) {
+    if (msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_MEMORY,
+                                   (const uint8_t *)payload) > 0) {
         g_memory_published += 1u;
     }
 }
