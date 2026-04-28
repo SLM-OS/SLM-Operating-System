@@ -123,6 +123,23 @@ End-to-end the cycle takes ~30 seconds on the capstone lab hardware (Pi 5 boot i
 
 ---
 
+## Alternative: in-place update from a running SLM-OS
+
+When the Pi 5 is already booted and reachable over the
+multi-session shell, the kernel can be replaced without involving
+the SDWire at all. Use the `kernel` admin command surface and the
+Pi 5 tryboot one-shot mechanism — see [`pi5-sdcard.md`](pi5-sdcard.md)
+§"In-place update from a running SLM-OS" for the procedure.
+
+That path is faster (no power-off, no SDWire switch latency, no
+remount) but requires the board to already be running and serving
+telnet. The SDWire path remains the recovery option when the
+running kernel cannot bring up networking, when the board is
+wedged, or when validating a first-boot regression on a fresh
+image.
+
+---
+
 ## Troubleshooting
 
 ### `sdwire_update` fails with "SBC is powered on"

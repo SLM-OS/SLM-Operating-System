@@ -217,6 +217,11 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
 | `lua <file>` | Run Lua script from filesystem |
 | `clear` | Clear terminal screen (ANSI escape sequence) |
 | `reboot` | Restart system via PSCI (QEMU: triggers exit) |
+| `kernel status` | Show boot-media availability, staged image presence, tryboot-armed flag, last activate/promote/rollback outcomes. Pi 5 only — short-circuits with "boot media unsupported" elsewhere. |
+| `kernel stage <vfs-path>` | Copy a built image (e.g. `/mnt/files/slmos.bin`) into `0:/slmstore/staged.img` on the FAT boot partition. Drives BCM2712 EMMC2 via `boot_media_acquire/release`. |
+| `kernel activate` | Arm Pi 5 tryboot one-shot via BCM mailbox `RPI_FIRMWARE_SET_REBOOT_FLAGS=1` + `RPI_FIRMWARE_NOTIFY_REBOOT`. Requires `tryboot.txt` on boot FAT (see `deploy/pi5/tryboot.txt`). On reboot, firmware loads `tryboot.txt` once, then auto-reverts to `config.txt`. |
+| `kernel promote` | After a successful tryboot session: copy `staged.img` over `kernel_2712.img` and clear the staged slot. Makes the swap permanent. |
+| `kernel rollback` | Clear tryboot flag (`SET_REBOOT_FLAGS=0`) and remove the staged image. Use before reboot to abort an arming, or after a failed tryboot to clean up. |
 
 ### Getting Help
 

@@ -25,6 +25,7 @@ Interactive shell, command surface, observability commands, multi-session.
 | Lua (`lua`, `lua -e`, `lua <file>`) | ✅ | ✅ | ✅ | ✅ |
 | Scheduler (`sched`, `sched policy`, `sched stats`) | ✅ | ✅ | ✅ | ✅ |
 | Diagnostic (`dtb`, `timdiag`, `peek`, `macbdiag`) | ✅ | ✅ | ✅ | 🟡 (`timdiag` ARM-only) |
+| Kernel-replace admin (`kernel status/stage/activate/promote/rollback`) | 🟡 stub (no boot media) | ✅ tryboot-driven | 🟡 stub | 🟡 stub |
 | GPU/hw shell (`gpu`, `nvgpu phase-N`) | — | — | ✅ | ✅ |
 | Multi-session TCP shell (port 2323) | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ |
 | Telnet protocol (IAC, ECHO, SGA, NAWS, TERMINAL-TYPE, IAC IP→Ctrl+C) | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ |
@@ -51,6 +52,7 @@ Interactive shell, command surface, observability commands, multi-session.
 - `docs/archive/plans/multi-session-shell-plan.md` (TCP shell + telnet + telnetd)
 - `docs/archive/plans/shell-command-history-plan.md` (#434 plan; implemented)
 - `docs/demo-readiness-backlog.md` (observability backlog — closed items)
-- Issues: #191-#196 (observability tickets), #199 (SSH), #434 (history)
+- `docs/dynamic-kernel-replace-plan.md` (`kernel` admin command surface, sub-tasks 4-6 closed by #371)
+- Issues: #191-#196 (observability tickets), #199 (SSH), #434 (history), #371 (kernel-replace HW validation, closed)
 
-*Last updated: 27 April 2026*
+*Last updated: 28 April 2026*
