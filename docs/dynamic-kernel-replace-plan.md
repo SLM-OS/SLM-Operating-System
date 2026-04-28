@@ -15,9 +15,14 @@ round-trip is verified end-to-end (closes #35).
 | 4 — `kernel` admin command surface | #370 | #395 | ✅ Merged |
 | 5 — Hardware validation on `pi-5-1` | #371 | #468/#504/this | ✅ Merged |
 
-Sub-tasks 1-6 are complete; sub-task 7 (Jetson PCIe regression
-check) is gated on a nano-resource release from @johnjezl and is
-the only remaining item under #371.
+All sub-tasks 1-7 are complete. Sub-task 7 (Jetson PCIe
+regression check, closed by this branch) found that PR #389's
+`pcie_core.c` changes are structurally inert on Jetson: the
+platform registers `pcie_stub.c` which declines to install
+`host_ops`, so `pcie_core::scan_bus` never runs and neither the
+bridge-skip nor the `CMD_MEMORY_SPACE` enable can interact with
+the Jetson PCIe path. See
+[`docs/jetson-pcie-regression-check.md`](jetson-pcie-regression-check.md).
 
 ---
 
@@ -315,8 +320,21 @@ check gated on a nano-resource release from @johnjezl).
   earlier #471 issue was based on a misread; the code has been
   correct since #370). See
   [`docs/pi5-stage-promote-rollback-verification.md`](pi5-stage-promote-rollback-verification.md).
-- ☐🔗🎫 Jetson PCIe regression check (gated on nano release) —
-  #371 sub-task 7.
+- ✅ Jetson PCIe regression check — #371 sub-task 7. Verified on
+  `jetson-nano-1`. PR #389's `pcie_core.c` changes (skip bridges
+  by class, unconditional `CMD_MEMORY_SPACE` enable after BAR
+  assignment) are structurally inert on Jetson: `pcie_stub.c`
+  declines to install `host_ops` on `PLATFORM_JETSON_ORIN_NANO`,
+  so `pcie_core::scan_bus` never runs and the bridge-skip /
+  MEM_SPACE-enable code paths cannot execute. The Jetson PCIe
+  init flow is independent (`pcie_tegra194.c` driven by
+  `pcietrain` shell command, out-of-band from pcie_core).
+  Verified post-#389 main boots cleanly via kexec, BPMP IPC
+  responsive, Tegra C8 RC initializes, no regressions in
+  Jetson-specific code paths. The pre-existing LTSSM=0x03
+  link-train failure is a documented Stage-2+ limitation
+  unrelated to #389. See
+  [`docs/jetson-pcie-regression-check.md`](jetson-pcie-regression-check.md).
 
 ---
 
