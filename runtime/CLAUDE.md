@@ -226,7 +226,7 @@ Every place that touches `static mut` must take the corresponding lock.
 Mutable statics without a held lock are UB under the Rust memory model;
 the compiler warns `static_mut_refs` on any unguarded reference.
 
-### Module-level RAII guards (`EngineGuard`, `OpsGuard`, `FfiBusyGuard`)
+### Module-level RAII guards (`EngineGuard`, `OpsGuard`)
 
 `runtime/src/inference/engine.rs` and `runtime/src/inference/ops.rs`
 each pair a hand-written `<thing>_lock()` / `<thing>_unlock()` with a
@@ -236,27 +236,23 @@ with multiple early returns — especially around the FFI boundary in
 acquire the guard rather than the bare pair: any new error path
 benefits from Drop releasing the lock automatically.
 
-`runtime/src/lib.rs::FfiBusyGuard` is a single shared RAII helper
-used by `rust_infer_bench`, `rust_infer_classify`, and
-`rust_infer_and_print` to serialise concurrent FFI callers against
-their per-function `static mut` output buffers. Pattern:
+### FFI output buffers — prefer stack-local arrays over `static mut`
+
+`rust_infer_bench`, `rust_infer_classify`, and `rust_infer_and_print`
+each own a small (64 × f32 = 256 B) inference output buffer. Earlier
+revisions held this as `static mut` and serialised concurrent callers
+with an `FfiBusyGuard` busy-flag. The simpler, race-free approach used
+here is to declare the output buffer as a local stack array:
 
 ```rust
-static BENCH_FFI_BUSY: AtomicBool = AtomicBool::new(false);
-if BENCH_FFI_BUSY
-    .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-    .is_err()
-{
-    return -1;
-}
-let _release = FfiBusyGuard(&BENCH_FFI_BUSY);
+static INPUT: [f32; 784] = [0.0; 784];      /* read-only, shareable */
+let mut output: [f32; 64] = [0.0; 64];      /* stack-local, per call */
 ```
 
-A second concurrent caller observes the flag set and returns -1
-instead of corrupting the static-mut output buffer. Add a new
-`FfiBusyGuard` site any time a new FFI entrypoint owns a
-`static mut` buffer the caller sees indirectly through the FFI
-return.
+A 64 KB kernel-task stack absorbs the 256 B comfortably, and there's
+no shared state to race over. Add new FFI entrypoints in this same
+shape — keep input buffers `static` (immutable) and output buffers
+local-stack.
 
 ### unsafe fn for raw-pointer escape hatches
 
