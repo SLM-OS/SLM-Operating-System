@@ -16,7 +16,9 @@
 //!     v       = matmul(x_norm, attn_v.weight) + attn_v.bias
 //!     rope.apply(pos, q_per_head); rope.apply(pos, k_per_head)
 //!     kv.append(layer, k, v)
-//!     attn    = gqa_decode_step(q, kv.k_view(layer), kv.v_view(layer), …)
+//!     attn    = gqa_decode_step(q,
+//!                               kv.k_view_with_pending(layer),
+//!                               kv.v_view_with_pending(layer), …)
 //!     proj    = matmul(attn, attn_output.weight)
 //!     x       = attn_in + proj                  (residual)
 //!
@@ -113,6 +115,15 @@ pub struct ForwardScratch {
     /// the largest activation row (`max(hidden_size, intermediate_size)`).
     pub q8k_scratch: Vec<u8>,
 
+    /// Output logits buffer (`vocab_size` f32s). Owned here so the
+    /// per-token decode loop doesn't allocate ~vocab_size × 4 bytes
+    /// (608 KB for Qwen2.5-1.5B) on every step.
+    pub logits: Vec<f32>,
+
+    /// FP32 dequant scratch for the embedding lookup (`hidden`
+    /// elements). Owned here for the same reason as `logits`.
+    pub embed_f32: Vec<f32>,
+
     /// Cached RoPE table (head_dim × max_pos pairs).
     pub rope: RopeTable,
 
@@ -125,12 +136,13 @@ impl ForwardScratch {
     /// Allocate scratch for the given architecture and context window.
     /// `max_ctx` is the session's effective context length — used to
     /// size the RoPE LUT and the attention softmax scratch.
-    pub fn new(arch: &ArchInfo, max_ctx: usize) -> Self {
+    pub fn new(arch: &ArchInfo, max_ctx: usize, vocab_size: usize) -> Self {
         let hidden = arch.embedding_length as usize;
         let intermediate = arch.feed_forward_length as usize;
         let head_dim = arch.head_dim as usize;
         let n_head_q = arch.head_count as usize;
         let n_head_kv = arch.head_count_kv as usize;
+        let vocab = vocab_size;
         let q_total = n_head_q.saturating_mul(head_dim);
         let kv_total = n_head_kv.saturating_mul(head_dim);
         let max_row = hidden.max(intermediate);
@@ -158,6 +170,8 @@ impl ForwardScratch {
             mlp_up: vec![0u16; intermediate],
             mlp_out: vec![0u16; hidden],
             q8k_scratch: vec![0u8; q8k_bytes],
+            logits: vec![0.0f32; vocab.max(1)],
+            embed_f32: vec![0.0f32; hidden],
             rope: RopeTable::new(head_dim, max_ctx, arch.rope_freq_base),
             name_buf: String::with_capacity(32),
         }
@@ -171,10 +185,16 @@ impl ForwardScratch {
 /// Run one decode-step forward pass.
 ///
 /// Looks up `token_id`'s embedding, walks every transformer block,
-/// applies the final norm + LM head, and returns the FP32 logits over
-/// the vocabulary. The KV cache is extended by one position via
-/// [`crate::slm::kv_cache::KvCache::commit_position`]; the caller
-/// drives sampling on the returned logits.
+/// applies the final norm + LM head, and writes the FP32 logits into
+/// `scratch.logits[..vocab_size]`. The KV cache is extended by one
+/// position via [`crate::slm::kv_cache::KvCache::commit_position`];
+/// the caller reads logits from `scratch` and drives sampling.
+///
+/// **Why logits live in `scratch` instead of being returned by value:**
+/// keeping the Vec allocation in `ForwardScratch` saves ~vocab × 4
+/// bytes of malloc churn per token (608 KB for Qwen2.5-1.5B). The
+/// decoder copies into its own per-prompt buffer once via
+/// `extend_from_slice` for the sampler to mutate.
 ///
 /// Returns `None` on:
 /// - a missing-or-malformed weight tensor (any required name absent),
@@ -190,7 +210,7 @@ pub fn forward_one(
     slm: &LoadedSlm,
     token_id: u32,
     scratch: &mut ForwardScratch,
-) -> Option<Vec<f32>> {
+) -> Option<()> {
     let arch = slm.arch();
     let hidden = arch.embedding_length as usize;
     let intermediate = arch.feed_forward_length as usize;
@@ -237,7 +257,13 @@ pub fn forward_one(
     // Token embedding lookup (Q4_K table, one row of `hidden` floats).
     // ---------------------------------------------------------------
     let embd_bytes = slm.tensor_bytes("token_embd.weight")?;
-    embedding_q4k_lookup(embd_bytes, hidden, token_id, &mut scratch.x_fp16)?;
+    embedding_q4k_lookup(
+        embd_bytes,
+        hidden,
+        token_id,
+        &mut scratch.x_fp16,
+        &mut scratch.embed_f32,
+    )?;
 
     // ---------------------------------------------------------------
     // Per-layer transformer block.
@@ -305,12 +331,18 @@ pub fn forward_one(
         session.kv.append(layer, &scratch.k_fp16, &scratch.v_fp16)?;
 
         // -- GQA attention -------------------------------------------
+        // `seq_len` covers positions `0..=pos` (inclusive — the
+        // just-appended slot is part of the attention input). Use
+        // the *_with_pending views so the slice covers `0..=len`
+        // (length `(len+1) * per_pos`); plain `k_view` / `v_view`
+        // return `0..len`, which would short the most recent slot
+        // and trip `gqa_decode_step`'s shape check on every call.
         let seq_len = pos.checked_add(1)?;
         if scratch.attn_logits.len() < seq_len {
             scratch.attn_logits.resize(seq_len, 0.0);
         }
-        let k_view = session.kv.k_view(layer)?;
-        let v_view = session.kv.v_view(layer)?;
+        let k_view = session.kv.k_view_with_pending(layer)?;
+        let v_view = session.kv.v_view_with_pending(layer)?;
         gqa_decode_step(
             &scratch.q_fp16,
             k_view,
@@ -390,16 +422,18 @@ pub fn forward_one(
         .tensor_bytes("output.weight")
         .or_else(|| slm.tensor_bytes("token_embd.weight"))?;
 
-    let mut logits = vec![0.0f32; vocab_size];
+    if scratch.logits.len() < vocab_size {
+        scratch.logits.resize(vocab_size, 0.0);
+    }
     lm_head(
         &scratch.x_norm,
         lm_w,
         hidden,
         vocab_size,
         &mut scratch.q8k_scratch,
-        &mut logits,
+        &mut scratch.logits[..vocab_size],
     )?;
-    Some(logits)
+    Some(())
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +457,7 @@ pub fn embedding_q4k_lookup(
     embedding_length: usize,
     token_id: u32,
     out: &mut [u16],
+    scratch_f32: &mut Vec<f32>,
 ) -> Option<()> {
     if embedding_length == 0
         || embedding_length % Q4_K_BLOCK_ELEMENTS != 0
@@ -439,16 +474,19 @@ pub fn embedding_q4k_lookup(
     }
     let row = &table_bytes[start..end];
 
-    // Dequantize one row into a temp FP32 buffer then convert to FP16.
-    // The buffer is row-shaped (`embedding_length` floats); allocating
-    // it per-token is fine — Qwen2.5-1.5B = 1536 × 4 B = 6 KB, paid
-    // once per forward step.
-    let mut tmp_f32: Vec<f32> = vec![0.0f32; embedding_length];
-    let n = dequantize_row_q4_k(row, &mut tmp_f32)?;
+    // Dequantize one row into the caller-supplied FP32 buffer, then
+    // convert to FP16. Earlier revisions allocated `tmp_f32` per
+    // call (~6 KB for Qwen2.5-1.5B); the M5.3.2 review folded the
+    // allocation into `ForwardScratch::embed_f32` so the per-token
+    // decode loop is allocation-free.
+    if scratch_f32.len() < embedding_length {
+        scratch_f32.resize(embedding_length, 0.0);
+    }
+    let n = dequantize_row_q4_k(row, &mut scratch_f32[..embedding_length])?;
     if n != embedding_length {
         return None;
     }
-    for (i, &f) in tmp_f32.iter().enumerate() {
+    for (i, &f) in scratch_f32[..embedding_length].iter().enumerate() {
         out[i] = f32_to_f16(f);
     }
     Some(())
@@ -564,7 +602,7 @@ mod tests {
     #[test]
     fn forward_scratch_shapes_match_arch() {
         let arch = test_arch();
-        let s = ForwardScratch::new(&arch, 16);
+        let s = ForwardScratch::new(&arch, 16, 32);
         assert_eq!(s.x_fp16.len(), 256);
         assert_eq!(s.residual.len(), 256);
         assert_eq!(s.x_norm.len(), 256);
@@ -585,7 +623,8 @@ mod tests {
         // float is `d * (qs.lo) - dmin * mn = 0 * 0 - 0 * 0 = 0`.
         let row = [0u8; Q4_K_BLOCK_SIZE];
         let mut out = vec![0u16; Q4_K_BLOCK_ELEMENTS];
-        embedding_q4k_lookup(&row, Q4_K_BLOCK_ELEMENTS, 0, &mut out)
+        let mut scratch = Vec::new();
+        embedding_q4k_lookup(&row, Q4_K_BLOCK_ELEMENTS, 0, &mut out, &mut scratch)
             .expect("lookup");
         for &b in &out {
             assert_eq!(f16_to_f32(b), 0.0);
@@ -594,33 +633,18 @@ mod tests {
 
     #[test]
     fn embedding_q4k_lookup_picks_correct_row() {
-        // Two rows. Row 0 zero-block, row 1 zero-block too — but the
-        // returned slice should be the second row's bytes (still
-        // zero, but proves the offset arithmetic doesn't pull from
-        // row 0 by accident). Hardcode a sentinel byte to make the
-        // distinction observable.
         let mut bytes = vec![0u8; 2 * Q4_K_BLOCK_SIZE];
-        // Mark the *header* of row 1 so dequant produces something
-        // distinguishable. Bytes 0..2 = `d` (FP16), so picking
-        // `d = 1.0` (FP16 = 0x3C00) and a 1-bit nibble at qs[0]
-        // produces a non-zero output.
         bytes[Q4_K_BLOCK_SIZE..Q4_K_BLOCK_SIZE + 2].copy_from_slice(&0x3C00u16.to_le_bytes());
-        // Set scale[0] to 1 so the dequant for is=0 isn't masked.
-        // The 6-bit scale layout is non-trivial — reuse Q4KBlockView
-        // mechanics indirectly by setting scales[0] = 0x01 (the low 6
-        // bits of byte 0 form scale[0]).
         bytes[Q4_K_BLOCK_SIZE + 4] = 0x01;
-        // Set qs[0] = 0x01 so output[0] = d * sc * 1 = 1.0.
         bytes[Q4_K_BLOCK_SIZE + 16] = 0x01;
         let mut out = vec![0u16; Q4_K_BLOCK_ELEMENTS];
-        embedding_q4k_lookup(&bytes, Q4_K_BLOCK_ELEMENTS, 1, &mut out)
+        let mut scratch = Vec::new();
+        embedding_q4k_lookup(&bytes, Q4_K_BLOCK_ELEMENTS, 1, &mut out, &mut scratch)
             .expect("row 1");
-        // Row 1's first element should be non-zero; row 0 stayed all
-        // zeros.
         assert!(f16_to_f32(out[0]).abs() > 0.0);
 
         let mut out0 = vec![0u16; Q4_K_BLOCK_ELEMENTS];
-        embedding_q4k_lookup(&bytes, Q4_K_BLOCK_ELEMENTS, 0, &mut out0)
+        embedding_q4k_lookup(&bytes, Q4_K_BLOCK_ELEMENTS, 0, &mut out0, &mut scratch)
             .expect("row 0");
         assert_eq!(f16_to_f32(out0[0]), 0.0);
     }
@@ -629,17 +653,18 @@ mod tests {
     fn embedding_q4k_lookup_rejects_oob_token() {
         let row = vec![0u8; Q4_K_BLOCK_SIZE];
         let mut out = vec![0u16; Q4_K_BLOCK_ELEMENTS];
-        // vocab_size = 1 (one row of 144 bytes); token_id = 1 is out
-        // of range.
-        assert!(embedding_q4k_lookup(&row, Q4_K_BLOCK_ELEMENTS, 1, &mut out).is_none());
+        let mut scratch = Vec::new();
+        assert!(
+            embedding_q4k_lookup(&row, Q4_K_BLOCK_ELEMENTS, 1, &mut out, &mut scratch).is_none()
+        );
     }
 
     #[test]
     fn embedding_q4k_lookup_rejects_bad_dim() {
         let row = vec![0u8; Q4_K_BLOCK_SIZE];
         let mut out = vec![0u16; 200];
-        // 200 isn't a multiple of 256.
-        assert!(embedding_q4k_lookup(&row, 200, 0, &mut out).is_none());
+        let mut scratch = Vec::new();
+        assert!(embedding_q4k_lookup(&row, 200, 0, &mut out, &mut scratch).is_none());
     }
 
     #[test]

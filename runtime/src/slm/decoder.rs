@@ -168,14 +168,22 @@ pub fn run_prompt(
     // Allocate the forward-pass scratch once per prompt. M5.3.2 sizes
     // it from the session's cached arch + max_ctx; the buffers are
     // reused across every token in this prompt.
-    let mut scratch = ForwardScratch::new(&session.arch, session.max_ctx);
+    let mut scratch = ForwardScratch::new(
+        &session.arch,
+        session.max_ctx,
+        session.vocab_size as usize,
+    );
 
     // 2) Prefill — push every prompt token through the forward pass,
     //    yielding between chunks. We deliberately walk one token at
     //    a time inside each chunk (rather than batched prefill);
     //    M5.3.2 can revisit if benchmarks demand it.
     let chunk = if cfg.prefill_chunk == 0 { 64 } else { cfg.prefill_chunk } as usize;
-    let mut last_logits: Vec<f32> = Vec::new();
+    // Pre-allocate the per-prompt logit buffer once at vocab capacity.
+    // `forward_step_via_registry` uses `extend_from_slice` to refill
+    // it, which is a memcpy (no realloc) when capacity already covers
+    // vocab_size. The sampler then mutates this Vec in-place.
+    let mut last_logits: Vec<f32> = Vec::with_capacity(session.vocab_size as usize);
     let mut consumed = 0usize;
     while consumed < prompt_ids.len() {
         // Stop flag honoured before each chunk so a slow prefill on
@@ -191,7 +199,7 @@ pub fn run_prompt(
         }
         let end = core::cmp::min(consumed + chunk, prompt_ids.len());
         for &tok in &prompt_ids[consumed..end] {
-            last_logits = forward_step_via_registry(session, tok, &mut scratch);
+            forward_step_via_registry(session, tok, &mut scratch, &mut last_logits);
         }
         consumed = end;
         // Yield once per chunk, not once per token, so the runtime
@@ -256,13 +264,14 @@ pub fn run_prompt(
             break;
         }
 
-        // Forward + sample for the next token.
-        let mut logits = forward_step_via_registry(session, next_id, &mut scratch);
-        if logits.is_empty() {
+        // Forward + sample for the next token. Reuses last_logits's
+        // backing allocation (sized once at vocab capacity above).
+        forward_step_via_registry(session, next_id, &mut scratch, &mut last_logits);
+        if last_logits.is_empty() {
             session.state = SessionState::Open;
             break;
         }
-        next_id = session.sampler_state.sample(&session.sampler_cfg, &mut logits);
+        next_id = session.sampler_state.sample(&session.sampler_cfg, &mut last_logits);
         decode_tokens += 1;
         keep_going = emit_token(session, next_id, cb);
 
@@ -328,18 +337,24 @@ fn forward_step_via_registry(
     session: &mut Session,
     token_id: u32,
     scratch: &mut ForwardScratch,
-) -> Vec<f32> {
-    let logits_opt = registry::with_loaded_slm(session.model_handle as usize, |slm| {
-        forward_one(session, slm, token_id, scratch)
-    });
-    match logits_opt {
-        Some(Some(v)) => v,
-        // Either the slot was empty / out-of-range
-        // (`with_loaded_slm` returned `None`) or `forward_one` itself
-        // failed (missing tensor, shape mismatch, KV full). Both
-        // surface as "no logits" so the outer loop exits cleanly.
-        _ => Vec::new(),
+    out: &mut Vec<f32>,
+) {
+    out.clear();
+    let vocab = session.vocab_size as usize;
+    let succeeded = registry::with_loaded_slm(session.model_handle as usize, |slm| {
+        forward_one(session, slm, token_id, scratch).is_some()
+    })
+    .unwrap_or(false);
+    if !succeeded {
+        return;
     }
+    // Copy from scratch.logits into the caller's persistent Vec. This
+    // is one memcpy per token and avoids the alloc churn that a
+    // per-token `Vec<f32>` return would force.
+    if scratch.logits.len() < vocab {
+        return;
+    }
+    out.extend_from_slice(&scratch.logits[..vocab]);
 }
 
 // ---------------------------------------------------------------------------
