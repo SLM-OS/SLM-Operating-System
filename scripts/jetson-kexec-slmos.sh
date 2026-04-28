@@ -37,6 +37,7 @@
 #   sudo ./jetson-kexec-slmos.sh --no-usb-hold   /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-smmu-fix   /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-usb-root-cleanup /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --no-helper     /path/to/slmos.elf
 #
 # Or install to Jetson and run:
 #   sudo slmos-kexec /root/slmos.elf
@@ -71,12 +72,31 @@
 #                       cleaner addressed state and skips only the
 #                       downstream slot-3 handoff for that run.
 #
+#   --no-helper         Skip the auto-start of the GPU channel-inherit
+#                       helper. By default, when --no-gpu-suspend is set,
+#                       this script starts gpu-kernel-mnist (and, if
+#                       present, gpu-kernel-sched-mlp) with
+#                       --preserve-for-kexec from $SLMOS_HELPER_DIR
+#                       (default /root/gpu-mnist) before loading the new
+#                       kernel. Without an active GPU channel, Linux
+#                       boots leave priv-lock asserted (HWCFG2 bit 13),
+#                       SLM-OS's GPU fastpath fails the channel-inherit
+#                       check, and inference falls back to CPU. Use
+#                       --no-helper if you've staged your own helper or
+#                       deliberately want CPU-only inference.
+#
+# Environment:
+#   SLMOS_HELPER_DIR    Directory containing gpu-kernel-mnist /
+#                       gpu-kernel-sched-mlp + their weights/shaders.
+#                       Defaults to /root/gpu-mnist.
+#
 set -euo pipefail
 
 NO_GPU_SUSPEND=0
 NO_USB_HOLD=0
 NO_SMMU_FIX=0
 NO_USB_ROOT_CLEANUP=0
+NO_HELPER=0
 KERNEL=""
 SKIP_XHCI_SLOT3_HANDOFF=0
 XHCI_SLOT1_HANDOFF_PAYLOAD=""
@@ -87,10 +107,83 @@ for arg in "$@"; do
         --no-usb-hold)    NO_USB_HOLD=1 ;;
         --no-smmu-fix)    NO_SMMU_FIX=1 ;;
         --no-usb-root-cleanup) NO_USB_ROOT_CLEANUP=1 ;;
+        --no-helper)      NO_HELPER=1 ;;
         *) KERNEL="$arg" ;;
     esac
 done
 KERNEL="${KERNEL:-/root/slmos.elf}"
+
+start_one_helper() {
+    # $1 = helper basename (gpu-kernel-mnist | gpu-kernel-sched-mlp)
+    # $2 = weights directory under $helper_dir
+    # $3 = log file path
+    local helper_name="$1"
+    local weights_subdir="$2"
+    local log="$3"
+    local helper_dir="${SLMOS_HELPER_DIR:-/root/gpu-mnist}"
+    local helper_path="$helper_dir/$helper_name"
+
+    if pgrep -f "$helper_name --preserve-for-kexec" >/dev/null 2>&1; then
+        echo "       $helper_name: already running"
+        return 0
+    fi
+    if [[ ! -x "$helper_path" ]]; then
+        echo "       $helper_name: not found at $helper_path (skipping)"
+        return 0
+    fi
+    if [[ ! -d "$helper_dir/$weights_subdir" ]]; then
+        echo "       $helper_name: weights dir $weights_subdir missing under $helper_dir (skipping)"
+        return 0
+    fi
+
+    : > "$log"
+    (cd "$helper_dir" && \
+        nohup setsid "./$helper_name" \
+            --preserve-for-kexec \
+            --timeout-secs 1800 \
+            --weights-dir "$weights_subdir" \
+            --shader-dir "." > "$log" 2>&1 < /dev/null &)
+
+    # Wait for the helper to reach the "Sleeping ... kexec now" line.
+    # Helpers go through their full Linux-side dispatch self-check
+    # before sleeping; on jetson-nano-2 this takes ~5 s for MNIST and
+    # ~10 s for sched-MLP. Cap at 60 s so a wedged helper doesn't
+    # block the kexec indefinitely — we'll continue without it and
+    # report the missing handoff so the operator can see what failed.
+    local waited=0
+    while (( waited < 60 )); do
+        if grep -q "kexec now" "$log" 2>/dev/null; then
+            echo "       $helper_name: staged (handoff in DRAM)"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    echo "Warning: $helper_name did not reach 'kexec now' within 60s" >&2
+    echo "         tail of $log:" >&2
+    tail -10 "$log" >&2 || true
+    return 1
+}
+
+maybe_start_gpu_helpers() {
+    # Channel-inherit only matters when we're keeping the GPU live
+    # across kexec — i.e. --no-gpu-suspend. Without it, the GPU is
+    # power-cycled and there's no Linux-side state to inherit.
+    if [[ "$NO_GPU_SUSPEND" != "1" ]]; then
+        return 0
+    fi
+    if [[ "$NO_HELPER" == "1" ]]; then
+        echo "       SKIPPING GPU helper start (--no-helper)"
+        return 0
+    fi
+
+    # Start MNIST first (kind=0 handoff). Sched-MLP is best-effort —
+    # only stage it if the binary is on disk, since not every Jetson
+    # build has the sched-mlp pipeline compiled.
+    start_one_helper gpu-kernel-mnist     mnist-weights /tmp/gpu-kernel-mnist.log || true
+    start_one_helper gpu-kernel-sched-mlp sched-weights /tmp/gpu-kernel-sched-mlp.log || true
+}
 
 find_smmu_fix_module() {
     local candidate
@@ -635,7 +728,7 @@ if [[ ! -d "$GPU_POWER" ]]; then
     echo "Warning: GPU power path not found — not a Jetson Orin, or driver not loaded" >&2
     echo "Proceeding with kexec anyway..." >&2
 else
-    echo "[1/7] Stopping GPU consumers..."
+    echo "[1/9] Stopping GPU consumers..."
     # Display manager holds GPU via DRM. `systemctl stop gdm` can hang
     # if the compositor is mid-render, so background it with a timeout.
     systemctl stop gdm 2>/dev/null &
@@ -663,11 +756,11 @@ else
     fi
 
     if [[ "$NO_GPU_SUSPEND" == "1" ]]; then
-        echo "[2/7] SKIPPING runtime-PM suspend (--no-gpu-suspend)"
+        echo "[2/9] SKIPPING runtime-PM suspend (--no-gpu-suspend)"
         echo "       GPU stays powered — preserving Falcon ACR state for Path 3"
-        echo "[3/7] SKIPPING BPMP clock re-enable (GPU already running)"
+        echo "[3/9] SKIPPING BPMP clock re-enable (GPU already running)"
     else
-        echo "[2/7] Runtime-PM suspending GPU (drains DMA to avoid RAS)..."
+        echo "[2/9] Runtime-PM suspending GPU (drains DMA to avoid RAS)..."
         echo 0 > "$GPU_POWER/autosuspend_delay_ms"
         echo auto > "$GPU_POWER/control"
         sleep 3
@@ -680,7 +773,7 @@ else
             echo "         kexec may still crash with a TF-A RAS error" >&2
         fi
 
-        echo "[3/7] Re-enabling GPU clocks + powergate for SLM-OS handoff..."
+        echo "[3/9] Re-enabling GPU clocks + powergate for SLM-OS handoff..."
         # Un-powergate the GPU domain (1 = ungated)
         echo 1 > "$BPMP/powergate/gpu/state" 2>/dev/null || echo "       powergate write failed" >&2
         # Enable the primary GPU clocks. These were turned off by nvgpu's
@@ -700,8 +793,15 @@ else
     fi
 fi
 
+if [[ "$NO_GPU_SUSPEND" == "1" ]]; then
+    echo "[4/9] Auto-starting GPU channel-inherit helper(s)..."
+    maybe_start_gpu_helpers
+else
+    echo "[4/9] SKIPPING GPU helper start (suspend path doesn't need channel inherit)"
+fi
+
 if [[ "$NO_USB_HOLD" == "0" ]]; then
-    echo "[4/8] Holding xusb clocks + powergates on for SLM-OS XHCI..."
+    echo "[5/9] Holding xusb clocks + powergates on for SLM-OS XHCI..."
     # Keep the full XUSB fabric live across kexec, not just the
     # minimal USB2 host subset. On jetson-nano-2, RUN=1 still wedged
     # the aperture with the narrower hold set; forcing the broader
@@ -750,11 +850,11 @@ if [[ "$NO_USB_HOLD" == "0" ]]; then
     pg_c="$(cat "$BPMP/powergate/xusbc/state" 2>/dev/null || echo '?')"
     echo "       after hold: xusb_core_dev=$core_dev xusb_core_host=$core_host xusb_core_ss=$core_ss xusb_falcon=$falcon xusb_fs_host=$fs_host xusb_ss=$ss xusba=$pg_a xusbb=$pg_b xusbc=$pg_c"
 else
-    echo "[4/8] SKIPPING xusb clock hold (--no-usb-hold)"
+    echo "[5/9] SKIPPING xusb clock hold (--no-usb-hold)"
 fi
 
 if [[ "$NO_USB_HOLD" == "0" ]]; then
-    echo "[5/8] Pinning tegra-xusb runtime PM so Linux doesn't idle-suspend..."
+    echo "[6/9] Pinning tegra-xusb runtime PM so Linux doesn't idle-suspend..."
     XUSB_DEV=/sys/devices/platform/bus@0/3610000.usb
     if [[ -d "$XUSB_DEV/power" ]]; then
         # 'on' disables runtime PM; low-cost pin that doesn't itself
@@ -814,7 +914,7 @@ if [[ "$NO_USB_HOLD" == "0" ]]; then
 fi
 
 if [[ "$NO_SMMU_FIX" == "0" ]]; then
-    echo "[6/8] Preparing xusb arm-smmu state for post-kexec XHCI..."
+    echo "[7/9] Preparing xusb arm-smmu state for post-kexec XHCI..."
     if [[ -d /sys/module/arm_smmu_noshutdown ]]; then
         echo "       arm_smmu_noshutdown already loaded"
         if ! verify_smmu_fix_effect; then
@@ -856,10 +956,10 @@ if [[ "$NO_SMMU_FIX" == "0" ]]; then
         fi
     fi
 else
-    echo "[6/8] SKIPPING arm-smmu fix (--no-smmu-fix)"
+    echo "[7/9] SKIPPING arm-smmu fix (--no-smmu-fix)"
 fi
 
-echo "[7/8] Loading kernel: $KERNEL"
+echo "[8/9] Loading kernel: $KERNEL"
 KEXEC_CMDLINE="$(cat /proc/cmdline)"
 if [[ -n "$XHCI_SLOT3_HANDOFF_PAYLOAD" ]]; then
     KEXEC_CMDLINE+=" slmos_xhci_slot3_handoff=$XHCI_SLOT3_HANDOFF_PAYLOAD"
@@ -872,5 +972,5 @@ else
     kexec -l "$KERNEL" --command-line="$KEXEC_CMDLINE"
 fi
 
-echo "[8/8] Executing kexec (serial console will take over)"
+echo "[9/9] Executing kexec (serial console will take over)"
 exec kexec -e
