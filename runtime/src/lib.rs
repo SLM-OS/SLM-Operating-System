@@ -62,7 +62,21 @@ pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
 
 #[panic_handler]
 fn rust_panic(info: &PanicInfo) -> ! {
+    // Postmortem output goes to BOTH UART and the bound shell.
+    // - uart_printf is the always-on path: lab serial capture (per the
+    //   project's serial_capture workflow) is the canonical place a
+    //   panic gets read after the fact, and the UART driver does not
+    //   depend on TCP / lwIP / scheduler state that may be wedged
+    //   precisely when a panic is most informative.
+    // - shell_printf additionally surfaces the panic in the operator's
+    //   active session if one is bound (e.g. the engineer who ran
+    //   `model bench` over telnet and tripped the panic). When no
+    //   session is bound, shell_printf falls back to UART, so the
+    //   double-emit is safe and idempotent on the fallback path.
+    // Order: UART first so the most reliable channel always sees the
+    // line, even if shell_printf later wedges in the lwIP TX ring.
     extern "C" {
+        fn uart_printf(fmt: *const u8, ...);
         fn shell_printf(fmt: *const u8, ...);
     }
 
@@ -83,6 +97,12 @@ fn rust_panic(info: &PanicInfo) -> ! {
         buf[len] = 0;
 
         unsafe {
+            uart_printf(
+                b"at %s:%u:%u\n\0".as_ptr(),
+                buf.as_ptr(),
+                loc.line(),
+                loc.column(),
+            );
             shell_printf(
                 b"at %s:%u:%u\n\0".as_ptr(),
                 buf.as_ptr(),
@@ -5072,6 +5092,17 @@ pub unsafe extern "C" fn rust_infer(
 /// Pre-condition: `n >= 1` and `n <= output.len()`. The two callers
 /// each early-return with -3 on `result == 0`, so `output[0]` is
 /// always reachable.
+///
+/// Output channel: each row is one `shell_printf` call. With a TCP
+/// session bound, that enqueues into the per-session 4 KB TX ring
+/// in `shell_io_tcp.c`; if the operator's terminal can't drain fast
+/// enough, the drop-oldest policy will silently elide rows. For the
+/// 10-element MNIST output that's a non-issue (~280 bytes total —
+/// well under the ring). When this helper starts being used by larger
+/// outputs (sched-MLP at 42 logits, future N-class models), batch
+/// into a single stack buffer + one `shell_printf` to avoid the
+/// drop hazard, or accept the partial-output trade-off explicitly
+/// at the new call site. (PR #557 round-2 review.)
 fn print_logits_and_argmax(output: &[f32], n: usize) -> usize {
     extern "C" {
         fn shell_printf(fmt: *const u8, ...);
