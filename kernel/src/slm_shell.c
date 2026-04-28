@@ -213,6 +213,20 @@ static int slm_load(int argc, char *argv[])
         shell_puts("slm load: file is empty\r\n");
         return -1;
     }
+    /*
+     * 2 GiB upper bound — well above Qwen2.5-1.5B-Q4_K_M (~1.0 GB)
+     * and Llama-3.2-1B-Q4_K_M (~0.8 GB), but small enough that an
+     * accidentally-staged 16 GiB blob fails fast with a useful
+     * message rather than hitting `pmm_alloc_pages` and producing
+     * a misleading "out of memory" diagnostic.
+     */
+    const size_t SLM_MAX_GGUF_BYTES = 2ull * 1024ull * 1024ull * 1024ull;
+    if (info.size > SLM_MAX_GGUF_BYTES) {
+        shell_printf("slm load: file too large (%llu bytes, cap %llu)\r\n",
+                     (unsigned long long)info.size,
+                     (unsigned long long)SLM_MAX_GGUF_BYTES);
+        return -1;
+    }
 
     size_t pages = (info.size + 4095u) / 4096u;
     uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
