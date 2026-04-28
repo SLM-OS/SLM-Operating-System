@@ -737,31 +737,51 @@ Phase 0 is GREEN; tasks are unblocked.
        to-end.
 
   **What remains for actual frame capture:**
-  1. ✅ **Port `vi_channel_config` — DONE.** Type ported in PR #N
-     as `struct camrtc_vi_channel_config` (160 B exactly, not the
-     earlier ~352 B estimate). 38 `_Static_assert`s pin the size
-     and every substruct field offset; a runtime test in
-     `kernel/tests/test_camera.c` verifies the 13 single-bit
-     flag positions match the L4T comment ordering. No `csidiag`
-     changes — populating the struct is a separate PR.
-  2. ☐ Populate `vi_channel_config` from `csidiag` with IMX219-
-     specific frame format (frame_x=1640, frame_y=1232, pixfmt
-     RAW10, atomp surface IOVA). Once non-zero, RCE's VI register
-     programming should reach the IND-emission path.
-  3. ☐ Power-on the IMX219 sensor + write `MODE_SELECT = STREAMING`
-     (extend the existing `imx219` shell command).
-  4. ☐ Allocate a 2.5 MB frame buffer for IMX219 binned-mode RAW10
-     (1640×1232) inside RCE's VM1 IOVA aperture. The current 64 KB
-     NC carveouts are too small; either grow the NC mapping or
-     allocate from a different NC-mapped region.
-  5. ☐ Set the atomp surface IOVAs in the descriptor's
-     `vi_channel_config.atomp.surface[0]`.
-  6. ☐ Inspect `capture_status.status` field in the descriptor for
-     `CAPTURE_STATUS_SUCCESS` after `STATUS_IND` arrives.
+  1. ✅ **Port `vi_channel_config` — DONE (PR #509).** Type ported
+     as `struct camrtc_vi_channel_config` (160 B exactly). 73
+     `_Static_assert`s pin every field offset and substruct size;
+     a runtime test verifies bitfield bit positions.
+  2. ✅ **Populate `vi_channel_config` from csidiag — DONE
+     (first-light bundle).** csidiag now writes IMX219 binning-
+     mode RAW10 values (frame_x=1640, frame_y=1232, T_R16
+     pixfmt=196, NVCSI_DATATYPE_RAW10=43, one-hot stream/vc).
+  3. ✅ **IMX219 MODE_SELECT=STREAMING — DONE (first-light
+     bundle).** `imx219_streaming_enable()` writes 0x0100=0x01
+     before issuing CAPTURE_REQUEST.
+  4. ✅ **Frame buffer carveout — DONE (first-light bundle).**
+     4 MB at 0xA1000000 carved out of PMM region 1 in
+     `kernel/mm/pmm.c`; sized for 1640×1232 T_R16 with headroom.
+  5. ✅ **Atomp surface IOVA — DONE (first-light bundle).**
+     IOVA goes in the **memoryinfo ring** at slot 0
+     (`base_address` + `size`), NOT in
+     `vi_channel_config.atomp.surface[i].offset` (that field is
+     unused by L4T).
+  6. ✅ **STATUS_IND decode — DONE (first-light bundle).**
+     csidiag overlays `struct camrtc_capture_status` at
+     descriptor+272 and prints status code + symbolic name +
+     decoded `notify_bits`.
 
-  Each remaining item is a separate PR. The wire-format port (msg
-  ABI + struct definitions) is now complete; what's left is the
-  data-path / hardware-config surface.
+  **First-light hardware result on jetson-nano-1 (2026-04-27):**
+  ```
+  CHANNEL_SETUP:   rc=0 channel_id=0x0 vi_mask=0x800000000
+  imx219 stream-on: rc=0 (MODE_SELECT=0x01)
+  vi_channel_config populated: 1640x1232 T_R16 → 0xa1000000 stride=3280
+  CAPTURE_REQUEST:  rc=0 status_buffer_index=0x0
+  capture_status: status=14 (FALCON_ERROR)
+  notify_bits=0x2000000 → FRAME_START_TIMEOUT
+  ```
+  Wire path complete — RCE consumed the request, programmed VI,
+  and reported back. The remaining blocker is the IMX219 sensor
+  itself: writing only `MODE_SELECT=0x01` from a freshly powered-
+  up sensor in default state isn't enough. Linux's IMX219 driver
+  writes ~70 mode-table registers (binning, output format, PLL
+  config, AGC defaults) before streaming.
+
+  **Next PR scope:** port the IMX219 binning-mode register-init
+  table from `docs/reference/linux-imx219.c` and write it before
+  `MODE_SELECT=0x01`. Expected outcome: `CAPTURE_STATUS_SUCCESS`
+  with the frame buffer at 0xA1000000 carrying ~4 MB of T_R16
+  RAW10 pixels.
 - ☐🔗 Implement Lua bindings + preprocessing. Verify by capturing a
   known printed digit and asserting that
   `slm.model_infer_bytes` returns the expected class.

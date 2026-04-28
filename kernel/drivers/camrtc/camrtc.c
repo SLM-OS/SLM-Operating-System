@@ -658,6 +658,18 @@ int camrtc_diag_dump(void)
 #define CAMRTC_VI_REQ_RING_OFFSET      0x0000u
 #define CAMRTC_VI_REQ_MEMINFO_OFFSET   0x4000u
 
+/* IMX219 frame buffer carveout (CAMRTC_FRAME_BUFFER_PHYS /
+ * _SIZE / IMX219_BINNED_* from camrtc_layout.h) is carved out
+ * of the Jetson PMM region 1 in `kernel/mm/pmm.c` (between the
+ * kernel heap and the NC mapping at 0xBDE00000). Sized for one
+ * IMX219 binning-mode RAW10 frame written by VI5 as T_R16 (16
+ * bpp) = ~3.96 MB.
+ *
+ * Single-surface single-shot for first-light: surface[0] only,
+ * one frame, queue depth 1. Future PRs that grow to multi-shot
+ * or multi-plane (Bayer demosaic surfaces) will subdivide this
+ * carveout — the size assert below pins the upper bound. */
+
 static uintptr_t g_ch_setup_region_phys;
 static uintptr_t g_ch_setup_cap_rx_iova;
 static uintptr_t g_ch_setup_cap_tx_iova;
@@ -700,6 +712,31 @@ uint32_t camrtc_vi_req_request_size(void)
 uint32_t camrtc_vi_req_meminfo_size(void)
 {
     return CAMRTC_VI_REQ_MEMINFO_SIZE;
+}
+
+uintptr_t camrtc_frame_buffer_iova(void)
+{
+    return CAMRTC_FRAME_BUFFER_PHYS;
+}
+
+uint32_t camrtc_frame_buffer_size(void)
+{
+    return CAMRTC_FRAME_BUFFER_SIZE;
+}
+
+uint32_t camrtc_frame_buffer_stride(void)
+{
+    return IMX219_BINNED_STRIDE;
+}
+
+uint32_t camrtc_frame_buffer_width(void)
+{
+    return IMX219_BINNED_WIDTH;
+}
+
+uint32_t camrtc_frame_buffer_height(void)
+{
+    return IMX219_BINNED_HEIGHT;
 }
 
 int camrtc_ch_setup_capture_control(void)
@@ -771,6 +808,23 @@ int camrtc_ch_setup_capture_control(void)
                    + CAMRTC_VI_REQ_QUEUE_DEPTH * CAMRTC_VI_REQ_MEMINFO_SIZE
                    <= CAMRTC_VI_REQ_REGION_RESERVED,
                    "VI memoryinfo ring overflows the carveout");
+    /* Frame buffer carveout constraints: must be inside RCE VM1
+     * aperture, must NOT overlap NC mapping (it's in cacheable
+     * PMM-managed DRAM at 0xA1000000), must be large enough for
+     * a single IMX219 binned-mode frame, and must be 8-byte
+     * aligned for word-at-a-time access. */
+    _Static_assert(CAMRTC_FRAME_BUFFER_PHYS >= 0xA0000000u,
+                   "Frame buffer must lie inside RCE VM1 aperture");
+    _Static_assert(CAMRTC_FRAME_BUFFER_PHYS + CAMRTC_FRAME_BUFFER_SIZE
+                   <= 0xC0000000u,
+                   "Frame buffer must end inside RCE VM1 aperture");
+    _Static_assert(CAMRTC_FRAME_BUFFER_PHYS + CAMRTC_FRAME_BUFFER_SIZE
+                   <= 0xBDE00000u,
+                   "Frame buffer must end below the NC carveout (0xBDE00000)");
+    _Static_assert(IMX219_BINNED_FRAME_BYTES <= CAMRTC_FRAME_BUFFER_SIZE,
+                   "IMX219 binned-mode frame must fit in CAMRTC_FRAME_BUFFER_SIZE");
+    _Static_assert((CAMRTC_FRAME_BUFFER_PHYS & 7u) == 0u,
+                   "Frame buffer must be 8-byte aligned");
     uint64_t iova_shifted = (uint64_t)region_phys >> 8;
 
     /* Zero the entire region so the TLV terminator + IVC ring
@@ -936,5 +990,10 @@ uintptr_t camrtc_vi_req_meminfo_iova(void) { return 0; }
 uint32_t  camrtc_vi_req_queue_depth(void) { return 0; }
 uint32_t  camrtc_vi_req_request_size(void) { return 0; }
 uint32_t  camrtc_vi_req_meminfo_size(void) { return 0; }
+uintptr_t camrtc_frame_buffer_iova(void) { return 0; }
+uint32_t  camrtc_frame_buffer_size(void) { return 0; }
+uint32_t  camrtc_frame_buffer_stride(void) { return 0; }
+uint32_t  camrtc_frame_buffer_width(void) { return 0; }
+uint32_t  camrtc_frame_buffer_height(void) { return 0; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

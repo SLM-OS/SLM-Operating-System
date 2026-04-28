@@ -1001,4 +1001,177 @@ reorders bits, that test fails before any hardware deploy.
 
 ---
 
+## IMX219 first-light bundle (2026-04-27, PR #513)
+
+End-to-end single-shot capture path: frame buffer carveout +
+populated `vi_channel_config` + IMX219 streaming control +
+`CAPTURE_STATUS_IND` decode. Wire path verified end-to-end on
+jetson-nano-1; the remaining blocker is the IMX219 sensor's
+register-bank init.
+
+### Frame buffer carveout
+
+4 MB at `0xA1000000`, carved out of PMM region 1 in
+`kernel/mm/pmm.c`. Sized for IMX219 binning-mode RAW10
+(1640×1232) written by VI5 as T_R16 (16 bpp) = ~3.96 MB.
+
+| Constraint | Why |
+|---|---|
+| Inside RCE VM1 IOVA aperture (0xA0000000-0xC0000000) | RCE rejects external IOVAs with `RTCPU_CH_ERR_INVALID_IOVA` |
+| Outside the NC mapping (ends at 0xBDE00000) | Cacheable PMM is faster; DMA coherence handled by `dc invalidate` if needed |
+| 8-byte aligned | word-at-a-time access |
+| `IMX219_BINNED_FRAME_BYTES <= CAMRTC_FRAME_BUFFER_SIZE` | sanity |
+
+5 `_Static_assert`s pin all 5 constraints. PMM splits region 1
+into two ranges around the carveout via
+`pmm_add_region_split(heap_start, 0xA1000000)` and
+`pmm_add_region_split(0xA1400000, 0xBDE00000)`.
+
+### Surface IOVA goes in the **memoryinfo ring**, not in `vi_channel_config.atomp.surface[i].offset`
+
+The single most non-obvious finding from hardware iteration. The
+`vi_channel_config.atomp.surface[i].offset / .offset_hi` fields
+exist in the L4T struct but are **unused by VI5**. RCE reads
+the surface IOVA from the **memoryinfo ring**, a separate
+128-byte-stride ring at `camrtc_vi_req_meminfo_iova()`
+(0xBDFD4000) populated with `struct
+camrtc_capture_descriptor_memoryinfo`:
+
+```c
+volatile struct camrtc_capture_descriptor_memoryinfo *meminfo =
+    (volatile struct camrtc_capture_descriptor_memoryinfo *)
+    camrtc_vi_req_meminfo_iova();
+meminfo->surface[0].base_address = 0xA1000000;            /* IOVA */
+meminfo->surface[0].size         = stride * height;       /* bytes */
+```
+
+`vi_channel_config.atomp.surface_stride[0]` (the per-row stride
+= width × 2 for T_R16) is the only `atomp` field that goes in
+the descriptor; everything else (IOVA, total size) lives in
+memoryinfo.
+
+Reference: L4T `vi5_fops.c:416-418`.
+
+### Channel-selector match block — critical encoding details
+
+Three findings from hardware iteration that aren't obvious from
+struct definitions alone:
+
+1. **`match.stream` and `match.vc` use ONE-HOT bit encoding**:
+   `match.stream = (1u << nvcsi_stream_id)`, NOT raw integer.
+   Stream 0 → 1, VC 0 → 1. Wrong encoding triggers RCE's "match
+   configuration is already in use by channel 0" error
+   (`vi5.c:4063`). Reference: L4T `vi5_fops.c:407-408`.
+
+2. **Masks must be set, not zero**:
+   `match.stream_mask = 0x3f` (6 bits, 6 NVCSI streams)
+   `match.vc_mask = 0xffff` (16 bits)
+   `match.datatype_mask = 0x3f` (6-bit CSI-2 datatype field)
+   Reference: L4T `vi5_fops.c:73-75` (capture_template) +
+   `vi5_fops.c:412`.
+
+3. **Frame-id and DOL fields stay zero**:
+   L4T's per-frame override doesn't touch these (no DOL or
+   frame-id matching for single-shot RAW10).
+
+### CAPTURE_STATUS_* status code values (verified against L4T)
+
+The status code enum starts at 1 and runs to 15:
+
+| Code | Name | Meaning |
+|-----:|------|---------|
+| 0  | UNKNOWN              | Capture status undefined  |
+| 1  | SUCCESS              | Frame captured successfully |
+| 2  | CSIMUX_FRAME         | CSIMUX frame error |
+| 3  | CSIMUX_STREAM        | CSIMUX stream error |
+| 4  | CHANSEL_FAULT        | Data-specific channel fault |
+| 5  | CHANSEL_FAULT_FE     | Channel fault at FE |
+| 6  | CHANSEL_COLLISION    | Two channels matched same frame |
+| 7  | CHANSEL_SHORT_FRAME  | Frame ended too early |
+| 8  | ATOMP_PACKER_OVERFLOW | Atom packer overflow |
+| 9  | ATOMP_FRAME_TRUNCATED | Frame truncated to memory |
+| 10 | ATOMP_FRAME_TOSSED   | Frame dropped (back-pressure) |
+| 11 | ISPBUF_FIFO_OVERFLOW | ISP buffer overflow |
+| 12 | SYNC_FAILURE         | Syncpoint sync failure |
+| 13 | NOTIFIER_BACKEND_DOWN | RCE notifier backend offline |
+| 14 | **FALCON_ERROR**     | **VI Falcon scheduler error** (common first-light blocker) |
+| 15 | CHANSEL_NOMATCH      | No channel selector matched |
+
+Plus the `notify_bits` 64-bit mask carries finer-grained event
+bits — the four most useful for first-light:
+- bit 25: `FRAME_START_TIMEOUT`
+- bit 26: `FRAME_COMPLETION_TIMEOUT`
+- bit 46: `CHANSEL_NO_MATCH`
+- bit 51: `ATOMP_FRAME_TOSSED`
+
+### csidiag chain (hardware-verified end-to-end)
+
+```
+imx219                              # power on, read CHIP_ID
+csidiag                             # full chain
+  ├── capture_init                  # CH_SETUP + ivc_init
+  ├── PHY_STREAM_OPEN               # NVCSI port A open
+  ├── CSI_SET_CONFIG                # 2 D-PHY lanes, 456 MHz
+  ├── CHANNEL_SETUP                 # VI channel allocate
+  ├── imx219_streaming_enable       # MODE_SELECT = 0x01
+  ├── 50 ms warm-up
+  ├── populate vi_channel_config    # 1640×1232 T_R16
+  ├── meminfo[0] = (fb_iova, size)  # surface destination
+  ├── CAPTURE_REQUEST               # buffer_index=0
+  └── decode capture_status         # status code + notify_bits
+```
+
+### Test coverage
+
+Compile-time (`_Static_assert` in `kernel/tests/test_camera.c`):
+
+- 4 on `camrtc_nvcsi_error_status` (16 B + 4 field offsets)
+- 11 on `camrtc_capture_status` (56 B + every field offset + alignment)
+- 7 on `CAPTURE_STATUS_*` codes + notify_bit positions
+- 5 on `camrtc_memoryinfo_surface` + `camrtc_capture_descriptor_memoryinfo`
+  (16 B + 128 B + every field offset + array stride at slot 3)
+- 3 on descriptor offsets (`CAMRTC_DESC_CH_CFG_OFFSET=64`,
+  `CAMRTC_DESC_STATUS_OFFSET=272`, status block ends @ 328)
+- 5 on frame buffer carveout invariants (in-aperture, before
+  NC mapping, frame fits, 8-byte aligned)
+- 8 on IMX219 streaming constants (MODE_SELECT register address,
+  STREAMING/STANDBY values, stub return values)
+
+Runtime (in `int test_suite_camera(void)`):
+
+- `test_camrtc_frame_buffer_accessors` — Jetson values
+  (0xA1000000, 4 MB, 1640×1232×2) vs QEMU stub zeros, with
+  in-aperture and stride×height invariants
+- `test_camrtc_memoryinfo_overlay_roundtrip` — write recognizable
+  IOVA + size to surface[0], surface[3], and engine_status_surface;
+  read back at the expected byte offsets. Catches struct-layout
+  regressions before any hardware deploy
+- `test_imx219_streaming_constants_and_stubs` — MODE_SELECT
+  register + STREAMING/STANDBY values + QEMU stub returns
+
+### Hardware iteration result on jetson-nano-1 (2026-04-27)
+
+```
+CHANNEL_SETUP:   rc=0 channel_id=0x0 vi_mask=0x800000000
+imx219 stream-on: rc=0 (MODE_SELECT=0x01)
+vi_channel_config populated: 1640x1232 T_R16 → surface[0]=0xa1000000 stride=3280
+CAPTURE_REQUEST: rc=0 status_buffer_index=0x0
+capture_status: status=14 frame_id=0 src_stream=0 vc=0
+err_data=0x1 flags=0x0 notify_bits=0x2000000
+*** Capture FAILED — status=14 (FALCON_ERROR).
+*** notify: FRAME_START_TIMEOUT — sensor never produced an SOF on CSI-2.
+*** Likely fix: full IMX219 register-bank init (binning mode + format + AE).
+```
+
+**This is what success looks like for the wire path.** RCE
+consumed the request, programmed VI, the Falcon scheduler ran,
+and reported back via STATUS_IND. The only missing piece is the
+sensor: writing only `MODE_SELECT=0x01` from a freshly powered-up
+sensor in default state isn't enough — Linux's IMX219 driver
+writes ~70 mode-table registers (binning, output format, PLL
+config, AGC defaults) before streaming. That register-init port
+is the next PR.
+
+---
+
 *End of notes.*

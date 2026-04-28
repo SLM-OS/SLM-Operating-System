@@ -21,6 +21,9 @@
 #include "debug.h"
 #include "spinlock.h"
 #include "dtb.h"
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "camrtc_layout.h"   /* CAMRTC_FRAME_BUFFER_PHYS / _END */
+#endif
 #include <stdbool.h>
 
 /* External symbols from linker script */
@@ -554,8 +557,19 @@ void pmm_init(void)
      * for the rationale. PMM doesn't manage the NC region (already
      * excluded by `heap_end = 0xBDE00000`), so no extra carveout
      * is needed here.
+     *
+     * IMX219 frame buffer carveout: 4 MB at 0xA1000000-0xA1400000
+     * (CAMRTC_FRAME_BUFFER_PHYS / _END from camrtc_layout.h —
+     * shared with kernel/drivers/camrtc/camrtc.c so the carveout
+     * geometry can't drift between PMM-side reservation and the
+     * accessor that hands the IOVA to RCE). The carveout sits in
+     * RCE's VM1 IOVA aperture (0xA0000000..0xC0000000); SMMU-
+     * bypass post-kexec means IOVA == phys for the camera path.
+     * PMM splits region 1 around the carveout so the buddy
+     * allocator never hands out frame-buffer pages.
      */
-    pmm_add_region_split(buddy_state.heap_start, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
+    pmm_add_region_split(buddy_state.heap_start, CAMRTC_FRAME_BUFFER_PHYS);
+    pmm_add_region_split(CAMRTC_FRAME_BUFFER_END, 0xBDE00000UL);  /* Last 2MB reserved for NC memory */
     pmm_add_region_split(0xC2000000UL, 0xFFFE0000UL);
     pmm_add_region_split(0x100000000UL, 0x240000000UL);
 #else

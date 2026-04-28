@@ -252,3 +252,17 @@ uintptr_t camrtc_vi_req_meminfo_iova(void);
 uint32_t  camrtc_vi_req_queue_depth(void);
 uint32_t  camrtc_vi_req_request_size(void);
 uint32_t  camrtc_vi_req_meminfo_size(void);
+
+/* IMX219 frame buffer carveout (4 MB at 0xA1000000). Carved out
+ * of the Jetson PMM region 1 in `kernel/mm/pmm.c`; sized for one
+ * IMX219 binning-mode frame written by VI5 as 16-bit-per-pixel
+ * (T_R16, 1640×1232 = ~3.96 MB). RCE uses this IOVA as the
+ * `atomp.surface[0]` destination in `camrtc_vi_channel_config`.
+ *
+ * Accessors return Jetson values on `PLATFORM_JETSON_ORIN_NANO`
+ * and zero everywhere else (QEMU stub path). */
+uintptr_t camrtc_frame_buffer_iova(void);   /* phys/IOVA, identity-mapped */
+uint32_t  camrtc_frame_buffer_size(void);   /* bytes carved out */
+uint32_t  camrtc_frame_buffer_stride(void); /* bytes per row (= width * 2) */
+uint32_t  camrtc_frame_buffer_width(void);  /* IMX219 binned-mode width  (1640) */
+uint32_t  camrtc_frame_buffer_height(void); /* IMX219 binned-mode height (1232) */
