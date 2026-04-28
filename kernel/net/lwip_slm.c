@@ -231,13 +231,29 @@ static struct net_stats net_statistics;
 /* RX-stall watchdog                                                           */
 /* -------------------------------------------------------------------------- */
 
-/* Default stall threshold. 10 s with link up and zero RX is well outside
- * any healthy network — even an idle subnet sees ARP traffic, gateway
- * keep-alives, and DHCP renewals. Anything past this is one of the four
- * known failure modes the snapshot is designed to surface (pbuf pool
- * out, TCP PCB out, heap out, driver wedge). */
+/* Default stall threshold. The original 10 s value (PR #439) was set
+ * for the multi-session telnet + slm-put workload where TX is active
+ * and an RX gap that long signalled heap exhaustion or a driver wedge.
+ * Empirically that's too tight on a quiet listener: a Jetson on a
+ * lab Ethernet sitting idle (e.g. `telemetry server start` with no
+ * client connected) commonly goes 15-60 s between unicast packets,
+ * and the WARN spam buried real signal during demos.
+ *
+ * Bumped to 60 s — still detects all four target failure modes
+ * (pbuf pool out, TCP PCB out, heap out, driver wedge), just with a
+ * one-minute delay instead of ten seconds. None of those modes
+ * recover on their own, so the longer detection window doesn't
+ * change the diagnostic outcome.
+ *
+ * For tighter bounds during stress tests, override at the call site
+ * via `net_watchdog_set_threshold_ms()`. The minimum is still 100 ms.
+ *
+ * A direction-aware watchdog (only count idle when there's recent TX
+ * or an open TCP connection) would eliminate the false positive
+ * entirely without changing the threshold; tracked separately as a
+ * follow-up. */
 #ifndef NET_RX_STALL_THRESHOLD_MS
-#define NET_RX_STALL_THRESHOLD_MS  10000u
+#define NET_RX_STALL_THRESHOLD_MS  60000u
 #endif
 
 /* Minimum override threshold. Prevents a misconfigured test from
