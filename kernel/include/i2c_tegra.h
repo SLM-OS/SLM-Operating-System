@@ -118,6 +118,19 @@ int tegra_i2c_write_reg16(struct tegra_i2c_bus *bus,
                           uint8_t  val);
 
 /*
+ * Write a 16-bit big-endian value to a 16-bit register address.
+ * Wire format: START | (slave<<1)|W ack | reg_hi ack | reg_lo ack |
+ * val_hi ack | val_lo ack | STOP. Matches Sony IMX219's CCI_REG16
+ * (and Linux's `cci_write` for 16-bit registers) semantics.
+ *
+ * Same return codes as `tegra_i2c_write_reg16`.
+ */
+int tegra_i2c_write_reg16_val16(struct tegra_i2c_bus *bus,
+                                uint8_t  slave_7bit,
+                                uint16_t reg,
+                                uint16_t val);
+
+/*
  * Read a single byte from a 16-bit register address on a 7-bit slave.
  * Two-message transfer: write reg_hi+reg_lo with REPEAT_START, then
  * read 1 byte and STOP. Same error codes as tegra_i2c_write_reg16,

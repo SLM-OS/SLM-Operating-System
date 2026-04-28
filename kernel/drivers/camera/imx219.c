@@ -179,6 +179,188 @@ int imx219_read_chip_id(uint16_t *out_chip_id)
     return 0;
 }
 
+/* IMX219 register-init sequence — width-tagged table walked by
+ * `imx219_write_table`. Mirrors L4T's `cci_reg_sequence` pattern
+ * but with width carried explicitly per entry instead of via the
+ * CCI_REG8 / CCI_REG16 macros (which encode width in the upper
+ * bits of the address — fine for kernel regmap, overkill here). */
+struct imx219_reg_seq {
+    uint16_t reg;        /* 16-bit register address */
+    uint16_t val;        /* up to 16-bit value */
+    uint8_t  width;      /* 1 or 2 — bytes to write big-endian */
+};
+
+#define R8(addr,  v)  { (addr), (v), 1 }
+#define R16(addr, v)  { (addr), (v), 2 }
+
+/* Common-init table — 31 writes copied verbatim from L4T's
+ * `imx219_common_regs` (`docs/reference/linux-imx219.c:161-203`).
+ * Sensor-mode-independent: PLL clock, undocumented tuning
+ * registers, frame-bank baseline. The numeric multipliers here
+ * (PLL_VT_MPY=57, PLL_OP_MPY=114, etc.) are tuned for a
+ * 24 MHz EXTPERIPH1 reference — see IMX219_XCLK_FREQ_HZ. */
+static const struct imx219_reg_seq imx219_common_regs[] = {
+    R8 (IMX219_REG_MODE_SELECT, 0x00),     /* into standby */
+
+    /* "To access addresses 0x3000-0x5fff" magic sequence. */
+    R8 (0x30eb, 0x05),
+    R8 (0x30eb, 0x0c),
+    R8 (0x300a, 0xff),
+    R8 (0x300b, 0xff),
+    R8 (0x30eb, 0x05),
+    R8 (0x30eb, 0x09),
+
+    /* PLL clock table (24 MHz EXTPERIPH1 reference). */
+    R8 (0x0301, 5),                         /* VTPXCK_DIV */
+    R8 (0x0303, 1),                         /* VTSYCK_DIV */
+    R8 (0x0304, 3),                         /* PREPLLCK_VT_DIV  (AUTO) */
+    R8 (0x0305, 3),                         /* PREPLLCK_OP_DIV  (AUTO) */
+    R16(0x0306, 57),                        /* PLL_VT_MPY */
+    R8 (0x030b, 1),                         /* OPSYCK_DIV */
+    R16(0x030c, 114),                       /* PLL_OP_MPY */
+
+    /* Undocumented tuning (datasheet §11; values from L4T). */
+    R8 (0x455e, 0x00),
+    R8 (0x471e, 0x4b),
+    R8 (0x4767, 0x0f),
+    R8 (0x4750, 0x14),
+    R8 (0x4540, 0x00),
+    R8 (0x47b4, 0x14),
+    R8 (0x4713, 0x30),
+    R8 (0x478b, 0x10),
+    R8 (0x478f, 0x10),
+    R8 (0x4793, 0x10),
+    R8 (0x4797, 0x0e),
+    R8 (0x479b, 0x0e),
+
+    /* Frame Bank Register Group "A" baseline. */
+    R16(0x0162, 3448),                      /* LINE_LENGTH_A */
+    R8 (0x0170, 1),                         /* X_ODD_INC_A */
+    R8 (0x0171, 1),                         /* Y_ODD_INC_A */
+
+    /* Output setup. */
+    R8 (0x0128, 0x00),                      /* DPHY_CTRL = TIMING_AUTO */
+    R16(0x012a, (IMX219_XCLK_FREQ_HZ / 1000000u) * 256u), /* EXCK_FREQ = MHz × 256 = 24×256=6144 */
+};
+
+/* Mode-specific writes for binning mode 1640×1232 RAW10 — derived
+ * from L4T's `imx219_set_framefmt` (`linux-imx219.c:586-662`)
+ * with crop = full pixel array and 2× digital binning H+V.
+ *
+ * Computed values:
+ *   X_ADD_STA_A = (8 - 8) = 0,  X_ADD_END_A = 0 + 3280 - 1 = 3279
+ *   Y_ADD_STA_A = (8 - 8) = 0,  Y_ADD_END_A = 0 + 2464 - 1 = 2463
+ *   BINNING_MODE_H/V = 0x01 (X2 digital)
+ *   X_OUTPUT_SIZE = 1640, Y_OUTPUT_SIZE = 1232
+ *   TP_WINDOW_W/H  = 1640, 1232 (test-pattern window matches output)
+ *   CSI_DATA_FORMAT_A = (10 << 8) | 10 = 0x0A0A
+ *   OPPXCK_DIV = 10 (= bpp) */
+static const struct imx219_reg_seq imx219_mode_binning_1640x1232[] = {
+    R16(0x0164, 0),                         /* X_ADD_STA_A */
+    R16(0x0166, 3279),                      /* X_ADD_END_A */
+    R16(0x0168, 0),                         /* Y_ADD_STA_A */
+    R16(0x016a, 2463),                      /* Y_ADD_END_A */
+    R8 (0x0174, IMX219_BINNING_X2),         /* BINNING_MODE_H */
+    R8 (0x0175, IMX219_BINNING_X2),         /* BINNING_MODE_V */
+    R16(0x016c, 1640),                      /* X_OUTPUT_SIZE */
+    R16(0x016e, 1232),                      /* Y_OUTPUT_SIZE */
+    R16(0x0624, 1640),                      /* TP_WINDOW_WIDTH */
+    R16(0x0626, 1232),                      /* TP_WINDOW_HEIGHT */
+    R16(0x018c, 0x0A0Au),                   /* CSI_DATA_FORMAT_A — RAW10 */
+    R8 (0x0309, 10),                        /* OPPXCK_DIV = bpp */
+};
+
+/* Lane mode — 2-lane D-PHY for IMX219-A on the Orin Nano dev kit.
+ * Single write between common-init and mode-specific blocks. */
+#define IMX219_REG_CSI_LANE_MODE     0x0114u
+#define IMX219_LANE_MODE_2LANE       0x01u
+
+/* Default control values L4T applies via __v4l2_ctrl_handler_setup
+ * (`linux-imx219.c:705`) AFTER the mode-init table and BEFORE
+ * MODE_SELECT=1. Without these the sensor uses internal defaults
+ * that prevent streaming — specifically VTS=0 means "can't compute
+ * frame timing", so the sensor never emits a SOF.
+ *
+ * For binning mode 1640×1232, VTS=1763 (per supported_modes[2]
+ * .vts_def in L4T). EXPOSURE=0x640 (1600 lines, IMX219_EXPOSURE_DEFAULT).
+ * DIGITAL_GAIN=0x0100 ("1.0x", IMX219_DGTL_GAIN_DEFAULT).
+ * ANALOG_GAIN=0 (IMX219_ANA_GAIN_DEFAULT). */
+static const struct imx219_reg_seq imx219_default_ctrls_binning[] = {
+    R8 (0x0157, 0),                         /* ANALOG_GAIN */
+    R16(0x0158, 0x0100),                    /* DIGITAL_GAIN = 1.0x */
+    R16(0x015a, 0x0640),                    /* EXPOSURE = 1600 lines */
+    R16(0x0160, 1763),                      /* VTS — binning-mode 30 fps frame timing */
+};
+
+#undef R8
+#undef R16
+
+/* Walk a register table, writing each entry via the appropriate
+ * I²C primitive. Returns 0 on success, or the first failing
+ * write's negative rc — leaves the sensor in a half-configured
+ * state on failure (caller should power-cycle). */
+static int imx219_write_table(const struct imx219_reg_seq *seq, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        int rc;
+        if (seq[i].width == 2u) {
+            rc = tegra_i2c_write_reg16_val16(&tegra_i2c_cam_bus,
+                                             IMX219_I2C_ADDR,
+                                             seq[i].reg,
+                                             seq[i].val);
+        } else {
+            rc = tegra_i2c_write_reg16(&tegra_i2c_cam_bus,
+                                       IMX219_I2C_ADDR,
+                                       seq[i].reg,
+                                       (uint8_t)seq[i].val);
+        }
+        if (rc != 0) {
+            WARN("imx219: I²C write reg=0x%04x val=0x%04x w=%u failed rc=%d "
+                 "at table index %zu",
+                 (unsigned)seq[i].reg, (unsigned)seq[i].val,
+                 (unsigned)seq[i].width, rc, i);
+            return rc;
+        }
+    }
+    return 0;
+}
+
+int imx219_set_mode_binning_1640x1232(void)
+{
+    /* 1. Common init (31 writes). */
+    int rc = imx219_write_table(imx219_common_regs,
+                                sizeof(imx219_common_regs)
+                                / sizeof(imx219_common_regs[0]));
+    if (rc != 0) return rc;
+
+    /* 2. Lane mode — 2 D-PHY lanes for IMX219-A. */
+    rc = tegra_i2c_write_reg16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                               IMX219_REG_CSI_LANE_MODE,
+                               IMX219_LANE_MODE_2LANE);
+    if (rc != 0) {
+        WARN("imx219: CSI_LANE_MODE write failed rc=%d", rc);
+        return rc;
+    }
+
+    /* 3. Mode-specific (12 writes) for 1640×1232 RAW10 binning. */
+    rc = imx219_write_table(imx219_mode_binning_1640x1232,
+                            sizeof(imx219_mode_binning_1640x1232)
+                            / sizeof(imx219_mode_binning_1640x1232[0]));
+    if (rc != 0) return rc;
+
+    /* 4. Default controls (4 writes) — VTS for frame timing,
+     * EXPOSURE / GAIN / DIGITAL_GAIN for AE baseline. Without
+     * VTS the sensor never produces a SOF (verified blocker on
+     * jetson-nano-1, this PR's iteration 1). */
+    rc = imx219_write_table(imx219_default_ctrls_binning,
+                            sizeof(imx219_default_ctrls_binning)
+                            / sizeof(imx219_default_ctrls_binning[0]));
+    if (rc != 0) return rc;
+
+    INFO("imx219: mode-init OK — 1640x1232 RAW10 binning, MODE_SELECT=standby");
+    return 0;
+}
+
 int imx219_streaming_enable(void)
 {
     return tegra_i2c_write_reg16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
@@ -202,6 +384,7 @@ int imx219_read_chip_id(uint16_t *out)
     if (out) *out = 0;
     return -1;
 }
+int imx219_set_mode_binning_1640x1232(void) { return -1; }
 int imx219_streaming_enable(void)  { return -1; }
 int imx219_streaming_disable(void) { return -1; }
 

@@ -6266,16 +6266,27 @@ int cmd_csidiag(int argc, char *argv[])
      * RCE sends CAPTURE_STATUS_IND with `capture_status.status`
      * = CAPTURE_STATUS_SUCCESS (1). */
 
+    /* Apply IMX219 mode-init register bank — 1640×1232 RAW10
+     * binning. ~45 register writes (PLL + lane mode + crop +
+     * binning + format). Without this the sensor stays in
+     * default state and never emits a SOF — verified hardware
+     * blocker on jetson-nano-1, PR #513. */
+    rc = imx219_set_mode_binning_1640x1232();
+    uart_printf("  imx219 mode-init: rc=%d (1640x1232 RAW10 binning)\r\n", rc);
+    if (rc != 0) {
+        uart_puts("  *** IMX219 mode-init failed — see WARN log.   ***\r\n");
+        uart_puts("  *** Run `imx219` first to power the sensor.   ***\r\n");
+        uart_puts("=== End ===\r\n");
+        return 0;
+    }
+
     /* Tell IMX219 to start streaming. MODE_SELECT (0x0100) goes
      * 0 → 1; sensor begins emitting CSI-2 frames on the next
-     * frame boundary (~33 ms at 30 fps). Caller must have
-     * already powered the sensor with the `imx219` shell
-     * command, which leaves it in standby. */
+     * frame boundary (~33 ms at 30 fps). */
     rc = imx219_streaming_enable();
     uart_printf("  imx219 stream-on: rc=%d (MODE_SELECT=0x01)\r\n", rc);
     if (rc != 0) {
         uart_puts("  *** I²C write to IMX219 MODE_SELECT failed.  ***\r\n");
-        uart_puts("  *** Run `imx219` first to power the sensor.  ***\r\n");
         uart_puts("=== End ===\r\n");
         return 0;
     }
