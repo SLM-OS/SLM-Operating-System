@@ -819,10 +819,16 @@ else
 endif
 
 # Stage the SDHCI test image so QEMU's `sd-card` device has a
-# backing file. Idempotent: only re-creates if missing. The image
-# is sparse (truncate, not dd) so the on-disk footprint stays tiny
-# (~500 KB after a typical QEMU run) until QEMU actually writes
-# blocks.
+# backing file. The recipe wipes and recreates the image every time
+# it fires — kernel tests mutate the image (FAT mkfs/probe, blob
+# writes leave 0x55AA boot-sector signatures, etc.), and any leftover
+# state from a prior run leaks back into the next run's
+# `boot_media_acquire()` and breaks tests that expect a fresh disk
+# (e.g. `blob_autoload_set` taking the FAT branch when it shouldn't).
+# The phony FORCE dep makes the recipe fire on every `make test`.
+# The image is sparse (truncate, not dd) so the on-disk footprint
+# stays tiny (~500 KB after a typical QEMU run) until QEMU actually
+# writes blocks; recreate cost is negligible.
 #
 # Two-tier creation (issue #392 Scope B): try SDHCI_TEST_IMG_SIZE
 # first (preferred — exercises the SDHC code path); on failure
@@ -830,43 +836,45 @@ endif
 # SDHCI_TEST_IMG_FALLBACK_SIZE which exercises SDSC instead. The
 # driver supports either via the CCS bit returned by ACMD41, so
 # all 6 SDHCI tests still run on the fallback path.
-$(SDHCI_TEST_IMG): | $(KERNEL_TEST_BUILD_DIR)
-	@if [ ! -f $@ ]; then \
-		if truncate -s $(SDHCI_TEST_IMG_SIZE) $@.tmp 2>/dev/null; then \
-			echo "Creating sparse $@ ($(SDHCI_TEST_IMG_SIZE), SDHC-sized)"; \
-		elif truncate -s $(SDHCI_TEST_IMG_FALLBACK_SIZE) $@.tmp 2>/dev/null; then \
-			echo ""; \
-			echo "WARN: cannot create $(SDHCI_TEST_IMG_SIZE) sparse image at $@;"; \
-			echo "      fell back to $(SDHCI_TEST_IMG_FALLBACK_SIZE) (SDSC-sized)."; \
-			echo "      All 6 SDHCI tests still run; the FatFs round-trip"; \
-			echo "      exercises the SDSC code path instead of SDHC."; \
-			echo "      See https://github.com/SLM-OS/SLM-Operating-System/issues/392"; \
-			echo "      for the full filesystem matrix."; \
-			echo ""; \
-		else \
-			rm -f $@.tmp; \
-			fstype=$$(stat -f -c %T $$(dirname $@) 2>/dev/null || echo unknown); \
-			echo ""; \
-			echo "ERROR: cannot create even a $(SDHCI_TEST_IMG_FALLBACK_SIZE) sparse image at $@"; \
-			echo "       build-dir filesystem: $$fstype"; \
-			case "$$fstype" in \
-				vfat|msdos|exfat) \
-					echo "       FAT-family filesystems don't support sparse files;" ;\
-					echo "       truncate would have to allocate the full size for real." ;; \
-				tmpfs) \
-					echo "       tmpfs likely hit its size cap on the truncate write."; \
-					echo "       Increase the tmpfs cap or move the build dir." ;; \
-				*) \
-					echo "       Disk doesn't have $(SDHCI_TEST_IMG_FALLBACK_SIZE) free, or a" ;\
-					echo "       file-size ulimit is restricting truncate." ;; \
-			esac; \
-			echo "       See https://github.com/SLM-OS/SLM-Operating-System/issues/392"; \
-			echo "       for the full failure-mode matrix and workarounds."; \
-			echo ""; \
-			exit 1; \
-		fi; \
-		mv $@.tmp $@; \
+.PHONY: sdhci-test-img-force
+sdhci-test-img-force:
+
+$(SDHCI_TEST_IMG): sdhci-test-img-force | $(KERNEL_TEST_BUILD_DIR)
+	@rm -f $@ $@.tmp
+	@if truncate -s $(SDHCI_TEST_IMG_SIZE) $@.tmp 2>/dev/null; then \
+		echo "Creating sparse $@ ($(SDHCI_TEST_IMG_SIZE), SDHC-sized)"; \
+	elif truncate -s $(SDHCI_TEST_IMG_FALLBACK_SIZE) $@.tmp 2>/dev/null; then \
+		echo ""; \
+		echo "WARN: cannot create $(SDHCI_TEST_IMG_SIZE) sparse image at $@;"; \
+		echo "      fell back to $(SDHCI_TEST_IMG_FALLBACK_SIZE) (SDSC-sized)."; \
+		echo "      All 6 SDHCI tests still run; the FatFs round-trip"; \
+		echo "      exercises the SDSC code path instead of SDHC."; \
+		echo "      See https://github.com/SLM-OS/SLM-Operating-System/issues/392"; \
+		echo "      for the full filesystem matrix."; \
+		echo ""; \
+	else \
+		rm -f $@.tmp; \
+		fstype=$$(stat -f -c %T $$(dirname $@) 2>/dev/null || echo unknown); \
+		echo ""; \
+		echo "ERROR: cannot create even a $(SDHCI_TEST_IMG_FALLBACK_SIZE) sparse image at $@"; \
+		echo "       build-dir filesystem: $$fstype"; \
+		case "$$fstype" in \
+			vfat|msdos|exfat) \
+				echo "       FAT-family filesystems don't support sparse files;" ;\
+				echo "       truncate would have to allocate the full size for real." ;; \
+			tmpfs) \
+				echo "       tmpfs likely hit its size cap on the truncate write."; \
+				echo "       Increase the tmpfs cap or move the build dir." ;; \
+			*) \
+				echo "       Disk doesn't have $(SDHCI_TEST_IMG_FALLBACK_SIZE) free, or a" ;\
+				echo "       file-size ulimit is restricting truncate." ;; \
+		esac; \
+		echo "       See https://github.com/SLM-OS/SLM-Operating-System/issues/392"; \
+		echo "       for the full failure-mode matrix and workarounds."; \
+		echo ""; \
+		exit 1; \
 	fi
+	@mv $@.tmp $@
 
 $(KERNEL_TEST_BUILD_DIR):
 	@mkdir -p $@
