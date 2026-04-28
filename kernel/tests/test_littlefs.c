@@ -579,17 +579,12 @@ static void test_persistent_lfs_store_reformats_after_mount_failure(void)
     TEST_ASSERT_EQUAL_INT(FR_OK, f_stat(PERSISTENT_LFS_STORE_PATH, &fno));
     TEST_ASSERT_EQUAL_INT(FR_OK, f_open(&fp, PERSISTENT_LFS_STORE_PATH, FA_WRITE));
     {
-        /* 0xCD pattern (not 0x00): LFS treats an all-zero superblock as
-         * a possible erased/empty state and the in-tree port has been
-         * observed to accept it instead of failing the mount. A garbage
-         * non-zero pattern guarantees the magic check fails so the
-         * test exercises the corruption-recovery path it intends to. */
-        uint8_t pattern[512];
-        memset(pattern, 0xCD, sizeof(pattern));
+        uint8_t zero[512];
+        memset(zero, 0, sizeof(zero));
         FSIZE_t remaining = fno.fsize;
         while (remaining > 0) {
-            UINT chunk = remaining > sizeof(pattern) ? sizeof(pattern) : (UINT)remaining;
-            TEST_ASSERT_EQUAL_INT(FR_OK, f_write(&fp, pattern, chunk, &wrote));
+            UINT chunk = remaining > sizeof(zero) ? sizeof(zero) : (UINT)remaining;
+            TEST_ASSERT_EQUAL_INT(FR_OK, f_write(&fp, zero, chunk, &wrote));
             TEST_ASSERT_EQUAL_UINT(chunk, wrote);
             remaining -= chunk;
         }

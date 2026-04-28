@@ -502,6 +502,11 @@ static void build_long_path(char *out, size_t cap,
  * detaching an already-detached FatFs disk is a no-op, and removing
  * a missing `.fat-authoritative` returns an error we deliberately
  * ignore.
+ *
+ * Future suite-specific setup should NOT redefine setUp() — that
+ * would silently displace this reset for every other suite in the
+ * binary. Add an explicit reset helper called from each affected
+ * test instead (e.g. `my_suite_test_reset()`).
  */
 void setUp(void)
 {
