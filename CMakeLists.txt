@@ -545,6 +545,12 @@ set(KERNEL_SOURCES
     kernel/src/shell_exec.c
     kernel/src/shell_component.c
     kernel/src/shell_top.c
+    # NOTE: kernel/src/slm_shell.c is built as a separate static
+    # library `slm_shell` (linked further down) so it can compile
+    # WITHOUT -mgeneral-regs-only — rust_slm_session_open /
+    # rust_slm_prompt take f32 by value (AAPCS64 V0/V1) which the
+    # kernel's default FP-disable forbids. Same pattern as `lua` /
+    # `ai_sched`.
     kernel/src/component_runtime.c
     # msg_router: Rust implementation in runtime/src/msg_router.rs
     # (linked via --whole-archive from Rust staticlib)
@@ -773,6 +779,10 @@ set(TEST_SOURCES
     kernel/tests/test_model_mem_smoke.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_eviction.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_slm_load.c>
+    # SLM shell verb tests (Phase SLM, M7.1). ARM64-only because the
+    # `slm` shell command family compiles against the Rust FFI which
+    # is ARM64-gated like the rest of the SLM stack.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_slm_shell.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_loader.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_swap.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_syscall.c>
@@ -1257,6 +1267,55 @@ target_compile_options(lua PRIVATE
 
 # Link with Lua library
 target_link_libraries(slmos.elf PRIVATE lua)
+
+# ==========================================================================
+# SLM Shell library (Phase SLM, M7.1)
+#
+# `slm` shell verb family. Compiled WITHOUT -mgeneral-regs-only so it
+# can call rust_slm_session_open / rust_slm_prompt — both take f32 by
+# value (AAPCS64 V0/V1) which the kernel's default FP-disable forbids.
+# Same isolation pattern as the `lua` and `ai_sched` libraries above.
+# ==========================================================================
+add_library(slm_shell STATIC kernel/src/slm_shell.c)
+target_include_directories(slm_shell PRIVATE ${KERNEL_INCLUDES} ${BUILD_INFO_DIR})
+add_dependencies(slm_shell generate_build_info)
+
+# Inherit CMAKE_C_STANDARD (set to 23 above) via CMake's per-target
+# property — the global -std flag is auto-selected to whichever spelling
+# (-std=c23 / -std=c2x / -std=gnu2x) the active toolchain accepts.
+set_target_properties(slm_shell PROPERTIES
+    C_STANDARD ${CMAKE_C_STANDARD}
+    C_STANDARD_REQUIRED ON)
+
+if(PLATFORM STREQUAL "X86_64")
+    target_compile_options(slm_shell PRIVATE
+        -ffreestanding
+        -nostdlib
+        -mno-red-zone -fno-stack-protector -fno-pic
+        -msse -msse2
+        -O2
+    )
+    target_include_directories(slm_shell PRIVATE
+        ${CMAKE_SOURCE_DIR}/kernel/include/compat)
+else()
+    # ARM64: omit -mgeneral-regs-only so f32 args can land in V0/V1.
+    target_compile_options(slm_shell PRIVATE
+        -ffreestanding
+        -nostdlib
+        -mcpu=${TARGET_CPU}
+        -fno-pie
+        -O2
+    )
+endif()
+
+target_compile_definitions(slm_shell PRIVATE
+    $<$<STREQUAL:${PLATFORM},X86_64>:PLATFORM_X86_64=1>
+    $<$<STREQUAL:${PLATFORM},QEMU_VIRT>:PLATFORM_QEMU_VIRT=1>
+    $<$<STREQUAL:${PLATFORM},RASPI5>:PLATFORM_RASPI5=1>
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:PLATFORM_JETSON_ORIN_NANO=1>
+)
+
+target_link_libraries(slmos.elf PRIVATE slm_shell)
 
 # ==========================================================================
 # nanopb — freestanding protobuf runtime (for .hef parsing)

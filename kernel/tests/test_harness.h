@@ -44,6 +44,10 @@ int test_suite_eviction(void);
 /* SLM loader / GGUF FFI tests (Phase SLM, M1.5 — calls into Rust) */
 int test_suite_slm_load(void);
 
+/* SLM shell verb dispatch tests (Phase SLM, M7.1 — calls into the
+ * `slm` command family registered via builtin_commands[]) */
+int test_suite_slm_shell(void);
+
 /* Priority inheritance mutex tests */
 int test_suite_pi_mutex(void);
 
