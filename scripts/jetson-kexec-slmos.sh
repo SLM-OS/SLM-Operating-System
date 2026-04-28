@@ -113,30 +113,56 @@ for arg in "$@"; do
 done
 KERNEL="${KERNEL:-/root/slmos.elf}"
 
+# start_one_helper — stage one channel-inherit helper and block until
+# its handoff is published.
+#
+# Exit codes (callers can distinguish; today both invocations use
+# `|| true` because every non-zero outcome is non-fatal — kexec
+# proceeds with whatever channels are live):
+#   0 — newly started or already running (handoff is live in DRAM)
+#   1 — skipped: helper binary or weights directory missing
+#   2 — started but timed out before reaching "kexec now"
+#
+# Args:
+#   $1 = helper basename (gpu-kernel-mnist | gpu-kernel-sched-mlp)
+#   $2 = weights directory under $helper_dir
+#   $3 = log file path
 start_one_helper() {
-    # $1 = helper basename (gpu-kernel-mnist | gpu-kernel-sched-mlp)
-    # $2 = weights directory under $helper_dir
-    # $3 = log file path
     local helper_name="$1"
     local weights_subdir="$2"
     local log="$3"
     local helper_dir="${SLMOS_HELPER_DIR:-/root/gpu-mnist}"
     local helper_path="$helper_dir/$helper_name"
 
-    if pgrep -f "$helper_name --preserve-for-kexec" >/dev/null 2>&1; then
+    # Exact-match the full argv ("-fx" forces a fixed string match
+    # against the entire command line). Plain `-f` does a regex
+    # substring match against the joined argv, which would also fire
+    # on e.g. `tail -f gpu-kernel-mnist --preserve-for-kexec.log`.
+    if pgrep -fx "$helper_path --preserve-for-kexec.*" >/dev/null 2>&1 ||
+       pgrep -fx "./$helper_name --preserve-for-kexec.*" >/dev/null 2>&1; then
         echo "       $helper_name: already running"
         return 0
     fi
     if [[ ! -x "$helper_path" ]]; then
         echo "       $helper_name: not found at $helper_path (skipping)"
-        return 0
+        return 1
     fi
     if [[ ! -d "$helper_dir/$weights_subdir" ]]; then
         echo "       $helper_name: weights dir $weights_subdir missing under $helper_dir (skipping)"
-        return 0
+        return 1
     fi
 
     : > "$log"
+    # `set -e` does not propagate into a backgrounded subshell, so a
+    # silent `cd` failure here would leak through as "helper started
+    # successfully but never logged anything" 60 seconds later. Verify
+    # the directory explicitly before launch — `helper_path` checked
+    # `-x` above so this should always succeed in practice, but the
+    # explicit test makes the failure mode loud rather than mysterious.
+    if [[ ! -d "$helper_dir" ]]; then
+        echo "Warning: $helper_name: helper_dir $helper_dir missing at launch" >&2
+        return 2
+    fi
     (cd "$helper_dir" && \
         nohup setsid "./$helper_name" \
             --preserve-for-kexec \
@@ -145,6 +171,14 @@ start_one_helper() {
             --shader-dir "." > "$log" 2>&1 < /dev/null &)
 
     # Wait for the helper to reach the "Sleeping ... kexec now" line.
+    # The "kexec now" suffix is a stringly-typed handoff contract
+    # between this script and the helper binaries (see
+    # host-tools/gpu-kernel-{mnist,sched-mlp}/main.cpp — both print
+    # "Sleeping until kill, kexec now" right before they go to sleep
+    # holding the GPU channel open). If a future helper revision
+    # changes that string, this match needs to update too — there's
+    # no other signal that the channel is fully staged.
+    #
     # Helpers go through their full Linux-side dispatch self-check
     # before sleeping; on jetson-nano-2 this takes ~5 s for MNIST and
     # ~10 s for sched-MLP. Cap at 60 s so a wedged helper doesn't
@@ -162,8 +196,8 @@ start_one_helper() {
 
     echo "Warning: $helper_name did not reach 'kexec now' within 60s" >&2
     echo "         tail of $log:" >&2
-    tail -10 "$log" >&2 || true
-    return 1
+    tail -50 "$log" >&2 || true
+    return 2
 }
 
 maybe_start_gpu_helpers() {
