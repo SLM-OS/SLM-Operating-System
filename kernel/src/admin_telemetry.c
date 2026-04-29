@@ -499,7 +499,19 @@ void admin_telemetry_periodic_pump(uint32_t now_ms)
      * could read it. The drain after each publish lets the consumer
      * fan the sample out to TCP clients before the next publish
      * lands in the slot. See the tcp_telemetry_server_poll forward-
-     * decl docstring above for the bug-history rationale. */
+     * decl docstring above for the bug-history rationale.
+     *
+     * CONSUMER-COUPLING LIMITATION: this drain is hardcoded to
+     * tcp_telemetry_server, the only same-task wildcard subscriber
+     * to `tel.*` that exists today. A future second consumer
+     * (e.g. a UDP emitter at `kernel/src/udp_telemetry_emitter.c`,
+     * or a Lua script holding a `slm.telemetry_subscribe` callback)
+     * would still see only `tel.mem` per pump tick because nothing
+     * drains its mailbox between the three publishes. The general
+     * fix is either a `msg_router_dispatch_pending()` primitive
+     * that drains every wildcard mailbox, or a multi-slot ring-
+     * buffer mailbox in msg_router itself. Both are out-of-scope
+     * for this PR; tracked separately. */
     publish_cpu_util(cpus);
     tcp_telemetry_server_poll();
     publish_steal(cpus);
