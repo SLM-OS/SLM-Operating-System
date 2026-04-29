@@ -540,3 +540,87 @@ void admin_telemetry_get_last_memory_payload_for_tests(char *out, size_t cap)
 {
     copy_payload_truncating(out, cap, g_last_memory_payload);
 }
+
+/* ===== AI scheduler decision audit (tel.aix) ========================= */
+
+static uint64_t g_ai_decision_published;
+static char     g_last_ai_decision_payload[TELEMETRY_MAX_PAYLOAD];
+
+static int append_kv_char(char *buf, size_t cap, size_t *pos,
+                          const char *key, char value)
+{
+    size_t klen = 0;
+    for (const char *p = key; *p; p++) klen++;
+    size_t need = (*pos > 0 ? 1u : 0u) + klen + 1u + 1u; /* sp+key+'='+ch */
+    if (*pos + need + 1u > cap) return -1;
+
+    if (*pos > 0) buf[(*pos)++] = ' ';
+    for (const char *p = key; *p; p++) buf[(*pos)++] = *p;
+    buf[(*pos)++] = '=';
+    buf[(*pos)++] = value;
+    return 0;
+}
+
+void admin_telemetry_record_ai_decision(char policy_id,
+                                        uint8_t core_assignment,
+                                        uint8_t priority_adj,
+                                        uint8_t preempt,
+                                        uint64_t dt_ns,
+                                        bool fallback)
+{
+    char payload[TELEMETRY_MAX_PAYLOAD];
+    size_t pos = 0;
+
+    /* Wire-format guard. policy_id lands directly in the payload string
+     * which travels through msg_router → tcp_telemetry_server's
+     * newline-framed protocol; an out-of-set char (especially '\n' or
+     * '\0') would corrupt the per-line TCP framing seen by host
+     * consumers. Production callers all pass documented constants;
+     * fail-open with '?' so a future buggy caller is detectable in
+     * the wire stream rather than silently breaking it. */
+    if (policy_id != ADMIN_TEL_AI_POLICY_MLP   &&
+        policy_id != ADMIN_TEL_AI_POLICY_PPO   &&
+        policy_id != ADMIN_TEL_AI_POLICY_HAILO) {
+        policy_id = ADMIN_TEL_AI_POLICY_UNKNOWN;
+    }
+
+    /* p=<one char>. Always present — the policy id is meaningful in
+     * both success and fallback cases (which AI policy was active
+     * when the decision was attempted). */
+    if (append_kv_char(payload, sizeof(payload), &pos, "p", policy_id) != 0)
+        goto done;
+
+    if (!fallback) {
+        /* Action fields. core/priority_adj/preempt are u8 with small
+         * domains; append_kv_uint formats them as decimal. */
+        if (append_kv_uint(payload, sizeof(payload), &pos, "c",  (uint64_t)core_assignment) != 0) goto done;
+        if (append_kv_uint(payload, sizeof(payload), &pos, "pa", (uint64_t)priority_adj)    != 0) goto done;
+        if (append_kv_uint(payload, sizeof(payload), &pos, "pe", (uint64_t)preempt)         != 0) goto done;
+    }
+
+    if (append_kv_uint(payload, sizeof(payload), &pos, "dt", dt_ns) != 0) goto done;
+    if (append_kv_uint(payload, sizeof(payload), &pos, "fb", fallback ? 1ull : 0ull) != 0) goto done;
+done:
+    payload[pos] = '\0';
+    memcpy(g_last_ai_decision_payload, payload, sizeof(g_last_ai_decision_payload));
+    if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_AI_DECIDE,
+                           (const uint8_t *)payload) == 0) {
+        g_ai_decision_published += 1u;
+    }
+}
+
+uint64_t admin_telemetry_get_ai_decision_published(void)
+{
+    return g_ai_decision_published;
+}
+
+void admin_telemetry_get_last_ai_decision_payload_for_tests(char *out, size_t cap)
+{
+    copy_payload_truncating(out, cap, g_last_ai_decision_payload);
+}
+
+void admin_telemetry_ai_decision_reset_for_tests(void)
+{
+    g_ai_decision_published = 0;
+    g_last_ai_decision_payload[0] = '\0';
+}

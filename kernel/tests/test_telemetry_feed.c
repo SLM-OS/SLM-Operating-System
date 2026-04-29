@@ -369,6 +369,166 @@ static void test_periodic_payload_truncates_to_caller_cap(void)
     admin_telemetry_get_last_cpu_payload_for_tests(small, 0u);
 }
 
+/* ---------- AI scheduler decision audit (tel.aix) ------------------- */
+
+static void test_ai_decision_publish_increments_counter(void)
+{
+    /* admin_telemetry_record_ai_decision must increment its publish
+     * counter on every call (success or fallback). */
+    admin_telemetry_ai_decision_reset_for_tests();
+    uint64_t before = admin_telemetry_get_ai_decision_published();
+
+    admin_telemetry_record_ai_decision(ADMIN_TEL_AI_POLICY_MLP,
+                                       2u, 1u, 0u, 12345u, false);
+
+    TEST_ASSERT_EQUAL_UINT64(before + 1u,
+                             admin_telemetry_get_ai_decision_published());
+}
+
+static void test_ai_decision_success_payload_format(void)
+{
+    /* Successful decision: payload must include p, c, pa, pe, dt, fb
+     * in documented order, with fb=0. */
+    admin_telemetry_ai_decision_reset_for_tests();
+    admin_telemetry_record_ai_decision(ADMIN_TEL_AI_POLICY_MLP,
+                                       3u, 2u, 1u, 87654u, false);
+
+    char payload[64] = {0};
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=m"),
+        "tel.aix must include policy id");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "c=3"),
+        "tel.aix must include core_assignment");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "pa=2"),
+        "tel.aix must include priority_adj");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "pe=1"),
+        "tel.aix must include preempt");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "dt=87654"),
+        "tel.aix must include decision latency");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "fb=0"),
+        "tel.aix must include fallback flag");
+
+    /* Documented order: p < c < pa < pe < dt < fb. */
+    const char *p  = strstr(payload, "p=");
+    const char *c  = strstr(payload, "c=");
+    const char *pa = strstr(payload, "pa=");
+    const char *pe = strstr(payload, "pe=");
+    const char *dt = strstr(payload, "dt=");
+    const char *fb = strstr(payload, "fb=");
+    TEST_ASSERT_TRUE(p < c && c < pa && pa < pe && pe < dt && dt < fb);
+}
+
+static void test_ai_decision_fallback_omits_action_fields(void)
+{
+    /* Fallback (fb=1) means inference failed → action is undefined.
+     * The publisher must omit c/pa/pe so a host viewer doesn't read
+     * stale or zeroed action data as meaningful. */
+    admin_telemetry_ai_decision_reset_for_tests();
+    /* core_assignment / priority_adj / preempt args are ignored when
+     * fallback=true; pass arbitrary values to confirm the publisher
+     * skips them rather than serialising whatever the caller passed. */
+    admin_telemetry_record_ai_decision(ADMIN_TEL_AI_POLICY_PPO,
+                                       7u, 9u, 1u, 5000u, true);
+
+    char payload[64] = {0};
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=p"),
+        "tel.aix fallback still includes policy id");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "dt=5000"),
+        "tel.aix fallback still includes latency");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "fb=1"),
+        "tel.aix fallback flag must be 1");
+    TEST_ASSERT_MESSAGE(strstr(payload, "c=7") == NULL,
+        "tel.aix fallback must NOT include c= (action is undefined)");
+    TEST_ASSERT_MESSAGE(strstr(payload, "pa=") == NULL,
+        "tel.aix fallback must NOT include pa=");
+    TEST_ASSERT_MESSAGE(strstr(payload, "pe=") == NULL,
+        "tel.aix fallback must NOT include pe=");
+}
+
+static void test_ai_decision_policy_ids(void)
+{
+    /* All three documented policy ids must round-trip through the
+     * payload. */
+    admin_telemetry_ai_decision_reset_for_tests();
+    char payload[64];
+
+    admin_telemetry_record_ai_decision(ADMIN_TEL_AI_POLICY_MLP,
+                                       0u, 0u, 0u, 1u, false);
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=m"), "MLP id round-trip");
+
+    admin_telemetry_record_ai_decision(ADMIN_TEL_AI_POLICY_PPO,
+                                       0u, 0u, 0u, 1u, false);
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=p"), "PPO id round-trip");
+
+    admin_telemetry_record_ai_decision(ADMIN_TEL_AI_POLICY_HAILO,
+                                       0u, 0u, 0u, 1u, false);
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=h"), "Hailo id round-trip");
+}
+
+static void test_ai_decision_payload_capped_at_max_msg_len(void)
+{
+    /* Worst case: largest plausible values in every field still fit
+     * MAX_MSG_LEN=60. Pin so future schema additions are caught. */
+    admin_telemetry_ai_decision_reset_for_tests();
+    admin_telemetry_record_ai_decision(ADMIN_TEL_AI_POLICY_HAILO,
+                                       255u, 255u, 1u,
+                                       UINT64_MAX, false);
+
+    char payload[64];
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_MESSAGE(strlen(payload) < 60,
+        "tel.aix worst-case payload must fit MAX_MSG_LEN=60");
+}
+
+static void test_ai_decision_topic_fits_msg_router(void)
+{
+    TEST_ASSERT_TRUE(strlen(TELEMETRY_TOPIC_AI_DECIDE) < 16);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(TELEMETRY_TOPIC_AI_DECIDE,
+                                    TELEMETRY_TOPIC_PREFIX, 4));
+}
+
+static void test_ai_decision_unknown_policy_id_falls_open_to_marker(void)
+{
+    /* Wire-format defense: any policy_id outside the documented set
+     * is replaced with '?'. The threat model is a future caller
+     * passing a typo, a new policy id that hasn't been added to
+     * sched_ai.c's dispatch yet, or worst-case a control char that
+     * would split the TCP-framed sample line at the wrong byte and
+     * corrupt host-side parsers. */
+    admin_telemetry_ai_decision_reset_for_tests();
+    char payload[64];
+
+    /* Plausible "looks valid but isn't documented" cases. */
+    admin_telemetry_record_ai_decision('g',  0u, 0u, 0u, 1u, false);
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=?"),
+        "unknown policy id 'g' must fail-open to '?'");
+    TEST_ASSERT_MESSAGE(strstr(payload, "p=g") == NULL,
+        "raw 'g' must NOT reach the wire");
+
+    /* Wire-format hostile: newline would split the TCP record. */
+    admin_telemetry_record_ai_decision('\n', 0u, 0u, 0u, 1u, false);
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_MESSAGE(strchr(payload, '\n') == NULL,
+        "no newline must reach the wire — would corrupt tcp framing");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=?"),
+        "newline policy id must fail-open to '?'");
+
+    /* Embedded nul would terminate the payload string mid-record. */
+    admin_telemetry_record_ai_decision('\0', 0u, 0u, 0u, 1u, false);
+    admin_telemetry_get_last_ai_decision_payload_for_tests(payload, sizeof(payload));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "p=?"),
+        "nul policy id must fail-open to '?'");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(payload, "fb="),
+        "fb= field must still be present after the policy guard");
+}
+
 /* ---------- Suite registration --------------------------------------- */
 
 int test_suite_telemetry_feed(void)
@@ -393,5 +553,12 @@ int test_suite_telemetry_feed(void)
     RUN_TEST(test_periodic_payload_capped_at_max_msg_len);
     RUN_TEST(test_periodic_payload_empty_before_publish);
     RUN_TEST(test_periodic_payload_truncates_to_caller_cap);
+    RUN_TEST(test_ai_decision_publish_increments_counter);
+    RUN_TEST(test_ai_decision_success_payload_format);
+    RUN_TEST(test_ai_decision_fallback_omits_action_fields);
+    RUN_TEST(test_ai_decision_policy_ids);
+    RUN_TEST(test_ai_decision_payload_capped_at_max_msg_len);
+    RUN_TEST(test_ai_decision_topic_fits_msg_router);
+    RUN_TEST(test_ai_decision_unknown_policy_id_falls_open_to_marker);
     return UNITY_END();
 }

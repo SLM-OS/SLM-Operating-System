@@ -16,6 +16,7 @@
 
 #include "sched_policy.h"
 #include "fp_context.h"
+#include "admin_telemetry.h"
 #include "ai_inference.h"
 #include "ai_state.h"
 #include "ai_types.h"
@@ -72,7 +73,8 @@ static struct ai_policy_stats ai_ppo_stats;
 static uint32_t ai_assign_cpu_common(
     struct task *task,
     int (*infer_fn)(const float *, struct ai_sched_action *),
-    struct ai_policy_stats *stats)
+    struct ai_policy_stats *stats,
+    char policy_id)
 {
     FP_CONTEXT_SAVE();
 
@@ -110,6 +112,7 @@ static uint32_t ai_assign_cpu_common(
     if (ret < 0) {
         stats->fallbacks++;
         rate_ewma_tick(&stats->fallback_rate, t1);
+        admin_telemetry_record_ai_decision(policy_id, 0u, 0u, 0u, dt, true);
         FP_CONTEXT_RESTORE();
         return sched_policy_heuristic.assign_cpu(task);
     }
@@ -120,6 +123,7 @@ static uint32_t ai_assign_cpu_common(
          task->cpu_affinity == CPU_AFFINITY_ANY)) {
         stats->fallbacks++;
         rate_ewma_tick(&stats->fallback_rate, t1);
+        admin_telemetry_record_ai_decision(policy_id, 0u, 0u, 0u, dt, true);
         FP_CONTEXT_RESTORE();
         return sched_policy_heuristic.assign_cpu(task);
     }
@@ -139,6 +143,13 @@ static uint32_t ai_assign_cpu_common(
     if (action.preempt && task->effective_priority < TASK_PRIORITY_CRITICAL) {
         task->effective_priority++;
     }
+
+    /* Successful AI decision — emit tel.aix audit sample. */
+    admin_telemetry_record_ai_decision(policy_id,
+                                       action.core_assignment,
+                                       action.priority_adj,
+                                       action.preempt,
+                                       dt, false);
 
     FP_CONTEXT_RESTORE();
     return action.core_assignment;
@@ -264,7 +275,7 @@ static int ai_schedule_mlp_via_device(const float *state,
 static uint32_t ai_mlp_assign_cpu(struct task *task)
 {
     return ai_assign_cpu_common(task, ai_schedule_mlp_via_device,
-                                &ai_mlp_stats);
+                                &ai_mlp_stats, ADMIN_TEL_AI_POLICY_MLP);
 }
 
 const struct sched_policy_ops sched_policy_ai_mlp = {
@@ -329,7 +340,8 @@ static void ai_ppo_shutdown(void)
 
 static uint32_t ai_ppo_assign_cpu(struct task *task)
 {
-    return ai_assign_cpu_common(task, ai_schedule_ppo, &ai_ppo_stats);
+    return ai_assign_cpu_common(task, ai_schedule_ppo, &ai_ppo_stats,
+                                ADMIN_TEL_AI_POLICY_PPO);
 }
 
 const struct sched_policy_ops sched_policy_ai_ppo = {
@@ -622,7 +634,7 @@ static int ai_schedule_mlp_via_hailo(const float *state,
 static uint32_t ai_hailo_assign_cpu(struct task *task)
 {
     return ai_assign_cpu_common(task, ai_schedule_mlp_via_hailo,
-                                &ai_hailo_stats);
+                                &ai_hailo_stats, ADMIN_TEL_AI_POLICY_HAILO);
 }
 
 const struct sched_policy_ops sched_policy_ai_hailo = {

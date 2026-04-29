@@ -216,10 +216,22 @@ rationale). Wildcard `tel.*` matches everything in this table.
 | `tel.cpu` | 1 Hz from `net_poll` | `c0=<load%> c1=<load%> ... c<n>=<load%>` |
 | `tel.stl` | 1 Hz from `net_poll` | `att=<n> ok=<n> stl=<n> emp=<n> fll=<n>` (work-stealing deltas across all CPUs) |
 | `tel.mem` | 1 Hz from `net_poll` | `fp=<n> tp=<n> wev=<n> xev=<n>` (free pages, total pages, weight/workspace eviction-count deltas) |
+| `tel.aix` | per AI scheduler decision | `p=<m\|p\|h\|?> c=<core> pa=<0..2> pe=<0\|1> dt=<ns> fb=<0\|1>` — fallback (`fb=1`) omits `c/pa/pe`; `p=?` is the wire-format fail-open marker for an unrecognised policy id |
 
 `tel.cpu` / `tel.stl` / `tel.mem` are the M4-follow-up cohort that
 landed via the `net_poll` periodic pump — see §14.8 for the deferral
 note this work resolved.
+
+`tel.aix` is the AI-scheduler decision audit trail. Implicit opt-in:
+the publisher only fires from `ai_assign_cpu_common` in `sched_ai.c`,
+which is reached only when an AI policy (`ai_mlp` / `ai_ppo` /
+`ai_hailo`) is active. With `heuristic` (the default policy), the
+publish path is unreachable — same trade-off as `tel.evi` (allocator-
+driven only) and `tel.inf` (Lua-binding-driven only). Per-decision
+publish rate while an AI policy is active is dispatcher-rate (every
+yield point under `COOP_PREEMPT`); the BLOCKING NOTE in
+`admin_telemetry_record_ai_decision`'s docstring covers the wedged-
+subscriber risk.
 
 ### 7.2 Back-pressure
 
@@ -242,8 +254,10 @@ The in-process bus is bridged to TCP by a dedicated push server, allowing a host
 tel.cpu seq=1 ts=120000 c0=42 c1=99 c2=18 c3=7
 tel.stl seq=2 ts=120000 att=12 ok=11 stl=0 emp=1 fll=0
 tel.mem seq=3 ts=120000 fp=10240 tp=12000 wev=0 xev=0
-tel.inf seq=4 ts=120031 dt=42 ok=1
-tel.evi seq=5 ts=120052 dt=87 fb=0
+tel.aix seq=4 ts=120010 p=m c=2 pa=1 pe=0 dt=8421 fb=0
+tel.inf seq=5 ts=120031 dt=42 ok=1
+tel.evi seq=6 ts=120052 dt=87 fb=0
+tel.aix seq=7 ts=120063 p=m dt=12087 fb=1
 ```
 
 The banner is emitted once on accept; comment lines start with `#` and consumers ignore them. Sample lines are `<topic> seq=<n> ts=<sys_now_ms> <payload>\n`, with `<payload>` being the msg_router payload verbatim (see §7.1 compact-topic table for per-topic key shapes).

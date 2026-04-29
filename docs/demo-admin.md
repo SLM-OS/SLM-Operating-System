@@ -155,7 +155,8 @@ Inference
 
 Cumulative feed counters per emitter topic + a one-line subscriber
 hint. M4 shipped `tel.evi` and `tel.inf` (event-driven); PR #565 added
-`tel.cpu`, `tel.stl`, and `tel.mem` (1 Hz periodic).
+`tel.cpu`, `tel.stl`, and `tel.mem` (1 Hz periodic); the AI scheduler
+audit topic `tel.aix` is the latest addition.
 
 ```
 Telemetry feed
@@ -164,17 +165,20 @@ Telemetry feed
   tel.cpu      published 42      (per-CPU load%, 1 Hz)
   tel.stl      published 42      (work-stealing deltas, 1 Hz)
   tel.mem      published 42      (memory pressure, 1 Hz)
-  total        134
+  tel.aix      published 187     (AI scheduler decision, per-decision)
+  total        320
 
   Subscribe pattern from another shell:
     lua -e 'slm.telemetry_subscribe("tel.*", function(t,d) print(t,d) end)'
 ```
 
 The three periodic topics fire from `net_poll` once a second once
-the network task is running. They go silent automatically when no
-subscriber matches the topic — `msg_router_publish` short-circuits
-on topic-not-found, so the cost of an unsubscribed feed is one
-formatted-string + one hash lookup per topic per second.
+the network task is running. `tel.aix` only fires when an AI
+scheduler policy (`ai_mlp` / `ai_ppo` / `ai_hailo`) is active —
+heuristic policy never reaches the publish path. All topics go
+silent automatically when no subscriber matches — `msg_router_publish`
+short-circuits on topic-not-found, so the cost of an unsubscribed
+feed is one formatted-string + one hash lookup per publish.
 
 ### 1.7 REPL (key 7)
 
