@@ -77,19 +77,12 @@
  * `dt_ns` is the wall-clock latency of the policy's victim selection.
  * Bumps the latency histogram and ticks the decision rate.
  *
- * BLOCKING NOTE: this call publishes to the `tel.evi` msg_router topic.
- * If a subscriber is registered but has stopped draining its mailbox
- * (e.g. a wedged Lua script, a disconnected telnet shell that left a
- * `slm.telemetry_subscribe` callback alive), `msg_router_publish` will
- * stall up to ACK_TIMEOUT_SECS (5s) per call waiting for the ACK
- * timeout. Eviction is allocator-driven, so a stalled record path
- * stalls every allocation attempt that triggers victim selection.
- *
- * Mitigation: keep telemetry subscriptions short-lived. The
- * `slm.telemetry_unsubscribe(handle)` call from Lua, or shell
- * disconnect (which runs the per-state teardown helper at lua_slm.c),
- * removes the subscription. If you observe eviction-path latency
- * regressions, check `slm.msg_router` is not over-subscribed first. */
+ * Publishes to `tel.evi` via the fire-and-forget `msg_router_publish_nowait`
+ * path — the eviction-allocator hot path never blocks on telemetry
+ * subscribers. Slow consumers may miss samples (the mailbox is
+ * single-slot and a faster publisher overwrites unread data); see
+ * `tel.cpu`/`tel.stl`/`tel.mem`'s pump for the same trade-off
+ * documented in the periodic context. */
 void admin_telemetry_record_eviction_decision(uint64_t dt_ns);
 
 /* Called when an eviction is observed to have re-faulted (fallback).
@@ -168,22 +161,20 @@ void admin_telemetry_get_feed_stats(struct admin_telemetry_feed_stats *out);
  * does not publish. Subsequent calls publish when ≥ interval_ms have
  * elapsed since the last publish.
  *
- * BLOCKING NOTE: each elapsed window fires THREE `msg_router_publish`
- * calls back-to-back (one per topic). If any subscriber to `tel.cpu`,
- * `tel.stl`, or `tel.mem` has stopped draining its mailbox (wedged
- * Lua script, leaked telnet subscription, etc.), `msg_router_publish`
- * will stall up to ACK_TIMEOUT_SECS (5 s). With three publishes per
- * tick that's up to 15 s of stall in the net_poll task per window —
- * larger amplification than the existing event-driven publishers.
- * Stalls in net_poll block lwIP timers, DHCP renewals, RX-stall
- * watchdog, CDC-ECM polling, and any other consumer of net_poll
- * cadence.
+ * Publishes use `msg_router_publish_nowait` — fire-and-forget, no
+ * ack-wait. The pump runs on the same task (`net_poll`) that drains
+ * the wildcard subscriber's mailbox; the original blocking publish
+ * caused a self-deadlock where the publisher waited 5 s for an ack
+ * that could only come from the same task. Symptom in production:
+ * "I only see tel.inf and tel.mem on the wire" — the deadlock plus
+ * single-slot-mailbox overwrites left only the last writer (tel.mem)
+ * visible per ~15 s tick.
  *
- * Mitigation is the same as for `tel.evi` / `tel.inf`: keep telemetry
- * subscriptions short-lived. `slm.telemetry_unsubscribe(handle)` and
- * the per-state shell-disconnect teardown helper in `lua_slm.c`
- * remove subscriptions cleanly. If net-pump latency regresses after a
- * session leak, check `slm.msg_router` for orphan subscribers first.
+ * Single-slot-mailbox mitigation: the pump explicitly calls
+ * `tcp_telemetry_server_poll()` between publishes so a same-task
+ * consumer drains each sample before the next write lands in the
+ * slot. Without that interleave, three back-to-back nowait writes
+ * would still overwrite each other within a single net_pump tick.
  */
 void admin_telemetry_periodic_pump(uint32_t now_ms);
 
@@ -250,11 +241,14 @@ void admin_telemetry_get_last_memory_payload_for_tests(char *out, size_t cap);
  * tel.inf (Lua-binding-driven only): you opt in by activating the
  * relevant subsystem.
  *
- * BLOCKING NOTE: msg_router_publish can stall up to ACK_TIMEOUT_SECS
- * (5 s) if a subscriber's mailbox is wedged. AI scheduler decisions
- * are dispatcher-rate (every yield point under COOP_PREEMPT), so a
- * stalled subscriber stalls every yield in the kernel. Mitigation:
- * keep telemetry subscriptions short-lived, same as for tel.evi/inf.
+ * Publishes use `msg_router_publish_nowait` — non-blocking. AI
+ * scheduler decisions are dispatcher-rate (every yield point under
+ * COOP_PREEMPT); the pre-fix blocking publish stalled the kernel
+ * for 5 s per yield while waiting for the consumer's drain to run
+ * on the same task — within milliseconds of activating any AI
+ * scheduler policy with a wildcard subscriber attached, the kernel
+ * froze. The nowait path drops samples instead of blocking when the
+ * subscriber falls behind.
  *
  * WIRE-FORMAT GUARD: any `policy_id` outside the documented set
  * ({MLP, PPO, HAILO}) is replaced with `'?'` (ADMIN_TEL_AI_POLICY_UNKNOWN)

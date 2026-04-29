@@ -37,6 +37,21 @@ extern int msg_router_publish(const uint8_t *topic_name, const uint8_t *data);
 extern int msg_router_publish_nowait(const uint8_t *topic_name,
                                       const uint8_t *data);
 
+/* Forward decl — implemented in kernel/src/tcp_telemetry_server.c.
+ * Called from the periodic pump *between* each publish to drain any
+ * pending sample out of the wildcard subscriber's single-slot mailbox
+ * before the next nowait publish overwrites it. The drain is fast
+ * (no MMIO, no I/O — just a mailbox.ready check + memcpy + per-client
+ * TX-ring write) and a no-op when the server isn't running, so the
+ * extra calls are cheap even when no telemetry consumer is attached.
+ *
+ * Without this drain, three back-to-back nowait publishes from a
+ * single net_poll tick all land in the same Mailbox slot, overwriting
+ * each other; the next tick's drain only sees the last writer
+ * (tel.mem), which is what surfaced as "I only see tel.inf and
+ * tel.mem on the wire" in production. */
+extern void tcp_telemetry_server_poll(void);
+
 /* Append a `key=value` pair to `buf[*pos..cap]`, with `value` formatted
  * as decimal uint64. Inserts a leading space when `*pos > 0`. Returns
  * 0 on success, -1 if the formatted text would exceed cap-1 (leaves
@@ -113,8 +128,8 @@ void admin_telemetry_record_eviction_decision(uint64_t dt_ns)
     if (append_kv_uint(payload, sizeof(payload), &pos, "dt", dt_ns) == 0 &&
         append_kv_uint(payload, sizeof(payload), &pos, "fb", 0u) == 0) {
         payload[pos] = '\0';
-        (void)msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_EVICTION,
-                                 (const uint8_t *)payload);
+        (void)msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_EVICTION,
+                                         (const uint8_t *)payload);
         g_eviction_published += 1u;
     }
 }
@@ -131,8 +146,8 @@ void admin_telemetry_record_eviction_fallback(void)
      * subscriber can correlate against the most recent decision. */
     if (append_kv_uint(payload, sizeof(payload), &pos, "fb", 1u) == 0) {
         payload[pos] = '\0';
-        (void)msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_EVICTION,
-                                 (const uint8_t *)payload);
+        (void)msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_EVICTION,
+                                         (const uint8_t *)payload);
         g_eviction_published += 1u;
     }
 }
@@ -196,8 +211,8 @@ void admin_telemetry_record_inference(uint64_t dt_ns, bool ok)
         append_kv_uint(payload, sizeof(payload), &pos, "ok",
                        ok ? 1ull : 0ull) == 0) {
         payload[pos] = '\0';
-        (void)msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_INFERENCE,
-                                 (const uint8_t *)payload);
+        (void)msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_INFERENCE,
+                                         (const uint8_t *)payload);
         g_inference_published += 1u;
     }
 }
@@ -357,11 +372,13 @@ static void publish_cpu_util(uint32_t cpus)
     payload[pos] = '\0';
     memcpy(g_last_cpu_payload, payload, sizeof(g_last_cpu_payload));
     /* nowait: do NOT block waiting for ack — see the extern comment at
-     * the top of this file for the self-deadlock rationale. */
-    if (msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_CPU_UTIL,
-                                   (const uint8_t *)payload) > 0) {
-        g_cpu_published += 1u;
-    }
+     * the top of this file for the self-deadlock rationale. Counter
+     * counts attempts (matches the §7.4 docstring contract: "regardless
+     * of whether anyone was subscribed"); the publish-return value is
+     * the per-call delivery count and goes uninspected. */
+    (void)msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_CPU_UTIL,
+                                     (const uint8_t *)payload);
+    g_cpu_published += 1u;
 }
 
 static void publish_steal(uint32_t cpus)
@@ -398,10 +415,9 @@ static void publish_steal(uint32_t cpus)
 done:
     payload[pos] = '\0';
     memcpy(g_last_steal_payload, payload, sizeof(g_last_steal_payload));
-    if (msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_STEAL,
-                                   (const uint8_t *)payload) > 0) {
-        g_steal_published += 1u;
-    }
+    (void)msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_STEAL,
+                                     (const uint8_t *)payload);
+    g_steal_published += 1u;
 }
 
 static void publish_memory(void)
@@ -434,10 +450,9 @@ static void publish_memory(void)
 done:
     payload[pos] = '\0';
     memcpy(g_last_memory_payload, payload, sizeof(g_last_memory_payload));
-    if (msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_MEMORY,
-                                   (const uint8_t *)payload) > 0) {
-        g_memory_published += 1u;
-    }
+    (void)msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_MEMORY,
+                                     (const uint8_t *)payload);
+    g_memory_published += 1u;
 }
 
 void admin_telemetry_periodic_pump(uint32_t now_ms)
@@ -476,9 +491,21 @@ void admin_telemetry_periodic_pump(uint32_t now_ms)
     uint32_t cpus = cpu_count;
     if (cpus > MAX_CPUS) cpus = MAX_CPUS;
 
+    /* Three back-to-back publishes to the SAME wildcard subscriber
+     * mailbox. msg_router's mailbox is single-slot — without the
+     * drain calls between publishes, the second and third writes
+     * would silently overwrite the prior payload before the
+     * consumer (tcp_telemetry_server_poll, also on this same task)
+     * could read it. The drain after each publish lets the consumer
+     * fan the sample out to TCP clients before the next publish
+     * lands in the slot. See the tcp_telemetry_server_poll forward-
+     * decl docstring above for the bug-history rationale. */
     publish_cpu_util(cpus);
+    tcp_telemetry_server_poll();
     publish_steal(cpus);
+    tcp_telemetry_server_poll();
     publish_memory();
+    tcp_telemetry_server_poll();
 }
 
 void admin_telemetry_get_periodic_stats(struct admin_telemetry_periodic_stats *out)
@@ -603,10 +630,15 @@ void admin_telemetry_record_ai_decision(char policy_id,
 done:
     payload[pos] = '\0';
     memcpy(g_last_ai_decision_payload, payload, sizeof(g_last_ai_decision_payload));
-    if (msg_router_publish((const uint8_t *)TELEMETRY_TOPIC_AI_DECIDE,
-                           (const uint8_t *)payload) == 0) {
-        g_ai_decision_published += 1u;
-    }
+    /* tel.aix MUST be nowait — this fires from the scheduler dispatch
+     * path (every yield point under COOP_PREEMPT). Synchronous-ack
+     * publishes here would stall the kernel for ~5 s per yield while
+     * waiting for the consumer's drain to run on the same task. The
+     * pre-fix design hung within milliseconds of activating any AI
+     * scheduler policy with a wildcard subscriber attached. */
+    (void)msg_router_publish_nowait((const uint8_t *)TELEMETRY_TOPIC_AI_DECIDE,
+                                     (const uint8_t *)payload);
+    g_ai_decision_published += 1u;
 }
 
 uint64_t admin_telemetry_get_ai_decision_published(void)

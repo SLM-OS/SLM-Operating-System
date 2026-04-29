@@ -157,4 +157,13 @@ void tcp_telemetry_server_test_simulate_closed_real_session(int slot);
 /* Tear down all synthetic sessions and reset counters. */
 void tcp_telemetry_server_test_reset(void);
 
+/* Returns the running count of `tcp_telemetry_server_poll()` calls
+ * since the last `tcp_telemetry_server_test_reset()`. Used by
+ * test_telemetry_feed.c to verify that admin_telemetry_periodic_pump
+ * interleaves drain calls between its three back-to-back publishes
+ * (without that interleaving, tel.cpu/tel.stl would silently overwrite
+ * each other in the single-slot mailbox before the next net_pump
+ * tick). */
+uint64_t tcp_telemetry_server_test_poll_invocations(void);
+
 #endif /* TCP_TELEMETRY_SERVER_H */
