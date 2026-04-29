@@ -574,9 +574,10 @@ set(KERNEL_SOURCES
     # because the MOCK_CAMERA_FRAME option is defined further down.
     kernel/src/camera.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/dtb.c>
-    # x86-64 has no DTB; provide minimal stubs for the two symbols
-    # platform-neutral code still references (dtb_get_memreserves /
-    # dtb_get_chosen).
+    # x86-64 stubs for dtb_get_memreserves / dtb_get_chosen — needed
+    # because kernel/mm/pmm.c and kernel/src/main.c call those
+    # symbols unconditionally, and kernel/src/dtb.c is excluded from
+    # the x86-64 build.
     $<$<STREQUAL:${PLATFORM},X86_64>:kernel/src/dtb_x86_stub.c>
     # General-purpose FDT reader — path + property lookup for any
     # driver. Built on every ARM64 target; x86-64 builds skip it
@@ -766,6 +767,10 @@ set(TEST_SOURCES
     # ARM64-specific test files (use inline asm not available on x86-64)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_scheduler.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_mem.c>
+    # Cross-platform model_mem init smoke test (runs on every target —
+    # the larger test_model_mem.c suite is ARM64-only because some of
+    # its tests don't fit the x86-64 256 MB QEMU memory budget).
+    kernel/tests/test_model_mem_smoke.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_eviction.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_loader.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_model_swap.c>

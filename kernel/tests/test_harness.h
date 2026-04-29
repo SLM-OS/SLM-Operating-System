@@ -34,6 +34,10 @@ int test_suite_scheduler(void);
 /* Model memory tests (new - calls into Rust) */
 int test_suite_model_mem(void);
 
+/* Cross-platform smoke test: asserts model_mem_init produced a usable
+ * allocator on the active target. Runs on every PLATFORM. */
+int test_suite_model_mem_smoke(void);
+
 /* Eviction policy tests (Phase AI-Eviction M1/M2 — calls into Rust) */
 int test_suite_eviction(void);
 

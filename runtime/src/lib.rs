@@ -619,12 +619,21 @@ extern "C" {
 /// Initialize model memory pools.
 ///
 /// Called by C kernel to set up Rust model memory allocator.
-/// Uses 256 MB for weights and 128 MB for workspace (with 1GB QEMU RAM).
+/// Pool sizes are platform-specific to fit available QEMU RAM:
+///   * ARM64 / aarch64-unknown-none: 256 MB weights / 128 MB workspace
+///     (QEMU virt has 1 GB; this leaves headroom for kernel + PMM).
+///   * x86-64 / x86_64-unknown-none: 64 MB weights / 32 MB workspace.
+///     QEMU q35 only gets 256 MB total, of which the kernel + buddy
+///     allocator already eat a large chunk; a 256+128 MB request hits
+///     `PMM allocation failed` and leaves the model_mem allocator
+///     uninitialized. Subsequent `eviction demo` calls then exercise
+///     uninitialized state and corrupt the Rust heap.
 #[no_mangle]
 pub extern "C" fn rust_model_mem_init() -> i32 {
-    // Sizes for 1GB RAM testing - large enough for meaningful model tests
-    let weight_mb: usize = 256;
-    let workspace_mb: usize = 128;
+    #[cfg(target_arch = "x86_64")]
+    let (weight_mb, workspace_mb): (usize, usize) = (64, 32);
+    #[cfg(not(target_arch = "x86_64"))]
+    let (weight_mb, workspace_mb): (usize, usize) = (256, 128);
 
     match mm::model_mem_init(weight_mb, workspace_mb) {
         Ok(()) => 0,

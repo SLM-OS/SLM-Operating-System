@@ -45,7 +45,13 @@ Two-pool allocator for model weights and inference workspace. Pools are backed b
 ```rust
 pub extern "C" fn rust_model_mem_init() -> i32
 ```
-Initialize model memory pools (256 MB weights, 128 MB workspace for 1 GB RAM). Returns 0 on success, -1 on failure.
+Initialize model memory pools. Sizes are selected by `target_arch`:
+aarch64 gets 256 MB weights + 128 MB workspace (sized for 1 GB QEMU
+virt and ≥4 GB hardware); x86-64 gets 64 MB weights + 32 MB workspace
+(QEMU q35 only allocates 256 MB total). Returns 0 on success, -1 on
+failure (PMM oversubscribe, alignment error, etc.). See
+`docs/model-memory.md` §"Pool Sizing" for the rationale and a checklist
+for raising the sizes.
 
 ```rust
 pub extern "C" fn rust_model_alloc_weights(size: usize) -> ModelHandle
