@@ -56,10 +56,30 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 /// - `heap_start` must be a valid pointer to allocatable memory
 /// - `heap_size` must accurately reflect the available memory
 /// - This function must only be called once
+/// Bytes passed to the most recent `rust_heap_init` call. Exposed via
+/// `rust_heap_size_bytes` so a kernel-side smoke test can confirm the
+/// per-platform `RUST_HEAP_MB` was actually honored — catches a
+/// silent regression where someone reduces the heap below what SLM's
+/// KV cache + `ForwardScratch` need.
+#[cfg(not(test))]
+static RUST_HEAP_SIZE_BYTES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(not(test))]
 #[no_mangle]
 pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
     ALLOCATOR.lock().init(heap_start, heap_size);
+    RUST_HEAP_SIZE_BYTES.store(heap_size, core::sync::atomic::Ordering::Release);
+}
+
+/// Return the heap size (bytes) passed to the most recent
+/// `rust_heap_init`. 0 means `rust_heap_init` has not been called yet.
+/// Used by `kernel/tests/test_model_mem_smoke.c` to assert
+/// `RUST_HEAP_MB` was honored.
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn rust_heap_size_bytes() -> usize {
+    RUST_HEAP_SIZE_BYTES.load(core::sync::atomic::Ordering::Acquire)
 }
 
 // =============================================================================
@@ -738,6 +758,10 @@ pub extern "C" fn rust_model_mem_init(weight_mb: u32, workspace_mb: u32) -> i32 
                     }
                     mm::AllocError::AlignmentError => {
                         kernel_ffi::uart_puts(b"alignment error\n\0".as_ptr());
+                    }
+                    mm::AllocError::Oversized => {
+                        kernel_ffi::uart_puts(
+                            b"requested pool size exceeds MAX_BLOCKS_PER_POOL (bump in lockstep with MODEL_MEM_*_MB)\n\0".as_ptr());
                     }
                     _ => {
                         kernel_ffi::uart_puts(b"unknown error\n\0".as_ptr());
