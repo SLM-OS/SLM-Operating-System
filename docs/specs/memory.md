@@ -24,6 +24,8 @@ Physical memory manager, virtual memory, caches, cross-CPU shared memory.
 | Spinlock hardware enable | N/A | Runtime flag `spinlock_hw_enabled` set by `vmm_init` | Same pattern | N/A |
 | Max tasks supported | 256 | 256 | 256 | 256 |
 | Kernel heap | buddy + slab-ish (GSP DMA uses page-aligned alloc) | same | same | same |
+| Model_mem weight pool (default) | 256 MB / 128 blocks | 256 MB | 256 MB | **64 MB / 32 blocks** (256 MB QEMU RAM cap) |
+| Model_mem workspace pool (default) | 128 MB / 64 blocks | 128 MB | 128 MB | **32 MB / 16 blocks** |
 
 ## Skipped / Blocked
 

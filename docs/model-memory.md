@@ -28,14 +28,14 @@ The model memory system provides specialized allocation for AI model weights and
 │  │  Weight Pool (Read-Only)                                    │    │
 │  │  - Model parameters, embeddings, static data                │    │
 │  │  - Long-lived (loaded once, used many times)                │    │
-│  │  - Default: 256 MB (128 × 2MB blocks) for 1GB RAM            │    │
+│  │  - Default: 256 MB aarch64 / 64 MB x86-64 (see Pool Sizing)  │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │  Workspace Pool (Read-Write)                                │    │
 │  │  - Activation tensors, KV cache, inference scratch          │    │
 │  │  - Per-inference (allocated, used, freed)                   │    │
-│  │  - Default: 128 MB (64 × 2MB blocks) for 1GB RAM             │    │
+│  │  - Default: 128 MB aarch64 / 32 MB x86-64 (see Pool Sizing)  │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -43,15 +43,37 @@ The model memory system provides specialized allocation for AI model weights and
 
 ### Pool Sizing
 
-Default configuration for QEMU with 1GB RAM (scaled for model testing):
+`runtime/src/lib.rs::rust_model_mem_init` selects pool sizes per
+`target_arch` so the request fits available RAM on each test target.
+The C kernel calls the FFI shim during boot; the Rust side picks the
+sizes below.
 
-| Pool | Size | Blocks | Purpose |
-|------|------|--------|---------|
-| Weight | 256 MB | 128 | Model weights (read-only after load) |
-| Workspace | 128 MB | 64 | Inference scratch space |
-| **Total** | **384 MB** | **192** | Reserved for model memory |
+| Target | Weight pool | Workspace pool | Notes |
+|---|---|---|---|
+| `aarch64` (QEMU virt, Pi 5, Jetson) | 256 MB / 128 blocks | 128 MB / 64 blocks | 1 GB QEMU, ≥4 GB hardware. |
+| `x86_64` (QEMU q35, test-pc) | 64 MB / 32 blocks | 32 MB / 16 blocks | QEMU q35 only gets **256 MB total**; the aarch64 sizes oversubscribed PMM and silently left the allocator uninitialized. |
 
-On Jetson Orin Nano (8 GB RAM), these can be scaled even larger for production models.
+**Why the x86-64 numbers are so much smaller.** The QEMU q35 test
+machine the project uses for `make test PLATFORM=X86_64` is capped at
+256 MB of guest RAM (see `Makefile`'s `QEMU_MEMORY := 256M` for the
+x86-64 branch). With the kernel image, the buddy allocator's per-page
+metadata, the Rust heap, and the `lwip` reservations all coming out
+of the same pool, requesting 256 MB + 128 MB for model_mem leaves
+nothing — `pmm_alloc_pages(65536)` returned `NULL`, the Rust shim
+returned `-1`, and `INITIALIZED` stayed `0`. Every later
+`rust_model_alloc_weights` quietly returned a null `ModelHandle` and
+tests that didn't check init explicitly silently no-op'd.
+
+If a future model demands a larger pool, raise the per-arch numbers
+(both must stay multiples of 2 — the model_mem pool block size is 2
+MB) AND raise `QEMU_MEMORY` in the Makefile to leave the kernel
+headroom. The cross-platform smoke test
+(`kernel/tests/test_model_mem_smoke.c::test_pools_initialized_with_blocks`)
+fails loudly if init regressed silently.
+
+On Jetson Orin Nano (≥4 GB RAM, post-OP-TEE carveout) and Pi 5 (4 GB+),
+the aarch64 numbers are conservative — production model loads can
+scale them higher when the target is known.
 
 ---
 

@@ -110,6 +110,12 @@ int test_harness_run_all(void)
 {
     int total_failures = 0;
 
+    /* Run model_mem smoke test FIRST so an init regression (e.g.
+     * silent PMM oversubscribe on a tight-RAM platform) surfaces
+     * before downstream tests have a chance to silently no-op or
+     * panic on the uninitialized allocator. Fast, side-effect free. */
+    total_failures += test_suite_model_mem_smoke();
+
     /* Run each test suite */
     int ipc_failures = test_suite_ipc();
     total_failures += ipc_failures;
