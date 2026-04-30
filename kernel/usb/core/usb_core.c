@@ -321,30 +321,6 @@ static int usb_hub_prepare_ports(struct usb_device *hub,
     return 0;
 }
 
-static int usb_hub_find_child_port(struct usb_device *hub,
-                                   const struct usb_hub_descriptor *desc,
-                                   uint8_t *port_out,
-                                   enum usb_speed *speed_out)
-{
-    if (hub == NULL || desc == NULL || port_out == NULL || speed_out == NULL)
-        return -1;
-
-    for (uint8_t port = 1; port <= desc->bNbrPorts; port++) {
-        struct usb_port_status st = {0};
-        int rc = usb_hub_get_port_status(hub, port, &st);
-        if (rc < (int)sizeof(st))
-            continue;
-
-        if (!(st.status & USB_PORT_STAT_CONNECTION))
-            continue;
-
-        *port_out = port;
-        *speed_out = usb_hub_port_speed(st.status);
-        return 0;
-    }
-    return -1;
-}
-
 static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset);
 static int usb_try_enumerate_via_hub(struct usb_device *hub);
 
@@ -1156,33 +1132,88 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub)
         return -1;
     }
 
-    uint8_t child_port = 0;
-    enum usb_speed child_speed = USB_SPEED_UNKNOWN;
-    if (usb_hub_find_child_port(hub, &desc, &child_port, &child_speed) != 0) {
+    /* Walk every downstream port, not just the first connected one.
+     * The original first-port-wins behaviour broke on jetson-nano-1's
+     * RTL8153 dongle (#575): the dongle has pass-through USB-A ports
+     * and a low-speed peripheral on hub port 1 made `usb_core` bind
+     * to it instead of the RTL8153 chip on hub port 3. Walking all
+     * ports and accepting only a CDC-ECM-capable device handles the
+     * pass-through topology correctly while staying single-device
+     * (we still bind exactly one downstream child). */
+    int connected_count = 0;
+    int enumerated_count = 0;
+    for (uint8_t port = 1; port <= desc.bNbrPorts; port++) {
+        struct usb_port_status st = {0};
+        int port_status_rc = usb_hub_get_port_status(hub, port, &st);
+        if (port_status_rc < (int)sizeof(st))
+            continue;
+        if (!(st.status & USB_PORT_STAT_CONNECTION))
+            continue;
+
+        connected_count++;
+        enum usb_speed child_speed = usb_hub_port_speed(st.status);
+
+        if (usb_hub_reset_port(hub, port, &child_speed) != 0) {
+            WARN("usb_core: hub port %u reset failed; trying next", port);
+            continue;
+        }
+
+        memset(&root_device, 0, sizeof(root_device));
+        root_device.hcd           = active_hcd;
+        root_device.address       = 0;
+        root_device.speed         = child_speed;
+        root_device.state         = USB_STATE_ATTACHED;
+        root_device.port          = port;
+        root_device.root_hub_port = hub->root_hub_port;
+        root_device.route_string  = port;
+
+        rc = usb_enumerate_one(&root_device, false);
+        if (rc != 0) {
+            INFO("usb_core: hub port %u: enumerate failed (rc=%d), trying next port",
+                 port, rc);
+            /* Defense-in-depth: belt-and-braces device_close on the
+             * non-zero return path. `usb_enumerate_one`'s err_close
+             * label already calls device_close when device_open
+             * succeeded, but the function has earlier-return paths
+             * that bypass err_close (e.g. when port reset fails
+             * before device_open is ever called) — those paths can't
+             * have a slot to release. The HCD-side device_close is
+             * idempotent on a never-opened device (it just bumps a
+             * counter on the mock; production HCDs guard on
+             * hcd_private being non-NULL). Calling it
+             * unconditionally here means a future regression that
+             * adds a *new* opened-but-not-closed path inside
+             * usb_enumerate_one can't silently leak xHCI slot state
+             * across a hub-walk retry. */
+            if (active_hcd->device_close)
+                active_hcd->device_close(&root_device);
+            continue;
+        }
+        enumerated_count++;
+
+        if (usb_config_is_cdc_ecm_candidate(root_device.raw_config,
+                                            root_device.raw_config_len)) {
+            INFO("usb_core: hub port %u: CDC-ECM device — binding (vid=0x%04x pid=0x%04x)",
+                 port,
+                 root_device.dev_desc.idVendor,
+                 root_device.dev_desc.idProduct);
+            root_device_present = true;
+            return 0;
+        }
+
+        INFO("usb_core: hub port %u: device class=0x%02x not CDC-ECM, releasing and trying next port",
+             port, root_device.dev_desc.bDeviceClass);
+        if (active_hcd->device_close)
+            active_hcd->device_close(&root_device);
+    }
+
+    if (connected_count == 0) {
         INFO("usb_core: hub has no connected downstream device");
         return 0;
     }
-
-    if (usb_hub_reset_port(hub, child_port, &child_speed) != 0) {
-        WARN("usb_core: hub port %u reset failed", child_port);
-        return -1;
-    }
-
-    memset(&root_device, 0, sizeof(root_device));
-    root_device.hcd = active_hcd;
-    root_device.address = 0;
-    root_device.speed = child_speed;
-    root_device.state = USB_STATE_ATTACHED;
-    root_device.port = child_port;
-    root_device.root_hub_port = hub->root_hub_port;
-    root_device.route_string = child_port;
-
-    rc = usb_enumerate_one(&root_device, false);
-    if (rc != 0)
-        return rc;
-
-    root_device_present = true;
-    return 0;
+    INFO("usb_core: hub had %d connected child(ren), %d enumerated, none expose CDC-ECM",
+         connected_count, enumerated_count);
+    return -1;
 }
 
 int usb_core_enumerate(void)
@@ -1238,7 +1269,7 @@ int usb_core_enumerate(void)
     memcpy(&hub_device, &root_device, sizeof(hub_device));
     memset(&root_device, 0, sizeof(root_device));
     hub_device_present = true;
-    INFO("usb_core: root device is a USB hub — probing one downstream child");
+    INFO("usb_core: root device is a USB hub — walking downstream ports for a CDC-ECM child");
     rc = usb_try_enumerate_via_hub(&hub_device);
     if (rc == 0)
         usb_hotplug_retry_blocked = false;
