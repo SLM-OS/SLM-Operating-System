@@ -802,7 +802,6 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 #include "net_driver.h"
 #include "arch/sys_arch.h"  /* sys_now() for DHCP timeout polling */
 #include "lwip/stats.h"     /* MEMP_PBUF_POOL peak tracking for #581 regression test */
-#include "uart.h"           /* uart_printf for #581 test diagnostics */
 extern void net_test_force_boot_deferred_dhcp(void);
 extern void net_test_force_dhcp_start_fail(void);
 #if defined(PLATFORM_QEMU_VIRT)
@@ -2013,8 +2012,6 @@ static void test_net_rx_burst_uses_pbuf_pool_not_heap(void)
     /* `max` is u32 on lwip 2.x; cast for the after-comparison. */
     uint32_t pbuf_pool_max_before =
         (uint32_t)lwip_stats.memp[MEMP_PBUF_POOL]->max;
-#else
-    uint32_t pbuf_pool_max_before = 0;
 #endif
 
     /* Build a 64-byte broadcast-dest ethertype-0x9000 frame. lwip
@@ -2035,9 +2032,18 @@ static void test_net_rx_burst_uses_pbuf_pool_not_heap(void)
     }
 
     /* Restore the original driver before asserting so a failure
-     * doesn't leave the test wrapper installed for downstream tests. */
+     * doesn't leave the test wrapper installed for downstream tests.
+     *
+     * Order matters: clear `rx_burst_test_remaining` first so any
+     * in-flight wrapper-recv call from net_pump_task running on a
+     * different CPU falls into the delegate-to-base path; then swap
+     * `active_driver` back to the real driver. We deliberately do
+     * NOT null `rx_burst_test_base` afterwards — leaving it pointing
+     * at the (still-valid) real driver keeps a late wrapper call
+     * safe to dereference. The pump task may sit on the wrapper for
+     * one more poll iteration after the swap; that's harmless. */
+    rx_burst_test_remaining = 0;
     net_register_driver(rx_burst_test_base);
-    rx_burst_test_base = NULL;
 
     struct net_watchdog_snapshot after;
     net_watchdog_get(&after);
