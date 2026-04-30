@@ -219,7 +219,15 @@ impl<'a> Iterator for ProtoIter<'a> {
             }
         };
 
-        self.pos = value_start + consumed;
+        // checked_add: an exotic protobuf with `value_start` near
+        // usize::MAX and a non-trivial `consumed` could wrap the
+        // cursor and let the parser read backward into earlier
+        // fields. usize wrap on 64-bit is unreachable in practice
+        // (would require a >2^63-byte buffer) but the guard is cheap.
+        self.pos = match value_start.checked_add(consumed) {
+            Some(p) => p,
+            None => return Some(Err(ParseError::LengthOverflow)),
+        };
 
         Some(Ok(ProtoField {
             field_number,

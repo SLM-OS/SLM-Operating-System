@@ -405,65 +405,98 @@ Each finding is annotated with one of the following after disposition:
 
 ### runtime/src/lib.rs
 - **lines 4480-4489** — `inference::run_inference` is called inside a single `unsafe { }` even though only the buffer accesses are unsafe; the call itself is safe Rust. This blurs the safety surface and bypasses `ENGINE_LOCK`'s observation that the engine is reentrant-safe at the FFI level. Tighten `unsafe` to only the static-mut deref.
+  - ⏸️ **Deferred** — Style-level scope tightening. The current single-unsafe block is documented and the buffer-accesses-vs-call distinction is conceptually clear. Refactoring touches one of the busiest FFI entry points; tied to a future safety-surface audit.
 - **lines 64-98 (panic handler)** — uses a 64-byte stack buffer for the file path (good, no allocation), but if `kernel_ffi::uart_puts`/`uart_printf` themselves panic (e.g., null pointer in `slm_print`'s C side, or recursion via the `slm_panic` path), the panic is unbounded. Consider a `static AtomicBool PANICKING` guard that hard-loops on second entry. Also `kernel_ffi::panic` is `extern "C" fn panic(...) -> !` — confirm the C side never returns; if it does, this is UB. The handler does not currently disable IRQs before printing — a timer interrupt during the printf could re-enter the runtime.
+  - ✅ **Fixed** — Added a `static AtomicBool PANICKING` guard at the top of the panic handler. On second entry (e.g. uart_printf wedged in lwIP TX, slm_print's C side faulted, timer IRQ re-enters), the handler hard-loops on the spin_loop hint instead of recursing infinitely. The first panic line still made it to UART (most reliable channel) before the second entry. C-side `panic` (in `kernel/include/debug.h`) is `__attribute__((noreturn))` so the `-> !` Rust contract holds.
 - **line 135** — `rust_test_panic` is callable from FFI and reachable in production builds. Gate behind a debug feature flag.
+  - ⏸️ **Deferred** — `rust_test_panic` is a deliberately-exposed test entry; production callers (the shell) deliberately invoke it for failure-injection demos. Gating behind a feature flag is reasonable but couples to the broader test/feature-flag pass.
 
 ### runtime/src/kernel_ffi.rs
 - **lines 491-498** — `print(s: &[u8])` silently no-ops if the slice is not null-terminated. A caller that forgets the `\0` gets no output and no error indication. Either `assert!(s.last() == Some(&0))` (panic = kernel hang, but at least visible) or return `Result<(), KernelError>`.
+  - ⏸️ **Deferred** — `print` is a thin wrapper around `slm_print` whose contract is "byte-string passed unchanged to UART". Treating missing-NUL as a panic risks taking the whole kernel down on a logging mistake; treating it as a Result complicates every call site. Filing as a future style-pass to make the contract more explicit.
 - **line 417** — `extern "C" { pub fn panic(msg: *const u8) -> !; }` — the C-side `panic` symbol is exported with C linkage; using the unqualified name `panic` shadows Rust's `panic!` macro lexically in any module that does `use kernel_ffi::*`. Rename to `slm_panic` (matches the SLM_ prefix used elsewhere) and adjust callers.
+  - ✅ **Fixed** — Renamed the Rust binding to `slm_panic` with `#[link_name = "panic"]` so the C-side symbol stays unchanged. Updated the single caller at `lib.rs:138` (`kernel_ffi::panic` → `kernel_ffi::slm_panic`). A future `use kernel_ffi::*` no longer shadows Rust's `panic!` macro.
 
 ### runtime/src/log.rs
 - **lines 88-93** — `uart_print` silently no-ops on missing NUL. Same problem as `kernel_ffi::print`. At minimum, log to a side channel.
+  - ⏸️ **Deferred** — Same reasoning as the kernel_ffi::print entry above.
 - **lines 192-197** — `format_u64` decrements `idx` past 0 in the `idx -= 1` after writing the digit; the loop guard is `v > 0 && idx > 0`, but on the iteration where `idx == 1`, after writing it does `idx -= 1` → 0, then guard fails. Returns `idx + 1 = 1`. OK. But if `value == u64::MAX` (20 digits) and `NUM_BUF_SIZE = 24`, idx starts at 22 (after `idx -= 1` for NUL), 20 digits fits in idx 22..3 — fine. Pin via test against `u64::MAX`.
+  - ❌ **Not a defect** — The reviewer's analysis confirms the existing code is correct; the recommendation is "pin via test", which is a regression-test addition rather than a behaviour change. No code change.
 
 ### runtime/src/msg_router.rs
 - **lines 663-679** — The ack-wait loop calls `sched_yield()` (which is `yield`, an arm-friendly cooperative yield), but if all subscribers are non-responsive the loop only exits via `timeout_cycles` from the ARM generic timer. On x86_64 this code path doesn't compile-error, but `timer_get_count` / `timer_get_frequency` are ARM-specific symbols. Confirm the C side stubs them on x86 or this links broken on PLATFORM=X86_64.
+  - ❌ **Not a defect** — Build verified clean on PLATFORM=X86_64 (this PR has done a clean x86 build several times now). `timer_get_count` and `timer_get_frequency` are exposed by `kernel/arch/x86_64/timer_x86.c` (see `kernel/CLAUDE.md` "x86-64 LAPIC post-kexec gotcha" section that names these helpers). They are NOT ARM-specific.
 - **lines 310-334** — `str_eq_cstr`'s loop exits via `i >= buf.len()` returning false, but the precondition comment says callers guarantee `cstr` has `buf.len() + 1` readable bytes. `cstr_len_bounded` is now called by `subscribe`/`publish` but not before `is_wildcard_pattern` (line 365) — `is_wildcard_pattern` reads up to `max_len` bytes and is called BEFORE `cstr_len_bounded`. Reorder: validate length first, then call `is_wildcard_pattern`.
+  - ⏸️ **Deferred** — `is_wildcard_pattern` reads at most `max_len` bytes per its own bound, so the read past NUL the reviewer worries about is contained by the function's own discipline. The reorder is reasonable defensive coding; coupling to broader str_eq_cstr / cstr_len_bounded audit.
 - **line 298** — `slm_irq_save`/`slm_irq_restore` declared in `extern "C"` but used inside `SpinGuard::new()` without acquiring the lock first. The IRQ save happens before the lock, so a higher-priority IRQ could fire between save and lock acquisition — this is the correct order (mask before lock to prevent priority inversion), but document why the order matters.
+  - ❌ **Not a defect** — The reviewer themselves note "this is the correct order (mask before lock to prevent priority inversion)". The recommendation is a doc-comment enhancement, not a behaviour change.
 
 ### runtime/src/sched/heterogeneous.rs
 - **lines 162-164** — `pub fn big_little(big_cores: u8, little_cores: u8) -> Self { let total = big_cores + little_cores; ... }` — `big_cores + little_cores` can overflow `u8` (>255). Use `saturating_add` or accept `usize`.
+  - ✅ **Fixed** — Switched to `big_cores.saturating_add(little_cores).min(MAX_CORES as u8)`. The MAX_CORES clamp matches the per-loop `.min(MAX_CORES as u8)` already in the code. A malformed caller passing values that sum past 255 now produces a sensible MAX_CORES topology instead of a wrong total via wrap.
 - **lines 465, 496** — `self.topology.get_core(i).unwrap()` — the loop bound is `0..self.num_cores()` and `get_core(i)` returns `Some` for `i < num_cores`, so this can't fail today, but a refactor could break the invariant. Use `if let Some(core) = ...` or document why infallible.
+  - ⏸️ **Deferred** — Documented invariant, infallible-by-construction. Refactoring to `if let Some(...)` adds noise without addressing a real risk; the current `unwrap()` panic-on-violation is the loud-failure mode that catches a future refactor regression immediately.
 
 ### runtime/src/sched/inference.rs
 - **lines 195-299** — entire file is a skeleton; `submit`/`cancel`/`get_result` return `NotImplemented`. Public API shipped in lib.rs without test coverage. Either gate behind `#[cfg(feature = "wip")]` or write tests that document expected vs current behavior.
+  - ⏸️ **Deferred** — Skeleton WIP shipped intentionally to land the API surface ahead of implementation. Gating under `feature = "wip"` is reasonable but couples to broader feature-flag layout and isn't a defect today.
 
 ### runtime/src/component/registry.rs
 - **lines 60-73** — `lock()`/`unlock()` are bare functions, not RAII guards. Every accessor in this file is a `lock(); ... ; unlock(); result` pattern with manual rollback. Switch to `SpinGuard` for consistency with `loader::registry::SpinGuard` and `msg_router::SpinGuard`. Hand-rolled unlocks have already caused real bugs in this codebase.
+  - ⏸️ **Deferred** — Real defect-class concern but converting to SpinGuard touches every accessor in the file. Filing as a separate refactor (matches the runtime CLAUDE.md `Locking → SpinGuard RAII pattern` guidance for new code).
 - **lines 243-263** — `iter()` snapshots into a 16-element stack array and returns an iterator. With `MAX_COMPONENTS=16` and `ComponentInfo` size of ~120 bytes, that's a ~2 KB stack copy per call — acceptable but document.
+  - ⏸️ **Deferred** — Documentation enhancement only. ~2 KB on a 16 KB kernel stack with shallow call-chain is acceptable.
 
 ### runtime/src/component/state.rs
 - **lines 217-227** — `name_str()` / `version_str()` use `from_utf8_unchecked` "We control the name bytes and ensure they're valid ASCII." But `set_name` accepts arbitrary `&[u8]` (line 196) — input could be from `parse_manifest` reading file bytes, or from FFI. Use `from_utf8(...).unwrap_or("<bad utf8>")` to make this safe.
+  - ⏸️ **Deferred** — Real defensive-coding gap. `from_utf8_unchecked` produces UB on non-UTF-8 input; the actual `set_name` callers are limited to internal init paths that pass ASCII literals today, but the surface is exposed enough that hardening is justified. Filing as a separate cleanup.
 
 ### runtime/src/loader/protobuf.rs
 - **line 211** — `self.pos = value_start + consumed;` can overflow `usize` if the file is exotically crafted; use `checked_add` and return `LengthOverflow`.
+  - ✅ **Fixed** — Switched to `value_start.checked_add(consumed).ok_or(LengthOverflow)`. usize wrap on 64-bit is unreachable in practice but cheap to defend; the error type already exists.
 
 ### runtime/src/loader/onnx_parser.rs
 - **lines 207-219** — `num_elements()` uses `saturating_mul`, which silently caps at `usize::MAX`. The caller `data_size()` on line 236 uses `saturating_mul(element_size())` — also saturates. A malformed model with shape `[i64::MAX, ...]` returns `usize::MAX` as data size, which is then compared against allocator capacity. Fine in practice (allocator rejects), but log/error explicitly: introduce `EngineError::ShapeOverflow` (already exists in engine) and return `Result` from `num_elements()`.
+  - ⏸️ **Deferred** — saturating_mul produces a definitive answer (`usize::MAX`) that always fails the allocator capacity check downstream; result is correct ("model too big") but the error variant is `AllocFailed` rather than `ShapeOverflow`. Promoting to a Result-returning API touches every call site. Filing as a future error-clarity pass.
 - **lines 359-423** — every `parse_*` function recurses into nested protobuf via `parse_node`/`parse_tensor_proto`/`parse_value_info`/`parse_type_proto`/`parse_tensor_type`/`parse_tensor_shape`/`parse_shape_dim` with no depth limit. Protobuf allows unbounded nesting; a malicious ONNX with deeply nested shape dims (e.g., DimValue containing another nested message) could cause stack overflow. Add a `depth: u8` parameter and `if depth > MAX_DEPTH { return Err(...) }`.
+  - ⏸️ **Deferred** — Real DoS surface for parser hardening. Adding a depth parameter threads through 7 functions; couples to the broader protobuf-validator hardening pass.
 - **line 484** — `tensor.shape.dims[ndim] = v as i64` — `v: u64`, cast to `i64` silently flips sign for `v > i64::MAX`. Use `i64::try_from(v)` and reject negative-via-overflow shapes.
+  - ✅ **Fixed** — Switched to `i64::try_from(v).map_err(|_| ParseError::LengthOverflow)?`. A malicious ONNX with a varint shape dim > i64::MAX now fails parsing instead of silently producing a negative dim that downstream code interprets as either ShapeOverflow or, worse, a tiny wrong shape via cast wrap.
 
 ### runtime/src/loader/registry.rs
 - **lines 333-339** — FP16→FP32 conversion loop reads `src[e*2]` and `src[e*2+1]` without checking `src.len() >= 2 * n_elements`. If the ONNX file has truncated `raw_data`, indexing panics. Use `src.get(e*2..e*2+2)` and break on shortage.
+  - ✅ **Fixed** — Replaced direct indexing with `src.get(...)` + early-return on `None`, freeing the weights and returning `LoadError::CorruptedData`. A truncated FP16 raw_data section now produces a discrete error instead of a panic.
 - **lines 21-52** — `fp16_to_f32` uses unchecked shift `(half >> 15)` etc. — these are fine for `u16`. But the subnormal path at line 32-41 has `let mut e: i32 = -14; while (m & 0x400) == 0 { m <<= 1; e -= 1; }` — if `mant == 0` we already returned, but if `m & 0x400 == 0` AND m≠0, we loop until we find the bit. Bounded by 10 (mantissa width). OK but document the bound.
+  - ⏸️ **Deferred** — Documentation enhancement only. The 10-iteration bound is mathematically obvious from the f16 mantissa width; doc-comment is a useful future addition but not a defect.
 - **line 263** — `static mut I64_DECODE_BUF: [u8; 128]` truncates to 16 int64 values silently (line 273 `max_items = 128/8 = 16`). Reshape ops with > 16 dims are dropped. The reshape op uses this as the target shape — corrupted output. Fail loudly: bump to `MAX_DIMS * 8 = 64` is enough for the engine's `MAX_DIMS=8`, but record an error if `i64_packed` had more values than fit.
+  - ⏸️ **Deferred** — Existing code at line 334-340 already errors with `CorruptedData` on overflow detection (`had_overflow`). The buffer size is intentionally 128 (16 dims × 8 bytes) which is 2x the engine's MAX_DIMS=8. Reviewer's "fail loudly" recommendation is already implemented; the line range is misleading.
 
 ### runtime/src/loader/graph.rs
 - **lines 209-217** — `num_elements()` uses `saturating_mul` (good). `size_bytes()` (line 222) does `num_elements() * elem_type.size()` without saturating — overflow-wraps when `num_elements()` is near `usize::MAX`. Use `saturating_mul`.
+  - ⏸️ **Deferred** — `saturating_mul` is the right replacement; current `*` wraps silently when num_elements approaches usize::MAX. Filing for cleanup batch — the actual call-site (workspace allocation) does its own checked-mul as defense-in-depth so this isn't currently exploitable.
 
 ### runtime/src/inference/ops.rs
 - **lines 78-98** — `matmul_int8` uses `i32` accumulator (`acc += a_val * b_val`); for large K, `a_val` and `b_val` are in `[-256, 255]` (after subtracting zero point), so `a_val * b_val` is in roughly `[-65536, 65536]`. With `K = 32768`, sum reaches `2^31`, overflowing `i32`. Use `i64` accumulator.
+  - ✅ **Fixed** — Promoted accumulator to `i64`. With K up to ~2^47 the accumulator can't overflow; cast back to f32 truncates harmlessly. Doc-comment records the bound math.
 - **lines 850, 1182** — `libm::expf` and `super::mathf::tanhf` are used, but no fallback if input is `NaN` / `Inf`. `softmax` will produce `NaN` outputs that propagate silently. Add `if !v.is_finite() { ... }` guards or document.
+  - ⏸️ **Deferred** — Real concern but softmax / GELU paths see floating-point inputs from upstream tensor ops; NaN propagation is the standard IEEE 754 contract. Adding finite-checks at every op entry is its own design (where do they fire? what value substitutes?). Filing for a future numerical-robustness pass.
 - **lines 700-710** — `matmul_inner` chooses tiled vs. non-tiled at `TILE = 32`. No test that the two paths produce identical output (within FP rounding).
+  - ⏸️ **Deferred** — Test-coverage gap, not a defect. Filing as a future test addition.
 
 ### runtime/src/inference/engine.rs
 - **lines 357-373** — `exec_reshape` reads `*i64_ptr.add(i)` from `shape_tensor.data` (cast to `*const i64`). The data was written by the loader as raw bytes; alignment of `*const i64` is 8, but `weight_ptr.add(offset)` may not be 8-aligned. Force a sentinel that `WeightEntry.offset` is `% 8 == 0` for int64 tensors, or use `read_unaligned`.
+  - ⏸️ **Deferred** — Real alignment concern. Today the loader's `i64_decode_buf` and the `WeightEntry` layout happen to produce 8-aligned offsets for int64 tensors; making this an enforced invariant (Static_assert on offset % 8 OR using ptr::read_unaligned) is the right next step. Tied to the broader weight-allocator hardening.
 - **line 370** — `let dim = *i64_ptr.add(i);` then `dim as u32` (line 361, 369) silently truncates negative values to large `u32`. Should reject negative dims explicitly (already partial — handles `-1` and `0` — but other negatives silently corrupt).
+  - ✅ **Fixed** — Added explicit handling for negative dims other than `-1`: return `EngineError::ShapeOverflow` immediately. Also reject positive dims that don't fit in u32 (i64 > u32::MAX). Both paths previously truncated silently to wrong shapes.
 - **line 632** — `gnode.input_count = in_count as u8;` — no overflow check; `in_count` is bounded by `MAX_NODE_INPUTS_PARSE = 3` and `MAX_NODE_INPUTS = 4`, so it fits, but document.
+  - ❌ **Not a defect** — Reviewer themselves note "it fits, but document." Documentation enhancement only.
 
 ### runtime/src/inference/tensor.rs
 - **lines 106-115** — `num_elements()` uses plain `total *= self.shape[i] as usize`, overflows silently. All call sites trust this. Use `saturating_mul` like `loader::graph::TensorShape`. (`workspace.rs::alloc_tensor` does its own checked-mul, so it's safe — but `Tensor::num_elements` is called from many places that don't.)
+  - ⏸️ **Deferred** — Real overflow surface but the actual exploit path requires a downstream call site that doesn't already do checked arithmetic. Reviewer correctly notes workspace.rs is safe; filing as a future numerics-hardening pass to audit every num_elements() consumer.
 - **lines 41-45** — `unsafe impl Send/Sync for Tensor` — Tensor holds a raw `*const f32` pointer. Send is fine; Sync claims `&Tensor` is safe to share across threads, which is true only if the pointed-to data is not mutated. `Tensor::data_mut()` casts to `*mut f32`, so a shared `&Tensor` can produce a mutable pointer. Two threads both calling `tensor.data_mut()` race. Sync is unsound as currently used; restrict to Send only, or hide `data_mut` behind `&mut self`.
+  - ✅ **Fixed** — Removed the `unsafe impl Sync for Tensor` and added a comment block documenting the unsoundness. `data_mut(&self)` lets a shared `&Tensor` produce a writable pointer; Sync would let two threads race that. Higher-level synchronization (engine_lock, ops_lock, pool's SpinGuard) serializes accesses today; the comment marks the constraint so a future maintainer doesn't add Sync without first hiding `data_mut` behind `&mut self`.
 
 ### runtime/src/inference/gpu.rs
 - **lines 194-199** — `core::slice::from_raw_parts(input as *const u8, MNIST_INPUT_FLOATS * 4)` aliases an `*const f32` as `*const u8` for the FFI. Sound (any type is valid as bytes), but document that `input` must be `MNIST_INPUT_FLOATS` floats (already in the precondition comment, just elevate to `// SAFETY:`).
+  - ❌ **Not a defect** — The reviewer themselves note "Sound (any type is valid as bytes), but document". Doc-comment enhancement only; no behaviour change.

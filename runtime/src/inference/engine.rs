@@ -378,6 +378,12 @@ impl InferenceEngine {
                         for i in 0..ndim {
                             let dim = *i64_ptr.add(i);
                             if dim > 0 {
+                                // Reject dims that don't fit in u32. Casting an
+                                // i64 > u32::MAX to u32 silently truncates the
+                                // upper 32 bits, producing a tiny wrong shape.
+                                if dim > i64::from(u32::MAX) {
+                                    return Err(EngineError::ShapeOverflow);
+                                }
                                 new_shape[i] = dim as u32;
                                 known_product *= dim as usize;
                             } else if dim == -1 {
@@ -389,6 +395,11 @@ impl InferenceEngine {
                                 let d = if i < input.ndim as usize { input.dim(i) } else { 1 };
                                 new_shape[i] = d;
                                 known_product *= d as usize;
+                            } else {
+                                // Negative dim other than -1 is malformed.
+                                // Casting silently wraps to a large u32 and
+                                // would corrupt the reshape silently.
+                                return Err(EngineError::ShapeOverflow);
                             }
                         }
                     }

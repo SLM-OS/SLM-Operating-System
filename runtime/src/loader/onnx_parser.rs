@@ -501,7 +501,13 @@ fn parse_tensor_proto<'a>(data: &'a [u8]) -> Result<TensorInfo<'a>, ParseError> 
                     }
                     FieldData::Varint(v) => {
                         if (tensor.shape.ndim as usize) < MAX_DIMS {
-                            tensor.shape.dims[tensor.shape.ndim as usize] = v as i64;
+                            // u64 -> i64 cast: reject values that
+                            // would flip sign rather than silently
+                            // letting a near-u64::MAX dim become a
+                            // negative shape entry.
+                            let dim = i64::try_from(v)
+                                .map_err(|_| ParseError::LengthOverflow)?;
+                            tensor.shape.dims[tensor.shape.ndim as usize] = dim;
                             tensor.shape.ndim += 1;
                         }
                     }

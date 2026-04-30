@@ -106,11 +106,18 @@ unsafe fn matmul_int8(
 
     for i in 0..m {
         for j in 0..n {
-            let mut acc: i32 = 0;
+            // i64 accumulator: a_val/b_val are in [-256, 255] after
+            // zero-point subtraction, so a_val * b_val is in
+            // [-65536, 65536]. With K = 32768 the running sum can
+            // reach ~2^31 and overflow i32. i64 has headroom for
+            // any realistic K value (would need ~2^47 K to overflow
+            // i64, far past any plausible weight matrix). The cast
+            // back to f32 truncates harmlessly.
+            let mut acc: i64 = 0;
             for kk in 0..k {
                 let a_val = (*ap.add(i * k + kk) as i32) - zp_a;
                 let b_val = (*bp.add(kk * n + j) as i32) - zp_b;
-                acc += a_val * b_val;
+                acc += (a_val * b_val) as i64;
             }
             *cp.add(i * n + j) = (acc as f32) * scale;
         }

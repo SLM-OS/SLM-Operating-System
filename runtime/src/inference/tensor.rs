@@ -38,11 +38,22 @@ pub struct Tensor {
     pub quant: QuantParams,
 }
 
-// SAFETY: Tensor is just a pointer + shape metadata. The underlying data
-// lives in kernel-managed memory (weight pool or workspace) which is
-// accessible from any CPU.
+// SAFETY: Tensor is a raw `*const f32` plus shape metadata. The
+// underlying data lives in kernel-managed memory (weight pool or
+// workspace) accessible from any CPU.
+//
+// Send is sound: Tensor's only owned state is a pointer; transferring
+// it across threads does not on its own race the pointee.
+//
+// Sync is intentionally NOT impl'd because `data_mut(&self)` casts
+// the `*const f32` to `*mut f32` and lets a shared `&Tensor` produce
+// a writable pointer. With Sync, two threads holding `&Tensor`
+// could both call `data_mut()` and race on the underlying buffer.
+// Higher-level synchronization (engine_lock, ops_lock, the pool's
+// SpinGuard) is what serializes accesses today; this comment marks
+// the constraint so a future maintainer doesn't add `unsafe impl
+// Sync` without first hiding `data_mut` behind `&mut self`.
 unsafe impl Send for Tensor {}
-unsafe impl Sync for Tensor {}
 
 impl Tensor {
     pub const EMPTY: Self = Self {
