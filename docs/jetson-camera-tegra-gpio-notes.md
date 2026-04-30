@@ -7,7 +7,7 @@ and switching the `cam_i2cmux` selector on the AON controller.
 ## Source and License
 
 Upstream driver (cached locally):
-- File: `docs/reference/linux-gpio-tegra186.c`
+- File: `../slmos-reference-cache/linux/linux-gpio-tegra186.c`
 - URL: https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/gpio/gpio-tegra186.c
 - Ref: Linux v6.12 (`torvalds/linux` tag `v6.12`)
 - SPDX header: `// SPDX-License-Identifier: GPL-2.0-only`

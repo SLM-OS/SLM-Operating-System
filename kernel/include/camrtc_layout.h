@@ -18,7 +18,7 @@
  * `csidiag` smoke test wouldn't immediately catch on a small
  * change.
  *
- * Values come from `docs/reference/l4t-tegra234-camera.dtsi`
+ * Values come from `../slmos-reference-cache/tegra-l4t/l4t-tegra234-camera.dtsi`
  * `ivccontrol@3` (capture-control) and `ivccapture@4` (capture).
  * SLM-OS uses 64 frames for the capture ring instead of L4T's 512
  * because we only issue single-shot requests today; growing this

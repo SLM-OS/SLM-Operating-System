@@ -7,7 +7,7 @@
  * the Intel-spec xHCI aperture at 0x03610000 will respond to RUN=1.
  *
  * Source of truth for these offsets is Linux's tegra-xusb driver
- * (`docs/reference/linux-xhci-tegra.c`). Every macro below cites the
+ * (`../slmos-reference-cache/linux/linux-xhci-tegra.c`). Every macro below cites the
  * upstream line number so future audits can cross-check.
  *
  * Only Tegra234 is addressed here — earlier Tegras (210/186/194) use

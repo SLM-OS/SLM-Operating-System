@@ -196,8 +196,8 @@ Six new subsystems on top of what already exists.
 - Tegra234 MIPI CSI-2 receiver. Configures lane mapping, performs
   D-PHY calibration, and routes the stream to VI.
 - **No NVIDIA programmer's manual.** The programming sequence comes
-  from the L4T sources cached at `docs/reference/l4t-csi*.c` /
-  `docs/reference/l4t-nvcsi*.c`. Distilled into
+  from the L4T sources cached at `../slmos-reference-cache/tegra-l4t/l4t-csi*.c` /
+  `../slmos-reference-cache/tegra-l4t/l4t-nvcsi*.c`. Distilled into
   `docs/jetson-camera-nvcsi-driver-notes.md`, including the 20-step
   direct-MMIO bring-up sequence and the RTCPU IPC fallback path.
 - **Two viable architectures** (per the code-read):
@@ -228,7 +228,7 @@ Six new subsystems on top of what already exists.
 
 - The Video Input engine. Receives NVCSI frames, DMAs them into DRAM.
 - **VI5 is RTCPU-only on T234.** The code-read of L4T `vi5_fops.c`
-  (cached at `docs/reference/l4t-vi5_fops.c`, distilled in
+  (cached at `../slmos-reference-cache/tegra-l4t/l4t-vi5_fops.c`, distilled in
   `docs/jetson-camera-vi-driver-notes.md`) confirms there is **no
   AP-programmable register interface** for VI5: zero `request_irq`,
   zero MMIO peeks. Every operation (`CAPTURE_CHANNEL_SETUP_REQ`,
@@ -553,7 +553,7 @@ Items that can land before Phase 0 hardware probing.
     64×320 B) and `ivccapture@4` (capture, 512×64 B).
   - Total port estimate: **~600-900 LoC new** + reuse of existing
     `bpmp/ivc.c` and `bpmp/hsp.c`.
-- ✅ Cache reference sources under `docs/reference/`:
+- ✅ Cache reference sources under `../slmos-reference-cache/`:
   Linux `imx219.c`, `i2c-tegra.c`, the L4T `csi*.c` / `nvcsi*.c` /
   `vi5*.c` files, and the camera-rtcpu IVC headers
   (`camrtc-capture*.h`). 24 files cached during the four-agent code-

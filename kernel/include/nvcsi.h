@@ -9,7 +9,7 @@
  * Architecture: direct MMIO (Option A from
  * `docs/jetson-camera-imx219-plan.md` §3). The historical T194
  * `csi4_fops` programming sequence in
- * `docs/reference/l4t-csi4_fops.c` applies unchanged on T234 because
+ * `../slmos-reference-cache/tegra-l4t/l4t-csi4_fops.c` applies unchanged on T234 because
  * the underlying NVCSI hardware layout was preserved across SoC
  * generations even though L4T R35 routes everything through RTCPU.
  * The 20-step bring-up procedure is documented in

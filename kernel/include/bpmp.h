@@ -12,8 +12,8 @@
  *
  * References:
  *   docs/archive/plans/jetson-bpmp-ipc-plan.md            SLM-OS port design
- *   docs/reference/linux-bpmp-abi.h         MRQ opcodes + payload formats
- *   docs/reference/edk2-nvidia-bpmpipc*     UEFI port target
+ *   ../slmos-reference-cache/linux/linux-bpmp-abi.h         MRQ opcodes + payload formats
+ *   ../slmos-reference-cache/tegra-l4t/edk2-nvidia-bpmpipc*     UEFI port target
  */
 
 #ifndef BPMP_H

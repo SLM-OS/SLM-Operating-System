@@ -27,7 +27,7 @@
 #define HSP_DIMENSIONING_REG    0x380
 
 /* HSP layout constants — see docs/archive/plans/jetson-bpmp-ipc-plan.md "Doorbell-offset
- * calculation" section and docs/reference/linux-tegra-hsp.c:289. */
+ * calculation" section and ../slmos-reference-cache/linux/linux-tegra-hsp.c:289. */
 #define HSP_COMMON_REGION_SIZE  0x10000   /* 64 KB common regs */
 #define HSP_SM_SIZE             0x8000    /* 32 KB per shared mailbox */
 #define HSP_SS_SIZE             0x10000   /* 64 KB per shared semaphore */

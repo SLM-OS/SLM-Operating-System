@@ -658,7 +658,7 @@ or extracted from a GeForce driver package).
 **Deliverables.**
 - Extract `gsp-535.113.01.bin`, `booter_load.bin`, and
   `booter_unload.bin` from the NVIDIA open-gpu-kernel-modules release
-  (already in `docs/reference/nvidia-open-gpu-kernel-modules/`? —
+  (already in `../slmos-reference-cache/nvidia/nvidia-open-gpu-kernel-modules/`? —
   audit first).
 - Verify signatures against NVIDIA's published hashes.
 - Commit a compressed copy (or a `build.rs`-driven download) to
@@ -800,7 +800,7 @@ test-rpc 15) + hardware integration via 7 harness actions
 **Reference.** Ported from nouveau's
 `drivers/gpu/drm/nouveau/nvkm/{falcon,subdev/gsp}/{ga102,r535}.c`
 plus NVIDIA `open-gpu-kernel-modules` 595 register headers. Twenty-
-plus reference files cached in `docs/reference/` for reproducibility.
+plus reference files cached in `../slmos-reference-cache/` for reproducibility.
 
 **Original est.** 10 days; **actual:** ~3 sessions of work shipped,
 remaining hardware-debug for FWSEC-FRTS execution unbounded but

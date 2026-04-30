@@ -858,7 +858,7 @@ experiment could complete usefully:**
    re-written for each new page. nvgpu's
    `gk20a_falcon_copy_to_imem` writes IMEMT every 64 u32 with an
    incrementing tag (three independent reference sites in
-   `docs/reference/nvgpu-hal-falcon-falcon_gk20a_fusa.c`); SLM-OS
+   `../slmos-reference-cache/nvidia/nvgpu-hal-falcon-falcon_gk20a_fusa.c`); SLM-OS
    was tagging every page as page 0, which silently corrupts the
    HS-bootrom signature for any multi-page upload (e.g. the ~18
    KB Booter ucode). Fix in `kernel/gpu/nvidia/falcon.c` + 3
@@ -909,12 +909,12 @@ same bug (peeked `BROM_BASE+0x010/0x004`, also unmapped) and printed
 the unmapped readings labelled "SEC2 BROM MOD_SEL".
 
 **Source-read of nouveau confirms the real story.** `ga102_flcn_fw_boot`
-(`docs/reference/nouveau-falcon-ga102.c:113-123`) writes the BROM
+(`../slmos-reference-cache/nouveau/nouveau-falcon-ga102.c:113-123`) writes the BROM
 selectors via plain BAR0 MMIO at the same `0x841180/198/19c/210`
 addresses SLM-OS uses in `kernel/gpu/nvidia/bringup.c:710-716`. There
 is no DMEMMAPPER fixup; the booter HS blob carries only the
 `(fuse_ver, engine_id, ucode_id)` triple in its meta_data block
-(`docs/reference/nouveau-gsp-ga102.c:41-92` `ga102_gsp_booter_ctor`).
+(`../slmos-reference-cache/nouveau/nouveau-gsp-ga102.c:41-92` `ga102_gsp_booter_ctor`).
 **The "DMEM-patch the Booter selectors" hypothesis is also refuted.**
 
 **Subsidiary observation — inherited scrub state:** SEC2 HWCFG2 =
@@ -952,8 +952,8 @@ and immediately STOPPED.
 
 Both reference implementations confirm `apps[0].offset` is the right
 value:
-- OGKM `kgspExecuteHsFalcon_GA102` (`docs/reference/ogkm-kernel_gsp_falcon_ga102.c:278`): `kflcnRegWrite(NV_PFALCON_FALCON_BOOTVEC, pUcode->imemVa)` where `imemVa = header.appCodeOffset` (`ogkm-kernel_gsp_booter.c:322`)
-- Nouveau v2 `nvkm_falcon_fw_ctor_hs_v2` (`docs/reference/nouveau-falcon-fw.c:351`): `fw->boot_addr = lhdr->app[0].offset`
+- OGKM `kgspExecuteHsFalcon_GA102` (`../slmos-reference-cache/nvidia/ogkm-kernel_gsp_falcon_ga102.c:278`): `kflcnRegWrite(NV_PFALCON_FALCON_BOOTVEC, pUcode->imemVa)` where `imemVa = header.appCodeOffset` (`ogkm-kernel_gsp_booter.c:322`)
+- Nouveau v2 `nvkm_falcon_fw_ctor_hs_v2` (`../slmos-reference-cache/nouveau/nouveau-falcon-fw.c:351`): `fw->boot_addr = lhdr->app[0].offset`
 
 After the fix, hardware `gpu init` shows CPUCTL=0x00 on first
 post-kexec attempt — Falcon is executing booter code, no longer
@@ -1008,7 +1008,7 @@ missing signature, etc.) which booter reports through MAILBOX0.
 
 | Artefact | What |
 |---|---|
-| `kernel/gpu/nvidia/gsp_wpr_meta.h` | 256-byte `GspFwWprMeta` struct (verbatim layout from `docs/reference/nouveau-r535-nvrm-gsp.h:417-555`); `_Static_assert`s pin sizeof + 11 critical field offsets at compile time so any layout drift breaks the build |
+| `kernel/gpu/nvidia/gsp_wpr_meta.h` | 256-byte `GspFwWprMeta` struct (verbatim layout from `../slmos-reference-cache/nouveau/nouveau-r535-nvrm-gsp.h:417-555`); `_Static_assert`s pin sizeof + 11 critical field offsets at compile time so any layout drift breaks the build |
 | `gsp_wpr_meta_populate_minimum` (in `bringup.c`) | Pure helper. Sets magic, revision, sysmemAddrOfRadix3Elf, sizeOfRadix3Elf, gspFwWprStart, gspFwWprEnd, fbSize. Other fields explicitly zeroed. NULL-safe. |
 | `gsp_radix3_fill_dummy_chain` (in `bringup.c`) | Pure helper. Writes single-entry L0/L1/L2 page entries given the per-level IOVAs. NULL in any page argument is a no-op for the entire call. |
 | `struct gsp_bringup` extension (`bringup.h`) | Four new pages tracked: `dma_radix3_l{0,1,2}_va/iova` + `dma_radix3_elf_va/iova/size`. Fail-path frees them; success path leaves them live for SEC2. |

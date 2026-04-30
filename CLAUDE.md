@@ -336,9 +336,21 @@ When debugging hardware issues, follow this order:
 
 ## Reference File Cache
 
-Before launching a subagent to fetch source files from GitHub (Circle, Linux kernel, NVIDIA open-gpu-kernel-modules, RP1 datasheet), check `docs/reference/` first. If the file has been fetched before, use the local copy. If fetching new files, save them to `docs/reference/` for future sessions.
+Third-party reference material (NVIDIA L4T nvgpu, Mesa/NVK, nouveau, HailoRT, Linux kernel, RPi firmware, etc.) lives in a **private companion repo** at `SLM-OS/slmos-reference-cache`, cloned as a sibling directory next to this checkout:
+
+```
+parent-dir/
+├── SLM-Operating-System/      ← this repo (public)
+└── slmos-reference-cache/     ← reference material (private)
+```
+
+In-tree citations use the form `../slmos-reference-cache/<vendor>/<filename>:<line>`. Vendor folders: `nvidia/`, `nouveau/`, `mesa/`, `hailo/`, `tegra-l4t/`, `linux/`, `rpi/`, `circle/`, `uboot/`, `kexec/`. SLM-OS-authored investigation notes and lab traces live under `derivatives/`.
+
+Before launching a subagent to fetch source files from GitHub, check `../slmos-reference-cache/` first. If the file has been fetched before, use the local copy. If fetching new files, save them to the appropriate vendor folder there (not into the public repo). The private repo's `README.md` documents the layout.
 
 Do NOT re-fetch the same GitHub raw URLs across multiple subagents in the same session. Fetch once, read from disk afterward.
+
+Do NOT add third-party source files to this public repo's `docs/` tree. The reference cache is intentionally private to keep the public repo's git history clean of vendored upstream material.
 
 ---
 

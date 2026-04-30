@@ -17,7 +17,7 @@
  * All addresses and field semantics verified against
  *   - nouveau `drivers/gpu/drm/nouveau/nvkm/falcon/{base,ga102}.c`
  *   - NVIDIA open-gpu-kernel-modules `src/common/inc/swref/published/ampere/ga102/dev_falcon_v4.h`
- *   - `docs/reference/nvidia-gsp-bringup-sequence.md` (captured 2026-04-14)
+ *   - `../slmos-reference-cache/derivatives/notes/nvidia-gsp-bringup-sequence.md` (captured 2026-04-14)
  *
  * Not used on Jetson Orin Nano — its GSP ucode is pre-loaded by
  * the platform firmware before Linux comes up, so Jetson-specific
@@ -163,7 +163,7 @@
  * matters: MOD_SEL must be last (it triggers the actual verify).
  *
  * Offsets are relative to the BROM base (0x111000 / 0x841000),
- * not the Falcon base. See `docs/reference/nouveau-falcon-hs-boot.md`.
+ * not the Falcon base. See `../slmos-reference-cache/derivatives/notes/nouveau-falcon-hs-boot.md`.
  */
 #define FALCON_BROM_PARAADDR0         0x210u      /* DMEM byte offset of signature */
 #define FALCON_BROM_UCODE_ID          0x198u      /* from descriptor's UcodeId */
@@ -172,7 +172,7 @@
 #define FALCON_BROM_MOD_SEL_RSA3K     1u
 
 /* Compile-time pin against accidental drift. Source of truth:
- * nouveau's `ga102_flcn_fw_boot` (`docs/reference/nouveau-falcon-ga102.c
+ * nouveau's `ga102_flcn_fw_boot` (`../slmos-reference-cache/nouveau/nouveau-falcon-ga102.c
  * :113-123`) writes these exact offsets, and NVIDIA's open-gpu-kernel-
  * modules `dev_falcon_v4.h` lists them under FALCON_PARAADDR0 /
  * FALCON_BROM_CURR_UCODE_ID / FALCON_BROM_ENGIDMASK / FALCON_MOD_SEL.

@@ -17,7 +17,7 @@
  *       gpu-kernel-launch.c gpu-launch-common.c
  *
  * Shader blob: ./write_cafe_shader.sass (640 B, from
- * docs/reference/cuda_write_shader.sass — the .text section of a
+ * ../slmos-reference-cache/derivatives/shaders/cuda_write_shader.sass — the .text section of a
  * CUDA-compiled cuda_write cubin).
  *
  * Usage: sudo ./gpu-kernel-launch [--preserve-for-kexec]

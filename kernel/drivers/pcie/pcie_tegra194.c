@@ -7,9 +7,9 @@
  * kernel/drivers/bpmp/.
  *
  * Reference files:
- *   docs/reference/linux-pcie-tegra194.c
- *   docs/reference/linux-pcie-designware.c
- *   docs/reference/linux-pcie-designware.h
+ *   ../slmos-reference-cache/linux/linux-pcie-tegra194.c
+ *   ../slmos-reference-cache/linux/linux-pcie-designware.c
+ *   ../slmos-reference-cache/linux/linux-pcie-designware.h
  */
 
 #include "platform.h"
@@ -32,7 +32,7 @@
 /* Tegra234 controller id for PCIe C8 (DT: nvidia,controller-id = <8>). */
 #define TEGRA_PCIE_C8_CID       8
 
-/* APPL register offsets (docs/reference/linux-pcie-tegra194.c:41..) */
+/* APPL register offsets (../slmos-reference-cache/linux/linux-pcie-tegra194.c:41..) */
 #define APPL_PINMUX                     0x000
 #define APPL_PINMUX_PEX_RST             (1u << 0)
 #define APPL_PINMUX_CLKREQ_OVERRIDE_EN  (1u << 2)
@@ -67,7 +67,7 @@
 #define TEGRA_P2U_C8_LANE0              0x03F40000UL
 #define TEGRA_P2U_C8_LANE1              0x03F50000UL
 
-/* P2U register offsets (docs/reference/linux-phy-tegra194-p2u.c:17-32). */
+/* P2U register offsets (../slmos-reference-cache/linux/linux-phy-tegra194-p2u.c:17-32). */
 #define P2U_CONTROL_CMN                             0x74
 #define P2U_CONTROL_CMN_ENABLE_L2_EXIT_RATE_CHANGE  (1u << 13)
 #define P2U_PERIODIC_EQ_CTRL_GEN3                   0xC0
@@ -81,7 +81,7 @@
 #define P2U_DIR_SEARCH_CTRL                         0xD4
 #define P2U_DIR_SEARCH_CTRL_GEN4_FINE_GRAIN_SEARCH_TWICE  (1u << 18)
 
-/* DesignWare DBI register offsets (docs/reference/linux-pcie-designware.h). */
+/* DesignWare DBI register offsets (../slmos-reference-cache/linux/linux-pcie-designware.h). */
 #define DBI_PCI_COMMAND                 0x004
 #define   DBI_PCI_CMD_IO_EN             (1u << 0)
 #define   DBI_PCI_CMD_MEM_EN            (1u << 1)

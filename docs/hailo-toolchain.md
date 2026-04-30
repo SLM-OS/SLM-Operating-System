@@ -224,9 +224,9 @@ Stick to DFC 3.33.1 for Hailo-8/8L.
 
 ## Further Reading
 
-- HailoRT source reference (cached): `docs/reference/hailort-*.cpp`,
-  `docs/reference/hailo-hef-parser-head.cpp`
-- v4.23 wire-format capture: `docs/reference/hailort-v4.23.0-wire-capture-
+- HailoRT source reference (cached): `../slmos-reference-cache/hailo/hailort-*.cpp`,
+  `../slmos-reference-cache/hailo/hailo-hef-parser-head.cpp`
+- v4.23 wire-format capture: `../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-
   mobilenet.txt`
 - Phase 8 / multi-context blocker: #347
 - Pi 5 AI HAT+ phase plan: `docs/pi5-ai-hat-plan.md`

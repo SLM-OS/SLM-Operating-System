@@ -84,7 +84,7 @@ volatile uint8_t *xhci_db_base;
  *       Must be programmed (XUSB_CFG_4 BAR0, XUSB_CFG_7 BAR2,
  *       XUSB_CFG_1 bus-master) before the xHCI op registers will
  *       respond to RUN=1 — see tegra_xusb_config in
- *       docs/reference/linux-xhci-tegra.c:786-830.
+ *       ../slmos-reference-cache/linux/linux-xhci-tegra.c:786-830.
  *
  * BAR2: Tegra234-unique wrapper aperture carrying the mailbox
  *       (MBOX_CMD/DATA_IN/DATA_OUT/OWNER), IFR DMA config, CSB
@@ -797,7 +797,7 @@ static void w32(volatile uint8_t *base, uint32_t off, uint32_t v)
  * forward to r32/w32 with the right base pointer, but having a
  * named accessor per aperture makes call sites read the same way
  * Linux's fpci_readl/bar2_readl do — which matters when porting
- * from the reference driver under docs/reference/.
+ * from the reference driver under ../slmos-reference-cache/.
  */
 static uint32_t fpci_r32(uint32_t off) { return r32(xhci_fpci_base, off); }
 static void     fpci_w32(uint32_t off, uint32_t v) { w32(xhci_fpci_base, off, v); }

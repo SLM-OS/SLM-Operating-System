@@ -41,7 +41,7 @@
  *   OUTPUT periph_bytes_per_buffer  = core_bytes_per_buffer,   periph_buffers=1
  * so periph_frame boils down to tensor size for input and core size
  * for output. Verified byte-for-byte against HailoRT's MNIST wire
- * capture (docs/reference/pios_{ACTIVATION,DYNAMIC}.bin). */
+ * capture (../slmos-reference-cache/derivatives/hailort-traces/pios_{ACTIVATION,DYNAMIC}.bin). */
 /* Resolve the OUTPUT boundary desc page size with fallback to the
  * INPUT default. Kept inline so both translate_open_boundary_for_pad
  * and emit_dynamic_boundary_prologue agree on the value they emit. */
@@ -116,7 +116,7 @@ int hailo_cs_translate_application_header(
 
     /* Phase 8 #253 (2026-04-23): HailoRT sets preliminary_run_asap=1
      * and can_fast_batch_switch=1 for MNIST on v4.23 (verified via
-     * Pi OS trace docs/reference/hailort-v4.23.0-mnist-fwctl-pi5.txt).
+     * Pi OS trace ../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-mnist-fwctl-pi5.txt).
      * SLM-OS leaves both at 0. Tested setting them: did not fix the
      * boundary-submit silence. Most likely they need to be paired
      * with a corresponding host-side behavior (PRELIMINARY ASAP mode
@@ -140,7 +140,7 @@ int hailo_cs_translate_application_header(
      * 0 + 1) both must be declared or fw's credit task walks an
      * incomplete list. Pi OS wire capture confirms HailoRT sends
      * config_channels_count=2 with packed_id=[0, 1] for MNIST on
-     * v4.23 (docs/reference/hailort-v4.23.0-wire-capture-mnist-pi5.txt,
+     * v4.23 (../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt,
      * SET_NETWORK_GROUP_HEADER #1 body). For v4.23 the array is
      * capped at HAILO_CS_MAX_CFG_CHANNELS=4. */
     if (cfg->cfg_channel_1_desc_list_iova != 0) {
@@ -333,7 +333,7 @@ static int translate_activation(const struct hef_info *info,
 
 /* BATCH_SWITCHING context. Per HailoRT's
  * fill_batch_switching_context_config_recepies_for_multi_context
- * (resource_manager_builder.cpp L1306-1333, docs/reference/
+ * (resource_manager_builder.cpp L1306-1333, ../slmos-reference-cache/
  * hailort-context-switch-orchestration.md), the minimal sequence
  * for a boundary-I/O network is:
  *
@@ -371,7 +371,7 @@ static int translate_activation(const struct hef_info *info,
  * nn_stream_config's LCU list at HEF-load time. */
 static const struct hailo_cs_act_switch_lcu_batch
 mnist_switch_lcu_batch_template[] = {
-    /* Values from docs/reference/pios_BATCH_SWITCHING.bin decoded
+    /* Values from ../slmos-reference-cache/derivatives/hailort-traces/pios_BATCH_SWITCHING.bin decoded
      * 2026-04-22 — kernel_done_count=2 for every LCU. */
     { .packed_lcu_id = 0x00, .network_index = 0, .kernel_done_count = 2 },
     { .packed_lcu_id = 0x10, .network_index = 0, .kernel_done_count = 2 },
@@ -494,7 +494,7 @@ static int translate_batch_switching(const struct hef_info *info,
  * Direct FETCH_CCW_BURSTS (without the REPEATED_ACTION wrapper)
  * gets rejected in PRELIMINARY on Hailo-8L with 0x402a0001 =
  * CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED —
- * confirmed via HailoRT v4.23 wire capture (docs/reference/
+ * confirmed via HailoRT v4.23 wire capture (../slmos-reference-cache/
  * hailort-v4.23.0-wire-capture-mobilenet.txt). The wrapped form
  * is accepted.
  *
@@ -505,7 +505,7 @@ static int translate_batch_switching(const struct hef_info *info,
  * parser learns to extract per-context add-ccw-burst sequences.
  */
 /* HailoRT v4.23 PRELIMINARY NN-core arming template for MNIST HEF.
- * Reference: docs/reference/pios_PRELIMINARY.bin decoded 2026-04-22.
+ * Reference: ../slmos-reference-cache/derivatives/hailort-traces/pios_PRELIMINARY.bin decoded 2026-04-22.
  * Emits the LCU-sweep + sequencer-trigger + LCU-enable sequence that
  * arms the NN core's compute pipeline. Without this, fw's inference
  * scheduler never grants credits to the boundary-IN fetch, and the
@@ -532,7 +532,7 @@ static const uint8_t MNIST_DISABLE_LCU_SWEEP[14] = {
 };
 
 /* sequencer_config bytes for clusters 0 and 1 (43 B each) verbatim
- * from HailoRT wire capture (docs/reference/pios_PRELIMINARY.bin).
+ * from HailoRT wire capture (../slmos-reference-cache/derivatives/hailort-traces/pios_PRELIMINARY.bin).
  * HEF-compiled constants — same on every load of the MNIST HEF,
  * IOVA-independent.
  *
@@ -1272,7 +1272,7 @@ static void fill_host_buffer_info(uint64_t iova, uint16_t page_size,
  * boundary channels with their stream_reg_info + host_buffer_info,
  * then resume the VDMA channels. Without these actions firmware
  * never primes device-side num_avail and every submit times out
- * (see #253 root-cause analysis + docs/reference/pios_DYNAMIC.bin). */
+ * (see #253 root-cause analysis + ../slmos-reference-cache/derivatives/hailort-traces/pios_DYNAMIC.bin). */
 static int emit_dynamic_boundary_prologue(
     const struct hef_info *info,
     const struct hailo_cs_translate_cfg *cfg,

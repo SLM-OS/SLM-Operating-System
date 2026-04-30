@@ -11,7 +11,7 @@
  *     +0x10  OUTPUT_VALUE     bit0 = output level (write)
  *
  * Reference: Linux v6.12 `drivers/gpio/gpio-tegra186.c`, cached at
- * `docs/reference/linux-gpio-tegra186.c`. Address arithmetic and the
+ * `../slmos-reference-cache/linux/linux-gpio-tegra186.c`. Address arithmetic and the
  * IMX219-specific pin mapping live in `kernel/include/platform.h` next
  * to the `TEGRA234_GPIO_*` constants. See
  * `docs/jetson-camera-tegra-gpio-notes.md` for the per-pin window

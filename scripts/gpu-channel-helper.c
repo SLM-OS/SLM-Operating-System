@@ -225,7 +225,7 @@ int main(int argc, char **argv)
      * **Kernel requirement:** `CREATE_SUBCONTEXT` (TSG ioctl op 18)
      * and `BIND_CHANNEL_EX` (op 11) require L4T r36 or newer. On
      * older kernels these ops don't exist and xioctl will abort
-     * the helper. The cached UAPI headers under docs/reference/ are
+     * the helper. The cached UAPI headers under ../slmos-reference-cache/ are
      * from L4T r36.4.7 (the Jetson Orin Nano dev kit default). */
     struct nvgpu_tsg_create_subcontext_args subctx;
     memset(&subctx, 0, sizeof(subctx));
@@ -509,7 +509,7 @@ int main(int argc, char **argv)
     /* SEMAPHORE_RELEASE via PBDMA-decoded host-family methods.
      *
      * Encoding matches nvgpu's gv11b_sema_add_incr_cmd verbatim
-     * (docs/reference/nvgpu-hal-sync-sema_cmdbuf_gv11b.c:45-101).
+     * (../slmos-reference-cache/nvidia/nvgpu-hal-sync-sema_cmdbuf_gv11b.c:45-101).
      * Method headers carry method_id = byte_off / 4 at bits [12:0]
      * (NOT byte_off at [11:0]) — the hardware decodes bits [12:0]
      * as method_id, so misplacing the value causes PBDMA to silently

@@ -101,7 +101,7 @@ Having a native Linux environment on the same hardware is handy for:
 - Running HailoRT (`hailortcli`) against the AI HAT+ for a known-good
   reference to compare against SLM-OS's own implementation.
 - Instrumenting the `hailo_pci` DKMS driver with `pr_info` hooks to
-  capture VDMA wire traces (see `docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt`).
+  capture VDMA wire traces (see `../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-vdma-mnist-pi5.txt`).
 - Booting `rpi-eeprom-config` / `vcgencmd` to inspect firmware state.
 - Running packet captures on the PCIe link via whatever tooling is
   convenient under Linux.
@@ -368,7 +368,7 @@ In order of how much time each one cost:
 
 - `.claude/worktrees/pi-5-ai-hat/` — where the SLM-OS build typically
   happens; the Pi OS card work was done from the same worktree.
-- `docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt` — Example wire
+- `../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-vdma-mnist-pi5.txt` — Example wire
   trace captured by instrumenting `hailo_pci` on Pi OS and running
   an MNIST inference. Pattern for future debugging sessions.
 - `docs/lab-operations.md` — general labctl workflow.

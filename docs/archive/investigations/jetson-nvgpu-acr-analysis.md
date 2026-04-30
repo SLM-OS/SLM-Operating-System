@@ -5,7 +5,7 @@ Sources: [OE4T/linux-nvgpu@l4t/l4t-r36.5](https://github.com/OE4T/linux-nvgpu/tr
 a separate branch in OE4T/linux-nvgpu; r36.5 is the immediate successor and is the
 same tree modulo a handful of bug fixes that do not touch ACR).
 
-All files referenced below are cached locally under `docs/reference/` with the
+All files referenced below are cached locally under `../slmos-reference-cache/` with the
 `nvgpu-<subpath>-<file>.<ext>` naming convention listed in the summary section.
 
 ## Executive summary
@@ -62,7 +62,7 @@ So the manifest is copied **verbatim** to the top of DMEM, and BROM consumes
 it after `STARTCPU` is written. The 2048 B size matches **`RSA3K_PK_SIZE_BYTE`**
 in `nvgpu-common-acr-nvgpu_acr_interface_v2.h:60`, which is the size of the
 RISCV PKC-parameter block (see Turing reference in
-`docs/reference/nouveau-nvfw-acr.h` — same shape):
+`../slmos-reference-cache/nouveau/nouveau-nvfw-acr.h` — same shape):
 
 ```
 struct rm_riscv_pkc_param {
@@ -307,7 +307,7 @@ prod + FECS PKC sig + GPCCS prod + GPCCS PKC sig + NETC + our own host-side
 GR init (registers) + a host channel pointing at a pushbuffer with a single
 `GET_GPU_INFO` method (NVC597 class). Skip PMU entirely.
 
-## Files cached (58 new files under `docs/reference/`)
+## Files cached (58 new files under `../slmos-reference-cache/`)
 
 ### ACR framework (common)
 * `nvgpu-common-acr-acr.c` — top-level init + construct/execute

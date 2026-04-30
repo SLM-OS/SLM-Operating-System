@@ -53,7 +53,7 @@
 /* Cadence MACB/GEM register map                                               */
 /*                                                                             */
 /* Offsets taken from Linux drivers/net/ethernet/cadence/macb.h (cached at    */
-/* docs/reference/linux-cadence-macb.h). Only the subset the driver actually   */
+/* ../slmos-reference-cache/linux/linux-cadence-macb.h). Only the subset the driver actually   */
 /* touches is defined here; the Linux header has the full set.                 */
 /* -------------------------------------------------------------------------- */
 

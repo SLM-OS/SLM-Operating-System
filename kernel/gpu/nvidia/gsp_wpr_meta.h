@@ -23,7 +23,7 @@
  * union arrangement are all checked at compile time against
  * `_Static_assert` constants below — any drift fails the build.
  *
- * Reference: docs/reference/nouveau-r535-nvrm-gsp.h:417-555 (verbatim
+ * Reference: ../slmos-reference-cache/nouveau/nouveau-r535-nvrm-gsp.h:417-555 (verbatim
  * copy of NVIDIA's R535 OGKM source). MAGIC/REVISION at lines 557-559.
  */
 
@@ -260,7 +260,7 @@ void gsp_wpr_meta_populate_minimum(GspFwWprMeta *meta,
  * pointer in any page argument is a no-op for the entire call.
  *
  * Reference: nouveau `nvkm_gsp_radix3_sg`
- * (`docs/reference/nouveau-gsp-r535.c:1656-1713`). Single-entry
+ * (`../slmos-reference-cache/nouveau/nouveau-gsp-r535.c:1656-1713`). Single-entry
  * chain is the Stage A simplification — production GSP-RM ELF
  * spans many L2 pages.
  */

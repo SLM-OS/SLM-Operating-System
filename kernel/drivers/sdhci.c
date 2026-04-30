@@ -1046,7 +1046,7 @@ struct blkdev *sdhci_create_qemu_pci(const char *name)
 #define AON_GPIO_BIT_SD_IO_1V8 (1u << 3)
 
 /* SDIO_CFG bank register offsets (relative to BCM2712_EMMC2_CFG_BASE).
- * Pinned to docs/reference/rpi-linux-sdhci-brcmstb.c (rpi-6.12.y)
+ * Pinned to ../slmos-reference-cache/rpi/rpi-linux-sdhci-brcmstb.c (rpi-6.12.y)
  * lines 37-51. Linux re-uses these offsets across all brcmstb-family
  * SDHCI bindings; the bcm2712 path uses them via cfginit_2712. */
 #define SDIO_CFG_CTRL                       0x00u
@@ -1066,7 +1066,7 @@ struct blkdev *sdhci_create_qemu_pci(const char *name)
 
 /*
  * Apply the BCM2712-specific SDHCI cfginit, mirroring Linux's
- * sdhci_brcmstb_cfginit_2712 (docs/reference/rpi-linux-sdhci-brcmstb.c
+ * sdhci_brcmstb_cfginit_2712 (../slmos-reference-cache/rpi/rpi-linux-sdhci-brcmstb.c
  * lines 260-296), trimmed to what SLM-OS actually needs:
  *
  *   - Force card-detect via SDIO_CFG_CTRL — the lab fixture's SDWire

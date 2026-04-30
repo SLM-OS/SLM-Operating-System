@@ -933,7 +933,7 @@ int test_suite_camera(void)
  * Compile-time assertions guarding kernel/include/tegra234_clocks.h
  * against accidental value drift. Each #define from the header is
  * pinned to the upstream Linux v6.12 dt-binding value (cached under
- * docs/reference/linux-dt-bindings-tegra234-{clock,reset,powergate}.h).
+ * ../slmos-reference-cache/linux/linux-dt-bindings-tegra234-{clock,reset,powergate}.h).
  *
  * If a future port of these constants from a newer upstream changes
  * any value, this assertion fires at compile time — much cheaper than
@@ -972,7 +972,7 @@ _Static_assert(TEGRA234_RESET_VI2    == 115u, "TEGRA234_RESET_VI2 drift");
  * post-kexec — see `kernel/drivers/camrtc/camrtc.c` + closed
  * issue #438 for the BPMP poweron sequence that depends on these
  * exact IDs. Pin them against
- * `docs/reference/linux-dt-bindings-tegra234-{clock,reset}.h`. */
+ * `../slmos-reference-cache/linux/linux-dt-bindings-tegra234-{clock,reset}.h`. */
 _Static_assert(TEGRA234_CLK_RCE_CPU_NIC == 113u,
     "TEGRA234_CLK_RCE_CPU_NIC drift");
 _Static_assert(TEGRA234_CLK_RCE_NIC     == 114u,
@@ -1062,7 +1062,7 @@ _Static_assert(CAMRTC_CAP_FRAME_SIZE == 64u,
  * these asserts catch field-reorder or struct-resize regressions
  * at compile time. Header is 8 B, PHY_STREAM_OPEN_REQ body is
  * 16 B, PHY_STREAM_OPEN_RESP body is 8 B per L4T's
- * `docs/reference/l4t-camrtc-capture-messages.h`. */
+ * `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`. */
 _Static_assert(sizeof(struct capture_msg_header) == 8,
     "capture_msg_header must be exactly 8 bytes (RCE wire format)");
 _Static_assert(sizeof(struct capture_phy_stream_open_req) == 16,
@@ -1564,7 +1564,7 @@ _Static_assert(TEGRA234_GPIO_AON_BASE  == 0x0C2F1000UL,
  * leaves the pad routed to its default SFIO peripheral and the
  * GPIO-controller writes are silently ignored (the IMX219 reset line
  * stays LOW even though OUTPUT_VALUE reads back as 1). Reference:
- * `docs/reference/linux-pinctrl-tegra234.c` `tegra234_pingroups[]`. */
+ * `../slmos-reference-cache/linux/linux-pinctrl-tegra234.c` `tegra234_pingroups[]`. */
 _Static_assert(TEGRA234_PINMUX_MAIN_BASE   == 0x02430000UL,
     "TEGRA234_PINMUX_MAIN_BASE drift");
 _Static_assert(TEGRA234_PINMUX_AON_BASE    == 0x0C300000UL,

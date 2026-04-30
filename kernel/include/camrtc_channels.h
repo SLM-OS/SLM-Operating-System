@@ -2,7 +2,7 @@
  * camrtc_channels.h — Tegra234 Camera RTCPU IVC channel-setup ABI.
  *
  * Direct port of the subset SLM-OS needs from
- * `docs/reference/l4t-camrtc-channels.h`. The TLV struct layout, tag
+ * `../slmos-reference-cache/tegra-l4t/l4t-camrtc-channels.h`. The TLV struct layout, tag
  * value, and channel error codes are wire-format ABI between the AP
  * and the RCE firmware — they cannot be reordered or have their
  * sizes changed without breaking the protocol.
@@ -21,7 +21,7 @@
 
 /* CAMRTC_TAG_IVC_SETUP — packed 'IVC-SETU' as a u64 little-endian.
  * Wire-equal to the L4T `CAMRTC_TAG64('I','V','C','-','S','E','T','U')`
- * macro at `docs/reference/l4t-camrtc-channels.h:30`. Pre-computed
+ * macro at `../slmos-reference-cache/tegra-l4t/l4t-camrtc-channels.h:30`. Pre-computed
  * here so the `_Static_assert` in test_camera.c can pin it.
  * Byte-by-byte: I=0x49 V=0x56 C=0x43 -=0x2D S=0x53 E=0x45 T=0x54 U=0x55. */
 #define CAMRTC_TAG_IVC_SETUP    ((uint64_t)0x55544553ULL << 32 | \

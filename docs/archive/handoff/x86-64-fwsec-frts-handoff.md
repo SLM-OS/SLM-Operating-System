@@ -5,8 +5,8 @@
 **Tracking issue:** [#27](https://github.com/johnjezl/CS-496-Capstone-SLM-Operating-System/issues/27)
 **Companion docs:**
 - `docs/x86-64-capstone-gap-closure-plan.md` §E3 — overall plan
-- `docs/reference/nvidia-gsp-bringup-sequence.md` — register map + Ampere bringup theory
-- `docs/reference/nouveau-gsp-fwsec.c` — nouveau's reference implementation
+- `../slmos-reference-cache/derivatives/notes/nvidia-gsp-bringup-sequence.md` — register map + Ampere bringup theory
+- `../slmos-reference-cache/nouveau/nouveau-gsp-fwsec.c` — nouveau's reference implementation
 - `docs/x86-64-gsp-fwsec-investigation.md` — earlier FWSEC discovery work (E2.5)
 
 This document is self-contained: if you're a new agent (or human)
@@ -41,9 +41,9 @@ but disproved on further reading:
 
 - `read_vbios.flags=2` means **use BAR0+0x300000 PROM window**
   (NV_PROM_DATA), NOT the PCI Expansion ROM BAR. Confirmed against
-  `docs/reference/nvidia-vbios-bar0-prom-access.md` and NVIDIA's
+  `../slmos-reference-cache/derivatives/notes/nvidia-vbios-bar0-prom-access.md` and NVIDIA's
   `kgspExtractVbiosFromRom_TU102` in
-  `docs/reference/nvidia-openrm-595-kernel-gsp-vbios-tu102.c:59-85`.
+  `../slmos-reference-cache/nvidia/nvidia-openrm-595-kernel-gsp-vbios-tu102.c:59-85`.
 - FWSEC never touches the Expansion ROM BAR. nouveau doesn't enable
   it either.
 

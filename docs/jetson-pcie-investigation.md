@@ -441,7 +441,7 @@ Left for a future Step 3.5 session:
 1. **DBI RC setup from `dw_pcie_setup_rc`.** Linux programs
    PCIE_PORT_LINK_CONTROL (link-capable width), GEN2_CTRL,
    LINK_CAPABILITIES, and the PCI Type 1 header before LTSSM_EN.
-   Reference: `docs/reference/linux-pcie-designware-host.c`.
+   Reference: `../slmos-reference-cache/linux/linux-pcie-designware-host.c`.
    Most plausible missing piece — if the RC's advertised link width
    doesn't match the endpoint's x1, training doesn't complete.
 2. **Force endpoint power cycle.** The RTL8168 is soldered on the
@@ -545,7 +545,7 @@ driver should train the link without further modification.
 
 ### Step 3.6 attempt — edk2-nvidia cross-check (20 April 2026, late)
 
-Fetched `docs/reference/edk2-nvidia-pciecontrollerdxe.c` (2368 LOC)
+Fetched `../slmos-reference-cache/tegra-l4t/edk2-nvidia-pciecontrollerdxe.c` (2368 LOC)
 and compared against our driver. Found three additional pieces
 edk2's UEFI bring-up does that Linux's probe either handles
 implicitly via kernel frameworks or doesn't do at all:
@@ -594,7 +594,7 @@ sets.
 
 ### Definitive conclusion
 
-Linux's own source code (`docs/reference/linux-pcie-designware.c:
+Linux's own source code (`../slmos-reference-cache/linux/linux-pcie-designware.c:
 dw_pcie_wait_for_link`, line 791) documents:
 
 > *"If the link is in POLL.{Active/Compliance} state, then the
@@ -669,8 +669,8 @@ without re-discovering it.
 ---
 
 *Investigation: 17 April 2026. Branch `jetson-rtl8169-driver`.
- Cached Linux references: `docs/reference/linux-pcie-tegra194.c`,
- `docs/reference/linux-r8169-main.c`. See commits 856d6d2
+ Cached Linux references: `../slmos-reference-cache/linux/linux-pcie-tegra194.c`,
+ `../slmos-reference-cache/linux/linux-r8169-main.c`. See commits 856d6d2
  (scaffolding), ec979df (correct addressing + RC-cold evidence),
  1e02b78 (investigation doc + shutdown-is-NULL finding), plus this
  update adding the XHCI test.*

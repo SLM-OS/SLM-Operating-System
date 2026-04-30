@@ -44,6 +44,39 @@ rustup target add aarch64-unknown-none
 rustup target add x86_64-unknown-none
 ```
 
+### Reference Cache (optional — for development reading material)
+
+In-tree code comments cite third-party reference material at paths
+like `../slmos-reference-cache/<vendor>/<filename>`. Those resolve to
+a private companion repo, `SLM-OS/slmos-reference-cache`, which holds
+mirrored upstream sources (NVIDIA L4T nvgpu, Mesa NVK, nouveau,
+HailoRT, Linux kernel, RPi firmware, etc.) plus SLM-OS-authored
+investigation notes and lab traces.
+
+The cache is **not required to build or run SLM-OS** — it's only
+useful if you're following inline citations in source comments or
+doing GPU/AI-accelerator driver work that benefits from reading
+upstream references locally.
+
+To set it up, clone the private repo as a sibling directory next to
+your SLM-OS checkout:
+
+```bash
+cd <parent-dir-of-this-checkout>
+git clone git@github.com:SLM-OS/slmos-reference-cache.git
+```
+
+Layout afterward:
+
+```
+parent-dir/
+├── SLM-Operating-System/      ← this repo
+└── slmos-reference-cache/     ← reference material
+```
+
+See `../slmos-reference-cache/README.md` (after cloning) for the
+vendor folder layout and conventions for adding new upstream files.
+
 ---
 
 ## Building

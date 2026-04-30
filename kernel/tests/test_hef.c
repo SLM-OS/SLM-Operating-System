@@ -13,7 +13,7 @@
  *
  * Out of scope (lands with real .hef parsing in later work):
  *   - Decoding the full ProtoHEFHef message — needs hef.pb.{c,h}
- *     generated from docs/reference/hailo-hef.proto.
+ *     generated from ../slmos-reference-cache/hailo/hailo-hef.proto.
  *   - MD5 / CRC verification — deferred until a consumer actually
  *     needs it.
  */

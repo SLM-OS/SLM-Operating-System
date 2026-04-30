@@ -7,7 +7,7 @@
  * step-by-step description.
  *
  * Reference: Linux mainline `drivers/media/i2c/imx219.c` (cached at
- * `docs/reference/linux-imx219.c`) and the L4T tegracam IMX219
+ * `../slmos-reference-cache/linux/linux-imx219.c`) and the L4T tegracam IMX219
  * driver wrapper. Notes on what SLM-OS deliberately skips (V4L2
  * machinery, runtime PM, mode tables) live in
  * `docs/jetson-camera-imx219-driver-notes.md`.
@@ -194,7 +194,7 @@ struct imx219_reg_seq {
 #define R16(addr, v)  { (addr), (v), 2 }
 
 /* Common-init table — 31 writes copied verbatim from L4T's
- * `imx219_common_regs` (`docs/reference/linux-imx219.c:161-203`).
+ * `imx219_common_regs` (`../slmos-reference-cache/linux/linux-imx219.c:161-203`).
  * Sensor-mode-independent: PLL clock, undocumented tuning
  * registers, frame-bank baseline. The numeric multipliers here
  * (PLL_VT_MPY=57, PLL_OP_MPY=114, etc.) are tuned for a

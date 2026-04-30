@@ -185,7 +185,7 @@ kernel/drivers/bpmp/
 ├── mrq.c           ~150 LOC — MRQ formatter, blocking send
 └── bpmp.c          ~80 LOC  — public API glue (init, clk, reset)
 
-docs/reference/     Already cached (9810 LOC Linux + 1691 LOC edk2)
+../slmos-reference-cache/     Already cached (9810 LOC Linux + 1691 LOC edk2)
 ```
 
 Replaces the existing `kernel/drivers/bpmp.c` +
@@ -291,7 +291,7 @@ read — will be corrected by Test 1.)
 
 ## References cached
 
-`docs/reference/`:
+`../slmos-reference-cache/`:
 - `linux-bpmp-abi.h` (6750 LOC) — MRQ opcodes, req/resp struct layouts
 - `linux-bpmp.c` (941 LOC) — Linux top-level BPMP driver
 - `linux-bpmp-tegra186.c` (387 LOC) — HSP-backed mailbox glue

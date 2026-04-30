@@ -2492,7 +2492,7 @@ static void test_change_context_switch_status_enabled_carries_batch_params(void)
  * the orchestration doc; that put fw into a "process exactly 1
  * batch of 1 then stop" mode where the boundary credit state
  * machine never armed for the IN submit. Pi OS wire capture (
- * docs/reference/hailort-v4.23.0-wire-capture-mnist-pi5.txt,
+ * ../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt,
  * CHANGE_STATUS #2 body) is the ground truth: enables-for-real
  * always (0, 0). */
 static void test_change_context_switch_status_enabled_zero_batch_means_infinite(void)
@@ -2774,7 +2774,7 @@ static void test_cs_translate_application_header_fills_defaults(void)
 
 static void test_cs_translate_application_header_boundary_bitmap(void)
 {
-    /* Pi OS wire capture (2026-04-22, docs/reference/hailort-v4.23.0-
+    /* Pi OS wire capture (2026-04-22, ../slmos-reference-cache/hailo/hailort-v4.23.0-
      * wire-capture-mnist-pi5.txt, SET_NETWORK_GROUP_HEADER #1 body)
      * shows HailoRT leaves all three boundary_channels_bitmap slots
      * at 0 for MNIST — firmware v4.23 discovers boundary channels
@@ -3372,7 +3372,7 @@ static void test_cs_translate_batch_switching_mnist_template(void)
                             out.batch_switching[7]);
 
     /* Spot-check a couple of template entries — byte layout per the
-     * HailoRT wire capture in docs/reference/pios_BATCH_SWITCHING.bin. */
+     * HailoRT wire capture in ../slmos-reference-cache/derivatives/hailort-traces/pios_BATCH_SWITCHING.bin. */
     TEST_ASSERT_EQUAL_UINT8(0x00, out.batch_switching[8]);   /* sub[0] packed_lcu */
     TEST_ASSERT_EQUAL_UINT8(0x10, out.batch_switching[14]);  /* sub[1] packed_lcu */
     TEST_ASSERT_EQUAL_UINT8(0x01, out.batch_switching[92]);  /* sub[14] packed_lcu */
@@ -3580,7 +3580,7 @@ static void test_cs_translate_preliminary_dual_cfg_channel(void)
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
     /* Full MNIST PRELIMINARY: 489 bytes. Matches
-     * docs/reference/pios_PRELIMINARY.bin (modulo IOVAs). */
+     * ../slmos-reference-cache/derivatives/hailort-traces/pios_PRELIMINARY.bin (modulo IOVAs). */
     TEST_ASSERT_EQUAL_UINT32((uint32_t)489, out.preliminary_len);
 
     /* Byte 0: first ACTIVATE_CFG_CHANNEL is the bulk channel
@@ -5136,7 +5136,7 @@ static void test_vdma_program_descriptor_masks_low_addr_bits(void)
  * keep the plain 0x02 control. */
 /* 0x02 DESC_CONTROL | 0x20 HOST_IRQ_BITMASK | 0x04 REQ_IRQ_PROCESSED
  * | 0x08 REQ_IRQ_ERR = 0x2E. Host-domain IRQ per HailoRT's hailo_pci
- * driver as captured on Pi OS 2026-04-22 (docs/reference/hailort-
+ * driver as captured on Pi OS 2026-04-22 (../slmos-reference-cache/hailo/hailort-
  * v4.23.0-vdma-mnist-pi5.txt): every per-transfer last desc ends in
  * 0x2e. Earlier SLM-OS pick of 0x1E (DEVICE domain) was wrong. */
 #define LAST_DESC_CTRL  0x2Eu

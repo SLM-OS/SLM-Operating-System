@@ -28,9 +28,9 @@
  * 0 (idle) or 1 (frame in flight).
  *
  * References:
- *   docs/reference/linux-tegra-ivc.c           (state machine)
- *   docs/reference/edk2-nvidia-bpmpipcprivate.h (IVC_CHANNEL layout)
- *   docs/reference/linux-bpmp-abi.h            (mrq_request wire format)
+ *   ../slmos-reference-cache/linux/linux-tegra-ivc.c           (state machine)
+ *   ../slmos-reference-cache/tegra-l4t/edk2-nvidia-bpmpipcprivate.h (IVC_CHANNEL layout)
+ *   ../slmos-reference-cache/linux/linux-bpmp-abi.h            (mrq_request wire format)
  */
 
 #ifndef DRIVERS_BPMP_IVC_H

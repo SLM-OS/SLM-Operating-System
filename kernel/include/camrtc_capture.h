@@ -4,7 +4,7 @@
  *
  * Builds on `camrtc.h` (HSP-VM transport) and `camrtc_ivc.h` (ring
  * transport): exposes typed wrappers for the
- * `docs/reference/l4t-camrtc-capture-messages.h` request/response
+ * `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h` request/response
  * pairs SLM-OS needs to bring up the IMX219 capture path.
  *
  * Today implements:
@@ -29,7 +29,7 @@
 
 /* ---- Capture-control wire constants ----
  *
- * Pinned subset of `docs/reference/l4t-camrtc-capture-messages.h`.
+ * Pinned subset of `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`.
  * These are wire-format ABI between SLM-OS and the RCE firmware;
  * `_Static_assert` block in `kernel/tests/test_camera.c` pins
  * struct sizes and opcode values against accidental drift. */
@@ -71,7 +71,7 @@ struct capture_phy_stream_open_resp {
 #define CAPTURE_FLAG_ERROR_REPORT_ENABLE    0x2u  /* RCE sends STATUS_IND on error */
 
 /* Number of lanes per NVCSI brick (CAMRTC_BRICK_NUM_LANES from
- * `docs/reference/l4t-camrtc-capture.h:1432`). Each brick covers
+ * `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture.h:1432`). Each brick covers
  * 4 D-PHY lanes; the cil_config selects how many of them are used
  * for the active stream. */
 #define NVCSI_BRICK_NUM_LANES   4u
@@ -557,7 +557,7 @@ int camrtc_capture_init(void);
  *   out_result Optional: filled with RCE's `result` field (0 ==
  *              CAPTURE_OK; non-zero is one of the
  *              `capture_result` codes in
- *              `docs/reference/l4t-camrtc-capture-messages.h`).
+ *              `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`).
  *
  * Returns 0 on success (request sent + response received +
  * out_result populated; *the caller must inspect *out_result* for
@@ -587,7 +587,7 @@ int camrtc_capture_phy_stream_open(uint32_t stream_id,
  *   num_lanes        D-PHY data lane count (2 for IMX219 binned).
  *   mipi_clock_rate  MIPI clock in kHz (456000 = 456 MHz, the
  *                    IMX219 default link freq from
- *                    `docs/reference/linux-imx219.c:139`).
+ *                    `../slmos-reference-cache/linux/linux-imx219.c:139`).
  *   out_result       Optional: filled with RCE's `result` field.
  *
  * Returns 0/-1/-2/-3/-4/-5 with the same meaning as

@@ -19,7 +19,7 @@
  *     doesn't waste a hardware iteration on a typo.
  *
  * The Linux reference line-numbers quoted throughout point at
- * `docs/reference/linux-xhci-tegra.c`. Keep the citations in sync
+ * `../slmos-reference-cache/linux/linux-xhci-tegra.c`. Keep the citations in sync
  * with any update to that file.
  */
 

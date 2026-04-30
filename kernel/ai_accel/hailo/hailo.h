@@ -17,7 +17,7 @@
  *      submit descriptors on the VDMA channel, wait for completion
  *      via MSI, read output tensors back.
  *
- * References (from docs/reference/):
+ * References (from ../slmos-reference-cache/):
  *   - hailo-driver-notes.md — annotated Linux driver
  *   - hailo-pcie-common.h / .c — device-independent constants
  *   - hailo-vdma-common.h / .c — descriptor ring + doorbell
@@ -50,14 +50,14 @@
 #define HAILO_ERR_UNSUPPORTED     (-8)
 
 /* -------------------------------------------------------------------------- */
-/* PCIe identifiers (docs/reference/hailo-pcie-common.h:38-44)                */
+/* PCIe identifiers (../slmos-reference-cache/hailo/hailo-pcie-common.h:38-44)                */
 /* -------------------------------------------------------------------------- */
 
 #define HAILO_PCI_VENDOR_ID       0x1E60
 #define HAILO_PCI_DEVICE_HAILO8   0x2864   /* Hailo-8 and Hailo-8L */
 
 /* -------------------------------------------------------------------------- */
-/* BAR indices (docs/reference/hailo-pcie-common.h:26-28)                     */
+/* BAR indices (../slmos-reference-cache/hailo/hailo-pcie-common.h:26-28)                     */
 /* -------------------------------------------------------------------------- */
 
 #define HAILO_BAR_CONFIG          0   /* BAR0: PLDA bridge regs + ATRs */
@@ -65,7 +65,7 @@
 #define HAILO_BAR_FW_ACCESS       4   /* BAR4: ATR0-mapped SRAM window */
 
 /* -------------------------------------------------------------------------- */
-/* Key BAR0 register offsets (docs/reference/hailo-driver-notes.md §3)         */
+/* Key BAR0 register offsets (../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md §3)         */
 /* -------------------------------------------------------------------------- */
 
 #define HAILO_REG_VENDOR              0x0098u
@@ -123,7 +123,7 @@
 #define HAILO_IRQ_DRIVER_DOWN_ACK     (1u << 27)  /* 0x08 in high byte */
 
 /* -------------------------------------------------------------------------- */
-/* Firmware header — docs/reference/hailo-fw-validation.h                     */
+/* Firmware header — ../slmos-reference-cache/hailo/hailo-fw-validation.h                     */
 /* -------------------------------------------------------------------------- */
 
 #define HAILO_FW_MAGIC_HAILO8         0x1DD89DE0u

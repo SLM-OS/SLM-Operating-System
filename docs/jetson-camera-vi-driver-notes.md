@@ -4,7 +4,7 @@ Notes extracted from the L4T `vi5` code path during the Pre-Hardware
 Tasks for the Jetson IMX219 camera plan
 (`docs/jetson-camera-imx219-plan.md` §"VI driver", §"Risk 3 — SMMU
 translations for VI DMA"). Cached source files are in
-`docs/reference/l4t-*.c` / `docs/reference/l4t-*.h`.
+`../slmos-reference-cache/tegra-l4t/l4t-*.c` / `../slmos-reference-cache/tegra-l4t/l4t-*.h`.
 
 ---
 
@@ -130,7 +130,7 @@ as all L4T code: NVIDIA does not maintain the bindings or the IVC wire
 format as a stable ABI; an L4T release upgrade can rev the
 `CAPTURE_REQUEST_REQ` payload or reorder fields silently.
 
-Cached files (under `docs/reference/`):
+Cached files (under `../slmos-reference-cache/`):
 
 | File | Source path |
 |------|-------------|
@@ -461,15 +461,15 @@ From `vi5_fops.c` and the broader L4T VI/camera bring-up
 | Power domain | `TEGRA234_POWER_DOMAIN_VIC` (per plan) — **but** L4T DT typically lists the VI power domain as `TEGRA234_POWER_DOMAIN_VI` (separate from VIC, which is the Video Image Compositor) | Plan's `VIC` reference looks like a typo for `VI`; verify against `dt-bindings/power/tegra234-powergate.h` once the DT is on hand |
 
 Cross-reference: the parallel agent fetched
-`docs/reference/linux-dt-bindings-tegra234-clock.h` and
-`docs/reference/linux-dt-bindings-tegra234-powergate.h` (visible in
+`../slmos-reference-cache/linux/linux-dt-bindings-tegra234-clock.h` and
+`../slmos-reference-cache/linux/linux-dt-bindings-tegra234-powergate.h` (visible in
 the cache). Concrete numeric IDs for `TEGRA234_CLK_VI` and
 `TEGRA234_POWER_DOMAIN_VI` should be looked up there before writing
 SLM-OS code.
 
 L4T does not directly poke clock/reset/power-domain registers — it
 calls the BPMP IPC (`bpmp_send`) which SLM-OS already implements (see
-`docs/reference/linux-bpmp-tegra186.c` and the existing BPMP driver in
+`../slmos-reference-cache/linux/linux-bpmp-tegra186.c` and the existing BPMP driver in
 the SLM-OS tree).
 
 ---

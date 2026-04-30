@@ -48,7 +48,7 @@
  * against hef.proto line 114 after resnet_v1_18_8L.hef parser
  * misreported hw_arch=3 as "hailo15m" (it's actually HAILO8L).
  * The prior mapping was a guess; the proto is the source of truth.
- * See docs/reference/hailo-hef-parser-head.cpp for HailoRT usage. */
+ * See ../slmos-reference-cache/hailo/hailo-hef-parser-head.cpp for HailoRT usage. */
 #define HEF_HW_ARCH_HAILO8         0
 #define HEF_HW_ARCH_HAILO8P        1
 #define HEF_HW_ARCH_HAILO8R        2

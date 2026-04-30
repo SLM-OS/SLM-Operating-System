@@ -5,7 +5,7 @@ Platform-neutral audit of SLM-OS's current state on Raspberry Pi 5 versus the ot
 This report is strictly a current-state inventory. It does not prioritize work items, propose a roadmap, or weigh findings against the capstone deliverables.
 
 **Date:** 2026-04-13
-**Source basis:** files under `docs/`, `kernel/`, `runtime/`, `docs/reference/`, and GitHub issues tagged `platform:pi5`, `platform:jetson`, `platform:x86-64`, `platform:qemu`.
+**Source basis:** files under `docs/`, `kernel/`, `runtime/`, `../slmos-reference-cache/`, and GitHub issues tagged `platform:pi5`, `platform:jetson`, `platform:x86-64`, `platform:qemu`.
 
 ---
 
@@ -32,11 +32,11 @@ Several rows above qualify Jetson as "working on CPU 0 only" for preemption. Jet
 
 ## Part B — Pi 5 Hardware Features Not Exploited
 
-The following are Pi 5 / BCM2712 capabilities observable in project documentation, reference files under `docs/reference/`, or the `cortex-a76` architecture implied by `CMakeLists.txt`. Current SLM-OS usage is recorded alongside a brief description of the generic OS-level utility each would provide on this SoC.
+The following are Pi 5 / BCM2712 capabilities observable in project documentation, reference files under `../slmos-reference-cache/`, or the `cortex-a76` architecture implied by `CMakeLists.txt`. Current SLM-OS usage is recorded alongside a brief description of the generic OS-level utility each would provide on this SoC.
 
 | Feature | Evidence | Current SLM-OS usage | Generic OS utility |
 |---|---|---|---|
-| RP1 PCIe south-bridge | `docs/reference/linux-rpi-mfd-rp1.c`, `linux-rpi-dt-bindings-mfd-rp1.h`; BAR0 at `0x1F00000000`, BAR3 MSI-X routing working for PL011 | UART0 (PL011) driven via BAR0. Other RP1 blocks dormant | Most Pi 5 peripheral I/O sits behind RP1 — GPIO banks, I²C, SPI, USB 2.0 / 3.0, Ethernet, SD/eMMC |
+| RP1 PCIe south-bridge | `../slmos-reference-cache/linux/linux-rpi-mfd-rp1.c`, `linux-rpi-dt-bindings-mfd-rp1.h`; BAR0 at `0x1F00000000`, BAR3 MSI-X routing working for PL011 | UART0 (PL011) driven via BAR0. Other RP1 blocks dormant | Most Pi 5 peripheral I/O sits behind RP1 — GPIO banks, I²C, SPI, USB 2.0 / 3.0, Ethernet, SD/eMMC |
 | VideoCore VII GPU | Boot output references the GPU / firmware; DRAM carve-out for VideoCore | `kernel/gpu/gpu_stub.c` only | GPU compute offload, display output, video decode |
 | ARM v8.2 crypto extensions (AES, SHA-1, SHA-2, PMULL) | `-mcpu=cortex-a76` enables them. `kernel/include/spinlock.h` gates LSE atomics at runtime by a similar mechanism | Unused | Block cipher, integrity digest, TLS / MAC offload |
 | ARM v8.2 NEON / SIMD | Cortex-A76 mandates NEON; `runtime/src/inference/ops.rs` references SIMD tiling | `matmul_tiled` still scalar per #71 | Inference, vector math, accelerated `memcpy` / `memset` |

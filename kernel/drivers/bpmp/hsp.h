@@ -16,8 +16,8 @@
  *                           + HSP_DB_BPMP * 0x100.
  *
  * References:
- *   docs/reference/edk2-nvidia-hspdoorbell.c (HspDoorbellInit)
- *   docs/reference/linux-tegra-hsp.c         (tegra_hsp_doorbell_setup)
+ *   ../slmos-reference-cache/tegra-l4t/edk2-nvidia-hspdoorbell.c (HspDoorbellInit)
+ *   ../slmos-reference-cache/linux/linux-tegra-hsp.c         (tegra_hsp_doorbell_setup)
  */
 
 #ifndef DRIVERS_BPMP_HSP_H
@@ -54,7 +54,7 @@
 
 /*
  * Tegra234 HSP doorbell stride — from
- *   docs/reference/linux-tegra-hsp.c:959 (tegra234_hsp_soc.reg_stride).
+ *   ../slmos-reference-cache/linux/linux-tegra-hsp.c:959 (tegra234_hsp_soc.reg_stride).
  */
 #define HSP_DB_BLOCK_STRIDE     0x100
 

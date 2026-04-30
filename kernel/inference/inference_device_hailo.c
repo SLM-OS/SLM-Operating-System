@@ -50,7 +50,7 @@
 #include "uart.h"
 #include <string.h>
 
-/* Firmware debug log layout (from docs/reference/hailo-fw-operation.c:18-21
+/* Firmware debug log layout (from ../slmos-reference-cache/hailo/hailo-fw-operation.c:18-21
  * and hailo-fw-operation.h:11).
  *
  *   BAR4[0x2000]                 APP CPU  { host_offset, chip_offset } + 4088 B data
@@ -301,7 +301,7 @@ static bool hailo_fw_dump_d2h_notification_once(void)
 /* OUT boundary-channel descriptor pre-fill depth. Linux's HailoRT
  * issues 8 sequential single-desc OUTPUT launch_transfer calls
  * before the first INPUT submit (Pi OS wire capture, 2026-04-22:
- * docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt). If fw pre-
+ * ../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-vdma-mnist-pi5.txt). If fw pre-
  * fetches OUT descriptors ahead of num_avail for pipelining and
  * trips on zero entries at [1..N], pre-filling N descriptors with
  * the same buffer keeps the prefetch window valid even though we
@@ -311,7 +311,7 @@ static bool hailo_fw_dump_d2h_notification_once(void)
 #define HAILO_BOUNDARY_OUT_PREFETCH_DEPTH 8u
 
 /* Phase-boundary wall-clock gaps observed in HailoRT's instrumented
- * MMIO trace (docs/reference/hailort-v4.23.0-mmio-trace-*-pi5.txt).
+ * MMIO trace (../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-mmio-trace-*-pi5.txt).
  * HailoRT leaves these gaps between major load-sequence RPCs — on
  * SLM-OS we insert matching udelays under HAILO_WIRE_DEBUG to test
  * whether the gaps themselves are load-bearing for #253. They are
@@ -934,7 +934,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
         if (in_bytes == 0) in_bytes = bpb * bpf;  /* shape-less fallback */
 
         /* Phase 8 boundary-submit probe (2026-04-23 — see
-         * docs/reference/hailort-trace-findings-vdma-2026-04-23.md):
+         * ../slmos-reference-cache/derivatives/notes/hailort-trace-findings-vdma-2026-04-23.md):
          * boundary IN/OUT tensors + desc lists go through the low-
          * bias allocator so their IOVAs land in the bottom of
          * physical RAM. Platforms without dma_alloc_low silently
@@ -1270,7 +1270,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
     }
 #ifdef HAILO_WIRE_DEBUG
     /* Dump each CS context for byte-level diff against
-     * docs/reference/pios_{ACTIVATION,BATCH_SWITCHING,PRELIMINARY,
+     * ../slmos-reference-cache/derivatives/hailort-traces/pios_{ACTIVATION,BATCH_SWITCHING,PRELIMINARY,
      * DYNAMIC}.bin. Gated behind HAILO_WIRE_DEBUG (CMake option,
      * default ON while Phase 8 #253 submit blocker is open). Release
      * kernels built with HAILO_WIRE_DEBUG=OFF skip this block. */
@@ -1332,7 +1332,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
 
     cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
     /* Pi OS wire capture (2026-04-22, HailoRT v4.23.0 MNIST on pi-5-1
-     * instrumented driver — see docs/reference/hailort-v4.23.0-wire-
+     * instrumented driver — see ../slmos-reference-cache/hailo/hailort-v4.23.0-wire-
      * capture-mnist-pi5.txt, CHANGE_STATUS #2 body):
      *   state=ENABLED, app_index=0, batch_size=0, batch_count=0
      * batch_size=0 = CONTROL_PROTOCOL__IGNORE_DYNAMIC_BATCH_SIZE (use
@@ -1883,7 +1883,7 @@ static int hailo_backend_run(struct inference_device *dev,
 #endif /* HAILO_WIRE_DEBUG */
 
     /* PHASE 8 KEY FINDING #2 (2026-04-22, instrumented hailo_pci on
-     * Pi OS yolov6n — see docs/reference/hailort-trace-findings-2026
+     * Pi OS yolov6n — see ../slmos-reference-cache/derivatives/notes/hailort-trace-findings-2026
      * -04-22.md): HailoRT pre-arms each output channel with N
      * SEPARATE launch_transfer calls, each one programming desc[i]
      * and bumping num_avail from i to i+1. Across 8 calls fw's

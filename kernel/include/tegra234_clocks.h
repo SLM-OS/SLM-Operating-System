@@ -9,7 +9,7 @@
  *   include/dt-bindings/reset/tegra234-reset.h   (Linux v6.12)
  *   include/dt-bindings/power/tegra234-powergate.h (Linux v6.12)
  *
- * Cached source: docs/reference/linux-dt-bindings-tegra234-{clock,reset,powergate}.h
+ * Cached source: ../slmos-reference-cache/linux/linux-dt-bindings-tegra234-{clock,reset,powergate}.h
  *
  * Scope: only the constants required for IMX219 camera bring-up
  * (every I2C controller, NVCSI, NVCSI-LP, VI / VI2, plus the VI and
@@ -135,7 +135,7 @@
 /*
  * Power-domain IDs are NOT in the clock or reset binding; they live
  * in include/dt-bindings/power/tegra234-powergate.h upstream (cached
- * locally in docs/reference/linux-dt-bindings-tegra234-powergate.h).
+ * locally in ../slmos-reference-cache/linux/linux-dt-bindings-tegra234-powergate.h).
  *
  * The two IDs reproduced here are the ones SLM-OS needs to power up
  * before exercising the IMX219 path:

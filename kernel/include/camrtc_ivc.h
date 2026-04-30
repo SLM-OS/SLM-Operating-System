@@ -7,10 +7,10 @@
  * exposes the bare-minimum API SLM-OS needs to send a request frame
  * and read the response frame for that channel — the foundation for
  * `CAPTURE_PHY_STREAM_OPEN_REQ`, `CAPTURE_CSI_STREAM_SET_CONFIG_REQ`,
- * and the rest of `docs/reference/l4t-camrtc-capture-messages.h`.
+ * and the rest of `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`.
  *
  * Wire-format notes (cross-checked against
- * `docs/reference/linux-tegra-ivc.c`):
+ * `../slmos-reference-cache/linux/linux-tegra-ivc.c`):
  *
  *   - Each queue is 128 B header + nframes * frame_size bytes of
  *     contiguous frame slots. The header is split into two 64-B

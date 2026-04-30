@@ -69,7 +69,7 @@ int hailo_cs_builder_append(struct hailo_cs_builder *b,
  * hailo_cs_repeated_action_header's docstring in hailo_cs_actions.h
  * for the full rule. Either sub-type rejected without the wrapper
  * (CONFIG_MANAGER_WRAPPER_STATUS_ACTION_TYPE_NOT_SUPPORTED). Wire
- * capture reference: docs/reference/hailort-v4.23.0-wire-capture-
+ * capture reference: ../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-
  * mobilenet.txt.
  *
  * Returns HAILO_OK on success, HAILO_ERR_INVAL on null args or

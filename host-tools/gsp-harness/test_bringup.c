@@ -664,7 +664,7 @@ static void test_wpr_meta_struct_size_runtime(void)
  * fail booter validation. */
 static void test_wpr_meta_constants_match_upstream(void)
 {
-    /* Reference: docs/reference/nouveau-r535-nvrm-gsp.h:557-559. */
+    /* Reference: ../slmos-reference-cache/nouveau/nouveau-r535-nvrm-gsp.h:557-559. */
     REQUIRE(GSP_FW_WPR_META_MAGIC == 0xdc3aae21371a60b3ULL);
     REQUIRE(GSP_FW_WPR_META_REVISION == 1ULL);
     REQUIRE(GSP_FW_WPR_META_VERIFIED == 0xa0a0a0a0a0a0a0a0ULL);

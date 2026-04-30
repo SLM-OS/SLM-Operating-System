@@ -65,7 +65,7 @@ chip id 0x177 (Ampere), BAR0 16 MB at 0x53000000, ROM BAR 512 KB at
 
 ## Where we got stuck
 
-The openrm/nova-core documentation cached in `docs/reference/` assumes
+The openrm/nova-core documentation cached in `../slmos-reference-cache/` assumes
 `FalconUcodeTablePtr` addresses into a concatenated virtual buffer
 `PciAt | FwSec#1 | FwSec#2` (possibly with an EFI image stripped).
 None of the arithmetic schemes documented there lands on a valid
@@ -137,7 +137,7 @@ image lives ~29 KB further, at `0x29D00`, behind the NPDS header.
 ## Investigation tools
 
 Left in `/tmp` on the dev box (not committed — see reference files
-in `docs/reference/` for what we pulled from openrm and nova-core):
+in `../slmos-reference-cache/` for what we pulled from openrm and nova-core):
 
 - `/tmp/dump_rom_mem.c` — reads GPU Expansion ROM via `/dev/mem`
   after caller enables the ROM BAR. Ran on test-pc 2026-04-14.

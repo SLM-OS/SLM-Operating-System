@@ -70,7 +70,7 @@ _Static_assert(WPR2_FRTS_SIZE <=
  * in bringup.h so the harness diagnostic dump uses the same names. */
 
 /* DMEMMAPPER FWSEC application interface layout (see reference:
- * docs/reference/nouveau-falcon-hs-boot.md).
+ * ../slmos-reference-cache/derivatives/notes/nouveau-falcon-hs-boot.md).
  *
  * Interface table header at dmem + interface_off (4 bytes):
  *   u8 ver (=1), u8 hdr, u8 len, u8 cnt
@@ -547,7 +547,7 @@ void gsp_bringup_free(struct gsp_bringup *b)
  * data section → patch signature → PIO upload IMEM/DMEM → BROM
  * program → STARTCPU → halt poll.
  *
- * Reference: docs/reference/nouveau-gsp-tu102.c `tu102_gsp_booter_ctor`
+ * Reference: ../slmos-reference-cache/nouveau/nouveau-gsp-tu102.c `tu102_gsp_booter_ctor`
  * + nouveau-falcon-fw.c `nvkm_falcon_fw_boot` + nouveau-falcon-gm200.c
  * `gm200_flcn_fw_load` + `gm200_flcn_fw_boot`. We use PIO (matching
  * nouveau's `gm200_flcn_fw` func table for booter on Ampere) rather
@@ -660,8 +660,8 @@ void gsp_bringup_set_booter_layout(struct gsp_bringup *b,
      * IMEM[0] which is the non-secure preamble, not the actual booter
      * entry. Reference: OGKM `kflcnRegWrite(NV_PFALCON_FALCON_BOOTVEC,
      * pUcode->imemVa)` where `imemVa = header.appCodeOffset`
-     * (`docs/reference/ogkm-kernel_gsp_falcon_ga102.c:278`,
-     * `docs/reference/ogkm-kernel_gsp_booter.c:322`). Same in nouveau
+     * (`../slmos-reference-cache/nvidia/ogkm-kernel_gsp_falcon_ga102.c:278`,
+     * `../slmos-reference-cache/nvidia/ogkm-kernel_gsp_booter.c:322`). Same in nouveau
      * v2 `nvkm_falcon_fw_ctor_hs_v2:351`: `fw->boot_addr =
      * lhdr->app[0].offset`. */
     b->booter_boot_addr     = img->apps[0].offset;
@@ -733,9 +733,9 @@ int gsp_bringup_booter_load(struct gsp_bringup *b)
      *                            offset where signature gets patched in)
      *
      * Reference: OGKM `kgspExecuteHsFalcon_GA102` (
-     * `docs/reference/ogkm-kernel_gsp_falcon_ga102.c:213-275`) and
+     * `../slmos-reference-cache/nvidia/ogkm-kernel_gsp_falcon_ga102.c:213-275`) and
      * nouveau v2 `nvkm_falcon_fw_ctor_hs_v2` (
-     * `docs/reference/nouveau-falcon-fw.c:340-356`).
+     * `../slmos-reference-cache/nouveau/nouveau-falcon-fw.c:340-356`).
      *
      * The previous SLM-OS code mirrored the v1 nouveau layout
      * (`fw->nmem_base_img = 0; fw->imem_base_img = lhdr->apps[0]`) which

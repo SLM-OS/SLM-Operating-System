@@ -3,7 +3,7 @@
  *
  * Implements hef_parse_outer_header() against the layout documented
  * in `hailort/libhailort/src/hef/hef_internal.hpp` (lines 92-172)
- * and in `docs/reference/hailo-driver-notes.md` §7.1.
+ * and in `../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md` §7.1.
  *
  * All outer fields are big-endian on disk; we read them via explicit
  * byte-shuffle so we don't depend on <arpa/inet.h> or host byte

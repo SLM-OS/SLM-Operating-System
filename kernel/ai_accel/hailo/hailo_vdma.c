@@ -145,7 +145,7 @@ void hailo_vdma_desc_list_free(struct hailo_vdma_desc_list *list)
 /* -------------------------------------------------------------------------- */
 
 /* Bit layout constants from the reference
- * (docs/reference/hailo-vdma-common.c:39-41). Firmware-fixed. */
+ * (../slmos-reference-cache/hailo/hailo-vdma-common.c:39-41). Firmware-fixed. */
 #define HAILO_VDMA_DESC_PAGE_SIZE_SHIFT 8u
 #define HAILO_VDMA_DESC_DESC_CONTROL    0x02u
 #define HAILO_VDMA_DESC_ADDR_L_MASK     0xFFFFFFC0u
@@ -192,7 +192,7 @@ void hailo_vdma_desc_list_free(struct hailo_vdma_desc_list *list)
  * HailoRT's hailo_pci driver actually emits on per-transfer last
  * descriptors for Hailo-8L boundary channels (verified via
  * instrumented pr_info on Pi OS 2026-04-22; see
- * docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt). */
+ * ../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-vdma-mnist-pi5.txt). */
 #define HAILO_VDMA_LAST_DESC_CTRL_DOMAIN_HOST \
     (HAILO_VDMA_DESC_DESC_CONTROL | \
      HAILO_VDMA_DESC_HOST_IRQ_BITMASK | \
@@ -260,7 +260,7 @@ int hailo_vdma_program_buffer(struct hailo_vdma_desc_list *list,
 
     /* #253 last-desc IRQ bits: use DOMAIN_HOST (0x2E), not DEVICE
      * (0x1E). Verified 2026-04-22 via instrumented hailo_pci on
-     * Pi OS (docs/reference/hailort-v4.23.0-vdma-mnist-pi5.txt):
+     * Pi OS (../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-vdma-mnist-pi5.txt):
      * every per-transfer last-desc ps_ctrl ends in 0x2e, meaning
      * HailoRT uses host_interrupts_bitmask (0x20) | REQ_IRQ_PROCESSED
      * (0x04) | REQ_IRQ_ERR (0x08) | DESC_CONTROL (0x02). Our earlier

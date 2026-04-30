@@ -19,7 +19,7 @@ tree at:
   `https://github.com/OE4T/linux-tegra-5.10` — branch
   `oe4t-patches-l4t-r35.6.1`, commit `4e110b9` (current as of fetch).
 
-Files cached in `docs/reference/` (`l4t-` prefix):
+Files cached in `../slmos-reference-cache/` (`l4t-` prefix):
 
 | Cached file                       | Upstream path                                                                      |
 |-----------------------------------|------------------------------------------------------------------------------------|
