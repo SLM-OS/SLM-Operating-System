@@ -1267,7 +1267,16 @@ mod tests {
     //! path lives in `kernel/tests/test_model_mem_smoke.c` because it
     //! requires real PMM.
     use super::*;
+    // The runtime crate is `no_std`; tests run on the host where the
+    // panic + format machinery used by `assert_eq!` lives in `std`.
     extern crate std;
+
+    /// Smallest pool request (in MB) that exceeds the
+    /// `MAX_BLOCKS_PER_POOL` cap. `MAX × 2 MB` is exactly the
+    /// boundary; one more block (+2 MB) puts us one legal increment
+    /// past it. Defined once so the boundary expression has a single
+    /// source of truth across the four tests below.
+    const FIRST_OVERSIZED_MB: usize = (MAX_BLOCKS_PER_POOL + 1) * 2;
 
     #[test]
     fn rejects_misaligned_weight_request() {
@@ -1282,21 +1291,16 @@ mod tests {
 
     #[test]
     fn rejects_oversized_weight_request() {
-        // MAX_BLOCKS_PER_POOL × 2 MB is exactly 1024 MB on the
-        // current cap; ask for one block more (2 MB extra) so we
-        // step over the boundary by the smallest legal increment.
-        let weight_mb = (MAX_BLOCKS_PER_POOL + 1) * 2;
         assert_eq!(
-            model_mem_init(weight_mb, 2),
+            model_mem_init(FIRST_OVERSIZED_MB, 2),
             Err(AllocError::Oversized)
         );
     }
 
     #[test]
     fn rejects_oversized_workspace_request() {
-        let workspace_mb = (MAX_BLOCKS_PER_POOL + 1) * 2;
         assert_eq!(
-            model_mem_init(2, workspace_mb),
+            model_mem_init(2, FIRST_OVERSIZED_MB),
             Err(AllocError::Oversized)
         );
     }
@@ -1307,9 +1311,9 @@ mod tests {
         // surface AlignmentError first, matching the order of the
         // checks in `model_mem_init`. Pinning the order so a future
         // refactor that swaps them surfaces here, not in production.
-        let weight_mb = (MAX_BLOCKS_PER_POOL + 1) * 2 + 1; // odd → misaligned
+        // `+ 1` makes the value odd, tripping the alignment check.
         assert_eq!(
-            model_mem_init(weight_mb, 2),
+            model_mem_init(FIRST_OVERSIZED_MB + 1, 2),
             Err(AllocError::AlignmentError)
         );
     }
