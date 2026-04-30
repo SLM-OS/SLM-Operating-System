@@ -130,8 +130,16 @@ void ga10b_qmd_set_bits(uint32_t *qmd, unsigned hi, unsigned lo,
  *
  * Args:
  *   qmd               — destination, must be 64 × uint32_t (256 B)
- *   shader_gpu_va     — full 49-bit GPU virtual address of the SASS
- *   cbuf_gpu_va       — GPU VA of cbuf[0] (CUDA param area)
+ *   shader_gpu_va     — GPU virtual address of the SASS. QMDV03_00
+ *                       PROGRAM_ADDRESS spans 49 bits (32 + 17);
+ *                       addresses above 2^49 are silently truncated
+ *                       to the low 49 bits — same behaviour as the
+ *                       Linux nvgpu helper. Today's nvgpu allocator
+ *                       returns GPU VAs comfortably under 2^40 so
+ *                       this is a future-proofing note, not a hot
+ *                       hazard.
+ *   cbuf_gpu_va       — GPU VA of cbuf[0] (CUDA param area). Same
+ *                       49-bit cap as `shader_gpu_va`.
  *   register_count_v  — per-thread register usage from the SASS header
  *   grid_x/y/z        — number of CTAs in each dimension
  *   block_x/y/z       — threads per CTA in each dimension

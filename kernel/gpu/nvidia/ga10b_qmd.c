@@ -71,6 +71,11 @@ void ga10b_qmd_populate(uint32_t *qmd,
                         uint32_t grid_x, uint32_t grid_y, uint32_t grid_z,
                         uint32_t block_x, uint32_t block_y, uint32_t block_z)
 {
+    /* Defensive: symmetric with ga10b_qmd_pool_prepare's null guards.
+     * A buggy upstream caller passing NULL would otherwise deref via
+     * ga10b_qmd_zero on the next line. */
+    if (qmd == NULL) return;
+
     ga10b_qmd_zero(qmd);
 
     /* Version + enum defaults (matches NVK's qmd_init!). */

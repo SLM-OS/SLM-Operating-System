@@ -560,6 +560,7 @@ enum ga10b_v7_validation_error {
     GA10B_V7_ERR_OPS_PHYS_ZERO        = 1,  /* pipeline_ops_phys == 0 */
     GA10B_V7_ERR_OPS_EXCEED_CAP       = 2,  /* pipeline_n_ops > V7_MAX */
     GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT = 3,/* qmd_pool_size_bytes < n_slots × 256 */
+    GA10B_V7_ERR_NULL_HANDOFF         = 4,  /* h == NULL */
 };
 
 /*
@@ -568,9 +569,12 @@ enum ga10b_v7_validation_error {
  * handoff, or one of the GA10B_V7_ERR_* codes describing the
  * specific malformation.
  *
- * Caller responsibility: only invoke after `ga10b_handoff_is_v7`
- * has already returned true. The checks here assume v7 markers are
- * present.
+ * Self-enforcing contract: `ga10b_handoff_is_v7` already null-
+ * checks, so a properly-sequenced caller never passes NULL — but
+ * a future direct caller that skipped `is_v7` would otherwise
+ * NULL-deref. The explicit check returns
+ * GA10B_V7_ERR_NULL_HANDOFF instead. Defense-in-depth, no hot-
+ * path cost.
  *
  * Pure-logic — host-testable. The dispatch-path call site logs the
  * specific failure via uart_printf and returns -1 to the bringup
@@ -579,6 +583,9 @@ enum ga10b_v7_validation_error {
 static inline enum ga10b_v7_validation_error
 ga10b_v7_validate_handoff(const struct ga10b_channel_handoff *h)
 {
+    if (h == NULL) {
+        return GA10B_V7_ERR_NULL_HANDOFF;
+    }
     if (h->pipeline_ops_phys == 0u) {
         return GA10B_V7_ERR_OPS_PHYS_ZERO;
     }

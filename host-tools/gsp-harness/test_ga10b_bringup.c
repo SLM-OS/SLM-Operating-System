@@ -2787,13 +2787,26 @@ static void test_v7_validate_first_failure_wins(void)
     printf("== test_v7_validate_first_failure_wins ==\n");
     /* When multiple checks fail, the validator returns the first-
      * tripped reason. Pinning the order makes the dispatch-site
-     * uart_printf branch deterministic. */
+     * uart_printf branch deterministic. NULL is checked first
+     * (defense-in-depth), then field-level errors in declaration
+     * order: ops_phys → exceed_cap → pool_size. */
     struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
     h.pipeline_ops_phys   = 0u;
     h.pipeline_n_ops      = GA10B_PIPELINE_V7_MAX_OPS + 1u;
     h.qmd_pool_size_bytes = 0u;
     REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h),
                GA10B_V7_ERR_OPS_PHYS_ZERO);
+}
+
+static void test_v7_validate_rejects_null_handoff(void)
+{
+    printf("== test_v7_validate_rejects_null_handoff ==\n");
+    /* Self-enforcing contract: even if a future caller skips
+     * `ga10b_handoff_is_v7` (which null-checks) and calls
+     * `ga10b_v7_validate_handoff` directly, NULL must surface
+     * cleanly rather than NULL-deref. */
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(NULL),
+               GA10B_V7_ERR_NULL_HANDOFF);
 }
 
 /* ======================================================================
@@ -3020,6 +3033,7 @@ int main(void)
     test_v7_validate_rejects_n_ops_exceeds_cap();
     test_v7_validate_rejects_pool_size_mismatch();
     test_v7_validate_first_failure_wins();
+    test_v7_validate_rejects_null_handoff();
 
     test_qmd_selftest_reference_matches_encoder();
     test_qmd_populate_is_deterministic();
