@@ -1938,11 +1938,19 @@ pub unsafe extern "C" fn rust_eviction_workload_compare(
         let trace = &trace_vec;
         let cache_size: usize = 8;
 
-        // Policies to compare.
+        // Policies to compare. Order matches the natural reading of the
+        // perf table — classic baselines first (lru/lfu/arc), then the
+        // SLM-OS heuristic, then the AI policies (xgboost/mlp/cacheus).
+        // The AI policies fall back to their compiled-in `generated::*`
+        // weights when no runtime eviction blob is loaded, so this
+        // comparator works on a vanilla boot.
         let policies: Vec<(&str, Box<dyn EvictionPolicy + Send>)> = alloc::vec![
-            ("lru", Box::new(eviction::LruPolicy::new()) as Box<dyn EvictionPolicy + Send>),
-            ("lfu", Box::new(eviction::LfuPolicy::new())),
-            ("slm", Box::new(eviction::SlmHeuristicPolicy::new())),
+            ("lru",     Box::new(eviction::LruPolicy::new()) as Box<dyn EvictionPolicy + Send>),
+            ("lfu",     Box::new(eviction::LfuPolicy::new())),
+            ("arc",     Box::new(eviction::ARCPolicy::new())),
+            ("slm",     Box::new(eviction::SlmHeuristicPolicy::new())),
+            ("xgboost", Box::new(eviction::XGBoostPolicy::new())),
+            ("mlp",     Box::new(eviction::MlpPolicy::new())),
             ("cacheus", Box::new(eviction::CacheusSelector::ml_only())),
         ];
 

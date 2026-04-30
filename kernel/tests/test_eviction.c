@@ -498,6 +498,68 @@ static void test_eviction_run_tests_passes(void)
     TEST_ASSERT_EQUAL_INT(0, failures);
 }
 
+/*
+ * `bench eviction` workload comparator (rust_eviction_workload_compare)
+ * must include every shipped eviction policy so the perf table in
+ * docs/benchmarks.md is honest about the AI policies the project
+ * claims. Pre-fix the comparator only ran lru/lfu/slm/cacheus —
+ * xgboost and mlp (the AI policies) and arc (the literature baseline)
+ * were silently absent, so #108/#109 hardware benchmarks couldn't
+ * actually compare the AI policies the project's eviction story
+ * is built on.
+ */
+static void test_eviction_workload_compare_includes_all_policies(void)
+{
+    if (!rust_eviction_enabled()) {
+        TEST_IGNORE_MESSAGE("ai_eviction feature disabled");
+    }
+
+    RustEvictionCompareResult results[16];
+    memset(results, 0, sizeof(results));
+    int32_t n = rust_eviction_workload_compare(results, 16u);
+    TEST_ASSERT_MESSAGE(n >= 7,
+        "comparator must report at least 7 policies (lru/lfu/arc/slm/xgboost/mlp/cacheus)");
+
+    /* Build a set of policy names returned by the comparator and assert
+     * the seven we expect are present. Scan order is policy-vec order in
+     * runtime/src/lib.rs::rust_eviction_workload_compare. */
+    bool seen_lru = false, seen_lfu = false, seen_arc = false,
+         seen_slm = false, seen_xgb = false, seen_mlp = false,
+         seen_cacheus = false;
+    for (int32_t i = 0; i < n; i++) {
+        const char *name = (const char *)results[i].policy_name;
+        if (strncmp(name, "lru", 4) == 0)     seen_lru = true;
+        if (strncmp(name, "lfu", 4) == 0)     seen_lfu = true;
+        if (strncmp(name, "arc", 4) == 0)     seen_arc = true;
+        if (strncmp(name, "slm", 4) == 0)     seen_slm = true;
+        if (strncmp(name, "xgboost", 8) == 0) seen_xgb = true;
+        if (strncmp(name, "mlp", 4) == 0)     seen_mlp = true;
+        if (strncmp(name, "cacheus", 8) == 0) seen_cacheus = true;
+    }
+    TEST_ASSERT_MESSAGE(seen_lru,     "comparator missing 'lru'");
+    TEST_ASSERT_MESSAGE(seen_lfu,     "comparator missing 'lfu'");
+    TEST_ASSERT_MESSAGE(seen_arc,     "comparator missing 'arc' (literature baseline)");
+    TEST_ASSERT_MESSAGE(seen_slm,     "comparator missing 'slm' (heuristic)");
+    TEST_ASSERT_MESSAGE(seen_xgb,     "comparator missing 'xgboost' (AI policy)");
+    TEST_ASSERT_MESSAGE(seen_mlp,     "comparator missing 'mlp' (AI policy)");
+    TEST_ASSERT_MESSAGE(seen_cacheus, "comparator missing 'cacheus' (AI policy)");
+
+    /* Sanity: every policy ran the same trace, so total_accesses must
+     * be identical across all reported entries. Pin the contract so a
+     * future change can't accidentally hand each policy a different
+     * trace and produce a misleading comparison. */
+    uint32_t expected_total = results[0].total_accesses;
+    TEST_ASSERT_TRUE(expected_total > 0u);
+    for (int32_t i = 1; i < n; i++) {
+        TEST_ASSERT_MESSAGE(expected_total == results[i].total_accesses,
+            "every policy must replay the same trace");
+        /* Faults + hits must equal total accesses. */
+        TEST_ASSERT_MESSAGE(
+            expected_total == results[i].faults + results[i].hits,
+            "faults + hits must equal total accesses");
+    }
+}
+
 /* ============================================================================
  * M1: snapshot_evictable_blocks filter — verifies the M6 integration
  * point returns the correct candidate set (allocated AND not pinned).
@@ -1185,6 +1247,7 @@ int test_suite_eviction(void)
     RUN_TEST(test_eviction_selftest_passes);
     RUN_TEST(test_eviction_run_tests_passes);
     RUN_TEST(test_eviction_active_policy_has_gpu_backend_default_false);
+    RUN_TEST(test_eviction_workload_compare_includes_all_policies);
 
     /* M6: allocator integration (skip cleanly when feature off). */
     RUN_TEST(test_alloc_evicts_when_full_weights);
