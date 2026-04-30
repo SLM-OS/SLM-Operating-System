@@ -1643,14 +1643,57 @@ static void test_launch_kernel_with_sema_pb_payload_passthrough(void)
  * Handoff v3 — channel + kernel-launch state
  * ====================================================================== */
 
-static void test_handoff_v6_layout_size(void)
+static void test_handoff_v7_layout_size(void)
 {
-    printf("== test_handoff_v6_layout_size ==\n");
+    printf("== test_handoff_v7_layout_size ==\n");
     /* Belt-and-suspenders runtime check. The header pins the size
      * with a _Static_assert but a fresh-eyes reader shouldn't have
      * to dig into compile-time errors to discover that v2 was 120,
-     * v3 was 192, v4 was 200, v5 was 216, and v6 is 232. */
-    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 232u);
+     * v3 was 192, v4 was 200, v5 was 216, v6 was 232, and v7 is 256. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 256u);
+}
+
+static void test_handoff_v7_pool_offsets(void)
+{
+    printf("== test_handoff_v7_pool_offsets ==\n");
+    /* v7 appends qmd_pool_* descriptor after pipeline_kind (offset
+     * 228, last u32 of v6). Pool descriptor is 24 bytes total. */
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, qmd_pool_phys),
+               232u);
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, qmd_pool_gpu_va),
+               240u);
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, qmd_pool_size_bytes),
+               248u);
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, qmd_pool_n_slots),
+               252u);
+}
+
+static void test_pipeline_op_v7_layout(void)
+{
+    printf("== test_pipeline_op_v7_layout ==\n");
+    /* v7 per-op struct: leading 24 B identical to v6, then 56 B of
+     * QMD construction inputs. Total 80 B per op. Both Linux helper
+     * and SLM-OS depend on the field offsets — silent reorder would
+     * make SLM-OS read e.g. block_x where it expects grid_x. */
+    REQUIRE_EQ(sizeof(struct ga10b_pipeline_op_v7), 80u);
+    /* v6-compatible prefix */
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, qmd_gpu_va), 0u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, output_phys), 8u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, expected_payload), 16u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, flags), 20u);
+    /* v7 additions */
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, shader_gpu_va), 24u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, cbuf_gpu_va), 32u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, register_count_v), 40u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, grid_x), 44u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, grid_y), 48u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, grid_z), 52u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, block_x), 56u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, block_y), 60u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, block_z), 64u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, smem_size_bytes), 68u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, slm_size_bytes), 72u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, barrier_count), 76u);
 }
 
 static void test_handoff_v6_input_buf_offsets(void)
@@ -2308,6 +2351,13 @@ static void test_pipeline_max_ops_constant(void)
      * stops working without surfacing a clear build error; tests
      * fail loudly instead. */
     REQUIRE(GA10B_PIPELINE_MAX_OPS >= 8u);
+
+    /* v7 cap: 4096 / 80 = 51 ops. Smaller than v6 because the per-op
+     * struct is bigger. Still comfortably above MNIST's 8 ops. */
+    REQUIRE_EQ((unsigned)GA10B_PIPELINE_V7_MAX_OPS, 51u);
+    REQUIRE(GA10B_PIPELINE_V7_MAX_OPS * sizeof(struct ga10b_pipeline_op_v7)
+            <= 4096u);
+    REQUIRE(GA10B_PIPELINE_V7_MAX_OPS >= 8u);
 }
 
 /* ======================================================================
@@ -2499,10 +2549,12 @@ int main(void)
     test_launch_kernel_with_sema_pb_idempotent();
     test_launch_kernel_with_sema_pb_payload_passthrough();
 
-    test_handoff_v6_layout_size();
+    test_handoff_v7_layout_size();
     test_handoff_v4_expected_payload_offset();
     test_handoff_v5_pipeline_offsets();
     test_handoff_v6_input_buf_offsets();
+    test_handoff_v7_pool_offsets();
+    test_pipeline_op_v7_layout();
     test_set_input_rejects_null_b();
     test_set_input_rejects_null_bytes();
     test_set_input_rejects_no_handoff();
