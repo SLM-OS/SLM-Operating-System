@@ -204,4 +204,38 @@ _Static_assert(RUST_HEAP_MB > 0u, "RUST_HEAP_MB must be positive");
  * were ever stripped. */
 _Static_assert(RUST_HEAP_MB <= 4096u, "RUST_HEAP_MB cannot exceed 4096 (4 GiB sanity ceiling)");
 
+/* ============================================================================
+ * RAM disk — sized to hold staged model files
+ * ============================================================================
+ *
+ * /mnt/files is backed by `ramdisk_create_default` (kernel/drivers/ramdisk.c)
+ * at 4 KB blocks. The driver does a single `pmm_alloc_pages(data_pages)`
+ * call, so the cap is the PMM buddy max-order: 1 GiB on this kernel
+ * (see `kernel/CLAUDE.md` §"Buddy Allocator"). A multi-chunk ramdisk
+ * would lift the ceiling but needs the block-device r/w path to
+ * walk chunk boundaries — deferred until a workload actually needs
+ * more than 1 GiB of staging.
+ *
+ * Jetson sizes to the buddy ceiling (1024 MB) so Qwen2.5-1.5B-Q4_K_M
+ * (~1014 MB per fetch-slm.sh registry) fits with a few MB of metadata
+ * headroom. Pi 5 keeps the original 32 MB cap (Hailo HEFs are ~20 MB;
+ * SLM on Pi 5 is not the demo target). QEMU and host-harness builds
+ * must stay small enough to boot inside `make test`'s 1 GB systemd
+ * MemoryMax cap.
+ */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#define RAMDISK_DEFAULT_MB      1024u
+#elif defined(PLATFORM_RASPI5)
+#define RAMDISK_DEFAULT_MB      32u
+#else /* PLATFORM_QEMU_VIRT, PLATFORM_X86_64, host harness */
+#define RAMDISK_DEFAULT_MB      32u
+#endif
+
+_Static_assert(RAMDISK_DEFAULT_MB > 0u, "RAMDISK_DEFAULT_MB must be positive");
+/* 1 GiB hard cap — `ramdisk_create` does a single `pmm_alloc_pages`
+ * call which the PMM buddy allocator cannot satisfy past max-order
+ * 18 = 1 GiB. Lifting the cap requires either a multi-chunk ramdisk
+ * driver or raising the buddy max-order. */
+_Static_assert(RAMDISK_DEFAULT_MB <= 1024u, "RAMDISK_DEFAULT_MB cannot exceed 1024 (PMM buddy max-order = 1 GiB)");
+
 #endif /* CONFIG_H */
