@@ -801,6 +801,7 @@ static void test_virtqueue_add_two_distinct_buffers(void)
 
 #include "net_driver.h"
 #include "arch/sys_arch.h"  /* sys_now() for DHCP timeout polling */
+#include "lwip/stats.h"     /* MEMP_PBUF_POOL peak tracking for #581 regression test */
 extern void net_test_force_boot_deferred_dhcp(void);
 extern void net_test_force_dhcp_start_fail(void);
 #if defined(PLATFORM_QEMU_VIRT)
@@ -1914,6 +1915,168 @@ static void test_lwip_rand_seed_different_inputs_diverge(void)
     TEST_ASSERT_TRUE(r1 != r2);
 }
 
+/*
+ * #581 regression: RX frames must come from PBUF_POOL, not the lwip
+ * heap. Production fix lives in `kernel/net/lwip_slm.c::net_poll`,
+ * where the per-frame `pbuf_alloc` switched from `PBUF_RAM` to
+ * `PBUF_POOL`. Without that change, sustained RX exhausts the heap
+ * (which is shared with TCP send/receive buffers, retransmit
+ * segments, ARP queues, etc.) and large transfers stall under the
+ * RX-stall watchdog.
+ *
+ * The test installs a wrapper driver whose `recv()` returns a
+ * canned 64-byte ethertype-0x9000 frame N times. lwip routes each
+ * frame to the netif input, finds no matching upper protocol, and
+ * frees the pbuf. The structural assertion is "the pbuf pool was
+ * exercised" — `lwip_stats.memp[MEMP_PBUF_POOL]->max` ticks above
+ * its pre-burst value once at least one frame is processed. With a
+ * regression to PBUF_RAM, RX would never touch the pool and `max`
+ * would stay flat.
+ */
+/* Burst size deliberately well below PBUF_POOL_SIZE (64 in lwipopts.h)
+ * so the test doesn't depend on lwip processing fully synchronously
+ * against the live virtio-net RX traffic the net_pump task is also
+ * driving. The structural claim (PBUF_POOL is used at all) only
+ * needs the pool peak to advance — exact frame counts aren't the
+ * load-bearing assertion. */
+#define RX_BURST_TEST_FRAMES        32
+#define RX_BURST_TEST_POLL_ITERS    128  /* generous; net_poll consumes 1/iter */
+
+static const struct net_driver *rx_burst_test_base;
+static int  rx_burst_test_remaining;
+static uint8_t rx_burst_test_frame[64];
+
+static int rx_burst_test_init(void)
+{
+    if (rx_burst_test_base && rx_burst_test_base->init)
+        return rx_burst_test_base->init();
+    return NET_OK;
+}
+
+static int rx_burst_test_send(const void *buf, size_t len)
+{
+    return rx_burst_test_base->send(buf, len);
+}
+
+static int rx_burst_test_recv(void *buf, size_t max_len)
+{
+    if (rx_burst_test_remaining <= 0)
+        return rx_burst_test_base->recv(buf, max_len);
+
+    size_t n = sizeof(rx_burst_test_frame);
+    if (n > max_len)
+        n = max_len;
+    memcpy(buf, rx_burst_test_frame, n);
+    rx_burst_test_remaining--;
+    return (int)n;
+}
+
+static void rx_burst_test_get_mac(uint8_t mac[6])
+{
+    rx_burst_test_base->get_mac(mac);
+}
+
+static bool rx_burst_test_link_status(void)
+{
+    return rx_burst_test_base->link_status();
+}
+
+static void rx_burst_test_tx_reap(void)
+{
+    if (rx_burst_test_base->tx_reap)
+        rx_burst_test_base->tx_reap();
+}
+
+static const struct net_driver rx_burst_test_driver = {
+    .name        = "rx-burst-test",
+    .init        = rx_burst_test_init,
+    .send        = rx_burst_test_send,
+    .recv        = rx_burst_test_recv,
+    .get_mac     = rx_burst_test_get_mac,
+    .link_status = rx_burst_test_link_status,
+    .tx_reap     = rx_burst_test_tx_reap,
+};
+
+static void test_net_rx_burst_uses_pbuf_pool_not_heap(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    /* Capture pre-burst state. The pbuf pool peak is what
+     * differentiates PBUF_POOL (rises) from PBUF_RAM (stays flat). */
+    struct net_watchdog_snapshot before;
+    net_watchdog_get(&before);
+#if MEMP_STATS
+    /* `max` is u32 on lwip 2.x; cast for the after-comparison. */
+    uint32_t pbuf_pool_max_before =
+        (uint32_t)lwip_stats.memp[MEMP_PBUF_POOL]->max;
+#endif
+
+    /* Build a 64-byte broadcast-dest ethertype-0x9000 frame. lwip
+     * accepts the netif input but finds no matching upper protocol
+     * and frees the pbuf — no TCP/UDP state retained. */
+    test_net_build_loopback_frame(rx_burst_test_frame);
+
+    /* Install the wrapper driver; subsequent net_poll() calls pull
+     * RX_BURST_TEST_FRAMES copies of the canned frame. */
+    rx_burst_test_base = net_get_driver();
+    TEST_ASSERT_NOT_NULL(rx_burst_test_base);
+    rx_burst_test_remaining = RX_BURST_TEST_FRAMES;
+    net_register_driver(&rx_burst_test_driver);
+
+    for (int i = 0; i < RX_BURST_TEST_POLL_ITERS &&
+                    rx_burst_test_remaining > 0; i++) {
+        net_poll();
+    }
+
+    /* Restore the original driver before asserting so a failure
+     * doesn't leave the test wrapper installed for downstream tests.
+     *
+     * Order matters: clear `rx_burst_test_remaining` first so any
+     * in-flight wrapper-recv call from net_pump_task running on a
+     * different CPU falls into the delegate-to-base path; then swap
+     * `active_driver` back to the real driver. We deliberately do
+     * NOT null `rx_burst_test_base` afterwards — leaving it pointing
+     * at the (still-valid) real driver keeps a late wrapper call
+     * safe to dereference. The pump task may sit on the wrapper for
+     * one more poll iteration after the swap; that's harmless. */
+    rx_burst_test_remaining = 0;
+    net_register_driver(rx_burst_test_base);
+
+    struct net_watchdog_snapshot after;
+    net_watchdog_get(&after);
+
+    /* All N frames must have been delivered to the netif input
+     * without dropping. Note `rx_packets` is monotonic and may
+     * include packets the live driver received during the test
+     * window — assert >= delta, not equality. */
+    TEST_ASSERT_TRUE(after.rx_packets >= before.rx_packets +
+                     RX_BURST_TEST_FRAMES);
+    TEST_ASSERT_EQUAL_UINT64(before.rx_dropped, after.rx_dropped);
+
+    /* Load-bearing claim: PBUF_POOL was actually used during the
+     * burst. With the production fix in place, the pool peak rises
+     * by at least 1 (typically more, since lwip may retain a pbuf
+     * across input processing). Without the fix (PBUF_RAM regression),
+     * the pool is never touched and max stays at its pre-burst value. */
+#if MEMP_STATS
+    uint32_t pbuf_pool_max_after =
+        (uint32_t)lwip_stats.memp[MEMP_PBUF_POOL]->max;
+    TEST_ASSERT_TRUE(pbuf_pool_max_after > pbuf_pool_max_before);
+#endif
+
+    /* Sanity: heap usage stayed bounded. Even with PBUF_RAM the
+     * heap settles back to baseline after the burst (lwip drops
+     * unrouted ethertype-0x9000 frames promptly), so this is a
+     * coarser check — the pool-peak assertion above is the load-
+     * bearing one. */
+#if MEM_STATS
+    TEST_ASSERT_TRUE(after.heap_used_peak < (MEM_SIZE - 1024u));
+#endif
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -1988,6 +2151,10 @@ int test_suite_net(void)
     RUN_TEST(test_net_dhcp_link_drop_restarts_timeout);
     RUN_TEST(test_net_driver_tx);
     RUN_TEST(test_net_driver_has_tx_reap);
+    /* #581 regression — runs while the live driver is up so net_poll
+     * actually invokes the wrapper recv. Must be BEFORE the
+     * not-initialized teardown block at the end of the suite. */
+    RUN_TEST(test_net_rx_burst_uses_pbuf_pool_not_heap);
     RUN_TEST(test_net_send_returns_quickly);
     RUN_TEST(test_net_send_oversized_rejected);
     RUN_TEST(test_net_send_pool_exhaustion);
