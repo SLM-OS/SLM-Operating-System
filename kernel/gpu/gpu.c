@@ -54,6 +54,17 @@ int gpu_init(void)
     if (ret == GPU_OK) {
         gpu_initialized = true;
         uart_puts("[GPU] Initialization complete\n");
+#if !defined(ENABLE_GA10B_FIRMWARE)
+        /* Loud post-init banner so an operator who built without
+         * `-DGA10B_FIRMWARE_DIR=...` (or with missing files) knows
+         * the GPU is detected but compute will fall back to CPU.
+         * The CMake warning during configure is easy to miss; this
+         * surfaces the same fact at every boot. */
+        uart_puts("[GPU] WARN: GA10B firmware not embedded — compute "
+                  "disabled (rebuild with -DGA10B_FIRMWARE_DIR=...; "
+                  "see docs/troubleshooting.md \"GPU acceleration "
+                  "silently disabled\")\n");
+#endif
     } else {
         uart_printf("[GPU] Initialization failed: %d\n", ret);
     }

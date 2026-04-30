@@ -1047,6 +1047,13 @@ typedef struct {
     float    rope_freq_base;       /* RoPE theta         */
 } SlmModelInfoC;
 
+/* FFI size pin: paired with `const _: () = assert!(size_of::<...>() == 92)`
+ * in runtime/src/slm/registry.rs. Layout is 16 + 32 + 10×u32 + f32 = 92 B,
+ * all naturally 4-byte aligned. Adding/reordering a field requires bumping
+ * both. */
+_Static_assert(sizeof(SlmModelInfoC) == 92,
+               "SlmModelInfoC must be 92 bytes — Rust mirror in registry.rs has a paired const-assert");
+
 /*
  * Load a GGUF model into the SLM registry.
  * @name: null-terminated model name (clamped to 31 bytes).
@@ -1071,6 +1078,16 @@ extern int rust_slm_get_info(uint32_t index, SlmModelInfoC *info);
  * Number of currently-loaded SLMs.
  */
 extern uint32_t rust_slm_count(void);
+
+/*
+ * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
+ *
+ * Single source of truth for the shell's pre-load size gate. Pinned
+ * at the Rust registry's MAX_PLAUSIBLE_GGUF_BYTES (1 GiB today; PMM
+ * buddy max-order). When #550 lands and the cap rises, the shell
+ * picks up the new value automatically.
+ */
+extern uint64_t rust_slm_max_gguf_bytes(void);
 
 /*
  * Test-only: build a Qwen2.5-shaped GGUF fixture into @out_buf and
@@ -1126,6 +1143,12 @@ typedef struct {
     uint64_t last_ttft_ns;     /* time-to-first-token, last prompt  */
     uint64_t last_decode_ns;   /* total decode time, last prompt    */
 } SlmStatsC;
+
+/* FFI size pin: paired with `const _: () = assert!(size_of::<SlmStatsC>() == 32)`
+ * in runtime/src/lib.rs. Layout is 3×u32 + 4-byte padding (u64 alignment)
+ * + 2×u64 = 32 B. */
+_Static_assert(sizeof(SlmStatsC) == 32,
+               "SlmStatsC must be 32 bytes — Rust mirror in lib.rs has a paired const-assert");
 
 /*
  * Token-emission callback. Invoked once per decoded token (prefill

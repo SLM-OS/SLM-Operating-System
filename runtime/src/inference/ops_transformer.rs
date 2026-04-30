@@ -348,6 +348,11 @@ pub fn matmul_q4k_row(
 /// quantization is paid once.
 ///
 /// Returns `None` on shape mismatch.
+///
+/// `#[inline]` so the per-row `vec_dot` call site sees the row stride
+/// + activation pointer at compile time and the quantize-once /
+/// dot-many pattern can hoist the Q8_K conversion out of the loop.
+#[inline]
 pub fn matmul_q4k_rows(
     weights: &[u8],
     rows: usize,
@@ -453,9 +458,15 @@ pub fn gqa_decode_step(
         let q_row = &q[q_off..q_off + head_dim];
 
         // 1. Logits[t] = (q · k_t) / sqrt(head_dim) for t in 0..seq_len.
+        // The outer-loop multiplies above use `checked_mul`. The
+        // inner indices below cannot overflow given `kv_len = seq_len
+        // * kv_per_pos` already passed `checked_mul`, but pin that
+        // invariant with a `debug_assert!` so a future refactor that
+        // weakens the outer bound surfaces here, not in production.
         let mut max_logit = f32::NEG_INFINITY;
         for t in 0..seq_len {
             let k_off = t * kv_per_pos + hkv * head_dim;
+            debug_assert!(k_off + head_dim <= k.len());
             let mut acc: f32 = 0.0;
             for d in 0..head_dim {
                 acc += f16_to_f32(q_row[d]) * f16_to_f32(k[k_off + d]);
@@ -483,10 +494,12 @@ pub fn gqa_decode_step(
 
         // 3. out[hq] = sum_t softmax[t] * v[t, hkv].
         let out_off = hq * head_dim;
+        debug_assert!(out_off + head_dim <= out.len());
         for d in 0..head_dim {
             let mut acc: f32 = 0.0;
             for t in 0..seq_len {
                 let v_off = t * kv_per_pos + hkv * head_dim;
+                debug_assert!(v_off + head_dim <= v.len());
                 acc += scratch_logits[t] * f16_to_f32(v[v_off + d]);
             }
             out[out_off + d] = f32_to_f16(acc);
