@@ -430,6 +430,14 @@ int hailo_vdma_channel_start(uint8_t channel_index,
     if (!list || !list->descs) return HAILO_ERR_INVAL;
     if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
     if (list->iova & 0xFFFFu) return HAILO_ERR_INVAL;  /* 64 KB-aligned */
+    /* Reject IOVAs that don't fit in the 48-bit register window
+     * formed by `addr_l = (iova >> 16) & 0xFFFF` + `addr_h = iova >>
+     * 32`. The address range encoded by the channel is bits[47:16],
+     * so any iova >= 2^48 silently truncates `addr_h` and the DMA
+     * walks the wrong physical address. The BCM2712 PCIe inbound
+     * window is 40-bit anyway so this is a generous bound; mostly
+     * defends against a future allocator regression. */
+    if (list->iova >> 48) return HAILO_ERR_INVAL;
     if (!hailo_platform) return HAILO_ERR_NODEV;
 
     /* Stop any prior activity on the channel before reprogramming. */
