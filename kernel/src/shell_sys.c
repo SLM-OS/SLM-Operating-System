@@ -40,6 +40,10 @@
 #include "sdhci.h"
 #include "string.h"
 #include "../gpu/gpu.h"
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "../gpu/nvidia/ga10b_qmd.h"
+#include "ga10b_qmd_selftest_reference.h"
+#endif
 #include <stdint.h>
 
 /* Command table access (defined in shell.c) */
@@ -3284,55 +3288,29 @@ int cmd_gpu(int argc, char *argv[])
 
     if (argc >= 2 && strcmp(argv[1], "qmd-selftest") == 0) {
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-        /* Forward decls — keeps the full ga10b_qmd.h include scoped
-         * to the JETSON-only path lower in this file. */
-        extern void ga10b_qmd_populate(uint32_t *qmd,
-                                        uint64_t shader_gpu_va,
-                                        uint64_t cbuf_gpu_va,
-                                        uint32_t register_count_v,
-                                        uint32_t grid_x, uint32_t grid_y,
-                                        uint32_t grid_z,
-                                        uint32_t block_x, uint32_t block_y,
-                                        uint32_t block_z);
-
-        /* Reference QMD bytes for fixed inputs
-         *   shader=0x12340000, cbuf=0x56780000, regs=64,
-         *   grid=1×1×1, block=32×1×1
-         * Generated once on the host via tools/qmd-selftest-gen.c
-         * (kept identical to the host harness baseline). Any divergence
-         * means the SLM-OS encoder produced different bytes than the
-         * host build for the same inputs — typical causes: missed
-         * field re-encoding, AArch64-vs-x86 corner case, memory
-         * corruption between encoder run and readback. */
-        static const uint32_t expected[64] = {
-            0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x00000040u, 0xfc000000u, 0x00000000u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00000000u, 0x04000000u,
-            0x00000001u, 0x00000001u, 0x00000001u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00200030u, 0x00010001u,
-            0x00004001u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x56780000u, 0x01000000u, 0x00000000u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x12340000u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-            0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
-        };
-
-        uint32_t actual[64];
+        /* Reference blob + fixed inputs come from the shared header
+         * `ga10b_qmd_selftest_reference.h`. The same header drives a
+         * host-side regression check in test_ga10b_bringup.c, so any
+         * intentional change to `ga10b_qmd_populate` defaults that
+         * forgets to regenerate the reference fails the host test
+         * before it can ship. The on-device run additionally catches
+         * AArch64-only corner cases (alignment, atomics, etc.) and
+         * memory corruption between encoder run and readback. */
+        uint32_t actual[GA10B_QMD_DWORDS];
         ga10b_qmd_populate(actual,
-                           0x12340000ULL, 0x56780000ULL,
-                           64u,
-                           1u, 1u, 1u,
-                           32u, 1u, 1u);
+                           GA10B_QMD_SELFTEST_SHADER_GPU_VA,
+                           GA10B_QMD_SELFTEST_CBUF_GPU_VA,
+                           GA10B_QMD_SELFTEST_REGISTER_COUNT,
+                           GA10B_QMD_SELFTEST_GRID_X,
+                           GA10B_QMD_SELFTEST_GRID_Y,
+                           GA10B_QMD_SELFTEST_GRID_Z,
+                           GA10B_QMD_SELFTEST_BLOCK_X,
+                           GA10B_QMD_SELFTEST_BLOCK_Y,
+                           GA10B_QMD_SELFTEST_BLOCK_Z);
 
         unsigned mismatches = 0;
-        for (unsigned i = 0; i < 64u; i++) {
-            if (actual[i] != expected[i]) mismatches++;
+        for (unsigned i = 0; i < GA10B_QMD_DWORDS; i++) {
+            if (actual[i] != ga10b_qmd_selftest_expected[i]) mismatches++;
         }
 
         if (mismatches == 0u) {
@@ -3346,14 +3324,14 @@ int cmd_gpu(int argc, char *argv[])
         /* Print up to the first 4 mismatching dwords so the diff is
          * actionable from a single shell session. */
         unsigned printed = 0;
-        for (unsigned i = 0; i < 64u && printed < 4u; i++) {
-            if (actual[i] != expected[i]) {
+        for (unsigned i = 0; i < GA10B_QMD_DWORDS && printed < 4u; i++) {
+            if (actual[i] != ga10b_qmd_selftest_expected[i]) {
                 shell_printf("  qmd[%2u]: expected 0x%08lx, "
                              "got 0x%08lx (xor 0x%08lx)\r\n",
                              i,
-                             (unsigned long)expected[i],
+                             (unsigned long)ga10b_qmd_selftest_expected[i],
                              (unsigned long)actual[i],
-                             (unsigned long)(actual[i] ^ expected[i]));
+                             (unsigned long)(actual[i] ^ ga10b_qmd_selftest_expected[i]));
                 printed++;
             }
         }
@@ -3363,6 +3341,7 @@ int cmd_gpu(int argc, char *argv[])
         }
         return -1;
 #else
+        (void)argv;  /* unused on non-Jetson */
         shell_puts("gpu qmd-selftest: only supported on "
                    "JETSON_ORIN_NANO\r\n");
         return -1;

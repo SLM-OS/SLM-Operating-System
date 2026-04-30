@@ -206,6 +206,20 @@ struct ga10b_channel_handoff {
      *     SKED redecode and per-QMD INVALIDATE_*_CACHE bits to
      *     fire on each launch).
      *
+     * Wire-format-skew note: the struct grew from 232 → 256 bytes
+     * with this v7 extension. A pre-v7 helper that writes only the
+     * first 232 bytes leaves these trailing fields uninitialised
+     * — typically the nvmap allocator returns zeroed pages, but
+     * that isn't formally guaranteed across kexec. The
+     * load-bearing wire-format guard is `version`: SLM-OS's
+     * dispatch path takes the v7 branch only when
+     * `version >= 7`, and a pre-v7 helper writes `version` ≤ 6
+     * deterministically. The `qmd_pool_n_slots > 0 &&
+     * qmd_pool_phys != 0` checks in the dispatch path are a
+     * defensive belt-and-braces against a buggy v7 producer that
+     * advances the version field without populating the pool —
+     * NOT a substitute for the version check.
+     *
      * Sizing: 1024 slots × 256 B = 256 KiB is the recommended
      * minimum for SLM workloads (~370 ops/token for Qwen 2.5
      * 1.5B). MNIST works with much less but the pool is sized
@@ -507,6 +521,75 @@ ga10b_pipeline_op_is_valid(const struct ga10b_pipeline_op *op)
     return op != NULL
         && op->qmd_gpu_va != 0u
         && op->output_phys != 0u;
+}
+
+/*
+ * Should the dispatch path take the v7 (per-dispatch QMD) branch?
+ *
+ * Returns true iff the handoff carries the load-bearing v7 markers:
+ * `version >= 7` (the wire-format check), pipeline_n_ops > 0 (any
+ * pipeline at all), qmd_pool_n_slots > 0 (a usable pool sized), and
+ * qmd_pool_phys != 0 (a usable pool mapped).
+ *
+ * A v6 helper writes `version = 6` and zero pool fields, so
+ * `is_v7` returns false and the dispatch path falls through to the
+ * v5/v6 helper-baked-QMD branch. A v7 helper that hasn't allocated
+ * a pool would advance `version` but leave the pool fields zero,
+ * which also returns false — defensive belt-and-braces against a
+ * partial v7 rollout.
+ *
+ * Pure-logic — host-testable.
+ */
+static inline bool
+ga10b_handoff_is_v7(const struct ga10b_channel_handoff *h)
+{
+    return h != NULL
+        && h->version >= 7u
+        && h->pipeline_n_ops > 0u
+        && h->qmd_pool_n_slots > 0u
+        && h->qmd_pool_phys != 0u;
+}
+
+/*
+ * Reasons a v7 handoff that *passed* `ga10b_handoff_is_v7` may
+ * still be malformed. The dispatch path returns -1 + sets
+ * `last_error_phase = 8` on any of these.
+ */
+enum ga10b_v7_validation_error {
+    GA10B_V7_OK                       = 0,
+    GA10B_V7_ERR_OPS_PHYS_ZERO        = 1,  /* pipeline_ops_phys == 0 */
+    GA10B_V7_ERR_OPS_EXCEED_CAP       = 2,  /* pipeline_n_ops > V7_MAX */
+    GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT = 3,/* qmd_pool_size_bytes < n_slots × 256 */
+};
+
+/*
+ * Validate a handoff that's already been classified v7 by
+ * `ga10b_handoff_is_v7`. Returns GA10B_V7_OK on a well-formed
+ * handoff, or one of the GA10B_V7_ERR_* codes describing the
+ * specific malformation.
+ *
+ * Caller responsibility: only invoke after `ga10b_handoff_is_v7`
+ * has already returned true. The checks here assume v7 markers are
+ * present.
+ *
+ * Pure-logic — host-testable. The dispatch-path call site logs the
+ * specific failure via uart_printf and returns -1 to the bringup
+ * caller; the host harness uses the return code directly.
+ */
+static inline enum ga10b_v7_validation_error
+ga10b_v7_validate_handoff(const struct ga10b_channel_handoff *h)
+{
+    if (h->pipeline_ops_phys == 0u) {
+        return GA10B_V7_ERR_OPS_PHYS_ZERO;
+    }
+    if (h->pipeline_n_ops > GA10B_PIPELINE_V7_MAX_OPS) {
+        return GA10B_V7_ERR_OPS_EXCEED_CAP;
+    }
+    if ((uint64_t)h->qmd_pool_size_bytes <
+        (uint64_t)h->qmd_pool_n_slots * 256u) {
+        return GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT;
+    }
+    return GA10B_V7_OK;
 }
 
 #endif /* GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H */

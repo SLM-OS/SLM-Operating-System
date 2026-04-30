@@ -25,6 +25,14 @@ static inline void ga10b_qmd_zero(uint32_t *qmd)
 void ga10b_qmd_set_bits(uint32_t *qmd, unsigned hi, unsigned lo,
                         uint64_t val)
 {
+    /* Defensive: all QMDV03_00 macros in the header have HI ≥ LO,
+     * but a typo in a future addition (or an out-of-range caller)
+     * would underflow `hi - lo + 1u` on the next line and write to
+     * far-past-end words via the two-word path. Bail out cleanly
+     * instead. Same safety-vs-cost trade as the `nbits >= 64u`
+     * guard below. */
+    if (hi < lo) return;
+
     unsigned nbits = hi - lo + 1u;
     /* Guard against `1ULL << 64` (UB). All QMDV03_00 fields used today
      * are ≤ 32 bits, so this branch is precautionary. */

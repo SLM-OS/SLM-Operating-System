@@ -1031,14 +1031,12 @@ static struct ga10b_channel_handoff g_handoff;
  * INVALIDATE_*_CACHE bits actually fire (issue #558).
  *
  * Single-channel design today; if SLM-OS ever supports multiple
- * concurrent channels, this becomes a per-channel field.
- *
- * Exposed under SLM_HOST_HARNESS so unit tests can drive it. */
-#ifdef SLM_HOST_HARNESS
-uint32_t g_qmd_pool_next_slot;
-#else
+ * concurrent channels, this becomes a per-channel field. The slot
+ * counter is local to the dispatch-loop body — host tests cover
+ * the counter advancement directly via `ga10b_qmd_pool_prepare`
+ * (which takes its own slot_inout pointer), so this static does
+ * not need extern visibility for tests. */
 static uint32_t g_qmd_pool_next_slot;
-#endif
 
 /* Scan a physical-memory range for the handoff magic, at the given
  * stride. Returns the address of the first match, or 0 if not found.
@@ -1780,35 +1778,47 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
      * Falls through to the v5/v6 path on any v7 input that's
      * missing or out of range. The v6 path remains the default until
      * Phase 3 (helper-side pool allocation) lands. */
-    if (g_handoff.version >= 7 && g_handoff.pipeline_n_ops > 0 &&
-        g_handoff.qmd_pool_n_slots > 0 &&
-        g_handoff.qmd_pool_phys != 0) {
-        if (g_handoff.pipeline_ops_phys == 0) {
-            uart_puts("[GA10B-P8-v7] pipeline_n_ops > 0 but "
-                      "pipeline_ops_phys is zero\n");
+    if (ga10b_handoff_is_v7(&g_handoff)) {
+        enum ga10b_v7_validation_error verr =
+            ga10b_v7_validate_handoff(&g_handoff);
+        if (verr != GA10B_V7_OK) {
+            switch (verr) {
+            case GA10B_V7_ERR_OPS_PHYS_ZERO:
+                uart_puts("[GA10B-P8-v7] pipeline_n_ops > 0 but "
+                          "pipeline_ops_phys is zero\n");
+                break;
+            case GA10B_V7_ERR_OPS_EXCEED_CAP:
+                uart_printf("[GA10B-P8-v7] pipeline_n_ops=%lu exceeds "
+                            "GA10B_PIPELINE_V7_MAX_OPS=%u — refusing "
+                            "to dispatch (handoff likely corrupt)\n",
+                            (unsigned long)g_handoff.pipeline_n_ops,
+                            (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
+                break;
+            case GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT:
+                uart_printf("[GA10B-P8-v7] qmd_pool_size_bytes=%lu < "
+                            "qmd_pool_n_slots=%lu × %u — handoff "
+                            "inconsistent\n",
+                            (unsigned long)g_handoff.qmd_pool_size_bytes,
+                            (unsigned long)g_handoff.qmd_pool_n_slots,
+                            (unsigned)GA10B_QMD_SIZE_BYTES);
+                break;
+            case GA10B_V7_OK:
+                /* Unreachable — the outer `if (verr != OK)` rejects
+                 * this case. Keeping the case label so a future
+                 * addition to the enum prompts a -Wswitch warning. */
+                break;
+            }
             b->last_error_phase = 8;
             return -1;
         }
-        if (g_handoff.pipeline_n_ops > GA10B_PIPELINE_V7_MAX_OPS) {
-            uart_printf("[GA10B-P8-v7] pipeline_n_ops=%lu exceeds "
-                        "GA10B_PIPELINE_V7_MAX_OPS=%u — refusing to "
-                        "dispatch (handoff likely corrupt)\n",
-                        (unsigned long)g_handoff.pipeline_n_ops,
-                        (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
-            b->last_error_phase = 8;
-            return -1;
-        }
-        if (g_handoff.qmd_pool_size_bytes <
-            (uint64_t)g_handoff.qmd_pool_n_slots * GA10B_QMD_SIZE_BYTES) {
-            uart_printf("[GA10B-P8-v7] qmd_pool_size_bytes=%lu < "
-                        "qmd_pool_n_slots=%lu × %u — handoff "
-                        "inconsistent\n",
-                        (unsigned long)g_handoff.qmd_pool_size_bytes,
-                        (unsigned long)g_handoff.qmd_pool_n_slots,
-                        (unsigned)GA10B_QMD_SIZE_BYTES);
-            b->last_error_phase = 8;
-            return -1;
-        }
+        /* CPU-physical → identity-mapped CPU VA on Jetson. Same
+         * contract as the v3 dispatch fields and the v5/v6 ops
+         * array: the helper allocates these via nvmap into the
+         * IOVMM heap, where SMMU passthrough makes the CPU's view
+         * of the page numerically equal to the physical address.
+         * Holds at EL2 with the unified DRAM map; would need an
+         * explicit phys-to-virt translation on any platform that
+         * doesn't identity-map. */
         const struct ga10b_pipeline_op_v7 *ops_v7 =
             (const struct ga10b_pipeline_op_v7 *)
                 (uintptr_t)g_handoff.pipeline_ops_phys;

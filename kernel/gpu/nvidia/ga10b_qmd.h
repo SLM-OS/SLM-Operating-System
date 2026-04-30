@@ -171,7 +171,13 @@ void ga10b_qmd_populate(uint32_t *qmd,
  * Args:
  *   pool_va         CPU virtual address of slot 0 (CPU-side identity-
  *                   mapped DRAM on Jetson; host tests pass a heap
- *                   buffer).
+ *                   buffer). Must be at least 4-byte aligned because
+ *                   the encoder casts each 256-byte slot to
+ *                   `uint32_t *` for word-granular writes. The
+ *                   helper-side allocator returns page-aligned
+ *                   memory, so this falls out automatically; it's
+ *                   only a constraint for synthesised pools in
+ *                   tests.
  *   pool_gpu_va     GPU virtual address of slot 0 (from the v7
  *                   handoff's `qmd_pool_gpu_va`).
  *   pool_n_slots    number of 256-byte slots in the pool (from the
