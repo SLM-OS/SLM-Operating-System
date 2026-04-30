@@ -253,6 +253,18 @@ static inline void pcie_udelay(uint32_t us)
 
 int pcie_tegra_host_init(void)
 {
+    /* Single-init only. The APPL/DBI/iATU MMIO programming below is
+     * not idempotent (some registers latch on first write, others
+     * accumulate state) — a second concurrent or sequential call
+     * would corrupt the controller state. There's no per-controller
+     * spinlock here because the contract is one-time bring-up from
+     * boot init on CPU 0; if a future hot-replug path needs this,
+     * it must add proper teardown + re-init sequencing first. */
+    if (g_host_inited) {
+        WARN("pcie-tegra: pcie_tegra_host_init called twice — ignoring");
+        return 0;
+    }
+
     INFO("pcie-tegra: configuring PCIe C8 root complex");
 
     /* Step 0: Ensure the BPMP power-domain PCIEX4CA is ON. Linux

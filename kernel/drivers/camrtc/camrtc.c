@@ -39,6 +39,7 @@
 #include "camrtc_channels.h"
 #include "camrtc_layout.h"
 #include "debug.h"
+#include "ncmem.h"
 #include "platform.h"
 #include "tegra234_clocks.h"
 #include "timer.h"
@@ -652,6 +653,21 @@ int camrtc_diag_dump(void)
  *     NC_MEM_END - 256.
  */
 #define CAMRTC_CTRL_REGION_PHYS    0xBDFE0000u
+
+/* Pin the dependency between CAMRTC_CTRL_REGION_PHYS and the NC
+ * mapping in vmm_init / ncmem.h. If a future change relocates the NC
+ * region (e.g. OP-TEE carveout moves), this assertion fires at build
+ * time rather than letting RCE see uncached MMIO and silently fail.
+ *
+ * Both bounds: the region must START inside the NC mapping AND its
+ * END (start + reserved) must stay within the NC mapping. */
+_Static_assert(CAMRTC_CTRL_REGION_PHYS >= NC_MEM_BASE,
+               "CAMRTC_CTRL_REGION_PHYS must lie within the NC mapping");
+_Static_assert(CAMRTC_CTRL_REGION_PHYS + CAMRTC_CTRL_REGION_RESERVED
+                   <= NC_MEM_BASE + NC_MEM_SIZE,
+               "CAMRTC_CTRL_REGION_PHYS + RESERVED must fit in NC mapping");
+_Static_assert(CAMRTC_CTRL_REGION_BYTES <= CAMRTC_CTRL_REGION_RESERVED,
+               "CAMRTC_CTRL_REGION_BYTES must fit in the 64 KB reservation");
 
 /* VI-capture per-request descriptor region. Sits 64 KB below the
  * CH_SETUP region in the same NC mapping. Layout (set up by

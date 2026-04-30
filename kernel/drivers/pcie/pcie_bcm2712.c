@@ -957,6 +957,12 @@ static void cfg_write32_locked(uint8_t bus, uint8_t dev, uint8_t func,
         return;
     }
     pcie1_w32(PCIE1_EXT_CFG_INDEX, ecam_idx(bus, dev, func));
+    /* Same read-back-as-barrier pattern as cfg_read32_locked above:
+     * back-to-back ECAM accesses on the BCM2712 bridge can otherwise
+     * land before the INDEX write has set up the TLP, causing the
+     * subsequent DATA write to target the previous bus/dev/func.
+     * Matches the Linux brcmstb pattern. */
+    (void)pcie1_r32(PCIE1_EXT_CFG_INDEX);
     *(volatile uint32_t *)(pcie1_regs + PCIE1_EXT_CFG_DATA
                            + (offset & 0xFFCu)) = value;
 }
