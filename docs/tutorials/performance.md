@@ -236,7 +236,7 @@ SLM-OS uses fixed-size memory pools and stack-allocated structures to avoid heap
 | Weight pool | 256 MB (128 x 2 MB blocks) | 1 block (26 KB data in 2 MB = 1.3% utilization) | Larger models use multiple blocks |
 | Workspace pool | 128 MB (64 x 2 MB blocks) | < 64 KB per inference call | Bump allocator resets per call |
 | Task stack | 64 KB per task | ~15 KB peak (Release build) | Debug builds use more due to no inlining |
-| Rust heap | 1 MB | Minimal (Box removed) | Used during model parsing; ParsedOnnx moved to stack |
+| Rust heap | 4 MB QEMU / 64 MB Pi 5 / 128 MB Jetson | Per-platform via `RUST_HEAP_MB` in `<config.h>` | SLM KV cache + ForwardScratch live here |
 | Model registry | 8 slots | ~8 KB in BSS per slot | Graph + weight table + handles |
 | Static inference engine | ~10 KB in BSS | ~10 KB (fixed) | Avoids heap allocation entirely |
 

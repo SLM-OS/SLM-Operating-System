@@ -17,8 +17,16 @@ use crate::kernel_ffi;
 /// Block size: 2MB (ARM L2 block size for huge page efficiency)
 pub const BLOCK_SIZE: usize = 2 * 1024 * 1024;
 
-/// Maximum blocks per pool (16-bit index in handle)
-const MAX_BLOCKS_PER_POOL: usize = 256;
+/// Maximum blocks per pool (16-bit index in handle).
+///
+/// At `BLOCK_SIZE = 2 MB` this is also the per-pool size cap in MB —
+/// `model_mem_init(weight_mb, workspace_mb)` silently truncates the
+/// requested pool size to `MAX_BLOCKS_PER_POOL × BLOCK_SIZE`. Sized
+/// for Jetson's `MODEL_MEM_WEIGHT_MB = 1024` so the requested 1 GB
+/// is fully addressable; smaller platforms (Pi 5 512, QEMU 256) fit
+/// comfortably below the cap. Each `BlockSlot` is ~48 B, so the BSS
+/// footprint is `2 pools × 512 slots × 48 B ≈ 48 KB`.
+const MAX_BLOCKS_PER_POOL: usize = 512;
 
 /// Pool identifiers
 const POOL_WEIGHT: u8 = 0;
