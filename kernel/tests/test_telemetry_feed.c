@@ -15,6 +15,7 @@
 
 #include "unity.h"
 #include "../include/admin_telemetry.h"
+#include "../include/tcp_telemetry_server.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -529,6 +530,37 @@ static void test_ai_decision_unknown_policy_id_falls_open_to_marker(void)
         "fb= field must still be present after the policy guard");
 }
 
+/* ---------- Drain-between-publishes (single-slot mailbox fix) -------- */
+
+static void test_periodic_pump_drains_between_publishes(void)
+{
+    /* admin_telemetry_periodic_pump publishes three samples back-to-
+     * back (tel.cpu, tel.stl, tel.mem) into msg_router. The mailbox
+     * is single-slot — without an explicit drain between publishes,
+     * tel.stl's payload overwrites tel.cpu's, then tel.mem's
+     * overwrites tel.stl's, and the consumer (tcp_telemetry_server,
+     * polled from the same net_pump task) only ever sees tel.mem
+     * on the next tick. Production users reported "I only see
+     * tel.inf and tel.mem on the wire" because of this.
+     *
+     * Pin the fix by counting tcp_telemetry_server_poll invocations
+     * across one publish tick: the pump must call it at least
+     * three times (once after each of the three publishes) so that
+     * a same-task consumer can drain each sample before the next
+     * write lands in the mailbox slot. */
+    tcp_telemetry_server_test_reset();
+    admin_telemetry_periodic_reset_for_tests();
+
+    uint64_t before = tcp_telemetry_server_test_poll_invocations();
+    admin_telemetry_periodic_pump(0u);                        /* baseline */
+    admin_telemetry_periodic_pump(TELEMETRY_PERIODIC_INTERVAL_MS);
+    uint64_t after = tcp_telemetry_server_test_poll_invocations();
+
+    TEST_ASSERT_MESSAGE(after - before >= 3u,
+        "periodic pump must drain at least 3 times across one publish tick "
+        "(once per topic) to avoid single-slot mailbox overwrites");
+}
+
 /* ---------- Suite registration --------------------------------------- */
 
 int test_suite_telemetry_feed(void)
@@ -560,5 +592,6 @@ int test_suite_telemetry_feed(void)
     RUN_TEST(test_ai_decision_payload_capped_at_max_msg_len);
     RUN_TEST(test_ai_decision_topic_fits_msg_router);
     RUN_TEST(test_ai_decision_unknown_policy_id_falls_open_to_marker);
+    RUN_TEST(test_periodic_pump_drains_between_publishes);
     return UNITY_END();
 }

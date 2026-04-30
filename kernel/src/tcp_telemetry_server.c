@@ -131,6 +131,15 @@ static uint64_t g_samples_delivered;
 static uint64_t g_samples_dropped;
 static uint64_t g_accept_rejects;
 
+/* Test-seam counter — incremented unconditionally on every
+ * tcp_telemetry_server_poll() entry, regardless of whether the
+ * listener is up or whether any sample was actually drained. Used by
+ * test_telemetry_feed.c to pin that admin_telemetry_periodic_pump
+ * interleaves drain calls between its three back-to-back publishes
+ * (otherwise tel.cpu/tel.stl would be silently overwritten in the
+ * single-slot mailbox before the next net_pump tick). */
+static uint64_t g_poll_invocations;
+
 /* ============================================================================
  * Helpers
  * ============================================================================ */
@@ -541,6 +550,8 @@ static void drain_to_lwip(struct tel_session *s)
 
 void tcp_telemetry_server_poll(void)
 {
+    g_poll_invocations++;
+
     /* Step 1: drain the msg_router subscription — gated on the listener
      * because there is nothing to source samples from once the operator
      * stops the server. (Tests exercise the fanout path directly via
@@ -846,4 +857,10 @@ void tcp_telemetry_server_test_reset(void)
     g_sessions_closed   = 0;
     g_accept_rejects    = 0;
     g_next_session_id   = 1;
+    g_poll_invocations  = 0;
+}
+
+uint64_t tcp_telemetry_server_test_poll_invocations(void)
+{
+    return g_poll_invocations;
 }
