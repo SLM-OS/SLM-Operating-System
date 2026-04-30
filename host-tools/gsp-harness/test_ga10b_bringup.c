@@ -2790,12 +2790,22 @@ static void test_v7_validate_first_failure_wins(void)
      * uart_printf branch deterministic. NULL is checked first
      * (defense-in-depth), then field-level errors in declaration
      * order: ops_phys → exceed_cap → pool_size. */
+
+    /* Field-level ordering: ops_phys wins over the later checks. */
     struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
     h.pipeline_ops_phys   = 0u;
     h.pipeline_n_ops      = GA10B_PIPELINE_V7_MAX_OPS + 1u;
     h.qmd_pool_size_bytes = 0u;
     REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h),
                GA10B_V7_ERR_OPS_PHYS_ZERO);
+
+    /* NULL beats every field-level error. The standalone
+     * `test_v7_validate_rejects_null_handoff` covers NULL on its
+     * own; this assertion pins NULL's *precedence* over any field-
+     * level malformation, since the validator can't reach the
+     * field-level checks at all if `h == NULL`. */
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(NULL),
+               GA10B_V7_ERR_NULL_HANDOFF);
 }
 
 static void test_v7_validate_rejects_null_handoff(void)

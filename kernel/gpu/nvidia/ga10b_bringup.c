@@ -1759,10 +1759,13 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
  * 0 on full-chain success, -1 on validation/dispatch failure (with
  * b->last_error_phase = 8).
  *
- * Extracted from the launch_kernel function body for readability +
- * (eventually) testability — the bounds-check error paths have
- * dedicated host-test coverage via `ga10b_v7_validate_handoff`,
- * which this function delegates to.
+ * Extracted from the launch_kernel function body for readability.
+ * The bounds-check error paths have dedicated host-test coverage
+ * via `ga10b_v7_validate_handoff`, which this function delegates
+ * to. The dispatch-loop body is exercised indirectly through the
+ * `ga10b_qmd_pool_prepare` tests; making it directly host-testable
+ * is tracked separately in #580 (refactor to take handoff + slot
+ * counter as parameters and a stub-submit function pointer).
  */
 static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
 {
