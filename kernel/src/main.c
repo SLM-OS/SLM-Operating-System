@@ -502,13 +502,16 @@ void kernel_main(void *dtb)
     /* Initialize Rust runtime */
     INFO("Initializing Rust runtime...");
 
-    /* Allocate heap for Rust (1MB = 256 pages) */
-    void *rust_heap = pmm_alloc_pages(256);
+    /* Allocate heap for Rust. RUST_HEAP_MB is per-platform in
+     * <config.h> — sized by SLM forward-path demand (KV cache +
+     * ForwardScratch); see the comment block there. */
+    const size_t rust_heap_pages = (size_t)RUST_HEAP_MB * 256u; /* 256 pages = 1 MB */
+    void *rust_heap = pmm_alloc_pages(rust_heap_pages);
     if (!rust_heap) {
-        panic("Failed to allocate Rust heap");
+        panic("Failed to allocate Rust heap (%u MB requested)", RUST_HEAP_MB);
     }
-    rust_heap_init(rust_heap, 256 * 4096);
-    INFO("  Rust heap: %p (%u KB)", rust_heap, (256 * 4096) / 1024);
+    rust_heap_init(rust_heap, rust_heap_pages * 4096u);
+    INFO("  Rust heap: %p (%u MB)", rust_heap, RUST_HEAP_MB);
 
     /* Call Rust init and verify */
     int magic = rust_init();
