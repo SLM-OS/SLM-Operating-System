@@ -73,8 +73,18 @@
  * model-memory block size is 2 MB; the Rust pool allocator rejects
  * misaligned sizes).
  *
- * Jetson hosts the SLM weight pool sized for Qwen2.5-1.5B-Q4_K_M
- * (~1.0 GB resident) plus a second-slot headroom; workspace covers
+ * **Hard ceiling: 1024 MB per pool.** `model_mem_init` asks PMM for a
+ * single contiguous block per pool; the buddy allocator's max order
+ * is 18 (1 GiB, see `kernel/CLAUDE.md` §"Buddy Allocator"). A request
+ * larger than 1 GiB returns `PMM_ERR_OUT_OF_RANGE` and leaves the pool
+ * uninitialized — `slm load` via the M5.3.3 PMM-bypass path still
+ * works, but `mm::alloc_weights` callers (eviction integration,
+ * future shared-weight refcounting) silently no-op. See #578 for the
+ * regression history and #550 for the multi-block follow-up that
+ * lifts the ceiling.
+ *
+ * Jetson sizes the weight pool to the buddy ceiling so Qwen2.5-1.5B-
+ * Q4_K_M (~1.0 GB resident) fits in a single block; workspace covers
  * per-layer activations and the 512 MB KV-cache sub-pool that M5
  * carves out (see docs/specs/slm-integration.md "Memory Plan").
  *
@@ -83,7 +93,7 @@
  * `make test`'s 1 GB systemd MemoryMax cap.
  */
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-#define MODEL_MEM_WEIGHT_MB     2048u
+#define MODEL_MEM_WEIGHT_MB     1024u
 #define MODEL_MEM_WORKSPACE_MB  256u
 #elif defined(PLATFORM_RASPI5)
 #define MODEL_MEM_WEIGHT_MB     512u
@@ -101,5 +111,40 @@ _Static_assert((MODEL_MEM_WEIGHT_MB    % 2u) == 0u,
                "MODEL_MEM_WEIGHT_MB must be a multiple of 2 (pool block = 2 MB)");
 _Static_assert((MODEL_MEM_WORKSPACE_MB % 2u) == 0u,
                "MODEL_MEM_WORKSPACE_MB must be a multiple of 2 (pool block = 2 MB)");
+_Static_assert(MODEL_MEM_WEIGHT_MB    <= 1024u,
+               "MODEL_MEM_WEIGHT_MB cannot exceed 1024 (PMM buddy max-order = 1 GiB; see #578)");
+_Static_assert(MODEL_MEM_WORKSPACE_MB <= 1024u,
+               "MODEL_MEM_WORKSPACE_MB cannot exceed 1024 (PMM buddy max-order = 1 GiB; see #578)");
+
+/* ============================================================================
+ * Rust heap — sized by SLM working-set demand
+ * ============================================================================
+ *
+ * The Rust runtime's `linked_list_allocator` lives entirely inside the
+ * region passed to `rust_heap_init`. `Vec`/`Box` allocations from the
+ * SLM forward path land here:
+ *
+ *   - KV cache: 2 (k,v) × n_layers × n_kv_heads × head_dim × ctx × 2
+ *     bytes (FP16). For Qwen2.5-1.5B (28 layers, 2 KV heads, 128
+ *     head_dim) this is ~28 MB at ctx=1024, ~56 MB at ctx=2048,
+ *     ~112 MB at ctx=4096.
+ *   - ForwardScratch: ~1 MB total — dominated by the vocab logits
+ *     buffer (152 064 × 4 B for Qwen) and the matmul/attention
+ *     scratch.
+ *
+ * The original 1 MB heap was sized for the pre-SLM ONNX/MNIST path
+ * and is not enough for any 1 B+ model. Jetson is sized for two
+ * concurrent ctx=2048 sessions plus headroom; Pi 5 carries enough
+ * for one ctx=2048 session of a 1 B-class model.
+ */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#define RUST_HEAP_MB            128u
+#elif defined(PLATFORM_RASPI5)
+#define RUST_HEAP_MB            64u
+#else /* PLATFORM_QEMU_VIRT, PLATFORM_X86_64, host harness */
+#define RUST_HEAP_MB            4u
+#endif
+
+_Static_assert(RUST_HEAP_MB > 0u, "RUST_HEAP_MB must be positive");
 
 #endif /* CONFIG_H */

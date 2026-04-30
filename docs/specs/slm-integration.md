@@ -176,10 +176,11 @@ quantization work.
 |---|---|---|---|
 | Kernel + runtime + stacks + non-cacheable | ~80 MB | (existing) | Unchanged from Phase 5. |
 | OP-TEE carveout (skipped by PMM) | 64 MB | n/a | `0xBE000000–0xC2000000`, see `docs/specs/memory.md`. |
-| **Weight pool (extended)** | **2 GB** | Phase 3 weight pool, raised from 256 MB | Holds 1× Q4_K_M Qwen2.5-1.5B (~1.0 GB) with room for a second model or future Q4_K_M Llama-3.2-3B (~2.0 GB). |
-| **KV-cache pool** | **512 MB** | New sub-pool inside workspace allocator | Sized for two concurrent sessions × 4 K context × Qwen2.5-1.5B GQA dims (≈230 MB each). Ring-allocated per session. |
+| **Weight pool** | **1 GB** | Phase 3 weight pool, raised from 256 MB | Holds 1× Q4_K_M Qwen2.5-1.5B (~1.0 GB) — fills the pool. PMM buddy max-order is 1 GiB (#578); a multi-block allocator (#550) is the path to two-model headroom. |
+| **Rust heap** | **128 MB** | `linked_list_allocator` over PMM | Hosts KV cache (~56 MB at ctx=2048 for Qwen2.5-1.5B) + `ForwardScratch` (~1 MB). Sized via `RUST_HEAP_MB` in `config.h`. |
+| **KV-cache pool** *(future)* | **512 MB** | Planned sub-pool inside workspace allocator | Sized for two concurrent sessions × 4 K context × Qwen2.5-1.5B GQA dims (≈230 MB each). Today the KV cache lives on the Rust heap; this row tracks the eventual move into a dedicated pool with eviction integration. |
 | Workspace (per-session scratch) | 256 MB | Phase 3 workspace pool | Per-layer activations, attention logits, RoPE LUTs. |
-| Free / future | ~3.7 GB | buddy | Headroom for additional models, components, page cache. |
+| Free / future | ~4.5 GB | buddy | Headroom for additional models, components, page cache. |
 
 Weights are **memory-mapped from GGUF directly into the weight pool** at
 load time (no decode pass; Q4_K blocks stay packed). Dequantization happens
@@ -190,11 +191,12 @@ cost.
 > **Plumbing landed in M0.2:** `rust_model_mem_init` now takes
 > `(uint32_t weight_mb, uint32_t workspace_mb)` and the kernel boot
 > path passes `MODEL_MEM_WEIGHT_MB` / `MODEL_MEM_WORKSPACE_MB` from
-> `<kernel/include/config.h>`. Per-platform defaults select 2 GB /
+> `<kernel/include/config.h>`. Per-platform defaults select 1 GB /
 > 256 MB on Jetson, 512 MB / 256 MB on Pi 5, and the original 256 MB /
-> 128 MB on QEMU and x86-64. The 512 MB KV-cache sub-pool is still M5
-> work — it carves out of the existing workspace pool rather than
-> requiring a third top-level pool.
+> 128 MB on QEMU and x86-64. The 1 GB Jetson cap is the PMM buddy
+> max-order ceiling; bigger pools wait on the multi-block allocator
+> in #550. The 512 MB KV-cache sub-pool is still M5 work; today the
+> KV cache lives on the Rust heap.
 
 ---
 
