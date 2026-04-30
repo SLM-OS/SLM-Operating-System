@@ -32,9 +32,19 @@
  *
  * Usage:
  *   sudo ./gpu-kernel-mnist [--preserve-for-kexec]
+ *                           [--qmd-pool [--qmd-pool-slots N]]
  *                           [--timeout-secs N]
  *                           [--weights-dir PATH]
  *                           [--shader-dir PATH]
+ *
+ * --qmd-pool          Produce a v7 handoff with a per-dispatch QMD
+ *                     pool. SLM-OS authors fresh QMDs per launch
+ *                     into the pool instead of replaying the
+ *                     helper-baked chain (issue #558 fix). Implies
+ *                     --preserve-for-kexec; ignored without it.
+ *                     Default: off — produces v6 handoff.
+ * --qmd-pool-slots N  Pool slot count (default 1024 → 256 KiB).
+ *                     Range 8..65536. Implies --qmd-pool.
  */
 #include "gpu-launch-common.h"
 
@@ -98,19 +108,56 @@ struct mnist_op {
     uint32_t output_bytes;          /* actual output payload size */
     uint32_t sentinel_cell_idx;     /* element index into output for poll */
     uint32_t sentinel_bits;         /* expected fp32 bit pattern at that cell */
+
+    /* v7 dispatch inputs, captured at QMD-build time. Allow SLM-OS
+     * to author the QMD for this op per-launch (issue #558 fix)
+     * instead of replaying the helper-baked bytes. Populated only
+     * when --qmd-pool is requested; v6 producers ignore them. */
+    uint64_t v7_shader_gpu_va;
+    uint64_t v7_cbuf_gpu_va;
+    uint32_t v7_register_count_v;
+    uint32_t v7_grid_x, v7_grid_y, v7_grid_z;
+    uint32_t v7_block_x, v7_block_y, v7_block_z;
 };
+
+/* Record the v7 dispatch inputs alongside each helper-baked QMD.
+ * Drops in next to the existing `gpu_populate_qmd_at` /
+ * `gpu_qmd_set_bits` calls in each op block — values come from the
+ * same locals those calls already use. */
+#define MNIST_RECORD_V7(op_, shader_, gx_, gy_, gz_, bx_, by_, bz_)        \
+    do {                                                                    \
+        (op_)->v7_shader_gpu_va    = (shader_);                             \
+        (op_)->v7_cbuf_gpu_va      = (op_)->cbuf_page.gpu_va;               \
+        (op_)->v7_register_count_v = GPU_LAUNCH_REGISTER_COUNT_V_DEFAULT;   \
+        (op_)->v7_grid_x = (gx_); (op_)->v7_grid_y = (gy_); (op_)->v7_grid_z = (gz_); \
+        (op_)->v7_block_x = (bx_); (op_)->v7_block_y = (by_); (op_)->v7_block_z = (bz_); \
+    } while (0)
 
 int main(int argc, char **argv)
 {
     setbuf(stdout, NULL);
 
     bool preserve = false;
+    bool qmd_pool = false;
+    uint32_t qmd_pool_slots = 1024u;  /* default sized for SLM workloads */
     int timeout_secs = 900;
     const char *weights_dir = "./mnist-weights";
     const char *shader_dir  = ".";
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--preserve-for-kexec") == 0) {
             preserve = true;
+        } else if (strcmp(argv[i], "--qmd-pool") == 0) {
+            qmd_pool = true;
+        } else if (strcmp(argv[i], "--qmd-pool-slots") == 0 && i + 1 < argc) {
+            qmd_pool = true;
+            int n = atoi(argv[++i]);
+            if (n < 8 || n > 65536) {
+                fprintf(stderr,
+                        "[mnist] --qmd-pool-slots out of range "
+                        "(8..65536); got %d\n", n);
+                return 2;
+            }
+            qmd_pool_slots = (uint32_t)n;
         } else if (strcmp(argv[i], "--timeout-secs") == 0 && i + 1 < argc) {
             timeout_secs = atoi(argv[++i]);
             if (timeout_secs <= 0) timeout_secs = 900;
@@ -119,6 +166,14 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--shader-dir") == 0 && i + 1 < argc) {
             shader_dir = argv[++i];
         }
+    }
+    if (qmd_pool && !preserve) {
+        /* --qmd-pool only matters across kexec; no point allocating
+         * the pool if we're not handing off to SLM-OS. */
+        fprintf(stderr,
+                "[mnist] --qmd-pool requires --preserve-for-kexec — "
+                "ignoring\n");
+        qmd_pool = false;
     }
 
     struct sigaction sa = { .sa_handler = on_term };
@@ -277,6 +332,8 @@ int main(int argc, char **argv)
         gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_DEPTH_HI,
                          QMD_CTA_RASTER_DEPTH_LO, grid_z);
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
+        MNIST_RECORD_V7(op, conv_shader_gva,
+                        grid_x, grid_y, grid_z, 256u, 1u, 1u);
     }
 
     /* Op 1: Add+ReLU on Conv1 output. Shape 1×8×28×28. */
@@ -307,6 +364,8 @@ int main(int argc, char **argv)
         gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
                          QMD_CTA_RASTER_HEIGHT_LO, 8);
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
+        MNIST_RECORD_V7(op, addrelu_shader_gva,
+                        grid_x, 8u, 1u, 256u, 1u, 1u);
     }
 
     /* Op 2: MaxPool1. Shape 1×8×28×28 → 1×8×14×14. */
@@ -341,6 +400,8 @@ int main(int argc, char **argv)
         gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
                          QMD_CTA_RASTER_HEIGHT_LO, 8);
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
+        MNIST_RECORD_V7(op, pool_shader_gva,
+                        grid_x, 8u, 1u, 256u, 1u, 1u);
     }
 
     /* Op 3: Conv2. Shape 1×8×14×14, 16 out-ch. */
@@ -375,6 +436,8 @@ int main(int argc, char **argv)
         gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
                          QMD_CTA_RASTER_HEIGHT_LO, 16);
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
+        MNIST_RECORD_V7(op, conv_shader_gva,
+                        grid_x, 16u, 1u, 256u, 1u, 1u);
     }
 
     /* Op 4: Add+ReLU on Conv2 output. Shape 1×16×14×14. */
@@ -405,6 +468,8 @@ int main(int argc, char **argv)
         gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
                          QMD_CTA_RASTER_HEIGHT_LO, 16);
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
+        MNIST_RECORD_V7(op, addrelu_shader_gva,
+                        grid_x, 16u, 1u, 256u, 1u, 1u);
     }
 
     /* Op 5: MaxPool2. Shape 1×16×14×14 → 1×16×4×4. */
@@ -439,6 +504,8 @@ int main(int argc, char **argv)
         gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
                          QMD_CTA_RASTER_HEIGHT_LO, 16);
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
+        MNIST_RECORD_V7(op, pool_shader_gva,
+                        grid_x, 16u, 1u, 256u, 1u, 1u);
     }
 
     /* Op 6: GEMM. M=1, K=256, N=10. Reshape is free (pool2 output is
@@ -471,6 +538,8 @@ int main(int argc, char **argv)
         gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
                          QMD_CTA_RASTER_HEIGHT_LO, grid_y);
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
+        MNIST_RECORD_V7(op, gemm_shader_gva,
+                        grid_x, grid_y, 1u, 16u, 16u, 1u);
     }
 
     /* Op 7: AddBias on logits (no ReLU). Shape 1×10 treated as
@@ -501,6 +570,8 @@ int main(int argc, char **argv)
         gpu_qmd_set_bits(qmd, QMD_CTA_RASTER_HEIGHT_HI,
                          QMD_CTA_RASTER_HEIGHT_LO, 10);
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
+        MNIST_RECORD_V7(op, addrelu_shader_gva,
+                        1u, 10u, 1u, 256u, 1u, 1u);
     }
 
     /* Pre-zero every output buffer so the per-cell sentinel poll
@@ -618,8 +689,38 @@ int main(int argc, char **argv)
      * irrelevant to the dispatch loop. The full output is read
      * back by the launcher (or by SLM-OS shell `peek` commands) to
      * validate the activation values cell-for-cell. */
+    /* Build the per-op pipeline array. v6 path packs 8 ops into 24 B
+     * each = 192 B; v7 path packs into 80 B each = 640 B. Both fit
+     * comfortably in a 4 KB allocation. */
     struct gpu_buffer pipe_ops = gpu_alloc_buffer(&ctx, 4096, 4096);
-    {
+    if (qmd_pool) {
+        memset(pipe_ops.cpu_va, 0, pipe_ops.size_bytes);
+        struct ga10b_pipeline_op_v7 *p =
+            (struct ga10b_pipeline_op_v7 *)pipe_ops.cpu_va;
+        for (int i = 0; i < MNIST_OP_COUNT; i++) {
+            /* v6-compatible prefix — same offsets/values as before. */
+            p[i].qmd_gpu_va       = ops[i].qmd_page.gpu_va;
+            p[i].output_phys      = ops[i].output.phys +
+                                    ops[i].sentinel_cell_idx * 4u;
+            p[i].expected_payload = 0u;  /* any-nonzero mode */
+            p[i].flags            = 0;
+            /* v7 additions: QMD construction inputs captured during
+             * QMD-build via MNIST_RECORD_V7. */
+            p[i].shader_gpu_va    = ops[i].v7_shader_gpu_va;
+            p[i].cbuf_gpu_va      = ops[i].v7_cbuf_gpu_va;
+            p[i].register_count_v = ops[i].v7_register_count_v;
+            p[i].grid_x = ops[i].v7_grid_x;
+            p[i].grid_y = ops[i].v7_grid_y;
+            p[i].grid_z = ops[i].v7_grid_z;
+            p[i].block_x = ops[i].v7_block_x;
+            p[i].block_y = ops[i].v7_block_y;
+            p[i].block_z = ops[i].v7_block_z;
+            p[i].smem_size_bytes  = 0;
+            p[i].slm_size_bytes   = 0;
+            p[i].barrier_count    = 0;
+        }
+        msync(pipe_ops.cpu_va, pipe_ops.size_bytes, MS_SYNC);
+    } else {
         memset(pipe_ops.cpu_va, 0, pipe_ops.size_bytes);
         struct ga10b_pipeline_op *p =
             (struct ga10b_pipeline_op *)pipe_ops.cpu_va;
@@ -639,25 +740,55 @@ int main(int argc, char **argv)
         msync(ops[i].output.cpu_va, ops[i].output.size_bytes, MS_SYNC);
     }
 
+    /* When --qmd-pool was requested, allocate the 256-byte-slot
+     * scratch region SLM-OS will author fresh QMDs into per launch.
+     * Allocation goes through the same nvgpu register+map path as
+     * the per-buffer allocations above, so the SMMU/IOVMM behaviour
+     * is identical. */
+    if (qmd_pool) {
+        gpu_alloc_qmd_pool(&ctx, qmd_pool_slots);
+        printf("[mnist] QMD pool: %u slots × 256 B = %u KiB "
+               "(phys=0x%llx gpu_va=0x%llx)\n",
+               ctx.qmd_pool_n_slots,
+               ctx.qmd_pool_size_bytes / 1024u,
+               (unsigned long long)gpu_virt_to_phys(ctx.qmd_pool_va),
+               (unsigned long long)ctx.qmd_pool_gva);
+    }
+
     int handoff_dmabuf = gpu_nvmap_alloc_dmabuf(ctx.nvmap_fd, 4096, 4096);
     void *handoff_va = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                             MAP_SHARED, handoff_dmabuf, 0);
     if (handoff_va == MAP_FAILED) { perror("mmap handoff"); return 1; }
 
-    /* v6 handoff: SLM-OS can swap the input tensor at runtime via
-     * slm_gpu_set_mnist_input(). The input buffer is the one Op 0
-     * (Conv1) reads from — same `input.phys` we memcpy'd the
-     * synthetic input into above. SLM-OS overwrites it with whatever
-     * bytes the user supplies before each run_mnist() call. */
-    uint64_t handoff_phys = gpu_write_handoff_v6(&ctx, handoff_va,
-        ops[7].output.phys, ops[7].output.gpu_va,
-        ops[7].sentinel_bits,
-        MNIST_OP_COUNT, pipe_ops.phys,
-        input.phys, (uint32_t)(1u * 1u * 28u * 28u * 4u),
-        GA10B_PIPELINE_KIND_MNIST);
+    /* v6 vs v7 handoff. v7 carries the per-dispatch QMD pool
+     * descriptor + per-op QMD construction inputs so SLM-OS authors
+     * fresh QMDs per launch (issue #558 fix). v6 is the legacy path
+     * that replays helper-baked QMDs — kept default for safe
+     * rollback until v7 dispatch is verified on hardware. */
+    uint64_t handoff_phys;
+    uint32_t handoff_version;
+    if (qmd_pool) {
+        handoff_phys = gpu_write_handoff_v7(&ctx, handoff_va,
+            ops[7].output.phys, ops[7].output.gpu_va,
+            ops[7].sentinel_bits,
+            MNIST_OP_COUNT, pipe_ops.phys,
+            input.phys, (uint32_t)(1u * 1u * 28u * 28u * 4u),
+            GA10B_PIPELINE_KIND_MNIST);
+        handoff_version = 7;
+    } else {
+        handoff_phys = gpu_write_handoff_v6(&ctx, handoff_va,
+            ops[7].output.phys, ops[7].output.gpu_va,
+            ops[7].sentinel_bits,
+            MNIST_OP_COUNT, pipe_ops.phys,
+            input.phys, (uint32_t)(1u * 1u * 28u * 28u * 4u),
+            GA10B_PIPELINE_KIND_MNIST);
+        handoff_version = 6;
+    }
 
-    printf("[mnist] Handoff at phys 0x%llx (version=6, %d ops)\n",
-           (unsigned long long)handoff_phys, MNIST_OP_COUNT);
+    printf("[mnist] Handoff at phys 0x%llx (version=%u, %d ops)\n",
+           (unsigned long long)handoff_phys,
+           (unsigned)handoff_version,
+           MNIST_OP_COUNT);
     printf("[mnist]   pipeline_ops_phys=0x%llx\n",
            (unsigned long long)pipe_ops.phys);
     printf("[mnist]   input_buf_phys=0x%llx (%u bytes — runtime swap target)\n",
