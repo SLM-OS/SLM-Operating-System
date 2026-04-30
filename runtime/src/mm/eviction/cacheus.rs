@@ -49,9 +49,10 @@ use super::xgboost::XGBoostPolicy;
 /// for interactive demos without straining the heap.
 const TRAJECTORY_CAPACITY: usize = 128;
 
-extern "C" {
-    fn slm_get_time_ns() -> u64;
-}
+// Use the canonical declaration from kernel_ffi rather than a local
+// duplicate `extern "C"` block. Multiple declarations of the same C
+// symbol risk silent signature divergence on a future API change.
+use crate::kernel_ffi::slm_get_time_ns;
 
 /// Default expert-pool tuning from the sibling Phase 5 sweep.
 pub const CACHEUS_DEFAULT_LR: f32 = 0.4;

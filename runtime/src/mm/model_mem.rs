@@ -779,12 +779,16 @@ fn evict_and_retry(pool_id: u8) -> Result<ModelHandle, AllocError> {
             };
             // Free via the pool's free (handles refcount internally,
             // wipes tracking). We accept StaleHandle as a benign race
-            // and fall through to the retry.
-            let _ = pool.free(h);
-            pool.evictions_total = pool.evictions_total.saturating_add(1);
-
-            if let Some(t) = &mut *addr_of_mut!(EVICTED_CONTENT_TRACKER) {
-                t.record_eviction(content_key, victim.block_id, now);
+            // and fall through to the retry. Only count an eviction
+            // when the free actually reclaimed a slot — counting
+            // StaleHandle losses would skew the metric upward on
+            // every concurrent-touch race.
+            let freed = pool.free(h).is_ok();
+            if freed {
+                pool.evictions_total = pool.evictions_total.saturating_add(1);
+                if let Some(t) = &mut *addr_of_mut!(EVICTED_CONTENT_TRACKER) {
+                    t.record_eviction(content_key, victim.block_id, now);
+                }
             }
         }
     }

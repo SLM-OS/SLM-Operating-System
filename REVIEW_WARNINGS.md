@@ -343,43 +343,61 @@ Each finding is annotated with one of the following after disposition:
 
 ### runtime/src/mm/model_mem.rs
 - **lines 685-796** — `evict_and_retry` releases the lock between candidate snapshot (line 689-697), eviction selection (line 725), and the actual `pool.free` (line 768). A concurrent `touch()`/`free()` between snapshot and free is handled (`StaleHandle` ignored) but the retry path is single-shot — under contention the caller can spuriously see `OutOfMemory`. Add a bounded retry (say 4 attempts) or document the single-shot semantics.
+  - ⏸️ **Deferred** — Spurious `OutOfMemory` under contention is a benign caller-visible failure that already triggers the higher-level fallback in `evict_and_retry`'s caller. A bounded-retry loop is preventive; the documented "single-shot" semantic is the simpler correctness invariant.
 - **line 769** — `pool.evictions_total = pool.evictions_total.saturating_add(1)` is incremented even when the prior `pool.free(h)` returned `StaleHandle` (line 768 discards the result). Counter overcounts on benign races. Check the `free` result before bumping.
+  - ✅ **Fixed** — Capture `pool.free(h).is_ok()` and only bump `evictions_total` (and call `record_eviction`) when the free actually reclaimed a slot. StaleHandle losses no longer skew the metric upward.
 - **line 1109** — `snapshot_evictable_blocks` allocates a `Vec` while holding the spinlock. The `alloc::vec::Vec::push` can call into `LockedHeap`, which is a third lock domain — if the heap is contended with another CPU mid-allocation while this CPU holds the pool spinlock, latency spikes. Pre-size with `Vec::with_capacity(2 * MAX_BLOCKS_PER_POOL)` before taking the guard.
+  - ⏸️ **Deferred** — Latency-spike concern, not correctness. The cross-lock-domain risk is real but not currently triggered (single-CPU eviction is the common case). Pre-sizing requires plumbing capacity into the snapshot API.
 - **line 1117** — `for (pool_id, pool_ptr) in [(POOL_WEIGHT, addr_of_mut!(WEIGHT_POOL)), ...]` — creating the tuple-array allocates a small array on the stack, but the inner `&*pool_ptr` is still a transient `&MemoryPool` while another thread cannot acquire LOCK. Fine, but the unsafe block is large; split per-pool to narrow the SAFETY scope.
+  - ⏸️ **Deferred** — Style-level recommendation; current SAFETY comment already covers the LOCK-held discipline. Splitting would refactor a stable section of code without a concrete risk reduction.
 
 ### runtime/src/mm/eviction/store.rs
 - **line 89** — `static mut STORES: [KindStore; 3]` lacks an explicit `unsafe impl Sync`. Compiler accepts because access is via `addr_of_mut!`, but the soundness contract should be spelled out as in `model_mem.rs`.
+  - ⏸️ **Deferred** — `addr_of_mut!` access pattern matches the runtime CLAUDE.md `Locking → unsafe fn for raw-pointer escape hatches` guidance. Adding `unsafe impl Sync` would imply general Sync-soundness which is NOT the actual invariant — the LOCK-held discipline is. Explicit doc-comment cross-reference would be reasonable; not a defect today.
 - **lines 131-139** — `reset()` uses `&mut` indexing on the static via `(*stores)[0] = ...`. Same pattern as above — works only because the lock is held, but the `&mut` materialisation is not visible to readers.
+  - ⏸️ **Deferred** — Same reasoning as the line 89 entry; the LOCK-held discipline is the soundness contract. Refactoring to pure `addr_of_mut!` arithmetic at every assignment would be churn without a concrete bug.
 
 ### runtime/src/mm/eviction/registry.rs
 - **lines 215-236** — `set_eviction_policy` quietly installs the caller's policy into pool 0 only and forces pool 1 to the default. The doc-comment admits this is a workaround for the unclonable `Box<dyn>`. Callers reading the function name reasonably expect "set both". Rename to `set_weight_eviction_policy` or take two `Box<dyn>` arguments.
+  - ⏸️ **Deferred** — API rename touches every call-site (Rust + FFI consumers). Existing doc-comment records the workaround. A future Box<dyn>-clone solution makes a clean two-policy API natural; the rename now would create a deprecation cycle for marginal benefit.
 - **lines 312-334** — `select_victim` dereferences `candidates[0].pool_type` to dispatch but the docs claim "callers pre-filter by pool". If a caller ever mixes pools, blocks of the wrong pool are scored against the wrong policy. Add a `debug_assert!(candidates.iter().all(|c| c.pool_type == pool))` guard.
+  - ⏸️ **Deferred** — debug_assert addition is reasonable defensive coding; the documented contract is the load-bearing safety net today. Filing as a future-defense item.
 - **line 81-94** — The `slm_get_time_ns` extern is also declared in `kernel_ffi.rs` and `cacheus.rs`. Triple-declared FFI signatures will silently diverge. Funnel through `kernel_ffi::get_time_ns()`.
+  - ✅ **Fixed** — Removed the duplicate `extern "C"` declaration from `registry.rs` and `cacheus.rs`; both now `use crate::kernel_ffi::slm_get_time_ns;` so the canonical declaration in `kernel_ffi.rs` is the single point of truth. Future C-side signature changes will fail to compile in one place instead of silently disagreeing across three.
 
 ### runtime/src/mm/eviction/cacheus.rs
 - **line 113** — `1.0 / n as f32` — when `experts.is_empty()`, the `debug_assert!` on line 111 only fires in debug. In release, `n = 0` makes weights `[inf; 0]` (vec is empty so no value) — actually Vec is empty so safe, but there is no defensive path. Promote to `assert!`.
+  - ❌ **Not a defect** — Reviewer themselves note "Vec is empty so safe". The `1.0 / 0.0` computation only runs if `n > 0` (it's used to fill weights), so the only path through `experts.is_empty()` is the empty-Vec construction. Existing `debug_assert!` pins the contract for development; release-mode safety is by construction (empty Vec, no entries to fill with Inf). No change.
 - **line 281** — `let mut best_score = f32::MIN;` — if a single expert returns NaN for every candidate, no `s > best_score` succeeds and `best_idx` stays at 0. Fine for safety, but add a comment so future maintainers don't change it to `f32::NEG_INFINITY` and break the NaN-safe degenerate path.
+  - ⏸️ **Deferred** — Documentation enhancement only. The `f32::MIN` choice is defensive and the reviewer already calls it "fine for safety". A doc-comment would help; not blocking.
 
 ### runtime/src/mm/eviction/runtime_xgboost.rs
 - **lines 102-110** — `roots` and `nodes` are heap-allocated even though the maximum tree count is unbounded by a `u16`. Add a cap (say 1024 trees and 16K nodes) so a malicious blob cannot OOM the kernel via a 65535-tree header.
+  - ✅ **Fixed** — Added `MAX_TREES = 1024` and `MAX_NODES = 16_384` caps, plus two new `RuntimeXGBoostError` variants (`TooManyTrees`, `TooManyNodes`). A malicious blob declaring a 65535-tree × 65535-node model now fails parsing with a discrete error instead of allocating ~256 MB on the kernel heap. Caps cover practical XGBoost models for this scheduler (typically <= a few hundred trees).
 
 ### runtime/src/mm/eviction/runtime_mlp.rs
 - **lines 71-102** — `parse_payload` reads 4-byte floats via 4-byte reads; OK. But `parse_vec` doesn't bounds-check the cursor — the outer length check at line 85 covers it, but if `PAYLOAD_LEN_V1` is ever changed without `FLOAT_COUNT`, an out-of-bounds index panics in kernel context. Add `debug_assert!(*cursor + count*4 <= bytes.len())` at the top of `parse_vec`.
+  - ⏸️ **Deferred** — debug_assert addition is reasonable defensive coding; the existing `PAYLOAD_LEN_V1` constant is the load-bearing contract. Tied to the broader payload-validation pass.
 
 ### runtime/src/mm/eviction/blob.rs
 - **lines 68-79** — `read_u16_le`/`read_u32_le` index without bounds check; safe only because `parse_blob` checks `bytes.len() < HEADER_LEN` first. Add `#[inline]` and a debug-bound check or take a fixed-size array.
+  - ⏸️ **Deferred** — Same defensive-helper recommendation as runtime_mlp.rs. The caller-side bound is documented and load-bearing. Taking fixed-size arrays would touch every read site.
 
 ### runtime/src/mm/eviction/features.rs
 - **line 47** — `AI_HORIZON_NS = 1_000_000_000` is a magic constant — already a `pub const` with comment, so this is fine.
+  - ❌ **Not a defect** — Reviewer themselves agree: "already a pub const with comment, so this is fine." No code change.
 
 ### runtime/src/mm/eviction/slm_heuristic.rs
 - **lines 65-73** — `bump_active_global` uses `compare_exchange_weak` with `Relaxed`/`Relaxed`. Cross-CPU readers via `get_active` (line 79) use `Relaxed`. Acceptable per the comment ("observational"), but document that this is intentionally inconsistent vs the `model_mem.rs` `Acquire/Release`.
+  - ⏸️ **Deferred** — Existing comment already records "observational"; cross-file consistency note is a doc-only enhancement. Filing as a future style cleanup.
 
 ### runtime/src/mm/model_loader.rs
 - **line 130** — `From<AllocError> for LoadError` collapses every `AllocError` into `LoadError::AllocFailed` — losing the `StaleHandle`/`PmmFailed` distinction. Map per-variant.
+  - ✅ **Fixed** — Expanded `LoadError` with `AllocStaleHandle`, `AllocInvalidHandle`, `AllocInternal` variants and rewrote `From<AllocError>` to map each `AllocError` discriminant to its corresponding `LoadError`. Higher-level retry / fallback logic can now distinguish "real OOM" from "concurrent stale-handle race" instead of treating both as generic AllocFailed.
 
 ### runtime/src/mm/eviction/tracker.rs
 - **line 132** — `self.entries.iter().rposition` then `entries.remove(pos)` is O(n) on `VecDeque` because `remove` shifts. Capacity is 256 — fine, but document.
+  - ❌ **Not a defect** — Reviewer themselves agree: "Capacity is 256 — fine". A 256-element shift is microseconds; not a real issue. Documenting it as a doc-comment would be useful but not blocking.
 
 ---
 
