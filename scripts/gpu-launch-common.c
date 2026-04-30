@@ -880,3 +880,150 @@ uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
 
     return handoff_phys;
 }
+
+void gpu_alloc_qmd_pool(struct gpu_launch_ctx *ctx, uint32_t n_slots)
+{
+    if (n_slots == 0u) {
+        fprintf(stderr,
+                "gpu_alloc_qmd_pool: refusing zero-slot pool\n");
+        exit(1);
+    }
+
+    /* Free any prior pool — the helper may call us a second time
+     * (idempotent contract). dmabuf_fd 0 is unused (stdin in
+     * userspace; we only get nonzero fds from open). */
+    if (ctx->qmd_pool_va != NULL && ctx->qmd_pool_size_bytes > 0u) {
+        munmap(ctx->qmd_pool_va, ctx->qmd_pool_size_bytes);
+    }
+    if (ctx->qmd_pool_dmabuf > 0) {
+        close(ctx->qmd_pool_dmabuf);
+    }
+
+    /* Round to page so pagemap returns a sensible PFN. */
+    const uint32_t page_size = 4096u;
+    uint64_t bytes_u64 = (uint64_t)n_slots * 256u;
+    if (bytes_u64 > 0xFFFFFFFFull) {
+        fprintf(stderr,
+                "gpu_alloc_qmd_pool: pool size %llu B overflows uint32_t\n",
+                (unsigned long long)bytes_u64);
+        exit(1);
+    }
+    uint32_t rounded = ((uint32_t)bytes_u64 + page_size - 1u)
+                       & ~(page_size - 1u);
+
+    /* gpu_alloc_buffer handles dmabuf alloc + register + map + mmap
+     * + pagemap touch. Same path the existing per-buffer allocations
+     * use — staying on the established pattern keeps the SMMU /
+     * IOVMM behaviour identical to the helper-baked QMDs. */
+    struct gpu_buffer pool = gpu_alloc_buffer(ctx, rounded, page_size);
+
+    ctx->qmd_pool_dmabuf     = pool.dmabuf_fd;
+    ctx->qmd_pool_va         = pool.cpu_va;
+    ctx->qmd_pool_gva        = pool.gpu_va;
+    ctx->qmd_pool_size_bytes = rounded;
+    ctx->qmd_pool_n_slots    = rounded / 256u;
+
+    /* Pre-zero the pool so any slot the SLM-OS dispatch path picks
+     * up from a fresh handoff has known content. SLM-OS overwrites
+     * the slot bytes before each launch via ga10b_qmd_populate, but
+     * a defined initial state simplifies any post-hoc inspection
+     * (e.g. `peek` on the slot before the first dispatch). */
+    memset(ctx->qmd_pool_va, 0, ctx->qmd_pool_size_bytes);
+    msync(ctx->qmd_pool_va, ctx->qmd_pool_size_bytes, MS_SYNC);
+}
+
+uint64_t gpu_write_handoff_v7(const struct gpu_launch_ctx *ctx,
+                               void *handoff_va,
+                               uint64_t output_phys,
+                               uint64_t output_gpu_va,
+                               uint32_t expected_payload,
+                               uint32_t pipeline_n_ops,
+                               uint64_t pipeline_ops_phys,
+                               uint64_t input_buf_phys,
+                               uint32_t input_buf_size,
+                               uint32_t pipeline_kind)
+{
+    /* v7 requires a populated pool; refuse to produce a malformed
+     * handoff that SLM-OS would silently fall back from. */
+    if (ctx->qmd_pool_n_slots == 0u || ctx->qmd_pool_va == NULL) {
+        fprintf(stderr,
+                "gpu_write_handoff_v7: no QMD pool — call "
+                "gpu_alloc_qmd_pool first\n");
+        exit(1);
+    }
+
+    uint64_t qmd_pool_phys = gpu_virt_to_phys(ctx->qmd_pool_va);
+    if (qmd_pool_phys == 0u) {
+        fprintf(stderr,
+                "gpu_write_handoff_v7: pagemap returned 0 for QMD "
+                "pool — pool not faulted in?\n");
+        exit(1);
+    }
+
+    /* Same single-page invariant as v3..v6: handoff struct is < 4 KB
+     * and the wire format pins sizeof at exactly 256 B. */
+    memset(handoff_va, 0, 4096);
+    uint64_t handoff_phys = gpu_virt_to_phys(handoff_va);
+
+    uint64_t userd_phys  = gpu_virt_to_phys(ctx->userd_va);
+    uint64_t gpfifo_phys = gpu_virt_to_phys(ctx->gpfifo_va);
+    uint64_t pb_phys     = gpu_virt_to_phys(ctx->pb_va);
+
+    /* v7 = v6 + qmd_pool_* fields. v3 dispatch fields stay zeroed
+     * for the same reason as v5/v6: forces v7 consumers to use the
+     * v7 dispatch path even if pipeline_n_ops survives but other
+     * fields don't. */
+    struct ga10b_channel_handoff hoff = {
+        .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
+        .version            = 7,
+        .channel_id         = 0,
+        .tsg_id             = 0,
+        .userd_phys         = userd_phys,
+        .userd_gp_put_offset = GPU_LAUNCH_USERD_GP_PUT_WORD * 4u,
+        .userd_gp_get_offset = GPU_LAUNCH_USERD_GP_GET_WORD * 4u,
+        .gpfifo_phys        = gpfifo_phys,
+        .gpfifo_gpu_va      = ctx->gpfifo_gpu_va,
+        .gpfifo_entries     = ctx->gpfifo_entries,
+        .gpfifo_entry_size  = 8,
+        .pushbuf_phys       = pb_phys,
+        .pushbuf_gpu_va     = ctx->pb_gva,
+        .pushbuf_size       = 65536,
+        .semaphore_phys     = output_phys,
+        .semaphore_gpu_va   = output_gpu_va,
+        .inst_block_phys    = 0,
+        .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
+                                [GPU_LAUNCH_USERD_GP_PUT_WORD],
+        .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
+                                [GPU_LAUNCH_USERD_GP_GET_WORD],
+        .work_submit_token  = ctx->work_submit_token,
+        /* v3 dispatch fields zeroed — see v5/v6 comment. */
+        .shader_phys        = 0,
+        .shader_gpu_va      = 0,
+        .cbuf_phys          = 0,
+        .cbuf_gpu_va        = 0,
+        .qmd_phys           = 0,
+        .qmd_gpu_va         = 0,
+        .output_phys        = 0,
+        .output_gpu_va      = 0,
+        .shader_size        = 0,
+        .cbuf_size          = 0,
+        .expected_payload   = expected_payload,
+        /* v5 extension. */
+        .pipeline_n_ops     = pipeline_n_ops,
+        .pipeline_ops_phys  = pipeline_ops_phys,
+        /* v6 extension. */
+        .input_buf_phys     = input_buf_phys,
+        .input_buf_size     = input_buf_size,
+        /* PR-3 extension: pipeline-kind discriminator. */
+        .pipeline_kind      = pipeline_kind,
+        /* v7 extension: per-dispatch QMD pool descriptor. */
+        .qmd_pool_phys      = qmd_pool_phys,
+        .qmd_pool_gpu_va    = ctx->qmd_pool_gva,
+        .qmd_pool_size_bytes = ctx->qmd_pool_size_bytes,
+        .qmd_pool_n_slots   = ctx->qmd_pool_n_slots,
+    };
+    memcpy(handoff_va, &hoff, sizeof(hoff));
+    msync(handoff_va, 4096, MS_SYNC);
+
+    return handoff_phys;
+}

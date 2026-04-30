@@ -207,6 +207,22 @@ struct gpu_launch_ctx {
 
     /* Doorbell page (mmap of the ctrl fd). */
     void *doorbell_page;
+
+    /* Optional QMD pool for v7 handoff (per-dispatch QMD construction,
+     * issue #558 fix). Zero / NULL when the helper has not called
+     * `gpu_alloc_qmd_pool` — in that case the helper produces v6
+     * handoffs unchanged. When non-zero, the SLM-OS dispatch path
+     * authors fresh QMDs into this region per-launch instead of
+     * replaying the helper-baked QMDs. See
+     * docs/gpu-qmd-per-dispatch-plan.md.
+     *
+     * The pool is N × 256 B; SLM-OS rotates through slots
+     * round-robin so consecutive launches use distinct GPU VAs. */
+    int       qmd_pool_dmabuf;
+    void     *qmd_pool_va;          /* CPU mapping (pagemap → phys) */
+    uint64_t  qmd_pool_gva;         /* GPU VA via NVGPU_AS_IOCTL_MAP */
+    uint32_t  qmd_pool_size_bytes;  /* total pool size, multiple of 256 */
+    uint32_t  qmd_pool_n_slots;     /* qmd_pool_size_bytes / 256 */
 };
 
 /* Per-kernel extra buffer (for inputs/outputs beyond the common
@@ -397,6 +413,46 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
  * SLM-OS's handoff scanner branches on this when there are multiple
  * handoffs of different kinds in DRAM. */
 uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
+                               void *handoff_va,
+                               uint64_t output_phys,
+                               uint64_t output_gpu_va,
+                               uint32_t expected_payload,
+                               uint32_t pipeline_n_ops,
+                               uint64_t pipeline_ops_phys,
+                               uint64_t input_buf_phys,
+                               uint32_t input_buf_size,
+                               uint32_t pipeline_kind);
+
+/* Allocate, register, and GMMU-map an N-slot QMD pool. Each slot is
+ * exactly 256 bytes (= GA10B QMDV03_00 size). Stores the pool's
+ * dmabuf fd, CPU VA, GPU VA, and size into ctx->qmd_pool_*.
+ * Idempotent: subsequent calls free the prior pool first.
+ *
+ * Recommended sizing for SLM workloads: 1024 slots → 256 KiB. Trivial
+ * cost relative to the channel's other allocations and amortises
+ * across all dispatches.
+ *
+ * Pool is sized + mapped at channel-bringup time only. SLM-OS reads
+ * its own next-slot counter and writes one QMD per launch into the
+ * appropriate slot via cache_clean — no coordination with the helper
+ * after kexec.
+ *
+ * Dies on any ioctl / mmap failure. */
+void gpu_alloc_qmd_pool(struct gpu_launch_ctx *ctx, uint32_t n_slots);
+
+/* v7 handoff: v6 + per-dispatch QMD pool + per-op QMD construction
+ * inputs. Caller is responsible for:
+ *   - having called `gpu_alloc_qmd_pool` so `ctx->qmd_pool_*` are
+ *     populated. Failing that, this writer aborts.
+ *   - allocating a `struct ga10b_pipeline_op_v7[]` array (80 B per
+ *     op) and passing `pipeline_ops_phys` pointing at it. The v7 op
+ *     layout is defined in kernel/gpu/nvidia/ga10b_channel_handoff.h.
+ *
+ * Wire format pinned by the kernel-side `_Static_assert`s; any
+ * struct change there breaks both producer and consumer at compile
+ * time. v6 handoff producers continue to work unchanged — v7 is
+ * additive. */
+uint64_t gpu_write_handoff_v7(const struct gpu_launch_ctx *ctx,
                                void *handoff_va,
                                uint64_t output_phys,
                                uint64_t output_gpu_va,
