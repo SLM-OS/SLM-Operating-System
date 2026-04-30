@@ -111,10 +111,20 @@ _Static_assert((MODEL_MEM_WEIGHT_MB    % 2u) == 0u,
                "MODEL_MEM_WEIGHT_MB must be a multiple of 2 (pool block = 2 MB)");
 _Static_assert((MODEL_MEM_WORKSPACE_MB % 2u) == 0u,
                "MODEL_MEM_WORKSPACE_MB must be a multiple of 2 (pool block = 2 MB)");
+/* The 1024 MB cap below is two ceilings stacked:
+ *   1. PMM buddy max-order (18 = 1 GiB, see kernel/CLAUDE.md
+ *      §"Buddy Allocator") rejects single-block allocations larger
+ *      than 1 GiB.
+ *   2. The Rust pool's `MAX_BLOCKS_PER_POOL = 512` in
+ *      `runtime/src/mm/model_mem.rs` makes 512 × 2 MB = 1 GiB the
+ *      effective per-pool cap. `model_mem_init` returns
+ *      `AllocError::Oversized` if either request exceeds this.
+ * Bumping this assert above 1024 requires bumping BOTH ceilings —
+ * #550 tracks the multi-block PMM follow-up. */
 _Static_assert(MODEL_MEM_WEIGHT_MB    <= 1024u,
-               "MODEL_MEM_WEIGHT_MB cannot exceed 1024 (PMM buddy max-order = 1 GiB; see #578)");
+               "MODEL_MEM_WEIGHT_MB cannot exceed 1024 (PMM buddy + MAX_BLOCKS_PER_POOL ceiling; see #578)");
 _Static_assert(MODEL_MEM_WORKSPACE_MB <= 1024u,
-               "MODEL_MEM_WORKSPACE_MB cannot exceed 1024 (PMM buddy max-order = 1 GiB; see #578)");
+               "MODEL_MEM_WORKSPACE_MB cannot exceed 1024 (PMM buddy + MAX_BLOCKS_PER_POOL ceiling; see #578)");
 
 /* ============================================================================
  * Rust heap — sized by SLM working-set demand
@@ -146,5 +156,12 @@ _Static_assert(MODEL_MEM_WORKSPACE_MB <= 1024u,
 #endif
 
 _Static_assert(RUST_HEAP_MB > 0u, "RUST_HEAP_MB must be positive");
+/* 4 GiB upper bound mirrors the realistic per-platform RAM ceiling
+ * (Jetson 8 GB, Pi 5 8 GB, x86-64 16 GB) — anything larger almost
+ * certainly indicates a typo (e.g. RUST_HEAP_MB 12800 instead of
+ * 128) and would also overflow the `unsigned int` arithmetic in
+ * `kernel/src/main.c::pmm_alloc_pages` callers if the size_t casts
+ * were ever stripped. */
+_Static_assert(RUST_HEAP_MB <= 4096u, "RUST_HEAP_MB cannot exceed 4096 (4 GiB sanity ceiling)");
 
 #endif /* CONFIG_H */

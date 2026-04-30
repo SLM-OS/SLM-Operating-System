@@ -221,6 +221,14 @@ int slm_msg_recv(uint32_t queue_id, void *msg, size_t msg_size, int timeout_ms);
 extern void rust_heap_init(void *heap_start, size_t heap_size);
 
 /*
+ * Return the heap size (bytes) passed to the most recent
+ * rust_heap_init. 0 means rust_heap_init has not been called yet.
+ * Used by kernel/tests/test_model_mem_smoke.c to assert that the
+ * per-platform RUST_HEAP_MB knob was honored end-to-end.
+ */
+extern size_t rust_heap_size_bytes(void);
+
+/*
  * Initialize Rust runtime.
  * Called by C kernel during boot.
  * Returns: 42 on success (magic number for verification)

@@ -19,13 +19,18 @@ pub const BLOCK_SIZE: usize = 2 * 1024 * 1024;
 
 /// Maximum blocks per pool (16-bit index in handle).
 ///
-/// At `BLOCK_SIZE = 2 MB` this is also the per-pool size cap in MB —
-/// `model_mem_init(weight_mb, workspace_mb)` silently truncates the
-/// requested pool size to `MAX_BLOCKS_PER_POOL × BLOCK_SIZE`. Sized
-/// for Jetson's `MODEL_MEM_WEIGHT_MB = 1024` so the requested 1 GB
-/// is fully addressable; smaller platforms (Pi 5 512, QEMU 256) fit
-/// comfortably below the cap. Each `BlockSlot` is ~48 B, so the BSS
-/// footprint is `2 pools × 512 slots × 48 B ≈ 48 KB`.
+/// At `BLOCK_SIZE = 2 MB` this is also the per-pool size cap in MB.
+/// `model_mem_init(weight_mb, workspace_mb)` returns
+/// `AllocError::Oversized` when either request exceeds
+/// `MAX_BLOCKS_PER_POOL × BLOCK_SIZE`, so a future bump of the
+/// C-side `MODEL_MEM_WEIGHT_MB` past 1024 fails loudly until this
+/// constant is bumped in lockstep (see the `_Static_assert` block in
+/// `kernel/include/config.h`).
+///
+/// Sized for Jetson's `MODEL_MEM_WEIGHT_MB = 1024` so the requested
+/// 1 GB is fully addressable; smaller platforms (Pi 5 512, QEMU 256)
+/// fit comfortably below the cap. Each `BlockSlot` is ~48 B, so the
+/// BSS footprint is `2 pools × 512 slots × 48 B ≈ 48 KB`.
 const MAX_BLOCKS_PER_POOL: usize = 512;
 
 /// Pool identifiers
@@ -51,6 +56,12 @@ pub enum AllocError {
     NotInitialized,
     /// Allocation failed in underlying PMM.
     PmmFailed,
+    /// Requested pool size exceeds the static `MAX_BLOCKS_PER_POOL`
+    /// cap. Surfaced from `model_mem_init` so a caller asking for
+    /// (e.g.) 2 GB never quietly gets 1 GB. Bumping the C-side
+    /// `MODEL_MEM_WEIGHT_MB` past `MAX_BLOCKS_PER_POOL × BLOCK_SIZE`
+    /// requires bumping `MAX_BLOCKS_PER_POOL` in lockstep.
+    Oversized,
 }
 
 // =============================================================================
@@ -204,6 +215,13 @@ impl MemoryPool {
     }
 
     /// Initialize pool with given base address and block count.
+    ///
+    /// Caller must ensure `count <= MAX_BLOCKS_PER_POOL`;
+    /// `model_mem_init` enforces this and returns
+    /// `AllocError::Oversized` otherwise. The `min` here is a
+    /// belt-and-braces guard for direct callers (currently none in
+    /// production); it keeps the array index sound but masks bugs,
+    /// so prefer the upstream check.
     fn init(&mut self, base: usize, count: usize, read_only: bool) {
         self.base_addr = base;
         self.block_count = count.min(MAX_BLOCKS_PER_POOL);
@@ -571,7 +589,13 @@ fn is_initialized() -> bool {
 /// * `workspace_mb` - Size of workspace pool in megabytes (must be multiple of 2)
 ///
 /// # Errors
-/// Returns `AllocError::PmmFailed` if PMM allocation fails.
+/// * `AllocError::AlignmentError` — `weight_mb` or `workspace_mb` is not
+///   a multiple of 2 (the pool block size in MB).
+/// * `AllocError::Oversized` — either pool would exceed
+///   `MAX_BLOCKS_PER_POOL × BLOCK_SIZE`. Surface a loud error rather
+///   than silently truncate; callers must keep the C-side
+///   `MODEL_MEM_*_MB` knobs in lockstep with `MAX_BLOCKS_PER_POOL`.
+/// * `AllocError::PmmFailed` — underlying PMM allocation failed.
 pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), AllocError> {
     // Validate sizes are 2MB aligned
     if weight_mb % 2 != 0 || workspace_mb % 2 != 0 {
@@ -580,6 +604,13 @@ pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), Alloc
 
     let weight_blocks = weight_mb / 2;
     let workspace_blocks = workspace_mb / 2;
+
+    // Reject oversized requests up front, before touching PMM. The
+    // pool's `init` would otherwise silently `count.min(MAX)` and
+    // give back a smaller pool than the caller asked for.
+    if weight_blocks > MAX_BLOCKS_PER_POOL || workspace_blocks > MAX_BLOCKS_PER_POOL {
+        return Err(AllocError::Oversized);
+    }
 
     // Allocate weight pool (power-of-2 pages work well with buddy allocator)
     // 256 MB = 65536 pages = order 16, exactly power of 2

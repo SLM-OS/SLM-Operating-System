@@ -476,13 +476,17 @@ void kernel_main(void *dtb)
 
     /* Allocate heap for Rust. RUST_HEAP_MB is per-platform in
      * <config.h> — sized by SLM forward-path demand (KV cache +
-     * ForwardScratch); see the comment block there. */
-    const size_t rust_heap_pages = (size_t)RUST_HEAP_MB * 256u; /* 256 pages = 1 MB */
+     * ForwardScratch); see the comment block there. Both multiplies
+     * are size_t-promoted explicitly so a hypothetical >4 GB heap
+     * (RUST_HEAP_MB > 4096) cannot wrap unsigned int before the
+     * promotion. The compile-time assert in <config.h> caps
+     * RUST_HEAP_MB well below that, but the cast is cheap insurance. */
+    const size_t rust_heap_pages = (size_t)RUST_HEAP_MB * (size_t)256; /* 256 pages = 1 MB */
     void *rust_heap = pmm_alloc_pages(rust_heap_pages);
     if (!rust_heap) {
         panic("Failed to allocate Rust heap (%u MB requested)", RUST_HEAP_MB);
     }
-    rust_heap_init(rust_heap, rust_heap_pages * 4096u);
+    rust_heap_init(rust_heap, rust_heap_pages * (size_t)4096);
     INFO("  Rust heap: %p (%u MB)", rust_heap, RUST_HEAP_MB);
 
     /* Call Rust init and verify */
