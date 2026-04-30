@@ -626,10 +626,17 @@ extern "C" {
 ///     QEMU q35 only gets 256 MB total, of which the kernel + buddy
 ///     allocator already eat a large chunk; a 256+128 MB request hits
 ///     `PMM allocation failed` and leaves the model_mem allocator
-///     uninitialized. Subsequent `eviction demo` calls then exercise
-///     uninitialized state and corrupt the Rust heap.
+///     uninitialized. Subsequent `rust_model_alloc_weights` calls then
+///     silently return null handles, and tests that don't check the
+///     init status (e.g. `eviction demo`) silently no-op — the
+///     failure is invisible without the smoke test in
+///     `kernel/tests/test_model_mem_smoke.c`.
 #[no_mangle]
 pub extern "C" fn rust_model_mem_init() -> i32 {
+    // 64 + 32 = 96 MB. Leaves ~150 MB on x86-64 QEMU for the kernel
+    // image, PMM metadata, Rust heap, and lwip after `pmm_init`.
+    // Both values must stay multiples of 2 (the pool block size).
+    // See docs/model-memory.md §"Pool Sizing" before raising.
     #[cfg(target_arch = "x86_64")]
     let (weight_mb, workspace_mb): (usize, usize) = (64, 32);
     #[cfg(not(target_arch = "x86_64"))]

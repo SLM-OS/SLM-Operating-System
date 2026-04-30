@@ -32,7 +32,13 @@
 
 /* Mirror the Rust ModelHandle layout (kept private in Rust; replicated
  * here so this test can call alloc/free without a public C header).
- * Same shape as test_model_mem.c's local copy. */
+ *
+ * `kernel/tests/test_model_mem.c` has the same struct under the name
+ * `ModelHandle`. The two copies are kept independent on purpose —
+ * since this smoke suite runs FIRST, a layout drift fails here
+ * before the larger model_mem suite runs, surfacing one clean
+ * regression instead of cascading symbol-shape errors. If a third
+ * caller appears, factor a shared `kernel/tests/_model_handle_priv.h`. */
 typedef struct {
     uint16_t block_index;
     uint8_t  pool_id;
