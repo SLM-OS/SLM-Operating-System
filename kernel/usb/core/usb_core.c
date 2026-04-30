@@ -16,6 +16,7 @@
 #include "usb.h"
 #include "debug.h"
 #include "ncmem.h"
+#include "smp.h"
 #include "timer.h"
 #include <string.h>
 
@@ -330,6 +331,14 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub);
 
 void usb_core_register_hcd(const struct usb_hcd *hcd)
 {
+    /* Enforce the primary-CPU-only invariant from the file-level
+     * comment block. Phase 1 is single-HCD, single-writer, called
+     * from boot init on CPU 0 before secondaries start. A secondary
+     * calling this would race on `active_hcd` (no lock here) and
+     * confuse the rest of the USB stack. ASSERT loudly so a
+     * future hot-plug refactor is forced to add proper locking. */
+    ASSERT(cpu_id() == 0);
+
     /* Re-registering the same HCD is a no-op (test suites do this on
      * every fixture reset) — skip the warning to keep the log clean.
      * Registering NULL is the documented way to clear the slot, also

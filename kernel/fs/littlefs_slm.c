@@ -98,6 +98,13 @@ static void lfs_memset(void *dst, int val, size_t n)
 
 static void lfs_strcpy(char *dst, const char *src, size_t max)
 {
+    /* Guard against max == 0: `max - 1` would underflow to SIZE_MAX
+     * and the loop would run for 4 GB iterations writing past the
+     * (zero-byte) buffer. Today every caller passes
+     * `sizeof(info->name)` which is non-zero, but the bug is latent. */
+    if (max == 0) {
+        return;
+    }
     size_t i = 0;
     while (i < max - 1 && src[i]) {
         dst[i] = src[i];
@@ -408,7 +415,18 @@ int littlefs_format(struct blkdev *dev)
     struct lfs_config config;
     lfs_t lfs;
 
-    /* Static buffers for format operation */
+    /* Static buffers for format operation.
+     *
+     * INVARIANT: littlefs_format MUST be called single-threaded. The
+     * static buffers are file-scope storage shared across every
+     * invocation, so concurrent callers (or a call against a
+     * different device while another mount is running) would race
+     * on these buffers and corrupt either format. Today every caller
+     * runs from boot media bring-up on CPU 0 before secondaries are
+     * online, which satisfies the invariant. If a future hot-format
+     * path is added (e.g. from a shell command, or a runtime device
+     * insert), promote these to per-call stack/heap allocations or
+     * gate the entire function with a single-caller spinlock. */
     static uint8_t read_buf[LFS_SLM_CACHE_SIZE];
     static uint8_t prog_buf[LFS_SLM_CACHE_SIZE];
     static uint8_t lookahead_buf[LFS_SLM_LOOKAHEAD_SIZE];
