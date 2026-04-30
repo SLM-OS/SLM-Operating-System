@@ -185,18 +185,55 @@ volatile uint32_t cpus_online = 1;
 #define AP_TRAMPOLINE_BASE  0x8000
 #define AP_PARAMS_OFF       0xF00
 
+/*
+ * The struct below is descriptive only — boot_ap() writes each field
+ * via a direct offset cast (`*(volatile uint64_t *)(params_base + 0x1C)
+ * = stack_top` etc.) rather than through a struct pointer, because the
+ * trampoline page is allocated as raw physical memory at
+ * AP_TRAMPOLINE_BASE and re-cast for type-punning. Keep this struct
+ * in sync with `ap_trampoline.S` and the offsets used in `boot_ap`.
+ *
+ * Layout under `__packed` (no compiler padding):
+ *   +0x00 cr3         u64
+ *   +0x08 gdt_limit   u16
+ *   +0x0A gdt_base    u64
+ *   +0x12 idt_limit   u16
+ *   +0x14 idt_base    u64
+ *   +0x1C stack       u64
+ *   +0x24 cpu_id      u32
+ *   +0x28 entry       u64
+ *   +0x30 flag        u32
+ */
 struct ap_boot_params {
     uint64_t cr3;           /* +0x00: PML4 physical address */
     uint16_t gdt_limit;     /* +0x08: GDT limit */
-    uint64_t gdt_base;      /* +0x0A: GDT base (note: packed, offset 0x0A not 0x10) */
+    uint64_t gdt_base;      /* +0x0A: GDT base (packed: offset 0x0A, not 0x10) */
     uint16_t idt_limit;     /* +0x12: IDT limit */
     uint64_t idt_base;      /* +0x14: IDT base */
-    uint32_t _pad;          /* +0x1C: alignment */
-    uint64_t stack;         /* +0x1C: per-CPU stack top (overwrites _pad at correct offset) */
+    uint64_t stack;         /* +0x1C: per-CPU stack top */
     uint32_t cpu_id;        /* +0x24: logical CPU ID */
     uint64_t entry;         /* +0x28: 64-bit entry point */
     volatile uint32_t flag; /* +0x30: AP sets to 1 when running */
 } __attribute__((packed));
+
+_Static_assert(offsetof(struct ap_boot_params, cr3) == 0x00,
+               "ap_boot_params: cr3 must be at +0x00");
+_Static_assert(offsetof(struct ap_boot_params, gdt_limit) == 0x08,
+               "ap_boot_params: gdt_limit must be at +0x08");
+_Static_assert(offsetof(struct ap_boot_params, gdt_base) == 0x0A,
+               "ap_boot_params: gdt_base must be at +0x0A");
+_Static_assert(offsetof(struct ap_boot_params, idt_limit) == 0x12,
+               "ap_boot_params: idt_limit must be at +0x12");
+_Static_assert(offsetof(struct ap_boot_params, idt_base) == 0x14,
+               "ap_boot_params: idt_base must be at +0x14");
+_Static_assert(offsetof(struct ap_boot_params, stack) == 0x1C,
+               "ap_boot_params: stack must be at +0x1C (matches boot_ap)");
+_Static_assert(offsetof(struct ap_boot_params, cpu_id) == 0x24,
+               "ap_boot_params: cpu_id must be at +0x24");
+_Static_assert(offsetof(struct ap_boot_params, entry) == 0x28,
+               "ap_boot_params: entry must be at +0x28");
+_Static_assert(offsetof(struct ap_boot_params, flag) == 0x30,
+               "ap_boot_params: flag must be at +0x30");
 
 /* Per-CPU stack size: 16 KB */
 #define AP_STACK_SIZE  (16384)
@@ -328,7 +365,14 @@ static int boot_ap(uint32_t logical_cpu_id, uint8_t apic_id)
     lapic_send_ipi(apic_id, 0, ICR_INIT | ICR_LEVEL_DEASSERT);
     delay_ms(10);
 
-    /* Send first SIPI — vector = page number of trampoline (0x8000 / 4096 = 8) */
+    /* Send first SIPI — vector = page number of trampoline (0x8000 / 4096 = 8).
+     * Intel SDM Vol 3A §10.6.2 requires SIPI vector to encode a page in
+     * the first 1 MB; pin that here so a future move of
+     * AP_TRAMPOLINE_BASE above 1 MB fails the build instead of
+     * silently truncating to a 0xFF mask. */
+    _Static_assert(AP_TRAMPOLINE_BASE <= 0xFF000UL,
+                   "AP_TRAMPOLINE_BASE must fit in the SIPI vector "
+                   "(<=0xFF000 == sub-1MB, 4 KB-aligned)");
     uint8_t sipi_vector = AP_TRAMPOLINE_BASE >> 12;
     lapic_send_ipi(apic_id, sipi_vector, ICR_SIPI);
     delay_ms(1);
@@ -536,7 +580,18 @@ void vmm_init(void)
     uart_printf("[VMM] Detected RAM end: 0x%lx (%lu GB)\n", ram_end, gb_needed);
 
     /* trampoline32.S already mapped 0-4GB (PDPT[0..3] → PD[0..3]).
-     * Extend PDPT[4..N] → PD[4..N] for RAM above 4GB. */
+     * Extend PDPT[4..N] → PD[4..N] for RAM above 4GB.
+     *
+     * Single-socket assumption. The CR3 reload below flushes THIS
+     * CPU's TLB, but a peer CPU on another socket could still hold
+     * stale `pdpt[i]` / `pd_page[j]` translations cached from
+     * before these stores. SLM-OS today only boots SMP within a
+     * single socket via LAPIC IPIs to local APIC IDs, so this is
+     * fine. A future multi-socket / multi-CPU-package SMP path
+     * needs a TLB shoot-down IPI here (see Linux's
+     * flush_tlb_others). The writes themselves are made through
+     * the cacheable identity map, so MESI handles cache visibility
+     * — the gap is purely TLB-side. */
     if (gb_needed > 4) {
         for (uint64_t i = 4; i < gb_needed; i++) {
             /* Point PDPT[i] at PD[i] (each PD is 4096 bytes apart) */

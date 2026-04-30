@@ -136,7 +136,17 @@ _start:
     cmp %ecx, %eax
     je halt32
 
-    /* Check long mode support */
+    /* Check long mode support.
+     *
+     * Pathological VM case: a misbehaving virtualizer could pass the
+     * `cmp $0x80000001, %eax; jb halt32` check (returns >= 0x80000001
+     * in eax for the extended-leaf max) but then return garbage in
+     * EDX for leaf 0x80000001. If bit 29 happens to be set in that
+     * garbage we proceed into long-mode setup, write CR0.PG, and
+     * jump to %cs:%eip in long mode — which immediately #UDs on a
+     * non-LM-capable CPU. There is no way to defend further from
+     * here without an out-of-band oracle. Real hardware reports the
+     * LM bit truthfully; QEMU/KVM/Hyper-V do too. Accepted risk. */
     mov $0x80000000, %eax
     cpuid
     cmp $0x80000001, %eax

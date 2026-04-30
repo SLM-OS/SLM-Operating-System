@@ -22,6 +22,17 @@
  * 3. Returns to caller (which must be identity-mapped)
  *
  * IMPORTANT: The caller must ensure identity mapping exists for this code.
+ *
+ * PRECONDITION — pre-SMP only. Every TLBI/IC sequence below uses
+ * `dsb nsh` (Non-shareable) which only synchronizes against THIS
+ * core's page table walker. That is correct here because the only
+ * caller, vmm_init, runs on the primary CPU before secondary CPUs
+ * are brought up. If this function is ever reused for a runtime
+ * remap (NC region change, kexec teardown, etc.) the `dsb nsh` is
+ * insufficient — secondaries may continue to walk through their
+ * own TLBs caching the previous translations. A reuse path would
+ * need to upgrade to `dsb ish` and ensure all secondaries are
+ * quiesced or running through the same broadcast invalidate.
  */
 .global mmu_enable
 .type mmu_enable, @function

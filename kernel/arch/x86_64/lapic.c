@@ -291,9 +291,18 @@ void lapic_send_ipi(uint32_t apic_id, uint32_t vector, uint32_t flags)
     /* Write vector + flags to ICR low (this triggers the IPI) */
     lapic_write(LAPIC_ICR_LO, vector | flags);
 
-    /* Wait for delivery (poll bit 12 = Send Pending) */
-    while (lapic_read(LAPIC_ICR_LO) & (1 << 12))
-        ;
+    /* Wait for delivery (poll bit 12 = Send Pending) — bound on TSC
+     * so a wedged LAPIC (e.g. after #MC) can't hang the kernel here.
+     * 100 ms at any plausible CPU frequency is several orders of
+     * magnitude over the worst-case IPI latency, so a real exit
+     * via this path means the LAPIC is genuinely broken. */
+    uint64_t deadline_tsc = __builtin_ia32_rdtsc() + 100ULL * 1000 * 1000 * 3;
+    while (lapic_read(LAPIC_ICR_LO) & (1 << 12)) {
+        if (__builtin_ia32_rdtsc() >= deadline_tsc) {
+            /* Give up silently — caller has no good recovery path. */
+            return;
+        }
+    }
 }
 
 /* ---- LAPIC Timer ---- */

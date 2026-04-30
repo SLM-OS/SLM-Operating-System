@@ -108,6 +108,13 @@ struct cpu_context {
     /* Interrupt state — preserved across context switches */
     uint64_t daif;      /* DAIF register (interrupt mask state) */
 };
+
+/* Pin offsets that kernel/arch/arm64/context.S uses as `CTX_DAIF`
+ * literals. If a future field is appended without updating the
+ * matching .S defines, the assembly would read garbage on restore.
+ * Crash early at compile time instead. */
+_Static_assert(offsetof(struct cpu_context, daif) == 0x280,
+               "CTX_DAIF in arm64/context.S expects daif at offset 0x280");
 #endif /* PLATFORM_X86_64 */
 
 /* Task cleanup callback (called when task is destroyed) */
