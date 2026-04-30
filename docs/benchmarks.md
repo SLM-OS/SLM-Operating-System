@@ -112,7 +112,7 @@ Task dispatch latency with deadline boost (priority escalation for urgent tasks)
 | Free | 3,792,604 KB (3.6 GB) |
 | Model weight pool | 256 MB (128 x 2 MB blocks) |
 | Model workspace pool | 128 MB (64 x 2 MB blocks) |
-| Rust heap | 1 MB |
+| Rust heap | 64 MB (Pi 5; per-platform via `RUST_HEAP_MB` in `<config.h>`) |
 | RAM disk (LittleFS) | 1 MB |
 
 ---
@@ -204,7 +204,7 @@ QEMU numbers vary between runs due to host load and emulation non-determinism. P
 | Kernel code + data | ~1 MB |
 | PMM heap | 4,076 MB (of 4 GB RAM) |
 | NC shared memory | 2 MB |
-| Rust heap | 1 MB |
+| Rust heap | 64 MB (Pi 5; per-platform via `RUST_HEAP_MB` in `<config.h>`) |
 | Model pools | 384 MB |
 | RAM disk (LittleFS) | 1 MB |
 | Task stacks | 16 KB each (max 32 tasks) |
