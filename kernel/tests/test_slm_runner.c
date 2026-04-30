@@ -199,6 +199,164 @@ static void test_slm_runner_publishes_done_after_empty_prompt(void)
 }
 
 /* ============================================================================
+ * Direct FFI tests
+ *
+ * The runner-component tests above reach the rust_slm_prompt /
+ * rust_slm_stop / rust_slm_session_reset / rust_slm_stats FFI
+ * functions transitively through `slm_runner_handle_prompt`. The
+ * tests below pin the FFI signatures themselves (callback typedef,
+ * return-value contract, NULL-arg behavior) so a Rust-side type drift
+ * surfaces here instead of at first hardware run.
+ * ============================================================================ */
+
+/* Token callback that records invocation counts + the last token id
+ * it was handed. All four counters live in a struct so a single
+ * static instance threads through the test cases without globals. */
+typedef struct {
+    uint32_t calls;
+    uint32_t last_token_id;
+    uint8_t  last_byte;
+} TokenCbState;
+
+static int32_t direct_token_cb(void *user, uint32_t token_id,
+                               const uint8_t *bytes, size_t bytes_len)
+{
+    TokenCbState *st = (TokenCbState *)user;
+    if (st) {
+        st->calls += 1;
+        st->last_token_id = token_id;
+        if (bytes && bytes_len > 0) {
+            st->last_byte = bytes[0];
+        }
+    }
+    return 1;  /* keep generating */
+}
+
+/* Test bootstrap: load fixture + open small-ctx session. The kernel
+ * test binary builds with `-mgeneral-regs-only`, so calling
+ * `rust_slm_session_open` directly (it takes f32 by value) won't
+ * compile here. Route through `slm_runner_setup_session_with_ctx`
+ * (in slm_runner.c, which is built without that constraint). Inlined
+ * via macro because the Unity asserts inside expand to bare `return;`
+ * which a non-void helper can't host. */
+#define DIRECT_FFI_TEST_OPEN(model_idx_var, sess_var) \
+    rust_slm_test_reset(); \
+    int model_idx_var = -1; \
+    runner_load_fixture(&(model_idx_var)); \
+    int sess_var = slm_runner_setup_session_with_ctx(4u); \
+    TEST_ASSERT_GREATER_OR_EQUAL(0, sess_var)
+
+#define DIRECT_FFI_TEST_CLOSE(model_idx_var, sess_var) \
+    do { \
+        TEST_ASSERT_EQUAL_INT32(0, rust_slm_session_close((uint32_t)(sess_var))); \
+        TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)(model_idx_var))); \
+    } while (0)
+
+/*
+ * rust_slm_prompt with an empty prompt returns 0 and never invokes
+ * the callback (greedy on zero-logits produces token id 0 = EOS,
+ * decoder exits before first emission). Pins the M5.2 state-machine
+ * contract that empty prompts are valid input.
+ */
+static void test_rust_slm_prompt_empty_returns_zero(void)
+{
+    DIRECT_FFI_TEST_OPEN(model_idx, sess);
+
+    TokenCbState st = {0};
+    int32_t rc = rust_slm_prompt((uint32_t)sess, NULL, 0, 0,
+                                 direct_token_cb, &st);
+    TEST_ASSERT_EQUAL_INT32(0, rc);
+    TEST_ASSERT_EQUAL_UINT32(0u, st.calls);
+
+    DIRECT_FFI_TEST_CLOSE(model_idx, sess);
+}
+
+/*
+ * rust_slm_prompt rejects a NULL prompt pointer when prompt_len > 0.
+ * Pins the FFI safety contract: callers paired (NULL, 0) must work
+ * (drill empty prompt) but (NULL, N) must fail rather than read
+ * garbage from address 0.
+ */
+static void test_rust_slm_prompt_null_with_length_fails(void)
+{
+    DIRECT_FFI_TEST_OPEN(model_idx, sess);
+
+    TokenCbState st = {0};
+    int32_t rc = rust_slm_prompt((uint32_t)sess, NULL, 8u, 0,
+                                 direct_token_cb, &st);
+    TEST_ASSERT_EQUAL_INT32(-1, rc);
+    TEST_ASSERT_EQUAL_UINT32(0u, st.calls);
+
+    DIRECT_FFI_TEST_CLOSE(model_idx, sess);
+}
+
+/*
+ * rust_slm_stop on a fresh session returns 0 (sets the cooperative
+ * stop flag idempotently). On a bad session id it returns -1. Pins
+ * the FFI signature so a future change to the stop-flag mechanism
+ * surfaces here.
+ */
+static void test_rust_slm_stop_signatures(void)
+{
+    DIRECT_FFI_TEST_OPEN(model_idx, sess);
+
+    TEST_ASSERT_EQUAL_INT32(0,  rust_slm_stop((uint32_t)sess));
+    /* Double-stop is idempotent. */
+    TEST_ASSERT_EQUAL_INT32(0,  rust_slm_stop((uint32_t)sess));
+    /* Bad session id rejected. */
+    TEST_ASSERT_EQUAL_INT32(-1, rust_slm_stop(0xDEADBEEFu));
+
+    DIRECT_FFI_TEST_CLOSE(model_idx, sess);
+}
+
+/*
+ * rust_slm_session_reset on a fresh session returns 0 and leaves the
+ * KV cache empty. On a bad session id it returns -1. The reset
+ * itself can't be observed without running a prompt first; this
+ * test pins the FFI signature and the success-on-fresh contract.
+ */
+static void test_rust_slm_session_reset_signatures(void)
+{
+    DIRECT_FFI_TEST_OPEN(model_idx, sess);
+
+    TEST_ASSERT_EQUAL_INT32(0,  rust_slm_session_reset((uint32_t)sess));
+    TEST_ASSERT_EQUAL_INT32(-1, rust_slm_session_reset(0xDEADBEEFu));
+
+    DIRECT_FFI_TEST_CLOSE(model_idx, sess);
+}
+
+/*
+ * rust_slm_stats on a fresh session returns 0 and the SlmStatsC
+ * struct is fully zeroed (no prompts run yet). Pins the FFI's
+ * struct-pointer-out pattern + the zero-initial-state invariant.
+ * NULL out-pointer rejected with -1.
+ */
+static void test_rust_slm_stats_fresh_session_zero(void)
+{
+    DIRECT_FFI_TEST_OPEN(model_idx, sess);
+
+    SlmStatsC stats = {
+        .prompts_completed = 0xFFFFFFFFu,
+        .tokens_in         = 0xFFFFFFFFu,
+        .tokens_out        = 0xFFFFFFFFu,
+        .last_ttft_ns      = 0xFFFFFFFFFFFFFFFFull,
+        .last_decode_ns    = 0xFFFFFFFFFFFFFFFFull,
+    };
+    int32_t rc = rust_slm_stats((uint32_t)sess, &stats);
+    TEST_ASSERT_EQUAL_INT32(0, rc);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.prompts_completed);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.tokens_in);
+    TEST_ASSERT_EQUAL_UINT32(0u, stats.tokens_out);
+    TEST_ASSERT_EQUAL_UINT64(0ull, stats.last_ttft_ns);
+    TEST_ASSERT_EQUAL_UINT64(0ull, stats.last_decode_ns);
+
+    /* Bad session id. */
+    TEST_ASSERT_EQUAL_INT32(-1, rust_slm_stats(0xDEADBEEFu, &stats));
+
+    DIRECT_FFI_TEST_CLOSE(model_idx, sess);
+}
+
+/* ============================================================================
  * Suite Runner
  * ============================================================================ */
 
@@ -209,6 +367,13 @@ int test_suite_slm_runner(void)
     RUN_TEST(test_slm_runner_setup_fails_without_model);
     RUN_TEST(test_slm_runner_setup_succeeds_after_load);
     RUN_TEST(test_slm_runner_publishes_done_after_empty_prompt);
+
+    /* Direct FFI signature tests (round-1 review follow-up). */
+    RUN_TEST(test_rust_slm_prompt_empty_returns_zero);
+    RUN_TEST(test_rust_slm_prompt_null_with_length_fails);
+    RUN_TEST(test_rust_slm_stop_signatures);
+    RUN_TEST(test_rust_slm_session_reset_signatures);
+    RUN_TEST(test_rust_slm_stats_fresh_session_zero);
 
     return (int)UnityEnd();
 }

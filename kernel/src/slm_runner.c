@@ -121,6 +121,13 @@ static int32_t slm_runner_token_cb(
             }
             n--;
         }
+        /* If after 4 walk-back steps we still land on a continuation
+         * byte (only possible with malformed UTF-8 — BBPE shouldn't
+         * produce it, but belt-and-braces), drop the trailing partial
+         * codepoint entirely rather than emit a half-encoded one. */
+        if (n > 0 && (bytes[n] & 0xC0) == 0x80) {
+            n = 0;
+        }
     }
     for (size_t i = 0; i < n; i++) {
         buf[i] = bytes[i];
