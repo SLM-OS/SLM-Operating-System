@@ -24,6 +24,7 @@
 
 #include "test_harness.h"
 #include "unity.h"
+#include "config.h"      /* RUST_HEAP_MB */
 #include "slm_ffi.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -125,6 +126,30 @@ static void test_workspace_alloc_round_trip(void)
     TEST_ASSERT_EQUAL_UINT64(before.free_blocks, after.free_blocks);
 }
 
+/*
+ * Confirm the Rust heap was sized to the per-platform `RUST_HEAP_MB`
+ * knob from `<config.h>` and not silently regressed. The SLM forward
+ * path's KV cache (~28 MB at ctx=1024 for Qwen2.5-1.5B) and
+ * `ForwardScratch` live on this heap; a regression that cuts the
+ * heap below the SLM working set would surface as an opaque
+ * "alloc::alloc::handle_alloc_error" panic mid-decode rather than at
+ * boot. This test pins the boot-time invariant.
+ */
+static void test_rust_heap_size_matches_config(void)
+{
+    const size_t expected = (size_t)RUST_HEAP_MB * 1024u * 1024u;
+    const size_t actual = rust_heap_size_bytes();
+
+    /* Non-zero: rust_heap_init was actually called. */
+    TEST_ASSERT_TRUE(actual > 0);
+
+    /* Exact match: the kernel boot path passed RUST_HEAP_MB through
+     * unmodified. Drift here means either main.c's pmm_alloc_pages
+     * call diverged from the constant, or the Rust side is rounding
+     * down on its own. Either is a regression worth catching. */
+    TEST_ASSERT_EQUAL_UINT64(expected, actual);
+}
+
 int test_suite_model_mem_smoke(void)
 {
     UnityBegin("Model Memory Smoke Tests");
@@ -132,6 +157,7 @@ int test_suite_model_mem_smoke(void)
     RUN_TEST(test_pools_initialized_with_blocks);
     RUN_TEST(test_weight_alloc_round_trip);
     RUN_TEST(test_workspace_alloc_round_trip);
+    RUN_TEST(test_rust_heap_size_matches_config);
 
     return UnityEnd();
 }
