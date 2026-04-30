@@ -137,7 +137,12 @@ static void test_workspace_alloc_round_trip(void)
  */
 static void test_rust_heap_size_matches_config(void)
 {
-    const size_t expected = (size_t)RUST_HEAP_MB * 1024u * 1024u;
+    /* Width-explicit MB→bytes via shift instead of `MB * 1024u * 1024u`
+     * so the math is unambiguous on a hypothetical 32-bit host build
+     * (size_t == uint32_t would overflow at the 4096 MB cap from
+     * config.h's _Static_assert; SLM-OS is 64-bit-only today, but the
+     * shift form makes the intent obvious for future readers). */
+    const uint64_t expected = (uint64_t)RUST_HEAP_MB << 20;
     const size_t actual = rust_heap_size_bytes();
 
     /* Non-zero: rust_heap_init was actually called. */

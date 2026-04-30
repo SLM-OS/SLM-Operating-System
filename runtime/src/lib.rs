@@ -50,21 +50,28 @@ pub use component::{ComponentState, ComponentInfo, ComponentType, Priority as Co
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
+/// Bytes passed to the most recent `rust_heap_init` call. Exposed via
+/// `rust_heap_size_bytes` so a kernel-side smoke test can confirm the
+/// per-platform `RUST_HEAP_MB` was actually honored — catches a
+/// silent regression where someone reduces the heap below what SLM's
+/// KV cache + `ForwardScratch` need.
+///
+/// Release/Acquire is technically stronger than the call pattern
+/// requires: `rust_heap_init` runs once on CPU 0 in `kernel_main`
+/// before any secondary CPU is brought up, so no concurrent reader
+/// exists at the moment of the store. Kept as Release/Acquire
+/// because it matches the "publish a value once" idiom and the
+/// extra fence cost is irrelevant on a one-time boot path.
+#[cfg(not(test))]
+static RUST_HEAP_SIZE_BYTES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 /// Initialize the Rust heap allocator.
 ///
 /// # Safety
 /// - `heap_start` must be a valid pointer to allocatable memory
 /// - `heap_size` must accurately reflect the available memory
 /// - This function must only be called once
-/// Bytes passed to the most recent `rust_heap_init` call. Exposed via
-/// `rust_heap_size_bytes` so a kernel-side smoke test can confirm the
-/// per-platform `RUST_HEAP_MB` was actually honored — catches a
-/// silent regression where someone reduces the heap below what SLM's
-/// KV cache + `ForwardScratch` need.
-#[cfg(not(test))]
-static RUST_HEAP_SIZE_BYTES: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-
 #[cfg(not(test))]
 #[no_mangle]
 pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
