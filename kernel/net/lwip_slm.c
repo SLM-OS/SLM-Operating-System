@@ -706,24 +706,47 @@ void net_poll(void) {
     /* Check for received packets */
     int len = active_driver->recv(rx_packet_buf, sizeof(rx_packet_buf));
     if (len > 0) {
-        /* Create pbuf for the received packet */
-        struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_RAM);
+        /* Allocate from PBUF_POOL (the 64-entry fixed pool sized at
+         * PBUF_POOL_BUFSIZE = 1536 each), NOT PBUF_RAM (which would
+         * draw from the shared lwip MEM_SIZE heap).
+         *
+         * Why this matters under sustained RX (#581): the lwip heap
+         * is shared with TCP send buffers, retransmit-queue segment
+         * data, ARP queue entries, HTTP-client state, and DNS state.
+         * If every received Ethernet frame allocates a PBUF_RAM pbuf
+         * from heap, frames arriving faster than the upper stack can
+         * drain pile up in TCP receive queues, the heap saturates,
+         * subsequent pbuf_alloc returns NULL, drops climb, RX goes
+         * idle, and the watchdog fires.
+         *
+         * PBUF_POOL has its own 96 KB BSS (PBUF_POOL_SIZE *
+         * PBUF_POOL_BUFSIZE) and never cannibalizes the heap. lwip
+         * automatically chains multiple pool slots when len exceeds
+         * PBUF_POOL_BUFSIZE — pbuf_take handles the chain correctly
+         * (a contiguous memcpy into p->payload would only fill the
+         * first slot of a chained pbuf and silently truncate). */
+        struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
-            memcpy(p->payload, rx_packet_buf, len);
-            net_statistics.rx_packets++;
-            net_statistics.rx_bytes += len;
-
-            /* Watchdog liveness ping. Note here (after pbuf_alloc
-             * succeeded) rather than after slm_netif.input() because
-             * "received a frame at the netif boundary" is the right
-             * granularity — even a frame the IP stack drops indicates
-             * the driver/USB/lwIP-pool path is alive. */
-            net_watchdog_note_rx();
-
-            /* Pass to lwIP */
-            if (slm_netif.input(p, &slm_netif) != ERR_OK) {
+            if (pbuf_take(p, rx_packet_buf, (u16_t)len) != ERR_OK) {
                 pbuf_free(p);
                 net_statistics.rx_dropped++;
+            } else {
+                net_statistics.rx_packets++;
+                net_statistics.rx_bytes += len;
+
+                /* Watchdog liveness ping. Note here (after pbuf_alloc
+                 * + pbuf_take succeeded) rather than after
+                 * slm_netif.input() because "received a frame at the
+                 * netif boundary" is the right granularity — even a
+                 * frame the IP stack drops indicates the driver / USB
+                 * / lwIP-pool path is alive. */
+                net_watchdog_note_rx();
+
+                /* Pass to lwIP */
+                if (slm_netif.input(p, &slm_netif) != ERR_OK) {
+                    pbuf_free(p);
+                    net_statistics.rx_dropped++;
+                }
             }
         } else {
             net_statistics.rx_dropped++;

@@ -41,15 +41,27 @@ The lwIP stack is configured in `kernel/include/lwipopts.h`:
 | Option | Value | Description |
 |--------|-------|-------------|
 | `NO_SYS` | 1 | Single-threaded, polled mode |
-| `MEM_SIZE` | 32KB | Heap size for lwIP allocations |
-| `PBUF_POOL_SIZE` | 16 | Number of packet buffers |
+| `MEM_SIZE` | 256 KB | Heap for TCP send/retransmit buffers, ARP queues, HTTP/DNS state. RX no longer draws from this heap (uses `PBUF_POOL`). |
+| `PBUF_POOL_SIZE` | 64 | Number of receive packet buffers (chained for frames > 1536 B) |
 | `PBUF_POOL_BUFSIZE` | 1536 | Size of each packet buffer |
+| `TCP_MSS` | 1460 | TCP maximum segment size (Ethernet MTU − headers) |
+| `TCP_WND` | 32×MSS (~46 KB) | Per-connection receive window. Bumped from 4×MSS in #581 for 1 GB+ transfer throughput. |
+| `TCP_SND_BUF` | 32×MSS (~46 KB) | Per-connection send buffer |
+| `TCP_SND_QUEUELEN` | 64 | Per-connection in-flight pbuf queue (sized 2×`TCP_SND_BUF`/MSS per lwip guidance) |
+| `MEMP_NUM_TCP_SEG` | 128 | Total TCP segment-buffer pool, sized for one bulk transfer + 16 telnet sessions |
+| `MEMP_NUM_TCP_PCB` | 32 | Active + TIME_WAIT TCP control blocks |
 | `LWIP_TCP` | 1 | Enable TCP support |
 | `LWIP_UDP` | 1 | Enable UDP support |
 | `LWIP_ICMP` | 1 | Enable ICMP (ping) support |
 | `LWIP_DHCP` | 1 | Enable DHCP client |
 | `LWIP_SOCKET` | 0 | Disable BSD sockets (raw API only) |
 | `LWIP_NETCONN` | 0 | Disable netconn API |
+
+**RX path memory model:** every received Ethernet frame allocates from
+`PBUF_POOL` rather than the lwip heap. The 64-slot pool (≈ 96 KB BSS)
+absorbs RX bursts without competing with TCP send buffers, ARP queues,
+or DNS state on the shared heap. See `kernel/net/lwip_slm.c` and
+issue #581 for the prior heap-exhaustion stall.
 
 ### Default IP Configuration
 

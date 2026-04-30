@@ -41,26 +41,27 @@
 
 /* Heap size for variable-length allocations.
  *
- * Bumped 32 KB → 128 KB after the RX-stall watchdog (PR #439) caught
- * heap exhaustion under multi-session telnet + slm-put load:
+ * History:
+ *   - 32 KB: original VirtIO-net bringup default (DHCP + ping only).
+ *   - 128 KB (PR #439): the RX-stall watchdog caught heap exhaustion
+ *     under multi-session telnet + slm-put load. The hot allocations
+ *     were per-frame RX pbufs (`pbuf_alloc(PBUF_RAW, len, PBUF_RAM)`)
+ *     piling up in TCP receive queues.
+ *   - 256 KB (#581): RX-side migrated to PBUF_POOL (see lwip_slm.c —
+ *     no longer draws from this heap), so the heap now needs to
+ *     cover only TCP send buffers, retransmit-queue segment data,
+ *     ARP queue entries, HTTP-client state, and DNS state. With
+ *     TCP_WND/TCP_SND_BUF bumped to 32*MSS (~46 KB each), a single
+ *     in-progress download holds up to ~100 KB of TCP working set;
+ *     256 KB gives comfortable headroom for two concurrent transfers
+ *     plus transient TX pbufs without falling back to drops.
  *
- *   [WARN] net: RX stalled (link up, 10010 ms idle, threshold 10000 ms)
- *   [WARN] net:   rx_packets=719 dropped=66 no_buffers=0
- *   [WARN] net:   pbuf_pool=0/64 tcp_pcb=2/32 heap=32768/32768
- *
- * The 32 KB ceiling was the original VirtIO-net bringup default
- * (DHCP + ping workload only) and never revisited as the workload
- * grew. Multi-session telnet creates concurrent
- * `tcp_write(... TCP_WRITE_FLAG_COPY)` allocations; per-frame
- * `pbuf_alloc(PBUF_RAW, len, PBUF_RAM)` on RX is also heap-backed.
- * 128 KB gives ~80 in-flight 1500-byte pbufs of headroom which is
- * comfortable for 16 simultaneous shell-tcp sessions.
- *
- * Tradeoffs: BSS growth is +96 KB (negligible on 4-8 GB systems);
- * a fragmented heap walk under SYS_ARCH_PROTECT (PR #435) holds
- * IRQs off proportionally longer. The watchdog will catch it if
- * IRQ latency starts dropping packets at this size; revisit if so. */
-#define MEM_SIZE                    (128 * 1024)  /* 128 KB */
+ * Tradeoffs: BSS growth is +128 KB (negligible on 4-8 GB hardware
+ * targets and fits the 256 MB QEMU x86-64 budget). A fragmented
+ * heap walk under SYS_ARCH_PROTECT (PR #435) holds IRQs off
+ * proportionally longer; the watchdog will catch IRQ-latency-driven
+ * drops if this size grows further. */
+#define MEM_SIZE                    (256 * 1024)  /* 256 KB */
 
 /* Memory alignment (8-byte for AArch64) */
 #define MEM_ALIGNMENT               8
@@ -136,9 +137,22 @@
 /* TCP support (for future telnet/HTTP) */
 #define LWIP_TCP                    1
 #define TCP_MSS                     1460
-#define TCP_WND                     (4 * TCP_MSS)
-#define TCP_SND_BUF                 (4 * TCP_MSS)
-#define TCP_SND_QUEUELEN            16
+/* Per-connection TCP receive + send window. Both bumped 4*MSS → 32*MSS
+ * (5840 → 46720 bytes) for #581: the prior 5.8 KB receive window meant
+ * a 1 GB transfer required ~170 K RTTs end-to-end (≥ 170 s on a 1 ms
+ * LAN, far worse on real internet paths) regardless of available
+ * bandwidth. 46 KB is well under lwip's 64 KB unscaled-window cap
+ * (RFC 7323 scaling not enabled here) and saturates a 100 Mb/s link
+ * at 4 ms RTT or a 1 Gb/s link at 0.4 ms RTT. Per-connection working
+ * set under load is roughly TCP_WND + TCP_SND_BUF ≈ 92 KB; MEM_SIZE
+ * was bumped to 256 KB to cover this with headroom for two concurrent
+ * transfers. */
+#define TCP_WND                     (32 * TCP_MSS)
+#define TCP_SND_BUF                 (32 * TCP_MSS)
+/* TCP_SND_QUEUELEN must hold the larger send buffer's worth of
+ * pbufs. lwip's recommended setting is (2 * TCP_SND_BUF) / TCP_MSS
+ * = 64 for the new TCP_SND_BUF = 32*MSS. 16 → 64. */
+#define TCP_SND_QUEUELEN            64
 /* MEMP_NUM_TCP_PCB is the *total* pool of active TCP PCBs:
  *   - established connections
  *   - half-open SYN_RCVD
@@ -152,10 +166,14 @@
  * connection a PCB. 32 = 16 active + 16 TIME_WAIT headroom. */
 #define MEMP_NUM_TCP_PCB            32
 #define MEMP_NUM_TCP_PCB_LISTEN     4
-/* TCP segment buffers: bumped 16 → 64 alongside PBUF_POOL_SIZE so
- * 16 simultaneous sessions × 4 in-flight segments each have room
- * without falling back to MEM heap allocs. */
-#define MEMP_NUM_TCP_SEG            64
+/* TCP segment buffers. Sized to cover the per-connection
+ * TCP_SND_QUEUELEN (64) plus headroom for a second concurrent
+ * download and the 16 max telnet sessions' steady-state windows.
+ * 16 → 64 (PR #427 telnet-pool fix) → 128 (#581: bumped alongside
+ * TCP_SND_QUEUELEN so a single 1 GB transfer doesn't starve the
+ * telnetd accept path during the transfer's burst window). Each
+ * tcp_seg slot is ~32 bytes of BSS, so 128 slots = ~4 KB. */
+#define MEMP_NUM_TCP_SEG            128
 
 /* UDP support (for DNS, DHCP) */
 #define LWIP_UDP                    1
