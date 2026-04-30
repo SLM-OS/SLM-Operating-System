@@ -151,3 +151,42 @@ void ga10b_qmd_populate(uint32_t *qmd,
                        GA10B_QMD_CBUF_VALID_BASE + cbuf_idx,
                        GA10B_QMD_CBUF_VALID_BASE + cbuf_idx, 1u);
 }
+
+struct ga10b_qmd_pool_slot
+ga10b_qmd_pool_prepare(uint8_t *pool_va,
+                       uint64_t pool_gpu_va,
+                       uint32_t pool_n_slots,
+                       uint32_t *slot_inout,
+                       const struct ga10b_pipeline_op_v7 *op)
+{
+    struct ga10b_qmd_pool_slot result = { 0, NULL, 0u };
+
+    /* Defensive: caller is supposed to validate, but guarding the
+     * modulo against pool_n_slots==0 here costs nothing and prevents
+     * a divide-by-zero crash from an upstream bug. */
+    if (pool_n_slots == 0u || pool_va == NULL ||
+        slot_inout == NULL || op == NULL) {
+        return result;
+    }
+
+    uint32_t slot = *slot_inout % pool_n_slots;
+    uint8_t *slot_va = pool_va + (size_t)slot * GA10B_QMD_SIZE_BYTES;
+
+    /* Cast slot to uint32_t* for the encoder. The 256-byte alignment
+     * is the caller's responsibility (the helper allocates the pool
+     * page-aligned and slots are 256-byte multiples, so this falls
+     * out as long as pool_va is at least 4-byte aligned). */
+    ga10b_qmd_populate((uint32_t *)slot_va,
+                       op->shader_gpu_va,
+                       op->cbuf_gpu_va,
+                       op->register_count_v,
+                       op->grid_x, op->grid_y, op->grid_z,
+                       op->block_x, op->block_y, op->block_z);
+
+    *slot_inout = (slot + 1u) % pool_n_slots;
+
+    result.gpu_va = pool_gpu_va + (uint64_t)slot * GA10B_QMD_SIZE_BYTES;
+    result.cpu_va = slot_va;
+    result.index  = slot;
+    return result;
+}

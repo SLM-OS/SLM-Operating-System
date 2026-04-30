@@ -43,6 +43,7 @@
 #include "../../kernel/gpu/nvidia/falcon.h"
 #include "../../kernel/gpu/nvidia/ga10b_bringup.h"
 #include "../../kernel/gpu/nvidia/ga10b_channel_handoff.h"
+#include "../../kernel/gpu/nvidia/ga10b_qmd.h"
 #include "../../kernel/gpu/nvidia/gsp.h"
 #include "../../scripts/gpu-qmd-bits.h"
 
@@ -2479,6 +2480,177 @@ static void test_qmd_set_bits_preserves_neighbors(void)
 }
 
 /* ======================================================================
+ * ga10b_qmd_pool_prepare — pure-logic helper for the v7 dispatch path.
+ *
+ * Tests cover: slot rotation, wrap-around, the GPU VA returned matches
+ * pool_gpu_va + slot_index * 256, the slot's CPU bytes match what
+ * ga10b_qmd_populate would write directly, and defensive null/zero
+ * input handling.
+ * ====================================================================== */
+
+/* Synthesize a representative v7 op for tests. Values are arbitrary
+ * but distinct so we can tell op A's QMD bytes from op B's. */
+static struct ga10b_pipeline_op_v7
+make_test_op_v7(uint64_t shader, uint64_t cbuf, uint32_t regs,
+                uint32_t gx, uint32_t gy, uint32_t gz)
+{
+    struct ga10b_pipeline_op_v7 op;
+    memset(&op, 0, sizeof(op));
+    op.qmd_gpu_va       = 0x10000000ULL;  /* non-zero — validator pass */
+    op.output_phys      = 0x20000000ULL;  /* non-zero — validator pass */
+    op.expected_payload = 0xCAFEDEADu;
+    op.flags            = 0;
+    op.shader_gpu_va    = shader;
+    op.cbuf_gpu_va      = cbuf;
+    op.register_count_v = regs;
+    op.grid_x = gx; op.grid_y = gy; op.grid_z = gz;
+    op.block_x = 32u; op.block_y = 1u; op.block_z = 1u;
+    op.smem_size_bytes = 0;
+    op.slm_size_bytes  = 0;
+    op.barrier_count   = 0;
+    return op;
+}
+
+static void test_qmd_pool_prepare_advances_slot(void)
+{
+    printf("== test_qmd_pool_prepare_advances_slot ==\n");
+    uint8_t pool[8 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x12340000ULL, 0x56780000ULL, 64u, 1u, 1u, 1u);
+
+    struct ga10b_qmd_pool_slot r0 = ga10b_qmd_pool_prepare(
+        pool, 0xAA000000ULL, 8u, &slot, &op);
+    REQUIRE_EQ(r0.index, 0u);
+    REQUIRE_EQ(r0.gpu_va, 0xAA000000ULL);
+    REQUIRE(r0.cpu_va == pool);
+    REQUIRE_EQ(slot, 1u);
+
+    struct ga10b_qmd_pool_slot r1 = ga10b_qmd_pool_prepare(
+        pool, 0xAA000000ULL, 8u, &slot, &op);
+    REQUIRE_EQ(r1.index, 1u);
+    REQUIRE_EQ(r1.gpu_va, 0xAA000000ULL + GA10B_QMD_SIZE_BYTES);
+    REQUIRE(r1.cpu_va == pool + GA10B_QMD_SIZE_BYTES);
+    REQUIRE_EQ(slot, 2u);
+}
+
+static void test_qmd_pool_prepare_wraps_at_n_slots(void)
+{
+    printf("== test_qmd_pool_prepare_wraps_at_n_slots ==\n");
+    uint8_t pool[3 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x12340000ULL, 0x56780000ULL, 64u, 1u, 1u, 1u);
+
+    /* 3 slots; on the 4th call we wrap back to slot 0. */
+    for (uint32_t i = 0; i < 7; i++) {
+        struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+            pool, 0xBB000000ULL, 3u, &slot, &op);
+        REQUIRE_EQ(r.index, i % 3u);
+    }
+    REQUIRE_EQ(slot, 7u % 3u);
+}
+
+static void test_qmd_pool_prepare_starts_from_inout_value(void)
+{
+    printf("== test_qmd_pool_prepare_starts_from_inout_value ==\n");
+    /* Caller may resume with a non-zero counter (e.g. across
+     * launches). The helper must respect the in-value, not reset it. */
+    uint8_t pool[4 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 5;  /* > pool_n_slots — should modulo to 1 */
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x12340000ULL, 0x56780000ULL, 64u, 1u, 1u, 1u);
+
+    struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+        pool, 0xCC000000ULL, 4u, &slot, &op);
+    REQUIRE_EQ(r.index, 1u);
+    REQUIRE_EQ(r.gpu_va, 0xCC000000ULL + GA10B_QMD_SIZE_BYTES);
+    REQUIRE_EQ(slot, 2u);
+}
+
+static void test_qmd_pool_prepare_writes_match_direct_populate(void)
+{
+    printf("== test_qmd_pool_prepare_writes_match_direct_populate ==\n");
+    /* The slot's bytes must equal what ga10b_qmd_populate would
+     * produce from the same op-params. This is the byte-compare gate
+     * that Phase 4 uses against helper-baked QMDs on hardware. */
+    uint8_t pool[4 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x123400000000ULL,    /* shader_gpu_va, both halves nonzero */
+        0x5678BEEF0000ULL,    /* cbuf_gpu_va, both halves nonzero */
+        96u, 16u, 8u, 4u);
+    op.block_x = 32; op.block_y = 4; op.block_z = 1;
+
+    /* Drive the pool-prepare path. */
+    struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+        pool, 0x11000000ULL, 4u, &slot, &op);
+    REQUIRE_EQ(r.index, 0u);
+
+    /* Independently encode the same QMD via the lower-level encoder. */
+    uint32_t expected[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(expected,
+                       op.shader_gpu_va, op.cbuf_gpu_va,
+                       op.register_count_v,
+                       op.grid_x, op.grid_y, op.grid_z,
+                       op.block_x, op.block_y, op.block_z);
+
+    /* Slot bytes match the direct encoder output to the byte. */
+    REQUIRE_EQ(memcmp(r.cpu_va, expected, GA10B_QMD_SIZE_BYTES), 0);
+}
+
+static void test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds(void)
+{
+    printf("== test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds ==\n");
+    /* Two ops with different shader/cbuf/register/dim params must
+     * produce different QMD bytes. Catches a regression where the
+     * helper accidentally pinned a parameter. */
+    uint8_t pool[4 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+
+    struct ga10b_pipeline_op_v7 op_a = make_test_op_v7(
+        0x10000000ULL, 0x20000000ULL, 64u, 1u, 1u, 1u);
+    struct ga10b_pipeline_op_v7 op_b = make_test_op_v7(
+        0x30000000ULL, 0x40000000ULL, 96u, 8u, 4u, 2u);
+
+    struct ga10b_qmd_pool_slot ra = ga10b_qmd_pool_prepare(
+        pool, 0u, 4u, &slot, &op_a);
+    struct ga10b_qmd_pool_slot rb = ga10b_qmd_pool_prepare(
+        pool, 0u, 4u, &slot, &op_b);
+
+    REQUIRE(memcmp(ra.cpu_va, rb.cpu_va, GA10B_QMD_SIZE_BYTES) != 0);
+}
+
+static void test_qmd_pool_prepare_rejects_invalid_inputs(void)
+{
+    printf("== test_qmd_pool_prepare_rejects_invalid_inputs ==\n");
+    uint8_t pool[GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x10000000ULL, 0x20000000ULL, 64u, 1u, 1u, 1u);
+
+    /* pool_n_slots == 0: must return zero-initialised result. */
+    struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+        pool, 0xDD000000ULL, 0u, &slot, &op);
+    REQUIRE_EQ(r.gpu_va, 0u);
+    REQUIRE(r.cpu_va == NULL);
+    REQUIRE_EQ(slot, 0u);  /* counter unchanged on reject */
+
+    /* NULL pool_va. */
+    r = ga10b_qmd_pool_prepare(NULL, 0xDD000000ULL, 4u, &slot, &op);
+    REQUIRE_EQ(r.gpu_va, 0u);
+
+    /* NULL slot_inout. */
+    r = ga10b_qmd_pool_prepare(pool, 0xDD000000ULL, 4u, NULL, &op);
+    REQUIRE_EQ(r.gpu_va, 0u);
+
+    /* NULL op. */
+    r = ga10b_qmd_pool_prepare(pool, 0xDD000000ULL, 4u, &slot, NULL);
+    REQUIRE_EQ(r.gpu_va, 0u);
+}
+
+/* ======================================================================
  * Entry
  * ====================================================================== */
 
@@ -2593,6 +2765,13 @@ int main(void)
     test_qmd_set_bits_spans_two_words();
     test_qmd_set_bits_truncates_excess_value();
     test_qmd_set_bits_preserves_neighbors();
+
+    test_qmd_pool_prepare_advances_slot();
+    test_qmd_pool_prepare_wraps_at_n_slots();
+    test_qmd_pool_prepare_starts_from_inout_value();
+    test_qmd_pool_prepare_writes_match_direct_populate();
+    test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds();
+    test_qmd_pool_prepare_rejects_invalid_inputs();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);

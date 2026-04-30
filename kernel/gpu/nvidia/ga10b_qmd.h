@@ -27,6 +27,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ga10b_channel_handoff.h"   /* struct ga10b_pipeline_op_v7 */
+
 /* QMDV03_00 is exactly 256 bytes (64 × uint32_t). */
 #define GA10B_QMD_SIZE_BYTES 256u
 #define GA10B_QMD_DWORDS     (GA10B_QMD_SIZE_BYTES / 4u)
@@ -148,5 +150,58 @@ void ga10b_qmd_populate(uint32_t *qmd,
                         uint32_t register_count_v,
                         uint32_t grid_x, uint32_t grid_y, uint32_t grid_z,
                         uint32_t block_x, uint32_t block_y, uint32_t block_z);
+
+/* ---- Pool-slot dispatch helper ----
+ *
+ * Pick the next slot in a QMD pool, populate it from a v7 op's
+ * QMD-construction inputs, advance the slot counter (mod
+ * `pool_n_slots`), and return enough handles to the populated slot
+ * for the dispatch path to:
+ *   - cache_clean the slot bytes (uses `cpu_va`)
+ *   - feed the GPU VA into `SEND_PCAS_A` (uses `gpu_va`)
+ *
+ * Pure-logic. The caller is responsible for:
+ *
+ *   - Pre-validating that the v7 handoff carries a non-zero pool
+ *     (`qmd_pool_n_slots > 0` and `qmd_pool_gpu_va != 0`).
+ *   - Calling `gsp_platform->cache_clean(result.cpu_va, 256)` and
+ *     `gsp_platform->mb()` after this function returns, so the GPU
+ *     sees the populated bytes once the dispatch fires.
+ *
+ * Args:
+ *   pool_va         CPU virtual address of slot 0 (CPU-side identity-
+ *                   mapped DRAM on Jetson; host tests pass a heap
+ *                   buffer).
+ *   pool_gpu_va     GPU virtual address of slot 0 (from the v7
+ *                   handoff's `qmd_pool_gpu_va`).
+ *   pool_n_slots    number of 256-byte slots in the pool (from the
+ *                   v7 handoff's `qmd_pool_n_slots`).
+ *   slot_inout      [in/out] the next-slot counter. Read at entry,
+ *                   advanced (mod `pool_n_slots`) on exit.
+ *   op              the v7 op whose QMD inputs (shader_gpu_va,
+ *                   cbuf_gpu_va, register_count_v, grid/block dims)
+ *                   become the encoded QMD content.
+ *
+ * Returns a `ga10b_qmd_pool_slot`. On invalid input (NULL pointers
+ * or `pool_n_slots == 0`), the returned struct has all-zero fields.
+ *
+ * smem_size, slm_size, and barrier_count from the v7 op are NOT yet
+ * propagated into the QMD (the underlying encoder defaults them to
+ * 0). MNIST kernels run with these all zero today; SLM workloads
+ * that need them will require the encoder to grow corresponding
+ * setters.
+ */
+struct ga10b_qmd_pool_slot {
+    uint64_t gpu_va;        /* slot's GPU VA — feeds SEND_PCAS_A */
+    uint8_t *cpu_va;        /* slot's CPU VA — for cache_clean */
+    uint32_t index;         /* slot index used (for diagnostics) */
+};
+
+struct ga10b_qmd_pool_slot
+ga10b_qmd_pool_prepare(uint8_t *pool_va,
+                       uint64_t pool_gpu_va,
+                       uint32_t pool_n_slots,
+                       uint32_t *slot_inout,
+                       const struct ga10b_pipeline_op_v7 *op);
 
 #endif /* GPU_NVIDIA_GA10B_QMD_H */
