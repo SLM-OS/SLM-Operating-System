@@ -151,9 +151,9 @@ impl From<AllocError> for LoadError {
             AllocError::OutOfMemory | AllocError::PmmFailed => LoadError::AllocFailed,
             AllocError::StaleHandle => LoadError::AllocStaleHandle,
             AllocError::InvalidHandle => LoadError::AllocInvalidHandle,
-            AllocError::AlignmentError | AllocError::NotInitialized => {
-                LoadError::AllocInternal
-            }
+            AllocError::AlignmentError
+            | AllocError::NotInitialized
+            | AllocError::Oversized => LoadError::AllocInternal,
         }
     }
 }
