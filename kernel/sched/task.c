@@ -56,7 +56,6 @@ static spinlock_t task_lock = SPINLOCK_INIT;
  * cache_clean/cache_invalidate pattern in task_current/task_set_current. */
 #if defined(PLATFORM_HAS_NC_MEMORY)
 static struct task **current_task;
-static struct task *current_task_fallback[MAX_CPUS];
 #else
 static struct task *current_task[MAX_CPUS];
 #endif
@@ -76,11 +75,14 @@ void task_table_init(void)
     current_task = ncmem_alloc(MAX_CPUS * sizeof(struct task *),
                                CACHE_LINE_SIZE);
     if (!current_task) {
-        /* NC exhausted — fall back to BSS. task_current/task_set_current
-         * will not have cache maintenance here (NC build path elides it),
-         * so this fallback loses cross-CPU coherency. Flag loudly. */
-        WARN("current_task: NC alloc failed, falling back to BSS (cross-CPU coherency degraded)");
-        current_task = current_task_fallback;
+        /* NC exhaustion is fatal on platforms that need NC for cross-
+         * CPU coherency (Pi 5, Jetson). Falling back to BSS would let
+         * `task_set_current` run without `cache_clean` (the NC build
+         * path elides it), so a remote CPU's `task_current_on_cpu`
+         * would see stale data — silent corruption with no diagnostic.
+         * Better to halt here with a clear message: NC arena sizing
+         * needs to be raised in the platform header. */
+        panic("current_task: NC arena exhausted — bump NC_MEM_SIZE (platform header)");
     }
     for (uint32_t i = 0; i < MAX_CPUS; i++)
         current_task[i] = NULL;
@@ -604,8 +606,19 @@ void task_destroy(struct task *task)
      * fail the validator when a thief tries to accept them. Wraps
      * naturally — collisions require 2^32 reuses of the same slot
      * between a push and a still-outstanding steal probe, which is
-     * not reachable by a realistic workload. */
+     * not reachable by a realistic workload.
+     *
+     * On non-NC platforms the bumped generation must be flushed to
+     * PoC for cross-CPU thieves to observe it; otherwise a thief on
+     * another CPU validating a captured generation against
+     * `task->generation` reads a stale cacheline and accepts a slot
+     * that was just recycled. NC platforms (Pi 5, Jetson) keep
+     * task_table in non-cacheable memory so the write is visible
+     * without maintenance. */
     task->generation++;
+#if !defined(PLATFORM_HAS_NC_MEMORY)
+    cache_clean(&task->generation);
+#endif
 
     TASK_UNLOCK_IRQRESTORE();
 

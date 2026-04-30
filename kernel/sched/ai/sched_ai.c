@@ -532,12 +532,27 @@ static void ai_hailo_shutdown(void)
 }
 
 /* Quantize an fp32 state vector to INT8 using per-tensor scale+zp.
- * clamp(round(x/scale + zp), -128, 127). */
+ * clamp(round(x/scale + zp), -128, 127).
+ *
+ * NaN/Inf handling: ai_state.c's feature extraction can produce NaN
+ * (e.g. through a degenerate Newton's-iteration sqrt) or ±Inf
+ * (division by a zero variance). Casting NaN or out-of-range Inf to
+ * `int32_t` is undefined behaviour per C11 §6.3.1.4. Treat any non-
+ * finite input as the zero-point: a "neutral" feature value the
+ * downstream argmax cannot interpret as policy advice. */
 static void quantize_fp32_to_int8(const float *src, int8_t *dst, uint32_t n,
                                    float scale, int8_t zp)
 {
     for (uint32_t i = 0; i < n; i++) {
-        float q = src[i] / scale + (float)zp;
+        float v = src[i];
+        /* IEEE 754: NaN != NaN. The (v - v) == 0 form rejects
+         * ±Inf in the same expression — finite values give 0,
+         * NaN gives NaN, ±Inf gives NaN-via-(Inf - Inf). */
+        if (v != v || (v - v) != 0.0f) {
+            dst[i] = zp;
+            continue;
+        }
+        float q = v / scale + (float)zp;
         /* Round to nearest, ties away from zero. */
         int32_t qi = (int32_t)(q + (q >= 0.0f ? 0.5f : -0.5f));
         if (qi < -128) qi = -128;
@@ -655,13 +670,21 @@ void sched_ai_get_stats(const char *policy_name,
                         const uint32_t **action_hist, int *n_actions)
 {
     struct ai_policy_stats *stats = NULL;
-    /* policy_name[3] disambiguates among "ai_mlp", "ai_ppo", "ai_hailo" */
-    if (policy_name[0] == 'a' && policy_name[3] == 'm')
-        stats = &ai_mlp_stats;
-    else if (policy_name[0] == 'a' && policy_name[3] == 'p')
-        stats = &ai_ppo_stats;
-    else if (policy_name[0] == 'a' && policy_name[3] == 'h')
-        stats = &ai_hailo_stats;
+    /* policy_name[3] disambiguates among "ai_mlp", "ai_ppo", "ai_hailo".
+     * Length-validate the prefix first so a caller passing a 2-char
+     * policy ("ai\0") doesn't read past the NUL terminator. The four
+     * checked positions are policy_name[0..3] inclusive. */
+    if (policy_name && policy_name[0] != '\0' &&
+        policy_name[1] != '\0' && policy_name[2] != '\0' &&
+        policy_name[3] != '\0' &&
+        policy_name[0] == 'a') {
+        if (policy_name[3] == 'm')
+            stats = &ai_mlp_stats;
+        else if (policy_name[3] == 'p')
+            stats = &ai_ppo_stats;
+        else if (policy_name[3] == 'h')
+            stats = &ai_hailo_stats;
+    }
 
     if (!stats) {
         *decisions = 0;
@@ -694,6 +717,13 @@ int sched_ai_get_rate_stats(const char *policy_name,
                             uint64_t *out_total_ns)
 {
     if (!policy_name) return -1;
+
+    /* Length-validate before reading policy_name[3] — same pattern as
+     * sched_ai_get_stats above. A caller passing "ai\0" must not read
+     * past the NUL. */
+    if (policy_name[0] == '\0' || policy_name[1] == '\0' ||
+        policy_name[2] == '\0' || policy_name[3] == '\0')
+        return -1;
 
     struct ai_policy_stats *stats = NULL;
     if (policy_name[0] == 'a' && policy_name[3] == 'm')

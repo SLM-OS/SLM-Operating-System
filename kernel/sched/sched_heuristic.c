@@ -69,14 +69,21 @@ static uint32_t calculate_deadline_pressure(uint32_t cpu)
  */
 static uint32_t find_target_cpu(void)
 {
+    /* Round-robin start cursor. Multiple CPUs can call this
+     * concurrently from policy paths, so use relaxed atomics — we
+     * don't need ordering, just want to avoid torn reads / lost
+     * updates on the RMW. The "tiebreaker" semantic of `rr_next` is
+     * approximate by design: a lost update just means two CPUs
+     * pick the same starting cpu for one decision, then drift. */
     static uint32_t rr_next;
     uint32_t isolated = sched_get_isolated_cores();
 
     uint32_t best_cpu = 0;  /* fallback */
     uint32_t best_score = UINT32_MAX;
+    uint32_t start = __atomic_load_n(&rr_next, __ATOMIC_RELAXED);
 
     for (uint32_t i = 0; i < cpu_count; i++) {
-        uint32_t cpu = (rr_next + i) % cpu_count;
+        uint32_t cpu = (start + i) % cpu_count;
 
         if (isolated & (1U << cpu))
             continue;
@@ -90,7 +97,7 @@ static uint32_t find_target_cpu(void)
         }
     }
 
-    rr_next = best_cpu + 1;
+    __atomic_store_n(&rr_next, best_cpu + 1, __ATOMIC_RELAXED);
     return best_cpu;
 }
 

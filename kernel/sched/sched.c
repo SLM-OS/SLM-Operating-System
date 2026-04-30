@@ -1750,7 +1750,18 @@ void sched_rebalance_tick(uint32_t cpu)
         return;
 
     /* scheduler_add_task_to_cpu handles rq_lock + smp_notify_cpu on
-     * the destination CPU. */
+     * the destination CPU.
+     *
+     * Lock-release-then-modify is safe here. Between the unlock above
+     * and the `assigned_cpu = idle_cpu` write below there is a window
+     * where a thief on a third CPU could pop the candidate's stale
+     * deque entry on busy_cpu's deque. The thief then acquires
+     * rq_lock[busy_cpu], runs the validation in `sched_try_steal`,
+     * and reaches `remove_from_cpu_queue_locked(candidate, busy_cpu)`
+     * — which returns 0 because we already removed candidate from
+     * busy_cpu's queue under the lock. The result is `stealable == 0`
+     * and the thief discards the entry as stale. The candidate then
+     * makes its way to idle_cpu via the add_task call below. */
     candidate->state = TASK_READY;
     candidate->assigned_cpu = idle_cpu;
     scheduler_add_task_to_cpu(candidate, idle_cpu);

@@ -466,16 +466,15 @@ static int boot_secondary(uint32_t cpu)
 
     /* Boot flag may not be visible due to cache incoherency (Pi 5, Jetson).
      * If PSCI CPU_ON returned success, the secondary is likely running
-     * but the flag write didn't propagate. Accept it as online. */
-    if (ret == PSCI_SUCCESS) {
-        WARN("CPU %u: boot flag not visible (cache incoherency) — assuming online", cpu);
-        cpu_data[cpu].online = true;
-        return PSCI_SUCCESS;
-    }
-
-    WARN("CPU %u: boot timeout (flag=%u, online=%d)", cpu,
-         cpu_boot_flag[cpu], (int)cpu_data[cpu].online);
-    return PSCI_INTERNAL_FAILURE;
+     * but the flag write didn't propagate. Accept it as online.
+     *
+     * `ret` is unconditionally PSCI_SUCCESS at this point (the
+     * non-success branch above returns early at line 437-441). The
+     * timeout-fail branch that previously sat below this fallback
+     * was unreachable; it has been removed. */
+    WARN("CPU %u: boot flag not visible (cache incoherency) — assuming online", cpu);
+    cpu_data[cpu].online = true;
+    return PSCI_SUCCESS;
 }
 
 /*
