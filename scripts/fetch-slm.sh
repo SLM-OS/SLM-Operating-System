@@ -234,7 +234,21 @@ echo "Download complete: $(stat --format='%s' "$PART") bytes"
 
 if [[ "$EXPECTED_SHA" == "TBD-PIN-AFTER-FIRST-DOWNLOAD" ]]; then
     actual=$(compute_sha "$PART")
-    mv -f "$PART" "$DEST"
+    # Refuse to clobber an existing $DEST when the pin is unset —
+    # the on-disk copy may already be the developer's known-good
+    # blob waiting to be hash-pinned, and overwriting it would
+    # silently swap them to whatever the upstream returned this
+    # run. The earlier check at the top of the script already
+    # bails when $DEST exists with a TBD pin; this is a second
+    # gate in case someone reordered the early-return logic.
+    if [[ -e "$DEST" ]]; then
+        echo "fetch-slm.sh: refusing to overwrite existing '$DEST' with unverified download." >&2
+        echo "  Either pin SHA256 for '$MODEL_NAME' or delete '$DEST' first." >&2
+        rm -f "$PART"
+        trap - EXIT
+        exit 5
+    fi
+    mv "$PART" "$DEST"
     trap - EXIT
     echo "DOWNLOADED: $DEST" >&2
     echo "fetch-slm.sh: SHA256 pin is unset for '$MODEL_NAME' — file written to '$DEST' but NOT verified." >&2

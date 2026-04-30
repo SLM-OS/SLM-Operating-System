@@ -214,17 +214,18 @@ static int slm_load(int argc, char *argv[])
         return -1;
     }
     /*
-     * 2 GiB upper bound — well above Qwen2.5-1.5B-Q4_K_M (~1.0 GB)
-     * and Llama-3.2-1B-Q4_K_M (~0.8 GB), but small enough that an
-     * accidentally-staged 16 GiB blob fails fast with a useful
-     * message rather than hitting `pmm_alloc_pages` and producing
-     * a misleading "out of memory" diagnostic.
+     * GGUF size cap is owned by the Rust registry
+     * (`MAX_PLAUSIBLE_GGUF_BYTES`, 1 GiB today — matches PMM buddy
+     * max-order). Querying via FFI keeps the C shell in lockstep
+     * when #550's multi-block allocator lifts the ceiling, so a
+     * stale 2-GiB hardcode here can't accept a file the registry
+     * will then reject with `CorruptedData`.
      */
-    const size_t SLM_MAX_GGUF_BYTES = 2ull * 1024ull * 1024ull * 1024ull;
-    if (info.size > SLM_MAX_GGUF_BYTES) {
+    const uint64_t cap = rust_slm_max_gguf_bytes();
+    if ((uint64_t)info.size > cap) {
         shell_printf("slm load: file too large (%llu bytes, cap %llu)\r\n",
                      (unsigned long long)info.size,
-                     (unsigned long long)SLM_MAX_GGUF_BYTES);
+                     (unsigned long long)cap);
         return -1;
     }
 

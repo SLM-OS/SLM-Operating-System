@@ -159,6 +159,26 @@ impl Handoff {
     /// no page is available (kernel hasn't staged it yet, or M6.A-2
     /// isn't wired) or the page header fails magic/version checks.
     /// M5 callers fall back to CPU when this returns `None`.
+    ///
+    /// # M6.A-3 re-review hook
+    ///
+    /// Today this is a stub: `slm_gpu_get_handoff_phys` returns 0 on
+    /// every platform, so the magic/version check + later reads in
+    /// the `Some(Self { ... })` arm are unreachable. When M6.A-3
+    /// wires the real pre-kexec handoff loader, the magic/version
+    /// validation below has a TOCTOU window — the kernel could in
+    /// principle re-stage the page between the magic check (line
+    /// 179-183) and downstream reads of `op_count` / `arch_kind`.
+    /// At that point either:
+    ///   1. Document that the kernel must not mutate the staged
+    ///      page after `slm_gpu_get_handoff_phys` first returns
+    ///      non-zero (matches the read-only `'static` bound on
+    ///      `Handoff`'s PhantomData), OR
+    ///   2. Read the entire header into a local copy via
+    ///      `core::ptr::read_volatile` and validate the local
+    ///      copy's fields before constructing `Self`.
+    /// Pinning this here so the M6.A-3 PR reviewer doesn't have to
+    /// rediscover the constraint.
     pub fn try_from_kernel() -> Option<Self> {
         // SAFETY: bare-metal FFI; the kernel-side stub returns either
         // 0 (no page staged) or a kernel-vouched physical address that

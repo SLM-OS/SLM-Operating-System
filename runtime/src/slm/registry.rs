@@ -266,6 +266,14 @@ pub struct SlmModelInfoC {
 // crosses the FFI boundary as a value type and never contains
 // borrowed data.
 
+// FFI size pin: paired with `_Static_assert(sizeof(SlmModelInfoC) ==
+// 92, ...)` in `kernel/include/slm_ffi.h`. Field layout is 16 +
+// 32 + 10×u32 + f32 = 92 bytes; all naturally 4-byte aligned so no
+// padding. Adding/reordering a field breaks the C side's struct
+// reads; failing here at compile time surfaces the drift before
+// anything links.
+const _: () = assert!(core::mem::size_of::<SlmModelInfoC>() == 92);
+
 // ---------------------------------------------------------------------------
 // Slot table + spinlock
 // ---------------------------------------------------------------------------

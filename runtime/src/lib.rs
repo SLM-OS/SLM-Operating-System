@@ -5148,6 +5148,19 @@ pub extern "C" fn rust_slm_count() -> u32 {
     slm::registry::count() as u32
 }
 
+/// Maximum GGUF buffer size accepted by `rust_slm_load`, in bytes.
+///
+/// Single source of truth for the C shell's pre-load size gate. Pinned
+/// at the registry's `MAX_PLAUSIBLE_GGUF_BYTES` (1 GiB today, matching
+/// the PMM buddy max-order). When #550's multi-block allocator lands
+/// and the cap rises, the C shell automatically picks up the new
+/// value without a corresponding edit on its side.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_max_gguf_bytes() -> u64 {
+    slm::registry::MAX_PLAUSIBLE_GGUF_BYTES as u64
+}
+
 /// Test-only: build a Qwen2.5-shaped GGUF fixture into the caller's
 /// buffer and return the bytes-written count via `*out_size`.
 ///
@@ -5223,6 +5236,13 @@ pub struct SlmStatsC {
     pub last_ttft_ns: u64,
     pub last_decode_ns: u64,
 }
+
+// FFI size pin: paired with `_Static_assert(sizeof(SlmStatsC) == 32,
+// ...)` in `kernel/include/slm_ffi.h`. Layout is 3×u32 + 4-byte
+// padding (u64 alignment) + 2×u64 = 32 bytes. Failing here surfaces
+// any field add/reorder at compile time before C and Rust drift.
+#[cfg(feature = "slm")]
+const _: () = assert!(core::mem::size_of::<SlmStatsC>() == 32);
 
 /// Open a session over a loaded SLM.
 ///
