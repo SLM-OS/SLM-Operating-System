@@ -10,6 +10,7 @@
  */
 
 #include "ga10b_bringup.h"
+#include "ga10b_qmd.h"
 #include "gsp.h"
 #include "falcon.h"
 #include "../../include/uart.h"
@@ -1022,6 +1023,21 @@ struct ga10b_channel_handoff g_handoff;
 static struct ga10b_channel_handoff g_handoff;
 #endif
 
+/* Per-channel QMD-pool round-robin counter. Used by the v7 dispatch
+ * path in `ga10b_bringup_launch_kernel` to pick a fresh slot for
+ * each launch. Persists across launches (modulo pool_n_slots) so
+ * consecutive dispatches use distinct pool offsets — that's what
+ * forces SKED to redecode each time and makes the per-QMD
+ * INVALIDATE_*_CACHE bits actually fire (issue #558).
+ *
+ * Single-channel design today; if SLM-OS ever supports multiple
+ * concurrent channels, this becomes a per-channel field. The slot
+ * counter is local to the dispatch-loop body — host tests cover
+ * the counter advancement directly via `ga10b_qmd_pool_prepare`
+ * (which takes its own slot_inout pointer), so this static does
+ * not need extern visibility for tests. */
+static uint32_t g_qmd_pool_next_slot;
+
 /* Scan a physical-memory range for the handoff magic, at the given
  * stride. Returns the address of the first match, or 0 if not found.
  * The stride and range are parameters so the host tests can drive this
@@ -1736,6 +1752,159 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
                                  7, "GA10B-P7C");
 }
 
+/* v7 per-dispatch QMD pipeline runner. Called from
+ * `ga10b_bringup_launch_kernel` after `ga10b_handoff_is_v7` returns
+ * true. Validates the v7 fields, walks the v7 ops array, authors
+ * a fresh QMD per op into the next pool slot, and submits. Returns
+ * 0 on full-chain success, -1 on validation/dispatch failure (with
+ * b->last_error_phase = 8).
+ *
+ * Extracted from the launch_kernel function body for readability.
+ * The bounds-check error paths have dedicated host-test coverage
+ * via `ga10b_v7_validate_handoff`, which this function delegates
+ * to. The dispatch-loop body is exercised indirectly through the
+ * `ga10b_qmd_pool_prepare` tests; making it directly host-testable
+ * is tracked separately in #580 (refactor to take handoff + slot
+ * counter as parameters and a stub-submit function pointer).
+ */
+static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
+{
+    enum ga10b_v7_validation_error verr =
+        ga10b_v7_validate_handoff(&g_handoff);
+    if (verr != GA10B_V7_OK) {
+        switch (verr) {
+        case GA10B_V7_ERR_OPS_PHYS_ZERO:
+            uart_puts("[GA10B-P8-v7] pipeline_n_ops > 0 but "
+                      "pipeline_ops_phys is zero\n");
+            break;
+        case GA10B_V7_ERR_OPS_EXCEED_CAP:
+            uart_printf("[GA10B-P8-v7] pipeline_n_ops=%lu exceeds "
+                        "GA10B_PIPELINE_V7_MAX_OPS=%u — refusing "
+                        "to dispatch (handoff likely corrupt)\n",
+                        (unsigned long)g_handoff.pipeline_n_ops,
+                        (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
+            break;
+        case GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT:
+            uart_printf("[GA10B-P8-v7] qmd_pool_size_bytes=%lu < "
+                        "qmd_pool_n_slots=%lu × %u — handoff "
+                        "inconsistent\n",
+                        (unsigned long)g_handoff.qmd_pool_size_bytes,
+                        (unsigned long)g_handoff.qmd_pool_n_slots,
+                        (unsigned)GA10B_QMD_SIZE_BYTES);
+            break;
+        case GA10B_V7_ERR_NULL_HANDOFF:
+            /* Unreachable in production — `ga10b_handoff_is_v7`
+             * already null-checks and we only enter this branch
+             * when it returned true. Defensive log so a future
+             * caller that skips `is_v7` still surfaces the bug
+             * instead of dispatching with garbage. */
+            uart_puts("[GA10B-P8-v7] handoff pointer is NULL — "
+                      "validate-after-is_v7 contract violated\n");
+            break;
+        case GA10B_V7_OK:
+            /* Unreachable — the outer `if (verr != OK)` rejects
+             * this case. Keeping the case label so a future
+             * addition to the enum prompts a -Wswitch warning. */
+            break;
+        }
+        b->last_error_phase = 8;
+        return -1;
+    }
+    /* CPU-physical → identity-mapped CPU VA on Jetson. Same
+     * contract as the v3 dispatch fields and the v5/v6 ops
+     * array: the helper allocates these via nvmap into the
+     * IOVMM heap, where SMMU passthrough makes the CPU's view
+     * of the page numerically equal to the physical address.
+     * Holds at EL2 with the unified DRAM map; would need an
+     * explicit phys-to-virt translation on any platform that
+     * doesn't identity-map. */
+    const struct ga10b_pipeline_op_v7 *ops_v7 =
+        (const struct ga10b_pipeline_op_v7 *)
+            (uintptr_t)g_handoff.pipeline_ops_phys;
+    uint8_t *pool_va =
+        (uint8_t *)(uintptr_t)g_handoff.qmd_pool_phys;
+    if (gsp_platform->cache_invalidate) {
+        gsp_platform->cache_invalidate(
+            (void *)ops_v7,
+            (size_t)g_handoff.pipeline_n_ops * sizeof(*ops_v7));
+    }
+    GA10B_DBG("[GA10B-P8-v7] per-dispatch QMD mode — %lu ops, "
+              "pool_phys=0x%lx pool_gpu_va=0x%lx slots=%lu\n",
+              (unsigned long)g_handoff.pipeline_n_ops,
+              (unsigned long)g_handoff.qmd_pool_phys,
+              (unsigned long)g_handoff.qmd_pool_gpu_va,
+              (unsigned long)g_handoff.qmd_pool_n_slots);
+    for (uint32_t i = 0; i < g_handoff.pipeline_n_ops; i++) {
+        const struct ga10b_pipeline_op_v7 *op = &ops_v7[i];
+        /* Validate via the v6-prefix-compatible op_is_valid
+         * helper. It checks qmd_gpu_va (kept around for byte-
+         * compare validation) and output_phys; both fields are
+         * at the same offsets on v7. */
+        if (!ga10b_pipeline_op_is_valid(
+                (const struct ga10b_pipeline_op *)op)) {
+            uart_printf("[GA10B-P8-v7] op %lu malformed "
+                        "(qmd=0x%lx out=0x%lx) — aborting\n",
+                        (unsigned long)(i + 1),
+                        (unsigned long)op->qmd_gpu_va,
+                        (unsigned long)op->output_phys);
+            b->last_error_phase = 8;
+            return -1;
+        }
+        /* Author a fresh QMD into the next pool slot. */
+        struct ga10b_qmd_pool_slot slot = ga10b_qmd_pool_prepare(
+            pool_va,
+            g_handoff.qmd_pool_gpu_va,
+            g_handoff.qmd_pool_n_slots,
+            &g_qmd_pool_next_slot,
+            op);
+        /* Cache-clean the freshly-written slot bytes so the GPU
+         * sees them via the GMMU mapping. `cache_clean` is
+         * NULL-guarded because some test platforms stub it; the
+         * `mb()` is mandatory on every supported platform (Pi 5,
+         * Jetson, x86, QEMU all install it during gsp_platform
+         * setup) so it's called unconditionally. Same convention
+         * the v5/v6 path uses. */
+        if (gsp_platform->cache_clean) {
+            gsp_platform->cache_clean((const void *)slot.cpu_va,
+                                      GA10B_QMD_SIZE_BYTES);
+        }
+        gsp_platform->mb();
+        uint64_t sema_gpu_va =
+            g_handoff.semaphore_gpu_va + GA10B_SEMA_PAGE_OFFSET;
+        uint64_t sema_phys =
+            g_handoff.semaphore_phys + GA10B_SEMA_PAGE_OFFSET;
+        GA10B_DBG("[GA10B-P8-v7]   op[%lu/%lu] slot=%lu "
+                  "fresh_qmd_gpu_va=0x%lx out=0x%lx "
+                  "sema_phys=0x%lx (payload=0x%x)\n",
+                  (unsigned long)(i + 1),
+                  (unsigned long)g_handoff.pipeline_n_ops,
+                  (unsigned long)slot.index,
+                  (unsigned long)slot.gpu_va,
+                  (unsigned long)op->output_phys,
+                  (unsigned long)sema_phys,
+                  (unsigned)GA10B_SEMA_RELEASE_PAYLOAD);
+        uint32_t pb_buf[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
+        uint32_t pb_dwords =
+            ga10b_build_launch_kernel_with_sema_pushbuffer(
+                pb_buf, slot.gpu_va,
+                sema_gpu_va,
+                GA10B_SEMA_RELEASE_PAYLOAD);
+        int rc = ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                       sema_phys,
+                                       GA10B_SEMA_RELEASE_PAYLOAD,
+                                       8, "GA10B-P8-v7");
+        if (rc < 0) {
+            uart_printf("[GA10B-P8-v7] op %lu failed (rc=%d) "
+                        "— aborting chain\n",
+                        (unsigned long)(i + 1), rc);
+            return rc;
+        }
+    }
+    GA10B_DBG("[GA10B-P8-v7] pipeline complete — %lu ops fired\n",
+              (unsigned long)g_handoff.pipeline_n_ops);
+    return 0;
+}
+
 int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
 {
     if (!b || (b->state != GA10B_BRINGUP_CHANNEL_OPEN &&
@@ -1750,11 +1919,27 @@ int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
         return -1;
     }
 
-    /* v5 multi-op pipeline path. When pipeline_n_ops > 0, the handoff
-     * carries an array of struct ga10b_pipeline_op describing N
-     * dispatches to run in sequence. Used by model-inference helpers
-     * (MNIST and beyond) where each op's output is the next op's
-     * input. */
+    /* v7 per-dispatch QMD path. When the helper has populated the v7
+     * pool descriptor (version >= 7 + qmd_pool_n_slots > 0), each
+     * op's QMD bytes are authored *here* per-launch into a slot of
+     * the GMMU-mapped QMD pool, and the slot's GPU VA is what gets
+     * fed into SEND_PCAS_A. Forces SKED to redecode each launch —
+     * workaround for the off-by-one staleness that comes from
+     * replaying byte-identical helper-baked QMDs. See
+     * docs/gpu-qmd-per-dispatch-plan.md and #558.
+     *
+     * Falls through to the v5/v6 path on any v7 input that's
+     * missing or out of range. The v6 path remains the default until
+     * Phase 3 (helper-side pool allocation) lands. */
+    if (ga10b_handoff_is_v7(&g_handoff)) {
+        return ga10b_dispatch_v7_pipeline(b);
+    }
+
+    /* v5/v6 multi-op pipeline path (helper-baked QMDs). When
+     * pipeline_n_ops > 0, the handoff carries an array of
+     * struct ga10b_pipeline_op describing N dispatches to run in
+     * sequence. Used by model-inference helpers (MNIST and beyond)
+     * where each op's output is the next op's input. */
     if (g_handoff.version >= 5 && g_handoff.pipeline_n_ops > 0) {
         if (g_handoff.pipeline_ops_phys == 0) {
             uart_puts("[GA10B-P8] pipeline_n_ops > 0 but pipeline_ops_phys "

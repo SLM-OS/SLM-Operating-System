@@ -43,7 +43,9 @@
 #include "../../kernel/gpu/nvidia/falcon.h"
 #include "../../kernel/gpu/nvidia/ga10b_bringup.h"
 #include "../../kernel/gpu/nvidia/ga10b_channel_handoff.h"
+#include "../../kernel/gpu/nvidia/ga10b_qmd.h"
 #include "../../kernel/gpu/nvidia/gsp.h"
+#include "../../kernel/include/ga10b_qmd_selftest_reference.h"
 #include "../../scripts/gpu-qmd-bits.h"
 
 /* nvidia_vbios_platform_load is referenced by the shared gsp bringup
@@ -1643,14 +1645,57 @@ static void test_launch_kernel_with_sema_pb_payload_passthrough(void)
  * Handoff v3 — channel + kernel-launch state
  * ====================================================================== */
 
-static void test_handoff_v6_layout_size(void)
+static void test_handoff_v7_layout_size(void)
 {
-    printf("== test_handoff_v6_layout_size ==\n");
+    printf("== test_handoff_v7_layout_size ==\n");
     /* Belt-and-suspenders runtime check. The header pins the size
      * with a _Static_assert but a fresh-eyes reader shouldn't have
      * to dig into compile-time errors to discover that v2 was 120,
-     * v3 was 192, v4 was 200, v5 was 216, and v6 is 232. */
-    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 232u);
+     * v3 was 192, v4 was 200, v5 was 216, v6 was 232, and v7 is 256. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 256u);
+}
+
+static void test_handoff_v7_pool_offsets(void)
+{
+    printf("== test_handoff_v7_pool_offsets ==\n");
+    /* v7 appends qmd_pool_* descriptor after pipeline_kind (offset
+     * 228, last u32 of v6). Pool descriptor is 24 bytes total. */
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, qmd_pool_phys),
+               232u);
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, qmd_pool_gpu_va),
+               240u);
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, qmd_pool_size_bytes),
+               248u);
+    REQUIRE_EQ(offsetof(struct ga10b_channel_handoff, qmd_pool_n_slots),
+               252u);
+}
+
+static void test_pipeline_op_v7_layout(void)
+{
+    printf("== test_pipeline_op_v7_layout ==\n");
+    /* v7 per-op struct: leading 24 B identical to v6, then 56 B of
+     * QMD construction inputs. Total 80 B per op. Both Linux helper
+     * and SLM-OS depend on the field offsets — silent reorder would
+     * make SLM-OS read e.g. block_x where it expects grid_x. */
+    REQUIRE_EQ(sizeof(struct ga10b_pipeline_op_v7), 80u);
+    /* v6-compatible prefix */
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, qmd_gpu_va), 0u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, output_phys), 8u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, expected_payload), 16u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, flags), 20u);
+    /* v7 additions */
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, shader_gpu_va), 24u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, cbuf_gpu_va), 32u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, register_count_v), 40u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, grid_x), 44u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, grid_y), 48u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, grid_z), 52u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, block_x), 56u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, block_y), 60u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, block_z), 64u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, smem_size_bytes), 68u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, slm_size_bytes), 72u);
+    REQUIRE_EQ(offsetof(struct ga10b_pipeline_op_v7, barrier_count), 76u);
 }
 
 static void test_handoff_v6_input_buf_offsets(void)
@@ -2308,6 +2353,13 @@ static void test_pipeline_max_ops_constant(void)
      * stops working without surfacing a clear build error; tests
      * fail loudly instead. */
     REQUIRE(GA10B_PIPELINE_MAX_OPS >= 8u);
+
+    /* v7 cap: 4096 / 80 = 51 ops. Smaller than v6 because the per-op
+     * struct is bigger. Still comfortably above MNIST's 8 ops. */
+    REQUIRE_EQ((unsigned)GA10B_PIPELINE_V7_MAX_OPS, 51u);
+    REQUIRE(GA10B_PIPELINE_V7_MAX_OPS * sizeof(struct ga10b_pipeline_op_v7)
+            <= 4096u);
+    REQUIRE(GA10B_PIPELINE_V7_MAX_OPS >= 8u);
 }
 
 /* ======================================================================
@@ -2429,6 +2481,437 @@ static void test_qmd_set_bits_preserves_neighbors(void)
 }
 
 /* ======================================================================
+ * ga10b_qmd_pool_prepare — pure-logic helper for the v7 dispatch path.
+ *
+ * Tests cover: slot rotation, wrap-around, the GPU VA returned matches
+ * pool_gpu_va + slot_index * 256, the slot's CPU bytes match what
+ * ga10b_qmd_populate would write directly, and defensive null/zero
+ * input handling.
+ * ====================================================================== */
+
+/* Synthesize a representative v7 op for tests. Values are arbitrary
+ * but distinct so we can tell op A's QMD bytes from op B's. */
+static struct ga10b_pipeline_op_v7
+make_test_op_v7(uint64_t shader, uint64_t cbuf, uint32_t regs,
+                uint32_t gx, uint32_t gy, uint32_t gz)
+{
+    struct ga10b_pipeline_op_v7 op;
+    memset(&op, 0, sizeof(op));
+    op.qmd_gpu_va       = 0x10000000ULL;  /* non-zero — validator pass */
+    op.output_phys      = 0x20000000ULL;  /* non-zero — validator pass */
+    op.expected_payload = 0xCAFEDEADu;
+    op.flags            = 0;
+    op.shader_gpu_va    = shader;
+    op.cbuf_gpu_va      = cbuf;
+    op.register_count_v = regs;
+    op.grid_x = gx; op.grid_y = gy; op.grid_z = gz;
+    op.block_x = 32u; op.block_y = 1u; op.block_z = 1u;
+    op.smem_size_bytes = 0;
+    op.slm_size_bytes  = 0;
+    op.barrier_count   = 0;
+    return op;
+}
+
+static void test_qmd_pool_prepare_advances_slot(void)
+{
+    printf("== test_qmd_pool_prepare_advances_slot ==\n");
+    uint8_t pool[8 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x12340000ULL, 0x56780000ULL, 64u, 1u, 1u, 1u);
+
+    struct ga10b_qmd_pool_slot r0 = ga10b_qmd_pool_prepare(
+        pool, 0xAA000000ULL, 8u, &slot, &op);
+    REQUIRE_EQ(r0.index, 0u);
+    REQUIRE_EQ(r0.gpu_va, 0xAA000000ULL);
+    REQUIRE(r0.cpu_va == pool);
+    REQUIRE_EQ(slot, 1u);
+
+    struct ga10b_qmd_pool_slot r1 = ga10b_qmd_pool_prepare(
+        pool, 0xAA000000ULL, 8u, &slot, &op);
+    REQUIRE_EQ(r1.index, 1u);
+    REQUIRE_EQ(r1.gpu_va, 0xAA000000ULL + GA10B_QMD_SIZE_BYTES);
+    REQUIRE(r1.cpu_va == pool + GA10B_QMD_SIZE_BYTES);
+    REQUIRE_EQ(slot, 2u);
+}
+
+static void test_qmd_pool_prepare_wraps_at_n_slots(void)
+{
+    printf("== test_qmd_pool_prepare_wraps_at_n_slots ==\n");
+    uint8_t pool[3 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x12340000ULL, 0x56780000ULL, 64u, 1u, 1u, 1u);
+
+    /* 3 slots; on the 4th call we wrap back to slot 0. */
+    for (uint32_t i = 0; i < 7; i++) {
+        struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+            pool, 0xBB000000ULL, 3u, &slot, &op);
+        REQUIRE_EQ(r.index, i % 3u);
+    }
+    REQUIRE_EQ(slot, 7u % 3u);
+}
+
+static void test_qmd_pool_prepare_starts_from_inout_value(void)
+{
+    printf("== test_qmd_pool_prepare_starts_from_inout_value ==\n");
+    /* Caller may resume with a non-zero counter (e.g. across
+     * launches). The helper must respect the in-value, not reset it. */
+    uint8_t pool[4 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 5;  /* > pool_n_slots — should modulo to 1 */
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x12340000ULL, 0x56780000ULL, 64u, 1u, 1u, 1u);
+
+    struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+        pool, 0xCC000000ULL, 4u, &slot, &op);
+    REQUIRE_EQ(r.index, 1u);
+    REQUIRE_EQ(r.gpu_va, 0xCC000000ULL + GA10B_QMD_SIZE_BYTES);
+    REQUIRE_EQ(slot, 2u);
+}
+
+static void test_qmd_pool_prepare_writes_match_direct_populate(void)
+{
+    printf("== test_qmd_pool_prepare_writes_match_direct_populate ==\n");
+    /* The slot's bytes must equal what ga10b_qmd_populate would
+     * produce from the same op-params. This is the byte-compare gate
+     * that Phase 4 uses against helper-baked QMDs on hardware. */
+    uint8_t pool[4 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x123400000000ULL,    /* shader_gpu_va, both halves nonzero */
+        0x5678BEEF0000ULL,    /* cbuf_gpu_va, both halves nonzero */
+        96u, 16u, 8u, 4u);
+    op.block_x = 32; op.block_y = 4; op.block_z = 1;
+
+    /* Drive the pool-prepare path. */
+    struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+        pool, 0x11000000ULL, 4u, &slot, &op);
+    REQUIRE_EQ(r.index, 0u);
+
+    /* Independently encode the same QMD via the lower-level encoder. */
+    uint32_t expected[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(expected,
+                       op.shader_gpu_va, op.cbuf_gpu_va,
+                       op.register_count_v,
+                       op.grid_x, op.grid_y, op.grid_z,
+                       op.block_x, op.block_y, op.block_z);
+
+    /* Slot bytes match the direct encoder output to the byte. */
+    REQUIRE_EQ(memcmp(r.cpu_va, expected, GA10B_QMD_SIZE_BYTES), 0);
+}
+
+static void test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds(void)
+{
+    printf("== test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds ==\n");
+    /* Two ops with different shader/cbuf/register/dim params must
+     * produce different QMD bytes. Catches a regression where the
+     * helper accidentally pinned a parameter. */
+    uint8_t pool[4 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+
+    struct ga10b_pipeline_op_v7 op_a = make_test_op_v7(
+        0x10000000ULL, 0x20000000ULL, 64u, 1u, 1u, 1u);
+    struct ga10b_pipeline_op_v7 op_b = make_test_op_v7(
+        0x30000000ULL, 0x40000000ULL, 96u, 8u, 4u, 2u);
+
+    struct ga10b_qmd_pool_slot ra = ga10b_qmd_pool_prepare(
+        pool, 0u, 4u, &slot, &op_a);
+    struct ga10b_qmd_pool_slot rb = ga10b_qmd_pool_prepare(
+        pool, 0u, 4u, &slot, &op_b);
+
+    REQUIRE(memcmp(ra.cpu_va, rb.cpu_va, GA10B_QMD_SIZE_BYTES) != 0);
+}
+
+static void test_qmd_pool_prepare_rejects_invalid_inputs(void)
+{
+    printf("== test_qmd_pool_prepare_rejects_invalid_inputs ==\n");
+    uint8_t pool[GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x10000000ULL, 0x20000000ULL, 64u, 1u, 1u, 1u);
+
+    /* pool_n_slots == 0: must return zero-initialised result. */
+    struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+        pool, 0xDD000000ULL, 0u, &slot, &op);
+    REQUIRE_EQ(r.gpu_va, 0u);
+    REQUIRE(r.cpu_va == NULL);
+    REQUIRE_EQ(slot, 0u);  /* counter unchanged on reject */
+
+    /* NULL pool_va. */
+    r = ga10b_qmd_pool_prepare(NULL, 0xDD000000ULL, 4u, &slot, &op);
+    REQUIRE_EQ(r.gpu_va, 0u);
+
+    /* NULL slot_inout. */
+    r = ga10b_qmd_pool_prepare(pool, 0xDD000000ULL, 4u, NULL, &op);
+    REQUIRE_EQ(r.gpu_va, 0u);
+
+    /* NULL op. */
+    r = ga10b_qmd_pool_prepare(pool, 0xDD000000ULL, 4u, &slot, NULL);
+    REQUIRE_EQ(r.gpu_va, 0u);
+}
+
+/* ======================================================================
+ * v7 dispatch validators — `ga10b_handoff_is_v7` +
+ * `ga10b_v7_validate_handoff`. These pure-logic helpers gate the
+ * v7 branch in `ga10b_bringup_launch_kernel`. Tests here exercise
+ * the early-return paths that the dispatch loop relies on; without
+ * them the four bounds-check error paths are unreachable from any
+ * test.
+ * ====================================================================== */
+
+static struct ga10b_channel_handoff
+make_well_formed_v7_handoff(void)
+{
+    /* Numerically-plausible (but synthetic) handoff that passes all
+     * v7 checks. Used as the reference baseline; per-test mutations
+     * break specific fields. */
+    struct ga10b_channel_handoff h;
+    memset(&h, 0, sizeof(h));
+    h.magic              = GA10B_CHANNEL_HANDOFF_MAGIC;
+    h.version            = 7u;
+    h.pipeline_n_ops     = 8u;
+    h.pipeline_ops_phys  = 0xDEAD0000ULL;
+    h.qmd_pool_phys      = 0xCAFE0000ULL;
+    h.qmd_pool_gpu_va    = 0x4000ULL;
+    h.qmd_pool_n_slots   = 16u;
+    h.qmd_pool_size_bytes = 16u * 256u;
+    return h;
+}
+
+static void test_handoff_is_v7_accepts_well_formed(void)
+{
+    printf("== test_handoff_is_v7_accepts_well_formed ==\n");
+    struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
+    REQUIRE(ga10b_handoff_is_v7(&h));
+}
+
+static void test_handoff_is_v7_rejects_pre_v7_version(void)
+{
+    printf("== test_handoff_is_v7_rejects_pre_v7_version ==\n");
+    struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
+    h.version = 6u;
+    REQUIRE(!ga10b_handoff_is_v7(&h));
+    h.version = 5u;
+    REQUIRE(!ga10b_handoff_is_v7(&h));
+    h.version = 0u;
+    REQUIRE(!ga10b_handoff_is_v7(&h));
+}
+
+static void test_handoff_is_v7_rejects_zero_pool_fields(void)
+{
+    printf("== test_handoff_is_v7_rejects_zero_pool_fields ==\n");
+    /* Defensive belt-and-braces: a partial v7 producer that
+     * advances `version` without populating the pool should still
+     * fall through to v6, not take the v7 path with NULL pool. */
+    struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
+    h.qmd_pool_n_slots = 0u;
+    REQUIRE(!ga10b_handoff_is_v7(&h));
+
+    h = make_well_formed_v7_handoff();
+    h.qmd_pool_phys = 0u;
+    REQUIRE(!ga10b_handoff_is_v7(&h));
+
+    h = make_well_formed_v7_handoff();
+    h.pipeline_n_ops = 0u;
+    REQUIRE(!ga10b_handoff_is_v7(&h));
+}
+
+static void test_handoff_is_v7_rejects_null(void)
+{
+    printf("== test_handoff_is_v7_rejects_null ==\n");
+    REQUIRE(!ga10b_handoff_is_v7(NULL));
+}
+
+static void test_v7_validate_accepts_well_formed(void)
+{
+    printf("== test_v7_validate_accepts_well_formed ==\n");
+    struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h), GA10B_V7_OK);
+}
+
+static void test_v7_validate_rejects_zero_ops_phys(void)
+{
+    printf("== test_v7_validate_rejects_zero_ops_phys ==\n");
+    /* (1) of the reviewer's 5 cases: pipeline_ops_phys = 0 returns
+     * a phase-8 error from the dispatch path. */
+    struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
+    h.pipeline_ops_phys = 0u;
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h),
+               GA10B_V7_ERR_OPS_PHYS_ZERO);
+}
+
+static void test_v7_validate_rejects_n_ops_exceeds_cap(void)
+{
+    printf("== test_v7_validate_rejects_n_ops_exceeds_cap ==\n");
+    /* (2) of the reviewer's 5 cases: pipeline_n_ops > V7_MAX. */
+    struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
+    h.pipeline_n_ops = GA10B_PIPELINE_V7_MAX_OPS + 1u;
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h),
+               GA10B_V7_ERR_OPS_EXCEED_CAP);
+
+    /* The cap value itself is allowed; the check is `>`, not `>=`. */
+    h = make_well_formed_v7_handoff();
+    h.pipeline_n_ops = GA10B_PIPELINE_V7_MAX_OPS;
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h), GA10B_V7_OK);
+}
+
+static void test_v7_validate_rejects_pool_size_mismatch(void)
+{
+    printf("== test_v7_validate_rejects_pool_size_mismatch ==\n");
+    /* (3) of the reviewer's 5 cases: a producer that claims more
+     * slots than the pool can hold (e.g. wrong size_bytes /
+     * n_slots arithmetic). Walk both sides of the boundary. */
+    struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
+    h.qmd_pool_n_slots    = 16u;
+    h.qmd_pool_size_bytes = 16u * 256u - 1u;
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h),
+               GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT);
+
+    /* Exact match passes. */
+    h = make_well_formed_v7_handoff();
+    h.qmd_pool_n_slots    = 16u;
+    h.qmd_pool_size_bytes = 16u * 256u;
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h), GA10B_V7_OK);
+
+    /* Generous over-allocation is fine — we only check the lower
+     * bound. */
+    h = make_well_formed_v7_handoff();
+    h.qmd_pool_n_slots    = 16u;
+    h.qmd_pool_size_bytes = 16u * 256u + 4096u;
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h), GA10B_V7_OK);
+}
+
+static void test_v7_validate_first_failure_wins(void)
+{
+    printf("== test_v7_validate_first_failure_wins ==\n");
+    /* When multiple checks fail, the validator returns the first-
+     * tripped reason. Pinning the order makes the dispatch-site
+     * uart_printf branch deterministic. NULL is checked first
+     * (defense-in-depth), then field-level errors in declaration
+     * order: ops_phys → exceed_cap → pool_size. */
+
+    /* Field-level ordering: ops_phys wins over the later checks. */
+    struct ga10b_channel_handoff h = make_well_formed_v7_handoff();
+    h.pipeline_ops_phys   = 0u;
+    h.pipeline_n_ops      = GA10B_PIPELINE_V7_MAX_OPS + 1u;
+    h.qmd_pool_size_bytes = 0u;
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(&h),
+               GA10B_V7_ERR_OPS_PHYS_ZERO);
+
+    /* NULL beats every field-level error. The standalone
+     * `test_v7_validate_rejects_null_handoff` covers NULL on its
+     * own; this assertion pins NULL's *precedence* over any field-
+     * level malformation, since the validator can't reach the
+     * field-level checks at all if `h == NULL`. */
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(NULL),
+               GA10B_V7_ERR_NULL_HANDOFF);
+}
+
+static void test_v7_validate_rejects_null_handoff(void)
+{
+    printf("== test_v7_validate_rejects_null_handoff ==\n");
+    /* Self-enforcing contract: even if a future caller skips
+     * `ga10b_handoff_is_v7` (which null-checks) and calls
+     * `ga10b_v7_validate_handoff` directly, NULL must surface
+     * cleanly rather than NULL-deref. */
+    REQUIRE_EQ((int)ga10b_v7_validate_handoff(NULL),
+               GA10B_V7_ERR_NULL_HANDOFF);
+}
+
+/* ======================================================================
+ * `gpu qmd-selftest` reference-blob auto-pinning regression check.
+ *
+ * The shell verb at kernel/src/shell_sys.c:cmd_gpu compares a
+ * runtime-encoded QMD against `ga10b_qmd_selftest_expected` from
+ * kernel/include/ga10b_qmd_selftest_reference.h. If a future change
+ * to `ga10b_qmd_populate` defaults forgets to regenerate the
+ * reference blob via scripts/tools/qmd-selftest-gen.c, the on-
+ * device verb starts failing. The test below catches it earlier:
+ * encode with the same fixed inputs the shared header pins, then
+ * byte-compare against the same blob. Build fails before deploy.
+ * ====================================================================== */
+
+static void test_qmd_selftest_reference_matches_encoder(void)
+{
+    printf("== test_qmd_selftest_reference_matches_encoder ==\n");
+    uint32_t actual[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(actual,
+                       GA10B_QMD_SELFTEST_SHADER_GPU_VA,
+                       GA10B_QMD_SELFTEST_CBUF_GPU_VA,
+                       GA10B_QMD_SELFTEST_REGISTER_COUNT,
+                       GA10B_QMD_SELFTEST_GRID_X,
+                       GA10B_QMD_SELFTEST_GRID_Y,
+                       GA10B_QMD_SELFTEST_GRID_Z,
+                       GA10B_QMD_SELFTEST_BLOCK_X,
+                       GA10B_QMD_SELFTEST_BLOCK_Y,
+                       GA10B_QMD_SELFTEST_BLOCK_Z);
+    REQUIRE_EQ(memcmp(actual, ga10b_qmd_selftest_expected,
+                      GA10B_QMD_SIZE_BYTES), 0);
+}
+
+static void test_qmd_populate_is_deterministic(void)
+{
+    printf("== test_qmd_populate_is_deterministic ==\n");
+    /* Same inputs twice, two distinct buffers — bytes must match
+     * exactly. Catches any non-determinism that would silently
+     * break the byte-compare gate (uninitialised memory leaking
+     * into the result, etc.). */
+    uint32_t a[GA10B_QMD_DWORDS], b[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(a,
+                       GA10B_QMD_SELFTEST_SHADER_GPU_VA,
+                       GA10B_QMD_SELFTEST_CBUF_GPU_VA,
+                       GA10B_QMD_SELFTEST_REGISTER_COUNT,
+                       GA10B_QMD_SELFTEST_GRID_X,
+                       GA10B_QMD_SELFTEST_GRID_Y,
+                       GA10B_QMD_SELFTEST_GRID_Z,
+                       GA10B_QMD_SELFTEST_BLOCK_X,
+                       GA10B_QMD_SELFTEST_BLOCK_Y,
+                       GA10B_QMD_SELFTEST_BLOCK_Z);
+    ga10b_qmd_populate(b,
+                       GA10B_QMD_SELFTEST_SHADER_GPU_VA,
+                       GA10B_QMD_SELFTEST_CBUF_GPU_VA,
+                       GA10B_QMD_SELFTEST_REGISTER_COUNT,
+                       GA10B_QMD_SELFTEST_GRID_X,
+                       GA10B_QMD_SELFTEST_GRID_Y,
+                       GA10B_QMD_SELFTEST_GRID_Z,
+                       GA10B_QMD_SELFTEST_BLOCK_X,
+                       GA10B_QMD_SELFTEST_BLOCK_Y,
+                       GA10B_QMD_SELFTEST_BLOCK_Z);
+    REQUIRE_EQ(memcmp(a, b, GA10B_QMD_SIZE_BYTES), 0);
+}
+
+/* ======================================================================
+ * Defensive: `hi < lo` early-return in ga10b_qmd_set_bits.
+ * Catches a future macro typo that would otherwise underflow nbits
+ * and write to far-past-end words via the two-word path.
+ * ====================================================================== */
+
+static void test_qmd_set_bits_rejects_inverted_range(void)
+{
+    printf("== test_qmd_set_bits_rejects_inverted_range ==\n");
+    uint32_t qmd[GA10B_QMD_DWORDS] = {0};
+    /* `hi < lo` should leave the buffer untouched and not corrupt
+     * memory beyond it (the canary words past index 63). */
+    uint32_t canary[8] = {
+        0xCAFEBABEu, 0xDEADBEEFu, 0xFEEDFACEu, 0x1234ABCDu,
+        0xABCD1234u, 0xFACEFEEDu, 0xBEEFDEADu, 0xBABECAFEu,
+    };
+    uint32_t canary_pre[8];
+    memcpy(canary_pre, canary, sizeof(canary));
+
+    ga10b_qmd_set_bits(qmd, /*hi=*/3, /*lo=*/5, 0xFFu);
+
+    /* QMD untouched. */
+    for (size_t i = 0; i < GA10B_QMD_DWORDS; i++) {
+        REQUIRE_EQ(qmd[i], 0u);
+    }
+    /* Canary untouched (would catch the two-word-path overflow
+     * that the early-return guards against). */
+    REQUIRE_EQ(memcmp(canary, canary_pre, sizeof(canary)), 0);
+}
+
+/* ======================================================================
  * Entry
  * ====================================================================== */
 
@@ -2499,10 +2982,12 @@ int main(void)
     test_launch_kernel_with_sema_pb_idempotent();
     test_launch_kernel_with_sema_pb_payload_passthrough();
 
-    test_handoff_v6_layout_size();
+    test_handoff_v7_layout_size();
     test_handoff_v4_expected_payload_offset();
     test_handoff_v5_pipeline_offsets();
     test_handoff_v6_input_buf_offsets();
+    test_handoff_v7_pool_offsets();
+    test_pipeline_op_v7_layout();
     test_set_input_rejects_null_b();
     test_set_input_rejects_null_bytes();
     test_set_input_rejects_no_handoff();
@@ -2541,6 +3026,28 @@ int main(void)
     test_qmd_set_bits_spans_two_words();
     test_qmd_set_bits_truncates_excess_value();
     test_qmd_set_bits_preserves_neighbors();
+
+    test_qmd_pool_prepare_advances_slot();
+    test_qmd_pool_prepare_wraps_at_n_slots();
+    test_qmd_pool_prepare_starts_from_inout_value();
+    test_qmd_pool_prepare_writes_match_direct_populate();
+    test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds();
+    test_qmd_pool_prepare_rejects_invalid_inputs();
+
+    test_handoff_is_v7_accepts_well_formed();
+    test_handoff_is_v7_rejects_pre_v7_version();
+    test_handoff_is_v7_rejects_zero_pool_fields();
+    test_handoff_is_v7_rejects_null();
+    test_v7_validate_accepts_well_formed();
+    test_v7_validate_rejects_zero_ops_phys();
+    test_v7_validate_rejects_n_ops_exceeds_cap();
+    test_v7_validate_rejects_pool_size_mismatch();
+    test_v7_validate_first_failure_wins();
+    test_v7_validate_rejects_null_handoff();
+
+    test_qmd_selftest_reference_matches_encoder();
+    test_qmd_populate_is_deterministic();
+    test_qmd_set_bits_rejects_inverted_range();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);

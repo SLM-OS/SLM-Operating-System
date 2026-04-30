@@ -646,6 +646,7 @@ test-ga10b-bringup:
 	    -o build/host-tools/test_ga10b_bringup \
 	    host-tools/gsp-harness/test_ga10b_bringup.c \
 	    kernel/gpu/nvidia/ga10b_bringup.c \
+	    kernel/gpu/nvidia/ga10b_qmd.c \
 	    kernel/gpu/nvidia/falcon.c \
 	    kernel/gpu/nvidia/gsp.c
 	@./build/host-tools/test_ga10b_bringup

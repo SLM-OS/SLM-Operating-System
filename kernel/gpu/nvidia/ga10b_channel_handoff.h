@@ -55,15 +55,30 @@ struct ga10b_channel_handoff {
                                  *    can swap the model's input tensor
                                  *    at runtime (per-image MNIST
                                  *    classification post-kexec).
+                                 * 7: v6 + qmd_pool_* fields and per-op
+                                 *    QMD-construction inputs (shader,
+                                 *    cbuf, dims, register count) so
+                                 *    SLM-OS can author fresh QMDs per
+                                 *    dispatch instead of replaying the
+                                 *    helper-baked chain. When version
+                                 *    >= 7, `pipeline_ops_phys` points
+                                 *    at an array of
+                                 *    `struct ga10b_pipeline_op_v7`
+                                 *    rather than the v6
+                                 *    `struct ga10b_pipeline_op`.
+                                 *    Workaround for the SKED elision
+                                 *    bug — issue #558.
                                  * SLM-OS channel inherit accepts any of
-                                 * v2..v6; `nvgpu launch-kernel` needs
+                                 * v2..v7; `nvgpu launch-kernel` needs
                                  * at least v3 for shader/QMD fields,
                                  * runs the v5 pipeline if
                                  * `pipeline_n_ops > 0`, otherwise
                                  * single-shot per the v4 path. The v6
                                  * input swap path is opt-in via
                                  * `slm_gpu_set_mnist_input` /
-                                 * `slm.gpu_set_mnist_input`. */
+                                 * `slm.gpu_set_mnist_input`. The v7
+                                 * per-dispatch QMD path is the future
+                                 * default once the helper writes v7. */
     uint32_t channel_id;        /* Diagnostic only; never used as the
                                  * doorbell token. See work_submit_token
                                  * below — the kernel's allocation path
@@ -173,6 +188,47 @@ struct ga10b_channel_handoff {
      * different kinds in DRAM (e.g. MNIST + sched-MLP coexisting
      * across two host-side launchers running concurrently). */
     uint32_t pipeline_kind;
+
+    /* --- v7 extension: per-dispatch QMD pool. ---
+     * Zero on v2..v6. Populated by helpers that want SLM-OS to
+     * author fresh QMDs per dispatch instead of replaying the
+     * helper-baked chain (workaround for SKED elision; issue #558).
+     *
+     * When `version >= 7`:
+     *   - `pipeline_ops_phys` points at an array of
+     *     `struct ga10b_pipeline_op_v7` (80 B each), NOT the v6
+     *     `struct ga10b_pipeline_op` (24 B). SLM-OS branches on
+     *     `version` to choose the right indexing stride.
+     *   - The pool descriptor below names a GMMU-mapped scratch
+     *     region SLM-OS writes fresh QMD bytes into. SLM-OS
+     *     advances through `qmd_pool_n_slots` slots round-robin
+     *     so consecutive launches use distinct GPU VAs (forces
+     *     SKED redecode and per-QMD INVALIDATE_*_CACHE bits to
+     *     fire on each launch).
+     *
+     * Wire-format-skew note: the struct grew from 232 → 256 bytes
+     * with this v7 extension. A pre-v7 helper that writes only the
+     * first 232 bytes leaves these trailing fields uninitialised
+     * — typically the nvmap allocator returns zeroed pages, but
+     * that isn't formally guaranteed across kexec. The
+     * load-bearing wire-format guard is `version`: SLM-OS's
+     * dispatch path takes the v7 branch only when
+     * `version >= 7`, and a pre-v7 helper writes `version` ≤ 6
+     * deterministically. The `qmd_pool_n_slots > 0 &&
+     * qmd_pool_phys != 0` checks in the dispatch path are a
+     * defensive belt-and-braces against a buggy v7 producer that
+     * advances the version field without populating the pool —
+     * NOT a substitute for the version check.
+     *
+     * Sizing: 1024 slots × 256 B = 256 KiB is the recommended
+     * minimum for SLM workloads (~370 ops/token for Qwen 2.5
+     * 1.5B). MNIST works with much less but the pool is sized
+     * once at channel setup so generous default is fine. See
+     * docs/gpu-qmd-per-dispatch-plan.md §3. */
+    uint64_t qmd_pool_phys;
+    uint64_t qmd_pool_gpu_va;
+    uint32_t qmd_pool_size_bytes;
+    uint32_t qmd_pool_n_slots;
 };
 
 /* Pipeline-kind discriminator values stored in
@@ -185,8 +241,8 @@ enum ga10b_pipeline_kind {
     GA10B_PIPELINE_KIND_EVICTION_QNET = 2,
 };
 
-/* One entry per op in a v5 pipeline. SLM-OS reads this array from
- * the DRAM page at handoff->pipeline_ops_phys. */
+/* One entry per op in a v5/v6 pipeline. SLM-OS reads this array from
+ * the DRAM page at handoff->pipeline_ops_phys when version <= 6. */
 struct ga10b_pipeline_op {
     uint64_t qmd_gpu_va;        /* GPU VA of this op's QMD (256 B aligned) */
     uint64_t output_phys;       /* CPU-physical sentinel target */
@@ -194,20 +250,70 @@ struct ga10b_pipeline_op {
     uint32_t flags;             /* reserved (0 today) */
 };
 
+/* v7 per-op layout. Used when `handoff->version >= 7`. The leading
+ * 24 bytes are layout-compatible with `struct ga10b_pipeline_op` so
+ * read-only consumers of the v6 fields can use a single struct (this
+ * one). Indexing stride differs between versions, though, so SLM-OS
+ * dispatch must branch on `handoff->version` to pick the right
+ * sizeof when walking `pipeline_ops_phys`.
+ *
+ * v7 adds the inputs needed for SLM-OS to author a fresh QMD per
+ * dispatch. The Linux helper writes these alongside the existing
+ * `qmd_gpu_va` field; SLM-OS uses the new fields to call
+ * `ga10b_qmd_populate` against a slot in the QMD pool, then submits
+ * the freshly-built QMD's GPU VA via `SEND_PCAS_A` instead of
+ * `qmd_gpu_va`. The original `qmd_gpu_va` is kept for byte-compare
+ * validation (Phase 4 of docs/gpu-qmd-per-dispatch-plan.md).
+ *
+ * Block dims are u32 here for wire-format simplicity even though the
+ * QMD's CTA_THREAD_DIM fields are 16 bits wide — the encoder masks
+ * to the right width when packing.
+ */
+struct ga10b_pipeline_op_v7 {
+    /* v6-compatible prefix — same 24-byte layout as
+     * `struct ga10b_pipeline_op`. Pinned by static asserts below. */
+    uint64_t qmd_gpu_va;
+    uint64_t output_phys;
+    uint32_t expected_payload;
+    uint32_t flags;
+
+    /* v7 additions: QMD construction inputs. */
+    uint64_t shader_gpu_va;     /* GPU VA of compiled SASS for this op */
+    uint64_t cbuf_gpu_va;       /* GPU VA of cbuf[0] (CUDA param area) */
+    uint32_t register_count_v;  /* per-thread register usage */
+    uint32_t grid_x;            /* CTA raster width */
+    uint32_t grid_y;            /* CTA raster height */
+    uint32_t grid_z;            /* CTA raster depth */
+    uint32_t block_x;           /* threads per CTA, dim 0 */
+    uint32_t block_y;           /* threads per CTA, dim 1 */
+    uint32_t block_z;           /* threads per CTA, dim 2 */
+    uint32_t smem_size_bytes;   /* shared memory per block */
+    uint32_t slm_size_bytes;    /* shader local memory per thread */
+    uint32_t barrier_count;     /* num_control_barriers */
+};
+
 /* Upper bound on pipeline length, enforced by the kernel-side runner.
- * The launcher allocates a single 4 KB page for the ops array
- * (4096 / sizeof(struct ga10b_pipeline_op) = 170), so SLM-OS rejects
- * any handoff that claims more — anything past that would dereference
- * past the page into adjacent memory. MNIST currently uses 8 ops;
- * real SLMs may need this raised, but a finite cap matters more than
- * a generous one. */
-#define GA10B_PIPELINE_MAX_OPS 170u
+ * Two values, one per per-op layout: the launcher allocates a single
+ * 4 KB page for the ops array, so the cap is `4096 / sizeof(op)`.
+ * Anything past that would dereference into adjacent memory.
+ *
+ *   v6 ops (24 B): 4096 / 24 = 170 max
+ *   v7 ops (80 B): 4096 / 80 = 51  max
+ *
+ * MNIST uses 8 ops on either layout. Larger SLMs (Qwen 2.5 1.5B has
+ * ~370 ops/token) need either the launcher to allocate >1 page or
+ * a different ops-array structure entirely — tracked separately
+ * (#573 covers the dispatch architecture rework). */
+#define GA10B_PIPELINE_MAX_OPS    170u   /* v6 cap (existing) */
+#define GA10B_PIPELINE_V7_MAX_OPS 51u    /* v7 cap (4096 / 80) */
 
 /* Wire-format size is locked: both the Linux helper and SLM-OS
  * depend on this exact layout. Any struct reorder or field addition
  * breaks the handoff silently — the static_assert catches it at
- * compile time on both sides. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 232,
+ * compile time on both sides. v7 grew the struct by 24 bytes
+ * (qmd_pool_phys + qmd_pool_gpu_va + qmd_pool_size_bytes +
+ * qmd_pool_n_slots) → 232 + 24 = 256. */
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 256,
                "ga10b_channel_handoff layout changed — update Linux "
                "helper (scripts/gpu-channel-helper.c, "
                "scripts/gpu-kernel-launch.c, scripts/gpu-launch-common.c) "
@@ -215,6 +321,9 @@ _Static_assert(sizeof(struct ga10b_channel_handoff) == 232,
 _Static_assert(sizeof(struct ga10b_pipeline_op) == 24,
                "ga10b_pipeline_op layout changed — Linux + SLM-OS "
                "must agree on the per-op size");
+_Static_assert(sizeof(struct ga10b_pipeline_op_v7) == 80,
+               "ga10b_pipeline_op_v7 layout changed — Linux helper "
+               "and SLM-OS must agree on the v7 per-op size");
 
 /* Field-offset pins for the v3 extension. A reorder that preserves
  * sizeof() (e.g. swapping two uint64_t fields) wouldn't fire the
@@ -255,13 +364,63 @@ _Static_assert(offsetof(struct ga10b_channel_handoff, input_buf_size) == 224,
                "v6 input_buf_size offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, pipeline_kind) == 228,
                "PR-3 pipeline_kind offset drifted (must be 228 — last "
-               "u32 in the struct, was previously _pad4)");
+               "u32 of the v6 struct, was previously _pad4)");
+
+/* v7 pool descriptor — appended after pipeline_kind. Pinning each
+ * field's offset lets a v7-aware reader detect a v6-built handoff
+ * (where these bytes would be zero) and fall back to the v6 dispatch
+ * path. */
+_Static_assert(offsetof(struct ga10b_channel_handoff, qmd_pool_phys) == 232,
+               "v7 qmd_pool_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, qmd_pool_gpu_va) == 240,
+               "v7 qmd_pool_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, qmd_pool_size_bytes) == 248,
+               "v7 qmd_pool_size_bytes offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, qmd_pool_n_slots) == 252,
+               "v7 qmd_pool_n_slots offset drifted");
+
 _Static_assert(offsetof(struct ga10b_pipeline_op, qmd_gpu_va) == 0,
                "pipeline_op.qmd_gpu_va must be at offset 0");
 _Static_assert(offsetof(struct ga10b_pipeline_op, output_phys) == 8,
                "pipeline_op.output_phys must be at offset 8");
 _Static_assert(offsetof(struct ga10b_pipeline_op, expected_payload) == 16,
                "pipeline_op.expected_payload must be at offset 16");
+
+/* v7 per-op layout — leading 24 bytes match v6, then new fields
+ * append. Pinning each field's offset catches accidental reorders
+ * that would leave sizeof() unchanged but break wire compatibility. */
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, qmd_gpu_va) == 0,
+               "v7 op qmd_gpu_va must match v6 layout (offset 0)");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, output_phys) == 8,
+               "v7 op output_phys must match v6 layout (offset 8)");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, expected_payload) == 16,
+               "v7 op expected_payload must match v6 layout (offset 16)");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, flags) == 20,
+               "v7 op flags must match v6 layout (offset 20)");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, shader_gpu_va) == 24,
+               "v7 op shader_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, cbuf_gpu_va) == 32,
+               "v7 op cbuf_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, register_count_v) == 40,
+               "v7 op register_count_v offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, grid_x) == 44,
+               "v7 op grid_x offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, grid_y) == 48,
+               "v7 op grid_y offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, grid_z) == 52,
+               "v7 op grid_z offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, block_x) == 56,
+               "v7 op block_x offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, block_y) == 60,
+               "v7 op block_y offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, block_z) == 64,
+               "v7 op block_z offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, smem_size_bytes) == 68,
+               "v7 op smem_size_bytes offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, slm_size_bytes) == 72,
+               "v7 op slm_size_bytes offset drifted");
+_Static_assert(offsetof(struct ga10b_pipeline_op_v7, barrier_count) == 76,
+               "v7 op barrier_count offset drifted");
 
 /*
  * Validate a candidate handoff block. Returns 0 iff magic, version,
@@ -362,6 +521,82 @@ ga10b_pipeline_op_is_valid(const struct ga10b_pipeline_op *op)
     return op != NULL
         && op->qmd_gpu_va != 0u
         && op->output_phys != 0u;
+}
+
+/*
+ * Should the dispatch path take the v7 (per-dispatch QMD) branch?
+ *
+ * Returns true iff the handoff carries the load-bearing v7 markers:
+ * `version >= 7` (the wire-format check), pipeline_n_ops > 0 (any
+ * pipeline at all), qmd_pool_n_slots > 0 (a usable pool sized), and
+ * qmd_pool_phys != 0 (a usable pool mapped).
+ *
+ * A v6 helper writes `version = 6` and zero pool fields, so
+ * `is_v7` returns false and the dispatch path falls through to the
+ * v5/v6 helper-baked-QMD branch. A v7 helper that hasn't allocated
+ * a pool would advance `version` but leave the pool fields zero,
+ * which also returns false — defensive belt-and-braces against a
+ * partial v7 rollout.
+ *
+ * Pure-logic — host-testable.
+ */
+static inline bool
+ga10b_handoff_is_v7(const struct ga10b_channel_handoff *h)
+{
+    return h != NULL
+        && h->version >= 7u
+        && h->pipeline_n_ops > 0u
+        && h->qmd_pool_n_slots > 0u
+        && h->qmd_pool_phys != 0u;
+}
+
+/*
+ * Reasons a v7 handoff that *passed* `ga10b_handoff_is_v7` may
+ * still be malformed. The dispatch path returns -1 + sets
+ * `last_error_phase = 8` on any of these.
+ */
+enum ga10b_v7_validation_error {
+    GA10B_V7_OK                       = 0,
+    GA10B_V7_ERR_OPS_PHYS_ZERO        = 1,  /* pipeline_ops_phys == 0 */
+    GA10B_V7_ERR_OPS_EXCEED_CAP       = 2,  /* pipeline_n_ops > V7_MAX */
+    GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT = 3,/* qmd_pool_size_bytes < n_slots × 256 */
+    GA10B_V7_ERR_NULL_HANDOFF         = 4,  /* h == NULL */
+};
+
+/*
+ * Validate a handoff that's already been classified v7 by
+ * `ga10b_handoff_is_v7`. Returns GA10B_V7_OK on a well-formed
+ * handoff, or one of the GA10B_V7_ERR_* codes describing the
+ * specific malformation.
+ *
+ * Self-enforcing contract: `ga10b_handoff_is_v7` already null-
+ * checks, so a properly-sequenced caller never passes NULL — but
+ * a future direct caller that skipped `is_v7` would otherwise
+ * NULL-deref. The explicit check returns
+ * GA10B_V7_ERR_NULL_HANDOFF instead. Defense-in-depth, no hot-
+ * path cost.
+ *
+ * Pure-logic — host-testable. The dispatch-path call site logs the
+ * specific failure via uart_printf and returns -1 to the bringup
+ * caller; the host harness uses the return code directly.
+ */
+static inline enum ga10b_v7_validation_error
+ga10b_v7_validate_handoff(const struct ga10b_channel_handoff *h)
+{
+    if (h == NULL) {
+        return GA10B_V7_ERR_NULL_HANDOFF;
+    }
+    if (h->pipeline_ops_phys == 0u) {
+        return GA10B_V7_ERR_OPS_PHYS_ZERO;
+    }
+    if (h->pipeline_n_ops > GA10B_PIPELINE_V7_MAX_OPS) {
+        return GA10B_V7_ERR_OPS_EXCEED_CAP;
+    }
+    if ((uint64_t)h->qmd_pool_size_bytes <
+        (uint64_t)h->qmd_pool_n_slots * 256u) {
+        return GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT;
+    }
+    return GA10B_V7_OK;
 }
 
 #endif /* GPU_NVIDIA_GA10B_CHANNEL_HANDOFF_H */
