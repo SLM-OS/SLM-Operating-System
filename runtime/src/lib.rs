@@ -71,7 +71,13 @@ static RUST_HEAP_SIZE_BYTES: core::sync::atomic::AtomicUsize =
 /// # Safety
 /// - `heap_start` must be a valid pointer to allocatable memory
 /// - `heap_size` must accurately reflect the available memory
-/// - This function must only be called once
+/// - This function must only be called once. A second call would
+///   re-`init` the underlying `LockedHeap` (corrupting any
+///   already-issued allocations) and overwrite `RUST_HEAP_SIZE_BYTES`
+///   with the new size. The boot path in `kernel/src/main.c` is the
+///   only legitimate caller; if a second caller appears, add a
+///   one-shot `compare_exchange` guard rather than relaxing this
+///   contract.
 #[cfg(not(test))]
 #[no_mangle]
 pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
