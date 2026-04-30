@@ -299,9 +299,17 @@ static const struct usb_hcd mock_hcd_ops = {
 /* Test fixtures                                                               */
 /* -------------------------------------------------------------------------- */
 
+static void hub_walk_reset(void);   /* defined alongside the hub-walk machinery */
+
 static void reset_mock_and_core(void)
 {
     memset(&mock, 0, sizeof(mock));
+    /* Clear the hub-walk overlay every fixture reset. Without this,
+     * a TEST_ASSERT_* longjmp out of the hub-walk test would leave
+     * `hub_walk.enabled = true`, and the next single-device test
+     * would have its control transfers intercepted by
+     * `hub_walk_handle_control` in confusing ways. */
+    hub_walk_reset();
     mock.port_connected = true;
     mock.port_speed     = USB_SPEED_HIGH;
     usb_core_register_hcd(&mock_hcd_ops);
@@ -1253,11 +1261,27 @@ static struct {
     bool    port_low_speed[3];
     bool    port_c_reset[3];
     bool    port_enabled[3];
+    /* Per-port "is CDC" flag. When true, that port returns the
+     * CDC-ECM device blob instead of the HID one. Default-false
+     * lets the bug-regression test (HID on port 1, CDC on port 2)
+     * stay terse — only the all-non-CDC and cdc-on-port-1 tests
+     * touch these explicitly. */
+    bool    port_is_cdc[3];   /* 1-indexed; [0] unused */
 } hub_walk;
+
+static void hub_walk_reset(void)
+{
+    memset(&hub_walk, 0, sizeof(hub_walk));
+}
 
 /* Returns true if the URB was a hub-walk request handled by this
  * extension; false if `mock_submit_urb` should fall through to its
- * usual single-device responses. */
+ * usual single-device responses.
+ *
+ * Hub status bit / feature codes are USB 2.0 spec §11.24.2 (Port
+ * Status fields) and §11.24.2.7.1 (Port Features). Kept as numeric
+ * literals here so the test stays independent of the file-static
+ * USB_PORT_STAT_* / USB_PORT_FEAT_* defines in usb_core.c. */
 static bool hub_walk_handle_control(struct usb_urb *urb)
 {
     if (!hub_walk.enabled)
@@ -1355,30 +1379,36 @@ static bool hub_walk_handle_control(struct usb_urb *urb)
                 return true;
             }
             /* Downstream child — pick the canned blob for the port
-             * the walker most recently reset. */
-            if (hub_walk.walking_port == 1) {
-                if (desc_type == USB_DT_DEVICE)
-                    complete_control(urb, &hub_walk_port1_dev_desc,
-                                     sizeof(hub_walk_port1_dev_desc),
-                                     USB_URB_OK);
-                else if (desc_type == USB_DT_CONFIG)
-                    complete_control(urb, hub_walk_port1_config,
-                                     sizeof(hub_walk_port1_config),
-                                     USB_URB_OK);
-                else
-                    complete_control(urb, NULL, 0, USB_URB_IO_ERROR);
-                return true;
-            }
-            if (hub_walk.walking_port == 2) {
-                if (desc_type == USB_DT_DEVICE)
-                    complete_control(urb, &hub_walk_port2_dev_desc,
-                                     sizeof(hub_walk_port2_dev_desc),
-                                     USB_URB_OK);
-                else if (desc_type == USB_DT_CONFIG)
-                    complete_control(urb, mock_config, sizeof(mock_config),
-                                     USB_URB_OK);
-                else
-                    complete_control(urb, NULL, 0, USB_URB_IO_ERROR);
+             * the walker most recently reset. Each port's identity
+             * is independently controllable via `port_is_cdc[port]`
+             * so the same mock can simulate the nano-1 topology
+             * (HID-on-port-1 + CDC-on-port-2), the all-non-CDC
+             * negative case, and the nano-2 topology
+             * (CDC-on-port-1, port 2 disconnected). */
+            uint8_t p = hub_walk.walking_port;
+            if (p >= 1 && p <= 2) {
+                if (hub_walk.port_is_cdc[p]) {
+                    if (desc_type == USB_DT_DEVICE)
+                        complete_control(urb, &hub_walk_port2_dev_desc,
+                                         sizeof(hub_walk_port2_dev_desc),
+                                         USB_URB_OK);
+                    else if (desc_type == USB_DT_CONFIG)
+                        complete_control(urb, mock_config, sizeof(mock_config),
+                                         USB_URB_OK);
+                    else
+                        complete_control(urb, NULL, 0, USB_URB_IO_ERROR);
+                } else {
+                    if (desc_type == USB_DT_DEVICE)
+                        complete_control(urb, &hub_walk_port1_dev_desc,
+                                         sizeof(hub_walk_port1_dev_desc),
+                                         USB_URB_OK);
+                    else if (desc_type == USB_DT_CONFIG)
+                        complete_control(urb, hub_walk_port1_config,
+                                         sizeof(hub_walk_port1_config),
+                                         USB_URB_OK);
+                    else
+                        complete_control(urb, NULL, 0, USB_URB_IO_ERROR);
+                }
                 return true;
             }
             return false;
@@ -1407,19 +1437,32 @@ static void test_enumerate_hub_walks_past_non_cdc_child(void)
      * keyboard, never reaching the RTL8153. Verify the walker now
      * skips the non-CDC child and binds the CDC-ECM device. */
     reset_mock_and_core();
+    /* Clear usb_core's static `root_device_present` /
+     * `hub_device_present` / cached `root_device` from any prior
+     * test — without this, the first thing usb_core_enumerate does
+     * is call device_close on the previous test's bound device,
+     * which inflates our walker_closes baseline. */
+    usb_core_reset();
     mock.port_connected = true;
     mock.port_speed     = USB_SPEED_HIGH;
 
-    memset(&hub_walk, 0, sizeof(hub_walk));
     hub_walk.enabled            = true;
     hub_walk.port_connected[1]  = true;
     hub_walk.port_low_speed[1]  = true;   /* HID */
+    hub_walk.port_is_cdc[1]     = false;
     hub_walk.port_connected[2]  = true;
     hub_walk.port_high_speed[2] = true;   /* RTL8153 */
+    hub_walk.port_is_cdc[2]     = true;
 
-    TEST_ASSERT_EQUAL_INT(0, usb_core_start());
+    /* Don't call usb_core_start — it internally calls
+     * usb_core_enumerate, which would double-run the walker and
+     * inflate the close count by the second-pass state-cleanup
+     * path. Mock HCD doesn't need .start() to be called for
+     * enumerate to work; reset_mock_and_core has done the setup. */
+    int closes_before = mock.device_close_count;
     int rc = usb_core_enumerate();
     TEST_ASSERT_EQUAL_INT(0, rc);
+    int walker_closes = mock.device_close_count - closes_before;
 
     const struct usb_device *bound = usb_core_first_device();
     TEST_ASSERT_NOT_NULL(bound);
@@ -1428,12 +1471,131 @@ static void test_enumerate_hub_walks_past_non_cdc_child(void)
     TEST_ASSERT_EQUAL_HEX16(0x0BDA, bound->dev_desc.idVendor);
     TEST_ASSERT_EQUAL_HEX16(0x8153, bound->dev_desc.idProduct);
 
-    /* Port 2 wins, so the HID on port 1 must have been device_close'd
-     * (released) before the walker moved on. Pin the lower bound:
-     * the HID was actually freed. */
-    TEST_ASSERT_TRUE(mock.device_close_count >= 1);
+    /* Pin the port-walk order: walker tries port 1 (HID, rejected →
+     * device_close), then port 2 (CDC-ECM, bound, no device_close).
+     * Plus internal device_close calls from `usb_core_enumerate`'s
+     * own state-cleanup branches (root_device_present and
+     * hub_device_present), which we baseline out via
+     * `closes_before`. If a future change reverses the walk order
+     * to N→1, port 2 wins immediately, walker_closes stays 0, and
+     * this assertion fires — pinning the order without
+     * overconstraining. */
+    TEST_ASSERT_EQUAL_INT(1, walker_closes);
+}
 
-    hub_walk.enabled = false;
+static void test_enumerate_hub_with_no_connected_children(void)
+{
+    /* Hub with zero connected ports must NOT return error — that
+     * would put `cdc_ecm` into the hot-plug-blocked state on Jetson
+     * and prevent a later RTL8153 attach from succeeding. The
+     * walker reports "no connected downstream device" and returns
+     * 0; root_device_present stays false because nothing was bound. */
+    reset_mock_and_core();
+    /* Clear usb_core's static `root_device_present` /
+     * `hub_device_present` / cached `root_device` from any prior
+     * test — without this, the first thing usb_core_enumerate does
+     * is call device_close on the previous test's bound device,
+     * which inflates our walker_closes baseline. */
+    usb_core_reset();
+    mock.port_connected = true;
+    mock.port_speed     = USB_SPEED_HIGH;
+
+    hub_walk.enabled = true;
+    /* All port_connected[*] = false (default after the
+     * reset_mock_and_core memset) — hub advertises 2 ports, neither
+     * has a device attached. */
+
+    TEST_ASSERT_EQUAL_INT(0, usb_core_start());
+    int rc = usb_core_enumerate();
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    /* No bound device. */
+    TEST_ASSERT_NULL(usb_core_first_device());
+}
+
+static void test_enumerate_hub_with_no_cdc_children_returns_error(void)
+{
+    /* Hub with multiple connected children, none of them CDC-ECM.
+     * Walker must walk every port, reject each, and return -1
+     * (which `cdc_ecm` re-tries on hot-plug — same as the
+     * "no device" path elsewhere in this suite). Pins the
+     * "rejected every port" exit path that the earlier test only
+     * partially exercised (it had a CDC device on port 2). */
+    reset_mock_and_core();
+    /* Clear usb_core's static `root_device_present` /
+     * `hub_device_present` / cached `root_device` from any prior
+     * test — without this, the first thing usb_core_enumerate does
+     * is call device_close on the previous test's bound device,
+     * which inflates our walker_closes baseline. */
+    usb_core_reset();
+    mock.port_connected = true;
+    mock.port_speed     = USB_SPEED_HIGH;
+
+    hub_walk.enabled            = true;
+    hub_walk.port_connected[1]  = true;
+    hub_walk.port_low_speed[1]  = true;
+    hub_walk.port_is_cdc[1]     = false;   /* HID */
+    hub_walk.port_connected[2]  = true;
+    hub_walk.port_low_speed[2]  = true;
+    hub_walk.port_is_cdc[2]     = false;   /* HID — both ports non-CDC */
+
+    /* Don't call usb_core_start — it internally calls
+     * usb_core_enumerate, which would double-run the walker and
+     * inflate the close count by the second-pass state-cleanup
+     * path. Mock HCD doesn't need .start() to be called for
+     * enumerate to work; reset_mock_and_core has done the setup. */
+    int closes_before = mock.device_close_count;
+    int rc = usb_core_enumerate();
+    TEST_ASSERT_LESS_THAN(0, rc);
+    int walker_closes = mock.device_close_count - closes_before;
+
+    TEST_ASSERT_NULL(usb_core_first_device());
+    /* Both rejected children must have been released by the walker. */
+    TEST_ASSERT_EQUAL_INT(2, walker_closes);
+}
+
+static void test_enumerate_hub_with_cdc_on_first_port(void)
+{
+    /* Regression-prevention for the jetson-nano-2 topology: the only
+     * connected child is CDC-ECM and sits on port 1. Walker must
+     * bind it without iterating further. Tight lower bound on
+     * device_close_count = 0 (no rejections happened) catches a
+     * future change that accidentally always tries every port. */
+    reset_mock_and_core();
+    /* Clear usb_core's static `root_device_present` /
+     * `hub_device_present` / cached `root_device` from any prior
+     * test — without this, the first thing usb_core_enumerate does
+     * is call device_close on the previous test's bound device,
+     * which inflates our walker_closes baseline. */
+    usb_core_reset();
+    mock.port_connected = true;
+    mock.port_speed     = USB_SPEED_HIGH;
+
+    hub_walk.enabled            = true;
+    hub_walk.port_connected[1]  = true;
+    hub_walk.port_high_speed[1] = true;
+    hub_walk.port_is_cdc[1]     = true;   /* CDC-ECM on port 1 */
+    /* Port 2 left disconnected — like nano-2's working topology. */
+
+    /* Don't call usb_core_start — it internally calls
+     * usb_core_enumerate, which would double-run the walker and
+     * inflate the close count by the second-pass state-cleanup
+     * path. Mock HCD doesn't need .start() to be called for
+     * enumerate to work; reset_mock_and_core has done the setup. */
+    int closes_before = mock.device_close_count;
+    int rc = usb_core_enumerate();
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    int walker_closes = mock.device_close_count - closes_before;
+
+    const struct usb_device *bound = usb_core_first_device();
+    TEST_ASSERT_NOT_NULL(bound);
+    TEST_ASSERT_EQUAL_HEX16(0x0BDA, bound->dev_desc.idVendor);
+    TEST_ASSERT_EQUAL_HEX16(0x8153, bound->dev_desc.idProduct);
+
+    /* No device_close on the success path — port 1 won, no other
+     * port was even visited (and no rejection means no walker-side
+     * device_close call). */
+    TEST_ASSERT_EQUAL_INT(0, walker_closes);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1492,6 +1654,9 @@ int test_suite_usb_core(void)
     RUN_TEST(test_hotplug_poll_idempotent_after_enumeration);
     RUN_TEST(test_hotplug_poll_propagates_enumerate_failure);
     RUN_TEST(test_enumerate_hub_walks_past_non_cdc_child);
+    RUN_TEST(test_enumerate_hub_with_no_connected_children);
+    RUN_TEST(test_enumerate_hub_with_no_cdc_children_returns_error);
+    RUN_TEST(test_enumerate_hub_with_cdc_on_first_port);
 
     return UnityEnd();
 }

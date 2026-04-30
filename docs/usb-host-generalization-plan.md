@@ -81,7 +81,9 @@ This plan is complete when all of the following are true:
 
 - one exposed `root_device`
 - one special `hub_device`
-- one downstream child
+- one **bound** downstream child — the walker (#575) iterates every
+  downstream port looking for a CDC-ECM-capable device, but it
+  commits to exactly one and ignores the rest
 - one global enumeration result the rest of the system consumes
 
 That is enough for the current NIC demo, but it is not a generic host
@@ -92,12 +94,15 @@ topology model.
 The current hub handling is sufficient for:
 
 - one retained root hub on Jetson
-- one downstream child on a known path
+- one CDC-ECM downstream child anywhere in the hub's port table
+  (since #575 the walker skips non-CDC peripherals on lower-numbered
+  ports — a USB-A pass-through dongle with a keyboard plugged in
+  works correctly)
 
 It is not sufficient for:
 
-- more than one downstream device
-- multi-tier hub traversal
+- binding multiple downstream devices simultaneously
+- multi-tier hub traversal (hub-of-hub)
 - generic port change handling
 - disconnect cleanup
 

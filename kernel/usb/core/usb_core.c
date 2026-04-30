@@ -1144,8 +1144,8 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub)
     int enumerated_count = 0;
     for (uint8_t port = 1; port <= desc.bNbrPorts; port++) {
         struct usb_port_status st = {0};
-        int srt = usb_hub_get_port_status(hub, port, &st);
-        if (srt < (int)sizeof(st))
+        int port_status_rc = usb_hub_get_port_status(hub, port, &st);
+        if (port_status_rc < (int)sizeof(st))
             continue;
         if (!(st.status & USB_PORT_STAT_CONNECTION))
             continue;
@@ -1171,10 +1171,22 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub)
         if (rc != 0) {
             INFO("usb_core: hub port %u: enumerate failed (rc=%d), trying next port",
                  port, rc);
-            /* `usb_enumerate_one` calls device_close on its err_close
-             * path, so the slot is already released — just zero our
-             * local state before the next iteration. */
-            memset(&root_device, 0, sizeof(root_device));
+            /* Defense-in-depth: belt-and-braces device_close on the
+             * non-zero return path. `usb_enumerate_one`'s err_close
+             * label already calls device_close when device_open
+             * succeeded, but the function has earlier-return paths
+             * that bypass err_close (e.g. when port reset fails
+             * before device_open is ever called) — those paths can't
+             * have a slot to release. The HCD-side device_close is
+             * idempotent on a never-opened device (it just bumps a
+             * counter on the mock; production HCDs guard on
+             * hcd_private being non-NULL). Calling it
+             * unconditionally here means a future regression that
+             * adds a *new* opened-but-not-closed path inside
+             * usb_enumerate_one can't silently leak xHCI slot state
+             * across a hub-walk retry. */
+            if (active_hcd->device_close)
+                active_hcd->device_close(&root_device);
             continue;
         }
         enumerated_count++;
@@ -1193,7 +1205,6 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub)
              port, root_device.dev_desc.bDeviceClass);
         if (active_hcd->device_close)
             active_hcd->device_close(&root_device);
-        memset(&root_device, 0, sizeof(root_device));
     }
 
     if (connected_count == 0) {

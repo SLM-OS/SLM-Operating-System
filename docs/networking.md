@@ -814,9 +814,9 @@ reliability sweep (`labctl boot_test --count 10` with DHCP + ping).
 | 6 (control transfers) | ✅ | PR #308 — Setup / Data / Status Stage TRB builders + EP0 dispatch |
 | 7 (CONFIGURE_ENDPOINT + bulk) | ✅ | PR #308 — per-endpoint transfer-ring allocation, Normal TRB for bulk/interrupt |
 | Post-kexec retained hub handoff | ✅ | On `jetson-nano-2`, the Linux helper now deauthorizes the USB2 root hub before `kexec`, preserves the cleaned addressed slot-1 handoff, and skips only the stale slot-3 handoff. SLM-OS adopts the retained high-speed Realtek root hub with no manual re-plug. |
-| Minimal hub support | ✅ | `usb_core` now has one-tier USB 2.0 hub scaffolding, which is sufficient for the current Jetson lab path: retained root hub on slot 1, one downstream child on fresh slot 2. This is not general multi-tier hub support. |
+| Minimal hub support | ✅ | `usb_core` has one-tier USB 2.0 hub scaffolding sufficient for the current Jetson lab path. The walker (#575) iterates every downstream port and commits to the first one that exposes a CDC-ECM configuration — non-CDC peripherals (keyboards/mice plugged into a USB-A pass-through dongle) are released via `device_close` and skipped. Still single-device-bound and single-tier (no hub-of-hub traversal). |
 | General USB host support beyond the current NIC path | ☐ Planned | Tracked in #384. The next step is to replace the current one-tier/root-hub-specific model with generic multi-device topology, hotplug, alternate-setting, and class-binding support. See `docs/usb-host-generalization-plan.md`. |
-| Phase 4 (lwIP integration) | ✅ | On the validated `jetson-nano-2` path, the downstream RTL8153 now enumerates via the retained-root-hub path, `cdc_ecm` binds config 2, DHCP reaches `192.168.4.5/24` (`gw 192.168.4.1`), and `ping 192.168.4.1` succeeds after `kexec` with no manual unplug/replug. |
+| Phase 4 (lwIP integration) | ✅ | Validated on both `jetson-nano-2` (CDC-ECM on hub port 3, no other peripherals) and `jetson-nano-1` (CDC-ECM on hub port 3, low-speed HID on hub port 1 — the hub-walker fix in #575 makes this path work). `cdc_ecm` binds Config 2, DHCP succeeds, and `ping` to the gateway round-trips in ~2 ms on both. |
 
 Source layout in `kernel/drivers/usb/xhci/`:
 
