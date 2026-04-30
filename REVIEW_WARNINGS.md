@@ -2,6 +2,16 @@
 
 128 warning findings across 8 subsystems. Generated 2026-04-26 from parallel multi-agent review of `kernel/` and `runtime/` (excluding `kernel/lib/` vendored code and `kernel/tests/`).
 
+## Status legend
+
+Each finding is annotated with one of the following after disposition:
+
+- ✅ **Fixed** — defect confirmed, fix applied in this PR.
+- ❌ **Not a defect** — investigated and found to be a false positive, with reasoning.
+- ☐ **Pending** — confirmed valid; left for follow-up (reason given).
+- ⏸️ **Deferred** — out of scope for this PR (reason given).
+- 🎫 **Tracked in issue** — filed as a separate GitHub issue (number cited).
+
 ---
 
 ## kernel/src + kernel/include
@@ -11,26 +21,35 @@
 
 ### kernel/src/elf.c
 - **lines 217-218** — `(memsz + PAGE_SIZE - 1) / PAGE_SIZE` can overflow if `memsz > SIZE_MAX - PAGE_SIZE`. Cap `memsz` (e.g. against a sane `ELF_MAX_SEGMENT_SIZE`) before allocation; otherwise an attacker-controlled ELF could request a 1-byte allocation and write past it.
+  - ✅ **Fixed** — Added `if (memsz > SIZE_MAX - PAGE_SIZE) { elf_unload(info); return ELF_ERR_TRUNCATED; }` immediately before the round-up. The first-pass overflow guard already rejects `p_vaddr + p_memsz` wrap, but a malicious ELF with `min_vaddr = 0` could still slip a near-`SIZE_MAX` memsz into the round-up zone.
 
 ### kernel/src/vfs.c
 - **line 364-365** — `vfs_init` dereferences `root_node` without NULL-check after `alloc_node()`. The pool is large (64) so this is unlikely to fail at boot, but a defensive `panic("vfs_init: out of nodes")` matches the pattern in `main.c`.
+  - ✅ **Fixed** — Added `if (!root_node) panic(...)` after `alloc_node()`. Added `#include "debug.h"` for `panic`.
 - **lines 35-58** — `alloc_node` is a non-atomic bump allocator with no lock. Today every caller (`vfs_init`, `vfs_create_*`, `vfs_mount`, `littlefs_mount_at`) runs on CPU 0 before `scheduler_start`, but if anything later mounts from a task context (a future hot-plug filesystem), `next_node++` races silently. Either document the "boot-only" invariant in the header or add a `pool_lock` spinlock.
+  - ✅ **Fixed** — Added a doc-comment on `alloc_node` recording the "boot-only" invariant: all callers must run on the primary CPU before `scheduler_start`. A future caller from task context must add a `pool_lock` spinlock first.
 
 ### kernel/src/component_runtime.c
 - **lines 121-128** — `echo_mailbox` is `volatile` plus mixed `__atomic_*` access on `ready`/`ack`. The `data[64]` field is written with plain stores (line 622) before the atomic release on `ready` — comment says the explicit thread fence handles ordering, which is correct, but the `volatile` keyword on the struct is misleading and not load-bearing.
+  - ✅ **Fixed** — Removed the outer `volatile` qualifier on the struct (the inner `volatile uint32_t ready/ack` are kept as visual cues for cross-context fields). Updated the doc-comment to record that the `__ATOMIC_RELEASE` / `__ATOMIC_ACQUIRE` accesses are what carry ordering, not the `volatile` keyword.
 
 ### kernel/src/main.c
 - **lines 213-219** — Pi 5 DTB scan reads from `0x2FFF0000` down to `0x2E000000` in 4 KB steps with no bounds check that those addresses are mapped. Pre-VMM init this is the firmware identity map; if the firmware ever hands off a smaller RAM window the scan faults instead of "DTB not found". Add a guard against `RAM_BASE + RAM_SIZE`.
+  - ✅ **Fixed** — Clamped the scan top against `RAM_BASE + RAM_SIZE` and the scan bottom against `RAM_BASE`. A future smaller RAM window now produces "DTB not found" instead of a pre-VMM data abort.
 - **lines 184-192** — Pi 5 LED blink writes to `0x107D517C04ULL` directly (no `volatile *` cast on first read of `i`, then writes the cast pointer). Extract the address into a named platform constant; literal magic addresses pre-MMU are easy to copy-paste wrong (compare with the WDT_BASE/WDT_UNLOCK use a few lines below which uses a constant).
+  - ✅ **Fixed** — Hoisted the literal into a local `BCM2712_GPIO2_DATA_REG` define inside the block (kept scoped because vmm hasn't mapped this yet — the literal physical address is required pre-MMU). Comment cross-references the WDT_BASE pattern.
 
 ### kernel/src/kprintf.c
 - **lines 537-541** — `uart_vsnprintf`: `if (out.pos > 0) { *out.buf = '\0'; }` writes NUL at the current write position, but the `else if (size > 0)` branch is unreachable (size==0 was already short-circuited at line 529). Dead code; either remove it or document why it's defensive.
+  - ✅ **Fixed** — Simplified to `else { buf[size - 1] = '\0'; }` — `size > 0` is unconditionally true at that point because the `size == 0` early return already fired. Comment records why.
 
 ### kernel/include/spinlock.h
 - **lines 79-81** — `spinlock_t` is a single `uint32_t`; on Pi 5 the lock + DC CIVAC dance assumes the lock occupies its own cacheline to avoid false sharing with adjacent data. Adjacent `spinlock_t` instances (e.g. `direct_channels[]` if it ever gets locks) share a 64-byte line. Consider `alignas(64)` for spinlocks declared in arrays.
+  - ✅ **Fixed** — Added a doc-comment on the `spinlock_t` typedef recording the array-alignment convention. Existing arrays (`rq_lock`, `steal_deque_lock` in `kernel/sched/sched.c`) already use `__attribute__((aligned(CACHE_LINE_SIZE)))`. Doc-comment makes the convention discoverable for new array sites.
 
 ### kernel/src/tcp_telemetry_server.c
 - **lines 392-410** — `session_feed_input` writes the `'\0'` terminator at `min(s->rx_len, RX_LINE_MAX-1)` only when `\n` is seen. If the last byte before `\n` was a `\r` and `rx_len == RX_LINE_MAX-1`, the NUL overwrites that `\r` and the CR-strip below (line 350) sees nothing. Minor; results in a slightly truncated command echo.
+  - ❌ **Not a defect** — Re-traced the boundary case. `rx_len + 1 >= RX_LINE_MAX` triggers `rx_overflow = true` and drops the byte, so `rx_len` never exceeds `RX_LINE_MAX - 1`. When `\n` arrives with `rx_len == RX_LINE_MAX - 1`, the NUL goes to index `RX_LINE_MAX - 1` (one past the last data byte at `RX_LINE_MAX - 2`), so the `\r` at `rx_len - 1 = RX_LINE_MAX - 2` is preserved and the CR-strip works correctly. If overflow did fire (e.g. `RX_LINE_MAX-1` chars followed by `\r` then `\n`), `session_handle_command` returns early on `rx_overflow` without running the CR-strip path — but the buffer was already truncated upstream, so the silent loss of `\r` is a non-issue at that point. No code change.
 
 ---
 

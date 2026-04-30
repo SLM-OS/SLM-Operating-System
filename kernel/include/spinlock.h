@@ -80,6 +80,21 @@ typedef struct {
     volatile uint32_t lock;
 } spinlock_t;
 
+/*
+ * Cacheline-alignment for arrays:
+ *
+ * `spinlock_t` is a single uint32_t — multiple consecutive instances
+ * share a cacheline, so two CPUs spinning on neighbouring locks
+ * ping-pong the same line. Always declare arrays of spinlocks with
+ * `__attribute__((aligned(CACHE_LINE_SIZE)))`, e.g.:
+ *
+ *     static spinlock_t rq_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
+ *
+ * (See kernel/sched/sched.c rq_lock and steal_deque_lock.) The same
+ * applies if a struct ever embeds a spinlock_t adjacent to other
+ * frequently-written data — pad or align to avoid false sharing.
+ */
+
 #define SPINLOCK_INIT { .lock = 0 }
 
 /*

@@ -14,6 +14,7 @@
 #include "uart.h"
 #include "slm_ffi.h"
 #include "string.h"
+#include "debug.h"  /* panic() */
 #include <stddef.h>
 
 /* Maximum number of VFS nodes */
@@ -31,6 +32,13 @@ static struct vfs_node *components_node = NULL;
 
 /*
  * Allocate a new node from the pool.
+ *
+ * NOTE: This is a non-atomic bump allocator. All callers
+ * (vfs_init, vfs_create_*, vfs_mount, littlefs_mount_at) must run
+ * on the primary CPU before scheduler_start. If a future caller
+ * needs to allocate VFS nodes from a task context (hot-plug FS,
+ * dynamic component mount, etc.), `next_node++` will race silently
+ * across CPUs and a `pool_lock` spinlock must be added here.
  */
 static struct vfs_node *alloc_node(void)
 {
@@ -360,8 +368,14 @@ static int read_proc_self(char *buf, size_t size, void *ctx)
 
 void vfs_init(void)
 {
-    /* Create root directory */
+    /* Create root directory. The pool is sized at VFS_MAX_NODES (64)
+     * and vfs_init runs first, so this allocation cannot fail in
+     * practice — but a defensive panic matches main.c's pattern and
+     * makes a future MAX_NODES change loud rather than silent. */
     root_node = alloc_node();
+    if (!root_node) {
+        panic("vfs_init: alloc_node returned NULL — pool exhausted");
+    }
     strncpy(root_node->name, "/", VFS_MAX_NAME);
     root_node->type = VFS_NODE_DIR;
 

@@ -593,10 +593,12 @@ int uart_vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
     struct fmt_output out = fmt_output_buf(buf, size);
     fmt_vprintf(&out, fmt, args);
 
-    /* Always null-terminate */
+    /* Always null-terminate. The size==0 case is rejected up-front,
+     * so the second branch unconditionally has size > 0; drop the
+     * redundant `else if (size > 0)` guard. */
     if (out.pos > 0) {
         *out.buf = '\0';
-    } else if (size > 0) {
+    } else {
         buf[size - 1] = '\0';
     }
 

@@ -117,10 +117,18 @@ static void counter_service_entry(void *arg)
  * Demonstrates inter-component communication.
  * ============================================================================ */
 
-/* Simple shared mailbox for echo service (avoids IPC queue complexity) */
-static volatile struct {
-    volatile uint32_t ready;       /* 1 = message available */
-    volatile uint32_t ack;         /* 1 = message consumed */
+/* Simple shared mailbox for echo service (avoids IPC queue complexity).
+ *
+ * Cross-CPU synchronisation is provided by the __atomic_*(ready, ack)
+ * accesses below — the data[] field is written before the
+ * __ATOMIC_RELEASE store on `ready`, and the receiver sees a
+ * consistent buffer via the __ATOMIC_ACQUIRE load. The `volatile`
+ * qualifiers below are NOT load-bearing for ordering (the atomics
+ * are); they are kept solely as visual cues that this struct is
+ * touched from multiple contexts. */
+static struct {
+    volatile uint32_t ready;       /* atomic: 1 = message available */
+    volatile uint32_t ack;         /* atomic: 1 = message consumed */
     char data[64];
 } echo_mailbox;
 
