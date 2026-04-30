@@ -889,13 +889,25 @@ void gpu_alloc_qmd_pool(struct gpu_launch_ctx *ctx, uint32_t n_slots)
         exit(1);
     }
 
-    /* Free any prior pool — the helper may call us a second time
-     * (idempotent contract). dmabuf_fd 0 is unused (stdin in
-     * userspace; we only get nonzero fds from open). */
+    /* Release any prior pool's CPU mmap and dmabuf fd if a second
+     * call occurs. The GMMU mapping is left implicit — closing the
+     * dmabuf relies on nvgpu's refcount to drop the GPU VA. The
+     * docstring in gpu-launch-common.h spells out the single-use
+     * contract; this cleanup is adequate for current call sites
+     * and a paranoia hedge against accidental re-invocation.
+     *
+     * Sentinel for "not allocated" is qmd_pool_dmabuf == 0. The
+     * `struct gpu_launch_ctx` is zero-initialised by callers (see
+     * the `struct gpu_launch_ctx ctx = {0};` pattern in
+     * gpu-kernel-mnist.c and friends), and gpu_nvmap_alloc_dmabuf
+     * never returns fd 0 in practice (fd 0 == stdin, always open
+     * in any process). Using `!= 0` rather than `> 0` so a fd of
+     * exactly 0 — which would be invalid as a sentinel anyway —
+     * still triggers a close attempt rather than leaking it. */
     if (ctx->qmd_pool_va != NULL && ctx->qmd_pool_size_bytes > 0u) {
         munmap(ctx->qmd_pool_va, ctx->qmd_pool_size_bytes);
     }
-    if (ctx->qmd_pool_dmabuf > 0) {
+    if (ctx->qmd_pool_dmabuf != 0) {
         close(ctx->qmd_pool_dmabuf);
     }
 
