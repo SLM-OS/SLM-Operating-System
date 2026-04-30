@@ -395,6 +395,10 @@ set(KERNEL_SOURCES
     # Jetson-only: nvgpu-native bringup skeleton (parallel to bringup.c's
     # GSP-RM path, for GA10B's ACR+FECS+GPCCS+PMU boot model).
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_bringup.c>
+    # Jetson-only: per-dispatch QMDV03_00 encoder (issue #558 fix).
+    # No-op when nothing calls ga10b_qmd_populate (Phase 1 — encoder
+    # ported but not yet wired into the dispatch path).
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_qmd.c>
     # Jetson: full GSP platform shim — MMIO at GPU_BASE, unified memory
     # DMA, cache maintenance, firmware via .incbin. Replaces the old
     # nvidia_gsp_platform_stub.c now that CBB firewall is bypassed.
