@@ -23,6 +23,11 @@
 #include "shell.h"
 #include "shell_io.h"
 
+/* Forward declaration. Full definition lives in littlefs_slm.h; this
+ * header only needs the pointer for `shell_xput_session::mnt` and
+ * doesn't otherwise depend on littlefs. */
+struct lfs_mount;
+
 /* Maximum number of non-console sessions (e.g. TCP). Kept fixed so the
  * session/task/ring-buffer footprint stays statically bounded. Each slot
  * costs roughly 64 KB task stack + 8 KB ring buffers = ~72 KB, so 16 TCP
@@ -50,6 +55,25 @@ struct shell_xput_session {
     uint32_t expected_size;
     uint32_t received_size;
     uint32_t checksum;
+    /* File handle held open across all `xput chunk` calls between
+     * `xput begin` and `xput finish`/`xput abort` (#588 follow-up).
+     * Per-chunk open/close + seek+write+close is unsafe for bulk
+     * uploads: a 1 GB transfer is ~2.25M chunk cycles at the 497 B
+     * shell-line cap. Each cycle (a) leaks a LittleFS file handle
+     * if the session task is torn down mid-call (LFS_SLM_MAX_FILES
+     * = 4, so 4 such teardowns wedge the mount), and (b) churns LFS
+     * COW metadata to the point where opens fail entirely.
+     *
+     * `fd` is set to -1 in the no-handle state but DO NOT use
+     * `fd < 0` to test "is a handle held": littlefs_slm.c's
+     * encode_file_handle packs the generation into bits 16-31, so
+     * any handle with `gen & 0x8000` is a negative int. Use
+     * `mnt != NULL` as the authoritative held-fd signal. */
+    int      fd;
+    /* Mount that owns `fd`, AND the "fd is held" signal. NULL
+     * means no fd is open. Cached at begin so chunks don't have to
+     * re-resolve `xput->path` on every write. */
+    struct lfs_mount *mnt;
 };
 
 /* Per-session command-history ring. Sized at 32 × 128 = 4 KB of payload
@@ -136,6 +160,13 @@ struct shell_session *shell_session_alloc(void);
  * both cases). The caller is responsible for closing the shell_io
  * before freeing. */
 void shell_session_free(struct shell_session *s);
+
+/* Defensive cleanup for an in-flight xput upload that's still
+ * active when its owning session is torn down (peer RST, task
+ * forced exit, etc.). Closes the LittleFS file handle held in
+ * `s->xput.fd` if any, preventing a leak in the
+ * LFS_SLM_MAX_FILES = 4 pool. Implementation in shell_fs.c. */
+void shell_xput_session_close_for(struct shell_session *s);
 
 /* Initialize the console session. Must be called once before any
  * shell_session_current() call. Safe to call multiple times — only

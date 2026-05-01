@@ -1113,9 +1113,17 @@ void shell_io_tcp_poll(void)
                 if (pd == 0) continue;
                 const char *name = lwip_stats.memp[p]->name
                     ? lwip_stats.memp[p]->name : "?";
+                /* kprintf only supports `-` and `0` flags (see
+                 * kprintf.c). `%+d` is silently broken — it prints
+                 * "%+d" literally, doesn't consume the int arg, and
+                 * the integer leaks into the next %s read of the
+                 * outer caller. Print the `+` manually for non-
+                 * negative values; %d already prefixes negatives
+                 * with `-`. (pd == 0 is filtered above.) */
+                const char *sign = (pd > 0) ? "+" : "";
                 int n = uart_snprintf(pool_attribution + attr_off,
                                       sizeof(pool_attribution) - attr_off,
-                                      " %s%+d", name, (int)pd);
+                                      " %s%s%d", name, sign, (int)pd);
                 if (n <= 0) break;
                 attr_off += (size_t)n;
             }

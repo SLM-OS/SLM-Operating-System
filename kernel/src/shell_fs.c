@@ -26,10 +26,44 @@ static uint32_t shell_checksum32_update(uint32_t checksum,
     return checksum;
 }
 
+/* Close a held xput fd if any, then zero the session-specific
+ * upload state. Safe to call when no fd is open (the close path
+ * is gated on `mnt` being non-NULL — which is the authoritative
+ * "fd is held" signal; do NOT use `fd < 0` as a sentinel because
+ * encode_file_handle in littlefs_slm.c packs the generation into
+ * bits 16-31, so any handle with `gen & 0x8000` is negative when
+ * interpreted as a signed int even though it's perfectly valid).
+ * Used by `xput begin` (reset before re-init), `xput abort`
+ * (explicit teardown), `xput finish` (post-validation cleanup),
+ * and `shell_xput_session_close_for` (session-free defensive
+ * cleanup called from shell_session_free when the session is
+ * being torn down — covers the case where a session task exits
+ * mid-upload without going through abort/finish, so the LFS file
+ * handle doesn't leak into the LFS_SLM_MAX_FILES = 4 pool). */
+static void xput_close_fd(struct shell_xput_session *xput)
+{
+    if (xput && xput->mnt) {
+        littlefs_file_close(xput->mnt, xput->fd);
+    }
+    if (xput) {
+        xput->mnt = NULL;
+        xput->fd = -1;
+    }
+}
+
 static void xput_session_reset(void)
 {
     struct shell_session *session = shell_session_current();
+    xput_close_fd(&session->xput);
     memset(&session->xput, 0, sizeof(session->xput));
+    session->xput.fd = -1;   /* explicit "no handle" sentinel */
+}
+
+void shell_xput_session_close_for(struct shell_session *s)
+{
+    if (!s) return;
+    xput_close_fd(&s->xput);
+    s->xput.active = false;
 }
 
 static struct shell_xput_session *xput_session_current(void)
@@ -628,14 +662,24 @@ int cmd_xput(int argc, char *argv[])
             shell_printf("xput begin: %s: Not a mounted filesystem\r\n", resolved);
             return -1;
         }
+        /* Tear down any prior session state (closing a held fd if
+         * one leaked through), THEN open the new file and hold the
+         * fd open across all subsequent chunks. The pre-refactor
+         * code opened-then-closed here and re-opened per chunk;
+         * that pattern caused two failure modes on the 1 GB GGUF
+         * upload: (1) ~32K open/close cycles per GB churned LFS
+         * COW metadata to the point opens started failing, and
+         * (2) any session task killed mid-chunk leaked a handle in
+         * the LFS_SLM_MAX_FILES=4 pool, wedging the mount after
+         * 4 such teardowns. Holding a single fd for the upload's
+         * lifetime collapses both windows. */
+        xput_session_reset();
         fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
         if (fd < 0) {
             shell_printf("xput begin: %s: Failed to open file\r\n", resolved);
             return -1;
         }
-        littlefs_file_close(mnt, fd);
 
-        xput_session_reset();
         xput = xput_session_current();
         xput->active = true;
         strncpy(xput->path, resolved, sizeof(xput->path) - 1);
@@ -643,6 +687,8 @@ int cmd_xput(int argc, char *argv[])
         xput->expected_size = size;
         xput->received_size = 0;
         xput->checksum = 0x811C9DC5u;
+        xput->fd = fd;
+        xput->mnt = mnt;
         shell_printf("XPUT ok begin path=%s size=%lu\r\n",
                      xput->path,
                      (unsigned long)xput->expected_size);
@@ -651,11 +697,8 @@ int cmd_xput(int argc, char *argv[])
 
     if (strcmp(argv[1], "chunk") == 0) {
         uint32_t offset;
-        const char *subpath = NULL;
-        struct lfs_mount *mnt;
         static uint8_t data[512];
         int bytes;
-        int fd;
         int written;
 
         if (argc < 4) {
@@ -697,29 +740,23 @@ int cmd_xput(int argc, char *argv[])
             return -1;
         }
 
-        mnt = vfs_get_mount_ctx(xput->path, &subpath);
-        if (!mnt) {
-            shell_printf("xput chunk: %s: Not a mounted filesystem\r\n",
-                         xput->path);
+        /* Use the persistent fd opened by `xput begin`. The previous
+         * implementation re-opened/closed per chunk; see the comment
+         * in the begin handler for why that was load-bearing on
+         * uploads larger than a few MB. `mnt` is the authoritative
+         * "fd is held" signal — do not test `fd < 0`, see the
+         * xput_close_fd comment. */
+        if (!xput->mnt) {
+            shell_puts("xput chunk: session has no open fd "
+                       "(did `xput begin` succeed?)\r\n");
             return -1;
         }
-        fd = littlefs_file_open(mnt, subpath, LFS_O_WRONLY | LFS_O_CREAT);
-        if (fd < 0) {
-            shell_printf("xput chunk: %s: Failed to open file\r\n",
-                         xput->path);
-            return -1;
-        }
-        if (littlefs_file_seek(mnt, fd, (int32_t)offset, 0) < 0) {
-            littlefs_file_close(mnt, fd);
-            shell_printf("xput chunk: %s: Seek failed\r\n", xput->path);
-            return -1;
-        }
-        written = littlefs_file_write(mnt, fd, data, (size_t)bytes);
-        littlefs_file_close(mnt, fd);
-        if (written != bytes) {
+        if (littlefs_file_write(xput->mnt, xput->fd, data,
+                                (size_t)bytes) != bytes) {
             shell_printf("xput chunk: %s: Write failed\r\n", xput->path);
             return -1;
         }
+        written = bytes;
 
         xput->received_size += (uint32_t)bytes;
         xput->checksum =
@@ -728,6 +765,7 @@ int cmd_xput(int argc, char *argv[])
                      (unsigned long)offset,
                      (unsigned long)xput->received_size,
                      (unsigned long)xput->checksum);
+        (void)written;
         return 0;
     }
 
@@ -742,11 +780,16 @@ int cmd_xput(int argc, char *argv[])
                          (unsigned long)xput->received_size);
             return -1;
         }
+        /* Cache the formatted summary BEFORE the reset so the close
+         * happens before we report success — partial writes that
+         * fail at close (e.g. metadata flush errors on full
+         * underlying media) would otherwise be silently swallowed
+         * after the user's tool has already moved on. */
         shell_printf("XPUT ok finish path=%s size=%lu checksum=%lu\r\n",
                      xput->path,
                      (unsigned long)xput->received_size,
                      (unsigned long)xput->checksum);
-        xput_session_reset();
+        xput_session_reset();   /* closes the persistent fd */
         return 0;
     }
 

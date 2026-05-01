@@ -111,7 +111,14 @@ void tcp_shell_server_note_session_close(uint32_t session_id,
          * persistent positive PBUF_POOL delta across multiple
          * sessions is the smoking gun for the #581 follow-up
          * pool-leak investigation. */
-        INFO("shell-tcp: session %u closed: heap_delta=%+d, pool_delta=%s",
+        /* Use %d (not %+d) — kprintf only supports the `-` and `0`
+         * flags (see kprintf.c top-of-file docs). %+d falls into the
+         * default case which prints "%+d" literally and does NOT
+         * consume the va_arg, so the next %s reads heap_delta_bytes
+         * as a char* and prints garbage from wherever that integer
+         * happens to point. Negative values still get a leading `-`
+         * from %d. */
+        INFO("shell-tcp: session %u closed: heap_delta=%d, pool_delta=%s",
              (unsigned)session_id, (int)heap_delta_bytes, pool_attribution);
     }
 }

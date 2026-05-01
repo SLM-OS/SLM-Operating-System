@@ -58,6 +58,9 @@ static void session_reset_defaults(struct shell_session *s)
     s->term_type[0]       = '\0';
     s->interrupt_requested = false;
     memset(&s->xput, 0, sizeof(s->xput));
+    /* Explicit "no LittleFS handle held" sentinel — `0` is a valid
+     * file-handle value, so we can't rely on the memset above. */
+    s->xput.fd = -1;
 
     /* Wipe any stale recall ring left behind from a previous occupant
      * of this pool slot, then put the cursor on the live edit buffer
@@ -158,6 +161,16 @@ void shell_session_free(struct shell_session *s)
     if (!s || s == &console_session) {
         return;
     }
+    /* Close any held xput fd before tearing down the session.
+     * Without this, a peer that opens an `xput begin` and
+     * disconnects before `xput finish` (or before a chunk-error
+     * recovery path runs) leaks one of the LFS_SLM_MAX_FILES = 4
+     * LittleFS file handles per failed session. After 4 such
+     * teardowns the mount is wedged and every subsequent open
+     * returns LFS_ERR_NOMEM. Run this OUTSIDE pool_lock — the
+     * close path takes the LFS mount's own spinlock and we
+     * don't want to nest. */
+    shell_xput_session_close_for(s);
     if (s->lua) {
         lua_slm_close((lua_State *)s->lua);
         s->lua = NULL;
