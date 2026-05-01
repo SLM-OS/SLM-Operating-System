@@ -28,17 +28,21 @@ static uint32_t shell_checksum32_update(uint32_t checksum,
 
 /* Close a held xput fd if any, then zero the session-specific
  * upload state. Safe to call when no fd is open (the close path
- * is gated on `mnt` being non-NULL and `fd >= 0`). Used by
- * `xput begin` (reset before re-init), `xput abort` (explicit
- * teardown), `xput finish` (post-validation cleanup), and
- * `shell_xput_session_close_for` (session-free defensive cleanup
- * called from shell_session_free when the session is being torn
- * down — covers the case where a session task exits mid-upload
- * without going through abort/finish, so the LFS file handle
- * doesn't leak into the LFS_SLM_MAX_FILES = 4 pool). */
+ * is gated on `mnt` being non-NULL — which is the authoritative
+ * "fd is held" signal; do NOT use `fd < 0` as a sentinel because
+ * encode_file_handle in littlefs_slm.c packs the generation into
+ * bits 16-31, so any handle with `gen & 0x8000` is negative when
+ * interpreted as a signed int even though it's perfectly valid).
+ * Used by `xput begin` (reset before re-init), `xput abort`
+ * (explicit teardown), `xput finish` (post-validation cleanup),
+ * and `shell_xput_session_close_for` (session-free defensive
+ * cleanup called from shell_session_free when the session is
+ * being torn down — covers the case where a session task exits
+ * mid-upload without going through abort/finish, so the LFS file
+ * handle doesn't leak into the LFS_SLM_MAX_FILES = 4 pool). */
 static void xput_close_fd(struct shell_xput_session *xput)
 {
-    if (xput && xput->mnt && xput->fd >= 0) {
+    if (xput && xput->mnt) {
         littlefs_file_close(xput->mnt, xput->fd);
     }
     if (xput) {
@@ -739,8 +743,10 @@ int cmd_xput(int argc, char *argv[])
         /* Use the persistent fd opened by `xput begin`. The previous
          * implementation re-opened/closed per chunk; see the comment
          * in the begin handler for why that was load-bearing on
-         * uploads larger than a few MB. */
-        if (xput->fd < 0 || !xput->mnt) {
+         * uploads larger than a few MB. `mnt` is the authoritative
+         * "fd is held" signal — do not test `fd < 0`, see the
+         * xput_close_fd comment. */
+        if (!xput->mnt) {
             shell_puts("xput chunk: session has no open fd "
                        "(did `xput begin` succeed?)\r\n");
             return -1;

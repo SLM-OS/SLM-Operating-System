@@ -63,10 +63,16 @@ struct shell_xput_session {
      * if the session task is torn down mid-call (LFS_SLM_MAX_FILES
      * = 4, so 4 such teardowns wedge the mount), and (b) churns LFS
      * COW metadata to the point where opens fail entirely.
-     * Negative when no fd is held (closed-or-never-opened state). */
+     *
+     * `fd` is set to -1 in the no-handle state but DO NOT use
+     * `fd < 0` to test "is a handle held": littlefs_slm.c's
+     * encode_file_handle packs the generation into bits 16-31, so
+     * any handle with `gen & 0x8000` is a negative int. Use
+     * `mnt != NULL` as the authoritative held-fd signal. */
     int      fd;
-    /* Mount that owns `fd`. Cached at begin so chunks don't have
-     * to re-resolve `xput->path` on every write. */
+    /* Mount that owns `fd`, AND the "fd is held" signal. NULL
+     * means no fd is open. Cached at begin so chunks don't have to
+     * re-resolve `xput->path` on every write. */
     struct lfs_mount *mnt;
 };
 
