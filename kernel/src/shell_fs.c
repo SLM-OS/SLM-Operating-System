@@ -705,13 +705,13 @@ int cmd_xput(int argc, char *argv[])
     if (strcmp(argv[1], "chunk") == 0) {
         uint32_t offset;
         /* Decode buffer for hex-encoded chunk payload. Sized at 4 KB
-     * to match the post-#581 SHELL_MAX_LINE = 8192 ceiling: the
-     * `xput chunk OFFSET HEXDATA\n` line carries up to ~8 KB of
-     * hex (= 4 KB binary) after subtracting the prefix and slm-put.py's
-     * 16-char headroom. Static so it stays out of the 64 KB task
-     * stack; the same line is parsed into argv anyway, so this
-     * buffer's lifetime is bounded by the single shell command. */
-    static uint8_t data[4096];
+         * to match the post-#581 SHELL_MAX_LINE = 8192 ceiling: the
+         * `xput chunk OFFSET HEXDATA\n` line carries up to ~8 KB of
+         * hex (= 4 KB binary) after subtracting the prefix and slm-put.py's
+         * 16-char headroom. Static so it stays out of the 64 KB task
+         * stack; the same line is parsed into argv anyway, so this
+         * buffer's lifetime is bounded by the single shell command. */
+        static uint8_t data[4096];
         int bytes;
         int written;
 
