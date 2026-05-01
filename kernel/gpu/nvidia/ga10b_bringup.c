@@ -236,8 +236,23 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 /* ---- COMPUTE_B compute-kernel launch methods --------------------
  * Used by ga10b_bringup_launch_kernel (Phase 8). Offsets from
  * ../slmos-reference-cache/mesa/mesa-clc7c0.h. */
+#define NVC7C0_INVALIDATE_SHADER_CACHES               0x021cu
 #define NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI 0x0244u
 #define NVC7C0_INVALIDATE_SKED_CACHES                 0x0298u
+
+/* INVALIDATE_SHADER_CACHES bitfields per
+ * ../slmos-reference-cache/mesa/mesa-clc7c0.h:299-314 (bit positions
+ * decoded from "MSB:LSB" notation). All five bits set = nuke every
+ * shader-side cache before the next dispatch reads input/cbuf data.
+ *
+ *   INSTRUCTION  bit  0   0x0001
+ *   LOCKS        bit  1   0x0002
+ *   FLUSH_DATA   bit  2   0x0004
+ *   DATA         bit  4   0x0010
+ *   CONSTANT     bit 12   0x1000
+ *   --------------------------
+ *   ALL                   0x1017                                        */
+#define NVC7C0_INVALIDATE_SHADER_CACHES_ALL            0x1017u
 #define NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_A      0x02a0u
 #define NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_B      0x02a4u
 #define NVC7C0_SEND_PCAS_A                            0x02b4u
@@ -1412,13 +1427,27 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
     pb[8]  = ga10b_hdr_immd(1, NVC7C0_INVALIDATE_SKED_CACHES, 0);
     pb[9]  = ga10b_hdr_immd(1, NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, 0);
 
-    pb[10] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SEND_PCAS_A);
-    pb[11] = (uint32_t)(qmd_gpu_va >> 8);
+    /* INVALIDATE_SHADER_CACHES — Why: Phase 6 hardware verification
+     * showed that even with per-dispatch QMD rotation, the GPU's
+     * shader-side caches (instruction, data, constant, locks) still
+     * carried stale entries from the prior launch on the same channel.
+     * The deterministic off-by-one was eliminated by per-dispatch QMD
+     * (PR #574/#577); the residual intermittent staleness was
+     * coherency at the shader-cache level, not the SKED level. With
+     * `gpu debug on` (uart_printf between launches) staleness vanished
+     * because the printf path inserted enough delay for the caches to
+     * naturally drain. This explicit invalidate makes the dispatch
+     * pushbuffer self-sufficient. */
+    pb[10] = ga10b_hdr_immd(1, NVC7C0_INVALIDATE_SHADER_CACHES,
+                            NVC7C0_INVALIDATE_SHADER_CACHES_ALL);
+
+    pb[11] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SEND_PCAS_A);
+    pb[12] = (uint32_t)(qmd_gpu_va >> 8);
 
     /* PCAS2_B on Ampere with INVALIDATE_COPY_SCHEDULE. The Turing-era
      * SEND_SIGNALING_PCAS_B (at 0x02bc) silently no-ops dispatch on
      * GA10B — see pb builder docstring in the header. */
-    pb[12] = ga10b_hdr_immd(1, NVC7C0_SEND_SIGNALING_PCAS2_B,
+    pb[13] = ga10b_hdr_immd(1, NVC7C0_SEND_SIGNALING_PCAS2_B,
                             NVC7C0_SEND_SIGNALING_PCAS2_B_ACTION_INVALIDATE_COPY_SCHEDULE);
 
     return GA10B_LAUNCH_KERNEL_PB_DWORDS;
@@ -1429,7 +1458,7 @@ uint32_t ga10b_build_launch_kernel_with_sema_pushbuffer(uint32_t *pb,
                                                          uint64_t sem_gpu_va,
                                                          uint32_t payload)
 {
-    /* First 13 dwords: same as the plain launch_kernel pushbuffer. */
+    /* First 14 dwords: same as the plain launch_kernel pushbuffer. */
     (void)ga10b_build_launch_kernel_pushbuffer(pb, qmd_gpu_va);
 
     /* Trailing 10 dwords: REPORT_SEMAPHORE_PAYLOAD/ADDRESS/EXECUTE
@@ -1439,16 +1468,16 @@ uint32_t ga10b_build_launch_kernel_with_sema_pushbuffer(uint32_t *pb,
      * stores `payload` at sem_gpu_va. Same encoding as
      * ga10b_build_compute_sema_release_pushbuffer's tail (which we
      * use for the smoke test). */
-    pb[13] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER);
-    pb[14] = payload;
-    pb[15] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER);
-    pb[16] = 0u;     /* 32-bit release; high payload ignored */
-    pb[17] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER);
-    pb[18] = (uint32_t)(sem_gpu_va & 0xFFFFFFFFu);
-    pb[19] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_UPPER);
-    pb[20] = (uint32_t)((sem_gpu_va >> 32) & 0xFFu);
-    pb[21] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_REPORT_SEMAPHORE_EXECUTE);
-    pb[22] = NVC7C0_SEM_EXECUTE_OP_RELEASE |
+    pb[14] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER);
+    pb[15] = payload;
+    pb[16] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER);
+    pb[17] = 0u;     /* 32-bit release; high payload ignored */
+    pb[18] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER);
+    pb[19] = (uint32_t)(sem_gpu_va & 0xFFFFFFFFu);
+    pb[20] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_UPPER);
+    pb[21] = (uint32_t)((sem_gpu_va >> 32) & 0xFFu);
+    pb[22] = NVC56F_METHOD_HEADER_INC(1, 1, NVC7C0_REPORT_SEMAPHORE_EXECUTE);
+    pb[23] = NVC7C0_SEM_EXECUTE_OP_RELEASE |
              NVC7C0_SEM_EXECUTE_STRUCTURE_SIZE_ONE_WORD;
     return GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS;
 }
@@ -1505,7 +1534,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
 {
     /* Bound pb_dwords against the inherited pushbuffer size before any
      * write. Today's callers cap at GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS
-     * (= 23), but a future caller passing a larger value would
+     * (= 24), but a future caller passing a larger value would
      * overflow g_handoff.pushbuf_phys. Cheap up-front check.
      *
      * Note: this and the 40-bit-VA check below intentionally use

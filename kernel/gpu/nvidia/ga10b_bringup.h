@@ -257,7 +257,7 @@ uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
 
 /* Size of the compute-kernel-launch pushbuffer in dwords.
  *
- * Layout (13 dwords):
+ * Layout (14 dwords):
  *   [0]     INC header SET_OBJECT
  *   [1]     class_id (AMPERE_COMPUTE_B)
  *   [2]     INC header count=2 SET_SHADER_SHARED_MEMORY_WINDOW_A
@@ -266,10 +266,11 @@ uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
  *   [6-7]   upper (0) / lower (0xff000000) of local-mem window base
  *   [8]     IMMD INVALIDATE_SKED_CACHES
  *   [9]     IMMD INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI
- *   [10]    INC header SEND_PCAS_A
- *   [11]    QMD address shifted right 8
- *   [12]    IMMD SEND_SIGNALING_PCAS2_B action=INVALIDATE_COPY_SCHEDULE */
-#define GA10B_LAUNCH_KERNEL_PB_DWORDS 13u
+ *   [10]    IMMD INVALIDATE_SHADER_CACHES (all bits = 0x1017)
+ *   [11]    INC header SEND_PCAS_A
+ *   [12]    QMD address shifted right 8
+ *   [13]    IMMD SEND_SIGNALING_PCAS2_B action=INVALIDATE_COPY_SCHEDULE */
+#define GA10B_LAUNCH_KERNEL_PB_DWORDS 14u
 
 /* Pure-logic builder for the compute-kernel-launch pushbuffer. QMD
  * must be 256-byte aligned so that qmd_gpu_va >> 8 fits the
@@ -291,9 +292,9 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
 
 /* Size of the launch-kernel-with-semaphore pushbuffer in dwords.
  *
- * Extends GA10B_LAUNCH_KERNEL_PB_DWORDS (13) with a REPORT_SEMAPHORE
+ * Extends GA10B_LAUNCH_KERNEL_PB_DWORDS (14) with a REPORT_SEMAPHORE
  * release tail (10 dwords: payload lower/upper, address lower/upper,
- * execute, each as a 1-method-1-data pair). Total: 23 dwords.
+ * execute, each as a 1-method-1-data pair). Total: 24 dwords.
  *
  * The semaphore release on AMPERE_COMPUTE_B with default flags waits
  * for prior compute to drain and flushes L2 → DRAM before the release
@@ -311,7 +312,7 @@ uint32_t ga10b_build_launch_kernel_pushbuffer(uint32_t *pb,
  *      computes to 0.0f, GH #372);
  *   - the full output reaches DRAM, not just the cells that happen
  *     to be in L2's writeback queue (fixes the 4 KB truncation, #390). */
-#define GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS 23u
+#define GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS 24u
 
 /* Byte offset within the channel-semaphore page used for per-op
  * completion releases. The launcher's gpu_write_handoff_v6 sets

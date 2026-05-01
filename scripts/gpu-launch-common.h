@@ -17,7 +17,7 @@
  *     to `out`; write_cafe has only `out`).
  *   - main() orchestration.
  *
- * Everything else — channel bringup, the 13-dword dispatch
+ * Everything else — channel bringup, the 14-dword dispatch
  * pushbuffer, the GPFIFO + doorbell + poll loop, handoff serialization
  * — lives here.
  */
@@ -66,6 +66,12 @@
  * NVC7C0 method offsets used by the dispatch pushbuffer.
  * ============================================================ */
 #define NVC7C0_SET_OBJECT                             0x0000
+#define NVC7C0_INVALIDATE_SHADER_CACHES               0x021c
+/* INSTRUCTION + LOCKS + FLUSH_DATA + DATA + CONSTANT bits set —
+ * mesa-clc7c0.h:299-314 (bits 0,1,2,4,12). Required between
+ * launches on the same channel; without it shader-side caches
+ * retain stale entries even when the QMD rotates per dispatch. */
+#define NVC7C0_INVALIDATE_SHADER_CACHES_ALL            0x1017
 #define NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI 0x0244
 #define NVC7C0_INVALIDATE_SKED_CACHES                 0x0298
 #define NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_A      0x02a0
@@ -314,8 +320,8 @@ void gpu_populate_qmd_at(uint32_t *qmd,
                           uint64_t cbuf_gpu_va,
                           uint32_t register_count_v);
 
-/* Build the 13-dword dispatch pushbuffer at `pb` (caller provides
- * storage ≥ 13 u32). qmd_gpu_va must be 256 B-aligned. Returns
+/* Build the 14-dword dispatch pushbuffer at `pb` (caller provides
+ * storage ≥ 14 u32). qmd_gpu_va must be 256 B-aligned. Returns
  * the dword count written. Same shape as the kernel's
  * ga10b_build_launch_kernel_pushbuffer(). */
 size_t gpu_build_launch_pushbuffer(uint32_t *pb, uint64_t qmd_gpu_va);
