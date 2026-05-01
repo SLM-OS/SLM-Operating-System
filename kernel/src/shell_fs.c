@@ -563,7 +563,7 @@ int cmd_put(int argc, char *argv[])
 
     /* Decode buffer for hex-encoded chunk payload. Sized at 16 KB
      * to match the post-#581 SHELL_MAX_LINE = 32768 ceiling: the
-     * `xput chunk OFFSET HEXDATA\n` line carries up to ~8 KB of
+     * `xput chunk OFFSET HEXDATA\n` line carries up to ~32 KB of
      * hex (= 16 KB binary) after subtracting the prefix and slm-put.py's
      * 16-char headroom. Static so it stays out of the 64 KB task
      * stack; the same line is parsed into argv anyway, so this
@@ -706,7 +706,7 @@ int cmd_xput(int argc, char *argv[])
         uint32_t offset;
         /* Decode buffer for hex-encoded chunk payload. Sized at 16 KB
          * to match the post-#581 SHELL_MAX_LINE = 32768 ceiling: the
-         * `xput chunk OFFSET HEXDATA\n` line carries up to ~8 KB of
+         * `xput chunk OFFSET HEXDATA\n` line carries up to ~32 KB of
          * hex (= 16 KB binary) after subtracting the prefix and slm-put.py's
          * 16-char headroom. Static so it stays out of the 64 KB task
          * stack; the same line is parsed into argv anyway, so this
