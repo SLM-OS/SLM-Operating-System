@@ -75,12 +75,15 @@
  *
  * Wire form for the bulk-upload command is
  * `xput chunk OFFSET HEXDATA\n`, with HEXDATA at 2× the binary
- * chunk size. The line-budget arithmetic in slm-put.py
- * (`max_framed_chunk_bytes`) leaves a 16-char headroom and
- * subtracts `xput chunk ` (11 chars) + 10-digit offset + space
- * (12 chars) + newline (1) = 24 chars, then halves the rest for
- * hex. With SHELL_MAX_LINE = 32768 the effective binary ceiling
- * is `(32768 - 1 - 16 - 24) / 2 = 16363` bytes per chunk.
+ * chunk size. The effective per-chunk binary ceiling is
+ * `(SHELL_MAX_LINE - 1 - 16 - 22) / 2 ≈ 16 KB` at SHELL_MAX_LINE
+ * = 32768, where the 22 covers `xput chunk OFFSET ` at a
+ * worst-case 10-digit offset plus the trailing space, the -1
+ * reserves a byte for the newline that `run_command` appends,
+ * the -16 is the SHELL_LINE_HEADROOM safety margin in slm-put.py,
+ * and the /2 accounts for hex's 2× expansion. See
+ * `max_framed_chunk_bytes` in scripts/tools/slm-put.py for the
+ * live arithmetic.
  *
  * Stack cost is 32 KB on the stack-local `line_buffer` in
  * shell_run() and on the `buf` in shell_execute(). On a 64 KB

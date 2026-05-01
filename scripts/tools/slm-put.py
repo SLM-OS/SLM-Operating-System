@@ -244,14 +244,47 @@ def format_duration(seconds: float) -> str:
     return f"{s}s"
 
 
+# Throttle for emit_progress: minimum wall-clock seconds between two
+# stderr progress lines. 0.5s = up to 2 lines/sec, fast enough that
+# the ETA visibly evolves but slow enough that a high-throughput
+# transfer (e.g. post-#595 ~16 KB chunks at tens of MB/s) doesn't
+# drown the terminal. Single-process script, so module-level state
+# is fine.
+_PROGRESS_THROTTLE_SECONDS = 0.5
+_progress_last_emit_time = 0.0
+
+
+def reset_progress_throttle() -> None:
+    """Clear the throttle so the very next emit_progress fires
+    immediately. Called at the top of upload_framed / upload_legacy
+    so the first chunk's progress always lands without delay."""
+    global _progress_last_emit_time
+    _progress_last_emit_time = 0.0
+
+
 def emit_progress(start_time: float, offset: int, total: int) -> None:
     """One-line progress to stderr: percent, bytes/total, instantaneous
     rate (averaged over the whole upload so far for stability), and
     ETA. Called once per successful chunk in upload_framed and
-    upload_legacy. Average rate (not EWMA) keeps the math obvious; if
-    a single chunk stalls, the rate dips visibly — which is the
-    behavior you want for diagnosing slowdowns."""
-    elapsed = max(time.monotonic() - start_time, 0.001)
+    upload_legacy.
+
+    Throttled to one line per _PROGRESS_THROTTLE_SECONDS of wall clock
+    so very fast transfers don't spam stderr. The final byte (offset
+    == total) always emits — completion is not skipped even if the
+    final chunk landed within the throttle window — so the run's
+    final progress line shows the closing rate before the summary.
+
+    Average rate (not EWMA) keeps the math obvious; if a single chunk
+    stalls, the rate dips visibly — which is the behavior you want for
+    diagnosing slowdowns."""
+    global _progress_last_emit_time
+    now = time.monotonic()
+    is_final = (offset >= total) and (total > 0)
+    if not is_final and (now - _progress_last_emit_time) < _PROGRESS_THROTTLE_SECONDS:
+        return
+    _progress_last_emit_time = now
+
+    elapsed = max(now - start_time, 0.001)
     rate = offset / elapsed
     pct = (offset / total * 100.0) if total > 0 else 100.0
     if rate > 0 and offset < total:
@@ -520,6 +553,7 @@ def upload_legacy(shell: Shell, args: argparse.Namespace, data: bytes,
                   total: int, target_desc: str,
                   shell_factory: Callable[[], Shell]) -> int:
     start_time = time.monotonic()
+    reset_progress_throttle()
     if total == 0:
         out = shell.run_command(f"put {args.remote_path} 00")
         log_response(args.debug, "put-empty", out)
@@ -709,6 +743,7 @@ def upload_framed(shell: Shell, args: argparse.Namespace, data: bytes,
                   total: int, target_desc: str,
                   shell_factory: Callable[[], Shell]) -> int:
     start_time = time.monotonic()
+    reset_progress_throttle()
     if total == 0:
         out = xput_begin(shell, args, total)
         if shell_command_failed(out):
