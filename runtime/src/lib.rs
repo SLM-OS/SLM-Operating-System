@@ -68,9 +68,15 @@ fn rust_panic(info: &PanicInfo) -> ! {
     // path), reentry would infinite-loop printing. Hard-loop on
     // second entry instead — the first panic line already made it to
     // UART (the most reliable channel) at this point.
+    //
+    // Relaxed ordering is sufficient: we only need atomicity on the
+    // RMW (so two concurrent panickers don't both observe `false`),
+    // not any happens-before with surrounding memory. Stronger
+    // orderings would add unnecessary fences on every panic-handler
+    // entry without protecting anything.
     use core::sync::atomic::{AtomicBool, Ordering};
     static PANICKING: AtomicBool = AtomicBool::new(false);
-    if PANICKING.swap(true, Ordering::SeqCst) {
+    if PANICKING.swap(true, Ordering::Relaxed) {
         loop {
             core::hint::spin_loop();
         }

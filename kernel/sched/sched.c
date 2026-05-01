@@ -76,7 +76,7 @@ volatile int preempt_disabled[MAX_CPUS];
 /* Per-CPU run queue locks — always in cacheable memory.
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
  * used by spinlocks may not work on Non-Cacheable memory (BCM2712). */
-static spinlock_t rq_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
+static SPINLOCK_ARRAY(rq_lock, MAX_CPUS);
 
 #if CONFIG_WORK_STEALING
 /*
@@ -125,7 +125,7 @@ static steal_deque_t cpu_steal_deques[MAX_CPUS];
  * steal_deque_t which was neutered by SPINLOCK_SKIP_LOCKING on
  * Jetson. Acquire the victim's lock before any steal_deque_*
  * operation; never held across other locks. */
-static spinlock_t steal_deque_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
+static SPINLOCK_ARRAY(steal_deque_lock, MAX_CPUS);
 #endif /* CONFIG_WORK_STEALING */
 
 /* Lock helpers that use the correct lock for a given CPU */

@@ -293,9 +293,15 @@ void lapic_send_ipi(uint32_t apic_id, uint32_t vector, uint32_t flags)
 
     /* Wait for delivery (poll bit 12 = Send Pending) — bound on TSC
      * so a wedged LAPIC (e.g. after #MC) can't hang the kernel here.
-     * 100 ms at any plausible CPU frequency is several orders of
-     * magnitude over the worst-case IPI latency, so a real exit
-     * via this path means the LAPIC is genuinely broken. */
+     *
+     * Budget = 3*10^8 TSC cycles, which is ~100 ms at 3 GHz. The
+     * actual wall-clock bound scales inversely with TSC frequency:
+     * ~33 ms at 9 GHz, ~300 ms at 1 GHz. That spread is well
+     * inside "much longer than any real IPI delivery" (microseconds)
+     * across every plausible x86 CPU frequency, so a timeout exit
+     * means the LAPIC is genuinely broken. If `tsc_freq_hz` ever
+     * becomes a calibrated runtime value, scale this to wall-clock
+     * 100 ms exactly. */
     uint64_t deadline_tsc = __builtin_ia32_rdtsc() + 100ULL * 1000 * 1000 * 3;
     while (lapic_read(LAPIC_ICR_LO) & (1 << 12)) {
         if (__builtin_ia32_rdtsc() >= deadline_tsc) {

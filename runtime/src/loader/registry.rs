@@ -400,24 +400,19 @@ fn prepare_onnx_payload(name: &[u8], data: &[u8]) -> Result<PreparedPayload, Loa
             let dest = weight_ptr.add(offset);
             if is_fp16 {
                 let n_elements = src.len() / 2;
-                // Defend against a truncated FP16 raw_data section:
-                // src.len() must be >= 2 * n_elements (which it
-                // always is by construction of n_elements above) and
-                // both indices `e*2` and `e*2+1` must stay inside
-                // src. Using `get(..)` returns None on shortfall and
-                // the explicit early-stop turns a malformed ONNX
-                // into a CorruptedData error rather than a panic.
+                // The FP16 read indices `e*2` and `e*2+1` are
+                // bounded by 2*n_elements - 1 < 2*n_elements ≤
+                // src.len() by construction of n_elements above, so
+                // direct indexing cannot panic. Pin the invariant
+                // with a debug_assert! so a future refactor that
+                // computes n_elements from a different source
+                // surfaces the dependency at test time. Release
+                // builds elide the assert and the loop runs without
+                // per-element bounds-check overhead.
+                debug_assert!(src.len() >= 2 * n_elements);
                 let dest_f32 = dest as *mut f32;
                 for e in 0..n_elements {
-                    let lo = match src.get(e * 2) { Some(b) => *b, None => {
-                        let _ = mm::free(weights);
-                        return Err(LoadError::CorruptedData);
-                    }};
-                    let hi = match src.get(e * 2 + 1) { Some(b) => *b, None => {
-                        let _ = mm::free(weights);
-                        return Err(LoadError::CorruptedData);
-                    }};
-                    let half = u16::from_le_bytes([lo, hi]);
+                    let half = u16::from_le_bytes([src[e * 2], src[e * 2 + 1]]);
                     *dest_f32.add(e) = fp16_to_f32(half);
                 }
             } else {

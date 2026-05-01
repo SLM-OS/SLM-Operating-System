@@ -82,7 +82,7 @@ void task_table_init(void)
          * would see stale data — silent corruption with no diagnostic.
          * Better to halt here with a clear message: NC arena sizing
          * needs to be raised in the platform header. */
-        panic("current_task: NC arena exhausted — bump NC_MEM_SIZE (platform header)");
+        panic("current_task: NC arena exhausted — bump NC_MEM_SIZE in kernel/include/ncmem.h");
     }
     for (uint32_t i = 0; i < MAX_CPUS; i++)
         current_task[i] = NULL;

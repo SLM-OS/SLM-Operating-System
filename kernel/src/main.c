@@ -225,11 +225,19 @@ void kernel_main(void *dtb)
          * 0x2FFF0000 is just below the end of Pi 5's low 1 GB
          * region; if a future firmware version hands off a smaller
          * RAM window the unguarded scan could fault before VMM
-         * init. Clamp explicitly. */
+         * init. Clamp explicitly.
+         *
+         * `ram_end > 0x1000` guard prevents an underflow if a
+         * future platform.h regression sets RAM_BASE+RAM_SIZE to a
+         * value where the addition wraps to ≤ 0x1000 — without it,
+         * `ram_end - 0x1000` would underflow to ~SIZE_MAX and the
+         * scan would walk wild memory. */
         uint64_t scan_top = 0x2FFF0000;
         uint64_t scan_bot = 0x2E000000;
         const uint64_t ram_end = (uint64_t)RAM_BASE + (uint64_t)RAM_SIZE;
-        if (scan_top > ram_end) scan_top = ram_end - 0x1000;
+        if (scan_top > ram_end) {
+            scan_top = (ram_end > 0x1000) ? ram_end - 0x1000 : 0;
+        }
         if (scan_bot < (uint64_t)RAM_BASE) scan_bot = (uint64_t)RAM_BASE;
         for (uint64_t addr = scan_top; addr >= scan_bot; addr -= 0x1000) {
             uint32_t *p = (uint32_t *)addr;

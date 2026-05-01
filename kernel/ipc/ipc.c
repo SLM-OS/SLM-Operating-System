@@ -228,19 +228,17 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
         queue->prio_msgs_sent[p] = 0;
     }
 
-    /* Register in global table */
+    /* Register in global table. Assign the queue ID only after a slot
+     * is reserved so a table-full failure doesn't burn an ID from the
+     * sequence space (with u32 IDs the wrap is decades away, but
+     * keeping the sequence dense is the cleaner contract). */
     irq_flags_t flags = spin_lock_irqsave(&ipc_state.lock);
 
-    uint32_t id = ipc_state.next_queue_id++;
-    queue->id = id;
-
-    /* Find free slot. If the table is full, surface the failure to the
-     * caller as NULL — silently dropping the queue would leak the
-     * pmm_alloc_page above and the buffer pages, with no diagnostic. */
     bool registered = false;
     for (size_t i = 0; i < MSG_QUEUE_MAX; i++) {
         if (!ipc_state.queues[i]) {
             ipc_state.queues[i] = queue;
+            queue->id = ipc_state.next_queue_id++;
             registered = true;
             break;
         }
@@ -249,6 +247,9 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
     spin_unlock_irqrestore(&ipc_state.lock, flags);
 
     if (!registered) {
+        /* Table full — surface as NULL with WARN. Silently dropping
+         * the queue would leak the pmm_alloc_page above and the
+         * buffer pages with no diagnostic. */
         WARN("msg_queue_create: queue table full (MSG_QUEUE_MAX=%d)", MSG_QUEUE_MAX);
         pmm_free_pages(queue->buffer, pages_needed);
         pmm_free_page(queue);
@@ -670,15 +671,16 @@ struct shared_buffer *shared_buffer_create(size_t size, uint32_t flags)
 
     /* Register in global table. Same fail-loud rule as msg_queue_create:
      * if the table is full, free the buffer pages and the buf page so a
-     * full table doesn't silently leak system memory on every retry. */
+     * full table doesn't silently leak system memory on every retry.
+     * Also defer the ID assignment until a slot is reserved so a
+     * table-full failure doesn't burn an ID. */
     irq_flags_t irqflags = spin_lock_irqsave(&ipc_state.lock);
-
-    buf->id = ipc_state.next_buffer_id++;
 
     bool registered = false;
     for (size_t i = 0; i < SHM_BUFFER_MAX; i++) {
         if (!ipc_state.buffers[i]) {
             ipc_state.buffers[i] = buf;
+            buf->id = ipc_state.next_buffer_id++;
             registered = true;
             break;
         }
