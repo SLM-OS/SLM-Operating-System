@@ -43,9 +43,27 @@ struct shell_io {
     /* True iff the backend can still do I/O (e.g. TCP peer connected). */
     bool (*is_open)(struct shell_io *io);
 
+    /* Optional. True iff the line-edit loop should echo printable
+     * input bytes back to the peer. Defaults to ON (the equivalent
+     * of returning true) when NULL — preserves the UART console's
+     * always-echo behavior without forcing every backend to
+     * implement this hook. The TCP backend wires it to the telnet
+     * IAC ECHO negotiation: when the peer says `DONT ECHO` (which
+     * slm-put.py and any other line-mode-buffering client do as
+     * default), echo is suppressed entirely, eliminating the per-
+     * char `tcp_write_buf` lock+ring traffic that otherwise caps
+     * `xput chunk` throughput at ~30 KB/s. */
+    bool (*echo_enabled)(struct shell_io *io);
+
     /* Backend-private data. */
     void *ctx;
 };
+
+/* Helper: returns true if `io` should echo input. NULL-safe; uses
+ * the vtable's `echo_enabled` callback when present, otherwise
+ * defaults to true. Centralized so the line-edit loop and any
+ * future caller don't have to repeat the NULL check. */
+bool shell_io_echo_enabled(struct shell_io *io);
 
 /* Convenience: write a null-terminated string via io->write. */
 void shell_io_puts(struct shell_io *io, const char *s);
