@@ -63,30 +63,42 @@
 
 /* Maximum command line length.
  *
- * Bumped 1024 → 8192 (#581 throughput follow-up) so framed `xput
- * chunk` commands can carry larger binary chunks. The wire form is
- * `xput chunk OFFSET HEXDATA\n`, where HEXDATA is 2× the binary
- * chunk size; with the previous 1024-char ceiling and a ~25-char
- * prefix (`xput chunk ` + 10-digit offset + space + newline) plus
- * slm-put.py's 16-char headroom, the binary chunk capped at
- * ~497 B. A 1 GB upload at 497 B/chunk over a strictly synchronous
- * request/response shell protocol takes hours regardless of LAN
- * speed (~2.16M round-trips × ~3 ms RTT ≈ 1.8 h, 6 h+ on slower
- * paths). 8192 raises the binary chunk to ~4 KB, cutting round-
- * trips 8× and the 1 GB transfer to ~15-25 minutes.
+ * History (#581 throughput stack):
+ *   - 1024: original. Capped framed `xput chunk` binary at ~497 B,
+ *     forcing ~2.16M round-trips per 1 GB upload.
+ *   - 1024 → 8192 (PR #592): raised binary chunk to ~4 KB,
+ *     cutting round-trips 8× to ~270K.
+ *   - 8192 → 32768 (this bump): raises binary chunk to ~16 KB,
+ *     cutting round-trips 4× more to ~65K. Combined with the
+ *     persistent fd (#591), echo-skip (#593), and net_poll drain
+ *     loop (#594), 1 GB upload should land in tens of minutes.
  *
- * Stack cost is 8 KB on the stack-local `line_buffer` in
- * shell_run() and on the `buf` in shell_execute(), well under the
- * 64 KB STACK_SIZE budget. BSS cost lands in TCP_SHELL_RING_SIZE
- * (16 KB / session × 16 sessions = 256 KB extra; see
- * shell_io_tcp.c) and the static `data[]` decode buffer in
- * cmd_xput chunk (4 KB).
+ * Wire form for the bulk-upload command is
+ * `xput chunk OFFSET HEXDATA\n`, with HEXDATA at 2× the binary
+ * chunk size. The line-budget arithmetic in slm-put.py
+ * (`max_framed_chunk_bytes`) leaves a 16-char headroom and
+ * subtracts `xput chunk ` (11 chars) + 10-digit offset + space
+ * (12 chars) + newline (1) = 24 chars, then halves the rest for
+ * hex. With SHELL_MAX_LINE = 32768 the effective binary ceiling
+ * is `(32768 - 1 - 16 - 24) / 2 = 16363` bytes per chunk.
+ *
+ * Stack cost is 32 KB on the stack-local `line_buffer` in
+ * shell_run() and on the `buf` in shell_execute(). On a 64 KB
+ * STACK_SIZE that's 50% per buffer — only one is live at a time
+ * (shell_run's REPL is the only caller of shell_execute via
+ * dispatch_cmd), and the deepest call chain underneath
+ * (shell_run → cmd_xput → littlefs_file_write → COW metadata
+ * helpers) typically uses < 4 KB more. Headroom remains.
+ *
+ * BSS cost lands in TCP_SHELL_RING_SIZE (16 KB / session × 16
+ * sessions = 256 KB; see shell_io_tcp.c) and the static `data[]`
+ * decode buffer in cmd_xput chunk (16 KB now).
  *
  * Both sides of the protocol must agree on this value:
  * `SHELL_MAX_LINE` in scripts/tools/slm-put.py mirrors it.
  * Mismatch → either truncated commands (kernel < client) or
  * wasted slm-put.py headroom (kernel > client). */
-#define SHELL_MAX_LINE      8192
+#define SHELL_MAX_LINE      32768
 #define SHELL_MAX_ARGS      16              /* Maximum arguments per command */
 
 #endif /* CONFIG_H */
