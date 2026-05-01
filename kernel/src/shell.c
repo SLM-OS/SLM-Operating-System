@@ -819,8 +819,8 @@ void shell_mutation_resume(bool paused)
 void shell_run(void)
 {
     /* Stack-local line buffer so two concurrent sessions (console +
-     * TCP) don't corrupt each other's in-progress input. 1024 bytes
-     * + argv is well within the 64 KB task stack. */
+     * TCP) don't corrupt each other's in-progress input. SHELL_MAX_LINE
+     * (post-#581: 8 KB) + argv is well within the 64 KB task stack. */
     char line_buffer[SHELL_MAX_LINE];
     char *argv[SHELL_MAX_ARGS];
     int argc;

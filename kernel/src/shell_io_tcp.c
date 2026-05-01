@@ -42,9 +42,23 @@
 #include "lwip/stats.h"        /* lwip_stats.mem.used for the heap snapshot */
 #include "arch/sys_arch.h"   /* sys_now() for connected_at timestamp */
 
-/* Per-direction buffer size. Must be a power of two. 4 KB matches
- * Plan §1.7's resource-limit budget. */
-#define TCP_SHELL_RING_SIZE 4096
+/* Per-direction buffer size. Must be a power of two.
+ *
+ * Bumped 4 KB → 16 KB (#581 throughput follow-up) so a single
+ * SHELL_MAX_LINE-sized command (8 KB) can be buffered comfortably
+ * even when the shell task is briefly behind on draining (e.g.
+ * during a chunk's LFS write). With the prior 4 KB ring, a
+ * post-bump 8 KB `xput chunk …\n` line could only be half-buffered
+ * at a time — the lwIP recv window would back-pressure the peer
+ * after every 4 KB and the round-trip count for a 1 GB upload
+ * would barely improve over the pre-bump path. 16 KB gives one
+ * full chunk command + 8 KB headroom for the response and any
+ * IAC negotiation in flight.
+ *
+ * Cost is BSS only: 16 KB rx + 16 KB tx × MAX_TCP_SHELL_SESSIONS
+ * (16) = 512 KB extra static memory. Negligible on the deploy
+ * targets (4-8 GB Pi 5 / Jetson). */
+#define TCP_SHELL_RING_SIZE 16384
 #define TCP_SHELL_RING_MASK (TCP_SHELL_RING_SIZE - 1)
 
 _Static_assert((TCP_SHELL_RING_SIZE & TCP_SHELL_RING_MASK) == 0,
@@ -715,11 +729,13 @@ int shell_io_tcp_test_run_write_timeout(uint32_t timeout_override_ms)
      * is about the timeout, not about what got queued.
      *
      * `static` rather than stack-local: TCP_SHELL_RING_SIZE is
-     * 4 KB so this would otherwise consume ~4.4 KB of the 16 KB
-     * test-task stack in one local. The test runs single-threaded
-     * within the kernel-test main task, so the static is safe and
-     * keeps the stack pressure low for any future test that
-     * happens to nest inside this one. */
+     * now 16 KB (post-#581 throughput bump) so this would otherwise
+     * consume ~16.4 KB in one local — well under the 64 KB
+     * STACK_SIZE budget but wasteful when only the timeout path
+     * is being exercised. The test runs single-threaded within the
+     * kernel-test main task, so the static is safe and keeps stack
+     * pressure low for any future test that happens to nest inside
+     * this one. */
     static char buf[TCP_SHELL_RING_SIZE + 256];
     for (size_t i = 0; i < sizeof(buf); i++) buf[i] = 'x';
 

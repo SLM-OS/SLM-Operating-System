@@ -198,7 +198,13 @@ class SerialShell:
 
 
 Shell = TelnetShell | SerialShell
-SHELL_MAX_LINE = 1024
+# Must mirror SHELL_MAX_LINE in kernel/include/config.h. A mismatch
+# truncates commands (kernel < client) or wastes headroom (kernel >
+# client). 8192 was chosen post-#581 to raise the framed-chunk
+# binary ceiling from ~497 B to ~4 KB, cutting 1 GB upload round-
+# trips 8× (~2.16M → ~270K). See the same constant's comment in
+# kernel/include/config.h for the full rationale.
+SHELL_MAX_LINE = 8192
 SHELL_LINE_HEADROOM = 16
 
 
@@ -239,8 +245,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--chunk-bytes",
         type=int,
-        default=512,
-        help="Bytes per put chunk before hex encoding (default: 512)",
+        default=4096,
+        help=(
+            "Bytes per put chunk before hex encoding (default: 4096). "
+            "Capped at runtime by max_framed_chunk_bytes() / "
+            "max_legacy_chunk_bytes(); with SHELL_MAX_LINE = 8192 the "
+            "effective ceiling is ~4076 B."
+        ),
     )
     p.add_argument(
         "--prompt",
