@@ -1077,10 +1077,10 @@ static void test_slm_shell_exec_too_long(void)
     TEST_ASSERT_NOT_NULL(L);
 
     /* Use a string strictly greater than SHELL_MAX_LINE (post-#581:
-     * 8192). 16384 = 2× SHELL_MAX_LINE is plenty without depending
+     * 32768). 65536 = 2× SHELL_MAX_LINE is plenty without depending
      * on the Lua side knowing the kernel constant. */
     const char *code =
-        "local long = string.rep('a', 16384)\n"
+        "local long = string.rep('a', 65536)\n"
         "local ok, err = pcall(slm.shell_exec, long)\n"
         "assert(ok == false, 'should error on too-long command')\n"
         "assert(type(err) == 'string', 'error should be a string')";

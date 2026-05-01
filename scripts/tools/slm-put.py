@@ -200,12 +200,103 @@ class SerialShell:
 Shell = TelnetShell | SerialShell
 # Must mirror SHELL_MAX_LINE in kernel/include/config.h. A mismatch
 # truncates commands (kernel < client) or wastes headroom (kernel >
-# client). 8192 was chosen post-#581 to raise the framed-chunk
-# binary ceiling from ~497 B to ~4 KB, cutting 1 GB upload round-
-# trips 8× (~2.16M → ~270K). See the same constant's comment in
-# kernel/include/config.h for the full rationale.
-SHELL_MAX_LINE = 8192
+# client). 32768 chosen post-#581 to raise the framed-chunk binary
+# ceiling to ~16 KB, cutting 1 GB round-trips to ~65K (vs. ~2.16M
+# at the original 1024-char limit). See the same constant's comment
+# in kernel/include/config.h for the full history.
+SHELL_MAX_LINE = 32768
 SHELL_LINE_HEADROOM = 16
+
+
+def format_bytes(n: int) -> str:
+    """Human-readable byte count. KB/MB/GB powers of 1024 because that's
+    what filesystem sizes match locally; the wire isn't involved in
+    this formatting."""
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    if n < 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    return f"{n / (1024 * 1024 * 1024):.2f} GB"
+
+
+def format_rate(bytes_per_sec: float) -> str:
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.0f} B/s"
+    if bytes_per_sec < 1024 * 1024:
+        return f"{bytes_per_sec / 1024:.1f} KB/s"
+    return f"{bytes_per_sec / (1024 * 1024):.2f} MB/s"
+
+
+def format_duration(seconds: float) -> str:
+    """ETA / elapsed formatting. Drops the leading unit when zero so
+    `5m 12s` reads cleaner than `0h 5m 12s`."""
+    if seconds < 0 or not (seconds == seconds):  # NaN check
+        return "?"
+    total = int(seconds)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
+# Throttle for emit_progress: minimum wall-clock seconds between two
+# stderr progress lines. 0.5s = up to 2 lines/sec, fast enough that
+# the ETA visibly evolves but slow enough that a high-throughput
+# transfer (e.g. post-#595 ~16 KB chunks at tens of MB/s) doesn't
+# drown the terminal. Single-process script, so module-level state
+# is fine.
+_PROGRESS_THROTTLE_SECONDS = 0.5
+_progress_last_emit_time = 0.0
+
+
+def reset_progress_throttle() -> None:
+    """Clear the throttle so the very next emit_progress fires
+    immediately. Called at the top of upload_framed / upload_legacy
+    so the first chunk's progress always lands without delay."""
+    global _progress_last_emit_time
+    _progress_last_emit_time = 0.0
+
+
+def emit_progress(start_time: float, offset: int, total: int) -> None:
+    """One-line progress to stderr: percent, bytes/total, instantaneous
+    rate (averaged over the whole upload so far for stability), and
+    ETA. Called once per successful chunk in upload_framed and
+    upload_legacy.
+
+    Throttled to one line per _PROGRESS_THROTTLE_SECONDS of wall clock
+    so very fast transfers don't spam stderr. The final byte (offset
+    == total) always emits — completion is not skipped even if the
+    final chunk landed within the throttle window — so the run's
+    final progress line shows the closing rate before the summary.
+
+    Average rate (not EWMA) keeps the math obvious; if a single chunk
+    stalls, the rate dips visibly — which is the behavior you want for
+    diagnosing slowdowns."""
+    global _progress_last_emit_time
+    now = time.monotonic()
+    is_final = (offset >= total) and (total > 0)
+    if not is_final and (now - _progress_last_emit_time) < _PROGRESS_THROTTLE_SECONDS:
+        return
+    _progress_last_emit_time = now
+
+    elapsed = max(now - start_time, 0.001)
+    rate = offset / elapsed
+    pct = (offset / total * 100.0) if total > 0 else 100.0
+    if rate > 0 and offset < total:
+        eta = (total - offset) / rate
+        eta_str = format_duration(eta)
+    else:
+        eta_str = "?"
+    print(
+        f"  {format_bytes(offset)}/{format_bytes(total)} "
+        f"({pct:.1f}%) | {format_rate(rate)} avg | ETA {eta_str}",
+        file=sys.stderr,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -245,12 +336,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--chunk-bytes",
         type=int,
-        default=4096,
+        default=16384,
         help=(
-            "Bytes per put chunk before hex encoding (default: 4096). "
+            "Bytes per put chunk before hex encoding (default: 16384). "
             "Capped at runtime by max_framed_chunk_bytes() / "
-            "max_legacy_chunk_bytes(); with SHELL_MAX_LINE = 8192 the "
-            "effective ceiling is ~4076 B."
+            "max_legacy_chunk_bytes(); with SHELL_MAX_LINE = 32768 the "
+            "effective ceiling is ~16363 B."
         ),
     )
     p.add_argument(
@@ -461,6 +552,8 @@ def max_framed_chunk_bytes(offset: int) -> int:
 def upload_legacy(shell: Shell, args: argparse.Namespace, data: bytes,
                   total: int, target_desc: str,
                   shell_factory: Callable[[], Shell]) -> int:
+    start_time = time.monotonic()
+    reset_progress_throttle()
     if total == 0:
         out = shell.run_command(f"put {args.remote_path} 00")
         log_response(args.debug, "put-empty", out)
@@ -518,7 +611,7 @@ def upload_legacy(shell: Shell, args: argparse.Namespace, data: bytes,
                 if shell_command_failed(out):
                     raise RuntimeError(f"remote {verb} command failed")
                 offset += len(chunk)
-                print(f"{offset}/{total} bytes uploaded", file=sys.stderr)
+                emit_progress(start_time, offset, total)
                 break
             except Exception as exc:
                 attempt += 1
@@ -556,9 +649,12 @@ def upload_legacy(shell: Shell, args: argparse.Namespace, data: bytes,
             )
             return 1
 
+    elapsed = max(time.monotonic() - start_time, 0.001)
+    avg_rate = total / elapsed
     print(
-        f"uploaded {total} bytes to {args.remote_path} via "
-        f"{args.transport}:{target_desc} protocol=legacy"
+        f"uploaded {format_bytes(total)} to {args.remote_path} via "
+        f"{args.transport}:{target_desc} protocol=legacy "
+        f"in {format_duration(elapsed)} ({format_rate(avg_rate)} avg)"
     )
     return 0
 
@@ -646,6 +742,8 @@ def parse_xput_next(output: bytes) -> int | None:
 def upload_framed(shell: Shell, args: argparse.Namespace, data: bytes,
                   total: int, target_desc: str,
                   shell_factory: Callable[[], Shell]) -> int:
+    start_time = time.monotonic()
+    reset_progress_throttle()
     if total == 0:
         out = xput_begin(shell, args, total)
         if shell_command_failed(out):
@@ -698,7 +796,7 @@ def upload_framed(shell: Shell, args: argparse.Namespace, data: bytes,
                 if remote_next is None or remote_next <= offset:
                     raise RuntimeError("failed to parse xput next offset")
                 offset = remote_next
-                print(f"{offset}/{total} bytes uploaded", file=sys.stderr)
+                emit_progress(start_time, offset, total)
                 break
             except Exception as exc:
                 attempt += 1
@@ -748,9 +846,12 @@ def upload_framed(shell: Shell, args: argparse.Namespace, data: bytes,
             )
             return 1
 
+    elapsed = max(time.monotonic() - start_time, 0.001)
+    avg_rate = total / elapsed
     print(
-        f"uploaded {total} bytes to {args.remote_path} via "
-        f"{args.transport}:{target_desc} protocol=framed"
+        f"uploaded {format_bytes(total)} to {args.remote_path} via "
+        f"{args.transport}:{target_desc} protocol=framed "
+        f"in {format_duration(elapsed)} ({format_rate(avg_rate)} avg)"
     )
     return 0
 
