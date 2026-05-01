@@ -535,6 +535,15 @@ size_t gpu_build_launch_pushbuffer(uint32_t *pb, uint64_t qmd_gpu_va)
     *p++ = GPU_HDR_IMMD(GPU_LAUNCH_SUBCH_COMPUTE,
                         NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI, 0);
 
+    /* INVALIDATE_SHADER_CACHES (bits 0,1,2,4,12 = 0x1017). Required
+     * for cross-launch coherency on the same channel — Phase 6
+     * hardware verification confirmed per-dispatch QMD rotation alone
+     * leaves shader-side cache staleness across launches. Mirrors the
+     * kernel's ga10b_build_launch_kernel_pushbuffer. */
+    *p++ = GPU_HDR_IMMD(GPU_LAUNCH_SUBCH_COMPUTE,
+                        NVC7C0_INVALIDATE_SHADER_CACHES,
+                        NVC7C0_INVALIDATE_SHADER_CACHES_ALL);
+
     /* SEND_PCAS_A: QMD address shifted right 8 (QMD is 256 B aligned). */
     *p++ = GPU_HDR_INC(1, GPU_LAUNCH_SUBCH_COMPUTE, NVC7C0_SEND_PCAS_A);
     *p++ = (uint32_t)(qmd_gpu_va >> 8);
@@ -558,7 +567,7 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
     /* GPFIFO entry encodes the pushbuffer length at gp_e1[31:10] —
      * 22 bits, max 0x3FFFFF dwords. Past that the high bits get
      * silently truncated and PBDMA reads a too-short pushbuffer.
-     * All current launchers stay well under this (largest is 13
+     * All current launchers stay well under this (largest is 14
      * dwords), but a fail-fast guard surfaces the failure mode at
      * its source if a future caller balloons the pb. */
     if (pb_dwords >= (1u << 22)) {

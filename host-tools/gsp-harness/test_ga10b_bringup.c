@@ -1343,7 +1343,7 @@ static void test_compute_sema_release_pb_zero_payload(void)
 /* ======================================================================
  * ga10b_build_launch_kernel_pushbuffer (Phase 8 — compute kernel launch)
  *
- * Tests pin the 13-dword dispatch pushbuffer that SLM-OS emits after
+ * Tests pin the 14-dword dispatch pushbuffer that SLM-OS emits after
  * inheriting a v3 channel handoff. The crucial Ampere-vs-Turing split
  * — SEND_SIGNALING_PCAS2_B at method 0x02C0 with PCAS_ACTION =
  * INVALIDATE_COPY_SCHEDULE (0xA), NOT the Turing-era
@@ -1352,6 +1352,13 @@ static void test_compute_sema_release_pb_zero_payload(void)
  * GA10B silently no-ops dispatch (PBDMA consumes the pushbuffer, no
  * dmesg error, kernel never runs). Worth protecting aggressively so
  * a well-meaning unification across arches can't regress it.
+ *
+ * The INVALIDATE_SHADER_CACHES at pb[10] is also load-bearing: Phase 6
+ * hardware verification confirmed that without it, per-dispatch QMD
+ * rotation alone leaves shader-side cache staleness across launches
+ * on the same channel (intermittent off-by-one disappears only when a
+ * `gpu debug on` printf provides incidental delay). The 0x1017
+ * data field (INSTRUCTION+LOCKS+FLUSH_DATA+DATA+CONSTANT) is pinned.
  * ====================================================================== */
 
 /* Test-side immediate-header encoder — mirrors the kernel's
@@ -1405,18 +1412,26 @@ static void test_launch_kernel_pb_layout(void)
     REQUIRE_EQ(pb[9], EXPECT_IMMD_HDR(1, 0x0244u, 0));
     REQUIRE_EQ(pb[9], 0x80002091u);
 
-    /* [10-11] SEND_PCAS_A (0x02B4). Data = qmd_gva >> 8. */
-    REQUIRE_EQ(pb[10], EXPECT_INC_HDR(1, 1, 0x02B4u));
-    REQUIRE_EQ(pb[10], 0x200120ADu);
-    REQUIRE_EQ(pb[11], (uint32_t)(qmd_gva >> 8));
-    REQUIRE_EQ(pb[11], 0x1FFC0130u);      /* literal guard */
+    /* [10] INVALIDATE_SHADER_CACHES (0x021c) immediate, data=0x1017
+     * (INSTRUCTION+LOCKS+FLUSH_DATA+DATA+CONSTANT all set). Required
+     * for cross-launch coherency on the same channel — without this,
+     * shader-side caches retain stale entries from the prior dispatch
+     * even when the QMD rotates. See section docstring above. */
+    REQUIRE_EQ(pb[10], EXPECT_IMMD_HDR(1, 0x021Cu, 0x1017u));
+    REQUIRE_EQ(pb[10], 0x90172087u);      /* literal guard */
 
-    /* [12] SEND_SIGNALING_PCAS2_B (0x02C0) immediate, action=0xA.
+    /* [11-12] SEND_PCAS_A (0x02B4). Data = qmd_gva >> 8. */
+    REQUIRE_EQ(pb[11], EXPECT_INC_HDR(1, 1, 0x02B4u));
+    REQUIRE_EQ(pb[11], 0x200120ADu);
+    REQUIRE_EQ(pb[12], (uint32_t)(qmd_gva >> 8));
+    REQUIRE_EQ(pb[12], 0x1FFC0130u);      /* literal guard */
+
+    /* [13] SEND_SIGNALING_PCAS2_B (0x02C0) immediate, action=0xA.
      * CRITICAL REGRESSION GUARD: this must be PCAS2_B at 0x02C0 with
      * action 0xA (INVALIDATE_COPY_SCHEDULE), NOT PCAS_B at 0x02BC.
      * See this test file's launch-kernel section doc for why. */
-    REQUIRE_EQ(pb[12], EXPECT_IMMD_HDR(1, 0x02C0u, 0xA));
-    REQUIRE_EQ(pb[12], 0x800A20B0u);
+    REQUIRE_EQ(pb[13], EXPECT_IMMD_HDR(1, 0x02C0u, 0xA));
+    REQUIRE_EQ(pb[13], 0x800A20B0u);
 }
 
 static void test_launch_kernel_pb_qmd_shift_lower(void)
@@ -1432,7 +1447,7 @@ static void test_launch_kernel_pb_qmd_shift_lower(void)
     uint64_t qmd_gva = 0x00000000FEDCBA00ULL;
     ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva);
 
-    REQUIRE_EQ(pb[11], 0x00FEDCBAu);
+    REQUIRE_EQ(pb[12], 0x00FEDCBAu);
 }
 
 static void test_launch_kernel_pb_qmd_shift_upper(void)
@@ -1448,8 +1463,8 @@ static void test_launch_kernel_pb_qmd_shift_upper(void)
     uint64_t qmd_gva = 0x0000123456789A00ULL;
     ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva);
 
-    REQUIRE_EQ(pb[11], (uint32_t)((qmd_gva >> 8) & 0xFFFFFFFFu));
-    REQUIRE_EQ(pb[11], 0x3456789Au);      /* literal guard */
+    REQUIRE_EQ(pb[12], (uint32_t)((qmd_gva >> 8) & 0xFFFFFFFFu));
+    REQUIRE_EQ(pb[12], 0x3456789Au);      /* literal guard */
 }
 
 static void test_launch_kernel_pb_qmd_shift_at_40bit_boundary(void)
@@ -1462,13 +1477,13 @@ static void test_launch_kernel_pb_qmd_shift_at_40bit_boundary(void)
      * highest VA that DOES fit is (1ULL << 40) - 1; after >> 8 that
      * becomes 0xFFFFFFFF (32 bits). (1ULL << 40) >> 8 = 0x100000000
      * overflows uint32 by exactly one bit — the cast to uint32
-     * drops that bit and pb[11] reads as zero. Documents the
+     * drops that bit and pb[12] reads as zero. Documents the
      * silent-overflow behavior so a future check added to reject
      * out-of-range QMDs has a pre-existing test to contradict. */
     uint64_t qmd_gva = 1ULL << 40;
     ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva);
 
-    REQUIRE_EQ(pb[11], 0u);
+    REQUIRE_EQ(pb[12], 0u);
 }
 
 static void test_launch_kernel_pb_qmd_misalignment_truncates(void)
@@ -1489,8 +1504,8 @@ static void test_launch_kernel_pb_qmd_misalignment_truncates(void)
     ga10b_build_launch_kernel_pushbuffer(pb, qmd_gva_misaligned);
 
     /* Low 8 bits dropped — result matches the aligned case. */
-    REQUIRE_EQ(pb[11], (uint32_t)(qmd_gva_aligned >> 8));
-    REQUIRE_EQ(pb[11], 0x1FFC0130u);      /* literal guard */
+    REQUIRE_EQ(pb[12], (uint32_t)(qmd_gva_aligned >> 8));
+    REQUIRE_EQ(pb[12], 0x1FFC0130u);      /* literal guard */
 }
 
 static void test_launch_kernel_pb_idempotent(void)
@@ -1515,15 +1530,15 @@ static void test_launch_kernel_pb_uses_ampere_pcas2_b(void)
 
     /* Ampere split guard. The dispatch-kick method MUST be
      * SEND_SIGNALING_PCAS2_B (method_id = 0x02C0 / 4 = 0xB0). If a
-     * future refactor changes pb[12] to PCAS_B (0x02BC / 4 = 0xAF)
+     * future refactor changes pb[13] to PCAS_B (0x02BC / 4 = 0xAF)
      * or swaps the action to the PCAS_B-style bitfield, GA10B
      * dispatch will silently no-op on hardware. This test shouts
      * about that at build time, not at hardware-debug time. */
-    uint32_t pb12 = pb[12];
-    uint32_t method_id = pb12 & 0x1FFFu;
-    uint32_t sec_op    = (pb12 >> 29) & 0x7u;
-    uint32_t data      = (pb12 >> 16) & 0x1FFFu;
-    uint32_t subch     = (pb12 >> 13) & 0x7u;
+    uint32_t pb13 = pb[13];
+    uint32_t method_id = pb13 & 0x1FFFu;
+    uint32_t sec_op    = (pb13 >> 29) & 0x7u;
+    uint32_t data      = (pb13 >> 16) & 0x1FFFu;
+    uint32_t subch     = (pb13 >> 13) & 0x7u;
 
     REQUIRE_EQ(sec_op, 4u);                    /* IMMD opcode */
     REQUIRE_EQ(subch, 1u);                     /* compute subch */
@@ -1538,16 +1553,16 @@ static void test_launch_kernel_pb_uses_ampere_pcas2_b(void)
 static void test_launch_kernel_with_sema_pb_size(void)
 {
     printf("== test_launch_kernel_with_sema_pb_size ==\n");
-    /* 13 dwords for the launch_kernel prefix + 10 dwords for the
+    /* 14 dwords for the launch_kernel prefix + 10 dwords for the
      * REPORT_SEMAPHORE release tail (5 method headers, each followed
-     * by their data dword). 23 total. */
-    REQUIRE_EQ(GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS, 23u);
+     * by their data dword). 24 total. */
+    REQUIRE_EQ(GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS, 24u);
 }
 
 static void test_launch_kernel_with_sema_pb_layout(void)
 {
     printf("== test_launch_kernel_with_sema_pb_layout ==\n");
-    /* Verify the first 13 dwords are bit-identical to the plain
+    /* Verify the first 14 dwords are bit-identical to the plain
      * launch_kernel pushbuffer (same QMD), then the 10-dword sema
      * release tail follows. Pin layout so a future refactor of
      * either builder doesn't accidentally desync them. */
@@ -1577,31 +1592,31 @@ static void test_launch_kernel_with_sema_pb_layout(void)
      *   ADDRESS_UPPER  = 0x0164 → method_id 0x59
      *   EXECUTE        = 0x0168 → method_id 0x5A
      */
-    /* pb[13]: PAYLOAD_LOWER header, pb[14]: payload value */
-    REQUIRE_EQ(pb_sema[13] & 0x1FFFu, 0x158u / 4u);  /* method_id */
-    REQUIRE_EQ((pb_sema[13] >> 13) & 0x7u, 1u);      /* subch 1 */
-    REQUIRE_EQ(pb_sema[14], payload);
+    /* pb[14]: PAYLOAD_LOWER header, pb[15]: payload value */
+    REQUIRE_EQ(pb_sema[14] & 0x1FFFu, 0x158u / 4u);  /* method_id */
+    REQUIRE_EQ((pb_sema[14] >> 13) & 0x7u, 1u);      /* subch 1 */
+    REQUIRE_EQ(pb_sema[15], payload);
 
-    /* pb[15]: PAYLOAD_UPPER header, pb[16]: high payload (0 for 1-word) */
-    REQUIRE_EQ(pb_sema[15] & 0x1FFFu, 0x15Cu / 4u);
-    REQUIRE_EQ(pb_sema[16], 0u);
+    /* pb[16]: PAYLOAD_UPPER header, pb[17]: high payload (0 for 1-word) */
+    REQUIRE_EQ(pb_sema[16] & 0x1FFFu, 0x15Cu / 4u);
+    REQUIRE_EQ(pb_sema[17], 0u);
 
-    /* pb[17]: ADDRESS_LOWER header, pb[18]: low 32 bits of sem_va */
-    REQUIRE_EQ(pb_sema[17] & 0x1FFFu, 0x160u / 4u);
-    REQUIRE_EQ(pb_sema[18], (uint32_t)(sem_va & 0xFFFFFFFFu));
+    /* pb[18]: ADDRESS_LOWER header, pb[19]: low 32 bits of sem_va */
+    REQUIRE_EQ(pb_sema[18] & 0x1FFFu, 0x160u / 4u);
+    REQUIRE_EQ(pb_sema[19], (uint32_t)(sem_va & 0xFFFFFFFFu));
 
-    /* pb[19]: ADDRESS_UPPER header, pb[20]: high bits of sem_va */
-    REQUIRE_EQ(pb_sema[19] & 0x1FFFu, 0x164u / 4u);
-    REQUIRE_EQ(pb_sema[20], (uint32_t)((sem_va >> 32) & 0xFFu));
+    /* pb[20]: ADDRESS_UPPER header, pb[21]: high bits of sem_va */
+    REQUIRE_EQ(pb_sema[20] & 0x1FFFu, 0x164u / 4u);
+    REQUIRE_EQ(pb_sema[21], (uint32_t)((sem_va >> 32) & 0xFFu));
 
-    /* pb[21]: EXECUTE header, pb[22]: OP=RELEASE | STRUCTURE=ONE_WORD.
+    /* pb[22]: EXECUTE header, pb[23]: OP=RELEASE | STRUCTURE=ONE_WORD.
      * The exact bits ensure the GPU waits for prior compute to drain,
      * flushes L2, then writes a 32-bit payload (no timestamp). */
-    REQUIRE_EQ(pb_sema[21] & 0x1FFFu, 0x168u / 4u);
+    REQUIRE_EQ(pb_sema[22] & 0x1FFFu, 0x168u / 4u);
     /* OP_RELEASE=0 in [4:0]; STRUCTURE_SIZE_ONE_WORD=1 in bit 8 (per
      * clc7c0.h NVC7C0_REPORT_SEMAPHORE_EXECUTE_STRUCTURE_SIZE
      * field [4:3]; ONE_WORD = 1<<3 = 0x8). */
-    uint32_t exec = pb_sema[22];
+    uint32_t exec = pb_sema[23];
     REQUIRE_EQ(exec & 0x7u, 0u);                     /* OPERATION=RELEASE */
     REQUIRE_EQ((exec >> 3) & 0x3u, 1u);              /* SIZE=ONE_WORD */
 }
@@ -1623,22 +1638,22 @@ static void test_launch_kernel_with_sema_pb_idempotent(void)
 static void test_launch_kernel_with_sema_pb_payload_passthrough(void)
 {
     printf("== test_launch_kernel_with_sema_pb_payload_passthrough ==\n");
-    /* Confirm the caller-supplied payload lands at pb[14] verbatim.
+    /* Confirm the caller-supplied payload lands at pb[15] verbatim.
      * The kernel uses 0xCAFEDEAD as the per-op completion payload —
      * if a future refactor masked or transformed the payload, the
      * polling loop would never match. */
     uint32_t pb[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
     ga10b_build_launch_kernel_with_sema_pushbuffer(
         pb, 0x1ffc013000ULL, 0x1ffc08b000ULL, 0xDEADBEEFu);
-    REQUIRE_EQ(pb[14], 0xDEADBEEFu);
+    REQUIRE_EQ(pb[15], 0xDEADBEEFu);
 
     ga10b_build_launch_kernel_with_sema_pushbuffer(
         pb, 0x1ffc013000ULL, 0x1ffc08b000ULL, 0xCAFEDEADu);
-    REQUIRE_EQ(pb[14], 0xCAFEDEADu);
+    REQUIRE_EQ(pb[15], 0xCAFEDEADu);
 
     ga10b_build_launch_kernel_with_sema_pushbuffer(
         pb, 0x1ffc013000ULL, 0x1ffc08b000ULL, 0u);
-    REQUIRE_EQ(pb[14], 0u);
+    REQUIRE_EQ(pb[15], 0u);
 }
 
 /* ======================================================================
