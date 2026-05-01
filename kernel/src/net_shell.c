@@ -337,8 +337,9 @@ static int cmd_netstat(int argc, char *argv[]) {
                  (unsigned)wd.ms_since_last_rx);
     shell_printf("  events:     stalls=%u  recoveries=%u\n",
                  (unsigned)wd.stall_events, (unsigned)wd.recovery_events);
-    shell_printf("  pbuf pool:  %u/%u   tcp pcbs: %u/%u\n",
+    shell_printf("  pbuf pool:  %u/%u  (peak %u, alloc-err %u)   tcp pcbs: %u/%u\n",
                  (unsigned)wd.pbuf_pool_used, (unsigned)wd.pbuf_pool_avail,
+                 (unsigned)wd.pbuf_pool_peak, (unsigned)wd.pbuf_pool_err,
                  (unsigned)wd.tcp_pcb_used,   (unsigned)wd.tcp_pcb_avail);
     shell_printf("  lwip heap:  %u/%u  (peak %u)\n",
                  (unsigned)wd.heap_used, (unsigned)wd.heap_avail,

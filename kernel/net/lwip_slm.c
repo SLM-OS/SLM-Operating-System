@@ -335,9 +335,13 @@ void net_watchdog_get(struct net_watchdog_snapshot *out) {
     if (lwip_stats.memp[MEMP_PBUF_POOL] != NULL) {
         out->pbuf_pool_used  = (uint16_t)lwip_stats.memp[MEMP_PBUF_POOL]->used;
         out->pbuf_pool_avail = (uint16_t)lwip_stats.memp[MEMP_PBUF_POOL]->avail;
+        out->pbuf_pool_peak  = (uint16_t)lwip_stats.memp[MEMP_PBUF_POOL]->max;
+        out->pbuf_pool_err   = (uint32_t)lwip_stats.memp[MEMP_PBUF_POOL]->err;
     } else {
         out->pbuf_pool_used  = 0;
         out->pbuf_pool_avail = 0;
+        out->pbuf_pool_peak  = 0;
+        out->pbuf_pool_err   = 0;
     }
     if (lwip_stats.memp[MEMP_TCP_PCB] != NULL) {
         out->tcp_pcb_used  = (uint16_t)lwip_stats.memp[MEMP_TCP_PCB]->used;
@@ -349,6 +353,8 @@ void net_watchdog_get(struct net_watchdog_snapshot *out) {
 #else
     out->pbuf_pool_used  = 0;
     out->pbuf_pool_avail = 0;
+    out->pbuf_pool_peak  = 0;
+    out->pbuf_pool_err   = 0;
     out->tcp_pcb_used    = 0;
     out->tcp_pcb_avail   = 0;
 #endif
@@ -390,8 +396,9 @@ static void net_watchdog_check(void) {
          (unsigned long long)snap.rx_packets,
          (unsigned long long)snap.rx_dropped,
          (unsigned long long)snap.rx_no_buffers);
-    WARN("net:   pbuf_pool=%u/%u tcp_pcb=%u/%u heap=%u/%u",
+    WARN("net:   pbuf_pool=%u/%u (peak %u, err %u) tcp_pcb=%u/%u heap=%u/%u",
          (unsigned)snap.pbuf_pool_used, (unsigned)snap.pbuf_pool_avail,
+         (unsigned)snap.pbuf_pool_peak, (unsigned)snap.pbuf_pool_err,
          (unsigned)snap.tcp_pcb_used,   (unsigned)snap.tcp_pcb_avail,
          (unsigned)snap.heap_used,      (unsigned)snap.heap_avail);
 }

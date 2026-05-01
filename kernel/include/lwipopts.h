@@ -98,11 +98,17 @@
  * started failing — incoming frames (including ARP requests for
  * our own IP) were dropped at the netif boundary. The host's ARP
  * cache then went `(incomplete)` for SLM-OS's IP, breaking both
- * ping and any new TCP connect from outside. 64 pbufs gives each
- * of the 16 max-shell-sessions enough headroom for retransmit
- * queues + a comfortable RX buffer without significantly bumping
- * static memory footprint (64 × 1536 = 96 KB). */
-#define PBUF_POOL_SIZE              64
+ * ping and any new TCP connect from outside.
+ *
+ * Bumped 64 → 128 (#581 follow-up) after 1 GB GGUF transfers
+ * pegged the post-PR-584 pool at 64/64 within ~2 MB. With RX now
+ * routing to the pool (PR #584), 64 slots is too small for a
+ * single TCP_WND ≈ 46 KB connection plus retransmit/ARP/ooseq
+ * headroom; doubling buys both diagnostic value (if the new peg
+ * is 128/128 there's a leak, not a sizing problem) and practical
+ * margin (128 × 1536 = 192 KB BSS, still small relative to
+ * MEM_SIZE = 256 KB heap). */
+#define PBUF_POOL_SIZE              128
 
 /* Size of each pbuf in pool (standard Ethernet MTU + headers) */
 #define PBUF_POOL_BUFSIZE           1536
