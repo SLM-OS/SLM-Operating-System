@@ -181,15 +181,23 @@ void kernel_main(void *dtb)
     /*
      * Raspberry Pi 5: Blink LED to confirm kernel reached C code.
      * BCM2712 GPIO2 controls ACT LED (bit 9).
+     *
+     * Pre-MMU MMIO must use the literal physical address — vmm hasn't
+     * mapped GPIO2_BASE yet at this point. Named constant matches the
+     * naming convention used by WDT_BASE / WDT_UNLOCK below so a
+     * future copy-paste error is easier to catch.
      */
     {
-        volatile uint32_t *gpio2_data = (volatile uint32_t *)0x107D517C04ULL;
+        #define BCM2712_GPIO2_DATA_REG  0x107D517C04ULL
+        volatile uint32_t *gpio2_data =
+            (volatile uint32_t *)BCM2712_GPIO2_DATA_REG;
         for (int i = 0; i < 3; i++) {
             *gpio2_data |= (1 << 9);   /* LED ON */
             for (volatile int d = 0; d < 500000; d++);
             *gpio2_data &= ~(1 << 9);  /* LED OFF */
             for (volatile int d = 0; d < 500000; d++);
         }
+        #undef BCM2712_GPIO2_DATA_REG
     }
 #endif
 
@@ -210,8 +218,28 @@ void kernel_main(void *dtb)
      * Scan backwards from the top of low RAM to find it.
      */
     if (!dtb) {
-        /* FDT magic is 0xD00DFEED (big-endian) */
-        for (uint64_t addr = 0x2FFF0000; addr >= 0x2E000000; addr -= 0x1000) {
+        /* FDT magic is 0xD00DFEED (big-endian).
+         *
+         * Bound the scan against the platform's actual RAM window
+         * (RAM_BASE..RAM_BASE+RAM_SIZE). The hardcoded scan top
+         * 0x2FFF0000 is just below the end of Pi 5's low 1 GB
+         * region; if a future firmware version hands off a smaller
+         * RAM window the unguarded scan could fault before VMM
+         * init. Clamp explicitly.
+         *
+         * `ram_end > 0x1000` guard prevents an underflow if a
+         * future platform.h regression sets RAM_BASE+RAM_SIZE to a
+         * value where the addition wraps to ≤ 0x1000 — without it,
+         * `ram_end - 0x1000` would underflow to ~SIZE_MAX and the
+         * scan would walk wild memory. */
+        uint64_t scan_top = 0x2FFF0000;
+        uint64_t scan_bot = 0x2E000000;
+        const uint64_t ram_end = (uint64_t)RAM_BASE + (uint64_t)RAM_SIZE;
+        if (scan_top > ram_end) {
+            scan_top = (ram_end > 0x1000) ? ram_end - 0x1000 : 0;
+        }
+        if (scan_bot < (uint64_t)RAM_BASE) scan_bot = (uint64_t)RAM_BASE;
+        for (uint64_t addr = scan_top; addr >= scan_bot; addr -= 0x1000) {
             uint32_t *p = (uint32_t *)addr;
             if (*p == 0xEDFE0DD0) {  /* 0xD00DFEED in little-endian */
                 dtb = (void *)addr;

@@ -40,6 +40,16 @@ void steal_deque_init(steal_deque_t *d)
 
 int steal_deque_push(steal_deque_t *d, struct task *t)
 {
+    /* `bottom - top` is unsigned subtraction; wraps cleanly modulo 2^32
+     * as long as the logical invariant `bottom >= top` holds (which the
+     * external lock guarantees on every call). After roughly 2^32 push
+     * cycles on the same deque the absolute counters wrap, but the
+     * difference still computes the correct live count modulo 2^32 —
+     * the capacity check is a `>=` against a small bound, so the
+     * wrap is benign. At a realistic per-CPU push rate (single-digit
+     * thousands per second under heavy spawn churn), reaching 2^32
+     * would take decades; flagged here only so a future maintainer
+     * who widens these to int64 doesn't think this is broken. */
     uint32_t size = d->bottom - d->top;
     if (size >= STEAL_DEQUE_CAPACITY) {
         return -1;

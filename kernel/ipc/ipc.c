@@ -101,9 +101,16 @@ static inline int timeout_expired(uint64_t start_time, uint64_t timeout_ticks)
 
 /*
  * Block the current task on a wait queue.
- * Caller must hold queue->lock.
+ * Caller must hold `lock` with IRQs saved into `flags`. Returns the
+ * new IRQ flags after re-acquiring the lock so the caller can restore
+ * symmetrically without leaving a lock-held-IRQs-enabled window
+ * between the previous `irq_restore` and a fresh `irq_save`. A timer
+ * ISR firing in that window and contending the same `lock` would
+ * deadlock the CPU.
  */
-static void block_on_queue(struct task **wait_queue, spinlock_t *lock)
+static irq_flags_t block_on_queue(struct task **wait_queue,
+                                  spinlock_t *lock,
+                                  irq_flags_t flags)
 {
     struct task *current = task_current();
 
@@ -114,14 +121,15 @@ static void block_on_queue(struct task **wait_queue, spinlock_t *lock)
     /* Mark as blocked and remove from scheduler */
     current->state = TASK_BLOCKED;
 
-    /* Release lock before yielding (will be re-acquired after wake) */
-    spin_unlock(lock);
+    /* Release lock + restore IRQs as one operation so we never sit
+     * lock-held with IRQs enabled. */
+    spin_unlock_irqrestore(lock, flags);
 
     /* Yield - scheduler will skip this task until woken */
     yield();
 
-    /* Re-acquire lock after waking */
-    spin_lock(lock);
+    /* Re-acquire lock and capture fresh IRQ flags for the caller. */
+    return spin_lock_irqsave(lock);
 }
 
 /*
@@ -220,21 +228,33 @@ struct msg_queue *msg_queue_create(size_t capacity, size_t msg_size)
         queue->prio_msgs_sent[p] = 0;
     }
 
-    /* Register in global table */
+    /* Register in global table. Assign the queue ID only after a slot
+     * is reserved so a table-full failure doesn't burn an ID from the
+     * sequence space (with u32 IDs the wrap is decades away, but
+     * keeping the sequence dense is the cleaner contract). */
     irq_flags_t flags = spin_lock_irqsave(&ipc_state.lock);
 
-    uint32_t id = ipc_state.next_queue_id++;
-    queue->id = id;
-
-    /* Find free slot */
+    bool registered = false;
     for (size_t i = 0; i < MSG_QUEUE_MAX; i++) {
         if (!ipc_state.queues[i]) {
             ipc_state.queues[i] = queue;
+            queue->id = ipc_state.next_queue_id++;
+            registered = true;
             break;
         }
     }
 
     spin_unlock_irqrestore(&ipc_state.lock, flags);
+
+    if (!registered) {
+        /* Table full — surface as NULL with WARN. Silently dropping
+         * the queue would leak the pmm_alloc_page above and the
+         * buffer pages with no diagnostic. */
+        WARN("msg_queue_create: queue table full (MSG_QUEUE_MAX=%d)", MSG_QUEUE_MAX);
+        pmm_free_pages(queue->buffer, pages_needed);
+        pmm_free_page(queue);
+        return NULL;
+    }
 
     DEBUG_PRINT("Created message queue %u (capacity=%zu per-prio, msg_size=%zu)",
                 queue->id, capacity, msg_size);
@@ -328,9 +348,7 @@ int msg_send_priority(struct msg_queue *queue, const void *msg,
 
         if (timeout_ms < 0) {
             /* Infinite wait: block until space available */
-            irq_restore(flags);
-            block_on_queue(&queue->send_waiters, &queue->lock);
-            flags = irq_save();
+            flags = block_on_queue(&queue->send_waiters, &queue->lock, flags);
         } else {
             /* Timed wait: yield and retry */
             spin_unlock_irqrestore(&queue->lock, flags);
@@ -446,9 +464,7 @@ int msg_recv(struct msg_queue *queue, void *msg, int timeout_ms)
 
         if (timeout_ms < 0) {
             /* Infinite wait: block until message available */
-            irq_restore(flags);
-            block_on_queue(&queue->recv_waiters, &queue->lock);
-            flags = irq_save();
+            flags = block_on_queue(&queue->recv_waiters, &queue->lock, flags);
         } else {
             /* Timed wait: yield and retry */
             spin_unlock_irqrestore(&queue->lock, flags);
@@ -653,19 +669,31 @@ struct shared_buffer *shared_buffer_create(size_t size, uint32_t flags)
     buf->mappings = NULL;
     buf->gpu_backed = gpu_backed;
 
-    /* Register in global table */
+    /* Register in global table. Same fail-loud rule as msg_queue_create:
+     * if the table is full, free the buffer pages and the buf page so a
+     * full table doesn't silently leak system memory on every retry.
+     * Also defer the ID assignment until a slot is reserved so a
+     * table-full failure doesn't burn an ID. */
     irq_flags_t irqflags = spin_lock_irqsave(&ipc_state.lock);
 
-    buf->id = ipc_state.next_buffer_id++;
-
+    bool registered = false;
     for (size_t i = 0; i < SHM_BUFFER_MAX; i++) {
         if (!ipc_state.buffers[i]) {
             ipc_state.buffers[i] = buf;
+            buf->id = ipc_state.next_buffer_id++;
+            registered = true;
             break;
         }
     }
 
     spin_unlock_irqrestore(&ipc_state.lock, irqflags);
+
+    if (!registered) {
+        WARN("shared_buffer_create: buffer table full (SHM_BUFFER_MAX=%d)", SHM_BUFFER_MAX);
+        pmm_free_pages(phys, pages);
+        pmm_free_page(buf);
+        return NULL;
+    }
 
     DEBUG_PRINT("Created shared buffer %u (size=%zu, phys=%p, flags=0x%x)",
                 buf->id, size, phys, flags);

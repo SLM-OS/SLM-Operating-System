@@ -414,7 +414,14 @@ extern "C" {
     // -------------------------------------------------------------------------
 
     /// Kernel panic - does not return.
-    pub fn panic(msg: *const u8) -> !;
+    ///
+    /// Renamed Rust binding (was `panic`) so that a downstream module
+    /// doing `use kernel_ffi::*` does not lexically shadow Rust's
+    /// `panic!` macro. `link_name = "panic"` keeps the C-side symbol
+    /// unchanged (defined as `void panic(const char *fmt, ...)` in
+    /// `kernel/include/debug.h`); only the Rust-visible name moves.
+    #[link_name = "panic"]
+    pub fn slm_panic(msg: *const u8) -> !;
 
     /// Print to UART (for rust_hello).
     pub fn uart_puts(s: *const u8);

@@ -400,6 +400,16 @@ fn prepare_onnx_payload(name: &[u8], data: &[u8]) -> Result<PreparedPayload, Loa
             let dest = weight_ptr.add(offset);
             if is_fp16 {
                 let n_elements = src.len() / 2;
+                // The FP16 read indices `e*2` and `e*2+1` are
+                // bounded by 2*n_elements - 1 < 2*n_elements ≤
+                // src.len() by construction of n_elements above, so
+                // direct indexing cannot panic. Pin the invariant
+                // with a debug_assert! so a future refactor that
+                // computes n_elements from a different source
+                // surfaces the dependency at test time. Release
+                // builds elide the assert and the loop runs without
+                // per-element bounds-check overhead.
+                debug_assert!(src.len() >= 2 * n_elements);
                 let dest_f32 = dest as *mut f32;
                 for e in 0..n_elements {
                     let half = u16::from_le_bytes([src[e * 2], src[e * 2 + 1]]);

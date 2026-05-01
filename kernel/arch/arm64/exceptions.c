@@ -211,7 +211,7 @@ void el1_sync_handler(struct trap_frame *tf)
         uint64_t _mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
         uint32_t _cpu = (_mpidr & 0xFF) | ((_mpidr >> 8) & 0xFF);
-        if (_cpu < 4)
+        if (_cpu < MAX_CPUS)
             *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xE0 + _cpu;
     }
 #endif
@@ -260,7 +260,7 @@ void el1_irq_handler(void)
         uint64_t _mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
         uint32_t _cpu = (_mpidr & 0xFF) | ((_mpidr >> 8) & 0xFF);
-        if (_cpu < 4)
+        if (_cpu < MAX_CPUS)
             *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xF0 + _cpu;
     }
 #endif
@@ -286,8 +286,12 @@ void el1_irq_handler(void)
          * the interrupt is still being handled and won't deliver more
          * timer interrupts to this CPU.
          */
+        /* Diagnostic-only counter — increments on every timer IRQ
+         * entry across all CPUs. Use __atomic_fetch_add so the count
+         * is correct under SMP contention; a plain RMW would lose
+         * increments and silently skew the diag value. */
         static volatile uint32_t timer_irq_entered;
-        timer_irq_entered++;
+        __atomic_fetch_add(&timer_irq_entered, 1, __ATOMIC_RELAXED);
         gic_end_interrupt(irq);
         timer_handler();
         return;  /* EOI already done, don't do it again */

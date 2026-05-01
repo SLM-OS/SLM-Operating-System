@@ -73,10 +73,19 @@ extern void task_destroy(struct task *task);
  */
 volatile int preempt_disabled[MAX_CPUS];
 
+/* `SPINLOCK_ARRAY` in spinlock.h hardcodes a 64-byte alignment to
+ * avoid pulling cache.h into every TU that uses spinlocks. This TU
+ * sees both headers, so pin the assumption with a static_assert: if
+ * `CACHE_LINE_SIZE` ever changes (e.g. a new ARM CPU with 128-byte
+ * lines), the build fails here instead of letting the macro silently
+ * under-align. */
+_Static_assert(CACHE_LINE_SIZE == 64,
+               "SPINLOCK_ARRAY in spinlock.h hardcodes 64-byte alignment");
+
 /* Per-CPU run queue locks — always in cacheable memory.
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
  * used by spinlocks may not work on Non-Cacheable memory (BCM2712). */
-static spinlock_t rq_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
+static SPINLOCK_ARRAY(rq_lock, MAX_CPUS);
 
 #if CONFIG_WORK_STEALING
 /*
@@ -125,7 +134,7 @@ static steal_deque_t cpu_steal_deques[MAX_CPUS];
  * steal_deque_t which was neutered by SPINLOCK_SKIP_LOCKING on
  * Jetson. Acquire the victim's lock before any steal_deque_*
  * operation; never held across other locks. */
-static spinlock_t steal_deque_lock[MAX_CPUS] __attribute__((aligned(CACHE_LINE_SIZE)));
+static SPINLOCK_ARRAY(steal_deque_lock, MAX_CPUS);
 #endif /* CONFIG_WORK_STEALING */
 
 /* Lock helpers that use the correct lock for a given CPU */
@@ -1750,7 +1759,18 @@ void sched_rebalance_tick(uint32_t cpu)
         return;
 
     /* scheduler_add_task_to_cpu handles rq_lock + smp_notify_cpu on
-     * the destination CPU. */
+     * the destination CPU.
+     *
+     * Lock-release-then-modify is safe here. Between the unlock above
+     * and the `assigned_cpu = idle_cpu` write below there is a window
+     * where a thief on a third CPU could pop the candidate's stale
+     * deque entry on busy_cpu's deque. The thief then acquires
+     * rq_lock[busy_cpu], runs the validation in `sched_try_steal`,
+     * and reaches `remove_from_cpu_queue_locked(candidate, busy_cpu)`
+     * — which returns 0 because we already removed candidate from
+     * busy_cpu's queue under the lock. The result is `stealable == 0`
+     * and the thief discards the entry as stale. The candidate then
+     * makes its way to idle_cpu via the add_task call below. */
     candidate->state = TASK_READY;
     candidate->assigned_cpu = idle_cpu;
     scheduler_add_task_to_cpu(candidate, idle_cpu);

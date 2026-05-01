@@ -124,8 +124,17 @@ static efi_status_t efi_exit_boot(efi_handle_t handle,
     /* First call: get required buffer size */
     status = bs->get_memory_map(&map_size, NULL, &map_key,
                                 &desc_size, &desc_version);
-    /* Expected: EFI_BUFFER_TOO_SMALL, map_size now has required size */
-
+    /* Expected: EFI_BUFFER_TOO_SMALL, map_size now has required size.
+     * UEFI conformant firmware populates desc_size on the size-only
+     * call, but defend against a non-conformant implementation that
+     * leaves desc_size = 0 — `map_size += 0 * 8` would skip the
+     * slack and the second call could fail under map churn. Use a
+     * minimum descriptor stride large enough to match any plausible
+     * EFI memory descriptor (the spec-mandated minimum is 40 bytes
+     * for revision 1, but firmware may extend it). */
+    if (desc_size == 0) {
+        desc_size = sizeof(efi_memory_desc_t);
+    }
     /* Add slack for the AllocatePool call itself changing the map */
     map_size += desc_size * 8;
 

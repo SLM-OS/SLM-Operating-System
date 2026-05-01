@@ -88,7 +88,18 @@ ap_pm_entry:
     or      $0x620, %eax
     mov     %eax, %cr4
 
-    /* Load BSP's PML4 into CR3 */
+    /* Load BSP's PML4 into CR3.
+     *
+     * Identity-map dependency: the trampoline runs at TRAMP_BASE
+     * (sub-1MB, page 8). The BSP's PML4 must contain a valid
+     * identity mapping covering at least this page so that the
+     * fetch immediately after `mov %eax, %cr0` (CR0.PG = 1, lines
+     * below) finds a translation for the current EIP. trampoline32.S
+     * builds PD[0] with 512 × 2MB pages covering 0-1GB, which
+     * includes TRAMP_BASE, so this works today. If VMM is ever
+     * rebuilt with a non-identity low region, APs will hang at
+     * the CR0 write because long-mode entry needs paging-on but
+     * the page tables don't map this PC. */
     mov     PARAM_CR3, %eax
     mov     %eax, %cr3
 

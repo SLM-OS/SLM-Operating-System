@@ -1367,15 +1367,29 @@ static void xhci_program_registers(uint8_t max_slots)
     dsb(sy);
 
     /* DCBAAP (64-bit). Write low first, then high per spec ordering
-     * advice — HC latches on the high-dword write. */
+     * advice — HC latches on the high-dword write. ARM nGnRE Device
+     * memory preserves program order between different Device
+     * addresses, but a DSB SY between the lo and hi stores is cheap
+     * insurance against future remappings to nGRE / write-combining
+     * regions and matches the convention Linux's xhci_write_64 uses
+     * on platforms that don't have an atomic 64-bit MMIO path. */
     uint64_t dcbaap = (uint64_t)(uintptr_t)xhci_dcbaa;
     w32(xhci_op_base, XHCI_OP_DCBAAP,     (uint32_t)(dcbaap & 0xFFFFFFFFu));
+    dsb(sy);
     w32(xhci_op_base, XHCI_OP_DCBAAP + 4, (uint32_t)(dcbaap >> 32));
 
     /* CRCR: ring base (64-bit) + Ring Cycle State (bit 0). Must be
      * written as two 32-bit stores with high last. */
     uint64_t cmd_ring_ptr = xhci_cmd_ring.phys | 1 /* RCS = initial PCS */;
+    /* Command ring base must be 64-byte aligned (xHCI 1.2 §5.4.5).
+     * `| 1` for the RCS bit collides with address bits if the lower
+     * 6 bits of `phys` are ever non-zero. PMM today returns
+     * page-aligned blocks (4 KB), so this is satisfied — but a
+     * future allocator that returns smaller alignment would silently
+     * corrupt the ring base. ASSERT loudly. */
+    ASSERT((xhci_cmd_ring.phys & 0x3F) == 0);
     w32(xhci_op_base, XHCI_OP_CRCR,     (uint32_t)(cmd_ring_ptr & 0xFFFFFFFFu));
+    dsb(sy);
     w32(xhci_op_base, XHCI_OP_CRCR + 4, (uint32_t)(cmd_ring_ptr >> 32));
 
     /* CONFIG: MaxSlotsEnabled in low byte. Enable all reported slots
@@ -1403,9 +1417,11 @@ static void xhci_program_registers(uint8_t max_slots)
      * writing ERSTBA enables the event ring. */
     uint64_t erdp = xhci_event_ring_dequeue_phys(&xhci_evt_ring);
     w32(ir0, XHCI_IR_ERDP,     (uint32_t)(erdp & 0xFFFFFFFFu));
+    dsb(sy);
     w32(ir0, XHCI_IR_ERDP + 4, (uint32_t)(erdp >> 32));
     uint64_t erstba = (uint64_t)(uintptr_t)xhci_erst;
     w32(ir0, XHCI_IR_ERSTBA,     (uint32_t)(erstba & 0xFFFFFFFFu));
+    dsb(sy);
     w32(ir0, XHCI_IR_ERSTBA + 4, (uint32_t)(erstba >> 32));
 
     /* Leave IMAN.IE = 0 (polling, no IRQs in Phase 3A). IMOD stays

@@ -160,7 +160,13 @@ impl CpuTopology {
     /// * `big_cores` - Number of performance (big) cores
     /// * `little_cores` - Number of efficiency (LITTLE) cores
     pub fn big_little(big_cores: u8, little_cores: u8) -> Self {
-        let total = big_cores + little_cores;
+        // Saturating add: a malformed caller passing big_cores +
+        // little_cores > 255 used to overflow u8 silently and report
+        // a wrong total. Saturating to MAX_CORES is the natural
+        // ceiling — the loops below already clamp via .min(MAX_CORES).
+        let total = big_cores
+            .saturating_add(little_cores)
+            .min(MAX_CORES as u8);
         let mut cores = [CoreInfo::new(0, CoreType::Any, 0); MAX_CORES];
 
         // Big cores first

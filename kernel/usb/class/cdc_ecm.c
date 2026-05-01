@@ -353,14 +353,19 @@ int cdc_ecm_parse_mac_string(const uint8_t *desc, size_t desc_len,
  */
 static void generate_fallback_mac(uint8_t mac[6])
 {
+    /* Use atomic post-increment so two CPUs probing different devices
+     * concurrently (Phase 4 hot-plug) can't both observe the same
+     * counter value and synthesize colliding MACs. RELAXED is fine —
+     * we only need monotonic distinct outputs across the call set,
+     * not any inter-thread happens-before. */
     static uint32_t counter;
-    counter++;
+    uint32_t value = __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED);
     mac[0] = 0x02;
     mac[1] = 0x53;  /* 'S' — SLM */
     mac[2] = 0x4C;  /* 'L' */
     mac[3] = 0x4D;  /* 'M' */
-    mac[4] = (uint8_t)(counter >> 8);
-    mac[5] = (uint8_t)counter;
+    mac[4] = (uint8_t)(value >> 8);
+    mac[5] = (uint8_t)value;
 }
 
 /* -------------------------------------------------------------------------- */

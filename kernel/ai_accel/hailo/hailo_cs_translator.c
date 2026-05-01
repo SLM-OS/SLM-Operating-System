@@ -1038,6 +1038,19 @@ static int translate_wait_sequencer(const struct hef_wait_sequencer_action *a,
 static int translate_trigger_sequencer(const struct hef_trigger_sequencer_action *a,
                                        struct hailo_cs_builder *b)
 {
+    /* Range-check BEFORE the narrowing struct initialization. The
+     * casts to u8/u16 below silently truncate; if we WARN-then-emit
+     * the wire body would already carry the wrong value. Reject
+     * with HAILO_ERR_INVAL and let the caller surface the malformed
+     * HEF instead of letting it through. */
+    if (a->cluster_index      > 0xFFu ||
+        a->initial_l3_cut     > 0xFFu ||
+        a->initial_l3_offset  > 0xFFFFu) {
+        WARN("hailo translator: TriggerSequencer out-of-range — cluster=%u "
+             "l3_cut=%u l3_offset=%u (rejecting)",
+             a->cluster_index, a->initial_l3_cut, a->initial_l3_offset);
+        return HAILO_ERR_INVAL;
+    }
     struct hailo_cs_act_trigger_sequencer body = {
         .cluster_index = (uint8_t)a->cluster_index,
         .sequencer_config = {
@@ -1051,13 +1064,6 @@ static int translate_trigger_sequencer(const struct hef_trigger_sequencer_action
             .l2_offset_1       = a->l2_offset_1,
         },
     };
-    if (a->cluster_index      > 0xFFu ||
-        a->initial_l3_cut     > 0xFFu ||
-        a->initial_l3_offset  > 0xFFFFu) {
-        WARN("hailo translator: TriggerSequencer narrows — cluster=%u "
-             "l3_cut=%u l3_offset=%u",
-             a->cluster_index, a->initial_l3_cut, a->initial_l3_offset);
-    }
     return hailo_cs_builder_append(b, HAILO_CS_ACT_TRIGGER_SEQUENCER,
                                    &body, sizeof(body));
 }

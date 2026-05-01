@@ -78,11 +78,14 @@ pub fn policy_counters() -> PolicyCounters {
     PolicyCounters { decisions, fallbacks, avg_latency_ns: avg }
 }
 
-extern "C" {
-    /// ARM generic timer / x86 TSC monotonic nanoseconds. Used to time
-    /// `select_victim` calls for the policy-latency counter.
-    fn slm_get_time_ns() -> u64;
+// `slm_get_time_ns` is declared in `kernel_ffi.rs` and used here via
+// the canonical re-export. Avoiding a duplicate `extern "C"` block
+// for the same C symbol keeps the Rust↔C signature in one place; a
+// future change to the C-side prototype would otherwise risk silent
+// signature divergence between the two declarations.
+use crate::kernel_ffi::slm_get_time_ns;
 
+extern "C" {
     /// M3: bucketed-histogram + EWMA rate hooks. Updates the global
     /// eviction-consumer telemetry stored in `kernel/src/admin_telemetry.c`.
     /// Same dt as the existing LATENCY_TOTAL_NS counter — these are

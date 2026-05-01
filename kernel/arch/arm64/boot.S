@@ -217,6 +217,18 @@ real_start:
      * If kexec: x0 already contains the DTB pointer, continue normally.
      */
     cbz     x1, .Lnot_efi              /* x1 == NULL → definitely not EFI */
+    /*
+     * Known kexec-vs-EFI handshake risk: this `ldr` blindly trusts
+     * x1. A predecessor passing x1 = some non-NULL non-EFI pointer
+     * (stale Linux register state, malformed kexec descriptor, etc.)
+     * faults here before VBAR_EL1 is installed, so the abort is fatal
+     * with no diagnostic. DAIF.A is set by the kernel entry above so
+     * this would surface as a synchronous fault rather than an SError
+     * storm, but neither path has an installed handler at this point.
+     * Accepted: kexec callers must pass x1 = 0 if they don't intend
+     * the EFI handshake. UEFI launches always pass a real
+     * EFI_SYSTEM_TABLE here.
+     */
     ldr     x10, =0x5453595320494249    /* EFI_SYSTEM_TABLE_SIGNATURE */
     ldr     x11, [x1]                   /* Read first 8 bytes at x1 */
     cmp     x10, x11
@@ -316,6 +328,14 @@ real_start:
     str     x16, [x15, #0x28]               /* [+0x28] = ID_AA64PFR0_EL1 */
 #endif
 
+    /*
+     * Re-read CurrentEL into x10 immediately before the gate. The
+     * `mrs x10, CurrentEL` above is far enough away that any future
+     * code added between (e.g. another diagnostic block, additional
+     * EL2 setup) could clobber x10 silently. A fresh read here is
+     * a couple of bytes and makes the gate robust to refactors.
+     */
+    mrs     x10, CurrentEL
     cmp     x10, #8                 /* EL2 = 0b1000 (CurrentEL bits [3:2] = 2) */
     b.ne    .Lpi5_in_el1            /* Already in EL1, skip transition */
 

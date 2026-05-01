@@ -222,8 +222,18 @@ int elf_load(const void *buffer, size_t size, struct elf_info *info)
             continue;
         }
 
-        /* Calculate pages needed (round up to page size) */
+        /* Calculate pages needed (round up to page size).
+         * Reject memsz near SIZE_MAX so the round-up doesn't wrap to 0
+         * (which would request a zero-page allocation and silently
+         * succeed, then be written past). The first-pass overflow
+         * guard above already rejects p_memsz values that would wrap
+         * `p_vaddr + p_memsz`, but a malicious ELF with min_vaddr = 0
+         * could still slip a memsz into the wrap zone. */
         size_t memsz = phdr[i].p_memsz;
+        if (memsz > SIZE_MAX - PAGE_SIZE) {
+            elf_unload(info);
+            return ELF_ERR_TRUNCATED;
+        }
         size_t pages = (memsz + PAGE_SIZE - 1) / PAGE_SIZE;
 
         /* Allocate pages */

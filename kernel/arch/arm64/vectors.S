@@ -79,6 +79,21 @@ exception_vectors:
 /*
  * Macro to save all general-purpose registers.
  * Creates a trap frame on the stack.
+ *
+ * AAPCS reserves x18 as the "platform register" — toolchains that
+ * generate code for a runtime which uses x18 as a TLS / shadow-call
+ * pointer expect every async exception to preserve it transparently.
+ * SLM-OS is bare-metal and the kernel itself never uses x18, so the
+ * trap-frame save/restore at offset 144 (paired with restore_regs
+ * below) is sufficient: any task-side use of x18 is preserved across
+ * the trap frame, and the kernel handler runs with x18 reloaded from
+ * the saved slot. If the kernel is ever linked against compiler-rt /
+ * LLVM objects compiled with `-ffixed-x18`, the IRQ entry must NOT
+ * be allowed to clobber x18 between the save and the C handler call;
+ * today the macro stores it before any kernel-side mutation, so the
+ * AAPCS contract is preserved by accident. Document explicitly so a
+ * future maintainer doesn't hoist the x18-touching code above the
+ * stp at offset 144.
  */
 .macro save_regs
     sub     sp, sp, #272            /* Space for x0-x30, sp, elr, spsr */

@@ -8,6 +8,7 @@
 
 #include "inference_device.h"
 #include "debug.h"
+#include "smp.h"
 #include <stddef.h>
 
 /* -------------------------------------------------------------------------- */
@@ -20,6 +21,16 @@ static struct inference_device *default_device;
 
 int inference_device_register(struct inference_device *dev)
 {
+    /* INVARIANT: registration is single-CPU-only. Every call to this
+     * function runs from boot-time module init on CPU 0 before
+     * secondaries come online. There is no lock here because adding
+     * one would only matter if a second CPU ever called register()
+     * concurrently, which would itself be a bug — `devices[]` and
+     * `device_count` would already be inconsistent past that point.
+     * Trip an assert so the violation is loud rather than corrupting
+     * state silently. */
+    ASSERT(cpu_id() == 0);
+
     if (!dev || !dev->ops || !dev->ops->name
      || !dev->ops->load_model || !dev->ops->run || !dev->ops->free_model) {
         return INF_ERR_INVAL;

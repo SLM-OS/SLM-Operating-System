@@ -114,8 +114,14 @@ impl Drop for LoadedModel {
 /// Error type for model loading operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadError {
-    /// Memory allocation failed
+    /// Pool out of memory or PMM exhaustion.
     AllocFailed,
+    /// Concurrent free/reuse race against the loader's handle.
+    AllocStaleHandle,
+    /// Allocation handle no longer corresponds to a live slot.
+    AllocInvalidHandle,
+    /// Allocator internal precondition violated.
+    AllocInternal,
     /// Invalid model format
     InvalidFormat,
     /// Model too large for available memory
@@ -135,8 +141,20 @@ pub enum LoadError {
 }
 
 impl From<AllocError> for LoadError {
-    fn from(_: AllocError) -> Self {
-        LoadError::AllocFailed
+    fn from(e: AllocError) -> Self {
+        // Map per-variant so a caller observing LoadError can
+        // distinguish "real OOM" from "stale handle race" from
+        // "internal allocator precondition violated". Collapsing
+        // every variant to AllocFailed loses signal that's useful
+        // to higher-level retry / fallback logic.
+        match e {
+            AllocError::OutOfMemory | AllocError::PmmFailed => LoadError::AllocFailed,
+            AllocError::StaleHandle => LoadError::AllocStaleHandle,
+            AllocError::InvalidHandle => LoadError::AllocInvalidHandle,
+            AllocError::AlignmentError | AllocError::NotInitialized => {
+                LoadError::AllocInternal
+            }
+        }
     }
 }
 

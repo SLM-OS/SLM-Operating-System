@@ -85,7 +85,25 @@ switch_to:
     mov     CTX_RSP(%rdx), %rsp
 
     /* Restore rflags (may re-enable IRQs via IF bit).
-     * Reentrant schedule() is prevented by per-CPU guard flag. */
+     * Reentrant schedule() is prevented by per-CPU guard flag.
+     *
+     * RFLAGS contract:
+     *  - For a NEW task, kernel/sched/task.c initializes
+     *    context.rflags = 0 (IF=0). The first dispatch jumps to
+     *    `task_entry_wrapper` (below), which `sti`s before tail-
+     *    calling task_entry_trampoline — so a brand-new task's
+     *    first instruction always runs with interrupts enabled.
+     *  - For a RESUMING task, the rflags loaded here is whatever
+     *    was captured by the matching `pushfq` in `switch_to`'s
+     *    save half. Voluntary deschedules (yield/sleep) always
+     *    happen with IRQs enabled, so the saved IF=1 and resumes
+     *    enable preemption normally. The per-CPU `preempt_disabled`
+     *    flag is software-only and does NOT mask hardware IRQs.
+     *
+     * Net result: any task that reaches a yield point runs with
+     * IF=1 from then on. A future "spawn task with preconfigured
+     * rflags" code path would have to either set IF=1 in the
+     * initial rflags or do its own sti before yielding. */
     mov     CTX_RFLAGS(%rdx), %rax
     push    %rax
     popfq

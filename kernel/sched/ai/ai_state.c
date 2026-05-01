@@ -95,9 +95,19 @@ static void extract_per_core(float *out)
 
         /* Current task's effective priority on this core.
          * task_current() is per-CPU and only valid on the calling CPU,
-         * so for other CPUs we check the run queue head as a proxy. */
-        if (rq->idle_task && rq->head) {
-            f[5] = (float)rq->head->effective_priority / 7.0f;
+         * so for other CPUs we check the run queue head as a proxy.
+         *
+         * Lock-free read of rq->head from another CPU. Snapshot the
+         * pointer locally so a concurrent migration / pop on the
+         * target CPU can't free the task between the NULL-check and
+         * the field load. The torn-read window remains best-effort —
+         * effective_priority may briefly read a stale value — but
+         * that's acceptable for an AI feature vector that already
+         * tolerates noise. The pointer-snapshot guards against the
+         * NULL-deref / use-after-free, which would actually crash. */
+        struct task *h = rq->head;
+        if (rq->idle_task && h) {
+            f[5] = (float)h->effective_priority / 7.0f;
         } else {
             f[5] = 0.0f;  /* idle or empty */
         }

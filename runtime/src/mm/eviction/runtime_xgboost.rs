@@ -39,6 +39,8 @@ pub enum RuntimeXGBoostError {
     NonZeroReserved,
     BadLength,
     EmptyModel,
+    TooManyTrees,
+    TooManyNodes,
     RootOutOfRange,
     ChildOutOfRange,
     InvalidFeatureIndex,
@@ -48,6 +50,15 @@ pub enum RuntimeXGBoostError {
 
 const FLAG_LEAF: u16 = 1;
 const FEATURE_COUNT: usize = 27;
+
+// Bound the parser against malicious blobs that declare a u16 tree
+// count near 65535 with a u16 node count near 65535. The product of
+// those two would otherwise allocate hundreds of MB on the kernel
+// heap. Realistic XGBoost models for this scheduler have <= a few
+// hundred trees and <= ~16K total nodes; pick generous caps that
+// cover any practical model and reject anything beyond.
+const MAX_TREES: usize = 1024;
+const MAX_NODES: usize = 16_384;
 
 fn read_u16_le(bytes: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([bytes[off], bytes[off + 1]])
@@ -90,6 +101,12 @@ pub fn parse_payload(bytes: &[u8]) -> Result<RuntimeXGBoostModel, RuntimeXGBoost
     let node_count = read_u16_le(bytes, 10) as usize;
     if tree_count == 0 || node_count == 0 {
         return Err(RuntimeXGBoostError::EmptyModel);
+    }
+    if tree_count > MAX_TREES {
+        return Err(RuntimeXGBoostError::TooManyTrees);
+    }
+    if node_count > MAX_NODES {
+        return Err(RuntimeXGBoostError::TooManyNodes);
     }
 
     let roots_len = tree_count * 2;

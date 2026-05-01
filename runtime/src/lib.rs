@@ -62,6 +62,26 @@ pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
 
 #[panic_handler]
 fn rust_panic(info: &PanicInfo) -> ! {
+    // Recursion guard: if uart_printf / shell_printf themselves panic
+    // (e.g. lwIP TX ring wedged, slm_print's C side faulted on a NULL
+    // arg, or the panic flow re-enters via timer IRQ + scheduler
+    // path), reentry would infinite-loop printing. Hard-loop on
+    // second entry instead — the first panic line already made it to
+    // UART (the most reliable channel) at this point.
+    //
+    // Relaxed ordering is sufficient: we only need atomicity on the
+    // RMW (so two concurrent panickers don't both observe `false`),
+    // not any happens-before with surrounding memory. Stronger
+    // orderings would add unnecessary fences on every panic-handler
+    // entry without protecting anything.
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static PANICKING: AtomicBool = AtomicBool::new(false);
+    if PANICKING.swap(true, Ordering::Relaxed) {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     // Postmortem output goes to BOTH UART and the bound shell.
     // - uart_printf is the always-on path: lab serial capture (per the
     //   project's serial_capture workflow) is the canonical place a
@@ -121,7 +141,7 @@ fn rust_panic(info: &PanicInfo) -> ! {
     }
 
     unsafe {
-        kernel_ffi::panic(b"Rust panic - halting\0".as_ptr());
+        kernel_ffi::slm_panic(b"Rust panic - halting\0".as_ptr());
     }
 }
 
