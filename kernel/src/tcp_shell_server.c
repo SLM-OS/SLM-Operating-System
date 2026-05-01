@@ -101,6 +101,18 @@ void tcp_shell_server_note_session_close(uint32_t session_id,
              "(threshold=%u, measured post-tcp_close) — suspect leak%s",
              (unsigned)session_id, (int)heap_delta_bytes,
              (unsigned)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES, attr);
+    } else if (pool_attribution && pool_attribution[0]) {
+        /* Heap is clean but at least one MEMP pool ended the session
+         * with a non-zero delta. Heap-only leak detection misses pool
+         * leaks (e.g. PBUF_POOL slots not returned), so surface them
+         * here. INFO level — sessions don't always close with all
+         * pools at exactly zero in flight (tx unacked may still be
+         * in-flight at close-settle measurement time), but a
+         * persistent positive PBUF_POOL delta across multiple
+         * sessions is the smoking gun for the #581 follow-up
+         * pool-leak investigation. */
+        INFO("shell-tcp: session %u closed: heap_delta=%+d, pool_delta=%s",
+             (unsigned)session_id, (int)heap_delta_bytes, pool_attribution);
     }
 }
 

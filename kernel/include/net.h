@@ -281,6 +281,8 @@ struct net_watchdog_snapshot {
     uint64_t  rx_no_buffers;         /* driver-layer drops */
     uint16_t  pbuf_pool_used;        /* lwip_stats.memp[MEMP_PBUF_POOL]->used */
     uint16_t  pbuf_pool_avail;       /* configured PBUF_POOL_SIZE */
+    uint16_t  pbuf_pool_peak;        /* lwip_stats.memp[MEMP_PBUF_POOL]->max — high-water mark */
+    uint32_t  pbuf_pool_err;         /* lwip_stats.memp[MEMP_PBUF_POOL]->err — alloc-failure count */
     uint16_t  tcp_pcb_used;
     uint16_t  tcp_pcb_avail;
     uint32_t  heap_used;             /* lwip_stats.mem.used */

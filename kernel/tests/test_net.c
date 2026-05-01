@@ -2005,14 +2005,10 @@ static void test_net_rx_burst_uses_pbuf_pool_not_heap(void)
     }
 
     /* Capture pre-burst state. The pbuf pool peak is what
-     * differentiates PBUF_POOL (rises) from PBUF_RAM (stays flat). */
+     * differentiates PBUF_POOL (touched at least once) from PBUF_RAM
+     * (pool never touched). */
     struct net_watchdog_snapshot before;
     net_watchdog_get(&before);
-#if MEMP_STATS
-    /* `max` is u32 on lwip 2.x; cast for the after-comparison. */
-    uint32_t pbuf_pool_max_before =
-        (uint32_t)lwip_stats.memp[MEMP_PBUF_POOL]->max;
-#endif
 
     /* Build a 64-byte broadcast-dest ethertype-0x9000 frame. lwip
      * accepts the netif input but finds no matching upper protocol
@@ -2057,14 +2053,25 @@ static void test_net_rx_burst_uses_pbuf_pool_not_heap(void)
     TEST_ASSERT_EQUAL_UINT64(before.rx_dropped, after.rx_dropped);
 
     /* Load-bearing claim: PBUF_POOL was actually used during the
-     * burst. With the production fix in place, the pool peak rises
-     * by at least 1 (typically more, since lwip may retain a pbuf
-     * across input processing). Without the fix (PBUF_RAM regression),
-     * the pool is never touched and max stays at its pre-burst value. */
+     * burst. With the production fix in place, every RX frame allocs
+     * a pool slot, lwip processes it (ethertype 0x9000 has no upper-
+     * layer handler so it's freed at the eth-input default case),
+     * and the pbuf returns to the pool. Pool peak rises to at least
+     * 1 (transient during processing). Without the fix (PBUF_RAM
+     * regression), the pool is never touched and peak stays at 0.
+     *
+     * Earlier revisions of this test asserted `peak_after >
+     * peak_before` (strict delta). That worked accidentally because
+     * pre-fix unknown ethertypes leaked pbufs in the pool — the peak
+     * grew monotonically with each frame. With the leak fixed (#581),
+     * pool churns through alloc-free pairs so the peak settles at 1
+     * for the whole burst. The correct invariant is "peak >= 1 at
+     * any point during the burst", which the post-burst max captures
+     * since lwip_stats.memp[].max is monotonic. */
 #if MEMP_STATS
     uint32_t pbuf_pool_max_after =
         (uint32_t)lwip_stats.memp[MEMP_PBUF_POOL]->max;
-    TEST_ASSERT_TRUE(pbuf_pool_max_after > pbuf_pool_max_before);
+    TEST_ASSERT_TRUE(pbuf_pool_max_after >= 1);
 #endif
 
     /* Sanity: heap usage stayed bounded. Even with PBUF_RAM the

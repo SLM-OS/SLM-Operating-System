@@ -90,18 +90,26 @@
 
 /* Number of pbufs in the pool.
  *
- * Increased from 16 to 64 for #427: under fast connect/disconnect
- * cycles on the telnet shell port, lingering TCP TIME_WAIT PCBs
- * each retain pbufs for retransmit / unACKed segments. With a 16-
- * pbuf pool the pool would saturate after ~8 close-then-reopen
- * cycles, at which point `pbuf_alloc` in the cdc_ecm RX path
- * started failing — incoming frames (including ARP requests for
- * our own IP) were dropped at the netif boundary. The host's ARP
- * cache then went `(incomplete)` for SLM-OS's IP, breaking both
- * ping and any new TCP connect from outside. 64 pbufs gives each
- * of the 16 max-shell-sessions enough headroom for retransmit
- * queues + a comfortable RX buffer without significantly bumping
- * static memory footprint (64 × 1536 = 96 KB). */
+ * History:
+ *   - 16 → 64 (PR #427): under fast connect/disconnect cycles on
+ *     the telnet shell port, lingering TCP TIME_WAIT PCBs each
+ *     retain pbufs for retransmit / unACKed segments. With a 16-
+ *     pbuf pool the pool saturated after ~8 close-then-reopen
+ *     cycles, dropping incoming frames (including ARP requests for
+ *     our own IP) at the netif boundary.
+ *   - 64 → 128 (during the #581 investigation): bumped to confirm
+ *     the post-PR-584 saturation was a leak (peg at 128/128) rather
+ *     than a sizing problem.
+ *   - 128 → 64 (#581 root cause fixed): the leak — IPv6 frames
+ *     escaping `LWIP_HOOK_UNKNOWN_ETH_PROTOCOL = 0` without ever
+ *     calling pbuf_free, see this file's hooks section — has been
+ *     fixed. Post-fix peak under a 1 GB TCP transfer is bounded by
+ *     `TCP_WND/MSS ≈ 32` in-flight segments plus a handful for
+ *     ARP/OOSEQ, well under 64. Reverted to keep BSS lean
+ *     (64 × 1536 = 96 KB vs. 192 KB at 128). The watchdog's pbuf
+ *     pool peak/alloc-err counters (see net_watchdog_get) will
+ *     name the wedge if this proves too tight under a future
+ *     workload. */
 #define PBUF_POOL_SIZE              64
 
 /* Size of each pbuf in pool (standard Ethernet MTU + headers) */
@@ -267,8 +275,18 @@
 /* Application Hooks                                                           */
 /* -------------------------------------------------------------------------- */
 
-/* No application hooks by default */
-#define LWIP_HOOK_UNKNOWN_ETH_PROTOCOL(p, netif) 0
+/* No application hooks. Specifically: do NOT define
+ * LWIP_HOOK_UNKNOWN_ETH_PROTOCOL here. lwIP's ethernet_input does
+ * `if (HOOK(p, netif) == ERR_OK) { break; }` — and ERR_OK is 0,
+ * which is what an "I don't handle this" stub macro would naturally
+ * return. The break exits the switch WITHOUT calling pbuf_free, so
+ * every unknown-ethertype frame (IPv6 NDP/RA at 0x86dd is the most
+ * common one on a LAN with IPv6-enabled routers) silently leaks
+ * its pbuf. Pre-PR-584 this saturated the lwIP heap (RX path used
+ * PBUF_RAM); post-PR-584 it saturates the pool. Leaving the macro
+ * undefined makes lwIP's `#ifdef LWIP_HOOK_UNKNOWN_ETH_PROTOCOL`
+ * branch compile out and the default case falls straight through
+ * to free_and_return (#581 follow-up). */
 
 /* -------------------------------------------------------------------------- */
 /* Sanity Checks                                                               */
