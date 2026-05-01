@@ -73,6 +73,15 @@ extern void task_destroy(struct task *task);
  */
 volatile int preempt_disabled[MAX_CPUS];
 
+/* `SPINLOCK_ARRAY` in spinlock.h hardcodes a 64-byte alignment to
+ * avoid pulling cache.h into every TU that uses spinlocks. This TU
+ * sees both headers, so pin the assumption with a static_assert: if
+ * `CACHE_LINE_SIZE` ever changes (e.g. a new ARM CPU with 128-byte
+ * lines), the build fails here instead of letting the macro silently
+ * under-align. */
+_Static_assert(CACHE_LINE_SIZE == 64,
+               "SPINLOCK_ARRAY in spinlock.h hardcodes 64-byte alignment");
+
 /* Per-CPU run queue locks — always in cacheable memory.
  * Separated from cpu_runqueue because exclusive load/store (ldaxr/stxr)
  * used by spinlocks may not work on Non-Cacheable memory (BCM2712). */

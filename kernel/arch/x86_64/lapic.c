@@ -299,9 +299,10 @@ void lapic_send_ipi(uint32_t apic_id, uint32_t vector, uint32_t flags)
      * ~33 ms at 9 GHz, ~300 ms at 1 GHz. That spread is well
      * inside "much longer than any real IPI delivery" (microseconds)
      * across every plausible x86 CPU frequency, so a timeout exit
-     * means the LAPIC is genuinely broken. If `tsc_freq_hz` ever
-     * becomes a calibrated runtime value, scale this to wall-clock
-     * 100 ms exactly. */
+     * means the LAPIC is genuinely broken. If the calibrated
+     * `tsc_freq` from `kernel/arch/x86_64/timer_x86.c` is ever
+     * exposed beyond that translation unit, scale this to
+     * wall-clock 100 ms exactly. */
     uint64_t deadline_tsc = __builtin_ia32_rdtsc() + 100ULL * 1000 * 1000 * 3;
     while (lapic_read(LAPIC_ICR_LO) & (1 << 12)) {
         if (__builtin_ia32_rdtsc() >= deadline_tsc) {
