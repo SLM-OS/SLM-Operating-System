@@ -1534,7 +1534,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
 {
     /* Bound pb_dwords against the inherited pushbuffer size before any
      * write. Today's callers cap at GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS
-     * (= 23), but a future caller passing a larger value would
+     * (= 24), but a future caller passing a larger value would
      * overflow g_handoff.pushbuf_phys. Cheap up-front check.
      *
      * Note: this and the 40-bit-VA check below intentionally use

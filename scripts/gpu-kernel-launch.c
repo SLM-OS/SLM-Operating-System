@@ -88,7 +88,7 @@ int main(int argc, char **argv)
      * dims / memory-size / cbuf-size — no per-kernel overrides. */
     gpu_launch_populate_qmd(&ctx);
 
-    /* Build + dispatch the 13-dword compute pushbuffer. */
+    /* Build + dispatch the 14-dword compute pushbuffer. */
     uint32_t pb_buf[32];
     size_t pb_dwords = gpu_build_launch_pushbuffer(pb_buf, ctx.qmd_gva);
     printf("[launch] pushbuffer %zu dwords\n", pb_dwords);
