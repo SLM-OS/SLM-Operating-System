@@ -518,6 +518,16 @@ int shell_read_command(const char *prompt, char *buf, int max_len)
     }
     struct shell_io *io = s->io;
 
+    /* Captured once per call — telnet negotiation can in principle
+     * flip mid-line, but the WILL/DONT ECHO exchange is initiated
+     * at connect time and slm-put.py never re-negotiates, so a
+     * single read avoids the per-char vtable indirection in the
+     * hot path. The line-edit loop emits ~SHELL_MAX_LINE writes
+     * per command (8 KB post-#581); a per-char check would be a
+     * measurable per-byte cost on the bulk-upload path that this
+     * field exists to fix. */
+    bool echo = shell_io_echo_enabled(io);
+
     if (prompt && *prompt) {
         io->write(io, prompt, strlen(prompt));
     }
@@ -554,10 +564,19 @@ int shell_read_command(const char *prompt, char *buf, int max_len)
                                    ? shell_history_prev(s)
                                    : shell_history_next(s);
                 if (recall) {
-                    /* \r → column 0; ESC[K → erase to end of line. */
-                    io->write(io, "\r\x1b[K", 4);
-                    if (prompt && *prompt) {
-                        io->write(io, prompt, strlen(prompt));
+                    /* History recall is a no-op for echo-off peers:
+                     * a line-mode client won't be sending arrow-key
+                     * CSI sequences in the first place (it does its
+                     * own local line edit), and the visible recall
+                     * has nowhere to go. Skip the visual update,
+                     * but still load the recall into `buf` so a
+                     * pasted ESC[A doesn't leave the buffer empty. */
+                    if (echo) {
+                        /* \r → column 0; ESC[K → erase to end of line. */
+                        io->write(io, "\r\x1b[K", 4);
+                        if (prompt && *prompt) {
+                            io->write(io, prompt, strlen(prompt));
+                        }
                     }
                     size_t rl = strlen(recall);
                     if (rl > (size_t)(max_len - 1)) {
@@ -565,10 +584,12 @@ int shell_read_command(const char *prompt, char *buf, int max_len)
                     }
                     if (rl > 0) {
                         memcpy(buf, recall, rl);
-                        /* Echo `buf` rather than `recall` so the visible
-                         * line and the in-memory buffer stay in lock-
-                         * step when the recall is clipped to fit. */
-                        io->write(io, buf, rl);
+                        if (echo) {
+                            /* Echo `buf` rather than `recall` so the visible
+                             * line and the in-memory buffer stay in lock-
+                             * step when the recall is clipped to fit. */
+                            io->write(io, buf, rl);
+                        }
                     }
                     buf[rl] = '\0';
                     pos = (int)rl;
@@ -583,25 +604,43 @@ int shell_read_command(const char *prompt, char *buf, int max_len)
             continue;
         }
         if (c == '\r' || c == '\n') {
-            io->write(io, "\r\n", 2);
+            /* CRLF echo is part of the visual line-end for echo-on
+             * peers; for echo-off peers it's just extra bytes the
+             * client has to skip past in its `read_until_prompt`
+             * scan. Harmless but skippable. */
+            if (echo) {
+                io->write(io, "\r\n", 2);
+            }
             break;
         }
         if (c == '\b' || c == 0x7F) {
             if (pos > 0) {
                 pos--;
-                io->write(io, "\b \b", 3);
+                if (echo) {
+                    io->write(io, "\b \b", 3);
+                }
             }
             continue;
         }
         if (c == 0x03) {
-            io->write(io, "^C\r\n", 4);
+            if (echo) {
+                io->write(io, "^C\r\n", 4);
+            }
             shell_history_reset_cursor(s);
             pos = 0;
             break;
         }
         if (c >= 0x20 && c < 0x7F) {
             buf[pos++] = c;
-            io->write(io, &c, 1);
+            /* Per-char echo dominates bulk-upload throughput — see
+             * shell_io.h::echo_enabled. With slm-put.py (or any
+             * line-mode telnet client) negotiating DONT ECHO, this
+             * skip removes ~8 KB of TX traffic and 8K spinlock-
+             * protected ring writes per `xput chunk`, raising
+             * effective bandwidth from ~30 KB/s to wire-rate. */
+            if (echo) {
+                io->write(io, &c, 1);
+            }
             continue;
         }
         /* Other control bytes silently ignored, same as shell_read_line. */

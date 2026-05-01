@@ -24,6 +24,18 @@
  */
 #define SHELL_IO_PRINTF_BUF 4096
 
+bool shell_io_echo_enabled(struct shell_io *io)
+{
+    /* NULL-safe and vtable-optional: callers don't have to repeat the
+     * NULL checks, and a backend that doesn't implement the hook
+     * keeps echoing (the historical default) — only the TCP backend
+     * needs to opt into the negotiation-driven path. */
+    if (!io || !io->echo_enabled) {
+        return true;
+    }
+    return io->echo_enabled(io);
+}
+
 void shell_io_puts(struct shell_io *io, const char *s)
 {
     if (!io || !s) {

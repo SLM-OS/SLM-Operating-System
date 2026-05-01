@@ -576,6 +576,25 @@ static bool tcp_is_open(struct shell_io *io)
     return !ctx->closed;
 }
 
+/* Echo decision driven by telnet IAC negotiation. The kernel offers
+ * `WILL ECHO` on connect (telnet.c:282); peers that want server-side
+ * echo reply `DO ECHO` (the flag stays set), peers that want local /
+ * line-mode echo reply `DONT ECHO` (the flag clears via
+ * handle_opt_dont in telnet.c). slm-put.py and any other line-
+ * buffering tool always reply DONT, so this returns false for them
+ * and the line-edit loop skips its per-char tcp_write_buf call —
+ * which was capping bulk-upload throughput at ~30 KB/s through the
+ * cumulative spinlock + tx-ring overhead. Interactive telnet clients
+ * that *do* want server echo (some old terminals, or a peer that
+ * negotiated DO ECHO explicitly) keep the flag set and continue to
+ * see their input echoed. The check is a single bit read on the
+ * per-session telnet parser — cheap to call once per input char. */
+static bool tcp_echo_enabled(struct shell_io *io)
+{
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
+    return (ctx->telnet.negotiated_flags & TELNET_F_WILL_ECHO) != 0;
+}
+
 /* -------------------------------------------------------------------------- */
 /* lwIP callbacks — net_pump context                                          */
 /* -------------------------------------------------------------------------- */
@@ -870,6 +889,7 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
     ctx->io.flush         = tcp_flush;
     ctx->io.close         = tcp_close_io;
     ctx->io.is_open       = tcp_is_open;
+    ctx->io.echo_enabled  = tcp_echo_enabled;
     ctx->io.ctx           = ctx;
 
     /* Initialize the telnet parser with our callback set. ctx->ctx
