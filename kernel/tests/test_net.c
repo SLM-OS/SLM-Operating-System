@@ -2084,6 +2084,80 @@ static void test_net_rx_burst_uses_pbuf_pool_not_heap(void)
 #endif
 }
 
+/*
+ * #581 throughput follow-up: net_poll must drain ALL frames the
+ * driver has buffered, not just one. Pre-fix net_poll() called
+ * active_driver->recv() exactly once and bailed; with TCP fragmenting
+ * an 8 KB framed `xput chunk` command into ~6 segments and net_pump
+ * running at ~100 Hz, that single-frame-per-tick cadence put a 60 ms
+ * floor on per-chunk turnaround and capped 1 GB upload throughput at
+ * ~2 MB/min. Post-fix, net_poll loops until recv returns 0.
+ *
+ * This test asserts the loop semantics directly: queue MULTIPLE
+ * frames in the wrapper driver, call net_poll() exactly ONCE, and
+ * verify rx_packets advanced by the queued count. Pre-fix this
+ * delta would be 1; post-fix it equals the queued count.
+ */
+#define RX_DRAIN_TEST_FRAMES   4
+
+static void test_net_poll_drains_all_buffered_frames(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    test_net_build_loopback_frame(rx_burst_test_frame);
+
+    rx_burst_test_base = net_get_driver();
+    TEST_ASSERT_NOT_NULL(rx_burst_test_base);
+
+    struct net_watchdog_snapshot before;
+    net_watchdog_get(&before);
+
+    /* Queue N frames in the wrapper. Each `recv()` returns one and
+     * decrements the counter; when zero, the wrapper falls through
+     * to the live driver. After this assignment, rx_burst_test_recv
+     * returns the canned frame N times. */
+    rx_burst_test_remaining = RX_DRAIN_TEST_FRAMES;
+    net_register_driver(&rx_burst_test_driver);
+
+    /* The load-bearing call: ONE net_poll. Pre-fix, this drains
+     * exactly 1 frame (recv called once); post-fix, it loops until
+     * recv returns 0 and drains all N. */
+    net_poll();
+
+    /* Restore the real driver. Order matters per the burst test:
+     * clear the counter first so any in-flight wrapper-recv from a
+     * concurrent net_pump tick falls into the delegate path, then
+     * swap active_driver. */
+    rx_burst_test_remaining = 0;
+    net_register_driver(rx_burst_test_base);
+
+    struct net_watchdog_snapshot after;
+    net_watchdog_get(&after);
+
+    /* Strict delta: rx_packets MUST have advanced by exactly
+     * RX_DRAIN_TEST_FRAMES from this single net_poll call.
+     * `>= +N` rather than `== +N` only because net_pump is also
+     * polling concurrently and may have processed real traffic
+     * (DHCP renewals, ARP) during this test window. The
+     * load-bearing claim is "more than 1 frame drained per tick";
+     * the +N lower bound covers that without flaking on background
+     * traffic. */
+    TEST_ASSERT_TRUE(after.rx_packets >= before.rx_packets +
+                     RX_DRAIN_TEST_FRAMES);
+
+    /* Counter must hit zero — proves recv was called RX_DRAIN_TEST_FRAMES
+     * times within the single net_poll. If only 1 frame was drained,
+     * remaining would be (N-1). */
+    TEST_ASSERT_EQUAL_INT(0, rx_burst_test_remaining);
+
+    /* No drops — pool/heap budgets are unchanged from the test_net_rx_burst
+     * test which already exercises the same path with 32 frames. */
+    TEST_ASSERT_EQUAL_UINT64(before.rx_dropped, after.rx_dropped);
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -2162,6 +2236,10 @@ int test_suite_net(void)
      * actually invokes the wrapper recv. Must be BEFORE the
      * not-initialized teardown block at the end of the suite. */
     RUN_TEST(test_net_rx_burst_uses_pbuf_pool_not_heap);
+    /* #581 throughput follow-up: drain-loop semantics. Must run
+     * while the live driver is up so net_poll's single invocation
+     * actually reaches the wrapper recv. */
+    RUN_TEST(test_net_poll_drains_all_buffered_frames);
     RUN_TEST(test_net_send_returns_quickly);
     RUN_TEST(test_net_send_oversized_rejected);
     RUN_TEST(test_net_send_pool_exhaustion);
