@@ -3682,6 +3682,207 @@ static void test_shell_jetson_bpmp_pcie_cmds_correct_platform(void)
 }
 
 /* ============================================================================
+ * shell_io echo-negotiation tests (#581 follow-up)
+ * ============================================================================ */
+
+#include "../include/shell_io.h"
+
+/* Mock shell_io that replays a fixed input buffer through read_char,
+ * captures every byte passed to write, and reports a configurable
+ * echo state. Drives the line-edit loop deterministically without a
+ * real UART or TCP backend. */
+struct echo_test_mock {
+    struct shell_io io;
+    const char     *input;
+    size_t          input_pos;
+    size_t          input_len;
+    char            captured[256];
+    size_t          captured_len;
+    bool            echo;
+};
+
+static int echo_test_read_char(struct shell_io *io)
+{
+    struct echo_test_mock *m = (struct echo_test_mock *)io->ctx;
+    if (m->input_pos >= m->input_len) return -1;
+    return (unsigned char)m->input[m->input_pos++];
+}
+
+static void echo_test_write(struct shell_io *io, const char *buf, size_t len)
+{
+    struct echo_test_mock *m = (struct echo_test_mock *)io->ctx;
+    for (size_t i = 0; i < len && m->captured_len < sizeof(m->captured); i++) {
+        m->captured[m->captured_len++] = buf[i];
+    }
+}
+
+static bool echo_test_is_open(struct shell_io *io) { (void)io; return true; }
+static bool echo_test_echo_enabled(struct shell_io *io)
+{
+    struct echo_test_mock *m = (struct echo_test_mock *)io->ctx;
+    return m->echo;
+}
+
+static void echo_test_init(struct echo_test_mock *m, const char *input,
+                           bool with_echo_hook, bool echo)
+{
+    extern void *memset(void *s, int c, size_t n);
+    memset(m, 0, sizeof(*m));
+    m->io.read_char    = echo_test_read_char;
+    m->io.write        = echo_test_write;
+    m->io.is_open      = echo_test_is_open;
+    m->io.echo_enabled = with_echo_hook ? echo_test_echo_enabled : NULL;
+    m->io.ctx          = m;
+    m->input           = input;
+    m->input_len       = strlen(input);
+    m->echo            = echo;
+}
+
+/* Drive shell_read_command with a bound mock session. Outputs the
+ * line-read result into `*out_n`, with `out_captured`/
+ * `out_captured_len` set to the mock's record of every byte the
+ * line-edit loop wrote. Returns void rather than int because
+ * Unity's TEST_ASSERT_NOT_NULL expands to a bare `return;` on
+ * failure, which mismatches any non-void return type. */
+static void echo_test_run(struct echo_test_mock *m, char *line_out,
+                          int line_max, int *out_n, char *out_captured,
+                          size_t out_cap_size, size_t *out_captured_len)
+{
+    struct shell_session *sess = shell_session_alloc();
+    TEST_ASSERT_NOT_NULL(sess);
+    sess->io = &m->io;
+    shell_session_bind(task_current(), sess);
+
+    *out_n = shell_read_command("$ ", line_out, line_max);
+
+    shell_session_unbind(task_current());
+    sess->io = NULL;
+    shell_session_free(sess);
+
+    size_t copy = m->captured_len < out_cap_size ? m->captured_len : out_cap_size;
+    extern void *memcpy(void *d, const void *s, size_t n);
+    memcpy(out_captured, m->captured, copy);
+    *out_captured_len = copy;
+}
+
+/*
+ * Helper contract: NULL `io` and NULL `echo_enabled` callback both
+ * return true, preserving the always-echo default for backends
+ * that don't opt into the hook (UART console).
+ */
+static void test_shell_io_echo_enabled_defaults_true(void)
+{
+    TEST_ASSERT_TRUE(shell_io_echo_enabled(NULL));
+
+    struct shell_io io;
+    extern void *memset(void *s, int c, size_t n);
+    memset(&io, 0, sizeof(io));
+    /* echo_enabled deliberately left NULL — should default to ON. */
+    TEST_ASSERT_TRUE(shell_io_echo_enabled(&io));
+}
+
+/*
+ * Helper contract: when `echo_enabled` is wired up, its return
+ * value flows through unchanged.
+ */
+static void test_shell_io_echo_enabled_callback_used(void)
+{
+    struct echo_test_mock m;
+    echo_test_init(&m, "", true /*with hook*/, false /*echo off*/);
+    TEST_ASSERT_FALSE(shell_io_echo_enabled(&m.io));
+
+    m.echo = true;
+    TEST_ASSERT_TRUE(shell_io_echo_enabled(&m.io));
+}
+
+/*
+ * Integration: shell_read_command's line-edit loop must NOT echo
+ * input bytes when the backend reports `echo_enabled = false`. The
+ * prompt is still emitted (clients still need it to know the shell
+ * is ready); only the per-char data echo and the trailing CRLF are
+ * suppressed. The in-memory line `buf_out` must still reflect the
+ * exact input the peer sent — the negotiation only affects what's
+ * sent BACK, not what's parsed.
+ */
+static void test_shell_read_command_skips_echo_when_disabled(void)
+{
+    struct echo_test_mock m;
+    echo_test_init(&m, "hello\n", true /*with hook*/, false /*echo off*/);
+
+    char line[64];
+    char captured[256];
+    size_t captured_len = 0;
+    int n = 0;
+    echo_test_run(&m, line, sizeof(line), &n,
+                  captured, sizeof(captured), &captured_len);
+
+    /* Buffer state is unchanged by the negotiation — still tracks input. */
+    TEST_ASSERT_EQUAL_INT(5, n);
+    TEST_ASSERT_EQUAL_STRING("hello", line);
+
+    /* The ONLY thing written should be the prompt. No echo of "hello",
+     * no trailing "\r\n". Compared as bounded memory because TEST_ASSERT
+     * variants vary in null-handling. */
+    TEST_ASSERT_EQUAL_UINT(2, captured_len);
+    TEST_ASSERT_EQUAL_INT('$', captured[0]);
+    TEST_ASSERT_EQUAL_INT(' ', captured[1]);
+}
+
+/*
+ * Companion: the same input WITH echo enabled writes prompt + each
+ * input char + CRLF. Locks in that the gating only fires when echo
+ * is off — not by accident from some other path.
+ */
+static void test_shell_read_command_echoes_when_enabled(void)
+{
+    struct echo_test_mock m;
+    echo_test_init(&m, "hi\n", true /*with hook*/, true /*echo on*/);
+
+    char line[64];
+    char captured[256];
+    size_t captured_len = 0;
+    int n = 0;
+    echo_test_run(&m, line, sizeof(line), &n,
+                  captured, sizeof(captured), &captured_len);
+
+    TEST_ASSERT_EQUAL_INT(2, n);
+    TEST_ASSERT_EQUAL_STRING("hi", line);
+
+    /* Prompt "$ ", then 'h', then 'i', then "\r\n" = 6 bytes. */
+    TEST_ASSERT_EQUAL_UINT(6, captured_len);
+    TEST_ASSERT_EQUAL_INT('$', captured[0]);
+    TEST_ASSERT_EQUAL_INT(' ', captured[1]);
+    TEST_ASSERT_EQUAL_INT('h', captured[2]);
+    TEST_ASSERT_EQUAL_INT('i', captured[3]);
+    TEST_ASSERT_EQUAL_INT('\r', captured[4]);
+    TEST_ASSERT_EQUAL_INT('\n', captured[5]);
+}
+
+/*
+ * NULL echo_enabled hook (the UART backend's configuration) defaults
+ * to echo-on. Same input produces the same captured stream as the
+ * explicit-echo-on case above.
+ */
+static void test_shell_read_command_null_hook_echoes(void)
+{
+    struct echo_test_mock m;
+    echo_test_init(&m, "hi\n", false /*no hook*/, false /*irrelevant*/);
+
+    char line[64];
+    char captured[256];
+    size_t captured_len = 0;
+    int n = 0;
+    echo_test_run(&m, line, sizeof(line), &n,
+                  captured, sizeof(captured), &captured_len);
+
+    TEST_ASSERT_EQUAL_INT(2, n);
+    TEST_ASSERT_EQUAL_STRING("hi", line);
+    TEST_ASSERT_EQUAL_UINT(6, captured_len);
+    TEST_ASSERT_EQUAL_INT('h', captured[2]);
+    TEST_ASSERT_EQUAL_INT('i', captured[3]);
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -3702,6 +3903,13 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_unknown_command);
     RUN_TEST(test_shell_cmd_too_long);
     RUN_TEST(test_shell_cmd_at_max_length);
+
+    /* #581 follow-up: echo respects telnet WILL/DONT ECHO negotiation. */
+    RUN_TEST(test_shell_io_echo_enabled_defaults_true);
+    RUN_TEST(test_shell_io_echo_enabled_callback_used);
+    RUN_TEST(test_shell_read_command_skips_echo_when_disabled);
+    RUN_TEST(test_shell_read_command_echoes_when_enabled);
+    RUN_TEST(test_shell_read_command_null_hook_echoes);
 
     /* Basic commands - just verify they execute (minimal output) */
     RUN_TEST(test_shell_cmd_clear);
