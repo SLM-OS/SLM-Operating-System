@@ -79,4 +79,14 @@ SECTIONS
         *(.eh_frame)
         *(.note*)
     }
+
+    /* `gdt64` is referenced from trampoline32.S as `.long gdt64` (32-bit
+     * pointer in `gdt64_ptr`), so the symbol must live below 4 GB.
+     * `gdt64` itself is a local symbol; assert on `gdt64_ptr` (its
+     * sibling in the same `.rodata.gdt` section, exported via
+     * `.global`). If gdt64_ptr is sub-4GB, gdt64 is too.
+     * KERNEL_PHYS = 0x100000 is well below this on the standard image,
+     * but a future link-address change should fail loud here. */
+    ASSERT(gdt64_ptr < 0x100000000,
+           "gdt64 must fit in trampoline32.S's .long gdt64 (sub-4GB)")
 }

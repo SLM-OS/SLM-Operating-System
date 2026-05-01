@@ -165,8 +165,10 @@ mmu_disable:
     /* Read SCTLR */
     mrs     x0, sctlr_el1
 
-    /* Clear M, C, I bits */
-    mov     x1, #0x1005         /* M | C | I bits */
+    /* Clear SCTLR_EL1.{M, C, I} = bits {0, 2, 12}.
+     * 0x1005 = (1<<12) | (1<<2) | (1<<0) — spell it out so a future
+     * reader doesn't have to decode the hex. */
+    mov     x1, #((1<<0) | (1<<2) | (1<<12))    /* M | C | I */
     bic     x0, x0, x1
 
     /* Disable MMU */

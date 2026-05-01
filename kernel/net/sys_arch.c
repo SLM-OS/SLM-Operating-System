@@ -25,11 +25,23 @@ uint32_t sys_now(void) {
     uint64_t count = timer_get_count();
     uint64_t freq = timer_get_frequency();
 
-    /* Convert to milliseconds: count * 1000 / freq */
-    /* Do division first to avoid overflow on count * 1000 */
+    /* Convert to milliseconds: count * 1000 / freq.
+     *
+     * Precision: we divide first (`freq / 1000`) to avoid the
+     * `count * 1000` overflow on large counts, but this rounds the
+     * divisor down. On QEMU with cntfrq = 62.5 MHz, `freq / 1000` =
+     * 62500 (exact). On x86-64 the calibrated TSC frequency may not
+     * be a multiple of 1000 (e.g. 3499999000 Hz → 3499999 / 1000 =
+     * 3499 — the integer division loses ~0.03% precision per ms).
+     * lwIP timeouts are coarse (50-500 ms typical), so the drift is
+     * negligible. If finer precision is needed for a future
+     * latency-sensitive path, switch to `(count * 1000) / freq`
+     * after bounding `count < UINT64_MAX / 1000` (≈5800 years at
+     * 1 GHz, so the bound is benign).
+     *
+     * Truncate to uint32_t — wraps after ~49 days, fine for timeouts. */
     uint64_t ms = count / (freq / 1000);
 
-    /* Truncate to uint32_t - wraps after ~49 days, fine for timeouts */
     return (uint32_t)ms;
 }
 

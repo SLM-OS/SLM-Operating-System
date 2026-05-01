@@ -65,13 +65,19 @@ int falcon_probe(struct falcon *f, uint32_t engine_base)
 
     /* Sanity: reading CPUCTL on a live engine returns a finite value
      * in the low 16 bits. A firmware misconfiguration or off-die
-     * engine reads 0xFFFFFFFF. */
+     * engine reads 0xFFFFFFFF; a PRI-arbiter denial returns the
+     * 0xbadfXXXX poison pattern. Reject both — the engine is
+     * unreachable from our privilege level either way. (Same check
+     * `falcon_wait_halted` does at line 122.) */
     uint32_t cpuctl = flcn_r32(f, FALCON_CPUCTL);
     if (cpuctl == 0xFFFFFFFFu) return -1;
+    if ((cpuctl & 0xffff0000u) == 0xbadf0000u) return -1;
 
     uint32_t hwcfg  = flcn_r32(f, FALCON_HWCFG);
     uint32_t hwcfg2 = flcn_r32(f, FALCON_HWCFG2);
     if (hwcfg == 0xFFFFFFFFu || hwcfg2 == 0xFFFFFFFFu) return -1;
+    if ((hwcfg & 0xffff0000u) == 0xbadf0000u) return -1;
+    if ((hwcfg2 & 0xffff0000u) == 0xbadf0000u) return -1;
 
     /* IMEM/DMEM size in blocks of 256. */
     uint32_t imem_blocks = hwcfg & FALCON_HWCFG_IMEM_SIZE_MASK;

@@ -217,6 +217,15 @@ static uint8_t *cdc_notify_buf(struct cdc_notify_slot *slot)
     return slot->buf;
 }
 
+/*
+ * Lifetime note: cdc_ecm_dma_init allocates from ncmem_alloc, which is
+ * a bump allocator with no `free` (kernel/include/ncmem.h). The buffers
+ * stay live for the lifetime of the kernel. If a probe failure path
+ * returns from this function with some slots already populated, those
+ * NC pages leak — acceptable for the boot-once design (probe runs at
+ * boot, no hot-plug). A future hot-plug path would need an NC arena
+ * with reclaim or a per-device pre-reserved fixed pool.
+ */
 static int cdc_ecm_dma_init(void)
 {
 #if defined(PLATFORM_HAS_NC_MEMORY)

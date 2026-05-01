@@ -90,4 +90,12 @@ SECTIONS
         *(.eh_frame)
         *(.note*)
     }
+
+    /* `gdt64` is referenced as `.long gdt64` in trampoline32.S; pin
+     * sub-4GB so a future link-address change fails loud here rather
+     * than silently truncating the GDT pointer. `gdt64` is local;
+     * assert on its sibling `gdt64_ptr` in the same `.rodata.gdt`
+     * section (exported via `.global`). */
+    ASSERT(gdt64_ptr < 0x100000000,
+           "gdt64 must fit in trampoline32.S's .long gdt64 (sub-4GB)")
 }
