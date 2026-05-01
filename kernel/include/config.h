@@ -61,7 +61,32 @@
  * Shell Configuration
  * ============================================================================ */
 
-#define SHELL_MAX_LINE      1024            /* Maximum command line length */
+/* Maximum command line length.
+ *
+ * Bumped 1024 → 8192 (#581 throughput follow-up) so framed `xput
+ * chunk` commands can carry larger binary chunks. The wire form is
+ * `xput chunk OFFSET HEXDATA\n`, where HEXDATA is 2× the binary
+ * chunk size; with the previous 1024-char ceiling and a ~25-char
+ * prefix (`xput chunk ` + 10-digit offset + space + newline) plus
+ * slm-put.py's 16-char headroom, the binary chunk capped at
+ * ~497 B. A 1 GB upload at 497 B/chunk over a strictly synchronous
+ * request/response shell protocol takes hours regardless of LAN
+ * speed (~2.16M round-trips × ~3 ms RTT ≈ 1.8 h, 6 h+ on slower
+ * paths). 8192 raises the binary chunk to ~4 KB, cutting round-
+ * trips 8× and the 1 GB transfer to ~15-25 minutes.
+ *
+ * Stack cost is 8 KB on the stack-local `line_buffer` in
+ * shell_run() and on the `buf` in shell_execute(), well under the
+ * 64 KB STACK_SIZE budget. BSS cost lands in TCP_SHELL_RING_SIZE
+ * (16 KB / session × 16 sessions = 256 KB extra; see
+ * shell_io_tcp.c) and the static `data[]` decode buffer in
+ * cmd_xput chunk (4 KB).
+ *
+ * Both sides of the protocol must agree on this value:
+ * `SHELL_MAX_LINE` in scripts/tools/slm-put.py mirrors it.
+ * Mismatch → either truncated commands (kernel < client) or
+ * wasted slm-put.py headroom (kernel > client). */
+#define SHELL_MAX_LINE      8192
 #define SHELL_MAX_ARGS      16              /* Maximum arguments per command */
 
 #endif /* CONFIG_H */
