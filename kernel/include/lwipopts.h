@@ -273,8 +273,18 @@
 /* Application Hooks                                                           */
 /* -------------------------------------------------------------------------- */
 
-/* No application hooks by default */
-#define LWIP_HOOK_UNKNOWN_ETH_PROTOCOL(p, netif) 0
+/* No application hooks. Specifically: do NOT define
+ * LWIP_HOOK_UNKNOWN_ETH_PROTOCOL here. lwIP's ethernet_input does
+ * `if (HOOK(p, netif) == ERR_OK) { break; }` — and ERR_OK is 0,
+ * which is what an "I don't handle this" stub macro would naturally
+ * return. The break exits the switch WITHOUT calling pbuf_free, so
+ * every unknown-ethertype frame (IPv6 NDP/RA at 0x86dd is the most
+ * common one on a LAN with IPv6-enabled routers) silently leaks
+ * its pbuf. Pre-PR-584 this saturated the lwIP heap (RX path used
+ * PBUF_RAM); post-PR-584 it saturates the pool. Leaving the macro
+ * undefined makes lwIP's `#ifdef LWIP_HOOK_UNKNOWN_ETH_PROTOCOL`
+ * branch compile out and the default case falls straight through
+ * to free_and_return (#581 follow-up). */
 
 /* -------------------------------------------------------------------------- */
 /* Sanity Checks                                                               */
