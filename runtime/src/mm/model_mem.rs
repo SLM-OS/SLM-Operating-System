@@ -73,6 +73,17 @@ impl ModelHandle {
     }
 
     /// Check if handle is null/invalid.
+    ///
+    /// The "null" sentinel requires BOTH fields to match (block_index ==
+    /// 0xFFFF AND pool_id == 0xFF). A handle with one but not both is
+    /// treated as live by this check — that is intentional, because
+    /// `null()` is the only constructor that produces both sentinels
+    /// together, so a single-sentinel handle would itself be an
+    /// internal corruption (e.g. stale partial write from a torn
+    /// memcpy on the FFI boundary). Such a handle would still fail
+    /// validation in the allocator's bounds + generation checks
+    /// downstream — keep the strict AND so callers can distinguish
+    /// "constructor-produced null" from "garbage".
     pub fn is_null(&self) -> bool {
         self.block_index == 0xFFFF && self.pool_id == 0xFF
     }

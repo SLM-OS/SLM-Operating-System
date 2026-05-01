@@ -685,6 +685,26 @@ const _: () = {
     // Flags sizes
     assert!(core::mem::size_of::<MemFlags>() == 4);
     assert!(core::mem::size_of::<ShmFlags>() == 4);
+
+    // GpuInfoFfi field offsets — pin every field so a future struct
+    // edit (re-ordering, adding a field, changing a type) fails the
+    // build instead of silently desyncing from the C-side
+    // RustGpuInfo layout. The C-side definition lives in
+    // `kernel/src/slm_ffi.c`'s `slm_gpu_get_info` accessor.
+    //
+    // Note: `#[repr(C)]` honours natural alignment, so the u64
+    // `memory_size` sits at offset 112 (not 108 — there is a 4-byte
+    // padding gap after `tensor_cores: u32` at 104..108 to bring the
+    // u64 to 8-aligned). Total size is 128 (struct alignment = 8).
+    assert!(core::mem::offset_of!(GpuInfoFfi, name) == 0);
+    assert!(core::mem::offset_of!(GpuInfoFfi, device) == 32);
+    assert!(core::mem::offset_of!(GpuInfoFfi, capabilities) == 96);
+    assert!(core::mem::offset_of!(GpuInfoFfi, cuda_cores) == 100);
+    assert!(core::mem::offset_of!(GpuInfoFfi, tensor_cores) == 104);
+    assert!(core::mem::offset_of!(GpuInfoFfi, memory_size) == 112);
+    assert!(core::mem::offset_of!(GpuInfoFfi, unified_memory) == 120);
+    assert!(core::mem::offset_of!(GpuInfoFfi, compute_ready) == 121);
+    assert!(core::mem::size_of::<GpuInfoFfi>() == 128);
 };
 
 /// Run-time FFI validation tests.

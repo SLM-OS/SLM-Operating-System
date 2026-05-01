@@ -68,7 +68,19 @@ pub struct PolicyCounters {
     pub avg_latency_ns: u64,
 }
 
-/// Read a consistent snapshot of the per-policy counters.
+/// Read a snapshot of the per-policy counters.
+///
+/// The four loads are independent `Ordering::Relaxed` reads — they
+/// are not snapshot-atomic. A concurrent eviction can update
+/// `LATENCY_TOTAL_NS` after we've already loaded `LATENCY_SAMPLES`,
+/// producing an `avg = total_ns / samples` that uses a `total_ns`
+/// from a slightly later moment than `samples`. The skew is bounded
+/// by one in-flight eviction's latency contribution, which is
+/// well within the noise of the metric (per-policy averaged
+/// nanoseconds, consumed by AI / telemetry not by control logic).
+/// A truly atomic snapshot would require either combining the two
+/// fields into a single 128-bit atomic or holding a lock across the
+/// hot path — neither is justified for an observational counter.
 pub fn policy_counters() -> PolicyCounters {
     let decisions = DECISIONS.load(Ordering::Relaxed);
     let fallbacks = FALLBACKS.load(Ordering::Relaxed);
