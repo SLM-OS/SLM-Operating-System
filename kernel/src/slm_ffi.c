@@ -582,7 +582,17 @@ static int ensure_mnist_bringup(void)
      * 8-op pipeline dispatch per fresh inherit (i.e., once per kexec
      * session, or once after a different bringup overwrites
      * g_handoff). The discarded result is the same kernel chain that
-     * runs on every later call — we just don't read its logits. */
+     * runs on every later call — we just don't read its logits.
+     *
+     * Lock-hold-time note: every caller of `ensure_mnist_bringup` runs
+     * inside `g_gpu_dispatch_lock` with IRQs disabled (see
+     * `slm_gpu_run_mnist`, `slm_gpu_set_mnist_input_fill`). This warmup
+     * doubles the worst-case lock-hold on first dispatch — typical is
+     * ~50-200 ms (one inference) but `ga10b_submit_and_poll` has a
+     * 2 s per-op timeout, so a hung GPU could hold the lock + IRQs
+     * for ~16 s extra in pathological cases. Same path the user's
+     * dispatch already exercises (just twice on first call); a
+     * future async-warmup-from-kernel_main move would relieve this. */
     int warmup_rc = ga10b_bringup_launch_kernel(&g_mnist_bringup);
     if (warmup_rc < 0) {
         /* Non-fatal: the warmup failing doesn't itself prevent the
