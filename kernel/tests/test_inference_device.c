@@ -147,6 +147,30 @@ static void test_find_nonexistent_returns_null(void)
     TEST_ASSERT_NULL(inference_device_find(NULL));
 }
 
+/* `inference_device_find` must compare the FULL strings; a prefix
+ * lookup must not false-match a longer registered name. Pins the
+ * strcmp-replacement of the previous hand-rolled char-by-char
+ * compare (PR #598 / REVIEW_SUGGESTIONS.md). */
+static void test_find_prefix_does_not_match(void)
+{
+    /* `fake-test` is registered above. Querying just `fake` (a
+     * proper prefix) must NOT match. */
+    TEST_ASSERT_NULL(inference_device_find("fake"));
+
+    /* Same in the other direction — querying a SUPER-string of a
+     * registered name must also NOT match. */
+    TEST_ASSERT_NULL(inference_device_find("fake-test-extra"));
+}
+
+/* Empty-string lookup is well-defined: it must return NULL because
+ * no registered device has an empty name (the registration guard
+ * in `inference_device_register` rejects `dev->ops->name == NULL`,
+ * but a 0-length string would still be technically valid). */
+static void test_find_empty_string_returns_null(void)
+{
+    TEST_ASSERT_NULL(inference_device_find(""));
+}
+
 static void test_default_device_set(void)
 {
     /* fake_dev was registered earlier in the suite; the default is
@@ -193,6 +217,8 @@ int test_suite_inference_device(void)
     RUN_TEST(test_fake_backend_run);
     RUN_TEST(test_null_dev_rejected);
     RUN_TEST(test_find_nonexistent_returns_null);
+    RUN_TEST(test_find_prefix_does_not_match);
+    RUN_TEST(test_find_empty_string_returns_null);
     RUN_TEST(test_default_device_set);
     RUN_TEST(test_set_default_unknown_device_rejected);
 #if defined(CONFIG_AI_SCHEDULER)

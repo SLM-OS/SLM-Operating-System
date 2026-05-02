@@ -472,7 +472,13 @@ static void pmm_add_region_split(uintptr_t start, uintptr_t end)
      * The check is unconditional (not gated by NDEBUG via ASSERT)
      * because pmm_add_region_split is called only a handful of times
      * during boot — the runtime cost is irrelevant; the diagnostic is
-     * the value. */
+     * the value.
+     *
+     * Regression coverage: `pmm_init` itself calls this function
+     * once per platform region (1-4 times depending on platform).
+     * If the post-call `in_split = false` reset is ever broken, the
+     * second call panics during boot and every test in `test_pmm.c`
+     * fails to even start. Implicit but loud. */
     static bool in_split = false;
     if (in_split) {
         panic("pmm_add_region_split: re-entered "
