@@ -4132,12 +4132,19 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
     // Test 3b: Over-length varint (more than MAX_VARINT_BYTES with
     // continuation bits set). Pins the MAX_VARINT_BYTES = 10 cap
     // introduced when the magic numbers were named (PR #598).
+    //
+    // Use a value-bearing input rather than 11×0x80: 10 bytes of
+    // 0xFF (= 9 × continuation + payload-7-ones) plus an 11th byte
+    // that still has the continuation bit set. This forces the
+    // function past the `MAX_VARINT_BITS` shift check first (each
+    // byte contributes seven real value bits) and then into the
+    // byte-count limit on the 11th iteration — exercising both
+    // limits in their natural priority. Must be rejected as
+    // InvalidVarint (not UnexpectedEof) because the limit fires
+    // before EOF.
     {
-        // 11 bytes all 0x80 = 11 bytes of "more to come" with no
-        // terminating zero-continuation byte. Must be rejected as
-        // InvalidVarint (not UnexpectedEof) because the limit fires
-        // before EOF.
-        let data = [0x80; 11];
+        let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x80];
         let result = loader::protobuf::decode_varint(&data);
         let passed = matches!(result,
             Err(loader::protobuf::ParseError::InvalidVarint));

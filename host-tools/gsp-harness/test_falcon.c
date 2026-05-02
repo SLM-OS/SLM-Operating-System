@@ -76,10 +76,14 @@ struct mock_engine {
      * falcon_is_priv_locked() and the wait_halted early-bail. */
     bool     priv_locked;
     /* Independent poison flags for the HWCFG / HWCFG2 reads. Lets
-     * `test_probe_rejects_poisoned_*` exercise each of `falcon_probe`'s
-     * three poison checks in isolation. (CPUCTL poisoning continues
-     * to flow through `priv_locked` for back-compat with existing
-     * tests.) */
+     * `test_probe_rejects_poisoned_*` exercise each of
+     * `falcon_probe`'s two geometry-register poison checks in
+     * isolation. CPUCTL poisoning is intentionally NOT rejected by
+     * probe (callers use `falcon_is_priv_locked()` to detect it,
+     * which requires probe to have succeeded first); the
+     * `priv_locked` flag above continues to model that path for
+     * the existing `test_priv_locked_*` and `test_wait_halted_*`
+     * tests. */
     bool     hwcfg_poisoned;
     bool     hwcfg2_poisoned;
 

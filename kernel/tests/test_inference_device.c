@@ -162,10 +162,11 @@ static void test_find_prefix_does_not_match(void)
     TEST_ASSERT_NULL(inference_device_find("fake-test-extra"));
 }
 
-/* Empty-string lookup is well-defined: it must return NULL because
- * no registered device has an empty name (the registration guard
- * in `inference_device_register` rejects `dev->ops->name == NULL`,
- * but a 0-length string would still be technically valid). */
+/* Empty SEARCH string returns NULL because no registered device
+ * has a zero-length name. `inference_device_register` rejects a
+ * NULL `dev->ops->name` pointer but doesn't actively forbid a
+ * zero-length name string; in practice every registrant uses a
+ * non-empty literal, so an empty search never hits anything. */
 static void test_find_empty_string_returns_null(void)
 {
     TEST_ASSERT_NULL(inference_device_find(""));
