@@ -12,8 +12,21 @@
 #include "vfs.h"
 #include "littlefs_slm.h"
 #include "string.h"
+#include "timer.h"
+#include "debug.h"
 #include <stdint.h>
 #include <stddef.h>
+
+/* Threshold for the per-chunk LFS write timing log emitted from
+ * cmd_xput chunk. A healthy 16 KB write on RAM-backed LittleFS is
+ * ~30-60 ms; 250 ms is roughly 4× normal and only fires when the
+ * write path is genuinely degraded (the symptom #597 documents).
+ * Threshold-gated so a steady-state upload does not spam the kernel
+ * UART with one INFO line per chunk. The log goes to uart_printf
+ * (kernel UART), not the shell session, so it is invisible to the
+ * telnet client driving the upload — i.e. it cannot break the
+ * line-oriented xput protocol. */
+#define XPUT_SLOW_WRITE_THRESHOLD_MS 250UL
 
 static uint32_t shell_checksum32_update(uint32_t checksum,
                                         const uint8_t *data,
@@ -765,10 +778,30 @@ int cmd_xput(int argc, char *argv[])
                        "(did `xput begin` succeed?)\r\n");
             return -1;
         }
+
+        /* Time the LFS write to surface the degradation #597 documents
+         * (transfer rate falling from ~125 KB/s to ~64 KB/s as the
+         * file grows, eventually exceeding the script's prompt-read
+         * timeout). Confirms whether the cost is in lfs_file_write
+         * vs. somewhere else in the chunk path. CNTPCT_EL0 / TSC
+         * via the same accessor shell_io_tcp.c uses for its bench
+         * paths. */
+        const uint64_t freq = timer_get_frequency();
+        const uint64_t t_start = timer_get_count();
         if (littlefs_file_write(xput->mnt, xput->fd, data,
                                 (size_t)bytes) != bytes) {
             shell_printf("xput chunk: %s: Write failed\r\n", xput->path);
             return -1;
+        }
+        const uint64_t elapsed_ms =
+            freq ? (((timer_get_count() - t_start) * 1000ULL) / freq) : 0;
+        if (elapsed_ms >= XPUT_SLOW_WRITE_THRESHOLD_MS) {
+            INFO("xput: slow LFS write offset=%lu bytes=%d "
+                 "elapsed_ms=%lu file_size=%lu",
+                 (unsigned long)offset,
+                 bytes,
+                 (unsigned long)elapsed_ms,
+                 (unsigned long)(xput->received_size + (uint32_t)bytes));
         }
         written = bytes;
 
