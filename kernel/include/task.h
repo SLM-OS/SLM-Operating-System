@@ -205,6 +205,33 @@ struct task {
 /* Task function prototype */
 typedef void (*task_entry_t)(void *arg);
 
+/* ===== Stack canary diagnostic (#601 Bug B) =====
+ *
+ * 64-byte magic pattern at the LOW address of every task's stack
+ * (i.e., at stack_base, the boundary stack overflow would smash
+ * first since ARM64/x86 stacks grow DOWN). A wild pointer that
+ * writes to the bottom of any task's stack will leave a recognizable
+ * pattern in the corruption — comparing the actual contents to the
+ * expected pattern lets us detect both stack overflow AND wild
+ * cross-task writes.
+ *
+ * Diagnostic only: this is observation infrastructure, not a fix.
+ * Once Bug B is root-caused we can decide whether to keep it. */
+#define TASK_STACK_CANARY_BYTES   64u
+#define TASK_STACK_CANARY_PATTERN 0xDEADBEEFCAFEBABEULL
+
+/* Initialize the canary at stack bottom. Called from task_create. */
+void task_canary_init(struct task *task);
+
+/* Verify a single task's canary. Returns 0 if intact, 1 if broken.
+ * On corruption logs the corrupted bytes with their offset within
+ * the canary region. Safe to call from any context. */
+int task_canary_check(struct task *task);
+
+/* Iterate all live tasks and check each canary. Returns the number
+ * of broken canaries found (0 = all intact). Logs each break. */
+int task_canary_check_all(void);
+
 /*
  * Create a new task with specified priority.
  *

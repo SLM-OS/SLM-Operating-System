@@ -109,6 +109,7 @@ const shell_cmd_t builtin_commands[] = {
     {"xput",     cmd_xput,     "Framed upload (xput begin|chunk|status|finish|abort)", false, SHELL_CAT_FILESYSTEM},
 
     /* --- System info --- */
+    {"canary",    cmd_canary,    "Check task stack canaries (#601 Bug B diagnostic)",  false, SHELL_CAT_SYSINFO},
     {"cpu",       cmd_cpu,       "Show CPU status",                                    false, SHELL_CAT_SYSINFO},
     {"dtb",       cmd_dtb,       "Show device tree info",                              false, SHELL_CAT_SYSINFO},
     {"ipc",       cmd_ipc,       "Show IPC statistics",                                false, SHELL_CAT_SYSINFO},

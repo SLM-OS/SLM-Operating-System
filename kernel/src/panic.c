@@ -165,6 +165,51 @@ void panic(const char *fmt, ...)
     uart_puts_unlocked("\n\n");
     dump_registers();
 
+    /* #601 Bug B diagnostic: dump task stack canary state + the
+     * stack contents around the current SP. If any task's canary
+     * is broken, the offset + corrupted bytes get logged. Even if
+     * canaries are intact, the SP-region dump shows what's living
+     * on the stack at the moment of the panic — a corrupt return
+     * address there will be visible alongside its surrounding
+     * stack-frame context. */
+    {
+        extern int task_canary_check_all(void);
+        uart_puts_unlocked("\nStack canary check:\n");
+        int broken = task_canary_check_all();
+        if (broken == 0) {
+            uart_puts_unlocked("  All task canaries intact.\n");
+        }
+
+        /* Stack dump near SP. On AArch64 we can read SP via mrs
+         * then dump 256 bytes (32 quadwords) around it. Stack grows
+         * down, so dump from SP-64 to SP+192 to capture the
+         * immediately-active frames + a bit below for canary visibility. */
+#if !defined(PLATFORM_X86_64)
+        {
+            uint64_t sp;
+            __asm__ volatile("mov %0, sp" : "=r"(sp));
+            uart_printf_unlocked("\nStack dump around SP=0x%lx:\n", sp);
+            uint64_t start = (sp - 64) & ~0x7ULL;
+            const uint64_t *p = (const uint64_t *)(uintptr_t)start;
+            for (int row = 0; row < 32; row++) {
+                uint64_t addr = start + row * 8;
+                uint64_t v = p[row];
+                /* ASCII view of the 8 bytes for spotting strings. */
+                char ascii[9];
+                for (int j = 0; j < 8; j++) {
+                    uint8_t b = (uint8_t)(v >> (j * 8));
+                    ascii[j] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+                }
+                ascii[8] = '\0';
+                uart_printf_unlocked("  0x%lx: 0x%016lx  \"%s\"%s\n",
+                                     (unsigned long)addr,
+                                     (unsigned long)v, ascii,
+                                     (addr == sp) ? "  <- SP" : "");
+            }
+        }
+#endif
+    }
+
     uart_puts_unlocked("\nSystem halted.\n");
 
     /* Infinite loop - system is dead */
