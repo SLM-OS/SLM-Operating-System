@@ -1705,6 +1705,18 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                     tag,
                     (unsigned long)poll_val,
                     (unsigned long)expected_payload);
+        /* #601 wedge diag: dump cumulative GPFIFO + QMD-pool state so
+         * we can correlate failure threshold with ring boundaries. */
+        extern uint32_t g_qmd_pool_next_slot;
+        uart_printf("[%s] WEDGE-DIAG: gp_put=%lu gp_get=%lu "
+                    "qmd_slot=%lu/%lu pb_dwords=%lu poll_phys=0x%lx\n",
+                    tag,
+                    (unsigned long)new_gp_put,
+                    (unsigned long)final_gp_get,
+                    (unsigned long)g_qmd_pool_next_slot,
+                    (unsigned long)g_handoff.qmd_pool_n_slots,
+                    (unsigned long)pb_dwords,
+                    (unsigned long)poll_phys);
     } else {
         uart_printf("[%s] GP_GET did not advance — PBDMA didn't see "
                     "our submit\n", tag);
