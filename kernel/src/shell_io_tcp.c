@@ -172,8 +172,19 @@ struct tcp_shell_ctx {
      * String literal — no allocation, no free. NULL until the first
      * close path runs. Subsequent close paths leave the first reason
      * intact so we report root cause, not the cleanup that ran
-     * immediately after. Set under rx_lock so multi-CPU close races
-     * don't tear it. */
+     * immediately after.
+     *
+     * Two writers reach this field via different locks: `mark_closed`
+     * holds `rx_lock`, while `shell_io_tcp_kick` holds `pool_lock`.
+     * In practice they never race because every close path runs on
+     * CPU 0 under cooperative scheduling. The `volatile` qualifier +
+     * first-NULL-wins check keeps a future multi-CPU regression to
+     * "wrong reason logged for one line" rather than corruption. The
+     * inconsistent lock holders mirror the pre-existing model for
+     * `closed`, which has the same two writers and same single-CPU
+     * justification — see kick's pool_lock comment for why kick can't
+     * drop pool_lock to acquire rx_lock without re-validating the
+     * slot. */
     volatile const char *close_reason;
 
     /* lwIP pcb — net_pump context only. NULL after close. */
