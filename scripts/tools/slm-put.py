@@ -734,6 +734,76 @@ def can_resume_framed(status: tuple[str, int, int, int] | None,
     return (True, received)
 
 
+def parse_xput_resume(output: bytes) -> tuple[str, int, int, int] | None:
+    """Parse `XPUT ok resume path=... size=... received=... checksum=...`."""
+    text = output.decode("utf-8", errors="replace")
+    if "XPUT ok resume" not in text:
+        return None
+    path = None
+    size = None
+    received = None
+    checksum = None
+    for token in text.replace("\r", " ").replace("\n", " ").split():
+        if token.startswith("path="):
+            path = token.split("=", 1)[1]
+        elif token.startswith("size="):
+            try:
+                size = int(token.split("=", 1)[1])
+            except ValueError:
+                return None
+        elif token.startswith("received="):
+            try:
+                received = int(token.split("=", 1)[1])
+            except ValueError:
+                return None
+        elif token.startswith("checksum="):
+            try:
+                checksum = int(token.split("=", 1)[1], 0)
+            except ValueError:
+                return None
+    if path is None or size is None or received is None or checksum is None:
+        return None
+    return (path, size, received, checksum)
+
+
+def begin_or_resume_framed(shell: "Shell",
+                           args: argparse.Namespace,
+                           data: bytes,
+                           total: int) -> int:
+    """Try `xput resume` (continues an existing partial file on disk
+    without truncating); fall back to `xput begin` (truncates and
+    starts fresh) if the file doesn't exist or its checksum disagrees
+    with the local source. Returns the offset to start uploading from
+    (the resume point on success, 0 on begin).
+
+    The resume path is the fix for the case where a TCP disconnect
+    erases the kernel-side xput session state but leaves the partial
+    file on disk. Without it, every reconnect runs `xput begin` which
+    LFS_O_TRUNCs the file and the upload restarts at byte 0 — the
+    longer the upload, the more wasted work."""
+    out = shell.run_command(f"xput resume {args.remote_path} {total}")
+    log_response(args.debug, "xput-resume", out)
+    if not shell_command_failed(out):
+        info = parse_xput_resume(out)
+        if info is not None:
+            path, size, received, checksum = info
+            if (path == normalize_remote_path(args.remote_path)
+                    and size == total
+                    and 0 <= received <= total
+                    and checksum == fnv1a32(data[:received])):
+                return received
+            # File exists but doesn't match — fall through to truncating begin.
+            print(
+                f"xput resume: existing file disagrees with source "
+                f"(received={received}, restarting from 0)",
+                file=sys.stderr,
+            )
+    out = xput_begin(shell, args, total)
+    if shell_command_failed(out):
+        raise RuntimeError("xput begin failed")
+    return 0
+
+
 def parse_xput_next(output: bytes) -> int | None:
     text = output.decode("utf-8", errors="replace")
     for token in text.replace("\r", " ").replace("\n", " ").split():
@@ -779,12 +849,23 @@ def upload_framed(shell: Shell, args: argparse.Namespace, data: bytes,
         resume_ok, offset = can_resume_framed(status_info, args.remote_path, total, data)
         if resume_ok:
             if offset > 0:
-                print(f"resuming framed upload at {offset}/{total} bytes", file=sys.stderr)
+                print(
+                    f"resuming framed upload at {offset}/{total} bytes "
+                    f"(in-memory session)",
+                    file=sys.stderr,
+                )
         else:
-            out = xput_begin(shell, args, total)
-            if shell_command_failed(out):
-                print("xput begin failed", file=sys.stderr)
+            try:
+                offset = begin_or_resume_framed(shell, args, data, total)
+            except RuntimeError as exc:
+                print(f"{exc}", file=sys.stderr)
                 return 1
+            if offset > 0:
+                print(
+                    f"resuming framed upload at {offset}/{total} bytes "
+                    f"(from disk)",
+                    file=sys.stderr,
+                )
 
     while offset < total:
         base_offset = offset
@@ -824,14 +905,25 @@ def upload_framed(shell: Shell, args: argparse.Namespace, data: bytes,
                 resume_ok, remote_offset = can_resume_framed(
                     status_info, args.remote_path, total, data
                 )
-                if not resume_ok:
-                    out = xput_begin(shell, args, total)
-                    if shell_command_failed(out):
-                        print("xput begin failed during recovery", file=sys.stderr)
-                        return 1
-                    offset = 0
-                else:
+                if resume_ok:
                     offset = remote_offset
+                else:
+                    # In-memory session is gone (TCP close discards it).
+                    # Fall back to disk-resume before truncating begin —
+                    # this is the load-bearing change vs. pre-fix behavior
+                    # where every reconnect blew away the entire partial
+                    # file. begin_or_resume_framed tries `xput resume`
+                    # first; only if the file doesn't exist or its
+                    # checksum disagrees does it call `xput begin`.
+                    try:
+                        offset = begin_or_resume_framed(
+                            shell, args, data, total
+                        )
+                    except RuntimeError as exc:
+                        print(
+                            f"{exc} (during recovery)", file=sys.stderr
+                        )
+                        return 1
                 print(
                     f"recovered after chunk error; remote has {offset}/{total} bytes",
                     file=sys.stderr,

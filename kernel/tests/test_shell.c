@@ -2787,6 +2787,90 @@ static void test_shell_cmd_xput_isolated_per_session(void)
 }
 
 /*
+ * Test: xput resume picks up an existing partial file without
+ * truncating it. Models the TCP-disconnect-then-reconnect path —
+ * `shell_xput_session_close_for` is the teardown that
+ * shell_session_free runs when a TCP shell session closes, which is
+ * what discards the in-memory xput state. After that runs, the disk
+ * still has the bytes; `xput resume` must see them, report the
+ * correct received offset, and let `xput chunk <received>` continue
+ * the upload from there. Pre-fix, the only path forward was
+ * `xput begin` which LFS_O_TRUNCs the file and starts over.
+ */
+static void test_shell_cmd_xput_resume_after_disconnect(void)
+{
+    const char *path = "/mnt/files/xput_resume.bin";
+
+    /* Phase 1: begin + first chunk, then simulate TCP close. */
+    int ret = shell_execute("xput begin /mnt/files/xput_resume.bin 4");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput chunk 0 aabb");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    shell_xput_session_close_for(shell_session_current());
+
+    /* Status should be inactive — the in-memory session is gone. */
+    ret = shell_execute("xput status");
+    TEST_ASSERT_EQUAL_INT(0, ret);   /* status returns 0 even when inactive */
+
+    /* Phase 2: resume from disk. */
+    ret = shell_execute("xput resume /mnt/files/xput_resume.bin 4");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Phase 3: continue from offset 2. */
+    ret = shell_execute("xput chunk 2 ccdd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput finish");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Verify the full file is correct — first half from begin/chunk0,
+     * second half from resume/chunk2. If begin had truncated, we would
+     * see {0xcc, 0xdd, ...} instead. */
+    uint8_t buf[8];
+    int n = read_file_content(path, (char *)buf, sizeof(buf));
+    uint8_t expected[] = {0xaa, 0xbb, 0xcc, 0xdd};
+    TEST_ASSERT_EQUAL_INT((int)sizeof(expected), n);
+    TEST_ASSERT_EQUAL_MEMORY(expected, buf, sizeof(expected));
+
+    shell_execute("rm /mnt/files/xput_resume.bin");
+}
+
+/*
+ * Test: xput resume rejects a request for a file that does not exist.
+ * Calling code must fall back to `xput begin` in that case (which
+ * the slm-put.py begin_or_resume_framed helper does).
+ */
+static void test_shell_cmd_xput_resume_missing_file(void)
+{
+    int ret = shell_execute("xput resume /mnt/files/xput_no_such.bin 100");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+}
+
+/*
+ * Test: xput resume rejects a request whose declared total is smaller
+ * than what's already on disk — the on-disk file would no longer fit
+ * the protocol, and silently truncating in resume would defeat the
+ * point. Caller can `xput begin` (which truncates) if they really
+ * want to overwrite.
+ */
+static void test_shell_cmd_xput_resume_existing_too_large(void)
+{
+    /* Set up a 4-byte file. */
+    int ret = shell_execute("xput begin /mnt/files/xput_resume_big.bin 4");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput chunk 0 aabbccdd");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+    ret = shell_execute("xput finish");
+    TEST_ASSERT_EQUAL_INT(0, ret);
+
+    /* Resume with a smaller total — should be rejected. */
+    ret = shell_execute("xput resume /mnt/files/xput_resume_big.bin 2");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+
+    shell_execute("rm /mnt/files/xput_resume_big.bin");
+}
+
+/*
  * Test: mkdir creates a directory.
  */
 static void test_shell_cmd_mkdir(void)
@@ -4130,6 +4214,9 @@ int test_suite_shell(void)
     RUN_TEST(test_shell_cmd_xput_offset_mismatch);
     RUN_TEST(test_shell_cmd_xput_incomplete_finish);
     RUN_TEST(test_shell_cmd_xput_isolated_per_session);
+    RUN_TEST(test_shell_cmd_xput_resume_after_disconnect);
+    RUN_TEST(test_shell_cmd_xput_resume_missing_file);
+    RUN_TEST(test_shell_cmd_xput_resume_existing_too_large);
     RUN_TEST(test_shell_cmd_mkdir);
     RUN_TEST(test_shell_cmd_mkdir_no_args);
     RUN_TEST(test_shell_cmd_rm);

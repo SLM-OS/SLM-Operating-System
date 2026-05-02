@@ -168,6 +168,14 @@ struct tcp_shell_ctx {
      * drain that lwIP can't service. */
     volatile bool     write_degraded;
 
+    /* First close path that fired, captured for the close-log INFO line.
+     * String literal — no allocation, no free. NULL until the first
+     * close path runs. Subsequent close paths leave the first reason
+     * intact so we report root cause, not the cleanup that ran
+     * immediately after. Set under rx_lock so multi-CPU close races
+     * don't tear it. */
+    volatile const char *close_reason;
+
     /* lwIP pcb — net_pump context only. NULL after close. */
     struct tcp_pcb   *pcb;
 
@@ -413,8 +421,9 @@ static int tcp_try_read_char(struct shell_io *io)
 
 /* Forward decl — defined in the lwIP-callback section below. The
  * tcp_write_buf timeout path calls it to mark the session closed
- * when the drain has stalled past the cap. */
-static void mark_closed(struct tcp_shell_ctx *ctx);
+ * when the drain has stalled past the cap. The `reason` is a static
+ * string literal recorded for the close-log INFO line. */
+static void mark_closed(struct tcp_shell_ctx *ctx, const char *reason);
 
 /* Cached timer-counter frequency. The timer is set up once at boot
  * and the frequency is constant thereafter, but every tcp_write_buf
@@ -466,7 +475,7 @@ static void tcp_write_timeout_bail(struct tcp_shell_ctx *ctx, size_t dropped)
                 (unsigned)ctx->session_id,
                 (unsigned)g_write_timeout_ms,
                 (unsigned)dropped);
-    mark_closed(ctx);
+    mark_closed(ctx, "write_timeout");
 }
 
 static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
@@ -599,9 +608,12 @@ static bool tcp_echo_enabled(struct shell_io *io)
 /* lwIP callbacks — net_pump context                                          */
 /* -------------------------------------------------------------------------- */
 
-static void mark_closed(struct tcp_shell_ctx *ctx)
+static void mark_closed(struct tcp_shell_ctx *ctx, const char *reason)
 {
     irq_flags_t flags = spin_lock_irqsave(&ctx->rx_lock);
+    if (!ctx->close_reason) {
+        ctx->close_reason = reason;
+    }
     ctx->closed = true;
     spin_unlock_irqrestore(&ctx->rx_lock, flags);
 }
@@ -612,14 +624,14 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 
     if (err != ERR_OK) {
         if (p) pbuf_free(p);
-        mark_closed(ctx);
+        mark_closed(ctx, "rx_err");
         return ERR_OK;
     }
 
     if (p == NULL) {
         /* Peer FIN — mark closed; shell task will exit its REPL and
          * the poll path will complete the tcp_close. */
-        mark_closed(ctx);
+        mark_closed(ctx, "peer_fin");
         return ERR_OK;
     }
 
@@ -666,7 +678,7 @@ static void on_err(void *arg, err_t err)
         uint64_t now = timer_get_count();
         ctx->close_completed_ticks = now ? now : 1;
     }
-    mark_closed(ctx);
+    mark_closed(ctx, "peer_rst");
 }
 
 static err_t on_sent(void *arg, struct tcp_pcb *pcb, uint16_t len)
@@ -693,6 +705,7 @@ static struct tcp_shell_ctx *ctx_alloc(void)
             c->closed  = false;
             c->shell_done = false;
             c->write_degraded = false;
+            c->close_reason = NULL;
             c->pcb     = NULL;
             c->rx_lock = (spinlock_t)SPINLOCK_INIT;
             c->tx_lock = (spinlock_t)SPINLOCK_INIT;
@@ -959,7 +972,7 @@ void shell_io_tcp_destroy(struct shell_io *io)
      * CPU 0, so the scheduler switch orders this NULL store ahead of
      * any subsequent net_pump read — no barrier needed. */
     ctx->session = NULL;
-    mark_closed(ctx);
+    mark_closed(ctx, "shell_exit");
     ctx->shell_done = true;
     /* After this returns, the caller MUST NOT touch the io again —
      * the poll path may tcp_close and free the slot on the next
@@ -1020,6 +1033,9 @@ bool shell_io_tcp_kick(uint32_t session_id)
     for (uint32_t i = 0; i < MAX_TCP_SHELL_SESSIONS; i++) {
         struct tcp_shell_ctx *ctx = &ctx_pool[i];
         if (ctx->in_use && ctx->session_id == session_id) {
+            if (!ctx->close_reason) {
+                ctx->close_reason = "kicked";
+            }
             ctx->closed = true;
             kicked = true;
             break;
@@ -1167,7 +1183,9 @@ void shell_io_tcp_poll(void)
             tcp_shell_server_note_session_close(ctx->session_id, delta,
                                                 pool_attribution[0]
                                                     ? pool_attribution
-                                                    : NULL);
+                                                    : NULL,
+                                                (const char *)
+                                                    ctx->close_reason);
             ctx_free(ctx);
         }
     }
