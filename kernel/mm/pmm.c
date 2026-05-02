@@ -11,7 +11,8 @@
  *   ...
  *   Order 10: 1024 pages (4 MB)
  *   Order 16: 65536 pages (256 MB)
- *   Order 18: 262144 pages (1 GB) - maximum
+ *   Order 18: 262144 pages (1 GB)
+ *   Order 19: 524288 pages (2 GB) - maximum
  */
 
 #include "pmm.h"
@@ -33,7 +34,12 @@ extern char __kernel_end;
  * Buddy Allocator Configuration
  * ========================================================================== */
 
-#define MAX_ORDER       18          /* Maximum order: 2^18 = 262144 pages (1 GB) */
+/* MAX_ORDER kept in sync with `PMM_MAX_ORDER` in `kernel/include/pmm.h`
+ * — both must change together. The public stats struct
+ * (`pmm_buddy_stats.free_counts[]`) is sized from `PMM_MAX_ORDER`. */
+#define MAX_ORDER       19          /* Maximum order: 2^19 = 524288 pages (2 GB) */
+_Static_assert(MAX_ORDER == PMM_MAX_ORDER,
+               "MAX_ORDER must match PMM_MAX_ORDER in pmm.h");
 #define MIN_BLOCK_SIZE  PAGE_SIZE   /* Minimum allocation: 4 KB */
 
 /* Allocation-failure sentinel returned by the internal buddy helpers.

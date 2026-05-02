@@ -42,14 +42,14 @@ pub const SLM_ARCH_LEN: usize = 16;
 /// Maximum length of a model's user-facing name.
 pub const SLM_NAME_LEN: usize = 32;
 
-/// 1 GiB ceiling on a single GGUF buffer. Matches the PMM buddy
-/// allocator's max order (18 = 256 K pages = 1 GiB on the Jetson
-/// kernel) — anything larger fails inside
-/// [`crate::kernel_ffi::alloc_pages`] regardless. Catching it at
-/// this gate gives a clearer error than the buddy walk's "no
-/// contiguous run". 1 GiB also covers the production demo target
-/// Qwen2.5-1.5B-Q4_K_M (~1.0 GB).
-pub const MAX_PLAUSIBLE_GGUF_BYTES: usize = 1024 * 1024 * 1024;
+/// 2 GiB ceiling on a single GGUF buffer. Matches the PMM buddy
+/// allocator's max order (`PMM_MAX_ORDER = 19` in
+/// `kernel/include/pmm.h`, bumped from 18 to 19 on 2026-05-02 to
+/// fit Qwen2.5-1.5B-Q4_K_M which is 1.04 GB on disk). Anything
+/// larger fails inside [`crate::kernel_ffi::alloc_pages`]; catching
+/// it at this gate gives a clearer error than the buddy walk's
+/// "no contiguous run".
+pub const MAX_PLAUSIBLE_GGUF_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Snapshot of one tensor descriptor, owned by the registry slot.
 ///
