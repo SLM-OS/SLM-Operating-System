@@ -352,8 +352,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--timeout",
         type=float,
-        default=10.0,
-        help="Seconds to wait for each prompt (default: %(default)s)",
+        default=60.0,
+        help=(
+            "Seconds to wait for each prompt (default: %(default)s). "
+            "Sized for #597's worst-case LFS write latency near the "
+            "end of a 1 GB transfer. A timeout shorter than the "
+            "slowest single chunk forces a reconnect, which re-opens "
+            "the LFS handle and makes throughput worse — not better."
+        ),
     )
     p.add_argument(
         "--no-verify-size",
