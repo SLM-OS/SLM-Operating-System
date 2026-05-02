@@ -1617,7 +1617,17 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
               (unsigned long)pb_gpu_va,
               (unsigned long)pb_bytes);
 
-    uint32_t new_gp_put = gp_put + 1;
+    /* Write the MASKED gp_put to USERD — matches nvgpu's behavior in
+     * `gv11b_userd_gp_put` and `nvgpu_submit_append_gpfifo_kernel`
+     * (nvgpu-common-fifo-submit.c:245, nvgpu-hal-fifo-userd_gv11b.c:72).
+     * nvgpu keeps `c->gpfifo.put` masked to entry_num-1, so USERD never
+     * sees a value above the ring size. PBDMA's internal tracking
+     * expects this. Writing an unmasked value crosses the wraparound
+     * boundary (gp_put=entry_num) and PBDMA stops seeing new submits
+     * — observed as `GP_GET didn't advance` wedge in #601 after we
+     * shrank the ring from 1024 to 512 entries to fit one page. */
+    uint32_t ring_mask = g_handoff.gpfifo_entries - 1u;
+    uint32_t new_gp_put = (gp_put + 1u) & ring_mask;
     volatile uint32_t *userd = (volatile uint32_t *)(uintptr_t)
         g_handoff.userd_phys;
     uint32_t gp_put_word = g_handoff.userd_gp_put_offset / 4;
