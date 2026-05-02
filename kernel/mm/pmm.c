@@ -464,6 +464,28 @@ static dtb_memreserve_t pmm_split_rsv   [DTB_MAX_MEMRESERVES];
 
 static void pmm_add_region_split(uintptr_t start, uintptr_t end)
 {
+    /* The pmm_split_* scratch arrays are shared file-statics; the
+     * "single-threaded during boot" precondition is documented above
+     * but not enforced. Trip a panic on re-entry so a future caller
+     * that violates the contract surfaces immediately rather than
+     * silently corrupting whichever caller's split state is active.
+     * The check is unconditional (not gated by NDEBUG via ASSERT)
+     * because pmm_add_region_split is called only a handful of times
+     * during boot — the runtime cost is irrelevant; the diagnostic is
+     * the value.
+     *
+     * Regression coverage: `pmm_init` itself calls this function
+     * once per platform region (1-4 times depending on platform).
+     * If the post-call `in_split = false` reset is ever broken, the
+     * second call panics during boot and every test in `test_pmm.c`
+     * fails to even start. Implicit but loud. */
+    static bool in_split = false;
+    if (in_split) {
+        panic("pmm_add_region_split: re-entered "
+              "(scratch arrays would race)");
+    }
+    in_split = true;
+
     int n_rsv = dtb_get_memreserves(pmm_split_rsv, DTB_MAX_MEMRESERVES);
     int n_out = pmm_carve_reserves(start, end, pmm_split_rsv, n_rsv,
                                    pmm_split_starts, pmm_split_ends,
@@ -471,6 +493,8 @@ static void pmm_add_region_split(uintptr_t start, uintptr_t end)
     for (int i = 0; i < n_out; i++) {
         pmm_add_region(pmm_split_starts[i], pmm_split_ends[i]);
     }
+
+    in_split = false;
 }
 
 /*

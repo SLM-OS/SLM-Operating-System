@@ -115,11 +115,11 @@ All tests run on the dev machine, not on hardware:
 | Suite | Count | Notable coverage |
 |---|---|---|
 | `make test-vbios` | 30 | BIT parser, PCIR walker, FWSEC discovery |
-| `make test-falcon` | 37 | Probe/reset/halt-poll/DMA/PIO/HS-boot protocol, plus this session: `falcon_hs_kick` (3), `falcon_is_priv_locked` (3), `falcon_wait_halted` early-bail on `0xbadfXXXX` (1) |
+| `make test-falcon` | 39 | Probe/reset/halt-poll/DMA/PIO/HS-boot protocol, plus this session: `falcon_hs_kick` (3), `falcon_is_priv_locked` (3), `falcon_wait_halted` early-bail on `0xbadfXXXX` (1), `falcon_probe` rejects poisoned HWCFG/HWCFG2 (2 — PR #598) |
 | `make test-nvfw` | 14 | `nvfw_bin_hdr` / `hs_header_v2` / `hs_load_header_v2` framing |
 | `make test-bringup` | 36 | Sig-index algorithm, DMEMMAPPER patcher (legacy FRTS + generic init_cmd parameterised), `gsp_bringup_free` null-safety, state-machine guards, `gsp_bringup_set_booter_layout` BOOTVEC pinning (5), Stage A WprMeta + radix3 chain helpers (11) |
 | `make test-rpc` | 17 | Ring math, init/dtor, null/oversize/not-alive rejection |
-| **Total** | **123** | |
+| **Total** | **125** | |
 
 ### 1.5 In-kernel test coverage (x86-64 platform shim)
 

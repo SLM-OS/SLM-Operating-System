@@ -65,13 +65,26 @@ int falcon_probe(struct falcon *f, uint32_t engine_base)
 
     /* Sanity: reading CPUCTL on a live engine returns a finite value
      * in the low 16 bits. A firmware misconfiguration or off-die
-     * engine reads 0xFFFFFFFF. */
+     * engine reads 0xFFFFFFFF — reject. A PRI-arbiter denial returns
+     * the 0xbadfXXXX poison pattern; we deliberately accept that
+     * here so callers can later observe it via
+     * `falcon_is_priv_locked()` (the diagnostic API depends on the
+     * struct being initialized). `falcon_wait_halted` has the
+     * matching poison check (line ~135) to bail without spinning
+     * its full timeout budget on a priv-locked engine. */
     uint32_t cpuctl = flcn_r32(f, FALCON_CPUCTL);
     if (cpuctl == 0xFFFFFFFFu) return -1;
 
+    /* HWCFG / HWCFG2 carry imem/dmem geometry — poison would parse
+     * as garbage block counts (e.g. 0xbadf5610 → imem_size = 0x010 *
+     * FALCON_DMA_CHUNK = 4 KB, well off the real geometry). Reject
+     * both `0xFFFFFFFF` and the `0xbadfXXXX` poison so a probe that
+     * succeeds always returns trustworthy sizes. */
     uint32_t hwcfg  = flcn_r32(f, FALCON_HWCFG);
     uint32_t hwcfg2 = flcn_r32(f, FALCON_HWCFG2);
     if (hwcfg == 0xFFFFFFFFu || hwcfg2 == 0xFFFFFFFFu) return -1;
+    if ((hwcfg & 0xffff0000u) == 0xbadf0000u) return -1;
+    if ((hwcfg2 & 0xffff0000u) == 0xbadf0000u) return -1;
 
     /* IMEM/DMEM size in blocks of 256. */
     uint32_t imem_blocks = hwcfg & FALCON_HWCFG_IMEM_SIZE_MASK;

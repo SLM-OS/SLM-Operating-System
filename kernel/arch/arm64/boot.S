@@ -398,12 +398,14 @@ real_start:
     str     x16, [x15, #0x30]               /* [+0x30] = GICD_CTLR pre */
 #endif
 
-    /* Set all GICD_IGROUPR registers to 0xFFFFFFFF (all Group 1) */
+    /* Set all GICD_IGROUPR registers to 0xFFFFFFFF (all Group 1).
+     * Hoist `mvn w14, wzr` out of the loop — the all-ones constant
+     * is invariant per iteration; one move out, one store in. */
     mov     x12, x10
     add     x12, x12, #0x080       /* GICD_IGROUPR0 offset */
     mov     w13, #0
+    mvn     w14, wzr               /* w14 = 0xFFFFFFFF (all Group 1) */
 .Lgroup_loop:
-    mov     w14, #0xFFFFFFFF
     str     w14, [x12, x13, lsl #2]
     add     w13, w13, #1
     cmp     w13, w11

@@ -275,7 +275,12 @@ void lapic_eoi(void)
      * allowing the same ISR to be re-entered for an interrupt it has
      * already serviced. `lock; addl $0, (%rsp)` is a full fence on x86
      * (mfence would also work).
-     */
+     *
+     * The locked stack RMW is safe here: lapic_eoi runs only from
+     * inside an active ISR, where %rsp points at the ISR's own
+     * stack frame (built by the CPU's interrupt entry sequence).
+     * Targeting `(%rsp)` therefore touches a live, mapped, owned
+     * stack page — never a popped or stale frame. */
     __asm__ volatile("lock; addl $0, (%%rsp)" ::: "memory", "cc");
 }
 

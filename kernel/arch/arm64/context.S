@@ -177,7 +177,14 @@ switch_to:
 
     /* Restore DAIF last — any IRQ that becomes deliverable here is
      * safe because SP, GPRs, FPU are fully loaded. x3 is scratch and
-     * may be clobbered by the very next exception, which is fine. */
+     * may be clobbered by the very next exception, which is fine.
+     *
+     * Note on the post-DAIF window: an IRQ taken in the few cycles
+     * between `msr daif` and `ret` runs on the NEW task's stack
+     * (SP_EL1 was already loaded above) and the new task's saved
+     * register context — which is exactly what we want. The trap
+     * frame the ISR builds will sit on the new task's stack, not
+     * the outgoing task's, so there is no cross-stack contamination. */
     ldr     x3, [x2, #CTX_DAIF]
     msr     daif, x3
 

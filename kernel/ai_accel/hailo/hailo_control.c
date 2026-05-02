@@ -436,13 +436,29 @@ static void control_post_boot_init(void)
 }
 
 /*
- * BSS footprint: two large static wire buffers (req ~1520 B + resp
- * 1500 B ≈ 3 KB total). Chosen over stack allocation because the
- * 16 KB kernel stack can't comfortably carry 3 KB of transient
- * scratch on every control call — boot-path callers already use a
- * big chunk of it. Chosen over heap allocation because this file
- * runs on Pi 5 only and the simpler static layout is easier to
- * audit. Only reachable post-boot once firmware is running.
+ * BSS footprint summary for this file (kernel/ai_accel/hailo/hailo_control.c):
+ *
+ *   control_req_wire             ~1520 B  (transport request)
+ *   control_resp_wire            ~1500 B  (transport response)
+ *   read_memory wire / resp      ~ 270 B  (per-opcode scratch, defined
+ *   write_memory wire             ~ 280 B  below in hailo_control_*
+ *   config_stream wire            ~ 240 B  helpers)
+ *   set_network_group_header      ~ 230 B
+ *   set_context_info wire         ~1024 B
+ *   change_status wire            ~ 230 B
+ *   get_hw_consts resp            ~ 264 B
+ *
+ * Total per-file BSS reservation is roughly 5–6 KB across the
+ * transport buffers and roughly another ~3–4 KB across the per-opcode
+ * scratches. Chosen over stack allocation because the 16 KB kernel
+ * stack can't comfortably carry the per-call transient scratch on top
+ * of the boot-path frames already on it. Chosen over heap allocation
+ * because this file runs on Pi 5 only and the simpler static layout
+ * is easier to audit. Only reachable post-boot once firmware is
+ * running, so the BSS pressure is paid once for the kernel lifetime.
+ * If a future port adds another platform, revisit this budget — the
+ * static-buffer count grows with opcode count and the linear-scan
+ * cost is already noticeable in `nm | grep control_`.
  */
 static uint8_t control_req_wire[sizeof(struct hailo_control_wire_hdr)
                               + HAILO_CONTROL_MAX_BUFFER_LENGTH];

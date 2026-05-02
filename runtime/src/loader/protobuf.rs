@@ -67,6 +67,14 @@ pub enum ParseError {
 
 /// Decode a varint from a byte slice.
 ///
+/// Maximum bit width of a protobuf varint (decoding into u64).
+pub const MAX_VARINT_BITS: u32 = 64;
+
+/// Maximum byte width of a protobuf varint encoding (10 bytes carries
+/// the full 64-bit range with 7 payload bits per byte; the 10th byte
+/// uses only 1 payload bit).
+pub const MAX_VARINT_BYTES: usize = 10;
+
 /// Returns `(value, bytes_consumed)` on success.
 /// Varints use 7 bits per byte with the high bit as continuation flag.
 pub fn decode_varint(data: &[u8]) -> Result<(u64, usize), ParseError> {
@@ -74,7 +82,7 @@ pub fn decode_varint(data: &[u8]) -> Result<(u64, usize), ParseError> {
     let mut shift: u32 = 0;
 
     for (i, &byte) in data.iter().enumerate() {
-        if shift >= 64 {
+        if shift >= MAX_VARINT_BITS {
             return Err(ParseError::InvalidVarint);
         }
         value |= ((byte & 0x7F) as u64) << shift;
@@ -82,8 +90,8 @@ pub fn decode_varint(data: &[u8]) -> Result<(u64, usize), ParseError> {
         if byte & 0x80 == 0 {
             return Ok((value, i + 1));
         }
-        // Max 10 bytes for a 64-bit varint
-        if i >= 9 {
+        // Max MAX_VARINT_BYTES bytes for a 64-bit varint
+        if i + 1 >= MAX_VARINT_BYTES {
             return Err(ParseError::InvalidVarint);
         }
     }

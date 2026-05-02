@@ -9,6 +9,7 @@
 #include "inference_device.h"
 #include "debug.h"
 #include "smp.h"
+#include "string.h"
 #include <stddef.h>
 
 /* -------------------------------------------------------------------------- */
@@ -65,10 +66,9 @@ struct inference_device *inference_device_find(const char *name)
 {
     if (!name) return NULL;
     for (uint32_t i = 0; i < device_count; i++) {
-        const char *a = name;
-        const char *b = devices[i]->ops->name;
-        while (*a && *b && *a == *b) { a++; b++; }
-        if (*a == 0 && *b == 0) return devices[i];
+        if (strcmp(name, devices[i]->ops->name) == 0) {
+            return devices[i];
+        }
     }
     return NULL;
 }

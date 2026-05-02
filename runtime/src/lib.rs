@@ -4129,6 +4129,51 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test 3b: Over-length varint (more than MAX_VARINT_BYTES with
+    // continuation bits set). Pins the MAX_VARINT_BYTES = 10 cap
+    // introduced when the magic numbers were named (PR #598).
+    //
+    // Use a value-bearing input rather than 11×0x80: 10 bytes of
+    // 0xFF (= 9 × continuation + payload-7-ones) plus an 11th byte
+    // that still has the continuation bit set. This forces the
+    // function past the `MAX_VARINT_BITS` shift check first (each
+    // byte contributes seven real value bits) and then into the
+    // byte-count limit on the 11th iteration — exercising both
+    // limits in their natural priority. Must be rejected as
+    // InvalidVarint (not UnexpectedEof) because the limit fires
+    // before EOF.
+    {
+        let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x80];
+        let result = loader::protobuf::decode_varint(&data);
+        let passed = matches!(result,
+            Err(loader::protobuf::ParseError::InvalidVarint));
+        print_test_result(b"protobuf: varint over-length rejected\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 3c: Maximum-legal varint = exactly 10 bytes with a
+    // terminating zero-continuation byte. MAX_VARINT_BYTES = 10
+    // means this MUST decode (not be rejected as too long).
+    {
+        // u64::MAX in varint form: 9 × 0xFF (continuation + 7 ones)
+        // followed by a final 0x01 (no continuation, top bit only).
+        let data = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        let result = loader::protobuf::decode_varint(&data);
+        let passed = result == Ok((u64::MAX, loader::protobuf::MAX_VARINT_BYTES));
+        print_test_result(b"protobuf: varint u64::MAX (10 bytes)\0", passed);
+        if !passed { failures += 1; }
+    }
+
+    // Test 3d: Constants exposed as the documented values.
+    {
+        let bits_ok = loader::protobuf::MAX_VARINT_BITS == 64;
+        let bytes_ok = loader::protobuf::MAX_VARINT_BYTES == 10;
+        let passed = bits_ok && bytes_ok;
+        print_test_result(b"protobuf: MAX_VARINT_{BITS,BYTES} values\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Test 4: ProtoIter over simple message
     {
         // Field 1, varint, value 7: tag=0x08, value=0x07

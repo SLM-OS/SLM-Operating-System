@@ -75,6 +75,17 @@ struct mock_engine {
      * after BSI re-applies DEVINIT. Lets tests exercise
      * falcon_is_priv_locked() and the wait_halted early-bail. */
     bool     priv_locked;
+    /* Independent poison flags for the HWCFG / HWCFG2 reads. Lets
+     * `test_probe_rejects_poisoned_*` exercise each of
+     * `falcon_probe`'s two geometry-register poison checks in
+     * isolation. CPUCTL poisoning is intentionally NOT rejected by
+     * probe (callers use `falcon_is_priv_locked()` to detect it,
+     * which requires probe to have succeeded first); the
+     * `priv_locked` flag above continues to model that path for
+     * the existing `test_priv_locked_*` and `test_wait_halted_*`
+     * tests. */
+    bool     hwcfg_poisoned;
+    bool     hwcfg2_poisoned;
 
     /* PIO IMEM/DMEM upload capture — a few hundred 4-byte slots so
      * tests can read back what the driver streamed through the data
@@ -133,6 +144,7 @@ static uint32_t mock_read32(uint32_t addr)
             return v;
         }
         case FALCON_HWCFG: {
+            if (e->hwcfg_poisoned) return 0xbadf5610u;
             uint32_t imem_blk = e->imem_size / FALCON_DMA_CHUNK;
             uint32_t dmem_blk = e->dmem_size / FALCON_DMA_CHUNK;
             return (imem_blk & FALCON_HWCFG_IMEM_SIZE_MASK) |
@@ -140,6 +152,7 @@ static uint32_t mock_read32(uint32_t addr)
                     & FALCON_HWCFG_DMEM_SIZE_MASK);
         }
         case FALCON_HWCFG2: {
+            if (e->hwcfg2_poisoned) return 0xbadf5630u;
             /* Scrub countdown: each read decrements scrub_steps;
              * clears scrubbing when it hits zero. */
             if (e->scrubbing) {
@@ -376,6 +389,41 @@ static void test_probe_rejects_zero_hwcfg(void)
 
     struct falcon f;
     REQUIRE(falcon_probe(&f, NV_PGSP_BASE) < 0);
+}
+
+/* `falcon_probe` must reject the 0xbadfXXXX PRI-arbiter poison
+ * pattern on the geometry registers (HWCFG, HWCFG2). Poison there
+ * would parse as a garbage block count and the resulting struct
+ * would advertise wrong imem_size / dmem_size — silent corruption.
+ *
+ * CPUCTL poison is intentionally NOT rejected by probe: callers
+ * use `falcon_is_priv_locked()` to detect that state (see
+ * `test_priv_locked_detects_poison_pattern` further down), which
+ * requires probe to have succeeded first.
+ *
+ * Two separate tests so each register's poison flag is exercised
+ * in isolation; otherwise an early-return on a prior register
+ * would mask a missing later check. */
+static void test_probe_rejects_poisoned_hwcfg(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PGSP_BASE, 0x10000, 0x10000, true);
+    e->hwcfg_poisoned = true;    /* HWCFG read returns 0xbadf5610 */
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PGSP_BASE) < 0);
+    REQUIRE(!f.initialized);
+}
+
+static void test_probe_rejects_poisoned_hwcfg2(void)
+{
+    reset_mock();
+    struct mock_engine *e = add_engine(NV_PGSP_BASE, 0x10000, 0x10000, true);
+    e->hwcfg2_poisoned = true;   /* HWCFG2 read returns 0xbadf5630 */
+
+    struct falcon f;
+    REQUIRE(falcon_probe(&f, NV_PGSP_BASE) < 0);
+    REQUIRE(!f.initialized);
 }
 
 static void test_reset_completes_after_scrub(void)
@@ -981,6 +1029,8 @@ int main(void)
     test_probe_sec2_falcon();
     test_probe_rejects_offdie();
     test_probe_rejects_zero_hwcfg();
+    test_probe_rejects_poisoned_hwcfg();
+    test_probe_rejects_poisoned_hwcfg2();
     test_reset_completes_after_scrub();
     test_wait_halted_succeeds_when_halted();
     test_wait_halted_times_out();

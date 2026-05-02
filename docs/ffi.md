@@ -439,6 +439,17 @@ typedef struct {
 } RustGpuInfo;
 ```
 
+**Field offsets are pinned at compile time.** The Rust mirror struct
+`GpuInfoFfi` (in `runtime/src/kernel_ffi.rs`) carries
+`core::mem::offset_of!` const-eval asserts on every field plus a
+`size_of` check (PR #598). Note that `#[repr(C)]` honours natural
+alignment, so the `u64 memory_size` lives at offset **112**, not
+108 — there is a 4-byte padding gap after `tensor_cores: u32` (at
+104-108) to bring the u64 to 8-aligned. Total `sizeof(RustGpuInfo)`
+is **128**, not 124. Any future struct edit (re-ordering, adding a
+field, changing a type) fails the const-eval instead of silently
+desyncing the Rust↔C layout.
+
 The `slm_gpu_available()` function delegates to the kernel's `gpu_available()`, which checks whether a GPU driver has been registered and initialized. The `slm_gpu_get_info()` function queries the active GPU driver via `gpu_get_info()` and copies the result into the `RustGpuInfo` layout expected by Rust.
 
 ### Component System (called from C)

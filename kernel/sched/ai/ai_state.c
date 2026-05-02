@@ -192,7 +192,15 @@ static void extract_per_task(float *out, uint64_t now)
  */
 static void extract_global(float *out)
 {
-    /* Ready count across all CPUs */
+    /* Ready count across all CPUs.
+     *
+     * `ready_count` reads are unsynchronized across CPUs — each CPU
+     * can mutate its own slot while we sum here, so the result is a
+     * point-in-time-ish snapshot rather than a transactionally
+     * consistent total. That's acceptable for an AI feature input
+     * (the policy already tolerates noisy inputs) and faster than
+     * acquiring every per-CPU rq_lock; the per-feature snapshot
+     * pattern is consistent with f[5] in extract_per_core(). */
     uint32_t total_ready = 0;
     for (uint32_t c = 0; c < cpu_count; c++) {
         total_ready += sched_cpu_rq(c)->ready_count;

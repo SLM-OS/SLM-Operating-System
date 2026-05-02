@@ -644,6 +644,18 @@ tests in `kernel/tests/test_pmm.c`. It handles unsorted reservation
 lists, zero-size entries, reservations entirely outside the target
 region, and reservations that fully swallow the region.
 
+**Re-entry guard (PR #598):** `pmm_add_region_split` uses file-scope
+scratch arrays (`pmm_split_*`) shared across calls. The "single-
+threaded during boot" precondition is now enforced by an unconditional
+`if (in_split) panic(...)` check at the top of the function — a
+future caller that re-enters concurrently surfaces immediately rather
+than silently corrupting whichever caller's split state is active.
+The check is unconditional (not gated by NDEBUG via ASSERT) because
+the function is called only a handful of times during boot.
+Implicit regression coverage: `pmm_init` calls the function once per
+platform region; a broken `in_split = false` reset would panic during
+boot and every test in `test_pmm.c` would fail to even start.
+
 ### Testing
 
 Tests in `kernel/tests/test_pmm.c` verify:

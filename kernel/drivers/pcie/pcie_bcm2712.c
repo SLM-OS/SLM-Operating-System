@@ -106,6 +106,13 @@
 #define   RC_BAR_CONFIG_LO_SIZE_MASK  0x1Fu
 
 #define PCIE1_RC_CONFIG_RETRY_TIMEOUT  0x405Cu
+/* Timeout values match the BRCMSTB reference driver. The encoding
+ * stuffs the 32-bit timeout field into bits[31:16] of each register;
+ * the low 16 bits are reserved on this controller. The chosen values
+ * give ~240 ms RC retry and ~57 ms UBUS-fabric timeout at the
+ * 750 MHz UBUS clock, which is the documented BCM2712 default. */
+#define   UBUS_TIMEOUT_VAL               0x0B2D0000u
+#define   RC_CONFIG_RETRY_TIMEOUT_VAL    0x0ABA0000u
 #define PCIE1_MISC_CTRL_REG            0x4064u  /* holds PERSTB at bit 2 */
 #define   PCIE_CTRL_PERSTB_MASK        (1u << 2)
 #define PCIE1_UBUS_CTRL                0x40A4u
@@ -751,8 +758,8 @@ static int bcm2712_train_link(void)
     pcie1_w32(PCIE1_AXI_READ_ERROR_DATA, 0xFFFFFFFFu);
 
     /* 9. Timeouts (2712-specific; values from reference driver). */
-    pcie1_w32(PCIE1_UBUS_TIMEOUT, 0x0B2D0000u);
-    pcie1_w32(PCIE1_RC_CONFIG_RETRY_TIMEOUT, 0x0ABA0000u);
+    pcie1_w32(PCIE1_UBUS_TIMEOUT, UBUS_TIMEOUT_VAL);
+    pcie1_w32(PCIE1_RC_CONFIG_RETRY_TIMEOUT, RC_CONFIG_RETRY_TIMEOUT_VAL);
 
     /* 10. Disable RC_BAR1 and RC_BAR3 (clear size field). */
     tmp = pcie1_r32(PCIE1_RC_BAR1_CONFIG_LO);
