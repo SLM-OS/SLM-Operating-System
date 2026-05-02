@@ -210,21 +210,19 @@ _Static_assert(RUST_HEAP_MB <= 4096u, "RUST_HEAP_MB cannot exceed 4096 (4 GiB sa
  *
  * /mnt/files is backed by `ramdisk_create_default` (kernel/drivers/ramdisk.c)
  * at 4 KB blocks. The driver does a single `pmm_alloc_pages(data_pages)`
- * call, so the cap is the PMM buddy max-order: 1 GiB on this kernel
- * (see `kernel/CLAUDE.md` §"Buddy Allocator"). A multi-chunk ramdisk
- * would lift the ceiling but needs the block-device r/w path to
- * walk chunk boundaries — deferred until a workload actually needs
- * more than 1 GiB of staging.
+ * call, so the cap is the PMM buddy max-order: 2 GiB on this kernel
+ * (`PMM_MAX_ORDER = 19`, bumped 2026-05-02 from 18 to fit a
+ * Q4_K_M GGUF for Qwen2.5-1.5B which is 1.04 GB on disk).
  *
- * Jetson sizes to the buddy ceiling (1024 MB) so Qwen2.5-1.5B-Q4_K_M
- * (~1014 MB per fetch-slm.sh registry) fits with a few MB of metadata
- * headroom. Pi 5 keeps the original 32 MB cap (Hailo HEFs are ~20 MB;
- * SLM on Pi 5 is not the demo target). QEMU and host-harness builds
- * must stay small enough to boot inside `make test`'s 1 GB systemd
+ * Jetson sizes to 1280 MB — covers the 1.04 GB GGUF plus headroom
+ * for demo scripts, preload.conf, and a future second-model stage.
+ * Pi 5 keeps the original 32 MB cap (Hailo HEFs are ~20 MB; SLM on
+ * Pi 5 is not the demo target). QEMU and host-harness builds must
+ * stay small enough to boot inside `make test`'s 1 GB systemd
  * MemoryMax cap.
  */
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-#define RAMDISK_DEFAULT_MB      1024u
+#define RAMDISK_DEFAULT_MB      1280u
 #elif defined(PLATFORM_RASPI5)
 #define RAMDISK_DEFAULT_MB      32u
 #else /* PLATFORM_QEMU_VIRT, PLATFORM_X86_64, host harness */
@@ -232,10 +230,10 @@ _Static_assert(RUST_HEAP_MB <= 4096u, "RUST_HEAP_MB cannot exceed 4096 (4 GiB sa
 #endif
 
 _Static_assert(RAMDISK_DEFAULT_MB > 0u, "RAMDISK_DEFAULT_MB must be positive");
-/* 1 GiB hard cap — `ramdisk_create` does a single `pmm_alloc_pages`
- * call which the PMM buddy allocator cannot satisfy past max-order
- * 18 = 1 GiB. Lifting the cap requires either a multi-chunk ramdisk
- * driver or raising the buddy max-order. */
-_Static_assert(RAMDISK_DEFAULT_MB <= 1024u, "RAMDISK_DEFAULT_MB cannot exceed 1024 (PMM buddy max-order = 1 GiB)");
+/* 2 GiB hard cap — `ramdisk_create` does a single `pmm_alloc_pages`
+ * call. The PMM buddy max-order (`PMM_MAX_ORDER` in pmm.h) is the
+ * ceiling. A multi-chunk ramdisk driver would lift this; deferred
+ * until a workload actually needs > 2 GiB of staging. */
+_Static_assert(RAMDISK_DEFAULT_MB <= 2048u, "RAMDISK_DEFAULT_MB cannot exceed 2048 (PMM buddy max-order = 2 GiB)");
 
 #endif /* CONFIG_H */
