@@ -619,12 +619,14 @@ int cmd_put(int argc, char *argv[])
 }
 
 /*
- * xput begin|chunk|status|finish|abort - Framed upload session
+ * xput begin|resume|chunk|status|finish|abort - Framed upload session
  *
  * Session-oriented upload surface for host tools. begin declares the
- * final size and truncates the target. chunk enforces an exact offset,
- * finish validates the declared size, and status exposes the current
- * remote offset for resume/recovery.
+ * final size and truncates the target; resume picks up an existing
+ * partial file without truncating (used by clients reconnecting after
+ * a TCP-level disconnect, which loses the in-memory xput session).
+ * chunk enforces an exact offset, finish validates the declared size,
+ * and status exposes the current remote offset for resume/recovery.
  */
 int cmd_xput(int argc, char *argv[])
 {
@@ -632,6 +634,7 @@ int cmd_xput(int argc, char *argv[])
 
     if (argc < 2) {
         shell_puts("Usage: xput begin <path> <size>\r\n");
+        shell_puts("       xput resume <path> <size>\r\n");
         shell_puts("       xput chunk <offset> <hex...>\r\n");
         shell_puts("       xput status\r\n");
         shell_puts("       xput finish\r\n");
@@ -712,6 +715,123 @@ int cmd_xput(int argc, char *argv[])
         shell_printf("XPUT ok begin path=%s size=%lu\r\n",
                      xput->path,
                      (unsigned long)xput->expected_size);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "resume") == 0) {
+        /* Resume an existing partial upload without truncating. The
+         * client follows up with `xput chunk` writes starting at the
+         * `received` offset reported here. The xput session lives on
+         * a per-shell-session basis (see shell_xput_session_close_for
+         * + shell_session_free), so any TCP disconnect leaves the
+         * file on disk but the in-memory session gone — `xput status`
+         * will report inactive. `xput resume` reconstructs the
+         * session from the on-disk state.
+         *
+         * Reading the existing bytes to compute the FNV-1a checksum
+         * is a one-time cost on resume (bounded by LFS read
+         * bandwidth — a few seconds for ~500 MB on RAM-backed disks).
+         * The alternative — persisting the checksum on disk — is
+         * more state to maintain across crashes / mounts and would
+         * have to survive the same teardown that loses the in-memory
+         * session, defeating the point. The protocol stays
+         * stateless on disk by recomputing here.
+         *
+         * Caller-side responsibility: after `xput resume` succeeds,
+         * the client MUST verify the reported `checksum` matches
+         * its source data's FNV-1a over the first `received` bytes.
+         * If it doesn't (file on disk is from a prior, different
+         * upload), the client should fall back to `xput begin` to
+         * truncate and start over. */
+        char resolved[VFS_MAX_PATH];
+        const char *subpath = NULL;
+        struct lfs_mount *mnt;
+        uint32_t size;
+        int fd;
+        struct lfs_entry_info info;
+
+        if (argc < 4) {
+            shell_puts("Usage: xput resume <path> <size>\r\n");
+            return -1;
+        }
+        if (shell_resolve_path(argv[2], resolved, sizeof(resolved)) < 0) {
+            shell_puts("xput resume: path too long\r\n");
+            return -1;
+        }
+        if (shell_parse_uint(argv[3], &size) != 0) {
+            shell_printf("xput resume: invalid size: %s\r\n", argv[3]);
+            return -1;
+        }
+        mnt = vfs_get_mount_ctx(resolved, &subpath);
+        if (!mnt) {
+            shell_printf("xput resume: %s: Not a mounted filesystem\r\n",
+                         resolved);
+            return -1;
+        }
+        if (littlefs_stat_path(mnt, subpath, &info) != LFS_ERR_OK) {
+            shell_printf("xput resume: %s: file does not exist\r\n",
+                         resolved);
+            return -1;
+        }
+        if (info.size > size) {
+            shell_printf("xput resume: %s: existing %lu > requested %lu\r\n",
+                         resolved,
+                         (unsigned long)info.size,
+                         (unsigned long)size);
+            return -1;
+        }
+
+        xput_session_reset();
+        fd = littlefs_file_open(mnt, subpath, LFS_O_RDWR);
+        if (fd < 0) {
+            shell_printf("xput resume: %s: Failed to open file\r\n",
+                         resolved);
+            return -1;
+        }
+
+        uint32_t checksum = 0x811C9DC5u;
+        {
+            static uint8_t scratch[4096];
+            uint32_t left = info.size;
+            while (left > 0) {
+                uint32_t want =
+                    left > sizeof(scratch) ? sizeof(scratch) : left;
+                int got = littlefs_file_read(mnt, fd, scratch,
+                                             (size_t)want);
+                if (got != (int)want) {
+                    littlefs_file_close(mnt, fd);
+                    shell_printf("xput resume: %s: read failed at %lu\r\n",
+                                 resolved,
+                                 (unsigned long)(info.size - left));
+                    return -1;
+                }
+                checksum = shell_checksum32_update(checksum, scratch,
+                                                   (size_t)want);
+                left -= want;
+            }
+        }
+
+        if (littlefs_file_seek(mnt, fd, 0, LFS_SEEK_END) < 0) {
+            littlefs_file_close(mnt, fd);
+            shell_printf("xput resume: %s: seek failed\r\n", resolved);
+            return -1;
+        }
+
+        xput = xput_session_current();
+        xput->active = true;
+        strncpy(xput->path, resolved, sizeof(xput->path) - 1);
+        xput->path[sizeof(xput->path) - 1] = '\0';
+        xput->expected_size = size;
+        xput->received_size = info.size;
+        xput->checksum = checksum;
+        xput->fd = fd;
+        xput->mnt = mnt;
+        shell_printf("XPUT ok resume path=%s size=%lu received=%lu "
+                     "checksum=%lu\r\n",
+                     xput->path,
+                     (unsigned long)xput->expected_size,
+                     (unsigned long)xput->received_size,
+                     (unsigned long)xput->checksum);
         return 0;
     }
 
@@ -841,6 +961,7 @@ int cmd_xput(int argc, char *argv[])
     }
 
     shell_puts("Usage: xput begin <path> <size>\r\n");
+    shell_puts("       xput resume <path> <size>\r\n");
     shell_puts("       xput chunk <offset> <hex...>\r\n");
     shell_puts("       xput status\r\n");
     shell_puts("       xput finish\r\n");

@@ -551,7 +551,7 @@ static void test_tcp_shell_server_note_session_pair(void)
     tcp_shell_server_get_stats(&before);
 
     tcp_shell_server_note_session_open(0xDEADBEEFu);
-    tcp_shell_server_note_session_close(0xDEADBEEFu, 256, NULL);
+    tcp_shell_server_note_session_close(0xDEADBEEFu, 256, NULL, NULL);
 
     struct tcp_shell_server_stats after;
     tcp_shell_server_get_stats(&after);

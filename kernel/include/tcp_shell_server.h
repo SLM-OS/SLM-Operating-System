@@ -93,9 +93,17 @@ void tcp_shell_server_note_session_open(uint32_t session_id);
  * NULL or empty means "no attribution available" (MEMP_STATS off, or
  * all pools netted zero). When a leak warning fires, the attribution
  * is appended verbatim so the operator can see which lwIP allocator
- * the residual heap delta came from (#537 attribution work). */
+ * the residual heap delta came from (#537 attribution work).
+ *
+ * `close_reason` is a static string identifying the close path that
+ * fired first ("peer_fin", "peer_rst", "rx_err", "write_timeout",
+ * "shell_exit", "kicked"). NULL means the close path didn't record
+ * one (treated as "unknown" by the log). Used to tell at-a-glance
+ * whether a churning session count is driven by client disconnects
+ * (peer_fin), network resets (peer_rst), or local timeouts. */
 void tcp_shell_server_note_session_close(uint32_t session_id,
                                          int32_t  heap_delta_bytes,
-                                         const char *pool_attribution);
+                                         const char *pool_attribution,
+                                         const char *close_reason);
 
 #endif /* TCP_SHELL_SERVER_H */

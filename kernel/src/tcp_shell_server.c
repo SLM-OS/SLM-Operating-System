@@ -84,7 +84,8 @@ void tcp_shell_server_note_session_open(uint32_t session_id) {
 
 void tcp_shell_server_note_session_close(uint32_t session_id,
                                          int32_t  heap_delta_bytes,
-                                         const char *pool_attribution) {
+                                         const char *pool_attribution,
+                                         const char *close_reason) {
     sessions_closed++;
 
     last_session_heap_delta = heap_delta_bytes;
@@ -92,34 +93,40 @@ void tcp_shell_server_note_session_close(uint32_t session_id,
         max_session_heap_delta = heap_delta_bytes;
     }
 
+    const char *reason =
+        (close_reason && close_reason[0]) ? close_reason : "unknown";
+
     if (heap_delta_bytes > (int32_t)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES) {
         leak_warnings++;
         total_suspicious_leak += (uint32_t)heap_delta_bytes;
         const char *attr = (pool_attribution && pool_attribution[0])
             ? pool_attribution : "";
         WARN("shell-tcp: session %u closed with +%d bytes still on lwIP heap "
-             "(threshold=%u, measured post-tcp_close) — suspect leak%s",
-             (unsigned)session_id, (int)heap_delta_bytes,
+             "(reason=%s, threshold=%u, measured post-tcp_close) — suspect leak%s",
+             (unsigned)session_id, (int)heap_delta_bytes, reason,
              (unsigned)NET_SHELL_TCP_LEAK_THRESHOLD_BYTES, attr);
-    } else if (pool_attribution && pool_attribution[0]) {
-        /* Heap is clean but at least one MEMP pool ended the session
-         * with a non-zero delta. Heap-only leak detection misses pool
-         * leaks (e.g. PBUF_POOL slots not returned), so surface them
-         * here. INFO level — sessions don't always close with all
-         * pools at exactly zero in flight (tx unacked may still be
-         * in-flight at close-settle measurement time), but a
-         * persistent positive PBUF_POOL delta across multiple
-         * sessions is the smoking gun for the #581 follow-up
-         * pool-leak investigation. */
-        /* Use %d (not %+d) — kprintf only supports the `-` and `0`
+    } else {
+        /* Heap is clean. Always log the close reason at INFO so
+         * operators can tell at a glance whether a churning session
+         * count is driven by peer FINs (clean client disconnects)
+         * vs. peer RSTs (network reset) vs. local timeouts. The
+         * pool_delta suffix is appended only when at least one
+         * MEMP pool ended with a non-zero delta — it surfaces pool
+         * leaks that the heap-only check misses (PBUF_POOL slots
+         * not returned, etc.), which was the smoking gun for #588's
+         * IPv6-frame leak.
+         *
+         * Use %d (not %+d) — kprintf only supports the `-` and `0`
          * flags (see kprintf.c top-of-file docs). %+d falls into the
          * default case which prints "%+d" literally and does NOT
          * consume the va_arg, so the next %s reads heap_delta_bytes
          * as a char* and prints garbage from wherever that integer
          * happens to point. Negative values still get a leading `-`
          * from %d. */
-        INFO("shell-tcp: session %u closed: heap_delta=%d, pool_delta=%s",
-             (unsigned)session_id, (int)heap_delta_bytes, pool_attribution);
+        const char *attr = (pool_attribution && pool_attribution[0])
+            ? pool_attribution : "";
+        INFO("shell-tcp: session %u closed: reason=%s heap_delta=%d pool_delta=%s",
+             (unsigned)session_id, reason, (int)heap_delta_bytes, attr);
     }
 }
 
