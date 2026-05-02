@@ -571,6 +571,27 @@ static int ensure_mnist_bringup(void)
     rc = ga10b_bringup_channel_kind(&g_mnist_bringup,
                                      GA10B_PIPELINE_KIND_MNIST);
     if (rc < 0) return rc;
+
+    /* Warmup dispatch — Bug A workaround for #596. The very first
+     * compute dispatch after channel inheritance returns all-zero
+     * logits: the GPU's cold-start grid silently doesn't write its
+     * output buffer (still under investigation; see #596). Subsequent
+     * dispatches in the same channel produce correct deterministic
+     * output. Running one throwaway inference here absorbs the cold
+     * start so user-visible calls see warm state. Cost: one extra
+     * 8-op pipeline dispatch per fresh inherit (i.e., once per kexec
+     * session, or once after a different bringup overwrites
+     * g_handoff). The discarded result is the same kernel chain that
+     * runs on every later call — we just don't read its logits. */
+    int warmup_rc = ga10b_bringup_launch_kernel(&g_mnist_bringup);
+    if (warmup_rc < 0) {
+        /* Non-fatal: the warmup failing doesn't itself prevent the
+         * user's call. If a real dispatch problem persists, the
+         * caller's launch_kernel will surface it. */
+        uart_printf("[mnist] warmup dispatch returned %d "
+                    "(continuing — first user call may see Bug A)\n",
+                    warmup_rc);
+    }
     return 0;
 }
 
@@ -594,6 +615,14 @@ static int ensure_sched_bringup(void)
     rc = ga10b_bringup_channel_kind(&g_sched_bringup,
                                      GA10B_PIPELINE_KIND_SCHED_MLP);
     if (rc < 0) return rc;
+
+    /* Same Bug A warmup as ensure_mnist_bringup — see comment there. */
+    int warmup_rc = ga10b_bringup_launch_kernel(&g_sched_bringup);
+    if (warmup_rc < 0) {
+        uart_printf("[sched] warmup dispatch returned %d "
+                    "(continuing — first user call may see Bug A)\n",
+                    warmup_rc);
+    }
     return 0;
 }
 
