@@ -2037,6 +2037,57 @@ static void test_handoff_validate_gpfifo_entries(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
 }
 
+/* ga10b_next_gp_put pins the wraparound semantics that PBDMA expects.
+ * The unmasked form (`cur + 1`, no `& mask`) regressed the GA10B
+ * channel after the GPFIFO ring shrank from 1024 to 512 entries to fit
+ * one contiguous IOVMM page (#601): once gp_put hit gpfifo_entries,
+ * USERD reads disagreed with PBDMA's internal counter and `GP_GET
+ * didn't advance` on every subsequent submit. Both kernel-side
+ * (`ga10b_submit_and_poll` in ga10b_bringup.c) and helper-side
+ * (`gpu_submit_and_poll` in scripts/gpu-launch-common.c) call this
+ * inline now; the test exercises the function directly so a future
+ * refactor that replaces the callers can't silently regress the wrap. */
+static void test_next_gp_put_wraps_at_ring_boundary(void)
+{
+    printf("== test_next_gp_put_wraps_at_ring_boundary ==\n");
+
+    /* 512-entry ring (the post-#601 value): index 511 → 0, not 512. */
+    REQUIRE_EQ(ga10b_next_gp_put(0u,   512u), 1u);
+    REQUIRE_EQ(ga10b_next_gp_put(1u,   512u), 2u);
+    REQUIRE_EQ(ga10b_next_gp_put(510u, 512u), 511u);
+    REQUIRE_EQ(ga10b_next_gp_put(511u, 512u), 0u);
+
+    /* The original wedge: cur = entries - 1 must NOT yield entries. */
+    REQUIRE(ga10b_next_gp_put(511u, 512u) != 512u);
+
+    /* Other power-of-two rings round-trip cleanly across the boundary. */
+    REQUIRE_EQ(ga10b_next_gp_put(1023u, 1024u), 0u);
+    REQUIRE_EQ(ga10b_next_gp_put(1u,    2u),    0u);
+    REQUIRE_EQ(ga10b_next_gp_put(0u,    2u),    1u);
+    REQUIRE_EQ(ga10b_next_gp_put(15u,   16u),   0u);
+
+    /* Even an out-of-range cur value gets re-masked into the ring,
+     * so a stale read can't push gp_put past the boundary. */
+    REQUIRE_EQ(ga10b_next_gp_put(512u,  512u),  1u);
+    REQUIRE_EQ(ga10b_next_gp_put(1023u, 512u),  0u);
+
+    /* Documented contract: caller MUST validate gpfifo_entries via
+     * ga10b_validate_handoff (which rejects 0 / non-power-of-two)
+     * before calling this. The helper is a one-line `(cur+1) & mask`
+     * with no defensive check — the cases below pin the
+     * garbage-in/garbage-out behaviour so a future "let's add a
+     * check" refactor doesn't quietly start panicking. */
+    /* gpfifo_entries == 0: mask underflows to 0xFFFFFFFF, masking is
+     * a no-op, result is cur+1. */
+    REQUIRE_EQ(ga10b_next_gp_put(0u,    0u),    1u);
+    REQUIRE_EQ(ga10b_next_gp_put(42u,   0u),    43u);
+    /* Non-power-of-two: mask is just (entries - 1), which still
+     * masks but produces ring-incoherent indices — caller's bug. */
+    REQUIRE_EQ(ga10b_next_gp_put(0u,    3u),    0u);   /* (0+1) & 0b10 = 0 */
+    REQUIRE_EQ(ga10b_next_gp_put(2u,    3u),    2u);   /* (2+1) & 0b10 = 2 */
+    REQUIRE_EQ(ga10b_next_gp_put(0u,    5u),    0u);   /* (0+1) & 0b100 = 0 */
+}
+
 /* ======================================================================
  * Test 9: handoff scanner (finds magic in a memory buffer)
  * ====================================================================== */
@@ -2974,6 +3025,8 @@ int main(void)
     test_handoff_validate_null_addresses();
     test_handoff_validate_gpfifo_entries();
     test_handoff_validate_missing_doorbell_token();
+
+    test_next_gp_put_wraps_at_ring_boundary();
 
     test_method_header_encoding();
 

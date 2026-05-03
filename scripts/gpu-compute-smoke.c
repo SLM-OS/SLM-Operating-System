@@ -52,6 +52,8 @@
 #include "/usr/src/nvidia/nvgpu/include/uapi/linux/nvgpu-ctrl.h"
 #include "/usr/src/nvidia/nvidia-oot/include/uapi/linux/nvmap.h"
 
+#include "gpu-launch-common.h"
+
 #define SEM_PAYLOAD  0x0000CAFEu
 
 /* NV906F/NVC56F pushbuffer header opcodes (bits 31:29). */
@@ -307,11 +309,12 @@ int main(int argc, char **argv)
     xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_WDT, &wdt, "WDT_DISABLE");
 
     int userd_dmabuf  = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
-    int gpfifo_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 8192, 4096);
+    int gpfifo_dmabuf = nvmap_alloc_dmabuf(nvmap_fd,
+                                           GPU_LAUNCH_GPFIFO_BYTES, 4096);
 
     struct nvgpu_channel_setup_bind_args sb;
     memset(&sb, 0, sizeof(sb));
-    sb.num_gpfifo_entries = 1024;
+    sb.num_gpfifo_entries = GPU_LAUNCH_GPFIFO_ENTRIES;
     sb.flags = NVGPU_CHANNEL_SETUP_BIND_FLAGS_DETERMINISTIC |
                NVGPU_CHANNEL_SETUP_BIND_FLAGS_USERMODE_SUPPORT;
     sb.userd_dmabuf_fd  = userd_dmabuf;
@@ -369,7 +372,8 @@ int main(int argc, char **argv)
 
     void *userd_va  = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
                            userd_dmabuf, 0);
-    void *gpfifo_va = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED,
+    void *gpfifo_va = mmap(NULL, GPU_LAUNCH_GPFIFO_BYTES,
+                           PROT_READ | PROT_WRITE, MAP_SHARED,
                            gpfifo_dmabuf, 0);
     void *pb_va     = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_SHARED,
                            pb_dmabuf, 0);

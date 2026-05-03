@@ -1617,7 +1617,11 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
               (unsigned long)pb_gpu_va,
               (unsigned long)pb_bytes);
 
-    uint32_t new_gp_put = gp_put + 1;
+    /* Write the MASKED gp_put to USERD — see ga10b_next_gp_put header
+     * doc in ga10b_channel_handoff.h for the why (nvgpu compatibility,
+     * #601 wedge). Pinned in
+     * test_ga10b_bringup.c:test_next_gp_put_wraps_at_ring_boundary. */
+    uint32_t new_gp_put = ga10b_next_gp_put(gp_put, g_handoff.gpfifo_entries);
     volatile uint32_t *userd = (volatile uint32_t *)(uintptr_t)
         g_handoff.userd_phys;
     uint32_t gp_put_word = g_handoff.userd_gp_put_offset / 4;

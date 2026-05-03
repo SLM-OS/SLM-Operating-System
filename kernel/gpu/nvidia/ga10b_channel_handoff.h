@@ -503,6 +503,26 @@ ga10b_poll_match(uint32_t poll_val, uint32_t expected_payload)
 }
 
 /*
+ * Compute the next GP_PUT value for a GPFIFO of `gpfifo_entries`
+ * entries (must be a non-zero power of two), wrapping at the ring
+ * boundary. Mirrors nvgpu's `gv11b_userd_gp_put` — see
+ * `nvgpu-common-fifo-submit.c:nvgpu_submit_append_gpfifo_kernel` and
+ * `nvgpu-hal-fifo-userd_gv11b.c:gv11b_userd_gp_put` in the reference
+ * cache. PBDMA's internal tracking expects a value strictly less than
+ * `gpfifo_entries`; writing an unmasked value at the wraparound (i.e.
+ * gp_put == gpfifo_entries) silently stops PBDMA from seeing new
+ * submits — observed as the `GP_GET didn't advance` wedge in #601
+ * after the ring shrank from 1024 to 512 entries to fit one page.
+ *
+ * Pure-logic — no MMIO, host-testable.
+ */
+static inline uint32_t
+ga10b_next_gp_put(uint32_t cur_gp_put, uint32_t gpfifo_entries)
+{
+    return (cur_gp_put + 1u) & (gpfifo_entries - 1u);
+}
+
+/*
  * Sanity-check a single entry in the v5 pipeline ops array. Returns
  * true iff the op has plausible non-zero addresses (qmd_gpu_va,
  * output_phys). Does NOT verify that those addresses are actually
