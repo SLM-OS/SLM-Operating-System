@@ -64,10 +64,10 @@
 #include "/usr/src/nvidia/nvgpu/include/uapi/linux/nvgpu-ctrl.h"
 #include "/usr/src/nvidia/nvidia-oot/include/uapi/linux/nvmap.h"
 
-/* Shared handoff-block layout + magic. Using the kernel header here
- * ensures the struct field offsets match what SLM-OS expects; if the
- * layout changes, both sides rebuild together. */
-#include "../kernel/gpu/nvidia/ga10b_channel_handoff.h"
+/* Shared launcher constants + nvgpu UAPI; transitively pulls in the
+ * kernel handoff header (../kernel/gpu/nvidia/ga10b_channel_handoff.h),
+ * so the struct layout / magic / GPU_LAUNCH_GPFIFO_* sizing constants
+ * stay in lock-step with what SLM-OS expects. */
 #include "gpu-launch-common.h"
 #include <signal.h>
 

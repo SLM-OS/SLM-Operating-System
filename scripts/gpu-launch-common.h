@@ -67,7 +67,7 @@
  *   - num_gpfifo_entries in setup-bind    (NVGPU_IOCTL_CHANNEL_SETUP_BIND)
  *   - ctx->gpfifo_entries                 (used for mask + msync size)
  *
- * Naming all three from the single ENTRIES constant keeps them in
+ * Naming all four from the single ENTRIES constant keeps them in
  * lock-step. Each entry is 8 bytes (gp_e0 + gp_e1 — Ampere format,
  * see ga10b_bringup.h GPFIFO entry encoding).
  * ============================================================ */
