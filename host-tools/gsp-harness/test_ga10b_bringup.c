@@ -2037,6 +2037,41 @@ static void test_handoff_validate_gpfifo_entries(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
 }
 
+/* ga10b_next_gp_put pins the wraparound semantics that PBDMA expects.
+ * The unmasked form (`cur + 1`, no `& mask`) regressed the GA10B
+ * channel after the GPFIFO ring shrank from 1024 to 512 entries to fit
+ * one contiguous IOVMM page (#601): once gp_put hit gpfifo_entries,
+ * USERD reads disagreed with PBDMA's internal counter and `GP_GET
+ * didn't advance` on every subsequent submit. Both kernel-side
+ * (`ga10b_submit_and_poll` in ga10b_bringup.c) and helper-side
+ * (`gpu_submit_and_poll` in scripts/gpu-launch-common.c) call this
+ * inline now; the test exercises the function directly so a future
+ * refactor that replaces the callers can't silently regress the wrap. */
+static void test_next_gp_put_wraps_at_ring_boundary(void)
+{
+    printf("== test_next_gp_put_wraps_at_ring_boundary ==\n");
+
+    /* 512-entry ring (the post-#601 value): index 511 → 0, not 512. */
+    REQUIRE_EQ(ga10b_next_gp_put(0u,   512u), 1u);
+    REQUIRE_EQ(ga10b_next_gp_put(1u,   512u), 2u);
+    REQUIRE_EQ(ga10b_next_gp_put(510u, 512u), 511u);
+    REQUIRE_EQ(ga10b_next_gp_put(511u, 512u), 0u);
+
+    /* The original wedge: cur = entries - 1 must NOT yield entries. */
+    REQUIRE(ga10b_next_gp_put(511u, 512u) != 512u);
+
+    /* Other power-of-two rings round-trip cleanly across the boundary. */
+    REQUIRE_EQ(ga10b_next_gp_put(1023u, 1024u), 0u);
+    REQUIRE_EQ(ga10b_next_gp_put(1u,    2u),    0u);
+    REQUIRE_EQ(ga10b_next_gp_put(0u,    2u),    1u);
+    REQUIRE_EQ(ga10b_next_gp_put(15u,   16u),   0u);
+
+    /* Even an out-of-range cur value gets re-masked into the ring,
+     * so a stale read can't push gp_put past the boundary. */
+    REQUIRE_EQ(ga10b_next_gp_put(512u,  512u),  1u);
+    REQUIRE_EQ(ga10b_next_gp_put(1023u, 512u),  0u);
+}
+
 /* ======================================================================
  * Test 9: handoff scanner (finds magic in a memory buffer)
  * ====================================================================== */
@@ -2974,6 +3009,8 @@ int main(void)
     test_handoff_validate_null_addresses();
     test_handoff_validate_gpfifo_entries();
     test_handoff_validate_missing_doorbell_token();
+
+    test_next_gp_put_wraps_at_ring_boundary();
 
     test_method_header_encoding();
 

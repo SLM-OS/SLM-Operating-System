@@ -624,7 +624,7 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
     ((uint32_t *)ctx->gpfifo_va)[slot * 2 + 1] = gp_e1;
     msync(ctx->gpfifo_va, ctx->gpfifo_entries * 8, MS_SYNC);
 
-    uint32_t new_gp_put = cur_gp_put + 1;
+    uint32_t new_gp_put = ga10b_next_gp_put(cur_gp_put, ctx->gpfifo_entries);
     userd[GPU_LAUNCH_USERD_GP_PUT_WORD] = new_gp_put;
     msync(ctx->userd_va, 4096, MS_SYNC);
 
