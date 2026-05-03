@@ -168,8 +168,22 @@ int cmd_help(int argc, char *argv[])
  */
 int cmd_mem(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
+    /* `mem buddy [order]` — dump per-order free counts and (when an
+     * order is given) walk the free list at that order printing each
+     * block's address + next/prev fields. Diagnostic for free-list
+     * corruption (e.g., #608's order-19 fault during slm load). */
+    if (argc >= 2 && argv[1] && argv[1][0] == 'b') {
+        pmm_dump_stats();
+        if (argc >= 3 && argv[2]) {
+            unsigned int order = 0;
+            for (const char *p = argv[2]; *p >= '0' && *p <= '9'; p++) {
+                order = order * 10 + (unsigned int)(*p - '0');
+            }
+            extern void pmm_dump_free_list(unsigned int, size_t);
+            pmm_dump_free_list(order, /* max_blocks = */ 32);
+        }
+        return 0;
+    }
 
     size_t total_pages = pmm_get_total_pages();
     size_t free_pages = pmm_get_free_pages();
