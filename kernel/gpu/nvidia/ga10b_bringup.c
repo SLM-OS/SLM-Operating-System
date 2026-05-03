@@ -51,6 +51,28 @@ bool ga10b_dispatch_verbose_get(void)
             uart_printf(__VA_ARGS__);                               \
     } while (0)
 
+/* Dispatch poll budget shared by ga10b_submit_and_poll (single-op
+ * smoke-test path) and the v7 bulk dispatcher. Each iteration of
+ * the outer poll loop pairs with one ga10b_dispatch_poll_delay_us
+ * call below, so the wall-clock cap is approximately
+ * GA10B_DISPATCH_POLL_TIMEOUT_US microseconds. The 2 s value is
+ * generous — typical sema release fires in tens of microseconds,
+ * but tail latencies under context-switch pressure or first-op
+ * QMD fault diagnostics can stretch into the hundreds of ms. */
+#define GA10B_DISPATCH_POLL_TIMEOUT_US 2000000u
+
+/* Approximate 1 µs delay via volatile nop-spin. Calibrated for
+ * Cortex-A78AE (Jetson Orin); not precise wall-clock — the actual
+ * wait depends on CPU clock + memory pressure — but bounded above
+ * by a small multiple of 1 µs so the overall poll budget tracks
+ * GA10B_DISPATCH_POLL_TIMEOUT_US within a constant factor. The
+ * `volatile` prevents the compiler from optimizing the loop body
+ * away. */
+static inline void ga10b_dispatch_poll_delay_us(void)
+{
+    for (volatile int i = 0; i < 1500; i++) { }
+}
+
 extern const struct gsp_platform_ops *gsp_platform;
 
 /* ---- Firmware symbols from nvidia_ga10b_firmware.S ----
@@ -1660,7 +1682,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
 
     GA10B_DBG("[%s] polling (2s timeout)...\n", tag);
     uint32_t poll_val = 0;
-    for (uint32_t us = 0; us < 2000000; us++) {
+    for (uint32_t us = 0; us < GA10B_DISPATCH_POLL_TIMEOUT_US; us++) {
         if (gsp_platform->cache_invalidate) {
             gsp_platform->cache_invalidate((void *)poll, sizeof(uint32_t));
         }
@@ -1669,7 +1691,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
          * tests can pin the exact predicate without re-encoding it
          * (and the Linux launcher uses the same helper). */
         if (ga10b_poll_match(poll_val, expected_payload)) break;
-        for (volatile int i = 0; i < 1500; i++) { }
+        ga10b_dispatch_poll_delay_us();
     }
 
     uint32_t gp_get_word = g_handoff.userd_gp_get_offset / 4;
@@ -1811,20 +1833,68 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
                                  7, "GA10B-P7C");
 }
 
-/* v7 per-dispatch QMD pipeline runner. Called from
- * `ga10b_bringup_launch_kernel` after `ga10b_handoff_is_v7` returns
- * true. Validates the v7 fields, walks the v7 ops array, authors
- * a fresh QMD per op into the next pool slot, and submits. Returns
- * 0 on full-chain success, -1 on validation/dispatch failure (with
+/* v7 per-dispatch QMD pipeline — BULK SUBMIT pattern.
+ *
+ * Called from `ga10b_bringup_launch_kernel` after
+ * `ga10b_handoff_is_v7` returns true. Validates the v7 fields,
+ * authors fresh QMDs for all ops, queues their pushbuffers + a
+ * trailing semaphore release into the GPFIFO, and kicks PBDMA
+ * with a single GP_PUT write + a single doorbell ring. Returns 0
+ * on chain success, -1 on validation / dispatch failure (with
  * b->last_error_phase = 8).
  *
- * Extracted from the launch_kernel function body for readability.
- * The bounds-check error paths have dedicated host-test coverage
- * via `ga10b_v7_validate_handoff`, which this function delegates
- * to. The dispatch-loop body is exercised indirectly through the
- * `ga10b_qmd_pool_prepare` tests; making it directly host-testable
- * is tracked separately in #580 (refactor to take handoff + slot
- * counter as parameters and a stub-submit function pointer).
+ * Why bulk: the previous per-op dispatcher called
+ * `ga10b_submit_and_poll` once per op — N pushbuffer writes, N
+ * GPFIFO entries, N USERD GP_PUT writes, N doorbell rings, N
+ * 2-second polls. That stressed PBDMA's USERD/doorbell path with
+ * N updates per inference (8 per MNIST chain) and was the failure
+ * mode behind the wedge in #596. The bulk pattern matches what
+ * nvgpu's `nvgpu_submit_prepare_gpfifo_track` /
+ * `gv11b_userd_gp_put` do at scale — append all GPFIFO entries
+ * for a logical submit, then advance USERD GP_PUT and ring the
+ * doorbell exactly once. PBDMA stays in its known-good operating
+ * regime; no per-op pressure.
+ *
+ * Layout in the pushbuffer area (`g_handoff.pushbuf_phys`,
+ * size = pushbuf_size, default 65 536 B on the helper):
+ *
+ *     +---------------------------------------------------+
+ *     | op[0] launch_kernel pb (14 dwords = 56 B)         |
+ *     | op[1] launch_kernel pb (14 dwords = 56 B)         |
+ *     | ...                                               |
+ *     | op[N-1] launch_kernel pb (14 dwords = 56 B)       |
+ *     | trailing COMPUTE_B sema-release pb (12 dw = 48 B) |
+ *     +---------------------------------------------------+
+ *
+ * Each op's pushbuffer is a SEND_PCAS2_B-kicked dispatch only
+ * (no per-op semaphore). The GPU's compute engine processes them
+ * in order on subch 1. The trailing entry uses
+ * NVC7C0_REPORT_SEMAPHORE with STRUCTURE_SIZE_ONE_WORD and the
+ * default FLUSH_DISABLE=0, which (per Mesa NVK
+ * `nvk_dispatch_signal_semaphore`) waits for the compute pipeline
+ * to drain and flushes L2 → DRAM before the release write
+ * becomes visible. So when the poll matches, every preceding
+ * kernel has retired AND its outputs are in coherent DRAM —
+ * exactly the synchronization Bug C / #596 was missing.
+ *
+ * Failure mode: a poll timeout means somewhere in the chain
+ * stalled — but unlike the per-op path, we lose per-op error
+ * localization. If a regression needs that, re-run with
+ * `gpu debug on` to see which slot's submit didn't fire its
+ * barrier. Diagnostic granularity is the cost; structural
+ * robustness on PBDMA is the win.
+ *
+ * Reference: `nvgpu-common-fifo-submit.c::nvgpu_submit_prepare_gpfifo_track`
+ * (lines 392-413, 572) and `nvgpu-hal-fifo-userd_gv11b.c::gv11b_userd_gp_put`
+ * (lines 67-77) in the reference cache.
+ *
+ * Host testability: the bounds-check paths have dedicated
+ * coverage via `ga10b_v7_validate_handoff`. The dispatch-loop
+ * body is exercised indirectly through the `ga10b_qmd_pool_prepare`
+ * + `ga10b_build_*_pushbuffer` tests. Making the bulk dispatch
+ * directly host-testable is still tracked under #580 (refactor to
+ * take handoff + slot counter as parameters and a stub-submit
+ * function pointer).
  */
 static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
 {
@@ -1869,14 +1939,54 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
         b->last_error_phase = 8;
         return -1;
     }
+    /* Capacity check: N kernel-dispatch entries + 1 trailing sema
+     * entry must fit comfortably in the GPFIFO ring AND the
+     * pushbuffer area. nvgpu reserves 2 extra entries per submit
+     * (pre/post fence); we cap at half-ring as a safety margin
+     * mirroring `check_gpfifo_capacity` (`EXTRA_GPFIFO_ENTRIES`
+     * + headroom). With the post-#601 ring of 512, that allows up
+     * to 255 ops per chain — vastly more than the ~8 a typical
+     * MNIST or sched chain requires. */
+    uint32_t n = g_handoff.pipeline_n_ops;
+    uint32_t total_entries = n + 1u;
+    if (total_entries > (g_handoff.gpfifo_entries / 2u)) {
+        uart_printf("[GA10B-P8-v7] %lu entries (%lu ops + 1 sema) "
+                    "exceeds half-ring budget %lu (gpfifo_entries=%lu)\n",
+                    (unsigned long)total_entries,
+                    (unsigned long)n,
+                    (unsigned long)(g_handoff.gpfifo_entries / 2u),
+                    (unsigned long)g_handoff.gpfifo_entries);
+        b->last_error_phase = 8;
+        return -1;
+    }
+
+    uint32_t pb_kernel_bytes =
+        GA10B_LAUNCH_KERNEL_PB_DWORDS * 4u;          /* 56 */
+    uint32_t pb_sema_bytes =
+        GA10B_COMPUTE_SEMA_RELEASE_PB_DWORDS * 4u;   /* 48 */
+    uint64_t total_pb_bytes =
+        (uint64_t)n * pb_kernel_bytes + pb_sema_bytes;
+    if (total_pb_bytes > g_handoff.pushbuf_size) {
+        uart_printf("[GA10B-P8-v7] %llu pushbuf bytes "
+                    "(%lu ops × %u + %u sema) exceeds "
+                    "pushbuf_size=%lu\n",
+                    (unsigned long long)total_pb_bytes,
+                    (unsigned long)n,
+                    (unsigned)pb_kernel_bytes,
+                    (unsigned)pb_sema_bytes,
+                    (unsigned long)g_handoff.pushbuf_size);
+        b->last_error_phase = 8;
+        return -1;
+    }
+
     /* CPU-physical → identity-mapped CPU VA on Jetson. Same
-     * contract as the v3 dispatch fields and the v5/v6 ops
-     * array: the helper allocates these via nvmap into the
-     * IOVMM heap, where SMMU passthrough makes the CPU's view
-     * of the page numerically equal to the physical address.
-     * Holds at EL2 with the unified DRAM map; would need an
-     * explicit phys-to-virt translation on any platform that
-     * doesn't identity-map. */
+     * contract as the v3 dispatch fields and the v5/v6 ops array:
+     * the helper allocates these via nvmap into the IOVMM heap,
+     * where SMMU passthrough makes the CPU's view of the page
+     * numerically equal to the physical address. Holds at EL2
+     * with the unified DRAM map; would need an explicit
+     * phys-to-virt translation on any platform that doesn't
+     * identity-map. */
     const struct ga10b_pipeline_op_v7 *ops_v7 =
         (const struct ga10b_pipeline_op_v7 *)
             (uintptr_t)g_handoff.pipeline_ops_phys;
@@ -1885,20 +1995,40 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
     if (gsp_platform->cache_invalidate) {
         gsp_platform->cache_invalidate(
             (void *)ops_v7,
-            (size_t)g_handoff.pipeline_n_ops * sizeof(*ops_v7));
+            (size_t)n * sizeof(*ops_v7));
     }
-    GA10B_DBG("[GA10B-P8-v7] per-dispatch QMD mode — %lu ops, "
-              "pool_phys=0x%lx pool_gpu_va=0x%lx slots=%lu\n",
-              (unsigned long)g_handoff.pipeline_n_ops,
-              (unsigned long)g_handoff.qmd_pool_phys,
-              (unsigned long)g_handoff.qmd_pool_gpu_va,
-              (unsigned long)g_handoff.qmd_pool_n_slots);
-    for (uint32_t i = 0; i < g_handoff.pipeline_n_ops; i++) {
+
+    /* Pre-clear the poll target ONCE — the trailing sema entry is
+     * the only writer. Pre-zero so a non-zero match below is
+     * unambiguous proof the GPU wrote the payload. */
+    uint64_t sema_gpu_va =
+        g_handoff.semaphore_gpu_va + GA10B_SEMA_PAGE_OFFSET;
+    uint64_t poll_phys =
+        g_handoff.semaphore_phys + GA10B_SEMA_PAGE_OFFSET;
+    volatile uint32_t *poll = (volatile uint32_t *)(uintptr_t)poll_phys;
+    *poll = 0;
+    if (gsp_platform->cache_clean) {
+        gsp_platform->cache_clean((const void *)poll, sizeof(uint32_t));
+    }
+    gsp_platform->mb();
+
+    uint32_t gp_put_start = g_handoff.initial_gp_put;
+    uint32_t ring_mask = g_handoff.gpfifo_entries - 1u;
+    uint64_t pushbuf_phys = g_handoff.pushbuf_phys;
+    uint64_t pushbuf_gpu_va = g_handoff.pushbuf_gpu_va;
+    volatile uint64_t *gpfifo =
+        (volatile uint64_t *)(uintptr_t)g_handoff.gpfifo_phys;
+
+    GA10B_DBG("[GA10B-P8-v7] BULK %lu ops + 1 sema — gp_put=%lu, "
+              "pushbuf_phys=0x%lx pool_phys=0x%lx\n",
+              (unsigned long)n,
+              (unsigned long)gp_put_start,
+              (unsigned long)pushbuf_phys,
+              (unsigned long)g_handoff.qmd_pool_phys);
+
+    /* Phase 1: queue all N kernel-dispatch entries. */
+    for (uint32_t i = 0; i < n; i++) {
         const struct ga10b_pipeline_op_v7 *op = &ops_v7[i];
-        /* Validate via the v6-prefix-compatible op_is_valid
-         * helper. It checks qmd_gpu_va (kept around for byte-
-         * compare validation) and output_phys; both fields are
-         * at the same offsets on v7. */
         if (!ga10b_pipeline_op_is_valid(
                 (const struct ga10b_pipeline_op *)op)) {
             uart_printf("[GA10B-P8-v7] op %lu malformed "
@@ -1909,6 +2039,7 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
             b->last_error_phase = 8;
             return -1;
         }
+
         /* Author a fresh QMD into the next pool slot. */
         struct ga10b_qmd_pool_slot slot = ga10b_qmd_pool_prepare(
             pool_va,
@@ -1916,52 +2047,199 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
             g_handoff.qmd_pool_n_slots,
             &g_qmd_pool_next_slot,
             op);
-        /* Cache-clean the freshly-written slot bytes so the GPU
-         * sees them via the GMMU mapping. `cache_clean` is
-         * NULL-guarded because some test platforms stub it; the
-         * `mb()` is mandatory on every supported platform (Pi 5,
-         * Jetson, x86, QEMU all install it during gsp_platform
-         * setup) so it's called unconditionally. Same convention
-         * the v5/v6 path uses. */
         if (gsp_platform->cache_clean) {
             gsp_platform->cache_clean((const void *)slot.cpu_va,
                                       GA10B_QMD_SIZE_BYTES);
         }
-        gsp_platform->mb();
-        uint64_t sema_gpu_va =
-            g_handoff.semaphore_gpu_va + GA10B_SEMA_PAGE_OFFSET;
-        uint64_t sema_phys =
-            g_handoff.semaphore_phys + GA10B_SEMA_PAGE_OFFSET;
-        GA10B_DBG("[GA10B-P8-v7]   op[%lu/%lu] slot=%lu "
-                  "fresh_qmd_gpu_va=0x%lx out=0x%lx "
-                  "sema_phys=0x%lx (payload=0x%x)\n",
+
+        /* Build the dispatch-only pushbuffer at this op's slot in
+         * the packed pushbuffer area. Each op gets pb_kernel_bytes
+         * of space starting at offset i * pb_kernel_bytes. */
+        uint64_t pb_op_phys =
+            pushbuf_phys + (uint64_t)i * pb_kernel_bytes;
+        uint64_t pb_op_gpu_va =
+            pushbuf_gpu_va + (uint64_t)i * pb_kernel_bytes;
+        uint32_t *pb_op_cpu = (uint32_t *)(uintptr_t)pb_op_phys;
+        uint32_t pb_dwords = ga10b_build_launch_kernel_pushbuffer(
+            pb_op_cpu, slot.gpu_va);
+
+        /* GPFIFO entry: 8-byte Ampere format. gp_e0 is the lower
+         * 32 bits of the pushbuffer GPU VA (PCB-aligned, so bits
+         * [1:0] are zero); gp_e1 holds the upper 8 bits of the VA
+         * + the pushbuffer length in dwords. */
+        uint32_t gp_e0 = (uint32_t)(pb_op_gpu_va & 0xFFFFFFFCu);
+        uint32_t gp_e1 = (uint32_t)((pb_op_gpu_va >> 32) & 0xFFu) |
+                         (pb_dwords << 10);
+        uint64_t entry = ((uint64_t)gp_e1 << 32) | gp_e0;
+        uint32_t gp_idx = (gp_put_start + i) & ring_mask;
+        gpfifo[gp_idx] = entry;
+
+        GA10B_DBG("[GA10B-P8-v7]   queue op[%lu/%lu] slot=%lu "
+                  "qmd_gpu_va=0x%lx pb_phys=0x%lx pb_gpu_va=0x%lx "
+                  "gp_idx=%lu\n",
                   (unsigned long)(i + 1),
-                  (unsigned long)g_handoff.pipeline_n_ops,
+                  (unsigned long)n,
                   (unsigned long)slot.index,
                   (unsigned long)slot.gpu_va,
-                  (unsigned long)op->output_phys,
-                  (unsigned long)sema_phys,
-                  (unsigned)GA10B_SEMA_RELEASE_PAYLOAD);
-        uint32_t pb_buf[GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS];
-        uint32_t pb_dwords =
-            ga10b_build_launch_kernel_with_sema_pushbuffer(
-                pb_buf, slot.gpu_va,
-                sema_gpu_va,
-                GA10B_SEMA_RELEASE_PAYLOAD);
-        int rc = ga10b_submit_and_poll(b, pb_buf, pb_dwords,
-                                       sema_phys,
-                                       GA10B_SEMA_RELEASE_PAYLOAD,
-                                       8, "GA10B-P8-v7");
-        if (rc < 0) {
-            uart_printf("[GA10B-P8-v7] op %lu failed (rc=%d) "
-                        "— aborting chain\n",
-                        (unsigned long)(i + 1), rc);
-            return rc;
+                  (unsigned long)pb_op_phys,
+                  (unsigned long)pb_op_gpu_va,
+                  (unsigned long)gp_idx);
+    }
+
+    /* Phase 2: queue the trailing COMPUTE_B REPORT_SEMAPHORE
+     * entry. This fires AFTER all N preceding kernel dispatches
+     * drain (FLUSH_DISABLE=0 + STRUCTURE_SIZE_ONE_WORD on the
+     * REPORT_SEMAPHORE_EXECUTE method) so its release write is
+     * the unambiguous "all kernels done, all outputs in DRAM"
+     * signal. */
+    uint64_t pb_sema_phys =
+        pushbuf_phys + (uint64_t)n * pb_kernel_bytes;
+    uint64_t pb_sema_gpu_va =
+        pushbuf_gpu_va + (uint64_t)n * pb_kernel_bytes;
+    uint32_t *pb_sema_cpu = (uint32_t *)(uintptr_t)pb_sema_phys;
+    uint32_t sema_pb_dwords =
+        ga10b_build_compute_sema_release_pushbuffer(
+            pb_sema_cpu, sema_gpu_va, GA10B_SEMA_RELEASE_PAYLOAD);
+
+    uint32_t s_e0 = (uint32_t)(pb_sema_gpu_va & 0xFFFFFFFCu);
+    uint32_t s_e1 = (uint32_t)((pb_sema_gpu_va >> 32) & 0xFFu) |
+                    (sema_pb_dwords << 10);
+    uint64_t sema_entry = ((uint64_t)s_e1 << 32) | s_e0;
+    uint32_t sema_gp_idx = (gp_put_start + n) & ring_mask;
+    gpfifo[sema_gp_idx] = sema_entry;
+
+    GA10B_DBG("[GA10B-P8-v7]   queue sema_release pb_phys=0x%lx "
+              "pb_gpu_va=0x%lx gp_idx=%lu sema_gpu_va=0x%lx "
+              "(payload=0x%x)\n",
+              (unsigned long)pb_sema_phys,
+              (unsigned long)pb_sema_gpu_va,
+              (unsigned long)sema_gp_idx,
+              (unsigned long)sema_gpu_va,
+              (unsigned)GA10B_SEMA_RELEASE_PAYLOAD);
+
+    /* Phase 3: cache-clean the entire pushbuffer area + the
+     * GPFIFO entries we just wrote, then memory-barrier so PBDMA
+     * sees the writes when we kick. The GPFIFO entries can span a
+     * ring-wrap — handle the split case by cleaning two contiguous
+     * runs. */
+    if (gsp_platform->cache_clean) {
+        gsp_platform->cache_clean(
+            (const void *)(uintptr_t)pushbuf_phys,
+            (size_t)total_pb_bytes);
+
+        uint32_t start_idx = gp_put_start & ring_mask;
+        if ((uint64_t)start_idx + total_entries <=
+                g_handoff.gpfifo_entries) {
+            gsp_platform->cache_clean(
+                (const void *)&gpfifo[start_idx],
+                (size_t)total_entries * sizeof(uint64_t));
+        } else {
+            uint32_t first = g_handoff.gpfifo_entries - start_idx;
+            uint32_t second = total_entries - first;
+            gsp_platform->cache_clean(
+                (const void *)&gpfifo[start_idx],
+                (size_t)first * sizeof(uint64_t));
+            gsp_platform->cache_clean(
+                (const void *)&gpfifo[0],
+                (size_t)second * sizeof(uint64_t));
         }
     }
-    GA10B_DBG("[GA10B-P8-v7] pipeline complete — %lu ops fired\n",
-              (unsigned long)g_handoff.pipeline_n_ops);
-    return 0;
+    gsp_platform->mb();
+
+    /* Phase 4: write USERD GP_PUT ONCE with the cumulative new
+     * value, then ring the doorbell ONCE. This is the bulk-submit
+     * win — PBDMA only sees one GP_PUT advance and one doorbell
+     * for the entire chain. */
+    uint32_t new_gp_put = (gp_put_start + total_entries) & ring_mask;
+    volatile uint32_t *userd =
+        (volatile uint32_t *)(uintptr_t)g_handoff.userd_phys;
+    uint32_t gp_put_word = g_handoff.userd_gp_put_offset / 4u;
+    userd[gp_put_word] = new_gp_put;
+    if (gsp_platform->cache_clean) {
+        gsp_platform->cache_clean(
+            (const void *)&userd[gp_put_word], sizeof(uint32_t));
+    }
+    gsp_platform->mb();
+
+    GA10B_DBG("[GA10B-P8-v7] GP_PUT advanced: %lu → %lu "
+              "(total_entries=%lu)\n",
+              (unsigned long)gp_put_start,
+              (unsigned long)new_gp_put,
+              (unsigned long)total_entries);
+
+    volatile uint32_t *doorbell =
+        (volatile uint32_t *)(uintptr_t)GA10B_USERMODE_DOORBELL_PHYS;
+    *doorbell = g_handoff.work_submit_token;
+    gsp_platform->mb();
+
+    GA10B_DBG("[GA10B-P8-v7] doorbell rung — polling for sema "
+              "(2s timeout)\n");
+
+    /* Phase 5: poll the channel sema for the trailing release
+     * payload. Same budget the per-op path used; see
+     * GA10B_DISPATCH_POLL_TIMEOUT_US near the top of the file. */
+    uint32_t poll_val = 0;
+    for (uint32_t us = 0; us < GA10B_DISPATCH_POLL_TIMEOUT_US; us++) {
+        if (gsp_platform->cache_invalidate) {
+            gsp_platform->cache_invalidate(
+                (void *)poll, sizeof(uint32_t));
+        }
+        poll_val = *poll;
+        if (ga10b_poll_match(poll_val, GA10B_SEMA_RELEASE_PAYLOAD)) {
+            break;
+        }
+        ga10b_dispatch_poll_delay_us();
+    }
+
+    /* Phase 6: bookkeeping. Same always-advance contract as
+     * `ga10b_submit_and_poll` (#596 / PR #610): the GPFIFO entries
+     * have been written and USERD GP_PUT has been advanced, so
+     * the cached counters MUST move forward regardless of whether
+     * the poll matched. Otherwise a subsequent call would re-write
+     * the same USERD value (no-op for PBDMA) and overwrite the
+     * in-flight entries. */
+    uint32_t gp_get_word = g_handoff.userd_gp_get_offset / 4u;
+    if (gsp_platform->cache_invalidate) {
+        gsp_platform->cache_invalidate(
+            (void *)&userd[gp_get_word], sizeof(uint32_t));
+    }
+    uint32_t final_gp_get = userd[gp_get_word];
+    uint32_t prev_gp_get = g_handoff.initial_gp_get;
+    g_handoff.initial_gp_put = new_gp_put;
+    g_handoff.initial_gp_get = final_gp_get;
+
+    bool payload_matched =
+        ga10b_poll_match(poll_val, GA10B_SEMA_RELEASE_PAYLOAD);
+    if (payload_matched) {
+        GA10B_DBG("[GA10B-P8-v7] BULK pipeline complete — %lu ops "
+                  "fired, GP_GET=%lu\n",
+                  (unsigned long)n,
+                  (unsigned long)final_gp_get);
+        b->state = GA10B_BRINGUP_METHOD_ACCEPTED;
+        return 0;
+    }
+
+    /* Diagnostic on timeout: discriminate "PBDMA didn't see our
+     * submit at all" (gp_get unchanged) from "PBDMA consumed
+     * entries but the trailing sema didn't fire" (gp_get advanced
+     * but poll_val never landed). The second case usually means
+     * one of the kernel dispatches faulted internally; re-run with
+     * `gpu debug on` to see per-op QMD/pb authoring traces. */
+    if (final_gp_get != prev_gp_get) {
+        uart_printf("[GA10B-P8-v7] BULK poll timeout — PBDMA "
+                    "advanced (GP_GET %lu → %lu) but sema didn't "
+                    "fire (poll=0x%lx, want 0x%x)\n",
+                    (unsigned long)prev_gp_get,
+                    (unsigned long)final_gp_get,
+                    (unsigned long)poll_val,
+                    (unsigned)GA10B_SEMA_RELEASE_PAYLOAD);
+    } else {
+        uart_printf("[GA10B-P8-v7] BULK poll timeout — PBDMA "
+                    "didn't see our submits (GP_GET still %lu)\n",
+                    (unsigned long)final_gp_get);
+    }
+    b->last_error_phase = 8;
+    return -1;
 }
 
 int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
