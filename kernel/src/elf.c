@@ -507,6 +507,11 @@ struct task *elf_create_task_with_args(const struct elf_info *info,
     task->stack_base = stack;
     task->stack_top = (void *)stack_top;
 
+    /* Plant stack canary — ELF tasks bypass `task_create` (which sets
+     * the canary inline), so the canary init must be done explicitly
+     * here for `cmd_canary` / panic-time inventory to cover them. */
+    task_canary_init(task);
+
     /* Set up initial context */
 #if defined(PLATFORM_X86_64)
     task->context.rsp = sp;

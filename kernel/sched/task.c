@@ -762,7 +762,7 @@ void task_canary_init(struct task *task)
     }
 }
 
-int task_canary_check(struct task *task)
+static int task_canary_check_impl(struct task *task, bool unlocked)
 {
     if (!task || !task->stack_base || task->id == 0) return 0;
     const uint64_t *p = (const uint64_t *)task->stack_base;
@@ -779,31 +779,67 @@ int task_canary_check(struct task *task)
             ascii[j] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
         }
         ascii[8] = '\0';
-        uart_printf("[canary] BROKEN task='%s' id=%u stack_base=%p "
-                    "+0x%lx: 0x%lx  \"%s\"\n",
-                    task->name, task->id, task->stack_base,
-                    (unsigned long)(i * sizeof(uint64_t)),
-                    (unsigned long)v, ascii);
+        if (unlocked) {
+            uart_printf_unlocked(
+                "[canary] BROKEN task='%s' id=%u stack_base=%p "
+                "+0x%lx: 0x%lx  \"%s\"\n",
+                task->name, task->id, task->stack_base,
+                (unsigned long)(i * sizeof(uint64_t)),
+                (unsigned long)v, ascii);
+        } else {
+            uart_printf("[canary] BROKEN task='%s' id=%u stack_base=%p "
+                        "+0x%lx: 0x%lx  \"%s\"\n",
+                        task->name, task->id, task->stack_base,
+                        (unsigned long)(i * sizeof(uint64_t)),
+                        (unsigned long)v, ascii);
+        }
     }
     return broken;
 }
 
-int task_canary_check_all(void)
+int task_canary_check(struct task *task)
+{
+    return task_canary_check_impl(task, false);
+}
+
+/* Shared implementation. `unlocked` selects between the locked
+ * uart_printf path (safe from normal task context) and the
+ * uart_printf_unlocked path (safe from panic context where the
+ * UART lock cannot be held). See task.h for the public callers. */
+static int task_canary_check_all_impl(bool unlocked)
 {
     int broken_count = 0;
     /* Iterate without taking the task_lock — this is observation only,
      * a torn read of `id` just means we miss a transient zero or new
      * task, which is acceptable for diagnostic purposes. */
-    uart_printf_unlocked("[canary] Task stack inventory:\n");
+    if (unlocked)
+        uart_printf_unlocked("[canary] Task stack inventory:\n");
+    else
+        uart_printf("[canary] Task stack inventory:\n");
     for (uint32_t i = 0; i < MAX_TASKS; i++) {
         struct task *t = &task_table[i];
         if (t->id == 0) continue;
         if (!t->stack_base) continue;
-        uart_printf_unlocked("  id=%u name='%s' stack=[%p..%p)\n",
-                             t->id, t->name, t->stack_base, t->stack_top);
-        if (task_canary_check(t)) {
+        if (unlocked) {
+            uart_printf_unlocked("  id=%u name='%s' stack=[%p..%p)\n",
+                                 t->id, t->name, t->stack_base, t->stack_top);
+        } else {
+            uart_printf("  id=%u name='%s' stack=[%p..%p)\n",
+                        t->id, t->name, t->stack_base, t->stack_top);
+        }
+        if (task_canary_check_impl(t, unlocked)) {
             broken_count++;
         }
     }
     return broken_count;
+}
+
+int task_canary_check_all(void)
+{
+    return task_canary_check_all_impl(false);
+}
+
+int task_canary_check_all_unlocked(void)
+{
+    return task_canary_check_all_impl(true);
 }
