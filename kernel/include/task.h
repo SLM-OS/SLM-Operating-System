@@ -220,7 +220,12 @@ typedef void (*task_entry_t)(void *arg);
 #define TASK_STACK_CANARY_BYTES   64u
 #define TASK_STACK_CANARY_PATTERN 0xDEADBEEFCAFEBABEULL
 
-/* Initialize the canary at stack bottom. Called from task_create. */
+/* Initialize the canary at stack bottom. Called from
+ * `task_create_with_priority` (the standard path) and from
+ * `elf_create_task_with_args` (the ELF-loader path that bypasses
+ * task_create). Any future task-creation path that assigns
+ * stack_base directly must also call this so cmd_canary and the
+ * panic-time inventory cover those tasks too. */
 void task_canary_init(struct task *task);
 
 /* Verify a single task's canary. Returns 0 if intact, 1 if broken.
