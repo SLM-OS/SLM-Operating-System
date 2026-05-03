@@ -140,7 +140,15 @@ static int cmd_kernel_status(int argc, char *argv[])
     if (boot_volume_mount() < 0) {
         shell_puts("boot volume:    unavailable (no SDHCI controller, "
                    "no card, or no FAT32 on partition 1)\n");
-        return -1;
+        /* Reporting "boot volume unavailable" is the *purpose* of
+         * status on platforms without an SD-backed boot path
+         * (Jetson, the QEMU x86 ISA-debug-exit harness, etc.);
+         * returning -1 would have the shell print
+         * "Command returned error: -1" right after a successful
+         * informational print, confusing the operator into thinking
+         * the status query itself failed. The status was reported
+         * — that's success. */
+        return 0;
     }
 
     bool has_tryboot = fat_file_exists(TRYBOOT_IMG_PATH);
