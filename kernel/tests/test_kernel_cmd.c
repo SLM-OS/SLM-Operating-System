@@ -260,12 +260,19 @@ static void test_status_runs_without_card_or_stage(void)
     /* `kernel status` must succeed even if no SDHCI controller is
      * available (unrelated platforms shouldn't error out). The
      * QEMU virt build with sdhci-pci has a controller, but it may
-     * be unformatted at this point — status reports that gracefully. */
+     * be unformatted at this point — status reports that gracefully.
+     *
+     * Returns 0 in BOTH cases: when the boot volume mounts and the
+     * staged-image / active-kernel info gets reported, AND when
+     * the volume is unavailable (which is the steady state on
+     * Jetson and any platform without an SD-backed boot path).
+     * The status query's job is to report state — reporting
+     * "unavailable" is success, not failure. Pre-fix this returned
+     * -1 in the unavailable case, which the shell rendered as
+     * "Command returned error: -1" right after a successful
+     * informational print, confusing operators. */
     int rc = shell_execute("kernel status");
-    /* Returns -1 if the boot volume is unavailable, 0 otherwise.
-     * Either is acceptable from a test-correctness standpoint;
-     * both indicate the path executed without crashing. */
-    TEST_ASSERT_TRUE(rc == 0 || rc == -1);
+    TEST_ASSERT_EQUAL_INT(0, rc);
 }
 
 static void test_stage_writes_image_and_sha_sidecar(void)
