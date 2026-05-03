@@ -1517,13 +1517,24 @@ uint32_t ga10b_build_launch_kernel_with_sema_pushbuffer(uint32_t *pb,
  * be reported as success; an earlier loose criterion was a
  * now-resolved #273 workaround and has been dropped.
  *
- * GPFIFO bookkeeping: on any PBDMA progress (gp_advanced), update
- * `g_handoff.initial_gp_put` / `initial_gp_get` so a subsequent
- * submit targets a fresh slot. This is symmetric across success and
- * partial-failure paths because the slot has been consumed either
- * way; reusing it would overwrite a not-yet-drained entry only if
- * PBDMA hadn't seen our submit at all, and that case (!gp_advanced)
- * leaves the counters unchanged. */
+ * GPFIFO bookkeeping: ALWAYS advance `g_handoff.initial_gp_put` /
+ * `initial_gp_get` on return, regardless of `gp_advanced` or
+ * `payload_matched`. Once the GPFIFO entry has been written and
+ * USERD GP_PUT has been advanced, the slot is consumed from the
+ * channel's hardware perspective — a subsequent submit MUST target
+ * the next slot, or it would re-write the same USERD value (a
+ * no-op for PBDMA) and overwrite the in-flight entry. The earlier
+ * `if (gp_advanced)` guard caused a permanent wedge in #596 when
+ * the 2 s poll fired before PBDMA's GP_GET caught up. See the
+ * in-function comment for the full reasoning.
+ *
+ * Future architectural follow-up: refactor the v7 pipeline
+ * dispatcher to nvgpu's bulk pattern (queue all op entries, write
+ * USERD GP_PUT once with the cumulative new value, ring doorbell
+ * once, poll only the final semaphore). Eliminates per-op PBDMA
+ * pressure and matches the path NVIDIA tests at scale. The
+ * bookkeeping fix here remains load-bearing for any single-op
+ * caller (smoke tests, debug paths). */
 static int ga10b_submit_and_poll(struct ga10b_bringup *b,
                                  const uint32_t *pb_buf,
                                  uint32_t pb_dwords,
@@ -1674,17 +1685,32 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
               (unsigned long)final_gp_get,
               (unsigned long)g_handoff.initial_gp_get);
 
+    /* gp_advanced is diagnostic-only after the #596 fix — used to
+     * discriminate the two failure modes in the error log below
+     * ("PBDMA didn't see our submit" vs "PBDMA consumed it but no
+     * payload"). The bookkeeping below no longer depends on it. */
     bool gp_advanced     = (final_gp_get != g_handoff.initial_gp_get);
     bool payload_matched = ga10b_poll_match(poll_val, expected_payload);
 
-    /* Symmetric bookkeeping: any PBDMA progress consumes the slot.
-     * Update the counters so the next submit lands in a fresh slot,
-     * regardless of whether the payload matched — even in the
-     * partial-failure case the entry is no longer pending. */
-    if (gp_advanced) {
-        g_handoff.initial_gp_put = new_gp_put;
-        g_handoff.initial_gp_get = final_gp_get;
-    }
+    /* Bookkeeping: ALWAYS advance the cached put pointer, even when
+     * `gp_advanced` is false. Reasoning:
+     *
+     *   - The GPFIFO entry has already been written to slot `gp_idx`
+     *     in the gpfifo[gp_idx] = entry write earlier in this
+     *     function. Reusing that slot on the next call would
+     *     overwrite an in-flight entry.
+     *   - The USERD GP_PUT register has already been written to
+     *     `new_gp_put`. PBDMA's view of "next slot to fetch" is
+     *     advanced regardless of whether it has YET acted on it.
+     *     A subsequent submit that re-writes the SAME USERD GP_PUT
+     *     value (because the cached put didn't advance) is a no-op
+     *     from PBDMA's perspective — the wedge mode that surfaced as
+     *     "iter 1 op 8 fails, iter 2+ op 1 fails forever" in #596.
+     *   - For `gp_advanced=false`, `final_gp_get == initial_gp_get`,
+     *     so the assignment to `initial_gp_get` is a no-op there;
+     *     keep both lines together for symmetry. */
+    g_handoff.initial_gp_put = new_gp_put;
+    g_handoff.initial_gp_get = final_gp_get;
 
     if (payload_matched) {
         GA10B_DBG("[%s] payload observed — GPU executed submit.\n", tag);
