@@ -4348,17 +4348,32 @@ int lua_slm_dofile(lua_State *L, const char *filename) {
         return -1;
     }
 
-    /* Sized to fit the embedded demo scripts with headroom. Lives on the
-     * shell task's 64 KB stack, so keep it bounded but comfortably above
-     * the current demo payload sizes. */
-    char buf[32768];
-    int len = vfs_read_path(resolved, buf, sizeof(buf) - 1, 0);
-    if (len < 0) {
-        shell_printf("lua: cannot open %s\n", resolved);
+    /* Read the script into a heap-allocated buffer. We previously used
+     * `char buf[32768]` on the shell task's stack, which silently caused
+     * #601 Bug B: the shell task's 64 KB stack OVERFLOWED into the
+     * adjacent net_pump task's stack region (no guard pages between
+     * task stacks). The overflow wrote Lua source bytes onto net_pump's
+     * saved-LR slots, making the next ret in net_pump panic with a
+     * PC alignment fault to a string-literal address. PMM-backed
+     * allocation moves the 32 KB out of the stack entirely so shell's
+     * call chain only consumes its actual frame size. */
+    const size_t buf_size = 32768u;
+    const size_t buf_pages = (buf_size + 4095u) / 4096u;  /* 8 pages */
+    char *buf = (char *)pmm_alloc_pages(buf_pages);
+    if (!buf) {
+        shell_printf("lua: out of memory loading %s\n", resolved);
         return -1;
     }
-    if (len >= (int)sizeof(buf) - 1) {
-        shell_printf("lua: %s exceeds %d bytes\n", resolved, (int)sizeof(buf) - 1);
+
+    int len = vfs_read_path(resolved, buf, buf_size - 1, 0);
+    if (len < 0) {
+        shell_printf("lua: cannot open %s\n", resolved);
+        pmm_free_pages(buf, buf_pages);
+        return -1;
+    }
+    if (len >= (int)buf_size - 1) {
+        shell_printf("lua: %s exceeds %d bytes\n", resolved, (int)buf_size - 1);
+        pmm_free_pages(buf, buf_pages);
         return -1;
     }
     buf[len] = '\0';
@@ -4371,6 +4386,7 @@ int lua_slm_dofile(lua_State *L, const char *filename) {
         shell_printf("Lua error: %s\n", msg ? msg : "(unknown)");
     }
     lua_settop(L, saved_top);
+    pmm_free_pages(buf, buf_pages);
     return status;
 }
 

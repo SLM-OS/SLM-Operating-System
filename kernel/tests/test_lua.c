@@ -3459,6 +3459,118 @@ static void test_slm_dofile_runtime_error(void)
     test_lua_close(L);
 }
 
+/*
+ * Test: lua_slm_dofile loads a near-max-size script (#603 regression).
+ *
+ * PR #603 root-caused a Jetson kernel panic to a 32 KB stack-local
+ * `char buf[32768]` in lua_slm_dofile that overflowed the 64 KB shell
+ * task stack into adjacent task memory during Lua parser recursion.
+ * The fix moved the buffer to pmm_alloc_pages. This test loads a
+ * ~31 KB script (just under the 32 KB cap) and confirms it executes
+ * — a future refactor that reintroduces a large stack-local would
+ * fail here in QEMU before reaching Jetson, where the stack-overflow
+ * → adjacent-task-corruption symptom is impractical to assert
+ * directly (it depends on Jetson's no-guard-page task layout).
+ *
+ * The test itself avoids any large stack-local: the file content is
+ * built up in 1 KB chunks via repeated littlefs writes, and the
+ * verification reads back a global the script set rather than the
+ * script body itself.
+ */
+static void test_slm_dofile_near_max_size(void)
+{
+    const char *path = "/mnt/files/big.lua";
+    const char *subpath = NULL;
+    void *mnt = vfs_get_mount_ctx(path, &subpath);
+    if (!mnt) {
+        TEST_IGNORE_MESSAGE("LittleFS not mounted");
+        return;
+    }
+
+    int fd = littlefs_file_open(mnt, subpath,
+                                TEST_LFS_O_WRONLY | TEST_LFS_O_CREAT | TEST_LFS_O_TRUNC);
+    TEST_ASSERT_MESSAGE(fd >= 0, "Failed to create test script");
+
+    /* Layout: `local s=[[` + 31 * 1024 bytes of 'a' + `]] near_max_size_ok=#s`
+     * Total ≈ 31766 bytes — under the 32767-byte lua_slm_dofile cap. */
+    const char *header = "local s=[[";
+    const char *footer = "]] near_max_size_ok=#s";
+    int header_len = 0, footer_len = 0;
+    for (const char *p = header; *p; p++) header_len++;
+    for (const char *p = footer; *p; p++) footer_len++;
+
+    littlefs_file_write(mnt, fd, header, header_len);
+
+    char chunk[1024];
+    for (int i = 0; i < 1024; i++) chunk[i] = 'a';
+    for (int i = 0; i < 31; i++) {
+        littlefs_file_write(mnt, fd, chunk, 1024);
+    }
+
+    littlefs_file_write(mnt, fd, footer, footer_len);
+    littlefs_file_close(mnt, fd);
+
+    lua_State *L = test_lua_open_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    int result = lua_slm_dofile(L, path);
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    /* Verify execution: 31 chunks * 1024 bytes = 31744. */
+    result = lua_slm_dostring(L,
+        "assert(near_max_size_ok == 31744, "
+        "'near-max-size script should have set the global to 31744')");
+    TEST_ASSERT_EQUAL_INT(0, result);
+
+    test_lua_close(L);
+}
+
+/*
+ * Test: lua_slm_dofile rejects oversize scripts (>32 KB cap).
+ *
+ * Companion to test_slm_dofile_near_max_size: confirms the size-check
+ * path that follows the buffered read fires cleanly when a script
+ * exceeds the 32 KB cap. The reject path must return non-zero AND
+ * not leak the heap-allocated buffer (PR #603's pmm_free_pages call
+ * sits on the same path; if a future refactor moves the free out of
+ * the reject branch, the kernel will leak 8 PMM pages per oversize
+ * load and PMM stats would drift over time — this test doesn't assert
+ * on PMM stats but does keep the codepath under test coverage).
+ */
+static void test_slm_dofile_oversize_rejected(void)
+{
+    const char *path = "/mnt/files/oversize.lua";
+    const char *subpath = NULL;
+    void *mnt = vfs_get_mount_ctx(path, &subpath);
+    if (!mnt) {
+        TEST_IGNORE_MESSAGE("LittleFS not mounted");
+        return;
+    }
+
+    int fd = littlefs_file_open(mnt, subpath,
+                                TEST_LFS_O_WRONLY | TEST_LFS_O_CREAT | TEST_LFS_O_TRUNC);
+    TEST_ASSERT_MESSAGE(fd >= 0, "Failed to create test script");
+
+    /* 33 KB of identical bytes — past the 32 KB cap. The size check
+     * fires before any Lua parse attempt, so the content doesn't
+     * need to be valid Lua. */
+    char chunk[1024];
+    for (int i = 0; i < 1024; i++) chunk[i] = 'a';
+    for (int i = 0; i < 33; i++) {
+        littlefs_file_write(mnt, fd, chunk, 1024);
+    }
+
+    littlefs_file_close(mnt, fd);
+
+    lua_State *L = test_lua_open_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    int result = lua_slm_dofile(L, path);
+    TEST_ASSERT_NOT_EQUAL(0, result);  /* rejected */
+
+    test_lua_close(L);
+}
+
 /* ============================================================================
  * Lua Heap Allocator Regression Tests
  *
@@ -3930,6 +4042,8 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_dofile_empty_file);
     RUN_TEST(test_slm_dofile_uses_slm_api);
     RUN_TEST(test_slm_dofile_runtime_error);
+    RUN_TEST(test_slm_dofile_near_max_size);
+    RUN_TEST(test_slm_dofile_oversize_rejected);
 
     /* Heap allocator regression tests */
     RUN_TEST(test_calloc_overflow_returns_null);
