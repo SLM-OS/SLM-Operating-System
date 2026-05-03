@@ -576,6 +576,20 @@ void task_destroy(struct task *task)
         return;
     }
 
+    /* Idle-task guard (#200/#606 investigation, 2026-05-02). Idle tasks
+     * are perpetual — destroying one would leave the owning CPU with
+     * no fallback for `pick_next_task`, leading to the
+     * `terminated/destroyed task selected as next` panic seen on
+     * pre-PR-598 baseline runs. Refuse loudly with the call site in
+     * the backtrace. */
+    extern uint32_t cpu_count;
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        if (task == sched_cpu_rq(i)->idle_task) {
+            panic("task_destroy: refusing to destroy idle task for CPU %u "
+                  "(task='%s')", i, task->name);
+        }
+    }
+
     TASK_LOCK_IRQSAVE();
 
     /* Verify task is terminated */

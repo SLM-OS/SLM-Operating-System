@@ -1268,6 +1268,22 @@ void scheduler_terminate_task(struct task *task)
         return;
     }
 
+    /* Idle-task guard (#200/#606 investigation, 2026-05-02). The
+     * scheduler-dispatch panic captured on the pre-PR-598 baseline
+     * fired with `current = idle_2 AND state = TERMINATED`; the
+     * only legitimate writer to TASK_TERMINATED outside that idle's
+     * lifetime is this function (the other site is shell `kill`,
+     * which has its own idle guard). Refuse the operation loudly
+     * if a caller passes an idle task — converts the silent
+     * corruption into a clear early panic with the call site in
+     * the backtrace. */
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        if (task == cpu_rq(i)->idle_task) {
+            panic("scheduler_terminate_task: refusing to terminate idle task "
+                  "for CPU %u (task='%s')", i, task->name);
+        }
+    }
+
     /* Same snapshot/lock/recheck pattern as scheduler_remove_task: a
      * concurrent steal can change task->assigned_cpu under us. We pin
      * `cpu` once we successfully recheck under the lock so the post-loop
@@ -1456,11 +1472,29 @@ static struct task *pick_next_task(uint32_t cpu)
     struct cpu_runqueue *rq = cpu_rq(cpu);
 
     if (rq->head) {
+        /* The comment in `schedule()`'s zombie-cleanup block claimed
+         * "the picker's TERMINATED/DESTROYED skip is the
+         * authoritative guard against stale-queue races" — but the
+         * old picker had no such skip. Add one now so a stale queue
+         * head (e.g. a task whose `task_exit` raced its enqueue path)
+         * panics here with a meaningful message instead of being
+         * silently dispatched to a freed entry pointer. (#200/#606
+         * investigation, 2026-05-02.) */
+        if (rq->head->state == TASK_TERMINATED ||
+            rq->head->state == TASK_DESTROYED) {
+            panic("pick_next_task: stale TERMINATED/DESTROYED task at queue "
+                  "head (CPU %u, task='%s', state=%d)",
+                  cpu, rq->head->name, (int)rq->head->state);
+        }
         sched_diag_picked[cpu]++;
         return rq->head;
     }
 
-    /* No ready tasks - run idle task */
+    /* No ready tasks - run idle task. The idle struct's state is
+     * never legitimately TERMINATED/DESTROYED (idle is perpetual);
+     * if it is, the corruption happened upstream and the panic in
+     * `schedule()` will surface it with a backtrace pointing to
+     * the dispatch point rather than this picker. */
     return rq->idle_task;
 }
 
