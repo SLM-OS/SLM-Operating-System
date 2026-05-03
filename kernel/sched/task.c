@@ -314,6 +314,9 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->stack_base = stack;
     task->stack_top = (void *)((uintptr_t)stack + STACK_SIZE);
 
+    /* Plant canary at stack bottom — diagnostic for #601 Bug B. */
+    task_canary_init(task);
+
     /* Initialize CPU context */
     /* Zero out the context first */
     for (size_t i = 0; i < sizeof(task->context); i++) {
@@ -743,4 +746,100 @@ void task_set_cleanup(struct task *task, task_cleanup_t cleanup, void *cleanup_a
     if (!task) return;
     task->cleanup = cleanup;
     task->cleanup_arg = cleanup_arg;
+}
+
+/* ========================================================================
+ * Stack canary diagnostic — #601 Bug B investigation
+ * ====================================================================== */
+
+void task_canary_init(struct task *task)
+{
+    if (!task || !task->stack_base) return;
+    uint64_t *p = (uint64_t *)task->stack_base;
+    const uint32_t n = TASK_STACK_CANARY_BYTES / sizeof(uint64_t);
+    for (uint32_t i = 0; i < n; i++) {
+        p[i] = TASK_STACK_CANARY_PATTERN;
+    }
+}
+
+static int task_canary_check_impl(struct task *task, bool unlocked)
+{
+    if (!task || !task->stack_base || task->id == 0) return 0;
+    const uint64_t *p = (const uint64_t *)task->stack_base;
+    const uint32_t n = TASK_STACK_CANARY_BYTES / sizeof(uint64_t);
+    int broken = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (p[i] == TASK_STACK_CANARY_PATTERN) continue;
+        broken = 1;
+        /* Log offset + actual value + ASCII interpretation. */
+        uint64_t v = p[i];
+        char ascii[9];
+        for (int j = 0; j < 8; j++) {
+            uint8_t b = (uint8_t)(v >> (j * 8));
+            ascii[j] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+        }
+        ascii[8] = '\0';
+        if (unlocked) {
+            uart_printf_unlocked(
+                "[canary] BROKEN task='%s' id=%u stack_base=%p "
+                "+0x%lx: 0x%lx  \"%s\"\n",
+                task->name, task->id, task->stack_base,
+                (unsigned long)(i * sizeof(uint64_t)),
+                (unsigned long)v, ascii);
+        } else {
+            uart_printf("[canary] BROKEN task='%s' id=%u stack_base=%p "
+                        "+0x%lx: 0x%lx  \"%s\"\n",
+                        task->name, task->id, task->stack_base,
+                        (unsigned long)(i * sizeof(uint64_t)),
+                        (unsigned long)v, ascii);
+        }
+    }
+    return broken;
+}
+
+int task_canary_check(struct task *task)
+{
+    return task_canary_check_impl(task, false);
+}
+
+/* Shared implementation. `unlocked` selects between the locked
+ * uart_printf path (safe from normal task context) and the
+ * uart_printf_unlocked path (safe from panic context where the
+ * UART lock cannot be held). See task.h for the public callers. */
+static int task_canary_check_all_impl(bool unlocked)
+{
+    int broken_count = 0;
+    /* Iterate without taking the task_lock — this is observation only,
+     * a torn read of `id` just means we miss a transient zero or new
+     * task, which is acceptable for diagnostic purposes. */
+    if (unlocked)
+        uart_printf_unlocked("[canary] Task stack inventory:\n");
+    else
+        uart_printf("[canary] Task stack inventory:\n");
+    for (uint32_t i = 0; i < MAX_TASKS; i++) {
+        struct task *t = &task_table[i];
+        if (t->id == 0) continue;
+        if (!t->stack_base) continue;
+        if (unlocked) {
+            uart_printf_unlocked("  id=%u name='%s' stack=[%p..%p)\n",
+                                 t->id, t->name, t->stack_base, t->stack_top);
+        } else {
+            uart_printf("  id=%u name='%s' stack=[%p..%p)\n",
+                        t->id, t->name, t->stack_base, t->stack_top);
+        }
+        if (task_canary_check_impl(t, unlocked)) {
+            broken_count++;
+        }
+    }
+    return broken_count;
+}
+
+int task_canary_check_all(void)
+{
+    return task_canary_check_all_impl(false);
+}
+
+int task_canary_check_all_unlocked(void)
+{
+    return task_canary_check_all_impl(true);
 }

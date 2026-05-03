@@ -289,6 +289,156 @@ static void test_task_slot_skips_freed_by_id(void)
 }
 
 /* ============================================================================
+ * Unit Tests: Stack canary diagnostic (#601)
+ *
+ * Cover the public canary API documented in task.h. Tests pre-empt
+ * a future regression where the canary pattern, byte count, or
+ * stack_base placement drifts and the panic-time inventory silently
+ * stops detecting overflow.
+ * ============================================================================ */
+
+/*
+ * task_create plants the canary at stack_base, so a freshly created
+ * task always reports intact (broken == 0).
+ */
+static void test_canary_intact_on_task_create(void)
+{
+    struct task *t = task_create_with_priority("canary_intact",
+                                               nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_NOT_NULL(t->stack_base);
+
+    TEST_ASSERT_EQUAL_INT(0, task_canary_check(t));
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/*
+ * Overwriting the canary region must be detected. Restoring it must
+ * make the check pass again — proves the check reads from where the
+ * init writes (no drifting offset).
+ */
+static void test_canary_detects_overwrite(void)
+{
+    struct task *t = task_create_with_priority("canary_overwrite",
+                                               nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_NOT_NULL(t->stack_base);
+
+    /* Save the original canary bytes so we can restore after. */
+    uint8_t saved[TASK_STACK_CANARY_BYTES];
+    for (uint32_t i = 0; i < TASK_STACK_CANARY_BYTES; i++) {
+        saved[i] = ((uint8_t *)t->stack_base)[i];
+    }
+
+    /* Overwrite the entire 64-byte canary region with zeros — would
+     * be the smashed-canary state under a stack overflow. */
+    for (uint32_t i = 0; i < TASK_STACK_CANARY_BYTES; i++) {
+        ((uint8_t *)t->stack_base)[i] = 0;
+    }
+    TEST_ASSERT_EQUAL_INT(1, task_canary_check(t));
+
+    /* Restore exact bytes — check should now pass. */
+    for (uint32_t i = 0; i < TASK_STACK_CANARY_BYTES; i++) {
+        ((uint8_t *)t->stack_base)[i] = saved[i];
+    }
+    TEST_ASSERT_EQUAL_INT(0, task_canary_check(t));
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/*
+ * A single-byte change anywhere in the 64-byte region must trip the
+ * check — not just zeroing the whole region. Loop over all 64 byte
+ * positions and confirm each is covered.
+ */
+static void test_canary_detects_single_byte_overwrite(void)
+{
+    struct task *t = task_create_with_priority("canary_byte",
+                                               nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+
+    uint8_t *cs = (uint8_t *)t->stack_base;
+    for (uint32_t i = 0; i < TASK_STACK_CANARY_BYTES; i++) {
+        uint8_t orig = cs[i];
+        cs[i] ^= 0xFF;  /* flip all bits in this byte */
+        /* Failure message would carry the offset, but Unity-light
+         * doesn't have TEST_ASSERT_EQUAL_INT_MESSAGE; the fail line
+         * + offset comment in the source narrows it well enough. */
+        TEST_ASSERT_EQUAL_INT(1, task_canary_check(t));
+        cs[i] = orig;
+    }
+    TEST_ASSERT_EQUAL_INT(0, task_canary_check(t));
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/*
+ * task_canary_check_all returns the count of broken canaries.
+ * Test as a DELTA against whatever the baseline is — the test
+ * harness may already have broken canaries from unrelated state
+ * (this isn't the test that asserts a clean baseline; that's the
+ * job of the system's overall integrity, surfaced via the
+ * `canary` shell command). What this test asserts is that
+ * corrupting one new task adds exactly one to the count, and
+ * restoring removes exactly one.
+ */
+static void test_canary_check_all_returns_count(void)
+{
+    struct task *a = task_create_with_priority("canary_all_a",
+                                               nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    struct task *b = task_create_with_priority("canary_all_b",
+                                               nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_NOT_NULL(b);
+
+    int baseline = task_canary_check_all();
+
+    /* Corrupt task `a`'s canary region. */
+    uint8_t *cs = (uint8_t *)a->stack_base;
+    uint8_t saved = cs[0];
+    cs[0] ^= 0xFF;
+    int with_one_broken = task_canary_check_all();
+    TEST_ASSERT_EQUAL_INT(baseline + 1, with_one_broken);
+
+    /* Restore so cleanup is clean. */
+    cs[0] = saved;
+    TEST_ASSERT_EQUAL_INT(baseline, task_canary_check_all());
+
+    a->state = TASK_TERMINATED;
+    task_destroy(a);
+    b->state = TASK_TERMINATED;
+    task_destroy(b);
+}
+
+/*
+ * task_canary_check must tolerate NULL / freed tasks without
+ * crashing. Returns 0 in both cases per its contract.
+ */
+static void test_canary_check_null_and_dead_safe(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, task_canary_check(NULL));
+
+    /* Build a "dead" task struct on the test stack: id == 0 means
+     * the slot is free per task.c convention. */
+    struct task dead;
+    for (size_t i = 0; i < sizeof(dead); i++)
+        ((uint8_t *)&dead)[i] = 0;
+    /* Even with a non-null stack_base, id==0 must short-circuit. */
+    uint64_t fake_stack_dummy = 0;
+    dead.stack_base = &fake_stack_dummy;
+    TEST_ASSERT_EQUAL_INT(0, task_canary_check(&dead));
+}
+
+/* ============================================================================
  * Unit Tests: task_sleep_ms() scheduler-blocking sleep (#319)
  * ============================================================================ */
 
@@ -4707,6 +4857,13 @@ int test_suite_scheduler(void)
     RUN_TEST(test_task_slot_in_range_returns_slot);
     RUN_TEST(test_task_slot_finds_created_task);
     RUN_TEST(test_task_slot_skips_freed_by_id);
+
+    /* Unit tests: stack canary diagnostic (#601) */
+    RUN_TEST(test_canary_intact_on_task_create);
+    RUN_TEST(test_canary_detects_overwrite);
+    RUN_TEST(test_canary_detects_single_byte_overwrite);
+    RUN_TEST(test_canary_check_all_returns_count);
+    RUN_TEST(test_canary_check_null_and_dead_safe);
 
     /* Unit tests: task_sleep_ms() scheduler-blocking sleep (#319) */
     RUN_TEST(test_task_sleep_ms_zero_returns_immediately);

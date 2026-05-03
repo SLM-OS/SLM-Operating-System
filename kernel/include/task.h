@@ -205,6 +205,54 @@ struct task {
 /* Task function prototype */
 typedef void (*task_entry_t)(void *arg);
 
+/* ===== Stack canary diagnostic (#601 Bug B) =====
+ *
+ * 64-byte magic pattern at the LOW address of every task's stack
+ * (i.e., at stack_base, the boundary stack overflow would smash
+ * first since ARM64/x86 stacks grow DOWN). A wild pointer that
+ * writes to the bottom of any task's stack will leave a recognizable
+ * pattern in the corruption — comparing the actual contents to the
+ * expected pattern lets us detect both stack overflow AND wild
+ * cross-task writes.
+ *
+ * Diagnostic only: this is observation infrastructure, not a fix.
+ * Once Bug B is root-caused we can decide whether to keep it. */
+#define TASK_STACK_CANARY_BYTES   64u
+#define TASK_STACK_CANARY_PATTERN 0xDEADBEEFCAFEBABEULL
+
+/* Initialize the canary at stack bottom. Called from
+ * `task_create_with_priority` (the standard path) and from
+ * `elf_create_task_with_args` (the ELF-loader path that bypasses
+ * task_create). Any future task-creation path that assigns
+ * stack_base directly must also call this so cmd_canary and the
+ * panic-time inventory cover those tasks too. */
+void task_canary_init(struct task *task);
+
+/* Verify a single task's canary. Returns 0 if intact, 1 if broken.
+ * On corruption logs the corrupted bytes with their offset within
+ * the canary region. Uses the locked uart_printf path; safe from
+ * normal task context but will deadlock if called from a panic
+ * handler with the UART lock held. The panic-safe equivalent is
+ * baked into `task_canary_check_all_unlocked`. */
+int task_canary_check(struct task *task);
+
+/* Iterate all live tasks and check each canary. Returns the number
+ * of broken canaries found (0 = all intact). Logs each break.
+ *
+ * Uses the locked uart_printf path — safe from normal task context
+ * (e.g., the `canary` shell command). Do NOT call from a panic
+ * handler with locks unsafe; use `task_canary_check_all_unlocked`
+ * instead. */
+int task_canary_check_all(void);
+
+/* Same as task_canary_check_all but uses uart_printf_unlocked, so
+ * it's safe to call from contexts where the UART lock cannot be
+ * held — specifically the panic handler, where IRQs are off and
+ * locks are presumed corrupted. The output may interleave with
+ * concurrent log output from other CPUs, so callers from normal
+ * task context should prefer the locked variant above. */
+int task_canary_check_all_unlocked(void);
+
 /*
  * Create a new task with specified priority.
  *

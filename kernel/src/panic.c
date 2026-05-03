@@ -6,6 +6,7 @@
 #include "debug.h"
 #include "task.h"
 #include "smp.h"
+#include "platform.h"     /* RAM_BASE / RAM_SIZE for stack-dump bounds */
 #include <stdint.h>
 #include <stdarg.h>
 
@@ -164,6 +165,80 @@ void panic(const char *fmt, ...)
 
     uart_puts_unlocked("\n\n");
     dump_registers();
+
+    /* #601 Bug B diagnostic: dump task stack canary state + the
+     * stack contents around the current SP. If any task's canary
+     * is broken, the offset + corrupted bytes get logged. Even if
+     * canaries are intact, the SP-region dump shows what's living
+     * on the stack at the moment of the panic — a corrupt return
+     * address there will be visible alongside its surrounding
+     * stack-frame context.
+     *
+     * x86-64 panics can use the QEMU monitor / GDB stub for stack
+     * inspection (and the page-fault handler dumps CR2/RSP), so the
+     * stack-content dump below is ARM64-only — adding it on x86-64
+     * is straightforward (`mov %%rsp, %0`) but hasn't been needed
+     * yet. */
+    {
+        uart_puts_unlocked("\nStack canary check:\n");
+        int broken = task_canary_check_all_unlocked();
+        if (broken == 0) {
+            uart_puts_unlocked("  All task canaries intact.\n");
+        }
+
+        /* Stack dump near SP. On AArch64 we can read SP via mrs
+         * then dump 256 bytes (32 quadwords) around it. Stack grows
+         * down, so dump from SP-64 to SP+192 to capture the
+         * immediately-active frames + a bit below for canary visibility.
+         *
+         * Address-range guard: a severely corrupted SP (the bug class
+         * this dump exists to diagnose) could land outside known RAM,
+         * and dereferencing such a pointer would re-fault inside the
+         * panic handler — turning a debuggable panic into a hang or
+         * recursive panic. Bound the dump window to [RAM_BASE,
+         * RAM_BASE + RAM_SIZE) and skip the dump if the start falls
+         * outside. We accept slightly truncating the high end if the
+         * range straddles RAM_BASE+RAM_SIZE. */
+#if !defined(PLATFORM_X86_64)
+        {
+            uint64_t sp;
+            __asm__ volatile("mov %0, sp" : "=r"(sp));
+            uint64_t start = (sp - 64) & ~0x7ULL;
+            uint64_t end_excl = start + 32 * 8;
+            const uint64_t ram_lo = (uint64_t)RAM_BASE;
+            const uint64_t ram_hi = ram_lo + (uint64_t)RAM_SIZE;
+            if (start < ram_lo || start >= ram_hi) {
+                uart_printf_unlocked(
+                    "\nStack dump around SP=0x%lx skipped — outside "
+                    "RAM window [0x%lx..0x%lx); SP likely corrupted.\n",
+                    (unsigned long)sp,
+                    (unsigned long)ram_lo,
+                    (unsigned long)ram_hi);
+            } else {
+                /* Clamp end to RAM_HI so we never read past mapped DRAM. */
+                if (end_excl > ram_hi) end_excl = ram_hi;
+                uart_printf_unlocked("\nStack dump around SP=0x%lx:\n", sp);
+                const uint64_t *p = (const uint64_t *)(uintptr_t)start;
+                uint64_t rows = (end_excl - start) / 8u;
+                for (uint64_t row = 0; row < rows; row++) {
+                    uint64_t addr = start + row * 8;
+                    uint64_t v = p[row];
+                    /* ASCII view of the 8 bytes for spotting strings. */
+                    char ascii[9];
+                    for (int j = 0; j < 8; j++) {
+                        uint8_t b = (uint8_t)(v >> (j * 8));
+                        ascii[j] = (b >= 0x20 && b < 0x7F) ? (char)b : '.';
+                    }
+                    ascii[8] = '\0';
+                    uart_printf_unlocked("  0x%lx: 0x%016lx  \"%s\"%s\n",
+                                         (unsigned long)addr,
+                                         (unsigned long)v, ascii,
+                                         (addr == sp) ? "  <- SP" : "");
+                }
+            }
+        }
+#endif
+    }
 
     uart_puts_unlocked("\nSystem halted.\n");
 

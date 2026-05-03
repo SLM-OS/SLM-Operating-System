@@ -491,6 +491,21 @@ int cmd_cpu(int argc, char *argv[])
 /*
  * uptime - Show system uptime
  */
+int cmd_canary(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    int broken = task_canary_check_all();
+    if (broken == 0) {
+        shell_printf("All task stack canaries intact.\r\n");
+    } else {
+        shell_printf("%d broken canary region(s) detected (see "
+                     "uart_printf log above for offsets/values).\r\n",
+                     broken);
+    }
+    return 0;
+}
+
 int cmd_uptime(int argc, char *argv[])
 {
     (void)argc;

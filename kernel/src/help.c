@@ -412,6 +412,22 @@ static const struct help_entry help_entries[] = {
         "  - Isolation state\n"
     ),
 
+    HELP_TEXT("canary",
+        "canary - Check task stack canaries (#601 Bug B diagnostic)\n"
+        "\n"
+        "Usage:\n"
+        "  canary\n"
+        "\n"
+        "Iterates every live task and verifies the 64-byte canary\n"
+        "pattern at stack_base. Reports the stack inventory\n"
+        "([stack_base..stack_top) for each task) and any tasks whose\n"
+        "canary has been smashed by a stack overflow or wild write.\n"
+        "Diagnostic only — no side effects.\n"
+        "\n"
+        "Also runs automatically inside the panic handler to surface\n"
+        "stack-corruption symptoms at crash time.\n"
+    ),
+
     HELP_TEXT("kill",
         "kill - Terminate a task\n"
         "\n"

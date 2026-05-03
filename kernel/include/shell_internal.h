@@ -54,6 +54,7 @@ int cmd_mem(int argc, char **argv);
 int cmd_tasks(int argc, char **argv);
 int cmd_cpu(int argc, char **argv);
 int cmd_uptime(int argc, char **argv);
+int cmd_canary(int argc, char **argv);
 int cmd_clear(int argc, char **argv);
 int cmd_reboot(int argc, char **argv);
 int cmd_sleep(int argc, char **argv);
