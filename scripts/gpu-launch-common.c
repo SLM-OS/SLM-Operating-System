@@ -178,27 +178,18 @@ void gpu_launch_setup(struct gpu_launch_ctx *ctx,
     gpu_xioctl(ctx->ch_fd, NVGPU_IOCTL_CHANNEL_WDT, &wdt, "WDT_DISABLE");
 
     ctx->userd_dmabuf  = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
-    /* GPFIFO sized to fit in ONE 4 KB page so the IOVMM allocation is
-     * physically contiguous. Why: the helper's nvmap allocator uses
-     * NVMAP_HEAP_IOVMM (0x40000000), which scatters multi-page
-     * allocations across non-contiguous physical pages — fine for
-     * device access via SMMU but breaks SLM-OS's post-kexec direct-
-     * physical writes (Jetson EL2 identity DRAM mapping). With an
-     * 8 KB GPFIFO, SLM-OS would write entries 512..1023 to
-     * `gpfifo_phys + 4096..8191` which lands at *wherever the second
-     * physical page happens to be*, NOT the second page of the IOVMM
-     * allocation. PBDMA reads via the SMMU-mapped GPU VA and finds
-     * stale entries → silent dispatch failure → wedge at GPFIFO index
-     * 512. See #601 for the full investigation chain.
-     *
-     * One 4 KB page = 512 entries (8 bytes each). Plenty for our
-     * single-channel workload — peak observed steady-state is ~10
-     * outstanding entries before the next poll. */
-    ctx->gpfifo_dmabuf = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
+    /* GPFIFO is sized to one 4 KB page (512 entries × 8 B). See
+     * GPU_LAUNCH_GPFIFO_* in gpu-launch-common.h for the why and
+     * the single-source-of-truth contract — the alloc, mmap,
+     * num_gpfifo_entries, and ctx->gpfifo_entries below all derive
+     * from those constants. */
+    ctx->gpfifo_dmabuf = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd,
+                                                GPU_LAUNCH_GPFIFO_BYTES,
+                                                4096);
 
     struct nvgpu_channel_setup_bind_args sb;
     memset(&sb, 0, sizeof(sb));
-    sb.num_gpfifo_entries = 512;
+    sb.num_gpfifo_entries = GPU_LAUNCH_GPFIFO_ENTRIES;
     sb.flags = NVGPU_CHANNEL_SETUP_BIND_FLAGS_DETERMINISTIC |
                NVGPU_CHANNEL_SETUP_BIND_FLAGS_USERMODE_SUPPORT;
     sb.userd_dmabuf_fd  = ctx->userd_dmabuf;
@@ -207,7 +198,7 @@ void gpu_launch_setup(struct gpu_launch_ctx *ctx,
                "SETUP_BIND");
     ctx->work_submit_token = sb.work_submit_token;
     ctx->gpfifo_gpu_va     = sb.gpfifo_gpu_va;
-    ctx->gpfifo_entries    = 512;
+    ctx->gpfifo_entries    = GPU_LAUNCH_GPFIFO_ENTRIES;
     printf("[launch] work_submit_token=0x%x\n", sb.work_submit_token);
 
     struct nvgpu_alloc_obj_ctx_args octx = {
@@ -283,7 +274,8 @@ void gpu_launch_setup(struct gpu_launch_ctx *ctx,
 
     ctx->userd_va  = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
                           ctx->userd_dmabuf, 0);
-    ctx->gpfifo_va = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+    ctx->gpfifo_va = mmap(NULL, GPU_LAUNCH_GPFIFO_BYTES,
+                          PROT_READ | PROT_WRITE, MAP_SHARED,
                           ctx->gpfifo_dmabuf, 0);
     ctx->pb_va     = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_SHARED,
                           ctx->pb_dmabuf, 0);
@@ -609,10 +601,9 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
      * each subsequent call advances to the next slot. */
     volatile uint32_t *userd = (volatile uint32_t *)ctx->userd_va;
     uint32_t cur_gp_put = userd[GPU_LAUNCH_USERD_GP_PUT_WORD];
-    /* gpu_launch_setup pins gpfifo_entries to 512 (a power of two
-     * fitting in one 4 KB page — see #601 for why a multi-page
-     * GPFIFO breaks SLM-OS's post-kexec direct-physical writes);
-     * the mask works as long as that contract holds. */
+    /* gpu_launch_setup pins gpfifo_entries to GPU_LAUNCH_GPFIFO_ENTRIES
+     * (a power of two — see gpu-launch-common.h for why); the mask
+     * works as long as that contract holds. */
     uint32_t mask = ctx->gpfifo_entries - 1u;
     uint32_t slot = cur_gp_put & mask;
 
@@ -622,7 +613,9 @@ int gpu_submit_and_poll(struct gpu_launch_ctx *ctx,
                      ((uint32_t)pb_dwords << 10);
     ((uint32_t *)ctx->gpfifo_va)[slot * 2 + 0] = gp_e0;
     ((uint32_t *)ctx->gpfifo_va)[slot * 2 + 1] = gp_e1;
-    msync(ctx->gpfifo_va, ctx->gpfifo_entries * 8, MS_SYNC);
+    msync(ctx->gpfifo_va,
+          ctx->gpfifo_entries * GPU_LAUNCH_GPFIFO_ENTRY_BYTES,
+          MS_SYNC);
 
     uint32_t new_gp_put = ga10b_next_gp_put(cur_gp_put, ctx->gpfifo_entries);
     userd[GPU_LAUNCH_USERD_GP_PUT_WORD] = new_gp_put;
@@ -725,7 +718,7 @@ uint64_t gpu_write_handoff_v4(const struct gpu_launch_ctx *ctx,
         .gpfifo_phys        = gpfifo_phys,
         .gpfifo_gpu_va      = ctx->gpfifo_gpu_va,
         .gpfifo_entries     = ctx->gpfifo_entries,
-        .gpfifo_entry_size  = 8,
+        .gpfifo_entry_size  = GPU_LAUNCH_GPFIFO_ENTRY_BYTES,
         .pushbuf_phys       = pb_phys,
         .pushbuf_gpu_va     = ctx->pb_gva,
         .pushbuf_size       = 65536,
@@ -799,7 +792,7 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
         .gpfifo_phys        = gpfifo_phys,
         .gpfifo_gpu_va      = ctx->gpfifo_gpu_va,
         .gpfifo_entries     = ctx->gpfifo_entries,
-        .gpfifo_entry_size  = 8,
+        .gpfifo_entry_size  = GPU_LAUNCH_GPFIFO_ENTRY_BYTES,
         .pushbuf_phys       = pb_phys,
         .pushbuf_gpu_va     = ctx->pb_gva,
         .pushbuf_size       = 65536,
@@ -869,7 +862,7 @@ uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
         .gpfifo_phys        = gpfifo_phys,
         .gpfifo_gpu_va      = ctx->gpfifo_gpu_va,
         .gpfifo_entries     = ctx->gpfifo_entries,
-        .gpfifo_entry_size  = 8,
+        .gpfifo_entry_size  = GPU_LAUNCH_GPFIFO_ENTRY_BYTES,
         .pushbuf_phys       = pb_phys,
         .pushbuf_gpu_va     = ctx->pb_gva,
         .pushbuf_size       = 65536,
@@ -1023,7 +1016,7 @@ uint64_t gpu_write_handoff_v7(const struct gpu_launch_ctx *ctx,
         .gpfifo_phys        = gpfifo_phys,
         .gpfifo_gpu_va      = ctx->gpfifo_gpu_va,
         .gpfifo_entries     = ctx->gpfifo_entries,
-        .gpfifo_entry_size  = 8,
+        .gpfifo_entry_size  = GPU_LAUNCH_GPFIFO_ENTRY_BYTES,
         .pushbuf_phys       = pb_phys,
         .pushbuf_gpu_va     = ctx->pb_gva,
         .pushbuf_size       = 65536,

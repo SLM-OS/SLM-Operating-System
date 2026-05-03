@@ -53,6 +53,30 @@
 #define GPU_LAUNCH_USERD_GP_GET_WORD  34u
 
 /* ============================================================
+ * GPFIFO ring sizing. Pinned to one 4 KB page (512 entries × 8 B)
+ * so the IOVMM allocation is physically contiguous and SLM-OS's
+ * post-kexec direct-physical writes from the EL2 identity DRAM
+ * mapping land on the page PBDMA actually reads. A multi-page
+ * GPFIFO scatters across non-contiguous physical pages under
+ * NVMAP_HEAP_IOVMM and produces silent dispatch failures past
+ * the first page boundary — see #601.
+ *
+ * The 4 numbers must agree:
+ *   - dmabuf alloc size                   (gpu_nvmap_alloc_dmabuf)
+ *   - mmap size                           (mmap)
+ *   - num_gpfifo_entries in setup-bind    (NVGPU_IOCTL_CHANNEL_SETUP_BIND)
+ *   - ctx->gpfifo_entries                 (used for mask + msync size)
+ *
+ * Naming all three from the single ENTRIES constant keeps them in
+ * lock-step. Each entry is 8 bytes (gp_e0 + gp_e1 — Ampere format,
+ * see ga10b_bringup.h GPFIFO entry encoding).
+ * ============================================================ */
+#define GPU_LAUNCH_GPFIFO_ENTRIES     512u
+#define GPU_LAUNCH_GPFIFO_ENTRY_BYTES 8u
+#define GPU_LAUNCH_GPFIFO_BYTES       (GPU_LAUNCH_GPFIFO_ENTRIES * \
+                                       GPU_LAUNCH_GPFIFO_ENTRY_BYTES)
+
+/* ============================================================
  * nvmap allocation knobs (captured from CUDA's ioctl stream via
  * LD_PRELOAD snoop on L4T r36.4.7). Must stay in lock-step with
  * scripts/gpu-channel-helper.c — SLM-OS inherits channels from

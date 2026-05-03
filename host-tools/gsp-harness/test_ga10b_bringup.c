@@ -2070,6 +2070,22 @@ static void test_next_gp_put_wraps_at_ring_boundary(void)
      * so a stale read can't push gp_put past the boundary. */
     REQUIRE_EQ(ga10b_next_gp_put(512u,  512u),  1u);
     REQUIRE_EQ(ga10b_next_gp_put(1023u, 512u),  0u);
+
+    /* Documented contract: caller MUST validate gpfifo_entries via
+     * ga10b_validate_handoff (which rejects 0 / non-power-of-two)
+     * before calling this. The helper is a one-line `(cur+1) & mask`
+     * with no defensive check — the cases below pin the
+     * garbage-in/garbage-out behaviour so a future "let's add a
+     * check" refactor doesn't quietly start panicking. */
+    /* gpfifo_entries == 0: mask underflows to 0xFFFFFFFF, masking is
+     * a no-op, result is cur+1. */
+    REQUIRE_EQ(ga10b_next_gp_put(0u,    0u),    1u);
+    REQUIRE_EQ(ga10b_next_gp_put(42u,   0u),    43u);
+    /* Non-power-of-two: mask is just (entries - 1), which still
+     * masks but produces ring-incoherent indices — caller's bug. */
+    REQUIRE_EQ(ga10b_next_gp_put(0u,    3u),    0u);   /* (0+1) & 0b10 = 0 */
+    REQUIRE_EQ(ga10b_next_gp_put(2u,    3u),    2u);   /* (2+1) & 0b10 = 2 */
+    REQUIRE_EQ(ga10b_next_gp_put(0u,    5u),    0u);   /* (0+1) & 0b100 = 0 */
 }
 
 /* ======================================================================

@@ -68,6 +68,7 @@
  * ensures the struct field offsets match what SLM-OS expects; if the
  * layout changes, both sides rebuild together. */
 #include "../kernel/gpu/nvidia/ga10b_channel_handoff.h"
+#include "gpu-launch-common.h"
 #include <signal.h>
 
 /* Default time to keep the channel alive waiting for kexec. Override
@@ -258,9 +259,15 @@ int main(int argc, char **argv)
     };
     xioctl(ch_fd, NVGPU_IOCTL_CHANNEL_WDT, &wdt, "WDT_DISABLE");
 
-    /* Allocate buffers via nvmap: USERD (4KB), GPFIFO (8KB = 1024 entries). */
+    /* Allocate buffers via nvmap: USERD (4KB), GPFIFO (one 4KB page,
+     * 512 entries — see GPU_LAUNCH_GPFIFO_* in gpu-launch-common.h
+     * for why a multi-page GPFIFO breaks SLM-OS's post-kexec direct-
+     * physical writes; #601). This helper writes channel handoffs
+     * that SLM-OS inherits, so its sizing MUST match
+     * gpu-launch-common.c. */
     int userd_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 4096, 4096);
-    int gpfifo_dmabuf = nvmap_alloc_dmabuf(nvmap_fd, 8192, 4096);
+    int gpfifo_dmabuf = nvmap_alloc_dmabuf(nvmap_fd,
+                                           GPU_LAUNCH_GPFIFO_BYTES, 4096);
     printf("[gpu-helper] USERD dmabuf=%d, GPFIFO dmabuf=%d\n",
            userd_dmabuf, gpfifo_dmabuf);
 
@@ -269,7 +276,7 @@ int main(int argc, char **argv)
      * via LD_PRELOAD on L4T r36.4.7. */
     struct nvgpu_channel_setup_bind_args sb;
     memset(&sb, 0, sizeof(sb));
-    sb.num_gpfifo_entries = 1024;
+    sb.num_gpfifo_entries = GPU_LAUNCH_GPFIFO_ENTRIES;
     sb.num_inflight_jobs = 0;
     sb.flags = NVGPU_CHANNEL_SETUP_BIND_FLAGS_DETERMINISTIC |
                NVGPU_CHANNEL_SETUP_BIND_FLAGS_USERMODE_SUPPORT;
@@ -400,7 +407,8 @@ int main(int argc, char **argv)
      * Then translate to physical addresses via /proc/self/pagemap. */
     void *userd_va = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                           MAP_SHARED, userd_dmabuf, 0);
-    void *gpfifo_va = mmap(NULL, 8192, PROT_READ | PROT_WRITE,
+    void *gpfifo_va = mmap(NULL, GPU_LAUNCH_GPFIFO_BYTES,
+                           PROT_READ | PROT_WRITE,
                            MAP_SHARED, gpfifo_dmabuf, 0);
     void *pb_va = mmap(NULL, 65536, PROT_READ | PROT_WRITE,
                        MAP_SHARED, pb_dmabuf, 0);
@@ -415,7 +423,7 @@ int main(int argc, char **argv)
 
     /* Touch pages to ensure they're faulted in before pagemap lookup. */
     memset(userd_va, 0, 4096);
-    memset(gpfifo_va, 0, 8192);
+    memset(gpfifo_va, 0, GPU_LAUNCH_GPFIFO_BYTES);
     memset(pb_va, 0, 65536);
     memset(sem_va, 0, 4096);
 
@@ -471,8 +479,8 @@ int main(int argc, char **argv)
         .userd_gp_get_offset = 34 * 4,
         .gpfifo_phys        = gpfifo_phys,
         .gpfifo_gpu_va      = sb.gpfifo_gpu_va,
-        .gpfifo_entries     = 1024,
-        .gpfifo_entry_size  = 8,
+        .gpfifo_entries     = GPU_LAUNCH_GPFIFO_ENTRIES,
+        .gpfifo_entry_size  = GPU_LAUNCH_GPFIFO_ENTRY_BYTES,
         .pushbuf_phys       = pb_phys,
         .pushbuf_gpu_va     = pb_map.offset,
         .pushbuf_size       = 65536,
