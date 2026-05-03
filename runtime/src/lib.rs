@@ -5151,10 +5151,10 @@ pub extern "C" fn rust_slm_count() -> u32 {
 /// Maximum GGUF buffer size accepted by `rust_slm_load`, in bytes.
 ///
 /// Single source of truth for the C shell's pre-load size gate. Pinned
-/// at the registry's `MAX_PLAUSIBLE_GGUF_BYTES` (1 GiB today, matching
-/// the PMM buddy max-order). When #550's multi-block allocator lands
-/// and the cap rises, the C shell automatically picks up the new
-/// value without a corresponding edit on its side.
+/// at the registry's `MAX_PLAUSIBLE_GGUF_BYTES` (2 GiB today, matching
+/// the PMM buddy max-order = 19). When #550's multi-block allocator
+/// lands and the cap rises, the C shell automatically picks up the
+/// new value without a corresponding edit on its side.
 #[no_mangle]
 #[cfg(feature = "slm")]
 pub extern "C" fn rust_slm_max_gguf_bytes() -> u64 {
