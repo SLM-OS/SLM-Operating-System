@@ -437,7 +437,7 @@ uart_printf("Weight pool: %zu/%zu blocks free\n",
 
 **Symptom:** `slm load /mnt/files/foo.gguf` returns `file too large (X bytes, cap Y)`.
 
-**Cause:** GGUF buffer cap is `MAX_PLAUSIBLE_GGUF_BYTES` in `runtime/src/slm/registry.rs` — 1 GiB today, matching the PMM buddy max-order. Larger files would not fit a single contiguous PMM allocation. The C shell queries this cap via `rust_slm_max_gguf_bytes()` so both sides stay in lockstep.
+**Cause:** GGUF buffer cap is `MAX_PLAUSIBLE_GGUF_BYTES` in `runtime/src/slm/registry.rs` — 2 GiB today, matching the PMM buddy max-order (`PMM_MAX_ORDER = 19`). Larger files would not fit a single contiguous PMM allocation. The C shell queries this cap via `rust_slm_max_gguf_bytes()` so both sides stay in lockstep.
 
 **Fix:** Either use a smaller-quantization variant (Q4_K_M < Q8_0 < FP16) of the same model, or wait on the multi-block weight allocator (#550) which lifts the ceiling.
 

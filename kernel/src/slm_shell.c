@@ -215,11 +215,11 @@ static int slm_load(int argc, char *argv[])
     }
     /*
      * GGUF size cap is owned by the Rust registry
-     * (`MAX_PLAUSIBLE_GGUF_BYTES`, 1 GiB today — matches PMM buddy
-     * max-order). Querying via FFI keeps the C shell in lockstep
-     * when #550's multi-block allocator lifts the ceiling, so a
-     * stale 2-GiB hardcode here can't accept a file the registry
-     * will then reject with `CorruptedData`.
+     * (`MAX_PLAUSIBLE_GGUF_BYTES`, 2 GiB today — matches PMM buddy
+     * max-order = 19). Querying via FFI keeps the C shell in lockstep
+     * when #550's multi-block allocator lifts the ceiling further, so
+     * a stale hardcode here can't accept a file the registry will
+     * then reject with `CorruptedData`.
      */
     const uint64_t cap = rust_slm_max_gguf_bytes();
     if ((uint64_t)info.size > cap) {

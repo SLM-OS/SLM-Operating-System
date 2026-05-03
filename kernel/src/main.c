@@ -332,8 +332,7 @@ void kernel_main(void *dtb)
      * QEMU and Pi 5 boot cleanly under either ordering, but the
      * vmm_init→pmm_init sequence is correct on every ARM64
      * platform and removes a class of cache-coherency latent
-     * bugs, so the swap is unconditional under PLATFORM_X86_64's
-     * #else branch.
+     * bugs, so the swap is unconditional on every ARM64 target.
      */
     uart_puts("\n");
     vmm_init();

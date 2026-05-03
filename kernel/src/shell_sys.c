@@ -172,7 +172,7 @@ int cmd_mem(int argc, char *argv[])
      * order is given) walk the free list at that order printing each
      * block's address + next/prev fields. Diagnostic for free-list
      * corruption (e.g., #608's order-19 fault during slm load). */
-    if (argc >= 2 && argv[1] && argv[1][0] == 'b') {
+    if (argc >= 2 && argv[1] && strcmp(argv[1], "buddy") == 0) {
         pmm_dump_stats();
         if (argc >= 3 && argv[2]) {
             unsigned int order = 0;

@@ -1083,9 +1083,9 @@ extern uint32_t rust_slm_count(void);
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
  *
  * Single source of truth for the shell's pre-load size gate. Pinned
- * at the Rust registry's MAX_PLAUSIBLE_GGUF_BYTES (1 GiB today; PMM
- * buddy max-order). When #550 lands and the cap rises, the shell
- * picks up the new value automatically.
+ * at the Rust registry's MAX_PLAUSIBLE_GGUF_BYTES (2 GiB today; PMM
+ * buddy max-order = 19). When #550 lands and the cap rises, the
+ * shell picks up the new value automatically.
  */
 extern uint64_t rust_slm_max_gguf_bytes(void);
 
