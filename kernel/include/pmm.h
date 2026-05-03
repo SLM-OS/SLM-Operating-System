@@ -155,4 +155,16 @@ size_t pmm_get_total_pages(void);
  */
 void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
 
+/*
+ * Walk the free list at the given order and print each block's
+ * address + next/prev pointer values. Bounded at `max_blocks` to
+ * keep a corrupted cycle from looping forever.
+ *
+ * Diagnostic only — output goes to UART (uart_printf), not the
+ * active shell's I/O. Capture via serial console. Used by
+ * `mem buddy <order>` to debug free-list corruption (e.g., #608's
+ * order-19 fault).
+ */
+void pmm_dump_free_list(unsigned int order, size_t max_blocks);
+
 #endif /* PMM_H */

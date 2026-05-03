@@ -312,17 +312,43 @@ void kernel_main(void *dtb)
     /* x86-64: extend page tables BEFORE PMM so all RAM is accessible */
     uart_puts("\n");
     vmm_init();
-#endif
 
     /* Initialize physical memory manager */
     uart_puts("\n");
     pmm_init();
     pmm_dump_stats();
-
-#if !defined(PLATFORM_X86_64)
-    /* ARM64: enable MMU after PMM (PMM needs to know page boundaries first) */
+#else
+    /*
+     * ARM64: vmm_init MUST run before pmm_init.
+     *
+     * On Tegra234 (Jetson Orin) the SCF L4 cache (4 MiB, 16-way, 8
+     * slices — Orin TRM §5.2.1.2.1) sits between CCPLEX and DRAM
+     * and isn't enumerated by CLIDR_EL1, so explicit set/way
+     * maintenance can't reach it. After kexec it still holds
+     * Linux's dirty data for the addresses we're about to use as
+     * free-list block heads. With MMU off + SCTLR.C=0, pmm_init's
+     * pointer writes go directly to DRAM as Device-nGnRnE; once
+     * mmu_enable later activates the data cache, the next load
+     * fills L1 from L4's stale shadow, clobbering our free-list
+     * pointers and producing the order-19 page fault from #608.
+     *
+     * Running pmm_init AFTER mmu_enable routes the pointer writes
+     * through the now-active coherent fabric, naturally evicting
+     * the stale L4 entries via SCF write-allocate at the same
+     * cache lines. vmm_init touches only static page-table arrays
+     * in BSS, so it has no PMM dependency — safe to run first.
+     * QEMU and Pi 5 boot cleanly under either ordering, but the
+     * vmm_init→pmm_init sequence is correct on every ARM64
+     * platform and removes a class of cache-coherency latent
+     * bugs, so the swap is unconditional under PLATFORM_X86_64's
+     * #else branch.
+     */
     uart_puts("\n");
     vmm_init();
+
+    uart_puts("\n");
+    pmm_init();
+    pmm_dump_stats();
 #endif
 
     /* Initialize non-cacheable shared memory region (Pi 5 only) */
