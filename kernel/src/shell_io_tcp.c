@@ -877,8 +877,12 @@ out:
  *   2. Snapshot `lwip_stats.mem.used` into `heap_used_at_open_bytes`
  *      and the per-MEMP-pool `used` counts into `memp_used_at_open[]`,
  *      mirroring what `shell_io_tcp_create` does for a real session.
- *   3. Mark closed + shell_done with a rewound settle timer.
- *   4. Drive `shell_io_tcp_poll` once. The poll path measures the
+ *   3. Call `tcp_shell_server_note_session_open` to balance the
+ *      eventual close-counter bump (keeps the opened/closed invariant
+ *      `closed <= opened` holding for any subsequent test that
+ *      observes the stats struct).
+ *   4. Mark closed + shell_done with a rewound settle timer.
+ *   5. Drive `shell_io_tcp_poll` once. The poll path measures the
  *      close-time heap delta and routes through
  *      `tcp_shell_server_note_session_close`, which increments
  *      `leak_warnings` if the delta exceeds NET_SHELL_TCP_LEAK_THRESHOLD_BYTES.
@@ -918,6 +922,14 @@ int shell_io_tcp_test_run_clean_close_cycle(void)
     ctx->shell_done = true;
     ctx->pcb = NULL;
     ctx->session_id = 0xC10C1057u;   /* literal: "CLOC1057" — close-test */
+
+    /* Pair the close-counter increment that the poll path will fire
+     * (via tcp_shell_server_note_session_close) with a matching
+     * sessions_opened bump, so the loop caller doesn't underflow
+     * `active = opened - closed` on the stats struct. The
+     * `stats_invariants` test in test_net.c asserts opened >=
+     * closed; this keeps that holding even after N cycles. */
+    tcp_shell_server_note_session_open(ctx->session_id);
 
     /* Rewind close_completed_ticks past the settle window so the
      * poll path's measure-and-free branch fires on the first call. */

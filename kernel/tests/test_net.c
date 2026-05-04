@@ -560,9 +560,13 @@ static void test_tcp_shell_no_false_leak_over_50_close_cycles(void)
     struct tcp_shell_server_stats after;
     tcp_shell_server_get_stats(&after);
 
-    /* The cycle drives the close path but bypasses note_session_open
-     * (the helper allocates a ctx directly). So sessions_closed
-     * should grow by 50 but sessions_opened should be unchanged. */
+    /* Each cycle calls both `note_session_open` and (via poll)
+     * `note_session_close`, so the open/close counters advance in
+     * lock-step. Pairing matters because the `stats_invariants`
+     * test asserts `closed <= opened`; an unmatched close would
+     * underflow `active = opened - closed` on subsequent reads. */
+    TEST_ASSERT_EQUAL_UINT(before.sessions_opened + 50,
+                           after.sessions_opened);
     TEST_ASSERT_EQUAL_UINT(before.sessions_closed + 50,
                            after.sessions_closed);
 
