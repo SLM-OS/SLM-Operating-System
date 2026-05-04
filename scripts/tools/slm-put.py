@@ -1133,15 +1133,18 @@ def upload_xput_bin(shell: "Shell",
             sent += len(block)
             emit_progress(start_time, sent, total, resume_offset)
 
-        # Half-close the write side of the socket. This forces Linux's
-        # TCP to flush any remaining buffered data + send FIN. Without
-        # this, on slow links the last partial segment can sit in the
-        # OS send buffer and never reach the kernel, leaving
-        # cmd_xput_bin blocked waiting for bytes that never come.
-        try:
-            shell.sock.shutdown(socket.SHUT_WR)
-        except OSError:
-            pass
+        # No SHUT_WR. With the kernel's lwIP-level RX flow control
+        # (PR follow-up to #621), `cmd_xput_bin` reads exactly
+        # `total - resume_offset` bytes off the wire, then emits
+        # "XPUT-BIN done" and returns. We don't need to half-close
+        # to signal end-of-stream — the byte count is the signal.
+        # Pre-flow-control we used SHUT_WR as a Nagle/buffer-flush
+        # workaround, but TCP_NODELAY (set in TelnetShell.__init__)
+        # already disables Nagle so the last sendall hits the wire
+        # immediately. SHUT_WR also caused a FIN-after-data race
+        # where the kernel saw "closed" before reading the final
+        # block's bytes, dropping ~6-14 KB at the tail of large
+        # uploads — the bug this whole change set fixes.
     finally:
         shell.sock.settimeout(saved_timeout)
 
@@ -1169,13 +1172,12 @@ def upload_xput_bin(shell: "Shell",
         try:
             shell._recv_some()
         except RuntimeError:
-            # Kernel closed the connection — typical when our SHUT_WR
-            # racing with the kernel's response: kernel has already
-            # printed "err received=N reason=closed" + cleaned up
-            # before its TCP layer finishes flushing the response;
-            # we see the FIN before the response bytes. Don't fail
-            # the upload over it — the file commits in the kernel's
-            # partial-write-on-close path; verify via stat below.
+            # Kernel closed the connection unexpectedly. Without our
+            # SHUT_WR, this should only happen on a real abort/RST
+            # (the kernel's normal `done` path leaves the connection
+            # open until we close). Treat as "uncertain final state"
+            # and stat the remote file to find out what actually
+            # made it.
             closed_seen = True
             break
     if err_seen:
