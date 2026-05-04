@@ -11,6 +11,7 @@
 #include "cdc_ecm.h"
 #include "debug.h"
 #include "timer.h"
+#include "sched.h"          /* yield() for net_pump fast cadence (#597) */
 
 /* lwIP includes */
 #include "lwip/init.h"
@@ -1081,14 +1082,27 @@ void net_poll(void) {
 }
 
 /*
- * Background task body that drives net_poll() at ~100 Hz so RX and
- * lwIP timers keep running when the shell is idle. Without this, the
- * only RX drain was inside the `ping` command's wait loops and
- * net_init's DHCP wait — meaning SLM-OS wouldn't respond to an
- * inbound ping while sitting at the prompt. Spawned at
- * TASK_PRIORITY_IDLE (see kernel/src/main.c) so shell, tests, and
- * workloads preempt it trivially; sleep_ms(10) yields cooperatively
- * between polls.
+ * Background task body that drives net_poll() so RX and lwIP timers
+ * keep running. Spawned at TASK_PRIORITY_IDLE (see
+ * kernel/src/main.c) so shell, tests, and workloads preempt it
+ * trivially.
+ *
+ * Cadence: yield() between polls when work was done; sleep_ms(10)
+ * only when the last poll was a no-op. This is the load-bearing
+ * change for #597 throughput — pre-fix, net_pump always slept
+ * 10 ms after each poll, capping the RX processing rate at ~100 Hz.
+ * For `xput-bin` uploads on a fresh kernel boot, that throttled the
+ * pbuf drain into our shell ring to ~600 KB/s ceiling regardless
+ * of any LFS- or ring-side optimization. With yield() while the
+ * peer is actively pushing data, the loop runs as fast as the
+ * shell task can drain the ring; on the throughput target
+ * SmolLM2-135M (~100 MB) this lifted the observed rate from
+ * ~220 KB/s past 1 MB/s.
+ *
+ * The sleep-when-idle path keeps power consumption sane when no
+ * traffic is arriving. The packet counter delta tells us whether
+ * "real work" happened, vs. just a hot-plug retry or sys_check_timeouts
+ * (those count as no-ops for cadence purposes).
  *
  * Entry function lives here (next to net_poll) rather than in
  * main.c so platform init only needs to task_create it, not know
@@ -1099,9 +1113,20 @@ void net_poll(void) {
 void net_pump_task_entry(void *arg)
 {
     (void)arg;
+    uint64_t prev_rx = 0;
     for (;;) {
         net_poll();
-        sleep_ms(10);
+        uint64_t rx = net_statistics.rx_packets;
+        if (rx != prev_rx) {
+            /* Active traffic — yield-only between polls so the
+             * shell task draining the ring can keep up. */
+            prev_rx = rx;
+            yield();
+        } else {
+            /* Idle — sleep 10 ms to leave CPU for other work and
+             * let the timer wheel advance. */
+            sleep_ms(10);
+        }
     }
 }
 

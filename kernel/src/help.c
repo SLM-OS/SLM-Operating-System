@@ -220,11 +220,36 @@ static const struct help_entry help_entries[] = {
         "finishes only when the received byte count matches the declared\n"
         "size. This is intended for host upload tools.\n"
         "\n"
+        "For higher throughput on large files, prefer `xput-bin` (#597\n"
+        "Option B) which streams raw bytes without hex 2x expansion.\n"
+        "\n"
         "Examples:\n"
         "  xput begin blob.bin 1024\n"
         "  xput chunk 0 000102ff\n"
         "  xput chunk 4 aabbccdd\n"
         "  xput finish\n"
+    ),
+
+    HELP_TEXT("xput-bin",
+        "xput-bin - Direct binary upload (#597 Option B)\n"
+        "\n"
+        "Usage:\n"
+        "  xput-bin <path> <total>\n"
+        "\n"
+        "Streams `total` raw bytes straight into the named file via the\n"
+        "current shell session's TCP transport — no hex encoding, no\n"
+        "per-line shell parse. Sustains 1+ MB/s on hardware where the\n"
+        "framed `xput chunk` protocol caps at ~125 KB/s due to hex 2x\n"
+        "expansion + line-edit per-byte overhead.\n"
+        "\n"
+        "Wire format: telnet IAC byte-stuffed (0xFF in payload doubles\n"
+        "to 0xFF 0xFF on the wire per RFC 854). Resume: if the file\n"
+        "already exists with size <= total, the kernel reports the\n"
+        "existing offset in its `XPUT-BIN ready offset=N` response and\n"
+        "the client streams from N onwards.\n"
+        "\n"
+        "Use `slm-put.py --protocol binary` to drive this from the\n"
+        "host side.\n"
     ),
 
     HELP_TEXT("append",

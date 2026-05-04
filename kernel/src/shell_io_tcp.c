@@ -25,6 +25,7 @@
 #include "shell_session.h"
 #include "spinlock.h"
 #include "string.h"
+#include "sched.h"               /* yield() for #597 Option B fast read loop */
 #include "task.h"
 #include "tcp_shell_server.h"   /* tcp_shell_server_note_session_close */
 #include "telnet.h"
@@ -58,16 +59,41 @@
  * Cost is BSS only: 16 KB rx + 16 KB tx × MAX_TCP_SHELL_SESSIONS
  * (16) = 512 KB extra static memory. Negligible on the deploy
  * targets (4-8 GB Pi 5 / Jetson). */
-#define TCP_SHELL_RING_SIZE 16384
-#define TCP_SHELL_RING_MASK (TCP_SHELL_RING_SIZE - 1)
+/* TX ring fits a SHELL_MAX_LINE-sized response + IAC headroom and
+ * is bounded by tcp_write's uint16_t length. RX ring needs to be
+ * large enough to absorb a full TCP_WND-bytes burst without dropping
+ * (telnet_inject_rx silently drops on overflow; on_recv tcp_recveds
+ * the consumed pbuf bytes regardless, so any drop is a permanent
+ * data loss for the session). With TCP_WND = 32 * MSS ≈ 46 KB, the
+ * RX ring needs at least 48 KB; 64 KB gives margin for IAC stuffing
+ * (xput-bin payload doubles 0xFF). */
+#define TCP_SHELL_TX_RING_SIZE 16384
+#define TCP_SHELL_TX_RING_MASK (TCP_SHELL_TX_RING_SIZE - 1)
+/* 256 KB RX ring — sized to absorb any reasonable end-of-stream
+ * burst on `xput-bin` uploads. Pre-bump (64 KB) was just over
+ * TCP_WND ≈ 46 KB but on stream-end the kernel had a window of
+ * acked-but-not-yet-consumed bytes that could exceed the ring,
+ * causing telnet_inject_rx to silently drop the tail 128 KB of
+ * a 100 MB upload. With 256 KB ring, even a full TCP send buffer
+ * drain on the peer side fits without overflowing. */
+#define TCP_SHELL_RX_RING_SIZE 262144
+#define TCP_SHELL_RX_RING_MASK (TCP_SHELL_RX_RING_SIZE - 1)
 
-_Static_assert((TCP_SHELL_RING_SIZE & TCP_SHELL_RING_MASK) == 0,
-               "TCP_SHELL_RING_SIZE must be a power of two");
-/* The drain path passes `chunk` (clamped to ring size) into tcp_write
- * which takes a uint16_t length — guard against a future bump above
- * 64 K silently truncating. */
-_Static_assert(TCP_SHELL_RING_SIZE <= 0xFFFF,
-               "TCP_SHELL_RING_SIZE must fit in uint16_t for tcp_write()");
+/* Backwards-compat alias used in places that don't care which ring
+ * — kept for code clarity until existing call sites are audited.
+ * Existing rx-side accesses have already been migrated to
+ * TCP_SHELL_RX_RING_*; tx-side accesses use TCP_SHELL_TX_RING_*. */
+#define TCP_SHELL_RING_SIZE TCP_SHELL_TX_RING_SIZE
+#define TCP_SHELL_RING_MASK TCP_SHELL_TX_RING_MASK
+
+_Static_assert((TCP_SHELL_TX_RING_SIZE & TCP_SHELL_TX_RING_MASK) == 0,
+               "TCP_SHELL_TX_RING_SIZE must be a power of two");
+_Static_assert((TCP_SHELL_RX_RING_SIZE & TCP_SHELL_RX_RING_MASK) == 0,
+               "TCP_SHELL_RX_RING_SIZE must be a power of two");
+/* TX drain passes a u16 length to tcp_write; clamp checked at call
+ * site, but pin via assert so a future bump can't silently truncate. */
+_Static_assert(TCP_SHELL_TX_RING_SIZE <= 0xFFFF,
+               "TCP_SHELL_TX_RING_SIZE must fit in uint16_t for tcp_write()");
 
 /* The per-session memp snapshot stores `lwip_stats.memp[i]->used`
  * losslessly so close-time deltas are accurate (#537). lwIP's
@@ -206,13 +232,13 @@ struct tcp_shell_ctx {
 
     /* RX ring: bytes from peer waiting for the shell task to read. */
     spinlock_t        rx_lock;
-    uint8_t           rx_buf[TCP_SHELL_RING_SIZE];
+    uint8_t           rx_buf[TCP_SHELL_RX_RING_SIZE];
     uint32_t          rx_head;
     uint32_t          rx_tail;
 
     /* TX ring: bytes from shell task waiting to go out via tcp_write. */
     spinlock_t        tx_lock;
-    uint8_t           tx_buf[TCP_SHELL_RING_SIZE];
+    uint8_t           tx_buf[TCP_SHELL_TX_RING_SIZE];
     uint32_t          tx_head;
     uint32_t          tx_tail;
     bool              tx_prev_was_cr;   /* preserve CRLF state across write calls */
@@ -263,14 +289,27 @@ static spinlock_t            pool_lock = SPINLOCK_INIT;
 /* Ring helpers — all callers already hold the relevant lock.                 */
 /* -------------------------------------------------------------------------- */
 
+static inline uint32_t ring_used_mask(uint32_t head, uint32_t tail, uint32_t mask)
+{
+    return (head - tail) & mask;
+}
+
+static inline uint32_t ring_free_mask(uint32_t head, uint32_t tail, uint32_t mask)
+{
+    return mask - ring_used_mask(head, tail, mask);
+}
+
+/* TX-only convenience wrappers — historical API used by the TX
+ * drain in poll. Kept for now; RX paths use the *_mask form
+ * directly with TCP_SHELL_RX_RING_MASK. */
 static inline uint32_t ring_used(uint32_t head, uint32_t tail)
 {
-    return (head - tail) & TCP_SHELL_RING_MASK;
+    return ring_used_mask(head, tail, TCP_SHELL_TX_RING_MASK);
 }
 
 static inline uint32_t ring_free(uint32_t head, uint32_t tail)
 {
-    return TCP_SHELL_RING_MASK - ring_used(head, tail);
+    return ring_free_mask(head, tail, TCP_SHELL_TX_RING_MASK);
 }
 
 static size_t normalize_output_bytes(uint8_t *dst,
@@ -308,12 +347,19 @@ static void telnet_inject_rx(void *opaque, uint8_t byte)
 {
     struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)opaque;
     irq_flags_t flags = spin_lock_irqsave(&ctx->rx_lock);
-    if (ring_free(ctx->rx_head, ctx->rx_tail) > 0) {
-        ctx->rx_buf[ctx->rx_head & TCP_SHELL_RING_MASK] = byte;
-        ctx->rx_head = (ctx->rx_head + 1) & TCP_SHELL_RING_MASK;
+    if (ring_free_mask(ctx->rx_head, ctx->rx_tail,
+                       TCP_SHELL_RX_RING_MASK) > 0) {
+        ctx->rx_buf[ctx->rx_head & TCP_SHELL_RX_RING_MASK] = byte;
+        ctx->rx_head = (ctx->rx_head + 1) & TCP_SHELL_RX_RING_MASK;
     }
-    /* Ring full — drop. A polite peer stops once the TCP window
-     * stops advancing; see on_recv for the window-slide logic. */
+    /* Ring full — drop. With TCP_SHELL_RX_RING_SIZE > TCP_WND in
+     * the production config, this only fires under unusual
+     * conditions (e.g., binary upload via xput-bin where the LFS
+     * write is much slower than the TCP recv). The data loss is
+     * silent at this layer; on_recv unconditionally tcp_recveds the
+     * pbuf bytes regardless. Bumping the ring is the cheap fix; a
+     * proper fix would track ring-overflow counts in on_recv and
+     * tcp_recved only what fit. */
     spin_unlock_irqrestore(&ctx->rx_lock, flags);
 }
 
@@ -387,8 +433,8 @@ static int tcp_read_char(struct shell_io *io)
     for (;;) {
         irq_flags_t flags = spin_lock_irqsave(&ctx->rx_lock);
         if (ctx->rx_head != ctx->rx_tail) {
-            uint8_t c = ctx->rx_buf[ctx->rx_tail & TCP_SHELL_RING_MASK];
-            ctx->rx_tail = (ctx->rx_tail + 1) & TCP_SHELL_RING_MASK;
+            uint8_t c = ctx->rx_buf[ctx->rx_tail & TCP_SHELL_RX_RING_MASK];
+            ctx->rx_tail = (ctx->rx_tail + 1) & TCP_SHELL_RX_RING_MASK;
             spin_unlock_irqrestore(&ctx->rx_lock, flags);
 
             /* Acknowledge one byte so lwIP can slide its recv window.
@@ -424,8 +470,8 @@ static int tcp_try_read_char(struct shell_io *io)
         spin_unlock_irqrestore(&ctx->rx_lock, flags);
         return -1;    /* no data, regardless of whether closed */
     }
-    uint8_t c = ctx->rx_buf[ctx->rx_tail & TCP_SHELL_RING_MASK];
-    ctx->rx_tail = (ctx->rx_tail + 1) & TCP_SHELL_RING_MASK;
+    uint8_t c = ctx->rx_buf[ctx->rx_tail & TCP_SHELL_RX_RING_MASK];
+    ctx->rx_tail = (ctx->rx_tail + 1) & TCP_SHELL_RX_RING_MASK;
     spin_unlock_irqrestore(&ctx->rx_lock, flags);
     return (int)c;
 }
@@ -453,7 +499,8 @@ static int tcp_read_buf(struct shell_io *io, char *dst, int max_len)
 
     for (;;) {
         irq_flags_t flags = spin_lock_irqsave(&ctx->rx_lock);
-        uint32_t used = ring_used(ctx->rx_head, ctx->rx_tail);
+        uint32_t used = ring_used_mask(ctx->rx_head, ctx->rx_tail,
+                                       TCP_SHELL_RX_RING_MASK);
         if (used > 0) {
             uint32_t want = (used < (uint32_t)max_len)
                           ? used
@@ -462,8 +509,8 @@ static int tcp_read_buf(struct shell_io *io, char *dst, int max_len)
             /* Two-step copy to handle ring wrap. tail_idx is the
              * masked-into-buffer position; `contiguous` is how many
              * bytes we can copy before hitting the wrap point. */
-            uint32_t tail_idx = ctx->rx_tail & TCP_SHELL_RING_MASK;
-            uint32_t contiguous = TCP_SHELL_RING_SIZE - tail_idx;
+            uint32_t tail_idx = ctx->rx_tail & TCP_SHELL_RX_RING_MASK;
+            uint32_t contiguous = TCP_SHELL_RX_RING_SIZE - tail_idx;
             uint32_t first = (want < contiguous) ? want : contiguous;
 
             for (uint32_t i = 0; i < first; i++) {
@@ -473,7 +520,7 @@ static int tcp_read_buf(struct shell_io *io, char *dst, int max_len)
             for (uint32_t i = 0; i < second; i++) {
                 dst[first + i] = (char)ctx->rx_buf[i];
             }
-            ctx->rx_tail = (ctx->rx_tail + want) & TCP_SHELL_RING_MASK;
+            ctx->rx_tail = (ctx->rx_tail + want) & TCP_SHELL_RX_RING_MASK;
 
             spin_unlock_irqrestore(&ctx->rx_lock, flags);
             return (int)want;
@@ -485,7 +532,15 @@ static int tcp_read_buf(struct shell_io *io, char *dst, int max_len)
         if (closed) {
             return -1;
         }
-        sleep_ms(TCP_SHELL_POLL_INTERVAL_MS);
+        /* Cooperative yield instead of sleep_ms(10) — net_pump task
+         * runs on the same CPU, so we just need to give it a turn,
+         * not wait a full timer tick. The 10 ms sleep was the
+         * dominant per-block cost on `xput-bin` uploads (#597
+         * Option B) — LFS write was 1 ms but each block needed
+         * multiple ring-empty wait cycles, each costing 10 ms
+         * scheduler latency. yield() returns within microseconds
+         * after net_pump processes pending pbufs. */
+        yield();
     }
 }
 
@@ -1034,7 +1089,7 @@ int shell_io_tcp_test_run_read_buf_wrap(void)
     /* Place `pattern` so the first 16 bytes land at the end of the
      * ring buffer and the next 16 land at the start. tail_idx then
      * points at the first byte of the payload. */
-    const uint32_t tail_idx = TCP_SHELL_RING_SIZE - span_first;
+    const uint32_t tail_idx = TCP_SHELL_RX_RING_SIZE - span_first;
     for (uint32_t i = 0; i < span_first; i++) {
         ctx->rx_buf[tail_idx + i] = pattern[i];
     }

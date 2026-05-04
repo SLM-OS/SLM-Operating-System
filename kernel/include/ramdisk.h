@@ -17,7 +17,12 @@
  * the 31 MB cost is negligible; QEMU defaults to 1 GB which still
  * leaves plenty. Revisit if HEFs ever grow past ~30 MB. */
 #define RAMDISK_DEFAULT_BLOCK_SIZE   4096     /* 4 KB blocks */
-#define RAMDISK_DEFAULT_BLOCK_COUNT  8192     /* 32 MB total */
+/* 256 MB total — bumped from 32 MB so a real SLM model fits.
+ * SmolLM2-135M Q4_K_M is ~100 MB; bigger Qwen2.5-1.5B is ~1 GB
+ * which still won't fit but at least lets the smaller end-to-end
+ * test target upload without an SD-backed mount. PMM cost is
+ * 256 MB; Pi 5 / Jetson have GB+ RAM. (#597 throughput target). */
+#define RAMDISK_DEFAULT_BLOCK_COUNT  65536    /* 256 MB total */
 
 /*
  * Create a RAM disk with specified geometry.
