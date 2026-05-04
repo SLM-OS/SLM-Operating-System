@@ -663,6 +663,83 @@ int net_init(void) {
     return 0;
 }
 
+/*
+ * Submit a single Ethernet frame to the lwIP stack as if it had been
+ * read from the active driver's recv(). Allocates a pbuf chain from
+ * PBUF_POOL, copies via pbuf_take (handles chained slots correctly
+ * for frames > PBUF_POOL_BUFSIZE), updates RX statistics, and routes
+ * through slm_netif.input.
+ *
+ * Extracted from net_poll's RX drain loop in PR #614 follow-up so
+ * the test-only injector (`net_test_inject_rx_frame`) shares the
+ * exact same allocation + take + input sequence as production. A
+ * future regression that changes pbuf_take back to a contiguous
+ * memcpy (the #581 root cause) would silently truncate frames at
+ * 1536 bytes in BOTH the production path and the test injector;
+ * the chained-pbuf regression test in test_net.c then fires.
+ *
+ * Returns the bytes input on success (== len), or -1 on any failure
+ * (pool exhausted, take failed, netif input rejected). The
+ * statistics counter `rx_dropped` is incremented on each failure
+ * mode, mirroring the prior inline behavior.
+ */
+int net_input_frame_into_stack(const uint8_t *frame, size_t len)
+{
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
+    if (!p) {
+        net_statistics.rx_dropped++;
+        return -1;
+    }
+    if (pbuf_take(p, frame, (u16_t)len) != ERR_OK) {
+        pbuf_free(p);
+        net_statistics.rx_dropped++;
+        return -1;
+    }
+    net_statistics.rx_packets++;
+    net_statistics.rx_bytes += len;
+
+    /* Watchdog liveness ping. Note here (after pbuf_alloc +
+     * pbuf_take succeeded) rather than after slm_netif.input()
+     * because "received a frame at the netif boundary" is the
+     * right granularity — even a frame the IP stack drops
+     * indicates the driver / USB / lwIP-pool path is alive. */
+    net_watchdog_note_rx();
+
+    /* Pass to lwIP. ethernet_input either consumes the pbuf
+     * (returning ERR_OK after dispatching to ip4_input or
+     * etharp_input) or frees it via free_and_return; the only
+     * case we still need to free is when input() returns a
+     * non-OK code. */
+    if (slm_netif.input(p, &slm_netif) != ERR_OK) {
+        pbuf_free(p);
+        net_statistics.rx_dropped++;
+        return -1;
+    }
+    return (int)len;
+}
+
+/*
+ * Test-only RX injector. Bypasses the active_driver->recv path and
+ * its `rx_packet_buf` size cap (1518 B) so tests can drive the lwIP
+ * stack with arbitrary-length frames — specifically frames > the
+ * lwIP PBUF_POOL_BUFSIZE = 1536 B threshold that exercises the
+ * chained-pbuf assembly logic the #581 fix put in place.
+ *
+ * Identical processing to the production net_poll loop because both
+ * call `net_input_frame_into_stack`. A regression in the inner
+ * pbuf_take logic affects the test the same way it affects
+ * production.
+ *
+ * Production callers should not use this — the recv-driven path is
+ * the right one for real driver traffic. Convention matches the
+ * other `net_test_*` exports in this file (see
+ * `net_test_force_boot_deferred_dhcp` etc.).
+ */
+int net_test_inject_rx_frame(const uint8_t *frame, size_t len)
+{
+    return net_input_frame_into_stack(frame, len);
+}
+
 void net_poll(void) {
     /*
      * Drive the USB core's hot-plug retry path even before net_init
@@ -746,36 +823,7 @@ void net_poll(void) {
         if (len <= 0) {
             break;   /* nothing more buffered; wait for next tick */
         }
-
-        struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
-        if (!p) {
-            net_statistics.rx_dropped++;
-            continue;
-        }
-        if (pbuf_take(p, rx_packet_buf, (u16_t)len) != ERR_OK) {
-            pbuf_free(p);
-            net_statistics.rx_dropped++;
-            continue;
-        }
-        net_statistics.rx_packets++;
-        net_statistics.rx_bytes += len;
-
-        /* Watchdog liveness ping. Note here (after pbuf_alloc +
-         * pbuf_take succeeded) rather than after slm_netif.input()
-         * because "received a frame at the netif boundary" is the
-         * right granularity — even a frame the IP stack drops
-         * indicates the driver / USB / lwIP-pool path is alive. */
-        net_watchdog_note_rx();
-
-        /* Pass to lwIP. ethernet_input either consumes the pbuf
-         * (returning ERR_OK after dispatching to ip4_input or
-         * etharp_input) or frees it via free_and_return; the only
-         * case we still need to free is when input() returns a
-         * non-OK code. */
-        if (slm_netif.input(p, &slm_netif) != ERR_OK) {
-            pbuf_free(p);
-            net_statistics.rx_dropped++;
-        }
+        net_input_frame_into_stack(rx_packet_buf, (size_t)len);
     }
 
     /* Process lwIP timers */
