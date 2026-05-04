@@ -3849,6 +3849,91 @@ static void echo_test_run(struct echo_test_mock *m, char *line_out,
     *out_captured_len = copy;
 }
 
+/* Tiny mock for the shell_io_read_buf helper-contract tests
+ * (#597). Independent of echo_test_mock so we can count read_char
+ * vs read_buf invocations and prove which path the helper took. */
+struct read_buf_mock {
+    struct shell_io io;
+    const char     *input;
+    int             input_pos;
+    int             input_len;
+    int             read_char_calls;
+    int             read_buf_calls;
+};
+
+static int read_buf_mock_read_char(struct shell_io *io)
+{
+    struct read_buf_mock *m = (struct read_buf_mock *)io->ctx;
+    m->read_char_calls++;
+    if (m->input_pos >= m->input_len) return -1;
+    return (unsigned char)m->input[m->input_pos++];
+}
+
+static int read_buf_mock_read_buf(struct shell_io *io, char *dst, int max_len)
+{
+    struct read_buf_mock *m = (struct read_buf_mock *)io->ctx;
+    m->read_buf_calls++;
+    int avail = m->input_len - m->input_pos;
+    if (avail <= 0) return -1;
+    int n = (avail < max_len) ? avail : max_len;
+    extern void *memcpy(void *d, const void *s, size_t n);
+    memcpy(dst, m->input + m->input_pos, (size_t)n);
+    m->input_pos += n;
+    return n;
+}
+
+static void read_buf_mock_init(struct read_buf_mock *m, const char *input,
+                               bool with_read_buf)
+{
+    extern void *memset(void *s, int c, size_t n);
+    memset(m, 0, sizeof(*m));
+    m->io.read_char = read_buf_mock_read_char;
+    m->io.read_buf  = with_read_buf ? read_buf_mock_read_buf : NULL;
+    m->io.ctx       = m;
+    m->input        = input;
+    m->input_len    = (int)strlen(input);
+}
+
+/*
+ * Test: shell_io_read_buf uses the vtable's read_buf when set, and
+ * drains all available bytes in a single call (#597 perf path).
+ * A regression that re-routes through read_char would show up as
+ * read_char_calls > 0, read_buf_calls != 1, or got != input_len.
+ */
+static void test_shell_io_read_buf_uses_batched_when_available(void)
+{
+    struct read_buf_mock m;
+    read_buf_mock_init(&m, "hello world\n", true /*with_read_buf*/);
+
+    char dst[32];
+    int got = shell_io_read_buf(&m.io, dst, (int)sizeof(dst));
+
+    TEST_ASSERT_EQUAL_INT(12, got);
+    TEST_ASSERT_EQUAL_INT(1, m.read_buf_calls);
+    TEST_ASSERT_EQUAL_INT(0, m.read_char_calls);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(dst, "hello world\n", 12));
+}
+
+/*
+ * Test: shell_io_read_buf falls back to ONE read_char call when the
+ * vtable's read_buf is NULL (UART backend etc.). Returns exactly one
+ * byte even if max_len > 1, so callers don't stall waiting for a
+ * second byte the user hasn't typed yet.
+ */
+static void test_shell_io_read_buf_falls_back_to_read_char(void)
+{
+    struct read_buf_mock m;
+    read_buf_mock_init(&m, "hi\n", false /*no read_buf*/);
+
+    char dst[32];
+    int got = shell_io_read_buf(&m.io, dst, (int)sizeof(dst));
+
+    TEST_ASSERT_EQUAL_INT(1, got);
+    TEST_ASSERT_EQUAL_INT(1, m.read_char_calls);
+    TEST_ASSERT_EQUAL_INT(0, m.read_buf_calls);
+    TEST_ASSERT_EQUAL_INT('h', dst[0]);
+}
+
 /*
  * Helper contract: NULL `io` and NULL `echo_enabled` callback both
  * return true, preserving the always-echo default for backends
@@ -3991,6 +4076,8 @@ int test_suite_shell(void)
     /* #581 follow-up: echo respects telnet WILL/DONT ECHO negotiation. */
     RUN_TEST(test_shell_io_echo_enabled_defaults_true);
     RUN_TEST(test_shell_io_echo_enabled_callback_used);
+    RUN_TEST(test_shell_io_read_buf_uses_batched_when_available);
+    RUN_TEST(test_shell_io_read_buf_falls_back_to_read_char);
     RUN_TEST(test_shell_read_command_skips_echo_when_disabled);
     RUN_TEST(test_shell_read_command_echoes_when_enabled);
     RUN_TEST(test_shell_read_command_null_hook_echoes);

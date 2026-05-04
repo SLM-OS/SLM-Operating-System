@@ -430,6 +430,65 @@ static int tcp_try_read_char(struct shell_io *io)
     return (int)c;
 }
 
+/*
+ * Batched RX: drain up to `max_len` bytes from the ring into `dst`
+ * in a single lock cycle. Blocks (sleeps) waiting for the first byte
+ * the same way `tcp_read_char` does, then returns whatever the ring
+ * currently holds (could be 1, could be max_len). Returns -1 if the
+ * session closes with the ring empty.
+ *
+ * Per #597: a 32 KB hex `xput chunk` line via the per-char
+ * `tcp_read_char` path costs ~32K spin_lock_irqsave + memcpy(1) +
+ * spin_unlock cycles. With this batched path and a caller-side
+ * prefetch buffer (see `shell_read_command`), the same line costs
+ * ~32 lock cycles (one per ~1024-byte refill), with the per-char
+ * line-edit work happening against a local memory buffer.
+ */
+static int tcp_read_buf(struct shell_io *io, char *dst, int max_len)
+{
+    if (max_len <= 0) {
+        return 0;
+    }
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
+
+    for (;;) {
+        irq_flags_t flags = spin_lock_irqsave(&ctx->rx_lock);
+        uint32_t used = ring_used(ctx->rx_head, ctx->rx_tail);
+        if (used > 0) {
+            uint32_t want = (used < (uint32_t)max_len)
+                          ? used
+                          : (uint32_t)max_len;
+
+            /* Two-step copy to handle ring wrap. tail_idx is the
+             * masked-into-buffer position; `contiguous` is how many
+             * bytes we can copy before hitting the wrap point. */
+            uint32_t tail_idx = ctx->rx_tail & TCP_SHELL_RING_MASK;
+            uint32_t contiguous = TCP_SHELL_RING_SIZE - tail_idx;
+            uint32_t first = (want < contiguous) ? want : contiguous;
+
+            for (uint32_t i = 0; i < first; i++) {
+                dst[i] = (char)ctx->rx_buf[tail_idx + i];
+            }
+            uint32_t second = want - first;
+            for (uint32_t i = 0; i < second; i++) {
+                dst[first + i] = (char)ctx->rx_buf[i];
+            }
+            ctx->rx_tail = (ctx->rx_tail + want) & TCP_SHELL_RING_MASK;
+
+            spin_unlock_irqrestore(&ctx->rx_lock, flags);
+            return (int)want;
+        }
+
+        bool closed = ctx->closed;
+        spin_unlock_irqrestore(&ctx->rx_lock, flags);
+
+        if (closed) {
+            return -1;
+        }
+        sleep_ms(TCP_SHELL_POLL_INTERVAL_MS);
+    }
+}
+
 /* Forward decl — defined in the lwIP-callback section below. The
  * tcp_write_buf timeout path calls it to mark the session closed
  * when the drain has stalled past the cap. The `reason` is a static
@@ -898,6 +957,110 @@ out:
  * release ordering) which is where the late-April leak in #537
  * lived.
  */
+/*
+ * Test-only driver for #597 / `tcp_read_buf`.
+ *
+ * Allocates a ctx, primes the RX ring with a known pattern, and
+ * verifies tcp_read_buf drains all the bytes in a SINGLE call (not
+ * one byte per call as `tcp_read_char` would). Returns 0 on
+ * success, -1 if no slot could be allocated, -2 if the byte count
+ * or content didn't match.
+ */
+int shell_io_tcp_test_run_read_buf_drains_ring(void)
+{
+    struct tcp_shell_ctx *ctx = ctx_alloc();
+    if (!ctx) {
+        return -1;
+    }
+
+    /* Prime the ring with a known pattern at the start of the
+     * buffer (tail_idx == 0). Exercises the non-wrap path of
+     * tcp_read_buf's two-step copy — `first` covers everything,
+     * `second` is zero. The wrap path has its own test below. */
+    static const char src[] =
+        "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV";
+    const uint32_t n = (uint32_t)sizeof(src) - 1;     /* drop NUL */
+    for (uint32_t i = 0; i < n; i++) {
+        ctx->rx_buf[i] = (uint8_t)src[i];
+    }
+    ctx->rx_head = n;
+    ctx->rx_tail = 0;
+    ctx->closed = false;
+
+    char dst[128];
+    int got = tcp_read_buf(&ctx->io, dst, (int)sizeof(dst));
+
+    int rc = (got == (int)n && memcmp(dst, src, n) == 0) ? 0 : -2;
+
+    ctx_free(ctx);
+    return rc;
+}
+
+/*
+ * Test-only driver for the wrap branch of `tcp_read_buf` (#597
+ * review follow-up).
+ *
+ * The non-wrap test above stays below TCP_SHELL_RING_SIZE with
+ * tail_idx==0 so `first` covers the whole copy. This variant
+ * positions tail_idx near the END of the ring buffer and writes
+ * data that crosses the wrap boundary, forcing the two-step copy:
+ * `first` from `tail_idx..ring_end`, then `second` from `ring_start
+ * ..(want - first)`. Prior to tcp_read_buf this code path was
+ * unreachable (per-char reads always touched one slot at a time),
+ * so a bug in either copy length or the wrap-around tail update
+ * would silently corrupt the assembled buffer. Returns 0 on
+ * success, -1 if no slot, -2 on count or content mismatch.
+ */
+int shell_io_tcp_test_run_read_buf_wrap(void)
+{
+    struct tcp_shell_ctx *ctx = ctx_alloc();
+    if (!ctx) {
+        return -1;
+    }
+
+    /* Position tail_idx 16 bytes from ring end. Total payload 32
+     * bytes splits as 16 (pre-wrap) + 16 (post-wrap). Both halves
+     * non-trivial so an off-by-one in either step shows up
+     * immediately as a content miscompare. */
+    const uint32_t span_first  = 16;
+    const uint32_t span_second = 16;
+    const uint32_t total       = span_first + span_second;
+
+    static uint8_t pattern[32];
+    for (uint32_t i = 0; i < total; i++) {
+        pattern[i] = (uint8_t)(0xC0 + i);   /* deterministic, non-zero, distinct */
+    }
+
+    /* Place `pattern` so the first 16 bytes land at the end of the
+     * ring buffer and the next 16 land at the start. tail_idx then
+     * points at the first byte of the payload. */
+    const uint32_t tail_idx = TCP_SHELL_RING_SIZE - span_first;
+    for (uint32_t i = 0; i < span_first; i++) {
+        ctx->rx_buf[tail_idx + i] = pattern[i];
+    }
+    for (uint32_t i = 0; i < span_second; i++) {
+        ctx->rx_buf[i] = pattern[span_first + i];
+    }
+    ctx->rx_tail = tail_idx;
+    ctx->rx_head = tail_idx + total;        /* pre-mask wraps via & MASK on read */
+    ctx->closed  = false;
+
+    uint8_t dst[64];
+    int got = tcp_read_buf(&ctx->io, (char *)dst, (int)sizeof(dst));
+
+    int rc = (got == (int)total && memcmp(dst, pattern, total) == 0) ? 0 : -2;
+
+    /* Verify the post-read tail landed in the post-wrap region —
+     * confirms the `(rx_tail + want) & MASK` advance handled the
+     * wrap, not just the copy. */
+    if (rc == 0 && ctx->rx_tail != span_second) {
+        rc = -2;
+    }
+
+    ctx_free(ctx);
+    return rc;
+}
+
 int shell_io_tcp_test_run_clean_close_cycle(void)
 {
     struct tcp_shell_ctx *ctx = ctx_alloc();
@@ -1003,6 +1166,7 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
     ctx->io.close         = tcp_close_io;
     ctx->io.is_open       = tcp_is_open;
     ctx->io.echo_enabled  = tcp_echo_enabled;
+    ctx->io.read_buf      = tcp_read_buf;
     ctx->io.ctx           = ctx;
 
     /* Initialize the telnet parser with our callback set. ctx->ctx

@@ -540,12 +540,24 @@ int shell_read_command(const char *prompt, char *buf, int max_len)
         if (pos >= max_len - 1) {
             break;
         }
-        int ch = io->read_char(io);
-        if (ch < 0) {
-            buf[pos] = '\0';
-            return -1;
+        /* Refill the prefetch when our local view is empty (#597).
+         * The TCP backend's `read_buf` drains the rx ring in a single
+         * spin_lock_irqsave cycle (vs. one per byte for `read_char`),
+         * which is the core of the throughput recovery for large
+         * `xput chunk` lines. The session-level buffer means
+         * unconsumed bytes after a newline (multi-line paste,
+         * pipelined commands) survive the return from this call. */
+        if (s->read_prefetch_pos >= s->read_prefetch_len) {
+            int got = shell_io_read_buf(io, s->read_prefetch,
+                                        (int)sizeof(s->read_prefetch));
+            if (got <= 0) {
+                buf[pos] = '\0';
+                return -1;
+            }
+            s->read_prefetch_pos = 0;
+            s->read_prefetch_len = (uint16_t)got;
         }
-        char c = (char)ch;
+        char c = s->read_prefetch[s->read_prefetch_pos++];
 
         /* ESC-sequence parser. Bare ESC and unknown CSI parameter
          * bytes deliberately fall through to the data path so the

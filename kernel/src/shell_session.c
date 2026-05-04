@@ -68,6 +68,12 @@ static void session_reset_defaults(struct shell_session *s)
      * than mid-browse (#434). */
     memset(&s->history, 0, sizeof(s->history));
     s->history.cursor = -1;
+
+    /* Drop any prefetched-but-unconsumed input bytes from the prior
+     * occupant. A new session starts with an empty prefetch and
+     * shell_read_command refills on first read (#597). */
+    s->read_prefetch_pos = 0;
+    s->read_prefetch_len = 0;
 }
 
 void shell_session_init(void)
