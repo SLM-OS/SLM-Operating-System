@@ -826,6 +826,32 @@ int slm_gpu_get_info(RustGpuInfo *info);
  */
 int slm_gpu_run_mnist(void *logits_bytes_out);
 
+/* ---- Generic kind-parameterized GPU dispatch ----
+ *
+ * Each function takes a `kind` selector matching one of
+ * `enum ga10b_pipeline_kind` (GA10B_PIPELINE_KIND_MNIST,
+ * GA10B_PIPELINE_KIND_SCHED_MLP, GA10B_PIPELINE_KIND_EVICTION_QNET,
+ * ...). The caller chooses which pre-uploaded pipeline to dispatch;
+ * SLM-OS routes to the matching handoff via the kind discriminator
+ * the helpers stamp into DRAM.
+ *
+ * The kind-named entry points above (slm_gpu_run_mnist,
+ * slm_gpu_run_sched_inference) are 1-line shims for backward
+ * compatibility — new model integrations should call these generic
+ * functions with the appropriate kind constant.
+ *
+ * Output / input caps are caller-supplied: callers know the model
+ * shape, the kernel just bounds-checks against the handoff's
+ * input_buf_size (set_input) or output_size (run). On non-Jetson
+ * platforms all four return -1 unconditionally. */
+int slm_gpu_run(uint32_t kind, void *output, size_t output_cap);
+int slm_gpu_set_input(uint32_t kind, const void *bytes, size_t cap);
+int slm_gpu_set_input_fill(uint32_t kind, uint32_t value_bits,
+                           uint32_t n_floats);
+int slm_gpu_run_with_input(uint32_t kind,
+                           const void *input, size_t input_cap,
+                           void *output, size_t output_cap);
+
 /*
  * FP-free argmax over an array of fp32 bit patterns. Used by
  * Lua / shell callers that need the predicted class but can't do

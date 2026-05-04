@@ -239,6 +239,12 @@ enum ga10b_pipeline_kind {
     GA10B_PIPELINE_KIND_MNIST         = 0,
     GA10B_PIPELINE_KIND_SCHED_MLP     = 1,
     GA10B_PIPELINE_KIND_EVICTION_QNET = 2,
+    /* Sentinel — number of currently-defined kinds. NOT a valid
+     * value for the wire `pipeline_kind` field (handoffs only ever
+     * carry an actual kind). Used by SLM-OS for sizing kind-indexed
+     * arrays such as the per-kind bringup pool in slm_ffi.c. Adding
+     * a new kind: add it above this line, COUNT picks up automatically. */
+    GA10B_PIPELINE_KIND_COUNT
 };
 
 /* One entry per op in a v5/v6 pipeline. SLM-OS reads this array from

@@ -397,7 +397,23 @@ int slm_gpu_get_info(RustGpuInfo *info)
  * single-shot diagnostic and not meant to interleave with FFI
  * dispatch; documenting rather than locking that path. */
 static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
-static struct ga10b_bringup g_mnist_bringup;
+
+/* Per-kind bringup state. One slot per `enum ga10b_pipeline_kind`
+ * value, indexed directly by the kind. Each slot caches the GPU
+ * channel inheritance + handoff lookup for that pipeline kind so
+ * subsequent dispatches skip the inherit + scan. The slots share
+ * `g_handoff` (a kernel singleton populated by
+ * `ga10b_bringup_channel_kind`); when a different-kind dispatch
+ * has overwritten g_handoff since this slot's last successful
+ * call, `ensure_bringup` re-runs `ga10b_bringup_channel_kind` to
+ * repopulate it. The state-machine fields in struct ga10b_bringup
+ * (state, last_error_phase, etc.) stay private per slot.
+ *
+ * Bug-A warmup is also per-slot: each kind needs one throwaway
+ * inference after a fresh inherit so the cold-start grid quirk
+ * doesn't corrupt the user's first call. See Bug A comment in
+ * `ensure_bringup` below for the full rationale. */
+static struct ga10b_bringup g_bringups[GA10B_PIPELINE_KIND_COUNT];
 
 /* Consecutive-dispatch-failure circuit breaker.
  *
@@ -558,125 +574,99 @@ int slm_gpu_dispatch_breaker_test_count(void)
  * g_handoff with a different pipeline_kind — in that case our state
  * is stale and we re-walk channel_kind to repopulate g_handoff with
  * MNIST data. */
-static int ensure_mnist_bringup(void)
+/* Cache + warmup state for one pipeline_kind. Idempotent: returns
+ * 0 immediately if `g_bringups[kind]` is already in a usable state
+ * AND `g_handoff` currently holds that kind; otherwise re-runs
+ * inherit + channel_kind to repopulate `g_handoff` and runs a
+ * one-shot warmup dispatch.
+ *
+ * Caller MUST hold `g_gpu_dispatch_lock`. The body invokes
+ * `ga10b_bringup_launch_kernel` (the warmup), which assumes
+ * exclusive access to the channel + handoff state.
+ *
+ * Bug A workaround (see #596): the very first compute dispatch
+ * after channel inheritance returns all-zero logits — the GPU's
+ * cold-start grid silently doesn't write its output buffer.
+ * Subsequent dispatches in the same channel produce correct
+ * deterministic output. Running one throwaway inference here
+ * absorbs the cold start so user-visible calls see warm state.
+ * Cost: one extra pipeline dispatch per fresh inherit (i.e., once
+ * per kexec session, or once after a different-kind bringup
+ * overwrites `g_handoff`).
+ *
+ * Lock-hold-time note: callers run inside `g_gpu_dispatch_lock`
+ * with IRQs disabled. This warmup doubles the worst-case lock-hold
+ * on first dispatch — typical ~50-200 ms (one inference) but
+ * `ga10b_submit_and_poll`'s 2 s per-op timeout means a hung GPU
+ * could hold the lock + IRQs for ~16 s extra in pathological
+ * cases. The user's dispatch already exercises this path (just
+ * twice on first call); a future async-warmup-from-kernel_main
+ * move would relieve the lock-hold cost. */
+static int ensure_bringup(uint32_t kind)
 {
-    bool channel_open = (g_mnist_bringup.state == GA10B_BRINGUP_CHANNEL_OPEN ||
-                         g_mnist_bringup.state == GA10B_BRINGUP_METHOD_ACCEPTED);
-    bool active_is_mnist = (ga10b_bringup_active_pipeline_kind() ==
-                            GA10B_PIPELINE_KIND_MNIST);
-    if (channel_open && active_is_mnist) return 0;
+    if (kind >= GA10B_PIPELINE_KIND_COUNT) return -1;
+    struct ga10b_bringup *b = &g_bringups[kind];
 
-    int rc = ga10b_bringup_inherit(&g_mnist_bringup);
+    bool channel_open = (b->state == GA10B_BRINGUP_CHANNEL_OPEN ||
+                         b->state == GA10B_BRINGUP_METHOD_ACCEPTED);
+    bool active_is_kind = (ga10b_bringup_active_pipeline_kind() == kind);
+    if (channel_open && active_is_kind) return 0;
+
+    int rc = ga10b_bringup_inherit(b);
     if (rc < 0) return rc;
-    rc = ga10b_bringup_channel_kind(&g_mnist_bringup,
-                                     GA10B_PIPELINE_KIND_MNIST);
+    rc = ga10b_bringup_channel_kind(b, kind);
     if (rc < 0) return rc;
 
-    /* Warmup dispatch — Bug A workaround for #596. The very first
-     * compute dispatch after channel inheritance returns all-zero
-     * logits: the GPU's cold-start grid silently doesn't write its
-     * output buffer (still under investigation; see #596). Subsequent
-     * dispatches in the same channel produce correct deterministic
-     * output. Running one throwaway inference here absorbs the cold
-     * start so user-visible calls see warm state. Cost: one extra
-     * 8-op pipeline dispatch per fresh inherit (i.e., once per kexec
-     * session, or once after a different bringup overwrites
-     * g_handoff). The discarded result is the same kernel chain that
-     * runs on every later call — we just don't read its logits.
-     *
-     * Lock-hold-time note: every caller of `ensure_mnist_bringup` runs
-     * inside `g_gpu_dispatch_lock` with IRQs disabled (see
-     * `slm_gpu_run_mnist`, `slm_gpu_set_mnist_input_fill`). This warmup
-     * doubles the worst-case lock-hold on first dispatch — typical is
-     * ~50-200 ms (one inference) but `ga10b_submit_and_poll` has a
-     * 2 s per-op timeout, so a hung GPU could hold the lock + IRQs
-     * for ~16 s extra in pathological cases. Same path the user's
-     * dispatch already exercises (just twice on first call); a
-     * future async-warmup-from-kernel_main move would relieve this. */
-    int warmup_rc = ga10b_bringup_launch_kernel(&g_mnist_bringup);
+    int warmup_rc = ga10b_bringup_launch_kernel(b);
     if (warmup_rc < 0) {
         /* Non-fatal: the warmup failing doesn't itself prevent the
          * user's call. If a real dispatch problem persists, the
          * caller's launch_kernel will surface it. */
-        uart_printf("[mnist] warmup dispatch returned %d "
+        uart_printf("[gpu-kind=%lu] warmup dispatch returned %d "
                     "(continuing — first user call may see Bug A)\n",
-                    warmup_rc);
+                    (unsigned long)kind, warmup_rc);
     }
     return 0;
 }
 
-/* Sched MLP dispatch — parallel to MNIST. Separate per-instance
- * bringup state but shared g_handoff (kernel singleton); the
- * pipeline_kind check in ensure_*_bringup detects stale state from
- * cross-instance overwrites and re-runs channel_kind to repopulate
- * g_handoff with the right kind. */
-static struct ga10b_bringup g_sched_bringup;
+/* ---- Generic kind-parameterized GPU dispatch FFI ----
+ *
+ * The functions below take `kind` as the first argument and route
+ * through the per-kind cache in `g_bringups[]`. The kind-named
+ * shims (slm_gpu_run_mnist, slm_gpu_run_sched_inference, etc.)
+ * stay below as 1-line wrappers for backward compatibility with
+ * existing Lua / Rust callers; new model integrations should
+ * call the generic functions directly with the kind constant. */
 
-static int ensure_sched_bringup(void)
+int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
 {
-    bool channel_open = (g_sched_bringup.state == GA10B_BRINGUP_CHANNEL_OPEN ||
-                         g_sched_bringup.state == GA10B_BRINGUP_METHOD_ACCEPTED);
-    bool active_is_sched = (ga10b_bringup_active_pipeline_kind() ==
-                            GA10B_PIPELINE_KIND_SCHED_MLP);
-    if (channel_open && active_is_sched) return 0;
-
-    int rc = ga10b_bringup_inherit(&g_sched_bringup);
-    if (rc < 0) return rc;
-    rc = ga10b_bringup_channel_kind(&g_sched_bringup,
-                                     GA10B_PIPELINE_KIND_SCHED_MLP);
-    if (rc < 0) return rc;
-
-    /* Same Bug A warmup as ensure_mnist_bringup — see comment there. */
-    int warmup_rc = ga10b_bringup_launch_kernel(&g_sched_bringup);
-    if (warmup_rc < 0) {
-        uart_printf("[sched] warmup dispatch returned %d "
-                    "(continuing — first user call may see Bug A)\n",
-                    warmup_rc);
-    }
-    return 0;
-}
-
-int slm_gpu_run_mnist(void *logits_bytes_out)
-{
-    if (!logits_bytes_out) return -1;
-    /* Short-circuit before taking the IRQ-off lock if the breaker
-     * has been tripped. Engine.rs handles -1 by falling back to
-     * CPU NEON, so we just produce that rc. */
+    if (!output) return -1;
     if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
 
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    int rc = ensure_mnist_bringup();
+    int rc = ensure_bringup(kind);
     if (rc < 0) goto out;
-    rc = ga10b_bringup_launch_kernel(&g_mnist_bringup);
+    struct ga10b_bringup *b = &g_bringups[kind];
+    rc = ga10b_bringup_launch_kernel(b);
     if (rc < 0) goto out;
-    /* 4-byte * 10 = 40 bytes of fp32 bit patterns. */
-    int n = ga10b_bringup_read_pipeline_output(&g_mnist_bringup,
-                                                logits_bytes_out,
-                                                40u);
+    int n = ga10b_bringup_read_pipeline_output(b, output, output_cap);
     rc = n < 0 ? -1 : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
     gpu_dispatch_record_result(rc);
     return rc;
 }
-int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
+
+int slm_gpu_set_input(uint32_t kind, const void *bytes, size_t cap)
 {
     /* NULL `bytes` falls through to ga10b_bringup_set_input, which
-     * returns -3 — keeps the error code mapping one-to-one with the
-     * bringup helper (-1 = no v6 handoff, -2 = cap too large, -3 =
-     * bad arg).
-     *
-     * Engine.rs calls this FIRST in the MNIST fastpath; if it fails
-     * the run_mnist call below is never reached. Without this
-     * breaker hook, the trip-path was unreachable in production
-     * because `ensure_mnist_bringup` failures here happened *before*
-     * any failure could be recorded against `slm_gpu_run_mnist`.
-     * Mirror the breaker discipline used in run_mnist / run_sched. */
+     * returns -3 — preserves the error mapping (-1 no v6 handoff,
+     * -2 cap too large, -3 bad arg) callers depend on. */
     if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    int rc = ensure_mnist_bringup();
+    int rc = ensure_bringup(kind);
     if (rc < 0) goto out;
-    int n = ga10b_bringup_set_input(&g_mnist_bringup, bytes, cap);
+    int n = ga10b_bringup_set_input(&g_bringups[kind], bytes, cap);
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
@@ -685,63 +675,117 @@ out:
     gpu_dispatch_record_set_input_result(rc);
     return rc;
 }
-int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
+
+int slm_gpu_set_input_fill(uint32_t kind, uint32_t value_bits,
+                           uint32_t n_floats)
 {
     if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    int rc = ensure_mnist_bringup();
+    int rc = ensure_bringup(kind);
     if (rc < 0) goto out;
-    int n = ga10b_bringup_set_input_fill(&g_mnist_bringup, value_bits, n_floats);
+    int n = ga10b_bringup_set_input_fill(&g_bringups[kind], value_bits,
+                                          n_floats);
     rc = n < 0 ? n : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
-    /* Same filter as set_mnist_input above. */
     gpu_dispatch_record_set_input_result(rc);
     return rc;
 }
 
-/* Sched MLP dispatch. Same shape as slm_gpu_run_mnist but reads
- * a 42-element fp32 logits vector (AI_SCHED_N_ACTIONS = 42 on
- * Jetson) instead of MNIST's 10-element output. The caller passes
- * the 108-element fp32 feature vector as `state_bytes`; the engine
- * does set_input + launch_kernel + read_output in one shot. */
-int slm_gpu_run_sched_inference(const void *state_bytes,
-                                 size_t state_bytes_len,
-                                 void *logits_bytes_out)
+/* All-in-one set_input + launch + read under a single lock
+ * acquisition. Used by callers that produce input bytes
+ * synchronously and want output in the same call (e.g.
+ * sched-MLP's `assign_cpu` path, where holding the lock across
+ * the whole sequence prevents a concurrent dispatcher from
+ * overwriting g_handoff between set_input and launch). */
+int slm_gpu_run_with_input(uint32_t kind,
+                           const void *input, size_t input_cap,
+                           void *output, size_t output_cap)
 {
-    if (!state_bytes || !logits_bytes_out) return -1;
-    /* Same circuit-breaker short-circuit as the MNIST path. The
-     * counter is shared between MNIST + sched-MLP because they
-     * use the same channel and degrade together. */
+    if (!input || !output) return -1;
     if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
 
-    /* Held across the whole set_input + launch_kernel + read_output
-     * sequence so two CPUs concurrently in `ai_mlp_assign_cpu` can't
-     * stomp the shared g_handoff or race the GPFIFO write + doorbell
-     * + semaphore poll. See the lock-comment block above
-     * g_gpu_dispatch_lock for full rationale. */
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    int rc = ensure_sched_bringup();
+    int rc = ensure_bringup(kind);
     if (rc < 0) goto out;
 
-    int n = ga10b_bringup_set_input(&g_sched_bringup, state_bytes,
-                                     state_bytes_len);
+    struct ga10b_bringup *b = &g_bringups[kind];
+    int n = ga10b_bringup_set_input(b, input, input_cap);
     if (n < 0) { rc = n; goto out; }
 
-    rc = ga10b_bringup_launch_kernel(&g_sched_bringup);
+    rc = ga10b_bringup_launch_kernel(b);
     if (rc < 0) goto out;
 
-    /* 4-byte * 42 = 168 bytes of fp32 bit patterns. */
-    n = ga10b_bringup_read_pipeline_output(&g_sched_bringup,
-                                            logits_bytes_out,
-                                            168u);
+    n = ga10b_bringup_read_pipeline_output(b, output, output_cap);
     rc = n < 0 ? -1 : 0;
 out:
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
     gpu_dispatch_record_result(rc);
     return rc;
 }
+
+/* ---- Kind-named shims (backward compatibility) ----
+ *
+ * Existing Lua bindings (l_gpu_run_mnist, l_gpu_set_mnist_input)
+ * and Rust FFI callers (kernel_ffi::gpu_run_mnist) still call the
+ * MNIST-named entry points. These thin wrappers preserve those
+ * symbols. New model integrations should use the generic
+ * slm_gpu_run / slm_gpu_set_input / slm_gpu_run_with_input
+ * functions directly with the appropriate kind constant.
+ *
+ * Output-size constants below are derived from the model:
+ *   MNIST:     10 fp32 logits = 40 bytes
+ *   SCHED_MLP: 42 fp32 logits = 168 bytes (AI_SCHED_N_ACTIONS=42) */
+
+int slm_gpu_run_mnist(void *logits_bytes_out)
+{
+    return slm_gpu_run(GA10B_PIPELINE_KIND_MNIST, logits_bytes_out, 40u);
+}
+
+int slm_gpu_set_mnist_input(const void *bytes, size_t cap)
+{
+    return slm_gpu_set_input(GA10B_PIPELINE_KIND_MNIST, bytes, cap);
+}
+
+int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats)
+{
+    return slm_gpu_set_input_fill(GA10B_PIPELINE_KIND_MNIST,
+                                   value_bits, n_floats);
+}
+
+int slm_gpu_run_sched_inference(const void *state_bytes,
+                                 size_t state_bytes_len,
+                                 void *logits_bytes_out)
+{
+    return slm_gpu_run_with_input(GA10B_PIPELINE_KIND_SCHED_MLP,
+                                   state_bytes, state_bytes_len,
+                                   logits_bytes_out, 168u);
+}
 #else
+int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
+{
+    (void)kind; (void)output; (void)output_cap;
+    return -1;
+}
+int slm_gpu_set_input(uint32_t kind, const void *bytes, size_t cap)
+{
+    (void)kind; (void)bytes; (void)cap;
+    return -1;
+}
+int slm_gpu_set_input_fill(uint32_t kind, uint32_t value_bits,
+                           uint32_t n_floats)
+{
+    (void)kind; (void)value_bits; (void)n_floats;
+    return -1;
+}
+int slm_gpu_run_with_input(uint32_t kind,
+                           const void *input, size_t input_cap,
+                           void *output, size_t output_cap)
+{
+    (void)kind; (void)input; (void)input_cap;
+    (void)output; (void)output_cap;
+    return -1;
+}
 int slm_gpu_run_mnist(void *logits_bytes_out)
 {
     (void)logits_bytes_out;
