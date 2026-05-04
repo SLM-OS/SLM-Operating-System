@@ -226,6 +226,19 @@ struct tcp_shell_ctx {
     uint32_t          rx_head;
     uint32_t          rx_tail;
 
+    /* RX flow control (#621 follow-up): pbuf chain holding bytes
+     * that didn't fit in the rx ring at on_recv time. Drained from
+     * on_recv (next pbuf arrival) and from shell_io_tcp_poll (every
+     * net_pump tick). lwIP's recv window only advances when we
+     * tcp_recved, which we do only for bytes that actually injected
+     * into the ring — so a slow shell task back-pressures the peer
+     * naturally instead of the ring silently dropping. Both fields
+     * are touched only from net_pump context (on_recv +
+     * shell_io_tcp_poll); shell-task drains the ring without
+     * touching them. */
+    struct pbuf      *pending_pbuf;
+    uint16_t          pending_offset;
+
     /* TX ring: bytes from shell task waiting to go out via tcp_write. */
     spinlock_t        tx_lock;
     uint8_t           tx_buf[TCP_SHELL_TX_RING_SIZE];
@@ -341,16 +354,116 @@ static void telnet_inject_rx(void *opaque, uint8_t byte)
                        TCP_SHELL_RX_RING_MASK) > 0) {
         ctx->rx_buf[ctx->rx_head & TCP_SHELL_RX_RING_MASK] = byte;
         ctx->rx_head = (ctx->rx_head + 1) & TCP_SHELL_RX_RING_MASK;
+        spin_unlock_irqrestore(&ctx->rx_lock, flags);
+        return;
     }
-    /* Ring full — drop. With TCP_SHELL_RX_RING_SIZE > TCP_WND in
-     * the production config, this only fires under unusual
-     * conditions (e.g., binary upload via xput-bin where the LFS
-     * write is much slower than the TCP recv). The data loss is
-     * silent at this layer; on_recv unconditionally tcp_recveds the
-     * pbuf bytes regardless. Bumping the ring is the cheap fix; a
-     * proper fix would track ring-overflow counts in on_recv and
-     * tcp_recved only what fit. */
     spin_unlock_irqrestore(&ctx->rx_lock, flags);
+
+    /* Ring full at the moment of inject. With the on_recv
+     * flow-control path (drain_pending_pbuf below), this should be
+     * unreachable: the pre-check refuses to feed a wire byte to
+     * telnet_rx_byte unless ring_free >= 1, so no inject can ever
+     * find the ring full. WARN if we somehow get here — it means a
+     * caller bypassed the pre-check (bug) or the telnet state
+     * machine produced more than 1 inject from a single wire byte
+     * (also a bug). */
+    uart_printf("[WARN] shell-tcp: rx ring full — flow-control "
+                "invariant violated; dropping byte 0x%02x\n", byte);
+}
+
+/*
+ * Drain bytes from ctx->pending_pbuf into the rx ring (via the
+ * telnet state machine), stopping as soon as the ring would have
+ * to drop. Returns the count of pbuf wire bytes consumed —
+ * caller passes that to tcp_recved so lwIP only slides its recv
+ * window for bytes we actually accepted.
+ *
+ * Pre-check rule: process a wire byte only when ring_free >= 1.
+ * telnet_rx_byte injects 0 or 1 ring bytes per wire byte (regular
+ * data is 1:1; IAC sequences absorb 2-3 wire bytes for 0 or 1
+ * inject). One free slot is therefore sufficient for the worst
+ * case. The pre-check is conservative across IAC subnegotiations
+ * (might idle at ring_free=0 even though the next several wire
+ * bytes are IAC scaffolding that wouldn't inject), but the
+ * pessimization is bounded by the IAC option length (~tens of
+ * bytes) and never causes drops.
+ *
+ * Locking: the pre-check takes rx_lock briefly to read head/tail
+ * coherently, then releases. telnet_rx_byte may then call
+ * telnet_inject_rx which takes rx_lock again. Between the
+ * pre-check and the inject, ring_free can only INCREASE (shell
+ * task drains the ring; nobody else writes head/tail) — so a
+ * pre-check that observed free >= 1 guarantees the inject sees
+ * free >= 1. No silent drops.
+ *
+ * Runs in net_pump context. The shell task never calls this; it
+ * only drains the ring (which makes more space, which the next
+ * net_pump tick of shell_io_tcp_poll will turn into more
+ * tcp_recved).
+ */
+static uint32_t drain_pending_pbuf(struct tcp_shell_ctx *ctx)
+{
+    uint32_t consumed = 0;
+
+    while (ctx->pending_pbuf != NULL) {
+        struct pbuf *head = ctx->pending_pbuf;
+        const uint8_t *data = (const uint8_t *)head->payload;
+
+        while (ctx->pending_offset < head->len) {
+            irq_flags_t f = spin_lock_irqsave(&ctx->rx_lock);
+            uint32_t free = ring_free_mask(ctx->rx_head, ctx->rx_tail,
+                                           TCP_SHELL_RX_RING_MASK);
+            spin_unlock_irqrestore(&ctx->rx_lock, f);
+            if (free == 0) {
+                return consumed;
+            }
+
+            telnet_rx_byte(&ctx->telnet, data[ctx->pending_offset]);
+            ctx->pending_offset++;
+            consumed++;
+        }
+
+        /* Head segment fully drained — advance to the next link in
+         * the chain. pbuf_ref(next) before pbuf_free(head) so the
+         * recursive free walk inside pbuf_free decrements next's
+         * refcount back to 1 instead of all the way to 0. */
+        struct pbuf *next = head->next;
+        if (next) {
+            pbuf_ref(next);
+        }
+        pbuf_free(head);
+        ctx->pending_pbuf = next;
+        ctx->pending_offset = 0;
+    }
+
+    return consumed;
+}
+
+/*
+ * Drain pending bytes into the ring and then advance the recv
+ * window for what fit. tcp_recved takes a u16_t length, so chunk
+ * the call if the drain produced > 64 KB (rare under normal
+ * TCP_WND <= 64 KB but possible if a cat'd chain was bigger).
+ * Followed by tcp_output to flush any telnet responses the parser
+ * queued during the drain — skipped when the drain consumed 0
+ * bytes, since telnet_rx_byte never ran and could not have queued
+ * anything new.
+ */
+static void recved_pending(struct tcp_shell_ctx *ctx, struct tcp_pcb *pcb)
+{
+    uint32_t consumed = drain_pending_pbuf(ctx);
+    if (consumed == 0) {
+        return;
+    }
+    while (consumed > 0) {
+        uint16_t step = (consumed > UINT16_MAX) ? UINT16_MAX
+                                                : (uint16_t)consumed;
+        tcp_recved(pcb, step);
+        consumed -= step;
+    }
+    if (ctx->pcb) {
+        tcp_output(ctx->pcb);
+    }
 }
 
 static void telnet_send_to_peer(void *opaque, const uint8_t *data, size_t len)
@@ -750,36 +863,35 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     }
 
     if (p == NULL) {
-        /* Peer FIN — mark closed; shell task will exit its REPL and
-         * the poll path will complete the tcp_close. */
+        /* Peer FIN. Drain any pending bytes one last time so the
+         * shell task can read them before observing closed=true.
+         * Whatever still doesn't fit gets freed in ctx_free; that's
+         * the bound on stream-end byte loss (≤ ring size) and only
+         * happens if the shell task was truly wedged. */
+        if (ctx->pending_pbuf) {
+            recved_pending(ctx, pcb);
+        }
         mark_closed(ctx, "peer_fin");
         return ERR_OK;
     }
 
-    /* Feed every byte through the telnet parser. The parser pushes
-     * decoded data bytes into the RX ring via telnet_inject_rx and
-     * emits option-negotiation replies via telnet_send_to_peer. Ring
-     * overflow is still possible (telnet_inject_rx drops on a full
-     * ring) but is rare in practice because (a) IAC sequences shrink
-     * the byte stream on average, and (b) a polite peer slows down
-     * once tcp_recved stops advancing the window. */
-    uint16_t consumed = 0;
-    struct pbuf *q = p;
-    while (q) {
-        const uint8_t *data = (const uint8_t *)q->payload;
-        telnet_rx(&ctx->telnet, data, q->len);
-        consumed += q->len;
-        q = q->next;
+    /* Hand the new pbuf to the flow-control queue. If a previous
+     * on_recv left bytes pending (ring was full), pbuf_cat appends
+     * the new chain so byte order is preserved. Ownership transfers
+     * to ctx — we don't pbuf_free p here (drain_pending_pbuf does
+     * that as it advances through the chain). */
+    if (ctx->pending_pbuf) {
+        pbuf_cat(ctx->pending_pbuf, p);
+    } else {
+        ctx->pending_pbuf = p;
+        ctx->pending_offset = 0;
     }
 
-    if (consumed > 0) {
-        tcp_recved(pcb, consumed);
-        /* Flush any telnet responses the parser queued on the pcb. */
-        if (ctx->pcb) {
-            tcp_output(ctx->pcb);
-        }
-    }
-    pbuf_free(p);
+    /* Drain as much as fits. tcp_recved advances the recv window
+     * only for the bytes that actually injected — anything still in
+     * pending_pbuf stays out of the window slide, which is what
+     * back-pressures the peer. */
+    recved_pending(ctx, pcb);
     return ERR_OK;
 }
 
@@ -831,6 +943,8 @@ static struct tcp_shell_ctx *ctx_alloc(void)
             c->rx_lock = (spinlock_t)SPINLOCK_INIT;
             c->tx_lock = (spinlock_t)SPINLOCK_INIT;
             c->rx_head = c->rx_tail = 0;
+            c->pending_pbuf = NULL;
+            c->pending_offset = 0;
             c->tx_head = c->tx_tail = 0;
             c->tx_prev_was_cr = false;
             c->close_completed_ticks = 0;
@@ -844,6 +958,14 @@ static struct tcp_shell_ctx *ctx_alloc(void)
 
 static void ctx_free(struct tcp_shell_ctx *ctx)
 {
+    /* Free any flow-control pbuf chain still queued. Bytes in here
+     * never reached the ring; the session is going away so they're
+     * legitimately dropped. */
+    if (ctx->pending_pbuf) {
+        pbuf_free(ctx->pending_pbuf);
+        ctx->pending_pbuf = NULL;
+        ctx->pending_offset = 0;
+    }
     irq_flags_t flags = spin_lock_irqsave(&pool_lock);
     ctx->in_use = false;
     spin_unlock_irqrestore(&pool_lock, flags);
@@ -1365,6 +1487,15 @@ void shell_io_tcp_poll(void)
     for (uint32_t i = 0; i < MAX_TCP_SHELL_SESSIONS; i++) {
         struct tcp_shell_ctx *ctx = &ctx_pool[i];
         if (!ctx->in_use) continue;
+
+        /* RX flow control: pick up any bytes that didn't fit in the
+         * ring last time on_recv ran. The shell task may have drained
+         * the ring since then, so there's room now. Done before the
+         * TX drain so the recv-window slide goes out in the same
+         * tcp_output cycle as any TX bytes the shell-task queued. */
+        if (ctx->pcb && ctx->pending_pbuf) {
+            recved_pending(ctx, ctx->pcb);
+        }
 
         /* Drain the TX ring into lwIP. */
         if (ctx->pcb) {
