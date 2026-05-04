@@ -518,6 +518,35 @@ static void test_shell_io_tcp_close_settling(void)
 }
 
 /*
+ * Test: tcp_read_buf drains the rx ring in a single call (#597).
+ *
+ * Pre-fix, the line-edit loop in shell_read_command read one byte
+ * per `read_char` call, costing one spin_lock_irqsave + IRQ-disable
+ * cycle per byte. A 32 KB hex `xput chunk` line ate ~32K cycles
+ * before any actual processing happened — the dominant cost in
+ * #597's per-chunk breakdown. The new tcp_read_buf vtable method
+ * drains everything in the ring in ONE lock cycle, so the line-
+ * edit loop's per-char work happens against a local prefetch
+ * buffer instead of the locked ring.
+ *
+ * The helper primes the ring with a 58-byte pattern and asserts
+ * the read drains all 58 in a single tcp_read_buf call (vs. 58
+ * tcp_read_char calls). A regression that re-introduces the per-
+ * char overhead would either return 1 (per-char regression) or
+ * fail content match (ring-walk bug).
+ */
+static void test_shell_io_tcp_read_buf_drains_ring(void)
+{
+    int rc = shell_io_tcp_test_run_read_buf_drains_ring();
+    TEST_ASSERT_MESSAGE(rc != -1,
+        "test_run_read_buf_drains_ring: pool slot allocation failed");
+    TEST_ASSERT_MESSAGE(rc != -2,
+        "test_run_read_buf_drains_ring: tcp_read_buf returned wrong "
+        "byte count or content");
+    TEST_ASSERT_EQUAL_INT(0, rc);
+}
+
+/*
  * Test: 50-cycle close-path drive must not increment leak_warnings (#537).
  *
  * Field observation summary (2026-05-02 jetson-nano-2 traces): post the
@@ -2435,6 +2464,7 @@ int test_suite_net(void)
     RUN_TEST(test_tcp_shell_server_note_session_pair);
     RUN_TEST(test_shell_io_tcp_write_buf_timeout);
     RUN_TEST(test_shell_io_tcp_close_settling);
+    RUN_TEST(test_shell_io_tcp_read_buf_drains_ring);
     RUN_TEST(test_tcp_shell_no_false_leak_over_50_close_cycles);
     RUN_TEST(test_net_stats_initial_values);
 

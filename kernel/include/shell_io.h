@@ -55,6 +55,24 @@ struct shell_io {
      * `xput chunk` throughput at ~30 KB/s. */
     bool (*echo_enabled)(struct shell_io *io);
 
+    /* Optional batched read. Drains up to `max_len` bytes from the
+     * backend's RX buffer into `dst` in a single backend operation
+     * (one lock-cycle on the TCP backend, vs. one per byte for
+     * `read_char`). Blocks until at least one byte is available,
+     * then returns whatever the backend has queued — could be 1,
+     * could be max_len. Returns -1 when the backend is closed and
+     * no bytes are queued.
+     *
+     * Backends without batched-read support set this to NULL;
+     * callers fall back to the per-char `read_char` loop via
+     * `shell_io_read_buf`.
+     *
+     * Critical for #597's throughput ceiling: a 32 KB hex
+     * `xput chunk` line takes ~32K vtable+lock cycles via
+     * read_char; a 1024-byte batched read drops that to ~32 cycles
+     * with the same wire-level RX cost. */
+    int  (*read_buf)(struct shell_io *io, char *dst, int max_len);
+
     /* Backend-private data. */
     void *ctx;
 };
@@ -64,6 +82,17 @@ struct shell_io {
  * defaults to true. Centralized so the line-edit loop and any
  * future caller don't have to repeat the NULL check. */
 bool shell_io_echo_enabled(struct shell_io *io);
+
+/* Helper: drain up to `max_len` bytes from `io` into `dst`. Uses
+ * the vtable's `read_buf` callback when present, otherwise falls
+ * back to a `read_char` loop that reads ONE byte (so callers don't
+ * stall waiting for the second byte that may never arrive). Blocks
+ * until at least one byte is available; returns -1 on closed.
+ *
+ * Centralized fallback so callers like `shell_read_command` get the
+ * batched-read perf win on backends that support it (TCP) without
+ * forcing every backend (UART) to implement the hook. */
+int  shell_io_read_buf(struct shell_io *io, char *dst, int max_len);
 
 /* Convenience: write a null-terminated string via io->write. */
 void shell_io_puts(struct shell_io *io, const char *s);

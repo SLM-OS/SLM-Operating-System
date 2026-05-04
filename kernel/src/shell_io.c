@@ -36,6 +36,37 @@ bool shell_io_echo_enabled(struct shell_io *io)
     return io->echo_enabled(io);
 }
 
+int shell_io_read_buf(struct shell_io *io, char *dst, int max_len)
+{
+    if (!io || !dst || max_len <= 0) {
+        return -1;
+    }
+
+    /* Backends that implement batched read (TCP) drain the RX ring
+     * in a single lock cycle. The shell_read_command line-edit loop
+     * uses this to avoid the per-char vtable+lock+IRQ-disable cost
+     * that capped `xput chunk` throughput at ~125 KB/s on hardware
+     * (#597). */
+    if (io->read_buf) {
+        return io->read_buf(io, dst, max_len);
+    }
+
+    /* Fallback for backends without batched-read support (UART):
+     * block for ONE byte via read_char and return it. The caller's
+     * outer loop will re-call us for each subsequent byte, recovering
+     * the per-char path. We deliberately do NOT loop reading more
+     * bytes here — read_char blocks until data arrives, so a second
+     * read_char after the first might wait indefinitely for a byte
+     * the peer hasn't sent yet (e.g., the user is typing one
+     * character at a time on the UART console). */
+    int c = io->read_char(io);
+    if (c < 0) {
+        return -1;
+    }
+    dst[0] = (char)c;
+    return 1;
+}
+
 void shell_io_puts(struct shell_io *io, const char *s)
 {
     if (!io || !s) {

@@ -137,4 +137,11 @@ int shell_io_tcp_test_run_close_settling(void);
  * be allocated, -2 if the slot wasn't freed by the poll. */
 int shell_io_tcp_test_run_clean_close_cycle(void);
 
+/* Test-only driver for #597 / `tcp_read_buf`: primes the rx ring
+ * with a known pattern and verifies the batched-read vtable
+ * function drains all bytes in a single call. Returns 0 on success,
+ * -1 if no slot could be allocated, -2 if the byte count or content
+ * didn't match the expected pattern. */
+int shell_io_tcp_test_run_read_buf_drains_ring(void);
+
 #endif /* SHELL_IO_TCP_H */

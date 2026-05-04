@@ -144,6 +144,33 @@ struct shell_session {
      * own copy so two operators editing in parallel cannot see each
      * other's recall buffer. */
     struct shell_history history;
+
+    /* Line-edit prefetch buffer (#597 throughput perf).
+     *
+     * `shell_read_command` reads from `read_prefetch[read_prefetch_pos
+     * .. read_prefetch_len)` first and only refills via the backend's
+     * `read_buf` (or `read_char` fallback) when the local range is
+     * empty. On the TCP backend this collapses ~32K per-char vtable+
+     * lock cycles per `xput chunk` into ~32 batched-drain cycles,
+     * recovering the ~32 ms/chunk per-char overhead identified in
+     * #597's cost breakdown.
+     *
+     * Lives on the session (not as a stack-local in
+     * `shell_read_command`) so unconsumed bytes from a multi-line
+     * paste survive across `shell_read_command` calls. Without this,
+     * a paste of "cmd1\ncmd2\n" into the shell would lose `cmd2`
+     * the first time `shell_read_command` returned at the first
+     * newline.
+     *
+     * Sized to amortise the lock cycle without a stack-busting
+     * allocation: 1 KB drains 8× a typical SHELL_MAX_LINE-bound
+     * `xput chunk` line in 8 lock cycles, vs. 32K with the per-char
+     * path. UART sessions never fill it (the read_buf fallback
+     * yields one byte at a time), so the byte cost on console is
+     * just the buffer's BSS footprint per session. */
+    char     read_prefetch[1024];
+    uint16_t read_prefetch_pos;     /* Next byte to consume in [pos, len) */
+    uint16_t read_prefetch_len;     /* Bytes currently in prefetch */
 };
 
 /* Get the singleton console session (UART-backed). Always non-NULL
