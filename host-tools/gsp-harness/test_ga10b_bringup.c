@@ -73,6 +73,13 @@ void uart_printf(const char *fmt, ...)
     va_end(ap);
 }
 
+/* yield() is the kernel cooperative-scheduler entry called by
+ * ga10b_dispatch_poll_wait between poll iterations. Host tests
+ * don't have a scheduler; the GPU dispatch path isn't exercised
+ * here (tests target pure-logic builders + handoff validation),
+ * but the symbol must resolve at link time. */
+void yield(void) { }
+
 static int failures;
 
 #define REQUIRE(expr) do { \

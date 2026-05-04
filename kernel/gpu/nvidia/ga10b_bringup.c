@@ -14,6 +14,7 @@
 #include "gsp.h"
 #include "falcon.h"
 #include "../../include/uart.h"
+#include "../../include/sched.h"
 
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -53,7 +54,7 @@ bool ga10b_dispatch_verbose_get(void)
 
 /* Dispatch poll budget shared by ga10b_submit_and_poll (single-op
  * smoke-test path) and the v7 bulk dispatcher. Each iteration of
- * the outer poll loop pairs with one ga10b_dispatch_poll_delay_us
+ * the outer poll loop pairs with one ga10b_dispatch_poll_wait
  * call below, so the wall-clock cap is approximately
  * GA10B_DISPATCH_POLL_TIMEOUT_US microseconds. The 2 s value is
  * generous — typical sema release fires in tens of microseconds,
@@ -61,16 +62,36 @@ bool ga10b_dispatch_verbose_get(void)
  * QMD fault diagnostics can stretch into the hundreds of ms. */
 #define GA10B_DISPATCH_POLL_TIMEOUT_US 2000000u
 
-/* Approximate 1 µs delay via volatile nop-spin. Calibrated for
- * Cortex-A78AE (Jetson Orin); not precise wall-clock — the actual
- * wait depends on CPU clock + memory pressure — but bounded above
- * by a small multiple of 1 µs so the overall poll budget tracks
- * GA10B_DISPATCH_POLL_TIMEOUT_US within a constant factor. The
- * `volatile` prevents the compiler from optimizing the loop body
- * away. */
-static inline void ga10b_dispatch_poll_delay_us(void)
+/* Single inter-poll wait: brief spin, then cooperative yield.
+ *
+ * The spin is the existing Cortex-A78AE-calibrated ~1 µs nop loop
+ * — cheap, absorbs fast completions (single-op smoke tests, the
+ * tail end of an MNIST chain) without scheduler round-trip
+ * overhead. The yield lets other tasks (net_pump packet handling,
+ * shell I/O, AI scheduler decisions, model preload tasks) run
+ * during the bulk of the GPU compute time rather than letting the
+ * dispatcher pin CPU 0 for the full chain duration.
+ *
+ * Cost model on Jetson with cooperative preemption: hardware
+ * timer IRQs don't deliver to EL2, so idle's wfi unblocks only on
+ * external IRQs (typically USB CDC-ECM packets every few ms during
+ * an active shell session). When the dispatcher yields and no
+ * other task is ready, idle wfi may block briefly before the
+ * dispatcher resumes. That adds tail latency to the GPU chain
+ * but lets long-running net_pump / shell traffic make progress.
+ *
+ * Empirical baseline (200-iter alternating-fill MNIST probe):
+ *   - Pure spin (PR #612):                     65 ms total
+ *   - Spin-then-yield (this commit):           re-measured below
+ *
+ * `volatile` on the spin prevents the compiler from optimizing
+ * the loop body away. `yield` is the cooperative scheduler entry
+ * from sched.h; safe to call from task context, never from an
+ * ISR (this dispatcher only runs in task context). */
+static inline void ga10b_dispatch_poll_wait(void)
 {
     for (volatile int i = 0; i < 1500; i++) { }
+    yield();
 }
 
 extern const struct gsp_platform_ops *gsp_platform;
@@ -1691,7 +1712,7 @@ static int ga10b_submit_and_poll(struct ga10b_bringup *b,
          * tests can pin the exact predicate without re-encoding it
          * (and the Linux launcher uses the same helper). */
         if (ga10b_poll_match(poll_val, expected_payload)) break;
-        ga10b_dispatch_poll_delay_us();
+        ga10b_dispatch_poll_wait();
     }
 
     uint32_t gp_get_word = g_handoff.userd_gp_get_offset / 4;
@@ -2188,7 +2209,7 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
         if (ga10b_poll_match(poll_val, GA10B_SEMA_RELEASE_PAYLOAD)) {
             break;
         }
-        ga10b_dispatch_poll_delay_us();
+        ga10b_dispatch_poll_wait();
     }
 
     /* Phase 6: bookkeeping. Same always-advance contract as
