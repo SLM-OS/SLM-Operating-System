@@ -714,6 +714,19 @@ void kernel_main(void *dtb)
 
     ipc_init();
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* GPU dispatcher task (#573 Option 2). Owns per-kind bringup
+     * state + the busy-poll wait that previously pinned every
+     * caller's CPU under spin_lock_irqsave. After this init,
+     * slm_gpu_run / set_input / run_with_input enqueue requests
+     * to the dispatcher and block in msg_recv (sleep-friendly,
+     * scheduler-aware) — caller CPUs stay free to run other tasks
+     * during GPU compute. Must follow ipc_init() (uses msg_queue)
+     * and precede scheduler_start (the dispatcher task is added
+     * to the scheduler here). No-op on non-Jetson builds. */
+    slm_gpu_dispatcher_init();
+#endif
+
     /* Create main task (runs tests) */
     struct task *main_task = task_create("main", main_task_func, NULL);
     if (!main_task) {

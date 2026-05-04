@@ -629,99 +629,287 @@ static int ensure_bringup(uint32_t kind)
     return 0;
 }
 
+/* ---- GPU dispatcher task ---------------------------------------
+ *
+ * Single owner of the per-kind bringup state above. Callers (Lua
+ * FFI bindings, Rust runtime FFI, the MNIST/sched-MLP shims below)
+ * submit dispatch requests to `g_gpu_request_q` and block on a
+ * per-call reply queue. The dispatcher dequeues requests, runs the
+ * actual GPU work under `g_gpu_dispatch_lock` (still needed to
+ * mutex against the `nvgpu` shell-command path that pokes
+ * `ga10b_bringup_*` directly), and posts the result back.
+ *
+ * The point: callers used to busy-poll the GPU semaphore for up to
+ * 2 s with `g_gpu_dispatch_lock` held + IRQs off. That pinned the
+ * caller's CPU and blocked every other task on it (net_pump, shell,
+ * scheduler decisions). With the dispatcher owning the wait, the
+ * caller blocks in `msg_recv` — sleep-friendly, scheduler-aware —
+ * and other tasks on the caller's CPU keep making progress. The
+ * dispatcher's own CPU is still pinned during the busy-poll, but
+ * that's one CPU instead of N, and the dispatcher's natural home
+ * is whichever CPU the scheduler picks for it.
+ *
+ * Why not yield inside the existing dispatch path: see #573 +
+ * branch `feat/ga10b-poll-yield` (NOT merged). That experiment
+ * tried `yield()` in the busy-poll loop, but `slm_gpu_run` runs
+ * with `g_gpu_dispatch_lock` held + IRQs off, and `yield()` while
+ * IRQs are off is the explicit CLAUDE.md "Critical" anti-pattern.
+ * Empirical fallout: 118/200 wrong-argmax mismatches + 2× runtime.
+ * The dispatcher-task design avoids that by moving the wait OUT
+ * of the lock-held context — callers wait IPC-style (no lock, no
+ * IRQ disable), the dispatcher does the pinning work in isolation. */
+
+/* GPU-dispatch operation discriminator carried in `struct gpu_request`. */
+enum gpu_op {
+    GPU_OP_RUN              = 1,
+    GPU_OP_SET_INPUT        = 2,
+    GPU_OP_SET_INPUT_FILL   = 3,
+    GPU_OP_RUN_WITH_INPUT   = 4,
+};
+
+/* Caller-allocated dispatch request. Lives on the caller's stack
+ * for the duration of the FFI call (caller blocks in msg_recv on
+ * `reply_q` until the dispatcher posts). The pointer is what
+ * actually flows over `g_gpu_request_q`, so request size doesn't
+ * matter for the queue's per-slot allocation. */
+struct gpu_request {
+    enum gpu_op    op;
+    uint32_t       kind;
+    const void    *input;
+    size_t         input_len;
+    void          *output;
+    size_t         output_cap;
+    uint32_t       fill_bits;
+    uint32_t       fill_n_floats;
+    struct msg_queue *reply_q;
+};
+
+/* Wire format on `g_gpu_request_q`. msg_queue copies fixed-size
+ * messages, so we send a single pointer and the dispatcher
+ * dereferences it (caller's stack stays valid until reply lands). */
+struct gpu_request_msg {
+    struct gpu_request *req;
+};
+
+/* Wire format on the per-call reply queue. Single int rc — the
+ * caller-supplied output buffer is written in place by the
+ * dispatcher's bringup helpers. */
+struct gpu_reply_msg {
+    int rc;
+};
+
+/* Request-queue capacity. 8 slots covers the worst case of every
+ * SMP CPU concurrently calling slm_gpu_run plus a few extra; the
+ * GPU is sequential so additional concurrency only adds queueing
+ * latency, not throughput. msg_queue allocates from a fixed pool
+ * so this isn't pressure on PMM. */
+#define GPU_REQUEST_QUEUE_DEPTH 8
+
+static struct msg_queue *g_gpu_request_q;
+
+/* Internal lock-protected dispatch helpers — invoked only from the
+ * dispatcher task body, so the lock is purely mutex'ing against
+ * the shell-command path. `ensure_bringup` is also called only
+ * from these helpers (was previously called from the public FFI
+ * bodies that became the request enqueuers). */
+
+static int do_run_locked(uint32_t kind, void *output, size_t cap)
+{
+    int rc = ensure_bringup(kind);
+    if (rc < 0) return rc;
+    struct ga10b_bringup *b = &g_bringups[kind];
+    rc = ga10b_bringup_launch_kernel(b);
+    if (rc < 0) return rc;
+    int n = ga10b_bringup_read_pipeline_output(b, output, cap);
+    return n < 0 ? -1 : 0;
+}
+
+static int do_set_input_locked(uint32_t kind, const void *bytes, size_t cap)
+{
+    int rc = ensure_bringup(kind);
+    if (rc < 0) return rc;
+    int n = ga10b_bringup_set_input(&g_bringups[kind], bytes, cap);
+    return n < 0 ? n : 0;
+}
+
+static int do_set_input_fill_locked(uint32_t kind, uint32_t bits,
+                                    uint32_t n_floats)
+{
+    int rc = ensure_bringup(kind);
+    if (rc < 0) return rc;
+    int n = ga10b_bringup_set_input_fill(&g_bringups[kind], bits, n_floats);
+    return n < 0 ? n : 0;
+}
+
+static int do_run_with_input_locked(uint32_t kind,
+                                    const void *input, size_t input_cap,
+                                    void *output, size_t output_cap)
+{
+    int rc = ensure_bringup(kind);
+    if (rc < 0) return rc;
+    struct ga10b_bringup *b = &g_bringups[kind];
+    int n = ga10b_bringup_set_input(b, input, input_cap);
+    if (n < 0) return n;
+    rc = ga10b_bringup_launch_kernel(b);
+    if (rc < 0) return rc;
+    n = ga10b_bringup_read_pipeline_output(b, output, output_cap);
+    return n < 0 ? -1 : 0;
+}
+
+static void gpu_dispatcher_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        struct gpu_request_msg msg;
+        if (msg_recv(g_gpu_request_q, &msg, MSG_WAIT_FOREVER) != IPC_OK) {
+            continue;
+        }
+        struct gpu_request *req = msg.req;
+        struct gpu_reply_msg reply = { .rc = -1 };
+
+        irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+        switch (req->op) {
+        case GPU_OP_RUN:
+            reply.rc = do_run_locked(req->kind, req->output, req->output_cap);
+            break;
+        case GPU_OP_SET_INPUT:
+            reply.rc = do_set_input_locked(req->kind, req->input,
+                                            req->input_len);
+            break;
+        case GPU_OP_SET_INPUT_FILL:
+            reply.rc = do_set_input_fill_locked(req->kind, req->fill_bits,
+                                                 req->fill_n_floats);
+            break;
+        case GPU_OP_RUN_WITH_INPUT:
+            reply.rc = do_run_with_input_locked(req->kind,
+                                                 req->input, req->input_len,
+                                                 req->output, req->output_cap);
+            break;
+        }
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+
+        /* Record result for the circuit breaker. set_input ops use
+         * the filtered variant so caller-side validation errors
+         * (-2 cap, -3 bad arg) don't trip the breaker. */
+        if (req->op == GPU_OP_SET_INPUT ||
+                req->op == GPU_OP_SET_INPUT_FILL) {
+            gpu_dispatch_record_set_input_result(reply.rc);
+        } else {
+            gpu_dispatch_record_result(reply.rc);
+        }
+
+        /* Reply queue is a private 1-slot queue created by the
+         * caller; msg_send wakes the caller blocking in msg_recv.
+         * If the caller went away before the reply (impossible
+         * today since callers block synchronously, but defensive),
+         * msg_send returns IPC_ERR_FULL/TIMEOUT and we drop. */
+        msg_send(req->reply_q, &reply, MSG_WAIT_FOREVER);
+    }
+}
+
+void slm_gpu_dispatcher_init(void)
+{
+    if (g_gpu_request_q) return;  /* idempotent — already initialized */
+
+    g_gpu_request_q = msg_queue_create(GPU_REQUEST_QUEUE_DEPTH,
+                                        sizeof(struct gpu_request_msg));
+    if (!g_gpu_request_q) {
+        uart_printf("[gpu] dispatcher init: msg_queue_create failed — "
+                    "GPU dispatch FFI will return -1\n");
+        return;
+    }
+    struct task *t = task_create("gpu_dispatcher", gpu_dispatcher_task, NULL);
+    if (!t) {
+        uart_printf("[gpu] dispatcher init: task_create failed — "
+                    "GPU dispatch FFI will return -1\n");
+        msg_queue_destroy(g_gpu_request_q);
+        g_gpu_request_q = NULL;
+        return;
+    }
+    scheduler_add_task(t);
+}
+
+/* Build a request, post it, wait for the reply. Common scaffolding
+ * for the four public dispatch entry points below. Returns the
+ * dispatcher's rc, or -1 if the dispatcher isn't running (init
+ * failed at boot, or non-Jetson — but the non-Jetson stubs short-
+ * circuit before reaching here). */
+static int gpu_dispatch_via_task(struct gpu_request *req)
+{
+    if (!g_gpu_request_q) return -1;
+    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
+
+    /* Per-call reply queue: 1 slot, single message. msg_queue_create
+     * pulls from a fixed pool (MSG_QUEUE_MAX); on exhaustion we
+     * fall back to -1, same as a tripped breaker. */
+    struct msg_queue *reply_q = msg_queue_create(1,
+                                                  sizeof(struct gpu_reply_msg));
+    if (!reply_q) return -1;
+    req->reply_q = reply_q;
+
+    struct gpu_request_msg msg = { .req = req };
+    int send_rc = msg_send(g_gpu_request_q, &msg, MSG_WAIT_FOREVER);
+    if (send_rc != IPC_OK) {
+        msg_queue_destroy(reply_q);
+        return -1;
+    }
+
+    struct gpu_reply_msg reply = { .rc = -1 };
+    int recv_rc = msg_recv(reply_q, &reply, MSG_WAIT_FOREVER);
+    msg_queue_destroy(reply_q);
+    return recv_rc == IPC_OK ? reply.rc : -1;
+}
+
 /* ---- Generic kind-parameterized GPU dispatch FFI ----
  *
- * The functions below take `kind` as the first argument and route
- * through the per-kind cache in `g_bringups[]`. The kind-named
- * shims (slm_gpu_run_mnist, slm_gpu_run_sched_inference, etc.)
- * stay below as 1-line wrappers for backward compatibility with
- * existing Lua / Rust callers; new model integrations should
- * call the generic functions directly with the kind constant. */
+ * Each function takes `kind` as the first argument, builds a
+ * `struct gpu_request` on the caller's stack, and routes through
+ * the dispatcher task. The kind-named shims further down
+ * (slm_gpu_run_mnist, slm_gpu_run_sched_inference, etc.) are
+ * 1-line wrappers around these for backward compatibility. */
 
 int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
 {
     if (!output) return -1;
-    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
-
-    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    int rc = ensure_bringup(kind);
-    if (rc < 0) goto out;
-    struct ga10b_bringup *b = &g_bringups[kind];
-    rc = ga10b_bringup_launch_kernel(b);
-    if (rc < 0) goto out;
-    int n = ga10b_bringup_read_pipeline_output(b, output, output_cap);
-    rc = n < 0 ? -1 : 0;
-out:
-    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
-    gpu_dispatch_record_result(rc);
-    return rc;
+    struct gpu_request req = {
+        .op = GPU_OP_RUN, .kind = kind,
+        .output = output, .output_cap = output_cap,
+    };
+    return gpu_dispatch_via_task(&req);
 }
 
 int slm_gpu_set_input(uint32_t kind, const void *bytes, size_t cap)
 {
-    /* NULL `bytes` falls through to ga10b_bringup_set_input, which
-     * returns -3 — preserves the error mapping (-1 no v6 handoff,
-     * -2 cap too large, -3 bad arg) callers depend on. */
-    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
-    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    int rc = ensure_bringup(kind);
-    if (rc < 0) goto out;
-    int n = ga10b_bringup_set_input(&g_bringups[kind], bytes, cap);
-    rc = n < 0 ? n : 0;
-out:
-    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
-    /* Filtered: only -1 / 0 reach the breaker counter. -2 (cap too
-     * large) and -3 (bad arg) are caller-side validation errors. */
-    gpu_dispatch_record_set_input_result(rc);
-    return rc;
+    /* NULL `bytes` is intentionally passed through to ga10b_bringup_set_input
+     * (returns -3) so callers see the same error mapping. */
+    struct gpu_request req = {
+        .op = GPU_OP_SET_INPUT, .kind = kind,
+        .input = bytes, .input_len = cap,
+    };
+    return gpu_dispatch_via_task(&req);
 }
 
 int slm_gpu_set_input_fill(uint32_t kind, uint32_t value_bits,
                            uint32_t n_floats)
 {
-    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
-    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    int rc = ensure_bringup(kind);
-    if (rc < 0) goto out;
-    int n = ga10b_bringup_set_input_fill(&g_bringups[kind], value_bits,
-                                          n_floats);
-    rc = n < 0 ? n : 0;
-out:
-    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
-    gpu_dispatch_record_set_input_result(rc);
-    return rc;
+    struct gpu_request req = {
+        .op = GPU_OP_SET_INPUT_FILL, .kind = kind,
+        .fill_bits = value_bits, .fill_n_floats = n_floats,
+    };
+    return gpu_dispatch_via_task(&req);
 }
 
-/* All-in-one set_input + launch + read under a single lock
- * acquisition. Used by callers that produce input bytes
- * synchronously and want output in the same call (e.g.
- * sched-MLP's `assign_cpu` path, where holding the lock across
- * the whole sequence prevents a concurrent dispatcher from
- * overwriting g_handoff between set_input and launch). */
 int slm_gpu_run_with_input(uint32_t kind,
                            const void *input, size_t input_cap,
                            void *output, size_t output_cap)
 {
     if (!input || !output) return -1;
-    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
-
-    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    int rc = ensure_bringup(kind);
-    if (rc < 0) goto out;
-
-    struct ga10b_bringup *b = &g_bringups[kind];
-    int n = ga10b_bringup_set_input(b, input, input_cap);
-    if (n < 0) { rc = n; goto out; }
-
-    rc = ga10b_bringup_launch_kernel(b);
-    if (rc < 0) goto out;
-
-    n = ga10b_bringup_read_pipeline_output(b, output, output_cap);
-    rc = n < 0 ? -1 : 0;
-out:
-    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
-    gpu_dispatch_record_result(rc);
-    return rc;
+    struct gpu_request req = {
+        .op = GPU_OP_RUN_WITH_INPUT, .kind = kind,
+        .input = input, .input_len = input_cap,
+        .output = output, .output_cap = output_cap,
+    };
+    return gpu_dispatch_via_task(&req);
 }
 
 /* ---- Kind-named shims (backward compatibility) ----
@@ -786,6 +974,7 @@ int slm_gpu_run_with_input(uint32_t kind,
     (void)output; (void)output_cap;
     return -1;
 }
+void slm_gpu_dispatcher_init(void) { }
 int slm_gpu_run_mnist(void *logits_bytes_out)
 {
     (void)logits_bytes_out;

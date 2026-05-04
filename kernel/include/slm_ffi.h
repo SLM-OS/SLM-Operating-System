@@ -852,6 +852,14 @@ int slm_gpu_run_with_input(uint32_t kind,
                            const void *input, size_t input_cap,
                            void *output, size_t output_cap);
 
+/* Spawn the GPU dispatcher task and create its request queue.
+ * Idempotent — safe to call multiple times. Must be called AFTER
+ * `ipc_init()` and BEFORE the scheduler starts. On non-Jetson
+ * builds this is a no-op stub. The four `slm_gpu_*` entry points
+ * above (and their MNIST/sched-named shims) all return -1
+ * unconditionally if this hasn't been called or if it failed. */
+void slm_gpu_dispatcher_init(void);
+
 /*
  * FP-free argmax over an array of fp32 bit patterns. Used by
  * Lua / shell callers that need the predicted class but can't do
