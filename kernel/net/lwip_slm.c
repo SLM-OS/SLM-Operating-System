@@ -740,6 +740,59 @@ int net_test_inject_rx_frame(const uint8_t *frame, size_t len)
     return net_input_frame_into_stack(frame, len);
 }
 
+/*
+ * Test-only: drive the same pbuf_alloc + pbuf_take pair the
+ * production RX path uses, then read the assembled chain back into
+ * `dest` so the caller can byte-compare against the source. Frees
+ * the pbuf before returning (does NOT hand to slm_netif.input —
+ * the goal is to validate chain assembly, not L3 routing).
+ *
+ * Why this exists separately from `net_test_inject_rx_frame`:
+ * `inject` runs the full production code path including
+ * `slm_netif.input`, but lwIP's `ethernet_input` only reads the L2
+ * header (first 14 B), so a regression that fills only the first
+ * pool slot via `memcpy(p->payload, src, len)` instead of
+ * `pbuf_take(p, src, len)` would still satisfy `inject`'s
+ * "rx_packets advanced, rx_dropped flat" assertions — the test
+ * couldn't see the corrupted tail. This helper exposes the chain
+ * for byte-level inspection so the test can detect the regression
+ * mode #585 explicitly calls out.
+ *
+ * Returns the number of bytes copied into `dest` (== len on
+ * success), or -1 if alloc or take failed, -2 if `dest_len < len`.
+ *
+ * This deliberately duplicates the alloc + take call in
+ * `net_input_frame_into_stack`. The duplication is the point: a
+ * regression that touches the production helper's take call won't
+ * be caught by the duplicate, BUT the duplicate catches regressions
+ * to any of (PBUF_POOL slot size, pbuf_alloc chain semantics,
+ * pbuf_take chain handling) that would silently affect both. A
+ * full end-to-end test would require splitting the production
+ * helper into "alloc + take" and "input" phases just for testing,
+ * which would expose the pbuf for inspection at the cost of an
+ * artificial seam in production code. Two test paths (inject for
+ * the production code path; this one for byte-level chain
+ * verification) is the lower-cost trade.
+ */
+int net_test_alloc_take_readback(const uint8_t *frame, size_t len,
+                                 uint8_t *dest, size_t dest_len)
+{
+    if (dest_len < len) {
+        return -2;
+    }
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
+    if (!p) {
+        return -1;
+    }
+    if (pbuf_take(p, frame, (u16_t)len) != ERR_OK) {
+        pbuf_free(p);
+        return -1;
+    }
+    u16_t copied = pbuf_copy_partial(p, dest, (u16_t)len, 0);
+    pbuf_free(p);
+    return (int)copied;
+}
+
 void net_poll(void) {
     /*
      * Drive the USB core's hot-plug retry path even before net_init

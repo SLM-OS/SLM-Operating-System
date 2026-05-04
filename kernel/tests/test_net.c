@@ -2263,6 +2263,10 @@ static void test_net_poll_drains_all_buffered_frames(void)
 static uint8_t chained_pbuf_test_frame[CHAINED_PBUF_TEST_FRAME_LEN];
 
 extern int net_test_inject_rx_frame(const uint8_t *frame, size_t len);
+extern int net_test_alloc_take_readback(const uint8_t *frame, size_t len,
+                                        uint8_t *dest, size_t dest_len);
+
+static uint8_t chained_pbuf_readback[CHAINED_PBUF_TEST_FRAME_LEN];
 
 static void test_net_rx_chained_pbuf_assembly(void)
 {
@@ -2272,11 +2276,12 @@ static void test_net_rx_chained_pbuf_assembly(void)
     }
 
     /* Build the frame: standard broadcast Ethernet header followed
-     * by a deterministic byte pattern. The pattern itself isn't
-     * read back (no upper-layer handler for ethertype 0x9000), but
-     * keeping it nontrivial means a future caller that does verify
-     * payload bytes (e.g. a jumbo-frame echo test) can extend this
-     * fixture without rebuilding it. */
+     * by a deterministic byte pattern. The byte-pattern (vs all-
+     * zeros) is the load-bearing fixture for the readback assertion
+     * below — a regression of pbuf_take to a contiguous memcpy
+     * would leave bytes past offset 1536 as whatever was in the
+     * second pool slot before alloc, which is almost never our
+     * deterministic pattern. */
     static const uint8_t bcast_mac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     memcpy(chained_pbuf_test_frame + 0, bcast_mac, 6);     /* dst */
     memcpy(chained_pbuf_test_frame + 6, bcast_mac, 6);     /* src */
@@ -2286,28 +2291,53 @@ static void test_net_rx_chained_pbuf_assembly(void)
         chained_pbuf_test_frame[i] = (uint8_t)(i & 0xFF);
     }
 
+    /* Phase 1: production code-path smoke check.
+     *
+     * Drive `net_input_frame_into_stack` end-to-end via the inject
+     * hook: alloc + take + slm_netif.input. Asserts the chain alloc
+     * doesn't fail and the frame doesn't get dropped at any step in
+     * the production helper. Doesn't byte-compare — see phase 2 for
+     * that. */
     struct net_watchdog_snapshot before;
     net_watchdog_get(&before);
 
-    int rc = net_test_inject_rx_frame(chained_pbuf_test_frame,
-                                      CHAINED_PBUF_TEST_FRAME_LEN);
-
-    /* Inject must succeed — pool budget is generous, frame is well-
-     * formed at L2. A return of -1 means alloc/take/input failed,
-     * which would be the regression mode if pbuf_take started
-     * rejecting chains (or if production allocator fell back to
-     * the memcpy path that can't handle them). */
-    TEST_ASSERT_EQUAL_INT(CHAINED_PBUF_TEST_FRAME_LEN, rc);
+    int inject_rc = net_test_inject_rx_frame(chained_pbuf_test_frame,
+                                             CHAINED_PBUF_TEST_FRAME_LEN);
+    TEST_ASSERT_EQUAL_INT(CHAINED_PBUF_TEST_FRAME_LEN, inject_rc);
 
     struct net_watchdog_snapshot after;
     net_watchdog_get(&after);
 
-    /* The injected frame must show up at the netif boundary and
-     * NOT be dropped. rx_dropped staying flat is the load-bearing
-     * assertion — pbuf_take returning a non-OK error code from a
-     * regression would increment it. */
     TEST_ASSERT_TRUE(after.rx_packets >= before.rx_packets + 1);
     TEST_ASSERT_EQUAL_UINT64(before.rx_dropped, after.rx_dropped);
+
+    /* Phase 2: chain-assembly correctness.
+     *
+     * Drive the same alloc + pbuf_take pair, then read the assembled
+     * chain back into `chained_pbuf_readback` via pbuf_copy_partial
+     * (which walks the chain). Byte-compare against the source. A
+     * regression of pbuf_take to `memcpy(p->payload, src, len)`
+     * would only populate the first pool slot's worth (1536 B), and
+     * pbuf_copy_partial would copy the still-uninitialized contents
+     * of the second slot for offsets [1536, 3000) — the byte-
+     * compare fails immediately at offset 1536.
+     *
+     * Done as a separate test hook (not via inject above) because
+     * inject hands the pbuf to slm_netif.input, which frees it
+     * before we can inspect — and lwIP's ethernet_input only reads
+     * the L2 header so it can't see chain corruption past offset
+     * 14. The duplication of alloc + take in this hook is documented
+     * in the helper's docblock. */
+    memset(chained_pbuf_readback, 0xAA, sizeof(chained_pbuf_readback));
+    int rb_rc = net_test_alloc_take_readback(
+        chained_pbuf_test_frame,
+        CHAINED_PBUF_TEST_FRAME_LEN,
+        chained_pbuf_readback,
+        sizeof(chained_pbuf_readback));
+    TEST_ASSERT_EQUAL_INT(CHAINED_PBUF_TEST_FRAME_LEN, rb_rc);
+    TEST_ASSERT_EQUAL_MEMORY(chained_pbuf_test_frame,
+                             chained_pbuf_readback,
+                             CHAINED_PBUF_TEST_FRAME_LEN);
 }
 
 #endif /* ENABLE_NETWORKING */
