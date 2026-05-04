@@ -326,7 +326,9 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
 
     let gguf = Gguf::parse(data).map_err(map_gguf_err)?;
     let info = gguf.validate_for_inference().map_err(map_gguf_err)?;
-    let vocab_size = vocab_size_of(&gguf)?;
+    let vocab_size = vocab_size_of(&gguf).inspect_err(|_| {
+        crate::log::log_error(b"[slm] load: vocab_size_of failed (CorruptedData)\0");
+    })?;
     let tensor_count = u32::try_from(gguf.tensor_count())
         .map_err(|_| LoadError::CorruptedData)?;
     // `data.len()` is already bounded above by `MAX_PLAUSIBLE_GGUF_BYTES`
@@ -339,7 +341,10 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     // Build the tokenizer up-front. If this fails the GGUF lacked a
     // tokens/merges array — surface as CorruptedData rather than a
     // separate variant, mirroring the existing GgufError mapping.
-    let tokenizer = Bbpe::from_gguf(&gguf).map_err(|_| LoadError::CorruptedData)?;
+    let tokenizer = Bbpe::from_gguf(&gguf).map_err(|_| {
+        crate::log::log_error(b"[slm] load: Bbpe::from_gguf failed (CorruptedData)\0");
+        LoadError::CorruptedData
+    })?;
 
     // Snapshot tensor descriptors with owned `String` names so the
     // GGUF-borrowed `'a` lifetime can be dropped after this function.
@@ -644,7 +649,32 @@ fn copy_into(dst: &mut [u8], src: &[u8]) {
     dst[..n].copy_from_slice(&src[..n]);
 }
 
-fn map_gguf_err(_e: GgufError) -> LoadError {
+fn map_gguf_err(e: GgufError) -> LoadError {
+    /* Diagnostic: log the specific GgufError variant before collapsing
+     * to LoadError::CorruptedData. The C shell currently prints a
+     * single "failed to parse" message for every non-success return —
+     * without this UART trace, debugging real-world GGUFs requires a
+     * source patch + redeploy per failure mode. Cheap (one fixed-
+     * length string per failed load), and quietly absent on the happy
+     * path. */
+    let label: &[u8] = match e {
+        GgufError::BadMagic => b"[slm] gguf parse: bad magic\0",
+        GgufError::BadVersion => b"[slm] gguf parse: unsupported version (expected 3)\0",
+        GgufError::Truncated => b"[slm] gguf parse: input truncated\0",
+        GgufError::BadAlignment => b"[slm] gguf parse: bad alignment\0",
+        GgufError::OversizedTensorCount => b"[slm] gguf parse: tensor_count cap\0",
+        GgufError::OversizedKvCount => b"[slm] gguf parse: kv_count cap\0",
+        GgufError::OversizedString => b"[slm] gguf parse: string-length cap\0",
+        GgufError::OversizedArrayLen => b"[slm] gguf parse: array-length cap\0",
+        GgufError::DimTooLarge => b"[slm] gguf parse: tensor dim > 2^40\0",
+        GgufError::TooManyDims => b"[slm] gguf parse: too many tensor dims\0",
+        GgufError::UnknownMetaType => b"[slm] gguf parse: unknown meta type tag\0",
+        GgufError::BadUtf8 => b"[slm] gguf parse: bad utf-8\0",
+        GgufError::MissingMetadataKey(_) => b"[slm] gguf parse: missing required metadata key\0",
+        GgufError::BadMetadataType(_) => b"[slm] gguf parse: required metadata key wrong type\0",
+        GgufError::UnsupportedArchitecture => b"[slm] gguf parse: unsupported architecture\0",
+    };
+    crate::log::log_error(label);
     LoadError::CorruptedData
 }
 

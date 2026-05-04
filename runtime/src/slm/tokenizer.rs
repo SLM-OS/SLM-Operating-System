@@ -57,12 +57,22 @@ pub const MAX_PLAUSIBLE_VOCAB: usize = 1 << 20;
 /// magnitude as the vocab.
 pub const MAX_PLAUSIBLE_MERGES: usize = 1 << 20;
 
-/// Cap on the byte length of a single token body. Real BBPE token
-/// pieces sit well under 64 bytes; anything above is hostile or
-/// malformed. Used both for the vocab loader and for BPE-merge
-/// intermediate pieces (no merged piece can exceed this length either,
-/// preventing pathological merge chains from blowing the stack).
-const MAX_TOKEN_BYTES: usize = 64;
+/// Cap on the byte length of a single token body. Used both for
+/// the vocab loader and for BPE-merge intermediate pieces (no merged
+/// piece can exceed this length either, preventing pathological merge
+/// chains from blowing the stack).
+///
+/// Sized for real-world vocab maxima: Qwen2.5-1.5B tops out at 256 bytes
+/// (whitespace-padding tokens like `Ċ` + 80×`Ġ` for indented code);
+/// SmolLM2-135M tops out at 162 bytes; Llama-3 stays under 200. 512
+/// gives 2× headroom over the largest observed value while keeping
+/// the worst-case allocator footprint bounded
+/// (`MAX_PLAUSIBLE_VOCAB × MAX_TOKEN_BYTES = 2^20 × 512 = 512 MB`,
+/// comfortable on Jetson's 8 GB and well above any plausible host
+/// build target). The previous 64-byte cap was too tight: `Bbpe::from_gguf`
+/// rejected SmolLM2's vocab with `VocabTooLarge` and was the proximate
+/// cause of every failed `slm load` in the M5 demo path.
+const MAX_TOKEN_BYTES: usize = 512;
 
 /// GGUF `token_type` values per the GGML spec.
 const TOKEN_TYPE_NORMAL: i32 = 1;
@@ -938,5 +948,22 @@ mod tests {
         // Sanity-only: confirm the constant is exposed.
         assert_eq!(MAX_PLAUSIBLE_VOCAB, 1 << 20);
         assert_eq!(MAX_PLAUSIBLE_MERGES, 1 << 20);
+    }
+
+    #[test]
+    fn max_token_bytes_covers_observed_vocabs() {
+        // Empirical maxima from `gguf-inspect dump-vocab`:
+        //   - SmolLM2-135M-Instruct.Q4_K_M:  162 bytes
+        //   - Qwen2.5-1.5B-Instruct-Q4_K_M:  256 bytes
+        //   - Llama-3.2-1B-Instruct-Q4_K_M: <200 bytes
+        // The cap must accept all three; a regression that lowers
+        // it below 256 trips this, and a regression that lowers it
+        // below 64 (the historic value before #608's diagnostic)
+        // re-introduces the SmolLM-load failure that motivated the
+        // bump.
+        assert!(MAX_TOKEN_BYTES >= 256,
+            "MAX_TOKEN_BYTES = {MAX_TOKEN_BYTES} < 256; would reject \
+             real-world vocabs (Qwen2.5 max = 256). See tokenizer.rs \
+             docstring for sizing rationale.");
     }
 }
