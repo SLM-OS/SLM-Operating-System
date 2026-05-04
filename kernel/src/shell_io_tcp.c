@@ -43,39 +43,29 @@
 #include "lwip/stats.h"        /* lwip_stats.mem.used for the heap snapshot */
 #include "arch/sys_arch.h"   /* sys_now() for connected_at timestamp */
 
-/* Per-direction buffer size. Must be a power of two.
+/* Per-direction shell ring sizes. Both must be powers of two.
  *
- * Bumped 4 KB → 16 KB (#581 throughput follow-up) so a single
- * SHELL_MAX_LINE-sized command (8 KB) can be buffered comfortably
- * even when the shell task is briefly behind on draining (e.g.
- * during a chunk's LFS write). With the prior 4 KB ring, a
- * post-bump 8 KB `xput chunk …\n` line could only be half-buffered
- * at a time — the lwIP recv window would back-pressure the peer
- * after every 4 KB and the round-trip count for a 1 GB upload
- * would barely improve over the pre-bump path. 16 KB gives one
- * full chunk command + 8 KB headroom for the response and any
- * IAC negotiation in flight.
+ * TX ring (16 KB): originally bumped 4 KB → 16 KB in #581 so a
+ * SHELL_MAX_LINE-sized response (8 KB) plus IAC headroom fits even
+ * when the shell task is briefly behind on draining. Bounded by
+ * tcp_write's uint16_t length argument; static_assert below.
  *
- * Cost is BSS only: 16 KB rx + 16 KB tx × MAX_TCP_SHELL_SESSIONS
- * (16) = 512 KB extra static memory. Negligible on the deploy
- * targets (4-8 GB Pi 5 / Jetson). */
-/* TX ring fits a SHELL_MAX_LINE-sized response + IAC headroom and
- * is bounded by tcp_write's uint16_t length. RX ring needs to be
- * large enough to absorb a full TCP_WND-bytes burst without dropping
+ * RX ring (256 KB): sized to absorb a full TCP_WND burst plus the
+ * end-of-stream tail of an `xput-bin` upload without dropping bytes
  * (telnet_inject_rx silently drops on overflow; on_recv tcp_recveds
  * the consumed pbuf bytes regardless, so any drop is a permanent
- * data loss for the session). With TCP_WND = 32 * MSS ≈ 46 KB, the
- * RX ring needs at least 48 KB; 64 KB gives margin for IAC stuffing
- * (xput-bin payload doubles 0xFF). */
+ * data loss for the session). TCP_WND = 32 * MSS ≈ 46 KB, but on
+ * stream-end the peer can have a window of acked-but-not-yet-
+ * consumed bytes plus IAC-doubled 0xFF stuffing in flight that
+ * collectively exceed a 64 KB ring. 256 KB gives ample margin —
+ * the dropped-tail symptom on 100 MB uploads went away once it
+ * landed.
+ *
+ * BSS cost: (16 KB tx + 256 KB rx) × MAX_TCP_SHELL_SESSIONS (16)
+ * ≈ 4.3 MB. Trivial on Pi 5 / Jetson (4-8 GB RAM); roughly 0.4%
+ * of QEMU's default 1 GB guest RAM, also fine. */
 #define TCP_SHELL_TX_RING_SIZE 16384
 #define TCP_SHELL_TX_RING_MASK (TCP_SHELL_TX_RING_SIZE - 1)
-/* 256 KB RX ring — sized to absorb any reasonable end-of-stream
- * burst on `xput-bin` uploads. Pre-bump (64 KB) was just over
- * TCP_WND ≈ 46 KB but on stream-end the kernel had a window of
- * acked-but-not-yet-consumed bytes that could exceed the ring,
- * causing telnet_inject_rx to silently drop the tail 128 KB of
- * a 100 MB upload. With 256 KB ring, even a full TCP send buffer
- * drain on the peer side fits without overflowing. */
 #define TCP_SHELL_RX_RING_SIZE 262144
 #define TCP_SHELL_RX_RING_MASK (TCP_SHELL_RX_RING_SIZE - 1)
 
@@ -533,13 +523,19 @@ static int tcp_read_buf(struct shell_io *io, char *dst, int max_len)
             return -1;
         }
         /* Cooperative yield instead of sleep_ms(10) — net_pump task
-         * runs on the same CPU, so we just need to give it a turn,
-         * not wait a full timer tick. The 10 ms sleep was the
-         * dominant per-block cost on `xput-bin` uploads (#597
-         * Option B) — LFS write was 1 ms but each block needed
-         * multiple ring-empty wait cycles, each costing 10 ms
-         * scheduler latency. yield() returns within microseconds
-         * after net_pump processes pending pbufs. */
+         * runs on the same CPU as the shell task today, so we just
+         * need to give it a turn, not wait a full timer tick. The
+         * 10 ms sleep was the dominant per-block cost on `xput-bin`
+         * uploads (#597 Option B) — LFS write was 1 ms but each
+         * block needed multiple ring-empty wait cycles, each
+         * costing 10 ms scheduler latency. yield() returns within
+         * microseconds after net_pump processes pending pbufs.
+         *
+         * If shell tasks ever migrate off CPU 0 while net_pump
+         * stays pinned, this loop could starve when net_pump
+         * doesn't get scheduled. Today the shell task runs on
+         * CPU 0 with net_pump alongside it (TASK_PRIORITY_IDLE),
+         * so a yield reliably hands control back. */
         yield();
     }
 }

@@ -1116,6 +1116,11 @@ void net_pump_task_entry(void *arg)
     uint64_t prev_rx = 0;
     for (;;) {
         net_poll();
+        /* Non-atomic 64-bit read: net_pump runs only on CPU 0 today
+         * and is the sole writer of net_statistics.rx_packets via
+         * net_poll → on_recv. If a future change moves the lwIP
+         * timer or the cdc_ecm RX path to another CPU, this read
+         * needs an atomic_load or a memory barrier. */
         uint64_t rx = net_statistics.rx_packets;
         if (rx != prev_rx) {
             /* Active traffic — yield-only between polls so the

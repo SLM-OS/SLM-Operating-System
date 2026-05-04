@@ -20,8 +20,15 @@
 /* 256 MB total — bumped from 32 MB so a real SLM model fits.
  * SmolLM2-135M Q4_K_M is ~100 MB; bigger Qwen2.5-1.5B is ~1 GB
  * which still won't fit but at least lets the smaller end-to-end
- * test target upload without an SD-backed mount. PMM cost is
- * 256 MB; Pi 5 / Jetson have GB+ RAM. (#597 throughput target). */
+ * test target upload without an SD-backed mount.
+ *
+ * PMM cost is 256 MB. Fine on Pi 5 / Jetson (GB+ RAM). On QEMU
+ * `make test` runs with -m 1G, so the ramdisk consumes ~25% of
+ * guest RAM — leaves ~750 MB for kernel BSS, task stacks, lwIP
+ * heap, and test allocations, which `make test` proves is enough
+ * (full QEMU suite passes post-bump). If a future test starts
+ * OOM'ing on QEMU, gate the bump behind PLATFORM != QEMU_VIRT
+ * before dropping the ramdisk size. (#597 throughput target). */
 #define RAMDISK_DEFAULT_BLOCK_COUNT  65536    /* 256 MB total */
 
 /*

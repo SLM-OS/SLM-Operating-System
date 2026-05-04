@@ -976,9 +976,9 @@ int cmd_xput(int argc, char *argv[])
  * shell-parse cost that cap the framed `xput chunk` protocol's
  * throughput at ~125 KB/s on hardware. After the command line is
  * dispatched, this handler reads `total` raw bytes from the shell
- * session's input stream straight into a 64 KB staging buffer, then
+ * session's input stream straight into a 128 KB staging buffer, then
  * commits them to LFS with one `littlefs_file_write` call per
- * 64 KB block (vs. one per 16 KB chunk in the framed path —
+ * 128 KB block (vs. one per 16 KB chunk in the framed path —
  * amortizes the COW metadata cost).
  *
  * Wire encoding: bytes flow over the existing telnet shell session
@@ -1018,9 +1018,34 @@ int cmd_xput_bin(int argc, char *argv[])
         return -1;
     }
 
+    /* 128 KB staging buffer in BSS, half the 256 KB shell rx ring so
+     * each LFS write fits comfortably without contending against
+     * still-arriving bytes. Reduces the total number of LFS
+     * write+metadata-commit cycles per upload — the dominant cost
+     * on 5+ MB transfers (#597).
+     *
+     * Single-flight guard: the buffer is shared across all shell
+     * sessions. Two concurrent xput-bin callers would interleave
+     * writes into bin_buf and corrupt both files silently. The
+     * `xput_bin_active` flag makes a second concurrent caller fail
+     * fast with `XPUT-BIN err reason=busy` rather than racing.
+     * Atomic test-and-set so the guard holds even if shell tasks
+     * ever migrate off CPU 0 or move to a preemptive policy.
+     * Checked before any LFS work so a busy reject is cheap and
+     * doesn't disturb the in-flight uploader's state. Cleared on
+     * every return path below. */
+    static uint8_t bin_buf[131072];
+    static bool xput_bin_active = false;
+
+    if (__atomic_exchange_n(&xput_bin_active, true, __ATOMIC_ACQ_REL)) {
+        shell_puts("XPUT-BIN err received=0 reason=busy\r\n");
+        return -1;
+    }
+
     const char *subpath = NULL;
     struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
     if (!mnt) {
+        __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
         shell_printf("xput-bin: %s: Not a mounted filesystem\r\n", resolved);
         return -1;
     }
@@ -1034,6 +1059,7 @@ int cmd_xput_bin(int argc, char *argv[])
     bool resume = false;
     if (littlefs_stat_path(mnt, subpath, &info) == LFS_ERR_OK) {
         if (info.size > total) {
+            __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
             shell_printf("xput-bin: %s: existing %lu > requested %lu\r\n",
                          resolved,
                          (unsigned long)info.size,
@@ -1049,25 +1075,18 @@ int cmd_xput_bin(int argc, char *argv[])
                                   ? (LFS_O_RDWR)
                                   : (LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC));
     if (fd < 0) {
+        __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
         shell_printf("xput-bin: %s: failed to open\r\n", resolved);
         return -1;
     }
     if (resume) {
         if (littlefs_file_seek(mnt, fd, 0, LFS_SEEK_END) < 0) {
             littlefs_file_close(mnt, fd);
+            __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
             shell_printf("xput-bin: %s: seek failed\r\n", resolved);
             return -1;
         }
     }
-
-    /* 128 KB staging buffer in BSS — bigger than the rx ring (64 KB)
-     * so each LFS write covers two ring-fulls of data. Reduces the
-     * total number of LFS write+metadata-commit cycles for the same
-     * upload, which was the dominant cost on 5+ MB transfers (#597).
-     * One cmd_xput_bin call active per kernel at a time — only one
-     * session does an upload, and each shell task processes one
-     * command at a time. */
-    static uint8_t bin_buf[131072];
 
     /* Tell the client we're ready and what offset to start streaming
      * from. The client uses this for resume — sends only
@@ -1125,6 +1144,7 @@ int cmd_xput_bin(int argc, char *argv[])
                     }
                 }
                 littlefs_file_close(mnt, fd);
+                __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
                 shell_printf("XPUT-BIN err received=%lu reason=closed\r\n",
                              (unsigned long)received);
                 return -1;
@@ -1132,45 +1152,28 @@ int cmd_xput_bin(int argc, char *argv[])
             if (n > 0) {
                 got += (uint32_t)n;
                 last_progress_ticks = timer_get_count();
-            } else {
-                /* n == 0 means non-blocking read had nothing — but
-                 * shell_session_read_raw always blocks for at least
-                 * one byte (or returns -1). Defensive: treat as
-                 * stall trigger. */
-                if (read_to_ticks &&
-                    (timer_get_count() - last_progress_ticks)
-                    > read_to_ticks) {
-                    INFO("xput-bin: read stall after %u/%u (got %u of "
-                         "block) — committing partial",
-                         (unsigned)received, (unsigned)total,
-                         (unsigned)got);
-                    if (got > 0) {
-                        int wp = littlefs_file_write(mnt, fd, bin_buf,
-                                                     (size_t)got);
-                        if (wp == (int)got) received += got;
-                    }
-                    littlefs_file_close(mnt, fd);
-                    shell_printf("XPUT-BIN err received=%lu reason=stall\r\n",
-                                 (unsigned long)received);
-                    return -1;
-                }
+                continue;
             }
-            /* Block-stall check between successful reads as well: if
-             * peer stops sending halfway through a block (TCP send
-             * buffer drained but Nagle/end-of-stream interaction),
-             * commit what we have rather than hang forever. */
+            /* n == 0: shell_session_read_raw always blocks for at
+             * least one byte or returns -1, so this is the stall
+             * path — peer stopped sending halfway through a block
+             * (TCP send buffer drained, Nagle/end-of-stream
+             * interaction). Commit what we have rather than hang
+             * forever. */
             if (read_to_ticks &&
                 (timer_get_count() - last_progress_ticks)
                 > read_to_ticks) {
                 INFO("xput-bin: read stall after %u/%u (got %u of "
                      "block) — committing partial",
-                     (unsigned)received, (unsigned)total, (unsigned)got);
+                     (unsigned)received, (unsigned)total,
+                     (unsigned)got);
                 if (got > 0) {
                     int wp = littlefs_file_write(mnt, fd, bin_buf,
                                                  (size_t)got);
                     if (wp == (int)got) received += got;
                 }
                 littlefs_file_close(mnt, fd);
+                __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
                 shell_printf("XPUT-BIN err received=%lu reason=stall\r\n",
                              (unsigned long)received);
                 return -1;
@@ -1180,6 +1183,7 @@ int cmd_xput_bin(int argc, char *argv[])
         int written = littlefs_file_write(mnt, fd, bin_buf, (size_t)got);
         if (written != (int)got) {
             littlefs_file_close(mnt, fd);
+            __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
             shell_printf("XPUT-BIN err received=%lu reason=write\r\n",
                          (unsigned long)received);
             return -1;
@@ -1188,6 +1192,7 @@ int cmd_xput_bin(int argc, char *argv[])
     }
 
     littlefs_file_close(mnt, fd);
+    __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
     shell_printf("XPUT-BIN done size=%lu\r\n", (unsigned long)received);
     return 0;
 }

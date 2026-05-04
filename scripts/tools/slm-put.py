@@ -978,7 +978,7 @@ def upload_xput_bin(shell: "Shell",
     expansion, no per-line shell parse — kernel reads raw bytes
     straight into LFS.
 
-    Per-block staging on the kernel side is 64 KB (vs framed protocol's
+    Per-block staging on the kernel side is 128 KB (vs framed protocol's
     16 KB per chunk), which amortizes the LFS COW metadata cost over
     larger writes.
 
@@ -1030,6 +1030,24 @@ def upload_xput_bin(shell: "Shell",
                 # `XPUT-BIN done` parser doesn't re-find this line.
                 del shell.buf[: end + 1]
                 break
+        # Pre-stream error from the kernel (e.g. reason=busy when
+        # another session is already uploading, or open/seek failures
+        # against the target path). Surface it instead of waiting out
+        # the full --timeout for a "ready" line that will never come.
+        err_idx = shell.buf.find(b"XPUT-BIN err")
+        if err_idx >= 0:
+            err_end = shell.buf.find(b"\n", err_idx)
+            err_line = bytes(
+                shell.buf[err_idx : err_end if err_end >= 0 else len(shell.buf)]
+            ).decode("ascii", errors="replace").strip()
+            print(f"xput-bin: kernel rejected upload: {err_line}",
+                  file=sys.stderr)
+            # Drain to the prompt so subsequent commands work.
+            try:
+                shell.read_until_prompt()
+            except Exception:
+                pass
+            return 1
         # Check for unknown-command response (kernel without xput-bin).
         if b"Unknown command" in shell.buf or b"command not found" in shell.buf:
             print("xput-bin: kernel doesn't support it; falling back to framed",
@@ -1078,7 +1096,12 @@ def upload_xput_bin(shell: "Shell",
     saved_timeout = shell.sock.gettimeout()
     shell.sock.settimeout(None)
     try:
-        BLOCK = 256 * 1024  # bigger block = less Python overhead per loop iteration
+        # 128 KB matches the kernel's bin_buf commit size in
+        # cmd_xput_bin. Aligning script BLOCK with kernel commit
+        # boundary makes the partial-commit-on-close case predictable:
+        # if the FIN-after-data race trims the tail, the loss rounds
+        # to a kernel commit boundary rather than mid-block.
+        BLOCK = 128 * 1024
         sent = resume_offset
         payload = data[resume_offset:]
         cursor = 0
@@ -1143,33 +1166,89 @@ def upload_xput_bin(shell: "Shell",
         print(f"xput-bin: kernel reported error: {err_line!r}",
               file=sys.stderr)
         return 1
-    if closed_seen:
-        # The kernel already cleaned up. We don't know exact bytes
-        # received, but the partial-commit-on-close path means file
-        # has the last successfully-acked block. Verify with stat
-        # (handled by the upload_xput_bin caller's `--no-verify-size`
-        # opt-out). Don't return 1 — the most common cause is a
-        # FIN-after-data race that's harmless.
-        print("xput-bin: peer closed before done response; assuming "
-              "kernel partial-commit completed",
-              file=sys.stderr)
-    elif not done_seen:
+    if not done_seen and not closed_seen:
         print(
             f"xput-bin: timeout ({drain_timeout:.0f}s) waiting for done response",
             file=sys.stderr,
         )
         return 1
 
-    # Drain through to the next prompt so subsequent commands work.
-    try:
-        shell.read_until_prompt()
-    except Exception:
-        pass
+    # Resolve actual on-disk size. On the done-seen path the existing
+    # shell is still open and we can stat directly. On the closed_seen
+    # path the kernel closed our session so we have to reconnect to
+    # run stat — required for an honest "uploaded N bytes" report,
+    # since the partial-commit-on-close path may have trimmed the
+    # tail (FIN-after-data race, documented in PR #621). The user
+    # can opt out of stat with --no-verify-size; in that mode the
+    # closed_seen path returns 0 with a warning so existing scripted
+    # callers don't break.
+    actual_size: int | None
+    if closed_seen:
+        if args.no_verify_size:
+            print("xput-bin: peer closed before done response; "
+                  "skipping stat (--no-verify-size); assumed-complete",
+                  file=sys.stderr)
+            actual_size = None
+        else:
+            try:
+                shell = reconnect(shell_factory, args.debug)
+            except Exception as e:
+                print(
+                    f"xput-bin: peer closed before done response and "
+                    f"reconnect failed ({e}); cannot verify size",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                actual_size = remote_stat(shell, args.remote_path, args.debug)
+            except RuntimeError as e:
+                print(f"xput-bin: stat after close failed: {e}",
+                      file=sys.stderr)
+                return 1
+    else:
+        # Drain through to the next prompt so the post-stream stat works.
+        try:
+            shell.read_until_prompt()
+        except Exception:
+            pass
+        if args.no_verify_size:
+            actual_size = None
+        else:
+            try:
+                actual_size = remote_stat(shell, args.remote_path, args.debug)
+            except RuntimeError as e:
+                print(f"xput-bin: stat failed: {e}", file=sys.stderr)
+                return 1
 
     elapsed = max(time.monotonic() - start_time, 0.001)
-    avg_rate = total / elapsed
+
+    if actual_size is None:
+        # --no-verify-size path. Report what we attempted to send.
+        avg_rate = total / elapsed
+        print(
+            f"uploaded {format_bytes(total)} to {args.remote_path} via "
+            f"{args.transport}:{target_desc} protocol=binary "
+            f"in {format_duration(elapsed)} ({format_rate(avg_rate)} avg)"
+        )
+        return 0
+
+    if actual_size != total:
+        # Partial — report honestly and exit non-zero so callers know.
+        missing = total - actual_size
+        avg_rate = actual_size / elapsed
+        print(
+            f"xput-bin: partial upload — wrote {format_bytes(actual_size)} of "
+            f"{format_bytes(total)} ({missing} bytes missing) to "
+            f"{args.remote_path} via {args.transport}:{target_desc} "
+            f"in {format_duration(elapsed)} ({format_rate(avg_rate)} avg). "
+            f"Re-run xput-bin to resume from {actual_size}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    avg_rate = actual_size / elapsed
     print(
-        f"uploaded {format_bytes(total)} to {args.remote_path} via "
+        f"uploaded {format_bytes(actual_size)} to {args.remote_path} via "
         f"{args.transport}:{target_desc} protocol=binary "
         f"in {format_duration(elapsed)} ({format_rate(avg_rate)} avg)"
     )
