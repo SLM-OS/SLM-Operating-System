@@ -8,6 +8,7 @@
 #define TASK_H
 
 #include <stdalign.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 #include "config.h"
@@ -24,6 +25,10 @@
 #define TASK_PRIORITY_DEFAULT   TASK_PRIORITY_NORMAL
 #define TASK_PRIORITY_MAX       7
 #define TASK_PRIORITY_MIN       0
+
+/* Task flags (struct task::flags). Set once at task creation; never
+ * cleared. Currently only TASK_FLAG_IDLE is defined (#200, 2026-05-03). */
+#define TASK_FLAG_IDLE          (1u << 0)   /* per-CPU perpetual idle task */
 
 /* Task states */
 typedef enum {
@@ -166,7 +171,19 @@ struct task {
 
     /* User mode support (Phase 5 M4) */
     uint8_t is_user;                    /* 1 if runs at EL0, 0 for kernel EL1 */
-    uint8_t _user_pad[7];              /* Alignment padding */
+
+    /* Task-flag bits (#200 investigation, 2026-05-03). Currently
+     * only TASK_FLAG_IDLE is defined; set once at idle creation in
+     * `scheduler_init` / `scheduler_init_secondary`. Used by
+     * `is_idle_task(t)` for O(1) guards in state-mutation paths
+     * (terminate, destroy, kill) — replaces the old loop-over-cpu_rq
+     * pointer comparison. Pattern ported from Linux's PF_IDLE
+     * (`include/linux/sched.h:PF_IDLE`).
+     *
+     * Flag bits are ORed in; never cleared. Adding a new bit is
+     * additive and won't affect existing callers. */
+    uint8_t flags;                      /* TASK_FLAG_* bits */
+    uint8_t _user_pad[6];              /* Alignment padding */
     void (*user_entry)(void *arg);      /* EL0 entry point (for user tasks) */
 
     /* Slot generation counter for work-stealing ABA avoidance (#139).
@@ -252,6 +269,22 @@ int task_canary_check_all(void);
  * concurrent log output from other CPUs, so callers from normal
  * task context should prefer the locked variant above. */
 int task_canary_check_all_unlocked(void);
+
+/*
+ * is_idle_task — return true if `t` is a per-CPU idle task.
+ *
+ * Used as an O(1) guard in state-mutation paths (terminate, destroy,
+ * kill) to refuse operations that would corrupt a CPU's perpetual
+ * idle. The flag is set once at idle creation and never cleared.
+ *
+ * Pattern ported from Linux's `is_idle_task` in
+ * `include/linux/sched.h` (uses PF_IDLE there). NULL-safe for
+ * callers that may not have validated the pointer.
+ */
+static inline bool is_idle_task(const struct task *t)
+{
+    return t && (t->flags & TASK_FLAG_IDLE);
+}
 
 /*
  * Create a new task with specified priority.

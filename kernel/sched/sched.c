@@ -776,6 +776,7 @@ void scheduler_init(void)
     cpu_rq(0)->idle_task->state = TASK_READY;
     cpu_rq(0)->idle_task->cpu_affinity = 0;  /* Pinned to CPU 0 */
     cpu_rq(0)->idle_task->assigned_cpu = 0;
+    cpu_rq(0)->idle_task->flags |= TASK_FLAG_IDLE;   /* permanent idle marker */
 
     /* Register built-in policy */
     sched_register_policy(&sched_policy_heuristic);
@@ -900,6 +901,7 @@ void scheduler_init_secondary(uint32_t cpu)
     idle->state = TASK_READY;
     idle->cpu_affinity = cpu;  /* Pinned to this CPU */
     idle->assigned_cpu = cpu;
+    idle->flags |= TASK_FLAG_IDLE;   /* permanent idle marker */
     cpu_rq(cpu)->idle_task = idle;
 
     rq_unlock_irqrestore(cpu, flags);
@@ -1268,20 +1270,16 @@ void scheduler_terminate_task(struct task *task)
         return;
     }
 
-    /* Idle-task guard (#200/#606 investigation, 2026-05-02). The
-     * scheduler-dispatch panic captured on the pre-PR-598 baseline
-     * fired with `current = idle_2 AND state = TERMINATED`; the
-     * only legitimate writer to TASK_TERMINATED outside that idle's
-     * lifetime is this function (the other site is shell `kill`,
-     * which has its own idle guard). Refuse the operation loudly
-     * if a caller passes an idle task — converts the silent
-     * corruption into a clear early panic with the call site in
-     * the backtrace. */
-    for (uint32_t i = 0; i < cpu_count; i++) {
-        if (task == cpu_rq(i)->idle_task) {
-            panic("scheduler_terminate_task: refusing to terminate idle task "
-                  "for CPU %u (task='%s')", i, task->name);
-        }
+    /* Idle-task guard (#200/#606 investigation, 2026-05-02 / 03).
+     * Refuse to mark an idle task TERMINATED — idle is perpetual,
+     * and the scheduler dispatch panic captured on the pre-PR-598
+     * baseline fired with `current = idle_2 AND state = TERMINATED`.
+     * Uses the O(1) flag-bit predicate `is_idle_task()` (Linux
+     * PF_IDLE pattern) — replaces an earlier loop-over-cpu_rq
+     * pointer comparison. */
+    if (is_idle_task(task)) {
+        panic("scheduler_terminate_task: refusing to terminate idle task "
+              "(task='%s', cpu_affinity=%u)", task->name, task->cpu_affinity);
     }
 
     /* Same snapshot/lock/recheck pattern as scheduler_remove_task: a
