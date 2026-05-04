@@ -684,6 +684,24 @@ int net_init(void) {
 }
 
 /*
+ * Walk a `struct tcp_pcb` list (tcp_active_pcbs / tcp_tw_pcbs) and
+ * tcp_abort each entry. Captures `next` before each abort because
+ * tcp_abort frees the pcb synchronously, so dereffing pcb->next
+ * after the call would touch freed memory. The TCP listen list
+ * uses a different pcb type and a different close fn, so it stays
+ * inline at the caller rather than sharing this helper.
+ */
+static void abort_tcp_pcb_list(struct tcp_pcb *head)
+{
+    struct tcp_pcb *pcb = head;
+    while (pcb != NULL) {
+        struct tcp_pcb *next = pcb->next;
+        tcp_abort(pcb);
+        pcb = next;
+    }
+}
+
+/*
  * Tear down the network subsystem so it can be re-initialized
  * without rebooting (#609). Inverse of `net_init` for everything
  * except the one-shot `lwip_init()` call (which would re-initialize
@@ -755,27 +773,15 @@ int net_shutdown(void) {
     }
 
     /* 2. Abort all TCP PCBs. Walks each of lwIP's three lists in
-     * turn. tcp_abort() removes the pcb from its list and calls
-     * the err_fn synchronously — capture next BEFORE abort so we
-     * don't deref a freed pcb. Listen pcbs use the separate
-     * tcp_pcb_listen type and tcp_close (which for listen state
-     * just unbinds + frees). */
-    {
-        struct tcp_pcb *pcb = tcp_active_pcbs;
-        while (pcb != NULL) {
-            struct tcp_pcb *next = pcb->next;
-            tcp_abort(pcb);
-            pcb = next;
-        }
-    }
-    {
-        struct tcp_pcb *pcb = tcp_tw_pcbs;
-        while (pcb != NULL) {
-            struct tcp_pcb *next = pcb->next;
-            tcp_abort(pcb);
-            pcb = next;
-        }
-    }
+     * turn. The active + tw lists hold `struct tcp_pcb *` and use
+     * tcp_abort (sends RST + frees synchronously). Listen pcbs are
+     * the separate `struct tcp_pcb_listen` type and use tcp_close
+     * (for LISTEN state, lwIP's tcp_close just unbinds + frees the
+     * listen-pool slot — there's no connection to close). All three
+     * variants capture next BEFORE the close to avoid dereffing a
+     * freed pcb. */
+    abort_tcp_pcb_list(tcp_active_pcbs);
+    abort_tcp_pcb_list(tcp_tw_pcbs);
     {
         struct tcp_pcb_listen *pcb = tcp_listen_pcbs.listen_pcbs;
         while (pcb != NULL) {
