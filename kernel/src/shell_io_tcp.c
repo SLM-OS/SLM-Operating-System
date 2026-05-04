@@ -861,6 +861,95 @@ out:
     return rc;
 }
 
+/*
+ * Test-only driver for the #537 leak-regression test.
+ *
+ * Drives one full close cycle with the heap-baseline snapshot
+ * captured at "open time" so the post-settle delta measurement
+ * is meaningful. (`shell_io_tcp_test_run_close_settling` above
+ * pins `heap_used_at_open_bytes = 0`, which makes its measured
+ * delta equal to whatever the lwIP heap holds at the moment —
+ * fine for testing slot-release timing, useless for testing
+ * leak detection because the baseline isn't real.)
+ *
+ * Cycle:
+ *   1. Allocate a ctx.
+ *   2. Snapshot `lwip_stats.mem.used` into `heap_used_at_open_bytes`
+ *      and the per-MEMP-pool `used` counts into `memp_used_at_open[]`,
+ *      mirroring what `shell_io_tcp_create` does for a real session.
+ *   3. Call `tcp_shell_server_note_session_open` to balance the
+ *      eventual close-counter bump (keeps the opened/closed invariant
+ *      `closed <= opened` holding for any subsequent test that
+ *      observes the stats struct).
+ *   4. Mark closed + shell_done with a rewound settle timer.
+ *   5. Drive `shell_io_tcp_poll` once. The poll path measures the
+ *      close-time heap delta and routes through
+ *      `tcp_shell_server_note_session_close`, which increments
+ *      `leak_warnings` if the delta exceeds NET_SHELL_TCP_LEAK_THRESHOLD_BYTES.
+ *
+ * Returns 0 if the slot was freed (cycle completed), -1 if no
+ * slot could be allocated, -2 if poll didn't free the slot.
+ *
+ * Caller (test_net.c) wraps this in a 50-cycle loop and asserts
+ * `leak_warnings` doesn't increment. The cycle never touches a real
+ * pcb / never calls `tcp_write`, so it can't detect leaks in
+ * lwIP-side allocations — but it pins the kernel-side bookkeeping
+ * (heap snapshot diff, MEMP attribution arithmetic, settle
+ * release ordering) which is where the late-April leak in #537
+ * lived.
+ */
+int shell_io_tcp_test_run_clean_close_cycle(void)
+{
+    struct tcp_shell_ctx *ctx = ctx_alloc();
+    if (!ctx) {
+        return -1;
+    }
+
+    /* Snapshot the heap baseline as a real session would. */
+#if MEM_STATS
+    ctx->heap_used_at_open_bytes = (uint32_t)lwip_stats.mem.used;
+#else
+    ctx->heap_used_at_open_bytes = 0;
+#endif
+#if MEMP_STATS
+    for (int i = 0; i < MEMP_MAX; i++) {
+        ctx->memp_used_at_open[i] = lwip_stats.memp[i]
+            ? (uint32_t)lwip_stats.memp[i]->used
+            : 0u;
+    }
+#endif
+
+    ctx->shell_done = true;
+    ctx->pcb = NULL;
+    ctx->session_id = 0xC10C1057u;   /* literal: "CLOC1057" — close-test */
+
+    /* Pair the close-counter increment that the poll path will fire
+     * (via tcp_shell_server_note_session_close) with a matching
+     * sessions_opened bump, so the loop caller doesn't underflow
+     * `active = opened - closed` on the stats struct. The
+     * `stats_invariants` test in test_net.c asserts opened >=
+     * closed; this keeps that holding even after N cycles. */
+    tcp_shell_server_note_session_open(ctx->session_id);
+
+    /* Rewind close_completed_ticks past the settle window so the
+     * poll path's measure-and-free branch fires on the first call. */
+    uint64_t freq = shell_io_tcp_timer_freq();
+    uint64_t settle_ticks =
+        (freq * (uint64_t)(TCP_SHELL_CLOSE_SETTLE_MS + 100)) / 1000ULL;
+    uint64_t cur = timer_get_count();
+    ctx->close_completed_ticks = (cur > settle_ticks)
+        ? (cur - settle_ticks)
+        : 1ULL;
+
+    shell_io_tcp_poll();
+
+    int rc = ctx->in_use ? -2 : 0;
+
+    /* Idempotent — see close-settling test for the rationale. */
+    ctx_free(ctx);
+    return rc;
+}
+
 size_t shell_io_tcp_test_normalize_output(const char *first,
                                           const char *second,
                                           char *out,
