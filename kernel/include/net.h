@@ -74,6 +74,29 @@ const char *net_strerror(int err);
 int net_init(void);
 
 /**
+ * Tear down the network subsystem so it can be re-initialized
+ * without a reboot. Use case: TCP/lwIP wedge recovery — pbuf pool
+ * stuck, RX-stall watchdog ALARMED, telnet sessions unresponsive.
+ *
+ * Releases the DHCP lease, aborts every TCP PCB, removes the netif,
+ * and resets the RX-stall watchdog state. The lwIP subsystem itself
+ * (memory pools, timer wheel) is NOT re-initialized — `lwip_init()`
+ * is documented as one-shot per process.
+ *
+ * After this, `net_is_up()` returns false. Subsequent `net_init()`
+ * brings the netif back up and restarts DHCP.
+ *
+ * Idempotent — calling on an uninitialized stack is a no-op.
+ *
+ * Caveat: aborts every TCP PCB including the caller's own session
+ * if invoked from a TCP shell. Initiate from serial console for
+ * safe wedge recovery.
+ *
+ * @return  0 on success.
+ */
+int net_shutdown(void);
+
+/**
  * Process pending network events
  *
  * This function must be called periodically (e.g., from main loop or

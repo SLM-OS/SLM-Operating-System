@@ -224,12 +224,21 @@ static int cmd_ifconfig(int argc, char *argv[]) {
 /* -------------------------------------------------------------------------- */
 
 /**
- * net init|status - Initialize or show network status
+ * net init|stop|start|restart|status|watchdog - Network subsystem control
+ *
+ * stop / start / restart added in #609 for wedge recovery without
+ * reboot. `start` is a synonym for `init` (wraps the same net_init);
+ * `restart` chains stop → start. All three abort every TCP PCB, so
+ * if invoked over telnet they kill the calling session — recovery
+ * from a wedged stack should be initiated from serial console.
  */
 static int cmd_net(int argc, char *argv[]) {
     if (argc < 2) {
-        shell_printf("Usage: net <init|status|watchdog>\n");
+        shell_printf("Usage: net <init|start|stop|restart|status|watchdog>\n");
         shell_printf("  net init               - Initialize network subsystem\n");
+        shell_printf("  net start              - Synonym for `init`\n");
+        shell_printf("  net stop               - Tear down lwIP / abort TCP PCBs / release DHCP\n");
+        shell_printf("  net restart            - `stop` then `start` (wedge recovery)\n");
         shell_printf("  net status             - Show network status\n");
         shell_printf("  net watchdog [<ms>]    - Show or set RX-stall watchdog threshold\n");
         return -1;
@@ -257,7 +266,7 @@ static int cmd_net(int argc, char *argv[]) {
         return 0;
     }
 
-    if (strcmp(argv[1], "init") == 0) {
+    if (strcmp(argv[1], "init") == 0 || strcmp(argv[1], "start") == 0) {
         if (net_is_up()) {
             shell_printf("Network already initialized\n");
             return 0;
@@ -268,6 +277,38 @@ static int cmd_net(int argc, char *argv[]) {
             return -1;
         }
         shell_printf("Network initialized successfully\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "stop") == 0) {
+        if (!net_is_up()) {
+            shell_printf("Network already down\n");
+            return 0;
+        }
+        /* Print the warning BEFORE actually shutting down — if this
+         * was issued over telnet the user's last hope of seeing the
+         * message is the queued bytes flushing before the RST goes
+         * out. (Slim hope: the abort takes effect immediately, but
+         * lwIP may flush queued TX before the RST. Better than nothing.) */
+        shell_printf("Tearing down network. If you ran this over telnet, "
+                     "your session is about to end.\n");
+        net_shutdown();
+        shell_printf("Network stopped\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "restart") == 0) {
+        shell_printf("Restarting network. If you ran this over telnet, "
+                     "your session is about to end.\n");
+        if (net_is_up()) {
+            net_shutdown();
+        }
+        shell_printf("Re-initializing network...\n");
+        if (net_init() < 0) {
+            shell_printf("Network re-initialization failed\n");
+            return -1;
+        }
+        shell_printf("Network restarted\n");
         return 0;
     }
 
