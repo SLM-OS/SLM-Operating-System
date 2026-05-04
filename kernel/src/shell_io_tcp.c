@@ -973,10 +973,10 @@ int shell_io_tcp_test_run_read_buf_drains_ring(void)
         return -1;
     }
 
-    /* Prime the ring with a known pattern. Stay below
-     * TCP_SHELL_RING_SIZE so we don't have to worry about the wrap
-     * case in this smoke test (the wrap path is structurally
-     * identical — the function's two-step copy handles it). */
+    /* Prime the ring with a known pattern at the start of the
+     * buffer (tail_idx == 0). Exercises the non-wrap path of
+     * tcp_read_buf's two-step copy — `first` covers everything,
+     * `second` is zero. The wrap path has its own test below. */
     static const char src[] =
         "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUV";
     const uint32_t n = (uint32_t)sizeof(src) - 1;     /* drop NUL */
@@ -991,6 +991,71 @@ int shell_io_tcp_test_run_read_buf_drains_ring(void)
     int got = tcp_read_buf(&ctx->io, dst, (int)sizeof(dst));
 
     int rc = (got == (int)n && memcmp(dst, src, n) == 0) ? 0 : -2;
+
+    ctx_free(ctx);
+    return rc;
+}
+
+/*
+ * Test-only driver for the wrap branch of `tcp_read_buf` (#597
+ * review follow-up).
+ *
+ * The non-wrap test above stays below TCP_SHELL_RING_SIZE with
+ * tail_idx==0 so `first` covers the whole copy. This variant
+ * positions tail_idx near the END of the ring buffer and writes
+ * data that crosses the wrap boundary, forcing the two-step copy:
+ * `first` from `tail_idx..ring_end`, then `second` from `ring_start
+ * ..(want - first)`. Prior to tcp_read_buf this code path was
+ * unreachable (per-char reads always touched one slot at a time),
+ * so a bug in either copy length or the wrap-around tail update
+ * would silently corrupt the assembled buffer. Returns 0 on
+ * success, -1 if no slot, -2 on count or content mismatch.
+ */
+int shell_io_tcp_test_run_read_buf_wrap(void)
+{
+    struct tcp_shell_ctx *ctx = ctx_alloc();
+    if (!ctx) {
+        return -1;
+    }
+
+    /* Position tail_idx 16 bytes from ring end. Total payload 32
+     * bytes splits as 16 (pre-wrap) + 16 (post-wrap). Both halves
+     * non-trivial so an off-by-one in either step shows up
+     * immediately as a content miscompare. */
+    const uint32_t span_first  = 16;
+    const uint32_t span_second = 16;
+    const uint32_t total       = span_first + span_second;
+
+    static uint8_t pattern[32];
+    for (uint32_t i = 0; i < total; i++) {
+        pattern[i] = (uint8_t)(0xC0 + i);   /* deterministic, non-zero, distinct */
+    }
+
+    /* Place `pattern` so the first 16 bytes land at the end of the
+     * ring buffer and the next 16 land at the start. tail_idx then
+     * points at the first byte of the payload. */
+    const uint32_t tail_idx = TCP_SHELL_RING_SIZE - span_first;
+    for (uint32_t i = 0; i < span_first; i++) {
+        ctx->rx_buf[tail_idx + i] = pattern[i];
+    }
+    for (uint32_t i = 0; i < span_second; i++) {
+        ctx->rx_buf[i] = pattern[span_first + i];
+    }
+    ctx->rx_tail = tail_idx;
+    ctx->rx_head = tail_idx + total;        /* pre-mask wraps via & MASK on read */
+    ctx->closed  = false;
+
+    uint8_t dst[64];
+    int got = tcp_read_buf(&ctx->io, (char *)dst, (int)sizeof(dst));
+
+    int rc = (got == (int)total && memcmp(dst, pattern, total) == 0) ? 0 : -2;
+
+    /* Verify the post-read tail landed in the post-wrap region —
+     * confirms the `(rx_tail + want) & MASK` advance handled the
+     * wrap, not just the copy. */
+    if (rc == 0 && ctx->rx_tail != span_second) {
+        rc = -2;
+    }
 
     ctx_free(ctx);
     return rc;

@@ -547,6 +547,29 @@ static void test_shell_io_tcp_read_buf_drains_ring(void)
 }
 
 /*
+ * Test: tcp_read_buf correctly handles a payload that spans the
+ * ring-wrap boundary (#597 review follow-up).
+ *
+ * Pre-tcp_read_buf, multi-byte reads that crossed the wrap point
+ * weren't possible (per-char reads always touched one slot at a
+ * time). The new helper's two-step copy + the `(rx_tail + want) &
+ * MASK` advance are both new code that this test exercises directly.
+ * A bug in either copy length or the wrap-around tail update would
+ * silently corrupt the assembled buffer or leave rx_tail at the
+ * wrong position for the next read.
+ */
+static void test_shell_io_tcp_read_buf_handles_wrap(void)
+{
+    int rc = shell_io_tcp_test_run_read_buf_wrap();
+    TEST_ASSERT_MESSAGE(rc != -1,
+        "test_run_read_buf_wrap: pool slot allocation failed");
+    TEST_ASSERT_MESSAGE(rc != -2,
+        "test_run_read_buf_wrap: tcp_read_buf wrap path returned wrong "
+        "byte count, content, or post-read rx_tail position");
+    TEST_ASSERT_EQUAL_INT(0, rc);
+}
+
+/*
  * Test: 50-cycle close-path drive must not increment leak_warnings (#537).
  *
  * Field observation summary (2026-05-02 jetson-nano-2 traces): post the
@@ -2465,6 +2488,7 @@ int test_suite_net(void)
     RUN_TEST(test_shell_io_tcp_write_buf_timeout);
     RUN_TEST(test_shell_io_tcp_close_settling);
     RUN_TEST(test_shell_io_tcp_read_buf_drains_ring);
+    RUN_TEST(test_shell_io_tcp_read_buf_handles_wrap);
     RUN_TEST(test_tcp_shell_no_false_leak_over_50_close_cycles);
     RUN_TEST(test_net_stats_initial_values);
 
