@@ -128,4 +128,13 @@ int shell_io_tcp_test_run_write_timeout(uint32_t timeout_override_ms);
  * settle period elapsed. */
 int shell_io_tcp_test_run_close_settling(void);
 
+/* Test-only driver for the #537 leak-regression test: drives one
+ * full close cycle with a real heap-baseline snapshot (vs.
+ * `shell_io_tcp_test_run_close_settling`'s baseline=0), so the
+ * close-time delta computation is meaningful. Wrap in a loop +
+ * `tcp_shell_server_get_stats` to assert leak_warnings doesn't
+ * grow across N cycles. Returns 0 on success, -1 if no slot could
+ * be allocated, -2 if the slot wasn't freed by the poll. */
+int shell_io_tcp_test_run_clean_close_cycle(void);
+
 #endif /* SHELL_IO_TCP_H */

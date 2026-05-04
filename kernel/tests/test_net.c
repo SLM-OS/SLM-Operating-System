@@ -518,6 +518,66 @@ static void test_shell_io_tcp_close_settling(void)
 }
 
 /*
+ * Test: 50-cycle close-path drive must not increment leak_warnings (#537).
+ *
+ * Field observation summary (2026-05-02 jetson-nano-2 traces): post the
+ * deferred-measurement settle work, every clean session close in 16+
+ * sequential disconnect cycles registered as a *negative* heap delta
+ * (returned more memory than it took at open-time), and `leaks:
+ * warnings=0 total=0 bytes` held throughout. The pre-fix late-April
+ * state had ~2 of 13 sessions tripping +1300-2000 byte warnings.
+ *
+ * This test pins that "no false-positive leaks" property into CI by
+ * driving `shell_io_tcp_test_run_clean_close_cycle` 50 times back-to-
+ * back. Each cycle:
+ *   - allocates a pool slot
+ *   - snapshots the lwIP heap baseline + per-MEMP-pool baseline
+ *   - rewinds the close-settle timer past the 1500 ms window
+ *   - drives `shell_io_tcp_poll`, which measures the close-time delta
+ *     and routes through `tcp_shell_server_note_session_close`
+ *
+ * If the close-path bookkeeping ever regresses to the pre-fix state
+ * (false-positive leak warnings on clean closes), this test fires
+ * immediately rather than surfacing in a 1 GB hardware upload trace.
+ *
+ * Coverage caveat: cycles never call `tcp_write` against a real pcb,
+ * so this test cannot detect leaks in lwIP-side allocation paths
+ * (those are caught only by the slm-put.py-driven hardware exerciser
+ * in #537's plan). It catches the kernel-side accounting, which is
+ * where the late-April leak lived.
+ */
+static void test_tcp_shell_no_false_leak_over_50_close_cycles(void)
+{
+    struct tcp_shell_server_stats before;
+    tcp_shell_server_get_stats(&before);
+
+    for (int i = 0; i < 50; i++) {
+        int rc = shell_io_tcp_test_run_clean_close_cycle();
+        TEST_ASSERT_MESSAGE(rc == 0,
+            "clean-close cycle must succeed (-1=alloc fail, -2=slot held)");
+    }
+
+    struct tcp_shell_server_stats after;
+    tcp_shell_server_get_stats(&after);
+
+    /* The cycle drives the close path but bypasses note_session_open
+     * (the helper allocates a ctx directly). So sessions_closed
+     * should grow by 50 but sessions_opened should be unchanged. */
+    TEST_ASSERT_EQUAL_UINT(before.sessions_closed + 50,
+                           after.sessions_closed);
+
+    /* The load-bearing assertion: zero false-positive leak warnings.
+     * Pre-deferred-measurement, each cycle would have tripped a
+     * warning if `lwip_stats.mem.used` exceeded baseline + 1024 B at
+     * measurement time. With the baseline-snapshot fix, delta should
+     * round to zero (or slightly negative if other work freed memory
+     * mid-test) and leak_warnings stays put. */
+    TEST_ASSERT_MESSAGE(after.leak_warnings == before.leak_warnings,
+        "50 clean closes must not trip any leak warnings — "
+        "regression of the deferred-measurement fix");
+}
+
+/*
  * Test: tcp_write_buf bails within the configured wall-clock cap when
  * the drain is wedged (#536).
  *
@@ -2198,6 +2258,7 @@ int test_suite_net(void)
     RUN_TEST(test_tcp_shell_server_note_session_pair);
     RUN_TEST(test_shell_io_tcp_write_buf_timeout);
     RUN_TEST(test_shell_io_tcp_close_settling);
+    RUN_TEST(test_tcp_shell_no_false_leak_over_50_close_cycles);
     RUN_TEST(test_net_stats_initial_values);
 
     /* lwIP RNG / lwip_rand_seed (DTB-driven entropy seeding) */
