@@ -21,6 +21,8 @@
 #include "lwip/icmp.h"
 #include "lwip/ip4.h"
 #include "lwip/raw.h"
+#include "lwip/tcp.h"
+#include "lwip/priv/tcp_priv.h"  /* tcp_active_pcbs / tcp_tw_pcbs / tcp_listen_pcbs walk for net_shutdown (#609) */
 #include "lwip/stats.h"
 #include "lwip/memp.h"
 
@@ -53,6 +55,14 @@ const struct net_driver *net_get_driver(void) {
 static struct netif slm_netif;
 static bool net_initialized = false;
 static bool dhcp_started = false;
+/* lwip_init() is documented as one-shot for the lifetime of the
+ * process — calling it twice re-initializes pool linked lists that
+ * may still hold live entries. `net stop` / `net restart` (#609)
+ * needs to bring the netif up and down without re-running it, so
+ * track the lwIP-subsystem state separately from the netif state.
+ * Initial value false; flipped to true after the very first
+ * `net_init()` and never reset. */
+static bool lwip_subsystem_initialized = false;
 static bool dhcp_requested = false;
 static bool last_was_bound = false;
 
@@ -594,9 +604,19 @@ int net_init(void) {
         return NET_E_GENERIC;
     }
 
-    /* Initialize lwIP */
-    lwip_init();
-    INFO("lwIP %s initialized", LWIP_VERSION_STRING);
+    /* Initialize lwIP — exactly once per boot. lwIP's pool init
+     * (memp_init, pbuf_init, etc.) sets pool free-list heads from
+     * static storage; running it twice would orphan any allocations
+     * that survived the prior teardown (DHCP-bound state, ARP
+     * entries, etc.) and confuse pool accounting. The netif setup
+     * below is re-runnable; the lwIP subsystem init is not. */
+    if (!lwip_subsystem_initialized) {
+        lwip_init();
+        lwip_subsystem_initialized = true;
+        INFO("lwIP %s initialized", LWIP_VERSION_STRING);
+    } else {
+        INFO("lwIP subsystem already initialized — re-attaching netif only");
+    }
 
     /* Set up default IP configuration (will be overridden by DHCP) */
     ip4_addr_t ipaddr, netmask, gateway;
@@ -660,6 +680,146 @@ int net_init(void) {
     }
 #endif
 
+    return 0;
+}
+
+/*
+ * Walk a `struct tcp_pcb` list (tcp_active_pcbs / tcp_tw_pcbs) and
+ * tcp_abort each entry. Captures `next` before each abort because
+ * tcp_abort frees the pcb synchronously, so dereffing pcb->next
+ * after the call would touch freed memory. The TCP listen list
+ * uses a different pcb type and a different close fn, so it stays
+ * inline at the caller rather than sharing this helper.
+ */
+static void abort_tcp_pcb_list(struct tcp_pcb *head)
+{
+    struct tcp_pcb *pcb = head;
+    while (pcb != NULL) {
+        struct tcp_pcb *next = pcb->next;
+        tcp_abort(pcb);
+        pcb = next;
+    }
+}
+
+/*
+ * Tear down the network subsystem so it can be re-initialized
+ * without rebooting (#609). Inverse of `net_init` for everything
+ * except the one-shot `lwip_init()` call (which would re-initialize
+ * pool linked lists that may still hold live entries — see
+ * `lwip_subsystem_initialized` doc comment).
+ *
+ * Use case: the TCP/lwIP stack has wedged (RX-stall watchdog
+ * ALARMED, pbuf pool stuck, telnet sessions unresponsive) and the
+ * operator wants to recover without losing in-memory state
+ * (mounted GGUF, registered models, the LFS RAM disk).
+ *
+ * Sequence (mirror of net_init in reverse):
+ *
+ *   1. dhcp_release_and_stop — return the lease so the server
+ *      doesn't think we still hold the IP. Best-effort: if the
+ *      DHCP server is gone or the link is down the RELEASE packet
+ *      may not be acknowledged, but lwIP frees its DHCP state
+ *      either way.
+ *   2. tcp_abort on every active PCB — listen sockets stop
+ *      accepting, in-flight connections get a RST. This unblocks
+ *      pool slots held by unacked TX queues. Walks `tcp_active_pcbs`,
+ *      `tcp_listen_pcbs`, and `tcp_tw_pcbs`.
+ *   3. raw_remove the ping PCB.
+ *   4. netif_set_down + netif_remove — stops further frame dispatch
+ *      from `slm_netif.input`. Driver continues to receive but
+ *      net_poll's RX loop short-circuits on `!net_initialized`.
+ *   5. Reset RX-stall watchdog state and counters — `netstat` will
+ *      show a clean baseline after the next `net start`.
+ *   6. Clear `net_initialized` so `net_is_up()` returns false and
+ *      shell commands gate appropriately.
+ *
+ * Caveats:
+ *
+ *   - Calling this from a TCP shell session aborts that session's
+ *     own PCB, killing the caller. The shell command warns about
+ *     this; recovery from a wedged stack should be initiated from
+ *     serial console.
+ *   - The driver's RX/TX rings are not reset. Frames keep arriving
+ *     at the driver but get dropped at the lwIP boundary (no netif
+ *     to dispatch to). On `net start` traffic resumes; the driver's
+ *     ring drains naturally.
+ *   - lwIP's mem and memp pools are not re-initialized. Any
+ *     allocations not freed by the PCB walk above survive the
+ *     teardown — this is intentional, the typical wedge mode is
+ *     "TCP state holds pool slots", which the abort walk releases.
+ *     If the wedge is in the heap-allocator state itself (mem.c
+ *     free-list corruption, e.g.), only a kexec recovers.
+ *
+ * Returns 0 on success. Failure modes are limited to "not
+ * currently initialized" (also returns 0; idempotent).
+ */
+int net_shutdown(void) {
+    if (!net_initialized) {
+        return 0;
+    }
+
+    INFO("Shutting down network subsystem...");
+
+    /* 1. DHCP release. dhcp_release_and_stop on a netif that never
+     * ran DHCP is a no-op in lwIP, so this is safe even when the
+     * link came up via the static fallback path. */
+    if (dhcp_started) {
+        dhcp_release_and_stop(&slm_netif);
+        dhcp_started = false;
+        dhcp_requested = false;
+        dhcp_timeout_armed = false;
+        dhcp_fallback_done = false;
+        last_was_bound = false;
+    }
+
+    /* 2. Abort all TCP PCBs. Walks each of lwIP's three lists in
+     * turn. The active + tw lists hold `struct tcp_pcb *` and use
+     * tcp_abort (sends RST + frees synchronously). Listen pcbs are
+     * the separate `struct tcp_pcb_listen` type and use tcp_close
+     * (for LISTEN state, lwIP's tcp_close just unbinds + frees the
+     * listen-pool slot — there's no connection to close). All three
+     * variants capture next BEFORE the close to avoid dereffing a
+     * freed pcb. */
+    abort_tcp_pcb_list(tcp_active_pcbs);
+    abort_tcp_pcb_list(tcp_tw_pcbs);
+    {
+        struct tcp_pcb_listen *pcb = tcp_listen_pcbs.listen_pcbs;
+        while (pcb != NULL) {
+            struct tcp_pcb_listen *next = pcb->next;
+            tcp_close((struct tcp_pcb *)pcb);
+            pcb = next;
+        }
+    }
+
+    /* 3. Drop the ping raw_pcb. raw_remove unlinks from the raw
+     * list and frees; the test for NULL guards against a partial
+     * init that didn't allocate it (raw_new returns NULL on memp
+     * exhaustion at boot). */
+    if (ping_pcb != NULL) {
+        raw_remove(ping_pcb);
+        ping_pcb = NULL;
+    }
+
+    /* 4. Bring the netif down and unregister. netif_remove unlinks
+     * from the netif list; subsequent ARP / IP traffic is
+     * silently dropped. `slm_netif` itself is static storage and
+     * remains valid for re-add on the next net_init. */
+    netif_set_down(&slm_netif);
+    netif_remove(&slm_netif);
+
+    /* 5. Reset the RX-stall watchdog so `netstat` doesn't show
+     * stale ALARMED state from before the shutdown. The counters
+     * (stalls/recoveries) reset too — they're only meaningful
+     * within a single up→down→up window and a fresh start gets
+     * a clean slate. */
+    rx_watchdog_seen_first_rx     = false;
+    rx_watchdog_alarmed           = false;
+    rx_watchdog_last_rx_ms        = 0;
+    rx_watchdog_stall_events      = 0;
+    rx_watchdog_recovery_events   = 0;
+
+    net_initialized = false;
+    INFO("Network subsystem shut down");
     return 0;
 }
 

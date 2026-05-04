@@ -2340,6 +2340,61 @@ static void test_net_rx_chained_pbuf_assembly(void)
                              CHAINED_PBUF_TEST_FRAME_LEN);
 }
 
+/*
+ * #609: net_shutdown / net_init cycle leaves the stack in a usable
+ * state.
+ *
+ * The shutdown path tears down the netif, aborts every TCP PCB,
+ * releases the DHCP lease, and resets the RX-stall watchdog. The
+ * subsequent net_init must succeed (lwip_init is one-shot but the
+ * netif setup is re-runnable) and net_is_up() must report true.
+ *
+ * Pre-fix, net_init had only the early-return guard `if
+ * (net_initialized) return 0;` — there was no inverse to drop the
+ * netif and reset state. A wedge required a full kexec.
+ *
+ * Test does the cycle once to catch the most likely regression
+ * (e.g., an attempt to call lwip_init twice would corrupt the
+ * memp pool free lists and any subsequent allocation would fail
+ * or assert; netif_remove without resetting net_initialized would
+ * leave the state inconsistent).
+ */
+static void test_net_shutdown_then_init_succeeds(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    /* Snapshot the watchdog state to verify it was reset. */
+    struct net_watchdog_snapshot before_shutdown;
+    net_watchdog_get(&before_shutdown);
+
+    int rc = net_shutdown();
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_FALSE(net_is_up());
+
+    /* Watchdog state must be cleared post-shutdown. */
+    struct net_watchdog_snapshot after_shutdown;
+    net_watchdog_get(&after_shutdown);
+    TEST_ASSERT_FALSE(after_shutdown.armed);
+    TEST_ASSERT_FALSE(after_shutdown.alarmed);
+    TEST_ASSERT_EQUAL_UINT(0, after_shutdown.stall_events);
+    TEST_ASSERT_EQUAL_UINT(0, after_shutdown.recovery_events);
+
+    /* Idempotent: a second shutdown is a no-op. */
+    rc = net_shutdown();
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    /* Re-init must succeed. lwip_init() is gated behind a separate
+     * `lwip_subsystem_initialized` flag so a second call here
+     * does NOT re-run it (which would corrupt pool free lists);
+     * only the netif setup runs. */
+    rc = net_init();
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_TRUE(net_is_up());
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -2445,6 +2500,11 @@ int test_suite_net(void)
     RUN_TEST(test_net_pci_watchdog_fires_on_stall);
 #endif
     RUN_TEST(test_net_rx_no_buffers_clean);
+    /* #609: net_shutdown / net_init cycle. Destructive — tears down
+     * the netif and re-initializes it. Must run LAST among the
+     * "live driver" tests so any subtle state-after-restart
+     * differences don't leak into other tests' expectations. */
+    RUN_TEST(test_net_shutdown_then_init_succeeds);
 
     return UNITY_END();
 #else
