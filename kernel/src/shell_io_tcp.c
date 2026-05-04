@@ -445,13 +445,19 @@ static uint32_t drain_pending_pbuf(struct tcp_shell_ctx *ctx)
  * the call if the drain produced > 64 KB (rare under normal
  * TCP_WND <= 64 KB but possible if a cat'd chain was bigger).
  * Followed by tcp_output to flush any telnet responses the parser
- * queued during the drain.
+ * queued during the drain — skipped when the drain consumed 0
+ * bytes, since telnet_rx_byte never ran and could not have queued
+ * anything new.
  */
 static void recved_pending(struct tcp_shell_ctx *ctx, struct tcp_pcb *pcb)
 {
     uint32_t consumed = drain_pending_pbuf(ctx);
+    if (consumed == 0) {
+        return;
+    }
     while (consumed > 0) {
-        uint16_t step = (consumed > 0xFFFF) ? 0xFFFF : (uint16_t)consumed;
+        uint16_t step = (consumed > UINT16_MAX) ? UINT16_MAX
+                                                : (uint16_t)consumed;
         tcp_recved(pcb, step);
         consumed -= step;
     }

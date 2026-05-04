@@ -238,7 +238,13 @@ void kernel_main(void *dtb)
         if (scan_top > ram_end) {
             scan_top = (ram_end > 0x1000) ? ram_end - 0x1000 : 0;
         }
+#if RAM_BASE != 0
+        /* Skip on platforms where RAM_BASE is 0 (Pi 5) — the
+         * comparison would be `scan_bot < 0` which `-Werror=type-
+         * limits` flags as always-false on unsigned. The clamp is
+         * a no-op there: scan_bot (0x2E000000) is already > 0. */
         if (scan_bot < (uint64_t)RAM_BASE) scan_bot = (uint64_t)RAM_BASE;
+#endif
         for (uint64_t addr = scan_top; addr >= scan_bot; addr -= 0x1000) {
             uint32_t *p = (uint32_t *)addr;
             if (*p == 0xEDFE0DD0) {  /* 0xD00DFEED in little-endian */
