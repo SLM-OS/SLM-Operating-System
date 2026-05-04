@@ -116,6 +116,7 @@ int cmd_cat(int argc, char **argv);
 int cmd_write(int argc, char **argv);
 int cmd_put(int argc, char **argv);
 int cmd_xput(int argc, char **argv);
+int cmd_xput_bin(int argc, char **argv);
 int cmd_mkdir(int argc, char **argv);
 int cmd_rm(int argc, char **argv);
 int cmd_mv(int argc, char **argv);

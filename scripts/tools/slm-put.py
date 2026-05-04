@@ -36,6 +36,12 @@ class TelnetShell:
         self.timeout = timeout
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(0.25)
+        # Disable Nagle. Without this, the OS coalesces our last partial
+        # block on `xput-bin` uploads — the kernel ends up waiting forever
+        # for the final 72-128 KB that never crosses the wire because
+        # Nagle holds it for an ACK that the kernel doesn't send because
+        # it's still waiting for those bytes.
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.buf = bytearray()
         self.iac_pending = bytearray()
 
@@ -317,9 +323,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("remote_path", help="Destination path on the SLM-OS VFS")
     p.add_argument(
         "--protocol",
-        choices=("auto", "framed", "legacy"),
+        choices=("auto", "binary", "framed", "legacy"),
         default="auto",
-        help="Upload protocol (default: %(default)s)",
+        help=(
+            "Upload protocol (default: %(default)s). 'binary' uses "
+            "the post-#597-OptionB `xput-bin` direct binary stream "
+            "for ~10x throughput vs 'framed'; falls back to 'framed' "
+            "automatically under 'auto' if the kernel doesn't have "
+            "xput-bin compiled in."
+        ),
     )
     p.add_argument(
         "--transport",
@@ -954,6 +966,295 @@ def upload_framed(shell: Shell, args: argparse.Namespace, data: bytes,
     return 0
 
 
+def upload_xput_bin(shell: "Shell",
+                    args: argparse.Namespace,
+                    data: bytes,
+                    total: int,
+                    target_desc: str,
+                    shell_factory: Callable[[], "Shell"]) -> int:
+    """Direct binary upload via the post-#597-OptionB `xput-bin` shell
+    command. Streams the raw file payload over the existing telnet
+    session AS-IS (with mandatory 0xFF doubling per RFC 854). No hex
+    expansion, no per-line shell parse — kernel reads raw bytes
+    straight into LFS.
+
+    Per-block staging on the kernel side is 128 KB (vs framed protocol's
+    16 KB per chunk), which amortizes the LFS COW metadata cost over
+    larger writes.
+
+    Resume: the kernel reports the existing on-disk file size in its
+    `XPUT-BIN ready offset=N` response; the script streams from N
+    onwards, so reconnects after a partial upload pick up where they
+    left off without re-sending the bytes already on disk.
+
+    The transport is telnet only — serial would need additional flow
+    control. SerialShell callers fall through to upload_framed.
+    """
+    if args.transport != "telnet":
+        print("xput-bin requires telnet transport; falling back to framed",
+              file=sys.stderr)
+        return upload_framed(shell, args, data, total, target_desc, shell_factory)
+
+    if not isinstance(shell, TelnetShell):
+        print("xput-bin requires TelnetShell; falling back to framed",
+              file=sys.stderr)
+        return upload_framed(shell, args, data, total, target_desc, shell_factory)
+
+    start_time = time.monotonic()
+    reset_progress_throttle()
+
+    # Send the command. read_until_prompt would expect a trailing
+    # `slmos> ` which we DON'T want yet — the kernel emits
+    # `XPUT-BIN ready offset=N\r\n` first, then we stream, then it
+    # emits `XPUT-BIN done size=N\r\n` and the prompt. So bypass
+    # run_command and parse manually.
+    cmd = f"xput-bin {args.remote_path} {total}\n".encode("ascii")
+    shell.sock.sendall(cmd)
+
+    # Wait for the ready line. shell.buf is filled by _recv_some()
+    # which strips telnet IAC. Search for the marker.
+    deadline = time.monotonic() + args.timeout
+    resume_offset: int | None = None
+    while time.monotonic() < deadline:
+        marker = b"XPUT-BIN ready offset="
+        idx = shell.buf.find(marker)
+        if idx >= 0:
+            end = shell.buf.find(b"\n", idx)
+            if end >= 0:
+                line = bytes(shell.buf[idx:end]).decode("ascii", errors="replace")
+                try:
+                    resume_offset = int(line.split("offset=", 1)[1].strip())
+                except (IndexError, ValueError):
+                    resume_offset = None
+                # Consume up through the newline so the post-stream
+                # `XPUT-BIN done` parser doesn't re-find this line.
+                del shell.buf[: end + 1]
+                break
+        # Pre-stream error from the kernel (e.g. reason=busy when
+        # another session is already uploading, or open/seek failures
+        # against the target path). Surface it instead of waiting out
+        # the full --timeout for a "ready" line that will never come.
+        err_idx = shell.buf.find(b"XPUT-BIN err")
+        if err_idx >= 0:
+            err_end = shell.buf.find(b"\n", err_idx)
+            err_line = bytes(
+                shell.buf[err_idx : err_end if err_end >= 0 else len(shell.buf)]
+            ).decode("ascii", errors="replace").strip()
+            print(f"xput-bin: kernel rejected upload: {err_line}",
+                  file=sys.stderr)
+            # Drain to the prompt so subsequent commands work.
+            try:
+                shell.read_until_prompt()
+            except Exception:
+                pass
+            return 1
+        # Check for unknown-command response (kernel without xput-bin).
+        if b"Unknown command" in shell.buf or b"command not found" in shell.buf:
+            print("xput-bin: kernel doesn't support it; falling back to framed",
+                  file=sys.stderr)
+            # Drain the rest of the line (and any prompt) so the
+            # follow-up framed upload sees a clean buffer.
+            try:
+                shell.read_until_prompt()
+            except Exception:
+                pass
+            return upload_framed(shell, args, data, total, target_desc, shell_factory)
+        shell._recv_some()
+
+    if resume_offset is None:
+        print(
+            f"xput-bin: timeout waiting for ready response (>{args.timeout}s); "
+            "is the kernel running #597-OptionB?",
+            file=sys.stderr,
+        )
+        return 1
+
+    if resume_offset > total:
+        print(
+            f"xput-bin: kernel reports offset={resume_offset} > total={total}; "
+            "abort (file on disk is larger than source)",
+            file=sys.stderr,
+        )
+        return 1
+    if resume_offset > 0:
+        print(
+            f"resuming binary upload at {resume_offset}/{total} bytes (from disk)",
+            file=sys.stderr,
+        )
+
+    # Stream the remaining bytes with mandatory IAC byte-stuffing.
+    # 0xFF in payload becomes 0xFF 0xFF on wire per RFC 854. The
+    # kernel's existing telnet RX parser unstuffs transparently
+    # before bytes reach the shell ring.
+    #
+    # Disable the recv-side 0.25s socket timeout for the duration
+    # of the stream — sendall on a stalled TCP window otherwise
+    # raises socket.timeout in 250 ms, far short of LFS-write
+    # times (~150 ms per 64 KB block on RAM-backed LFS, easily
+    # blocking longer when the kernel ring fills). Restored to
+    # the pre-stream value before the post-stream prompt read.
+    saved_timeout = shell.sock.gettimeout()
+    shell.sock.settimeout(None)
+    try:
+        # 128 KB matches the kernel's bin_buf commit size in
+        # cmd_xput_bin. Aligning script BLOCK with kernel commit
+        # boundary makes the partial-commit-on-close case predictable:
+        # if the FIN-after-data race trims the tail, the loss rounds
+        # to a kernel commit boundary rather than mid-block.
+        BLOCK = 128 * 1024
+        sent = resume_offset
+        payload = data[resume_offset:]
+        cursor = 0
+        while cursor < len(payload):
+            block = payload[cursor : cursor + BLOCK]
+            # Stuff: replace each 0xFF with 0xFF 0xFF.
+            if b"\xff" in block:
+                stuffed = block.replace(b"\xff", b"\xff\xff")
+            else:
+                stuffed = block
+            shell.sock.sendall(stuffed)
+            cursor += len(block)
+            sent += len(block)
+            emit_progress(start_time, sent, total)
+
+        # Half-close the write side of the socket. This forces Linux's
+        # TCP to flush any remaining buffered data + send FIN. Without
+        # this, on slow links the last partial segment can sit in the
+        # OS send buffer and never reach the kernel, leaving
+        # cmd_xput_bin blocked waiting for bytes that never come.
+        try:
+            shell.sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+    finally:
+        shell.sock.settimeout(saved_timeout)
+
+    # Wait for the done line. Generous timeout — the kernel may have
+    # ~ring_size bytes still in flight from sendall + a few LFS write
+    # cycles to drain. For a multi-MB upload at typical LFS-write-bound
+    # rates (~1-2 MB/s), 30 s is enough; for the 1+ GB case, scale
+    # with file size.
+    drain_timeout = max(args.timeout, 30.0, total / (256 * 1024))
+    deadline = time.monotonic() + drain_timeout
+    done_seen = False
+    err_seen = False
+    err_line: bytes = b""
+    closed_seen = False
+    while time.monotonic() < deadline:
+        if b"XPUT-BIN done" in shell.buf:
+            done_seen = True
+            break
+        if b"XPUT-BIN err" in shell.buf:
+            err_idx = shell.buf.find(b"XPUT-BIN err")
+            err_end = shell.buf.find(b"\n", err_idx)
+            err_line = bytes(shell.buf[err_idx : err_end if err_end >= 0 else len(shell.buf)])
+            err_seen = True
+            break
+        try:
+            shell._recv_some()
+        except RuntimeError:
+            # Kernel closed the connection — typical when our SHUT_WR
+            # racing with the kernel's response: kernel has already
+            # printed "err received=N reason=closed" + cleaned up
+            # before its TCP layer finishes flushing the response;
+            # we see the FIN before the response bytes. Don't fail
+            # the upload over it — the file commits in the kernel's
+            # partial-write-on-close path; verify via stat below.
+            closed_seen = True
+            break
+    if err_seen:
+        print(f"xput-bin: kernel reported error: {err_line!r}",
+              file=sys.stderr)
+        return 1
+    if not done_seen and not closed_seen:
+        print(
+            f"xput-bin: timeout ({drain_timeout:.0f}s) waiting for done response",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Resolve actual on-disk size. On the done-seen path the existing
+    # shell is still open and we can stat directly. On the closed_seen
+    # path the kernel closed our session so we have to reconnect to
+    # run stat — required for an honest "uploaded N bytes" report,
+    # since the partial-commit-on-close path may have trimmed the
+    # tail (FIN-after-data race, documented in PR #621). The user
+    # can opt out of stat with --no-verify-size; in that mode the
+    # closed_seen path returns 0 with a warning so existing scripted
+    # callers don't break.
+    actual_size: int | None
+    if closed_seen:
+        if args.no_verify_size:
+            print("xput-bin: peer closed before done response; "
+                  "skipping stat (--no-verify-size); assumed-complete",
+                  file=sys.stderr)
+            actual_size = None
+        else:
+            try:
+                shell = reconnect(shell_factory, args.debug)
+            except Exception as e:
+                print(
+                    f"xput-bin: peer closed before done response and "
+                    f"reconnect failed ({e}); cannot verify size",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                actual_size = remote_stat(shell, args.remote_path, args.debug)
+            except RuntimeError as e:
+                print(f"xput-bin: stat after close failed: {e}",
+                      file=sys.stderr)
+                return 1
+    else:
+        # Drain through to the next prompt so the post-stream stat works.
+        try:
+            shell.read_until_prompt()
+        except Exception:
+            pass
+        if args.no_verify_size:
+            actual_size = None
+        else:
+            try:
+                actual_size = remote_stat(shell, args.remote_path, args.debug)
+            except RuntimeError as e:
+                print(f"xput-bin: stat failed: {e}", file=sys.stderr)
+                return 1
+
+    elapsed = max(time.monotonic() - start_time, 0.001)
+
+    if actual_size is None:
+        # --no-verify-size path. Report what we attempted to send.
+        avg_rate = total / elapsed
+        print(
+            f"uploaded {format_bytes(total)} to {args.remote_path} via "
+            f"{args.transport}:{target_desc} protocol=binary "
+            f"in {format_duration(elapsed)} ({format_rate(avg_rate)} avg)"
+        )
+        return 0
+
+    if actual_size != total:
+        # Partial — report honestly and exit non-zero so callers know.
+        missing = total - actual_size
+        avg_rate = actual_size / elapsed
+        print(
+            f"xput-bin: partial upload — wrote {format_bytes(actual_size)} of "
+            f"{format_bytes(total)} ({missing} bytes missing) to "
+            f"{args.remote_path} via {args.transport}:{target_desc} "
+            f"in {format_duration(elapsed)} ({format_rate(avg_rate)} avg). "
+            f"Re-run xput-bin to resume from {actual_size}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    avg_rate = actual_size / elapsed
+    print(
+        f"uploaded {format_bytes(actual_size)} to {args.remote_path} via "
+        f"{args.transport}:{target_desc} protocol=binary "
+        f"in {format_duration(elapsed)} ({format_rate(avg_rate)} avg)"
+    )
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     if args.chunk_bytes <= 0:
@@ -1016,6 +1317,17 @@ def main() -> int:
             return upload_legacy(shell, args, data, total, target_desc, shell_factory)
         if args.protocol == "framed":
             return upload_framed(shell, args, data, total, target_desc, shell_factory)
+        if args.protocol == "binary":
+            return upload_xput_bin(shell, args, data, total, target_desc, shell_factory)
+
+        # auto: prefer binary > framed > legacy. Probe for xput-bin
+        # support by issuing a status-style command. Note: xput-bin
+        # without args returns -1 with usage, so we use that as a
+        # cheap "does the kernel know this command" check.
+        probe_bin = shell.run_command("xput-bin")
+        log_response(args.debug, "xput-bin-probe", probe_bin)
+        if not unknown_command(probe_bin):
+            return upload_xput_bin(shell, args, data, total, target_desc, shell_factory)
 
         probe = shell.run_command("xput status")
         log_response(args.debug, "xput-probe", probe)

@@ -107,6 +107,7 @@ const shell_cmd_t builtin_commands[] = {
     {"wc",       cmd_wc,       "Count lines/words/bytes (wc <path>)",               false, SHELL_CAT_FILESYSTEM},
     {"write",    cmd_write,    "Write to file (write <path> <content>)",            false, SHELL_CAT_FILESYSTEM},  /* VFS locks internally */
     {"xput",     cmd_xput,     "Framed upload (xput begin|chunk|status|finish|abort)", false, SHELL_CAT_FILESYSTEM},
+    {"xput-bin", cmd_xput_bin, "Direct binary upload (xput-bin <path> <total>)",       false, SHELL_CAT_FILESYSTEM},
 
     /* --- System info --- */
     {"canary",    cmd_canary,    "Check task stack canaries (#601 Bug B diagnostic)",  false, SHELL_CAT_SYSINFO},
@@ -661,6 +662,35 @@ int shell_read_command(const char *prompt, char *buf, int max_len)
 
     buf[pos] = '\0';
     return pos;
+}
+
+/*
+ * Drain the session-level prefetch first, then fall back to the
+ * backend's batched read. Required by `cmd_xput_bin` (#597 Option B):
+ * the prefetch may hold bytes that arrived in the same TCP segment
+ * as the `xput-bin <path> <total>\n` command line. If we read straight
+ * from the io's read_buf without first consuming the prefetch, those
+ * bytes are lost and the upload skips them.
+ */
+int shell_session_read_raw(char *dst, int max_len)
+{
+    if (!dst || max_len <= 0) {
+        return -1;
+    }
+    struct shell_session *s = shell_session_current();
+    if (!s || !s->io) {
+        return -1;
+    }
+
+    if (s->read_prefetch_pos < s->read_prefetch_len) {
+        int avail = (int)(s->read_prefetch_len - s->read_prefetch_pos);
+        int n = (avail < max_len) ? avail : max_len;
+        memcpy(dst, &s->read_prefetch[s->read_prefetch_pos], (size_t)n);
+        s->read_prefetch_pos += (uint16_t)n;
+        return n;
+    }
+
+    return shell_io_read_buf(s->io, dst, max_len);
 }
 
 /* ============================================================================

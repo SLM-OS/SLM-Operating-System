@@ -242,4 +242,18 @@ void shell_history_reset_cursor(struct shell_session *s);
  */
 int shell_read_command(const char *prompt, char *buf, int max_len);
 
+/*
+ * Read raw bytes from the bound shell session, draining the
+ * line-edit prefetch buffer first then falling back to the backend's
+ * batched read. Used by commands like `xput-bin` that consume
+ * arbitrary binary input after a normal shell-line dispatch — the
+ * prefetch may hold bytes that arrived in the same TCP segment as
+ * the command line, so they must be consumed before going to the
+ * ring or the upload would skip them.
+ *
+ * Returns the number of bytes read (1..max_len) on success, or
+ * a negative value on closed/error backend.
+ */
+int shell_session_read_raw(char *dst, int max_len);
+
 #endif /* SHELL_H */

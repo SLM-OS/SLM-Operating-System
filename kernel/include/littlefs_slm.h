@@ -25,8 +25,25 @@
 #include "lfs.h"
 
 /* LittleFS configuration for SLM-OS */
-#define LFS_SLM_CACHE_SIZE      256    /* Read/program cache size */
-#define LFS_SLM_LOOKAHEAD_SIZE  16     /* Lookahead buffer size (in bytes, tracks 128 blocks) */
+/* LFS file cache size. Bumped from 256 to 4096 (= ramdisk
+ * block_size) for #597 throughput. With cache_size=256 and
+ * block_size=4096, each 4 KB data block required 16 cache flushes
+ * during a bulk write, capping `xput-bin` throughput at ~320 KB/s
+ * on a fresh file. With cache_size=4096, one flush per block. The
+ * cache is per-open-file, so the BSS cost is
+ * cache_size × LFS_SLM_MAX_FILES (4) = 16 KB extra per mount —
+ * trivial on Pi 5/Jetson with GBs of RAM. The metadata lookahead
+ * cache + read/program buffers are sized via the same constant
+ * (see g_lfs_state in littlefs_slm.c) and benefit equally. */
+#define LFS_SLM_CACHE_SIZE      4096   /* Read/program cache size */
+/* Lookahead buffer size in BYTES; each byte tracks 8 blocks. With
+ * the default 32 MB ramdisk (8192 blocks), the prior 16-byte
+ * lookahead (= 128 blocks) was exhausted ~64 times per full upload,
+ * each exhaustion triggering a full-disk metadata scan. Bumped to
+ * 1024 bytes (= 8192 blocks = whole 32 MB ramdisk) so a single scan
+ * covers all blocks for any sane workload. Cost: 1 KB BSS per
+ * mount. */
+#define LFS_SLM_LOOKAHEAD_SIZE  1024   /* Lookahead buffer size (in bytes, tracks 8192 blocks) */
 #define LFS_SLM_BLOCK_CYCLES    500    /* Wear leveling cycles before moving metadata */
 
 /* Maximum open files/directories */

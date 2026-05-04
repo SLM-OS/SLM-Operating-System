@@ -970,6 +970,234 @@ int cmd_xput(int argc, char *argv[])
 }
 
 /*
+ * xput-bin <path> <total> - Direct binary upload (#597 Option B).
+ *
+ * Bypasses both the hex 2× wire-overhead AND the line-edit per-byte
+ * shell-parse cost that cap the framed `xput chunk` protocol's
+ * throughput at ~125 KB/s on hardware. After the command line is
+ * dispatched, this handler reads `total` raw bytes from the shell
+ * session's input stream straight into a 128 KB staging buffer, then
+ * commits them to LFS with one `littlefs_file_write` call per
+ * 128 KB block (vs. one per 16 KB chunk in the framed path —
+ * amortizes the COW metadata cost).
+ *
+ * Wire encoding: bytes flow over the existing telnet shell session
+ * AS-IS, with the standard telnet IAC escape. Any 0xFF byte in the
+ * payload MUST be doubled by the sender (0xFF 0xFF) to match RFC 854.
+ * The kernel's existing telnet RX parser unstuffs this transparently
+ * before bytes reach the shell ring, so cmd_xput_bin sees the
+ * original payload.
+ *
+ * Resume: if the file already exists with size <= total, the new
+ * data is appended starting at the existing-file offset. The kernel
+ * reports `XPUT-BIN ready offset=N` and the client streams from N
+ * onwards. On size > total, the command rejects with an error so
+ * the client can `xput begin` (truncate) explicitly.
+ *
+ * Protocol:
+ *   client:  xput-bin <path> <total>\n
+ *   kernel:  XPUT-BIN ready offset=<resume_offset>\r\n
+ *   client:  <total - resume_offset> raw bytes (with 0xFF doubled)
+ *   kernel:  XPUT-BIN done size=<total>\r\n
+ *   kernel:  slmos>     (normal prompt resumes)
+ */
+int cmd_xput_bin(int argc, char *argv[])
+{
+    if (argc < 3) {
+        shell_puts("Usage: xput-bin <path> <total>\r\n");
+        return -1;
+    }
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
+        shell_puts("xput-bin: path too long\r\n");
+        return -1;
+    }
+    uint32_t total;
+    if (shell_parse_uint(argv[2], &total) != 0) {
+        shell_printf("xput-bin: invalid total: %s\r\n", argv[2]);
+        return -1;
+    }
+
+    /* 128 KB staging buffer in BSS, half the 256 KB shell rx ring so
+     * each LFS write fits comfortably without contending against
+     * still-arriving bytes. Reduces the total number of LFS
+     * write+metadata-commit cycles per upload — the dominant cost
+     * on 5+ MB transfers (#597).
+     *
+     * Single-flight guard: the buffer is shared across all shell
+     * sessions. Two concurrent xput-bin callers would interleave
+     * writes into bin_buf and corrupt both files silently. The
+     * `xput_bin_active` flag makes a second concurrent caller fail
+     * fast with `XPUT-BIN err reason=busy` rather than racing.
+     * Atomic test-and-set so the guard holds even if shell tasks
+     * ever migrate off CPU 0 or move to a preemptive policy.
+     * Checked before any LFS work so a busy reject is cheap and
+     * doesn't disturb the in-flight uploader's state. Cleared on
+     * every return path below. */
+    static uint8_t bin_buf[131072];
+    static bool xput_bin_active = false;
+
+    if (__atomic_exchange_n(&xput_bin_active, true, __ATOMIC_ACQ_REL)) {
+        shell_puts("XPUT-BIN err received=0 reason=busy\r\n");
+        return -1;
+    }
+
+    const char *subpath = NULL;
+    struct lfs_mount *mnt = vfs_get_mount_ctx(resolved, &subpath);
+    if (!mnt) {
+        __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
+        shell_printf("xput-bin: %s: Not a mounted filesystem\r\n", resolved);
+        return -1;
+    }
+
+    /* Resume detection: stat the path. If it exists with size <=
+     * total, the client's bytes get appended past `existing_size`.
+     * size > total means a stale/wrong file is in the way; the client
+     * must `rm` or `xput begin` to clear it explicitly. */
+    struct lfs_entry_info info;
+    uint32_t resume_offset = 0;
+    bool resume = false;
+    if (littlefs_stat_path(mnt, subpath, &info) == LFS_ERR_OK) {
+        if (info.size > total) {
+            __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
+            shell_printf("xput-bin: %s: existing %lu > requested %lu\r\n",
+                         resolved,
+                         (unsigned long)info.size,
+                         (unsigned long)total);
+            return -1;
+        }
+        resume_offset = info.size;
+        resume = (info.size > 0);
+    }
+
+    int fd = littlefs_file_open(mnt, subpath,
+                                resume
+                                  ? (LFS_O_RDWR)
+                                  : (LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC));
+    if (fd < 0) {
+        __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
+        shell_printf("xput-bin: %s: failed to open\r\n", resolved);
+        return -1;
+    }
+    if (resume) {
+        if (littlefs_file_seek(mnt, fd, 0, LFS_SEEK_END) < 0) {
+            littlefs_file_close(mnt, fd);
+            __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
+            shell_printf("xput-bin: %s: seek failed\r\n", resolved);
+            return -1;
+        }
+    }
+
+    /* Tell the client we're ready and what offset to start streaming
+     * from. The client uses this for resume — sends only
+     * total - resume_offset bytes. */
+    shell_printf("XPUT-BIN ready offset=%lu\r\n",
+                 (unsigned long)resume_offset);
+
+    /* Cap the wait between bytes inside a block at this many ms.
+     * Without it, an upload that loses its tail (peer's TCP send
+     * buffer never drains, or stuffing miscount) hangs cmd_xput_bin
+     * indefinitely waiting for the partial block to complete.
+     * 5 seconds is comfortably above any reasonable network blip
+     * and gives Linux's TCP retransmit time to get unstuck.
+     *
+     * On timeout we commit whatever partial bytes we have to LFS,
+     * so the file ends with the last successfully-received bytes
+     * intact. The script can then `xput-bin` again to resume from
+     * the new offset. */
+    const uint64_t freq_for_read_to = timer_get_frequency();
+    const uint64_t read_to_ticks = freq_for_read_to
+        ? (freq_for_read_to * 5ULL)        /* 5 seconds */
+        : 0;
+
+    uint32_t received = resume_offset;
+    while (received < total) {
+        uint32_t want = total - received;
+        if (want > sizeof(bin_buf)) {
+            want = sizeof(bin_buf);
+        }
+
+        /* Drain `want` bytes into bin_buf. shell_session_read_raw
+         * blocks waiting for the first byte and returns whatever is
+         * available; loop until we've assembled the full block, or
+         * we've been waiting too long without any new bytes (last-
+         * block stall protection). */
+        uint32_t got = 0;
+        uint64_t last_progress_ticks = timer_get_count();
+        while (got < want) {
+            int n = shell_session_read_raw((char *)(bin_buf + got),
+                                           (int)(want - got));
+            if (n < 0) {
+                /* Connection closed or backend error mid-stream.
+                 * Commit whatever partial bytes we got before
+                 * closing — otherwise a peer drop near the end of
+                 * the upload silently rolls back the in-flight
+                 * block. */
+                if (got > 0) {
+                    int wp = littlefs_file_write(mnt, fd, bin_buf,
+                                                 (size_t)got);
+                    if (wp == (int)got) {
+                        received += got;
+                        INFO("xput-bin: partial commit on close: "
+                             "+%u bytes => %lu",
+                             got, (unsigned long)received);
+                    }
+                }
+                littlefs_file_close(mnt, fd);
+                __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
+                shell_printf("XPUT-BIN err received=%lu reason=closed\r\n",
+                             (unsigned long)received);
+                return -1;
+            }
+            if (n > 0) {
+                got += (uint32_t)n;
+                last_progress_ticks = timer_get_count();
+                continue;
+            }
+            /* n == 0: shell_session_read_raw always blocks for at
+             * least one byte or returns -1, so this is the stall
+             * path — peer stopped sending halfway through a block
+             * (TCP send buffer drained, Nagle/end-of-stream
+             * interaction). Commit what we have rather than hang
+             * forever. */
+            if (read_to_ticks &&
+                (timer_get_count() - last_progress_ticks)
+                > read_to_ticks) {
+                INFO("xput-bin: read stall after %u/%u (got %u of "
+                     "block) — committing partial",
+                     (unsigned)received, (unsigned)total,
+                     (unsigned)got);
+                if (got > 0) {
+                    int wp = littlefs_file_write(mnt, fd, bin_buf,
+                                                 (size_t)got);
+                    if (wp == (int)got) received += got;
+                }
+                littlefs_file_close(mnt, fd);
+                __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
+                shell_printf("XPUT-BIN err received=%lu reason=stall\r\n",
+                             (unsigned long)received);
+                return -1;
+            }
+        }
+
+        int written = littlefs_file_write(mnt, fd, bin_buf, (size_t)got);
+        if (written != (int)got) {
+            littlefs_file_close(mnt, fd);
+            __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
+            shell_printf("XPUT-BIN err received=%lu reason=write\r\n",
+                         (unsigned long)received);
+            return -1;
+        }
+        received += got;
+    }
+
+    littlefs_file_close(mnt, fd);
+    __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
+    shell_printf("XPUT-BIN done size=%lu\r\n", (unsigned long)received);
+    return 0;
+}
+
+/*
  * mkdir <path> - Create a directory
  * Supports relative paths.
  */
