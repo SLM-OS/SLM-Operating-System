@@ -2222,6 +2222,124 @@ static void test_net_poll_drains_all_buffered_frames(void)
     TEST_ASSERT_EQUAL_UINT64(before.rx_dropped, after.rx_dropped);
 }
 
+/*
+ * #585: regression test for the chained-pbuf RX assembly path.
+ *
+ * The #581 fix replaced a contiguous `memcpy(p->payload, src, len)`
+ * in lwip_slm.c's RX loop with `pbuf_take(p, src, len)`. The new
+ * call walks the pbuf chain so frames longer than PBUF_POOL_BUFSIZE
+ * (1536 B) are populated correctly across multiple pool slots; the
+ * old memcpy would silently truncate them to the first slot's
+ * worth.
+ *
+ * The existing `test_net_rx_burst_uses_pbuf_pool_not_heap` only
+ * covers 64-byte frames, so the chained-pbuf code path is not
+ * exercised by it. And the production driver buffer
+ * (`rx_packet_buf` in lwip_slm.c) is sized 1518 B, below the pool
+ * slot size — meaning a wrapper-driver test that returns >1518 B
+ * gets clamped to 1518 by `recv()` and never reaches the chain
+ * threshold. To exercise the chain path this test calls
+ * `net_test_inject_rx_frame`, which bypasses the recv buffer cap
+ * but routes through the same `net_input_frame_into_stack` helper
+ * the production loop uses — so a regression of pbuf_take to
+ * memcpy fails BOTH the production path AND this test.
+ *
+ * Frame size: 3000 B (2× PBUF_POOL_BUFSIZE = 3072), guaranteed to
+ * span at least two pool slots. Ethertype 0x9000 has no upper-layer
+ * handler, so lwIP frees the pbuf at the eth-input default case
+ * after parsing the header — the chain assembly is what matters,
+ * not whether anyone consumed the payload.
+ *
+ * Pre-fix regression mode: bytes past offset 1536 are junk
+ * (whatever was in the second pool slot before alloc). lwIP's
+ * ethernet_input only inspects the L2 header so the corrupted
+ * tail wouldn't surface as a parse error — the bug would silently
+ * affect any future caller that consumes bigger frames (jumbo
+ * support, tunneled protocols, etc.). This test pins the assembly
+ * itself: rx_packets advances by 1, rx_dropped doesn't.
+ */
+#define CHAINED_PBUF_TEST_FRAME_LEN  3000
+
+static uint8_t chained_pbuf_test_frame[CHAINED_PBUF_TEST_FRAME_LEN];
+
+extern int net_test_inject_rx_frame(const uint8_t *frame, size_t len);
+extern int net_test_alloc_take_readback(const uint8_t *frame, size_t len,
+                                        uint8_t *dest, size_t dest_len);
+
+static uint8_t chained_pbuf_readback[CHAINED_PBUF_TEST_FRAME_LEN];
+
+static void test_net_rx_chained_pbuf_assembly(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    /* Build the frame: standard broadcast Ethernet header followed
+     * by a deterministic byte pattern. The byte-pattern (vs all-
+     * zeros) is the load-bearing fixture for the readback assertion
+     * below — a regression of pbuf_take to a contiguous memcpy
+     * would leave bytes past offset 1536 as whatever was in the
+     * second pool slot before alloc, which is almost never our
+     * deterministic pattern. */
+    static const uint8_t bcast_mac[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    memcpy(chained_pbuf_test_frame + 0, bcast_mac, 6);     /* dst */
+    memcpy(chained_pbuf_test_frame + 6, bcast_mac, 6);     /* src */
+    chained_pbuf_test_frame[12] = 0x90;                    /* ethertype hi */
+    chained_pbuf_test_frame[13] = 0x00;                    /* ethertype lo */
+    for (size_t i = 14; i < CHAINED_PBUF_TEST_FRAME_LEN; i++) {
+        chained_pbuf_test_frame[i] = (uint8_t)(i & 0xFF);
+    }
+
+    /* Phase 1: production code-path smoke check.
+     *
+     * Drive `net_input_frame_into_stack` end-to-end via the inject
+     * hook: alloc + take + slm_netif.input. Asserts the chain alloc
+     * doesn't fail and the frame doesn't get dropped at any step in
+     * the production helper. Doesn't byte-compare — see phase 2 for
+     * that. */
+    struct net_watchdog_snapshot before;
+    net_watchdog_get(&before);
+
+    int inject_rc = net_test_inject_rx_frame(chained_pbuf_test_frame,
+                                             CHAINED_PBUF_TEST_FRAME_LEN);
+    TEST_ASSERT_EQUAL_INT(CHAINED_PBUF_TEST_FRAME_LEN, inject_rc);
+
+    struct net_watchdog_snapshot after;
+    net_watchdog_get(&after);
+
+    TEST_ASSERT_TRUE(after.rx_packets >= before.rx_packets + 1);
+    TEST_ASSERT_EQUAL_UINT64(before.rx_dropped, after.rx_dropped);
+
+    /* Phase 2: chain-assembly correctness.
+     *
+     * Drive the same alloc + pbuf_take pair, then read the assembled
+     * chain back into `chained_pbuf_readback` via pbuf_copy_partial
+     * (which walks the chain). Byte-compare against the source. A
+     * regression of pbuf_take to `memcpy(p->payload, src, len)`
+     * would only populate the first pool slot's worth (1536 B), and
+     * pbuf_copy_partial would copy the still-uninitialized contents
+     * of the second slot for offsets [1536, 3000) — the byte-
+     * compare fails immediately at offset 1536.
+     *
+     * Done as a separate test hook (not via inject above) because
+     * inject hands the pbuf to slm_netif.input, which frees it
+     * before we can inspect — and lwIP's ethernet_input only reads
+     * the L2 header so it can't see chain corruption past offset
+     * 14. The duplication of alloc + take in this hook is documented
+     * in the helper's docblock. */
+    memset(chained_pbuf_readback, 0xAA, sizeof(chained_pbuf_readback));
+    int rb_rc = net_test_alloc_take_readback(
+        chained_pbuf_test_frame,
+        CHAINED_PBUF_TEST_FRAME_LEN,
+        chained_pbuf_readback,
+        sizeof(chained_pbuf_readback));
+    TEST_ASSERT_EQUAL_INT(CHAINED_PBUF_TEST_FRAME_LEN, rb_rc);
+    TEST_ASSERT_EQUAL_MEMORY(chained_pbuf_test_frame,
+                             chained_pbuf_readback,
+                             CHAINED_PBUF_TEST_FRAME_LEN);
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -2305,6 +2423,10 @@ int test_suite_net(void)
      * while the live driver is up so net_poll's single invocation
      * actually reaches the wrapper recv. */
     RUN_TEST(test_net_poll_drains_all_buffered_frames);
+    /* #585 follow-up: chained-pbuf assembly when frame > pool slot
+     * size. Goes through net_test_inject_rx_frame to bypass the
+     * 1518 B rx_packet_buf cap. */
+    RUN_TEST(test_net_rx_chained_pbuf_assembly);
     RUN_TEST(test_net_send_returns_quickly);
     RUN_TEST(test_net_send_oversized_rejected);
     RUN_TEST(test_net_send_pool_exhaustion);
