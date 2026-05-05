@@ -469,8 +469,9 @@ static void test_canary_check_null_and_dead_safe(void)
     /* Build a "dead" task struct on the test stack: id == 0 means
      * the slot is free per task.c convention. */
     struct task dead;
-    for (size_t i = 0; i < sizeof(dead); i++)
+    for (size_t i = 0; i < sizeof(dead); i++) {
         ((uint8_t *)&dead)[i] = 0;
+    }
     /* Even with a non-null stack_base, id==0 must short-circuit. */
     uint64_t fake_stack_dummy = 0;
     dead.stack_base = &fake_stack_dummy;
@@ -1694,8 +1695,11 @@ static void test_no_starvation(void)
     /* Verify both completed all iterations (no starvation) */
     int low_count = 0, high_count = 0;
     for (int i = 0; i < starv_index; i++) {
-        if (starv_order[i] == 1) low_count++;
-        else if (starv_order[i] == 2) high_count++;
+        if (starv_order[i] == 1) {
+            low_count++;
+        } else if (starv_order[i] == 2) {
+            high_count++;
+        }
     }
     TEST_ASSERT_EQUAL_INT(STARV_ITERATIONS, low_count);
     TEST_ASSERT_EQUAL_INT(STARV_ITERATIONS, high_count);
@@ -2585,10 +2589,12 @@ static void test_cpu_logical_map_encoding(void)
         TEST_ASSERT_EQUAL_HEX64(0x300, cpu_logical_map[3]);
 #elif defined(PLATFORM_QEMU_VIRT)
     /* QEMU: Aff0 encoding — sequential */
-    if (cpu_count >= 2)
+    if (cpu_count >= 2) {
         TEST_ASSERT_EQUAL_HEX64(1, cpu_logical_map[1]);
-    if (cpu_count >= 3)
+    }
+    if (cpu_count >= 3) {
         TEST_ASSERT_EQUAL_HEX64(2, cpu_logical_map[2]);
+    }
 #endif
 }
 
@@ -3256,8 +3262,9 @@ static uint32_t tracking_assign_cpu(struct task *task)
     /* Simple round-robin across all CPUs */
     extern uint32_t cpu_count;
     uint32_t cpu = tracking_count % cpu_count;
-    if (tracking_count < 16)
+    if (tracking_count < 16) {
         tracking_assignments[tracking_count] = cpu;
+    }
     tracking_count++;
     return cpu;
 }
@@ -3347,8 +3354,11 @@ static void test_proactive_load_balance_redirect(void)
     int on_cpu0 = 0;
     int off_cpu0 = 0;
     for (int i = 0; i < N; i++) {
-        if (tasks[i]->assigned_cpu == 0) on_cpu0++;
-        else off_cpu0++;
+        if (tasks[i]->assigned_cpu == 0) {
+            on_cpu0++;
+        } else {
+            off_cpu0++;
+        }
     }
     TEST_ASSERT_MESSAGE(off_cpu0 >= 1,
         "S5 override never redirected away from overloaded CPU 0");

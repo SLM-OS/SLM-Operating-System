@@ -40,8 +40,9 @@ enum gpu_consumer gpu_consumer_from_name(const char *name)
 {
     if (!name) return GPU_CONSUMER_COUNT;
     for (unsigned i = 0; i < GPU_CONSUMER_COUNT; i++) {
-        if (strcmp(name, k_consumer_names[i]) == 0)
+        if (strcmp(name, k_consumer_names[i]) == 0) {
             return (enum gpu_consumer)i;
+        }
     }
     return GPU_CONSUMER_COUNT;
 }
@@ -137,9 +138,10 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
     switch (c) {
     case GPU_CONSUMER_SCHED:
         if (!active_sched_policy_has_gpu_backend()) {
-            if (out_reason)
+            if (out_reason) {
                 *out_reason = "scaffold only — no scheduler policy "
                               "declares a GPU backend yet";
+            }
             /* Fall through to the flip — operator intent is recorded
              * even though dispatch is unaffected. */
         } else if (out_reason) {
@@ -170,9 +172,10 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
          * today; this branch will start accepting cleanly the first
          * time a policy flips that to true. */
         if (!eviction_active_policy_has_gpu_backend()) {
-            if (out_reason)
+            if (out_reason) {
                 *out_reason = "scaffold only — no eviction policy "
                               "declares a GPU backend yet";
+            }
             /* Fall through to the flip — operator intent is recorded
              * even though dispatch is unaffected. */
         }

@@ -122,12 +122,20 @@ static int shell_build_content(int argc, char *argv[], int first_arg,
                     /* \xNN — two hex digits */
                     int hi = -1, lo = -1;
                     char c1 = p[2], c2 = c1 ? p[3] : 0;
-                    if (c1 >= '0' && c1 <= '9') hi = c1 - '0';
-                    else if (c1 >= 'a' && c1 <= 'f') hi = 10 + (c1 - 'a');
-                    else if (c1 >= 'A' && c1 <= 'F') hi = 10 + (c1 - 'A');
-                    if (c2 >= '0' && c2 <= '9') lo = c2 - '0';
-                    else if (c2 >= 'a' && c2 <= 'f') lo = 10 + (c2 - 'a');
-                    else if (c2 >= 'A' && c2 <= 'F') lo = 10 + (c2 - 'A');
+                    if (c1 >= '0' && c1 <= '9') {
+                        hi = c1 - '0';
+                    } else if (c1 >= 'a' && c1 <= 'f') {
+                        hi = 10 + (c1 - 'a');
+                    } else if (c1 >= 'A' && c1 <= 'F') {
+                        hi = 10 + (c1 - 'A');
+                    }
+                    if (c2 >= '0' && c2 <= '9') {
+                        lo = c2 - '0';
+                    } else if (c2 >= 'a' && c2 <= 'f') {
+                        lo = 10 + (c2 - 'a');
+                    } else if (c2 >= 'A' && c2 <= 'F') {
+                        lo = 10 + (c2 - 'A');
+                    }
                     if (hi < 0 || lo < 0) {
                         /* Malformed — emit literally so the user sees it */
                         out[pos++] = '\\';

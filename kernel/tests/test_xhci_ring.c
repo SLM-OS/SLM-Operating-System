@@ -199,8 +199,9 @@ static void test_enqueue_double_wrap_toggles_pcs_back(void)
     cmd.control = XHCI_TRB_TYPE(XHCI_TRB_CMD_NOOP);
 
     /* 7 + 1 wrap + 7 + 1 wrap = 16 enqueues total = two laps. */
-    for (unsigned i = 0; i < 16; i++)
+    for (unsigned i = 0; i < 16; i++) {
         TEST_ASSERT_NOT_NULL(xhci_ring_enqueue(&r, &cmd));
+    }
     TEST_ASSERT_EQUAL_UINT32(2, r.enqueue);   /* 16 mod 7 ... no, via two wraps */
     TEST_ASSERT_EQUAL_UINT8(1, r.cycle_state);   /* back to starting PCS */
 }
@@ -217,8 +218,9 @@ static void test_event_ring_init(void)
     TEST_ASSERT_EQUAL_INT(0, xhci_event_ring_init(&r, trbs, (uintptr_t)trbs, 8));
 
     /* All slots zeroed. */
-    for (unsigned i = 0; i < 8; i++)
+    for (unsigned i = 0; i < 8; i++) {
         TEST_ASSERT_EQUAL_UINT32(0, trbs[i].control);
+    }
     TEST_ASSERT_EQUAL_UINT32(8, r.num_trbs);
     TEST_ASSERT_EQUAL_UINT32(0, r.dequeue);
     TEST_ASSERT_EQUAL_UINT8(1, r.cycle_state);
@@ -308,11 +310,13 @@ static void test_event_ring_dequeue_phys(void)
     TEST_ASSERT_EQUAL_UINT64(base, xhci_event_ring_dequeue_phys(&r));
 
     /* Advance dequeue to 3 by consuming 3 slots. */
-    for (unsigned i = 0; i < 3; i++)
-        trbs[i].control = XHCI_TRB_CYCLE;   /* match ECS=1 */
+    for (unsigned i = 0; i < 3; i++) {
+        trbs[i].control = XHCI_TRB_CYCLE; /* match ECS=1 */
+    }
     struct xhci_trb out;
-    for (unsigned i = 0; i < 3; i++)
+    for (unsigned i = 0; i < 3; i++) {
         TEST_ASSERT_TRUE(xhci_event_ring_peek(&r, &out));
+    }
 
     /* dequeue=3 → phys = base + 3*sizeof(TRB) = base + 48. */
     TEST_ASSERT_EQUAL_UINT64(base + 3 * 16,
@@ -432,8 +436,9 @@ static void test_event_ring_dequeue_phys_after_wrap(void)
 
     struct xhci_trb out;
     /* Consume 3 — dequeue_phys tracks slot 3. */
-    for (unsigned i = 0; i < 3; i++)
+    for (unsigned i = 0; i < 3; i++) {
         TEST_ASSERT_TRUE(xhci_event_ring_peek(&r, &out));
+    }
     TEST_ASSERT_EQUAL_UINT64(base + 3 * 16, xhci_event_ring_dequeue_phys(&r));
 
     /* 4th consume wraps. dequeue goes back to 0, ECS toggles 1→0. */

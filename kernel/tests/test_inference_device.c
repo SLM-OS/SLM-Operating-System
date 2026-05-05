@@ -50,8 +50,9 @@ static int fake_run(struct inference_device *dev, inference_model_handle_t h,
 {
     (void)dev;
     if (h != 7) return INF_ERR_INVAL;
-    if (in->dtype != INF_DTYPE_INT32 || out->dtype != INF_DTYPE_INT32)
+    if (in->dtype != INF_DTYPE_INT32 || out->dtype != INF_DTYPE_INT32) {
         return INF_ERR_BAD_TENSOR;
+    }
     /* Copy input to output, add 1 to every value — a deterministic
      * signature the test can check without FP. */
     uint32_t n = in->n_elems;

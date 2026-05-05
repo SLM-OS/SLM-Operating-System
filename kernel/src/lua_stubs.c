@@ -548,10 +548,15 @@ long strtol(const char *nptr, char **endptr, int base) {
     /* Parse digits */
     while (*s) {
         int digit;
-        if (*s >= '0' && *s <= '9') digit = *s - '0';
-        else if (*s >= 'a' && *s <= 'z') digit = *s - 'a' + 10;
-        else if (*s >= 'A' && *s <= 'Z') digit = *s - 'A' + 10;
-        else break;
+        if (*s >= '0' && *s <= '9') {
+            digit = *s - '0';
+        } else if (*s >= 'a' && *s <= 'z') {
+            digit = *s - 'a' + 10;
+        } else if (*s >= 'A' && *s <= 'Z') {
+            digit = *s - 'A' + 10;
+        } else {
+            break;
+        }
 
         if (digit >= base) break;
 
@@ -619,8 +624,11 @@ double strtod(const char *nptr, char **endptr) {
 
     /* Apply exponent */
     while (exponent-- > 0) {
-        if (exp_negative) result /= 10.0;
-        else result *= 10.0;
+        if (exp_negative) {
+            result /= 10.0;
+        } else {
+            result *= 10.0;
+        }
     }
 
     if (endptr) *endptr = (char *)s;
@@ -855,11 +863,15 @@ static void warn_trig_stub_once(const char *name)
 {
     static int warned_asin, warned_acos, warned_atan, warned_atan2;
     int *flag = 0;
-    if (name[0] == 's') flag = &warned_asin;       /* asin */
-    else if (name[0] == 'c') flag = &warned_acos;  /* acos */
-    else if (name[1] == 't' && name[4] == 0)
+    if (name[0] == 's') {
+        flag = &warned_asin; /* asin */
+    } else if (name[0] == 'c') {
+        flag = &warned_acos; /* acos */
+    } else if (name[1] == 't' && name[4] == 0) {
         flag = &warned_atan;                       /* atan */
-    else flag = &warned_atan2;                     /* atan2 */
+    } else {
+        flag = &warned_atan2; /* atan2 */
+    }
     if (flag && !*flag) {
         *flag = 1;
         extern int uart_printf(const char *fmt, ...);

@@ -1559,8 +1559,9 @@ static size_t emit_core_fragment(uint8_t *out, size_t core_off,
     };
     size_t off = core_off;
     memcpy(out + off, &core, sizeof(core)); off += sizeof(core);
-    for (uint32_t i = 0; i < code_bytes_present; i++)
+    for (uint32_t i = 0; i < code_bytes_present; i++) {
         out[off++] = (uint8_t)(0xC0 + i);
+    }
     return off - core_off;
 }
 

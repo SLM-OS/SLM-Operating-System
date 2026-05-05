@@ -125,10 +125,12 @@ int cpu_logical_id(uint64_t mpidr)
  */
 void smp_notify_cpu(uint32_t logical_cpu)
 {
-    if (logical_cpu == cpu_id())
+    if (logical_cpu == cpu_id()) {
         return;
-    if (logical_cpu >= cpu_count)
+    }
+    if (logical_cpu >= cpu_count) {
         return;
+    }
     __asm__ volatile("sev" ::: "memory");
 }
 
@@ -376,8 +378,9 @@ void secondary_init(uint32_t logical_cpu_id)
     {
         int retry;
         for (retry = 0; retry < SCHED_INIT_MAX_RETRIES; retry++) {
-            if (scheduler_is_initialized())
+            if (scheduler_is_initialized()) {
                 break;
+            }
             timer_busy_wait_us(100);
         }
         if (!scheduler_is_initialized()) {

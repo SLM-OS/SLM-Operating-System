@@ -203,8 +203,11 @@ int telnetd_config_parse(struct telnetd_config *cfg, char *buf, size_t len)
         /* Skip blank and comment lines. */
         if (*line != '\0' && *line != '#') {
             int rc = apply_line(cfg, line);
-            if (rc == 1) cfg->unknown_keys++;
-            else if (rc < 0) cfg->malformed_lines++;
+            if (rc == 1) {
+                cfg->unknown_keys++;
+            } else if (rc < 0) {
+                cfg->malformed_lines++;
+            }
         }
 
         if (!line_end) break;

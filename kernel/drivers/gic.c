@@ -1002,8 +1002,9 @@ static struct gic_handler_entry gic_handlers[GIC_MAX_REGISTERED_HANDLERS];
 
 int gic_register_handler(uint32_t irq, gic_handler_fn handler)
 {
-    if (!handler)
+    if (!handler) {
         return -1;
+    }
     for (unsigned i = 0; i < GIC_MAX_REGISTERED_HANDLERS; i++) {
         gic_handler_fn existing = __atomic_load_n(&gic_handlers[i].fn,
                                                   __ATOMIC_ACQUIRE);
@@ -1040,8 +1041,9 @@ gic_handler_fn gic_lookup_handler(uint32_t irq)
          * we observe .fn != NULL, .irq is guaranteed visible. */
         gic_handler_fn fn = __atomic_load_n(&gic_handlers[i].fn,
                                             __ATOMIC_ACQUIRE);
-        if (fn != NULL && gic_handlers[i].irq == irq)
+        if (fn != NULL && gic_handlers[i].irq == irq) {
             return fn;
+        }
     }
     return NULL;
 }

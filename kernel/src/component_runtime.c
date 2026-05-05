@@ -165,8 +165,9 @@ static void echo_service_entry(void *arg)
         }
     }
 
-    if (msgs_received > 0)
+    if (msgs_received > 0) {
         uart_printf("[echo] Idle timeout after %d messages\n", msgs_received);
+    }
 
     uart_printf("[echo] Done (%d messages)\n", msgs_received);
     component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);

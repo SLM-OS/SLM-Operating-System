@@ -95,8 +95,9 @@ static bool net_link_is_up(void) {
 }
 
 static int net_start_dhcp_client(const char *reason) {
-    if (dhcp_started)
+    if (dhcp_started) {
         return NET_OK;
+    }
 
     if (dhcp_test_force_start_fail) {
         dhcp_test_force_start_fail = false;
@@ -132,13 +133,15 @@ static int net_start_dhcp_client(const char *reason) {
 }
 
 static void net_sync_link_state(void) {
-    if (!net_initialized || active_driver == NULL || active_driver->link_status == NULL)
+    if (!net_initialized || active_driver == NULL || active_driver->link_status == NULL) {
         return;
+    }
 
     bool driver_link_up = active_driver->link_status();
     bool lwip_link_up = net_link_is_up();
-    if (driver_link_up == lwip_link_up)
+    if (driver_link_up == lwip_link_up) {
         return;
+    }
 
     if (driver_link_up) {
         netif_set_link_up(&slm_netif);
@@ -198,18 +201,22 @@ void net_test_force_dhcp_start_fail(void) {
  * fallback fired, 0 if no action was taken.
  */
 int net_dhcp_check_timeout(void) {
-    if (!dhcp_requested || dhcp_fallback_done || !dhcp_timeout_armed)
+    if (!dhcp_requested || dhcp_fallback_done || !dhcp_timeout_armed) {
         return 0;
-    if (dhcp_supplied_address(&slm_netif))
+    }
+    if (dhcp_supplied_address(&slm_netif)) {
         return 0;
+    }
 
     uint32_t elapsed = sys_now() - dhcp_start_time;
-    if (elapsed < dhcp_timeout_ms)
+    if (elapsed < dhcp_timeout_ms) {
         return 0;
+    }
 
     WARN("DHCP timeout after %u ms; falling back to static IP", elapsed);
-    if (dhcp_started)
+    if (dhcp_started) {
         dhcp_stop(&slm_netif);
+    }
     dhcp_requested = false;
     dhcp_started = false;
     dhcp_timeout_armed = false;
@@ -996,8 +1003,9 @@ void net_poll(void) {
      * and frees the pool buffers so subsequent sends can reuse them.
      * Optional op — drivers that complete TX synchronously inside
      * send() may leave it NULL. */
-    if (active_driver->tx_reap)
+    if (active_driver->tx_reap) {
         active_driver->tx_reap();
+    }
 
     net_sync_link_state();
 

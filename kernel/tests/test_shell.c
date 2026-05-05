@@ -3689,8 +3689,9 @@ extern int num_external_commands;
 bool cmd_table_has(const shell_cmd_t *table, int count, const char *name)
 {
     for (int i = 0; i < count; i++) {
-        if (strcmp(name, table[i].name) == 0)
+        if (strcmp(name, table[i].name) == 0) {
             return true;
+        }
     }
     return false;
 }

@@ -1310,8 +1310,9 @@ void vmm_init(void)
     {
         const char *p = (const char *)l1_table;
         const char *end = p + sizeof(l1_table);
-        for (; p < end; p += 64)
-            __asm__ volatile("dc cvac, %0" :: "r"(p) : "memory");
+        for (; p < end; p += 64) {
+            __asm__ volatile("dc cvac, %0" ::"r"(p) : "memory");
+        }
     }
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     {

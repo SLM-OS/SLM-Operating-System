@@ -298,8 +298,9 @@ static int l_component_list(lua_State *L) {
     int idx = 1;
     for (uint32_t i = 0; i < COMPONENT_MAX_COUNT; i++) {
         component_info_t info;
-        if (component_get_info(i, &info) != 0)
+        if (component_get_info(i, &info) != 0) {
             continue;
+        }
 
         lua_createtable(L, 0, 7);
 
@@ -2509,10 +2510,11 @@ static int l_eviction_policy(lua_State *L) {
 #if defined(CONFIG_AI_EVICTION)
     uint8_t buf[64];
     size_t n = rust_eviction_policy_name(buf, sizeof(buf));
-    if (n > 0)
+    if (n > 0) {
         lua_pushlstring(L, (const char *)buf, n);
-    else
+    } else {
         lua_pushnil(L);
+    }
 #else
     lua_pushnil(L);
 #endif
@@ -2889,10 +2891,11 @@ static int l_eviction_stats(lua_State *L) {
     /* Policy name */
     uint8_t pbuf[64];
     size_t pn = rust_eviction_policy_name(pbuf, sizeof(pbuf));
-    if (pn > 0)
+    if (pn > 0) {
         lua_pushlstring(L, (const char *)pbuf, pn);
-    else
+    } else {
         lua_pushstring(L, "unknown");
+    }
     lua_setfield(L, -2, "policy");
 
     lua_pushinteger(L, (lua_Integer)stats.weight_evictions);
@@ -3102,11 +3105,14 @@ static int l_model_load(lua_State *L) {
     const char *name = luaL_optstring(L, 2, NULL);
     if (!name) {
         const char *base = resolved;
-        for (const char *p = resolved; *p; p++)
-            if (*p == '/') base = p + 1;
+        for (const char *p = resolved; *p; p++) {
+            if (*p == '/')
+                base = p + 1;
+        }
         size_t n = 0;
-        for (const char *p = base; *p && *p != '.' && n < 31; p++)
+        for (const char *p = base; *p && *p != '.' && n < 31; p++) {
             derived[n++] = *p;
+        }
         derived[n] = '\0';
         name = derived;
     }
@@ -3178,11 +3184,14 @@ static int l_model_swap(lua_State *L) {
     const char *name = luaL_optstring(L, 3, NULL);
     if (!name) {
         const char *base = resolved;
-        for (const char *p = resolved; *p; p++)
-            if (*p == '/') base = p + 1;
+        for (const char *p = resolved; *p; p++) {
+            if (*p == '/')
+                base = p + 1;
+        }
         size_t n = 0;
-        for (const char *p = base; *p && *p != '.' && n < 31; p++)
+        for (const char *p = base; *p && *p != '.' && n < 31; p++) {
             derived[n++] = *p;
+        }
         derived[n] = '\0';
         name = derived;
     }
@@ -4379,8 +4388,9 @@ int lua_slm_dofile(lua_State *L, const char *filename) {
     buf[len] = '\0';
 
     int status = luaL_loadbufferx(L, buf, (size_t)len, resolved, NULL);
-    if (status == LUA_OK)
+    if (status == LUA_OK) {
         status = lua_pcall(L, 0, LUA_MULTRET, 0);
+    }
     if (status != LUA_OK) {
         const char *msg = lua_tostring(L, -1);
         shell_printf("Lua error: %s\n", msg ? msg : "(unknown)");

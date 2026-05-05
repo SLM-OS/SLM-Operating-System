@@ -1193,7 +1193,7 @@ else()
     set(LUA_SETJMP kernel/arch/arm64/setjmp.S)
 endif()
 
-add_library(lua STATIC ${LUA_SOURCES} kernel/src/lua_stubs.c kernel/src/lua_slm.c kernel/src/lua_shell.c ${LUA_SETJMP})
+add_library(lua STATIC ${LUA_SOURCES} kernel/src/lua_stubs.c kernel/src/lua_slm.c kernel/src/lua_shell.c kernel/tests/test_lua_stubs.c ${LUA_SETJMP})
 target_include_directories(lua PRIVATE ${KERNEL_INCLUDES} kernel/lib/lua/src ${BUILD_INFO_DIR})
 add_dependencies(lua generate_build_info)
 

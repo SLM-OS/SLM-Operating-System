@@ -162,12 +162,14 @@ int admin_telemetry_get_eviction_stats(struct latency_hist *out_hist,
     uint64_t now = slm_get_time_ns();
 
     if (out_hist) latency_hist_snapshot(&g_eviction_hist, out_hist);
-    if (out_decision_rate_q16)
+    if (out_decision_rate_q16) {
         *out_decision_rate_q16 =
             rate_ewma_get_q16(&g_eviction_decision_rate, now);
-    if (out_fallback_rate_q16)
+    }
+    if (out_fallback_rate_q16) {
         *out_fallback_rate_q16 =
             rate_ewma_get_q16(&g_eviction_fallback_rate, now);
+    }
     if (out_total_decisions) *out_total_decisions = g_eviction_decisions;
     if (out_total_fallbacks) *out_total_fallbacks = g_eviction_fallbacks;
     if (out_total_ns)        *out_total_ns        = g_eviction_total_ns;
@@ -236,10 +238,12 @@ int admin_telemetry_get_inference_stats(struct latency_hist *out_hist,
     uint64_t now = slm_get_time_ns();
 
     if (out_hist) latency_hist_snapshot(&g_inference_hist, out_hist);
-    if (out_calls_per_s_q16)
+    if (out_calls_per_s_q16) {
         *out_calls_per_s_q16 = rate_ewma_get_q16(&g_inference_call_rate, now);
-    if (out_errors_per_s_q16)
+    }
+    if (out_errors_per_s_q16) {
         *out_errors_per_s_q16 = rate_ewma_get_q16(&g_inference_error_rate, now);
+    }
     if (out_total_calls)  *out_total_calls  = g_inference_calls;
     if (out_total_errors) *out_total_errors = g_inference_errors;
     if (out_total_ns)     *out_total_ns     = g_inference_total_ns;
@@ -363,8 +367,9 @@ static void publish_cpu_util(uint32_t cpus)
             key[1] = (char)('0' + (i / 10));
             key[2] = (char)('0' + (i % 10));
         }
-        if (append_kv_uint(payload, sizeof(payload), &pos, key, load) != 0)
+        if (append_kv_uint(payload, sizeof(payload), &pos, key, load) != 0) {
             break; /* payload full — drop remaining CPUs from this sample */
+        }
 
         g_prev_picked[i]     = picked_now[i];
         g_prev_idle_loops[i] = idle_now[i];
@@ -626,8 +631,9 @@ void admin_telemetry_record_ai_decision(char policy_id,
     /* p=<one char>. Always present — the policy id is meaningful in
      * both success and fallback cases (which AI policy was active
      * when the decision was attempted). */
-    if (append_kv_char(payload, sizeof(payload), &pos, "p", policy_id) != 0)
+    if (append_kv_char(payload, sizeof(payload), &pos, "p", policy_id) != 0) {
         goto done;
+    }
 
     if (!fallback) {
         /* Action fields. core/priority_adj/preempt are u8 with small
