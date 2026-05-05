@@ -410,10 +410,12 @@ _Static_assert(sizeof(mnist_switch_lcu_batch_template) /
 
 static bool hef_matches_mnist_template(const struct hef_info *info)
 {
-    if (info->ccw_action_count != HAILO_MNIST_TEMPLATE_CCW_ACTION_COUNT)
+    if (info->ccw_action_count != HAILO_MNIST_TEMPLATE_CCW_ACTION_COUNT) {
         return false;
-    if (info->ccw_total_bytes != HAILO_MNIST_TEMPLATE_CCW_TOTAL_BYTES)
+    }
+    if (info->ccw_total_bytes != HAILO_MNIST_TEMPLATE_CCW_TOTAL_BYTES) {
         return false;
+    }
     /* sdk_version is a NUL-terminated C string; check its prefix so
      * "3.33.1" et al all match. A HEF compiled on a newer DFC will
      * likely carry different sequencer_config bytes and must fall

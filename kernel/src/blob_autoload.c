@@ -307,10 +307,15 @@ static int blob_autoload_parse_u32(const char *text, int base, uint32_t *out)
     while (*p) {
         uint32_t digit;
         char c = *p++;
-        if (c >= '0' && c <= '9') digit = (uint32_t)(c - '0');
-        else if (base == 16 && c >= 'a' && c <= 'f') digit = 10u + (uint32_t)(c - 'a');
-        else if (base == 16 && c >= 'A' && c <= 'F') digit = 10u + (uint32_t)(c - 'A');
-        else return -1;
+        if (c >= '0' && c <= '9') {
+            digit = (uint32_t)(c - '0');
+        } else if (base == 16 && c >= 'a' && c <= 'f') {
+            digit = 10u + (uint32_t)(c - 'a');
+        } else if (base == 16 && c >= 'A' && c <= 'F') {
+            digit = 10u + (uint32_t)(c - 'A');
+        } else {
+            return -1;
+        }
         if (digit >= (uint32_t)base) return -1;
         value = value * (uint32_t)base + digit;
     }
@@ -1471,18 +1476,28 @@ int blob_autoload_set(const char *domain, const char *kind, const char *path)
 
     if (strcmp(domain, "eviction") == 0) {
         int kind_id = 0;
-        if (strcmp(kind, "xgboost") == 0) kind_id = 1;
-        else if (strcmp(kind, "mlp") == 0) kind_id = 2;
-        else if (strcmp(kind, "cacheus_config") == 0) kind_id = 3;
+        if (strcmp(kind, "xgboost") == 0) {
+            kind_id = 1;
+        } else if (strcmp(kind, "mlp") == 0) {
+            kind_id = 2;
+        } else if (strcmp(kind, "cacheus_config") == 0) {
+            kind_id = 3;
+        }
         if (kind_id == 0) return -1;
         rc = eviction_blob_validate_file((uint16_t)kind_id, path, resolved, sizeof(resolved));
     } else if (strcmp(domain, "sched") == 0) {
         uint16_t kind_id = 0;
-        if (strcmp(kind, "mlp") == 0) kind_id = SCHED_MODEL_KIND_MLP;
-        else if (strcmp(kind, "ppo") == 0) kind_id = SCHED_MODEL_KIND_PPO;
-        else if (strcmp(kind, "config") == 0) kind_id = SCHED_MODEL_KIND_CONFIG;
-        else if (strcmp(kind, "thresholds") == 0) kind_id = SCHED_MODEL_KIND_THRESHOLDS;
-        else if (strcmp(kind, "rebalance") == 0) kind_id = SCHED_MODEL_KIND_REBALANCE;
+        if (strcmp(kind, "mlp") == 0) {
+            kind_id = SCHED_MODEL_KIND_MLP;
+        } else if (strcmp(kind, "ppo") == 0) {
+            kind_id = SCHED_MODEL_KIND_PPO;
+        } else if (strcmp(kind, "config") == 0) {
+            kind_id = SCHED_MODEL_KIND_CONFIG;
+        } else if (strcmp(kind, "thresholds") == 0) {
+            kind_id = SCHED_MODEL_KIND_THRESHOLDS;
+        } else if (strcmp(kind, "rebalance") == 0) {
+            kind_id = SCHED_MODEL_KIND_REBALANCE;
+        }
         if (kind_id == 0) return -1;
         rc = sched_blob_validate_file(kind_id, path, resolved, sizeof(resolved));
     } else {

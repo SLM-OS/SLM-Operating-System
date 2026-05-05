@@ -1867,8 +1867,9 @@ static void test_slm_task_migrate_bad_args(void)
 static void migrate_test_task_body(void *arg)
 {
     (void)arg;
-    for (int i = 0; i < 1000; i++)
+    for (int i = 0; i < 1000; i++) {
         yield();
+    }
 }
 static void test_slm_task_migrate_succeeds(void)
 {

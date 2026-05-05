@@ -776,14 +776,15 @@ static void bench_context_switch(void)
         shell_printf("  Context switch: %d round-trips\r\n", bench_ctx_count - 1);
         shell_printf("    Average: %lu ns (%lu us)\r\n",
                     (unsigned long)avg_ns, (unsigned long)(avg_ns / 1000));
-        if (avg_ns < 10000)
+        if (avg_ns < 10000) {
             shell_puts("    Rating:  Excellent (< 10 us)\r\n");
-        else if (avg_ns < 50000)
+        } else if (avg_ns < 50000) {
             shell_puts("    Rating:  Good (< 50 us)\r\n");
-        else if (avg_ns < 100000)
+        } else if (avg_ns < 100000) {
             shell_puts("    Rating:  Acceptable (< 100 us)\r\n");
-        else
+        } else {
             shell_puts("    Rating:  Needs optimization (> 100 us)\r\n");
+        }
         hist_print(&bench_ctx_hist);
     } else {
         shell_puts("  Context switch: insufficient data\r\n");
@@ -1132,8 +1133,9 @@ static void bench_shared_buffer(void)
     uint64_t start = slm_get_time_ns();
     for (int i = 0; i < 1000; i++) {
         volatile uint8_t *p = (volatile uint8_t *)ptr;
-        for (int j = 0; j < 4096; j += 64)
+        for (int j = 0; j < 4096; j += 64) {
             p[j] = (uint8_t)i;
+        }
     }
     uint64_t write_ns = slm_get_time_ns() - start;
 
@@ -1142,8 +1144,9 @@ static void bench_shared_buffer(void)
     volatile uint8_t sink = 0;
     for (int i = 0; i < 1000; i++) {
         volatile uint8_t *p = (volatile uint8_t *)ptr;
-        for (int j = 0; j < 4096; j += 64)
+        for (int j = 0; j < 4096; j += 64) {
             sink = p[j];
+        }
     }
     (void)sink;
     uint64_t read_ns = slm_get_time_ns() - start;
@@ -2357,12 +2360,15 @@ static int model_swap(int argc, char *argv[])
 
     /* Derive the new model's name from the file (matches `model load`). */
     const char *base = resolved;
-    for (const char *p = resolved; *p; p++)
-        if (*p == '/') base = p + 1;
+    for (const char *p = resolved; *p; p++) {
+        if (*p == '/')
+            base = p + 1;
+    }
     char model_name[32];
     size_t name_len = 0;
-    for (const char *p = base; *p && *p != '.' && name_len < 31; p++)
+    for (const char *p = base; *p && *p != '.' && name_len < 31; p++) {
         model_name[name_len++] = *p;
+    }
     model_name[name_len] = '\0';
 
     int rc = rust_model_swap((uint32_t)idx, model_name,
@@ -2866,11 +2872,13 @@ int cmd_model(int argc, char *argv[])
                      meta.name[0] ? meta.name : argv[2]);
         shell_printf("  kind           %s\r\n", model_kind_name(meta.kind));
         shell_printf("  size           %lu bytes\r\n", (unsigned long)meta.size);
-        if (meta.sha256[0])
+        if (meta.sha256[0]) {
             shell_printf("  sha256         %s\r\n", meta.sha256);
-        if (meta.uploaded_ts_ms)
+        }
+        if (meta.uploaded_ts_ms) {
             shell_printf("  uploaded_ts_ms %lu\r\n",
                          (unsigned long)meta.uploaded_ts_ms);
+        }
         return 0;
     }
 
@@ -2965,10 +2973,16 @@ int cmd_peek(int argc, char *argv[])
     uint64_t addr = 0;
     while (*s) {
         uint64_t d;
-        if (*s >= '0' && *s <= '9') d = *s - '0';
-        else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
-        else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
-        else { shell_puts("bad hex address\r\n"); return -1; }
+        if (*s >= '0' && *s <= '9') {
+            d = *s - '0';
+        } else if (*s >= 'a' && *s <= 'f') {
+            d = 10 + (*s - 'a');
+        } else if (*s >= 'A' && *s <= 'F') {
+            d = 10 + (*s - 'A');
+        } else {
+            shell_puts("bad hex address\r\n");
+            return -1;
+        }
         addr = (addr << 4) | d;
         s++;
     }
@@ -3122,10 +3136,16 @@ int cmd_poke(int argc, char *argv[])
         int ndigits = 0;
         while (*s) {
             uint64_t d;
-            if (*s >= '0' && *s <= '9') d = *s - '0';
-            else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
-            else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
-            else { uart_puts("bad hex\r\n"); return -1; }
+            if (*s >= '0' && *s <= '9') {
+                d = *s - '0';
+            } else if (*s >= 'a' && *s <= 'f') {
+                d = 10 + (*s - 'a');
+            } else if (*s >= 'A' && *s <= 'F') {
+                d = 10 + (*s - 'A');
+            } else {
+                uart_puts("bad hex\r\n");
+                return -1;
+            }
             if (++ndigits > 16) { uart_puts("hex too long\r\n"); return -1; }
             fields[f] = (fields[f] << 4) | d;
             s++;

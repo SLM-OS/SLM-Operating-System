@@ -114,8 +114,9 @@ int cmd_component(int argc, char *argv[])
         int pos = 0;
         for (int i = 2; i < argc && pos < 62; i++) {
             if (i > 2 && pos < 62) msg[pos++] = ' ';
-            for (int j = 0; argv[i][j] && pos < 62; j++)
+            for (int j = 0; argv[i][j] && pos < 62; j++) {
                 msg[pos++] = argv[i][j];
+            }
         }
         msg[pos] = '\0';
         return component_send_echo(msg);
@@ -297,8 +298,9 @@ int cmd_msg(int argc, char *argv[])
         int pos = 0;
         for (int i = 3; i < argc && pos < 62; i++) {
             if (i > 3 && pos < 62) msg[pos++] = ' ';
-            for (int j = 0; argv[i][j] && pos < 62; j++)
+            for (int j = 0; argv[i][j] && pos < 62; j++) {
                 msg[pos++] = argv[i][j];
+            }
         }
         msg[pos] = '\0';
 

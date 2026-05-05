@@ -57,8 +57,9 @@ enum model_kind model_kind_from_name(const char *name)
 {
     if (!name) return MODEL_KIND_COUNT;
     for (unsigned i = 0; i < MODEL_KIND_COUNT; i++) {
-        if (strcmp(name, k_engines[i].name) == 0)
+        if (strcmp(name, k_engines[i].name) == 0) {
             return (enum model_kind)i;
+        }
     }
     return MODEL_KIND_COUNT;
 }
@@ -170,13 +171,15 @@ int model_meta_parse(const char *buf, size_t len, struct model_meta *out)
             if (k == MODEL_KIND_COUNT) return MODEL_LAUNCH_ERR_BADKIND;
             out->kind = k;
         } else if (span_eq_lit(line, key_len, "size")) {
-            if (parse_u64(val, val_end, &out->size) != 0)
+            if (parse_u64(val, val_end, &out->size) != 0) {
                 return MODEL_LAUNCH_ERR_BADMETA;
+            }
         } else if (span_eq_lit(line, key_len, "sha256")) {
             copy_span(out->sha256, MODEL_META_SHA256_LEN, val, val_len);
         } else if (span_eq_lit(line, key_len, "uploaded_ts_ms")) {
-            if (parse_u64(val, val_end, &out->uploaded_ts_ms) != 0)
+            if (parse_u64(val, val_end, &out->uploaded_ts_ms) != 0) {
                 return MODEL_LAUNCH_ERR_BADMETA;
+            }
         }
         /* Unknown keys silently ignored — forward-compat. */
     }

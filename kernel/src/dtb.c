@@ -507,8 +507,9 @@ static void copy_chosen_bytes(const struct fdt_handle *h, const char *path,
     *out_len = 0;
     const void *data = NULL;
     uint32_t len = 0;
-    if (fdt_get_property_by_path(h, path, prop, &data, &len) != FDT_LIB_OK)
+    if (fdt_get_property_by_path(h, path, prop, &data, &len) != FDT_LIB_OK) {
         return;
+    }
     uint32_t n = len < cap ? len : cap;
     for (uint32_t i = 0; i < n; i++) out[i] = ((const uint8_t *)data)[i];
     *out_len = n;
@@ -525,8 +526,9 @@ static void copy_chosen_string(const struct fdt_handle *h, const char *path,
     out[0] = '\0';
     const void *data = NULL;
     uint32_t len = 0;
-    if (fdt_get_property_by_path(h, path, prop, &data, &len) != FDT_LIB_OK)
+    if (fdt_get_property_by_path(h, path, prop, &data, &len) != FDT_LIB_OK) {
         return;
+    }
     if (len == 0) return;
     uint32_t n = len < cap - 1 ? len : cap - 1;
     for (uint32_t i = 0; i < n; i++) out[i] = ((const char *)data)[i];

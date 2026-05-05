@@ -74,10 +74,15 @@ static int parse_hex_u32(const char *s, uint32_t *out)
     uint32_t v = 0;
     for (; *s; s++) {
         uint32_t d;
-        if (*s >= '0' && *s <= '9')      d = (uint32_t)(*s - '0');
-        else if (*s >= 'a' && *s <= 'f') d = (uint32_t)(*s - 'a' + 10);
-        else if (*s >= 'A' && *s <= 'F') d = (uint32_t)(*s - 'A' + 10);
-        else return -1;
+        if (*s >= '0' && *s <= '9') {
+            d = (uint32_t)(*s - '0');
+        } else if (*s >= 'a' && *s <= 'f') {
+            d = (uint32_t)(*s - 'a' + 10);
+        } else if (*s >= 'A' && *s <= 'F') {
+            d = (uint32_t)(*s - 'A' + 10);
+        } else {
+            return -1;
+        }
         /* Caps the input at 8 hex digits (0xFFFFFFFF). Once the
          * accumulator has bit 28 set, the next left-shift-by-4
          * would push the MSB out and silently truncate. Reject
@@ -1054,9 +1059,11 @@ static int cmd_hailo(int argc, char *argv[])
             return 0;
         }
         bool is_input;
-        if (strcmp(argv[2], "in") == 0)       is_input = true;
-        else if (strcmp(argv[2], "out") == 0) is_input = false;
-        else {
+        if (strcmp(argv[2], "in") == 0) {
+            is_input = true;
+        } else if (strcmp(argv[2], "out") == 0) {
+            is_input = false;
+        } else {
             shell_printf("hailo: cfgstream: direction '%s' not in "
                          "{in, out}\n", argv[2]);
             return 0;

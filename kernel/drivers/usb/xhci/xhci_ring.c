@@ -26,8 +26,9 @@
 int xhci_ring_init(struct xhci_ring *r, struct xhci_trb *trbs,
                    uintptr_t trbs_phys, uint32_t num_trbs)
 {
-    if (r == NULL || trbs == NULL || num_trbs < 4)
+    if (r == NULL || trbs == NULL || num_trbs < 4) {
         return -1;
+    }
 
     /* Always zeroes the caller's buffer — callers can rely on every
      * TRB's cycle bit being 0 after init (the HC uses cycle=0 as
@@ -70,8 +71,9 @@ int xhci_ring_init(struct xhci_ring *r, struct xhci_trb *trbs,
 int xhci_event_ring_init(struct xhci_event_ring *r, struct xhci_trb *trbs,
                          uintptr_t trbs_phys, uint32_t num_trbs)
 {
-    if (r == NULL || trbs == NULL || num_trbs < 4)
+    if (r == NULL || trbs == NULL || num_trbs < 4) {
         return -1;
+    }
 
     memset(trbs, 0, (size_t)num_trbs * sizeof(struct xhci_trb));
 
@@ -86,8 +88,9 @@ int xhci_event_ring_init(struct xhci_event_ring *r, struct xhci_trb *trbs,
 struct xhci_trb *xhci_ring_enqueue(struct xhci_ring *r,
                                    const struct xhci_trb *t)
 {
-    if (r == NULL || t == NULL || r->trbs == NULL)
+    if (r == NULL || t == NULL || r->trbs == NULL) {
         return NULL;
+    }
 
     /*
      * If the enqueue slot IS the Link TRB, flip the Link's cycle bit
@@ -132,12 +135,14 @@ struct xhci_trb *xhci_ring_enqueue(struct xhci_ring *r,
 
 bool xhci_event_ring_peek(struct xhci_event_ring *r, struct xhci_trb *out)
 {
-    if (r == NULL || out == NULL || r->trbs == NULL)
+    if (r == NULL || out == NULL || r->trbs == NULL) {
         return false;
+    }
 
     struct xhci_trb *slot = &r->trbs[r->dequeue];
-    if ((slot->control & XHCI_TRB_CYCLE) != (r->cycle_state & 1))
-        return false;   /* no event yet */
+    if ((slot->control & XHCI_TRB_CYCLE) != (r->cycle_state & 1)) {
+        return false; /* no event yet */
+    }
 
     /*
      * DMA read barrier between the cycle-bit check and the payload
@@ -177,8 +182,9 @@ bool xhci_event_ring_peek(struct xhci_event_ring *r, struct xhci_trb *out)
 
 uintptr_t xhci_event_ring_dequeue_phys(const struct xhci_event_ring *r)
 {
-    if (r == NULL || r->trbs == NULL)
+    if (r == NULL || r->trbs == NULL) {
         return 0;
+    }
     return r->phys + (uintptr_t)r->dequeue * sizeof(struct xhci_trb);
 }
 

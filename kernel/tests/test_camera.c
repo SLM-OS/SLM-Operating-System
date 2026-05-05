@@ -738,8 +738,9 @@ static void test_camrtc_memoryinfo_overlay_roundtrip(void)
     /* Zero the whole struct first (no specific contract on
      * uninitialized memoryinfo, but we want a deterministic
      * baseline). */
-    for (size_t i = 0; i < sizeof(m); i++)
+    for (size_t i = 0; i < sizeof(m); i++) {
         ((volatile uint8_t *)&m)[i] = 0u;
+    }
 
     /* Write a recognizable IOVA + size to surface[0]. */
     m.surface[0].base_address = 0xCAFEF00DDEADBEEFull;
@@ -870,8 +871,9 @@ static void test_camrtc_vi_channel_config_bitfield_positions(void)
     /* Set all 13 single-bit flags simultaneously; underlying word
      * must read back as bits 0..12 set (= 0x1FFF). pad_flags__:19
      * stays untouched so bits 13..31 remain zero. */
-    for (size_t i = 0; i < sizeof(cfg); i++)
+    for (size_t i = 0; i < sizeof(cfg); i++) {
         ((volatile uint8_t *)&cfg)[i] = 0u;
+    }
     cfg.dt_enable                  = 1u;
     cfg.embdata_enable             = 1u;
     cfg.flush_enable               = 1u;

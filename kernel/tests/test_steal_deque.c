@@ -40,8 +40,9 @@ static struct task *as_task(uintptr_t v)
      * tests rely on `as_task(0x10) == as_task(0x10)` for pointer
      * identity. Otherwise allocate a fresh slot. */
     for (int i = 0; i < fake_task_used; i++) {
-        if (fake_sentinels[i] == v)
+        if (fake_sentinels[i] == v) {
             return &fake_tasks[i];
+        }
     }
     /* FAKE_TASK_COUNT (64) is larger than STEAL_DEQUE_CAPACITY (32)
      * plus worst-case overhead in any single test between
@@ -164,8 +165,9 @@ static void test_pop_and_steal_share_queue(void)
 static void test_empty_after_drain_by_mixed_ops(void)
 {
     reset_deque();
-    for (int i = 1; i <= 8; i++)
+    for (int i = 1; i <= 8; i++) {
         steal_deque_push(&d, as_task((uintptr_t)i));
+    }
 
     TEST_ASSERT_EQUAL_UINT32(8, steal_deque_size(&d));
 
@@ -189,8 +191,9 @@ static void test_empty_after_drain_by_mixed_ops(void)
 static void test_push_full_returns_error(void)
 {
     reset_deque();
-    for (uint32_t i = 0; i < STEAL_DEQUE_CAPACITY; i++)
+    for (uint32_t i = 0; i < STEAL_DEQUE_CAPACITY; i++) {
         TEST_ASSERT_EQUAL_INT(0, steal_deque_push(&d, as_task(0x100 + i)));
+    }
 
     TEST_ASSERT_EQUAL_UINT32(STEAL_DEQUE_CAPACITY, steal_deque_size(&d));
     TEST_ASSERT_EQUAL_INT(-1, steal_deque_push(&d, as_task(0xDEAD)));
@@ -199,8 +202,9 @@ static void test_push_full_returns_error(void)
 static void test_full_then_pop_reopens_space(void)
 {
     reset_deque();
-    for (uint32_t i = 0; i < STEAL_DEQUE_CAPACITY; i++)
+    for (uint32_t i = 0; i < STEAL_DEQUE_CAPACITY; i++) {
         steal_deque_push(&d, as_task(0x200 + i));
+    }
 
     /* Full */
     TEST_ASSERT_EQUAL_INT(-1, steal_deque_push(&d, as_task(0xBEEF)));
@@ -223,12 +227,14 @@ static void test_indices_wrap_correctly(void)
     uintptr_t counter = 1;
     for (int round = 0; round < 4; round++) {
         /* Fill partway */
-        for (int i = 0; i < (int)(STEAL_DEQUE_CAPACITY / 2); i++)
+        for (int i = 0; i < (int)(STEAL_DEQUE_CAPACITY / 2); i++) {
             TEST_ASSERT_EQUAL_INT(0, steal_deque_push(&d, as_task(counter++)));
+        }
 
         /* Drain via steal (FIFO) */
-        while (!steal_deque_is_empty(&d))
+        while (!steal_deque_is_empty(&d)) {
             TEST_ASSERT_NOT_NULL(steal_deque_steal(&d, (void *)0));
+        }
     }
 
     TEST_ASSERT_TRUE(steal_deque_is_empty(&d));

@@ -302,14 +302,16 @@ int slm_gpu_get_info(RustGpuInfo *info)
     if (!info) return -1;
 
     /* Zero the struct first */
-    for (size_t i = 0; i < sizeof(RustGpuInfo); i++)
+    for (size_t i = 0; i < sizeof(RustGpuInfo); i++) {
         ((uint8_t *)info)[i] = 0;
+    }
 
     if (!gpu_available()) {
         /* No GPU — fill with defaults */
         const char *name = "none";
-        for (int i = 0; name[i] && i < 31; i++)
+        for (int i = 0; name[i] && i < 31; i++) {
             info->name[i] = (uint8_t)name[i];
+        }
         return 0;
     }
 
@@ -319,12 +321,14 @@ int slm_gpu_get_info(RustGpuInfo *info)
 
     /* Copy strings */
     if (gi.name) {
-        for (int i = 0; gi.name[i] && i < 31; i++)
+        for (int i = 0; gi.name[i] && i < 31; i++) {
             info->name[i] = (uint8_t)gi.name[i];
+        }
     }
     if (gi.device) {
-        for (int i = 0; gi.device[i] && i < 63; i++)
+        for (int i = 0; gi.device[i] && i < 63; i++) {
             info->device[i] = (uint8_t)gi.device[i];
+        }
     }
 
     info->capabilities = gi.capabilities;

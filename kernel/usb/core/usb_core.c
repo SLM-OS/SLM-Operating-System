@@ -88,8 +88,9 @@ static bool usb_is_root_device(const struct usb_device *dev)
 
 static bool usb_config_is_cdc_ecm_candidate(const uint8_t *buf, size_t len)
 {
-    if (buf == NULL || len < sizeof(struct usb_config_descriptor))
+    if (buf == NULL || len < sizeof(struct usb_config_descriptor)) {
         return false;
+    }
 
     bool have_ctrl = false;
     bool have_data = false;
@@ -99,16 +100,19 @@ static bool usb_config_is_cdc_ecm_candidate(const uint8_t *buf, size_t len)
     while (p + 2 <= end) {
         uint8_t blen = p[0];
         uint8_t btype = p[1];
-        if (blen < 2 || p + blen > end)
+        if (blen < 2 || p + blen > end) {
             break;
+        }
 
         if (btype == USB_DT_INTERFACE &&
             blen >= sizeof(struct usb_interface_descriptor)) {
             const struct usb_interface_descriptor *id = (const void *)p;
-            if (id->bInterfaceClass == 0x02 && id->bInterfaceSubClass == 0x06)
+            if (id->bInterfaceClass == 0x02 && id->bInterfaceSubClass == 0x06) {
                 have_ctrl = true;
-            if (id->bInterfaceClass == 0x0A)
+            }
+            if (id->bInterfaceClass == 0x0A) {
                 have_data = true;
+            }
         }
 
         p += blen;
@@ -124,8 +128,9 @@ static int usb_fetch_config_descriptor(struct usb_device *dev,
                                        size_t cfg_buf_cap)
 {
     if (dev == NULL || cfg_head == NULL || cfg_buf == NULL ||
-        cfg_buf_cap < sizeof(struct usb_config_descriptor))
+        cfg_buf_cap < sizeof(struct usb_config_descriptor)) {
         return -1;
+    }
 
     struct usb_config_descriptor *cfg_head_buf = cfg_head;
     uint8_t *bounce = usb_get_retained_desc_bounce(sizeof(*cfg_head));
@@ -136,10 +141,12 @@ static int usb_fetch_config_descriptor(struct usb_device *dev,
 
     int n = usb_get_descriptor(dev, USB_DT_CONFIG, cfg_index,
                                cfg_head_buf, sizeof(*cfg_head));
-    if (n >= (int)sizeof(*cfg_head) && cfg_head_buf != cfg_head)
+    if (n >= (int)sizeof(*cfg_head) && cfg_head_buf != cfg_head) {
         memcpy(cfg_head, cfg_head_buf, sizeof(*cfg_head));
-    if (n < (int)sizeof(*cfg_head))
+    }
+    if (n < (int)sizeof(*cfg_head)) {
         return -1;
+    }
 
     uint16_t total = cfg_head->wTotalLength;
     if (total > cfg_buf_cap) {
@@ -156,10 +163,12 @@ static int usb_fetch_config_descriptor(struct usb_device *dev,
     }
 
     n = usb_get_descriptor(dev, USB_DT_CONFIG, cfg_index, xfer_buf, total);
-    if (n >= (int)total && xfer_buf != cfg_buf)
+    if (n >= (int)total && xfer_buf != cfg_buf) {
         memcpy(cfg_buf, xfer_buf, total);
-    if (n < (int)total)
+    }
+    if (n < (int)total) {
         return -1;
+    }
 
     return (int)total;
 }
@@ -208,33 +217,39 @@ _Static_assert(sizeof(struct usb_port_status) == 4, "port status size");
 
 static bool usb_device_is_hub(const struct usb_device *dev)
 {
-    if (dev == NULL)
+    if (dev == NULL) {
         return false;
-    if (dev->dev_desc.bDeviceClass == USB_CLASS_HUB)
+    }
+    if (dev->dev_desc.bDeviceClass == USB_CLASS_HUB) {
         return true;
+    }
 
     for (unsigned i = 0; i < USB_MAX_INTERFACES_PER_DEV; i++) {
         if (dev->ifaces[i].valid &&
-            dev->ifaces[i].class_code == USB_CLASS_HUB)
+            dev->ifaces[i].class_code == USB_CLASS_HUB) {
             return true;
+        }
     }
     return false;
 }
 
 static enum usb_speed usb_hub_port_speed(uint16_t status)
 {
-    if (status & USB_PORT_STAT_LOW_SPEED)
+    if (status & USB_PORT_STAT_LOW_SPEED) {
         return USB_SPEED_LOW;
-    if (status & USB_PORT_STAT_HIGH_SPEED)
+    }
+    if (status & USB_PORT_STAT_HIGH_SPEED) {
         return USB_SPEED_HIGH;
+    }
     return USB_SPEED_FULL;
 }
 
 static int usb_hub_get_descriptor(struct usb_device *hub,
                                   struct usb_hub_descriptor *desc)
 {
-    if (hub == NULL || desc == NULL)
+    if (hub == NULL || desc == NULL) {
         return -1;
+    }
     return usb_control_msg(hub,
                            USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_DEVICE,
                            USB_REQ_GET_DESCRIPTOR,
@@ -245,8 +260,9 @@ static int usb_hub_get_descriptor(struct usb_device *hub,
 static int usb_hub_get_port_status(struct usb_device *hub, uint8_t port,
                                    struct usb_port_status *st)
 {
-    if (hub == NULL || st == NULL || port == 0)
+    if (hub == NULL || st == NULL || port == 0) {
         return -1;
+    }
     return usb_control_msg(hub,
                            USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_OTHER,
                            USB_REQ_GET_STATUS, 0, port,
@@ -256,8 +272,9 @@ static int usb_hub_get_port_status(struct usb_device *hub, uint8_t port,
 static int usb_hub_set_port_feature(struct usb_device *hub, uint8_t port,
                                     uint16_t feature)
 {
-    if (hub == NULL || port == 0)
+    if (hub == NULL || port == 0) {
         return -1;
+    }
     return usb_control_msg(hub,
                            USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_OTHER,
                            USB_REQ_SET_FEATURE, feature, port,
@@ -267,8 +284,9 @@ static int usb_hub_set_port_feature(struct usb_device *hub, uint8_t port,
 static int usb_hub_clear_port_feature(struct usb_device *hub, uint8_t port,
                                       uint16_t feature)
 {
-    if (hub == NULL || port == 0)
+    if (hub == NULL || port == 0) {
         return -1;
+    }
     return usb_control_msg(hub,
                            USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_OTHER,
                            USB_REQ_CLEAR_FEATURE, feature, port,
@@ -278,8 +296,9 @@ static int usb_hub_clear_port_feature(struct usb_device *hub, uint8_t port,
 static int usb_hub_reset_port(struct usb_device *hub, uint8_t port,
                               enum usb_speed *speed_out)
 {
-    if (usb_hub_set_port_feature(hub, port, USB_PORT_FEAT_RESET) < 0)
+    if (usb_hub_set_port_feature(hub, port, USB_PORT_FEAT_RESET) < 0) {
         return -1;
+    }
 
     uint64_t start = timer_get_count();
     uint64_t freq  = timer_get_frequency();
@@ -287,16 +306,18 @@ static int usb_hub_reset_port(struct usb_device *hub, uint8_t port,
     while (timer_get_count() - start < ticks) {
         struct usb_port_status st = {0};
         int rc = usb_hub_get_port_status(hub, port, &st);
-        if (rc < (int)sizeof(st))
+        if (rc < (int)sizeof(st)) {
             return -1;
+        }
 
         if ((st.change & USB_PORT_STAT_C_RESET) &&
             (st.status & USB_PORT_STAT_CONNECTION) &&
             (st.status & USB_PORT_STAT_ENABLE)) {
             (void)usb_hub_clear_port_feature(hub, port, USB_PORT_FEAT_C_RESET);
             (void)usb_hub_clear_port_feature(hub, port, USB_PORT_FEAT_C_ENABLE);
-            if (speed_out)
+            if (speed_out) {
                 *speed_out = usb_hub_port_speed(st.status);
+            }
             return 0;
         }
     }
@@ -306,16 +327,18 @@ static int usb_hub_reset_port(struct usb_device *hub, uint8_t port,
 static int usb_hub_prepare_ports(struct usb_device *hub,
                                  struct usb_hub_descriptor *desc)
 {
-    if (hub == NULL || desc == NULL || desc->bNbrPorts == 0)
+    if (hub == NULL || desc == NULL || desc->bNbrPorts == 0) {
         return -1;
+    }
 
     for (uint8_t port = 1; port <= desc->bNbrPorts; port++) {
         (void)usb_hub_set_port_feature(hub, port, USB_PORT_FEAT_POWER);
     }
 
     uint32_t delay_ms = (uint32_t)desc->bPwrOn2PwrGood * 2u;
-    if (delay_ms == 0)
+    if (delay_ms == 0) {
         delay_ms = 20;
+    }
     uint64_t start = timer_get_count();
     uint64_t ticks = (timer_get_frequency() / 1000u) * delay_ms;
     while (timer_get_count() - start < ticks) { }
@@ -408,8 +431,9 @@ const char *usb_urb_status_str(enum usb_urb_status s)
  */
 int usb_submit_urb(struct usb_urb *urb)
 {
-    if (urb == NULL || urb->dev == NULL)
+    if (urb == NULL || urb->dev == NULL) {
         return -USB_URB_IO_ERROR;
+    }
     if (active_hcd == NULL || active_hcd->submit_urb == NULL) {
         urb->status = USB_URB_IO_ERROR;
         return -USB_URB_IO_ERROR;
@@ -432,8 +456,9 @@ int usb_submit_urb(struct usb_urb *urb)
 
 int usb_cancel_urb(struct usb_urb *urb)
 {
-    if (urb == NULL || active_hcd == NULL || active_hcd->cancel_urb == NULL)
+    if (urb == NULL || active_hcd == NULL || active_hcd->cancel_urb == NULL) {
         return -USB_URB_IO_ERROR;
+    }
     return active_hcd->cancel_urb(urb);
 }
 
@@ -443,8 +468,9 @@ int usb_cancel_urb(struct usb_urb *urb)
 
 void usb_core_poll(void)
 {
-    if (active_hcd && active_hcd->poll)
+    if (active_hcd && active_hcd->poll) {
         active_hcd->poll();
+    }
 }
 
 /*
@@ -464,8 +490,9 @@ void usb_core_poll(void)
  */
 int usb_core_hotplug_poll(void)
 {
-    if (active_hcd == NULL || active_hcd->port_status == NULL)
+    if (active_hcd == NULL || active_hcd->port_status == NULL) {
         return 0;
+    }
     if (usb_hotplug_retry_blocked) {
         if (!usb_hotplug_retry_blocked_logged) {
             INFO("usb_core: hotplug retry suppressed after prior enumeration failure");
@@ -473,13 +500,15 @@ int usb_core_hotplug_poll(void)
         }
         return 0;
     }
-    if (root_device_present)
+    if (root_device_present) {
         return 0;
+    }
 
     bool connected = false;
     enum usb_speed speed = USB_SPEED_UNKNOWN;
-    if (!active_hcd->port_status(0, &connected, &speed) || !connected)
+    if (!active_hcd->port_status(0, &connected, &speed) || !connected) {
         return 0;
+    }
 
     int rc = usb_core_enumerate();
     if (rc != 0) {
@@ -520,8 +549,9 @@ static int usb_wait_urb(struct usb_urb *urb, uint32_t timeout_ms)
 
     while ((timer_get_count() - start) < deadline_ticks) {
         usb_core_poll();
-        if (urb->status != USB_URB_PENDING)
+        if (urb->status != USB_URB_PENDING) {
             return urb->status;
+        }
     }
     (void)usb_cancel_urb(urb);
     urb->status = USB_URB_TIMEOUT;
@@ -546,8 +576,9 @@ int usb_control_msg(struct usb_device *dev,
                     uint16_t wLength,
                     uint32_t timeout_ms)
 {
-    if (dev == NULL)
+    if (dev == NULL) {
         return -USB_URB_IO_ERROR;
+    }
 
     void *xfer_buf = data;
     void *bounce = NULL;
@@ -583,15 +614,17 @@ int usb_control_msg(struct usb_device *dev,
     urb.length = wLength;
 
     int sub = usb_submit_urb(&urb);
-    if (sub != 0)
+    if (sub != 0) {
         return sub;
+    }
 
     int status = usb_wait_urb(&urb, timeout_ms);
     if (status == USB_URB_OK || status == USB_URB_SHORT) {
         if (bounce != NULL && data_in && data != NULL && urb.actual_length > 0) {
             size_t copy_len = urb.actual_length;
-            if (copy_len > wLength)
+            if (copy_len > wLength) {
                 copy_len = wLength;
+            }
             memcpy(data, bounce, copy_len);
         }
         return (int)urb.actual_length;
@@ -633,14 +666,16 @@ int usb_get_descriptor(struct usb_device *dev,
 
 int usb_parse_configuration(struct usb_device *dev)
 {
-    if (dev == NULL || dev->raw_config_len < sizeof(struct usb_config_descriptor))
+    if (dev == NULL || dev->raw_config_len < sizeof(struct usb_config_descriptor)) {
         return -1;
+    }
     /* Defensive cap: usb_core_enumerate already truncates to this size
      * before writing raw_config_len, but a direct caller (tests, future
      * class-driver probing) could set a larger value. Reject rather
      * than walk `end` past the buffer into adjacent struct fields. */
-    if (dev->raw_config_len > sizeof(dev->raw_config))
+    if (dev->raw_config_len > sizeof(dev->raw_config)) {
         return -1;
+    }
 
     const uint8_t *p   = dev->raw_config;
     const uint8_t *end = p + dev->raw_config_len;
@@ -648,21 +683,25 @@ int usb_parse_configuration(struct usb_device *dev)
     /* Zero out the parsed tables — enumerate_config may be re-called. */
     for (unsigned i = 0; i < USB_MAX_INTERFACES_PER_DEV; i++) {
         dev->ifaces[i].valid = false;
-        for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++)
+        for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++) {
             dev->ifaces[i].ep_index[e] = -1;
+        }
     }
-    for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++)
+    for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++) {
         dev->endpoints[e].valid = false;
+    }
 
     /* The CONFIGURATION descriptor is first. */
     const struct usb_config_descriptor *cfg = (const void *)p;
-    if (cfg->bDescriptorType != USB_DT_CONFIG)
+    if (cfg->bDescriptorType != USB_DT_CONFIG) {
         return -1;
+    }
     /* USB 2.0 §9.6.3 fixes the config-descriptor header length at 9. A
      * device that reports something else is malformed; bailing here
      * avoids advancing `p` into garbage. */
-    if (cfg->bLength != sizeof(struct usb_config_descriptor))
+    if (cfg->bLength != sizeof(struct usb_config_descriptor)) {
         return -1;
+    }
 
     /* Walk class/standard descriptors after the CONFIGURATION header. */
     int cur_iface_slot = -1;
@@ -672,13 +711,15 @@ int usb_parse_configuration(struct usb_device *dev)
     while (p + 2 <= end) {
         uint8_t blen = p[0];
         uint8_t btype = p[1];
-        if (blen < 2 || p + blen > end)
+        if (blen < 2 || p + blen > end) {
             break;
+        }
 
         switch (btype) {
         case USB_DT_INTERFACE: {
-            if (blen < sizeof(struct usb_interface_descriptor))
+            if (blen < sizeof(struct usb_interface_descriptor)) {
                 break;
+            }
             const struct usb_interface_descriptor *id = (const void *)p;
 
             cur_iface_slot = -1;
@@ -717,14 +758,16 @@ int usb_parse_configuration(struct usb_device *dev)
             slot->class_code    = id->bInterfaceClass;
             slot->subclass      = id->bInterfaceSubClass;
             slot->protocol      = id->bInterfaceProtocol;
-            for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++)
+            for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++) {
                 slot->ep_index[e] = -1;
+            }
             break;
         }
 
         case USB_DT_ENDPOINT: {
-            if (blen < sizeof(struct usb_endpoint_descriptor))
+            if (blen < sizeof(struct usb_endpoint_descriptor)) {
                 break;
+            }
             if (cur_iface_slot < 0) {
                 /* Orphan endpoint — should not happen on a sane device. */
                 break;
@@ -772,22 +815,26 @@ usb_find_endpoint(const struct usb_device *dev,
                   uint8_t direction,
                   uint8_t xfer_type)
 {
-    if (dev == NULL)
+    if (dev == NULL) {
         return NULL;
+    }
 
     for (unsigned i = 0; i < USB_MAX_INTERFACES_PER_DEV; i++) {
         const struct usb_interface *slot = &dev->ifaces[i];
-        if (!slot->valid || slot->number != interface_number)
+        if (!slot->valid || slot->number != interface_number) {
             continue;
+        }
         for (unsigned e = 0; e < USB_MAX_ENDPOINTS_PER_DEV; e++) {
             int8_t idx = slot->ep_index[e];
             if (idx < 0) continue;
             const struct usb_endpoint *ep = &dev->endpoints[idx];
             if (!ep->valid) continue;
-            if ((ep->address & USB_DIR_IN) != (direction & USB_DIR_IN))
+            if ((ep->address & USB_DIR_IN) != (direction & USB_DIR_IN)) {
                 continue;
-            if ((ep->attributes & USB_XFER_TYPE_MASK) != (xfer_type & USB_XFER_TYPE_MASK))
+            }
+            if ((ep->attributes & USB_XFER_TYPE_MASK) != (xfer_type & USB_XFER_TYPE_MASK)) {
                 continue;
+            }
             return ep;
         }
     }
@@ -824,8 +871,9 @@ struct usb_device *usb_core_first_device(void)
  */
 static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
 {
-    if (dev == NULL || active_hcd == NULL)
+    if (dev == NULL || active_hcd == NULL) {
         return -1;
+    }
 
     /*
      * Devices always start enumeration at USB address 0. Keep the target
@@ -914,8 +962,9 @@ static int usb_enumerate_one(struct usb_device *dev, bool do_root_reset)
         n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
                                dd_stub_buf, initial_desc_len);
         if (n >= 8) {
-            if (dd_stub_buf != dd_stub)
+            if (dd_stub_buf != dd_stub) {
                 memcpy(dd_stub, dd_stub_buf, (size_t)n);
+            }
             /* bMaxPacketSize0 is byte 7. Record it for the HCD if useful later. */
             dev->dev_desc.bMaxPacketSize0 = dd_stub[7];
             if (n >= (int)sizeof(dev->dev_desc)) {
@@ -1006,8 +1055,9 @@ got_initial_descriptor:
             n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
                                    dd_full_buf, sizeof(dd_full));
             if (n >= (int)sizeof(dev->dev_desc)) {
-                if (dd_full_buf != dd_full)
+                if (dd_full_buf != dd_full) {
                     memcpy(dd_full, dd_full_buf, sizeof(dd_full));
+                }
                 memcpy(&dev->dev_desc, dd_full, sizeof(dev->dev_desc));
             } else {
                 WARN("usb_core: short GET_DESCRIPTOR(device, 64) n=%d", n);
@@ -1031,8 +1081,9 @@ got_initial_descriptor:
             n = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
                                    dd_full_buf,
                                    sizeof(dev->dev_desc));
-            if (n >= (int)sizeof(dev->dev_desc) && dd_full_buf != &dev->dev_desc)
+            if (n >= (int)sizeof(dev->dev_desc) && dd_full_buf != &dev->dev_desc) {
                 memcpy(&dev->dev_desc, dd_full_buf, sizeof(dev->dev_desc));
+            }
         }
         if (n < (int)sizeof(dev->dev_desc)) {
             WARN("usb_core: short GET_DESCRIPTOR(device) n=%d", n);
@@ -1066,10 +1117,12 @@ got_initial_descriptor:
                                                        &cand_head,
                                                        cfg_candidate,
                                                        sizeof(cfg_candidate));
-            if (cand_len < (int)sizeof(cand_head))
+            if (cand_len < (int)sizeof(cand_head)) {
                 continue;
-            if (!usb_config_is_cdc_ecm_candidate(cfg_candidate, (size_t)cand_len))
+            }
+            if (!usb_config_is_cdc_ecm_candidate(cfg_candidate, (size_t)cand_len)) {
                 continue;
+            }
 
             memcpy(dev->raw_config, cfg_candidate, (size_t)cand_len);
             dev->raw_config_len = (uint16_t)cand_len;
@@ -1123,8 +1176,9 @@ got_initial_descriptor:
     return 0;
 
 err_close:
-    if (device_opened && active_hcd->device_close)
+    if (device_opened && active_hcd->device_close) {
         active_hcd->device_close(dev);
+    }
     return -1;
 }
 
@@ -1154,10 +1208,12 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub)
     for (uint8_t port = 1; port <= desc.bNbrPorts; port++) {
         struct usb_port_status st = {0};
         int port_status_rc = usb_hub_get_port_status(hub, port, &st);
-        if (port_status_rc < (int)sizeof(st))
+        if (port_status_rc < (int)sizeof(st)) {
             continue;
-        if (!(st.status & USB_PORT_STAT_CONNECTION))
+        }
+        if (!(st.status & USB_PORT_STAT_CONNECTION)) {
             continue;
+        }
 
         connected_count++;
         enum usb_speed child_speed = usb_hub_port_speed(st.status);
@@ -1194,8 +1250,9 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub)
              * adds a *new* opened-but-not-closed path inside
              * usb_enumerate_one can't silently leak xHCI slot state
              * across a hub-walk retry. */
-            if (active_hcd->device_close)
+            if (active_hcd->device_close) {
                 active_hcd->device_close(&root_device);
+            }
             continue;
         }
         enumerated_count++;
@@ -1212,8 +1269,9 @@ static int usb_try_enumerate_via_hub(struct usb_device *hub)
 
         INFO("usb_core: hub port %u: device class=0x%02x not CDC-ECM, releasing and trying next port",
              port, root_device.dev_desc.bDeviceClass);
-        if (active_hcd->device_close)
+        if (active_hcd->device_close) {
             active_hcd->device_close(&root_device);
+        }
     }
 
     if (connected_count == 0) {
@@ -1280,10 +1338,11 @@ int usb_core_enumerate(void)
     hub_device_present = true;
     INFO("usb_core: root device is a USB hub — walking downstream ports for a CDC-ECM child");
     rc = usb_try_enumerate_via_hub(&hub_device);
-    if (rc == 0)
+    if (rc == 0) {
         usb_hotplug_retry_blocked = false;
-    else if (usb_disable_hotplug_retry_after_failure)
+    } else if (usb_disable_hotplug_retry_after_failure) {
         usb_hotplug_retry_blocked = true;
+    }
     return rc;
 }
 

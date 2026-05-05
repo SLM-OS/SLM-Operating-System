@@ -274,8 +274,9 @@ static struct usb_urb *mock_complete_pending_rx(const uint8_t *payload,
         if (urb->transfer_type != USB_XFER_BULK) continue;
         if (!(urb->endpoint & USB_DIR_IN)) continue;
         uint32_t n = len > urb->length ? urb->length : len;
-        if (payload && n > 0)
+        if (payload && n > 0) {
             memcpy(urb->buffer, payload, n);
+        }
         urb->actual_length = n;
         urb->status = USB_URB_OK;
         mock.in_flight[i] = NULL;
@@ -303,12 +304,14 @@ static struct usb_urb *mock_complete_pending_notify(uint8_t type,
             0x00, 0x00, /* wIndex = ctrl iface 0 in the mock */
             (uint8_t)(payload_len & 0xFF), (uint8_t)(payload_len >> 8),
         };
-        if (payload != NULL && payload_len > 0)
+        if (payload != NULL && payload_len > 0) {
             memcpy(&msg[8], payload, payload_len);
+        }
 
         uint32_t n = (uint32_t)(8 + payload_len);
-        if (n > urb->length)
+        if (n > urb->length) {
             n = urb->length;
+        }
         memcpy(urb->buffer, msg, n);
         urb->actual_length = n;
         urb->status = USB_URB_OK;
@@ -698,8 +701,9 @@ static void test_recv_handles_small_buffer(void)
     int n = net_get_driver()->recv(out, 32);
     TEST_ASSERT_EQUAL_INT(32, n);
     TEST_ASSERT_EQUAL_MEMORY(frame, out, 32);
-    for (int i = 32; i < 64; i++)
+    for (int i = 32; i < 64; i++) {
         TEST_ASSERT_EQUAL_UINT8(0xAA, out[i]);
+    }
 }
 
 static void test_mac_fallback_when_imac_zero(void)
@@ -1001,8 +1005,9 @@ static void test_net_poll_is_idempotent_after_bind(void)
     const struct net_driver *drv_after_first = net_get_driver();
     TEST_ASSERT_NOT_NULL(drv_after_first);
 
-    for (int i = 0; i < 50; i++)
+    for (int i = 0; i < 50; i++) {
         net_poll();
+    }
 
     TEST_ASSERT_EQUAL_PTR(drv_after_first, net_get_driver());
     /* MAC still matches — the probed state wasn't clobbered. */
@@ -1024,8 +1029,9 @@ static void test_net_poll_no_hcd_is_safe(void)
     net_register_driver(NULL);
 
     /* Call several ticks — must not crash, must not register a driver. */
-    for (int i = 0; i < 10; i++)
+    for (int i = 0; i < 10; i++) {
         net_poll();
+    }
 
     TEST_ASSERT_NULL(net_get_driver());
     TEST_ASSERT_NULL(cdc_ecm_get_mac());

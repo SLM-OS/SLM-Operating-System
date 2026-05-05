@@ -935,8 +935,9 @@ static bool link_test_force_up;
 
 static int link_test_driver_init(void)
 {
-    if (link_test_base_driver && link_test_base_driver->init)
+    if (link_test_base_driver && link_test_base_driver->init) {
         return link_test_base_driver->init();
+    }
     return NET_OK;
 }
 
@@ -962,8 +963,9 @@ static bool link_test_driver_link_status(void)
 
 static void link_test_driver_tx_reap(void)
 {
-    if (link_test_base_driver->tx_reap)
+    if (link_test_base_driver->tx_reap) {
         link_test_base_driver->tx_reap();
+    }
 }
 
 static const struct net_driver link_test_driver = {
@@ -1146,8 +1148,9 @@ static void test_net_dhcp_binds(void)
     while ((sys_now() - start) < 2000) {
         net_poll();
         net_get_info(&info);
-        if (info.dhcp_status == NET_DHCP_BOUND)
+        if (info.dhcp_status == NET_DHCP_BOUND) {
             break;
+        }
     }
 
     if (info.dhcp_status != NET_DHCP_BOUND) {
@@ -1629,9 +1632,13 @@ static void test_net_send_pool_exhaustion(void)
     uint32_t start = sys_now();
     for (int i = 0; i < 32; i++) {
         int ret = drv->send(frame, sizeof(frame));
-        if (ret == 0)               ok++;
-        else if (ret == NET_E_BUSY) busy++;
-        else                        other++;
+        if (ret == 0) {
+            ok++;
+        } else if (ret == NET_E_BUSY) {
+            busy++;
+        } else {
+            other++;
+        }
     }
     uint32_t elapsed = sys_now() - start;
 
@@ -1684,8 +1691,9 @@ static void test_net_burst_8_sends_async(void)
     uint32_t start = sys_now();
     int ok = 0;
     for (int i = 0; i < 8; i++) {
-        if (drv->send(frame, sizeof(frame)) == 0)
+        if (drv->send(frame, sizeof(frame)) == 0) {
             ok++;
+        }
     }
     uint32_t submit_elapsed = sys_now() - start;
 
@@ -2064,8 +2072,9 @@ static uint8_t rx_burst_test_frame[64];
 
 static int rx_burst_test_init(void)
 {
-    if (rx_burst_test_base && rx_burst_test_base->init)
+    if (rx_burst_test_base && rx_burst_test_base->init) {
         return rx_burst_test_base->init();
+    }
     return NET_OK;
 }
 
@@ -2076,12 +2085,14 @@ static int rx_burst_test_send(const void *buf, size_t len)
 
 static int rx_burst_test_recv(void *buf, size_t max_len)
 {
-    if (rx_burst_test_remaining <= 0)
+    if (rx_burst_test_remaining <= 0) {
         return rx_burst_test_base->recv(buf, max_len);
+    }
 
     size_t n = sizeof(rx_burst_test_frame);
-    if (n > max_len)
+    if (n > max_len) {
         n = max_len;
+    }
     memcpy(buf, rx_burst_test_frame, n);
     rx_burst_test_remaining--;
     return (int)n;
@@ -2099,8 +2110,9 @@ static bool rx_burst_test_link_status(void)
 
 static void rx_burst_test_tx_reap(void)
 {
-    if (rx_burst_test_base->tx_reap)
+    if (rx_burst_test_base->tx_reap) {
         rx_burst_test_base->tx_reap();
+    }
 }
 
 static const struct net_driver rx_burst_test_driver = {

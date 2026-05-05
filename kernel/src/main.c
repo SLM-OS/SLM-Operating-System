@@ -293,10 +293,12 @@ void kernel_main(void *dtb)
          * kernel/net/sys_arch.c, which is only compiled with
          * networking enabled. */
         const dtb_chosen_t *ch = dtb_get_chosen();
-        if (ch->rng_seed_len > 0)
+        if (ch->rng_seed_len > 0) {
             lwip_rand_seed(ch->rng_seed, ch->rng_seed_len);
-        if (ch->kaslr_seed_len > 0)
+        }
+        if (ch->kaslr_seed_len > 0) {
             lwip_rand_seed(ch->kaslr_seed, ch->kaslr_seed_len);
+        }
 #endif
     } else {
         WARN("DTB parsing failed (code=%d), using platform defaults", dtb_ret);

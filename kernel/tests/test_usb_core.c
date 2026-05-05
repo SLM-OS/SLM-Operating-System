@@ -143,8 +143,9 @@ static int mock_endpoint_configure(struct usb_device *dev,
                                    const struct usb_endpoint *ep)
 {
     (void)dev; (void)ep;
-    if (mock.endpoint_configure_rc)
+    if (mock.endpoint_configure_rc) {
         return mock.endpoint_configure_rc;
+    }
     mock.endpoints_configured++;
     return 0;
 }
@@ -157,16 +158,18 @@ static void complete_control(struct usb_urb *urb,
         uint32_t n = (resp_len < urb->length) ? resp_len : urb->length;
         memcpy(urb->buffer, resp, n);
         urb->actual_length = n;
-        if (n < urb->length && status == USB_URB_OK)
+        if (n < urb->length && status == USB_URB_OK) {
             urb->status = USB_URB_SHORT;
-        else
+        } else {
             urb->status = status;
+        }
     } else {
         urb->actual_length = 0;
         urb->status = status;
     }
-    if (urb->complete)
+    if (urb->complete) {
         urb->complete(urb);
+    }
 }
 
 /* Store a pending URB for later cancellation. */
@@ -222,8 +225,9 @@ static int mock_submit_urb(struct usb_urb *urb)
      * intercept hub class requests + child standard requests. Falls
      * through to the existing single-device responses when the
      * extension declines the URB. */
-    if (hub_walk_handle_control(urb))
+    if (hub_walk_handle_control(urb)) {
         return 0;
+    }
 
     uint8_t req = urb->setup.bRequest;
     uint8_t desc_type  = (uint8_t)(urb->setup.wValue >> 8);
@@ -1284,8 +1288,9 @@ static void hub_walk_reset(void)
  * USB_PORT_STAT_* / USB_PORT_FEAT_* defines in usb_core.c. */
 static bool hub_walk_handle_control(struct usb_urb *urb)
 {
-    if (!hub_walk.enabled)
+    if (!hub_walk.enabled) {
         return false;
+    }
 
     uint8_t bmReqType = urb->setup.bmRequestType;
     uint8_t req       = urb->setup.bRequest;
@@ -1308,17 +1313,21 @@ static bool hub_walk_handle_control(struct usb_urb *urb)
             if (req == USB_REQ_GET_STATUS) {
                 uint16_t status = 0, change = 0;
                 if (port >= 1 && port <= 2) {
-                    if (hub_walk.port_connected[port])
+                    if (hub_walk.port_connected[port]) {
                         status |= 0x0001; /* CONNECTION */
-                    if (hub_walk.port_enabled[port])
+                    }
+                    if (hub_walk.port_enabled[port]) {
                         status |= 0x0002; /* ENABLE */
+                    }
                     status |= 0x0100;     /* POWER */
-                    if (hub_walk.port_high_speed[port])
+                    if (hub_walk.port_high_speed[port]) {
                         status |= 0x0400; /* HIGH_SPEED */
-                    else if (hub_walk.port_low_speed[port])
+                    } else if (hub_walk.port_low_speed[port]) {
                         status |= 0x0200; /* LOW_SPEED */
-                    if (hub_walk.port_c_reset[port])
+                    }
+                    if (hub_walk.port_c_reset[port]) {
                         change |= 0x0010; /* C_RESET */
+                    }
                 }
                 uint8_t buf[4] = {
                     (uint8_t)(status & 0xff),
@@ -1345,8 +1354,9 @@ static bool hub_walk_handle_control(struct usb_urb *urb)
                 return true;
             }
             if (req == USB_REQ_CLEAR_FEATURE) {
-                if (wValue == 20 /* C_RESET */ && port >= 1 && port <= 2)
+                if (wValue == 20 /* C_RESET */ && port >= 1 && port <= 2) {
                     hub_walk.port_c_reset[port] = false;
+                }
                 complete_control(urb, NULL, 0, USB_URB_OK);
                 return true;
             }
@@ -1366,16 +1376,17 @@ static bool hub_walk_handle_control(struct usb_urb *urb)
         if (req == USB_REQ_GET_DESCRIPTOR) {
             uint8_t desc_type = (uint8_t)(wValue >> 8);
             if (is_hub) {
-                if (desc_type == USB_DT_DEVICE)
+                if (desc_type == USB_DT_DEVICE) {
                     complete_control(urb, &hub_walk_hub_dev_desc,
                                      sizeof(hub_walk_hub_dev_desc),
                                      USB_URB_OK);
-                else if (desc_type == USB_DT_CONFIG)
+                } else if (desc_type == USB_DT_CONFIG) {
                     complete_control(urb, hub_walk_hub_config,
                                      sizeof(hub_walk_hub_config),
                                      USB_URB_OK);
-                else
+                } else {
                     complete_control(urb, NULL, 0, USB_URB_IO_ERROR);
+                }
                 return true;
             }
             /* Downstream child — pick the canned blob for the port
@@ -1388,26 +1399,28 @@ static bool hub_walk_handle_control(struct usb_urb *urb)
             uint8_t p = hub_walk.walking_port;
             if (p >= 1 && p <= 2) {
                 if (hub_walk.port_is_cdc[p]) {
-                    if (desc_type == USB_DT_DEVICE)
+                    if (desc_type == USB_DT_DEVICE) {
                         complete_control(urb, &hub_walk_port2_dev_desc,
                                          sizeof(hub_walk_port2_dev_desc),
                                          USB_URB_OK);
-                    else if (desc_type == USB_DT_CONFIG)
+                    } else if (desc_type == USB_DT_CONFIG) {
                         complete_control(urb, mock_config, sizeof(mock_config),
                                          USB_URB_OK);
-                    else
+                    } else {
                         complete_control(urb, NULL, 0, USB_URB_IO_ERROR);
+                    }
                 } else {
-                    if (desc_type == USB_DT_DEVICE)
+                    if (desc_type == USB_DT_DEVICE) {
                         complete_control(urb, &hub_walk_port1_dev_desc,
                                          sizeof(hub_walk_port1_dev_desc),
                                          USB_URB_OK);
-                    else if (desc_type == USB_DT_CONFIG)
+                    } else if (desc_type == USB_DT_CONFIG) {
                         complete_control(urb, hub_walk_port1_config,
                                          sizeof(hub_walk_port1_config),
                                          USB_URB_OK);
-                    else
+                    } else {
                         complete_control(urb, NULL, 0, USB_URB_IO_ERROR);
+                    }
                 }
                 return true;
             }

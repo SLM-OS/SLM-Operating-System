@@ -546,8 +546,9 @@ static bool tx_has_inflight(void) {
  * with synthetic inputs via virtio_net_test_trigger_watchdog().
  * Callers must hold tx_lock (same invariant as tx_reap_locked). */
 static void tx_watchdog_warn_if_stuck(bool any_inflight) {
-    if (tx_stall_warned || !any_inflight)
+    if (tx_stall_warned || !any_inflight) {
         return;
+    }
     uint32_t elapsed = sys_now() - tx_last_progress_ms;
     if (elapsed >= VIRTIO_NET_TX_STALL_THRESHOLD_MS) {
         WARN("TX descriptors stuck: no completion for %u ms (virtio-mmio)",
@@ -562,8 +563,9 @@ static void virtio_net_tx_reap_locked(void) {
     while (true) {
         uint32_t used_len;
         int desc_idx = virtqueue_get_buf(&netdev.tx_vq, &used_len);
-        if (desc_idx < 0)
+        if (desc_idx < 0) {
             break;
+        }
 
         uintptr_t addr = (uintptr_t)netdev.tx_vq.desc[desc_idx].addr;
         uintptr_t pool_base = (uintptr_t)&tx_buffer_pool[0][0];
@@ -595,16 +597,18 @@ static void virtio_net_tx_reap_locked(void) {
  * the locked helper with tx_lock acquisition. Must be IRQ-safe
  * because tx_lock is also acquired from virtio_net_irq_handler. */
 static void virtio_net_tx_reap(void) {
-    if (!initialized)
+    if (!initialized) {
         return;
+    }
     irq_flags_t flags = spin_lock_irqsave(&tx_lock);
     virtio_net_tx_reap_locked();
     spin_unlock_irqrestore(&tx_lock, flags);
 }
 
 int virtio_net_send(const uint8_t *data, uint32_t len) {
-    if (!initialized)
+    if (!initialized) {
         return -1;
+    }
 
     if (len > 1514) {  /* Max Ethernet frame size */
         ERROR("Packet too large: %u bytes", len);

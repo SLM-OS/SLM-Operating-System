@@ -85,8 +85,9 @@ static uint32_t find_target_cpu(void)
     for (uint32_t i = 0; i < cpu_count; i++) {
         uint32_t cpu = (start + i) % cpu_count;
 
-        if (isolated & (1U << cpu))
+        if (isolated & (1U << cpu)) {
             continue;
+        }
 
         uint32_t score = sched_cpu_rq(cpu)->ready_count
                        + calculate_deadline_pressure(cpu);
@@ -120,8 +121,9 @@ static uint32_t find_performance_cpu(void)
     int found_perf_core = 0;
 
     for (uint32_t cpu = 1; cpu < cpu_count; cpu++) {
-        if (isolated & (1U << cpu))
+        if (isolated & (1U << cpu)) {
             continue;
+        }
 
         uint32_t score = sched_cpu_rq(cpu)->ready_count
                        + calculate_deadline_pressure(cpu);

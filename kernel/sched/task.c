@@ -155,8 +155,9 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
         uint64_t mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
         uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
-        if (hw_cpu < MAX_CPUS)
+        if (hw_cpu < MAX_CPUS) {
             preempt_disabled[hw_cpu] = 0;
+        }
         __asm__ volatile("dsb sy" ::: "memory");
     }
 #else
@@ -824,10 +825,11 @@ static int task_canary_check_all_impl(bool unlocked)
     /* Iterate without taking the task_lock — this is observation only,
      * a torn read of `id` just means we miss a transient zero or new
      * task, which is acceptable for diagnostic purposes. */
-    if (unlocked)
+    if (unlocked) {
         uart_printf_unlocked("[canary] Task stack inventory:\n");
-    else
+    } else {
         uart_printf("[canary] Task stack inventory:\n");
+    }
     for (uint32_t i = 0; i < MAX_TASKS; i++) {
         struct task *t = &task_table[i];
         if (t->id == 0) continue;

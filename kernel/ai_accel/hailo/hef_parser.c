@@ -1069,8 +1069,11 @@ static bool decode_edge_layer_cb(pb_istream_t *stream,
          * field is absent — proto3 doesn't emit zero-valued enums.
          * We flip to output only on an explicit direction==1. */
         p->is_input = !(stage.seen_direction && stage.direction == 1);
-        if (p->is_input) hef_edge_layer_kept_h2d++;
-        else             hef_edge_layer_kept_d2h++;
+        if (p->is_input) {
+            hef_edge_layer_kept_h2d++;
+        } else {
+            hef_edge_layer_kept_d2h++;
+        }
         if (stage.seen_shape) {
             p->has_tensor_shape = true;
             p->height           = stage.height;

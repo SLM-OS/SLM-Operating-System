@@ -121,8 +121,9 @@ int steal_deque_is_empty(const steal_deque_t *d)
 
 int steal_deque_remove(steal_deque_t *d, struct task *t)
 {
-    if (t == (struct task *)0)
+    if (t == (struct task *)0) {
         return 0;
+    }
 
     int cleared = 0;
     /* Walk the live range [top, bottom). Monotonic indices; mask at

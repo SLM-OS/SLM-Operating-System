@@ -772,8 +772,9 @@ static int context_switch_load(struct hailo_model_slot *slot,
         ccw_bytes = (outer->ccws_size > 0) ? outer->ccws_size
                                            : HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
     }
-    if (ccw_bytes == 0)
+    if (ccw_bytes == 0) {
         ccw_bytes = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
+    }
 
     /* Audit F-01 (2026-04-24): CCW tensor + desc list now use the
      * low-DMA allocators (`_low` variants). The hard-bounded ceiling
@@ -851,8 +852,9 @@ static int context_switch_load(struct hailo_model_slot *slot,
          * via ACTIVATE_CFG_CHANNEL) is the walk-boundary, still
          * advertised as 56320 to match HailoRT. */
         uint32_t bulk_bytes = ch_bytes[0];
-        if (bulk_bytes == 0)
+        if (bulk_bytes == 0) {
             bulk_bytes = HAILO_CS_DEFAULT_CCW_DESC_PAGE_SIZE;
+        }
         rc = hailo_tensor_alloc_low(bulk_bytes, &slot->ccw_tensor_1);
         if (rc != HAILO_OK) {
             WARN("hailo backend: CCW bulk tensor alloc failed (rc=%d, bytes=%u)",
@@ -2061,8 +2063,10 @@ uint32_t hailo_backend_in_use_slots(void)
 {
     irq_flags_t flags = spin_lock_irqsave(&slots_lock);
     uint32_t n = 0;
-    for (int i = 0; i < HAILO_MAX_MODELS; i++)
-        if (slots[i].in_use) n++;
+    for (int i = 0; i < HAILO_MAX_MODELS; i++) {
+        if (slots[i].in_use)
+            n++;
+    }
     spin_unlock_irqrestore(&slots_lock, flags);
     return n;
 }

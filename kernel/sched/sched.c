@@ -912,8 +912,9 @@ void scheduler_init_secondary(uint32_t cpu)
 #endif
 
     /* Skip INFO print on secondary CPUs — uart_lock contention may hang */
-    if (cpu == 0)
+    if (cpu == 0) {
         INFO("CPU %u: scheduler initialized", cpu);
+    }
 }
 
 /*
@@ -1091,8 +1092,9 @@ static uint32_t least_loaded_cpu(uint32_t fallback, uint32_t *out_sum,
     uint32_t sum = 0;
     uint32_t n = 0;
     for (uint32_t c = 0; c < cpu_count; c++) {
-        if (sched.isolated_cores & (1U << c))
+        if (sched.isolated_cores & (1U << c)) {
             continue;
+        }
         uint32_t r = cpu_rq(c)->ready_count;
         sum += r;
         n++;
@@ -1101,10 +1103,12 @@ static uint32_t least_loaded_cpu(uint32_t fallback, uint32_t *out_sum,
             best_cpu = c;
         }
     }
-    if (out_sum)
+    if (out_sum) {
         *out_sum = sum;
-    if (out_count)
+    }
+    if (out_count) {
         *out_count = n;
+    }
     return best_cpu;
 }
 
@@ -1725,22 +1729,26 @@ void sched_rebalance_tick(uint32_t cpu)
     struct sched_runtime_rebalance_config runtime_cfg;
 
     /* Single-threaded: only BSP drives the rebalance decision. */
-    if (cpu != 0)
+    if (cpu != 0) {
         return;
+    }
 
     sched_rebalance_config_defaults(&runtime_cfg);
 #ifdef CONFIG_AI_SCHEDULER
     (void)sched_runtime_rebalance_config_snapshot(&runtime_cfg);
 #endif
-    if (runtime_cfg.enabled == 0u)
+    if (runtime_cfg.enabled == 0u) {
         return;
+    }
 
     rebalance_tick_counter++;
-    if ((rebalance_tick_counter % runtime_cfg.interval_ticks) != 0)
+    if ((rebalance_tick_counter % runtime_cfg.interval_ticks) != 0) {
         return;
+    }
 
-    if (cpu_count < 2)
+    if (cpu_count < 2) {
         return;
+    }
 
     /* Snapshot-then-decide. Reading ready_count without a lock is
      * racy, but the final migration locks, so a stale snapshot only
@@ -1760,10 +1768,12 @@ void sched_rebalance_tick(uint32_t cpu)
             idle_cpu = i;
         }
     }
-    if (busy_cpu == idle_cpu)
+    if (busy_cpu == idle_cpu) {
         return;
-    if (max_ready < (uint32_t)(min_ready + runtime_cfg.imbalance_min))
+    }
+    if (max_ready < (uint32_t)(min_ready + runtime_cfg.imbalance_min)) {
         return;
+    }
 
     /* Walk busy CPU's queue under its rq_lock, pick first migratable
      * task (CPU_AFFINITY_ANY, not idle, state READY), dequeue. */
@@ -1772,23 +1782,28 @@ void sched_rebalance_tick(uint32_t cpu)
 
     struct task *candidate = NULL;
     for (struct task *t = busy_rq->head; t != NULL; t = t->next) {
-        if (t == busy_rq->idle_task)
+        if (t == busy_rq->idle_task) {
             continue;
-        if (t->cpu_affinity != CPU_AFFINITY_ANY)
+        }
+        if (t->cpu_affinity != CPU_AFFINITY_ANY) {
             continue;
-        if (t->state != TASK_READY)
+        }
+        if (t->state != TASK_READY) {
             continue;
+        }
         candidate = t;
         break;
     }
 
-    if (candidate)
+    if (candidate) {
         remove_from_cpu_queue_locked(candidate, busy_cpu);
+    }
 
     rq_unlock_irqrestore(busy_cpu, flags);
 
-    if (!candidate)
+    if (!candidate) {
         return;
+    }
 
     /* scheduler_add_task_to_cpu handles rq_lock + smp_notify_cpu on
      * the destination CPU.
@@ -2059,8 +2074,9 @@ void scheduler_start(uint32_t this_cpu)
     *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + this_cpu * 4) = 0xC1;
 #endif
 
-    if (this_cpu == 0)
+    if (this_cpu == 0) {
         INFO("CPU %u: Starting scheduler", this_cpu);
+    }
 
     irq_flags_t flags = rq_lock_irqsave(this_cpu);
 
@@ -2099,8 +2115,9 @@ void scheduler_start(uint32_t this_cpu)
 
     task_set_current(first);
 
-    if (this_cpu == 0)
+    if (this_cpu == 0) {
         INFO("CPU %u: Switching to first task: '%s'", this_cpu, first->name);
+    }
 
     rq_unlock_irqrestore(this_cpu, flags);
 
@@ -2112,8 +2129,9 @@ void scheduler_start(uint32_t this_cpu)
     /* Start timer and enable interrupts now that a task is active.
      * Must be done AFTER task_set_current() so that timer IRQ handler
      * can safely call task_current() in schedule(). */
-    if (this_cpu == 0)
+    if (this_cpu == 0) {
         INFO("Starting timer (100 Hz)...");
+    }
     timer_start();
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
@@ -2127,8 +2145,9 @@ void scheduler_start(uint32_t this_cpu)
 
     /* Unmask IRQs. If timer fires, scheduler_tick() sees preempt_disabled=1
      * and skips schedule(). Ticks still count for sleep/uptime. */
-    if (this_cpu == 0)
+    if (this_cpu == 0) {
         INFO("Enabling interrupts...");
+    }
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* NC trace: 0xC6 = pre-daifclr */
@@ -2239,16 +2258,18 @@ void scheduler_tick(void)
      * rq_lock or run with stale current/next state. Policies should
      * publish work via scheduler_add_task* and let the next preemption
      * point pick it up. */
-    if (active_policy && active_policy->tick)
+    if (active_policy && active_policy->tick) {
         active_policy->tick(cpu);
+    }
 
     /* Skip preemption if a context switch is in progress on this CPU.
      * schedule() sets preempt_disabled between rq_unlock and switch_to
      * completion. Calling schedule() here would corrupt state because
      * task_set_current(next) has already been called but the actual
      * stack switch hasn't happened yet. */
-    if (preempt_disabled[cpu])
+    if (preempt_disabled[cpu]) {
         return;
+    }
 
 #if defined(SECONDARY_PREEMPT)
     /* Defer the schedule() call to exception-return context via the ELR

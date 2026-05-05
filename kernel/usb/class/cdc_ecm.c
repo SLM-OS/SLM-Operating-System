@@ -311,8 +311,9 @@ static const uint8_t *find_cdc_ecm_functional(const struct usb_device *dev)
         /* CS_INTERFACE (0x24) with the Ethernet Networking subtype
          * (0x0F) identifies the functional descriptor. Its total
          * length is 13 bytes per CDC 1.2 §5.2.3.3. */
-        if (btype == USB_DT_CS_INTERFACE && blen >= 13 && p[2] == CDC_FUNCTIONAL_ETHERNET)
+        if (btype == USB_DT_CS_INTERFACE && blen >= 13 && p[2] == CDC_FUNCTIONAL_ETHERNET) {
             return p;
+        }
         p += blen;
     }
     return NULL;
@@ -327,12 +328,14 @@ static const uint8_t *find_cdc_ecm_functional(const struct usb_device *dev)
 int cdc_ecm_parse_mac_string(const uint8_t *desc, size_t desc_len,
                              uint8_t out_mac[6])
 {
-    if (desc == NULL || out_mac == NULL)
+    if (desc == NULL || out_mac == NULL) {
         return -1;
+    }
     /* Need header + 12 chars × 2 bytes = 26 bytes. The device's
      * reported bLength must match. */
-    if (desc_len < 26 || desc[0] != 26 || desc[1] != USB_DT_STRING)
+    if (desc_len < 26 || desc[0] != 26 || desc[1] != USB_DT_STRING) {
         return -1;
+    }
 
     uint8_t nibbles[12];
     for (unsigned i = 0; i < 12; i++) {
@@ -341,17 +344,24 @@ int cdc_ecm_parse_mac_string(const uint8_t *desc, size_t desc_len,
         /* Reject anything that isn't pure ASCII — a real CDC-ECM
          * string uses the BMP's ASCII range, so the high byte of
          * each UTF-16 unit must be zero. */
-        if (hi != 0)
+        if (hi != 0) {
             return -1;
+        }
         uint8_t n;
-        if      (lo >= '0' && lo <= '9') n = (uint8_t)(lo - '0');
-        else if (lo >= 'a' && lo <= 'f') n = (uint8_t)(lo - 'a' + 10);
-        else if (lo >= 'A' && lo <= 'F') n = (uint8_t)(lo - 'A' + 10);
-        else return -1;
+        if (lo >= '0' && lo <= '9') {
+            n = (uint8_t)(lo - '0');
+        } else if (lo >= 'a' && lo <= 'f') {
+            n = (uint8_t)(lo - 'a' + 10);
+        } else if (lo >= 'A' && lo <= 'F') {
+            n = (uint8_t)(lo - 'A' + 10);
+        } else {
+            return -1;
+        }
         nibbles[i] = n;
     }
-    for (unsigned i = 0; i < 6; i++)
+    for (unsigned i = 0; i < 6; i++) {
         out_mac[i] = (uint8_t)((nibbles[i * 2] << 4) | nibbles[i * 2 + 1]);
+    }
     return 0;
 }
 
@@ -440,11 +450,13 @@ static int cdc_rx_submit(struct cdc_rx_slot *slot)
 
 static int cdc_notify_submit(void)
 {
-    if (cdc.notif_in == NULL)
+    if (cdc.notif_in == NULL) {
         return NET_OK;
+    }
 
-    if (__atomic_load_n(&cdc.notif.in_use, __ATOMIC_ACQUIRE))
+    if (__atomic_load_n(&cdc.notif.in_use, __ATOMIC_ACQUIRE)) {
         return NET_OK;
+    }
 
     cdc.notif.urb.dev           = cdc.dev;
     cdc.notif.urb.endpoint      = cdc.notif_in->address;
@@ -471,8 +483,9 @@ static int cdc_notify_submit(void)
 
 static void cdc_notify_handle_event(void)
 {
-    if (!__atomic_load_n(&cdc.notif.completed, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&cdc.notif.completed, __ATOMIC_ACQUIRE)) {
         return;
+    }
 
     __atomic_store_n(&cdc.notif.completed, false, __ATOMIC_RELAXED);
 
@@ -556,11 +569,13 @@ static int cdc_ecm_net_init(void)
      * drivers and lets the shell register the driver without
      * surrendering URBs to the HCD prematurely.
      */
-    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE)) {
         return NET_E_NOT_INIT;
+    }
     int dma_rc = cdc_ecm_dma_init();
-    if (dma_rc != NET_OK)
+    if (dma_rc != NET_OK) {
         return dma_rc;
+    }
     for (unsigned i = 0; i < CDC_ECM_RX_SLOTS; i++) {
         int rc = cdc_rx_submit(&cdc.rx[i]);
         if (rc != 0) {
@@ -588,12 +603,15 @@ static int cdc_ecm_net_init(void)
 
 static int cdc_ecm_net_send(const void *buf, size_t len)
 {
-    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE)) {
         return NET_E_NOT_INIT;
-    if (buf == NULL || len == 0)
+    }
+    if (buf == NULL || len == 0) {
         return NET_E_INVAL;
-    if (len > CDC_ECM_BUF_SIZE)
+    }
+    if (len > CDC_ECM_BUF_SIZE) {
         return NET_E_TOO_LARGE;
+    }
 
     for (unsigned i = 0; i < CDC_ECM_TX_SLOTS; i++) {
         struct cdc_tx_slot *slot = &cdc.tx[i];
@@ -615,8 +633,9 @@ static int cdc_ecm_net_send(const void *buf, size_t len)
         if (!__atomic_compare_exchange_n(&slot->in_use, &expected, true,
                                          false /* strong */,
                                          __ATOMIC_ACQUIRE,
-                                         __ATOMIC_RELAXED))
+                                         __ATOMIC_RELAXED)) {
             continue;
+        }
 
         memcpy(cdc_tx_buf(slot), buf, len);
         slot->urb.dev           = cdc.dev;
@@ -650,10 +669,12 @@ static int cdc_ecm_net_send(const void *buf, size_t len)
 
 static int cdc_ecm_net_recv(void *buf, size_t max_len)
 {
-    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE)) {
         return NET_E_NOT_INIT;
-    if (buf == NULL)
+    }
+    if (buf == NULL) {
         return NET_E_INVAL;
+    }
 
     for (unsigned i = 0; i < CDC_ECM_RX_SLOTS; i++) {
         struct cdc_rx_slot *slot = &cdc.rx[i];
@@ -661,13 +682,16 @@ static int cdc_ecm_net_recv(void *buf, size_t max_len)
          * if we observe `ready == true`, `slot->len` and
          * `slot->buf` are guaranteed to reflect the latest
          * completion. */
-        if (!__atomic_load_n(&slot->ready, __ATOMIC_ACQUIRE))
+        if (!__atomic_load_n(&slot->ready, __ATOMIC_ACQUIRE)) {
             continue;
+        }
         uint32_t len = slot->len;
-        if (len > max_len)
+        if (len > max_len) {
             len = (uint32_t)max_len;
-        if (len > 0)
+        }
+        if (len > 0) {
             memcpy(buf, cdc_rx_buf(slot), len);
+        }
         /* Release the slot before re-submitting so a fast completion
          * after re-submit doesn't race us into a double-processed
          * frame. RELAXED is fine — `ready = false` doesn't publish
@@ -691,8 +715,9 @@ static void cdc_ecm_net_tx_reap(void)
         /* ACQUIRE pairs with the RELEASE in cdc_tx_complete: once we
          * see `completed == true`, all HCD writes to the URB before
          * the completion callback ran are visible here. */
-        if (!__atomic_load_n(&slot->completed, __ATOMIC_ACQUIRE))
+        if (!__atomic_load_n(&slot->completed, __ATOMIC_ACQUIRE)) {
             continue;
+        }
         /* Clear completed first, then in_use. RELEASE on in_use
          * ensures a fresh send() that CAS-wins the slot sees the
          * cleared `completed` flag set by this thread. */
@@ -708,8 +733,9 @@ static void cdc_ecm_net_get_mac(uint8_t mac[6])
 
 static bool cdc_ecm_net_link_status(void)
 {
-    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE)) {
         return false;
+    }
     /*
      * If the device exposes a usable notification endpoint, defer
      * link-up until a real CDC signal arrives. This preserves the
@@ -717,14 +743,17 @@ static bool cdc_ecm_net_link_status(void)
      * actually available. Only the "no notification path" fallback
      * retains the historical "probed implies up" behaviour.
      */
-    if (cdc.notif_in == NULL)
+    if (cdc.notif_in == NULL) {
         return true;
+    }
     if (!__atomic_load_n(&cdc.link_signal_valid, __ATOMIC_ACQUIRE)) {
-        if (!cdc.notif_wait_active)
+        if (!cdc.notif_wait_active) {
             return false;
+        }
         uint32_t started = cdc.notif_wait_started_ms;
-        if ((sys_now() - started) < cdc_notify_silence_timeout_ms)
+        if ((sys_now() - started) < cdc_notify_silence_timeout_ms) {
             return false;
+        }
         if (!cdc.notif_silence_fallback_logged) {
             WARN("cdc_ecm: no link notification after %u ms; falling back to probe-based link up",
                  cdc_notify_silence_timeout_ms);
@@ -758,8 +787,9 @@ int cdc_ecm_probe_and_register(void)
      * re-run the full probe on every tick once a device is bound, or
      * RX URB resubmission + pool counters would drift. ACQUIRE pairs
      * with the RELEASE at the end of a successful probe below. */
-    if (__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE))
+    if (__atomic_load_n(&cdc.probed, __ATOMIC_ACQUIRE)) {
         return NET_OK;
+    }
 
     /* Every probe starts from a clean slate so a subsequent call that
      * finds no device (or a non-CDC device) can't leave stale state
@@ -791,10 +821,11 @@ int cdc_ecm_probe_and_register(void)
         if (!dev->ifaces[i].valid) continue;
         uint8_t cls = dev->ifaces[i].class_code;
         uint8_t sub = dev->ifaces[i].subclass;
-        if (cls == 0x02 && sub == CDC_SUBCLASS_ECM && ctrl_iface == NULL)
+        if (cls == 0x02 && sub == CDC_SUBCLASS_ECM && ctrl_iface == NULL) {
             ctrl_iface = &dev->ifaces[i];
-        else if (cls == CDC_DATA_INTERFACE_CLASS && data_iface == NULL)
+        } else if (cls == CDC_DATA_INTERFACE_CLASS && data_iface == NULL) {
             data_iface = &dev->ifaces[i];
+        }
     }
     if (ctrl_iface == NULL || data_iface == NULL) {
         int ctrl_if = (ctrl_iface != NULL) ? (int)ctrl_iface->number : -1;
@@ -876,8 +907,9 @@ int cdc_ecm_probe_and_register(void)
                  imac, n);
         }
     }
-    if (!have_mac)
+    if (!have_mac) {
         generate_fallback_mac(cdc.mac);
+    }
 
     cdc.dev           = dev;
     cdc.ctrl_iface_num = ctrl_iface->number;
@@ -944,8 +976,9 @@ void cdc_ecm_reset(void)
      * Also clears the "no device" log-once flag so a test that
      * re-probes an empty bus after reset sees the log message fire
      * again — keeps the reset/log-emit symmetry explicit. */
-    if (__atomic_load_n(&cdc.notif.in_use, __ATOMIC_ACQUIRE))
+    if (__atomic_load_n(&cdc.notif.in_use, __ATOMIC_ACQUIRE)) {
         (void)usb_cancel_urb(&cdc.notif.urb);
+    }
     __atomic_store_n(&cdc.probed, false, __ATOMIC_RELEASE);
     cdc_logged_no_device = false;
     cdc.notif_in = NULL;

@@ -196,12 +196,15 @@ static uint32_t make_test_dtb(uint8_t *buf, uint32_t buf_size,
     /* Pre-intern string offsets */
     uint32_t s_memreserve = 0, s_rng_seed = 0, s_kaslr_seed = 0;
     uint32_t s_version = 0, s_caps = 0, s_build_ts = 0, s_update_ts = 0;
-    if (spec->n_root_memreserve_pairs > 0)
+    if (spec->n_root_memreserve_pairs > 0) {
         s_memreserve = intern_string(buf, off_strings, &strings_off, "memreserve");
-    if (spec->chosen_rng_seed_len > 0)
-        s_rng_seed   = intern_string(buf, off_strings, &strings_off, "rng-seed");
-    if (spec->chosen_kaslr_seed_len > 0)
+    }
+    if (spec->chosen_rng_seed_len > 0) {
+        s_rng_seed = intern_string(buf, off_strings, &strings_off, "rng-seed");
+    }
+    if (spec->chosen_kaslr_seed_len > 0) {
         s_kaslr_seed = intern_string(buf, off_strings, &strings_off, "kaslr-seed");
+    }
     if (spec->chosen_bootloader_version) {
         s_version    = intern_string(buf, off_strings, &strings_off, "version");
         s_caps       = intern_string(buf, off_strings, &strings_off, "capabilities");
@@ -232,12 +235,14 @@ static uint32_t make_test_dtb(uint8_t *buf, uint32_t buf_size,
         emit_u32_be(buf, &struct_off, FDT_BEGIN_NODE);
         emit_str_aligned4(buf, &struct_off, "chosen");
 
-        if (spec->chosen_rng_seed_len > 0)
+        if (spec->chosen_rng_seed_len > 0) {
             emit_prop(buf, &struct_off, s_rng_seed,
                       spec->chosen_rng_seed, spec->chosen_rng_seed_len);
-        if (spec->chosen_kaslr_seed_len > 0)
+        }
+        if (spec->chosen_kaslr_seed_len > 0) {
             emit_prop(buf, &struct_off, s_kaslr_seed,
                       spec->chosen_kaslr_seed, spec->chosen_kaslr_seed_len);
+        }
 
         if (spec->chosen_bootloader_version) {
             emit_u32_be(buf, &struct_off, FDT_BEGIN_NODE);
