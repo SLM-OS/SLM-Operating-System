@@ -167,11 +167,22 @@ impl ForwardScratch {
         let max_row = hidden.max(intermediate);
         // The arch dims come from `ArchInfo`'s u32 fields, so they
         // fit `< 2^32` and the `div_ceil + saturating_mul` math
-        // below cannot overflow `usize` on 64-bit targets. Pin the
-        // assumption — a future arch with `u64` dims would need a
-        // re-think.
-        debug_assert!(hidden <= u32::MAX as usize, "hidden out of u32 range");
-        debug_assert!(intermediate <= u32::MAX as usize, "intermediate out of u32 range");
+        // below cannot overflow `usize` on 64-bit targets (where
+        // `usize::MAX = 2^64 - 1`). The asserts catch the actual
+        // overflow risk: `hidden.div_ceil(256)` evaluates as
+        // `(hidden + 255) / 256` and would wrap if `hidden` is
+        // within 255 of `usize::MAX`. On 64-bit this is unreachable
+        // from the `u32` source; the guard makes the dependency
+        // explicit so a future arch with `u64` dims (or a hostile
+        // 32-bit target where `usize::MAX = u32::MAX`) trips it.
+        debug_assert!(
+            hidden <= usize::MAX - 255,
+            "hidden too close to usize::MAX; div_ceil(256) would overflow",
+        );
+        debug_assert!(
+            intermediate <= usize::MAX - 255,
+            "intermediate too close to usize::MAX; div_ceil(256) would overflow",
+        );
         // Padded row count for Q4_K rows whose element count isn't a
         // multiple of 256 — e.g. SmolLM2's hidden=576 stored as 3
         // super-blocks = 768 floats. The dequant kernel writes the
