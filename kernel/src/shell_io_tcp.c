@@ -839,18 +839,21 @@ static bool tcp_echo_enabled(struct shell_io *io)
 }
 
 /*
- * Forward to the telnet parser's binary_mode flag. Plain bool
- * write — the flag is read by telnet_rx_byte in net_pump context
- * and written here from shell-task context, but both run on CPU 0
- * cooperatively in SLM-OS, and the read site is a single bool
- * load that cannot tear. No barriers required for the CPU model
- * we ship; if shell tasks ever migrate off CPU 0 the flag would
- * need to become atomic.
+ * Forward to the telnet parser's binary_mode flag. Atomic store
+ * paired with the atomic load in telnet_rx_byte — both use
+ * RELAXED ordering because the flag stands alone (no other data
+ * is published with it) and on the SLM-OS shell-task / net_pump
+ * cooperative-on-CPU-0 model the natural sequencing already
+ * guarantees the writer's effect is visible before the next byte
+ * arrives. The atomic primitives are kept for parity with
+ * `xput_bin_active` in cmd_xput_bin (same single-flag pattern)
+ * and so a future preemptive or multi-CPU shell-task layout
+ * doesn't silently regress.
  */
 static void tcp_set_binary_mode(struct shell_io *io, bool on)
 {
     struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
-    ctx->telnet.binary_mode = on;
+    __atomic_store_n(&ctx->telnet.binary_mode, on, __ATOMIC_RELAXED);
 }
 
 /* -------------------------------------------------------------------------- */
