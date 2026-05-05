@@ -319,6 +319,10 @@ impl Bbpe {
                 }
             }
         }
+        // Invariant pinned once here at construction; readers in
+        // `decode_inner` can index `byte_for_id[idx]` directly after
+        // bounds-checking against `vocab.len()`.
+        debug_assert_eq!(byte_for_id.len(), vocab.len());
 
         Ok(Self {
             vocab,
@@ -412,10 +416,9 @@ impl Bbpe {
             if idx >= self.vocab.len() {
                 continue;
             }
-            // `byte_for_id.len() == vocab.len()` by construction in
+            // `byte_for_id.len() == vocab.len()` invariant pinned in
             // `from_gguf`; the bounds check above on `idx` against
             // `vocab.len()` therefore covers `byte_for_id` too.
-            debug_assert_eq!(self.byte_for_id.len(), self.vocab.len());
             if let Some(b) = self.byte_for_id[idx] {
                 encoded.push(b);
             } else {

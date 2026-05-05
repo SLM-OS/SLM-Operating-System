@@ -165,6 +165,13 @@ impl ForwardScratch {
         let q_total = n_head_q.saturating_mul(head_dim);
         let kv_total = n_head_kv.saturating_mul(head_dim);
         let max_row = hidden.max(intermediate);
+        // The arch dims come from `ArchInfo`'s u32 fields, so they
+        // fit `< 2^32` and the `div_ceil + saturating_mul` math
+        // below cannot overflow `usize` on 64-bit targets. Pin the
+        // assumption — a future arch with `u64` dims would need a
+        // re-think.
+        debug_assert!(hidden <= u32::MAX as usize, "hidden out of u32 range");
+        debug_assert!(intermediate <= u32::MAX as usize, "intermediate out of u32 range");
         // Padded row count for Q4_K rows whose element count isn't a
         // multiple of 256 — e.g. SmolLM2's hidden=576 stored as 3
         // super-blocks = 768 floats. The dequant kernel writes the

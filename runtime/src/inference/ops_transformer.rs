@@ -492,6 +492,11 @@ pub fn matmul_quant_rows(
     // this refactor, this allocated a fresh `Vec<f32>` of size `cols`
     // per call — for a 30-layer model with ~7 matmuls per layer that
     // was ~211 heap allocations per token.
+    //
+    // Only `acts_f32_scratch[..cols]` is overwritten; bytes past
+    // `cols` keep stale data from the previous call. That's safe
+    // because the dot-product loop below reads `[..cols]` only —
+    // skipping the rest avoids a memset on every matmul.
     for (i, &bits) in acts_fp16.iter().enumerate() {
         acts_f32_scratch[i] = f16_to_f32(bits);
     }
@@ -655,9 +660,12 @@ pub fn swiglu_mlp(
     // Q4_K-only legacy signature kept for the existing test fixture.
     // Real models use the dispatching variant below. Both scratch
     // buffers are allocated locally because the legacy callers don't
-    // reach this far in the hot path — fixture tests only.
-    let mut tmp_dequant: Vec<f32> = Vec::new();
-    let mut tmp_acts_f32: Vec<f32> = Vec::new();
+    // reach this far in the hot path — fixture tests only. Pre-size
+    // to `max(hidden, intermediate)` so `swiglu_mlp_q`'s resize-up
+    // path doesn't reallocate during fixture runs.
+    let max_cols = hidden_size.max(intermediate_size);
+    let mut tmp_dequant: Vec<f32> = Vec::with_capacity(max_cols);
+    let mut tmp_acts_f32: Vec<f32> = Vec::with_capacity(max_cols);
     swiglu_mlp_q(
         x,
         crate::slm::gguf::GgmlType::Q4_K,
@@ -812,9 +820,11 @@ pub fn lm_head(
 ) -> Option<()> {
     // Q4_K-only legacy signature kept for the existing test fixture.
     // Real LM heads in Qwen2.5 Q4_K_M and SmolLM are Q6_K — call the
-    // dispatching variant directly from forward.rs.
-    let mut tmp_dequant: Vec<f32> = Vec::new();
-    let mut tmp_acts_f32: Vec<f32> = Vec::new();
+    // dispatching variant directly from forward.rs. Pre-size both
+    // scratch buffers to `hidden_size` (the matmul inner dim) so
+    // `lm_head_q`'s resize-up path doesn't reallocate.
+    let mut tmp_dequant: Vec<f32> = Vec::with_capacity(hidden_size);
+    let mut tmp_acts_f32: Vec<f32> = Vec::with_capacity(hidden_size);
     lm_head_q(
         x,
         crate::slm::gguf::GgmlType::Q4_K,

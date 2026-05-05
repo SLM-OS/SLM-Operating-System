@@ -162,10 +162,11 @@ impl LoadedSlm {
     /// Look up a tensor's descriptor and its raw byte slice in a
     /// single pass over the tensor table. Callers that need both
     /// (the M5 forward pass dispatches on `info.ggml_type` and reads
-    /// the bytes) save the second linear scan that
-    /// `tensor_info(name)` followed by `tensor_bytes(name)` would
-    /// otherwise pay — `~340 string compares × 7 tensors × 30 layers`
-    /// per token on Qwen2.5-1.5B.
+    /// the bytes — see `crate::slm::forward::tensor_q` and
+    /// `crate::slm::forward::layer_tensor_q`) save the second linear
+    /// scan that `tensor_info(name)` followed by `tensor_bytes(name)`
+    /// would otherwise pay — `~340 string compares × 7 tensors × 30
+    /// layers` per token on Qwen2.5-1.5B.
     pub fn tensor_info_and_bytes(&self, name: &str) -> Option<(&OwnedTensorInfo, &[u8])> {
         let info = self.tensor_info(name)?;
         let n_elements = elements_of(&info.dims)?;
