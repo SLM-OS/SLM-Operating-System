@@ -277,8 +277,8 @@ Verify `TASK_CONTEXT_OFFSET` in `context.S` matches actual offset of `context` f
 3. MMU mappings incomplete
 
 **Solutions:**
-1. Verify `rust_model_mem_init()` called during boot
-2. Check pool sizes in `model_mem.rs`
+1. Verify `rust_model_mem_init(MODEL_MEM_WEIGHT_MB, MODEL_MEM_WORKSPACE_MB)` is called during boot (call site in `kernel/src/main.c`)
+2. Check the per-platform pool sizes in `kernel/include/config.h` — Jetson Orin Nano needs 2048/256 for SLM workloads; QEMU defaults of 256/128 will under-fit a 1.5 B parameter Q4_K_M model
 3. Verify physical memory is mapped in page tables
 
 ### Memory leak detected
@@ -428,6 +428,58 @@ uart_printf("Weight pool: %zu/%zu blocks free\n",
 **Cause:** The ONNX parser uses fixed-size name buffers (`NAME_LEN=40` in parser, `TENSOR_NAME_LEN=40` in graph). ONNX models with tensor names longer than 39 characters will have their names truncated, causing name-mismatch errors during graph construction or inference.
 
 **Fix:** Increase `NAME_LEN` and `TENSOR_NAME_LEN` if the target model has longer names. Be aware this increases struct sizes and stack usage.
+
+---
+
+## SLM (Small Language Model) Runtime
+
+### `slm load` reports "file too large"
+
+**Symptom:** `slm load /mnt/files/foo.gguf` returns `file too large (X bytes, cap Y)`.
+
+**Cause:** GGUF buffer cap is `MAX_PLAUSIBLE_GGUF_BYTES` in `runtime/src/slm/registry.rs` — 2 GiB today, matching the PMM buddy max-order (`PMM_MAX_ORDER = 19`). Larger files would not fit a single contiguous PMM allocation. The C shell queries this cap via `rust_slm_max_gguf_bytes()` so both sides stay in lockstep.
+
+**Fix:** Either use a smaller-quantization variant (Q4_K_M < Q8_0 < FP16) of the same model, or wait on the multi-block weight allocator (#550) which lifts the ceiling.
+
+### `slm load` reports "failed to parse" on a file under the cap
+
+**Symptom:** `slm load` rejects a known-good GGUF that's smaller than the size cap.
+
+**Causes (in order of likelihood):**
+1. File is truncated — verify with `stat /mnt/files/foo.gguf` and re-fetch via `scripts/fetch-slm.sh`.
+2. SHA256 mismatch from a corrupted transfer — re-run the fetch script (it verifies after download).
+3. GGUF version unsupported — the registry parses GGUF v3 only. Older v1/v2 files are rejected.
+
+### GPU acceleration silently disabled on Jetson
+
+**Symptom:** `slm prompt` runs but `slm stats <session>` reports CPU-only execution; `gpu use status` shows `inference: off`.
+
+**Causes:**
+1. Build was configured without `-DGA10B_FIRMWARE_DIR=…`. Re-configure with `make kernel PLATFORM=JETSON_ORIN_NANO` after running `scripts/tools/fetch-ga10b-firmware.sh` to populate `~/jetson-ga10b-firmware`.
+2. Firmware directory was set but missing files — CMake emits a `WARNING` (not a fatal error) and disables embedding. Watch the configure output for `GA10B firmware: <path>` vs `GA10B firmware: ... missing files`. SLM-OS also logs `[GPU] GA10B firmware not embedded — compute disabled` at boot if the embed was disabled.
+3. GA10B GSP loader code-path mismatch — the bringup runs the discrete-Ampere loader instead of the GA10B nvgpu loader. Tracked in #579; doesn't currently block CPU inference.
+
+### Shell hangs streaming a large GGUF over UART
+
+**Symptom:** `slm load <large-file>` causes the serial console to wedge for tens of seconds with no output.
+
+**Cause:** UART is a serial bottleneck — at 115200 baud, transferring even progress bytes for a 1 GB file would saturate the link. The shell deliberately stays silent during PMM allocation + VFS read for files this size.
+
+**Workaround:** Use telnet (`nc <ip> 2323`) instead of the serial console for any `slm` operation on files > ~10 MB. Telnet over Ethernet has orders-of-magnitude more bandwidth.
+
+### `slm launch` rejects a sampler option
+
+**Symptom:** `slm launch 0 --sampler topkp --temp 0.7` reports `unknown sampler kind` or similar.
+
+**Cause:** Sampler kind names are case-sensitive and must match exactly: `greedy`, `temp`, `topk`, `topp`, `topkp` (the `topkp` form is the demo default). Numeric `SLM_SAMPLER_*` constants are also accepted.
+
+### Rust heap exhaustion mid-decode
+
+**Symptom:** Boot succeeds, `slm load` succeeds, `slm launch` succeeds — but `slm prompt` panics with `alloc::alloc::handle_alloc_error`.
+
+**Cause:** KV cache + `ForwardScratch` outgrew the per-platform `RUST_HEAP_MB` set in `kernel/include/config.h` (Jetson 128 MB / Pi 5 64 MB / QEMU 4 MB). KV cache scales as `2 × n_layers × n_kv_heads × head_dim × ctx × 2 B`; a 4 K-context Qwen2.5-1.5B run needs ≈112 MB just for KV.
+
+**Fix:** Either reduce the `--ctx` value at `slm launch` (drop from 4096 → 2048 → 1024), or bump `RUST_HEAP_MB` for the platform. Sizing rationale lives in the comment block above `RUST_HEAP_MB` in `<config.h>`.
 
 ---
 

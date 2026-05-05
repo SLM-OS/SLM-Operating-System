@@ -17,8 +17,21 @@ use crate::kernel_ffi;
 /// Block size: 2MB (ARM L2 block size for huge page efficiency)
 pub const BLOCK_SIZE: usize = 2 * 1024 * 1024;
 
-/// Maximum blocks per pool (16-bit index in handle)
-const MAX_BLOCKS_PER_POOL: usize = 256;
+/// Maximum blocks per pool (16-bit index in handle).
+///
+/// At `BLOCK_SIZE = 2 MB` this is also the per-pool size cap in MB.
+/// `model_mem_init(weight_mb, workspace_mb)` returns
+/// `AllocError::Oversized` when either request exceeds
+/// `MAX_BLOCKS_PER_POOL × BLOCK_SIZE`, so a future bump of the
+/// C-side `MODEL_MEM_WEIGHT_MB` past 1024 fails loudly until this
+/// constant is bumped in lockstep (see the `_Static_assert` block in
+/// `kernel/include/config.h`).
+///
+/// Sized for Jetson's `MODEL_MEM_WEIGHT_MB = 1024` so the requested
+/// 1 GB is fully addressable; smaller platforms (Pi 5 512, QEMU 256)
+/// fit comfortably below the cap. Each `BlockSlot` is ~48 B, so the
+/// BSS footprint is `2 pools × 512 slots × 48 B ≈ 48 KB`.
+const MAX_BLOCKS_PER_POOL: usize = 512;
 
 /// Pool identifiers
 const POOL_WEIGHT: u8 = 0;
@@ -43,6 +56,12 @@ pub enum AllocError {
     NotInitialized,
     /// Allocation failed in underlying PMM.
     PmmFailed,
+    /// Requested pool size exceeds the static `MAX_BLOCKS_PER_POOL`
+    /// cap. Surfaced from `model_mem_init` so a caller asking for
+    /// (e.g.) 2 GB never quietly gets 1 GB. Bumping the C-side
+    /// `MODEL_MEM_WEIGHT_MB` past `MAX_BLOCKS_PER_POOL × BLOCK_SIZE`
+    /// requires bumping `MAX_BLOCKS_PER_POOL` in lockstep.
+    Oversized,
 }
 
 // =============================================================================
@@ -207,6 +226,13 @@ impl MemoryPool {
     }
 
     /// Initialize pool with given base address and block count.
+    ///
+    /// Caller must ensure `count <= MAX_BLOCKS_PER_POOL`;
+    /// `model_mem_init` enforces this and returns
+    /// `AllocError::Oversized` otherwise. The `min` here is a
+    /// belt-and-braces guard for direct callers (currently none in
+    /// production); it keeps the array index sound but masks bugs,
+    /// so prefer the upstream check.
     fn init(&mut self, base: usize, count: usize, read_only: bool) {
         self.base_addr = base;
         self.block_count = count.min(MAX_BLOCKS_PER_POOL);
@@ -574,7 +600,13 @@ fn is_initialized() -> bool {
 /// * `workspace_mb` - Size of workspace pool in megabytes (must be multiple of 2)
 ///
 /// # Errors
-/// Returns `AllocError::PmmFailed` if PMM allocation fails.
+/// * `AllocError::AlignmentError` — `weight_mb` or `workspace_mb` is not
+///   a multiple of 2 (the pool block size in MB).
+/// * `AllocError::Oversized` — either pool would exceed
+///   `MAX_BLOCKS_PER_POOL × BLOCK_SIZE`. Surface a loud error rather
+///   than silently truncate; callers must keep the C-side
+///   `MODEL_MEM_*_MB` knobs in lockstep with `MAX_BLOCKS_PER_POOL`.
+/// * `AllocError::PmmFailed` — underlying PMM allocation failed.
 pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), AllocError> {
     // Validate sizes are 2MB aligned
     if weight_mb % 2 != 0 || workspace_mb % 2 != 0 {
@@ -583,6 +615,13 @@ pub fn model_mem_init(weight_mb: usize, workspace_mb: usize) -> Result<(), Alloc
 
     let weight_blocks = weight_mb / 2;
     let workspace_blocks = workspace_mb / 2;
+
+    // Reject oversized requests up front, before touching PMM. The
+    // pool's `init` would otherwise silently `count.min(MAX)` and
+    // give back a smaller pool than the caller asked for.
+    if weight_blocks > MAX_BLOCKS_PER_POOL || workspace_blocks > MAX_BLOCKS_PER_POOL {
+        return Err(AllocError::Oversized);
+    }
 
     // Allocate weight pool (power-of-2 pages work well with buddy allocator)
     // 256 MB = 65536 pages = order 16, exactly power of 2
@@ -1216,4 +1255,66 @@ pub fn gpu_unmap(handle: ModelHandle) -> Result<(), GpuError> {
     let _ = set_gpu_mapped(handle, false);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for `model_mem_init`'s precondition checks.
+    //!
+    //! Both `AlignmentError` and `Oversized` short-circuit before any
+    //! `kernel_ffi::alloc_pages` call, so they're reachable from
+    //! `cargo test` without a stubbed PMM. Coverage for the success
+    //! path lives in `kernel/tests/test_model_mem_smoke.c` because it
+    //! requires real PMM.
+    use super::*;
+    // The runtime crate is `no_std`; tests run on the host where the
+    // panic + format machinery used by `assert_eq!` lives in `std`.
+    extern crate std;
+
+    /// Smallest pool request (in MB) that exceeds the
+    /// `MAX_BLOCKS_PER_POOL` cap. `MAX × 2 MB` is exactly the
+    /// boundary; one more block (+2 MB) puts us one legal increment
+    /// past it. Defined once so the boundary expression has a single
+    /// source of truth across the four tests below.
+    const FIRST_OVERSIZED_MB: usize = (MAX_BLOCKS_PER_POOL + 1) * 2;
+
+    #[test]
+    fn rejects_misaligned_weight_request() {
+        // Odd MB violates the 2 MB block alignment.
+        assert_eq!(model_mem_init(3, 2), Err(AllocError::AlignmentError));
+    }
+
+    #[test]
+    fn rejects_misaligned_workspace_request() {
+        assert_eq!(model_mem_init(2, 3), Err(AllocError::AlignmentError));
+    }
+
+    #[test]
+    fn rejects_oversized_weight_request() {
+        assert_eq!(
+            model_mem_init(FIRST_OVERSIZED_MB, 2),
+            Err(AllocError::Oversized)
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_workspace_request() {
+        assert_eq!(
+            model_mem_init(2, FIRST_OVERSIZED_MB),
+            Err(AllocError::Oversized)
+        );
+    }
+
+    #[test]
+    fn alignment_check_fires_before_oversized_check() {
+        // A request that's both oversized AND misaligned should
+        // surface AlignmentError first, matching the order of the
+        // checks in `model_mem_init`. Pinning the order so a future
+        // refactor that swaps them surfaces here, not in production.
+        // `+ 1` makes the value odd, tripping the alignment check.
+        assert_eq!(
+            model_mem_init(FIRST_OVERSIZED_MB + 1, 2),
+            Err(AllocError::AlignmentError)
+        );
+    }
 }

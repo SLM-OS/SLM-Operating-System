@@ -127,6 +127,7 @@ const shell_cmd_t builtin_commands[] = {
     {"model",    cmd_model,    "Model management (load/list/info/unload/swap/pools)",       true, SHELL_CAT_PROCESS},
     {"sched",    cmd_sched,    "Scheduler (sched [policy [<name>] | model ... | stats])",   true, SHELL_CAT_PROCESS},
     {"sleep",    cmd_sleep,    "Sleep for N ms (sleep <ms>)",                               false, SHELL_CAT_PROCESS},
+    {"slm",      cmd_slm,      "Small language model (load/list/info/launch/prompt/stats)", true, SHELL_CAT_PROCESS},
     {"tasks",    cmd_tasks,    "List all tasks",                                            false, SHELL_CAT_PROCESS},
 
     /* --- Components & message router --- */

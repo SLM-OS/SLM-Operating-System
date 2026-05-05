@@ -21,6 +21,15 @@ pub mod ops;
 pub mod engine;
 pub mod gpu;
 
+#[cfg(feature = "slm")]
+pub mod quant;
+
+#[cfg(feature = "slm")]
+pub mod ops_transformer;
+
+#[cfg(feature = "slm")]
+pub mod gpu_slm;
+
 pub use tensor::Tensor;
 pub use workspace::BumpAllocator;
 pub use engine::{InferenceEngine, EngineError, InferenceStats, run_inference, get_stats};

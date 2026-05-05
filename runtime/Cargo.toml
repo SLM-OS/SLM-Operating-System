@@ -14,7 +14,12 @@ bitflags = { version = "2.4", default-features = false }
 libm = "0.2"
 
 [features]
-default = []
+default = ["slm"]
+# Small Language Model runtime support: GGUF v3 parser, BBPE tokenizer,
+# INT4 dequant kernels, transformer ops, KV cache, and decoder. Default-on
+# so the kernel build picks it up automatically; `--no-default-features`
+# disables the entire `slm` module tree.
+slm = []
 # Pluggable EvictionPolicy trait + classical Rust policies (M1/M3).
 ai_eviction = []
 # Also pulls in the generated XGBoost (~1.3 MB) and int8 MLP weights (M4).

@@ -333,12 +333,17 @@ upstream LLVM legalizer fix lands or libm 0.2 splits its f16 paths.
 
 ### Allocator Initialization
 
-The Rust heap is initialized by C during boot:
+The Rust heap is initialized by C during boot. Size is per-platform via
+`RUST_HEAP_MB` in `<kernel/include/config.h>` (Jetson 128 MB, Pi 5 64 MB,
+QEMU/x86-64 4 MB). The KV cache and `ForwardScratch` from the SLM
+forward path are the dominant consumers — see the comment block in
+`config.h` for the per-platform sizing rationale.
 
 ```c
 // In kernel/src/main.c
-void *rust_heap = pmm_alloc_pages(256);  // 1MB
-rust_heap_init(rust_heap, 256 * 4096);
+const size_t rust_heap_pages = (size_t)RUST_HEAP_MB * 256u;
+void *rust_heap = pmm_alloc_pages(rust_heap_pages);
+rust_heap_init(rust_heap, rust_heap_pages * 4096u);
 ```
 
 After this, Rust can use `Box`, `Vec`, etc. (with `alloc` crate if added).

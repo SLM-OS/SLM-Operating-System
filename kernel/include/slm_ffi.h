@@ -12,6 +12,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include "config.h"   /* MODEL_MEM_WEIGHT_MB / MODEL_MEM_WORKSPACE_MB defaults */
+
 /*
  * ==========================================================================
  * Error Codes (shared between C and Rust)
@@ -219,6 +221,14 @@ int slm_msg_recv(uint32_t queue_id, void *msg, size_t msg_size, int timeout_ms);
 extern void rust_heap_init(void *heap_start, size_t heap_size);
 
 /*
+ * Return the heap size (bytes) passed to the most recent
+ * rust_heap_init. 0 means rust_heap_init has not been called yet.
+ * Used by kernel/tests/test_model_mem_smoke.c to assert that the
+ * per-platform RUST_HEAP_MB knob was honored end-to-end.
+ */
+extern size_t rust_heap_size_bytes(void);
+
+/*
  * Initialize Rust runtime.
  * Called by C kernel during boot.
  * Returns: 42 on success (magic number for verification)
@@ -254,10 +264,17 @@ extern int rust_run_tests(void);
 
 /*
  * Initialize model memory pools.
- * Allocates memory from PMM for weight and workspace pools.
- * Returns: 0 on success, -1 on failure.
+ *
+ * `weight_mb` and `workspace_mb` are megabyte sizes for the two pools.
+ * Both must be multiples of 2 (each pool block is 2 MB); the Rust
+ * allocator rejects misaligned values with -1. Per-platform defaults
+ * live in <config.h> as MODEL_MEM_WEIGHT_MB / MODEL_MEM_WORKSPACE_MB
+ * — call sites should pass those constants rather than hard-coding.
+ *
+ * Returns: 0 on success, -1 on failure (alignment error or PMM out
+ * of memory).
  */
-extern int rust_model_mem_init(void);
+extern int rust_model_mem_init(uint32_t weight_mb, uint32_t workspace_mb);
 
 /*
  * Run model memory tests.
@@ -957,6 +974,24 @@ bool slm_gpu_dispatch_breaker_is_tripped(void);
  * test header directly. (PR #555 round-3 review.) */
 
 /*
+ * Return the physical address of the staged `slm_gpu_handoff_v1_t`
+ * page, or 0 if no page is staged. Consumed by the Rust runtime's
+ * GPU SLM backend (`runtime/src/inference/gpu_slm.rs`).
+ *
+ * M6.A scaffolding stub: the real implementation in M6.A-2 will look
+ * up the address staged by the pre-kexec L4T loader
+ * (`scripts/slm-gpu-bringup.c`). Until that lands, the default weak
+ * implementation in `slm_ffi.c` returns 0 and the Rust side falls
+ * through to CPU.
+ *
+ * The returned page (when non-zero) is mapped read-only and contains
+ * exactly one `slm_gpu_handoff_v1_t` followed by `op_count`
+ * consecutive `slm_gpu_op_desc_t` entries — see
+ * `kernel/include/gpu_handoff.h`.
+ */
+uint64_t slm_gpu_get_handoff_phys(void);
+
+/*
  * Print GPU status to UART (called from Rust shell command).
  */
 extern void rust_gpu_print_status(void);
@@ -1002,5 +1037,234 @@ uint64_t slm_irq_save(void);
  * Restore local IRQ state from a prior slm_irq_save().
  */
 void slm_irq_restore(uint64_t flags);
+
+/*
+ * ==========================================================================
+ * SLM (Small Language Model) Loader — Phase SLM, M1
+ * ==========================================================================
+ *
+ * Parallel API to rust_model_load (ONNX) for GGUF-format SLMs.
+ * The SLM registry stores parsed metadata (architecture,
+ * dimensions, vocab size) without copying weights into the
+ * model_mem pool — that arrives in M5 once the decoder needs them.
+ */
+
+#define SLM_ARCH_NAME_LEN 16  /* matches Rust SLM_ARCH_LEN */
+#define SLM_MODEL_NAME_LEN 32 /* matches Rust SLM_NAME_LEN */
+
+/*
+ * C-layout snapshot of an SLM registry entry. Returned by value via
+ * rust_slm_get_info; matches the field order of Rust's
+ * `SlmModelInfoC`.
+ */
+typedef struct {
+    uint8_t  architecture[SLM_ARCH_NAME_LEN]; /* null-padded ASCII */
+    uint8_t  name[SLM_MODEL_NAME_LEN];        /* null-padded ASCII */
+    uint32_t block_count;          /* n_layer            */
+    uint32_t embedding_length;     /* hidden width       */
+    uint32_t head_count;           /* attention heads    */
+    uint32_t head_count_kv;        /* GQA KV heads       */
+    uint32_t head_dim;             /* per-head dimension */
+    uint32_t feed_forward_length;  /* SwiGLU intermediate*/
+    uint32_t context_length;       /* trained ctx        */
+    uint32_t vocab_size;           /* tokenizer vocab    */
+    uint32_t tensor_count;         /* GGUF tensor count  */
+    uint32_t source_bytes;         /* on-disk size       */
+    float    rope_freq_base;       /* RoPE theta         */
+} SlmModelInfoC;
+
+/* FFI size pin: paired with `const _: () = assert!(size_of::<...>() == 92)`
+ * in runtime/src/slm/registry.rs. Layout is 16 + 32 + 10×u32 + f32 = 92 B,
+ * all naturally 4-byte aligned. Adding/reordering a field requires bumping
+ * both. */
+_Static_assert(sizeof(SlmModelInfoC) == 92,
+               "SlmModelInfoC must be 92 bytes — Rust mirror in registry.rs has a paired const-assert");
+
+/*
+ * Load a GGUF model into the SLM registry.
+ * @name: null-terminated model name (clamped to 31 bytes).
+ * @data: pointer to GGUF bytes.
+ * @data_len: number of bytes at @data.
+ * Returns slot index (>= 0) on success, -1 on error.
+ */
+extern int rust_slm_load(const uint8_t *name, const uint8_t *data, size_t data_len);
+
+/*
+ * Unload a SLM by slot index. Returns 0 on success, -1 on error.
+ */
+extern int rust_slm_unload(uint32_t index);
+
+/*
+ * Snapshot the registry entry at @index into @info.
+ * Returns 0 on success, -1 if the slot is empty / out of range.
+ */
+extern int rust_slm_get_info(uint32_t index, SlmModelInfoC *info);
+
+/*
+ * Number of currently-loaded SLMs.
+ */
+extern uint32_t rust_slm_count(void);
+
+/*
+ * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
+ *
+ * Single source of truth for the shell's pre-load size gate. Pinned
+ * at the Rust registry's MAX_PLAUSIBLE_GGUF_BYTES (2 GiB today; PMM
+ * buddy max-order = 19). When #550 lands and the cap rises, the
+ * shell picks up the new value automatically.
+ */
+extern uint64_t rust_slm_max_gguf_bytes(void);
+
+/*
+ * Test-only: build a Qwen2.5-shaped GGUF fixture into @out_buf and
+ * record the bytes written via @out_size. Returns 0 on success or
+ * -1 if the buffer is too small / pointers are null. Used by
+ * kernel/tests/test_slm_load.c so the FFI surface can be exercised
+ * end-to-end without staging a real GGUF.
+ */
+extern int rust_slm_test_build_qwen_fixture(
+    uint32_t vocab_size,
+    uint8_t *out_buf,
+    size_t out_capacity,
+    size_t *out_size);
+
+/*
+ * Test-only: reset the SLM registry to empty. Tests call this
+ * between cases so each one starts with a known-empty slot table.
+ */
+extern void rust_slm_test_reset(void);
+
+/*
+ * ==========================================================================
+ * SLM Session / Decoder FFI - Phase SLM, M5.2
+ * ==========================================================================
+ *
+ * Per-conversation state and the prefill+decode loop. Builds on the
+ * model registry (rust_slm_load above) plus M5.1's KV cache and
+ * sampler. The forward pass is structurally complete but operates
+ * on placeholder zero weights for M5.2 - real per-tensor lookup
+ * lands in M5.3 once the GGUF weights are mmap'd into the model
+ * memory pool.
+ *
+ * Sampler-kind tags - keep in sync with rust_slm_session_open():
+ *   0 = Greedy (argmax; ignores temperature/top_k/top_p)
+ *   1 = Temperature
+ *   2 = TopK
+ *   3 = TopP
+ *   4 = TopKTopP (the demo default per the spec)
+ */
+#define SLM_SAMPLER_GREEDY        0u
+#define SLM_SAMPLER_TEMPERATURE   1u
+#define SLM_SAMPLER_TOP_K         2u
+#define SLM_SAMPLER_TOP_P         3u
+#define SLM_SAMPLER_TOP_K_TOP_P   4u
+
+/*
+ * Per-session telemetry snapshot. Populated by rust_slm_stats().
+ */
+typedef struct {
+    uint32_t prompts_completed;
+    uint32_t tokens_in;        /* cumulative prefill tokens         */
+    uint32_t tokens_out;       /* cumulative decoded tokens         */
+    uint64_t last_ttft_ns;     /* time-to-first-token, last prompt  */
+    uint64_t last_decode_ns;   /* total decode time, last prompt    */
+} SlmStatsC;
+
+/* FFI size pin: paired with `const _: () = assert!(size_of::<SlmStatsC>() == 32)`
+ * in runtime/src/lib.rs. Layout is 3×u32 + 4-byte padding (u64 alignment)
+ * + 2×u64 = 32 B. */
+_Static_assert(sizeof(SlmStatsC) == 32,
+               "SlmStatsC must be 32 bytes — Rust mirror in lib.rs has a paired const-assert");
+
+/*
+ * Token-emission callback. Invoked once per decoded token (prefill
+ * is silent). `user` is the opaque pointer the caller passed to
+ * rust_slm_prompt. `bytes`/`bytes_len` is the UTF-8 form of the
+ * sampled token (do NOT retain the pointer past return). Return
+ * non-zero to continue, zero to stop generation early.
+ */
+typedef int32_t (*RustSlmTokenCb)(
+    void *user,
+    uint32_t token_id,
+    const uint8_t *bytes,
+    size_t bytes_len);
+
+/*
+ * Open a session over a loaded SLM.
+ *
+ * @model_handle: slot index returned by rust_slm_load().
+ * @max_ctx: caller-chosen context ceiling (capped at the model's
+ *           trained context_length).
+ * @sampler_kind: one of the SLM_SAMPLER_* constants.
+ * @temperature, @top_k, @top_p: sampler parameters (ignored by
+ *           Greedy).
+ * @seed: PRNG seed for reproducibility (xorshift64; 0 is replaced
+ *           with 1 because the algorithm has a fixed point at 0).
+ * Returns the session id (>= 0) on success, -1 on error
+ * (model not loaded, KV-cache allocation failed, session table
+ * full, unknown sampler kind).
+ */
+extern int32_t rust_slm_session_open(
+    uint32_t model_handle,
+    uint32_t max_ctx,
+    uint32_t sampler_kind,
+    float temperature,
+    uint32_t top_k,
+    float top_p,
+    uint64_t seed);
+
+/*
+ * Close a session, releasing its slot.
+ * Returns 0 on success, -1 on bad session id.
+ */
+extern int32_t rust_slm_session_close(uint32_t session_id);
+
+/*
+ * Reset a session's KV cache and counters for a fresh
+ * conversation. Returns 0 on success, -1 on bad session id.
+ */
+extern int32_t rust_slm_session_reset(uint32_t session_id);
+
+/*
+ * Run a prompt against an open session. The decoder calls `cb`
+ * once per emitted token; returning 0 from the callback stops
+ * generation early.
+ *
+ * @prompt / @prompt_len: UTF-8 prompt bytes. `prompt` may be NULL
+ *           when @prompt_len == 0.
+ * @max_new_tokens: cap on decoded tokens. 0 = unlimited (until
+ *           EOS, the cooperative stop flag, or the cache fills).
+ * @cb: token callback (see RustSlmTokenCb above).
+ * @user: opaque cookie passed to the callback.
+ *
+ * Returns 0 on success, -1 on error (NULL pointer when length is
+ * non-zero, invalid UTF-8, session not in Open state, etc.).
+ *
+ * NOTE (M5.2): non-empty prompts currently return -1 because the
+ * runtime doesn't yet stash a per-session tokenizer (M5.3 plumbs
+ * the GGUF bytes through). The state machine and stop-flag path
+ * are exercisable via empty prompts.
+ */
+extern int32_t rust_slm_prompt(
+    uint32_t session_id,
+    const uint8_t *prompt,
+    size_t prompt_len,
+    uint32_t max_new_tokens,
+    RustSlmTokenCb cb,
+    void *user);
+
+/*
+ * Cooperative-cancel signal for an in-flight rust_slm_prompt call.
+ * Sets the session's stop flag; the decoder loop honours it at
+ * the next yield boundary. Returns 0 on success, -1 on bad
+ * session id.
+ */
+extern int32_t rust_slm_stop(uint32_t session_id);
+
+/*
+ * Snapshot a session's telemetry counters into *out.
+ * Returns 0 on success, -1 on NULL pointer / bad session id.
+ */
+extern int32_t rust_slm_stats(uint32_t session_id, SlmStatsC *out);
 
 #endif /* SLM_FFI_H */

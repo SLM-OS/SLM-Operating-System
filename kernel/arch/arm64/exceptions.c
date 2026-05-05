@@ -162,6 +162,43 @@ static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
     }
     uart_printf("  SPSR_EL1:  0x%lx\n", tf->spsr);
 
+    /* General-purpose register dump.
+     *
+     * Useful for any post-mortem where the fault address alone is
+     * ambiguous: figuring out which value an `ldr [base, #imm]` was
+     * dereferencing, which Rust / C error code is in x0, what the
+     * call chain was via x29 (frame pointer) and x30 (link
+     * register), etc. The trap-frame layout already saves all 31
+     * GPRs on every exception entry — we just hadn't been printing
+     * them. Cheap (one printf per pair, no allocation) and only
+     * runs on the panic path.
+     *
+     * Layout:
+     *   x0..x18    — caller-saved + scratch + IPC (x16=ip0, x17=ip1, x18=PR)
+     *   x19..x28   — callee-saved (preserved across function calls;
+     *                if any of these is wrong on a fault, suspect a
+     *                callee that violated AAPCS or stack corruption)
+     *   x29 (FP)   — frame pointer chain; back-trace by walking [fp]
+     *   x30 (LR)   — return address of the caller
+     */
+    uart_puts("\nGeneral Purpose Registers:\n");
+    uart_printf("  x0 =0x%016lx  x1 =0x%016lx  x2 =0x%016lx  x3 =0x%016lx\n",
+                tf->x0, tf->x1, tf->x2, tf->x3);
+    uart_printf("  x4 =0x%016lx  x5 =0x%016lx  x6 =0x%016lx  x7 =0x%016lx\n",
+                tf->x4, tf->x5, tf->x6, tf->x7);
+    uart_printf("  x8 =0x%016lx  x9 =0x%016lx  x10=0x%016lx  x11=0x%016lx\n",
+                tf->x8, tf->x9, tf->x10, tf->x11);
+    uart_printf("  x12=0x%016lx  x13=0x%016lx  x14=0x%016lx  x15=0x%016lx\n",
+                tf->x12, tf->x13, tf->x14, tf->x15);
+    uart_printf("  x16=0x%016lx  x17=0x%016lx  x18=0x%016lx  x19=0x%016lx\n",
+                tf->x16, tf->x17, tf->x18, tf->x19);
+    uart_printf("  x20=0x%016lx  x21=0x%016lx  x22=0x%016lx  x23=0x%016lx\n",
+                tf->x20, tf->x21, tf->x22, tf->x23);
+    uart_printf("  x24=0x%016lx  x25=0x%016lx  x26=0x%016lx  x27=0x%016lx\n",
+                tf->x24, tf->x25, tf->x26, tf->x27);
+    uart_printf("  x28=0x%016lx  x29=0x%016lx  x30=0x%016lx\n",
+                tf->x28, tf->x29, tf->x30);
+
 #if defined(PLATFORM_RASPI5)
     /* On Pi 5 the fault halt is cleaner via PSCI CPU_OFF than an
      * in-kernel WFI loop: PSCI hands the core to EL3/TF-A which

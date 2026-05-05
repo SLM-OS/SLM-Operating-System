@@ -5,6 +5,10 @@
  */
 
 #include "slm_ffi.h"
+/* Pull gpu_handoff.h into a translation unit so its _Static_assert
+ * sizes are actually exercised on every kernel build (catches struct
+ * drift the moment the C header is touched). */
+#include "gpu_handoff.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "uart.h"
@@ -829,6 +833,25 @@ bool slm_gpu_dispatch_breaker_is_tripped(void) { return false; }
 void slm_gpu_dispatch_breaker_test_record(int rc) { (void)rc; }
 int  slm_gpu_dispatch_breaker_test_count(void) { return 0; }
 #endif
+
+/*
+ * SLM GPU handoff descriptor lookup (M6.A-1 scaffolding).
+ *
+ * Marked `weak` so the future M6.A-2 pre-kexec loader integration
+ * can override it with a strong definition that returns the actual
+ * physical address staged at kexec time. Until that lands, every
+ * platform returns 0 and the Rust runtime
+ * (`runtime/src/inference/gpu_slm.rs::Handoff::try_from_kernel`)
+ * falls back to CPU.
+ *
+ * Pattern matches the `__attribute__((weak))` use elsewhere in the
+ * tree (see `kernel/src/shell_sys.c:hailo_control_signal_driver_shutdown`,
+ * `kernel/src/camera.c:mock_camera_frame_*`).
+ */
+__attribute__((weak)) uint64_t slm_gpu_get_handoff_phys(void)
+{
+    return 0;
+}
 
 /*
  * FP-free argmax over fp32 bit patterns. The kernel target compiles

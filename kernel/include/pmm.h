@@ -41,8 +41,17 @@ struct pmm_stats {
     uintptr_t heap_end;         /* Last allocatable address + 1 */
 };
 
-/* Buddy allocator specific statistics (for testing/debugging) */
-#define PMM_MAX_ORDER   18      /* Maximum order: 2^18 = 262144 pages (1 GB) */
+/* Buddy allocator specific statistics (for testing/debugging).
+ *
+ * Bumped 2026-05-02 from 18 (1 GiB) to 19 (2 GiB) so a Q4_K_M GGUF
+ * for Qwen2.5-1.5B (1.04 GB) fits in a single contiguous allocation.
+ * The cost is negligible — `struct buddy_state` adds one extra
+ * free-list pointer + one count (~16 bytes). All call sites that
+ * loop `0..=MAX_ORDER` get one extra iteration, irrelevant in
+ * boot/teardown context. Free-list / split / merge logic is
+ * order-agnostic; #578 follow-up tracks model_mem multi-block
+ * support which would obviate further bumps. */
+#define PMM_MAX_ORDER   19      /* Maximum order: 2^19 = 524288 pages (2 GB) */
 
 struct pmm_buddy_stats {
     size_t free_counts[PMM_MAX_ORDER + 1];  /* Free blocks at each order */
@@ -145,5 +154,17 @@ size_t pmm_get_total_pages(void);
  * @stats: Pointer to buddy stats structure to fill.
  */
 void pmm_get_buddy_stats(struct pmm_buddy_stats *stats);
+
+/*
+ * Walk the free list at the given order and print each block's
+ * address + next/prev pointer values. Bounded at `max_blocks` to
+ * keep a corrupted cycle from looping forever.
+ *
+ * Diagnostic only — output goes to UART (uart_printf), not the
+ * active shell's I/O. Capture via serial console. Used by
+ * `mem buddy <order>` to debug free-list corruption (e.g., #608's
+ * order-19 fault).
+ */
+void pmm_dump_free_list(unsigned int order, size_t max_blocks);
 
 #endif /* PMM_H */

@@ -11,7 +11,8 @@
  *   ...
  *   Order 10: 1024 pages (4 MB)
  *   Order 16: 65536 pages (256 MB)
- *   Order 18: 262144 pages (1 GB) - maximum
+ *   Order 18: 262144 pages (1 GB)
+ *   Order 19: 524288 pages (2 GB) - maximum
  */
 
 #include "pmm.h"
@@ -33,7 +34,12 @@ extern char __kernel_end;
  * Buddy Allocator Configuration
  * ========================================================================== */
 
-#define MAX_ORDER       18          /* Maximum order: 2^18 = 262144 pages (1 GB) */
+/* MAX_ORDER kept in sync with `PMM_MAX_ORDER` in `kernel/include/pmm.h`
+ * — both must change together. The public stats struct
+ * (`pmm_buddy_stats.free_counts[]`) is sized from `PMM_MAX_ORDER`. */
+#define MAX_ORDER       19          /* Maximum order: 2^19 = 524288 pages (2 GB) */
+_Static_assert(MAX_ORDER == PMM_MAX_ORDER,
+               "MAX_ORDER must match PMM_MAX_ORDER in pmm.h");
 #define MIN_BLOCK_SIZE  PAGE_SIZE   /* Minimum allocation: 4 KB */
 
 /* Allocation-failure sentinel returned by the internal buddy helpers.
@@ -517,6 +523,7 @@ static void pmm_add_region(uintptr_t start, uintptr_t end)
         }
 
         size_t block_size = order_to_size(order);
+
         set_block_state(current, order, BLOCK_FREE);
         free_list_add(current, order);
         buddy_state.free_pages += order_to_pages(order);
@@ -607,6 +614,44 @@ void pmm_init(void)
 #else
     pmm_add_region_split(buddy_state.heap_start, buddy_state.heap_end);
 #endif
+
+    /*
+     * Post-init sanity: every order's free list head must have
+     * next/prev pointers either NULL or pointing inside the heap.
+     * On Jetson kexec, if pmm_init has run BEFORE vmm_init while
+     * SCTLR.C=0, Linux's stale L4 cache lines clobber the freshly-
+     * written pointers and the next pop will fault (issue #608).
+     * Catching it here turns a confusing later page fault during
+     * `slm load` into a clear, immediate panic that names the
+     * exact cause, so a future caller-order regression doesn't
+     * silently re-introduce the bug.
+     */
+    for (unsigned int o = 0; o <= MAX_ORDER; o++) {
+        struct free_block *head = buddy_state.free_lists[o];
+        if (!head) continue;
+        uintptr_t haddr = (uintptr_t)head;
+        if (haddr < buddy_state.heap_start || haddr >= buddy_state.heap_end)
+            panic("pmm_init: free list head order=%u outside heap "
+                  "(head=0x%lx, heap=0x%lx-0x%lx) — likely stale cache "
+                  "from kexec; ensure vmm_init runs before pmm_init",
+                  o, (unsigned long)haddr,
+                  (unsigned long)buddy_state.heap_start,
+                  (unsigned long)buddy_state.heap_end);
+        if (head->next != NULL || head->prev != NULL) {
+            uintptr_t naddr = (uintptr_t)head->next;
+            uintptr_t paddr = (uintptr_t)head->prev;
+            bool n_ok = (naddr == 0) ||
+                        (naddr >= buddy_state.heap_start &&
+                         naddr < buddy_state.heap_end);
+            if (head->prev != NULL || !n_ok)
+                panic("pmm_init: free list head order=%u corrupt "
+                      "(head=0x%lx next=0x%lx prev=0x%lx) — likely "
+                      "stale cache from kexec; ensure vmm_init runs "
+                      "before pmm_init",
+                      o, (unsigned long)haddr,
+                      (unsigned long)naddr, (unsigned long)paddr);
+        }
+    }
 
     buddy_state.initialized = true;
 
@@ -865,6 +910,93 @@ void pmm_dump_stats(void)
     uart_printf("    Frees:       %u\n", (unsigned)buddy_stats.free_count);
     uart_printf("    Splits:      %u\n", (unsigned)buddy_stats.split_count);
     uart_printf("    Merges:      %u\n", (unsigned)buddy_stats.merge_count);
+}
+
+/*
+ * Walk the free list at `order` and print each block's address + the
+ * next/prev pointer values it carries. Bounded at `max_blocks` to
+ * keep a cycle from looping forever; if the count is hit it prints
+ * a "(truncated)" marker so the caller knows the list was longer.
+ *
+ * Validates each pointer against the heap range before chasing —
+ * the whole point of this diagnostic is to find blocks whose
+ * pointer fields have been clobbered, so we can't assume `next`
+ * points at a valid block.
+ *
+ * Snapshots the head pointer under the PMM lock to get a coherent
+ * starting point, then walks without the lock so the slow UART
+ * output doesn't stall every other allocation. The list is
+ * boot-time-stable for orders that nothing has touched, which is
+ * the case for order MAX_ORDER on a freshly-booted system.
+ */
+void pmm_dump_free_list(unsigned int order, size_t max_blocks)
+{
+    if (order > MAX_ORDER) {
+        uart_printf("pmm_dump_free_list: order %u > MAX_ORDER (%u)\n",
+                    order, MAX_ORDER);
+        return;
+    }
+
+    irq_flags_t flags = spin_lock_irqsave(&pmm_lock);
+    struct free_block *head = buddy_state.free_lists[order];
+    size_t count = buddy_state.free_counts[order];
+    uintptr_t heap_start = buddy_state.heap_start;
+    uintptr_t heap_end = buddy_state.heap_end;
+    spin_unlock_irqrestore(&pmm_lock, flags);
+
+    uart_printf("\nFree list at order %u (%u KB blocks): count=%u, head=%p\n",
+                order, (unsigned)(order_to_size(order) / 1024),
+                (unsigned)count, (void *)head);
+    uart_printf("  Heap range: 0x%lx - 0x%lx\n",
+                (unsigned long)heap_start, (unsigned long)heap_end);
+
+    struct free_block *prev_seen = NULL;
+    struct free_block *cur = head;
+    size_t i = 0;
+    while (cur && i < max_blocks) {
+        uintptr_t addr = (uintptr_t)cur;
+        bool addr_in_heap = (addr >= heap_start && addr < heap_end);
+        bool addr_aligned = is_aligned_to_order(addr, order);
+
+        /* Print the block address + its in-memory next/prev fields.
+         * If the address is out of heap or unaligned, those fields
+         * may be MMIO or unmapped — skip the deref to avoid faulting. */
+        uart_printf("  [%3u] block=%p heap=%s align=%s",
+                    (unsigned)i, (void *)cur,
+                    addr_in_heap ? "ok" : "BAD",
+                    addr_aligned ? "ok" : "BAD");
+
+        if (!addr_in_heap || !addr_aligned) {
+            uart_puts("  (skipping deref)\n");
+            break;
+        }
+
+        /* Safe to read next/prev now. */
+        struct free_block *nxt = cur->next;
+        struct free_block *prv = cur->prev;
+        uart_printf("  next=%p prev=%p\n", (void *)nxt, (void *)prv);
+
+        /* prev linkage check: head's prev must be NULL; others' prev
+         * must equal the previous block we walked through. */
+        if (i == 0 && prv != NULL) {
+            uart_puts("    !! head->prev is non-NULL (corrupt linkage)\n");
+        } else if (i > 0 && prv != prev_seen) {
+            uart_printf("    !! prev (%p) != expected (%p)\n",
+                        (void *)prv, (void *)prev_seen);
+        }
+
+        prev_seen = cur;
+        cur = nxt;
+        i++;
+    }
+
+    if (cur && i == max_blocks) {
+        uart_printf("  (truncated at %u blocks; list longer or cyclic)\n",
+                    (unsigned)max_blocks);
+    } else if (!cur && i != count) {
+        uart_printf("  !! walked %u blocks but free_count=%u (mismatch)\n",
+                    (unsigned)i, (unsigned)count);
+    }
 }
 
 /*

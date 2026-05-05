@@ -5,8 +5,8 @@
 //! - Memory allocator integration
 //! - Future: Model loading and inference scheduling
 
-#![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
 
 // `alloc` provides `Box`, `Vec`, `VecDeque`, `BTreeMap`, etc. We enable
 // it unconditionally; it links fine without a global allocator, and
@@ -15,7 +15,9 @@
 // `core` + static arrays as they do today.
 extern crate alloc;
 
+#[cfg(not(test))]
 use core::panic::PanicInfo;
+#[cfg(not(test))]
 use linked_list_allocator::LockedHeap;
 
 // =============================================================================
@@ -30,6 +32,8 @@ pub mod component;
 pub mod msg_router;
 pub mod loader;
 pub mod inference;
+#[cfg(feature = "slm")]
+pub mod slm;
 
 // Re-export commonly used types
 pub use kernel_ffi::{KernelError, KernelResult, MemFlags, ShmFlags, TaskId};
@@ -42,24 +46,60 @@ pub use component::{ComponentState, ComponentInfo, ComponentType, Priority as Co
 // Global Allocator
 // =============================================================================
 
+#[cfg(not(test))]
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
+
+/// Bytes passed to the most recent `rust_heap_init` call. Exposed via
+/// `rust_heap_size_bytes` so a kernel-side smoke test can confirm the
+/// per-platform `RUST_HEAP_MB` was actually honored — catches a
+/// silent regression where someone reduces the heap below what SLM's
+/// KV cache + `ForwardScratch` need.
+///
+/// Release/Acquire is technically stronger than the call pattern
+/// requires: `rust_heap_init` runs once on CPU 0 in `kernel_main`
+/// before any secondary CPU is brought up, so no concurrent reader
+/// exists at the moment of the store. Kept as Release/Acquire
+/// because it matches the "publish a value once" idiom and the
+/// extra fence cost is irrelevant on a one-time boot path.
+#[cfg(not(test))]
+static RUST_HEAP_SIZE_BYTES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
 
 /// Initialize the Rust heap allocator.
 ///
 /// # Safety
 /// - `heap_start` must be a valid pointer to allocatable memory
 /// - `heap_size` must accurately reflect the available memory
-/// - This function must only be called once
+/// - This function must only be called once. A second call would
+///   re-`init` the underlying `LockedHeap` (corrupting any
+///   already-issued allocations) and overwrite `RUST_HEAP_SIZE_BYTES`
+///   with the new size. The boot path in `kernel/src/main.c` is the
+///   only legitimate caller; if a second caller appears, add a
+///   one-shot `compare_exchange` guard rather than relaxing this
+///   contract.
+#[cfg(not(test))]
 #[no_mangle]
 pub unsafe extern "C" fn rust_heap_init(heap_start: *mut u8, heap_size: usize) {
     ALLOCATOR.lock().init(heap_start, heap_size);
+    RUST_HEAP_SIZE_BYTES.store(heap_size, core::sync::atomic::Ordering::Release);
+}
+
+/// Return the heap size (bytes) passed to the most recent
+/// `rust_heap_init`. 0 means `rust_heap_init` has not been called yet.
+/// Used by `kernel/tests/test_model_mem_smoke.c` to assert
+/// `RUST_HEAP_MB` was honored.
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn rust_heap_size_bytes() -> usize {
+    RUST_HEAP_SIZE_BYTES.load(core::sync::atomic::Ordering::Acquire)
 }
 
 // =============================================================================
 // Panic Handler
 // =============================================================================
 
+#[cfg(not(test))]
 #[panic_handler]
 fn rust_panic(info: &PanicInfo) -> ! {
     // Recursion guard: if uart_printf / shell_printf themselves panic
@@ -142,6 +182,80 @@ fn rust_panic(info: &PanicInfo) -> ! {
 
     unsafe {
         kernel_ffi::slm_panic(b"Rust panic - halting\0".as_ptr());
+    }
+}
+
+// =============================================================================
+// FFI Stubs (cargo test on host)
+// =============================================================================
+//
+// When running `cargo test --target x86_64-unknown-linux-gnu`, the kernel
+// C symbols are not present (we link only the Rust crate against std). The
+// stubs below let the host test harness link cleanly. They are wired in
+// only under `#[cfg(test)]` and are no-ops, since unit tests don't depend
+// on real UART output or kernel state.
+#[cfg(test)]
+#[allow(non_camel_case_types)]
+mod test_ffi_stubs {
+    /// Host-side stub for the kernel's `uart_puts`. Some `slm` runtime
+    /// code paths (e.g. registry diagnostic prints) call this directly;
+    /// during host unit tests it's harmless to drop the message.
+    #[no_mangle]
+    pub extern "C" fn uart_puts(_s: *const u8) {}
+
+    // M5.3.1: registry tests want to allocate from the weight pool
+    // (`mm::alloc_weights` → `kernel_ffi::alloc_pages`
+    // → `slm_alloc_pages`). The host has no kernel PMM; route the
+    // call through `std::alloc` so `cargo test` can exercise the
+    // weight-pool path with real allocations.
+    //
+    // The stubs only need to satisfy `model_mem_init`'s contract: a
+    // 2 MB-aligned base address. Allocations from `std::alloc` aren't
+    // page-aligned by default on all platforms, so we manually round
+    // up to a 2 MB boundary and remember the original pointer.
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static TEST_ALLOC_BUMP: AtomicUsize = AtomicUsize::new(0);
+
+    #[no_mangle]
+    pub extern "C" fn slm_alloc_pages(count: usize) -> *mut u8 {
+        // 4 KB pages → bytes.
+        let bytes = count.saturating_mul(4096);
+        let align = 2 * 1024 * 1024usize; // 2 MB
+        // Over-allocate by `align - 1` to give ourselves slack for
+        // manual alignment.
+        let total = bytes.saturating_add(align);
+        let layout = match core::alloc::Layout::from_size_align(total, 8) {
+            Ok(l) => l,
+            Err(_) => return core::ptr::null_mut(),
+        };
+        // SAFETY: layout is non-zero size; we own the returned ptr.
+        let raw = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        if raw.is_null() {
+            return core::ptr::null_mut();
+        }
+        let raw_addr = raw as usize;
+        let aligned = (raw_addr + align - 1) & !(align - 1);
+        // Track usage for sanity (optional).
+        TEST_ALLOC_BUMP.fetch_add(bytes, Ordering::Relaxed);
+        aligned as *mut u8
+    }
+
+    #[no_mangle]
+    pub extern "C" fn slm_free_pages(_addr: *mut u8, _count: usize) {
+        // Host stub: leak the allocation. The host process exits
+        // shortly after each test invocation; tests that loop alloc/
+        // free pairs are bounded and the OS reclaims everything on
+        // exit. Implementing real free would require remembering the
+        // original (pre-alignment) pointer, which is more bookkeeping
+        // than tests need.
+    }
+
+    /// Host stub for `slm_task_current`. The model_mem allocator
+    /// stamps `owner_task` on every allocation; tests don't care
+    /// about the value, so any constant works.
+    #[no_mangle]
+    pub extern "C" fn slm_task_current() -> u32 {
+        0
     }
 }
 
@@ -638,31 +752,15 @@ extern "C" {
 
 /// Initialize model memory pools.
 ///
-/// Called by C kernel to set up Rust model memory allocator.
-/// Pool sizes are platform-specific to fit available QEMU RAM:
-///   * ARM64 / aarch64-unknown-none: 256 MB weights / 128 MB workspace
-///     (QEMU virt has 1 GB; this leaves headroom for kernel + PMM).
-///   * x86-64 / x86_64-unknown-none: 64 MB weights / 32 MB workspace.
-///     QEMU q35 only gets 256 MB total, of which the kernel + buddy
-///     allocator already eat a large chunk; a 256+128 MB request hits
-///     `PMM allocation failed` and leaves the model_mem allocator
-///     uninitialized. Subsequent `rust_model_alloc_weights` calls then
-///     silently return null handles, and tests that don't check the
-///     init status (e.g. `eviction demo`) silently no-op — the
-///     failure is invisible without the smoke test in
-///     `kernel/tests/test_model_mem_smoke.c`.
+/// Called by the C kernel boot path with platform-specific pool sizes
+/// from `<config.h>` (`MODEL_MEM_WEIGHT_MB` / `MODEL_MEM_WORKSPACE_MB`).
+/// Both values are megabytes and must be multiples of 2 (the pool block
+/// size is 2 MB; misaligned values return `-1`).
+///
+/// Returns 0 on success, -1 on failure.
 #[no_mangle]
-pub extern "C" fn rust_model_mem_init() -> i32 {
-    // 64 + 32 = 96 MB. Leaves ~150 MB on x86-64 QEMU for the kernel
-    // image, PMM metadata, Rust heap, and lwip after `pmm_init`.
-    // Both values must stay multiples of 2 (the pool block size).
-    // See docs/model-memory.md §"Pool Sizing" before raising.
-    #[cfg(target_arch = "x86_64")]
-    let (weight_mb, workspace_mb): (usize, usize) = (64, 32);
-    #[cfg(not(target_arch = "x86_64"))]
-    let (weight_mb, workspace_mb): (usize, usize) = (256, 128);
-
-    match mm::model_mem_init(weight_mb, workspace_mb) {
+pub extern "C" fn rust_model_mem_init(weight_mb: u32, workspace_mb: u32) -> i32 {
+    match mm::model_mem_init(weight_mb as usize, workspace_mb as usize) {
         Ok(()) => 0,
         Err(e) => {
             unsafe {
@@ -673,6 +771,10 @@ pub extern "C" fn rust_model_mem_init() -> i32 {
                     }
                     mm::AllocError::AlignmentError => {
                         kernel_ffi::uart_puts(b"alignment error\n\0".as_ptr());
+                    }
+                    mm::AllocError::Oversized => {
+                        kernel_ffi::uart_puts(
+                            b"requested pool size exceeds MAX_BLOCKS_PER_POOL (bump in lockstep with MODEL_MEM_*_MB)\n\0".as_ptr());
                     }
                     _ => {
                         kernel_ffi::uart_puts(b"unknown error\n\0".as_ptr());
@@ -4953,6 +5055,469 @@ pub extern "C" fn rust_model_loader_test() -> i32 {
     }
 
     failures
+}
+
+// =============================================================================
+// SLM Loader API (Phase SLM, M1)
+// =============================================================================
+//
+// Parallel to the ONNX rust_model_load family above. The SLM
+// registry stores GGUF metadata (architecture, dimensions, vocab
+// size) without copying weights into the model_mem pool — that
+// arrives in M5 once the decoder needs them. M7 wires `slm load`
+// in the shell to call rust_slm_load.
+
+/// Load a GGUF model from a buffer into the SLM registry.
+///
+/// Returns the slot index (>= 0) on success, -1 on error. Errors
+/// include malformed GGUF, missing required architecture metadata,
+/// unsupported architecture, and registry full.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated string pointer
+/// - `data` must point to `data_len` bytes of GGUF-format data
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_load(
+    name: *const u8,
+    data: *const u8,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || data.is_null() || data_len == 0 {
+        return -1;
+    }
+    // Bound the name length before deref per runtime/CLAUDE.md
+    // "C-string bounds-before-deref".
+    let mut name_len = 0usize;
+    while name_len < slm::registry::SLM_NAME_LEN {
+        let c = *name.add(name_len);
+        if c == 0 {
+            break;
+        }
+        name_len += 1;
+    }
+    let name_slice = core::slice::from_raw_parts(name, name_len);
+    let data_slice = core::slice::from_raw_parts(data, data_len);
+    match slm::registry::load_slm(name_slice, data_slice) {
+        Ok(idx) => idx as i32,
+        Err(_) => -1,
+    }
+}
+
+/// Unload a SLM by slot index.
+///
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_unload(index: u32) -> i32 {
+    match slm::registry::unload_slm(index as usize) {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Read C-friendly metadata about a loaded SLM.
+///
+/// Returns 0 on success, -1 if the slot is empty / out of range or
+/// `info` is null.
+///
+/// # Safety
+/// - `info` must point to a `SlmModelInfoC`-sized buffer
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_get_info(
+    index: u32,
+    info: *mut slm::registry::SlmModelInfoC,
+) -> i32 {
+    if info.is_null() {
+        return -1;
+    }
+    match slm::registry::get_info(index as usize) {
+        Some(snap) => {
+            *info = snap;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Number of currently-loaded SLMs (for `slm list`).
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_count() -> u32 {
+    slm::registry::count() as u32
+}
+
+/// Maximum GGUF buffer size accepted by `rust_slm_load`, in bytes.
+///
+/// Single source of truth for the C shell's pre-load size gate. Pinned
+/// at the registry's `MAX_PLAUSIBLE_GGUF_BYTES` (2 GiB today, matching
+/// the PMM buddy max-order = 19). When #550's multi-block allocator
+/// lands and the cap rises, the C shell automatically picks up the
+/// new value without a corresponding edit on its side.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_max_gguf_bytes() -> u64 {
+    slm::registry::MAX_PLAUSIBLE_GGUF_BYTES as u64
+}
+
+/// Test-only: build a Qwen2.5-shaped GGUF fixture into the caller's
+/// buffer and return the bytes-written count via `*out_size`.
+///
+/// Used by `kernel/tests/test_slm_load.c` to drive the FFI surface
+/// end-to-end without staging a real ~1 GB GGUF on disk. The shape
+/// matches Qwen2.5-1.5B-Instruct so every key
+/// `validate_for_inference` reads is exercised.
+///
+/// Returns 0 on success, -1 on null pointer / buffer-too-small.
+///
+/// # Safety
+/// - `out_buf` must point to `out_capacity` writable bytes.
+/// - `out_size` must be a valid `*mut usize`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_test_build_qwen_fixture(
+    vocab_size: u32,
+    out_buf: *mut u8,
+    out_capacity: usize,
+    out_size: *mut usize,
+) -> i32 {
+    if out_buf.is_null() || out_size.is_null() {
+        return -1;
+    }
+    let buf = core::slice::from_raw_parts_mut(out_buf, out_capacity);
+    match slm::registry::build_qwen_test_fixture(vocab_size as usize, buf) {
+        Some(n) => {
+            *out_size = n;
+            0
+        }
+        None => -1,
+    }
+}
+
+/// Reset the SLM registry to its initial empty state. Test-only —
+/// `kernel/tests/test_slm_load.c` calls this between cases so each
+/// test sees a known empty slot table.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_test_reset() {
+    // Equivalent to `unload_slm` on every occupied slot; no
+    // separate Rust-side accessor needed beyond what the registry
+    // already exposes.
+    for idx in 0..slm::registry::SLM_MAX_SLOTS {
+        let _ = slm::registry::unload_slm(idx);
+    }
+}
+
+// =============================================================================
+// SLM Session / Decoder FFI (Phase SLM, M5.2)
+// =============================================================================
+//
+// Wires `Session` (per-conversation state) and `decoder::run_prompt`
+// (prefill + autoregressive generation) to the C kernel. The 4-slot
+// session table lives in `runtime/src/slm/session.rs`; FFI handles
+// are slot indices.
+
+/// Sampler-kind tag used by `rust_slm_session_open`.
+const SLM_SAMPLER_GREEDY: u32 = 0;
+const SLM_SAMPLER_TEMPERATURE: u32 = 1;
+const SLM_SAMPLER_TOP_K: u32 = 2;
+const SLM_SAMPLER_TOP_P: u32 = 3;
+const SLM_SAMPLER_TOP_K_TOP_P: u32 = 4;
+
+/// C-layout snapshot of session telemetry. Mirrors `SlmStatsC` in
+/// the kernel header.
+#[cfg(feature = "slm")]
+#[repr(C)]
+pub struct SlmStatsC {
+    pub prompts_completed: u32,
+    pub tokens_in: u32,
+    pub tokens_out: u32,
+    pub last_ttft_ns: u64,
+    pub last_decode_ns: u64,
+}
+
+// FFI size pin: paired with `_Static_assert(sizeof(SlmStatsC) == 32,
+// ...)` in `kernel/include/slm_ffi.h`. Layout is 3×u32 + 4-byte
+// padding (u64 alignment) + 2×u64 = 32 bytes. Failing here surfaces
+// any field add/reorder at compile time before C and Rust drift.
+#[cfg(feature = "slm")]
+const _: () = assert!(core::mem::size_of::<SlmStatsC>() == 32);
+
+/// Open a session over a loaded SLM.
+///
+/// `model_handle` is the slot index returned by `rust_slm_load`.
+/// `max_ctx` is the caller-chosen ceiling (capped at the model's
+/// trained context length). Sampler kind is one of the
+/// `SLM_SAMPLER_*` constants in the C header.
+///
+/// Returns the session id (>= 0) on success, -1 on error
+/// (model not loaded, KV-cache allocation failed, session table
+/// full, unknown sampler kind).
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_open(
+    model_handle: u32,
+    max_ctx: u32,
+    sampler_kind: u32,
+    temperature: f32,
+    top_k: u32,
+    top_p: f32,
+    seed: u64,
+) -> i32 {
+    let max_ctx_us = match usize::try_from(max_ctx) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
+    let top_k_us = match usize::try_from(top_k) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
+
+    let sampler = match sampler_kind {
+        SLM_SAMPLER_GREEDY => slm::sampler::Sampler::Greedy,
+        SLM_SAMPLER_TEMPERATURE => slm::sampler::Sampler::Temperature { temperature },
+        SLM_SAMPLER_TOP_K => slm::sampler::Sampler::TopK {
+            temperature,
+            k: top_k_us,
+        },
+        SLM_SAMPLER_TOP_P => slm::sampler::Sampler::TopP { temperature, p: top_p },
+        SLM_SAMPLER_TOP_K_TOP_P => slm::sampler::Sampler::TopKTopP {
+            temperature,
+            k: top_k_us,
+            p: top_p,
+        },
+        _ => return -1,
+    };
+
+    let session = match slm::session::Session::open(model_handle, max_ctx_us, sampler, seed)
+    {
+        Some(s) => s,
+        None => return -1,
+    };
+    match slm::session::insert(session) {
+        Some(idx) => idx as i32,
+        None => -1,
+    }
+}
+
+/// Close a session, releasing its slot. Returns 0 on success, -1 if
+/// the slot was empty or out of range.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_close(session_id: u32) -> i32 {
+    // Mark closed first (best-effort; ignored if slot is empty), then
+    // free the slot. The two steps don't have to be atomic — a
+    // racing FFI call against the same id is invalid usage.
+    let _ = slm::session::with_session(session_id as usize, |s| s.close());
+    match slm::session::remove(session_id as usize) {
+        Some(_) => 0,
+        None => -1,
+    }
+}
+
+/// Reset a session's KV cache and counters for a fresh conversation.
+/// Returns 0 on success, -1 if the slot is empty / out of range.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_session_reset(session_id: u32) -> i32 {
+    match slm::session::with_session(session_id as usize, |s| s.reset()) {
+        Some(()) => 0,
+        None => -1,
+    }
+}
+
+/// C-callable token callback: receives `user`, `token_id`, the UTF-8
+/// `bytes` pointer and length. Returns non-zero to continue, zero to
+/// stop generation early.
+#[cfg(feature = "slm")]
+pub type RustSlmTokenCb = unsafe extern "C" fn(
+    user: *mut core::ffi::c_void,
+    token_id: u32,
+    bytes: *const u8,
+    bytes_len: usize,
+) -> i32;
+
+/// Pointer-typed bridge so the static `TokenCallback` (which has a
+/// `fn(...) -> bool` signature) can dispatch to a caller's
+/// `RustSlmTokenCb` via thread-local context. Storing the C
+/// callback + user pointer in atomics keeps the bridge `no_std`
+/// without `lazy_static` / `OnceCell` machinery.
+#[cfg(feature = "slm")]
+mod ffi_cb {
+    use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+
+    static CB: AtomicUsize = AtomicUsize::new(0);
+    static USER: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(core::ptr::null_mut());
+    /// Single-prompt-at-a-time gate. The cb + user pointer pair is a
+    /// shared mutable static; without serialization, two concurrent
+    /// `rust_slm_prompt` calls (different sessions, possibly different
+    /// CPUs) would race on `install` and deliver tokens to the wrong
+    /// user pointer. `try_install` returns `false` if a prompt is
+    /// already in flight; the caller surfaces `-1`.
+    static BUSY: AtomicBool = AtomicBool::new(false);
+
+    /// Acquire the bridge or return `false` if another prompt is in
+    /// flight. Pairs with [`clear`].
+    pub fn try_install(
+        cb: super::RustSlmTokenCb,
+        user: *mut core::ffi::c_void,
+    ) -> bool {
+        if BUSY
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        CB.store(cb as usize, Ordering::SeqCst);
+        USER.store(user, Ordering::SeqCst);
+        true
+    }
+
+    pub fn clear() {
+        CB.store(0, Ordering::SeqCst);
+        USER.store(core::ptr::null_mut(), Ordering::SeqCst);
+        BUSY.store(false, Ordering::Release);
+    }
+
+    pub fn dispatch(token_id: u32, bytes: &[u8]) -> bool {
+        let raw = CB.load(Ordering::SeqCst);
+        if raw == 0 {
+            return false;
+        }
+        // SAFETY: `raw` was installed via `try_install` from a valid
+        // function pointer of `RustSlmTokenCb` type. The type
+        // matches the cast.
+        let cb: super::RustSlmTokenCb = unsafe { core::mem::transmute(raw) };
+        let user = USER.load(Ordering::SeqCst);
+        // SAFETY: `bytes` is a Rust slice lent to the C callback for
+        // the duration of the call only. The callback documented
+        // contract is "do not retain the pointer past return".
+        let rc = unsafe { cb(user, token_id, bytes.as_ptr(), bytes.len()) };
+        rc != 0
+    }
+}
+
+#[cfg(feature = "slm")]
+fn ffi_cb_trampoline(token_id: u32, bytes: &[u8]) -> bool {
+    ffi_cb::dispatch(token_id, bytes)
+}
+
+/// Run a prompt against an open session.
+///
+/// `prompt` / `prompt_len` is a UTF-8 string (not necessarily
+/// null-terminated; the length is authoritative).
+/// `max_new_tokens == 0` means "until EOS or stop flag".
+/// `cb` is called once per emitted token; returning 0 stops
+/// generation. `user` is passed through opaquely.
+///
+/// Returns 0 on success, -1 on error (invalid pointers, session
+/// not in `Open` state, etc.).
+///
+/// # Safety
+/// - `prompt` must be a valid pointer to `prompt_len` bytes of UTF-8
+///   data, or null when `prompt_len == 0`.
+/// - `cb` must be a valid C function pointer of type
+///   [`RustSlmTokenCb`].
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_prompt(
+    session_id: u32,
+    prompt: *const u8,
+    prompt_len: usize,
+    max_new_tokens: u32,
+    cb: RustSlmTokenCb,
+    user: *mut core::ffi::c_void,
+) -> i32 {
+    if prompt.is_null() && prompt_len != 0 {
+        return -1;
+    }
+    // Cap prompt length at 1 MiB. The kernel side caller is in-process
+    // so this isn't a hard exploit boundary, but `runtime/CLAUDE.md`
+    // requires explicit bounds at every FFI entry. 1 MiB is well past
+    // Qwen2.5-1.5B's 32 K context-token budget × ~4 bytes/token.
+    const MAX_PROMPT_BYTES: usize = 1 << 20;
+    if prompt_len > MAX_PROMPT_BYTES {
+        return -1;
+    }
+    let prompt_slice: &[u8] = if prompt_len == 0 {
+        &[]
+    } else {
+        // SAFETY: caller's contract — pointer + length are valid.
+        unsafe { core::slice::from_raw_parts(prompt, prompt_len) }
+    };
+    let prompt_str = match core::str::from_utf8(prompt_slice) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    // M5.3.1: the decoder fetches the tokenizer from the registry
+    // via `with_loaded_slm` — the FFI shim no longer needs to
+    // synthesize one. Empty prompts go straight through and exit
+    // cleanly without entering the decode loop; non-empty prompts
+    // tokenize against the loaded model's `Bbpe`.
+    let cfg = slm::decoder::DecodeConfig {
+        max_new_tokens,
+        eos_token_id: 2,
+        prefill_chunk: 64,
+    };
+
+    // Acquire the FFI bridge — fails (returns -1) if another prompt
+    // is already in flight on a different session, so the cb + user
+    // pointer pair can't get clobbered cross-CPU.
+    if !ffi_cb::try_install(cb, user) {
+        return -1;
+    }
+    let result = slm::session::with_session(session_id as usize, |s| {
+        slm::decoder::run_prompt(s, prompt_str, &cfg, ffi_cb_trampoline)
+    });
+    ffi_cb::clear();
+
+    match result {
+        Some(Some(_stats)) => 0,
+        _ => -1,
+    }
+}
+
+/// Cooperative-cancel signal for an in-flight `rust_slm_prompt` call.
+/// Sets the session's stop flag; the decoder loop notices at the
+/// next yield boundary. Returns 0 on success, -1 on bad index.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub extern "C" fn rust_slm_stop(session_id: u32) -> i32 {
+    match slm::session::with_session(session_id as usize, |s| s.request_stop()) {
+        Some(()) => 0,
+        None => -1,
+    }
+}
+
+/// Snapshot a session's telemetry counters into `*out`. Returns 0
+/// on success, -1 on null pointer / unknown session id.
+///
+/// # Safety
+/// - `out` must point to writable memory of at least
+///   `sizeof(SlmStatsC)`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_stats(session_id: u32, out: *mut SlmStatsC) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    let snap = slm::session::with_session(session_id as usize, |s| SlmStatsC {
+        prompts_completed: s.prompts_completed,
+        tokens_in: s.tokens_in,
+        tokens_out: s.tokens_out,
+        last_ttft_ns: s.last_ttft_ns,
+        last_decode_ns: s.last_decode_ns,
+    });
+    match snap {
+        Some(stats) => {
+            // SAFETY: caller's contract — `out` is writable.
+            unsafe { *out = stats; }
+            0
+        }
+        None => -1,
+    }
 }
 
 // =============================================================================

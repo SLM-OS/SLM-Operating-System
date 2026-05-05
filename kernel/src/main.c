@@ -312,17 +312,42 @@ void kernel_main(void *dtb)
     /* x86-64: extend page tables BEFORE PMM so all RAM is accessible */
     uart_puts("\n");
     vmm_init();
-#endif
 
     /* Initialize physical memory manager */
     uart_puts("\n");
     pmm_init();
     pmm_dump_stats();
-
-#if !defined(PLATFORM_X86_64)
-    /* ARM64: enable MMU after PMM (PMM needs to know page boundaries first) */
+#else
+    /*
+     * ARM64: vmm_init MUST run before pmm_init.
+     *
+     * On Tegra234 (Jetson Orin) the SCF L4 cache (4 MiB, 16-way, 8
+     * slices — Orin TRM §5.2.1.2.1) sits between CCPLEX and DRAM
+     * and isn't enumerated by CLIDR_EL1, so explicit set/way
+     * maintenance can't reach it. After kexec it still holds
+     * Linux's dirty data for the addresses we're about to use as
+     * free-list block heads. With MMU off + SCTLR.C=0, pmm_init's
+     * pointer writes go directly to DRAM as Device-nGnRnE; once
+     * mmu_enable later activates the data cache, the next load
+     * fills L1 from L4's stale shadow, clobbering our free-list
+     * pointers and producing the order-19 page fault from #608.
+     *
+     * Running pmm_init AFTER mmu_enable routes the pointer writes
+     * through the now-active coherent fabric, naturally evicting
+     * the stale L4 entries via SCF write-allocate at the same
+     * cache lines. vmm_init touches only static page-table arrays
+     * in BSS, so it has no PMM dependency — safe to run first.
+     * QEMU and Pi 5 boot cleanly under either ordering, but the
+     * vmm_init→pmm_init sequence is correct on every ARM64
+     * platform and removes a class of cache-coherency latent
+     * bugs, so the swap is unconditional on every ARM64 target.
+     */
     uart_puts("\n");
     vmm_init();
+
+    uart_puts("\n");
+    pmm_init();
+    pmm_dump_stats();
 #endif
 
     /* Initialize non-cacheable shared memory region (Pi 5 only) */
@@ -510,13 +535,20 @@ void kernel_main(void *dtb)
     /* Initialize Rust runtime */
     INFO("Initializing Rust runtime...");
 
-    /* Allocate heap for Rust (1MB = 256 pages) */
-    void *rust_heap = pmm_alloc_pages(256);
+    /* Allocate heap for Rust. RUST_HEAP_MB is per-platform in
+     * <config.h> — sized by SLM forward-path demand (KV cache +
+     * ForwardScratch); see the comment block there. Both multiplies
+     * are size_t-promoted explicitly so a hypothetical >4 GB heap
+     * (RUST_HEAP_MB > 4096) cannot wrap unsigned int before the
+     * promotion. The compile-time assert in <config.h> caps
+     * RUST_HEAP_MB well below that, but the cast is cheap insurance. */
+    const size_t rust_heap_pages = (size_t)RUST_HEAP_MB * (size_t)256; /* 256 pages = 1 MB */
+    void *rust_heap = pmm_alloc_pages(rust_heap_pages);
     if (!rust_heap) {
-        panic("Failed to allocate Rust heap");
+        panic("Failed to allocate Rust heap (%u MB requested)", RUST_HEAP_MB);
     }
-    rust_heap_init(rust_heap, 256 * 4096);
-    INFO("  Rust heap: %p (%u KB)", rust_heap, (256 * 4096) / 1024);
+    rust_heap_init(rust_heap, rust_heap_pages * (size_t)4096);
+    INFO("  Rust heap: %p (%u MB)", rust_heap, RUST_HEAP_MB);
 
     /* Call Rust init and verify */
     int magic = rust_init();
@@ -542,13 +574,14 @@ void kernel_main(void *dtb)
         INFO("  Message router: OK");
     }
 
-    /* Initialize model memory pools */
+    /* Initialize model memory pools (per-platform sizes from config.h) */
     INFO("Initializing model memory...");
-    int model_init = rust_model_mem_init();
+    int model_init = rust_model_mem_init(MODEL_MEM_WEIGHT_MB, MODEL_MEM_WORKSPACE_MB);
     if (model_init != 0) {
         WARN("Model memory init failed (code=%d)", model_init);
     } else {
-        INFO("  Model memory: OK (16 MB weights, 8 MB workspace)");
+        INFO("  Model memory: OK (%u MB weights, %u MB workspace)",
+             (unsigned)MODEL_MEM_WEIGHT_MB, (unsigned)MODEL_MEM_WORKSPACE_MB);
     }
 
     /* Initialize model loader registry */

@@ -410,6 +410,18 @@ static void digit_classifier_entry(void *arg)
     component_set_state((uint32_t)comp_idx, COMPONENT_TERMINATING);
 }
 
+/* ============================================================================
+ * Phase SLM M8: slm-runner Component
+ *
+ * The slm-runner entry point lives in kernel/src/slm_runner.c and is
+ * compiled as a separate static library (slm_runner) without
+ * -mgeneral-regs-only — rust_slm_session_open and rust_slm_prompt take
+ * f32 by value (AAPCS64 V0/V1) which this TU's default flags forbid.
+ * Same isolation pattern as kernel/src/slm_shell.c.
+ * ============================================================================ */
+
+extern void slm_runner_entry(void *arg);
+
 static const struct builtin_component builtin_components[] = {
     {
         .name = "counter",
@@ -452,6 +464,15 @@ static const struct builtin_component builtin_components[] = {
         .priority = COMPONENT_PRIORITY_NORMAL,
         .entry = digit_classifier_entry,
         .model_name = "mnist",
+    },
+    /* Phase SLM M8: language-model service component */
+    {
+        .name = "slm-runner",
+        .version = "1.0.0",
+        .description = "SLM prompt streaming via /slm/prompt → /slm/token",
+        .type = COMPONENT_TYPE_APPLICATION,
+        .priority = COMPONENT_PRIORITY_NORMAL,
+        .entry = slm_runner_entry,
     },
 };
 

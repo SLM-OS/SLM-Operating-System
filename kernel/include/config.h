@@ -104,4 +104,136 @@
 #define SHELL_MAX_LINE      32768
 #define SHELL_MAX_ARGS      16              /* Maximum arguments per command */
 
+/* ============================================================================
+ * Model Memory (Phase 3) — pool sizes consumed by rust_model_mem_init
+ * ============================================================================
+ *
+ * Per-platform default sizes for the model-memory weight and workspace
+ * pools. Both values are megabytes and must be multiples of 2 (the
+ * model-memory block size is 2 MB; the Rust pool allocator rejects
+ * misaligned sizes).
+ *
+ * **Hard ceiling: 1024 MB per pool.** `model_mem_init` asks PMM for a
+ * single contiguous block per pool; the buddy allocator's max order
+ * is 18 (1 GiB, see `kernel/CLAUDE.md` §"Buddy Allocator"). A request
+ * larger than 1 GiB returns `PMM_ERR_OUT_OF_RANGE` and leaves the pool
+ * uninitialized — `slm load` via the M5.3.3 PMM-bypass path still
+ * works, but `mm::alloc_weights` callers (eviction integration,
+ * future shared-weight refcounting) silently no-op. See #578 for the
+ * regression history and #550 for the multi-block follow-up that
+ * lifts the ceiling.
+ *
+ * Jetson sizes the weight pool to the buddy ceiling so Qwen2.5-1.5B-
+ * Q4_K_M (~1.0 GB resident) fits in a single block; workspace covers
+ * per-layer activations and the 512 MB KV-cache sub-pool that M5
+ * carves out (see docs/specs/slm-integration.md "Memory Plan").
+ *
+ * Pi 5 hosts smaller vision-class models. QEMU and x86-64 keep the
+ * original Phase-5 defaults so the test kernel boots inside
+ * `make test`'s 1 GB systemd MemoryMax cap.
+ */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#define MODEL_MEM_WEIGHT_MB     1024u
+#define MODEL_MEM_WORKSPACE_MB  256u
+#elif defined(PLATFORM_RASPI5)
+#define MODEL_MEM_WEIGHT_MB     512u
+#define MODEL_MEM_WORKSPACE_MB  256u
+#else /* PLATFORM_QEMU_VIRT, PLATFORM_X86_64, host harness */
+#define MODEL_MEM_WEIGHT_MB     256u
+#define MODEL_MEM_WORKSPACE_MB  128u
+#endif
+
+/* `_Static_assert` works in both C11+ and C23 without `<assert.h>` —
+ * config.h is also pulled in by the bundled Lua build (`lua_stubs.c`),
+ * which compiles with a pre-C23 standard, so the bare `static_assert`
+ * spelling is not portable here. */
+_Static_assert((MODEL_MEM_WEIGHT_MB    % 2u) == 0u,
+               "MODEL_MEM_WEIGHT_MB must be a multiple of 2 (pool block = 2 MB)");
+_Static_assert((MODEL_MEM_WORKSPACE_MB % 2u) == 0u,
+               "MODEL_MEM_WORKSPACE_MB must be a multiple of 2 (pool block = 2 MB)");
+/* The 1024 MB cap below is two ceilings stacked:
+ *   1. PMM buddy max-order (18 = 1 GiB, see kernel/CLAUDE.md
+ *      §"Buddy Allocator") rejects single-block allocations larger
+ *      than 1 GiB.
+ *   2. The Rust pool's `MAX_BLOCKS_PER_POOL = 512` in
+ *      `runtime/src/mm/model_mem.rs` makes 512 × 2 MB = 1 GiB the
+ *      effective per-pool cap. `model_mem_init` returns
+ *      `AllocError::Oversized` if either request exceeds this.
+ * Bumping this assert above 1024 requires bumping BOTH ceilings —
+ * #550 tracks the multi-block PMM follow-up. */
+_Static_assert(MODEL_MEM_WEIGHT_MB    <= 1024u,
+               "MODEL_MEM_WEIGHT_MB cannot exceed 1024 (PMM buddy + MAX_BLOCKS_PER_POOL ceiling; see #578)");
+_Static_assert(MODEL_MEM_WORKSPACE_MB <= 1024u,
+               "MODEL_MEM_WORKSPACE_MB cannot exceed 1024 (PMM buddy + MAX_BLOCKS_PER_POOL ceiling; see #578)");
+
+/* ============================================================================
+ * Rust heap — sized by SLM working-set demand
+ * ============================================================================
+ *
+ * The Rust runtime's `linked_list_allocator` lives entirely inside the
+ * region passed to `rust_heap_init`. `Vec`/`Box` allocations from the
+ * SLM forward path land here:
+ *
+ *   - KV cache: 2 (k,v) × n_layers × n_kv_heads × head_dim × ctx × 2
+ *     bytes (FP16). For Qwen2.5-1.5B (28 layers, 2 KV heads, 128
+ *     head_dim) this is ~28 MB at ctx=1024, ~56 MB at ctx=2048,
+ *     ~112 MB at ctx=4096.
+ *   - ForwardScratch: ~1 MB total — dominated by the vocab logits
+ *     buffer (152 064 × 4 B for Qwen) and the matmul/attention
+ *     scratch.
+ *
+ * The original 1 MB heap was sized for the pre-SLM ONNX/MNIST path
+ * and is not enough for any 1 B+ model. Jetson is sized for two
+ * concurrent ctx=2048 sessions plus headroom; Pi 5 carries enough
+ * for one ctx=2048 session of a 1 B-class model.
+ */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#define RUST_HEAP_MB            128u
+#elif defined(PLATFORM_RASPI5)
+#define RUST_HEAP_MB            64u
+#else /* PLATFORM_QEMU_VIRT, PLATFORM_X86_64, host harness */
+#define RUST_HEAP_MB            4u
+#endif
+
+_Static_assert(RUST_HEAP_MB > 0u, "RUST_HEAP_MB must be positive");
+/* 4 GiB upper bound mirrors the realistic per-platform RAM ceiling
+ * (Jetson 8 GB, Pi 5 8 GB, x86-64 16 GB) — anything larger almost
+ * certainly indicates a typo (e.g. RUST_HEAP_MB 12800 instead of
+ * 128) and would also overflow the `unsigned int` arithmetic in
+ * `kernel/src/main.c::pmm_alloc_pages` callers if the size_t casts
+ * were ever stripped. */
+_Static_assert(RUST_HEAP_MB <= 4096u, "RUST_HEAP_MB cannot exceed 4096 (4 GiB sanity ceiling)");
+
+/* ============================================================================
+ * RAM disk — sized to hold staged model files
+ * ============================================================================
+ *
+ * /mnt/files is backed by `ramdisk_create_default` (kernel/drivers/ramdisk.c)
+ * at 4 KB blocks. The driver does a single `pmm_alloc_pages(data_pages)`
+ * call, so the cap is the PMM buddy max-order: 2 GiB on this kernel
+ * (`PMM_MAX_ORDER = 19`, bumped 2026-05-02 from 18 to fit a
+ * Q4_K_M GGUF for Qwen2.5-1.5B which is 1.04 GB on disk).
+ *
+ * Jetson sizes to 1280 MB — covers the 1.04 GB GGUF plus headroom
+ * for demo scripts, preload.conf, and a future second-model stage.
+ * Pi 5 keeps the original 32 MB cap (Hailo HEFs are ~20 MB; SLM on
+ * Pi 5 is not the demo target). QEMU and host-harness builds must
+ * stay small enough to boot inside `make test`'s 1 GB systemd
+ * MemoryMax cap.
+ */
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#define RAMDISK_DEFAULT_MB      1280u
+#elif defined(PLATFORM_RASPI5)
+#define RAMDISK_DEFAULT_MB      32u
+#else /* PLATFORM_QEMU_VIRT, PLATFORM_X86_64, host harness */
+#define RAMDISK_DEFAULT_MB      32u
+#endif
+
+_Static_assert(RAMDISK_DEFAULT_MB > 0u, "RAMDISK_DEFAULT_MB must be positive");
+/* 2 GiB hard cap — `ramdisk_create` does a single `pmm_alloc_pages`
+ * call. The PMM buddy max-order (`PMM_MAX_ORDER` in pmm.h) is the
+ * ceiling. A multi-chunk ramdisk driver would lift this; deferred
+ * until a workload actually needs > 2 GiB of staging. */
+_Static_assert(RAMDISK_DEFAULT_MB <= 2048u, "RAMDISK_DEFAULT_MB cannot exceed 2048 (PMM buddy max-order = 2 GiB)");
+
 #endif /* CONFIG_H */

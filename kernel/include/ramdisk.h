@@ -8,28 +8,22 @@
 #define RAMDISK_H
 
 #include "blkdev.h"
+#include "config.h"   /* RAMDISK_DEFAULT_MB per-platform sizing */
 
 /* Default RAM disk configuration.
- * Bumped 2026-04-21 from 256 blocks (1 MB) to 8192 blocks (32 MB) so
- * a single Hailo HEF file (18-20 MB for ResNet-18 Hailo-8L) plus the
- * embedded demo scripts (~30 KB) and preload.conf can fit without
- * silently truncating in littlefs_file_write. Pi 5 has 8 GB RAM so
- * the 31 MB cost is negligible; QEMU defaults to 1 GB which still
- * leaves plenty. Revisit if HEFs ever grow past ~30 MB. */
-#define RAMDISK_DEFAULT_BLOCK_SIZE   4096     /* 4 KB blocks */
-/* 256 MB total — bumped from 32 MB so a real SLM model fits.
- * SmolLM2-135M Q4_K_M is ~100 MB; bigger Qwen2.5-1.5B is ~1 GB
- * which still won't fit but at least lets the smaller end-to-end
- * test target upload without an SD-backed mount.
  *
- * PMM cost is 256 MB. Fine on Pi 5 / Jetson (GB+ RAM). On QEMU
- * `make test` runs with -m 1G, so the ramdisk consumes ~25% of
- * guest RAM — leaves ~750 MB for kernel BSS, task stacks, lwIP
- * heap, and test allocations, which `make test` proves is enough
- * (full QEMU suite passes post-bump). If a future test starts
- * OOM'ing on QEMU, gate the bump behind PLATFORM != QEMU_VIRT
- * before dropping the ramdisk size. (#597 throughput target). */
-#define RAMDISK_DEFAULT_BLOCK_COUNT  65536    /* 256 MB total */
+ * Block size is fixed at 4 KB (matches PMM page size). Block count
+ * is derived from the per-platform `RAMDISK_DEFAULT_MB` knob in
+ * `<config.h>` — see the comment block there for sizing rationale.
+ * Jetson is 1.5 GB to stage a Q4_K_M GGUF (Qwen2.5-1.5B is ~1.0 GB);
+ * Pi 5 and QEMU stay at 32 MB for Hailo HEFs and the test budget.
+ *
+ * Block-count history:
+ *   - 256 blocks (1 MB) — original Phase 5 ONNX-MNIST sizing.
+ *   - 8192 blocks (32 MB) — bumped 2026-04-21 for Hailo HEFs.
+ *   - per-platform (32 / 1536 MB) — bumped 2026-04-30 for SLM GGUFs. */
+#define RAMDISK_DEFAULT_BLOCK_SIZE   4096u    /* 4 KB blocks */
+#define RAMDISK_DEFAULT_BLOCK_COUNT  ((RAMDISK_DEFAULT_MB) * 256u)  /* 256 blocks per MB */
 
 /*
  * Create a RAM disk with specified geometry.

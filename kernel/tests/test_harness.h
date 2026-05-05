@@ -41,6 +41,18 @@ int test_suite_model_mem_smoke(void);
 /* Eviction policy tests (Phase AI-Eviction M1/M2 — calls into Rust) */
 int test_suite_eviction(void);
 
+/* SLM loader / GGUF FFI tests (Phase SLM, M1.5 — calls into Rust) */
+int test_suite_slm_load(void);
+
+/* SLM shell verb dispatch tests (Phase SLM, M7.1 — calls into the
+ * `slm` command family registered via builtin_commands[]) */
+int test_suite_slm_shell(void);
+
+/* SLM runner component tests (Phase SLM, M8.1 — exercises the
+ * setup_session / handle_prompt boundary that drives /slm/prompt →
+ * /slm/token → /slm/done streaming) */
+int test_suite_slm_runner(void);
+
 /* Priority inheritance mutex tests */
 int test_suite_pi_mutex(void);
 

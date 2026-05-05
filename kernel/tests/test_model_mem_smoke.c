@@ -24,6 +24,7 @@
 
 #include "test_harness.h"
 #include "unity.h"
+#include "config.h"      /* RUST_HEAP_MB */
 #include "slm_ffi.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -125,6 +126,35 @@ static void test_workspace_alloc_round_trip(void)
     TEST_ASSERT_EQUAL_UINT64(before.free_blocks, after.free_blocks);
 }
 
+/*
+ * Confirm the Rust heap was sized to the per-platform `RUST_HEAP_MB`
+ * knob from `<config.h>` and not silently regressed. The SLM forward
+ * path's KV cache (~28 MB at ctx=1024 for Qwen2.5-1.5B) and
+ * `ForwardScratch` live on this heap; a regression that cuts the
+ * heap below the SLM working set would surface as an opaque
+ * "alloc::alloc::handle_alloc_error" panic mid-decode rather than at
+ * boot. This test pins the boot-time invariant.
+ */
+static void test_rust_heap_size_matches_config(void)
+{
+    /* Width-explicit MB→bytes via shift instead of `MB * 1024u * 1024u`
+     * so the math is unambiguous on a hypothetical 32-bit host build
+     * (size_t == uint32_t would overflow at the 4096 MB cap from
+     * config.h's _Static_assert; SLM-OS is 64-bit-only today, but the
+     * shift form makes the intent obvious for future readers). */
+    const uint64_t expected = (uint64_t)RUST_HEAP_MB << 20;
+    const size_t actual = rust_heap_size_bytes();
+
+    /* Non-zero: rust_heap_init was actually called. */
+    TEST_ASSERT_TRUE(actual > 0);
+
+    /* Exact match: the kernel boot path passed RUST_HEAP_MB through
+     * unmodified. Drift here means either main.c's pmm_alloc_pages
+     * call diverged from the constant, or the Rust side is rounding
+     * down on its own. Either is a regression worth catching. */
+    TEST_ASSERT_EQUAL_UINT64(expected, actual);
+}
+
 int test_suite_model_mem_smoke(void)
 {
     UnityBegin("Model Memory Smoke Tests");
@@ -132,6 +162,7 @@ int test_suite_model_mem_smoke(void)
     RUN_TEST(test_pools_initialized_with_blocks);
     RUN_TEST(test_weight_alloc_round_trip);
     RUN_TEST(test_workspace_alloc_round_trip);
+    RUN_TEST(test_rust_heap_size_matches_config);
 
     return UnityEnd();
 }
