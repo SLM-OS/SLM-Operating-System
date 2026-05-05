@@ -182,6 +182,8 @@ int test_harness_run_all(void)
     total_failures += test_suite_component();
     total_failures += test_suite_vmm();
     total_failures += test_suite_lua();
+    /* libc-stub regression: strtol/strtod chain rewrite in lua_stubs.c. */
+    total_failures += test_suite_lua_stubs();
 #endif
     /* Networking tests run on all platforms with ENABLE_NETWORKING */
 #if defined(ENABLE_NETWORKING)

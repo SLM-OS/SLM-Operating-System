@@ -137,6 +137,9 @@ int test_suite_xhci_xfer(void);
 /* Lua scripting tests */
 int test_suite_lua(void);
 
+/* libc-stub regression tests (strtol / strtod in lua_stubs.c) */
+int test_suite_lua_stubs(void);
+
 /* Multi-core integration tests (actual tasks across CPUs) */
 int test_suite_integration(void);
 
