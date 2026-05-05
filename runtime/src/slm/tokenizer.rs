@@ -75,6 +75,7 @@ pub const MAX_PLAUSIBLE_MERGES: usize = 1 << 20;
 const MAX_TOKEN_BYTES: usize = 512;
 
 /// GGUF `token_type` values per the GGML spec.
+#[allow(dead_code)] // referenced from cfg(test) fixtures
 const TOKEN_TYPE_NORMAL: i32 = 1;
 const TOKEN_TYPE_BYTE: i32 = 2;
 const TOKEN_TYPE_CONTROL: i32 = 3;
@@ -127,6 +128,12 @@ pub struct Bbpe {
     /// byte has no direct vocab entry, in which case
     /// [`Self::encode_piece`] returns a hard error.
     byte_table: [Option<u32>; 256],
+    /// Per-token-id reverse of [`Self::byte_table`]. `byte_for_id[id]`
+    /// returns `Some(b)` when the token represents raw byte `b`
+    /// (a Qwen2-style `<0xNN>` BYTE-type entry); `None` for normal
+    /// or special tokens whose body is GPT-2 byte-to-unicode encoded
+    /// and must be reverse-mapped on decode.
+    byte_for_id: Vec<Option<u8>>,
 }
 
 impl Bbpe {
@@ -297,6 +304,22 @@ impl Bbpe {
             }
         }
 
+        // Reverse byte_table into a per-token-id lookup. Used by
+        // decode to identify Qwen2-style `<0xNN>` BYTE-type tokens
+        // that need their stored byte emitted directly instead of
+        // running their literal body through the byte-to-unicode
+        // reverse mapping (which would otherwise turn `<0x80>` into
+        // the bytes for `<`, `0`, `x`, `8`, `0`, `>` — wrong).
+        let mut byte_for_id: Vec<Option<u8>> = alloc::vec![None; vocab.len()];
+        for b in 0..256 {
+            if let Some(id) = byte_table[b] {
+                let idx = id as usize;
+                if idx < byte_for_id.len() {
+                    byte_for_id[idx] = Some(b as u8);
+                }
+            }
+        }
+
         Ok(Self {
             vocab,
             bytes_to_id,
@@ -304,6 +327,7 @@ impl Bbpe {
             specials,
             special_ids_to_bytes,
             byte_table,
+            byte_for_id,
         })
     }
 
@@ -324,10 +348,24 @@ impl Bbpe {
     /// Special-token strings are tokenized as bytes — pass ChatML
     /// inputs through [`crate::slm::chat_template::encode_chat`] to
     /// have specials looked up by name.
+    ///
+    /// Each pre-tokenized chunk's raw bytes are run through the GPT-2
+    /// byte-to-unicode mapping ([`byte_to_unicode_char`]) before BPE
+    /// merging because the GGUF vocab and merges are stored in that
+    /// encoded form. Without this, raw bytes like `0x20` (space) would
+    /// never match a vocab entry whose body is `Ġ` (UTF-8 `0xC4 0xA0`),
+    /// and every chunk would degenerate to single-byte fallback tokens
+    /// that the model wasn't trained on.
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut out: Vec<u32> = Vec::with_capacity(text.len() / 3);
+        let mut encoded: String = String::new();
         for chunk in pre_tokenize(text) {
-            self.encode_piece(chunk.as_bytes(), &mut out);
+            encoded.clear();
+            encoded.reserve(chunk.len() * 2);
+            for &b in chunk.as_bytes() {
+                encoded.push(byte_to_unicode_char(b));
+            }
+            self.encode_piece(encoded.as_bytes(), &mut out);
         }
         out
     }
@@ -345,18 +383,69 @@ impl Bbpe {
     }
 
     fn decode_inner(&self, ids: &[u32], render_specials: bool) -> String {
-        // saturating_mul: a hostile caller passing an enormous slice
-        // shouldn't be able to overflow Vec::with_capacity (which
-        // panics on overflow). The cap is just a hint — the loop
-        // below grows as needed.
-        let mut bytes: Vec<u8> = Vec::with_capacity(ids.len().saturating_mul(3));
+        // Phase 1: build the encoded UTF-8 byte stream by concatenating
+        // each token's byte representation:
+        //   * Qwen2-style BYTE tokens emit the raw byte they stand for.
+        //     When the encoder fell back to per-byte for the multi-byte
+        //     UTF-8 of an encoded char (e.g. `Ġ` = 0xC4 0xA0), the two
+        //     emitted raw bytes will reassemble into valid UTF-8 of the
+        //     encoded char downstream — phase 2's chars-then-reverse
+        //     loop will then recover the original byte.
+        //   * Normal tokens emit their vocab body verbatim. The body is
+        //     already GPT-2 byte-to-unicode encoded UTF-8.
+        //   * Specials emit their literal name (e.g. `<|im_start|>`)
+        //     when `render_specials`; otherwise skipped.
+        //
+        // saturating_mul guards `Vec::with_capacity` against an
+        // overflow when a hostile caller passes an enormous slice.
+        let mut encoded: Vec<u8> = Vec::with_capacity(ids.len().saturating_mul(3));
         for &id in ids {
-            if !render_specials && self.special_ids_to_bytes.contains_key(&id) {
+            if self.special_ids_to_bytes.contains_key(&id) {
+                if render_specials {
+                    if let Some(body) = self.special_ids_to_bytes.get(&id) {
+                        encoded.extend_from_slice(body);
+                    }
+                }
                 continue;
             }
             let idx = id as usize;
-            if idx < self.vocab.len() {
-                bytes.extend_from_slice(&self.vocab[idx]);
+            if idx >= self.vocab.len() {
+                continue;
+            }
+            if let Some(b) = self.byte_for_id.get(idx).copied().flatten() {
+                encoded.push(b);
+            } else {
+                encoded.extend_from_slice(&self.vocab[idx]);
+            }
+        }
+
+        // Phase 2: parse the encoded byte stream as UTF-8 and reverse
+        // the byte-to-unicode mapping char-by-char to recover the raw
+        // bytes of the original input. Chars outside the encoding
+        // range (e.g. inside a special-token body like `<|im_start|>`,
+        // whose `|` codepoint isn't part of the byte-to-unicode
+        // alphabet — well, `|` IS in the printable range so it maps
+        // identity, but emoji or other Unicode in a special would
+        // not) pass through as their UTF-8 bytes so no data is
+        // dropped.
+        let s: String = match core::str::from_utf8(&encoded) {
+            Ok(s) => String::from(s),
+            Err(_) => {
+                // Encoded stream isn't fully valid UTF-8 — most likely
+                // because a multi-byte char's tail token was clipped
+                // mid-decode. Use the lossy converter so we can still
+                // emit something useful.
+                String::from_utf8_lossy(&encoded).into_owned()
+            }
+        };
+        let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
+        for ch in s.chars() {
+            if let Some(b) = unicode_char_to_byte(ch) {
+                bytes.push(b);
+            } else {
+                let mut buf = [0u8; 4];
+                let utf8 = ch.encode_utf8(&mut buf);
+                bytes.extend_from_slice(utf8.as_bytes());
             }
         }
         // Replace invalid UTF-8 with U+FFFD rather than failing — the
@@ -407,17 +496,41 @@ impl Bbpe {
     }
 
     /// Push the BPE-merged token ids for `bytes` onto `out`.
+    ///
+    /// `bytes` is the GPT-2 byte-to-unicode encoded UTF-8 form of one
+    /// pre-tokenized chunk (the caller in [`Self::encode`] applies the
+    /// mapping). Initial BPE pieces are one CHARACTER each (1–4 UTF-8
+    /// bytes per piece) because merges and vocab keys align on
+    /// character boundaries — splitting `Ġ` (UTF-8 `0xC4 0xA0`) into
+    /// two single-byte pieces would never re-merge through any vocab
+    /// entry.
     fn encode_piece(&self, bytes: &[u8], out: &mut Vec<u32>) {
         if bytes.is_empty() {
             return;
         }
 
-        // Initial pieces: one byte each, owned `Vec<u8>` so the merge
-        // loop can grow them without juggling lifetimes. For typical
-        // pre-token chunks this is at most a few dozen bytes.
-        let mut pieces: Vec<Vec<u8>> = Vec::with_capacity(bytes.len());
-        for &b in bytes {
-            pieces.push(alloc::vec![b]);
+        // Initial pieces: one CHARACTER each. If the input isn't valid
+        // UTF-8 (shouldn't happen — `encode` produces it from the
+        // byte-to-unicode mapping which always yields valid UTF-8),
+        // fall back to per-byte fallback for the whole piece.
+        let s = match core::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => {
+                for &b in bytes {
+                    if let Some(id) = self.byte_table[b as usize] {
+                        out.push(id);
+                    } else if let Some(&id) = self.bytes_to_id.get(&alloc::vec![b]) {
+                        out.push(id);
+                    }
+                }
+                return;
+            }
+        };
+        let mut pieces: Vec<Vec<u8>> = Vec::with_capacity(s.chars().count());
+        for ch in s.chars() {
+            let mut buf = [0u8; 4];
+            let utf8 = ch.encode_utf8(&mut buf);
+            pieces.push(utf8.as_bytes().to_vec());
         }
 
         // Repeatedly merge the lowest-rank adjacent pair. O(n²) worst
@@ -488,6 +601,61 @@ fn is_specialish(bytes: &[u8]) -> bool {
     bytes.len() >= 4
         && bytes.starts_with(b"<|")
         && bytes.ends_with(b"|>")
+}
+
+// ---------------------------------------------------------------------------
+// GPT-2 byte-to-unicode mapping
+// ---------------------------------------------------------------------------
+//
+// Mirrors `bytes_to_unicode` from `transformers/models/gpt2/tokenization_gpt2.py`.
+// Bytes that are already printable Latin-1 (`!..~`, `¡..¬`, `®..ÿ`) map
+// to themselves as Unicode code points. The remaining 68 control /
+// space / DEL / soft-hyphen bytes get assigned U+0100..U+0143 in order
+// of byte value:
+//
+//   bytes 0x00..=0x1F → U+0100..=U+011F   (32 entries)
+//   byte  0x20        → U+0120            (Ġ — the famous "space marker")
+//   bytes 0x7F..=0xA0 → U+0121..=U+0142   (34 entries)
+//   byte  0xAD        → U+0143
+//
+// SmolLM2 / Llama / Qwen2 vocabs and merges are stored in this encoded
+// form, so encode must apply it before BPE merging and decode must
+// reverse it to recover the actual UTF-8 output.
+
+/// Encode one raw byte as its GPT-2 byte-to-unicode character.
+pub(crate) fn byte_to_unicode_char(b: u8) -> char {
+    let code: u32 = match b {
+        0x00..=0x1F => 0x100 + b as u32,
+        0x20 => 0x120,
+        0x21..=0x7E => b as u32,
+        0x7F..=0xA0 => 0x121 + (b as u32 - 0x7F),
+        0xA1..=0xAC => b as u32,
+        0xAD => 0x143,
+        0xAE..=0xFF => b as u32,
+    };
+    // SAFETY: every arm above resolves to a valid Unicode scalar
+    // value — the mapping is closed over `0..256` and produces code
+    // points strictly below U+0144 plus the printable Latin-1 range.
+    // None of those values fall in the surrogate hole (U+D800..U+DFFF).
+    char::from_u32(code).expect("byte_to_unicode_char produces only valid scalars")
+}
+
+/// Reverse [`byte_to_unicode_char`]: map a Unicode character back to
+/// the raw byte it represents in the GPT-2 byte-to-unicode encoding.
+/// Returns `None` for characters outside the encoding range (e.g.
+/// chars from the body of a special token like `<|im_start|>`).
+pub(crate) fn unicode_char_to_byte(ch: char) -> Option<u8> {
+    let c = ch as u32;
+    match c {
+        0x21..=0x7E => Some(c as u8),
+        0xA1..=0xAC => Some(c as u8),
+        0xAE..=0xFF => Some(c as u8),
+        0x100..=0x11F => Some((c - 0x100) as u8),
+        0x120 => Some(0x20),
+        0x121..=0x142 => Some(0x7F + (c - 0x121) as u8),
+        0x143 => Some(0xAD),
+        _ => None,
+    }
 }
 
 /// Translate a BYTE-type token body to the raw byte it stands for.
