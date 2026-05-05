@@ -2916,6 +2916,33 @@ static void test_qmd_selftest_reference_matches_encoder(void)
                       GA10B_QMD_SIZE_BYTES), 0);
 }
 
+/* Pin CWD_MEMBAR_TYPE = L1_SYSMEMBAR (#596). The reference-blob
+ * test catches the change indirectly via the dword-11 byte
+ * difference, but a focused field-pin guards the intent: if a
+ * future maintainer regenerates the reference for an unrelated
+ * change AND simultaneously drops the CWD membar (e.g. via a
+ * "minimize QMD overhead" cleanup), the blob test passes but iter 1
+ * silently regresses to ~83% wrong-argmax. CWD_MEMBAR_TYPE lives
+ * at QMD bits 368-369 = dword 11, bit-offset 16, 2 bits wide. */
+static void test_qmd_populate_sets_cwd_sysmembar(void)
+{
+    printf("== test_qmd_populate_sets_cwd_sysmembar ==\n");
+    uint32_t qmd[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(qmd,
+                       GA10B_QMD_SELFTEST_SHADER_GPU_VA,
+                       GA10B_QMD_SELFTEST_CBUF_GPU_VA,
+                       GA10B_QMD_SELFTEST_REGISTER_COUNT,
+                       GA10B_QMD_SELFTEST_GRID_X,
+                       GA10B_QMD_SELFTEST_GRID_Y,
+                       GA10B_QMD_SELFTEST_GRID_Z,
+                       GA10B_QMD_SELFTEST_BLOCK_X,
+                       GA10B_QMD_SELFTEST_BLOCK_Y,
+                       GA10B_QMD_SELFTEST_BLOCK_Z);
+    uint32_t cwd_membar_field = (qmd[11] >> 16) & 0x3u;
+    REQUIRE_EQ(cwd_membar_field,
+               GA10B_QMD_CWD_MEMBAR_TYPE_L1_SYSMEMBAR);
+}
+
 static void test_qmd_populate_is_deterministic(void)
 {
     printf("== test_qmd_populate_is_deterministic ==\n");
@@ -3114,6 +3141,7 @@ int main(void)
     test_v7_validate_rejects_null_handoff();
 
     test_qmd_selftest_reference_matches_encoder();
+    test_qmd_populate_sets_cwd_sysmembar();
     test_qmd_populate_is_deterministic();
     test_qmd_set_bits_rejects_inverted_range();
 

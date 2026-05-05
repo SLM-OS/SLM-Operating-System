@@ -103,6 +103,24 @@
 #define GA10B_QMD_INVALIDATE_INSTRUCTION_CACHE_BIT      190
 #define GA10B_QMD_INVALIDATE_SHADER_CONSTANT_CACHE_BIT  191
 
+/* CTA Workload Dispatcher membar — runs before this QMD's CTAs
+ * launch. NV reference: ../slmos-reference-cache/mesa/mesa-clc7c0qmd.h
+ * NVC7C0_QMDV02_03_CWD_MEMBAR_TYPE at MW(369:368), 2-bit field with:
+ *   L1_NONE      = 0  (no membar — default; can leave stale L1/L2
+ *                       lines visible to a kernel that just had its
+ *                       inputs rewritten by the CPU)
+ *   L1_SYSMEMBAR = 1  (system memory barrier; forces this CTA's
+ *                       loads to observe any pending writes through
+ *                       to sysmem — the option needed to fix the
+ *                       iter-1 stale-input race in #596)
+ *   L1_MEMBAR    = 3  (GPU-only memory barrier, weaker than
+ *                       SYSMEMBAR; ordering only within GPU caches) */
+#define GA10B_QMD_CWD_MEMBAR_TYPE_LO_BIT                368
+#define GA10B_QMD_CWD_MEMBAR_TYPE_HI_BIT                369
+#define GA10B_QMD_CWD_MEMBAR_TYPE_L1_NONE                 0u
+#define GA10B_QMD_CWD_MEMBAR_TYPE_L1_SYSMEMBAR            1u
+#define GA10B_QMD_CWD_MEMBAR_TYPE_L1_MEMBAR               3u
+
 /* Caching enable flags. */
 #define GA10B_QMD_SM_GLOBAL_CACHING_ENABLE_BIT          134
 

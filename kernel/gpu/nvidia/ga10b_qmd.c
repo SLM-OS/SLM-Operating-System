@@ -143,6 +143,22 @@ void ga10b_qmd_populate(uint32_t *qmd,
     ga10b_qmd_set_bits(qmd, GA10B_QMD_INVALIDATE_SHADER_CONSTANT_CACHE_BIT,
                        GA10B_QMD_INVALIDATE_SHADER_CONSTANT_CACHE_BIT, 1u);
 
+    /* CWD_MEMBAR_TYPE = L1_SYSMEMBAR. Issues a system memory barrier
+     * before this QMD's CTAs launch, forcing this kernel's loads to
+     * observe any pending writes through to sysmem — including the
+     * CPU-side writes to input_buf_phys that happened just before
+     * dispatch. Without this, the GPU's L1/L2 read paths can return
+     * stale lines from a previous kernel's reads of the same
+     * addresses, and the user's set_input_fill is silently ignored
+     * by the next dispatch (the iter-1 race in #596 — empirically
+     * ~83% iter-1 failure rate on the alternating-fill probe before
+     * this fix). The cost is one membar per dispatch — measured in
+     * nanoseconds at Tegra GPU clocks. Reference: NVC7C0_QMDV02_03
+     * field MW(369:368) per ../slmos-reference-cache/mesa/mesa-clc7c0qmd.h. */
+    ga10b_qmd_set_bits(qmd, GA10B_QMD_CWD_MEMBAR_TYPE_HI_BIT,
+                       GA10B_QMD_CWD_MEMBAR_TYPE_LO_BIT,
+                       GA10B_QMD_CWD_MEMBAR_TYPE_L1_SYSMEMBAR);
+
     /* cbuf[0]: CUDA-compatible param area at cbuf_gpu_va. The valid
      * bit goes on, size encodes shifted-by-4 (so the field is 16-byte
      * granular; matches NVK's qmd_impl_set_cbuf!(NONE, SHIFTED4)). */
