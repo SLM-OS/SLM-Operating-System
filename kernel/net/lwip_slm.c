@@ -28,6 +28,7 @@
 #include "lwip/memp.h"
 
 #include "shell_io_tcp.h"
+#include "tcp_shell_server.h"
 #include "tcp_telemetry_server.h"
 #include "admin_telemetry.h"
 #include "netif/ethernet.h"
@@ -773,14 +774,33 @@ int net_shutdown(void) {
         last_was_bound = false;
     }
 
-    /* 2. Abort all TCP PCBs. Walks each of lwIP's three lists in
+    /* 2a. Stop in-tree listen-pcb owners FIRST so they nullify their
+     *     own static `listen_pcb` pointers before lwIP frees the
+     *     underlying memory. Skipping this step left a use-after-
+     *     free trap: net_shutdown closed the listen pcb via the
+     *     direct walk below, but tcp_shell_server / tcp_telemetry_server
+     *     each kept their cached pointers, and the next `telnetd start`
+     *     /  `telemetry start` hit `if (listen_pcb)` early-return on
+     *     the dangling pointer, then a subsequent `stop` corrupted the
+     *     MEMP_TCP_PCB_LISTEN free list, then the next `start` tripped
+     *     `tcp_free: LISTEN` deep in lwIP. Each stop fn here is
+     *     idempotent — a no-op when the listener wasn't running.
+     *
+     *     NB: any new in-tree listen-pcb owner must be added here too;
+     *     the listen-pcb walk in step 2b is a defense-in-depth net,
+     *     not a substitute. */
+    tcp_shell_server_stop();
+    tcp_telemetry_server_stop();
+
+    /* 2b. Abort all TCP PCBs. Walks each of lwIP's three lists in
      * turn. The active + tw lists hold `struct tcp_pcb *` and use
      * tcp_abort (sends RST + frees synchronously). Listen pcbs are
      * the separate `struct tcp_pcb_listen` type and use tcp_close
      * (for LISTEN state, lwIP's tcp_close just unbinds + frees the
      * listen-pool slot — there's no connection to close). All three
      * variants capture next BEFORE the close to avoid dereffing a
-     * freed pcb. */
+     * freed pcb. After step 2a the listen list is normally empty;
+     * this walk only catches strays. */
     abort_tcp_pcb_list(tcp_active_pcbs);
     abort_tcp_pcb_list(tcp_tw_pcbs);
     {
