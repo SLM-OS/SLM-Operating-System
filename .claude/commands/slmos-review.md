@@ -40,6 +40,7 @@ no POSIX. All code runs in kernel space (EL1/EL2 on ARM64, Ring 0 on x86-64).
 - Cross-platform build breakage risk (check all targets: QEMU ARM64, Pi 5, Jetson, x86-64)
 - Rust FFI `extern "C"` without documented safety invariants
 - Lock ordering inconsistency
+- **Unbraced multi-line control flow bodies in C** — `if`/`else`/`while`/`for`/`do` whose body spans multiple source lines but lacks `{ ... }`. Single-line guards (`if (err) return rc;`) are fine and intentionally allowed. Canonical check: clang-tidy's `readability-braces-around-statements` with `ShortStatementLines: 1`. Vendored trees (`kernel/lib/lwip`, `kernel/lib/lua`, `kernel/lib/littlefs`, `kernel/lib/fatfs`, `kernel/lib/fdt`, `kernel/lib/nanopb`) are exempt.
 
 ### Suggestions (nice to have)
 
