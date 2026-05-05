@@ -40,10 +40,11 @@ no POSIX. All code runs in kernel space (EL1/EL2 on ARM64, Ring 0 on x86-64).
 - Cross-platform build breakage risk (check all targets: QEMU ARM64, Pi 5, Jetson, x86-64)
 - Rust FFI `extern "C"` without documented safety invariants
 - Lock ordering inconsistency
-- **Unbraced multi-line control flow bodies in C** — flag `if`/`else`/`while`/`for`/`do` whose body spans multiple source lines but lacks `{ ... }`.
-  - Single-line guards (`if (err) return rc;`) are fine and intentionally allowed.
+- **Unbraced control flow bodies in C** — flag `if`/`else`/`while`/`for`/`do` without `{ ... }` UNLESS the construct is a stand-alone single-line guard.
+  - Exempt: stand-alone `if (cond) stmt;` on a single source line — e.g. `if (err) return rc;`. Only the bare `if` form is exempt; the `if` must not have an `else`/`else if` arm.
+  - **NOT exempt:** chained `if/else if/.../else`, even when every branch's body is a single line. The chain must be fully braced. Reason: clang-tidy's `readability-braces-around-statements` flags these (it measures body span on the outer `if`, which always spans multiple lines once an `else` is attached), and that's the convention the kernel C tree was normalised to in PR #627.
   - Canonical check: clang-tidy's `readability-braces-around-statements` with `ShortStatementLines: 1`.
-  - Exempt: anything under `kernel/lib/` (vendored: lwip, lua, littlefs, fatfs, fdt, nanopb, plus `md5.c` and `sha256.c`) and any `**/*.pb.c` (nanopb-generated outputs, regardless of location).
+  - Exempt files: anything under `kernel/lib/` (vendored: lwip, lua, littlefs, fatfs, fdt, nanopb, plus `md5.c` and `sha256.c`) and any `**/*.pb.c` (nanopb-generated outputs, regardless of location).
 
 ### Suggestions (nice to have)
 
