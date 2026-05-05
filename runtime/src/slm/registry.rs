@@ -156,6 +156,17 @@ impl LoadedSlm {
     /// [`Self::weight_pages`] isn't backed (degenerate state), or
     /// the computed byte range falls outside the buffer.
     pub fn tensor_bytes(&self, name: &str) -> Option<&[u8]> {
+        Some(self.tensor_info_and_bytes(name)?.1)
+    }
+
+    /// Look up a tensor's descriptor and its raw byte slice in a
+    /// single pass over the tensor table. Callers that need both
+    /// (the M5 forward pass dispatches on `info.ggml_type` and reads
+    /// the bytes) save the second linear scan that
+    /// `tensor_info(name)` followed by `tensor_bytes(name)` would
+    /// otherwise pay — `~340 string compares × 7 tensors × 30 layers`
+    /// per token on Qwen2.5-1.5B.
+    pub fn tensor_info_and_bytes(&self, name: &str) -> Option<(&OwnedTensorInfo, &[u8])> {
         let info = self.tensor_info(name)?;
         let n_elements = elements_of(&info.dims)?;
         let size = ggml_type_byte_size(info.ggml_type, n_elements)? as usize;
@@ -165,7 +176,7 @@ impl LoadedSlm {
         if abs_end > bytes.len() {
             return None;
         }
-        Some(&bytes[abs_start..abs_end])
+        Some((info, &bytes[abs_start..abs_end]))
     }
 
     /// Borrow the full owned weight buffer (header + tensor data).

@@ -623,24 +623,50 @@ pub fn dequantize_row_q6_k(weights: &[u8], out: &mut [f32]) -> Option<usize> {
         let dst = &mut out[b * Q6_K_BLOCK_ELEMENTS..(b + 1) * Q6_K_BLOCK_ELEMENTS];
 
         for half in 0..2 {
-            let ql = &ql_all[half * 64..half * 64 + 64];
-            let qh = &qh_all[half * 32..half * 32 + 32];
-            let sc = &scales[half * 8..half * 8 + 8];
-            let y = &mut dst[half * 128..half * 128 + 128];
-            for l in 0..32 {
-                let is = l / 16; // sub-block index within this half (0 or 1)
-                let q1 = ((ql[l] & 0x0F) | (((qh[l] >> 0) & 0x03) << 4)) as i32 - 32;
-                let q2 = ((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 0x03) << 4)) as i32 - 32;
-                let q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 0x03) << 4)) as i32 - 32;
-                let q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 0x03) << 4)) as i32 - 32;
-                y[l] = d * (sc[is] as i8 as i32 as f32) * (q1 as f32);
-                y[l + 32] = d * (sc[is + 2] as i8 as i32 as f32) * (q2 as f32);
-                y[l + 64] = d * (sc[is + 4] as i8 as i32 as f32) * (q3 as f32);
-                y[l + 96] = d * (sc[is + 6] as i8 as i32 as f32) * (q4 as f32);
-            }
+            dequant_q6k_half(
+                &ql_all[half * 64..half * 64 + 64],
+                &qh_all[half * 32..half * 32 + 32],
+                &scales[half * 8..half * 8 + 8],
+                d,
+                &mut dst[half * 128..half * 128 + 128],
+            );
         }
     }
     Some(n_out)
+}
+
+/// Decode one 128-element half of a Q6_K super-block.
+///
+/// `ql` is 64 bytes (low-4-bit nibbles for 128 weights, packed as
+/// low/high nibbles), `qh` is 32 bytes (high-2-bit pairs, 4 weights
+/// per byte at shifts 0/2/4/6), `sc` is 8 signed `i8` scales (2
+/// sub-blocks of 16 elements each, with the second sub-block's two
+/// scales picked up at `+2`, `+4`, `+6` offsets). `d` is the f32
+/// super-block scale; `y` is the 128-element output.
+///
+/// Each `l in 0..32` decodes 4 weights at positions `{l, l+32, l+64,
+/// l+96}`. Scale bytes are signed (`as i8 as i32`); reading them
+/// unsigned silently scales every output by ~63× wrong magnitude
+/// (and wrong sign for negative scales) — pinned by
+/// `dequantize_q6k_signed_scale_positive_output` in this module's
+/// tests.
+#[inline]
+fn dequant_q6k_half(ql: &[u8], qh: &[u8], sc: &[u8], d: f32, y: &mut [f32]) {
+    debug_assert_eq!(ql.len(), 64);
+    debug_assert_eq!(qh.len(), 32);
+    debug_assert_eq!(sc.len(), 8);
+    debug_assert_eq!(y.len(), 128);
+    for l in 0..32 {
+        let is = l / 16; // sub-block index within this half (0 or 1)
+        let q1 = ((ql[l] & 0x0F) | (((qh[l] >> 0) & 0x03) << 4)) as i32 - 32;
+        let q2 = ((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 0x03) << 4)) as i32 - 32;
+        let q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 0x03) << 4)) as i32 - 32;
+        let q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 0x03) << 4)) as i32 - 32;
+        y[l] = d * (sc[is] as i8 as i32 as f32) * (q1 as f32);
+        y[l + 32] = d * (sc[is + 2] as i8 as i32 as f32) * (q2 as f32);
+        y[l + 64] = d * (sc[is + 4] as i8 as i32 as f32) * (q3 as f32);
+        y[l + 96] = d * (sc[is + 6] as i8 as i32 as f32) * (q4 as f32);
+    }
 }
 
 // ---------------------------------------------------------------------------

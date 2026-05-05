@@ -412,7 +412,11 @@ impl Bbpe {
             if idx >= self.vocab.len() {
                 continue;
             }
-            if let Some(b) = self.byte_for_id.get(idx).copied().flatten() {
+            // `byte_for_id.len() == vocab.len()` by construction in
+            // `from_gguf`; the bounds check above on `idx` against
+            // `vocab.len()` therefore covers `byte_for_id` too.
+            debug_assert_eq!(self.byte_for_id.len(), self.vocab.len());
+            if let Some(b) = self.byte_for_id[idx] {
                 encoded.push(b);
             } else {
                 encoded.extend_from_slice(&self.vocab[idx]);
@@ -1116,6 +1120,40 @@ mod tests {
         // Sanity-only: confirm the constant is exposed.
         assert_eq!(MAX_PLAUSIBLE_VOCAB, 1 << 20);
         assert_eq!(MAX_PLAUSIBLE_MERGES, 1 << 20);
+    }
+
+    #[test]
+    fn byte_to_unicode_round_trip_all_256_bytes() {
+        // Pin the GPT-2 byte-to-unicode encoding's lossless round-trip
+        // for every byte 0x00..=0xFF. A regression in either
+        // `byte_to_unicode_char` or `unicode_char_to_byte` (e.g. an
+        // off-by-one in one of the U+0100..U+0143 range arms) would
+        // silently corrupt encode → decode for affected bytes.
+        for b in 0u8..=255 {
+            let ch = byte_to_unicode_char(b);
+            assert_eq!(
+                unicode_char_to_byte(ch),
+                Some(b),
+                "byte 0x{:02X} encoded as U+{:04X} did not round-trip",
+                b,
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn byte_to_unicode_known_anchors() {
+        // The three named anchor characters that document the encoding.
+        assert_eq!(byte_to_unicode_char(b'\n'), '\u{010A}'); // Ċ
+        assert_eq!(byte_to_unicode_char(b' '), '\u{0120}'); // Ġ
+        assert_eq!(byte_to_unicode_char(b'!'), '!');
+        assert_eq!(unicode_char_to_byte('\u{010A}'), Some(b'\n'));
+        assert_eq!(unicode_char_to_byte('\u{0120}'), Some(b' '));
+        assert_eq!(unicode_char_to_byte('!'), Some(b'!'));
+        // Outside the encoding range — special-token chars like the
+        // Asian-language glyphs in Qwen2's `<|im_start|>` won't all
+        // map. Pick a safe out-of-range char.
+        assert_eq!(unicode_char_to_byte('中'), None);
     }
 
     #[test]

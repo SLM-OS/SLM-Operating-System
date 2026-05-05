@@ -120,8 +120,11 @@ pub struct ForwardScratch {
     /// (608 KB for Qwen2.5-1.5B) on every step.
     pub logits: Vec<f32>,
 
-    /// FP32 dequant scratch for the embedding lookup (`hidden`
-    /// elements). Owned here for the same reason as `logits`.
+    /// FP32 dequant scratch for the embedding lookup. Sized to the
+    /// padded row count so a Q4_K embedding table whose `hidden_size`
+    /// isn't a multiple of 256 (e.g. SmolLM2's 576 → 3 super-blocks =
+    /// 768 floats) doesn't trigger a heap reallocation in
+    /// `embedding_lookup_any`.
     pub embed_f32: Vec<f32>,
 
     /// FP32 dequant scratch for the per-row matmul fallback path
@@ -131,6 +134,14 @@ pub struct ForwardScratch {
     /// inner dim is `hidden_size`. The Q4_K fast path doesn't use
     /// this — its vec_dot kernel runs directly on packed bytes.
     pub dequant_f32: Vec<f32>,
+
+    /// FP32-widened activations scratch for the per-row matmul
+    /// fallback path. `matmul_quant_rows` widens `acts_fp16` (length
+    /// `cols`) into this buffer once per call, then dot-products it
+    /// row-by-row with dequantized weights. Pre-allocating here
+    /// removes ~211 heap allocations per token (30 layers ×
+    /// ~7 matmul_quant_rows calls per layer + 1 lm_head).
+    pub acts_f32: Vec<f32>,
 
     /// Cached RoPE table (head_dim × max_pos pairs).
     pub rope: RopeTable,
@@ -154,6 +165,13 @@ impl ForwardScratch {
         let q_total = n_head_q.saturating_mul(head_dim);
         let kv_total = n_head_kv.saturating_mul(head_dim);
         let max_row = hidden.max(intermediate);
+        // Padded row count for Q4_K rows whose element count isn't a
+        // multiple of 256 — e.g. SmolLM2's hidden=576 stored as 3
+        // super-blocks = 768 floats. The dequant kernel writes the
+        // full padded count; sizing the scratch buffers to it avoids
+        // a runtime resize on the first call.
+        let padded_hidden = hidden.div_ceil(256).saturating_mul(256).max(hidden);
+        let padded_max_row = max_row.div_ceil(256).saturating_mul(256).max(max_row);
         // q8k_scratch sized for the largest activation row that ever
         // feeds `matmul_q4k_rows`. The extra capacity costs ~ a few
         // kilobytes (one Q8_K block = 292 bytes per 256 elements).
@@ -179,8 +197,9 @@ impl ForwardScratch {
             mlp_out: vec![0u16; hidden],
             q8k_scratch: vec![0u8; q8k_bytes],
             logits: vec![0.0f32; vocab.max(1)],
-            embed_f32: vec![0.0f32; hidden],
-            dequant_f32: vec![0.0f32; max_row.max(hidden)],
+            embed_f32: vec![0.0f32; padded_hidden],
+            dequant_f32: vec![0.0f32; padded_max_row],
+            acts_f32: vec![0.0f32; max_row],
             rope: RopeTable::new(head_dim, max_ctx, arch.rope_freq_base),
             name_buf: String::with_capacity(32),
         }
@@ -317,6 +336,7 @@ pub fn forward_one(
             &mut scratch.q8k_scratch,
             &mut scratch.matmul_f32,
             &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
             &mut scratch.q_fp16,
         )?;
 
@@ -332,6 +352,7 @@ pub fn forward_one(
             &mut scratch.q8k_scratch,
             &mut scratch.matmul_f32,
             &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
             &mut scratch.k_fp16,
         )?;
 
@@ -347,6 +368,7 @@ pub fn forward_one(
             &mut scratch.q8k_scratch,
             &mut scratch.matmul_f32,
             &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
             &mut scratch.v_fp16,
         )?;
 
@@ -399,6 +421,9 @@ pub fn forward_one(
         if scratch.dequant_f32.len() < proj_in_len {
             scratch.dequant_f32.resize(proj_in_len, 0.0);
         }
+        if scratch.acts_f32.len() < proj_in_len {
+            scratch.acts_f32.resize(proj_in_len, 0.0);
+        }
         matmul_quant_rows(
             o_quant,
             o_w,
@@ -407,6 +432,7 @@ pub fn forward_one(
             &scratch.attn_out,
             &mut scratch.q8k_scratch,
             &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
             &mut scratch.matmul_f32[..proj_out_len],
         )?;
 
@@ -443,6 +469,7 @@ pub fn forward_one(
             &mut scratch.mlp_up,
             &mut scratch.q8k_scratch,
             &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
             &mut scratch.mlp_out,
         )?;
 
@@ -482,6 +509,7 @@ pub fn forward_one(
         vocab_size,
         &mut scratch.q8k_scratch,
         &mut scratch.dequant_f32,
+        &mut scratch.acts_f32,
         &mut scratch.logits[..vocab_size],
     )?;
     Some(())
@@ -619,6 +647,7 @@ fn project_with_bias(
     q8k_scratch: &mut [u8],
     matmul_f32: &mut Vec<f32>,
     dequant_scratch: &mut Vec<f32>,
+    acts_f32_scratch: &mut Vec<f32>,
     out_fp16: &mut [u16],
 ) -> Option<()> {
     if out_fp16.len() != rows {
@@ -635,6 +664,9 @@ fn project_with_bias(
     if dequant_scratch.len() < cols {
         dequant_scratch.resize(cols, 0.0);
     }
+    if acts_f32_scratch.len() < cols {
+        acts_f32_scratch.resize(cols, 0.0);
+    }
     matmul_quant_rows(
         weight_quant,
         weight,
@@ -643,6 +675,7 @@ fn project_with_bias(
         acts_fp16,
         q8k_scratch,
         dequant_scratch,
+        acts_f32_scratch,
         &mut matmul_f32[..rows],
     )?;
     match bias_f32_bytes {
@@ -711,7 +744,9 @@ fn layer_tensor_bytes_opt<'a>(
 /// (Qwen2.5-1.5B's `ffn_down` is Q6_K while `ffn_gate`/`ffn_up` are
 /// Q4_K; SmolLM2 mixes Q4_K + Q5_0 + Q8_0 in attention). The forward
 /// pass needs the quant type to pick the right dequant kernel; this
-/// helper grabs both in one call so per-tensor lookup happens once.
+/// helper grabs both in one call via
+/// [`LoadedSlm::tensor_info_and_bytes`] so the linear tensor-table
+/// scan happens once per name rather than twice.
 fn layer_tensor_q<'a>(
     slm: &'a LoadedSlm,
     name_buf: &mut String,
@@ -720,18 +755,14 @@ fn layer_tensor_q<'a>(
 ) -> Option<(&'a [u8], GgmlType)> {
     name_buf.clear();
     write!(name_buf, "blk.{}.{}", layer, suffix).ok()?;
-    let info = slm.tensor_info(name_buf.as_str())?;
-    let q = GgmlType(info.ggml_type);
-    let bytes = slm.tensor_bytes(name_buf.as_str())?;
-    Some((bytes, q))
+    let (info, bytes) = slm.tensor_info_and_bytes(name_buf.as_str())?;
+    Some((bytes, GgmlType(info.ggml_type)))
 }
 
 /// Same as [`layer_tensor_q`] but for top-level (non-layer) tensors.
 fn tensor_q<'a>(slm: &'a LoadedSlm, name: &str) -> Option<(&'a [u8], GgmlType)> {
-    let info = slm.tensor_info(name)?;
-    let q = GgmlType(info.ggml_type);
-    let bytes = slm.tensor_bytes(name)?;
-    Some((bytes, q))
+    let (info, bytes) = slm.tensor_info_and_bytes(name)?;
+    Some((bytes, GgmlType(info.ggml_type)))
 }
 
 /// Look up a `GgmlType` for the named tensor (sanity-check helper, not

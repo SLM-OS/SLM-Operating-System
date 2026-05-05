@@ -417,6 +417,12 @@ pub fn matmul_q4k_rows(
 /// products.
 ///
 /// Returns `None` on shape mismatch or unsupported quant type.
+///
+/// `acts_f32_scratch` is caller-owned scratch for the FP32-widened
+/// activations the per-row fallback dot product reads from. It must
+/// have length ≥ `cols`. Pre-allocated by [`crate::slm::forward::ForwardScratch`]
+/// so the per-token decode loop is allocation-free; the Q4_K fast
+/// path doesn't read it.
 pub fn matmul_quant_rows(
     quant_type: crate::slm::gguf::GgmlType,
     weights: &[u8],
@@ -425,6 +431,7 @@ pub fn matmul_quant_rows(
     acts_fp16: &[u16],
     q8k_scratch: &mut [u8],
     dequant_scratch: &mut [f32],
+    acts_f32_scratch: &mut [f32],
     out_fp32: &mut [f32],
 ) -> Option<()> {
     use crate::inference::quant::{dequantize_row_any, quant_row_bytes};
@@ -472,17 +479,21 @@ pub fn matmul_quant_rows(
         GgmlType::Q6_K | GgmlType::Q5_0 | GgmlType::Q8_0 | GgmlType::F32 | GgmlType::F16 => cols,
         _ => return None,
     };
-    if n_per_row < cols || dequant_scratch.len() < n_per_row {
+    // n_per_row >= cols by construction in every branch above (Q4_K's
+    // ceil-rounded count, identity for the rest); the assert documents
+    // the invariant for future maintainers without paying a release-
+    // build branch.
+    debug_assert!(n_per_row >= cols, "n_per_row {} < cols {}", n_per_row, cols);
+    if dequant_scratch.len() < n_per_row || acts_f32_scratch.len() < cols {
         return None;
     }
 
-    // Widen activations once. Allocate here for now — the caller's
-    // `q8k_scratch` is sized for Q8_K and the wrong shape for an
-    // FP32 buffer. A future refactor could pre-allocate this in
-    // ForwardScratch alongside the existing dequant_scratch.
-    let mut acts_f32: alloc::vec::Vec<f32> = alloc::vec::Vec::with_capacity(cols);
-    for &bits in acts_fp16.iter() {
-        acts_f32.push(f16_to_f32(bits));
+    // Widen activations once into the caller-supplied scratch. Pre-
+    // this refactor, this allocated a fresh `Vec<f32>` of size `cols`
+    // per call — for a 30-layer model with ~7 matmuls per layer that
+    // was ~211 heap allocations per token.
+    for (i, &bits) in acts_fp16.iter().enumerate() {
+        acts_f32_scratch[i] = f16_to_f32(bits);
     }
 
     for r in 0..rows {
@@ -495,7 +506,7 @@ pub fn matmul_quant_rows(
         }
         let mut acc: f32 = 0.0;
         for i in 0..cols {
-            acc += dequant_scratch[i] * acts_f32[i];
+            acc += dequant_scratch[i] * acts_f32_scratch[i];
         }
         out_fp32[r] = acc;
     }
@@ -642,8 +653,11 @@ pub fn swiglu_mlp(
     out: &mut [u16],
 ) -> Option<()> {
     // Q4_K-only legacy signature kept for the existing test fixture.
-    // Real models use the dispatching variant below.
+    // Real models use the dispatching variant below. Both scratch
+    // buffers are allocated locally because the legacy callers don't
+    // reach this far in the hot path — fixture tests only.
     let mut tmp_dequant: Vec<f32> = Vec::new();
+    let mut tmp_acts_f32: Vec<f32> = Vec::new();
     swiglu_mlp_q(
         x,
         crate::slm::gguf::GgmlType::Q4_K,
@@ -658,6 +672,7 @@ pub fn swiglu_mlp(
         up_scratch,
         q8k_scratch,
         &mut tmp_dequant,
+        &mut tmp_acts_f32,
         out,
     )
 }
@@ -668,7 +683,9 @@ pub fn swiglu_mlp(
 /// (Qwen2.5 Q4_K_M and SmolLM both mix Q4_K and Q6_K within one
 /// FFN block). `dequant_scratch` is shared scratch for the
 /// dispatcher's per-row dequantization fallback; sized at the
-/// largest of `hidden_size` and `intermediate_size`.
+/// largest of `hidden_size` and `intermediate_size`. `acts_f32_scratch`
+/// is the FP32-widened activation buffer that `matmul_quant_rows`
+/// reads (caller-owned to skip a heap alloc per call).
 pub fn swiglu_mlp_q(
     x: &[u16],
     gate_quant: crate::slm::gguf::GgmlType,
@@ -683,6 +700,7 @@ pub fn swiglu_mlp_q(
     up_scratch: &mut [u16],
     q8k_scratch: &mut [u8],
     dequant_scratch: &mut Vec<f32>,
+    acts_f32_scratch: &mut Vec<f32>,
     out: &mut [u16],
 ) -> Option<()> {
     // 256-block alignment was enforced when the only supported quant
@@ -702,10 +720,15 @@ pub fn swiglu_mlp_q(
 
     // Make sure the dequant scratch can hold the largest inner-row
     // we'll dequantize. Both gate/up consume `hidden_size`-element
-    // rows; down consumes `intermediate_size`.
+    // rows; down consumes `intermediate_size`. Same sizing for
+    // `acts_f32_scratch` since the matmul widens activations of
+    // length `cols` (= hidden for gate/up, = intermediate for down).
     let max_cols = hidden_size.max(intermediate_size);
     if dequant_scratch.len() < max_cols {
         dequant_scratch.resize(max_cols, 0.0);
+    }
+    if acts_f32_scratch.len() < max_cols {
+        acts_f32_scratch.resize(max_cols, 0.0);
     }
 
     // gate = matmul(x, gate_w) [intermediate_size]
@@ -719,6 +742,7 @@ pub fn swiglu_mlp_q(
         x,
         q8k_scratch,
         dequant_scratch,
+        acts_f32_scratch,
         &mut tmp_f32,
     )?;
     for i in 0..intermediate_size {
@@ -732,6 +756,7 @@ pub fn swiglu_mlp_q(
         x,
         q8k_scratch,
         dequant_scratch,
+        acts_f32_scratch,
         &mut tmp_f32,
     )?;
     for i in 0..intermediate_size {
@@ -756,6 +781,7 @@ pub fn swiglu_mlp_q(
         gate_scratch,
         q8k_scratch,
         dequant_scratch,
+        acts_f32_scratch,
         &mut out_f32,
     )?;
     for i in 0..hidden_size {
@@ -788,6 +814,7 @@ pub fn lm_head(
     // Real LM heads in Qwen2.5 Q4_K_M and SmolLM are Q6_K — call the
     // dispatching variant directly from forward.rs.
     let mut tmp_dequant: Vec<f32> = Vec::new();
+    let mut tmp_acts_f32: Vec<f32> = Vec::new();
     lm_head_q(
         x,
         crate::slm::gguf::GgmlType::Q4_K,
@@ -796,6 +823,7 @@ pub fn lm_head(
         vocab_size,
         q8k_scratch,
         &mut tmp_dequant,
+        &mut tmp_acts_f32,
         logits,
     )
 }
@@ -814,6 +842,7 @@ pub fn lm_head_q(
     vocab_size: usize,
     q8k_scratch: &mut [u8],
     dequant_scratch: &mut Vec<f32>,
+    acts_f32_scratch: &mut Vec<f32>,
     logits: &mut [f32],
 ) -> Option<()> {
     if hidden_size == 0 || vocab_size == 0 {
@@ -821,6 +850,9 @@ pub fn lm_head_q(
     }
     if dequant_scratch.len() < hidden_size {
         dequant_scratch.resize(hidden_size, 0.0);
+    }
+    if acts_f32_scratch.len() < hidden_size {
+        acts_f32_scratch.resize(hidden_size, 0.0);
     }
     matmul_quant_rows(
         weight_quant,
@@ -830,6 +862,7 @@ pub fn lm_head_q(
         x,
         q8k_scratch,
         dequant_scratch,
+        acts_f32_scratch,
         logits,
     )
 }
