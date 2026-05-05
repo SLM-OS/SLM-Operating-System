@@ -271,6 +271,7 @@ void telnet_init(struct telnet_parser *tp, const struct telnet_ops *ops)
     tp->state            = T_DATA;
     tp->subneg_len       = 0;
     tp->negotiated_flags = 0;
+    tp->binary_mode      = false;
     tp->ops              = *ops;
 }
 
@@ -295,11 +296,19 @@ void telnet_rx_byte(struct telnet_parser *tp, uint8_t b)
     case T_DATA:
         if (b == TELNET_IAC) {
             tp->state = T_IAC;
-        } else if (b == '\r') {
+        } else if (b == '\r' &&
+                   !__atomic_load_n(&tp->binary_mode, __ATOMIC_RELAXED)) {
             /* Enter a mini-state that swallows CR LF / CR NUL so the
              * shell sees exactly one submit per keypress, regardless
              * of whether the client sends CR LF (standard telnet)
-             * or CR NUL (some clients) or bare LF (raw nc). */
+             * or CR NUL (some clients) or bare LF (raw nc).
+             *
+             * Skipped in binary_mode: an xput-bin upload of binary
+             * data (e.g. a GGUF model) randomly contains 0x0D 0x0A
+             * and 0x0D 0x00 pairs at byte-pattern frequency
+             * (~1/65536 each). With CR-state swallow active those
+             * second bytes get dropped silently and every byte
+             * after shifts by one, corrupting the file. */
             tp->ops.inject_rx(tp->ops.ctx, '\r');
             tp->state = T_CR;
         } else {
@@ -308,13 +317,23 @@ void telnet_rx_byte(struct telnet_parser *tp, uint8_t b)
         break;
 
     case T_CR:
-        if (b == '\n' || b == 0x00) {
-            /* Swallow the trailing LF or NUL — shell already saw CR. */
+        if ((b == '\n' || b == 0x00) &&
+            !__atomic_load_n(&tp->binary_mode, __ATOMIC_RELAXED)) {
+            /* Swallow the trailing LF or NUL — shell already saw CR.
+             * Defense-in-depth: gated on binary_mode so a future caller
+             * that flips binary_mode while the parser is mid-T_CR
+             * doesn't drop the next data byte. The xput-bin flow can't
+             * actually reach here today (the script terminates the
+             * command line with bare LF, so the parser is in T_DATA at
+             * binary_mode flip time), but the gate lets the comment on
+             * struct telnet_parser.binary_mode hold without caveat. */
         } else if (b == TELNET_IAC) {
             tp->state = T_IAC;
             return;
         } else {
-            /* Some other byte — emit it normally. */
+            /* Some other byte — emit it normally. In binary_mode, this
+             * is also the path that 0x0A / 0x00 take after the swallow
+             * branch's binary_mode check fails. */
             tp->ops.inject_rx(tp->ops.ctx, b);
         }
         tp->state = T_DATA;

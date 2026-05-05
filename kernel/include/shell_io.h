@@ -73,6 +73,18 @@ struct shell_io {
      * with the same wire-level RX cost. */
     int  (*read_buf)(struct shell_io *io, char *dst, int max_len);
 
+    /* Optional. Toggle binary pass-through on the underlying
+     * transport. The TCP backend forwards to its telnet parser's
+     * `binary_mode` flag — when true, the parser stops swallowing
+     * the LF/NUL after a CR, so binary data containing CR LF /
+     * CR NUL pairs (e.g. an `xput-bin` GGUF upload) reaches the
+     * shell intact instead of getting silently shifted by one byte
+     * after every drop. IAC IAC -> 0xFF unstuffing remains active.
+     * UART/serial backends have no telnet decoder and set this to
+     * NULL; callers must NULL-check (or use the
+     * shell_session_set_binary_mode helper which does). */
+    void (*set_binary_mode)(struct shell_io *io, bool on);
+
     /* Backend-private data. */
     void *ctx;
 };

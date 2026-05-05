@@ -838,6 +838,24 @@ static bool tcp_echo_enabled(struct shell_io *io)
     return (ctx->telnet.negotiated_flags & TELNET_F_WILL_ECHO) != 0;
 }
 
+/*
+ * Forward to the telnet parser's binary_mode flag. Atomic store
+ * paired with the atomic load in telnet_rx_byte — both use
+ * RELAXED ordering because the flag stands alone (no other data
+ * is published with it) and on the SLM-OS shell-task / net_pump
+ * cooperative-on-CPU-0 model the natural sequencing already
+ * guarantees the writer's effect is visible before the next byte
+ * arrives. The atomic primitives are kept for parity with
+ * `xput_bin_active` in cmd_xput_bin (same single-flag pattern)
+ * and so a future preemptive or multi-CPU shell-task layout
+ * doesn't silently regress.
+ */
+static void tcp_set_binary_mode(struct shell_io *io, bool on)
+{
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
+    __atomic_store_n(&ctx->telnet.binary_mode, on, __ATOMIC_RELAXED);
+}
+
 /* -------------------------------------------------------------------------- */
 /* lwIP callbacks — net_pump context                                          */
 /* -------------------------------------------------------------------------- */
@@ -1332,15 +1350,16 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
     ctx->connected_at = sys_now();
     ctx->session_id   = 0;      /* Populated by shell_io_tcp_attach_session. */
 
-    ctx->io.read_char     = tcp_read_char;
-    ctx->io.try_read_char = tcp_try_read_char;
-    ctx->io.write         = tcp_write_buf;
-    ctx->io.flush         = tcp_flush;
-    ctx->io.close         = tcp_close_io;
-    ctx->io.is_open       = tcp_is_open;
-    ctx->io.echo_enabled  = tcp_echo_enabled;
-    ctx->io.read_buf      = tcp_read_buf;
-    ctx->io.ctx           = ctx;
+    ctx->io.read_char       = tcp_read_char;
+    ctx->io.try_read_char   = tcp_try_read_char;
+    ctx->io.write           = tcp_write_buf;
+    ctx->io.flush           = tcp_flush;
+    ctx->io.close           = tcp_close_io;
+    ctx->io.is_open         = tcp_is_open;
+    ctx->io.echo_enabled    = tcp_echo_enabled;
+    ctx->io.read_buf        = tcp_read_buf;
+    ctx->io.set_binary_mode = tcp_set_binary_mode;
+    ctx->io.ctx             = ctx;
 
     /* Initialize the telnet parser with our callback set. ctx->ctx
      * is the opaque pointer the parser hands back to every callback. */

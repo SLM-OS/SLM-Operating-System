@@ -1088,6 +1088,17 @@ int cmd_xput_bin(int argc, char *argv[])
         }
     }
 
+    /* Switch the session's telnet decoder to binary pass-through
+     * BEFORE we tell the script we're ready. Without this, any
+     * 0x0D 0x0A or 0x0D 0x00 pair in the binary payload would have
+     * its second byte swallowed by the T_CR LF/NUL-eating state,
+     * silently shifting every byte after it by one and corrupting
+     * the file (~14 KB of drops on a typical 100 MB GGUF). The
+     * script doesn't send binary data until it sees "ready", so
+     * setting the flag here covers every byte of the upload.
+     * Cleared on every return path below alongside xput_bin_active. */
+    shell_session_set_binary_mode(true);
+
     /* Tell the client we're ready and what offset to start streaming
      * from. The client uses this for resume — sends only
      * total - resume_offset bytes. */
@@ -1144,6 +1155,7 @@ int cmd_xput_bin(int argc, char *argv[])
                     }
                 }
                 littlefs_file_close(mnt, fd);
+                shell_session_set_binary_mode(false);
                 __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
                 shell_printf("XPUT-BIN err received=%lu reason=closed\r\n",
                              (unsigned long)received);
@@ -1173,6 +1185,7 @@ int cmd_xput_bin(int argc, char *argv[])
                     if (wp == (int)got) received += got;
                 }
                 littlefs_file_close(mnt, fd);
+                shell_session_set_binary_mode(false);
                 __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
                 shell_printf("XPUT-BIN err received=%lu reason=stall\r\n",
                              (unsigned long)received);
@@ -1183,6 +1196,7 @@ int cmd_xput_bin(int argc, char *argv[])
         int written = littlefs_file_write(mnt, fd, bin_buf, (size_t)got);
         if (written != (int)got) {
             littlefs_file_close(mnt, fd);
+            shell_session_set_binary_mode(false);
             __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
             shell_printf("XPUT-BIN err received=%lu reason=write\r\n",
                          (unsigned long)received);
@@ -1192,6 +1206,7 @@ int cmd_xput_bin(int argc, char *argv[])
     }
 
     littlefs_file_close(mnt, fd);
+    shell_session_set_binary_mode(false);
     __atomic_store_n(&xput_bin_active, false, __ATOMIC_RELEASE);
     shell_printf("XPUT-BIN done size=%lu\r\n", (unsigned long)received);
     return 0;

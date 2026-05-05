@@ -256,4 +256,17 @@ int shell_read_command(const char *prompt, char *buf, int max_len);
  */
 int shell_session_read_raw(char *dst, int max_len);
 
+/*
+ * Toggle binary-mode pass-through on the current session's I/O
+ * backend (#621 follow-up). When `on` is true, the TCP backend's
+ * telnet parser stops swallowing the LF/NUL after a CR — required
+ * for `xput-bin` so binary streams containing CR LF / CR NUL pairs
+ * don't get silently shifted. IAC IAC -> 0xFF unstuffing remains
+ * active so the script can still send literal 0xFF bytes.
+ *
+ * No-op on backends without a telnet decoder (UART, serial). Pair
+ * set(true) at command entry with set(false) on every return path.
+ */
+void shell_session_set_binary_mode(bool on);
+
 #endif /* SHELL_H */
