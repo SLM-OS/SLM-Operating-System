@@ -6149,6 +6149,7 @@ pub extern "C" fn rust_inference_test() -> i32 {
             // SAFETY: single-threaded test context, static buffers
             let result = unsafe {
                 let out_ptr = core::ptr::addr_of_mut!(E2E_OUTPUT) as *mut f32;
+                // write_bytes count is in `f32` elements, not bytes; +0.0 is bit-pattern 0.
                 core::ptr::write_bytes(out_ptr, 0, E2E_OUTPUT_LEN);
                 inference::run_inference(
                     idx,
