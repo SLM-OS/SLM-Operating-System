@@ -29,7 +29,7 @@
 //! Prerequisites" for context on this dispatch scaffolding.
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use super::tensor::{Tensor, TensorElemType};
+use super::tensor::Tensor;
 use super::engine::EngineError;
 use crate::loader::registry::fp16_to_f32;
 
@@ -299,7 +299,10 @@ pub fn conv2d(
             let _g = OpsGuard::new();
             static mut IM2COL_BUF: [f32; IM2COL_MAX] = [0.0; IM2COL_MAX];
             // SAFETY: OPS_LOCK held via OpsGuard — no concurrent access.
-            let col = IM2COL_BUF.as_mut_ptr();
+            // addr_of_mut! avoids materialising a `&mut [f32; N]` reference
+            // (static_mut_refs UB pattern); the raw pointer is the only
+            // route to the buffer from here on.
+            let col = core::ptr::addr_of_mut!(IM2COL_BUF) as *mut f32;
 
             for n in 0..batch {
                 // Build im2col matrix: unroll input patches into columns
@@ -716,7 +719,9 @@ pub fn matmul(a: &Tensor, b: &Tensor, out: &mut Tensor) -> Result<(), EngineErro
             static mut FP16_BUF: [f32; FP16_ROW_BUF_SIZE] = [0.0; FP16_ROW_BUF_SIZE];
             let ap = a.data;
             let bp_u16 = b.data as *const u16;
-            let buf = FP16_BUF.as_mut_ptr();
+            // SAFETY: OPS_LOCK held via OpsGuard. addr_of_mut! avoids the
+            // `&mut [f32; N]` reference that triggers static_mut_refs UB.
+            let buf = core::ptr::addr_of_mut!(FP16_BUF) as *mut f32;
             for i in 0..m {
                 for kk in 0..k {
                     let a_ik = *ap.add(i * k + kk);

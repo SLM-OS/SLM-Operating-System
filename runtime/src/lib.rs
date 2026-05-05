@@ -5673,10 +5673,14 @@ pub extern "C" fn rust_inference_test() -> i32 {
                 }
             }
 
-            let input  = inference::Tensor::new(CONV_IN.as_ptr(),  &[BATCH as u32, CIN as u32, H as u32, W as u32]);
-            let weight = inference::Tensor::new(CONV_WT.as_ptr(),  &[COUT as u32, CIN as u32, KH as u32, KW as u32]);
+            let input  = inference::Tensor::new(
+                core::ptr::addr_of!(CONV_IN) as *const f32,
+                &[BATCH as u32, CIN as u32, H as u32, W as u32]);
+            let weight = inference::Tensor::new(
+                core::ptr::addr_of!(CONV_WT) as *const f32,
+                &[COUT as u32, CIN as u32, KH as u32, KW as u32]);
             let mut out = inference::Tensor::new(
-                CONV_OUT.as_mut_ptr() as *const f32,
+                core::ptr::addr_of_mut!(CONV_OUT) as *const f32,
                 &[BATCH as u32, COUT as u32, HOUT as u32, WOUT as u32]);
 
             let result = inference::ops::conv2d(
@@ -6125,8 +6129,10 @@ pub extern "C" fn rust_inference_test() -> i32 {
 
         if let Ok(idx) = load_result {
             // Use statics to avoid stack overflow (32KB stack)
-            static E2E_INPUT: [f32; 784] = [0.0; 784];
-            static mut E2E_OUTPUT: [f32; 10] = [0.0; 10];
+            const E2E_INPUT_LEN: usize = 784;
+            const E2E_OUTPUT_LEN: usize = 10;
+            static E2E_INPUT: [f32; E2E_INPUT_LEN] = [0.0; E2E_INPUT_LEN];
+            static mut E2E_OUTPUT: [f32; E2E_OUTPUT_LEN] = [0.0; E2E_OUTPUT_LEN];
 
             // Check engine can be created for this model
             let engine_ok = inference::InferenceEngine::new(idx).is_ok();
@@ -6142,13 +6148,15 @@ pub extern "C" fn rust_inference_test() -> i32 {
 
             // SAFETY: single-threaded test context, static buffers
             let result = unsafe {
-                for o in E2E_OUTPUT.iter_mut() { *o = 0.0; }
+                let out_ptr = core::ptr::addr_of_mut!(E2E_OUTPUT) as *mut f32;
+                // write_bytes count is in `f32` elements, not bytes; +0.0 is bit-pattern 0.
+                core::ptr::write_bytes(out_ptr, 0, E2E_OUTPUT_LEN);
                 inference::run_inference(
                     idx,
                     E2E_INPUT.as_ptr(),
-                    E2E_INPUT.len(),
-                    E2E_OUTPUT.as_mut_ptr(),
-                    E2E_OUTPUT.len(),
+                    E2E_INPUT_LEN,
+                    out_ptr,
+                    E2E_OUTPUT_LEN,
                 )
             };
 
@@ -6313,10 +6321,13 @@ pub extern "C" fn rust_inference_test() -> i32 {
         static mut B_BIG: [f32; 4096] = [1.0; 4096]; // 64x64
         static mut C_BIG: [f32; 4096] = [0.0; 4096]; // 64x64
         unsafe {
-            let a = inference::Tensor::new(A_BIG.as_ptr(), &[64, 64]);
-            let b = inference::Tensor::new(B_BIG.as_ptr(), &[64, 64]);
-            let mut c = inference::Tensor::new(C_BIG.as_mut_ptr(), &[64, 64]);
-            c.data = C_BIG.as_mut_ptr() as *const f32;
+            let a = inference::Tensor::new(
+                core::ptr::addr_of!(A_BIG) as *const f32, &[64, 64]);
+            let b = inference::Tensor::new(
+                core::ptr::addr_of!(B_BIG) as *const f32, &[64, 64]);
+            let c_ptr = core::ptr::addr_of_mut!(C_BIG) as *mut f32;
+            let mut c = inference::Tensor::new(c_ptr as *const f32, &[64, 64]);
+            c.data = c_ptr as *const f32;
             let result = inference::ops::matmul(&a, &b, &mut c);
             let ok = result.is_ok();
             // Each element should be 64.0 (dot product of 64 ones)
@@ -6378,10 +6389,12 @@ pub extern "C" fn rust_inference_test() -> i32 {
                 }
             }
 
-            let a = inference::Tensor::new(A_ODD.as_ptr(), &[M as u32, K as u32]);
-            let b = inference::Tensor::new(B_ODD.as_ptr(), &[K as u32, N as u32]);
+            let a = inference::Tensor::new(
+                core::ptr::addr_of!(A_ODD) as *const f32, &[M as u32, K as u32]);
+            let b = inference::Tensor::new(
+                core::ptr::addr_of!(B_ODD) as *const f32, &[K as u32, N as u32]);
             let mut c = inference::Tensor::new(
-                C_ODD.as_mut_ptr() as *const f32, &[M as u32, N as u32]);
+                core::ptr::addr_of_mut!(C_ODD) as *const f32, &[M as u32, N as u32]);
             let result = inference::ops::matmul(&a, &b, &mut c);
             let ok = result.is_ok();
 
@@ -6827,16 +6840,14 @@ pub extern "C" fn rust_matmul_bench_fp32(iterations: u32) -> i32 {
     let size_u32 = SIZE as u32;
     let a = inference::Tensor::new(A_BUF.as_ptr(), &[size_u32, size_u32]);
     let b = inference::Tensor::new(B_BUF.as_ptr(), &[size_u32, size_u32]);
-    // SAFETY: C_BUF is static mut. We take a mut raw pointer via
-    // as_mut_ptr() while holding no other reference — Tensor only
-    // stores the pointer. Subsequent matmul writes through that
-    // pointer under `unsafe { ... }` inside ops::matmul.
-    let mut c = unsafe {
-        inference::Tensor::new(
-            core::ptr::addr_of_mut!(C_BUF) as *const f32,
-            &[size_u32, size_u32],
-        )
-    };
+    // C_BUF is static mut. The mut raw pointer via addr_of_mut! is taken
+    // while no other reference exists — Tensor only stores the pointer.
+    // Subsequent matmul writes through it under `unsafe { ... }` inside
+    // ops::matmul.
+    let mut c = inference::Tensor::new(
+        core::ptr::addr_of_mut!(C_BUF) as *const f32,
+        &[size_u32, size_u32],
+    );
 
     let mut min_ns: u64 = u64::MAX;
     let mut max_ns: u64 = 0;
@@ -6936,11 +6947,9 @@ pub extern "C" fn rust_conv_bench_fp32(iterations: u32) -> i32 {
         &[BATCH as u32, CIN as u32, H as u32, W as u32]);
     let weight = inference::Tensor::new(WT_BUF.as_ptr(),
         &[COUT as u32, CIN as u32, KH as u32, KW as u32]);
-    let mut out = unsafe {
-        inference::Tensor::new(
-            core::ptr::addr_of_mut!(OUT_BUF) as *const f32,
-            &[BATCH as u32, COUT as u32, HOUT as u32, WOUT as u32])
-    };
+    let mut out = inference::Tensor::new(
+        core::ptr::addr_of_mut!(OUT_BUF) as *const f32,
+        &[BATCH as u32, COUT as u32, HOUT as u32, WOUT as u32]);
 
     let mut min_ns = u64::MAX;
     let mut max_ns = 0u64;
@@ -7064,18 +7073,14 @@ pub extern "C" fn rust_matmul_bench_fp16(iterations: u32) -> i32 {
 
     let size_u32 = SIZE as u32;
     let a = inference::Tensor::new(A_BUF.as_ptr(), &[size_u32, size_u32]);
-    let b = unsafe {
-        inference::Tensor::new_fp16(
-            core::ptr::addr_of!(B_FP16) as *const u16,
-            &[size_u32, size_u32],
-        )
-    };
-    let mut c = unsafe {
-        inference::Tensor::new(
-            core::ptr::addr_of_mut!(C_BUF) as *const f32,
-            &[size_u32, size_u32],
-        )
-    };
+    let b = inference::Tensor::new_fp16(
+        core::ptr::addr_of!(B_FP16) as *const u16,
+        &[size_u32, size_u32],
+    );
+    let mut c = inference::Tensor::new(
+        core::ptr::addr_of_mut!(C_BUF) as *const f32,
+        &[size_u32, size_u32],
+    );
 
     let mut min_ns: u64 = u64::MAX;
     let mut max_ns: u64 = 0;
@@ -7150,24 +7155,18 @@ pub extern "C" fn rust_matmul_bench_int8(iterations: u32) -> i32 {
     }
 
     let size_u32 = SIZE as u32;
-    let a = unsafe {
-        inference::Tensor::new_int8(
-            core::ptr::addr_of!(A_I8) as *const i8,
-            &[size_u32, size_u32], 0.05, 0,
-        )
-    };
-    let b = unsafe {
-        inference::Tensor::new_int8(
-            core::ptr::addr_of!(B_I8) as *const i8,
-            &[size_u32, size_u32], 0.1, 0,
-        )
-    };
-    let mut c = unsafe {
-        inference::Tensor::new(
-            core::ptr::addr_of_mut!(C_BUF) as *const f32,
-            &[size_u32, size_u32],
-        )
-    };
+    let a = inference::Tensor::new_int8(
+        core::ptr::addr_of!(A_I8) as *const i8,
+        &[size_u32, size_u32], 0.05, 0,
+    );
+    let b = inference::Tensor::new_int8(
+        core::ptr::addr_of!(B_I8) as *const i8,
+        &[size_u32, size_u32], 0.1, 0,
+    );
+    let mut c = inference::Tensor::new(
+        core::ptr::addr_of_mut!(C_BUF) as *const f32,
+        &[size_u32, size_u32],
+    );
 
     let mut min_ns: u64 = u64::MAX;
     let mut max_ns: u64 = 0;

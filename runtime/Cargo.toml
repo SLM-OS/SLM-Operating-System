@@ -20,6 +20,9 @@ ai_eviction = []
 # Also pulls in the generated XGBoost (~1.3 MB) and int8 MLP weights (M4).
 ai_eviction_models = ["ai_eviction"]
 
+[lints.rust]
+warnings = "deny"
+
 [profile.dev]
 panic = "abort"
 
