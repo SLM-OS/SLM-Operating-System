@@ -271,6 +271,7 @@ void telnet_init(struct telnet_parser *tp, const struct telnet_ops *ops)
     tp->state            = T_DATA;
     tp->subneg_len       = 0;
     tp->negotiated_flags = 0;
+    tp->binary_mode      = false;
     tp->ops              = *ops;
 }
 
@@ -295,11 +296,18 @@ void telnet_rx_byte(struct telnet_parser *tp, uint8_t b)
     case T_DATA:
         if (b == TELNET_IAC) {
             tp->state = T_IAC;
-        } else if (b == '\r') {
+        } else if (b == '\r' && !tp->binary_mode) {
             /* Enter a mini-state that swallows CR LF / CR NUL so the
              * shell sees exactly one submit per keypress, regardless
              * of whether the client sends CR LF (standard telnet)
-             * or CR NUL (some clients) or bare LF (raw nc). */
+             * or CR NUL (some clients) or bare LF (raw nc).
+             *
+             * Skipped in binary_mode: an xput-bin upload of binary
+             * data (e.g. a GGUF model) randomly contains 0x0D 0x0A
+             * and 0x0D 0x00 pairs at byte-pattern frequency
+             * (~1/65536 each). With CR-state swallow active those
+             * second bytes get dropped silently and every byte
+             * after shifts by one, corrupting the file. */
             tp->ops.inject_rx(tp->ops.ctx, '\r');
             tp->state = T_CR;
         } else {

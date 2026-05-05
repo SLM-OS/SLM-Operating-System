@@ -838,6 +838,21 @@ static bool tcp_echo_enabled(struct shell_io *io)
     return (ctx->telnet.negotiated_flags & TELNET_F_WILL_ECHO) != 0;
 }
 
+/*
+ * Forward to the telnet parser's binary_mode flag. Plain bool
+ * write — the flag is read by telnet_rx_byte in net_pump context
+ * and written here from shell-task context, but both run on CPU 0
+ * cooperatively in SLM-OS, and the read site is a single bool
+ * load that cannot tear. No barriers required for the CPU model
+ * we ship; if shell tasks ever migrate off CPU 0 the flag would
+ * need to become atomic.
+ */
+static void tcp_set_binary_mode(struct shell_io *io, bool on)
+{
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
+    ctx->telnet.binary_mode = on;
+}
+
 /* -------------------------------------------------------------------------- */
 /* lwIP callbacks — net_pump context                                          */
 /* -------------------------------------------------------------------------- */
@@ -1332,15 +1347,16 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
     ctx->connected_at = sys_now();
     ctx->session_id   = 0;      /* Populated by shell_io_tcp_attach_session. */
 
-    ctx->io.read_char     = tcp_read_char;
-    ctx->io.try_read_char = tcp_try_read_char;
-    ctx->io.write         = tcp_write_buf;
-    ctx->io.flush         = tcp_flush;
-    ctx->io.close         = tcp_close_io;
-    ctx->io.is_open       = tcp_is_open;
-    ctx->io.echo_enabled  = tcp_echo_enabled;
-    ctx->io.read_buf      = tcp_read_buf;
-    ctx->io.ctx           = ctx;
+    ctx->io.read_char       = tcp_read_char;
+    ctx->io.try_read_char   = tcp_try_read_char;
+    ctx->io.write           = tcp_write_buf;
+    ctx->io.flush           = tcp_flush;
+    ctx->io.close           = tcp_close_io;
+    ctx->io.is_open         = tcp_is_open;
+    ctx->io.echo_enabled    = tcp_echo_enabled;
+    ctx->io.read_buf        = tcp_read_buf;
+    ctx->io.set_binary_mode = tcp_set_binary_mode;
+    ctx->io.ctx             = ctx;
 
     /* Initialize the telnet parser with our callback set. ctx->ctx
      * is the opaque pointer the parser hands back to every callback. */

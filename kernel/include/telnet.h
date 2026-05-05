@@ -128,6 +128,18 @@ struct telnet_parser {
     uint8_t           subneg[TELNET_SB_BUF_SIZE];
     size_t            subneg_len;
     uint32_t          negotiated_flags;   /* TELNET_F_* */
+    /* Pass-through for binary uploads (#621 follow-up). When true,
+     * the parser still performs IAC IAC -> 0xFF unstuffing (so the
+     * sender can transmit literal 0xFF data bytes) but stops
+     * special-casing CR: '\r' is injected as a plain data byte
+     * instead of triggering the T_CR LF/NUL-swallow state. Without
+     * this, any binary stream containing a 0x0D 0x0A or 0x0D 0x00
+     * pair gets the second byte silently dropped — for an SLM-OS
+     * GGUF upload of ~100 MB that's ~14000 byte drops, every byte
+     * after the first drop shifts by one, corrupting the file.
+     * Caller flips via the shell_io vtable's set_binary_mode hook
+     * (TCP backend forwards here; non-telnet backends no-op). */
+    bool              binary_mode;
     struct telnet_ops ops;
 };
 

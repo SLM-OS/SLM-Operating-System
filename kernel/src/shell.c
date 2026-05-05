@@ -693,6 +693,26 @@ int shell_session_read_raw(char *dst, int max_len)
     return shell_io_read_buf(s->io, dst, max_len);
 }
 
+/*
+ * Toggle binary-mode pass-through on the current session's I/O
+ * backend. Used by `cmd_xput_bin` to disable telnet's CR-LF /
+ * CR-NUL swallow for the duration of a binary upload — without
+ * this, any 0x0D 0x0A or 0x0D 0x00 pair in the binary stream
+ * gets the second byte silently dropped, shifting every
+ * subsequent byte by one and corrupting the file.
+ *
+ * No-op when the session has no io, or when the backend doesn't
+ * implement set_binary_mode (UART/serial). Safe to call from
+ * any return path — pairs cleanly with set(true) / set(false).
+ */
+void shell_session_set_binary_mode(bool on)
+{
+    struct shell_session *s = shell_session_current();
+    if (s && s->io && s->io->set_binary_mode) {
+        s->io->set_binary_mode(s->io, on);
+    }
+}
+
 /* ============================================================================
  * Per-session I/O wrappers
  * ============================================================================ */
