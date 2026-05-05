@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 use crate::kernel_ffi;
 use crate::mm::model_loader::LoadError;
 use crate::slm::gguf::{
-    q4_k_byte_size, ArchInfo, ArchKind, GgmlType, Gguf, GgufError, MetaValue,
+    ArchInfo, ArchKind, GgmlType, Gguf, GgufError, MetaValue,
 };
 use crate::slm::tokenizer::Bbpe;
 
@@ -686,21 +686,18 @@ fn map_gguf_err(e: GgufError) -> LoadError {
 /// - F32 (id 0): 4 × n_elements
 /// - F16 (id 1): 2 × n_elements
 /// - Q4_K (id 12): 144 × ceil(n_elements / 256) bytes
-/// - Q8_K (id 15): 256 × ceil(n_elements / 256) bytes  (1 super-block
-///   header byte + 256 quant bytes — the `ggml.h` `block_q8_K` struct
-///   is laid out as `{f32 d; int8_t qs[256]; int16_t bsums[16]} = 292`
-///   in newer GGML; SLM-OS doesn't dequant Q8_K yet, so we conservatively
-///   refuse to size it here. The caller should use F32/F16/Q4_K paths.)
+/// - Q5_0 (id 6): 22 × (n_elements / 32)
+/// - Q6_K (id 14): 210 × (n_elements / 256)
+/// - Q8_0 (id 8): 34 × (n_elements / 32)
+///
+/// Q8_K (id 15) is intentionally not sized here — it appears in
+/// activation paths, never as a stored tensor type. Other types
+/// (Q4_0, Q5_1, Q3_K, etc.) return `None`.
 pub fn ggml_type_byte_size(ggml_type: u32, n_elements: u64) -> Option<u64> {
     let n = n_elements as usize;
-    let bytes = match GgmlType(ggml_type) {
-        GgmlType::F32 => n.checked_mul(4)?,
-        GgmlType::F16 => n.checked_mul(2)?,
-        GgmlType::Q4_K => q4_k_byte_size(n)?,
-        // Other quant types are out of scope for M5.3.1's plumbing —
-        // M5.3.2 picks them up if the forward pass needs them.
-        _ => return None,
-    };
+    // Single source of truth: dispatch through quant_row_bytes so
+    // every "is this type supported" decision lives in one place.
+    let bytes = crate::inference::quant::quant_row_bytes(GgmlType(ggml_type), n)?;
     u64::try_from(bytes).ok()
 }
 

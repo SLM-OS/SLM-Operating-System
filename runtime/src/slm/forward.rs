@@ -64,10 +64,10 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::inference::ops_transformer::{
-    gqa_decode_step, lm_head, matmul_q4k_rows, rmsnorm, swiglu_mlp, RopeTable,
+    gqa_decode_step, lm_head_q, matmul_quant_rows, rmsnorm, swiglu_mlp_q, RopeTable,
 };
-use crate::inference::quant::{dequantize_row_q4_k, q8_k_byte_size};
-use crate::slm::gguf::{f32_to_f16, q4_k_byte_size, ArchInfo, GgmlType, Q4_K_BLOCK_ELEMENTS};
+use crate::inference::quant::{dequantize_row_any, q8_k_byte_size};
+use crate::slm::gguf::{f32_to_f16, ArchInfo, GgmlType};
 use crate::slm::registry::LoadedSlm;
 use crate::slm::session::Session;
 
@@ -124,6 +124,14 @@ pub struct ForwardScratch {
     /// elements). Owned here for the same reason as `logits`.
     pub embed_f32: Vec<f32>,
 
+    /// FP32 dequant scratch for the per-row matmul fallback path
+    /// (Q5_0 / Q6_K / Q8_0 weights). Sized to the largest matmul
+    /// inner dimension across the model: max(hidden, intermediate)
+    /// is ≥ all attention/FFN cols; LM head also fits because its
+    /// inner dim is `hidden_size`. The Q4_K fast path doesn't use
+    /// this — its vec_dot kernel runs directly on packed bytes.
+    pub dequant_f32: Vec<f32>,
+
     /// Cached RoPE table (head_dim × max_pos pairs).
     pub rope: RopeTable,
 
@@ -172,6 +180,7 @@ impl ForwardScratch {
             q8k_scratch: vec![0u8; q8k_bytes],
             logits: vec![0.0f32; vocab.max(1)],
             embed_f32: vec![0.0f32; hidden],
+            dequant_f32: vec![0.0f32; max_row.max(hidden)],
             rope: RopeTable::new(head_dim, max_ctx, arch.rope_freq_base),
             name_buf: String::with_capacity(32),
         }
@@ -235,13 +244,21 @@ pub fn forward_one(
     {
         return None;
     }
-    if hidden % Q4_K_BLOCK_ELEMENTS != 0
-        || intermediate % Q4_K_BLOCK_ELEMENTS != 0
-        || head_dim == 0
+    // hidden / intermediate were originally constrained to be multiples
+    // of Q4_K_BLOCK_ELEMENTS = 256 because the M5.3.x forward pass
+    // assumed every weight was Q4_K-aligned. SmolLM2's hidden=576
+    // breaks that — it's a multiple of 32 (Q5_0 / Q8_0 block size)
+    // but not 256. With the multi-quant dispatcher in place, the
+    // matmul kernel handles partial-block Q4_K rows internally, so
+    // the only structural requirement is dimensions > 0 and the
+    // GQA head ratio.
+    if head_dim == 0
         || n_head_q == 0
         || n_head_kv == 0
         || vocab_size == 0
         || block_count == 0
+        || hidden == 0
+        || intermediate == 0
         || n_head_q % n_head_kv != 0
     {
         return None;
@@ -254,10 +271,14 @@ pub fn forward_one(
     }
 
     // ---------------------------------------------------------------
-    // Token embedding lookup (Q4_K table, one row of `hidden` floats).
+    // Token embedding lookup. The table's quant type varies by build:
+    // Qwen2.5 Q4_K_M ships token_embd as Q6_K, SmolLM2 as Q8_0, the
+    // M5.3.x synthetic fixture as Q4_K. Dispatch on whatever the
+    // GGUF descriptor says.
     // ---------------------------------------------------------------
-    let embd_bytes = slm.tensor_bytes("token_embd.weight")?;
-    embedding_q4k_lookup(
+    let (embd_bytes, embd_quant) = tensor_q(slm, "token_embd.weight")?;
+    embedding_lookup_any(
+        embd_quant,
         embd_bytes,
         hidden,
         token_id,
@@ -277,10 +298,17 @@ pub fn forward_one(
         f32_bytes_into_fp16_slice(attn_norm_bytes, &mut scratch.norm_fp16)?;
         rmsnorm(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
 
-        // -- Q / K / V projections (Q4_K matmul + F32 bias add) -----
-        let q_w = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_q.weight")?;
-        let q_b = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_q.bias")?;
+        // -- Q / K / V projections (matmul + optional F32 bias add) --
+        //
+        // Biases are present in Qwen2 GGUFs but absent from LLaMA-1/2/3
+        // and SmolLM. Quant type varies per tensor: Qwen2.5-1.5B uses
+        // Q4_K, SmolLM uses Q5_0 for Q/K/output and Q8_0 for V. Each
+        // weight's `ggml_type` comes from the GGUF tensor descriptor;
+        // `layer_tensor_q` returns both bytes + type in one lookup.
+        let (q_w, q_quant) = layer_tensor_q(slm, &mut scratch.name_buf, layer, "attn_q.weight")?;
+        let q_b = layer_tensor_bytes_opt(slm, &mut scratch.name_buf, layer, "attn_q.bias");
         project_with_bias(
+            q_quant,
             q_w,
             n_head_q.checked_mul(head_dim)?,
             hidden,
@@ -288,12 +316,14 @@ pub fn forward_one(
             q_b,
             &mut scratch.q8k_scratch,
             &mut scratch.matmul_f32,
+            &mut scratch.dequant_f32,
             &mut scratch.q_fp16,
         )?;
 
-        let k_w = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_k.weight")?;
-        let k_b = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_k.bias")?;
+        let (k_w, k_quant) = layer_tensor_q(slm, &mut scratch.name_buf, layer, "attn_k.weight")?;
+        let k_b = layer_tensor_bytes_opt(slm, &mut scratch.name_buf, layer, "attn_k.bias");
         project_with_bias(
+            k_quant,
             k_w,
             n_head_kv.checked_mul(head_dim)?,
             hidden,
@@ -301,12 +331,14 @@ pub fn forward_one(
             k_b,
             &mut scratch.q8k_scratch,
             &mut scratch.matmul_f32,
+            &mut scratch.dequant_f32,
             &mut scratch.k_fp16,
         )?;
 
-        let v_w = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_v.weight")?;
-        let v_b = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_v.bias")?;
+        let (v_w, v_quant) = layer_tensor_q(slm, &mut scratch.name_buf, layer, "attn_v.weight")?;
+        let v_b = layer_tensor_bytes_opt(slm, &mut scratch.name_buf, layer, "attn_v.bias");
         project_with_bias(
+            v_quant,
             v_w,
             n_head_kv.checked_mul(head_dim)?,
             hidden,
@@ -314,6 +346,7 @@ pub fn forward_one(
             v_b,
             &mut scratch.q8k_scratch,
             &mut scratch.matmul_f32,
+            &mut scratch.dequant_f32,
             &mut scratch.v_fp16,
         )?;
 
@@ -356,17 +389,24 @@ pub fn forward_one(
         )?;
 
         // -- Output projection ---------------------------------------
-        let o_w = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_output.weight")?;
+        let (o_w, o_quant) =
+            layer_tensor_q(slm, &mut scratch.name_buf, layer, "attn_output.weight")?;
         let proj_out_len = hidden;
         if scratch.matmul_f32.len() < proj_out_len {
             scratch.matmul_f32.resize(proj_out_len, 0.0);
         }
-        matmul_q4k_rows(
+        let proj_in_len = n_head_q.checked_mul(head_dim)?;
+        if scratch.dequant_f32.len() < proj_in_len {
+            scratch.dequant_f32.resize(proj_in_len, 0.0);
+        }
+        matmul_quant_rows(
+            o_quant,
             o_w,
             proj_out_len,
-            n_head_q.checked_mul(head_dim)?,
+            proj_in_len,
             &scratch.attn_out,
             &mut scratch.q8k_scratch,
+            &mut scratch.dequant_f32,
             &mut scratch.matmul_f32[..proj_out_len],
         )?;
 
@@ -383,19 +423,26 @@ pub fn forward_one(
         f32_bytes_into_fp16_slice(ffn_norm_bytes, &mut scratch.norm_fp16)?;
         rmsnorm(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
 
-        let gate_w = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "ffn_gate.weight")?;
-        let up_w = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "ffn_up.weight")?;
-        let down_w = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "ffn_down.weight")?;
-        swiglu_mlp(
+        // FFN weights mix quant types in K_M tiers — Qwen2.5-1.5B has
+        // ffn_gate/ffn_up = Q4_K but ffn_down = Q6_K; SmolLM mixes
+        // similarly. Look up each tensor's declared type.
+        let (gate_w, gate_q) = layer_tensor_q(slm, &mut scratch.name_buf, layer, "ffn_gate.weight")?;
+        let (up_w, up_q) = layer_tensor_q(slm, &mut scratch.name_buf, layer, "ffn_up.weight")?;
+        let (down_w, down_q) = layer_tensor_q(slm, &mut scratch.name_buf, layer, "ffn_down.weight")?;
+        swiglu_mlp_q(
             &scratch.x_norm,
+            gate_q,
             gate_w,
+            up_q,
             up_w,
+            down_q,
             down_w,
             hidden,
             intermediate,
             &mut scratch.mlp_gate,
             &mut scratch.mlp_up,
             &mut scratch.q8k_scratch,
+            &mut scratch.dequant_f32,
             &mut scratch.mlp_out,
         )?;
 
@@ -417,20 +464,24 @@ pub fn forward_one(
 
     // Some Qwen2 builds tie `output.weight` to `token_embd.weight`. If
     // a dedicated LM-head tensor is present, use it; otherwise fall
-    // back to the embedding table.
-    let lm_w = slm
-        .tensor_bytes("output.weight")
-        .or_else(|| slm.tensor_bytes("token_embd.weight"))?;
+    // back to the embedding table. The two tensors usually differ in
+    // quant type (Qwen2.5 ships output.weight as Q6_K and reuses
+    // token_embd.weight as the embedding table) — pick up whichever
+    // is present and dispatch on its declared type.
+    let (lm_w, lm_quant) = tensor_q(slm, "output.weight")
+        .or_else(|| tensor_q(slm, "token_embd.weight"))?;
 
     if scratch.logits.len() < vocab_size {
         scratch.logits.resize(vocab_size, 0.0);
     }
-    lm_head(
+    lm_head_q(
         &scratch.x_norm,
+        lm_quant,
         lm_w,
         hidden,
         vocab_size,
         &mut scratch.q8k_scratch,
+        &mut scratch.dequant_f32,
         &mut scratch.logits[..vocab_size],
     )?;
     Some(())
@@ -440,16 +491,22 @@ pub fn forward_one(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Q4_K-packed embedding-table row lookup.
+/// Quantization-aware embedding-table row lookup.
 ///
 /// `table_bytes` is the entire embedding table laid out row-major,
-/// `vocab_size` rows of `embedding_length` Q4_K-packed elements
-/// (`q4_k_byte_size(embedding_length)` bytes per row). Reads
-/// `token_id`'s row, dequantizes to FP32, converts to FP16, and writes
+/// `vocab_size` rows of `embedding_length` quantized elements (size
+/// per row depends on `quant_type`). Reads `token_id`'s row,
+/// dequantizes to FP32, converts to FP16, and writes
 /// `embedding_length` u16s into `out`.
 ///
+/// Token embeddings vary by quant tier: Qwen2.5-1.5B Q4_K_M ships
+/// `token_embd.weight` as **Q6_K** (the heavier "important tensor"
+/// tier in K_M); SmolLM2-135M Q4_K_M ships it as **Q8_0**. This
+/// function dispatches via [`crate::inference::quant::dequantize_row_any`]
+/// so all supported types work.
+///
 /// Returns `None` on:
-/// - `embedding_length` not a multiple of `Q4_K_BLOCK_ELEMENTS`,
+/// - unsupported `quant_type`,
 /// - the row's byte range falling outside `table_bytes`,
 /// - `out.len() != embedding_length`.
 pub fn embedding_q4k_lookup(
@@ -459,13 +516,33 @@ pub fn embedding_q4k_lookup(
     out: &mut [u16],
     scratch_f32: &mut Vec<f32>,
 ) -> Option<()> {
-    if embedding_length == 0
-        || embedding_length % Q4_K_BLOCK_ELEMENTS != 0
-        || out.len() != embedding_length
-    {
+    // Compatibility shim for tests / fixtures that still expect a
+    // Q4_K-only call path.
+    embedding_lookup_any(
+        GgmlType::Q4_K,
+        table_bytes,
+        embedding_length,
+        token_id,
+        out,
+        scratch_f32,
+    )
+}
+
+/// Quantization-aware variant of [`embedding_q4k_lookup`]. Real
+/// models call this from `forward_one` with the embedding table's
+/// declared quant type (Q4_K / Q6_K / Q8_0 are the common ones).
+pub fn embedding_lookup_any(
+    quant_type: GgmlType,
+    table_bytes: &[u8],
+    embedding_length: usize,
+    token_id: u32,
+    out: &mut [u16],
+    scratch_f32: &mut Vec<f32>,
+) -> Option<()> {
+    if embedding_length == 0 || out.len() != embedding_length {
         return None;
     }
-    let row_bytes = q4_k_byte_size(embedding_length)?;
+    let row_bytes = crate::inference::quant::quant_row_bytes(quant_type, embedding_length)?;
     let tok = usize::try_from(token_id).ok()?;
     let start = tok.checked_mul(row_bytes)?;
     let end = start.checked_add(row_bytes)?;
@@ -474,20 +551,26 @@ pub fn embedding_q4k_lookup(
     }
     let row = &table_bytes[start..end];
 
-    // Dequantize one row into the caller-supplied FP32 buffer, then
-    // convert to FP16. Earlier revisions allocated `tmp_f32` per
-    // call (~6 KB for Qwen2.5-1.5B); the M5.3.2 review folded the
-    // allocation into `ForwardScratch::embed_f32` so the per-token
-    // decode loop is allocation-free.
-    if scratch_f32.len() < embedding_length {
-        scratch_f32.resize(embedding_length, 0.0);
+    // Q4_K rows may be padded out to the next 256-element super-block
+    // boundary (`embedding_length = 576` → 3 super-blocks → 768
+    // floats stored). Allocate enough scratch for the padded count;
+    // we'll only convert the first `embedding_length` floats below.
+    let n_per_row = match quant_type {
+        GgmlType::Q4_K => {
+            let nb = row_bytes / 144;
+            nb.checked_mul(256)?
+        }
+        _ => embedding_length,
+    };
+    if scratch_f32.len() < n_per_row {
+        scratch_f32.resize(n_per_row, 0.0);
     }
-    let n = dequantize_row_q4_k(row, &mut scratch_f32[..embedding_length])?;
-    if n != embedding_length {
+    let n = dequantize_row_any(quant_type, row, &mut scratch_f32[..n_per_row])?;
+    if n < embedding_length {
         return None;
     }
-    for (i, &f) in scratch_f32[..embedding_length].iter().enumerate() {
-        out[i] = f32_to_f16(f);
+    for i in 0..embedding_length {
+        out[i] = f32_to_f16(scratch_f32[i]);
     }
     Some(())
 }
@@ -510,45 +593,72 @@ fn f32_bytes_into_fp16_slice(bytes: &[u8], out: &mut [u16]) -> Option<()> {
     Some(())
 }
 
-/// Multi-row Q4_K matmul + per-output-row F32 bias add, FP16 output.
+/// Multi-row matmul + optional per-output-row F32 bias add, FP16 output.
 ///
-/// Used by the Q/K/V projections — each of which is
-/// `out = matmul(x_norm, weight) + bias` where the bias is stored as
-/// raw F32 little-endian bytes. The `matmul_q4k_rows` kernel writes
-/// FP32 output directly into `matmul_f32`; we then add the bias and
-/// f16-narrow into `out_fp16`.
+/// Used by the Q/K/V/output projections. With bias (`Some(bytes)`),
+/// computes `out = matmul(x_norm, weight) + bias`. Without bias
+/// (`None`), computes `out = matmul(x_norm, weight)`.
+///
+/// **Architecture variants:** Qwen2 stores QKV biases (`attn_q.bias`,
+/// `attn_k.bias`, `attn_v.bias`) in the GGUF; LLaMA-1/2/3 and SmolLM
+/// (which uses the LLaMA arch) don't. The caller passes `None` for
+/// the bias-less case so a missing tensor doesn't kill the forward
+/// pass via `?` on a hard `tensor_bytes` lookup.
+///
+/// **Quantization variants:** the weight tensor's quant type is
+/// passed explicitly so this function works for Q4_K (Qwen2.5
+/// attention), Q5_0 (SmolLM attention), Q8_0 (SmolLM V), and
+/// anything else `matmul_quant_rows` supports.
 fn project_with_bias(
+    weight_quant: GgmlType,
     weight: &[u8],
     rows: usize,
     cols: usize,
     acts_fp16: &[u16],
-    bias_f32_bytes: &[u8],
+    bias_f32_bytes: Option<&[u8]>,
     q8k_scratch: &mut [u8],
     matmul_f32: &mut Vec<f32>,
+    dequant_scratch: &mut Vec<f32>,
     out_fp16: &mut [u16],
 ) -> Option<()> {
     if out_fp16.len() != rows {
         return None;
     }
-    if bias_f32_bytes.len() != rows.checked_mul(4)? {
-        return None;
+    if let Some(bytes) = bias_f32_bytes {
+        if bytes.len() != rows.checked_mul(4)? {
+            return None;
+        }
     }
     if matmul_f32.len() < rows {
         matmul_f32.resize(rows, 0.0);
     }
-    matmul_q4k_rows(
+    if dequant_scratch.len() < cols {
+        dequant_scratch.resize(cols, 0.0);
+    }
+    matmul_quant_rows(
+        weight_quant,
         weight,
         rows,
         cols,
         acts_fp16,
         q8k_scratch,
+        dequant_scratch,
         &mut matmul_f32[..rows],
     )?;
-    for i in 0..rows {
-        let chunk = &bias_f32_bytes[i * 4..(i + 1) * 4];
-        let arr: [u8; 4] = chunk.try_into().ok()?;
-        let b = f32::from_le_bytes(arr);
-        out_fp16[i] = f32_to_f16(matmul_f32[i] + b);
+    match bias_f32_bytes {
+        Some(bytes) => {
+            for i in 0..rows {
+                let chunk = &bytes[i * 4..(i + 1) * 4];
+                let arr: [u8; 4] = chunk.try_into().ok()?;
+                let b = f32::from_le_bytes(arr);
+                out_fp16[i] = f32_to_f16(matmul_f32[i] + b);
+            }
+        }
+        None => {
+            for i in 0..rows {
+                out_fp16[i] = f32_to_f16(matmul_f32[i]);
+            }
+        }
     }
     Some(())
 }
@@ -567,6 +677,61 @@ fn layer_tensor_bytes<'a>(
     // OOM); using `.ok()?` keeps the API infallible at the call site.
     write!(name_buf, "blk.{}.{}", layer, suffix).ok()?;
     slm.tensor_bytes(name_buf.as_str())
+}
+
+/// Same shape as [`layer_tensor_bytes`] but distinguishes "tensor
+/// absent from this GGUF" from "lookup itself failed". Returns
+/// `Some(bytes)` when the tensor exists, `None` when it doesn't.
+///
+/// Used for tensors that some architectures ship and others don't
+/// — e.g. Qwen2 has `attn_q.bias` / `attn_k.bias` / `attn_v.bias`
+/// but LLaMA / SmolLM omit them. Callers pass the returned `Option`
+/// through to [`project_with_bias`], which adds the bias when
+/// present and skips it when not.
+///
+/// The two functions look identical at the source level — both
+/// boil down to `slm.tensor_bytes(name)` — but the distinct names
+/// make it obvious at the call site whether a missing tensor is a
+/// hard error (use `layer_tensor_bytes(...)?`) or expected
+/// (use `layer_tensor_bytes_opt(...)`).
+fn layer_tensor_bytes_opt<'a>(
+    slm: &'a LoadedSlm,
+    name_buf: &mut String,
+    layer: usize,
+    suffix: &str,
+) -> Option<&'a [u8]> {
+    name_buf.clear();
+    write!(name_buf, "blk.{}.{}", layer, suffix).ok()?;
+    slm.tensor_bytes(name_buf.as_str())
+}
+
+/// Look up a layer's tensor and return its bytes plus quant type.
+///
+/// Real-world Q4_K_M GGUFs mix quant types within a single layer
+/// (Qwen2.5-1.5B's `ffn_down` is Q6_K while `ffn_gate`/`ffn_up` are
+/// Q4_K; SmolLM2 mixes Q4_K + Q5_0 + Q8_0 in attention). The forward
+/// pass needs the quant type to pick the right dequant kernel; this
+/// helper grabs both in one call so per-tensor lookup happens once.
+fn layer_tensor_q<'a>(
+    slm: &'a LoadedSlm,
+    name_buf: &mut String,
+    layer: usize,
+    suffix: &str,
+) -> Option<(&'a [u8], GgmlType)> {
+    name_buf.clear();
+    write!(name_buf, "blk.{}.{}", layer, suffix).ok()?;
+    let info = slm.tensor_info(name_buf.as_str())?;
+    let q = GgmlType(info.ggml_type);
+    let bytes = slm.tensor_bytes(name_buf.as_str())?;
+    Some((bytes, q))
+}
+
+/// Same as [`layer_tensor_q`] but for top-level (non-layer) tensors.
+fn tensor_q<'a>(slm: &'a LoadedSlm, name: &str) -> Option<(&'a [u8], GgmlType)> {
+    let info = slm.tensor_info(name)?;
+    let q = GgmlType(info.ggml_type);
+    let bytes = slm.tensor_bytes(name)?;
+    Some((bytes, q))
 }
 
 /// Look up a `GgmlType` for the named tensor (sanity-check helper, not

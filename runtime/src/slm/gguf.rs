@@ -256,6 +256,10 @@ impl GgmlType {
     pub const F16: GgmlType = GgmlType(1);
     /// `q4_0` — legacy 4-bit quant.
     pub const Q4_0: GgmlType = GgmlType(2);
+    /// `q5_0` — legacy 5-bit quant. Used by SmolLM2 attention weights.
+    pub const Q5_0: GgmlType = GgmlType(6);
+    /// `q8_0` — legacy 8-bit quant. Used by SmolLM2 token embeddings + V projection.
+    pub const Q8_0: GgmlType = GgmlType(8);
     /// `q4_K` — 4-bit K-quants. Common for Qwen2/Llama weight tensors.
     pub const Q4_K: GgmlType = GgmlType(12);
     /// `q6_K` — 6-bit K-quants. Used for output projection in many K-quant models.
@@ -897,8 +901,19 @@ impl<'a> Reader<'a> {
     /// Read a length-prefixed UTF-8 string and return it as a borrowed
     /// `&str` slice into the original buffer (zero-copy).
     fn string_borrowed(&mut self) -> Result<&'a str, GgufError> {
+        /* Snapshot the offset BEFORE reading the length so a cap-trip
+         * names the file offset where the bad length lives. Without
+         * this, `OversizedString` says only "some string was huge" —
+         * which makes upload-corruption (#618-class) bugs hard to
+         * localize. The log goes to UART and only fires on the cap
+         * path; the happy path still does no extra work. */
+        let len_offset = self.pos as u64;
         let len = self.u64()?;
         if len > MAX_PLAUSIBLE_STRING_LEN {
+            crate::log::log_error_val(
+                b"[gguf] OversizedString at file offset =\0", len_offset);
+            crate::log::log_error_val(
+                b"[gguf]   declared length =\0", len);
             return Err(GgufError::OversizedString);
         }
         let len = usize::try_from(len).map_err(|_| GgufError::OversizedString)?;
@@ -1040,6 +1055,64 @@ pub fn q4_k_byte_size(elements: usize) -> Option<usize> {
 /// error.
 pub fn q4_k_byte_size_unchecked(elements: usize) -> usize {
     q4_k_block_count(elements) * Q4_K_BLOCK_SIZE
+}
+
+// ---------------------------------------------------------------------------
+// Q8_0, Q5_0, Q6_K block layouts
+// ---------------------------------------------------------------------------
+//
+// Real-world Q4_K_M GGUFs (Qwen2.5, SmolLM, Llama-3) mix multiple quant
+// types within a single file. Q4_K_M's "M" tier reserves Q6_K for
+// output_norm/lm_head (~29 tensors in Qwen2.5) and Q4_K for the rest.
+// SmolLM additionally uses Q5_0 for attention weights and Q8_0 for
+// token_embd + V projections. The constants and byte-size helpers
+// below cover those three additional types so the M5.3 forward pass
+// can dispatch.
+
+/// Elements per Q8_0 block (fixed by GGML format).
+pub const Q8_0_BLOCK_ELEMENTS: usize = 32;
+/// Bytes per Q8_0 block: `f16 d` (2 B) + `i8 qs[32]` (32 B) = 34 B.
+pub const Q8_0_BLOCK_SIZE: usize = 2 + 32;
+
+/// On-disk byte size of a Q8_0-quantized row of `elements` weights.
+/// `elements` must be a multiple of [`Q8_0_BLOCK_ELEMENTS`]; returns
+/// `None` otherwise (Q8_0 has no padding mode in GGML).
+pub fn q8_0_byte_size(elements: usize) -> Option<usize> {
+    if elements % Q8_0_BLOCK_ELEMENTS != 0 {
+        return None;
+    }
+    (elements / Q8_0_BLOCK_ELEMENTS).checked_mul(Q8_0_BLOCK_SIZE)
+}
+
+/// Elements per Q5_0 block (fixed by GGML format).
+pub const Q5_0_BLOCK_ELEMENTS: usize = 32;
+/// Bytes per Q5_0 block: `f16 d` (2 B) + `u8 qh[4]` (4 B,
+/// packed 5th-bit per element) + `u8 qs[16]` (16 B, two 4-bit
+/// nibbles per byte) = 22 B.
+pub const Q5_0_BLOCK_SIZE: usize = 2 + 4 + 16;
+
+/// On-disk byte size of a Q5_0-quantized row of `elements` weights.
+pub fn q5_0_byte_size(elements: usize) -> Option<usize> {
+    if elements % Q5_0_BLOCK_ELEMENTS != 0 {
+        return None;
+    }
+    (elements / Q5_0_BLOCK_ELEMENTS).checked_mul(Q5_0_BLOCK_SIZE)
+}
+
+/// Elements per Q6_K super-block (fixed by GGML format).
+pub const Q6_K_BLOCK_ELEMENTS: usize = 256;
+/// Bytes per Q6_K super-block: `u8 ql[128]` + `u8 qh[64]` +
+/// `i8 scales[16]` + `f16 d` (2 B) = 210 B.
+pub const Q6_K_BLOCK_SIZE: usize = 128 + 64 + 16 + 2;
+
+/// On-disk byte size of a Q6_K-quantized row of `elements` weights.
+/// `elements` must be a multiple of [`Q6_K_BLOCK_ELEMENTS`]; Q6_K
+/// rows aren't padded (super-blocks are always full).
+pub fn q6_k_byte_size(elements: usize) -> Option<usize> {
+    if elements % Q6_K_BLOCK_ELEMENTS != 0 {
+        return None;
+    }
+    (elements / Q6_K_BLOCK_ELEMENTS).checked_mul(Q6_K_BLOCK_SIZE)
 }
 
 /// Borrowed view over a single Q4_K super-block. Constructed via

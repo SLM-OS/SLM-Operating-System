@@ -396,6 +396,112 @@ pub fn matmul_q4k_rows(
     Some(())
 }
 
+/// Dispatching multi-row matmul over any supported GGML quant type.
+///
+/// Real-world Q4_K_M GGUFs mix quant types within a single file —
+/// Q4_K dominates, with Q6_K sprinkled on the LM head and a handful of
+/// "important" weights, plus Q5_0 / Q8_0 on legacy-quant SmolLM
+/// builds. This function is the single dispatch surface the M5 forward
+/// pass uses; it picks the optimized vec_dot path for Q4_K and falls
+/// back to a per-row "dequantize then F32 dot product" loop for other
+/// types.
+///
+/// `weights` is `rows × quant_row_bytes(quant_type, cols)` packed
+/// bytes laid out row-major. `acts_fp16` is the FP16 input vector
+/// of `cols` elements (shared across all output rows). `q8k_scratch`
+/// is reused across rows by the Q4_K fast path; ignored on other
+/// types but still required as a parameter so callers can keep one
+/// allocation. `dequant_scratch` holds one dequantized row of FP32
+/// weights for the fallback path; sized at the largest `cols` the
+/// caller will ever pass. `out_fp32` receives the per-row dot
+/// products.
+///
+/// Returns `None` on shape mismatch or unsupported quant type.
+pub fn matmul_quant_rows(
+    quant_type: crate::slm::gguf::GgmlType,
+    weights: &[u8],
+    rows: usize,
+    cols: usize,
+    acts_fp16: &[u16],
+    q8k_scratch: &mut [u8],
+    dequant_scratch: &mut [f32],
+    out_fp32: &mut [f32],
+) -> Option<()> {
+    use crate::inference::quant::{dequantize_row_any, quant_row_bytes};
+    use crate::slm::gguf::GgmlType;
+
+    if cols == 0 || acts_fp16.len() != cols || out_fp32.len() != rows {
+        return None;
+    }
+
+    // Q4_K stays on the optimized vec_dot path when `cols` is a clean
+    // multiple of 256 (Qwen2.5-1.5B's 1536-element rows qualify; the
+    // M5.3.x synthetic fixture qualifies). SmolLM2's `hidden = 576`
+    // does NOT — `matmul_q4k_rows` enforces alignment and would
+    // reject. Fall through to the per-row dequant path in that case.
+    if quant_type == GgmlType::Q4_K && cols % Q4_K_BLOCK_ELEMENTS == 0 {
+        return matmul_q4k_rows(weights, rows, cols, acts_fp16, q8k_scratch, out_fp32);
+    }
+
+    // Generic fallback: per-row dequantize to F32, then dot product
+    // with the FP16-widened activations. Slower than Q4_K's vec_dot
+    // but correct for any supported quant type. Used for Q6_K
+    // (LM head + ~29 "important" tensors in Qwen2.5 Q4_K_M), Q5_0
+    // (SmolLM attention), Q8_0 (SmolLM token_embd + V projection),
+    // F32, F16.
+    let row_bytes = quant_row_bytes(quant_type, cols)?;
+    let total = row_bytes.checked_mul(rows)?;
+    if weights.len() != total {
+        return None;
+    }
+
+    // For Q4_K (and other K-quants with super-block padding), the
+    // stored row may be larger than `cols` floats: `q4_k_byte_size`
+    // pads partial trailing super-blocks out to the next 256-element
+    // boundary. SmolLM2's hidden dim 576 is NOT divisible by 256,
+    // so a 576-element Q4_K row is stored as 3 super-blocks = 768
+    // elements with 192 padding. The dequant kernel writes the full
+    // padded count; we only dot-product the first `cols` of those.
+    let n_per_row = match quant_type {
+        GgmlType::Q4_K => {
+            let nb = row_bytes / 144;
+            nb.checked_mul(256)?
+        }
+        // Q6_K rows aren't padded — its byte-size helper rejects
+        // non-256-aligned counts upstream, so n_per_row == cols.
+        GgmlType::Q6_K | GgmlType::Q5_0 | GgmlType::Q8_0 | GgmlType::F32 | GgmlType::F16 => cols,
+        _ => return None,
+    };
+    if n_per_row < cols || dequant_scratch.len() < n_per_row {
+        return None;
+    }
+
+    // Widen activations once. Allocate here for now — the caller's
+    // `q8k_scratch` is sized for Q8_K and the wrong shape for an
+    // FP32 buffer. A future refactor could pre-allocate this in
+    // ForwardScratch alongside the existing dequant_scratch.
+    let mut acts_f32: alloc::vec::Vec<f32> = alloc::vec::Vec::with_capacity(cols);
+    for &bits in acts_fp16.iter() {
+        acts_f32.push(f16_to_f32(bits));
+    }
+
+    for r in 0..rows {
+        let start = r.checked_mul(row_bytes)?;
+        let end = start.checked_add(row_bytes)?;
+        let row = &weights[start..end];
+        let n = dequantize_row_any(quant_type, row, &mut dequant_scratch[..n_per_row])?;
+        if n < cols {
+            return None;
+        }
+        let mut acc: f32 = 0.0;
+        for i in 0..cols {
+            acc += dequant_scratch[i] * acts_f32[i];
+        }
+        out_fp32[r] = acc;
+    }
+    Some(())
+}
+
 // ---------------------------------------------------------------------------
 // Grouped-Query Attention (decode step)
 // ---------------------------------------------------------------------------
@@ -535,11 +641,55 @@ pub fn swiglu_mlp(
     q8k_scratch: &mut [u8],
     out: &mut [u16],
 ) -> Option<()> {
-    if hidden_size == 0
-        || intermediate_size == 0
-        || hidden_size % Q4_K_BLOCK_ELEMENTS != 0
-        || intermediate_size % Q4_K_BLOCK_ELEMENTS != 0
-    {
+    // Q4_K-only legacy signature kept for the existing test fixture.
+    // Real models use the dispatching variant below.
+    let mut tmp_dequant: Vec<f32> = Vec::new();
+    swiglu_mlp_q(
+        x,
+        crate::slm::gguf::GgmlType::Q4_K,
+        gate_w,
+        crate::slm::gguf::GgmlType::Q4_K,
+        up_w,
+        crate::slm::gguf::GgmlType::Q4_K,
+        down_w,
+        hidden_size,
+        intermediate_size,
+        gate_scratch,
+        up_scratch,
+        q8k_scratch,
+        &mut tmp_dequant,
+        out,
+    )
+}
+
+/// SwiGLU MLP block accepting per-weight quant types.
+///
+/// `gate_w`/`up_w`/`down_w` may each carry a different GGML quant
+/// (Qwen2.5 Q4_K_M and SmolLM both mix Q4_K and Q6_K within one
+/// FFN block). `dequant_scratch` is shared scratch for the
+/// dispatcher's per-row dequantization fallback; sized at the
+/// largest of `hidden_size` and `intermediate_size`.
+pub fn swiglu_mlp_q(
+    x: &[u16],
+    gate_quant: crate::slm::gguf::GgmlType,
+    gate_w: &[u8],
+    up_quant: crate::slm::gguf::GgmlType,
+    up_w: &[u8],
+    down_quant: crate::slm::gguf::GgmlType,
+    down_w: &[u8],
+    hidden_size: usize,
+    intermediate_size: usize,
+    gate_scratch: &mut [u16],
+    up_scratch: &mut [u16],
+    q8k_scratch: &mut [u8],
+    dequant_scratch: &mut Vec<f32>,
+    out: &mut [u16],
+) -> Option<()> {
+    // 256-block alignment was enforced when the only supported quant
+    // was Q4_K. With the multi-quant dispatcher in `matmul_quant_rows`,
+    // partial-block rows are handled inline (SmolLM2's hidden=576 is
+    // a multiple of Q5_0/Q8_0's 32 but not Q4_K's 256).
+    if hidden_size == 0 || intermediate_size == 0 {
         return None;
     }
     if x.len() != hidden_size
@@ -550,26 +700,38 @@ pub fn swiglu_mlp(
         return None;
     }
 
+    // Make sure the dequant scratch can hold the largest inner-row
+    // we'll dequantize. Both gate/up consume `hidden_size`-element
+    // rows; down consumes `intermediate_size`.
+    let max_cols = hidden_size.max(intermediate_size);
+    if dequant_scratch.len() < max_cols {
+        dequant_scratch.resize(max_cols, 0.0);
+    }
+
     // gate = matmul(x, gate_w) [intermediate_size]
     // up   = matmul(x, up_w)   [intermediate_size]
     let mut tmp_f32: Vec<f32> = vec![0.0; intermediate_size];
-    matmul_q4k_rows(
+    matmul_quant_rows(
+        gate_quant,
         gate_w,
         intermediate_size,
         hidden_size,
         x,
         q8k_scratch,
+        dequant_scratch,
         &mut tmp_f32,
     )?;
     for i in 0..intermediate_size {
         gate_scratch[i] = f32_to_f16(tmp_f32[i]);
     }
-    matmul_q4k_rows(
+    matmul_quant_rows(
+        up_quant,
         up_w,
         intermediate_size,
         hidden_size,
         x,
         q8k_scratch,
+        dequant_scratch,
         &mut tmp_f32,
     )?;
     for i in 0..intermediate_size {
@@ -586,12 +748,14 @@ pub fn swiglu_mlp(
 
     // out = matmul(gate, down_w) [hidden_size]
     let mut out_f32: Vec<f32> = vec![0.0; hidden_size];
-    matmul_q4k_rows(
+    matmul_quant_rows(
+        down_quant,
         down_w,
         hidden_size,
         intermediate_size,
         gate_scratch,
         q8k_scratch,
+        dequant_scratch,
         &mut out_f32,
     )?;
     for i in 0..hidden_size {
@@ -620,10 +784,54 @@ pub fn lm_head(
     q8k_scratch: &mut [u8],
     logits: &mut [f32],
 ) -> Option<()> {
+    // Q4_K-only legacy signature kept for the existing test fixture.
+    // Real LM heads in Qwen2.5 Q4_K_M and SmolLM are Q6_K — call the
+    // dispatching variant directly from forward.rs.
+    let mut tmp_dequant: Vec<f32> = Vec::new();
+    lm_head_q(
+        x,
+        crate::slm::gguf::GgmlType::Q4_K,
+        weight,
+        hidden_size,
+        vocab_size,
+        q8k_scratch,
+        &mut tmp_dequant,
+        logits,
+    )
+}
+
+/// LM-head projection accepting an explicit weight quant type.
+///
+/// LM head ("output.weight") in any K_M-tier GGUF is typically Q6_K
+/// for accuracy; some variants ship F16. Tied embeddings (no
+/// dedicated `output.weight`) reuse `token_embd.weight` which can be
+/// Q4_K, Q6_K, or Q8_0 depending on quant tier.
+pub fn lm_head_q(
+    x: &[u16],
+    weight_quant: crate::slm::gguf::GgmlType,
+    weight: &[u8],
+    hidden_size: usize,
+    vocab_size: usize,
+    q8k_scratch: &mut [u8],
+    dequant_scratch: &mut Vec<f32>,
+    logits: &mut [f32],
+) -> Option<()> {
     if hidden_size == 0 || vocab_size == 0 {
         return None;
     }
-    matmul_q4k_rows(weight, vocab_size, hidden_size, x, q8k_scratch, logits)
+    if dequant_scratch.len() < hidden_size {
+        dequant_scratch.resize(hidden_size, 0.0);
+    }
+    matmul_quant_rows(
+        weight_quant,
+        weight,
+        vocab_size,
+        hidden_size,
+        x,
+        q8k_scratch,
+        dequant_scratch,
+        logits,
+    )
 }
 
 // ---------------------------------------------------------------------------

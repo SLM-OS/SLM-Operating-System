@@ -510,6 +510,212 @@ fn monotonic_ns() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Q8_0 dequantization
+// ---------------------------------------------------------------------------
+//
+// Block layout: { f16 d; i8 qs[32]; }  — 34 bytes per 32 elements.
+// Each weight is a signed 8-bit value scaled by `d` (per-block).
+
+use crate::slm::gguf::{
+    Q5_0_BLOCK_ELEMENTS, Q5_0_BLOCK_SIZE, Q6_K_BLOCK_ELEMENTS, Q6_K_BLOCK_SIZE,
+    Q8_0_BLOCK_ELEMENTS, Q8_0_BLOCK_SIZE, GgmlType,
+};
+
+/// Dequantize a Q8_0-packed weight row to FP32.
+///
+/// `weights.len()` must be a multiple of [`Q8_0_BLOCK_SIZE`]. `out`
+/// must have at least `nb * Q8_0_BLOCK_ELEMENTS` floats. Returns the
+/// number of floats written, or `None` on shape mismatch.
+pub fn dequantize_row_q8_0(weights: &[u8], out: &mut [f32]) -> Option<usize> {
+    if weights.len() % Q8_0_BLOCK_SIZE != 0 {
+        return None;
+    }
+    let nb = weights.len() / Q8_0_BLOCK_SIZE;
+    let n_out = nb.checked_mul(Q8_0_BLOCK_ELEMENTS)?;
+    if out.len() < n_out {
+        return None;
+    }
+    for b in 0..nb {
+        let block = &weights[b * Q8_0_BLOCK_SIZE..(b + 1) * Q8_0_BLOCK_SIZE];
+        let d = crate::slm::gguf::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let dst = &mut out[b * Q8_0_BLOCK_ELEMENTS..(b + 1) * Q8_0_BLOCK_ELEMENTS];
+        for i in 0..Q8_0_BLOCK_ELEMENTS {
+            dst[i] = d * (block[2 + i] as i8 as f32);
+        }
+    }
+    Some(n_out)
+}
+
+// ---------------------------------------------------------------------------
+// Q5_0 dequantization
+// ---------------------------------------------------------------------------
+//
+// Block layout: { f16 d; u8 qh[4]; u8 qs[16]; } — 22 bytes per 32 elements.
+// `qh` is a 32-bit packed bitfield: bit i of qh holds the 5th bit of
+// element i. `qs` packs two 4-bit nibbles per byte (low nibble = element
+// `i` for i < 16, high nibble = element `i + 16`). Combined 5-bit value
+// (0..31) is offset by -16 to give signed range -16..15.
+
+/// Dequantize a Q5_0-packed weight row to FP32.
+pub fn dequantize_row_q5_0(weights: &[u8], out: &mut [f32]) -> Option<usize> {
+    if weights.len() % Q5_0_BLOCK_SIZE != 0 {
+        return None;
+    }
+    let nb = weights.len() / Q5_0_BLOCK_SIZE;
+    let n_out = nb.checked_mul(Q5_0_BLOCK_ELEMENTS)?;
+    if out.len() < n_out {
+        return None;
+    }
+    for b in 0..nb {
+        let block = &weights[b * Q5_0_BLOCK_SIZE..(b + 1) * Q5_0_BLOCK_SIZE];
+        let d = crate::slm::gguf::f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let qh = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
+        let qs = &block[6..22];
+        let dst = &mut out[b * Q5_0_BLOCK_ELEMENTS..(b + 1) * Q5_0_BLOCK_ELEMENTS];
+        for i in 0..16 {
+            let q = qs[i];
+            let xh_lo = ((qh >> i) & 1) << 4;
+            let xh_hi = ((qh >> (i + 16)) & 1) << 4;
+            let q_lo = ((q & 0x0F) | xh_lo as u8) as i32 - 16;
+            let q_hi = ((q >> 4) | xh_hi as u8) as i32 - 16;
+            dst[i] = d * (q_lo as f32);
+            dst[i + 16] = d * (q_hi as f32);
+        }
+    }
+    Some(n_out)
+}
+
+// ---------------------------------------------------------------------------
+// Q6_K dequantization
+// ---------------------------------------------------------------------------
+//
+// Block layout (per llama.cpp `block_q6_K`):
+//   u8  ql[128]    — low 4 bits of each weight (256 weights total)
+//   u8  qh[64]     — high 2 bits, packed 4-per-byte
+//   i8  scales[16] — per-16-element sub-block scales
+//   f16 d          — super-block scale
+//
+// Total: 128 + 64 + 16 + 2 = 210 bytes per 256-element super-block.
+//
+// The super-block is processed in two 128-element halves. Within a
+// half (32 ql bytes, 32 qh bytes, 8 scales): each `l in 0..32` decodes
+// 4 weights at output positions {l, l+32, l+64, l+96}, picking up 2
+// high bits from the same `qh[l]` byte (shifts 0/2/4/6) and 4 low
+// bits from `ql[l]` and `ql[l+32]` (low/high nibbles). Combined 6-bit
+// values are offset by -32 to yield signed range -32..31.
+
+/// Dequantize a Q6_K-packed weight row to FP32.
+pub fn dequantize_row_q6_k(weights: &[u8], out: &mut [f32]) -> Option<usize> {
+    if weights.len() % Q6_K_BLOCK_SIZE != 0 {
+        return None;
+    }
+    let nb = weights.len() / Q6_K_BLOCK_SIZE;
+    let n_out = nb.checked_mul(Q6_K_BLOCK_ELEMENTS)?;
+    if out.len() < n_out {
+        return None;
+    }
+    for b in 0..nb {
+        let block = &weights[b * Q6_K_BLOCK_SIZE..(b + 1) * Q6_K_BLOCK_SIZE];
+        let ql_all = &block[0..128];
+        let qh_all = &block[128..192];
+        let scales = &block[192..208];
+        let d = crate::slm::gguf::f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
+        let dst = &mut out[b * Q6_K_BLOCK_ELEMENTS..(b + 1) * Q6_K_BLOCK_ELEMENTS];
+
+        for half in 0..2 {
+            let ql = &ql_all[half * 64..half * 64 + 64];
+            let qh = &qh_all[half * 32..half * 32 + 32];
+            let sc = &scales[half * 8..half * 8 + 8];
+            let y = &mut dst[half * 128..half * 128 + 128];
+            for l in 0..32 {
+                let is = l / 16; // sub-block index within this half (0 or 1)
+                let q1 = ((ql[l] & 0x0F) | (((qh[l] >> 0) & 0x03) << 4)) as i32 - 32;
+                let q2 = ((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 0x03) << 4)) as i32 - 32;
+                let q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 0x03) << 4)) as i32 - 32;
+                let q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 0x03) << 4)) as i32 - 32;
+                y[l] = d * (sc[is] as i8 as i32 as f32) * (q1 as f32);
+                y[l + 32] = d * (sc[is + 2] as i8 as i32 as f32) * (q2 as f32);
+                y[l + 64] = d * (sc[is + 4] as i8 as i32 as f32) * (q3 as f32);
+                y[l + 96] = d * (sc[is + 6] as i8 as i32 as f32) * (q4 as f32);
+            }
+        }
+    }
+    Some(n_out)
+}
+
+// ---------------------------------------------------------------------------
+// Generic dispatcher
+// ---------------------------------------------------------------------------
+
+/// Bytes-per-row for a tensor of `n_elements` quantized as `ggml_type`.
+///
+/// Covers the types the M5 forward pass actually loads from real
+/// GGUFs: F32, F16, Q4_K (Qwen2 demo), Q6_K (LM-head in any K_M
+/// quant), Q5_0 / Q8_0 (SmolLM attention + embedding). Other types
+/// return `None` — caller falls back to whatever error path it has
+/// for "format not supported" (typically a diagnostic log + abort
+/// the forward pass cleanly).
+pub fn quant_row_bytes(ggml_type: GgmlType, n_elements: usize) -> Option<usize> {
+    match ggml_type {
+        GgmlType::F32 => n_elements.checked_mul(4),
+        GgmlType::F16 => n_elements.checked_mul(2),
+        GgmlType::Q4_K => crate::slm::gguf::q4_k_byte_size(n_elements),
+        GgmlType::Q6_K => crate::slm::gguf::q6_k_byte_size(n_elements),
+        GgmlType::Q5_0 => crate::slm::gguf::q5_0_byte_size(n_elements),
+        GgmlType::Q8_0 => crate::slm::gguf::q8_0_byte_size(n_elements),
+        _ => None,
+    }
+}
+
+/// Dequantize one row of a quantized tensor to FP32.
+///
+/// `weights` is exactly one row's worth of bytes (size matches
+/// [`quant_row_bytes`] for `ggml_type` and `out.len()` element
+/// count). `out` is the FP32 destination, sized at the row's
+/// element count.
+///
+/// F32 / F16 source types pass through with width conversion only.
+/// All quant types decode block-by-block per the layouts documented
+/// above their respective `dequantize_row_*` functions.
+pub fn dequantize_row_any(
+    ggml_type: GgmlType,
+    weights: &[u8],
+    out: &mut [f32],
+) -> Option<usize> {
+    match ggml_type {
+        GgmlType::F32 => {
+            if weights.len() != out.len().checked_mul(4)? {
+                return None;
+            }
+            for i in 0..out.len() {
+                out[i] = f32::from_le_bytes([
+                    weights[i * 4],
+                    weights[i * 4 + 1],
+                    weights[i * 4 + 2],
+                    weights[i * 4 + 3],
+                ]);
+            }
+            Some(out.len())
+        }
+        GgmlType::F16 => {
+            if weights.len() != out.len().checked_mul(2)? {
+                return None;
+            }
+            for i in 0..out.len() {
+                let bits = u16::from_le_bytes([weights[i * 2], weights[i * 2 + 1]]);
+                out[i] = crate::slm::gguf::f16_to_f32(bits);
+            }
+            Some(out.len())
+        }
+        GgmlType::Q4_K => dequantize_row_q4_k(weights, out),
+        GgmlType::Q6_K => dequantize_row_q6_k(weights, out),
+        GgmlType::Q5_0 => dequantize_row_q5_0(weights, out),
+        GgmlType::Q8_0 => dequantize_row_q8_0(weights, out),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -949,6 +1155,53 @@ mod tests {
         assert_eq!(nearest_int(-0.5), -1);
         assert_eq!(nearest_int(127.0), 127);
         assert_eq!(nearest_int(-128.0), -128);
+    }
+
+    // -- Q6_K dequant -------------------------------------------------
+
+    #[test]
+    fn dequantize_q6k_signed_scale_positive_output() {
+        // Regression for the signed-scale bug: sc bytes were cast
+        // `as i32` (unsigned) instead of `as i8 as i32`. A scale of
+        // -1 stored as 0xFF should give positive output when the
+        // quant values are negative, not a huge negative.
+        //
+        // Block layout: ql=0, qh=0, d=1.0 →
+        //   every 6-bit quant = (0 | 0) - 32 = -32.
+        // With scales[0] = -1 (0xFF):
+        //   y[0] = d * (-1) * (-32) = +32.0  (correct, signed)
+        //   y[0] = d * 255 * (-32) = -8160   (wrong, unsigned)
+        let mut block = [0u8; Q6_K_BLOCK_SIZE];
+        // d = 1.0 (f16 0x3C00) at bytes 208..210.
+        block[208] = 0x00;
+        block[209] = 0x3C;
+        // scales[0] = -1 stored as 0xFF (i8 two's complement).
+        block[192] = 0xFF;
+        // All other scales = 1 for sanity.
+        for i in 1..16 {
+            block[192 + i] = 0x01;
+        }
+        // ql=0, qh=0 → all 6-bit quants = 0|0 - 32 = -32.
+
+        let mut out = vec![0.0f32; Q6_K_BLOCK_ELEMENTS];
+        let n = dequantize_row_q6_k(&block, &mut out).expect("dequant ok");
+        assert_eq!(n, Q6_K_BLOCK_ELEMENTS);
+
+        // y[0] should use scales[0]=-1, q=-32 → +32.0.
+        assert!(
+            (out[0] - 32.0).abs() < 1e-3,
+            "signed scale -1 × q=-32 should give +32, got {}",
+            out[0]
+        );
+
+        // y[32] uses scales[2]=1 (since is = l/16 = 0 for l in 0..15,
+        // scale index = is + 2 = 2). scales[2] = 0x01 = +1.
+        // y[32] = d * 1 * (-32) = -32.
+        assert!(
+            (out[32] - (-32.0)).abs() < 1e-3,
+            "positive scale +1 × q=-32 should give -32, got {}",
+            out[32]
+        );
     }
 
     // -- Black-hole consume to keep multi_block result alive in
