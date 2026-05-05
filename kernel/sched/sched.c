@@ -776,6 +776,7 @@ void scheduler_init(void)
     cpu_rq(0)->idle_task->state = TASK_READY;
     cpu_rq(0)->idle_task->cpu_affinity = 0;  /* Pinned to CPU 0 */
     cpu_rq(0)->idle_task->assigned_cpu = 0;
+    cpu_rq(0)->idle_task->flags |= TASK_FLAG_IDLE;   /* permanent idle marker */
 
     /* Register built-in policy */
     sched_register_policy(&sched_policy_heuristic);
@@ -900,6 +901,7 @@ void scheduler_init_secondary(uint32_t cpu)
     idle->state = TASK_READY;
     idle->cpu_affinity = cpu;  /* Pinned to this CPU */
     idle->assigned_cpu = cpu;
+    idle->flags |= TASK_FLAG_IDLE;   /* permanent idle marker */
     cpu_rq(cpu)->idle_task = idle;
 
     rq_unlock_irqrestore(cpu, flags);
@@ -1268,6 +1270,18 @@ void scheduler_terminate_task(struct task *task)
         return;
     }
 
+    /* Idle-task guard (#200/#606 investigation, 2026-05-02 / 03).
+     * Refuse to mark an idle task TERMINATED — idle is perpetual,
+     * and the scheduler dispatch panic captured on the pre-PR-598
+     * baseline fired with `current = idle_2 AND state = TERMINATED`.
+     * Uses the O(1) flag-bit predicate `is_idle_task()` (Linux
+     * PF_IDLE pattern) — replaces an earlier loop-over-cpu_rq
+     * pointer comparison. */
+    if (is_idle_task(task)) {
+        panic("scheduler_terminate_task: refusing to terminate idle task "
+              "(task='%s', cpu_affinity=%u)", task->name, task->cpu_affinity);
+    }
+
     /* Same snapshot/lock/recheck pattern as scheduler_remove_task: a
      * concurrent steal can change task->assigned_cpu under us. We pin
      * `cpu` once we successfully recheck under the lock so the post-loop
@@ -1456,11 +1470,29 @@ static struct task *pick_next_task(uint32_t cpu)
     struct cpu_runqueue *rq = cpu_rq(cpu);
 
     if (rq->head) {
+        /* The comment in `schedule()`'s zombie-cleanup block claimed
+         * "the picker's TERMINATED/DESTROYED skip is the
+         * authoritative guard against stale-queue races" — but the
+         * old picker had no such skip. Add one now so a stale queue
+         * head (e.g. a task whose `task_exit` raced its enqueue path)
+         * panics here with a meaningful message instead of being
+         * silently dispatched to a freed entry pointer. (#200/#606
+         * investigation, 2026-05-02.) */
+        if (rq->head->state == TASK_TERMINATED ||
+            rq->head->state == TASK_DESTROYED) {
+            panic("pick_next_task: stale TERMINATED/DESTROYED task at queue "
+                  "head (CPU %u, task='%s', state=%d)",
+                  cpu, rq->head->name, (int)rq->head->state);
+        }
         sched_diag_picked[cpu]++;
         return rq->head;
     }
 
-    /* No ready tasks - run idle task */
+    /* No ready tasks - run idle task. The idle struct's state is
+     * never legitimately TERMINATED/DESTROYED (idle is perpetual);
+     * if it is, the corruption happened upstream and the panic in
+     * `schedule()` will surface it with a backtrace pointing to
+     * the dispatch point rather than this picker. */
     return rq->idle_task;
 }
 

@@ -289,6 +289,45 @@ static void test_task_slot_skips_freed_by_id(void)
 }
 
 /* ============================================================================
+ * Unit Tests: is_idle_task() predicate (#200/#622)
+ * ============================================================================ */
+
+/*
+ * is_idle_task() is the O(1) flag-bit guard used by scheduler_terminate_task,
+ * task_destroy, and cmd_kill to refuse operations on per-CPU idle tasks
+ * (Linux PF_IDLE pattern). Cover the three contracts a future refactor
+ * might break:
+ *   1. NULL-safe — must not deref.
+ *   2. Returns false for any non-idle task created via task_create.
+ *   3. Returns true for the per-CPU idle task created by scheduler_init.
+ */
+
+static void test_is_idle_task_null_returns_false(void)
+{
+    TEST_ASSERT_FALSE(is_idle_task(NULL));
+}
+
+static void test_is_idle_task_regular_task_returns_false(void)
+{
+    struct task *t = task_create_with_priority("not_idle", nop_entry, NULL,
+                                               TASK_PRIORITY_NORMAL);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_FALSE(is_idle_task(t));
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+static void test_is_idle_task_cpu0_idle_returns_true(void)
+{
+    struct cpu_runqueue *rq = sched_cpu_rq(0);
+    TEST_ASSERT_NOT_NULL(rq);
+    TEST_ASSERT_NOT_NULL(rq->idle_task);
+    TEST_ASSERT_MESSAGE(is_idle_task(rq->idle_task),
+        "CPU 0 idle missing TASK_FLAG_IDLE — scheduler_init must set it");
+}
+
+/* ============================================================================
  * Unit Tests: Stack canary diagnostic (#601)
  *
  * Cover the public canary API documented in task.h. Tests pre-empt
@@ -4857,6 +4896,11 @@ int test_suite_scheduler(void)
     RUN_TEST(test_task_slot_in_range_returns_slot);
     RUN_TEST(test_task_slot_finds_created_task);
     RUN_TEST(test_task_slot_skips_freed_by_id);
+
+    /* Unit tests: is_idle_task() predicate (#200/#622) */
+    RUN_TEST(test_is_idle_task_null_returns_false);
+    RUN_TEST(test_is_idle_task_regular_task_returns_false);
+    RUN_TEST(test_is_idle_task_cpu0_idle_returns_true);
 
     /* Unit tests: stack canary diagnostic (#601) */
     RUN_TEST(test_canary_intact_on_task_create);

@@ -271,11 +271,12 @@ int cmd_kill(int argc, char *argv[])
         return -1;
     }
 
-    /* Don't allow killing idle tasks (they have special names like "idle" or "idle_0") */
-    if (strcmp(target->name, "idle") == 0 ||
-        (target->name[0] == 'i' && target->name[1] == 'd' &&
-         target->name[2] == 'l' && target->name[3] == 'e' &&
-         target->name[4] == '_')) {
+    /* Don't allow killing idle tasks. Use the O(1) flag-bit predicate
+     * `is_idle_task()` (Linux PF_IDLE pattern) — replaces a previous
+     * name-based check which could be defeated by a user-renamed task
+     * happening to start with `idle_` and would miss any future idle
+     * with a different naming convention. */
+    if (is_idle_task(target)) {
         shell_puts("Cannot kill idle tasks\r\n");
         return -1;
     }
