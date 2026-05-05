@@ -643,7 +643,7 @@ impl InferenceEngine {
         let k = a.cols() as usize;
         let n = b.cols() as usize;
 
-        let mut out = self.workspace.alloc_tensor(&[m as u32, n as u32])?;
+        let out = self.workspace.alloc_tensor(&[m as u32, n as u32])?;
 
         super::gpu::gpu_execute_matmul(a.data, b.data, out.data_mut(), m, k, n)
             .map_err(|_| EngineError::UnsupportedOp)?;
@@ -817,7 +817,7 @@ pub unsafe fn run_inference(
     // is compute-ready, route the whole graph through the v6 handoff
     // SLM-OS already pre-uploaded. Falls through to the CPU path on
     // any error so the user still gets an answer.
-    let mut result: Result<usize, EngineError>;
+    let result: Result<usize, EngineError>;
     if mnist_gpu_fastpath_eligible(model_index) {
         // Successful dispatch is the steady-state happy path; logging
         // it every iteration drowns the console at >1 inf/s. The
