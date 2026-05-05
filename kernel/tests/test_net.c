@@ -11,6 +11,7 @@
 #if defined(ENABLE_NETWORKING)
 #include "../include/net.h"
 #include "../include/tcp_shell_server.h"
+#include "../include/tcp_telemetry_server.h"
 #include "../include/shell_io_tcp.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -2447,6 +2448,71 @@ static void test_net_shutdown_then_init_succeeds(void)
     TEST_ASSERT_TRUE(net_is_up());
 }
 
+/*
+ * PR #630: net_shutdown must clear in-tree listeners' static
+ * `listen_pcb` pointers before lwIP frees the underlying memory.
+ *
+ * Pre-fix, net_shutdown walked tcp_listen_pcbs and tcp_close()'d
+ * each pcb directly. lwIP freed the memp slot, but tcp_shell_server
+ * and tcp_telemetry_server each kept their cached static pointers
+ * dangling. The first start after net cycling hit
+ * `if (listen_pcb) return early`, the next stop tcp_close()'d
+ * freed memory and corrupted the MEMP_TCP_PCB_LISTEN free list,
+ * and the following start tripped `tcp_free: LISTEN` deep in lwIP.
+ *
+ * The fix invokes tcp_shell_server_stop() / tcp_telemetry_server_stop()
+ * before the listen-pcb walk so each owner nullifies its own pointer.
+ * This test verifies that contract: bring up the listeners, run
+ * net_shutdown, observe both `_running()` queries return false. A
+ * regression that re-introduces the dangling pointer would leave
+ * `_running()` returning true (because the static is non-NULL),
+ * which is the exact precondition that turned into a UAF.
+ */
+static void test_net_shutdown_clears_in_tree_listeners(void)
+{
+    if (!net_is_up()) {
+        TEST_IGNORE_MESSAGE("network not initialized");
+        return;
+    }
+
+    /* Bring telnetd up. Pick port 2324 to avoid colliding with any
+     * external state on the default 2323. */
+    int rc = tcp_shell_server_start(2324);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_MESSAGE(tcp_shell_server_running(),
+        "tcp_shell_server should be running after start");
+
+    /* Bring telemetry up too — same UAF risk applied to it pre-fix. */
+    int trc = tcp_telemetry_server_start(0);  /* 0 = default port */
+    TEST_ASSERT_EQUAL_INT(0, trc);
+    TEST_ASSERT_MESSAGE(tcp_telemetry_server_running(),
+        "tcp_telemetry_server should be running after start");
+
+    /* Tear the network down. The pre-fix bug was that this left
+     * each listener's static pointer dangling. */
+    int sd = net_shutdown();
+    TEST_ASSERT_EQUAL_INT(0, sd);
+
+    /* The fix's load-bearing assertion: net_shutdown must invoke
+     * each listener's _stop() so the static pointer is cleared.
+     * If either of these fails, the next telnetd/telemetry start
+     * would observe a non-NULL stale pointer and short-circuit
+     * (PR #630 root cause). */
+    TEST_ASSERT_MESSAGE(!tcp_shell_server_running(),
+        "tcp_shell_server's listen_pcb must be cleared by net_shutdown — "
+        "a non-NULL value here is the dangling pointer that triggers "
+        "`tcp_free: LISTEN` on the next start/stop/start cycle (PR #630)");
+    TEST_ASSERT_MESSAGE(!tcp_telemetry_server_running(),
+        "tcp_telemetry_server's listen_pcb must be cleared by "
+        "net_shutdown for the same reason (PR #630)");
+
+    /* Re-init the network so subsequent tests have a clean state.
+     * Mirrors test_net_shutdown_then_init_succeeds's tail. */
+    rc = net_init();
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_TRUE(net_is_up());
+}
+
 #endif /* ENABLE_NETWORKING */
 
 /* ============================================================================
@@ -2559,6 +2625,10 @@ int test_suite_net(void)
      * "live driver" tests so any subtle state-after-restart
      * differences don't leak into other tests' expectations. */
     RUN_TEST(test_net_shutdown_then_init_succeeds);
+    /* PR #630: net_shutdown must clear in-tree listeners' static
+     * `listen_pcb` pointers. Same destructive shape as the test
+     * above — runs after it for the same reason. */
+    RUN_TEST(test_net_shutdown_clears_in_tree_listeners);
 
     return UNITY_END();
 #else
