@@ -291,11 +291,13 @@ static int slm_load(int argc, char *argv[])
 }
 
 /*
- * Read at most `total` bytes from the active shell session into
- * `buf`. Returns 0 on success (`buf` filled with `total` bytes) and a
- * negative error code on failure: -1 for peer close mid-stream, -2 for
- * a 5-second stall with no incoming bytes, -3 for an internal arg
- * error (zero `total`).
+ * Read exactly `total` bytes from the active shell session into
+ * `buf`. Returns true on success (`buf` filled with `total` bytes),
+ * false on any failure (peer close mid-stream, 5-second stall with
+ * no incoming bytes, or `total == 0`). The failure-case wire reply
+ * `SLM-XLOAD err received=<N> reason=<cause>` is printed inside
+ * this helper so the caller doesn't need to discriminate; on `true`
+ * the caller emits the success reply.
  *
  * Caller is responsible for switching the session into binary mode
  * before calling and back out after. This helper does NOT touch the
@@ -308,10 +310,11 @@ static int slm_load(int argc, char *argv[])
  * 1 GB upload stays at ~8K read calls.
  */
 #define SLM_XLOAD_CHUNK_BYTES   131072u
-static int slm_xload_drain_session(uint8_t *buf, uint32_t total)
+static bool slm_xload_drain_session(uint8_t *buf, uint32_t total)
 {
     if (total == 0) {
-        return -3;
+        shell_printf("SLM-XLOAD err received=0 reason=zero_total\r\n");
+        return false;
     }
     const uint64_t freq = timer_get_frequency();
     const uint64_t stall_ticks = freq ? (freq * 5ULL) : 0;  /* 5 s */
@@ -328,7 +331,7 @@ static int slm_xload_drain_session(uint8_t *buf, uint32_t total)
         if (n < 0) {
             shell_printf("SLM-XLOAD err received=%lu reason=closed\r\n",
                          (unsigned long)received);
-            return -1;
+            return false;
         }
         if (n > 0) {
             received += (uint32_t)n;
@@ -339,10 +342,10 @@ static int slm_xload_drain_session(uint8_t *buf, uint32_t total)
             (timer_get_count() - last_progress) > stall_ticks) {
             shell_printf("SLM-XLOAD err received=%lu reason=stall\r\n",
                          (unsigned long)received);
-            return -2;
+            return false;
         }
     }
-    return 0;
+    return true;
 }
 
 /* Print the post-load info banner that mirrors `slm load`'s success
@@ -441,9 +444,9 @@ static int slm_xload(int argc, char *argv[])
     shell_printf("SLM-XLOAD ready name=%s total=%lu\r\n",
                  name_buf, (unsigned long)total);
 
-    int rc = slm_xload_drain_session(buf, total);
+    bool ok = slm_xload_drain_session(buf, total);
     shell_session_set_binary_mode(false);
-    if (rc != 0) {
+    if (!ok) {
         pmm_free_pages(buf, pages);
         return -1;
     }

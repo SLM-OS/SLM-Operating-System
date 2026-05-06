@@ -324,9 +324,12 @@ impl Drop for SpinGuard {
 /// snapshot pipeline; this helper is the single place where it lives
 /// so a future quant or arch addition only has one site to update.
 ///
-/// The `tag` byte slice is included in the UART error logs so a
-/// failure in the take-pages path is distinguishable from a failure
-/// in the copy path during post-mortem.
+/// `tag` is included in the UART error logs so a failure in the
+/// take-pages path is distinguishable from a failure in the copy
+/// path during post-mortem. Typed as `&CStr` (not `&[u8]`) so the
+/// type system enforces the NUL-termination that the `uart_puts`
+/// FFI relies on — no implicit per-call-site invariant for future
+/// callers to break.
 struct ParsedGguf {
     info: ArchInfo,
     vocab_size: u32,
@@ -337,7 +340,10 @@ struct ParsedGguf {
     tensor_data_start: usize,
 }
 
-fn parse_gguf_for_registry(data: &[u8], tag: &[u8]) -> Result<ParsedGguf, LoadError> {
+fn parse_gguf_for_registry(
+    data: &[u8],
+    tag: &core::ffi::CStr,
+) -> Result<ParsedGguf, LoadError> {
     if data.len() > MAX_PLAUSIBLE_GGUF_BYTES {
         // Reject implausibly large GGUFs early. Matches the M7 shell
         // cap; also stops a u32 source_bytes overflow path with one
@@ -350,9 +356,12 @@ fn parse_gguf_for_registry(data: &[u8], tag: &[u8]) -> Result<ParsedGguf, LoadEr
     let vocab_size = vocab_size_of(&gguf).inspect_err(|_| {
         // Emit the tag at runtime so the same helper produces
         // distinguishable log lines for `load` vs `take_pages` paths.
+        // SAFETY: each `uart_puts` call gets a NUL-terminated C
+        // string. `tag.as_ptr()` is guaranteed NUL-terminated by
+        // the `&CStr` type; the byte-string literals end in `\0`.
         unsafe {
             kernel_ffi::uart_puts(b"[slm] \0".as_ptr());
-            kernel_ffi::uart_puts(tag.as_ptr());
+            kernel_ffi::uart_puts(tag.as_ptr() as *const u8);
             kernel_ffi::uart_puts(
                 b": vocab_size_of failed (CorruptedData)\n\0".as_ptr(),
             );
@@ -371,9 +380,10 @@ fn parse_gguf_for_registry(data: &[u8], tag: &[u8]) -> Result<ParsedGguf, LoadEr
     // tokens/merges array — surface as CorruptedData rather than a
     // separate variant, mirroring the existing GgufError mapping.
     let tokenizer = Bbpe::from_gguf(&gguf).map_err(|_| {
+        // SAFETY: same as the vocab_size_of error block above.
         unsafe {
             kernel_ffi::uart_puts(b"[slm] \0".as_ptr());
-            kernel_ffi::uart_puts(tag.as_ptr());
+            kernel_ffi::uart_puts(tag.as_ptr() as *const u8);
             kernel_ffi::uart_puts(
                 b": Bbpe::from_gguf failed (CorruptedData)\n\0".as_ptr(),
             );
@@ -420,7 +430,7 @@ fn parse_gguf_for_registry(data: &[u8], tag: &[u8]) -> Result<ParsedGguf, LoadEr
 /// [`SLM_NAME_LEN`] - 1 bytes; truncation is silent and recorded as
 /// a UART warning.
 pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
-    let parsed = parse_gguf_for_registry(data, b"load\0")?;
+    let parsed = parse_gguf_for_registry(data, c"load")?;
 
     // Allocate the GGUF buffer directly from the PMM. The Phase-3
     // `mm::alloc_weights` is single-block-only (fixed 2 MB) and
@@ -532,7 +542,7 @@ pub fn load_slm_take_pages(
     // the duration of this call.
     let data: &[u8] = unsafe { core::slice::from_raw_parts(weight_ptr.as_ptr(), data_len) };
 
-    let parsed = parse_gguf_for_registry(data, b"take_pages\0")?;
+    let parsed = parse_gguf_for_registry(data, c"take_pages")?;
 
     let entry = LoadedSlm {
         name: clamp_name(name),

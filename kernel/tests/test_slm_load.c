@@ -266,31 +266,26 @@ static void test_take_pages_caller_frees_on_failure(void)
 
 /* Argument guards: null name / null data / zero pages / zero data_len
  * all return -1 without touching the registry or freeing anything.
- * The caller in each case retains ownership of whatever buffer it
- * passed (if any) — matching the documented contract. */
+ * The function rejects on each of these BEFORE deref'ing `data`, so
+ * we don't need a real PMM allocation here — a stack pointer keeps
+ * the test free of buddy-allocator side effects. */
 static void test_take_pages_handles_null_zero_args(void)
 {
     rust_slm_test_reset();
 
-    /* A non-null page so the data check is exercised in isolation
-     * for the null-name and null-data cases. */
-    size_t pages = 1;
-    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
-    TEST_ASSERT_NOT_NULL(buf);
+    uint8_t dummy = 0;
+    uint8_t *buf = &dummy;
 
     TEST_ASSERT_EQUAL_INT(-1,
-        rust_slm_load_take_pages(NULL, buf, pages, 16));
+        rust_slm_load_take_pages(NULL, buf, 1, 16));
     TEST_ASSERT_EQUAL_INT(-1,
-        rust_slm_load_take_pages((const uint8_t *)"x", NULL, pages, 16));
+        rust_slm_load_take_pages((const uint8_t *)"x", NULL, 1, 16));
     TEST_ASSERT_EQUAL_INT(-1,
         rust_slm_load_take_pages((const uint8_t *)"x", buf, 0, 16));
     TEST_ASSERT_EQUAL_INT(-1,
-        rust_slm_load_take_pages((const uint8_t *)"x", buf, pages, 0));
+        rust_slm_load_take_pages((const uint8_t *)"x", buf, 1, 0));
 
     TEST_ASSERT_EQUAL_UINT32(0u, rust_slm_count());
-
-    /* Caller still owns buf in every branch above. */
-    pmm_free_pages(buf, pages);
 }
 
 /* ============================================================================
