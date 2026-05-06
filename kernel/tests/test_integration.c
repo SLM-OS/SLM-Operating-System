@@ -26,6 +26,7 @@
 #include "../include/ncmem.h"
 #include "../include/timer.h"
 #include "../include/preempt_point.h"
+#include "../include/cpu_supervisor.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -207,6 +208,26 @@ void tearDown(void)
                         (unsigned long)cur[c],
                         DORMANCY_STALL_THRESHOLD);
             dormancy_reported[c] = true;
+
+            /* #216 Tier 3: drive recovery from the test harness.
+             *
+             * The Tier 2 supervisor task (kernel/sched/cpu_supervisor.c)
+             * is gated on !ENABLE_BOOT_TESTS so its CPU 0 background
+             * task doesn't perturb scheduler-test ready-counts. That
+             * gating means the auto-recovery path is OFF in the test
+             * kernel — exactly when dormancy is most likely.
+             *
+             * Compromise: the test harness invokes
+             * cpu_supervisor_resurrect() inline at the dormancy-enter
+             * threshold. The recovery path runs on CPU 0 (same as the
+             * supervisor task would) and lets the next test see a
+             * working CPU. Tasks already queued on the dormant CPU
+             * are leaked — the same trade-off the Tier 2 supervisor
+             * makes — and the diagnostic uart_printf above pins the
+             * culprit test before recovery scrubs the queue. */
+            int rc = cpu_supervisor_resurrect(c);
+            uart_printf("  [dormancy-recover-attempt] CPU %lu rc=%d\n",
+                        (unsigned long)c, rc);
         }
     }
 #endif
