@@ -95,6 +95,39 @@ pub extern "C" fn rust_heap_size_bytes() -> usize {
     RUST_HEAP_SIZE_BYTES.load(core::sync::atomic::Ordering::Acquire)
 }
 
+/// Currently-allocated bytes inside the Rust heap (sum of in-use
+/// blocks; excludes free-list overhead). Surfaced to the C `mem`
+/// shell command so the operator can spot heap pressure during
+/// large-model inference. Zero before `rust_heap_init` runs.
+///
+/// Briefly takes the allocator's spinlock — safe to call from any
+/// kernel context that doesn't already hold it.
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn rust_heap_used_bytes() -> usize {
+    // Short-circuit pre-init: `LockedHeap::empty()` has a valid
+    // mutex but a zero-sized region; `.used()` would return 0
+    // anyway, but skipping the lock acquisition entirely matters
+    // if a very-early-boot diagnostic path (running before
+    // `rust_heap_init`) ever calls this.
+    if RUST_HEAP_SIZE_BYTES.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return 0;
+    }
+    ALLOCATOR.lock().used()
+}
+
+/// Currently-free bytes inside the Rust heap. Briefly takes the
+/// allocator's spinlock; see [`rust_heap_used_bytes`] for the
+/// pre-init short-circuit and locking semantics.
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn rust_heap_free_bytes() -> usize {
+    if RUST_HEAP_SIZE_BYTES.load(core::sync::atomic::Ordering::Acquire) == 0 {
+        return 0;
+    }
+    ALLOCATOR.lock().free()
+}
+
 // =============================================================================
 // Panic Handler
 // =============================================================================

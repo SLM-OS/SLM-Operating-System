@@ -196,10 +196,34 @@ int cmd_mem(int argc, char *argv[])
 
     shell_puts("Memory Statistics:\r\n");
     shell_puts("\r\n");
+    shell_puts("PMM (physical pages):\r\n");
     shell_printf("  Total:     %lu KB (%lu pages)\r\n", total_kb, total_pages);
     shell_printf("  Used:      %lu KB (%lu pages)\r\n", used_kb, used_pages);
     shell_printf("  Free:      %lu KB (%lu pages)\r\n", free_kb, free_pages);
     shell_puts("\r\n");
+
+    /* Rust heap (linked_list_allocator) — every Rust-side Vec/Box
+     * lives here: SLM forward scratch, KV cache, tokenizer, msg
+     * router publish payloads, component runtime, telemetry.
+     * Sized by RUST_HEAP_MB in <config.h>. Zeros mean
+     * `rust_heap_init` hasn't run yet (very-early-boot path). */
+    size_t rh_total = rust_heap_size_bytes();
+    if (rh_total > 0u) {
+        size_t rh_used = rust_heap_used_bytes();
+        size_t rh_free = rust_heap_free_bytes();
+        size_t rh_total_kb = rh_total / 1024u;
+        size_t rh_used_kb = rh_used / 1024u;
+        size_t rh_free_kb = rh_free / 1024u;
+        /* Percent used, ceiling-divided so a heap that's anything-
+         * but-empty never displays as 0%. The outer `if (rh_total >
+         * 0u)` already guards the divide. */
+        unsigned int rh_pct = (unsigned int)((rh_used * 100u + rh_total - 1u) / rh_total);
+        shell_puts("Rust heap (linked_list_allocator):\r\n");
+        shell_printf("  Total:     %lu KB\r\n", rh_total_kb);
+        shell_printf("  Used:      %lu KB (%u%%)\r\n", rh_used_kb, rh_pct);
+        shell_printf("  Free:      %lu KB\r\n", rh_free_kb);
+        shell_puts("\r\n");
+    }
 
     return 0;
 }

@@ -172,25 +172,37 @@ _Static_assert(MODEL_MEM_WORKSPACE_MB <= 1024u,
  *
  * The Rust runtime's `linked_list_allocator` lives entirely inside the
  * region passed to `rust_heap_init`. `Vec`/`Box` allocations from the
- * SLM forward path land here:
+ * SLM forward path land here, plus the msg_router publish queue and
+ * the component runtime. KV cache (the dominant consumer) =
+ *   2 (k+v) × n_layers × n_kv_heads × head_dim × ctx × 2 B (FP16):
  *
- *   - KV cache: 2 (k,v) × n_layers × n_kv_heads × head_dim × ctx × 2
- *     bytes (FP16). For Qwen2.5-1.5B (28 layers, 2 KV heads, 128
- *     head_dim) this is ~28 MB at ctx=1024, ~56 MB at ctx=2048,
- *     ~112 MB at ctx=4096.
- *   - ForwardScratch: ~1 MB total — dominated by the vocab logits
- *     buffer (152 064 × 4 B for Qwen) and the matmul/attention
- *     scratch.
+ *   Model           |  ctx=1K  |  ctx=4K  |  ctx=8K  | + scratch
+ *   ----------------|----------|----------|----------|----------
+ *   SmolLM2-135M    |    22 MB |    90 MB |   180 MB | +   7 MB
+ *   Qwen2.5-1.5B    |    28 MB |   112 MB |   224 MB | +  23 MB
+ *   Qwen2.5-3B      |    36 MB |   144 MB |   288 MB | +  24 MB
+ *   Qwen2.5-7B      |    58 MB |   230 MB |   470 MB | +  24 MB
+ *   Llama-3.1-8B    |   128 MB |   512 MB |  1024 MB | +  16 MB
+ *   Qwen2.5-14B     |   192 MB |   768 MB |  1536 MB | +  24 MB
  *
- * The original 1 MB heap was sized for the pre-SLM ONNX/MNIST path
- * and is not enough for any 1 B+ model. Jetson is sized for two
- * concurrent ctx=2048 sessions plus headroom; Pi 5 carries enough
- * for one ctx=2048 session of a 1 B-class model.
+ * Jetson sized to comfortably hold:
+ *   - Two concurrent Qwen2.5-1.5B sessions at ctx=8K (~500 MB)
+ *   - One Qwen2.5-7B at ctx=4K (~250 MB) once the 1 GiB model_mem /
+ *     ramdisk PMM cap is lifted (separate work; see #550).
+ *   - Headroom for fragmentation under msg_router publish churn.
+ *     Telemetry pumps publish on every net_pump tick; without
+ *     enough heap room those small allocs interleave with mid-
+ *     sized matmul scratch and starve the inference path. Tracked
+ *     as a longer-term slab-allocator follow-up.
+ *
+ * Pi 5 carries 1/4 the heap (one Qwen2.5-1.5B at ctx=4K). QEMU and
+ * x86-64 stay small because their tests only use a 256-element
+ * synthetic fixture.
  */
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-#define RUST_HEAP_MB            128u
+#define RUST_HEAP_MB            1024u
 #elif defined(PLATFORM_RASPI5)
-#define RUST_HEAP_MB            64u
+#define RUST_HEAP_MB            256u
 #else /* PLATFORM_QEMU_VIRT, PLATFORM_X86_64, host harness */
 #define RUST_HEAP_MB            4u
 #endif
