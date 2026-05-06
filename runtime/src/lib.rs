@@ -5137,6 +5137,59 @@ pub unsafe extern "C" fn rust_slm_load(
     }
 }
 
+/// Like [`rust_slm_load`], but takes ownership of a caller-supplied
+/// `kernel_ffi::alloc_pages(pages)` allocation instead of allocating
+/// a fresh PMM buffer and copying.
+///
+/// On success returns the slot index (>= 0); the registry now owns
+/// the allocation and the caller MUST NOT free it.
+///
+/// On failure returns -1; the caller still owns `data` and MUST free
+/// it via `pmm_free_pages(data, pages)`.
+///
+/// Used by `slm xload` (the streaming GGUF load path) on platforms
+/// where the buddy allocator can only produce one buffer of the
+/// required size at a time, making the "alloc + copy" pattern of
+/// `rust_slm_load` impossible. See `slm::registry::load_slm_take_pages`
+/// for the full safety contract.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated string pointer.
+/// - `data` must point to `data_len` bytes of GGUF-format data living
+///   inside a `kernel_ffi::alloc_pages(pages)` allocation that the
+///   caller will NOT free for the duration of this call.
+/// - On success the kernel buddy allocation is transferred to the
+///   registry; do NOT call `pmm_free_pages` on `data`.
+#[no_mangle]
+#[cfg(feature = "slm")]
+pub unsafe extern "C" fn rust_slm_load_take_pages(
+    name: *const u8,
+    data: *mut u8,
+    pages: usize,
+    data_len: usize,
+) -> i32 {
+    if name.is_null() || data.is_null() || data_len == 0 || pages == 0 {
+        return -1;
+    }
+    let mut name_len = 0usize;
+    while name_len < slm::registry::SLM_NAME_LEN {
+        let c = *name.add(name_len);
+        if c == 0 {
+            break;
+        }
+        name_len += 1;
+    }
+    let name_slice = core::slice::from_raw_parts(name, name_len);
+    let weight_ptr = match core::ptr::NonNull::new(data) {
+        Some(p) => p,
+        None => return -1,
+    };
+    match slm::registry::load_slm_take_pages(name_slice, weight_ptr, pages, data_len) {
+        Ok(idx) => idx as i32,
+        Err(_) => -1,
+    }
+}
+
 /// Unload a SLM by slot index.
 ///
 /// Returns 0 on success, -1 on error.

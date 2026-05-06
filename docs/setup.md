@@ -289,34 +289,42 @@ driver and is open-redistribution licensed.
 ## Jetson SD-Card Layout
 
 When SLM-OS boots on a Jetson Orin Nano (Super Dev Kit) the LittleFS
-partition mounted at `/mnt/files` carries every blob the kernel needs
-beyond the kernel image itself. Standard layout:
+partition mounted at `/mnt/files` carries the small blobs the kernel
+needs beyond the kernel image itself (autoload registry, AI-scheduler
+weights, ONNX vision models). Standard layout:
 
 ```
 /mnt/files/
 ├── blob_autoload.conf                          # registry of blobs to autoload
 ├── scheduler_mlp.hef                           # AI scheduler weights (Hailo-compiled)
-├── models/
-│   └── *.onnx                                  # Phase-5 ONNX vision models
-└── qwen2.5-1.5b-instruct-q4_k_m.gguf           # SLM weights — Qwen2.5-1.5B Q4_K_M (~1.0 GB)
+└── models/
+    └── *.onnx                                  # Phase-5 ONNX vision models
 ```
 
-The Qwen GGUF is the M5 demo target for `slm load /mnt/files/...`. It
-is **not** embedded in the kernel image (kernel-image budget is 32 MB;
-the GGUF is ~1 GB). Staging is done through labctl rather than
-direct `mount`/`cp`/`umount` (see `CLAUDE.md` "labctl is the only
-hardware interface"). The current high-level flow:
+`/mnt/files` is a 64 MB RAM-disk-backed LittleFS on Jetson kexec
+boots — sized to fit demo scripts, the help tree, and small blobs
+without claiming the order-19 PMM buddy that a full-size GGUF
+needs. **GGUFs are not staged here.** A 1 GB Qwen2.5-1.5B Q4_K_M
+won't fit (and even if it did, `slm load`'s alloc + copy path
+needs a second buffer of equal size — which can't coexist with
+the 1 GB Rust heap on an 8 GB system).
+
+The supported SLM-load path is `slm xload`, which streams the GGUF
+straight into a single PMM buffer over the existing telnet shell
+(no LittleFS round-trip, peak memory == file size):
 
 ```bash
 # Fetch + verify on the dev host
 scripts/fetch-slm.sh
 
-# Switch the SDWire to the labctl host, place the GGUF onto the
-# LittleFS partition mounted at /mnt/files via the appropriate
-# labctl sdwire subcommand (see docs/lab-operations.md for the
-# current syntax — sdwire_update / sdwire_to_host / sdwire_to_dut),
-# then return the SD card to the DUT and reboot:
-labctl power cycle jetson-nano-1
+# Power-cycle the Jetson so it boots SLM-OS via kexec, wait for
+# the shell, then stream the GGUF (uses the same telnet binary
+# protocol as `xput-bin` — see scripts/tools/slm-put.py for a
+# reference client; `slm xload` is the kernel-side verb).
+labctl power_cycle jetson-nano-1
+slmos> slm xload qwen <total_bytes>
+slmos> slm launch 0
+slmos> slm prompt 0 "hello"
 ```
 
 For background on the GGUF format and how SLM-OS parses it, see

@@ -37,6 +37,7 @@
 #include "pmm.h"
 #include "slm_ffi.h"
 #include "string.h"
+#include "timer.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -286,6 +287,190 @@ static int slm_load(int argc, char *argv[])
                  (unsigned long)mi.vocab_size,
                  (unsigned long)mi.context_length,
                  (unsigned long)(mi.source_bytes / (1024u * 1024u)));
+    return 0;
+}
+
+/*
+ * Read exactly `total` bytes from the active shell session into
+ * `buf`. Returns true on success (`buf` filled with `total` bytes),
+ * false on any failure (peer close mid-stream, 5-second stall with
+ * no incoming bytes, or `total == 0`). The failure-case wire reply
+ * `SLM-XLOAD err received=<N> reason=<cause>` is printed inside
+ * this helper so the caller doesn't need to discriminate; on `true`
+ * the caller emits the success reply.
+ *
+ * Caller is responsible for switching the session into binary mode
+ * before calling and back out after. This helper does NOT touch the
+ * binary-mode flag because callers (`slm xload` here, future stream
+ * loaders) have varying needs around when the protocol header is
+ * exchanged relative to the mode switch.
+ *
+ * Reads in 128 KB slices to amortise per-call overhead; matches the
+ * `xput-bin` staging-buffer size in `kernel/src/shell_fs.c` so a
+ * 1 GB upload stays at ~8K read calls.
+ */
+#define SLM_XLOAD_CHUNK_BYTES   131072u
+static bool slm_xload_drain_session(uint8_t *buf, uint32_t total)
+{
+    if (total == 0) {
+        shell_printf("SLM-XLOAD err received=0 reason=zero_total\r\n");
+        return false;
+    }
+    const uint64_t freq = timer_get_frequency();
+    const uint64_t stall_ticks = freq ? (freq * 5ULL) : 0;  /* 5 s */
+
+    uint32_t received = 0;
+    uint64_t last_progress = timer_get_count();
+    while (received < total) {
+        uint32_t want = total - received;
+        if (want > SLM_XLOAD_CHUNK_BYTES) {
+            want = SLM_XLOAD_CHUNK_BYTES;
+        }
+
+        int n = shell_session_read_raw((char *)(buf + received), (int)want);
+        if (n < 0) {
+            shell_printf("SLM-XLOAD err received=%lu reason=closed\r\n",
+                         (unsigned long)received);
+            return false;
+        }
+        if (n > 0) {
+            received += (uint32_t)n;
+            last_progress = timer_get_count();
+            continue;
+        }
+        if (stall_ticks &&
+            (timer_get_count() - last_progress) > stall_ticks) {
+            shell_printf("SLM-XLOAD err received=%lu reason=stall\r\n",
+                         (unsigned long)received);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Print the post-load info banner that mirrors `slm load`'s success
+ * output. Pulled into its own helper so the main `slm xload` body
+ * stays inside the 80-line guideline. */
+static void slm_xload_print_loaded(int idx)
+{
+    SlmModelInfoC mi;
+    if (rust_slm_get_info((uint32_t)idx, &mi) != 0) {
+        shell_printf("[slm] loaded handle=%d (info unavailable)\r\n", idx);
+        return;
+    }
+    shell_printf("[slm] loaded handle=%d  arch=", idx);
+    fixed_name_print(mi.architecture, sizeof(mi.architecture));
+    shell_printf("  blocks=%lu hidden=%lu head=%lu/%lu head_dim=%lu vocab=%lu "
+                 "ctx=%lu source=%lu MB\r\n",
+                 (unsigned long)mi.block_count,
+                 (unsigned long)mi.embedding_length,
+                 (unsigned long)mi.head_count,
+                 (unsigned long)mi.head_count_kv,
+                 (unsigned long)mi.head_dim,
+                 (unsigned long)mi.vocab_size,
+                 (unsigned long)mi.context_length,
+                 (unsigned long)(mi.source_bytes / (1024u * 1024u)));
+}
+
+/*
+ * slm xload <name> <total>
+ *
+ * Streaming GGUF load that bypasses the LittleFS round-trip used by
+ * `slm load`. The default path needs the file in the ramdisk AND a
+ * second PMM buffer of equal size to feed rust_slm_load — i.e. 2× the
+ * file size resident at once. With a 1.04 GB Q4_K_M GGUF + 1 GB Rust
+ * heap + 1.28 GB ramdisk, the PMM buddy can run out of an order-19
+ * block even though there are gigabytes "free" in smaller orders.
+ *
+ * xload skips LittleFS: receive `total` raw bytes from the telnet
+ * shell session straight into a single PMM buffer, hand that to
+ * rust_slm_load, and free the buffer. Peak memory == file size.
+ *
+ * Wire format mirrors `xput-bin` so the existing telnet binary-mode
+ * machinery (IAC unstuffing, 0xFF doubling) is reused unchanged:
+ *
+ *   client:  slm xload <name> <total>\n
+ *   kernel:  SLM-XLOAD ready name=<name> total=<N>\r\n
+ *   client:  <total> raw bytes (with 0xFF doubled per RFC 854)
+ *   kernel:  SLM-XLOAD done received=<total>\r\n
+ *   kernel:  [slm] loaded handle=<idx> ...   (rust_slm_load output)
+ *   kernel:  slmos>     (normal prompt resumes)
+ */
+static int slm_xload(int argc, char *argv[])
+{
+    if (argc < 4) {
+        shell_puts("Usage: slm xload <name> <total>\r\n");
+        return -1;
+    }
+    const char *name = argv[2];
+    uint32_t total;
+    if (shell_parse_uint(argv[3], &total) != 0) {
+        shell_printf("slm xload: invalid total: %s\r\n", argv[3]);
+        return -1;
+    }
+    if (total == 0) {
+        shell_puts("slm xload: total must be > 0\r\n");
+        return -1;
+    }
+
+    const uint64_t cap = rust_slm_max_gguf_bytes();
+    if ((uint64_t)total > cap) {
+        shell_printf("slm xload: too large (%lu bytes, cap %llu)\r\n",
+                     (unsigned long)total, (unsigned long long)cap);
+        return -1;
+    }
+
+    /* Bound the model name like slm_load does: registry caps at
+     * SLM_MODEL_NAME_LEN (32). */
+    char name_buf[SLM_MODEL_NAME_LEN];
+    size_t nl = 0;
+    for (const char *p = name; *p && nl + 1 < sizeof(name_buf); p++) {
+        name_buf[nl++] = *p;
+    }
+    name_buf[nl] = '\0';
+    if (nl == 0) {
+        shell_puts("slm xload: empty name\r\n");
+        return -1;
+    }
+
+    size_t pages = (total + 4095u) / 4096u;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+    if (!buf) {
+        shell_puts("slm xload: out of memory for stream buffer\r\n");
+        return -1;
+    }
+
+    shell_session_set_binary_mode(true);
+    shell_printf("SLM-XLOAD ready name=%s total=%lu\r\n",
+                 name_buf, (unsigned long)total);
+
+    bool ok = slm_xload_drain_session(buf, total);
+    shell_session_set_binary_mode(false);
+    if (!ok) {
+        pmm_free_pages(buf, pages);
+        return -1;
+    }
+    shell_printf("SLM-XLOAD done received=%lu\r\n", (unsigned long)total);
+
+    /* Transfer ownership of the streaming buffer to the registry. On
+     * success the registry will free the pages on `slm unload`; we
+     * MUST NOT call pmm_free_pages here. On failure (-1) the caller
+     * still owns the pages and we free them ourselves. The take-pages
+     * variant exists specifically because the original `rust_slm_load`
+     * allocates a SECOND buffer of the same size to copy into — on a
+     * Jetson 8 GB system the buddy allocator can only produce one
+     * order-19 (2 GB) block at a time, so the alloc+copy path fails
+     * for a 1.04 GB Q4_K_M GGUF even though the file itself fits in
+     * available PMM. */
+    int idx = rust_slm_load_take_pages((const uint8_t *)name_buf,
+                                       buf, pages, (size_t)total);
+    if (idx < 0) {
+        pmm_free_pages(buf, pages);
+        shell_puts("slm xload: failed to parse stream "
+                   "(not a GGUF or unsupported architecture)\r\n");
+        return -1;
+    }
+    slm_xload_print_loaded(idx);
     return 0;
 }
 
@@ -774,7 +959,9 @@ static int slm_gpu(void)
 static void slm_print_usage(void)
 {
     shell_puts("Usage: slm <verb> [args]\r\n");
-    shell_puts("  load   <path>                  Load a GGUF model\r\n");
+    shell_puts("  load   <path>                  Load a GGUF model from VFS\r\n");
+    shell_puts("  xload  <name> <total>          Stream-load a GGUF over telnet "
+               "(no LittleFS round-trip)\r\n");
     shell_puts("  list                           List loaded SLMs\r\n");
     shell_puts("  info   <handle>                Show model metadata\r\n");
     shell_puts("  unload <handle>                Unload a model\r\n");
@@ -799,6 +986,7 @@ int cmd_slm(int argc, char *argv[])
     const char *verb = argv[1];
 
     if (strcmp(verb, "load")   == 0) return slm_load(argc, argv);
+    if (strcmp(verb, "xload")  == 0) return slm_xload(argc, argv);
     if (strcmp(verb, "list")   == 0) return slm_list();
     if (strcmp(verb, "info")   == 0) return slm_info(argc, argv);
     if (strcmp(verb, "unload") == 0) return slm_unload(argc, argv);

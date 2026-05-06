@@ -115,8 +115,14 @@ Qwen2.5-1.5B-Instruct Q4_K_M GGUF onto the target.
 - ☐ **M0-4.** `host-tools/gguf-inspect dump-vocab <file>` subcommand:
   emits the tokenizer vocab + merges as a self-contained binary blob
   (used by tests).
-- ☐ **M0-5.** Add `/mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf` to the
-  standard Jetson SD-card layout in `docs/setup.md`.
+- ✅ **M0-5.** ~~Add `/mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf` to the
+  standard Jetson SD-card layout in `docs/setup.md`.~~ Superseded:
+  the Jetson load path is now `slm xload` (streaming over the
+  telnet shell), not LittleFS staging — see `docs/setup.md`
+  §"Jetson SD-Card Layout". The 1 GB Q4_K_M GGUF can't coexist
+  with the 1 GB Rust heap on an 8 GB system using the LittleFS
+  alloc+copy path; xload was added so peak resident memory ==
+  file size.
 - ☐ **M0-6.** Doc: `docs/tutorials/slm-models.md` — how to fetch, verify,
   and stage a GGUF for SLM-OS (mirrors `docs/tutorials/models.md`).
 

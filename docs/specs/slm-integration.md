@@ -225,6 +225,16 @@ session-oriented and prompt-aware.
 ### Example session
 
 ```
+# Jetson — stream the GGUF in over the telnet shell (avoids the
+# alloc+copy doubling that the LittleFS path needs; see
+# docs/setup.md §"Jetson SD-Card Layout"):
+slmos> slm xload qwen <total_bytes>
+SLM-XLOAD ready name=qwen total=<total_bytes>
+... (1 GB streamed) ...
+SLM-XLOAD done received=<total_bytes>
+[slm] loaded handle=0  arch=qwen2  blocks=28 hidden=1536 ...
+
+# Or, on a platform with the contiguous PMM headroom:
 slmos> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
 [slm] parsed gguf v3: 339 tensors, q4_K_M, vocab=152064
 [slm] loaded handle=0  qwen2  1.54 B params  weights=1014 MB  load=412 ms
@@ -426,6 +436,12 @@ type: slm-runner
 models:
   - name: qwen2.5-1.5b
     path: /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
+    # NOTE: On Jetson the runtime resolves the model via the in-memory
+    # registry (populated by an out-of-band `slm xload` over the
+    # telnet shell) rather than the LittleFS path — see
+    # `docs/setup.md` §"Jetson SD-Card Layout". Manifests should
+    # still declare the canonical `path:` so non-Jetson platforms
+    # and tooling that introspect the manifest see the source.
     preload: true
     pin: true             # use registry pin/unpin to lock against eviction
 

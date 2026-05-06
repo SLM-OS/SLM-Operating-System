@@ -317,18 +317,33 @@ impl Drop for SpinGuard {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Attempt to load a GGUF buffer into the SLM registry. On success
-/// returns the slot index; on error a typed [`LoadError`].
+/// Parse + validate a GGUF byte slice and emit the metadata pieces
+/// that go into a [`LoadedSlm`]. Both load entry points
+/// ([`load_slm`] copying-in and [`load_slm_take_pages`]
+/// taking-ownership) share the same parse/validate/tokenize/
+/// snapshot pipeline; this helper is the single place where it lives
+/// so a future quant or arch addition only has one site to update.
 ///
-/// M5.3.1 owns the source bytes in the weight pool, builds the
-/// [`Bbpe`] tokenizer, and snapshots tensor descriptors so the
-/// caller can drop `data` immediately after this call returns.
-///
-/// `name` is a UTF-8 byte slice (not null-terminated) used for
-/// display in `slm list` / `slm info`. It's clamped to
-/// [`SLM_NAME_LEN`] - 1 bytes; truncation is silent and recorded as
-/// a UART warning.
-pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
+/// `tag` is included in the UART error logs so a failure in the
+/// take-pages path is distinguishable from a failure in the copy
+/// path during post-mortem. Typed as `&CStr` (not `&[u8]`) so the
+/// type system enforces the NUL-termination that the `uart_puts`
+/// FFI relies on — no implicit per-call-site invariant for future
+/// callers to break.
+struct ParsedGguf {
+    info: ArchInfo,
+    vocab_size: u32,
+    tensor_count: u32,
+    source_bytes: u32,
+    tokenizer: Bbpe,
+    tensors: Vec<OwnedTensorInfo>,
+    tensor_data_start: usize,
+}
+
+fn parse_gguf_for_registry(
+    data: &[u8],
+    tag: &core::ffi::CStr,
+) -> Result<ParsedGguf, LoadError> {
     if data.len() > MAX_PLAUSIBLE_GGUF_BYTES {
         // Reject implausibly large GGUFs early. Matches the M7 shell
         // cap; also stops a u32 source_bytes overflow path with one
@@ -339,12 +354,23 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     let gguf = Gguf::parse(data).map_err(map_gguf_err)?;
     let info = gguf.validate_for_inference().map_err(map_gguf_err)?;
     let vocab_size = vocab_size_of(&gguf).inspect_err(|_| {
-        crate::log::log_error(b"[slm] load: vocab_size_of failed (CorruptedData)\0");
+        // Emit the tag at runtime so the same helper produces
+        // distinguishable log lines for `load` vs `take_pages` paths.
+        // SAFETY: each `uart_puts` call gets a NUL-terminated C
+        // string. `tag.as_ptr()` is guaranteed NUL-terminated by
+        // the `&CStr` type; the byte-string literals end in `\0`.
+        unsafe {
+            kernel_ffi::uart_puts(b"[slm] \0".as_ptr());
+            kernel_ffi::uart_puts(tag.as_ptr() as *const u8);
+            kernel_ffi::uart_puts(
+                b": vocab_size_of failed (CorruptedData)\n\0".as_ptr(),
+            );
+        }
     })?;
     let tensor_count = u32::try_from(gguf.tensor_count())
         .map_err(|_| LoadError::CorruptedData)?;
     // `data.len()` is already bounded above by `MAX_PLAUSIBLE_GGUF_BYTES`
-    // (1 GiB — see the const above for why), so the u32 cast is
+    // (2 GiB — see the const above for why), so the u32 cast is
     // provably loss-free. Earlier revisions had a saturating fallback
     // for > 4 GiB inputs; the M5.3.1 review pointed out it was dead
     // code, and the M5.3.3 cap-tighten makes it doubly so.
@@ -354,7 +380,14 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     // tokens/merges array — surface as CorruptedData rather than a
     // separate variant, mirroring the existing GgufError mapping.
     let tokenizer = Bbpe::from_gguf(&gguf).map_err(|_| {
-        crate::log::log_error(b"[slm] load: Bbpe::from_gguf failed (CorruptedData)\0");
+        // SAFETY: same as the vocab_size_of error block above.
+        unsafe {
+            kernel_ffi::uart_puts(b"[slm] \0".as_ptr());
+            kernel_ffi::uart_puts(tag.as_ptr() as *const u8);
+            kernel_ffi::uart_puts(
+                b": Bbpe::from_gguf failed (CorruptedData)\n\0".as_ptr(),
+            );
+        }
         LoadError::CorruptedData
     })?;
 
@@ -370,6 +403,34 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
             offset: t.offset,
         });
     }
+    // Drop the borrowed parser before returning so the caller's
+    // source slice is no longer aliased.
+    drop(gguf);
+
+    Ok(ParsedGguf {
+        info,
+        vocab_size,
+        tensor_count,
+        source_bytes,
+        tokenizer,
+        tensors,
+        tensor_data_start,
+    })
+}
+
+/// Attempt to load a GGUF buffer into the SLM registry. On success
+/// returns the slot index; on error a typed [`LoadError`].
+///
+/// M5.3.1 owns the source bytes in the weight pool, builds the
+/// [`Bbpe`] tokenizer, and snapshots tensor descriptors so the
+/// caller can drop `data` immediately after this call returns.
+///
+/// `name` is a UTF-8 byte slice (not null-terminated) used for
+/// display in `slm list` / `slm info`. It's clamped to
+/// [`SLM_NAME_LEN`] - 1 bytes; truncation is silent and recorded as
+/// a UART warning.
+pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
+    let parsed = parse_gguf_for_registry(data, c"load")?;
 
     // Allocate the GGUF buffer directly from the PMM. The Phase-3
     // `mm::alloc_weights` is single-block-only (fixed 2 MB) and
@@ -418,23 +479,18 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         core::ptr::copy_nonoverlapping(data.as_ptr(), weight_ptr.as_ptr(), data.len());
     }
 
-    // Drop the temporary `Gguf<'a>` parser before stashing the entry
-    // — its borrowed slices into `data` go out of scope here, so the
-    // caller's source buffer is no longer aliased.
-    drop(gguf);
-
     let entry = LoadedSlm {
         name: clamp_name(name),
-        info,
-        vocab_size,
-        source_bytes,
-        tensor_count,
+        info: parsed.info,
+        vocab_size: parsed.vocab_size,
+        source_bytes: parsed.source_bytes,
+        tensor_count: parsed.tensor_count,
         weight_pages: Some(weight_ptr),
         weight_pages_count: pages_u32,
         weight_data_len: data.len(),
-        tokenizer: Some(tokenizer),
-        tensors,
-        tensor_data_start,
+        tokenizer: Some(parsed.tokenizer),
+        tensors: parsed.tensors,
+        tensor_data_start: parsed.tensor_data_start,
     };
     match insert_entry(entry) {
         Ok(idx) => Ok(idx),
@@ -451,6 +507,57 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
             Err(e)
         }
     }
+}
+
+/// Like [`load_slm`], but takes ownership of a caller-supplied PMM
+/// allocation instead of allocating a fresh weight buffer and
+/// copying. Used by `slm xload` (the streaming load path) where the
+/// caller has already allocated PMM pages large enough to hold the
+/// GGUF and streamed bytes directly into them — copying into a second
+/// 1 GB buddy block isn't possible on systems where the buddy
+/// allocator can only produce one such block at a time.
+///
+/// `weight_ptr` MUST be a `kernel_ffi::alloc_pages(pages)` allocation
+/// containing `data_len` bytes of valid GGUF data. On success the
+/// registry takes ownership of the allocation and the caller MUST
+/// NOT free it (`unload_slm` will). On error the caller MUST free it
+/// itself — this function does NOT free the input on the error path,
+/// because the caller still has valid `weight_ptr` and may want to
+/// retry or report an error before releasing it.
+///
+/// Safety mirrors [`load_slm`]'s expectations on the input bytes: the
+/// caller must guarantee `weight_ptr` points to `data_len` initialized
+/// bytes that remain valid for the duration of this call.
+pub fn load_slm_take_pages(
+    name: &[u8],
+    weight_ptr: core::ptr::NonNull<u8>,
+    pages: usize,
+    data_len: usize,
+) -> Result<usize, LoadError> {
+    let pages_u32 = u32::try_from(pages).map_err(|_| LoadError::ModelTooLarge)?;
+
+    // SAFETY: The caller's contract requires `weight_ptr` to point to
+    // `data_len` initialized bytes living inside a `pages * 4096`-byte
+    // PMM allocation that they have not freed and will not free for
+    // the duration of this call.
+    let data: &[u8] = unsafe { core::slice::from_raw_parts(weight_ptr.as_ptr(), data_len) };
+
+    let parsed = parse_gguf_for_registry(data, c"take_pages")?;
+
+    let entry = LoadedSlm {
+        name: clamp_name(name),
+        info: parsed.info,
+        vocab_size: parsed.vocab_size,
+        source_bytes: parsed.source_bytes,
+        tensor_count: parsed.tensor_count,
+        weight_pages: Some(weight_ptr),
+        weight_pages_count: pages_u32,
+        weight_data_len: data_len,
+        tokenizer: Some(parsed.tokenizer),
+        tensors: parsed.tensors,
+        tensor_data_start: parsed.tensor_data_start,
+    };
+    insert_entry(entry)
 }
 
 /// Free the slot at `index`. Returns `LoadError::InvalidFormat` if

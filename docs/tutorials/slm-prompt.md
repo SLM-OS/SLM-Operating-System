@@ -14,16 +14,27 @@ demo expecting coherent output.
 
 - A Jetson Orin Nano running SLM-OS post-kexec (see
   `docs/jetson-boot.md`).
-- A GGUF v3 model staged at `/mnt/files/<name>.gguf`. The reference
-  workflow (`scripts/fetch-slm.sh`, then labctl `sdwire_*` to write
-  to the SD card) is documented in `docs/setup.md` §"Jetson SD-Card
-  Layout" and `docs/tutorials/slm-models.md`.
+- A GGUF v3 model. On Jetson the recommended path is `slm xload`,
+  which streams the file straight into a single PMM buffer over the
+  telnet shell — see `docs/setup.md` §"Jetson SD-Card Layout" for the
+  rationale (the LittleFS round-trip needs two order-19 buddies that
+  Jetson's 8 GB system can't produce simultaneously). On platforms
+  that fit `slm load`'s alloc+copy pattern, a GGUF can also be staged
+  at `/mnt/files/<name>.gguf` and loaded by path.
 - Per-platform model-memory pool sizing wired in M0.2 — Jetson's
   defaults (2 GB weight, 256 MB workspace) cover Qwen2.5-1.5B-Q4_K_M.
 
 ## End-to-end flow
 
 ```
+# Jetson (recommended): stream-load via the telnet shell.
+slmos> slm xload qwen <total_bytes>
+SLM-XLOAD ready name=qwen total=<total_bytes>
+... (1 GB streamed over the wire) ...
+SLM-XLOAD done received=<total_bytes>
+[slm] loaded handle=0  arch=qwen2  blocks=28 hidden=1536
+
+# Or, on platforms with enough contiguous PMM headroom:
 slmos> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
 [slm] loaded handle=0  arch=qwen2  blocks=28 hidden=1536
       head=12/2 head_dim=128 vocab=152064 ctx=32768 source=1014 MB
