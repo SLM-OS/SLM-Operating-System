@@ -878,6 +878,85 @@ int ga10b_bringup_pmu(struct ga10b_bringup *b)
  * the caller should fall back to the from-scratch ACR path (which
  * will also fail on locked hardware, but with better diagnostics).
  */
+
+/* GA10B UFLUSH register block (BAR0+0x70000-0x70010), per
+ * ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_flush_ga10b.h.
+ * All four registers share the layout: bit 0 = PENDING_BUSY (write 1
+ * to start the op), bit 1 = OUTSTANDING_TRUE. Op completes when both
+ * bits read back 0. */
+#define GA10B_UFLUSH_FB_FLUSH              0x00070000u
+#define GA10B_UFLUSH_L2_SYSMEM_INVALIDATE  0x00070004u
+#define GA10B_UFLUSH_L2_FLUSH_DIRTY        0x00070010u
+#define GA10B_UFLUSH_PENDING_BUSY          (1u << 0)
+#define GA10B_UFLUSH_OUTSTANDING_TRUE      (1u << 1)
+#define GA10B_UFLUSH_DONE_MASK \
+    (GA10B_UFLUSH_PENDING_BUSY | GA10B_UFLUSH_OUTSTANDING_TRUE)
+
+/* Issue one UFLUSH op and poll until PENDING_BUSY and OUTSTANDING_TRUE
+ * both clear. Mirrors gk20a_mm_fb_flush / gk20a_mm_l2_invalidate /
+ * gk20a_mm_l2_flush in nvgpu-hal-mm-cache-flush_gk20a_fusa.c — same
+ * write-then-poll-both-bits pattern, same retry budget shape.
+ *
+ * Timeout: 100 retries × ~5 µs busy-wait = ~500 µs ceiling. nvgpu
+ * uses 100 retries for FB_FLUSH, 200 for L2_INV, 2000 for L2_FLUSH;
+ * 100 is sufficient for our use because we run this only at inherit
+ * (no concurrent GPU traffic) so the op should complete in <10 µs.
+ *
+ * Returns 0 on success, -1 on timeout. */
+static int ga10b_uflush_op(uint32_t reg, const char *name)
+{
+    bar0_w32(reg, GA10B_UFLUSH_PENDING_BUSY);
+    gsp_platform->mb();
+
+    for (int retries = 0; retries < 100; retries++) {
+        uint32_t v = bar0_r32(reg);
+        if ((v & GA10B_UFLUSH_DONE_MASK) == 0) {
+            return 0;
+        }
+        for (volatile int i = 0; i < 7500; i++) { }  /* ~5 µs */
+    }
+    uart_printf("[GA10B-INHERIT] uflush %s timed out (reg=0x%lx, last=0x%lx)\n",
+                name, (unsigned long)reg, (unsigned long)bar0_r32(reg));
+    return -1;
+}
+
+/* Evict the GPU L2 of any clean lines inherited from Linux's nvgpu.
+ *
+ * After kexec, GA10B's L2 cache may still hold lines tagged for
+ * physical addresses that nvgpu's MNIST helper wrote pre-handoff.
+ * The first GPU dispatch in SLM-OS can read those stale lines
+ * instead of fetching fresh data we wrote at the same GPU VA, which
+ * surfaces as the iter-1 "got nvgpu's helper output" race (#596).
+ *
+ * Sequence per gv11b_mm_l2_flush in
+ * ../slmos-reference-cache/nvidia/nvgpu-hal-mm-cache-flush_gv11b_fusa.c
+ * (and kmemsysCacheOp_GM200 in OGKM):
+ *
+ *   1. fb_flush   — drain pending sysmem writes into L2
+ *   2. l2_flush_dirty       — write any dirty L2 lines back to DRAM
+ *   3. l2_sysmem_invalidate — invalidate clean L2 lines (this is the
+ *                             one that reaches the stale nvgpu data)
+ *   4. fb_flush   — second sysmembar so DRAM is the source of truth
+ *
+ * "For GK20A, an explicit sysmembar flush is needed before L2 cache
+ * flush operation. Refer GK20A LTC IAS (section 5.5)" — kmemsysCacheOp_GM200
+ * comment. GK20A is the predecessor Tegra GPU; the same ordering applies
+ * to GA10B. */
+int ga10b_l2_evict_sysmem(void)
+{
+    if (!gsp_platform) return -1;
+
+    int rc;
+    rc = ga10b_uflush_op(GA10B_UFLUSH_FB_FLUSH, "fb_flush[1]");
+    if (rc < 0) return rc;
+    rc = ga10b_uflush_op(GA10B_UFLUSH_L2_FLUSH_DIRTY, "l2_flush_dirty");
+    if (rc < 0) return rc;
+    rc = ga10b_uflush_op(GA10B_UFLUSH_L2_SYSMEM_INVALIDATE, "l2_sysmem_invalidate");
+    if (rc < 0) return rc;
+    rc = ga10b_uflush_op(GA10B_UFLUSH_FB_FLUSH, "fb_flush[2]");
+    return rc;
+}
+
 int ga10b_bringup_inherit(struct ga10b_bringup *b)
 {
     if (!b) return -1;
@@ -929,6 +1008,20 @@ int ga10b_bringup_inherit(struct ga10b_bringup *b)
 
     uart_puts("[GA10B-INHERIT] Linux left ACR/FECS/GPCCS in PASS state — "
               "skipping phases 1-4\n");
+
+    /* Evict L2 lines inherited from Linux's nvgpu before any SLM-OS
+     * dispatch reads through them. See ga10b_l2_evict_sysmem header
+     * for the sequence (#596 iter-1 stale-read race). Non-fatal: a
+     * timeout here would still let the rest of bringup proceed —
+     * caller sees the iter-1 race come back instead of a hard fail. */
+    if (ga10b_l2_evict_sysmem() < 0) {
+        uart_puts("[GA10B-INHERIT] L2 evict timed out — first dispatch may "
+                  "still see stale nvgpu data\n");
+    } else {
+        uart_puts("[GA10B-INHERIT] L2 evict done (FB_FLUSH + L2_FLUSH_DIRTY + "
+                  "L2_SYSMEM_INVALIDATE + FB_FLUSH)\n");
+    }
+
     b->state = GA10B_BRINGUP_PMU_UP;
     return 0;
 }
