@@ -453,6 +453,84 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     }
 }
 
+/// Like [`load_slm`], but takes ownership of a caller-supplied PMM
+/// allocation instead of allocating a fresh weight buffer and
+/// copying. Used by `slm xload` (the streaming load path) where the
+/// caller has already allocated PMM pages large enough to hold the
+/// GGUF and streamed bytes directly into them — copying into a second
+/// 1 GB buddy block isn't possible on systems where the buddy
+/// allocator can only produce one such block at a time.
+///
+/// `weight_ptr` MUST be a `kernel_ffi::alloc_pages(pages)` allocation
+/// containing `data_len` bytes of valid GGUF data. On success the
+/// registry takes ownership of the allocation and the caller MUST
+/// NOT free it (`unload_slm` will). On error the caller MUST free it
+/// itself — this function does NOT free the input on the error path,
+/// because the caller still has valid `weight_ptr` and may want to
+/// retry or report an error before releasing it.
+///
+/// Safety mirrors [`load_slm`]'s expectations on the input bytes: the
+/// caller must guarantee `weight_ptr` points to `data_len` initialized
+/// bytes that remain valid for the duration of this call.
+pub fn load_slm_take_pages(
+    name: &[u8],
+    weight_ptr: core::ptr::NonNull<u8>,
+    pages: usize,
+    data_len: usize,
+) -> Result<usize, LoadError> {
+    if data_len > MAX_PLAUSIBLE_GGUF_BYTES {
+        return Err(LoadError::ModelTooLarge);
+    }
+    let pages_u32 = u32::try_from(pages).map_err(|_| LoadError::ModelTooLarge)?;
+
+    // SAFETY: The caller's contract requires `weight_ptr` to point to
+    // `data_len` initialized bytes living inside a `pages * 4096`-byte
+    // PMM allocation that they have not freed and will not free for
+    // the duration of this call.
+    let data: &[u8] = unsafe { core::slice::from_raw_parts(weight_ptr.as_ptr(), data_len) };
+
+    let gguf = Gguf::parse(data).map_err(map_gguf_err)?;
+    let info = gguf.validate_for_inference().map_err(map_gguf_err)?;
+    let vocab_size = vocab_size_of(&gguf).inspect_err(|_| {
+        crate::log::log_error(b"[slm] take_pages: vocab_size_of failed (CorruptedData)\0");
+    })?;
+    let tensor_count = u32::try_from(gguf.tensor_count())
+        .map_err(|_| LoadError::CorruptedData)?;
+    let source_bytes = data.len() as u32;
+
+    let tokenizer = Bbpe::from_gguf(&gguf).map_err(|_| {
+        crate::log::log_error(b"[slm] take_pages: Bbpe::from_gguf failed (CorruptedData)\0");
+        LoadError::CorruptedData
+    })?;
+
+    let tensor_data_start = gguf.tensor_data_start();
+    let mut tensors: Vec<OwnedTensorInfo> = Vec::with_capacity(gguf.tensors().len());
+    for t in gguf.tensors() {
+        tensors.push(OwnedTensorInfo {
+            name: String::from(t.name),
+            dims: t.dims.clone(),
+            ggml_type: t.ggml_type.0,
+            offset: t.offset,
+        });
+    }
+    drop(gguf);
+
+    let entry = LoadedSlm {
+        name: clamp_name(name),
+        info,
+        vocab_size,
+        source_bytes,
+        tensor_count,
+        weight_pages: Some(weight_ptr),
+        weight_pages_count: pages_u32,
+        weight_data_len: data_len,
+        tokenizer: Some(tokenizer),
+        tensors,
+        tensor_data_start,
+    };
+    insert_entry(entry)
+}
+
 /// Free the slot at `index`. Returns `LoadError::InvalidFormat` if
 /// the slot is empty or the index is out of range.
 pub fn unload_slm(index: usize) -> Result<(), LoadError> {

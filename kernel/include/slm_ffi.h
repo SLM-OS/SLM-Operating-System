@@ -1104,6 +1104,20 @@ _Static_assert(sizeof(SlmModelInfoC) == 92,
 extern int rust_slm_load(const uint8_t *name, const uint8_t *data, size_t data_len);
 
 /*
+ * Like rust_slm_load, but takes ownership of a caller-supplied
+ * pmm_alloc_pages(pages) allocation. On success the registry owns
+ * the buffer and the caller MUST NOT free it. On failure (-1) the
+ * caller still owns `data` and MUST free it.
+ *
+ * Used by `slm xload` on Jetson-class memory where allocating two
+ * order-19 buddies (input + weight buffer) is not possible.
+ */
+extern int rust_slm_load_take_pages(const uint8_t *name,
+                                    uint8_t *data,
+                                    size_t pages,
+                                    size_t data_len);
+
+/*
  * Unload a SLM by slot index. Returns 0 on success, -1 on error.
  */
 extern int rust_slm_unload(uint32_t index);

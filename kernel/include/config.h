@@ -19,7 +19,7 @@
  * Memory Configuration
  * ============================================================================ */
 
-#define STACK_SIZE          0x10000UL       /* 64 KB per stack — needed for ONNX parsing + inference */
+#define STACK_SIZE          0x40000UL       /* 256 KB per stack — needed for SLM forward (Qwen2.5-1.5B) on top of ONNX parsing */
 
 /* ============================================================================
  * Scheduler Configuration
@@ -226,15 +226,25 @@ _Static_assert(RUST_HEAP_MB <= 4096u, "RUST_HEAP_MB cannot exceed 4096 (4 GiB sa
  * (`PMM_MAX_ORDER = 19`, bumped 2026-05-02 from 18 to fit a
  * Q4_K_M GGUF for Qwen2.5-1.5B which is 1.04 GB on disk).
  *
- * Jetson sizes to 1280 MB — covers the 1.04 GB GGUF plus headroom
- * for demo scripts, preload.conf, and a future second-model stage.
+ * Jetson sizes to 64 MB — `slm xload` streams the GGUF straight
+ * into a PMM buffer (no LittleFS intermediate), so the ramdisk only
+ * needs to hold the boot-seeded demo scripts, preload.conf, and the
+ * help tree (~70 KB total). 64 MB leaves plenty of headroom for
+ * future small blobs without claiming any of the order-18+ buddy
+ * blocks the SLM load buffer needs. The previous 1280 MB sizing
+ * (kept for the LittleFS-based `slm load` path) ate one of the
+ * 8 GB system's order-19-aligned buddies, which combined with the
+ * 1 GB Rust heap left no contiguous order-19 free for a Q4_K_M
+ * Qwen2.5-1.5B GGUF (1.04 GB → rounds up to order 19 in the buddy
+ * allocator).
+ *
  * Pi 5 keeps the original 32 MB cap (Hailo HEFs are ~20 MB; SLM on
  * Pi 5 is not the demo target). QEMU and host-harness builds must
  * stay small enough to boot inside `make test`'s 1 GB systemd
  * MemoryMax cap.
  */
 #if defined(PLATFORM_JETSON_ORIN_NANO)
-#define RAMDISK_DEFAULT_MB      1280u
+#define RAMDISK_DEFAULT_MB      64u
 #elif defined(PLATFORM_RASPI5)
 #define RAMDISK_DEFAULT_MB      32u
 #else /* PLATFORM_QEMU_VIRT, PLATFORM_X86_64, host harness */

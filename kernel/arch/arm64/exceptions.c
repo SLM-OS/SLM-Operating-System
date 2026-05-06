@@ -199,6 +199,27 @@ static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
     uart_printf("  x28=0x%016lx  x29=0x%016lx  x30=0x%016lx\n",
                 tf->x28, tf->x29, tf->x30);
 
+    /* Stack-canary inventory for every live task. Each task's stack
+     * has a magic pattern written near the bottom at create time
+     * (`task_canary_init`). A broken canary on the faulting task
+     * means its stack overflowed — and on a register-corruption-
+     * looking fault (zeroed callee-saved regs, garbage frame
+     * pointer) overflow into the adjacent task->context save area
+     * is exactly the mechanism we'd expect.
+     *
+     * The `_unlocked` variant skips the task-table spinlock since
+     * we may already hold it from the faulting task's context;
+     * trades cross-CPU consistency for the ability to print at
+     * all from the exception handler. */
+    uart_puts("\nStack Canaries:\n");
+    int broken = task_canary_check_all_unlocked();
+    if (broken == 0) {
+        uart_puts("  (all task stacks intact)\n");
+    } else {
+        uart_printf("  %d task(s) with broken canaries — see lines above\n",
+                    broken);
+    }
+
 #if defined(PLATFORM_RASPI5)
     /* On Pi 5 the fault halt is cleaner via PSCI CPU_OFF than an
      * in-kernel WFI loop: PSCI hands the core to EL3/TF-A which

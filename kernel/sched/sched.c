@@ -2084,6 +2084,44 @@ void schedule(void)
 
     rq_unlock_irqrestore(this_cpu, flags);
 
+    /* Stack-overflow assertion. Validate the live SP register against
+     * `current`'s stack range BEFORE we save it via switch_to.
+     *
+     * Catches the class of stack overflows that the bottom-of-stack
+     * canary (TASK_STACK_CANARY_BYTES, 64 B) misses: a function with
+     * a single large stack frame can decrement SP past the canary
+     * region in one go, leaving the canary intact while landing the
+     * SP inside an adjacent task's stack region. Once that happens
+     * the running task starts corrupting its neighbor's frames; the
+     * symptom often surfaces much later as a wild fault or a wedge
+     * in scheduler bookkeeping, far from the original cause.
+     *
+     * Bumped STACK_SIZE to 256 KB after a 64 KB stack proved too
+     * small for the SLM forward path (Qwen2.5-1.5B Q4_K_M). Keeping
+     * this assertion as a permanent guard so a future workload that
+     * grows past the new ceiling fails loudly here instead of
+     * spelunking through corrupted task state. */
+    if (current && current->stack_base && current->stack_top) {
+        uint64_t live_sp;
+        __asm__ volatile("mov %0, sp" : "=r"(live_sp));
+        uintptr_t base = (uintptr_t)current->stack_base;
+        uintptr_t top  = (uintptr_t)current->stack_top;
+        if (live_sp < base || live_sp > top) {
+            extern int uart_printf(const char *fmt, ...);
+            uart_printf("\nstack overflow: SP is outside current task's stack\n"
+                        "  current id=%u name='%s' live_sp=0x%lx but "
+                        "stack=[0x%lx..0x%lx)\n"
+                        "  next id=%u name='%s'\n",
+                        (unsigned int)current->id, current->name,
+                        (unsigned long)live_sp,
+                        (unsigned long)base, (unsigned long)top,
+                        next ? (unsigned int)next->id : 0u,
+                        next ? next->name : "(none)");
+            panic("stack overflow: refusing to switch_to with SP outside "
+                  "current task's [stack_base, stack_top]");
+        }
+    }
+
     switch_to(current, next);
 
     /* Resumed on our stack after being switched back.
