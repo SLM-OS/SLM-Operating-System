@@ -494,29 +494,45 @@ fn dot_q4k_q8k_block_scalar(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
 /// - FEAT_DotProd must be present at runtime — guaranteed for every
 ///   CPU we ship to (Cortex-A76 / A78AE), enforced at compile time
 ///   by `+dotprod` in `runtime/.cargo/config.toml`.
+/// SDOT intrinsic wrapper. Encodes `sdot {acc}.4s, {a}.16b, {b}.16b`
+/// via inline asm so we don't depend on the unstable
+/// `core::arch::aarch64::vdotq_s32` intrinsic (gated behind
+/// `stdarch_neon_dotprod`). The compiler picks any V register; the
+/// `vN` format specifier resolves to the right name. Lifted out of
+/// `dot_q4k_q8k_block_neon` to keep that function under the
+/// 80-line guideline.
+///
+/// # Safety
+/// Caller must ensure FEAT_DotProd is present at runtime (enforced
+/// for our platforms by `+dotprod` in `runtime/.cargo/config.toml`).
+// `#[inline(always)]` would conflict with `#[target_feature]` on
+// stable rustc (E0658, tracked upstream as rust-lang/rust#145574).
+// `#[inline]` is a strong-enough hint here: the body is one asm
+// instruction + a move, and LTO collapses it inside
+// `dot_q4k_q8k_block_neon` either way.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+#[inline]
+unsafe fn sdot_q(
+    acc: core::arch::aarch64::int32x4_t,
+    a: core::arch::aarch64::int8x16_t,
+    b: core::arch::aarch64::int8x16_t,
+) -> core::arch::aarch64::int32x4_t {
+    let mut out = acc;
+    core::arch::asm!(
+        "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
+        acc = inout(vreg) out,
+        a = in(vreg) a,
+        b = in(vreg) b,
+        options(pure, nomem, nostack, preserves_flags),
+    );
+    out
+}
+
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,dotprod")]
 unsafe fn dot_q4k_q8k_block_neon(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
     use core::arch::aarch64::*;
-    use core::arch::asm;
-
-    /// SDOT wrapper. Encodes `sdot {acc}.4s, {a}.16b, {b}.16b`
-    /// directly so we don't depend on the unstable
-    /// `core::arch::aarch64::vdotq_s32` intrinsic. The compiler is
-    /// free to allocate any V register; vN format specifier resolves
-    /// to the right name for the chosen physical register.
-    #[inline(always)]
-    unsafe fn sdot(acc: int32x4_t, a: int8x16_t, b: int8x16_t) -> int32x4_t {
-        let mut out = acc;
-        asm!(
-            "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
-            acc = inout(vreg) out,
-            a = in(vreg) a,
-            b = in(vreg) b,
-            options(pure, nomem, nostack, preserves_flags),
-        );
-        out
-    }
 
     let d_w = view.d();
     let dmin_w = view.dmin();
@@ -568,12 +584,12 @@ unsafe fn dot_q4k_q8k_block_neon(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32
         // (4-wide groupings). Two calls per accumulator cover all
         // 32 element pairs; vaddvq_s32 reduces the 4 lanes to one.
         let mut acc_lo = vdupq_n_s32(0);
-        acc_lo = sdot(acc_lo, vreinterpretq_s8_u8(q_lo_a), q8_lo_a);
-        acc_lo = sdot(acc_lo, vreinterpretq_s8_u8(q_lo_b), q8_lo_b);
+        acc_lo = sdot_q(acc_lo, vreinterpretq_s8_u8(q_lo_a), q8_lo_a);
+        acc_lo = sdot_q(acc_lo, vreinterpretq_s8_u8(q_lo_b), q8_lo_b);
 
         let mut acc_hi = vdupq_n_s32(0);
-        acc_hi = sdot(acc_hi, vreinterpretq_s8_u8(q_hi_a), q8_hi_a);
-        acc_hi = sdot(acc_hi, vreinterpretq_s8_u8(q_hi_b), q8_hi_b);
+        acc_hi = sdot_q(acc_hi, vreinterpretq_s8_u8(q_hi_a), q8_hi_a);
+        acc_hi = sdot_q(acc_hi, vreinterpretq_s8_u8(q_hi_b), q8_hi_b);
 
         let sc_lo = view.scale(j * 2) as i32;
         let sc_hi = view.scale(j * 2 + 1) as i32;

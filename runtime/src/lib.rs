@@ -7871,6 +7871,85 @@ pub extern "C" fn rust_matmul_bench_int8(iterations: u32) -> i32 {
     0
 }
 
+/// Fill `weights` and `acts` with deterministic, varied content for
+/// the Q4_K vec_dot bench. Every block gets non-zero d / dmin /
+/// scales / mins / qs so the i32 accumulators don't collapse to 0
+/// and the timed cost reflects realistic decode-path arithmetic.
+/// Mirrors the content `benchmark_q4k_q8k_dot` uses in `quant.rs`.
+fn fill_q4k_q8k_bench_buffers(weights: &mut [u8], acts: &mut [u8], nb: usize) {
+    use crate::inference::quant::Q8_K_BLOCK_SIZE;
+    use crate::slm::gguf::Q4_K_BLOCK_SIZE;
+
+    for b in 0..nb {
+        let base = b * Q4_K_BLOCK_SIZE;
+        weights[base]     = 0x00; weights[base + 1] = 0x3C;   // d = 1.0 (f16)
+        weights[base + 2] = 0x00; weights[base + 3] = 0x38;   // dmin = 0.5 (f16)
+        for i in 0..12 {
+            weights[base + 4 + i] = (i as u8) | ((i as u8) << 4);
+        }
+        for i in 0..128 {
+            weights[base + 16 + i] = (i ^ b) as u8;
+        }
+        let abase = b * Q8_K_BLOCK_SIZE;
+        let d_bytes = 1.0f32.to_le_bytes();
+        acts[abase..abase + 4].copy_from_slice(&d_bytes);
+        for i in 0..256 {
+            acts[abase + 4 + i] = if i & 1 == 0 { 1 } else { 0xFFu8 };
+        }
+        // bsums[j] = 0 (eight +1s and eight -1s per 16-elt window).
+    }
+}
+
+/// Print the `bench q4kdot` result block using the same format the
+/// other `bench` shell subcommands emit. Lives next to its caller so
+/// any change to one reminds the next reader to keep the other in
+/// sync — the `[%s]` kernel-name banner is the only difference vs
+/// `bench matmul`.
+fn print_q4kdot_result(
+    use_scalar: bool,
+    elements_aligned: usize,
+    nb: usize,
+    iterations: u32,
+    success: u32,
+    min_ns: u64,
+    max_ns: u64,
+    avg_ns: u64,
+) {
+    extern "C" {
+        fn shell_printf(fmt: *const u8, ...);
+    }
+
+    // FLOPs per row dot: 2 × elements (one mul + one add per
+    // element). Counting the dequant arithmetic as an extra add
+    // per element would inflate the number; convention here matches
+    // the FP32 / FP16 / INT8 benches above which all use 2·M·K·N.
+    let flops_per_call: u64 = 2 * (elements_aligned as u64);
+    let avg_gflops_x1000 = if avg_ns > 0 { (flops_per_call * 1000) / avg_ns } else { 0 };
+    let min_gflops_x1000 = if min_ns > 0 { (flops_per_call * 1000) / min_ns } else { 0 };
+
+    let kernel_name: &[u8] = if use_scalar {
+        b"scalar (reference)\0"
+    } else if cfg!(target_arch = "aarch64") {
+        b"NEON (FEAT_DotProd / SDOT)\0"
+    } else {
+        b"scalar (host build, no NEON)\0"
+    };
+
+    unsafe {
+        shell_printf(b"  Kernel:      %s\n\0".as_ptr(), kernel_name.as_ptr());
+        shell_printf(b"  Row width:   %lu elements (%lu Q4_K blocks)\n\0".as_ptr(),
+                    elements_aligned as u64, nb as u64);
+        shell_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
+                    iterations as u64, success as u64);
+        shell_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        shell_printf(b"  Latency:     min=%lu ns  avg=%lu ns  max=%lu ns\n\0".as_ptr(),
+                    min_ns, avg_ns, max_ns);
+        shell_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
+                    avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
+                    min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
+    }
+}
+
 /// Microbench the Q4_K vec_dot kernel. Default is the dispatcher
 /// `vec_dot_q4_k_q8_k` (NEON SDOT path on aarch64). Pass `force_scalar
 /// != 0` to instead exercise `vec_dot_q4_k_q8_k_scalar`, the scalar
@@ -7895,10 +7974,6 @@ pub extern "C" fn rust_bench_q4k_q8k_dot(
     iterations: u32,
     force_scalar: u32,
 ) -> i32 {
-    extern "C" {
-        fn shell_printf(fmt: *const u8, ...);
-    }
-
     use crate::inference::quant::Q8_K_BLOCK_SIZE;
     use crate::slm::gguf::Q4_K_BLOCK_SIZE;
 
@@ -7916,29 +7991,7 @@ pub extern "C" fn rust_bench_q4k_q8k_dot(
     extern crate alloc;
     let mut weights = alloc::vec![0u8; w_bytes];
     let mut acts    = alloc::vec![0u8; a_bytes];
-
-    // Deterministic, varied content: gives every block non-zero
-    // d / dmin / scales / mins / qs so the i32 accumulators don't
-    // collapse to 0 and the timed cost reflects realistic decode-path
-    // arithmetic. Reuses the same content as `benchmark_q4k_q8k_dot`.
-    for b in 0..nb {
-        let base = b * Q4_K_BLOCK_SIZE;
-        weights[base]     = 0x00; weights[base + 1] = 0x3C;       // d = 1.0 (f16)
-        weights[base + 2] = 0x00; weights[base + 3] = 0x38;       // dmin = 0.5 (f16)
-        for i in 0..12 {
-            weights[base + 4 + i] = (i as u8) | ((i as u8) << 4);
-        }
-        for i in 0..128 {
-            weights[base + 16 + i] = (i ^ b) as u8;
-        }
-        let abase = b * Q8_K_BLOCK_SIZE;
-        let d_bytes = 1.0f32.to_le_bytes();
-        acts[abase..abase + 4].copy_from_slice(&d_bytes);
-        for i in 0..256 {
-            acts[abase + 4 + i] = if i & 1 == 0 { 1 } else { 0xFFu8 };
-        }
-        // bsums[j] = 0 (eight +1s and eight -1s per 16-elt window).
-    }
+    fill_q4k_q8k_bench_buffers(&mut weights, &mut acts, nb);
 
     let mut min_ns: u64 = u64::MAX;
     let mut max_ns: u64 = 0;
@@ -7970,42 +8023,16 @@ pub extern "C" fn rust_bench_q4k_q8k_dot(
     if success == 0 {
         return -1;
     }
-
     let avg_ns = total_ns / success as u64;
-    // FLOPs per row dot: 2 × elements (one mul + one add per element,
-    // counting the dequant arithmetic as an additional add per element
-    // would inflate the number; convention here matches the FP32 /
-    // FP16 / INT8 benches above which all use 2·M·K·N).
-    let flops_per_call: u64 = 2 * (elements_aligned as u64);
-    let avg_gflops_x1000 = if avg_ns > 0 { (flops_per_call * 1000) / avg_ns } else { 0 };
-    let min_gflops_x1000 = if min_ns > 0 { (flops_per_call * 1000) / min_ns } else { 0 };
-
-    let kernel_name: &[u8] = if use_scalar {
-        b"scalar (reference)\0"
-    } else {
-        // Compile-time annotation of the active dispatch path. On
-        // aarch64 the kernel is the inline-asm SDOT path; on host
-        // builds it's the same code as `scalar` (the cfg-gated NEON
-        // helper isn't compiled in there).
-        if cfg!(target_arch = "aarch64") {
-            b"NEON (FEAT_DotProd / SDOT)\0"
-        } else {
-            b"scalar (host build, no NEON)\0"
-        }
-    };
-
-    unsafe {
-        shell_printf(b"  Kernel:      %s\n\0".as_ptr(), kernel_name.as_ptr());
-        shell_printf(b"  Row width:   %lu elements (%lu Q4_K blocks)\n\0".as_ptr(),
-                    elements_aligned as u64, nb as u64);
-        shell_printf(b"  Iterations:  %lu (success %lu)\n\0".as_ptr(),
-                    iterations as u64, success as u64);
-        shell_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
-        shell_printf(b"  Latency:     min=%lu ns  avg=%lu ns  max=%lu ns\n\0".as_ptr(),
-                    min_ns, avg_ns, max_ns);
-        shell_printf(b"  Throughput:  avg=%lu.%03lu GFLOPS  peak=%lu.%03lu GFLOPS\n\0".as_ptr(),
-                    avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
-                    min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
-    }
+    print_q4kdot_result(
+        use_scalar,
+        elements_aligned,
+        nb,
+        iterations,
+        success,
+        min_ns,
+        max_ns,
+        avg_ns,
+    );
     0
 }
