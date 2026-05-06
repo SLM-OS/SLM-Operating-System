@@ -145,13 +145,12 @@ platform.
 
 ```bash
 # On the dev host, after `scripts/fetch-slm.sh`:
-python3 scripts/tools/slm-put.py jetson-nano-1 \
-    build/slm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
-    --target slm:qwen
+python3 scripts/tools/slm-xload.py 192.168.4.100 qwen \
+    build/slm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf
 ```
 
-The reference client wraps `slm xload <name> <total>` over the
-existing telnet binary protocol (same wire format as `xput-bin`).
+`slm-xload.py` wraps the `slm xload <name> <total>` shell verb over
+the existing telnet binary protocol (same wire format as `xput-bin`).
 Peak kernel memory == file size; no second copy.
 
 For platforms where the SD card / LittleFS path fits the GGUF

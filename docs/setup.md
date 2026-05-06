@@ -318,11 +318,15 @@ straight into a single PMM buffer over the existing telnet shell
 scripts/fetch-slm.sh
 
 # Power-cycle the Jetson so it boots SLM-OS via kexec, wait for
-# the shell, then stream the GGUF (uses the same telnet binary
-# protocol as `xput-bin` — see scripts/tools/slm-put.py for a
-# reference client; `slm xload` is the kernel-side verb).
+# the shell prompt, then stream the GGUF in via the host-side
+# `slm-xload.py` reference client (drives the kernel-side
+# `slm xload` verb over the same telnet binary protocol that
+# `xput-bin` uses).
 labctl power_cycle jetson-nano-1
-slmos> slm xload qwen <total_bytes>
+python3 scripts/tools/slm-xload.py 192.168.4.100 qwen \
+    build/slm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+
+# In the SLM-OS shell:
 slmos> slm launch 0
 slmos> slm prompt 0 "hello"
 ```
