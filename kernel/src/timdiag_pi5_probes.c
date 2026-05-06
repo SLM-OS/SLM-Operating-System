@@ -62,6 +62,7 @@
 #define GICC_PMR            (*(volatile uint32_t *)(GIC_CPU_BASE  + 0x004))
 #define GICC_IAR            (*(volatile uint32_t *)(GIC_CPU_BASE  + 0x00C))
 #define GICC_EOIR           (*(volatile uint32_t *)(GIC_CPU_BASE  + 0x010))
+#define GICC_HPPIR          (*(volatile uint32_t *)(GIC_CPU_BASE  + 0x018))
 
 /* Bits of interest in GICC_CTLR. EnableGrp1=bit 0,
  * FIQBypDisGrp1=bit 4, IRQBypDisGrp1=bit 5. The bypass-disable bits
@@ -132,7 +133,7 @@ void timdiag_pi5_probe_sgi(void)
     }
 
     /* Snapshot HPPIR before. 0x3FF = "no pending interrupt". */
-    uint32_t hppir = *(volatile uint32_t *)(GIC_CPU_BASE + 0x18);
+    uint32_t hppir = GICC_HPPIR;
     uart_printf("  CPU %u — GICC_HPPIR before SGI: 0x%x (irq=%u%s)\r\n",
                 cpu, hppir, hppir & 0x3FF,
                 (hppir & 0x3FF) == 0x3FF ? " — no pending" : "");
@@ -162,7 +163,7 @@ void timdiag_pi5_probe_sgi(void)
     }
 
     /* Read HPPIR again. If the SGI propagated, we'll see irq=0. */
-    uint32_t hppir_after = *(volatile uint32_t *)(GIC_CPU_BASE + 0x18);
+    uint32_t hppir_after = GICC_HPPIR;
     uart_printf("  CPU %u — GICC_HPPIR after  SGI: 0x%x (irq=%u%s)\r\n",
                 cpu, hppir_after, hppir_after & 0x3FF,
                 (hppir_after & 0x3FF) == 0x3FF ? " — no pending" : "");
@@ -214,6 +215,7 @@ void timdiag_pi5_probe_sgi(void)
  * would route real IRQs through. We try both and report.
  * ============================================================================ */
 
+#if defined(SECONDARY_PREEMPT)
 /*
  * Observe diag_vec_counts.irq for the calling CPU over a fixed
  * wall-clock window. Returns the delta. We use the per-CPU IRQ
@@ -221,6 +223,10 @@ void timdiag_pi5_probe_sgi(void)
  * timer_handler_count because the latter also advances via the
  * coop-preempt synthetic tick — the synthetic counter would
  * obscure whether real hardware IRQs are firing.
+ *
+ * Only used by the B2 probe body, which itself is gated on
+ * SECONDARY_PREEMPT (the probe unmasks DAIF.I and would otherwise
+ * hang Pi 5 hardware — see timdiag_pi5_probe_bypass).
  */
 static uint64_t observe_irq_count_for_us(uint64_t us)
 {
@@ -235,10 +241,32 @@ static uint64_t observe_irq_count_for_us(uint64_t us)
     }
     return vec->irq - before;
 }
+#endif /* SECONDARY_PREEMPT */
 
 void timdiag_pi5_probe_bypass(void)
 {
     uart_puts("\r\n--- Track B2: GICC_CTLR bypass-disable probe ---\r\n");
+
+#if !defined(SECONDARY_PREEMPT)
+    /* The B2 probe unmasks DAIF.I to observe whether real timer IRQs
+     * deliver under different bypass-bit configurations. On Pi 5
+     * without SECONDARY_PREEMPT, if HPPIR is showing a pending IRQ,
+     * the IRQ vector runs and `schedule()` is called from IRQ context
+     * — which corrupts the abandoned exception frame on real ARM64
+     * hardware (the documented #98 issue). Empirical result: the
+     * system hangs and the operator must power-cycle.
+     *
+     * Skip the probe rather than ship a footgun. Rebuild with
+     * `make kernel PLATFORM=RASPI5 SECONDARY_PREEMPT=ON PI5_IRQ_DIAG=ON`
+     * to enable. */
+    uart_puts("  SKIPPED: B2 unmasks DAIF.I and hangs Pi 5 hardware\r\n"
+              "  unless SECONDARY_PREEMPT is enabled (the IRQ vector\r\n"
+              "  calls schedule() from IRQ context — see #98). Rebuild\r\n"
+              "  with SECONDARY_PREEMPT=ON and re-run to engage this\r\n"
+              "  probe. B2's hypothesis is downstream of the SCR_EL3\r\n"
+              "  question that B1+B3 already point to (see #134 plan).\r\n");
+    return;
+#else
 
     uint32_t saved = GICC_CTLR;
     uart_printf("  Saved GICC_CTLR=0x%x (IRQBypDisGrp1=%u FIQBypDisGrp1=%u)\r\n",
@@ -277,16 +305,23 @@ void timdiag_pi5_probe_bypass(void)
     __asm__ volatile("msr daif, %0" :: "r"(daif_save));
     __asm__ volatile("isb" ::: "memory");
 
-    if (inverted_delta > base_delta) {
+    /* 1-tick tolerance for jitter — IRQ counts are sampled across two
+     * 50 ms windows and a single timer-tick boundary can land in
+     * either window. A real bypass-direction effect would produce a
+     * delta of dozens (one per tick × ~5 ticks), not a one-off. */
+    int64_t signed_delta = (int64_t)inverted_delta - (int64_t)base_delta;
+    if (signed_delta > 1) {
         uart_puts("  RESULT: Inverted bypass bits delivered MORE IRQs.\r\n"
                   "  >>> Pi 5 nIRQ likely routes through the GIC bypass output.\r\n"
                   "  >>> One-line fix in gic_cpu_init: clear bits 4+5 in GICC_CTLR.\r\n");
-    } else if (inverted_delta == base_delta) {
-        uart_puts("  RESULT: No change — bypass bits are not the blocker.\r\n");
-    } else {
+    } else if (signed_delta < -1) {
         uart_puts("  RESULT: Inverted bypass bits delivered FEWER IRQs.\r\n"
                   "  >>> Current (set) state is correct; investigation continues.\r\n");
+    } else {
+        uart_puts("  RESULT: No significant change (delta within +/-1 tick) "
+                  "— bypass bits are not the blocker.\r\n");
     }
+#endif /* SECONDARY_PREEMPT */
 }
 
 /* ============================================================================

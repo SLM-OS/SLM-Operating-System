@@ -32,6 +32,7 @@
 #include "smp.h"
 #include "ipc.h"
 #include "timer.h"
+#include "timdiag_pi5_probes.h"
 #include "slm_ffi.h"
 #include "platform.h"
 #include "ncmem.h"
@@ -5571,11 +5572,7 @@ int cmd_timdiag(int argc, char *argv[])
      * probe the GICv2 → A76 IRQ path on Pi 5. Each probe is opt-in
      * via a subcommand argument because they perturb live state
      * (DAIF, GICC_CTLR, timer) and shouldn't fire on every timdiag
-     * invocation. */
-    extern void timdiag_pi5_probe_sgi(void);
-    extern void timdiag_pi5_probe_bypass(void);
-    extern void timdiag_pi5_probe_smc(void);
-
+     * invocation. Prototypes in timdiag_pi5_probes.h. */
     if (argc >= 2 && argv[1]) {
         if (strcmp(argv[1], "sgi") == 0) {
             timdiag_pi5_probe_sgi();
