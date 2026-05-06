@@ -414,6 +414,34 @@ struct cpu_runqueue *sched_cpu_rq(uint32_t cpu)
     return cpu_rq(cpu);
 }
 
+/*
+ * Drain the per-CPU run queue under rq_lock. Used by the dormancy
+ * recovery path (#216 Tier 2, kernel/sched/cpu_supervisor.c) when a
+ * secondary CPU has been declared dead and is about to be
+ * resurrected via psci_cpu_on. The tasks still on the queue are
+ * leaked — the fault that killed the CPU may have left their
+ * state in indeterminate condition, and migrating them risks
+ * propagating the corruption. A future tier will iterate the queue
+ * and individually validate each task before deciding to migrate or
+ * terminate.
+ *
+ * Caller is expected to have set cpu_data[cpu].online = false
+ * before calling this so steal_deque-based thieves stop racing.
+ */
+void sched_drain_cpu_runqueue(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS) return;
+    irq_flags_t flags = rq_lock_irqsave(cpu);
+    struct cpu_runqueue *rq = cpu_rq(cpu);
+    if (rq) {
+        rq->head = NULL;
+        rq->tail = NULL;
+        rq->ready_count = 0;
+        rq->zombie = NULL;
+    }
+    rq_unlock_irqrestore(cpu, flags);
+}
+
 /* ============================================================================
  * Policy registry and active policy
  * ============================================================================ */

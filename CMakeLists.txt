@@ -433,6 +433,10 @@ set(KERNEL_SOURCES
     # (post Jetson plan P3) and the Pi 5 SECONDARY_PREEMPT=ON build both
     # link. On X86_64 the trampoline is not needed.
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/preempt.c>
+    # cpu_supervisor.c body is guarded by #if defined(PLATFORM_RASPI5);
+    # always compile so the public API stubs are linked on every platform
+    # and shell commands referencing it stay platform-neutral.
+    kernel/sched/cpu_supervisor.c
 
     # ==========================================================================
     # Inter-Process Communication
@@ -821,6 +825,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_integration.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_coop_preempt.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_cpu_supervisor.c>
 )
 
 # lwIP library sources (QEMU networking only)
