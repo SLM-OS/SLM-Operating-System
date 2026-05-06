@@ -897,10 +897,13 @@ int ga10b_bringup_pmu(struct ga10b_bringup *b)
  * gk20a_mm_l2_flush in nvgpu-hal-mm-cache-flush_gk20a_fusa.c — same
  * write-then-poll-both-bits pattern, same retry budget shape.
  *
- * Timeout: 100 retries × ~5 µs busy-wait = ~500 µs ceiling. nvgpu
- * uses 100 retries for FB_FLUSH, 200 for L2_INV, 2000 for L2_FLUSH;
- * 100 is sufficient for our use because we run this only at inherit
- * (no concurrent GPU traffic) so the op should complete in <10 µs.
+ * Timeout: 100 retries × ~5 µs busy-wait = ~500 µs per op ceiling.
+ * nvgpu uses 100 retries for FB_FLUSH, 200 for L2_INV, 2000 for
+ * L2_FLUSH; 100 is sufficient for our use because we run this only
+ * at inherit (no concurrent GPU traffic) so the op should complete
+ * in <10 µs. Calibration of the inner busy-wait constant (7500
+ * volatile-loop iterations ≈ 5 µs on Cortex-A78AE @ ~1.5 GHz) follows
+ * the same scheme as `ga10b_gsp_engine_reset` (15 000 ≈ 10 µs).
  *
  * Returns 0 on success, -1 on timeout. */
 static int ga10b_uflush_op(uint32_t reg, const char *name)
@@ -941,7 +944,14 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * "For GK20A, an explicit sysmembar flush is needed before L2 cache
  * flush operation. Refer GK20A LTC IAS (section 5.5)" — kmemsysCacheOp_GM200
  * comment. GK20A is the predecessor Tegra GPU; the same ordering applies
- * to GA10B. */
+ * to GA10B.
+ *
+ * Lock-hold cost: callers run this under `g_gpu_dispatch_lock` with
+ * IRQs disabled (see `ensure_bringup` in slm_ffi.c). Worst-case time
+ * is 4 ops × ~500 µs/op ≈ 2 ms IRQ-off if every op hits its retry
+ * limit. Typical post-kexec cold-state run is ~40 µs total (each op
+ * completes in <10 µs per `ga10b_uflush_op`'s comment). Bounded and
+ * well below the file's existing IRQ-off budgets. */
 int ga10b_l2_evict_sysmem(void)
 {
     if (!gsp_platform) return -1;
