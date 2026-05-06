@@ -215,6 +215,53 @@ kernel: check-build-dir runtime kernel-config-check $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
+# ============================================================================
+# Pi 5 EL3 armstub (Track C of #134)
+# ============================================================================
+#
+# Builds kernel/arch/arm64/armstub8-2712.S into a flat binary that the
+# Pi 5 firmware loads at EL3 (with `armstub=armstub8-2712.bin` in
+# config.txt). The stub clears SCR_EL3.IRQ/FIQ so non-secure timer
+# interrupts deliver to EL1 — see PR #639 for the diagnostic chain
+# that pinned this register.
+#
+# Output: build/armstub/armstub8-2712.bin (~256 bytes)
+#
+# Tooling: re-uses the kernel ARM cross toolchain. Only available on
+# ARM64 platforms (Pi 5 specifically — the source hardcodes BCM2712
+# GIC-400 base address).
+#
+# WARNING: Deploying this binary REPLACES TF-A's BL31. PSCI stops
+# working. See docs/pi5-armstub-track-c.md for the integration plan.
+ARMSTUB_BUILD_DIR := build/armstub
+ARMSTUB_SRC      := kernel/arch/arm64/armstub8-2712.S
+ARMSTUB_ELF      := $(ARMSTUB_BUILD_DIR)/armstub8-2712.elf
+ARMSTUB_BIN      := $(ARMSTUB_BUILD_DIR)/armstub8-2712.bin
+ARMSTUB_CC       := aarch64-none-elf-gcc
+ARMSTUB_OBJCOPY  := aarch64-none-elf-objcopy
+
+.PHONY: armstub-pi5
+armstub-pi5: $(ARMSTUB_BIN)
+	@echo "Built $(ARMSTUB_BIN) ($$(stat -c%s $(ARMSTUB_BIN)) bytes)"
+	@echo "  Deploy: copy to Pi 5 boot partition + add 'armstub=armstub8-2712.bin' to config.txt"
+	@echo "  WARNING: replaces TF-A; see docs/pi5-armstub-track-c.md before booting"
+
+$(ARMSTUB_BIN): $(ARMSTUB_ELF)
+	@$(ARMSTUB_OBJCOPY) -O binary $< $@
+
+$(ARMSTUB_ELF): $(ARMSTUB_SRC) | $(ARMSTUB_BUILD_DIR)
+	@echo "Assembling Pi 5 armstub..."
+	@$(ARMSTUB_CC) -nostdlib -nostartfiles \
+		-Wl,--section-start=.text=0 \
+		-o $@ $<
+
+$(ARMSTUB_BUILD_DIR):
+	@mkdir -p $(ARMSTUB_BUILD_DIR)
+
+.PHONY: armstub-clean
+armstub-clean:
+	@rm -rf $(ARMSTUB_BUILD_DIR)
+
 $(KERNEL_BUILD_DIR)/Makefile:
 	@echo "Configuring kernel build..."
 	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_BUILD_DIR) \
