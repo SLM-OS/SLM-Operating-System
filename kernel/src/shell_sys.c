@@ -5650,15 +5650,34 @@ int cmd_timdiag(int argc, char *argv[])
  * (the hang IS proof that SCR_EL3 routing works) but operators who
  * run it without context will need to power-cycle.
  */
+/* Direct UART write — bypass kernel UART driver. Used by irqtest's
+ * unmask probe to localize hangs without depending on shell_printf
+ * (which uses uart_lock + may itself wedge). Pi 5 RP1 PL011 DR is
+ * at IRQTEST_UART_DR (0x1f00030000). The same address is reconstructed
+ * via movz/movk in vectors.S:STAGE25_TRACE_CHAR — keep the two in sync
+ * when the RP1 mapping changes. */
+#define IRQTEST_UART_DR  0x1f00030000ULL
+static inline void irqtest_putc(char c)
+{
+    *(volatile uint32_t *)IRQTEST_UART_DR = (uint32_t)(unsigned char)c;
+}
+static inline void irqtest_puts(const char *s)
+{
+    while (*s) {
+        irqtest_putc(*s++);
+    }
+}
+
 int cmd_irqtest(int argc, char *argv[])
 {
     (void)argc; (void)argv;
 
-    shell_puts("\r\n--- irqtest: brief DAIF.I unmask probe ---\r\n");
+    /* Header via direct UART writes only. */
+    irqtest_puts("\r\nirqtest probe:");
 
     uint32_t cpu = cpu_id();
     if (cpu >= MAX_CPUS) {
-        shell_printf("  bogus cpu_id %u\r\n", cpu);
+        irqtest_puts(" bogus cpu_id\r\n");
         return -1;
     }
 
@@ -5696,43 +5715,58 @@ int cmd_irqtest(int argc, char *argv[])
     uint64_t irq_before = vec->irq;
     uint64_t fiq_before = vec->fiq;
 
-    shell_printf("  CPU %u — diag_vec_counts before: irq=%lu fiq=%lu\r\n",
-                cpu, (unsigned long)irq_before, (unsigned long)fiq_before);
-
     uint64_t daif_save;
     __asm__ volatile("mrs %0, daif" : "=r"(daif_save));
-    shell_printf("  DAIF before: 0x%lx (D=%lu A=%lu I=%lu F=%lu)\r\n",
-                (unsigned long)daif_save,
-                (unsigned long)((daif_save >> 9) & 1),
-                (unsigned long)((daif_save >> 8) & 1),
-                (unsigned long)((daif_save >> 7) & 1),
-                (unsigned long)((daif_save >> 6) & 1));
+    irqtest_puts(" 1");  /* checkpoint 1: read DAIF */
 
     uint64_t freq;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
     uint64_t now;
     __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now));
     uint64_t target = now + (freq / 10000);  /* 100 µs */
+    irqtest_puts(" 2");  /* checkpoint 2: read CNTFRQ + CNTPCT */
 
     /* Unmask DAIF.I (#2 = I bit). FIQ stays masked unless caller
-     * passes "fiq" arg. */
-    if (argc >= 2 && argv[1] && strcmp(argv[1], "fiq") == 0) {
-        __asm__ volatile("msr daifclr, #3" ::: "memory"); /* I + F */
-    } else {
-        __asm__ volatile("msr daifclr, #2" ::: "memory"); /* I only */
+     * passes "fiq" arg.
+     *
+     * For the bisect test we ALSO support "noirq" to skip the daifclr
+     * entirely — confirms whether the daifclr itself or something
+     * else is the cause of the hang. */
+    bool skip_daifclr = (argc >= 2 && argv[1] && strcmp(argv[1], "noirq") == 0);
+    irqtest_puts(skip_daifclr ? " 3-skipped" : " 3");  /* checkpoint 3: about to daifclr */
+    if (!skip_daifclr) {
+        if (argc >= 2 && argv[1] && strcmp(argv[1], "fiq") == 0) {
+            __asm__ volatile("msr daifclr, #3" ::: "memory"); /* I + F */
+        } else {
+            __asm__ volatile("msr daifclr, #2" ::: "memory"); /* I only */
+        }
     }
+    irqtest_puts(" 4");  /* checkpoint 4: daifclr returned (or skipped) */
     __asm__ volatile("isb" ::: "memory");
+    irqtest_puts(" 5");  /* checkpoint 5: isb returned */
 
-    /* Spin briefly. Both `now` and `target` are u64; use the
-     * subtract-and-compare pattern to avoid wraparound surprises. */
+    /* Spin briefly with periodic trace dots so we can see how far
+     * the spin gets before hang vs. completion. Both `now` and
+     * `target` are u64; use the subtract-and-compare pattern to
+     * avoid wraparound surprises. */
+    int dot_counter = 0;
     do {
         __asm__ volatile("yield");
         __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now));
+        /* Emit '.' every ~256 iterations of the spin so we know if
+         * the spin is making forward progress. */
+        if ((++dot_counter & 0xFF) == 0) {
+            irqtest_putc('.');
+        }
     } while (now < target);
+
+    irqtest_puts(" 6");  /* checkpoint 6: spin completed */
 
     /* Re-mask. */
     __asm__ volatile("msr daif, %0" :: "r"(daif_save));
     __asm__ volatile("isb" ::: "memory");
+
+    irqtest_puts(" 7");  /* checkpoint 7: re-mask done */
 
     uint64_t irq_after = vec->irq;
     uint64_t fiq_after = vec->fiq;
