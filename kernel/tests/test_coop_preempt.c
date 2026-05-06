@@ -135,17 +135,26 @@ static void test_slm_preempt_point_callable(void)
 /*
  * On COOP_PREEMPT platforms (Pi 5, Jetson) a tight loop calling
  * slm_preempt_point() should observe schedule() entries via the slow
- * path at roughly the TIMER_HZ rate (every ~10 ms). Verifies the
- * Track A contract: an in-tree CPU-bound loop that calls the macro
- * cooperates with the scheduler instead of monopolizing the CPU.
+ * path at roughly the TIMER_HZ rate. Verifies the Track A contract:
+ * an in-tree CPU-bound loop that calls the macro cooperates with
+ * the scheduler instead of monopolizing the CPU.
  *
- * Bound the loop by wall-clock (50 ms) and assert the counter
- * advanced at least 4 times — same slack as the existing
- * test_pit_ticks_advances_over_time check.
+ * Bound the loop by wall-clock (PREEMPT_POINT_TEST_WINDOW_MS) and
+ * assert the slow-path counter advanced by at least
+ * PREEMPT_POINT_TEST_MIN_SCHED — one less than the integer quantum
+ * count over the window, allowing one missed boundary (same slack
+ * as the existing test_pit_ticks_advances_over_time check).
  */
 #define PREEMPT_POINT_TEST_WINDOW_MS  50UL
 #define PREEMPT_POINT_TEST_MIN_SCHED  ((PREEMPT_POINT_TEST_WINDOW_MS / \
                                        (1000UL / TIMER_HZ)) - 1)
+
+/* Catch future TIMER_HZ / WINDOW_MS combinations where the window
+ * doesn't span at least two quanta — without this guard the integer
+ * subtraction in MIN_SCHED would underflow a UL and the assertion
+ * would silently demand ~1.8e19 schedule entries. */
+_Static_assert((PREEMPT_POINT_TEST_WINDOW_MS / (1000UL / TIMER_HZ)) >= 2,
+    "PREEMPT_POINT_TEST_WINDOW_MS must span >= 2 TIMER_HZ quanta");
 
 static void test_slm_preempt_point_drives_schedule(void)
 {
