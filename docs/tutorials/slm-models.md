@@ -144,7 +144,9 @@ SD-card staging isn't viable for Qwen-class models on this
 platform.
 
 ```bash
-# On the dev host, after `scripts/fetch-slm.sh`:
+# On the dev host, after `scripts/fetch-slm.sh`. Substitute your
+# Jetson's IP for 192.168.4.100 (the one labctl reports for
+# `jetson-nano-1` in the SLM-OS lab).
 python3 scripts/tools/slm-xload.py 192.168.4.100 qwen \
     build/slm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf
 ```

@@ -50,7 +50,17 @@ def recv_until(sock: socket.socket, needle: bytes, timeout: float) -> bytes:
     """Read from `sock` until `needle` appears in the buffer or `timeout`
     seconds elapse. Returns the full buffer received so far on success;
     raises `TimeoutError` if the deadline passes without a match, or
-    `EOFError` if the peer closed first."""
+    `EOFError` if the peer closed first.
+
+    Note: bytes received past `needle` in the same `recv()` call are
+    discarded along with the local buffer when the function returns.
+    Currently safe because each consecutive call in this script waits
+    for a reply that the kernel emits with a long-enough gap (post-
+    upload `SLM-XLOAD done`, post-load info banner, then prompt) that
+    they don't get coalesced into one TCP segment. If a future caller
+    adds two replies that could land in one read, the leftover would
+    silently vanish — refactor to a closure-level buffer at that
+    point."""
     buf = bytearray()
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -97,14 +107,18 @@ def stream_payload(sock: socket.socket, path: str, size: int) -> None:
                 elapsed = now - t0
                 rate_mb = sent / elapsed / 1024 / 1024 if elapsed > 0 else 0.0
                 pct = 100.0 * sent / size
-                eta = (
-                    (size - sent) / max(1.0, rate_mb * 1024 * 1024)
+                # Render the eta as "?" when no data has flowed yet —
+                # printing "ETA 0s" in that case suggests "almost done"
+                # which is exactly the opposite of what the user
+                # actually sees. Matches `slm-put.py`'s convention.
+                eta_str = (
+                    f"{int((size - sent) / (rate_mb * 1024 * 1024))}s"
                     if rate_mb > 0
-                    else 0
+                    else "?"
                 )
                 print(
                     f"  {sent}/{size} ({pct:.1f}%) | "
-                    f"{rate_mb:.2f} MB/s | ETA {int(eta)}s",
+                    f"{rate_mb:.2f} MB/s | ETA {eta_str}",
                     flush=True,
                 )
                 last_print = now
@@ -144,6 +158,37 @@ def main() -> int:
         ),
     )
     args = ap.parse_args()
+
+    # Name validation. The kernel's `slm xload` arg parser splits on
+    # whitespace and the registry caps names at SLM_MODEL_NAME_LEN-1
+    # (= 31) bytes. A too-long name is silently truncated; a name
+    # containing whitespace or CR/LF/NUL would split the command line
+    # and end up failing the kernel-side `shell_parse_uint` check on
+    # the wrong arg with an opaque error. Reject both up front so the
+    # user sees a clear message instead.
+    name_bytes = args.name.encode("utf-8")
+    if len(name_bytes) == 0:
+        print("[slm-xload] name must be non-empty", file=sys.stderr)
+        return 1
+    if len(name_bytes) > 31:
+        print(
+            f"[slm-xload] name '{args.name}' too long "
+            f"({len(name_bytes)} bytes, max 31)",
+            file=sys.stderr,
+        )
+        return 1
+    bad_byte = next(
+        (b for b in name_bytes if b in (0x00, 0x09, 0x0A, 0x0D, 0x20)),
+        None,
+    )
+    if bad_byte is not None:
+        print(
+            f"[slm-xload] name '{args.name}' contains a forbidden byte "
+            f"(0x{bad_byte:02x}); the kernel shell parser splits on "
+            "whitespace and rejects embedded NUL/CR/LF",
+            file=sys.stderr,
+        )
+        return 1
 
     if not os.path.isfile(args.path):
         print(f"[slm-xload] {args.path}: not a regular file", file=sys.stderr)

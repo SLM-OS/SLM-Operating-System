@@ -725,4 +725,4 @@ reserve map vs root-node `memreserve` property, `/chosen` entropy,
 
 ---
 
-*Last updated: December 2025*
+*Last updated: May 2026*
