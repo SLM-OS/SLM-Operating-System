@@ -132,32 +132,49 @@ For a Qwen2.5-1.5B-Instruct GGUF the output should report
 `qwen2.embedding_length = 1536`, `qwen2.attention.head_count = 12`,
 `qwen2.attention.head_count_kv = 2`, vocab size 152 064.
 
-### Step 3: Stage onto the Jetson SD card
+### Step 3: Get the GGUF onto the running SLM-OS
 
-GGUFs are ~1 GB; they live on the LittleFS partition mounted at
-`/mnt/files`, not embedded in the kernel image. All SD-card writes
-go through labctl per `CLAUDE.md` "labctl is the only hardware
-interface" — never `mount` / `cp` / `umount` directly.
-
-The labctl workflow at a high level: switch the SDWire to the host
-side (`sdwire_to_host`), place the GGUF onto the LittleFS partition
-via the appropriate labctl `sdwire` subcommand, switch the SDWire
-back to the DUT (`sdwire_to_dut`), and reboot:
+GGUFs are ~1 GB. On Jetson the recommended path is `slm xload`:
+stream the GGUF from the dev host straight into a single PMM
+buffer over the telnet shell, no SD-card / LittleFS round-trip.
+The Jetson's 8 GB system can produce only one order-19 (2 GB)
+buddy block at a time, and the LittleFS-based `slm load` path
+needs two (one to hold the file, one for the registry copy) — so
+SD-card staging isn't viable for Qwen-class models on this
+platform.
 
 ```bash
-labctl power cycle jetson-nano-1
+# On the dev host, after `scripts/fetch-slm.sh`:
+python3 scripts/tools/slm-put.py jetson-nano-1 \
+    build/slm-models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
+    --target slm:qwen
 ```
 
-`docs/lab-operations.md` documents the current sdwire subcommand
-syntax (the command names have changed across labctl releases — pin
-to the version installed on the lab host before scripting any
-automation around them).
+The reference client wraps `slm xload <name> <total>` over the
+existing telnet binary protocol (same wire format as `xput-bin`).
+Peak kernel memory == file size; no second copy.
+
+For platforms where the SD card / LittleFS path fits the GGUF
+(smaller models, or a future multi-block PMM allocator), the
+`/mnt/files`-staged `slm load <path>` workflow still works and
+labctl is still the only sanctioned SD-card interface.
 
 ### Step 4: Load from the SLM-OS shell
 
-Once the M7 milestone lands, the `slm load` shell verb opens the GGUF
-through VFS, parses it, copies weight tensors into the weight pool,
-and registers the model:
+After `slm xload` completes the model is already registered;
+`slm list` shows it and `slm launch <handle>` opens a session:
+
+```
+slmos> slm xload qwen <total_bytes>
+SLM-XLOAD ready name=qwen total=<total_bytes>
+... (1 GB streamed) ...
+SLM-XLOAD done received=<total_bytes>
+[slm] loaded handle=0  arch=qwen2  blocks=28 hidden=1536
+      head=12/2 head_dim=128 vocab=152064 ctx=32768 source=1014 MB
+```
+
+For platforms that can fit `slm load`'s alloc+copy footprint, the
+file-path variant produces the same result:
 
 ```
 slmos> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
@@ -165,19 +182,16 @@ slmos> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
 [slm] loaded handle=0  qwen2  1.54 B params  weights=1014 MB  load=412 ms
 ```
 
-Until M7 ships, the load path is exercised through the integration
-tests in `runtime/src/slm/tests/` and the `host-tools/gguf-inspect` CLI.
-
 For the full launch / prompt flow, see `docs/specs/slm-integration.md`
 §"CLI Surface (Shell)". For the spec memory plan, KV-cache sizing,
 and tensor-core utilization targets, see the rest of that document.
 
 ---
 
-## Verifying End-to-End Once M7 Lands
+## Verifying End-to-End
 
 ```
-slmos> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
+slmos> slm xload qwen <total_bytes>           # Jetson — streams over telnet
 slmos> slm launch 0 --ctx 4096 --gpu auto
 slmos> slm prompt 0 "Explain virtual memory in two sentences."
 ```

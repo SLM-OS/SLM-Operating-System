@@ -19,7 +19,12 @@
  * Memory Configuration
  * ============================================================================ */
 
-#define STACK_SIZE          0x40000UL       /* 256 KB per stack — needed for SLM forward (Qwen2.5-1.5B) on top of ONNX parsing */
+/* 256 KB per stack — needed for SLM forward (Qwen2.5-1.5B) on top
+ * of ONNX parsing. Worst-case PMM cost is `MAX_TASKS * STACK_SIZE`
+ * = 64 * 256 KB = 16 MB; comfortably within budget on every shipping
+ * platform (8 GB Jetson, 8 GB Pi 5, 16 GB x86-64, 1 GB QEMU virt).
+ * Re-check this if MAX_TASKS grows. */
+#define STACK_SIZE          0x40000UL
 
 /* ============================================================================
  * Scheduler Configuration

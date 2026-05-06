@@ -291,6 +291,85 @@ static int slm_load(int argc, char *argv[])
 }
 
 /*
+ * Read at most `total` bytes from the active shell session into
+ * `buf`. Returns 0 on success (`buf` filled with `total` bytes) and a
+ * negative error code on failure: -1 for peer close mid-stream, -2 for
+ * a 5-second stall with no incoming bytes, -3 for an internal arg
+ * error (zero `total`).
+ *
+ * Caller is responsible for switching the session into binary mode
+ * before calling and back out after. This helper does NOT touch the
+ * binary-mode flag because callers (`slm xload` here, future stream
+ * loaders) have varying needs around when the protocol header is
+ * exchanged relative to the mode switch.
+ *
+ * Reads in 128 KB slices to amortise per-call overhead; matches the
+ * `xput-bin` staging-buffer size in `kernel/src/shell_fs.c` so a
+ * 1 GB upload stays at ~8K read calls.
+ */
+#define SLM_XLOAD_CHUNK_BYTES   131072u
+static int slm_xload_drain_session(uint8_t *buf, uint32_t total)
+{
+    if (total == 0) {
+        return -3;
+    }
+    const uint64_t freq = timer_get_frequency();
+    const uint64_t stall_ticks = freq ? (freq * 5ULL) : 0;  /* 5 s */
+
+    uint32_t received = 0;
+    uint64_t last_progress = timer_get_count();
+    while (received < total) {
+        uint32_t want = total - received;
+        if (want > SLM_XLOAD_CHUNK_BYTES) {
+            want = SLM_XLOAD_CHUNK_BYTES;
+        }
+
+        int n = shell_session_read_raw((char *)(buf + received), (int)want);
+        if (n < 0) {
+            shell_printf("SLM-XLOAD err received=%lu reason=closed\r\n",
+                         (unsigned long)received);
+            return -1;
+        }
+        if (n > 0) {
+            received += (uint32_t)n;
+            last_progress = timer_get_count();
+            continue;
+        }
+        if (stall_ticks &&
+            (timer_get_count() - last_progress) > stall_ticks) {
+            shell_printf("SLM-XLOAD err received=%lu reason=stall\r\n",
+                         (unsigned long)received);
+            return -2;
+        }
+    }
+    return 0;
+}
+
+/* Print the post-load info banner that mirrors `slm load`'s success
+ * output. Pulled into its own helper so the main `slm xload` body
+ * stays inside the 80-line guideline. */
+static void slm_xload_print_loaded(int idx)
+{
+    SlmModelInfoC mi;
+    if (rust_slm_get_info((uint32_t)idx, &mi) != 0) {
+        shell_printf("[slm] loaded handle=%d (info unavailable)\r\n", idx);
+        return;
+    }
+    shell_printf("[slm] loaded handle=%d  arch=", idx);
+    fixed_name_print(mi.architecture, sizeof(mi.architecture));
+    shell_printf("  blocks=%lu hidden=%lu head=%lu/%lu head_dim=%lu vocab=%lu "
+                 "ctx=%lu source=%lu MB\r\n",
+                 (unsigned long)mi.block_count,
+                 (unsigned long)mi.embedding_length,
+                 (unsigned long)mi.head_count,
+                 (unsigned long)mi.head_count_kv,
+                 (unsigned long)mi.head_dim,
+                 (unsigned long)mi.vocab_size,
+                 (unsigned long)mi.context_length,
+                 (unsigned long)(mi.source_bytes / (1024u * 1024u)));
+}
+
+/*
  * slm xload <name> <total>
  *
  * Streaming GGUF load that bypasses the LittleFS round-trip used by
@@ -362,41 +441,13 @@ static int slm_xload(int argc, char *argv[])
     shell_printf("SLM-XLOAD ready name=%s total=%lu\r\n",
                  name_buf, (unsigned long)total);
 
-    const uint64_t freq = timer_get_frequency();
-    const uint64_t stall_ticks = freq ? (freq * 5ULL) : 0;  /* 5 s */
-
-    uint32_t received = 0;
-    uint64_t last_progress = timer_get_count();
-    while (received < total) {
-        uint32_t want = total - received;
-        if (want > 131072u) want = 131072u;
-
-        int n = shell_session_read_raw((char *)(buf + received), (int)want);
-        if (n < 0) {
-            shell_session_set_binary_mode(false);
-            pmm_free_pages(buf, pages);
-            shell_printf("SLM-XLOAD err received=%lu reason=closed\r\n",
-                         (unsigned long)received);
-            return -1;
-        }
-        if (n > 0) {
-            received += (uint32_t)n;
-            last_progress = timer_get_count();
-            continue;
-        }
-        if (stall_ticks &&
-            (timer_get_count() - last_progress) > stall_ticks) {
-            shell_session_set_binary_mode(false);
-            pmm_free_pages(buf, pages);
-            shell_printf("SLM-XLOAD err received=%lu reason=stall\r\n",
-                         (unsigned long)received);
-            return -1;
-        }
-    }
-
+    int rc = slm_xload_drain_session(buf, total);
     shell_session_set_binary_mode(false);
-    shell_printf("SLM-XLOAD done received=%lu\r\n",
-                 (unsigned long)received);
+    if (rc != 0) {
+        pmm_free_pages(buf, pages);
+        return -1;
+    }
+    shell_printf("SLM-XLOAD done received=%lu\r\n", (unsigned long)total);
 
     /* Transfer ownership of the streaming buffer to the registry. On
      * success the registry will free the pages on `slm unload`; we
@@ -409,31 +460,14 @@ static int slm_xload(int argc, char *argv[])
      * for a 1.04 GB Q4_K_M GGUF even though the file itself fits in
      * available PMM. */
     int idx = rust_slm_load_take_pages((const uint8_t *)name_buf,
-                                       buf, pages, (size_t)received);
+                                       buf, pages, (size_t)total);
     if (idx < 0) {
         pmm_free_pages(buf, pages);
         shell_puts("slm xload: failed to parse stream "
                    "(not a GGUF or unsupported architecture)\r\n");
         return -1;
     }
-
-    SlmModelInfoC mi;
-    if (rust_slm_get_info((uint32_t)idx, &mi) != 0) {
-        shell_printf("[slm] loaded handle=%d (info unavailable)\r\n", idx);
-        return 0;
-    }
-    shell_printf("[slm] loaded handle=%d  arch=", idx);
-    fixed_name_print(mi.architecture, sizeof(mi.architecture));
-    shell_printf("  blocks=%lu hidden=%lu head=%lu/%lu head_dim=%lu vocab=%lu "
-                 "ctx=%lu source=%lu MB\r\n",
-                 (unsigned long)mi.block_count,
-                 (unsigned long)mi.embedding_length,
-                 (unsigned long)mi.head_count,
-                 (unsigned long)mi.head_count_kv,
-                 (unsigned long)mi.head_dim,
-                 (unsigned long)mi.vocab_size,
-                 (unsigned long)mi.context_length,
-                 (unsigned long)(mi.source_bytes / (1024u * 1024u)));
+    slm_xload_print_loaded(idx);
     return 0;
 }
 

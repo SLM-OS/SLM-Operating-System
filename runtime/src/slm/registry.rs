@@ -317,18 +317,27 @@ impl Drop for SpinGuard {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Attempt to load a GGUF buffer into the SLM registry. On success
-/// returns the slot index; on error a typed [`LoadError`].
+/// Parse + validate a GGUF byte slice and emit the metadata pieces
+/// that go into a [`LoadedSlm`]. Both load entry points
+/// ([`load_slm`] copying-in and [`load_slm_take_pages`]
+/// taking-ownership) share the same parse/validate/tokenize/
+/// snapshot pipeline; this helper is the single place where it lives
+/// so a future quant or arch addition only has one site to update.
 ///
-/// M5.3.1 owns the source bytes in the weight pool, builds the
-/// [`Bbpe`] tokenizer, and snapshots tensor descriptors so the
-/// caller can drop `data` immediately after this call returns.
-///
-/// `name` is a UTF-8 byte slice (not null-terminated) used for
-/// display in `slm list` / `slm info`. It's clamped to
-/// [`SLM_NAME_LEN`] - 1 bytes; truncation is silent and recorded as
-/// a UART warning.
-pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
+/// The `tag` byte slice is included in the UART error logs so a
+/// failure in the take-pages path is distinguishable from a failure
+/// in the copy path during post-mortem.
+struct ParsedGguf {
+    info: ArchInfo,
+    vocab_size: u32,
+    tensor_count: u32,
+    source_bytes: u32,
+    tokenizer: Bbpe,
+    tensors: Vec<OwnedTensorInfo>,
+    tensor_data_start: usize,
+}
+
+fn parse_gguf_for_registry(data: &[u8], tag: &[u8]) -> Result<ParsedGguf, LoadError> {
     if data.len() > MAX_PLAUSIBLE_GGUF_BYTES {
         // Reject implausibly large GGUFs early. Matches the M7 shell
         // cap; also stops a u32 source_bytes overflow path with one
@@ -339,12 +348,20 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     let gguf = Gguf::parse(data).map_err(map_gguf_err)?;
     let info = gguf.validate_for_inference().map_err(map_gguf_err)?;
     let vocab_size = vocab_size_of(&gguf).inspect_err(|_| {
-        crate::log::log_error(b"[slm] load: vocab_size_of failed (CorruptedData)\0");
+        // Emit the tag at runtime so the same helper produces
+        // distinguishable log lines for `load` vs `take_pages` paths.
+        unsafe {
+            kernel_ffi::uart_puts(b"[slm] \0".as_ptr());
+            kernel_ffi::uart_puts(tag.as_ptr());
+            kernel_ffi::uart_puts(
+                b": vocab_size_of failed (CorruptedData)\n\0".as_ptr(),
+            );
+        }
     })?;
     let tensor_count = u32::try_from(gguf.tensor_count())
         .map_err(|_| LoadError::CorruptedData)?;
     // `data.len()` is already bounded above by `MAX_PLAUSIBLE_GGUF_BYTES`
-    // (1 GiB — see the const above for why), so the u32 cast is
+    // (2 GiB — see the const above for why), so the u32 cast is
     // provably loss-free. Earlier revisions had a saturating fallback
     // for > 4 GiB inputs; the M5.3.1 review pointed out it was dead
     // code, and the M5.3.3 cap-tighten makes it doubly so.
@@ -354,7 +371,13 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
     // tokens/merges array — surface as CorruptedData rather than a
     // separate variant, mirroring the existing GgufError mapping.
     let tokenizer = Bbpe::from_gguf(&gguf).map_err(|_| {
-        crate::log::log_error(b"[slm] load: Bbpe::from_gguf failed (CorruptedData)\0");
+        unsafe {
+            kernel_ffi::uart_puts(b"[slm] \0".as_ptr());
+            kernel_ffi::uart_puts(tag.as_ptr());
+            kernel_ffi::uart_puts(
+                b": Bbpe::from_gguf failed (CorruptedData)\n\0".as_ptr(),
+            );
+        }
         LoadError::CorruptedData
     })?;
 
@@ -370,6 +393,34 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
             offset: t.offset,
         });
     }
+    // Drop the borrowed parser before returning so the caller's
+    // source slice is no longer aliased.
+    drop(gguf);
+
+    Ok(ParsedGguf {
+        info,
+        vocab_size,
+        tensor_count,
+        source_bytes,
+        tokenizer,
+        tensors,
+        tensor_data_start,
+    })
+}
+
+/// Attempt to load a GGUF buffer into the SLM registry. On success
+/// returns the slot index; on error a typed [`LoadError`].
+///
+/// M5.3.1 owns the source bytes in the weight pool, builds the
+/// [`Bbpe`] tokenizer, and snapshots tensor descriptors so the
+/// caller can drop `data` immediately after this call returns.
+///
+/// `name` is a UTF-8 byte slice (not null-terminated) used for
+/// display in `slm list` / `slm info`. It's clamped to
+/// [`SLM_NAME_LEN`] - 1 bytes; truncation is silent and recorded as
+/// a UART warning.
+pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
+    let parsed = parse_gguf_for_registry(data, b"load\0")?;
 
     // Allocate the GGUF buffer directly from the PMM. The Phase-3
     // `mm::alloc_weights` is single-block-only (fixed 2 MB) and
@@ -418,23 +469,18 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         core::ptr::copy_nonoverlapping(data.as_ptr(), weight_ptr.as_ptr(), data.len());
     }
 
-    // Drop the temporary `Gguf<'a>` parser before stashing the entry
-    // — its borrowed slices into `data` go out of scope here, so the
-    // caller's source buffer is no longer aliased.
-    drop(gguf);
-
     let entry = LoadedSlm {
         name: clamp_name(name),
-        info,
-        vocab_size,
-        source_bytes,
-        tensor_count,
+        info: parsed.info,
+        vocab_size: parsed.vocab_size,
+        source_bytes: parsed.source_bytes,
+        tensor_count: parsed.tensor_count,
         weight_pages: Some(weight_ptr),
         weight_pages_count: pages_u32,
         weight_data_len: data.len(),
-        tokenizer: Some(tokenizer),
-        tensors,
-        tensor_data_start,
+        tokenizer: Some(parsed.tokenizer),
+        tensors: parsed.tensors,
+        tensor_data_start: parsed.tensor_data_start,
     };
     match insert_entry(entry) {
         Ok(idx) => Ok(idx),
@@ -478,9 +524,6 @@ pub fn load_slm_take_pages(
     pages: usize,
     data_len: usize,
 ) -> Result<usize, LoadError> {
-    if data_len > MAX_PLAUSIBLE_GGUF_BYTES {
-        return Err(LoadError::ModelTooLarge);
-    }
     let pages_u32 = u32::try_from(pages).map_err(|_| LoadError::ModelTooLarge)?;
 
     // SAFETY: The caller's contract requires `weight_ptr` to point to
@@ -489,44 +532,20 @@ pub fn load_slm_take_pages(
     // the duration of this call.
     let data: &[u8] = unsafe { core::slice::from_raw_parts(weight_ptr.as_ptr(), data_len) };
 
-    let gguf = Gguf::parse(data).map_err(map_gguf_err)?;
-    let info = gguf.validate_for_inference().map_err(map_gguf_err)?;
-    let vocab_size = vocab_size_of(&gguf).inspect_err(|_| {
-        crate::log::log_error(b"[slm] take_pages: vocab_size_of failed (CorruptedData)\0");
-    })?;
-    let tensor_count = u32::try_from(gguf.tensor_count())
-        .map_err(|_| LoadError::CorruptedData)?;
-    let source_bytes = data.len() as u32;
-
-    let tokenizer = Bbpe::from_gguf(&gguf).map_err(|_| {
-        crate::log::log_error(b"[slm] take_pages: Bbpe::from_gguf failed (CorruptedData)\0");
-        LoadError::CorruptedData
-    })?;
-
-    let tensor_data_start = gguf.tensor_data_start();
-    let mut tensors: Vec<OwnedTensorInfo> = Vec::with_capacity(gguf.tensors().len());
-    for t in gguf.tensors() {
-        tensors.push(OwnedTensorInfo {
-            name: String::from(t.name),
-            dims: t.dims.clone(),
-            ggml_type: t.ggml_type.0,
-            offset: t.offset,
-        });
-    }
-    drop(gguf);
+    let parsed = parse_gguf_for_registry(data, b"take_pages\0")?;
 
     let entry = LoadedSlm {
         name: clamp_name(name),
-        info,
-        vocab_size,
-        source_bytes,
-        tensor_count,
+        info: parsed.info,
+        vocab_size: parsed.vocab_size,
+        source_bytes: parsed.source_bytes,
+        tensor_count: parsed.tensor_count,
         weight_pages: Some(weight_ptr),
         weight_pages_count: pages_u32,
         weight_data_len: data_len,
-        tokenizer: Some(tokenizer),
-        tensors,
-        tensor_data_start,
+        tokenizer: Some(parsed.tokenizer),
+        tensors: parsed.tensors,
+        tensor_data_start: parsed.tensor_data_start,
     };
     insert_entry(entry)
 }

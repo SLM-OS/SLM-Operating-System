@@ -103,6 +103,68 @@ static void test_slm_shell_list_empty_registry(void)
 }
 
 /* ============================================================================
+ * `slm xload` argument-validation coverage
+ * ----------------------------------------------------------------------------
+ * The streaming body of `slm xload` requires a live telnet session in
+ * binary mode and can't be exercised under Unity, but the verb's
+ * argument-parse + cap-check guards run synchronously before any IO
+ * begins. Cover each negative branch that returns before the read
+ * loop so a future regression in dispatch / parse shows up in CI
+ * instead of on hardware. Each case must NOT alter the registry; we
+ * assert that with a `rust_slm_count()` check after.
+ * ========================================================================= */
+
+/* `slm xload` with no name/total → -1 (usage). */
+static void test_slm_shell_xload_missing_args(void)
+{
+    rust_slm_test_reset();
+    int ret = shell_execute("slm xload");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    TEST_ASSERT_EQUAL_UINT32(0u, rust_slm_count());
+}
+
+/* `slm xload qwen` with no total → -1 (still missing args). */
+static void test_slm_shell_xload_missing_total(void)
+{
+    rust_slm_test_reset();
+    int ret = shell_execute("slm xload qwen");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    TEST_ASSERT_EQUAL_UINT32(0u, rust_slm_count());
+}
+
+/* `slm xload qwen abc` → -1 (parse_uint rejects non-digits). */
+static void test_slm_shell_xload_invalid_total(void)
+{
+    rust_slm_test_reset();
+    int ret = shell_execute("slm xload qwen abc");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    TEST_ASSERT_EQUAL_UINT32(0u, rust_slm_count());
+}
+
+/* `slm xload qwen 0` → -1 (total must be > 0; otherwise we'd
+ * pmm_alloc_pages(0) and stream into a zero-size buffer). */
+static void test_slm_shell_xload_zero_total(void)
+{
+    rust_slm_test_reset();
+    int ret = shell_execute("slm xload qwen 0");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    TEST_ASSERT_EQUAL_UINT32(0u, rust_slm_count());
+}
+
+/* `slm xload qwen <too-large>` → -1 (cap check via
+ * rust_slm_max_gguf_bytes; declines BEFORE pmm_alloc_pages, so we
+ * don't actually try to grab a 4 GB buddy block in the test.) */
+static void test_slm_shell_xload_oversize_total(void)
+{
+    rust_slm_test_reset();
+    /* uint32 max is 4294967295; the registry cap is 2 GiB, so this
+     * is comfortably above and exercises the cap branch. */
+    int ret = shell_execute("slm xload qwen 4000000000");
+    TEST_ASSERT_EQUAL_INT(-1, ret);
+    TEST_ASSERT_EQUAL_UINT32(0u, rust_slm_count());
+}
+
+/* ============================================================================
  * Suite Runner
  * ========================================================================= */
 
@@ -116,6 +178,11 @@ int test_suite_slm_shell(void)
     RUN_TEST(test_slm_shell_no_verb_prints_usage);
     RUN_TEST(test_slm_shell_info_empty_slot);
     RUN_TEST(test_slm_shell_list_empty_registry);
+    RUN_TEST(test_slm_shell_xload_missing_args);
+    RUN_TEST(test_slm_shell_xload_missing_total);
+    RUN_TEST(test_slm_shell_xload_invalid_total);
+    RUN_TEST(test_slm_shell_xload_zero_total);
+    RUN_TEST(test_slm_shell_xload_oversize_total);
 
     return (int)UnityEnd();
 }

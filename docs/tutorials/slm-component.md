@@ -42,14 +42,24 @@ counters.
 
 ## Step 1: Load a Model
 
-The runner requires an SLM in slot 0 of the registry. Load one via the
-shell `slm load` verb before starting the component:
+The runner requires an SLM in slot 0 of the registry. On Jetson the
+recommended path is `slm xload`, which streams the GGUF straight
+into a single PMM buffer (see `docs/setup.md` §"Jetson SD-Card
+Layout" for why the LittleFS-staged path doesn't fit a Qwen-class
+model on 8 GB). On platforms with enough contiguous PMM the
+file-path `slm load` form still works.
 
 ```
+# Jetson (streamed):
+SLM-OS> slm xload qwen <total_bytes>
+[INFO] SLM 'qwen' loaded at slot 0 (28 layers, vocab 152064)
+
+# Or, on a platform with the alloc+copy headroom:
 SLM-OS> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
 [INFO] SLM 'qwen2.5-1.5b' loaded at slot 0 (28 layers, vocab 152064)
+
 SLM-OS> slm list
-[0] qwen2.5-1.5b  arch=qwen2  ctx=32768  vocab=152064
+[0] qwen  arch=qwen2  ctx=32768  vocab=152064
 ```
 
 If the runner is started before any model is loaded, the component
@@ -57,7 +67,7 @@ exits cleanly after logging:
 
 ```
 [slm-runner] ERROR: no SLM loaded
-[slm-runner] Load one with: slm load /mnt/files/<model>.gguf
+[slm-runner] Load one with: slm xload <name> <bytes>
 ```
 
 ---

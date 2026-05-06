@@ -2103,7 +2103,11 @@ void schedule(void)
      * spelunking through corrupted task state. */
     if (current && current->stack_base && current->stack_top) {
         uint64_t live_sp;
-        __asm__ volatile("mov %0, sp" : "=r"(live_sp));
+#if defined(PLATFORM_X86_64)
+        __asm__ volatile("mov %%rsp, %0" : "=r"(live_sp));
+#else
+        __asm__ volatile("mov %0, sp"   : "=r"(live_sp));
+#endif
         uintptr_t base = (uintptr_t)current->stack_base;
         uintptr_t top  = (uintptr_t)current->stack_top;
         if (live_sp < base || live_sp > top) {

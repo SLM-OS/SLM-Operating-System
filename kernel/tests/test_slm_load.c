@@ -14,6 +14,7 @@
 
 #include "unity.h"
 #include "../include/slm_ffi.h"
+#include "../include/pmm.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -171,6 +172,128 @@ static void test_get_info_rejects_empty_slot(void)
 }
 
 /* ============================================================================
+ * `rust_slm_load_take_pages` ownership-transfer FFI tests
+ * ----------------------------------------------------------------------------
+ * The streaming GGUF load path (`slm xload` shell verb) hands a
+ * pre-allocated PMM buffer to the registry instead of letting the
+ * registry allocate + copy. Each test below pins one half of the
+ * ownership contract:
+ *   - Success: registry owns the buffer; `unload` frees it. We don't
+ *     have a heap-leak detector in-tree, so we re-load into the same
+ *     slot afterward to prove the slot is actually free (not just
+ *     vacated by `unload` while the buffer leaked).
+ *   - Failure: registry leaves the buffer with the caller; we have
+ *     to call `pmm_free_pages` ourselves. We exercise this by
+ *     submitting non-GGUF bytes.
+ *   - Argument guards: null/zero rejection mirrors `rust_slm_load`.
+ * ========================================================================= */
+
+/* Round-trip: load via take_pages, get_info, unload. After unload the
+ * slot should be reusable — proven by a second `rust_slm_load` into
+ * the same slot succeeding. If the take_pages success path failed to
+ * register the buffer with the registry, this second load would
+ * collide; if `unload` failed to release the take_pages allocation,
+ * we'd notice on cumulative test runs (no leak detector but the
+ * round-trip doesn't accumulate state). */
+static void test_take_pages_round_trip_and_unload(void)
+{
+    rust_slm_test_reset();
+    size_t n = 0; build_fixture(64, &n);
+
+    /* Allocate PMM-backed pages and copy the fixture into them.
+     * Mirrors what `slm xload` does after streaming bytes off the
+     * shell session. */
+    size_t pages = (n + 4095u) / 4096u;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+    TEST_ASSERT_NOT_NULL(buf);
+    memcpy(buf, fixture_buf, n);
+
+    int idx = rust_slm_load_take_pages(
+        (const uint8_t *)"qwen-stream", buf, pages, n);
+    TEST_ASSERT_TRUE(idx >= 0);
+    /* DO NOT call pmm_free_pages(buf, pages) here — registry owns. */
+
+    SlmModelInfoC info;
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_get_info((uint32_t)idx, &info));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(info.architecture, "qwen2", 5));
+    TEST_ASSERT_EQUAL_INT(0, memcmp(info.name, "qwen-stream", 11));
+    TEST_ASSERT_EQUAL_UINT32(64u, info.vocab_size);
+
+    /* Unload returns the slot — registry frees its take_pages buffer. */
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)idx));
+
+    /* Re-load via the copying path into the same slot: succeeds only
+     * if the take_pages buffer was actually released and the slot is
+     * back in the free pool. */
+    int idx_b = rust_slm_load((const uint8_t *)"reuse", fixture_buf, n);
+    TEST_ASSERT_EQUAL_INT(idx, idx_b);
+    TEST_ASSERT_EQUAL_INT(0, rust_slm_unload((uint32_t)idx_b));
+}
+
+/* Failure path: caller still owns the buffer when take_pages returns
+ * -1. We hand in non-GGUF bytes so parse rejects, then free the PMM
+ * pages ourselves. If the registry had erroneously freed them on the
+ * error path (mismatched-double-free contract), this `pmm_free_pages`
+ * call would corrupt the buddy free list and the next allocation
+ * would either fail or hand back the same address — both detectable
+ * by a follow-up alloc round trip. */
+static void test_take_pages_caller_frees_on_failure(void)
+{
+    rust_slm_test_reset();
+
+    size_t pages = 1;  /* 4 KB is plenty for a junk header. */
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+    TEST_ASSERT_NOT_NULL(buf);
+    memset(buf, 0, 4096);
+    memcpy(buf, "NOTAGGUF", 8);
+
+    int idx = rust_slm_load_take_pages(
+        (const uint8_t *)"junk", buf, pages, 64);
+    TEST_ASSERT_EQUAL_INT(-1, idx);
+    TEST_ASSERT_EQUAL_UINT32(0u, rust_slm_count());
+
+    /* Caller MUST free on -1. If the contract were inverted, this
+     * would double-free. */
+    pmm_free_pages(buf, pages);
+
+    /* Buddy sanity: a fresh alloc + free of the same size shouldn't
+     * fail. Catches the classic post-double-free wedge where the free
+     * list is left holding a stale pointer. */
+    uint8_t *probe = (uint8_t *)pmm_alloc_pages(pages);
+    TEST_ASSERT_NOT_NULL(probe);
+    pmm_free_pages(probe, pages);
+}
+
+/* Argument guards: null name / null data / zero pages / zero data_len
+ * all return -1 without touching the registry or freeing anything.
+ * The caller in each case retains ownership of whatever buffer it
+ * passed (if any) — matching the documented contract. */
+static void test_take_pages_handles_null_zero_args(void)
+{
+    rust_slm_test_reset();
+
+    /* A non-null page so the data check is exercised in isolation
+     * for the null-name and null-data cases. */
+    size_t pages = 1;
+    uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+    TEST_ASSERT_NOT_NULL(buf);
+
+    TEST_ASSERT_EQUAL_INT(-1,
+        rust_slm_load_take_pages(NULL, buf, pages, 16));
+    TEST_ASSERT_EQUAL_INT(-1,
+        rust_slm_load_take_pages((const uint8_t *)"x", NULL, pages, 16));
+    TEST_ASSERT_EQUAL_INT(-1,
+        rust_slm_load_take_pages((const uint8_t *)"x", buf, 0, 16));
+    TEST_ASSERT_EQUAL_INT(-1,
+        rust_slm_load_take_pages((const uint8_t *)"x", buf, pages, 0));
+
+    TEST_ASSERT_EQUAL_UINT32(0u, rust_slm_count());
+
+    /* Caller still owns buf in every branch above. */
+    pmm_free_pages(buf, pages);
+}
+
+/* ============================================================================
  * Suite Runner
  * ============================================================================ */
 
@@ -184,6 +307,9 @@ int test_suite_slm_load(void)
     RUN_TEST(test_load_rejects_non_gguf_bytes);
     RUN_TEST(test_load_handles_null_args);
     RUN_TEST(test_get_info_rejects_empty_slot);
+    RUN_TEST(test_take_pages_round_trip_and_unload);
+    RUN_TEST(test_take_pages_caller_frees_on_failure);
+    RUN_TEST(test_take_pages_handles_null_zero_args);
 
     return (int)UnityEnd();
 }
