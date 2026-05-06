@@ -425,6 +425,26 @@ static spinlock_t g_gpu_dispatch_lock = SPINLOCK_INIT;
  * `ensure_bringup` below for the full rationale. */
 static struct ga10b_bringup g_bringups[GA10B_PIPELINE_KIND_COUNT];
 
+/* Per-kind "first user dispatch after fresh inherit needs a throwaway"
+ * flag. Set in `ensure_bringup` immediately after the in-bringup
+ * warmup absorbs Bug A; cleared in the user-call path
+ * (slm_gpu_run / slm_gpu_run_with_input) on the next dispatch.
+ *
+ * Why this is separate from the existing in-bringup warmup: the
+ * warmup absorbs Bug A (very-first-dispatch-returns-all-zeros) but
+ * does NOT reliably clear residual GPU L2 lines inherited from
+ * Linux's nvgpu helper. PR #644 (gpu/l2-evict-sequence) does the
+ * documented L2 evict on inherit, which closes that race for the
+ * common path; this flag adds belt-and-suspenders for any L2 lines
+ * that re-fill between inherit and the first user dispatch. The
+ * effect is that the first user call after a fresh kexec runs
+ * launch_kernel twice and returns the second result, so any stale
+ * cache traffic during dispatch #1 is followed by a clean dispatch
+ * #2 whose output is what the user sees. ~17% pre-fix iter-1 rate
+ * tracked in #596. */
+static bool g_post_inherit_double_dispatch_pending
+    [GA10B_PIPELINE_KIND_COUNT] = { false };
+
 /* Consecutive-dispatch-failure circuit breaker.
  *
  * `ga10b_submit_and_poll` busy-waits up to 2 s with the dispatch
@@ -605,13 +625,17 @@ int slm_gpu_dispatch_breaker_test_count(void)
  * overwrites `g_handoff`).
  *
  * Lock-hold-time note: callers run inside `g_gpu_dispatch_lock`
- * with IRQs disabled. This warmup doubles the worst-case lock-hold
- * on first dispatch — typical ~50-200 ms (one inference) but
- * `ga10b_submit_and_poll`'s 2 s per-op timeout means a hung GPU
- * could hold the lock + IRQs for ~16 s extra in pathological
- * cases. The user's dispatch already exercises this path (just
- * twice on first call); a future async-warmup-from-kernel_main
- * move would relieve the lock-hold cost. */
+ * with IRQs disabled. This warmup combines with the post-inherit
+ * throwaway dispatch (Option A for #596 — see
+ * `g_post_inherit_double_dispatch_pending`) to triple the
+ * worst-case lock-hold on first dispatch: warmup + throwaway +
+ * user's real dispatch all run under the same lock acquisition
+ * before the user gets their result. Typical cost is ~150-600 ms
+ * (3 × one MNIST inference at ~50-200 ms each); pathological
+ * (hung GPU on every op) is bounded by `ga10b_submit_and_poll`'s
+ * 2 s per-op × 8-op MNIST pipeline × 3 dispatches ≈ 48 s of IRQ-
+ * off in the worst case. A future async-warmup-from-kernel_main
+ * move would relieve all three. */
 static int ensure_bringup(uint32_t kind)
 {
     if (kind >= GA10B_PIPELINE_KIND_COUNT) {
@@ -646,7 +670,36 @@ static int ensure_bringup(uint32_t kind)
                     "(continuing — first user call may see Bug A)\n",
                     (unsigned long)kind, warmup_rc);
     }
+
+    /* Arm the post-inherit double-dispatch for the next user call.
+     * See g_post_inherit_double_dispatch_pending comment for why this
+     * is a second safety net layered on top of the warmup + the L2
+     * evict in ga10b_bringup_inherit. */
+    g_post_inherit_double_dispatch_pending[kind] = true;
     return 0;
+}
+
+/* Consume the post-inherit double-dispatch flag if armed: run one
+ * throwaway launch_kernel and clear the flag. Both user-call sites
+ * (slm_gpu_run, slm_gpu_run_with_input) need the identical sequence,
+ * so factoring it out keeps them in lockstep.
+ *
+ * Non-fatal: a discarded-dispatch failure logs but does not
+ * propagate — the user dispatch that follows will surface any
+ * persistent problem with its own rc. Caller must hold
+ * g_gpu_dispatch_lock and have already verified `kind` is in range
+ * (ensure_bringup does that). */
+static void consume_post_inherit_double_dispatch(uint32_t kind,
+                                                  struct ga10b_bringup *b)
+{
+    if (!g_post_inherit_double_dispatch_pending[kind]) return;
+    g_post_inherit_double_dispatch_pending[kind] = false;
+    int discard_rc = ga10b_bringup_launch_kernel(b);
+    if (discard_rc < 0) {
+        uart_printf("[gpu-kind=%lu] post-inherit throwaway dispatch "
+                    "returned %d (continuing to user dispatch)\n",
+                    (unsigned long)kind, discard_rc);
+    }
 }
 
 /* ---- Generic kind-parameterized GPU dispatch FFI ----
@@ -667,6 +720,11 @@ int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
     int rc = ensure_bringup(kind);
     if (rc < 0) goto out;
     struct ga10b_bringup *b = &g_bringups[kind];
+
+    /* Option A for #596 — one throwaway launch on the first user
+     * call after a fresh inherit. */
+    consume_post_inherit_double_dispatch(kind, b);
+
     rc = ga10b_bringup_launch_kernel(b);
     if (rc < 0) goto out;
     int n = ga10b_bringup_read_pipeline_output(b, output, output_cap);
@@ -732,6 +790,12 @@ int slm_gpu_run_with_input(uint32_t kind,
     struct ga10b_bringup *b = &g_bringups[kind];
     int n = ga10b_bringup_set_input(b, input, input_cap);
     if (n < 0) { rc = n; goto out; }
+
+    /* Option A for #596. Throwaway dispatch is placed *after*
+     * set_input so the discarded launch already sees the user's
+     * fresh input — both dispatches read the same input buffer, the
+     * user just sees the second result. */
+    consume_post_inherit_double_dispatch(kind, b);
 
     rc = ga10b_bringup_launch_kernel(b);
     if (rc < 0) goto out;
