@@ -123,6 +123,13 @@ int ga10b_bringup_prepare(struct ga10b_bringup *b);
  * phases 1–4. Returns 0 on success, -1 if the state isn't clean. */
 int ga10b_bringup_inherit(struct ga10b_bringup *b);
 
+/* Evict L2 lines inherited from Linux's nvgpu (FB_FLUSH +
+ * L2_FLUSH_DIRTY + L2_SYSMEM_INVALIDATE + FB_FLUSH). Called from
+ * ga10b_bringup_inherit; exposed so callers can re-run the eviction
+ * if a future cross-engine path wants it explicitly. Returns 0 on
+ * success, -1 on UFLUSH timeout. */
+int ga10b_l2_evict_sysmem(void);
+
 /* Phase 1: ACR on GSP Falcon — establishes WPR, loads LS ucodes. */
 int ga10b_bringup_acr(struct ga10b_bringup *b);
 
