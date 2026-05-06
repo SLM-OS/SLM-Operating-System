@@ -262,6 +262,88 @@ $(ARMSTUB_BUILD_DIR):
 armstub-clean:
 	@rm -rf $(ARMSTUB_BUILD_DIR)
 
+# ============================================================================
+# Pi 5 custom TF-A bl31.bin (Track C Stage 2 of #134)
+# ============================================================================
+#
+# Builds a patched Arm Trusted Firmware-A BL31 with the SLM-OS Pi 5 IRQ
+# routing fixes applied (see tools/tfa-patches/README.md).
+#
+# Output: build/armstub/armstub8-2712.bin (~32 KB).
+#
+# Requires:
+#   - ../slmos-tf-a/ (sibling clone of ARM-software/arm-trusted-firmware)
+#     If absent, the target clones it. Patches are applied via `git am`
+#     on a fresh `slmos-pi5-irq-routing` branch.
+#   - aarch64-none-elf-gcc on PATH or via /opt/arm-gnu-toolchain.
+#
+# Conventions:
+#   - The TF-A clone lives outside this repo (sibling). Not committed.
+#   - Patches in tools/tfa-patches/ are the canonical source of changes.
+#   - Re-running `make tfa-pi5` is idempotent IF the patches already
+#     applied. To re-apply after changes, `make tfa-pi5-reset` resets
+#     the TF-A clone to upstream master and re-applies all patches.
+TFA_DIR        := ../slmos-tf-a
+TFA_REMOTE     := https://github.com/ARM-software/arm-trusted-firmware.git
+TFA_BRANCH     := slmos-pi5-irq-routing
+TFA_BUILD_DIR  := $(TFA_DIR)/build/rpi5/release
+TFA_BL31_BIN   := $(TFA_BUILD_DIR)/bl31.bin
+TFA_PATCHES    := $(wildcard tools/tfa-patches/*.patch)
+TFA_TOOLCHAIN  := /opt/arm-gnu-toolchain/bin
+
+.PHONY: tfa-pi5
+tfa-pi5: $(ARMSTUB_BIN)-from-tfa
+	@echo "Built $(ARMSTUB_BIN) from patched TF-A ($$(stat -c%s $(ARMSTUB_BIN)) bytes)"
+
+.PHONY: $(ARMSTUB_BIN)-from-tfa
+$(ARMSTUB_BIN)-from-tfa: $(TFA_BL31_BIN) | $(ARMSTUB_BUILD_DIR)
+	@cp $(TFA_BL31_BIN) $(ARMSTUB_BIN)
+	@echo "Copied $(TFA_BL31_BIN) -> $(ARMSTUB_BIN)"
+
+# Build TF-A bl31.bin. Depends on the TF-A clone existing AND patches
+# being applied. We use the branch existing as the "patches applied"
+# marker; tfa-pi5-reset wipes and re-creates it.
+$(TFA_BL31_BIN): tfa-prepare
+	@echo "Building TF-A bl31 for rpi5..."
+	@PATH=$(TFA_TOOLCHAIN):$$PATH $(MAKE) -C $(TFA_DIR) \
+		PLAT=rpi5 CROSS_COMPILE=aarch64-none-elf- \
+		DEBUG=0 LOG_LEVEL=40 -j4 bl31
+
+.PHONY: tfa-prepare
+tfa-prepare: $(TFA_DIR)/.git
+	@cd $(TFA_DIR) && \
+	if ! git rev-parse --verify $(TFA_BRANCH) >/dev/null 2>&1; then \
+		echo "Creating $(TFA_BRANCH) and applying patches..."; \
+		git checkout -b $(TFA_BRANCH) master && \
+		git -c user.email=slmos-build@example.com \
+		    -c user.name=slmos-build \
+		    am $(addprefix $(CURDIR)/,$(TFA_PATCHES)); \
+	else \
+		git checkout $(TFA_BRANCH) >/dev/null; \
+	fi
+
+$(TFA_DIR)/.git:
+	@echo "Cloning TF-A to $(TFA_DIR) ..."
+	@git clone $(TFA_REMOTE) $(TFA_DIR)
+
+# DESTRUCTIVE: deletes the slmos-pi5-irq-routing branch in $(TFA_DIR)
+# and any commits on it. Use after editing tools/tfa-patches/*.patch
+# to re-apply; do NOT use if you've made local edits to TF-A you
+# haven't yet captured into a patch file.
+.PHONY: tfa-pi5-reset
+tfa-pi5-reset:
+	@echo "WARNING: This will delete branch $(TFA_BRANCH) in $(TFA_DIR)."
+	@echo "Any local commits on that branch beyond tools/tfa-patches/"
+	@echo "will be LOST. (5 second pause — Ctrl-C to abort.)"
+	@sleep 5
+	@cd $(TFA_DIR) && git checkout master && git branch -D $(TFA_BRANCH) 2>/dev/null || true
+	@$(MAKE) tfa-prepare
+
+.PHONY: tfa-pi5-clean
+tfa-pi5-clean:
+	@if [ -d $(TFA_DIR) ]; then $(MAKE) -C $(TFA_DIR) clean; fi
+	@rm -f $(ARMSTUB_BIN)
+
 $(KERNEL_BUILD_DIR)/Makefile:
 	@echo "Configuring kernel build..."
 	$(CMAKE) -G "Unix Makefiles" -B $(KERNEL_BUILD_DIR) \

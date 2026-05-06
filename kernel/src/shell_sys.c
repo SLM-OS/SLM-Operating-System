@@ -5571,6 +5571,153 @@ int cmd_timdiag(int argc, char *argv[])
     return 0;
 }
 
+#if defined(PLATFORM_RASPI5) && defined(PI5_IRQ_DIAG)
+#include "diag_pi5.h"
+/*
+ * irqtest — Track C Stage 2 / 2.5 diagnostic.
+ *
+ * Briefly unmasks DAIF.I and observes whether the IRQ vector counter
+ * (`diag_vec_counts.irq` in NC memory) advances on the current CPU.
+ *
+ * Three outcomes:
+ *
+ *   irq counter advances:
+ *     SCR_EL3 / GIC routing path WORKS. The kernel is blocking IRQs by
+ *     holding DAIF.I=1 in tasks. Stage 2.5 (unmask DAIF.I in
+ *     task_entry_trampoline + activate SECONDARY_PREEMPT) will
+ *     activate hardware preemption.
+ *
+ *   fiq counter advances:
+ *     PPI is still in Group 0. Group register write from EL3 didn't
+ *     take effect — TF-A patch needs revisiting.
+ *
+ *   neither advances:
+ *     SCR_EL3 / GIC routing patches not effective. Either our TF-A
+ *     isn't loaded or another gate is in play.
+ *
+ * Brief = 100 µs. Short enough that even if the IRQ fires, the timer
+ * handler doesn't have time to call schedule() (which would wedge on
+ * Pi 5 without SECONDARY_PREEMPT). The vector entry's first instruction
+ * (DIAG_BUMP_VEC in vectors.S) increments the counter, which is all
+ * we need to observe.
+ *
+ * WARNING: without SECONDARY_PREEMPT this command WILL HANG Pi 5
+ * hardware if any IRQ is currently pending — that's the diagnostic
+ * (the hang IS proof that SCR_EL3 routing works) but operators who
+ * run it without context will need to power-cycle.
+ */
+int cmd_irqtest(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    shell_puts("\r\n--- irqtest: brief DAIF.I unmask probe ---\r\n");
+
+    uint32_t cpu = cpu_id();
+    if (cpu >= MAX_CPUS) {
+        shell_printf("  bogus cpu_id %u\r\n", cpu);
+        return -1;
+    }
+
+#if !defined(SECONDARY_PREEMPT)
+    /* The probe unmasks DAIF.I. If a timer IRQ fires (which is
+     * exactly what we're testing for), the IRQ vector calls
+     * schedule() from IRQ context — which corrupts the abandoned
+     * exception frame on real ARM64 hardware (PR #98). Empirical
+     * result: system hangs and operator must power-cycle.
+     *
+     * The hang IS the diagnostic for Stage 2 — it's how we confirm
+     * the SCR_EL3 routing patch works before Stage 2.5 (which lands
+     * SECONDARY_PREEMPT) goes in. So we don't skip the probe. We
+     * pause to give the operator a chance to abort if they typed
+     * the command without reading docs/pi5-armstub-track-c.md. */
+    shell_puts("  WARNING: this probe will hang the system if a timer IRQ\r\n"
+               "  fires (the IRQ vector calls schedule() from IRQ context\r\n"
+               "  without SECONDARY_PREEMPT — see #98). The hang itself IS\r\n"
+               "  the diagnostic: it proves SCR_EL3 routing works. Power-\r\n"
+               "  cycle to recover. (5 second pause — Ctrl-C to abort...)\r\n");
+    {
+        uint64_t freq_pause;
+        __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq_pause));
+        uint64_t now_pause;
+        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now_pause));
+        uint64_t pause_target = now_pause + freq_pause * 5;  /* 5 s */
+        do {
+            __asm__ volatile("yield");
+            __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now_pause));
+        } while (now_pause < pause_target);
+    }
+#endif
+
+    struct diag_vec_counts *vec = diag_vec_counts_cpu(cpu);
+    uint64_t irq_before = vec->irq;
+    uint64_t fiq_before = vec->fiq;
+
+    shell_printf("  CPU %u — diag_vec_counts before: irq=%lu fiq=%lu\r\n",
+                cpu, (unsigned long)irq_before, (unsigned long)fiq_before);
+
+    uint64_t daif_save;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif_save));
+    shell_printf("  DAIF before: 0x%lx (D=%lu A=%lu I=%lu F=%lu)\r\n",
+                (unsigned long)daif_save,
+                (unsigned long)((daif_save >> 9) & 1),
+                (unsigned long)((daif_save >> 8) & 1),
+                (unsigned long)((daif_save >> 7) & 1),
+                (unsigned long)((daif_save >> 6) & 1));
+
+    uint64_t freq;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    uint64_t now;
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now));
+    uint64_t target = now + (freq / 10000);  /* 100 µs */
+
+    /* Unmask DAIF.I (#2 = I bit). FIQ stays masked unless caller
+     * passes "fiq" arg. */
+    if (argc >= 2 && argv[1] && strcmp(argv[1], "fiq") == 0) {
+        __asm__ volatile("msr daifclr, #3" ::: "memory"); /* I + F */
+    } else {
+        __asm__ volatile("msr daifclr, #2" ::: "memory"); /* I only */
+    }
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Spin briefly. Both `now` and `target` are u64; use the
+     * subtract-and-compare pattern to avoid wraparound surprises. */
+    do {
+        __asm__ volatile("yield");
+        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now));
+    } while (now < target);
+
+    /* Re-mask. */
+    __asm__ volatile("msr daif, %0" :: "r"(daif_save));
+    __asm__ volatile("isb" ::: "memory");
+
+    uint64_t irq_after = vec->irq;
+    uint64_t fiq_after = vec->fiq;
+
+    shell_printf("  CPU %u — diag_vec_counts after:  irq=%lu fiq=%lu\r\n",
+                cpu, (unsigned long)irq_after, (unsigned long)fiq_after);
+
+    if (irq_after > irq_before) {
+        shell_printf("  RESULT: IRQ DELIVERED (delta=%lu).\r\n",
+                    (unsigned long)(irq_after - irq_before));
+        shell_puts("  >>> SCR_EL3 / GIC routing path WORKS. The kernel is\r\n"
+                   "      blocking IRQs by holding DAIF.I=1 in tasks. Stage 2.5\r\n"
+                   "      (unmask DAIF.I in task_entry_trampoline + activate\r\n"
+                   "      SECONDARY_PREEMPT) will activate hardware preemption.\r\n");
+    } else if (fiq_after > fiq_before) {
+        shell_printf("  RESULT: FIQ DELIVERED (delta=%lu).\r\n",
+                    (unsigned long)(fiq_after - fiq_before));
+        shell_puts("  >>> PPI is still in Group 0 — group register write\r\n"
+                   "      from EL3 didn't take effect.\r\n");
+    } else {
+        shell_puts("  RESULT: No IRQ or FIQ delivered.\r\n");
+        shell_puts("  >>> SCR_EL3 / GIC routing patches not effective. Either\r\n"
+                   "      TF-A isn't loaded or another gate is in play.\r\n");
+    }
+
+    return 0;
+}
+#endif /* PLATFORM_RASPI5 && PI5_IRQ_DIAG */
+
 #endif /* !PLATFORM_X86_64 */
 
 #if defined(PLATFORM_RASPI5)

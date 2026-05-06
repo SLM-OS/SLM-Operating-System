@@ -189,6 +189,9 @@ const shell_cmd_t builtin_commands[] = {
 #endif
 #if !defined(PLATFORM_X86_64)
     {"timdiag",   cmd_timdiag,   "Timer/interrupt delivery diagnostic",                       false, SHELL_CAT_HARDWARE},
+#if defined(PLATFORM_RASPI5) && defined(PI5_IRQ_DIAG)
+    {"irqtest",   cmd_irqtest,   "Briefly unmask DAIF.I + check if IRQ vector fires (Pi 5)",  false, SHELL_CAT_HARDWARE},
+#endif
 #endif
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     {"xhci",      cmd_xhci,      "Show Tegra XHCI controller info (#266 Phase 3A)",           false, SHELL_CAT_HARDWARE},
