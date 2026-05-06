@@ -229,6 +229,20 @@ extern void rust_heap_init(void *heap_start, size_t heap_size);
 extern size_t rust_heap_size_bytes(void);
 
 /*
+ * Currently-allocated bytes inside the Rust heap (sum of in-use
+ * blocks). Used by `cmd_mem` to print heap pressure during
+ * inference. Briefly takes the allocator's spinlock; safe from any
+ * kernel context that doesn't already hold it.
+ */
+extern size_t rust_heap_used_bytes(void);
+
+/*
+ * Currently-free bytes inside the Rust heap. See
+ * rust_heap_used_bytes for locking semantics.
+ */
+extern size_t rust_heap_free_bytes(void);
+
+/*
  * Initialize Rust runtime.
  * Called by C kernel during boot.
  * Returns: 42 on success (magic number for verification)

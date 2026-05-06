@@ -207,9 +207,6 @@ int cmd_mem(int argc, char *argv[])
      * router publish payloads, component runtime, telemetry.
      * Sized by RUST_HEAP_MB in <config.h>. Zeros mean
      * `rust_heap_init` hasn't run yet (very-early-boot path). */
-    extern size_t rust_heap_size_bytes(void);
-    extern size_t rust_heap_used_bytes(void);
-    extern size_t rust_heap_free_bytes(void);
     size_t rh_total = rust_heap_size_bytes();
     if (rh_total > 0u) {
         size_t rh_used = rust_heap_used_bytes();
@@ -217,9 +214,10 @@ int cmd_mem(int argc, char *argv[])
         size_t rh_total_kb = rh_total / 1024u;
         size_t rh_used_kb = rh_used / 1024u;
         size_t rh_free_kb = rh_free / 1024u;
-        /* Percent used, rounded to nearest int. Skip if total is 0
-         * (defensive — covered by the outer if). */
-        unsigned int rh_pct = (unsigned int)((rh_used * 100u + rh_total / 2u) / rh_total);
+        /* Percent used, ceiling-divided so a heap that's anything-
+         * but-empty never displays as 0%. The outer `if (rh_total >
+         * 0u)` already guards the divide. */
+        unsigned int rh_pct = (unsigned int)((rh_used * 100u + rh_total - 1u) / rh_total);
         shell_puts("Rust heap (linked_list_allocator):\r\n");
         shell_printf("  Total:     %lu KB\r\n", rh_total_kb);
         shell_printf("  Used:      %lu KB (%u%%)\r\n", rh_used_kb, rh_pct);

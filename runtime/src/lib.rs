@@ -105,6 +105,11 @@ pub extern "C" fn rust_heap_size_bytes() -> usize {
 #[cfg(not(test))]
 #[no_mangle]
 pub extern "C" fn rust_heap_used_bytes() -> usize {
+    // Short-circuit pre-init: `LockedHeap::empty()` has a valid
+    // mutex but a zero-sized region; `.used()` would return 0
+    // anyway, but skipping the lock acquisition entirely matters
+    // if a very-early-boot diagnostic path (running before
+    // `rust_heap_init`) ever calls this.
     if RUST_HEAP_SIZE_BYTES.load(core::sync::atomic::Ordering::Acquire) == 0 {
         return 0;
     }
@@ -112,7 +117,8 @@ pub extern "C" fn rust_heap_used_bytes() -> usize {
 }
 
 /// Currently-free bytes inside the Rust heap. Briefly takes the
-/// allocator's spinlock; see [`rust_heap_used_bytes`].
+/// allocator's spinlock; see [`rust_heap_used_bytes`] for the
+/// pre-init short-circuit and locking semantics.
 #[cfg(not(test))]
 #[no_mangle]
 pub extern "C" fn rust_heap_free_bytes() -> usize {
