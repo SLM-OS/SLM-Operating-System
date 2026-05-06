@@ -14,6 +14,7 @@
 #include "gic.h"
 #include "timer.h"
 #include "smp.h"
+#include "cpu_supervisor.h"
 #include "ipc.h"
 #include "slm_ffi.h"
 #include "test_harness.h"
@@ -768,6 +769,25 @@ void kernel_main(void *dtb)
     main_task->cpu_affinity = 0;
 #endif
     scheduler_add_task(main_task);
+
+#if !defined(ENABLE_BOOT_TESTS)
+    /* Spawn the CPU-resurrection supervisor (#216 Tier 2) on platforms
+     * that need it. No-op stub on QEMU / Jetson / x86-64. The
+     * supervisor watches sched_diag_idle_loops once per second and
+     * issues psci_cpu_on for any CPU whose counter has been frozen
+     * for SUPERVISOR_FROZEN_THRESHOLD samples. Independent of the
+     * test harness's per-test dormancy detector (PR #290) — both
+     * can fire on the same condition; the test harness reports first
+     * and the supervisor recovers.
+     *
+     * Gated on !ENABLE_BOOT_TESTS for the same reason as net_pump:
+     * scheduler tests check exact CPU 0 ready-count and task lists,
+     * and a low-priority background task on CPU 0 perturbs those
+     * counts. Tests rely on the manual `cpu resurrect <N>` shell
+     * command instead — driven from integration tests when explicit
+     * recovery is needed. */
+    cpu_supervisor_start();
+#endif
 
 #if defined(ENABLE_NETWORKING) && !defined(ENABLE_BOOT_TESTS)
     /* Background network-pump task — drives net_poll() at ~100 Hz so

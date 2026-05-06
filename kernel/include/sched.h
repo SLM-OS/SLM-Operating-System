@@ -42,6 +42,14 @@ struct cpu_runqueue {
 struct cpu_runqueue *sched_cpu_rq(uint32_t cpu);
 
 /*
+ * Drain the per-CPU run queue (#216 Tier 2 / kernel/sched/cpu_supervisor.c).
+ * Resets head/tail/zombie/ready_count to zero under rq_lock. Tasks left
+ * on the queue are leaked — caller must have already declared the CPU
+ * dead. Safe to call from a task context on any CPU.
+ */
+void sched_drain_cpu_runqueue(uint32_t cpu);
+
+/*
  * Initialize the scheduler (boot CPU).
  *
  * Sets up the idle task and prepares the run queue.

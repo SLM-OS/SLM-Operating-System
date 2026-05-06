@@ -212,6 +212,9 @@ int test_suite_steal_deque(void);
 /* Cooperative-preemption tests (issue #99 resolution) */
 int test_suite_coop_preempt(void);
 
+/* CPU resurrection supervisor tests (#216 Tier 2) */
+int test_suite_cpu_supervisor(void);
+
 /* Scheduler trace buffer tests (#195) */
 int test_suite_sched_trace(void);
 

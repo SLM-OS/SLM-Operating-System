@@ -30,6 +30,7 @@
 #include "runtime_blob_file.h"
 #include "vmm.h"
 #include "smp.h"
+#include "cpu_supervisor.h"
 #include "ipc.h"
 #include "timer.h"
 #include "slm_ffi.h"
@@ -275,12 +276,32 @@ int cmd_tasks(int argc, char *argv[])
 }
 
 /*
- * cpu - Show CPU status
+ * cpu - Show CPU status (default) or run a CPU subcommand.
+ *
+ * Subcommands (#216 Tier 2):
+ *   cpu resurrect <N>  — manually resurrect a dormant secondary CPU
+ *                        via psci_cpu_on. Equivalent to the
+ *                        supervisor's auto-recovery path; useful for
+ *                        integration tests that want to drive recovery
+ *                        without waiting for the dormancy threshold.
  */
 int cmd_cpu(int argc, char *argv[])
 {
-    (void)argc;
-    (void)argv;
+    if (argc >= 2 && argv[1] && strcmp(argv[1], "resurrect") == 0) {
+        if (argc < 3 || !argv[2]) {
+            shell_puts("usage: cpu resurrect <N>\r\n");
+            return -1;
+        }
+        int signed_target = atoi(argv[2]);
+        if (signed_target < 0) {
+            shell_puts("usage: cpu resurrect <N>  (N must be non-negative)\r\n");
+            return -1;
+        }
+        uint32_t target = (uint32_t)signed_target;
+        int rc = cpu_supervisor_resurrect(target);
+        shell_printf("cpu resurrect %u: rc=%d\r\n", target, rc);
+        return rc;
+    }
 
     shell_puts("CPU Status:\r\n");
     shell_puts("\r\n");
