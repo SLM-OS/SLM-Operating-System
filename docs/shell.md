@@ -111,6 +111,7 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
   gpu          Show GPU info (non-x86); see also nvidia_gpu_register on x86-64
   hailo        Hailo NPU control
   hspdiag      HSP/BPMP doorbell probe (Jetson only)
+  irqtest      Pi 5 brief DAIF.I unmask probe (PI5_IRQ_DIAG only — see warning below)
   kernel       Manage staged / active boot kernel
   macbdiag     MACB IRQ delivery diagnostic (Pi 5 + networking)
   nvgpu        Jetson nvgpu bringup (Jetson only)
@@ -118,7 +119,7 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
   peek         Read physical memory
   poke         Write 32-bit word
   rtldiag      RTL8168 PCIe probe (Jetson + networking)
-  timdiag      Timer/interrupt delivery diagnostic (non-x86)
+  timdiag      Timer/interrupt delivery diagnostic (non-x86; subcommands on Pi 5)
   xhci         Tegra XHCI controller info (Jetson only)
   xhcidiag     Tegra XHCI CBB-at-EL2 probe (Jetson + networking)
 ```
@@ -145,6 +146,7 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
 | `mem` | Show PMM statistics (total pages, free, allocated) |
 | `tasks` | List all tasks with ID, state, CPU affinity, priority, and name |
 | `cpu` | Show per-core status (online state, current task) |
+| `cpu resurrect <N>` | Pi 5 only. Manually resurrect a dormant secondary CPU via `psci_cpu_on`. Drains the target's run queue (any tasks left there are leaked), then re-issues PSCI CPU_ON. Returns 0 on success (incl. cache-incoherency fallback), `-1` invalid CPU id, `-2` ALREADY_ON (software wedge — drain alone was the recovery), `-4` real PSCI failure (CPU left offline). The auto-supervisor (kernel/sched/cpu_supervisor.c, #216 Tier 2) drives this same path automatically when a secondary's `sched_diag_idle_loops` counter is frozen for 6 samples; the manual subcommand exists for integration tests and operator use. Stubs to `-1` on Jetson / QEMU / x86-64. |
 | `uptime` | Show system uptime in seconds and milliseconds |
 | `vmm` | Show virtual memory statistics (page tables, mapped regions) |
 | `ipc` | Show IPC statistics (message queues, shared buffers) |
@@ -212,6 +214,12 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
 | `sched stats` | Show scheduler statistics and per-CPU utilization |
 | `timdiag` | Timer/interrupt delivery diagnostic — ARM64 only. Dumps timer state, GIC group configuration, CPU interface registers, and SPI group bitmap. Helps investigate whether hardware timer preemption is available on the platform. See `docs/archive/investigations/jetson-preemption-investigation.md` for interpretation. |
 | `timdiag fiq` | Same diagnostic but also runs the FIQ delivery test (writes `ICC_IGRPEN0` and unmasks `DAIF.F`). **May crash on Jetson** if TF-A traps Group 0 register access. Use only for investigation. |
+| `timdiag sgi` | Pi 5 + `PI5_IRQ_DIAG` only. Self-SGI probe (Track B of #134) — fires SGI 0 to the calling CPU and polls `GICC_HPPIR` to verify the GIC distributor → CPU interface path works. DAIF stays masked the whole time so the IRQ vector never runs. Reports SGI propagation outcome (HPPIR=0 means propagated). See `docs/pi5-armstub-track-c.md` for interpretation. |
+| `timdiag bypass` | Pi 5 + `PI5_IRQ_DIAG` only. Bypass-direction probe (Track B of #134) — toggles `GICC_CTLR.IRQBypDisGrp1`/`FIQBypDisGrp1` and observes whether the per-CPU IRQ counter advances over a 50 ms window. **Requires `SECONDARY_PREEMPT=ON`** to run; without it, prints a SKIPPED message because the probe unmasks `DAIF.I` and would otherwise hang Pi 5 hardware (the IRQ vector calls `schedule()` from IRQ context — see #98). |
+| `timdiag smc` | Pi 5 + `PI5_IRQ_DIAG` only. SMC fingerprint probe (Track B of #134) — times PSCI_VERSION and a deliberately invalid SMC over 8 round-trips each; reports min/max cycles + microseconds. Establishes the EL3 dispatch cost (relevant for deciding whether a custom-armstub Track C is feasible). Read-only — does not perturb GIC or DAIF state. |
+| `irqtest` | Pi 5 + `PI5_IRQ_DIAG` only. Brief DAIF.I unmask probe (Track C Stage 2 / 2.5 of #134). Unmasks `DAIF.I` for ~100 µs and observes whether `diag_vec_counts.irq` advances on the calling CPU. **WARNING: without `SECONDARY_PREEMPT=ON` this command WILL HANG the system if a timer IRQ fires** — that's the diagnostic (the hang itself proves SCR_EL3 IRQ routing works) but operators who run it without context will need to **power-cycle to recover**. The command prints a 5-second-pause warning before unmasking when SECONDARY_PREEMPT is off, giving Ctrl-C a chance. With SECONDARY_PREEMPT on, the probe completes cleanly and reports IRQ-delivered / FIQ-delivered / nothing-delivered. The command also emits checkpoint trace markers '1' through '7' via direct UART writes when built with `STAGE25_TRACE_PI5=ON` so a hang can be pinned to a specific instruction. See `docs/pi5-stage25-irqtest-findings.md`. |
+| `irqtest noirq` | Same probe but skips the `daifclr` entirely — control baseline. Confirms whether the `daifclr` itself or some other code path is the trigger when `irqtest` hangs. Always safe to run. |
+| `irqtest fiq` | Variant that unmasks both `DAIF.I` and `DAIF.F`. Same hang risk as bare `irqtest`. |
 | `lua` | Enter Lua REPL |
 | `lua -e "code"` | Execute Lua code directly |
 | `lua <file>` | Run Lua script from filesystem |
