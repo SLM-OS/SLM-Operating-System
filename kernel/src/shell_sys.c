@@ -292,7 +292,12 @@ int cmd_cpu(int argc, char *argv[])
             shell_puts("usage: cpu resurrect <N>\r\n");
             return -1;
         }
-        uint32_t target = (uint32_t)atoi(argv[2]);
+        int signed_target = atoi(argv[2]);
+        if (signed_target < 0) {
+            shell_puts("usage: cpu resurrect <N>  (N must be non-negative)\r\n");
+            return -1;
+        }
+        uint32_t target = (uint32_t)signed_target;
         int rc = cpu_supervisor_resurrect(target);
         shell_printf("cpu resurrect %u: rc=%d\r\n", target, rc);
         return rc;

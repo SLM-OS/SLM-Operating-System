@@ -46,11 +46,19 @@ void cpu_supervisor_start(void);
  *   - Calls psci_cpu_on() with secondary_entry as the entry point.
  *   - Polls cpu_boot_flag for up to RESURRECT_TIMEOUT_US.
  *
- * Returns 0 on success, negative on failure:
- *   -1: invalid `cpu` argument.
- *   -2: psci_cpu_on returned a non-success code (often ALREADY_ON,
- *       meaning the dormancy was a software wedge rather than a fault).
- *   -3: timeout waiting for cpu_boot_flag.
+ * Returns 0 on success (including the cache-incoherency fallback —
+ * PSCI succeeded but the boot flag wasn't visible within the polling
+ * window; the next supervisor tick is the ground truth), negative on
+ * failure:
+ *   -1: invalid `cpu` argument (0, or out of range).
+ *   -2: PSCI returned ALREADY_ON. The dormancy was a software wedge
+ *       (CPU spinning in WFE without ever taking SEV) rather than a
+ *       fault-driven psci_cpu_off; the queue drain IS the recovery,
+ *       and online flag has been restored.
+ *   -4: PSCI returned a real failure code (DENIED, INVALID_PARAMETERS,
+ *       NOT_PRESENT, INTERNAL_FAILURE). The CPU has been left offline.
+ *       Higher-level recovery (reboot, manual intervention) is
+ *       required.
  *
  * Safe to call from a task context. Must NOT be called from an IRQ
  * handler — internally uses sleep_ms / busy waits.

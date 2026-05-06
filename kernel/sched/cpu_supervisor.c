@@ -52,12 +52,14 @@
 #include <stdbool.h>
 
 /* sched_diag_idle_loops is exposed by sched.c; same backing as the
- * `cpu` / per-test dormancy detector reads. */
+ * `cpu` / per-test dormancy detector reads.
+ * cpu_boot_flag and secondary_entry are declared in smp.h. */
 extern volatile uint32_t *sched_diag_idle_loops;
-extern volatile uint32_t cpu_boot_flag[MAX_CPUS];
 
-/* PSCI CPU_ON return code for "already powered on". psci_call's
- * raw int return; we don't import the full enum here. */
+/* PSCI return codes used here. psci_call returns the raw int; we
+ * don't import the full enum. PSCI_ALREADY_ON is the discriminant
+ * between "software wedge — drain alone is the recovery" and "real
+ * PSCI failure — leave the CPU dead". */
 #define PSCI_SUCCESS_LOCAL          0
 #define PSCI_ALREADY_ON_LOCAL       (-4)
 
@@ -96,10 +98,9 @@ int cpu_supervisor_resurrect(uint32_t cpu)
     /* (1) Take the CPU offline. The work-stealer reads cpu_data->online
      * to decide whether a CPU's deque is stealable; setting this here
      * stops a thief from racing into the run queue we're about to
-     * reset. */
+     * reset. cache_clean already issues dsb sy internally. */
     cpu_data[cpu].online = false;
     cache_clean(&cpu_data[cpu].online);
-    __asm__ volatile("dsb sy" ::: "memory");
 
     /* (2) Reset run queue (drains under rq_lock internally). */
     sched_drain_cpu_runqueue(cpu);
@@ -114,55 +115,90 @@ int cpu_supervisor_resurrect(uint32_t cpu)
      * the only writer the polling loop sees. */
     __atomic_store_n(&cpu_boot_flag[cpu], 0, __ATOMIC_RELEASE);
     cache_clean(&cpu_boot_flag[cpu]);
-    __asm__ volatile("dsb sy" ::: "memory");
 
     /* (5) PSCI CPU_ON. Forward the same arguments boot_secondary uses
      * the first time around — the secondary_entry assembly reads x0
      * to recover its logical CPU id. */
-    extern void secondary_entry(void);
     uint64_t mpidr = cpu_logical_map[cpu];
     int rc = psci_cpu_on(mpidr, (uintptr_t)&secondary_entry, cpu);
     resurrect_attempts[cpu]++;
 
-    if (rc != PSCI_SUCCESS_LOCAL) {
-        /* PSCI_ALREADY_ON (-4) means the CPU is technically still
-         * powered. That happens when the dormancy was a software
-         * wedge (spinning in WFE without ever taking SEV) rather
-         * than a fault-driven psci_cpu_off. We can't psci_cpu_off
-         * for the CPU from here (it has to call it on itself).
-         * Restore online=true so the scheduler treats the CPU as
-         * a valid target again — the drain we did earlier is
-         * harmless and the CPU's idle loop will pick up new work. */
+    if (rc == PSCI_ALREADY_ON_LOCAL) {
+        /* Software wedge — CPU is alive but the scheduler stopped
+         * picking work for it (e.g. spinning in WFE without ever
+         * taking SEV). We can't psci_cpu_off from here (the CPU has
+         * to call it on itself). The drain we did earlier IS the
+         * recovery — restore online=true so the scheduler treats
+         * the CPU as a valid target again and its idle loop picks
+         * up new work on the next SEV. */
         cpu_data[cpu].online = true;
         cache_clean(&cpu_data[cpu].online);
-        WARN("cpu_supervisor: psci_cpu_on(%lu, mpidr=0x%lx) returned %d — "
-             "resurrection failed (CPU still powered; queue drained but "
-             "online flag restored)",
-             (unsigned long)cpu, (unsigned long)mpidr, rc);
+        WARN("cpu_supervisor: CPU %u was ALREADY_ON (software wedge); "
+             "queue drained, online flag restored", cpu);
         return -2;
     }
+    if (rc != PSCI_SUCCESS_LOCAL) {
+        /* Real PSCI failure (DENIED, INVALID_PARAMETERS, NOT_PRESENT,
+         * INTERNAL_FAILURE). Leave online=false so the scheduler
+         * stops targeting the CPU. The next supervisor tick will
+         * still see the dormant counter, but won't loop forever:
+         * resurrect_attempts climbs and the operator sees the
+         * persistent WARN. A higher-level recovery (reboot, manual
+         * intervention) is the only remaining option. */
+        WARN("cpu_supervisor: psci_cpu_on(%lu, mpidr=0x%lx) returned %d — "
+             "permanent failure, CPU left offline",
+             (unsigned long)cpu, (unsigned long)mpidr, rc);
+        return -4;
+    }
 
-    /* (6) Poll for cpu_boot_flag. */
+    /* (6) Poll for cpu_boot_flag. Pi 5 / Jetson per-core L2 caches
+     * are incoherent, so try BOTH visibility paths each iteration:
+     *   1. LDAR (atomic load-acquire) — works when caches happen to
+     *      be coherent.
+     *   2. DC IVAC + plain read — forces the local L2 line to be
+     *      invalidated and re-fetched from the PoC where the
+     *      secondary's STLR has been pushed via cache_clean.
+     * Mirrors the established pattern in kernel/sched/smp.c around
+     * line 459 (boot path). Without this, the resurrection would
+     * time out on Pi 5 hardware even on successful CPU bring-up. */
     uint32_t waited_us = 0;
     while (waited_us < RESURRECT_TIMEOUT_US) {
         if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
-            cpu_data[cpu].online = true;
-            cache_clean(&cpu_data[cpu].online);
-            resurrect_successes[cpu]++;
-            INFO("cpu_supervisor: CPU %u resurrected (boot flag set after "
-                 "%u us; total successes=%lu)",
-                 cpu, waited_us,
-                 (unsigned long)resurrect_successes[cpu]);
-            return 0;
+            goto resurrect_succeeded;
+        }
+        cache_invalidate(&cpu_boot_flag[cpu]);
+        if (cpu_boot_flag[cpu]) {
+            goto resurrect_succeeded;
         }
         timer_busy_wait_us(RESURRECT_POLL_US);
         waited_us += RESURRECT_POLL_US;
     }
 
-    WARN("cpu_supervisor: CPU %u did not signal online within %u us — "
-         "resurrection abandoned",
+    /* Timeout. PSCI_SUCCESS earlier means the CPU was actually brought
+     * up; the boot flag may simply not be visible due to cache
+     * incoherency. Mirror smp.c's "trust PSCI" fallback — restore
+     * online and report success with a soft warning. The supervisor's
+     * next dormancy sample is the ground truth: if the CPU really
+     * isn't running, idle_loops will still be frozen and we'll
+     * resurrect again. */
+    cpu_data[cpu].online = true;
+    cache_clean(&cpu_data[cpu].online);
+    resurrect_successes[cpu]++;
+    WARN("cpu_supervisor: CPU %u did not signal online within %u us; "
+         "PSCI returned success so trusting CPU is up "
+         "(cache-incoherency fallback)",
          cpu, RESURRECT_TIMEOUT_US);
-    return -3;
+    return 0;
+
+resurrect_succeeded:
+    cpu_data[cpu].online = true;
+    cache_clean(&cpu_data[cpu].online);
+    resurrect_successes[cpu]++;
+    INFO("cpu_supervisor: CPU %u resurrected (boot flag set after "
+         "%u us; total successes=%lu)",
+         cpu, waited_us,
+         (unsigned long)resurrect_successes[cpu]);
+    return 0;
 }
 
 void cpu_supervisor_get_stats(struct cpu_supervisor_stats *out)
@@ -197,11 +233,12 @@ static void supervisor_tick(void)
 
         /* Counter unchanged this sample. */
         frozen_samples[c]++;
-        if (frozen_samples[c] == 3) {
+        if (frozen_samples[c] == SUPERVISOR_FROZEN_THRESHOLD / 2) {
             /* Halfway to threshold — one warning per dormancy episode. */
             WARN("cpu_supervisor: CPU %u idle counter frozen at %u for "
-                 "3 samples (will resurrect at %u)",
-                 c, cur, SUPERVISOR_FROZEN_THRESHOLD);
+                 "%u samples (will resurrect at %u)",
+                 c, cur, SUPERVISOR_FROZEN_THRESHOLD / 2,
+                 SUPERVISOR_FROZEN_THRESHOLD);
             dormancy_warnings++;
         }
         if (frozen_samples[c] >= SUPERVISOR_FROZEN_THRESHOLD) {

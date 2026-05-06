@@ -180,6 +180,15 @@ void secondary_init(uint32_t cpu_id);
 extern void secondary_entry(void);
 
 /*
+ * Cross-core boot handshake flag, indexed by logical CPU id. Defined
+ * in kernel/sched/smp.c. The secondary CPU's bring-up assembly STLRs
+ * a 1 here once it reaches `secondary_init`; the BSP polls this slot
+ * after issuing `psci_cpu_on`. Also reset and re-polled by the
+ * resurrection path in kernel/sched/cpu_supervisor.c.
+ */
+extern volatile uint32_t cpu_boot_flag[MAX_CPUS];
+
+/*
  * smp_notify_cpu() — nudge a remote CPU to re-check its run queue.
  *
  * The scheduler calls this after enqueuing a task on another CPU's

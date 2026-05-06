@@ -73,10 +73,21 @@ static void test_get_stats_zero_baseline(void)
     memset(&stats, 0xAA, sizeof(stats));
     cpu_supervisor_get_stats(&stats);
 
-    /* dormancy_warnings is small (uint64_t) — at boot it should be 0
-     * unless a real dormancy fired before the test ran. We can't
-     * assert a hard zero without race risk, so just check it's a
-     * sane value (< 1 million). */
+    /* If get_stats was a no-op, the pre-fill pattern would survive
+     * verbatim. Assert at least one field has been overwritten away
+     * from the 0xAA pattern. dormancy_warnings is the most reliable
+     * candidate — at boot it's typically 0; any real value differs
+     * from the pre-fill. */
+    TEST_ASSERT_MESSAGE(stats.dormancy_warnings != 0xAAAAAAAAAAAAAAAAULL,
+        "dormancy_warnings still holds the pre-fill pattern — "
+        "cpu_supervisor_get_stats appears to be a no-op");
+    TEST_ASSERT_MESSAGE(stats.frozen_samples[0] != 0xAAAAAAAAU,
+        "frozen_samples[0] still holds the pre-fill pattern — "
+        "cpu_supervisor_get_stats appears to be a no-op");
+
+    /* And sanity-check that the value is plausible. dormancy_warnings
+     * is one warning per dormancy episode — at boot it should be
+     * close to zero. */
     TEST_ASSERT_MESSAGE(stats.dormancy_warnings < 1000000ULL,
         "dormancy_warnings count is implausibly large — supervisor "
         "stats may not be initialized");
@@ -90,23 +101,14 @@ static void test_get_stats_null_safe(void)
     TEST_ASSERT_TRUE(true);
 }
 
-#if defined(PLATFORM_RASPI5)
 /*
- * On Pi 5, calling resurrect on an online CPU drains its run queue
- * (which test_integration may have populated) and then issues
- * psci_cpu_on. PSCI returns ALREADY_ON for a still-running CPU,
- * which the supervisor surfaces as -2. This exercises the
- * drain → PSCI call path without actually killing the target.
- *
- * Skipped at boot-test time because the drain side effect would
- * disrupt other tests' run-queue assumptions.
+ * NOTE: Pi 5-only coverage of the actual recovery cycle (kill CPU →
+ * wait for dormancy detection → verify resurrected) is intentionally
+ * NOT here. Faulting a CPU is a destructive side effect that would
+ * disrupt every following test's run-queue assumptions. That path is
+ * driven from the Pi 5 hardware boot-test workflow and from the shell
+ * (`cpu resurrect <N>`) for manual operator use.
  */
-static void test_resurrect_already_on_returns_psci_error(void)
-{
-    TEST_IGNORE_MESSAGE("only run by hand from the shell — drains the target's "
-                        "run queue");
-}
-#endif
 
 int test_suite_cpu_supervisor(void)
 {
@@ -116,8 +118,5 @@ int test_suite_cpu_supervisor(void)
     RUN_TEST(test_resurrect_rejects_unconfigured_cpu);
     RUN_TEST(test_get_stats_zero_baseline);
     RUN_TEST(test_get_stats_null_safe);
-#if defined(PLATFORM_RASPI5)
-    RUN_TEST(test_resurrect_already_on_returns_psci_error);
-#endif
     return UNITY_END();
 }
