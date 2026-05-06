@@ -1,0 +1,157 @@
+From 613a96e07539e644a12e7230879650529f1558db Mon Sep 17 00:00:00 2001
+From: John Jezl <john@jezl.com>
+Date: Wed, 6 May 2026 00:29:57 -0700
+Subject: [PATCH] SLM-OS Pi 5 IRQ routing patches
+
+---
+ lib/el3_runtime/aarch64/context_mgmt.c | 18 ++++++
+ plat/rpi/rpi5/platform.mk              |  4 ++
+ plat/rpi/rpi5/rpi5_setup.c             | 83 +++++++++++++++++++++++++-
+ 3 files changed, 104 insertions(+), 1 deletion(-)
+
+diff --git a/lib/el3_runtime/aarch64/context_mgmt.c b/lib/el3_runtime/aarch64/context_mgmt.c
+index 7e3a2e5..e37bba4 100644
+--- a/lib/el3_runtime/aarch64/context_mgmt.c
++++ b/lib/el3_runtime/aarch64/context_mgmt.c
+@@ -376,6 +376,24 @@ static void setup_ns_context(cpu_context_t *ctx, const struct entry_point_info *
+ 	 *  indicated by the interrupt routing model for BL31.
+ 	 */
+ 	scr_el3 |= get_scr_el3_from_routing_model(NON_SECURE);
++
++	/*
++	 * SLM-OS / #134 Track C Stage 2: explicitly clear SCR_EL3.IRQ and
++	 * SCR_EL3.FIQ for the non-secure context. The stock TF-A default on
++	 * Raspberry Pi 5 leaves NS IRQ delivery blocked between GICC_HPPIR
++	 * (where the timer PPI is visible as Group 1 NS) and the CPU's IRQ
++	 * pin — see PR #639's `timdiag sgi` output. Clearing these bits forces
++	 * NS interrupts to deliver at EL1/EL2 instead of being trapped to EL3.
++	 *
++	 * Conditional on PLAT_RPI5 (defined by plat/rpi/rpi5/platform.mk) so
++	 * other platforms are unaffected. The routing-model value above stays
++	 * in the cleanup so any TF-A-internal logic that depends on it for its
++	 * cached scr_el3[] array (interrupt_mgmt.c) keeps working — we just
++	 * override the bits in the per-context SCR_EL3 used at ERET.
++	 */
++#ifdef PLAT_RPI5
++	scr_el3 &= ~((u_register_t)((1U << 1) | (1U << 2)));
++#endif
+ #endif
+ 
+ 	if (is_feat_the_supported()) {
+diff --git a/plat/rpi/rpi5/platform.mk b/plat/rpi/rpi5/platform.mk
+index 2403c86..801e38f 100644
+--- a/plat/rpi/rpi5/platform.mk
++++ b/plat/rpi/rpi5/platform.mk
+@@ -94,6 +94,10 @@ SMC_PCI_SUPPORT			:= 0
+ 
+ $(eval $(call add_define,RPI3_BL33_IN_AARCH32))
+ $(eval $(call add_define,RPI3_DIRECT_LINUX_BOOT))
++# SLM-OS Track C Stage 2: identify the rpi5 platform to context_mgmt.c
++# so it can apply the SCR_EL3.IRQ/FIQ clear without affecting other platforms.
++PLAT_RPI5 := 1
++$(eval $(call add_define,PLAT_RPI5))
+ ifdef RPI3_PRELOADED_DTB_BASE
+ $(eval $(call add_define,RPI3_PRELOADED_DTB_BASE))
+ endif
+diff --git a/plat/rpi/rpi5/rpi5_setup.c b/plat/rpi/rpi5/rpi5_setup.c
+index de82300..99cbc37 100644
+--- a/plat/rpi/rpi5/rpi5_setup.c
++++ b/plat/rpi/rpi5/rpi5_setup.c
+@@ -1,12 +1,93 @@
+ /*
+  * Copyright (c) 2024, Mario Bălănică <mariobalanica02@gmail.com>
++ * Copyright (c) 2026, SLM-OS contributors.
+  *
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <arch_helpers.h>
++#include <common/debug.h>
++#include <lib/mmio.h>
+ #include <rpi_shared.h>
++#include "../include/rpi_hw.h"
+ 
++/*
++ * SLM-OS / #134 Track C Stage 2:
++ *
++ * On the stock RPi 5 firmware (TF-A's vanilla bl31.bin), non-secure
++ * timer IRQs are visible at GICC_HPPIR=30 but never reach the kernel's
++ * IRQ vector. The exact cause is unconfirmed because SCR_EL3 is
++ * unreadable from non-secure. This hook does two things from EL3:
++ *
++ *   1. Logs SCR_EL3 to the UART so we have ground truth on what
++ *      bits are set (especially IRQ/FIQ — bits 1 and 2 — which would
++ *      route NS interrupts to EL3 if non-zero).
++ *
++ *   2. Defensively clears SCR_EL3.IRQ and SCR_EL3.FIQ in the live
++ *      EL3 register. Note: TF-A's per-context SCR_EL3 (used at the
++ *      ERET to BL33) is computed separately in cm_setup_context;
++ *      this only affects what EL3 itself sees during BL31 runtime.
++ *      The actual fix that propagates to BL33 is in setup_ns_context
++ *      (lib/el3_runtime/aarch64/context_mgmt.c).
++ */
+ void plat_rpi_bl31_custom_setup(void)
+ {
+-	/* Nothing to do here yet. */
++	uint64_t scr = read_scr_el3();
++	NOTICE("rpi5: SCR_EL3 entry value = 0x%016llx\n",
++	       (unsigned long long)scr);
++	NOTICE("rpi5:   NS=%llu IRQ=%llu FIQ=%llu EA=%llu RW=%llu HCE=%llu\n",
++	       (unsigned long long)((scr >> 0) & 1),
++	       (unsigned long long)((scr >> 1) & 1),
++	       (unsigned long long)((scr >> 2) & 1),
++	       (unsigned long long)((scr >> 3) & 1),
++	       (unsigned long long)((scr >> 10) & 1),
++	       (unsigned long long)((scr >> 8) & 1));
++
++	/*
++	 * Clear IRQ + FIQ in the live SCR_EL3 (BL31 runtime). This
++	 * doesn't propagate to BL33 by itself — context_mgmt.c clobbers
++	 * with its own value at ERET — but pairs with the
++	 * `setup_ns_context` patch below.
++	 */
++	scr &= ~((1ULL << 1) | (1ULL << 2));
++	write_scr_el3(scr);
++	isb();
++
++	NOTICE("rpi5: SCR_EL3 after clear = 0x%016llx\n",
++	       (unsigned long long)read_scr_el3());
++
++	/*
++	 * Explicitly mark all PPIs (and SGIs) as Group 1 Non-secure. TF-A's
++	 * default `gicv2_spis_configure_defaults` only touches SPIs (IRQs
++	 * 32+); PPIs stay in Group 0 unless we write IGROUPR[0] from EL3.
++	 *
++	 * Group 0 PPIs are signaled as FIQ. With our SCR_EL3.FIQ=0 above,
++	 * FIQ is taken at EL1 — but the kernel's idle loop unmasks DAIF.I
++	 * not DAIF.F, so the FIQ stays pending. Switching the PPIs to
++	 * Group 1 NS makes them deliver as IRQ at EL1 instead, which the
++	 * kernel's existing path is built for.
++	 *
++	 * Banked register: each CPU has its own GICR_IGROUPR0 view, so
++	 * this only affects the CPU running this code (CPU 0). Secondary
++	 * CPUs initialize their own copies through the same code path
++	 * via PSCI CPU_ON → secondary_entry → plat_rpi_bl31_custom_setup
++	 * is NOT re-run for secondaries — TF-A only calls it once on
++	 * primary boot. We therefore write the GICD_BASE-relative
++	 * register, but on GICv2 PPI/SGI ranges of IGROUPR are banked.
++	 *
++	 * For Pi 5 we need this to be done per-secondary-CPU, OR we need
++	 * to set Group via an aliased register. For now: do it on this
++	 * CPU; if secondaries don't see Group 1, follow up with a
++	 * per-CPU init hook.
++	 */
++	{
++		uintptr_t gicd_base = RPI4_GIC_GICD_BASE;
++		uint32_t pre = mmio_read_32(gicd_base + 0x080);
++		mmio_write_32(gicd_base + 0x080, 0xFFFFFFFFU);
++		__asm__ volatile("dsb sy" ::: "memory");
++		uint32_t post = mmio_read_32(gicd_base + 0x080);
++		NOTICE("rpi5: GICD_IGROUPR[0] pre=0x%08x post=0x%08x "
++		       "(target: 0xFFFFFFFF — all PPI/SGI Group 1 NS)\n",
++		       pre, post);
++	}
+ }
+-- 
+2.43.0
+

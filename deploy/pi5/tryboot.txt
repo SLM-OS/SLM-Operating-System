@@ -46,3 +46,7 @@ pciex4_reset=0
 
 # Load the candidate kernel image instead of the active one.
 kernel=tryboot.img
+
+# Track C of #134: load our custom TF-A bl31.bin as the EL3 armstub.
+# Mirrors config.txt; firmware does not merge the two files.
+armstub=armstub8-2712.bin

@@ -1,6 +1,6 @@
 # Pi 5 Track C — Custom EL3 Armstub for True Preemptive Multitasking
 
-**Status:** Stage 1 (source + build infrastructure) — landed via PR for `feat/pi5-armstub-track-c`. Stage 2 (TF-A integration) — open.
+**Status:** Stage 1 (minimal armstub source + build) and Stage 2 (custom TF-A with `SCR_EL3` + GIC patches) both landed. Stage 2.5 (kernel-side `DAIF.I` unmask) — open.
 
 **Issue:** [#134](https://github.com/SLM-OS/SLM-Operating-System/issues/134) — restore hardware timer IRQ delivery on Pi 5.
 
@@ -169,6 +169,96 @@ Stage 2 should address this preemptively:
 
 ---
 
+## Stage 2 — TF-A integration (landed)
+
+Took **Path A** from Stage 1's plan: forked `ARM-software/arm-trusted-firmware`,
+patched it, built a custom `bl31.bin`, deployed.
+
+**Patches** (in `tools/tfa-patches/`):
+
+1. `setup_ns_context` in `lib/el3_runtime/aarch64/context_mgmt.c` —
+   explicitly clears `SCR_EL3.IRQ` and `SCR_EL3.FIQ` for the
+   non-secure context so NS interrupts deliver to EL1/EL2.
+   Gated on `PLAT_RPI5`.
+
+2. `plat_rpi_bl31_custom_setup` in `plat/rpi/rpi5/rpi5_setup.c` —
+   writes `GICD_IGROUPR[0] = 0xFFFFFFFF` from EL3, putting all
+   PPIs (timer included) in Group 1 NS. TF-A's default
+   `gicv2_spis_configure_defaults` only touches SPIs (≥32);
+   PPIs need explicit treatment.
+
+3. `PLAT_RPI5` define in `plat/rpi/rpi5/platform.mk`.
+
+**Build:** `make tfa-pi5` clones TF-A as a sibling of this repo
+(if needed), applies the patches, builds `bl31.bin` (~32 KB),
+copies it to `build/armstub/armstub8-2712.bin`. Companion
+`make tfa-pi5-reset` re-applies after patch updates.
+
+**Hardware verification on pi-5-2:**
+
+- Custom TF-A boots cleanly. PSCI continues to work (4/4 CPUs come
+  up). `boot_test` is at parity with stock TF-A.
+- `diag` shows the same **per-CPU IRQ counter = 0 on all CPUs** as
+  before the custom TF-A.
+
+The IRQ counters being zero is the surprise. We confirmed our
+TF-A is loaded (a deliberate write to an unmapped DRAM address
+from `plat_rpi_bl31_custom_setup` faulted the boot, which
+wouldn't happen if the firmware ignored our binary). So the
+patches *did* run; they just didn't unblock IRQ delivery.
+
+The most likely remaining blocker is **kernel-side**: tasks run
+with `DAIF.I = 1` and CPU 0's idle (which would `daifclr+wfi`)
+rarely runs because the shell + `net_pump` keep CPU 0 busy.
+`sched_diag_idle_loops[0]` stays at the sentinel `0xAAAA = 43690`
+— idle on CPU 0 has never run. So even with our SCR_EL3 patches,
+the CPU never holds an unmasked IRQ state long enough to take
+the pending timer IRQ.
+
+## Stage 2.5 — kernel-side: per-task `orig_elr`/`orig_spsr` (open)
+
+This stage was originally framed as "unmask `DAIF.I` in tasks" — a
+one-line change. **Hardware testing on pi-5-2 with the irqtest probe
+in this PR proved that's only half the story.**
+
+**Verified via `irqtest`:** with the Stage 2 TF-A loaded and
+`DAIF.I` briefly cleared from a shell command, the system **hangs
+immediately** — meaning the timer IRQ DOES deliver to the IRQ
+vector. Stage 2's TF-A patches *are* working. The hang itself is
+proof.
+
+**What's actually broken:** Pi 5's existing `SECONDARY_PREEMPT`
+trampoline (`kernel/sched/preempt.c`, PR #98) saves `orig_elr` /
+`orig_spsr` in **per-CPU NC slots**, not per-task. When
+preempt-during-preempted-task happens (which it does as soon as
+hardware IRQs are firing every 10 ms across multiple ready tasks),
+the inner preemption clobbers the outer's save slots, and the
+outer task's eret target is corrupted.
+
+The fix is moving `orig_elr` / `orig_spsr` into `struct task`. This
+is a small structural change (~20 lines in preempt.c, vectors.S,
+task.h) plus regression validation. It belongs in Stage 2.5 because
+it's the load-bearing change for activating real preemption.
+
+After Stage 2.5:
+
+1. **Unmask `DAIF.I`** in `task_entry_trampoline` (gated on
+   `SECONDARY_PREEMPT=ON`). One line.
+2. **Activate `SECONDARY_PREEMPT=ON`** for Pi 5 default builds.
+3. **Activate the Stage 2 custom TF-A** (place `bl31.bin` →
+   `armstub8-2712.bin` on the boot partition, add `armstub=` to
+   `config.txt`).
+4. **Boot test:** `boot_test --count 10` on pi-5-2. Each boot
+   should advance per-CPU IRQ counters > 0.
+5. **Multi-core test acceptance:** the five originally-failing
+   tests should pass via real hardware preemption rather than via
+   the Tier 2/3 auto-recovery.
+
+The `irqtest` shell command (`PLATFORM_RASPI5 + PI5_IRQ_DIAG`
+only, in `kernel/src/shell_sys.c`) stays in this PR as the
+diagnostic that pinned the per-task `orig_elr` requirement and
+will continue to pin Stage 2.5's success.
+
 ## Acceptance criteria for closing #134
 
 | Criterion | Status |
@@ -177,16 +267,13 @@ Stage 2 should address this preemptively:
 | Build infrastructure (`make armstub-pi5`) | ✅ Stage 1 |
 | `SCR_EL3.IRQ=0` clear documented in source | ✅ Stage 1 |
 | Track C rationale + path forward documented | ✅ Stage 1 (this doc) |
-| TF-A fork or PSCI implementation integrated | ☐ Stage 2 |
-| Boot reliability ≥ 99/100 with armstub deployed | ☐ Stage 2 |
-| `cpu` shell shows non-zero IRQ counter on all CPUs | ☐ Stage 2 |
-| `make test PLATFORM=RASPI5` 5/5 multi-core tests pass with `SECONDARY_PREEMPT=ON` | ☐ Stage 2 |
-| `boot_test --count 10` 10/10 with `COOP_PREEMPT=OFF` | ☐ Stage 2 |
-
-Stage 2 is the work this stage de-risks: when someone takes it on,
-the diagnostics from PR #639 and the source/build from this PR mean
-the only remaining unknowns are the TF-A build mechanics or the
-PSCI implementation details.
+| TF-A fork integrated + built | ✅ Stage 2 |
+| `make tfa-pi5` builds TF-A from patches | ✅ Stage 2 |
+| Boot reliability ≥ 99/100 with armstub deployed | ✅ Stage 2 (parity with stock) |
+| `DAIF.I` unmasked in tasks | ☐ Stage 2.5 |
+| `cpu` shell shows non-zero IRQ counter on all CPUs | ☐ Stage 2.5 |
+| `make test PLATFORM=RASPI5` 5/5 multi-core tests pass with `SECONDARY_PREEMPT=ON` | ☐ Stage 2.5 |
+| `boot_test --count 10` 10/10 with `COOP_PREEMPT=OFF` | ☐ Stage 2.5 |
 
 ---
 

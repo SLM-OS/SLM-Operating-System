@@ -39,3 +39,8 @@ pciex4_reset=0
 
 # The kernel filename Pi 5 firmware loads from this partition.
 kernel=kernel_2712.img
+
+# SLM-OS Track C Stage 2: load our custom TF-A bl31.bin as the EL3
+# armstub. The default firmware behavior is to auto-load
+# armstub8-2712.bin if present, but explicit is safer.
+armstub=armstub8-2712.bin
