@@ -182,6 +182,40 @@ exception_vectors:
 .endm
 
 /*
+ * Stage 2.5 trace marker macro — writes a single ASCII char to the
+ * Pi 5 RP1 PL011 DR register at 0x1f00030000 (mirrors
+ * IRQTEST_UART_DR in kernel/src/shell_sys.c — keep both in sync if
+ * the RP1 mapping ever changes). Bypasses the kernel UART driver
+ * entirely (no lock, no FIFO check). Saves/restores x16/x17 around
+ * the write so it's safe before save_regs.
+ *
+ * Pi-5-specific. Compiled in only when STAGE25_TRACE_PI5 is defined.
+ */
+#if defined(STAGE25_TRACE_PI5)
+/* Address constructed via movz/movk so we don't depend on a reachable
+ * literal pool — the macro is invoked from inside the exception
+ * vectors which are in the .text section but the literal pool
+ * placement is up to the linker.
+ *
+ * 0x1f00030000 = 0x001f_0003_0000_0000:
+ *   movz #0x0000          → bits  0..15
+ *   movk #0x0003, lsl #16 → bits 16..31
+ *   movk #0x001f, lsl #32 → bits 32..47 */
+.macro STAGE25_TRACE_CHAR c
+    stp     x16, x17, [sp, #-16]!
+    movz    x16, #0x0000
+    movk    x16, #0x0003, lsl #16
+    movk    x16, #0x001f, lsl #32
+    mov     w17, #\c
+    str     w17, [x16]
+    ldp     x16, x17, [sp], #16
+.endm
+#else
+.macro STAGE25_TRACE_CHAR c
+.endm
+#endif
+
+/*
  * Hang - unhandled exceptions
  */
 hang:
@@ -213,9 +247,11 @@ el1_sync:
  * EL1 IRQ (kernel) - Timer interrupts come here
  */
 el1_irq:
+    STAGE25_TRACE_CHAR 'V'              /* Trace: vector entered */
     DIAG_BUMP_VEC 0x08
     save_regs
     bl      el1_irq_handler     /* Call C handler */
+    STAGE25_TRACE_CHAR 'H'              /* Trace: irq_handler returned */
 #if defined(SECONDARY_PREEMPT)
     /* After the IRQ body runs, check for a pending reschedule. When set,
      * maybe_arm_resched_trampoline() rewrites the saved ELR_EL1 in the
@@ -225,8 +261,10 @@ el1_irq:
      * Pi 5 hang caused by switch_to inside an exception handler. */
     mov     x0, sp
     bl      maybe_arm_resched_trampoline
+    STAGE25_TRACE_CHAR 'M'              /* Trace: maybe_arm returned */
 #endif
     restore_regs
+    STAGE25_TRACE_CHAR 'E'              /* Trace: about to eret */
     eret
 
 /*
@@ -356,6 +394,7 @@ el0_serror:
 .global resched_trampoline
 .type resched_trampoline, @function
 resched_trampoline:
+    STAGE25_TRACE_CHAR 'T'              /* Trace: trampoline entry */
     /* Save caller-clobbered registers. IRQs are still masked so we
      * cannot be re-entered here. */
     sub     sp, sp, #192
@@ -417,12 +456,14 @@ resched_trampoline:
     mov     w6, #1
     str     w6, [x5, x0, lsl #2]
 
+    STAGE25_TRACE_CHAR 'B'              /* Trace: trampoline before schedule */
     /* Unmask IRQs and call schedule(). If schedule() picks a different
      * task, switch_to() swaps stacks. When this task is eventually
      * switched back in, execution resumes just after the bl below. */
     msr     daifclr, #2
     isb
     bl      schedule
+    STAGE25_TRACE_CHAR 'C'              /* Trace: trampoline after schedule */
     msr     daifset, #2
     isb
 
@@ -455,6 +496,7 @@ resched_trampoline:
     ldp     x29, x30, [sp, #152]
     add     sp, sp, #192
 
+    STAGE25_TRACE_CHAR 'D'              /* Trace: trampoline before final eret */
     /* eret works outside of an exception handler: it atomically
      * restores PSTATE from SPSR_EL1 and branches to ELR_EL1. This is
      * the canonical way to jump-with-PSTATE-restore in kernel code. */
