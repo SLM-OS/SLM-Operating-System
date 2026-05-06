@@ -5565,6 +5565,32 @@ int cmd_timdiag(int argc, char *argv[])
 #elif GIC_VERSION == 2
     shell_puts("\r\nGICv2 platform — FIQ test skipped (see pi5-preemption-resolution.md)\r\n");
     timdiag_test_wfi_wake();
+
+#if defined(PLATFORM_RASPI5) && defined(PI5_IRQ_DIAG)
+    /* Track B probes (#134 / #635). Independent diagnostics that
+     * probe the GICv2 → A76 IRQ path on Pi 5. Each probe is opt-in
+     * via a subcommand argument because they perturb live state
+     * (DAIF, GICC_CTLR, timer) and shouldn't fire on every timdiag
+     * invocation. */
+    extern void timdiag_pi5_probe_sgi(void);
+    extern void timdiag_pi5_probe_bypass(void);
+    extern void timdiag_pi5_probe_smc(void);
+
+    if (argc >= 2 && argv[1]) {
+        if (strcmp(argv[1], "sgi") == 0) {
+            timdiag_pi5_probe_sgi();
+        } else if (strcmp(argv[1], "bypass") == 0) {
+            timdiag_pi5_probe_bypass();
+        } else if (strcmp(argv[1], "smc") == 0) {
+            timdiag_pi5_probe_smc();
+        }
+    } else {
+        shell_puts("\r\nPi 5 GICv2 probes (Track B of #134):\r\n"
+                   "  timdiag sgi     — Test GIC→CPU IRQ path via self-SGI\r\n"
+                   "  timdiag bypass  — Toggle GICC_CTLR bypass-disable bits, observe timer\r\n"
+                   "  timdiag smc     — Time PSCI SMC round-trip (SCR_EL3.IRQ inference)\r\n");
+    }
+#endif
 #endif
 
     shell_puts("\r\n=== End Diagnostic ===\r\n");

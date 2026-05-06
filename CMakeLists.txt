@@ -545,6 +545,7 @@ set(KERNEL_SOURCES
     kernel/src/shell_io_uart.c
     kernel/src/shell_session.c
     kernel/src/shell_sys.c
+    kernel/src/timdiag_pi5_probes.c
     kernel/src/shell_fs.c
     kernel/src/shell_exec.c
     kernel/src/shell_component.c
