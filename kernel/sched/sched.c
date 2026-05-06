@@ -1703,26 +1703,31 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
  * coop tick — schedule() then runs coop_preempt_maybe_tick() and
  * may switch_to() a different runnable task.
  *
- * preempt_disabled handling: schedule() itself short-circuits when
- * preempt_disabled[cpu] is set, so callers inside spinlocks or
- * other non-preemptible critical sections are safe.
+ * IMPORTANT — caller invariant: must NOT be invoked from inside a
+ * spinlock-held region. SLM-OS's `spin_lock` / `spin_lock_irqsave`
+ * (kernel/include/spinlock.h) do NOT bump `preempt_disabled[]`, so
+ * the early-out below does not protect such callers — schedule()
+ * would run with the lock still held, and another task contending
+ * the same lock on this CPU would spin forever (spin loops do not
+ * call slm_preempt_point()). The `preempt_disabled[cpu]` check
+ * exists to skip recursion when the scheduler itself is in the
+ * middle of a context switch, not to legitimize lock-held callers.
  */
 volatile uint64_t slm_preempt_point_calls;
 volatile uint64_t slm_preempt_point_schedule_calls;
 
 void slm_preempt_check_and_yield(void)
 {
-    slm_preempt_point_calls++;
-
     uint32_t cpu = cpu_id();
     if (cpu >= MAX_CPUS)
         return;
 
-    /* Skip when a context switch is already in progress on this CPU
-     * — recursing into schedule() through the preempt-point would be
-     * needless work. The fast-path early-out also covers callers
-     * inside spin_lock_irqsave critical sections (preempt_disabled
-     * is set by the lock primitive). */
+    slm_preempt_point_calls++;
+
+    /* Skip when the scheduler is already mid-context-switch on this
+     * CPU — recursing into schedule() through the preempt-point would
+     * just re-enter the same code path. NOTE: this does NOT cover
+     * spinlock-held callers; see the function header comment. */
     if (preempt_disabled[cpu])
         return;
 

@@ -143,12 +143,16 @@ static void test_slm_preempt_point_callable(void)
  * advanced at least 4 times — same slack as the existing
  * test_pit_ticks_advances_over_time check.
  */
+#define PREEMPT_POINT_TEST_WINDOW_MS  50UL
+#define PREEMPT_POINT_TEST_MIN_SCHED  ((PREEMPT_POINT_TEST_WINDOW_MS / \
+                                       (1000UL / TIMER_HZ)) - 1)
+
 static void test_slm_preempt_point_drives_schedule(void)
 {
     uint64_t freq = timer_get_frequency();
     TEST_ASSERT_MESSAGE(freq > 0, "timer_get_frequency returned 0");
 
-    uint64_t target_cycles = freq / 20;   /* 50 ms */
+    uint64_t target_cycles = (freq * PREEMPT_POINT_TEST_WINDOW_MS) / 1000UL;
     uint64_t start_cycles  = timer_get_count();
     uint64_t start_calls   = slm_preempt_point_calls;
     uint64_t start_sched   = slm_preempt_point_schedule_calls;
@@ -166,9 +170,11 @@ static void test_slm_preempt_point_drives_schedule(void)
         "slm_preempt_point_calls did not advance — macro may not be "
         "calling slm_preempt_check_and_yield()");
 
-    /* Slow path: at 100 Hz the quantum expires every 10 ms; in 50 ms
-     * we expect at least 4 schedule() entries through the macro. */
-    TEST_ASSERT_MESSAGE(slow_path >= 4,
+    /* Slow path: one schedule() entry per (1000/TIMER_HZ) ms quantum;
+     * over PREEMPT_POINT_TEST_WINDOW_MS we expect at least
+     * PREEMPT_POINT_TEST_MIN_SCHED entries (one less than the integer
+     * quantum count, allowing a single missed boundary). */
+    TEST_ASSERT_MESSAGE(slow_path >= PREEMPT_POINT_TEST_MIN_SCHED,
         "slm_preempt_point() did not drive schedule() — quantum check "
         "may be wrong, or COOP_PREEMPT is not actually engaged");
 }

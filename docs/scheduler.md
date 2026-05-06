@@ -106,21 +106,27 @@ is cheap enough that "when in doubt, add it" is the right call —
 adding one preempt point per back-edge has no measurable cost on the
 hot path.
 
+**Hard restriction — DO NOT call `slm_preempt_point()` from inside a
+spinlock-held region.** SLM-OS's `spin_lock` and `spin_lock_irqsave`
+do not bump `preempt_disabled[]`, so the macro would fall into
+`schedule()` with the lock still held. A second task on the same CPU
+that contends the lock would spin forever (spin loops do not call
+`slm_preempt_point()`), single-CPU-deadlocking the kernel. Lock-held
+poll loops that need the scheduler to make progress are a separate
+problem — convert them to a sleep-based wait instead.
+
 Examples already following the policy:
 
-- `kernel/tests/test_integration.c:delay()` — loops `count` nops; one
-  preempt point per iteration.
-- `kernel/ai_accel/hailo/hailo_control.c:wait_for_response` — 100 µs
-  poll with up to 5 s timeout (50 000 iterations); one preempt point
-  per iteration. Lets the scheduler swap in another task while
-  firmware is still computing.
-- `kernel/ai_accel/hailo/hailo_vdma.c` — VDMA channel poll loops,
-  same structure as `wait_for_response`.
+- `kernel/tests/test_integration.c:delay()` — lock-free `nop` loop;
+  one preempt point per iteration.
 
-Reviewers looking at long loops should ask: *what's the worst-case
-iteration count, and is there at least one yielding call (or
-preempt-point) inside the loop body?* If neither, request the macro
-be added.
+Reviewers looking at long loops should ask three questions:
+1. *What's the worst-case iteration count?*
+2. *Is there at least one yielding call (or preempt-point) inside the
+   loop body?* If neither, request the macro be added.
+3. *Is this loop running under a spinlock?* If yes, the macro is
+   **not** the fix — file an issue to convert the wait to a
+   sleep-based primitive.
 
 #### Diagnostic counters
 
@@ -132,8 +138,10 @@ path), suitable for asserting in tests and for surfacing in the
 - `test_slm_preempt_point_callable` (all platforms) — asserts the
   macro can be invoked 1 024 times without faulting.
 - `test_slm_preempt_point_drives_schedule` (`COOP_PREEMPT` only) —
-  asserts a 50 ms tight loop of macro calls produces ≥ 4 schedule()
-  entries (one per 10 ms quantum, allowing one missed boundary).
+  asserts a `PREEMPT_POINT_TEST_WINDOW_MS` (50 ms) tight loop of
+  macro calls produces at least `PREEMPT_POINT_TEST_MIN_SCHED`
+  schedule() entries (one less than the integer quantum count over
+  the window, allowing one missed boundary).
 
 Both live in `kernel/tests/test_coop_preempt.c`.
 

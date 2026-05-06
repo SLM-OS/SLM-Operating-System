@@ -23,6 +23,14 @@
  * loops are expected to follow the policy documented in
  * docs/scheduler.md §Preemption Points.
  *
+ * **DO NOT call this macro from inside a spinlock-held region.**
+ * SLM-OS's `spin_lock` / `spin_lock_irqsave` (kernel/include/spinlock.h)
+ * do not bump `preempt_disabled[]`; the macro would fall into
+ * `schedule()` with the lock still held, and any contending task on
+ * the same CPU would spin forever. Restrict call sites to lock-free
+ * busy loops (computation, polling that does not run under a lock,
+ * test helpers).
+ *
  * No-op on platforms where COOP_PREEMPT is not defined (QEMU,
  * x86-64). Stays compile-clean there so call sites can be
  * unconditional.
@@ -51,9 +59,10 @@
  * full schedule() invocation, which itself runs
  * coop_preempt_maybe_tick() and possibly switch_to().
  *
- * Safe to call from any task context, including with IRQs disabled —
- * schedule() handles preempt_disabled[cpu] internally and short-
- * circuits when a context switch is already in progress.
+ * Caller must NOT hold a spinlock — see header block above. The
+ * preempt_disabled[cpu] early-out only short-circuits recursion when
+ * the scheduler is already mid-context-switch; it does not legitimize
+ * lock-held callers, since SLM-OS spinlocks do not bump that flag.
  */
 void slm_preempt_check_and_yield(void);
 
