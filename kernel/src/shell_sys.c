@@ -5571,6 +5571,119 @@ int cmd_timdiag(int argc, char *argv[])
     return 0;
 }
 
+#if defined(PLATFORM_RASPI5) && defined(PI5_IRQ_DIAG)
+/*
+ * irqtest — Track C Stage 2 / 2.5 diagnostic.
+ *
+ * Briefly unmasks DAIF.I and observes whether the IRQ vector counter
+ * (`diag_vec_counts.irq` in NC memory) advances on the current CPU.
+ *
+ * Three outcomes:
+ *
+ *   irq counter advances:
+ *     SCR_EL3 / GIC routing path WORKS. The kernel is blocking IRQs by
+ *     holding DAIF.I=1 in tasks. Stage 2.5 (unmask DAIF.I in
+ *     task_entry_trampoline + activate SECONDARY_PREEMPT) will
+ *     activate hardware preemption.
+ *
+ *   fiq counter advances:
+ *     PPI is still in Group 0. Group register write from EL3 didn't
+ *     take effect — TF-A patch needs revisiting.
+ *
+ *   neither advances:
+ *     SCR_EL3 / GIC routing patches not effective. Either our TF-A
+ *     isn't loaded or another gate is in play.
+ *
+ * Brief = 100 µs. Short enough that even if the IRQ fires, the timer
+ * handler doesn't have time to call schedule() (which would wedge on
+ * Pi 5 without SECONDARY_PREEMPT). The vector entry's first instruction
+ * (DIAG_BUMP_VEC in vectors.S) increments the counter, which is all
+ * we need to observe.
+ */
+int cmd_irqtest(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    shell_puts("\r\n--- irqtest: brief DAIF.I unmask probe ---\r\n");
+
+    uint32_t cpu = cpu_id();
+    if (cpu >= MAX_CPUS) {
+        shell_printf("  bogus cpu_id %u\r\n", cpu);
+        return -1;
+    }
+
+    /* diag_vec_counts is in NC memory at NC_MEM_BASE+0xFF60, 0x20 bytes
+     * per CPU. irq counter at offset 0x08 within the per-CPU block. */
+    volatile uint64_t *vec = (volatile uint64_t *)(NC_MEM_BASE + 0xFF60UL + cpu * 0x20UL);
+    uint64_t irq_before = vec[1];
+    uint64_t fiq_before = vec[2];
+
+    shell_printf("  CPU %u — diag_vec_counts before: irq=%lu fiq=%lu\r\n",
+                cpu, (unsigned long)irq_before, (unsigned long)fiq_before);
+
+    uint64_t daif_save;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif_save));
+    shell_printf("  DAIF before: 0x%lx (D=%lu A=%lu I=%lu F=%lu)\r\n",
+                (unsigned long)daif_save,
+                (unsigned long)((daif_save >> 9) & 1),
+                (unsigned long)((daif_save >> 8) & 1),
+                (unsigned long)((daif_save >> 7) & 1),
+                (unsigned long)((daif_save >> 6) & 1));
+
+    uint64_t freq;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+    uint64_t now;
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now));
+    uint64_t target = now + (freq / 10000);  /* 100 µs */
+
+    /* Unmask DAIF.I (#2 = I bit). FIQ stays masked unless caller
+     * passes "fiq" arg. */
+    if (argc >= 2 && argv[1] && strcmp(argv[1], "fiq") == 0) {
+        __asm__ volatile("msr daifclr, #3" ::: "memory"); /* I + F */
+    } else {
+        __asm__ volatile("msr daifclr, #2" ::: "memory"); /* I only */
+    }
+    __asm__ volatile("isb" ::: "memory");
+
+    /* Spin briefly. Both `now` and `target` are u64; use the
+     * subtract-and-compare pattern to avoid wraparound surprises. */
+    do {
+        __asm__ volatile("yield");
+        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now));
+    } while (now < target);
+
+    /* Re-mask. */
+    __asm__ volatile("msr daif, %0" :: "r"(daif_save));
+    __asm__ volatile("isb" ::: "memory");
+
+    uint64_t irq_after = vec[1];
+    uint64_t fiq_after = vec[2];
+
+    shell_printf("  CPU %u — diag_vec_counts after:  irq=%lu fiq=%lu\r\n",
+                cpu, (unsigned long)irq_after, (unsigned long)fiq_after);
+
+    if (irq_after > irq_before) {
+        shell_printf("  RESULT: IRQ DELIVERED (delta=%lu).\r\n",
+                    (unsigned long)(irq_after - irq_before));
+        shell_puts("  >>> SCR_EL3 / GIC routing path WORKS. The kernel is\r\n"
+                   "      blocking IRQs by holding DAIF.I=1 in tasks. Stage 2.5\r\n"
+                   "      (unmask DAIF.I in task_entry_trampoline + activate\r\n"
+                   "      SECONDARY_PREEMPT) will activate hardware preemption.\r\n");
+    } else if (fiq_after > fiq_before) {
+        shell_printf("  RESULT: FIQ DELIVERED (delta=%lu).\r\n",
+                    (unsigned long)(fiq_after - fiq_before));
+        shell_puts("  >>> PPI is still in Group 0 — group register write\r\n"
+                   "      from EL3 didn't take effect.\r\n");
+    } else {
+        shell_puts("  RESULT: No IRQ or FIQ delivered.\r\n");
+        shell_puts("  >>> SCR_EL3 / GIC routing patches not effective. Either\r\n"
+                   "      TF-A isn't loaded or another gate is in play.\r\n");
+    }
+
+    return 0;
+}
+#endif /* PLATFORM_RASPI5 && PI5_IRQ_DIAG */
+
 #endif /* !PLATFORM_X86_64 */
 
 #if defined(PLATFORM_RASPI5)
