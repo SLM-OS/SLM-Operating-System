@@ -60,6 +60,13 @@ void cpu_supervisor_start(void);
  *       Higher-level recovery (reboot, manual intervention) is
  *       required.
  *
+ * On platforms without a fault-recovery story (Jetson, QEMU, x86-64)
+ * this is a stub that returns -1 for ANY input — there's no PSCI
+ * resurrection path to drive, so callers should treat any negative
+ * return as "feature not supported on this platform". Callers that
+ * need to distinguish "invalid input" from "not supported" must
+ * gate at the call site with `#if defined(PLATFORM_RASPI5)`.
+ *
  * Safe to call from a task context. Must NOT be called from an IRQ
  * handler — internally uses sleep_ms / busy waits.
  */

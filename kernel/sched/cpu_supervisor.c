@@ -74,6 +74,15 @@ extern volatile uint32_t *sched_diag_idle_loops;
 #define RESURRECT_TIMEOUT_US        5000000u   /* 5 s */
 #define RESURRECT_POLL_US           100u
 
+/* Halfway warning derives from THRESHOLD / 2; that integer-division
+ * is only meaningful when THRESHOLD spans at least 2 samples. With
+ * threshold=1 the supervisor would resurrect on the first frozen
+ * sample (no halfway distinction), and threshold=0 would resurrect
+ * unconditionally — both nonsensical. Catch a future tweak that
+ * accidentally lowers this. */
+_Static_assert(SUPERVISOR_FROZEN_THRESHOLD >= 2,
+    "SUPERVISOR_FROZEN_THRESHOLD must be >= 2 for the halfway warning math");
+
 /* Per-CPU dormancy state. Plain volatile (no atomic) because writers
  * are single (the supervisor task on CPU 0); cross-CPU readers are
  * informational (the `cpu` shell command). */
@@ -82,6 +91,37 @@ static volatile uint32_t frozen_samples[MAX_CPUS];
 static volatile uint64_t resurrect_attempts[MAX_CPUS];
 static volatile uint64_t resurrect_successes[MAX_CPUS];
 static volatile uint64_t dormancy_warnings;
+
+/*
+ * Wait up to `timeout_us` microseconds for `cpu_boot_flag[cpu]` to
+ * become non-zero. Returns the elapsed microseconds when the flag
+ * was observed, or `timeout_us` if the wait expired.
+ *
+ * Pi 5 / Jetson per-core L2 caches are incoherent, so we try BOTH
+ * visibility paths each iteration:
+ *   1. LDAR (atomic load-acquire) — works when caches happen to be
+ *      coherent.
+ *   2. DC IVAC + plain read — forces the local L2 line to be
+ *      invalidated and re-fetched from the PoC where the secondary's
+ *      STLR has been pushed via cache_clean.
+ * Mirrors the pattern in kernel/sched/smp.c around line 459.
+ */
+static uint32_t wait_for_boot_flag(uint32_t cpu, uint32_t timeout_us)
+{
+    uint32_t waited_us = 0;
+    while (waited_us < timeout_us) {
+        if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
+            return waited_us;
+        }
+        cache_invalidate(&cpu_boot_flag[cpu]);
+        if (cpu_boot_flag[cpu]) {
+            return waited_us;
+        }
+        timer_busy_wait_us(RESURRECT_POLL_US);
+        waited_us += RESURRECT_POLL_US;
+    }
+    return timeout_us;
+}
 
 int cpu_supervisor_resurrect(uint32_t cpu)
 {
@@ -151,53 +191,28 @@ int cpu_supervisor_resurrect(uint32_t cpu)
         return -4;
     }
 
-    /* (6) Poll for cpu_boot_flag. Pi 5 / Jetson per-core L2 caches
-     * are incoherent, so try BOTH visibility paths each iteration:
-     *   1. LDAR (atomic load-acquire) — works when caches happen to
-     *      be coherent.
-     *   2. DC IVAC + plain read — forces the local L2 line to be
-     *      invalidated and re-fetched from the PoC where the
-     *      secondary's STLR has been pushed via cache_clean.
-     * Mirrors the established pattern in kernel/sched/smp.c around
-     * line 459 (boot path). Without this, the resurrection would
-     * time out on Pi 5 hardware even on successful CPU bring-up. */
-    uint32_t waited_us = 0;
-    while (waited_us < RESURRECT_TIMEOUT_US) {
-        if (__atomic_load_n(&cpu_boot_flag[cpu], __ATOMIC_ACQUIRE)) {
-            goto resurrect_succeeded;
-        }
-        cache_invalidate(&cpu_boot_flag[cpu]);
-        if (cpu_boot_flag[cpu]) {
-            goto resurrect_succeeded;
-        }
-        timer_busy_wait_us(RESURRECT_POLL_US);
-        waited_us += RESURRECT_POLL_US;
+    /* (6) Poll for cpu_boot_flag. */
+    uint32_t waited_us = wait_for_boot_flag(cpu, RESURRECT_TIMEOUT_US);
+
+    /* Whether the flag was observed or we timed out, the CPU is up
+     * (PSCI returned success). Restore online + bump successes. The
+     * timeout case is the cache-incoherency fallback: if the CPU
+     * actually isn't running, idle_loops will still be frozen on
+     * the next supervisor tick and we'll resurrect again. */
+    cpu_data[cpu].online = true;
+    cache_clean(&cpu_data[cpu].online);
+    resurrect_successes[cpu]++;
+
+    if (waited_us < RESURRECT_TIMEOUT_US) {
+        INFO("cpu_supervisor: CPU %u resurrected (boot flag set after "
+             "%u us; total successes=%lu)",
+             cpu, waited_us, (unsigned long)resurrect_successes[cpu]);
+    } else {
+        WARN("cpu_supervisor: CPU %u did not signal online within %u us; "
+             "PSCI returned success so trusting CPU is up "
+             "(cache-incoherency fallback)",
+             cpu, RESURRECT_TIMEOUT_US);
     }
-
-    /* Timeout. PSCI_SUCCESS earlier means the CPU was actually brought
-     * up; the boot flag may simply not be visible due to cache
-     * incoherency. Mirror smp.c's "trust PSCI" fallback — restore
-     * online and report success with a soft warning. The supervisor's
-     * next dormancy sample is the ground truth: if the CPU really
-     * isn't running, idle_loops will still be frozen and we'll
-     * resurrect again. */
-    cpu_data[cpu].online = true;
-    cache_clean(&cpu_data[cpu].online);
-    resurrect_successes[cpu]++;
-    WARN("cpu_supervisor: CPU %u did not signal online within %u us; "
-         "PSCI returned success so trusting CPU is up "
-         "(cache-incoherency fallback)",
-         cpu, RESURRECT_TIMEOUT_US);
-    return 0;
-
-resurrect_succeeded:
-    cpu_data[cpu].online = true;
-    cache_clean(&cpu_data[cpu].online);
-    resurrect_successes[cpu]++;
-    INFO("cpu_supervisor: CPU %u resurrected (boot flag set after "
-         "%u us; total successes=%lu)",
-         cpu, waited_us,
-         (unsigned long)resurrect_successes[cpu]);
     return 0;
 }
 
