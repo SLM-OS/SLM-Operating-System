@@ -5572,6 +5572,7 @@ int cmd_timdiag(int argc, char *argv[])
 }
 
 #if defined(PLATFORM_RASPI5) && defined(PI5_IRQ_DIAG)
+#include "diag_pi5.h"
 /*
  * irqtest — Track C Stage 2 / 2.5 diagnostic.
  *
@@ -5599,6 +5600,11 @@ int cmd_timdiag(int argc, char *argv[])
  * Pi 5 without SECONDARY_PREEMPT). The vector entry's first instruction
  * (DIAG_BUMP_VEC in vectors.S) increments the counter, which is all
  * we need to observe.
+ *
+ * WARNING: without SECONDARY_PREEMPT this command WILL HANG Pi 5
+ * hardware if any IRQ is currently pending — that's the diagnostic
+ * (the hang IS proof that SCR_EL3 routing works) but operators who
+ * run it without context will need to power-cycle.
  */
 int cmd_irqtest(int argc, char *argv[])
 {
@@ -5612,11 +5618,39 @@ int cmd_irqtest(int argc, char *argv[])
         return -1;
     }
 
-    /* diag_vec_counts is in NC memory at NC_MEM_BASE+0xFF60, 0x20 bytes
-     * per CPU. irq counter at offset 0x08 within the per-CPU block. */
-    volatile uint64_t *vec = (volatile uint64_t *)(NC_MEM_BASE + 0xFF60UL + cpu * 0x20UL);
-    uint64_t irq_before = vec[1];
-    uint64_t fiq_before = vec[2];
+#if !defined(SECONDARY_PREEMPT)
+    /* The probe unmasks DAIF.I. If a timer IRQ fires (which is
+     * exactly what we're testing for), the IRQ vector calls
+     * schedule() from IRQ context — which corrupts the abandoned
+     * exception frame on real ARM64 hardware (PR #98). Empirical
+     * result: system hangs and operator must power-cycle.
+     *
+     * The hang IS the diagnostic for Stage 2 — it's how we confirm
+     * the SCR_EL3 routing patch works before Stage 2.5 (which lands
+     * SECONDARY_PREEMPT) goes in. So we don't skip the probe. We
+     * pause to give the operator a chance to abort if they typed
+     * the command without reading docs/pi5-armstub-track-c.md. */
+    shell_puts("  WARNING: this probe will hang the system if a timer IRQ\r\n"
+               "  fires (the IRQ vector calls schedule() from IRQ context\r\n"
+               "  without SECONDARY_PREEMPT — see #98). The hang itself IS\r\n"
+               "  the diagnostic: it proves SCR_EL3 routing works. Power-\r\n"
+               "  cycle to recover. (5 second pause — Ctrl-C to abort...)\r\n");
+    {
+        uint64_t freq_pause;
+        __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq_pause));
+        uint64_t now_pause;
+        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now_pause));
+        uint64_t pause_target = now_pause + freq_pause * 5;  /* 5 s */
+        do {
+            __asm__ volatile("yield");
+            __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now_pause));
+        } while (now_pause < pause_target);
+    }
+#endif
+
+    struct diag_vec_counts *vec = diag_vec_counts_cpu(cpu);
+    uint64_t irq_before = vec->irq;
+    uint64_t fiq_before = vec->fiq;
 
     shell_printf("  CPU %u — diag_vec_counts before: irq=%lu fiq=%lu\r\n",
                 cpu, (unsigned long)irq_before, (unsigned long)fiq_before);
@@ -5656,8 +5690,8 @@ int cmd_irqtest(int argc, char *argv[])
     __asm__ volatile("msr daif, %0" :: "r"(daif_save));
     __asm__ volatile("isb" ::: "memory");
 
-    uint64_t irq_after = vec[1];
-    uint64_t fiq_after = vec[2];
+    uint64_t irq_after = vec->irq;
+    uint64_t fiq_after = vec->fiq;
 
     shell_printf("  CPU %u — diag_vec_counts after:  irq=%lu fiq=%lu\r\n",
                 cpu, (unsigned long)irq_after, (unsigned long)fiq_after);

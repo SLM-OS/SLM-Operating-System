@@ -315,7 +315,9 @@ tfa-prepare: $(TFA_DIR)/.git
 	if ! git rev-parse --verify $(TFA_BRANCH) >/dev/null 2>&1; then \
 		echo "Creating $(TFA_BRANCH) and applying patches..."; \
 		git checkout -b $(TFA_BRANCH) master && \
-		git am $(addprefix $(CURDIR)/,$(TFA_PATCHES)); \
+		git -c user.email=slmos-build@example.com \
+		    -c user.name=slmos-build \
+		    am $(addprefix $(CURDIR)/,$(TFA_PATCHES)); \
 	else \
 		git checkout $(TFA_BRANCH) >/dev/null; \
 	fi
@@ -324,9 +326,16 @@ $(TFA_DIR)/.git:
 	@echo "Cloning TF-A to $(TFA_DIR) ..."
 	@git clone $(TFA_REMOTE) $(TFA_DIR)
 
+# DESTRUCTIVE: deletes the slmos-pi5-irq-routing branch in $(TFA_DIR)
+# and any commits on it. Use after editing tools/tfa-patches/*.patch
+# to re-apply; do NOT use if you've made local edits to TF-A you
+# haven't yet captured into a patch file.
 .PHONY: tfa-pi5-reset
 tfa-pi5-reset:
-	@echo "Resetting $(TFA_DIR) to upstream master + reapplying patches..."
+	@echo "WARNING: This will delete branch $(TFA_BRANCH) in $(TFA_DIR)."
+	@echo "Any local commits on that branch beyond tools/tfa-patches/"
+	@echo "will be LOST. (5 second pause — Ctrl-C to abort.)"
+	@sleep 5
 	@cd $(TFA_DIR) && git checkout master && git branch -D $(TFA_BRANCH) 2>/dev/null || true
 	@$(MAKE) tfa-prepare
 
