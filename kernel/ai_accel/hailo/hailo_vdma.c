@@ -12,6 +12,7 @@
 #include "hailo_internal.h"
 #include "debug.h"
 #include "uart.h"
+#include "preempt_point.h"
 #include <string.h>
 
 #ifdef HAILO_WIRE_DEBUG
@@ -644,6 +645,7 @@ int hailo_vdma_submit_and_wait(uint8_t channel_index,
 #endif
         hailo_platform->udelay(poll_interval_us);
         elapsed += poll_interval_us;
+        slm_preempt_point();
     }
     uint32_t proc_end = hailo_platform->read32(HAILO_BAR_VDMA,
         channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_NUM_PROC_DWORD));
@@ -855,6 +857,7 @@ int hailo_vdma_channel_wait_proc(uint8_t channel_index,
         }
         hailo_platform->udelay(poll_interval_us);
         elapsed += poll_interval_us;
+        slm_preempt_point();
     }
     uint32_t proc_end = hailo_platform->read32(HAILO_BAR_VDMA,
         channel_host_reg(channel_index, HAILO_VDMA_CHANNEL_NUM_PROC_DWORD));

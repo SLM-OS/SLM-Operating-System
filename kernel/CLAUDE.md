@@ -216,7 +216,7 @@ The `PI5_COOP_PREEMPT` spelling is retained as a deprecated Makefile/CMake alias
 
 **Consequences:**
 - `pit_ticks` and `timer_handler_count` advance on all CPUs when those CPUs yield.
-- A pure CPU-bound loop that never yields still monopolizes its CPU. The `delay()` helper in `kernel/tests/test_integration.c` yields every ~1k iterations for this reason.
+- A pure CPU-bound loop that never yields still monopolizes its CPU. The **`slm_preempt_point()`** macro in `kernel/include/preempt_point.h` is the policy fix: any in-tree loop that may iterate >1 000 times without a yielding primitive must call it on the back-edge. Cheap when the quantum hasn't expired (~5 instructions); falls into `schedule()` when ≥10 ms has elapsed. Compile-time no-op on non-`COOP_PREEMPT` platforms. See `docs/scheduler.md` §"Preemption Model" for the full policy.
 - `timer_get_count()` (CNTPCT_EL0) remains the authoritative wall-clock source for timeouts; see `hw_timeout_start()` / `hw_timeout_expired()` in `component_runtime.c`. Works regardless of IRQ delivery state.
 
 **`sched_set_policy()` must hold IRQs disabled.** The function wraps init/swap/shutdown in `irq_save`/`irq_restore`. Retained because the ELR-trampoline path (PR #98, inert under coop-preempt but kept for future hardware-IRQ restoration) still relies on it.

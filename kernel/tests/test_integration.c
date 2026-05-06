@@ -25,6 +25,7 @@
 #include "../include/slm_ffi.h"
 #include "../include/ncmem.h"
 #include "../include/timer.h"
+#include "../include/preempt_point.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -35,32 +36,25 @@
 /*
  * Busy-wait for multi-core integration tests.
  *
- * On COOP_PREEMPT platforms (Pi 5, Jetson — no hardware timer IRQs, see
- * docs/archive/investigations/pi5-preemption-resolution.md and the Jetson plan v4 resolution),
- * a task that never yields will never let the scheduler migrate it,
- * boost its priority, or observe another CPU's progress. Yield every
- * ~1k iterations under COOP_PREEMPT to give the scheduler a tick.
+ * Calls slm_preempt_point() on every iteration:
+ *   - On COOP_PREEMPT platforms (Pi 5, Jetson) the macro checks
+ *     CNTPCT_EL0 and reschedules only when the per-CPU 10 ms quantum
+ *     has elapsed. Lets the scheduler migrate, priority-boost, or
+ *     observe progress on another CPU.
+ *   - On platforms with hardware timer IRQs (QEMU, x86-64) the macro
+ *     expands to a no-op so the original timing behavior is unchanged.
  *
- * On platforms with hardware timer IRQs (QEMU, x86-64): keep the pure
- * nop loop. Yielding here changes scheduler behavior — the integration
- * tests are timing-sensitive and repeated voluntary reschedules can
- * push their work-completion windows past the test timeouts.
+ * Compared to the previous fixed 1024-iteration yield, the macro
+ * doesn't churn unnecessarily inside short delay() calls — one
+ * reschedule per quantum, not per loop budget. See
+ * kernel/include/preempt_point.h.
  */
 static void delay(volatile uint32_t count)
 {
-#if defined(COOP_PREEMPT)
-    extern void yield(void);
-    volatile uint32_t spin = 0;
     while (count--) {
         __asm__ volatile("nop");
-        if ((++spin & 0x3FF) == 0)
-            yield();
+        slm_preempt_point();
     }
-#else
-    while (count--) {
-        __asm__ volatile("nop");
-    }
-#endif
 }
 
 /* Shared test state protected by spinlock */

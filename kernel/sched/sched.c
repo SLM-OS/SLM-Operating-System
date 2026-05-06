@@ -1692,6 +1692,57 @@ static inline void coop_preempt_maybe_tick(uint32_t cpu)
     scheduler_tick();
     preempt_disabled[cpu] = prev_preempt_disabled;
 }
+
+/*
+ * Voluntary preemption point — Track A of the Pi 5 preemption plan.
+ *
+ * Called from in-tree CPU-bound loops via the slm_preempt_point()
+ * macro in <preempt_point.h>. Cheap when the quantum hasn't expired
+ * (CNTPCT load, sub, compare, not-taken branch). Falls through to
+ * schedule() when ≥10 ms has elapsed on this CPU since the last
+ * coop tick — schedule() then runs coop_preempt_maybe_tick() and
+ * may switch_to() a different runnable task.
+ *
+ * preempt_disabled handling: schedule() itself short-circuits when
+ * preempt_disabled[cpu] is set, so callers inside spinlocks or
+ * other non-preemptible critical sections are safe.
+ */
+volatile uint64_t slm_preempt_point_calls;
+volatile uint64_t slm_preempt_point_schedule_calls;
+
+void slm_preempt_check_and_yield(void)
+{
+    slm_preempt_point_calls++;
+
+    uint32_t cpu = cpu_id();
+    if (cpu >= MAX_CPUS)
+        return;
+
+    /* Skip when a context switch is already in progress on this CPU
+     * — recursing into schedule() through the preempt-point would be
+     * needless work. The fast-path early-out also covers callers
+     * inside spin_lock_irqsave critical sections (preempt_disabled
+     * is set by the lock primitive). */
+    if (preempt_disabled[cpu])
+        return;
+
+    uint64_t freq = timer_get_frequency();
+    if (freq == 0)
+        return;
+    uint64_t period = freq / TIMER_HZ;
+    uint64_t now = timer_get_count();
+    uint64_t last = coop_last_tick_cntpct[cpu];
+
+    /* Fast path: quantum hasn't elapsed. The `last == 0` arm covers
+     * the bootstrap case before the first real tick — we want to
+     * fall through into schedule() once on first call so the
+     * deadline gets seeded by coop_preempt_maybe_tick. */
+    if (last != 0 && (now - last) < period)
+        return;
+
+    slm_preempt_point_schedule_calls++;
+    schedule();
+}
 #endif /* COOP_PREEMPT */
 
 /* ---- Periodic load rebalance (D1 / P2-4) ----

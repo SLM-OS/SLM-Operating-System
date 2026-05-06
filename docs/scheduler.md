@@ -41,6 +41,102 @@ The scheduler uses a **hybrid priority/deadline** approach:
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+## Preemption Model
+
+SLM-OS supports two preemption mechanisms, selected at compile time per
+platform. New code does not need to think about which one is active —
+both converge on "the scheduler gets a chance to run on the per-CPU
+quantum boundary" — but library and inference code that runs CPU-bound
+loops needs to be aware of one rule (the **preemption-point policy**
+below).
+
+### Hardware timer IRQ — preferred
+
+When the GIC delivers timer PPI 30 (ARM64) or the LAPIC timer vector
+(x86-64) to the kernel, every task is preempted asynchronously at the
+quantum boundary regardless of what it is doing. This is the model on
+**QEMU virt** and **x86-64**.
+
+### Cooperative preemption (`COOP_PREEMPT`) — fallback
+
+Default-on for **Raspberry Pi 5** and **Jetson Orin Nano**, where
+non-secure writes to the GIC group registers are silently ignored by
+EL3 firmware and the timer IRQ never reaches the kernel. See
+`docs/archive/investigations/pi5-preemption-resolution.md` and
+`docs/archive/investigations/jetson-preemption-investigation.md` for
+the empirical chain.
+
+`schedule()` calls `coop_preempt_maybe_tick()` on every entry: it
+reads `CNTPCT_EL0`, compares against the per-CPU 10 ms deadline, and
+synthesizes a `scheduler_tick()` call when the quantum has expired.
+This drives the AI policy, deadline boosts, migration decisions, and
+the `pit_ticks` / `timer_handler_count` observability counters.
+
+**Consequence:** the scheduler intervenes **only when the running task
+calls `schedule()`** — voluntarily via `yield()` / `sleep()`, or
+implicitly via a blocking primitive (locks, message router,
+UART, file I/O). A task that runs a tight CPU-bound loop with no
+yielding call monopolizes its CPU until exit. The
+**`slm_preempt_point()`** macro is the policy-level fix.
+
+### `slm_preempt_point()` — voluntary preemption points
+
+Defined in `kernel/include/preempt_point.h`. On `COOP_PREEMPT`
+platforms the macro expands to a small helper that does:
+
+1. Bump `slm_preempt_point_calls` (diagnostic counter).
+2. Bail out if the current CPU has `preempt_disabled` set.
+3. Read `CNTPCT_EL0`. Compare against the per-CPU coop deadline.
+4. Return immediately if the quantum has not elapsed (~5–8
+   instructions on the not-due path, branch not taken).
+5. Otherwise call `schedule()` — which itself runs
+   `coop_preempt_maybe_tick()` and may switch to a different
+   runnable task. Bumps `slm_preempt_point_schedule_calls`.
+
+On non-`COOP_PREEMPT` platforms the macro expands to `((void)0)`.
+Call sites can therefore be unconditional.
+
+#### Preemption-point policy (mandatory for in-tree code)
+
+Any in-tree loop that may iterate **more than ~1 000 times** without
+calling a yielding primitive (`yield()`, `sleep_*`, blocking IPC,
+`spin_lock_irqsave` / `spin_unlock_irqrestore`, `uart_*`, `task_exit`,
+etc.) **must** call `slm_preempt_point()` on its back-edge. The macro
+is cheap enough that "when in doubt, add it" is the right call —
+adding one preempt point per back-edge has no measurable cost on the
+hot path.
+
+Examples already following the policy:
+
+- `kernel/tests/test_integration.c:delay()` — loops `count` nops; one
+  preempt point per iteration.
+- `kernel/ai_accel/hailo/hailo_control.c:wait_for_response` — 100 µs
+  poll with up to 5 s timeout (50 000 iterations); one preempt point
+  per iteration. Lets the scheduler swap in another task while
+  firmware is still computing.
+- `kernel/ai_accel/hailo/hailo_vdma.c` — VDMA channel poll loops,
+  same structure as `wait_for_response`.
+
+Reviewers looking at long loops should ask: *what's the worst-case
+iteration count, and is there at least one yielding call (or
+preempt-point) inside the loop body?* If neither, request the macro
+be added.
+
+#### Diagnostic counters
+
+Both counters are read via `extern volatile uint64_t` declared in
+`preempt_point.h`. They are best-effort (no atomics on the fast
+path), suitable for asserting in tests and for surfacing in the
+`cpu` shell command. Regression tests:
+
+- `test_slm_preempt_point_callable` (all platforms) — asserts the
+  macro can be invoked 1 024 times without faulting.
+- `test_slm_preempt_point_drives_schedule` (`COOP_PREEMPT` only) —
+  asserts a 50 ms tight loop of macro calls produces ≥ 4 schedule()
+  entries (one per 10 ms quantum, allowing one missed boundary).
+
+Both live in `kernel/tests/test_coop_preempt.c`.
+
 ## Priority System
 
 ### Priority Levels

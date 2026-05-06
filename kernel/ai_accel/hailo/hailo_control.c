@@ -53,6 +53,7 @@
 #include "debug.h"
 #include "md5.h"
 #include "spinlock.h"
+#include "preempt_point.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -268,6 +269,13 @@ static int wait_for_response(uint32_t timeout_us)
         }
         hailo_platform->udelay(poll_interval_us);
         elapsed += poll_interval_us;
+        /* Long-poll cooperation: at 100 µs poll interval and up to 5 s
+         * timeout, this loop can run 50,000 iterations on one CPU
+         * without yielding. slm_preempt_point() lets the scheduler
+         * fire its 10 ms quantum on COOP_PREEMPT platforms (Pi 5,
+         * Jetson). No-op on QEMU / x86-64 where the timer ISR
+         * handles preemption. */
+        slm_preempt_point();
     }
     return HAILO_ERR_TIMEOUT;
 }
