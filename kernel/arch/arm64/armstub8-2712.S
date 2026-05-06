@@ -125,10 +125,10 @@ _start:
      *   HCE [8]  = 1  Enable HVC instruction
      *   RW  [10] = 1  EL2 is AArch64
      *
-     * Leave bits 4 (RES1), 5 (RES1), 6 (EA), and high bits as TF-A
-     * set — those are platform-implementation-defined and clobbering
-     * them risks subtle regressions (Pi 5's TF-A relies on EA=1 for
-     * synchronous error abort routing for example).
+     * Leave bits 3 (EA), 4 (RES1), 5 (RES1), 9 (SIF), and high
+     * bits as TF-A set — clobbering them risks subtle regressions
+     * (Pi 5's TF-A relies on EA=1 for synchronous error abort
+     * routing, for example).
      */
     mrs     x0, scr_el3
     orr     x0, x0, #(1 << 0)               /* NS = 1 */
@@ -152,7 +152,10 @@ _start:
 
     /*
      * ACTLR_EL3: Allow EL2 access to implementation-defined features.
-     * Set to all-1s to avoid trapping implementation-defined registers.
+     * The all-1s value matches the standard
+     * raspberrypi/tools/armstubs/armstub8.S — known good on
+     * BCM2712 / Cortex-A76. Don't reduce without verifying which
+     * bits TF-A's downstream paths rely on (PSCI, SDEI).
      */
     mov     x0, #0xFFFFFFFF
     msr     actlr_el3, x0
