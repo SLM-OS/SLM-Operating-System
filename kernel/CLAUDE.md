@@ -196,6 +196,56 @@ The 8-attempt bound is generous: each successful steal/migrate moves a task at m
 
 ---
 
+## Task Stack Sizing — `STACK_SIZE` (May 2026)
+
+`STACK_SIZE` in `kernel/include/config.h` is **256 KB** per task. Do
+not reduce it without auditing the SLM forward path's call depth on
+the workload that triggered the bump (Qwen2.5-1.5B-Instruct Q4_K_M
+GGUF). A 64 KB stack — the previous default — was insufficient for
+the full forward chain through 30 layers of attention + SwiGLU +
+matmul kernels: a single large intra-frame allocation could decrement
+SP past the bottom-of-stack canary in one go, landing the SP inside
+the adjacent task's stack region. Symptom is a wild fault on the next
+cooperative yield, far from the original cause. See PR #643.
+
+The `MAX_TASKS * STACK_SIZE` worst-case PMM budget is now 16 MB
+(64 tasks × 256 KB). Comfortable on every shipping platform; bump
+the assertion in `config.h` if `MAX_TASKS` ever grows past 64.
+
+---
+
+## Stack-Overflow Guard — save-side SP-range assertion (May 2026)
+
+`schedule()` in `kernel/sched/sched.c` validates the **live SP
+register** against `current->stack_base..current->stack_top` immediately
+before every `switch_to`. On mismatch, the kernel panics with the
+offending task's id, name, the live SP, and the expected range —
+catches the class of stack overflows that the bottom-of-stack canary
+(`TASK_STACK_CANARY_BYTES = 64`) misses (a frame large enough to
+skip past the canary in one SP decrement leaves the canary intact
+while corrupting the neighbor task).
+
+The SP read is platform-gated:
+
+```c
+#if defined(PLATFORM_X86_64)
+    __asm__ volatile("mov %%rsp, %0" : "=r"(live_sp));
+#else
+    __asm__ volatile("mov %0, sp"   : "=r"(live_sp));
+#endif
+```
+
+Mirror this pattern (or call into a shared helper) for any new code
+that needs to read SP cross-platform — the existing site is in
+`schedule()`, plus `panic.c::dump_registers`.
+
+The page-fault handler in `kernel/arch/arm64/exceptions.c` also
+prints a per-task canary inventory (`task_canary_check_all_unlocked`)
+inline with the GPR dump, covering the case where an overflow does
+write through the canary region.
+
+---
+
 ## Idle Task DAIF
 
 The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry. `context.S` saves this masked DAIF into idle's context. On resume, the restored DAIF keeps IRQ masked. If the unmask is only at function entry, idle would loop forever in `wfi` with IRQ disabled.
@@ -675,4 +725,4 @@ reserve map vs root-node `memreserve` property, `/chosen` entropy,
 
 ---
 
-*Last updated: December 2025*
+*Last updated: May 2026*
