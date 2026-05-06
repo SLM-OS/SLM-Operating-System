@@ -1294,7 +1294,7 @@ static void s3_steal_work_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|gpu|stats|all>\r\n");
+        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|q4kdot|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -1589,6 +1589,54 @@ int cmd_bench(int argc, char *argv[])
         rust_matmul_bench_fp16(iters);
         shell_puts("--- INT8 (A and B quantized, FP32 output) ---\r\n");
         rust_matmul_bench_int8(iters);
+    } else if (strcmp(argv[1], "q4kdot") == 0) {
+        /* Q4_K · Q8_K vec_dot microbenchmark. Dominant per-token decode
+         * cost on Qwen2.5; useful for measuring NEON kernel speedups
+         * in isolation from the rest of the forward pass.
+         *
+         * Usage: bench q4kdot [scalar|neon] [elements [iterations]]
+         *
+         *   scalar  — force the scalar-only path
+         *             (`vec_dot_q4_k_q8_k_scalar`); use to capture the
+         *             baseline number for an A/B vs the NEON SDOT
+         *             kernel from the same kernel binary.
+         *   neon    — explicit "use the production dispatcher". Same
+         *             as omitting the kernel selector.
+         *   default — production dispatcher (NEON on aarch64).
+         *
+         * Defaults match Qwen2.5-1.5B's hidden_size (1536, the smallest
+         * inner dim that appears in the decoder's projection matmuls).
+         */
+        uint32_t elements = 1536;
+        uint32_t iters = 200;
+        uint32_t force_scalar = 0;
+        int arg_off = 2;  /* index of first non-verb arg */
+        if (argc > arg_off) {
+            if (strcmp(argv[arg_off], "scalar") == 0) {
+                force_scalar = 1;
+                arg_off++;
+            } else if (strcmp(argv[arg_off], "neon") == 0) {
+                arg_off++;
+            }
+        }
+        if (argc > arg_off) {
+            uint32_t n;
+            if (shell_parse_uint(argv[arg_off], &n) == 0 &&
+                n >= 256 && n <= (1u << 20)) {
+                elements = n;
+            }
+            arg_off++;
+        }
+        if (argc > arg_off) {
+            uint32_t n;
+            if (shell_parse_uint(argv[arg_off], &n) == 0 &&
+                n > 0 && n <= 100000) {
+                iters = n;
+            }
+        }
+        shell_puts("Q4_K vec_dot Benchmark\r\n");
+        shell_puts("======================\r\n");
+        rust_bench_q4k_q8k_dot(elements, iters, force_scalar);
     } else if (strcmp(argv[1], "gpu") == 0) {
         shell_puts("GPU Cache Sync Benchmark\r\n");
         shell_puts("========================\r\n");

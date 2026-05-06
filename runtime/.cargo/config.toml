@@ -14,7 +14,15 @@ rustflags = [
     # NEON is baseline for aarch64 (ARMv8-A mandates it), but make it
     # explicit so the `#[target_feature(enable = "neon")]` attributes on
     # SIMD helpers in inference/ops.rs are consistent with build config.
-    "-C", "target-feature=+neon",
+    #
+    # `+dotprod` adds the ARMv8.2-A FEAT_DotProd extension (UDOT/SDOT
+    # instructions). Required by the NEON Q4_K vec_dot kernel in
+    # `inference/quant.rs::dot_q4k_q8k_block_neon`. Mandatory on every
+    # CPU we currently target — Cortex-A76 (Pi 5, QEMU virt's default
+    # cortex-a76 cpu model) and Cortex-A78AE (Jetson Orin Nano) — so
+    # enabling it globally is safe; the runtime won't load on a hypo-
+    # thetical pre-v8.2 ARMv8 CPU, which we don't ship to.
+    "-C", "target-feature=+neon,+dotprod",
 ]
 
 [target.x86_64-unknown-none]

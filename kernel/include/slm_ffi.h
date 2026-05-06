@@ -759,6 +759,23 @@ extern int rust_matmul_bench_fp16(uint32_t iterations);
 extern int rust_matmul_bench_int8(uint32_t iterations);
 
 /*
+ * Q4_K vec_dot benchmark — one row dot product over `elements` weights
+ * × Q8_K acts, repeated `iterations` times. The Qwen2.5 per-token
+ * decode loop dispatches O(layers × matmuls × rows) of these, so this
+ * is the right thing to time before/after a NEON Q4_K kernel change.
+ * `elements` is rounded down to a multiple of 256 (Q4_K block size);
+ * < 256 returns -1. Reports min/avg/max ns + GFLOPS. Returns 0 / -1.
+ *
+ * @force_scalar: 0 = use the production `vec_dot_q4_k_q8_k` (NEON on
+ *                aarch64); non-zero = force `vec_dot_q4_k_q8_k_scalar`
+ *                so one deploy can produce a scalar baseline + a NEON
+ *                measurement back-to-back from the same boot.
+ */
+extern int rust_bench_q4k_q8k_dot(uint32_t elements,
+                                  uint32_t iterations,
+                                  uint32_t force_scalar);
+
+/*
  * ==========================================================================
  * GPU Compute FFI (Phase 5, M3)
  * ==========================================================================
