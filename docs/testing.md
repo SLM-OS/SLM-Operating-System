@@ -324,6 +324,60 @@ Validates the deadline-aware scheduler with priority ordering, deadline boost, c
 - Tests use CPU 0 with IRQ protection for deterministic ordering
 - Benchmark tests log results with assessment (Excellent < 10µs, Good < 50µs, etc.)
 
+### Cooperative-Preemption Tests (`kernel/tests/test_coop_preempt.c`)
+
+Validates cooperative-preemption infrastructure on platforms where the
+hardware timer IRQ doesn't deliver to the kernel (Pi 5, Jetson — see
+`docs/scheduler.md` §"Preemption Model"). Tests run via Unity
+framework (5 tests total).
+
+| Test | Description |
+|------|-------------|
+| test_cntpct_monotonic | `timer_get_count()` (CNTPCT_EL0) advances across a 1,000-iteration nop loop |
+| test_pit_ticks_advances_over_time | After ~50 ms of yields, `pit_ticks` advanced ≥4 times (one per ~10 ms quantum) |
+| test_timer_handler_count_advances | After ~50 ms of yields, `timer_handler_count` advanced ≥4 times |
+| test_slm_preempt_point_callable | `slm_preempt_point()` macro invoked 1,024 times must not fault (all platforms) |
+| test_slm_preempt_point_drives_schedule | (`COOP_PREEMPT` only) 50 ms tight loop of `slm_preempt_point()` calls produces ≥`PREEMPT_POINT_TEST_MIN_SCHED` (4) `schedule()` entries via the slow path |
+
+**Test Notes:**
+- The fast/slow path counters (`slm_preempt_point_calls` /
+  `slm_preempt_point_schedule_calls`) are extern `volatile uint64_t`
+  declared in `kernel/include/preempt_point.h`.
+- A `_Static_assert(PREEMPT_POINT_TEST_WINDOW_MS / (1000UL / TIMER_HZ) >= 2, ...)`
+  guards the test's tolerance math at compile time so a future tweak
+  to `TIMER_HZ` or the window size can't silently underflow the
+  schedule-count expectation.
+- The "drives schedule" test verifies the Track A contract from #635
+  / PR #636: an in-tree CPU-bound loop that calls `slm_preempt_point()`
+  cooperates with the scheduler instead of monopolizing its CPU.
+
+### CPU Supervisor Tests (`kernel/tests/test_cpu_supervisor.c`)
+
+Validates parameter handling and diagnostic API surface for the
+secondary-CPU resurrection path (#216 Tier 2,
+`kernel/sched/cpu_supervisor.c`). Tests run via Unity framework (5
+tests total).
+
+| Test | Description |
+|------|-------------|
+| test_resurrect_rejects_cpu_zero | `cpu_supervisor_resurrect(0)` returns negative — CPU 0 hosts the supervisor itself |
+| test_resurrect_rejects_out_of_range | `cpu_supervisor_resurrect(MAX_CPUS+1)` returns negative |
+| test_resurrect_rejects_unconfigured_cpu | `cpu_supervisor_resurrect(cpu_count)` returns negative (rejects ids in the unconfigured tail) |
+| test_get_stats_zero_baseline | After `memset(stats, 0xAA)` + `cpu_supervisor_get_stats(&stats)`, the snapshot fields are no longer the pre-fill pattern (proves the call is not a no-op) |
+| test_get_stats_null_safe | `cpu_supervisor_get_stats(NULL)` does not fault — mirrors the contract of other diagnostic snapshot APIs |
+
+**Test Notes:**
+- Pi 5–only coverage of the actual recovery cycle (kill CPU → wait
+  for dormancy detection → verify resurrected) lives in the Pi 5
+  hardware boot-test workflow, not as Unity tests — faulting a CPU
+  is a destructive side effect that disrupts every following test's
+  run-queue assumptions. The harness-driven path is documented in
+  the Integration Tests section above.
+- The non-Pi5 stub returns `-1` for any input. The
+  `kernel/include/cpu_supervisor.h` header documents this so callers
+  treat any negative return as "feature not supported on this
+  platform" rather than reading the per-code enum.
+
 ### PI Mutex Tests (`kernel/tests/test_pi_mutex.c`)
 
 Validates the priority-inheriting mutex implementation. Tests run via Unity framework.
@@ -840,6 +894,45 @@ Multi-core integration tests that exercise the scheduler with actual tasks runni
 - Task migration test verifies `sched_migrate_task()` moves READY tasks between run queues
 - Lock contention test counts atomic increments to detect race conditions
 - Lifecycle test checks PMM free pages before/after to detect memory leaks
+
+#### Harness-driven dormancy recovery (#216 Tier 3, Pi 5 only)
+
+`tearDown()` in `test_integration.c` watches `sched_diag_idle_loops[c]`
+for every secondary CPU after each test completes. If a CPU's idle
+counter is unchanged across `DORMANCY_STALL_THRESHOLD` (default 3)
+consecutive `tearDown` calls, the harness:
+
+1. Emits `[dormancy-enter] CPU N dormant at <test_name>` to UART so
+   the log pins which test wedged the CPU.
+2. Calls `cpu_supervisor_resurrect((uint32_t)c)` inline to drain the
+   dormant CPU's run queue and re-issue PSCI CPU_ON.
+3. Emits `[dormancy-recover-attempt] CPU N rc=<code>` so the recovery
+   outcome is in the log.
+4. On a later `tearDown` where the CPU's idle counter resumes, emits
+   `[dormancy-recover] CPU N resumed at <test_name>`.
+
+The auto-recovery exists because the always-on Tier 2 CPU supervisor
+task (`kernel/sched/cpu_supervisor.c`) is gated on `!ENABLE_BOOT_TESTS`
+— scheduler tests assert exact CPU 0 ready-counts and the
+supervisor's CPU 0 background task would perturb them. The harness
+fires the same recovery driver inline so multi-CPU test suites
+survive a per-test fault without losing the rest of the run.
+
+**Effect on test reproducibility:** if test N wedges CPU 1, tests
+N+1 through N+4 see CPU 1 dormant before recovery fires. Cross-CPU
+tests in that window may exit early reporting "no progress on CPU 1"
+but won't false-fail the suite. Runs are reproducible enough for
+regression detection but exact per-test cycle counts are not.
+
+**Tasks left on a dormant CPU's queue are leaked**, not migrated —
+the fault that killed the CPU may have left them in indeterminate
+state; auto-migration would risk propagating corruption. The
+diagnostic UART line above pins the culprit test before recovery
+scrubs the queue.
+
+See `kernel/sched/cpu_supervisor.c`, `kernel/include/cpu_supervisor.h`,
+and the `cpu resurrect <N>` shell subcommand in `docs/shell.md` for
+the manual recovery path used by hardware operators.
 
 ### FFI Tests (`runtime/src/lib.rs`)
 
