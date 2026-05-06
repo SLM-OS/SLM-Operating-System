@@ -625,13 +625,17 @@ int slm_gpu_dispatch_breaker_test_count(void)
  * overwrites `g_handoff`).
  *
  * Lock-hold-time note: callers run inside `g_gpu_dispatch_lock`
- * with IRQs disabled. This warmup doubles the worst-case lock-hold
- * on first dispatch — typical ~50-200 ms (one inference) but
- * `ga10b_submit_and_poll`'s 2 s per-op timeout means a hung GPU
- * could hold the lock + IRQs for ~16 s extra in pathological
- * cases. The user's dispatch already exercises this path (just
- * twice on first call); a future async-warmup-from-kernel_main
- * move would relieve the lock-hold cost. */
+ * with IRQs disabled. This warmup combines with the post-inherit
+ * throwaway dispatch (Option A for #596 — see
+ * `g_post_inherit_double_dispatch_pending`) to triple the
+ * worst-case lock-hold on first dispatch: warmup + throwaway +
+ * user's real dispatch all run under the same lock acquisition
+ * before the user gets their result. Typical cost is ~150-600 ms
+ * (3 × one MNIST inference at ~50-200 ms each); pathological
+ * (hung GPU on every op) is bounded by `ga10b_submit_and_poll`'s
+ * 2 s per-op × 8-op MNIST pipeline × 3 dispatches ≈ 48 s of IRQ-
+ * off in the worst case. A future async-warmup-from-kernel_main
+ * move would relieve all three. */
 static int ensure_bringup(uint32_t kind)
 {
     if (kind >= GA10B_PIPELINE_KIND_COUNT) {
@@ -675,6 +679,29 @@ static int ensure_bringup(uint32_t kind)
     return 0;
 }
 
+/* Consume the post-inherit double-dispatch flag if armed: run one
+ * throwaway launch_kernel and clear the flag. Both user-call sites
+ * (slm_gpu_run, slm_gpu_run_with_input) need the identical sequence,
+ * so factoring it out keeps them in lockstep.
+ *
+ * Non-fatal: a discarded-dispatch failure logs but does not
+ * propagate — the user dispatch that follows will surface any
+ * persistent problem with its own rc. Caller must hold
+ * g_gpu_dispatch_lock and have already verified `kind` is in range
+ * (ensure_bringup does that). */
+static void consume_post_inherit_double_dispatch(uint32_t kind,
+                                                  struct ga10b_bringup *b)
+{
+    if (!g_post_inherit_double_dispatch_pending[kind]) return;
+    g_post_inherit_double_dispatch_pending[kind] = false;
+    int discard_rc = ga10b_bringup_launch_kernel(b);
+    if (discard_rc < 0) {
+        uart_printf("[gpu-kind=%lu] post-inherit throwaway dispatch "
+                    "returned %d (continuing to user dispatch)\n",
+                    (unsigned long)kind, discard_rc);
+    }
+}
+
 /* ---- Generic kind-parameterized GPU dispatch FFI ----
  *
  * The functions below take `kind` as the first argument and route
@@ -694,18 +721,9 @@ int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
     if (rc < 0) goto out;
     struct ga10b_bringup *b = &g_bringups[kind];
 
-    /* Post-inherit double-dispatch (Option A for #596). One throwaway
-     * launch on the first user call after a fresh inherit; the user
-     * sees the second dispatch's output. */
-    if (g_post_inherit_double_dispatch_pending[kind]) {
-        g_post_inherit_double_dispatch_pending[kind] = false;
-        int discard_rc = ga10b_bringup_launch_kernel(b);
-        if (discard_rc < 0) {
-            uart_printf("[gpu-kind=%lu] post-inherit throwaway dispatch "
-                        "returned %d (continuing to user dispatch)\n",
-                        (unsigned long)kind, discard_rc);
-        }
-    }
+    /* Option A for #596 — one throwaway launch on the first user
+     * call after a fresh inherit. */
+    consume_post_inherit_double_dispatch(kind, b);
 
     rc = ga10b_bringup_launch_kernel(b);
     if (rc < 0) goto out;
@@ -773,19 +791,11 @@ int slm_gpu_run_with_input(uint32_t kind,
     int n = ga10b_bringup_set_input(b, input, input_cap);
     if (n < 0) { rc = n; goto out; }
 
-    /* Post-inherit double-dispatch (Option A for #596). The throwaway
-     * launch goes out *after* set_input so the discarded dispatch
-     * already sees the user's fresh input — both dispatches read the
-     * same input buffer, the user just sees the second result. */
-    if (g_post_inherit_double_dispatch_pending[kind]) {
-        g_post_inherit_double_dispatch_pending[kind] = false;
-        int discard_rc = ga10b_bringup_launch_kernel(b);
-        if (discard_rc < 0) {
-            uart_printf("[gpu-kind=%lu] post-inherit throwaway dispatch "
-                        "returned %d (continuing to user dispatch)\n",
-                        (unsigned long)kind, discard_rc);
-        }
-    }
+    /* Option A for #596. Throwaway dispatch is placed *after*
+     * set_input so the discarded launch already sees the user's
+     * fresh input — both dispatches read the same input buffer, the
+     * user just sees the second result. */
+    consume_post_inherit_double_dispatch(kind, b);
 
     rc = ga10b_bringup_launch_kernel(b);
     if (rc < 0) goto out;
