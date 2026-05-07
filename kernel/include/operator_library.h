@@ -73,14 +73,27 @@ struct operator_library {
     size_t         sass_region_len;
 };
 
-/* Parser error codes. Negative for the kernel return-int convention. */
-#define OPERATOR_LIBRARY_ERR_NULL      (-1)  /* NULL pointer arg          */
-#define OPERATOR_LIBRARY_ERR_TRUNC     (-2)  /* shorter than declared     */
-#define OPERATOR_LIBRARY_ERR_MAGIC     (-3)  /* magic mismatch            */
-#define OPERATOR_LIBRARY_ERR_VERSION   (-4)  /* version / schema mismatch */
-#define OPERATOR_LIBRARY_ERR_RESERVED  (-5)  /* reserved field non-zero   */
-#define OPERATOR_LIBRARY_ERR_CHECKSUM  (-6)  /* checksum mismatch         */
-#define OPERATOR_LIBRARY_ERR_LAYOUT    (-7)  /* offsets out of range      */
+/* Parser error codes. Negative for the kernel return-int convention.
+ * `_NOT_FOUND` is also returned by `operator_library_lookup` on a
+ * lookup miss (no entry matched the requested triple). */
+#define OPERATOR_LIBRARY_ERR_NULL       (-1)  /* NULL pointer arg          */
+#define OPERATOR_LIBRARY_ERR_TRUNC      (-2)  /* shorter than declared     */
+#define OPERATOR_LIBRARY_ERR_MAGIC      (-3)  /* magic mismatch            */
+#define OPERATOR_LIBRARY_ERR_VERSION    (-4)  /* version / schema mismatch */
+#define OPERATOR_LIBRARY_ERR_RESERVED   (-5)  /* reserved field non-zero   */
+#define OPERATOR_LIBRARY_ERR_CHECKSUM   (-6)  /* checksum mismatch         */
+#define OPERATOR_LIBRARY_ERR_LAYOUT     (-7)  /* offsets out of range      */
+#define OPERATOR_LIBRARY_ERR_NOT_FOUND  (-8)  /* lookup miss               */
+
+/* Defensive cap on `op_count` from the inner header. The packed
+ * format permits up to 2^32 entries in theory, but a real library
+ * is on the order of a few dozen even with the full op × tier ×
+ * dtype matrix. A blob declaring more than this is rejected with
+ * ERR_LAYOUT — protects against malicious or corrupted input
+ * triggering pathologically large scans, and the cap is well above
+ * any realistic value. Bump if a future library legitimately
+ * needs more. */
+#define OPERATOR_LIBRARY_MAX_OPS         65536u
 
 /*
  * Parse a packed library blob. Validates the outer header (magic,
@@ -99,7 +112,9 @@ int operator_library_open(struct operator_library *out,
 /*
  * Look up an entry by (op_kind, tier, dtype). On success, returns 0
  * and *out_sass / *out_size point to a region inside the library
- * blob. On miss, returns -1; *out_sass and *out_size are unchanged.
+ * blob. On miss, returns OPERATOR_LIBRARY_ERR_NOT_FOUND; *out_sass
+ * and *out_size are unchanged. Returns OPERATOR_LIBRARY_ERR_NULL on
+ * a NULL or unopened-handle argument.
  *
  * Linear scan — N is small (a few dozen entries even with full op +
  * tier + dtype matrix) so a bsearch isn't worth the indexing cost.

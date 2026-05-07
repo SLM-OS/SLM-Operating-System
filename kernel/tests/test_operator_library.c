@@ -205,22 +205,28 @@ static void test_lookup_misses_unknown_combo(void)
     TEST_ASSERT_EQUAL_INT(0, operator_library_open(&lib, buf, total));
 
     /* Wrong op_kind. */
-    TEST_ASSERT_EQUAL_INT(-1,
+    TEST_ASSERT_EQUAL_INT(OPERATOR_LIBRARY_ERR_NOT_FOUND,
         operator_library_lookup(&lib,
             SLM_GPU_OP_CONV2D, SLM_GPU_TIER_SIMT,
             SLM_GPU_DTYPE_FP32, NULL, NULL));
 
     /* Wrong tier. */
-    TEST_ASSERT_EQUAL_INT(-1,
+    TEST_ASSERT_EQUAL_INT(OPERATOR_LIBRARY_ERR_NOT_FOUND,
         operator_library_lookup(&lib,
             SLM_GPU_OP_GEMM_GENERIC, SLM_GPU_TIER_HMMA,
             SLM_GPU_DTYPE_FP32, NULL, NULL));
 
     /* Wrong dtype. */
-    TEST_ASSERT_EQUAL_INT(-1,
+    TEST_ASSERT_EQUAL_INT(OPERATOR_LIBRARY_ERR_NOT_FOUND,
         operator_library_lookup(&lib,
             SLM_GPU_OP_GEMM_GENERIC, SLM_GPU_TIER_SIMT,
             SLM_GPU_DTYPE_FP16, NULL, NULL));
+
+    /* NULL handle returns ERR_NULL, distinct from a miss. */
+    TEST_ASSERT_EQUAL_INT(OPERATOR_LIBRARY_ERR_NULL,
+        operator_library_lookup(NULL,
+            SLM_GPU_OP_GEMM_GENERIC, SLM_GPU_TIER_SIMT,
+            SLM_GPU_DTYPE_FP32, NULL, NULL));
 }
 
 static void test_open_rejects_null(void)
@@ -371,6 +377,43 @@ static void test_lookup_returns_first_match_on_duplicate(void)
     TEST_ASSERT_EQUAL_HEX8('A', sass[0]);
 }
 
+/* Forge a blob with op_count just above OPERATOR_LIBRARY_MAX_OPS,
+ * with a valid checksum so the parser reaches the cap check. We
+ * don't need to lay out fake entries — the cap fires before
+ * entries_bytes is even computed. */
+static void test_open_rejects_op_count_above_cap(void)
+{
+    /* Outer header (24) + inner header (8). Pad with zeros so the
+     * declared payload_len matches what we wrote. */
+    static uint8_t buf[256];
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, "OPLB", 4);
+    put_u16_le(buf + 4,  OPERATOR_LIBRARY_VERSION_V1);
+    put_u16_le(buf + 6,  0);
+    put_u16_le(buf + 8,  OPERATOR_LIBRARY_SCHEMA_V1);
+    put_u16_le(buf + 10, 0);
+    /* payload_len = inner header only (8 B); no entries declared
+     * inline because the cap rejects before we'd read them. */
+    put_u32_le(buf + 12, OPERATOR_LIBRARY_INNER_HEADER_LEN);
+    /* checksum filled below */
+    put_u32_le(buf + 20, 0);
+
+    uint8_t *payload = buf + OPERATOR_LIBRARY_OUTER_HEADER_LEN;
+    /* op_count = MAX_OPS + 1 → cap rejects. */
+    put_u32_le(payload,     OPERATOR_LIBRARY_MAX_OPS + 1u);
+    put_u32_le(payload + 4, 0);
+
+    uint32_t cks = operator_library_checksum32(
+        payload, OPERATOR_LIBRARY_INNER_HEADER_LEN);
+    put_u32_le(buf + 16, cks);
+
+    size_t total = OPERATOR_LIBRARY_OUTER_HEADER_LEN
+                 + OPERATOR_LIBRARY_INNER_HEADER_LEN;
+    struct operator_library lib;
+    TEST_ASSERT_EQUAL_INT(OPERATOR_LIBRARY_ERR_LAYOUT,
+        operator_library_open(&lib, buf, total));
+}
+
 int test_suite_operator_library(void)
 {
     UnityBegin("test_operator_library.c");
@@ -384,6 +427,7 @@ int test_suite_operator_library(void)
     RUN_TEST(test_open_rejects_reserved_set);
     RUN_TEST(test_open_rejects_bad_checksum);
     RUN_TEST(test_open_rejects_bad_layout);
+    RUN_TEST(test_open_rejects_op_count_above_cap);
     RUN_TEST(test_lookup_returns_first_match_on_duplicate);
     return UnityEnd();
 }

@@ -111,6 +111,14 @@ int operator_library_open(struct operator_library *out,
     if (read_u32_le(payload + 4) != 0) {
         return OPERATOR_LIBRARY_ERR_RESERVED;
     }
+    /* Sanity cap. The format permits up to 2^32 entries; a real
+     * library has a few dozen. Reject anything pathologically large
+     * before computing entries_bytes — defends against integer
+     * overflow on a hypothetical 32-bit `size_t` port and keeps
+     * the linear-scan loop bounded against malicious blobs. */
+    if (op_count > OPERATOR_LIBRARY_MAX_OPS) {
+        return OPERATOR_LIBRARY_ERR_LAYOUT;
+    }
 
     /* Entries array + SASS region layout. */
     size_t entries_bytes = (size_t)op_count * OPERATOR_LIBRARY_ENTRY_LEN;
@@ -134,8 +142,15 @@ int operator_library_open(struct operator_library *out,
         }
         uint64_t sass_offset = read_u64_le(e + 16);
         uint64_t sass_size   = read_u64_le(e + 24);
-        /* Defensive: sass_offset + sass_size must not overflow
-         * size_t and must lie within the SASS region. */
+        /* Region containment without integer-overflow risk: check
+         * sass_offset on its own first, then check sass_size against
+         * the REMAINING space (`region_len - offset`). Adding
+         * `sass_offset + sass_size` first would itself overflow on
+         * a malicious blob with `sass_size` near UINT64_MAX, after
+         * which the comparison would silently pass. The subtract
+         * form is safe because the `sass_offset > sass_region_len`
+         * check immediately above guarantees the subtraction never
+         * underflows. */
         if (sass_offset > sass_region_len) {
             return OPERATOR_LIBRARY_ERR_LAYOUT;
         }
@@ -157,7 +172,7 @@ int operator_library_lookup(const struct operator_library *lib,
                             uint32_t op_kind, uint32_t tier, uint32_t dtype,
                             const uint8_t **out_sass, size_t *out_size)
 {
-    if (!lib || !lib->entries) return -1;
+    if (!lib || !lib->entries) return OPERATOR_LIBRARY_ERR_NULL;
 
     for (uint32_t i = 0; i < lib->op_count; i++) {
         const uint8_t *e = lib->entries
@@ -172,5 +187,5 @@ int operator_library_lookup(const struct operator_library *lib,
         if (out_size) *out_size = (size_t)sass_size;
         return 0;
     }
-    return -1;
+    return OPERATOR_LIBRARY_ERR_NOT_FOUND;
 }
