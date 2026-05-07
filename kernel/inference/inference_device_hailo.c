@@ -346,16 +346,20 @@ void hailo_fw_drain_d2h_notifications(uint32_t max_events)
 
 /* #361 settle pings (2026-05-06): APP-CPU IDENTIFY + GET_DEVICE_
  * INFORMATION pair issued before each CORE-CPU RPC during HEF load.
- * HailoRT v4.23's wire capture interleaves these between every major
- * step; SLM-OS used to send none. `hailo ctxsmoke full pings` on
- * pi-5-1 reproducibly silences the CPU_ECC_FATAL fw fires at
- * CHANGE_STATUS(ENABLED) when pings are present (verified across two
- * fresh-boot A/B pairs). One CPU_ECC_FATAL still appears at SET_CTX
- * (DYNAMIC), so the suppression is partial — but ENABLED is the
- * load-completing transition and silencing it there is the relevant
- * outcome. Best-effort: failures are logged and load continues, since
- * pings are not protocol-required (every load-RPC return code stays
- * 0 with or without them). */
+ * Mirrors HailoRT v4.23's wire-capture cadence (which interleaves
+ * APP-CPU pings between every major CORE step). Best-effort: failures
+ * are logged and load continues — pings are not protocol-required
+ * (every load-RPC return code stays 0 with or without them).
+ *
+ * Hardware A/B history on pi-5-1:
+ *   - On `hailo ctxsmoke full` (synthetic contexts), pings reproducibly
+ *     silence the CPU_ECC_FATAL fw fires at CHANGE_STATUS(ENABLED).
+ *   - On real `hailo load /mnt/files/user.hef sched` (MNIST), the load
+ *     succeeds whether pings fire or are stubbed to no-op — production
+ *     load's inter-step DMA + parser work is apparently long enough
+ *     that the ENABLED-time event doesn't trip. Pings don't HURT the
+ *     production path (still rc=0 everywhere) and matching HailoRT is
+ *     cheap insurance against future fw versions, so they stay on. */
 static void context_switch_settle_pings(const char *where)
 {
     struct hailo_control_identify_response idr;
