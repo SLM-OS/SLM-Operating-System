@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "comment": "Operator library manifest (#663). Each entry maps a (op_kind, tier, dtype) triple to a compiled SASS blob. The blob path is resolved relative to this manifest's directory. Update this file when adding a new operator/tier/dtype variant; keep in lockstep with enum slm_gpu_op_kind / SLM_GPU_TIER_* / enum slm_gpu_dtype in kernel/include/gpu_handoff.h.",
+
+  "entries": [
+    {
+      "op_kind": "GEMM_GENERIC",
+      "tier":    "SIMT",
+      "dtype":   "FP32",
+      "sass":    "gemm_fp32_shader.sass",
+      "comment": "Today's CUDA-core FP32 GEMM. Reads M/K/N from cbuf at dispatch time. Source: scripts/cuda/gemm_fp32.cu."
+    },
+    {
+      "op_kind": "CONV2D",
+      "tier":    "SIMT",
+      "dtype":   "FP32",
+      "sass":    "conv2d_fp32_direct_shader.sass",
+      "comment": "Direct (no im2col) FP32 conv. Source: scripts/cuda/conv2d_fp32_direct.cu. To be replaced by implicit-GEMM HMMA conv (#662) for HMMA tier."
+    },
+    {
+      "op_kind": "ADD_BIAS",
+      "tier":    "SIMT",
+      "dtype":   "FP32",
+      "sass":    "add_bias_relu_fp32_shader.sass",
+      "comment": "Add per-channel bias, optional ReLU via launcher cbuf flag. Source: scripts/cuda/add_bias_relu_fp32.cu."
+    },
+    {
+      "op_kind": "MAXPOOL",
+      "tier":    "SIMT",
+      "dtype":   "FP32",
+      "sass":    "maxpool2d_fp32_shader.sass",
+      "comment": "Spatial max pooling. Reads kernel/stride from cbuf. Source: scripts/cuda/maxpool2d_fp32.cu."
+    }
+  ],
+
+  "future_entries": {
+    "comment": "Add these when their kernels land. Documented here so the manifest reads as a roadmap, not a punch-list.",
+    "GEMM_GENERIC.HMMA.FP16":   "from #659 — gemm_hmma_fp16_shader.sass",
+    "CONV2D.HMMA.FP16":         "from #662 — conv2d_hmma_fp16_shader.sass (implicit-GEMM)",
+    "Q4K_DOT.SIMT.Q4K":         "future SLM-on-GPU work",
+    "GEMM_GENERIC.HMMA.BF16":   "tensor-core BF16 if a target model wants it",
+    "GEMM_GENERIC.IMMA.INT8":   "future quantized matmul on tensor cores"
+  }
+}

@@ -97,20 +97,47 @@ typedef struct {
 /*
  * Op-kind enum — keep in sync with runtime/src/inference/gpu_slm.rs::OpKind.
  *
- * Tier 1 / Tier 2 SASS kernels exist only for the matmul-shaped ops
- * (Q4kDot, Q4kGemm, GqaAttn, SwiGlu, LmHead). The element-wise /
- * gather ops (RmsNorm, Rope, Embedding) ship as a single SIMT kernel
- * variant — see plan §M6.D.
+ * Single namespace shared by the SLM transformer pipeline AND the CNN
+ * pipeline (per #663 alignment note). Tier 1 / Tier 2 SASS kernels
+ * exist for the matmul-shaped ops (Q4K_DOT, Q4K_GEMM, GQA_ATTN,
+ * SWIGLU, LM_HEAD, GEMM_GENERIC, CONV2D); element-wise / gather ops
+ * ship as a single SIMT variant.
+ *
+ * Discriminants 0..7 are pinned by gpu_slm.rs::OpKind. Add new ops
+ * after SLM_GPU_OP_LM_HEAD; keep low-numbered IDs stable.
  */
 enum slm_gpu_op_kind {
-    SLM_GPU_OP_RMSNORM   = 0,  /* element-wise, single tier         */
-    SLM_GPU_OP_ROPE      = 1,  /* element-wise, single tier         */
-    SLM_GPU_OP_EMBEDDING = 2,  /* gather, single tier               */
-    SLM_GPU_OP_Q4K_DOT   = 3,  /* matmul (decode), Tier-1 + Tier-2  */
-    SLM_GPU_OP_Q4K_GEMM  = 4,  /* matmul (prefill), Tier-1 + Tier-2 */
-    SLM_GPU_OP_GQA_ATTN  = 5,  /* fused attention, Tier-1 + Tier-2  */
-    SLM_GPU_OP_SWIGLU    = 6,  /* fused MLP, Tier-1 + Tier-2        */
-    SLM_GPU_OP_LM_HEAD   = 7,  /* final projection, Tier-1 + Tier-2 */
+    /* SLM transformer ops (0..7) — pinned, do not renumber. */
+    SLM_GPU_OP_RMSNORM       = 0,  /* element-wise, single tier         */
+    SLM_GPU_OP_ROPE          = 1,  /* element-wise, single tier         */
+    SLM_GPU_OP_EMBEDDING     = 2,  /* gather, single tier               */
+    SLM_GPU_OP_Q4K_DOT       = 3,  /* quant matmul (decode)             */
+    SLM_GPU_OP_Q4K_GEMM      = 4,  /* quant matmul (prefill)            */
+    SLM_GPU_OP_GQA_ATTN      = 5,  /* fused attention                   */
+    SLM_GPU_OP_SWIGLU        = 6,  /* fused MLP                         */
+    SLM_GPU_OP_LM_HEAD       = 7,  /* final projection                  */
+    /* CNN-shaped ops (8+). Generic GEMM and Conv2D are dtype-
+     * polymorphic — the (op_kind, tier, dtype) triple in the
+     * operator library disambiguates which kernel runs. */
+    SLM_GPU_OP_GEMM_GENERIC  = 8,  /* dense matmul, no quant            */
+    SLM_GPU_OP_CONV2D        = 9,  /* 2D conv, direct or implicit-GEMM  */
+    SLM_GPU_OP_ADD_BIAS      = 10, /* element-wise, optional ReLU flag  */
+    SLM_GPU_OP_MAXPOOL       = 11, /* spatial max pooling               */
+};
+
+/*
+ * Data-type enum used by the operator library to disambiguate
+ * within a tier (e.g. SIMT FP32 vs SIMT FP16 vs IMMA INT8). The
+ * library lookup key is (op_kind, tier, dtype). Discriminants are
+ * stable; reserve 0 for "unknown / use library default".
+ */
+enum slm_gpu_dtype {
+    SLM_GPU_DTYPE_FP32  = 1,
+    SLM_GPU_DTYPE_FP16  = 2,
+    SLM_GPU_DTYPE_BF16  = 3,
+    SLM_GPU_DTYPE_TF32  = 4,
+    SLM_GPU_DTYPE_INT8  = 5,
+    SLM_GPU_DTYPE_Q4K   = 6,
 };
 
 /*

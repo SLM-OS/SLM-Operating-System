@@ -227,6 +227,9 @@ int test_suite_gpu_consumer(void);
 /* Tier-preference toggle tests (#664 — tensor-core stage 6). */
 int test_suite_gpu_tier(void);
 
+/* Operator library parser tests (#663 — tensor-core stage 5). */
+int test_suite_operator_library(void);
+
 /* GPU dispatch circuit-breaker tests (#552 mitigation, PR #555). */
 int test_suite_gpu_dispatch_breaker(void);
 
