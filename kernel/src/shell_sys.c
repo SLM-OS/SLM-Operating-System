@@ -3831,6 +3831,8 @@ int cmd_telemetry(int argc, char *argv[])
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../gpu/nvidia/ga10b_bringup.h"
+#include "../gpu/nvidia/ga10b_channel_handoff.h"
+#include "../gpu/nvidia/ga10b_gmmu.h"
 
 /*
  * nvgpu - Jetson GA10B nvgpu-native bringup driver (ACR → FECS → GPCCS
@@ -4000,9 +4002,123 @@ int cmd_nvgpu(int argc, char *argv[])
         return 0;
     }
 
+    if (strcmp(argv[1], "gmmu") == 0) {
+        /* Read-only GMMU page-table walker (#666 Milestone A).
+         *
+         * Subcommands:
+         *   nvgpu gmmu pushbuf   — walk g_handoff.pushbuf_gpu_va,
+         *                          assert leaf phys == pushbuf_phys
+         *   nvgpu gmmu walk <hex_va>
+         *                        — walk an arbitrary GPU VA against
+         *                          the loaded handoff's inst block
+         *   nvgpu gmmu walk-raw <inst_block_phys_hex> <gpu_va_hex>
+         *                        — walk against a caller-supplied
+         *                          inst-block phys. Bypasses the
+         *                          handoff requirement; useful for
+         *                          structural validation when the
+         *                          host-side helper hasn't run.
+         *
+         * `pushbuf` and `walk` need a handoff (run `nvgpu inherit`
+         * + `nvgpu channel` first). `walk-raw` doesn't.
+         */
+        if (argc < 3) {
+            shell_puts("usage: nvgpu gmmu <pushbuf | walk <hex_va> | "
+                       "walk-raw <inst_phys_hex> <hex_va>>\r\n");
+            return -1;
+        }
+        if (strcmp(argv[2], "walk-raw") == 0) {
+            if (argc < 5) {
+                shell_puts("usage: nvgpu gmmu walk-raw <inst_phys_hex> <hex_va>\r\n");
+                return -1;
+            }
+            uint64_t inst = 0, va = 0;
+            for (int a = 0; a < 2; a++) {
+                const char *s = argv[3 + a];
+                if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+                uint64_t v = 0;
+                while (*s) {
+                    uint64_t d;
+                    if (*s >= '0' && *s <= '9') d = *s - '0';
+                    else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
+                    else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
+                    else { shell_puts("bad hex\r\n"); return -1; }
+                    v = (v << 4) | d;
+                    s++;
+                }
+                if (a == 0) inst = v; else va = v;
+            }
+            struct ga10b_gmmu_walk_result wr;
+            int rc = ga10b_gmmu_walk(inst, va, &wr);
+            if (rc != 0) {
+                shell_printf("ga10b_gmmu_walk failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            return 0;
+        }
+        const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+        if (h == NULL) {
+            shell_puts("gmmu: no handoff loaded — run `nvgpu inherit` "
+                       "+ `nvgpu channel` first (or use `walk-raw`)\r\n");
+            return -1;
+        }
+        if (strcmp(argv[2], "pushbuf") == 0) {
+            struct ga10b_gmmu_walk_result wr;
+            int rc = ga10b_gmmu_walk(h->inst_block_phys, h->pushbuf_gpu_va, &wr);
+            if (rc != 0) {
+                shell_printf("ga10b_gmmu_walk failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            if (wr.status == GA10B_GMMU_WALK_OK) {
+                if (wr.leaf_phys == h->pushbuf_phys) {
+                    shell_printf("VERIFY: leaf phys 0x%lx == "
+                                 "g_handoff.pushbuf_phys 0x%lx — PASS\r\n",
+                                 (unsigned long)wr.leaf_phys,
+                                 (unsigned long)h->pushbuf_phys);
+                    return 0;
+                }
+                shell_printf("VERIFY: leaf phys 0x%lx != "
+                             "g_handoff.pushbuf_phys 0x%lx — FAIL\r\n",
+                             (unsigned long)wr.leaf_phys,
+                             (unsigned long)h->pushbuf_phys);
+                return -1;
+            }
+            return -1;
+        }
+        if (strcmp(argv[2], "walk") == 0) {
+            if (argc < 4) {
+                shell_puts("usage: nvgpu gmmu walk <hex_va>\r\n");
+                return -1;
+            }
+            const char *s = argv[3];
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+            uint64_t va = 0;
+            while (*s) {
+                uint64_t d;
+                if (*s >= '0' && *s <= '9') d = *s - '0';
+                else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
+                else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
+                else { shell_puts("bad hex VA\r\n"); return -1; }
+                va = (va << 4) | d;
+                s++;
+            }
+            struct ga10b_gmmu_walk_result wr;
+            int rc = ga10b_gmmu_walk(h->inst_block_phys, va, &wr);
+            if (rc != 0) {
+                shell_printf("ga10b_gmmu_walk failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            return (wr.status == GA10B_GMMU_WALK_OK) ? 0 : -1;
+        }
+        shell_puts("usage: nvgpu gmmu <pushbuf | walk <hex_va>>\r\n");
+        return -1;
+    }
+
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | submit | submit-compute | launch-kernel | "
-              "run-mnist | fecs | gpccs | pmu | run]\r\n");
+              "run-mnist | fecs | gpccs | pmu | run | gmmu]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
