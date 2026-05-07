@@ -178,8 +178,27 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
             return 0;
         }
     }
-    shell_printf("hailo: ctxsmoke variant=%s (out=%d in=%d)\n",
-                 variant, (int)include_out, (int)include_in);
+    /* #361 hypothesis test (disconfirmed 2026-05-06): scan trailing
+     * argv[] for `hwcN` where N is the GET_HW_CONSTS repeat count
+     * (default 1). HailoRT v4.23 calls GET_HW_CONSTS 4× during HEF
+     * load; the question was whether the count itself silences the
+     * CPU_ECC_FATAL events fw fires on RPCs after RESET. Hardware
+     * A/B on pi-5-1: x4 still fires CPU_ECC_FATAL at ENABLED and
+     * generates additional ECC events during the GET_HW_CONSTS
+     * sequence itself. Kept as a tunable knob so future investigation
+     * can re-test cheaply (e.g., x4 plus settle-pings combination). */
+    uint32_t hwc_repeat = 1u;
+    for (int ai = 3; ai < argc; ai++) {
+        if (strncmp(argv[ai], "hwc", 3) == 0) {
+            int n = 0;
+            for (const char *p = argv[ai] + 3; *p >= '0' && *p <= '9'; p++)
+                n = n * 10 + (*p - '0');
+            if (n >= 1 && n <= 16) hwc_repeat = (uint32_t)n;
+        }
+    }
+    shell_printf("hailo: ctxsmoke variant=%s (out=%d in=%d) hwc_repeat=%u\n",
+                 variant, (int)include_out, (int)include_in,
+                 (unsigned)hwc_repeat);
     /* Phase 6.3d/6.4 hardware probe: exercise the three context-
      * switch opcodes (CHANGE_CONTEXT_SWITCH_STATUS,
      * SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO) against live
@@ -360,6 +379,10 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
         HAILO_CS_IGNORE_APPLICATION_INDEX,
         /*batch_size=*/0, /*batch_count=*/0);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after RESET]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     /* #180 pre-configure handshake (2026-04-19 wire capture): HailoRT
      * calls CLEAR_CONFIGURED_APPS then GET_HW_CONSTS between
@@ -369,15 +392,35 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     shell_puts("  [2/8] CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS...\n");
     rc = hailo_control_context_switch_clear_configured_apps();
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after CLEAR_CONFIGURED_APPS]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
-    shell_puts("  [3/8] GET_HW_CONSTS...\n");
+    /* #361: GET_HW_CONSTS hypothesis test — repeat hwc_repeat times.
+     * HailoRT v4.23 issues 4 back-to-back GET_HW_CONSTS RPCs during
+     * HEF load; SLM-OS production used 1 until #361. Drain d2h after
+     * each call to count CPU_ECC_FATAL events as the count varies. */
+    shell_printf("  [3/8] GET_HW_CONSTS x%u...\n", (unsigned)hwc_repeat);
     uint32_t hw_consts_resp_len = 0;
-    rc = hailo_control_get_hw_consts(&hw_consts_resp_len);
-    shell_printf("        rc=%d resp_len=%u\n", rc, hw_consts_resp_len);
+    for (uint32_t i = 0; i < hwc_repeat; i++) {
+        rc = hailo_control_get_hw_consts(&hw_consts_resp_len);
+        shell_printf("        [%u/%u] rc=%d resp_len=%u\n",
+                     (unsigned)(i + 1), (unsigned)hwc_repeat,
+                     rc, hw_consts_resp_len);
+#ifdef HAILO_WIRE_DEBUG
+        shell_printf("  [d2h after GET_HW_CONSTS #%u]\n", (unsigned)(i + 1));
+        hailo_fw_drain_d2h_notifications(4);
+#endif
+    }
 
     shell_puts("  [4/8] SET_NETWORK_GROUP_HEADER...\n");
     rc = hailo_control_set_network_group_header(&hdr);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after SET_NETWORK_GROUP_HEADER]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     shell_printf("  [5/8] SET_CONTEXT_INFO(ACTIVATION, %u bytes)\n",
                  (unsigned)bufs.activation_len);
@@ -399,6 +442,10 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
                                         bufs.activation,
                                         (uint32_t)bufs.activation_len);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after SET_CONTEXT_INFO(ACTIVATION)]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     /* Diagnostic: probe an APP-CPU opcode (IDENTIFY) right after
      * ACTIVATION. Hardware-verified on pi-5-1 fw v4.23 that this
@@ -440,6 +487,10 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
                                         bufs.batch_switching,
                                         (uint32_t)bufs.batch_switching_len);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after SET_CONTEXT_INFO(BATCH_SWITCHING)]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     /* #180 experiment C — post-failure BAR4 scope scan. Findings
      * from experiment B: BAR4+0x640 stays 0xFFFFFFFF for >1 s AND
@@ -501,6 +552,10 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
                                         bufs.preliminary,
                                         (uint32_t)bufs.preliminary_len);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after SET_CONTEXT_INFO(PRELIMINARY)]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     if (!dcc0) {
         shell_printf("  [8/8] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
@@ -520,6 +575,10 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
                                             bufs.dynamic,
                                             (uint32_t)bufs.dynamic_len);
         shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+        shell_puts("  [d2h after SET_CONTEXT_INFO(DYNAMIC)]\n");
+        hailo_fw_drain_d2h_notifications(4);
+#endif
     } else {
         shell_puts("  [8/8] SKIP: DYNAMIC (dcc0 mode)\n");
     }
@@ -536,6 +595,10 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
         /*application_index=*/0,
         /*batch_size=*/0, /*batch_count=*/0);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after CHANGE_STATUS(ENABLED)]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     hailo_vdma_desc_list_free(&bnd_out_list);
     hailo_vdma_desc_list_free(&bnd_in_list);

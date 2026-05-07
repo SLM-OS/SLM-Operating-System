@@ -1194,6 +1194,15 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #endif
     cs_load_stage_set(52);
 
+    /* #361 (2026-05-06): HailoRT v4.23 calls GET_HW_CONSTS four times
+     * during HEF load (three direct callers in resource_manager_
+     * builder.cpp + one whose source we haven't pinned). SLM-OS calls
+     * it once. Hypothesis: does mirroring the 4× pattern stop the
+     * CPU_ECC_FATAL events fw fires on RPCs after RESET? Tested via
+     * `hailo ctxsmoke full hwc4` — disconfirmed. CPU_ECC_FATAL still
+     * fires at CHANGE_STATUS(ENABLED) and additional ECC events fire
+     * during the GET_HW_CONSTS sequence itself. The count is not
+     * load-bearing; next concrete delta is APP-CPU settle pings. */
     uint32_t hw_consts_len = 0;
     rc = hailo_control_get_hw_consts(&hw_consts_len);
     if (rc != HAILO_OK) {

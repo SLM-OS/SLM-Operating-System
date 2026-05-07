@@ -6897,7 +6897,7 @@ static void test_inf_hailo_load_rings_context_switch_sequence(void)
     /* Expected core-CPU RPCs per context_switch_load:
      *   1. CHANGE_STATUS(RESET)
      *   2. CLEAR_CONFIGURED_APPS     (pre-configure handshake)
-     *   3. GET_HW_CONSTS             (pre-configure handshake)
+     *   3. GET_HW_CONSTS
      *   4. SET_NETWORK_GROUP_HEADER
      *   5-8. SET_CONTEXT_INFO × 4    (ACT/BS/PRE/DYN)
      *   9. CHANGE_STATUS(ENABLED)
