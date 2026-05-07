@@ -1294,7 +1294,7 @@ static void s3_steal_work_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|q4kdot|gpu|stats|all>\r\n");
+        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|matmul_q4k_batch|conv|quant|q4kdot|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -1637,6 +1637,31 @@ int cmd_bench(int argc, char *argv[])
         shell_puts("Q4_K vec_dot Benchmark\r\n");
         shell_puts("======================\r\n");
         rust_bench_q4k_q8k_dot(elements, iters, force_scalar);
+    } else if (strcmp(argv[1], "matmul_q4k_batch") == 0) {
+        /* Batched Q4_K matmul vs per-token comparison.
+         *
+         * Usage: bench matmul_q4k_batch [rows [cols [batch [iters]]]]
+         *
+         * Defaults match Qwen2.5-1.5B's Q projection at the prefill
+         * chunk size: rows=1536 (n_head_q × head_dim), cols=1536
+         * (hidden), batch=64 (default prefill_chunk), iters=20.
+         *
+         * Reports both paths' wall-clock + GFLOPS plus the speedup
+         * ratio. The per-token path is the current production cost
+         * model (one matmul_q4k_rows call per prefill token); the
+         * batched path is what `forward_batch` will use. The ratio
+         * is the bandwidth amortization PR-3 captures.
+         */
+        uint32_t rows = 1536, cols = 1536, batch = 64, iters = 20;
+        if (argc > 2) { uint32_t v; if (!shell_parse_uint(argv[2], &v) && v > 0) rows = v; }
+        if (argc > 3) { uint32_t v; if (!shell_parse_uint(argv[3], &v) && v >= 256) cols = v; }
+        if (argc > 4) { uint32_t v; if (!shell_parse_uint(argv[4], &v) && v > 0) batch = v; }
+        if (argc > 5) { uint32_t v; if (!shell_parse_uint(argv[5], &v) && v > 0) iters = v; }
+        shell_puts("Batched Q4_K Matmul Benchmark\r\n");
+        shell_puts("=============================\r\n");
+        if (rust_bench_matmul_q4k_batch(rows, cols, batch, iters) != 0) {
+            shell_puts("  bench failed (check rows/cols/batch/iters args)\r\n");
+        }
     } else if (strcmp(argv[1], "gpu") == 0) {
         shell_puts("GPU Cache Sync Benchmark\r\n");
         shell_puts("========================\r\n");

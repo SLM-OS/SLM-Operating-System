@@ -143,6 +143,84 @@ impl KvCache {
         Some(())
     }
 
+    /// Write K/V for `layer` at an **explicit position** without
+    /// touching [`self.len`].
+    ///
+    /// Used by [`crate::slm::forward::forward_batch`] to fan B prompt
+    /// tokens through one layer at a time: every token writes at
+    /// `pos+b` for some base `pos = self.len`, and `self.len` only
+    /// advances after **all** layers have processed **all** B tokens
+    /// (via B successive [`commit_position`] calls). The single-token
+    /// [`append`] uses `self.len` as the implicit position; that
+    /// works for `forward_one` because each layer commits implicitly
+    /// after the full forward pass. For batched prefill the positions
+    /// have to be addressable independently of the global `len`
+    /// pointer.
+    ///
+    /// Returns `None` if `layer >= n_layers`, `position >= max_ctx`,
+    /// or the K/V slice lengths don't match `per_pos()`.
+    pub fn append_at(
+        &mut self,
+        layer: usize,
+        position: usize,
+        k_layer: &[u16],
+        v_layer: &[u16],
+    ) -> Option<()> {
+        if layer >= self.n_layers || position >= self.max_ctx {
+            return None;
+        }
+        let per_pos = self.per_pos();
+        if k_layer.len() != per_pos || v_layer.len() != per_pos {
+            return None;
+        }
+        let layer_base = layer.checked_mul(self.per_layer())?;
+        let pos_off = position.checked_mul(per_pos)?;
+        let off = layer_base.checked_add(pos_off)?;
+        let end = off.checked_add(per_pos)?;
+        if end > self.k.len() {
+            return None;
+        }
+        self.k[off..end].copy_from_slice(k_layer);
+        self.v[off..end].copy_from_slice(v_layer);
+        Some(())
+    }
+
+    /// Borrow the K cache slice for `layer` covering positions
+    /// `0..end_exclusive`. Sibling of [`k_view_with_pending`] for the
+    /// batched prefill path: lets the caller pin the visible window
+    /// independently of `self.len`, so token `b`'s attention at
+    /// position `pos+b` reads exactly `0..=pos+b` (B tokens still
+    /// uncommitted — `self.len` is still `pos`).
+    ///
+    /// Returns `None` if `layer >= n_layers` or
+    /// `end_exclusive > max_ctx`.
+    pub fn k_view_to(&self, layer: usize, end_exclusive: usize) -> Option<&[u16]> {
+        if layer >= self.n_layers || end_exclusive > self.max_ctx {
+            return None;
+        }
+        let layer_base = layer.checked_mul(self.per_layer())?;
+        let span = end_exclusive.checked_mul(self.per_pos())?;
+        let end = layer_base.checked_add(span)?;
+        if end > self.k.len() {
+            return None;
+        }
+        Some(&self.k[layer_base..end])
+    }
+
+    /// V counterpart to [`k_view_to`]. Same contract.
+    pub fn v_view_to(&self, layer: usize, end_exclusive: usize) -> Option<&[u16]> {
+        if layer >= self.n_layers || end_exclusive > self.max_ctx {
+            return None;
+        }
+        let layer_base = layer.checked_mul(self.per_layer())?;
+        let span = end_exclusive.checked_mul(self.per_pos())?;
+        let end = layer_base.checked_add(span)?;
+        if end > self.v.len() {
+            return None;
+        }
+        Some(&self.v[layer_base..end])
+    }
+
     /// Borrow the K cache slice for `layer` covering positions
     /// `0..self.len`. Shape: `len × n_kv_heads × head_dim` row-major.
     ///
@@ -446,5 +524,43 @@ mod tests {
         let cache = KvCache::new(2, 4, 1, 2).expect("alloc");
         assert!(cache.k_view(2).is_none());
         assert!(cache.v_view(2).is_none());
+    }
+
+    #[test]
+    fn append_at_writes_explicit_position_without_advancing_len() {
+        let mut cache = KvCache::new(2, 4, 1, 2).expect("alloc");
+        let k0 = [0x3C00u16, 0x0000];
+        let v0 = [0x3800u16, 0x4000];
+        let k1 = [0x4400u16, 0x4800];
+        let v1 = [0x4C00u16, 0x5000];
+        cache.append_at(0, 2, &k0, &v0).expect("write pos 2");
+        cache.append_at(1, 2, &k1, &v1).expect("write pos 2 layer 1");
+        assert_eq!(cache.len, 0, "append_at must not touch len");
+
+        // Pin len so k_view_to(layer, end) returns the correct slice
+        // even before commit_position runs.
+        let kv = cache.k_view_to(0, 3).expect("view to 3");
+        assert_eq!(&kv[4..6], &k0, "pos 2 K");
+        let kv1 = cache.k_view_to(1, 3).expect("view to 3 layer 1");
+        assert_eq!(&kv1[4..6], &k1, "pos 2 K layer 1");
+    }
+
+    #[test]
+    fn append_at_rejects_oob_position_or_bad_shape() {
+        let mut cache = KvCache::new(2, 4, 1, 2).expect("alloc");
+        let k = [0u16; 2];
+        let v = [0u16; 2];
+        assert!(cache.append_at(0, 4, &k, &v).is_none(), "pos == max_ctx");
+        assert!(cache.append_at(2, 0, &k, &v).is_none(), "layer OOB");
+        let k_short = [0u16; 1];
+        assert!(cache.append_at(0, 0, &k_short, &v).is_none(), "K len mismatch");
+    }
+
+    #[test]
+    fn k_view_to_rejects_oob() {
+        let cache = KvCache::new(2, 4, 1, 2).expect("alloc");
+        assert!(cache.k_view_to(0, 5).is_none(), "end > max_ctx");
+        assert!(cache.k_view_to(2, 1).is_none(), "layer OOB");
+        assert!(cache.v_view_to(0, 5).is_none());
     }
 }

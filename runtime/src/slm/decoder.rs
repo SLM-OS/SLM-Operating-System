@@ -175,19 +175,23 @@ pub fn run_prompt(
     );
 
     // 2) Prefill — push every prompt token through the forward pass,
-    //    yielding between chunks. We deliberately walk one token at
-    //    a time inside each chunk (rather than batched prefill);
-    //    M5.3.2 can revisit if benchmarks demand it.
+    //    yielding between chunks.
+    //
+    //    NOTE: `forward_batch` (PR-3) exists in the tree and would
+    //    fan B prompt tokens through a single batched dispatch, but
+    //    is NOT wired into the production prefill path on Jetson.
+    //    Microbench on Cortex-A78AE (jetson-nano-1, NEON SDOT Q4_K
+    //    kernel from PR #652) returned 0.99× across every shape in
+    //    Qwen2.5-1.5B's prefill — the kernel is single-CPU compute-
+    //    bound at this scale, so amortizing weight bandwidth across
+    //    B activation rows yields no measurable win. Tracked in
+    //    GH #675. The batched implementation stays in the tree as
+    //    infrastructure for the post-PR-2 (multi-CPU) world, where
+    //    each CPU could run the batched kernel on its slice.
     let chunk = if cfg.prefill_chunk == 0 { 64 } else { cfg.prefill_chunk } as usize;
-    // Pre-allocate the per-prompt logit buffer once at vocab capacity.
-    // `forward_step_via_registry` uses `extend_from_slice` to refill
-    // it, which is a memcpy (no realloc) when capacity already covers
-    // vocab_size. The sampler then mutates this Vec in-place.
     let mut last_logits: Vec<f32> = Vec::with_capacity(session.vocab_size as usize);
     let mut consumed = 0usize;
     while consumed < prompt_ids.len() {
-        // Stop flag honoured before each chunk so a slow prefill on
-        // a long prompt can still be cancelled.
         if session.stop_flag {
             session.state = SessionState::Stopped;
             return Some(DecodeStats {
@@ -592,4 +596,5 @@ mod tests {
         assert!(stats.prefill_tokens > 0, "prompt should tokenize to >=1 token");
         assert_eq!(s.tokens_in, stats.prefill_tokens);
     }
+
 }

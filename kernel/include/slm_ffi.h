@@ -776,6 +776,24 @@ extern int rust_bench_q4k_q8k_dot(uint32_t elements,
                                   uint32_t force_scalar);
 
 /*
+ * Batched Q4_K matmul microbenchmark: compares one
+ * `matmul_q4k_rows_batch(rows, cols, batch, ...)` call against
+ * `batch` calls of `matmul_q4k_rows(rows, cols, ...)`. The win is
+ * weight-bandwidth amortization — each weight row is read once
+ * per call instead of `batch` times.
+ *
+ * Used by `bench matmul_q4k_batch <rows> <cols> <batch> [iters]`.
+ *
+ * Reports min/avg/max ns + GFLOPS for both paths plus the speedup
+ * ratio. Returns 0 on success, -1 on bad shape (cols not a multiple
+ * of 256, batch == 0, etc).
+ */
+extern int rust_bench_matmul_q4k_batch(uint32_t rows,
+                                       uint32_t cols,
+                                       uint32_t batch,
+                                       uint32_t iterations);
+
+/*
  * ==========================================================================
  * GPU Compute FFI (Phase 5, M3)
  * ==========================================================================

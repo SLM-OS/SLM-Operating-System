@@ -8036,3 +8036,167 @@ pub extern "C" fn rust_bench_q4k_q8k_dot(
     );
     0
 }
+
+/// Microbench the batched Q4_K matmul kernel against the per-token
+/// `matmul_q4k_rows`. The batched kernel reads each weight row once
+/// and dot-products it against `batch` Q8_K activation rows; the
+/// per-token comparison invokes `matmul_q4k_rows` `batch` times,
+/// streaming the entire weight buffer once per call. The wall-clock
+/// ratio reports the bandwidth amortization PR-3 is built on.
+///
+/// `cols` is rounded down to a multiple of 256. `rows`, `cols`,
+/// and `batch` must each be > 0; `iterations` must be > 0. Returns
+/// 0 on success, -1 on any precondition violation.
+///
+/// Both paths reuse the same weight + activation buffers across
+/// iterations so allocation cost stays out of the timed window.
+#[no_mangle]
+pub extern "C" fn rust_bench_matmul_q4k_batch(
+    rows: u32,
+    cols: u32,
+    batch: u32,
+    iterations: u32,
+) -> i32 {
+    extern "C" {
+        fn shell_printf(fmt: *const u8, ...);
+    }
+    if rows == 0 || cols < 256 || batch == 0 || iterations == 0 {
+        return -1;
+    }
+    let rows = rows as usize;
+    let cols_aligned = (cols as usize) / 256 * 256;
+    let batch = batch as usize;
+    let iters = iterations;
+
+    let row_bytes = match crate::slm::gguf::q4_k_byte_size(cols_aligned) {
+        Some(v) => v,
+        None => return -1,
+    };
+    let total_w = match row_bytes.checked_mul(rows) {
+        Some(v) => v,
+        None => return -1,
+    };
+    let q8k_per = match crate::inference::quant::q8_k_byte_size(cols_aligned) {
+        Some(v) => v,
+        None => return -1,
+    };
+    let q8k_total = match q8k_per.checked_mul(batch) {
+        Some(v) => v,
+        None => return -1,
+    };
+
+    extern crate alloc;
+    let mut weights = alloc::vec![0u8; total_w];
+    let nb = cols_aligned / 256;
+    // Reuse the q4kdot fixture per row for a realistic bit-pattern.
+    let mut wtmp = alloc::vec![0u8; row_bytes];
+    let mut atmp = alloc::vec![0u8; q8k_per];
+    for r in 0..rows {
+        fill_q4k_q8k_bench_buffers(&mut wtmp, &mut atmp, nb);
+        let s = r * row_bytes;
+        weights[s..s + row_bytes].copy_from_slice(&wtmp);
+    }
+
+    // Activations: deterministic small-magnitude FP16. 0x3800 = 0.5,
+    // 0x3C00 = 1.0; alternating per element keeps Q8_K quantization
+    // realistic without saturating.
+    let mut acts_fp16 = alloc::vec![0u16; batch.checked_mul(cols_aligned).unwrap_or(0)];
+    for (i, slot) in acts_fp16.iter_mut().enumerate() {
+        *slot = if i & 1 == 0 { 0x3C00 } else { 0x3800 };
+    }
+
+    let mut q8k_batch = alloc::vec![0u8; q8k_total];
+    let mut q8k_single = alloc::vec![0u8; q8k_per];
+    let mut out_batch = alloc::vec![0.0f32; batch.checked_mul(rows).unwrap_or(0)];
+    let mut out_single = alloc::vec![0.0f32; rows];
+
+    let mut sink: f32 = 0.0;
+
+    // ---- Batched path ----
+    let mut min_b: u64 = u64::MAX;
+    let mut max_b: u64 = 0;
+    let mut total_b: u64 = 0;
+    let mut succ_b: u32 = 0;
+    for _ in 0..iters {
+        let t0 = kernel_ffi::get_time_ns();
+        let ok = inference::ops_transformer::matmul_q4k_rows_batch(
+            &weights,
+            rows,
+            cols_aligned,
+            batch,
+            &acts_fp16,
+            &mut q8k_batch,
+            &mut out_batch,
+        );
+        let dt = kernel_ffi::get_time_ns().saturating_sub(t0);
+        if ok.is_some() {
+            sink += out_batch[0];
+            if dt < min_b { min_b = dt; }
+            if dt > max_b { max_b = dt; }
+            total_b += dt;
+            succ_b += 1;
+        }
+    }
+
+    // ---- Per-token comparison path: `batch` matmul_q4k_rows calls ----
+    let mut min_s: u64 = u64::MAX;
+    let mut max_s: u64 = 0;
+    let mut total_s: u64 = 0;
+    let mut succ_s: u32 = 0;
+    for _ in 0..iters {
+        let t0 = kernel_ffi::get_time_ns();
+        let mut ok_all = true;
+        for b in 0..batch {
+            let act = &acts_fp16[b * cols_aligned..(b + 1) * cols_aligned];
+            if inference::ops_transformer::matmul_q4k_rows(
+                &weights,
+                rows,
+                cols_aligned,
+                act,
+                &mut q8k_single,
+                &mut out_single,
+            )
+            .is_none()
+            {
+                ok_all = false;
+                break;
+            }
+            sink += out_single[0];
+        }
+        let dt = kernel_ffi::get_time_ns().saturating_sub(t0);
+        if ok_all {
+            if dt < min_s { min_s = dt; }
+            if dt > max_s { max_s = dt; }
+            total_s += dt;
+            succ_s += 1;
+        }
+    }
+    core::hint::black_box(sink);
+
+    if succ_b == 0 || succ_s == 0 {
+        return -1;
+    }
+    let avg_b = total_b / succ_b as u64;
+    let avg_s = total_s / succ_s as u64;
+    // Speedup × 1000 (3-digit fixed-point so we don't need %f).
+    let speedup_x1000 = if avg_b > 0 { (avg_s * 1000) / avg_b } else { 0 };
+
+    // FLOPs per call: batched = 2 · rows · cols · batch; per-token
+    // path = same total, just measured across `batch` calls.
+    let flops = 2u64 * (rows as u64) * (cols_aligned as u64) * (batch as u64);
+    let bw_b = if avg_b > 0 { (flops * 1000) / avg_b } else { 0 };
+    let bw_s = if avg_s > 0 { (flops * 1000) / avg_s } else { 0 };
+
+    unsafe {
+        shell_printf(
+            b"  Shape:       rows=%lu cols=%lu batch=%lu iters=%lu\n\0".as_ptr(),
+            rows as u64, cols_aligned as u64, batch as u64, iters as u64);
+        shell_printf(b"  Batched:     min=%lu ns  avg=%lu ns  max=%lu ns  (%lu.%03lu GFLOPS)\n\0".as_ptr(),
+            min_b, avg_b, max_b, bw_b / 1000, bw_b % 1000);
+        shell_printf(b"  Per-token:   min=%lu ns  avg=%lu ns  max=%lu ns  (%lu.%03lu GFLOPS)\n\0".as_ptr(),
+            min_s, avg_s, max_s, bw_s / 1000, bw_s % 1000);
+        shell_printf(b"  Speedup:     %lu.%03lu x (avg per-token / avg batched)\n\0".as_ptr(),
+            speedup_x1000 / 1000, speedup_x1000 % 1000);
+    }
+    0
+}

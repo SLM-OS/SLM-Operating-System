@@ -64,7 +64,8 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use crate::inference::ops_transformer::{
-    gqa_decode_step, lm_head_q, matmul_quant_rows, rmsnorm, swiglu_mlp_q, RopeTable,
+    gqa_decode_step, lm_head_q, matmul_quant_rows, matmul_quant_rows_batch, rmsnorm,
+    swiglu_mlp_q, RopeTable,
 };
 use crate::inference::quant::{dequantize_row_any, q8_k_byte_size};
 use crate::slm::gguf::{f32_to_f16, ArchInfo, GgmlType};
@@ -534,6 +535,606 @@ pub fn forward_one(
 }
 
 // ---------------------------------------------------------------------------
+// Batched forward pass — prefill (PR-3)
+// ---------------------------------------------------------------------------
+
+/// Per-prompt scratch for [`forward_batch`]. Shaped like
+/// [`ForwardScratch`] but every per-token buffer is `max_batch ×`
+/// the per-token size, so a single batched dispatch through the
+/// transformer fills `max_batch` rows of activations.
+///
+/// **Memory budget.** For Qwen2.5-1.5B at `max_batch = 64`:
+///
+/// | Buffer            | Size                                          |
+/// |-------------------|-----------------------------------------------|
+/// | x_fp16_b          | 64 × 1536 × 2 B    = 192 KB                   |
+/// | residual_b        | same                                          |
+/// | x_norm_b          | same                                          |
+/// | q_fp16_b          | 64 × 1536 × 2 B    = 192 KB                   |
+/// | k_fp16_b          | 64 × 256  × 2 B    =  32 KB                   |
+/// | v_fp16_b          | same                                          |
+/// | matmul_f32_b      | 64 × 8960 × 4 B    = 2.3 MB                   |
+/// | attn_out_b        | 192 KB                                        |
+/// | mlp_gate/up/gated | 64 × 8960 × 2 B    = 1.1 MB each              |
+/// | mlp_out_b         | 192 KB                                        |
+/// | q8k_scratch_batch | 64 × q8_k_byte_size(8960) ≈ 654 KB            |
+/// | logits            | 608 KB (last batch row only)                  |
+/// | (LM head not batched — single-row reuse of matmul_f32)       |    |
+/// | **Total**         | ≈ 8 MB                                        |
+///
+/// Comfortably inside Jetson's 128 MB Rust heap. The struct holds
+/// onto its allocations across all prefill chunks of a prompt — no
+/// realloc per chunk.
+pub struct ForwardBatchScratch {
+    pub max_batch: usize,
+    pub hidden: usize,
+    pub intermediate: usize,
+    pub vocab_size: usize,
+
+    pub x_fp16_b: Vec<u16>,
+    pub residual_b: Vec<u16>,
+    pub x_norm_b: Vec<u16>,
+    pub norm_fp16: Vec<u16>,
+
+    pub q_fp16_b: Vec<u16>,
+    pub k_fp16_b: Vec<u16>,
+    pub v_fp16_b: Vec<u16>,
+
+    pub matmul_f32_b: Vec<f32>,
+    pub attn_out_b: Vec<u16>,
+    pub attn_logits: Vec<f32>,
+
+    pub mlp_gate_b: Vec<u16>,
+    pub mlp_up_b: Vec<u16>,
+    pub mlp_out_b: Vec<u16>,
+
+    pub q8k_scratch_batch: Vec<u8>,
+
+    pub logits: Vec<f32>,
+    pub embed_f32: Vec<f32>,
+    pub dequant_f32: Vec<f32>,
+    pub acts_f32: Vec<f32>,
+
+    pub rope: RopeTable,
+    pub name_buf: String,
+}
+
+impl ForwardBatchScratch {
+    /// Allocate batched scratch for the given architecture and prefill
+    /// chunk size. `max_batch` caps the per-call batch dimension; pass
+    /// the decoder's `prefill_chunk` (default 64).
+    pub fn new(
+        arch: &ArchInfo,
+        max_ctx: usize,
+        vocab_size: usize,
+        max_batch: usize,
+    ) -> Self {
+        let hidden = arch.embedding_length as usize;
+        let intermediate = arch.feed_forward_length as usize;
+        let head_dim = arch.head_dim as usize;
+        let n_head_q = arch.head_count as usize;
+        let n_head_kv = arch.head_count_kv as usize;
+        let max_row = hidden.max(intermediate);
+        let q_total = n_head_q.saturating_mul(head_dim);
+        let kv_total = n_head_kv.saturating_mul(head_dim);
+
+        let padded_hidden = hidden.div_ceil(256).saturating_mul(256).max(hidden);
+        let padded_max_row = max_row.div_ceil(256).saturating_mul(256).max(max_row);
+        let q8k_per_row = crate::inference::quant::q8_k_byte_size(max_row).unwrap_or(0);
+        let q8k_total = q8k_per_row.saturating_mul(max_batch);
+
+        Self {
+            max_batch,
+            hidden,
+            intermediate,
+            vocab_size,
+            x_fp16_b: vec![0u16; max_batch.saturating_mul(hidden)],
+            residual_b: vec![0u16; max_batch.saturating_mul(hidden)],
+            x_norm_b: vec![0u16; max_batch.saturating_mul(hidden)],
+            norm_fp16: vec![0u16; hidden],
+            q_fp16_b: vec![0u16; max_batch.saturating_mul(q_total)],
+            k_fp16_b: vec![0u16; max_batch.saturating_mul(kv_total)],
+            v_fp16_b: vec![0u16; max_batch.saturating_mul(kv_total)],
+            // Sized for max(rows-of-any-projection × batch).
+            // gate/up/down rows = intermediate, Q rows = q_total ≤
+            // hidden ≤ intermediate for Qwen2.5; fall back to the
+            // larger of the two so any batched matmul fits.
+            matmul_f32_b: vec![0.0f32; max_batch.saturating_mul(max_row)],
+            attn_out_b: vec![0u16; max_batch.saturating_mul(q_total)],
+            // Per-token GQA still runs serially inside the batch loop;
+            // sized for the longest in-flight prefix (max_ctx).
+            attn_logits: vec![0.0f32; max_ctx.max(1)],
+            mlp_gate_b: vec![0u16; max_batch.saturating_mul(intermediate)],
+            mlp_up_b: vec![0u16; max_batch.saturating_mul(intermediate)],
+            mlp_out_b: vec![0u16; max_batch.saturating_mul(hidden)],
+            q8k_scratch_batch: vec![0u8; q8k_total],
+            // LM head runs single-row on the last batch slot; sized
+            // for vocab.
+            logits: vec![0.0f32; vocab_size.max(1)],
+            embed_f32: vec![0.0f32; padded_hidden],
+            dequant_f32: vec![0.0f32; padded_max_row],
+            acts_f32: vec![0.0f32; max_row],
+            rope: RopeTable::new(head_dim, max_ctx, arch.rope_freq_base),
+            name_buf: String::with_capacity(32),
+        }
+    }
+}
+
+/// Run a batched forward pass over `tokens` — `tokens.len()` ≤
+/// `scratch.max_batch`.
+///
+/// **Semantically equivalent to** calling [`forward_one`] in sequence
+/// for each token in `tokens` and reading `scratch.logits` after the
+/// last call. Bit-equality is enforced by the
+/// `forward_batch_matches_per_token_loop` test.
+///
+/// Operationally: every per-layer matmul (Q/K/V/O, MLP gate/up/down)
+/// is dispatched as a single `[B × cols] × [rows × cols]` →
+/// `[B × rows]` call instead of B independent calls. Weight rows are
+/// loaded from DRAM once per call and dot-producted against B
+/// activation rows in the inner loop, amortizing the dominant
+/// prefill bandwidth cost. RoPE, KV-cache append, and GQA attention
+/// stay per-token inside the batch loop — attention is compute-
+/// bound, not bandwidth-bound, so the per-token overhead is
+/// negligible compared to the matmul win.
+///
+/// **KV-cache discipline.** `kv.len` does **not** advance during
+/// the layer loop; instead each token's K/V at each layer is
+/// written via [`kv.append_at(layer, pos+b, ...)`](
+/// crate::slm::kv_cache::KvCache::append_at) at the explicit
+/// position it owns. After all layers + all batch tokens are
+/// processed, [`kv.commit_position`] is called once per token to
+/// advance `len` by `tokens.len()`. This matches the contract
+/// `forward_one` would have established by running the same
+/// tokens sequentially.
+///
+/// **Logits** are only computed for the **last** batch slot
+/// (`tokens.len() - 1`). The decoder's prefill loop only needs
+/// the last position's logits to sample the first decode token;
+/// computing logits for intermediate batch positions would waste
+/// `(B-1) × vocab × hidden` matmul work.
+///
+/// Returns `None` on:
+/// - empty `tokens` slice or `tokens.len() > scratch.max_batch`,
+/// - any KV-cache append/view failure (cache full, layer OOB),
+/// - any tensor-lookup failure (missing required weight),
+/// - shape mismatch between scratch and arch.
+pub fn forward_batch(
+    session: &mut Session,
+    slm: &LoadedSlm,
+    tokens: &[u32],
+    scratch: &mut ForwardBatchScratch,
+) -> Option<()> {
+    let arch = slm.arch();
+    let hidden = arch.embedding_length as usize;
+    let intermediate = arch.feed_forward_length as usize;
+    let head_dim = arch.head_dim as usize;
+    let n_head_q = arch.head_count as usize;
+    let n_head_kv = arch.head_count_kv as usize;
+    let block_count = arch.block_count as usize;
+    let vocab_size = session.vocab_size as usize;
+
+    let batch = tokens.len();
+    if batch == 0 || batch > scratch.max_batch {
+        return None;
+    }
+    if hidden != scratch.hidden
+        || intermediate != scratch.intermediate
+        || vocab_size != scratch.vocab_size
+    {
+        return None;
+    }
+    if head_dim == 0
+        || n_head_q == 0
+        || n_head_kv == 0
+        || vocab_size == 0
+        || block_count == 0
+        || hidden == 0
+        || intermediate == 0
+        || n_head_q % n_head_kv != 0
+    {
+        return None;
+    }
+
+    let q_total = n_head_q.checked_mul(head_dim)?;
+    let kv_total = n_head_kv.checked_mul(head_dim)?;
+
+    // Position the first batch token will occupy; subsequent tokens
+    // fill pos+1, pos+2, ..., pos+batch-1.
+    let pos_base = session.kv.len;
+    let pos_end_excl = pos_base.checked_add(batch)?;
+    if pos_end_excl > session.max_ctx {
+        return None;
+    }
+
+    // ---------------------------------------------------------------
+    // Token embedding lookups — one per batch slot. Cheap relative
+    // to the matmuls; no batching benefit here.
+    // ---------------------------------------------------------------
+    let (embd_bytes, embd_quant) = tensor_q(slm, "token_embd.weight")?;
+    for b in 0..batch {
+        let row_off = b.checked_mul(hidden)?;
+        let row_end = row_off.checked_add(hidden)?;
+        embedding_lookup_any(
+            embd_quant,
+            embd_bytes,
+            hidden,
+            tokens[b],
+            &mut scratch.x_fp16_b[row_off..row_end],
+            &mut scratch.embed_f32,
+        )?;
+    }
+
+    // ---------------------------------------------------------------
+    // Per-layer transformer block (batched).
+    // ---------------------------------------------------------------
+    for layer in 0..block_count {
+        // Save residual for the attention sub-block (B rows).
+        scratch
+            .residual_b
+            .copy_from_slice(&scratch.x_fp16_b[..batch * hidden]);
+
+        // -- attention RMSNorm — per row -----------------------------
+        let attn_norm_bytes =
+            layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_norm.weight")?;
+        f32_bytes_into_fp16_slice(attn_norm_bytes, &mut scratch.norm_fp16)?;
+        for b in 0..batch {
+            let row_off = b.checked_mul(hidden)?;
+            let row_end = row_off.checked_add(hidden)?;
+            rmsnorm(
+                &scratch.x_fp16_b[row_off..row_end],
+                &scratch.norm_fp16,
+                1e-6,
+                &mut scratch.x_norm_b[row_off..row_end],
+            )?;
+        }
+
+        // -- Q / K / V projections (batched matmul + per-row bias) ---
+        let (q_w, q_quant) = layer_tensor_q(slm, &mut scratch.name_buf, layer, "attn_q.weight")?;
+        let q_b = layer_tensor_bytes_opt(slm, &mut scratch.name_buf, layer, "attn_q.bias");
+        project_batch_with_bias(
+            q_quant,
+            q_w,
+            q_total,
+            hidden,
+            batch,
+            &scratch.x_norm_b,
+            q_b,
+            &mut scratch.q8k_scratch_batch,
+            &mut scratch.matmul_f32_b,
+            &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
+            &mut scratch.q_fp16_b,
+        )?;
+
+        let (k_w, k_quant) = layer_tensor_q(slm, &mut scratch.name_buf, layer, "attn_k.weight")?;
+        let k_b = layer_tensor_bytes_opt(slm, &mut scratch.name_buf, layer, "attn_k.bias");
+        project_batch_with_bias(
+            k_quant,
+            k_w,
+            kv_total,
+            hidden,
+            batch,
+            &scratch.x_norm_b,
+            k_b,
+            &mut scratch.q8k_scratch_batch,
+            &mut scratch.matmul_f32_b,
+            &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
+            &mut scratch.k_fp16_b,
+        )?;
+
+        let (v_w, v_quant) = layer_tensor_q(slm, &mut scratch.name_buf, layer, "attn_v.weight")?;
+        let v_b = layer_tensor_bytes_opt(slm, &mut scratch.name_buf, layer, "attn_v.bias");
+        project_batch_with_bias(
+            v_quant,
+            v_w,
+            kv_total,
+            hidden,
+            batch,
+            &scratch.x_norm_b,
+            v_b,
+            &mut scratch.q8k_scratch_batch,
+            &mut scratch.matmul_f32_b,
+            &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
+            &mut scratch.v_fp16_b,
+        )?;
+
+        // -- Per-token: RoPE, KV append at explicit pos, attention ---
+        for b in 0..batch {
+            let token_pos = pos_base + b;
+            let q_off = b.checked_mul(q_total)?;
+            let kv_off = b.checked_mul(kv_total)?;
+            let q_slice = &mut scratch.q_fp16_b[q_off..q_off + q_total];
+            for h in 0..n_head_q {
+                let off = h.checked_mul(head_dim)?;
+                scratch.rope.apply(token_pos, &mut q_slice[off..off + head_dim]);
+            }
+            let k_slice = &mut scratch.k_fp16_b[kv_off..kv_off + kv_total];
+            for h in 0..n_head_kv {
+                let off = h.checked_mul(head_dim)?;
+                scratch.rope.apply(token_pos, &mut k_slice[off..off + head_dim]);
+            }
+
+            // Append at explicit pos — kv.len stays at pos_base
+            // until the post-loop commit phase.
+            let v_slice = &scratch.v_fp16_b[kv_off..kv_off + kv_total];
+            session
+                .kv
+                .append_at(layer, token_pos, k_slice, v_slice)?;
+
+            let seq_len = token_pos.checked_add(1)?;
+            if scratch.attn_logits.len() < seq_len {
+                scratch.attn_logits.resize(seq_len, 0.0);
+            }
+            let k_view = session.kv.k_view_to(layer, seq_len)?;
+            let v_view = session.kv.v_view_to(layer, seq_len)?;
+            let attn_off = b.checked_mul(q_total)?;
+            gqa_decode_step(
+                q_slice,
+                k_view,
+                v_view,
+                n_head_q,
+                n_head_kv,
+                head_dim,
+                seq_len,
+                &mut scratch.attn_logits[..seq_len],
+                &mut scratch.attn_out_b[attn_off..attn_off + q_total],
+            )?;
+        }
+
+        // -- Output projection (batched) -----------------------------
+        let (o_w, o_quant) =
+            layer_tensor_q(slm, &mut scratch.name_buf, layer, "attn_output.weight")?;
+        let mm_total = batch.checked_mul(hidden)?;
+        if scratch.matmul_f32_b.len() < mm_total {
+            scratch.matmul_f32_b.resize(mm_total, 0.0);
+        }
+        matmul_quant_rows_batch(
+            o_quant,
+            o_w,
+            hidden,
+            q_total,
+            batch,
+            &scratch.attn_out_b[..batch * q_total],
+            &mut scratch.q8k_scratch_batch,
+            &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
+            &mut scratch.matmul_f32_b[..mm_total],
+        )?;
+
+        // -- Attention residual (per row, FP16-via-FP32) -------------
+        for b in 0..batch {
+            let row_off = b.checked_mul(hidden)?;
+            for i in 0..hidden {
+                let r = crate::slm::gguf::f16_to_f32(scratch.residual_b[row_off + i]);
+                let m = scratch.matmul_f32_b[row_off + i];
+                scratch.x_fp16_b[row_off + i] = f32_to_f16(r + m);
+            }
+        }
+
+        // -- MLP block: residual + RMSNorm + SwiGLU + residual -------
+        scratch
+            .residual_b
+            .copy_from_slice(&scratch.x_fp16_b[..batch * hidden]);
+
+        let ffn_norm_bytes =
+            layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "ffn_norm.weight")?;
+        f32_bytes_into_fp16_slice(ffn_norm_bytes, &mut scratch.norm_fp16)?;
+        for b in 0..batch {
+            let row_off = b.checked_mul(hidden)?;
+            let row_end = row_off.checked_add(hidden)?;
+            rmsnorm(
+                &scratch.x_fp16_b[row_off..row_end],
+                &scratch.norm_fp16,
+                1e-6,
+                &mut scratch.x_norm_b[row_off..row_end],
+            )?;
+        }
+
+        // -- Batched gate/up matmuls ---------------------------------
+        let (gate_w, gate_q) =
+            layer_tensor_q(slm, &mut scratch.name_buf, layer, "ffn_gate.weight")?;
+        let (up_w, up_q) =
+            layer_tensor_q(slm, &mut scratch.name_buf, layer, "ffn_up.weight")?;
+        let (down_w, down_q) =
+            layer_tensor_q(slm, &mut scratch.name_buf, layer, "ffn_down.weight")?;
+
+        let mlp_total = batch.checked_mul(intermediate)?;
+        if scratch.matmul_f32_b.len() < mlp_total {
+            scratch.matmul_f32_b.resize(mlp_total, 0.0);
+        }
+        matmul_quant_rows_batch(
+            gate_q,
+            gate_w,
+            intermediate,
+            hidden,
+            batch,
+            &scratch.x_norm_b[..batch * hidden],
+            &mut scratch.q8k_scratch_batch,
+            &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
+            &mut scratch.matmul_f32_b[..mlp_total],
+        )?;
+        for i in 0..mlp_total {
+            scratch.mlp_gate_b[i] = f32_to_f16(scratch.matmul_f32_b[i]);
+        }
+        matmul_quant_rows_batch(
+            up_q,
+            up_w,
+            intermediate,
+            hidden,
+            batch,
+            &scratch.x_norm_b[..batch * hidden],
+            &mut scratch.q8k_scratch_batch,
+            &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
+            &mut scratch.matmul_f32_b[..mlp_total],
+        )?;
+        for i in 0..mlp_total {
+            scratch.mlp_up_b[i] = f32_to_f16(scratch.matmul_f32_b[i]);
+        }
+
+        // SwiGLU activation: gate ← silu(gate); gate ← gate ⊙ up.
+        // Per-row, but flat over [B × intermediate] is fine — the
+        // operation is element-wise.
+        crate::inference::ops_transformer::silu(
+            &mut scratch.mlp_gate_b[..mlp_total],
+        );
+        for i in 0..mlp_total {
+            let gv = crate::slm::gguf::f16_to_f32(scratch.mlp_gate_b[i]);
+            let uv = crate::slm::gguf::f16_to_f32(scratch.mlp_up_b[i]);
+            scratch.mlp_gate_b[i] = f32_to_f16(gv * uv);
+        }
+
+        // -- Down projection (batched) -------------------------------
+        let mm_hidden = batch.checked_mul(hidden)?;
+        if scratch.matmul_f32_b.len() < mm_hidden {
+            scratch.matmul_f32_b.resize(mm_hidden, 0.0);
+        }
+        matmul_quant_rows_batch(
+            down_q,
+            down_w,
+            hidden,
+            intermediate,
+            batch,
+            &scratch.mlp_gate_b[..mlp_total],
+            &mut scratch.q8k_scratch_batch,
+            &mut scratch.dequant_f32,
+            &mut scratch.acts_f32,
+            &mut scratch.matmul_f32_b[..mm_hidden],
+        )?;
+        for i in 0..mm_hidden {
+            scratch.mlp_out_b[i] = f32_to_f16(scratch.matmul_f32_b[i]);
+        }
+
+        // -- MLP residual --------------------------------------------
+        for b in 0..batch {
+            let row_off = b.checked_mul(hidden)?;
+            for i in 0..hidden {
+                let r = crate::slm::gguf::f16_to_f32(scratch.residual_b[row_off + i]);
+                let m = crate::slm::gguf::f16_to_f32(scratch.mlp_out_b[row_off + i]);
+                scratch.x_fp16_b[row_off + i] = f32_to_f16(r + m);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Commit `batch` positions to KvCache. After this loop, `kv.len`
+    // == pos_base + batch — same as if `forward_one` had walked
+    // `tokens` sequentially.
+    // ---------------------------------------------------------------
+    for _ in 0..batch {
+        session.kv.commit_position()?;
+    }
+
+    // ---------------------------------------------------------------
+    // Final norm + LM head — only the LAST batch row's logits matter
+    // for sampling the first decode token. Computing logits for every
+    // batch position would waste (B-1) × vocab × hidden matmul work.
+    // ---------------------------------------------------------------
+    let last_row = batch.checked_sub(1)?;
+    let last_off = last_row.checked_mul(hidden)?;
+    let last_end = last_off.checked_add(hidden)?;
+    let out_norm_bytes = slm.tensor_bytes("output_norm.weight")?;
+    f32_bytes_into_fp16_slice(out_norm_bytes, &mut scratch.norm_fp16)?;
+    rmsnorm(
+        &scratch.x_fp16_b[last_off..last_end],
+        &scratch.norm_fp16,
+        1e-6,
+        &mut scratch.x_norm_b[last_off..last_end],
+    )?;
+
+    let (lm_w, lm_quant) = tensor_q(slm, "output.weight")
+        .or_else(|| tensor_q(slm, "token_embd.weight"))?;
+
+    if scratch.logits.len() < vocab_size {
+        scratch.logits.resize(vocab_size, 0.0);
+    }
+    lm_head_q(
+        &scratch.x_norm_b[last_off..last_end],
+        lm_quant,
+        lm_w,
+        hidden,
+        vocab_size,
+        &mut scratch.q8k_scratch_batch,
+        &mut scratch.dequant_f32,
+        &mut scratch.acts_f32,
+        &mut scratch.logits[..vocab_size],
+    )?;
+    Some(())
+}
+
+/// Batched variant of [`project_with_bias`] — one matmul over B
+/// activation rows + per-row bias add. Output is `[B × rows]` FP16.
+#[allow(clippy::too_many_arguments)]
+fn project_batch_with_bias(
+    weight_quant: GgmlType,
+    weight: &[u8],
+    rows: usize,
+    cols: usize,
+    batch: usize,
+    acts_fp16: &[u16],
+    bias_f32_bytes: Option<&[u8]>,
+    q8k_scratch: &mut [u8],
+    matmul_f32: &mut Vec<f32>,
+    dequant_scratch: &mut Vec<f32>,
+    acts_f32_scratch: &mut Vec<f32>,
+    out_fp16: &mut [u16],
+) -> Option<()> {
+    let total = batch.checked_mul(rows)?;
+    if out_fp16.len() < total {
+        return None;
+    }
+    if let Some(bytes) = bias_f32_bytes {
+        if bytes.len() != rows.checked_mul(4)? {
+            return None;
+        }
+    }
+    if matmul_f32.len() < total {
+        matmul_f32.resize(total, 0.0);
+    }
+    if dequant_scratch.len() < cols {
+        dequant_scratch.resize(cols, 0.0);
+    }
+    if acts_f32_scratch.len() < cols {
+        acts_f32_scratch.resize(cols, 0.0);
+    }
+    matmul_quant_rows_batch(
+        weight_quant,
+        weight,
+        rows,
+        cols,
+        batch,
+        &acts_fp16[..batch * cols],
+        q8k_scratch,
+        dequant_scratch,
+        acts_f32_scratch,
+        &mut matmul_f32[..total],
+    )?;
+    match bias_f32_bytes {
+        Some(bytes) => {
+            for b in 0..batch {
+                let row_off = b * rows;
+                for i in 0..rows {
+                    let chunk = &bytes[i * 4..(i + 1) * 4];
+                    let arr: [u8; 4] = chunk.try_into().ok()?;
+                    let bias = f32::from_le_bytes(arr);
+                    out_fp16[row_off + i] = f32_to_f16(matmul_f32[row_off + i] + bias);
+                }
+            }
+        }
+        None => {
+            for i in 0..total {
+                out_fp16[i] = f32_to_f16(matmul_f32[i]);
+            }
+        }
+    }
+    Some(())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -797,7 +1398,7 @@ pub fn tensor_type(slm: &LoadedSlm, name: &str) -> Option<GgmlType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slm::gguf::{f16_to_f32, ArchKind, Q4_K_BLOCK_SIZE};
+    use crate::slm::gguf::{f16_to_f32, ArchKind, Q4_K_BLOCK_ELEMENTS, Q4_K_BLOCK_SIZE};
 
     fn test_arch() -> ArchInfo {
         ArchInfo {
@@ -1039,5 +1640,34 @@ mod tests {
                 "idx {i}: helper={a}, direct={b}"
             );
         }
+    }
+
+    /// PR-3: `ForwardBatchScratch::new` allocates buffers sized for
+    /// `max_batch × per-token`. Pin the relationships that matter for
+    /// the forward_batch hot loop so a future arch tweak that changes
+    /// dim ratios doesn't silently under-size a scratch buffer.
+    #[test]
+    fn forward_batch_scratch_sizes_scale_with_max_batch() {
+        let arch = test_arch();
+        let max_batch = 8;
+        let s = ForwardBatchScratch::new(&arch, 16, 32, max_batch);
+        assert_eq!(s.max_batch, max_batch);
+        assert_eq!(s.x_fp16_b.len(), max_batch * 256);
+        assert_eq!(s.residual_b.len(), max_batch * 256);
+        assert_eq!(s.x_norm_b.len(), max_batch * 256);
+        assert_eq!(s.q_fp16_b.len(), max_batch * 256);
+        assert_eq!(s.k_fp16_b.len(), max_batch * 256);
+        assert_eq!(s.v_fp16_b.len(), max_batch * 256);
+        assert_eq!(s.attn_out_b.len(), max_batch * 256);
+        assert_eq!(s.mlp_gate_b.len(), max_batch * 256);
+        assert_eq!(s.mlp_up_b.len(), max_batch * 256);
+        assert_eq!(s.mlp_out_b.len(), max_batch * 256);
+        // matmul_f32_b sized for max(hidden, intermediate); both 256.
+        assert!(s.matmul_f32_b.len() >= max_batch * 256);
+        // q8k scratch sized for max_batch × q8_k_byte_size(max_row).
+        let q8k_per = crate::inference::quant::q8_k_byte_size(256).unwrap();
+        assert_eq!(s.q8k_scratch_batch.len(), max_batch * q8k_per);
+        // logits sized for vocab (single-row LM head).
+        assert_eq!(s.logits.len(), 32);
     }
 }

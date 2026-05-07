@@ -76,12 +76,23 @@ extern "C" {
     /// `mut`) is UB under modern Rust (1.78+ deny-by-default
     /// `static_mut_refs`). The volatile read in `get_ticks` is the
     /// synchronization mechanism.
+    #[cfg(not(test))]
     static mut pit_ticks: u64;
 }
 
 /// Read `pit_ticks` using volatile access (modified by ISR at 100 Hz).
+///
+/// Stubbed to zero under `cfg(test)` so `cargo test` can link without
+/// the kernel-side `pit_ticks` symbol; the timestamp prefix in
+/// formatted log lines is the only consumer and produces `[0.00]`
+/// instead of a real elapsed time during host tests.
 #[inline]
 fn get_ticks() -> u64 {
+    #[cfg(test)]
+    {
+        return 0;
+    }
+    #[cfg(not(test))]
     // SAFETY: pit_ticks is mutated by the timer ISR. We read it via
     // `read_volatile` on a raw pointer obtained from `&raw const`,
     // which never materialises a reference to the static-mut and so

@@ -396,6 +396,107 @@ pub fn matmul_q4k_rows(
     Some(())
 }
 
+/// Batched Q4_K matmul: `[batch × cols]` activations × `[rows × cols]`
+/// weights → `[batch × rows]` output (row-major in both).
+///
+/// Used by [`crate::slm::forward::forward_batch`] to amortize the
+/// dominant prefill cost — the weight stream from DRAM. With
+/// `matmul_q4k_rows`, every prompt token re-reads ~1 GB of Qwen2.5
+/// weights; here, each weight row is read once per call and dot-
+/// producted against all `batch` activation rows in the inner loop,
+/// keeping it hot in L1 / L2.
+///
+/// **Layout.** `acts_fp16` is `batch * cols` u16s, contiguous per
+/// activation row (row 0: `[0..cols]`, row 1: `[cols..2*cols]`, …).
+/// `out_fp32` is `batch * rows` f32s, contiguous per output row
+/// (row b's results: `[b*rows..(b+1)*rows]`). `q8k_scratch` is
+/// `batch * q8_k_byte_size(cols)` bytes — every activation row gets
+/// quantized into Q8_K once, up front, so the inner loop is pure
+/// `vec_dot_q4_k_q8_k`.
+///
+/// **Why this layout for `out`.** A `[batch × rows]` row-major
+/// output is what every downstream op wants (residual add, RMSNorm,
+/// the next per-token RoPE / attention). A column-major
+/// `[rows × batch]` layout would let the inner loop write
+/// contiguously into one weight row's slot but would need a
+/// transpose before any per-token op — strictly worse.
+///
+/// **Why innermost is `for b in 0..batch`.** Each weight row
+/// (`row_bytes` bytes — 144 B for Q4_K with cols=256) is loaded
+/// once and `vec_dot`-applied against `batch` Q8_K activation
+/// rows. For Qwen2.5-1.5B (cols=1536, row_bytes=864), the weight
+/// row stays hot across all `batch` SDOT inner loops; the Q8_K
+/// activation rows (also ~292 B for cols=256, ~1.7 KB for
+/// cols=1536) live in cache for the duration. This is the whole
+/// point — bandwidth is amortized `batch×`.
+///
+/// Bit-equal to calling [`matmul_q4k_rows`] `batch` times on each
+/// activation row. `B=1` is identical to `matmul_q4k_rows` (modulo
+/// one extra outer-loop iteration).
+///
+/// Returns `None` on shape mismatch.
+#[inline]
+pub fn matmul_q4k_rows_batch(
+    weights: &[u8],
+    rows: usize,
+    cols: usize,
+    batch: usize,
+    acts_fp16: &[u16],
+    q8k_scratch: &mut [u8],
+    out_fp32: &mut [f32],
+) -> Option<()> {
+    if cols == 0 || cols % Q4_K_BLOCK_ELEMENTS != 0 || batch == 0 || rows == 0 {
+        return None;
+    }
+    if acts_fp16.len() != batch.checked_mul(cols)? {
+        return None;
+    }
+    if out_fp32.len() != batch.checked_mul(rows)? {
+        return None;
+    }
+    let row_bytes = q4_k_byte_size(cols)?;
+    if weights.len() != row_bytes.checked_mul(rows)? {
+        return None;
+    }
+    let q8k_len = q8_k_byte_size(cols)?;
+    let q8k_total = q8k_len.checked_mul(batch)?;
+    if q8k_scratch.len() < q8k_total {
+        return None;
+    }
+
+    // Quantize all `batch` activation rows up front into a packed
+    // [batch × q8k_len] buffer. After this loop the inner kernel is
+    // pure vec_dot, no per-row F32 setup needed.
+    let mut acts_f32: Vec<f32> = vec![0.0f32; cols];
+    for b in 0..batch {
+        let act_start = b.checked_mul(cols)?;
+        for i in 0..cols {
+            acts_f32[i] = f16_to_f32(acts_fp16[act_start + i]);
+        }
+        let q_start = b.checked_mul(q8k_len)?;
+        let q_end = q_start.checked_add(q8k_len)?;
+        quantize_row_q8_k(&acts_f32, &mut q8k_scratch[q_start..q_end])?;
+    }
+
+    // Inner-loop order: weight row outer, batch inner. Each weight
+    // row is loaded once into cache, then dot-producted against
+    // `batch` Q8_K activation rows before moving to the next weight
+    // row. Output is [batch × rows] row-major, so the write to
+    // `out_fp32[b * rows + r]` is the right slot.
+    for r in 0..rows {
+        let w_start = r.checked_mul(row_bytes)?;
+        let w_end = w_start.checked_add(row_bytes)?;
+        let w_row = &weights[w_start..w_end];
+        for b in 0..batch {
+            let q_start = b.checked_mul(q8k_len)?;
+            let q_end = q_start.checked_add(q8k_len)?;
+            let dot = vec_dot_q4_k_q8_k(w_row, &q8k_scratch[q_start..q_end])?;
+            out_fp32[b.checked_mul(rows)?.checked_add(r)?] = dot;
+        }
+    }
+    Some(())
+}
+
 /// Dispatching multi-row matmul over any supported GGML quant type.
 ///
 /// Real-world Q4_K_M GGUFs mix quant types within a single file —
@@ -514,6 +615,68 @@ pub fn matmul_quant_rows(
             acc += dequant_scratch[i] * acts_f32_scratch[i];
         }
         out_fp32[r] = acc;
+    }
+    Some(())
+}
+
+/// Batched dispatch wrapper around [`matmul_q4k_rows_batch`].
+///
+/// `acts_fp16` is `[batch × cols]` row-major; `out_fp32` is
+/// `[batch × rows]` row-major. For Q4_K weights with `cols` a
+/// multiple of 256, the batched kernel is invoked directly. For any
+/// other quant type, falls back to `batch` independent
+/// [`matmul_quant_rows`] calls — losing batching gain but keeping the
+/// dispatch surface uniform so callers don't have to special-case
+/// quant type. The fallback is what Qwen2.5-1.5B's LM head (Q6_K)
+/// goes through, but the LM head runs once per `forward_batch` call
+/// (only the last batch row's logits matter for sampling), so the
+/// fallback's cost is paid only once per call regardless of batch
+/// size.
+///
+/// `q8k_scratch` must be ≥ `batch * q8_k_byte_size(cols)` for the
+/// Q4_K fast path; the fallback only needs ≥ `q8_k_byte_size(cols)`
+/// (it reuses the front of the buffer per call).
+pub fn matmul_quant_rows_batch(
+    quant_type: crate::slm::gguf::GgmlType,
+    weights: &[u8],
+    rows: usize,
+    cols: usize,
+    batch: usize,
+    acts_fp16: &[u16],
+    q8k_scratch: &mut [u8],
+    dequant_scratch: &mut [f32],
+    acts_f32_scratch: &mut [f32],
+    out_fp32: &mut [f32],
+) -> Option<()> {
+    use crate::slm::gguf::GgmlType;
+
+    if batch == 0 || cols == 0 || rows == 0 {
+        return None;
+    }
+    if acts_fp16.len() != batch.checked_mul(cols)?
+        || out_fp32.len() != batch.checked_mul(rows)?
+    {
+        return None;
+    }
+    if quant_type == GgmlType::Q4_K && cols % Q4_K_BLOCK_ELEMENTS == 0 {
+        return matmul_q4k_rows_batch(
+            weights, rows, cols, batch, acts_fp16, q8k_scratch, out_fp32,
+        );
+    }
+    for b in 0..batch {
+        let acts = &acts_fp16[b.checked_mul(cols)?..(b + 1).checked_mul(cols)?];
+        let out = &mut out_fp32[b.checked_mul(rows)?..(b + 1).checked_mul(rows)?];
+        matmul_quant_rows(
+            quant_type,
+            weights,
+            rows,
+            cols,
+            acts,
+            q8k_scratch,
+            dequant_scratch,
+            acts_f32_scratch,
+            out,
+        )?;
     }
     Some(())
 }
@@ -1201,6 +1364,143 @@ mod tests {
             let single = matmul_q4k_row(row, &acts, &mut q8k_each, cols).expect("single");
             assert!((single - out[r]).abs() < 1e-3);
         }
+    }
+
+    /// Build a non-trivial Q4_K-encoded weight row of `cols` elements
+    /// with a deterministic per-row bit pattern. Used by the batched
+    /// matmul tests so a regression in inner-loop ordering would
+    /// actually flip a number (vs the all-zero fixture above which
+    /// returns zero for every path).
+    ///
+    /// Each block uses d=1.0 (f16 0x3C00), dmin=0, scales-and-mins
+    /// header set so per-sub-block scale=1 / min=0, and `qs` filled
+    /// with `(i ^ row_seed) & 0x0F | ((i ^ row_seed) << 4) & 0xF0`
+    /// so two adjacent rows produce distinguishable dot products.
+    fn q4k_row_nontrivial(cols: usize, row_seed: u8) -> Vec<u8> {
+        let mut row = vec![0u8; q4_k_byte_size(cols).unwrap()];
+        let nb = cols / Q4_K_BLOCK_ELEMENTS;
+        for b in 0..nb {
+            let base = b * Q4_K_BLOCK_SIZE;
+            row[base] = 0x00;
+            row[base + 1] = 0x3C;
+            row[base + 2] = 0x00;
+            row[base + 3] = 0x00;
+            for i in 0..12 {
+                row[base + 4 + i] = (i as u8) | ((i as u8) << 4);
+            }
+            for i in 0..128 {
+                let nib = ((i as u8) ^ row_seed) & 0x0F;
+                row[base + 16 + i] = nib | (nib << 4);
+            }
+        }
+        row
+    }
+
+    #[test]
+    fn matmul_q4k_rows_batch_b1_matches_matmul_q4k_rows() {
+        // batch=1 must be bit-equal to matmul_q4k_rows for any weights.
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let rows = 4usize;
+        let mut weights = Vec::new();
+        for r in 0..rows {
+            weights.extend_from_slice(&q4k_row_nontrivial(cols, r as u8));
+        }
+        let acts = from_f32(&(0..cols).map(|i| (i as f32) / (cols as f32)).collect::<Vec<_>>());
+        let q8k_per = q8_k_byte_size(cols).unwrap();
+
+        let mut q8k_a = vec![0u8; q8k_per];
+        let mut out_serial = vec![0.0f32; rows];
+        matmul_q4k_rows(&weights, rows, cols, &acts, &mut q8k_a, &mut out_serial)
+            .expect("serial");
+
+        let mut q8k_b = vec![0u8; q8k_per];
+        let mut out_batch = vec![0.0f32; rows];
+        matmul_q4k_rows_batch(&weights, rows, cols, 1, &acts, &mut q8k_b, &mut out_batch)
+            .expect("batch B=1");
+        assert_eq!(out_batch, out_serial, "batch=1 must equal serial bit-for-bit");
+    }
+
+    #[test]
+    fn matmul_q4k_rows_batch_matches_per_token_loop() {
+        // batched(B>1) result row b must equal matmul_q4k_rows on
+        // activation row b for every b in 0..batch.
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let rows = 5usize;
+        let batch = 3usize;
+        let mut weights = Vec::new();
+        for r in 0..rows {
+            weights.extend_from_slice(&q4k_row_nontrivial(cols, (r as u8).wrapping_add(7)));
+        }
+
+        // Distinct activation row per batch slot.
+        let mut acts_fp16: Vec<u16> = Vec::with_capacity(batch * cols);
+        for b in 0..batch {
+            let row_f32: Vec<f32> = (0..cols)
+                .map(|i| ((i + b * 13) as f32) / (cols as f32))
+                .collect();
+            acts_fp16.extend_from_slice(&from_f32(&row_f32));
+        }
+
+        let q8k_per = q8_k_byte_size(cols).unwrap();
+        let mut q8k_batch = vec![0u8; q8k_per * batch];
+        let mut out_batch = vec![0.0f32; batch * rows];
+        matmul_q4k_rows_batch(
+            &weights, rows, cols, batch, &acts_fp16, &mut q8k_batch, &mut out_batch,
+        )
+        .expect("batch");
+
+        for b in 0..batch {
+            let act = &acts_fp16[b * cols..(b + 1) * cols];
+            let mut q8k_each = vec![0u8; q8k_per];
+            let mut out_each = vec![0.0f32; rows];
+            matmul_q4k_rows(&weights, rows, cols, act, &mut q8k_each, &mut out_each)
+                .expect("per-token");
+            for r in 0..rows {
+                let bv = out_batch[b * rows + r];
+                let sv = out_each[r];
+                assert_eq!(
+                    bv.to_bits(),
+                    sv.to_bits(),
+                    "batch row b={b} r={r}: batched={bv} per-token={sv}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matmul_q4k_rows_batch_rejects_bad_shapes() {
+        let cols = Q4_K_BLOCK_ELEMENTS;
+        let rows = 2usize;
+        let weights = vec![0u8; rows * Q4_K_BLOCK_SIZE];
+        let q8k_per = q8_k_byte_size(cols).unwrap();
+        let acts = vec![0u16; cols * 2];
+        let mut q8k = vec![0u8; q8k_per * 2];
+        let mut out = vec![0.0f32; rows * 2];
+
+        // batch == 0
+        assert!(
+            matmul_q4k_rows_batch(&weights, rows, cols, 0, &acts, &mut q8k, &mut out).is_none()
+        );
+        // cols not multiple of 256
+        assert!(matmul_q4k_rows_batch(&weights, rows, 200, 2, &acts, &mut q8k, &mut out).is_none());
+        // acts shape mismatch
+        let acts_short = vec![0u16; cols];
+        assert!(
+            matmul_q4k_rows_batch(&weights, rows, cols, 2, &acts_short, &mut q8k, &mut out)
+                .is_none()
+        );
+        // out shape mismatch
+        let mut out_short = vec![0.0f32; rows];
+        assert!(
+            matmul_q4k_rows_batch(&weights, rows, cols, 2, &acts, &mut q8k, &mut out_short)
+                .is_none()
+        );
+        // q8k_scratch too small
+        let mut q8k_short = vec![0u8; q8k_per];
+        assert!(
+            matmul_q4k_rows_batch(&weights, rows, cols, 2, &acts, &mut q8k_short, &mut out)
+                .is_none()
+        );
     }
 
     // ---- GQA --------------------------------------------------------
