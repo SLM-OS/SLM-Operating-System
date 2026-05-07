@@ -17,9 +17,19 @@
 #include "syscall.h"
 #include <stdint.h>
 
-/* Timer IRQ numbers */
-#define PHYS_TIMER_IRQ  30  /* Physical timer PPI 14 */
-#define VIRT_TIMER_IRQ  27  /* Virtual timer PPI 11 */
+/* Timer IRQ numbers — Generic Timer PPIs.
+ *
+ * Which one a given platform uses depends on the EL the kernel runs at:
+ *   - HYP_PHYS_TIMER_IRQ (PPI 26 / CNTHP) — Pi 5 at EL2/VHE (#683).
+ *   - VIRT_TIMER_IRQ     (PPI 27 / CNTV)  — historical EL1 fallback.
+ *   - PHYS_TIMER_IRQ     (PPI 30 / CNTP)  — QEMU + Jetson + x86.
+ *
+ * platform.h pins TIMER_IRQ to one of these per platform; this dispatch
+ * accepts all three so the same IRQ vector handles every case.
+ */
+#define HYP_PHYS_TIMER_IRQ  26  /* Hyp Physical Timer PPI 10 (CNTHP) */
+#define VIRT_TIMER_IRQ      27  /* Virtual timer PPI 11 (CNTV) */
+#define PHYS_TIMER_IRQ      30  /* Non-secure physical timer PPI 14 (CNTP) */
 
 /*
  * Decode exception class from ESR_EL1
@@ -333,8 +343,9 @@ void el1_irq_handler(void)
 
     /* Dispatch based on IRQ number */
     switch (irq) {
-    case PHYS_TIMER_IRQ:
-    case VIRT_TIMER_IRQ: {
+    case HYP_PHYS_TIMER_IRQ:
+    case VIRT_TIMER_IRQ:
+    case PHYS_TIMER_IRQ: {
         /*
          * For timer interrupt, we must signal EOI BEFORE calling the handler
          * because timer_handler() -> scheduler_tick() -> schedule() may
