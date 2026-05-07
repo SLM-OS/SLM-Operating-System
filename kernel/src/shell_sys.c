@@ -1790,13 +1790,21 @@ static void diag_print_el2(void)
                     c_magic == DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC
                         ? "OK" : "MISSING");
         if (c_magic == DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC) {
+            /* Sentinel C captures TF-A's secure readback of IGROUPR[0]
+             * after writing 0xFFFFFFFF. Both candidate timer PPIs
+             * (CNTV=27 banked, CNTP=30) must end up in Group 1 NS — bits
+             * 16-23 / 24 are RES0 on GIC-400 (unimplemented PPIs) so
+             * they read back zero even when the write was accepted.
+             * This invariant is independent of which PPI the runtime
+             * timer driver picks via TIMER_IRQ. */
+            uint32_t timer_ppis = (1u << 27) | (1u << 30);
             shell_printf("    TF-A view  IGROUPR[0]: pre=0x%08lx post=0x%08lx  %s\r\n",
                         (unsigned long)c_pre, (unsigned long)c_post,
                         (c_post == 0xFFFFFFFFul)
                             ? "(write fully held — all PPIs Group 1 NS)"
-                            : ((c_post & (1u << 30)) != 0u)
-                                  ? "(timer PPI 30 in Group 1 NS; bits 16-23/24 RES0 on GIC-400)"
-                                  : "(partial — PPI 30 NOT in Group 1 NS)");
+                            : ((c_post & timer_ppis) == timer_ppis)
+                                  ? "(timer PPIs 27+30 in Group 1 NS; bits 16-23/24 RES0 on GIC-400)"
+                                  : "(partial — at least one timer PPI NOT in Group 1 NS)");
             shell_printf("    TF-A view  GICD_CTLR : 0x%08lx\r\n",
                         (unsigned long)c_ctlr);
         }
@@ -5841,8 +5849,9 @@ static inline void irqtest_fifo_drain(void)
     int t = 10000000;  /* ~6 ms at 1.5 GHz including MMIO latency */
     while (t-- > 0) {
         uint32_t fr = *(volatile uint32_t *)IRQTEST_UART_FR;
-        if ((fr & IRQTEST_FR_TXFE) && !(fr & IRQTEST_FR_BUSY))
+        if ((fr & IRQTEST_FR_TXFE) && !(fr & IRQTEST_FR_BUSY)) {
             break;
+        }
         __asm__ volatile("" ::: "memory");
     }
 }
@@ -5879,6 +5888,86 @@ static inline void irqtest_puts(const char *s)
 {
     while (*s) {
         irqtest_putc(*s++);
+    }
+}
+
+/* Dump VBAR_EL1, DAIF, SCTLR_EL1, and the NS-visible GIC state for
+ * the active timer PPI (TIMER_IRQ). Run before any DAIF manipulation
+ * so the captured state reflects what the kernel sees right before
+ * `daifclr` — useful for telling "vector base corrupt" or "PMR/RPR
+ * blocks delivery" apart from "IRQ pin really should fire". */
+static void irqtest_dump_pre_daifclr_state(void)
+{
+    uint64_t vbar_now, daif_pre, sctlr_now;
+    __asm__ volatile("mrs %0, vbar_el1"  : "=r"(vbar_now));
+    __asm__ volatile("mrs %0, daif"      : "=r"(daif_pre));
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr_now));
+    shell_printf("\r\n  pre-daifclr: VBAR_EL1=0x%lx DAIF=0x%lx SCTLR_EL1=0x%lx\r\n",
+                 (unsigned long)vbar_now,
+                 (unsigned long)daif_pre,
+                 (unsigned long)sctlr_now);
+    extern char exception_vectors[];
+    shell_printf("  exception_vectors symbol = %p (must equal VBAR_EL1)\r\n",
+                 (void *)exception_vectors);
+    /* GIC delivery state — what NS-EL1 actually sees about the active
+     * timer PPI (TIMER_IRQ).
+     *   GICC_HPPIR (off 0x18): highest priority pending Group 1 NS
+     *     IRQ visible to NS — returns 1023 (none), 1022 (top is
+     *     Group 0/1-Secure, NS can't see), or the IRQ id.
+     *   GICC_AHPPIR (off 0x28): aliased — secure HPPIR (NS reads 0
+     *     unless GICC_CTLR.AckCtl steers it).
+     *   GICD_ISACTIVER0 (0x300): which IRQs are currently ACTIVE.
+     *   GICD_ITARGETSR7 (0x81C): IRQs 28..31 → CPU mask. PPI is
+     *     banked, so this returns 0x01010101 if banked-as-CPU0.
+     *   GICD_ICFGR1   (0xC04): trigger config for IRQs 16..31, 2
+     *     bits per IRQ. For IRQ N (16..31), bit (N%16)*2+1 = 1 →
+     *     edge-triggered, 0 → level-triggered. */
+    uint32_t hppir   = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x18);
+    uint32_t ahppir  = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x28);
+    uint32_t rpr     = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x14);
+    uint32_t pmr     = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x04);
+    uint32_t bpr     = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x08);
+    uint32_t isacti0 = *(volatile uint32_t *)(GIC_DIST_BASE + 0x300);
+    uint32_t itarg7  = *(volatile uint32_t *)(GIC_DIST_BASE + 0x81C);
+    uint32_t icfgr1  = *(volatile uint32_t *)(GIC_DIST_BASE + 0xC04);
+    /* IPRIORITYR for IRQ N = GICD_BASE + 0x400 + N (per-byte offset) */
+    uint8_t  ipriby  = *(volatile uint8_t  *)(GIC_DIST_BASE + 0x400 + TIMER_IRQ);
+    unsigned trig_bit = ((TIMER_IRQ % 16u) * 2u) + 1u;
+    shell_printf("  GIC NS:  HPPIR=0x%x  AHPPIR=0x%x  RPR=0x%x  PMR=0x%x  BPR=0x%x\r\n",
+                 hppir, ahppir, rpr, pmr, bpr);
+    shell_printf("           ISACTIVER0=0x%x  ITARGETSR7=0x%x  ICFGR1=0x%x  IPRI[%u]=0x%02x\r\n",
+                 isacti0, itarg7, icfgr1, (unsigned)TIMER_IRQ, ipriby);
+    shell_printf("  HPPIR decode: %s\r\n",
+                 (hppir & 0x3FF) == 0x3FF ? "1023 (no Grp1NS pending)" :
+                 (hppir & 0x3FF) == 0x3FE ? "1022 (top pending is Grp0/Grp1S — NS cannot see)" :
+                 "actual IRQ id (Grp1NS pending — should deliver)");
+    shell_printf("  Delivery gate: pri(0x%02x) < (RPR(0x%x) & PMR(0x%x))? %s\r\n",
+                 ipriby, rpr, pmr,
+                 ipriby < (rpr < pmr ? rpr : pmr) ? "yes — should deliver"
+                                                   : "NO — RPR/PMR blocks delivery");
+    shell_printf("  ICFGR1 decode: PPI %u trigger = %s\r\n",
+                 (unsigned)TIMER_IRQ,
+                 (icfgr1 & (1u << trig_bit)) ? "edge" : "level");
+}
+
+/* Undo per-mode side effects so the probes don't poison kernel state.
+ * mode_iar deliberately ack'd without EOI (active-priority bit stays
+ * raised, future IRQs at <= that priority are silently masked).
+ * mode_linit changed GICC_CTLR (set EOImodeNS, which changes
+ * kernel-wide EOI semantics from single-write-EOIR to DIR-after-EOI).
+ * Both must be undone before returning to the shell. */
+static void irqtest_cleanup_state(uint32_t iar_saved_id, bool iar_pending_eoi,
+                                  uint32_t linit_saved_ctlr, bool linit_changed_ctlr)
+{
+    if (iar_pending_eoi) {
+        *(volatile uint32_t *)(GIC_CPU_BASE + 0x10) = iar_saved_id;
+        __asm__ volatile("dsb sy" ::: "memory");
+        irqtest_puts(" IAR-EOI");
+    }
+    if (linit_changed_ctlr) {
+        *(volatile uint32_t *)(GIC_CPU_BASE + 0x00) = linit_saved_ctlr;
+        __asm__ volatile("dsb sy" ::: "memory");
+        irqtest_puts(" CTLR-restored");
     }
 }
 
@@ -6016,61 +6105,11 @@ int cmd_irqtest(int argc, char *argv[])
 #else
     (void)single_mode;
 #endif
-    /* #672 probe: dump VBAR_EL1 + pre-daifclr DAIF as hex via the
-     * standard puts() helper *before* anything FIFO-sensitive happens.
-     * Goal: rule out a corrupted vector base or a stuck I-bit before
-     * we daifclr. Captured via shell_printf because at this point UART
-     * lock + FIFO are both healthy. */
-    {
-        uint64_t vbar_now, daif_pre, sctlr_now;
-        __asm__ volatile("mrs %0, vbar_el1"  : "=r"(vbar_now));
-        __asm__ volatile("mrs %0, daif"      : "=r"(daif_pre));
-        __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr_now));
-        shell_printf("\r\n  pre-daifclr: VBAR_EL1=0x%lx DAIF=0x%lx SCTLR_EL1=0x%lx\r\n",
-                     (unsigned long)vbar_now,
-                     (unsigned long)daif_pre,
-                     (unsigned long)sctlr_now);
-        extern char exception_vectors[];
-        shell_printf("  exception_vectors symbol = %p (must equal VBAR_EL1)\r\n",
-                     (void *)exception_vectors);
-        /* GIC delivery state — what NS-EL1 actually sees about PPI 30.
-         *   GICC_HPPIR (off 0x18): highest priority pending Group 1 NS
-         *     IRQ visible to NS — returns 1023 (none), 1022 (top is
-         *     Group 0/1-Secure, NS can't see), or the IRQ id.
-         *   GICC_AHPPIR (off 0x28): aliased — secure HPPIR (NS reads
-         *     0 unless GICC_CTLR.AckCtl steers it).
-         *   GICD_ISACTIVER0 (0x300): which IRQs are currently ACTIVE.
-         *   GICD_ITARGETSR7 (0x81C): IRQs 28..31 → CPU mask. PPI is
-         *     banked, so this returns 0x01010101 if banked-as-CPU0. */
-        uint32_t hppir   = *(volatile uint32_t *)(0x107FFFA000ULL + 0x18);
-        uint32_t ahppir  = *(volatile uint32_t *)(0x107FFFA000ULL + 0x28);
-        uint32_t rpr     = *(volatile uint32_t *)(0x107FFFA000ULL + 0x14);
-        uint32_t pmr     = *(volatile uint32_t *)(0x107FFFA000ULL + 0x04);
-        uint32_t bpr     = *(volatile uint32_t *)(0x107FFFA000ULL + 0x08);
-        uint32_t isacti0 = *(volatile uint32_t *)(0x107fff9000ULL + 0x300);
-        uint32_t itarg7  = *(volatile uint32_t *)(0x107fff9000ULL + 0x81C);
-        uint32_t icfgr1  = *(volatile uint32_t *)(0x107fff9000ULL + 0xC04);
-        uint32_t ipri30  = *(volatile uint32_t *)(0x107fff9000ULL + 0x418 + ((30 / 4) - (30 / 4)) * 4);
-        /* IPRIORITYR for IRQ 30 = GICD_BASE + 0x400 + 30 (per-byte offset) */
-        uint8_t  ipriby  = *(volatile uint8_t *)(0x107fff9000ULL + 0x400 + 30);
-        shell_printf("  GIC NS:  HPPIR=0x%x  AHPPIR=0x%x  RPR=0x%x  PMR=0x%x  BPR=0x%x\r\n",
-                     hppir, ahppir, rpr, pmr, bpr);
-        shell_printf("           ISACTIVER0=0x%x  ITARGETSR7=0x%x  ICFGR1=0x%x  IPRI[30]=0x%02x\r\n",
-                     isacti0, itarg7, icfgr1, ipriby);
-        (void)ipri30;
-        shell_printf("  HPPIR decode: %s\r\n",
-                     (hppir & 0x3FF) == 0x3FF ? "1023 (no Grp1NS pending)" :
-                     (hppir & 0x3FF) == 0x3FE ? "1022 (top pending is Grp0/Grp1S — NS cannot see)" :
-                     "actual IRQ id (Grp1NS pending — should deliver)");
-        shell_printf("  Delivery gate: pri(0x%02x) < (RPR(0x%x) & PMR(0x%x))? %s\r\n",
-                     ipriby, rpr, pmr,
-                     ipriby < (rpr < pmr ? rpr : pmr) ? "yes — should deliver"
-                                                       : "NO — RPR/PMR blocks delivery");
-        /* ICFGR1 bit positions for IRQ 30: 2 bits per IRQ, IRQ 30 → bits 28..29.
-         * bit 29 = 1 → edge-triggered, 0 → level-triggered. */
-        shell_printf("  ICFGR1[30..31] decode: PPI 30 trigger = %s\r\n",
-                     (icfgr1 & (1u << 29)) ? "edge" : "level");
-    }
+    /* #672 probe: dump VBAR_EL1, DAIF, SCTLR_EL1, and the NS-visible
+     * GIC state for TIMER_IRQ before any DAIF manipulation. Goal: rule
+     * out a corrupted vector base, stuck I-bit, or PMR/RPR-blocked
+     * delivery before we daifclr. */
+    irqtest_dump_pre_daifclr_state();
 
     irqtest_puts(skip_daifclr ? " 3-skipped" : " 3");  /* checkpoint 3: about to daifclr */
 
@@ -6114,8 +6153,9 @@ int cmd_irqtest(int argc, char *argv[])
     /* "clr" mode: clear the pending timer PPI in GIC before daifclr.
      * Tests whether the wedge is caused by the GIC asserting the IRQ
      * pin AT the moment we unmask DAIF.I. GIC-400 ICPENDR clears
-     * pending state without needing ack/EOI. PPI 30 is banked per-CPU
-     * so this only affects the running CPU. */
+     * pending state without needing ack/EOI. The timer PPI is banked
+     * per-CPU so this only affects the running CPU. Operates on the
+     * currently-active TIMER_IRQ (PPI 27 on Pi 5 since #672). */
     /* "tdis" mode: disable the generic timer at the CNTP_CTL_EL0 level
      * before daifclr. If this fixes the wedge, the wedge is caused by
      * the timer's IRQ assertion at the GIC level. */
@@ -6138,17 +6178,19 @@ int cmd_irqtest(int argc, char *argv[])
     }
 
     if (mode_clr) {
-        /* GICD_ICPENDR0 = GICD_BASE + 0x280, write 1<<30 to clear PPI 30 */
-        uint32_t pre = *(volatile uint32_t *)(0x107fff9000ULL + 0x200);
-        *(volatile uint32_t *)(0x107fff9000ULL + 0x280) = (1u << 30);
+        /* GICD_ICPENDR0 = GICD_BASE + 0x280; write 1<<TIMER_IRQ to
+         * clear the timer PPI (banked per-CPU for IDs 0..31). */
+        uint32_t timer_bit = 1u << TIMER_IRQ;
+        uint32_t pre = *(volatile uint32_t *)(GIC_DIST_BASE + 0x200);
+        *(volatile uint32_t *)(GIC_DIST_BASE + 0x280) = timer_bit;
         __asm__ volatile("dsb sy" ::: "memory");
-        uint32_t post = *(volatile uint32_t *)(0x107fff9000ULL + 0x200);
-        /* ALSO disable PPI 30 entirely — write 1<<30 to ICENABLER0 */
-        *(volatile uint32_t *)(0x107fff9000ULL + 0x180) = (1u << 30);
+        uint32_t post = *(volatile uint32_t *)(GIC_DIST_BASE + 0x200);
+        /* ALSO disable the timer PPI entirely via ICENABLER0. */
+        *(volatile uint32_t *)(GIC_DIST_BASE + 0x180) = timer_bit;
         __asm__ volatile("dsb sy" ::: "memory");
-        uint32_t after_dis = *(volatile uint32_t *)(0x107fff9000ULL + 0x100);
-        shell_printf("\r\n  GIC ISPENDR0 pre=0x%08x post-clear=0x%08x ISENABLER0 post-disable=0x%08x\r\n",
-                     pre, post, after_dis);
+        uint32_t after_dis = *(volatile uint32_t *)(GIC_DIST_BASE + 0x100);
+        shell_printf("\r\n  GIC ISPENDR0 pre=0x%08x post-clear=0x%08x ISENABLER0 post-disable=0x%08x (PPI %u)\r\n",
+                     pre, post, after_dis, (unsigned)TIMER_IRQ);
         irqtest_puts(" CLR-PEND");
     }
 
@@ -6173,10 +6215,12 @@ int cmd_irqtest(int argc, char *argv[])
     if (mode_drain) {
         int n = 0;
         for (int i = 0; i < 32 && n < 10; i++) {
-            uint32_t iar = *(volatile uint32_t *)(0x107FFFA000ULL + 0x0C);
+            uint32_t iar = *(volatile uint32_t *)(GIC_CPU_BASE + 0x0C);
             __asm__ volatile("dsb sy" ::: "memory");
-            if ((iar & 0x3FF) == 0x3FF) break;
-            *(volatile uint32_t *)(0x107FFFA000ULL + 0x10) = iar;
+            if ((iar & 0x3FF) == 0x3FF) {
+                break;
+            }
+            *(volatile uint32_t *)(GIC_CPU_BASE + 0x10) = iar;
             __asm__ volatile("dsb sy" ::: "memory");
             n++;
         }
@@ -6189,28 +6233,37 @@ int cmd_irqtest(int argc, char *argv[])
      * distributor-disable cycle re-evaluates the IRQ pending state
      * in some way the kernel hasn't triggered. */
     if (mode_dis) {
-        uint32_t pre_ctlr = *(volatile uint32_t *)(0x107fff9000ULL + 0x000);
-        *(volatile uint32_t *)(0x107fff9000ULL + 0x000) = 0;
+        uint32_t pre_ctlr = *(volatile uint32_t *)(GIC_DIST_BASE + 0x000);
+        *(volatile uint32_t *)(GIC_DIST_BASE + 0x000) = 0;
         __asm__ volatile("dsb sy" ::: "memory");
-        *(volatile uint32_t *)(0x107fff9000ULL + 0x000) = pre_ctlr;
+        *(volatile uint32_t *)(GIC_DIST_BASE + 0x000) = pre_ctlr;
         __asm__ volatile("dsb sy" ::: "memory");
-        uint32_t post_ctlr = *(volatile uint32_t *)(0x107fff9000ULL + 0x000);
+        uint32_t post_ctlr = *(volatile uint32_t *)(GIC_DIST_BASE + 0x000);
         shell_printf("\r\n  DIS-CYCLE: GICD_CTLR pre=0x%x post=0x%x\r\n",
                      pre_ctlr, post_ctlr);
     }
 
+    /* Saved across mode_linit so the post-irqtest cleanup block can
+     * restore the original GICC_CTLR. EOImodeNS changes kernel-wide
+     * EOI semantics from "single-write to EOIR" to "DIR-after-EOI",
+     * so leaving it set after the probe poisons every subsequent
+     * IRQ acknowledge in the running kernel. */
+    uint32_t linit_saved_ctlr = 0;
+    bool linit_changed_ctlr = false;
     if (mode_linit) {
         for (int i = 0; i < 4; i++) {
-            *(volatile uint32_t *)(0x107FFFA000ULL + 0xD0 + i * 4) = 0;
+            *(volatile uint32_t *)(GIC_CPU_BASE + 0xD0 + i * 4) = 0;
         }
         __asm__ volatile("dsb sy" ::: "memory");
-        uint32_t ctlr_pre = *(volatile uint32_t *)(0x107FFFA000ULL + 0x00);
+        uint32_t ctlr_pre = *(volatile uint32_t *)(GIC_CPU_BASE + 0x00);
         uint32_t bypass = ctlr_pre & 0x1E0; /* bypass bits 5..8 */
-        *(volatile uint32_t *)(0x107FFFA000ULL + 0x00) =
+        linit_saved_ctlr = ctlr_pre;
+        linit_changed_ctlr = true;
+        *(volatile uint32_t *)(GIC_CPU_BASE + 0x00) =
             bypass | (1u << 9) /* EOImodeNS */ | 1u /* EnableGrp1NS */;
         __asm__ volatile("dsb sy" ::: "memory");
-        uint32_t ctlr_post = *(volatile uint32_t *)(0x107FFFA000ULL + 0x00);
-        shell_printf("\r\n  LINIT: GICC_CTLR pre=0x%x post=0x%x (set EOImodeNS)\r\n",
+        uint32_t ctlr_post = *(volatile uint32_t *)(GIC_CPU_BASE + 0x00);
+        shell_printf("\r\n  LINIT: GICC_CTLR pre=0x%x post=0x%x (set EOImodeNS — restored on exit)\r\n",
                      ctlr_pre, ctlr_post);
     }
 
@@ -6263,17 +6316,29 @@ int cmd_irqtest(int argc, char *argv[])
      * If daifclr STILL wedges after a successful ack, the wedge is not
      * the IRQ pin assertion at all — something else is going wrong
      * in the daifclr path. */
+    /* Saved across mode_iar so the post-irqtest cleanup block can EOI
+     * the IRQ that mode_iar deliberately leaves in ACTIVE state.
+     * Without that EOI, the active priority bit stays raised and
+     * future IRQs at <= that priority are silently masked at the CPU
+     * interface — i.e. the next "irqtest" invocation, normal kernel
+     * timer ticks, etc. all stop working. */
+    uint32_t iar_saved_id = 0x3FF;
+    bool iar_pending_eoi = false;
     if (mode_iar) {
-        uint32_t iar = *(volatile uint32_t *)(0x107FFFA000ULL + 0x0C);
+        uint32_t iar = *(volatile uint32_t *)(GIC_CPU_BASE + 0x0C);
         __asm__ volatile("dsb sy" ::: "memory");
-        uint32_t isacti_after = *(volatile uint32_t *)(0x107fff9000ULL + 0x300);
-        uint32_t hppir_after  = *(volatile uint32_t *)(0x107FFFA000ULL + 0x18);
+        uint32_t isacti_after = *(volatile uint32_t *)(GIC_DIST_BASE + 0x300);
+        uint32_t hppir_after  = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x18);
         shell_printf("\r\n  IAR-ack: GICC_IAR=0x%x (id=%u)  ISACTIVER0=0x%x  HPPIR=0x%x\r\n",
                      iar, iar & 0x3FF, isacti_after, hppir_after);
-        /* DELIBERATELY NO EOI. State stays ACTIVE so the pin is
-         * de-asserted (until EOI). If daifclr now succeeds, the wedge
-         * was about pin assertion. If it still wedges, the wedge is
-         * unrelated to GIC pin state. */
+        /* DELIBERATELY NO IMMEDIATE EOI. State stays ACTIVE so the pin
+         * is de-asserted (until EOI). If daifclr now succeeds, the
+         * wedge was about pin assertion. If it still wedges, the
+         * wedge is unrelated to GIC pin state. The saved id is EOI'd
+         * in the cleanup block at the end of cmd_irqtest so the active
+         * priority is released before the shell returns. */
+        iar_saved_id = iar;
+        iar_pending_eoi = ((iar & 0x3FF) != 0x3FF);
     }
     if (mode_wait) {
         uint64_t freq_w, now_w, target_w;
@@ -6373,6 +6438,9 @@ int cmd_irqtest(int argc, char *argv[])
         irqtest_puts(" PD=0");
     }
 #endif
+
+    irqtest_cleanup_state(iar_saved_id, iar_pending_eoi,
+                          linit_saved_ctlr, linit_changed_ctlr);
 
     uint64_t irq_after = vec->irq;
     uint64_t fiq_after = vec->fiq;
