@@ -133,6 +133,25 @@ if(HAILO_D3HOT_AT_BOOT)
     add_compile_definitions(HAILO_D3HOT_AT_BOOT=1)
 endif()
 
+# Microsecond settle delay between OUT prefetch and IN submit. HailoRT's
+# vdma trace (~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-vdma-mnist-pi5.txt)
+# shows ~4.6 ms wall-clock between the last OUT launch_transfer and the
+# first IN launch_transfer. SLM-OS today does these back-to-back. #682
+# hypothesis: fw needs time to settle into the dataflow state after seeing
+# 8 OUT credits before accepting the IN avail bump.
+#
+# Verdict on pi-5-1 (2026-05-07): DISCONFIRMED at 5000 us. proc still
+# stays at 0, dev base still 0x00002c01, identical timeout. The 4.6 ms
+# gap in HailoRT's trace was almost certainly userspace-kernel ioctl
+# overhead, not a fw requirement. Default 0 (no delay); kept compile-
+# time-tunable so the experiment can be re-run with a different value
+# (e.g. 100000 = 100 ms) without re-editing source. >0 wires the udelay
+# back into hailo_backend_run; 0 elides the call entirely (the #if
+# turns into nothing).
+set(HAILO_OUT_TO_IN_SETTLE_US "0" CACHE STRING
+    "Microseconds to wait between OUT prefetch and IN submit (#682 settle test, disconfirmed)")
+add_compile_definitions(HAILO_OUT_TO_IN_SETTLE_US=${HAILO_OUT_TO_IN_SETTLE_US})
+
 # Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1). Adds EL2 register
 # snapshot in boot.S, per-CPU per-vector exception counters in vectors.S,
 # a real el1_fiq handler that captures the FIQ source, and the `diag`

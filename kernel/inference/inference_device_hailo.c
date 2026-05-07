@@ -1920,6 +1920,20 @@ static int hailo_backend_run(struct inference_device *dev,
      * data lands per input we submit. wait_proc(target=1) is the
      * right downstream poll. */
 
+#if HAILO_OUT_TO_IN_SETTLE_US > 0
+    /* #682 settle-gap experiment (2026-05-07). HailoRT's vdma trace
+     * shows ~4.6 ms wall-clock between the final OUT launch_transfer
+     * and the IN launch_transfer; SLM-OS does these back-to-back.
+     * Most likely that gap is just userspace-kernel ioctl overhead,
+     * but if fw needs time to settle into dataflow state after seeing
+     * 8 OUT credits before honoring an IN avail bump, this delay
+     * would surface it. Compile-time-tunable via
+     * -DHAILO_OUT_TO_IN_SETTLE_US=<usec>; set to 0 to skip. */
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(HAILO_OUT_TO_IN_SETTLE_US);
+    }
+#endif
+
     int rc;
     uint64_t t_in_submit  = timer_get_count();
     rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
