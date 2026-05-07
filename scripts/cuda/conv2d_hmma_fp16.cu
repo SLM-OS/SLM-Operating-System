@@ -218,7 +218,11 @@ __global__ void conv2d_hmma_fp16(const half *X, const half *W, float *Y,
 /* --- Host harness --- */
 
 /* Harness exit codes — same scheme as scripts/cuda/gemm_hmma_fp16.cu so a
- * future CI wrapper can keyed on identical numbers across both kernels. */
+ * future CI wrapper can key on identical numbers across both kernels.
+ * Code 4 is intentionally skipped: gemm reserves it for SMOKE_MISMATCH
+ * (the all-ones bit-exact path), and this harness has no smoke variant
+ * — the keep-the-numbers-aligned promise is more useful than reusing 4
+ * for a different meaning here. */
 #define HARNESS_RC_OK              0
 #define HARNESS_RC_OOM             1
 #define HARNESS_RC_LAUNCH_FAIL     2  /* cudaGetLastError after <<<...>>> */
