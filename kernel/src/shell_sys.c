@@ -6044,14 +6044,32 @@ int cmd_irqtest(int argc, char *argv[])
          *     banked, so this returns 0x01010101 if banked-as-CPU0. */
         uint32_t hppir   = *(volatile uint32_t *)(0x107FFFA000ULL + 0x18);
         uint32_t ahppir  = *(volatile uint32_t *)(0x107FFFA000ULL + 0x28);
+        uint32_t rpr     = *(volatile uint32_t *)(0x107FFFA000ULL + 0x14);
+        uint32_t pmr     = *(volatile uint32_t *)(0x107FFFA000ULL + 0x04);
+        uint32_t bpr     = *(volatile uint32_t *)(0x107FFFA000ULL + 0x08);
         uint32_t isacti0 = *(volatile uint32_t *)(0x107fff9000ULL + 0x300);
         uint32_t itarg7  = *(volatile uint32_t *)(0x107fff9000ULL + 0x81C);
-        shell_printf("  GIC NS:  HPPIR=0x%x  AHPPIR=0x%x  ISACTIVER0=0x%x  ITARGETSR7=0x%x\r\n",
-                     hppir, ahppir, isacti0, itarg7);
+        uint32_t icfgr1  = *(volatile uint32_t *)(0x107fff9000ULL + 0xC04);
+        uint32_t ipri30  = *(volatile uint32_t *)(0x107fff9000ULL + 0x418 + ((30 / 4) - (30 / 4)) * 4);
+        /* IPRIORITYR for IRQ 30 = GICD_BASE + 0x400 + 30 (per-byte offset) */
+        uint8_t  ipriby  = *(volatile uint8_t *)(0x107fff9000ULL + 0x400 + 30);
+        shell_printf("  GIC NS:  HPPIR=0x%x  AHPPIR=0x%x  RPR=0x%x  PMR=0x%x  BPR=0x%x\r\n",
+                     hppir, ahppir, rpr, pmr, bpr);
+        shell_printf("           ISACTIVER0=0x%x  ITARGETSR7=0x%x  ICFGR1=0x%x  IPRI[30]=0x%02x\r\n",
+                     isacti0, itarg7, icfgr1, ipriby);
+        (void)ipri30;
         shell_printf("  HPPIR decode: %s\r\n",
                      (hppir & 0x3FF) == 0x3FF ? "1023 (no Grp1NS pending)" :
                      (hppir & 0x3FF) == 0x3FE ? "1022 (top pending is Grp0/Grp1S — NS cannot see)" :
                      "actual IRQ id (Grp1NS pending — should deliver)");
+        shell_printf("  Delivery gate: pri(0x%02x) < (RPR(0x%x) & PMR(0x%x))? %s\r\n",
+                     ipriby, rpr, pmr,
+                     ipriby < (rpr < pmr ? rpr : pmr) ? "yes — should deliver"
+                                                       : "NO — RPR/PMR blocks delivery");
+        /* ICFGR1 bit positions for IRQ 30: 2 bits per IRQ, IRQ 30 → bits 28..29.
+         * bit 29 = 1 → edge-triggered, 0 → level-triggered. */
+        shell_printf("  ICFGR1[30..31] decode: PPI 30 trigger = %s\r\n",
+                     (icfgr1 & (1u << 29)) ? "edge" : "level");
     }
 
     irqtest_puts(skip_daifclr ? " 3-skipped" : " 3");  /* checkpoint 3: about to daifclr */
@@ -6087,6 +6105,8 @@ int cmd_irqtest(int argc, char *argv[])
     bool mode_dsb    = (argc >= 2 && argv[1] && strcmp(argv[1], "dsb") == 0);
     bool mode_wait   = (argc >= 2 && argv[1] && strcmp(argv[1], "wait") == 0);
     bool mode_iar    = (argc >= 2 && argv[1] && strcmp(argv[1], "iar") == 0);
+    bool mode_match  = (argc >= 2 && argv[1] && strcmp(argv[1], "match") == 0);
+    bool mode_putsx  = (argc >= 2 && argv[1] && strcmp(argv[1], "putsx") == 0);
 
     /* "clr" mode: clear the pending timer PPI in GIC before daifclr.
      * Tests whether the wedge is caused by the GIC asserting the IRQ
@@ -6129,9 +6149,33 @@ int cmd_irqtest(int argc, char *argv[])
         irqtest_puts(" CLR-PEND");
     }
 
+    /* "putsx" mode: extra UART puts BEFORE the drain+A+drain sequence.
+     * Mimics what `idle` mode adds via puts(" IDLE-EMU") but with no
+     * cacheable bump, no mpidr read. */
+    if (mode_putsx) {
+        irqtest_puts(" PUTSX");
+    }
+
     irqtest_fifo_drain();
     IRQTEST_RAW_PUTC('A');
     irqtest_fifo_drain();
+
+    /* "match" mode: run idle's *exact* pre-daifclr instruction stream
+     * — bl-style function call to cpu_logical_id + cacheable r/m/w of
+     * a counter — with NO MMIO between this prologue and the daifclr.
+     * If "match" passes while "single" wedges, the unblocker is the
+     * function-call + cacheable-bump pattern specifically, not the
+     * total amount of activity. */
+    if (mode_match) {
+        uint64_t mpidr;
+        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+        int log_id = cpu_logical_id(mpidr);
+        static volatile uint32_t match_counter[8];
+        if (log_id >= 0 && log_id < 8) match_counter[log_id]++;
+        /* No further activity — let daifclr run in same pipeline state
+         * as idle's. */
+    }
+
 
     /* "cmem" mode: a single cacheable load/store right after the
      * drain and immediately before daifclr — tests whether *any*
