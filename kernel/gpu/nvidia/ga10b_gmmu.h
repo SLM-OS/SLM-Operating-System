@@ -316,4 +316,64 @@ int ga10b_gmmu_free(uint64_t inst_block_phys,
  * GA10B_GMMU_FREE_TRACKER_SLOTS. */
 uint32_t ga10b_gmmu_free_tracker_count(void);
 
+/* Discover the currently-bound channel's inst_block by reading
+ * NV_PGRAPH_PRI_FECS_CURRENT_CTX (BAR0 + 0x409b00). FECS owns
+ * the binding; the register's low 28 bits are `inst_block_phys >> 12`.
+ *
+ * Used as a fallback when the Linux-side gpu-channel-helper writes
+ * `inst_block_phys = 0` into the handoff (the existing
+ * `scripts/gpu-channel-helper.c` does this — it leaves the field
+ * with a "filled in from FECS_CURRENT_CTX if needed" comment that
+ * was never actioned). After `nvgpu inherit + channel`, the
+ * channel is bound and FECS_CURRENT_CTX reads back the inst block.
+ *
+ * Returns 0 on read failure (target field invalid), nonzero phys
+ * on success. Reads BAR0 directly; safe post-inherit.
+ *
+ * On Tegra Orin Nano (gk20a, no `iommus` DT property on the GPU
+ * device) the value IS a CPU phys, not an SMMU IOVA. The
+ * canonical chain that proves this:
+ *
+ *   nvgpu_inst_block_addr (common/mm/mm.c)
+ *     → nvgpu_mem_get_addr (os/linux/nvgpu_mem.c)
+ *       → branches on nvgpu_iommuable(g):
+ *         → false on Tegra Orin (no iommu_domain)
+ *         → returns gv11b_gpu_phys_addr(NULL, phys) = phys verbatim
+ *
+ * So the FECS register holds the inst block CPU phys directly.
+ * See ~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-os-linux-nvgpu_mem.c
+ * for the source.
+ */
+uint64_t ga10b_gmmu_discover_inst_block_phys(void);
+
+/* Fire a GA10B GMMU TLB invalidate for the given PDB. Mirrors
+ * `gm20b_fb_tlb_invalidate` in nvgpu (l4t-r36.4.4 fb_gm20b_fusa.c
+ * — see ~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-fb_gm20b_fusa.c).
+ * GA10B inherits the gm20b implementation per `hal_ga10b.c`'s
+ * `.tlb_invalidate = gm20b_fb_tlb_invalidate`.
+ *
+ * Sequence:
+ *   1. Poll fb_mmu_ctrl[16:23] (pri_fifo_space) until non-zero —
+ *      ensures the MMU PRIv FIFO has room for our invalidate cmd.
+ *   2. Write fb_mmu_invalidate_pdb_r =
+ *        ((pdb_phys >> 12) << 4) | aperture_sys_mem (=2).
+ *   3. Write fb_mmu_invalidate_r =
+ *        all_va_true (=1) | trigger (=0x80000000).
+ *   4. Poll fb_mmu_ctrl[15] (pri_fifo_empty) until set — invalidate
+ *      has completed.
+ *
+ * `pdb_phys` is the physical address of the page-directory base
+ * (the PDB page, not the inst block). Caller obtains it by walking
+ * the inst block via `ga10b_gmmu_walk` (the result includes
+ * `pdb_phys`) or directly from a SLM-OS-allocated PDB.
+ *
+ * Returns 0 on success, -1 on FIFO timeout.
+ *
+ * Single-threaded today — the shell task is the only caller path.
+ * Add a spinlock when the GMMU writer becomes accessible to
+ * concurrent contexts (e.g. the runtime model loader if it lands a
+ * worker thread).
+ */
+int ga10b_gmmu_tlb_invalidate(uint64_t pdb_phys);
+
 #endif /* GPU_NVIDIA_GA10B_GMMU_H */
