@@ -174,7 +174,11 @@ Audit and convert (or rely on VHE redirection):
 
 ## 5-PR plan
 
-### PR 1 — Audit + plan (no code change)
+### PR 1 — Audit + plan (no code change) ✅ MERGED
+
+Landed in #685 (the PR-1 audit was bundled into the same PR as PR-2).
+
+
 
 Goal: complete inventory of every `*_EL1` mention in the codebase,
 classify each as VHE-redirect-OK vs needs-rewrite-to-`*_EL2`, and
@@ -196,7 +200,7 @@ Scope of audit:
 Output for each: file:line, register name, disposition (`VHE-OK`,
 `rewrite-EL2`, `rewrite-add-platform-guard`, `drop`).
 
-### PR 2 — Boot at EL2 with E2H=1 (single-CPU)
+### PR 2 — Boot at EL2 with E2H=1 (single-CPU) ✅ MERGED (#685)
 
 Goal: stay at EL2 in `primary_cpu`, set up `VBAR_EL2` +
 `HCR_EL2.E2H/TGE`, run scheduler at EL2 on CPU 0 only. Verify shell
@@ -206,24 +210,31 @@ Touches: `kernel/arch/arm64/boot.S`, `kernel/arch/arm64/vectors.S`,
 the EL1→EL2 register rewrites identified in PR 1 that are necessary
 for boot to complete.
 
-Acceptance: pi-5-2 boots to shell. `diag` shows
-`CurrentEL = 0xC` (EL2h) and `HCR_EL2.E2H = 1`. Existing tests via
-`make test` (QEMU at EL1) still pass — the EL2 path is gated on
-`PLATFORM_RASPI5` so QEMU is unaffected.
+**Outcome:** Merged 2026-05-07 as commit `8c27da3f`. pi-5-2 boots to
+shell at EL2h with HCR_EL2.E2H=1 (10/10 boot_test). Boot banner
+reports "Running at EL2 (VHE) on Raspberry Pi 5". The PR included
+the smp_boot.S secondary EL2 block, so PR-3's secondary-CPU work
+was effectively scope-collapsed into PR-2; PR-3 then only needed
+verification + the per-CPU EL diagnostic.
 
-### PR 3 — SMP at EL2
+### PR 3 — SMP at EL2 ✅ (in flight as of 2026-05-07)
 
-Goal: `smp_boot.S` and `secondary_init` apply the same EL2 setup on
-each secondary. All 4 CPUs come up at EL2h with VBAR_EL2 installed.
+Goal: confirm all 4 CPUs come up at EL2h with VBAR_EL2 installed,
+and add the per-CPU EL diagnostic that proves it. The bulk of the
+secondary-CPU EL2 setup landed with PR-2; PR-3 is the verification
++ diagnostic layer.
 
-Touches: `kernel/arch/arm64/smp_boot.S`, `kernel/sched/smp.c` (PSCI
-call args may need update — PSCI returns the boot CPU to the
-configured EL, which should be EL2 since that's what the boot path
-is at), per-CPU register init for the secondaries.
+Touches: `kernel/sched/smp.c` (per-CPU CurrentEL capture via NC
+slot), `kernel/include/smp.h` (cpu_record_current_el /
+cpu_get_current_el API), `kernel/src/shell_sys.c` (cpu shell column
+showing per-CPU EL), `kernel/arch/arm64/smp_boot.S` (defensive
+pre-flip CNTHCTL_EL2 write on Pi 5 secondary path, mirroring the
+empirically-load-bearing primary write in boot.S).
 
-Acceptance: pi-5-2 boots all 4 CPUs at EL2h. `cpu` shell shows
-4/4 online. Existing SMP tests (cross-CPU dispatch, cache coherency)
-still pass.
+**Outcome:** pi-5-2 boots all 4 CPUs at EL2h (`cpu` shell shows
+EL2h for all four). 10/10 boot_test. `bench smp` cross-CPU
+dispatch passes (smp1/2/3 ran on CPUs 1/2/3). Existing SMP tests
+unaffected.
 
 ### PR 4 — Timer to PPI 26
 

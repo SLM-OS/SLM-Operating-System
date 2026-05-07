@@ -28,6 +28,9 @@ struct per_cpu cpu_data[MAX_CPUS];
 uint64_t cpu_logical_map[MAX_CPUS];
 #if defined(PLATFORM_HAS_NC_MEMORY)
 static uint64_t *nc_cpu_logical_map;  /* NC copy for cross-CPU reads */
+static uint64_t *nc_cpu_current_el;   /* Per-CPU CurrentEL captured at boot (#683 PR-3 SMP-EL2 verification) */
+#else
+static uint64_t cpu_current_el_fallback[MAX_CPUS];
 #endif
 
 /* Number of CPUs in the system */
@@ -44,6 +47,54 @@ volatile uint32_t cpu_boot_flag[MAX_CPUS] __attribute__((aligned(64)));
 /* Per-CPU boot stacks (16 KB each, 16-byte aligned) */
 /* NOT static - needs to be visible to smp_boot.S */
 _Alignas(16) uint8_t cpu_stacks[MAX_CPUS][STACK_SIZE];
+
+/*
+ * Record CurrentEL for the calling CPU into a per-CPU NC slot.
+ * Used by both the primary boot path (CPU 0) and secondary_init
+ * (CPUs 1..N) so the kernel can later verify every CPU landed at
+ * the same EL — the explicit acceptance criterion for #683 PR-3.
+ *
+ * Reads only registers legal at every EL (CurrentEL is always
+ * accessible). At EL2h with VHE, CurrentEL reads 0xC; at EL1h it
+ * reads 0x4. cpu_get_current_el() returns the recorded value or
+ * CPU_EL_NOT_RECORDED if not yet captured.
+ *
+ * Ordering: no explicit barrier here. The NC mapping bypasses cache
+ * so writes are observable to other CPUs without DC CIVAC, but the
+ * happens-before edge between "EL recorded" and "CPU 0 reads it" is
+ * established by the caller — secondary_init records the EL BEFORE
+ * the online-handshake atomic store-release on cpu_boot_flag, and
+ * the primary's smp_init waits on that flag before reading. Move
+ * the record call after the online handshake and that ordering
+ * invariant breaks.
+ */
+void cpu_record_current_el(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS) {
+        return;
+    }
+    uint64_t cur;
+    __asm__ volatile("mrs %0, CurrentEL" : "=r"(cur));
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    if (nc_cpu_current_el) {
+        nc_cpu_current_el[cpu] = cur;
+    }
+#else
+    cpu_current_el_fallback[cpu] = cur;
+#endif
+}
+
+uint64_t cpu_get_current_el(uint32_t cpu)
+{
+    if (cpu >= MAX_CPUS) {
+        return CPU_EL_NOT_RECORDED;
+    }
+#if defined(PLATFORM_HAS_NC_MEMORY)
+    return nc_cpu_current_el ? nc_cpu_current_el[cpu] : CPU_EL_NOT_RECORDED;
+#else
+    return cpu_current_el_fallback[cpu];
+#endif
+}
 
 /*
  * Invoke PSCI function.
@@ -203,7 +254,22 @@ static void init_cpu_map(void)
      * Secondary CPUs read these via NC addresses for instant visibility. */
     nc_cpu_logical_map = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
     for (int i = 0; i < MAX_CPUS; i++) {
-        if (nc_cpu_logical_map) nc_cpu_logical_map[i] = 0xFFFFFFFFUL;  /* sentinel */
+        if (nc_cpu_logical_map) {
+            nc_cpu_logical_map[i] = 0xFFFFFFFFUL;  /* sentinel */
+        }
+    }
+    /* Per-CPU CurrentEL slot — each CPU writes its own at boot, CPU 0
+     * reads back to verify all CPUs landed at the expected EL (#683
+     * PR-3 acceptance: 4/4 CPUs at EL2h on pi-5-2). */
+    nc_cpu_current_el = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
+    for (int i = 0; i < MAX_CPUS; i++) {
+        if (nc_cpu_current_el) {
+            nc_cpu_current_el[i] = CPU_EL_NOT_RECORDED;
+        }
+    }
+#else
+    for (int i = 0; i < MAX_CPUS; i++) {
+        cpu_current_el_fallback[i] = CPU_EL_NOT_RECORDED;
     }
 #endif
 
@@ -319,6 +385,11 @@ void secondary_init(uint32_t logical_cpu_id)
     /* Trace: 0xEE = reached C entry from smp_boot.S */
     nc_trace(logical_cpu_id, 0xEE);
     DEBUG_PRINT("CPU %u: secondary_init starting", logical_cpu_id);
+
+    /* Capture CurrentEL into the NC slot before any further setup so
+     * CPU 0's `cpu` shell command can confirm this CPU landed at the
+     * expected EL (EL2h with VHE on Pi 5/Jetson, EL1h on QEMU). */
+    cpu_record_current_el(logical_cpu_id);
 
     /* #137: confirm the trampoline's MPIDR fold produces this CPU's
      * logical id. Panics early on platforms where the formula
@@ -680,6 +751,12 @@ void smp_init(void)
     /* Mark CPU 0 (boot CPU) as online */
     cpu_data[0].online = true;
     cpus_online = 1;
+
+    /* Record CPU 0's CurrentEL into the per-CPU NC slot — must come
+     * after init_cpu_map() (which allocates nc_cpu_current_el) but
+     * before secondaries boot. Each secondary records its own slot
+     * from secondary_init. */
+    cpu_record_current_el(0);
 
     /*
      * Clean all cpu_data cachelines to PoC before booting secondaries.
