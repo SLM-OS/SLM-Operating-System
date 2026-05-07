@@ -336,21 +336,29 @@ When debugging hardware issues, follow this order:
 
 ## Reference File Cache
 
-Third-party reference material (NVIDIA L4T nvgpu, Mesa/NVK, nouveau, HailoRT, Linux kernel, RPi firmware, etc.) lives in a **private companion repo** at `SLM-OS/slmos-reference-cache`, cloned as a sibling directory next to this checkout:
+Third-party reference material (NVIDIA L4T nvgpu, Mesa/NVK, nouveau, HailoRT, Linux kernel, RPi firmware, etc.) lives in a **directory** at `~/slmos-ref/` (not a git repo):
 
 ```
-parent-dir/
-├── SLM-Operating-System/      ← this repo (public)
-└── slmos-reference-cache/     ← reference material (private)
+~/slmos-ref/
+├── nvidia/         ← nvgpu, MODS, open-gpu-kernel-modules, tinylinux
+├── nouveau/        ← open-source NV driver
+├── mesa/           ← NVK
+├── hailo/          ← HailoRT
+├── tegra-l4t/      ← L4T-specific drivers (camera RTCPU, BPMP-IPC, EDK2)
+├── linux/          ← Linux kernel sources
+├── rpi/, circle/, uboot/, kexec/, tf-a/
+└── derivatives/    ← SLM-OS-authored notes + lab traces
 ```
 
-In-tree citations use the form `../slmos-reference-cache/<vendor>/<filename>:<line>`. Vendor folders: `nvidia/`, `nouveau/`, `mesa/`, `hailo/`, `tegra-l4t/`, `linux/`, `rpi/`, `circle/`, `uboot/`, `kexec/`. SLM-OS-authored investigation notes and lab traces live under `derivatives/`.
+In-tree citations use the form `~/slmos-ref/<vendor>/<filename>:<line>`. SLM-OS-authored investigation notes and lab traces live under `derivatives/`.
 
-Before launching a subagent to fetch source files from GitHub, check `../slmos-reference-cache/` first. If the file has been fetched before, use the local copy. If fetching new files, save them to the appropriate vendor folder there (not into the public repo). The private repo's `README.md` documents the layout.
+For NVIDIA L4T sources specifically, the canonical mirror is **https://gitlab.com/nvidia/nv-tegra/linux-nvgpu** — full nvgpu source tree with `l4t/l4t-r36.4.4` (and other) branches. The raw URL pattern is `https://gitlab.com/nvidia/nv-tegra/linux-nvgpu/-/raw/<URL-encoded-branch>/<path>`. GitHub `nvidia/mods-kernel-driver` is a separate, much smaller artifact (just MODS).
 
-Do NOT re-fetch the same GitHub raw URLs across multiple subagents in the same session. Fetch once, read from disk afterward.
+Before launching a subagent to fetch source files, check `~/slmos-ref/` first. If the file has been fetched before, use the local copy. If fetching new files, save them to the appropriate vendor folder there (not into the public repo).
 
-Do NOT add third-party source files to this public repo's `docs/` tree. The reference cache is intentionally private to keep the public repo's git history clean of vendored upstream material.
+Do NOT re-fetch the same raw URLs across multiple subagents in the same session. Fetch once, read from disk afterward.
+
+Do NOT add third-party source files to this public repo's `docs/` tree. The reference cache is intentionally separate to keep the public repo's git history clean of vendored upstream material.
 
 ---
 

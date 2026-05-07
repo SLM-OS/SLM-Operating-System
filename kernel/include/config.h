@@ -227,21 +227,27 @@ _Static_assert(RUST_HEAP_MB <= 4096u, "RUST_HEAP_MB cannot exceed 4096 (4 GiB sa
  *
  * /mnt/files is backed by `ramdisk_create_default` (kernel/drivers/ramdisk.c)
  * at 4 KB blocks. The driver does a single `pmm_alloc_pages(data_pages)`
- * call, so the cap is the PMM buddy max-order: 2 GiB on this kernel
- * (`PMM_MAX_ORDER = 19`, bumped 2026-05-02 from 18 to fit a
- * Q4_K_M GGUF for Qwen2.5-1.5B which is 1.04 GB on disk).
+ * call, so the cap is the PMM buddy max-order: 2 GiB on this kernel.
+ * `PMM_MAX_ORDER = 19` (bumped 2026-05-02 from 18) is sized for the
+ * `slm xload` PMM buffer, not for the ramdisk — a Q4_K_M Qwen2.5-1.5B
+ * GGUF is 1.04 GB on disk and rounds to one order-19 (1 GB) buddy
+ * when xload allocates the destination buffer.
  *
- * Jetson sizes to 64 MB — `slm xload` streams the GGUF straight
- * into a PMM buffer (no LittleFS intermediate), so the ramdisk only
- * needs to hold the boot-seeded demo scripts, preload.conf, and the
- * help tree (~70 KB total). 64 MB leaves plenty of headroom for
- * future small blobs without claiming any of the order-18+ buddy
- * blocks the SLM load buffer needs. The previous 1280 MB sizing
- * (kept for the LittleFS-based `slm load` path) ate one of the
- * 8 GB system's order-19-aligned buddies, which combined with the
- * 1 GB Rust heap left no contiguous order-19 free for a Q4_K_M
- * Qwen2.5-1.5B GGUF (1.04 GB → rounds up to order 19 in the buddy
- * allocator).
+ * Jetson is sized to 64 MB. `slm xload <name> <total>` streams big
+ * GGUFs straight from telnet into a single PMM buffer with no
+ * intermediate ramdisk file (commit d498ffa1; see kernel/src/slm_shell.c
+ * `slm_xload` + `rust_slm_load_take_pages` FFI). The ramdisk only
+ * holds the boot-seeded demo scripts, preload.conf, and the help
+ * tree (~70 KB resident). 64 MB leaves headroom for future small
+ * blobs without claiming any of the order-18+ buddy blocks xload
+ * needs.
+ *
+ * Historical: an earlier 1280 MB Jetson ramdisk (paired with the
+ * LittleFS-staged `slm load` path) consumed one of the 8 GB system's
+ * order-19-aligned buddies. Combined with the 1 GB Rust heap, no
+ * contiguous order-19 free was left for the Qwen2.5-1.5B Q4_K_M
+ * load buffer. d498ffa1 dropped the ramdisk back to 64 MB once xload
+ * eliminated the LittleFS-staging requirement.
  *
  * Pi 5 keeps the original 32 MB cap (Hailo HEFs are ~20 MB; SLM on
  * Pi 5 is not the demo target). QEMU and host-harness builds must
