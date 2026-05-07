@@ -703,28 +703,31 @@ int main(int argc, char **argv)
             printf("\n");
         }
         if (!ok) {
-            /* Sentinel cell stayed zero. The GPU may still have run
-             * the op — precision shifts (HMMA vs FP32, FFMA-vs-numpy
-             * rounding) can make the chosen sentinel cell happen to
-             * land on exactly 0.0f. Scan the rest of the output for
-             * any non-zero word as a fallback proof-of-execution.
-             * pipeline_sentinels.bin was computed from the FP32 path
-             * specifically; tier=hmma is the most likely consumer of
-             * this fallback. */
+            /* --- Sentinel-cell fallback ------------------------------
+             *
+             * The sentinel poll-loop above watches a single cell of
+             * the output buffer until it transitions from 0 to its
+             * expected post-op bit pattern. Any tier with ULP-level
+             * precision shifts (HMMA vs FP32, FFMA vs numpy rounding)
+             * can land that cell on exactly 0.0f when the FP32
+             * pipeline_sentinels.bin baseline didn't, so we have to
+             * distinguish "kernel never ran" from "kernel ran, just
+             * landed on 0".
+             *
+             * Approach: scan the whole output buffer for any non-zero
+             * word; demand at least half the cells be populated before
+             * accepting. Half is a comfortable floor — every healthy
+             * MNIST op produces output that's dense (Conv/AddBias
+             * touch every cell, MaxPool touches every output cell,
+             * GEMM touches every (m,n) inside (M,N) bounds). Anything
+             * sparser is more plausibly a bounds-check bug or a
+             * partial dispatch than a real ULP-collision. */
             const uint32_t *scan = (const uint32_t *)op->output.cpu_va;
             uint32_t scan_words = op->output_bytes / 4u;
             uint32_t nonzero_cells = 0;
             for (uint32_t k = 0; k < scan_words; k++) {
                 if (scan[k] != 0u) nonzero_cells++;
             }
-            /* Demand a meaningful fraction of cells be populated
-             * before accepting — a single non-zero cell could be
-             * stale data, a bounds-check bug, or the kernel writing
-             * only the corner. Half of the buffer is a comfortable
-             * floor: every healthy MNIST op produces output that's
-             * dense (Conv/AddBias touch every cell, MaxPool touches
-             * every output cell, GEMM touches every (m,n) within
-             * (M,N) bounds). */
             uint32_t accept_floor = scan_words / 2u;
             if (accept_floor == 0u) accept_floor = 1u;
             if (nonzero_cells >= accept_floor) {

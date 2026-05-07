@@ -49,9 +49,10 @@
 
 using namespace nvcuda;
 
-constexpr int TILE_M = 16;
-constexpr int TILE_N = 16;
-constexpr int TILE_K = 16;
+constexpr int TILE_M    = 16;
+constexpr int TILE_N    = 16;
+constexpr int TILE_K    = 16;
+constexpr int WARP_SIZE = 32;          /* one warp per CTA, lane = 0..31 */
 
 /* Worst-case absolute error tolerance for the harness's GPU-vs-CPU
  * comparison. Generous because both sides round through FP16 at the
@@ -93,7 +94,7 @@ __global__ void gemm_hmma_fp32a_fp16w(const float *a, const half *b, float *c,
         const int k_base = kt * TILE_K;
 
         /* A tile: FP32 → FP16 cast on shared-memory load. */
-        for (int i = lane; i < TILE_M * TILE_K; i += 32) {
+        for (int i = lane; i < TILE_M * TILE_K; i += WARP_SIZE) {
             const int m_local = i / TILE_K;
             const int k_local = i % TILE_K;
             const int m = tile_row + m_local;
@@ -107,7 +108,7 @@ __global__ void gemm_hmma_fp32a_fp16w(const float *a, const half *b, float *c,
 
         /* B tile: already FP16, row-major K×N (matches on-disk
          * W_fc.bin from --dtype fp16). */
-        for (int i = lane; i < TILE_K * TILE_N; i += 32) {
+        for (int i = lane; i < TILE_K * TILE_N; i += WARP_SIZE) {
             const int k_local = i / TILE_N;
             const int n_local = i % TILE_N;
             const int n = tile_col + n_local;
@@ -129,7 +130,7 @@ __global__ void gemm_hmma_fp32a_fp16w(const float *a, const half *b, float *c,
     wmma::store_matrix_sync(c_smem, c_frag, TILE_N, wmma::mem_row_major);
     __syncthreads();
 
-    for (int i = lane; i < TILE_M * TILE_N; i += 32) {
+    for (int i = lane; i < TILE_M * TILE_N; i += WARP_SIZE) {
         const int m_local = i / TILE_N;
         const int n_local = i % TILE_N;
         const int m = tile_row + m_local;
@@ -142,16 +143,27 @@ __global__ void gemm_hmma_fp32a_fp16w(const float *a, const half *b, float *c,
 
 /* --- Host harness --- */
 
-/* Bail loudly on the first CUDA error so OOM / launch failures
- * surface as a clean exit instead of bleeding into the comparison
- * loop and looking like an HMMA correctness regression. */
-#define CUDA_OK(call)                                                          \
+/* Harness exit codes — same numeric scheme as scripts/cuda/gemm_hmma_fp16.cu
+ * and conv2d_hmma_fp16.cu so a future CI wrapper can key on identical
+ * codes across all three kernels. Code 4 (SMOKE_MISMATCH in gemm) is
+ * skipped — this harness has no smoke variant either. */
+#define HARNESS_RC_OK              0
+#define HARNESS_RC_OOM             1
+#define HARNESS_RC_LAUNCH_FAIL     2  /* cudaGetLastError after <<<...>>> */
+#define HARNESS_RC_RUN_FAIL        3  /* error during cudaDeviceSynchronize */
+#define HARNESS_RC_MISMATCH        5  /* result above tolerance */
+
+/* Bail loudly on the first CUDA error so launch / sync / OOM failures
+ * surface with a distinct HARNESS_RC_* instead of bleeding into the
+ * comparison loop and looking like an HMMA correctness regression. */
+#define CUDA_OK_OR(rc, label)                                                  \
     do {                                                                       \
-        cudaError_t _e = (call);                                               \
+        cudaError_t _e = cudaGetLastError();                                   \
         if (_e != cudaSuccess) {                                               \
             fprintf(stderr, "%s:%d: cuda error: %s\n",                         \
                     __FILE__, __LINE__, cudaGetErrorString(_e));               \
-            exit(1);                                                           \
+            ret = (rc);                                                        \
+            goto label;                                                        \
         }                                                                      \
     } while (0)
 
@@ -203,62 +215,91 @@ static int run_one(int M, int K, int N, bool verbose)
     size_t b_n = (size_t)K * N;
     size_t c_n = (size_t)M * N;
 
+    int    ret   = HARNESS_RC_OK;
     float *h_a   = (float *)malloc(a_n * sizeof(float));
     half  *h_b   = (half  *)malloc(b_n * sizeof(half));
     float *h_gpu = (float *)malloc(c_n * sizeof(float));
     float *h_ref = (float *)malloc(c_n * sizeof(float));
+    float *d_a   = nullptr;
+    half  *d_b   = nullptr;
+    float *d_c   = nullptr;
+    if (!h_a || !h_b || !h_gpu || !h_ref) {
+        fprintf(stderr, "oom\n");
+        ret = HARNESS_RC_OOM;
+        goto cleanup;
+    }
 
-    uint32_t seed = 0xC0FFEEu + (uint32_t)(M * 31 + K * 17 + N);
-    fill_random_f32(h_a, a_n, &seed);
-    fill_random_h  (h_b, b_n, &seed);
+    /* Scoped block: see the matching note in gemm_hmma_fp16.cu —
+     * `goto cleanup` must not cross initializer-bearing locals. */
+    {
+        uint32_t seed = 0xC0FFEEu + (uint32_t)(M * 31 + K * 17 + N);
+        fill_random_f32(h_a, a_n, &seed);
+        fill_random_h  (h_b, b_n, &seed);
+    }
 
     cpu_reference(h_a, h_b, h_ref, M, K, N);
 
-    float *d_a; CUDA_OK(cudaMalloc(&d_a, a_n * sizeof(float)));
-    half  *d_b; CUDA_OK(cudaMalloc(&d_b, b_n * sizeof(half)));
-    float *d_c; CUDA_OK(cudaMalloc(&d_c, c_n * sizeof(float)));
-    CUDA_OK(cudaMemcpy(d_a, h_a, a_n * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_OK(cudaMemcpy(d_b, h_b, b_n * sizeof(half),  cudaMemcpyHostToDevice));
-    CUDA_OK(cudaMemset(d_c, 0, c_n * sizeof(float)));
+    cudaMalloc(&d_a, a_n * sizeof(float));
+    cudaMalloc(&d_b, b_n * sizeof(half));
+    cudaMalloc(&d_c, c_n * sizeof(float));
+    /* Catch device-side OOM here so it surfaces as HARNESS_RC_OOM
+     * rather than being mis-attributed to the kernel launch below. */
+    CUDA_OK_OR(HARNESS_RC_OOM, cleanup);
+    cudaMemcpy(d_a, h_a, a_n * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b, h_b, b_n * sizeof(half),  cudaMemcpyHostToDevice);
+    cudaMemset(d_c, 0, c_n * sizeof(float));
 
-    dim3 block(32, 1, 1);
-    dim3 grid((N + TILE_N - 1) / TILE_N,
-              (M + TILE_M - 1) / TILE_M, 1);
-    gemm_hmma_fp32a_fp16w<<<grid, block>>>(d_a, d_b, d_c, M, K, N);
-    CUDA_OK(cudaGetLastError());        /* catches launch-config errors */
-    CUDA_OK(cudaDeviceSynchronize());   /* catches in-kernel faults     */
+    {
+        dim3 block(WARP_SIZE, 1, 1);
+        dim3 grid((N + TILE_N - 1) / TILE_N,
+                  (M + TILE_M - 1) / TILE_M, 1);
+        gemm_hmma_fp32a_fp16w<<<grid, block>>>(d_a, d_b, d_c, M, K, N);
+    }
+    CUDA_OK_OR(HARNESS_RC_LAUNCH_FAIL, cleanup);
+    cudaDeviceSynchronize();
+    CUDA_OK_OR(HARNESS_RC_RUN_FAIL, cleanup);
 
-    CUDA_OK(cudaMemcpy(h_gpu, d_c, c_n * sizeof(float),
-                       cudaMemcpyDeviceToHost));
+    cudaMemcpy(h_gpu, d_c, c_n * sizeof(float), cudaMemcpyDeviceToHost);
 
-    int ok = 1;
-    float worst = 0.0f;
-    for (size_t i = 0; i < c_n; i++) {
-        float e = h_gpu[i] - h_ref[i];
-        if (e < 0) e = -e;
-        if (e > worst) worst = e;
-        if (e > HMMA_GEMM_ABS_ERR_TOL) {
-            if (ok) {
-                fprintf(stderr,
-                        "[%dx%dx%d] MISMATCH C[%zu] gpu=%f ref=%f err=%f\n",
-                        M, K, N, i, (double)h_gpu[i], (double)h_ref[i],
-                        (double)e);
+    {
+        int ok = 1;
+        float worst = 0.0f;
+        for (size_t i = 0; i < c_n; i++) {
+            float e = h_gpu[i] - h_ref[i];
+            if (e < 0) e = -e;
+            if (e > worst) worst = e;
+            if (e > HMMA_GEMM_ABS_ERR_TOL) {
+                if (ok) {
+                    fprintf(stderr,
+                            "[%dx%dx%d] MISMATCH C[%zu] gpu=%f "
+                            "ref=%f err=%f\n",
+                            M, K, N, i, (double)h_gpu[i],
+                            (double)h_ref[i], (double)e);
+                }
+                ok = 0;
             }
-            ok = 0;
         }
-    }
-    if (ok) {
-        printf("[%dx%dx%d] OK (worst err %.6e)\n",
-               M, K, N, (double)worst);
-        if (verbose) {
-            printf("    sample: C[0]=%f ref=%f\n",
-                   (double)h_gpu[0], (double)h_ref[0]);
+        if (ok) {
+            printf("[%dx%dx%d] OK (worst err %.6e)\n",
+                   M, K, N, (double)worst);
+            if (verbose) {
+                printf("    sample: C[0]=%f ref=%f\n",
+                       (double)h_gpu[0], (double)h_ref[0]);
+            }
+        } else {
+            ret = HARNESS_RC_MISMATCH;
         }
     }
 
-    free(h_a); free(h_b); free(h_gpu); free(h_ref);
-    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
-    return ok ? 0 : 1;
+cleanup:
+    free(h_a);
+    free(h_b);
+    free(h_gpu);
+    free(h_ref);
+    if (d_a) cudaFree(d_a);
+    if (d_b) cudaFree(d_b);
+    if (d_c) cudaFree(d_c);
+    return ret;
 }
 
 int main(int argc, char **argv)
