@@ -425,6 +425,7 @@ set(KERNEL_SOURCES
     kernel/src/latency_hist.c
     kernel/src/rate_ewma.c
     kernel/src/gpu_consumer.c
+    kernel/src/gpu_tier.c
     kernel/src/admin_telemetry.c
     kernel/src/model_engine.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
@@ -726,6 +727,7 @@ set(TEST_SOURCES
     kernel/tests/test_sched_trace.c
     kernel/tests/test_latency_hist.c
     kernel/tests/test_gpu_consumer.c
+    kernel/tests/test_gpu_tier.c
     kernel/tests/test_gpu_dispatch_breaker.c
     kernel/tests/test_admin_telemetry.c
     kernel/tests/test_telemetry_feed.c
