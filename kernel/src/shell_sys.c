@@ -5827,8 +5827,20 @@ int cmd_timdiag(int argc, char *argv[])
  * via movz/movk in vectors.S:STAGE25_TRACE_CHAR — keep the two in sync
  * when the RP1 mapping changes. */
 #define IRQTEST_UART_DR  0x1f00030000ULL
+#define IRQTEST_UART_FR  0x1f00030018ULL  /* PL011 Flag Register */
+#define IRQTEST_FR_TXFF  (1u << 5)        /* Transmit FIFO full */
 static inline void irqtest_putc(char c)
 {
+    /* Wait for room in TX FIFO with a short timeout (so we cannot
+     * deadlock if the UART is genuinely wedged). 100k cycles ≈ 67 µs
+     * at 1.5 GHz — more than enough for a single FIFO slot to drain
+     * at 115200 baud (~87 µs/char), but bounded so traces written
+     * during the unmask probe can never block the test forever. */
+    int timeout = 100000;
+    while ((*(volatile uint32_t *)IRQTEST_UART_FR & IRQTEST_FR_TXFF) &&
+           --timeout > 0) {
+        __asm__ volatile("" ::: "memory");
+    }
     *(volatile uint32_t *)IRQTEST_UART_DR = (uint32_t)(unsigned char)c;
 }
 static inline void irqtest_puts(const char *s)
