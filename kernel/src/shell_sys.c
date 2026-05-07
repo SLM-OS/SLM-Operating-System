@@ -6062,12 +6062,38 @@ int cmd_irqtest(int argc, char *argv[])
     bool mode_fmask  = (argc >= 2 && argv[1] && strcmp(argv[1], "fmask") == 0);
     bool mode_clr    = (argc >= 2 && argv[1] && strcmp(argv[1], "clr") == 0);
     bool mode_wfi    = (argc >= 2 && argv[1] && strcmp(argv[1], "wfi") == 0);
+    bool mode_idle   = (argc >= 2 && argv[1] && strcmp(argv[1], "idle") == 0);
+    bool mode_tdis   = (argc >= 2 && argv[1] && strcmp(argv[1], "tdis") == 0);
+    bool mode_cmem   = (argc >= 2 && argv[1] && strcmp(argv[1], "cmem") == 0);
+    bool mode_dsb    = (argc >= 2 && argv[1] && strcmp(argv[1], "dsb") == 0);
+    bool mode_wait   = (argc >= 2 && argv[1] && strcmp(argv[1], "wait") == 0);
 
     /* "clr" mode: clear the pending timer PPI in GIC before daifclr.
      * Tests whether the wedge is caused by the GIC asserting the IRQ
      * pin AT the moment we unmask DAIF.I. GIC-400 ICPENDR clears
      * pending state without needing ack/EOI. PPI 30 is banked per-CPU
      * so this only affects the running CPU. */
+    /* "tdis" mode: disable the generic timer at the CNTP_CTL_EL0 level
+     * before daifclr. If this fixes the wedge, the wedge is caused by
+     * the timer's IRQ assertion at the GIC level. */
+    if (mode_tdis) {
+        __asm__ volatile("msr cntp_ctl_el0, %0\n\tisb"
+                         :: "r"((uint64_t)0) : "memory");
+        irqtest_puts(" CNTP-DIS");
+    }
+
+    /* "idle" mode: emulate idle's exact prologue — cacheable BSS load,
+     * mrs mpidr, write to cacheable memory — to test whether the
+     * MMIO-heavy path right before daifclr (UART drain) is the
+     * differentiator. */
+    if (mode_idle) {
+        static volatile uint32_t idle_emu_counter;
+        uint64_t mpidr;
+        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+        idle_emu_counter += (uint32_t)(mpidr & 0xff);
+        irqtest_puts(" IDLE-EMU");
+    }
+
     if (mode_clr) {
         /* GICD_ICPENDR0 = GICD_BASE + 0x280, write 1<<30 to clear PPI 30 */
         uint32_t pre = *(volatile uint32_t *)(0x107fff9000ULL + 0x200);
@@ -6086,6 +6112,34 @@ int cmd_irqtest(int argc, char *argv[])
     irqtest_fifo_drain();
     IRQTEST_RAW_PUTC('A');
     irqtest_fifo_drain();
+
+    /* "cmem" mode: a single cacheable load/store right after the
+     * drain and immediately before daifclr — tests whether *any*
+     * cacheable memory access between MMIO and daifclr unblocks the
+     * wedge. Counter-intuitive but `idle` mode points this way.
+     *
+     * "dsb" mode: full DSB SY barrier between drain and daifclr. */
+    if (mode_cmem) {
+        static volatile uint32_t cmem_probe;
+        cmem_probe++;
+    }
+    if (mode_dsb) {
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+    /* "wait" mode: ~10 ms CNTPCT busy-wait between drain and daifclr —
+     * tests pure timing as the unblocker (no MMIO, no cacheable
+     * activity beyond CNTPCT reads). */
+    if (mode_wait) {
+        uint64_t freq_w, now_w, target_w;
+        __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq_w));
+        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now_w));
+        target_w = now_w + freq_w / 100;
+        do {
+            __asm__ volatile("yield");
+            __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now_w));
+        } while (now_w < target_w);
+    }
+
     /* "fmask" mode: mask FIQ first, then clear I. If FIQ delivery is
      * the wedge cause (Group 0 timer signaled as FIQ → vector entry
      * faults silently), this should pass while the default daifclr
