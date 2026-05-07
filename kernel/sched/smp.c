@@ -57,7 +57,16 @@ _Alignas(16) uint8_t cpu_stacks[MAX_CPUS][STACK_SIZE];
  * Reads only registers legal at every EL (CurrentEL is always
  * accessible). At EL2h with VHE, CurrentEL reads 0xC; at EL1h it
  * reads 0x4. cpu_get_current_el() returns the recorded value or
- * 0xFFFFFFFF if not yet captured.
+ * CPU_EL_NOT_RECORDED if not yet captured.
+ *
+ * Ordering: no explicit barrier here. The NC mapping bypasses cache
+ * so writes are observable to other CPUs without DC CIVAC, but the
+ * happens-before edge between "EL recorded" and "CPU 0 reads it" is
+ * established by the caller — secondary_init records the EL BEFORE
+ * the online-handshake atomic store-release on cpu_boot_flag, and
+ * the primary's smp_init waits on that flag before reading. Move
+ * the record call after the online handshake and that ordering
+ * invariant breaks.
  */
 void cpu_record_current_el(uint32_t cpu)
 {

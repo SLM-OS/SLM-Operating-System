@@ -2608,6 +2608,13 @@ static void test_cpu_logical_map_encoding(void)
  */
 static void test_cpu_current_el_recorded(void)
 {
+#if defined(PLATFORM_X86_64)
+    /* x86 has no exception-level concept; the API in
+     * kernel/arch/x86_64/platform_x86.c is a no-op stub that always
+     * returns CPU_EL_NOT_RECORDED. The "slot populated" assertion
+     * below would fail there, so skip on x86. */
+    TEST_IGNORE_MESSAGE("CurrentEL is ARM-only; x86 stub returns sentinel");
+#else
     /* CPU 0 must have its EL recorded by smp_init — non-sentinel. */
     uint64_t cpu0_el = cpu_get_current_el(0);
     TEST_ASSERT_TRUE(cpu0_el != CPU_EL_NOT_RECORDED);
@@ -2632,6 +2639,7 @@ static void test_cpu_current_el_recorded(void)
     cpu_record_current_el(MAX_CPUS);
     cpu_record_current_el(0xFFFFFFFF);
     TEST_ASSERT_EQUAL_HEX64(before, cpu_get_current_el(0));
+#endif
 }
 
 /*
