@@ -687,7 +687,12 @@ int main(int argc, char **argv)
                op->sentinel_bits,
                actual_sentinel_bits[i] == op->sentinel_bits
                    ? "exact" : "ULP-divergent");
-        if (i == 6 || i == 7) {
+        if (gemm_tier_hmma && (i == 6 || i == 7)) {
+            /* Per-cell dump of op 6's HMMA result and op 7's bias-
+             * added logits — concrete evidence the FP16 path's
+             * precision divergence stays within ULP tolerance vs
+             * the FP32 reference. Off in the auto path to keep the
+             * baseline output compact. */
             const float *vals = (const float *)op->output.cpu_va;
             uint32_t cnt = op->output_bytes / 4u;
             if (cnt > 10u) cnt = 10u;
@@ -708,24 +713,33 @@ int main(int argc, char **argv)
              * this fallback. */
             const uint32_t *scan = (const uint32_t *)op->output.cpu_va;
             uint32_t scan_words = op->output_bytes / 4u;
-            int found_nonzero = 0;
+            uint32_t nonzero_cells = 0;
             for (uint32_t k = 0; k < scan_words; k++) {
-                if (scan[k] != 0u) {
-                    found_nonzero = 1;
-                    break;
-                }
+                if (scan[k] != 0u) nonzero_cells++;
             }
-            if (found_nonzero) {
+            /* Demand a meaningful fraction of cells be populated
+             * before accepting — a single non-zero cell could be
+             * stale data, a bounds-check bug, or the kernel writing
+             * only the corner. Half of the buffer is a comfortable
+             * floor: every healthy MNIST op produces output that's
+             * dense (Conv/AddBias touch every cell, MaxPool touches
+             * every output cell, GEMM touches every (m,n) within
+             * (M,N) bounds). */
+            uint32_t accept_floor = scan_words / 2u;
+            if (accept_floor == 0u) accept_floor = 1u;
+            if (nonzero_cells >= accept_floor) {
                 fprintf(stderr,
                         "[mnist]   op[%d %s] sentinel cell %u stayed 0 "
-                        "but other cells fired — accepting (tier=%s)\n",
+                        "but %u/%u cells fired — accepting (tier=%s)\n",
                         i, op->name, op->sentinel_cell_idx,
+                        nonzero_cells, scan_words,
                         gemm_tier_hmma ? "hmma" : "auto");
             } else {
                 fprintf(stderr,
-                        "[mnist] op[%d %s] sentinel timeout (no non-zero "
-                        "write anywhere in %u-byte output)\n",
-                        i, op->name, op->output_bytes);
+                        "[mnist] op[%d %s] sentinel timeout (only %u/%u "
+                        "cells non-zero in %u-byte output; floor=%u)\n",
+                        i, op->name, nonzero_cells, scan_words,
+                        op->output_bytes, accept_floor);
                 return 1;
             }
         }

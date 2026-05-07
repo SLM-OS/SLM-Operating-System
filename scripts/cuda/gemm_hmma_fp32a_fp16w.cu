@@ -53,6 +53,20 @@ constexpr int TILE_M = 16;
 constexpr int TILE_N = 16;
 constexpr int TILE_K = 16;
 
+/* Worst-case absolute error tolerance for the harness's GPU-vs-CPU
+ * comparison. Generous because both sides round through FP16 at the
+ * activation×weight multiply; observed worst-case across the test
+ * shapes is ~3.05e-5 (256×256×128). */
+constexpr float HMMA_GEMM_ABS_ERR_TOL = 1e-2f;
+
+/* Single-warp WMMA: must be launched with blockDim == (32, 1, 1).
+ * `lane = threadIdx.x` is the warp lane (0..31). The kernel uses
+ * `__syncthreads()` between SMEM stage + WMMA load, so partial-warp
+ * configurations would deadlock at the barrier — runtime guards
+ * here would make that worse, not better, since an early `return`
+ * before the barrier keeps the rest of the CTA waiting forever.
+ * The launcher (host harness + SLM-OS gpu-kernel-mnist.c op 6)
+ * dispatches with (32, 1, 1) by construction. */
 __global__ void gemm_hmma_fp32a_fp16w(const float *a, const half *b, float *c,
                                        int M, int K, int N)
 {
@@ -128,20 +142,39 @@ __global__ void gemm_hmma_fp32a_fp16w(const float *a, const half *b, float *c,
 
 /* --- Host harness --- */
 
+/* Bail loudly on the first CUDA error so OOM / launch failures
+ * surface as a clean exit instead of bleeding into the comparison
+ * loop and looking like an HMMA correctness regression. */
+#define CUDA_OK(call)                                                          \
+    do {                                                                       \
+        cudaError_t _e = (call);                                               \
+        if (_e != cudaSuccess) {                                               \
+            fprintf(stderr, "%s:%d: cuda error: %s\n",                         \
+                    __FILE__, __LINE__, cudaGetErrorString(_e));               \
+            exit(1);                                                           \
+        }                                                                      \
+    } while (0)
+
+/* Numerical Recipes LCG — produces values in [-1, 1) from the top
+ * 16 bits of the LCG state. Used for both FP32 and FP16 fills so
+ * the same seed yields a deterministic comparison across dtypes. */
+static float next_random_f32(uint32_t *seed)
+{
+    *seed = (*seed) * 1664525u + 1013904223u;
+    return ((float)((*seed >> 8) & 0xFFFF) / 32768.0f) - 1.0f;
+}
+
 static void fill_random_f32(float *buf, size_t n, uint32_t *seed)
 {
     for (size_t i = 0; i < n; i++) {
-        *seed = (*seed) * 1664525u + 1013904223u;
-        buf[i] = ((float)((*seed >> 8) & 0xFFFF) / 32768.0f) - 1.0f;
+        buf[i] = next_random_f32(seed);
     }
 }
 
 static void fill_random_h(half *buf, size_t n, uint32_t *seed)
 {
     for (size_t i = 0; i < n; i++) {
-        *seed = (*seed) * 1664525u + 1013904223u;
-        float v = ((float)((*seed >> 8) & 0xFFFF) / 32768.0f) - 1.0f;
-        buf[i] = __float2half(v);
+        buf[i] = __float2half(next_random_f32(seed));
     }
 }
 
@@ -181,20 +214,22 @@ static int run_one(int M, int K, int N, bool verbose)
 
     cpu_reference(h_a, h_b, h_ref, M, K, N);
 
-    float *d_a; cudaMalloc(&d_a, a_n * sizeof(float));
-    half  *d_b; cudaMalloc(&d_b, b_n * sizeof(half));
-    float *d_c; cudaMalloc(&d_c, c_n * sizeof(float));
-    cudaMemcpy(d_a, h_a, a_n * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b, h_b, b_n * sizeof(half),  cudaMemcpyHostToDevice);
-    cudaMemset(d_c, 0, c_n * sizeof(float));
+    float *d_a; CUDA_OK(cudaMalloc(&d_a, a_n * sizeof(float)));
+    half  *d_b; CUDA_OK(cudaMalloc(&d_b, b_n * sizeof(half)));
+    float *d_c; CUDA_OK(cudaMalloc(&d_c, c_n * sizeof(float)));
+    CUDA_OK(cudaMemcpy(d_a, h_a, a_n * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_OK(cudaMemcpy(d_b, h_b, b_n * sizeof(half),  cudaMemcpyHostToDevice));
+    CUDA_OK(cudaMemset(d_c, 0, c_n * sizeof(float)));
 
     dim3 block(32, 1, 1);
     dim3 grid((N + TILE_N - 1) / TILE_N,
               (M + TILE_M - 1) / TILE_M, 1);
     gemm_hmma_fp32a_fp16w<<<grid, block>>>(d_a, d_b, d_c, M, K, N);
-    cudaDeviceSynchronize();
+    CUDA_OK(cudaGetLastError());        /* catches launch-config errors */
+    CUDA_OK(cudaDeviceSynchronize());   /* catches in-kernel faults     */
 
-    cudaMemcpy(h_gpu, d_c, c_n * sizeof(float), cudaMemcpyDeviceToHost);
+    CUDA_OK(cudaMemcpy(h_gpu, d_c, c_n * sizeof(float),
+                       cudaMemcpyDeviceToHost));
 
     int ok = 1;
     float worst = 0.0f;
@@ -202,7 +237,7 @@ static int run_one(int M, int K, int N, bool verbose)
         float e = h_gpu[i] - h_ref[i];
         if (e < 0) e = -e;
         if (e > worst) worst = e;
-        if (e > 1e-2f) {
+        if (e > HMMA_GEMM_ABS_ERR_TOL) {
             if (ok) {
                 fprintf(stderr,
                         "[%dx%dx%d] MISMATCH C[%zu] gpu=%f ref=%f err=%f\n",
