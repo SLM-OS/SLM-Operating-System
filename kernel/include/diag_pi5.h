@@ -108,6 +108,17 @@ struct diag_vec_counts {
 #define DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC 0xCAFE0003U
 
 /*
+ * Sentinel D slot range (NC offsets 0xFEF0..0xFEFF) was reserved for
+ * an ICC_SRE_EL3/EL2/EL1 capture from Secure-EL3 by patched TF-A.
+ * Removed — even ICC_SRE_EL3 read from EL3 generates UNDEFINED on
+ * this Cortex-A76 implementation. ID_AA64PFR0_EL1.GIC reads as 0,
+ * meaning the CPU does not implement the GIC system register
+ * interface, so SRE registers are UNDEFINED at every EL. Slots are
+ * left vacant for a future probe; the kernel decodes the GIC field
+ * directly from the existing boot.S id_aa64pfr0_el1 capture.
+ */
+
+/*
  * ICC_SRE_EL2 snapshots (issue #99 root-cause probe).
  *
  * Pi 5 has GIC-400 (GICv2 only) but Cortex-A76 supports the GICv3

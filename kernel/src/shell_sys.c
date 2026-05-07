@@ -1801,6 +1801,34 @@ static void diag_print_el2(void)
                         (unsigned long)c_ctlr);
         }
     }
+
+    /*
+     * Sentinel D was reserved for ICC_SRE_EL3/EL2/EL1 captured from
+     * Secure-EL3 by patched TF-A. Disabled — even ICC_SRE_EL3 read
+     * from EL3 generates UNDEFINED on this Cortex-A76 implementation.
+     * Reason is visible in ID_AA64PFR0_EL1 above:
+     *   bits 27:24 (GIC field) == 0  →  GIC system register interface
+     *                                   is NOT implemented.
+     * SRE is moot — the CPU has no sysreg interface to listen on, so
+     * IRQs must be delivered via the legacy memory-mapped GICC_*
+     * interface unconditionally. Decode the GIC field here so the
+     * fact is plain on every diag dump.
+     */
+    {
+        uint64_t pfr0 = s->id_aa64pfr0_el1;
+        uint32_t gic_field = (uint32_t)((pfr0 >> 24) & 0xF);
+        const char *gic_decode =
+            (gic_field == 0u) ? "0 (NOT implemented — CPU has no sysreg ICC_*)"
+            : (gic_field == 1u) ? "1 (GICv3.0/4.0 sysreg interface)"
+            : (gic_field == 3u) ? "3 (GICv4.1 sysreg interface)"
+            : "?";
+        shell_printf("  ID_AA64PFR0_EL1.GIC = %s\r\n", gic_decode);
+        if (gic_field == 0u) {
+            shell_puts("    >>> ICC_SRE_EL* are UNDEFINED on this CPU. SRE branch\r\n"
+                       "        of #134 is moot — IRQ delivery has to flow through\r\n"
+                       "        legacy GICC_* MMIO unconditionally.\r\n");
+        }
+    }
 }
 
 static void diag_print_vec(void)
