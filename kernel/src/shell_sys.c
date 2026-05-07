@@ -1772,6 +1772,35 @@ static void diag_print_el2(void)
                     : (s->gicd_igroupr0_post == 0ul)
                           ? "(writes SILENTLY DISCARDED — FIQ hypothesis likely)"
                           : "(partial)");
+
+    /*
+     * Sentinel C: TF-A's own readback of GICD_IGROUPR0 from EL3,
+     * captured by patched TF-A in plat_rpi_bl31_custom_setup right
+     * after the 0xFFFFFFFF write. Lets us distinguish "write was
+     * never persistent at EL3" from "write was persistent at EL3
+     * but cleared before NS-EL2 reads."
+     */
+    {
+        uint32_t c_magic = *(volatile uint32_t *)DIAG_GIC_SENTINEL_C_MAGIC;
+        uint32_t c_pre   = *(volatile uint32_t *)DIAG_GIC_SENTINEL_C_IGROUPR0_PRE;
+        uint32_t c_post  = *(volatile uint32_t *)DIAG_GIC_SENTINEL_C_IGROUPR0_POST;
+        uint32_t c_ctlr  = *(volatile uint32_t *)DIAG_GIC_SENTINEL_C_GICD_CTLR;
+        shell_printf("  Sentinel C (TF-A IGROUPR readback): magic=0x%08lx %s\r\n",
+                    (unsigned long)c_magic,
+                    c_magic == DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC
+                        ? "OK" : "MISSING");
+        if (c_magic == DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC) {
+            shell_printf("    TF-A view  IGROUPR[0]: pre=0x%08lx post=0x%08lx  %s\r\n",
+                        (unsigned long)c_pre, (unsigned long)c_post,
+                        (c_post == 0xFFFFFFFFul)
+                            ? "(persistent at EL3 — kernel side cleared it)"
+                            : (c_post == c_pre)
+                                  ? "(write DISCARDED at GIC level)"
+                                  : "(partial)");
+            shell_printf("    TF-A view  GICD_CTLR : 0x%08lx\r\n",
+                        (unsigned long)c_ctlr);
+        }
+    }
 }
 
 static void diag_print_vec(void)

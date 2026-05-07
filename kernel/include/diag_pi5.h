@@ -93,6 +93,21 @@ struct diag_vec_counts {
 #define DIAG_SCR_SENTINEL_B_EXPECTED_MAGIC  0xCAFE0002U
 
 /*
+ * GIC sentinel C (#134 GIC probe).
+ *
+ * Written by patched TF-A from plat_rpi_bl31_custom_setup, immediately
+ * after its IGROUPR0 write. Lets the kernel distinguish three cases:
+ *   - Write was persistent in TF-A's view (post == 0xFFFFFFFF).
+ *   - Write was discarded at EL3 by the GIC (post != 0xFFFFFFFF).
+ *   - Write was persistent at EL3 but cleared before NS reads.
+ */
+#define DIAG_GIC_SENTINEL_C_MAGIC          (NC_MEM_BASE + 0xFEE0UL)
+#define DIAG_GIC_SENTINEL_C_IGROUPR0_PRE   (NC_MEM_BASE + 0xFEE4UL)
+#define DIAG_GIC_SENTINEL_C_IGROUPR0_POST  (NC_MEM_BASE + 0xFEE8UL)
+#define DIAG_GIC_SENTINEL_C_GICD_CTLR      (NC_MEM_BASE + 0xFEECUL)
+#define DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC 0xCAFE0003U
+
+/*
  * ICC_SRE_EL2 snapshots (issue #99 root-cause probe).
  *
  * Pi 5 has GIC-400 (GICv2 only) but Cortex-A76 supports the GICv3

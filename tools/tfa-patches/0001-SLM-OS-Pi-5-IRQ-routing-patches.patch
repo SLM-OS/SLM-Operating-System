@@ -1,7 +1,7 @@
 From 87d118ae791ca9843a23d788a6a774b96665dbe5 Mon Sep 17 00:00:00 2001
 From: John Jezl <john@jezl.com>
 Date: Wed, 6 May 2026 00:29:57 -0700
-Subject: [PATCH 1/2] SLM-OS Pi 5 IRQ routing patches
+Subject: [PATCH 1/3] SLM-OS Pi 5 IRQ routing patches
 
 ---
  lib/el3_runtime/aarch64/context_mgmt.c | 18 ++++++

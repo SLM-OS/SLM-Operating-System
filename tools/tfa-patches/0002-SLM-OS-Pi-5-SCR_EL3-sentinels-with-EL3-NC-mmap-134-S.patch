@@ -1,7 +1,7 @@
 From 84577ff984f18465b782354023c977fc67a33d3d Mon Sep 17 00:00:00 2001
 From: slmos-build <slmos-build@example.com>
 Date: Wed, 6 May 2026 17:27:13 -0700
-Subject: [PATCH 2/2] SLM-OS Pi 5 SCR_EL3 sentinels with EL3 NC mmap (#134
+Subject: [PATCH 2/3] SLM-OS Pi 5 SCR_EL3 sentinels with EL3 NC mmap (#134
  Stage 2.5+ debug)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
