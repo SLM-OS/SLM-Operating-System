@@ -46,7 +46,12 @@ uint32_t gpu_tier_from_name(const char *name)
 
 uint32_t gpu_tier_get(void)
 {
-    return atomic_load_explicit(&g_gpu_tier, memory_order_acquire);
+    /* `relaxed` because the atomic publishes only itself — there is
+     * no other state the dispatcher needs to acquire-synchronise
+     * with via this load. Same pattern as
+     * `gpu_dispatch_record_result` (slm_ffi.c) and the rate-limit
+     * timestamp from PR #653. */
+    return atomic_load_explicit(&g_gpu_tier, memory_order_relaxed);
 }
 
 uint64_t gpu_tier_last_change_ms(void)
@@ -80,11 +85,18 @@ int gpu_tier_set(uint32_t tier, const char **out_reason)
         *out_reason = "preference active when `gpu use inference on`";
     }
 
-    atomic_store_explicit(&g_gpu_tier, tier, memory_order_release);
+    atomic_store_explicit(&g_gpu_tier, tier, memory_order_relaxed);
     g_gpu_tier_change_ms = slm_get_time_ns() / 1000000ull;
     return 0;
 }
 
+/* Snapshot is intentionally non-atomic: the four fields are read
+ * one at a time and a concurrent writer on another CPU could update
+ * `tier` between this load and the `change_ms` read. That's
+ * acceptable here — the snapshot is only consumed by debug/UI code
+ * paths (`gpu tier status` shell command, telemetry feed). The
+ * dispatcher reads `gpu_tier_get()` directly and never sees a torn
+ * tier. */
 void gpu_tier_status_get(struct gpu_tier_status *out)
 {
     if (!out) return;

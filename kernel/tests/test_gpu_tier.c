@@ -154,6 +154,47 @@ static void test_status_snapshot(void)
     gpu_tier_set(SLM_GPU_TIER_AUTO, NULL);
 }
 
+/* Cover the "GPU available, inference off, non-CPU tier" branch in
+ * gpu_tier_set: the call should succeed AND populate `*out_reason`
+ * with the "preference active when …" note. The default state at
+ * boot satisfies this regime — `gpu use inference` is off until the
+ * operator flips it explicitly — so no setup is required beyond
+ * making sure inference is in fact off. On the QEMU stub build
+ * `slm_gpu_available()` returns 1, so the GPU-absent branch above
+ * does NOT fire here. */
+static void test_set_with_inference_off_surfaces_note(void)
+{
+    /* If a previous test in some other suite enabled inference,
+     * skip this test rather than silently passing on the wrong
+     * branch — the alternative would be to flip inference here, but
+     * gpu_consumer_set is outside this suite's scope and could mask
+     * real regressions in dependent state. */
+    if (gpu_consumer_enabled(GPU_CONSUMER_INFERENCE)) {
+        TEST_IGNORE_MESSAGE("inference is on; this test covers the "
+                            "inference-off branch");
+        return;
+    }
+
+    const char *reason = NULL;
+    int rc = gpu_tier_set(SLM_GPU_TIER_HMMA, &reason);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_EQUAL_UINT32(SLM_GPU_TIER_HMMA, gpu_tier_get());
+    /* The exact reason text isn't pinned (could rephrase without
+     * breaking semantics) but it must be non-NULL for a non-CPU
+     * tier with inference off on a GPU-capable build. */
+    TEST_ASSERT_NOT_NULL(reason);
+
+    /* CPU tier never produces a note in this regime, even with
+     * inference off — the operator is explicitly opting out of the
+     * GPU path. */
+    reason = NULL;
+    rc = gpu_tier_set(SLM_GPU_TIER_CPU, &reason);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_NULL(reason);
+
+    gpu_tier_set(SLM_GPU_TIER_AUTO, NULL);
+}
+
 int test_suite_gpu_tier(void)
 {
     UnityBegin("test_gpu_tier.c");
@@ -163,6 +204,7 @@ int test_suite_gpu_tier(void)
     RUN_TEST(test_set_get_round_trip);
     RUN_TEST(test_set_unknown_tier_rejected);
     RUN_TEST(test_set_with_null_reason_ok);
+    RUN_TEST(test_set_with_inference_off_surfaces_note);
     RUN_TEST(test_last_change_ms_updates);
     RUN_TEST(test_status_snapshot);
     return UnityEnd();
