@@ -1,8 +1,9 @@
 /*
- * test_gpu_dispatch_breaker.c — unit tests for the GPU dispatch
- * circuit breaker (PR #555 / mitigation for #552).
+ * test_gpu_dispatch_breaker.c — unit tests for GPU dispatch
+ * admission control: the circuit breaker (PR #555 / #552) and the
+ * sched-MLP rate-limit window (#651).
  *
- * The breaker is a small atomic state machine in `kernel/src/slm_ffi.c`:
+ * Breaker — a small atomic state machine in `kernel/src/slm_ffi.c`:
  *
  *   - record_result(rc < 0) increments the counter; record_result(rc
  *     >= 0) zeroes it.
@@ -12,16 +13,25 @@
  *   - A one-shot WARN log fires exactly when the threshold is
  *     crossed, not on every subsequent failure.
  *
- * Tests drive the state machine via two test seams exposed in
- * `slm_ffi.h` (slm_gpu_dispatch_breaker_test_record / _test_count)
- * — production code paths reach the same state machine through
- * the dispatch hot-path (slm_gpu_run_mnist / _sched_inference),
- * which can't be exercised in QEMU without a real GA10B.
+ * Rate limiter — a pure-logic predicate
+ * `sched_dispatch_within_rate_limit(now, last)` that gates
+ * `slm_gpu_run_sched_inference` against the previous successful
+ * dispatch's timestamp. Tested via the platform-neutral seam
+ * `slm_gpu_sched_dispatch_test_within_window` so the assertions
+ * compile and run on every target — the predicate is the same
+ * arithmetic on all of them.
  *
- * On platforms without PLATFORM_JETSON_ORIN_NANO, the seams are
- * no-ops (count is always 0, is_tripped is always false). The
- * "Jetson-only" tests explicitly skip themselves there so the
- * suite stays green on QEMU and x86-64.
+ * Tests drive the state machines via test seams exposed in
+ * `slm_ffi_test.h` — production code paths reach the same machines
+ * through the dispatch hot-path (slm_gpu_run_mnist /
+ * _sched_inference), which can't be exercised in QEMU without a
+ * real GA10B.
+ *
+ * On platforms without PLATFORM_JETSON_ORIN_NANO, the breaker seams
+ * are no-ops (count is always 0, is_tripped is always false). The
+ * "Jetson-only" breaker tests explicitly skip themselves there so
+ * the suite stays green on QEMU and x86-64. Rate-limit predicate
+ * tests run on every platform.
  */
 
 #include "unity.h"
@@ -186,6 +196,86 @@ static void test_breaker_stubs_on_non_jetson(void)
 
 #endif
 
+/* ---- Sched-MLP rate-limit window (#651) ----------------------------
+ *
+ * Pure-logic tests; run on every platform. The predicate is the
+ * same arithmetic on Jetson and elsewhere — only the call site
+ * (`slm_gpu_run_sched_inference`) is platform-gated.
+ *
+ * RATE_LIMIT_NS is currently 50 ms (50_000_000 ns). The tests pin
+ * exact boundaries so a future bump to the window is caught here
+ * before the production code drifts. */
+#define TEST_RATE_LIMIT_NS  50000000ULL
+
+/* First call (last == 0) must always pass — the box just booted and
+ * `g_sched_dispatch_last_ns` is zero-initialised. */
+static void test_rate_limit_first_call_passes(void)
+{
+    /* now is huge, last is 0 → (now - 0) >> RATE_LIMIT_NS → not
+     * within window. */
+    TEST_ASSERT_FALSE(slm_gpu_sched_dispatch_test_within_window(
+                         (uint64_t)1000000000ULL, 0ULL));
+}
+
+/* now == last (zero gap) is unambiguously inside the window. */
+static void test_rate_limit_zero_gap_inside_window(void)
+{
+    TEST_ASSERT_TRUE(slm_gpu_sched_dispatch_test_within_window(
+                        12345ULL, 12345ULL));
+}
+
+/* Just-inside boundary: (now - last) == RATE_LIMIT_NS - 1. */
+static void test_rate_limit_just_inside_window(void)
+{
+    uint64_t last = 1000000ULL;
+    uint64_t now  = last + TEST_RATE_LIMIT_NS - 1ULL;
+    TEST_ASSERT_TRUE(slm_gpu_sched_dispatch_test_within_window(now, last));
+}
+
+/* Boundary == RATE_LIMIT_NS: predicate uses strict-less-than, so
+ * exactly-on-the-boundary is *not* inside the window. */
+static void test_rate_limit_at_boundary_passes(void)
+{
+    uint64_t last = 1000000ULL;
+    uint64_t now  = last + TEST_RATE_LIMIT_NS;
+    TEST_ASSERT_FALSE(slm_gpu_sched_dispatch_test_within_window(now, last));
+}
+
+/* Just outside boundary: gap is RATE_LIMIT_NS + 1. */
+static void test_rate_limit_just_outside_window(void)
+{
+    uint64_t last = 1000000ULL;
+    uint64_t now  = last + TEST_RATE_LIMIT_NS + 1ULL;
+    TEST_ASSERT_FALSE(slm_gpu_sched_dispatch_test_within_window(now, last));
+}
+
+/* Far outside: gap of multiple windows. Should pass. */
+static void test_rate_limit_far_outside_window(void)
+{
+    uint64_t last = 1000000ULL;
+    uint64_t now  = last + TEST_RATE_LIMIT_NS * 100ULL;
+    TEST_ASSERT_FALSE(slm_gpu_sched_dispatch_test_within_window(now, last));
+}
+
+/* Backward time (now < last) underflows the unsigned subtraction
+ * to a huge value (≥ RATE_LIMIT_NS), so the predicate reports
+ * "not within window" — i.e. allow the dispatch. This is the
+ * safe-by-default behaviour: a clock anomaly should never wedge
+ * the system by permanently rejecting dispatches. CNTPCT_EL0 is
+ * monotonic on hardware, but defending against the impossible is
+ * cheap. */
+static void test_rate_limit_backward_time_safe(void)
+{
+    /* now is less than last by 1 ns → unsigned subtraction wraps to
+     * UINT64_MAX → far above RATE_LIMIT_NS → predicate returns
+     * false → dispatch allowed. */
+    TEST_ASSERT_FALSE(slm_gpu_sched_dispatch_test_within_window(
+                         100ULL, 101ULL));
+    /* Larger backward jump — same outcome. */
+    TEST_ASSERT_FALSE(slm_gpu_sched_dispatch_test_within_window(
+                         1000000ULL, 999999999999ULL));
+}
+
 int test_suite_gpu_dispatch_breaker(void)
 {
     UNITY_BEGIN();
@@ -201,5 +291,15 @@ int test_suite_gpu_dispatch_breaker(void)
 #else
     RUN_TEST(test_breaker_stubs_on_non_jetson);
 #endif
+
+    /* Rate-limit predicate is platform-neutral — runs on every target. */
+    RUN_TEST(test_rate_limit_first_call_passes);
+    RUN_TEST(test_rate_limit_zero_gap_inside_window);
+    RUN_TEST(test_rate_limit_just_inside_window);
+    RUN_TEST(test_rate_limit_at_boundary_passes);
+    RUN_TEST(test_rate_limit_just_outside_window);
+    RUN_TEST(test_rate_limit_far_outside_window);
+    RUN_TEST(test_rate_limit_backward_time_safe);
+
     return UNITY_END();
 }
