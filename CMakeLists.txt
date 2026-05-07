@@ -133,6 +133,28 @@ if(HAILO_D3HOT_AT_BOOT)
     add_compile_definitions(HAILO_D3HOT_AT_BOOT=1)
 endif()
 
+# Defer CHANGE_STATUS(ENABLED) + CFG pull from context_switch_load to the
+# first hailo_backend_run on the slot. #682 hypothesis (issue body §3):
+# fw expects host to signal input ready before the dynamic context's
+# APPLICATION_CHANGE_INTERRUPT action fires, so moving the ENABLED
+# trigger closer to the avail bump may shorten the window in which fw
+# sits idle waiting for nothing.
+#
+# Verdict on pi-5-1 (2026-05-07): DISCONFIRMED. With ENABLED+CFG pull
+# moved from load to runmodel (firing milliseconds before the IN
+# avail bump instead of seconds), fw's IN ch=2 still stalls
+# identically: proc=0 throughout, dev base=0x00002c01, all desc
+# status=0x00. The gating mechanism for IN ch=2 is not about
+# ENABLED timing.
+#
+# Default OFF — load-time activation matches Linux's order more
+# closely and is the correct default. Kept gated so the alternative
+# can be re-enabled for comparison without re-editing source.
+option(HAILO_DEFER_ENABLED_TO_RUN "Defer CHANGE_STATUS(ENABLED) from load to first run (#682, disconfirmed)" OFF)
+if(HAILO_DEFER_ENABLED_TO_RUN)
+    add_compile_definitions(HAILO_DEFER_ENABLED_TO_RUN=1)
+endif()
+
 # Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1). Adds EL2 register
 # snapshot in boot.S, per-CPU per-vector exception counters in vectors.S,
 # a real el1_fiq handler that captures the FIQ source, and the `diag`

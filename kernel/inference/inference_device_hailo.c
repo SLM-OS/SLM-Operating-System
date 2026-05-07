@@ -386,6 +386,17 @@ struct hailo_model_slot {
     struct hailo_vdma_desc_list   boundary_in_list;
     struct hailo_tensor           boundary_out_tensor;
     struct hailo_vdma_desc_list   boundary_out_list;
+
+    /* #682 deferred-ENABLED experiment (2026-05-07). When
+     * HAILO_DEFER_ENABLED_TO_RUN is set, context_switch_load stops
+     * after SET_CONTEXT_INFO(DYNAMIC) and sets enabled_deferred=true.
+     * The first hailo_backend_run on this slot then issues
+     * CHANGE_STATUS(ENABLED) + CFG pull before its boundary submit.
+     * Hypothesis: fw's IN-channel arming may be sensitive to whether
+     * the host has signaled "input ready" (avail bump) before fw
+     * finishes processing the dynamic block. Default build leaves
+     * this false and the load path runs as before. */
+    bool                          enabled_deferred;
 };
 
 static struct hailo_model_slot slots[HAILO_MAX_MODELS];
@@ -685,6 +696,115 @@ static int copy_ccws_for_cfg_channel(
         off += a->data_size;
     }
     return (int)off;
+}
+
+/*
+ * CHANGE_STATUS(ENABLED) + CFG pull. Extracted so it can run either
+ * at the end of context_switch_load (default) or at the start of the
+ * first hailo_backend_run on the slot (when HAILO_DEFER_ENABLED_TO_RUN
+ * is set, #682 experiment). Reads ccw_num_avail_{0,1} and
+ * ccw_has_second_channel from the slot — those are populated earlier
+ * in load before this helper runs. cs_load_stage codes are unchanged
+ * from the inline version so `hailo stage` interpretation continues
+ * to work; failure paths return the rc the caller should propagate.
+ */
+static int hailo_apply_enabled_and_cfg_pull(struct hailo_model_slot *slot)
+{
+    int rc;
+
+#ifdef HAILO_WIRE_DEBUG
+    /* #253 (2026-04-23): 2.8 ms wall-clock gap in HailoRT's wire
+     * capture between the 4th SET_CONTEXT_INFO (DYNAMIC) and the next
+     * RPC. Candidate: fw's CORE task is still finishing DYNAMIC's
+     * AllowInputDataflow action-list processing. Tested and
+     * disconfirmed for #253; kept under HAILO_WIRE_DEBUG for future
+     * bisects. */
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(HAILO_HAILORT_GAP_POST_DYNAMIC_US);
+    }
+#endif
+
+    cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
+    /* Pi OS wire capture (2026-04-22, HailoRT v4.23.0 MNIST on pi-5-1
+     * instrumented driver — see ../slmos-reference-cache/hailo/hailort-v4.23.0-wire-
+     * capture-mnist-pi5.txt, CHANGE_STATUS #2 body):
+     *   state=ENABLED, app_index=0, batch_size=0, batch_count=0
+     * batch_size=0 = CONTROL_PROTOCOL__IGNORE_DYNAMIC_BATCH_SIZE.
+     * batch_count=0 = INIFINITE_BATCH_COUNT — fw keeps processing
+     * submits until CHANGE_STATUS(RESET). */
+    rc = hailo_control_change_context_switch_status(
+            HAILO_CS_STATE_ENABLED,
+            /*application_index=*/0,
+            /*batch_size=*/0, /*batch_count=*/0);
+    if (rc != HAILO_OK) {
+        WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(ENABLED) failed (rc=%d)", rc);
+        return rc;
+    }
+#ifdef HAILO_WIRE_DEBUG
+    uart_printf("[bisect] post CHANGE_STATUS(ENABLED):\r\n");
+    hailo_fw_drain_d2h_notifications(2);
+    {
+        struct hailo_control_identify_response idr;
+        uint32_t gdi_len = 0;
+        int r1 = hailo_control_get_device_information(&gdi_len);
+        int r2 = hailo_control_identify(&idr);
+        int r3 = hailo_control_get_device_information(&gdi_len);
+        int r4 = hailo_control_identify(&idr);
+        uart_printf("[settle] post-ENABLED pings: GDI=%d ID=%d GDI=%d ID=%d\r\n",
+                    r1, r2, r3, r4);
+        uart_printf("[bisect] post-ENABLED settle pings:\r\n");
+        hailo_fw_drain_d2h_notifications(2);
+    }
+    if (hailo_platform && hailo_platform->udelay) {
+        hailo_platform->udelay(HAILO_HAILORT_GAP_POST_SETTLE_PINGS_US);
+    }
+#endif /* HAILO_WIRE_DEBUG */
+
+    cs_load_stage_set(72);
+    if (slot->ccw_has_second_channel) {
+        const uint8_t bulk_ch = 0;
+        int arm0 = hailo_vdma_channel_wait_armed(bulk_ch, 500000u);
+        if (arm0 != HAILO_OK) {
+            WARN("hailo backend: CFG bulk ch=%u never armed (rc=%d)",
+                 bulk_ch, arm0);
+            cs_load_stage_set(830072);
+            return arm0;
+        }
+        int sub0 = hailo_vdma_channel_wait_proc(
+            bulk_ch, slot->ccw_num_avail_1, 2000000u);
+        if (sub0 != HAILO_OK) {
+            WARN("hailo backend: CFG bulk wait_proc (target=%u) "
+                 "failed (rc=%d)", (unsigned)slot->ccw_num_avail_1, sub0);
+            cs_load_stage_set(830000 + (sub0 < 0 ? -sub0 : sub0));
+            return sub0;
+        }
+    }
+
+    const uint8_t cfg_ch = HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL;
+    int arm_rc = hailo_vdma_channel_wait_armed(cfg_ch, 500000u);
+    if (arm_rc != HAILO_OK) {
+        WARN("hailo backend: CFG channel %u never armed after "
+             "ENABLED (rc=%d)", cfg_ch, arm_rc);
+        cs_load_stage_set(830072);
+        return arm_rc;
+    }
+    cs_load_stage_set(73);
+
+    int sub_rc = hailo_vdma_submit_and_wait(
+        cfg_ch, slot->ccw_num_avail_0, 2000000u);
+    if (sub_rc != HAILO_OK) {
+        WARN("hailo backend: CFG channel submit (avail=%u) "
+             "failed (rc=%d)", (unsigned)slot->ccw_num_avail_0, sub_rc);
+        cs_load_stage_set(830000 + (sub_rc < 0 ? -sub_rc : sub_rc));
+        return sub_rc;
+    }
+    cs_load_stage_set(74);
+
+#ifdef HAILO_WIRE_DEBUG
+    uart_printf("[bisect] post CCW DMA pull:\r\n");
+    hailo_fw_drain_d2h_notifications(2);
+#endif
+    return HAILO_OK;
 }
 
 /* The full 6-step load sequence. Called from load_model after the
@@ -1318,151 +1438,18 @@ static int context_switch_load(struct hailo_model_slot *slot,
 
     }
 
-#ifdef HAILO_WIRE_DEBUG
-    /* #253 (2026-04-23): 2.8 ms wall-clock gap in HailoRT's wire
-     * capture between the 4th SET_CONTEXT_INFO (DYNAMIC) and the next
-     * RPC. Candidate: fw's CORE task is still finishing DYNAMIC's
-     * AllowInputDataflow action-list processing (the action that
-     * arms the boundary dataflow scheduler). Firing CHANGE_STATUS
-     * (ENABLED) before that completes may leave the scheduler in an
-     * incomplete state and never issue boundary credits. Tested and
-     * disconfirmed — kept under HAILO_WIRE_DEBUG for future bisects. */
-    if (hailo_platform && hailo_platform->udelay) {
-        hailo_platform->udelay(HAILO_HAILORT_GAP_POST_DYNAMIC_US);
-    }
-#endif
-
-    cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
-    /* Pi OS wire capture (2026-04-22, HailoRT v4.23.0 MNIST on pi-5-1
-     * instrumented driver — see ../slmos-reference-cache/hailo/hailort-v4.23.0-wire-
-     * capture-mnist-pi5.txt, CHANGE_STATUS #2 body):
-     *   state=ENABLED, app_index=0, batch_size=0, batch_count=0
-     * batch_size=0 = CONTROL_PROTOCOL__IGNORE_DYNAMIC_BATCH_SIZE (use
-     * pre-configured). batch_count=0 = CONTROL_PROTOCOL__INIFINITE_
-     * BATCH_COUNT — fw will keep processing submits until CHANGE_STATUS
-     * (RESET). Previously SLM-OS sent (1,1), which told fw "process
-     * exactly 1 batch of 1 and stop"; fw's action-list processor then
-     * gated the boundary dataflow on a state machine transition that
-     * never fired from our host writes, leaving num_proc pinned at 0
-     * on the boundary channels. */
-    rc = hailo_control_change_context_switch_status(
-            HAILO_CS_STATE_ENABLED,
-            /*application_index=*/0,
-            /*batch_size=*/0, /*batch_count=*/0);
-    if (rc != HAILO_OK) {
-        WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(ENABLED) failed (rc=%d)", rc);
-        goto fail;
-    }
-#ifdef HAILO_WIRE_DEBUG
-    uart_printf("[bisect] post CHANGE_STATUS(ENABLED):\r\n");
-    hailo_fw_drain_d2h_notifications(2);
-
-    /* #253 (2026-04-23): HailoRT's wire capture shows 2× (GET_DEVICE_INFO
-     * + IDENTIFY) interleaved after CHANGE_STATUS(ENABLED) and before the
-     * first boundary submit. SLM-OS previously went straight from ENABLED
-     * to CCW upload + submit. Tested this pattern in case fw needs a
-     * specific settle handshake before accepting boundary credits —
-     * disconfirmed but kept here so the bisect infrastructure stays
-     * intact for future investigations. */
-    {
-        struct hailo_control_identify_response idr;
-        uint32_t gdi_len = 0;
-        int r1 = hailo_control_get_device_information(&gdi_len);
-        int r2 = hailo_control_identify(&idr);
-        int r3 = hailo_control_get_device_information(&gdi_len);
-        int r4 = hailo_control_identify(&idr);
-        uart_printf("[settle] post-ENABLED pings: GDI=%d ID=%d GDI=%d ID=%d\r\n",
-                    r1, r2, r3, r4);
-        uart_printf("[bisect] post-ENABLED settle pings:\r\n");
-        hailo_fw_drain_d2h_notifications(2);
-    }
-    /* #253 (2026-04-23): 1.6 ms wall-clock gap in HailoRT between the
-     * last settle ping and the next CHANGE_STATUS. Match it. */
-    if (hailo_platform && hailo_platform->udelay) {
-        hailo_platform->udelay(HAILO_HAILORT_GAP_POST_SETTLE_PINGS_US);
-    }
-#endif /* HAILO_WIRE_DEBUG */
-
-    /* #253: CHANGE_STATUS(ENABLED) returns synchronously but fw's
-     * action-list processing (ACTIVATION → BATCH_SWITCHING →
-     * PRELIMINARY → DYNAMIC) continues asynchronously. Fw programs
-     * the CFG channel's regs (CONTROL=START, depth, iova) while
-     * processing ACTIVATION/PRELIMINARY — before ENABLED the channel
-     * is all zeros, writes don't stick.
-     *
-     * Poll CFG ch base_dword until CONTROL=START lights up, then
-     * write num_avail = ccw_num_avail so the engine fetches the
-     * programmed descriptors. Wait for num_proc to catch up: when
-     * it equals num_avail the CCW DMA pull is complete, which is
-     * what PRELIMINARY's FETCH_CFG_CHANNEL_DESCRIPTORS was waiting
-     * for. Only then is fw's inference pipeline ready to process
-     * the first boundary submit. Skipping this step leaves fw
-     * blocked behind unloaded CCWs and every H2D submit times out
-     * with num_proc=0. */
-    cs_load_stage_set(72);
-    {
-        /* Drain BOTH cfg channels when we're in dual-channel mode.
-         * PCIe channel 0 carries the bulk microcode, channel 1 the
-         * small secondary payload — both need num_avail written and
-         * num_proc polled before fw's PRELIMINARY can finish. Order
-         * doesn't matter (separate VDMA engines) but wait for the
-         * bulk channel first so the NN-core microcode lands before
-         * fw's TRIGGER_SEQUENCER runs. */
-        if (slot->ccw_has_second_channel) {
-            /* On the bulk channel fw's PRELIMINARY itself issues two
-             * FETCH_CFG_CHANNEL_DESCRIPTORS REPEATED groups (1 desc
-             * handshake + bulk_desc_count-1 for the microcode), so
-             * the channel DMA is driven by those actions rather than
-             * by a host-side num_avail write. Just wait for the
-             * channel's num_proc to reach bulk_desc_count — that's
-             * the signal the microcode has fully landed and the
-             * NN-core sequencers have their program loaded. */
-            const uint8_t bulk_ch = 0;
-            int arm0 = hailo_vdma_channel_wait_armed(bulk_ch, 500000u);
-            if (arm0 != HAILO_OK) {
-                WARN("hailo backend: CFG bulk ch=%u never armed (rc=%d)",
-                     bulk_ch, arm0);
-                cs_load_stage_set(830072);
-                rc = arm0;
-                goto fail;
-            }
-            int sub0 = hailo_vdma_channel_wait_proc(
-                bulk_ch, ccw_num_avail_bulk, 2000000u);
-            if (sub0 != HAILO_OK) {
-                WARN("hailo backend: CFG bulk wait_proc (target=%u) "
-                     "failed (rc=%d)", (unsigned)ccw_num_avail_bulk, sub0);
-                cs_load_stage_set(830000 + (sub0 < 0 ? -sub0 : sub0));
-                rc = sub0;
-                goto fail;
-            }
-        }
-
-        const uint8_t cfg_ch = HAILO_CS_DEFAULT_CONFIG_VDMA_CHANNEL;
-        int arm_rc = hailo_vdma_channel_wait_armed(cfg_ch, 500000u /* 500 ms */);
-        if (arm_rc != HAILO_OK) {
-            WARN("hailo backend: CFG channel %u never armed after "
-                 "ENABLED (rc=%d)", cfg_ch, arm_rc);
-            cs_load_stage_set(830072);
-            rc = arm_rc;
-            goto fail;
-        }
-        cs_load_stage_set(73);
-
-        int sub_rc = hailo_vdma_submit_and_wait(
-            cfg_ch, ccw_num_avail, 2000000u /* 2 s */);
-        if (sub_rc != HAILO_OK) {
-            WARN("hailo backend: CFG channel submit (avail=%u) "
-                 "failed (rc=%d)", (unsigned)ccw_num_avail, sub_rc);
-            cs_load_stage_set(830000 + (sub_rc < 0 ? -sub_rc : sub_rc));
-            rc = sub_rc;
-            goto fail;
-        }
-        cs_load_stage_set(74);
-    }
-
-#ifdef HAILO_WIRE_DEBUG
-    uart_printf("[bisect] post CCW DMA pull:\r\n");
-    hailo_fw_drain_d2h_notifications(2);
+#ifdef HAILO_DEFER_ENABLED_TO_RUN
+    /* #682 deferred-ENABLED experiment (2026-05-07). Skip the
+     * ENABLED + CFG pull here; the first hailo_backend_run on this
+     * slot will issue them. enabled_deferred is the latch read from
+     * the run path. The ccw_bytes/in_bytes/out_bytes log line still
+     * fires below — readers parsing for "context-switch load OK" as
+     * a "ready to submit" signal need to know the slot is set up but
+     * not yet activated. */
+    slot->enabled_deferred = true;
+#else
+    rc = hailo_apply_enabled_and_cfg_pull(slot);
+    if (rc != HAILO_OK) goto fail;
 #endif
     cs_load_stage_set(71);
     INFO("hailo backend: context-switch load OK (CCW=%u B, IN=%u B, OUT=%u B)",
@@ -1775,6 +1762,23 @@ static int hailo_backend_run(struct inference_device *dev,
              out->n_elems, slot->boundary_out_tensor.tensor_bytes);
         HAILO_RUN_RETURN(INF_ERR_BAD_TENSOR);
     }
+
+#ifdef HAILO_DEFER_ENABLED_TO_RUN
+    /* #682 deferred-ENABLED experiment (2026-05-07). When the load
+     * path skipped CHANGE_STATUS(ENABLED) + CFG pull, do them now
+     * before any host-side boundary submit work. Single-shot per
+     * slot — clear the flag immediately so subsequent inferences
+     * skip this block. Failure here propagates the same WARN +
+     * stage-code as the load-time path; the run is aborted. */
+    if (slot->enabled_deferred) {
+        int de_rc = hailo_apply_enabled_and_cfg_pull(slot);
+        if (de_rc != HAILO_OK) {
+            WARN("hailo backend: deferred ENABLED+CFG pull failed (rc=%d)", de_rc);
+            HAILO_RUN_RETURN(hailo_err_to_inf(de_rc));
+        }
+        slot->enabled_deferred = false;
+    }
+#endif
 
     /* The VDMA channel indices that receive these submits must be
      * the ones ACTIVATION opened. translate_activation packed them
