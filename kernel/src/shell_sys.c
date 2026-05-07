@@ -1823,6 +1823,8 @@ static void diag_print_vec(void)
 static void diag_print_gic_runtime(void)
 {
 #if defined(PLATFORM_RASPI5)
+    volatile uint32_t *gicd_ctlr_runtime =
+        (volatile uint32_t *)(GIC_DIST_BASE + 0x000UL);
     volatile uint32_t *gicd_isenabler0 =
         (volatile uint32_t *)(GIC_DIST_BASE + 0x100UL);
     volatile uint32_t *gicd_ispendr0 =
@@ -1833,6 +1835,7 @@ static void diag_print_gic_runtime(void)
         (volatile uint32_t *)(GIC_CPU_BASE + 0x000UL);
     volatile uint32_t *gicc_pmr =
         (volatile uint32_t *)(GIC_CPU_BASE + 0x004UL);
+    uint32_t gicd_ctlr_now = *gicd_ctlr_runtime;
     uint32_t iser = *gicd_isenabler0;
     uint32_t ispr = *gicd_ispendr0;
     uint32_t iacr = *gicd_iactiver0;
@@ -1848,6 +1851,20 @@ static void diag_print_gic_runtime(void)
     (void)sre_pre; (void)sre_post;
 
     shell_puts("\r\nGIC runtime state (read from shell task):\r\n");
+    /*
+     * GICD_CTLR from NS view. On GIC-400 with security extensions,
+     * NS reads/writes only see one bit: EnableGrp1NS (NS-view bit 0
+     * aliases the actual register's bit 1). bit 0 == 1 means the
+     * distributor is forwarding NS Group 1 interrupts to the NS CPU
+     * interface — which is what we need for PPI 30 (timer) to deliver.
+     * This is the kernel side of the gate; if 0, kernel's
+     * `GICD_CTLR = ctlr | 1` write in gic_init didn't take effect.
+     */
+    shell_printf("  GICD_CTLR = 0x%x  (NS view; bit0=EnableGrp1NS=%u)%s\r\n",
+                gicd_ctlr_now, gicd_ctlr_now & 1u,
+                (gicd_ctlr_now & 1u)
+                    ? "  ← distributor forwards NS Group 1 ✓"
+                    : "  ← distributor NOT forwarding NS Group 1 ✗");
     shell_printf("  GICC_CTLR = 0x%x  (bit0=EnGrp1 bit4=FIQByp!disG1 "
                 "bit5=IRQByp!disG1 bit9=EOImodeNS)\r\n",
                 *gicc_ctlr);
