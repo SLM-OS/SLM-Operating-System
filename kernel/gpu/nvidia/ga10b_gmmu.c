@@ -537,6 +537,34 @@ static uint64_t read_pdb_phys(uint64_t inst_block_phys)
     return pdb_phys;
 }
 
+/* Map one page at `gpu_va` to `data_phys`. Walks PDE3 → PDE0,
+ * allocating intermediate tables on demand; writes the leaf PTE.
+ * Does NOT issue dsb sy — caller is expected to issue one after
+ * a batch of map_one_page calls so the cost amortizes. */
+static int map_one_page(uint64_t pdb_phys,
+                        uint64_t gpu_va,
+                        uint64_t data_phys,
+                        uint32_t flags)
+{
+    uint16_t i3 = va_index(gpu_va, GA10B_PDE3_VA_HI, GA10B_PDE3_VA_LO);
+    uint16_t i2 = va_index(gpu_va, GA10B_PDE2_VA_HI, GA10B_PDE2_VA_LO);
+    uint16_t i1 = va_index(gpu_va, GA10B_PDE1_VA_HI, GA10B_PDE1_VA_LO);
+    uint16_t i0 = va_index(gpu_va, GA10B_PDE0_VA_HI, GA10B_PDE0_VA_LO);
+    uint16_t ip = va_index(gpu_va, GA10B_PTE_VA_HI,  GA10B_PTE_VA_LO);
+
+    uint64_t pde2_phys, pde1_phys, pde0_phys, pte_phys;
+    if (ensure_regular_pde(pdb_phys, i3, &pde2_phys) < 0) return -1;
+    if (ensure_regular_pde(pde2_phys, i2, &pde1_phys) < 0) return -1;
+    if (ensure_regular_pde(pde1_phys, i1, &pde0_phys) < 0) return -1;
+    if (ensure_dual_pde_small_table(pde0_phys, i0, &pte_phys) < 0) return -1;
+
+    uint64_t pte_entry_phys = pte_phys + (uint64_t)ip * GA10B_GMMU_ENTRY_SIZE;
+    uint64_t pte_entry = encode_pte(data_phys, flags);
+    *(volatile uint64_t *)(uintptr_t)pte_entry_phys = pte_entry;
+    cache_clean((const volatile void *)(uintptr_t)pte_entry_phys);
+    return 0;
+}
+
 int ga10b_gmmu_alloc_page(uint64_t inst_block_phys,
                           uint32_t flags,
                           uint64_t *out_gpu_va,
@@ -546,58 +574,163 @@ int ga10b_gmmu_alloc_page(uint64_t inst_block_phys,
     if (out_gpu_va == NULL || out_cpu_va == NULL || out_phys == NULL) {
         return -1;
     }
-
-    /* 1. Pick a fresh GPU VA. */
-    if (g_va_cursor >= GA10B_GMMU_VA_LIMIT) {
-        return -1;  /* range exhausted */
-    }
-    uint64_t va = g_va_cursor;
-    /* Reserve the VA up front so a mid-walk failure doesn't leak
-     * the slot — caller will retry against a fresh VA. */
-    g_va_cursor += 4096;
-
-    /* 2. Read the PDB from the inst block. */
     uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
     if (pdb_phys == 0) return -1;
 
-    /* 3. Allocate the data page. */
+    if (g_va_cursor >= GA10B_GMMU_VA_LIMIT) return -1;
+    uint64_t va = g_va_cursor;
+    g_va_cursor += 4096;
+
     void *data_page = pmm_alloc_page();
     if (data_page == NULL) return -1;
     uint64_t data_phys = (uint64_t)(uintptr_t)data_page;
 
-    /* 4. Decompose the VA into per-level indices. */
-    uint16_t i3 = va_index(va, GA10B_PDE3_VA_HI, GA10B_PDE3_VA_LO);
-    uint16_t i2 = va_index(va, GA10B_PDE2_VA_HI, GA10B_PDE2_VA_LO);
-    uint16_t i1 = va_index(va, GA10B_PDE1_VA_HI, GA10B_PDE1_VA_LO);
-    uint16_t i0 = va_index(va, GA10B_PDE0_VA_HI, GA10B_PDE0_VA_LO);
-    uint16_t ip = va_index(va, GA10B_PTE_VA_HI,  GA10B_PTE_VA_LO);
+    if (map_one_page(pdb_phys, va, data_phys, flags) < 0) return -1;
 
-    /* 5. Walk + write per-level tables.
-     *
-     * The PDE3 entry sits in the PDB itself — Linux populated PDE3[0]
-     * for the lower VAs, but our high VA range may map to PDE3[0] too
-     * (since 0x40_0000_0000 >> 40 == 0). The PDE3 entry should already
-     * be valid. PDE2[256] at our VA almost certainly is empty. */
-    uint64_t pde2_table_phys, pde1_table_phys, pde0_table_phys, pte_table_phys;
-    if (ensure_regular_pde(pdb_phys, i3, &pde2_table_phys) < 0) return -1;
-    if (ensure_regular_pde(pde2_table_phys, i2, &pde1_table_phys) < 0) return -1;
-    if (ensure_regular_pde(pde1_table_phys, i1, &pde0_table_phys) < 0) return -1;
-    if (ensure_dual_pde_small_table(pde0_table_phys, i0, &pte_table_phys) < 0) return -1;
-
-    /* 6. Write the leaf PTE. */
-    uint64_t pte_entry_phys = pte_table_phys + (uint64_t)ip * GA10B_GMMU_ENTRY_SIZE;
-    uint64_t pte_entry = encode_pte(data_phys, flags);
-    *(volatile uint64_t *)(uintptr_t)pte_entry_phys = pte_entry;
-    cache_clean((const volatile void *)(uintptr_t)pte_entry_phys);
-
-    /* DSB SY: order page-table publication relative to anything the
-     * caller does next (e.g. memcpy via cpu_va, then GPU dispatch).
-     * Without this, the GPU can race the cache_clean and TLB-walk
-     * stale entries on the very first lookup. */
+    /* DSB SY: order PT publication relative to anything the caller
+     * does next (memcpy via cpu_va, GPU dispatch). Without this the
+     * GPU can race the cache_clean and TLB-walk stale entries on
+     * the very first lookup. */
     __asm__ volatile("dsb sy" ::: "memory");
 
     *out_gpu_va = va;
     *out_cpu_va = data_page;
     *out_phys = data_phys;
+    return 0;
+}
+
+/* ---------------------------------------------------------------------
+ * Multi-page alloc + free
+ * --------------------------------------------------------------------- */
+
+struct gmmu_free_extent {
+    uint64_t gpu_va;
+    uint32_t n_pages;
+    uint32_t _pad;
+};
+
+static struct gmmu_free_extent g_free_extents[GA10B_GMMU_FREE_TRACKER_SLOTS];
+static uint32_t g_free_extent_count;
+
+uint32_t ga10b_gmmu_free_tracker_count(void)
+{
+    return g_free_extent_count;
+}
+
+int ga10b_gmmu_alloc(uint64_t inst_block_phys,
+                     uint32_t n_pages,
+                     uint32_t flags,
+                     uint64_t *out_gpu_va_base,
+                     void    **out_first_cpu_va,
+                     uint64_t *out_first_phys)
+{
+    if (out_gpu_va_base == NULL || out_first_cpu_va == NULL ||
+        out_first_phys == NULL) {
+        return -1;
+    }
+    if (n_pages == 0 || n_pages > GA10B_GMMU_MAX_ALLOC_PAGES) {
+        return -1;
+    }
+
+    uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
+    if (pdb_phys == 0) return -1;
+
+    /* Reserve the contiguous VA range from the bump cursor.
+     * Range exhaustion is checked atomically with the reservation
+     * so a partial alloc from the tail of the range doesn't leak
+     * VAs (caller can retry with a smaller request, or admit
+     * defeat). */
+    uint64_t va_span = (uint64_t)n_pages * 4096ull;
+    if (g_va_cursor + va_span > GA10B_GMMU_VA_LIMIT) {
+        return -1;
+    }
+    uint64_t va_base = g_va_cursor;
+    g_va_cursor += va_span;
+
+    /* Per page: alloc PMM page, map it. PMM pages need not be
+     * contiguous in phys — every page gets its own PTE entry
+     * pointing at its individual phys. */
+    void *first_cpu_va = NULL;
+    uint64_t first_phys = 0;
+    for (uint32_t i = 0; i < n_pages; i++) {
+        void *data = pmm_alloc_page();
+        if (data == NULL) {
+            /* Partial alloc — the pages we mapped before this
+             * stay mapped and the PTEs stay set. The PMM pages
+             * we already alloc'd leak (no phys-tracker yet,
+             * Milestone D). Caller treats this as fatal. */
+            return -1;
+        }
+        if (i == 0) {
+            first_cpu_va = data;
+            first_phys = (uint64_t)(uintptr_t)data;
+        }
+        uint64_t va_i = va_base + (uint64_t)i * 4096ull;
+        uint64_t phys_i = (uint64_t)(uintptr_t)data;
+        if (map_one_page(pdb_phys, va_i, phys_i, flags) < 0) {
+            return -1;
+        }
+    }
+
+    /* Single dsb sy at the end — amortizes across all N pages. */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    *out_gpu_va_base = va_base;
+    *out_first_cpu_va = first_cpu_va;
+    *out_first_phys = first_phys;
+    return 0;
+}
+
+int ga10b_gmmu_free(uint64_t inst_block_phys,
+                    uint64_t gpu_va,
+                    uint32_t n_pages)
+{
+    if (n_pages == 0 || n_pages > GA10B_GMMU_MAX_ALLOC_PAGES) return -1;
+    if ((gpu_va & 0xfff) != 0) return -1;
+    if (gpu_va < GA10B_GMMU_VA_BASE ||
+        gpu_va + (uint64_t)n_pages * 4096ull > GA10B_GMMU_VA_LIMIT) {
+        return -1;
+    }
+
+    /* Per page: walk to find the leaf PTE, clear it. */
+    for (uint32_t i = 0; i < n_pages; i++) {
+        uint64_t va_i = gpu_va + (uint64_t)i * 4096ull;
+        struct ga10b_gmmu_walk_result wr;
+        if (ga10b_gmmu_walk(inst_block_phys, va_i, &wr) != 0) {
+            /* Walker shouldn't return non-zero — it always returns
+             * 0 with a status field. Defensive bail. */
+            return -1;
+        }
+        if (wr.status != GA10B_GMMU_WALK_OK) {
+            /* Page wasn't mapped to begin with. Skip — caller may
+             * have called free twice or with a slightly-off range;
+             * the rest of the contiguous range is still freed. */
+            continue;
+        }
+        const struct ga10b_gmmu_level_record *pte_rec = &wr.levels[4];
+        uint64_t pte_entry_phys = pte_rec->table_phys +
+                                  (uint64_t)pte_rec->index * GA10B_GMMU_ENTRY_SIZE;
+        /* Clear the PTE: zero entry = invalid + addr=0 + flags=0. */
+        *(volatile uint64_t *)(uintptr_t)pte_entry_phys = 0;
+        cache_clean((const volatile void *)(uintptr_t)pte_entry_phys);
+    }
+
+    /* DSB SY so any subsequent GPU dispatch sees the cleared PTEs.
+     * Note: this does NOT invalidate the GPU's TLB. If the GPU has
+     * a cached translation for any of these VAs from a prior walk,
+     * a subsequent access would still serve the cached (now stale)
+     * mapping. The Milestone D TLB invalidate sequence + safe-VA-
+     * reuse is the fix; until then, callers must NOT touch a freed
+     * VA from the GPU side. */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* Track the freed extent for future TLB-invalidate-enabled
+     * reuse. Drop on the floor if the table is full — alloc still
+     * works because the bump cursor is independent. */
+    if (g_free_extent_count < GA10B_GMMU_FREE_TRACKER_SLOTS) {
+        g_free_extents[g_free_extent_count].gpu_va = gpu_va;
+        g_free_extents[g_free_extent_count].n_pages = n_pages;
+        g_free_extent_count++;
+    }
     return 0;
 }

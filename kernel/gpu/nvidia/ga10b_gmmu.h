@@ -219,4 +219,101 @@ int ga10b_gmmu_alloc_page(uint64_t inst_block_phys,
  * page. */
 uint64_t ga10b_gmmu_va_cursor(void);
 
+/* ---------------------------------------------------------------------
+ * Milestone C — multi-page alloc + free
+ * --------------------------------------------------------------------- */
+
+/* Maximum number of contiguous-VA pages a single
+ * `ga10b_gmmu_alloc` call can hand back. Cap exists to bound the
+ * worst-case PMM allocation cost (one PMM page per leaf data page
+ * plus on-demand intermediate PT pages). 2 MB at 4 KB granularity =
+ * 512 pages — comfortably above the largest single SLM-OS scratch
+ * buffer we anticipate (per-layer activation tensors run a few
+ * hundred KB); raise if the model loader needs bigger contiguous
+ * VA regions. */
+#define GA10B_GMMU_MAX_ALLOC_PAGES   512u
+
+/* Number of slots in the free-extent tracker. Each slot records
+ * one freed (gpu_va, n_pages) extent so a future TLB-invalidate
+ * landing can immediately enable VA reuse without API changes.
+ * For Milestone C the table is write-only — the alloc path does
+ * NOT reuse freed slots (TLB invalidate is unimplemented). 64
+ * slots is room for ~64 outstanding free'd allocations, well past
+ * what realistic SLM model load/unload churn would produce. */
+#define GA10B_GMMU_FREE_TRACKER_SLOTS 64u
+
+/* Allocate N contiguous 4 KB GPU virtual pages from the bump
+ * cursor. Phys pages are allocated INDIVIDUALLY from PMM —
+ * non-contiguous in physical memory but contiguous in GPU VA, the
+ * shape every consumer (matmul, activation tensors, KV cache)
+ * actually wants.
+ *
+ * Per-page work:
+ *   - Allocate a 4 KB PMM page.
+ *   - Walk inst_block_phys's GMMU tree for `va_base + i*4096`,
+ *     allocating intermediate PDE tables as needed.
+ *   - Write the leaf PTE.
+ *
+ * Crosses PT / PDE0 / PDE1 boundaries automatically — each per-page
+ * walk descends from the PDB and reuses any already-populated
+ * intermediate tables.
+ *
+ * Output:
+ *   *out_gpu_va_base — VA of the first page (4 KB-aligned)
+ *   *out_first_cpu_va — kernel VA of the first page (subsequent
+ *                       pages' CPU VAs are NOT contiguous; the
+ *                       caller must walk per-page if needed)
+ *   *out_first_phys  — phys of the first page (same caveat)
+ *
+ * On failure: returns negative, partial allocations are NOT rolled
+ * back (page-table tree pages stay allocated, leaf PTEs stay set
+ * for whatever pages did succeed). Callers should treat alloc
+ * failure as a fatal error path. Out params undefined on failure.
+ *
+ * Requires `n_pages` in [1..GA10B_GMMU_MAX_ALLOC_PAGES].
+ *
+ * Single-page convenience: `ga10b_gmmu_alloc_page` is equivalent
+ * to `ga10b_gmmu_alloc(1, ...)` with the additional convenience of
+ * returning the cpu_va as a `void*` instead of a u64.
+ */
+int ga10b_gmmu_alloc(uint64_t inst_block_phys,
+                     uint32_t n_pages,
+                     uint32_t flags,
+                     uint64_t *out_gpu_va_base,
+                     void    **out_first_cpu_va,
+                     uint64_t *out_first_phys);
+
+/* Free N contiguous pages previously returned by `ga10b_gmmu_alloc`
+ * (or `ga10b_gmmu_alloc_page` with n_pages=1). Per page:
+ *   - Walk the existing leaf PTE.
+ *   - Clear the PTE (valid=0 + address bits zeroed) so a future
+ *     GPU walk would see "unmapped".
+ *   - cache_clean the PTE.
+ *   - PMM page itself stays allocated to track-via-extent for
+ *     future free; tracking removal is the caller's responsibility
+ *     today (Milestone C constraint: alloc'd PMM pages leak on
+ *     free until a phys-tracker lands in Milestone D).
+ *
+ * The freed extent is recorded in a small (GA10B_GMMU_FREE_TRACKER_SLOTS)
+ * table so a future TLB-invalidate landing can enable VA reuse. The
+ * Milestone C alloc path does NOT reuse freed VAs — without TLB
+ * invalidate, the GPU's cached translation could still point at the
+ * stale phys page after free, making reuse unsafe. The table is
+ * write-only for now.
+ *
+ * Returns 0 on success. Negative on:
+ *   - bad gpu_va (not 4 KB aligned, outside the SLM-OS reserved
+ *     range, or not currently mapped),
+ *   - free-tracker full (drop the limit; new alloc still succeeds
+ *     because the bump cursor doesn't depend on the tracker).
+ */
+int ga10b_gmmu_free(uint64_t inst_block_phys,
+                    uint64_t gpu_va,
+                    uint32_t n_pages);
+
+/* Inspector for the free-tracker slot count (for diag). Returns
+ * the number of currently-recorded freed extents — saturates at
+ * GA10B_GMMU_FREE_TRACKER_SLOTS. */
+uint32_t ga10b_gmmu_free_tracker_count(void);
+
 #endif /* GPU_NVIDIA_GA10B_GMMU_H */

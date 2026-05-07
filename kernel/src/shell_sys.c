@@ -4032,8 +4032,118 @@ int cmd_nvgpu(int argc, char *argv[])
          */
         if (argc < 3) {
             shell_puts("usage: nvgpu gmmu <pushbuf | walk <hex_va> | "
-                       "walk-raw <inst_phys_hex> <hex_va> | alloc-page>\r\n");
+                       "walk-raw <inst_phys_hex> <hex_va> | "
+                       "alloc-page | alloc-page-synth | "
+                       "alloc-multi-synth <n_pages>>\r\n");
             return -1;
+        }
+        if (strcmp(argv[2], "alloc-multi-synth") == 0) {
+            /* #666 Milestone C: alloc N contiguous-VA pages on a
+             * synthetic inst block, walk a few sample VAs to
+             * confirm leaf PTEs are valid + correct, then free
+             * and walk again to confirm PTEs are cleared.
+             *
+             * Synthetic inst block (same setup as alloc-page-synth)
+             * keeps this self-contained — no real GPU channel
+             * needed. */
+            if (argc < 4) {
+                shell_puts("usage: nvgpu gmmu alloc-multi-synth <n_pages>\r\n");
+                return -1;
+            }
+            uint32_t n_pages = 0;
+            if (shell_parse_uint(argv[3], &n_pages) < 0 ||
+                n_pages == 0 || n_pages > 512) {
+                shell_puts("n_pages must be 1..512\r\n");
+                return -1;
+            }
+            void *inst = pmm_alloc_page();
+            void *pdb_page = pmm_alloc_page();
+            if (inst == NULL || pdb_page == NULL) {
+                shell_puts("alloc-multi-synth: PMM exhaustion\r\n");
+                return -1;
+            }
+            for (int i = 0; i < 512; i++) {
+                ((volatile uint64_t *)inst)[i] = 0;
+                ((volatile uint64_t *)pdb_page)[i] = 0;
+            }
+            uint64_t inst_phys = (uint64_t)(uintptr_t)inst;
+            uint64_t pdb_phys = (uint64_t)(uintptr_t)pdb_page;
+            volatile uint32_t *iw = (volatile uint32_t *)inst;
+            iw[128] = ((uint32_t)pdb_phys & 0xfffff000u) |
+                      (2u << 1) | (1u << 3);
+            iw[129] = (uint32_t)(pdb_phys >> 32);
+            cache_clean_range(inst, 4096);
+            cache_clean_range(pdb_page, 4096);
+
+            shell_printf("alloc-multi-synth: inst=0x%lx pdb=0x%lx n=%u\r\n",
+                         (unsigned long)inst_phys,
+                         (unsigned long)pdb_phys,
+                         (unsigned)n_pages);
+
+            uint64_t va_base = 0, first_phys = 0;
+            void *first_cpu_va = NULL;
+            int rc = ga10b_gmmu_alloc(inst_phys, n_pages, 0,
+                                      &va_base, &first_cpu_va, &first_phys);
+            if (rc < 0) {
+                shell_printf("ga10b_gmmu_alloc(n=%u) failed: rc=%d\r\n",
+                             (unsigned)n_pages, rc);
+                return rc;
+            }
+            shell_printf("alloc-multi-synth: va_base=0x%lx first_cpu=%p first_phys=0x%lx\r\n",
+                         (unsigned long)va_base, first_cpu_va,
+                         (unsigned long)first_phys);
+
+            /* Walk first / middle / last to spot-check. */
+            uint32_t probes[3] = {0, n_pages / 2, n_pages - 1};
+            int n_probes = (n_pages == 1) ? 1 : (n_pages == 2 ? 2 : 3);
+            int verify_pass = 1;
+            for (int p = 0; p < n_probes; p++) {
+                uint32_t idx = probes[p];
+                uint64_t va_i = va_base + (uint64_t)idx * 4096ull;
+                struct ga10b_gmmu_walk_result wr;
+                ga10b_gmmu_walk(inst_phys, va_i, &wr);
+                if (wr.status != GA10B_GMMU_WALK_OK) {
+                    shell_printf("PROBE[%u] va=0x%lx: walk status=%d — FAIL\r\n",
+                                 (unsigned)idx, (unsigned long)va_i,
+                                 (int)wr.status);
+                    verify_pass = 0;
+                    continue;
+                }
+                shell_printf("PROBE[%u] va=0x%lx leaf_phys=0x%lx\r\n",
+                             (unsigned)idx, (unsigned long)va_i,
+                             (unsigned long)wr.leaf_phys);
+            }
+
+            /* Free and confirm PTEs are cleared. */
+            int frc = ga10b_gmmu_free(inst_phys, va_base, n_pages);
+            if (frc < 0) {
+                shell_printf("ga10b_gmmu_free failed: rc=%d\r\n", frc);
+                return frc;
+            }
+            shell_printf("free: ok (tracker_count=%u)\r\n",
+                         (unsigned)ga10b_gmmu_free_tracker_count());
+
+            int free_verify_pass = 1;
+            for (int p = 0; p < n_probes; p++) {
+                uint32_t idx = probes[p];
+                uint64_t va_i = va_base + (uint64_t)idx * 4096ull;
+                struct ga10b_gmmu_walk_result wr;
+                ga10b_gmmu_walk(inst_phys, va_i, &wr);
+                if (wr.status == GA10B_GMMU_WALK_PTE_INVALID) {
+                    shell_printf("POST-FREE[%u] va=0x%lx: PTE_INVALID — OK\r\n",
+                                 (unsigned)idx, (unsigned long)va_i);
+                } else {
+                    shell_printf("POST-FREE[%u] va=0x%lx: status=%d phys=0x%lx — FAIL\r\n",
+                                 (unsigned)idx, (unsigned long)va_i,
+                                 (int)wr.status, (unsigned long)wr.leaf_phys);
+                    free_verify_pass = 0;
+                }
+            }
+
+            shell_printf("VERIFY: alloc=%s free=%s\r\n",
+                         verify_pass ? "PASS" : "FAIL",
+                         free_verify_pass ? "PASS" : "FAIL");
+            return (verify_pass && free_verify_pass) ? 0 : -1;
         }
         if (strcmp(argv[2], "alloc-page-synth") == 0) {
             /* Synthetic-handoff variant of alloc-page: build a fresh
@@ -4259,7 +4369,8 @@ int cmd_nvgpu(int argc, char *argv[])
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | submit | submit-compute | launch-kernel | "
               "run-mnist | fecs | gpccs | pmu | run | "
-              "gmmu <pushbuf | walk | walk-raw | alloc-page>]\r\n");
+              "gmmu <pushbuf | walk | walk-raw | "
+              "alloc-page | alloc-page-synth | alloc-multi-synth>]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
