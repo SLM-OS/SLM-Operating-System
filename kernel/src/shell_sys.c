@@ -1903,6 +1903,52 @@ static void diag_print_gic_runtime(void)
                 ispr, (ispr >> 30) & 1);
     shell_printf("  GICD_IACTIVER0  = 0x%x  (bit 30 [timer active] = %u)\r\n",
                 iacr, (iacr >> 30) & 1);
+
+    /*
+     * GICC_ACTIVEPRIO[0..3] (offset 0xD0..0xDC). Each bit corresponds
+     * to a "running priority" entry. If anything earlier (firmware,
+     * boot ROM, TF-A) left an active priority bit set, the CPU
+     * interface refuses to deliver new IRQs at or below that priority
+     * — they queue at the distributor (visible as ISPENDR) but never
+     * reach the CPU. Linux's gic_cpu_if_up clears these unconditionally
+     * via writel(0, GICC + 0xD0 + i*4). Our kernel never touched them
+     * before round 5 of the #134 probe.
+     */
+    {
+        volatile uint32_t *gicc_aprn =
+            (volatile uint32_t *)(GIC_CPU_BASE + 0xD0UL);
+        shell_puts("  GICC_ACTIVEPRIO[0..3]: ");
+        for (uint32_t i = 0; i < 4; i++) {
+            shell_printf("0x%08x ", gicc_aprn[i]);
+        }
+        uint32_t any_set = 0;
+        for (uint32_t i = 0; i < 4; i++) any_set |= gicc_aprn[i];
+        shell_printf(" %s\r\n",
+                    any_set ? "← stale active priority — CPU interface "
+                              "would block lower IRQs"
+                            : "(clean)");
+    }
+
+    /*
+     * GICD_IPRIORITYR for PPI 30 (timer). Read from NS to see what
+     * priority the CPU interface compares against PMR. With GIC-400
+     * security extensions, the NS-view value of a Secure-written
+     * priority may differ from what Secure software wrote.
+     */
+    {
+        volatile uint32_t *gicd_ipri =
+            (volatile uint32_t *)(GIC_DIST_BASE + 0x400UL);
+        uint32_t row = 30u / 4u;          /* IPRIORITYR row containing IRQ 30 */
+        uint32_t shift = (30u % 4u) * 8u; /* byte position within the row */
+        uint8_t pri = (uint8_t)(gicd_ipri[row] >> shift);
+        shell_printf("  IPRIORITYR[PPI 30] (NS view) = 0x%02x   PMR = 0x%x\r\n",
+                    pri, *gicc_pmr);
+        shell_printf("    delivers under PMR if pri < PMR  →  %s\r\n",
+                    (pri < (uint8_t)(*gicc_pmr & 0xff))
+                        ? "yes (priority allows delivery)"
+                        : "NO — IPRIORITYR ≥ PMR, IRQ masked at CPU iface");
+    }
+
     shell_puts("  ICC_SRE_EL2     = (not probed — access from EL2 "
               "traps to EL3 on this platform)\r\n");
 #endif
