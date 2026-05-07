@@ -395,9 +395,10 @@ pub fn vec_dot_q4_k_q8_k_scalar(weights: &[u8], acts: &[u8]) -> Option<f32> {
 
 /// Per-block dot product. Dispatches to the NEON FEAT_DotProd kernel
 /// on aarch64; the scalar reference is kept for non-aarch64 builds
-/// (host-side `cargo test` on x86-64) and as a correctness oracle
-/// (the unit tests in this module assert NEON == scalar bit-for-bit
-/// across thousands of random inputs).
+/// (host-side `cargo test` on x86-64) and as a correctness oracle —
+/// `q4k_neon_matches_scalar_self_test` (called from
+/// `rust_run_tests`) asserts NEON == scalar bit-for-bit across 256
+/// random inputs every kernel boot under `make test`.
 #[inline]
 fn dot_q4k_q8k_block(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
     #[cfg(target_arch = "aarch64")]
@@ -465,6 +466,42 @@ fn dot_q4k_q8k_block_scalar(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
     d_w * d_a * (scale_sum as f32) - dmin_w * d_a * (min_sum as f32)
 }
 
+/// SDOT intrinsic wrapper. Encodes `sdot {acc}.4s, {a}.16b, {b}.16b`
+/// via inline asm so we don't depend on the unstable
+/// `core::arch::aarch64::vdotq_s32` intrinsic (gated behind
+/// `stdarch_neon_dotprod`). The compiler picks any V register; the
+/// `vN` format specifier resolves to the right name. Lifted out of
+/// `dot_q4k_q8k_block_neon` to keep that function under the
+/// 80-line guideline.
+///
+/// `#[inline(always)]` would conflict with `#[target_feature]` on
+/// stable rustc (E0658, tracked upstream as rust-lang/rust#145574).
+/// `#[inline]` is a strong-enough hint here: the body is one asm
+/// instruction + a move, and LTO collapses it inside
+/// `dot_q4k_q8k_block_neon` either way.
+///
+/// # Safety
+/// Caller must ensure FEAT_DotProd is present at runtime (enforced
+/// for our platforms by `+dotprod` in `runtime/.cargo/config.toml`).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+#[inline]
+unsafe fn sdot_q(
+    acc: core::arch::aarch64::int32x4_t,
+    a: core::arch::aarch64::int8x16_t,
+    b: core::arch::aarch64::int8x16_t,
+) -> core::arch::aarch64::int32x4_t {
+    let mut out = acc;
+    core::arch::asm!(
+        "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
+        acc = inout(vreg) out,
+        a = in(vreg) a,
+        b = in(vreg) b,
+        options(pure, nomem, nostack, preserves_flags),
+    );
+    out
+}
+
 /// NEON FEAT_DotProd implementation of the per-block Q4_K · Q8_K dot.
 /// Replaces the scalar inner loop's 32×4 = 128 i32 multiply-adds with
 /// 4 × 2 SDOT instructions (16 i8·i8 lanes per call, accumulated
@@ -494,41 +531,6 @@ fn dot_q4k_q8k_block_scalar(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
 /// - FEAT_DotProd must be present at runtime — guaranteed for every
 ///   CPU we ship to (Cortex-A76 / A78AE), enforced at compile time
 ///   by `+dotprod` in `runtime/.cargo/config.toml`.
-/// SDOT intrinsic wrapper. Encodes `sdot {acc}.4s, {a}.16b, {b}.16b`
-/// via inline asm so we don't depend on the unstable
-/// `core::arch::aarch64::vdotq_s32` intrinsic (gated behind
-/// `stdarch_neon_dotprod`). The compiler picks any V register; the
-/// `vN` format specifier resolves to the right name. Lifted out of
-/// `dot_q4k_q8k_block_neon` to keep that function under the
-/// 80-line guideline.
-///
-/// # Safety
-/// Caller must ensure FEAT_DotProd is present at runtime (enforced
-/// for our platforms by `+dotprod` in `runtime/.cargo/config.toml`).
-// `#[inline(always)]` would conflict with `#[target_feature]` on
-// stable rustc (E0658, tracked upstream as rust-lang/rust#145574).
-// `#[inline]` is a strong-enough hint here: the body is one asm
-// instruction + a move, and LTO collapses it inside
-// `dot_q4k_q8k_block_neon` either way.
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon,dotprod")]
-#[inline]
-unsafe fn sdot_q(
-    acc: core::arch::aarch64::int32x4_t,
-    a: core::arch::aarch64::int8x16_t,
-    b: core::arch::aarch64::int8x16_t,
-) -> core::arch::aarch64::int32x4_t {
-    let mut out = acc;
-    core::arch::asm!(
-        "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
-        acc = inout(vreg) out,
-        a = in(vreg) a,
-        b = in(vreg) b,
-        options(pure, nomem, nostack, preserves_flags),
-    );
-    out
-}
-
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,dotprod")]
 unsafe fn dot_q4k_q8k_block_neon(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
