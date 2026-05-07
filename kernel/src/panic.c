@@ -35,7 +35,7 @@ static void dump_registers(void)
 }
 
 #else /* ARM64 */
-#include "../arch/arm64/el_regs.h"
+#include "el_regs.h"
 /*
  * Read ARM64 system registers for exception debugging. ESR_EL1 and
  * FAR_EL1 are VHE-redirected (silently target *_EL2 when E2H=1), but

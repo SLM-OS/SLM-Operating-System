@@ -1,10 +1,11 @@
 /*
  * vectors.S - Exception vector table for SLM-OS (ARM64)
  *
- * Handles exceptions at the EL the kernel runs at: EL1h on most
- * platforms, EL2h with VHE on PLATFORM_RASPI5 (#683). Vector table
- * layout is the same for both — only the ELR/SPSR register operands
- * differ (no VHE redirect for those — see el_regs.h).
+ * Handles exceptions at the EL the kernel runs at: EL1h on QEMU,
+ * EL2h with VHE on PLATFORM_RASPI5 / PLATFORM_JETSON_ORIN_NANO
+ * (#683). Vector table layout is the same for both — only the
+ * ELR/SPSR register operands differ (no VHE redirect for those —
+ * see el_regs.h).
  */
 
 #include "el_regs.h"

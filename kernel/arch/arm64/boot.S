@@ -368,12 +368,22 @@ real_start:
     msr     hstr_el2, xzr
 
     /*
-     * CNTHCTL_EL2 — bits 0+1 = 3 enables lower-EL access to physical
-     * timer + counter. With E2H=0 (current state) the bits are
-     * EL1PCTEN/EL1PCEN; with E2H=1 (post-flip) the same positions are
-     * EL0PCTEN/EL0PCEN. Value 3 is correct under both interpretations,
-     * so writing it here covers code paths between this write and the
-     * E2H flip below that may read CNTPCT_EL0 or CNTP_*_EL0.
+     * CNTHCTL_EL2 — bits 0+1 = 3. Under E2H=0 (current state) the
+     * bits are EL1PCTEN/EL1PCEN; under E2H=1 (post-flip) the same
+     * positions are EL0PCTEN/EL0PCEN. Value 3 is correct under both
+     * layouts, so the write target is unambiguous.
+     *
+     * EMPIRICAL: this pre-flip write is load-bearing. Removing it
+     * silently wedges pi-5-2 with zero UART output (verified by
+     * bisect during PR #685 review-fix iteration). The post-flip
+     * CNTHCTL_EL2 write further down is NOT sufficient on its own.
+     * Root cause not yet identified — possible candidates: code
+     * between here and the E2H flip implicitly reads CNTPCT_EL0 or
+     * CNTP_*_EL0 (compiler-emitted, runtime-support, or speculative
+     * fetches) at a moment where lower-EL access bits matter; or
+     * Pi 5 firmware self-hosts CNTHCTL_EL2 in a state that needs
+     * to be cleared before the GIC config sequence below. Until
+     * the root cause is pinned, do NOT remove this write.
      */
     mov     x10, #3
     msr     cnthctl_el2, x10
