@@ -12,6 +12,7 @@
 #include "sched_policy.h"
 #include "sched_trace.h"
 #include "gpu_consumer.h"
+#include "gpu_tier.h"
 #include "admin_telemetry.h"
 #if defined(ENABLE_NETWORKING)
 #include "tcp_telemetry_server.h"
@@ -3512,10 +3513,70 @@ static int cmd_gpu_use(int argc, char *argv[])
     return 0;
 }
 
+/* gpu tier <auto|hmma|simt|fp32|cpu>
+ *
+ * Tier preference toggle (#664, tensor-core stage 6). Sibling of
+ * `gpu use` — selects which kernel variant the dispatcher prefers
+ * when multiple are present in the operator library. Setting a tier
+ * while `gpu use inference` is OFF is allowed; the preference is
+ * recorded and surfaces a note in the response.
+ *
+ *   gpu tier              — print status
+ *   gpu tier status       — print status
+ *   gpu tier <name>       — set preference
+ */
+static int cmd_gpu_tier(int argc, char *argv[])
+{
+    if (argc < 3 || strcmp(argv[2], "status") == 0) {
+        struct gpu_tier_status st;
+        gpu_tier_status_get(&st);
+        const char *name = gpu_tier_name(st.tier);
+        shell_puts("GPU tier preference:\r\n");
+        shell_printf("  tier         %s   (last change %lu ms)\r\n",
+                     name ? name : "?",
+                     (unsigned long)st.change_ms);
+        shell_printf("  gpu_ready    %s\r\n", st.gpu_ready ? "yes" : "no");
+        shell_printf("  inference    %s\r\n",
+                     st.inference_enabled ? "ON " : "off");
+        if (st.tier != SLM_GPU_TIER_CPU
+            && st.tier != SLM_GPU_TIER_AUTO
+            && !st.inference_enabled) {
+            shell_puts("           note: tier preference is set but "
+                       "inactive — `gpu use inference on` to enable\r\n");
+        }
+        return 0;
+    }
+
+    uint32_t tier = gpu_tier_from_name(argv[2]);
+    if (tier == SLM_GPU_TIER_INVALID) {
+        shell_printf("gpu tier: unknown tier '%s' "
+                     "(want auto|hmma|simt|fp32|cpu)\r\n",
+                     argv[2]);
+        return -1;
+    }
+
+    const char *reason = NULL;
+    int rc = gpu_tier_set(tier, &reason);
+    if (rc != 0) {
+        shell_printf("gpu tier %s: rejected (%s)\r\n",
+                     argv[2], reason ? reason : "unknown reason");
+        return rc;
+    }
+
+    shell_printf("gpu tier: %s\r\n", gpu_tier_name(tier));
+    if (reason) {
+        shell_printf("           note: %s\r\n", reason);
+    }
+    return 0;
+}
+
 int cmd_gpu(int argc, char *argv[])
 {
     if (argc >= 2 && strcmp(argv[1], "use") == 0) {
         return cmd_gpu_use(argc, argv);
+    }
+    if (argc >= 2 && strcmp(argv[1], "tier") == 0) {
+        return cmd_gpu_tier(argc, argv);
     }
 
     if (argc >= 2 && strcmp(argv[1], "debug") == 0) {
