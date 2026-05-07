@@ -1922,7 +1922,9 @@ static void diag_print_gic_runtime(void)
             shell_printf("0x%08x ", gicc_aprn[i]);
         }
         uint32_t any_set = 0;
-        for (uint32_t i = 0; i < 4; i++) any_set |= gicc_aprn[i];
+        for (uint32_t i = 0; i < 4; i++) {
+            any_set |= gicc_aprn[i];
+        }
         shell_printf(" %s\r\n",
                     any_set ? "← stale active priority — CPU interface "
                               "would block lower IRQs"
