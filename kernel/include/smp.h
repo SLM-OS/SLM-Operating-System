@@ -152,9 +152,12 @@ int psci_cpu_on(uint64_t target_mpidr, uintptr_t entry_point,
 /*
  * Record / read the calling CPU's CurrentEL at boot. Used to verify
  * every CPU landed at the expected EL (#683 PR-3 — EL2h+VHE on Pi 5
- * and Jetson, EL1h on QEMU). Returns 0xFFFFFFFF if the slot was not
- * recorded (e.g. NC alloc failed).
+ * and Jetson, EL1h on QEMU). Returns CPU_EL_NOT_RECORDED if the slot
+ * was not recorded (e.g. NC alloc failed, or the CPU never reached
+ * secondary_init / smp_init). Real CurrentEL values fit in 4 bits
+ * (0/4/8/0xC), so the sentinel cannot collide with a valid reading.
  */
+#define CPU_EL_NOT_RECORDED  0xFFFFFFFFUL
 void cpu_record_current_el(uint32_t cpu);
 uint64_t cpu_get_current_el(uint32_t cpu);
 

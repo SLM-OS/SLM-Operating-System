@@ -78,10 +78,10 @@ void cpu_record_current_el(uint32_t cpu)
 uint64_t cpu_get_current_el(uint32_t cpu)
 {
     if (cpu >= MAX_CPUS) {
-        return 0xFFFFFFFFUL;
+        return CPU_EL_NOT_RECORDED;
     }
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    return nc_cpu_current_el ? nc_cpu_current_el[cpu] : 0xFFFFFFFFUL;
+    return nc_cpu_current_el ? nc_cpu_current_el[cpu] : CPU_EL_NOT_RECORDED;
 #else
     return cpu_current_el_fallback[cpu];
 #endif
@@ -255,12 +255,12 @@ static void init_cpu_map(void)
     nc_cpu_current_el = ncmem_alloc(MAX_CPUS * sizeof(uint64_t), 64);
     for (int i = 0; i < MAX_CPUS; i++) {
         if (nc_cpu_current_el) {
-            nc_cpu_current_el[i] = 0xFFFFFFFFUL;  /* sentinel: not yet recorded */
+            nc_cpu_current_el[i] = CPU_EL_NOT_RECORDED;
         }
     }
 #else
     for (int i = 0; i < MAX_CPUS; i++) {
-        cpu_current_el_fallback[i] = 0xFFFFFFFFUL;
+        cpu_current_el_fallback[i] = CPU_EL_NOT_RECORDED;
     }
 #endif
 

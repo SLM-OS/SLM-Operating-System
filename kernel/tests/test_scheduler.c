@@ -2599,6 +2599,42 @@ static void test_cpu_logical_map_encoding(void)
 }
 
 /*
+ * Test: cpu_record_current_el / cpu_get_current_el round-trip + bounds.
+ * Smoke-tests the per-CPU EL diagnostic API (#683 PR-3) — by the time
+ * the test suite runs, smp_init has already recorded CPU 0's EL into
+ * the per-CPU NC slot, so cpu_get_current_el(0) must return a real
+ * CurrentEL value (one of 4/8/0xC depending on platform), never the
+ * sentinel.
+ */
+static void test_cpu_current_el_recorded(void)
+{
+    /* CPU 0 must have its EL recorded by smp_init — non-sentinel. */
+    uint64_t cpu0_el = cpu_get_current_el(0);
+    TEST_ASSERT_TRUE(cpu0_el != CPU_EL_NOT_RECORDED);
+
+    /* Decode bits [3:2] — must be a valid EL number 0..3 (0xC = EL2,
+     * 4 = EL1, etc). Anything outside this range means we read garbage. */
+    unsigned el = (unsigned)((cpu0_el >> 2) & 0x3);
+    TEST_ASSERT_TRUE(el <= 3);
+
+    /* Out-of-range CPU id returns the sentinel — exercises the bounds
+     * check in cpu_get_current_el. Using MAX_CPUS deliberately. */
+    TEST_ASSERT_EQUAL_HEX64(CPU_EL_NOT_RECORDED, cpu_get_current_el(MAX_CPUS));
+    TEST_ASSERT_EQUAL_HEX64(CPU_EL_NOT_RECORDED, cpu_get_current_el(0xFFFFFFFF));
+
+    /* Re-record CPU 0 — should be idempotent (same CurrentEL). */
+    uint64_t before = cpu_get_current_el(0);
+    cpu_record_current_el(0);
+    TEST_ASSERT_EQUAL_HEX64(before, cpu_get_current_el(0));
+
+    /* cpu_record_current_el(MAX_CPUS) is a no-op — must not corrupt
+     * adjacent slots or panic. */
+    cpu_record_current_el(MAX_CPUS);
+    cpu_record_current_el(0xFFFFFFFF);
+    TEST_ASSERT_EQUAL_HEX64(before, cpu_get_current_el(0));
+}
+
+/*
  * Test: secondary_mmu_ttbr is set after VMM init (used by secondary CPUs).
  */
 static void test_secondary_mmu_ttbr_set(void)
@@ -4998,6 +5034,7 @@ int test_suite_scheduler(void)
 
     /* SMP: MPIDR encoding and secondary MMU */
     RUN_TEST(test_cpu_logical_map_encoding);
+    RUN_TEST(test_cpu_current_el_recorded);
     RUN_TEST(test_secondary_mmu_ttbr_set);
 
     /* SMP: multi-core online verification */

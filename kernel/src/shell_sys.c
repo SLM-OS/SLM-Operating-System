@@ -327,10 +327,15 @@ int cmd_cpu(int argc, char *argv[])
 
         /* Decode CurrentEL value captured at boot. CurrentEL bits
          * [3:2] hold the EL number; values 0/4/8/C correspond to
-         * EL0/EL1/EL2/EL3. EL2 + HCR_EL2.E2H=1 still reports 0xC. */
+         * EL0/EL1/EL2/EL3. EL2 + HCR_EL2.E2H=1 still reports 0xC.
+         *
+         * VHE is a kernel-wide design choice on platforms that hit
+         * EL2 (Pi 5, Jetson per #683); the boot banner annotates
+         * "(VHE)" once for CPU 0 — this column reports EL only and
+         * doesn't repeat the annotation per row. */
         uint64_t cur_el_raw = cpu_get_current_el(i);
         char el_text[8];
-        if (cur_el_raw == 0xFFFFFFFFUL) {
+        if (cur_el_raw == CPU_EL_NOT_RECORDED) {
             el_text[0] = '-'; el_text[1] = '\0';
         } else {
             unsigned el = (unsigned)((cur_el_raw >> 2) & 0x3);

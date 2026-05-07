@@ -484,6 +484,25 @@ int psci_cpu_on(uint64_t target_mpidr, uintptr_t entry_point, uintptr_t context_
     return -1;  /* x86-64 uses INIT-SIPI, not PSCI */
 }
 
+/*
+ * Per-CPU "EL" capture stubs. The cpu_record / cpu_get_current_el API
+ * is ARM-flavored (#683 PR-3); on x86-64 there is no exception level
+ * concept, so the slot remains the sentinel and the `cpu` shell
+ * command renders '-' in the EL column. Defined here so cmd_cpu's
+ * call site links cleanly on x86-64; the real implementations live
+ * in kernel/sched/smp.c (ARM64 only).
+ */
+void cpu_record_current_el(uint32_t cpu)
+{
+    (void)cpu;
+}
+
+uint64_t cpu_get_current_el(uint32_t cpu)
+{
+    (void)cpu;
+    return CPU_EL_NOT_RECORDED;
+}
+
 void psci_cpu_off(void)
 {
     __asm__ volatile("cli; hlt");
