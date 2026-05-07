@@ -5720,6 +5720,60 @@ int cmd_irqtest(int argc, char *argv[])
 {
     (void)argc; (void)argv;
 
+    /*
+     * SCR_EL3 sentinel readout (#134 Stage 2.5+). Always runs first,
+     * before any DAIF manipulation, so it's safe under every path
+     * (`irqtest`, `irqtest noirq`, `irqtest fiq`). Tells the operator:
+     *   - Did our TF-A `setup_ns_context` PLAT_RPI5 patch run?
+     *   - What scr_el3 value did it write to the NS-context buffer?
+     *   - Did `cm_prepare_el3_exit_ns` see the same value just before
+     *     the assembly `el3_exit` loaded it?
+     *
+     * If sentinel magic words are missing, the patched TF-A isn't
+     * loaded (deploy regression — armstub8-2712.bin is stock or
+     * absent). If sentinel A's value has bits 1/2 set, our clear
+     * isn't taking effect. If B differs from A, an override path
+     * runs between them.
+     */
+    {
+        uint32_t a_magic = *(volatile uint32_t *)DIAG_SCR_SENTINEL_A_MAGIC;
+        uint64_t a_val   = *(volatile uint64_t *)DIAG_SCR_SENTINEL_A_VAL;
+        uint32_t b_magic = *(volatile uint32_t *)DIAG_SCR_SENTINEL_B_MAGIC;
+        uint64_t b_val   = *(volatile uint64_t *)DIAG_SCR_SENTINEL_B_VAL;
+
+        shell_puts("\r\n--- SCR_EL3 sentinels (TF-A debug) ---\r\n");
+        shell_printf("  Sentinel A (setup_ns_context):     magic=0x%08x %s\r\n",
+                    a_magic,
+                    a_magic == DIAG_SCR_SENTINEL_A_EXPECTED_MAGIC
+                        ? "OK" : "MISSING — patched TF-A not loaded?");
+        if (a_magic == DIAG_SCR_SENTINEL_A_EXPECTED_MAGIC) {
+            shell_printf("                                     scr_el3=0x%lx (IRQ=%lu FIQ=%lu)\r\n",
+                        (unsigned long)a_val,
+                        (unsigned long)((a_val >> 1) & 1),
+                        (unsigned long)((a_val >> 2) & 1));
+        }
+        shell_printf("  Sentinel B (cm_prepare_el3_exit_ns): magic=0x%08x %s\r\n",
+                    b_magic,
+                    b_magic == DIAG_SCR_SENTINEL_B_EXPECTED_MAGIC
+                        ? "OK" : "MISSING — patched TF-A not loaded?");
+        if (b_magic == DIAG_SCR_SENTINEL_B_EXPECTED_MAGIC) {
+            shell_printf("                                     scr_el3=0x%lx (IRQ=%lu FIQ=%lu)\r\n",
+                        (unsigned long)b_val,
+                        (unsigned long)((b_val >> 1) & 1),
+                        (unsigned long)((b_val >> 2) & 1));
+        }
+        if (a_magic == DIAG_SCR_SENTINEL_A_EXPECTED_MAGIC &&
+            b_magic == DIAG_SCR_SENTINEL_B_EXPECTED_MAGIC) {
+            if (a_val == b_val) {
+                shell_puts("  Verdict: A == B → no override between setup_ns_context and el3_exit.\r\n");
+            } else {
+                shell_printf("  Verdict: A != B → SOMETHING OVERRODE SCR_EL3 (delta=0x%lx).\r\n",
+                            (unsigned long)(a_val ^ b_val));
+            }
+        }
+        shell_puts("\r\n");
+    }
+
     /* Header via direct UART writes only. */
     irqtest_puts("\r\nirqtest probe:");
 

@@ -67,6 +67,32 @@ struct diag_vec_counts {
 #define DIAG_FIQ_TRACE      (NC_MEM_BASE + 0xFFE0UL)
 
 /*
+ * SCR_EL3 sentinels written by our patched TF-A (issue #134 Stage 2.5+
+ * debug). Two writers that bracket the NS-context lifetime — see
+ * tools/tfa-patches/0001-SLM-OS-Pi-5-IRQ-routing-patches.patch.
+ *
+ *   Sentinel A: setup_ns_context — magic + post-clear scr_el3
+ *   Sentinel B: cm_prepare_el3_exit_ns — magic + scr_el3 read from
+ *               the NS context just before the assembly el3_exit
+ *               loads it via `msr scr_el3, x18`.
+ *
+ * If A's magic is present and its scr_el3 has bits 1 (IRQ) and 2
+ * (FIQ) clear, our patch ran and set the right value in the buffer.
+ * If B's magic is present and B's scr_el3 == A's scr_el3, no later
+ * code overrode our clear. If B differs, something between
+ * setup_ns_context and el3_exit re-wrote the per-context SCR_EL3.
+ *
+ * Slots live in NC memory so the kernel's NC mapping reads them
+ * directly from DRAM (TF-A's writes are dc cvac'd to PoC).
+ */
+#define DIAG_SCR_SENTINEL_A_MAGIC  (NC_MEM_BASE + 0xFEC0UL)
+#define DIAG_SCR_SENTINEL_A_VAL    (NC_MEM_BASE + 0xFEC8UL)
+#define DIAG_SCR_SENTINEL_B_MAGIC  (NC_MEM_BASE + 0xFED0UL)
+#define DIAG_SCR_SENTINEL_B_VAL    (NC_MEM_BASE + 0xFED8UL)
+#define DIAG_SCR_SENTINEL_A_EXPECTED_MAGIC  0xCAFE0001U
+#define DIAG_SCR_SENTINEL_B_EXPECTED_MAGIC  0xCAFE0002U
+
+/*
  * ICC_SRE_EL2 snapshots (issue #99 root-cause probe).
  *
  * Pi 5 has GIC-400 (GICv2 only) but Cortex-A76 supports the GICv3

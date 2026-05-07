@@ -1,7 +1,7 @@
-From 613a96e07539e644a12e7230879650529f1558db Mon Sep 17 00:00:00 2001
+From 87d118ae791ca9843a23d788a6a774b96665dbe5 Mon Sep 17 00:00:00 2001
 From: John Jezl <john@jezl.com>
 Date: Wed, 6 May 2026 00:29:57 -0700
-Subject: [PATCH] SLM-OS Pi 5 IRQ routing patches
+Subject: [PATCH 1/2] SLM-OS Pi 5 IRQ routing patches
 
 ---
  lib/el3_runtime/aarch64/context_mgmt.c | 18 ++++++
@@ -10,7 +10,7 @@ Subject: [PATCH] SLM-OS Pi 5 IRQ routing patches
  3 files changed, 104 insertions(+), 1 deletion(-)
 
 diff --git a/lib/el3_runtime/aarch64/context_mgmt.c b/lib/el3_runtime/aarch64/context_mgmt.c
-index 7e3a2e5..e37bba4 100644
+index 7e3a2e588..e37bba41b 100644
 --- a/lib/el3_runtime/aarch64/context_mgmt.c
 +++ b/lib/el3_runtime/aarch64/context_mgmt.c
 @@ -376,6 +376,24 @@ static void setup_ns_context(cpu_context_t *ctx, const struct entry_point_info *
@@ -39,7 +39,7 @@ index 7e3a2e5..e37bba4 100644
  
  	if (is_feat_the_supported()) {
 diff --git a/plat/rpi/rpi5/platform.mk b/plat/rpi/rpi5/platform.mk
-index 2403c86..801e38f 100644
+index 2403c86cb..801e38fe8 100644
 --- a/plat/rpi/rpi5/platform.mk
 +++ b/plat/rpi/rpi5/platform.mk
 @@ -94,6 +94,10 @@ SMC_PCI_SUPPORT			:= 0
@@ -54,7 +54,7 @@ index 2403c86..801e38f 100644
  $(eval $(call add_define,RPI3_PRELOADED_DTB_BASE))
  endif
 diff --git a/plat/rpi/rpi5/rpi5_setup.c b/plat/rpi/rpi5/rpi5_setup.c
-index de82300..99cbc37 100644
+index de82300de..99cbc3735 100644
 --- a/plat/rpi/rpi5/rpi5_setup.c
 +++ b/plat/rpi/rpi5/rpi5_setup.c
 @@ -1,12 +1,93 @@
