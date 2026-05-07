@@ -79,9 +79,10 @@
 
 using namespace nvcuda;
 
-constexpr int TILE_M = 16;
-constexpr int TILE_N = 16;
-constexpr int TILE_K = 16;
+constexpr int TILE_M    = 16;
+constexpr int TILE_N    = 16;
+constexpr int TILE_K    = 16;
+constexpr int WARP_SIZE = 32;          /* one warp per CTA, lane = 0..31 */
 
 __global__ void conv2d_hmma_fp16(const half *X, const half *W, float *Y,
                                  int N_batch, int C_in, int H_in, int W_in,
@@ -119,7 +120,7 @@ __global__ void conv2d_hmma_fp16(const half *X, const half *W, float *Y,
          * (m_local, k_local) = W[tile_m + m_local, k_base + k_local].
          * W is stored [K_out, C_in·R·S] = contiguous reshape of
          * W[K_out, C_in, R, S], so the index is just a linear read. */
-        for (int i = lane; i < TILE_M * TILE_K; i += 32) {
+        for (int i = lane; i < TILE_M * TILE_K; i += WARP_SIZE) {
             const int m_local = i / TILE_K;
             const int k_local = i % TILE_K;
             const int m = tile_m + m_local;
@@ -142,7 +143,7 @@ __global__ void conv2d_hmma_fp16(const half *X, const half *W, float *Y,
          * storage and produced wrong outputs on every 3×3 shape.)
          *
          * Out-of-bounds (h_in, w_in) → 0 (zero padding). */
-        for (int i = lane; i < TILE_K * TILE_N; i += 32) {
+        for (int i = lane; i < TILE_K * TILE_N; i += WARP_SIZE) {
             const int n_local = i / TILE_K;
             const int k_local = i % TILE_K;
             const int n = tile_n + n_local;
@@ -193,7 +194,7 @@ __global__ void conv2d_hmma_fp16(const half *X, const half *W, float *Y,
     wmma::store_matrix_sync(c_smem, c_frag, TILE_N, wmma::mem_row_major);
     __syncthreads();
 
-    for (int i = lane; i < TILE_M * TILE_N; i += 32) {
+    for (int i = lane; i < TILE_M * TILE_N; i += WARP_SIZE) {
         const int m_local = i / TILE_N;
         const int n_local = i % TILE_N;
         const int m = tile_m + m_local;
@@ -216,6 +217,28 @@ __global__ void conv2d_hmma_fp16(const half *X, const half *W, float *Y,
 
 /* --- Host harness --- */
 
+/* Harness exit codes — same scheme as scripts/cuda/gemm_hmma_fp16.cu so a
+ * future CI wrapper can keyed on identical numbers across both kernels. */
+#define HARNESS_RC_OK              0
+#define HARNESS_RC_OOM             1
+#define HARNESS_RC_LAUNCH_FAIL     2  /* cudaGetLastError after <<<...>>> */
+#define HARNESS_RC_RUN_FAIL        3  /* error during cudaDeviceSynchronize */
+#define HARNESS_RC_MISMATCH        5  /* result above tolerance */
+
+/* Bail loudly on the first CUDA error so launch / sync failures surface
+ * with a distinct HARNESS_RC_* instead of being mis-attributed by a
+ * comparison loop reading uninitialized device memory. */
+#define CUDA_OK_OR(rc, label)                                                  \
+    do {                                                                       \
+        cudaError_t _e = cudaGetLastError();                                   \
+        if (_e != cudaSuccess) {                                               \
+            fprintf(stderr, "%s:%d: cuda error: %s\n",                         \
+                    __FILE__, __LINE__, cudaGetErrorString(_e));               \
+            ret = (rc);                                                        \
+            goto label;                                                        \
+        }                                                                      \
+    } while (0)
+
 static void fill_random(half *buf, size_t n, uint32_t *seed)
 {
     for (size_t i = 0; i < n; i++) {
@@ -229,7 +252,7 @@ static void fill_random(half *buf, size_t n, uint32_t *seed)
  * with FP16 inputs cast on each multiply, mirroring the HMMA
  * accumulator. */
 static void cpu_reference(const half *X, const half *W, float *Y,
-                          int N_batch, int C_in, int H_in, int W_in_,
+                          int N_batch, int C_in, int H_in, int W_in,
                           int K_out,   int R,    int S,
                           int H_out,   int W_out,
                           int pad,     int stride)
@@ -245,10 +268,12 @@ static void cpu_reference(const half *X, const half *W, float *Y,
                                 int hi = h * stride + r - pad;
                                 int wi = w * stride + sx - pad;
                                 if (hi < 0 || hi >= H_in
-                                 || wi < 0 || wi >= W_in_) continue;
+                                 || wi < 0 || wi >= W_in) {
+                                    continue;
+                                }
                                 long long xi = ((long long)nb * C_in + c)
-                                             * H_in * W_in_
-                                             + (long long)hi * W_in_ + wi;
+                                             * H_in * W_in
+                                             + (long long)hi * W_in + wi;
                                 long long wi_ = ((long long)k * C_in + c)
                                               * R * S
                                               + (long long)r * S + sx;
@@ -267,13 +292,13 @@ static void cpu_reference(const half *X, const half *W, float *Y,
     }
 }
 
-static int run_one(int N_batch, int C_in, int H_in, int W_in_,
+static int run_one(int N_batch, int C_in, int H_in, int W_in,
                    int K_out,   int R,    int S,
                    int pad,     int stride,
                    bool verbose)
 {
     const int H_out = (H_in + 2 * pad - R) / stride + 1;
-    const int W_out = (W_in_ + 2 * pad - S) / stride + 1;
+    const int W_out = (W_in + 2 * pad - S) / stride + 1;
 
     const int M_gemm = K_out;
     const int K_gemm = C_in * R * S;
@@ -283,91 +308,119 @@ static int run_one(int N_batch, int C_in, int H_in, int W_in_,
         fprintf(stderr,
                 "[N=%d C=%d %dx%d K=%d %dx%d pad=%d stride=%d "
                 "→ M=%d K=%d N=%d] SKIPPED (not tile-aligned).\n",
-                N_batch, C_in, H_in, W_in_, K_out, R, S, pad, stride,
+                N_batch, C_in, H_in, W_in, K_out, R, S, pad, stride,
                 M_gemm, K_gemm, N_gemm);
-        return 0;
+        return HARNESS_RC_OK;
     }
 
-    size_t x_n = (size_t)N_batch * C_in * H_in * W_in_;
+    size_t x_n = (size_t)N_batch * C_in * H_in * W_in;
     size_t w_n = (size_t)K_out * C_in * R * S;
     size_t y_n = (size_t)N_batch * K_out * H_out * W_out;
 
-    half  *h_x = (half  *)malloc(x_n * sizeof(half));
-    half  *h_w = (half  *)malloc(w_n * sizeof(half));
+    int    ret   = HARNESS_RC_OK;
+    half  *h_x   = (half  *)malloc(x_n * sizeof(half));
+    half  *h_w   = (half  *)malloc(w_n * sizeof(half));
     float *h_gpu = (float *)malloc(y_n * sizeof(float));
     float *h_ref = (float *)malloc(y_n * sizeof(float));
+    half  *d_x   = nullptr;
+    half  *d_w   = nullptr;
+    float *d_y   = nullptr;
+    if (!h_x || !h_w || !h_gpu || !h_ref) {
+        fprintf(stderr, "oom\n");
+        ret = HARNESS_RC_OOM;
+        goto cleanup;
+    }
 
-    uint32_t seed = 0x9E3779B9u
-                  ^ (uint32_t)(C_in * 31 + K_out * 17 + R * 11 + pad * 7 + stride);
-    fill_random(h_x, x_n, &seed);
-    fill_random(h_w, w_n, &seed);
+    /* Scoped block: see the matching note in gemm_hmma_fp16.cu —
+     * goto cleanup must not cross initializer-bearing locals. */
+    {
+        uint32_t seed = 0x9E3779B9u
+                      ^ (uint32_t)(C_in * 31 + K_out * 17
+                                   + R * 11 + pad * 7 + stride);
+        fill_random(h_x, x_n, &seed);
+        fill_random(h_w, w_n, &seed);
+    }
 
     cpu_reference(h_x, h_w, h_ref,
-                  N_batch, C_in, H_in, W_in_,
+                  N_batch, C_in, H_in, W_in,
                   K_out, R, S, H_out, W_out,
                   pad, stride);
 
-    half  *d_x; cudaMalloc(&d_x, x_n * sizeof(half));
-    half  *d_w; cudaMalloc(&d_w, w_n * sizeof(half));
-    float *d_y; cudaMalloc(&d_y, y_n * sizeof(float));
+    cudaMalloc(&d_x, x_n * sizeof(half));
+    cudaMalloc(&d_w, w_n * sizeof(half));
+    cudaMalloc(&d_y, y_n * sizeof(float));
+    /* Catch device-side OOM here so it surfaces as HARNESS_RC_OOM
+     * rather than being mis-attributed to the kernel launch below. */
+    CUDA_OK_OR(HARNESS_RC_OOM, cleanup);
     cudaMemcpy(d_x, h_x, x_n * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_w, h_w, w_n * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemset(d_y, 0, y_n * sizeof(float));
 
-    dim3 block(32, 1, 1);
-    dim3 grid(N_gemm / TILE_N, M_gemm / TILE_M, 1);
-    conv2d_hmma_fp16<<<grid, block>>>(d_x, d_w, d_y,
-                                       N_batch, C_in, H_in, W_in_,
-                                       K_out, R, S, H_out, W_out,
-                                       pad, stride);
-    cudaError_t kerr = cudaGetLastError();
-    if (kerr != cudaSuccess) {
-        fprintf(stderr, "kernel launch failed: %s\n", cudaGetErrorString(kerr));
-        return 2;
+    {
+        dim3 block(WARP_SIZE, 1, 1);
+        dim3 grid(N_gemm / TILE_N, M_gemm / TILE_M, 1);
+        conv2d_hmma_fp16<<<grid, block>>>(d_x, d_w, d_y,
+                                          N_batch, C_in, H_in, W_in,
+                                          K_out, R, S, H_out, W_out,
+                                          pad, stride);
     }
+    CUDA_OK_OR(HARNESS_RC_LAUNCH_FAIL, cleanup);
     cudaDeviceSynchronize();
-    kerr = cudaGetLastError();
-    if (kerr != cudaSuccess) {
-        fprintf(stderr, "kernel run failed: %s\n", cudaGetErrorString(kerr));
-        return 3;
-    }
+    CUDA_OK_OR(HARNESS_RC_RUN_FAIL, cleanup);
 
     cudaMemcpy(h_gpu, d_y, y_n * sizeof(float), cudaMemcpyDeviceToHost);
 
-    int ok = 1;
-    float worst_err = 0.0f;
-    for (size_t i = 0; i < y_n; i++) {
-        float err = h_gpu[i] - h_ref[i];
-        if (err < 0) err = -err;
-        if (err > worst_err) worst_err = err;
-        if (err > 1e-2f) {
-            if (ok) {
-                fprintf(stderr,
-                        "[%dx%dx%dx%d K%d %dx%d pad%d s%d] MISMATCH "
-                        "Y[%zu] gpu=%f ref=%f err=%f\n",
-                        N_batch, C_in, H_in, W_in_, K_out, R, S, pad, stride,
-                        i, (double)h_gpu[i], (double)h_ref[i],
-                        (double)err);
+    /* Tolerance: see scripts/cuda/gemm_hmma_fp16.cu for the derivation
+     * — HMMA accumulates FP32 from FP16 operands, per-multiply error
+     * is ~FP16 ULP (~5e-4 near 1.0), and across K accumulations it
+     * grows ~sqrt(K). For the largest case here (K_gemm = 288), 1e-2
+     * abs is comfortably above the noise floor without masking real
+     * bugs. */
+    {
+        int ok = 1;
+        float worst_err = 0.0f;
+        for (size_t i = 0; i < y_n; i++) {
+            float err = h_gpu[i] - h_ref[i];
+            if (err < 0) err = -err;
+            if (err > worst_err) worst_err = err;
+            if (err > 1e-2f) {
+                if (ok) {
+                    fprintf(stderr,
+                            "[%dx%dx%dx%d K%d %dx%d pad%d s%d] MISMATCH "
+                            "Y[%zu] gpu=%f ref=%f err=%f\n",
+                            N_batch, C_in, H_in, W_in, K_out, R, S, pad,
+                            stride, i, (double)h_gpu[i], (double)h_ref[i],
+                            (double)err);
+                }
+                ok = 0;
             }
-            ok = 0;
+        }
+
+        if (ok) {
+            printf("[N=%d C=%d %dx%d K=%d %dx%d pad=%d s=%d "
+                   "→ M=%d K=%d N=%d] OK (worst err %.6e)\n",
+                   N_batch, C_in, H_in, W_in, K_out, R, S, pad, stride,
+                   M_gemm, K_gemm, N_gemm, (double)worst_err);
+            if (verbose && y_n >= 4) {
+                printf("    sample: Y[0]=%f ref=%f, Y[%zu]=%f ref=%f\n",
+                       (double)h_gpu[0], (double)h_ref[0],
+                       y_n - 1, (double)h_gpu[y_n - 1],
+                       (double)h_ref[y_n - 1]);
+            }
+        } else {
+            ret = HARNESS_RC_MISMATCH;
         }
     }
 
-    if (ok) {
-        printf("[N=%d C=%d %dx%d K=%d %dx%d pad=%d s=%d "
-               "→ M=%d K=%d N=%d] OK (worst err %.6e)\n",
-               N_batch, C_in, H_in, W_in_, K_out, R, S, pad, stride,
-               M_gemm, K_gemm, N_gemm, (double)worst_err);
-        if (verbose && y_n >= 4) {
-            printf("    sample: Y[0]=%f ref=%f, Y[%zu]=%f ref=%f\n",
-                   (double)h_gpu[0], (double)h_ref[0],
-                   y_n - 1, (double)h_gpu[y_n - 1], (double)h_ref[y_n - 1]);
-        }
-    }
-
-    free(h_x); free(h_w); free(h_gpu); free(h_ref);
-    cudaFree(d_x); cudaFree(d_w); cudaFree(d_y);
-    return ok ? 0 : 5;
+cleanup:
+    free(h_x);
+    free(h_w);
+    free(h_gpu);
+    free(h_ref);
+    if (d_x) cudaFree(d_x);
+    if (d_w) cudaFree(d_w);
+    if (d_y) cudaFree(d_y);
+    return ret;
 }
 
 int main(int argc, char **argv)
