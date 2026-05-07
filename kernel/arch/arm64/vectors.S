@@ -219,6 +219,7 @@ exception_vectors:
  * Hang - unhandled exceptions
  */
 hang:
+    STAGE25_TRACE_CHAR 'h'              /* Trace: hang vector reached (#672 probe) */
     wfi
     b       hang
 
@@ -236,6 +237,7 @@ el1_serror_sp0:
  * Could be: SVC, data abort, instruction abort, etc.
  */
 el1_sync:
+    STAGE25_TRACE_CHAR 'S'              /* Trace: sync exception (#672 probe) */
     DIAG_BUMP_VEC 0x00
     save_regs
     mov     x0, sp              /* Pass trap frame pointer */
@@ -278,6 +280,7 @@ el1_irq:
  * records the IRQ number, then EOIs.
  */
 el1_fiq:
+    STAGE25_TRACE_CHAR 'F'              /* Trace: FIQ entered (#672 probe) */
     DIAG_BUMP_VEC 0x10
     save_regs
     mov     x0, sp
@@ -297,6 +300,7 @@ el1_fiq:
  * EL1 SError (kernel)
  */
 el1_serror:
+    STAGE25_TRACE_CHAR 'X'              /* Trace: SError (#672 probe) */
     DIAG_BUMP_VEC 0x18
     save_regs
     mov     x0, sp

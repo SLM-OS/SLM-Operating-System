@@ -765,8 +765,24 @@
 #define GIC_DIST_BASE       0x107FFF9000UL  /* GIC_BASE + 0x1000 */
 #define GIC_CPU_BASE        0x107FFFA000UL  /* GIC_BASE + 0x2000 */
 
-/* Timer - ARM Generic Timer */
-#define TIMER_IRQ           30              /* PPI 14 (CNTV_EL0) */
+/* Timer - ARM Generic Timer.
+ *
+ * #672 / #134: Pi 5's GIC-400 + BCM2712 firmware does NOT route the
+ * NS-EL1 physical timer (PPI 30) usefully — the IRQ pin asserts but
+ * the CPU never enters the IRQ vector at NS-EL1, and any `daifclr`
+ * with the pin asserted hard-locks the core. Linux on Pi 5 doesn't
+ * hit this because it boots into EL2 with VHE and uses PPI 26 (Hyp
+ * Physical Timer) via `arch_timer_select_ppi()`'s first branch — the
+ * NS-EL1 PPI 30 path is silicon Linux never exercises.
+ *
+ * Switching the SLM-OS timer to PPI 27 (the NS Virtual Timer, CNTV_*)
+ * — Linux's HYP-not-available fallback — is the EL1-stays-EL1 fix.
+ * CNTV is accessible at EL1 by default (no CNTHCTL_EL2 bit needed for
+ * EL1 access), and CNTVOFF_EL2 is left at the reset value of 0 by
+ * boot.S so virtual time tracks physical time exactly.
+ */
+#define TIMER_IRQ           27              /* PPI 11 (CNTV_EL0) */
+#define PLATFORM_TIMER_USES_VIRTUAL  1      /* timer.c switches CNTP_*→CNTV_* */
 
 /* CPU configuration */
 #define CPU_MAX             4               /* 4x Cortex-A76 */

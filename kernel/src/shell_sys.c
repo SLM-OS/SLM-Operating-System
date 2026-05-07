@@ -1771,7 +1771,7 @@ static void diag_print_el2(void)
                 (s->gicd_igroupr0_post == 0xFFFFFFFFul)
                     ? "(writes held)"
                     : (s->gicd_igroupr0_post == 0ul)
-                          ? "(writes SILENTLY DISCARDED — FIQ hypothesis likely)"
+                          ? "(NS RAZ when GICD_CTLR.DS=0 — see Sentinel C for actual config)"
                           : "(partial)");
 
     /*
@@ -1791,13 +1791,21 @@ static void diag_print_el2(void)
                     c_magic == DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC
                         ? "OK" : "MISSING");
         if (c_magic == DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC) {
+            /* Sentinel C captures TF-A's secure readback of IGROUPR[0]
+             * after writing 0xFFFFFFFF. Both candidate timer PPIs
+             * (CNTV=27 banked, CNTP=30) must end up in Group 1 NS — bits
+             * 16-23 / 24 are RES0 on GIC-400 (unimplemented PPIs) so
+             * they read back zero even when the write was accepted.
+             * This invariant is independent of which PPI the runtime
+             * timer driver picks via TIMER_IRQ. */
+            uint32_t timer_ppis = (1u << 27) | (1u << 30);
             shell_printf("    TF-A view  IGROUPR[0]: pre=0x%08lx post=0x%08lx  %s\r\n",
                         (unsigned long)c_pre, (unsigned long)c_post,
                         (c_post == 0xFFFFFFFFul)
-                            ? "(persistent at EL3 — kernel side cleared it)"
-                            : (c_post == c_pre)
-                                  ? "(write DISCARDED at GIC level)"
-                                  : "(partial)");
+                            ? "(write fully held — all PPIs Group 1 NS)"
+                            : ((c_post & timer_ppis) == timer_ppis)
+                                  ? "(timer PPIs 27+30 in Group 1 NS; bits 16-23/24 RES0 on GIC-400)"
+                                  : "(partial — at least one timer PPI NOT in Group 1 NS)");
             shell_printf("    TF-A view  GICD_CTLR : 0x%08lx\r\n",
                         (unsigned long)c_ctlr);
         }
@@ -5890,6 +5898,24 @@ int cmd_timdiag(int argc, char *argv[])
 #define IRQTEST_UART_DR  0x1f00030000ULL
 #define IRQTEST_UART_FR  0x1f00030018ULL  /* PL011 Flag Register */
 #define IRQTEST_FR_TXFF  (1u << 5)        /* Transmit FIFO full */
+#define IRQTEST_FR_TXFE  (1u << 7)        /* Transmit FIFO empty */
+#define IRQTEST_FR_BUSY  (1u << 3)        /* UART busy transmitting */
+
+/* Spin until FIFO is fully empty AND UART finished shifting the last
+ * char on the wire. Bounded ~10 ms timeout. Used to make the next raw
+ * write GUARANTEED to fit in the FIFO so we can pin down whether code
+ * after daifclr executes or not. */
+static inline void irqtest_fifo_drain(void)
+{
+    int t = 10000000;  /* ~6 ms at 1.5 GHz including MMIO latency */
+    while (t-- > 0) {
+        uint32_t fr = *(volatile uint32_t *)IRQTEST_UART_FR;
+        if ((fr & IRQTEST_FR_TXFE) && !(fr & IRQTEST_FR_BUSY)) {
+            break;
+        }
+        __asm__ volatile("" ::: "memory");
+    }
+}
 static inline void irqtest_putc(char c)
 {
     /* Wait for room in TX FIFO with a short timeout (so we cannot
@@ -5904,10 +5930,105 @@ static inline void irqtest_putc(char c)
     }
     *(volatile uint32_t *)IRQTEST_UART_DR = (uint32_t)(unsigned char)c;
 }
+
+/* Raw UART write — no FIFO check, no lock, no driver. Identical to
+ * vectors.S:STAGE25_TRACE_CHAR. Drops the char silently if the FIFO
+ * is full, but never blocks execution. Used for tight probe points
+ * around `daifclr` where we need to know "did execution reach this
+ * line" rather than "did the char definitely make it on the wire". */
+#define IRQTEST_RAW_PUTC(ch) do {                                     \
+    __asm__ volatile(                                                 \
+        "movz x16, #0x0000\n\t"                                       \
+        "movk x16, #0x0003, lsl #16\n\t"                              \
+        "movk x16, #0x001f, lsl #32\n\t"                              \
+        "mov  w17, %w0\n\t"                                           \
+        "str  w17, [x16]\n\t"                                         \
+        :: "r"((uint32_t)(unsigned char)(ch)) : "x16", "x17", "memory"); \
+} while (0)
 static inline void irqtest_puts(const char *s)
 {
     while (*s) {
         irqtest_putc(*s++);
+    }
+}
+
+/* Dump VBAR_EL1, DAIF, SCTLR_EL1, and the NS-visible GIC state for
+ * the active timer PPI (TIMER_IRQ). Run before any DAIF manipulation
+ * so the captured state reflects what the kernel sees right before
+ * `daifclr` — useful for telling "vector base corrupt" or "PMR/RPR
+ * blocks delivery" apart from "IRQ pin really should fire". */
+static void irqtest_dump_pre_daifclr_state(void)
+{
+    uint64_t vbar_now, daif_pre, sctlr_now;
+    __asm__ volatile("mrs %0, vbar_el1"  : "=r"(vbar_now));
+    __asm__ volatile("mrs %0, daif"      : "=r"(daif_pre));
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr_now));
+    shell_printf("\r\n  pre-daifclr: VBAR_EL1=0x%lx DAIF=0x%lx SCTLR_EL1=0x%lx\r\n",
+                 (unsigned long)vbar_now,
+                 (unsigned long)daif_pre,
+                 (unsigned long)sctlr_now);
+    extern char exception_vectors[];
+    shell_printf("  exception_vectors symbol = %p (must equal VBAR_EL1)\r\n",
+                 (void *)exception_vectors);
+    /* GIC delivery state — what NS-EL1 actually sees about the active
+     * timer PPI (TIMER_IRQ).
+     *   GICC_HPPIR (off 0x18): highest priority pending Group 1 NS
+     *     IRQ visible to NS — returns 1023 (none), 1022 (top is
+     *     Group 0/1-Secure, NS can't see), or the IRQ id.
+     *   GICC_AHPPIR (off 0x28): aliased — secure HPPIR (NS reads 0
+     *     unless GICC_CTLR.AckCtl steers it).
+     *   GICD_ISACTIVER0 (0x300): which IRQs are currently ACTIVE.
+     *   GICD_ITARGETSR7 (0x81C): IRQs 28..31 → CPU mask. PPI is
+     *     banked, so this returns 0x01010101 if banked-as-CPU0.
+     *   GICD_ICFGR1   (0xC04): trigger config for IRQs 16..31, 2
+     *     bits per IRQ. For IRQ N (16..31), bit (N%16)*2+1 = 1 →
+     *     edge-triggered, 0 → level-triggered. */
+    uint32_t hppir   = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x18);
+    uint32_t ahppir  = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x28);
+    uint32_t rpr     = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x14);
+    uint32_t pmr     = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x04);
+    uint32_t bpr     = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x08);
+    uint32_t isacti0 = *(volatile uint32_t *)(GIC_DIST_BASE + 0x300);
+    uint32_t itarg7  = *(volatile uint32_t *)(GIC_DIST_BASE + 0x81C);
+    uint32_t icfgr1  = *(volatile uint32_t *)(GIC_DIST_BASE + 0xC04);
+    /* IPRIORITYR for IRQ N = GICD_BASE + 0x400 + N (per-byte offset) */
+    uint8_t  ipriby  = *(volatile uint8_t  *)(GIC_DIST_BASE + 0x400 + TIMER_IRQ);
+    unsigned trig_bit = ((TIMER_IRQ % 16u) * 2u) + 1u;
+    shell_printf("  GIC NS:  HPPIR=0x%x  AHPPIR=0x%x  RPR=0x%x  PMR=0x%x  BPR=0x%x\r\n",
+                 hppir, ahppir, rpr, pmr, bpr);
+    shell_printf("           ISACTIVER0=0x%x  ITARGETSR7=0x%x  ICFGR1=0x%x  IPRI[%u]=0x%02x\r\n",
+                 isacti0, itarg7, icfgr1, (unsigned)TIMER_IRQ, ipriby);
+    shell_printf("  HPPIR decode: %s\r\n",
+                 (hppir & 0x3FF) == 0x3FF ? "1023 (no Grp1NS pending)" :
+                 (hppir & 0x3FF) == 0x3FE ? "1022 (top pending is Grp0/Grp1S — NS cannot see)" :
+                 "actual IRQ id (Grp1NS pending — should deliver)");
+    shell_printf("  Delivery gate: pri(0x%02x) < (RPR(0x%x) & PMR(0x%x))? %s\r\n",
+                 ipriby, rpr, pmr,
+                 ipriby < (rpr < pmr ? rpr : pmr) ? "yes — should deliver"
+                                                   : "NO — RPR/PMR blocks delivery");
+    shell_printf("  ICFGR1 decode: PPI %u trigger = %s\r\n",
+                 (unsigned)TIMER_IRQ,
+                 (icfgr1 & (1u << trig_bit)) ? "edge" : "level");
+}
+
+/* Undo per-mode side effects so the probes don't poison kernel state.
+ * mode_iar deliberately ack'd without EOI (active-priority bit stays
+ * raised, future IRQs at <= that priority are silently masked).
+ * mode_linit changed GICC_CTLR (set EOImodeNS, which changes
+ * kernel-wide EOI semantics from single-write-EOIR to DIR-after-EOI).
+ * Both must be undone before returning to the shell. */
+static void irqtest_cleanup_state(uint32_t iar_saved_id, bool iar_pending_eoi,
+                                  uint32_t linit_saved_ctlr, bool linit_changed_ctlr)
+{
+    if (iar_pending_eoi) {
+        *(volatile uint32_t *)(GIC_CPU_BASE + 0x10) = iar_saved_id;
+        __asm__ volatile("dsb sy" ::: "memory");
+        irqtest_puts(" IAR-EOI");
+    }
+    if (linit_changed_ctlr) {
+        *(volatile uint32_t *)(GIC_CPU_BASE + 0x00) = linit_saved_ctlr;
+        __asm__ volatile("dsb sy" ::: "memory");
+        irqtest_puts(" CTLR-restored");
     }
 }
 
@@ -6028,15 +6149,319 @@ int cmd_irqtest(int argc, char *argv[])
      *
      * For the bisect test we ALSO support "noirq" to skip the daifclr
      * entirely — confirms whether the daifclr itself or something
-     * else is the cause of the hang. */
+     * else is the cause of the hang. "single" mode neutralizes the
+     * SECONDARY_PREEMPT trampoline (sets preempt_disabled[cpu]=1)
+     * so the IRQ handler returns to the original PC instead of
+     * detouring via resched_trampoline. Lets us prove IRQ delivery
+     * works without involving schedule(). */
     bool skip_daifclr = (argc >= 2 && argv[1] && strcmp(argv[1], "noirq") == 0);
+    bool single_mode  = (argc >= 2 && argv[1] && strcmp(argv[1], "single") == 0);
+#if defined(SECONDARY_PREEMPT)
+    extern volatile int preempt_disabled[MAX_CPUS];
+    if (single_mode) {
+        preempt_disabled[cpu] = 1;
+        __asm__ volatile("dsb sy" ::: "memory");
+        irqtest_puts(" PD=1");
+    }
+#else
+    (void)single_mode;
+#endif
+    /* #672 probe: dump VBAR_EL1, DAIF, SCTLR_EL1, and the NS-visible
+     * GIC state for TIMER_IRQ before any DAIF manipulation. Goal: rule
+     * out a corrupted vector base, stuck I-bit, or PMR/RPR-blocked
+     * delivery before we daifclr. */
+    irqtest_dump_pre_daifclr_state();
+
     irqtest_puts(skip_daifclr ? " 3-skipped" : " 3");  /* checkpoint 3: about to daifclr */
-    if (!skip_daifclr) {
-        if (argc >= 2 && argv[1] && strcmp(argv[1], "fiq") == 0) {
-            __asm__ volatile("msr daifclr, #3" ::: "memory"); /* I + F */
-        } else {
-            __asm__ volatile("msr daifclr, #2" ::: "memory"); /* I only */
+
+    /* Drain the FIFO before the raw markers so we are guaranteed to
+     * see them on the wire. PL011 silently drops writes to a full
+     * FIFO, so without the drain, the markers can vanish and we'd
+     * misread "char missing" as "code did not execute". */
+    /* #672 daifclr-wedge isolation:
+     *   "noirq"        → no daifclr at all (control: should print A B)
+     *   "single"/""    → daifclr #2 (clear I — original test)
+     *   "fiq"          → daifclr #3 (clear I+F)
+     *   "set"          → daifset #2 (set I — already set, true no-op)
+     *   "isb"          → just isb (no DAIF write at all)
+     *   "dbg"          → daifclr #1 (clear D bit only — should never raise IRQ)
+     *
+     * Differential reading:
+     *   - all wedge except "noirq" → it's *any* msr to DAIF that wedges
+     *   - "set" / "dbg" / "isb" pass, only #2 / #3 wedge → IRQ unmask
+     *     specifically delivers an exception that hangs the CPU
+     *   - "isb" wedges → not DAIF at all; some unrelated state
+     */
+    bool mode_set    = (argc >= 2 && argv[1] && strcmp(argv[1], "set") == 0);
+    bool mode_isb    = (argc >= 2 && argv[1] && strcmp(argv[1], "isb") == 0);
+    bool mode_dbg    = (argc >= 2 && argv[1] && strcmp(argv[1], "dbg") == 0);
+    bool mode_fiq    = (argc >= 2 && argv[1] && strcmp(argv[1], "fiq") == 0);
+    bool mode_fmask  = (argc >= 2 && argv[1] && strcmp(argv[1], "fmask") == 0);
+    bool mode_clr    = (argc >= 2 && argv[1] && strcmp(argv[1], "clr") == 0);
+    bool mode_wfi    = (argc >= 2 && argv[1] && strcmp(argv[1], "wfi") == 0);
+    bool mode_idle   = (argc >= 2 && argv[1] && strcmp(argv[1], "idle") == 0);
+    bool mode_tdis   = (argc >= 2 && argv[1] && strcmp(argv[1], "tdis") == 0);
+    bool mode_cmem   = (argc >= 2 && argv[1] && strcmp(argv[1], "cmem") == 0);
+    bool mode_dsb    = (argc >= 2 && argv[1] && strcmp(argv[1], "dsb") == 0);
+    bool mode_wait   = (argc >= 2 && argv[1] && strcmp(argv[1], "wait") == 0);
+    bool mode_iar    = (argc >= 2 && argv[1] && strcmp(argv[1], "iar") == 0);
+    bool mode_match  = (argc >= 2 && argv[1] && strcmp(argv[1], "match") == 0);
+    bool mode_putsx  = (argc >= 2 && argv[1] && strcmp(argv[1], "putsx") == 0);
+    bool mode_linit  = (argc >= 2 && argv[1] && strcmp(argv[1], "linit") == 0);
+    bool mode_drain  = (argc >= 2 && argv[1] && strcmp(argv[1], "iardrain") == 0);
+    bool mode_dis    = (argc >= 2 && argv[1] && strcmp(argv[1], "dis") == 0);
+
+    /* "clr" mode: clear the pending timer PPI in GIC before daifclr.
+     * Tests whether the wedge is caused by the GIC asserting the IRQ
+     * pin AT the moment we unmask DAIF.I. GIC-400 ICPENDR clears
+     * pending state without needing ack/EOI. The timer PPI is banked
+     * per-CPU so this only affects the running CPU. Operates on the
+     * currently-active TIMER_IRQ (PPI 27 on Pi 5 since #672). */
+    /* "tdis" mode: disable the generic timer at the CNTP_CTL_EL0 level
+     * before daifclr. If this fixes the wedge, the wedge is caused by
+     * the timer's IRQ assertion at the GIC level. */
+    if (mode_tdis) {
+        __asm__ volatile("msr cntp_ctl_el0, %0\n\tisb"
+                         :: "r"((uint64_t)0) : "memory");
+        irqtest_puts(" CNTP-DIS");
+    }
+
+    /* "idle" mode: emulate idle's exact prologue — cacheable BSS load,
+     * mrs mpidr, write to cacheable memory — to test whether the
+     * MMIO-heavy path right before daifclr (UART drain) is the
+     * differentiator. */
+    if (mode_idle) {
+        static volatile uint32_t idle_emu_counter;
+        uint64_t mpidr;
+        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+        idle_emu_counter += (uint32_t)(mpidr & 0xff);
+        irqtest_puts(" IDLE-EMU");
+    }
+
+    if (mode_clr) {
+        /* GICD_ICPENDR0 = GICD_BASE + 0x280; write 1<<TIMER_IRQ to
+         * clear the timer PPI (banked per-CPU for IDs 0..31). */
+        uint32_t timer_bit = 1u << TIMER_IRQ;
+        uint32_t pre = *(volatile uint32_t *)(GIC_DIST_BASE + 0x200);
+        *(volatile uint32_t *)(GIC_DIST_BASE + 0x280) = timer_bit;
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t post = *(volatile uint32_t *)(GIC_DIST_BASE + 0x200);
+        /* ALSO disable the timer PPI entirely via ICENABLER0. */
+        *(volatile uint32_t *)(GIC_DIST_BASE + 0x180) = timer_bit;
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t after_dis = *(volatile uint32_t *)(GIC_DIST_BASE + 0x100);
+        shell_printf("\r\n  GIC ISPENDR0 pre=0x%08x post-clear=0x%08x ISENABLER0 post-disable=0x%08x (PPI %u)\r\n",
+                     pre, post, after_dis, (unsigned)TIMER_IRQ);
+        irqtest_puts(" CLR-PEND");
+    }
+
+    /* "putsx" mode: extra UART puts BEFORE the drain+A+drain sequence.
+     * Mimics what `idle` mode adds via puts(" IDLE-EMU") but with no
+     * cacheable bump, no mpidr read. */
+    if (mode_putsx) {
+        irqtest_puts(" PUTSX");
+    }
+
+    /* "linit" mode: replay Linux's gic_cpu_if_up sequence before daifclr.
+     * Linux on the same hardware delivers timer IRQs successfully —
+     * if our `daifclr` wedge is from missing GIC config, this should
+     * unblock. Sequence (irq-gic.c:gic_cpu_if_up):
+     *   - Clear GICC_ACTIVEPRIO[0..3]
+     *   - Read GICC_CTLR, preserve bypass bits
+     *   - Write GICC_CTLR = bypass | EOImodeNS | EnableGrp1NS
+     */
+    /* "iardrain" mode: ack/EOI in a tight loop until IAR returns
+     * spurious. Tests whether multiple IAR-ack-EOI cycles drain a
+     * stuck pending state vs a single ack. */
+    if (mode_drain) {
+        int n = 0;
+        for (int i = 0; i < 32 && n < 10; i++) {
+            uint32_t iar = *(volatile uint32_t *)(GIC_CPU_BASE + 0x0C);
+            __asm__ volatile("dsb sy" ::: "memory");
+            if ((iar & 0x3FF) == 0x3FF) {
+                break;
+            }
+            *(volatile uint32_t *)(GIC_CPU_BASE + 0x10) = iar;
+            __asm__ volatile("dsb sy" ::: "memory");
+            n++;
         }
+        shell_printf("\r\n  IARDRAIN: ack'd+eoi'd %d IRQs\r\n", n);
+    }
+
+    /* "dis" mode: disable distributor, then re-enable. Linux always
+     * does disable→config→enable. We don't (we incrementally configure
+     * to preserve secure-side state). Tests whether a NS-side
+     * distributor-disable cycle re-evaluates the IRQ pending state
+     * in some way the kernel hasn't triggered. */
+    if (mode_dis) {
+        uint32_t pre_ctlr = *(volatile uint32_t *)(GIC_DIST_BASE + 0x000);
+        *(volatile uint32_t *)(GIC_DIST_BASE + 0x000) = 0;
+        __asm__ volatile("dsb sy" ::: "memory");
+        *(volatile uint32_t *)(GIC_DIST_BASE + 0x000) = pre_ctlr;
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t post_ctlr = *(volatile uint32_t *)(GIC_DIST_BASE + 0x000);
+        shell_printf("\r\n  DIS-CYCLE: GICD_CTLR pre=0x%x post=0x%x\r\n",
+                     pre_ctlr, post_ctlr);
+    }
+
+    /* Saved across mode_linit so the post-irqtest cleanup block can
+     * restore the original GICC_CTLR. EOImodeNS changes kernel-wide
+     * EOI semantics from "single-write to EOIR" to "DIR-after-EOI",
+     * so leaving it set after the probe poisons every subsequent
+     * IRQ acknowledge in the running kernel. */
+    uint32_t linit_saved_ctlr = 0;
+    bool linit_changed_ctlr = false;
+    if (mode_linit) {
+        for (int i = 0; i < 4; i++) {
+            *(volatile uint32_t *)(GIC_CPU_BASE + 0xD0 + i * 4) = 0;
+        }
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t ctlr_pre = *(volatile uint32_t *)(GIC_CPU_BASE + 0x00);
+        uint32_t bypass = ctlr_pre & 0x1E0; /* bypass bits 5..8 */
+        linit_saved_ctlr = ctlr_pre;
+        linit_changed_ctlr = true;
+        *(volatile uint32_t *)(GIC_CPU_BASE + 0x00) =
+            bypass | (1u << 9) /* EOImodeNS */ | 1u /* EnableGrp1NS */;
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t ctlr_post = *(volatile uint32_t *)(GIC_CPU_BASE + 0x00);
+        shell_printf("\r\n  LINIT: GICC_CTLR pre=0x%x post=0x%x (set EOImodeNS — restored on exit)\r\n",
+                     ctlr_pre, ctlr_post);
+    }
+
+    irqtest_fifo_drain();
+    IRQTEST_RAW_PUTC('A');
+    irqtest_fifo_drain();
+
+    /* "match" mode: run idle's *exact* pre-daifclr instruction stream
+     * — bl-style function call to cpu_logical_id + cacheable r/m/w of
+     * a counter — with NO MMIO between this prologue and the daifclr.
+     * If "match" passes while "single" wedges, the unblocker is the
+     * function-call + cacheable-bump pattern specifically, not the
+     * total amount of activity. */
+    if (mode_match) {
+        uint64_t mpidr;
+        __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+        int log_id = cpu_logical_id(mpidr);
+        static volatile uint32_t match_counter[8];
+        if (log_id >= 0 && log_id < 8) match_counter[log_id]++;
+        /* No further activity — let daifclr run in same pipeline state
+         * as idle's. */
+    }
+
+
+    /* "cmem" mode: a single cacheable load/store right after the
+     * drain and immediately before daifclr — tests whether *any*
+     * cacheable memory access between MMIO and daifclr unblocks the
+     * wedge. Counter-intuitive but `idle` mode points this way.
+     *
+     * "dsb" mode: full DSB SY barrier between drain and daifclr. */
+    if (mode_cmem) {
+        static volatile uint32_t cmem_probe;
+        cmem_probe++;
+    }
+    if (mode_dsb) {
+        __asm__ volatile("dsb sy" ::: "memory");
+    }
+    /* "wait" mode: ~10 ms CNTPCT busy-wait between drain and daifclr —
+     * tests pure timing as the unblocker (no MMIO, no cacheable
+     * activity beyond CNTPCT reads). */
+    /* "iar" mode: manually ack the pending IRQ via NS GICC_IAR before
+     * daifclr. If the GIC accepts the ack, IAR returns 30, the IRQ
+     * transitions to ACTIVE, the IRQ pin de-asserts, and daifclr should
+     * complete normally. EOI'd via GICC_EOIR after.
+     *
+     * If IAR returns 1023 (spurious), GIC refused to ack — proves
+     * Group 1 NS routing is broken at the CPU interface despite the
+     * HPPIR readback saying otherwise.
+     *
+     * If daifclr STILL wedges after a successful ack, the wedge is not
+     * the IRQ pin assertion at all — something else is going wrong
+     * in the daifclr path. */
+    /* Saved across mode_iar so the post-irqtest cleanup block can EOI
+     * the IRQ that mode_iar deliberately leaves in ACTIVE state.
+     * Without that EOI, the active priority bit stays raised and
+     * future IRQs at <= that priority are silently masked at the CPU
+     * interface — i.e. the next "irqtest" invocation, normal kernel
+     * timer ticks, etc. all stop working. */
+    uint32_t iar_saved_id = 0x3FF;
+    bool iar_pending_eoi = false;
+    if (mode_iar) {
+        uint32_t iar = *(volatile uint32_t *)(GIC_CPU_BASE + 0x0C);
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t isacti_after = *(volatile uint32_t *)(GIC_DIST_BASE + 0x300);
+        uint32_t hppir_after  = *(volatile uint32_t *)(GIC_CPU_BASE  + 0x18);
+        shell_printf("\r\n  IAR-ack: GICC_IAR=0x%x (id=%u)  ISACTIVER0=0x%x  HPPIR=0x%x\r\n",
+                     iar, iar & 0x3FF, isacti_after, hppir_after);
+        /* DELIBERATELY NO IMMEDIATE EOI. State stays ACTIVE so the pin
+         * is de-asserted (until EOI). If daifclr now succeeds, the
+         * wedge was about pin assertion. If it still wedges, the
+         * wedge is unrelated to GIC pin state. The saved id is EOI'd
+         * in the cleanup block at the end of cmd_irqtest so the active
+         * priority is released before the shell returns. */
+        iar_saved_id = iar;
+        iar_pending_eoi = ((iar & 0x3FF) != 0x3FF);
+    }
+    if (mode_wait) {
+        uint64_t freq_w, now_w, target_w;
+        __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq_w));
+        __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now_w));
+        target_w = now_w + freq_w / 100;
+        do {
+            __asm__ volatile("yield");
+            __asm__ volatile("mrs %0, cntpct_el0" : "=r"(now_w));
+        } while (now_w < target_w);
+    }
+
+    /* "fmask" mode: mask FIQ first, then clear I. If FIQ delivery is
+     * the wedge cause (Group 0 timer signaled as FIQ → vector entry
+     * faults silently), this should pass while the default daifclr
+     * #2 fails. Pre-existing DAIF=0x80 (I=1, F=0); fmask transitions
+     * I=1,F=1 → I=0,F=1. */
+    if (mode_fmask) {
+        __asm__ volatile("msr daifset, #1\n\tisb" ::: "memory"); /* mask F */
+        IRQTEST_RAW_PUTC('a');  /* lowercase a after F mask */
+        irqtest_fifo_drain();
+    }
+    if (!skip_daifclr) {
+        if (mode_set) {
+            __asm__ volatile("msr daifset, #2\n\tisb" ::: "memory");
+        } else if (mode_isb) {
+            __asm__ volatile("isb" ::: "memory");
+        } else if (mode_dbg) {
+            __asm__ volatile("msr daifclr, #1\n\tisb" ::: "memory");
+        } else if (mode_fiq) {
+            __asm__ volatile("msr daifclr, #3\n\tisb" ::: "memory");
+        } else if (mode_wfi) {
+            /* Mirror idle's exact sequence: daifclr #2 + isb + wfi */
+            __asm__ volatile("msr daifclr, #2\n\tisb\n\twfi" ::: "memory");
+        } else {
+            __asm__ volatile("msr daifclr, #2\n\tisb" ::: "memory");
+        }
+    }
+    /* Burst raw writes WITHOUT drain — if any of these makes it on the
+     * wire, the CPU is alive after daifclr. If none makes it, CPU is
+     * truly halted. */
+    IRQTEST_RAW_PUTC('B');
+    IRQTEST_RAW_PUTC('B');
+    IRQTEST_RAW_PUTC('B');
+    IRQTEST_RAW_PUTC('B');
+    irqtest_fifo_drain();
+    IRQTEST_RAW_PUTC('C');
+    irqtest_fifo_drain();
+    /* #672 probe: read DAIF immediately and emit one hex byte to UART
+     * via irqtest_putc. The DAIF bits we care about are 6 (F), 7 (I);
+     * print the I+F nibble (high 2 bits of byte 0). If `1` is set
+     * after a daifclr #2 (I), the unmask did not take effect. If both
+     * bits are 0, IRQ unmask succeeded but IRQ never delivered. */
+    {
+        uint64_t daif_now;
+        __asm__ volatile("mrs %0, daif" : "=r"(daif_now));
+        IRQTEST_RAW_PUTC('C');
+        uint8_t hi = (uint8_t)((daif_now >> 6) & 0x3);
+        IRQTEST_RAW_PUTC('D');
+        irqtest_puts(" daif=");
+        irqtest_putc('0' + ((hi >> 1) & 1));  /* I bit */
+        irqtest_putc('0' + (hi & 1));         /* F bit */
     }
     irqtest_puts(" 4");  /* checkpoint 4: daifclr returned (or skipped) */
     __asm__ volatile("isb" ::: "memory");
@@ -6064,6 +6489,19 @@ int cmd_irqtest(int argc, char *argv[])
     __asm__ volatile("isb" ::: "memory");
 
     irqtest_puts(" 7");  /* checkpoint 7: re-mask done */
+
+#if defined(SECONDARY_PREEMPT)
+    /* Restore preempt_disabled so the kernel resumes normal scheduling
+     * after the probe. */
+    if (single_mode) {
+        preempt_disabled[cpu] = 0;
+        __asm__ volatile("dsb sy" ::: "memory");
+        irqtest_puts(" PD=0");
+    }
+#endif
+
+    irqtest_cleanup_state(iar_saved_id, iar_pending_eoi,
+                          linit_saved_ctlr, linit_changed_ctlr);
 
     uint64_t irq_after = vec->irq;
     uint64_t fiq_after = vec->fiq;
