@@ -1,8 +1,12 @@
 # GPU SLM Handoff — Design Spec
 
 **Status:** M6.A scaffolding only — schema, Rust backend skeleton, and FFI
-shim. All SASS kernel authoring (M6.B / M6.C / M6.D) and the pre-kexec
-loader (M6.A-2) and bare-metal pushbuffer dispatch (M6.A-3) are deferred.
+shim. All SLM-op SASS kernel authoring (M6.B Q4kDot/GqaAttn/SwiGlu/LmHead,
+M6.C SIMT siblings, M6.D element-wise) and the pre-kexec loader (M6.A-2)
+and bare-metal pushbuffer dispatch (M6.A-3) are deferred. The MNIST-
+targeted generic ops (`GEMM_GENERIC`, `CONV2D`, `ADD_BIAS`, `MAXPOOL`)
+are ahead of the SLM ops in the kernel-library timeline — see §4 for
+the current operator-library inventory.
 
 **Companions:**
 
@@ -12,6 +16,15 @@ loader (M6.A-2) and bare-metal pushbuffer dispatch (M6.A-3) are deferred.
 - MNIST precedent: [`scripts/gpu-kernel-launch.c`](../../scripts/),
   PR #376
 - Ampere bringup: [`kernel/gpu/nvidia/ga10b_bringup.c`](../../kernel/gpu/nvidia/)
+- **Operator library (#663/#671) — realized form of the SASS-pool half
+  of this spec.** `kernel/gpu/operator_library.c` parses a packed blob
+  produced by `scripts/build-operator-library.py` from
+  `scripts/cuda/operator_library/MANIFEST.json`. Today's library carries
+  four SIMT FP32 kernels (`gemm_fp32`, `conv2d_fp32_direct`,
+  `add_bias_relu_fp32`, `maxpool2d_fp32`) plus the just-landed HMMA
+  siblings (#673 `gemm_hmma_fp16`, #674 `conv2d_hmma_fp16`). See
+  `kernel/include/operator_library.h` for the lookup contract
+  (`slm_gpu_op_lib_lookup(op_kind, tier, dtype)` → entry pointer).
 
 ---
 
@@ -60,6 +73,18 @@ array striding.
 `_Static_assert` guards the header at ≤ 256 bytes and the descriptor at
 exactly 64 bytes — bumping either is a schema-version bump.
 
+**SASS-pool format vs the operator library.** This spec describes
+`sass_kernel_pool_va` as an opaque pool with per-op `sass_kernel_offset`
+indexing into it. The operator library (#663/#671) is the realized form
+of that pool: a packed blob with a header, FNV-1a integrity check, and
+a lookup table keyed on `(op_kind, tier, dtype)`. The handoff's
+`sass_kernel_pool_va` can either point at a hand-staged offset table
+(the original M6 plan) or at an operator-library blob with the runtime
+side calling `slm_gpu_op_lib_lookup` instead of indexing
+`sass_kernel_offset`. Either path is schema-compatible; the operator
+library variant gives the runtime cleaner versioning and lookup
+semantics, and is the path the MNIST tier-toggle work in #676 uses.
+
 ---
 
 ## §3 Tier Model
@@ -86,11 +111,19 @@ The Rust backend's `TIER_TABLE` (`runtime/src/inference/gpu_slm.rs`) is
 the read side of this gate. It defaults to all-CPU; M6.A-4 populates it
 after the smoke probes.
 
+The operator-library lookup (`slm_gpu_op_lib_lookup(op_kind, tier,
+dtype)`) is the runtime machinery that the smoke-test gate's "demote
+this op to Tier 2" decision will toggle — when an HMMA tier-1 entry
+fails the smoke test, the runtime falls back to the SIMT tier-2 entry
+for that op via the same lookup. Today's MNIST `--gemm-tier auto|hmma`
+flag (#676) is the operator-tier toggle's manual analogue.
+
 ---
 
 ## §4 Per-op Kernel Inventory
 
-Mirrors plan §M6.B / M6.C / M6.D:
+Mirrors plan §M6.B / M6.C / M6.D — these are the SLM (Qwen / LLaMA-style)
+ops the M6 milestone targets:
 
 | Op kind | Tier 1 (HMMA) | Tier 2 (SIMT) | Element-wise (single tier) |
 |---|---|---|---|
@@ -106,6 +139,23 @@ Mirrors plan §M6.B / M6.C / M6.D:
 Element-wise / reduction ops have only one variant — they don't hit
 tensor cores in either tier, so the second variant would be wasted
 authoring.
+
+**MNIST-targeted generic ops in the same schema.** `enum slm_gpu_op_kind`
+also defines `GEMM_GENERIC = 8`, `CONV2D = 9`, `ADD_BIAS = 10`, and
+`MAXPOOL = 11` — the kernels MNIST inference dispatches today via the
+operator library. The library currently carries:
+
+| Op kind | Tier 1 (HMMA) | Tier 2 (SIMT) |
+|---|---|---|
+| `GEMM_GENERIC` | `gemm_hmma_fp16` (FP16, #673) — also `gemm_hmma_fp32a_fp16w` (FP32-act × FP16-weight, #676; held in the manifest's `future_entries` until the schema gains an act-vs-weight dtype split) | `gemm_fp32` (FP32) |
+| `CONV2D` | `conv2d_hmma_fp16` (FP16, implicit-GEMM, #674) | `conv2d_fp32_direct` (FP32) |
+| `ADD_BIAS` | — | `add_bias_relu_fp32` (FP32, optional ReLU via cbuf flag) |
+| `MAXPOOL` | — | `maxpool2d_fp32` (FP32) |
+
+The MNIST `--gemm-tier auto|hmma` flag (#676) is the manual analogue of
+the per-op tier toggle the smoke-test gate (§3) automates for the SLM
+ops above. Both tracks share the same handoff schema and the same
+operator-library plumbing.
 
 Per-kernel HMMA utilization probe (M6.B-6) reads `%clock64` and the
 MMA-issue counter at the kernel prologue/epilogue and returns the busy
@@ -143,6 +193,17 @@ The page is staged at a known PA (TBD — likely the same kexec-handoff
 page used by MNIST, plus an extra reserved range for the op_desc array).
 The strong override of `slm_gpu_get_handoff_phys()` lives in this loader
 or in a Jetson-specific kernel C file that mirrors the MNIST pattern.
+
+**SASS-pool packer.** `scripts/build-operator-library.py` (#663/#671)
+is the realized form of the `gpu_map_sass(get_kernel_blob(arch_info))`
+step above. It reads a JSON manifest declaring `(op_kind, tier, dtype)
+→ sass_path` triples, validates that no two entries collide, and packs
+the result into a single blob with a header, FNV-1a integrity check,
+and an O(1) lookup table. The bare-metal side parses the blob via
+`kernel/gpu/operator_library.c::slm_gpu_op_lib_load` and looks up
+entries with `slm_gpu_op_lib_lookup`. The current MNIST manifest at
+`scripts/cuda/operator_library/MANIFEST.json` lists the 4 SIMT FP32
+kernels plus the just-landed HMMA FP16 GEMM and Conv2D entries.
 
 ---
 
@@ -232,6 +293,12 @@ The SASS bring-up plan (mirror of plan §M6.B/C/D):
 4. **Concatenation.** All kernels concatenated into one SASS pool blob
    shipped pre-kexec. Per-op `sass_kernel_offset` selects the entry
    point. The pool is mapped read-only / executable on the GPU.
+   *Realized form:* the operator library's
+   `scripts/build-operator-library.py` is one implementation of this
+   concatenation step — it produces a self-describing blob with a
+   `(op_kind, tier, dtype)` lookup table instead of a parallel offset
+   array. SLM ops authored under M6.B/M6.C should target the same
+   manifest schema so they slot into the existing parser.
 
 Per-op kernel slips fall back to Tier 2 (Tier-1 slip) or CPU (Tier-1 +
 Tier-2 slip) at op granularity — the demo still GPU-accelerates the rest
@@ -266,5 +333,9 @@ authors have the mitigations close at hand.)
 
 ---
 
-*Last updated: 2026-04-27. Authored as part of M6.1 (#482) — see
-[`docs/plans/slm-integration-plan.md`](../plans/slm-integration-plan.md) §M6.A.*
+*Last updated: 2026-05-07. Authored as part of M6.1 (#482) — see
+[`docs/plans/slm-integration-plan.md`](../plans/slm-integration-plan.md) §M6.A.
+2026-05-07 sweep aligned the spec with the operator-library schema
+landed in #663/#671 and the HMMA tensor-core ladder landed in
+#673/#674/#676 (`gemm_hmma_fp16`, `conv2d_hmma_fp16`,
+`gemm_hmma_fp32a_fp16w`).*

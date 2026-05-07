@@ -15,7 +15,7 @@
       "tier":    "SIMT",
       "dtype":   "FP32",
       "sass":    "conv2d_fp32_direct_shader.sass",
-      "comment": "Direct (no im2col) FP32 conv. Source: scripts/cuda/conv2d_fp32_direct.cu. To be replaced by implicit-GEMM HMMA conv (#662) for HMMA tier."
+      "comment": "Direct (no im2col) FP32 conv. Source: scripts/cuda/conv2d_fp32_direct.cu. The HMMA tier-1 sibling for this op landed in #674 (see CONV2D.HMMA.FP16 below)."
     },
     {
       "op_kind": "ADD_BIAS",
@@ -30,13 +30,26 @@
       "dtype":   "FP32",
       "sass":    "maxpool2d_fp32_shader.sass",
       "comment": "Spatial max pooling. Reads kernel/stride from cbuf. Source: scripts/cuda/maxpool2d_fp32.cu."
+    },
+    {
+      "op_kind": "GEMM_GENERIC",
+      "tier":    "HMMA",
+      "dtype":   "FP16",
+      "sass":    "gemm_hmma_fp16_shader.sass",
+      "comment": "FP16/FP16 → FP32 tensor-core GEMM via nvcuda::wmma m16n16k16 (lowers to mma.sync.m16n8k16 on sm_87 GA10B). Reads M/K/N from cbuf at dispatch time, same scalar layout as the SIMT FP32 entry — the launcher just swaps the shader. Source: scripts/cuda/gemm_hmma_fp16.cu (#659/#673)."
+    },
+    {
+      "op_kind": "CONV2D",
+      "tier":    "HMMA",
+      "dtype":   "FP16",
+      "sass":    "conv2d_hmma_fp16_shader.sass",
+      "comment": "Implicit-GEMM 2D convolution on tensor cores. Reformulates conv as (K_out, C_in·R·S, N_batch·H_out·W_out) GEMM and computes the im2col B-matrix gather in-shader (no DRAM staging). Source: scripts/cuda/conv2d_hmma_fp16.cu (#662/#674)."
     }
   ],
 
   "future_entries": {
     "comment": "Add these when their kernels land. Documented here so the manifest reads as a roadmap, not a punch-list.",
-    "GEMM_GENERIC.HMMA.FP16":   "from #659 — gemm_hmma_fp16_shader.sass",
-    "CONV2D.HMMA.FP16":         "from #662 — conv2d_hmma_fp16_shader.sass (implicit-GEMM)",
+    "GEMM_GENERIC.HMMA.FP32A_FP16W": "from #661/#676 — gemm_hmma_fp32a_fp16w_shader.sass. Mixed-precision (FP32 activation × FP16 weight) GEMM used by the MNIST FC layer when it has to consume an FP32 pool2 output. Schema gap: today's (op_kind, tier, dtype) triple can't express the activation-vs-weight precision split — needs a schema bump (separate `act_dtype` + `weight_dtype` fields, or a packed dtype-pair encoding) before this can move into `entries`. The MNIST launcher (scripts/gpu-kernel-mnist.c) loads the SASS directly via --shader-dir today, bypassing the operator library, so this is dormant until the schema lands.",
     "Q4K_DOT.SIMT.Q4K":         "future SLM-on-GPU work",
     "GEMM_GENERIC.HMMA.BF16":   "tensor-core BF16 if a target model wants it",
     "GEMM_GENERIC.IMMA.INT8":   "future quantized matmul on tensor cores"
