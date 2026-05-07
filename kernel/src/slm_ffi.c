@@ -362,6 +362,32 @@ int slm_gpu_get_info(RustGpuInfo *info)
  * platforms these are stubs returning -1.
  */
 
+/* Sched-MLP dispatch rate-limit window (#651). Defined on every
+ * platform so the pure-logic predicate below — and the test seam in
+ * test_gpu_dispatch_breaker.c — compile cross-platform. The atomic
+ * timestamp it gates (`g_sched_dispatch_last_ns`) and the call-site
+ * that consults it both live inside the Jetson `#ifdef` block. */
+#define GPU_SCHED_DISPATCH_RATE_LIMIT_NS  50000000ULL  /* 50 ms */
+
+/* Pure-logic admission-control predicate. Returns true iff the
+ * dispatch should be rejected because the previous dispatch
+ * completed less than RATE_LIMIT_NS ago. Unsigned subtraction makes
+ * the first call (last == 0) always pass, and is well-defined under
+ * timer wraparound (any underflow lands far above the window
+ * threshold, so a wrap simply re-opens the gate — safe-by-default,
+ * since rejected dispatches fall back to CPU NEON anyway). Tested
+ * directly via `slm_gpu_sched_dispatch_test_within_window`. */
+static inline bool sched_dispatch_within_rate_limit(uint64_t now,
+                                                     uint64_t last)
+{
+    return (now - last) < GPU_SCHED_DISPATCH_RATE_LIMIT_NS;
+}
+
+bool slm_gpu_sched_dispatch_test_within_window(uint64_t now, uint64_t last)
+{
+    return sched_dispatch_within_rate_limit(now, last);
+}
+
 #ifdef PLATFORM_JETSON_ORIN_NANO
 /* Per-kind dispatch lock — serialises every `slm_gpu_*` entry
  * point (run / set_input / set_input_fill / run_with_input and
@@ -444,6 +470,33 @@ static struct ga10b_bringup g_bringups[GA10B_PIPELINE_KIND_COUNT];
  * tracked in #596. */
 static bool g_post_inherit_double_dispatch_pending
     [GA10B_PIPELINE_KIND_COUNT] = { false };
+
+/* Sched-MLP dispatch rate limiter (#651).
+ *
+ * `gpu use sched on` with `ai_mlp` invokes `slm_gpu_run_sched_inference`
+ * from every `ai_mlp_assign_cpu` call — i.e. every task_create / steal
+ * across all six CPUs. Each dispatch holds `g_gpu_dispatch_lock` IRQ-
+ * off for ~5 ms; a task burst piles up dozens of waiters and starves
+ * timer ticks / RX-stall watchdogs / shell scheduling enough to wedge
+ * the box (telnet stops, serial stops, hard power-cycle required —
+ * 2026-04-27 jetson-nano-2 reproducer).
+ *
+ * The limiter is system-wide rather than per-CPU: at most one GPU
+ * sched dispatch may *complete* in any RATE_LIMIT_NS window. The
+ * timestamp `g_sched_dispatch_last_ns` is updated *after* a successful
+ * dispatch (see comment near the store), so the next allowed dispatch
+ * starts at least RATE_LIMIT_NS after the previous one finishes —
+ * about 55 ms start-to-start for a 5 ms dispatch with a 50 ms window.
+ * Rejected dispatches return -1, and `forward_via_device` already has
+ * a silent CPU NEON fallback for that case
+ * (kernel/sched/ai/ai_inference.c:280-289).
+ *
+ * Effective worst-case IRQ-off load on the system: in steady state
+ * only one CPU at a time wins the try-lock, so the dispatch path
+ * burns ≤ 5 ms per ≥ 55 ms interval ≈ 9 % of one CPU. Other CPUs'
+ * `assign_cpu` calls return -1 from the rate-limit check (or from
+ * the try-lock) without ever spinning IRQ-off. */
+static _Atomic uint64_t g_sched_dispatch_last_ns = 0;
 
 /* Consecutive-dispatch-failure circuit breaker.
  *
@@ -770,6 +823,33 @@ out:
     return rc;
 }
 
+/* Inner dispatch sequence shared by the blocking + try-lock entry
+ * points. Caller must already hold `g_gpu_dispatch_lock` IRQ-off.
+ * Returns 0 on success, negative on failure. */
+static int slm_gpu_dispatch_locked(uint32_t kind,
+                                    const void *input, size_t input_cap,
+                                    void *output, size_t output_cap)
+{
+    int rc = ensure_bringup(kind);
+    if (rc < 0) return rc;
+
+    struct ga10b_bringup *b = &g_bringups[kind];
+    int n = ga10b_bringup_set_input(b, input, input_cap);
+    if (n < 0) return n;
+
+    /* Option A for #596. Throwaway dispatch is placed *after*
+     * set_input so the discarded launch already sees the user's
+     * fresh input — both dispatches read the same input buffer, the
+     * user just sees the second result. */
+    consume_post_inherit_double_dispatch(kind, b);
+
+    rc = ga10b_bringup_launch_kernel(b);
+    if (rc < 0) return rc;
+
+    n = ga10b_bringup_read_pipeline_output(b, output, output_cap);
+    return n < 0 ? -1 : 0;
+}
+
 /* All-in-one set_input + launch + read under a single lock
  * acquisition. Used by callers that produce input bytes
  * synchronously and want output in the same call (e.g.
@@ -784,26 +864,50 @@ int slm_gpu_run_with_input(uint32_t kind,
     if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
 
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
-    int rc = ensure_bringup(kind);
-    if (rc < 0) goto out;
-
-    struct ga10b_bringup *b = &g_bringups[kind];
-    int n = ga10b_bringup_set_input(b, input, input_cap);
-    if (n < 0) { rc = n; goto out; }
-
-    /* Option A for #596. Throwaway dispatch is placed *after*
-     * set_input so the discarded launch already sees the user's
-     * fresh input — both dispatches read the same input buffer, the
-     * user just sees the second result. */
-    consume_post_inherit_double_dispatch(kind, b);
-
-    rc = ga10b_bringup_launch_kernel(b);
-    if (rc < 0) goto out;
-
-    n = ga10b_bringup_read_pipeline_output(b, output, output_cap);
-    rc = n < 0 ? -1 : 0;
-out:
+    int rc = slm_gpu_dispatch_locked(kind, input, input_cap,
+                                      output, output_cap);
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    gpu_dispatch_record_result(rc);
+    return rc;
+}
+
+/* Try-lock variant of slm_gpu_run_with_input (#651).
+ *
+ * Identical body to slm_gpu_run_with_input but uses spin_trylock
+ * instead of spin_lock_irqsave: if g_gpu_dispatch_lock is held by
+ * another CPU, return -1 immediately so the caller can fall through
+ * to its own fallback (CPU NEON for the sched-MLP path) rather than
+ * burn IRQ-off time spinning on a long-running dispatch.
+ *
+ * Designed for the sched-MLP hot path where any latency in
+ * `assign_cpu` directly translates to scheduler stall. Not suitable
+ * for callers that need the GPU result to actually drive the
+ * decision (those want the blocking variant). Returns -1 on:
+ *   - lock contention (try-lock failed),
+ *   - any other error path that the blocking variant returns -1 for.
+ * The caller cannot distinguish the two; both should silently fall
+ * back to CPU. */
+static int slm_gpu_try_run_with_input(uint32_t kind,
+                                       const void *input, size_t input_cap,
+                                       void *output, size_t output_cap)
+{
+    if (!input || !output) return -1;
+    if (gpu_dispatch_breaker_is_tripped_inner()) return -1;
+
+    irq_flags_t irq = irq_save();
+    if (!spin_trylock(&g_gpu_dispatch_lock)) {
+        irq_restore(irq);
+        /* Lock contention is admission-control rejection, not a
+         * dispatch failure — don't feed the consecutive-failure
+         * breaker counter (it would trip on legitimate burst
+         * traffic). */
+        return -1;
+    }
+
+    int rc = slm_gpu_dispatch_locked(kind, input, input_cap,
+                                      output, output_cap);
+    spin_unlock(&g_gpu_dispatch_lock);
+    irq_restore(irq);
     gpu_dispatch_record_result(rc);
     return rc;
 }
@@ -841,9 +945,46 @@ int slm_gpu_run_sched_inference(const void *state_bytes,
                                  size_t state_bytes_len,
                                  void *logits_bytes_out)
 {
-    return slm_gpu_run_with_input(GA10B_PIPELINE_KIND_SCHED_MLP,
-                                   state_bytes, state_bytes_len,
-                                   logits_bytes_out, 168u);
+    /* #651 admission control. Two layers between the per-CPU
+     * `assign_cpu` hot path and the IRQ-off dispatch:
+     *
+     *   1. Rate limiter — peek at the system-wide last-dispatch
+     *      timestamp; if we're inside the RATE_LIMIT_NS window from
+     *      the previous successful dispatch, return immediately.
+     *   2. Try-lock — even within the window, if another CPU is
+     *      currently dispatching, return immediately rather than
+     *      spin IRQ-off behind it.
+     *
+     * Either rejection path returns -1; `forward_via_device` already
+     * silently falls back to CPU NEON for negative rc. */
+    uint64_t now = slm_get_time_ns();
+    uint64_t last = atomic_load_explicit(&g_sched_dispatch_last_ns,
+                                          memory_order_relaxed);
+    if (sched_dispatch_within_rate_limit(now, last)) {
+        return -1;
+    }
+
+    int rc = slm_gpu_try_run_with_input(GA10B_PIPELINE_KIND_SCHED_MLP,
+                                         state_bytes, state_bytes_len,
+                                         logits_bytes_out, 168u);
+    if (rc == 0) {
+        /* Update timestamp only on a successful dispatch. Failed
+         * dispatches (-1 from try-lock contention or downstream rc)
+         * leave the window open so the next caller can attempt a
+         * fresh dispatch instead of waiting out the rate limit on
+         * stale state. Race-tolerant: two CPUs may both dispatch in
+         * the same window because the peek above is non-atomic, but
+         * the try-lock serialises them so only one actually runs the
+         * GPU; the other gets -1 from try-lock and never reaches
+         * here. The store is `relaxed` because it publishes nothing
+         * other than itself (the timestamp is a scalar, no other
+         * state synchronises through it) and the only reader is the
+         * `relaxed` load above. */
+        atomic_store_explicit(&g_sched_dispatch_last_ns,
+                              slm_get_time_ns(),
+                              memory_order_relaxed);
+    }
+    return rc;
 }
 #else
 int slm_gpu_run(uint32_t kind, void *output, size_t output_cap)
