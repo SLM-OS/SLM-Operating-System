@@ -344,6 +344,34 @@ void hailo_fw_drain_d2h_notifications(uint32_t max_events)
                 (unsigned)max_events);
 }
 
+/* #361 settle pings (2026-05-06): APP-CPU IDENTIFY + GET_DEVICE_
+ * INFORMATION pair issued before each CORE-CPU RPC during HEF load.
+ * HailoRT v4.23's wire capture interleaves these between every major
+ * step; SLM-OS used to send none. `hailo ctxsmoke full pings` on
+ * pi-5-1 reproducibly silences the CPU_ECC_FATAL fw fires at
+ * CHANGE_STATUS(ENABLED) when pings are present (verified across two
+ * fresh-boot A/B pairs). One CPU_ECC_FATAL still appears at SET_CTX
+ * (DYNAMIC), so the suppression is partial — but ENABLED is the
+ * load-completing transition and silencing it there is the relevant
+ * outcome. Best-effort: failures are logged and load continues, since
+ * pings are not protocol-required (every load-RPC return code stays
+ * 0 with or without them). */
+static void context_switch_settle_pings(const char *where)
+{
+    struct hailo_control_identify_response idr;
+    int irc = hailo_control_identify(&idr);
+    if (irc != HAILO_OK) {
+        WARN("hailo backend: pre-%s IDENTIFY rc=%d (continuing)",
+             where, irc);
+    }
+    uint32_t gdi_len = 0;
+    int drc = hailo_control_get_device_information(&gdi_len);
+    if (drc != HAILO_OK) {
+        WARN("hailo backend: pre-%s GET_DEVICE_INFORMATION rc=%d "
+             "(continuing)", where, drc);
+    }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Model slot table                                                            */
 /* -------------------------------------------------------------------------- */
@@ -1127,33 +1155,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * pre-configure handshake before accepting network-group-
      * level setup. */
     cs_load_stage_set(50);
-#ifdef HAILO_WIRE_DEBUG
-    /* #253 (2026-04-23): HailoRT wire capture shows IDENTIFY (0x00,
-     * APP_CPU) is sent before the first CORE_CPU RPC. SLM-OS's load
-     * jumps straight to CHANGE_STATUS(RESET), which triggers a
-     * CPU_ECC_ERROR on fw v4.23 (memory_bitmap=0x1000). Theory: the
-     * APP_CPU IDENTIFY warms up fw state that RESET depends on, and
-     * skipping it causes fw to access uninit memory during RESET
-     * processing. Tested and disconfirmed — kept under HAILO_WIRE_DEBUG
-     * for re-use in future bisect investigations. */
-    {
-        struct hailo_control_identify_response idr;
-        int warm_rc = hailo_control_identify(&idr);
-        uart_printf("[warmup] pre-RESET IDENTIFY rc=%d\r\n", warm_rc);
-        uint32_t gdi_len = 0;
-        warm_rc = hailo_control_get_device_information(&gdi_len);
-        uart_printf("[warmup] pre-RESET GET_DEV_INFO #1 rc=%d resp_len=%u\r\n",
-                    warm_rc, (unsigned)gdi_len);
-        gdi_len = 0;
-        warm_rc = hailo_control_get_device_information(&gdi_len);
-        uart_printf("[warmup] pre-RESET GET_DEV_INFO #2 rc=%d resp_len=%u\r\n",
-                    warm_rc, (unsigned)gdi_len);
-        /* Drain so we see if any of the pings fire notifications. */
-        uart_printf("[bisect] post pre-RESET pings:\r\n");
-        hailo_fw_drain_d2h_notifications(2);
-    }
-#endif /* HAILO_WIRE_DEBUG */
-
+    context_switch_settle_pings("RESET");
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
             HAILO_CS_IGNORE_APPLICATION_INDEX,
@@ -1178,6 +1180,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * firmware had registered from a prior load; GET_HW_CONSTS
      * reads hardware constants firmware needs to have handy
      * before it can validate subsequent context-switch bytes. */
+    context_switch_settle_pings("CLEAR_CONFIGURED_APPS");
     rc = hailo_control_context_switch_clear_configured_apps();
     if (rc != HAILO_OK) {
         WARN("hailo backend: CLEAR_CONFIGURED_APPS failed (rc=%d)", rc);
@@ -1203,6 +1206,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * fires at CHANGE_STATUS(ENABLED) and additional ECC events fire
      * during the GET_HW_CONSTS sequence itself. The count is not
      * load-bearing; next concrete delta is APP-CPU settle pings. */
+    context_switch_settle_pings("GET_HW_CONSTS");
     uint32_t hw_consts_len = 0;
     rc = hailo_control_get_hw_consts(&hw_consts_len);
     if (rc != HAILO_OK) {
@@ -1215,6 +1219,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #endif
     cs_load_stage_set(53);
 
+    context_switch_settle_pings("SET_NETWORK_GROUP_HEADER");
     rc = hailo_control_set_network_group_header(&hdr);
     if (rc != HAILO_OK) {
         WARN("hailo backend: SET_NETWORK_GROUP_HEADER failed (rc=%d)", rc);
@@ -1307,6 +1312,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
 
     for (uint32_t i = 0; i < sizeof(ctxs) / sizeof(ctxs[0]); i++) {
         cs_load_stage_set(60 + (int)i * 2);     /* 60, 62, 64, 66 per context */
+        context_switch_settle_pings(ctxs[i].name);
         rc = hailo_control_set_context_info(ctxs[i].type,
                                             ctxs[i].bytes, ctxs[i].len);
         if (rc != HAILO_OK) {
@@ -1342,6 +1348,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #endif
 
     cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
+    context_switch_settle_pings("CHANGE_STATUS_ENABLED");
     /* Pi OS wire capture (2026-04-22, HailoRT v4.23.0 MNIST on pi-5-1
      * instrumented driver — see ../slmos-reference-cache/hailo/hailort-v4.23.0-wire-
      * capture-mnist-pi5.txt, CHANGE_STATUS #2 body):

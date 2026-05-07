@@ -451,16 +451,36 @@ static bool mock_smart_memory_handle(uint32_t opcode_native,
      * these in sequence and the single shared mock_fw_sim_control_resp
      * buffer can't supply per-opcode responses; auto-echo solves that
      * without per-test seeding. Gated by mock_fw_sim_smart_memory_enabled
-     * so tests opting out of context-switch responses still work. */
+     * so tests opting out of context-switch responses still work.
+     *
+     * GET_DEVICE_INFORMATION joins the empty-body auto-echo set: #361
+     * settle pings call it before each CORE-CPU RPC during load. The
+     * wrapper only checks resp_len >= response_header (24 B); the
+     * 28-byte echo (header + param_count) clears that. */
     if (mock_fw_sim_smart_memory_enabled
      && (opcode_native == HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS
       || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER
       || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO
       || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS
       || opcode_native == HAILO_CONTROL_OPCODE_GET_HW_CONSTS
-      || opcode_native == HAILO_CONTROL_OPCODE_CORE_IDENTIFY)) {
+      || opcode_native == HAILO_CONTROL_OPCODE_CORE_IDENTIFY
+      || opcode_native == HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION)) {
         mock_build_echo_response(resp_out, resp_out_len,
                                  req_opcode_be, 0, NULL, 0);
+        return true;
+    }
+
+    /* IDENTIFY has a 162-byte body the wrapper validates strictly
+     * (resp_len >= sizeof(response_header + param_count + body)).
+     * #361 settle pings call IDENTIFY before each CORE-CPU RPC during
+     * load; supply zeroed body bytes so the length check passes. */
+    if (mock_fw_sim_smart_memory_enabled
+     && opcode_native == HAILO_CONTROL_OPCODE_IDENTIFY) {
+        static uint8_t identify_zero_body[162] = {0};
+        mock_build_echo_response(resp_out, resp_out_len,
+                                 req_opcode_be, 0,
+                                 identify_zero_body,
+                                 sizeof(identify_zero_body));
         return true;
     }
 
