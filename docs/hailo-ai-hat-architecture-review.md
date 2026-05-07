@@ -14,7 +14,7 @@ The current implementation is not yet a general Hailo AI HAT+ inference backend.
 
 The specific "can't get inference data back" blocker appears, from the docs and traces, to start before output data return. Firmware accepts enough context to reach boundary input submission, but the input H2D VDMA channel does not advance `num_proc`, and the first descriptor status remains zero. That means the device most likely did not successfully read/process the boundary input descriptor list. The strongest offline root-cause candidate is therefore DMA reachability/coherency for the descriptor list or buffer, not the user-facing output path.
 
-The most important evidence is the VDMA trace comparison in `../slmos-reference-cache/derivatives/notes/hailort-trace-findings-vdma-2026-04-23.md`: HailoRT writes the input channel `num_avail` and `num_proc` advances, while SLM-OS writes the same class of channel registers and `num_proc` stays zero. The same doc notes an address-pattern split: CCW DMA from a low host physical address worked, while the failing boundary input descriptor list was near the top of 4 GB. Current code has moved some boundary allocations to a "low" allocator, but that allocator is only low-biased, not bounded to a proven DMA-safe aperture.
+The most important evidence is the VDMA trace comparison in `~/slmos-ref/derivatives/notes/hailort-trace-findings-vdma-2026-04-23.md`: HailoRT writes the input channel `num_avail` and `num_proc` advances, while SLM-OS writes the same class of channel registers and `num_proc` stays zero. The same doc notes an address-pattern split: CCW DMA from a low host physical address worked, while the failing boundary input descriptor list was near the top of 4 GB. Current code has moved some boundary allocations to a "low" allocator, but that allocator is only low-biased, not bounded to a proven DMA-safe aperture.
 
 ## Architecture reviewed
 
@@ -33,13 +33,13 @@ Primary internal references used:
 
 - `docs/pi5-ai-hat-plan.md`
 - `docs/hailo-support-ticket-draft.md`
-- `../slmos-reference-cache/derivatives/notes/hailort-trace-findings-2026-04-22.md`
-- `../slmos-reference-cache/derivatives/notes/hailort-trace-findings-vdma-2026-04-23.md`
-- `../slmos-reference-cache/derivatives/notes/hailort-vs-slmos-source-comparison.md`
-- `../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md`
-- `../slmos-reference-cache/hailo/hailo-pcie.c`
-- `../slmos-reference-cache/rpi/rpi-linux-pcie-brcmstb.c`
-- `../slmos-reference-cache/linux/linux-bcm2712.dtsi`
+- `~/slmos-ref/derivatives/notes/hailort-trace-findings-2026-04-22.md`
+- `~/slmos-ref/derivatives/notes/hailort-trace-findings-vdma-2026-04-23.md`
+- `~/slmos-ref/derivatives/notes/hailort-vs-slmos-source-comparison.md`
+- `~/slmos-ref/derivatives/notes/hailo-driver-notes.md`
+- `~/slmos-ref/hailo/hailo-pcie.c`
+- `~/slmos-ref/rpi/rpi-linux-pcie-brcmstb.c`
+- `~/slmos-ref/linux/linux-bcm2712.dtsi`
 
 Primary external references checked:
 
@@ -53,10 +53,10 @@ The external references matter mainly as sanity checks: Raspberry Pi documents t
 Key local evidence anchors:
 
 - DMA mapping and low allocator: `kernel/ai_accel/hailo/hailo_pi5.c:241`, `kernel/ai_accel/hailo/hailo_pi5.c:246`, `kernel/ai_accel/hailo/hailo_pi5.c:269`, `kernel/mm/pmm.c:525`
-- HailoRT VDMA success and low-vs-high address clue: `../slmos-reference-cache/derivatives/notes/hailort-trace-findings-vdma-2026-04-23.md:20`, `../slmos-reference-cache/derivatives/notes/hailort-trace-findings-vdma-2026-04-23.md:45`
+- HailoRT VDMA success and low-vs-high address clue: `~/slmos-ref/derivatives/notes/hailort-trace-findings-vdma-2026-04-23.md:20`, `~/slmos-ref/derivatives/notes/hailort-trace-findings-vdma-2026-04-23.md:45`
 - BCM2712 inbound window hard-coding: `kernel/drivers/pcie/pcie_bcm2712.c:728`, `kernel/drivers/pcie/pcie_bcm2712.c:732`, `kernel/drivers/pcie/pcie_bcm2712.c:740`
-- Linux reference for parsed DMA aperture: `../slmos-reference-cache/rpi/rpi-linux-pcie-brcmstb.c:1068`, `../slmos-reference-cache/rpi/rpi-linux-pcie-brcmstb.c:1072`, `../slmos-reference-cache/linux/linux-bcm2712.dtsi:1062`
-- Hailo PCIe descriptor page-size workaround: `../slmos-reference-cache/hailo/hailo-pcie.c:83`
+- Linux reference for parsed DMA aperture: `~/slmos-ref/rpi/rpi-linux-pcie-brcmstb.c:1068`, `~/slmos-ref/rpi/rpi-linux-pcie-brcmstb.c:1072`, `~/slmos-ref/linux/linux-bcm2712.dtsi:1062`
+- Hailo PCIe descriptor page-size workaround: `~/slmos-ref/hailo/hailo-pcie.c:83`
 - Debug default and intrusive VDMA debug path: `CMakeLists.txt:114`, `Makefile:22`, `kernel/ai_accel/hailo/hailo_vdma.c:535`
 - MNIST-specific translator hooks: `kernel/ai_accel/hailo/hailo_cs_translator.c:373`, `kernel/ai_accel/hailo/hailo_cs_translator.c:411`, `kernel/ai_accel/hailo/hailo_cs_translator.c:448`
 - Single-pad selection and synthetic fallback area: `kernel/inference/inference_device_hailo.c:429`, `kernel/inference/inference_device_hailo.c:1498`, `kernel/inference/inference_device_hailo.c:1502`

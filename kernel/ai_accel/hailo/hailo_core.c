@@ -65,7 +65,7 @@ static enum hailo_state state = HAILO_STATE_UNINIT;
 
 /*
  * ATR[0] is shared with device firmware post-boot
- * (../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md §9.7). Every dev_read /
+ * (~/slmos-ref/derivatives/notes/hailo-driver-notes.md §9.7). Every dev_read /
  * dev_write through the ATR[0] window must save → retarget →
  * access → restore atomically, or concurrent accesses (including
  * firmware traffic after hailo_boot) corrupt the control channel
@@ -99,7 +99,7 @@ const char *hailo_state_str(enum hailo_state s)
  * registers in BAR0. Caller is responsible for saving and restoring
  * the prior ATR[0] value around any read/write through the window —
  * post-boot, firmware itself uses ATR[0] for its own traffic
- * (../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md §9.7).
+ * (~/slmos-ref/derivatives/notes/hailo-driver-notes.md §9.7).
  */
 static void atr0_set_target(uint64_t dev_addr)
 {
@@ -546,7 +546,7 @@ int hailo_decode_core_fw(const uint8_t *blob, size_t fw_size,
 /*
  * Bring the Hailo device to RUNNING state by uploading firmware and
  * triggering the boot ROM. Protocol distilled from
- * ../slmos-reference-cache/hailo/hailo-pcie-common.c hailo_pcie_write_firmware_batch
+ * ~/slmos-ref/hailo/hailo-pcie-common.c hailo_pcie_write_firmware_batch
  * + hailo_trigger_firmware_boot + hailo_pcie_wait_for_firmware:
  *
  *   1. Validate the flat firmware blob (header magic, code_size).

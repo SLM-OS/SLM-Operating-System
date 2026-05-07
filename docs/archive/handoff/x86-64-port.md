@@ -625,7 +625,7 @@ See **`docs/nvidia-gsp.md`** for the complete 7-phase boot sequence, register ma
 | File | Purpose |
 |------|---------|
 | `kernel/arch/x86_64/nvidia_gpu.c` | GPU probe, BAR mapping, register decode, VRAM test, shell command |
-| `../slmos-reference-cache/nvidia/nvidia-nv_ref.h` | Register definitions from open-gpu-kernel-modules |
+| `~/slmos-ref/nvidia/nvidia-nv_ref.h` | Register definitions from open-gpu-kernel-modules |
 
 ---
 

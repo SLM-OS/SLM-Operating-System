@@ -1130,7 +1130,7 @@ static void test_method_header_encoding(void)
     /* --- Test-side EXPECT_INC_HDR coverage --- */
 
     /* Host-family (subch 0, byte 0x5C-0x6C): nvgpu's exact literals
-     * from ../slmos-reference-cache/nvidia/nvgpu-hal-sync-sema_cmdbuf_gv11b.c. */
+     * from ~/slmos-ref/nvidia/nvgpu-hal-sync-sema_cmdbuf_gv11b.c. */
     REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x5Cu), 0x20010017u);  /* SEM_ADDR_LO */
     REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x60u), 0x20010018u);  /* SEM_ADDR_HI */
     REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x64u), 0x20010019u);  /* SEM_PAYLOAD_LO */

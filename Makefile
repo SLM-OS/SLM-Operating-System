@@ -272,18 +272,20 @@ armstub-clean:
 # Output: build/armstub/armstub8-2712.bin (~32 KB).
 #
 # Requires:
-#   - ../slmos-tf-a/ (sibling clone of ARM-software/arm-trusted-firmware)
-#     If absent, the target clones it. Patches are applied via `git am`
-#     on a fresh `slmos-pi5-irq-routing` branch.
+#   - ~/slmos-ref/tf-a/ (working tree of ARM-software/arm-trusted-firmware
+#     in the local-only reference library — see CLAUDE.md "Reference File
+#     Cache"). If absent, the target clones it. Patches are applied via
+#     `git am` on a fresh `slmos-pi5-irq-routing` branch.
 #   - aarch64-none-elf-gcc on PATH or via /opt/arm-gnu-toolchain.
 #
 # Conventions:
-#   - The TF-A clone lives outside this repo (sibling). Not committed.
+#   - The TF-A working tree lives outside this repo at ~/slmos-ref/tf-a.
+#     Not committed.
 #   - Patches in tools/tfa-patches/ are the canonical source of changes.
 #   - Re-running `make tfa-pi5` is idempotent IF the patches already
 #     applied. To re-apply after changes, `make tfa-pi5-reset` resets
 #     the TF-A clone to upstream master and re-applies all patches.
-TFA_DIR        := ../slmos-tf-a
+TFA_DIR        := $(HOME)/slmos-ref/tf-a
 TFA_REMOTE     := https://github.com/ARM-software/arm-trusted-firmware.git
 TFA_BRANCH     := slmos-pi5-irq-routing
 TFA_BUILD_DIR  := $(TFA_DIR)/build/rpi5/release

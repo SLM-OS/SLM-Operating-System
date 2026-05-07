@@ -2,7 +2,7 @@
  * hailo_control.h — Hailo firmware control-channel wire format.
  *
  * Ported from HailoRT's common/include/control_protocol.h (MIT
- * license; see ../slmos-reference-cache/hailo/hailort-control-protocol.h). We
+ * license; see ~/slmos-ref/hailo/hailort-control-protocol.h). We
  * carry only the subset the kernel actually sends today: IDENTIFY
  * for version-probe (#281 tier-1 milestone), WRITE/READ_MEMORY
  * and CONFIG_STREAM / OPEN_STREAM for the Phase 5.2 CCW streaming
@@ -126,7 +126,7 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_RUN_BIST_TEST                        = 0x3C,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS = 0x47,
     HAILO_CONTROL_OPCODE_GET_HW_CONSTS                        = 0x48,
-    /* Full table in ../slmos-reference-cache/hailo/hailort-control-protocol.h. */
+    /* Full table in ~/slmos-ref/hailo/hailort-control-protocol.h. */
 };
 
 /* CONTROL_PROTOCOL__communication_type_t values.
@@ -471,7 +471,7 @@ int hailo_control_config_stream_pcie(
  *
  * IMPORTANT: MAX_CFG_CHANNELS is 4 in firmware v4.23 (running on the
  * AI HAT+ in the lab), NOT the 24 the cached reference header
- * ../slmos-reference-cache/hailo/hailort-control-protocol.h shows for newer releases.
+ * ~/slmos-ref/hailo/hailort-control-protocol.h shows for newer releases.
  * The application_header_t wire size is 32 bytes on v4.23; firmware
  * rejects any other length with
  * CONTROL_PROTOCOL_STATUS_INVALID_CONTEXT_SWITCH_APP_HEADER_LENGTH

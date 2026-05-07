@@ -45,7 +45,7 @@ fire each time.
 
 This is what every production driver does. Mesa's NVK builds a fresh
 QMD per dispatch (`nvk_cmd_upload_qmd` in
-`../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c:159`), CUDA
+`~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c:159`), CUDA
 runtime does the same, nouveau does the same. The Linux-helper-baked
 QMD chain was an SLM-OS shortcut for getting compute working without
 authoring QMDs from scratch on the bare-metal side; fixing the off-by-
@@ -58,7 +58,7 @@ one means undoing that shortcut.
 `scripts/gpu-launch-common.c:gpu_populate_qmd_at()` (lines 395-481) is
 a complete, working C QMD encoder for Ampere. It mirrors NVK's
 `Qmd3_0::new()` + `fill_qmd()`
-(`../slmos-reference-cache/mesa/mesa-nak_qmd.rs:499-528, 616-655`) and
+(`~/slmos-ref/mesa/mesa-nak_qmd.rs:499-528, 616-655`) and
 produces the same 256-byte QMD format that Linux uses for
 `AMPERE_COMPUTE_B`.
 
@@ -67,7 +67,7 @@ move + cache-flush primitive swap (`msync(MS_SYNC)` →
 `gsp_platform->cache_clean()`) — there is no new bit-encoding work.
 
 The QMD format itself is documented in
-`../slmos-reference-cache/mesa/mesa-clc7c0qmd.h` (NVIDIA's auto-
+`~/slmos-ref/mesa/mesa-clc7c0qmd.h` (NVIDIA's auto-
 generated header for the `clc7c0` class — Ampere compute) and the bit
 positions are pinned in `scripts/gpu-launch-common.h:108-141`.
 
@@ -316,9 +316,9 @@ Total: ~4 days of focused work, with a 1-day buffer.
 | `scripts/gpu-qmd-bits.h` | — | `gpu_qmd_set_bits` helper. Pure-logic, host-testable, already used by both the helper and by SLM-OS test code. |
 | `kernel/gpu/nvidia/ga10b_bringup.c` | 1739-1850 | Pipeline runner. Where the dispatch site lives. |
 | `kernel/gpu/nvidia/ga10b_channel_handoff.h` | 190-217 | `struct ga10b_pipeline_op` definition + size assert. v7 bump goes here. |
-| `../slmos-reference-cache/mesa/mesa-nak_qmd.rs` | 499-528, 616-655 | NVK's Rust QMD encoder for Ampere (`Qmd3_0`). Cross-reference for any field we're unsure about. |
-| `../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c` | 159-260 | NVK's `nvk_cmd_upload_qmd` — model for the upload pattern (allocate buffer, fill QMD, dispatch). |
-| `../slmos-reference-cache/mesa/mesa-clc7c0qmd.h` | — | Authoritative Ampere QMD field definitions, auto-generated from NVIDIA's `open-gpu-doc`. The reference if we hit a "what is this bit?" question. |
+| `~/slmos-ref/mesa/mesa-nak_qmd.rs` | 499-528, 616-655 | NVK's Rust QMD encoder for Ampere (`Qmd3_0`). Cross-reference for any field we're unsure about. |
+| `~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c` | 159-260 | NVK's `nvk_cmd_upload_qmd` — model for the upload pattern (allocate buffer, fill QMD, dispatch). |
+| `~/slmos-ref/mesa/mesa-clc7c0qmd.h` | — | Authoritative Ampere QMD field definitions, auto-generated from NVIDIA's `open-gpu-doc`. The reference if we hit a "what is this bit?" question. |
 
 ---
 

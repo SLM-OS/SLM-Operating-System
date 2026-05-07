@@ -47,10 +47,10 @@ rustup target add x86_64-unknown-none
 ### Reference Cache (optional — for development reading material)
 
 In-tree code comments cite third-party reference material at paths
-like `../slmos-reference-cache/<vendor>/<filename>`. Those resolve to
-a private companion repo, `SLM-OS/slmos-reference-cache`, which holds
-mirrored upstream sources (NVIDIA L4T nvgpu, Mesa NVK, nouveau,
-HailoRT, Linux kernel, RPi firmware, etc.) plus SLM-OS-authored
+like `~/slmos-ref/<vendor>/<filename>`. This is a local-only flat
+reference tree (not a git repo) that holds mirrored upstream sources
+(NVIDIA L4T nvgpu, Mesa NVK, nouveau, HailoRT, Linux kernel, RPi
+firmware, ARM Trusted Firmware, etc.) plus SLM-OS-authored
 investigation notes and lab traces.
 
 The cache is **not required to build or run SLM-OS** — it's only
@@ -58,24 +58,17 @@ useful if you're following inline citations in source comments or
 doing GPU/AI-accelerator driver work that benefits from reading
 upstream references locally.
 
-To set it up, clone the private repo as a sibling directory next to
-your SLM-OS checkout:
+To set it up, populate `~/slmos-ref/` on your machine with the
+expected vendor folders. Symlinking it from a synced location
+(Dropbox, Syncthing, etc.) is fine — the in-tree references are
+just absolute home-relative paths.
 
-```bash
-cd <parent-dir-of-this-checkout>
-git clone git@github.com:SLM-OS/slmos-reference-cache.git
-```
+Vendor folders: `nvidia/`, `nouveau/`, `mesa/`, `hailo/`,
+`tegra-l4t/`, `linux/`, `rpi/`, `circle/`, `uboot/`, `kexec/`,
+`tf-a/`. SLM-OS-authored notes live under `derivatives/`.
 
-Layout afterward:
-
-```
-parent-dir/
-├── SLM-Operating-System/      ← this repo
-└── slmos-reference-cache/     ← reference material
-```
-
-See `../slmos-reference-cache/README.md` (after cloning) for the
-vendor folder layout and conventions for adding new upstream files.
+See `~/slmos-ref/README.md` for the full layout and conventions for
+adding new upstream files.
 
 ---
 

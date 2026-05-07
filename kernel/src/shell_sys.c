@@ -6846,7 +6846,7 @@ int cmd_nvcsi(int argc, char *argv[])
     } else {
         uart_puts("  *** Non-zero INTR_STATUS — receiver saw a   ***\r\n");
         uart_puts("  *** packet or fault during init. Inspect    ***\r\n");
-        uart_puts("  *** bits per ../slmos-reference-cache/tegra-l4t/l4t-csi4_registers.h ***\r\n");
+        uart_puts("  *** bits per ~/slmos-ref/tegra-l4t/l4t-csi4_registers.h ***\r\n");
     }
 
     uart_puts("=== End ===\r\n");
@@ -6900,7 +6900,7 @@ int cmd_rcediag(int argc, char *argv[])
          * the established session can carry arbitrary HSP-VM
          * messages — not just the boot-sync HELLO/PROTOCOL/RESUME
          * sequence. PING is documented in
-         * `../slmos-reference-cache/tegra-l4t/l4t-camrtc-commands.h:64-66` as the
+         * `~/slmos-ref/tegra-l4t/l4t-camrtc-commands.h:64-66` as the
          * "check aliveness of RCE FW and the HSP protocol" probe;
          * RCE echoes the 24-bit param verbatim. This is the
          * smallest pre-CH_SETUP gate proving `camrtc_send_msg` is
@@ -6965,7 +6965,7 @@ int cmd_rcediag(int argc, char *argv[])
  *   2. CAPTURE_PHY_STREAM_OPEN_REQ (NVCSI port A, stream 0, D-PHY)
  *   3. Print the response result.
  *
- * Result codes are in `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`
+ * Result codes are in `~/slmos-ref/tegra-l4t/l4t-camrtc-capture-messages.h`
  * (CAPTURE_OK = 0, CAPTURE_ERROR_* otherwise). Anything other than
  * 0 means the request reached RCE, came back, but RCE rejected it
  * — e.g. NVCSI not powered, port already open, bad PHY type. The
@@ -6989,7 +6989,7 @@ int cmd_csidiag(int argc, char *argv[])
 
     uint32_t result = 0xDEADBEEFu;
     /* NVCSI_STREAM_0 = 0, NVCSI_PORT_A = 0, NVCSI_PHY_TYPE_DPHY = 0
-     * (`../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture.h:1372/1387/1443`). */
+     * (`~/slmos-ref/tegra-l4t/l4t-camrtc-capture.h:1372/1387/1443`). */
     rc = camrtc_capture_phy_stream_open(0u, 0u, 0u, &result);
     uart_printf("  PHY_STREAM_OPEN: rc=%d result=0x%x\r\n",
                 rc, (unsigned)result);
@@ -7008,7 +7008,7 @@ int cmd_csidiag(int argc, char *argv[])
 
     /* PHY_STREAM_OPEN succeeded. Configure the brick + CIL for
      * IMX219: 2 D-PHY lanes, 456 MHz MIPI clock (the IMX219
-     * default link freq from `../slmos-reference-cache/linux/linux-imx219.c:139`).
+     * default link freq from `~/slmos-ref/linux/linux-imx219.c:139`).
      * SoC-default t_hs_settle / t_clk_settle (0). */
     uint32_t cfg_result = 0xDEADBEEFu;
     rc = camrtc_capture_csi_stream_set_config(0u, 0u, 2u, 456000u,
