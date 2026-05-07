@@ -249,23 +249,6 @@ el1_sync:
  * EL1 IRQ (kernel) - Timer interrupts come here
  */
 el1_irq:
-#if defined(STAGE25_TRACE_PI5)
-    /* #672 hard probe: when the IRQ vector is entered, drain the UART
-     * FIFO between writes so each 'I' is guaranteed on the wire.
-     * Loops forever (clobbers x16/x17 — diagnostic builds only). */
-1:  /* Drain FIFO: load FR (offset 0x18 from DR), wait until TXFE=1 */
-    movz    x16, #0x0018
-    movk    x16, #0x0003, lsl #16
-    movk    x16, #0x001f, lsl #32
-2:  ldr     w17, [x16]
-    tst     w17, #0x80          /* TXFE bit */
-    b.eq    2b
-    /* Write 'I' to DR */
-    sub     x16, x16, #0x18
-    mov     w17, #'I'
-    str     w17, [x16]
-    b       1b
-#endif
     STAGE25_TRACE_CHAR 'V'              /* Trace: vector entered */
     DIAG_BUMP_VEC 0x08
     save_regs
@@ -297,15 +280,6 @@ el1_irq:
  * records the IRQ number, then EOIs.
  */
 el1_fiq:
-#if defined(STAGE25_TRACE_PI5)
-    /* #672 hard probe: bust-loop emitting 'F' if FIQ vector entered. */
-3:  movz    x16, #0x0000
-    movk    x16, #0x0003, lsl #16
-    movk    x16, #0x001f, lsl #32
-    mov     w17, #'F'
-    str     w17, [x16]
-    b       3b
-#endif
     STAGE25_TRACE_CHAR 'F'              /* Trace: FIQ entered (#672 probe) */
     DIAG_BUMP_VEC 0x10
     save_regs
@@ -326,15 +300,6 @@ el1_fiq:
  * EL1 SError (kernel)
  */
 el1_serror:
-#if defined(STAGE25_TRACE_PI5)
-    /* #672 hard probe: bust-loop emitting 'X' if SError vector entered. */
-4:  movz    x16, #0x0000
-    movk    x16, #0x0003, lsl #16
-    movk    x16, #0x001f, lsl #32
-    mov     w17, #'X'
-    str     w17, [x16]
-    b       4b
-#endif
     STAGE25_TRACE_CHAR 'X'              /* Trace: SError (#672 probe) */
     DIAG_BUMP_VEC 0x18
     save_regs

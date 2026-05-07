@@ -13,13 +13,32 @@
 #include "platform.h"
 
 /*
- * Timer selection: All platforms use the non-secure physical timer (CNTP).
- * Pi 5 previously used virtual timer (CNTV, IRQ 27) but Linux and Circle
- * both use the physical timer (IRQ 30) at EL1. CNTHCTL_EL2 must have
- * EL1PCEN set (done in boot.S) for EL1 access to CNTP registers.
+ * Timer selection.
+ *
+ * QEMU + Jetson + x86 use the non-secure physical timer (CNTP, PPI 30
+ * on ARM64). CNTHCTL_EL2.EL1PCEN must be set (done in boot.S) for EL1
+ * access to CNTP registers.
+ *
+ * Pi 5 (#672 / #134): the BCM2712 / GIC-400 firmware does not route
+ * PPI 30 → NS-EL1 in a working way — the IRQ pin asserts but the CPU
+ * never enters the EL1 vector, and `daifclr` with the pin asserted
+ * hard-locks CPU 0. Linux on Pi 5 boots at EL2 with VHE and uses PPI
+ * 26 (Hyp Physical Timer) instead, so it never exercises that path.
+ *
+ * For SLM-OS at NS-EL1, PPI 27 (the virtual timer, CNTV_*_EL0) is
+ * Linux's HYP-not-available fallback in `arch_timer_select_ppi()` and
+ * sidesteps the broken PPI 30 routing entirely. CNTVOFF_EL2 reset
+ * value of 0 (boot.S leaves it alone) makes virtual time track
+ * physical time, so existing CNTPCT-based code (timer_get_count,
+ * coop_preempt_maybe_tick, etc.) keeps working unchanged. The
+ * platform select is via PLATFORM_TIMER_USES_VIRTUAL in platform.h.
  */
+#if defined(PLATFORM_TIMER_USES_VIRTUAL) && PLATFORM_TIMER_USES_VIRTUAL
+#define USE_VIRTUAL_TIMER   1
+#else
 #define USE_VIRTUAL_TIMER   0
-#define ACTUAL_TIMER_IRQ    TIMER_IRQ  /* Physical timer IRQ 30 */
+#endif
+#define ACTUAL_TIMER_IRQ    TIMER_IRQ
 
 /* Timer interval (computed at init) */
 static uint64_t timer_interval;
