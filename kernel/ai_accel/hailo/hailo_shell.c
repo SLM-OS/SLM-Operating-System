@@ -188,17 +188,27 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
      * sequence itself. Kept as a tunable knob so future investigation
      * can re-test cheaply (e.g., x4 plus settle-pings combination). */
     uint32_t hwc_repeat = 1u;
+    /* #361 settle-ping hypothesis: when `pings` is set, fire APP-CPU
+     * IDENTIFY + GET_DEVICE_INFORMATION before each CORE-CPU step.
+     * HailoRT v4.23's wire capture (hailort-v4.23.0-wire-capture-mnist
+     * -pi5.txt) shows ~3 APP-CPU RPCs interleaved before/after every
+     * major CORE step; SLM-OS sends none. The question is whether the
+     * pings silence the CPU_ECC_FATAL events fw fires after RESET. */
+    bool inject_pings = false;
     for (int ai = 3; ai < argc; ai++) {
         if (strncmp(argv[ai], "hwc", 3) == 0) {
             int n = 0;
             for (const char *p = argv[ai] + 3; *p >= '0' && *p <= '9'; p++)
                 n = n * 10 + (*p - '0');
             if (n >= 1 && n <= 16) hwc_repeat = (uint32_t)n;
+        } else if (strcmp(argv[ai], "pings") == 0) {
+            inject_pings = true;
         }
     }
-    shell_printf("hailo: ctxsmoke variant=%s (out=%d in=%d) hwc_repeat=%u\n",
+    shell_printf("hailo: ctxsmoke variant=%s (out=%d in=%d) hwc_repeat=%u "
+                 "pings=%d\n",
                  variant, (int)include_out, (int)include_in,
-                 (unsigned)hwc_repeat);
+                 (unsigned)hwc_repeat, (int)inject_pings);
     /* Phase 6.3d/6.4 hardware probe: exercise the three context-
      * switch opcodes (CHANGE_CONTEXT_SWITCH_STATUS,
      * SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO) against live
@@ -373,8 +383,28 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     }
 
     shell_puts("hailo: ctxsmoke:\n");
+    int rc;
+
+    /* Settle-ping helper. Fires APP-CPU IDENTIFY + GET_DEVICE_INFORMATION
+     * (two RPCs HailoRT interleaves before/after every CORE step) when
+     * the `pings` knob is on, then drains d2h. Uses block scope and a
+     * label so the existing rc/struct names stay reachable. */
+#define CTXSMOKE_SETTLE_PINGS(_label)                                   \
+    do {                                                                \
+        if (inject_pings) {                                             \
+            struct hailo_control_identify_response __idr;               \
+            int __irc = hailo_control_identify(&__idr);                 \
+            shell_printf("  [ping " _label "] IDENTIFY rc=%d\n", __irc);\
+            uint32_t __dlen = 0;                                        \
+            int __drc = hailo_control_get_device_information(&__dlen);  \
+            shell_printf("  [ping " _label "] GET_DEVICE_INFO rc=%d "   \
+                         "len=%u\n", __drc, (unsigned)__dlen);          \
+        }                                                               \
+    } while (0)
+
+    CTXSMOKE_SETTLE_PINGS("pre-RESET");
     shell_puts("  [1/8] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
-    int rc = hailo_control_change_context_switch_status(
+    rc = hailo_control_change_context_switch_status(
         HAILO_CS_STATE_RESET,
         HAILO_CS_IGNORE_APPLICATION_INDEX,
         /*batch_size=*/0, /*batch_count=*/0);
@@ -389,6 +419,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
      * CHANGE_CONTEXT_SWITCH_STATUS(RESET) and SET_NETWORK_GROUP_HEADER.
      * Skipping these left firmware's context-switch bookkeeping stale
      * and BATCH_SWITCHING walked into uninitialized state. */
+    CTXSMOKE_SETTLE_PINGS("pre-CLEAR_APPS");
     shell_puts("  [2/8] CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS...\n");
     rc = hailo_control_context_switch_clear_configured_apps();
     shell_printf("        rc=%d\n", rc);
@@ -404,6 +435,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     shell_printf("  [3/8] GET_HW_CONSTS x%u...\n", (unsigned)hwc_repeat);
     uint32_t hw_consts_resp_len = 0;
     for (uint32_t i = 0; i < hwc_repeat; i++) {
+        CTXSMOKE_SETTLE_PINGS("pre-GET_HW_CONSTS");
         rc = hailo_control_get_hw_consts(&hw_consts_resp_len);
         shell_printf("        [%u/%u] rc=%d resp_len=%u\n",
                      (unsigned)(i + 1), (unsigned)hwc_repeat,
@@ -414,6 +446,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
 #endif
     }
 
+    CTXSMOKE_SETTLE_PINGS("pre-SET_NG_HEADER");
     shell_puts("  [4/8] SET_NETWORK_GROUP_HEADER...\n");
     rc = hailo_control_set_network_group_header(&hdr);
     shell_printf("        rc=%d\n", rc);
@@ -422,6 +455,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     hailo_fw_drain_d2h_notifications(4);
 #endif
 
+    CTXSMOKE_SETTLE_PINGS("pre-CTX(ACT)");
     shell_printf("  [5/8] SET_CONTEXT_INFO(ACTIVATION, %u bytes)\n",
                  (unsigned)bufs.activation_len);
     /* #180 diag: dump the first 80 ACTIVATION bytes — the three
@@ -469,6 +503,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     shell_puts("  [--] DIAG: sleeping 500 ms before BATCH_SWITCHING\n");
     hailo_platform->udelay(500000u);
 
+    CTXSMOKE_SETTLE_PINGS("pre-CTX(BS)");
     shell_printf("  [6/8] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes)\n",
                  (unsigned)bufs.batch_switching_len);
 #ifdef HAILO_WIRE_DEBUG
@@ -535,6 +570,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
         shell_printf("        BSC_IMASK_HOST=0x%08x\n", imask);
     }
 
+    CTXSMOKE_SETTLE_PINGS("pre-CTX(PRE)");
     shell_printf("  [7/8] SET_CONTEXT_INFO(PRELIMINARY, %u bytes)\n",
                  (unsigned)bufs.preliminary_len);
     shell_printf("        CCW buffer iova=0x%lx\n",
@@ -558,6 +594,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
 #endif
 
     if (!dcc0) {
+        CTXSMOKE_SETTLE_PINGS("pre-CTX(DYN)");
         shell_printf("  [8/8] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
                      (unsigned)bufs.dynamic_len);
 #ifdef HAILO_WIRE_DEBUG
@@ -589,6 +626,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
      * the header-supplied batch (we set batch_size=1 in the app
      * header). If firmware accepts all 4 SET_CONTEXT_INFO calls,
      * this transition unlocks per-frame VDMA submission. */
+    CTXSMOKE_SETTLE_PINGS("pre-ENABLED");
     shell_puts("  [-/8] CHANGE_CONTEXT_SWITCH_STATUS(ENABLED)...\n");
     rc = hailo_control_change_context_switch_status(
         HAILO_CS_STATE_ENABLED,
@@ -599,6 +637,8 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     shell_puts("  [d2h after CHANGE_STATUS(ENABLED)]\n");
     hailo_fw_drain_d2h_notifications(4);
 #endif
+
+#undef CTXSMOKE_SETTLE_PINGS
 
     hailo_vdma_desc_list_free(&bnd_out_list);
     hailo_vdma_desc_list_free(&bnd_in_list);
