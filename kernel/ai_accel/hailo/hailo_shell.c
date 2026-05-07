@@ -709,6 +709,11 @@ static int cmd_hailo(int argc, char *argv[])
         if (rc == HAILO_OK) {
             shell_printf("hailo: boot OK, state=%s\n",
                          hailo_state_str(hailo_get_state()));
+            /* #682 checkpoint 1: IN ch=2 base register state right
+             * after fw flash, before any model load. Establishes
+             * baseline — if avail!=0 here, the stale-SRAM hypothesis
+             * is in play. */
+            hailo_vdma_dump_channel_regs(2, "[682-cp1] post boot");
         } else {
             shell_printf("hailo: boot failed (%d), state=%s\n", rc,
                          hailo_state_str(hailo_get_state()));
