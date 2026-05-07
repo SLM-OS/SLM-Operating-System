@@ -20,6 +20,9 @@
 #ifndef SLM_FFI_TEST_H
 #define SLM_FFI_TEST_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -33,6 +36,16 @@ void slm_gpu_dispatch_breaker_test_record(int rc);
 /* Read the raw consecutive-failure counter. Atomically loaded so
  * tests can assert exact values mid-run. */
 int  slm_gpu_dispatch_breaker_test_count(void);
+
+/* Sched-MLP dispatch rate-limit predicate (#651).
+ *
+ * Returns true iff `now - last < RATE_LIMIT_NS`, i.e. the next
+ * dispatch should be rejected because the previous one finished
+ * inside the window. Available on every platform — the predicate
+ * itself is pure arithmetic — so the test runs cross-platform even
+ * though the call site (`slm_gpu_run_sched_inference`) is gated to
+ * Jetson. */
+bool slm_gpu_sched_dispatch_test_within_window(uint64_t now, uint64_t last);
 
 #ifdef __cplusplus
 }

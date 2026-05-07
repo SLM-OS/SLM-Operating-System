@@ -1,0 +1,59 @@
+From b16f2857d78c56122a70b39b4f03281573054371 Mon Sep 17 00:00:00 2001
+From: slmos-build <slmos-build@example.com>
+Date: Wed, 6 May 2026 18:07:35 -0700
+Subject: [PATCH 3/3] =?UTF-8?q?SLM-OS=20Pi=205=20GIC=20Sentinel=20C=20?=
+ =?UTF-8?q?=E2=80=94=20capture=20TF-A=20IGROUPR0=20readback=20(#134)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ plat/rpi/rpi5/rpi5_setup.c | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/plat/rpi/rpi5/rpi5_setup.c b/plat/rpi/rpi5/rpi5_setup.c
+index 99cbc3735..9261b9c98 100644
+--- a/plat/rpi/rpi5/rpi5_setup.c
++++ b/plat/rpi/rpi5/rpi5_setup.c
+@@ -86,8 +86,38 @@ void plat_rpi_bl31_custom_setup(void)
+ 		mmio_write_32(gicd_base + 0x080, 0xFFFFFFFFU);
+ 		__asm__ volatile("dsb sy" ::: "memory");
+ 		uint32_t post = mmio_read_32(gicd_base + 0x080);
++		uint32_t gicd_ctlr_now = mmio_read_32(gicd_base + 0x000);
+ 		NOTICE("rpi5: GICD_IGROUPR[0] pre=0x%08x post=0x%08x "
+ 		       "(target: 0xFFFFFFFF — all PPI/SGI Group 1 NS)\n",
+ 		       pre, post);
++
++		/*
++		 * SLM-OS Sentinel C (#134 GIC probe).
++		 *
++		 * Publish TF-A's own IGROUPR0 readback to NC memory so the
++		 * kernel can verify whether our IGROUPR write actually took
++		 * effect at EL3. The kernel-side `diag` command later reads
++		 * IGROUPR0 again at NS-EL2/EL1 — comparing the two answers:
++		 *
++		 *   C.post == 0xFFFFFFFF AND kernel reads 0xFFFFFFFF
++		 *     → write took effect, no clobber, GIC is in expected
++		 *       state. Look elsewhere for the IRQ-delivery gate.
++		 *
++		 *   C.post == 0xFFFFFFFF AND kernel reads 0
++		 *     → write was visible to TF-A but cleared between
++		 *       el3_exit and the kernel's read (security-state view
++		 *       difference, or some Pi 5 firmware path resets the
++		 *       distributor on EL handoff).
++		 *
++		 *   C.post != 0xFFFFFFFF
++		 *     → the GIC silently discards the write at EL3 — root
++		 *       cause is in GIC config (DS bit, security gating).
++		 *
++		 * Slot map matches kernel/include/diag_pi5.h DIAG_GIC_SENTINEL_C_*.
++		 */
++		*(volatile uint32_t *)0xFFE0FEE0ULL = 0xCAFE0003U;
++		*(volatile uint32_t *)0xFFE0FEE4ULL = pre;
++		*(volatile uint32_t *)0xFFE0FEE8ULL = post;
++		*(volatile uint32_t *)0xFFE0FEECULL = gicd_ctlr_now;
+ 	}
+ }
+-- 
+2.43.0
+

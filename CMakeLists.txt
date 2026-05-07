@@ -143,6 +143,17 @@ if(PLATFORM STREQUAL "RASPI5" AND PI5_IRQ_DIAG)
     add_compile_definitions(PI5_IRQ_DIAG=1)
 endif()
 
+# Pi 5 Stage 2.5+ trace markers — emit single ASCII chars from the
+# exception vectors and resched_trampoline directly to the RP1 PL011
+# DR. Bypasses the kernel UART driver so traces survive even when
+# higher-level logging is wedged. See `STAGE25_TRACE_CHAR` in
+# kernel/arch/arm64/vectors.S. Off by default; enable with
+# -DSTAGE25_TRACE_PI5=ON when debugging the trampoline path (#672).
+option(STAGE25_TRACE_PI5 "Pi 5 vector + trampoline trace markers (debug only)" OFF)
+if(PLATFORM STREQUAL "RASPI5" AND STAGE25_TRACE_PI5)
+    add_compile_definitions(STAGE25_TRACE_PI5=1)
+endif()
+
 # Cooperative-preemption fallback — for ARM64 platforms where the GIC
 # security configuration prevents timer IRQs from reaching the kernel.
 # See docs/pi5-preemption-resolution.md for the Pi 5 diagnostic chain
@@ -425,6 +436,7 @@ set(KERNEL_SOURCES
     kernel/src/latency_hist.c
     kernel/src/rate_ewma.c
     kernel/src/gpu_consumer.c
+    kernel/src/gpu_tier.c
     kernel/gpu/operator_library.c
     kernel/src/admin_telemetry.c
     kernel/src/model_engine.c
@@ -727,6 +739,7 @@ set(TEST_SOURCES
     kernel/tests/test_sched_trace.c
     kernel/tests/test_latency_hist.c
     kernel/tests/test_gpu_consumer.c
+    kernel/tests/test_gpu_tier.c
     kernel/tests/test_operator_library.c
     kernel/tests/test_gpu_dispatch_breaker.c
     kernel/tests/test_admin_telemetry.c
