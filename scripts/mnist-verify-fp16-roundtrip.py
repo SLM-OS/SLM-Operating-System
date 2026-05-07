@@ -12,8 +12,9 @@ the same FP16 weights will also classify correctly. The kernel may
 introduce additional accumulator-ordering differences, but those
 are bounded by the same FP16-precision envelope.
 
-Run from the repo root:
-    /tmp/onnxenv/bin/python3 scripts/mnist-verify-fp16-roundtrip.py \\
+Run from the repo root with a Python 3 venv that has `numpy` and
+`onnx` installed:
+    python3 scripts/mnist-verify-fp16-roundtrip.py \\
         models/test/mnist.onnx --count 100
 
 Acceptance for #660: at least 99% argmax agreement on N=100 random
@@ -21,6 +22,11 @@ test-set indices. The remaining ~1% are MNIST cases where the FP32
 top-1 is itself within 1-2% of FP32 top-2; FP16 rounding can flip
 those without indicating a real classifier-quality regression. Run
 N=1000 or N=10000 if the user wants tighter bounds.
+
+Performance note: each compared image runs the full Conv1 + Conv2 +
+2× MaxPool + GEMM + AddBias pipeline twice (FP32 reference + FP16
+emulated reference) in pure numpy. N=100 finishes in a few seconds;
+N=10000 takes minutes. Bump `--count` deliberately.
 
 Caches the test set under ~/.cache/slmos-mnist/ via the same path
 mnist-extract-test-digits.py uses.
@@ -39,8 +45,8 @@ try:
     import onnx
 except ImportError:
     sys.exit(
-        "onnx module required. Use the existing venv: "
-        "/tmp/onnxenv/bin/python3 scripts/mnist-verify-fp16-roundtrip.py ..."
+        "onnx module required. Activate or run from a Python venv "
+        "with `pip install onnx numpy`."
     )
 
 # Reuse the reference inference + roundtrip helper from the extractor.
@@ -53,6 +59,12 @@ TEST_IMAGES_URL = ("https://ossci-datasets.s3.amazonaws.com/mnist/"
                    "t10k-images-idx3-ubyte.gz")
 TEST_LABELS_URL = ("https://ossci-datasets.s3.amazonaws.com/mnist/"
                    "t10k-labels-idx1-ubyte.gz")
+
+# IDX file-format magics. The IDX format prefixes every file with a
+# 32-bit big-endian magic that encodes the dimensionality and dtype.
+# See http://yann.lecun.com/exdb/mnist/ § "FILE FORMATS".
+IDX3_IMAGES_MAGIC = 0x00000803  # 2051: 3-D, ubyte (image stack)
+IDX1_LABELS_MAGIC = 0x00000801  # 2049: 1-D, ubyte (label vector)
 
 
 def fetch(url: str, dest: Path) -> None:
@@ -73,14 +85,16 @@ def load_test_set():
 
     with gzip.open(img_gz, "rb") as f:
         magic, count, rows, cols = struct.unpack(">IIII", f.read(16))
-        if magic != 2051:
-            raise RuntimeError(f"unexpected images magic: {magic}")
+        if magic != IDX3_IMAGES_MAGIC:
+            raise RuntimeError(f"unexpected images magic: {magic:#x} "
+                               f"(want {IDX3_IMAGES_MAGIC:#x})")
         images = np.frombuffer(f.read(),
                                dtype=np.uint8).reshape(count, rows, cols)
     with gzip.open(lbl_gz, "rb") as f:
         magic, _ = struct.unpack(">II", f.read(8))
-        if magic != 2049:
-            raise RuntimeError(f"unexpected labels magic: {magic}")
+        if magic != IDX1_LABELS_MAGIC:
+            raise RuntimeError(f"unexpected labels magic: {magic:#x} "
+                               f"(want {IDX1_LABELS_MAGIC:#x})")
         labels = np.frombuffer(f.read(), dtype=np.uint8)
     return images, labels
 
