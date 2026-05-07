@@ -198,6 +198,21 @@ bool ga10b_dispatch_verbose_get(void);
  * timeout. PBDMA-decoded; bypasses GR. */
 int ga10b_bringup_smoke_test(struct ga10b_bringup *b);
 
+/* Variant of `ga10b_bringup_smoke_test` that targets a caller-
+ * supplied (sem_gpu_va, sem_phys, payload) tuple instead of the
+ * handoff-baked semaphore. Used by `nvgpu gmmu gpu-test` to fire
+ * a host-class SEMAPHORE_RELEASE at a SLM-OS-allocated GMMU VA —
+ * if the GPU writes `payload` to `sem_phys`, the GPU's TLB walker
+ * accepted our PDE chain + PTE end-to-end (#666 / #678).
+ *
+ * Caller supplies sem_phys as the CPU-side address it will poll.
+ * On Jetson identity-mapped DRAM that's the same number as the
+ * physical address backing sem_gpu_va. */
+int ga10b_bringup_sema_release_at(struct ga10b_bringup *b,
+                                  uint64_t sem_gpu_va,
+                                  uint64_t sem_phys,
+                                  uint32_t payload);
+
 /* Phase 7 (compute variant): submit AMPERE_COMPUTE_B-class
  * SEMAPHORE_RELEASE. Same success criterion. Validates that the GR
  * engine's compute pipeline accepts method dispatch on the inherited

@@ -70,6 +70,31 @@ struct pmm_buddy_stats {
 void pmm_init(void);
 
 /*
+ * Maximum runtime memreserves the PMM tracks. Sized for the
+ * GA10B GMMU use case: one entry covering Linux's inst block +
+ * PDB chain region (typically a single 1-2 MB cluster). Bump if
+ * a future consumer needs to reserve more disjoint ranges.
+ */
+#define PMM_MAX_RUNTIME_RESERVES   8
+
+/*
+ * Append a runtime-discovered phys range to the PMM reserve list.
+ * MUST be called BEFORE pmm_init — reserves take effect inside
+ * pmm_add_region_split's carve pass.
+ *
+ * Used to keep specific phys pages out of the buddy allocator
+ * when some other consumer needs them at fixed addresses. The
+ * canonical use case is the GA10B GPU inst block + PDB chain
+ * after kexec: the GPU's MMU walker reads from those phys, so
+ * SLM-OS PMM must not reuse them. See `kernel/src/main.c` for
+ * the call site (Jetson-only, between vmm_init and pmm_init).
+ *
+ * Returns 0 on success, -1 if the reserve table is full
+ * (PMM_MAX_RUNTIME_RESERVES) or `size` is 0.
+ */
+int pmm_runtime_reserve_add(uint64_t addr, uint64_t size);
+
+/*
  * Allocate a single 4KB physical page.
  *
  * Returns: Physical address of allocated page, or 0 on failure.

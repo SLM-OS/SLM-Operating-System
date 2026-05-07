@@ -346,6 +346,32 @@ void kernel_main(void *dtb)
     uart_puts("\n");
     vmm_init();
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Reserve Linux's GPU inst block + a generous surrounding window
+     * before pmm_init builds the buddy. nvgpu allocates the inst block
+     * + PDB chain + per-level page tables sequentially via nvmap, so
+     * the cluster is contiguous within ~1 MB. The GPU's MMU walker
+     * still reads from those phys post-kexec; if SLM-OS PMM hands the
+     * pages out as buddy free space, our inst-block walker reads
+     * stomped bytes (and #678's GPU-side validation fails).
+     *
+     * Cheap to over-reserve since DRAM is 8 GB. The reserve no-ops if
+     * FECS_CURRENT_CTX returns 0 (no GPU bound — e.g. fresh boot
+     * without --no-gpu-suspend kexec).
+     */
+    {
+        extern uint64_t ga10b_gmmu_discover_inst_block_phys(void);
+        uint64_t inst = ga10b_gmmu_discover_inst_block_phys();
+        if (inst != 0) {
+            uint64_t base = inst & ~((uint64_t)0x100000 - 1);  /* 1 MB align */
+            (void)pmm_runtime_reserve_add(base, 0x100000);     /* reserve 1 MB */
+            uart_printf("[INFO] Reserved Linux GPU inst-block region "
+                        "0x%lx..0x%lx for GMMU walker (#666/#678)\n",
+                        (unsigned long)base, (unsigned long)(base + 0x100000));
+        }
+    }
+#endif
+
     uart_puts("\n");
     pmm_init();
     pmm_dump_stats();

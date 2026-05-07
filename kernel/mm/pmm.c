@@ -464,9 +464,30 @@ int pmm_carve_reserves(uintptr_t start, uintptr_t end,
  * cap grows in the future, the worst-case ~1 KB stack footprint per
  * call would otherwise scale with it.
  */
-static uintptr_t        pmm_split_starts[DTB_MAX_MEMRESERVES + 1];
-static uintptr_t        pmm_split_ends  [DTB_MAX_MEMRESERVES + 1];
-static dtb_memreserve_t pmm_split_rsv   [DTB_MAX_MEMRESERVES];
+/* Combined reserve scratch: DTB reserves + runtime reserves. The
+ * carve pass treats both kinds identically — they're just phys
+ * ranges to exclude. */
+#define PMM_TOTAL_RESERVES (DTB_MAX_MEMRESERVES + PMM_MAX_RUNTIME_RESERVES)
+static uintptr_t        pmm_split_starts[PMM_TOTAL_RESERVES + 1];
+static uintptr_t        pmm_split_ends  [PMM_TOTAL_RESERVES + 1];
+static dtb_memreserve_t pmm_split_rsv   [PMM_TOTAL_RESERVES];
+
+/* Runtime reserve list — append-only, populated by callers
+ * BEFORE pmm_init via pmm_runtime_reserve_add(). Used by GA10B
+ * to keep Linux's GPU inst block + PDB chain out of the buddy
+ * allocator; see kernel/src/main.c for the Jetson-only call. */
+static dtb_memreserve_t pmm_runtime_rsv[PMM_MAX_RUNTIME_RESERVES];
+static int              pmm_runtime_rsv_count;
+
+int pmm_runtime_reserve_add(uint64_t addr, uint64_t size)
+{
+    if (size == 0) return -1;
+    if (pmm_runtime_rsv_count >= PMM_MAX_RUNTIME_RESERVES) return -1;
+    pmm_runtime_rsv[pmm_runtime_rsv_count].addr = addr;
+    pmm_runtime_rsv[pmm_runtime_rsv_count].size = size;
+    pmm_runtime_rsv_count++;
+    return 0;
+}
 
 static void pmm_add_region_split(uintptr_t start, uintptr_t end)
 {
@@ -493,9 +514,15 @@ static void pmm_add_region_split(uintptr_t start, uintptr_t end)
     in_split = true;
 
     int n_rsv = dtb_get_memreserves(pmm_split_rsv, DTB_MAX_MEMRESERVES);
+    /* Append runtime reserves after DTB reserves. n_rsv tracks
+     * the combined count; pmm_carve_reserves treats both the same. */
+    for (int i = 0; i < pmm_runtime_rsv_count &&
+                    n_rsv < PMM_TOTAL_RESERVES; i++) {
+        pmm_split_rsv[n_rsv++] = pmm_runtime_rsv[i];
+    }
     int n_out = pmm_carve_reserves(start, end, pmm_split_rsv, n_rsv,
                                    pmm_split_starts, pmm_split_ends,
-                                   DTB_MAX_MEMRESERVES + 1);
+                                   PMM_TOTAL_RESERVES + 1);
     for (int i = 0; i < n_out; i++) {
         pmm_add_region(pmm_split_starts[i], pmm_split_ends[i]);
     }

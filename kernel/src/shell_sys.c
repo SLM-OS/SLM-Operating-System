@@ -4037,6 +4037,111 @@ int cmd_nvgpu(int argc, char *argv[])
                        "alloc-multi-synth <n_pages>>\r\n");
             return -1;
         }
+        if (strcmp(argv[2], "gpu-test") == 0) {
+            /* #678 scaffold: end-to-end GPU-side validation that the
+             * SLM-OS GMMU walker emits PTE chains the GPU's TLB
+             * walker accepts. Allocate a SLM-OS-managed GMMU VA in
+             * the inherited channel's address space, fire a host-
+             * class SEMAPHORE_RELEASE targeting that VA, poll our
+             * cpu_va. PASS iff the GPU writes 0xCAFE there — that
+             * proves the GPU walked Linux's PDB → into our newly-
+             * written PDE2[256] subtree → into our PDE1/PDE0/PT
+             * pages → found our PTE → wrote to our phys page.
+             *
+             * Status (2026-05-07): does NOT work yet. The
+             * FECS_CURRENT_CTX register and the inst-block PDB
+             * pointer are *Tegra MC SMMU IOVAs*, not CPU phys.
+             * `nvgpu_iommuable(g)` returns false on Tegra Orin (no
+             * `iommus` DT property on the gk20a device), but that
+             * checks the standard ARM SMMU iommu_domain — Tegra MC
+             * has its own SEPARATE SMMU layer that nvgpu's
+             * `nvgpu_mem_get_addr` doesn't account for. Result:
+             * SLM-OS-side reads of "phys 0x..." from FECS see
+             * unrelated DRAM, not Linux's actual inst block.
+             *
+             * To actually close #678, one of:
+             *   1. Add Tegra MC SMMU IOVA→phys translation in a
+             *      Linux LKM that patches the handoff with the real
+             *      phys before kexec.
+             *   2. Build a SLM-OS-owned channel (alloc inst block +
+             *      PDB ourselves, swap FECS context) — bypasses
+             *      the IOVA question entirely.
+             *
+             * The infrastructure here is preserved as scaffolding
+             * for whichever path is chosen. The ga10b_bringup_
+             * sema_release_at + the alloc + cache + verify flow are
+             * all reusable.
+             *
+             * Requires (when it works): real handoff (`nvgpu
+             * inherit` + `nvgpu channel`) + arm_smmu_noshutdown.ko
+             * loaded pre-kexec (so the SMMU survives kexec). */
+            const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+            if (h == NULL) {
+                shell_puts("gpu-test: no handoff loaded — run `nvgpu inherit` "
+                           "+ `nvgpu channel` first\r\n");
+                return -1;
+            }
+            uint64_t inst_phys = h->inst_block_phys;
+            if (inst_phys == 0) {
+                inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys == 0) {
+                    shell_puts("gpu-test: handoff inst_block_phys=0 + FECS "
+                               "discover failed — gpu/channel state lost?\r\n");
+                    return -1;
+                }
+                shell_printf("gpu-test: using FECS_CURRENT_CTX inst=0x%lx\r\n",
+                             (unsigned long)inst_phys);
+            }
+
+            uint64_t our_va = 0, our_phys = 0;
+            void *our_cpu_va = NULL;
+            int rc = ga10b_gmmu_alloc_page(inst_phys, 0,
+                                           &our_va, &our_cpu_va, &our_phys);
+            if (rc < 0) {
+                shell_printf("gpu-test: ga10b_gmmu_alloc_page rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("gpu-test: allocated SLM-OS GMMU VA: "
+                         "gpu_va=0x%lx cpu_va=%p phys=0x%lx\r\n",
+                         (unsigned long)our_va, our_cpu_va,
+                         (unsigned long)our_phys);
+
+            /* Sentinel — GPU should overwrite this with 0xCAFE.
+             * Different from 0 so we can distinguish "GPU wrote
+             * 0xCAFE" from "page was already 0". */
+            volatile uint32_t *target = (volatile uint32_t *)our_cpu_va;
+            target[0] = 0xDEADBEEFu;
+            cache_clean_range((void *)target, 4);
+            __asm__ volatile("dsb sy" ::: "memory");
+            shell_printf("gpu-test: pre-dispatch target[0] = 0x%08x\r\n",
+                         (unsigned)target[0]);
+
+            /* Fire SEMAPHORE_RELEASE targeting our VA. The submit
+             * polls our_phys for 0xCAFE and returns 0 if the GPU
+             * wrote it. */
+            int srrc = ga10b_bringup_sema_release_at(
+                &b, our_va, our_phys, 0x0000CAFEu);
+
+            /* Invalidate CPU caches so we read the GPU's write,
+             * not a stale CPU-cache copy. */
+            cache_invalidate_range((void *)target, 4);
+            __asm__ volatile("dsb sy" ::: "memory");
+            uint32_t observed = target[0];
+            shell_printf("gpu-test: post-dispatch target[0] = 0x%08x "
+                         "(submit rc=%d)\r\n",
+                         (unsigned)observed, srrc);
+
+            if (srrc == 0 && observed == 0x0000CAFEu) {
+                shell_printf("VERIFY: GPU wrote 0xCAFE through SLM-OS GMMU "
+                             "VA 0x%lx — PASS (#678 closed)\r\n",
+                             (unsigned long)our_va);
+                return 0;
+            }
+            shell_printf("VERIFY: GPU did NOT write 0xCAFE — FAIL "
+                         "(submit rc=%d, observed=0x%08x)\r\n",
+                         srrc, (unsigned)observed);
+            return -1;
+        }
         if (strcmp(argv[2], "reuse-synth") == 0) {
             /* #666 Milestone D: alloc-free-alloc round-trip on a
              * synthetic inst block. Validates:
@@ -4474,7 +4579,7 @@ int cmd_nvgpu(int argc, char *argv[])
               "run-mnist | fecs | gpccs | pmu | run | "
               "gmmu <pushbuf | walk | walk-raw | "
               "alloc-page | alloc-page-synth | "
-              "alloc-multi-synth | reuse-synth>]\r\n");
+              "alloc-multi-synth | reuse-synth | gpu-test>]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */

@@ -1910,6 +1910,30 @@ int ga10b_bringup_smoke_test(struct ga10b_bringup *b)
                                  7, "GA10B-P7");
 }
 
+int ga10b_bringup_sema_release_at(struct ga10b_bringup *b,
+                                  uint64_t sem_gpu_va,
+                                  uint64_t sem_phys,
+                                  uint32_t payload)
+{
+    /* Same precondition as smoke_test — channel must be open or
+     * have a prior submit settled. */
+    if (!b || (b->state != GA10B_BRINGUP_CHANNEL_OPEN &&
+               b->state != GA10B_BRINGUP_METHOD_ACCEPTED)) return -1;
+
+    uart_printf("[GA10B-P7-AT] SEMAPHORE_RELEASE → gpu_va=0x%lx "
+                "(poll phys=0x%lx for 0x%x)\n",
+                (unsigned long)sem_gpu_va, (unsigned long)sem_phys,
+                (unsigned)payload);
+
+    uint32_t pb_buf[GA10B_SEMA_RELEASE_PB_DWORDS];
+    uint32_t pb_dwords = ga10b_build_sema_release_pushbuffer(
+        pb_buf, sem_gpu_va, payload);
+
+    return ga10b_submit_and_poll(b, pb_buf, pb_dwords,
+                                 sem_phys, payload,
+                                 7, "GA10B-P7-AT");
+}
+
 int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
 {
     /* Accept CHANNEL_OPEN (first submit) or METHOD_ACCEPTED (after a
