@@ -733,6 +733,27 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
     INFO("hailo: firmware %u.%u rev=0x%08x booted",
          hdr.firmware_major, hdr.firmware_minor, hdr.firmware_revision);
 
+#ifdef HAILO_IRQ_CYCLE_AT_BOOT
+    /* #682 (2026-05-07): mirror Linux's hailo_activate_board IRQ
+     * sequence — enable → load_firmware → DISABLE → (later) re-enable.
+     * Until now SLM-OS pre-armed IMASK_HOST before the trigger and left
+     * it armed for the rest of fw lifetime. Linux instead writes 0 to
+     * IMASK_HOST immediately after load_firmware completes (see
+     * hailo-pcie-common.c:879 hailo_pcie_disable_interrupts), then
+     * re-arms it later from the user-space open() path that runs
+     * before the first VDMA submit. Hypothesis: the missing disable
+     * gives fw a different IRQ state at boot, which prevents `proc`
+     * from advancing on the boundary IN channel during runmodel.
+     *
+     * The disable runs first so the post-boot D3hot transition (if
+     * enabled below) happens with IMASK_HOST=0, matching Linux's
+     * order. The re-arm runs after the D3hot cycle so the device is
+     * back in D0 with fresh IRQ-mask writes — closer to the state
+     * the user-space open() leaves behind. */
+    INFO("hailo: post-boot IRQ disable (IMASK_HOST=0)");
+    hailo_control_disable_imask();
+#endif /* HAILO_IRQ_CYCLE_AT_BOOT */
+
 #ifdef HAILO_D3HOT_AT_BOOT
     /* Phase 8 #253 (2026-04-25): replicate Linux hailo_pcie's post-boot
      * D0→D3hot→D0 round-trip. Linux puts the device into deep idle right
@@ -762,6 +783,22 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
         }
     }
 #endif /* HAILO_D3HOT_AT_BOOT */
+
+#ifdef HAILO_IRQ_CYCLE_AT_BOOT
+    /* Settle delay then re-arm. The delay is conservative — Linux's
+     * user-space open() path does plenty of other work between the
+     * disable and the re-enable, so giving fw a few ms to settle in
+     * D0 with IMASK_HOST=0 isn't unreasonable. 5 ms matches the
+     * other Hailo settle waits in the boot path. */
+    if (hailo_platform->udelay) hailo_platform->udelay(5000);
+    int arm_rc = hailo_control_arm_irq_masks();
+    if (arm_rc != HAILO_OK) {
+        WARN("hailo: post-cycle IRQ re-arm failed (rc=%d) — fw may not "
+             "see masked interrupts", arm_rc);
+    } else {
+        INFO("hailo: post-boot IRQ re-arm OK");
+    }
+#endif /* HAILO_IRQ_CYCLE_AT_BOOT */
 
     return HAILO_OK;
 

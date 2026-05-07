@@ -755,6 +755,21 @@ int hailo_control_run_bist_test(bool     is_top_test,
 int hailo_control_arm_irq_masks(void);
 
 /*
+ * Mirror of hailo_pcie_disable_interrupts. Writes 0 to BSC_IMASK_HOST
+ * and clears the "armed" flag so a follow-up arm call re-runs the
+ * register writes. Linux disables IMASK_HOST after load_firmware
+ * completes (see hailo_activate_board), then re-enables it later from
+ * the user-space open() path. SLM-OS uses this in the boot path
+ * (HAILO_IRQ_CYCLE_AT_BOOT) to replicate the disable→re-enable cycle
+ * around the post-boot D3hot transition.
+ *
+ * Per-channel SRC/DST IRQ masks are NOT cleared here — Linux's
+ * disable path leaves them armed too. Safe to call on platforms with
+ * no MMIO (no-op).
+ */
+void hailo_control_disable_imask(void);
+
+/*
  * Pre-boot MSI registration. Linux's hailo_pcie_enable_interrupts
  * (called BEFORE load_firmware) does pci_enable_msi + request_irq
  * so MSI is configured by the time fw boots. SLM-OS previously only

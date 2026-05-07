@@ -387,6 +387,22 @@ int hailo_control_arm_irq_masks(void)
     return HAILO_OK;
 }
 
+void hailo_control_disable_imask(void)
+{
+    if (!hailo_platform || !hailo_platform->write32) return;
+
+    /* Mirrors hailo_pcie_disable_interrupts (hailo-pcie-common.c:879):
+     * a single u32 write of 0 to BSC_IMASK_HOST. Linux issues this
+     * after load_firmware completes, before its post-boot D3hot
+     * transition. Clearing the armed flag lets a subsequent
+     * hailo_control_arm_irq_masks() call re-arm rather than early-
+     * return. The per-channel SRC/DST IRQ masks are left armed —
+     * Linux's disable path doesn't touch those either. */
+    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, 0u);
+    if (hailo_platform->mb) hailo_platform->mb();
+    control_irq_masks_armed = false;
+}
+
 static void control_post_boot_init(void)
 {
     if (control_post_boot_init_done) return;
