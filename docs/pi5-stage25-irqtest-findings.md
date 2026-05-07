@@ -1,10 +1,14 @@
 # Pi 5 Stage 2.5 — Trampoline-path Hang Investigation
 
-**Status:** In progress. The original "Stage 2.5 = small kernel-side
-fix to unmask `DAIF.I` in tasks" plan was wrong — empirical testing on
-pi-5-2 shows the actual problem is deeper.
+**Status:** **Closed.** Investigation produced the conclusion that
+NS-EL1 IRQ delivery is broken on Pi 5 regardless of which timer PPI
+is selected. The actual production fix is tracked in
+[#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683) —
+move SLM-OS to EL2 with VHE. See
+[`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md).
 
 **Issue:** [#134](https://github.com/SLM-OS/SLM-Operating-System/issues/134).
+**Investigation issue:** [#672](https://github.com/SLM-OS/SLM-Operating-System/issues/672) (closed 2026-05-07).
 
 **Prerequisite:** [PR #641](https://github.com/SLM-OS/SLM-Operating-System/pull/641) (Stage 2 — TF-A patches + `irqtest` shell command).
 
@@ -117,29 +121,62 @@ either:
 
 ---
 
-## Next steps
+## Final state (after #672 differential probing)
 
-1. **Verify our SCR_EL3 patch is in the runtime path.** Either by
-   adding a TF-A-side print right before `el3_exit` (BCM2712 UART —
-   needs a hardware UART tap) or via JTAG.
-2. **Compare with the [`raspberrypi/tools/armstubs/armstub8.S`](https://github.com/raspberrypi/tools/blob/master/armstubs/armstub8.S)
-   approach** — that uses a spin table for SMP and bypasses TF-A
-   entirely. NS IRQs would deliver naturally because no EL3
-   firmware is running. Trade-off: lose PSCI; the kernel needs the
-   spin-table SMP path SLM-OS doesn't currently have.
-3. **Check whether the kernel boot.S writes anything to SCR-related
-   registers from EL2 that could mask our intent.** EL2 can't write
-   SCR_EL3 directly but it can write `HCR_EL2.IMO` etc.
+The follow-on `issue/672/secondary-preempt-bringup` branch added 8
+commits of differential probes (`single`, `noirq`, `set`, `dbg`,
+`isb`, `fmask`, `fiq`, `wfi`, `cmem`, `dsb`, `wait`, `idle`, `match`,
+`putsx`, `clr`, `tdis`, `iar`, `iardrain`, `dis`, `linit`). The probes
+established:
 
-Stage 2.5 is **not** "one DAIF unmask away" from observable hardware
-preemption. The wedge is upstream of the kernel — at the boundary
-between EL3 firmware and NS exception delivery — and resolving it
-needs either deeper TF-A debugging tooling or a different EL3
-strategy.
+- **PPI 30 (CNTP) is correctly placed in Group 1 NS by TF-A.**
+  `GICC_HPPIR` returns 30 from NS-EL1 (not 1022); NS can ack via
+  `IAR`. So the GIC routing is correct — the original "SCR_EL3 isn't
+  taking effect" hypothesis is **disconfirmed**.
+- **The GIC's `nIRQ` pin is asserted whenever the timer is enabled
+  and pending.** Proof by experiment: `CNTP_CTL=0`, `ICENABLER0`
+  disable, and IAR-without-EOI all unblock `daifclr`.
+- **The EL1 IRQ vector is never entered** from any code path —
+  `vec->irq` stays 0 across all CPUs forever, including from idle's
+  `daifclr+isb+wfi` loop. The earlier "idle survives, irqtest
+  doesn't" framing was a timing flake; both wedge under the right
+  pin-asserted timing.
+- **`daifclr #2` at NS-EL1 with the pin asserted hard-locks CPU 0**
+  with no exception delivered.
+- **PPI 27 (CNTV virtual) tested as the alternative** — same wedge
+  signature. The blocker is **not PPI-specific**; NS-EL1 IRQ
+  delivery on this Pi 5 / BCM2712 / GIC-400 firmware appears broken
+  regardless of PPI.
+
+### Why this isn't visible on Linux
+
+Linux on Pi 5 boots into EL2 with VHE and uses PPI 26 (Hyp Physical
+Timer) via `arch_timer_select_ppi()`'s first branch. It never
+exercises NS-EL1 IRQ delivery. The Pi firmware path that's been
+validated end-to-end is EL2 / `VBAR_EL2` / PPI 26.
+
+### Resolution
+
+Tracked in [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683):
+move SLM-OS to EL2 with VHE on Pi 5. See
+[`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md) for the 5-PR refactor
+plan. The trampoline infrastructure (PR #656) remains structurally
+sound but unexercised on Pi 5 until #683 unblocks hardware IRQ
+delivery; `COOP_PREEMPT` is the working preemption mode in the
+meantime.
+
+### What's landing from #672 by default
+
+- `19364004` `fix(pi5): switch timer to PPI 27 (CNTV virtual timer)`
+  — matches Linux's documented EL1 fallback choice. Not a fix for
+  the wedge but not worse than PPI 30 either, and #683 will replace
+  it with PPI 26 anyway.
+- The diagnostic infra (asm + C trace macros, `irqtest` modes) gated
+  behind `STAGE25_TRACE_PI5`. No-op in production builds.
 
 ---
 
-## Why this is still progress
+## Why this work was still progress
 
 The `irqtest noirq` baseline + checkpoint trace is the first
 diagnostic that:
@@ -148,13 +185,16 @@ diagnostic that:
   IRQ delivery path" *without* needing to read post-mortem state.
   The presence/absence of checkpoint chars is the ground-truth
   signal.
-- Runs the same test under different kernel configs (SECONDARY_PREEMPT
-  on/off, COOP_PREEMPT on/off, custom TF-A vs stock) so future
-  bisection has a stable harness.
+- Runs the same test under different kernel configs
+  (`SECONDARY_PREEMPT` on/off, `COOP_PREEMPT` on/off, custom TF-A
+  vs stock, PPI 27 vs PPI 30) so future bisection has a stable
+  harness.
 
 Both the asm and C trace macros are gated on `STAGE25_TRACE_PI5` so
-production builds are unaffected.
+production builds are unaffected. The diagnostic harness will
+continue to pin #683's correctness — after PR 4 of #683 lands,
+`irqtest` should report `RESULT: IRQ DELIVERED` rather than wedging.
 
 ---
 
-*Last updated: 2026-05-06.*
+*Last updated: 2026-05-07.*
