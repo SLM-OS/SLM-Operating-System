@@ -224,6 +224,9 @@ int test_suite_latency_hist(void);
 /* Per-consumer GPU toggle tests (admin & telemetry suite, M2) */
 int test_suite_gpu_consumer(void);
 
+/* Operator library parser tests (#663 — tensor-core stage 5). */
+int test_suite_operator_library(void);
+
 /* GPU dispatch circuit-breaker tests (#552 mitigation, PR #555). */
 int test_suite_gpu_dispatch_breaker(void);
 
