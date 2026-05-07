@@ -24,6 +24,7 @@
 
 #include "../../include/cache.h"
 #include "../../include/pmm.h"
+#include "../../include/timer.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -567,6 +568,11 @@ static int map_one_page(uint64_t pdb_phys,
     return 0;
 }
 
+/* Defined alongside ga10b_gmmu_free below; forward decl so the
+ * alloc paths can consult the free-extent tracker before touching
+ * the bump cursor. */
+static uint64_t pop_free_extent(uint32_t n_pages);
+
 int ga10b_gmmu_alloc_page(uint64_t inst_block_phys,
                           uint32_t flags,
                           uint64_t *out_gpu_va,
@@ -579,9 +585,15 @@ int ga10b_gmmu_alloc_page(uint64_t inst_block_phys,
     uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
     if (pdb_phys == 0) return -1;
 
-    if (g_va_cursor >= GA10B_GMMU_VA_LIMIT) return -1;
-    uint64_t va = g_va_cursor;
-    g_va_cursor += 4096;
+    /* Reuse a freed VA before bumping the cursor. The free path
+     * already TLB-invalidated this VA, so a fresh PTE write here
+     * lands on a clean translation slot. */
+    uint64_t va = pop_free_extent(1);
+    if (va == 0) {
+        if (g_va_cursor >= GA10B_GMMU_VA_LIMIT) return -1;
+        va = g_va_cursor;
+        g_va_cursor += 4096;
+    }
 
     void *data_page = pmm_alloc_page();
     if (data_page == NULL) return -1;
@@ -619,6 +631,104 @@ uint32_t ga10b_gmmu_free_tracker_count(void)
     return g_free_extent_count;
 }
 
+/* GA10B BAR0 base on Jetson Orin Nano (per
+ * `kernel/gpu/gpu_nvidia.h`'s comment header — MMIO at 0x17000000).
+ * NV_PGRAPH_PRI_FECS_CURRENT_CTX lives at BAR0 + 0x409b00 per
+ * `slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_gr_ga10b.h`'s
+ * `gr_fecs_current_ctx_r() = 0x00409b00U`. Identity-mapped — no
+ * extra ioremap needed.
+ *
+ * Register layout (gr_fecs_current_ctx_*):
+ *   bits [27:0]  : ptr   = inst_block_phys >> 12
+ *   bits [29:28] : target (0=vid_mem, 2=sys_mem_coh, 3=sys_mem_ncoh)
+ */
+#define GA10B_BAR0_BASE                  0x17000000ull
+#define GA10B_GR_FECS_CURRENT_CTX_OFFSET 0x00409b00u
+
+uint64_t ga10b_gmmu_discover_inst_block_phys(void)
+{
+    uint32_t reg = *(volatile uint32_t *)(uintptr_t)
+        (GA10B_BAR0_BASE + GA10B_GR_FECS_CURRENT_CTX_OFFSET);
+    uint8_t target = (uint8_t)((reg >> 28) & 0x3);
+    if (target == 0) {
+        /* vid_mem on Jetson is bogus (no discrete vidmem); also
+         * matches the "register reads as 0xfffffffe / similar
+         * garbage when GPU is asleep" failure mode. */
+        return 0;
+    }
+    uint32_t ptr_v = reg & 0x0fffffffu;
+    uint64_t inst_block_phys = ((uint64_t)ptr_v) << 12;
+    if (!phys_in_dram(inst_block_phys, 4096)) return 0;
+    return inst_block_phys;
+}
+
+/* GA10B FB MMU register offsets (from
+ * ~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_fb_ga10b.h):
+ *   fb_mmu_ctrl_r            = 0x100c80   (status, 32-bit)
+ *     bit 15        = pri_fifo_empty  (1 = invalidate done)
+ *     bits 16..23   = pri_fifo_space  (non-zero = FIFO has room)
+ *   fb_mmu_invalidate_pdb_r  = 0x100cb8   (set target PDB)
+ *     bits 4..31    = (pdb_phys >> 12)
+ *     bits 0..1     = aperture (sys_mem=2, vid_mem=0)
+ *   fb_mmu_invalidate_r      = 0x100cbc   (kick + scope)
+ *     bit 0         = all_va
+ *     bit 31        = trigger
+ */
+#define GA10B_FB_MMU_CTRL_OFFSET                  0x00100c80u
+#define GA10B_FB_MMU_INVALIDATE_PDB_OFFSET        0x00100cb8u
+#define GA10B_FB_MMU_INVALIDATE_OFFSET            0x00100cbcu
+#define GA10B_FB_MMU_CTRL_PRI_FIFO_EMPTY_BIT      (1u << 15)
+#define GA10B_FB_MMU_INVALIDATE_PDB_APERTURE_SYS  0x2u
+#define GA10B_FB_MMU_INVALIDATE_ALL_VA_TRUE       0x1u
+#define GA10B_FB_MMU_INVALIDATE_TRIGGER_TRUE      0x80000000u
+
+/* nvgpu uses 1000 retries x 2us = 2ms total. Match that. */
+#define GA10B_TLB_POLL_MAX_RETRIES                1000u
+#define GA10B_TLB_POLL_INTERVAL_US                2u
+
+static inline uint32_t bar0_read32(uint32_t offset)
+{
+    return *(volatile uint32_t *)(uintptr_t)(GA10B_BAR0_BASE + offset);
+}
+
+static inline void bar0_write32(uint32_t offset, uint32_t value)
+{
+    *(volatile uint32_t *)(uintptr_t)(GA10B_BAR0_BASE + offset) = value;
+}
+
+int ga10b_gmmu_tlb_invalidate(uint64_t pdb_phys)
+{
+    if (!phys_in_dram(pdb_phys, 4096)) return -1;
+
+    /* 1. Wait for PRI FIFO room. */
+    uint32_t retries = 0;
+    while (((bar0_read32(GA10B_FB_MMU_CTRL_OFFSET) >> 16) & 0xffu) == 0u) {
+        if (++retries > GA10B_TLB_POLL_MAX_RETRIES) return -1;
+        timer_busy_wait_us(GA10B_TLB_POLL_INTERVAL_US);
+    }
+
+    /* 2. Write PDB target. Bits [31:4] of the encoded register =
+     * pdb_phys[39:12]; bits [1:0] = aperture. */
+    uint32_t pdb_lo28 = (uint32_t)((pdb_phys >> 12) & 0x0fffffffu);
+    bar0_write32(GA10B_FB_MMU_INVALIDATE_PDB_OFFSET,
+                 (pdb_lo28 << 4) | GA10B_FB_MMU_INVALIDATE_PDB_APERTURE_SYS);
+
+    /* 3. Trigger an all-VA invalidate against that PDB. */
+    bar0_write32(GA10B_FB_MMU_INVALIDATE_OFFSET,
+                 GA10B_FB_MMU_INVALIDATE_ALL_VA_TRUE |
+                 GA10B_FB_MMU_INVALIDATE_TRIGGER_TRUE);
+
+    /* 4. Wait for completion (FIFO drains to empty). */
+    retries = 0;
+    while ((bar0_read32(GA10B_FB_MMU_CTRL_OFFSET) &
+            GA10B_FB_MMU_CTRL_PRI_FIFO_EMPTY_BIT) == 0u) {
+        if (++retries > GA10B_TLB_POLL_MAX_RETRIES) return -1;
+        timer_busy_wait_us(GA10B_TLB_POLL_INTERVAL_US);
+    }
+
+    return 0;
+}
+
 int ga10b_gmmu_alloc(uint64_t inst_block_phys,
                      uint32_t n_pages,
                      uint32_t flags,
@@ -637,17 +747,23 @@ int ga10b_gmmu_alloc(uint64_t inst_block_phys,
     uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
     if (pdb_phys == 0) return -1;
 
-    /* Reserve the contiguous VA range from the bump cursor.
-     * Range exhaustion is checked atomically with the reservation
-     * so a partial alloc from the tail of the range doesn't leak
-     * VAs (caller can retry with a smaller request, or admit
-     * defeat). */
+    /* Try exact-fit reuse from the free-extent tracker first.
+     * The free path TLB-invalidated when the extent was returned,
+     * so a fresh PTE write here lands on a clean slot. */
     uint64_t va_span = (uint64_t)n_pages * 4096ull;
-    if (g_va_cursor + va_span > GA10B_GMMU_VA_LIMIT) {
-        return -1;
+    uint64_t va_base = pop_free_extent(n_pages);
+    if (va_base == 0) {
+        /* Reserve the contiguous VA range from the bump cursor.
+         * Range exhaustion is checked atomically with the
+         * reservation so a partial alloc from the tail of the
+         * range doesn't leak VAs (caller can retry with a smaller
+         * request, or admit defeat). */
+        if (g_va_cursor + va_span > GA10B_GMMU_VA_LIMIT) {
+            return -1;
+        }
+        va_base = g_va_cursor;
+        g_va_cursor += va_span;
     }
-    uint64_t va_base = g_va_cursor;
-    g_va_cursor += va_span;
 
     /* Per page: alloc PMM page, map it. PMM pages need not be
      * contiguous in phys — every page gets its own PTE entry
@@ -717,22 +833,56 @@ int ga10b_gmmu_free(uint64_t inst_block_phys,
         cache_clean((const volatile void *)(uintptr_t)pte_entry_phys);
     }
 
-    /* DSB SY so any subsequent GPU dispatch sees the cleared PTEs.
-     * Note: this does NOT invalidate the GPU's TLB. If the GPU has
-     * a cached translation for any of these VAs from a prior walk,
-     * a subsequent access would still serve the cached (now stale)
-     * mapping. The Milestone D TLB invalidate sequence + safe-VA-
-     * reuse is the fix; until then, callers must NOT touch a freed
-     * VA from the GPU side. */
+    /* DSB SY so the GPU's GMMU walker sees the cleared PTEs from
+     * PoC if it re-walks the page table (after the TLB invalidate
+     * forces a re-walk on next access). */
     __asm__ volatile("dsb sy" ::: "memory");
 
-    /* Track the freed extent for future TLB-invalidate-enabled
-     * reuse. Drop on the floor if the table is full — alloc still
-     * works because the bump cursor is independent. */
+    /* Fire the TLB invalidate now — without it, the GPU could serve
+     * a cached translation for a freed VA, defeating the point of
+     * the free. The PDB phys is read from the inst block (same
+     * source as the walker's PDB lookup). */
+    uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
+    if (pdb_phys != 0) {
+        /* Best-effort: a TLB invalidate timeout doesn't roll back
+         * the free, since the PTEs are already cleared. The freed
+         * VA is at worst served from a stale TLB entry until the
+         * next successful invalidate (which the next free will
+         * fire). */
+        (void)ga10b_gmmu_tlb_invalidate(pdb_phys);
+    }
+
+    /* Track the freed extent for VA reuse. ga10b_gmmu_alloc /
+     * alloc_page consult this table BEFORE bumping the cursor,
+     * pulling the first slot whose n_pages matches the request.
+     * Single-page reuse is what the "alloc 1 → free → alloc 1
+     * same VA" smoke test exercises; multi-page exact-fit reuse
+     * uses the same path. */
     if (g_free_extent_count < GA10B_GMMU_FREE_TRACKER_SLOTS) {
         g_free_extents[g_free_extent_count].gpu_va = gpu_va;
         g_free_extents[g_free_extent_count].n_pages = n_pages;
         g_free_extent_count++;
+    }
+    return 0;
+}
+
+/* Try to satisfy an allocation of `n_pages` from the free-extent
+ * tracker (exact-fit). Returns the freed VA on success, removing
+ * its slot; returns 0 on miss (caller falls through to the bump
+ * cursor). */
+static uint64_t pop_free_extent(uint32_t n_pages)
+{
+    for (uint32_t i = 0; i < g_free_extent_count; i++) {
+        if (g_free_extents[i].n_pages == n_pages) {
+            uint64_t va = g_free_extents[i].gpu_va;
+            /* Remove slot by swapping with the tail. Order in the
+             * tracker is otherwise irrelevant. */
+            g_free_extent_count--;
+            if (i != g_free_extent_count) {
+                g_free_extents[i] = g_free_extents[g_free_extent_count];
+            }
+            return va;
+        }
     }
     return 0;
 }
