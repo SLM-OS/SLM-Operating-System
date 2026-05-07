@@ -1456,6 +1456,18 @@ uint32_t ga10b_bringup_active_pipeline_kind(void)
     return g_handoff.pipeline_kind;
 }
 
+const struct ga10b_channel_handoff *ga10b_bringup_handoff(void)
+{
+    /* g_handoff is zero-initialised; magic stays 0 until the
+     * channel-inherit phase copies a validated block in. Use that
+     * as the "loaded" signal so callers can detect the no-handoff
+     * case without inspecting individual fields. */
+    if (g_handoff.magic != GA10B_CHANNEL_HANDOFF_MAGIC) {
+        return NULL;
+    }
+    return &g_handoff;
+}
+
 /* ---- Phase 7: Pushbuffer submission (NOP + SEMAPHORE_RELEASE) ----
  *
  * Write a minimal pushbuffer (NOP method + SEMAPHORE_RELEASE), add

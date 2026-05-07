@@ -410,6 +410,9 @@ set(KERNEL_SOURCES
     # No-op when nothing calls ga10b_qmd_populate (Phase 1 — encoder
     # ported but not yet wired into the dispatch path).
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_qmd.c>
+    # Jetson-only: read-only GMMU page-table walker (#666 Milestone A).
+    # No-op until invoked via the `nvgpu gmmu walk` shell verb.
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_gmmu.c>
     # Jetson: full GSP platform shim — MMIO at GPU_BASE, unified memory
     # DMA, cache maintenance, firmware via .incbin. Replaces the old
     # nvidia_gsp_platform_stub.c now that CBB firewall is bypassed.
