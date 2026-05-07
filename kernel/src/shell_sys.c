@@ -1770,7 +1770,7 @@ static void diag_print_el2(void)
                 (s->gicd_igroupr0_post == 0xFFFFFFFFul)
                     ? "(writes held)"
                     : (s->gicd_igroupr0_post == 0ul)
-                          ? "(writes SILENTLY DISCARDED — FIQ hypothesis likely)"
+                          ? "(NS RAZ when GICD_CTLR.DS=0 — see Sentinel C for actual config)"
                           : "(partial)");
 
     /*
@@ -1793,10 +1793,10 @@ static void diag_print_el2(void)
             shell_printf("    TF-A view  IGROUPR[0]: pre=0x%08lx post=0x%08lx  %s\r\n",
                         (unsigned long)c_pre, (unsigned long)c_post,
                         (c_post == 0xFFFFFFFFul)
-                            ? "(persistent at EL3 — kernel side cleared it)"
-                            : (c_post == c_pre)
-                                  ? "(write DISCARDED at GIC level)"
-                                  : "(partial)");
+                            ? "(write fully held — all PPIs Group 1 NS)"
+                            : ((c_post & (1u << 30)) != 0u)
+                                  ? "(timer PPI 30 in Group 1 NS; bits 16-23/24 RES0 on GIC-400)"
+                                  : "(partial — PPI 30 NOT in Group 1 NS)");
             shell_printf("    TF-A view  GICD_CTLR : 0x%08lx\r\n",
                         (unsigned long)c_ctlr);
         }
