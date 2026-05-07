@@ -200,6 +200,12 @@ static int run_random(int M, int K, int N, bool verbose)
     cudaMalloc(&d_a, a_n * sizeof(half));
     cudaMalloc(&d_b, b_n * sizeof(half));
     cudaMalloc(&d_c, c_n * sizeof(float));
+    /* Catch device-side OOM here so it surfaces as HARNESS_RC_OOM
+     * rather than being mis-attributed to the kernel launch below.
+     * cudaGetLastError sticks errors across calls, so a failed
+     * cudaMalloc would otherwise pop out of CUDA_OK_OR after
+     * <<<grid, block>>> with the wrong code. */
+    CUDA_OK_OR(HARNESS_RC_OOM, cleanup);
     cudaMemcpy(d_a, h_a, a_n * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, h_b, b_n * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemset(d_c, 0, c_n * sizeof(float));
@@ -259,7 +265,10 @@ static int run_random(int M, int K, int N, bool verbose)
     }
 
 cleanup:
-    free(h_a); free(h_b); free(h_gpu); free(h_ref);
+    free(h_a);
+    free(h_b);
+    free(h_gpu);
+    free(h_ref);
     if (d_a) cudaFree(d_a);
     if (d_b) cudaFree(d_b);
     if (d_c) cudaFree(d_c);
@@ -297,17 +306,23 @@ static int run_one(int M, int K, int N, bool verbose)
      * sentinel (= K) is comparable across kernels. */
     {
         half one_h = __float2half(1.0f);
-        for (size_t i = 0; i < a_n; i++) h_a[i] = one_h;
+        for (size_t i = 0; i < a_n; i++) {
+            h_a[i] = one_h;
+        }
         /* B is col-major [K × N]: layout in memory is N columns of
          * K elements each, so all-ones works without thinking
          * about it. */
-        for (size_t i = 0; i < b_n; i++) h_b[i] = one_h;
+        for (size_t i = 0; i < b_n; i++) {
+            h_b[i] = one_h;
+        }
     }
     memset(h_c, 0, c_n * sizeof(float));
 
     cudaMalloc(&d_a, a_n * sizeof(half));
     cudaMalloc(&d_b, b_n * sizeof(half));
     cudaMalloc(&d_c, c_n * sizeof(float));
+    /* See note in run_random: catch OOM here, not at the launch. */
+    CUDA_OK_OR(HARNESS_RC_OOM, cleanup);
     cudaMemcpy(d_a, h_a, a_n * sizeof(half),  cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, h_b, b_n * sizeof(half),  cudaMemcpyHostToDevice);
     cudaMemset(d_c, 0, c_n * sizeof(float));
@@ -354,7 +369,9 @@ static int run_one(int M, int K, int N, bool verbose)
     }
 
 cleanup:
-    free(h_a); free(h_b); free(h_c);
+    free(h_a);
+    free(h_b);
+    free(h_c);
     if (d_a) cudaFree(d_a);
     if (d_b) cudaFree(d_b);
     if (d_c) cudaFree(d_c);
