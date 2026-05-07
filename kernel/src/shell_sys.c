@@ -6107,6 +6107,9 @@ int cmd_irqtest(int argc, char *argv[])
     bool mode_iar    = (argc >= 2 && argv[1] && strcmp(argv[1], "iar") == 0);
     bool mode_match  = (argc >= 2 && argv[1] && strcmp(argv[1], "match") == 0);
     bool mode_putsx  = (argc >= 2 && argv[1] && strcmp(argv[1], "putsx") == 0);
+    bool mode_linit  = (argc >= 2 && argv[1] && strcmp(argv[1], "linit") == 0);
+    bool mode_drain  = (argc >= 2 && argv[1] && strcmp(argv[1], "iardrain") == 0);
+    bool mode_dis    = (argc >= 2 && argv[1] && strcmp(argv[1], "dis") == 0);
 
     /* "clr" mode: clear the pending timer PPI in GIC before daifclr.
      * Tests whether the wedge is caused by the GIC asserting the IRQ
@@ -6154,6 +6157,61 @@ int cmd_irqtest(int argc, char *argv[])
      * cacheable bump, no mpidr read. */
     if (mode_putsx) {
         irqtest_puts(" PUTSX");
+    }
+
+    /* "linit" mode: replay Linux's gic_cpu_if_up sequence before daifclr.
+     * Linux on the same hardware delivers timer IRQs successfully —
+     * if our `daifclr` wedge is from missing GIC config, this should
+     * unblock. Sequence (irq-gic.c:gic_cpu_if_up):
+     *   - Clear GICC_ACTIVEPRIO[0..3]
+     *   - Read GICC_CTLR, preserve bypass bits
+     *   - Write GICC_CTLR = bypass | EOImodeNS | EnableGrp1NS
+     */
+    /* "iardrain" mode: ack/EOI in a tight loop until IAR returns
+     * spurious. Tests whether multiple IAR-ack-EOI cycles drain a
+     * stuck pending state vs a single ack. */
+    if (mode_drain) {
+        int n = 0;
+        for (int i = 0; i < 32 && n < 10; i++) {
+            uint32_t iar = *(volatile uint32_t *)(0x107FFFA000ULL + 0x0C);
+            __asm__ volatile("dsb sy" ::: "memory");
+            if ((iar & 0x3FF) == 0x3FF) break;
+            *(volatile uint32_t *)(0x107FFFA000ULL + 0x10) = iar;
+            __asm__ volatile("dsb sy" ::: "memory");
+            n++;
+        }
+        shell_printf("\r\n  IARDRAIN: ack'd+eoi'd %d IRQs\r\n", n);
+    }
+
+    /* "dis" mode: disable distributor, then re-enable. Linux always
+     * does disable→config→enable. We don't (we incrementally configure
+     * to preserve secure-side state). Tests whether a NS-side
+     * distributor-disable cycle re-evaluates the IRQ pending state
+     * in some way the kernel hasn't triggered. */
+    if (mode_dis) {
+        uint32_t pre_ctlr = *(volatile uint32_t *)(0x107fff9000ULL + 0x000);
+        *(volatile uint32_t *)(0x107fff9000ULL + 0x000) = 0;
+        __asm__ volatile("dsb sy" ::: "memory");
+        *(volatile uint32_t *)(0x107fff9000ULL + 0x000) = pre_ctlr;
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t post_ctlr = *(volatile uint32_t *)(0x107fff9000ULL + 0x000);
+        shell_printf("\r\n  DIS-CYCLE: GICD_CTLR pre=0x%x post=0x%x\r\n",
+                     pre_ctlr, post_ctlr);
+    }
+
+    if (mode_linit) {
+        for (int i = 0; i < 4; i++) {
+            *(volatile uint32_t *)(0x107FFFA000ULL + 0xD0 + i * 4) = 0;
+        }
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t ctlr_pre = *(volatile uint32_t *)(0x107FFFA000ULL + 0x00);
+        uint32_t bypass = ctlr_pre & 0x1E0; /* bypass bits 5..8 */
+        *(volatile uint32_t *)(0x107FFFA000ULL + 0x00) =
+            bypass | (1u << 9) /* EOImodeNS */ | 1u /* EnableGrp1NS */;
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t ctlr_post = *(volatile uint32_t *)(0x107FFFA000ULL + 0x00);
+        shell_printf("\r\n  LINIT: GICC_CTLR pre=0x%x post=0x%x (set EOImodeNS)\r\n",
+                     ctlr_pre, ctlr_post);
     }
 
     irqtest_fifo_drain();
