@@ -3833,6 +3833,15 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_bringup.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"
 #include "../gpu/nvidia/ga10b_gmmu.h"
+/* cache_clean_range / pmm_alloc_page are already pulled in via the
+ * earlier `gpu/gpu.h` and top-level `pmm.h` includes. Don't add
+ * `cache.h` here — gpu.h declares cache_clean_range as
+ * `void cache_clean_range(void *, size_t)` (the linked C ABI in
+ * `kernel/gpu/cache.c`) while `kernel/include/cache.h` declares it
+ * `static inline ... (const volatile void *, size_t)`; including
+ * both in the same TU triggers conflicting-types build errors.
+ * Pre-existing API inconsistency tracked separately; for this PR
+ * we use whichever declaration is already in scope. */
 
 /*
  * nvgpu - Jetson GA10B nvgpu-native bringup driver (ACR → FECS → GPCCS
@@ -4023,7 +4032,138 @@ int cmd_nvgpu(int argc, char *argv[])
          */
         if (argc < 3) {
             shell_puts("usage: nvgpu gmmu <pushbuf | walk <hex_va> | "
-                       "walk-raw <inst_phys_hex> <hex_va>>\r\n");
+                       "walk-raw <inst_phys_hex> <hex_va> | alloc-page>\r\n");
+            return -1;
+        }
+        if (strcmp(argv[2], "alloc-page-synth") == 0) {
+            /* Synthetic-handoff variant of alloc-page: build a fresh
+             * inst block + PDB page in PMM, then run the writer
+             * against that. Proves the writer composes correct
+             * PDE/PTE entries that the walker can read back —
+             * without depending on a real GPU channel handoff
+             * (jetson-nano-1 has no gpu-mnist host helper, so no
+             * handoff gets published pre-kexec).
+             *
+             * Real-channel validation needs `nvgpu inherit + channel`
+             * on a Jetson with helpers staged. Tracked in #678 /
+             * Milestone B follow-up. */
+            void *inst = pmm_alloc_page();
+            void *pdb_page = pmm_alloc_page();
+            if (inst == NULL || pdb_page == NULL) {
+                shell_puts("alloc-page-synth: PMM exhaustion\r\n");
+                return -1;
+            }
+            /* Zero both pages so all PT entries are invalid. */
+            for (int i = 0; i < 512; i++) {
+                ((volatile uint64_t *)inst)[i] = 0;
+                ((volatile uint64_t *)pdb_page)[i] = 0;
+            }
+            /* Write the PDB pointer into the inst block at byte
+             * offset 512 (= word 128 = ram_in_page_dir_base_lo_w()).
+             * Encoding: bits[2:1]=target sys_mem_coh(2), bit[3]=vol,
+             * bits[31:12]=pdb_phys[31:12], hi word = pdb_phys[63:32]. */
+            uint64_t inst_phys = (uint64_t)(uintptr_t)inst;
+            uint64_t pdb_phys = (uint64_t)(uintptr_t)pdb_page;
+            volatile uint32_t *iw = (volatile uint32_t *)inst;
+            iw[128] = ((uint32_t)pdb_phys & 0xfffff000u) |
+                      (2u << 1) /* target=sys_mem_coh */ |
+                      (1u << 3) /* volatile */;
+            iw[129] = (uint32_t)(pdb_phys >> 32);
+            cache_clean_range(inst, 4096);
+            cache_clean_range(pdb_page, 4096);
+
+            shell_printf("alloc-page-synth: inst=0x%lx pdb=0x%lx\r\n",
+                         (unsigned long)inst_phys, (unsigned long)pdb_phys);
+
+            uint64_t gpu_va = 0, phys = 0;
+            void *cpu_va = NULL;
+            int rc = ga10b_gmmu_alloc_page(inst_phys, 0,
+                                           &gpu_va, &cpu_va, &phys);
+            if (rc < 0) {
+                shell_printf("ga10b_gmmu_alloc_page failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("alloc-page-synth: gpu_va=0x%lx cpu_va=%p phys=0x%lx\r\n",
+                         (unsigned long)gpu_va, cpu_va, (unsigned long)phys);
+
+            volatile uint32_t *sentinel = (volatile uint32_t *)cpu_va;
+            sentinel[0] = 0xDEADBEEFu;
+            sentinel[1] = 0xCAFEBABEu;
+            shell_printf("alloc-page-synth: wrote sentinel via cpu_va: "
+                         "[0]=0x%08x [1]=0x%08x\r\n",
+                         (unsigned)sentinel[0], (unsigned)sentinel[1]);
+
+            struct ga10b_gmmu_walk_result wr;
+            int wrc = ga10b_gmmu_walk(inst_phys, gpu_va, &wr);
+            if (wrc != 0) {
+                shell_printf("alloc-page-synth: walker rc=%d\r\n", wrc);
+                return wrc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            if (wr.status == GA10B_GMMU_WALK_OK && wr.leaf_phys == phys) {
+                shell_printf("VERIFY: walker leaf_phys 0x%lx == "
+                             "alloc'd phys 0x%lx — PASS\r\n",
+                             (unsigned long)wr.leaf_phys,
+                             (unsigned long)phys);
+                return 0;
+            }
+            shell_printf("VERIFY: walker leaf_phys 0x%lx != "
+                         "alloc'd phys 0x%lx — FAIL\r\n",
+                         (unsigned long)wr.leaf_phys,
+                         (unsigned long)phys);
+            return -1;
+        }
+        if (strcmp(argv[2], "alloc-page") == 0) {
+            /* #666 Milestone B: allocate a single 4 KB page in the
+             * inherited channel's GMMU address space, write a
+             * sentinel pattern via the kernel-VA alias, then re-walk
+             * the GPU VA via Milestone A's walker and confirm the
+             * leaf PTE points at our new page. CPU-side smoke test
+             * — proves the writer composed correct PDE/PTE entries
+             * that the walker can read back. Real GPU verification
+             * (a kernel that reads from gpu_va) is deferred. */
+            const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+            if (h == NULL) {
+                shell_puts("alloc-page: no handoff loaded — run `nvgpu inherit` "
+                           "+ `nvgpu channel` first\r\n");
+                return -1;
+            }
+            uint64_t gpu_va = 0, phys = 0;
+            void *cpu_va = NULL;
+            int rc = ga10b_gmmu_alloc_page(h->inst_block_phys, 0,
+                                           &gpu_va, &cpu_va, &phys);
+            if (rc < 0) {
+                shell_printf("ga10b_gmmu_alloc_page failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("alloc-page: gpu_va=0x%lx cpu_va=%p phys=0x%lx\r\n",
+                         (unsigned long)gpu_va, cpu_va, (unsigned long)phys);
+            /* Write sentinel via cpu_va to prove the page is writable. */
+            volatile uint32_t *sentinel = (volatile uint32_t *)cpu_va;
+            sentinel[0] = 0xDEADBEEFu;
+            sentinel[1] = 0xCAFEBABEu;
+            shell_printf("alloc-page: wrote sentinel via cpu_va: "
+                         "[0]=0x%08x [1]=0x%08x\r\n",
+                         (unsigned)sentinel[0], (unsigned)sentinel[1]);
+            /* Re-walk the GPU VA — leaf phys must equal phys we got. */
+            struct ga10b_gmmu_walk_result wr;
+            int wrc = ga10b_gmmu_walk(h->inst_block_phys, gpu_va, &wr);
+            if (wrc != 0) {
+                shell_printf("alloc-page: walker rc=%d\r\n", wrc);
+                return wrc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            if (wr.status == GA10B_GMMU_WALK_OK && wr.leaf_phys == phys) {
+                shell_printf("VERIFY: walker leaf_phys 0x%lx == "
+                             "alloc'd phys 0x%lx — PASS\r\n",
+                             (unsigned long)wr.leaf_phys,
+                             (unsigned long)phys);
+                return 0;
+            }
+            shell_printf("VERIFY: walker leaf_phys 0x%lx != "
+                         "alloc'd phys 0x%lx — FAIL\r\n",
+                         (unsigned long)wr.leaf_phys,
+                         (unsigned long)phys);
             return -1;
         }
         if (strcmp(argv[2], "walk-raw") == 0) {
@@ -4118,7 +4258,8 @@ int cmd_nvgpu(int argc, char *argv[])
 
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | submit | submit-compute | launch-kernel | "
-              "run-mnist | fecs | gpccs | pmu | run | gmmu]\r\n");
+              "run-mnist | fecs | gpccs | pmu | run | "
+              "gmmu <pushbuf | walk | walk-raw | alloc-page>]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
