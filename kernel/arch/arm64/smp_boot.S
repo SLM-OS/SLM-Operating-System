@@ -53,20 +53,19 @@ secondary_entry:
     isb
 #elif defined(PLATFORM_RASPI5)
     /*
-     * Pi 5 (#683): Stay at EL2 with VHE. Read-modify-write to preserve
-     * any firmware-set HCR_EL2 bits (matches the primary CPU's RMW in
-     * boot.S).
+     * Pi 5 (#683): Stay at EL2 with VHE. Unconditional overwrite
+     * (matches both the Pi 5 primary in boot.S and the Jetson EL2
+     * blocks here and in boot.S).
      */
-    mrs     x0, hcr_el2
-    ldr     x1, =((1 << 34) | (1 << 31) | (1 << 27))   /* E2H | RW | TGE */
-    orr     x0, x0, x1
+    msr     hstr_el2, xzr               /* Clear sysreg-trap mask. */
+    ldr     x0, =((1 << 34) | (1 << 31) | (1 << 27))   /* E2H | RW | TGE */
     msr     hcr_el2, x0
     isb
 
     /*
-     * CNTHCTL_EL2: bits 0+1 = 3. Same bit positions under E2H=0
-     * (EL1PCTEN/EL1PCEN) and E2H=1 (EL0PCTEN/EL0PCEN), so the value
-     * is correct without re-interpretation.
+     * CNTHCTL_EL2 — programmed post-E2H so the write hits the EL1
+     * CNTKCTL bit layout that applies under E2H=1. Bits 0+1 are
+     * EL0PCTEN/EL0PCEN.
      */
     mov     x0, #3
     msr     cnthctl_el2, x0

@@ -359,25 +359,25 @@ real_start:
 #endif
 
     /*
-     * CNTHCTL_EL2 — allow lower ELs (and, under E2H=1, EL0) access
-     * to physical timer and counter. With E2H=0 the bit layout is
-     * EL1PCTEN(0)/EL1PCEN(1); with E2H=1 the bit layout becomes the
-     * EL1 CNTKCTL layout where the same bit positions are
-     * EL0PCTEN(0)/EL0PCEN(1). Setting bits 0+1 = value 3 is correct
-     * under both interpretations, so the value doesn't change across
-     * the E2H toggle.
-     *
-     * Setting it BEFORE the E2H flip programs the legacy-layout
-     * register. We re-write it AFTER the flip below to be safe under
-     * the redefined semantics.
+     * Clear the system-register trap mask so that VHE-redirected
+     * `*_EL1` accesses below (sctlr_el1, cpacr_el1) don't trap to
+     * EL2 with no handler installed. Pi 5 firmware enters with
+     * unknown HSTR_EL2 contents; explicit zero is safer than
+     * inheriting the firmware default.
+     */
+    msr     hstr_el2, xzr
+
+    /*
+     * CNTHCTL_EL2 — bits 0+1 = 3 enables lower-EL access to physical
+     * timer + counter. With E2H=0 (current state) the bits are
+     * EL1PCTEN/EL1PCEN; with E2H=1 (post-flip) the same positions are
+     * EL0PCTEN/EL0PCEN. Value 3 is correct under both interpretations,
+     * so writing it here covers code paths between this write and the
+     * E2H flip below that may read CNTPCT_EL0 or CNTP_*_EL0.
      */
     mov     x10, #3
     msr     cnthctl_el2, x10
     msr     cntvoff_el2, xzr        /* No virtual offset */
-
-#if defined(PI5_IRQ_DIAG)
-    str     x10, [x15, #0x10]               /* [+0x10] = CNTHCTL_EL2 as written */
-#endif
 
     /*
      * Configure GIC-400 interrupt groups from EL2.
@@ -534,18 +534,20 @@ real_start:
      *                 VBAR_EL2 + 0x400 (lower-EL AArch64 sync).
      *   RW  (bit 31): EL1/lower ELs are AArch64 (no AArch32 support).
      *
-     * Read-modify-write rather than overwrite: Pi 5 firmware enters
-     * with HCR_EL2 in some unknown state and we don't want to clobber
-     * implementation-defined or firmware-specific bits mid-flight.
-     * Same RMW pattern as the Jetson EL2 block below.
+     * Unconditional overwrite (matches the Jetson EL2 block below).
+     * An earlier draft of this PR used a read-modify-write to
+     * preserve firmware bits, but pi-5-1 boots silently wedged with
+     * RMW while pi-5-2 worked, suggesting at least one Pi 5 firmware
+     * variant leaves a problematic bit set (VM=1 stage-2 enable,
+     * IMO/FMO trap bits, ...). Unconditional overwrite ensures the
+     * resulting HCR_EL2 is exactly what the kernel wants — the only
+     * bits we depend on are the three we set.
      *
      * ISB after the write is required for E2H to take effect for
      * register-name redirection (ARM ARM D5.2.1 — change to E2H is
      * context-synchronizing only after ISB).
      */
-    mrs     x10, hcr_el2
-    ldr     x11, =((1 << 34) | (1 << 31) | (1 << 27))   /* E2H | RW | TGE */
-    orr     x10, x10, x11
+    ldr     x10, =((1 << 34) | (1 << 31) | (1 << 27))   /* E2H | RW | TGE */
     msr     hcr_el2, x10
     isb
 
@@ -581,12 +583,17 @@ real_start:
 #endif
 
     /*
-     * Re-write CNTHCTL_EL2 under the post-E2H semantics. With E2H=1
-     * the layout becomes EL1 CNTKCTL — bits 0+1 are now
-     * EL0PCTEN/EL0PCEN. Value 3 is still correct.
+     * CNTHCTL_EL2 — allow lower ELs access to physical timer and
+     * counter. With E2H=1, the layout is EL1 CNTKCTL: bits 0/1 are
+     * EL0PCTEN/EL0PCEN. Programmed post-E2H so the write hits the
+     * register under the EL1-CNTKCTL semantics that apply at runtime.
      */
     mov     x10, #3
     msr     cnthctl_el2, x10
+
+#if defined(PI5_IRQ_DIAG)
+    str     x10, [x15, #0x10]               /* [+0x10] = CNTHCTL_EL2 as written */
+#endif
 
     /*
      * Enable FP/SIMD. Under E2H=1, `msr cpacr_el1, x` redirects to

@@ -35,8 +35,13 @@ static void dump_registers(void)
 }
 
 #else /* ARM64 */
+#include "../arch/arm64/el_regs.h"
 /*
- * Read ARM64 system registers for exception debugging.
+ * Read ARM64 system registers for exception debugging. ESR_EL1 and
+ * FAR_EL1 are VHE-redirected (silently target *_EL2 when E2H=1), but
+ * ELR/SPSR are not — those use KERN_ELR_NAME / KERN_SPSR_NAME from
+ * el_regs.h to read the live exception state at the EL the kernel
+ * is actually running on.
  */
 static inline uint64_t read_esr_el1(void)
 {
@@ -48,7 +53,7 @@ static inline uint64_t read_esr_el1(void)
 static inline uint64_t read_elr_el1(void)
 {
     uint64_t val;
-    __asm__ volatile("mrs %0, elr_el1" : "=r"(val));
+    __asm__ volatile("mrs %0, " KERN_ELR_NAME : "=r"(val));
     return val;
 }
 
@@ -62,7 +67,7 @@ static inline uint64_t read_far_el1(void)
 static inline uint64_t read_spsr_el1(void)
 {
     uint64_t val;
-    __asm__ volatile("mrs %0, spsr_el1" : "=r"(val));
+    __asm__ volatile("mrs %0, " KERN_SPSR_NAME : "=r"(val));
     return val;
 }
 

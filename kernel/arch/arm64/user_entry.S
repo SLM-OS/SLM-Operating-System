@@ -1,10 +1,18 @@
 /*
  * user_entry.S - EL0 Entry Trampoline for SLM-OS
  *
- * Transitions from EL1 (kernel) to EL0 (user) via ERET.
+ * Transitions from the kernel EL (EL1h on QEMU/x86, EL2h with VHE
+ * on Pi 5 / Jetson per #683) to EL0 via ERET.
  * Called from user_task_wrapper() in task.c after context switch
  * restores this task for the first time.
+ *
+ * KERN_ELR / KERN_SPSR (from el_regs.h) resolve to elr_el2/spsr_el2
+ * on EL2 platforms so ERET reads the live exception state, not the
+ * dormant EL1 registers. SPSR value with M[3:0]=0 means "return to
+ * EL0t" regardless of which EL we ERET from.
  */
+
+#include "el_regs.h"
 
 .section .text
 
@@ -24,10 +32,11 @@
 .global user_task_enter
 .type user_task_enter, %function
 user_task_enter:
-    /* Set up EL0 return state */
-    msr     elr_el1, x0         /* Entry point -> ELR (where ERET will jump) */
+    /* Set up EL0 return state. KERN_ELR/KERN_SPSR resolve to *_EL2
+     * on Pi 5 / Jetson (EL2h+VHE) and *_EL1 on QEMU/other (EL1h). */
+    msr     KERN_ELR, x0        /* Entry point -> ELR (where ERET will jump) */
     mov     x3, #0x0            /* SPSR = EL0t: EL0, SP_EL0, interrupts enabled */
-    msr     spsr_el1, x3
+    msr     KERN_SPSR, x3
     msr     sp_el0, x1          /* User stack pointer */
 
     /* Pass argument in x0 for the user function */
@@ -65,11 +74,11 @@ user_task_enter:
     mov     x29, #0
     mov     x30, #0
 
-    /* ISB ensures the elr_el1/spsr_el1 writes above are observed by the
-     * upcoming ERET (ARM ARM D1.21.1 — context-altering MSRs require an
-     * ISB before the consuming exception-return instruction). Without
-     * this, ERET may use stale SPSR/ELR and immediately fault back to
-     * EL1 with corrupted PSTATE. */
+    /* ISB ensures the KERN_ELR/KERN_SPSR writes above are observed by
+     * the upcoming ERET (ARM ARM D1.21.1 — context-altering MSRs
+     * require an ISB before the consuming exception-return
+     * instruction). Without this, ERET may use stale SPSR/ELR and
+     * immediately fault back with corrupted PSTATE. */
     isb
 
     /* Transition to EL0 */

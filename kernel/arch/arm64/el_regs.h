@@ -14,23 +14,33 @@
  *     delivery is broken on BCM2712 / GIC-400 firmware regardless of
  *     PPI; running at EL2 routes IRQs through VBAR_EL2 the way Linux
  *     and Pi firmware actually validate).
- *   - EL1h on every other ARM64 platform (QEMU virt direct boot,
- *     Jetson preemption is cooperative-only and never exercises this
- *     path on hardware).
+ *   - EL2h with VHE on PLATFORM_JETSON_ORIN_NANO (CBB firewall path
+ *     forces EL2 entry; smp_boot.S confirms secondaries also stay at
+ *     EL2). Cooperative-only preemption today, so vector-entry paths
+ *     that read ELR/SPSR aren't currently exercised on Jetson
+ *     hardware — but the macro selects the right operand for the day
+ *     hardware IRQs come back, and matches what KVM-host kernels do.
+ *   - EL1h on every other ARM64 platform (QEMU virt direct boot).
  *
  * Sites that explicitly mrs/msr ELR or SPSR (vector save/restore,
- * resched_trampoline, user_entry) must use KERN_ELR / KERN_SPSR so
- * the same source compiles correctly for both runtime ELs.
+ * resched_trampoline, panic register dump, user_entry) must use
+ * KERN_ELR / KERN_SPSR (assembly) or KERN_ELR_NAME / KERN_SPSR_NAME
+ * (C inline asm) so the same source compiles correctly for both
+ * runtime ELs.
  */
 #ifndef KERNEL_ARCH_ARM64_EL_REGS_H
 #define KERNEL_ARCH_ARM64_EL_REGS_H
 
-#if defined(PLATFORM_RASPI5)
-#  define KERN_ELR  elr_el2
-#  define KERN_SPSR spsr_el2
+#if defined(PLATFORM_RASPI5) || defined(PLATFORM_JETSON_ORIN_NANO)
+#  define KERN_ELR        elr_el2
+#  define KERN_SPSR       spsr_el2
+#  define KERN_ELR_NAME   "elr_el2"
+#  define KERN_SPSR_NAME  "spsr_el2"
 #else
-#  define KERN_ELR  elr_el1
-#  define KERN_SPSR spsr_el1
+#  define KERN_ELR        elr_el1
+#  define KERN_SPSR       spsr_el1
+#  define KERN_ELR_NAME   "elr_el1"
+#  define KERN_SPSR_NAME  "spsr_el1"
 #endif
 
 #endif /* KERNEL_ARCH_ARM64_EL_REGS_H */
