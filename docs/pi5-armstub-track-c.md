@@ -1,6 +1,10 @@
 # Pi 5 Track C — Custom EL3 Armstub for True Preemptive Multitasking
 
-**Status:** Stage 1 (minimal armstub source + build) and Stage 2 (custom TF-A with `SCR_EL3` + GIC patches) both landed. Stage 2.5 (kernel-side `DAIF.I` unmask) — open.
+**Status:** **Closed.** Stage 1 (armstub source + build) and Stage 2 (custom TF-A with `SCR_EL3` + GIC patches) both landed and validated on hardware. Stage 2.5 disconfirmed the original "one-line `DAIF.I` unmask" framing — see [`pi5-stage25-irqtest-findings.md`](pi5-stage25-irqtest-findings.md) for the differential probing that ruled out NS-EL1 IRQ delivery on Pi 5.
+
+The actual production fix is tracked in [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683) — move SLM-OS to EL2 with VHE so IRQs route through `VBAR_EL2` (the path Pi firmware actually validates). See [`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md) for the refactor plan.
+
+This document is retained for the Stage 1 + Stage 2 work product (TF-A patches in `tools/tfa-patches/`, `make tfa-pi5`, custom `bl31.bin` deploy path) which remain useful even under the EL2/VHE direction.
 
 **Issue:** [#134](https://github.com/SLM-OS/SLM-Operating-System/issues/134) — restore hardware timer IRQ delivery on Pi 5.
 
@@ -215,49 +219,43 @@ rarely runs because the shell + `net_pump` keep CPU 0 busy.
 the CPU never holds an unmasked IRQ state long enough to take
 the pending timer IRQ.
 
-## Stage 2.5 — kernel-side: per-task `orig_elr`/`orig_spsr` (open)
+## Stage 2.5 — original framing was wrong (resolved into #683)
 
-This stage was originally framed as "unmask `DAIF.I` in tasks" — a
-one-line change. **Hardware testing on pi-5-2 with the irqtest probe
-in this PR proved that's only half the story.**
+This stage was originally framed as "unmask `DAIF.I` in tasks plus
+move `orig_elr`/`orig_spsr` into `struct task`" — small kernel-side
+work. The differential probing on `issue/672/secondary-preempt-bringup`
+(see [`pi5-stage25-irqtest-findings.md`](pi5-stage25-irqtest-findings.md)
+and #672's closing summary) **disconfirmed** that framing.
 
-**Verified via `irqtest`:** with the Stage 2 TF-A loaded and
-`DAIF.I` briefly cleared from a shell command, the system **hangs
-immediately** — meaning the timer IRQ DOES deliver to the IRQ
-vector. Stage 2's TF-A patches *are* working. The hang itself is
-proof.
+What the probing established:
 
-**What's actually broken:** Pi 5's existing `SECONDARY_PREEMPT`
-trampoline (`kernel/sched/preempt.c`, PR #98) saves `orig_elr` /
-`orig_spsr` in **per-CPU NC slots**, not per-task. When
-preempt-during-preempted-task happens (which it does as soon as
-hardware IRQs are firing every 10 ms across multiple ready tasks),
-the inner preemption clobbers the outer's save slots, and the
-outer task's eret target is corrupted.
+- Stage 2's TF-A patches **do** run and **do** put PPI 30 in Group 1 NS.
+  `GICC_HPPIR` from NS-EL1 returns 30 (not 1022) — proof that the GIC
+  routing is correct.
+- The GIC's `nIRQ` pin to CPU 0 is asserted. Disabling the timer
+  (`CNTP_CTL=0`) or the PPI (`ICENABLER0`) unblocks `daifclr`; the
+  pin assertion is real.
+- **But the EL1 IRQ vector is never entered** — `vec->irq` stays 0
+  across all CPUs. `daifclr #2` at NS-EL1 with the pin asserted
+  hard-locks CPU 0 with no exception delivered.
+- PPI 27 (CNTV virtual) tested as the alternative: identical wedge.
+  The blocker is **not PPI-specific**; NS-EL1 IRQ delivery is broken
+  in general on this Pi 5 / BCM2712 / GIC-400 firmware.
 
-The fix is moving `orig_elr` / `orig_spsr` into `struct task`. This
-is a small structural change (~20 lines in preempt.c, vectors.S,
-task.h) plus regression validation. It belongs in Stage 2.5 because
-it's the load-bearing change for activating real preemption.
+The trampoline (`orig_elr`/`orig_spsr` in `struct task`) was never
+exercised because the IRQ exception is never delivered to enter it.
+The trampoline infrastructure remains structurally sound but inert.
 
-After Stage 2.5:
+**Path forward:** [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683)
+moves SLM-OS to EL2 with VHE so IRQs go through `VBAR_EL2` — the
+path Linux on Pi 5 uses and Pi firmware validates. See
+[`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md) for the refactor plan.
 
-1. **Unmask `DAIF.I`** in `task_entry_trampoline` (gated on
-   `SECONDARY_PREEMPT=ON`). One line.
-2. **Activate `SECONDARY_PREEMPT=ON`** for Pi 5 default builds.
-3. **Activate the Stage 2 custom TF-A** (place `bl31.bin` →
-   `armstub8-2712.bin` on the boot partition, add `armstub=` to
-   `config.txt`).
-4. **Boot test:** `boot_test --count 10` on pi-5-2. Each boot
-   should advance per-CPU IRQ counters > 0.
-5. **Multi-core test acceptance:** the five originally-failing
-   tests should pass via real hardware preemption rather than via
-   the Tier 2/3 auto-recovery.
-
-The `irqtest` shell command (`PLATFORM_RASPI5 + PI5_IRQ_DIAG`
-only, in `kernel/src/shell_sys.c`) stays in this PR as the
-diagnostic that pinned the per-task `orig_elr` requirement and
-will continue to pin Stage 2.5's success.
+The `irqtest` shell command (`PLATFORM_RASPI5 + PI5_IRQ_DIAG`,
+`kernel/src/shell_sys.c`) stays as the diagnostic harness that
+pinned the EL1-IRQ-delivery wedge and will pin #683's success
+(after #683's PR 4 lands, `irqtest` should report `RESULT: IRQ
+DELIVERED`).
 
 ## Acceptance criteria for closing #134
 
@@ -270,11 +268,11 @@ will continue to pin Stage 2.5's success.
 | TF-A fork integrated + built | ✅ Stage 2 |
 | `make tfa-pi5` builds TF-A from patches | ✅ Stage 2 |
 | Boot reliability ≥ 99/100 with armstub deployed | ✅ Stage 2 (parity with stock) |
-| `DAIF.I` unmasked in tasks | ☐ Stage 2.5 |
-| `cpu` shell shows non-zero IRQ counter on all CPUs | ☐ Stage 2.5 |
-| `make test PLATFORM=RASPI5` 5/5 multi-core tests pass with `SECONDARY_PREEMPT=ON` | ☐ Stage 2.5 |
-| `boot_test --count 10` 10/10 with `COOP_PREEMPT=OFF` | ☐ Stage 2.5 |
+| Stage 2.5 framing (`DAIF.I` unmask + per-task `orig_elr`) | 🔁 superseded — #672 disconfirmed; tracked under #683 |
+| `cpu` shell shows non-zero IRQ counter on all CPUs | 🔗 #683 PR 4 |
+| `make test PLATFORM=RASPI5` multi-core tests pass with `SECONDARY_PREEMPT=ON` | 🔗 follow-up to #683 |
+| `boot_test --count 10` 10/10 with `COOP_PREEMPT=OFF` | 🔗 follow-up to #683 |
 
 ---
 
-*Last updated: 2026-05-05.*
+*Last updated: 2026-05-07.*

@@ -1,8 +1,14 @@
 /*
  * vectors.S - Exception vector table for SLM-OS (ARM64)
  *
- * Handles exceptions and interrupts at EL1.
+ * Handles exceptions at the EL the kernel runs at: EL1h on QEMU,
+ * EL2h with VHE on PLATFORM_RASPI5 / PLATFORM_JETSON_ORIN_NANO
+ * (#683). Vector table layout is the same for both — only the
+ * ELR/SPSR register operands differ (no VHE redirect for those —
+ * see el_regs.h).
  */
+
+#include "el_regs.h"
 
 .section .text
 
@@ -114,9 +120,10 @@ exception_vectors:
     stp     x28, x29, [sp, #224]
     str     x30, [sp, #240]
 
-    /* Save ELR and SPSR */
-    mrs     x0, elr_el1
-    mrs     x1, spsr_el1
+    /* Save ELR and SPSR (KERN_ELR / KERN_SPSR resolve to elr_el2 /
+     * spsr_el2 on PLATFORM_RASPI5, elr_el1 / spsr_el1 elsewhere). */
+    mrs     x0, KERN_ELR
+    mrs     x1, KERN_SPSR
     stp     x0, x1, [sp, #248]
 .endm
 
@@ -157,10 +164,10 @@ exception_vectors:
  * Macro to restore all general-purpose registers.
  */
 .macro restore_regs
-    /* Restore ELR and SPSR */
+    /* Restore ELR and SPSR (see KERN_ELR / KERN_SPSR in el_regs.h). */
     ldp     x0, x1, [sp, #248]
-    msr     elr_el1, x0
-    msr     spsr_el1, x1
+    msr     KERN_ELR, x0
+    msr     KERN_SPSR, x1
 
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
@@ -483,8 +490,8 @@ resched_trampoline:
 
     /* Restore orig_elr/orig_spsr into the system registers. */
     ldp     x3, x4, [sp, #168]
-    msr     elr_el1, x3
-    msr     spsr_el1, x4
+    msr     KERN_ELR, x3
+    msr     KERN_SPSR, x4
 
     /* Restore task's GPRs and unwind the trampoline frame. */
     ldp     x0, x1,   [sp, #0]

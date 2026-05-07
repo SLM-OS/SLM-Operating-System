@@ -59,12 +59,19 @@ quantum boundary regardless of what it is doing. This is the model on
 
 ### Cooperative preemption (`COOP_PREEMPT`) — fallback
 
-Default-on for **Raspberry Pi 5** and **Jetson Orin Nano**, where
-non-secure writes to the GIC group registers are silently ignored by
-EL3 firmware and the timer IRQ never reaches the kernel. See
-`docs/archive/investigations/pi5-preemption-resolution.md` and
-`docs/archive/investigations/jetson-preemption-investigation.md` for
-the empirical chain.
+Default-on for **Raspberry Pi 5** and **Jetson Orin Nano** for
+historical reasons that differ per platform.
+
+- On Pi 5, NS-EL1 IRQ delivery is broken at the GIC-400 / BCM2712 /
+  firmware level regardless of which timer PPI is selected. See
+  [`pi5-stage25-irqtest-findings.md`](pi5-stage25-irqtest-findings.md)
+  for the differential probing that established this; see
+  [`pi5-el2-vhe-plan.md`](pi5-el2-vhe-plan.md) (issue #683) for the
+  refactor to EL2 with VHE that will unblock hardware IRQ delivery
+  via `VBAR_EL2` + PPI 26.
+- On Jetson the original CBB firewall investigation drove the
+  cooperative model; see
+  `docs/archive/investigations/jetson-preemption-investigation.md`.
 
 `schedule()` calls `coop_preempt_maybe_tick()` on every entry: it
 reads `CNTPCT_EL0`, compares against the per-CPU 10 ms deadline, and

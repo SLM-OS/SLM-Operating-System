@@ -4,11 +4,15 @@
  * This is the entry point for secondary CPUs when woken via PSCI CPU_ON.
  * PSCI places the context_id (logical CPU ID) in x0.
  *
- * On Pi 5, TF-A drops the secondary CPU to EL2 with MMU off. This code:
- *   1. Performs EL2→EL1 transition (if needed)
- *   2. Enables the MMU using the primary CPU's page tables
- *   3. Sets up per-CPU stack and exception vectors
- *   4. Jumps to secondary_init() in C
+ * On Pi 5 (#683) and Jetson, TF-A delivers secondary CPUs at EL2.
+ * SLM-OS stays at EL2 with VHE so the kernel runs at the same EL on
+ * every CPU. This code:
+ *   1. Enables VHE (HCR_EL2.E2H=1, TGE=1, RW=1) if at EL2; falls back
+ *      to EL1 if firmware enters at EL1 (unexpected on Pi 5/Jetson but
+ *      survivable for QEMU SMP builds).
+ *   2. Enables the MMU using the primary CPU's page tables.
+ *   3. Sets up per-CPU stack and exception vectors.
+ *   4. Jumps to secondary_init() in C.
  */
 
 .section .text
@@ -23,19 +27,20 @@ secondary_entry:
 
     /*
      * Check if we're at EL2 or EL1.
-     * - Jetson (after kexec): EL2 → enable VHE, stay at EL2
-     * - Pi 5 (via TF-A): EL2 → transition to EL1
-     * - QEMU: EL1 → skip EL2 handling
+     *   - Pi 5 (#683): TF-A delivers secondaries at EL2 → enable VHE,
+     *     stay at EL2 (matches primary in boot.S).
+     *   - Jetson: kexec/UEFI delivers secondaries at EL2 → enable
+     *     VHE, stay at EL2.
+     *   - QEMU: typically EL1 → skip EL2 handling, fall through.
      */
     mrs     x0, CurrentEL
     cmp     x0, #8                  /* EL2 = 0b1000 */
-    b.ne    .Lsec_in_el1
+    b.ne    .Lsec_post_el2
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
     /*
-     * Jetson: Stay at EL2 with VHE (same as primary CPU in boot.S).
-     * Enable VHE so EL1 register names redirect to EL2 transparently.
-     * Disable stale Linux timers to prevent pending IRQs.
+     * Jetson: Stay at EL2 with VHE (matches Jetson primary CPU's
+     * unconditional overwrite in boot.S).
      */
     ldr     x0, =((1 << 34) | (1 << 31) | (1 << 27))
     msr     hcr_el2, x0
@@ -46,46 +51,75 @@ secondary_entry:
     msr     cntv_ctl_el0, xzr
     msr     cnthp_ctl_el2, xzr
     isb
+#elif defined(PLATFORM_RASPI5)
+    /*
+     * Pi 5 (#683): Stay at EL2 with VHE. Unconditional overwrite
+     * (matches both the Pi 5 primary in boot.S and the Jetson EL2
+     * blocks here and in boot.S).
+     */
+    msr     hstr_el2, xzr               /* Clear sysreg-trap mask. */
+    ldr     x0, =((1 << 34) | (1 << 31) | (1 << 27))   /* E2H | RW | TGE */
+    msr     hcr_el2, x0
+    isb
 
-    b       .Lsec_in_el1           /* Continue with MMU setup (VHE active) */
-#else
-    /* --- EL2→EL1 transition (Pi 5 path) --- */
-
-    /* Disable coprocessor traps to EL2 */
-    mov     x0, #0x33ff
-    msr     cptr_el2, x0
-    msr     hstr_el2, xzr
-
-    /* Enable EL1 access to physical timer and counter */
+    /*
+     * CNTHCTL_EL2 — programmed post-E2H so the write hits the EL1
+     * CNTKCTL bit layout that applies under E2H=1. Bits 0+1 are
+     * EL0PCTEN/EL0PCEN.
+     */
     mov     x0, #3
     msr     cnthctl_el2, x0
     msr     cntvoff_el2, xzr
 
-    /* Enable FP/SIMD at EL1 */
+    /*
+     * Enable FP/SIMD via CPACR_EL1 (redirects to CPTR_EL2 with CPACR
+     * format under E2H=1).
+     */
     mov     x0, #(3 << 20)
     msr     cpacr_el1, x0
 
-    /* HCR_EL2: RW=1 (AArch64 EL1) */
+    /*
+     * SCTLR_EL1 safe initial value (redirects to SCTLR_EL2 with EL1
+     * layout under E2H=1). MMU/cache stays off until we load the
+     * primary's page tables below.
+     */
+    mov     x0, #0x0800
+    movk    x0, #0x30d0, lsl #16
+    msr     sctlr_el1, x0
+    isb
+#else
+    /*
+     * Other platforms entering at EL2: drop to EL1 (legacy path,
+     * unchanged from before #683).
+     */
+    mov     x0, #0x33ff
+    msr     cptr_el2, x0
+    msr     hstr_el2, xzr
+
+    mov     x0, #3
+    msr     cnthctl_el2, x0
+    msr     cntvoff_el2, xzr
+
+    mov     x0, #(3 << 20)
+    msr     cpacr_el1, x0
+
     mov     x0, #(1 << 31)
     msr     hcr_el2, x0
 
-    /* SCTLR_EL1: safe initial value (MMU off, caches off) */
     mov     x0, #0x0800
     movk    x0, #0x30d0, lsl #16
     msr     sctlr_el1, x0
 
-    /* Return to EL1h with exceptions masked */
     mov     x0, #0x3c4
     msr     spsr_el2, x0
-    adr     x0, .Lsec_in_el1
+    adr     x0, .Lsec_post_el2
     msr     elr_el2, x0
-    /* ISB between ELR/SPSR writes and ERET (ARM ARM D.1.21.1). */
     isb
     eret
-#endif /* PLATFORM_JETSON_ORIN_NANO */
+#endif /* PLATFORM_JETSON_ORIN_NANO / PLATFORM_RASPI5 / other */
 
-.Lsec_in_el1:
-    /* --- Now at EL1 (or EL2 with VHE on Jetson) with MMU off --- */
+.Lsec_post_el2:
+    /* --- Now at EL2h+VHE (Pi 5/Jetson) or EL1 (QEMU/other), MMU off --- */
 
     /*
      * Enable the MMU using the primary CPU's page tables.

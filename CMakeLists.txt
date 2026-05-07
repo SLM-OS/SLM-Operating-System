@@ -930,6 +930,8 @@ set(KERNEL_INCLUDES
 # resorting to relative includes.
 if(PLATFORM STREQUAL "X86_64")
     list(APPEND KERNEL_INCLUDES ${CMAKE_SOURCE_DIR}/kernel/arch/x86_64)
+else()
+    list(APPEND KERNEL_INCLUDES ${CMAKE_SOURCE_DIR}/kernel/arch/arm64)
 endif()
 
 # Build kernel ELF — include lwIP when networking is enabled
