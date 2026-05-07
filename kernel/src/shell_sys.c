@@ -1772,6 +1772,63 @@ static void diag_print_el2(void)
                     : (s->gicd_igroupr0_post == 0ul)
                           ? "(writes SILENTLY DISCARDED — FIQ hypothesis likely)"
                           : "(partial)");
+
+    /*
+     * Sentinel C: TF-A's own readback of GICD_IGROUPR0 from EL3,
+     * captured by patched TF-A in plat_rpi_bl31_custom_setup right
+     * after the 0xFFFFFFFF write. Lets us distinguish "write was
+     * never persistent at EL3" from "write was persistent at EL3
+     * but cleared before NS-EL2 reads."
+     */
+    {
+        uint32_t c_magic = *(volatile uint32_t *)DIAG_GIC_SENTINEL_C_MAGIC;
+        uint32_t c_pre   = *(volatile uint32_t *)DIAG_GIC_SENTINEL_C_IGROUPR0_PRE;
+        uint32_t c_post  = *(volatile uint32_t *)DIAG_GIC_SENTINEL_C_IGROUPR0_POST;
+        uint32_t c_ctlr  = *(volatile uint32_t *)DIAG_GIC_SENTINEL_C_GICD_CTLR;
+        shell_printf("  Sentinel C (TF-A IGROUPR readback): magic=0x%08lx %s\r\n",
+                    (unsigned long)c_magic,
+                    c_magic == DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC
+                        ? "OK" : "MISSING");
+        if (c_magic == DIAG_GIC_SENTINEL_C_EXPECTED_MAGIC) {
+            shell_printf("    TF-A view  IGROUPR[0]: pre=0x%08lx post=0x%08lx  %s\r\n",
+                        (unsigned long)c_pre, (unsigned long)c_post,
+                        (c_post == 0xFFFFFFFFul)
+                            ? "(persistent at EL3 — kernel side cleared it)"
+                            : (c_post == c_pre)
+                                  ? "(write DISCARDED at GIC level)"
+                                  : "(partial)");
+            shell_printf("    TF-A view  GICD_CTLR : 0x%08lx\r\n",
+                        (unsigned long)c_ctlr);
+        }
+    }
+
+    /*
+     * Sentinel D was reserved for ICC_SRE_EL3/EL2/EL1 captured from
+     * Secure-EL3 by patched TF-A. Disabled — even ICC_SRE_EL3 read
+     * from EL3 generates UNDEFINED on this Cortex-A76 implementation.
+     * Reason is visible in ID_AA64PFR0_EL1 above:
+     *   bits 27:24 (GIC field) == 0  →  GIC system register interface
+     *                                   is NOT implemented.
+     * SRE is moot — the CPU has no sysreg interface to listen on, so
+     * IRQs must be delivered via the legacy memory-mapped GICC_*
+     * interface unconditionally. Decode the GIC field here so the
+     * fact is plain on every diag dump.
+     */
+    {
+        uint64_t pfr0 = s->id_aa64pfr0_el1;
+        uint32_t gic_field = (uint32_t)((pfr0 >> 24) & 0xF);
+        const char *gic_decode =
+            (gic_field == 0u) ? "0 (NOT implemented — CPU has no sysreg ICC_*)"
+            : (gic_field == 1u) ? "1 (GICv3.0/4.0 sysreg interface)"
+            : (gic_field == 3u) ? "3 (GICv4.1 sysreg interface)"
+            : "?";
+        shell_printf("  ID_AA64PFR0_EL1.GIC = %s\r\n", gic_decode);
+        if (gic_field == 0u) {
+            shell_puts("    >>> ICC_SRE_EL* are UNDEFINED on this CPU. SRE branch\r\n"
+                       "        of #134 is moot — IRQ delivery has to flow through\r\n"
+                       "        legacy GICC_* MMIO unconditionally.\r\n");
+        }
+    }
 }
 
 static void diag_print_vec(void)
@@ -1794,6 +1851,8 @@ static void diag_print_vec(void)
 static void diag_print_gic_runtime(void)
 {
 #if defined(PLATFORM_RASPI5)
+    volatile uint32_t *gicd_ctlr_runtime =
+        (volatile uint32_t *)(GIC_DIST_BASE + 0x000UL);
     volatile uint32_t *gicd_isenabler0 =
         (volatile uint32_t *)(GIC_DIST_BASE + 0x100UL);
     volatile uint32_t *gicd_ispendr0 =
@@ -1804,6 +1863,7 @@ static void diag_print_gic_runtime(void)
         (volatile uint32_t *)(GIC_CPU_BASE + 0x000UL);
     volatile uint32_t *gicc_pmr =
         (volatile uint32_t *)(GIC_CPU_BASE + 0x004UL);
+    uint32_t gicd_ctlr_now = *gicd_ctlr_runtime;
     uint32_t iser = *gicd_isenabler0;
     uint32_t ispr = *gicd_ispendr0;
     uint32_t iacr = *gicd_iactiver0;
@@ -1819,6 +1879,20 @@ static void diag_print_gic_runtime(void)
     (void)sre_pre; (void)sre_post;
 
     shell_puts("\r\nGIC runtime state (read from shell task):\r\n");
+    /*
+     * GICD_CTLR from NS view. On GIC-400 with security extensions,
+     * NS reads/writes only see one bit: EnableGrp1NS (NS-view bit 0
+     * aliases the actual register's bit 1). bit 0 == 1 means the
+     * distributor is forwarding NS Group 1 interrupts to the NS CPU
+     * interface — which is what we need for PPI 30 (timer) to deliver.
+     * This is the kernel side of the gate; if 0, kernel's
+     * `GICD_CTLR = ctlr | 1` write in gic_init didn't take effect.
+     */
+    shell_printf("  GICD_CTLR = 0x%x  (NS view; bit0=EnableGrp1NS=%u)%s\r\n",
+                gicd_ctlr_now, gicd_ctlr_now & 1u,
+                (gicd_ctlr_now & 1u)
+                    ? "  ← distributor forwards NS Group 1 ✓"
+                    : "  ← distributor NOT forwarding NS Group 1 ✗");
     shell_printf("  GICC_CTLR = 0x%x  (bit0=EnGrp1 bit4=FIQByp!disG1 "
                 "bit5=IRQByp!disG1 bit9=EOImodeNS)\r\n",
                 *gicc_ctlr);
@@ -1829,6 +1903,54 @@ static void diag_print_gic_runtime(void)
                 ispr, (ispr >> 30) & 1);
     shell_printf("  GICD_IACTIVER0  = 0x%x  (bit 30 [timer active] = %u)\r\n",
                 iacr, (iacr >> 30) & 1);
+
+    /*
+     * GICC_ACTIVEPRIO[0..3] (offset 0xD0..0xDC). Each bit corresponds
+     * to a "running priority" entry. If anything earlier (firmware,
+     * boot ROM, TF-A) left an active priority bit set, the CPU
+     * interface refuses to deliver new IRQs at or below that priority
+     * — they queue at the distributor (visible as ISPENDR) but never
+     * reach the CPU. Linux's gic_cpu_if_up clears these unconditionally
+     * via writel(0, GICC + 0xD0 + i*4). Our kernel never touched them
+     * before round 5 of the #134 probe.
+     */
+    {
+        volatile uint32_t *gicc_aprn =
+            (volatile uint32_t *)(GIC_CPU_BASE + 0xD0UL);
+        shell_puts("  GICC_ACTIVEPRIO[0..3]: ");
+        for (uint32_t i = 0; i < 4; i++) {
+            shell_printf("0x%08x ", gicc_aprn[i]);
+        }
+        uint32_t any_set = 0;
+        for (uint32_t i = 0; i < 4; i++) {
+            any_set |= gicc_aprn[i];
+        }
+        shell_printf(" %s\r\n",
+                    any_set ? "← stale active priority — CPU interface "
+                              "would block lower IRQs"
+                            : "(clean)");
+    }
+
+    /*
+     * GICD_IPRIORITYR for PPI 30 (timer). Read from NS to see what
+     * priority the CPU interface compares against PMR. With GIC-400
+     * security extensions, the NS-view value of a Secure-written
+     * priority may differ from what Secure software wrote.
+     */
+    {
+        volatile uint32_t *gicd_ipri =
+            (volatile uint32_t *)(GIC_DIST_BASE + 0x400UL);
+        uint32_t row = 30u / 4u;          /* IPRIORITYR row containing IRQ 30 */
+        uint32_t shift = (30u % 4u) * 8u; /* byte position within the row */
+        uint8_t pri = (uint8_t)(gicd_ipri[row] >> shift);
+        shell_printf("  IPRIORITYR[PPI 30] (NS view) = 0x%02x   PMR = 0x%x\r\n",
+                    pri, *gicc_pmr);
+        shell_printf("    delivers under PMR if pri < PMR  →  %s\r\n",
+                    (pri < (uint8_t)(*gicc_pmr & 0xff))
+                        ? "yes (priority allows delivery)"
+                        : "NO — IPRIORITYR ≥ PMR, IRQ masked at CPU iface");
+    }
+
     shell_puts("  ICC_SRE_EL2     = (not probed — access from EL2 "
               "traps to EL3 on this platform)\r\n");
 #endif
@@ -5719,6 +5841,60 @@ static inline void irqtest_puts(const char *s)
 int cmd_irqtest(int argc, char *argv[])
 {
     (void)argc; (void)argv;
+
+    /*
+     * SCR_EL3 sentinel readout (#134 Stage 2.5+). Always runs first,
+     * before any DAIF manipulation, so it's safe under every path
+     * (`irqtest`, `irqtest noirq`, `irqtest fiq`). Tells the operator:
+     *   - Did our TF-A `setup_ns_context` PLAT_RPI5 patch run?
+     *   - What scr_el3 value did it write to the NS-context buffer?
+     *   - Did `cm_prepare_el3_exit_ns` see the same value just before
+     *     the assembly `el3_exit` loaded it?
+     *
+     * If sentinel magic words are missing, the patched TF-A isn't
+     * loaded (deploy regression — armstub8-2712.bin is stock or
+     * absent). If sentinel A's value has bits 1/2 set, our clear
+     * isn't taking effect. If B differs from A, an override path
+     * runs between them.
+     */
+    {
+        uint32_t a_magic = *(volatile uint32_t *)DIAG_SCR_SENTINEL_A_MAGIC;
+        uint64_t a_val   = *(volatile uint64_t *)DIAG_SCR_SENTINEL_A_VAL;
+        uint32_t b_magic = *(volatile uint32_t *)DIAG_SCR_SENTINEL_B_MAGIC;
+        uint64_t b_val   = *(volatile uint64_t *)DIAG_SCR_SENTINEL_B_VAL;
+
+        shell_puts("\r\n--- SCR_EL3 sentinels (TF-A debug) ---\r\n");
+        shell_printf("  Sentinel A (setup_ns_context):     magic=0x%08x %s\r\n",
+                    a_magic,
+                    a_magic == DIAG_SCR_SENTINEL_A_EXPECTED_MAGIC
+                        ? "OK" : "MISSING — patched TF-A not loaded?");
+        if (a_magic == DIAG_SCR_SENTINEL_A_EXPECTED_MAGIC) {
+            shell_printf("                                     scr_el3=0x%lx (IRQ=%lu FIQ=%lu)\r\n",
+                        (unsigned long)a_val,
+                        (unsigned long)((a_val >> 1) & 1),
+                        (unsigned long)((a_val >> 2) & 1));
+        }
+        shell_printf("  Sentinel B (cm_prepare_el3_exit_ns): magic=0x%08x %s\r\n",
+                    b_magic,
+                    b_magic == DIAG_SCR_SENTINEL_B_EXPECTED_MAGIC
+                        ? "OK" : "MISSING — patched TF-A not loaded?");
+        if (b_magic == DIAG_SCR_SENTINEL_B_EXPECTED_MAGIC) {
+            shell_printf("                                     scr_el3=0x%lx (IRQ=%lu FIQ=%lu)\r\n",
+                        (unsigned long)b_val,
+                        (unsigned long)((b_val >> 1) & 1),
+                        (unsigned long)((b_val >> 2) & 1));
+        }
+        if (a_magic == DIAG_SCR_SENTINEL_A_EXPECTED_MAGIC &&
+            b_magic == DIAG_SCR_SENTINEL_B_EXPECTED_MAGIC) {
+            if (a_val == b_val) {
+                shell_puts("  Verdict: A == B → no override between setup_ns_context and el3_exit.\r\n");
+            } else {
+                shell_printf("  Verdict: A != B → SOMETHING OVERRODE SCR_EL3 (delta=0x%lx).\r\n",
+                            (unsigned long)(a_val ^ b_val));
+            }
+        }
+        shell_puts("\r\n");
+    }
 
     /* Header via direct UART writes only. */
     irqtest_puts("\r\nirqtest probe:");

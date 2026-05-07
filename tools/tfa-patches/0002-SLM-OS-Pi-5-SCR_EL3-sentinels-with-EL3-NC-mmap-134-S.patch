@@ -1,0 +1,137 @@
+From 84577ff984f18465b782354023c977fc67a33d3d Mon Sep 17 00:00:00 2001
+From: slmos-build <slmos-build@example.com>
+Date: Wed, 6 May 2026 17:27:13 -0700
+Subject: [PATCH 2/3] SLM-OS Pi 5 SCR_EL3 sentinels with EL3 NC mmap (#134
+ Stage 2.5+ debug)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds the 0xFFE00000+2 MB Pi 5 NC region to BL31's mmap so the EL3
+sentinel writes target a mapped page (the previous attempt without
+this mmap faulted with a synchronous external abort in
+setup_ns_context, looping in plat_panic_handler before BL31 could
+print its banner).
+
+- plat/rpi/common/rpi4_bl31_setup.c: add MT_NON_CACHEABLE | MT_RW |
+  MT_SECURE region for 0xFFE00000..0xFFFFFFFF under PLAT_RPI5.
+- plat/rpi/rpi5/include/platform_def.h: bump MAX_MMAP_REGIONS 8 -> 10.
+- lib/el3_runtime/aarch64/context_mgmt.c: write Sentinel A magic +
+  scr_el3 in setup_ns_context after the IRQ/FIQ clear; write
+  Sentinel B magic + scr_el3 read from NS context at the top of
+  cm_prepare_el3_exit_ns. Slots match kernel diag_pi5.h offsets.
+  No DC CVAC needed — NC mapping makes writes immediately visible
+  to the kernel reading uncached.
+---
+ lib/el3_runtime/aarch64/context_mgmt.c | 33 ++++++++++++++++++++++++++
+ plat/rpi/common/rpi4_bl31_setup.c      | 21 ++++++++++++++++
+ plat/rpi/rpi5/include/platform_def.h   | 10 +++++++-
+ 3 files changed, 63 insertions(+), 1 deletion(-)
+
+diff --git a/lib/el3_runtime/aarch64/context_mgmt.c b/lib/el3_runtime/aarch64/context_mgmt.c
+index e37bba41b..622f7ed2e 100644
+--- a/lib/el3_runtime/aarch64/context_mgmt.c
++++ b/lib/el3_runtime/aarch64/context_mgmt.c
+@@ -393,6 +393,17 @@ static void setup_ns_context(cpu_context_t *ctx, const struct entry_point_info *
+ 	 */
+ #ifdef PLAT_RPI5
+ 	scr_el3 &= ~((u_register_t)((1U << 1) | (1U << 2)));
++	/*
++	 * SLM-OS Sentinel A — pinned magic + post-clear scr_el3 written
++	 * to the kernel NC region so the kernel can verify (a) this patch
++	 * actually executed in the deployed bl31, and (b) what value our
++	 * clear left in the per-context buffer. Slot map matches
++	 * kernel/include/diag_pi5.h DIAG_SCR_SENTINEL_A_*. NC mapping is
++	 * provided by plat/rpi/common/rpi4_bl31_setup.c — without it, the
++	 * stores fault. No DC CVAC needed because the mapping is NC.
++	 */
++	*(volatile uint32_t *)0xFFE0FEC0ULL = 0xCAFE0001U;
++	*(volatile uint64_t *)0xFFE0FEC8ULL = (uint64_t)scr_el3;
+ #endif
+ #endif
+ 
+@@ -1789,6 +1800,28 @@ void cm_el2_sysregs_context_restore(uint32_t security_state)
+  ******************************************************************************/
+ void cm_prepare_el3_exit_ns(void)
+ {
++#ifdef PLAT_RPI5
++	/*
++	 * SLM-OS Sentinel B (#134 Stage 2.5+).
++	 *
++	 * Read SCR_EL3 from the Non-secure context just before the
++	 * assembly el3_exit path loads it via `msr scr_el3, x18` and
++	 * publish to the kernel NC region. Slot map matches
++	 * kernel/include/diag_pi5.h DIAG_SCR_SENTINEL_B_*. If A == B
++	 * with IRQ/FIQ bits clear, our setup_ns_context patch is the
++	 * value going into NS-EL1; if B differs from A, some override
++	 * runs between setup_ns_context and el3_exit.
++	 */
++	{
++		cpu_context_t *ns_ctx_for_sentinel = cm_get_context(NON_SECURE);
++		if (ns_ctx_for_sentinel != NULL) {
++			u_register_t scr_b = read_ctx_reg(
++				get_el3state_ctx(ns_ctx_for_sentinel), CTX_SCR_EL3);
++			*(volatile uint32_t *)0xFFE0FED0ULL = 0xCAFE0002U;
++			*(volatile uint64_t *)0xFFE0FED8ULL = (uint64_t)scr_b;
++		}
++	}
++#endif
+ #if (CTX_INCLUDE_EL2_REGS && IMAGE_BL31)
+ #if ENABLE_ASSERTIONS
+ 	cpu_context_t *ctx = cm_get_context(NON_SECURE);
+diff --git a/plat/rpi/common/rpi4_bl31_setup.c b/plat/rpi/common/rpi4_bl31_setup.c
+index a7228fd4f..12ec78506 100644
+--- a/plat/rpi/common/rpi4_bl31_setup.c
++++ b/plat/rpi/common/rpi4_bl31_setup.c
+@@ -186,6 +186,27 @@ void bl31_plat_arch_setup(void)
+ 	 */
+ 	mmap_add_region(0, 0, 4096, MT_NON_CACHEABLE | MT_RW | MT_SECURE);
+ 
++#ifdef PLAT_RPI5
++	/*
++	 * SLM-OS sentinel region (#134 Stage 2.5+).
++	 *
++	 * The kernel reserves the last 2 MB of DRAM (0xFFE00000..0xFFFFFFFF)
++	 * as Non-Cacheable shared memory (NC region). Our setup_ns_context
++	 * patch writes Sentinel A at 0xFFE0FEC0 and cm_prepare_el3_exit_ns
++	 * writes Sentinel B at 0xFFE0FED0 — those pages must be mapped in
++	 * BL31's MMU or the sentinel store faults with a synchronous
++	 * external abort, looping in plat_panic_handler before BL31 can
++	 * even print its banner.
++	 *
++	 * Mapped as MT_NON_CACHEABLE so cache attributes match the kernel
++	 * side (which maps the region as Normal Non-Cacheable Inner
++	 * Shareable in vmm.c). With matching attributes the writes are
++	 * visible to the kernel reading uncached without DC CVAC.
++	 */
++	mmap_add_region(0xFFE00000ULL, 0xFFE00000ULL, 0x200000ULL,
++			MT_NON_CACHEABLE | MT_RW | MT_SECURE);
++#endif
++
+ 	rpi3_setup_page_tables(BL31_BASE, BL31_END - BL31_BASE,
+ 			       BL_CODE_BASE, BL_CODE_END,
+ 			       BL_RO_DATA_BASE, BL_RO_DATA_END
+diff --git a/plat/rpi/rpi5/include/platform_def.h b/plat/rpi/rpi5/include/platform_def.h
+index a4c2f5b9d..dc85447f5 100644
+--- a/plat/rpi/rpi5/include/platform_def.h
++++ b/plat/rpi/rpi5/include/platform_def.h
+@@ -117,7 +117,15 @@
+ #define PLAT_PHY_ADDR_SPACE_SIZE	(ULL(1) << 40)
+ #define PLAT_VIRT_ADDR_SPACE_SIZE	(ULL(1) << 40)
+ 
+-#define MAX_MMAP_REGIONS		8
++/*
++ * SLM-OS: bumped from 8 to 10 to cover the extra Pi 5 NC sentinel
++ * region (0xFFE00000, 2 MB) added in bl31_plat_arch_setup. The
++ * existing region count for BL31 is 8 (DEVICE0, DTB if present,
++ * stub-magic page, total/code/rodata/coh from rpi3_setup_page_tables);
++ * we add 1 sentinel region; the +1 cushion keeps room for the next
++ * forced map.
++ */
++#define MAX_MMAP_REGIONS		10
+ #define MAX_XLAT_TABLES			4
+ 
+ #define MAX_IO_DEVICES			U(3)
+-- 
+2.43.0
+
