@@ -6033,6 +6033,25 @@ int cmd_irqtest(int argc, char *argv[])
         extern char exception_vectors[];
         shell_printf("  exception_vectors symbol = %p (must equal VBAR_EL1)\r\n",
                      (void *)exception_vectors);
+        /* GIC delivery state — what NS-EL1 actually sees about PPI 30.
+         *   GICC_HPPIR (off 0x18): highest priority pending Group 1 NS
+         *     IRQ visible to NS — returns 1023 (none), 1022 (top is
+         *     Group 0/1-Secure, NS can't see), or the IRQ id.
+         *   GICC_AHPPIR (off 0x28): aliased — secure HPPIR (NS reads
+         *     0 unless GICC_CTLR.AckCtl steers it).
+         *   GICD_ISACTIVER0 (0x300): which IRQs are currently ACTIVE.
+         *   GICD_ITARGETSR7 (0x81C): IRQs 28..31 → CPU mask. PPI is
+         *     banked, so this returns 0x01010101 if banked-as-CPU0. */
+        uint32_t hppir   = *(volatile uint32_t *)(0x107FFFA000ULL + 0x18);
+        uint32_t ahppir  = *(volatile uint32_t *)(0x107FFFA000ULL + 0x28);
+        uint32_t isacti0 = *(volatile uint32_t *)(0x107fff9000ULL + 0x300);
+        uint32_t itarg7  = *(volatile uint32_t *)(0x107fff9000ULL + 0x81C);
+        shell_printf("  GIC NS:  HPPIR=0x%x  AHPPIR=0x%x  ISACTIVER0=0x%x  ITARGETSR7=0x%x\r\n",
+                     hppir, ahppir, isacti0, itarg7);
+        shell_printf("  HPPIR decode: %s\r\n",
+                     (hppir & 0x3FF) == 0x3FF ? "1023 (no Grp1NS pending)" :
+                     (hppir & 0x3FF) == 0x3FE ? "1022 (top pending is Grp0/Grp1S — NS cannot see)" :
+                     "actual IRQ id (Grp1NS pending — should deliver)");
     }
 
     irqtest_puts(skip_daifclr ? " 3-skipped" : " 3");  /* checkpoint 3: about to daifclr */
@@ -6067,6 +6086,7 @@ int cmd_irqtest(int argc, char *argv[])
     bool mode_cmem   = (argc >= 2 && argv[1] && strcmp(argv[1], "cmem") == 0);
     bool mode_dsb    = (argc >= 2 && argv[1] && strcmp(argv[1], "dsb") == 0);
     bool mode_wait   = (argc >= 2 && argv[1] && strcmp(argv[1], "wait") == 0);
+    bool mode_iar    = (argc >= 2 && argv[1] && strcmp(argv[1], "iar") == 0);
 
     /* "clr" mode: clear the pending timer PPI in GIC before daifclr.
      * Tests whether the wedge is caused by the GIC asserting the IRQ
@@ -6129,6 +6149,30 @@ int cmd_irqtest(int argc, char *argv[])
     /* "wait" mode: ~10 ms CNTPCT busy-wait between drain and daifclr —
      * tests pure timing as the unblocker (no MMIO, no cacheable
      * activity beyond CNTPCT reads). */
+    /* "iar" mode: manually ack the pending IRQ via NS GICC_IAR before
+     * daifclr. If the GIC accepts the ack, IAR returns 30, the IRQ
+     * transitions to ACTIVE, the IRQ pin de-asserts, and daifclr should
+     * complete normally. EOI'd via GICC_EOIR after.
+     *
+     * If IAR returns 1023 (spurious), GIC refused to ack — proves
+     * Group 1 NS routing is broken at the CPU interface despite the
+     * HPPIR readback saying otherwise.
+     *
+     * If daifclr STILL wedges after a successful ack, the wedge is not
+     * the IRQ pin assertion at all — something else is going wrong
+     * in the daifclr path. */
+    if (mode_iar) {
+        uint32_t iar = *(volatile uint32_t *)(0x107FFFA000ULL + 0x0C);
+        __asm__ volatile("dsb sy" ::: "memory");
+        uint32_t isacti_after = *(volatile uint32_t *)(0x107fff9000ULL + 0x300);
+        uint32_t hppir_after  = *(volatile uint32_t *)(0x107FFFA000ULL + 0x18);
+        shell_printf("\r\n  IAR-ack: GICC_IAR=0x%x (id=%u)  ISACTIVER0=0x%x  HPPIR=0x%x\r\n",
+                     iar, iar & 0x3FF, isacti_after, hppir_after);
+        /* DELIBERATELY NO EOI. State stays ACTIVE so the pin is
+         * de-asserted (until EOI). If daifclr now succeeds, the wedge
+         * was about pin assertion. If it still wedges, the wedge is
+         * unrelated to GIC pin state. */
+    }
     if (mode_wait) {
         uint64_t freq_w, now_w, target_w;
         __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq_w));
