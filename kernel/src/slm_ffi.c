@@ -207,6 +207,107 @@ uint32_t slm_task_current(void)
     return task ? task->id : 0;
 }
 
+#include "smp.h"
+#include "ncmem.h"
+/* Don't include cache.h — its `static inline` functions conflict
+ * with the out-of-line prototypes in `gpu/gpu.h` (same names, slightly
+ * different signatures: `const volatile void *` vs `void *`). The
+ * gpu.h prototypes are already in scope via the include above and
+ * resolve to `kernel/gpu/cache.c`. The two implementations are
+ * functionally equivalent (DC CVAC/IVAC loop + DSB); the duplicate-
+ * symbol cleanup is out of scope for the parallel-matmul PR. */
+
+/*
+ * Create a kernel task pinned to a specific CPU. Used by the parallel
+ * matmul worker pool (`runtime/src/inference/matmul_parallel.rs`)
+ * to spawn one persistent worker per remote CPU at boot time.
+ *
+ * Returns the task ID (non-zero) on success, 0 on failure (target_cpu
+ * out of range or task_create OOM).
+ */
+uint32_t slm_task_create_pinned(const char *name,
+                                slm_task_entry_t entry,
+                                void *arg,
+                                uint32_t target_cpu)
+{
+    if (target_cpu >= cpu_count) {
+        return 0;
+    }
+    struct task *task = task_create(name, (task_entry_t)entry, arg);
+    if (!task) {
+        return 0;
+    }
+    sched_set_task_affinity(task, target_cpu);
+    scheduler_add_task_to_cpu(task, target_cpu);
+    return task->id;
+}
+
+/*
+ * Number of online CPUs. Used by the parallel matmul dispatcher to
+ * size its worker pool. On Jetson this is 6; on Pi 5 it's 4; on QEMU
+ * virt it's whatever `-smp cores=N` was set to (typically 4).
+ */
+uint32_t slm_cpu_count(void)
+{
+    return cpu_count;
+}
+
+/*
+ * Cross-CPU cache maintenance for the parallel matmul output buffer.
+ * Pre-SMPEN on Jetson the per-CPU L2s are incoherent; the parallel
+ * matmul worker writes its slice of out_fp32 from a remote CPU, so
+ * the writer must clean (DC CVAC) and the reader (calling task)
+ * must invalidate (DC IVAC) before reading. Both reduce to no-ops
+ * on platforms without `PLATFORM_HAS_NC_MEMORY` (i.e., once SMPEN
+ * provides hardware coherency on Jetson, see GH issue #655).
+ */
+void slm_cache_clean_range(const void *addr, size_t size)
+{
+    /* gpu.h's prototype takes `void *`; the cast is safe here
+     * because DC CVAC is a read-only operation (no actual memory
+     * write through the pointer). The `const` in the FFI signature
+     * documents intent for Rust callers. */
+    cache_clean_range((void *)addr, size);
+}
+
+void slm_cache_invalidate_range(void *addr, size_t size)
+{
+    cache_invalidate_range(addr, size);
+}
+
+/*
+ * NC-memory allocator wrapper. The parallel matmul mailboxes (one
+ * per worker CPU) live in NC memory so writes from the dispatcher
+ * are instantly visible to the polling worker without cache
+ * maintenance. Falls back to NULL on platforms without an NC region
+ * (QEMU virt, x86-64) — caller must check.
+ */
+void *slm_ncmem_alloc(size_t size, size_t align)
+{
+    return ncmem_alloc(size, align);
+}
+
+/*
+ * Issue an SEV broadcast to wake any CPU currently in WFE. Used by
+ * the parallel matmul dispatcher to wake the per-CPU workers from
+ * their WFE-idle wait once their mailbox has been filled.
+ *
+ * The DSB before SEV is mandatory: ARM ARM lets a CPU's NC stores
+ * sit in flight to other PEs for a brief window after the store
+ * instruction retires locally. SEV travels much faster than the
+ * NC store. Without the DSB the worker can wake from SEV, read the
+ * `state` field of its mailbox before the dispatcher's `state=1`
+ * store has reached the worker's PE, see 0, and re-enter WFE — at
+ * which point no further SEV ever fires and we deadlock. The DSB
+ * forces the dispatcher's NC writes to complete to the
+ * OuterShareableDomain *before* the SEV instruction issues.
+ */
+void slm_sev(void)
+{
+    __asm__ volatile("dsb sy" ::: "memory");
+    __asm__ volatile("sev" ::: "memory");
+}
+
 /*
  * IPC - Message Queues
  */

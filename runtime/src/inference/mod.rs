@@ -28,6 +28,9 @@ pub mod quant;
 pub mod ops_transformer;
 
 #[cfg(feature = "slm")]
+pub mod matmul_parallel;
+
+#[cfg(feature = "slm")]
 pub mod gpu_slm;
 
 pub use tensor::Tensor;

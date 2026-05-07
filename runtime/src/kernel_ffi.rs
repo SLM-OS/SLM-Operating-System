@@ -381,6 +381,40 @@ extern "C" {
     /// Task ID of the currently running task, or 0 if no task is running.
     pub fn slm_task_current() -> TaskId;
 
+    /// Create a kernel task pinned to a specific CPU. Used by the
+    /// parallel matmul worker pool to spawn one persistent worker per
+    /// remote CPU at boot. Returns task ID (non-zero) on success.
+    pub fn slm_task_create_pinned(
+        name: *const c_char,
+        entry: extern "C" fn(*mut core::ffi::c_void),
+        arg: *mut core::ffi::c_void,
+        target_cpu: u32,
+    ) -> TaskId;
+
+    /// Number of online CPUs. Used by the parallel matmul dispatcher
+    /// to size its worker pool.
+    pub fn slm_cpu_count() -> u32;
+
+    /// Cross-CPU cache maintenance for the parallel matmul output
+    /// buffer. Pre-SMPEN on Jetson the per-CPU L2s are incoherent;
+    /// the worker writing its output slice from a remote CPU must
+    /// `clean` (DC CVAC) and the reader must `invalidate` (DC IVAC)
+    /// before reading. Both reduce to no-ops once SMPEN provides
+    /// hardware coherency (GH issue #655).
+    pub fn slm_cache_clean_range(addr: *const u8, size: usize);
+    pub fn slm_cache_invalidate_range(addr: *mut u8, size: usize);
+
+    /// Allocate from the kernel's non-cacheable region. Returns NULL
+    /// on platforms without an NC region (QEMU virt, x86-64). Used
+    /// by the parallel matmul mailboxes so dispatcher writes are
+    /// instantly visible to polling workers.
+    pub fn slm_ncmem_alloc(size: usize, align: usize) -> *mut u8;
+
+    /// Issue an SEV broadcast to wake any CPU currently in WFE.
+    /// Used by the parallel matmul dispatcher to wake remote
+    /// workers after filling their mailbox.
+    pub fn slm_sev();
+
     // -------------------------------------------------------------------------
     // IPC - Message Queues
     // -------------------------------------------------------------------------

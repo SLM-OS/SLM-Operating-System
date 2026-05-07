@@ -728,6 +728,22 @@ void kernel_main(void *dtb)
      * busy-wait long enough that secondaries time out. */
     boot_media_allow_creates();
 
+    /* Spawn the parallel-matmul worker pool: one persistent kernel
+     * task per remote CPU that idles in WFE waiting for SLM matmul
+     * work. The dispatcher (in `runtime/src/inference/matmul_parallel.rs`)
+     * fans rows across the workers via NC-memory mailboxes. Must
+     * land after `scheduler_init` so secondary CPUs are up and
+     * accepting pinned tasks; runs unconditionally because the
+     * Rust function is a no-op on single-CPU / non-NC platforms.
+     * Returns spawned worker count for the boot log. */
+    {
+        extern uint32_t rust_matmul_workers_init(void);
+        uint32_t mm_workers = rust_matmul_workers_init();
+        if (mm_workers > 0) {
+            INFO("  Parallel matmul workers spawned: %u", mm_workers);
+        }
+    }
+
 #ifdef CONFIG_AI_SCHEDULER
     /* Register the CPU-MLP inference-device backend BEFORE the AI
      * scheduling policies, so sched_ai.c can route MLP inference

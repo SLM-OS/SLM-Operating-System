@@ -7460,6 +7460,18 @@ pub extern "C" fn rust_component_test() -> i32 {
         if !passed { failures += 1; }
     }
 
+    // Test 6: parallel matmul bit-equality vs single-threaded
+    // matmul_q4k_rows. 16 random shapes × ~150 rows each. No-op
+    // when the worker pool isn't initialized (single-CPU builds,
+    // pre-init order).
+    {
+        let mismatches =
+            inference::matmul_parallel::matmul_parallel_matches_serial_self_test(16);
+        let passed = mismatches == 0;
+        print_test_result(b"matmul_q4k parallel vs single-threaded\0", passed);
+        if !passed { failures += 1; }
+    }
+
     // Summary
     unsafe {
         if failures == 0 {
@@ -7948,6 +7960,131 @@ fn print_q4kdot_result(
                     avg_gflops_x1000 / 1000, avg_gflops_x1000 % 1000,
                     min_gflops_x1000 / 1000, min_gflops_x1000 % 1000);
     }
+}
+
+/// Microbench the parallel Q4_K matmul vs the single-threaded path
+/// over the same shape. Times `iterations` rounds of each, prints
+/// min/avg/max ns + GFLOPS for both, and emits the speedup ratio.
+/// Used by `bench matmul_par <rows> <cols> [iters]` on Jetson to
+/// validate the row-fan-out across CPUs.
+///
+/// `rows` and `cols` must each be at least 256 and `cols` must be a
+/// multiple of 256 (the Q4_K super-block size). `iterations` < 1
+/// returns -1.
+#[no_mangle]
+pub extern "C" fn rust_bench_matmul_par(rows: u32, cols: u32, iterations: u32) -> i32 {
+    extern "C" {
+        fn shell_printf(fmt: *const u8, ...);
+    }
+
+    use crate::inference::ops_transformer::matmul_q4k_rows;
+    use crate::inference::matmul_parallel::matmul_q4k_rows_parallel;
+    use crate::inference::quant::Q8_K_BLOCK_SIZE;
+    use crate::slm::gguf::{q4_k_byte_size, Q4_K_BLOCK_ELEMENTS};
+
+    if iterations == 0 || rows < 64 || cols < 256 || (cols as usize) % 256 != 0 {
+        return -1;
+    }
+    let rows_u = rows as usize;
+    let cols_u = cols as usize;
+    let row_bytes = match q4_k_byte_size(cols_u) {
+        Some(v) => v,
+        None => return -1,
+    };
+    let weight_bytes = match row_bytes.checked_mul(rows_u) {
+        Some(v) => v,
+        None => return -1,
+    };
+    let q8k_len = (cols_u / Q4_K_BLOCK_ELEMENTS) * Q8_K_BLOCK_SIZE;
+
+    extern crate alloc;
+    let mut weights = alloc::vec![0u8; weight_bytes];
+    // Same fill pattern as the per-block bench so we exercise non-
+    // trivial accumulator paths.
+    for b in 0..(weight_bytes / row_bytes) {
+        let base = b * row_bytes;
+        weights[base]     = 0x00; weights[base + 1] = 0x3C;
+        weights[base + 2] = 0x00; weights[base + 3] = 0x38;
+        for i in 0..12 {
+            weights[base + 4 + i] = (i as u8) | ((i as u8) << 4);
+        }
+        for i in 0..(row_bytes - 16) {
+            weights[base + 16 + i] = (i ^ b) as u8;
+        }
+    }
+    let acts_fp16: alloc::vec::Vec<u16> = (0..cols_u).map(|i| {
+        // 0x3C00 = 1.0 in IEEE-754 binary16; vary low bits per index.
+        0x3C00u16.wrapping_add((i as u16) & 0x000F)
+    }).collect();
+    let mut q8k_scratch = alloc::vec![0u8; q8k_len];
+    let mut out_serial   = alloc::vec![0.0f32; rows_u];
+    let mut out_parallel = alloc::vec![0.0f32; rows_u];
+
+    let mut sink: f32 = 0.0;
+
+    // Serial baseline.
+    let (mut min_s, mut max_s, mut sum_s, mut ok_s) = (u64::MAX, 0u64, 0u64, 0u32);
+    for _ in 0..iterations {
+        let t0 = kernel_ffi::get_time_ns();
+        let r = matmul_q4k_rows(&weights, rows_u, cols_u, &acts_fp16,
+                                &mut q8k_scratch, &mut out_serial);
+        let dt = kernel_ffi::get_time_ns().saturating_sub(t0);
+        if r.is_some() {
+            sink += out_serial[0];
+            if dt < min_s { min_s = dt; }
+            if dt > max_s { max_s = dt; }
+            sum_s += dt;
+            ok_s += 1;
+        }
+    }
+
+    // Parallel.
+    let (mut min_p, mut max_p, mut sum_p, mut ok_p) = (u64::MAX, 0u64, 0u64, 0u32);
+    for _ in 0..iterations {
+        let t0 = kernel_ffi::get_time_ns();
+        let r = matmul_q4k_rows_parallel(&weights, rows_u, cols_u, &acts_fp16,
+                                         &mut q8k_scratch, &mut out_parallel);
+        let dt = kernel_ffi::get_time_ns().saturating_sub(t0);
+        if r.is_some() {
+            sink += out_parallel[0];
+            if dt < min_p { min_p = dt; }
+            if dt > max_p { max_p = dt; }
+            sum_p += dt;
+            ok_p += 1;
+        }
+    }
+    core::hint::black_box(sink);
+
+    if ok_s == 0 || ok_p == 0 {
+        return -1;
+    }
+    let avg_s = sum_s / ok_s as u64;
+    let avg_p = sum_p / ok_p as u64;
+
+    // Throughput: 2 × rows × cols FLOPs per call (one mul + one
+    // add per (row, col) pair). At 1536×1536 that's 4.7 MFLOPs.
+    let flops_per_call: u64 = 2 * (rows_u as u64) * (cols_u as u64);
+    let gf = |ns: u64| if ns > 0 { (flops_per_call * 1000) / ns } else { 0 };
+
+    // Speedup as basis points (×1000) so we don't need float fmt.
+    let speedup_x1000 = if avg_p > 0 { (avg_s * 1000) / avg_p } else { 0 };
+
+    unsafe {
+        shell_printf(b"  Shape:       %lu rows x %lu cols (Q4_K weights, FP16 acts)\n\0".as_ptr(),
+                    rows_u as u64, cols_u as u64);
+        shell_printf(b"  Iterations:  %lu (serial=%lu parallel=%lu)\n\0".as_ptr(),
+                    iterations as u64, ok_s as u64, ok_p as u64);
+        shell_printf(b"  FLOPs/call:  %lu\n\0".as_ptr(), flops_per_call);
+        shell_printf(b"  Serial:      min=%lu us  avg=%lu us  max=%lu us  (%lu.%03lu GFLOPS)\n\0".as_ptr(),
+                    min_s / 1000, avg_s / 1000, max_s / 1000,
+                    gf(avg_s) / 1000, gf(avg_s) % 1000);
+        shell_printf(b"  Parallel:    min=%lu us  avg=%lu us  max=%lu us  (%lu.%03lu GFLOPS)\n\0".as_ptr(),
+                    min_p / 1000, avg_p / 1000, max_p / 1000,
+                    gf(avg_p) / 1000, gf(avg_p) % 1000);
+        shell_printf(b"  Speedup:     %lu.%03lu x\n\0".as_ptr(),
+                    speedup_x1000 / 1000, speedup_x1000 % 1000);
+    }
+    0
 }
 
 /// Microbench the Q4_K vec_dot kernel. Default is the dispatcher

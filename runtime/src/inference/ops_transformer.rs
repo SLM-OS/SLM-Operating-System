@@ -446,6 +446,19 @@ pub fn matmul_quant_rows(
     // M5.3.x synthetic fixture qualifies). SmolLM2's `hidden = 576`
     // does NOT — `matmul_q4k_rows` enforces alignment and would
     // reject. Fall through to the per-row dequant path in that case.
+    //
+    // NOTE: `matmul_parallel::matmul_q4k_rows_parallel` exists and
+    // is wired through `bench matmul_par`, but is NOT the production
+    // path on Jetson today. The persistent worker pool spawns
+    // correctly + workers process dispatched slices, but the per-
+    // worker tasks execute sequentially across CPUs 1-5 instead of
+    // in parallel — confirmed via a fixed-duration busy-loop diag
+    // that took 5 × per-worker time instead of max(per-worker
+    // time). The serialization is in the kernel's cooperative SMP
+    // scheduling path, not in this dispatcher. Tracked in GH #669.
+    // Until that lands, route Q4_K matmul through the single-
+    // threaded NEON kernel from PR #652 — which already gave 3.3×
+    // over scalar.
     if quant_type == GgmlType::Q4_K && cols % Q4_K_BLOCK_ELEMENTS == 0 {
         return matmul_q4k_rows(weights, rows, cols, acts_fp16, q8k_scratch, out_fp32);
     }

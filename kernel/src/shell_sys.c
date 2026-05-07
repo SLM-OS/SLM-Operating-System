@@ -1294,7 +1294,7 @@ static void s3_steal_work_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|q4kdot|gpu|stats|all>\r\n");
+        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|matmul_par|conv|quant|q4kdot|gpu|stats|all>\r\n");
         return 1;
     }
 
@@ -1637,6 +1637,40 @@ int cmd_bench(int argc, char *argv[])
         shell_puts("Q4_K vec_dot Benchmark\r\n");
         shell_puts("======================\r\n");
         rust_bench_q4k_q8k_dot(elements, iters, force_scalar);
+    } else if (strcmp(argv[1], "matmul_par") == 0) {
+        /* Parallel-vs-serial Q4_K matmul A/B benchmark. Defaults
+         * match a Qwen2.5-1.5B Q output projection (1536 × 1536).
+         *
+         * Usage: bench matmul_par [rows [cols [iterations]]]
+         */
+        uint32_t rows = 1536;
+        uint32_t cols = 1536;
+        uint32_t iters = 50;
+        if (argc >= 3) {
+            uint32_t n;
+            if (shell_parse_uint(argv[2], &n) == 0 &&
+                n >= 64 && n <= (1u << 18)) {
+                rows = n;
+            }
+        }
+        if (argc >= 4) {
+            uint32_t n;
+            if (shell_parse_uint(argv[3], &n) == 0 &&
+                n >= 256 && n <= (1u << 16) && (n % 256u) == 0) {
+                cols = n;
+            }
+        }
+        if (argc >= 5) {
+            uint32_t n;
+            if (shell_parse_uint(argv[4], &n) == 0 && n > 0 && n <= 10000) {
+                iters = n;
+            }
+        }
+        shell_puts("Q4_K matmul Parallel-vs-Serial Benchmark\r\n");
+        shell_puts("========================================\r\n");
+        rust_bench_matmul_par(rows, cols, iters);
+    } else if (strcmp(argv[1], "matmul_par_diag") == 0) {
+        rust_matmul_par_diag();
     } else if (strcmp(argv[1], "gpu") == 0) {
         shell_puts("GPU Cache Sync Benchmark\r\n");
         shell_puts("========================\r\n");

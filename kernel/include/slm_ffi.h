@@ -178,6 +178,46 @@ int slm_task_set_deadline(uint32_t task_id, uint64_t deadline_ns);
 uint32_t slm_task_current(void);
 
 /*
+ * Create a kernel task pinned to a specific CPU. Used by the parallel
+ * matmul worker pool to spawn one persistent worker per remote CPU.
+ *
+ * Returns task ID (non-zero) on success, 0 on failure.
+ */
+uint32_t slm_task_create_pinned(const char *name,
+                                slm_task_entry_t entry,
+                                void *arg,
+                                uint32_t target_cpu);
+
+/*
+ * Number of online CPUs. Used by the parallel matmul dispatcher to
+ * size its worker pool.
+ */
+uint32_t slm_cpu_count(void);
+
+/*
+ * Cross-CPU cache maintenance for the parallel matmul output buffer.
+ * No-ops on platforms with hardware cache coherency. See GH issue
+ * #655 for the post-SMPEN cleanup plan.
+ */
+void slm_cache_clean_range(const void *addr, size_t size);
+void slm_cache_invalidate_range(void *addr, size_t size);
+
+/*
+ * Allocate from the kernel's non-cacheable region. Returns NULL on
+ * platforms without NC memory (QEMU virt, x86-64). Used by the
+ * parallel matmul mailboxes so writes from the dispatcher are
+ * instantly visible to the polling worker.
+ */
+void *slm_ncmem_alloc(size_t size, size_t align);
+
+/*
+ * Issue an SEV broadcast to wake any CPU currently in WFE. Used by
+ * the parallel matmul dispatcher to wake remote workers after
+ * filling their mailbox.
+ */
+void slm_sev(void);
+
+/*
  * ==========================================================================
  * IPC - Message Queues
  * ==========================================================================
@@ -774,6 +814,24 @@ extern int rust_matmul_bench_int8(uint32_t iterations);
 extern int rust_bench_q4k_q8k_dot(uint32_t elements,
                                   uint32_t iterations,
                                   uint32_t force_scalar);
+
+/*
+ * Q4_K matmul parallel-vs-serial A/B benchmark. Runs the same shape
+ * through both `matmul_q4k_rows` (single-threaded) and
+ * `matmul_q4k_rows_parallel` (per-CPU worker pool), prints
+ * min/avg/max latency + GFLOPS for each, and the speedup ratio.
+ *
+ * `rows` >= 64, `cols` >= 256 and a multiple of 256, `iterations` > 0.
+ * Returns 0 / -1.
+ */
+extern int rust_bench_matmul_par(uint32_t rows,
+                                 uint32_t cols,
+                                 uint32_t iterations);
+
+/* Dump the per-worker `runs_completed` NC-mailbox counter so the
+ * shell can confirm workers are actually waking + processing
+ * dispatched slices. Diagnostic only. */
+extern void rust_matmul_par_diag(void);
 
 /*
  * ==========================================================================
