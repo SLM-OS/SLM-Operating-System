@@ -286,7 +286,11 @@ fn q8k_d(bytes: &[u8]) -> f32 {
     f32::from_le_bytes(arr)
 }
 
-/// Read `qs[idx]` as i8 from a Q8_K block.
+/// Read `qs[idx]` as i8 from a Q8_K block. Used by the scalar
+/// reference dot path and by tests; the NEON hot path bypasses it
+/// with bulk vld1q_s8 loads, so it shows up as dead in production
+/// aarch64 builds.
+#[allow(dead_code)]
 #[inline]
 fn q8k_qs(bytes: &[u8], idx: usize) -> i8 {
     bytes[Q8K_OFF_QS + idx] as i8
@@ -358,10 +362,70 @@ pub fn vec_dot_q4_k_q8_k(weights: &[u8], acts: &[u8]) -> Option<f32> {
     Some(sumf)
 }
 
-/// Per-block dot product. Pulled out so the NEON fast path can swap
-/// in without restructuring the outer loop.
+/// Scalar-only end-to-end Q4_K · Q8_K vec_dot. Identical to
+/// [`vec_dot_q4_k_q8_k`] except the per-block dot always runs through
+/// [`dot_q4k_q8k_block_scalar`] regardless of target architecture.
+///
+/// Exposed primarily for the `bench q4kdot scalar` benchmark variant
+/// so a single kernel binary can produce an apples-to-apples
+/// scalar-vs-NEON A/B without redeploying. Not used by the production
+/// decoder hot path (which dispatches via `dot_q4k_q8k_block`).
+pub fn vec_dot_q4_k_q8_k_scalar(weights: &[u8], acts: &[u8]) -> Option<f32> {
+    if weights.len() % Q4_K_BLOCK_SIZE != 0 {
+        return None;
+    }
+    if acts.len() % Q8_K_BLOCK_SIZE != 0 {
+        return None;
+    }
+    let nb_w = weights.len() / Q4_K_BLOCK_SIZE;
+    let nb_a = acts.len() / Q8_K_BLOCK_SIZE;
+    if nb_w != nb_a {
+        return None;
+    }
+
+    let mut sumf = 0.0f32;
+    for b in 0..nb_w {
+        let w_block = &weights[b * Q4_K_BLOCK_SIZE..(b + 1) * Q4_K_BLOCK_SIZE];
+        let a_block = &acts[b * Q8_K_BLOCK_SIZE..(b + 1) * Q8_K_BLOCK_SIZE];
+        let view = Q4KBlockView::from_slice(w_block)?;
+        sumf += dot_q4k_q8k_block_scalar(&view, a_block);
+    }
+    Some(sumf)
+}
+
+/// Per-block dot product. Dispatches to the NEON FEAT_DotProd kernel
+/// on aarch64; the scalar reference is kept for non-aarch64 builds
+/// (host-side `cargo test` on x86-64) and as a correctness oracle —
+/// `q4k_neon_matches_scalar_self_test` (called from
+/// `rust_run_tests`) asserts NEON == scalar bit-for-bit across 256
+/// random inputs every kernel boot under `make test`.
 #[inline]
 fn dot_q4k_q8k_block(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: `+dotprod` is in `runtime/.cargo/config.toml`'s
+        // target-feature list and FEAT_DotProd is mandatory on every
+        // CPU we ship to (see the comment in `.cargo/config.toml`).
+        // The Q4KBlockView guarantees a 144-byte slice; `a_block`
+        // length is checked by the caller in `vec_dot_q4_k_q8_k`.
+        return unsafe { dot_q4k_q8k_block_neon(view, a_block) };
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        dot_q4k_q8k_block_scalar(view, a_block)
+    }
+}
+
+/// Scalar reference implementation of the per-block Q4_K · Q8_K dot
+/// product. Mirrors `ggml_vec_dot_q4_K_q8_K_generic`'s structure 1:1
+/// so it doubles as the correctness oracle for the NEON path.
+///
+/// Reachable from non-aarch64 builds (host `cargo test` on x86-64)
+/// and from the bit-equality test on aarch64 — but unused in the
+/// production aarch64 hot path, hence `#[allow(dead_code)]`.
+#[allow(dead_code)]
+#[inline]
+fn dot_q4k_q8k_block_scalar(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
     let d_w = view.d();
     let dmin_w = view.dmin();
     let d_a = q8k_d(a_block);
@@ -397,6 +461,141 @@ fn dot_q4k_q8k_block(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
             acc_hi += q_hi * (q8k_qs(a_block, q8_hi_base + l) as i32);
         }
         scale_sum += sc_lo * acc_lo + sc_hi * acc_hi;
+    }
+
+    d_w * d_a * (scale_sum as f32) - dmin_w * d_a * (min_sum as f32)
+}
+
+/// SDOT intrinsic wrapper. Encodes `sdot {acc}.4s, {a}.16b, {b}.16b`
+/// via inline asm so we don't depend on the unstable
+/// `core::arch::aarch64::vdotq_s32` intrinsic (gated behind
+/// `stdarch_neon_dotprod`). The compiler picks any V register; the
+/// `vN` format specifier resolves to the right name. Lifted out of
+/// `dot_q4k_q8k_block_neon` to keep that function under the
+/// 80-line guideline.
+///
+/// `#[inline(always)]` would conflict with `#[target_feature]` on
+/// stable rustc (E0658, tracked upstream as rust-lang/rust#145574).
+/// `#[inline]` is a strong-enough hint here: the body is one asm
+/// instruction + a move, and LTO collapses it inside
+/// `dot_q4k_q8k_block_neon` either way.
+///
+/// # Safety
+/// Caller must ensure FEAT_DotProd is present at runtime (enforced
+/// for our platforms by `+dotprod` in `runtime/.cargo/config.toml`).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+#[inline]
+unsafe fn sdot_q(
+    acc: core::arch::aarch64::int32x4_t,
+    a: core::arch::aarch64::int8x16_t,
+    b: core::arch::aarch64::int8x16_t,
+) -> core::arch::aarch64::int32x4_t {
+    let mut out = acc;
+    core::arch::asm!(
+        "sdot {acc:v}.4s, {a:v}.16b, {b:v}.16b",
+        acc = inout(vreg) out,
+        a = in(vreg) a,
+        b = in(vreg) b,
+        options(pure, nomem, nostack, preserves_flags),
+    );
+    out
+}
+
+/// NEON FEAT_DotProd implementation of the per-block Q4_K · Q8_K dot.
+/// Replaces the scalar inner loop's 32×4 = 128 i32 multiply-adds with
+/// 4 × 2 SDOT instructions (16 i8·i8 lanes per call, accumulated
+/// 4-wide), driving Q4_K vec_dot from "the dominant decode cost"
+/// toward "small fraction of decode cost".
+///
+/// Layout: each `j` outer iter consumes 32 packed q4 bytes
+/// (`view.quant(j*32 + l)` for l=0..32) and produces two 32-element
+/// sub-block dot products against q8 acts at offsets `(j*2)*32` and
+/// `(j*2+1)*32`. We load the 32 q4 bytes as two `uint8x16_t`, mask /
+/// shift to get q_lo / q_hi nibble vectors (values 0..15, safely
+/// reinterpretable as `int8x16_t` since they're all non-negative),
+/// then issue two SDOTs per accumulator. Matches GGML's
+/// `ggml_vec_dot_q4_K_q8_K` reference NEON path structurally.
+///
+/// SDOT is emitted via inline asm rather than the `vdotq_s32`
+/// intrinsic because the latter is nightly-only on stable Rust
+/// (gated behind the unstable `stdarch_neon_dotprod` feature). The
+/// inline-asm path is identical machine code and works on stable.
+///
+/// # Safety
+/// - The caller's `Q4KBlockView` guarantees `view.quant(0..128)` is a
+///   valid 128-byte read inside a 144-byte block.
+/// - `a_block` MUST be `>= Q8_K_BLOCK_SIZE = 292` bytes: the caller
+///   (`vec_dot_q4_k_q8_k`) checks `acts.len() % 292 == 0` and slices
+///   per-block before invoking this.
+/// - FEAT_DotProd must be present at runtime — guaranteed for every
+///   CPU we ship to (Cortex-A76 / A78AE), enforced at compile time
+///   by `+dotprod` in `runtime/.cargo/config.toml`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,dotprod")]
+unsafe fn dot_q4k_q8k_block_neon(view: &Q4KBlockView<'_>, a_block: &[u8]) -> f32 {
+    use core::arch::aarch64::*;
+
+    let d_w = view.d();
+    let dmin_w = view.dmin();
+    let d_a = q8k_d(a_block);
+
+    // Min term stays scalar — only 16 multiplies, NEON-ifying it
+    // saves <1% of block time and adds ugly 16-wide gather code.
+    let mut min_sum: i32 = 0;
+    for j in 0..16 {
+        let mn = view.min(j / 2) as i32;
+        min_sum += q8k_bsum(a_block, j) as i32 * mn;
+    }
+
+    // Raw byte pointers into the packed Q4_K block (16-byte header
+    // + 128 q4 bytes) and the Q8_K acts (4-byte d header + 256 i8
+    // qs). The view's `as_bytes()` is a `&[u8; 144]`, so `qs_ptr`
+    // is well-defined and non-null.
+    let q4_block = view.as_bytes();
+    let qs_ptr = q4_block.as_ptr().add(16);             // 128 q4 bytes
+    let q8_qs_ptr = a_block.as_ptr().add(Q8K_OFF_QS);   // 256 i8
+
+    let mask_lo = vdupq_n_u8(0x0F);
+    let mut scale_sum: i32 = 0;
+
+    for j in 0..4 {
+        // Load 32 packed q4 bytes (= 64 q4 weights in nibble pairs).
+        let q4_a = vld1q_u8(qs_ptr.add(j * 32));
+        let q4_b = vld1q_u8(qs_ptr.add(j * 32 + 16));
+
+        // Split low / high nibbles. Result: uint8x16_t with values
+        // 0..15. Reinterpreted as int8x16_t below — safe because the
+        // values are non-negative.
+        let q_lo_a = vandq_u8(q4_a, mask_lo);
+        let q_lo_b = vandq_u8(q4_b, mask_lo);
+        let q_hi_a = vshrq_n_u8(q4_a, 4);
+        let q_hi_b = vshrq_n_u8(q4_b, 4);
+
+        // Load 32 q8 acts for the low half (q8 sub-block 2j) and
+        // 32 for the high half (q8 sub-block 2j+1). Each half is
+        // two 16-byte vectors.
+        let q8_lo_base = q8_qs_ptr.add((j * 2) * 32);
+        let q8_hi_base = q8_qs_ptr.add((j * 2 + 1) * 32);
+        let q8_lo_a = vld1q_s8(q8_lo_base as *const i8);
+        let q8_lo_b = vld1q_s8(q8_lo_base.add(16) as *const i8);
+        let q8_hi_a = vld1q_s8(q8_hi_base as *const i8);
+        let q8_hi_b = vld1q_s8(q8_hi_base.add(16) as *const i8);
+
+        // SDOT accumulates 16 i8·i8 products into 4 i32 lanes
+        // (4-wide groupings). Two calls per accumulator cover all
+        // 32 element pairs; vaddvq_s32 reduces the 4 lanes to one.
+        let mut acc_lo = vdupq_n_s32(0);
+        acc_lo = sdot_q(acc_lo, vreinterpretq_s8_u8(q_lo_a), q8_lo_a);
+        acc_lo = sdot_q(acc_lo, vreinterpretq_s8_u8(q_lo_b), q8_lo_b);
+
+        let mut acc_hi = vdupq_n_s32(0);
+        acc_hi = sdot_q(acc_hi, vreinterpretq_s8_u8(q_hi_a), q8_hi_a);
+        acc_hi = sdot_q(acc_hi, vreinterpretq_s8_u8(q_hi_b), q8_hi_b);
+
+        let sc_lo = view.scale(j * 2) as i32;
+        let sc_hi = view.scale(j * 2 + 1) as i32;
+        scale_sum += sc_lo * vaddvq_s32(acc_lo) + sc_hi * vaddvq_s32(acc_hi);
     }
 
     d_w * d_a * (scale_sum as f32) - dmin_w * d_a * (min_sum as f32)
@@ -1235,5 +1434,97 @@ mod tests {
     #[allow(dead_code)]
     fn use_result(v: f32) -> Vec<f32> {
         vec![v; 1]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NEON / scalar bit-equality self-test
+// ---------------------------------------------------------------------------
+//
+// `make test` runs the kernel's Unity suite via FFI, not `cargo test`,
+// so `#[cfg(test)]` blocks in this no_std runtime never execute on the
+// target. To get on-target coverage of the NEON Q4_K kernel — the very
+// thing whose correctness matters — the bit-equality check lives as a
+// public function and is called from `rust_run_tests` in lib.rs.
+//
+// On x86-64 the function is a no-op (returns 0) since the NEON path
+// isn't compiled in there.
+
+/// Run a randomized bit-equality check between the NEON and scalar
+/// Q4_K · Q8_K dot implementations. Returns the number of mismatches
+/// (0 == pass). Always returns 0 on non-aarch64 builds.
+///
+/// Generates `trials` randomized Q4_K weight blocks paired with
+/// random-Q8_K-quantized activation rows, runs both paths, and
+/// compares the f32 outputs bit-for-bit. Bit-equality holds because
+/// both impls reduce the same i32 multiply-accumulates in the same
+/// per-sub-block grouping and the trailing f32 expression is
+/// identical text in both — any divergence is a real bug.
+pub fn q4k_neon_matches_scalar_self_test(trials: u32) -> u32 {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = trials;
+        return 0;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Tiny LCG so the test is deterministic + alloc-light (no
+        // `rand` crate). Numerical Recipes constants — fine for
+        // fuzz-style coverage, not cryptographic use.
+        fn lcg_next(state: &mut u64) -> u64 {
+            *state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *state
+        }
+
+        extern crate alloc;
+        let mut rng: u64 = 0xC0FFEE_DEADBEEFu64;
+        let mut mismatches: u32 = 0;
+
+        for _ in 0..trials {
+            // Q4_K block bytes (assembled directly — no test helpers).
+            let mut w_block = [0u8; Q4_K_BLOCK_SIZE];
+            // d, dmin in valid f16 range.
+            let d_bits = (lcg_next(&mut rng) & 0xFFFF) as u16 | 0x3000; // bias toward normals
+            let dmin_bits = (lcg_next(&mut rng) & 0xFFFF) as u16 | 0x2000;
+            w_block[0..2].copy_from_slice(&d_bits.to_le_bytes());
+            w_block[2..4].copy_from_slice(&dmin_bits.to_le_bytes());
+            // 12 packed scales+mins bytes — the Q4KBlockView accessors
+            // mask to 6 bits, so any byte value is valid.
+            for k in 0..12 {
+                w_block[4 + k] = (lcg_next(&mut rng) & 0xFF) as u8;
+            }
+            // 128 packed q4 bytes (random).
+            for k in 0..128 {
+                w_block[16 + k] = (lcg_next(&mut rng) & 0xFF) as u8;
+            }
+
+            // Q8_K activations: real quantize from random f32 input
+            // so bsums and d are computed consistently with the q8k
+            // accessors.
+            let mut a_floats = alloc::vec![0.0f32; Q8_K_BLOCK_ELEMENTS];
+            for j in 0..Q8_K_BLOCK_ELEMENTS {
+                let r = (lcg_next(&mut rng) as i32) as f32;
+                a_floats[j] = r / (i32::MAX as f32);
+            }
+            let mut a_block = alloc::vec![0u8; Q8_K_BLOCK_SIZE];
+            if quantize_row_q8_k(&a_floats, &mut a_block).is_none() {
+                continue;
+            }
+
+            let view = match Q4KBlockView::from_slice(&w_block) {
+                Some(v) => v,
+                None => continue,
+            };
+            let scalar = dot_q4k_q8k_block_scalar(&view, &a_block);
+            // SAFETY: aarch64 cfg-gated, +dotprod enabled globally.
+            let neon = unsafe { dot_q4k_q8k_block_neon(&view, &a_block) };
+
+            if scalar.to_bits() != neon.to_bits() {
+                mismatches += 1;
+            }
+        }
+        mismatches
     }
 }
