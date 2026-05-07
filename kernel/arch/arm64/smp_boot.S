@@ -58,18 +58,33 @@ secondary_entry:
      * blocks here and in boot.S).
      */
     msr     hstr_el2, xzr               /* Clear sysreg-trap mask. */
+
+    /*
+     * CNTHCTL_EL2 — bits 0+1 = 3, written BEFORE the E2H flip to
+     * mirror the primary's pattern in boot.S. The primary's pre-flip
+     * write is empirically load-bearing (bisect during PR #685
+     * review-fix wedged pi-5-2 silently when removed); the secondary
+     * window between EL2 entry and the E2H flip is much smaller (no
+     * GIC config in between), so the wedge may or may not reproduce
+     * here, but the symmetry costs one extra write and removes the
+     * risk. Re-written below post-E2H to also program the EL1
+     * CNTKCTL bit-layout view of the same register.
+     */
+    mov     x0, #3
+    msr     cnthctl_el2, x0
+    msr     cntvoff_el2, xzr
+
     ldr     x0, =((1 << 34) | (1 << 31) | (1 << 27))   /* E2H | RW | TGE */
     msr     hcr_el2, x0
     isb
 
     /*
-     * CNTHCTL_EL2 — programmed post-E2H so the write hits the EL1
-     * CNTKCTL bit layout that applies under E2H=1. Bits 0+1 are
-     * EL0PCTEN/EL0PCEN.
+     * CNTHCTL_EL2 — re-written post-E2H so it also hits the register
+     * under the EL1 CNTKCTL bit layout (bits 0+1 = EL0PCTEN/EL0PCEN).
+     * Value 3 is correct under both interpretations.
      */
     mov     x0, #3
     msr     cnthctl_el2, x0
-    msr     cntvoff_el2, xzr
 
     /*
      * Enable FP/SIMD via CPACR_EL1 (redirects to CPTR_EL2 with CPACR

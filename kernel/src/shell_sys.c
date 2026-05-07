@@ -311,8 +311,8 @@ int cmd_cpu(int argc, char *argv[])
     shell_printf("  CPUs:        %lu online / %lu total\r\n", cpus_online, cpu_count);
     shell_puts("\r\n");
 
-    shell_puts("  CPU  Status   Isolated  Current Task\r\n");
-    shell_puts("  ---  ------   --------  ------------\r\n");
+    shell_puts("  CPU  Status   EL       Isolated  Current Task\r\n");
+    shell_puts("  ---  ------   ------   --------  ------------\r\n");
 
     for (uint32_t i = 0; i < cpu_count; i++) {
         bool online = (i < cpus_online);
@@ -325,9 +325,24 @@ int cmd_cpu(int argc, char *argv[])
             current = task_current();
         }
 
-        shell_printf("  %3lu  %-6s   %-8s  %s\r\n",
+        /* Decode CurrentEL value captured at boot. CurrentEL bits
+         * [3:2] hold the EL number; values 0/4/8/C correspond to
+         * EL0/EL1/EL2/EL3. EL2 + HCR_EL2.E2H=1 still reports 0xC. */
+        uint64_t cur_el_raw = cpu_get_current_el(i);
+        char el_text[8];
+        if (cur_el_raw == 0xFFFFFFFFUL) {
+            el_text[0] = '-'; el_text[1] = '\0';
+        } else {
+            unsigned el = (unsigned)((cur_el_raw >> 2) & 0x3);
+            el_text[0] = 'E'; el_text[1] = 'L';
+            el_text[2] = (char)('0' + el);
+            el_text[3] = 'h'; el_text[4] = '\0';
+        }
+
+        shell_printf("  %3lu  %-6s   %-6s   %-8s  %s\r\n",
                     i,
                     online ? "online" : "offline",
+                    el_text,
                     isolated ? "yes" : "no",
                     current ? current->name : "-");
     }
