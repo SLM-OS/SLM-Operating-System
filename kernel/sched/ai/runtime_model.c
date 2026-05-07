@@ -12,12 +12,18 @@ enum {
     SCHED_MODEL_SLOT_ROLLBACK = 2,
 };
 
+/*
+ * The dense MLP weights (~528 KB) live OUTSIDE the slot union in a
+ * dedicated pool so the three non-dense stores (config / thresholds /
+ * rebalance) don't waste 528 KB per slot for payloads that are <40 B.
+ * See sched_dense_pool below; sched_dense_pool_row maps a store index
+ * to its row in the pool, or -1 when the store has no dense payload.
+ */
 struct sched_model_slot {
     int present;
     uint32_t readers;
     struct sched_model_meta meta;
     union {
-        struct sched_runtime_mlp_model dense;
         struct sched_runtime_balance_config balance;
         struct sched_runtime_deadline_thresholds thresholds;
         struct sched_runtime_rebalance_config rebalance;
@@ -39,10 +45,24 @@ enum {
     SCHED_MODEL_STORE_THRESHOLDS = 3,
     SCHED_MODEL_STORE_REBALANCE = 4,
     SCHED_MODEL_STORE_COUNT = 5,
+    SCHED_DENSE_POOL_ROWS = 2,
 };
 
 static spinlock_t sched_model_lock = SPINLOCK_INIT;
 static spinlock_t sched_model_stage_lock = SPINLOCK_INIT;
+static struct sched_runtime_mlp_model
+    sched_dense_pool[SCHED_DENSE_POOL_ROWS][SCHED_MODEL_SLOT_COUNT];
+static struct sched_runtime_mlp_model stage_scratch_dense;
+static const int sched_dense_pool_row[SCHED_MODEL_STORE_COUNT] = {
+    [SCHED_MODEL_STORE_MLP]        = 0,
+    [SCHED_MODEL_STORE_PPO]        = 1,
+    [SCHED_MODEL_STORE_CONFIG]     = -1,
+    [SCHED_MODEL_STORE_THRESHOLDS] = -1,
+    [SCHED_MODEL_STORE_REBALANCE]  = -1,
+};
+/* Bump SCHED_DENSE_POOL_ROWS when adding a new dense-using store above. */
+_Static_assert(SCHED_DENSE_POOL_ROWS == 2,
+               "sched_dense_pool_row count out of sync with pool dimension");
 static struct sched_model_store sched_model_stores[SCHED_MODEL_STORE_COUNT] = {
     {
         .staged_idx = SCHED_MODEL_SLOT_STAGED,
@@ -76,6 +96,22 @@ static struct sched_model_store sched_model_stores[SCHED_MODEL_STORE_COUNT] = {
     },
 };
 static struct sched_model_slot stage_scratch_slot;
+
+/*
+ * Returns the dense pool entry for (store_idx, slot_idx), or NULL if
+ * the store does not use dense weights. Also serves as a "does this
+ * store have a dense payload?" predicate via the slot_idx=0 form.
+ */
+static struct sched_runtime_mlp_model *
+sched_dense_slot(int store_idx, uint8_t slot_idx)
+{
+    int row;
+    if (store_idx < 0 || store_idx >= SCHED_MODEL_STORE_COUNT) return NULL;
+    if (slot_idx >= SCHED_MODEL_SLOT_COUNT) return NULL;
+    row = sched_dense_pool_row[store_idx];
+    if (row < 0) return NULL;
+    return &sched_dense_pool[row][slot_idx];
+}
 
 static uint16_t read_u16_le(const uint8_t *p)
 {
@@ -486,13 +522,14 @@ static int parse_sched_rebalance_blob(
 
 static int parse_sched_blob(uint16_t kind_id, const uint8_t *data, size_t len,
                             struct sched_model_meta *meta,
-                            struct sched_model_slot *out)
+                            struct sched_model_slot *out,
+                            struct sched_runtime_mlp_model *dense_out)
 {
     switch (kind_id) {
         case SCHED_MODEL_KIND_MLP:
         case SCHED_MODEL_KIND_PPO:
-            return parse_sched_dense_blob(kind_id, data, len, meta,
-                                          &out->payload.dense);
+            if (!dense_out) return -1;
+            return parse_sched_dense_blob(kind_id, data, len, meta, dense_out);
         case SCHED_MODEL_KIND_CONFIG:
             return parse_sched_balance_blob(kind_id, data, len, meta,
                                             &out->payload.balance);
@@ -519,13 +556,23 @@ int sched_model_stage_blob(uint16_t kind_id, const uint8_t *data, size_t len)
     irq_flags_t flags;
     struct sched_model_store *store;
     struct sched_model_slot *staged_slot;
+    struct sched_runtime_mlp_model *staged_dense;
 
     if (store_idx < 0) return -1;
 
     stage_flags = spin_lock_irqsave(&sched_model_stage_lock);
+    /*
+     * Zero the scratch buffers up front so a partial parse failure
+     * cannot leak fields from the previous successful stage into the
+     * next caller's view. parse_sched_dense_payload also zeros its
+     * output, so this is defensive rather than required.
+     */
     memset(&stage_scratch_slot, 0, sizeof(stage_scratch_slot));
+    if (sched_dense_slot(store_idx, 0)) {
+        memset(&stage_scratch_dense, 0, sizeof(stage_scratch_dense));
+    }
     if (parse_sched_blob(kind_id, data, len, &stage_scratch_slot.meta,
-                         &stage_scratch_slot) != 0) {
+                         &stage_scratch_slot, &stage_scratch_dense) != 0) {
         spin_unlock_irqrestore(&sched_model_stage_lock, stage_flags);
         return -1;
     }
@@ -541,6 +588,8 @@ int sched_model_stage_blob(uint16_t kind_id, const uint8_t *data, size_t len)
     }
 
     *staged_slot = stage_scratch_slot;
+    staged_dense = sched_dense_slot(store_idx, store->staged_idx);
+    if (staged_dense) *staged_dense = stage_scratch_dense;
     store->current_state = SCHED_MODEL_STAGED;
     spin_unlock_irqrestore(&sched_model_lock, flags);
     spin_unlock_irqrestore(&sched_model_stage_lock, stage_flags);
@@ -556,8 +605,11 @@ int sched_model_validate_blob(uint16_t kind_id, const uint8_t *data, size_t len)
 
     stage_flags = spin_lock_irqsave(&sched_model_stage_lock);
     memset(&stage_scratch_slot, 0, sizeof(stage_scratch_slot));
+    if (sched_dense_slot(store_idx, 0)) {
+        memset(&stage_scratch_dense, 0, sizeof(stage_scratch_dense));
+    }
     if (parse_sched_blob(kind_id, data, len, &stage_scratch_slot.meta,
-                         &stage_scratch_slot) != 0) {
+                         &stage_scratch_slot, &stage_scratch_dense) != 0) {
         spin_unlock_irqrestore(&sched_model_stage_lock, stage_flags);
         return -1;
     }
@@ -570,6 +622,7 @@ int sched_model_activate(uint16_t kind_id)
     int store_idx = sched_model_store_index(kind_id);
     irq_flags_t flags;
     struct sched_model_store *store;
+    struct sched_runtime_mlp_model *staged_dense;
     uint8_t old_staged;
     uint8_t old_active;
     uint8_t old_rollback;
@@ -595,6 +648,8 @@ int sched_model_activate(uint16_t kind_id)
     store->rollback_idx = old_active;
     store->staged_idx = old_rollback;
     memset(&store->slots[store->staged_idx], 0, sizeof(store->slots[store->staged_idx]));
+    staged_dense = sched_dense_slot(store_idx, store->staged_idx);
+    if (staged_dense) memset(staged_dense, 0, sizeof(*staged_dense));
     store->current_state = SCHED_MODEL_ACTIVE;
     spin_unlock_irqrestore(&sched_model_lock, flags);
     return 0;
@@ -605,6 +660,7 @@ int sched_model_rollback(uint16_t kind_id)
     int store_idx = sched_model_store_index(kind_id);
     irq_flags_t flags;
     struct sched_model_store *store;
+    struct sched_runtime_mlp_model *staged_dense;
     uint8_t old_staged;
     uint8_t old_active;
     uint8_t old_rollback;
@@ -631,6 +687,8 @@ int sched_model_rollback(uint16_t kind_id)
     store->rollback_idx = old_active;
     store->staged_idx = old_staged;
     memset(&store->slots[store->staged_idx], 0, sizeof(store->slots[store->staged_idx]));
+    staged_dense = sched_dense_slot(store_idx, store->staged_idx);
+    if (staged_dense) memset(staged_dense, 0, sizeof(*staged_dense));
     store->current_state = SCHED_MODEL_ROLLED_BACK;
     spin_unlock_irqrestore(&sched_model_lock, flags);
     return 0;
@@ -641,6 +699,7 @@ int sched_model_clear(uint16_t kind_id)
     int store_idx = sched_model_store_index(kind_id);
     irq_flags_t flags;
     struct sched_model_store *store;
+    int row;
 
     if (store_idx < 0) return -1;
 
@@ -654,6 +713,10 @@ int sched_model_clear(uint16_t kind_id)
     }
 
     memset(store->slots, 0, sizeof(store->slots));
+    row = sched_dense_pool_row[store_idx];
+    if (row >= 0) {
+        memset(&sched_dense_pool[row], 0, sizeof(sched_dense_pool[row]));
+    }
     store->staged_idx = SCHED_MODEL_SLOT_STAGED;
     store->active_idx = SCHED_MODEL_SLOT_ACTIVE;
     store->rollback_idx = SCHED_MODEL_SLOT_ROLLBACK;
@@ -737,17 +800,45 @@ static void sched_runtime_release(sched_runtime_token_t token)
     spin_unlock_irqrestore(&sched_model_lock, flags);
 }
 
+static int sched_runtime_dense_acquire(int store_idx,
+                                       const struct sched_runtime_mlp_model **out,
+                                       sched_runtime_token_t *token)
+{
+    int row;
+    irq_flags_t flags;
+    struct sched_model_store *store;
+    struct sched_model_slot *slot;
+    uint8_t active_idx;
+
+    if (!out || !token) return 0;
+    *out = NULL;
+    *token = 0;
+
+    if (store_idx < 0 || store_idx >= SCHED_MODEL_STORE_COUNT) return 0;
+    row = sched_dense_pool_row[store_idx];
+    if (row < 0) return 0;
+
+    flags = spin_lock_irqsave(&sched_model_lock);
+    store = &sched_model_stores[store_idx];
+    active_idx = store->active_idx;
+    slot = &store->slots[active_idx];
+    if (!slot->present) {
+        spin_unlock_irqrestore(&sched_model_lock, flags);
+        return 0;
+    }
+
+    slot->readers++;
+    *out = &sched_dense_pool[row][active_idx];
+    *token = (sched_runtime_token_t)((((store_idx & 0xFFu) << 8)
+                                   | (active_idx & 0xFFu)) + 1u);
+    spin_unlock_irqrestore(&sched_model_lock, flags);
+    return 1;
+}
+
 int sched_runtime_mlp_acquire(const struct sched_runtime_mlp_model **out,
                               sched_runtime_token_t *token)
 {
-    const struct sched_model_slot *slot = NULL;
-    if (!out) return 0;
-    if (!sched_runtime_acquire_slot(SCHED_MODEL_KIND_MLP, &slot, token)) {
-        *out = NULL;
-        return 0;
-    }
-    *out = &slot->payload.dense;
-    return 1;
+    return sched_runtime_dense_acquire(SCHED_MODEL_STORE_MLP, out, token);
 }
 
 void sched_runtime_mlp_release(sched_runtime_token_t token)
@@ -758,14 +849,7 @@ void sched_runtime_mlp_release(sched_runtime_token_t token)
 int sched_runtime_ppo_acquire(const struct sched_runtime_mlp_model **out,
                               sched_runtime_token_t *token)
 {
-    const struct sched_model_slot *slot = NULL;
-    if (!out) return 0;
-    if (!sched_runtime_acquire_slot(SCHED_MODEL_KIND_PPO, &slot, token)) {
-        *out = NULL;
-        return 0;
-    }
-    *out = &slot->payload.dense;
-    return 1;
+    return sched_runtime_dense_acquire(SCHED_MODEL_STORE_PPO, out, token);
 }
 
 void sched_runtime_ppo_release(sched_runtime_token_t token)
