@@ -71,7 +71,7 @@
  * the 1.2 KB already consumed by pads[] — well under the 16 KB
  * kernel stack budget.
  */
-#define HEF_PARSER_MAX_CCW_ACTIONS 256
+#define HEF_PARSER_MAX_CCW_ACTIONS 512
 /* Cap on the number of HEF contexts whose compute-phase action
  * streams we capture (ProtoHEFContext.operations[].actions[]).
  * A simple MLP emits ~1-2 dynamic contexts; the fixed ACTIVATION/

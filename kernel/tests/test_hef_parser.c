@@ -1055,9 +1055,12 @@ static void test_decode_ccw_truncation(void)
     const uint8_t one_byte = 0x42;
     const uint32_t overrun = HEF_PARSER_MAX_CCW_ACTIONS + 3;
 
-    /* Allocate a heap-ish buffer on the stack — 256 * ~12 B per
-     * Operation entry ≈ 3 KB; comfortable. */
-    static uint8_t ops_buf[4 * 1024];
+    /* Static buffers sized to MAX_CCW_ACTIONS + 3 entries × ~16 bytes
+     * each (action + operation + len-prefix overhead), with generous
+     * headroom so future MAX bumps don't silently overflow the test
+     * fixture. At MAX=512 → 515 entries × 16 ≈ 8.2 KB; 24 KB ops_buf
+     * leaves comfortable margin. */
+    static uint8_t ops_buf[24 * 1024];
     size_t ops_len = 0;
     for (uint32_t i = 0; i < overrun; i++) {
         uint8_t act[16];
@@ -1067,11 +1070,11 @@ static void test_decode_ccw_truncation(void)
         emit_lenprefix(ops_buf, &ops_len, 1, op, op_len);
     }
 
-    static uint8_t ng_buf[8 * 1024];
+    static uint8_t ng_buf[32 * 1024];
     size_t ng_len = 0;
     emit_lenprefix(ng_buf, &ng_len, 2, ops_buf, ops_len);
 
-    static uint8_t blob[16 * 1024];
+    static uint8_t blob[40 * 1024];
     size_t blen = 0;
     emit_lenprefix(blob, &blen, 2, ng_buf, ng_len);
 
