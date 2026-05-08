@@ -186,6 +186,21 @@ struct task {
     uint8_t _user_pad[6];              /* Alignment padding */
     void (*user_entry)(void *arg);      /* EL0 entry point (for user tasks) */
 
+    /* Per-task TTBR0_EL1 L1 table (#697 PR-3 scaffolding).
+     *
+     * Physical address of this task's L1 table for the lower VA half.
+     * Populated by task_create_user (PR-3); written to TTBR0_EL1 on
+     * context-switch into a user task (PR-3); freed by task_destroy
+     * (PR-3). Set to 0 for kernel-mode tasks.
+     *
+     * Stored as PA (not VA) because the page-table walker does PA
+     * lookups and because the L1 table is allocated from PMM (which
+     * returns PAs). Value 0 = "no per-task user mapping; do not write
+     * TTBR0 on switch_to". Allocated unused in PR-1 so PR-3 can
+     * populate without changing the struct layout / TASK_CONTEXT_OFFSET
+     * invariants. */
+    uint64_t user_l1_pa;
+
     /* Slot generation counter for work-stealing ABA avoidance (#139).
      *
      * Bumped by task_destroy each time this task_table slot is freed,
