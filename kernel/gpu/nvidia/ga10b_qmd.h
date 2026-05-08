@@ -217,11 +217,22 @@ void ga10b_qmd_populate(uint32_t *qmd,
  * Returns a `ga10b_qmd_pool_slot`. On invalid input (NULL pointers
  * or `pool_n_slots == 0`), the returned struct has all-zero fields.
  *
- * smem_size, slm_size, and barrier_count from the v7 op are NOT yet
- * propagated into the QMD (the underlying encoder defaults them to
- * 0). MNIST kernels run with these all zero today; SLM workloads
- * that need them will require the encoder to grow corresponding
- * setters.
+ * smem_size_bytes, slm_size_bytes, and barrier_count from the v7 op
+ * are written unconditionally over whatever `ga10b_qmd_populate` left
+ * in those fields — the v7 op is authoritative. SIMT kernels (the
+ * MNIST conv + pool + addrelu chain) send 0 in all three, which
+ * encodes the same bits as populate's defaults but isolates the v7
+ * path from future changes to those defaults. HMMA / WMMA kernels
+ * (the FP32A×FP16W tensor-core GEMM at MNIST op 6) need
+ * SHARED_MEMORY_SIZE = 2048 and BARRIER_COUNT = 3 — gpu-kernel-mnist
+ * sets the v7 fields when invoked with `--gemm-tier hmma`. Without
+ * the propagation the WMMA chain stalls op[N+1] silently (observed
+ * empirically on Jetson GA10B).
+ *
+ * SLM is encoded into the LOW half only (24-bit field, ~16 MB
+ * ceiling). The HIGH half stays at populate's zero default; no
+ * realistic GA10B kernel needs > 16 MB of shader-local memory per
+ * thread. Update this contract if a future workload hits the limit.
  */
 struct ga10b_qmd_pool_slot {
     uint64_t gpu_va;        /* slot's GPU VA — feeds SEND_PCAS_A */
