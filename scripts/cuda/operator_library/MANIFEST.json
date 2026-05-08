@@ -72,13 +72,21 @@
       "dtype":   "FP16",
       "sass":    "rope_f16_shader.sass",
       "comment": "Rotary Position Embedding for Q/K vectors. Rotates pairs (vec[2i], vec[2i+1]) by precomputed (cos, sin) factors from a flat FP32 LUT keyed on (token position, pair index). One block per (token, head); one thread per pair; no shared memory, no reductions. GPT-NeoX / Llama / Qwen2 pair-interleave convention. Mirrors runtime/src/inference/ops_transformer.rs::RopeTable::apply. Validated within 2 ULPs across Qwen2.5-1.5B Q (1×12×128), K (1×2×128), prefill (16×12×128), Llama-2 Q (1×32×128), and a 64-dim head (1×8×64); position-0 boundary case is bit-exact. Source: scripts/cuda/rope_f16.cu (#540)."
+    },
+    {
+      "op_kind": "Q4K_DOT",
+      "tier":    "SIMT",
+      "dtype":   "Q4K",
+      "sass":    "q4k_dot_f16_shader.sass",
+      "comment": "Q4_K-weight × FP16-activation matmul (decode path). Computes out[N] = W[N×K] @ x[K] where W is row-major Q4_K-packed (each row = K/256 super-blocks of 144 B) and out is FP32. One block per output row, 256 threads per block; each thread walks every super-block in its row, dequantizes its element on the fly, multiplies by the matching activation, and accumulates into an FP32 register, then a shared-memory tree reduction over the 256 partial sums writes one output. Mirrors the dequantize-then-FP32-dot fallback path in runtime/src/inference/ops_transformer.rs (the Q8_K-quantized activation fast path used by vec_dot_q4_k_q8_k isn't portable to GPU without a Q8K_QUANTIZE kernel, deferred). Validated within 5e-4 relative tolerance across all distinct Qwen2.5-1.5B SLM matmul shapes (Q/KV/up/down); worst observed relative error was 1.02e-6, well under tolerance. Source: scripts/cuda/q4k_dot_f16.cu (#540)."
     }
   ],
 
   "future_entries": {
     "comment": "Add these when their kernels land. Documented here so the manifest reads as a roadmap, not a punch-list.",
     "GEMM_GENERIC.HMMA.FP32A_FP16W": "from #661/#676 — gemm_hmma_fp32a_fp16w_shader.sass. Mixed-precision (FP32 activation × FP16 weight) GEMM used by the MNIST FC layer when it has to consume an FP32 pool2 output. Schema gap: today's (op_kind, tier, dtype) triple can't express the activation-vs-weight precision split — needs a schema bump (separate `act_dtype` + `weight_dtype` fields, or a packed dtype-pair encoding) before this can move into `entries`. The MNIST launcher (scripts/gpu-kernel-mnist.c) loads the SASS directly via --shader-dir today, bypassing the operator library, so this is dormant until the schema lands.",
-    "Q4K_DOT.SIMT.Q4K":         "future SLM-on-GPU work — fused dequantize + matmul, lighter on bandwidth than Q4K_DEQUANT followed by GEMM_GENERIC. Q4K_DEQUANT (above) is the standalone unpacker; Q4K_DOT will inline that unpack into the matmul inner loop.",
+    "Q4K_GEMM.SIMT.Q4K":        "multi-row Q4_K matmul for prefill — same per-output-row kernel as Q4K_DOT but tiled across multiple input rows. Until it lands, prefill chunks dispatch Q4K_DOT once per row.",
+    "Q8K_QUANTIZE.SIMT.FP16":   "FP16 → Q8_K row quantizer. Unlocks the vec_dot_q4_k_q8_k fast path that the CPU reference uses (~2× the dequant-then-FP32-dot path's perf on CPU; expect similar on GPU).",
     "GEMM_GENERIC.HMMA.BF16":   "tensor-core BF16 if a target model wants it",
     "GEMM_GENERIC.IMMA.INT8":   "future quantized matmul on tensor cores"
   }
