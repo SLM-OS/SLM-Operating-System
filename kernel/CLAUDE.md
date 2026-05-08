@@ -293,9 +293,19 @@ abandoned exception frame on real ARM64 hardware).
 
 **Platform status:**
 
-- **Pi 5:** functional in combination with `COOP_PREEMPT` (the
-  trampoline path is inert today because timer IRQs don't deliver;
-  infrastructure kept for when #134 restores hardware IRQ delivery).
+- **Pi 5:** **live on hardware as of May 2026.** TF-A (#134) and the
+  EL2/VHE migration (#683) together restored hardware timer IRQ
+  delivery on PPI 26 (CNTHP, the Hyp Physical Timer). Two fixes were
+  needed to make the trampoline path itself work at EL2/VHE: (1)
+  `timer.c` writes the timer via `cnthp_*_el2` directly under
+  `PLATFORM_RASPI5` because `CNTP_*_EL0` accesses from EL2 with
+  `HCR_EL2.{E2H,TGE}=1` are RES0 (only the `_EL1` register names get
+  redirected to `CNTHP_*_EL2`); (2) `maybe_arm_resched_trampoline`
+  accepts both EL1h (0x5) and EL2h (0x9) as kernel-mode SPSR values,
+  since at EL2/VHE the interrupted context is always EL2h. The
+  default build still ships `SECONDARY_PREEMPT=OFF` /
+  `COOP_PREEMPT=ON` pending a broader policy decision; flipping the
+  default is a separate change from enabling the option.
 - **Jetson:** compiles but **not safe to enable yet** — the
   `resched_trampoline` in `vectors.S:377-380` uses
   `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` to compute the CPU index,

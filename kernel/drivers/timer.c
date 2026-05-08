@@ -57,14 +57,31 @@ static inline uint64_t read_cntpct(void)
     return val;
 }
 
+/* Pi 5 boots at EL2 with HCR_EL2.{E2H, TGE} = {1, 1}. Per ARM ARM,
+ * accesses to CNTP_*_EL0 from EL2 in that configuration are RES0 /
+ * silently ignored — the redirect-to-CNTHP_*_EL2 only applies to
+ * the _EL1 register names, not the _EL0 ones. So at EL2/VHE we
+ * must hit the Hyp Phys Timer's EL2 names directly. The PPI 26
+ * IRQ that's actually wired in the GIC IS the CNTHP timer.
+ *
+ * QEMU + Jetson + x86 stay at EL1 (Pi 5 is the outlier today), so
+ * they keep using the EL0 names. */
 static inline void write_cntp_ctl(uint64_t val)
 {
+#if defined(PLATFORM_RASPI5)
+    __asm__ volatile("msr cnthp_ctl_el2, %0" :: "r"(val));
+#else
     __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"(val));
+#endif
 }
 
 static inline void write_cntp_tval(int64_t val)
 {
+#if defined(PLATFORM_RASPI5)
+    __asm__ volatile("msr cnthp_tval_el2, %0" :: "r"(val));
+#else
     __asm__ volatile("msr cntp_tval_el0, %0" :: "r"(val));
+#endif
 }
 
 /* Timer control bits (CNTP_CTL_EL0 — also the layout of CNTHP_CTL_EL2
