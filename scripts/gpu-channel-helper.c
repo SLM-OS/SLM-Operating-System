@@ -101,6 +101,74 @@ static void xioctl(int fd, unsigned long req, void *arg, const char *name)
     }
 }
 
+/* Forward declare for use by the helper buffer allocator below. */
+static int nvmap_alloc_dmabuf(int nvmap_fd, uint32_t size, uint32_t align);
+static uint64_t virt_to_phys(void *vaddr);
+
+/* Allocate a single dmabuf, register it with nvgpu, GMMU-map it
+ * into the channel's address space, mmap it for CPU access, zero
+ * the contents, and resolve its physical address. Used by the
+ * QMD-pool / SASS-pool / cbuf allocations below — all share the
+ * exact same setup sequence and only differ in size. Dies on any
+ * ioctl/mmap failure with a clear message naming `tag`. */
+static int alloc_channel_buffer(int nvmap_fd, int ctrl_fd, int as_fd,
+                                uint32_t size_bytes, const char *tag,
+                                int *out_dmabuf, void **out_cpu_va,
+                                uint64_t *out_phys, uint64_t *out_gpu_va)
+{
+    const uint32_t page_size = 4096u;
+    uint32_t rounded = (size_bytes + page_size - 1u) & ~(page_size - 1u);
+
+    int dmabuf = nvmap_alloc_dmabuf(nvmap_fd, rounded, page_size);
+
+    struct nvgpu_gpu_register_buffer_args regbuf;
+    memset(&regbuf, 0, sizeof(regbuf));
+    regbuf.dmabuf_fd = dmabuf;
+    regbuf.comptags_alloc_control = NVGPU_GPU_COMPTAGS_ALLOC_NONE;
+    if (ioctl(ctrl_fd, NVGPU_GPU_IOCTL_REGISTER_BUFFER, &regbuf) < 0) {
+        fprintf(stderr,
+                "[gpu-helper] REGISTER_BUFFER(%s) failed: %s\n",
+                tag, strerror(errno));
+        return -1;
+    }
+
+    struct nvgpu_as_map_buffer_ex_args map;
+    memset(&map, 0, sizeof(map));
+    map.compr_kind = -1;
+    map.incompr_kind = 0;
+    map.dmabuf_fd = dmabuf;
+    map.mapping_size = 0;
+    map.page_size = page_size;
+    if (ioctl(as_fd, NVGPU_AS_IOCTL_MAP_BUFFER_EX, &map) < 0) {
+        fprintf(stderr,
+                "[gpu-helper] MAP_BUFFER_EX(%s) failed: %s\n",
+                tag, strerror(errno));
+        return -1;
+    }
+
+    void *cpu_va = mmap(NULL, rounded, PROT_READ | PROT_WRITE,
+                        MAP_SHARED, dmabuf, 0);
+    if (cpu_va == MAP_FAILED) {
+        fprintf(stderr, "[gpu-helper] mmap(%s): %s\n", tag, strerror(errno));
+        return -1;
+    }
+    memset(cpu_va, 0, rounded);
+    msync(cpu_va, rounded, MS_SYNC);
+
+    uint64_t phys = virt_to_phys(cpu_va);
+    if (phys == 0) {
+        fprintf(stderr,
+                "[gpu-helper] virt_to_phys returned 0 for %s\n", tag);
+        return -1;
+    }
+
+    *out_dmabuf = dmabuf;
+    *out_cpu_va = cpu_va;
+    *out_phys = phys;
+    *out_gpu_va = map.offset;
+    return 0;
+}
+
 /* Allocate an nvmap buffer and return a dmabuf fd for it. */
 static int nvmap_alloc_dmabuf(int nvmap_fd, uint32_t size, uint32_t align)
 {
@@ -498,7 +566,6 @@ int main(int argc, char **argv)
     uint64_t qmd_pool_gva    = 0;
     uint32_t qmd_pool_size_bytes = 0;
     if (qmd_pool_slots > 0) {
-        const uint32_t page_size = 4096u;
         uint64_t bytes = (uint64_t)qmd_pool_slots * 256ull;
         if (bytes > 0xFFFFFFFFull) {
             fprintf(stderr,
@@ -506,56 +573,82 @@ int main(int argc, char **argv)
                     (unsigned long long)bytes);
             return 1;
         }
-        qmd_pool_size_bytes = ((uint32_t)bytes + page_size - 1u) &
-                              ~(page_size - 1u);
-
-        qmd_pool_dmabuf = nvmap_alloc_dmabuf(nvmap_fd,
-                                              qmd_pool_size_bytes,
-                                              page_size);
-
-        struct nvgpu_gpu_register_buffer_args qregbuf;
-        memset(&qregbuf, 0, sizeof(qregbuf));
-        qregbuf.dmabuf_fd = qmd_pool_dmabuf;
-        qregbuf.comptags_alloc_control = NVGPU_GPU_COMPTAGS_ALLOC_NONE;
-        if (ioctl(ctrl_fd, NVGPU_GPU_IOCTL_REGISTER_BUFFER, &qregbuf) < 0) {
-            fprintf(stderr,
-                    "[gpu-helper] REGISTER_BUFFER(QMD_POOL) failed: %s\n",
-                    strerror(errno));
+        qmd_pool_size_bytes = (uint32_t)bytes;
+        if (alloc_channel_buffer(nvmap_fd, ctrl_fd, as_fd,
+                                 qmd_pool_size_bytes, "QMD_POOL",
+                                 &qmd_pool_dmabuf, &qmd_pool_va,
+                                 &qmd_pool_phys, &qmd_pool_gva) < 0) {
             return 1;
         }
-
-        struct nvgpu_as_map_buffer_ex_args qmap;
-        memset(&qmap, 0, sizeof(qmap));
-        qmap.compr_kind = -1;
-        qmap.incompr_kind = 0;
-        qmap.dmabuf_fd = qmd_pool_dmabuf;
-        qmap.mapping_size = 0;
-        qmap.page_size = page_size;
-        xioctl(as_fd, NVGPU_AS_IOCTL_MAP_BUFFER_EX, &qmap,
-               "MAP_QMD_POOL");
-        qmd_pool_gva = qmap.offset;
-
-        qmd_pool_va = mmap(NULL, qmd_pool_size_bytes,
-                            PROT_READ | PROT_WRITE,
-                            MAP_SHARED, qmd_pool_dmabuf, 0);
-        if (qmd_pool_va == MAP_FAILED) {
-            perror("mmap QMD pool");
-            return 1;
-        }
-        memset(qmd_pool_va, 0, qmd_pool_size_bytes);
-        msync(qmd_pool_va, qmd_pool_size_bytes, MS_SYNC);
-        qmd_pool_phys = virt_to_phys(qmd_pool_va);
-        if (qmd_pool_phys == 0) {
-            fprintf(stderr,
-                    "[gpu-helper] virt_to_phys returned 0 for QMD pool\n");
-            return 1;
-        }
+        /* Round up tracked size to whole pages — alloc_channel_buffer
+         * page-rounds internally and the handoff size field must
+         * reflect the actual allocation. */
+        qmd_pool_size_bytes = (qmd_pool_size_bytes + 4095u) & ~4095u;
         printf("[gpu-helper] QMD pool: %u slots, %u B, "
                "phys=0x%llx, gpu_va=0x%llx\n",
                (unsigned)(qmd_pool_size_bytes / 256u),
                qmd_pool_size_bytes,
                (unsigned long long)qmd_pool_phys,
                (unsigned long long)qmd_pool_gva);
+    }
+
+    /* Pre-stage SASS region + cbuf in the channel's GMMU when v7
+     * mode is requested. SLM-OS's `slm_oplib_dispatch` needs both
+     * to be pre-mapped in the inherited channel — without them it
+     * would have to call `ga10b_gmmu_alloc` post-kexec, which
+     * requires discovering the channel's inst_block_phys (FECS_-
+     * CURRENT_CTX is unreliable, walk-discovery requires big-page
+     * walker support — both are bigger investments than just
+     * pre-staging here).
+     *
+     * SASS region (`shader_*` fields in the v7 handoff): empty
+     * GMMU-mapped buffer big enough for the embedded operator
+     * library's SASS pool. SLM-OS reads `shader_phys` from the
+     * handoff and writes the SASS bytes into it post-kexec via the
+     * identity-mapped phys, then sets g_sass_pool_gpu_va = the
+     * helper's `shader_gpu_va`.
+     *
+     * 1 MB is enough for the current 13-entry library (largest
+     * single SASS is ~16 KB; 1 MB leaves room for additions).
+     *
+     * cbuf (`cbuf_*` fields): single 4 KB page for runtime kernel
+     * args. Reused serially across dispatches — the dispatcher
+     * zeros it, populates from `args`, and submits in a one-at-
+     * a-time pattern. Concurrent dispatches would race on these
+     * bytes, but slm_oplib_dispatch is synchronous (it polls the
+     * trailing semaphore before returning), so serial reuse is
+     * correct. */
+    int      sass_dmabuf = -1;
+    void    *sass_va     = NULL;
+    uint64_t sass_phys   = 0;
+    uint64_t sass_gva    = 0;
+    uint32_t sass_size_bytes = 0;
+    int      cbuf_dmabuf = -1;
+    void    *cbuf_va     = NULL;
+    uint64_t cbuf_phys   = 0;
+    uint64_t cbuf_gva    = 0;
+    if (qmd_pool_slots > 0) {
+        sass_size_bytes = 1u << 20;  /* 1 MB */
+        if (alloc_channel_buffer(nvmap_fd, ctrl_fd, as_fd,
+                                 sass_size_bytes, "SASS_POOL",
+                                 &sass_dmabuf, &sass_va,
+                                 &sass_phys, &sass_gva) < 0) {
+            return 1;
+        }
+        printf("[gpu-helper] SASS pool: %u B, phys=0x%llx, gpu_va=0x%llx\n",
+               sass_size_bytes,
+               (unsigned long long)sass_phys,
+               (unsigned long long)sass_gva);
+
+        if (alloc_channel_buffer(nvmap_fd, ctrl_fd, as_fd,
+                                 4096u, "CBUF",
+                                 &cbuf_dmabuf, &cbuf_va,
+                                 &cbuf_phys, &cbuf_gva) < 0) {
+            return 1;
+        }
+        printf("[gpu-helper] cbuf: 4096 B, phys=0x%llx, gpu_va=0x%llx\n",
+               (unsigned long long)cbuf_phys,
+               (unsigned long long)cbuf_gva);
     }
 
     /* Allocate a dedicated dmabuf for the handoff block. Writing via
@@ -608,6 +701,15 @@ int main(int argc, char **argv)
         .initial_gp_put     = 0,
         .initial_gp_get     = 0,
         .work_submit_token  = sb.work_submit_token,
+        /* v3 dispatch fields, repurposed in v7 mode as the pre-
+         * staged SASS region + cbuf for `slm_oplib_dispatch`.
+         * Zero in v2 mode (no v7 pre-staging requested). */
+        .shader_phys        = sass_phys,
+        .shader_gpu_va      = sass_gva,
+        .shader_size        = sass_size_bytes,
+        .cbuf_phys          = cbuf_phys,
+        .cbuf_gpu_va        = cbuf_gva,
+        .cbuf_size          = (cbuf_phys != 0) ? 4096u : 0u,
         /* v7-only: per-dispatch QMD pool. Zero in v2 mode. */
         .qmd_pool_phys      = qmd_pool_phys,
         .qmd_pool_gpu_va    = qmd_pool_gva,

@@ -4210,6 +4210,29 @@ int cmd_nvgpu(int argc, char *argv[])
             } else {
                 const struct ga10b_channel_handoff *h =
                     ga10b_bringup_handoff();
+                shell_printf("oplib stage: handoff h=%p shader_phys=0x%lx "
+                             "shader_gpu_va=0x%lx shader_size=%u "
+                             "cbuf_phys=0x%lx cbuf_gpu_va=0x%lx\r\n",
+                             (const void *)h,
+                             (h ? (unsigned long)h->shader_phys : 0ul),
+                             (h ? (unsigned long)h->shader_gpu_va : 0ul),
+                             (h ? (unsigned)h->shader_size : 0u),
+                             (h ? (unsigned long)h->cbuf_phys : 0ul),
+                             (h ? (unsigned long)h->cbuf_gpu_va : 0ul));
+                /* Fast path: when the helper pre-staged the SASS
+                 * region in the channel's GMMU (v7 mode), skip
+                 * inst-block discovery entirely — `oplib_pool_-
+                 * stage_to_gpu` doesn't need it. The function
+                 * detects the pre-staged region via h->shader_*
+                 * and writes the SASS bytes directly into the
+                 * helper's mapped buffer. */
+                if (h != NULL && h->shader_gpu_va != 0 &&
+                    h->shader_phys != 0) {
+                    shell_puts("oplib stage: using helper-staged SASS "
+                               "region (no inst block discovery needed)\r\n");
+                    inst_phys = 0;
+                    goto oplib_stage_call;
+                }
                 if (h != NULL && h->inst_block_phys != 0) {
                     inst_phys = h->inst_block_phys;
                 } else {
@@ -4289,6 +4312,8 @@ int cmd_nvgpu(int argc, char *argv[])
                                  fecs_ok ? "FECS" : "DRAM walk");
                 }
             }
+oplib_stage_call:
+            ;
             int rc = oplib_pool_stage_to_gpu(inst_phys);
             if (rc < 0) {
                 shell_printf("oplib stage: rc=%d\r\n", rc);
@@ -4494,17 +4519,6 @@ int cmd_nvgpu(int argc, char *argv[])
             uint64_t inst_phys = 0;
             const struct ga10b_channel_handoff *h =
                 ga10b_bringup_handoff();
-            if (h != NULL && h->inst_block_phys != 0) {
-                inst_phys = h->inst_block_phys;
-            } else {
-                inst_phys = ga10b_gmmu_discover_inst_block_phys();
-                if (inst_phys == 0) {
-                    shell_puts("dispatch-rmsnorm: no handoff and "
-                               "FECS_CURRENT_CTX read failed\r\n");
-                    return -1;
-                }
-            }
-
             uint64_t in_bytes  = (uint64_t)n_rows * n * 2u;
             uint64_t gam_bytes = (uint64_t)n * 2u;
             uint64_t out_bytes = (uint64_t)n_rows * n * 2u;
@@ -4519,23 +4533,77 @@ int cmd_nvgpu(int argc, char *argv[])
             uint64_t in_phys = 0, gam_phys = 0, out_phys = 0;
             void *in_cpu = NULL, *gam_cpu = NULL, *out_cpu = NULL;
             int rc;
-            rc = ga10b_gmmu_alloc(inst_phys, in_pages, 0,
-                                   &in_va, &in_cpu, &in_phys);
-            if (rc < 0) {
-                shell_printf("dispatch-rmsnorm: input alloc rc=%d\r\n", rc);
-                return rc;
-            }
-            rc = ga10b_gmmu_alloc(inst_phys, gam_pages, 0,
-                                   &gam_va, &gam_cpu, &gam_phys);
-            if (rc < 0) {
-                shell_printf("dispatch-rmsnorm: gamma alloc rc=%d\r\n", rc);
-                return rc;
-            }
-            rc = ga10b_gmmu_alloc(inst_phys, out_pages, 0,
-                                   &out_va, &out_cpu, &out_phys);
-            if (rc < 0) {
-                shell_printf("dispatch-rmsnorm: output alloc rc=%d\r\n", rc);
-                return rc;
+
+            /* Fast path: when the helper pre-staged the SASS pool
+             * (1 MB), carve scratch input/gamma/output out of the
+             * tail. The SASS region itself sits at offset 0 with
+             * length 7680 B for the rmsnorm-only blob; we leave a
+             * safety margin and start the scratch carve-outs at
+             * 64 KB so any future SASS region growth doesn't
+             * collide. Each region is sized to in_bytes/gam_bytes/
+             * out_bytes — the cap upstream limits each to
+             * 65536² × 2 B but the smoke test uses tiny shapes
+             * (4×16 → 128 B). The 1 MB pool is plenty for any
+             * shape this verb is realistically invoked with.
+             *
+             * Avoiding the post-kexec ga10b_gmmu_alloc path means
+             * we don't need a discovered inst_block_phys — the
+             * helper already mapped the pool in the channel's
+             * address space. */
+            if (h != NULL && h->shader_gpu_va != 0 &&
+                h->shader_phys != 0 && h->shader_size >= 0x40000u) {
+                uint64_t base_phys = h->shader_phys;
+                uint64_t base_gva  = h->shader_gpu_va;
+                /* SASS occupies [0..0x10000); leave that alone. */
+                in_phys  = base_phys + 0x10000ull;
+                in_va    = base_gva  + 0x10000ull;
+                gam_phys = base_phys + 0x20000ull;
+                gam_va   = base_gva  + 0x20000ull;
+                out_phys = base_phys + 0x30000ull;
+                out_va   = base_gva  + 0x30000ull;
+                if (in_bytes  > 0x10000u || gam_bytes > 0x10000u ||
+                    out_bytes > 0x10000u) {
+                    shell_printf("dispatch-rmsnorm: scratch slot too small "
+                                 "(in=%llu gam=%llu out=%llu vs 64 KB)\r\n",
+                                 (unsigned long long)in_bytes,
+                                 (unsigned long long)gam_bytes,
+                                 (unsigned long long)out_bytes);
+                    return -1;
+                }
+                in_cpu  = (void *)(uintptr_t)in_phys;
+                gam_cpu = (void *)(uintptr_t)gam_phys;
+                out_cpu = (void *)(uintptr_t)out_phys;
+                shell_puts("dispatch-rmsnorm: scratch buffers carved from "
+                           "pre-staged SASS pool\r\n");
+            } else {
+                if (h != NULL && h->inst_block_phys != 0) {
+                    inst_phys = h->inst_block_phys;
+                } else {
+                    inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                    if (inst_phys == 0) {
+                        shell_puts("dispatch-rmsnorm: no handoff and "
+                                   "FECS_CURRENT_CTX read failed\r\n");
+                        return -1;
+                    }
+                }
+                rc = ga10b_gmmu_alloc(inst_phys, in_pages, 0,
+                                       &in_va, &in_cpu, &in_phys);
+                if (rc < 0) {
+                    shell_printf("dispatch-rmsnorm: input alloc rc=%d\r\n", rc);
+                    return rc;
+                }
+                rc = ga10b_gmmu_alloc(inst_phys, gam_pages, 0,
+                                       &gam_va, &gam_cpu, &gam_phys);
+                if (rc < 0) {
+                    shell_printf("dispatch-rmsnorm: gamma alloc rc=%d\r\n", rc);
+                    return rc;
+                }
+                rc = ga10b_gmmu_alloc(inst_phys, out_pages, 0,
+                                       &out_va, &out_cpu, &out_phys);
+                if (rc < 0) {
+                    shell_printf("dispatch-rmsnorm: output alloc rc=%d\r\n", rc);
+                    return rc;
+                }
             }
 
             /* Fill input with alternating +1.0/-1.0 FP16 (0x3C00 /

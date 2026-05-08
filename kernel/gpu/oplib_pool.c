@@ -19,6 +19,8 @@
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../include/cache.h"
 #include "nvidia/ga10b_gmmu.h"
+#include "nvidia/ga10b_bringup.h"          /* ga10b_bringup_handoff */
+#include "nvidia/ga10b_channel_handoff.h"  /* struct ga10b_channel_handoff */
 #endif
 
 /* Linker-supplied symbols from kernel/src/oplib_embed.S. */
@@ -175,8 +177,46 @@ int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
         return 0;
     }
 
-    /* Round up to whole 4 KB pages. */
     size_t sass_len = g_handle.sass_region_len;
+
+    /* Fast path: if the inherited channel handoff exposes a pre-
+     * staged SASS region (helper allocated `shader_*` fields in
+     * the channel's GMMU pre-kexec), copy the embedded SASS bytes
+     * into it and use the helper's GPU VA directly. Skips the
+     * post-kexec ga10b_gmmu_alloc path entirely — that path
+     * requires discovering the channel's inst_block_phys, which
+     * is unreliable on a kexec'd Linux box (FECS_CURRENT_CTX
+     * stale, walk-discovery blocked on big-page support). */
+    {
+        const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+        if (h != NULL && h->shader_gpu_va != 0 &&
+            h->shader_phys != 0 && h->shader_size >= sass_len) {
+            volatile uint8_t *dst =
+                (volatile uint8_t *)(uintptr_t)h->shader_phys;
+            const uint8_t *src = g_handle.sass_region;
+            for (size_t i = 0; i < sass_len; i++) {
+                dst[i] = src[i];
+            }
+            cache_clean_range((void *)(uintptr_t)h->shader_phys, sass_len);
+            __asm__ volatile("dsb sy" ::: "memory");
+            g_sass_pool_gpu_va = h->shader_gpu_va;
+            g_sass_pool_n_pages = (sass_len + 4095) / 4096;
+            g_stage_rc = 0;
+            g_staged = true;
+            uart_printf("[oplib] stage_to_gpu: %zu B copied into helper-"
+                        "staged SASS region at gpu_va=0x%llx (phys=0x%llx, "
+                        "capacity %u B)\n",
+                        sass_len,
+                        (unsigned long long)h->shader_gpu_va,
+                        (unsigned long long)h->shader_phys,
+                        (unsigned)h->shader_size);
+            return 0;
+        }
+    }
+
+    /* Slow path: no pre-staged region — allocate via the post-kexec
+     * GMMU walker. Only viable when inst_block_phys is correct AND
+     * the walker can place mappings (small-page region). */
     size_t n_pages  = (sass_len + 4095) / 4096;
 
     uint64_t gpu_va = 0;
