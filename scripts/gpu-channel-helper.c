@@ -157,12 +157,45 @@ int main(int argc, char **argv)
 {
     setbuf(stdout, NULL);  /* unbuffered output for kexec debugging */
 
-    /* Parse --timeout-secs. */
+    /* Argument parsing.
+     *
+     * The first three flags are honored:
+     *   --timeout-secs N  : how long to keep the channel alive
+     *   --qmd-pool        : allocate a QMD pool + emit a v7 handoff so
+     *                       SLM-OS's per-dispatch GPU path
+     *                       (`slm_oplib_dispatch`) can pick a slot
+     *                       round-robin. Default pool is 1024 slots
+     *                       (256 KiB).
+     *   --qmd-pool-slots N: explicit slot count (implies --qmd-pool).
+     *
+     * The remaining flags exist purely so this binary is drop-in
+     * compatible with the slmos-kexec auto-launcher (`start_one_helper`
+     * in scripts/jetson-kexec-slmos.sh). That launcher always passes
+     * --preserve-for-kexec, --weights-dir, --shader-dir, and may pass
+     * --gemm-tier / --weights-fp16-dir. Channel-only operation has
+     * nothing useful to do with weights or shaders, so we accept and
+     * ignore them. */
     int timeout_secs = DEFAULT_TIMEOUT_SECS;
+    int qmd_pool_slots = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--timeout-secs") == 0 && i + 1 < argc) {
             timeout_secs = atoi(argv[++i]);
             if (timeout_secs <= 0) timeout_secs = DEFAULT_TIMEOUT_SECS;
+        } else if (strcmp(argv[i], "--qmd-pool") == 0) {
+            if (qmd_pool_slots == 0) qmd_pool_slots = 1024;
+        } else if (strcmp(argv[i], "--qmd-pool-slots") == 0 &&
+                   i + 1 < argc) {
+            qmd_pool_slots = atoi(argv[++i]);
+            if (qmd_pool_slots <= 0) qmd_pool_slots = 1024;
+        } else if (strcmp(argv[i], "--preserve-for-kexec") == 0) {
+            /* No-op: this helper always preserves the channel by
+             * holding fds open through the sleep loop. */
+        } else if ((strcmp(argv[i], "--weights-dir") == 0 ||
+                    strcmp(argv[i], "--shader-dir") == 0 ||
+                    strcmp(argv[i], "--weights-fp16-dir") == 0 ||
+                    strcmp(argv[i], "--gemm-tier") == 0) &&
+                   i + 1 < argc) {
+            i++;
         }
     }
 
@@ -444,6 +477,87 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Optional QMD pool for v7 handoff. SLM-OS's per-dispatch GPU
+     * path (`slm_oplib_dispatch`, kernel/gpu/oplib_dispatch.c) needs
+     * `qmd_pool_gpu_va != 0` in the inherited handoff before it will
+     * fire any kernel — without a pool, the dispatcher refuses
+     * gracefully ("qmd_pool_gpu_va == 0 — channel handoff missing
+     * v7 pool resources"). The pool is sized in 256 B slots; SLM-OS
+     * rotates through them round-robin so consecutive dispatches
+     * land at distinct GPU VAs (avoids SKED's QMD decode cache
+     * serving the prior launch's output, the v6 staleness bug).
+     *
+     * Allocated inline (mirrors the pb/sem pattern above) rather
+     * than via gpu-launch-common.c's `gpu_alloc_qmd_pool` because
+     * this helper builds standalone — no link step against
+     * gpu-launch-common.c. The header is included for the handoff
+     * struct definition only. */
+    int      qmd_pool_dmabuf = -1;
+    void    *qmd_pool_va     = NULL;
+    uint64_t qmd_pool_phys   = 0;
+    uint64_t qmd_pool_gva    = 0;
+    uint32_t qmd_pool_size_bytes = 0;
+    if (qmd_pool_slots > 0) {
+        const uint32_t page_size = 4096u;
+        uint64_t bytes = (uint64_t)qmd_pool_slots * 256ull;
+        if (bytes > 0xFFFFFFFFull) {
+            fprintf(stderr,
+                    "[gpu-helper] QMD pool size %llu B overflows uint32_t\n",
+                    (unsigned long long)bytes);
+            return 1;
+        }
+        qmd_pool_size_bytes = ((uint32_t)bytes + page_size - 1u) &
+                              ~(page_size - 1u);
+
+        qmd_pool_dmabuf = nvmap_alloc_dmabuf(nvmap_fd,
+                                              qmd_pool_size_bytes,
+                                              page_size);
+
+        struct nvgpu_gpu_register_buffer_args qregbuf;
+        memset(&qregbuf, 0, sizeof(qregbuf));
+        qregbuf.dmabuf_fd = qmd_pool_dmabuf;
+        qregbuf.comptags_alloc_control = NVGPU_GPU_COMPTAGS_ALLOC_NONE;
+        if (ioctl(ctrl_fd, NVGPU_GPU_IOCTL_REGISTER_BUFFER, &qregbuf) < 0) {
+            fprintf(stderr,
+                    "[gpu-helper] REGISTER_BUFFER(QMD_POOL) failed: %s\n",
+                    strerror(errno));
+            return 1;
+        }
+
+        struct nvgpu_as_map_buffer_ex_args qmap;
+        memset(&qmap, 0, sizeof(qmap));
+        qmap.compr_kind = -1;
+        qmap.incompr_kind = 0;
+        qmap.dmabuf_fd = qmd_pool_dmabuf;
+        qmap.mapping_size = 0;
+        qmap.page_size = page_size;
+        xioctl(as_fd, NVGPU_AS_IOCTL_MAP_BUFFER_EX, &qmap,
+               "MAP_QMD_POOL");
+        qmd_pool_gva = qmap.offset;
+
+        qmd_pool_va = mmap(NULL, qmd_pool_size_bytes,
+                            PROT_READ | PROT_WRITE,
+                            MAP_SHARED, qmd_pool_dmabuf, 0);
+        if (qmd_pool_va == MAP_FAILED) {
+            perror("mmap QMD pool");
+            return 1;
+        }
+        memset(qmd_pool_va, 0, qmd_pool_size_bytes);
+        msync(qmd_pool_va, qmd_pool_size_bytes, MS_SYNC);
+        qmd_pool_phys = virt_to_phys(qmd_pool_va);
+        if (qmd_pool_phys == 0) {
+            fprintf(stderr,
+                    "[gpu-helper] virt_to_phys returned 0 for QMD pool\n");
+            return 1;
+        }
+        printf("[gpu-helper] QMD pool: %u slots, %u B, "
+               "phys=0x%llx, gpu_va=0x%llx\n",
+               (unsigned)(qmd_pool_size_bytes / 256u),
+               qmd_pool_size_bytes,
+               (unsigned long long)qmd_pool_phys,
+               (unsigned long long)qmd_pool_gva);
+    }
+
     /* Allocate a dedicated dmabuf for the handoff block. Writing via
      * /dev/mem is blocked by CONFIG_STRICT_DEVMEM for System RAM, but
      * we can write to dmabuf memory via its own mmap. SLM-OS scans
@@ -464,9 +578,13 @@ int main(int argc, char **argv)
      * Using named fields (not hand-indexed words) means SLM-OS and
      * this helper can never drift out of sync silently — any struct
      * reorder is a compile error on rebuild. */
+    /* Handoff version is bumped to 7 when a QMD pool was allocated,
+     * so SLM-OS's `ga10b_v7_validate_handoff` accepts it. The v7
+     * dispatch path is the only one that consumes qmd_pool_*; v2
+     * scanners simply ignore those bytes. */
     struct ga10b_channel_handoff hoff = {
         .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
-        .version            = 2,
+        .version            = (qmd_pool_slots > 0) ? 7u : 2u,
         .channel_id         = 0,  /* nvgpu doesn't expose this cheaply;
                                    * work_submit_token below is the
                                    * authoritative field for the
@@ -490,6 +608,11 @@ int main(int argc, char **argv)
         .initial_gp_put     = 0,
         .initial_gp_get     = 0,
         .work_submit_token  = sb.work_submit_token,
+        /* v7-only: per-dispatch QMD pool. Zero in v2 mode. */
+        .qmd_pool_phys      = qmd_pool_phys,
+        .qmd_pool_gpu_va    = qmd_pool_gva,
+        .qmd_pool_size_bytes = qmd_pool_size_bytes,
+        .qmd_pool_n_slots   = qmd_pool_size_bytes / 256u,
     };
     memcpy(handoff, &hoff, sizeof(hoff));
     msync(handoff, 4096, MS_SYNC);
