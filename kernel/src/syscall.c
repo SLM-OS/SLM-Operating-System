@@ -226,11 +226,9 @@ static int64_t sys_mmap_handler(struct trap_frame *frame)
     uint32_t flags  = (uint32_t)frame->x3;
     (void)flags;       /* MAP_ANONYMOUS implicit */
 
-    /* Reject zero / absurdly-large requests. 64 MB cap is well above
-     * any realistic per-call mmap and below the user-VA window's
-     * 256 GB ceiling — guards against integer-overflow shenanigans
-     * in the page-count arithmetic below. */
-    if (len == 0 || len > (64UL * 1024 * 1024)) {
+    /* Reject zero / absurdly-large requests; cap guards the page-
+     * count arithmetic below from integer-overflow shenanigans. */
+    if (len == 0 || len > SYS_MMAP_MAX_LEN_BYTES) {
         return -1;
     }
 
@@ -299,7 +297,7 @@ static int64_t sys_munmap_handler(struct trap_frame *frame)
     uint64_t addr = frame->x0;
     uint64_t len  = frame->x1;
 
-    if (len == 0 || len > (64UL * 1024 * 1024)) {
+    if (len == 0 || len > SYS_MMAP_MAX_LEN_BYTES) {
         return -1;
     }
     if ((addr & (PAGE_SIZE - 1)) != 0) {
@@ -321,6 +319,10 @@ static int64_t sys_munmap_handler(struct trap_frame *frame)
         return -1;
     }
 
+    /* Best-effort tear-down: continue past per-page failures so a
+     * partially-mapped range still has its installed pages freed,
+     * and report a single -1 on any failure. The caller cannot
+     * recover per-page rc anyway. */
     int rc = 0;
     for (uint64_t i = 0; i < pages; i++) {
         if (vmm_user_unmap_page(t->user_l1_pa, addr + i * PAGE_SIZE) != 0) {

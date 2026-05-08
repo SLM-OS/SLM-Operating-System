@@ -42,6 +42,12 @@
 
 #define MAP_ANONYMOUS   0x0     /* Default; no FD, zero-filled */
 
+/* Per-call mmap/munmap length cap. Comfortably above any realistic
+ * single-call request and well below USER_VA_LIMIT (256 GB user
+ * window) — guards the page-count arithmetic in the handlers from
+ * pathological inputs. */
+#define SYS_MMAP_MAX_LEN_BYTES  (64UL * 1024 * 1024)
+
 /* SPSR value for EL0t (EL0, SP_EL0, all interrupts enabled) */
 #define SPSR_EL0T       0x0
 
