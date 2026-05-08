@@ -45,6 +45,26 @@
 #define KVA_TO_PA(va)       ((va) & ~KERNEL_VA_BASE)
 
 /*
+ * Per-task user VA range (#697 PR-2).
+ *
+ * SLM-OS keeps the kernel running at low VA in a shared TTBR0=TTBR1
+ * mapping. Per-task L1 tables (allocated by vmm_create_user_l1)
+ * mirror the boot L1's entries for L1[0..USER_L1_FIRST-1] (kernel
+ * mappings, shared via L2-table pointer copies) and have their own
+ * entries for L1[USER_L1_FIRST..USER_L1_LIMIT-1] (per-task user
+ * mappings, populated by task_create_user in PR-3).
+ *
+ * USER_L1_FIRST = 256 was chosen because every current platform's
+ * kernel mappings stay below L1[256] (Pi 5 uses up to L1[124] for
+ * MMIO; QEMU/Jetson use the low 8). 256 GB of user VA is far more
+ * than any user task needs.
+ */
+#define USER_L1_FIRST       256                  /* First L1 index for user mappings */
+#define USER_L1_LIMIT       512                  /* One past last L1 index for user */
+#define USER_VA_BASE        ((uint64_t)USER_L1_FIRST * L1_BLOCK_SIZE)
+#define USER_VA_LIMIT       ((uint64_t)USER_L1_LIMIT * L1_BLOCK_SIZE)
+
+/*
  * ==========================================================================
  * Page Table Entry Definitions
  * ==========================================================================
@@ -264,6 +284,42 @@ uint64_t vmm_virt_to_phys(uint64_t virt);
  * Returns true if mapped, false otherwise.
  */
 bool vmm_is_mapped(uint64_t virt);
+
+/*
+ * Allocate and initialise a per-task L1 table for TTBR0_EL1 (#697 PR-2).
+ *
+ * The new L1 mirrors the boot L1's entries for L1[0..USER_L1_FIRST-1]
+ * (kernel mappings — pointers to shared L2 tables) and zeroes
+ * L1[USER_L1_FIRST..USER_L1_LIMIT-1] (user mappings — populated by
+ * task_create_user in PR-3).
+ *
+ * Mirroring is done at L1 granularity by COPYING L1 entries (which
+ * contain L2 table pointers) — the underlying L2 tables are shared
+ * with the kernel boot L1 and other per-task L1s. This means any
+ * kernel-side mapping change must go through L2-level edits to
+ * propagate to existing per-task L1s; direct boot-L1 edits do NOT
+ * propagate. This invariant is documented in
+ * docs/pi5-el0-execution-plan.md "Risks" section.
+ *
+ * @out_pa: Output — physical address of the new L1 page (caller-owned).
+ *          Pass to vmm_destroy_user_l1 when done.
+ *
+ * Returns 0 on success, -1 on failure (PMM exhausted or NULL out_pa).
+ */
+int vmm_create_user_l1(uint64_t *out_pa);
+
+/*
+ * Free a per-task L1 table previously returned by vmm_create_user_l1.
+ *
+ * Walks the L1's user-region entries (USER_L1_FIRST..USER_L1_LIMIT-1)
+ * and frees any per-task L2/L3 sub-tables. Kernel-region L1 entries
+ * point to shared L2s and are NOT freed.
+ *
+ * Safe to call with l1_pa == 0 (no-op).
+ *
+ * @l1_pa: Physical address of the L1 page to free.
+ */
+void vmm_destroy_user_l1(uint64_t l1_pa);
 
 /*
  * ==========================================================================
