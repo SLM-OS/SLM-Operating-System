@@ -51,7 +51,7 @@
 #define GIC_CPU_BASE        0x08010000UL
 
 /* Timer - ARM Generic Timer */
-#define TIMER_IRQ           30              /* PPI (CNTV_EL0) */
+#define TIMER_IRQ           30              /* PPI 14 — NS Phys Timer (CNTP_*_EL0) */
 
 /* CPU configuration */
 #define CPU_MAX             4               /* QEMU default */
@@ -145,7 +145,7 @@
 #define GIC_REDIST_SIZE     0x00200000UL    /* 2 MB (covers all CPUs) */
 
 /* Timer - ARM Generic Timer */
-#define TIMER_IRQ           30              /* PPI 14 (CNTV_EL0) - same as QEMU */
+#define TIMER_IRQ           30              /* PPI 14 — NS Phys Timer (CNTP_*_EL0), same as QEMU */
 
 /* CPU configuration */
 #define CPU_MAX             6               /* 6x Cortex-A78AE */

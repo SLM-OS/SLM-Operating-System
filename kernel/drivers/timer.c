@@ -57,21 +57,9 @@ static inline uint64_t read_cntpct(void)
     return val;
 }
 
-static inline uint64_t read_cntp_ctl(void)
-{
-    uint64_t val;
-    __asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(val));
-    return val;
-}
-
 static inline void write_cntp_ctl(uint64_t val)
 {
     __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"(val));
-}
-
-static inline void write_cntp_cval(uint64_t val)
-{
-    __asm__ volatile("msr cntp_cval_el0, %0" :: "r"(val));
 }
 
 static inline void write_cntp_tval(int64_t val)
