@@ -133,6 +133,7 @@ const shell_cmd_t builtin_commands[] = {
     {"slm",      cmd_slm,      "Small language model (load/list/info/launch/prompt/stats)", true, SHELL_CAT_PROCESS},
     {"tasks",    cmd_tasks,    "List all tasks",                                            false, SHELL_CAT_PROCESS},
 #if !defined(PLATFORM_X86_64)
+    {"userelf",  cmd_userelf,  "Run the embedded EL0 hello ELF (ELF loader follow-up)",     false, SHELL_CAT_PROCESS},
     {"usertest", cmd_usertest, "Run the EL0 smoke task (#697 PR-4)",                        false, SHELL_CAT_PROCESS},
 #endif
 

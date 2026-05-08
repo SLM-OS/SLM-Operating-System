@@ -14,6 +14,7 @@
 #include "arch.h"
 #if !defined(PLATFORM_X86_64)
 #include "vmm.h"
+#include "elf.h"
 #endif
 #include <stddef.h>
 
@@ -570,6 +571,78 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
     task->user_entry = (void (*)(void *))(uintptr_t)entry_va;
     task->user_l1_pa = user_l1_pa;
     task->user_stack_top = USER_STACK_TOP;
+    task->user_stack_phys = (uint64_t)(uintptr_t)user_stack_page;
+    task->user_va_next = USER_MMAP_VA_START;
+
+    return task;
+}
+
+/*
+ * Create a user-mode task from a static ARM64 ELF blob.
+ *
+ * Sibling of task_create_user. Differences:
+ *   - text/rodata/data come from PT_LOAD segments mapped by
+ *     elf_load_user (each page PMM_OWNED), not the linker's
+ *     `.text.user` window.
+ *   - the user stack lives at USER_ELF_STACK_PAGE_VA (just below
+ *     the mmap window) so it cannot collide with multi-page ELF
+ *     segments. user_stack_top mirrors that VA.
+ *   - the entry point is whatever ELF e_entry pointed at, used as
+ *     the ERET target directly (no kernel→user VA translation).
+ */
+struct task *task_create_user_elf(const char *name,
+                                  const void *blob, size_t blob_len,
+                                  uint8_t priority)
+{
+    if (!blob || blob_len == 0) {
+        return NULL;
+    }
+
+    uint64_t user_l1_pa = 0;
+    if (vmm_create_user_l1(&user_l1_pa) != 0) {
+        ERROR("task_create_user_elf: vmm_create_user_l1 failed");
+        return NULL;
+    }
+
+    uint64_t entry_va = 0;
+    int rc = elf_load_user(blob, blob_len, user_l1_pa, &entry_va);
+    if (rc != ELF_OK) {
+        ERROR("task_create_user_elf: elf_load_user failed: %s",
+              elf_strerror(rc));
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+
+    /* Allocate the EL0 stack page and map it RW-user at the ELF
+     * stack VA. PMM_OWNED so vmm_destroy_user_l1 reclaims it
+     * alongside the ELF segments at task teardown. */
+    void *user_stack_page = pmm_alloc_pages(1);
+    if (!user_stack_page) {
+        ERROR("task_create_user_elf: failed to allocate user stack page");
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+    if (vmm_user_map_page(user_l1_pa, USER_ELF_STACK_PAGE_VA,
+                          (uint64_t)(uintptr_t)user_stack_page,
+                          VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED) != 0) {
+        ERROR("task_create_user_elf: failed to map user stack page");
+        pmm_free_pages(user_stack_page, 1);
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+
+    struct task *task = task_create_with_priority(name, user_task_wrapper,
+                                                   NULL, priority);
+    if (!task) {
+        pmm_free_pages(user_stack_page, 1);
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+
+    task->is_user = 1;
+    task->user_entry = (void (*)(void *))(uintptr_t)entry_va;
+    task->user_l1_pa = user_l1_pa;
+    task->user_stack_top = USER_ELF_STACK_TOP;
     task->user_stack_phys = (uint64_t)(uintptr_t)user_stack_page;
     task->user_va_next = USER_MMAP_VA_START;
 

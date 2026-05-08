@@ -61,6 +61,7 @@ int cmd_sleep(int argc, char **argv);
 #if !defined(PLATFORM_X86_64)
 int cmd_usertest(int argc, char **argv);
 int cmd_mmaptest(int argc, char **argv);
+int cmd_userelf(int argc, char **argv);
 #endif
 #if defined(PI5_IRQ_DIAG)
 int cmd_diag(int argc, char **argv);

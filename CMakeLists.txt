@@ -694,6 +694,11 @@ set(KERNEL_SOURCES
     # logs and exits, used by the `usertest` shell command.
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/user_smoke.c>
 
+    # ELF loader for EL0 user-mode tasks. Companion to elf.c which
+    # loads ELFs into kernel space; this variant maps PT_LOAD
+    # segments into a per-task user L1 with the right RWX bits.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/elf_user.c>
+
     # Semihosting (for QEMU test exit)
     kernel/src/semihosting.c
 
@@ -1218,6 +1223,60 @@ set_source_files_properties(
     COMPILE_DEFINITIONS "OPLIB_BLOB_PATH=${OPLIB_BLOB_FINAL}"
     OBJECT_DEPENDS      "${OPLIB_BLOB_FINAL}"
 )
+
+# ============================================================================
+# EL0 hello ELF (user/hello/) — built stand-alone with the ARM64
+# toolchain and embedded into the kernel image via .incbin so the
+# `elftest` shell command can load it without a filesystem.
+# ============================================================================
+#
+# Built only on ARM64 platforms (the EL0 path is not yet wired on
+# x86-64). Uses the same aarch64-none-elf-gcc the kernel uses, but
+# with stand-alone user-binary flags: no kernel includes (just
+# kernel/include/ for syscall.h + user_syscall.h), no PIC, page-
+# aligned segments via -z max-page-size=0x1000 so the loader can
+# map each segment with one vmm_user_map_page call per 4 KB page.
+# objcopy --strip-all keeps the embedded blob small (<10 KB).
+if(NOT PLATFORM STREQUAL "X86_64")
+    set(USER_HELLO_ELF "${CMAKE_BINARY_DIR}/user_hello.elf")
+    set(USER_HELLO_SRC "${CMAKE_SOURCE_DIR}/user/hello/start.S"
+                       "${CMAKE_SOURCE_DIR}/user/hello/main.c")
+    set(USER_HELLO_LD  "${CMAKE_SOURCE_DIR}/user/user.ld")
+
+    # Resolve the ARM64 cross compiler / objcopy. CMake's
+    # CMAKE_C_COMPILER points at this when PLATFORM is an ARM64
+    # variant; we use it directly so the user binary is always built
+    # with the same toolchain version as the kernel (avoids weird
+    # ABI skew between user and kernel ELFs).
+    add_custom_command(
+        OUTPUT  "${USER_HELLO_ELF}"
+        COMMAND ${CMAKE_C_COMPILER}
+                -ffreestanding -nostdlib -static -fno-pic -fno-pie
+                -fno-stack-protector -fno-builtin
+                -O2 -Wall -Wextra -std=c2x
+                -mgeneral-regs-only
+                -I ${CMAKE_SOURCE_DIR}/kernel/include
+                -T ${USER_HELLO_LD}
+                -Wl,-no-pie
+                -Wl,-z,max-page-size=0x1000
+                -Wl,-z,common-page-size=0x1000
+                ${USER_HELLO_SRC}
+                -o "${USER_HELLO_ELF}.unstripped"
+        COMMAND ${CMAKE_OBJCOPY} --strip-all
+                "${USER_HELLO_ELF}.unstripped" "${USER_HELLO_ELF}"
+        DEPENDS ${USER_HELLO_SRC} ${USER_HELLO_LD}
+        COMMENT "Building EL0 hello ELF (${USER_HELLO_ELF})"
+        VERBATIM
+    )
+
+    target_sources(slmos.elf PRIVATE kernel/src/user_hello_embed.S)
+    set_source_files_properties(
+        kernel/src/user_hello_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "USER_HELLO_ELF_PATH=${USER_HELLO_ELF}"
+        OBJECT_DEPENDS      "${USER_HELLO_ELF}"
+    )
+endif()
 
 # ============================================================================
 # User .hef (optional .incbin — Phase 8 real-inference deploy path)

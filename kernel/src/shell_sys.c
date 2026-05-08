@@ -666,25 +666,24 @@ int cmd_sleep(int argc, char *argv[])
 extern void user_smoke_main(void *arg);
 extern void user_mmap_smoke_main(void *arg);
 
-/* Pin a fresh user task to this CPU, dispatch it, and yield-poll
- * until the slot is reaped or TERMINATED — shared between cmd_usertest
- * and cmd_mmaptest. Returns 0 on success (task ran to exit) or -1 on
- * task_create_user failure / poll-loop timeout. */
-static int run_user_smoke(const char *cmd_name, void (*entry)(void *))
+/* Embedded EL0 hello ELF (kernel/src/user_hello_embed.S). */
+extern const uint8_t user_hello_elf_start[];
+extern const uint8_t user_hello_elf_end[];
+
+/* Pin a freshly-created user task to this CPU, dispatch it, and
+ * yield-poll until the slot is reaped or TERMINATED. Shared between
+ * cmd_usertest, cmd_mmaptest, and cmd_userelf; the only difference
+ * between those commands is how the task is constructed (linker
+ * smoke vs ELF blob). Returns 0 on success or -1 on poll timeout. */
+static int run_user_task_until_exit(struct task *t, const char *cmd_name)
 {
-    struct task *t = task_create_user(cmd_name, entry, NULL,
-                                      TASK_PRIORITY_DEFAULT);
-    if (!t) {
-        shell_printf("%s: task_create_user failed\r\n", cmd_name);
-        return -1;
-    }
     task_set_affinity(t, cpu_id());
     uint32_t task_id = t->id;
     scheduler_add_task(t);
 
-    /* Poll until reaped or TERMINATED. 100k yield cap absorbs
-     * cooperative-preempt delays on Pi 5 / Jetson without a
-     * wall-clock check; on QEMU resolves in a few yields. */
+    /* 100k yield cap absorbs cooperative-preempt delays on Pi 5 /
+     * Jetson without a wall-clock check; on QEMU resolves in a few
+     * yields. */
     for (int i = 0; i < 100000; i++) {
         struct task *cur = task_get(task_id);
         if (!cur || cur->id != task_id) {
@@ -704,7 +703,13 @@ int cmd_usertest(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    if (run_user_smoke("usertest", user_smoke_main) != 0) {
+    struct task *t = task_create_user("usertest", user_smoke_main, NULL,
+                                      TASK_PRIORITY_DEFAULT);
+    if (!t) {
+        shell_puts("usertest: task_create_user failed\r\n");
+        return -1;
+    }
+    if (run_user_task_until_exit(t, "usertest") != 0) {
         return -1;
     }
     shell_puts("usertest: ok\r\n");
@@ -715,10 +720,35 @@ int cmd_mmaptest(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    if (run_user_smoke("mmaptest", user_mmap_smoke_main) != 0) {
+    struct task *t = task_create_user("mmaptest", user_mmap_smoke_main, NULL,
+                                      TASK_PRIORITY_DEFAULT);
+    if (!t) {
+        shell_puts("mmaptest: task_create_user failed\r\n");
+        return -1;
+    }
+    if (run_user_task_until_exit(t, "mmaptest") != 0) {
         return -1;
     }
     shell_puts("mmaptest: ok\r\n");
+    return 0;
+}
+
+int cmd_userelf(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    size_t blob_len = (size_t)(user_hello_elf_end - user_hello_elf_start);
+    struct task *t = task_create_user_elf("userelf",
+                                          user_hello_elf_start, blob_len,
+                                          TASK_PRIORITY_DEFAULT);
+    if (!t) {
+        shell_puts("userelf: task_create_user_elf failed\r\n");
+        return -1;
+    }
+    if (run_user_task_until_exit(t, "userelf") != 0) {
+        return -1;
+    }
+    shell_puts("userelf: ok\r\n");
     return 0;
 }
 #endif /* !PLATFORM_X86_64 */
