@@ -458,6 +458,7 @@ set(KERNEL_SOURCES
     kernel/gpu/operator_library.c
     kernel/gpu/oplib_pool.c
     kernel/gpu/operator_dispatch.c
+    kernel/gpu/oplib_dispatch.c
     kernel/src/admin_telemetry.c
     kernel/src/model_engine.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>

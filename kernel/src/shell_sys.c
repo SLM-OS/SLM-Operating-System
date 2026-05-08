@@ -3993,6 +3993,7 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_channel_handoff.h"
 #include "../gpu/nvidia/ga10b_gmmu.h"
 #include "oplib_pool.h"
+#include "oplib_dispatch.h"
 /* cache_clean_range / pmm_alloc_page are already pulled in via the
  * earlier `gpu/gpu.h` and top-level `pmm.h` includes. Don't add
  * `cache.h` here — gpu.h declares cache_clean_range as
@@ -4265,8 +4266,120 @@ int cmd_nvgpu(int argc, char *argv[])
                          (unsigned long)gpu_va, size);
             return 0;
         }
+        if (strcmp(argv[2], "prep-rmsnorm") == 0) {
+            /* #714 A.2 follow-on: prepare a v7-op for RMSNORM
+             * dispatch. Allocates input/gamma/output buffers via
+             * GMMU, builds + populates a cbuf, computes launch
+             * shape — everything except the actual pushbuffer
+             * submit. Prints the prepared dispatch parameters for
+             * inspection.
+             *
+             * Usage: nvgpu oplib prep-rmsnorm <n_rows> <n>
+             *
+             * Hardware verification: stage the operator library
+             * first via `nvgpu oplib stage`, then run this verb.
+             * Output should show non-zero shader_va, cbuf_va, and
+             * the expected grid/block dims.
+             */
+            if (argc < 5) {
+                shell_puts("usage: nvgpu oplib prep-rmsnorm "
+                           "<n_rows> <n>\r\n");
+                return -1;
+            }
+            uint32_t n_rows = (uint32_t)atoi(argv[3]);
+            uint32_t n      = (uint32_t)atoi(argv[4]);
+            if (n_rows == 0 || n == 0) {
+                shell_puts("oplib prep-rmsnorm: n_rows and n must be > 0\r\n");
+                return -1;
+            }
+
+            /* Resolve inst_block_phys: handoff first, FECS fallback. */
+            uint64_t inst_phys = 0;
+            const struct ga10b_channel_handoff *h =
+                ga10b_bringup_handoff();
+            if (h != NULL && h->inst_block_phys != 0) {
+                inst_phys = h->inst_block_phys;
+            } else {
+                inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys == 0) {
+                    shell_puts("oplib prep-rmsnorm: no handoff and "
+                               "FECS_CURRENT_CTX read failed\r\n");
+                    return -1;
+                }
+            }
+
+            /* Allocate input/gamma/output buffers in the channel's
+             * GMMU. RmsNorm consumes input + gamma (both n_rows*n /
+             * n FP16 halves), produces output (n_rows*n halves).
+             * Round each up to a 4 KB page boundary for the GMMU
+             * allocator. */
+            uint32_t in_bytes  = n_rows * n * 2u;
+            uint32_t gam_bytes = n * 2u;
+            uint32_t out_bytes = n_rows * n * 2u;
+            uint32_t in_pages  = (in_bytes  + 4095u) / 4096u;
+            uint32_t gam_pages = (gam_bytes + 4095u) / 4096u;
+            uint32_t out_pages = (out_bytes + 4095u) / 4096u;
+            if (in_pages == 0)  in_pages = 1;
+            if (gam_pages == 0) gam_pages = 1;
+            if (out_pages == 0) out_pages = 1;
+
+            uint64_t in_va = 0, gam_va = 0, out_va = 0;
+            uint64_t in_phys = 0, gam_phys = 0, out_phys = 0;
+            void *in_cpu = NULL, *gam_cpu = NULL, *out_cpu = NULL;
+            int rc = ga10b_gmmu_alloc(inst_phys, in_pages, 0,
+                                       &in_va, &in_cpu, &in_phys);
+            if (rc < 0) {
+                shell_printf("oplib prep-rmsnorm: input alloc rc=%d\r\n", rc);
+                return rc;
+            }
+            rc = ga10b_gmmu_alloc(inst_phys, gam_pages, 0,
+                                   &gam_va, &gam_cpu, &gam_phys);
+            if (rc < 0) {
+                shell_printf("oplib prep-rmsnorm: gamma alloc rc=%d\r\n", rc);
+                return rc;
+            }
+            rc = ga10b_gmmu_alloc(inst_phys, out_pages, 0,
+                                   &out_va, &out_cpu, &out_phys);
+            if (rc < 0) {
+                shell_printf("oplib prep-rmsnorm: output alloc rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("oplib prep-rmsnorm: in=0x%lx gamma=0x%lx out=0x%lx\r\n",
+                         (unsigned long)in_va, (unsigned long)gam_va,
+                         (unsigned long)out_va);
+
+            /* Build args. eps = 1e-6f (Qwen default) — 0x358637BD
+             * is the IEEE 754 bit pattern. */
+            struct operator_dispatch_args args = {
+                .op_kind = SLM_GPU_OP_RMSNORM,
+                .u.rmsnorm = {
+                    .x_gpu_va     = in_va,
+                    .gamma_gpu_va = gam_va,
+                    .out_gpu_va   = out_va,
+                    .n_rows       = n_rows,
+                    .n            = n,
+                    .eps_bits     = 0x358637BDu,
+                },
+            };
+
+            struct slm_oplib_dispatch_prep prep;
+            rc = slm_oplib_prepare_dispatch(inst_phys,
+                                             SLM_GPU_OP_RMSNORM,
+                                             SLM_GPU_TIER_SIMT,
+                                             SLM_GPU_DTYPE_FP16,
+                                             &args, &prep);
+            if (rc < 0) {
+                shell_printf("oplib prep-rmsnorm: prepare rc=%d "
+                             "(did you `nvgpu oplib stage` first?)\r\n", rc);
+                return rc;
+            }
+            shell_printf("oplib prep-rmsnorm: PREPARED — submit not yet "
+                         "wired (#714 follow-on)\r\n");
+            return 0;
+        }
         shell_puts("usage: nvgpu oplib [status | stage [<inst_hex>] | "
-                   "probe <op_kind> <tier> <dtype>]\r\n");
+                   "probe <op_kind> <tier> <dtype> | "
+                   "prep-rmsnorm <n_rows> <n>]\r\n");
         return -1;
     }
 
