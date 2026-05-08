@@ -1168,11 +1168,11 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(RESET) failed (rc=%d)", rc);
         goto fail;
     }
+#ifdef HAILO_WIRE_DEBUG
     /* #682 checkpoint 2: IN ch=2 base register right after RESET RPC.
      * RESET should clear all channel state — if avail!=0 here, RESET
      * is not actually clearing the host-side mirror. */
     hailo_vdma_dump_channel_regs(2, "[682-cp2] post RESET");
-#ifdef HAILO_WIRE_DEBUG
     /* #253 (2026-04-23) ECC bisect: drain D2H mailbox between every
      * step of the load so we can see exactly which RPC triggers the
      * CPU_ECC_FATAL event (memory_bitmap=0x1000). The drain is cheap
@@ -1377,12 +1377,12 @@ static int context_switch_load(struct hailo_model_slot *slot,
         WARN("hailo backend: CHANGE_CONTEXT_SWITCH_STATUS(ENABLED) failed (rc=%d)", rc);
         goto fail;
     }
+#ifdef HAILO_WIRE_DEBUG
     /* #682 checkpoint 3: IN ch=2 base register right after
      * CHANGE_STATUS(ENABLED). If avail becomes non-zero between
      * checkpoints 2 and 3, the ACTIVATION/ENABLED firmware path
      * is programming the host-side base register on our behalf. */
     hailo_vdma_dump_channel_regs(2, "[682-cp3] post ENABLED");
-#ifdef HAILO_WIRE_DEBUG
     uart_printf("[bisect] post CHANGE_STATUS(ENABLED):\r\n");
     hailo_fw_drain_d2h_notifications(2);
 
@@ -1759,11 +1759,13 @@ static int hailo_backend_run(struct inference_device *dev,
     slot->inflight_runs++;
     spin_unlock_irqrestore(&slots_lock, run_flags);
 
+#ifdef HAILO_WIRE_DEBUG
     /* #682 checkpoint 4: IN ch=2 base register at runmodel entry,
      * before any program_buffer or submit work. Pinpoints whether
      * avail=2 already at function entry (load left it) vs gets
      * introduced by code between here and submit_and_wait. */
     hailo_vdma_dump_channel_regs(2, "[682-cp4] runmodel entry");
+#endif
 
     int run_rc;
     #define HAILO_RUN_RETURN(rc_) do { run_rc = (rc_); goto run_release; } while (0)
