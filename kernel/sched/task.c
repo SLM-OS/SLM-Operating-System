@@ -734,8 +734,6 @@ void task_destroy(struct task *task)
     task->user_l1_pa = 0;
     task->user_stack_top = 0;
     task->user_stack_phys = 0;
-    task->user_stack_top = 0;
-    task->user_stack_phys = 0;
 
     /* Bump the slot generation (#139) so any still-cached captures in
      * per-CPU steal deques from the previous life of this slot will

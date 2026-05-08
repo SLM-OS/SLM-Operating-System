@@ -626,6 +626,13 @@ int vmm_user_map_page(uint64_t l1_pa, uint64_t va, uint64_t pa, uint32_t flags)
     uint64_t l2_idx = L2_INDEX(va);
     uint64_t l3_idx = L3_INDEX(va);
 
+    /* Track sub-tables installed by THIS call so a failure on a later
+     * step can roll them back instead of leaving an orphan L2 / L3
+     * for vmm_destroy_user_l1 to clean up at task tear-down. The
+     * fast path (everything pre-existing) leaves both NULL. */
+    void *new_l2_page = NULL;
+    void *new_l3_page = NULL;
+
     /* L1 → L2: install fresh L2 if absent. */
     uint64_t l2_pa;
     uint64_t l1_entry = user_l1[l1_idx];
@@ -633,15 +640,15 @@ int vmm_user_map_page(uint64_t l1_pa, uint64_t va, uint64_t pa, uint32_t flags)
     if (l1_type == PTE_TYPE_TABLE) {
         l2_pa = l1_entry & PTE_ADDR_MASK;
     } else if (l1_type == PTE_TYPE_INVALID) {
-        void *l2_page = pmm_alloc_pages(1);
-        if (!l2_page) {
+        new_l2_page = pmm_alloc_pages(1);
+        if (!new_l2_page) {
             return -1;
         }
         for (size_t i = 0; i < ENTRIES_PER_TABLE; i++) {
-            ((uint64_t *)l2_page)[i] = 0;
+            ((uint64_t *)new_l2_page)[i] = 0;
         }
-        cache_clean_range(l2_page, TABLE_SIZE);
-        l2_pa = (uint64_t)(uintptr_t)l2_page;
+        cache_clean_range(new_l2_page, TABLE_SIZE);
+        l2_pa = (uint64_t)(uintptr_t)new_l2_page;
         user_l1[l1_idx] = make_table_desc(l2_pa);
         cache_clean_range(&user_l1[l1_idx], sizeof(uint64_t));
     } else {
@@ -657,31 +664,47 @@ int vmm_user_map_page(uint64_t l1_pa, uint64_t va, uint64_t pa, uint32_t flags)
     if (l2_type == PTE_TYPE_TABLE) {
         l3_pa = l2_entry & PTE_ADDR_MASK;
     } else if (l2_type == PTE_TYPE_INVALID) {
-        void *l3_page = pmm_alloc_pages(1);
-        if (!l3_page) {
-            return -1;
+        new_l3_page = pmm_alloc_pages(1);
+        if (!new_l3_page) {
+            goto fail;
         }
         for (size_t i = 0; i < ENTRIES_PER_TABLE; i++) {
-            ((uint64_t *)l3_page)[i] = 0;
+            ((uint64_t *)new_l3_page)[i] = 0;
         }
-        cache_clean_range(l3_page, TABLE_SIZE);
-        l3_pa = (uint64_t)(uintptr_t)l3_page;
+        cache_clean_range(new_l3_page, TABLE_SIZE);
+        l3_pa = (uint64_t)(uintptr_t)new_l3_page;
         l2[l2_idx] = make_table_desc(l3_pa);
         cache_clean_range(&l2[l2_idx], sizeof(uint64_t));
     } else {
         /* L2 block (2 MB) — incompatible with 4 KB page mapping. */
-        return -1;
+        goto fail;
     }
 
     /* L3 → page. */
     uint64_t *l3 = (uint64_t *)(uintptr_t)l3_pa;
     if ((l3[l3_idx] & PTE_TYPE_MASK) != PTE_TYPE_INVALID) {
-        return -1;
+        goto fail;
     }
     l3[l3_idx] = make_page_desc(pa, flags);
     cache_clean_range(&l3[l3_idx], sizeof(uint64_t));
 
     return 0;
+
+fail:
+    /* Roll back any sub-tables this call installed. Pre-existing
+     * sub-tables (l1_type/l2_type were TABLE on entry) are left
+     * untouched — the caller's prior mappings inside them stay valid. */
+    if (new_l3_page) {
+        l2[l2_idx] = 0;
+        cache_clean_range(&l2[l2_idx], sizeof(uint64_t));
+        pmm_free_pages(new_l3_page, 1);
+    }
+    if (new_l2_page) {
+        user_l1[l1_idx] = 0;
+        cache_clean_range(&user_l1[l1_idx], sizeof(uint64_t));
+        pmm_free_pages(new_l2_page, 1);
+    }
+    return -1;
 }
 
 void vmm_destroy_user_l1(uint64_t l1_pa)
