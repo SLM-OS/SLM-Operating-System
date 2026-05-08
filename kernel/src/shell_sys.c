@@ -4194,6 +4194,77 @@ int cmd_nvgpu(int argc, char *argv[])
                        "alloc-multi-synth <n_pages>>\r\n");
             return -1;
         }
+        if (strcmp(argv[2], "reuse-synth") == 0) {
+            /* #666 Milestone D: alloc-free-alloc round-trip on a
+             * synthetic inst block. Validates:
+             *   - free's TLB-invalidate doesn't crash the GPU
+             *   - the freed extent goes into the tracker
+             *   - the next alloc with matching n_pages reuses the
+             *     same VA from the tracker (not the bump cursor)
+             *   - the new PTE is written correctly at the reused
+             *     VA (walker reads back the new alloc's phys, not
+             *     stale bytes from the freed alloc)
+             */
+            void *inst = pmm_alloc_page();
+            void *pdb_page = pmm_alloc_page();
+            if (inst == NULL || pdb_page == NULL) {
+                shell_puts("reuse-synth: PMM exhaustion\r\n");
+                return -1;
+            }
+            for (int i = 0; i < 512; i++) {
+                ((volatile uint64_t *)inst)[i] = 0;
+                ((volatile uint64_t *)pdb_page)[i] = 0;
+            }
+            uint64_t inst_phys = (uint64_t)(uintptr_t)inst;
+            uint64_t pdb_phys = (uint64_t)(uintptr_t)pdb_page;
+            volatile uint32_t *iw = (volatile uint32_t *)inst;
+            iw[128] = ((uint32_t)pdb_phys & 0xfffff000u) |
+                      (2u << 1) | (1u << 3);
+            iw[129] = (uint32_t)(pdb_phys >> 32);
+            cache_clean_range(inst, 4096);
+            cache_clean_range(pdb_page, 4096);
+
+            /* First alloc. */
+            uint64_t va_a = 0, phys_a = 0;
+            void *cpu_a = NULL;
+            int rc = ga10b_gmmu_alloc_page(inst_phys, 0, &va_a, &cpu_a, &phys_a);
+            if (rc < 0) { shell_printf("alloc#1 rc=%d\r\n", rc); return rc; }
+            shell_printf("alloc#1 va=0x%lx phys=0x%lx\r\n",
+                         (unsigned long)va_a, (unsigned long)phys_a);
+
+            /* Free it — fires TLB invalidate, returns extent to tracker. */
+            int frc = ga10b_gmmu_free(inst_phys, va_a, 1);
+            if (frc < 0) { shell_printf("free rc=%d\r\n", frc); return frc; }
+            shell_printf("free: ok (tracker_count=%u)\r\n",
+                         (unsigned)ga10b_gmmu_free_tracker_count());
+
+            /* Second alloc — should pull va_a back out of the tracker. */
+            uint64_t va_b = 0, phys_b = 0;
+            void *cpu_b = NULL;
+            rc = ga10b_gmmu_alloc_page(inst_phys, 0, &va_b, &cpu_b, &phys_b);
+            if (rc < 0) { shell_printf("alloc#2 rc=%d\r\n", rc); return rc; }
+            shell_printf("alloc#2 va=0x%lx phys=0x%lx (tracker_count=%u)\r\n",
+                         (unsigned long)va_b, (unsigned long)phys_b,
+                         (unsigned)ga10b_gmmu_free_tracker_count());
+
+            /* Walk the reused VA — leaf must point at alloc#2's phys
+             * (not alloc#1's stale phys). */
+            struct ga10b_gmmu_walk_result wr;
+            ga10b_gmmu_walk(inst_phys, va_b, &wr);
+            if (wr.status != GA10B_GMMU_WALK_OK) {
+                shell_printf("walk after alloc#2: status=%d — FAIL\r\n",
+                             (int)wr.status);
+                return -1;
+            }
+            int va_match = (va_b == va_a) ? 1 : 0;
+            int phys_match = (wr.leaf_phys == phys_b) ? 1 : 0;
+            int phys_distinct = (phys_b != phys_a) ? 1 : 0;
+            shell_printf("VERIFY: va_reused=%s leaf_match=%s phys_distinct=%s\r\n",
+                         va_match ? "YES" : "NO",
+                         phys_match ? "YES" : "NO",
+                         phys_distinct ? "YES" : "NO");
+            return (va_match && phys_match && phys_distinct) ? 0 : -1;
+        }
         if (strcmp(argv[2], "alloc-multi-synth") == 0) {
             /* #666 Milestone C: alloc N contiguous-VA pages on a
              * synthetic inst block, walk a few sample VAs to
@@ -4395,9 +4466,20 @@ int cmd_nvgpu(int argc, char *argv[])
                            "+ `nvgpu channel` first\r\n");
                 return -1;
             }
+            uint64_t inst_phys2 = h->inst_block_phys;
+            if (inst_phys2 == 0) {
+                inst_phys2 = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys2 == 0) {
+                    shell_puts("alloc-page: handoff inst_block_phys=0 "
+                               "and FECS_CURRENT_CTX read failed\r\n");
+                    return -1;
+                }
+                shell_printf("alloc-page: using FECS_CURRENT_CTX inst=0x%lx\r\n",
+                             (unsigned long)inst_phys2);
+            }
             uint64_t gpu_va = 0, phys = 0;
             void *cpu_va = NULL;
-            int rc = ga10b_gmmu_alloc_page(h->inst_block_phys, 0,
+            int rc = ga10b_gmmu_alloc_page(inst_phys2, 0,
                                            &gpu_va, &cpu_va, &phys);
             if (rc < 0) {
                 shell_printf("ga10b_gmmu_alloc_page failed: rc=%d\r\n", rc);
@@ -4414,7 +4496,7 @@ int cmd_nvgpu(int argc, char *argv[])
                          (unsigned)sentinel[0], (unsigned)sentinel[1]);
             /* Re-walk the GPU VA — leaf phys must equal phys we got. */
             struct ga10b_gmmu_walk_result wr;
-            int wrc = ga10b_gmmu_walk(h->inst_block_phys, gpu_va, &wr);
+            int wrc = ga10b_gmmu_walk(inst_phys2, gpu_va, &wr);
             if (wrc != 0) {
                 shell_printf("alloc-page: walker rc=%d\r\n", wrc);
                 return wrc;
@@ -4482,8 +4564,20 @@ int cmd_nvgpu(int argc, char *argv[])
             return -1;
         }
         if (strcmp(argv[2], "pushbuf") == 0) {
+            uint64_t inst_phys = h->inst_block_phys;
+            if (inst_phys == 0) {
+                inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys == 0) {
+                    shell_puts("gmmu pushbuf: handoff inst_block_phys=0 "
+                               "and FECS_CURRENT_CTX read failed\r\n");
+                    return -1;
+                }
+                shell_printf("gmmu pushbuf: handoff inst_block_phys=0; "
+                             "discovered via FECS_CURRENT_CTX = 0x%lx\r\n",
+                             (unsigned long)inst_phys);
+            }
             struct ga10b_gmmu_walk_result wr;
-            int rc = ga10b_gmmu_walk(h->inst_block_phys, h->pushbuf_gpu_va, &wr);
+            int rc = ga10b_gmmu_walk(inst_phys, h->pushbuf_gpu_va, &wr);
             if (rc != 0) {
                 shell_printf("ga10b_gmmu_walk failed: rc=%d\r\n", rc);
                 return rc;
@@ -4530,8 +4624,17 @@ int cmd_nvgpu(int argc, char *argv[])
                 va = (va << 4) | d;
                 s++;
             }
+            uint64_t inst_phys3 = h->inst_block_phys;
+            if (inst_phys3 == 0) {
+                inst_phys3 = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys3 == 0) {
+                    shell_puts("walk: handoff inst_block_phys=0 "
+                               "and FECS_CURRENT_CTX read failed\r\n");
+                    return -1;
+                }
+            }
             struct ga10b_gmmu_walk_result wr;
-            int rc = ga10b_gmmu_walk(h->inst_block_phys, va, &wr);
+            int rc = ga10b_gmmu_walk(inst_phys3, va, &wr);
             if (rc != 0) {
                 shell_printf("ga10b_gmmu_walk failed: rc=%d\r\n", rc);
                 return rc;
@@ -4547,7 +4650,8 @@ int cmd_nvgpu(int argc, char *argv[])
               "channel | submit | submit-compute | launch-kernel | "
               "run-mnist | fecs | gpccs | pmu | run | "
               "gmmu <pushbuf | walk | walk-raw | "
-              "alloc-page | alloc-page-synth | alloc-multi-synth> | "
+              "alloc-page | alloc-page-synth | "
+              "alloc-multi-synth | reuse-synth> | "
               "oplib]\r\n");
     return -1;
 }
