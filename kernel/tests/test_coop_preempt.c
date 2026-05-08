@@ -23,6 +23,7 @@
 #include "../include/sched.h"
 #include "../include/smp.h"
 #include "../include/preempt_point.h"
+#include "../include/task.h"
 #include <stdint.h>
 
 extern void yield(void);
@@ -114,7 +115,6 @@ static void test_timer_handler_count_advances(void)
  * yield() on CPU 0 instead of WFI; see the comment in sched.c for
  * why.
  */
-extern void task_sleep_ms(uint32_t ms);
 static void test_task_sleep_ms_wakes_caller(void)
 {
     uint64_t freq = timer_get_frequency();

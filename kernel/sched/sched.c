@@ -623,16 +623,14 @@ static void idle_task_func(void *arg)
          * scheduler_tick → task_wake_sleepers, which finds CPU 0's
          * sleeper and wakes it.
          *
-         * Fix: on CPU 0, fall through to the post-loop yield()
-         * directly. Secondary CPUs still WFE — they're only wake-
-         * worthy when cross-CPU dispatch SEVs them, which is fine.
-         * The cost is CPU 0 burns power instead of sleeping; for the
-         * capstone OS that's acceptable until/unless real timer IRQs
-         * are restored on Jetson. */
-        if (cpu_id() == 0) {
-            /* No wait — yield() at end of loop drives schedule()
-             * which fires coop_preempt_maybe_tick. */
-        } else {
+         * Fix: on CPU 0, skip the wait entirely and fall through to
+         * the post-loop yield(), which drives schedule() and fires
+         * coop_preempt_maybe_tick. Secondary CPUs still WFE — they're
+         * only wake-worthy when cross-CPU dispatch SEVs them, which
+         * is fine. The cost is CPU 0 burns power instead of sleeping;
+         * for the capstone OS that's acceptable until/unless real
+         * timer IRQs are restored on Jetson. */
+        if (cpu_id() != 0) {
             __asm__ volatile("wfe" ::: "memory");
         }
 #else
