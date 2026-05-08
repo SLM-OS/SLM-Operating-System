@@ -65,6 +65,23 @@
 #define USER_VA_LIMIT       ((uint64_t)USER_L1_LIMIT * L1_BLOCK_SIZE)
 
 /*
+ * #697 PR-4 — fixed user-VA layout for the smoke EL0 task.
+ *
+ * Two 4 KB pages at the bottom of the user window:
+ *   USER_TEXT_VA       — first page, RX (.text.user maps here).
+ *   USER_STACK_PAGE_VA — second page, RW (per-task stack page).
+ *   USER_STACK_TOP     — one past the stack page; SP_EL0 starts here
+ *                        and grows down into USER_STACK_PAGE_VA.
+ *
+ * A future ELF loader will replace these constants with per-task
+ * layout. For the smoke we hard-code the addresses since both pages
+ * are sized to the smoke's needs (one code page, one stack page).
+ */
+#define USER_TEXT_VA        USER_VA_BASE
+#define USER_STACK_PAGE_VA  (USER_VA_BASE + PAGE_SIZE)
+#define USER_STACK_TOP      (USER_STACK_PAGE_VA + PAGE_SIZE)
+
+/*
  * ==========================================================================
  * Page Table Entry Definitions
  * ==========================================================================
@@ -367,6 +384,45 @@ void vmm_destroy_user_l1(uint64_t l1_pa);
  *         Must be 4 KB aligned. Passing 0 is undefined.
  */
 void vmm_user_addrspace_switch(uint64_t l1_pa);
+
+/*
+ * Map a single 4 KB page into a per-task L1 (#697 PR-4).
+ *
+ * Walks the per-task L1 → L2 → L3 chain at `va`, allocating fresh L2
+ * and L3 sub-tables from PMM as needed, then installs an L3 page
+ * descriptor for `pa` with the requested permissions.
+ *
+ * `va` must be in the user window [USER_VA_BASE, USER_VA_LIMIT) and
+ * page-aligned; `pa` must also be page-aligned. Pass `flags` from the
+ * VMM_FLAG_* / VMM_FLAGS_* set — VMM_FLAG_USER controls the AP[1]
+ * (EL0-accessible) bit; without it the entry is kernel-only and the
+ * mapping is useless to a user task.
+ *
+ * Sub-tables created here become owned by the L1 — vmm_destroy_user_l1
+ * frees them when the task is destroyed.
+ *
+ * No TLB invalidation is emitted: the caller is expected to either
+ * (a) populate mappings before the L1 is loaded into TTBR0_EL1 (the
+ * vmm_user_addrspace_switch on schedule() then flushes), or (b) issue
+ * a manual flush after a runtime mapping change. PR-4 takes path (a).
+ *
+ * Returns 0 on success, -1 on validation failure or PMM exhaustion or
+ * if the target slot is already mapped (caller is expected not to
+ * re-map an active VA).
+ */
+int vmm_user_map_page(uint64_t l1_pa, uint64_t va, uint64_t pa, uint32_t flags);
+
+/*
+ * PA of the boot (kernel) L1 table — the L1 that vmm_init populated
+ * at boot, mirrored into every per-task L1 by vmm_create_user_l1.
+ *
+ * Used by schedule() to restore TTBR0_EL1 when switching from a user
+ * task back to a kernel task (#697 PR-4): without the restore, TTBR0
+ * keeps pointing at the user task's L1 even after the task is gone,
+ * and a subsequent task_destroy frees that L1 while it's still the
+ * walker's active root.
+ */
+uint64_t vmm_boot_l1_pa(void);
 
 /*
  * ==========================================================================

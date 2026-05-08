@@ -39,19 +39,40 @@ SECTIONS
      * TEXT SEGMENT (RX) - Code and read-only data
      * ================================================================ */
 
-    /* Code section - starts at RAM base */
+    /* Code section - starts at RAM base.
+     * EXCLUDE_FILE keeps user_smoke.c's .text.user / .rodata.user
+     * out of the main code section so the per-task L1 can map exactly
+     * the .text.user range below with VMM_FLAG_USER (#697 PR-4). The
+     * `.text.*` wildcard would otherwise greedily absorb `.text.user`. */
     .text : {
         __text_start = .;
         KEEP(*(.text.boot))     /* Boot code first */
-        *(.text .text.*)        /* All other code */
+        *(EXCLUDE_FILE(*user_smoke.c.obj) .text)
+        *(EXCLUDE_FILE(*user_smoke.c.obj) .text.*)
         __text_end = .;
     } > RAM :text
 
     /* Read-only data - same segment as code */
     .rodata : {
         __rodata_start = .;
-        *(.rodata .rodata.*)
+        *(EXCLUDE_FILE(*user_smoke.c.obj) .rodata)
+        *(EXCLUDE_FILE(*user_smoke.c.obj) .rodata.*)
         __rodata_end = .;
+    } > RAM :text
+
+    /* User-mode smoke section (#697 PR-4) — page-aligned + page-padded
+     * so the per-task L1 can map exactly this range with VMM_FLAG_USER
+     * without leaking adjacent kernel text/rodata. The `.text.user` and
+     * `.rodata.user` content from user_smoke.c lands here via the
+     * explicit section attributes; everything else from that .obj is
+     * EXCLUDE_FILEd above (in practice user_smoke.c emits nothing else
+     * because every symbol carries the section attribute). */
+    .text.user ALIGN(4096) : {
+        __text_user_start = .;
+        *(.text.user .text.user.*)
+        *(.rodata.user .rodata.user.*)
+        . = ALIGN(4096);
+        __text_user_end = .;
     } > RAM :text
 
     /* ================================================================

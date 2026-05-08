@@ -670,6 +670,10 @@ set(KERNEL_SOURCES
     kernel/src/slm_ffi.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/syscall.c>
 
+    # User-mode smoke (#697 PR-4) — single EL0 entry point that
+    # logs and exits, used by the `usertest` shell command.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/user_smoke.c>
+
     # Semihosting (for QEMU test exit)
     kernel/src/semihosting.c
 

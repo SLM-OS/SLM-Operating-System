@@ -653,6 +653,64 @@ int cmd_sleep(int argc, char *argv[])
     return 0;
 }
 
+#if !defined(PLATFORM_X86_64)
+/* ============================================================================
+ * usertest - Smoke test for #697 EL0 user-mode execution.
+ *
+ * Creates a user task whose entry is `user_smoke_main` (in .text.user),
+ * adds it to the scheduler, and waits up to 1 s for it to terminate.
+ * The user task is expected to print "[USERTEST] hello\n" via SYS_LOG
+ * and exit via SYS_EXIT — proving the EL1 → EL0 → EL1 round-trip on
+ * the per-task TTBR0_EL1 from PR-3 actually works end-to-end.
+ * ============================================================================ */
+extern void user_smoke_main(void *arg);
+
+int cmd_usertest(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    struct task *t = task_create_user("usertest", user_smoke_main, NULL,
+                                      TASK_PRIORITY_DEFAULT);
+    if (!t) {
+        shell_puts("usertest: task_create_user failed\r\n");
+        return -1;
+    }
+    /* Pin to the shell's CPU so yield() in the poll loop below
+     * deterministically dispatches the smoke task. Cross-CPU dispatch
+     * is a separate concern from #697 PR-4. */
+    task_set_affinity(t, cpu_id());
+    uint32_t task_id = t->id;
+    scheduler_add_task(t);
+
+    /* Poll until the smoke task has exited. The scheduler reaps
+     * TERMINATED zombies on the next schedule cycle, so a slot that
+     * has gone away (task_get returns NULL or the id no longer
+     * matches) is a successful end state. TASK_TERMINATED is also a
+     * success state — caught before the auto-reap fires.
+     *
+     * Bound: 100k yields. With the smoke pinned to this CPU and a
+     * single SVC-log + SVC-exit path, this resolves in a few yields
+     * on QEMU and well under a millisecond on Pi 5. The high cap
+     * absorbs cooperative-preempt delays without a wall-clock check. */
+    for (int i = 0; i < 100000; i++) {
+        struct task *cur = task_get(task_id);
+        if (!cur || cur->id != task_id) {
+            shell_puts("usertest: ok\r\n");
+            return 0;
+        }
+        if (cur->state == TASK_TERMINATED) {
+            shell_puts("usertest: ok\r\n");
+            return 0;
+        }
+        yield();
+    }
+
+    shell_puts("usertest: timeout — user task did not exit\r\n");
+    return -1;
+}
+#endif /* !PLATFORM_X86_64 */
+
 /* ============================================================================
  * bench - Performance benchmarking
  *
