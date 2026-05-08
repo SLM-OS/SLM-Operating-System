@@ -44,13 +44,20 @@
       "dtype":   "FP16",
       "sass":    "conv2d_hmma_fp16_shader.sass",
       "comment": "Implicit-GEMM 2D convolution on tensor cores. Reformulates conv as (K_out, C_in·R·S, N_batch·H_out·W_out) GEMM and computes the im2col B-matrix gather in-shader (no DRAM staging). Source: scripts/cuda/conv2d_hmma_fp16.cu (#662/#674)."
+    },
+    {
+      "op_kind": "Q4K_DEQUANT",
+      "tier":    "SIMT",
+      "dtype":   "FP16",
+      "sass":    "q4k_dequant_f16_shader.sass",
+      "comment": "Q4_K → FP16 dequantizer. One CUDA block per 144-byte super-block, 256 threads each materializing one FP16 output. Mirrors runtime/src/inference/quant.rs::dequant_q4k_block bit-for-bit (validated against CPU reference on Jetson sm_87 across 1/32/128 super-block harness). First SLM-shaped entry in the operator library; usable as a standalone weight-materialization step and as a stepping-stone before the fused Q4K_DOT / Q4K_GEMM kernels land. Source: scripts/cuda/q4k_dequant_f16.cu (#540)."
     }
   ],
 
   "future_entries": {
     "comment": "Add these when their kernels land. Documented here so the manifest reads as a roadmap, not a punch-list.",
     "GEMM_GENERIC.HMMA.FP32A_FP16W": "from #661/#676 — gemm_hmma_fp32a_fp16w_shader.sass. Mixed-precision (FP32 activation × FP16 weight) GEMM used by the MNIST FC layer when it has to consume an FP32 pool2 output. Schema gap: today's (op_kind, tier, dtype) triple can't express the activation-vs-weight precision split — needs a schema bump (separate `act_dtype` + `weight_dtype` fields, or a packed dtype-pair encoding) before this can move into `entries`. The MNIST launcher (scripts/gpu-kernel-mnist.c) loads the SASS directly via --shader-dir today, bypassing the operator library, so this is dormant until the schema lands.",
-    "Q4K_DOT.SIMT.Q4K":         "future SLM-on-GPU work",
+    "Q4K_DOT.SIMT.Q4K":         "future SLM-on-GPU work — fused dequantize + matmul, lighter on bandwidth than Q4K_DEQUANT followed by GEMM_GENERIC. Q4K_DEQUANT (above) is the standalone unpacker; Q4K_DOT will inline that unpack into the matmul inner loop.",
     "GEMM_GENERIC.HMMA.BF16":   "tensor-core BF16 if a target model wants it",
     "GEMM_GENERIC.IMMA.INT8":   "future quantized matmul on tensor cores"
   }
