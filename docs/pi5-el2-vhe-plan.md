@@ -1,12 +1,33 @@
 # Pi 5 — EL2 with VHE Refactor Plan
 
-**Status:** Plan stage. Not started.
+**Status:** ✅ **Done (2026-05-08).** All 5 PRs merged on `main`; #683 closed.
 
-**Issue:** [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683) — move SLM-OS to EL2 with VHE on Pi 5 so NS IRQ delivery works.
+**Issue:** [#683](https://github.com/SLM-OS/SLM-Operating-System/issues/683) — move SLM-OS to EL2 with VHE on Pi 5 so NS IRQ delivery works. **Closed as completed.**
 
-**Predecessor:** [#672](https://github.com/SLM-OS/SLM-Operating-System/issues/672) — closed; established that NS-EL1 IRQ delivery on Pi 5 is broken regardless of which timer PPI is selected.
+**Predecessor:** [#672](https://github.com/SLM-OS/SLM-Operating-System/issues/672) — closed; established that NS-EL1 IRQ delivery on Pi 5 is broken regardless of which timer PPI is selected. **Resolved by PR-4 (PPI 26 + EL2 vector).**
 
-**Predecessor:** [#134](https://github.com/SLM-OS/SLM-Operating-System/issues/134) — original "restore Pi 5 hardware timer IRQ delivery" issue.
+**Predecessor:** [#134](https://github.com/SLM-OS/SLM-Operating-System/issues/134) — original "restore Pi 5 hardware timer IRQ delivery" issue. **Resolved by PR-4.**
+
+**Follow-up:** [#697](https://github.com/SLM-OS/SLM-Operating-System/issues/697) — real EL0 user-mode execution (VMM_FLAG_USER, per-task TTBR0, smoke EL0 task). Not in #683 scope; PR-5 was verify-only.
+
+## Merged PRs
+
+| PR | Title | Merge commit |
+|---|---|---|
+| [#684](https://github.com/SLM-OS/SLM-Operating-System/pull/684) | PR-1: close predecessor #672 docs | landed pre-refactor |
+| [#685](https://github.com/SLM-OS/SLM-Operating-System/pull/685) | PR-2: boot at EL2 + VHE on Pi 5 | `8c27da3f` |
+| [#686](https://github.com/SLM-OS/SLM-Operating-System/pull/686) | PR-3: SMP at EL2 (per-CPU EL diagnostic) | `3a9d4e9f` |
+| [#693](https://github.com/SLM-OS/SLM-Operating-System/pull/693) | PR-4: timer on PPI 26 — hardware IRQ delivery at EL2/VHE | `2a48902e` |
+| [#698](https://github.com/SLM-OS/SLM-Operating-System/pull/698) | PR-5: verify EL0 → EL2 SVC vector + regression test | `e46becb3` |
+
+## Verified outcome (pi-5-2, `SECONDARY_PREEMPT=ON`)
+
+- Boot reaches shell at EL2/VHE: `[INFO] Running at EL2 (VHE) on Raspberry Pi 5`.
+- All 4 CPUs come up at EL2h, confirmed by the `cpu` shell column added in PR-3.
+- Timer initialises on PPI 26 with `CNTP_*_EL0` register names (VHE-redirected to `CNTHP_*_EL2`): `[INFO] Timer initialized (IRQ 26, CNTP_*_EL0, not started)`.
+- `irqtest` reports `RESULT: IRQ DELIVERED (delta=1)` and the shell stays responsive — the historical PPI 30 hang at `daifclr` is gone.
+- `diag vec` per-CPU IRQ counter scales at 100 Hz on idle CPU 0 (matches `TIMER_HZ`).
+- `make test` passes default + `SECONDARY_PREEMPT=ON`, including the new PR-5 vector-layout regression test.
 
 ---
 
