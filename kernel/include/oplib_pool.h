@@ -62,4 +62,58 @@ void oplib_pool_status_print(void);
  * the linker-script symbols). */
 size_t oplib_pool_blob_size(void);
 
+/* ============================================================================
+ * GPU-VA staging (#718, A.1.5)
+ * ============================================================================
+ *
+ * The .incbin blob lives in kernel .rodata, which is CPU-readable but not
+ * GPU-readable on Jetson — the GA10B GMMU has its own page tables (the
+ * inherited Linux ones, post-kexec) and only sees the VAs Linux/SLM-OS
+ * maps for it. `oplib_pool_stage_to_gpu()` copies the SASS region into
+ * fresh PMM pages and GMMU-maps them at a dedicated GPU VA range so the
+ * dispatcher (B follow-on, #714) can reference any kernel by
+ * `(g_sass_pool_gpu_va + entry.sass_offset)`.
+ *
+ * Staging is Jetson-only (calls into ga10b_gmmu_alloc, which only exists
+ * on PLATFORM_JETSON_ORIN_NANO). On other platforms the function is a
+ * stub that returns -1 and `slm_oplib_get_sass_gpu_va` always returns
+ * NOT_AVAILABLE.
+ */
+
+/* Stage the SASS region into GPU VA. Allocates PMM pages, copies the
+ * region's bytes, GMMU-maps via `ga10b_gmmu_alloc`, caches the resulting
+ * base GPU VA.
+ *
+ * `inst_block_phys` identifies the GPU channel whose page tables receive
+ * the new mapping. Caller obtains it from a real handoff
+ * (`ga10b_bringup_handoff()->inst_block_phys`) or via FECS_CURRENT_CTX
+ * read-back (`ga10b_gmmu_discover_inst_block_phys()`).
+ *
+ * Idempotent: a second call with the same (or any) inst_block_phys
+ * after a successful first call returns the cached rc without
+ * re-allocating. The staging is per-channel today — if a future use
+ * case rebinds the channel (different inst block), reset state via a
+ * yet-unbuilt `oplib_pool_unstage()` first.
+ *
+ * Returns:
+ *   0 on success (or sass_region_len == 0 stub case — staging is a no-op).
+ *   negative on `ga10b_gmmu_alloc` failure or PMM exhaustion.
+ *   -1 on Jetson-only-platform stub fallback.
+ */
+int oplib_pool_stage_to_gpu(uint64_t inst_block_phys);
+
+/* Look up a SASS kernel's GPU VA by (op_kind, tier, dtype).
+ *
+ * On success returns 0 and *out_gpu_va / *out_size give the GPU virtual
+ * address and byte length of the kernel inside the staged SASS pool.
+ * Returns OPERATOR_LIBRARY_ERR_NOT_FOUND on lookup miss,
+ * OPERATOR_LIBRARY_ERR_NULL on uninitialized handle or unstaged pool.
+ */
+int oplib_pool_get_sass_gpu_va(uint32_t op_kind, uint32_t tier, uint32_t dtype,
+                                uint64_t *out_gpu_va, size_t *out_size);
+
+/* Inspector: GPU VA where the staged SASS region begins, or 0 if not
+ * staged. Used by the status verb. */
+uint64_t oplib_pool_gpu_va_base(void);
+
 #endif /* OPLIB_POOL_H */

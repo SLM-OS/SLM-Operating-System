@@ -4164,7 +4164,97 @@ int cmd_nvgpu(int argc, char *argv[])
             oplib_pool_status_print();
             return 0;
         }
-        shell_puts("usage: nvgpu oplib [status]\r\n");
+        if (strcmp(argv[2], "stage") == 0) {
+            /* Stage the embedded SASS region into GPU VA so the
+             * dispatcher (#714) can fetch instructions through the
+             * inherited channel's GMMU. Uses inst_block_phys from
+             * the loaded handoff if present, else FECS_CURRENT_CTX.
+             *
+             *   nvgpu oplib stage              — auto-discover inst block
+             *   nvgpu oplib stage <inst_hex>   — explicit inst block
+             */
+            uint64_t inst_phys = 0;
+            if (argc >= 4) {
+                const char *s = argv[3];
+                if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                    s += 2;
+                }
+                while (*s) {
+                    uint64_t d;
+                    if (*s >= '0' && *s <= '9') {
+                        d = *s - '0';
+                    } else if (*s >= 'a' && *s <= 'f') {
+                        d = 10 + (*s - 'a');
+                    } else if (*s >= 'A' && *s <= 'F') {
+                        d = 10 + (*s - 'A');
+                    } else {
+                        shell_puts("bad hex inst_phys\r\n");
+                        return -1;
+                    }
+                    inst_phys = (inst_phys << 4) | d;
+                    s++;
+                }
+            } else {
+                const struct ga10b_channel_handoff *h =
+                    ga10b_bringup_handoff();
+                if (h != NULL && h->inst_block_phys != 0) {
+                    inst_phys = h->inst_block_phys;
+                } else {
+                    inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                    if (inst_phys == 0) {
+                        shell_puts("oplib stage: no handoff and "
+                                   "FECS_CURRENT_CTX read failed\r\n");
+                        return -1;
+                    }
+                    shell_printf("oplib stage: discovered inst_block_phys "
+                                 "via FECS = 0x%lx\r\n",
+                                 (unsigned long)inst_phys);
+                }
+            }
+            int rc = oplib_pool_stage_to_gpu(inst_phys);
+            if (rc < 0) {
+                shell_printf("oplib stage: rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("oplib stage: ok, gpu_va_base=0x%lx\r\n",
+                         (unsigned long)oplib_pool_gpu_va_base());
+            return 0;
+        }
+        if (strcmp(argv[2], "probe") == 0) {
+            /* Look up an SASS kernel by (op_kind, tier, dtype) and
+             * print its GPU VA + size. Validates the staged pool
+             * resolves a known triple correctly.
+             *
+             *   nvgpu oplib probe <op_kind> <tier> <dtype>
+             *
+             * Discriminants are decimal ints — see kernel/include/
+             * gpu_handoff.h for the enum values.
+             */
+            if (argc < 6) {
+                shell_puts("usage: nvgpu oplib probe "
+                           "<op_kind> <tier> <dtype>\r\n");
+                return -1;
+            }
+            uint32_t op_kind = (uint32_t)atoi(argv[3]);
+            uint32_t tier    = (uint32_t)atoi(argv[4]);
+            uint32_t dtype   = (uint32_t)atoi(argv[5]);
+            uint64_t gpu_va = 0;
+            size_t   size = 0;
+            int rc = oplib_pool_get_sass_gpu_va(op_kind, tier, dtype,
+                                                 &gpu_va, &size);
+            if (rc != 0) {
+                shell_printf("oplib probe: (%u, %u, %u) rc=%d\r\n",
+                             (unsigned)op_kind, (unsigned)tier,
+                             (unsigned)dtype, rc);
+                return rc;
+            }
+            shell_printf("oplib probe: (%u, %u, %u) gpu_va=0x%lx size=%zu\r\n",
+                         (unsigned)op_kind, (unsigned)tier, (unsigned)dtype,
+                         (unsigned long)gpu_va, size);
+            return 0;
+        }
+        shell_puts("usage: nvgpu oplib [status | stage [<inst_hex>] | "
+                   "probe <op_kind> <tier> <dtype>]\r\n");
         return -1;
     }
 
