@@ -218,29 +218,29 @@ ga10b_qmd_pool_prepare(uint8_t *pool_va,
      * and SHARED_MEMORY_SIZE=2048 for the FP32A×FP16W tensor-core GEMM).
      * v7 builds the QMD per-dispatch from op fields; without these
      * overrides the HMMA shader stalls op[N+1] (observed empirically as
-     * AddBias output staying all-zero for 5 s on Jetson GA10B). The
-     * helper populates `smem_size_bytes`, `slm_size_bytes`, and
-     * `barrier_count` in the v7 op struct; SIMT kernels leave them 0
-     * and the encoder defaults match what `ga10b_qmd_populate` already
-     * wrote, so the override is a no-op for the SIMT path. */
-    if (op->smem_size_bytes != 0u) {
-        ga10b_qmd_set_bits((uint32_t *)slot_va,
-                           GA10B_QMD_SHARED_MEMORY_SIZE_HI,
-                           GA10B_QMD_SHARED_MEMORY_SIZE_LO,
-                           op->smem_size_bytes);
-    }
-    if (op->slm_size_bytes != 0u) {
-        ga10b_qmd_set_bits((uint32_t *)slot_va,
-                           GA10B_QMD_SHADER_LOCAL_MEM_LOW_SIZE_HI,
-                           GA10B_QMD_SHADER_LOCAL_MEM_LOW_SIZE_LO,
-                           op->slm_size_bytes);
-    }
-    if (op->barrier_count != 0u) {
-        ga10b_qmd_set_bits((uint32_t *)slot_va,
-                           GA10B_QMD_BARRIER_COUNT_HI,
-                           GA10B_QMD_BARRIER_COUNT_LO,
-                           op->barrier_count);
-    }
+     * AddBias output staying all-zero for 5 s on Jetson GA10B).
+     *
+     * The v7 op fields are authoritative: write them unconditionally
+     * over whatever populate wrote. SIMT kernels send 0 in all three
+     * fields, which yields the same encoded bits as populate's zero
+     * defaults — but doing the write keeps the v7 path's behavior
+     * decoupled from any future change to the encoder defaults. The
+     * SLM field carries up to 24 bits (LOW half, ~16 MB ceiling); the
+     * HIGH half stays at populate's zero default since `slm_size_bytes`
+     * cannot exceed 32 bits and no realistic kernel approaches that. */
+    uint32_t *qmd = (uint32_t *)slot_va;
+    ga10b_qmd_set_bits(qmd,
+                       GA10B_QMD_SHARED_MEMORY_SIZE_HI,
+                       GA10B_QMD_SHARED_MEMORY_SIZE_LO,
+                       op->smem_size_bytes);
+    ga10b_qmd_set_bits(qmd,
+                       GA10B_QMD_SHADER_LOCAL_MEM_LOW_SIZE_HI,
+                       GA10B_QMD_SHADER_LOCAL_MEM_LOW_SIZE_LO,
+                       op->slm_size_bytes);
+    ga10b_qmd_set_bits(qmd,
+                       GA10B_QMD_BARRIER_COUNT_HI,
+                       GA10B_QMD_BARRIER_COUNT_LO,
+                       op->barrier_count);
 
     *slot_inout = (slot + 1u) % pool_n_slots;
 
