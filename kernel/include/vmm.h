@@ -340,6 +340,35 @@ int vmm_create_user_l1(uint64_t *out_pa);
 void vmm_destroy_user_l1(uint64_t l1_pa);
 
 /*
+ * Switch the EL0 address space (TTBR0_EL1) to a per-task L1 table
+ * (#697 PR-3).
+ *
+ * Writes l1_pa into TTBR0_EL1 and invalidates the TLB so subsequent
+ * fetches/loads use the new mappings. Safe to call when l1_pa is the
+ * same as the current TTBR0 (still emits a barrier sequence; harmless
+ * extra cost, no correctness impact).
+ *
+ * Kernel mappings: every per-task L1 mirrors the boot L1's kernel
+ * entries (vmm_create_user_l1 contract), so the kernel's own
+ * translations at low VA remain valid through the swap. The TLB
+ * flush is full (`tlbi vmalle1is`) for simplicity — kernel-region
+ * translations re-walk to the same PA via the mirrored L1, so the
+ * extra cost is just the second walk, not a correctness issue.
+ *
+ * Concurrency: TTBR0_EL1 is per-CPU, so no cross-CPU race on the
+ * register itself. `tlbi vmalle1is` broadcasts to all CPUs in the
+ * inner-shareable domain — the broadcast invalidates other CPUs'
+ * TLBs for THIS CPU's TTBR0_EL1, which is harmless (entries from
+ * the prior TTBR0 are no longer reachable). The caller is expected
+ * to hold IRQs disabled across this + the immediately-following
+ * switch_to (today: scheduler holds rq_lock_irqsave through both).
+ *
+ * @l1_pa: PA of the per-task L1 table (from vmm_create_user_l1).
+ *         Must be 4 KB aligned. Passing 0 is undefined.
+ */
+void vmm_user_addrspace_switch(uint64_t l1_pa);
+
+/*
  * ==========================================================================
  * TLB Shootdown API
  * ==========================================================================

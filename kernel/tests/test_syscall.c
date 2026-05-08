@@ -16,6 +16,7 @@
 #include "syscall.h"
 #include "task.h"
 #include "string.h"
+#include "pmm.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -322,7 +323,8 @@ static void test_syscall_touch_block_invalid_handle(void)
  * ============================================================================ */
 
 #if !defined(PLATFORM_X86_64)
-/* Test: task_create_user sets is_user flag */
+/* Test: task_create_user sets is_user flag and allocates a per-task L1
+ * (#697 PR-3 — user_l1_pa is populated at create time, freed at destroy). */
 static void test_task_create_user_sets_flag(void)
 {
     /* Create a dummy user task (it won't actually run at EL0) */
@@ -332,9 +334,51 @@ static void test_task_create_user_sets_flag(void)
     TEST_ASSERT_EQUAL_UINT8(1, t->is_user);
     TEST_ASSERT_NOT_NULL((void *)(uintptr_t)t->user_entry);
 
+    /* PR-3: user_l1_pa is non-zero and page-aligned. */
+    TEST_ASSERT_TRUE(t->user_l1_pa != 0);
+    TEST_ASSERT_EQUAL_UINT64(0, t->user_l1_pa & 0xFFF);
+
     /* Clean up — mark as terminated so it doesn't run */
     t->state = TASK_TERMINATED;
     task_destroy(t);
+}
+
+/* Test (#697 PR-3): a kernel-mode task (created via task_create) leaves
+ * user_l1_pa == 0. The schedule() TTBR0-swap path keys off this — kernel
+ * tasks must not trigger an address-space switch. */
+static void test_task_create_kernel_leaves_user_l1_zero(void)
+{
+    extern void task_exit(void);
+    struct task *t = task_create("test_kernel_l1", (task_entry_t)task_exit, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT8(0, t->is_user);
+    TEST_ASSERT_EQUAL_UINT64(0, t->user_l1_pa);
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/* Test (#697 PR-3): task_destroy returns the per-task L1 page to PMM.
+ * Asserts the buddy free count after destroy is at least the count
+ * before create — same shape as test_create_destroy_user_l1_no_leak in
+ * test_vmm.c, but exercising the lifecycle end-to-end through
+ * task_create_user / task_destroy rather than the raw vmm helpers. */
+static void test_task_destroy_frees_user_l1(void)
+{
+    extern void task_exit(void);
+    struct pmm_stats before, after;
+    pmm_get_stats(&before);
+
+    struct task *t = task_create_user("destroy_l1", (task_entry_t)task_exit, NULL, 4);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_TRUE(t->user_l1_pa != 0);
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+
+    pmm_get_stats(&after);
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "task_destroy leaked the per-task L1 page");
 }
 #endif
 
@@ -420,6 +464,8 @@ int test_suite_syscall(void)
 #if !defined(PLATFORM_X86_64)
     /* User task creation */
     RUN_TEST(test_task_create_user_sets_flag);
+    RUN_TEST(test_task_create_kernel_leaves_user_l1_zero);
+    RUN_TEST(test_task_destroy_frees_user_l1);
 
     /* #683 PR-5: vector layout for EL0 → EL2 SVC */
     RUN_TEST(test_lower_el_sync_vector_dispatches_to_el0_sync);

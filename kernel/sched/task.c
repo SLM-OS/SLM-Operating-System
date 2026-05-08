@@ -12,6 +12,9 @@
 #include "cache.h"
 #include "ncmem.h"
 #include "arch.h"
+#if !defined(PLATFORM_X86_64)
+#include "vmm.h"
+#endif
 #include <stddef.h>
 
 /* Task table - NC on Pi 5, BSS fallback otherwise */
@@ -463,14 +466,30 @@ static void user_task_wrapper(void *arg)
 struct task *task_create_user(const char *name, task_entry_t user_entry,
                               void *arg, uint8_t priority)
 {
+    /* Allocate the per-task L1 page table BEFORE the task slot. If the
+     * allocation fails we never publish a half-initialized task; if the
+     * task allocation fails we tear the L1 back down on the same path.
+     * vmm_create_user_l1 mirrors the boot L1's kernel entries (L1[0..255])
+     * and zeros the user window (L1[256..511]); subsequent user mappings
+     * land in this L1 without touching the kernel's. */
+    uint64_t user_l1_pa = 0;
+    if (vmm_create_user_l1(&user_l1_pa) != 0) {
+        ERROR("task_create_user: vmm_create_user_l1 failed");
+        return NULL;
+    }
+
     /* Create a kernel task that runs the user_task_wrapper */
     struct task *task = task_create_with_priority(name, user_task_wrapper,
                                                    arg, priority);
-    if (!task) return NULL;
+    if (!task) {
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
 
-    /* Mark as user-mode and store the real EL0 entry point */
+    /* Mark as user-mode and store the real EL0 entry point + per-task L1 */
     task->is_user = 1;
     task->user_entry = user_entry;
+    task->user_l1_pa = user_l1_pa;
 
     return task;
 }
@@ -623,6 +642,7 @@ void task_destroy(struct task *task)
     str_copy(task_name, task->name, TASK_NAME_LEN);
     task_cleanup_t cleanup = task->cleanup;
     void *cleanup_arg = task->cleanup_arg;
+    uint64_t user_l1_pa = task->user_l1_pa;
 
     /* Clear task slot (marks as free: id == 0) */
     task->id = 0;
@@ -631,6 +651,9 @@ void task_destroy(struct task *task)
     task->stack_top = NULL;
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
+    task->is_user = 0;
+    task->user_entry = NULL;
+    task->user_l1_pa = 0;
 
     /* Bump the slot generation (#139) so any still-cached captures in
      * per-CPU steal deques from the previous life of this slot will
@@ -663,6 +686,19 @@ void task_destroy(struct task *task)
         size_t stack_pages = STACK_SIZE / 4096;
         pmm_free_pages(stack, stack_pages);
     }
+
+#if !defined(PLATFORM_X86_64)
+    /* Free the per-task L1 + any user-region L2/L3 sub-tables. The cleanup
+     * callback above is responsible for releasing user backing pages
+     * (PMM-allocated frames mapped into the user window) before we get
+     * here — vmm_destroy_user_l1 only walks page-table memory, not the
+     * leaf frames. */
+    if (user_l1_pa) {
+        vmm_destroy_user_l1(user_l1_pa);
+    }
+#else
+    (void)user_l1_pa;
+#endif
 
     /* Note: DEBUG_PRINT removed here to avoid output interleaving issues
      * during test runs with concurrent task destruction across multiple CPUs.
