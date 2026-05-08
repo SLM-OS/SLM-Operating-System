@@ -179,6 +179,19 @@ void ga10b_qmd_populate(uint32_t *qmd,
     ga10b_qmd_set_bits(qmd,
                        GA10B_QMD_CBUF_VALID_BASE + cbuf_idx,
                        GA10B_QMD_CBUF_VALID_BASE + cbuf_idx, 1u);
+    /* Force SKED to re-fetch cbuf[0] bytes from DRAM on every
+     * dispatch. Without this, when SLM-OS reuses a single cbuf
+     * page across consecutive dispatches (the
+     * `slm_oplib_dispatch` cbuf-pool path), SKED's cached cbuf
+     * bytes from the prior launch can starve the new launch's
+     * SM stage init — observed empirically as "first dispatch
+     * passes, second hangs" with PBDMA consuming both pushbuf
+     * entries but the trailing semaphore never firing. NVK sets
+     * this bit on every QMD via `qmd_impl_set_cbuf!(NONE,
+     * SHIFTED4)` for the same reason. */
+    ga10b_qmd_set_bits(qmd,
+                       GA10B_QMD_CBUF_INVALIDATE_BASE + cbuf_idx * 64u,
+                       GA10B_QMD_CBUF_INVALIDATE_BASE + cbuf_idx * 64u, 1u);
 }
 
 struct ga10b_qmd_pool_slot
