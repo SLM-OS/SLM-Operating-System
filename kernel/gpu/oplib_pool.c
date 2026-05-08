@@ -299,6 +299,19 @@ int oplib_pool_get_sass_gpu_va(uint32_t op_kind, uint32_t tier, uint32_t dtype,
     if (rc != 0) {
         return rc;
     }
+    /* Defensive bound check: the parser guarantees `sass` lies inside
+     * `[sass_region, sass_region + sass_region_len)` and `size`
+     * doesn't run past the end. But a corrupted blob (e.g. one that
+     * passed the outer-header checksum but had an entry table tampered
+     * with after parsing) could produce out-of-range pointers that
+     * yield wild GPU VAs. Re-check here so the dispatcher never sees
+     * a VA outside the staged pool. */
+    if (sass < g_handle.sass_region ||
+        size > g_handle.sass_region_len ||
+        (size_t)(sass - g_handle.sass_region) >
+            g_handle.sass_region_len - size) {
+        return OPERATOR_LIBRARY_ERR_LAYOUT;
+    }
     /* Translate CPU-side pointer into the embedded blob's SASS region
      * to GPU VA inside the staged pool. */
     size_t offset = (size_t)(sass - g_handle.sass_region);
