@@ -250,7 +250,9 @@ write through the canary region.
 
 The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry. `context.S` saves this masked DAIF into idle's context. On resume, the restored DAIF keeps IRQ masked. If the unmask is only at function entry, idle would loop forever in `wfi` with IRQ disabled.
 
-**Pi 5/Jetson platform split:** CPU 0's idle task does `daifclr` + `wfi` (timer-driven preemption). Secondary CPUs use `wfe` only (cooperative via SEV) because timer IRQs on secondary CPUs cause an exception handler hang (under investigation). This means `pit_ticks` only advances when CPU 0 is idle.
+**Pi 5 platform split:** CPU 0's idle task does `daifclr` + `wfi` (timer-driven preemption). Secondary CPUs use `wfe` only (cooperative via SEV) because timer IRQs on secondary CPUs cause an exception handler hang (under investigation). This means `pit_ticks` only advances when CPU 0 is idle.
+
+**Jetson platform split:** CPU 0's idle task does **NOT** WFI — it falls through directly to `yield()`. This is because hardware timer IRQs do not deliver to EL1/EL2 on Jetson (CCPLEX is non-secure, GIC group/route owned by EL3 firmware — see "ARM64 Hardware Timer IRQs" below), so a CPU 0 in WFI would never wake. The bug surfaces when the only ready task on CPU 0 (e.g. the serial-console shell, which is pinned to CPU 0 in `shell_start`) calls `task_sleep_ms`: shell blocks, idle takes over, idle WFIs, deadlock. Reproducer: `lua-admin -e slm.sleep(500)` on serial after a fresh `slmos-kexec`. Telnet "fixes" it because lwIP/`net_pump` activity yields on a secondary CPU and that yield runs `coop_preempt_maybe_tick → scheduler_tick → task_wake_sleepers`, which finds CPU 0's sleeper and wakes it. The fix: CPU 0 idle on Jetson spins through `yield()` instead of WFI'ing, accepting CPU burn for correctness. Secondary CPUs still WFE — they're only wake-worthy when cross-CPU dispatch SEVs them, which is fine. See `idle_task_func` in `kernel/sched/sched.c`.
 
 ---
 

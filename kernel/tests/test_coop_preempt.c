@@ -99,6 +99,44 @@ static void test_timer_handler_count_advances(void)
 }
 
 /*
+ * task_sleep_ms must wake the caller within a reasonable time bound.
+ *
+ * Direct contract test for the primitive used by `slm.sleep` (Lua
+ * FFI), `sleep_ms` (kernel helper), and `task_sleep_ms` callers
+ * throughout the kernel. Catches regressions where the wake path is
+ * broken — task_wake_sleepers stops firing, scheduler_tick stops
+ * calling it, COOP_PREEMPT is disengaged, etc.
+ *
+ * Does NOT reproduce the Jetson-specific idle-WFI deadlock (that
+ * needs real hardware where timer IRQs don't deliver to EL2), but
+ * does catch any wake-path breakage that affects QEMU. The Jetson
+ * idle path was changed in `idle_task_func` to fall through to
+ * yield() on CPU 0 instead of WFI; see the comment in sched.c for
+ * why.
+ */
+extern void task_sleep_ms(uint32_t ms);
+static void test_task_sleep_ms_wakes_caller(void)
+{
+    uint64_t freq = timer_get_frequency();
+    TEST_ASSERT_MESSAGE(freq > 0, "timer_get_frequency returned 0");
+
+    uint64_t start = timer_get_count();
+    task_sleep_ms(50);
+    uint64_t elapsed = timer_get_count() - start;
+    uint64_t elapsed_ms = (elapsed * 1000ull) / freq;
+
+    TEST_ASSERT_MESSAGE(elapsed_ms >= 40,
+        "task_sleep_ms returned too early — "
+        "deadline math or sleep-queue scan may be broken");
+    /* Generous upper bound — the test only fails if sleep is
+     * genuinely wedged. A passing test here on QEMU does NOT prove
+     * the fix for the Jetson idle-WFI deadlock; that requires
+     * hardware verification. */
+    TEST_ASSERT_MESSAGE(elapsed_ms <= 1000,
+        "task_sleep_ms blocked >1s for a 50ms sleep — wake path broken");
+}
+
+/*
  * CNTPCT_EL0 sanity — should monotonically advance regardless of any
  * scheduler state. Guards against regressions that clobber the
  * read_cntpct helper.
@@ -195,6 +233,7 @@ int test_suite_coop_preempt(void)
     RUN_TEST(test_cntpct_monotonic);
     RUN_TEST(test_pit_ticks_advances_over_time);
     RUN_TEST(test_timer_handler_count_advances);
+    RUN_TEST(test_task_sleep_ms_wakes_caller);
     RUN_TEST(test_slm_preempt_point_callable);
 #if defined(COOP_PREEMPT)
     RUN_TEST(test_slm_preempt_point_drives_schedule);
