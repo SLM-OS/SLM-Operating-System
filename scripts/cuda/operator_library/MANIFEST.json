@@ -51,6 +51,13 @@
       "dtype":   "FP16",
       "sass":    "q4k_dequant_f16_shader.sass",
       "comment": "Q4_K → FP16 dequantizer. One CUDA block per 144-byte super-block, 256 threads each materializing one FP16 output. Mirrors runtime/src/inference/quant.rs::dequant_q4k_block bit-for-bit (validated against CPU reference on Jetson sm_87 across 1/32/128 super-block harness). First SLM-shaped entry in the operator library; usable as a standalone weight-materialization step and as a stepping-stone before the fused Q4K_DOT / Q4K_GEMM kernels land. Source: scripts/cuda/q4k_dequant_f16.cu (#540)."
+    },
+    {
+      "op_kind": "RMSNORM",
+      "tier":    "SIMT",
+      "dtype":   "FP16",
+      "sass":    "rmsnorm_f16_shader.sass",
+      "comment": "Per-row root-mean-square layer norm in FP16 with FP32 accumulator. One CUDA block per row, 256 threads per block — strided sum-of-squares + tree reduction → rsqrtf → strided write of x * rms_inv * gamma. Mirrors runtime/src/inference/ops_transformer.rs::rmsnorm; matches the CPU reference within 2 ULPs across Qwen2.5-1.5B (1×1536, 16×1536), Llama-2 (1×4096), and a non-multiple-of-256 tail (1×768). Source: scripts/cuda/rmsnorm_f16.cu (#540)."
     }
   ],
 
