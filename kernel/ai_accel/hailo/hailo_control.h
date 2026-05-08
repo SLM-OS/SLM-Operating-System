@@ -755,6 +755,18 @@ int hailo_control_run_bist_test(bool     is_top_test,
 int hailo_control_arm_irq_masks(void);
 
 /*
+ * #682 hypothesis-1 diagnostic. Reads back the four interrupt-state
+ * registers (IMASK_HOST, ISTATUS_HOST, BCS_SOURCE_INTERRUPT_PER_CHANNEL,
+ * BCS_DESTINATION_INTERRUPT_PER_CHANNEL) and prints them with the
+ * supplied label. Used to verify whether the per-channel SRC/DST IRQ
+ * enable bits stay set across the load + run sequence, or whether
+ * fw / a CPU_ECC event is clearing them on us. Expensive enough not
+ * to leave on permanently, but no compile-time gate — call it
+ * sparingly from tracepoint sites under HAILO_WIRE_DEBUG.
+ */
+void hailo_control_dump_irq_state(const char *label);
+
+/*
  * Pre-boot MSI registration. Linux's hailo_pcie_enable_interrupts
  * (called BEFORE load_firmware) does pci_enable_msi + request_irq
  * so MSI is configured by the time fw boots. SLM-OS previously only

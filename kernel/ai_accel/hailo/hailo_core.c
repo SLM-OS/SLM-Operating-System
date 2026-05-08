@@ -733,6 +733,11 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
     INFO("hailo: firmware %u.%u rev=0x%08x booted",
          hdr.firmware_major, hdr.firmware_minor, hdr.firmware_revision);
 
+    /* #682 hypothesis-1 diagnostic: confirm the per-channel IRQ enable
+     * bits are still 0xFFFFFFFF immediately after fw boots and arm_irq_masks
+     * has run. Baseline read-back. */
+    hailo_control_dump_irq_state("post-boot-arm");
+
 #ifdef HAILO_D3HOT_AT_BOOT
     /* Phase 8 #253 (2026-04-25): replicate Linux hailo_pcie's post-boot
      * D0→D3hot→D0 round-trip. Linux puts the device into deep idle right
