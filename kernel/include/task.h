@@ -220,6 +220,13 @@ struct task {
      * a prior munmap. Zero for kernel-mode tasks. */
     uint64_t user_va_next;
 
+    /* ASID for the per-task TTBR0 (16-bit, set by vmm_alloc_asid in
+     * task_create_user / task_create_user_elf). Composed into TTBR0_EL1
+     * on schedule so the hardware can disambiguate this task's user
+     * PTEs from other tasks' without a full TLB flush at swap time.
+     * Zero for kernel-mode tasks (kernel ASID is reserved). */
+    uint16_t user_asid;
+
     /* Slot generation counter for work-stealing ABA avoidance (#139).
      *
      * Bumped by task_destroy each time this task_table slot is freed,

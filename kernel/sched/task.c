@@ -264,6 +264,7 @@ struct task *task_alloc(const char *name, uint8_t priority)
     task->user_stack_top = 0;
     task->user_stack_phys = 0;
     task->user_va_next = 0;
+    task->user_asid = 0;
 
     DEBUG_PRINT("Allocated task '%s' (id=%u, priority=%u)",
                 task->name, task->id, task->priority);
@@ -393,6 +394,7 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->user_stack_top = 0;
     task->user_stack_phys = 0;
     task->user_va_next = 0;
+    task->user_asid = 0;
 
     /* Clean the context struct to PoC so a secondary CPU can read it
      * during switch_to(). Without SMPEN, task_create's writes to
@@ -495,6 +497,13 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
         return NULL;
     }
 
+    uint16_t user_asid = vmm_alloc_asid();
+    if (!user_asid) {
+        ERROR("task_create_user: ASID pool exhausted");
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+
     /* Map every 4 KB page of .text.user into the per-task L1 at
      * USER_TEXT_VA, RX user. Multiple user tasks share the same backing
      * pages (the section is read-only and execute-only at EL0), so no
@@ -507,6 +516,7 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
         ERROR("task_create_user: .text.user is not page-aligned/sized "
               "(start=0x%lx, size=0x%zx)", text_user_kva, text_user_bytes);
         vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
         return NULL;
     }
     for (size_t off = 0; off < text_user_bytes; off += PAGE_SIZE) {
@@ -517,6 +527,7 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
             ERROR("task_create_user: failed to map .text.user page "
                   "VA=0x%lx PA=0x%lx", va, pa);
             vmm_destroy_user_l1(user_l1_pa);
+            vmm_free_asid(user_asid);
             return NULL;
         }
     }
@@ -529,6 +540,7 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
     if (!user_stack_page) {
         ERROR("task_create_user: failed to allocate user stack page");
         vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
         return NULL;
     }
     if (vmm_user_map_page(user_l1_pa, USER_STACK_PAGE_VA,
@@ -537,6 +549,7 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
         ERROR("task_create_user: failed to map user stack page");
         pmm_free_pages(user_stack_page, 1);
         vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
         return NULL;
     }
 
@@ -560,6 +573,7 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
     if (!task) {
         pmm_free_pages(user_stack_page, 1);
         vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
         return NULL;
     }
 
@@ -573,6 +587,7 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
     task->user_stack_top = USER_STACK_TOP;
     task->user_stack_phys = (uint64_t)(uintptr_t)user_stack_page;
     task->user_va_next = USER_MMAP_VA_START;
+    task->user_asid = user_asid;
 
     return task;
 }
@@ -604,12 +619,20 @@ struct task *task_create_user_elf(const char *name,
         return NULL;
     }
 
+    uint16_t user_asid = vmm_alloc_asid();
+    if (!user_asid) {
+        ERROR("task_create_user_elf: ASID pool exhausted");
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+
     uint64_t entry_va = 0;
     int rc = elf_load_user(blob, blob_len, user_l1_pa, &entry_va);
     if (rc != ELF_OK) {
         ERROR("task_create_user_elf: elf_load_user failed: %s",
               elf_strerror(rc));
         vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
         return NULL;
     }
 
@@ -620,6 +643,7 @@ struct task *task_create_user_elf(const char *name,
     if (!user_stack_page) {
         ERROR("task_create_user_elf: failed to allocate user stack page");
         vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
         return NULL;
     }
     if (vmm_user_map_page(user_l1_pa, USER_ELF_STACK_PAGE_VA,
@@ -628,6 +652,7 @@ struct task *task_create_user_elf(const char *name,
         ERROR("task_create_user_elf: failed to map user stack page");
         pmm_free_pages(user_stack_page, 1);
         vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
         return NULL;
     }
 
@@ -636,6 +661,7 @@ struct task *task_create_user_elf(const char *name,
     if (!task) {
         pmm_free_pages(user_stack_page, 1);
         vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
         return NULL;
     }
 
@@ -645,6 +671,7 @@ struct task *task_create_user_elf(const char *name,
     task->user_stack_top = USER_ELF_STACK_TOP;
     task->user_stack_phys = (uint64_t)(uintptr_t)user_stack_page;
     task->user_va_next = USER_MMAP_VA_START;
+    task->user_asid = user_asid;
 
     return task;
 }
@@ -799,6 +826,7 @@ void task_destroy(struct task *task)
     void *cleanup_arg = task->cleanup_arg;
     uint64_t user_l1_pa = task->user_l1_pa;
     uint64_t user_stack_phys = task->user_stack_phys;
+    uint16_t user_asid = task->user_asid;
 
     /* Clear task slot (marks as free: id == 0) */
     task->id = 0;
@@ -813,6 +841,7 @@ void task_destroy(struct task *task)
     task->user_stack_top = 0;
     task->user_stack_phys = 0;
     task->user_va_next = 0;
+    task->user_asid = 0;
 
     /* Bump the slot generation (#139) so any still-cached captures in
      * per-CPU steal deques from the previous life of this slot will
@@ -854,6 +883,14 @@ void task_destroy(struct task *task)
      * image PA, not PMM-owned) are left alone. */
     if (user_l1_pa) {
         vmm_destroy_user_l1(user_l1_pa);
+    }
+    /* Free the ASID after destroying the L1 — vmm_destroy_user_l1
+     * doesn't touch TTBR0 (it just walks the L1 tree freeing pages),
+     * so any other CPU that might still be running this task is the
+     * scheduler's concern, not ours. The ASID-recycle TLB flush
+     * happens at vmm_alloc_asid time when the slot is reused. */
+    if (user_asid) {
+        vmm_free_asid(user_asid);
     }
     (void)user_stack_phys;  /* now reclaimed by vmm_destroy_user_l1 */
 #else

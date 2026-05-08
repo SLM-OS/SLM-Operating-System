@@ -303,6 +303,13 @@ static uint64_t make_page_desc(uint64_t pa, uint32_t flags)
         desc |= PTE_SW_PMM_OWNED;
     }
 
+    /* User pages are non-global (nG=1), so the hardware tags them with
+     * the active ASID at fill-time and a TTBR0 swap to a different
+     * ASID doesn't see them. Kernel pages stay global (nG=0). */
+    if (flags & VMM_FLAG_USER) {
+        desc |= PTE_NG;
+    }
+
     return desc;
 }
 
@@ -578,32 +585,134 @@ int vmm_create_user_l1(uint64_t *out_pa)
     return 0;
 }
 
-void vmm_user_addrspace_switch(uint64_t l1_pa)
+void vmm_user_addrspace_switch(uint64_t l1_pa, uint16_t asid)
 {
 #if !defined(PLATFORM_X86_64)
-    /* Sequence per ARM ARM D8.7.2 / D8.13.4:
-     *   1. msr ttbr0_el1: write the new translation table base.
-     *   2. dsb ishst: ensure the msr is observed before the tlbi.
-     *   3. tlbi vmalle1is: broadcast invalidate all TLB entries (the
-     *      "is" suffix broadcasts to inner-shareable CPUs; SLM-OS
-     *      doesn't use ASID tagging today, so vmalle1 is the right
-     *      scope — invalidates everything mapped via either TTBR).
-     *   4. dsb ish: wait for the tlbi broadcast to complete.
-     *   5. isb: ensure subsequent instruction fetches use the new
-     *      translations rather than speculatively-prefetched stale
-     *      ones from the old TTBR0. */
+    /* TTBR0_EL1 layout with TCR.AS=1 (16-bit ASIDs, set in
+     * TCR_EL1_VALUE):
+     *   bits [63:48] = ASID
+     *   bits [47:1]  = base address
+     *
+     * No TLB invalidate. User PTEs carry nG=1 so the hardware tags
+     * them with the current ASID at fill time; entries from a
+     * different ASID can co-exist in the TLB without aliasing this
+     * one. Kernel PTEs are global (nG=0) and apply across all ASIDs.
+     * Stale ASID-tagged entries are flushed at vmm_alloc_asid time
+     * if/when an ASID slot is recycled. */
+    uint64_t ttbr0 = ((uint64_t)asid << 48) | (l1_pa & 0x0000FFFFFFFFFFFFUL);
     __asm__ volatile(
         "msr ttbr0_el1, %0\n"
-        "dsb ishst\n"
-        "tlbi vmalle1is\n"
-        "dsb ish\n"
         "isb\n"
-        :: "r"(l1_pa)
+        :: "r"(ttbr0)
         : "memory");
 #else
     (void)l1_pa;
+    (void)asid;
 #endif
 }
+
+/* ============================================================================
+ * ASID allocator (#697 follow-up: per-task TTBR0 needs ASID tagging
+ * so context switches don't cost a full TLB flush).
+ *
+ * Pool: 1..VMM_USER_ASID_MAX (slot 0 reserved for kernel/boot).
+ * Bitmap: one bit per slot; 0 = free, 1 = in use.
+ * Spinlock: simple cacheable spinlock; protects both the bitmap and
+ *           the recycle-flush flag.
+ *
+ * The "recycle" flag is one bit per slot, set on free and cleared on
+ * the next alloc that hands the slot out. When the alloc sees recycle=1,
+ * it issues `tlbi aside1is, asid<<48` before returning — flushing any
+ * stale entries from the prior holder of that ASID across all CPUs in
+ * the inner-shareable domain.
+ * ============================================================================ */
+
+#if !defined(PLATFORM_X86_64)
+
+#define ASID_BITMAP_BITS    (VMM_USER_ASID_MAX + 1)
+#define ASID_BITMAP_WORDS   ((ASID_BITMAP_BITS + 63) / 64)
+
+static uint64_t asid_in_use[ASID_BITMAP_WORDS];
+static uint64_t asid_recycled[ASID_BITMAP_WORDS];
+static spinlock_t asid_lock = SPINLOCK_INIT;
+
+static inline void asid_bit_set(uint64_t *bm, uint16_t i)
+{
+    bm[i / 64] |= (1UL << (i % 64));
+}
+static inline void asid_bit_clear(uint64_t *bm, uint16_t i)
+{
+    bm[i / 64] &= ~(1UL << (i % 64));
+}
+static inline int asid_bit_test(const uint64_t *bm, uint16_t i)
+{
+    return (bm[i / 64] >> (i % 64)) & 1;
+}
+
+uint16_t vmm_alloc_asid(void)
+{
+    irq_flags_t flags = spin_lock_irqsave(&asid_lock);
+
+    /* Linear scan starting at 1 — slot 0 is the kernel ASID. With
+     * MAX_TASKS = 64 and a 256-slot pool, this is fine. If the pool
+     * is ever sized larger or the live-task count grows past ~32,
+     * switch to a hint cursor. */
+    for (uint16_t i = 1; i <= VMM_USER_ASID_MAX; i++) {
+        if (asid_bit_test(asid_in_use, i)) {
+            continue;
+        }
+        asid_bit_set(asid_in_use, i);
+
+        /* Recycle: flush any stale TLB entries tagged with this ASID
+         * before returning it. The flush is broadcast (-IS) so other
+         * CPUs that may have run an earlier task with this ASID also
+         * drop their stale entries. */
+        bool recycled = asid_bit_test(asid_recycled, i) != 0;
+        if (recycled) {
+            asid_bit_clear(asid_recycled, i);
+        }
+        spin_unlock_irqrestore(&asid_lock, flags);
+
+        if (recycled) {
+            uint64_t arg = (uint64_t)i << 48;
+            __asm__ volatile(
+                "dsb ishst\n"
+                "tlbi aside1is, %0\n"
+                "dsb ish\n"
+                "isb\n"
+                :: "r"(arg)
+                : "memory");
+        }
+        return i;
+    }
+
+    /* Pool exhausted. Should never happen with VMM_USER_ASID_MAX (255)
+     * >> MAX_TASKS (64). If it does, the caller treats 0 as "no ASID
+     * available" and refuses to create the user task. */
+    spin_unlock_irqrestore(&asid_lock, flags);
+    return 0;
+}
+
+void vmm_free_asid(uint16_t asid)
+{
+    if (asid == 0 || asid > VMM_USER_ASID_MAX) {
+        return;
+    }
+    irq_flags_t flags = spin_lock_irqsave(&asid_lock);
+    asid_bit_clear(asid_in_use, asid);
+    /* Defer the TLB flush until alloc-time recycle: free is the
+     * common case (every task_destroy), alloc that recycles the
+     * same slot is rare. */
+    asid_bit_set(asid_recycled, asid);
+    spin_unlock_irqrestore(&asid_lock, flags);
+}
+
+#else  /* PLATFORM_X86_64 */
+
+uint16_t vmm_alloc_asid(void) { return 0; }
+void vmm_free_asid(uint16_t asid) { (void)asid; }
+
+#endif
 
 uint64_t vmm_boot_l1_pa(void)
 {

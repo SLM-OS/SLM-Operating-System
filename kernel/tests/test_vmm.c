@@ -756,6 +756,125 @@ static void test_user_unmap_page_validation(void)
 }
 
 /* ============================================================================
+ * ASID allocator (per-task TTBR0 ASID tagging).
+ * ============================================================================ */
+
+static void test_alloc_asid_returns_nonzero_unique(void)
+{
+    /* First two ASIDs out of the pool must both be non-zero (kernel
+     * ASID is reserved) and distinct. */
+    uint16_t a = vmm_alloc_asid();
+    uint16_t b = vmm_alloc_asid();
+    TEST_ASSERT_NOT_EQUAL(0, a);
+    TEST_ASSERT_NOT_EQUAL(0, b);
+    TEST_ASSERT_NOT_EQUAL(a, b);
+    TEST_ASSERT_TRUE(a <= VMM_USER_ASID_MAX);
+    TEST_ASSERT_TRUE(b <= VMM_USER_ASID_MAX);
+
+    vmm_free_asid(a);
+    vmm_free_asid(b);
+}
+
+static void test_alloc_asid_recycles_after_free(void)
+{
+    /* Free → re-alloc must hand back a previously-freed slot.
+     * (Allocator is a linear scan from slot 1, so the freed slot is
+     * the lowest free index by the time we re-alloc — but we only
+     * need to check that *some* slot is reused without exhausting
+     * the pool.) */
+    uint16_t a = vmm_alloc_asid();
+    TEST_ASSERT_NOT_EQUAL(0, a);
+    vmm_free_asid(a);
+    uint16_t b = vmm_alloc_asid();
+    TEST_ASSERT_EQUAL_UINT16(a, b);
+    vmm_free_asid(b);
+}
+
+static void test_free_asid_zero_noop(void)
+{
+    /* Freeing ASID 0 (kernel-reserved) and out-of-range values must
+     * be silent no-ops. The allocator's bitmap shouldn't underflow
+     * or trip a panic. */
+    vmm_free_asid(0);
+    vmm_free_asid(VMM_USER_ASID_MAX + 1);
+    vmm_free_asid(0xFFFF);
+    /* If any of those touched the bitmap, a fresh alloc might fail
+     * or hand back ASID 0; assert it doesn't. */
+    uint16_t a = vmm_alloc_asid();
+    TEST_ASSERT_NOT_EQUAL(0, a);
+    vmm_free_asid(a);
+}
+
+static void test_user_pte_has_ng_bit(void)
+{
+    /* User mappings must set PTE_NG (bit 11) so the hardware tags
+     * them with the active ASID. */
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    void *backing = pmm_alloc_pages(1);
+    TEST_ASSERT_NOT_NULL(backing);
+    uint64_t pa = (uint64_t)(uintptr_t)backing;
+
+    TEST_ASSERT_EQUAL_INT(0,
+        vmm_user_map_page(l1_pa, USER_VA_BASE, pa,
+                          VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED));
+
+    /* Walk the L1 to read the L3 entry directly and check nG. */
+    uint64_t *l1 = (uint64_t *)(uintptr_t)l1_pa;
+    uint64_t l1_idx = (USER_VA_BASE >> 30) & 0x1FF;
+    uint64_t l2_pa = l1[l1_idx] & PTE_ADDR_MASK;
+    uint64_t *l2 = (uint64_t *)(uintptr_t)l2_pa;
+    uint64_t l2_idx = (USER_VA_BASE >> 21) & 0x1FF;
+    uint64_t l3_pa = l2[l2_idx] & PTE_ADDR_MASK;
+    uint64_t *l3 = (uint64_t *)(uintptr_t)l3_pa;
+    uint64_t l3_idx = (USER_VA_BASE >> 12) & 0x1FF;
+    uint64_t pte = l3[l3_idx];
+
+    TEST_ASSERT_MESSAGE(pte & PTE_NG, "user PTE missing nG bit");
+
+    vmm_destroy_user_l1(l1_pa);
+}
+
+static void test_kernel_pte_global(void)
+{
+    /* Kernel-mapped pages walked from the boot L1 must have nG=0 so
+     * they apply across all ASIDs (no per-ASID retagging on TTBR0
+     * swap). Read the boot L1's L2/L3 chain for a known kernel VA —
+     * any page in the kernel image works. */
+    extern char __text_start[];
+    uint64_t kva = (uint64_t)(uintptr_t)__text_start;
+    /* Round to page boundary in case the symbol isn't aligned. */
+    kva &= ~(PAGE_SIZE - 1UL);
+
+    uint64_t l1_pa = vmm_boot_l1_pa();
+    uint64_t *l1 = (uint64_t *)(uintptr_t)l1_pa;
+    uint64_t l1_idx = (kva >> 30) & 0x1FF;
+    uint64_t l1_entry = l1[l1_idx];
+    /* L1 may be a 1 GB block (Pi 5 / Jetson) or a table descriptor
+     * (QEMU virt). Block descriptors carry the nG bit directly; for
+     * tables we walk to L2. */
+    if ((l1_entry & PTE_TYPE_MASK) == PTE_TYPE_BLOCK) {
+        TEST_ASSERT_MESSAGE(!(l1_entry & PTE_NG),
+            "kernel L1 block has nG=1");
+        return;
+    }
+    uint64_t *l2 = (uint64_t *)(uintptr_t)(l1_entry & PTE_ADDR_MASK);
+    uint64_t l2_idx = (kva >> 21) & 0x1FF;
+    uint64_t l2_entry = l2[l2_idx];
+    if ((l2_entry & PTE_TYPE_MASK) == PTE_TYPE_BLOCK) {
+        TEST_ASSERT_MESSAGE(!(l2_entry & PTE_NG),
+            "kernel L2 block has nG=1");
+        return;
+    }
+    uint64_t *l3 = (uint64_t *)(uintptr_t)(l2_entry & PTE_ADDR_MASK);
+    uint64_t l3_idx = (kva >> 12) & 0x1FF;
+    uint64_t l3_entry = l3[l3_idx];
+    TEST_ASSERT_MESSAGE(!(l3_entry & PTE_NG),
+        "kernel L3 page has nG=1");
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -806,6 +925,13 @@ int test_suite_vmm(void)
     RUN_TEST(test_user_unmap_page_frees_pmm_owned);
     RUN_TEST(test_destroy_user_l1_frees_owned_leaves);
     RUN_TEST(test_user_unmap_page_validation);
+
+    /* ASID allocator (per-task TTBR0 ASID tagging follow-up) */
+    RUN_TEST(test_alloc_asid_returns_nonzero_unique);
+    RUN_TEST(test_alloc_asid_recycles_after_free);
+    RUN_TEST(test_free_asid_zero_noop);
+    RUN_TEST(test_user_pte_has_ng_bit);
+    RUN_TEST(test_kernel_pte_global);
 
     return UnityEnd();
 }

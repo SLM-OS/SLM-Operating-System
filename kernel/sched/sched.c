@@ -2170,9 +2170,9 @@ void schedule(void)
      * The swap runs under rq_lock_irqsave, so no other CPU (or this
      * CPU) can observe a half-swapped state. */
     if (next->is_user && next->user_l1_pa) {
-        vmm_user_addrspace_switch(next->user_l1_pa);
+        vmm_user_addrspace_switch(next->user_l1_pa, next->user_asid);
     } else if (current && current->is_user) {
-        vmm_user_addrspace_switch(vmm_boot_l1_pa());
+        vmm_user_addrspace_switch(vmm_boot_l1_pa(), VMM_KERNEL_ASID);
     }
 #endif
 
