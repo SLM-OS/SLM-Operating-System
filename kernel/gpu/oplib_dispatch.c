@@ -20,6 +20,8 @@
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../include/cache.h"
 #include "nvidia/ga10b_gmmu.h"
+#include "nvidia/ga10b_bringup.h"
+#include "nvidia/ga10b_channel_handoff.h"
 #endif
 
 #include <stddef.h>
@@ -150,6 +152,74 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
     return 0;
 }
 
+int slm_oplib_dispatch(struct ga10b_bringup *b,
+                       uint64_t inst_block_phys,
+                       uint32_t op_kind,
+                       uint32_t tier,
+                       uint32_t dtype,
+                       const struct operator_dispatch_args *args)
+{
+    if (b == NULL || args == NULL) {
+        return -1;
+    }
+
+    struct slm_oplib_dispatch_prep prep;
+    int rc = slm_oplib_prepare_dispatch(inst_block_phys, op_kind,
+                                         tier, dtype, args, &prep);
+    if (rc < 0) {
+        return rc;
+    }
+
+    /* Build a single-element v7 ops array on the stack. The
+     * dispatcher's per-op validity check
+     * (`ga10b_pipeline_op_is_valid`) requires `qmd_gpu_va != 0` and
+     * `output_phys != 0` — those fields are MNIST helper-published
+     * sentinels that the v7 dispatch loop body doesn't actually use
+     * (the QMD slot is picked by `ga10b_qmd_pool_prepare`; the
+     * trailing semaphore is the only completion signal). Set them
+     * to a non-zero placeholder that the validity check passes.
+     * The QMD pool's GPU VA is always non-zero in v7 mode and is
+     * conveniently available — using it makes the placeholder
+     * obvious in dispatch logs ("qmd matches pool base"). */
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || h->qmd_pool_gpu_va == 0) {
+        /* Defensive: the inline dispatcher would still fail later
+         * on a zero pool VA. Surface here for a clearer error. */
+        uart_puts("[oplib-dispatch] qmd_pool_gpu_va == 0 — "
+                  "channel handoff missing v7 pool resources\n");
+        return -1;
+    }
+    uint64_t placeholder = h->qmd_pool_gpu_va;
+
+    struct ga10b_pipeline_op_v7 op = {
+        .qmd_gpu_va       = placeholder,
+        .output_phys      = placeholder,
+        .expected_payload = 0,
+        .flags            = 0,
+        .shader_gpu_va    = prep.shader_gpu_va,
+        .cbuf_gpu_va      = prep.cbuf_gpu_va,
+        .register_count_v = prep.register_count_v,
+        .grid_x           = prep.grid_x,
+        .grid_y           = prep.grid_y,
+        .grid_z           = prep.grid_z,
+        .block_x          = prep.block_x,
+        .block_y          = prep.block_y,
+        .block_z          = prep.block_z,
+        .smem_size_bytes  = prep.smem_size_bytes,
+        .slm_size_bytes   = prep.slm_size_bytes,
+        .barrier_count    = prep.barrier_count,
+    };
+
+    rc = ga10b_dispatch_v7_pipeline_inline(b, &op, 1);
+    if (rc < 0) {
+        uart_printf("[oplib-dispatch] inline dispatch failed: rc=%d\n", rc);
+        return rc;
+    }
+    uart_printf("[oplib-dispatch] op_kind=%u dispatched + completed\n",
+                (unsigned)op_kind);
+    return 0;
+}
+
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
 
 int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
@@ -167,6 +237,22 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
     (void)out;
     /* Non-Jetson platforms have no GA10B GMMU and no SASS pool
      * staging. The dispatcher prep is a no-op stub. */
+    return -1;
+}
+
+int slm_oplib_dispatch(struct ga10b_bringup *b,
+                       uint64_t inst_block_phys,
+                       uint32_t op_kind,
+                       uint32_t tier,
+                       uint32_t dtype,
+                       const struct operator_dispatch_args *args)
+{
+    (void)b;
+    (void)inst_block_phys;
+    (void)op_kind;
+    (void)tier;
+    (void)dtype;
+    (void)args;
     return -1;
 }
 

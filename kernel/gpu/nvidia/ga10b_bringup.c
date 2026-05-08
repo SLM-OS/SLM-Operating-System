@@ -2061,46 +2061,44 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
  * take handoff + slot counter as parameters and a stub-submit
  * function pointer).
  */
-static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
+/* Internal worker — fires N v7 ops + 1 trailing semaphore release
+ * through g_handoff's QMD pool + pushbuf + GPFIFO + semaphore.
+ *
+ * Both the existing `ga10b_dispatch_v7_pipeline` (which reads ops
+ * from the inherited handoff's pipeline_ops_phys) and the new
+ * `slm_oplib_dispatch_v7_op` path (which builds ops in C memory)
+ * funnel through here. Decoupling the dispatch loop from the
+ * handoff-published ops array is what enables the operator-library
+ * dispatcher (#714, A.2) to fire arbitrary kernels without a
+ * MNIST-shaped pre-staged pipeline.
+ *
+ * Caller responsibilities:
+ *   - `b` is in CHANNEL_OPEN or METHOD_ACCEPTED state.
+ *   - `g_handoff` has its v7 resource fields populated
+ *     (qmd_pool, pushbuf, gpfifo, semaphore, userd, work_submit_token).
+ *   - `ops_v7` is non-NULL and `n > 0`. Each op's QMD-construction
+ *     fields (shader_gpu_va, cbuf_gpu_va, grid/block, regs/smem)
+ *     have valid values.
+ *   - If `ops_v7` lives in DRAM that the GPU may have written to
+ *     previously, the caller has already invalidated the array's
+ *     cache range (the dispatch path reads but doesn't write).
+ *
+ * Returns 0 on successful semaphore release within timeout, -1
+ * otherwise (with `b->last_error_phase = 8` set on hardware
+ * failure paths).
+ */
+int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
+                                       const struct ga10b_pipeline_op_v7 *ops_v7,
+                                       uint32_t n)
 {
-    enum ga10b_v7_validation_error verr =
-        ga10b_v7_validate_handoff(&g_handoff);
-    if (verr != GA10B_V7_OK) {
-        switch (verr) {
-        case GA10B_V7_ERR_OPS_PHYS_ZERO:
-            uart_puts("[GA10B-P8-v7] pipeline_n_ops > 0 but "
-                      "pipeline_ops_phys is zero\n");
-            break;
-        case GA10B_V7_ERR_OPS_EXCEED_CAP:
-            uart_printf("[GA10B-P8-v7] pipeline_n_ops=%lu exceeds "
-                        "GA10B_PIPELINE_V7_MAX_OPS=%u — refusing "
-                        "to dispatch (handoff likely corrupt)\n",
-                        (unsigned long)g_handoff.pipeline_n_ops,
-                        (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
-            break;
-        case GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT:
-            uart_printf("[GA10B-P8-v7] qmd_pool_size_bytes=%lu < "
-                        "qmd_pool_n_slots=%lu × %u — handoff "
-                        "inconsistent\n",
-                        (unsigned long)g_handoff.qmd_pool_size_bytes,
-                        (unsigned long)g_handoff.qmd_pool_n_slots,
-                        (unsigned)GA10B_QMD_SIZE_BYTES);
-            break;
-        case GA10B_V7_ERR_NULL_HANDOFF:
-            /* Unreachable in production — `ga10b_handoff_is_v7`
-             * already null-checks and we only enter this branch
-             * when it returned true. Defensive log so a future
-             * caller that skips `is_v7` still surfaces the bug
-             * instead of dispatching with garbage. */
-            uart_puts("[GA10B-P8-v7] handoff pointer is NULL — "
-                      "validate-after-is_v7 contract violated\n");
-            break;
-        case GA10B_V7_OK:
-            /* Unreachable — the outer `if (verr != OK)` rejects
-             * this case. Keeping the case label so a future
-             * addition to the enum prompts a -Wswitch warning. */
-            break;
-        }
+    if (b == NULL || ops_v7 == NULL || n == 0) {
+        return -1;
+    }
+    if (n > GA10B_PIPELINE_V7_MAX_OPS) {
+        uart_printf("[GA10B-P8-v7] inline n=%lu exceeds "
+                    "GA10B_PIPELINE_V7_MAX_OPS=%u\n",
+                    (unsigned long)n,
+                    (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
         b->last_error_phase = 8;
         return -1;
     }
@@ -2112,7 +2110,6 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
      * + headroom). With the post-#601 ring of 512, that allows up
      * to 255 ops per chain — vastly more than the ~8 a typical
      * MNIST or sched chain requires. */
-    uint32_t n = g_handoff.pipeline_n_ops;
     uint32_t total_entries = n + 1u;
     if (total_entries > (g_handoff.gpfifo_entries / 2u)) {
         uart_printf("[GA10B-P8-v7] %lu entries (%lu ops + 1 sema) "
@@ -2145,23 +2142,17 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
     }
 
     /* CPU-physical → identity-mapped CPU VA on Jetson. Same
-     * contract as the v3 dispatch fields and the v5/v6 ops array:
-     * the helper allocates these via nvmap into the IOVMM heap,
-     * where SMMU passthrough makes the CPU's view of the page
-     * numerically equal to the physical address. Holds at EL2
-     * with the unified DRAM map; would need an explicit
-     * phys-to-virt translation on any platform that doesn't
-     * identity-map. */
-    const struct ga10b_pipeline_op_v7 *ops_v7 =
-        (const struct ga10b_pipeline_op_v7 *)
-            (uintptr_t)g_handoff.pipeline_ops_phys;
+     * contract as the v3 dispatch fields: the helper allocates
+     * these via nvmap into the IOVMM heap, where SMMU passthrough
+     * makes the CPU's view of the page numerically equal to the
+     * physical address. Holds at EL2 with the unified DRAM map. */
     uint8_t *pool_va =
         (uint8_t *)(uintptr_t)g_handoff.qmd_pool_phys;
-    if (gsp_platform->cache_invalidate) {
-        gsp_platform->cache_invalidate(
-            (void *)ops_v7,
-            (size_t)n * sizeof(*ops_v7));
-    }
+    /* `ops_v7` cache-invalidate is the caller's responsibility
+     * — for the wrapper that reads from g_handoff, it lives in
+     * Linux-staged DRAM and needs invalidation; for the inline
+     * caller that built ops in C memory the writes are already
+     * coherent. */
 
     /* Pre-clear the poll target ONCE — the trailing sema entry is
      * the only writer. Pre-zero so a non-zero match below is
@@ -2405,6 +2396,62 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
     }
     b->last_error_phase = 8;
     return -1;
+}
+
+/* Thin wrapper preserving the original
+ * `ga10b_dispatch_v7_pipeline(b)` entry-point: validates the v7
+ * handoff fields, reads the ops_v7 array from
+ * `g_handoff.pipeline_ops_phys`, cache-invalidates the array (it
+ * lives in Linux-staged DRAM the GPU may have touched), then
+ * dispatches via the inline worker. The MNIST path goes through
+ * here unchanged. */
+static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
+{
+    enum ga10b_v7_validation_error verr =
+        ga10b_v7_validate_handoff(&g_handoff);
+    if (verr != GA10B_V7_OK) {
+        switch (verr) {
+        case GA10B_V7_ERR_OPS_PHYS_ZERO:
+            uart_puts("[GA10B-P8-v7] pipeline_n_ops > 0 but "
+                      "pipeline_ops_phys is zero\n");
+            break;
+        case GA10B_V7_ERR_OPS_EXCEED_CAP:
+            uart_printf("[GA10B-P8-v7] pipeline_n_ops=%lu exceeds "
+                        "GA10B_PIPELINE_V7_MAX_OPS=%u — refusing "
+                        "to dispatch (handoff likely corrupt)\n",
+                        (unsigned long)g_handoff.pipeline_n_ops,
+                        (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
+            break;
+        case GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT:
+            uart_printf("[GA10B-P8-v7] qmd_pool_size_bytes=%lu < "
+                        "qmd_pool_n_slots=%lu × %u — handoff "
+                        "inconsistent\n",
+                        (unsigned long)g_handoff.qmd_pool_size_bytes,
+                        (unsigned long)g_handoff.qmd_pool_n_slots,
+                        (unsigned)GA10B_QMD_SIZE_BYTES);
+            break;
+        case GA10B_V7_ERR_NULL_HANDOFF:
+            uart_puts("[GA10B-P8-v7] handoff pointer is NULL — "
+                      "validate-after-is_v7 contract violated\n");
+            break;
+        case GA10B_V7_OK:
+            break;
+        }
+        b->last_error_phase = 8;
+        return -1;
+    }
+
+    uint32_t n = g_handoff.pipeline_n_ops;
+    const struct ga10b_pipeline_op_v7 *ops_v7 =
+        (const struct ga10b_pipeline_op_v7 *)
+            (uintptr_t)g_handoff.pipeline_ops_phys;
+    if (gsp_platform->cache_invalidate) {
+        gsp_platform->cache_invalidate(
+            (void *)ops_v7,
+            (size_t)n * sizeof(*ops_v7));
+    }
+
+    return ga10b_dispatch_v7_pipeline_inline(b, ops_v7, n);
 }
 
 int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
