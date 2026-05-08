@@ -296,6 +296,13 @@ static uint64_t make_page_desc(uint64_t pa, uint32_t flags)
         desc |= PTE_UXN;
     }
 
+    /* Software bit so vmm_destroy_user_l1 / vmm_user_unmap_page know
+     * whether the leaf PA is theirs to free or belongs to a caller
+     * (e.g. the .text.user kernel-image pages are NOT PMM-owned). */
+    if (flags & VMM_FLAG_PMM_OWNED) {
+        desc |= PTE_SW_PMM_OWNED;
+    }
+
     return desc;
 }
 
@@ -728,19 +735,87 @@ void vmm_destroy_user_l1(uint64_t l1_pa)
         uint64_t *l2 = (uint64_t *)(uintptr_t)l2_pa;
 
         /* L2 entries can be 2 MB blocks (no sub-table to free) or L3
-         * page tables (need to free the L3 page). */
+         * page tables (free L3 leaf pages flagged PMM_OWNED, then the
+         * L3 page itself). */
         for (size_t j = 0; j < ENTRIES_PER_TABLE; j++) {
             uint64_t l2_entry = l2[j];
-            if ((l2_entry & PTE_TYPE_MASK) == PTE_TYPE_TABLE) {
-                uint64_t l3_pa = l2_entry & PTE_ADDR_MASK;
-                pmm_free_pages((void *)(uintptr_t)l3_pa, 1);
+            if ((l2_entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+                continue;
             }
+            uint64_t l3_pa = l2_entry & PTE_ADDR_MASK;
+            uint64_t *l3 = (uint64_t *)(uintptr_t)l3_pa;
+
+            /* Walk L3 leaves. Free any leaf PA tagged PMM_OWNED — the
+             * caller's mmap-style mappings + the per-task EL0 stack
+             * land here. Untagged leaves (e.g. .text.user pages whose
+             * PA is in the kernel image) are left alone. */
+            for (size_t k = 0; k < ENTRIES_PER_TABLE; k++) {
+                uint64_t l3_entry = l3[k];
+                if ((l3_entry & PTE_TYPE_MASK) != PTE_TYPE_PAGE) {
+                    continue;
+                }
+                if (l3_entry & PTE_SW_PMM_OWNED) {
+                    uint64_t leaf_pa = l3_entry & PTE_ADDR_MASK;
+                    pmm_free_pages((void *)(uintptr_t)leaf_pa, 1);
+                }
+            }
+
+            pmm_free_pages((void *)(uintptr_t)l3_pa, 1);
         }
 
         pmm_free_pages((void *)(uintptr_t)l2_pa, 1);
     }
 
     pmm_free_pages((void *)(uintptr_t)l1_pa, 1);
+}
+
+int vmm_user_unmap_page(uint64_t l1_pa, uint64_t va)
+{
+    if (l1_pa == 0) {
+        return -1;
+    }
+    if (va < USER_VA_BASE || va >= USER_VA_LIMIT) {
+        return -1;
+    }
+    if ((va & (PAGE_SIZE - 1)) != 0) {
+        return -1;
+    }
+
+    uint64_t *user_l1 = (uint64_t *)(uintptr_t)l1_pa;
+    uint64_t l1_idx = L1_INDEX(va);
+    uint64_t l2_idx = L2_INDEX(va);
+    uint64_t l3_idx = L3_INDEX(va);
+
+    /* Walk L1 → L2 → L3. Any missing level means the VA isn't mapped. */
+    uint64_t l1_entry = user_l1[l1_idx];
+    if ((l1_entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return -1;
+    }
+    uint64_t *l2 = (uint64_t *)(uintptr_t)(l1_entry & PTE_ADDR_MASK);
+
+    uint64_t l2_entry = l2[l2_idx];
+    if ((l2_entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return -1;
+    }
+    uint64_t *l3 = (uint64_t *)(uintptr_t)(l2_entry & PTE_ADDR_MASK);
+
+    uint64_t l3_entry = l3[l3_idx];
+    if ((l3_entry & PTE_TYPE_MASK) != PTE_TYPE_PAGE) {
+        return -1;
+    }
+
+    /* Capture the leaf PA + ownership before clearing. */
+    uint64_t leaf_pa = l3_entry & PTE_ADDR_MASK;
+    bool pmm_owned = (l3_entry & PTE_SW_PMM_OWNED) != 0;
+
+    l3[l3_idx] = 0;
+    cache_clean_range(&l3[l3_idx], sizeof(uint64_t));
+
+    if (pmm_owned) {
+        pmm_free_pages((void *)(uintptr_t)leaf_pa, 1);
+    }
+
+    return 0;
 }
 
 /*

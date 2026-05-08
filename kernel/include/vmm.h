@@ -121,6 +121,7 @@
 #define PTE_SW_GPU_MAPPED   (1UL << 55)         /* Page is mapped to GPU */
 #define PTE_SW_MODEL_PAGE   (1UL << 56)         /* Contains model data */
 #define PTE_SW_INFERENCE_HOT (1UL << 57)        /* Frequently accessed */
+#define PTE_SW_PMM_OWNED    (1UL << 58)         /* PMM-backed user page; free on user L1 destroy */
 
 /* Output address mask (bits [47:12] for 4KB, [47:21] for 2MB) */
 #define PTE_ADDR_MASK       0x0000FFFFFFFFF000UL
@@ -220,6 +221,16 @@
 #define VMM_FLAG_GPU_MAPPED     (1U << 8)   /* Mapped to GPU */
 #define VMM_FLAG_MODEL_PAGE     (1U << 9)   /* Contains model data */
 #define VMM_FLAG_INFERENCE_HOT  (1U << 10)  /* Hot inference page */
+
+/*
+ * Mark a user-mode mapping as backed by a PMM page that the VMM
+ * should reclaim on tear-down. Without this flag, vmm_destroy_user_l1
+ * leaves the leaf PA alone (the caller owns it — used today for
+ * `.text.user` mappings whose PA is in the kernel image).
+ *
+ * Set by mmap-style callers and by the per-task EL0 stack mapping.
+ */
+#define VMM_FLAG_PMM_OWNED      (1U << 11)  /* Free leaf page on user-L1 destroy */
 
 /* Common flag combinations */
 #define VMM_FLAGS_KERNEL_CODE   (VMM_FLAG_READ | VMM_FLAG_EXEC)
@@ -411,6 +422,24 @@ void vmm_user_addrspace_switch(uint64_t l1_pa);
  * re-map an active VA).
  */
 int vmm_user_map_page(uint64_t l1_pa, uint64_t va, uint64_t pa, uint32_t flags);
+
+/*
+ * Tear down a single 4 KB user-mapped page (#697 follow-up: mmap).
+ *
+ * Walks the per-task L1 → L2 → L3 chain at `va`, clears the L3 entry,
+ * and — if the page was mapped with VMM_FLAG_PMM_OWNED — frees the
+ * underlying PMM page back to the buddy allocator. Sub-tables (L2, L3
+ * page-table pages) are NOT freed here even if they become empty;
+ * vmm_destroy_user_l1 reclaims them at task tear-down.
+ *
+ * No TLB invalidation is emitted. Callers that may have a live TLB
+ * entry for `va` (i.e. the L1 is in some CPU's TTBR0_EL1 right now)
+ * must follow this with `tlbi vae1is, <va>>>12` + dsb ish + isb.
+ *
+ * Returns 0 on success, -1 if `va` is out of the user window, not
+ * page-aligned, or not currently mapped.
+ */
+int vmm_user_unmap_page(uint64_t l1_pa, uint64_t va);
 
 /*
  * PA of the boot (kernel) L1 table — the L1 that vmm_init populated

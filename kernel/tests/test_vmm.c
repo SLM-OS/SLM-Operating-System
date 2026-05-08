@@ -666,6 +666,95 @@ static void test_create_destroy_user_l1_no_leak(void)
                         "PMM leaked pages across create+destroy");
 }
 
+/* Test (mmap follow-up): vmm_user_unmap_page clears the L3 entry and
+ * frees the leaf when VMM_FLAG_PMM_OWNED was set. Net PMM count
+ * recovers across map+unmap+destroy. */
+static void test_user_unmap_page_frees_pmm_owned(void)
+{
+    struct pmm_stats before, after;
+    pmm_get_stats(&before);
+
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    void *leaf = pmm_alloc_pages(1);
+    TEST_ASSERT_NOT_NULL(leaf);
+
+    uint64_t va = USER_VA_BASE + 0x10000;   /* arbitrary user-window page */
+    int rc = vmm_user_map_page(l1_pa, va, (uint64_t)(uintptr_t)leaf,
+                               VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    /* Unmap — should free the leaf and clear the L3 entry. A second
+     * call must fail because the slot is no longer mapped. */
+    TEST_ASSERT_EQUAL_INT(0, vmm_user_unmap_page(l1_pa, va));
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, va));
+
+    vmm_destroy_user_l1(l1_pa);
+
+    pmm_get_stats(&after);
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "PMM leaked across map+unmap+destroy");
+}
+
+/* Test: destroy walks L3 leaves and frees PMM_OWNED pages without
+ * the caller having to unmap them first. */
+static void test_destroy_user_l1_frees_owned_leaves(void)
+{
+    struct pmm_stats before, after;
+    pmm_get_stats(&before);
+
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    /* Map two PMM_OWNED pages and one un-owned page (kernel-image PA
+     * placeholder — we just borrow the boot-L1 PA for the test; the
+     * destroy path must leave it alone). */
+    void *p1 = pmm_alloc_pages(1);
+    void *p2 = pmm_alloc_pages(1);
+    TEST_ASSERT_NOT_NULL(p1);
+    TEST_ASSERT_NOT_NULL(p2);
+
+    uint64_t kernel_pa_placeholder = vmm_boot_l1_pa();   /* not allocated by us */
+
+    TEST_ASSERT_EQUAL_INT(0, vmm_user_map_page(l1_pa, USER_VA_BASE + 0x1000,
+                                               (uint64_t)(uintptr_t)p1,
+                                               VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED));
+    TEST_ASSERT_EQUAL_INT(0, vmm_user_map_page(l1_pa, USER_VA_BASE + 0x2000,
+                                               (uint64_t)(uintptr_t)p2,
+                                               VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED));
+    TEST_ASSERT_EQUAL_INT(0, vmm_user_map_page(l1_pa, USER_VA_BASE + 0x3000,
+                                               kernel_pa_placeholder,
+                                               VMM_FLAGS_USER_CODE));   /* no PMM_OWNED */
+
+    vmm_destroy_user_l1(l1_pa);
+
+    /* Both PMM_OWNED leaves should have been returned. The kernel-PA
+     * leaf must NOT have been freed (would corrupt the boot L1 free
+     * lists in PMM if it was). */
+    pmm_get_stats(&after);
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "destroy leaked PMM_OWNED leaves");
+}
+
+/* Test: out-of-range or unmapped VA returns -1 from unmap_page. */
+static void test_user_unmap_page_validation(void)
+{
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    /* VA below user window. */
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, USER_VA_BASE - PAGE_SIZE));
+    /* VA at the upper edge (== USER_VA_LIMIT, out of range). */
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, USER_VA_LIMIT));
+    /* Unaligned VA. */
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, USER_VA_BASE + 0x1));
+    /* Unmapped (no L2 yet). */
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, USER_VA_BASE));
+
+    vmm_destroy_user_l1(l1_pa);
+}
+
 /* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
@@ -714,6 +803,9 @@ int test_suite_vmm(void)
     RUN_TEST(test_create_user_l1_rejects_null_out);
     RUN_TEST(test_destroy_user_l1_zero_is_noop);
     RUN_TEST(test_create_destroy_user_l1_no_leak);
+    RUN_TEST(test_user_unmap_page_frees_pmm_owned);
+    RUN_TEST(test_destroy_user_l1_frees_owned_leaves);
+    RUN_TEST(test_user_unmap_page_validation);
 
     return UnityEnd();
 }
