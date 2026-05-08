@@ -36,14 +36,23 @@ demonstrably executing under SLM-OS on real GA10B silicon.
 
 **Per-dispatch cost (post-#722).** The 3-point `ga10b_l2_evict_sysmem`
 that closed the LTC staleness adds **~120 µs typical / ~6 ms worst
-case** of IRQ-off latency per inference. That's fine for MNIST at
-1–10 inf/s. It is **not** the right shape for SLM workloads: at
-Qwen 2.5 1.5B's ~370 ops/token × 10 tokens/sec = 3700 launches/sec,
-the evict overhead alone is ~440 ms/sec — clearly unworkable. The
-async-batched dispatch architecture in #573 is what unblocks SLMs,
-and a different barrier strategy (per-batch, not per-launch) will
-need to replace the 3-point evict on that path. Do not paste this
-pattern into the SLM forward path without the architectural rework.
+case** of IRQ-off latency per inference. (Derivation: each evict
+is 4 UFLUSH ops; per-op typical is <10 µs and worst case is the
+100-retry × ~5 µs busy-wait in `ga10b_uflush_op` ≈ 500 µs. So one
+evict is ~40 µs typical / ~2 ms worst, multiplied by three sites
+per dispatch.) That's fine for MNIST at 1–10 inf/s. It is **not**
+the right shape for SLM workloads: at Qwen 2.5 1.5B's ~370
+ops/token × 10 tokens/sec = 3700 launches/sec, the evict overhead
+alone is ~440 ms/sec — clearly unworkable. The async-batched
+dispatch architecture in #573 is what unblocks SLMs, and a
+different barrier strategy (per-batch, not per-launch) will need to
+replace the 3-point evict on that path. Do not paste this pattern
+into the SLM forward path without the architectural rework.
+
+The narrowing experiment — gate each of the three sites behind a
+cmdline flag and isolate which is strictly required — is tracked
+separately in #723. If only one or two sites turn out to matter,
+the per-dispatch overhead drops proportionally.
 
 **Outstanding follow-ups** (all out of scope here, tracked separately):
 - [#573](https://github.com/SLM-OS/SLM-Operating-System/issues/573) — async batched dispatch architecture for SLM workloads (per-launch poll overhead from the §7 risk note; deferred per the plan's exit criteria).

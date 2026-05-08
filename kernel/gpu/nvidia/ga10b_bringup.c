@@ -931,6 +931,10 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * instead of fetching fresh data we wrote at the same GPU VA, which
  * surfaces as the iter-1 "got nvgpu's helper output" race (#596).
  *
+ * Also called between dispatches via the 3-point coherency sites
+ * added in #722 (set_input + pre-launch + post-launch). Same UFLUSH
+ * sequence; same preconditions.
+ *
  * Sequence per gv11b_mm_l2_flush in
  * ../slmos-reference-cache/nvidia/nvgpu-hal-mm-cache-flush_gv11b_fusa.c
  * (and kmemsysCacheOp_GM200 in OGKM):
@@ -946,12 +950,30 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * comment. GK20A is the predecessor Tegra GPU; the same ordering applies
  * to GA10B.
  *
- * Lock-hold cost: callers run this under `g_gpu_dispatch_lock` with
- * IRQs disabled (see `ensure_bringup` in slm_ffi.c). Worst-case time
- * is 4 ops × ~500 µs/op ≈ 2 ms IRQ-off if every op hits its retry
- * limit. Typical post-kexec cold-state run is ~40 µs total (each op
- * completes in <10 µs per `ga10b_uflush_op`'s comment). Bounded and
- * well below the file's existing IRQ-off budgets. */
+ * Preconditions (all callers must hold):
+ *   - `g_gpu_dispatch_lock` IRQ-off (UFLUSH ops are not re-entrant
+ *     against concurrent dispatch from another context)
+ *   - GPU is quiescent on the active channel — either pre-handoff
+ *     (inherit), or after a prior dispatch's sema fired and before
+ *     the next submit's USERD GP_PUT write. The 100-retry budget in
+ *     `ga10b_uflush_op` was sized for this; if the GPU has in-flight
+ *     work targeting the same memory addresses, the L2_FLUSH_DIRTY
+ *     op may need the larger 2000-retry budget nvgpu uses.
+ *
+ * Caller logging policy: callers use `(void)ga10b_l2_evict_sysmem()`
+ * when a failure produces a visible-stale next-call result that the
+ * operator can detect (set_input, pre-launch). The post-launch site
+ * surfaces failures explicitly because a timeout there silently
+ * returns stale logits to the FFI caller — there's no follow-up
+ * call to make the staleness visible.
+ *
+ * Lock-hold cost: 4 ops × ~500 µs/op ≈ 2 ms IRQ-off worst case if
+ * every op hits its retry limit. Typical run is ~40 µs total (each
+ * op completes in <10 µs per `ga10b_uflush_op`'s comment). The
+ * 3-point-evict pattern in #722 multiplies this by 3 per dispatch:
+ * ~120 µs typical / ~6 ms worst case. Bounded and acceptable for
+ * MNIST workloads; not the right shape for SLM forward-path latency
+ * (see docs/gpu-qmd-per-dispatch-plan.md §Status). */
 int ga10b_l2_evict_sysmem(void)
 {
     if (!gsp_platform) return -1;
@@ -2646,9 +2668,9 @@ int ga10b_bringup_set_input(struct ga10b_bringup *b,
      * staleness; removing the pre-launch evict shifts the failure
      * pattern from "off-by-one" to "calls 2+4 wrong with values
      * swapped". The architectural understanding of which is strictly
-     * necessary on which path is incomplete; a follow-up should
-     * gate each evict behind a kernel cmdline flag and re-run the
-     * matrix systematically to narrow this down (#715 follow-up).
+     * necessary on which path is incomplete; the narrowing experiment
+     * is tracked in #723 (gate each site behind a kernel cmdline flag
+     * and run the full subset matrix).
      *
      * The 4-step UFLUSH sequence (FB_FLUSH + L2_FLUSH_DIRTY +
      * L2_SYSMEM_INVALIDATE + FB_FLUSH) is the same one
