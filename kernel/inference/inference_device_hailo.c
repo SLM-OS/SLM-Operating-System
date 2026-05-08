@@ -1937,6 +1937,19 @@ static int hailo_backend_run(struct inference_device *dev,
      * data lands per input we submit. wait_proc(target=1) is the
      * right downstream poll. */
 
+    /* #682 hyp-3b (disconfirmed 2026-05-07): live HailoRT capture on
+     * pi-5-1 (Linux + HailoRT v4.23.0 success run, dmesg
+     * /tmp/hailo-fresh/run1.log) showed the 4 post-ENABLED settle
+     * pings happen INSIDE runmodel, between OUT pre-prime and IN
+     * avail bump — not at end of load like ours. Tested moving them
+     * here (GET_DEV_INFO + IDENTIFY ×2) between the OUT prime loop
+     * above and the IRQ-state dump below — same stall: proc=0 on
+     * ch=2 through full 500 ms timeout. The pings did fire (rc=0)
+     * and ISTATUS shifted as expected (bit 25 cleared), but fw still
+     * did not advance to fetching input. Surviving candidates: MSI
+     * routing, fw-side cross-die signaling, or some MMIO outside
+     * the trace surfaces we've audited. */
+
     /* #682 hypothesis-1 (disconfirmed 2026-05-07): readback of
      * PER_SRC/PER_DST/ISTATUS at boot-arm, post-load, pre-IN-submit
      * showed fw sets PER_SRC bits 0/1 for CFG channels but never
