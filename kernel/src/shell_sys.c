@@ -4089,9 +4089,19 @@ int cmd_nvgpu(int argc, char *argv[])
         return 0;
     }
 
+    if (strcmp(argv[1], "oplib") == 0) {
+        if (argc < 3 || strcmp(argv[2], "status") == 0) {
+            extern void oplib_pool_status_print(void);
+            oplib_pool_status_print();
+            return 0;
+        }
+        shell_puts("usage: nvgpu oplib [status]\r\n");
+        return -1;
+    }
+
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | submit | submit-compute | launch-kernel | "
-              "run-mnist | fecs | gpccs | pmu | run]\r\n");
+              "run-mnist | fecs | gpccs | pmu | run | oplib]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
