@@ -760,9 +760,10 @@ int hailo_control_arm_irq_masks(void);
  * BCS_DESTINATION_INTERRUPT_PER_CHANNEL) and prints them with the
  * supplied label. Used to verify whether the per-channel SRC/DST IRQ
  * enable bits stay set across the load + run sequence, or whether
- * fw / a CPU_ECC event is clearing them on us. Expensive enough not
- * to leave on permanently, but no compile-time gate — call it
- * sparingly from tracepoint sites under HAILO_WIRE_DEBUG.
+ * fw / a CPU_ECC event is clearing them on us. The function itself
+ * is always compiled; all in-tree call sites are wrapped under
+ * `#ifdef HAILO_WIRE_DEBUG` so default builds incur no diagnostic
+ * I/O on the load/run hot paths.
  */
 void hailo_control_dump_irq_state(const char *label);
 
