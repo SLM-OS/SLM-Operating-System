@@ -664,50 +664,62 @@ int cmd_sleep(int argc, char *argv[])
  * the per-task TTBR0_EL1 from PR-3 actually works end-to-end.
  * ============================================================================ */
 extern void user_smoke_main(void *arg);
+extern void user_mmap_smoke_main(void *arg);
 
-int cmd_usertest(int argc, char *argv[])
+/* Pin a fresh user task to this CPU, dispatch it, and yield-poll
+ * until the slot is reaped or TERMINATED — shared between cmd_usertest
+ * and cmd_mmaptest. Returns 0 on success (task ran to exit) or -1 on
+ * task_create_user failure / poll-loop timeout. */
+static int run_user_smoke(const char *cmd_name, void (*entry)(void *))
 {
-    (void)argc;
-    (void)argv;
-
-    struct task *t = task_create_user("usertest", user_smoke_main, NULL,
+    struct task *t = task_create_user(cmd_name, entry, NULL,
                                       TASK_PRIORITY_DEFAULT);
     if (!t) {
-        shell_puts("usertest: task_create_user failed\r\n");
+        shell_printf("%s: task_create_user failed\r\n", cmd_name);
         return -1;
     }
-    /* Pin to the shell's CPU so yield() in the poll loop below
-     * deterministically dispatches the smoke task. Cross-CPU dispatch
-     * is a separate concern from #697 PR-4. */
     task_set_affinity(t, cpu_id());
     uint32_t task_id = t->id;
     scheduler_add_task(t);
 
-    /* Poll until the smoke task has exited. The scheduler reaps
-     * TERMINATED zombies on the next schedule cycle, so a slot that
-     * has gone away (task_get returns NULL or the id no longer
-     * matches) is a successful end state. TASK_TERMINATED is also a
-     * success state — caught before the auto-reap fires.
-     *
-     * Bound: 100k yields. With the smoke pinned to this CPU and a
-     * single SVC-log + SVC-exit path, this resolves in a few yields
-     * on QEMU and well under a millisecond on Pi 5. The high cap
-     * absorbs cooperative-preempt delays without a wall-clock check. */
+    /* Poll until reaped or TERMINATED. 100k yield cap absorbs
+     * cooperative-preempt delays on Pi 5 / Jetson without a
+     * wall-clock check; on QEMU resolves in a few yields. */
     for (int i = 0; i < 100000; i++) {
         struct task *cur = task_get(task_id);
         if (!cur || cur->id != task_id) {
-            shell_puts("usertest: ok\r\n");
             return 0;
         }
         if (cur->state == TASK_TERMINATED) {
-            shell_puts("usertest: ok\r\n");
             return 0;
         }
         yield();
     }
 
-    shell_puts("usertest: timeout — user task did not exit\r\n");
+    shell_printf("%s: timeout — user task did not exit\r\n", cmd_name);
     return -1;
+}
+
+int cmd_usertest(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    if (run_user_smoke("usertest", user_smoke_main) != 0) {
+        return -1;
+    }
+    shell_puts("usertest: ok\r\n");
+    return 0;
+}
+
+int cmd_mmaptest(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    if (run_user_smoke("mmaptest", user_mmap_smoke_main) != 0) {
+        return -1;
+    }
+    shell_puts("mmaptest: ok\r\n");
+    return 0;
 }
 #endif /* !PLATFORM_X86_64 */
 

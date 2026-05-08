@@ -82,6 +82,16 @@
 #define USER_STACK_TOP      (USER_STACK_PAGE_VA + PAGE_SIZE)
 
 /*
+ * Bump-allocator window for sys_mmap. Starts 1 MB into the user
+ * window — well clear of .text.user (1 page) and the stack (1 page),
+ * with plenty of headroom for either to grow before they collide.
+ *
+ * Allocator never reuses VA, so a fresh allocation never aliases
+ * stale TLB entries from a prior munmap of the same range.
+ */
+#define USER_MMAP_VA_START  (USER_VA_BASE + 0x100000)
+
+/*
  * ==========================================================================
  * Page Table Entry Definitions
  * ==========================================================================

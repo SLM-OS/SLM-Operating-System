@@ -27,7 +27,20 @@
 #define SYS_SLEEP       5       /* Sleep: sys_sleep(ms) */
 #define SYS_LOG         6       /* Log to UART: sys_log(str, len) */
 #define SYS_TOUCH_BLOCK 7       /* Touch model block: sys_touch_block(handle) (#123) */
-#define SYS_MAX         8       /* Sentinel (must be last + 1) */
+#define SYS_MMAP        8       /* Map anonymous user pages: sys_mmap(hint, len, prot, flags) → user VA or -1 */
+#define SYS_MUNMAP      9       /* Unmap user pages: sys_munmap(addr, len) → 0 or -1 */
+#define SYS_MAX         10      /* Sentinel (must be last + 1) */
+
+/* SYS_MMAP / SYS_MUNMAP flags. Subset of POSIX semantics — kept
+ * minimal. `prot` controls the AP / XN bits on the resulting
+ * mapping; `flags` is reserved for future use (today implicitly
+ * MAP_ANONYMOUS, zero-filled, private). */
+#define PROT_NONE       0x0
+#define PROT_READ       0x1
+#define PROT_WRITE      0x2
+#define PROT_EXEC       0x4
+
+#define MAP_ANONYMOUS   0x0     /* Default; no FD, zero-filled */
 
 /* SPSR value for EL0t (EL0, SP_EL0, all interrupts enabled) */
 #define SPSR_EL0T       0x0
