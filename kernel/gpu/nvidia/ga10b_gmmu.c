@@ -447,7 +447,9 @@ static void *alloc_zero_table_page(void)
     void *p = pmm_alloc_page();
     if (p == NULL) return NULL;
     volatile uint64_t *q = (volatile uint64_t *)p;
-    for (int i = 0; i < 512; i++) q[i] = 0;
+    for (int i = 0; i < 512; i++) {
+        q[i] = 0;
+    }
     cache_clean_range(p, 4096);
     return p;
 }
