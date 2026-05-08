@@ -69,24 +69,61 @@ Touches: `docs/pi5-el0-execution-plan.md` (new), `kernel/include/task.h` (new fi
 
 Acceptance: plan doc reviewed; kernel still builds clean on all 3 ARM64 platforms; `make test` passes.
 
-### PR 2 — Kernel at high VA (TTBR1)
+### PR 2 — Per-task L1 plumbing
 
-Goal: stop sharing one L1 between TTBR0 and TTBR1. Move the kernel into TTBR1's high-VA region so TTBR0 is freed up for per-task user mappings.
+Goal: prepare a `vmm_create_user_l1` / `vmm_destroy_user_l1` API so PR-3 can populate per-task L1 tables, and decide concretely how the kernel mappings remain reachable when a per-task L1 is loaded into `TTBR0_EL1`.
 
-Mechanism:
+Two designs are viable; **PR 2 picks one before writing code**:
 
-- `kernel/arch/arm64/linker.ld`: link `.text` / `.data` / `.bss` at a high VA base (`KERNEL_VA_BASE = 0xFFFFFF8000000000`) while keeping the load PA at `RAM_BASE`.
-- `kernel/arch/arm64/boot.S`: after `mmu_enable`, load the high-VA address of a `kernel_high_entry` label and `br` there. From that point on, the kernel runs at high VA. Reload SP to high VA. Reload exception-vector base to high VA (`vbar_el1` redirect under VHE).
-- `kernel/mm/vmm.c`: split the L1 — populate `l1_table_user` (TTBR0 region, identity-mapped during boot only, cleared after the high-VA jump) and `l1_table_kernel` (TTBR1 region, all kernel mappings). Update `mmu_enable` to write distinct TTBR0 and TTBR1.
+#### Option A — L1-clone (kernel stays at low VA)
 
-Touches: `kernel/arch/arm64/linker.ld`, `kernel/arch/arm64/boot.S`, `kernel/arch/arm64/mmu.S` (TTBR0/TTBR1 distinct args), `kernel/mm/vmm.c` (L1 split), `kernel/include/vmm.h` (new constants).
+- Each per-task L1 (allocated from PMM) starts as a copy of the boot L1's entries. L1 entries point to **shared** L2 tables for kernel mappings (so a future kernel-side mapping change propagates to all per-task L1s without per-task fix-up). The user-region L1 entries (covering whatever VA range a user task gets) are zeroed initially; PR 3/4 populate them with per-task L2 tables.
+- TTBR0 swap on context switch loads `task->user_l1_pa`. Kernel mappings stay reachable at the same low VA they're at today because the per-task L1 mirrors them via shared L2s.
+- Kernel doesn't move. Linker.ld unchanged. Boot.S unchanged.
+- Touches: `kernel/mm/vmm.c` (refactor `vmm_init` to keep kernel L2 tables addressable; new `vmm_create_user_l1` / `vmm_destroy_user_l1`), `kernel/include/vmm.h` (new declarations).
+- Risk: low (additive).
+
+#### Option B — Kernel at high VA (TTBR1) — original plan
+
+- Linker `.text`/`.data`/`.bss` relocated to `KERNEL_VA_BASE = 0xFFFFFF8000000000`. Boot.S adds a post-`mmu_enable` trampoline that branches from the identity-mapped low VA to the linked high VA. SP, VBAR, and any in-flight literal pointers reload to high VA.
+- After PR 2, kernel runs at high VA via `TTBR1_EL1`. `TTBR0_EL1` is freed; per-task L1s are pure user mappings (no kernel content).
+- Real KPTI-style separation. Future-proof for ASID tagging and stage-2 translation. Mirrors what every production kernel-OS does.
+- Touches: `kernel/arch/arm64/linker.ld`, `kernel/arch/arm64/boot.S`, `kernel/arch/arm64/mmu.S` (separate TTBR0/TTBR1 args), `kernel/mm/vmm.c` (L1 split), `kernel/include/vmm.h` (new constants), every platform's boot path.
+- Risk: high (every absolute-address pointer in the kernel; all 3 ARM64 boot paths affected).
+
+#### Decision
+
+| Concern | Option A (L1-clone) | Option B (high-VA) |
+|---|---|---|
+| Per-task EL0 isolation | ✓ | ✓ |
+| Kernel/user VA separation | ✗ (shared low-VA AS) | ✓ (separate halves) |
+| Boot path / linker changes | None | Major |
+| ASID future-proofing | Adequate | Better |
+| Estimated PR 2 size | ~150 lines | 200–500 lines, multi-platform |
+| Risk of regression | Low | High |
+
+For #697's scope (run a smoke EL0 task end-to-end), **Option A is sufficient and gets us there faster**. Option B becomes worthwhile once the kernel needs real KPTI-style separation (e.g. for security or for nested guests) — neither is in #697's scope.
+
+**PR 2 implements Option A.** A future "kernel at high VA" effort can layer on top without re-doing PR-3/4.
+
+#### Mechanism (Option A)
+
+- `kernel/mm/vmm.c`:
+  - Refactor `vmm_init` so `l1_table` (the boot L1) is built from explicit references to L2 tables that live at known PAs. The L2 tables (`l2_kernel`, `l2_mmio`, `l2_ram_*`, `l2_pcie_bar_win`) stay file-scoped statics today; PR-2 makes their PAs reachable from the new helpers.
+  - New `int vmm_create_user_l1(uint64_t *out_pa)`: allocates a 4 KB L1 page from PMM; copies the boot L1's L1 entries (which all happen to be in the lower VA range today since the kernel runs there) into the new L1; the user-region entries (TBD which range) are left zeroed. Returns 0 on success.
+  - New `void vmm_destroy_user_l1(uint64_t l1_pa)`: walks the per-task L1, frees any per-task L2/L3 sub-tables, frees the L1 page itself. Doesn't free shared kernel L2s.
+- `kernel/include/vmm.h`: declarations + a `USER_VA_BASE` / `USER_VA_LIMIT` pair defining which L1 entries are per-task vs shared (probably `0..256 GB` for user, the rest for kernel today since kernel image is in the low couple of GB).
+
+Touches: `kernel/mm/vmm.c`, `kernel/include/vmm.h`. No assembly changes, no linker-script changes, no boot.S changes.
 
 Acceptance:
 
-- `make test` passes (QEMU virt at EL1 — kernel running at high VA).
-- `kernel PLATFORM=RASPI5` boots to shell at EL2/VHE (kernel running at high VA).
-- `cpu` shell shows kernel `.text` at high VA.
-- `vmm` shell shows two distinct L1 tables.
+- `vmm_create_user_l1` returns a fresh L1 PA. Walking the L1 shows kernel L1 entries are mirrored from the boot L1 (same L2 PAs), and user-region L1 entries are zero.
+- `vmm_destroy_user_l1` frees the L1 cleanly.
+- New unit tests in `kernel/tests/test_vmm.c` cover both helpers.
+- `make test` (QEMU virt) passes.
+- `kernel PLATFORM=RASPI5` and `PLATFORM=JETSON_ORIN_NANO` build clean.
+- No hardware re-verification needed (no behavior change to running kernels — only new helpers).
 
 ### PR 3 — Per-task TTBR0 allocation + context-switch swap
 
@@ -145,9 +182,11 @@ Each PR must pass:
 - `make kernel PLATFORM=JETSON_ORIN_NANO` — clean build (Jetson is EL2 too, the high-VA refactor benefits it equally).
 - Pi 5 `pi-5-2` boot to shell with `SECONDARY_PREEMPT=ON` — no regression.
 
-PR 2 specific:
+PR 2 specific (Option A — L1-clone):
 
-- `vmm` shell shows kernel `.text` resolves at high VA via `TTBR1`.
+- `vmm_create_user_l1` returns a fresh L1 PA; walking it shows mirrored kernel L1 entries + zeroed user-region entries.
+- `vmm_destroy_user_l1` frees the L1 cleanly without leaking sub-tables.
+- New unit tests in `kernel/tests/test_vmm.c` cover both helpers.
 - A kernel-context syscall_dispatch test still passes (no regression on the existing fabricated-trap-frame tests in `test_syscall.c`).
 
 PR 3 specific:
@@ -164,10 +203,10 @@ PR 4 specific:
 
 ## Risks
 
-1. **Kernel-at-high-VA refactor (PR 2) is non-trivial.** ARM64 instructions are mostly PC-relative, so most code is naturally relocatable. But absolute pointers in initialised data, function-pointer tables, and any hardcoded `RAM_BASE`-style constants need auditing. Mitigation: an explicit audit table in PR 2's commit message / plan, similar to the `*_EL1` audit in #683's plan doc.
+1. **Per-task L1 mirroring drift.** Under Option A (L1-clone), each per-task L1 has its own copy of the boot L1's L1 entries. If the kernel later changes a kernel mapping by writing the boot L1 directly (rather than the underlying L2), the change won't propagate to existing per-task L1s. Mitigation: kernel-side mapping changes go through L2-level edits (which ARE shared). Document the invariant in `vmm.h` next to `vmm_create_user_l1`. Optionally, walk the per-task L1 table and re-clone if needed; deferred unless this surfaces.
 2. **TLB flush semantics on PR 3's TTBR0 swap.** `tlbi vmalle1` (non-shareable) is sufficient pre-SMP; for SMP we need `tlbi vmalle1is`. Today's scheduler can run a user task on any CPU. Mitigation: use the `is` variant from the start; pin the task to one CPU as a defensive option.
 3. **Linker-script section ordering for `.text.user` (PR 4).** Putting it adjacent to `.text` keeps PMM-free; putting it elsewhere requires extra mapping logic. Mitigation: standard linker-script practice.
-4. **Pi 5 cache discipline.** PR 2 changes the page tables before the MMU is enabled; PR 3 changes them at runtime under SMP. Existing `cache_clean_range` helpers cover both cases; new code must use them.
+4. **Pi 5 cache discipline.** PR 3 changes the page tables at runtime under SMP. Existing `cache_clean_range` helpers cover this; new code must use them.
 
 ---
 
@@ -182,4 +221,4 @@ PR 4 specific:
 
 ---
 
-*Last updated: 8 May 2026.*
+*Last updated: 8 May 2026 — PR 2 design split into Option A (L1-clone) and Option B (kernel at high VA); PR 2 chosen to implement Option A.*
