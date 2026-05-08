@@ -109,7 +109,13 @@ static int rmsnorm_launch_shape(const struct operator_dispatch_args *args,
      * upper bound for this kernel's scalar work — the GPU will fail
      * the dispatch loudly if too low. Tracked in #714 follow-on. */
     out->register_count_v = 32;
-    out->smem_size_bytes = 4096;   /* logits scratch + reduce_buf */
+    /* RmsNorm uses BLOCK_DIM (256) × float for the partial-sum
+     * reduction buffer (1024 B) plus a single float for the
+     * broadcast rms_inv (4 B). Round up to 2 KB to leave headroom
+     * for any future minor change to the kernel's shared layout
+     * without re-deriving the size. SASS-header-driven smem sizing
+     * is tracked in the same #714 follow-on as register_count_v. */
+    out->smem_size_bytes = 2048;
     out->slm_size_bytes  = 0;
     out->barrier_count   = 0;
     return 0;
