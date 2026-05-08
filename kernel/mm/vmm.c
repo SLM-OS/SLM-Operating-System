@@ -120,9 +120,19 @@ static struct {
 
 /*
  * Build a block descriptor (L2 entry for 2MB block).
+ *
+ * Block descriptors are kernel-mappings only — the per-task user L1
+ * always installs 4 KB pages via make_page_desc (which OR's PTE_NG
+ * for ASID tagging). A future caller that asks for a user-accessible
+ * block would silently produce a global mapping, breaking the ASID
+ * model; assert against it.
  */
 static uint64_t make_block_desc(uint64_t pa, uint32_t flags)
 {
+    if (flags & VMM_FLAG_USER) {
+        panic("make_block_desc: VMM_FLAG_USER on block descriptor "
+              "(user mappings must be 4 KB pages for ASID nG handling)");
+    }
     uint64_t desc = PTE_TYPE_BLOCK;
 
     /* Physical address (aligned to 2MB) */
@@ -195,6 +205,13 @@ static uint64_t make_block_desc(uint64_t pa, uint32_t flags)
 __attribute__((unused))
 static uint64_t make_l1_block_desc(uint64_t pa, uint32_t flags)
 {
+    /* Same restriction as make_block_desc: kernel-mappings only.
+     * User mappings must be 4 KB pages so make_page_desc can set
+     * PTE_NG for ASID tagging. */
+    if (flags & VMM_FLAG_USER) {
+        panic("make_l1_block_desc: VMM_FLAG_USER on L1 block "
+              "(user mappings must be 4 KB pages for ASID nG handling)");
+    }
     uint64_t desc = PTE_TYPE_BLOCK;
 
     /* Physical address (1GB aligned) */
@@ -598,9 +615,18 @@ void vmm_user_addrspace_switch(uint64_t l1_pa, uint16_t asid)
      * different ASID can co-exist in the TLB without aliasing this
      * one. Kernel PTEs are global (nG=0) and apply across all ASIDs.
      * Stale ASID-tagged entries are flushed at vmm_alloc_asid time
-     * if/when an ASID slot is recycled. */
+     * if/when an ASID slot is recycled.
+     *
+     * DSB ISHST before the MSR drains any prior PTE writes from the
+     * same CPU (e.g. vmm_user_map_page calls before this swap)
+     * through to the inner-shareable PoC, so the page-table walker
+     * is guaranteed to observe them when it next walks via the new
+     * TTBR0. Empirically the scheduler's spinlock cache maintenance
+     * already closes this window on Pi 5, but the architecture
+     * mandates the explicit barrier. */
     uint64_t ttbr0 = ((uint64_t)asid << 48) | (l1_pa & 0x0000FFFFFFFFFFFFUL);
     __asm__ volatile(
+        "dsb ishst\n"
         "msr ttbr0_el1, %0\n"
         "isb\n"
         :: "r"(ttbr0)
