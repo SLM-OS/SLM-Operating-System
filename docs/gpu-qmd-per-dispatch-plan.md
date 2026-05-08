@@ -9,6 +9,38 @@ inference returns stale results — off-by-one between dispatches).
 
 ---
 
+## Status (2026-05-07)
+
+**Done.** End-to-end v7 + HMMA dispatch verified on jetson-nano-2 with
+`SLMOS_GEMM_TIER=hmma slmos-kexec --no-gpu-suspend`. Landed in
+[PR #694](https://github.com/SLM-OS/SLM-Operating-System/pull/694)
+(merged commit `4ef44135`).
+
+| Phase | State | Notes |
+|---|---|---|
+| 1. Port encoder | ✅ | `kernel/gpu/nvidia/ga10b_qmd.{c,h}` mirrors the helper's encoder. |
+| 2. Handoff v7 | ✅ | `qmd_pool_phys/gpu_va/size_bytes/n_slots` tail; size pinned at 256 B. |
+| 3. QMD pool alloc | ✅ | Helper maps via `gpu_alloc_qmd_pool`; default 1024 slots. |
+| 4. Byte-compare selftest | ✅ | `test_qmd_selftest_reference_matches_encoder` + the v7-stride pinning test. |
+| 5. Switch dispatch to fresh QMD | ✅ | `ga10b_dispatch_v7_pipeline` builds a fresh QMD per launch via `ga10b_qmd_pool_prepare`. |
+| 6. Hardware re-probe | ✅ | jetson-nano-2: vertical-bar input → argmax=1, zero input → argmax=5; helper standalone shows max\|err\|=0.000410 vs CPU FP32. |
+| 7. Buffer / unknowns | ✅ | Closed in flight: scanner-level v7 acceptance (#694), v7 tail-field copy on inherit (#710), version-aware pipeline-output stride (#710), `slm-put.py --resume` false alarm (#715). |
+
+**Bonus delivery (out of original plan scope).** HMMA tier — FP32-activation
+× FP16-weight tensor-core GEMM at MNIST op 6 — added in the same PR.
+The QMD encoder propagates `smem_size_bytes`, `slm_size_bytes`, and
+`barrier_count` from the v7 op, which the HMMA SASS requires
+(`SHARED_MEMORY_SIZE = 2048`, `BARRIER_COUNT = 3`). Without that
+propagation the WMMA chain stalls op[N+1] silently. Tensor cores
+demonstrably executing under SLM-OS on real GA10B silicon.
+
+**Outstanding follow-ups** (all out of scope here, tracked separately):
+- [#573](https://github.com/SLM-OS/SLM-Operating-System/issues/573) — async batched dispatch architecture for SLM workloads (per-launch poll overhead from the §7 risk note; deferred per the plan's exit criteria).
+- [#702](https://github.com/SLM-OS/SLM-Operating-System/issues/702) — `compute_ready` audit (eligibility gate is a static `#ifdef PLATFORM_JETSON_ORIN_NANO`, decoupled from actual handoff state; not a v7-specific issue but exposed during this work).
+- [#692](https://github.com/SLM-OS/SLM-Operating-System/issues/692) — original "GPU MNIST returns CPU-identical logits" finding now largely explained by suspend-kexec masking (compute_ready=1 even when inherit failed silently); kept open until #702 resolves.
+
+---
+
 ## 1. Why a fresh QMD per dispatch
 
 Hardware-collected probe data on jetson-nano-2 (issue #558 comments,
