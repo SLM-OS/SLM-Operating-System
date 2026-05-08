@@ -215,7 +215,7 @@ command, Phase 5.1 I/O tensor-shape extraction (input/output pad
 dims from the first network group), and Phase 5.2 firmware
 control-channel RPC transport (`hailo_control.{c,h}` — MD5-stamped,
 MSI-on-BAR0 completion, BE header scalars; see
-`../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md` §4.5/4.6 for the wire-format
+`~/slmos-ref/derivatives/notes/hailo-driver-notes.md` §4.5/4.6 for the wire-format
 gotchas and opcode layouts) all landed. On pi-5-1 with the HAT+
 mounted: `hailo probe` succeeds (vendor=0x1e60 device=0x2864),
 `hailo boot` uploads the 164 KB Hailo-8 firmware blob (app + cert

@@ -425,6 +425,20 @@ static const struct help_entry help_entries[] = {
         "  - Task name\n"
     ),
 
+    HELP_TEXT("usertest",
+        "usertest - Run the EL0 smoke task (#697 PR-4)\n"
+        "\n"
+        "Usage:\n"
+        "  usertest\n"
+        "\n"
+        "Creates a user-mode (EL0) task whose entry is `user_smoke_main`\n"
+        "in .text.user, runs it on the per-task TTBR0_EL1 from PR-3, and\n"
+        "waits up to 1 s for it to terminate. The task prints\n"
+        "\"[USERTEST] hello\" via SYS_LOG and exits via SYS_EXIT.\n"
+        "\n"
+        "Used to verify the EL1 -> EL0 -> EL1 round-trip end-to-end.\n"
+    ),
+
     HELP_TEXT("cpu",
         "cpu - Show CPU status\n"
         "\n"

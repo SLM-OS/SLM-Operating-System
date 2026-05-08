@@ -367,7 +367,7 @@
  * the pad's function (GPIO vs SFIO peripheral), pull, drive enable,
  * input receiver, and other pad-level config. Per-pad register
  * offsets come from `tegra234_groups[]` in
- * `../slmos-reference-cache/linux/linux-pinctrl-tegra234.c` — see the per-offset
+ * `~/slmos-ref/linux/linux-pinctrl-tegra234.c` — see the per-offset
  * comment block below for why T194's table is *not* a safe source.
  * Pinmux register layout (per PIN_PINGROUP_ENTRY_Y):
  *   bits[1:0]  PM       — special-function select (0..3 = SF1..SF4)
@@ -402,7 +402,7 @@
  * **Don't trust pinmux offsets from Tegra194 source for T234.** The
  * pad table layout was reshuffled between T194 and T234; same pad
  * names but different register offsets. These values come from
- * `tegra234_groups[]` in `../slmos-reference-cache/linux/linux-pinctrl-tegra234.c`,
+ * `tegra234_groups[]` in `~/slmos-ref/linux/linux-pinctrl-tegra234.c`,
  * not the T194 table.
  */
 #define TEGRA234_PINMUX_CAM_RESET_OFF  0x4008u   /* PH.06 (within MAIN) */
@@ -607,7 +607,7 @@
 /* RP1 clock controller, at RP1_BAR + 0x18000 per rp1.dtsi. Stage 2
  * of the MACB driver writes CLK_ETH_CTRL / CLK_ETH_TSU_CTRL here to
  * enable the Ethernet clocks. Offsets from Linux drivers/clk/clk-rp1.c
- * (cached at ../slmos-reference-cache/linux/linux-rpi-clk-rp1.c). */
+ * (cached at ~/slmos-ref/linux/linux-rpi-clk-rp1.c). */
 #define RP1_CLOCKS_BASE         0x1F00018000UL
 #define RP1_CLK_ETH_CTRL        0x00064     /* 125 MHz TX clock */
 #define RP1_CLK_ETH_TSU_CTRL    0x00134     /*  50 MHz timestamp unit clock */

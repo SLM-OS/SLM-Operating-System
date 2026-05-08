@@ -103,7 +103,7 @@
 #define NVC7C0_SEND_PCAS_A                            0x02b4
 /* Ampere (cls_compute > TURING_COMPUTE_A) dispatches via PCAS2_B
  * with a composite action rather than PCAS_B's two-bit
- * invalidate/schedule. See ../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c:
+ * invalidate/schedule. See ~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c:
  * 322-340 — Ampere branch emits SEND_SIGNALING_PCAS2_B with
  * action=INVALIDATE_COPY_SCHEDULE (0xA). Using PCAS_B on GA10B
  * silently no-ops the dispatch even though the pushbuffer is
@@ -129,7 +129,7 @@
 
 /* ============================================================
  * QMDV03_00 field bit ranges (Ampere), from
- * ../slmos-reference-cache/mesa/mesa-clc7c0qmd.h.
+ * ~/slmos-ref/mesa/mesa-clc7c0qmd.h.
  * ============================================================ */
 #define QMD_MAJOR_VERSION_HI              583
 #define QMD_MAJOR_VERSION_LO              580

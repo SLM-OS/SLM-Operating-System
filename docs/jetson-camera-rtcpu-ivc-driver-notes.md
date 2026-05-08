@@ -4,7 +4,7 @@ Code-read of the Linux-for-Tegra (L4T) `tegra-camera-rtcpu` platform driver and
 its HSP+IVC transport layer, captured to scope the SLM-OS port. Companion to
 `docs/jetson-camera-imx219-plan.md` (§"VI driver", §"Pre-Hardware Tasks") and
 `docs/jetson-camera-vi-driver-notes.md`. The capture-protocol message wire
-format is already documented via `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`
+format is already documented via `~/slmos-ref/tegra-l4t/l4t-camrtc-capture-messages.h`
 and `l4t-camrtc-capture.h`; this document covers the **transport layer**
 underneath them.
 
@@ -21,27 +21,27 @@ patch series on top of upstream `linux-tegra`.
 
 | Cache file | Upstream path |
 |---|---|
-| `../slmos-reference-cache/tegra-l4t/l4t-tegra-camera-rtcpu.c` | `nvidia/drivers/platform/tegra/tegra-camera-rtcpu.c` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-hsp-combo.c` / `.h` | `nvidia/drivers/platform/tegra/rtcpu/hsp-combo.{c,h}` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-hsp-mailbox-client.c` | `nvidia/drivers/platform/tegra/rtcpu/hsp-mailbox-client.c` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-ivc-bus.c` | `nvidia/drivers/platform/tegra/rtcpu/ivc-bus.c` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-tegra-rtcpu-trace.c` | `nvidia/drivers/platform/tegra/rtcpu/tegra-rtcpu-trace.c` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-rtcpu-monitor.c` | `nvidia/drivers/platform/tegra/rtcpu/rtcpu-monitor.c` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-capture-ivc-priv.h` | `nvidia/drivers/platform/tegra/rtcpu/capture-ivc-priv.h` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-clk-group.c` | `nvidia/drivers/platform/tegra/rtcpu/clk-group.c` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-reset-group.c` | `nvidia/drivers/platform/tegra/rtcpu/reset-group.c` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-device-group.c` | `nvidia/drivers/platform/tegra/rtcpu/device-group.c` |
-| `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-camera-diagnostics.c` | `nvidia/drivers/platform/tegra/rtcpu/camera-diagnostics.c` |
-| `../slmos-reference-cache/tegra-l4t/l4t-camrtc-channels.h` | `nvidia/include/soc/tegra/camrtc-channels.h` |
-| `../slmos-reference-cache/tegra-l4t/l4t-camrtc-commands.h` | `nvidia/include/soc/tegra/camrtc-commands.h` |
-| `../slmos-reference-cache/tegra-l4t/l4t-camrtc-common.h` | `nvidia/include/soc/tegra/camrtc-common.h` |
-| `../slmos-reference-cache/tegra-l4t/l4t-camrtc-trace.h` | `nvidia/include/soc/tegra/camrtc-trace.h` |
-| `../slmos-reference-cache/tegra-l4t/l4t-camrtc-dbg-messages.h` | `nvidia/include/soc/tegra/camrtc-dbg-messages.h` |
-| `../slmos-reference-cache/tegra-l4t/l4t-binding-nvidia-tegra194-rce.txt` | `nvidia/Documentation/devicetree/bindings/platform/tegra/nvidia,tegra194-rce.txt` |
-| `../slmos-reference-cache/tegra-l4t/l4t-binding-tegra-ivc-channel.txt` | `nvidia/Documentation/devicetree/bindings/platform/tegra/tegra-ivc-channel.txt` |
-| `../slmos-reference-cache/tegra-l4t/l4t-binding-nvidia-tegra186-hsp.txt` | `nvidia/Documentation/devicetree/bindings/platform/tegra/nvidia,tegra186-hsp.txt` |
-| `../slmos-reference-cache/tegra-l4t/l4t-tegra234-camera.dtsi` | `nvidia/soc/t23x/kernel-dts/tegra234-soc/tegra234-camera.dtsi` |
-| `../slmos-reference-cache/tegra-l4t/l4t-tegra234-soc-base.dtsi` | `nvidia/soc/t23x/kernel-dts/tegra234-soc/tegra234-soc-base.dtsi` |
+| `~/slmos-ref/tegra-l4t/l4t-tegra-camera-rtcpu.c` | `nvidia/drivers/platform/tegra/tegra-camera-rtcpu.c` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-hsp-combo.c` / `.h` | `nvidia/drivers/platform/tegra/rtcpu/hsp-combo.{c,h}` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-hsp-mailbox-client.c` | `nvidia/drivers/platform/tegra/rtcpu/hsp-mailbox-client.c` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-ivc-bus.c` | `nvidia/drivers/platform/tegra/rtcpu/ivc-bus.c` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-tegra-rtcpu-trace.c` | `nvidia/drivers/platform/tegra/rtcpu/tegra-rtcpu-trace.c` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-rtcpu-monitor.c` | `nvidia/drivers/platform/tegra/rtcpu/rtcpu-monitor.c` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-capture-ivc-priv.h` | `nvidia/drivers/platform/tegra/rtcpu/capture-ivc-priv.h` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-clk-group.c` | `nvidia/drivers/platform/tegra/rtcpu/clk-group.c` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-reset-group.c` | `nvidia/drivers/platform/tegra/rtcpu/reset-group.c` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-device-group.c` | `nvidia/drivers/platform/tegra/rtcpu/device-group.c` |
+| `~/slmos-ref/tegra-l4t/l4t-rtcpu-camera-diagnostics.c` | `nvidia/drivers/platform/tegra/rtcpu/camera-diagnostics.c` |
+| `~/slmos-ref/tegra-l4t/l4t-camrtc-channels.h` | `nvidia/include/soc/tegra/camrtc-channels.h` |
+| `~/slmos-ref/tegra-l4t/l4t-camrtc-commands.h` | `nvidia/include/soc/tegra/camrtc-commands.h` |
+| `~/slmos-ref/tegra-l4t/l4t-camrtc-common.h` | `nvidia/include/soc/tegra/camrtc-common.h` |
+| `~/slmos-ref/tegra-l4t/l4t-camrtc-trace.h` | `nvidia/include/soc/tegra/camrtc-trace.h` |
+| `~/slmos-ref/tegra-l4t/l4t-camrtc-dbg-messages.h` | `nvidia/include/soc/tegra/camrtc-dbg-messages.h` |
+| `~/slmos-ref/tegra-l4t/l4t-binding-nvidia-tegra194-rce.txt` | `nvidia/Documentation/devicetree/bindings/platform/tegra/nvidia,tegra194-rce.txt` |
+| `~/slmos-ref/tegra-l4t/l4t-binding-tegra-ivc-channel.txt` | `nvidia/Documentation/devicetree/bindings/platform/tegra/tegra-ivc-channel.txt` |
+| `~/slmos-ref/tegra-l4t/l4t-binding-nvidia-tegra186-hsp.txt` | `nvidia/Documentation/devicetree/bindings/platform/tegra/nvidia,tegra186-hsp.txt` |
+| `~/slmos-ref/tegra-l4t/l4t-tegra234-camera.dtsi` | `nvidia/soc/t23x/kernel-dts/tegra234-soc/tegra234-camera.dtsi` |
+| `~/slmos-ref/tegra-l4t/l4t-tegra234-soc-base.dtsi` | `nvidia/soc/t23x/kernel-dts/tegra234-soc/tegra234-soc-base.dtsi` |
 
 ---
 
@@ -163,7 +163,7 @@ The two **load-bearing channels for IMX219 capture** are `ivccontrol@3`
 ("capture-control", carries `CAPTURE_CHANNEL_SETUP_REQ`,
 `CAPTURE_CHANNEL_RESET_REQ`, etc.) and `ivccapture@4` ("capture", carries
 `CAPTURE_REQUEST_REQ` and `CAPTURE_STATUS_IND`). Wire format already
-documented in `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`. Trace and
+documented in `~/slmos-ref/tegra-l4t/l4t-camrtc-capture-messages.h`. Trace and
 diagnostics channels can be skipped for a minimal port.
 
 **Region layout** (`l4t-rtcpu-ivc-bus.c:467-533`, region descriptor in
@@ -195,7 +195,7 @@ So a minimal IMX219 deployment needs ONE region containing two channels
 rings, plus rounding — comfortably under one 1 MB carveout.
 
 The IVC ring layout itself is the same `tegra-ivc.c` ring used by BPMP MRQ
-(`../slmos-reference-cache/linux/linux-tegra-ivc.c`) — head + tail + counts + payload, with
+(`~/slmos-ref/linux/linux-tegra-ivc.c`) — head + tail + counts + payload, with
 DMB / DSB ordering already implemented in SLM-OS's `kernel/drivers/bpmp/ivc.c`.
 
 ---
@@ -304,7 +304,7 @@ CCPLEX and BPMP using HSP doorbells at `HSP_TOP_BASE = 0x03C00000`
 | Piece | BPMP path (today) | Camera-RTCPU path (to add) | Verdict |
 |---|---|---|---|
 | HSP region | `0x03C00000` (`hsp_top`) | `0x0B950000` (`hsp_rce`) | **Different base — same `nvidia,tegra186-hsp` layout. SLM-OS's `hsp_init(uintptr_t hsp_base)` (kernel/drivers/bpmp/hsp.h:66) already accepts an arbitrary base, so the dimensioning probe and offset math is reusable verbatim.** |
-| HSP signaling primitive | **Doorbell** block (CCPLEX→BPMP). Single bit toggle in TRIGGER, polled / IRQ via PENDING. | **Shared-mailbox pair** (CCPLEX TX → RCE RX; RCE TX → CCPLEX RX) plus a **shared semaphore** for per-channel group bits. Each side polls TX-empty / RX-full state. | **Different. New code needed: SM TX/RX register accessors and SS get/set/clear. Linux's reference is `nvidia/drivers/platform/tegra/hsp/`; the shared-mailbox register set is documented in `../slmos-reference-cache/linux/linux-tegra-hsp.c` (already cached for the BPMP work).** |
+| HSP signaling primitive | **Doorbell** block (CCPLEX→BPMP). Single bit toggle in TRIGGER, polled / IRQ via PENDING. | **Shared-mailbox pair** (CCPLEX TX → RCE RX; RCE TX → CCPLEX RX) plus a **shared semaphore** for per-channel group bits. Each side polls TX-empty / RX-full state. | **Different. New code needed: SM TX/RX register accessors and SS get/set/clear. Linux's reference is `nvidia/drivers/platform/tegra/hsp/`; the shared-mailbox register set is documented in `~/slmos-ref/linux/linux-tegra-hsp.c` (already cached for the BPMP work).** |
 | Wire-message format on the mailbox | 32-bit BPMP MRQ index + IVC ring head/tail tracked separately (the doorbell only signals "look at the ring"). | 32-bit `CAMRTC_HSP_MSG(id, 24-bit param)` packed into the mailbox itself; sub-protocol of HELLO/PROTOCOL/RESUME/SUSPEND/BYE/CH_SETUP/PING/FW_HASH/IRQ. The mailbox carries control traffic; IVC frames carry capture data. | **Different. New code needed: wire encoding macros (`CAMRTC_HSP_MSG`, `CAMRTC_HSP_MSG_ID`, `CAMRTC_HSP_MSG_PARAM`) plus a small request/response state machine. ~150 lines following `l4t-rtcpu-hsp-combo.c:200-396`.** |
 | IVC ring layout + ordering | `linux-tegra-ivc.c` ring: head/tail counters, frame buffer, `smp_mb()` ordering. SLM-OS's `kernel/drivers/bpmp/ivc.c` is a port of this. | **Same** ring shape. `tegra_ivc_init_with_dma_handle` is the same call site Linux uses for both. Per-channel rings live inside a shared region instead of standalone allocations, but the per-ring code path is identical. | **Same. SLM-OS's existing `ivc.c` can be lifted with no changes; only the surrounding region-allocation / TLV-config layer is new.** |
 | Channel multiplexing | Single BPMP channel — no multiplexing. | Up to 8 groups per VM, multiple channels per group; group bits in shared semaphore identify which channel(s) to drain on RX-full. | **Different. SLM-OS needs a small dispatch table mapping group bits to channel-handler callbacks. Trivial — ~30 lines.** |
@@ -550,7 +550,7 @@ loop on jetson-nano-1):
    `MRQ_RESET_DEASSERT` for `TEGRA234_RESET_RCE_ALL` from SLM-OS
    itself before the HELLO. Mirrors L4T's
    `tegra_camrtc_poweron` (cached at
-   `../slmos-reference-cache/tegra-l4t/l4t-tegra-camera-rtcpu.c:856`).
+   `~/slmos-ref/tegra-l4t/l4t-tegra-camera-rtcpu.c:856`).
 4. **HSP common-region INT_STATUS readback.** Peek the HSP common
    region's INT_STATUS register (per-shared-IRQ-output pending
    mask, `linux-tegra-hsp.c:HSP_INT_STATUS`). If the shared-IRQ
@@ -658,7 +658,7 @@ left intact for the SYNC handshake to observe.
 ### Gotcha 2 — rate-limit the SYNC handshake; RCE has a heartbeat watchdog
 
 L4T's `tegra_ivc_reset` + `tegra_ivc_notified`
-(`../slmos-reference-cache/linux/linux-tegra-ivc.c:398`) drives the IVC state machine
+(`~/slmos-ref/linux/linux-tegra-ivc.c:398`) drives the IVC state machine
 on actual SS-bit interrupts — one notify per state transition. SLM-OS
 polls instead, and a tight no-spacing poll loop trips RCE's heartbeat
 watchdog (`BUG: core/watchdog/heartbeat-task.c:73 *** RCE WATCHDOG
@@ -695,7 +695,7 @@ did NOT work (tracking issue #458, closed by PR #460).
 
 `notify_rce(group)` in `camrtc_ivc.c` mirrors L4T
 `camrtc_hsp_vm_group_ring`
-(`../slmos-reference-cache/tegra-l4t/l4t-rtcpu-hsp-combo.c:252`):
+(`~/slmos-ref/tegra-l4t/l4t-rtcpu-hsp-combo.c:252`):
 
 ```c
 mmio_write32(SS0 + SHRD_SEM_SET, (group & 0xFF) << 16);
@@ -713,7 +713,7 @@ waiting for the matching response).
 ### Capture-control message wrappers (PR #461)
 
 `kernel/include/camrtc_capture.h` defines the typed wire-format
-structs ported from `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`,
+structs ported from `~/slmos-ref/tegra-l4t/l4t-camrtc-capture-messages.h`,
 with sizes pinned by `_Static_assert`s in
 `kernel/tests/test_camera.c`:
 

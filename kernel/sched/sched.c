@@ -2158,14 +2158,21 @@ void schedule(void)
     }
 
 #if !defined(PLATFORM_X86_64)
-    /* Swap TTBR0_EL1 to the incoming task's per-task L1 when entering a
-     * user-mode task (#697 PR-3). Kernel→kernel switches keep the boot
-     * L1 in TTBR0 — there is no observable user-VA mapping for kernel
-     * tasks, so the existing identity mapping is fine. The IRQs-disabled
-     * window held by rq_lock_irqsave covers this swap, so no other CPU
-     * (or this CPU) can observe a half-swapped state. */
+    /* TTBR0_EL1 management for user-task transitions (#697 PR-3 + PR-4).
+     *
+     *   user → user / kernel → user: write next's L1.
+     *   user → kernel : restore the boot L1 so the outgoing user L1
+     *     (which task_destroy may free) is no longer the walker's
+     *     active root. Without this, freeing the user L1 corrupts the
+     *     active translation tables on the same CPU.
+     *   kernel → kernel: leave TTBR0 alone (already boot L1).
+     *
+     * The swap runs under rq_lock_irqsave, so no other CPU (or this
+     * CPU) can observe a half-swapped state. */
     if (next->is_user && next->user_l1_pa) {
         vmm_user_addrspace_switch(next->user_l1_pa);
+    } else if (current && current->is_user) {
+        vmm_user_addrspace_switch(vmm_boot_l1_pa());
     }
 #endif
 

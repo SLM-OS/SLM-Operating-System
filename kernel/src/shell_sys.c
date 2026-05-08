@@ -653,6 +653,64 @@ int cmd_sleep(int argc, char *argv[])
     return 0;
 }
 
+#if !defined(PLATFORM_X86_64)
+/* ============================================================================
+ * usertest - Smoke test for #697 EL0 user-mode execution.
+ *
+ * Creates a user task whose entry is `user_smoke_main` (in .text.user),
+ * adds it to the scheduler, and waits up to 1 s for it to terminate.
+ * The user task is expected to print "[USERTEST] hello\n" via SYS_LOG
+ * and exit via SYS_EXIT — proving the EL1 → EL0 → EL1 round-trip on
+ * the per-task TTBR0_EL1 from PR-3 actually works end-to-end.
+ * ============================================================================ */
+extern void user_smoke_main(void *arg);
+
+int cmd_usertest(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    struct task *t = task_create_user("usertest", user_smoke_main, NULL,
+                                      TASK_PRIORITY_DEFAULT);
+    if (!t) {
+        shell_puts("usertest: task_create_user failed\r\n");
+        return -1;
+    }
+    /* Pin to the shell's CPU so yield() in the poll loop below
+     * deterministically dispatches the smoke task. Cross-CPU dispatch
+     * is a separate concern from #697 PR-4. */
+    task_set_affinity(t, cpu_id());
+    uint32_t task_id = t->id;
+    scheduler_add_task(t);
+
+    /* Poll until the smoke task has exited. The scheduler reaps
+     * TERMINATED zombies on the next schedule cycle, so a slot that
+     * has gone away (task_get returns NULL or the id no longer
+     * matches) is a successful end state. TASK_TERMINATED is also a
+     * success state — caught before the auto-reap fires.
+     *
+     * Bound: 100k yields. With the smoke pinned to this CPU and a
+     * single SVC-log + SVC-exit path, this resolves in a few yields
+     * on QEMU and well under a millisecond on Pi 5. The high cap
+     * absorbs cooperative-preempt delays without a wall-clock check. */
+    for (int i = 0; i < 100000; i++) {
+        struct task *cur = task_get(task_id);
+        if (!cur || cur->id != task_id) {
+            shell_puts("usertest: ok\r\n");
+            return 0;
+        }
+        if (cur->state == TASK_TERMINATED) {
+            shell_puts("usertest: ok\r\n");
+            return 0;
+        }
+        yield();
+    }
+
+    shell_puts("usertest: timeout — user task did not exit\r\n");
+    return -1;
+}
+#endif /* !PLATFORM_X86_64 */
+
 /* ============================================================================
  * bench - Performance benchmarking
  *
@@ -3923,6 +3981,15 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_channel_handoff.h"
 #include "../gpu/nvidia/ga10b_gmmu.h"
 #include "oplib_pool.h"
+/* cache_clean_range / pmm_alloc_page are already pulled in via the
+ * earlier `gpu/gpu.h` and top-level `pmm.h` includes. Don't add
+ * `cache.h` here — gpu.h declares cache_clean_range as
+ * `void cache_clean_range(void *, size_t)` (the linked C ABI in
+ * `kernel/gpu/cache.c`) while `kernel/include/cache.h` declares it
+ * `static inline ... (const volatile void *, size_t)`; including
+ * both in the same TU triggers conflicting-types build errors.
+ * Pre-existing API inconsistency tracked separately; for this PR
+ * we use whichever declaration is already in scope. */
 
 /*
  * nvgpu - Jetson GA10B nvgpu-native bringup driver (ACR → FECS → GPCCS
@@ -4122,7 +4189,138 @@ int cmd_nvgpu(int argc, char *argv[])
          */
         if (argc < 3) {
             shell_puts("usage: nvgpu gmmu <pushbuf | walk <hex_va> | "
-                       "walk-raw <inst_phys_hex> <hex_va>>\r\n");
+                       "walk-raw <inst_phys_hex> <hex_va> | alloc-page>\r\n");
+            return -1;
+        }
+        if (strcmp(argv[2], "alloc-page-synth") == 0) {
+            /* Synthetic-handoff variant of alloc-page: build a fresh
+             * inst block + PDB page in PMM, then run the writer
+             * against that. Proves the writer composes correct
+             * PDE/PTE entries that the walker can read back —
+             * without depending on a real GPU channel handoff
+             * (jetson-nano-1 has no gpu-mnist host helper, so no
+             * handoff gets published pre-kexec).
+             *
+             * Real-channel validation needs `nvgpu inherit + channel`
+             * on a Jetson with helpers staged. Tracked in #678 /
+             * Milestone B follow-up. */
+            void *inst = pmm_alloc_page();
+            void *pdb_page = pmm_alloc_page();
+            if (inst == NULL || pdb_page == NULL) {
+                shell_puts("alloc-page-synth: PMM exhaustion\r\n");
+                return -1;
+            }
+            /* Zero both pages so all PT entries are invalid. */
+            for (int i = 0; i < 512; i++) {
+                ((volatile uint64_t *)inst)[i] = 0;
+                ((volatile uint64_t *)pdb_page)[i] = 0;
+            }
+            /* Write the PDB pointer into the inst block at byte
+             * offset 512 (= word 128 = ram_in_page_dir_base_lo_w()).
+             * Encoding: bits[2:1]=target sys_mem_coh(2), bit[3]=vol,
+             * bits[31:12]=pdb_phys[31:12], hi word = pdb_phys[63:32]. */
+            uint64_t inst_phys = (uint64_t)(uintptr_t)inst;
+            uint64_t pdb_phys = (uint64_t)(uintptr_t)pdb_page;
+            volatile uint32_t *iw = (volatile uint32_t *)inst;
+            iw[128] = ((uint32_t)pdb_phys & 0xfffff000u) |
+                      (2u << 1) /* target=sys_mem_coh */ |
+                      (1u << 3) /* volatile */;
+            iw[129] = (uint32_t)(pdb_phys >> 32);
+            cache_clean_range(inst, 4096);
+            cache_clean_range(pdb_page, 4096);
+
+            shell_printf("alloc-page-synth: inst=0x%lx pdb=0x%lx\r\n",
+                         (unsigned long)inst_phys, (unsigned long)pdb_phys);
+
+            uint64_t gpu_va = 0, phys = 0;
+            void *cpu_va = NULL;
+            int rc = ga10b_gmmu_alloc_page(inst_phys, 0,
+                                           &gpu_va, &cpu_va, &phys);
+            if (rc < 0) {
+                shell_printf("ga10b_gmmu_alloc_page failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("alloc-page-synth: gpu_va=0x%lx cpu_va=%p phys=0x%lx\r\n",
+                         (unsigned long)gpu_va, cpu_va, (unsigned long)phys);
+
+            volatile uint32_t *sentinel = (volatile uint32_t *)cpu_va;
+            sentinel[0] = 0xDEADBEEFu;
+            sentinel[1] = 0xCAFEBABEu;
+            shell_printf("alloc-page-synth: wrote sentinel via cpu_va: "
+                         "[0]=0x%08x [1]=0x%08x\r\n",
+                         (unsigned)sentinel[0], (unsigned)sentinel[1]);
+
+            struct ga10b_gmmu_walk_result wr;
+            int wrc = ga10b_gmmu_walk(inst_phys, gpu_va, &wr);
+            if (wrc != 0) {
+                shell_printf("alloc-page-synth: walker rc=%d\r\n", wrc);
+                return wrc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            if (wr.status == GA10B_GMMU_WALK_OK && wr.leaf_phys == phys) {
+                shell_printf("VERIFY: walker leaf_phys 0x%lx == "
+                             "alloc'd phys 0x%lx — PASS\r\n",
+                             (unsigned long)wr.leaf_phys,
+                             (unsigned long)phys);
+                return 0;
+            }
+            shell_printf("VERIFY: walker leaf_phys 0x%lx != "
+                         "alloc'd phys 0x%lx — FAIL\r\n",
+                         (unsigned long)wr.leaf_phys,
+                         (unsigned long)phys);
+            return -1;
+        }
+        if (strcmp(argv[2], "alloc-page") == 0) {
+            /* #666 Milestone B: allocate a single 4 KB page in the
+             * inherited channel's GMMU address space, write a
+             * sentinel pattern via the kernel-VA alias, then re-walk
+             * the GPU VA via Milestone A's walker and confirm the
+             * leaf PTE points at our new page. CPU-side smoke test
+             * — proves the writer composed correct PDE/PTE entries
+             * that the walker can read back. Real GPU verification
+             * (a kernel that reads from gpu_va) is deferred. */
+            const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+            if (h == NULL) {
+                shell_puts("alloc-page: no handoff loaded — run `nvgpu inherit` "
+                           "+ `nvgpu channel` first\r\n");
+                return -1;
+            }
+            uint64_t gpu_va = 0, phys = 0;
+            void *cpu_va = NULL;
+            int rc = ga10b_gmmu_alloc_page(h->inst_block_phys, 0,
+                                           &gpu_va, &cpu_va, &phys);
+            if (rc < 0) {
+                shell_printf("ga10b_gmmu_alloc_page failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("alloc-page: gpu_va=0x%lx cpu_va=%p phys=0x%lx\r\n",
+                         (unsigned long)gpu_va, cpu_va, (unsigned long)phys);
+            /* Write sentinel via cpu_va to prove the page is writable. */
+            volatile uint32_t *sentinel = (volatile uint32_t *)cpu_va;
+            sentinel[0] = 0xDEADBEEFu;
+            sentinel[1] = 0xCAFEBABEu;
+            shell_printf("alloc-page: wrote sentinel via cpu_va: "
+                         "[0]=0x%08x [1]=0x%08x\r\n",
+                         (unsigned)sentinel[0], (unsigned)sentinel[1]);
+            /* Re-walk the GPU VA — leaf phys must equal phys we got. */
+            struct ga10b_gmmu_walk_result wr;
+            int wrc = ga10b_gmmu_walk(h->inst_block_phys, gpu_va, &wr);
+            if (wrc != 0) {
+                shell_printf("alloc-page: walker rc=%d\r\n", wrc);
+                return wrc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            if (wr.status == GA10B_GMMU_WALK_OK && wr.leaf_phys == phys) {
+                shell_printf("VERIFY: walker leaf_phys 0x%lx == "
+                             "alloc'd phys 0x%lx — PASS\r\n",
+                             (unsigned long)wr.leaf_phys,
+                             (unsigned long)phys);
+                return 0;
+            }
+            shell_printf("VERIFY: walker leaf_phys 0x%lx != "
+                         "alloc'd phys 0x%lx — FAIL\r\n",
+                         (unsigned long)wr.leaf_phys,
+                         (unsigned long)phys);
             return -1;
         }
         if (strcmp(argv[2], "walk-raw") == 0) {
@@ -4237,7 +4435,8 @@ int cmd_nvgpu(int argc, char *argv[])
 
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | submit | submit-compute | launch-kernel | "
-              "run-mnist | fecs | gpccs | pmu | run | gmmu | oplib]\r\n");
+              "run-mnist | fecs | gpccs | pmu | run | "
+              "gmmu <pushbuf | walk | walk-raw | alloc-page> | oplib]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
@@ -7450,7 +7649,7 @@ int cmd_nvcsi(int argc, char *argv[])
     } else {
         uart_puts("  *** Non-zero INTR_STATUS — receiver saw a   ***\r\n");
         uart_puts("  *** packet or fault during init. Inspect    ***\r\n");
-        uart_puts("  *** bits per ../slmos-reference-cache/tegra-l4t/l4t-csi4_registers.h ***\r\n");
+        uart_puts("  *** bits per ~/slmos-ref/tegra-l4t/l4t-csi4_registers.h ***\r\n");
     }
 
     uart_puts("=== End ===\r\n");
@@ -7504,7 +7703,7 @@ int cmd_rcediag(int argc, char *argv[])
          * the established session can carry arbitrary HSP-VM
          * messages — not just the boot-sync HELLO/PROTOCOL/RESUME
          * sequence. PING is documented in
-         * `../slmos-reference-cache/tegra-l4t/l4t-camrtc-commands.h:64-66` as the
+         * `~/slmos-ref/tegra-l4t/l4t-camrtc-commands.h:64-66` as the
          * "check aliveness of RCE FW and the HSP protocol" probe;
          * RCE echoes the 24-bit param verbatim. This is the
          * smallest pre-CH_SETUP gate proving `camrtc_send_msg` is
@@ -7569,7 +7768,7 @@ int cmd_rcediag(int argc, char *argv[])
  *   2. CAPTURE_PHY_STREAM_OPEN_REQ (NVCSI port A, stream 0, D-PHY)
  *   3. Print the response result.
  *
- * Result codes are in `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`
+ * Result codes are in `~/slmos-ref/tegra-l4t/l4t-camrtc-capture-messages.h`
  * (CAPTURE_OK = 0, CAPTURE_ERROR_* otherwise). Anything other than
  * 0 means the request reached RCE, came back, but RCE rejected it
  * — e.g. NVCSI not powered, port already open, bad PHY type. The
@@ -7593,7 +7792,7 @@ int cmd_csidiag(int argc, char *argv[])
 
     uint32_t result = 0xDEADBEEFu;
     /* NVCSI_STREAM_0 = 0, NVCSI_PORT_A = 0, NVCSI_PHY_TYPE_DPHY = 0
-     * (`../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture.h:1372/1387/1443`). */
+     * (`~/slmos-ref/tegra-l4t/l4t-camrtc-capture.h:1372/1387/1443`). */
     rc = camrtc_capture_phy_stream_open(0u, 0u, 0u, &result);
     uart_printf("  PHY_STREAM_OPEN: rc=%d result=0x%x\r\n",
                 rc, (unsigned)result);
@@ -7612,7 +7811,7 @@ int cmd_csidiag(int argc, char *argv[])
 
     /* PHY_STREAM_OPEN succeeded. Configure the brick + CIL for
      * IMX219: 2 D-PHY lanes, 456 MHz MIPI clock (the IMX219
-     * default link freq from `../slmos-reference-cache/linux/linux-imx219.c:139`).
+     * default link freq from `~/slmos-ref/linux/linux-imx219.c:139`).
      * SoC-default t_hs_settle / t_clk_settle (0). */
     uint32_t cfg_result = 0xDEADBEEFu;
     rc = camrtc_capture_csi_stream_set_config(0u, 0u, 2u, 456000u,

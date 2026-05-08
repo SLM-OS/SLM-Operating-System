@@ -107,7 +107,7 @@ Force `DAIF.I=0` and `DAIF.F=0` briefly in `main` (before shell spawns), read di
 
 ### 1d. External reference comparison
 
-Fetch into `../slmos-reference-cache/` if not already present (per `CLAUDE.md` reference cache rules):
+Fetch into `~/slmos-ref/` if not already present (per `CLAUDE.md` reference cache rules):
 
 - `linux/arch/arm64/kernel/entry.S` — EL1 IRQ vector on non-secure EL1.
 - `linux/drivers/clocksource/arm_arch_timer.c` — init order for CNTP vs CNTV, `CNTKCTL_EL1` programming.

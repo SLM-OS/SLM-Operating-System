@@ -129,6 +129,9 @@ const shell_cmd_t builtin_commands[] = {
     {"sleep",    cmd_sleep,    "Sleep for N ms (sleep <ms>)",                               false, SHELL_CAT_PROCESS},
     {"slm",      cmd_slm,      "Small language model (load/list/info/launch/prompt/stats)", true, SHELL_CAT_PROCESS},
     {"tasks",    cmd_tasks,    "List all tasks",                                            false, SHELL_CAT_PROCESS},
+#if !defined(PLATFORM_X86_64)
+    {"usertest", cmd_usertest, "Run the EL0 smoke task (#697 PR-4)",                        false, SHELL_CAT_PROCESS},
+#endif
 
     /* --- Components & message router --- */
     {"component", cmd_component, "Component system (list/register/status)",                  true, SHELL_CAT_COMPONENTS},

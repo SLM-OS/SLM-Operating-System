@@ -22,6 +22,9 @@
 
 #include "ga10b_gmmu.h"
 
+#include "../../include/cache.h"
+#include "../../include/pmm.h"
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -360,4 +363,243 @@ void ga10b_gmmu_walk_print(const struct ga10b_gmmu_walk_result *r)
         shell_puts("  STATUS: BAD_INST — PDB read failed or aperture invalid\r\n");
         break;
     }
+}
+
+/* ---------------------------------------------------------------------
+ * Milestone B — single-page allocator + writer
+ * --------------------------------------------------------------------- */
+
+/* Bump cursor for SLM-OS GMMU allocations. Single-threaded shell
+ * task is the only caller path today (matches `g_handoff` access
+ * pattern); no spinlock yet. Add one when a second writer (e.g.
+ * the runtime model loader's worker task) lands. */
+static uint64_t g_va_cursor = GA10B_GMMU_VA_BASE;
+
+uint64_t ga10b_gmmu_va_cursor(void)
+{
+    return g_va_cursor;
+}
+
+/* Encode a regular PDE entry pointing at `next_phys` with sys_mem_coh
+ * aperture. Mirrors `gmmu_new_pde_address_sys_f(v) = ((v & 0xffffff) << 8U)`
+ * + `gmmu_new_pde_aperture_sys_mem_coh_f() = 0x4`.
+ *
+ * Layout:
+ *   bit  0  : 0 (was: invalid bit; gmmu_new uses aperture==0 instead)
+ *   bits 3:1: aperture (0=invalid, 4=sys_mem_coh, 6=sys_mem_ncoh)
+ *   bit  3  : volatile
+ *   bits 31:8 : phys[35:12]   (24 bits at bit 8 of low word)
+ *   bits 55:32: phys[59:36]   (24 bits at bit 0 of high word)
+ *
+ * For Jetson, all phys < 2 TB so phys[59:36] fits in 5 bits.
+ */
+static inline uint64_t encode_regular_pde(uint64_t next_phys)
+{
+    /* sys_mem_coh aperture (4) at bit 1. */
+    uint64_t entry = (uint64_t)4 << GA10B_PDE_APERTURE_SHIFT;
+    /* phys[35:12] -> low word bits [31:8]. */
+    uint64_t addr_lo = (next_phys >> 12) & 0xffffff;
+    entry |= addr_lo << 8;
+    /* phys[59:36] -> high word bits [23:0]. */
+    uint64_t addr_hi = (next_phys >> 36) & 0xffffff;
+    entry |= addr_hi << 32;
+    return entry;
+}
+
+/* Encode the SMALL HALF of a dual PDE (PDE0). Big half left as-is
+ * by the caller via read-modify-write — never touch it. */
+static inline uint64_t encode_dual_pde_small(uint64_t next_phys)
+{
+    /* sys_mem_coh aperture for the small half: bits [3:1] of low word. */
+    uint64_t entry = (uint64_t)4 << GA10B_DUAL_PDE_SMALL_APERTURE_SHIFT;
+    /* phys[35:12] -> low word bits [31:8] (small PT phys >> 12). */
+    uint64_t addr_lo = (next_phys >> 12) & 0xffffff;
+    entry |= addr_lo << 8;
+    /* Small half doesn't carry phys_hi — small PT must fit in
+     * phys[35:0] = 64 GB. Jetson DRAM tops at 0x280000000 (10 GB),
+     * so any PMM-alloc'd page satisfies this. */
+    return entry;
+}
+
+/* Encode a leaf PTE pointing at `phys` with sys_mem_coh aperture. */
+static inline uint64_t encode_pte(uint64_t phys, uint32_t flags)
+{
+    uint64_t entry = GA10B_PTE_VALID_BIT;
+    /* sys_mem_coh aperture (4). */
+    entry |= (uint64_t)4 << GA10B_PTE_APERTURE_SHIFT;
+    if (flags & GA10B_GMMU_FLAG_RO)   entry |= GA10B_PTE_READ_ONLY_BIT;
+    if (flags & GA10B_GMMU_FLAG_PRIV) entry |= GA10B_PTE_PRIVILEGE_BIT;
+    /* phys[35:12] -> low word bits [31:8]. */
+    uint64_t addr_lo = (phys >> 12) & 0xffffff;
+    entry |= addr_lo << 8;
+    /* phys[59:36] -> high word bits [23:0]. */
+    uint64_t addr_hi = (phys >> 36) & 0xffffff;
+    entry |= addr_hi << 32;
+    return entry;
+}
+
+/* Allocate a fresh 4 KB PMM page, zero it, cache_clean the whole
+ * thing so the GPU sees an all-zero (= all-invalid) table when
+ * we point a parent PDE at it. Returns kernel VA (== phys on
+ * Jetson via identity map) or NULL on PMM exhaustion. */
+static void *alloc_zero_table_page(void)
+{
+    void *p = pmm_alloc_page();
+    if (p == NULL) return NULL;
+    volatile uint64_t *q = (volatile uint64_t *)p;
+    for (int i = 0; i < 512; i++) {
+        q[i] = 0;
+    }
+    cache_clean_range(p, 4096);
+    return p;
+}
+
+/* Walk a regular PDE level. If the entry is invalid, allocate a
+ * fresh next-level table, write the parent PDE, cache_clean.
+ * Returns next-level table phys via *out_next_phys.
+ *
+ * `parent_table_phys` is the table page containing the entry to
+ * read/write. `idx` is the entry's index within that page.
+ */
+static int ensure_regular_pde(uint64_t parent_table_phys,
+                              uint16_t idx,
+                              uint64_t *out_next_phys)
+{
+    uint64_t entry_phys = parent_table_phys + (uint64_t)idx * GA10B_GMMU_ENTRY_SIZE;
+    uint64_t entry = phys_read64(entry_phys);
+    uint64_t next_phys;
+    uint8_t aperture;
+    bool valid;
+    decode_regular_pde(entry, &next_phys, &aperture, &valid);
+    if (valid) {
+        *out_next_phys = next_phys;
+        return 0;
+    }
+    /* Empty slot — allocate next-level table. */
+    void *new_table = alloc_zero_table_page();
+    if (new_table == NULL) return -1;
+    uint64_t new_phys = (uint64_t)(uintptr_t)new_table;
+    uint64_t new_entry = encode_regular_pde(new_phys);
+    *(volatile uint64_t *)(uintptr_t)entry_phys = new_entry;
+    cache_clean((const volatile void *)(uintptr_t)entry_phys);
+    *out_next_phys = new_phys;
+    return 0;
+}
+
+/* Walk PDE0 (the dual PDE). Reads existing entry; if the small
+ * half is unpopulated, allocates a fresh small leaf-PT page and
+ * writes the small half via read-modify-write — preserving
+ * whatever Linux may have placed in the big half (a 64 KB or
+ * 2 MB mapping covering the same 32 MB VA region).
+ *
+ * `pde0_table_phys` is the PDE0 table page. `idx` is the dual
+ * PDE entry within it. Returns small-leaf PT phys via *out.
+ */
+static int ensure_dual_pde_small_table(uint64_t pde0_table_phys,
+                                       uint16_t idx,
+                                       uint64_t *out_small_phys)
+{
+    uint64_t entry_phys = pde0_table_phys + (uint64_t)idx * GA10B_GMMU_ENTRY_SIZE;
+    uint64_t entry = phys_read64(entry_phys);
+    uint64_t small_phys;
+    uint8_t aperture;
+    bool valid;
+    decode_dual_pde_small(entry, &small_phys, &aperture, &valid);
+    if (valid) {
+        *out_small_phys = small_phys;
+        return 0;
+    }
+    /* Allocate the small leaf table. Preserve the high 32 bits
+     * (potential big-page half) via mask. */
+    void *new_pt = alloc_zero_table_page();
+    if (new_pt == NULL) return -1;
+    uint64_t new_phys = (uint64_t)(uintptr_t)new_pt;
+    uint64_t small_bits = encode_dual_pde_small(new_phys);
+    /* Read-modify-write: keep upper 32 bits (big-half) intact. */
+    uint64_t merged = (entry & 0xffffffff00000000ull) | (small_bits & 0xffffffffull);
+    *(volatile uint64_t *)(uintptr_t)entry_phys = merged;
+    cache_clean((const volatile void *)(uintptr_t)entry_phys);
+    *out_small_phys = new_phys;
+    return 0;
+}
+
+/* Read PDB physical from inst block. Returns 0 on failure (which
+ * the caller treats as "bad inst block"). Mirrors the inline
+ * decode in ga10b_gmmu_walk. */
+static uint64_t read_pdb_phys(uint64_t inst_block_phys)
+{
+    if (!phys_in_dram(inst_block_phys, 4096)) return 0;
+    uint32_t pdb_lo = phys_read32(inst_block_phys + (128u * 4u));
+    uint32_t pdb_hi = phys_read32(inst_block_phys + (129u * 4u));
+    uint8_t target = (uint8_t)((pdb_lo >> 1) & 0x3);
+    if (target == 0) return 0;  /* vid_mem on a Jetson with no vidmem == bogus */
+    uint32_t phys_lo = pdb_lo & 0xfffff000;
+    uint64_t pdb_phys = ((uint64_t)pdb_hi << 32) | phys_lo;
+    if (!phys_in_dram(pdb_phys, 4096)) return 0;
+    return pdb_phys;
+}
+
+int ga10b_gmmu_alloc_page(uint64_t inst_block_phys,
+                          uint32_t flags,
+                          uint64_t *out_gpu_va,
+                          void    **out_cpu_va,
+                          uint64_t *out_phys)
+{
+    if (out_gpu_va == NULL || out_cpu_va == NULL || out_phys == NULL) {
+        return -1;
+    }
+
+    /* 1. Pick a fresh GPU VA. */
+    if (g_va_cursor >= GA10B_GMMU_VA_LIMIT) {
+        return -1;  /* range exhausted */
+    }
+    uint64_t va = g_va_cursor;
+    /* Reserve the VA up front so a mid-walk failure doesn't leak
+     * the slot — caller will retry against a fresh VA. */
+    g_va_cursor += 4096;
+
+    /* 2. Read the PDB from the inst block. */
+    uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
+    if (pdb_phys == 0) return -1;
+
+    /* 3. Allocate the data page. */
+    void *data_page = pmm_alloc_page();
+    if (data_page == NULL) return -1;
+    uint64_t data_phys = (uint64_t)(uintptr_t)data_page;
+
+    /* 4. Decompose the VA into per-level indices. */
+    uint16_t i3 = va_index(va, GA10B_PDE3_VA_HI, GA10B_PDE3_VA_LO);
+    uint16_t i2 = va_index(va, GA10B_PDE2_VA_HI, GA10B_PDE2_VA_LO);
+    uint16_t i1 = va_index(va, GA10B_PDE1_VA_HI, GA10B_PDE1_VA_LO);
+    uint16_t i0 = va_index(va, GA10B_PDE0_VA_HI, GA10B_PDE0_VA_LO);
+    uint16_t ip = va_index(va, GA10B_PTE_VA_HI,  GA10B_PTE_VA_LO);
+
+    /* 5. Walk + write per-level tables.
+     *
+     * The PDE3 entry sits in the PDB itself — Linux populated PDE3[0]
+     * for the lower VAs, but our high VA range may map to PDE3[0] too
+     * (since 0x40_0000_0000 >> 40 == 0). The PDE3 entry should already
+     * be valid. PDE2[256] at our VA almost certainly is empty. */
+    uint64_t pde2_table_phys, pde1_table_phys, pde0_table_phys, pte_table_phys;
+    if (ensure_regular_pde(pdb_phys, i3, &pde2_table_phys) < 0) return -1;
+    if (ensure_regular_pde(pde2_table_phys, i2, &pde1_table_phys) < 0) return -1;
+    if (ensure_regular_pde(pde1_table_phys, i1, &pde0_table_phys) < 0) return -1;
+    if (ensure_dual_pde_small_table(pde0_table_phys, i0, &pte_table_phys) < 0) return -1;
+
+    /* 6. Write the leaf PTE. */
+    uint64_t pte_entry_phys = pte_table_phys + (uint64_t)ip * GA10B_GMMU_ENTRY_SIZE;
+    uint64_t pte_entry = encode_pte(data_phys, flags);
+    *(volatile uint64_t *)(uintptr_t)pte_entry_phys = pte_entry;
+    cache_clean((const volatile void *)(uintptr_t)pte_entry_phys);
+
+    /* DSB SY: order page-table publication relative to anything the
+     * caller does next (e.g. memcpy via cpu_va, then GPU dispatch).
+     * Without this, the GPU can race the cache_clean and TLB-walk
+     * stale entries on the very first lookup. */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    *out_gpu_va = va;
+    *out_cpu_va = data_page;
+    *out_phys = data_phys;
+    return 0;
 }

@@ -754,7 +754,7 @@ wrapper config, power state, IFR initialization.
    and are NS-accessible. SLM-OS would need to re-enable
    translation for the xusb stream after kexec. Requires porting
    the minimum subset of Linux's arm-smmu-v2 driver (~500 lines
-   of relevant code from `../slmos-reference-cache/linux/linux-arm-smmu.c`'s 2395
+   of relevant code from `~/slmos-ref/linux/linux-arm-smmu.c`'s 2395
    total).
 3. **Pre-kexec SMMU bypass.** Globally flip all Tegra SMMUs to
    passthrough mode before kexec via a kernel module; SLM-OS then
@@ -789,8 +789,8 @@ Source files to read, in order:
 |---|---|
 | `kernel/drivers/usb/xhci/xhci_tegra.h` | Tegra234 FPCI + BAR2 register map, cited line-by-line from the cached Linux source |
 | `kernel/drivers/usb/xhci/xhci.c` | `tegra_xusb_config`, `bar2_csb_r32/w32`, `tegra_xusb_wait_for_falcon`, `tegra_xusb_read_firmware_header` — all ported from Linux with paragraph-level comments citing the upstream line numbers |
-| `../slmos-reference-cache/linux/linux-xhci-tegra.c` | Cached Linux tegra-xusb source (2849 lines). Always consult this before writing new Tegra code |
-| `../slmos-reference-cache/linux/linux-arm-smmu.c` | Cached Linux arm-smmu-v2 source (2395 lines). Primary reference for any SMMU-port or shutdown-caller-hunt work |
+| `~/slmos-ref/linux/linux-xhci-tegra.c` | Cached Linux tegra-xusb source (2849 lines). Always consult this before writing new Tegra code |
+| `~/slmos-ref/linux/linux-arm-smmu.c` | Cached Linux arm-smmu-v2 source (2395 lines). Primary reference for any SMMU-port or shutdown-caller-hunt work |
 
 ### 10.2 Known-good deploy/test workflow
 
@@ -885,7 +885,7 @@ Three SMMU instances at `0x08000000`, `0x10000000`, `0x12000000`
 are NS-accessible on Tegra234 (`ls /sys/bus/platform/drivers/arm-smmu/`
 on the Jetson confirms).
 
-**Minimum subset to port from `../slmos-reference-cache/linux/linux-arm-smmu.c`:**
+**Minimum subset to port from `~/slmos-ref/linux/linux-arm-smmu.c`:**
 
 - `arm_smmu_write_context_bank` (~40 lines) — programs a context
   bank's translation registers
@@ -1124,7 +1124,7 @@ and SLM-OS inherits a usable SMMU + xHCI.
 - **GitHub issues**: #266 (Phase 3A umbrella), #285 (original SMMU
   blocker, wontfix — re-open if a path pans out), #286 (standalone
   Falcon firmware load, deprioritized by the IFR finding).
-- **Reference code**: `../slmos-reference-cache/linux/linux-{arm-smmu,xhci-tegra}.c`.
+- **Reference code**: `~/slmos-ref/linux/linux-{arm-smmu,xhci-tegra}.c`.
   When pulling new Linux files, save them here — don't re-fetch.
 - **Lab hardware**: `labctl` MCP. See `kernel/CLAUDE.md` for board
   claim / serial / power workflows. Jetson-nano-1 has serial

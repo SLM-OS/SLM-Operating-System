@@ -38,19 +38,34 @@ SECTIONS
      * TEXT SEGMENT (RX) - Code and read-only data
      * ================================================================ */
 
-    /* Code section - starts at load address (0x80000) */
+    /* Code section - starts at load address (0x80000).
+     * EXCLUDE_FILE pulls user_smoke.c.obj out of the main .text/.rodata
+     * so the .text.user output below gets it instead. */
     .text : {
         __text_start = .;
         KEEP(*(.text.boot))     /* Boot code first */
-        *(.text .text.*)        /* All other code */
+        *(EXCLUDE_FILE(*user_smoke.c.obj) .text)
+        *(EXCLUDE_FILE(*user_smoke.c.obj) .text.*)
         __text_end = .;
     } > RAM :text
 
     /* Read-only data - same segment as code */
     .rodata : {
         __rodata_start = .;
-        *(.rodata .rodata.*)
+        *(EXCLUDE_FILE(*user_smoke.c.obj) .rodata)
+        *(EXCLUDE_FILE(*user_smoke.c.obj) .rodata.*)
         __rodata_end = .;
+    } > RAM :text
+
+    /* User-mode smoke section (#697 PR-4) — page-aligned + page-padded
+     * so the per-task L1 can map exactly this range with VMM_FLAG_USER
+     * without leaking adjacent kernel text/rodata. */
+    .text.user ALIGN(4096) : {
+        __text_user_start = .;
+        *(.text.user .text.user.*)
+        *(.rodata.user .rodata.user.*)
+        . = ALIGN(4096);
+        __text_user_end = .;
     } > RAM :text
 
     /* ================================================================

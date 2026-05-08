@@ -2,7 +2,7 @@
  * hailo_cs_actions.h — wire-format context-switch action structs.
  *
  * These mirror the CONTEXT_SWITCH_DEFS__* typedefs in hailort's
- * firmware-facing header at ../slmos-reference-cache/hailo/hailort-context_switch_defs.h.
+ * firmware-facing header at ~/slmos-ref/hailo/hailort-context_switch_defs.h.
  * Firmware parses the context_network_data blob of a SET_CONTEXT_INFO
  * RPC as a concatenation of [common_action_header_t][per-type body]
  * tuples; each action_type encodes which body type follows.
@@ -491,7 +491,7 @@ _Static_assert(sizeof(struct hailo_cs_act_activate_boundary_output) == 39,
 /* Edge layer direction enum used by (de)activate/pause/resume actions.
  * Values MUST match HailoRT v4.23 CONTEXT_SWITCH_DEFS__EDGE_LAYER_DIRECTION_t:
  *   UNINITIALIZED = 0, HOST_TO_DEVICE = 1, DEVICE_TO_HOST = 2.
- * See ../slmos-reference-cache/hailo/hailort-v4.23.0-context_switch_defs.h:134-138.
+ * See ~/slmos-ref/hailo/hailort-v4.23.0-context_switch_defs.h:134-138.
  * Pre-2026-04-22 we had H2D=0/D2H=1 which happened to survive through
  * ACTIVATION (the direction byte there is cross-validated against the
  * packed channel id and fw tolerates either) but broke in DYNAMIC's

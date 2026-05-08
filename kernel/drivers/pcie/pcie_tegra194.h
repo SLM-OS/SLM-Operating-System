@@ -5,9 +5,9 @@
  * MMIO to the APPL wrapper + DesignWare DBI + iATU. Targets the RTL8168
  * NIC behind PCIe C8 on the Jetson Orin Nano Super Dev Kit.
  *
- * Reference: ../slmos-reference-cache/linux/linux-pcie-tegra194.c
- *            ../slmos-reference-cache/linux/linux-pcie-designware-host.c
- *            ../slmos-reference-cache/linux/linux-pcie-designware.c
+ * Reference: ~/slmos-ref/linux/linux-pcie-tegra194.c
+ *            ~/slmos-ref/linux/linux-pcie-designware-host.c
+ *            ~/slmos-ref/linux/linux-pcie-designware.c
  *
  * Flow:
  *    pcie_tegra_host_init()       - BPMP UPHY/clock/reset + APPL regs

@@ -1,6 +1,8 @@
 # Pi 5 — Real EL0 User-Mode Execution Plan
 
-**Status:** Plan stage. Not started.
+**Status:** Done. All four PRs merged; smoke EL0 round-trip verified
+on QEMU virt and Pi 5 (`pi-5-2`, EL2/VHE), with 10/10 boot-test
+reliability. See `usertest` shell command for the smoke runner.
 
 **Issue:** [#697](https://github.com/SLM-OS/SLM-Operating-System/issues/697) — real EL0 user-mode execution: VMM_FLAG_USER on Pi 5 RAM, per-task TTBR0, smoke EL0 task, hardware verification.
 
@@ -145,7 +147,7 @@ Acceptance:
 - `make test` passes.
 - Pi 5 boots to shell at EL2/VHE, no regression.
 
-### PR 4 — Smoke EL0 task + hardware verification
+### PR 4 — Smoke EL0 task + hardware verification ✅ done
 
 Goal: actually run an EL0 task end-to-end on QEMU virt and Pi 5 hardware.
 

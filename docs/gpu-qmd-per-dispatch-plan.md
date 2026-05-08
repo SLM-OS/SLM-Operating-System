@@ -24,7 +24,7 @@ inference returns stale results — off-by-one between dispatches).
 | 4. Byte-compare selftest | ✅ | `test_qmd_selftest_reference_matches_encoder` + the v7-stride pinning test. |
 | 5. Switch dispatch to fresh QMD | ✅ | `ga10b_dispatch_v7_pipeline` builds a fresh QMD per launch via `ga10b_qmd_pool_prepare`. |
 | 6. Hardware re-probe | ✅ | jetson-nano-2: vertical-bar input → argmax=1, zero input → argmax=5; helper standalone shows max\|err\|=0.000410 vs CPU FP32. |
-| 7. Buffer / unknowns | ✅ | Closed in flight: scanner-level v7 acceptance (#694), v7 tail-field copy on inherit (#710), version-aware pipeline-output stride (#710), `slm-put.py --resume` false alarm (#715). |
+| 7. Buffer / unknowns | ✅ | Closed in flight: scanner-level v7 acceptance (#694), v7 tail-field copy on inherit (#710), version-aware pipeline-output stride (#710), GA10B LTC cross-dispatch coherency (#715 / #722). |
 
 **Bonus delivery (out of original plan scope).** HMMA tier — FP32-activation
 × FP16-weight tensor-core GEMM at MNIST op 6 — added in the same PR.
@@ -33,6 +33,26 @@ The QMD encoder propagates `smem_size_bytes`, `slm_size_bytes`, and
 (`SHARED_MEMORY_SIZE = 2048`, `BARRIER_COUNT = 3`). Without that
 propagation the WMMA chain stalls op[N+1] silently. Tensor cores
 demonstrably executing under SLM-OS on real GA10B silicon.
+
+**Per-dispatch cost (post-#722).** The 3-point `ga10b_l2_evict_sysmem`
+that closed the LTC staleness adds **~120 µs typical / ~6 ms worst
+case** of IRQ-off latency per inference. (Derivation: each evict
+is 4 UFLUSH ops; per-op typical is <10 µs and worst case is the
+100-retry × ~5 µs busy-wait in `ga10b_uflush_op` ≈ 500 µs. So one
+evict is ~40 µs typical / ~2 ms worst, multiplied by three sites
+per dispatch.) That's fine for MNIST at 1–10 inf/s. It is **not**
+the right shape for SLM workloads: at Qwen 2.5 1.5B's ~370
+ops/token × 10 tokens/sec = 3700 launches/sec, the evict overhead
+alone is ~440 ms/sec — clearly unworkable. The async-batched
+dispatch architecture in #573 is what unblocks SLMs, and a
+different barrier strategy (per-batch, not per-launch) will need to
+replace the 3-point evict on that path. Do not paste this pattern
+into the SLM forward path without the architectural rework.
+
+The narrowing experiment — gate each of the three sites behind a
+cmdline flag and isolate which is strictly required — is tracked
+separately in #723. If only one or two sites turn out to matter,
+the per-dispatch overhead drops proportionally.
 
 **Outstanding follow-ups** (all out of scope here, tracked separately):
 - [#573](https://github.com/SLM-OS/SLM-Operating-System/issues/573) — async batched dispatch architecture for SLM workloads (per-launch poll overhead from the §7 risk note; deferred per the plan's exit criteria).
@@ -77,7 +97,7 @@ fire each time.
 
 This is what every production driver does. Mesa's NVK builds a fresh
 QMD per dispatch (`nvk_cmd_upload_qmd` in
-`../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c:159`), CUDA
+`~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c:159`), CUDA
 runtime does the same, nouveau does the same. The Linux-helper-baked
 QMD chain was an SLM-OS shortcut for getting compute working without
 authoring QMDs from scratch on the bare-metal side; fixing the off-by-
@@ -90,7 +110,7 @@ one means undoing that shortcut.
 `scripts/gpu-launch-common.c:gpu_populate_qmd_at()` (lines 395-481) is
 a complete, working C QMD encoder for Ampere. It mirrors NVK's
 `Qmd3_0::new()` + `fill_qmd()`
-(`../slmos-reference-cache/mesa/mesa-nak_qmd.rs:499-528, 616-655`) and
+(`~/slmos-ref/mesa/mesa-nak_qmd.rs:499-528, 616-655`) and
 produces the same 256-byte QMD format that Linux uses for
 `AMPERE_COMPUTE_B`.
 
@@ -99,7 +119,7 @@ move + cache-flush primitive swap (`msync(MS_SYNC)` →
 `gsp_platform->cache_clean()`) — there is no new bit-encoding work.
 
 The QMD format itself is documented in
-`../slmos-reference-cache/mesa/mesa-clc7c0qmd.h` (NVIDIA's auto-
+`~/slmos-ref/mesa/mesa-clc7c0qmd.h` (NVIDIA's auto-
 generated header for the `clc7c0` class — Ampere compute) and the bit
 positions are pinned in `scripts/gpu-launch-common.h:108-141`.
 
@@ -348,9 +368,9 @@ Total: ~4 days of focused work, with a 1-day buffer.
 | `scripts/gpu-qmd-bits.h` | — | `gpu_qmd_set_bits` helper. Pure-logic, host-testable, already used by both the helper and by SLM-OS test code. |
 | `kernel/gpu/nvidia/ga10b_bringup.c` | 1739-1850 | Pipeline runner. Where the dispatch site lives. |
 | `kernel/gpu/nvidia/ga10b_channel_handoff.h` | 190-217 | `struct ga10b_pipeline_op` definition + size assert. v7 bump goes here. |
-| `../slmos-reference-cache/mesa/mesa-nak_qmd.rs` | 499-528, 616-655 | NVK's Rust QMD encoder for Ampere (`Qmd3_0`). Cross-reference for any field we're unsure about. |
-| `../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c` | 159-260 | NVK's `nvk_cmd_upload_qmd` — model for the upload pattern (allocate buffer, fill QMD, dispatch). |
-| `../slmos-reference-cache/mesa/mesa-clc7c0qmd.h` | — | Authoritative Ampere QMD field definitions, auto-generated from NVIDIA's `open-gpu-doc`. The reference if we hit a "what is this bit?" question. |
+| `~/slmos-ref/mesa/mesa-nak_qmd.rs` | 499-528, 616-655 | NVK's Rust QMD encoder for Ampere (`Qmd3_0`). Cross-reference for any field we're unsure about. |
+| `~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c` | 159-260 | NVK's `nvk_cmd_upload_qmd` — model for the upload pattern (allocate buffer, fill QMD, dispatch). |
+| `~/slmos-ref/mesa/mesa-clc7c0qmd.h` | — | Authoritative Ampere QMD field definitions, auto-generated from NVIDIA's `open-gpu-doc`. The reference if we hit a "what is this bit?" question. |
 
 ---
 

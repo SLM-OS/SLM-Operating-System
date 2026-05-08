@@ -17,6 +17,9 @@
 #include "task.h"
 #include "string.h"
 #include "pmm.h"
+#if !defined(PLATFORM_X86_64)
+#include "vmm.h"
+#endif
 #include <stdint.h>
 #include <stddef.h>
 
@@ -380,6 +383,37 @@ static void test_task_destroy_frees_user_l1(void)
     TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
                         "task_destroy leaked the per-task L1 page");
 }
+
+/* Test (#697 PR-4): task_create_user populates user_stack_top and
+ * user_stack_phys. Both are zero on kernel-mode tasks (already covered
+ * by test_task_create_kernel_leaves_user_l1_zero) and non-zero on user
+ * tasks. user_stack_top must equal USER_STACK_TOP — the smoke runs
+ * with a fixed VA layout. */
+static void test_task_create_user_populates_stack(void)
+{
+    extern void task_exit(void);
+    extern void user_smoke_main(void *arg);
+    /* Pass the real .text.user entry so task_create_user takes the
+     * translation path; the alternative (task_exit out of range) leaves
+     * user_entry == kernel VA, which is fine for the L1/stack checks
+     * but doesn't exercise the translation. */
+    struct task *t = task_create_user("usrstk", (task_entry_t)user_smoke_main, NULL, 4);
+    TEST_ASSERT_NOT_NULL(t);
+
+    TEST_ASSERT_EQUAL_UINT64(USER_STACK_TOP, t->user_stack_top);
+    TEST_ASSERT_TRUE(t->user_stack_phys != 0);
+    TEST_ASSERT_EQUAL_UINT64(0, t->user_stack_phys & 0xFFF);
+
+    /* The translated user_entry should land inside the user window —
+     * specifically inside the first 4 KB after USER_TEXT_VA (the only
+     * page mapped to .text.user — user_smoke is small). */
+    uintptr_t entry_va = (uintptr_t)t->user_entry;
+    TEST_ASSERT_TRUE(entry_va >= USER_TEXT_VA);
+    TEST_ASSERT_TRUE(entry_va < USER_TEXT_VA + 0x10000);
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
 #endif
 
 #if !defined(PLATFORM_X86_64)
@@ -466,6 +500,7 @@ int test_suite_syscall(void)
     RUN_TEST(test_task_create_user_sets_flag);
     RUN_TEST(test_task_create_kernel_leaves_user_l1_zero);
     RUN_TEST(test_task_destroy_frees_user_l1);
+    RUN_TEST(test_task_create_user_populates_stack);
 
     /* #683 PR-5: vector layout for EL0 → EL2 SVC */
     RUN_TEST(test_lower_el_sync_vector_dispatches_to_el0_sync);

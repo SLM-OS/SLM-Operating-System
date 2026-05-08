@@ -133,6 +133,21 @@ if(HAILO_D3HOT_AT_BOOT)
     add_compile_definitions(HAILO_D3HOT_AT_BOOT=1)
 endif()
 
+# Replicate Linux hailo_pcie's enable->fw_load->DISABLE->...->enable
+# IRQ-mask cycle around the post-boot D3hot transition. SLM-OS used to
+# pre-arm IMASK_HOST + per-channel SRC/DST masks before the fw trigger
+# and leave them armed forever; Linux instead writes 0 to IMASK_HOST
+# after load_firmware completes, then re-arms it later from the
+# user-space open() path. #682 hypothesis (2026-05-07): the missing
+# disable cycle leaves an IRQ-state divergence that prevents fw from
+# advancing `proc` on the boundary IN VDMA channel during runmodel.
+# Default ON to match Linux's order; turn OFF for A/B comparison.
+# See kernel/ai_accel/hailo/hailo_core.c hailo_boot post-trigger site.
+option(HAILO_IRQ_CYCLE_AT_BOOT "Disable IMASK_HOST after fw load and re-arm post-D3hot (Linux parity)" ON)
+if(HAILO_IRQ_CYCLE_AT_BOOT)
+    add_compile_definitions(HAILO_IRQ_CYCLE_AT_BOOT=1)
+endif()
+
 # Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1). Adds EL2 register
 # snapshot in boot.S, per-CPU per-vector exception counters in vectors.S,
 # a real el1_fiq handler that captures the FIQ source, and the `diag`
@@ -673,6 +688,10 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/component.c>
     kernel/src/slm_ffi.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/syscall.c>
+
+    # User-mode smoke (#697 PR-4) — single EL0 entry point that
+    # logs and exits, used by the `usertest` shell command.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/user_smoke.c>
 
     # Semihosting (for QEMU test exit)
     kernel/src/semihosting.c

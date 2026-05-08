@@ -232,7 +232,7 @@ int bpmp_reset_deassert(uint32_t reset_id)
  * ============================================================================ */
 
 /*
- * Wire layout from ../slmos-reference-cache/linux/linux-bpmp-abi.h struct mrq_uphy_request:
+ * Wire layout from ~/slmos-ref/linux/linux-bpmp-abi.h struct mrq_uphy_request:
  *
  *   offset 0   uint16_t lane
  *   offset 2   uint16_t cmd

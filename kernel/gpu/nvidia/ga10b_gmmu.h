@@ -158,4 +158,65 @@ int ga10b_gmmu_walk(uint64_t inst_block_phys, uint64_t gpu_va,
  * the output. */
 void ga10b_gmmu_walk_print(const struct ga10b_gmmu_walk_result *r);
 
+/* ---------------------------------------------------------------------
+ * Milestone B — single-page allocator + writer
+ * --------------------------------------------------------------------- */
+
+/* Bit flags for ga10b_gmmu_alloc_page. */
+#define GA10B_GMMU_FLAG_RO          (1u << 0)  /* set PTE read_only bit */
+#define GA10B_GMMU_FLAG_PRIV        (1u << 1)  /* set PTE privilege bit */
+
+/* High reserved VA range for SLM-OS allocations. Linux's allocations
+ * cluster below ~0x10_0000_0000; 0x40_0000_0000 (256 GB) sits well
+ * above any current usage. The cursor never wraps in Milestone B —
+ * we have ~256 GB of headroom for 4 KB pages, more than any workload
+ * the runtime model loader (#657) will need before free/reuse
+ * lands in Milestone C.
+ *
+ * 4 KB pages: 0x40_0000_0000..0x80_0000_0000 covers ~67M pages,
+ * which is room for an entire Qwen2.5-1.5B's worth of weight
+ * matrices many times over. */
+#define GA10B_GMMU_VA_BASE          0x4000000000ull
+#define GA10B_GMMU_VA_LIMIT         0x8000000000ull
+
+/* Allocate one 4 KB page in the inherited channel's GMMU address
+ * space.
+ *
+ *   1. Pick a fresh GPU VA from the bump-cursor in
+ *      [GA10B_GMMU_VA_BASE..GA10B_GMMU_VA_LIMIT).
+ *   2. Allocate a 4 KB PMM page for the data.
+ *   3. Walk the inherited page tables down PDE3 → PDE2 → PDE1 →
+ *      PDE0; allocate a fresh 4 KB PMM page for any intermediate
+ *      table that doesn't exist (zeroed; entries are all-invalid
+ *      until we write the one we care about).
+ *   4. Write the leaf PTE at PDE0's small-half-pointed leaf table.
+ *   5. cache_clean every page-table byte touched, plus a dsb sy,
+ *      so the GPU's GMMU walker reads the new entries from PoC.
+ *
+ * No TLB invalidate is issued — the VA range is fresh and this
+ * milestone never reuses VAs, so there's no stale TLB entry to
+ * flush. Free + realloc-same-VA is Milestone C, where the TLB
+ * invalidate sequence becomes load-bearing.
+ *
+ * Returns 0 on success. Out params populated only on success:
+ *   *out_gpu_va — 4 KB-aligned GPU VA
+ *   *out_cpu_va — kernel-side VA of the same page (identity-mapped
+ *                 to *out_phys on Jetson; use for memcpy from CPU)
+ *   *out_phys   — physical address (for diag/debug)
+ *
+ * Returns negative on failure: VA range exhausted, PMM out of
+ * pages, or malformed inst-block / page-table chain.
+ */
+int ga10b_gmmu_alloc_page(uint64_t inst_block_phys,
+                          uint32_t flags,
+                          uint64_t *out_gpu_va,
+                          void    **out_cpu_va,
+                          uint64_t *out_phys);
+
+/* Inspector for the allocator's high-water VA (for diag /
+ * `nvgpu gmmu alloc-page` output). Returns the VA the next
+ * allocation will hand out — i.e. one past the highest alloc'd
+ * page. */
+uint64_t ga10b_gmmu_va_cursor(void);
+
 #endif /* GPU_NVIDIA_GA10B_GMMU_H */

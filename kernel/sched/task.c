@@ -260,6 +260,8 @@ struct task *task_alloc(const char *name, uint8_t priority)
     task->is_user = 0;
     task->user_entry = NULL;
     task->user_l1_pa = 0;
+    task->user_stack_top = 0;
+    task->user_stack_phys = 0;
 
     DEBUG_PRINT("Allocated task '%s' (id=%u, priority=%u)",
                 task->name, task->id, task->priority);
@@ -386,6 +388,8 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->is_user = 0;
     task->user_entry = NULL;
     task->user_l1_pa = 0;
+    task->user_stack_top = 0;
+    task->user_stack_phys = 0;
 
     /* Clean the context struct to PoC so a secondary CPU can read it
      * during switch_to(). Without SMPEN, task_create's writes to
@@ -445,13 +449,17 @@ extern void user_task_enter(void *entry, void *stack_top, void *arg);
 static void user_task_wrapper(void *arg)
 {
     struct task *t = task_current();
-    if (!t || !t->user_entry) {
+    if (!t || !t->user_entry || !t->user_stack_top) {
         task_exit();
         return;
     }
 
-    /* ERET to EL0 — does not return */
-    user_task_enter((void *)(uintptr_t)t->user_entry, t->stack_top, arg);
+    /* ERET to EL0 — does not return. SP_EL0 = the per-task EL0 stack
+     * top (mapped into the per-task L1 with VMM_FLAG_USER), NOT the
+     * kernel stack at t->stack_top — EL0 cannot access kernel VAs. */
+    user_task_enter((void *)(uintptr_t)t->user_entry,
+                    (void *)(uintptr_t)t->user_stack_top,
+                    arg);
 
     /* Should never reach here */
     task_exit();
@@ -463,6 +471,12 @@ static void user_task_wrapper(void *arg)
  * The task starts in kernel mode (via task_entry_wrapper) then
  * transitions to EL0 via ERET. Syscalls (SVC #0) return to EL1.
  */
+/* Linker-defined .text.user range (#697 PR-4). The section holds the
+ * EL0-runnable code+rodata pages; task_create_user maps PA→user VA at
+ * USER_TEXT_VA so the ERET target lands inside the user window. */
+extern char __text_user_start[];
+extern char __text_user_end[];
+
 struct task *task_create_user(const char *name, task_entry_t user_entry,
                               void *arg, uint8_t priority)
 {
@@ -478,18 +492,81 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
         return NULL;
     }
 
-    /* Create a kernel task that runs the user_task_wrapper */
-    struct task *task = task_create_with_priority(name, user_task_wrapper,
-                                                   arg, priority);
-    if (!task) {
+    /* Map every 4 KB page of .text.user into the per-task L1 at
+     * USER_TEXT_VA, RX user. Multiple user tasks share the same backing
+     * pages (the section is read-only and execute-only at EL0), so no
+     * copy is needed. */
+    uintptr_t text_user_kva = (uintptr_t)__text_user_start;
+    size_t text_user_bytes = (size_t)(__text_user_end - __text_user_start);
+    if ((text_user_kva & (PAGE_SIZE - 1)) != 0 ||
+        (text_user_bytes & (PAGE_SIZE - 1)) != 0 ||
+        text_user_bytes == 0) {
+        ERROR("task_create_user: .text.user is not page-aligned/sized "
+              "(start=0x%lx, size=0x%zx)", text_user_kva, text_user_bytes);
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+    for (size_t off = 0; off < text_user_bytes; off += PAGE_SIZE) {
+        uint64_t pa = (uint64_t)text_user_kva + off;
+        uint64_t va = USER_TEXT_VA + off;
+        if (vmm_user_map_page(user_l1_pa, va, pa,
+                              VMM_FLAGS_USER_CODE) != 0) {
+            ERROR("task_create_user: failed to map .text.user page "
+                  "VA=0x%lx PA=0x%lx", va, pa);
+            vmm_destroy_user_l1(user_l1_pa);
+            return NULL;
+        }
+    }
+
+    /* Allocate a single 4 KB EL0 stack page from PMM and map it RW
+     * user at USER_STACK_PAGE_VA. Per-task; not shared. */
+    void *user_stack_page = pmm_alloc_pages(1);
+    if (!user_stack_page) {
+        ERROR("task_create_user: failed to allocate user stack page");
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+    if (vmm_user_map_page(user_l1_pa, USER_STACK_PAGE_VA,
+                          (uint64_t)(uintptr_t)user_stack_page,
+                          VMM_FLAGS_USER_DATA) != 0) {
+        ERROR("task_create_user: failed to map user stack page");
+        pmm_free_pages(user_stack_page, 1);
         vmm_destroy_user_l1(user_l1_pa);
         return NULL;
     }
 
-    /* Mark as user-mode and store the real EL0 entry point + per-task L1 */
+    /* Translate the linker-resolved kernel VA of `user_entry` to its
+     * user VA inside the mapped .text.user window. Out-of-range entries
+     * fall through unchanged — that supports unit tests that pass a
+     * kernel-only stub (e.g. task_exit) and immediately TERMINATE the
+     * task without ever ERETing to EL0. */
+    uintptr_t entry_kva = (uintptr_t)user_entry;
+    uint64_t entry_va;
+    if (entry_kva >= text_user_kva && entry_kva < text_user_kva + text_user_bytes) {
+        entry_va = USER_TEXT_VA + (entry_kva - text_user_kva);
+    } else {
+        entry_va = entry_kva;
+    }
+
+    /* Create the kernel-side task slot last. If alloc fails we tear
+     * down everything we've built up to this point. */
+    struct task *task = task_create_with_priority(name, user_task_wrapper,
+                                                   arg, priority);
+    if (!task) {
+        pmm_free_pages(user_stack_page, 1);
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+
+    /* Mark as user-mode and stash the per-task address-space state.
+     * No scheduler hand-off has happened yet (caller is responsible
+     * for `scheduler_add_task`), so these stores can't race with
+     * schedule() picking the task. */
     task->is_user = 1;
-    task->user_entry = user_entry;
+    task->user_entry = (void (*)(void *))(uintptr_t)entry_va;
     task->user_l1_pa = user_l1_pa;
+    task->user_stack_top = USER_STACK_TOP;
+    task->user_stack_phys = (uint64_t)(uintptr_t)user_stack_page;
 
     return task;
 }
@@ -643,6 +720,7 @@ void task_destroy(struct task *task)
     task_cleanup_t cleanup = task->cleanup;
     void *cleanup_arg = task->cleanup_arg;
     uint64_t user_l1_pa = task->user_l1_pa;
+    uint64_t user_stack_phys = task->user_stack_phys;
 
     /* Clear task slot (marks as free: id == 0) */
     task->id = 0;
@@ -654,6 +732,8 @@ void task_destroy(struct task *task)
     task->is_user = 0;
     task->user_entry = NULL;
     task->user_l1_pa = 0;
+    task->user_stack_top = 0;
+    task->user_stack_phys = 0;
 
     /* Bump the slot generation (#139) so any still-cached captures in
      * per-CPU steal deques from the previous life of this slot will
@@ -688,16 +768,19 @@ void task_destroy(struct task *task)
     }
 
 #if !defined(PLATFORM_X86_64)
-    /* Free the per-task L1 + any user-region L2/L3 sub-tables. The cleanup
-     * callback above is responsible for releasing user backing pages
-     * (PMM-allocated frames mapped into the user window) before we get
-     * here — vmm_destroy_user_l1 only walks page-table memory, not the
-     * leaf frames. */
+    /* Free the per-task L1 + any user-region L2/L3 sub-tables, then
+     * the EL0 stack page that task_create_user allocated. The L1
+     * helper only frees page-table memory, not leaf frames — the
+     * caller (here) owns the user stack and any other backings. */
     if (user_l1_pa) {
         vmm_destroy_user_l1(user_l1_pa);
     }
+    if (user_stack_phys) {
+        pmm_free_pages((void *)(uintptr_t)user_stack_phys, 1);
+    }
 #else
     (void)user_l1_pa;
+    (void)user_stack_phys;
 #endif
 
     /* Note: DEBUG_PRINT removed here to avoid output interleaving issues

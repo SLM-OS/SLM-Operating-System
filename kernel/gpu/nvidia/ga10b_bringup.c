@@ -177,7 +177,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 /* ---- GSP RISCV registers (offsets from NV_PGSP_RISCV_BASE) ----
  *
  * Used by phase 1 to start the HS ACR ucode in preloaded mode.
- * Register meanings per ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_priscv_ga10b.h. */
+ * Register meanings per ~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_priscv_ga10b.h. */
 
 #define RISCV_BOOT_VECTOR_LO        0x380u
 #define RISCV_BOOT_VECTOR_HI        0x384u
@@ -199,12 +199,12 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* ACR HS completion marker — written to MAILBOX0 by the ucode when
  * it runs. nvgpu's acr_sw_ga10b checks for ACR_OK. Exact constant
- * verified in ../slmos-reference-cache/nvidia/nvgpu-common-acr-acr_bootstrap.c. */
+ * verified in ~/slmos-ref/nvidia/nvgpu-common-acr-acr_bootstrap.c. */
 #define ACR_BOOT_OK                 0x000000ffu
 
 /* ---- FECS / GPCCS (GR Falcon) register offsets ----
  *
- * Offsets from ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_gr_ga10b.h (OE4T l4t-r36.5).
+ * Offsets from ~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_gr_ga10b.h (OE4T l4t-r36.5).
  * FECS is the GR front-end context-switch Falcon; GPCCS is per-GPC. On
  * GA10B cold boot (SEC_SECUREGPCCS path) ACR pre-loads both IMEM/DMEM
  * from WPR — SLM-OS only needs to issue STARTCPU and wait for the
@@ -244,7 +244,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  * here (not 1), and STRUCTURE_SIZE must be SEMAPHORE_ONE_WORD for
  * 32-bit payloads.
  *
- * Source: ../slmos-reference-cache/nvidia/nvgpu-include-class-clc7c0.h:109-142 */
+ * Source: ~/slmos-ref/nvidia/nvgpu-include-class-clc7c0.h:109-142 */
 #define NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER   0x0158u
 #define NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER   0x015Cu
 #define NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER   0x0160u
@@ -257,13 +257,13 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* ---- COMPUTE_B compute-kernel launch methods --------------------
  * Used by ga10b_bringup_launch_kernel (Phase 8). Offsets from
- * ../slmos-reference-cache/mesa/mesa-clc7c0.h. */
+ * ~/slmos-ref/mesa/mesa-clc7c0.h. */
 #define NVC7C0_INVALIDATE_SHADER_CACHES               0x021cu
 #define NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI 0x0244u
 #define NVC7C0_INVALIDATE_SKED_CACHES                 0x0298u
 
 /* INVALIDATE_SHADER_CACHES bitfields per
- * ../slmos-reference-cache/mesa/mesa-clc7c0.h:299-314 (bit positions
+ * ~/slmos-ref/mesa/mesa-clc7c0.h:299-314 (bit positions
  * decoded from "MSB:LSB" notation). All five bits set = nuke every
  * shader-side cache before the next dispatch reads input/cbuf data.
  *
@@ -285,7 +285,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* Per-arch window base addresses for Ampere. Mesa NVK hardcodes these
  * for `VOLTA_COMPUTE_A <= cls_compute < HOPPER_COMPUTE_A` in
- * ../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c:63-79. */
+ * ~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c:63-79. */
 #define NVC7C0_SHARED_MEMORY_WINDOW_BASE 0xfe000000u
 #define NVC7C0_LOCAL_MEMORY_WINDOW_BASE  0xff000000u
 
@@ -392,7 +392,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  * No channel, GMMU, or page tables required.
  *
  * Reference: nvgpu gm20b_gr_falcon_submit_fecs_method_op
- *   ../slmos-reference-cache/nvidia/nvgpu-gr-falcon-gm20b-fusa.c
+ *   ~/slmos-ref/nvidia/nvgpu-gr-falcon-gm20b-fusa.c
  */
 #define GR_FECS_METHOD_DATA         0x00409500u
 #define GR_FECS_METHOD_PUSH         0x00409504u
@@ -461,7 +461,7 @@ int ga10b_bringup_prepare(struct ga10b_bringup *b)
  * IMEM and ACR runs.
  *
  * This matches nvgpu_acr_bootstrap_hs_ucode_riscv in
- *   ../slmos-reference-cache/nvidia/nvgpu-common-acr-acr_bootstrap.c:360–419
+ *   ~/slmos-ref/nvidia/nvgpu-common-acr-acr_bootstrap.c:360–419
  * (preloaded BCR_CTRL=0x11 branch — we skip the 0x111 DMA path).
  *
  * On success the RISCV core runs, ACR authenticates FECS/GPCCS/(PMU),
@@ -490,7 +490,7 @@ static inline void bar0_w32(uint32_t off, uint32_t val)
  *   2. Wait 10+ µs
  *   3. Write ENGINE.RESET = 0       (deassert — crucial!)
  *
- * Reference: ../slmos-reference-cache/nvidia/nvgpu-hal-gsp-gsp_ga10b.c:54 ga10b_gsp_engine_reset.
+ * Reference: ~/slmos-ref/nvidia/nvgpu-hal-gsp-gsp_ga10b.c:54 ga10b_gsp_engine_reset.
  * Without the deassert write the engine stays in reset forever, and
  * HWCFG2/CPUCTL read back as PRI poison (0xbadfXXXX) — which is
  * exactly what we see on jetson-nano-2 after Linux's nvgpu detach.
@@ -736,8 +736,8 @@ int ga10b_bringup_acr(struct ga10b_bringup *b)
  * sentinel that the ucode writes as its first readiness signal.
  *
  * Reference:
- *   ../slmos-reference-cache/nvidia/nvgpu-common-gr-gr_falcon.c:737-738  — start_gpccs/start_fecs
- *   ../slmos-reference-cache/nvidia/nvgpu-hal-gr-falcon-gr_falcon_ga10b_fusa.c — mailbox plumbing
+ *   ~/slmos-ref/nvidia/nvgpu-common-gr-gr_falcon.c:737-738  — start_gpccs/start_fecs
+ *   ~/slmos-ref/nvidia/nvgpu-hal-gr-falcon-gr_falcon_ga10b_fusa.c — mailbox plumbing
  *
  * We split FECS and GPCCS into separate phases so the shell can invoke
  * them independently while iterating. The nvgpu driver issues them
@@ -845,7 +845,7 @@ int ga10b_bringup_gpccs(struct ga10b_bringup *b)
  * now we don't need PMU to submit a single NOP+SEMAPHORE method,
  * so skipping here is the pragmatic path.
  *
- * Reference: ../slmos-reference-cache/nvidia/nvgpu-common-acr-acr_sw_ga10b.c:417
+ * Reference: ~/slmos-ref/nvidia/nvgpu-common-acr-acr_sw_ga10b.c:417
  *   (lsf->is_lazy_bootstrap = g->support_ls_pmu ? true : false) */
 int ga10b_bringup_pmu(struct ga10b_bringup *b)
 {
@@ -880,7 +880,7 @@ int ga10b_bringup_pmu(struct ga10b_bringup *b)
  */
 
 /* GA10B UFLUSH register block (BAR0+0x70000-0x70010), per
- * ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_flush_ga10b.h.
+ * ~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_flush_ga10b.h.
  * All four registers share the layout: bit 0 = PENDING_BUSY (write 1
  * to start the op), bit 1 = OUTSTANDING_TRUE. Op completes when both
  * bits read back 0. */
@@ -931,8 +931,12 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * instead of fetching fresh data we wrote at the same GPU VA, which
  * surfaces as the iter-1 "got nvgpu's helper output" race (#596).
  *
+ * Also called between dispatches via the 3-point coherency sites
+ * added in #722 (set_input + pre-launch + post-launch). Same UFLUSH
+ * sequence; same preconditions.
+ *
  * Sequence per gv11b_mm_l2_flush in
- * ../slmos-reference-cache/nvidia/nvgpu-hal-mm-cache-flush_gv11b_fusa.c
+ * ~/slmos-ref/nvidia/nvgpu-hal-mm-cache-flush_gv11b_fusa.c
  * (and kmemsysCacheOp_GM200 in OGKM):
  *
  *   1. fb_flush   — drain pending sysmem writes into L2
@@ -946,12 +950,30 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * comment. GK20A is the predecessor Tegra GPU; the same ordering applies
  * to GA10B.
  *
- * Lock-hold cost: callers run this under `g_gpu_dispatch_lock` with
- * IRQs disabled (see `ensure_bringup` in slm_ffi.c). Worst-case time
- * is 4 ops × ~500 µs/op ≈ 2 ms IRQ-off if every op hits its retry
- * limit. Typical post-kexec cold-state run is ~40 µs total (each op
- * completes in <10 µs per `ga10b_uflush_op`'s comment). Bounded and
- * well below the file's existing IRQ-off budgets. */
+ * Preconditions (all callers must hold):
+ *   - `g_gpu_dispatch_lock` IRQ-off (UFLUSH ops are not re-entrant
+ *     against concurrent dispatch from another context)
+ *   - GPU is quiescent on the active channel — either pre-handoff
+ *     (inherit), or after a prior dispatch's sema fired and before
+ *     the next submit's USERD GP_PUT write. The 100-retry budget in
+ *     `ga10b_uflush_op` was sized for this; if the GPU has in-flight
+ *     work targeting the same memory addresses, the L2_FLUSH_DIRTY
+ *     op may need the larger 2000-retry budget nvgpu uses.
+ *
+ * Caller logging policy: callers use `(void)ga10b_l2_evict_sysmem()`
+ * when a failure produces a visible-stale next-call result that the
+ * operator can detect (set_input, pre-launch). The post-launch site
+ * surfaces failures explicitly because a timeout there silently
+ * returns stale logits to the FFI caller — there's no follow-up
+ * call to make the staleness visible.
+ *
+ * Lock-hold cost: 4 ops × ~500 µs/op ≈ 2 ms IRQ-off worst case if
+ * every op hits its retry limit. Typical run is ~40 µs total (each
+ * op completes in <10 µs per `ga10b_uflush_op`'s comment). The
+ * 3-point-evict pattern in #722 multiplies this by 3 per dispatch:
+ * ~120 µs typical / ~6 ms worst case. Bounded and acceptable for
+ * MNIST workloads; not the right shape for SLM forward-path latency
+ * (see docs/gpu-qmd-per-dispatch-plan.md §Status). */
 int ga10b_l2_evict_sysmem(void)
 {
     if (!gsp_platform) return -1;
@@ -2139,6 +2161,21 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
             (size_t)n * sizeof(*ops_v7));
     }
 
+    /* Pre-dispatch L2 evict. set_input only evicts lines for the
+     * input buffer; the dispatch path also reads cbuf, shader pages,
+     * and the QMD pool slot — any of which may carry L2 lines from a
+     * prior dispatch that were re-cached after set_input ran. Pre-
+     * launch evict ensures SKED, the SASS instruction fetch, and the
+     * SASS LDG path all see a clean L2 view of the channel-mapped
+     * buffers on this dispatch's first read. ~40 µs (#715).
+     *
+     * Caller is `ga10b_bringup_launch_kernel`, which holds
+     * `g_gpu_dispatch_lock` IRQ-off and is invoked between dispatches
+     * (after the prior sema fired, before this submit's USERD GP_PUT
+     * write) — so the GPU is quiescent on this channel and the
+     * 100-retry UFLUSH budget in `ga10b_uflush_op` is sufficient. */
+    (void)ga10b_l2_evict_sysmem();
+
     /* Pre-clear the poll target ONCE — the trailing sema entry is
      * the only writer. Pre-zero so a non-zero match below is
      * unambiguous proof the GPU wrote the payload. */
@@ -2622,6 +2659,37 @@ int ga10b_bringup_set_input(struct ga10b_bringup *b,
     if (gsp_platform && gsp_platform->mb) {
         gsp_platform->mb();
     }
+
+    /* GPU L2 invalidate. CPU has just written new bytes to DRAM at
+     * input_buf_phys, but the GPU's chip-wide L2 may still hold lines
+     * cached from a previous dispatch's read of the same physical
+     * address. Without this invalidate, the next dispatch's SASS LDG
+     * gets stale-from-L2 data even though DRAM is fresh — the off-by-
+     * one staleness pattern observed in #715 ("each call returns the
+     * previous call's result"). The QMD's per-launch
+     * INVALIDATE_SHADER_CACHES + CWD_MEMBAR_TYPE_L1_SYSMEMBAR cover
+     * SM-side caches but do not reach the LTC.
+     *
+     * Companion evicts run in `ga10b_dispatch_v7_pipeline` (pre-launch,
+     * to drop any lines re-cached between set_input and the actual
+     * dispatch) and `ga10b_bringup_read_pipeline_output` (post-launch,
+     * to flush GPU dirty L2 output lines back to DRAM before the CPU
+     * read). All three were empirically required on jetson-nano-2 to
+     * pass an ABBA + AAAA test matrix (digit_0/3/7 mixed sequences)
+     * — removing the post-launch evict alone reproduces the
+     * staleness; removing the pre-launch evict shifts the failure
+     * pattern from "off-by-one" to "calls 2+4 wrong with values
+     * swapped". The architectural understanding of which is strictly
+     * necessary on which path is incomplete; the narrowing experiment
+     * is tracked in #723 (gate each site behind a kernel cmdline flag
+     * and run the full subset matrix).
+     *
+     * The 4-step UFLUSH sequence (FB_FLUSH + L2_FLUSH_DIRTY +
+     * L2_SYSMEM_INVALIDATE + FB_FLUSH) is the same one
+     * `ga10b_bringup_inherit` runs once at startup. ~40 µs typical,
+     * 2 ms worst-case under IRQ-off (caller holds
+     * g_gpu_dispatch_lock). */
+    (void)ga10b_l2_evict_sysmem();
     return (int)cap;
 }
 
@@ -2652,6 +2720,17 @@ int ga10b_bringup_set_input_fill(struct ga10b_bringup *b,
     if (gsp_platform && gsp_platform->mb) {
         gsp_platform->mb();
     }
+    /* GPU L2 invalidate after CPU input write — see set_input header
+     * for the rationale. Same staleness fix applies to the fill path
+     * (sched-MLP runs through here on every assign_cpu tick).
+     *
+     * Sched-MLP cost note: ~40 µs IRQ-off per call. The hot path is
+     * already throttled by #651's RATE_LIMIT_NS + try-lock combo, so
+     * adding this evict doesn't change the per-tick budget shape. If
+     * `bench smp` or `bench stealing` regress under sched_mlp=ON,
+     * suspect the evict's worst-case (2 ms) tail rather than the
+     * typical case. */
+    (void)ga10b_l2_evict_sysmem();
     return (int)bytes_written;
 }
 
@@ -2694,6 +2773,31 @@ int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
         last_output_phys = ops[g_handoff.pipeline_n_ops - 1u].output_phys;
     }
     if (last_output_phys == 0u) return -1;
+
+    /* Post-dispatch L2 evict — load-bearing for #715. The trailing
+     * COMPUTE_SEMA_RELEASE entry in the dispatch fires with
+     * FLUSH_DISABLE=0, which is supposed to flush GPU writes through to
+     * sysmem before the sema release — but on GA10B silicon, hardware
+     * verification showed output reads still return stale data without
+     * an explicit L2 evict here. Drops any GPU L2 lines that hold this
+     * dispatch's output (writeback dirty lines + invalidate clean), so
+     * the CPU's subsequent cache_invalidate + memcpy reads fresh
+     * DRAM. Without this, two consecutive dispatches with different
+     * inputs return identical (stale) logits.
+     *
+     * This is the third leg of the cross-dispatch coherency tripod;
+     * see the companion comments in `ga10b_bringup_set_input` and the
+     * pre-dispatch site in `ga10b_dispatch_v7_pipeline`.
+     *
+     * Surface failures here. A timed-out evict on this site means the
+     * read below will return whatever was previously in DRAM at
+     * `last_output_phys` — exactly the off-by-one symptom #715 closed.
+     * Logging makes the silent-staleness regression visible without
+     * having to re-run the ABBA hardware test. */
+    if (ga10b_l2_evict_sysmem() < 0) {
+        uart_puts("[GA10B] post-dispatch L2 evict timed out — "
+                  "output read may return stale logits\n");
+    }
 
     /* Invalidate the buffer's cache range before the read. The GPU
      * wrote the data via its own (uncached-from-CPU's-perspective)

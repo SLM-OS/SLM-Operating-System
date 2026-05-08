@@ -27,7 +27,7 @@ This tool lets us:
 2. Use `gdb` to single-step the userspace side
 3. Add arbitrary `dmesg`-visible logging via hailo_pci's
    `trace_mmio`/`trace_ioctl` module params (already wired per
-   `../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-trace-instrumentation.patch`)
+   `~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-trace-instrumentation.patch`)
 4. A/B test: if our byte sequence works through `hailo_pci`, the bug
    is in SLM-OS's bare-metal kernel code. If it doesn't, the bug is
    in the bytes themselves (which would contradict the Pi OS wire
