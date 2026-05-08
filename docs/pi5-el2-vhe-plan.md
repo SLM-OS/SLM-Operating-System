@@ -236,7 +236,7 @@ EL2h for all four). 10/10 boot_test. `bench smp` cross-CPU
 dispatch passes (smp1/2/3 ran on CPUs 1/2/3). Existing SMP tests
 unaffected.
 
-### PR 4 — Timer to PPI 26
+### PR 4 — Timer to PPI 26 — **MERGED**
 
 Goal: switch the Pi 5 timer to PPI 26 (Hyp Physical Timer). Verify
 `vec->irq` increments on CPU 0 — the long-standing 0 from #672.
@@ -249,6 +249,20 @@ ensure the PPI number is right).
 Acceptance: `irqtest` no longer wedges and reports IRQ delivered.
 Per-CPU IRQ counter in `diag` shows non-zero on all CPUs. The
 trampoline path runs to completion.
+
+Status (2026-05-07, pi-5-2 verification with `SECONDARY_PREEMPT=ON`):
+
+- Boot reaches shell at EL2/VHE with `Timer initialized (IRQ 26,
+  CNTP_*_EL0, not started)`.
+- After idle WFI, `diag vec` per-CPU IRQ counters: CPU 0 = 201, CPU
+  1 = 3551, CPU 2 = 3552, CPU 3 = 3552 (~100Hz on CPU 0 idle —
+  matches `TIMER_HZ`).
+- `irqtest` reports `RESULT: IRQ DELIVERED (delta=1)` and the
+  shell remains responsive afterwards. The PR-2 era hang at
+  `daifclr` is gone.
+- Long-standing #672 / #134 root cause confirmed: PPI 30 NS-EL1
+  routing was firmware-blocked, but PPI 26 → EL2 vector via
+  `VBAR_EL2` works as Linux uses it.
 
 ### PR 5 — Userspace EL0 → EL2 SVC
 
