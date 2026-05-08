@@ -29,6 +29,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 
+#include "ga10b_channel_handoff.h"     /* struct ga10b_pipeline_op_v7 */
+
 #include "falcon.h"
 
 enum ga10b_bringup_state {
@@ -395,6 +397,20 @@ uint32_t ga10b_build_launch_kernel_with_sema_pushbuffer(uint32_t *pb,
  * consumed the pushbuffer, so the caller can tell "GPU didn't see
  * our submit" from "GPU saw it but the shader didn't fire". */
 int ga10b_bringup_launch_kernel(struct ga10b_bringup *b);
+
+/* Inline dispatcher: fire a caller-supplied N-element ops_v7 array
+ * through the inherited channel's QMD pool / pushbuffer / GPFIFO /
+ * semaphore. The original `ga10b_dispatch_v7_pipeline` (private)
+ * is now a thin wrapper that reads ops from `g_handoff` and calls
+ * this — extracted so `slm_oplib_dispatch` (#714) can fire ops
+ * built in C memory without a Linux-published pipeline.
+ *
+ * Caller responsibilities documented at the implementation site
+ * in ga10b_bringup.c. Returns 0 on completion within timeout, -1
+ * otherwise. */
+int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
+                                       const struct ga10b_pipeline_op_v7 *ops_v7,
+                                       uint32_t n);
 
 /*
  * Top-level runner. Walks phases 1–7 in order and returns 0 iff the

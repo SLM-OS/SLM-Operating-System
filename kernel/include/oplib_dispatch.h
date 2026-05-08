@@ -84,4 +84,36 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
                                 const struct operator_dispatch_args *args,
                                 struct slm_oplib_dispatch_prep *out);
 
+/* Forward decl — defined in kernel/gpu/nvidia/ga10b_bringup.h. The
+ * full struct definition isn't needed by callers of `slm_oplib_dispatch`. */
+struct ga10b_bringup;
+
+/* Fire a single SASS kernel from the operator library through the
+ * inherited GPU channel.
+ *
+ * Composes `slm_oplib_prepare_dispatch` (lookup SASS, allocate cbuf,
+ * populate, compute launch shape) with
+ * `ga10b_dispatch_v7_pipeline_inline` (build a 1-element v7 op,
+ * submit through QMD pool + pushbuffer + semaphore, poll
+ * completion). The dispatcher reuses the inherited handoff's
+ * channel resources — caller must ensure the bringup state is
+ * channel-open and the operator library is staged via
+ * `oplib_pool_stage_to_gpu`.
+ *
+ * Returns 0 on dispatch + completion, -1 on any failure
+ * (lookup miss, GMMU alloc failure, GPU dispatch timeout). The
+ * cbuf allocated by `prepare_dispatch` stays mapped after return —
+ * caller can free via the GMMU's free path or leave it for the
+ * next dispatch's cbuf if reuse semantics are wanted.
+ *
+ * Jetson-only. On non-Jetson platforms returns -1 without side
+ * effects.
+ */
+int slm_oplib_dispatch(struct ga10b_bringup *b,
+                       uint64_t inst_block_phys,
+                       uint32_t op_kind,
+                       uint32_t tier,
+                       uint32_t dtype,
+                       const struct operator_dispatch_args *args);
+
 #endif /* OPLIB_DISPATCH_H */

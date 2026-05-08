@@ -4394,9 +4394,177 @@ int cmd_nvgpu(int argc, char *argv[])
                          "wired (#714 follow-on)\r\n");
             return 0;
         }
+        if (strcmp(argv[2], "dispatch-rmsnorm") == 0) {
+            /* #732: end-to-end RMSNORM-on-GPU smoke test. Allocates
+             * input/gamma/output buffers via GMMU, fills input with
+             * a known FP16 pattern (sentinel: alternating 0x3C00
+             * and 0xBC00 = +1.0 / -1.0 so RMSNorm has work to do
+             * but a deterministic answer), fills gamma with all
+             * 0x3C00 (+1.0), then dispatches RMSNORM through the
+             * operator library and prints the first few output
+             * halves for inspection.
+             *
+             * Usage: nvgpu oplib dispatch-rmsnorm <n_rows> <n>
+             *
+             * Pre: `nvgpu oplib stage` must have run + the channel
+             * must be inherited. */
+            if (argc < 5) {
+                shell_puts("usage: nvgpu oplib dispatch-rmsnorm "
+                           "<n_rows> <n>\r\n");
+                return -1;
+            }
+            uint32_t n_rows = (uint32_t)atoi(argv[3]);
+            uint32_t n      = (uint32_t)atoi(argv[4]);
+            if (n_rows == 0 || n == 0) {
+                shell_puts("dispatch-rmsnorm: n_rows and n must be > 0\r\n");
+                return -1;
+            }
+            if (n_rows > 65536u || n > 65536u) {
+                shell_printf("dispatch-rmsnorm: cap exceeded "
+                             "(n_rows=%u n=%u, max 65536 each)\r\n",
+                             (unsigned)n_rows, (unsigned)n);
+                return -1;
+            }
+
+            uint64_t inst_phys = 0;
+            const struct ga10b_channel_handoff *h =
+                ga10b_bringup_handoff();
+            if (h != NULL && h->inst_block_phys != 0) {
+                inst_phys = h->inst_block_phys;
+            } else {
+                inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys == 0) {
+                    shell_puts("dispatch-rmsnorm: no handoff and "
+                               "FECS_CURRENT_CTX read failed\r\n");
+                    return -1;
+                }
+            }
+
+            uint64_t in_bytes  = (uint64_t)n_rows * n * 2u;
+            uint64_t gam_bytes = (uint64_t)n * 2u;
+            uint64_t out_bytes = (uint64_t)n_rows * n * 2u;
+            uint32_t in_pages  = (uint32_t)((in_bytes  + 4095u) / 4096u);
+            uint32_t gam_pages = (uint32_t)((gam_bytes + 4095u) / 4096u);
+            uint32_t out_pages = (uint32_t)((out_bytes + 4095u) / 4096u);
+            if (in_pages == 0)  in_pages = 1;
+            if (gam_pages == 0) gam_pages = 1;
+            if (out_pages == 0) out_pages = 1;
+
+            uint64_t in_va = 0, gam_va = 0, out_va = 0;
+            uint64_t in_phys = 0, gam_phys = 0, out_phys = 0;
+            void *in_cpu = NULL, *gam_cpu = NULL, *out_cpu = NULL;
+            int rc;
+            rc = ga10b_gmmu_alloc(inst_phys, in_pages, 0,
+                                   &in_va, &in_cpu, &in_phys);
+            if (rc < 0) {
+                shell_printf("dispatch-rmsnorm: input alloc rc=%d\r\n", rc);
+                return rc;
+            }
+            rc = ga10b_gmmu_alloc(inst_phys, gam_pages, 0,
+                                   &gam_va, &gam_cpu, &gam_phys);
+            if (rc < 0) {
+                shell_printf("dispatch-rmsnorm: gamma alloc rc=%d\r\n", rc);
+                return rc;
+            }
+            rc = ga10b_gmmu_alloc(inst_phys, out_pages, 0,
+                                   &out_va, &out_cpu, &out_phys);
+            if (rc < 0) {
+                shell_printf("dispatch-rmsnorm: output alloc rc=%d\r\n", rc);
+                return rc;
+            }
+
+            /* Fill input with alternating +1.0/-1.0 FP16 (0x3C00 /
+             * 0xBC00). After RMSNorm with gamma=1.0, the output
+             * should also be ±1.0 for each element since
+             * sqrt(mean(1^2)) == 1.0 and rms_inv = 1.0. */
+            volatile uint16_t *in_p = (volatile uint16_t *)in_cpu;
+            uint64_t in_count = (uint64_t)n_rows * n;
+            for (uint64_t i = 0; i < in_count; i++) {
+                in_p[i] = (i & 1) ? 0xBC00u : 0x3C00u;
+            }
+            cache_clean_range(in_cpu, in_pages * 4096u);
+
+            volatile uint16_t *gam_p = (volatile uint16_t *)gam_cpu;
+            for (uint32_t i = 0; i < n; i++) {
+                gam_p[i] = 0x3C00u;     /* FP16 +1.0 */
+            }
+            cache_clean_range(gam_cpu, gam_pages * 4096u);
+
+            /* Pre-fill output with a sentinel so we can tell if
+             * the GPU wrote anything at all. */
+            volatile uint16_t *out_p = (volatile uint16_t *)out_cpu;
+            for (uint64_t i = 0; i < in_count; i++) {
+                out_p[i] = 0xCAFEu;
+            }
+            cache_clean_range(out_cpu, out_pages * 4096u);
+
+            shell_printf("dispatch-rmsnorm: in=0x%lx gamma=0x%lx out=0x%lx "
+                         "(n_rows=%u, n=%u)\r\n",
+                         (unsigned long)in_va, (unsigned long)gam_va,
+                         (unsigned long)out_va,
+                         (unsigned)n_rows, (unsigned)n);
+
+            struct operator_dispatch_args args = {
+                .op_kind = SLM_GPU_OP_RMSNORM,
+                .u.rmsnorm = {
+                    .x_gpu_va     = in_va,
+                    .gamma_gpu_va = gam_va,
+                    .out_gpu_va   = out_va,
+                    .n_rows       = n_rows,
+                    .n            = n,
+                    .eps_bits     = 0x358637BDu,    /* 1e-6f */
+                },
+            };
+
+            extern int slm_oplib_dispatch(struct ga10b_bringup *b,
+                                          uint64_t inst_block_phys,
+                                          uint32_t op_kind,
+                                          uint32_t tier,
+                                          uint32_t dtype,
+                                          const struct operator_dispatch_args *args);
+            rc = slm_oplib_dispatch(&b, inst_phys,
+                                     SLM_GPU_OP_RMSNORM,
+                                     SLM_GPU_TIER_SIMT,
+                                     SLM_GPU_DTYPE_FP16,
+                                     &args);
+            if (rc < 0) {
+                shell_printf("dispatch-rmsnorm: slm_oplib_dispatch rc=%d\r\n", rc);
+                return rc;
+            }
+
+            /* Read back output. Cache-invalidate first so the CPU
+             * sees what the GPU wrote (not stale L1). */
+            extern void cache_invalidate_range(void *, size_t);
+            cache_invalidate_range(out_cpu, out_pages * 4096u);
+
+            /* Print the first 8 output halves + a sample from the
+             * tail. With sentinel-fill above, any 0xCAFE means the
+             * GPU didn't write that slot. */
+            shell_puts("dispatch-rmsnorm: output[0..7] = ");
+            for (int i = 0; i < 8 && (uint64_t)i < in_count; i++) {
+                shell_printf("0x%04x ", (unsigned)out_p[i]);
+            }
+            shell_puts("\r\n");
+            if (in_count > 8) {
+                uint64_t tail = in_count - 1;
+                shell_printf("dispatch-rmsnorm: output[%llu] = 0x%04x\r\n",
+                             (unsigned long long)tail,
+                             (unsigned)out_p[tail]);
+            }
+
+            /* Sentinel check: at least output[0] must not be 0xCAFE. */
+            if (out_p[0] == 0xCAFEu) {
+                shell_puts("dispatch-rmsnorm: FAIL — output[0] is "
+                           "still 0xCAFE sentinel (GPU didn't write)\r\n");
+                return -1;
+            }
+            shell_puts("dispatch-rmsnorm: PASS — GPU wrote output\r\n");
+            return 0;
+        }
         shell_puts("usage: nvgpu oplib [status | stage [<inst_hex>] | "
                    "probe <op_kind> <tier> <dtype> | "
-                   "prep-rmsnorm <n_rows> <n>]\r\n");
+                   "prep-rmsnorm <n_rows> <n> | "
+                   "dispatch-rmsnorm <n_rows> <n>]\r\n");
         return -1;
     }
 
