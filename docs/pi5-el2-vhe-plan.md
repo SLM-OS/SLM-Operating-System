@@ -264,7 +264,7 @@ Status (2026-05-07, pi-5-2 verification with `SECONDARY_PREEMPT=ON`):
   routing was firmware-blocked, but PPI 26 → EL2 vector via
   `VBAR_EL2` works as Linux uses it.
 
-### PR 5 — Userspace EL0 → EL2 SVC
+### PR 5 — Userspace EL0 → EL2 SVC — **MERGED (verify-only)**
 
 Goal: re-route the syscall path through the EL2 sync vector. Tasks
 at EL0 issuing SVC reach the lower-EL-AArch64 sync handler at
@@ -276,6 +276,40 @@ if any).
 
 Acceptance: userspace tasks (run via `task` shell command) issue
 SVCs and the kernel handles them correctly. Existing tests pass.
+
+Status (2026-05-08): merged as a verify-only PR. After PR-2/3/4
+landed, the EL0 → EL2 SVC path was already structurally complete:
+
+- `user_entry.S` writes `KERN_ELR / KERN_SPSR` (PR-2 work) — ERET
+  from EL2 to EL0 lands at the right PC/PSTATE.
+- The vector table's lower-EL AArch64 sync slot (offset 0x400) is
+  bound to `el0_sync`. Under VHE+TGE=1, EL0 SVC routes there from
+  any kernel EL — the same vectors service EL1h on QEMU and EL2h on
+  Pi 5 because writes to `VBAR_EL1` redirect to `VBAR_EL2`.
+- `el0_sync_handler`'s `mrs *_el1` reads of ESR/FAR redirect to
+  `*_EL2` under HCR_EL2.E2H=1 (ARM ARM D13.2.1 — both registers are
+  on the VHE redirect list).
+
+PR-5 contributes:
+
+- A regression test
+  `test_lower_el_sync_vector_dispatches_to_el0_sync` in
+  `kernel/tests/test_syscall.c` that decodes the AArch64 `B`
+  instruction at `exception_vectors + 0x400` and asserts the branch
+  target equals `el0_sync` — pinning the vector layout so a future
+  refactor of `vectors.S` can't silently break the EL0 → EL2 SVC
+  path.
+- A VHE-confirmation comment block on `el0_sync_handler` in
+  `exceptions.c` documenting that the `*_el1` register reads
+  redirect to `*_EL2` at EL2/E2H.
+
+What this PR does **not** do (deferred to follow-up #697):
+
+- Real EL0 task execution. `task_create_user` exists; every test
+  marks the task `TASK_TERMINATED` before it runs. Pi 5 RAM is
+  mapped as kernel-only (no `VMM_FLAG_USER`), so an EL0 task would
+  instruction-abort on its first PC. Per-task TTBR0 + user-mappable
+  memory is the next chunk of work; #697 captures the full scope.
 
 ### Follow-up (not part of #683)
 
