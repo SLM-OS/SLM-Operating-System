@@ -457,6 +457,7 @@ set(KERNEL_SOURCES
     kernel/src/gpu_tier.c
     kernel/gpu/operator_library.c
     kernel/gpu/oplib_pool.c
+    kernel/gpu/operator_dispatch.c
     kernel/src/admin_telemetry.c
     kernel/src/model_engine.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
@@ -765,6 +766,7 @@ set(TEST_SOURCES
     kernel/tests/test_gpu_tier.c
     kernel/tests/test_operator_library.c
     kernel/tests/test_oplib_pool.c
+    kernel/tests/test_operator_dispatch.c
     kernel/tests/test_gpu_dispatch_breaker.c
     kernel/tests/test_admin_telemetry.c
     kernel/tests/test_telemetry_feed.c

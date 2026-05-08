@@ -131,6 +131,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_gpu_tier();
     total_failures += test_suite_operator_library();
     total_failures += test_suite_oplib_pool();
+    total_failures += test_suite_operator_dispatch();
     total_failures += test_suite_gpu_dispatch_breaker();
     total_failures += test_suite_admin_telemetry();
     total_failures += test_suite_telemetry_feed();
