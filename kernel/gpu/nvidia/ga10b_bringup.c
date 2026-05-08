@@ -2740,6 +2740,22 @@ int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
      * (PBDMA stopped seeing submits). Keeping only this site saves
      * ~2/3 of the per-dispatch evict cost (~80 µs of #722's 120 µs).
      *
+     * Why one site is enough: the UFLUSH sequence is a chip-wide L2
+     * op, not a per-buffer one. So this evict does double duty —
+     * it (a) flushes THIS dispatch's dirty output lines back to DRAM
+     * for the CPU read immediately below, and (b) invalidates ANY
+     * lines the GPU's LDG path may have cached for the NEXT
+     * dispatch's input/cbuf/shader/QMD reads. The set_input and
+     * pre-launch sites were targeting (b) directly, but the prior
+     * dispatch's post-launch site already covers it.
+     *
+     * Regression guard: the call-site count is pinned in
+     * `host-tools/gsp-harness/test_ga10b_bringup.c`
+     * (`test_l2_evict_call_sites_pinned_to_minimal`). A future PR
+     * that re-adds an evict at set_input or pre-launch without
+     * updating the test will fail at build time, not at
+     * hardware-debug time.
+     *
      * Surface failures here. A timed-out evict on this site means the
      * read below will return whatever was previously in DRAM at
      * `last_output_phys` — exactly the off-by-one symptom #715 closed.

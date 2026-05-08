@@ -3074,6 +3074,70 @@ static void test_qmd_set_bits_rejects_inverted_range(void)
 }
 
 /* ======================================================================
+ * Cross-dispatch L2 evict — call-site count pin (#723 / PR #727)
+ * ====================================================================== */
+
+/* PR #722 added `ga10b_l2_evict_sysmem()` calls at three sites for
+ * cross-dispatch coherency on GA10B's chip-wide L2. The narrowing
+ * experiment in #723 (runtime mask gate over all 8 subsets, ABBA +
+ * AAAA on jetson-nano-2) showed the post-launch site is necessary
+ * AND sufficient — every passing subset includes it; pre-launch
+ * without set_input actually wedged the channel. PR #727 dropped
+ * the redundant set_input + pre-launch evicts; only the inherit
+ * call (`ga10b_bringup_inherit`, #596 race) and the per-dispatch
+ * post-launch call (`ga10b_bringup_read_pipeline_output`) remain.
+ *
+ * This test scans the source text and pins the call-site count at
+ * exactly two. A future PR that re-adds an evict at set_input or
+ * pre-launch (or anywhere else) will fail at build-time, not at
+ * hardware-debug-time — same spirit as
+ * `test_launch_kernel_pb_uses_ampere_pcas2_b`.
+ *
+ * The test runs from the project root via `make test-ga10b-bringup`
+ * (Makefile:775), so the source path is relative to cwd. */
+static void test_l2_evict_call_sites_pinned_to_minimal(void)
+{
+    printf("== test_l2_evict_call_sites_pinned_to_minimal ==\n");
+
+    const char *path = "kernel/gpu/nvidia/ga10b_bringup.c";
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "  could not open %s (cwd must be project root)\n",
+                path);
+        REQUIRE(f != NULL);
+        return;
+    }
+
+    /* Count `ga10b_l2_evict_sysmem(` occurrences that look like
+     * function-call sites — i.e. not inside a comment line and not
+     * the function's own definition. The cheap heuristic: ignore
+     * lines whose first non-whitespace is `*` (block-comment body)
+     * or `//` (line comment), and ignore the line that starts the
+     * function definition (`int ga10b_l2_evict_sysmem(void)`). */
+    char line[512];
+    int call_sites = 0;
+    while (fgets(line, sizeof(line), f)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (p[0] == '*') continue;
+        if (p[0] == '/' && p[1] == '/') continue;
+        if (strstr(line, "ga10b_l2_evict_sysmem(void)")) continue;
+        const char *q = line;
+        while ((q = strstr(q, "ga10b_l2_evict_sysmem(")) != NULL) {
+            call_sites++;
+            q += strlen("ga10b_l2_evict_sysmem(");
+        }
+    }
+    fclose(f);
+
+    /* Expected sites:
+     *   1. `ga10b_bringup_inherit` — post-kexec L2 evict (#596 race)
+     *   2. `ga10b_bringup_read_pipeline_output` — per-dispatch
+     *      post-launch coherency (#715 / #722, narrowed by #723) */
+    REQUIRE_EQ(call_sites, 2);
+}
+
+/* ======================================================================
  * Entry
  * ====================================================================== */
 
@@ -3214,6 +3278,8 @@ int main(void)
     test_qmd_populate_sets_cwd_sysmembar();
     test_qmd_populate_is_deterministic();
     test_qmd_set_bits_rejects_inverted_range();
+
+    test_l2_evict_call_sites_pinned_to_minimal();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);
