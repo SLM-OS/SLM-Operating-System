@@ -3920,6 +3920,7 @@ int cmd_telemetry(int argc, char *argv[])
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../gpu/nvidia/ga10b_bringup.h"
+#include "oplib_pool.h"
 
 /*
  * nvgpu - Jetson GA10B nvgpu-native bringup driver (ACR → FECS → GPCCS
@@ -4091,7 +4092,6 @@ int cmd_nvgpu(int argc, char *argv[])
 
     if (strcmp(argv[1], "oplib") == 0) {
         if (argc < 3 || strcmp(argv[2], "status") == 0) {
-            extern void oplib_pool_status_print(void);
             oplib_pool_status_print();
             return 0;
         }
