@@ -1210,10 +1210,21 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
      *      (model inference path).
      * v6: + input_buf_phys/size so SLM-OS can swap the model's input
      *      tensor at runtime (per-image MNIST classification).
-     * Phase 6 inherit accepts all five; launch_kernel version-gates
-     * at dispatch time (v3 minimum for single-shot, v5 for pipelines). */
+     * v7: + per-dispatch QMD pool (qmd_pool_phys/gpu_va/size_bytes/
+     *      n_slots). Prefix layout is identical to v6, so the
+     *      address/size/payload checks below all apply unchanged.
+     *      The v7-specific tail fields are validated later at the
+     *      dispatch path via `ga10b_v7_validate_handoff`. Without
+     *      v7 in this list the scanner rejects v7 handoffs and
+     *      reports "Handoff not found" even though the magic+kind
+     *      match — the bug that blocked end-to-end v7 inherit on
+     *      hardware until 2026-05-07.
+     * Phase 6 inherit accepts all six; launch_kernel version-gates
+     * at dispatch time (v3 minimum for single-shot, v5 for pipelines,
+     * v7 for the QMD-pool path). */
     if (h->version != 2 && h->version != 3 &&
-        h->version != 4 && h->version != 5 && h->version != 6) return -1;
+        h->version != 4 && h->version != 5 && h->version != 6 &&
+        h->version != 7) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;

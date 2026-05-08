@@ -1034,9 +1034,15 @@ static void test_handoff_validate_bad_version(void)
     h.version = 1;                  /* v1 lacked work_submit_token */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     /* v2 (channel-only), v3 (+ kernel-launch state), v4 (+
-     * expected_payload), v5 (+ pipeline), and v6 (+ input_buf) all
-     * pass — Phase 6/7 reads only v2 fields, Phase 8 checks the
-     * version at dispatch time before reading v3..v6 fields. */
+     * expected_payload), v5 (+ pipeline), v6 (+ input_buf), and v7
+     * (+ qmd-pool) all pass — Phase 6/7 reads only v2 fields, Phase 8
+     * checks the version at dispatch time before reading v3..v7
+     * fields. v7 specifically must pass because the scan loop
+     * (`ga10b_find_handoff_of_kind_in_range`) calls this validator
+     * to filter magic-collision candidates; rejecting v7 here makes
+     * the QMD-pool path unreachable from a real kexec — the bug
+     * fixed 2026-05-07 alongside the v7 HMMA override propagation
+     * (PR #694). */
     h.version = 2;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 3;
@@ -1047,7 +1053,9 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 6;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
-    h.version = 7;                  /* future, not yet defined */
+    h.version = 7;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 8;                  /* future, not yet defined */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
