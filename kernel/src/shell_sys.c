@@ -4292,6 +4292,22 @@ int cmd_nvgpu(int argc, char *argv[])
                 shell_puts("oplib prep-rmsnorm: n_rows and n must be > 0\r\n");
                 return -1;
             }
+            /* Cap inputs at safety margins large enough for any
+             * realistic SLM workload (Qwen2.5-1.5B prefill: 16
+             * rows × 8960 elements; LM head: 1 row × 151936
+             * vocab). 1<<16 each leaves >2 orders of magnitude of
+             * headroom on both axes.
+             *
+             * Without this cap, atoi-supplied multi-million values
+             * would overflow uint32_t in `n_rows * n * 2`, allocate
+             * a tiny cbuf, and pass garbage grid_x past GA10B's
+             * 65535-CTA limit to the launch-shape function. */
+            if (n_rows > 65536u || n > 65536u) {
+                shell_printf("oplib prep-rmsnorm: n_rows=%u n=%u "
+                             "exceeds safety cap (65536 each)\r\n",
+                             (unsigned)n_rows, (unsigned)n);
+                return -1;
+            }
 
             /* Resolve inst_block_phys: handoff first, FECS fallback. */
             uint64_t inst_phys = 0;
@@ -4311,14 +4327,15 @@ int cmd_nvgpu(int argc, char *argv[])
             /* Allocate input/gamma/output buffers in the channel's
              * GMMU. RmsNorm consumes input + gamma (both n_rows*n /
              * n FP16 halves), produces output (n_rows*n halves).
-             * Round each up to a 4 KB page boundary for the GMMU
-             * allocator. */
-            uint32_t in_bytes  = n_rows * n * 2u;
-            uint32_t gam_bytes = n * 2u;
-            uint32_t out_bytes = n_rows * n * 2u;
-            uint32_t in_pages  = (in_bytes  + 4095u) / 4096u;
-            uint32_t gam_pages = (gam_bytes + 4095u) / 4096u;
-            uint32_t out_pages = (out_bytes + 4095u) / 4096u;
+             * Use uint64_t for the byte arithmetic — the input cap
+             * above (n_rows*n ≤ 2^32) means n_rows*n*2 fits in u64
+             * with room. Round each up to a 4 KB page boundary. */
+            uint64_t in_bytes  = (uint64_t)n_rows * n * 2u;
+            uint64_t gam_bytes = (uint64_t)n * 2u;
+            uint64_t out_bytes = (uint64_t)n_rows * n * 2u;
+            uint32_t in_pages  = (uint32_t)((in_bytes  + 4095u) / 4096u);
+            uint32_t gam_pages = (uint32_t)((gam_bytes + 4095u) / 4096u);
+            uint32_t out_pages = (uint32_t)((out_bytes + 4095u) / 4096u);
             if (in_pages == 0)  in_pages = 1;
             if (gam_pages == 0) gam_pages = 1;
             if (out_pages == 0) out_pages = 1;
