@@ -324,6 +324,10 @@ el1_serror:
  * EL0 PC and PSTATE), and restore_regs + eret returns to EL0.
  */
 
+/* Exposed for the #683 PR-5 vector-layout regression test in
+ * kernel/tests/test_syscall.c — the test decodes the `b el0_sync`
+ * branch at exception_vectors + 0x400 and asserts the target. */
+.global el0_sync
 el0_sync:
     DIAG_BUMP_VEC 0x00
     save_regs

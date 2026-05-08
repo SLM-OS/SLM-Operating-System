@@ -338,6 +338,52 @@ static void test_task_create_user_sets_flag(void)
 }
 #endif
 
+#if !defined(PLATFORM_X86_64)
+/*
+ * Test (#683 PR-5): the lower-EL AArch64 sync slot at offset 0x400
+ * inside the ARM64 vector table dispatches to `el0_sync`.
+ *
+ * Why this matters: with the kernel at EL2h+TGE (Pi 5 after #683
+ * PR-2), EL0 SVC exceptions are taken to VBAR_EL2 + 0x400. The
+ * vector table is shared between QEMU (EL1h) and Pi 5/Jetson (EL2h)
+ * because writes to VBAR_EL1 redirect to VBAR_EL2 under VHE; the
+ * same single block of code at `exception_vectors` services both ELs.
+ *
+ * This test decodes the AArch64 unconditional-branch instruction at
+ * the slot and asserts it targets `el0_sync` — proving the SVC path
+ * lands at the C handler from any kernel EL.
+ *
+ * AArch64 B encoding (ARM ARM C6.2.34): bits[31:26] = 000101,
+ * bits[25:0] = signed imm26 (offset-by-4 in word units).
+ */
+/* Declared as char[] symbols so we can take their address as a data
+ * pointer without converting a function pointer to `void *` (ISO C
+ * forbids that and the kernel build is `-Wpedantic -Werror`). The
+ * actual definitions are in vectors.S — labels, no type info. */
+extern char exception_vectors[];
+extern char el0_sync[];
+
+static void test_lower_el_sync_vector_dispatches_to_el0_sync(void)
+{
+    /* Vector table requires 2 KB alignment. */
+    TEST_ASSERT_EQUAL_UINT64(0,
+        (uint64_t)(uintptr_t)exception_vectors & 0x7FF);
+
+    uint32_t *slot = (uint32_t *)((uintptr_t)exception_vectors + 0x400);
+    uint32_t insn = *slot;
+
+    /* `B <label>` opcode top-6 bits = 0b000101 → 0x14000000. */
+    TEST_ASSERT_EQUAL_HEX32(0x14000000, insn & 0xFC000000);
+
+    /* Sign-extend the 26-bit immediate, scale by 4, add to slot PC. */
+    int32_t imm26 = (int32_t)(insn << 6) >> 6;          /* sign-extend */
+    uintptr_t target = (uintptr_t)slot + ((int64_t)imm26 << 2);
+
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)el0_sync,
+                             (uint64_t)target);
+}
+#endif
+
 /* ============================================================================
  * Test Suite Runner
  * ============================================================================ */
@@ -374,6 +420,9 @@ int test_suite_syscall(void)
 #if !defined(PLATFORM_X86_64)
     /* User task creation */
     RUN_TEST(test_task_create_user_sets_flag);
+
+    /* #683 PR-5: vector layout for EL0 → EL2 SVC */
+    RUN_TEST(test_lower_el_sync_vector_dispatches_to_el0_sync);
 #endif
 
     return UnityEnd();

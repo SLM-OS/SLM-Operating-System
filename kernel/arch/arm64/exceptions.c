@@ -540,6 +540,13 @@ static void handle_user_fault(struct trap_frame *tf, uint64_t esr,
  * Dispatches SVC (syscalls) to the syscall table.
  * All other synchronous exceptions (data abort, instruction abort,
  * illegal instruction, etc.) terminate the component.
+ *
+ * #683 PR-5 (EL2/VHE): with the kernel at EL2h+TGE on Pi 5, EL0 sync
+ * exceptions take the lower-EL AArch64 sync vector at VBAR_EL2 + 0x400
+ * — the same `el0_sync` slot used at EL1h on QEMU. The `mrs *_el1`
+ * accesses below redirect to `*_EL2` under HCR_EL2.E2H=1 (ESR/FAR are
+ * on the VHE redirect list per ARM ARM D13.2.1), so this handler is
+ * VHE-correct without source changes.
  */
 void el0_sync_handler(struct trap_frame *tf)
 {
