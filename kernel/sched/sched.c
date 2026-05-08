@@ -607,6 +607,32 @@ static void idle_task_func(void *arg)
         __asm__ volatile("msr daifclr, #2" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
         __asm__ volatile("wfi");
+#elif defined(PLATFORM_JETSON_ORIN_NANO)
+        /* Jetson CPU 0: hardware timer IRQs do not deliver to EL1/EL2
+         * (CCPLEX is non-secure and the GIC group/route is owned by
+         * EL3 firmware — see "ARM64 Hardware Timer IRQs" in
+         * kernel/CLAUDE.md). The default Pi 5 path below would WFI
+         * here and never wake — when shell is the only ready task on
+         * CPU 0 and it calls task_sleep_ms, the shell blocks, idle
+         * takes over, WFI hangs forever waiting for an IRQ that
+         * never comes, and the sleeper never gets a chance to
+         * expire. Reproducer: `lua-admin -e slm.sleep(500)` on the
+         * serial console after a fresh kexec. Telnet "fixes" it
+         * because lwIP/net_pump activity yields on a secondary CPU,
+         * and *that* yield triggers coop_preempt_maybe_tick →
+         * scheduler_tick → task_wake_sleepers, which finds CPU 0's
+         * sleeper and wakes it.
+         *
+         * Fix: on CPU 0, skip the wait entirely and fall through to
+         * the post-loop yield(), which drives schedule() and fires
+         * coop_preempt_maybe_tick. Secondary CPUs still WFE — they're
+         * only wake-worthy when cross-CPU dispatch SEVs them, which
+         * is fine. The cost is CPU 0 burns power instead of sleeping;
+         * for the capstone OS that's acceptable until/unless real
+         * timer IRQs are restored on Jetson. */
+        if (cpu_id() != 0) {
+            __asm__ volatile("wfe" ::: "memory");
+        }
 #else
         if (cpu_id() == 0) {
             __asm__ volatile("msr daifclr, #2" ::: "memory");
