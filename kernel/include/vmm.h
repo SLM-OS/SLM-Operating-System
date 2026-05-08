@@ -135,6 +135,7 @@
 #define PTE_SH_OUTER        (2UL << 8)          /* Outer shareable */
 #define PTE_SH_INNER        (3UL << 8)          /* Inner shareable */
 #define PTE_AF              (1UL << 10)         /* Access flag (must be 1) */
+#define PTE_NG              (1UL << 11)         /* Not Global (ASID-tagged) */
 
 /*
  * Upper attributes (bits [63:52])
@@ -194,8 +195,10 @@
 #define TCR_EPD0            (1UL << 7)              /* Disable TTBR0 walks */
 #define TCR_EPD1            (1UL << 23)             /* Disable TTBR1 walks */
 #define TCR_IPS_40BIT       (2UL << 32)             /* 40-bit physical addresses */
+#define TCR_AS              (1UL << 36)             /* 16-bit ASIDs (vs 8-bit) */
 
-/* TCR value for SLM-OS: 39-bit VA, 4KB granule, both TTBR0 and TTBR1 enabled */
+/* TCR value for SLM-OS: 39-bit VA, 4KB granule, both TTBR0 and TTBR1 enabled,
+ * 16-bit ASIDs. */
 #define TCR_EL1_VALUE       (TCR_T0SZ(39)     | \
                              TCR_T1SZ(39)     | \
                              TCR_TG0_4KB      | \
@@ -206,7 +209,8 @@
                              TCR_ORGN1_WB_WA  | \
                              TCR_IRGN0_WB_WA  | \
                              TCR_IRGN1_WB_WA  | \
-                             TCR_IPS_40BIT)   /* Note: EPD0 NOT set - need TTBR0 for identity mapping */
+                             TCR_IPS_40BIT    | \
+                             TCR_AS)          /* Note: EPD0 NOT set - need TTBR0 for identity mapping */
 
 /*
  * ==========================================================================
@@ -393,33 +397,67 @@ int vmm_create_user_l1(uint64_t *out_pa);
 void vmm_destroy_user_l1(uint64_t l1_pa);
 
 /*
- * Switch the EL0 address space (TTBR0_EL1) to a per-task L1 table
- * (#697 PR-3).
+ * ASID reserved for the kernel / boot L1. User PTEs carry nG=1 so the
+ * hardware tags them with the active ASID; kernel PTEs are global
+ * (nG=0) and apply across all ASIDs. Reverting TTBR0_EL1 to the boot
+ * L1 (no user mappings) uses ASID 0 by convention.
+ */
+#define VMM_KERNEL_ASID     0U
+
+/*
+ * Allocate a fresh ASID for a user task.
  *
- * Writes l1_pa into TTBR0_EL1 and invalidates the TLB so subsequent
- * fetches/loads use the new mappings. Safe to call when l1_pa is the
- * same as the current TTBR0 (still emits a barrier sequence; harmless
- * extra cost, no correctness impact).
+ * Returns a value in [1, VMM_USER_ASID_MAX]; 0 is reserved for the
+ * kernel/boot path. Returns 0 if the pool is exhausted (recoverable
+ * via task_destroy → vmm_free_asid; non-recoverable in this PR if
+ * the live task count truly exceeds the pool).
  *
- * Kernel mappings: every per-task L1 mirrors the boot L1's kernel
- * entries (vmm_create_user_l1 contract), so the kernel's own
- * translations at low VA remain valid through the swap. The TLB
- * flush is full (`tlbi vmalle1is`) for simplicity — kernel-region
- * translations re-walk to the same PA via the mirrored L1, so the
- * extra cost is just the second walk, not a correctness issue.
+ * If the returned ASID was previously in use (recycled after a free),
+ * the allocator broadcasts `tlbi aside1is` for that ASID before
+ * returning it, so the next user-task swap cannot read stale entries
+ * from the prior holder.
+ *
+ * Allocator state is global; call site is the task-create path, so
+ * concurrency is bounded by the task-table spinlock at the caller.
+ */
+#define VMM_USER_ASID_MAX   255U
+uint16_t vmm_alloc_asid(void);
+
+/*
+ * Release a user ASID back to the pool.
+ *
+ * `asid == 0` is a no-op (the kernel ASID is never on the pool).
+ * Future allocations may recycle this slot; the broadcast TLB flush
+ * happens at the next vmm_alloc_asid that hands it out, not here, so
+ * a hot alloc/free loop pays the flush only on the second recycle.
+ */
+void vmm_free_asid(uint16_t asid);
+
+/*
+ * Switch the EL0 address space (TTBR0_EL1) to a per-task L1 table.
+ *
+ * Composes (asid << 48) | l1_pa into TTBR0_EL1, then ISBs. No TLB
+ * invalidation: user PTEs are tagged with `asid` (nG=1) so the
+ * hardware disambiguates them from any other ASID's entries that
+ * may still be cached. Kernel mappings (nG=0) remain valid through
+ * the swap.
+ *
+ * For the user→kernel revert, pass (vmm_boot_l1_pa(),
+ * VMM_KERNEL_ASID) — it composes the same TTBR0 the boot path
+ * installed, with no entries that could conflict with kernel
+ * translations.
  *
  * Concurrency: TTBR0_EL1 is per-CPU, so no cross-CPU race on the
- * register itself. `tlbi vmalle1is` broadcasts to all CPUs in the
- * inner-shareable domain — the broadcast invalidates other CPUs'
- * TLBs for THIS CPU's TTBR0_EL1, which is harmless (entries from
- * the prior TTBR0 are no longer reachable). The caller is expected
- * to hold IRQs disabled across this + the immediately-following
- * switch_to (today: scheduler holds rq_lock_irqsave through both).
+ * register itself. The caller is expected to hold IRQs disabled
+ * across this + the immediately-following switch_to (today:
+ * scheduler holds rq_lock_irqsave through both).
  *
- * @l1_pa: PA of the per-task L1 table (from vmm_create_user_l1).
- *         Must be 4 KB aligned. Passing 0 is undefined.
+ * @l1_pa: PA of the per-task L1 table (or boot L1 for kernel revert).
+ *         Must be 4 KB aligned.
+ * @asid:  16-bit ASID from vmm_alloc_asid (or VMM_KERNEL_ASID for
+ *         the kernel revert).
  */
-void vmm_user_addrspace_switch(uint64_t l1_pa);
+void vmm_user_addrspace_switch(uint64_t l1_pa, uint16_t asid);
 
 /*
  * Map a single 4 KB page into a per-task L1 (#697 PR-4).
