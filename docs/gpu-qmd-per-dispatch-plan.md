@@ -24,7 +24,7 @@ inference returns stale results — off-by-one between dispatches).
 | 4. Byte-compare selftest | ✅ | `test_qmd_selftest_reference_matches_encoder` + the v7-stride pinning test. |
 | 5. Switch dispatch to fresh QMD | ✅ | `ga10b_dispatch_v7_pipeline` builds a fresh QMD per launch via `ga10b_qmd_pool_prepare`. |
 | 6. Hardware re-probe | ✅ | jetson-nano-2: vertical-bar input → argmax=1, zero input → argmax=5; helper standalone shows max\|err\|=0.000410 vs CPU FP32. |
-| 7. Buffer / unknowns | ✅ | Closed in flight: scanner-level v7 acceptance (#694), v7 tail-field copy on inherit (#710), version-aware pipeline-output stride (#710), `slm-put.py --resume` false alarm (#715). |
+| 7. Buffer / unknowns | ✅ | Closed in flight: scanner-level v7 acceptance (#694), v7 tail-field copy on inherit (#710), version-aware pipeline-output stride (#710), GA10B LTC cross-dispatch coherency (#715 / #722). |
 
 **Bonus delivery (out of original plan scope).** HMMA tier — FP32-activation
 × FP16-weight tensor-core GEMM at MNIST op 6 — added in the same PR.
@@ -33,6 +33,17 @@ The QMD encoder propagates `smem_size_bytes`, `slm_size_bytes`, and
 (`SHARED_MEMORY_SIZE = 2048`, `BARRIER_COUNT = 3`). Without that
 propagation the WMMA chain stalls op[N+1] silently. Tensor cores
 demonstrably executing under SLM-OS on real GA10B silicon.
+
+**Per-dispatch cost (post-#722).** The 3-point `ga10b_l2_evict_sysmem`
+that closed the LTC staleness adds **~120 µs typical / ~6 ms worst
+case** of IRQ-off latency per inference. That's fine for MNIST at
+1–10 inf/s. It is **not** the right shape for SLM workloads: at
+Qwen 2.5 1.5B's ~370 ops/token × 10 tokens/sec = 3700 launches/sec,
+the evict overhead alone is ~440 ms/sec — clearly unworkable. The
+async-batched dispatch architecture in #573 is what unblocks SLMs,
+and a different barrier strategy (per-batch, not per-launch) will
+need to replace the 3-point evict on that path. Do not paste this
+pattern into the SLM forward path without the architectural rework.
 
 **Outstanding follow-ups** (all out of scope here, tracked separately):
 - [#573](https://github.com/SLM-OS/SLM-Operating-System/issues/573) — async batched dispatch architecture for SLM workloads (per-launch poll overhead from the §7 risk note; deferred per the plan's exit criteria).

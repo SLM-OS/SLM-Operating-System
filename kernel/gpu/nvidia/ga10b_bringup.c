@@ -2127,12 +2127,19 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
             (size_t)n * sizeof(*ops_v7));
     }
 
-    /* Pre-dispatch L2 evict. The set_input path already evicts after
-     * writing the new input, but a prior dispatch's read may have
-     * re-cached lines for the input/output buffers between set_input
-     * and the actual launch. Belt-and-braces: re-evict here so the
-     * GPU's chip-wide L2 starts the dispatch with no stale lines for
-     * any of the channel-mapped buffers. ~40 µs (#715). */
+    /* Pre-dispatch L2 evict. set_input only evicts lines for the
+     * input buffer; the dispatch path also reads cbuf, shader pages,
+     * and the QMD pool slot — any of which may carry L2 lines from a
+     * prior dispatch that were re-cached after set_input ran. Pre-
+     * launch evict ensures SKED, the SASS instruction fetch, and the
+     * SASS LDG path all see a clean L2 view of the channel-mapped
+     * buffers on this dispatch's first read. ~40 µs (#715).
+     *
+     * Caller is `ga10b_bringup_launch_kernel`, which holds
+     * `g_gpu_dispatch_lock` IRQ-off and is invoked between dispatches
+     * (after the prior sema fired, before this submit's USERD GP_PUT
+     * write) — so the GPU is quiescent on this channel and the
+     * 100-retry UFLUSH budget in `ga10b_uflush_op` is sufficient. */
     (void)ga10b_l2_evict_sysmem();
 
     /* Pre-clear the poll target ONCE — the trailing sema entry is
@@ -2633,8 +2640,15 @@ int ga10b_bringup_set_input(struct ga10b_bringup *b,
      * to drop any lines re-cached between set_input and the actual
      * dispatch) and `ga10b_bringup_read_pipeline_output` (post-launch,
      * to flush GPU dirty L2 output lines back to DRAM before the CPU
-     * read). All three are required on GA10B silicon for correct
-     * cross-dispatch coherency (#715 hardware verification).
+     * read). All three were empirically required on jetson-nano-2 to
+     * pass an ABBA + AAAA test matrix (digit_0/3/7 mixed sequences)
+     * — removing the post-launch evict alone reproduces the
+     * staleness; removing the pre-launch evict shifts the failure
+     * pattern from "off-by-one" to "calls 2+4 wrong with values
+     * swapped". The architectural understanding of which is strictly
+     * necessary on which path is incomplete; a follow-up should
+     * gate each evict behind a kernel cmdline flag and re-run the
+     * matrix systematically to narrow this down (#715 follow-up).
      *
      * The 4-step UFLUSH sequence (FB_FLUSH + L2_FLUSH_DIRTY +
      * L2_SYSMEM_INVALIDATE + FB_FLUSH) is the same one
@@ -2674,7 +2688,14 @@ int ga10b_bringup_set_input_fill(struct ga10b_bringup *b,
     }
     /* GPU L2 invalidate after CPU input write — see set_input header
      * for the rationale. Same staleness fix applies to the fill path
-     * (sched-MLP runs through here). */
+     * (sched-MLP runs through here on every assign_cpu tick).
+     *
+     * Sched-MLP cost note: ~40 µs IRQ-off per call. The hot path is
+     * already throttled by #651's RATE_LIMIT_NS + try-lock combo, so
+     * adding this evict doesn't change the per-tick budget shape. If
+     * `bench smp` or `bench stealing` regress under sched_mlp=ON,
+     * suspect the evict's worst-case (2 ms) tail rather than the
+     * typical case. */
     (void)ga10b_l2_evict_sysmem();
     return (int)bytes_written;
 }
@@ -2732,8 +2753,17 @@ int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
      *
      * This is the third leg of the cross-dispatch coherency tripod;
      * see the companion comments in `ga10b_bringup_set_input` and the
-     * pre-dispatch site in `ga10b_dispatch_v7_pipeline`. */
-    (void)ga10b_l2_evict_sysmem();
+     * pre-dispatch site in `ga10b_dispatch_v7_pipeline`.
+     *
+     * Surface failures here. A timed-out evict on this site means the
+     * read below will return whatever was previously in DRAM at
+     * `last_output_phys` — exactly the off-by-one symptom #715 closed.
+     * Logging makes the silent-staleness regression visible without
+     * having to re-run the ABBA hardware test. */
+    if (ga10b_l2_evict_sysmem() < 0) {
+        uart_puts("[GA10B] post-dispatch L2 evict timed out — "
+                  "output read may return stale logits\n");
+    }
 
     /* Invalidate the buffer's cache range before the read. The GPU
      * wrote the data via its own (uncached-from-CPU's-perspective)
