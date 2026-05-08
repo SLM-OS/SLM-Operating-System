@@ -521,6 +521,33 @@ int vmm_create_user_l1(uint64_t *out_pa)
     return 0;
 }
 
+void vmm_user_addrspace_switch(uint64_t l1_pa)
+{
+#if !defined(PLATFORM_X86_64)
+    /* Sequence per ARM ARM D8.7.2 / D8.13.4:
+     *   1. msr ttbr0_el1: write the new translation table base.
+     *   2. dsb ishst: ensure the msr is observed before the tlbi.
+     *   3. tlbi vmalle1is: broadcast invalidate all TLB entries (the
+     *      "is" suffix broadcasts to inner-shareable CPUs; SLM-OS
+     *      doesn't use ASID tagging today, so vmalle1 is the right
+     *      scope — invalidates everything mapped via either TTBR).
+     *   4. dsb ish: wait for the tlbi broadcast to complete.
+     *   5. isb: ensure subsequent instruction fetches use the new
+     *      translations rather than speculatively-prefetched stale
+     *      ones from the old TTBR0. */
+    __asm__ volatile(
+        "msr ttbr0_el1, %0\n"
+        "dsb ishst\n"
+        "tlbi vmalle1is\n"
+        "dsb ish\n"
+        "isb\n"
+        :: "r"(l1_pa)
+        : "memory");
+#else
+    (void)l1_pa;
+#endif
+}
+
 void vmm_destroy_user_l1(uint64_t l1_pa)
 {
     if (l1_pa == 0) {

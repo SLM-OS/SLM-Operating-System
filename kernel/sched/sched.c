@@ -23,6 +23,9 @@
 #include "cache.h"
 #include "ncmem.h"
 #include "preempt.h"
+#if !defined(PLATFORM_X86_64)
+#include "vmm.h"
+#endif
 #include "string.h"
 #include "runtime_model.h"
 #if CONFIG_WORK_STEALING
@@ -2153,6 +2156,18 @@ void schedule(void)
                   "current task's [stack_base, stack_top]");
         }
     }
+
+#if !defined(PLATFORM_X86_64)
+    /* Swap TTBR0_EL1 to the incoming task's per-task L1 when entering a
+     * user-mode task (#697 PR-3). Kernel→kernel switches keep the boot
+     * L1 in TTBR0 — there is no observable user-VA mapping for kernel
+     * tasks, so the existing identity mapping is fine. The IRQs-disabled
+     * window held by rq_lock_irqsave covers this swap, so no other CPU
+     * (or this CPU) can observe a half-swapped state. */
+    if (next->is_user && next->user_l1_pa) {
+        vmm_user_addrspace_switch(next->user_l1_pa);
+    }
+#endif
 
     switch_to(current, next);
 
