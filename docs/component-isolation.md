@@ -130,8 +130,8 @@ Before accessing user-provided pointers, each syscall handler calls `validate_us
 
 ## Known Limitations
 
-- **VMM_FLAG_USER:** EL0 memory access requires `VMM_FLAG_USER` (AP[1]=1) in the page table entries. Mapping pages with user-accessible permissions is under investigation on QEMU. Until resolved, user-mode tasks may fault immediately on memory access.
-- **Per-component page tables:** All tasks currently share the kernel's page table (`TTBR1_EL1`). Per-component address spaces via `TTBR0_EL1` are deferred.
+- **VMM_FLAG_USER on kernel pages causes a QEMU hang.** Setting `VMM_FLAG_USER` on the QEMU virt kernel RAM mapping (so AP[1]=1, UXN=0 on kernel pages that are already W and X) wedges the CPU exactly at the `msr sctlr_el1` instruction that enables the MMU. Re-confirmed on QEMU 8.2.2 + cortex-a76 (May 2026, see #697 step 1). PAN/EPAN/PAN3 are ruled out (cortex-a76 is ARMv8.2-A, no FEAT_PAN3; explicit `msr pan, #0` had no effect). `SCTLR_EL1.WXN` is 0 in baseline. Most likely a QEMU TCG quirk specific to user-flagged executable kernel pages. **The production design avoids this by construction**: per-task `TTBR0_EL1` (user pages live in a separate L1 table), kernel keeps `TTBR1_EL1` with AP=00, and user mappings are never applied to kernel pages.
+- **Per-component page tables:** All tasks currently share the kernel's page table (`TTBR1_EL1`). Per-component address spaces via `TTBR0_EL1` are tracked in [#697](https://github.com/SLM-OS/SLM-Operating-System/issues/697) and are the path that unblocks real EL0 execution.
 - **x86-64 Ring 3:** Not yet implemented. `task_create_user()` is ARM64-only.
 - **Restart policy:** Faulting components are terminated but not automatically restarted. Configurable restart is planned for a future milestone.
 
@@ -153,4 +153,4 @@ Before accessing user-provided pointers, each syscall handler calls `validate_us
 
 ---
 
-*Last updated: April 2026*
+*Last updated: May 2026*
