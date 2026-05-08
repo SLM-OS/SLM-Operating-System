@@ -1388,6 +1388,21 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
      * for defense-in-depth. */
     g_handoff.pipeline_kind      = hoff->pipeline_kind;
 
+    /* v7 extension: per-dispatch QMD pool descriptor. Zero on v2..v6.
+     * Without these copies `ga10b_handoff_is_v7` returns false even
+     * when the helper published v7, so `ga10b_bringup_launch_kernel`
+     * falls through to the v5/v6 path and submits dispatches against
+     * the v7 ops' empty `qmd_gpu_va` fields — observed on hardware
+     * (issue #710) as "GP_GET advanced but payload didn't land" at
+     * the first op. The receiver is unconditionally version-7-shaped
+     * (the `_Static_assert sizeof(...) == 256` covers it), so the
+     * unconditional read is safe; older helpers leave these zero
+     * and `is_v7` correctly returns false. */
+    g_handoff.qmd_pool_phys      = hoff->qmd_pool_phys;
+    g_handoff.qmd_pool_gpu_va    = hoff->qmd_pool_gpu_va;
+    g_handoff.qmd_pool_size_bytes = hoff->qmd_pool_size_bytes;
+    g_handoff.qmd_pool_n_slots   = hoff->qmd_pool_n_slots;
+
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
                                 &g_handoff) < 0) {
@@ -2642,20 +2657,38 @@ int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
 
     /* Resolve the LAST op's output_phys. Same identity-DRAM-mapping
      * assumption as the pipeline runner — physical address read from
-     * DRAM is also a valid VA SLM-OS can dereference at EL2. */
-    const struct ga10b_pipeline_op *ops =
-        (const struct ga10b_pipeline_op *)
-            (uintptr_t)g_handoff.pipeline_ops_phys;
-    const struct ga10b_pipeline_op *last =
-        &ops[g_handoff.pipeline_n_ops - 1u];
-    if (last->output_phys == 0u) return -1;
+     * DRAM is also a valid VA SLM-OS can dereference at EL2.
+     *
+     * Stride must match the on-disk op layout: 24 bytes on v5/v6
+     * (struct ga10b_pipeline_op), 80 bytes on v7 (struct
+     * ga10b_pipeline_op_v7). Both share `output_phys` at byte offset
+     * 8 in their prefix, but indexing as v6 across a v7 array reads
+     * from inside an earlier op's tail (op[N-1] under v6 stride lands
+     * inside op[(N-1)*3/10] under v7 stride for the MNIST 8-op
+     * shape). The helper sets v7 `expected_payload = 0` and `flags
+     * = 0` per op, so the bogus v6-cast read of `ops[7].output_phys`
+     * returns 0 and this function returned -1 even when v7 dispatch
+     * succeeded. Discovered via #710. */
+    uint64_t last_output_phys;
+    if (ga10b_handoff_is_v7(&g_handoff)) {
+        const struct ga10b_pipeline_op_v7 *ops =
+            (const struct ga10b_pipeline_op_v7 *)
+                (uintptr_t)g_handoff.pipeline_ops_phys;
+        last_output_phys = ops[g_handoff.pipeline_n_ops - 1u].output_phys;
+    } else {
+        const struct ga10b_pipeline_op *ops =
+            (const struct ga10b_pipeline_op *)
+                (uintptr_t)g_handoff.pipeline_ops_phys;
+        last_output_phys = ops[g_handoff.pipeline_n_ops - 1u].output_phys;
+    }
+    if (last_output_phys == 0u) return -1;
 
     /* Invalidate the buffer's cache range before the read. The GPU
      * wrote the data via its own (uncached-from-CPU's-perspective)
      * write path; without this, a stale cache line could mask the
      * fresh data. Same pattern as ga10b_submit_and_poll's poll
      * invalidate. */
-    const void *src = (const void *)(uintptr_t)last->output_phys;
+    const void *src = (const void *)(uintptr_t)last_output_phys;
     if (gsp_platform && gsp_platform->cache_invalidate) {
         gsp_platform->cache_invalidate((void *)src, cap);
     }
