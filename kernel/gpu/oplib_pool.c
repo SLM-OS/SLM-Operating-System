@@ -16,6 +16,11 @@
 #include "operator_library.h"
 #include "uart.h"
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "../include/cache.h"
+#include "nvidia/ga10b_gmmu.h"
+#endif
+
 /* Linker-supplied symbols from kernel/src/oplib_embed.S. */
 extern const uint8_t oplib_blob_start[];
 extern const uint8_t oplib_blob_end[];
@@ -26,6 +31,17 @@ extern const uint8_t oplib_blob_end[];
 static struct operator_library g_handle;
 static int g_init_rc = OPERATOR_LIBRARY_ERR_NULL;
 static bool g_initialized;
+
+/* GPU-VA staging state (#718, A.1.5). `g_staged` flips to true after
+ * the first successful `oplib_pool_stage_to_gpu()` call; subsequent
+ * calls are idempotent and return `g_stage_rc`. The stub blob
+ * (sass_region_len == 0) staging path is also recorded as "staged"
+ * with `g_sass_pool_gpu_va == 0` so callers see a stable,
+ * NOT_AVAILABLE-returning lookup contract. */
+static bool g_staged;
+static int g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
+static uint64_t g_sass_pool_gpu_va;
+static size_t g_sass_pool_n_pages;
 
 size_t oplib_pool_blob_size(void)
 {
@@ -109,4 +125,197 @@ void oplib_pool_status_print(void)
                     (unsigned)dtype, (unsigned long long)off,
                     (unsigned long long)sz);
     }
+
+    if (!g_staged) {
+        uart_printf("[oplib] GPU staging: not staged "
+                    "(call oplib_pool_stage_to_gpu)\n");
+    } else if (g_stage_rc != 0) {
+        uart_printf("[oplib] GPU staging: FAILED (rc=%d)\n", g_stage_rc);
+    } else if (g_sass_pool_gpu_va == 0) {
+        uart_printf("[oplib] GPU staging: stub (sass_region_len=0, "
+                    "no allocation needed)\n");
+    } else {
+        uart_printf("[oplib] GPU staging: pool gpu_va=0x%llx, %zu pages "
+                    "(%zu B SASS region)\n",
+                    (unsigned long long)g_sass_pool_gpu_va,
+                    g_sass_pool_n_pages, g_handle.sass_region_len);
+    }
+}
+
+/* ============================================================================
+ * GPU-VA staging (#718, A.1.5)
+ * ============================================================================ */
+
+uint64_t oplib_pool_gpu_va_base(void)
+{
+    return g_sass_pool_gpu_va;
+}
+
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+
+int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
+{
+    if (g_staged) {
+        return g_stage_rc;
+    }
+    if (!g_initialized || g_init_rc != 0) {
+        g_staged = true;
+        g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
+        return g_stage_rc;
+    }
+
+    /* Stub blob (op_count=0, sass_region_len=0): nothing to map. Mark
+     * staged so subsequent lookups return NOT_AVAILABLE cleanly via
+     * g_sass_pool_gpu_va == 0. */
+    if (g_handle.sass_region_len == 0) {
+        g_staged = true;
+        g_stage_rc = 0;
+        uart_printf("[oplib] stage_to_gpu: stub blob, no SASS region "
+                    "(op_count=%u)\n", (unsigned)g_handle.op_count);
+        return 0;
+    }
+
+    /* Round up to whole 4 KB pages. */
+    size_t sass_len = g_handle.sass_region_len;
+    size_t n_pages  = (sass_len + 4095) / 4096;
+
+    uint64_t gpu_va = 0;
+    uint64_t phys   = 0;
+    void    *cpu_va = NULL;
+    /* Read-only mapping — the GPU only fetches instructions from the
+     * SASS pool; no writes from the GPU side. PRIV bit unset (sass
+     * runs in user privilege from the channel's perspective). */
+    int rc = ga10b_gmmu_alloc(inst_block_phys, (uint32_t)n_pages,
+                               GA10B_GMMU_FLAG_RO,
+                               &gpu_va, &cpu_va, &phys);
+    if (rc < 0) {
+        g_staged = true;
+        g_stage_rc = rc;
+        uart_printf("[oplib] stage_to_gpu: ga10b_gmmu_alloc(n_pages=%zu) "
+                    "failed: rc=%d\n", n_pages, rc);
+        return rc;
+    }
+
+    /* Copy the SASS region. ga10b_gmmu_alloc returns the kernel VA of
+     * the FIRST page only — subsequent pages are PMM-allocated
+     * individually and are NOT contiguous in CPU virtual address
+     * space. Walk per-page using the per-page GPU VAs and the walker.
+     *
+     * Cheaper alternative: alloc all the PMM pages ourselves and
+     * copy into them before mapping. But that requires re-implementing
+     * map_one_page in this TU. Sticking with the per-page walk-after-
+     * alloc keeps the code small.
+     *
+     * For the first page, cpu_va points at the right CPU VA already;
+     * memcpy the first 4 KB. For pages [1..n_pages) we walk each
+     * GPU VA, get its leaf phys (== CPU phys via Jetson identity
+     * map), and memcpy from the SASS region into that page. */
+    {
+        const uint8_t *src = g_handle.sass_region;
+        size_t remaining = sass_len;
+
+        /* Page 0: cpu_va is the kernel-VA alias of `phys`. */
+        size_t copy0 = remaining > 4096 ? 4096 : remaining;
+        for (size_t b = 0; b < copy0; b++) {
+            ((volatile uint8_t *)cpu_va)[b] = src[b];
+        }
+        cache_clean_range(cpu_va, copy0);
+        src       += copy0;
+        remaining -= copy0;
+
+        /* Pages [1..n_pages): walk each one to find its leaf phys,
+         * which doubles as the kernel VA on Jetson. */
+        for (size_t i = 1; i < n_pages && remaining > 0; i++) {
+            uint64_t va_i = gpu_va + (uint64_t)i * 4096ull;
+            struct ga10b_gmmu_walk_result wr;
+            int wrc = ga10b_gmmu_walk(inst_block_phys, va_i, &wr);
+            if (wrc != 0 || wr.status != GA10B_GMMU_WALK_OK) {
+                g_staged = true;
+                g_stage_rc = -1;
+                uart_printf("[oplib] stage_to_gpu: post-alloc walk failed "
+                            "page %zu, rc=%d status=%d\n",
+                            i, wrc, (int)wr.status);
+                return -1;
+            }
+            volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)wr.leaf_phys;
+            size_t copy_n = remaining > 4096 ? 4096 : remaining;
+            for (size_t b = 0; b < copy_n; b++) {
+                dst[b] = src[b];
+            }
+            cache_clean_range((void *)(uintptr_t)wr.leaf_phys, copy_n);
+            src       += copy_n;
+            remaining -= copy_n;
+        }
+    }
+
+    /* DSB SY so the GPU sees the populated SASS pages from PoC on
+     * its first dispatch. ga10b_gmmu_alloc already issued one for
+     * the page-table publication; this one orders the data writes. */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    g_sass_pool_gpu_va = gpu_va;
+    g_sass_pool_n_pages = n_pages;
+    g_stage_rc = 0;
+    g_staged = true;
+
+    uart_printf("[oplib] stage_to_gpu: %zu B SASS staged at gpu_va=0x%llx "
+                "(%zu pages, first phys=0x%llx)\n",
+                sass_len, (unsigned long long)gpu_va,
+                n_pages, (unsigned long long)phys);
+    return 0;
+}
+
+#else  /* !PLATFORM_JETSON_ORIN_NANO */
+
+int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
+{
+    (void)inst_block_phys;
+    /* Non-Jetson platforms have no GA10B GMMU. Staging is a no-op
+     * stub; `oplib_pool_get_sass_gpu_va` will always return
+     * NOT_AVAILABLE because g_sass_pool_gpu_va stays 0. */
+    g_staged = true;
+    g_stage_rc = OPERATOR_LIBRARY_ERR_NULL;
+    return -1;
+}
+
+#endif /* PLATFORM_JETSON_ORIN_NANO */
+
+int oplib_pool_get_sass_gpu_va(uint32_t op_kind, uint32_t tier, uint32_t dtype,
+                                uint64_t *out_gpu_va, size_t *out_size)
+{
+    if (out_gpu_va == NULL || out_size == NULL) {
+        return OPERATOR_LIBRARY_ERR_NULL;
+    }
+    if (!g_initialized || g_init_rc != 0) {
+        return OPERATOR_LIBRARY_ERR_NULL;
+    }
+    if (!g_staged || g_stage_rc != 0 || g_sass_pool_gpu_va == 0) {
+        return OPERATOR_LIBRARY_ERR_NULL;
+    }
+    const uint8_t *sass = NULL;
+    size_t size = 0;
+    int rc = operator_library_lookup(&g_handle, op_kind, tier, dtype,
+                                     &sass, &size);
+    if (rc != 0) {
+        return rc;
+    }
+    /* Defensive bound check: the parser guarantees `sass` lies inside
+     * `[sass_region, sass_region + sass_region_len)` and `size`
+     * doesn't run past the end. But a corrupted blob (e.g. one that
+     * passed the outer-header checksum but had an entry table tampered
+     * with after parsing) could produce out-of-range pointers that
+     * yield wild GPU VAs. Re-check here so the dispatcher never sees
+     * a VA outside the staged pool. */
+    if (sass < g_handle.sass_region ||
+        size > g_handle.sass_region_len ||
+        (size_t)(sass - g_handle.sass_region) >
+            g_handle.sass_region_len - size) {
+        return OPERATOR_LIBRARY_ERR_LAYOUT;
+    }
+    /* Translate CPU-side pointer into the embedded blob's SASS region
+     * to GPU VA inside the staged pool. */
+    size_t offset = (size_t)(sass - g_handle.sass_region);
+    *out_gpu_va = g_sass_pool_gpu_va + offset;
+    *out_size   = size;
+    return 0;
 }
