@@ -233,6 +233,9 @@ int test_suite_operator_library(void);
 /* In-kernel embedded operator-library handle tests (#714). */
 int test_suite_oplib_pool(void);
 
+/* Per-op dispatch metadata registry tests (#714, A.2). */
+int test_suite_operator_dispatch(void);
+
 /* GPU dispatch circuit-breaker tests (#552 mitigation, PR #555). */
 int test_suite_gpu_dispatch_breaker(void);
 
