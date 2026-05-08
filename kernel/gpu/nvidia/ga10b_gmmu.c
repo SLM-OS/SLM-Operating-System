@@ -65,14 +65,42 @@
  * "invalid PDE" lets the walker abort cleanly with a meaningful
  * status rather than crashing the kernel. */
 #define GA10B_GMMU_DRAM_BASE   0x80000000ull
-#define GA10B_GMMU_DRAM_TOP    0x280000000ull
+/* Upper bound MUST match the platform's actual VMM map. Jetson's
+ * pmm_init declares regions up to 0x240000000 (#580 has the
+ * derivation from /proc/iomem); above that the VMM doesn't map
+ * anything, so a phys_read here would synchronous-abort on the
+ * dereference. The original 0x280000000 (RAM_SIZE) was wrong for
+ * exactly this reason — observed on the inst-block walk-discovery
+ * path when a candidate PDE3 entry decoded to a 0x27e440000-class
+ * address. */
+#define GA10B_GMMU_DRAM_TOP    0x240000000ull
 
+/* Jetson carves OP-TEE out of low DRAM at 0xBE000000-0xC2000000.
+ * The VMM doesn't map that 64 MB hole, so a phys_read inside it is
+ * a synchronous abort. Reject it here so the walker treats wild PDB
+ * pointers landing in the hole as "invalid PDE" instead of crashing.
+ * Same applies to the IMX219 frame-buffer carveout at
+ * 0xA1000000-0xA1400000 (camrtc.c:CAMRTC_FRAME_BUFFER_PHYS) and the
+ * NC-memory page at 0xBDE00000+2 MB the kernel reserves for cross-
+ * CPU coherent state. The latter two are platform-narrower than the
+ * OP-TEE hole; checking the hole alone covers most failure modes
+ * since wild PDB pointers tend to land in the largest unmapped
+ * region. Refine further if a candidate's walk faults inside one
+ * of the smaller carveouts. */
+#define GA10B_GMMU_OPTEE_BASE  0xBE000000ull
+#define GA10B_GMMU_OPTEE_TOP   0xC2000000ull
 static inline bool phys_in_dram(uint64_t phys, size_t bytes)
 {
     if (phys < GA10B_GMMU_DRAM_BASE) return false;
     uint64_t end = phys + bytes;
     if (end < phys) return false;        /* wrap */
     if (end > GA10B_GMMU_DRAM_TOP) return false;
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Reject any read that intersects the OP-TEE carveout. */
+    if (phys < GA10B_GMMU_OPTEE_TOP && end > GA10B_GMMU_OPTEE_BASE) {
+        return false;
+    }
+#endif
     return true;
 }
 
@@ -660,6 +688,82 @@ uint64_t ga10b_gmmu_discover_inst_block_phys(void)
     uint64_t inst_block_phys = ((uint64_t)ptr_v) << 12;
     if (!phys_in_dram(inst_block_phys, 4096)) return 0;
     return inst_block_phys;
+}
+
+uint64_t ga10b_gmmu_discover_inst_block_via_walk(uint64_t known_gpu_va,
+                                                  uint64_t expected_leaf_phys,
+                                                  uint64_t scan_start,
+                                                  uint64_t scan_end)
+{
+    if (known_gpu_va == 0 || expected_leaf_phys == 0) return 0;
+    if (scan_start >= scan_end) return 0;
+
+    /* 4 KB-align the scan range. Inst blocks are page-aligned per
+     * nvgpu's `nvgpu_dma_alloc_flags_sys` call (gv11b/gp10b channel
+     * RAM uses NVGPU_DMA_FORCE_CONTIGUOUS | sys-mem alloc, both of
+     * which return at least page-aligned phys). */
+    uint64_t cursor = (scan_start + 4095u) & ~((uint64_t)4095u);
+    uint64_t end    = scan_end & ~((uint64_t)4095u);
+
+    /* Diagnostic counters: how many candidates passed the pre-filter,
+     * how many full walks actually fired. Reading these from the
+     * shell helps distinguish "filter too strict" from "lots of
+     * walks but no leaf match". */
+    extern int uart_printf(const char *fmt, ...);
+    uint32_t pre_passed = 0;
+    uint32_t walks      = 0;
+    uint32_t walk_ok    = 0;
+
+    for (; cursor < end; cursor += 4096u) {
+        if (!phys_in_dram(cursor, 4096)) continue;
+
+        /* Cheap filter: peek PDB lo word at +0x200. The aperture
+         * field lives in bits [2:1] of the lo word, NOT bits
+         * [29:28] — see read_pdb_phys above for the canonical
+         * decode. Reject unless aperture is non-zero (vid_mem on
+         * Jetson is bogus) and the resulting PDB phys lands in
+         * DRAM. This rejects most pages without paying the walker's
+         * cost; the walker is what actually validates the rest. */
+        uint32_t pdb_lo = phys_read32(cursor + (128u * 4u));
+        uint8_t  target = (uint8_t)((pdb_lo >> 1) & 0x3u);
+        if (target == 0) continue;
+        uint32_t pdb_hi  = phys_read32(cursor + (129u * 4u));
+        uint32_t phys_lo = pdb_lo & 0xfffff000u;
+        uint64_t pdb_phys = ((uint64_t)pdb_hi << 32) | phys_lo;
+        if (!phys_in_dram(pdb_phys, 4096)) continue;
+        pre_passed++;
+
+        /* Full check: walk this candidate. The walker silently tolerates
+         * a bad PDB by returning status BAD_INST; OK + matching leaf
+         * is a positive match. */
+        struct ga10b_gmmu_walk_result wr;
+        walks++;
+        if (ga10b_gmmu_walk(cursor, known_gpu_va, &wr) != 0) continue;
+        if (wr.status != GA10B_GMMU_WALK_OK) continue;
+        walk_ok++;
+        if (wr.leaf_phys != expected_leaf_phys) {
+            /* Useful trace: walks that completed but landed at a
+             * different leaf (e.g. another channel's inst block
+             * mapping the same VA range to a different page). */
+            if (walk_ok <= 4) {
+                uart_printf("[gmmu-discover] walk OK at inst=0x%lx "
+                            "leaf=0x%lx (want 0x%lx)\n",
+                            (unsigned long)cursor,
+                            (unsigned long)wr.leaf_phys,
+                            (unsigned long)expected_leaf_phys);
+            }
+            continue;
+        }
+        uart_printf("[gmmu-discover] match at inst=0x%lx after %u "
+                    "candidates, %u walks (%u OK)\n",
+                    (unsigned long)cursor, pre_passed, walks, walk_ok);
+        return cursor;
+    }
+    uart_printf("[gmmu-discover] no match after %u candidates "
+                "(%u pre-filter pass, %u walks, %u walk-OK)\n",
+                (unsigned)((end - scan_start) / 4096u),
+                pre_passed, walks, walk_ok);
+    return 0;
 }
 
 /* GA10B FB MMU register offsets (from

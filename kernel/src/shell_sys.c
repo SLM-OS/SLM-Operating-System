@@ -4213,15 +4213,80 @@ int cmd_nvgpu(int argc, char *argv[])
                 if (h != NULL && h->inst_block_phys != 0) {
                     inst_phys = h->inst_block_phys;
                 } else {
+                    /* FECS_CURRENT_CTX may hold a stale pointer when
+                     * Linux nvgpu freed and reused the inst-block-
+                     * pointing memory between the helper's last
+                     * channel activity and the kexec. Verify that the
+                     * discovered inst block actually maps the
+                     * inherited channel's pushbuffer; if not, fall
+                     * back to a DRAM walk that cross-checks every
+                     * candidate against the handoff's
+                     * (pushbuf_gpu_va, pushbuf_phys) pair. */
                     inst_phys = ga10b_gmmu_discover_inst_block_phys();
-                    if (inst_phys == 0) {
-                        shell_puts("oplib stage: no handoff and "
-                                   "FECS_CURRENT_CTX read failed\r\n");
-                        return -1;
+                    bool fecs_ok = false;
+                    if (inst_phys != 0 && h != NULL &&
+                        h->pushbuf_gpu_va != 0 && h->pushbuf_phys != 0) {
+                        struct ga10b_gmmu_walk_result wr;
+                        ga10b_gmmu_walk(inst_phys,
+                                        h->pushbuf_gpu_va, &wr);
+                        shell_printf("oplib stage: FECS inst=0x%lx walk "
+                                     "status=%d levels=%d pdb=0x%lx "
+                                     "leaf=0x%lx (want 0x%lx)\r\n",
+                                     (unsigned long)inst_phys,
+                                     (int)wr.status,
+                                     wr.levels_walked,
+                                     (unsigned long)wr.pdb_phys,
+                                     (unsigned long)wr.leaf_phys,
+                                     (unsigned long)h->pushbuf_phys);
+                        if (wr.status == GA10B_GMMU_WALK_OK &&
+                            wr.leaf_phys == h->pushbuf_phys) {
+                            fecs_ok = true;
+                        }
+                    }
+                    if (!fecs_ok) {
+                        if (h == NULL || h->pushbuf_gpu_va == 0 ||
+                            h->pushbuf_phys == 0) {
+                            shell_puts("oplib stage: no handoff and "
+                                       "FECS_CURRENT_CTX read failed\r\n");
+                            return -1;
+                        }
+                        /* Scan all of mapped DRAM — both low (Linux
+                         * dma_alloc_coherent often places inst
+                         * blocks here) and high (where the per-
+                         * channel nvmap dmabufs live). High region
+                         * scanned first since inst blocks usually
+                         * cluster near the dmabufs that follow them
+                         * in allocation order. The phys_in_dram
+                         * helper already excludes the OP-TEE
+                         * carveout (0xBE..0xC2) so the walker won't
+                         * fault inside it. */
+                        struct { uint64_t lo, hi; } ranges[] = {
+                            { 0x100000000ull, 0x180000000ull },
+                            { 0x80000000ull,  0x100000000ull },
+                        };
+                        shell_printf("oplib stage: FECS inst=0x%lx didn't "
+                                     "map handoff PB; walking DRAM "
+                                     "(2 ranges)\r\n",
+                                     (unsigned long)inst_phys);
+                        inst_phys = 0;
+                        for (size_t r = 0; r < sizeof(ranges)/sizeof(ranges[0]);
+                             r++) {
+                            inst_phys = ga10b_gmmu_discover_inst_block_via_walk(
+                                h->pushbuf_gpu_va, h->pushbuf_phys,
+                                ranges[r].lo, ranges[r].hi);
+                            if (inst_phys != 0) break;
+                        }
+                        if (inst_phys == 0) {
+                            shell_puts("oplib stage: walk-based discovery "
+                                       "found no inst block matching the "
+                                       "handoff's PB\r\n");
+                            return -1;
+                        }
                     }
                     shell_printf("oplib stage: discovered inst_block_phys "
-                                 "via FECS = 0x%lx\r\n",
-                                 (unsigned long)inst_phys);
+                                 "= 0x%lx (%s)\r\n",
+                                 (unsigned long)inst_phys,
+                                 fecs_ok ? "FECS" : "DRAM walk");
                 }
             }
             int rc = oplib_pool_stage_to_gpu(inst_phys);
