@@ -223,4 +223,33 @@ int elf_copy_argv_strings(char *dst, size_t dst_size,
                           int argc, char *const argv[],
                           char *arg_locations[]);
 
+/*
+ * Load a static ARM64 ELF into a per-task EL0 address space.
+ *
+ * For each PT_LOAD segment the loader allocates fresh physical pages
+ * from PMM, copies p_filesz bytes, zero-fills the BSS tail up to
+ * p_memsz, and maps each page into the user L1 at p_vaddr with
+ * VMM_FLAG_USER + VMM_FLAG_PMM_OWNED + the R/W/X bits derived from
+ * p_flags. Because every page is PMM_OWNED, vmm_destroy_user_l1 will
+ * reclaim every leaf when the task is torn down — including any
+ * partial install left behind by a failure mid-load. Callers are
+ * expected to destroy the L1 themselves on a non-OK return.
+ *
+ * Per-segment validation (failure → ELF_ERR_INVALID):
+ *   - p_vaddr must be page-aligned.
+ *   - the entire segment ([p_vaddr, p_vaddr+p_memsz)) must lie below
+ *     USER_ELF_STACK_PAGE_VA (so segments cannot collide with the
+ *     stack the caller is about to map).
+ *
+ * @blob:      Pointer to the ELF image (typically a kernel-VA pointer
+ *             into an .incbin'd blob).
+ * @len:       Size of the ELF image.
+ * @l1_pa:     Physical address of the per-task L1 to install into.
+ * @entry_out: Receives the ELF's entry point (e_entry) on success.
+ *
+ * Returns ELF_OK on success or one of the existing ELF_ERR_* codes.
+ */
+int elf_load_user(const void *blob, size_t len,
+                  uint64_t l1_pa, uint64_t *entry_out);
+
 #endif /* ELF_H */

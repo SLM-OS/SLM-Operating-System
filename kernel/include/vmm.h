@@ -92,6 +92,21 @@
 #define USER_MMAP_VA_START  (USER_VA_BASE + 0x100000)
 
 /*
+ * Stack layout for EL0 ELF tasks (task_create_user_elf).
+ *
+ * The smoke task in task_create_user uses USER_STACK_PAGE_VA at
+ * USER_VA_BASE + PAGE_SIZE because its .text.user is exactly one
+ * page. ELF binaries are multi-page (text + rodata + data + bss),
+ * so their stack has to live somewhere that won't collide with the
+ * loaded segments. Placing the stack one page below the mmap window
+ * gives ELF segments up to 1 MB − 4 KB of contiguous space before
+ * they would touch the stack — comfortable for static demo binaries
+ * and the limit the user-VA loader enforces today.
+ */
+#define USER_ELF_STACK_PAGE_VA  (USER_MMAP_VA_START - PAGE_SIZE)
+#define USER_ELF_STACK_TOP      (USER_MMAP_VA_START)
+
+/*
  * ==========================================================================
  * Page Table Entry Definitions
  * ==========================================================================

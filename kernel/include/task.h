@@ -375,6 +375,34 @@ struct task *task_current_on_cpu(uint32_t cpu);
 #if !defined(PLATFORM_X86_64)
 struct task *task_create_user(const char *name, task_entry_t user_entry,
                               void *arg, uint8_t priority);
+
+/*
+ * Create a new user-mode (EL0) task from a static ARM64 ELF blob.
+ *
+ * Parses the ELF, allocates a per-task L1, maps every PT_LOAD
+ * segment via elf_load_user, allocates + maps a stack page at
+ * USER_ELF_STACK_PAGE_VA, and registers a kernel-side task that
+ * will ERET into the ELF's entry point on first schedule.
+ *
+ * Sibling of task_create_user — same is_user/per-task-L1 plumbing,
+ * different VA layout (the embedded smoke binary lives at
+ * USER_TEXT_VA + 1 page; ELF segments span multiple pages and need
+ * the high stack VA so they don't collide).
+ *
+ * @name:     Task name (for debugging / shell output).
+ * @blob:     Pointer to the ELF image (typically a kernel-VA pointer
+ *            into an .incbin'd blob).
+ * @blob_len: Size of the ELF image.
+ * @priority: Scheduler priority.
+ *
+ * Returns the task pointer on success, NULL on failure (invalid
+ * ELF, PMM exhausted, task table full, etc.). Failure paths free
+ * any partial state — no leak. The caller adds the task to the
+ * scheduler via scheduler_add_task.
+ */
+struct task *task_create_user_elf(const char *name,
+                                  const void *blob, size_t blob_len,
+                                  uint8_t priority);
 #endif
 
 /*

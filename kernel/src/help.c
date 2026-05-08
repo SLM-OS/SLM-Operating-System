@@ -453,6 +453,22 @@ static const struct help_entry help_entries[] = {
         "Used to verify the dynamic-user-memory path end-to-end.\n"
     ),
 
+    HELP_TEXT("userelf",
+        "userelf - Run the embedded EL0 hello ELF\n"
+        "\n"
+        "Usage:\n"
+        "  userelf\n"
+        "\n"
+        "Loads a static ARM64 ELF (built from user/hello and embedded\n"
+        "in the kernel image at link time) into a fresh per-task EL0\n"
+        "address space, then schedules and runs it. The program logs\n"
+        "\"[ELFTEST] hello from EL0 ELF\" via SYS_LOG and exits via\n"
+        "SYS_EXIT.\n"
+        "\n"
+        "Distinct from `elftest`, which exercises the kernel-mode ELF\n"
+        "loader (elf_create_task) used by the component framework.\n"
+    ),
+
     HELP_TEXT("cpu",
         "cpu - Show CPU status\n"
         "\n"
