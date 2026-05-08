@@ -1332,6 +1332,17 @@ static int context_switch_load(struct hailo_model_slot *slot,
     }
 #endif
 
+    /* #682 hyp-3 (2026-05-07): pre-ENABLED 4-ping barrier (GET_DEV_INFO,
+     * IDENTIFY, GET_DEV_INFO, IDENTIFY between SET_CONTEXT_INFO(DYNAMIC)
+     * and CHANGE_STATUS(ENABLED)) — disconfirmed. HailoRT's wire-capture
+     * shows these 4 pings as a fw-CORE-pipeline-flush barrier, but adding
+     * them on SLM-OS does not unblock the IN ch=2 stall: same proc=0
+     * pattern through the 500 ms poll. Notable side-finding from this
+     * test: the device-side channel mirror at +0x10 shows avail=0 while
+     * the host-side at +0x00 shows our avail=2 write — suggesting the
+     * cross-die avail propagation itself is the failure point, not the
+     * RPC sequencing leading up to ENABLED. Tracking under #682. */
+
     cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
     /* Pi OS wire capture (2026-04-22, HailoRT v4.23.0 MNIST on pi-5-1
      * instrumented driver — see ../slmos-reference-cache/hailo/hailort-v4.23.0-wire-
