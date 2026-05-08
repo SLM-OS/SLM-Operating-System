@@ -154,7 +154,7 @@ void ga10b_qmd_populate(uint32_t *qmd,
      * ~83% iter-1 failure rate on the alternating-fill probe before
      * this fix). The cost is one membar per dispatch — measured in
      * nanoseconds at Tegra GPU clocks. Reference: NVC7C0_QMDV02_03
-     * field MW(369:368) per ../slmos-reference-cache/mesa/mesa-clc7c0qmd.h. */
+     * field MW(369:368) per ~/slmos-ref/mesa/mesa-clc7c0qmd.h. */
     ga10b_qmd_set_bits(qmd, GA10B_QMD_CWD_MEMBAR_TYPE_HI_BIT,
                        GA10B_QMD_CWD_MEMBAR_TYPE_LO_BIT,
                        GA10B_QMD_CWD_MEMBAR_TYPE_L1_SYSMEMBAR);

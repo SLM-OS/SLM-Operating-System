@@ -2,7 +2,7 @@
  * nvcsi.c — Tegra234 NVCSI (MIPI CSI-2) receiver driver implementation.
  *
  * Direct-MMIO bring-up using the historical T194 csi4_fops sequence
- * cached at `../slmos-reference-cache/tegra-l4t/l4t-csi4_fops.c`. The Tegra234 NVCSI
+ * cached at `~/slmos-ref/tegra-l4t/l4t-csi4_fops.c`. The Tegra234 NVCSI
  * register layout matches T194 even though L4T R35 routes everything
  * through RTCPU — see `docs/jetson-camera-nvcsi-driver-notes.md` for
  * the code-read evidence.
@@ -16,7 +16,7 @@
  * `port-index = <0x01>` = NVCSI_PORT_B = (PHY 0, CIL_B). NOT CIL_A
  * — verified live against `/proc/device-tree/.../nvcsi@15a00000`.
  *
- * Register layout (from `../slmos-reference-cache/tegra-l4t/l4t-csi4_registers.h`):
+ * Register layout (from `~/slmos-ref/tegra-l4t/l4t-csi4_registers.h`):
  *   PHY brick base   = NVCSI_BASE + 0x18000 + brick*0x10000
  *     +0x00 NVCSI_CIL_PHY_CTRL          (0 = DPHY, 1 = CPHY)
  *     +0x04 NVCSI_CIL_CONFIG            (lane count for both halves)

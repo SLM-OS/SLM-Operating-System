@@ -188,7 +188,7 @@ vmm mapping needed — same 2 MB block as UART.
 **Reference driver:** Linux `drivers/net/ethernet/cadence/macb*.c`
 (~5000 lines; the `raspberrypi_rp1_config` entry is stock MACB plus
 config flags — no Pi-5-specific code path). Cached locally at
-`../slmos-reference-cache/linux/linux-cadence-macb.h` and `linux-cadence-macb-main.c`.
+`~/slmos-ref/linux/linux-cadence-macb.h` and `linux-cadence-macb-main.c`.
 
 **Landed driver:** `kernel/drivers/macb.c` (~1200 lines) implements:
 1. RP1 clock enable (`CLK_ETH_CTRL`, `CLK_ETH_TSU_CTRL`)

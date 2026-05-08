@@ -451,16 +451,36 @@ static bool mock_smart_memory_handle(uint32_t opcode_native,
      * these in sequence and the single shared mock_fw_sim_control_resp
      * buffer can't supply per-opcode responses; auto-echo solves that
      * without per-test seeding. Gated by mock_fw_sim_smart_memory_enabled
-     * so tests opting out of context-switch responses still work. */
+     * so tests opting out of context-switch responses still work.
+     *
+     * GET_DEVICE_INFORMATION joins the empty-body auto-echo set: #361
+     * settle pings call it before each CORE-CPU RPC during load. The
+     * wrapper only checks resp_len >= response_header (24 B); the
+     * 28-byte echo (header + param_count) clears that. */
     if (mock_fw_sim_smart_memory_enabled
      && (opcode_native == HAILO_CONTROL_OPCODE_CHANGE_CONTEXT_SWITCH_STATUS
       || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_NETWORK_GROUP_HEADER
       || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_SET_CONTEXT_INFO
       || opcode_native == HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS
       || opcode_native == HAILO_CONTROL_OPCODE_GET_HW_CONSTS
-      || opcode_native == HAILO_CONTROL_OPCODE_CORE_IDENTIFY)) {
+      || opcode_native == HAILO_CONTROL_OPCODE_CORE_IDENTIFY
+      || opcode_native == HAILO_CONTROL_OPCODE_GET_DEVICE_INFORMATION)) {
         mock_build_echo_response(resp_out, resp_out_len,
                                  req_opcode_be, 0, NULL, 0);
+        return true;
+    }
+
+    /* IDENTIFY has a 162-byte body the wrapper validates strictly
+     * (resp_len >= sizeof(response_header + param_count + body)).
+     * #361 settle pings call IDENTIFY before each CORE-CPU RPC during
+     * load; supply zeroed body bytes so the length check passes. */
+    if (mock_fw_sim_smart_memory_enabled
+     && opcode_native == HAILO_CONTROL_OPCODE_IDENTIFY) {
+        static uint8_t identify_zero_body[162] = {0};
+        mock_build_echo_response(resp_out, resp_out_len,
+                                 req_opcode_be, 0,
+                                 identify_zero_body,
+                                 sizeof(identify_zero_body));
         return true;
     }
 
@@ -2493,7 +2513,7 @@ static void test_change_context_switch_status_enabled_carries_batch_params(void)
  * the orchestration doc; that put fw into a "process exactly 1
  * batch of 1 then stop" mode where the boundary credit state
  * machine never armed for the IN submit. Pi OS wire capture (
- * ../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt,
+ * ~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt,
  * CHANGE_STATUS #2 body) is the ground truth: enables-for-real
  * always (0, 0). */
 static void test_change_context_switch_status_enabled_zero_batch_means_infinite(void)
@@ -2775,7 +2795,7 @@ static void test_cs_translate_application_header_fills_defaults(void)
 
 static void test_cs_translate_application_header_boundary_bitmap(void)
 {
-    /* Pi OS wire capture (2026-04-22, ../slmos-reference-cache/hailo/hailort-v4.23.0-
+    /* Pi OS wire capture (2026-04-22, ~/slmos-ref/hailo/hailort-v4.23.0-
      * wire-capture-mnist-pi5.txt, SET_NETWORK_GROUP_HEADER #1 body)
      * shows HailoRT leaves all three boundary_channels_bitmap slots
      * at 0 for MNIST — firmware v4.23 discovers boundary channels
@@ -3373,7 +3393,7 @@ static void test_cs_translate_batch_switching_mnist_template(void)
                             out.batch_switching[7]);
 
     /* Spot-check a couple of template entries — byte layout per the
-     * HailoRT wire capture in ../slmos-reference-cache/derivatives/hailort-traces/pios_BATCH_SWITCHING.bin. */
+     * HailoRT wire capture in ~/slmos-ref/derivatives/hailort-traces/pios_BATCH_SWITCHING.bin. */
     TEST_ASSERT_EQUAL_UINT8(0x00, out.batch_switching[8]);   /* sub[0] packed_lcu */
     TEST_ASSERT_EQUAL_UINT8(0x10, out.batch_switching[14]);  /* sub[1] packed_lcu */
     TEST_ASSERT_EQUAL_UINT8(0x01, out.batch_switching[92]);  /* sub[14] packed_lcu */
@@ -3581,7 +3601,7 @@ static void test_cs_translate_preliminary_dual_cfg_channel(void)
         hailo_cs_translate_contexts(&info, &cfg, &out));
 
     /* Full MNIST PRELIMINARY: 489 bytes. Matches
-     * ../slmos-reference-cache/derivatives/hailort-traces/pios_PRELIMINARY.bin (modulo IOVAs). */
+     * ~/slmos-ref/derivatives/hailort-traces/pios_PRELIMINARY.bin (modulo IOVAs). */
     TEST_ASSERT_EQUAL_UINT32((uint32_t)489, out.preliminary_len);
 
     /* Byte 0: first ACTIVATE_CFG_CHANNEL is the bulk channel
@@ -5137,7 +5157,7 @@ static void test_vdma_program_descriptor_masks_low_addr_bits(void)
  * keep the plain 0x02 control. */
 /* 0x02 DESC_CONTROL | 0x20 HOST_IRQ_BITMASK | 0x04 REQ_IRQ_PROCESSED
  * | 0x08 REQ_IRQ_ERR = 0x2E. Host-domain IRQ per HailoRT's hailo_pci
- * driver as captured on Pi OS 2026-04-22 (../slmos-reference-cache/hailo/hailort-
+ * driver as captured on Pi OS 2026-04-22 (~/slmos-ref/hailo/hailort-
  * v4.23.0-vdma-mnist-pi5.txt): every per-transfer last desc ends in
  * 0x2e. Earlier SLM-OS pick of 0x1E (DEVICE domain) was wrong. */
 #define LAST_DESC_CTRL  0x2Eu
@@ -6897,7 +6917,7 @@ static void test_inf_hailo_load_rings_context_switch_sequence(void)
     /* Expected core-CPU RPCs per context_switch_load:
      *   1. CHANGE_STATUS(RESET)
      *   2. CLEAR_CONFIGURED_APPS     (pre-configure handshake)
-     *   3. GET_HW_CONSTS             (pre-configure handshake)
+     *   3. GET_HW_CONSTS
      *   4. SET_NETWORK_GROUP_HEADER
      *   5-8. SET_CONTEXT_INFO × 4    (ACT/BS/PRE/DYN)
      *   9. CHANGE_STATUS(ENABLED)

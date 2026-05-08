@@ -178,8 +178,37 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
             return 0;
         }
     }
-    shell_printf("hailo: ctxsmoke variant=%s (out=%d in=%d)\n",
-                 variant, (int)include_out, (int)include_in);
+    /* #361 hypothesis test (disconfirmed 2026-05-06): scan trailing
+     * argv[] for `hwcN` where N is the GET_HW_CONSTS repeat count
+     * (default 1). HailoRT v4.23 calls GET_HW_CONSTS 4× during HEF
+     * load; the question was whether the count itself silences the
+     * CPU_ECC_FATAL events fw fires on RPCs after RESET. Hardware
+     * A/B on pi-5-1: x4 still fires CPU_ECC_FATAL at ENABLED and
+     * generates additional ECC events during the GET_HW_CONSTS
+     * sequence itself. Kept as a tunable knob so future investigation
+     * can re-test cheaply (e.g., x4 plus settle-pings combination). */
+    uint32_t hwc_repeat = 1u;
+    /* #361 settle-ping hypothesis: when `pings` is set, fire APP-CPU
+     * IDENTIFY + GET_DEVICE_INFORMATION before each CORE-CPU step.
+     * HailoRT v4.23's wire capture (hailort-v4.23.0-wire-capture-mnist
+     * -pi5.txt) shows ~3 APP-CPU RPCs interleaved before/after every
+     * major CORE step; SLM-OS sends none. The question is whether the
+     * pings silence the CPU_ECC_FATAL events fw fires after RESET. */
+    bool inject_pings = false;
+    for (int ai = 3; ai < argc; ai++) {
+        if (strncmp(argv[ai], "hwc", 3) == 0) {
+            int n = 0;
+            for (const char *p = argv[ai] + 3; *p >= '0' && *p <= '9'; p++)
+                n = n * 10 + (*p - '0');
+            if (n >= 1 && n <= 16) hwc_repeat = (uint32_t)n;
+        } else if (strcmp(argv[ai], "pings") == 0) {
+            inject_pings = true;
+        }
+    }
+    shell_printf("hailo: ctxsmoke variant=%s (out=%d in=%d) hwc_repeat=%u "
+                 "pings=%d\n",
+                 variant, (int)include_out, (int)include_in,
+                 (unsigned)hwc_repeat, (int)inject_pings);
     /* Phase 6.3d/6.4 hardware probe: exercise the three context-
      * switch opcodes (CHANGE_CONTEXT_SWITCH_STATUS,
      * SET_NETWORK_GROUP_HEADER, SET_CONTEXT_INFO) against live
@@ -354,31 +383,79 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     }
 
     shell_puts("hailo: ctxsmoke:\n");
+    int rc;
+
+    /* Settle-ping helper. Fires APP-CPU IDENTIFY + GET_DEVICE_INFORMATION
+     * (two RPCs HailoRT interleaves before/after every CORE step) when
+     * the `pings` knob is on, then drains d2h. Uses block scope and a
+     * label so the existing rc/struct names stay reachable. */
+#define CTXSMOKE_SETTLE_PINGS(_label)                                   \
+    do {                                                                \
+        if (inject_pings) {                                             \
+            struct hailo_control_identify_response __idr;               \
+            int __irc = hailo_control_identify(&__idr);                 \
+            shell_printf("  [ping " _label "] IDENTIFY rc=%d\n", __irc);\
+            uint32_t __dlen = 0;                                        \
+            int __drc = hailo_control_get_device_information(&__dlen);  \
+            shell_printf("  [ping " _label "] GET_DEVICE_INFO rc=%d "   \
+                         "len=%u\n", __drc, (unsigned)__dlen);          \
+        }                                                               \
+    } while (0)
+
+    CTXSMOKE_SETTLE_PINGS("pre-RESET");
     shell_puts("  [1/8] CHANGE_CONTEXT_SWITCH_STATUS(RESET)...\n");
-    int rc = hailo_control_change_context_switch_status(
+    rc = hailo_control_change_context_switch_status(
         HAILO_CS_STATE_RESET,
         HAILO_CS_IGNORE_APPLICATION_INDEX,
         /*batch_size=*/0, /*batch_count=*/0);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after RESET]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     /* #180 pre-configure handshake (2026-04-19 wire capture): HailoRT
      * calls CLEAR_CONFIGURED_APPS then GET_HW_CONSTS between
      * CHANGE_CONTEXT_SWITCH_STATUS(RESET) and SET_NETWORK_GROUP_HEADER.
      * Skipping these left firmware's context-switch bookkeeping stale
      * and BATCH_SWITCHING walked into uninitialized state. */
+    CTXSMOKE_SETTLE_PINGS("pre-CLEAR_APPS");
     shell_puts("  [2/8] CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS...\n");
     rc = hailo_control_context_switch_clear_configured_apps();
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after CLEAR_CONFIGURED_APPS]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
-    shell_puts("  [3/8] GET_HW_CONSTS...\n");
+    /* #361: GET_HW_CONSTS hypothesis test — repeat hwc_repeat times.
+     * HailoRT v4.23 issues 4 back-to-back GET_HW_CONSTS RPCs during
+     * HEF load; SLM-OS production used 1 until #361. Drain d2h after
+     * each call to count CPU_ECC_FATAL events as the count varies. */
+    shell_printf("  [3/8] GET_HW_CONSTS x%u...\n", (unsigned)hwc_repeat);
     uint32_t hw_consts_resp_len = 0;
-    rc = hailo_control_get_hw_consts(&hw_consts_resp_len);
-    shell_printf("        rc=%d resp_len=%u\n", rc, hw_consts_resp_len);
+    for (uint32_t i = 0; i < hwc_repeat; i++) {
+        CTXSMOKE_SETTLE_PINGS("pre-GET_HW_CONSTS");
+        rc = hailo_control_get_hw_consts(&hw_consts_resp_len);
+        shell_printf("        [%u/%u] rc=%d resp_len=%u\n",
+                     (unsigned)(i + 1), (unsigned)hwc_repeat,
+                     rc, hw_consts_resp_len);
+#ifdef HAILO_WIRE_DEBUG
+        shell_printf("  [d2h after GET_HW_CONSTS #%u]\n", (unsigned)(i + 1));
+        hailo_fw_drain_d2h_notifications(4);
+#endif
+    }
 
+    CTXSMOKE_SETTLE_PINGS("pre-SET_NG_HEADER");
     shell_puts("  [4/8] SET_NETWORK_GROUP_HEADER...\n");
     rc = hailo_control_set_network_group_header(&hdr);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after SET_NETWORK_GROUP_HEADER]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
+    CTXSMOKE_SETTLE_PINGS("pre-CTX(ACT)");
     shell_printf("  [5/8] SET_CONTEXT_INFO(ACTIVATION, %u bytes)\n",
                  (unsigned)bufs.activation_len);
     /* #180 diag: dump the first 80 ACTIVATION bytes — the three
@@ -399,6 +476,10 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
                                         bufs.activation,
                                         (uint32_t)bufs.activation_len);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after SET_CONTEXT_INFO(ACTIVATION)]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     /* Diagnostic: probe an APP-CPU opcode (IDENTIFY) right after
      * ACTIVATION. Hardware-verified on pi-5-1 fw v4.23 that this
@@ -422,6 +503,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     shell_puts("  [--] DIAG: sleeping 500 ms before BATCH_SWITCHING\n");
     hailo_platform->udelay(500000u);
 
+    CTXSMOKE_SETTLE_PINGS("pre-CTX(BS)");
     shell_printf("  [6/8] SET_CONTEXT_INFO(BATCH_SWITCHING, %u bytes)\n",
                  (unsigned)bufs.batch_switching_len);
 #ifdef HAILO_WIRE_DEBUG
@@ -440,6 +522,10 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
                                         bufs.batch_switching,
                                         (uint32_t)bufs.batch_switching_len);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after SET_CONTEXT_INFO(BATCH_SWITCHING)]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     /* #180 experiment C — post-failure BAR4 scope scan. Findings
      * from experiment B: BAR4+0x640 stays 0xFFFFFFFF for >1 s AND
@@ -484,6 +570,7 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
         shell_printf("        BSC_IMASK_HOST=0x%08x\n", imask);
     }
 
+    CTXSMOKE_SETTLE_PINGS("pre-CTX(PRE)");
     shell_printf("  [7/8] SET_CONTEXT_INFO(PRELIMINARY, %u bytes)\n",
                  (unsigned)bufs.preliminary_len);
     shell_printf("        CCW buffer iova=0x%lx\n",
@@ -501,8 +588,13 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
                                         bufs.preliminary,
                                         (uint32_t)bufs.preliminary_len);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after SET_CONTEXT_INFO(PRELIMINARY)]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
 
     if (!dcc0) {
+        CTXSMOKE_SETTLE_PINGS("pre-CTX(DYN)");
         shell_printf("  [8/8] SET_CONTEXT_INFO(DYNAMIC, %u bytes)\n",
                      (unsigned)bufs.dynamic_len);
 #ifdef HAILO_WIRE_DEBUG
@@ -520,6 +612,10 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
                                             bufs.dynamic,
                                             (uint32_t)bufs.dynamic_len);
         shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+        shell_puts("  [d2h after SET_CONTEXT_INFO(DYNAMIC)]\n");
+        hailo_fw_drain_d2h_notifications(4);
+#endif
     } else {
         shell_puts("  [8/8] SKIP: DYNAMIC (dcc0 mode)\n");
     }
@@ -530,12 +626,19 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
      * the header-supplied batch (we set batch_size=1 in the app
      * header). If firmware accepts all 4 SET_CONTEXT_INFO calls,
      * this transition unlocks per-frame VDMA submission. */
+    CTXSMOKE_SETTLE_PINGS("pre-ENABLED");
     shell_puts("  [-/8] CHANGE_CONTEXT_SWITCH_STATUS(ENABLED)...\n");
     rc = hailo_control_change_context_switch_status(
         HAILO_CS_STATE_ENABLED,
         /*application_index=*/0,
         /*batch_size=*/0, /*batch_count=*/0);
     shell_printf("        rc=%d\n", rc);
+#ifdef HAILO_WIRE_DEBUG
+    shell_puts("  [d2h after CHANGE_STATUS(ENABLED)]\n");
+    hailo_fw_drain_d2h_notifications(4);
+#endif
+
+#undef CTXSMOKE_SETTLE_PINGS
 
     hailo_vdma_desc_list_free(&bnd_out_list);
     hailo_vdma_desc_list_free(&bnd_in_list);
@@ -606,6 +709,13 @@ static int cmd_hailo(int argc, char *argv[])
         if (rc == HAILO_OK) {
             shell_printf("hailo: boot OK, state=%s\n",
                          hailo_state_str(hailo_get_state()));
+#ifdef HAILO_WIRE_DEBUG
+            /* #682 checkpoint 1: IN ch=2 base register state right
+             * after fw flash, before any model load. Establishes
+             * baseline — if avail!=0 here, the stale-SRAM hypothesis
+             * is in play. */
+            hailo_vdma_dump_channel_regs(2, "[682-cp1] post boot");
+#endif
         } else {
             shell_printf("hailo: boot failed (%d), state=%s\n", rc,
                          hailo_state_str(hailo_get_state()));

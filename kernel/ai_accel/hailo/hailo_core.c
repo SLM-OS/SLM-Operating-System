@@ -65,7 +65,7 @@ static enum hailo_state state = HAILO_STATE_UNINIT;
 
 /*
  * ATR[0] is shared with device firmware post-boot
- * (../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md §9.7). Every dev_read /
+ * (~/slmos-ref/derivatives/notes/hailo-driver-notes.md §9.7). Every dev_read /
  * dev_write through the ATR[0] window must save → retarget →
  * access → restore atomically, or concurrent accesses (including
  * firmware traffic after hailo_boot) corrupt the control channel
@@ -99,7 +99,7 @@ const char *hailo_state_str(enum hailo_state s)
  * registers in BAR0. Caller is responsible for saving and restoring
  * the prior ATR[0] value around any read/write through the window —
  * post-boot, firmware itself uses ATR[0] for its own traffic
- * (../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md §9.7).
+ * (~/slmos-ref/derivatives/notes/hailo-driver-notes.md §9.7).
  */
 static void atr0_set_target(uint64_t dev_addr)
 {
@@ -546,7 +546,7 @@ int hailo_decode_core_fw(const uint8_t *blob, size_t fw_size,
 /*
  * Bring the Hailo device to RUNNING state by uploading firmware and
  * triggering the boot ROM. Protocol distilled from
- * ../slmos-reference-cache/hailo/hailo-pcie-common.c hailo_pcie_write_firmware_batch
+ * ~/slmos-ref/hailo/hailo-pcie-common.c hailo_pcie_write_firmware_batch
  * + hailo_trigger_firmware_boot + hailo_pcie_wait_for_firmware:
  *
  *   1. Validate the flat firmware blob (header magic, code_size).
@@ -736,9 +736,31 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
 #ifdef HAILO_WIRE_DEBUG
     /* #682 hypothesis-1 diagnostic: confirm the per-channel IRQ enable
      * bits are still 0xFFFFFFFF immediately after fw boots and arm_irq_masks
-     * has run. Baseline read-back. */
+     * has run. Baseline read-back, captured BEFORE the optional IRQ-cycle
+     * disable below so the dump reflects the post-boot/post-arm state. */
     hailo_control_dump_irq_state("post-boot-arm");
 #endif
+
+#ifdef HAILO_IRQ_CYCLE_AT_BOOT
+    /* #682 (2026-05-07): mirror Linux's hailo_activate_board IRQ
+     * sequence — enable → load_firmware → DISABLE → (later) re-enable.
+     * Until now SLM-OS pre-armed IMASK_HOST before the trigger and left
+     * it armed for the rest of fw lifetime. Linux instead writes 0 to
+     * IMASK_HOST immediately after load_firmware completes (see
+     * hailo-pcie-common.c:879 hailo_pcie_disable_interrupts), then
+     * re-arms it later from the user-space open() path that runs
+     * before the first VDMA submit. Hypothesis: the missing disable
+     * gives fw a different IRQ state at boot, which prevents `proc`
+     * from advancing on the boundary IN channel during runmodel.
+     *
+     * The disable runs first so the post-boot D3hot transition (if
+     * enabled below) happens with IMASK_HOST=0, matching Linux's
+     * order. The re-arm runs after the D3hot cycle so the device is
+     * back in D0 with fresh IRQ-mask writes — closer to the state
+     * the user-space open() leaves behind. */
+    INFO("hailo: post-boot IRQ disable (IMASK_HOST=0)");
+    hailo_control_disable_imask();
+#endif /* HAILO_IRQ_CYCLE_AT_BOOT */
 
 #ifdef HAILO_D3HOT_AT_BOOT
     /* Phase 8 #253 (2026-04-25): replicate Linux hailo_pcie's post-boot
@@ -769,6 +791,22 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
         }
     }
 #endif /* HAILO_D3HOT_AT_BOOT */
+
+#ifdef HAILO_IRQ_CYCLE_AT_BOOT
+    /* Settle delay then re-arm. The delay is conservative — Linux's
+     * user-space open() path does plenty of other work between the
+     * disable and the re-enable, so giving fw a few ms to settle in
+     * D0 with IMASK_HOST=0 isn't unreasonable. 5 ms matches the
+     * other Hailo settle waits in the boot path. */
+    if (hailo_platform->udelay) hailo_platform->udelay(5000);
+    int arm_rc = hailo_control_arm_irq_masks();
+    if (arm_rc != HAILO_OK) {
+        WARN("hailo: post-cycle IRQ re-arm failed (rc=%d) — fw may not "
+             "see masked interrupts", arm_rc);
+    } else {
+        INFO("hailo: post-boot IRQ re-arm OK");
+    }
+#endif /* HAILO_IRQ_CYCLE_AT_BOOT */
 
     return HAILO_OK;
 

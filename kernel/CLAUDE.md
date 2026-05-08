@@ -399,7 +399,7 @@ page tag is a separate register. Without per-page IMEMT updates:
 
 Reference: nvgpu's `gk20a_falcon_copy_to_imem` mirrors this in
 three sites in
-`../slmos-reference-cache/nvidia/nvgpu-hal-falcon-falcon_gk20a_fusa.c`. SLM-OS
+`~/slmos-ref/nvidia/nvgpu-hal-falcon-falcon_gk20a_fusa.c`. SLM-OS
 matches the pattern. Regression coverage in
 `host-tools/gsp-harness/test_falcon.c`:
 `test_pio_imem_multi_page_writes_tag_per_page` (4-page upload,
@@ -437,12 +437,12 @@ The post-fail diagnostic in `nvidia_gpu.c` originally peeked
 "SEC2 BROM MOD_SEL = 0xbadf5720" — same bug, same wrong conclusion.
 
 **Source-read of nouveau confirms the real story.** `ga102_flcn_fw_boot`
-(`../slmos-reference-cache/nouveau/nouveau-falcon-ga102.c:113-123`) writes the BROM
+(`~/slmos-ref/nouveau/nouveau-falcon-ga102.c:113-123`) writes the BROM
 selectors via plain BAR0 MMIO at exactly the same `0x841180/198/19c/210`
 addresses SLM-OS uses in `kernel/gpu/nvidia/bringup.c:710-716`. There
 is no DMEMMAPPER fixup; the booter HS blob carries only the
 `(fuse_ver, engine_id, ucode_id)` triple in its meta_data block
-(`../slmos-reference-cache/nouveau/nouveau-gsp-ga102.c:41-92` `ga102_gsp_booter_ctor`).
+(`~/slmos-ref/nouveau/nouveau-gsp-ga102.c:41-92` `ga102_gsp_booter_ctor`).
 
 **Phase 2 STOPPED root cause located + fixed (PR #289, 2026-04-18).**
 The diagnostic added in PR #288 surfaced the actual bug on the next
@@ -473,8 +473,8 @@ WprMeta correctly is the documented E4 boundary.
   diagnostic was peeking. PR #288 has the corrected offsets.
 - For HS booter blobs (R535 booter_load), BOOTVEC must be
   `apps[0].offset`, not `os_code_offset` — see OGKM
-  `../slmos-reference-cache/nvidia/ogkm-kernel_gsp_falcon_ga102.c:278` and nouveau
-  v2 `../slmos-reference-cache/nouveau/nouveau-falcon-fw.c:351`. Pinned in
+  `~/slmos-ref/nvidia/ogkm-kernel_gsp_falcon_ga102.c:278` and nouveau
+  v2 `~/slmos-ref/nouveau/nouveau-falcon-fw.c:351`. Pinned in
   `host-tools/gsp-harness/test_bringup.c:test_booter_layout_*`.
 - When source-reading converging-but-wrong candidates from
   multiple references (Jetson code, nouveau, OGKM), add a runtime
@@ -498,7 +498,7 @@ booter to walk the chain without faulting, then advance to a
 
 **Layout pinning is load-bearing.** `kernel/gpu/nvidia/gsp_wpr_meta.h`
 copies the struct definition verbatim from
-`../slmos-reference-cache/nouveau/nouveau-r535-nvrm-gsp.h:417-555` and adds 11
+`~/slmos-ref/nouveau/nouveau-r535-nvrm-gsp.h:417-555` and adds 11
 `_Static_assert`s pinning sizeof + every field offset booter or
 SEC2 reads directly. If a future maintainer reorders fields or
 forgets a `uint64_t` somewhere, the build breaks instead of SEC2
@@ -513,7 +513,7 @@ IOVA, L2[0] = ELF IOVA, every other entry zeroed. Single-entry
 shape is the Stage A simplification — production GSP-RM ELF spans
 many L2 pages and `sizeOfRadix3Elf` would be the actual ELF byte
 length, not 4096. Reference: nouveau `nvkm_gsp_radix3_sg`
-(`../slmos-reference-cache/nouveau/nouveau-gsp-r535.c:1656-1713`).
+(`~/slmos-ref/nouveau/nouveau-gsp-r535.c:1656-1713`).
 
 **What Stage A deliberately leaves zero.** Bootloader address +
 size + offsets, signature address + size, heap fields, partition
@@ -538,7 +538,7 @@ consumes the pushbuffer, `GP_GET` advances, no dmesg error, no
 fault notifier — but the dispatch never reaches the SMs. The
 kernel silently does not run.
 
-Source: `../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c:322-340` — NVK
+Source: `~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c:322-340` — NVK
 branches on `cls_compute <= TURING_COMPUTE_A`:
 
 ```c

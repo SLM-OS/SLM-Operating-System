@@ -28,24 +28,31 @@ hardware-level instrumentation).
 
 ## How to build
 
+The TF-A source tree is expected at `~/slmos-ref/tf-a/` (part of the
+local reference library — see top-level `CLAUDE.md` "Reference File
+Cache"). It's not a git repo anymore; just a working tree of the
+ARM-software/arm-trusted-firmware sources with this patch applied.
+
 ```bash
-# 1. Clone TF-A as a sibling of this repo (private, not committed)
-cd ..
-git clone https://github.com/ARM-software/arm-trusted-firmware.git slmos-tf-a
-cd slmos-tf-a
+# 1. Set up the TF-A tree (one-time, if not already present)
+mkdir -p ~/slmos-ref/tf-a
+cd ~/slmos-ref/tf-a
+git clone https://github.com/ARM-software/arm-trusted-firmware.git .
 git checkout master
+git am <SLM-OS-checkout>/tools/tfa-patches/0001-SLM-OS-Pi-5-IRQ-routing-patches.patch
+# (After the initial setup, you can remove the .git dir — the source
+# tree is read-only reference material from this point.)
 
-# 2. Apply the patch
-git am ../CS-496-Capstone-SLM-Operating-System/tools/tfa-patches/0001-SLM-OS-Pi-5-IRQ-routing-patches.patch
-
-# 3. Build with the kernel toolchain
+# 2. Build with the kernel toolchain
+cd ~/slmos-ref/tf-a
 PATH=/opt/arm-gnu-toolchain/bin:$PATH \
     make PLAT=rpi5 CROSS_COMPILE=aarch64-none-elf- DEBUG=0 LOG_LEVEL=40 -j4 bl31
 
 # Output: build/rpi5/release/bl31.bin (~32 KB)
 ```
 
-Or use the Makefile target in this repo (see `make tfa-pi5`).
+Or use the Makefile target in this repo (see `make tfa-pi5`), which
+expects `TFA_DIR=~/slmos-ref/tf-a`.
 
 ## How to deploy
 

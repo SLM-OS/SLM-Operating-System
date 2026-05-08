@@ -13,7 +13,7 @@
  * follow-up Phase 5.4 commits on top of this foundation.
  *
  * Descriptor layout mirrors hailo_vdma_descriptor in
- * `../slmos-reference-cache/hailo/hailo-vdma-common.h:35`:
+ * `~/slmos-ref/hailo/hailo-vdma-common.h:35`:
  *
  *   struct hailo_vdma_descriptor {
  *       u32 PageSize_DescControl;    // page size (low bits) + control flags
@@ -116,7 +116,7 @@ struct hailo_vdma_desc_list {
 /* data_id written into each descriptor's AddrL_rsvd_DataID field AND
  * into the channel's BASE_DWORD at start time. Reference hw-ops pin
  * this at 0 for PCIe (`HAILO_PCIE_HOST_DMA_DATA_ID` in
- * ../slmos-reference-cache/hailo/hailo-pcie-common.h:35, used as `vdma_hw->ddr_data_id`
+ * ~/slmos-ref/hailo/hailo-pcie-common.h:35, used as `vdma_hw->ddr_data_id`
  * in hailo-vdma-common.c:294 and hailo-pcie.c:670). The `sys_index`
  * from the HEF is a stream identifier, NOT the descriptor's data_id —
  * mixing them up causes channel-vs-descriptor data_id divergence,
@@ -393,7 +393,7 @@ int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us);
  * that this helper returns immediately, leaving it to the caller to
  * poll num_proc on its own schedule. Used to pre-arm the OUTPUT
  * boundary channel before submitting INPUT, matching HailoRT's
- * observed host-side order (see ../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-vdma-
+ * observed host-side order (see ~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-vdma-
  * mnist-pi5.txt). Returns HAILO_OK / HAILO_ERR_INVAL.
  */
 int hailo_vdma_write_num_avail(uint8_t channel_index, uint16_t num_avail);

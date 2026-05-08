@@ -2,7 +2,7 @@
  * hailo_control.h — Hailo firmware control-channel wire format.
  *
  * Ported from HailoRT's common/include/control_protocol.h (MIT
- * license; see ../slmos-reference-cache/hailo/hailort-control-protocol.h). We
+ * license; see ~/slmos-ref/hailo/hailort-control-protocol.h). We
  * carry only the subset the kernel actually sends today: IDENTIFY
  * for version-probe (#281 tier-1 milestone), WRITE/READ_MEMORY
  * and CONFIG_STREAM / OPEN_STREAM for the Phase 5.2 CCW streaming
@@ -126,7 +126,7 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_RUN_BIST_TEST                        = 0x3C,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS = 0x47,
     HAILO_CONTROL_OPCODE_GET_HW_CONSTS                        = 0x48,
-    /* Full table in ../slmos-reference-cache/hailo/hailort-control-protocol.h. */
+    /* Full table in ~/slmos-ref/hailo/hailort-control-protocol.h. */
 };
 
 /* CONTROL_PROTOCOL__communication_type_t values.
@@ -471,7 +471,7 @@ int hailo_control_config_stream_pcie(
  *
  * IMPORTANT: MAX_CFG_CHANNELS is 4 in firmware v4.23 (running on the
  * AI HAT+ in the lab), NOT the 24 the cached reference header
- * ../slmos-reference-cache/hailo/hailort-control-protocol.h shows for newer releases.
+ * ~/slmos-ref/hailo/hailort-control-protocol.h shows for newer releases.
  * The application_header_t wire size is 32 bytes on v4.23; firmware
  * rejects any other length with
  * CONTROL_PROTOCOL_STATUS_INVALID_CONTEXT_SWITCH_APP_HEADER_LENGTH
@@ -753,6 +753,21 @@ int hailo_control_run_bist_test(bool     is_top_test,
  * needs fw to be RUNNING (handler may receive responses).
  */
 int hailo_control_arm_irq_masks(void);
+
+/*
+ * Mirror of hailo_pcie_disable_interrupts. Writes 0 to BSC_IMASK_HOST
+ * and clears the "armed" flag so a follow-up arm call re-runs the
+ * register writes. Linux disables IMASK_HOST after load_firmware
+ * completes (see hailo_activate_board), then re-enables it later from
+ * the user-space open() path. SLM-OS uses this in the boot path
+ * (HAILO_IRQ_CYCLE_AT_BOOT) to replicate the disable→re-enable cycle
+ * around the post-boot D3hot transition.
+ *
+ * Per-channel SRC/DST IRQ masks are NOT cleared here — Linux's
+ * disable path leaves them armed too. Safe to call on platforms with
+ * no MMIO (no-op).
+ */
+void hailo_control_disable_imask(void);
 
 /*
  * #682 hypothesis-1 diagnostic. Reads back the four interrupt-state

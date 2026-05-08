@@ -3,12 +3,12 @@
  *
  * Authors a 256-byte Queue Meta Data descriptor that the GA10B's SKED
  * compute scheduler decodes to launch a compute kernel. Mirrors NVK's
- * `Qmd3_0` (../slmos-reference-cache/mesa/mesa-nak_qmd.rs:499-528) and
+ * `Qmd3_0` (~/slmos-ref/mesa/mesa-nak_qmd.rs:499-528) and
  * the Linux-side helper at scripts/gpu-launch-common.c — both produce
  * the same bit layout for AMPERE_COMPUTE_B.
  *
  * Bit positions are fixed by NVIDIA's auto-generated header
- * (../slmos-reference-cache/mesa/mesa-clc7c0qmd.h, QMDV03_00 section)
+ * (~/slmos-ref/mesa/mesa-clc7c0qmd.h, QMDV03_00 section)
  * and are reproduced as named constants below. Each bit-range is
  * a (HI, LO) pair encoding a closed interval [LO..HI] in bit-index
  * units (bit 0 = qmd[0] LSB).
@@ -104,7 +104,7 @@
 #define GA10B_QMD_INVALIDATE_SHADER_CONSTANT_CACHE_BIT  191
 
 /* CTA Workload Dispatcher membar — runs before this QMD's CTAs
- * launch. NV reference: ../slmos-reference-cache/mesa/mesa-clc7c0qmd.h
+ * launch. NV reference: ~/slmos-ref/mesa/mesa-clc7c0qmd.h
  * NVC7C0_QMDV02_03_CWD_MEMBAR_TYPE at MW(369:368), 2-bit field with:
  *   L1_NONE      = 0  (no membar — default; can leave stale L1/L2
  *                       lines visible to a kernel that just had its

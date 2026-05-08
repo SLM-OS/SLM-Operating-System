@@ -2,7 +2,7 @@
  * i2c_tegra.c — Tegra234 HSI2C controller driver (polled).
  *
  * Reference: Linux v6.12 `drivers/i2c/busses/i2c-tegra.c`, cached at
- * `../slmos-reference-cache/linux/linux-i2c-tegra.c`. SLM-OS port is intentionally
+ * `~/slmos-ref/linux/linux-i2c-tegra.c`. SLM-OS port is intentionally
  * minimal — polled, no DMA, no IRQ, single-master, 7-bit addressing,
  * standard-mode (100 kHz). Sufficient for IMX219 register access.
  *
@@ -80,7 +80,7 @@
 #define I2C_INTERFACE_TIMING_THIGH_SHIFT  8u
 
 /* Standard-mode (100 kHz) clock-divisor / interface-timing values from
- * Linux's tegra194_i2c_hw struct (`../slmos-reference-cache/linux/linux-i2c-tegra.c`). */
+ * Linux's tegra194_i2c_hw struct (`~/slmos-ref/linux/linux-i2c-tegra.c`). */
 #define I2C_T194_CLK_DIVISOR_STD_MODE  0x4Fu
 #define I2C_T194_TLOW_STD_MODE         0x08u
 #define I2C_T194_THIGH_STD_MODE        0x07u

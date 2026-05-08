@@ -177,7 +177,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 /* ---- GSP RISCV registers (offsets from NV_PGSP_RISCV_BASE) ----
  *
  * Used by phase 1 to start the HS ACR ucode in preloaded mode.
- * Register meanings per ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_priscv_ga10b.h. */
+ * Register meanings per ~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_priscv_ga10b.h. */
 
 #define RISCV_BOOT_VECTOR_LO        0x380u
 #define RISCV_BOOT_VECTOR_HI        0x384u
@@ -199,12 +199,12 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* ACR HS completion marker — written to MAILBOX0 by the ucode when
  * it runs. nvgpu's acr_sw_ga10b checks for ACR_OK. Exact constant
- * verified in ../slmos-reference-cache/nvidia/nvgpu-common-acr-acr_bootstrap.c. */
+ * verified in ~/slmos-ref/nvidia/nvgpu-common-acr-acr_bootstrap.c. */
 #define ACR_BOOT_OK                 0x000000ffu
 
 /* ---- FECS / GPCCS (GR Falcon) register offsets ----
  *
- * Offsets from ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_gr_ga10b.h (OE4T l4t-r36.5).
+ * Offsets from ~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_gr_ga10b.h (OE4T l4t-r36.5).
  * FECS is the GR front-end context-switch Falcon; GPCCS is per-GPC. On
  * GA10B cold boot (SEC_SECUREGPCCS path) ACR pre-loads both IMEM/DMEM
  * from WPR — SLM-OS only needs to issue STARTCPU and wait for the
@@ -244,7 +244,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  * here (not 1), and STRUCTURE_SIZE must be SEMAPHORE_ONE_WORD for
  * 32-bit payloads.
  *
- * Source: ../slmos-reference-cache/nvidia/nvgpu-include-class-clc7c0.h:109-142 */
+ * Source: ~/slmos-ref/nvidia/nvgpu-include-class-clc7c0.h:109-142 */
 #define NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER   0x0158u
 #define NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER   0x015Cu
 #define NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER   0x0160u
@@ -257,13 +257,13 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* ---- COMPUTE_B compute-kernel launch methods --------------------
  * Used by ga10b_bringup_launch_kernel (Phase 8). Offsets from
- * ../slmos-reference-cache/mesa/mesa-clc7c0.h. */
+ * ~/slmos-ref/mesa/mesa-clc7c0.h. */
 #define NVC7C0_INVALIDATE_SHADER_CACHES               0x021cu
 #define NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI 0x0244u
 #define NVC7C0_INVALIDATE_SKED_CACHES                 0x0298u
 
 /* INVALIDATE_SHADER_CACHES bitfields per
- * ../slmos-reference-cache/mesa/mesa-clc7c0.h:299-314 (bit positions
+ * ~/slmos-ref/mesa/mesa-clc7c0.h:299-314 (bit positions
  * decoded from "MSB:LSB" notation). All five bits set = nuke every
  * shader-side cache before the next dispatch reads input/cbuf data.
  *
@@ -285,7 +285,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* Per-arch window base addresses for Ampere. Mesa NVK hardcodes these
  * for `VOLTA_COMPUTE_A <= cls_compute < HOPPER_COMPUTE_A` in
- * ../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c:63-79. */
+ * ~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c:63-79. */
 #define NVC7C0_SHARED_MEMORY_WINDOW_BASE 0xfe000000u
 #define NVC7C0_LOCAL_MEMORY_WINDOW_BASE  0xff000000u
 
@@ -392,7 +392,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  * No channel, GMMU, or page tables required.
  *
  * Reference: nvgpu gm20b_gr_falcon_submit_fecs_method_op
- *   ../slmos-reference-cache/nvidia/nvgpu-gr-falcon-gm20b-fusa.c
+ *   ~/slmos-ref/nvidia/nvgpu-gr-falcon-gm20b-fusa.c
  */
 #define GR_FECS_METHOD_DATA         0x00409500u
 #define GR_FECS_METHOD_PUSH         0x00409504u
@@ -461,7 +461,7 @@ int ga10b_bringup_prepare(struct ga10b_bringup *b)
  * IMEM and ACR runs.
  *
  * This matches nvgpu_acr_bootstrap_hs_ucode_riscv in
- *   ../slmos-reference-cache/nvidia/nvgpu-common-acr-acr_bootstrap.c:360–419
+ *   ~/slmos-ref/nvidia/nvgpu-common-acr-acr_bootstrap.c:360–419
  * (preloaded BCR_CTRL=0x11 branch — we skip the 0x111 DMA path).
  *
  * On success the RISCV core runs, ACR authenticates FECS/GPCCS/(PMU),
@@ -490,7 +490,7 @@ static inline void bar0_w32(uint32_t off, uint32_t val)
  *   2. Wait 10+ µs
  *   3. Write ENGINE.RESET = 0       (deassert — crucial!)
  *
- * Reference: ../slmos-reference-cache/nvidia/nvgpu-hal-gsp-gsp_ga10b.c:54 ga10b_gsp_engine_reset.
+ * Reference: ~/slmos-ref/nvidia/nvgpu-hal-gsp-gsp_ga10b.c:54 ga10b_gsp_engine_reset.
  * Without the deassert write the engine stays in reset forever, and
  * HWCFG2/CPUCTL read back as PRI poison (0xbadfXXXX) — which is
  * exactly what we see on jetson-nano-2 after Linux's nvgpu detach.
@@ -736,8 +736,8 @@ int ga10b_bringup_acr(struct ga10b_bringup *b)
  * sentinel that the ucode writes as its first readiness signal.
  *
  * Reference:
- *   ../slmos-reference-cache/nvidia/nvgpu-common-gr-gr_falcon.c:737-738  — start_gpccs/start_fecs
- *   ../slmos-reference-cache/nvidia/nvgpu-hal-gr-falcon-gr_falcon_ga10b_fusa.c — mailbox plumbing
+ *   ~/slmos-ref/nvidia/nvgpu-common-gr-gr_falcon.c:737-738  — start_gpccs/start_fecs
+ *   ~/slmos-ref/nvidia/nvgpu-hal-gr-falcon-gr_falcon_ga10b_fusa.c — mailbox plumbing
  *
  * We split FECS and GPCCS into separate phases so the shell can invoke
  * them independently while iterating. The nvgpu driver issues them
@@ -845,7 +845,7 @@ int ga10b_bringup_gpccs(struct ga10b_bringup *b)
  * now we don't need PMU to submit a single NOP+SEMAPHORE method,
  * so skipping here is the pragmatic path.
  *
- * Reference: ../slmos-reference-cache/nvidia/nvgpu-common-acr-acr_sw_ga10b.c:417
+ * Reference: ~/slmos-ref/nvidia/nvgpu-common-acr-acr_sw_ga10b.c:417
  *   (lsf->is_lazy_bootstrap = g->support_ls_pmu ? true : false) */
 int ga10b_bringup_pmu(struct ga10b_bringup *b)
 {
@@ -880,7 +880,7 @@ int ga10b_bringup_pmu(struct ga10b_bringup *b)
  */
 
 /* GA10B UFLUSH register block (BAR0+0x70000-0x70010), per
- * ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_flush_ga10b.h.
+ * ~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_flush_ga10b.h.
  * All four registers share the layout: bit 0 = PENDING_BUSY (write 1
  * to start the op), bit 1 = OUTSTANDING_TRUE. Op completes when both
  * bits read back 0. */
@@ -932,7 +932,7 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * surfaces as the iter-1 "got nvgpu's helper output" race (#596).
  *
  * Sequence per gv11b_mm_l2_flush in
- * ../slmos-reference-cache/nvidia/nvgpu-hal-mm-cache-flush_gv11b_fusa.c
+ * ~/slmos-ref/nvidia/nvgpu-hal-mm-cache-flush_gv11b_fusa.c
  * (and kmemsysCacheOp_GM200 in OGKM):
  *
  *   1. fb_flush   — drain pending sysmem writes into L2

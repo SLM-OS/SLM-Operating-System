@@ -1,7 +1,7 @@
 /*
  * hef_header.h — Hailo Executable Format outer-header parser.
  *
- * A `.hef` file has two parts (../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md §7):
+ * A `.hef` file has two parts (~/slmos-ref/derivatives/notes/hailo-driver-notes.md §7):
  *
  *   1. Flat outer header: magic (`0x01484546` = "HEF\x01"), a
  *      version tag, the protobuf body size, and a version-specific
@@ -21,7 +21,7 @@
  * version-mismatched file — before invoking nanopb.
  *
  * Reference: hef.cpp:479-523 in hailort, cached as
- * ../slmos-reference-cache/hailo/hailo-hef-parser-head.cpp (partial).
+ * ~/slmos-ref/hailo/hailo-hef-parser-head.cpp (partial).
  */
 
 #ifndef AI_ACCEL_HEF_HEADER_H
