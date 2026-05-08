@@ -2667,6 +2667,67 @@ static void test_qmd_pool_prepare_writes_match_direct_populate(void)
     REQUIRE_EQ(memcmp(r.cpu_va, expected, GA10B_QMD_SIZE_BYTES), 0);
 }
 
+static void test_qmd_pool_prepare_applies_hmma_overrides(void)
+{
+    printf("== test_qmd_pool_prepare_applies_hmma_overrides ==\n");
+    /* HMMA / WMMA shaders need non-default SHARED_MEMORY_SIZE +
+     * BARRIER_COUNT. The v7 pool encoder must honor the op's
+     * smem_size_bytes / barrier_count fields; without these
+     * overrides, helper-staged HMMA dispatches stall the next op
+     * (observed empirically — gpu-kernel-mnist.c §"BARRIER_COUNT=3
+     * matches what the SM expects"). SIMT ops set these fields to
+     * 0 and the encoder defaults stand. */
+    uint8_t pool[4 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x10000000ULL, 0x20000000ULL, 64u, 1u, 1u, 1u);
+    op.smem_size_bytes = 2048u;
+    op.slm_size_bytes  = 0u;       /* SIMT-default */
+    op.barrier_count   = 3u;
+
+    struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+        pool, 0xEE000000ULL, 4u, &slot, &op);
+    REQUIRE_EQ(r.index, 0u);
+
+    /* Read back the QMD fields. The 32-bit-word layout uses
+     * `ga10b_qmd_get_bits` parity reads — but we don't have a public
+     * getter, so reconstruct by encoding a reference QMD with the
+     * same effective parameters and comparing byte-by-byte. */
+    uint32_t expected[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(expected,
+                       op.shader_gpu_va, op.cbuf_gpu_va,
+                       op.register_count_v,
+                       op.grid_x, op.grid_y, op.grid_z,
+                       op.block_x, op.block_y, op.block_z);
+    /* Apply the same overrides the pool path would, so we can
+     * byte-compare the result. */
+    ga10b_qmd_set_bits(expected, GA10B_QMD_SHARED_MEMORY_SIZE_HI,
+                       GA10B_QMD_SHARED_MEMORY_SIZE_LO, 2048u);
+    ga10b_qmd_set_bits(expected, GA10B_QMD_BARRIER_COUNT_HI,
+                       GA10B_QMD_BARRIER_COUNT_LO, 3u);
+    REQUIRE_EQ(memcmp(r.cpu_va, expected, GA10B_QMD_SIZE_BYTES), 0);
+
+    /* Sanity: a SIMT-default op (smem=slm=barrier=0) must NOT have
+     * the HMMA bits set in its QMD — that would corrupt SIMT
+     * dispatch by the same path. */
+    uint8_t pool2[GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot2 = 0;
+    struct ga10b_pipeline_op_v7 simt_op = make_test_op_v7(
+        0x10000000ULL, 0x20000000ULL, 64u, 1u, 1u, 1u);
+    /* simt_op already has smem/slm/barrier zeroed by make_test_op_v7. */
+    struct ga10b_qmd_pool_slot rs = ga10b_qmd_pool_prepare(
+        pool2, 0u, 1u, &slot2, &simt_op);
+    REQUIRE_EQ(rs.index, 0u);
+    uint32_t simt_expected[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(simt_expected,
+                       simt_op.shader_gpu_va, simt_op.cbuf_gpu_va,
+                       simt_op.register_count_v,
+                       simt_op.grid_x, simt_op.grid_y, simt_op.grid_z,
+                       simt_op.block_x, simt_op.block_y, simt_op.block_z);
+    REQUIRE_EQ(memcmp(rs.cpu_va, simt_expected, GA10B_QMD_SIZE_BYTES), 0);
+}
+
 static void test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds(void)
 {
     printf("== test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds ==\n");
@@ -3127,6 +3188,7 @@ int main(void)
     test_qmd_pool_prepare_starts_from_inout_value();
     test_qmd_pool_prepare_writes_match_direct_populate();
     test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds();
+    test_qmd_pool_prepare_applies_hmma_overrides();
     test_qmd_pool_prepare_rejects_invalid_inputs();
 
     test_handoff_is_v7_accepts_well_formed();

@@ -127,10 +127,14 @@ KERNEL="${KERNEL:-/root/slmos.elf}"
 #   $1 = helper basename (gpu-kernel-mnist | gpu-kernel-sched-mlp)
 #   $2 = weights directory under $helper_dir
 #   $3 = log file path
+#   $4..  = extra argv tokens passed verbatim to the helper (per-helper
+#          flags like --qmd-pool, --gemm-tier hmma, etc.)
 start_one_helper() {
     local helper_name="$1"
     local weights_subdir="$2"
     local log="$3"
+    shift 3
+    local extra_args=("$@")
     local helper_dir="${SLMOS_HELPER_DIR:-/root/gpu-mnist}"
     local helper_path="$helper_dir/$helper_name"
 
@@ -179,7 +183,8 @@ start_one_helper() {
             --preserve-for-kexec \
             --timeout-secs 1800 \
             --weights-dir "$weights_subdir" \
-            --shader-dir "." > "$log" 2>&1 < /dev/null &)
+            --shader-dir "." \
+            "${extra_args[@]}" > "$log" 2>&1 < /dev/null &)
 
     # Wait for the helper to reach the "Sleeping ... kexec now" line.
     # The "kexec now" suffix is a stringly-typed handoff contract
@@ -226,7 +231,26 @@ maybe_start_gpu_helpers() {
     # Start MNIST first (kind=0 handoff). Sched-MLP is best-effort —
     # only stage it if the binary is on disk, since not every Jetson
     # build has the sched-mlp pipeline compiled.
-    start_one_helper gpu-kernel-mnist     mnist-weights /tmp/gpu-kernel-mnist.log || true
+    #
+    # `--qmd-pool` (MNIST only) produces a v7 handoff where each launch
+    # authors fresh QMD bytes into a slot of a GMMU-mapped pool. This
+    # forces SKED to redecode the descriptor every dispatch, which
+    # fixes the v6 off-by-one staleness where SKED's cached decode of
+    # replayed byte-identical QMDs serves the previous launch's output
+    # on the next call. Surfaces as `model_infer_file(N)` returning the
+    # prediction of input `N-1` under multi-inference workloads (e.g.
+    # mnist_loop.lua). See docs/gpu-qmd-per-dispatch-plan.md and #558.
+    #
+    # `SLMOS_GEMM_TIER=hmma` opts the FC layer (op 6) into the
+    # FP32-activation × FP16-weight tensor-core GEMM. The helper reads
+    # W_fc as FP16 from `mnist-weights-fp16/`. Other ops still use
+    # SIMT FP32 shaders. Default is unset (SIMT FP32 GEMM).
+    local mnist_extra=("--qmd-pool")
+    if [[ "${SLMOS_GEMM_TIER:-}" == "hmma" ]]; then
+        mnist_extra+=("--gemm-tier" "hmma"
+                      "--weights-fp16-dir" "mnist-weights-fp16")
+    fi
+    start_one_helper gpu-kernel-mnist     mnist-weights /tmp/gpu-kernel-mnist.log "${mnist_extra[@]}" || true
     start_one_helper gpu-kernel-sched-mlp sched-weights /tmp/gpu-kernel-sched-mlp.log || true
 }
 

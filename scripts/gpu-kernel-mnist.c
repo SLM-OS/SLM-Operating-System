@@ -130,6 +130,9 @@ struct mnist_op {
     uint32_t v7_register_count_v;
     uint32_t v7_grid_x, v7_grid_y, v7_grid_z;
     uint32_t v7_block_x, v7_block_y, v7_block_z;
+    uint32_t v7_smem_size_bytes;    /* SHARED_MEMORY_SIZE; non-zero for HMMA */
+    uint32_t v7_slm_size_bytes;     /* SHADER_LOCAL_MEM size */
+    uint32_t v7_barrier_count;      /* BARRIER_COUNT; 3 for the WMMA SASS */
 };
 
 /* Record the v7 dispatch inputs alongside each helper-baked QMD.
@@ -295,6 +298,10 @@ int main(int argc, char **argv)
 
     /* --- Per-op metadata --- */
     struct mnist_op ops[MNIST_OP_COUNT];
+    /* Zero-init so v7 fields (smem_size_bytes, slm_size_bytes,
+     * barrier_count) default to 0 for SIMT ops. The HMMA tier
+     * overrides these for op 6 below. */
+    memset(ops, 0, sizeof(ops));
     static const char *op_names[MNIST_OP_COUNT] = {
         "00_conv1", "01_addrelu1", "02_pool1",
         "03_conv2", "04_addrelu2", "05_pool2",
@@ -610,6 +617,15 @@ int main(int argc, char **argv)
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         MNIST_RECORD_V7(op, gemm_shader_gva,
                         grid_x, grid_y, 1u, block_x, block_y, 1u);
+        /* HMMA QMD overrides for the v7 dispatch path. SLM-OS rebuilds
+         * the QMD per-launch from these op fields and otherwise leaves
+         * SHARED_MEMORY_SIZE / BARRIER_COUNT at the encoder's defaults
+         * (zero) — which silently breaks the WMMA chain. SIMT path
+         * leaves these zero so the encoder's defaults stand. */
+        if (gemm_tier_hmma) {
+            op->v7_smem_size_bytes = 2048u;
+            op->v7_barrier_count   = 3u;
+        }
     }
 
     /* Op 7: AddBias on logits (no ReLU). Shape 1×10 treated as
@@ -837,9 +853,9 @@ int main(int argc, char **argv)
             p[i].block_x = ops[i].v7_block_x;
             p[i].block_y = ops[i].v7_block_y;
             p[i].block_z = ops[i].v7_block_z;
-            p[i].smem_size_bytes  = 0;
-            p[i].slm_size_bytes   = 0;
-            p[i].barrier_count    = 0;
+            p[i].smem_size_bytes  = ops[i].v7_smem_size_bytes;
+            p[i].slm_size_bytes   = ops[i].v7_slm_size_bytes;
+            p[i].barrier_count    = ops[i].v7_barrier_count;
         }
         msync(pipe_ops.cpu_va, pipe_ops.size_bytes, MS_SYNC);
     } else {

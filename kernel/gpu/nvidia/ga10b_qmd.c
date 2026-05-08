@@ -212,6 +212,36 @@ ga10b_qmd_pool_prepare(uint8_t *pool_va,
                        op->grid_x, op->grid_y, op->grid_z,
                        op->block_x, op->block_y, op->block_z);
 
+    /* HMMA / WMMA shaders ship with non-default barrier_count and
+     * shared-memory requirements that the v6 helper used to bake into
+     * its per-op QMD bytes (gpu-kernel-mnist.c sets BARRIER_COUNT=3
+     * and SHARED_MEMORY_SIZE=2048 for the FP32A×FP16W tensor-core GEMM).
+     * v7 builds the QMD per-dispatch from op fields; without these
+     * overrides the HMMA shader stalls op[N+1] (observed empirically as
+     * AddBias output staying all-zero for 5 s on Jetson GA10B). The
+     * helper populates `smem_size_bytes`, `slm_size_bytes`, and
+     * `barrier_count` in the v7 op struct; SIMT kernels leave them 0
+     * and the encoder defaults match what `ga10b_qmd_populate` already
+     * wrote, so the override is a no-op for the SIMT path. */
+    if (op->smem_size_bytes != 0u) {
+        ga10b_qmd_set_bits((uint32_t *)slot_va,
+                           GA10B_QMD_SHARED_MEMORY_SIZE_HI,
+                           GA10B_QMD_SHARED_MEMORY_SIZE_LO,
+                           op->smem_size_bytes);
+    }
+    if (op->slm_size_bytes != 0u) {
+        ga10b_qmd_set_bits((uint32_t *)slot_va,
+                           GA10B_QMD_SHADER_LOCAL_MEM_LOW_SIZE_HI,
+                           GA10B_QMD_SHADER_LOCAL_MEM_LOW_SIZE_LO,
+                           op->slm_size_bytes);
+    }
+    if (op->barrier_count != 0u) {
+        ga10b_qmd_set_bits((uint32_t *)slot_va,
+                           GA10B_QMD_BARRIER_COUNT_HI,
+                           GA10B_QMD_BARRIER_COUNT_LO,
+                           op->barrier_count);
+    }
+
     *slot_inout = (slot + 1u) % pool_n_slots;
 
     result.gpu_va = pool_gpu_va + (uint64_t)slot * GA10B_QMD_SIZE_BYTES;
