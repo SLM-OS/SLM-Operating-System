@@ -65,6 +65,13 @@
       "dtype":   "FP16",
       "sass":    "swiglu_f16_shader.sass",
       "comment": "Element-wise fused SiLU + multiply: out = silu(gate) * up = (gate / (1 + exp(-gate))) * up. The activation step that sits between the gate / up matmuls and the down matmul inside the SwiGLU MLP block. One thread per element, 256-thread blocks; sigmoid in FP32 with __expf (CUDA fast intrinsic). Mirrors runtime/src/inference/ops_transformer.rs::silu_out + the element-wise multiply that follows it inside swiglu_mlp_q. Validated within 2 ULPs across Qwen2.5-1.5B (n=8960), Llama-2 (n=11008), 16-row prefill (n=143360), and a non-multiple-of-256 tail (n=1023). NOTE: this is the element-wise half of SWIGLU (op_kind=6). The full MLP block also needs the gate / up / down matmuls, which will land as future Q4K_DOT entries; the dispatcher composes them. Source: scripts/cuda/swiglu_f16.cu (#540)."
+    },
+    {
+      "op_kind": "ROPE",
+      "tier":    "SIMT",
+      "dtype":   "FP16",
+      "sass":    "rope_f16_shader.sass",
+      "comment": "Rotary Position Embedding for Q/K vectors. Rotates pairs (vec[2i], vec[2i+1]) by precomputed (cos, sin) factors from a flat FP32 LUT keyed on (token position, pair index). One block per (token, head); one thread per pair; no shared memory, no reductions. GPT-NeoX / Llama / Qwen2 pair-interleave convention. Mirrors runtime/src/inference/ops_transformer.rs::RopeTable::apply. Validated within 2 ULPs across Qwen2.5-1.5B Q (1×12×128), K (1×2×128), prefill (16×12×128), Llama-2 Q (1×32×128), and a 64-dim head (1×8×64); position-0 boundary case is bit-exact. Source: scripts/cuda/rope_f16.cu (#540)."
     }
   ],
 
