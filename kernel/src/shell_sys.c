@@ -4133,18 +4133,30 @@ int cmd_nvgpu(int argc, char *argv[])
             uint64_t inst = 0, va = 0;
             for (int a = 0; a < 2; a++) {
                 const char *s = argv[3 + a];
-                if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+                if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                    s += 2;
+                }
                 uint64_t v = 0;
                 while (*s) {
                     uint64_t d;
-                    if (*s >= '0' && *s <= '9') d = *s - '0';
-                    else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
-                    else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
-                    else { shell_puts("bad hex\r\n"); return -1; }
+                    if (*s >= '0' && *s <= '9') {
+                        d = *s - '0';
+                    } else if (*s >= 'a' && *s <= 'f') {
+                        d = 10 + (*s - 'a');
+                    } else if (*s >= 'A' && *s <= 'F') {
+                        d = 10 + (*s - 'A');
+                    } else {
+                        shell_puts("bad hex\r\n");
+                        return -1;
+                    }
                     v = (v << 4) | d;
                     s++;
                 }
-                if (a == 0) inst = v; else va = v;
+                if (a == 0) {
+                    inst = v;
+                } else {
+                    va = v;
+                }
             }
             struct ga10b_gmmu_walk_result wr;
             int rc = ga10b_gmmu_walk(inst, va, &wr);
@@ -4191,14 +4203,22 @@ int cmd_nvgpu(int argc, char *argv[])
                 return -1;
             }
             const char *s = argv[3];
-            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                s += 2;
+            }
             uint64_t va = 0;
             while (*s) {
                 uint64_t d;
-                if (*s >= '0' && *s <= '9') d = *s - '0';
-                else if (*s >= 'a' && *s <= 'f') d = 10 + (*s - 'a');
-                else if (*s >= 'A' && *s <= 'F') d = 10 + (*s - 'A');
-                else { shell_puts("bad hex VA\r\n"); return -1; }
+                if (*s >= '0' && *s <= '9') {
+                    d = *s - '0';
+                } else if (*s >= 'a' && *s <= 'f') {
+                    d = 10 + (*s - 'a');
+                } else if (*s >= 'A' && *s <= 'F') {
+                    d = 10 + (*s - 'A');
+                } else {
+                    shell_puts("bad hex VA\r\n");
+                    return -1;
+                }
                 va = (va << 4) | d;
                 s++;
             }
