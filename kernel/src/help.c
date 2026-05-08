@@ -439,6 +439,20 @@ static const struct help_entry help_entries[] = {
         "Used to verify the EL1 -> EL0 -> EL1 round-trip end-to-end.\n"
     ),
 
+    HELP_TEXT("mmaptest",
+        "mmaptest - Run the EL0 sys_mmap/munmap smoke task\n"
+        "\n"
+        "Usage:\n"
+        "  mmaptest\n"
+        "\n"
+        "Creates a user-mode (EL0) task that calls sys_mmap to allocate\n"
+        "a single anonymous RW page, writes a sentinel through the user\n"
+        "VA, reads it back, then calls sys_munmap. Logs\n"
+        "\"[MMAPTEST] mmap+write+read+munmap ok\" on success.\n"
+        "\n"
+        "Used to verify the dynamic-user-memory path end-to-end.\n"
+    ),
+
     HELP_TEXT("cpu",
         "cpu - Show CPU status\n"
         "\n"

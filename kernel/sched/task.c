@@ -262,6 +262,7 @@ struct task *task_alloc(const char *name, uint8_t priority)
     task->user_l1_pa = 0;
     task->user_stack_top = 0;
     task->user_stack_phys = 0;
+    task->user_va_next = 0;
 
     DEBUG_PRINT("Allocated task '%s' (id=%u, priority=%u)",
                 task->name, task->id, task->priority);
@@ -390,6 +391,7 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->user_l1_pa = 0;
     task->user_stack_top = 0;
     task->user_stack_phys = 0;
+    task->user_va_next = 0;
 
     /* Clean the context struct to PoC so a secondary CPU can read it
      * during switch_to(). Without SMPEN, task_create's writes to
@@ -569,6 +571,7 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
     task->user_l1_pa = user_l1_pa;
     task->user_stack_top = USER_STACK_TOP;
     task->user_stack_phys = (uint64_t)(uintptr_t)user_stack_page;
+    task->user_va_next = USER_MMAP_VA_START;
 
     return task;
 }
@@ -736,6 +739,7 @@ void task_destroy(struct task *task)
     task->user_l1_pa = 0;
     task->user_stack_top = 0;
     task->user_stack_phys = 0;
+    task->user_va_next = 0;
 
     /* Bump the slot generation (#139) so any still-cached captures in
      * per-CPU steal deques from the previous life of this slot will

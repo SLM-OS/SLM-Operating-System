@@ -124,6 +124,9 @@ const shell_cmd_t builtin_commands[] = {
     {"bench",    cmd_bench,    "Performance benchmarks (bench <context|irq|ipc|stats|all>)", true, SHELL_CAT_PROCESS},
     {"eviction", cmd_eviction, "AI eviction (eviction [policy [<name>] | stats])",          true, SHELL_CAT_PROCESS},
     {"kill",     cmd_kill,     "Terminate a task by ID",                                    true, SHELL_CAT_PROCESS},
+#if !defined(PLATFORM_X86_64)
+    {"mmaptest", cmd_mmaptest, "Run the EL0 sys_mmap/munmap smoke task (mmap follow-up)",   false, SHELL_CAT_PROCESS},
+#endif
     {"model",    cmd_model,    "Model management (load/list/info/unload/swap/pools)",       true, SHELL_CAT_PROCESS},
     {"sched",    cmd_sched,    "Scheduler (sched [policy [<name>] | model ... | stats])",   true, SHELL_CAT_PROCESS},
     {"sleep",    cmd_sleep,    "Sleep for N ms (sleep <ms>)",                               false, SHELL_CAT_PROCESS},

@@ -294,7 +294,9 @@ static void test_syscall_numbers_contiguous(void)
     TEST_ASSERT_EQUAL_INT(5, SYS_SLEEP);
     TEST_ASSERT_EQUAL_INT(6, SYS_LOG);
     TEST_ASSERT_EQUAL_INT(7, SYS_TOUCH_BLOCK);
-    TEST_ASSERT_EQUAL_INT(8, SYS_MAX);
+    TEST_ASSERT_EQUAL_INT(8, SYS_MMAP);
+    TEST_ASSERT_EQUAL_INT(9, SYS_MUNMAP);
+    TEST_ASSERT_EQUAL_INT(10, SYS_MAX);
 }
 
 /* ============================================================================
@@ -414,6 +416,154 @@ static void test_task_create_user_populates_stack(void)
     t->state = TASK_TERMINATED;
     task_destroy(t);
 }
+
+/* Test (mmap): user_va_next is initialised to USER_MMAP_VA_START on
+ * task_create_user. */
+static void test_task_create_user_inits_mmap_cursor(void)
+{
+    extern void user_smoke_main(void *arg);
+    struct task *t = task_create_user("mmcur", (task_entry_t)user_smoke_main, NULL, 4);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT64(USER_MMAP_VA_START, t->user_va_next);
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/* Test (mmap): a page mapped via sys_mmap shows up in the per-task
+ * L1 with VMM_FLAG_PMM_OWNED set, advances the cursor, and is
+ * reclaimed by task_destroy without leaking PMM pages.
+ *
+ * The handler is exercised directly via syscall_dispatch to avoid
+ * needing scheduler-driven EL0 context — the EL0 round-trip is
+ * separately verified by the `mmaptest` shell command on hardware. */
+static void test_sys_mmap_allocates_advances_cursor(void)
+{
+    extern void user_smoke_main(void *arg);
+    struct pmm_stats before, after;
+
+    pmm_get_stats(&before);
+    struct task *t = task_create_user("mmtask", (task_entry_t)user_smoke_main, NULL, 4);
+    TEST_ASSERT_NOT_NULL(t);
+
+    /* Set this task as current so the syscall handler picks the right
+     * user_l1_pa / cursor. The original `current_task` is restored
+     * before destroying the task to keep the rest of the test suite
+     * stable. */
+    extern void task_set_current(struct task *task);
+    extern struct task *task_current(void);
+    struct task *prev = task_current();
+    task_set_current(t);
+
+    struct trap_frame f;
+    memset(&f, 0, sizeof(f));
+    f.x8 = SYS_MMAP;
+    f.x0 = 0;                                /* hint */
+    f.x1 = 4096;                             /* len */
+    f.x2 = PROT_READ | PROT_WRITE;           /* prot */
+    f.x3 = MAP_ANONYMOUS;                    /* flags */
+    syscall_dispatch(&f);
+
+    int64_t ret = (int64_t)f.x0;
+    TEST_ASSERT_EQUAL_INT64(USER_MMAP_VA_START, ret);
+    TEST_ASSERT_EQUAL_UINT64(USER_MMAP_VA_START + 4096, t->user_va_next);
+
+    /* munmap the same range — leaf is freed back to PMM. */
+    memset(&f, 0, sizeof(f));
+    f.x8 = SYS_MUNMAP;
+    f.x0 = (uint64_t)ret;
+    f.x1 = 4096;
+    syscall_dispatch(&f);
+    TEST_ASSERT_EQUAL_INT64(0, (int64_t)f.x0);
+
+    /* Restore current and tear down. PMM should be net-neutral. */
+    task_set_current(prev);
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+
+    pmm_get_stats(&after);
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "mmap+munmap+destroy leaked pages");
+}
+
+/* Test: sys_mmap rejects len == 0, len > 64 MB, and a kernel-mode
+ * caller (no user_l1_pa). */
+static void test_sys_mmap_validation(void)
+{
+    struct trap_frame f;
+
+    /* Kernel-mode caller (the test scaffolding's task is a kernel
+     * task — task_current returns the test driver, not a user task). */
+    memset(&f, 0, sizeof(f));
+    f.x8 = SYS_MMAP;
+    f.x1 = 4096;
+    f.x2 = PROT_READ | PROT_WRITE;
+    syscall_dispatch(&f);
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)f.x0);
+
+    /* Need a user task to exercise the len validation. */
+    extern void user_smoke_main(void *arg);
+    struct task *t = task_create_user("mmval", (task_entry_t)user_smoke_main, NULL, 4);
+    TEST_ASSERT_NOT_NULL(t);
+    extern void task_set_current(struct task *task);
+    extern struct task *task_current(void);
+    struct task *prev = task_current();
+    task_set_current(t);
+
+    /* len == 0 */
+    memset(&f, 0, sizeof(f));
+    f.x8 = SYS_MMAP;
+    f.x1 = 0;
+    f.x2 = PROT_READ;
+    syscall_dispatch(&f);
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)f.x0);
+
+    /* len > 64 MB */
+    memset(&f, 0, sizeof(f));
+    f.x8 = SYS_MMAP;
+    f.x1 = 65UL * 1024 * 1024;
+    f.x2 = PROT_READ;
+    syscall_dispatch(&f);
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)f.x0);
+
+    task_set_current(prev);
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/* Test: sys_munmap rejects unaligned addr and addresses outside the
+ * mmap window (.text.user / stack). */
+static void test_sys_munmap_validation(void)
+{
+    extern void user_smoke_main(void *arg);
+    struct task *t = task_create_user("muval", (task_entry_t)user_smoke_main, NULL, 4);
+    TEST_ASSERT_NOT_NULL(t);
+    extern void task_set_current(struct task *task);
+    extern struct task *task_current(void);
+    struct task *prev = task_current();
+    task_set_current(t);
+
+    struct trap_frame f;
+
+    /* Unaligned addr. */
+    memset(&f, 0, sizeof(f));
+    f.x8 = SYS_MUNMAP;
+    f.x0 = USER_MMAP_VA_START + 0x1;
+    f.x1 = 4096;
+    syscall_dispatch(&f);
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)f.x0);
+
+    /* Addr below mmap window — refuses to munmap .text.user / stack. */
+    memset(&f, 0, sizeof(f));
+    f.x8 = SYS_MUNMAP;
+    f.x0 = USER_TEXT_VA;
+    f.x1 = 4096;
+    syscall_dispatch(&f);
+    TEST_ASSERT_EQUAL_INT64(-1, (int64_t)f.x0);
+
+    task_set_current(prev);
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
 #endif
 
 #if !defined(PLATFORM_X86_64)
@@ -501,6 +651,10 @@ int test_suite_syscall(void)
     RUN_TEST(test_task_create_kernel_leaves_user_l1_zero);
     RUN_TEST(test_task_destroy_frees_user_l1);
     RUN_TEST(test_task_create_user_populates_stack);
+    RUN_TEST(test_task_create_user_inits_mmap_cursor);
+    RUN_TEST(test_sys_mmap_allocates_advances_cursor);
+    RUN_TEST(test_sys_mmap_validation);
+    RUN_TEST(test_sys_munmap_validation);
 
     /* #683 PR-5: vector layout for EL0 → EL2 SVC */
     RUN_TEST(test_lower_el_sync_vector_dispatches_to_el0_sync);

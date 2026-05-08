@@ -213,6 +213,13 @@ struct task {
     uint64_t user_stack_top;
     uint64_t user_stack_phys;
 
+    /* sys_mmap bump-allocator cursor. Starts at USER_MMAP_VA_START on
+     * task_create_user; each sys_mmap advances by the requested size
+     * (rounded up to page size). The allocator never reuses VA, so
+     * a freshly-allocated range cannot alias stale TLB entries from
+     * a prior munmap. Zero for kernel-mode tasks. */
+    uint64_t user_va_next;
+
     /* Slot generation counter for work-stealing ABA avoidance (#139).
      *
      * Bumped by task_destroy each time this task_table slot is freed,
