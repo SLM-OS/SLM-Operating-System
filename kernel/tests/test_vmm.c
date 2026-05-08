@@ -569,10 +569,12 @@ static void test_public_remap_invalidates_tlb(void)
  * ============================================================================ */
 
 /* The boot L1 is file-scoped static in vmm.c. Reach it via
- * vmm_get_ttbr1() (returns the live TTBR1_EL1 register value). Mask off
- * the ASID/CnP bits to get the L1 table PA. Identity-mapped, so the
- * PA can be cast directly to uint64_t * for table reads. */
-#define BOOT_L1_PA()        (vmm_get_ttbr1() & ~0xFFFUL)
+ * vmm_get_ttbr1() (returns the live TTBR1_EL1 register value). The
+ * register layout is BADDR[47:1] | CnP[0], with optional ASID in bits
+ * [63:48] (TCR_EL1.AS controlled). Mask to bits [47:12] to extract
+ * the table PA — survives a future ASID introduction. Identity-mapped,
+ * so the PA can be cast directly to uint64_t * for table reads. */
+#define BOOT_L1_PA()        (vmm_get_ttbr1() & 0x0000FFFFFFFFF000UL)
 
 /* Test: vmm_create_user_l1 returns a fresh, non-zero L1 PA. */
 static void test_create_user_l1_returns_fresh_pa(void)

@@ -301,6 +301,15 @@ bool vmm_is_mapped(uint64_t virt);
  * propagate. This invariant is documented in
  * docs/pi5-el0-execution-plan.md "Risks" section.
  *
+ * Concurrency precondition: caller must hold the kernel's VMM
+ * serialisation contract. SLM-OS does not maintain a vmm-wide lock;
+ * the existing convention is that mutations of l1_table happen
+ * single-threaded (boot, or under per-subsystem locks for runtime
+ * mappings like PCIe BAR setup). vmm_create_user_l1 reads l1_table,
+ * so it inherits that contract — torn reads if a concurrent writer
+ * mutates l1_table mid-copy. PR-3 callers must respect this when
+ * deciding when to call task_create_user.
+ *
  * @out_pa: Output — physical address of the new L1 page (caller-owned).
  *          Pass to vmm_destroy_user_l1 when done.
  *
@@ -311,9 +320,18 @@ int vmm_create_user_l1(uint64_t *out_pa);
 /*
  * Free a per-task L1 table previously returned by vmm_create_user_l1.
  *
- * Walks the L1's user-region entries (USER_L1_FIRST..USER_L1_LIMIT-1)
- * and frees any per-task L2/L3 sub-tables. Kernel-region L1 entries
- * point to shared L2s and are NOT freed.
+ * Frees only the page-table STRUCTURE — the L1 page itself plus any
+ * per-task L2 / L3 sub-tables hanging off user-region L1 entries
+ * (USER_L1_FIRST..USER_L1_LIMIT-1). Kernel-region L1 entries point
+ * to shared L2s and are NOT freed.
+ *
+ * Caller responsibility: free user backing pages BEFORE calling this.
+ * The data pages mapped by 2 MB block / 4 KB page descriptors are
+ * NOT freed automatically — destroy doesn't know whether a backing
+ * PA is a PMM-allocated user page (needs free) or an alias of a
+ * kernel page (e.g. .text.user in PR-4, must NOT be freed). The
+ * caller (PR-3+ task_destroy path) tracks page lifetime separately
+ * and frees backings before invoking this.
  *
  * Safe to call with l1_pa == 0 (no-op).
  *
