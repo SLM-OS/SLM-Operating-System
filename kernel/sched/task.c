@@ -250,6 +250,14 @@ struct task *task_alloc(const char *name, uint8_t priority)
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
 
+    /* User-mode defaults — task_create_user overrides is_user +
+     * user_entry; #697 PR-3 will populate user_l1_pa. Explicit init
+     * guards against stale-slot reuse: alloc_task_slot may return a
+     * slot whose previous owner was an EL0 task. */
+    task->is_user = 0;
+    task->user_entry = NULL;
+    task->user_l1_pa = 0;
+
     DEBUG_PRINT("Allocated task '%s' (id=%u, priority=%u)",
                 task->name, task->id, task->priority);
 
@@ -368,6 +376,13 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     /* No cleanup callback by default */
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
+
+    /* User-mode defaults — task_create_user overrides is_user +
+     * user_entry; #697 PR-3 will populate user_l1_pa. Explicit init
+     * guards against stale-slot reuse. */
+    task->is_user = 0;
+    task->user_entry = NULL;
+    task->user_l1_pa = 0;
 
     /* Clean the context struct to PoC so a secondary CPU can read it
      * during switch_to(). Without SMPEN, task_create's writes to
