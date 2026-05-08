@@ -1568,6 +1568,13 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #ifdef HAILO_WIRE_DEBUG
     uart_printf("[bisect] post CCW DMA pull:\r\n");
     hailo_fw_drain_d2h_notifications(2);
+
+    /* #682 hypothesis-1: read back per-channel IRQ-enable registers
+     * after fw has executed ACTIVATE_BOUNDARY_INPUT/OUTPUT and the
+     * full PRELIMINARY arming sequence. Compare to the post-boot-arm
+     * baseline — if any of the 32 SRC/DST bits flipped, fw is
+     * clearing them on us. */
+    hailo_control_dump_irq_state("post-load");
 #endif
     cs_load_stage_set(71);
     INFO("hailo backend: context-switch load OK (CCW=%u B, IN=%u B, OUT=%u B)",
@@ -2025,6 +2032,22 @@ static int hailo_backend_run(struct inference_device *dev,
      * data lands per input we submit. wait_proc(target=1) is the
      * right downstream poll. */
 
+#ifdef HAILO_WIRE_DEBUG
+    /* #682 hypothesis-1 (disconfirmed 2026-05-07): readback of
+     * PER_SRC/PER_DST/ISTATUS at boot-arm, post-load, pre-IN-submit
+     * showed fw sets PER_SRC bits 0/1 for CFG channels but never
+     * sets bit 2 for IN ch=2 or PER_DST bit 16 for OUT ch=16.
+     * A fix-attempt that wrote (1<<in_channel) into PER_SRC via RMW
+     * found the registers behave as write-1-to-clear interrupt status:
+     * the write returned PER_SRC=0 (clobbered fw's bits 0/1) and also
+     * cleared ISTATUS bit 0. So PER_SRC/PER_DST are "channels with an
+     * IRQ pending" status, not host-settable enables — boundary IN
+     * ch=2 not appearing means fw never raised an IRQ for it, which
+     * means fw never tried to fetch; root cause is upstream of the
+     * channel-arming/IRQ layer. */
+    hailo_control_dump_irq_state("pre-IN-submit");
+#endif
+
     int rc;
     uint64_t t_in_submit  = timer_get_count();
     rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
@@ -2046,6 +2069,12 @@ static int hailo_backend_run(struct inference_device *dev,
          * which num_proc==0 alone can't distinguish. */
         hailo_vdma_dump_desc_status(&slot->boundary_in_list, "IN", 8);
         hailo_vdma_dump_desc_status(&slot->boundary_out_list, "OUT", 8);
+#ifdef HAILO_WIRE_DEBUG
+        /* #682 hypothesis-1: post-timeout register read-back. If bits
+         * cleared during the 500 ms poll window, fw is dynamically
+         * disabling them — completes the four-point trail. */
+        hailo_control_dump_irq_state("post-timeout");
+#endif
         /* #253: dump fw debug log + D2H notification buffer on submit
          * failure. The D2H notification contains CONTEXT_SWITCH_RUN_TIME_ERROR
          * events that carry {exit_status, context_idx, action_idx} — exactly
