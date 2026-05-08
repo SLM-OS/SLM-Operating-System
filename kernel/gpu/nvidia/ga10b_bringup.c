@@ -2127,6 +2127,14 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
             (size_t)n * sizeof(*ops_v7));
     }
 
+    /* Pre-dispatch L2 evict. The set_input path already evicts after
+     * writing the new input, but a prior dispatch's read may have
+     * re-cached lines for the input/output buffers between set_input
+     * and the actual launch. Belt-and-braces: re-evict here so the
+     * GPU's chip-wide L2 starts the dispatch with no stale lines for
+     * any of the channel-mapped buffers. ~40 µs (#715). */
+    (void)ga10b_l2_evict_sysmem();
+
     /* Pre-clear the poll target ONCE — the trailing sema entry is
      * the only writer. Pre-zero so a non-zero match below is
      * unambiguous proof the GPU wrote the payload. */
@@ -2610,6 +2618,30 @@ int ga10b_bringup_set_input(struct ga10b_bringup *b,
     if (gsp_platform && gsp_platform->mb) {
         gsp_platform->mb();
     }
+
+    /* GPU L2 invalidate. CPU has just written new bytes to DRAM at
+     * input_buf_phys, but the GPU's chip-wide L2 may still hold lines
+     * cached from a previous dispatch's read of the same physical
+     * address. Without this invalidate, the next dispatch's SASS LDG
+     * gets stale-from-L2 data even though DRAM is fresh — the off-by-
+     * one staleness pattern observed in #715 ("each call returns the
+     * previous call's result"). The QMD's per-launch
+     * INVALIDATE_SHADER_CACHES + CWD_MEMBAR_TYPE_L1_SYSMEMBAR cover
+     * SM-side caches but do not reach the LTC.
+     *
+     * Companion evicts run in `ga10b_dispatch_v7_pipeline` (pre-launch,
+     * to drop any lines re-cached between set_input and the actual
+     * dispatch) and `ga10b_bringup_read_pipeline_output` (post-launch,
+     * to flush GPU dirty L2 output lines back to DRAM before the CPU
+     * read). All three are required on GA10B silicon for correct
+     * cross-dispatch coherency (#715 hardware verification).
+     *
+     * The 4-step UFLUSH sequence (FB_FLUSH + L2_FLUSH_DIRTY +
+     * L2_SYSMEM_INVALIDATE + FB_FLUSH) is the same one
+     * `ga10b_bringup_inherit` runs once at startup. ~40 µs typical,
+     * 2 ms worst-case under IRQ-off (caller holds
+     * g_gpu_dispatch_lock). */
+    (void)ga10b_l2_evict_sysmem();
     return (int)cap;
 }
 
@@ -2640,6 +2672,10 @@ int ga10b_bringup_set_input_fill(struct ga10b_bringup *b,
     if (gsp_platform && gsp_platform->mb) {
         gsp_platform->mb();
     }
+    /* GPU L2 invalidate after CPU input write — see set_input header
+     * for the rationale. Same staleness fix applies to the fill path
+     * (sched-MLP runs through here). */
+    (void)ga10b_l2_evict_sysmem();
     return (int)bytes_written;
 }
 
@@ -2682,6 +2718,22 @@ int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
         last_output_phys = ops[g_handoff.pipeline_n_ops - 1u].output_phys;
     }
     if (last_output_phys == 0u) return -1;
+
+    /* Post-dispatch L2 evict — load-bearing for #715. The trailing
+     * COMPUTE_SEMA_RELEASE entry in the dispatch fires with
+     * FLUSH_DISABLE=0, which is supposed to flush GPU writes through to
+     * sysmem before the sema release — but on GA10B silicon, hardware
+     * verification showed output reads still return stale data without
+     * an explicit L2 evict here. Drops any GPU L2 lines that hold this
+     * dispatch's output (writeback dirty lines + invalidate clean), so
+     * the CPU's subsequent cache_invalidate + memcpy reads fresh
+     * DRAM. Without this, two consecutive dispatches with different
+     * inputs return identical (stale) logits.
+     *
+     * This is the third leg of the cross-dispatch coherency tripod;
+     * see the companion comments in `ga10b_bringup_set_input` and the
+     * pre-dispatch site in `ga10b_dispatch_v7_pipeline`. */
+    (void)ga10b_l2_evict_sysmem();
 
     /* Invalidate the buffer's cache range before the read. The GPU
      * wrote the data via its own (uncached-from-CPU's-perspective)
