@@ -28,8 +28,14 @@ volatile uint32_t *reschedule_pending;
 volatile uint64_t *orig_elr;
 volatile uint64_t *orig_spsr;
 
-/* PSR mode bits [3:0]. 0x5 == EL1h (EL1 using SP_EL1). */
+/* PSR mode bits [3:0]. Kernel-mode sources we're willing to preempt:
+ *   0x5 = EL1h (EL1 using SP_EL1) — QEMU + Jetson + x86 path
+ *   0x9 = EL2h (EL2 using SP_EL2) — Pi 5 EL2/VHE path (#683)
+ * EL0t (0x0) is user-mode and isn't covered here — EL0 preemption
+ * doesn't need the trampoline because the kernel-stack frame on EL0
+ * → EL2 trap is fresh and switch_to from there is safe. */
 #define PSR_MODE_EL1H   0x5
+#define PSR_MODE_EL2H   0x9
 #define PSR_MODE_MASK   0xF
 
 /* PSR.DAIF.I bit — IRQ mask. Set in the SPSR we hand back to `eret` so
@@ -126,7 +132,10 @@ void maybe_arm_resched_trampoline(struct trap_frame *tf)
         return;
     if (preempt_disabled[cpu])
         return;
-    if ((tf->spsr & PSR_MODE_MASK) != PSR_MODE_EL1H)
+    /* Accept either EL1h or EL2h — kernel-mode source. EL0t and
+     * other unexpected modes fall through and are not preempted. */
+    uint64_t mode = tf->spsr & PSR_MODE_MASK;
+    if (mode != PSR_MODE_EL1H && mode != PSR_MODE_EL2H)
         return;
 
     /* Consume the flag and stash the original exception return state
