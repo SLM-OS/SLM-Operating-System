@@ -931,9 +931,10 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * instead of fetching fresh data we wrote at the same GPU VA, which
  * surfaces as the iter-1 "got nvgpu's helper output" race (#596).
  *
- * Also called between dispatches via the 3-point coherency sites
- * added in #722 (set_input + pre-launch + post-launch). Same UFLUSH
- * sequence; same preconditions.
+ * Also called between dispatches via the post-launch coherency
+ * site in `ga10b_bringup_read_pipeline_output` (#722 originally
+ * landed a 3-point evict; #723 narrowed to post-launch only). Same
+ * UFLUSH sequence; same preconditions.
  *
  * Sequence per gv11b_mm_l2_flush in
  * ~/slmos-ref/nvidia/nvgpu-hal-mm-cache-flush_gv11b_fusa.c
@@ -960,20 +961,21 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  *     work targeting the same memory addresses, the L2_FLUSH_DIRTY
  *     op may need the larger 2000-retry budget nvgpu uses.
  *
- * Caller logging policy: callers use `(void)ga10b_l2_evict_sysmem()`
- * when a failure produces a visible-stale next-call result that the
- * operator can detect (set_input, pre-launch). The post-launch site
- * surfaces failures explicitly because a timeout there silently
- * returns stale logits to the FFI caller — there's no follow-up
- * call to make the staleness visible.
+ * Caller logging policy: the inherit caller uses the
+ * `(void)ga10b_l2_evict_sysmem()` form because the failure mode
+ * (iter-1 stale-read race) is observable from the calling context.
+ * The post-launch dispatch caller surfaces failures explicitly
+ * because a timeout there silently returns stale logits to the FFI
+ * caller — there's no follow-up call to make the staleness visible.
  *
  * Lock-hold cost: 4 ops × ~500 µs/op ≈ 2 ms IRQ-off worst case if
  * every op hits its retry limit. Typical run is ~40 µs total (each
- * op completes in <10 µs per `ga10b_uflush_op`'s comment). The
- * 3-point-evict pattern in #722 multiplies this by 3 per dispatch:
- * ~120 µs typical / ~6 ms worst case. Bounded and acceptable for
- * MNIST workloads; not the right shape for SLM forward-path latency
- * (see docs/gpu-qmd-per-dispatch-plan.md §Status). */
+ * op completes in <10 µs per `ga10b_uflush_op`'s comment). One
+ * evict per dispatch (post-launch) — see
+ * `ga10b_bringup_read_pipeline_output` for the narrowing rationale
+ * (#723). Bounded and acceptable for MNIST workloads; not the right
+ * shape for SLM forward-path latency (see
+ * docs/gpu-qmd-per-dispatch-plan.md §Status). */
 int ga10b_l2_evict_sysmem(void)
 {
     if (!gsp_platform) return -1;
@@ -2161,21 +2163,6 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
             (size_t)n * sizeof(*ops_v7));
     }
 
-    /* Pre-dispatch L2 evict. set_input only evicts lines for the
-     * input buffer; the dispatch path also reads cbuf, shader pages,
-     * and the QMD pool slot — any of which may carry L2 lines from a
-     * prior dispatch that were re-cached after set_input ran. Pre-
-     * launch evict ensures SKED, the SASS instruction fetch, and the
-     * SASS LDG path all see a clean L2 view of the channel-mapped
-     * buffers on this dispatch's first read. ~40 µs (#715).
-     *
-     * Caller is `ga10b_bringup_launch_kernel`, which holds
-     * `g_gpu_dispatch_lock` IRQ-off and is invoked between dispatches
-     * (after the prior sema fired, before this submit's USERD GP_PUT
-     * write) — so the GPU is quiescent on this channel and the
-     * 100-retry UFLUSH budget in `ga10b_uflush_op` is sufficient. */
-    (void)ga10b_l2_evict_sysmem();
-
     /* Pre-clear the poll target ONCE — the trailing sema entry is
      * the only writer. Pre-zero so a non-zero match below is
      * unambiguous proof the GPU wrote the payload. */
@@ -2659,37 +2646,6 @@ int ga10b_bringup_set_input(struct ga10b_bringup *b,
     if (gsp_platform && gsp_platform->mb) {
         gsp_platform->mb();
     }
-
-    /* GPU L2 invalidate. CPU has just written new bytes to DRAM at
-     * input_buf_phys, but the GPU's chip-wide L2 may still hold lines
-     * cached from a previous dispatch's read of the same physical
-     * address. Without this invalidate, the next dispatch's SASS LDG
-     * gets stale-from-L2 data even though DRAM is fresh — the off-by-
-     * one staleness pattern observed in #715 ("each call returns the
-     * previous call's result"). The QMD's per-launch
-     * INVALIDATE_SHADER_CACHES + CWD_MEMBAR_TYPE_L1_SYSMEMBAR cover
-     * SM-side caches but do not reach the LTC.
-     *
-     * Companion evicts run in `ga10b_dispatch_v7_pipeline` (pre-launch,
-     * to drop any lines re-cached between set_input and the actual
-     * dispatch) and `ga10b_bringup_read_pipeline_output` (post-launch,
-     * to flush GPU dirty L2 output lines back to DRAM before the CPU
-     * read). All three were empirically required on jetson-nano-2 to
-     * pass an ABBA + AAAA test matrix (digit_0/3/7 mixed sequences)
-     * — removing the post-launch evict alone reproduces the
-     * staleness; removing the pre-launch evict shifts the failure
-     * pattern from "off-by-one" to "calls 2+4 wrong with values
-     * swapped". The architectural understanding of which is strictly
-     * necessary on which path is incomplete; the narrowing experiment
-     * is tracked in #723 (gate each site behind a kernel cmdline flag
-     * and run the full subset matrix).
-     *
-     * The 4-step UFLUSH sequence (FB_FLUSH + L2_FLUSH_DIRTY +
-     * L2_SYSMEM_INVALIDATE + FB_FLUSH) is the same one
-     * `ga10b_bringup_inherit` runs once at startup. ~40 µs typical,
-     * 2 ms worst-case under IRQ-off (caller holds
-     * g_gpu_dispatch_lock). */
-    (void)ga10b_l2_evict_sysmem();
     return (int)cap;
 }
 
@@ -2720,17 +2676,6 @@ int ga10b_bringup_set_input_fill(struct ga10b_bringup *b,
     if (gsp_platform && gsp_platform->mb) {
         gsp_platform->mb();
     }
-    /* GPU L2 invalidate after CPU input write — see set_input header
-     * for the rationale. Same staleness fix applies to the fill path
-     * (sched-MLP runs through here on every assign_cpu tick).
-     *
-     * Sched-MLP cost note: ~40 µs IRQ-off per call. The hot path is
-     * already throttled by #651's RATE_LIMIT_NS + try-lock combo, so
-     * adding this evict doesn't change the per-tick budget shape. If
-     * `bench smp` or `bench stealing` regress under sched_mlp=ON,
-     * suspect the evict's worst-case (2 ms) tail rather than the
-     * typical case. */
-    (void)ga10b_l2_evict_sysmem();
     return (int)bytes_written;
 }
 
@@ -2785,9 +2730,15 @@ int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
      * DRAM. Without this, two consecutive dispatches with different
      * inputs return identical (stale) logits.
      *
-     * This is the third leg of the cross-dispatch coherency tripod;
-     * see the companion comments in `ga10b_bringup_set_input` and the
-     * pre-dispatch site in `ga10b_dispatch_v7_pipeline`.
+     * #722 originally landed a 3-point evict at set_input + pre-launch
+     * + post-launch. The narrowing experiment in #723 (runtime mask
+     * gating each site, ABBA + AAAA on jetson-nano-2) showed
+     * post-launch is necessary AND sufficient: every passing subset
+     * includes this site, every failing subset omits it. The
+     * set_input and pre-launch evicts were redundant — and pre-launch
+     * without set_input wedged the channel mid-AAAA on two boots
+     * (PBDMA stopped seeing submits). Keeping only this site saves
+     * ~2/3 of the per-dispatch evict cost (~80 µs of #722's 120 µs).
      *
      * Surface failures here. A timed-out evict on this site means the
      * read below will return whatever was previously in DRAM at
