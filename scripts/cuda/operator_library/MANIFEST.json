@@ -86,6 +86,13 @@
       "dtype":   "FP16",
       "sass":    "gqa_attn_f16_shader.sass",
       "comment": "Fused Grouped-Query Attention decode step: out[hq, d] = sum_t softmax(Q[hq] · K[t, hq/group] / sqrt(hd))[t] * V[t, hq/group, d]. Three phases in a single kernel per Q head: QK-dot + max-reduce, numerically-stable softmax, attn-weighted V sum. GQA pairing via group = n_head_q / n_head_kv (Qwen2.5-1.5B uses g=6, Llama-2 g=1 = MHA, Mistral g=4, MQA g=n_head_q). Limits: head_dim ≤ 256, seq_len ≤ 4096 (kernel uses ~17 KB shared memory; both caps comfortable for every shipping SLM context length). Mirrors runtime/src/inference/ops_transformer.rs::gqa_decode_step. Validated within 8 ULPs across Qwen2.5-1.5B (seq_len 1..2048), Llama-2 MHA, Mistral GQA, and an MQA-hd64 fixture; worst observed was 1 ULP at every shape, and the seq_len=1 boundary case (softmax of one logit → out = V[0, hkv]) is bit-exact. Source: scripts/cuda/gqa_attn_f16.cu (#540)."
+    },
+    {
+      "op_kind": "EMBEDDING",
+      "tier":    "SIMT",
+      "dtype":   "Q4K",
+      "sass":    "embedding_q4k_f16_shader.sass",
+      "comment": "Token-ID → embedding-row gather over a Q4_K-packed embedding table. The first op of every SLM forward pass; produces the FP16 input vector for the first attention block. One block per super-block in the row, 256 threads per block — same Q4_K decoding path as q4k_dequant_f16 (#699) plus a token_id-keyed row offset and an embedding_length bounds check that handles padded rows (e.g., SmolLM2-135M's 576-element rows stored across 3 256-element super-blocks = 768 dequantized; only 576 written). Mirrors runtime/src/slm/forward.rs::embedding_lookup_any. Validated bit-exactly across Qwen2.5 (1536), Llama-2 (4096), Phi-2 (2560), and the SmolLM2 padded-row boundary. Source: scripts/cuda/embedding_q4k_f16.cu (#540)."
     }
   ],
 
