@@ -101,6 +101,13 @@ static int load_segment(const void *blob, size_t blob_len,
         }
 
         uint64_t va = ph->p_vaddr + off_in_seg;
+        /* TODO(#735): vmm_user_map_page silently replaces an existing
+         * L3 entry, so two PT_LOAD segments whose page-rounded ranges
+         * overlap would leak the first allocation. Safe today because
+         * the only caller (task_create_user_elf) loads the embedded
+         * user_hello.elf, whose linker script enforces disjoint
+         * page-aligned segments. Add an overwrite-rejection path
+         * before accepting filesystem-loaded ELFs. */
         if (vmm_user_map_page(l1_pa, va, (uint64_t)(uintptr_t)page, flags) != 0) {
             pmm_free_pages(page, 1);
             return ELF_ERR_NOMEM;
