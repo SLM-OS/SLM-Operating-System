@@ -179,7 +179,7 @@ Each PR must pass:
 
 - `make test` (QEMU virt at EL1) — confirms QEMU path unaffected (until PR 4 adds the EL0 round-trip).
 - `make kernel PLATFORM=RASPI5` — clean build.
-- `make kernel PLATFORM=JETSON_ORIN_NANO` — clean build (Jetson is EL2 too, the high-VA refactor benefits it equally).
+- `make kernel PLATFORM=JETSON_ORIN_NANO` — clean build as a cross-platform regression check (Jetson is also EL2/VHE).
 - Pi 5 `pi-5-2` boot to shell with `SECONDARY_PREEMPT=ON` — no regression.
 
 PR 2 specific (Option A — L1-clone):
