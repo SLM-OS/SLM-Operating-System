@@ -201,6 +201,18 @@ struct task {
      * invariants. */
     uint64_t user_l1_pa;
 
+    /* Per-task EL0 stack (#697 PR-4).
+     *
+     * `user_stack_top` is the user VA passed to user_task_enter as
+     * SP_EL0 (one past the last addressable byte of the stack page —
+     * standard ARM64 SP convention). `user_stack_phys` is the PA of
+     * the PMM page backing the stack, captured so task_destroy can
+     * free it without re-walking the per-task L1.
+     *
+     * Both fields are zero for kernel-mode tasks. */
+    uint64_t user_stack_top;
+    uint64_t user_stack_phys;
+
     /* Slot generation counter for work-stealing ABA avoidance (#139).
      *
      * Bumped by task_destroy each time this task_table slot is freed,
