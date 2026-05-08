@@ -519,7 +519,9 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
     }
 
     /* Allocate a single 4 KB EL0 stack page from PMM and map it RW
-     * user at USER_STACK_PAGE_VA. Per-task; not shared. */
+     * user at USER_STACK_PAGE_VA. Per-task; not shared. The PMM_OWNED
+     * flag tells vmm_destroy_user_l1 to free this leaf when the task
+     * is destroyed — no explicit user_stack_phys tracking needed. */
     void *user_stack_page = pmm_alloc_pages(1);
     if (!user_stack_page) {
         ERROR("task_create_user: failed to allocate user stack page");
@@ -528,7 +530,7 @@ struct task *task_create_user(const char *name, task_entry_t user_entry,
     }
     if (vmm_user_map_page(user_l1_pa, USER_STACK_PAGE_VA,
                           (uint64_t)(uintptr_t)user_stack_page,
-                          VMM_FLAGS_USER_DATA) != 0) {
+                          VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED) != 0) {
         ERROR("task_create_user: failed to map user stack page");
         pmm_free_pages(user_stack_page, 1);
         vmm_destroy_user_l1(user_l1_pa);
@@ -768,16 +770,15 @@ void task_destroy(struct task *task)
     }
 
 #if !defined(PLATFORM_X86_64)
-    /* Free the per-task L1 + any user-region L2/L3 sub-tables, then
-     * the EL0 stack page that task_create_user allocated. The L1
-     * helper only frees page-table memory, not leaf frames — the
-     * caller (here) owns the user stack and any other backings. */
+    /* Free the per-task L1, all user-region L2/L3 sub-tables, and
+     * any L3 leaf pages flagged VMM_FLAG_PMM_OWNED — that's the EL0
+     * stack page allocated in task_create_user, plus any pages the
+     * task mapped via mmap-style helpers. .text.user pages (kernel-
+     * image PA, not PMM-owned) are left alone. */
     if (user_l1_pa) {
         vmm_destroy_user_l1(user_l1_pa);
     }
-    if (user_stack_phys) {
-        pmm_free_pages((void *)(uintptr_t)user_stack_phys, 1);
-    }
+    (void)user_stack_phys;  /* now reclaimed by vmm_destroy_user_l1 */
 #else
     (void)user_l1_pa;
     (void)user_stack_phys;
