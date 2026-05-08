@@ -98,6 +98,13 @@ static int load_segment(const void *blob, size_t blob_len,
             uint64_t copy_len = remaining < PAGE_SIZE ? remaining : PAGE_SIZE;
             const uint8_t *src = (const uint8_t *)blob + ph->p_offset + off_in_seg;
             memcpy(page, src, copy_len);
+            /* TODO(#736): for executable segments (ph->p_flags & PF_X),
+             * sync D-cache to PoU + invalidate I-cache before EL0
+             * fetches from this page. Cortex-A76's unified L2 closes
+             * the window in practice (3/3 pi-5-2 hardware tests pass),
+             * but the architecture requires the explicit DC CVAU + DSB
+             * ISH + IC IVAU + DSB ISH + ISB sequence. Same gap in
+             * kernel/src/elf.c::elf_load — fix in tandem. */
         }
 
         uint64_t va = ph->p_vaddr + off_in_seg;
