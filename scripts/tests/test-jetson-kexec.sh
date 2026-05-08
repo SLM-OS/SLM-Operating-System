@@ -90,6 +90,10 @@ else
         1 "must run as root" \
         "$SCRIPT" --no-gpu-suspend "$tmpfile"
 
+    assert_fails_with "Non-root invocation with --gpu-suspend is rejected" \
+        1 "must run as root" \
+        "$SCRIPT" --gpu-suspend "$tmpfile"
+
     assert_fails_with "Non-root invocation with --no-usb-hold is rejected" \
         1 "must run as root" \
         "$SCRIPT" --no-usb-hold "$tmpfile"
