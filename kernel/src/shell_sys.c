@@ -4516,12 +4516,6 @@ int cmd_nvgpu(int argc, char *argv[])
                 },
             };
 
-            extern int slm_oplib_dispatch(struct ga10b_bringup *b,
-                                          uint64_t inst_block_phys,
-                                          uint32_t op_kind,
-                                          uint32_t tier,
-                                          uint32_t dtype,
-                                          const struct operator_dispatch_args *args);
             rc = slm_oplib_dispatch(&b, inst_phys,
                                      SLM_GPU_OP_RMSNORM,
                                      SLM_GPU_TIER_SIMT,
@@ -4534,7 +4528,6 @@ int cmd_nvgpu(int argc, char *argv[])
 
             /* Read back output. Cache-invalidate first so the CPU
              * sees what the GPU wrote (not stale L1). */
-            extern void cache_invalidate_range(void *, size_t);
             cache_invalidate_range(out_cpu, out_pages * 4096u);
 
             /* Print the first 8 output halves + a sample from the
