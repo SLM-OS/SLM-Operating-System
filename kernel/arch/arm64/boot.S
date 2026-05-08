@@ -297,8 +297,19 @@ real_start:
     str     w11, [x10]
 #elif defined(PLATFORM_RASPI5)
     /*
-     * Pi 5 enters from firmware in EL2. We must transition to EL1 before
-     * peripheral access will work. This follows Circle's startup64.S approach.
+     * Pi 5 enters from firmware in EL2. SLM-OS stays at EL2 with VHE
+     * (HCR_EL2.E2H=1) so hardware IRQs route through VBAR_EL2 — the
+     * path Linux on Pi 5 uses and Pi firmware actually validates.
+     * NS-EL1 IRQ delivery on BCM2712 / GIC-400 is broken regardless
+     * of which timer PPI is selected (see #672, #683, and
+     * docs/pi5-el2-vhe-plan.md).
+     *
+     * If firmware ever delivers SLM-OS at EL1 (the b.ne branch
+     * below), boot continues at EL1 — VHE redirection doesn't apply
+     * but the kernel still works because all the _EL1 register
+     * writes target the same registers they always have. Hardware
+     * IRQs won't deliver in that case (#683 wedge), but boot reaches
+     * the shell.
      */
 
     /* Check current exception level */
@@ -337,9 +348,9 @@ real_start:
      */
     mrs     x10, CurrentEL
     cmp     x10, #8                 /* EL2 = 0b1000 (CurrentEL bits [3:2] = 2) */
-    b.ne    .Lpi5_in_el1            /* Already in EL1, skip transition */
+    b.ne    .Lpi5_post_el2          /* Already at EL1 — skip EL2/VHE setup */
 
-    /* We're in EL2 - configure and transition to EL1 */
+    /* We're at EL2. Stay at EL2 with VHE enabled. */
 
 #if defined(PI5_IRQ_DIAG)
     /* HCR_EL2 pre-our-write (still in EL2 here, so mrs is legal). */
@@ -347,23 +358,36 @@ real_start:
     str     x16, [x15, #0x00]               /* [+0x00] = HCR_EL2 pre */
 #endif
 
-    /* Disable coprocessor traps to EL2 */
-    mov     x10, #0x33ff
-    msr     cptr_el2, x10
+    /*
+     * Clear the system-register trap mask so that VHE-redirected
+     * `*_EL1` accesses below (sctlr_el1, cpacr_el1) don't trap to
+     * EL2 with no handler installed. Pi 5 firmware enters with
+     * unknown HSTR_EL2 contents; explicit zero is safer than
+     * inheriting the firmware default.
+     */
     msr     hstr_el2, xzr
 
-    /* Enable EL1 access to physical timer and counter registers.
-     * CNTHCTL_EL2: bit 0 (EL1PCTEN) = allow CNTPCT_EL0 reads
-     *              bit 1 (EL1PCEN)   = allow CNTP_* timer access
-     * Without this, any physical timer access from EL1 traps to EL2
-     * and hangs (no EL2 exception handler installed). */
+    /*
+     * CNTHCTL_EL2 — bits 0+1 = 3. Under E2H=0 (current state) the
+     * bits are EL1PCTEN/EL1PCEN; under E2H=1 (post-flip) the same
+     * positions are EL0PCTEN/EL0PCEN. Value 3 is correct under both
+     * layouts, so the write target is unambiguous.
+     *
+     * EMPIRICAL: this pre-flip write is load-bearing. Removing it
+     * silently wedges pi-5-2 with zero UART output (verified by
+     * bisect during PR #685 review-fix iteration). The post-flip
+     * CNTHCTL_EL2 write further down is NOT sufficient on its own.
+     * Root cause not yet identified — possible candidates: code
+     * between here and the E2H flip implicitly reads CNTPCT_EL0 or
+     * CNTP_*_EL0 (compiler-emitted, runtime-support, or speculative
+     * fetches) at a moment where lower-EL access bits matter; or
+     * Pi 5 firmware self-hosts CNTHCTL_EL2 in a state that needs
+     * to be cleared before the GIC config sequence below. Until
+     * the root cause is pinned, do NOT remove this write.
+     */
     mov     x10, #3
     msr     cnthctl_el2, x10
     msr     cntvoff_el2, xzr        /* No virtual offset */
-
-#if defined(PI5_IRQ_DIAG)
-    str     x10, [x15, #0x10]               /* [+0x10] = CNTHCTL_EL2 as written */
-#endif
 
     /*
      * Configure GIC-400 interrupt groups from EL2.
@@ -507,19 +531,38 @@ real_start:
     str     w11, [x10]
     dsb     sy
 
-    /* Enable FP/SIMD at EL1 */
-    mov     x10, #(3 << 20)
-    msr     cpacr_el1, x10
-
-    /* Initialize HCR_EL2 for 64-bit EL1 */
-    mov     x10, #(1 << 31)         /* RW bit = 1 for AArch64 */
+    /*
+     * Enable VHE (Virtualization Host Extensions) and stay at EL2.
+     *
+     * HCR_EL2 bits we set:
+     *   E2H (bit 34): redirect _EL1 register names to _EL2 equivalents
+     *                 with EL1 layout. Lets the existing kernel ABI
+     *                 (SCTLR_EL1, TTBR0_EL1, MAIR_EL1, VBAR_EL1, etc.)
+     *                 keep working from EL2h.
+     *   TGE (bit 27): general exceptions trap to EL2 — important so
+     *                 userspace SVC etc. reaches us at EL2 via
+     *                 VBAR_EL2 + 0x400 (lower-EL AArch64 sync).
+     *   RW  (bit 31): EL1/lower ELs are AArch64 (no AArch32 support).
+     *
+     * Unconditional overwrite (matches the Jetson EL2 block below).
+     * An earlier draft of this PR used a read-modify-write to
+     * preserve firmware bits, but pi-5-1 boots silently wedged with
+     * RMW while pi-5-2 worked, suggesting at least one Pi 5 firmware
+     * variant leaves a problematic bit set (VM=1 stage-2 enable,
+     * IMO/FMO trap bits, ...). Unconditional overwrite ensures the
+     * resulting HCR_EL2 is exactly what the kernel wants — the only
+     * bits we depend on are the three we set.
+     *
+     * ISB after the write is required for E2H to take effect for
+     * register-name redirection (ARM ARM D5.2.1 — change to E2H is
+     * context-synchronizing only after ISB).
+     */
+    ldr     x10, =((1 << 34) | (1 << 31) | (1 << 27))   /* E2H | RW | TGE */
     msr     hcr_el2, x10
+    isb
 
 #if defined(PI5_IRQ_DIAG)
-    /* Snapshot HCR_EL2 after the write. If firmware had IMO/FMO/AMO
-     * bits set and our mov-then-msr didn't clear them explicitly, this
-     * readback will show it. */
-    isb
+    /* Snapshot HCR_EL2 after the write. */
     mrs     x16, hcr_el2
     str     x16, [x15, #0x08]               /* [+0x08] = HCR_EL2 post */
 
@@ -549,42 +592,44 @@ real_start:
     dsb     sy
 #endif
 
-    /* SCTLR_EL1 - safe initial value (from Circle) */
+    /*
+     * CNTHCTL_EL2 — allow lower ELs access to physical timer and
+     * counter. With E2H=1, the layout is EL1 CNTKCTL: bits 0/1 are
+     * EL0PCTEN/EL0PCEN. Programmed post-E2H so the write hits the
+     * register under the EL1-CNTKCTL semantics that apply at runtime.
+     */
+    mov     x10, #3
+    msr     cnthctl_el2, x10
+
+#if defined(PI5_IRQ_DIAG)
+    str     x10, [x15, #0x10]               /* [+0x10] = CNTHCTL_EL2 as written */
+#endif
+
+    /*
+     * Enable FP/SIMD. Under E2H=1, `msr cpacr_el1, x` redirects to
+     * CPTR_EL2 with the EL1 CPACR layout — bits [21:20] = FPEN.
+     */
+    mov     x10, #(3 << 20)
+    msr     cpacr_el1, x10
+
+    /*
+     * SCTLR_EL1 safe initial value (Circle's startup64.S baseline).
+     * Under E2H=1 this redirects to SCTLR_EL2 with the EL1 layout —
+     * MMU/cache disabled here; vmm_init enables them later.
+     */
     mov     x10, #0x0800
     movk    x10, #0x30d0, lsl #16
     msr     sctlr_el1, x10
-
-    /* Set up return to EL1h with interrupts masked */
-    mov     x10, #0x3c4             /* EL1h, DAIF masked */
-    msr     spsr_el2, x10
-    /*
-     * PCIe RC BAR3 → MIP0 routing was configured above (must be done from EL2).
-     * PCIe RC register writes hang from EL1 — the hardware restricts
-     * write access to EL2+. BAR3 routes RP1 MSI-X writes (PCIe addr
-     * 0xFF_FFFFF000) to MIP0 (phys 0x10_00130000) for interrupt delivery.
-     */
-    /*
-     * Enable MSI-X in RP1 PCIe config space (requires EL2 for writes).
-     * EXT_CFG: write bus/devfn to RC+0x9000, data at RC+0x8000+offset.
-     * MSI-X cap is at offset 0xB0. Message Control is at 0xB0+2 (in
-     * the upper 16 bits of the 32-bit word at 0xB0).
-     * Set Enable (bit 15) but NOT Function Mask (bit 14).
-     */
-    /* PCIe INTA approach for RP1 interrupts (no MSI-X/BAR1/MIP needed).
-     * RP1 MSIX_CFG and GIC configuration done from EL1 in uart_irq_init(). */
-
-    adr     x10, .Lpi5_in_el1
-    msr     elr_el2, x10
-    /*
-     * ISB required between ELR_EL2/SPSR_EL2 writes and ERET
-     * (ARM ARM D.1.21.1) — ensures the exception-return context is
-     * observable before the exception return executes.
-     */
     isb
-    eret
 
-.Lpi5_in_el1:
-    /* Now in EL1 - synchronize before continuing */
+    /*
+     * No eret — we stay at EL2h. Fall through to the rest of
+     * primary_cpu, which will install VBAR (writing vbar_el1
+     * redirects to VBAR_EL2), enable MMU via vmm_init, and start
+     * the scheduler.
+     */
+
+.Lpi5_post_el2:
     dsb     sy
     isb
 

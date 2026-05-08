@@ -53,6 +53,7 @@
 #include "debug.h"
 #include "md5.h"
 #include "spinlock.h"
+#include "uart.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -355,6 +356,24 @@ int hailo_control_signal_driver_shutdown(void)
     if (hailo_platform->mb) hailo_platform->mb();
     INFO("hailo: signaled DRIVER_SHUTDOWN to fw");
     return HAILO_OK;
+}
+
+void hailo_control_dump_irq_state(const char *label)
+{
+    if (!hailo_platform || !hailo_platform->read32) return;
+    uint32_t imask = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                            HAILO_BSC_IMASK_HOST);
+    uint32_t istat = hailo_platform->read32(HAILO_BAR_CONFIG,
+                                            HAILO_BCS_ISTATUS_HOST);
+    uint32_t per_src = hailo_platform->read32(
+        HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL);
+    uint32_t per_dst = hailo_platform->read32(
+        HAILO_BAR_CONFIG, HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL);
+    uart_printf("[irq-state] %s: IMASK=0x%08x ISTATUS=0x%08x "
+                "PER_SRC=0x%08x PER_DST=0x%08x\r\n",
+                label ? label : "(none)",
+                (unsigned)imask, (unsigned)istat,
+                (unsigned)per_src, (unsigned)per_dst);
 }
 
 int hailo_control_arm_irq_masks(void)

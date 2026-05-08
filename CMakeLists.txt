@@ -452,6 +452,8 @@ set(KERNEL_SOURCES
     kernel/src/rate_ewma.c
     kernel/src/gpu_consumer.c
     kernel/src/gpu_tier.c
+    kernel/gpu/operator_library.c
+    kernel/gpu/oplib_pool.c
     kernel/src/admin_telemetry.c
     kernel/src/model_engine.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
@@ -754,6 +756,8 @@ set(TEST_SOURCES
     kernel/tests/test_latency_hist.c
     kernel/tests/test_gpu_consumer.c
     kernel/tests/test_gpu_tier.c
+    kernel/tests/test_operator_library.c
+    kernel/tests/test_oplib_pool.c
     kernel/tests/test_gpu_dispatch_breaker.c
     kernel/tests/test_admin_telemetry.c
     kernel/tests/test_telemetry_feed.c
@@ -943,6 +947,8 @@ set(KERNEL_INCLUDES
 # resorting to relative includes.
 if(PLATFORM STREQUAL "X86_64")
     list(APPEND KERNEL_INCLUDES ${CMAKE_SOURCE_DIR}/kernel/arch/x86_64)
+else()
+    list(APPEND KERNEL_INCLUDES ${CMAKE_SOURCE_DIR}/kernel/arch/arm64)
 endif()
 
 # Build kernel ELF — include lwIP when networking is enabled
@@ -1151,6 +1157,58 @@ if(MOCK_CAMERA_FRAME)
     )
     message(STATUS "Embedding mock camera frame from: ${MOCK_CAMERA_FRAME_DIGIT}")
 endif()
+
+# ============================================================================
+# Operator library blob (.incbin — packed (op_kind,tier,dtype) → SASS table)
+# ============================================================================
+#
+# Set -DOPLIB_BLOB=path/to/operator_library.bin to embed a pre-built
+# library produced by `python3 scripts/build-operator-library.py`.
+#
+# When unset (the default), CMake generates a tiny stub (32 B —
+# valid OPLB header with op_count=0) via
+# `scripts/build-operator-library-stub.py`. The kernel-side parser
+# accepts the stub; every dispatch lookup returns NOT_FOUND so callers
+# fall through to CPU. This keeps QEMU and dev builds working without
+# Jetson access while preserving a single embedding code path.
+#
+# The Jetson workflow that produces a real blob is:
+#   1. Build each scripts/cuda/*.cu kernel on Jetson (nvcc -arch=sm_87)
+#   2. Extract SASS via cuobjdump + dd into scripts/cuda/operator_library/
+#   3. Run scripts/build-operator-library.py to pack into a .bin
+#   4. Configure CMake with -DOPLIB_BLOB=<path-to-bin>
+#
+# Steps 1-3 are codified by `scripts/cuda/<op>.cu` header comments.
+set(OPLIB_BLOB "" CACHE FILEPATH
+    "Path to operator_library.bin to embed. Empty = generate a stub.")
+if(OPLIB_BLOB)
+    if(NOT EXISTS "${OPLIB_BLOB}")
+        message(FATAL_ERROR "OPLIB_BLOB set but file does not exist: "
+                            "${OPLIB_BLOB}")
+    endif()
+    set(OPLIB_BLOB_FINAL "${OPLIB_BLOB}")
+    message(STATUS "Embedding operator library from: ${OPLIB_BLOB}")
+else()
+    set(OPLIB_BLOB_FINAL "${CMAKE_BINARY_DIR}/operator_library_stub.bin")
+    add_custom_command(
+        OUTPUT  "${OPLIB_BLOB_FINAL}"
+        COMMAND ${CMAKE_COMMAND} -E echo
+                "[gen] operator_library_stub.bin (op_count=0)"
+        COMMAND python3
+                "${CMAKE_SOURCE_DIR}/scripts/build-operator-library-stub.py"
+                "${OPLIB_BLOB_FINAL}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/scripts/build-operator-library-stub.py"
+        VERBATIM
+    )
+    message(STATUS "Embedding operator library: stub (set OPLIB_BLOB to override)")
+endif()
+target_sources(slmos.elf PRIVATE kernel/src/oplib_embed.S)
+set_source_files_properties(
+    kernel/src/oplib_embed.S
+    PROPERTIES
+    COMPILE_DEFINITIONS "OPLIB_BLOB_PATH=${OPLIB_BLOB_FINAL}"
+    OBJECT_DEPENDS      "${OPLIB_BLOB_FINAL}"
+)
 
 # ============================================================================
 # User .hef (optional .incbin — Phase 8 real-inference deploy path)

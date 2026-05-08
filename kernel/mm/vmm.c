@@ -11,6 +11,7 @@
 #include "uart.h"
 #include "debug.h"
 #include "spinlock.h"
+#include "cache.h"
 #include <stddef.h>
 
 /*
@@ -463,6 +464,124 @@ bool vmm_is_mapped(uint64_t virt)
 
     uint64_t l2_idx = L2_INDEX(virt);
     return (l2[l2_idx] & PTE_TYPE_MASK) != PTE_TYPE_INVALID;
+}
+
+/*
+ * #697 PR-2 — per-task TTBR0 L1 helpers.
+ *
+ * vmm_create_user_l1 allocates a fresh 4 KB L1 page from PMM,
+ * populates L1[0..USER_L1_FIRST-1] with copies of the boot L1's
+ * entries (so kernel mappings remain reachable when this L1 is
+ * loaded into TTBR0_EL1), and zeroes L1[USER_L1_FIRST..USER_L1_LIMIT-1]
+ * (PR-3's task_create_user populates these).
+ *
+ * vmm_destroy_user_l1 walks the user-region entries to free any
+ * per-task L2/L3 sub-tables, then frees the L1 page itself. It must
+ * not touch the kernel-region L1 entries — those point to L2 tables
+ * shared with the boot L1 and other per-task L1s.
+ */
+int vmm_create_user_l1(uint64_t *out_pa)
+{
+    if (!out_pa) {
+        return -1;
+    }
+
+    void *page = pmm_alloc_pages(1);
+    if (!page) {
+        ERROR("vmm_create_user_l1: PMM allocation failed");
+        return -1;
+    }
+
+    /* PMM returns identity-mapped VAs; VA == PA for kernel pages. */
+    uint64_t *user_l1 = (uint64_t *)page;
+
+    /* Mirror kernel L1 entries by COPY. Each copied entry is an L2
+     * table pointer (or 1 GB block descriptor); the pointed-to L2
+     * tables are shared with the boot L1 and other per-task L1s.
+     * Kernel-side mapping changes that go through L2-level edits
+     * propagate to all per-task L1s for free. Direct boot-L1 edits
+     * do NOT propagate — see "per-task L1 mirroring drift" risk in
+     * docs/pi5-el0-execution-plan.md. */
+    for (size_t i = 0; i < USER_L1_FIRST; i++) {
+        user_l1[i] = l1_table[i];
+    }
+
+    /* Zero user-region entries — task_create_user (PR-3) populates. */
+    for (size_t i = USER_L1_FIRST; i < USER_L1_LIMIT; i++) {
+        user_l1[i] = 0;
+    }
+
+    /* The page-table walker reads PAs directly. Clean the L1 page to
+     * Point of Coherency so the data is in DRAM before any future
+     * TTBR0 swap reads from it. Critical on Pi 5 / Jetson where
+     * SMPEN is not set and per-CPU L2 caches are incoherent. */
+    cache_clean_range(user_l1, TABLE_SIZE);
+
+    *out_pa = (uint64_t)(uintptr_t)page;
+    return 0;
+}
+
+void vmm_user_addrspace_switch(uint64_t l1_pa)
+{
+#if !defined(PLATFORM_X86_64)
+    /* Sequence per ARM ARM D8.7.2 / D8.13.4:
+     *   1. msr ttbr0_el1: write the new translation table base.
+     *   2. dsb ishst: ensure the msr is observed before the tlbi.
+     *   3. tlbi vmalle1is: broadcast invalidate all TLB entries (the
+     *      "is" suffix broadcasts to inner-shareable CPUs; SLM-OS
+     *      doesn't use ASID tagging today, so vmalle1 is the right
+     *      scope — invalidates everything mapped via either TTBR).
+     *   4. dsb ish: wait for the tlbi broadcast to complete.
+     *   5. isb: ensure subsequent instruction fetches use the new
+     *      translations rather than speculatively-prefetched stale
+     *      ones from the old TTBR0. */
+    __asm__ volatile(
+        "msr ttbr0_el1, %0\n"
+        "dsb ishst\n"
+        "tlbi vmalle1is\n"
+        "dsb ish\n"
+        "isb\n"
+        :: "r"(l1_pa)
+        : "memory");
+#else
+    (void)l1_pa;
+#endif
+}
+
+void vmm_destroy_user_l1(uint64_t l1_pa)
+{
+    if (l1_pa == 0) {
+        return;
+    }
+
+    uint64_t *user_l1 = (uint64_t *)(uintptr_t)l1_pa;
+
+    /* Walk only the user-region entries. Kernel-region entries point
+     * to shared L2 tables that other per-task L1s and the boot L1
+     * still reference. */
+    for (size_t i = USER_L1_FIRST; i < USER_L1_LIMIT; i++) {
+        uint64_t entry = user_l1[i];
+        if ((entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+            continue;       /* invalid or 1 GB block — nothing to free */
+        }
+
+        uint64_t l2_pa = entry & PTE_ADDR_MASK;
+        uint64_t *l2 = (uint64_t *)(uintptr_t)l2_pa;
+
+        /* L2 entries can be 2 MB blocks (no sub-table to free) or L3
+         * page tables (need to free the L3 page). */
+        for (size_t j = 0; j < ENTRIES_PER_TABLE; j++) {
+            uint64_t l2_entry = l2[j];
+            if ((l2_entry & PTE_TYPE_MASK) == PTE_TYPE_TABLE) {
+                uint64_t l3_pa = l2_entry & PTE_ADDR_MASK;
+                pmm_free_pages((void *)(uintptr_t)l3_pa, 1);
+            }
+        }
+
+        pmm_free_pages((void *)(uintptr_t)l2_pa, 1);
+    }
+
+    pmm_free_pages((void *)(uintptr_t)l1_pa, 1);
 }
 
 /*

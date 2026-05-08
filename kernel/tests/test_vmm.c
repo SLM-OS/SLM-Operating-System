@@ -565,6 +565,108 @@ static void test_public_remap_invalidates_tlb(void)
 }
 
 /* ============================================================================
+ * #697 PR-2: Per-task TTBR0 L1 helpers
+ * ============================================================================ */
+
+/* The boot L1 is file-scoped static in vmm.c. Reach it via
+ * vmm_get_ttbr1() (returns the live TTBR1_EL1 register value). The
+ * register layout is BADDR[47:1] | CnP[0], with optional ASID in bits
+ * [63:48] (TCR_EL1.AS controlled). Mask to bits [47:12] to extract
+ * the table PA — survives a future ASID introduction. Identity-mapped,
+ * so the PA can be cast directly to uint64_t * for table reads. */
+#define BOOT_L1_PA()        (vmm_get_ttbr1() & 0x0000FFFFFFFFF000UL)
+
+/* Test: vmm_create_user_l1 returns a fresh, non-zero L1 PA. */
+static void test_create_user_l1_returns_fresh_pa(void)
+{
+    uint64_t pa1 = 0;
+    int rc = vmm_create_user_l1(&pa1);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_TRUE(pa1 != 0);
+    TEST_ASSERT_EQUAL_UINT64(0, pa1 & 0xFFF);   /* page-aligned */
+
+    uint64_t pa2 = 0;
+    rc = vmm_create_user_l1(&pa2);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_TRUE(pa2 != 0);
+    TEST_ASSERT_TRUE(pa1 != pa2);               /* distinct pages */
+
+    vmm_destroy_user_l1(pa1);
+    vmm_destroy_user_l1(pa2);
+}
+
+/* Test: kernel-region L1 entries (0..USER_L1_FIRST-1) mirror the boot L1.
+ * Read entries from both tables and verify byte-for-byte equality. */
+static void test_create_user_l1_mirrors_kernel_entries(void)
+{
+    uint64_t pa = 0;
+    int rc = vmm_create_user_l1(&pa);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    /* Identity-mapped: PA == VA for kernel pages. */
+    uint64_t *user_l1 = (uint64_t *)(uintptr_t)pa;
+    uint64_t *boot_l1 = (uint64_t *)(uintptr_t)BOOT_L1_PA();
+
+    /* Sample several kernel-region indices, including known mapped ones
+     * (L1[0] is MMIO, L1[1] is RAM on QEMU). */
+    for (size_t i = 0; i < USER_L1_FIRST; i++) {
+        TEST_ASSERT_EQUAL_HEX64(boot_l1[i], user_l1[i]);
+    }
+
+    vmm_destroy_user_l1(pa);
+}
+
+/* Test: user-region L1 entries (USER_L1_FIRST..USER_L1_LIMIT-1) are zero. */
+static void test_create_user_l1_zeros_user_entries(void)
+{
+    uint64_t pa = 0;
+    int rc = vmm_create_user_l1(&pa);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    uint64_t *user_l1 = (uint64_t *)(uintptr_t)pa;
+    for (size_t i = USER_L1_FIRST; i < USER_L1_LIMIT; i++) {
+        TEST_ASSERT_EQUAL_UINT64(0, user_l1[i]);
+    }
+
+    vmm_destroy_user_l1(pa);
+}
+
+/* Test: NULL out_pa returns -1 without allocating. */
+static void test_create_user_l1_rejects_null_out(void)
+{
+    int rc = vmm_create_user_l1(NULL);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+}
+
+/* Test: vmm_destroy_user_l1(0) is a no-op (does not panic, does not
+ * touch PMM). */
+static void test_destroy_user_l1_zero_is_noop(void)
+{
+    /* Should not crash, should not assert. */
+    vmm_destroy_user_l1(0);
+    TEST_PASS();
+}
+
+/* Test: create + destroy returns the L1 page to PMM (free count
+ * recovers). */
+static void test_create_destroy_user_l1_no_leak(void)
+{
+    struct pmm_stats before, after;
+    pmm_get_stats(&before);
+
+    uint64_t pa = 0;
+    int rc = vmm_create_user_l1(&pa);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    vmm_destroy_user_l1(pa);
+
+    pmm_get_stats(&after);
+    /* Allocator may keep some metadata; require free count >= before
+     * (i.e. no net leak). */
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "PMM leaked pages across create+destroy");
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -604,6 +706,14 @@ int test_suite_vmm(void)
 
     /* PCIe BAR3→MIP0 routing (Pi 5 UART IRQ path) */
     RUN_TEST(test_bar3_mip0_routing);
+
+    /* #697 PR-2: per-task TTBR0 L1 helpers */
+    RUN_TEST(test_create_user_l1_returns_fresh_pa);
+    RUN_TEST(test_create_user_l1_mirrors_kernel_entries);
+    RUN_TEST(test_create_user_l1_zeros_user_entries);
+    RUN_TEST(test_create_user_l1_rejects_null_out);
+    RUN_TEST(test_destroy_user_l1_zero_is_noop);
+    RUN_TEST(test_create_destroy_user_l1_no_leak);
 
     return UnityEnd();
 }

@@ -1,8 +1,14 @@
 /*
  * vectors.S - Exception vector table for SLM-OS (ARM64)
  *
- * Handles exceptions and interrupts at EL1.
+ * Handles exceptions at the EL the kernel runs at: EL1h on QEMU,
+ * EL2h with VHE on PLATFORM_RASPI5 / PLATFORM_JETSON_ORIN_NANO
+ * (#683). Vector table layout is the same for both — only the
+ * ELR/SPSR register operands differ (no VHE redirect for those —
+ * see el_regs.h).
  */
+
+#include "el_regs.h"
 
 .section .text
 
@@ -114,9 +120,10 @@ exception_vectors:
     stp     x28, x29, [sp, #224]
     str     x30, [sp, #240]
 
-    /* Save ELR and SPSR */
-    mrs     x0, elr_el1
-    mrs     x1, spsr_el1
+    /* Save ELR and SPSR (KERN_ELR / KERN_SPSR resolve to elr_el2 /
+     * spsr_el2 on PLATFORM_RASPI5, elr_el1 / spsr_el1 elsewhere). */
+    mrs     x0, KERN_ELR
+    mrs     x1, KERN_SPSR
     stp     x0, x1, [sp, #248]
 .endm
 
@@ -157,10 +164,10 @@ exception_vectors:
  * Macro to restore all general-purpose registers.
  */
 .macro restore_regs
-    /* Restore ELR and SPSR */
+    /* Restore ELR and SPSR (see KERN_ELR / KERN_SPSR in el_regs.h). */
     ldp     x0, x1, [sp, #248]
-    msr     elr_el1, x0
-    msr     spsr_el1, x1
+    msr     KERN_ELR, x0
+    msr     KERN_SPSR, x1
 
     ldp     x0, x1, [sp, #0]
     ldp     x2, x3, [sp, #16]
@@ -219,6 +226,7 @@ exception_vectors:
  * Hang - unhandled exceptions
  */
 hang:
+    STAGE25_TRACE_CHAR 'h'              /* Trace: hang vector reached (#672 probe) */
     wfi
     b       hang
 
@@ -236,6 +244,7 @@ el1_serror_sp0:
  * Could be: SVC, data abort, instruction abort, etc.
  */
 el1_sync:
+    STAGE25_TRACE_CHAR 'S'              /* Trace: sync exception (#672 probe) */
     DIAG_BUMP_VEC 0x00
     save_regs
     mov     x0, sp              /* Pass trap frame pointer */
@@ -278,6 +287,7 @@ el1_irq:
  * records the IRQ number, then EOIs.
  */
 el1_fiq:
+    STAGE25_TRACE_CHAR 'F'              /* Trace: FIQ entered (#672 probe) */
     DIAG_BUMP_VEC 0x10
     save_regs
     mov     x0, sp
@@ -297,6 +307,7 @@ el1_fiq:
  * EL1 SError (kernel)
  */
 el1_serror:
+    STAGE25_TRACE_CHAR 'X'              /* Trace: SError (#672 probe) */
     DIAG_BUMP_VEC 0x18
     save_regs
     mov     x0, sp
@@ -313,6 +324,10 @@ el1_serror:
  * EL0 PC and PSTATE), and restore_regs + eret returns to EL0.
  */
 
+/* Exposed for the #683 PR-5 vector-layout regression test in
+ * kernel/tests/test_syscall.c — the test decodes the `b el0_sync`
+ * branch at exception_vectors + 0x400 and asserts the target. */
+.global el0_sync
 el0_sync:
     DIAG_BUMP_VEC 0x00
     save_regs
@@ -479,8 +494,8 @@ resched_trampoline:
 
     /* Restore orig_elr/orig_spsr into the system registers. */
     ldp     x3, x4, [sp, #168]
-    msr     elr_el1, x3
-    msr     spsr_el1, x4
+    msr     KERN_ELR, x3
+    msr     KERN_SPSR, x4
 
     /* Restore task's GPRs and unwind the trampoline frame. */
     ldp     x0, x1,   [sp, #0]

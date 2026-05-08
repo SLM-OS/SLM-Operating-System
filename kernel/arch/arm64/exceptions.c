@@ -17,9 +17,19 @@
 #include "syscall.h"
 #include <stdint.h>
 
-/* Timer IRQ numbers */
-#define PHYS_TIMER_IRQ  30  /* Physical timer PPI 14 */
-#define VIRT_TIMER_IRQ  27  /* Virtual timer PPI 11 */
+/* Timer IRQ numbers — Generic Timer PPIs.
+ *
+ * Which one a given platform uses depends on the EL the kernel runs at:
+ *   - HYP_PHYS_TIMER_IRQ (PPI 26 / CNTHP) — Pi 5 at EL2/VHE (#683).
+ *   - VIRT_TIMER_IRQ     (PPI 27 / CNTV)  — historical EL1 fallback.
+ *   - PHYS_TIMER_IRQ     (PPI 30 / CNTP)  — QEMU + Jetson + x86.
+ *
+ * platform.h pins TIMER_IRQ to one of these per platform; this dispatch
+ * accepts all three so the same IRQ vector handles every case.
+ */
+#define HYP_PHYS_TIMER_IRQ  26  /* Hyp Physical Timer PPI 10 (CNTHP) */
+#define VIRT_TIMER_IRQ      27  /* Virtual timer PPI 11 (CNTV) */
+#define PHYS_TIMER_IRQ      30  /* Non-secure physical timer PPI 14 (CNTP) */
 
 /*
  * Decode exception class from ESR_EL1
@@ -333,8 +343,9 @@ void el1_irq_handler(void)
 
     /* Dispatch based on IRQ number */
     switch (irq) {
-    case PHYS_TIMER_IRQ:
-    case VIRT_TIMER_IRQ: {
+    case HYP_PHYS_TIMER_IRQ:
+    case VIRT_TIMER_IRQ:
+    case PHYS_TIMER_IRQ: {
         /*
          * For timer interrupt, we must signal EOI BEFORE calling the handler
          * because timer_handler() -> scheduler_tick() -> schedule() may
@@ -529,6 +540,13 @@ static void handle_user_fault(struct trap_frame *tf, uint64_t esr,
  * Dispatches SVC (syscalls) to the syscall table.
  * All other synchronous exceptions (data abort, instruction abort,
  * illegal instruction, etc.) terminate the component.
+ *
+ * #683 PR-5 (EL2/VHE): with the kernel at EL2h+TGE on Pi 5, EL0 sync
+ * exceptions take the lower-EL AArch64 sync vector at VBAR_EL2 + 0x400
+ * — the same `el0_sync` slot used at EL1h on QEMU. The `mrs *_el1`
+ * accesses below redirect to `*_EL2` under HCR_EL2.E2H=1 (ESR/FAR are
+ * on the VHE redirect list per ARM ARM D13.2.1), so this handler is
+ * VHE-correct without source changes.
  */
 void el0_sync_handler(struct trap_frame *tf)
 {

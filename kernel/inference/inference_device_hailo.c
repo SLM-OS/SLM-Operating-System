@@ -210,6 +210,47 @@ static const char *d2h_event_name(uint32_t event_id)
     }
 }
 
+/* Decode a bit position in CPU_ECC's `memory_bitmap` to a block name.
+ * Mapping is CONTROL_PROTOCOL__bist_top_mem_block_t in
+ * ../slmos-reference-cache/hailo/hailort-control-protocol.h:1222-1252; CPU_ECC events use the
+ * same enum (confirmed by hailort-control.cpp:test_chip_memories
+ * iterating 0..NUM_MEM_BLOCKS over CONTROL_PROTOCOL__BIST_TOP_WHITELIST).
+ * The trailing _N suffix in the source enum is the physical block
+ * index in the SoC; the bit position is the enum ordinal. */
+static const char *top_mem_block_name(unsigned bit)
+{
+    switch (bit) {
+    case 0:  return "CRYPTO_1";
+    case 1:  return "L4_0_2";
+    case 2:  return "L4_1_3";
+    case 3:  return "L4_2_4";
+    case 4:  return "L4_3_5";
+    case 5:  return "SAGE1_CPU_6";
+    case 6:  return "SAGE1_CPU_FAST_BUS_7";
+    case 7:  return "SAGE1_DEBUG_8";
+    case 8:  return "SAGE1_ETH_9";
+    case 9:  return "SAGE1_FLASH_10";
+    case 10: return "SAGE1_H264_11";
+    case 11: return "SAGE1_ISP_12";
+    case 12: return "SAGE1_MIPI_RX_13";
+    case 13: return "SAGE1_MIPI_TX_14";
+    case 14: return "SAGE1_PCIE_15";
+    case 15: return "SAGE1_SDIO_16";
+    case 16: return "SAGE1_SOFTMAX_17";
+    case 17: return "SAGE1_USB_18";
+    case 18: return "SAGE1_19";
+    case 19: return "SUB_SERVER0_20";
+    case 20: return "SUB_SERVER1_21";
+    case 21: return "SUB_SERVER2_22";
+    case 22: return "SUB_SERVER3_23";
+    case 23: return "SUB_SERVER4_24";
+    case 24: return "SUB_SERVER5_25";
+    case 25: return "SUB_SERVER6_26";
+    case 26: return "SUB_SERVER7_27";
+    default: return "RESERVED";
+    }
+}
+
 /* ACK the pending notification by writing 0 to the is_buffer_in_use +
  * buffer_len u32 at offset 0. Fw is then free to overwrite the buffer
  * with the next queued event. */
@@ -259,19 +300,83 @@ static bool hailo_fw_dump_d2h_notification_once(void)
                 d2h_event_name(hdr[4]),
                 (unsigned)hdr[5], (unsigned)hdr[6]);
 
-    /* event_id 12 = CONTEXT_SWITCH_RUN_TIME_ERROR. Body: {exit_status,
-     * batch_index, context_index (u16), action_index (u16),
-     * application_index (u8)}. Packed, 13 bytes total. Read 16 B of
-     * payload and decode the first few fields. */
+    /* Read up to 16 B of body. Only the first `payload_len` bytes are
+     * the actual event payload; everything past that is stale fw-side
+     * notification-buffer contents from prior events. We still read 16
+     * to keep the bar4 alignment + length predictable, but we cap the
+     * printed dword count to ceil(payload_len/4) so readers don't get
+     * misled by trailing garbage (the bytes that vary per session
+     * because they're whatever the previous notification left behind).
+     */
     if (buf_len > sizeof(hdr)) {
         uint32_t body[4] = { 0 };
         hailo_platform->bar4_read(HAILO_D2H_NOTIFICATION_OFFSET + 4u
                                       + sizeof(hdr),
                                   body, sizeof(body));
-        uart_printf("[d2h] body[0..3]: 0x%08x 0x%08x 0x%08x 0x%08x\r\n",
-                    (unsigned)body[0], (unsigned)body[1],
-                    (unsigned)body[2], (unsigned)body[3]);
-        if (hdr[4] == 12) {   /* CONTEXT_SWITCH_RUN_TIME_ERROR */
+        uint32_t payload_len  = hdr[6];
+        uint32_t payload_dwords = (payload_len + 3u) / 4u;
+        if (payload_dwords > 4u) payload_dwords = 4u;
+        switch (payload_dwords) {
+        case 0:
+            /* Header claims zero payload; nothing to print but still
+             * reachable since buf_len > 28 (header + alignment slack). */
+            break;
+        case 1:
+            uart_printf("[d2h] body: 0x%08x (payload_len=%u)\r\n",
+                        (unsigned)body[0], (unsigned)payload_len);
+            break;
+        case 2:
+            uart_printf("[d2h] body: 0x%08x 0x%08x (payload_len=%u)\r\n",
+                        (unsigned)body[0], (unsigned)body[1],
+                        (unsigned)payload_len);
+            break;
+        case 3:
+            uart_printf("[d2h] body: 0x%08x 0x%08x 0x%08x "
+                        "(payload_len=%u)\r\n",
+                        (unsigned)body[0], (unsigned)body[1],
+                        (unsigned)body[2], (unsigned)payload_len);
+            break;
+        default:
+            uart_printf("[d2h] body: 0x%08x 0x%08x 0x%08x 0x%08x "
+                        "(payload_len=%u)\r\n",
+                        (unsigned)body[0], (unsigned)body[1],
+                        (unsigned)body[2], (unsigned)body[3],
+                        (unsigned)payload_len);
+            break;
+        }
+
+        if (hdr[4] == 7 || hdr[4] == 8) {
+            /* CPU_ECC_ERROR / CPU_ECC_FATAL — payload is one u32
+             * memory_bitmap. Decode the set bits to block names.
+             * On AI HAT+ on Pi 5 with v4.23 fw the persistently-
+             * observed value is 0x00001000 = bit 12 = SAGE1_MIPI_RX_13,
+             * which is unused on this configuration (no camera) — fw's
+             * boot-time ECC scrub flags it but it's not on the
+             * inference data path (those are SAGE1_PCIE / SUB_SERVER*).
+             * If a future trace shows OTHER bits set the decoder makes
+             * the block immediately legible without cross-referencing
+             * control-protocol.h. */
+            uint32_t bitmap = body[0];
+            uart_printf("[d2h] CPU_ECC: memory_bitmap=0x%08x",
+                        (unsigned)bitmap);
+            if (bitmap == 0) {
+                uart_printf(" (no blocks flagged)\r\n");
+            } else {
+                uart_printf(" blocks=");
+                bool first = true;
+                for (unsigned bit = 0; bit < 32u; bit++) {
+                    if (bitmap & (1u << bit)) {
+                        uart_printf("%s%s", first ? "" : ",",
+                                    top_mem_block_name(bit));
+                        first = false;
+                    }
+                }
+                uart_printf("\r\n");
+            }
+        } else if (hdr[4] == 12) {
+            /* CONTEXT_SWITCH_RUN_TIME_ERROR. Body: {exit_status,
+             * batch_index, context_index (u16), action_index (u16),
+             * application_index (u8)}. Packed, 13 bytes total. */
             uint32_t exit_status  = body[0];
             uint32_t batch_index  = body[1];
             uint16_t context_idx  = (uint16_t)(body[2] & 0xFFFFu);
@@ -1492,6 +1597,13 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #ifdef HAILO_WIRE_DEBUG
     uart_printf("[bisect] post CCW DMA pull:\r\n");
     hailo_fw_drain_d2h_notifications(2);
+
+    /* #682 hypothesis-1: read back per-channel IRQ-enable registers
+     * after fw has executed ACTIVATE_BOUNDARY_INPUT/OUTPUT and the
+     * full PRELIMINARY arming sequence. Compare to the post-boot-arm
+     * baseline — if any of the 32 SRC/DST bits flipped, fw is
+     * clearing them on us. */
+    hailo_control_dump_irq_state("post-load");
 #endif
     cs_load_stage_set(71);
     INFO("hailo backend: context-switch load OK (CCW=%u B, IN=%u B, OUT=%u B)",
@@ -1957,6 +2069,22 @@ static int hailo_backend_run(struct inference_device *dev,
      * data lands per input we submit. wait_proc(target=1) is the
      * right downstream poll. */
 
+#ifdef HAILO_WIRE_DEBUG
+    /* #682 hypothesis-1 (disconfirmed 2026-05-07): readback of
+     * PER_SRC/PER_DST/ISTATUS at boot-arm, post-load, pre-IN-submit
+     * showed fw sets PER_SRC bits 0/1 for CFG channels but never
+     * sets bit 2 for IN ch=2 or PER_DST bit 16 for OUT ch=16.
+     * A fix-attempt that wrote (1<<in_channel) into PER_SRC via RMW
+     * found the registers behave as write-1-to-clear interrupt status:
+     * the write returned PER_SRC=0 (clobbered fw's bits 0/1) and also
+     * cleared ISTATUS bit 0. So PER_SRC/PER_DST are "channels with an
+     * IRQ pending" status, not host-settable enables — boundary IN
+     * ch=2 not appearing means fw never raised an IRQ for it, which
+     * means fw never tried to fetch; root cause is upstream of the
+     * channel-arming/IRQ layer. */
+    hailo_control_dump_irq_state("pre-IN-submit");
+#endif
+
     int rc;
     uint64_t t_in_submit  = timer_get_count();
     rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
@@ -1978,6 +2106,12 @@ static int hailo_backend_run(struct inference_device *dev,
          * which num_proc==0 alone can't distinguish. */
         hailo_vdma_dump_desc_status(&slot->boundary_in_list, "IN", 8);
         hailo_vdma_dump_desc_status(&slot->boundary_out_list, "OUT", 8);
+#ifdef HAILO_WIRE_DEBUG
+        /* #682 hypothesis-1: post-timeout register read-back. If bits
+         * cleared during the 500 ms poll window, fw is dynamically
+         * disabling them — completes the four-point trail. */
+        hailo_control_dump_irq_state("post-timeout");
+#endif
         /* #253: dump fw debug log + D2H notification buffer on submit
          * failure. The D2H notification contains CONTEXT_SWITCH_RUN_TIME_ERROR
          * events that carry {exit_status, context_idx, action_idx} — exactly

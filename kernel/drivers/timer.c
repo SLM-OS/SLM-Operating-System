@@ -13,13 +13,32 @@
 #include "platform.h"
 
 /*
- * Timer selection: All platforms use the non-secure physical timer (CNTP).
- * Pi 5 previously used virtual timer (CNTV, IRQ 27) but Linux and Circle
- * both use the physical timer (IRQ 30) at EL1. CNTHCTL_EL2 must have
- * EL1PCEN set (done in boot.S) for EL1 access to CNTP registers.
+ * Timer selection.
+ *
+ * All ARM64 platforms now drive the timer through the CNTP_*_EL0
+ * register names with the CNTPCT_EL0 counter:
+ *
+ *   - QEMU + Jetson + x86: CNTP_*_EL0 / CNTPCT_EL0 are the
+ *     non-secure physical timer registers (CNTP, PPI 30).
+ *     CNTHCTL_EL2.EL1PCEN is set in boot.S so EL1 can reach them.
+ *   - Pi 5 (#683): SLM-OS boots at EL2 with VHE (HCR_EL2.E2H=1).
+ *     Under E2H=1, accesses to the CNTP_*_EL0 register names are
+ *     silently redirected by hardware to CNTHP_*_EL2 — the Hyp
+ *     Physical Timer's control / cval / tval registers — and the
+ *     timer interrupt is delivered on PPI 26 instead of PPI 30.
+ *     This is the same path Linux takes via `arch_timer_select_ppi()`
+ *     when `is_kernel_in_hyp_mode()` is true. CNTPCT_EL0 itself is
+ *     not redirected (the same physical counter feeds CNTP and
+ *     CNTHP), so timer_get_count and coop_preempt_maybe_tick keep
+ *     working unchanged.
+ *
+ * The Pi 5 PPI 30 → NS-EL1 routing was broken at the firmware level
+ * (#672 / #134); switching to PPI 26 (which TF-A / firmware route to
+ * the EL2 vector via VBAR_EL2) is the production fix that #683 is
+ * delivering. The platform-specific PPI number is TIMER_IRQ in
+ * platform.h.
  */
-#define USE_VIRTUAL_TIMER   0
-#define ACTUAL_TIMER_IRQ    TIMER_IRQ  /* Physical timer IRQ 30 */
+#define ACTUAL_TIMER_IRQ    TIMER_IRQ
 
 /* Timer interval (computed at init) */
 static uint64_t timer_interval;
@@ -38,48 +57,18 @@ static inline uint64_t read_cntpct(void)
     return val;
 }
 
-#if USE_VIRTUAL_TIMER
-static inline uint64_t read_cntp_ctl(void)
-{
-    uint64_t val;
-    __asm__ volatile("mrs %0, cntv_ctl_el0" : "=r"(val));
-    return val;
-}
-
-static inline void write_cntp_ctl(uint64_t val)
-{
-    __asm__ volatile("msr cntv_ctl_el0, %0" :: "r"(val));
-}
-
-static inline void write_cntp_tval(int64_t val)
-{
-    __asm__ volatile("msr cntv_tval_el0, %0" :: "r"(val));
-}
-#else
-static inline uint64_t read_cntp_ctl(void)
-{
-    uint64_t val;
-    __asm__ volatile("mrs %0, cntp_ctl_el0" : "=r"(val));
-    return val;
-}
-
 static inline void write_cntp_ctl(uint64_t val)
 {
     __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"(val));
-}
-
-static inline void write_cntp_cval(uint64_t val)
-{
-    __asm__ volatile("msr cntp_cval_el0, %0" :: "r"(val));
 }
 
 static inline void write_cntp_tval(int64_t val)
 {
     __asm__ volatile("msr cntp_tval_el0, %0" :: "r"(val));
 }
-#endif
 
-/* Timer control bits (same for CNTP and CNTV) */
+/* Timer control bits (CNTP_CTL_EL0 — also the layout of CNTHP_CTL_EL2
+ * that VHE redirects accesses to under HCR_EL2.E2H=1) */
 #define CNTP_CTL_ENABLE     (1 << 0)
 #define CNTP_CTL_IMASK      (1 << 1)
 #define CNTP_CTL_ISTATUS    (1 << 2)
@@ -106,8 +95,8 @@ void timer_init(void)
     gic_set_priority(ACTUAL_TIMER_IRQ, GIC_PRIORITY_DEFAULT);
     gic_enable_irq(ACTUAL_TIMER_IRQ);
 
-    INFO("Timer initialized (IRQ %d, %s, not started)",
-         ACTUAL_TIMER_IRQ, USE_VIRTUAL_TIMER ? "virtual" : "physical");
+    INFO("Timer initialized (IRQ %d, CNTP_*_EL0, not started)",
+         ACTUAL_TIMER_IRQ);
 }
 
 /*
@@ -187,7 +176,9 @@ void timer_percpu_init(void)
 
     /*
      * Enable timer interrupt in GIC for this CPU.
-     * PPI 30 (physical timer) is per-CPU, so each core must enable it.
+     * The Generic Timer PPIs (26/27/30) are all per-CPU, so each
+     * core must enable its own copy of the IRQ in the GIC distributor /
+     * redistributor.
      */
     gic_set_priority(ACTUAL_TIMER_IRQ, GIC_PRIORITY_DEFAULT);
     gic_enable_irq(ACTUAL_TIMER_IRQ);

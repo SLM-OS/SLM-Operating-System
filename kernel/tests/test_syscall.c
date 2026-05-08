@@ -16,6 +16,7 @@
 #include "syscall.h"
 #include "task.h"
 #include "string.h"
+#include "pmm.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -322,7 +323,8 @@ static void test_syscall_touch_block_invalid_handle(void)
  * ============================================================================ */
 
 #if !defined(PLATFORM_X86_64)
-/* Test: task_create_user sets is_user flag */
+/* Test: task_create_user sets is_user flag and allocates a per-task L1
+ * (#697 PR-3 — user_l1_pa is populated at create time, freed at destroy). */
 static void test_task_create_user_sets_flag(void)
 {
     /* Create a dummy user task (it won't actually run at EL0) */
@@ -332,9 +334,97 @@ static void test_task_create_user_sets_flag(void)
     TEST_ASSERT_EQUAL_UINT8(1, t->is_user);
     TEST_ASSERT_NOT_NULL((void *)(uintptr_t)t->user_entry);
 
+    /* PR-3: user_l1_pa is non-zero and page-aligned. */
+    TEST_ASSERT_TRUE(t->user_l1_pa != 0);
+    TEST_ASSERT_EQUAL_UINT64(0, t->user_l1_pa & 0xFFF);
+
     /* Clean up — mark as terminated so it doesn't run */
     t->state = TASK_TERMINATED;
     task_destroy(t);
+}
+
+/* Test (#697 PR-3): a kernel-mode task (created via task_create) leaves
+ * user_l1_pa == 0. The schedule() TTBR0-swap path keys off this — kernel
+ * tasks must not trigger an address-space switch. */
+static void test_task_create_kernel_leaves_user_l1_zero(void)
+{
+    extern void task_exit(void);
+    struct task *t = task_create("test_kernel_l1", (task_entry_t)task_exit, NULL);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_UINT8(0, t->is_user);
+    TEST_ASSERT_EQUAL_UINT64(0, t->user_l1_pa);
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+
+/* Test (#697 PR-3): task_destroy returns the per-task L1 page to PMM.
+ * Asserts the buddy free count after destroy is at least the count
+ * before create — same shape as test_create_destroy_user_l1_no_leak in
+ * test_vmm.c, but exercising the lifecycle end-to-end through
+ * task_create_user / task_destroy rather than the raw vmm helpers. */
+static void test_task_destroy_frees_user_l1(void)
+{
+    extern void task_exit(void);
+    struct pmm_stats before, after;
+    pmm_get_stats(&before);
+
+    struct task *t = task_create_user("destroy_l1", (task_entry_t)task_exit, NULL, 4);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_TRUE(t->user_l1_pa != 0);
+
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+
+    pmm_get_stats(&after);
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "task_destroy leaked the per-task L1 page");
+}
+#endif
+
+#if !defined(PLATFORM_X86_64)
+/*
+ * Test (#683 PR-5): the lower-EL AArch64 sync slot at offset 0x400
+ * inside the ARM64 vector table dispatches to `el0_sync`.
+ *
+ * Why this matters: with the kernel at EL2h+TGE (Pi 5 after #683
+ * PR-2), EL0 SVC exceptions are taken to VBAR_EL2 + 0x400. The
+ * vector table is shared between QEMU (EL1h) and Pi 5/Jetson (EL2h)
+ * because writes to VBAR_EL1 redirect to VBAR_EL2 under VHE; the
+ * same single block of code at `exception_vectors` services both ELs.
+ *
+ * This test decodes the AArch64 unconditional-branch instruction at
+ * the slot and asserts it targets `el0_sync` — proving the SVC path
+ * lands at the C handler from any kernel EL.
+ *
+ * AArch64 B encoding (ARM ARM C6.2.34): bits[31:26] = 000101,
+ * bits[25:0] = signed imm26 (offset-by-4 in word units).
+ */
+/* Declared as char[] symbols so we can take their address as a data
+ * pointer without converting a function pointer to `void *` (ISO C
+ * forbids that and the kernel build is `-Wpedantic -Werror`). The
+ * actual definitions are in vectors.S — labels, no type info. */
+extern char exception_vectors[];
+extern char el0_sync[];
+
+static void test_lower_el_sync_vector_dispatches_to_el0_sync(void)
+{
+    /* Vector table requires 2 KB alignment. */
+    TEST_ASSERT_EQUAL_UINT64(0,
+        (uint64_t)(uintptr_t)exception_vectors & 0x7FF);
+
+    uint32_t *slot = (uint32_t *)((uintptr_t)exception_vectors + 0x400);
+    uint32_t insn = *slot;
+
+    /* `B <label>` opcode top-6 bits = 0b000101 → 0x14000000. */
+    TEST_ASSERT_EQUAL_HEX32(0x14000000, insn & 0xFC000000);
+
+    /* Sign-extend the 26-bit immediate, scale by 4, add to slot PC. */
+    int32_t imm26 = (int32_t)(insn << 6) >> 6;          /* sign-extend */
+    uintptr_t target = (uintptr_t)slot + ((int64_t)imm26 << 2);
+
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)(uintptr_t)el0_sync,
+                             (uint64_t)target);
 }
 #endif
 
@@ -374,6 +464,11 @@ int test_suite_syscall(void)
 #if !defined(PLATFORM_X86_64)
     /* User task creation */
     RUN_TEST(test_task_create_user_sets_flag);
+    RUN_TEST(test_task_create_kernel_leaves_user_l1_zero);
+    RUN_TEST(test_task_destroy_frees_user_l1);
+
+    /* #683 PR-5: vector layout for EL0 → EL2 SVC */
+    RUN_TEST(test_lower_el_sync_vector_dispatches_to_el0_sync);
 #endif
 
     return UnityEnd();

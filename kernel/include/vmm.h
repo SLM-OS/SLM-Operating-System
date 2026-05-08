@@ -45,6 +45,26 @@
 #define KVA_TO_PA(va)       ((va) & ~KERNEL_VA_BASE)
 
 /*
+ * Per-task user VA range (#697 PR-2).
+ *
+ * SLM-OS keeps the kernel running at low VA in a shared TTBR0=TTBR1
+ * mapping. Per-task L1 tables (allocated by vmm_create_user_l1)
+ * mirror the boot L1's entries for L1[0..USER_L1_FIRST-1] (kernel
+ * mappings, shared via L2-table pointer copies) and have their own
+ * entries for L1[USER_L1_FIRST..USER_L1_LIMIT-1] (per-task user
+ * mappings, populated by task_create_user in PR-3).
+ *
+ * USER_L1_FIRST = 256 was chosen because every current platform's
+ * kernel mappings stay below L1[256] (Pi 5 uses up to L1[124] for
+ * MMIO; QEMU/Jetson use the low 8). 256 GB of user VA is far more
+ * than any user task needs.
+ */
+#define USER_L1_FIRST       256                  /* First L1 index for user mappings */
+#define USER_L1_LIMIT       512                  /* One past last L1 index for user */
+#define USER_VA_BASE        ((uint64_t)USER_L1_FIRST * L1_BLOCK_SIZE)
+#define USER_VA_LIMIT       ((uint64_t)USER_L1_LIMIT * L1_BLOCK_SIZE)
+
+/*
  * ==========================================================================
  * Page Table Entry Definitions
  * ==========================================================================
@@ -264,6 +284,89 @@ uint64_t vmm_virt_to_phys(uint64_t virt);
  * Returns true if mapped, false otherwise.
  */
 bool vmm_is_mapped(uint64_t virt);
+
+/*
+ * Allocate and initialise a per-task L1 table for TTBR0_EL1 (#697 PR-2).
+ *
+ * The new L1 mirrors the boot L1's entries for L1[0..USER_L1_FIRST-1]
+ * (kernel mappings — pointers to shared L2 tables) and zeroes
+ * L1[USER_L1_FIRST..USER_L1_LIMIT-1] (user mappings — populated by
+ * task_create_user in PR-3).
+ *
+ * Mirroring is done at L1 granularity by COPYING L1 entries (which
+ * contain L2 table pointers) — the underlying L2 tables are shared
+ * with the kernel boot L1 and other per-task L1s. This means any
+ * kernel-side mapping change must go through L2-level edits to
+ * propagate to existing per-task L1s; direct boot-L1 edits do NOT
+ * propagate. This invariant is documented in
+ * docs/pi5-el0-execution-plan.md "Risks" section.
+ *
+ * Concurrency precondition: caller must hold the kernel's VMM
+ * serialisation contract. SLM-OS does not maintain a vmm-wide lock;
+ * the existing convention is that mutations of l1_table happen
+ * single-threaded (boot, or under per-subsystem locks for runtime
+ * mappings like PCIe BAR setup). vmm_create_user_l1 reads l1_table,
+ * so it inherits that contract — torn reads if a concurrent writer
+ * mutates l1_table mid-copy. PR-3 callers must respect this when
+ * deciding when to call task_create_user.
+ *
+ * @out_pa: Output — physical address of the new L1 page (caller-owned).
+ *          Pass to vmm_destroy_user_l1 when done.
+ *
+ * Returns 0 on success, -1 on failure (PMM exhausted or NULL out_pa).
+ */
+int vmm_create_user_l1(uint64_t *out_pa);
+
+/*
+ * Free a per-task L1 table previously returned by vmm_create_user_l1.
+ *
+ * Frees only the page-table STRUCTURE — the L1 page itself plus any
+ * per-task L2 / L3 sub-tables hanging off user-region L1 entries
+ * (USER_L1_FIRST..USER_L1_LIMIT-1). Kernel-region L1 entries point
+ * to shared L2s and are NOT freed.
+ *
+ * Caller responsibility: free user backing pages BEFORE calling this.
+ * The data pages mapped by 2 MB block / 4 KB page descriptors are
+ * NOT freed automatically — destroy doesn't know whether a backing
+ * PA is a PMM-allocated user page (needs free) or an alias of a
+ * kernel page (e.g. .text.user in PR-4, must NOT be freed). The
+ * caller (PR-3+ task_destroy path) tracks page lifetime separately
+ * and frees backings before invoking this.
+ *
+ * Safe to call with l1_pa == 0 (no-op).
+ *
+ * @l1_pa: Physical address of the L1 page to free.
+ */
+void vmm_destroy_user_l1(uint64_t l1_pa);
+
+/*
+ * Switch the EL0 address space (TTBR0_EL1) to a per-task L1 table
+ * (#697 PR-3).
+ *
+ * Writes l1_pa into TTBR0_EL1 and invalidates the TLB so subsequent
+ * fetches/loads use the new mappings. Safe to call when l1_pa is the
+ * same as the current TTBR0 (still emits a barrier sequence; harmless
+ * extra cost, no correctness impact).
+ *
+ * Kernel mappings: every per-task L1 mirrors the boot L1's kernel
+ * entries (vmm_create_user_l1 contract), so the kernel's own
+ * translations at low VA remain valid through the swap. The TLB
+ * flush is full (`tlbi vmalle1is`) for simplicity — kernel-region
+ * translations re-walk to the same PA via the mirrored L1, so the
+ * extra cost is just the second walk, not a correctness issue.
+ *
+ * Concurrency: TTBR0_EL1 is per-CPU, so no cross-CPU race on the
+ * register itself. `tlbi vmalle1is` broadcasts to all CPUs in the
+ * inner-shareable domain — the broadcast invalidates other CPUs'
+ * TLBs for THIS CPU's TTBR0_EL1, which is harmless (entries from
+ * the prior TTBR0 are no longer reachable). The caller is expected
+ * to hold IRQs disabled across this + the immediately-following
+ * switch_to (today: scheduler holds rq_lock_irqsave through both).
+ *
+ * @l1_pa: PA of the per-task L1 table (from vmm_create_user_l1).
+ *         Must be 4 KB aligned. Passing 0 is undefined.
+ */
+void vmm_user_addrspace_switch(uint64_t l1_pa);
 
 /*
  * ==========================================================================

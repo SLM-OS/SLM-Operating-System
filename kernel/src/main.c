@@ -32,6 +32,7 @@
 #include "blob_autoload.h"
 #include "boot_media.h"
 #include "help.h"
+#include "oplib_pool.h"
 #if defined(ENABLE_NETWORKING)
 #include "net.h"
 #include "net_driver.h"
@@ -269,12 +270,28 @@ void kernel_main(void *dtb)
     uart_puts("========================================\n\n");
 
     INFO("Boot successful");
-#if defined(PLATFORM_JETSON_ORIN_NANO)
-    INFO("Running at EL2 (VHE) on %s", PLATFORM_NAME);
-#elif defined(PLATFORM_X86_64)
+#if defined(PLATFORM_X86_64)
     INFO("Running in Ring 0 on %s", PLATFORM_NAME);
 #else
-    INFO("Running at EL1 on %s", PLATFORM_NAME);
+    {
+        /* Read live CurrentEL so the print reflects the EL the
+         * kernel actually ended up at, not what the platform header
+         * assumes. With VHE, post-E2H=1 on Pi 5/Jetson, the value
+         * reads 0xC (EL2h). Without VHE on QEMU/other, it reads
+         * 0x4 (EL1h). When at EL2, also probe HCR_EL2.E2H to
+         * differentiate "EL2 with VHE" from "EL2 without VHE". */
+        uint64_t current_el;
+        __asm__ volatile("mrs %0, CurrentEL" : "=r"(current_el));
+        unsigned el = (unsigned)((current_el >> 2) & 0x3);
+        if (el == 2) {
+            uint64_t hcr;
+            __asm__ volatile("mrs %0, hcr_el2" : "=r"(hcr));
+            const char *vhe = (hcr & (1ull << 34)) ? " (VHE)" : "";
+            INFO("Running at EL2%s on %s", vhe, PLATFORM_NAME);
+        } else {
+            INFO("Running at EL%u on %s", el, PLATFORM_NAME);
+        }
+    }
 #endif
 
     /* Show DTB parsing results */
@@ -353,6 +370,13 @@ void kernel_main(void *dtb)
 
     /* Initialize non-cacheable shared memory region (Pi 5 only) */
     ncmem_init();
+
+    /* Parse the embedded operator-library blob (#714). Pure CPU side
+     * — no PMM / no GPU resources required, just a .rodata read. The
+     * default build embeds a 32-byte stub (op_count=0); pass
+     * -DOPLIB_BLOB=path to embed a real library produced by
+     * scripts/build-operator-library.py. */
+    (void)oplib_pool_init();
 
     /* Move UART lock to NC memory for cross-CPU safety */
     {

@@ -733,6 +733,14 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
     INFO("hailo: firmware %u.%u rev=0x%08x booted",
          hdr.firmware_major, hdr.firmware_minor, hdr.firmware_revision);
 
+#ifdef HAILO_WIRE_DEBUG
+    /* #682 hypothesis-1 diagnostic: confirm the per-channel IRQ enable
+     * bits are still 0xFFFFFFFF immediately after fw boots and arm_irq_masks
+     * has run. Baseline read-back, captured BEFORE the optional IRQ-cycle
+     * disable below so the dump reflects the post-boot/post-arm state. */
+    hailo_control_dump_irq_state("post-boot-arm");
+#endif
+
 #ifdef HAILO_IRQ_CYCLE_AT_BOOT
     /* #682 (2026-05-07): mirror Linux's hailo_activate_board IRQ
      * sequence — enable → load_firmware → DISABLE → (later) re-enable.

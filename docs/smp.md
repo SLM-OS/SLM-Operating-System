@@ -637,7 +637,7 @@ The full test suite passes on both QEMU and Pi 5 hardware (393 tests, 0 failures
 **Known Limitations:**
 - UART output is intentionally unsynchronized to avoid deadlock risks with panics
 - Blocked-task sleep queue attempted but wake mechanism failed on Pi 5 (deferred)
-- Pi 5 secondary-CPU hardware timer IRQs still don't deliver (cooperative `COOP_PREEMPT` path used instead); tracked as #134
+- Pi 5 hardware timer IRQs don't deliver to NS-EL1 (cooperative `COOP_PREEMPT` path used instead). Original tracking: #134; investigation closed in #672 with the conclusion that NS-EL1 IRQ delivery is broken regardless of PPI on Pi 5 / BCM2712 / GIC-400 firmware. Production fix tracked in #683 — move SLM-OS to EL2 with VHE so IRQs route through `VBAR_EL2` (the path Linux + Pi firmware actually validate). See `docs/pi5-el2-vhe-plan.md`.
 
 ### Files Modified/Added
 
