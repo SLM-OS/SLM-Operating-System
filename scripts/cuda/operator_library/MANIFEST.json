@@ -58,6 +58,13 @@
       "dtype":   "FP16",
       "sass":    "rmsnorm_f16_shader.sass",
       "comment": "Per-row root-mean-square layer norm in FP16 with FP32 accumulator. One CUDA block per row, 256 threads per block — strided sum-of-squares + tree reduction → rsqrtf → strided write of x * rms_inv * gamma. Mirrors runtime/src/inference/ops_transformer.rs::rmsnorm; matches the CPU reference within 2 ULPs across Qwen2.5-1.5B (1×1536, 16×1536), Llama-2 (1×4096), and a non-multiple-of-256 tail (1×768). Source: scripts/cuda/rmsnorm_f16.cu (#540)."
+    },
+    {
+      "op_kind": "SWIGLU",
+      "tier":    "SIMT",
+      "dtype":   "FP16",
+      "sass":    "swiglu_f16_shader.sass",
+      "comment": "Element-wise fused SiLU + multiply: out = silu(gate) * up = (gate / (1 + exp(-gate))) * up. The activation step that sits between the gate / up matmuls and the down matmul inside the SwiGLU MLP block. One thread per element, 256-thread blocks; sigmoid in FP32 with __expf (CUDA fast intrinsic). Mirrors runtime/src/inference/ops_transformer.rs::silu_out + the element-wise multiply that follows it inside swiglu_mlp_q. Validated within 2 ULPs across Qwen2.5-1.5B (n=8960), Llama-2 (n=11008), 16-row prefill (n=143360), and a non-multiple-of-256 tail (n=1023). NOTE: this is the element-wise half of SWIGLU (op_kind=6). The full MLP block also needs the gate / up / down matmuls, which will land as future Q4K_DOT entries; the dispatcher composes them. Source: scripts/cuda/swiglu_f16.cu (#540)."
     }
   ],
 
