@@ -84,8 +84,17 @@ exception_vectors:
  * ============================================================ */
 
 /*
- * Macro to save all general-purpose registers.
+ * Macro to save all general-purpose registers AND FP/SIMD state.
  * Creates a trap frame on the stack.
+ *
+ * Frame layout (800 bytes, 16-byte aligned):
+ *   [sp, #0..239]    x0-x29 (15 stp pairs)
+ *   [sp, #240]       x30
+ *   [sp, #248..263]  ELR, SPSR
+ *   [sp, #264..271]  padding (keeps q-region 16-byte aligned)
+ *   [sp, #272..783]  q0-q31 (16 stp pairs of q,q at stride 0x20)
+ *   [sp, #784..791]  FPCR
+ *   [sp, #792..799]  FPSR
  *
  * AAPCS reserves x18 as the "platform register" — toolchains that
  * generate code for a runtime which uses x18 as a TLS / shadow-call
@@ -101,9 +110,30 @@ exception_vectors:
  * AAPCS contract is preserved by accident. Document explicitly so a
  * future maintainer doesn't hoist the x18-touching code above the
  * stp at offset 144.
+ *
+ * FP/SIMD save (q0-q31, FPCR, FPSR) is required by the SECONDARY_PREEMPT
+ * trampoline path and any future user-mode preemption work. Without it:
+ *
+ *   1. Task is interrupted with FPU state in q0-q31.
+ *   2. el1_irq_handler / maybe_arm_resched_trampoline are AAPCS64 C
+ *      callees and may freely clobber q0-q7 + q16-q31 (caller-saved).
+ *   3. eret to resched_trampoline leaves the live q-regs in their
+ *      post-C state — NOT the interrupted task's state.
+ *   4. Trampoline calls schedule() → switch_to(old, new) which saves
+ *      the LIVE q-regs as old->context — i.e. saves the clobbered
+ *      values, not the interrupted task's actual FPU state.
+ *   5. When old task is later resumed via switch_to(other, old),
+ *      the corrupted q-regs are restored. Old task continues with
+ *      garbage FPU state.
+ *
+ * Same shape as switch_to in context.S (eager save of full FP/SIMD
+ * file). Cost: 16 stp pairs + 2 mrs + 1 stp = ~20 instructions +
+ * 528 bytes of stack per IRQ on every ARM64 path. Acceptable
+ * universal cost; there is no FPU-trap mechanism in this kernel
+ * that would let us defer the save to first-use.
  */
 .macro save_regs
-    sub     sp, sp, #272            /* Space for x0-x30, sp, elr, spsr */
+    sub     sp, sp, #800            /* GPRs + ELR/SPSR + pad + q-regs + FPCR/FPSR */
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -126,6 +156,36 @@ exception_vectors:
     mrs     x0, KERN_ELR
     mrs     x1, KERN_SPSR
     stp     x0, x1, [sp, #248]
+
+    /* Save FP/SIMD register file (q0-q31). 16-byte aligned at offset
+     * 272 since stp q,q requires that alignment. Stride 0x20 (32B) per
+     * pair; covers the whole 512-byte register file. */
+    stp     q0,  q1,  [sp, #272]
+    stp     q2,  q3,  [sp, #304]
+    stp     q4,  q5,  [sp, #336]
+    stp     q6,  q7,  [sp, #368]
+    stp     q8,  q9,  [sp, #400]
+    stp     q10, q11, [sp, #432]
+    stp     q12, q13, [sp, #464]
+    stp     q14, q15, [sp, #496]
+    stp     q16, q17, [sp, #528]
+    stp     q18, q19, [sp, #560]
+    stp     q20, q21, [sp, #592]
+    stp     q22, q23, [sp, #624]
+    stp     q24, q25, [sp, #656]
+    stp     q26, q27, [sp, #688]
+    stp     q28, q29, [sp, #720]
+    stp     q30, q31, [sp, #752]
+
+    /* Save FPCR / FPSR. mrs reads each into a 64-bit GPR slot; the
+     * upper half is RES0 in both registers. Use individual str (not
+     * stp) because offsets 784/792 are outside the stp x,x signed
+     * 7-bit *8 immediate range (-512..504); str has a 12-bit unsigned
+     * scaled immediate that comfortably reaches the end of this frame. */
+    mrs     x0, fpcr
+    str     x0, [sp, #784]
+    mrs     x0, fpsr
+    str     x0, [sp, #792]
 .endm
 
 /*
@@ -161,9 +221,40 @@ exception_vectors:
 .endm
 
 /*
- * Macro to restore all general-purpose registers.
+ * Macro to restore all general-purpose registers AND FP/SIMD state.
+ * Mirrors save_regs above — see that block for the frame layout and
+ * rationale for saving the full FP/SIMD file on every IRQ entry.
  */
 .macro restore_regs
+    /* Restore FPCR / FPSR before the q-regs so they govern any
+     * subsequent FP operation (here just the q-reg loads, which don't
+     * actually exercise FPCR/FPSR — but keep the program-state-first,
+     * data-second ordering consistent with switch_to in context.S).
+     * Individual ldr (not ldp) for the same imm-range reason as the
+     * save side. */
+    ldr     x0, [sp, #784]
+    msr     fpcr, x0
+    ldr     x0, [sp, #792]
+    msr     fpsr, x0
+
+    /* Restore FP/SIMD register file. Stride matches save_regs above. */
+    ldp     q0,  q1,  [sp, #272]
+    ldp     q2,  q3,  [sp, #304]
+    ldp     q4,  q5,  [sp, #336]
+    ldp     q6,  q7,  [sp, #368]
+    ldp     q8,  q9,  [sp, #400]
+    ldp     q10, q11, [sp, #432]
+    ldp     q12, q13, [sp, #464]
+    ldp     q14, q15, [sp, #496]
+    ldp     q16, q17, [sp, #528]
+    ldp     q18, q19, [sp, #560]
+    ldp     q20, q21, [sp, #592]
+    ldp     q22, q23, [sp, #624]
+    ldp     q24, q25, [sp, #656]
+    ldp     q26, q27, [sp, #688]
+    ldp     q28, q29, [sp, #720]
+    ldp     q30, q31, [sp, #752]
+
     /* Restore ELR and SPSR (see KERN_ELR / KERN_SPSR in el_regs.h). */
     ldp     x0, x1, [sp, #248]
     msr     KERN_ELR, x0
@@ -185,7 +276,7 @@ exception_vectors:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldr     x30, [sp, #240]
-    add     sp, sp, #272
+    add     sp, sp, #800
 .endm
 
 /*

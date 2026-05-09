@@ -28,14 +28,16 @@
  * ============================================================================ */
 
 /* Test: trap_frame struct has correct size.
- * The struct is 264 bytes (33 uint64_t fields). The assembly save_regs
- * allocates 272 bytes (264 + 8 padding for 16-byte SP alignment). */
+ * The struct is 264 bytes (33 uint64_t fields) — the C-visible portion.
+ * The assembly save_regs allocates TRAP_FRAME_ALLOC bytes (currently 800)
+ * and stores the FP/SIMD register file in the bytes past the C view; the
+ * struct deliberately does not expose those fields. */
 static void test_trap_frame_size(void)
 {
     /* 31 GPRs + ELR + SPSR = 33 * 8 = 264 bytes */
     TEST_ASSERT_EQUAL_UINT32(264, sizeof(struct trap_frame));
-    /* Must be <= the assembly allocation */
-    TEST_ASSERT_TRUE(sizeof(struct trap_frame) <= 272);
+    /* Must be <= the assembly allocation (which now includes FP/SIMD) */
+    TEST_ASSERT_TRUE(sizeof(struct trap_frame) <= TRAP_FRAME_ALLOC);
 }
 
 /* Test: trap_frame fields are at correct offsets */
