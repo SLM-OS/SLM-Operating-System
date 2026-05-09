@@ -66,18 +66,31 @@ expects `TFA_DIR=~/slmos-ref/tf-a`.
 ## Jetson Orin Nano (#380, t234) — what `0004-*` does
 
 `0004-SLM-OS-Jetson-IRQ-routing-patches.patch` ports the same idea to
-NVIDIA's downstream TF-A for Tegra234. Three changes:
+NVIDIA's downstream TF-A for Tegra234. Three changes — narrower than
+the Pi 5 patch in two important places because Tegra234's BL31 uses
+SDEI to deliver RAS uncorrectable-error notifications back to NS, and
+SDEI requires (a) Group 0 FIQs routed to EL3 and (b) Event 0 bound to
+a Secure SGI:
 
-1. **Clear `SCR_EL3.IRQ` and `SCR_EL3.FIQ`** in `setup_ns_context`
+1. **Clear `SCR_EL3.IRQ` only** in `setup_ns_context`
    (`lib/el3_runtime/aarch64/context_mgmt.c`), gated on
-   `PLAT_TEGRA234_SLMOS_PREEMPT`.
+   `PLAT_TEGRA234_SLMOS_PREEMPT`. **`SCR_EL3.FIQ` is left set** —
+   clearing it routes Group 0 FIQs to NS, which breaks SDEI's RAS
+   delivery path. Symptom of the wider variant we tested first:
+   `RAS Uncorrectable Error in IOB ... sdei_dispatch_event returned
+   -1 / Powering off core` on first IOB error after boot. Pi 5's
+   `0001-*` patch can clear both bits because RPi firmware doesn't
+   use SDEI; Tegra cannot.
 
-2. **Write `GICR_IGROUPR0 = 0xFFFFFFFF`** in `tegra_gicv3.c` on every
-   per-CPU init entry: `tegra_gic_init` (primary boot),
-   `tegra_gic_pcpu_init` (secondary CPU_ON warmboot), and
-   `tegra_gic_restore` (after suspend/resume). Because Tegra234 is
-   GICv3, the PPI/SGI Group bits live in each CPU's redistributor,
-   not the distributor — so the write must run per-CPU.
+2. **OR `GICR_IGROUPR0 |= 0xFFFF0000U`** (PPI bits 16..31 only) in
+   `tegra_gicv3.c` on every per-CPU init entry: `tegra_gic_init`
+   (primary boot), `tegra_gic_pcpu_init` (secondary CPU_ON warmboot),
+   and `tegra_gic_restore` (after suspend/resume). Because Tegra234
+   is GICv3, the PPI/SGI Group bits live in each CPU's redistributor,
+   not the distributor — so the write must run per-CPU. **SGI bits
+   0..15 are left untouched** — promoting them to Group 1 NS makes
+   SDEI Event 0 fail its `is_secure_sgi(map->intr)` assertion at
+   `services/std_svc/sdei/sdei_main.c:161` during BL31 init.
 
 3. **`PLAT_TEGRA234_SLMOS_PREEMPT` define** added to
    `plat/nvidia/tegra/soc/t234/platform_t234.mk`.
@@ -97,12 +110,24 @@ sibling-directory layout convention.)
 cd ~/slmos-ref/nvidia/Linux_for_Tegra/source/arm-trusted-firmware
 git apply <SLM-OS-checkout>/tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch
 
+# Build flags mirror NVIDIA's L4T `source/nvbuild.sh::build_atf_sources`.
+# `SPD=opteed` is critical — without it, BL31 has no Secure Payload
+# Dispatcher and OP-TEE's first SMC call into BL31 silently lands in
+# oblivion, surfacing as a deterministic RAS Uncorrectable error in
+# IOB at 0x03270000 (QSPI0) on first OP-TEE-side QSPI access.
 PATH=/opt/arm-gnu-toolchain/bin:$PATH \
     make PLAT=tegra TARGET_SOC=t234 \
          CROSS_COMPILE=aarch64-none-elf- \
-         DEBUG=0 LOG_LEVEL=40 -j4 bl31
+         SPD=opteed BRANCH_PROTECTION=3 ARM_ARCH_MINOR=3 \
+         DEBUG=0 LOG_LEVEL=20 -j4 bl31
 
 # Output: build/tegra/t234/release/bl31/bl31.bin
+```
+
+Or use the in-tree Makefile target which encapsulates all of the above:
+
+```bash
+make tfa-jetson    # builds bl31.bin in TFA_JETSON_DIR
 ```
 
 ### Deploying on Jetson Orin Nano

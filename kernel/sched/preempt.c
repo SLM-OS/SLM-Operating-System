@@ -84,8 +84,21 @@ void preempt_init(void)
  * resolve through cpu_logical_map[] so they agree on every platform
  * — Pi 5 Aff1, QEMU Aff0, Jetson dual-cluster (#647).
  *
- * Returns 0 on lookup miss. Real misconfig is caught by
- * preempt_check_cpu_mpidr below.
+ * Two layers of behavior, important to keep straight:
+ *
+ *   - `cpu_logical_id()` (in <smp.h>) returns -1 on miss. That's the
+ *     value `preempt_check_cpu_mpidr` below relies on to detect a
+ *     map-not-populated configuration error and panic loudly at boot.
+ *   - This wrapper clamps -1 to 0 so its return type matches the asm
+ *     macro's `dst` register convention (the trampoline has no
+ *     signed-sentinel slot in its calling sequence). The asm macro's
+ *     miss-returns-0 convention is documented in cpu_id_asm.h.
+ *
+ * Net effect: the trampoline path silently misroutes to slot 0 if it
+ * ever sees an unmapped MPIDR, but the boot-time invariant check
+ * forecloses that possibility on every CPU we ever schedule on. Any
+ * future caller that needs to distinguish miss from "CPU 0" must call
+ * `cpu_logical_id()` directly.
  */
 uint32_t preempt_trampoline_cpu_for_mpidr(uint64_t mpidr)
 {

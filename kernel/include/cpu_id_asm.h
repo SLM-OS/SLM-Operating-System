@@ -37,9 +37,21 @@
  *
  * Reads MPIDR_EL1, masks to AFF0|AFF1|AFF2|AFF3 = 0xFF00FFFFFF, scans
  * cpu_logical_map[] for a matching entry. On hit, dst holds the logical
- * CPU id (0..MAX_CPUS-1). On miss, dst = 0 (defensive — array indexing
- * stays in-bounds; preempt_check_cpu_mpidr surfaces real misconfig at
- * boot).
+ * CPU id (0..MAX_CPUS-1).
+ *
+ * Miss contract: dst = 0. This is the deliberate signal-to-noise
+ * tradeoff for the asm callers (resched_trampoline, DIAG_BUMP_VEC),
+ * which use the result to index per-CPU state arrays directly with no
+ * branch budget for a sentinel check. Returning 0 keeps the index
+ * in-bounds; `preempt_check_cpu_mpidr` (kernel/sched/preempt.c) walks
+ * every CPU's MPIDR at boot and panics if any of them is not in the
+ * map, so a runtime miss is structurally impossible on a kernel that
+ * boots successfully.
+ *
+ * Future callers that need to distinguish miss from "CPU 0" must call
+ * `cpu_logical_id()` from C — that path returns -1 on miss. Do NOT
+ * reuse this asm macro outside the preempt-init-protected scope
+ * without auditing each new call site for the silent-zero behavior.
  *
  * Clobbers: dst, s1, s2, s3 (caller saves what it needs).
  *

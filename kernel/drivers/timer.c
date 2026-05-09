@@ -78,6 +78,11 @@ static inline uint64_t read_cntpct(void)
  * RES0 write — without JETSON_HW_TICK we don't program the timer at
  * all on Jetson, leaving COOP_PREEMPT to drive ticks at yield points.
  */
+/* Add new VHE-platform entries to this disjunction. The criterion is
+ * "kernel runs at NS-EL2 with HCR_EL2.E2H=1" — anything that boots
+ * that way must drive cnthp_*_el2 directly, because writes to
+ * cntp_*_el0 from EL2 are RES0 in that mode. Tegra194/T210 ports
+ * would extend this gate similarly. */
 #if defined(PLATFORM_RASPI5) || \
     (defined(PLATFORM_JETSON_ORIN_NANO) && defined(JETSON_HW_TICK))
 #define SLMOS_TIMER_USES_CNTHP_EL2 1

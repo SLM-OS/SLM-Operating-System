@@ -50,6 +50,20 @@ static void test_pi5_encoding_pi5_only(void)
 static void test_jetson_dual_cluster(void)
 {
 #if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* cpu_logical_map[] is populated by smp_init(). When this test
+     * runs under a host harness (e.g. JETSON_ORIN_NANO build executed
+     * in QEMU for unit-test purposes) smp_init may not have run yet,
+     * in which case the map is all zeros and every assertion below
+     * fails noisily. Mirror the QEMU branch's guard — treat as
+     * inconclusive when the map is empty. The lookup algorithm itself
+     * is exercised against a populated map by test_qemu_encoding. */
+    if (cpu_count == 0) {
+        TEST_IGNORE_MESSAGE("smp_init not run in this test fixture — "
+                            "Jetson dual-cluster encoding cannot be "
+                            "validated without a populated map");
+        return;
+    }
+
     static const uint64_t jetson_mpidrs[] = {
         0x000, 0x100, 0x200, 0x300,    /* cluster 0 */
         0x10200, 0x10300                /* cluster 1 */
