@@ -29,6 +29,36 @@
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
+/* Populate CUDA's builtin-dim slot at cbuf[0][0x00..0x14] with the
+ * blockDim and gridDim values. Mirrors the
+ * gpu_write_builtin_dims() pattern documented in
+ * scripts/gpu-launch-common.h:
+ *
+ *   [0x00] blockDim.x  uint32_t    [0x0C] gridDim.x   uint32_t
+ *   [0x04] blockDim.y  uint32_t    [0x10] gridDim.y   uint32_t
+ *   [0x08] blockDim.z  uint32_t    [0x14] gridDim.z   uint32_t
+ *
+ * CUDA-compiled SASS reads `blockDim.x` from `c[0x0][0x0]` etc.
+ * via the IMAD R0, R0 (CTAID.X), c[0x0][0x0] (blockDim.x) pattern;
+ * leaving these zero makes a kernel that reads them compute its
+ * global thread index as if blockDim were 0 (every CTA collapses
+ * onto the same range; only CTA(0,0) appears to have run). The
+ * rmsnorm kernel happens not to read these slots (BLOCK_DIM is a
+ * compile-time constant, threadIdx/blockIdx come from PTX
+ * special registers), but populating them keeps the dispatcher
+ * correct for any future operator-library entry that does. */
+static void write_builtin_dims(void *cbuf_cpu,
+                                const struct operator_launch_shape *shape)
+{
+    volatile uint32_t *bdim = (volatile uint32_t *)cbuf_cpu;
+    bdim[0] = shape->block_x;   /* 0x00 blockDim.x */
+    bdim[1] = shape->block_y;   /* 0x04 blockDim.y */
+    bdim[2] = shape->block_z;   /* 0x08 blockDim.z */
+    bdim[3] = shape->grid_x;    /* 0x0C gridDim.x  */
+    bdim[4] = shape->grid_y;    /* 0x10 gridDim.y  */
+    bdim[5] = shape->grid_z;    /* 0x14 gridDim.z  */
+}
+
 int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
                                 uint32_t op_kind,
                                 uint32_t tier,
@@ -118,42 +148,18 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
         return -1;
     }
 
-    /* 4. Populate cbuf. CUDA-compiled SASS reads blockDim and
-     *    gridDim from cbuf[0] at fixed offsets:
-     *      [0x00] blockDim.x  uint32_t
-     *      [0x04] blockDim.y  uint32_t
-     *      [0x08] blockDim.z  uint32_t
-     *      [0x0C] gridDim.x   uint32_t
-     *      [0x10] gridDim.y   uint32_t
-     *      [0x14] gridDim.z   uint32_t
-     *    Helper kernels that ship through scripts/gpu-launch-
-     *    common.c call gpu_write_builtin_dims() to populate these
-     *    slots. The operator-library dispatcher must do the same;
-     *    leaving them zero made the rmsnorm SASS trap with
-     *    `illegal_instr_param` (see PR #744 follow-up — first
-     *    dispatch produced bit-exact output because non-trapping
-     *    warps completed the reduction, but the trap latched
-     *    sticky exception state that blocked subsequent dispatches
-     *    via gr_exception.gpc).
-     *
-     *    The per-op builder then writes its kernel args at
+    /* 4. Populate cbuf. The CUDA builtin-dim slot at
+     *    cbuf[0][0x00..0x14] gets blockDim/gridDim via
+     *    write_builtin_dims (see helper above). The per-op
+     *    builder then writes its kernel args at
      *    OPERATOR_CBUF0_BASE (0x160), beyond the builtin-dim
-     *    region — verified mismatch via operator_dispatch.h
-     *    static_asserts. */
+     *    region. */
     if (args->op_kind != op_kind) {
         uart_printf("[oplib-dispatch] args->op_kind=%u != op_kind=%u\n",
                     (unsigned)args->op_kind, (unsigned)op_kind);
         return -1;
     }
-    {
-        volatile uint32_t *bdim = (volatile uint32_t *)cbuf_cpu;
-        bdim[0] = shape.block_x;   /* 0x00 blockDim.x */
-        bdim[1] = shape.block_y;   /* 0x04 blockDim.y */
-        bdim[2] = shape.block_z;   /* 0x08 blockDim.z */
-        bdim[3] = shape.grid_x;    /* 0x0C gridDim.x  */
-        bdim[4] = shape.grid_y;    /* 0x10 gridDim.y  */
-        bdim[5] = shape.grid_z;    /* 0x14 gridDim.z  */
-    }
+    write_builtin_dims(cbuf_cpu, &shape);
     rc = operator_dispatch_build_cbuf(cbuf_cpu, args);
     if (rc != 0) {
         uart_printf("[oplib-dispatch] cbuf build failed: rc=%d\n", rc);

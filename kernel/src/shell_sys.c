@@ -4044,6 +4044,200 @@ int cmd_telemetry(int argc, char *argv[])
  *   nvgpu run            Attempt all phases end-to-end
  *   nvgpu info           Show firmware inventory only
  */
+/* GA10B BAR0 base + GR/PBDMA register byte offsets used by the
+ * `nvgpu engine-status` and `engine-clear` shell verbs. The BAR0
+ * base mirrors `GA10B_BAR0_BASE` in kernel/gpu/nvidia/ga10b_gmmu.c
+ * (file-static there); these are spelled out here rather than
+ * exported via a header because they're used only at this single
+ * call site. PBDMA[0] uses the i=0 stride of pbdma_*_r(i); GR
+ * registers are non-indexed. All offsets sourced from
+ * ~/slmos-ref/nvidia/nvgpu-include-nvgpu-hw-ga10b/
+ * hw_pbdma_ga10b.h and hw_gr_ga10b.h. */
+#define ENG_BAR0_BASE              0x17000000ull
+#define ENG_PBDMA0_INTR_0          0x00040108u   /* pbdma_intr_0_r(0) */
+#define ENG_PBDMA0_STATUS_SCHED    0x0004015cu   /* pbdma_status_sched_r(0) */
+#define ENG_PBDMA0_SUBDEVICE       0x00040094u   /* pbdma_subdevice_r(0) */
+#define ENG_PBDMA0_PB_HEADER       0x00040084u   /* pbdma_pb_header_r(0) */
+#define ENG_PBDMA0_ACQUIRE         0x00040010u   /* pbdma_acquire_r(0) */
+#define ENG_GR_INTR                0x00400100u   /* gr_intr_r() */
+#define ENG_GR_EXCEPTION           0x00400108u   /* gr_exception_r() */
+#define ENG_GR_STATUS              0x00400700u   /* gr_status_r() */
+#define ENG_GR_STATUS_1            0x00400604u   /* gr_status_1_r() */
+#define ENG_GR_ENGINE_STATUS       0x0040060cu   /* gr_engine_status_r() */
+
+static volatile uint32_t *eng_bar0(void)
+{
+    return (volatile uint32_t *)(uintptr_t)ENG_BAR0_BASE;
+}
+
+static int cmd_nvgpu_engine_clear(void)
+{
+    /* Attempt write-1-to-clear on `gr_intr_r` and `gr_exception_r`
+     * — nvgpu's gr_intr_handle pattern (`writel(gr_intr_r,
+     * U32_MAX)`) does this from the kernel driver.
+     *
+     * EMPIRICAL: Verified twice on jetson-nano-1 (PR #747) that
+     * the writes appear to be accepted (no fault) but the
+     * registers do NOT change value. Either the GA10B PRIv
+     * firewall blocks writes from NS-EL2 even where reads work,
+     * or `gr_exception.gpc` is a status rollup whose underlying
+     * per-GPC exception state must be cleared at
+     * `gr_pri_gpc{N}_exception_r` (0x00501xxx range) before the
+     * top-level rollup will reset. The verb is still useful as a
+     * confirmation tool — running it and seeing pre==post is
+     * the diagnostic. Real clearing of GPC-rooted exceptions
+     * needs per-GPC writes, which requires a way to clear the
+     * underlying SM hww_warp_esr / hww_global_esr first; those
+     * are `peek 0x17504730 / 0x17504734`-accessible and
+     * `poke ... 0` empirically does clear them (see PR #747
+     * commit message for the BSSY barrier-slot diagnosis chain
+     * that used this). */
+    volatile uint32_t *bar = eng_bar0();
+    uint32_t prev_intr = bar[ENG_GR_INTR / 4u];
+    uint32_t prev_exc  = bar[ENG_GR_EXCEPTION / 4u];
+    bar[ENG_GR_INTR      / 4u] = 0xFFFFFFFFu;
+    bar[ENG_GR_EXCEPTION / 4u] = 0xFFFFFFFFu;
+    __asm__ volatile("dsb sy" ::: "memory");
+    uint32_t new_intr = bar[ENG_GR_INTR / 4u];
+    uint32_t new_exc  = bar[ENG_GR_EXCEPTION / 4u];
+    shell_printf("engine-clear: gr_intr 0x%08x -> 0x%08x, "
+                 "gr_exception 0x%08x -> 0x%08x%s\r\n",
+                 (unsigned)prev_intr, (unsigned)new_intr,
+                 (unsigned)prev_exc, (unsigned)new_exc,
+                 (prev_intr == new_intr && prev_exc == new_exc)
+                     ? " (writes ignored — see verb comment)"
+                     : "");
+    return 0;
+}
+
+/* PBDMA[0] status block of `engine-status`, split out for
+ * readability. Decodes `pbdma_intr_0` pending bits, the
+ * `status_sched` channel-status enum, and the subdevice
+ * active/DMA-enable bits. */
+static void engine_status_dump_pbdma(volatile uint32_t *bar)
+{
+    uint32_t pbdma_intr_0       = bar[ENG_PBDMA0_INTR_0       / 4u];
+    uint32_t pbdma_status_sched = bar[ENG_PBDMA0_STATUS_SCHED / 4u];
+    uint32_t pbdma_subdevice    = bar[ENG_PBDMA0_SUBDEVICE    / 4u];
+    uint32_t pbdma_pb_header    = bar[ENG_PBDMA0_PB_HEADER    / 4u];
+    uint32_t pbdma_acquire      = bar[ENG_PBDMA0_ACQUIRE      / 4u];
+
+    shell_printf("\r\n=== PBDMA[0] ===\r\n");
+    shell_printf("  intr_0       = 0x%08x  ",
+                 (unsigned)pbdma_intr_0);
+    if (pbdma_intr_0 != 0) {
+        shell_printf("(");
+        if (pbdma_intr_0 & 0x2000u)   shell_printf("gpfifo ");
+        if (pbdma_intr_0 & 0x4000u)   shell_printf("gpptr ");
+        if (pbdma_intr_0 & 0x8000u)   shell_printf("gpentry ");
+        if (pbdma_intr_0 & 0x10000u)  shell_printf("gpcrc ");
+        if (pbdma_intr_0 & 0x20000u)  shell_printf("pbptr ");
+        if (pbdma_intr_0 & 0x40000u)  shell_printf("pbentry ");
+        if (pbdma_intr_0 & 0x80000u)  shell_printf("pbcrc ");
+        if (pbdma_intr_0 & 0x200000u) shell_printf("method ");
+        if (pbdma_intr_0 & 0x800000u) shell_printf("device ");
+        shell_printf(")\r\n");
+    } else {
+        shell_printf("(no pending interrupts)\r\n");
+    }
+
+    unsigned tsgid = (unsigned)(pbdma_status_sched & 0xfffu);
+    unsigned chan_status = (unsigned)((pbdma_status_sched >> 13) & 0x7u);
+    unsigned next_tsgid = (unsigned)((pbdma_status_sched >> 16) & 0xfffu);
+    const char *cs_name;
+    switch (chan_status) {
+        case 0: cs_name = "invalid"; break;
+        case 1: cs_name = "valid"; break;
+        case 5: cs_name = "chsw_save"; break;
+        case 6: cs_name = "chsw_load"; break;
+        case 7: cs_name = "chsw_switch"; break;
+        default: cs_name = "?"; break;
+    }
+    shell_printf("  status_sched = 0x%08x  (tsgid=%u next_tsgid=%u "
+                 "chan_status=%u/%s)\r\n",
+                 (unsigned)pbdma_status_sched,
+                 tsgid, next_tsgid, chan_status, cs_name);
+
+    unsigned subdev_id = (unsigned)(pbdma_subdevice & 0xfffu);
+    bool subdev_active = (pbdma_subdevice & 0x10000000u) != 0;
+    bool subdev_dma = (pbdma_subdevice & 0x20000000u) != 0;
+    shell_printf("  subdevice    = 0x%08x  (id=%u active=%d dma_en=%d)"
+                 "\r\n",
+                 (unsigned)pbdma_subdevice,
+                 subdev_id, subdev_active, subdev_dma);
+
+    shell_printf("  pb_header    = 0x%08x\r\n",
+                 (unsigned)pbdma_pb_header);
+    shell_printf("  acquire      = 0x%08x\r\n",
+                 (unsigned)pbdma_acquire);
+}
+
+/* GR engine status block of `engine-status`, split out for
+ * readability. Decodes `gr_exception` (top-level rollup of
+ * fe/memfmt/pd/scc/ds/ssync/mme/sked/mme_fe1/gpc), and the
+ * `gr_status` busy + fe-method-upper/lower flags. Note that
+ * GR registers read 0xbadf1002 (PRI poison) when FECS is idle
+ * — they only become readable after at least one channel
+ * dispatch has woken the GR engine. */
+static void engine_status_dump_gr(volatile uint32_t *bar)
+{
+    uint32_t gr_intr           = bar[ENG_GR_INTR          / 4u];
+    uint32_t gr_exception      = bar[ENG_GR_EXCEPTION     / 4u];
+    uint32_t gr_status         = bar[ENG_GR_STATUS        / 4u];
+    uint32_t gr_status_1       = bar[ENG_GR_STATUS_1      / 4u];
+    uint32_t gr_engine_status  = bar[ENG_GR_ENGINE_STATUS / 4u];
+
+    shell_printf("\r\n=== GR ===\r\n");
+    shell_printf("  intr         = 0x%08x  %s\r\n",
+                 (unsigned)gr_intr,
+                 gr_intr == 0 ? "(no pending)" : "(pending!)");
+    shell_printf("  exception    = 0x%08x  ",
+                 (unsigned)gr_exception);
+    if (gr_exception != 0) {
+        shell_printf("(");
+        if (gr_exception & 0x1u)        shell_printf("fe ");
+        if (gr_exception & 0x2u)        shell_printf("memfmt ");
+        if (gr_exception & 0x4u)        shell_printf("pd ");
+        if (gr_exception & 0x8u)        shell_printf("scc ");
+        if (gr_exception & 0x10u)       shell_printf("ds ");
+        if (gr_exception & 0x20u)       shell_printf("ssync ");
+        if (gr_exception & 0x80u)       shell_printf("mme ");
+        if (gr_exception & 0x100u)      shell_printf("sked ");
+        if (gr_exception & 0x200u)      shell_printf("mme_fe1 ");
+        if (gr_exception & 0x1000000u)  shell_printf("gpc ");
+        shell_printf(")\r\n");
+    } else {
+        shell_printf("(no exception)\r\n");
+    }
+    bool gr_busy = (gr_status & 0x1u) != 0;
+    bool gr_fe_method_upper = (gr_status & 0x2u) != 0;
+    bool gr_fe_method_lower = (gr_status & 0x4u) != 0;
+    shell_printf("  status       = 0x%08x  (busy=%d fe_method_upper=%d "
+                 "fe_method_lower=%d)\r\n",
+                 (unsigned)gr_status,
+                 gr_busy, gr_fe_method_upper, gr_fe_method_lower);
+    shell_printf("  status_1     = 0x%08x\r\n",
+                 (unsigned)gr_status_1);
+    shell_printf("  engine_status= 0x%08x\r\n",
+                 (unsigned)gr_engine_status);
+    shell_printf("\r\n");
+}
+
+static int cmd_nvgpu_engine_status(void)
+{
+    /* Read GR + PBDMA engine status registers from BAR0 and
+     * decode key fields. Diagnosis tool for the "first dispatch
+     * passes, second hangs" failure mode (PR #744 follow-up,
+     * PR #747 root-causing). Run before and after a stalled
+     * dispatch to localize the wedged engine. PBDMA[0] is the
+     * only instance our channel uses (channel 0, PBDMA stride
+     * 2048 bytes). */
+    volatile uint32_t *bar = eng_bar0();
+    engine_status_dump_pbdma(bar);
+    engine_status_dump_gr(bar);
+    return 0;
+}
+
 int cmd_nvgpu(int argc, char *argv[])
 {
     static struct ga10b_bringup b;
@@ -4143,140 +4337,10 @@ int cmd_nvgpu(int argc, char *argv[])
         return rc;
     }
     if (strcmp(argv[1], "engine-clear") == 0) {
-        /* Clear GR pending interrupts + exception state via w1c.
-         * nvgpu's gr_intr_handle pattern: writel(gr_intr_r,
-         * U32_MAX). Same likely applies to gr_exception_r.
-         * Diagnosis tool — clears the latent exception/intr seen
-         * after a successful dispatch to test whether it's
-         * blocking the next launch's methods. */
-        const uint64_t bar0 = 0x17000000ull;
-        volatile uint32_t *bar = (volatile uint32_t *)(uintptr_t)bar0;
-        uint32_t prev_intr = bar[0x00400100u / 4u];
-        uint32_t prev_exc  = bar[0x00400108u / 4u];
-        bar[0x00400100u / 4u] = 0xFFFFFFFFu;   /* gr_intr w1c */
-        bar[0x00400108u / 4u] = 0xFFFFFFFFu;   /* gr_exception w1c */
-        __asm__ volatile("dsb sy" ::: "memory");
-        uint32_t new_intr = bar[0x00400100u / 4u];
-        uint32_t new_exc  = bar[0x00400108u / 4u];
-        shell_printf("engine-clear: gr_intr 0x%08x -> 0x%08x, "
-                     "gr_exception 0x%08x -> 0x%08x\r\n",
-                     (unsigned)prev_intr, (unsigned)new_intr,
-                     (unsigned)prev_exc, (unsigned)new_exc);
-        return 0;
+        return cmd_nvgpu_engine_clear();
     }
     if (strcmp(argv[1], "engine-status") == 0) {
-        /* Read GR + PBDMA engine status registers and decode key
-         * fields. Diagnosis tool for the "first dispatch passes,
-         * second hangs" follow-up from PR #744 — run before and
-         * after a stalled dispatch to localize the wedged engine.
-         *
-         * Reads target BAR0 + 0x40000-0x40200 (PBDMA[0]) and
-         * BAR0 + 0x400100-0x400700 (GR). All offsets sourced from
-         * ~/slmos-ref/nvidia/nvgpu-include-nvgpu-hw-ga10b/
-         * hw_pbdma_ga10b.h and hw_gr_ga10b.h. PBDMA[0] is the only
-         * instance our channel uses (channel 0, PBDMA stride
-         * 2048 bytes). */
-        const uint64_t bar0 = 0x17000000ull;
-        volatile uint32_t *bar = (volatile uint32_t *)(uintptr_t)bar0;
-
-        /* PBDMA[0] register offsets (byte addresses → uint32 indices) */
-        uint32_t pbdma_intr_0      = bar[0x00040108u / 4u];
-        uint32_t pbdma_status_sched = bar[0x0004015cu / 4u];
-        uint32_t pbdma_subdevice   = bar[0x00040094u / 4u];
-        uint32_t pbdma_pb_header   = bar[0x00040084u / 4u];
-        uint32_t pbdma_acquire     = bar[0x00040010u / 4u];
-
-        /* GR engine status */
-        uint32_t gr_intr           = bar[0x00400100u / 4u];
-        uint32_t gr_exception      = bar[0x00400108u / 4u];
-        uint32_t gr_status         = bar[0x00400700u / 4u];
-        uint32_t gr_status_1       = bar[0x00400604u / 4u];
-        uint32_t gr_engine_status  = bar[0x0040060cu / 4u];
-
-        shell_printf("\r\n=== PBDMA[0] ===\r\n");
-        shell_printf("  intr_0       = 0x%08x  ",
-                     (unsigned)pbdma_intr_0);
-        if (pbdma_intr_0 != 0) {
-            shell_printf("(");
-            if (pbdma_intr_0 & 0x2000u)   shell_printf("gpfifo ");
-            if (pbdma_intr_0 & 0x4000u)   shell_printf("gpptr ");
-            if (pbdma_intr_0 & 0x8000u)   shell_printf("gpentry ");
-            if (pbdma_intr_0 & 0x10000u)  shell_printf("gpcrc ");
-            if (pbdma_intr_0 & 0x20000u)  shell_printf("pbptr ");
-            if (pbdma_intr_0 & 0x40000u)  shell_printf("pbentry ");
-            if (pbdma_intr_0 & 0x80000u)  shell_printf("pbcrc ");
-            if (pbdma_intr_0 & 0x200000u) shell_printf("method ");
-            if (pbdma_intr_0 & 0x800000u) shell_printf("device ");
-            shell_printf(")\r\n");
-        } else {
-            shell_printf("(no pending interrupts)\r\n");
-        }
-
-        unsigned tsgid = (unsigned)(pbdma_status_sched & 0xfffu);
-        unsigned chan_status = (unsigned)((pbdma_status_sched >> 13) & 0x7u);
-        unsigned next_tsgid = (unsigned)((pbdma_status_sched >> 16) & 0xfffu);
-        const char *cs_name;
-        switch (chan_status) {
-            case 0: cs_name = "invalid"; break;
-            case 1: cs_name = "valid"; break;
-            case 5: cs_name = "chsw_save"; break;
-            case 6: cs_name = "chsw_load"; break;
-            case 7: cs_name = "chsw_switch"; break;
-            default: cs_name = "?"; break;
-        }
-        shell_printf("  status_sched = 0x%08x  (tsgid=%u next_tsgid=%u "
-                     "chan_status=%u/%s)\r\n",
-                     (unsigned)pbdma_status_sched,
-                     tsgid, next_tsgid, chan_status, cs_name);
-
-        unsigned subdev_id = (unsigned)(pbdma_subdevice & 0xfffu);
-        bool subdev_active = (pbdma_subdevice & 0x10000000u) != 0;
-        bool subdev_dma = (pbdma_subdevice & 0x20000000u) != 0;
-        shell_printf("  subdevice    = 0x%08x  (id=%u active=%d dma_en=%d)"
-                     "\r\n",
-                     (unsigned)pbdma_subdevice,
-                     subdev_id, subdev_active, subdev_dma);
-
-        shell_printf("  pb_header    = 0x%08x\r\n",
-                     (unsigned)pbdma_pb_header);
-        shell_printf("  acquire      = 0x%08x\r\n",
-                     (unsigned)pbdma_acquire);
-
-        shell_printf("\r\n=== GR ===\r\n");
-        shell_printf("  intr         = 0x%08x  %s\r\n",
-                     (unsigned)gr_intr,
-                     gr_intr == 0 ? "(no pending)" : "(pending!)");
-        shell_printf("  exception    = 0x%08x  ",
-                     (unsigned)gr_exception);
-        if (gr_exception != 0) {
-            shell_printf("(");
-            if (gr_exception & 0x1u)        shell_printf("fe ");
-            if (gr_exception & 0x2u)        shell_printf("memfmt ");
-            if (gr_exception & 0x4u)        shell_printf("pd ");
-            if (gr_exception & 0x8u)        shell_printf("scc ");
-            if (gr_exception & 0x10u)       shell_printf("ds ");
-            if (gr_exception & 0x20u)       shell_printf("ssync ");
-            if (gr_exception & 0x80u)       shell_printf("mme ");
-            if (gr_exception & 0x100u)      shell_printf("sked ");
-            if (gr_exception & 0x200u)      shell_printf("mme_fe1 ");
-            if (gr_exception & 0x1000000u)  shell_printf("gpc ");
-            shell_printf(")\r\n");
-        } else {
-            shell_printf("(no exception)\r\n");
-        }
-        bool gr_busy = (gr_status & 0x1u) != 0;
-        bool gr_fe_method_upper = (gr_status & 0x2u) != 0;
-        bool gr_fe_method_lower = (gr_status & 0x4u) != 0;
-        shell_printf("  status       = 0x%08x  (busy=%d fe_method_upper=%d "
-                     "fe_method_lower=%d)\r\n",
-                     (unsigned)gr_status,
-                     gr_busy, gr_fe_method_upper, gr_fe_method_lower);
-        shell_printf("  status_1     = 0x%08x\r\n",
-                     (unsigned)gr_status_1);
-        shell_printf("  engine_status= 0x%08x\r\n",
-                     (unsigned)gr_engine_status);
-        shell_printf("\r\n");
-        return 0;
+        return cmd_nvgpu_engine_status();
     }
     if (strcmp(argv[1], "submit") == 0) {
         /* Phase 7: pushbuffer smoke test. */
@@ -5345,8 +5409,9 @@ oplib_stage_call:
     }
 
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
-              "channel | engine-status | submit | submit-compute | "
-              "launch-kernel | run-mnist | fecs | gpccs | pmu | run | "
+              "channel | engine-status | engine-clear | "
+              "submit | submit-compute | launch-kernel | "
+              "run-mnist | fecs | gpccs | pmu | run | "
               "gmmu <pushbuf | walk | walk-raw | "
               "alloc-page | alloc-page-synth | "
               "alloc-multi-synth | reuse-synth> | "
