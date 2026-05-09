@@ -5,18 +5,31 @@ multitasking on Jetson Orin Nano. Tracks issue **#380**.
 
 ---
 
-## Status (2026-05-08)
+## Status (2026-05-09)
 
 | Phase | Subject | Status |
 |-------|---------|--------|
-| 1 | Custom tegra234 TF-A patch (mirror of Pi 5's #134 / `0001-*`) | 🚧 next |
+| 1 | Custom tegra234 TF-A patch (mirror of Pi 5's #134 / `0001-*`) | ✅ landed (PR #746, hardware-verified) |
 | 2 | Dual-cluster MPIDR fold fix (#647) | ✅ landed |
-| 3 | `TIMER_IRQ` 30 → 26, restore CPU 0 idle WFI, regression | ☐🔗 |
+| 3 | `TIMER_IRQ` 30 → 26, restore CPU 0 idle WFI, regression | ✅ landed (PR #746) |
 
-Phase 0 (empirical full GIC dump) folded into Phase 1 instrumentation —
-Pi 5's PR #693 + the in-tree `tools/tfa-patches/0001-*` already proved
-the technique end-to-end and the only remaining unknowns are NVIDIA's
-specific BL31 layout, which the agent investigation answered.
+**Hardware verification (jetson-nano-2, 2026-05-09):** patched BL31
+flashed to both `A_secure-os` and `B_secure-os` slots via
+R36.4.4 BSP USB-recovery (`flash.sh -k {A,B}_secure-os
+jetson-orin-nano-devkit-super`). Linux boots cleanly, kexec to SLM-OS
+emits `[IRQ] Unhandled IRQ 198` in the boot log — direct evidence
+that hardware interrupts now deliver to NS-EL2 instead of trapping
+to EL3. The Pi 5 hardware-preemption path is now equivalent on
+Jetson. See user-memory `jetson_bl31_flash_path.md` for the
+end-to-end flash recipe and the three landmines (SGI scope,
+SCR_EL3.FIQ-vs-SDEI, `SPD=opteed` build flag) that were resolved
+during the hardware iteration.
+
+Phase 0 (empirical full GIC dump) was folded into Phase 1
+instrumentation — Pi 5's PR #693 + the in-tree
+`tools/tfa-patches/0001-*` already proved the technique end-to-end
+and the only remaining unknowns were NVIDIA's specific BL31 layout,
+which the agent investigation answered.
 
 ---
 
