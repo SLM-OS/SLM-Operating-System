@@ -103,12 +103,18 @@ static int rmsnorm_launch_shape(const struct operator_dispatch_args *args,
     out->block_x = RMSNORM_BLOCK_DIM;
     out->block_y = 1;
     out->block_z = 1;
-    /* register_count_v is conservatively set to 32. The actual SASS's
-     * register usage is in its `.nv.info` section; populating from
-     * that requires a SASS-header parser, deferred. 32 is a safe
-     * upper bound for this kernel's scalar work — the GPU will fail
-     * the dispatch loudly if too low. Tracked in #714 follow-on. */
-    out->register_count_v = 32;
+    /* register_count_v: bumped to 64 after observing the dispatch
+     * stall on Jetson with the original 32. The rmsnorm SASS
+     * (7680 B) has more register pressure than the simple write_cafe
+     * baseline this default came from — the FP16↔FP32 conversions
+     * + per-thread accumulator + tree-reduction pointers add up.
+     * 64 is still well under the SM's per-CTA cap (255 regs at
+     * blockDim 256 → 65280 regs total budget) and matches what
+     * nvcc's default codegen emits for similar 3-pointer reduction
+     * kernels. The actual SASS's register usage is in its
+     * `.nv.info` section; populating from that requires a SASS-
+     * header parser, deferred. */
+    out->register_count_v = 64;
     /* RmsNorm uses BLOCK_DIM (256) × float for the partial-sum
      * reduction buffer (1024 B) plus a single float for the
      * broadcast rms_inv (4 B). Round up to 2 KB to leave headroom

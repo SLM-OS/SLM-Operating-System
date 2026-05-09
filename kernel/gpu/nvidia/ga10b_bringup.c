@@ -2170,8 +2170,34 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
 
     uint32_t gp_put_start = g_handoff.initial_gp_put;
     uint32_t ring_mask = g_handoff.gpfifo_entries - 1u;
-    uint64_t pushbuf_phys = g_handoff.pushbuf_phys;
-    uint64_t pushbuf_gpu_va = g_handoff.pushbuf_gpu_va;
+
+    /* Pushbuffer ring-buffer offset (#732 follow-up): each dispatch
+     * advances `g_pushbuf_ring_offset` so consecutive calls write
+     * into different bytes of the pushbuf. The "first dispatch
+     * passes, second hangs" failure with a fixed offset 0 was
+     * suspected to be PBDMA caching the first dispatch's PB at
+     * those exact bytes; rotating the write offset eliminates that
+     * confound. Wraps when `offset + total_pb_bytes` would exceed
+     * `pushbuf_size`.
+     *
+     * Single-threaded contract: this static counter assumes only
+     * one caller of `ga10b_dispatch_v7_pipeline_inline` is in
+     * flight at a time. The shell verb is the only caller today,
+     * and `slm_oplib_dispatch` polls the trailing semaphore before
+     * returning, so a second invocation can't race the first.
+     * Same assumption applies to `g_qmd_pool_next_slot` above. If
+     * a future caller fires this from a Lua-thread or scheduler
+     * task, both counters need `_Atomic uint32_t` + a CAS update,
+     * or a spinlock around the entire dispatch. */
+    static uint32_t g_pushbuf_ring_offset = 0u;
+    if ((uint64_t)g_pushbuf_ring_offset + total_pb_bytes >
+            g_handoff.pushbuf_size) {
+        g_pushbuf_ring_offset = 0u;
+    }
+    uint64_t pushbuf_phys =
+        g_handoff.pushbuf_phys + g_pushbuf_ring_offset;
+    uint64_t pushbuf_gpu_va =
+        g_handoff.pushbuf_gpu_va + g_pushbuf_ring_offset;
     volatile uint64_t *gpfifo =
         (volatile uint64_t *)(uintptr_t)g_handoff.gpfifo_phys;
 
@@ -2363,6 +2389,13 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
     uint32_t prev_gp_get = g_handoff.initial_gp_get;
     g_handoff.initial_gp_put = new_gp_put;
     g_handoff.initial_gp_get = final_gp_get;
+
+    /* Advance the pushbuf ring offset so the next dispatch lands
+     * on fresh bytes. Round up to 256 B so each dispatch's PB
+     * region is well-separated (avoids any cacheline-aliasing
+     * concern in addition to PBDMA prefetch). */
+    g_pushbuf_ring_offset = (g_pushbuf_ring_offset +
+                              (uint32_t)total_pb_bytes + 255u) & ~255u;
 
     bool payload_matched =
         ga10b_poll_match(poll_val, GA10B_SEMA_RELEASE_PAYLOAD);

@@ -346,6 +346,36 @@ uint32_t ga10b_gmmu_free_tracker_count(void);
  */
 uint64_t ga10b_gmmu_discover_inst_block_phys(void);
 
+/* Discover the inherited channel's inst block by walking DRAM and
+ * cross-checking each candidate against a known (gpu_va, leaf_phys)
+ * pair from the channel handoff. Used as a fallback when
+ * `ga10b_gmmu_discover_inst_block_phys` (FECS_CURRENT_CTX) returns a
+ * stale pointer — observed on Jetson when Linux nvgpu replaced the
+ * inst-block-pointing memory between the helper's last channel
+ * activity and SLM-OS's first GMMU operation.
+ *
+ * Algorithm: for each 4 KB-aligned candidate in [scan_start..scan_end),
+ *   1. Quick filter: read PDB target/ptr at +0x200/+0x204; bail unless
+ *      PDB target is non-zero (bits 29:28 of word at +0x200) and the
+ *      PDB pointer lands inside DRAM.
+ *   2. Full check: walk the candidate for `known_gpu_va`. If the walk
+ *      succeeds (status = OK) and the resulting leaf phys matches
+ *      `expected_leaf_phys`, this is the channel's inst block.
+ *
+ * Caller supplies (known_gpu_va, expected_leaf_phys) from a handoff
+ * field with a guaranteed mapping — `g_handoff.pushbuf_gpu_va` and
+ * `g_handoff.pushbuf_phys` are the obvious pair (the helper's PB is
+ * always GMMU-mapped pre-kexec).
+ *
+ * Returns the matching inst_block_phys, or 0 if no match in range.
+ * Pure-logic — no MMIO, only DRAM reads. Bounded cost: scan range /
+ * 4 KB candidates, each at most one walk (5 page-table reads).
+ */
+uint64_t ga10b_gmmu_discover_inst_block_via_walk(uint64_t known_gpu_va,
+                                                  uint64_t expected_leaf_phys,
+                                                  uint64_t scan_start,
+                                                  uint64_t scan_end);
+
 /* Fire a GA10B GMMU TLB invalidate for the given PDB. Mirrors
  * `gm20b_fb_tlb_invalidate` in nvgpu (l4t-r36.4.4 fb_gm20b_fusa.c
  * — see ~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-fb_gm20b_fusa.c).

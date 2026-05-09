@@ -65,21 +65,38 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
         return -1;
     }
 
-    /* 2. Allocate a 4 KB cbuf page in the channel's GMMU. The
-     *    cbuf is read by the SASS via cbuf[0] reads at offsets
-     *    0x160 onward — see operator_dispatch.h::OPERATOR_CBUF0_BASE.
-     *    Caller-supplied flags=0 → no RO bit (the cbuf is read-only
-     *    from the GPU's perspective anyway, but leaving FLAG_RO off
-     *    matches the existing MNIST cbuf which the helper allocates
-     *    without RO too). */
+    /* 2. Get a cbuf page in the channel's GMMU. The cbuf is read by
+     *    the SASS via cbuf[0] reads at offsets 0x160 onward — see
+     *    operator_dispatch.h::OPERATOR_CBUF0_BASE.
+     *
+     *    Fast path: if the inherited handoff has a pre-staged cbuf
+     *    (helper allocated `cbuf_*` fields in the channel's GMMU
+     *    pre-kexec), use it directly. The cbuf is reused serially
+     *    across dispatches — slm_oplib_dispatch polls the trailing
+     *    semaphore before returning, so two dispatches can't race
+     *    on the cbuf bytes.
+     *
+     *    Slow path: post-kexec ga10b_gmmu_alloc, which requires a
+     *    correct inst_block_phys (currently unreliable on Jetson —
+     *    see oplib_pool.c::oplib_pool_stage_to_gpu for the same
+     *    architectural concern). */
     uint64_t cbuf_va = 0;
     uint64_t cbuf_phys = 0;
     void    *cbuf_cpu = NULL;
-    rc = ga10b_gmmu_alloc(inst_block_phys, 1u, 0u,
-                          &cbuf_va, &cbuf_cpu, &cbuf_phys);
-    if (rc < 0) {
-        uart_printf("[oplib-dispatch] cbuf alloc failed: rc=%d\n", rc);
-        return -1;
+    {
+        const struct ga10b_channel_handoff *hp = ga10b_bringup_handoff();
+        if (hp != NULL && hp->cbuf_gpu_va != 0 && hp->cbuf_phys != 0) {
+            cbuf_va  = hp->cbuf_gpu_va;
+            cbuf_phys = hp->cbuf_phys;
+            cbuf_cpu = (void *)(uintptr_t)hp->cbuf_phys;
+        } else {
+            rc = ga10b_gmmu_alloc(inst_block_phys, 1u, 0u,
+                                  &cbuf_va, &cbuf_cpu, &cbuf_phys);
+            if (rc < 0) {
+                uart_printf("[oplib-dispatch] cbuf alloc failed: rc=%d\n", rc);
+                return -1;
+            }
+        }
     }
 
     /* Zero the cbuf page so any unwritten bytes stay deterministic. */
