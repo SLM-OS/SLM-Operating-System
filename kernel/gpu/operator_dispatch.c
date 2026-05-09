@@ -127,7 +127,26 @@ static int rmsnorm_launch_shape(const struct operator_dispatch_args *args,
      * is tracked in the same #714 follow-on as register_count_v. */
     out->smem_size_bytes = 2048;
     out->slm_size_bytes  = 0;
-    out->barrier_count   = 0;
+    /* The rmsnorm kernel uses __syncthreads() between the
+     * partial-sum write and the tree-reduction read. nvcc on
+     * Ampere compiles __syncthreads() to BSSY/BSYNC (the
+     * Volta+ ITS-aware barrier intrinsic, replacing pre-Volta
+     * BAR.SYNC), which requires the QMD's BARRIER_COUNT field
+     * to reserve at least one barrier slot. With
+     * BARRIER_COUNT=0 the SM traps the BSSY with
+     * `illegal_instr_param` (warp_esr error 0x0b) on every warp
+     * that reaches the sync — the trap latches sticky exception
+     * state in gr_exception.gpc that blocks all subsequent
+     * COMPUTE_B method submissions on the channel. Diagnosed
+     * via the per-GPC exception probe: trapping PC was
+     * SASS_base + 0xb80, where the SASS bytes start with
+     * `1d 7b 00 00` matching the Ampere BSYNC opcode encoding.
+     *
+     * Each `__syncthreads()` requires one barrier slot. The
+     * rmsnorm kernel has a single sync point, so 1 suffices.
+     * gpu-kernel-mnist.c sets 3 for its HMMA WMMA shaders
+     * (load + mma_sync + store barriers). */
+    out->barrier_count   = 1;
     return 0;
 }
 

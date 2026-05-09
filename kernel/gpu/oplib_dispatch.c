@@ -107,13 +107,52 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
         }
     }
 
-    /* 3. Populate cbuf via the registered builder. Builder writes
-     *    at `cbuf_cpu + OPERATOR_CBUF0_BASE` for the op's arg
-     *    layout. Verifies args->op_kind matches op_kind here. */
+    /* 3. Compute the launch shape (grid/block/regs/smem/...). The
+     *    shape is needed before the cbuf write so the CUDA builtin-
+     *    dim slot (cbuf[0][0x00..0x14]) can carry the right values
+     *    — see step 4. */
+    struct operator_launch_shape shape;
+    rc = operator_dispatch_launch_shape(args, &shape);
+    if (rc != 0) {
+        uart_printf("[oplib-dispatch] launch_shape failed: rc=%d\n", rc);
+        return -1;
+    }
+
+    /* 4. Populate cbuf. CUDA-compiled SASS reads blockDim and
+     *    gridDim from cbuf[0] at fixed offsets:
+     *      [0x00] blockDim.x  uint32_t
+     *      [0x04] blockDim.y  uint32_t
+     *      [0x08] blockDim.z  uint32_t
+     *      [0x0C] gridDim.x   uint32_t
+     *      [0x10] gridDim.y   uint32_t
+     *      [0x14] gridDim.z   uint32_t
+     *    Helper kernels that ship through scripts/gpu-launch-
+     *    common.c call gpu_write_builtin_dims() to populate these
+     *    slots. The operator-library dispatcher must do the same;
+     *    leaving them zero made the rmsnorm SASS trap with
+     *    `illegal_instr_param` (see PR #744 follow-up — first
+     *    dispatch produced bit-exact output because non-trapping
+     *    warps completed the reduction, but the trap latched
+     *    sticky exception state that blocked subsequent dispatches
+     *    via gr_exception.gpc).
+     *
+     *    The per-op builder then writes its kernel args at
+     *    OPERATOR_CBUF0_BASE (0x160), beyond the builtin-dim
+     *    region — verified mismatch via operator_dispatch.h
+     *    static_asserts. */
     if (args->op_kind != op_kind) {
         uart_printf("[oplib-dispatch] args->op_kind=%u != op_kind=%u\n",
                     (unsigned)args->op_kind, (unsigned)op_kind);
         return -1;
+    }
+    {
+        volatile uint32_t *bdim = (volatile uint32_t *)cbuf_cpu;
+        bdim[0] = shape.block_x;   /* 0x00 blockDim.x */
+        bdim[1] = shape.block_y;   /* 0x04 blockDim.y */
+        bdim[2] = shape.block_z;   /* 0x08 blockDim.z */
+        bdim[3] = shape.grid_x;    /* 0x0C gridDim.x  */
+        bdim[4] = shape.grid_y;    /* 0x10 gridDim.y  */
+        bdim[5] = shape.grid_z;    /* 0x14 gridDim.z  */
     }
     rc = operator_dispatch_build_cbuf(cbuf_cpu, args);
     if (rc != 0) {
@@ -121,14 +160,6 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
         return -1;
     }
     cache_clean_range(cbuf_cpu, 4096);
-
-    /* 4. Compute the launch shape (grid/block/regs/smem/...). */
-    struct operator_launch_shape shape;
-    rc = operator_dispatch_launch_shape(args, &shape);
-    if (rc != 0) {
-        uart_printf("[oplib-dispatch] launch_shape failed: rc=%d\n", rc);
-        return -1;
-    }
 
     /* DSB SY so the cbuf bytes + page-table publication that
      * ga10b_gmmu_alloc already issued are both visible to the GPU
