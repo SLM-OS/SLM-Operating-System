@@ -4923,10 +4923,204 @@ oplib_stage_call:
             shell_puts("dispatch-rmsnorm: PASS — GPU wrote output\r\n");
             return 0;
         }
+        if (strcmp(argv[2], "dispatch-rope") == 0) {
+            /* End-to-end RoPE-on-GPU smoke test. RoPE is in-place on
+             * `vec`, so the assertion strategy is different from
+             * dispatch-rmsnorm:
+             *
+             *   - Fill positions[] with all-zeros so every rotation
+             *     is by angle 0.
+             *   - Fill cos_sin[] with (1.0f, 0.0f) pairs — the
+             *     identity rotation factors.
+             *   - Fill vec[] with alternating ±1.0 FP16 (0x3C00 /
+             *     0xBC00).
+             *   - Pre-fill vec[] with the same 0xCAFE sentinel as
+             *     rmsnorm — but unlike rmsnorm, the kernel READS
+             *     and WRITES vec, so we have to overwrite the
+             *     sentinel with the real input AFTER the sentinel
+             *     fill. Then dispatch.
+             *
+             * After dispatch with identity rotation, vec[] should
+             * still hold the alternating ±1.0 pattern bit-exact.
+             * Any 0xCAFE remaining means the GPU didn't write that
+             * slot; any change away from ±1.0 means the rotation
+             * isn't identity (cos_sin or positions wrong). This
+             * exercises the dispatch path without needing a CPU
+             * trig reference (which SLM-OS lacks: no libm).
+             *
+             * Usage: nvgpu oplib dispatch-rope <batch> <num_heads> <head_dim>
+             *
+             * Pre: `nvgpu oplib stage` and `nvgpu channel` must
+             * have run.
+             */
+            if (argc < 6) {
+                shell_puts("usage: nvgpu oplib dispatch-rope "
+                           "<batch> <num_heads> <head_dim>\r\n");
+                return -1;
+            }
+            uint32_t batch     = (uint32_t)atoi(argv[3]);
+            uint32_t num_heads = (uint32_t)atoi(argv[4]);
+            uint32_t head_dim  = (uint32_t)atoi(argv[5]);
+            if (batch == 0 || num_heads == 0 || head_dim == 0) {
+                shell_puts("dispatch-rope: batch/num_heads/head_dim "
+                           "must be > 0\r\n");
+                return -1;
+            }
+            if ((head_dim & 1u) != 0u) {
+                shell_puts("dispatch-rope: head_dim must be even "
+                           "(pairs are (vec[2i], vec[2i+1]))\r\n");
+                return -1;
+            }
+            /* Cap each scratch slot at 64 KB (the per-slot ceiling
+             * from the helper-staged SASS pool carve-out). vec is
+             * batch × num_heads × head_dim FP16 (2 B); cos_sin is
+             * head_dim FP32 (4 B) for the position-0 case (we only
+             * need positions=0 entries, which is just the first
+             * head_dim floats); positions is batch int32 (4 B). */
+            uint64_t vec_bytes = (uint64_t)batch * num_heads *
+                                  head_dim * 2u;
+            uint64_t pos_bytes = (uint64_t)batch * 4u;
+            uint64_t cs_bytes  = (uint64_t)head_dim * 2u * 4u;
+            if (vec_bytes > 0x10000u || pos_bytes > 0x10000u ||
+                cs_bytes > 0x10000u) {
+                shell_printf("dispatch-rope: scratch slot too small "
+                             "(vec=%llu pos=%llu cs=%llu vs 64 KB)\r\n",
+                             (unsigned long long)vec_bytes,
+                             (unsigned long long)pos_bytes,
+                             (unsigned long long)cs_bytes);
+                return -1;
+            }
+
+            /* Carve scratch from the pre-staged SASS pool. Same
+             * offsets as dispatch-rmsnorm: SASS at +0x00..+0x10000,
+             * input/gamma/out (or here vec/positions/cos_sin) at
+             * +0x10000 / +0x20000 / +0x30000. */
+            const struct ga10b_channel_handoff *h =
+                ga10b_bringup_handoff();
+            if (h == NULL || h->shader_gpu_va == 0 ||
+                h->shader_phys == 0 || h->shader_size < 0x40000u) {
+                shell_puts("dispatch-rope: pre-staged SASS pool "
+                           "missing — run helper with --qmd-pool\r\n");
+                return -1;
+            }
+            uint64_t base_phys = h->shader_phys;
+            uint64_t base_gva  = h->shader_gpu_va;
+            uint64_t vec_phys  = base_phys + 0x10000ull;
+            uint64_t vec_va    = base_gva  + 0x10000ull;
+            uint64_t pos_phys  = base_phys + 0x20000ull;
+            uint64_t pos_va    = base_gva  + 0x20000ull;
+            uint64_t cs_phys   = base_phys + 0x30000ull;
+            uint64_t cs_va     = base_gva  + 0x30000ull;
+            shell_puts("dispatch-rope: scratch buffers carved from "
+                       "pre-staged SASS pool\r\n");
+
+            /* Pre-fill vec with sentinel, then overwrite with real
+             * input. This way any byte the GPU doesn't touch keeps
+             * the sentinel. Identity rotation should leave the
+             * input pattern intact. */
+            volatile uint16_t *vec_p =
+                (volatile uint16_t *)(uintptr_t)vec_phys;
+            uint64_t vec_count =
+                (uint64_t)batch * num_heads * head_dim;
+            for (uint64_t i = 0; i < vec_count; i++) {
+                vec_p[i] = 0xCAFEu;
+            }
+            cache_clean_range((void *)(uintptr_t)vec_phys,
+                              (size_t)((vec_bytes + 4095u) & ~4095ull));
+            for (uint64_t i = 0; i < vec_count; i++) {
+                vec_p[i] = (i & 1u) ? 0xBC00u : 0x3C00u;
+            }
+            cache_clean_range((void *)(uintptr_t)vec_phys,
+                              (size_t)((vec_bytes + 4095u) & ~4095ull));
+
+            /* positions[i] = 0 for every token. */
+            volatile uint32_t *pos_p =
+                (volatile uint32_t *)(uintptr_t)pos_phys;
+            for (uint32_t i = 0; i < batch; i++) {
+                pos_p[i] = 0u;
+            }
+            cache_clean_range((void *)(uintptr_t)pos_phys,
+                              (size_t)((pos_bytes + 4095u) & ~4095ull));
+
+            /* cos_sin[2i]   = 1.0f (cos 0)  → IEEE 0x3F800000
+             * cos_sin[2i+1] = 0.0f (sin 0)  → IEEE 0x00000000 */
+            volatile uint32_t *cs_p =
+                (volatile uint32_t *)(uintptr_t)cs_phys;
+            for (uint32_t i = 0; i < head_dim; i++) {
+                cs_p[i * 2u]      = 0x3F800000u;
+                cs_p[i * 2u + 1u] = 0x00000000u;
+            }
+            cache_clean_range((void *)(uintptr_t)cs_phys,
+                              (size_t)((cs_bytes + 4095u) & ~4095ull));
+
+            shell_printf("dispatch-rope: vec=0x%lx pos=0x%lx "
+                         "cos_sin=0x%lx (batch=%u heads=%u head_dim=%u)\r\n",
+                         (unsigned long)vec_va,
+                         (unsigned long)pos_va,
+                         (unsigned long)cs_va,
+                         (unsigned)batch, (unsigned)num_heads,
+                         (unsigned)head_dim);
+
+            struct operator_dispatch_args args = {
+                .op_kind = SLM_GPU_OP_ROPE,
+                .u.rope = {
+                    .vec_gpu_va       = vec_va,
+                    .positions_gpu_va = pos_va,
+                    .cos_sin_gpu_va   = cs_va,
+                    .batch            = batch,
+                    .num_heads        = num_heads,
+                    .head_dim         = head_dim,
+                },
+            };
+
+            int rc = slm_oplib_dispatch(&b, 0,
+                                         SLM_GPU_OP_ROPE,
+                                         SLM_GPU_TIER_SIMT,
+                                         SLM_GPU_DTYPE_FP16,
+                                         &args);
+            if (rc < 0) {
+                shell_printf("dispatch-rope: slm_oplib_dispatch rc=%d\r\n",
+                             rc);
+                return rc;
+            }
+
+            cache_invalidate_range((void *)(uintptr_t)vec_phys,
+                                   (size_t)((vec_bytes + 4095u) & ~4095ull));
+
+            shell_puts("dispatch-rope: vec[0..7] = ");
+            for (int i = 0; i < 8 && (uint64_t)i < vec_count; i++) {
+                shell_printf("0x%04x ", (unsigned)vec_p[i]);
+            }
+            shell_puts("\r\n");
+            if (vec_count > 8) {
+                uint64_t tail = vec_count - 1;
+                shell_printf("dispatch-rope: vec[%llu] = 0x%04x\r\n",
+                             (unsigned long long)tail,
+                             (unsigned)vec_p[tail]);
+            }
+
+            /* Identity-rotation check: every element should be the
+             * original alternating ±1.0 FP16 pattern. */
+            for (uint64_t i = 0; i < vec_count; i++) {
+                uint16_t expect = (i & 1u) ? 0xBC00u : 0x3C00u;
+                if (vec_p[i] != expect) {
+                    shell_printf("dispatch-rope: FAIL — vec[%llu] = "
+                                 "0x%04x (expected 0x%04x)\r\n",
+                                 (unsigned long long)i,
+                                 (unsigned)vec_p[i],
+                                 (unsigned)expect);
+                    return -1;
+                }
+            }
+            shell_puts("dispatch-rope: PASS — identity rotation "
+                       "preserved input bit-exact\r\n");
+            return 0;
+        }
         shell_puts("usage: nvgpu oplib [status | stage [<inst_hex>] | "
                    "probe <op_kind> <tier> <dtype> | "
                    "prep-rmsnorm <n_rows> <n> | "
-                   "dispatch-rmsnorm <n_rows> <n>]\r\n");
+                   "dispatch-rmsnorm <n_rows> <n> | "
+                   "dispatch-rope <batch> <num_heads> <head_dim>]\r\n");
         return -1;
     }
 

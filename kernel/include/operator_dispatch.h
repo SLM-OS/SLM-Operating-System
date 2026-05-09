@@ -71,6 +71,23 @@
 #define RMSNORM_CBUF_OFFSET_EPS      0x1Cu
 #define RMSNORM_BLOCK_DIM            256u
 
+/* ROPE (scripts/cuda/rope_f16.cu):
+ *   [0x160 + 0x00] vec        half *           (in/out)
+ *   [0x160 + 0x08] positions  const int *
+ *   [0x160 + 0x10] cos_sin    const float *
+ *   [0x160 + 0x18] batch      int
+ *   [0x160 + 0x1C] num_heads  int
+ *   [0x160 + 0x20] head_dim   int
+ * Launch shape: grid=(batch * num_heads, 1, 1) block=(head_dim/2, 1, 1).
+ * One block per (token, head); one thread per pair within head_dim.
+ * Element-wise: no shared memory, no syncthreads, no SLM. */
+#define ROPE_CBUF_OFFSET_VEC         0x00u
+#define ROPE_CBUF_OFFSET_POSITIONS   0x08u
+#define ROPE_CBUF_OFFSET_COS_SIN     0x10u
+#define ROPE_CBUF_OFFSET_BATCH       0x18u
+#define ROPE_CBUF_OFFSET_NUM_HEADS   0x1Cu
+#define ROPE_CBUF_OFFSET_HEAD_DIM    0x20u
+
 /* Per-op runtime arguments. Different op_kinds have different
  * argument shapes; the registry's cbuf-builder dispatches on
  * op_kind to pick which sub-struct to read. */
@@ -92,6 +109,16 @@ struct operator_dispatch_args_rmsnorm {
     uint32_t eps_bits;
 };
 
+struct operator_dispatch_args_rope {
+    uint64_t vec_gpu_va;      /* in/out  [batch × num_heads × head_dim] FP16 */
+    uint64_t positions_gpu_va;/* [batch] int32 — token position per row */
+    uint64_t cos_sin_gpu_va;  /* [max_pos × head_dim] FP32 — interleaved
+                               * (cos, sin, cos, sin, ...) precomputed table */
+    uint32_t batch;           /* number of tokens */
+    uint32_t num_heads;       /* heads per token (n_head_q on Q, n_head_kv on K) */
+    uint32_t head_dim;        /* must be even — pairs are (vec[2i], vec[2i+1]) */
+};
+
 /* Tagged-union arg holder. The dispatcher fills the right sub-struct
  * based on the op_kind, then hands a pointer-to-union to the cbuf
  * builder which already knows which member to read. Keeping this
@@ -101,6 +128,7 @@ struct operator_dispatch_args {
     uint32_t op_kind;
     union {
         struct operator_dispatch_args_rmsnorm rmsnorm;
+        struct operator_dispatch_args_rope    rope;
     } u;
 };
 
