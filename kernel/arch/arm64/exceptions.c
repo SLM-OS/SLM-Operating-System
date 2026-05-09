@@ -387,7 +387,18 @@ void el1_irq_handler(void)
             h();
             return;
         }
-        uart_printf("[IRQ] Unhandled IRQ %u\n", irq);
+        /*
+         * No handler. Print once, then mask this INTID at the GIC so
+         * a level-high source (e.g. a stale Tegra234 xudc IRQ — SPI
+         * 166 / INTID 198 — inherited from Linux's pre-kexec state)
+         * cannot storm us. Subsequent reassertion remains pending at
+         * the distributor but never propagates to a CPU; if a driver
+         * ever does register a handler for this INTID it will need
+         * to gic_enable_irq() it first. Self-heals every "Linux had
+         * it on, SLM-OS doesn't claim it" inheritance case.
+         */
+        uart_printf("[IRQ] Unhandled IRQ %u — masking at GIC\n", irq);
+        gic_disable_irq(irq);
         break;
     }
     }
