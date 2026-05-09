@@ -53,30 +53,35 @@ additionally requires:
 
 ## Capability Matrix
 
+Legend below the matrix: ✅ shipped · 🟡 partial · ❌ explicitly out-of-scope on this platform
+
 | Sub-capability | QEMU (ARM64) | Pi 5 | Jetson Orin Nano | x86-64 |
 |---|---|---|---|---|
-| GGUF model upload via VFS | ✅ goal (via existing `model load`) | ✅ goal (constrained by RAM) | ✅ **primary target** | 🟡 if VFS reachable |
-| INT4 / Q4_K_M weight format | ✅ goal | ✅ goal | ✅ goal | 🟡 |
-| Transformer op set (RMSNorm, RoPE, GQA, SwiGLU) | ✅ goal | ✅ goal | ✅ goal | 🟡 SSE port |
-| KV-cache backed by `model_mem` workspace pool | ✅ goal | ✅ goal | ✅ goal | 🟡 |
-| BBPE tokenizer (Qwen vocab) | ✅ goal | ✅ goal | ✅ goal | 🟡 |
-| Autoregressive decode loop | ✅ goal | ✅ goal | ✅ goal | 🟡 |
-| Streaming output to UART (token-by-token) | ✅ goal | ✅ goal | ✅ goal | 🟡 |
-| `slm load / launch / prompt / status / unload` shell verbs | ✅ goal | ✅ goal | ✅ goal | 🟡 |
-| CPU NEON kernels (Q4 dot, RMSNorm, RoPE, SwiGLU) | ✅ goal | ✅ goal | ✅ goal | n/a (use SSE) |
-| GPU acceleration via kexec-handoff bridge (Option C) | ❌ N/A | ❌ N/A | ✅ **goal — extends MNIST bridge** | ❌ N/A |
-| GPU acceleration native (in-house GA10B driver, Option A) | ❌ N/A | ❌ N/A | 🟡 stretch, follows nvgpu phases 6–8 | ❌ N/A |
-| **GPU tensor-core (HMMA FP16) utilization** for matmul-heavy ops | ❌ N/A | ❌ N/A | ✅ **goal — main-line** | ❌ N/A |
+| GGUF model upload via VFS / `slm xload` | ✅ via `slm load` / `slm xload` | ✅ (constrained by RAM) | ✅ **primary target** — Jetson ramdisk raised to 1.25 GB to fit 1.04 GB Q4_K_M (#608) | 🟡 if VFS reachable |
+| GGUF v3 parser | ✅ in `runtime/src/slm/gguf.rs` | ✅ | ✅ | ✅ |
+| Q4_K_M dequant + vec_dot | ✅ NEON SDOT path (3.3× speedup vs scalar) | ✅ | ✅ | 🟡 SSE scalar |
+| Multi-quant dispatch (Q4_0, Q4_K, Q5_0, Q6_K, Q8_0) | ✅ per-tensor dispatch | ✅ | ✅ | 🟡 |
+| Transformer op set (RMSNorm, RoPE, GQA, SwiGLU) | ✅ shipped | ✅ | ✅ | 🟡 SSE port |
+| KV-cache | ✅ on Rust heap today (workspace-pool migration is M5) | ✅ | ✅ | 🟡 |
+| BBPE tokenizer (Qwen vocab) + GPT-2 byte-to-unicode encode/decode | ✅ shipped | ✅ | ✅ | 🟡 |
+| Autoregressive decode loop | ✅ shipped | ✅ | ✅ | 🟡 |
+| Streaming output to UART (token-by-token) | ✅ shipped | ✅ | ✅ | 🟡 |
+| `slm load / launch / prompt / status / unload / xload` shell verbs | ✅ shipped | ✅ | ✅ | 🟡 |
+| Task stack large enough for SLM forward (256 KB, was 64 KB pre-#643) | ✅ shipped | ✅ | ✅ | ✅ |
+| Rust runtime heap raised for Qwen2.5-1.5B (#634) | ✅ default 128 MB | ✅ 128 MB | ✅ **256 MB** to fit Qwen + KV | ✅ |
+| GPU acceleration via channel-inherit + GA10B v7 dispatch loop | ❌ N/A | ❌ N/A | ✅ shipped — `gpu use inference on` runs MNIST MLP through HMMA SASS | ❌ N/A |
+| GPU acceleration via kexec-handoff bridge (legacy Option C) | ❌ N/A | ❌ N/A | 🟡 superseded by the channel-preserving kexec path (PR #740 default) | ❌ N/A |
+| GPU acceleration native (in-house GA10B driver, Option A) | ❌ N/A | ❌ N/A | 🟡 GMMU + dispatcher landed (#666 / #714 / #732 / #737); transformer-op coverage incomplete | ❌ N/A |
+| **GPU tensor-core (HMMA FP16) utilization** for matmul ops | ❌ N/A | ❌ N/A | ✅ shipped end-to-end — MNIST cross-dispatch coherency closed (#710 / #722 / #727) | ❌ N/A |
+| Operators ported to GA10B GPU | ❌ N/A | ❌ N/A | RMSNORM, GQA_ATTN FP16 (#540), EMBEDDING.Q4K FP16 (#540), HMMA matmul, MNIST MLP | ❌ N/A |
+| Operators still CPU-only on Jetson | ❌ N/A | ❌ N/A | RoPE, SwiGLU (down-projection), LM-head (full transformer chain not yet GPU-resident) | ❌ N/A |
 | GPU tensor-core (IMMA INT8) end-to-end | ❌ N/A | ❌ N/A | ⏸️ deferred follow-up (needs INT8 activations) | ❌ N/A |
-| Per-token latency / TTFT / throughput telemetry | ✅ goal | ✅ goal | ✅ goal | 🟡 |
+| Per-token latency / TTFT / throughput telemetry | ✅ | ✅ | ✅ | 🟡 |
 | Big.LITTLE-aware decode-thread placement | ❌ uniform | ❌ uniform | ✅ goal (6× A78AE, dual-cluster) | n/a |
-| LRU model eviction (reuses Phase-5 registry) | ✅ inherited | ✅ inherited | ✅ inherited | ✅ inherited |
-| `slm-runner` component (EL0-isolated decode service) | ✅ goal | 🟡 inherited isolation status | 🟡 inherited isolation status | ❌ EL0 unwired |
-| Sampler (temperature, top-k, top-p) | ✅ goal | ✅ goal | ✅ goal | 🟡 |
-| Chat template renderer (Qwen ChatML) | ✅ goal | ✅ goal | ✅ goal | 🟡 |
-
-Legend: ✅ in-scope deliverable for this spec · 🟡 partial / inherited /
-deferred · ❌ explicitly out-of-scope on this platform
+| LRU model eviction (reuses Phase-5 registry) | ✅ | ✅ | ✅ | ✅ |
+| `slm-runner` component (EL0-isolated decode service) | 🟡 EL0 task primitives shipped (#697/#731/#734); component-runtime EL0 wiring TBD | 🟡 same | 🟡 same | ❌ EL0 unwired |
+| Sampler (temperature, top-k, top-p) | ✅ | ✅ | ✅ | 🟡 |
+| Chat template renderer (Qwen ChatML) | ✅ | ✅ | ✅ | 🟡 |
 
 ---
 
@@ -582,4 +587,4 @@ callback pattern already used for inference probability output.
   bump, SASS kernel library, golden-vector test harness, `slm-runner`
   component manifest
 
-*Last updated: 27 April 2026*
+*Last updated: 8 May 2026*

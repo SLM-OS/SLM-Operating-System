@@ -36,9 +36,9 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 | Boot to shell | ✅ | ✅ | ✅ | ✅ | [boot.md](boot.md) |
 | SMP | ✅ 4 cores | ✅ 4 cores | ✅ 6 cores | ✅ 8 cores | [smp.md](smp.md) |
 | Memory management | ✅ | ✅ | ✅ | ✅ | [memory.md](memory.md) |
-| Preemptive multitasking | ✅ HW | 🟡 cooperative | 🟡 cooperative | ✅ HW | [preemption.md](preemption.md) |
+| Preemptive multitasking | ✅ HW | ✅ HW (opt-in `SECONDARY_PREEMPT=ON`) / 🟡 cooperative (default) | 🟡 cooperative | ✅ HW | [preemption.md](preemption.md) |
 | Networking | ✅ DHCP + ping | ✅ DHCP + ping | ✅ DHCP + ping (USB CDC-ECM) | ✅ DHCP + ping | [networking.md](networking.md) |
-| GPU / accelerator inference | — | ✅ Hailo-8 NPU | ✅ | ✅ | [gpu-inference.md](gpu-inference.md) |
+| GPU / accelerator inference | — | ✅ Hailo-8 NPU | ✅ GA10B HMMA + dispatcher | ✅ | [gpu-inference.md](gpu-inference.md) |
 | Storage / filesystem | ✅ RAM disk + LittleFS | ✅ | ✅ | ✅ | [storage.md](storage.md) |
 | Shell / observability | ✅ | ✅ | ✅ | ✅ | [shell.md](shell.md) |
 | AI task scheduler | ✅ NEON | ✅ NEON | ✅ NEON | ✅ SSE | [ai-scheduler.md](ai-scheduler.md) |
@@ -63,4 +63,4 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 - [`../design/`](../design/) — design specs and engineering proposals (forward-looking).
 - [`../contracts/`](../contracts/) — stable interface contracts (e.g. runtime blob formats, device-file layout).
 
-*Last updated: 8 May 2026*
+*Last updated: 8 May 2026 (post-#742, post-oplib-dispatcher, post-fact-sheets refactor)*
