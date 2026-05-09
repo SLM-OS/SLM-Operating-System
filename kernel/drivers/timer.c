@@ -65,13 +65,27 @@ static inline uint64_t read_cntpct(void)
  * ignored. The VHE `_EL1`→`_EL2` register-name redirect does not
  * cover the `_EL0` names, so writing `CNTP_CTL_EL0` here would be a
  * no-op and the timer would never fire. The Hyp Physical Timer's
- * `CNTHP_*_EL2` registers ARE what the Pi firmware wires to PPI 26,
+ * `CNTHP_*_EL2` registers ARE what the firmware wires to PPI 26,
  * and they have the same bit layout as the `CNTP_*_EL0` versions,
- * so on Pi 5 we drive them directly while QEMU + Jetson + x86 keep
- * using the `_EL0` names from EL1 where the access is well-defined. */
+ * so on Pi 5 we drive them directly while QEMU + x86 keep using the
+ * `_EL0` names from EL1 where the access is well-defined.
+ *
+ * Jetson runs at NS-EL2/VHE post-kexec exactly like Pi 5 — the same
+ * RES0 rule applies. Under JETSON_HW_TICK=ON we take the Pi 5 path
+ * (cnthp_*_el2 + PPI 26); without that flag the kernel-side code is
+ * inert (stock NVIDIA BL31 leaves PPIs Group 0 → trapped to EL3, so
+ * no timer IRQ delivers regardless), but we still need to avoid the
+ * RES0 write — without JETSON_HW_TICK we don't program the timer at
+ * all on Jetson, leaving COOP_PREEMPT to drive ticks at yield points.
+ */
+#if defined(PLATFORM_RASPI5) || \
+    (defined(PLATFORM_JETSON_ORIN_NANO) && defined(JETSON_HW_TICK))
+#define SLMOS_TIMER_USES_CNTHP_EL2 1
+#endif
+
 static inline void write_timer_ctl(uint64_t val)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(SLMOS_TIMER_USES_CNTHP_EL2)
     __asm__ volatile("msr cnthp_ctl_el2, %0" :: "r"(val));
 #else
     __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"(val));
@@ -80,7 +94,7 @@ static inline void write_timer_ctl(uint64_t val)
 
 static inline void write_timer_tval(int64_t val)
 {
-#if defined(PLATFORM_RASPI5)
+#if defined(SLMOS_TIMER_USES_CNTHP_EL2)
     __asm__ volatile("msr cnthp_tval_el2, %0" :: "r"(val));
 #else
     __asm__ volatile("msr cntp_tval_el0, %0" :: "r"(val));

@@ -144,8 +144,29 @@
 #define GIC_REDIST_BASE     0x0F440000UL    /* GICR (per-CPU redistributors) */
 #define GIC_REDIST_SIZE     0x00200000UL    /* 2 MB (covers all CPUs) */
 
-/* Timer - ARM Generic Timer */
-#define TIMER_IRQ           30              /* PPI 14 — NS Phys Timer (CNTP_*_EL0), same as QEMU */
+/* Timer - ARM Generic Timer.
+ *
+ * SLM-OS boots at EL2/VHE on Jetson (kexec-from-Linux entry path
+ * leaves the CPU at EL2; `boot.S` enables HCR_EL2.E2H/TGE before
+ * jumping to C). Two timer IRQ configurations:
+ *
+ *   - JETSON_HW_TICK=ON  (requires patched BL31 from
+ *     tools/tfa-patches/0004-*.patch): TIMER_IRQ = 26 (PPI 10 =
+ *     Hyp Physical Timer / CNTHP). Mirrors Pi 5's #693/#742 path.
+ *     timer.c writes cnthp_ctl_el2 / cnthp_tval_el2 directly
+ *     (CNTP_*_EL0 from EL2 with E2H=1 are RES0). PPI 26 is
+ *     Group 1 NS only after the BL31 patch promotes PPIs/SGIs;
+ *     stock NVIDIA BL31 leaves it Group 0 → trapped to EL3.
+ *   - JETSON_HW_TICK=OFF (default): TIMER_IRQ = 30 (PPI 14 = NS
+ *     Phys Timer). Inert — stock TF-A doesn't route NS PPIs to
+ *     EL2 either, so this only exists for build symmetry. The
+ *     COOP_PREEMPT path in sched.c drives ticks at yield points.
+ */
+#if defined(JETSON_HW_TICK)
+#define TIMER_IRQ           26              /* PPI 10 — Hyp Phys Timer (CNTHP), needs patched BL31 */
+#else
+#define TIMER_IRQ           30              /* PPI 14 — NS Phys Timer; inert under stock BL31 (COOP_PREEMPT carries) */
+#endif
 
 /* CPU configuration */
 #define CPU_MAX             6               /* 6x Cortex-A78AE */
