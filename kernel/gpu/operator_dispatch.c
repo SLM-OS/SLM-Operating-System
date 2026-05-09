@@ -103,17 +103,21 @@ static int rmsnorm_launch_shape(const struct operator_dispatch_args *args,
     out->block_x = RMSNORM_BLOCK_DIM;
     out->block_y = 1;
     out->block_z = 1;
-    /* register_count_v: bumped to 64 after observing the dispatch
-     * stall on Jetson with the original 32. The rmsnorm SASS
-     * (7680 B) has more register pressure than the simple write_cafe
-     * baseline this default came from — the FP16↔FP32 conversions
-     * + per-thread accumulator + tree-reduction pointers add up.
-     * 64 is still well under the SM's per-CTA cap (255 regs at
-     * blockDim 256 → 65280 regs total budget) and matches what
-     * nvcc's default codegen emits for similar 3-pointer reduction
-     * kernels. The actual SASS's register usage is in its
-     * `.nv.info` section; populating from that requires a SASS-
-     * header parser, deferred. */
+    /* register_count_v: 64.
+     *
+     * History: 32 → 64 (PR #744) made dispatch #1 fire
+     *          end-to-end; 64 → 128 (this branch) was tested as
+     *          a candidate fix for the repeat-dispatch hang and
+     *          made no difference. The SM's `illegal_instr_param`
+     *          trap fires on multiple warps regardless of
+     *          register count; the actual SASS's register usage
+     *          is in its `.nv.info` section, but the trap is
+     *          rooted in something we're feeding the QMD/launch
+     *          setup that the SM rejects, not a too-low reg
+     *          count. Reverting to 64 as the known-working
+     *          baseline pending a SASS-header parser and a
+     *          systematic comparison against a working CUDA
+     *          invocation's QMD bytes. */
     out->register_count_v = 64;
     /* RmsNorm uses BLOCK_DIM (256) × float for the partial-sum
      * reduction buffer (1024 B) plus a single float for the
