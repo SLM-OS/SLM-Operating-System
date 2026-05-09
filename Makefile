@@ -389,9 +389,19 @@ tfa-jetson: $(TFA_JETSON_BL31_BIN)
 
 $(TFA_JETSON_BL31_BIN): tfa-jetson-prepare
 	@echo "Building TF-A bl31 for tegra234..."
+	@# Mirror NVIDIA's L4T `source/nvbuild.sh` build invocation: the
+	@# `SPD=opteed` selector wires up BL31's Secure Payload Dispatcher
+	@# so OP-TEE's SMC calls (boot-time init incl. QSPI0 driver setup)
+	@# resolve to handlers. Building without it produces a BL31 that
+	@# silently breaks OP-TEE → first OP-TEE-side QSPI0 access faults
+	@# at 0x03270000 → RAS Uncorrectable in IOB/ACI → core powers off.
+	@# `BRANCH_PROTECTION=3 ARM_ARCH_MINOR=3` enables PAC, matching the
+	@# stock build so any future cross-compare against `nvbuild.sh`
+	@# output is meaningful.
 	@PATH=$(TFA_TOOLCHAIN):$$PATH $(MAKE) -C $(TFA_JETSON_DIR) \
 		PLAT=tegra TARGET_SOC=t234 CROSS_COMPILE=aarch64-none-elf- \
-		DEBUG=0 LOG_LEVEL=40 LDFLAGS="$(TFA_JETSON_LDFLAGS)" \
+		SPD=opteed BRANCH_PROTECTION=3 ARM_ARCH_MINOR=3 \
+		DEBUG=0 LOG_LEVEL=20 LDFLAGS="$(TFA_JETSON_LDFLAGS)" \
 		-j4 bl31
 
 # `safe.directory=*` because the L4T tree may live under a symlinked

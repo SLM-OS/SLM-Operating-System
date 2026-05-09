@@ -1,4 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 0b9bf7a52010210c3274d42fe99d2db6b964e47b Mon Sep 17 00:00:00 2001
 From: John Jezl <john@jezl.com>
 Date: Fri, 8 May 2026 00:00:00 -0700
 Subject: [PATCH] SLM-OS Jetson Orin Nano (tegra234) IRQ routing patches
@@ -49,42 +49,46 @@ Build:
 
 Refs SLM-OS issue #380 (Jetson preemption restoration), mirrors the
 Pi 5 0001-SLM-OS-Pi-5-IRQ-routing-patches.patch landed via #134.
-
 ---
- lib/el3_runtime/aarch64/context_mgmt.c      | 16 +++++++++++++
- plat/nvidia/tegra/common/tegra_gicv3.c      | 25 +++++++++++++++++++++
- plat/nvidia/tegra/soc/t234/platform_t234.mk |  7 ++++++
- 3 files changed, 48 insertions(+)
+ lib/el3_runtime/aarch64/context_mgmt.c      | 21 ++++++++++++++
+ plat/nvidia/tegra/common/tegra_gicv3.c      | 31 +++++++++++++++++++++
+ plat/nvidia/tegra/soc/t234/platform_t234.mk |  7 +++++
+ 3 files changed, 59 insertions(+)
 
 diff --git a/lib/el3_runtime/aarch64/context_mgmt.c b/lib/el3_runtime/aarch64/context_mgmt.c
-index c605887..6d30c65 100755
+index c605887..eb031ec 100755
 --- a/lib/el3_runtime/aarch64/context_mgmt.c
 +++ b/lib/el3_runtime/aarch64/context_mgmt.c
-@@ -228,6 +228,22 @@ static void setup_ns_context(cpu_context_t *ctx, const struct entry_point_info *
+@@ -228,6 +228,27 @@ static void setup_ns_context(cpu_context_t *ctx, const struct entry_point_info *
  	 *  indicated by the interrupt routing model for BL31.
  	 */
  	scr_el3 |= get_scr_el3_from_routing_model(NON_SECURE);
 +
 +	/*
-+	 * SLM-OS / #380: clear SCR_EL3.IRQ and SCR_EL3.FIQ for the
-+	 * non-secure context. NVIDIA's stock TF-A on Tegra234 leaves NS
-+	 * IRQ/FIQ delivery routed to EL3, which traps the EL2 NS physical
-+	 * timer (PPI 26 / CNTHP) before it reaches SLM-OS at NS-EL2/VHE.
-+	 * Clearing these bits forces NS interrupts to deliver at EL2/EL1.
++	 * SLM-OS / #380: clear SCR_EL3.IRQ for the non-secure context so
++	 * Group 1 NS interrupts (e.g. PPI 26 / CNTHP) deliver as IRQ at
++	 * NS-EL2/VHE instead of being trapped to EL3. SCR_EL3.FIQ MUST be
++	 * left alone — Tegra's SDEI dispatcher relies on Group 0 FIQs being
++	 * routed to EL3 so it can hand RAS uncorrectable-error notifications
++	 * (e.g. CBB/IOB/ACI errors) up to the NS world. Clearing FIQ in an
++	 * earlier iteration broke the dispatch path and produced
++	 *   ERROR: sdei_dispatch_event returned -1
++	 *   ERROR: Powering off core
++	 * on first cascading error after boot.
 +	 *
 +	 * Conditional on PLAT_TEGRA234_SLMOS_PREEMPT (defined by
 +	 * plat/nvidia/tegra/soc/t234/platform_t234.mk) so other platforms
-+	 * are unaffected. Mirrors Pi 5's PLAT_RPI5 patch in
-+	 * tools/tfa-patches/0001-SLM-OS-Pi-5-IRQ-routing-patches.patch.
++	 * are unaffected. Pi 5's analogous patch (0001) clears both bits
++	 * because RPi firmware doesn't use SDEI.
 +	 */
 +#ifdef PLAT_TEGRA234_SLMOS_PREEMPT
-+	scr_el3 &= ~((u_register_t)((1U << 1) | (1U << 2)));
++	scr_el3 &= ~((u_register_t)(1U << 1));   /* clear IRQ only */
 +#endif
  #endif
  	write_ctx_reg(state, CTX_SCR_EL3, scr_el3);
  
 diff --git a/plat/nvidia/tegra/common/tegra_gicv3.c b/plat/nvidia/tegra/common/tegra_gicv3.c
-index 0500343..96d3f4f 100755
+index 0500343..6b98ddb 100755
 --- a/plat/nvidia/tegra/common/tegra_gicv3.c
 +++ b/plat/nvidia/tegra/common/tegra_gicv3.c
 @@ -1,5 +1,6 @@
@@ -94,29 +98,35 @@ index 0500343..96d3f4f 100755
   *
   * SPDX-License-Identifier: BSD-3-Clause
   */
-@@ -119,6 +120,21 @@ void tegra_gic_setup(const interrupt_prop_t *interrupt_props,
+@@ -119,6 +120,27 @@ void tegra_gic_setup(const interrupt_prop_t *interrupt_props,
  	}
  }
  
 +#ifdef PLAT_TEGRA234_SLMOS_PREEMPT
 +/*
-+ * SLM-OS / #380: write GICR_IGROUPR0 = 0xFFFFFFFF on this CPU's
-+ * redistributor so all PPIs and SGIs (incl. PPI 26 / CNTHP) become
-+ * Group 1 NS, deliverable to SLM-OS at NS-EL2/VHE. Called from each
-+ * per-CPU GIC init entry point — primary boot, secondary warmboot,
-+ * and suspend/resume.
++ * SLM-OS / #380: promote PPIs to Group 1 NS on this CPU's redistributor
++ * so PPI 26 (CNTHP) and friends deliver to SLM-OS at NS-EL2/VHE. Called
++ * from each per-CPU GIC init entry point — primary boot, secondary
++ * warmboot, and suspend/resume.
++ *
++ * GICR_IGROUPR0 covers SGIs in bits 0..15 and PPIs in bits 16..31.
++ * Only the PPI bits are touched — SGIs must keep their original
++ * groupings, otherwise SDEI initialization asserts (services/std_svc/
++ * sdei/sdei_main.c:161 expects Event 0 to be a Secure SGI). OR with
++ * the current value so PPIs already in Group 1 NS stay there.
 + */
 +static inline void slmos_promote_ppis_to_g1ns(void)
 +{
-+	gicr_write_igroupr0(gicv3_driver_data->rdistif_base_addrs[plat_my_core_pos()],
-+	                    0xFFFFFFFFU);
++	uintptr_t gicr_base = gicv3_driver_data->rdistif_base_addrs[plat_my_core_pos()];
++	uint32_t cur = gicr_read_igroupr0(gicr_base);
++	gicr_write_igroupr0(gicr_base, cur | 0xFFFF0000U);
 +}
 +#endif
 +
  /******************************************************************************
   * Tegra common helper to initialize the GICv3 only driver.
   *****************************************************************************/
-@@ -127,6 +143,9 @@ void tegra_gic_init(void)
+@@ -127,6 +149,9 @@ void tegra_gic_init(void)
  	gicv3_distif_init();
  	gicv3_rdistif_init(plat_my_core_pos());
  	gicv3_cpuif_enable(plat_my_core_pos());
@@ -126,7 +136,7 @@ index 0500343..96d3f4f 100755
  }
  
  /******************************************************************************
-@@ -164,6 +183,9 @@ void tegra_gic_pcpu_init(void)
+@@ -164,6 +189,9 @@ void tegra_gic_pcpu_init(void)
  
  	gicv3_rdistif_init(plat_my_core_pos());
  	gicv3_cpuif_enable(plat_my_core_pos());
@@ -136,7 +146,7 @@ index 0500343..96d3f4f 100755
  }
  
  /*******************************************************************************
-@@ -297,4 +319,7 @@ void tegra_gic_restore(uint32_t pstate_id)
+@@ -297,4 +325,7 @@ void tegra_gic_restore(uint32_t pstate_id)
  
  	/* Re-enable the GIC CPU interface*/
  	gicv3_cpuif_enable(plat_my_core_pos());
