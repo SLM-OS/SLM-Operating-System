@@ -257,7 +257,7 @@ static void test_enable_sched_accepts_with_scaffold_warning(void)
 /*
  * Enable sched when a policy with `has_gpu_backend = true` is active
  * → rc=0 with a "perf note" instead of the scaffold warning.
- * PR-3 of `docs/specs/gpu-policy-models.md`. Uses a test-only stub
+ * PR-3 of `docs/design/gpu-policy-models.md`. Uses a test-only stub
  * policy so this test runs the same on QEMU and Jetson — no
  * dependency on AI_SCHED build flag or whether ai_mlp is registered.
  */

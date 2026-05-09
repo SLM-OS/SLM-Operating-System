@@ -1,7 +1,7 @@
 # Admin & Telemetry Suite — Demo Runbook
 
 **Status:** 2026-04-26
-**Spec:** [docs/specs/admin-telemetry-suite.md](specs/admin-telemetry-suite.md)
+**Spec:** [docs/design/admin-telemetry-suite.md](design/admin-telemetry-suite.md)
 **Milestones:** M1 #413 · M2 #415 · M3 #416 · M4 #417 · M5 #418 · M6 #419
 
 End-to-end walkthrough of the admin & telemetry suite. Walks through
@@ -296,7 +296,7 @@ gpu use status                    # tabular view of all three flags
 (`engine::mnist_gpu_fastpath_eligible`); flipping it ON on Jetson
 with the v6 MNIST channel handoff present routes the model through
 the GPU. **sched** is wired through `slm_gpu_run_sched_inference`
-(PR-3 of `docs/specs/gpu-policy-models.md`): when ON, the active
+(PR-3 of `docs/design/gpu-policy-models.md`): when ON, the active
 `ai_mlp` policy's `ai_mlp_forward_logits` runs on GA10B for every
 `assign_cpu` decision instead of CPU NEON, falling back to CPU
 on dispatch error. Requires the sched-MLP v6 handoff staged via

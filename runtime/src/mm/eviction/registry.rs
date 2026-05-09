@@ -311,7 +311,7 @@ pub fn with_active_policy_for_pool<R>(
 /// (mirroring the sched path). Today every shipped policy returns
 /// false from `has_gpu_backend`; flipping that requires landing the
 /// matching `slm_gpu_run_eviction_inference` dispatch
-/// (`docs/specs/gpu-policy-models.md` PR-6).
+/// (`docs/design/gpu-policy-models.md` PR-6).
 pub fn any_active_policy_has_gpu_backend() -> bool {
     let _g = SpinGuard::new();
     // SAFETY: _g held — exclusive access to ACTIVE_POLICIES.

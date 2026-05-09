@@ -318,12 +318,12 @@ the host-side launcher's CPU/GPU agreement self-check).
   every policy producer.
 - Tensor-core support is **out of scope** here — these are FFMA-only
   shaders. Tensor-core variants are tracked in the per-op GPU
-  dispatch spec follow-up (`docs/specs/gpu-per-op-dispatch.md`).
+  dispatch spec follow-up (`docs/design/gpu-per-op-dispatch.md`).
 
 ## See also
 
-- `docs/specs/gpu-inference.md` — current GPU capabilities matrix
-- `docs/specs/gpu-per-op-dispatch.md` — long-term per-op GPU
+- `docs/fact-sheets/gpu-inference.md` — current GPU capabilities matrix
+- `docs/design/gpu-per-op-dispatch.md` — long-term per-op GPU
   dispatch architecture (separate spec)
 - `docs/jetson-cbb-report.md` §"Compute dispatch" — proof that
   bare-metal SLM-OS can ring the doorbell and execute compute

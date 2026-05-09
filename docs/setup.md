@@ -337,7 +337,7 @@ slmos> slm prompt 0 "hello"
 For background on the GGUF format and how SLM-OS parses it, see
 `docs/tutorials/slm-models.md`. For the `model_mem` pool sizing on
 Jetson (2 GB weight + 256 MB workspace), see
-`docs/specs/slm-integration.md` §"Memory Plan".
+`docs/fact-sheets/slm-integration.md` §"Memory Plan".
 
 ---
 

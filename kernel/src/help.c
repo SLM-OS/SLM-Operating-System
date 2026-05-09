@@ -973,7 +973,7 @@ static const struct help_entry help_entries[] = {
         "MNIST GA10B fastpath (Jetson, with --no-gpu-suspend kexec). `sched`\n"
         "and `eviction` accept on/off but currently have no GPU forward pass\n"
         "wired — flipping them ON records intent and emits a\n"
-        "`note: scaffold only…` warning. See docs/specs/gpu-policy-models.md\n"
+        "`note: scaffold only…` warning. See docs/design/gpu-policy-models.md\n"
         "for the wiring plan.\n"
         "\n"
         "Usage on x86-64 (richer external command, registered via\n"

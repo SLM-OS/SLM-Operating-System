@@ -20,7 +20,7 @@
  *
  * Status: M6.A-1 schema only. The actual SASS kernels (M6.B / M6.C /
  * M6.D), pushbuffer construction, semaphore polling, and the pre-kexec
- * loader are deferred per `docs/specs/gpu-slm-handoff.md`.
+ * loader are deferred per `docs/design/gpu-slm-handoff.md`.
  *
  * Op-kind values are mirrored in the Rust side as `OpKind`; keep the
  * two enums in sync. Tier values are mirrored as `Tier`.
@@ -53,7 +53,7 @@
  * Per-op tier flag. The pre-kexec loader sets this based on which
  * SASS kernels were successfully compiled and signed for the op.
  * The bare-metal dispatch reads it to pick which kernel offset to
- * jump to in the SASS pool. See docs/specs/gpu-slm-handoff.md
+ * jump to in the SASS pool. See docs/design/gpu-slm-handoff.md
  * §"Tier model" for the full fallback ladder.
  */
 #define SLM_GPU_TIER_AUTO  0u  /* prefer Tier1, fall back to Tier2 → CPU */

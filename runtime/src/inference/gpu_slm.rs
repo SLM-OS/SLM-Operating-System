@@ -7,11 +7,11 @@
 //! Status: **structural skeleton only**. The actual SASS kernels
 //! (M6.B Tier-1 HMMA, M6.C Tier-2 CUDA-core, M6.D element-wise) and
 //! the pushbuffer / semaphore-poll dispatch are weeks of work
-//! deferred per `docs/specs/gpu-slm-handoff.md`. Every entry point
+//! deferred per `docs/design/gpu-slm-handoff.md`. Every entry point
 //! currently returns `BackendError::NotAvailable`, which the
 //! M4-CPU-fallback path catches.
 //!
-//! See `docs/specs/gpu-slm-handoff.md` for the full design and
+//! See `docs/design/gpu-slm-handoff.md` for the full design and
 //! per-section bring-up plan.
 
 #![cfg(feature = "slm")]

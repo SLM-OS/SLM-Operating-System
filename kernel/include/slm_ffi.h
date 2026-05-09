@@ -843,7 +843,7 @@ int slm_model_gpu_dispatch_enabled(uint32_t model_index);
  * `gpu use eviction on` accepts cleanly or with a "scaffold only"
  * warning. Today every shipped policy returns false; flipping
  * requires landing the matching `slm_gpu_run_eviction_inference`
- * dispatch — see `docs/specs/gpu-policy-models.md` PR-6.
+ * dispatch — see `docs/design/gpu-policy-models.md` PR-6.
  */
 bool eviction_active_policy_has_gpu_backend(void);
 
@@ -952,7 +952,7 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap);
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats);
 
 /*
- * Sched-MLP dispatch — PR-3 of docs/specs/gpu-policy-models.md.
+ * Sched-MLP dispatch — PR-3 of docs/design/gpu-policy-models.md.
  *
  * Runs the AI scheduler MLP forward pass on GA10B by dispatching
  * the 8-op pipeline staged by `scripts/gpu-kernel-sched-mlp.c`

@@ -3,7 +3,7 @@
 //!
 //! M5.1 of the SLM integration plan (see
 //! `docs/plans/slm-integration-plan.md` §M5 and
-//! `docs/specs/slm-integration.md`). The decode loop in M5.2 appends one
+//! `docs/fact-sheets/slm-integration.md`). The decode loop in M5.2 appends one
 //! `(k, v)` pair per attention layer per generated token; the GQA op
 //! [`crate::inference::ops_transformer::gqa_decode_step`] reads the
 //! cumulative cache to compute attention.

@@ -44,8 +44,8 @@ Current inference paths and what each platform delivers today.
 - `docs/nvidia-gsp.md` — Platform shim contract
 - `docs/jetson-cbb-report.md` — CBB firewall impact on GPU path
 - `docs/x86-64-gpu-inference-status.md` — x86-64 GPU status
-- `docs/specs/gpu-policy-models.md` — Plan for wiring sched + eviction policy MLPs to GA10B compute dispatch (the `gpu use sched|eviction` toggles' missing backend)
-- `docs/specs/admin-telemetry-suite.md` §9 — `gpu use` shell command + `gpu_consumer_set` validation contract
+- `docs/design/gpu-policy-models.md` — Plan for wiring sched + eviction policy MLPs to GA10B compute dispatch (the `gpu use sched|eviction` toggles' missing backend)
+- `docs/design/admin-telemetry-suite.md` §9 — `gpu use` shell command + `gpu_consumer_set` validation contract
 - `docs/archive/plans/capstone-feature-status.md` §GPU-Based Inference (narrative)
 - Issues: #258 (Jetson — closed 2026-04-21), #185 (x86-64), #190 (resolved)
 

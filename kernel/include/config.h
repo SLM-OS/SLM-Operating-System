@@ -131,7 +131,7 @@
  * Jetson sizes the weight pool to the buddy ceiling so Qwen2.5-1.5B-
  * Q4_K_M (~1.0 GB resident) fits in a single block; workspace covers
  * per-layer activations and the 512 MB KV-cache sub-pool that M5
- * carves out (see docs/specs/slm-integration.md "Memory Plan").
+ * carves out (see docs/fact-sheets/slm-integration.md "Memory Plan").
  *
  * Pi 5 hosts smaller vision-class models. QEMU and x86-64 keep the
  * original Phase-5 defaults so the test kernel boots inside

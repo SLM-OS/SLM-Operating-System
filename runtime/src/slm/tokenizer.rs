@@ -2,7 +2,7 @@
 //! GGUF models.
 //!
 //! M2.1 of the SLM integration plan (see `docs/plans/slm-integration-plan.md`
-//! §M2 and `docs/specs/slm-integration.md`). Vocab + merges + special-token
+//! §M2 and `docs/fact-sheets/slm-integration.md`). Vocab + merges + special-token
 //! tables are loaded from the GGUF metadata produced by the M1.x parser
 //! ([`crate::slm::gguf`]). No external regex / tokenizer crate is pulled
 //! in: the GPT-2 pre-tokenization split is implemented as a hand-rolled
@@ -34,7 +34,7 @@
 //! byte-to-unicode mapping during pre-tokenization that this M2.1
 //! implementation does not — full byte-level fidelity for non-ASCII
 //! input lands in M5 alongside the decoder. See
-//! `docs/specs/slm-integration.md` §M2 for the staging plan.
+//! `docs/fact-sheets/slm-integration.md` §M2 for the staging plan.
 
 #![allow(clippy::module_name_repetitions)]
 

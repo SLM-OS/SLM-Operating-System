@@ -44,7 +44,7 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 - Multi-session TCP shell via lwIP raw callbacks (Phase 1).
 - Full telnet protocol: IAC, ECHO, SGA, NAWS, TERMINAL-TYPE, IAC IP→Ctrl+C. `telnet localhost 2323` gives character-at-a-time server-echoed mode (Phase 2).
 - `telnetd` daemon controls — `start/stop/status/sessions/kick` shell commands, `/etc/telnetd.conf` parser, `NET_TELNETD_AUTOSTART` build flag, `slm.telnetd_*` Lua bindings (Phase 3).
-- `telemetryd` — push-only TCP server on port 2325 that bridges the in-process `tel.*` msg_router topics out to the network. Wire format is newline-terminated `<topic> seq=<n> ts=<ms> <payload>` records. Per-client server-side glob filter (default `tel.*`) re-settable via the `SUB <pattern>` command on the same connection. Slow-client back-pressure is per-client drop-oldest with no propagation to msg_router. Controls: `telemetry server start|stop|status|sessions|kick` shell command, `slm.telemetryd_*` Lua bindings, `NET_TELEMETRYD_AUTOSTART` build flag. See `docs/specs/admin-telemetry-suite.md` §"Network feed".
+- `telemetryd` — push-only TCP server on port 2325 that bridges the in-process `tel.*` msg_router topics out to the network. Wire format is newline-terminated `<topic> seq=<n> ts=<ms> <payload>` records. Per-client server-side glob filter (default `tel.*`) re-settable via the `SUB <pattern>` command on the same connection. Slow-client back-pressure is per-client drop-oldest with no propagation to msg_router. Controls: `telemetry server start|stop|status|sessions|kick` shell command, `slm.telemetryd_*` Lua bindings, `NET_TELEMETRYD_AUTOSTART` build flag. See `docs/design/admin-telemetry-suite.md` §"Network feed".
 
 ## See also
 
@@ -53,7 +53,7 @@ TCP/IP networking: NIC driver, stack integration, shell-visible results.
 - `docs/net-driver-checklist.md` (driver implementor's checklist)
 - `docs/net-dma-coherence.md` (DMA coherence model)
 - `docs/archive/plans/multi-session-shell-plan.md` (TCP shell + telnet + telnetd)
-- `docs/specs/admin-telemetry-suite.md` §"Network feed" (telemetryd wire protocol)
+- `docs/design/admin-telemetry-suite.md` §"Network feed" (telemetryd wire protocol)
 - `docs/archive/plans/jetson-usb-networking-plan.md` (archived Jetson USB bring-up record)
 - `docs/usb-host-generalization-plan.md` (general USB host follow-on after the current CDC-ECM path)
 - `docs/capstone-feature-status.md` §"Networking"

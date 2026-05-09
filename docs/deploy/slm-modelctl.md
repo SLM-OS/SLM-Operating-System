@@ -121,14 +121,14 @@ python3 scripts/tools/slm-modelctl.py \
 - For `--http-url`, the default remote path still uses the fetched
   filename under `/mnt/files/policies/`.
 - `slm-modelctl.py` now enforces the standard operator-managed blob
-  roots from `docs/specs/device-file-contract.md`:
+  roots from `docs/contracts/device-file-contract.md`:
   - `/mnt/files/policies/`
   - `/mnt/files/models/`
 - `/mnt/files/autoload/` is reserved as a system-managed area. The
   wrapper will reject `load`, `apply`, and `autoload-set` paths there
   instead of treating it as a normal upload target.
 - Standard writable path conventions under `/mnt/files` are documented
-  in `docs/specs/device-file-contract.md`.
+  in `docs/contracts/device-file-contract.md`.
 - `slm-put.py` now auto-caps chunk sizes to stay under the shell line
   limit while still allowing larger requested chunk sizes.
 - `--tryboot` is intended for dual-boot Pi maintenance workflows such as

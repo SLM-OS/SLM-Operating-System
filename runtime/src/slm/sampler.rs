@@ -2,7 +2,7 @@
 //!
 //! M5.1 of the SLM integration plan (see
 //! `docs/plans/slm-integration-plan.md` §M5 and
-//! `docs/specs/slm-integration.md`). The decoder produces a vocab-sized
+//! `docs/fact-sheets/slm-integration.md`). The decoder produces a vocab-sized
 //! logits vector at the end of every forward pass; this module turns
 //! those logits into a token id according to the configured strategy.
 //!

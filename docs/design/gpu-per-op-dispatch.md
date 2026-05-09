@@ -192,7 +192,7 @@ Surfaced via `model stats` and the M3 telemetry feed.
 | `runtime/src/inference/engine.rs` | Swap name match for `graph_gpu_eligible`; per-op walk |
 | `runtime/src/loader/registry.rs` | Expose graph-ref accessor (`graph_ref` above) |
 | `host-tools/gsp-harness/test_*` | Per-op host-side tests using the existing harness |
-| `docs/specs/gpu-inference.md` | Update matrix to reflect per-op surface |
+| `docs/fact-sheets/gpu-inference.md` | Update matrix to reflect per-op surface |
 
 ## Test plan
 
@@ -237,7 +237,7 @@ Surfaced via `model stats` and the M3 telemetry feed.
 5. **PR-5**: Switch the engine to prefer graph eligibility over name;
    remove the name match. Whole-graph MNIST fastpath stays as a
    detected-by-graph-shape optimisation.
-6. **PR-6**: Update `docs/specs/gpu-inference.md` and close this spec.
+6. **PR-6**: Update `docs/fact-sheets/gpu-inference.md` and close this spec.
 
 Each PR ships independent test coverage and an end-to-end check on
 jetson-nano-2 (or behind the `#258` blocker, the host-side harness).
@@ -247,7 +247,7 @@ jetson-nano-2 (or behind the `#258` blocker, the host-side harness).
 - `runtime/src/inference/engine.rs` — current name-match path
 - `runtime/src/inference/gpu.rs` — `gpu_execute_matmul` stub, `select_backend`
 - `kernel/gpu/nvidia/ga10b_bringup.c` — Ampere PCAS2_B push-buffer building blocks
-- `docs/specs/gpu-inference.md` — current GPU capabilities matrix
+- `docs/fact-sheets/gpu-inference.md` — current GPU capabilities matrix
 - `CLAUDE.md` §"Jetson GA10B — Ampere compute dispatch uses PCAS2_B"
 - Issues: #258 (Jetson PBDMA doorbell), #185 (x86-64 SEC2 priv-lock)
 

@@ -30,7 +30,7 @@
  *     BYE\n                 graceful close
  *     <other>               echoed back as `# unknown: <input>\n`
  *
- * See docs/specs/admin-telemetry-suite.md "Network feed" for the
+ * See docs/design/admin-telemetry-suite.md "Network feed" for the
  * design rationale.
  */
 

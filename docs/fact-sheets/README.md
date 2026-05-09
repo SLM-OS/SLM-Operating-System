@@ -43,8 +43,6 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 | Shell / observability | ✅ | ✅ | ✅ | ✅ | [shell.md](shell.md) |
 | AI task scheduler | ✅ NEON | ✅ NEON | ✅ NEON | ✅ SSE | [ai-scheduler.md](ai-scheduler.md) |
 | AI page eviction | ✅ | ✅ | ✅ | ✅ | [ai-eviction.md](ai-eviction.md) |
-| Runtime model blob formats | ✅ | ✅ | ✅ | ✅ | [runtime-blob-formats.md](runtime-blob-formats.md) |
-| Device-local file contract | ✅ | ✅ | ✅ | ✅ | [device-file-contract.md](device-file-contract.md) |
 | IPC (message router) | ✅ | ✅ | ✅ | ✅ | [ipc.md](ipc.md) |
 | Components (hot-swap) | ✅ | ✅ | ✅ | 🟡 no EL0 yet | [components.md](components.md) |
 | Lua scripting | ✅ 5.4.7 | ✅ | ✅ | ✅ | [lua.md](lua.md) |
@@ -58,6 +56,11 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 - **Answer "does X work on platform Y?"** — scan the relevant drill-down's matrix.
 - **Answer "why doesn't X work on platform Y?"** — read the drill-down's "Skipped / Blocked" section.
 - **Update a sheet when delivering code** — every merged PR that adds/removes a capability updates the affected sheet in the same commit.
-- **Add a new sheet** when introducing a new top-level capability. Link it from this README.
+- **Add a new sheet** when introducing a new top-level capability. Link it from this README. Fact sheets describe shipped behavior; forward-looking design proposals belong in [`../design/`](../design/) and stable interface contracts in [`../contracts/`](../contracts/).
 
-*Last updated: 27 April 2026*
+## See also
+
+- [`../design/`](../design/) — design specs and engineering proposals (forward-looking).
+- [`../contracts/`](../contracts/) — stable interface contracts (e.g. runtime blob formats, device-file layout).
+
+*Last updated: 8 May 2026*
