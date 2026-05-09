@@ -30,7 +30,7 @@ python3 scripts/tools/slm-put.py --labctl pi-5-2 \
 ```
 
 The standard writable directory contract under `/mnt/files` is
-documented in `docs/specs/device-file-contract.md`.
+documented in `docs/contracts/device-file-contract.md`.
 
 Serial fallback example:
 

@@ -270,7 +270,7 @@ void ai_mlp_forward_logits(const float state[AI_STATE_DIM],
      * Caveat: GPU dispatch is ~6× slower than CPU NEON (post-handoff)
      * because the v6 channel-inherit path serializes per QMD. The
      * toggle is a deliberate operator-intent flag, not a perf default.
-     * See docs/specs/gpu-policy-models.md §"Why this matters".
+     * See docs/design/gpu-policy-models.md §"Why this matters".
      *
      * Also note that the per-call `slm_gpu_run_sched_inference` does
      * an inherit + channel scan on its first invocation (one-time

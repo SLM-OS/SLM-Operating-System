@@ -175,7 +175,7 @@ quantization work.
 | Region | Size | Pool | Notes |
 |---|---|---|---|
 | Kernel + runtime + stacks + non-cacheable | ~80 MB | (existing) | Unchanged from Phase 5. |
-| OP-TEE carveout (skipped by PMM) | 64 MB | n/a | `0xBE000000–0xC2000000`, see `docs/specs/memory.md`. |
+| OP-TEE carveout (skipped by PMM) | 64 MB | n/a | `0xBE000000–0xC2000000`, see `docs/fact-sheets/memory.md`. |
 | **Weight pool** | **1 GB** | Phase 3 weight pool, raised from 256 MB | Holds 1× Q4_K_M Qwen2.5-1.5B (~1.0 GB) — fills the pool. PMM buddy max-order is 1 GiB (#578); a multi-block allocator (#550) is the path to two-model headroom. |
 | **Rust heap** | **128 MB** | `linked_list_allocator` over PMM | Hosts KV cache (~56 MB at ctx=2048 for Qwen2.5-1.5B) + `ForwardScratch` (~1 MB). Sized via `RUST_HEAP_MB` in `config.h`. |
 | **KV-cache pool** *(future)* | **512 MB** | Planned sub-pool inside workspace allocator | Sized for two concurrent sessions × 4 K context × Qwen2.5-1.5B GQA dims (≈230 MB each). Today the KV cache lives on the Rust heap; this row tracks the eventual move into a dedicated pool with eviction integration. |
@@ -564,9 +564,9 @@ callback pattern already used for inference probability output.
 - `docs/onnx-support.md` — the ONNX format story (parallel format, not
   replaced)
 - `docs/model-memory.md` — pool layout, 2 MB alignment, refcounting rules
-- `docs/specs/components.md` — component lifecycle the `slm-runner`
+- `docs/fact-sheets/components.md` — component lifecycle the `slm-runner`
   inherits
-- `docs/specs/memory.md` — Jetson memory map and OP-TEE carveout
+- `docs/fact-sheets/memory.md` — Jetson memory map and OP-TEE carveout
 - `docs/scheduler.md` — AI scheduler and deadline policies the decode loop
   cooperates with
 - `docs/eviction-extended-features.md` — CACHEUS, used unchanged for

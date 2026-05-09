@@ -107,7 +107,7 @@ Hardware coverage (Pi 5):
 
 ## Step 7 — Docs
 
-**Files:** `docs/specs/lua-bindings.md`, shell `help` text
+**Files:** `docs/fact-sheets/lua-bindings.md`, shell `help` text
 
 Document the new binding/command, the Hailo limitation pointing at [#532](https://github.com/SLM-OS/SLM-Operating-System/issues/532), and the concurrent-safety guarantee.
 

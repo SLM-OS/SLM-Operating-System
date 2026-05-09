@@ -1,6 +1,6 @@
 /*
  * gpu-kernel-sched-mlp.c — Run the AI scheduler MLP forward pass on
- * the Jetson GA10B GPU (PR-2 of docs/specs/gpu-policy-models.md).
+ * the Jetson GA10B GPU (PR-2 of docs/design/gpu-policy-models.md).
  *
  * Eight kernel dispatches chained through the v6 channel handoff:
  *

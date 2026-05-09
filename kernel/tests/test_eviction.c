@@ -468,7 +468,7 @@ static void test_eviction_selftest_passes(void)
 }
 
 /*
- * PR-4 of docs/specs/gpu-policy-models.md:
+ * PR-4 of docs/design/gpu-policy-models.md:
  * `eviction_active_policy_has_gpu_backend()` exposes the Rust-side
  * `EvictionPolicy::has_gpu_backend()` scan to C. Today every shipped
  * policy returns false; this test pins that the C wrapper agrees.

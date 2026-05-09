@@ -278,7 +278,7 @@ connection (default `tel.*`); `BYE` closes gracefully. Slow-client
 back-pressure is per-client drop-oldest with line alignment — the
 publisher is never stalled. Build with `-DNET_TELEMETRYD_AUTOSTART=ON`
 to bring the listener up at boot. See
-`docs/specs/admin-telemetry-suite.md` §7.1 for the per-topic payload
+`docs/design/admin-telemetry-suite.md` §7.1 for the per-topic payload
 field reference and §7.4 for the architecture and wire-format spec.
 
 ---

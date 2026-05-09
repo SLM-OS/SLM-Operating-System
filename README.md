@@ -17,7 +17,7 @@ CS capstone project, Sonoma State University Computer Science program.
 | Raspberry Pi 5 (BCM2712) | `RASPI5` | Boots to interactive shell over UART |
 | NVIDIA Jetson Orin Nano | `JETSON_ORIN_NANO` | Boots via kexec at NS EL2 + VHE |
 
-Per-feature, per-platform status: [`docs/specs/README.md`](docs/specs/README.md).
+Per-feature, per-platform status: [`docs/fact-sheets/README.md`](docs/fact-sheets/README.md).
 
 ---
 
@@ -94,7 +94,7 @@ convention.
 Core references:
 
 - [`docs/architecture.md`](docs/architecture.md) — system architecture
-- [`docs/specs/`](docs/specs/) — per-capability × per-platform fact sheets
+- [`docs/fact-sheets/`](docs/fact-sheets/) — per-capability × per-platform fact sheets
 - [`docs/setup.md`](docs/setup.md) — dev environment setup (Ubuntu)
 - [`docs/getting-started.md`](docs/getting-started.md) — building, running, debugging
 - [`docs/shell.md`](docs/shell.md) — shell command reference
@@ -114,7 +114,7 @@ Archived / historical material lives under [`docs/archive/`](docs/archive/).
 
 ## Status
 
-- Cross-platform capability matrix: [`docs/specs/README.md`](docs/specs/README.md)
+- Cross-platform capability matrix: [`docs/fact-sheets/README.md`](docs/fact-sheets/README.md)
 - Delivery narrative: [`docs/archive/plans/capstone-feature-status.md`](docs/archive/plans/capstone-feature-status.md)
 - Open blockers and investigations: `gh issue list`
 

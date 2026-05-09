@@ -179,7 +179,7 @@ struct ga10b_channel_handoff {
     uint32_t input_buf_size;
 
     /* Pipeline-kind discriminator. PR-3 of
-     * docs/specs/gpu-policy-models.md repurposes the previously-
+     * docs/design/gpu-policy-models.md repurposes the previously-
      * reserved `_pad4` slot as a `enum ga10b_pipeline_kind`. Default
      * value 0 = MNIST keeps backward compatibility with v6 handoffs
      * written before this field existed (Linux helpers wrote
@@ -451,7 +451,7 @@ uint64_t ga10b_find_handoff_in_range(uint64_t start, uint64_t end,
  * validation fails or whose kind doesn't match, continuing the
  * scan past each. Returns 0 if no kind-matching handoff exists.
  *
- * PR-3 of docs/specs/gpu-policy-models.md. Production callers wrap
+ * PR-3 of docs/design/gpu-policy-models.md. Production callers wrap
  * this in `ga10b_bringup_channel_kind`; host tests pass mocked
  * memory ranges to validate the kind-discriminator logic.
  *

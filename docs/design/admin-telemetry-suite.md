@@ -35,7 +35,7 @@ This spec is **additive**. It extends existing substrate (policy vtable, evictio
 | Scheduler trace ring | `kernel/include/sched_trace.h:22-40`, `kernel/src/sched_trace.c` | 4096-entry circular buffer of context switch / migrate / wake / preempt events |
 | Eviction policy trait | `runtime/src/mm/eviction/policy.rs:53-79` | `EvictionPolicy::select_victim(&[BlockMeta]) → usize`, `score()`, `update_feedback()`, `name()` |
 | Eviction policies | `runtime/src/mm/eviction/` | LRU, LFU, MRU, FIFO, ARC, XGBoost, MLP, CACHEUS |
-| Dynamic blob format | `docs/specs/runtime-blob-formats.md` | `SEMB` outer wrapper, FNV-1a checksum, schema versioned |
+| Dynamic blob format | `docs/contracts/runtime-blob-formats.md` | `SEMB` outer wrapper, FNV-1a checksum, schema versioned |
 | Policy/model loading | `docs/dynamic-policy-model-loading-plan.md` | `sched model load/activate/rollback/clear`, `eviction model load/activate/...` (eviction phases E1-E5 ✅, scheduler S1-S3 partial). Lua side has `slm.sched_model_*`, `slm.eviction_model_*`. |
 | File upload | `kernel/src/shell_fs.c:568-760` | `xput begin/chunk/finish/abort`, hex over shell, FNV-1a, writes to LittleFS at `/mnt/files/`. 512-byte chunks. |
 | Lua bindings | `kernel/src/lua_slm.c` | 40+ bindings under `slm.*`. Per-session `lua_State *`. Safe vs admin tables. |
@@ -335,7 +335,7 @@ int  gpu_consumer_set(enum gpu_consumer c, bool enabled, const char **out_reason
 Backed by an `atomic_bool[3]`. Default: all OFF. Validation by consumer:
 
 - **inference** — accepts cleanly when `slm_gpu_available()` is non-zero. The Rust engine consults the flag in `mnist_gpu_fastpath_eligible`; flipping OFF forces CPU fallback even on Jetson with the v6 channel handoff present.
-- **sched / eviction** — accepts with a "scaffold only" warning written to `*out_reason`. The flag still flips so `gpu use status` reflects operator intent. Both sides query `has_gpu_backend()` on the active policy: sched via `sched_policy_ops::has_gpu_backend` (kernel C), eviction via `EvictionPolicy::has_gpu_backend()` (Rust trait, gpu-policy-models.md PR-4). No shipped policy returns true today. The `gpu use` shell command renders `*out_reason` as a `note: …` line. Wiring up the actual GPU forward pass for these is `docs/specs/gpu-policy-models.md`.
+- **sched / eviction** — accepts with a "scaffold only" warning written to `*out_reason`. The flag still flips so `gpu use status` reflects operator intent. Both sides query `has_gpu_backend()` on the active policy: sched via `sched_policy_ops::has_gpu_backend` (kernel C), eviction via `EvictionPolicy::has_gpu_backend()` (Rust trait, gpu-policy-models.md PR-4). No shipped policy returns true today. The `gpu use` shell command renders `*out_reason` as a `note: …` line. Wiring up the actual GPU forward pass for these is `docs/design/gpu-policy-models.md`.
 - All consumers — `slm_gpu_available() == 0` short-circuits to `GPU_CONSUMER_ERR_NODEV` with reason `"GPU not available on this build"`. Disable always succeeds.
 
 ### 9.2 Decision sites
@@ -492,11 +492,11 @@ loose end.
 
 ## 15. References
 
-- `docs/specs/gpu-inference.md` — GA10B nvgpu bringup, what `nvgpu prepare/run/inherit` do.
-- `docs/specs/ai-scheduler.md` — policy interface and state vector.
-- `docs/specs/ai-eviction.md` — eviction trait and feature schema.
-- `docs/specs/lua.md` — current Lua surface.
-- `docs/specs/runtime-blob-formats.md` — `SEMB` blob format and checksum scheme.
+- `docs/fact-sheets/gpu-inference.md` — GA10B nvgpu bringup, what `nvgpu prepare/run/inherit` do.
+- `docs/fact-sheets/ai-scheduler.md` — policy interface and state vector.
+- `docs/fact-sheets/ai-eviction.md` — eviction trait and feature schema.
+- `docs/fact-sheets/lua.md` — current Lua surface.
+- `docs/contracts/runtime-blob-formats.md` — `SEMB` blob format and checksum scheme.
 - `docs/dynamic-policy-model-loading-plan.md` — runtime model upload/activate/rollback (extended here for general model launch).
 - `docs/dynamic-kernel-replace-plan.md` — kernel replacement via tryboot (out of scope; referenced for context).
-- `docs/specs/shell.md` — shell command conventions, xput protocol.
+- `docs/fact-sheets/shell.md` — shell command conventions, xput protocol.

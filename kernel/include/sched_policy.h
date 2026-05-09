@@ -84,7 +84,7 @@ struct sched_policy_ops {
      * "perf note" warning describing the latency cliff.
      *
      * `sched_policy_ai_mlp` declares true (PR-3 of
-     * `docs/specs/gpu-policy-models.md`); `ai_mlp_forward_logits`
+     * `docs/design/gpu-policy-models.md`); `ai_mlp_forward_logits`
      * routes through `slm_gpu_run_sched_inference` when the toggle
      * is on. Other shipped policies (heuristic, ai_ppo, ai_hailo)
      * still default to false. Flipping a policy's value to true

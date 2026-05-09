@@ -11,7 +11,7 @@ the current operator-library inventory.
 **Companions:**
 
 - Plan: [`docs/plans/slm-integration-plan.md`](../plans/slm-integration-plan.md) §M6
-- Spec: [`docs/specs/slm-integration.md`](slm-integration.md) §"GPU
+- Spec: [`docs/fact-sheets/slm-integration.md`](../fact-sheets/slm-integration.md) §"GPU
   Integration on Orin Nano"
 - MNIST precedent: [`scripts/gpu-kernel-launch.c`](../../scripts/),
   PR #376
