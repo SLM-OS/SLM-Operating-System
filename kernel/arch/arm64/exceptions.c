@@ -274,12 +274,13 @@ static void handle_page_fault(struct trap_frame *tf, uint64_t esr, uint64_t far,
 void el1_sync_handler(struct trap_frame *tf)
 {
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xE0 + cpu = sync exception (data/instruction abort) */
+    /* NC trace: 0xE0 + cpu = sync exception (data/instruction abort).
+     * cpu_logical_map[] lookup — Jetson dual-cluster safe (#647). */
     {
         uint64_t _mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
-        uint32_t _cpu = (_mpidr & 0xFF) | ((_mpidr >> 8) & 0xFF);
-        if (_cpu < MAX_CPUS)
+        int _cpu = cpu_logical_id(_mpidr);
+        if (_cpu >= 0 && _cpu < (int)MAX_CPUS)
             *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xE0 + _cpu;
     }
 #endif
@@ -323,12 +324,13 @@ void el1_sync_handler(struct trap_frame *tf)
 void el1_irq_handler(void)
 {
 #if defined(PLATFORM_HAS_NC_MEMORY)
-    /* NC trace: 0xF0 + cpu = entered IRQ handler */
+    /* NC trace: 0xF0 + cpu = entered IRQ handler.
+     * cpu_logical_map[] lookup — Jetson dual-cluster safe (#647). */
     {
         uint64_t _mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
-        uint32_t _cpu = (_mpidr & 0xFF) | ((_mpidr >> 8) & 0xFF);
-        if (_cpu < MAX_CPUS)
+        int _cpu = cpu_logical_id(_mpidr);
+        if (_cpu >= 0 && _cpu < (int)MAX_CPUS)
             *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xF0 + _cpu;
     }
 #endif
@@ -427,8 +429,9 @@ void el1_fiq_handler(struct trap_frame *tf)
 #if defined(PI5_IRQ_DIAG)
     uint64_t mpidr;
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-    uint32_t cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
-    if (cpu < MAX_CPUS) {
+    /* cpu_logical_map[] lookup — Jetson dual-cluster safe (#647). */
+    int cpu = cpu_logical_id(mpidr);
+    if (cpu >= 0 && cpu < (int)MAX_CPUS) {
         *(volatile uint32_t *)(NC_MEM_BASE + 0xFFE0UL + cpu * 4) =
             0xD0000000u | irq_num;
     }

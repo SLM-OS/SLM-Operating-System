@@ -567,13 +567,14 @@ static void idle_task_func(void *arg)
 #if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
         /* Belt-and-braces trace slot at a fixed NC address so early-
          * boot analysis can confirm the counter is wired up even
-         * before scheduler_init finishes. Pi 5: CPU index in Aff1
-         * (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
+         * before scheduler_init finishes. cpu_logical_map[] lookup —
+         * Jetson dual-cluster safe (#647). */
         {
             uint64_t mpidr;
             __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-            uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
-            (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
+            int hw_cpu = cpu_logical_id(mpidr);
+            if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS)
+                (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
         }
 #endif
 

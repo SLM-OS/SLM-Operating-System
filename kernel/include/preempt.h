@@ -94,9 +94,16 @@ void preempt_check_cpu_mpidr(uint32_t this_cpu);
 
 static inline void preempt_init(void) {}
 static inline void preempt_check_cpu_mpidr(uint32_t this_cpu) { (void)this_cpu; }
+
+/* Mirror of the SECONDARY_PREEMPT-side helper so callers don't have to
+ * conditional-compile around the symbol. cpu_logical_id() is always
+ * available; the no-op wrapper just clamps -1 -> 0 so the call site
+ * gets a usable index. (#647) */
+int cpu_logical_id(uint64_t mpidr);
 static inline uint32_t preempt_trampoline_cpu_for_mpidr(uint64_t mpidr)
 {
-    return (uint32_t)((mpidr & 0xFFULL) | ((mpidr >> 8) & 0xFFULL));
+    int cpu = cpu_logical_id(mpidr);
+    return (cpu >= 0) ? (uint32_t)cpu : 0u;
 }
 
 #endif

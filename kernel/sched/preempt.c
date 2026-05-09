@@ -18,7 +18,14 @@
 #include "trap.h"
 #include "debug.h"
 #include "config.h"
+#include "cpu_id_asm.h"
 #include <stdint.h>
+
+/* Tie ARM64_MAX_CPUS_LITERAL (used by the asm macro in cpu_id_asm.h)
+ * to MAX_CPUS so a future change surfaces at compile time. */
+_Static_assert(ARM64_MAX_CPUS_LITERAL == MAX_CPUS,
+               "ARM64_MAX_CPUS_LITERAL out of sync with MAX_CPUS — "
+               "update kernel/include/cpu_id_asm.h");
 
 
 /* Per-CPU state, allocated from NC memory in preempt_init() so writes
@@ -72,39 +79,43 @@ void preempt_init(void)
 }
 
 /*
- * Pure fold. Must match the inline asm at the top of
- * `resched_trampoline` (kernel/arch/arm64/vectors.S):
+ * Mirror of the ARM64_GET_LOGICAL_CPU asm macro
+ * (kernel/include/cpu_id_asm.h) used by the resched trampoline. Both
+ * resolve through cpu_logical_map[] so they agree on every platform
+ * — Pi 5 Aff1, QEMU Aff0, Jetson dual-cluster (#647).
  *
- *     and  x1, x0, #0xFF         // Aff0
- *     ubfx x2, x0, #8, #8        // Aff1
- *     orr  x0, x1, x2            // cpu = Aff0 | Aff1
+ * Returns 0 on lookup miss. Real misconfig is caught by
+ * preempt_check_cpu_mpidr below.
  */
 uint32_t preempt_trampoline_cpu_for_mpidr(uint64_t mpidr)
 {
-    return (uint32_t)((mpidr & 0xFFULL) | ((mpidr >> 8) & 0xFFULL));
+    int cpu = cpu_logical_id(mpidr);
+    return (cpu >= 0) ? (uint32_t)cpu : 0u;
 }
 
 /*
- * #137: guard against the resched_trampoline's MPIDR-folding formula
- * silently mis-indexing on platforms with dual-cluster encodings.
- * The per-CPU invariant "trampoline_cpu_id(MPIDR) == logical_cpu_id"
- * is sufficient for uniqueness: if it holds on every CPU, then no
- * two CPUs map to the same trampoline slot.
+ * #137: sanity-check the per-CPU invariant
+ * "trampoline_cpu_id(MPIDR) == logical_cpu_id" at boot. With the
+ * cpu_logical_map[]-based lookup (#647) this can fail only when the
+ * map is not populated for this CPU — a configuration bug, not the
+ * old fold-collision class.
  */
 void preempt_check_cpu_mpidr(uint32_t this_cpu)
 {
     uint64_t mpidr = cpu_get_mpidr();
-    uint32_t trampoline_cpu = preempt_trampoline_cpu_for_mpidr(mpidr);
+    int looked_up = cpu_logical_id(mpidr);
 
-    if (trampoline_cpu != this_cpu) {
-        panic("SECONDARY_PREEMPT: trampoline cpu-id formula yields %u for "
-              "MPIDR=0x%lx but logical cpu is %u. Per-CPU trampoline slot "
-              "would collide — port the vectors.S MPIDR fold to this "
-              "platform's affinity layout (see `resched_trampoline` in "
-              "kernel/arch/arm64/vectors.S and Jetson plan P3 step 2) "
-              "before enabling SECONDARY_PREEMPT.",
-              (unsigned)trampoline_cpu, (unsigned long)mpidr,
-              (unsigned)this_cpu);
+    if (looked_up < 0) {
+        panic("SECONDARY_PREEMPT: cpu_logical_map[] has no entry for "
+              "MPIDR=0x%lx (logical cpu %u). cpu_logical_map must be "
+              "populated for every CPU before SECONDARY_PREEMPT can run.",
+              (unsigned long)mpidr, (unsigned)this_cpu);
+    }
+    if ((uint32_t)looked_up != this_cpu) {
+        panic("SECONDARY_PREEMPT: cpu_logical_map[%d] = MPIDR=0x%lx but "
+              "logical cpu reported as %u — map and bring-up sequence "
+              "disagree.",
+              looked_up, (unsigned long)mpidr, (unsigned)this_cpu);
     }
 }
 
