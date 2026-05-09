@@ -290,8 +290,25 @@ TFA_REMOTE     := https://github.com/ARM-software/arm-trusted-firmware.git
 TFA_BRANCH     := slmos-pi5-irq-routing
 TFA_BUILD_DIR  := $(TFA_DIR)/build/rpi5/release
 TFA_BL31_BIN   := $(TFA_BUILD_DIR)/bl31.bin
-TFA_PATCHES    := $(wildcard tools/tfa-patches/*.patch)
+# Pi 5 patches are 0001/0002/0003. Jetson's 0004-* applies against
+# NVIDIA's downstream TF-A and lives in TFA_JETSON_DIR; don't slurp
+# it into the Pi 5 build.
+TFA_PATCHES    := $(wildcard tools/tfa-patches/000[1-3]-*.patch)
 TFA_TOOLCHAIN  := /opt/arm-gnu-toolchain/bin
+
+# Jetson Orin Nano (tegra234) — uses NVIDIA's downstream TF-A from
+# the L4T BSP. The source tree is part of the Linux_for_Tegra/source/
+# layout that NVIDIA's flash.sh extracts.
+TFA_JETSON_DIR        := $(HOME)/slmos-ref/nvidia/Linux_for_Tegra/source/arm-trusted-firmware
+TFA_JETSON_BRANCH     := slmos-jetson-irq-routing
+TFA_JETSON_BUILD_DIR  := $(TFA_JETSON_DIR)/build/tegra/t234/release
+TFA_JETSON_BL31_BIN   := $(TFA_JETSON_BUILD_DIR)/bl31.bin
+TFA_JETSON_PATCHES    := $(wildcard tools/tfa-patches/0004-*.patch)
+# NVIDIA's downstream TF-A 4.0 + binutils >= 2.39 emits a fatal
+# "RWX LOAD segment" warning at link time (BL31 historically packs
+# code+data into one PROGBITS segment). Suppress with the same flag
+# upstream TF-A landed in c97cba18d. Local-only — no source change.
+TFA_JETSON_LDFLAGS    := --no-warn-rwx-segments
 
 .PHONY: tfa-pi5
 tfa-pi5: $(ARMSTUB_BIN)-from-tfa
@@ -345,6 +362,79 @@ tfa-pi5-reset:
 tfa-pi5-clean:
 	@if [ -d $(TFA_DIR) ]; then $(MAKE) -C $(TFA_DIR) clean; fi
 	@rm -f $(ARMSTUB_BIN)
+
+# ============================================================================
+# Jetson Orin Nano TF-A (tegra234) — see tools/tfa-patches/README.md
+# ============================================================================
+#
+# Conventions parallel the Pi 5 flow above. The TF-A source tree is
+# part of NVIDIA's L4T BSP — extracted from public_sources.tbz2's
+# atf_src.tbz2 into Linux_for_Tegra/source/. Not a git repo by
+# default; tfa-jetson-prepare initializes one so `git am` can apply
+# the patches.
+#
+# Output: $(TFA_JETSON_BL31_BIN). Deploy via UEFI capsule update
+# (preferred — runs from booted Linux) or `flash.sh -k A_bl31` over
+# USB Force Recovery.
+.PHONY: tfa-jetson
+tfa-jetson: $(TFA_JETSON_BL31_BIN)
+	@echo "Built Jetson bl31.bin: $(TFA_JETSON_BL31_BIN) ($$(stat -c%s $(TFA_JETSON_BL31_BIN)) bytes)"
+
+$(TFA_JETSON_BL31_BIN): tfa-jetson-prepare
+	@echo "Building TF-A bl31 for tegra234..."
+	@PATH=$(TFA_TOOLCHAIN):$$PATH $(MAKE) -C $(TFA_JETSON_DIR) \
+		PLAT=tegra TARGET_SOC=t234 CROSS_COMPILE=aarch64-none-elf- \
+		DEBUG=0 LOG_LEVEL=40 LDFLAGS="$(TFA_JETSON_LDFLAGS)" \
+		-j4 bl31
+
+# `safe.directory=*` because the L4T tree may live under a symlinked
+# path (e.g. ~/slmos-ref → Dropbox-mounted dir) where git refuses
+# operations citing "dubious ownership" otherwise.
+TFA_JETSON_GIT := git -c safe.directory=* -c user.email=slmos-build@example.com -c user.name=slmos-build
+
+.PHONY: tfa-jetson-prepare
+tfa-jetson-prepare: $(TFA_JETSON_DIR)/.git
+	@cd $(TFA_JETSON_DIR) && \
+	if ! $(TFA_JETSON_GIT) rev-parse --verify $(TFA_JETSON_BRANCH) >/dev/null 2>&1; then \
+		echo "Creating $(TFA_JETSON_BRANCH) and applying patches..."; \
+		BASE=$$($(TFA_JETSON_GIT) rev-parse HEAD) && \
+		$(TFA_JETSON_GIT) checkout -b $(TFA_JETSON_BRANCH) $$BASE && \
+		$(TFA_JETSON_GIT) am $(addprefix $(CURDIR)/,$(TFA_JETSON_PATCHES)); \
+	else \
+		$(TFA_JETSON_GIT) checkout $(TFA_JETSON_BRANCH) >/dev/null; \
+	fi
+
+# Initialize a fresh git repo from the L4T-extracted tree so
+# tfa-jetson-prepare's `git am` has a base to apply onto. The repo
+# stays in $(TFA_JETSON_DIR); no network required.
+$(TFA_JETSON_DIR)/.git:
+	@if [ ! -d $(TFA_JETSON_DIR) ]; then \
+		echo "ERROR: $(TFA_JETSON_DIR) does not exist."; \
+		echo "Extract NVIDIA L4T public_sources/atf_src.tbz2 into"; \
+		echo "Linux_for_Tegra/source/ first."; \
+		exit 1; \
+	fi
+	@echo "Initializing git repo in $(TFA_JETSON_DIR)..."
+	@cd $(TFA_JETSON_DIR) && \
+		$(TFA_JETSON_GIT) init -q && \
+		$(TFA_JETSON_GIT) add -A && \
+		$(TFA_JETSON_GIT) commit -q -m "L4T atf_src baseline"
+
+# DESTRUCTIVE: deletes the slmos-jetson-irq-routing branch in
+# $(TFA_JETSON_DIR). See tfa-pi5-reset for the same warning.
+.PHONY: tfa-jetson-reset
+tfa-jetson-reset:
+	@echo "WARNING: This will delete branch $(TFA_JETSON_BRANCH) in $(TFA_JETSON_DIR)."
+	@echo "Any local commits on that branch beyond tools/tfa-patches/"
+	@echo "will be LOST. (5 second pause — Ctrl-C to abort.)"
+	@sleep 5
+	@cd $(TFA_JETSON_DIR) && $(TFA_JETSON_GIT) checkout master 2>/dev/null || $(TFA_JETSON_GIT) checkout -b master
+	@cd $(TFA_JETSON_DIR) && $(TFA_JETSON_GIT) branch -D $(TFA_JETSON_BRANCH) 2>/dev/null || true
+	@$(MAKE) tfa-jetson-prepare
+
+.PHONY: tfa-jetson-clean
+tfa-jetson-clean:
+	@if [ -d $(TFA_JETSON_DIR) ]; then $(MAKE) -C $(TFA_JETSON_DIR) clean; fi
 
 $(KERNEL_BUILD_DIR)/Makefile:
 	@echo "Configuring kernel build..."
