@@ -109,8 +109,22 @@ static uint64_t virt_to_phys(void *vaddr);
  * into the channel's address space, mmap it for CPU access, zero
  * the contents, and resolve its physical address. Used by the
  * QMD-pool / SASS-pool / cbuf allocations below — all share the
- * exact same setup sequence and only differ in size. Dies on any
- * ioctl/mmap failure with a clear message naming `tag`. */
+ * exact same setup sequence and only differ in size.
+ *
+ * Returns 0 on success, -1 on failure. On failure the helper
+ * returns immediately to its caller, which exits the process
+ * (`return 1` from `main`); we deliberately do NOT roll back
+ * partial state (close dmabuf fd, munmap, etc.) on intermediate
+ * failures because process exit is the cleanup. If a future
+ * caller invokes this from a long-running context, it must add
+ * its own cleanup-on-error path.
+ *
+ * `*out_phys` and `*out_gpu_va` are set only on success; the
+ * caller MUST treat the buffer as page-rounded — the actual
+ * allocation is `round_up(size_bytes, 4 KB)` bytes, which the
+ * caller can compute the same way (`(size + 4095u) & ~4095u`).
+ * The handoff fields that record buffer size should reflect the
+ * rounded value, not the requested `size_bytes`. */
 static int alloc_channel_buffer(int nvmap_fd, int ctrl_fd, int as_fd,
                                 uint32_t size_bytes, const char *tag,
                                 int *out_dmabuf, void **out_cpu_va,
@@ -573,17 +587,17 @@ int main(int argc, char **argv)
                     (unsigned long long)bytes);
             return 1;
         }
-        qmd_pool_size_bytes = (uint32_t)bytes;
+        /* Page-round once here so `qmd_pool_size_bytes` matches the
+         * actual allocation that goes into the handoff. The helper
+         * page-rounds internally too — passing an already-rounded
+         * value makes the round a no-op there. */
+        qmd_pool_size_bytes = ((uint32_t)bytes + 4095u) & ~4095u;
         if (alloc_channel_buffer(nvmap_fd, ctrl_fd, as_fd,
                                  qmd_pool_size_bytes, "QMD_POOL",
                                  &qmd_pool_dmabuf, &qmd_pool_va,
                                  &qmd_pool_phys, &qmd_pool_gva) < 0) {
             return 1;
         }
-        /* Round up tracked size to whole pages — alloc_channel_buffer
-         * page-rounds internally and the handoff size field must
-         * reflect the actual allocation. */
-        qmd_pool_size_bytes = (qmd_pool_size_bytes + 4095u) & ~4095u;
         printf("[gpu-helper] QMD pool: %u slots, %u B, "
                "phys=0x%llx, gpu_va=0x%llx\n",
                (unsigned)(qmd_pool_size_bytes / 256u),

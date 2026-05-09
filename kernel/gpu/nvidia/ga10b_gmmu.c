@@ -75,18 +75,29 @@
  * address. */
 #define GA10B_GMMU_DRAM_TOP    0x240000000ull
 
-/* Jetson carves OP-TEE out of low DRAM at 0xBE000000-0xC2000000.
- * The VMM doesn't map that 64 MB hole, so a phys_read inside it is
- * a synchronous abort. Reject it here so the walker treats wild PDB
- * pointers landing in the hole as "invalid PDE" instead of crashing.
- * Same applies to the IMX219 frame-buffer carveout at
- * 0xA1000000-0xA1400000 (camrtc.c:CAMRTC_FRAME_BUFFER_PHYS) and the
- * NC-memory page at 0xBDE00000+2 MB the kernel reserves for cross-
- * CPU coherent state. The latter two are platform-narrower than the
- * OP-TEE hole; checking the hole alone covers most failure modes
- * since wild PDB pointers tend to land in the largest unmapped
- * region. Refine further if a candidate's walk faults inside one
- * of the smaller carveouts. */
+/* Jetson VMM has three known unmapped holes in the GA10B GMMU
+ * scan range. Only the largest (OP-TEE) is excluded here today;
+ * the others are listed for the next person who hits a fault.
+ *
+ *   1. OP-TEE carveout       0xBE000000 .. 0xC2000000   (64 MB)
+ *   2. IMX219 frame buffer   0xA1000000 .. 0xA1400000   ( 4 MB)
+ *      camrtc.c:CAMRTC_FRAME_BUFFER_PHYS / _END
+ *   3. NC-memory page        0xBDE00000 .. 0xBE000000   ( 2 MB)
+ *      the kernel reserves this 2 MB block immediately above the
+ *      cacheable region for cross-CPU coherent state — see
+ *      ncmem.h. Nominally inside region 1 but the cacheable
+ *      heap stops at 0xBDE00000.
+ *
+ * The walker reaches these regions only when a wild PDB pointer
+ * (read from a candidate inst block) decodes to a page-aligned
+ * address inside the hole. Empirically wild PDBs cluster in the
+ * largest unmapped region — OP-TEE has covered every observed
+ * fault to date. If a future scan faults at an address inside
+ * (2) or (3), add a matching exclusion below.
+ *
+ * TODO: fold (2) and (3) here once a real fault from one of
+ *       them is observed in the wild. Until then, leaving them
+ *       documented-but-unenforced keeps the path narrow. */
 #define GA10B_GMMU_OPTEE_BASE  0xBE000000ull
 #define GA10B_GMMU_OPTEE_TOP   0xC2000000ull
 static inline bool phys_in_dram(uint64_t phys, size_t bytes)
@@ -706,10 +717,14 @@ uint64_t ga10b_gmmu_discover_inst_block_via_walk(uint64_t known_gpu_va,
     uint64_t end    = scan_end & ~((uint64_t)4095u);
 
     /* Diagnostic counters: how many candidates passed the pre-filter,
-     * how many full walks actually fired. Reading these from the
-     * shell helps distinguish "filter too strict" from "lots of
-     * walks but no leaf match". */
+     * how many full walks actually fired. Printed via uart_printf
+     * only when `gpu debug on` is set (symmetric with the v7
+     * dispatch tracing) so a steady-state caller doesn't spam the
+     * UART. Errors / final-result lines below are gated the same
+     * way — diagnosis is opt-in. */
     extern int uart_printf(const char *fmt, ...);
+    extern bool ga10b_dispatch_verbose_get(void);
+    bool dbg = ga10b_dispatch_verbose_get();
     uint32_t pre_passed = 0;
     uint32_t walks      = 0;
     uint32_t walk_ok    = 0;
@@ -745,7 +760,7 @@ uint64_t ga10b_gmmu_discover_inst_block_via_walk(uint64_t known_gpu_va,
             /* Useful trace: walks that completed but landed at a
              * different leaf (e.g. another channel's inst block
              * mapping the same VA range to a different page). */
-            if (walk_ok <= 4) {
+            if (dbg && walk_ok <= 4) {
                 uart_printf("[gmmu-discover] walk OK at inst=0x%lx "
                             "leaf=0x%lx (want 0x%lx)\n",
                             (unsigned long)cursor,
@@ -754,15 +769,20 @@ uint64_t ga10b_gmmu_discover_inst_block_via_walk(uint64_t known_gpu_va,
             }
             continue;
         }
-        uart_printf("[gmmu-discover] match at inst=0x%lx after %u "
-                    "candidates, %u walks (%u OK)\n",
-                    (unsigned long)cursor, pre_passed, walks, walk_ok);
+        if (dbg) {
+            uart_printf("[gmmu-discover] match at inst=0x%lx after %u "
+                        "candidates, %u walks (%u OK)\n",
+                        (unsigned long)cursor,
+                        pre_passed, walks, walk_ok);
+        }
         return cursor;
     }
-    uart_printf("[gmmu-discover] no match after %u candidates "
-                "(%u pre-filter pass, %u walks, %u walk-OK)\n",
-                (unsigned)((end - scan_start) / 4096u),
-                pre_passed, walks, walk_ok);
+    if (dbg) {
+        uart_printf("[gmmu-discover] no match after %u candidates "
+                    "(%u pre-filter pass, %u walks, %u walk-OK)\n",
+                    (unsigned)((end - scan_start) / 4096u),
+                    pre_passed, walks, walk_ok);
+    }
     return 0;
 }
 

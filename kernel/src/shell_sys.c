@@ -4210,15 +4210,22 @@ int cmd_nvgpu(int argc, char *argv[])
             } else {
                 const struct ga10b_channel_handoff *h =
                     ga10b_bringup_handoff();
-                shell_printf("oplib stage: handoff h=%p shader_phys=0x%lx "
-                             "shader_gpu_va=0x%lx shader_size=%u "
-                             "cbuf_phys=0x%lx cbuf_gpu_va=0x%lx\r\n",
-                             (const void *)h,
-                             (h ? (unsigned long)h->shader_phys : 0ul),
-                             (h ? (unsigned long)h->shader_gpu_va : 0ul),
-                             (h ? (unsigned)h->shader_size : 0u),
-                             (h ? (unsigned long)h->cbuf_phys : 0ul),
-                             (h ? (unsigned long)h->cbuf_gpu_va : 0ul));
+                /* Diagnostic dump of relevant handoff fields, gated
+                 * behind `gpu debug on` so steady-state callers
+                 * aren't spammed. Useful when the fast path doesn't
+                 * trigger and you need to tell "helper didn't pre-
+                 * stage" from "fast path picked but failed". */
+                if (ga10b_dispatch_verbose_get()) {
+                    shell_printf("oplib stage: handoff h=%p shader_phys=0x%lx "
+                                 "shader_gpu_va=0x%lx shader_size=%u "
+                                 "cbuf_phys=0x%lx cbuf_gpu_va=0x%lx\r\n",
+                                 (const void *)h,
+                                 (h ? (unsigned long)h->shader_phys : 0ul),
+                                 (h ? (unsigned long)h->shader_gpu_va : 0ul),
+                                 (h ? (unsigned)h->shader_size : 0u),
+                                 (h ? (unsigned long)h->cbuf_phys : 0ul),
+                                 (h ? (unsigned long)h->cbuf_gpu_va : 0ul));
+                }
                 /* Fast path: when the helper pre-staged the SASS
                  * region in the channel's GMMU (v7 mode), skip
                  * inst-block discovery entirely — `oplib_pool_-
@@ -4313,7 +4320,6 @@ int cmd_nvgpu(int argc, char *argv[])
                 }
             }
 oplib_stage_call:
-            ;
             int rc = oplib_pool_stage_to_gpu(inst_phys);
             if (rc < 0) {
                 shell_printf("oplib stage: rc=%d\r\n", rc);

@@ -189,8 +189,20 @@ int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
      * stale, walk-discovery blocked on big-page support). */
     {
         const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+        /* Capacity check uses the page-rounded length (matches
+         * what the slow path's ga10b_gmmu_alloc(n_pages) would
+         * map). A handoff with shader_size between sass_len and
+         * round_up(sass_len, 4 KB) would otherwise pass the raw
+         * sass_len check but leave the last 4 KB page partially
+         * outside the helper's mapping, which the
+         * `g_sass_pool_n_pages` claim below would lie about. The
+         * helper today always allocates a multiple of 4 KB so the
+         * extra strictness is a no-op in practice; this guards
+         * against any future producer that hands SLM-OS an
+         * unaligned shader_size. */
+        size_t sass_pages_bytes = ((sass_len + 4095u) / 4096u) * 4096u;
         if (h != NULL && h->shader_gpu_va != 0 &&
-            h->shader_phys != 0 && h->shader_size >= sass_len) {
+            h->shader_phys != 0 && h->shader_size >= sass_pages_bytes) {
             volatile uint8_t *dst =
                 (volatile uint8_t *)(uintptr_t)h->shader_phys;
             const uint8_t *src = g_handle.sass_region;
