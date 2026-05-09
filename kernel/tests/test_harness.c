@@ -140,6 +140,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_msg_router();
     total_failures += test_suite_coop_preempt();
     total_failures += test_suite_cpu_supervisor();
+    total_failures += test_suite_mpidr_lookup();
 #endif
     total_failures += test_suite_gpu();
     total_failures += test_suite_vfs();

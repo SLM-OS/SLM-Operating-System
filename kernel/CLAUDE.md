@@ -306,16 +306,18 @@ abandoned exception frame on real ARM64 hardware).
   default build still ships `SECONDARY_PREEMPT=OFF` /
   `COOP_PREEMPT=ON` pending a broader policy decision; flipping the
   default is a separate change from enabling the option.
-- **Jetson:** compiles but **not safe to enable yet** — the
-  `resched_trampoline` in `vectors.S:377-380` uses
-  `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` to compute the CPU index,
-  which collides on dual-cluster CPU 4/5. Jetson plan P3 step 2 owns
-  the fix. **Enforced at boot (#137):** `preempt_check_cpu_mpidr`
-  (kernel/sched/preempt.c) panics from `scheduler_init` /
-  `secondary_init` if the fold disagrees with the caller's logical
-  CPU id, so the soft documentation warning can no longer be
-  bypassed silently — a Jetson build with `SECONDARY_PREEMPT=ON`
-  halts loudly on the first secondary bring-up.
+- **Jetson:** the trampoline's MPIDR fold is now safe on dual-cluster
+  layouts. The legacy `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` collided
+  on CPUs 4/5 (`MPIDR=0x10200, 0x10300`); the asm sites (in
+  `vectors.S` `DIAG_BUMP_VEC` and `resched_trampoline`) and the
+  matching C-side fold sites (`preempt.c`, `task.c`, `exceptions.c`,
+  `sched.c`) now go through `cpu_logical_map[]` — the asm via the
+  shared `ARM64_GET_LOGICAL_CPU` macro in `kernel/include/cpu_id_asm.h`,
+  C via `cpu_logical_id()` in `<smp.h>`. `preempt_check_cpu_mpidr`
+  remains as a boot-time invariant check (#137 / #647). Hardware-IRQ
+  delivery on Jetson still depends on a TF-A patch analogous to Pi 5's
+  `tools/tfa-patches/0001-*`; trampoline path is inert until that
+  lands.
 - **QEMU:** works today but rarely needed — QEMU's timer IRQ from an
   ISR doesn't crash the kernel; the default cooperative path is fine.
 

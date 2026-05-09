@@ -9,6 +9,7 @@
  */
 
 #include "el_regs.h"
+#include "cpu_id_asm.h"
 
 .section .text
 
@@ -139,24 +140,23 @@ exception_vectors:
  *   per-CPU block = 32 bytes at base + cpu*0x20
  *   offsets: sync=0x00, irq=0x08, fiq=0x10, serror=0x18
  *
- * cpu_id computed inline with the MPIDR hack used throughout the
- * PI5_* paths: `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` — correct for
- * Pi 5 (Aff1=cpu) and QEMU (Aff0=cpu). Not used on Jetson builds.
+ * cpu_id computed via ARM64_GET_LOGICAL_CPU (cpu_logical_map[] lookup),
+ * so the macro is correct on every platform — Pi 5 (Aff1 encoding),
+ * QEMU (Aff0), Jetson (dual-cluster). #647.
  */
 .macro DIAG_BUMP_VEC off:req
 #if defined(PI5_IRQ_DIAG)
+    stp     x14, x15, [sp, #-16]!
     stp     x16, x17, [sp, #-16]!
-    mrs     x16, mpidr_el1
-    ubfx    x17, x16, #8, #8
-    and     x16, x16, #0xFF
-    orr     x16, x16, x17                   /* x16 = logical cpu */
+    ARM64_GET_LOGICAL_CPU x14, x15, x16, x17    /* x14 = logical cpu */
     mov     x17, #0xFF60
     movk    x17, #0xFFE0, lsl #16
-    add     x17, x17, x16, lsl #5           /* x17 = per-CPU block base */
+    add     x17, x17, x14, lsl #5           /* x17 = per-CPU block base */
     ldr     x16, [x17, #\off]
     add     x16, x16, #1
     str     x16, [x17, #\off]
     ldp     x16, x17, [sp], #16
+    ldp     x14, x15, [sp], #16
 #endif
 .endm
 
@@ -425,31 +425,13 @@ resched_trampoline:
     str     x18,      [sp, #144]
     stp     x29, x30, [sp, #152]
 
-    /* Compute logical cpu_id inline rather than calling the C `cpu_id()`
-     * helper. Reasons:
-     *   1. We have not yet saved x19-x28 or set up a valid frame pointer
-     *      for a C call; a bl here would need extra register-save paperwork.
-     *   2. The MPIDR hack `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` is
-     *      the same one used by every other SECONDARY_PREEMPT code
-     *      site — task_entry_trampoline (task.c), NC trace points
-     *      (sched.c, exceptions.c, smp.c) — and is correct for Pi 5
-     *      (Aff1 holds CPU index) and QEMU (Aff0 holds it). The two
-     *      affinity fields are never both non-zero on these platforms.
-     *   3. Jetson uses a dual-cluster layout where this formula is WRONG
-     *      for cluster 1 CPUs (CPU 4 MPIDR 0x10200 → 2, collides with
-     *      CPU 2). Jetson plan P3 step 2 replaces this with a lookup
-     *      into cpu_logical_map[] before enabling SECONDARY_PREEMPT on
-     *      Jetson builds. Do NOT enable SECONDARY_PREEMPT on Jetson
-     *      without that fix.
-     *
-     * If the kernel is ever ported to a CPU with more complex affinity
-     * encoding while reusing this infrastructure, convert this into a
-     * shared asm macro alongside the existing NC-trace uses — don't
-     * silently skew one call site from the rest. */
-    mrs     x0, mpidr_el1
-    and     x1, x0, #0xFF
-    ubfx    x2, x0, #8, #8
-    orr     x0, x1, x2          /* x0 = cpu */
+    /* Compute logical cpu_id via the shared ARM64_GET_LOGICAL_CPU macro
+     * (kernel/include/cpu_id_asm.h). Scans cpu_logical_map[] so the
+     * lookup is correct on every platform — Pi 5 Aff1 encoding, QEMU
+     * Aff0, Jetson dual-cluster (#647). x0..x18 have already been
+     * stp'd to the trampoline frame above, so clobbering x0..x3 here
+     * is free. */
+    ARM64_GET_LOGICAL_CPU x0, x1, x2, x3   /* x0 = cpu */
 
     /* Snapshot orig_elr[cpu] / orig_spsr[cpu] to stack locals.
      * `orig_elr` and `orig_spsr` are global pointers into NC memory
@@ -483,11 +465,9 @@ resched_trampoline:
     isb
 
     /* schedule() clobbered x0-x18 and the flag-clear state. Recompute
-     * cpu_id and clear preempt_disabled[cpu]. */
-    mrs     x0, mpidr_el1
-    and     x1, x0, #0xFF
-    ubfx    x2, x0, #8, #8
-    orr     x0, x1, x2
+     * cpu_id (cpu_logical_map[] lookup, #647) and clear
+     * preempt_disabled[cpu]. */
+    ARM64_GET_LOGICAL_CPU x0, x1, x2, x3
     adrp    x5, preempt_disabled
     add     x5, x5, #:lo12:preempt_disabled
     str     wzr, [x5, x0, lsl #2]

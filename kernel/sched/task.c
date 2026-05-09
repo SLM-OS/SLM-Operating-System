@@ -138,10 +138,11 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     {
         uint64_t _mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
-        /* Pi 5: CPU index in Aff1 (bits[15:8]), QEMU: Aff0 (bits[7:0]).
-         * OR gives correct index when only one field is non-zero. */
-        uint32_t _cpu = (_mpidr & 0xFF) | ((_mpidr >> 8) & 0xFF);
-        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xDD;
+        /* cpu_logical_map[] lookup — correct on every platform incl.
+         * Jetson dual-cluster (#647). */
+        int _cpu = cpu_logical_id(_mpidr);
+        if (_cpu >= 0 && _cpu < (int)MAX_CPUS)
+            *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xDD;
     }
 #endif
 
@@ -158,8 +159,9 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
         extern volatile int preempt_disabled[];
         uint64_t mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-        uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
-        if (hw_cpu < MAX_CPUS) {
+        /* cpu_logical_map[] lookup — Jetson dual-cluster safe (#647). */
+        int hw_cpu = cpu_logical_id(mpidr);
+        if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS) {
             preempt_disabled[hw_cpu] = 0;
         }
         __asm__ volatile("dsb sy" ::: "memory");

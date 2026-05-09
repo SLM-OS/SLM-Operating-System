@@ -215,6 +215,9 @@ int test_suite_coop_preempt(void);
 /* CPU resurrection supervisor tests (#216 Tier 2) */
 int test_suite_cpu_supervisor(void);
 
+/* MPIDR -> logical CPU id lookup tests (#647) */
+int test_suite_mpidr_lookup(void);
+
 /* Scheduler trace buffer tests (#195) */
 int test_suite_sched_trace(void);
 

@@ -2313,43 +2313,11 @@ static void test_timer_irq_is_physical(void)
 }
 
 /*
- * #137: resched_trampoline's MPIDR fold gives unique ids for Pi 5
- * and QEMU virt, but collides on Jetson (dual-cluster A78AE) —
- * cluster 1's CPU 4 (MPIDR 0x10200) and CPU 5 (0x10300) fold to
- * 2 and 3, the same slots as cluster 0's CPU 2 and 3. The boot-
- * time sanity check calls this helper per-CPU; verify the helper
- * itself agrees with every known platform encoding.
+ * #647 superseded #137's collision-pinning test — the
+ * resched_trampoline's MPIDR fold has been replaced with a
+ * cpu_logical_map[] lookup that is correct on dual-cluster Jetson.
+ * Coverage moved to test_mpidr_lookup.c.
  */
-#include "preempt.h"
-
-static void test_preempt_trampoline_cpu_fold(void)
-{
-    /* Pi 5 — Aff1 holds the CPU index, Aff0 always 0. */
-    TEST_ASSERT_EQUAL_UINT32(0, preempt_trampoline_cpu_for_mpidr(0x000));
-    TEST_ASSERT_EQUAL_UINT32(1, preempt_trampoline_cpu_for_mpidr(0x100));
-    TEST_ASSERT_EQUAL_UINT32(2, preempt_trampoline_cpu_for_mpidr(0x200));
-    TEST_ASSERT_EQUAL_UINT32(3, preempt_trampoline_cpu_for_mpidr(0x300));
-
-    /* QEMU virt — Aff0 holds the CPU index, Aff1 always 0. */
-    TEST_ASSERT_EQUAL_UINT32(0, preempt_trampoline_cpu_for_mpidr(0x00));
-    TEST_ASSERT_EQUAL_UINT32(1, preempt_trampoline_cpu_for_mpidr(0x01));
-    TEST_ASSERT_EQUAL_UINT32(2, preempt_trampoline_cpu_for_mpidr(0x02));
-    TEST_ASSERT_EQUAL_UINT32(3, preempt_trampoline_cpu_for_mpidr(0x03));
-
-    /* Jetson dual-cluster A78AE — cluster 0 Aff1 = cpu, cluster 1
-     * Aff2 = 1 and Aff1 = 2/3. The fold ignores Aff2, so cluster
-     * 1's CPU 4 (0x10200) and CPU 5 (0x10300) collide with
-     * cluster 0's CPU 2/3. This is the exact bug the boot-time
-     * check must catch. */
-    TEST_ASSERT_EQUAL_UINT32(0, preempt_trampoline_cpu_for_mpidr(0x00000));
-    TEST_ASSERT_EQUAL_UINT32(1, preempt_trampoline_cpu_for_mpidr(0x00100));
-    TEST_ASSERT_EQUAL_UINT32(2, preempt_trampoline_cpu_for_mpidr(0x00200));
-    TEST_ASSERT_EQUAL_UINT32(3, preempt_trampoline_cpu_for_mpidr(0x00300));
-    /* CPU 4 wants slot 4 but the fold yields 2 — collision. */
-    TEST_ASSERT_EQUAL_UINT32(2, preempt_trampoline_cpu_for_mpidr(0x10200));
-    /* CPU 5 wants slot 5 but the fold yields 3 — collision. */
-    TEST_ASSERT_EQUAL_UINT32(3, preempt_trampoline_cpu_for_mpidr(0x10300));
-}
 
 #if !defined(PLATFORM_X86_64)
 #include "gic.h"
@@ -5023,7 +4991,6 @@ int test_suite_scheduler(void)
     RUN_TEST(test_timer_frequency_reasonable);
     RUN_TEST(test_timer_irq_is_physical);
     RUN_TEST(test_slm_time_ticks_to_ns_no_overflow);
-    RUN_TEST(test_preempt_trampoline_cpu_fold);
 
 #if !defined(PLATFORM_X86_64)
     /* GIC handler registration table (#204 follow-up) */

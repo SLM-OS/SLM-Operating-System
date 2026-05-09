@@ -94,6 +94,30 @@ if(SECONDARY_PREEMPT)
                        "(only Pi 5 and Jetson use the ELR trampoline)")
     endif()
 endif()
+
+# Jetson hardware-tick mode — enables the per-CPU CNTHP path on Jetson
+# Orin Nano. Pairs with the patched BL31 from
+# tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch which
+# promotes PPIs/SGIs to Group 1 NS in NVIDIA's downstream TF-A. Without
+# the patched BL31, this option produces a kernel that programs CNTHP
+# but never receives the IRQ — symptom is CPU 0 deadlock when shell
+# task_sleep_ms's, since the post-#739 yield-spin fallback (active
+# under stock BL31) gets bypassed.
+#
+# Off by default so plain `make kernel PLATFORM=JETSON_ORIN_NANO` keeps
+# working on dev kits that haven't reflashed BL31. Enable with
+# `make kernel PLATFORM=JETSON_ORIN_NANO JETSON_HW_TICK=ON
+#  SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` on a board running the
+# patched BL31.
+option(JETSON_HW_TICK "Drive Jetson preemption via per-CPU CNTHP / PPI 26 (requires patched BL31)" OFF)
+if(JETSON_HW_TICK)
+    if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
+        add_compile_definitions(JETSON_HW_TICK=1)
+    else()
+        message(STATUS "JETSON_HW_TICK=ON ignored on PLATFORM=${PLATFORM} "
+                       "(Jetson-only)")
+    endif()
+endif()
 # Pi 5 FIQ-routed timer (Phase 2 of issue #99): el1_fiq_handler dispatches
 # GICC_AIAR on IRQ 30 to timer_handler(), because non-secure IGROUPR writes
 # cannot promote Group 0 → Group 1 on this GICv2 and the timer therefore
@@ -874,6 +898,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_coop_preempt.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_cpu_supervisor.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_mpidr_lookup.c>
 )
 
 # lwIP library sources (QEMU networking only)
