@@ -20,7 +20,8 @@ Cross-platform symmetric-multiprocessing bring-up and runtime behavior.
 | Work stealing | ON | ON | ON | ON |
 | Multi-core integration tests | 5/5 pass | 15/15 pass (modulo #216 dormancy flake) | 6-core `bench smp` 5/5 | Full suite |
 | SMP-safe UART lock | Standard | IRQ-disable-only (NC lock deadlocks) | IRQ-disable-only | Standard |
-| CPU 0 idle behavior | WFI (timer wakes) | WFI (HW preempt opt-in) / WFE-spin (default coop) | WFI (HW tick default) / spin-yield under `JETSON_HW_TICK=OFF` | HLT |
+| CPU 0 idle behavior | WFI (timer wakes) | WFI (timer wakes) | WFI (HW tick default, timer wakes) / spin-yield under `JETSON_HW_TICK=OFF` | HLT |
+| Secondary-CPU idle behavior | WFI | WFI under HW preempt opt-in / WFE under default coop | WFI under HW tick default / WFE under `JETSON_HW_TICK=OFF` | HLT |
 
 ## Skipped / Blocked
 
