@@ -124,24 +124,37 @@ static inline uint64_t read_cntfrq(void)
 
 static void test_irq_save_regs_preserves_fp_simd(void)
 {
-    /* Pattern: low halves are 0xA5A5A5A5_xx0000NN where NN = q-reg index.
-     * High halves are 0x5A5A5A5A_xx0000NN. Distinct bit patterns per
-     * register so a swap or off-by-one between save and restore gets
-     * caught by element-wise comparison. */
+    /* Per-register patterns. Bit-mix the index across both halves so a
+     * misindexed save/restore (e.g. q[i].d[0] swapped with q[i+1].d[1])
+     * surfaces as a value mismatch even when the index byte alone would
+     * happen to alias. Index `i` (0..31) ends up in distinct byte
+     * positions of low/high to defeat that aliasing class:
+     *   low  = 0xDEADBEEF_<i>5A5A5A   ← index in bits[31:24]
+     *   high = 0x<i>5A5A5A_CAFEBABE   ← index in bits[63:56]
+     * Two registers can never produce identical low+high pairs by
+     * accident under any swap/off-by-N permutation of the file. */
     static volatile uint64_t pattern_lo[32];
     static volatile uint64_t pattern_hi[32];
     static volatile uint64_t observed_lo[32];
     static volatile uint64_t observed_hi[32];
 
     for (int i = 0; i < 32; i++) {
-        pattern_lo[i] = 0xA5A5A5A500000000ULL | (uint64_t)(i + 1);
-        pattern_hi[i] = 0x5A5A5A5A00000000ULL | (uint64_t)(i + 1);
+        pattern_lo[i] = 0xDEADBEEF005A5A5AULL | ((uint64_t)i << 24);
+        pattern_hi[i] = 0x005A5A5ACAFEBABEULL | ((uint64_t)i << 56);
     }
 
     /* Deadline: 200 ms in CNTPCT ticks. At the kernel's 100 Hz tick
      * rate that's 20 ticks of margin — far more than enough; if no
      * tick has fired in 200 ms something else is broken and the test
-     * should fail loud rather than spin forever. */
+     * should fail loud rather than spin forever.
+     *
+     * Overflow safety: CNTFRQ on every shipping ARM64 platform is
+     * 19.2–54 MHz, so freq/5 ≤ ~11M. CNTPCT is bounded by uptime in
+     * counter ticks (54M ticks/s × 2^64 / 54M ≈ 10^10 years before
+     * wrap), so cntpct + freq/5 cannot overflow uint64 on any plausible
+     * boot. If a future platform reports a CNTFRQ near 2^61, this
+     * deadline arithmetic would need to be reworked — that's the only
+     * regression class to worry about. */
     uint64_t freq = read_cntfrq();
     uint64_t deadline = read_cntpct() + (freq / 5);
 
