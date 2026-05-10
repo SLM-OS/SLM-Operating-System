@@ -39,7 +39,18 @@
 #include <string.h>
 
 /* Op-name table for the UART summary. Indices match SLM_GPU_OP_*
- * values 0..7. */
+ * values 0..7. The 8-wide range is the SLM op set; the loop below
+ * relies on `SLM_GPU_OP_LM_HEAD` being the last SLM op_kind. A
+ * future enum addition that inserts a value into the SLM range
+ * would silently drop the new op from this summary; pin the bound
+ * at compile time so an enum drift breaks the build instead. */
+_Static_assert(SLM_GPU_OP_RMSNORM == 0,
+               "OP_NAMES table is indexed from 0 = SLM_GPU_OP_RMSNORM");
+_Static_assert(SLM_GPU_OP_LM_HEAD == 7,
+               "OP_NAMES table sizes (8) and the loop bound assume "
+               "SLM_GPU_OP_LM_HEAD == 7. If the SLM op_kind range "
+               "grows, widen OP_NAMES, the loop bound, and the "
+               "`bool simt[8]` array in oplib_probe_run.");
 static const char *const OP_NAMES[8] = {
     "RMSNORM",
     "ROPE",

@@ -11,14 +11,15 @@
  *      default Cpu — i.e. don't bump the Simt count above the
  *      registered count.
  *
- * The Rust-side TIER_TABLE update can't be observed from this test
- * (the runtime crate isn't linked into the kernel-test image; the
- * `slm_runtime_set_tier_simt` extern resolves to a stub that
- * always returns 0). What we verify here is the C-side walk: the
- * dispatcher accepts every fixture, the probe reports the right
- * count, and the UART summary fires without panicking.
+ * The kernel-test build links libslm_runtime.a, so
+ * `slm_runtime_set_tier_simt` resolves to the real Rust impl (the
+ * `#[cfg(not(test))]` gate excludes only `cargo test`, not the
+ * kernel-test image). That means the probe's TIER_TABLE writes
+ * actually take effect during this test — the Simt-count assertion
+ * below is what we verify, but the underlying atomic stores into
+ * the Rust runtime's TIER_TABLE happen for real.
  *
- * Pure-logic. No GPU, no MMIO. Runs on QEMU.
+ * Pure-logic on the C side. No GPU, no MMIO. Runs on QEMU.
  */
 
 #include "unity.h"
