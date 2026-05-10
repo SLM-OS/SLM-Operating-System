@@ -4023,6 +4023,7 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_channel_handoff.h"
 #include "../gpu/nvidia/ga10b_gmmu.h"
 #include "oplib_pool.h"
+#include "oplib_weights_pool.h"
 #include "oplib_probe.h"
 #include "oplib_dispatch.h"
 /* cache_clean_range / pmm_alloc_page are already pulled in via the
@@ -6019,6 +6020,161 @@ oplib_stage_call:
         return -1;
     }
 
+    if (strcmp(argv[1], "weights-pool") == 0) {
+        if (argc < 3 || strcmp(argv[2], "status") == 0) {
+            /* `nvgpu weights-pool status` — describe what the v8
+             * handoff exposed and how much of the bump allocator
+             * has been consumed. */
+            uint64_t total = (uint64_t)oplib_weights_pool_total_size();
+            uint64_t used  = (uint64_t)oplib_weights_pool_bytes_used();
+            shell_printf("[weights-pool] gpu_va=0x%lx size=%lu B used=%lu B\r\n",
+                         (unsigned long)ga10b_weights_pool_gpu_va(),
+                         (unsigned long)total,
+                         (unsigned long)used);
+            return 0;
+        }
+        if (strcmp(argv[2], "smoke") == 0) {
+            /* `nvgpu weights-pool smoke [size_hex]` — proof-of-life
+             * for W2's stage path. Allocates a 256-byte slot
+             * (default; override via 3rd arg), fills CPU bytes with
+             * a counting pattern, calls the FFI to copy them into
+             * the pool, walks the GMMU back to the destination phys,
+             * reads the bytes via identity-mapped phys, and reports
+             * the byte-equality verdict.
+             *
+             * Hardware verification: this is what the W2 PR runs
+             * after `nvgpu inherit / channel / oplib stage` to
+             * prove `slm_runtime_stage_weight` made the bytes
+             * land. */
+            uint64_t want_bytes = 256u;
+            if (argc >= 4) {
+                const char *s = argv[3];
+                if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                    s += 2;
+                }
+                uint64_t v = 0;
+                while (*s) {
+                    char c = *s;
+                    uint64_t d;
+                    if (c >= '0' && c <= '9') d = (uint64_t)(c - '0');
+                    else if (c >= 'a' && c <= 'f') d = 10u + (uint64_t)(c - 'a');
+                    else if (c >= 'A' && c <= 'F') d = 10u + (uint64_t)(c - 'A');
+                    else { shell_puts("weights-pool smoke: bad hex size\r\n");
+                           return -1; }
+                    v = (v << 4) | d;
+                    s++;
+                }
+                if (v == 0 || v > 4096u) {
+                    shell_puts("weights-pool smoke: size must be in (0, 0x1000]\r\n");
+                    return -1;
+                }
+                want_bytes = v;
+            }
+
+            /* Build CPU pattern. Simple counting bytes — every
+             * byte's value is `i & 0xFF` so any single-byte miscopy
+             * is instantly visible in the failure print. */
+            static uint8_t pattern[4096];
+            for (uint64_t i = 0; i < want_bytes; i++) {
+                pattern[i] = (uint8_t)(i & 0xFFu);
+            }
+
+            uint64_t gpu_va = 0;
+            int rc = slm_runtime_stage_weight(pattern, want_bytes, &gpu_va);
+            if (rc != 0) {
+                /* Stage path is currently inert on this Jetson —
+                 * GMMU walk-discovery for the inherited channel's
+                 * inst block fails post-kexec because Linux's
+                 * teardown frees the inst-block tree before SLM-OS
+                 * boots. The pushbuf bytes survive (which is why
+                 * compute dispatch via the doorbell still works),
+                 * but the CPU-walkable GMMU is gone. The W2 PR
+                 * (#TBD) ships the FFI + bump allocator scaffolding
+                 * so W3-W7 hybrid wrappers have a stable interface
+                 * to call; the actual staging backend (likely a
+                 * GA10B Copy Engine path) lands in a follow-up. */
+                shell_printf("weights-pool smoke: stage rc=%d "
+                             "(pool used=%lu B; staging backend "
+                             "currently inert post-kexec on this "
+                             "board, see PR #TBD)\r\n",
+                             rc,
+                             (unsigned long)oplib_weights_pool_bytes_used());
+                return rc;
+            }
+            shell_printf("[weights-pool] staged %lu B at gpu_va=0x%lx\r\n",
+                         (unsigned long)want_bytes,
+                         (unsigned long)gpu_va);
+
+            /* Read-back via GMMU walk + identity-mapped phys. */
+            const struct ga10b_channel_handoff *h_dbg =
+                ga10b_bringup_handoff();
+            uint64_t inst = ga10b_gmmu_discover_inst_block_phys();
+            if (inst != 0 && h_dbg != NULL) {
+                struct ga10b_gmmu_walk_result vr;
+                if (!(ga10b_gmmu_walk(inst, h_dbg->pushbuf_gpu_va, &vr) == 0
+                      && vr.status == GA10B_GMMU_WALK_OK
+                      && vr.leaf_phys == h_dbg->pushbuf_phys)) {
+                    inst = 0;
+                }
+            }
+            if (inst == 0 && h_dbg != NULL) {
+                inst = ga10b_gmmu_discover_inst_block_via_walk(
+                    h_dbg->pushbuf_gpu_va, h_dbg->pushbuf_phys,
+                    0x80000000ULL, 0x240000000ULL);
+            }
+            if (inst == 0) {
+                shell_puts("weights-pool smoke: stage succeeded but "
+                           "no readback path (inst block discovery "
+                           "failed — same blocker as the stage path)\r\n");
+                return -1;
+            }
+
+            /* Walk the page that contains gpu_va. The smoke
+             * payload is <= 4 KB so it cannot span two pages
+             * (allocator always returns offsets that, together
+             * with size, stay under 4 KB on the smoke path —
+             * verified by the size cap above). */
+            struct ga10b_gmmu_walk_result wr;
+            uint64_t page_va = gpu_va & ~((uint64_t)4096u - 1u);
+            size_t   page_off = (size_t)(gpu_va - page_va);
+            if (ga10b_gmmu_walk(inst, page_va, &wr) != 0 ||
+                wr.status != GA10B_GMMU_WALK_OK) {
+                shell_puts("weights-pool smoke: GMMU walk failed\r\n");
+                return -1;
+            }
+            uint8_t *readback = (uint8_t *)(uintptr_t)
+                                (wr.leaf_phys + page_off);
+            cache_invalidate_range(readback, (size_t)want_bytes);
+
+            int mismatches = 0;
+            for (uint64_t i = 0; i < want_bytes; i++) {
+                if (readback[i] != pattern[i]) {
+                    if (mismatches < 4) {
+                        shell_printf("  byte %lu: got 0x%02x want 0x%02x\r\n",
+                                     (unsigned long)i,
+                                     (unsigned)readback[i],
+                                     (unsigned)pattern[i]);
+                    }
+                    mismatches++;
+                }
+            }
+            if (mismatches != 0) {
+                shell_printf("weights-pool smoke: FAIL, %d byte(s) "
+                             "differ in %lu B span\r\n",
+                             mismatches, (unsigned long)want_bytes);
+                return -1;
+            }
+            shell_printf("[weights-pool] smoke PASS — %lu B byte-exact "
+                         "round-trip via gpu_va=0x%lx, phys=0x%lx\r\n",
+                         (unsigned long)want_bytes,
+                         (unsigned long)gpu_va,
+                         (unsigned long)(wr.leaf_phys + page_off));
+            return 0;
+        }
+        shell_puts("usage: nvgpu weights-pool <status | smoke [size_hex]>\r\n");
+        return -1;
+    }
+
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
               "channel | engine-status | engine-clear | "
               "submit | submit-compute | launch-kernel | "
@@ -6026,7 +6182,8 @@ oplib_stage_call:
               "gmmu <pushbuf | walk | walk-raw | "
               "alloc-page | alloc-page-synth | "
               "alloc-multi-synth | reuse-synth> | "
-              "oplib]\r\n");
+              "oplib | "
+              "weights-pool <status | smoke>]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */

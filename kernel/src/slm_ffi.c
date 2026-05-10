@@ -21,12 +21,14 @@
 #include "gpu_consumer.h"
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdint.h>
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
 #include "operator_dispatch.h"      /* struct operator_dispatch_args */
 #include "oplib_dispatch.h"         /* slm_oplib_dispatch */
 #include "oplib_pool.h"             /* OPLIB_POOL_* slot offsets */
+#include "oplib_weights_pool.h"     /* W2 weight staging */
 /* cache_clean_range / cache_invalidate_range come from gpu.h above
  * (already included on the non-Jetson side). The kernel/include/cache.h
  * variant has a stricter signature (const volatile void *) and would
@@ -1277,6 +1279,38 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     return 0;
 }
 
+/* W2: stage CPU weight bytes into the helper-published GPU weights
+ * pool. See oplib_weights_pool.h for the per-page GMMU-walk
+ * staging mechanism. The lock guards the (alloc, stage) pair so a
+ * concurrent dispatch can't run mid-stage and observe a half-
+ * populated tensor — both `oplib_weights_pool_alloc` (mutates the
+ * bump pointer) and `oplib_weights_pool_stage` (touches the
+ * channel's GMMU walker state) need protection. */
+int slm_runtime_stage_weight(const void *cpu_bytes,
+                              uint64_t len,
+                              uint64_t *out_gpu_va)
+{
+    if (cpu_bytes == NULL || len == 0 || out_gpu_va == NULL) {
+        return -1;
+    }
+
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+
+    uint64_t gva = oplib_weights_pool_alloc((size_t)len, 0);
+    if (gva == 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+    int rc = oplib_weights_pool_stage(gva, cpu_bytes, (size_t)len);
+    if (rc != 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return rc;
+    }
+    *out_gpu_va = gva;
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return 0;
+}
+
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
 
 int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
@@ -1293,6 +1327,16 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     (void)n;
     (void)eps_bits;
     /* Non-Jetson: no GA10B GMMU, no operator library staging. */
+    return -1;
+}
+
+int slm_runtime_stage_weight(const void *cpu_bytes,
+                              uint64_t len,
+                              uint64_t *out_gpu_va)
+{
+    (void)cpu_bytes;
+    (void)len;
+    (void)out_gpu_va;
     return -1;
 }
 

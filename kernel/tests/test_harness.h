@@ -236,6 +236,10 @@ int test_suite_operator_library(void);
 /* In-kernel embedded operator-library handle tests (#714). */
 int test_suite_oplib_pool(void);
 
+/* W2 weights pool bump-allocator + staging tests
+ * (docs/design/gpu-weights-pool.md). */
+int test_suite_oplib_weights_pool(void);
+
 /* Per-op dispatch metadata registry tests (#714, A.2). */
 int test_suite_operator_dispatch(void);
 
