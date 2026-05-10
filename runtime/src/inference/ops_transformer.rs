@@ -685,6 +685,24 @@ pub fn swiglu_mlp(
     )
 }
 
+/// W7: element-wise SwiGLU step extracted from `swiglu_mlp_q` so
+/// the GPU hybrid wrapper (in `forward.rs`) has a single CPU
+/// reference to fall back to.
+///
+/// Computes `gate[i] = silu(gate[i]) * up[i]` in-place over the
+/// first `n` elements. `gate` and `up` are both FP16; the loop
+/// widens to FP32 internally because `mathf::tanhf`-based silu
+/// works in FP32. Caller pre-checks `gate.len() >= n` and
+/// `up.len() >= n`.
+pub fn swiglu_elementwise(gate: &mut [u16], up: &[u16], n: usize) {
+    silu(&mut gate[..n]);
+    for i in 0..n {
+        let gv = f16_to_f32(gate[i]);
+        let uv = f16_to_f32(up[i]);
+        gate[i] = f32_to_f16(gv * uv);
+    }
+}
+
 /// SwiGLU MLP block accepting per-weight quant types.
 ///
 /// `gate_w`/`up_w`/`down_w` may each carry a different GGML quant
@@ -771,13 +789,10 @@ pub fn swiglu_mlp_q(
         up_scratch[i] = f32_to_f16(tmp_f32[i]);
     }
 
-    // gate ← silu(gate); gate ← gate ⊙ up
-    silu(gate_scratch);
-    for i in 0..intermediate_size {
-        let gv = f16_to_f32(gate_scratch[i]);
-        let uv = f16_to_f32(up_scratch[i]);
-        gate_scratch[i] = f32_to_f16(gv * uv);
-    }
+    // gate ← silu(gate); gate ← gate ⊙ up. Extracted as
+    // `swiglu_elementwise` so forward.rs's W7 hybrid wrapper
+    // (`swiglu_elementwise_hybrid`) has a CPU fallback target.
+    swiglu_elementwise(gate_scratch, up_scratch, intermediate_size);
 
     // out = matmul(gate, down_w) [hidden_size]
     let mut out_f32: Vec<f32> = vec![0.0; hidden_size];

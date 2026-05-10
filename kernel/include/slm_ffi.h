@@ -1329,6 +1329,22 @@ extern int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
                                                uint32_t seq_len);
 
 /*
+ * W7: dispatch SWIGLU element-wise on `n` FP16 elements:
+ *   out[i] = silu(gate[i]) * up[i]
+ * Per-call CPU staging: gate → SCRATCH0, up → SCRATCH1, out from
+ * SCRATCH2 back into the caller's buffer. n*2 bytes per buffer
+ * must fit a 64 KB scratch slot (max n = 32 768 — covers
+ * Qwen2.5-1.5B's 8960 intermediate_size).
+ *
+ * Returns 0 on success, -1 on null/zero shape, scratch-slot
+ * overflow, or GPU dispatch failure. Jetson-only.
+ */
+extern int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
+                                             const void *up_cpu_in,
+                                             void *out_cpu_out,
+                                             uint32_t n);
+
+/*
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
  *
  * Single source of truth for the shell's pre-load size gate. Pinned
