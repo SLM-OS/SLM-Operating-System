@@ -349,6 +349,16 @@ unsafe extern "C" {
         head_dim: u32,
         seq_len: u32,
     ) -> i32;
+
+    /// W7: dispatch SWIGLU element-wise on n FP16 elements.
+    /// `out[i] = silu(gate[i]) * up[i]`. n capped at 32 768 by
+    /// the 64 KB scratch slot.
+    fn slm_runtime_dispatch_swiglu_simt(
+        gate_cpu_in: *const u8,
+        up_cpu_in: *const u8,
+        out_cpu_out: *mut u8,
+        n: u32,
+    ) -> i32;
 }
 
 /// `cargo test` doesn't link the kernel-side FFI; the host-side
@@ -416,6 +426,16 @@ unsafe fn slm_runtime_dispatch_gqa_attn_simt(
     _n_head_kv: u32,
     _head_dim: u32,
     _seq_len: u32,
+) -> i32 {
+    -1
+}
+
+#[cfg(test)]
+unsafe fn slm_runtime_dispatch_swiglu_simt(
+    _gate_cpu_in: *const u8,
+    _up_cpu_in: *const u8,
+    _out_cpu_out: *mut u8,
+    _n: u32,
 ) -> i32 {
     -1
 }
@@ -606,6 +626,43 @@ impl OperatorLibraryBackend {
                 n_head_kv,
                 head_dim,
                 seq_len,
+            )
+        };
+        if rc != 0 {
+            return Err(BackendError::NotAvailable);
+        }
+        Ok(())
+    }
+
+    /// W7: dispatch SWIGLU element-wise on n FP16 elements.
+    /// `out[i] = silu(gate[i]) * up[i]`. Caller pre-computes
+    /// gate and up via the per-projection matmul path; this
+    /// shim only handles the silu+multiply step.
+    pub fn dispatch_swiglu(
+        gate: &[u16],
+        up: &[u16],
+        out: &mut [u16],
+        n: u32,
+    ) -> Result<(), BackendError> {
+        if select_tier(OpKind::SwiGlu) != Tier::Simt {
+            return Err(BackendError::NotAvailable);
+        }
+        if n == 0 {
+            return Err(BackendError::BadShape);
+        }
+        if gate.len() != n as usize ||
+           up.len() != n as usize ||
+           out.len() != n as usize {
+            return Err(BackendError::BadShape);
+        }
+        // SAFETY: gate/up valid for n*2 bytes each; out valid for
+        // n*2 bytes mutable. FFI doesn't retain pointers.
+        let rc = unsafe {
+            slm_runtime_dispatch_swiglu_simt(
+                gate.as_ptr() as *const u8,
+                up.as_ptr() as *const u8,
+                out.as_mut_ptr() as *mut u8,
+                n,
             )
         };
         if rc != 0 {

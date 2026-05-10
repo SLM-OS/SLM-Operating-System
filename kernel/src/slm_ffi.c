@@ -1279,6 +1279,78 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     return 0;
 }
 
+/* W7: dispatch SWIGLU on (gate, up) → out element-wise. Per-call
+ * staging mirrors RMSNORM/Q4K_DOT: gate → SCRATCH0, up → SCRATCH1,
+ * out → SCRATCH2 then memcpy back. */
+int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
+                                      const void *up_cpu_in,
+                                      void *out_cpu_out,
+                                      uint32_t n)
+{
+    if (gate_cpu_in == NULL || up_cpu_in == NULL || out_cpu_out == NULL ||
+        n == 0) {
+        return -1;
+    }
+    uint64_t bytes = (uint64_t)n * 2u;
+    if (bytes > OPLIB_POOL_SLOT_BYTES) {
+        return -1;
+    }
+
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
+        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+    struct ga10b_bringup *b = ga10b_bringup_state();
+    if (b == NULL) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+
+    uint64_t gate_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t gate_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t up_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t up_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t out_phys  = h->shader_phys + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t out_va    = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH2;
+
+    memcpy((void *)(uintptr_t)gate_phys, gate_cpu_in, (size_t)bytes);
+    memcpy((void *)(uintptr_t)up_phys,   up_cpu_in,   (size_t)bytes);
+    cache_clean_range((void *)(uintptr_t)gate_phys,
+                      (size_t)((bytes + 4095u) & ~4095ull));
+    cache_clean_range((void *)(uintptr_t)up_phys,
+                      (size_t)((bytes + 4095u) & ~4095ull));
+
+    struct operator_dispatch_args args = {
+        .op_kind = SLM_GPU_OP_SWIGLU,
+        .u.swiglu = {
+            .gate_gpu_va = gate_va,
+            .up_gpu_va   = up_va,
+            .out_gpu_va  = out_va,
+            .n           = n,
+        },
+    };
+    int rc = slm_oplib_dispatch(b, 0,
+                                 SLM_GPU_OP_SWIGLU,
+                                 SLM_GPU_TIER_SIMT,
+                                 SLM_GPU_DTYPE_FP16,
+                                 &args);
+    if (rc < 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return rc;
+    }
+
+    cache_invalidate_range((void *)(uintptr_t)out_phys,
+                           (size_t)((bytes + 4095u) & ~4095ull));
+    memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)bytes);
+
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return 0;
+}
+
 /* W6: dispatch GQA_ATTN with per-call staging of Q/K/V into
  * SCRATCH0/1/2; out shares SCRATCH0 at a sub-page offset (matches
  * the existing GQA smoke verb's slot layout). seq_len is capped
@@ -1622,6 +1694,15 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
 {
     (void)q_cpu_in; (void)k_cpu_in; (void)v_cpu_in; (void)out_cpu_out;
     (void)n_head_q; (void)n_head_kv; (void)head_dim; (void)seq_len;
+    return -1;
+}
+
+int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
+                                      const void *up_cpu_in,
+                                      void *out_cpu_out,
+                                      uint32_t n)
+{
+    (void)gate_cpu_in; (void)up_cpu_in; (void)out_cpu_out; (void)n;
     return -1;
 }
 

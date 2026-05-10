@@ -65,7 +65,8 @@ use core::fmt::Write as _;
 
 use crate::inference::gpu_slm::{select_tier, OpKind, OperatorLibraryBackend, Tier};
 use crate::inference::ops_transformer::{
-    gqa_decode_step, lm_head_q, matmul_quant_rows, rmsnorm, swiglu_mlp_q, RopeTable,
+    gqa_decode_step, lm_head_q, matmul_quant_rows, rmsnorm, swiglu_elementwise,
+    swiglu_mlp_q, RopeTable,
 };
 use crate::inference::quant::{dequantize_row_any, q8_k_byte_size};
 use crate::slm::gguf::{f32_to_f16, ArchInfo, GgmlType};
@@ -170,6 +171,42 @@ fn embedding_lookup_hybrid(
         out,
         cpu_scratch,
     )
+}
+
+/// W7: element-wise SwiGLU hybrid wrapper. Dispatches the GPU
+/// SWIGLU operator on `gate` and `up` (already-projected
+/// activations) producing `out = silu(gate) * up`. Falls through
+/// to `swiglu_elementwise` (CPU) on any miss.
+///
+/// `swiglu_mlp_q` itself stays CPU-only because it lives in
+/// `ops_transformer.rs` (which can't depend on `gpu_slm`). When
+/// `forward.rs` swaps to a per-step MLP path that calls this
+/// helper directly, the GPU path activates. Until then this
+/// wrapper is allowed-dead-code: it exists so the FFN-refactor
+/// PR can adopt it without a separate scaffolding-only PR.
+#[inline]
+#[allow(dead_code)]
+fn swiglu_elementwise_hybrid(gate: &mut [u16], up: &[u16], n: usize) {
+    if n == 0 {
+        return;
+    }
+    if select_tier(OpKind::SwiGlu) == Tier::Simt {
+        /* GPU path needs separate gate/up reads + an out write,
+         * but our caller passes `gate` mutably as both input
+         * (silu) and output. Allocate a tiny temp on the GPU's
+         * behalf so the FFI stays the simple shape. The CPU
+         * fallback uses `gate` in place to avoid the heap touch. */
+        let mut tmp = vec![0u16; n];
+        if OperatorLibraryBackend::dispatch_swiglu(
+            &gate[..n], &up[..n], &mut tmp, n as u32,
+        )
+        .is_ok()
+        {
+            gate[..n].copy_from_slice(&tmp);
+            return;
+        }
+    }
+    swiglu_elementwise(gate, up, n);
 }
 
 /// W6: GQA_ATTN hybrid wrapper. Dispatches the GPU operator-library
