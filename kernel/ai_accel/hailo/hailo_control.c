@@ -2132,7 +2132,14 @@ int hailo_control_set_context_info(
 
 /* -------------------------------------------------------------------------- */
 /* CHANGE_HW_INFER_STATUS (opcode 0x4A, CORE CPU). #682 hyp-A.                */
+/*                                                                            */
+/* Gated behind HAILO_HYP_A_RPC. hyp-A was disconfirmed (2026-05-08) and      */
+/* the RPC has zero in-tree callers; the wire layout + _Static_asserts are    */
+/* preserved here as a build-flag-enabled reference for any future fw rev    */
+/* that may honour it. See header for the full investigation history.        */
 /* -------------------------------------------------------------------------- */
+
+#ifdef HAILO_HYP_A_RPC
 
 /* Per-channel info entry. Mirrors HailoRT's
  * CONTROL_PROTOCOL__hw_infer_channel_info_t (4 bytes packed). */
@@ -2261,3 +2268,5 @@ int hailo_control_change_hw_infer_status(
     spin_unlock(&control_lock);
     return rc;
 }
+
+#endif /* HAILO_HYP_A_RPC */

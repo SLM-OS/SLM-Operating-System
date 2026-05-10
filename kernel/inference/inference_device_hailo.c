@@ -937,11 +937,17 @@ static void hailo_bar4_diff_print(const char *label)
             unsigned off = (unsigned)(i * 4);
             bool in_app_log  = (off >= 0x2000u && off < 0x3000u);
             bool in_core_log = (off >= 0x3000u && off < 0x4000u);
-            if (in_app_log)        n_app_log++;
-            else if (in_core_log)  n_core_log++;
-            else if (off < 0x640u) n_ctrl++;
-            else if (off < 0xC80u) n_resp++;
-            else                   n_d2h++;
+            if (in_app_log) {
+                n_app_log++;
+            } else if (in_core_log) {
+                n_core_log++;
+            } else if (off < 0x640u) {
+                n_ctrl++;
+            } else if (off < 0xC80u) {
+                n_resp++;
+            } else {
+                n_d2h++;
+            }
 
             if (!in_app_log && !in_core_log) {
                 uart_printf("[bar4-diff] %s +0x%04x: 0x%08x -> 0x%08x\r\n",
@@ -2330,10 +2336,14 @@ static int hailo_backend_run(struct inference_device *dev,
      * the trained speed/width is anything other than what was
      * captured at post-boot-arm, the link re-trained between RPCs. */
     hailo_platform_log_link_state("pre-IN-submit");
-    /* #682 hyp-W: snapshot bridge errors right before the submit,
-     * then W1C the EP error bits so the post-timeout dump shows
-     * only errors that fired *during* the boundary submit window.
-     * Disambiguates stale boot-time UR/MA from runtime UR/MA. */
+    /* #682 hyp-W: dump (read-only) then W1C-clear (real config-space
+     * write — mutates EP state) the bridge error bits so the
+     * post-timeout dump shows only errors that fired *during* the
+     * boundary submit window. Disambiguates stale boot-time UR/MA
+     * from runtime UR/MA. The clear is the only `HAILO_WIRE_DEBUG`
+     * site that mutates device state; if you're debugging an
+     * unexpected post-submit DEVSTA value with WIRE_DEBUG enabled,
+     * remember this clear ran first. */
     hailo_platform_dump_bridge_errors("pre-IN-submit");
     hailo_platform_clear_bridge_errors("pre-IN-submit");
     /* #682 hyp-X-1 (DISCONFIRMED 2026-05-09): mirror Linux's

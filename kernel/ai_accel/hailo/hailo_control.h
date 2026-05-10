@@ -138,8 +138,11 @@ enum hailo_control_opcode {
     /* Full table in ~/slmos-ref/hailo/hailort-control-protocol.h. */
 };
 
+#ifdef HAILO_HYP_A_RPC
 /* CHANGE_HW_INFER_STATUS state values (mirrors HailoRT
- * CONTROL_PROTOCOL__hw_infer_state_t). */
+ * CONTROL_PROTOCOL__hw_infer_state_t). hyp-A was disconfirmed
+ * (2026-05-08); declarations are gated behind HAILO_HYP_A_RPC so the
+ * dead reference RPC doesn't ship in production. */
 enum hailo_hw_infer_state {
     HAILO_HW_INFER_STATE_START = 0,
     HAILO_HW_INFER_STATE_STOP  = 1,
@@ -151,6 +154,7 @@ enum hailo_boundary_channel_mode {
     HAILO_BOUNDARY_CHANNEL_MODE_DESC = 0,
     HAILO_BOUNDARY_CHANNEL_MODE_CCB  = 1,
 };
+#endif /* HAILO_HYP_A_RPC */
 
 /* CONTROL_PROTOCOL__communication_type_t values.
  * Mirrored from hailort-control-protocol.h:1522. We only use PCIE
@@ -827,6 +831,7 @@ int hailo_control_disarm_irq_masks(void);
  */
 void hailo_control_dump_irq_state(const char *label);
 
+#ifdef HAILO_HYP_A_RPC
 /*
  * #682 hyp-A (2026-05-08, disconfirmed): CHANGE_HW_INFER_STATUS RPC.
  * Targets CORE CPU. Used by HailoRT's hw-only benchmark mode to start
@@ -835,8 +840,10 @@ void hailo_control_dump_irq_state(const char *label);
  * experiment — fw's pios_DYNAMIC.bin ends with action 0x15 (waiting
  * for an app-change signal). RPC was rejected with status
  * 0x400300ca/0x40000001; HW-only mode requires special HEF state not
- * applicable to streaming inference. Kept as reference for the wire
- * layout in case a future fw version honours it.
+ * applicable to streaming inference. Gated behind HAILO_HYP_A_RPC so
+ * production builds don't ship the dead RPC; flip the build flag if
+ * a future fw version honours it. The wire layout (`_Static_assert`s
+ * in the .c file) and the comment trail are why we keep this around.
  *
  * `state`: HAILO_HW_INFER_STATE_START or _STOP.
  * `app_idx`: network group index (0 for our single-NG MNIST).
@@ -853,6 +860,7 @@ int hailo_control_change_hw_infer_status(
     uint16_t                          dynamic_batch_size,
     uint16_t                          batch_count,
     enum hailo_boundary_channel_mode  boundary_mode);
+#endif /* HAILO_HYP_A_RPC */
 
 /*
  * Pre-boot MSI registration. Linux's hailo_pcie_enable_interrupts

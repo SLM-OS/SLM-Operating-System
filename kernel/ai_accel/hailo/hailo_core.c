@@ -908,6 +908,11 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
      * never want to be one boot away from a regression. */
     if (hailo_platform->udelay) {
         hailo_platform->udelay(500000u); /* 500 ms (bisect-anchored) */
+        /* This 500 ms boot settle plus inference_device_hailo.c's
+         * 50 ms per-RPC floor (HAILO_CORE_CPU_SETTLE_FLOOR_US, 12
+         * RPCs in context_switch_load → ~600 ms total) are the
+         * dominant load-time latency. Tracked under #761 for a
+         * post-#682-unblock bisect-down. */
         INFO("hailo: post-disarm settle complete (500 ms)");
     }
 
