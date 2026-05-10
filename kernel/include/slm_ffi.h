@@ -1294,6 +1294,41 @@ extern int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
                                               uint32_t n);
 
 /*
+ * W6: dispatch GQA_ATTN using per-call staging of Q/K/V from CPU
+ * scratch slots. Q goes to SCRATCH0, K to SCRATCH1, V to SCRATCH2,
+ * out shares SCRATCH0 at a sub-page offset (Q is read before out
+ * is written, so the slot reuse is safe). FP16 throughout.
+ *
+ * Shapes:
+ *   Q:   [n_head_q × head_dim]            FP16
+ *   K/V: [seq_len × n_head_kv × head_dim] FP16
+ *   out: [n_head_q × head_dim]            FP16
+ *
+ * Constraints (caller pre-checks; FFI returns -1 if violated):
+ *   - n_head_q must be a multiple of n_head_kv (GQA grouping).
+ *   - head_dim ≤ 256 (kernel cap).
+ *   - K/V together with seq_len*n_head_kv*head_dim*2 must fit in
+ *     a 64 KB scratch slot. Practical cap: seq_len ≤ 128 for
+ *     Qwen2.5-1.5B (n_head_kv=2, head_dim=128). Beyond that the
+ *     caller falls through to the CPU `gqa_decode_step`.
+ *
+ * Returns 0 on success, -1 on shape/scratch overflow/dispatch
+ * failure. Persistent KV staging (so seq_len isn't capped at the
+ * 64 KB scratch ceiling) is a future enhancement gated on the
+ * W2 staging backend.
+ *
+ * Jetson-only.
+ */
+extern int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
+                                               const void *k_cpu_in,
+                                               const void *v_cpu_in,
+                                               void *out_cpu_out,
+                                               uint32_t n_head_q,
+                                               uint32_t n_head_kv,
+                                               uint32_t head_dim,
+                                               uint32_t seq_len);
+
+/*
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
  *
  * Single source of truth for the shell's pre-load size gate. Pinned

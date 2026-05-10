@@ -1279,6 +1279,104 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     return 0;
 }
 
+/* W6: dispatch GQA_ATTN with per-call staging of Q/K/V into
+ * SCRATCH0/1/2; out shares SCRATCH0 at a sub-page offset (matches
+ * the existing GQA smoke verb's slot layout). seq_len is capped
+ * by the K/V scratch-slot footprint. */
+int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
+                                        const void *k_cpu_in,
+                                        const void *v_cpu_in,
+                                        void *out_cpu_out,
+                                        uint32_t n_head_q,
+                                        uint32_t n_head_kv,
+                                        uint32_t head_dim,
+                                        uint32_t seq_len)
+{
+    if (q_cpu_in == NULL || k_cpu_in == NULL || v_cpu_in == NULL ||
+        out_cpu_out == NULL ||
+        n_head_q == 0 || n_head_kv == 0 || head_dim == 0 || seq_len == 0) {
+        return -1;
+    }
+    if ((n_head_q % n_head_kv) != 0) {
+        return -1;
+    }
+    uint64_t q_bytes   = (uint64_t)n_head_q  * head_dim * 2u;
+    uint64_t kv_bytes  = (uint64_t)seq_len   * n_head_kv * head_dim * 2u;
+    uint64_t out_bytes = q_bytes;
+    /* Q + out share SCRATCH0; the sub-page offset for `out` lands
+     * at SCRATCH0 + 0x1000, so Q must fit in the first 0x1000
+     * bytes of the slot. n_head_q*head_dim*2 ≤ 0x1000 means
+     * n_head_q*head_dim ≤ 2048 — Qwen2.5-1.5B's 16 q-heads × 128
+     * head_dim = 2048 fits exactly; SmolLM2's 9 × 64 = 576 fits
+     * comfortably. */
+    if (q_bytes > 0x1000ull || kv_bytes > OPLIB_POOL_SLOT_BYTES ||
+        out_bytes > 0x1000ull) {
+        return -1;
+    }
+
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
+        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+    struct ga10b_bringup *b = ga10b_bringup_state();
+    if (b == NULL) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+
+    uint64_t q_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t q_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t k_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t k_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t v_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t v_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH2;
+    /* out lives in SCRATCH0's second 4 KB sub-page. */
+    uint64_t out_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
+    uint64_t out_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
+
+    memcpy((void *)(uintptr_t)q_phys, q_cpu_in, (size_t)q_bytes);
+    memcpy((void *)(uintptr_t)k_phys, k_cpu_in, (size_t)kv_bytes);
+    memcpy((void *)(uintptr_t)v_phys, v_cpu_in, (size_t)kv_bytes);
+    cache_clean_range((void *)(uintptr_t)q_phys, 4096u);
+    cache_clean_range((void *)(uintptr_t)k_phys,
+                      (size_t)((kv_bytes + 4095u) & ~4095ull));
+    cache_clean_range((void *)(uintptr_t)v_phys,
+                      (size_t)((kv_bytes + 4095u) & ~4095ull));
+
+    struct operator_dispatch_args args = {
+        .op_kind = SLM_GPU_OP_GQA_ATTN,
+        .u.gqa_attn = {
+            .q_gpu_va   = q_va,
+            .k_gpu_va   = k_va,
+            .v_gpu_va   = v_va,
+            .out_gpu_va = out_va,
+            .n_head_q   = n_head_q,
+            .n_head_kv  = n_head_kv,
+            .head_dim   = head_dim,
+            .seq_len    = seq_len,
+        },
+    };
+    int rc = slm_oplib_dispatch(b, 0,
+                                 SLM_GPU_OP_GQA_ATTN,
+                                 SLM_GPU_TIER_SIMT,
+                                 SLM_GPU_DTYPE_FP16,
+                                 &args);
+    if (rc < 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return rc;
+    }
+
+    cache_invalidate_range((void *)(uintptr_t)out_phys, 4096u);
+    memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)out_bytes);
+
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return 0;
+}
+
 /* W5: dispatch Q4K_DOT against a GPU-resident weight matrix.
  * Per-call activation staging: x → SCRATCH0, dispatch with
  * (scratch_x_va, weights_gpu_va, scratch_out_va), pull FP32 out.
@@ -1510,6 +1608,20 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
 {
     (void)x_cpu_in; (void)weights_gpu_va; (void)weights_size_bytes;
     (void)out_cpu_out; (void)k; (void)n;
+    return -1;
+}
+
+int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
+                                        const void *k_cpu_in,
+                                        const void *v_cpu_in,
+                                        void *out_cpu_out,
+                                        uint32_t n_head_q,
+                                        uint32_t n_head_kv,
+                                        uint32_t head_dim,
+                                        uint32_t seq_len)
+{
+    (void)q_cpu_in; (void)k_cpu_in; (void)v_cpu_in; (void)out_cpu_out;
+    (void)n_head_q; (void)n_head_kv; (void)head_dim; (void)seq_len;
     return -1;
 }
 

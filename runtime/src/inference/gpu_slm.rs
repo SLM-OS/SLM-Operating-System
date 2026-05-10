@@ -336,6 +336,19 @@ unsafe extern "C" {
         k: u32,
         n: u32,
     ) -> i32;
+
+    /// W6: dispatch GQA_ATTN with per-call CPU staging of Q/K/V.
+    /// FP16 throughout. seq_len capped by 64 KB scratch slot.
+    fn slm_runtime_dispatch_gqa_attn_simt(
+        q_cpu_in: *const u8,
+        k_cpu_in: *const u8,
+        v_cpu_in: *const u8,
+        out_cpu_out: *mut u8,
+        n_head_q: u32,
+        n_head_kv: u32,
+        head_dim: u32,
+        seq_len: u32,
+    ) -> i32;
 }
 
 /// `cargo test` doesn't link the kernel-side FFI; the host-side
@@ -389,6 +402,20 @@ unsafe fn slm_runtime_dispatch_q4k_dot_simt(
     _out_cpu_out: *mut u8,
     _k: u32,
     _n: u32,
+) -> i32 {
+    -1
+}
+
+#[cfg(test)]
+unsafe fn slm_runtime_dispatch_gqa_attn_simt(
+    _q_cpu_in: *const u8,
+    _k_cpu_in: *const u8,
+    _v_cpu_in: *const u8,
+    _out_cpu_out: *mut u8,
+    _n_head_q: u32,
+    _n_head_kv: u32,
+    _head_dim: u32,
+    _seq_len: u32,
 ) -> i32 {
     -1
 }
@@ -526,6 +553,59 @@ impl OperatorLibraryBackend {
                 out.as_mut_ptr() as *mut u8,
                 k,
                 n,
+            )
+        };
+        if rc != 0 {
+            return Err(BackendError::NotAvailable);
+        }
+        Ok(())
+    }
+
+    /// W6: dispatch GQA_ATTN with per-call CPU staging of Q/K/V.
+    /// All inputs/outputs FP16. The KV scratch slot caps `seq_len`
+    /// — for Qwen2.5-1.5B (n_head_kv=2, head_dim=128) that's 128
+    /// positions; longer contexts must fall back to CPU.
+    pub fn dispatch_gqa_attn(
+        q: &[u16],
+        k: &[u16],
+        v: &[u16],
+        out: &mut [u16],
+        n_head_q: u32,
+        n_head_kv: u32,
+        head_dim: u32,
+        seq_len: u32,
+    ) -> Result<(), BackendError> {
+        if select_tier(OpKind::GqaAttn) != Tier::Simt {
+            return Err(BackendError::NotAvailable);
+        }
+        if n_head_q == 0 || n_head_kv == 0 || head_dim == 0 || seq_len == 0 {
+            return Err(BackendError::BadShape);
+        }
+        if (n_head_q % n_head_kv) != 0 {
+            return Err(BackendError::BadShape);
+        }
+        let q_len  = (n_head_q  as usize).checked_mul(head_dim as usize)
+            .ok_or(BackendError::BadShape)?;
+        let kv_len = (seq_len as usize).checked_mul(n_head_kv as usize)
+            .and_then(|v| v.checked_mul(head_dim as usize))
+            .ok_or(BackendError::BadShape)?;
+        if q.len() != q_len || out.len() != q_len ||
+           k.len() != kv_len || v.len() != kv_len {
+            return Err(BackendError::BadShape);
+        }
+        // SAFETY: q/k/v valid for q.len()*2 / k.len()*2 / v.len()*2
+        // bytes; out valid for out.len()*2 bytes mutable. FFI doesn't
+        // retain pointers past return.
+        let rc = unsafe {
+            slm_runtime_dispatch_gqa_attn_simt(
+                q.as_ptr() as *const u8,
+                k.as_ptr() as *const u8,
+                v.as_ptr() as *const u8,
+                out.as_mut_ptr() as *mut u8,
+                n_head_q,
+                n_head_kv,
+                head_dim,
+                seq_len,
             )
         };
         if rc != 0 {
