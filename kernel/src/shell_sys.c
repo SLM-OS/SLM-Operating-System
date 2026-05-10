@@ -6056,11 +6056,16 @@ oplib_stage_call:
                 while (*s) {
                     char c = *s;
                     uint64_t d;
-                    if (c >= '0' && c <= '9') d = (uint64_t)(c - '0');
-                    else if (c >= 'a' && c <= 'f') d = 10u + (uint64_t)(c - 'a');
-                    else if (c >= 'A' && c <= 'F') d = 10u + (uint64_t)(c - 'A');
-                    else { shell_puts("weights-pool smoke: bad hex size\r\n");
-                           return -1; }
+                    if (c >= '0' && c <= '9') {
+                        d = (uint64_t)(c - '0');
+                    } else if (c >= 'a' && c <= 'f') {
+                        d = 10u + (uint64_t)(c - 'a');
+                    } else if (c >= 'A' && c <= 'F') {
+                        d = 10u + (uint64_t)(c - 'A');
+                    } else {
+                        shell_puts("weights-pool smoke: bad hex size\r\n");
+                        return -1;
+                    }
                     v = (v << 4) | d;
                     s++;
                 }
@@ -6088,15 +6093,18 @@ oplib_stage_call:
                  * teardown frees the inst-block tree before SLM-OS
                  * boots. The pushbuf bytes survive (which is why
                  * compute dispatch via the doorbell still works),
-                 * but the CPU-walkable GMMU is gone. The W2 PR
-                 * (#TBD) ships the FFI + bump allocator scaffolding
-                 * so W3-W7 hybrid wrappers have a stable interface
-                 * to call; the actual staging backend (likely a
-                 * GA10B Copy Engine path) lands in a follow-up. */
+                 * but the CPU-walkable GMMU is gone. W2 ships the
+                 * FFI + bump allocator scaffolding so W3-W7 hybrid
+                 * wrappers have a stable interface to call; the
+                 * actual staging backend (likely a GA10B Copy
+                 * Engine path) lands in a follow-up. See
+                 * docs/design/gpu-weights-pool.md for the full
+                 * architecture. */
                 shell_printf("weights-pool smoke: stage rc=%d "
                              "(pool used=%lu B; staging backend "
                              "currently inert post-kexec on this "
-                             "board, see PR #TBD)\r\n",
+                             "board, see docs/design/"
+                             "gpu-weights-pool.md)\r\n",
                              rc,
                              (unsigned long)oplib_weights_pool_bytes_used());
                 return rc;
