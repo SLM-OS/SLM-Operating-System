@@ -135,10 +135,10 @@ broader hardware/networking generalization remains follow-on work.
 
 ## 7. Scheduler Enhancements
 
-### Secondary CPU Timer Preemption (1-2 weeks)
-- Deferred scheduling via ELR_EL1 trampoline (design documented in `docs/archive/investigations/pi5-secondary-cpu-preemption.md`)
-- Enables true preemptive multi-core scheduling on Pi 5
-- Requires preemption-safe test suite updates
+### ✅ Secondary CPU Timer Preemption — Done
+- Deferred scheduling via ELR_EL1 trampoline shipped on Pi 5 (PR #742, opt-in via `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`) and Jetson (PRs #647 + #746 + #752 + #753 + #755, default-on under `JETSON_HW_TICK=ON`).
+- True preemptive multi-core scheduling on both ARM64 hardware platforms; `kernel/sched/preempt.c` + `resched_trampoline` in `vectors.S`.
+- Pi 5 default still ships cooperative pending a broader audit; Jetson default flipped 2026-05-09. See `docs/fact-sheets/preemption.md`.
 
 ### Real AI Scheduler Weights
 - Integrate Plan A exported weights (MLP, PPO models)
@@ -164,7 +164,7 @@ broader hardware/networking generalization remains follow-on work.
 - Replace the spin-wait loop in `pi_mutex_lock` with a wait-queue model: waiter blocks (TASK_BLOCKED), owner's `pi_mutex_unlock` wakes one waiter
 - Removes the single-CPU contended livelock documented in `docs/scheduler.md` ("Known Limitation — Single-CPU Contended Priority Inheritance")
 - Also eliminates the need for `DAIF`-aware timer preemption to make progress on contended mutexes
-- Blocked by timer-driven wakeup on secondary CPUs on Pi 5 (see "Secondary CPU Timer Preemption" above); once that lands, the sleep queue is a straightforward addition
+- Unblocked on Pi 5 (opt-in `SECONDARY_PREEMPT=ON`, PR #742) and Jetson (default `JETSON_HW_TICK=ON`, PR #746/#755). Sleep queue is now a straightforward addition.
 
 ### ✅ Timer-Driven Busy-Wait Helper (small) — Done (#94)
 - `timer_busy_wait_us(us)` added as inline in `kernel/include/timer.h` — uses CNTPCT_EL0 (ARM64) / TSC (x86-64)
@@ -191,9 +191,9 @@ broader hardware/networking generalization remains follow-on work.
 ## Priority Recommendations
 
 **High priority (immediate post-capstone):**
-1. Secondary CPU preemption — unblocks multi-core integration tests
-2. Real AI scheduler weights — validates the AI-first thesis
-3. FP16 quantization — practical inference speedup
+1. Real AI scheduler weights — validates the AI-first thesis
+2. FP16 quantization — practical inference speedup
+3. pi_mutex sleep queue — replaces single-CPU contended livelock on the priority-inheritance path
 
 **Medium priority (next semester):**
 4. Secure boot + encrypted models — production deployment requirement

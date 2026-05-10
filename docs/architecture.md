@@ -279,7 +279,8 @@ RTL8168 init path). Tracker: #25. Full trail in
   - Pi 5 MACB is polled-only today: IRQ wiring installed but RP1
     MSIX_CFG engine doesn't fire TLPs on peripheral assertion —
     shared blocker with UART RX, tracked in #247. #134 (timer PPI)
-    is a separate, closed issue resolved via COOP_PREEMPT.
+    is a separate, closed issue resolved via the patched BL31
+    (`tools/tfa-patches/0001-*`) plus the EL2/VHE pivot.
 - `ENABLE_NETWORKING` CMake option — default ON for QEMU_VIRT, X86_64,
   and RASPI5; OFF for Jetson until real NIC driver lands (#25)
 - `NET_DHCP_AT_BOOT` default ON — lwIP starts DHCP during `net_init()`
@@ -789,7 +790,7 @@ See `docs/ffi.md` for complete FFI documentation.
   - Boots to fully interactive shell on real hardware
   - RP1 UART TX/RX working (PL011 via RP1 southbridge)
   - GICv2, buddy allocator, VMM, all subsystems operational
-  - Preemptive scheduling active at 100 Hz (physical timer, IRQ 30)
+  - Preemptive scheduling at 100 Hz available via opt-in `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` build (PR #742, EL2/VHE PPI 26 / CNTHP); default build still ships cooperative
   - Automated deploy pipeline via SDWireC and labctl
   - See `docs/pi5-baremetal-status.md` for detailed status
 - **Experimental x86-64 port**:

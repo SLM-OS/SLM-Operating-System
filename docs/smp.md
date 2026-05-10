@@ -452,7 +452,7 @@ All tasks are created with `DAIF.I=1` (IRQ masked). `task_create()` in `kernel/s
 
 Rationale: on real ARM64 hardware without SMPEN (Pi 5) or on post-kexec Jetson, a timer IRQ taken mid-context-restore causes the ISR to run on a partially-restored task context, corrupting state. Starting tasks with IRQs masked closes this window. Task code unmasks naturally on the first `spin_unlock_irqrestore` or the idle task's explicit `daifclr`. On QEMU the same masking applies for uniformity — QEMU delivers IRQs regardless, but the invariant matches real hardware behavior.
 
-Platform-specific consequence: timer IRQs do not fire at all on Pi 5 or Jetson — the GIC Group configuration is EL3-owned and cannot be changed from NS (`docs/archive/investigations/pi5-preemption-resolution.md`, `docs/archive/investigations/jetson-preemption-investigation.md`). Both platforms rely on COOP_PREEMPT (`coop_preempt_maybe_tick` in `kernel/sched/sched.c`) to synthesize ticks at `schedule()` entry via `CNTPCT_EL0` polling. Only QEMU and x86-64 have real timer-driven preemption. Run the `timdiag` shell command to inspect live GIC/timer state and confirm which mode is active.
+Platform-specific consequence: timer IRQ delivery on Pi 5 and Jetson depends on the BL31 in use. Stock TF-A on either platform leaves the GIC PPI Group register EL3-owned with `SCR_EL3.IRQ/FIQ` routed to EL3, so timer IRQs never reach NS-EL1/EL2 (see `docs/archive/investigations/pi5-preemption-resolution.md`, `docs/archive/investigations/jetson-preemption-investigation.md`); these builds rely on `COOP_PREEMPT` (`coop_preempt_maybe_tick` in `kernel/sched/sched.c`) to synthesize ticks at `schedule()` entry via `CNTPCT_EL0` polling. With the patched BL31 (`tools/tfa-patches/0001-*` for Pi 5, `tools/tfa-patches/0004-*` for Jetson) and EL2/VHE, PPI 26 (CNTHP) delivers per-CPU at EL2 and `SECONDARY_PREEMPT=ON` enables true hardware preemption — default-on for Jetson under `JETSON_HW_TICK=ON`, opt-in on Pi 5. QEMU and x86-64 always have real timer-driven preemption. Run the `timdiag` shell command to inspect live GIC/timer state and confirm which mode is active.
 
 ### Secondary-CPU Preemption (`SECONDARY_PREEMPT`)
 
@@ -468,8 +468,9 @@ The feature is gated behind the `SECONDARY_PREEMPT` compile-time option:
 
 | Build invocation | Effect |
 |---|---|
-| *default* | Trampoline not compiled. Secondary CPUs use cooperative `wfe`/SEV wake; preemption only on CPU 0 (if timer IRQs deliver there). |
-| `make kernel SECONDARY_PREEMPT=ON` | Trampoline compiled and linked. All CPUs enable timer preemption. Functional on Pi 5 (#99 coop-preempt path) and QEMU; gated on the Jetson MPIDR fix (Jetson plan P3 step 2) before it's safe there. |
+| *default* (Pi 5, QEMU, x86-64) | Trampoline not compiled. Secondary CPUs use cooperative `wfe`/SEV wake; preemption only on CPU 0 (if timer IRQs deliver there). |
+| *default* (Jetson) | `JETSON_HW_TICK=ON` implies `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`. Trampoline compiled; PPI 26 drives true HW preemption on every CPU under the patched tegra234 BL31. |
+| `make kernel SECONDARY_PREEMPT=ON` | Trampoline compiled and linked. All CPUs enable timer preemption. Live on Pi 5 (PR #742) and Jetson; QEMU works for trampoline-path CI but isn't strictly needed there. |
 | `make kernel PI5_SECONDARY_PREEMPT=ON` | Deprecated alias. Sets `SECONDARY_PREEMPT=ON`. Kept so existing Pi 5 Makefile invocations continue working. |
 
 The option was renamed from the original `PI5_SECONDARY_PREEMPT` to a
@@ -481,16 +482,17 @@ compiling into Jetson builds at all).
 **Boot-time MPIDR uniqueness check (#137):** when
 `SECONDARY_PREEMPT` is defined, `preempt_check_cpu_mpidr(this_cpu)`
 runs once per CPU — from `scheduler_init` on the boot CPU and from
-`secondary_init` on each secondary. It replicates the
-`resched_trampoline` MPIDR fold
-(`(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)`) in C and panics if the
-fold's result disagrees with the caller's known logical CPU id.
-That makes Jetson+`SECONDARY_PREEMPT` loud-fail at boot rather than
-silently corrupting context when cluster 1 CPUs map to the wrong
-trampoline slot. The pure fold helper
-`preempt_trampoline_cpu_for_mpidr(mpidr)` is exercised by
-`test_preempt_trampoline_cpu_fold` with Pi 5 / QEMU / Jetson
-encodings.
+`secondary_init` on each secondary. It looks up the caller's MPIDR
+in `cpu_logical_map[]` (the same path the asm trampoline uses via
+the `ARM64_GET_LOGICAL_CPU` macro in `kernel/include/cpu_id_asm.h`)
+and panics if the result disagrees with the caller's known logical
+CPU id. The legacy `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` fold
+collided on Jetson dual-cluster CPUs 4/5 (`MPIDR=0x10200, 0x10300`);
+PR #647 replaced it with the cpu_logical_map[] lookup so the
+trampoline handles every supported MPIDR encoding correctly. The
+pure helper `preempt_trampoline_cpu_for_mpidr(mpidr)` is exercised
+by `test_mpidr_lookup` (`kernel/tests/test_mpidr_lookup.c`) with
+Pi 5 / QEMU / Jetson encodings.
 
 ### Inter-Processor Interrupts (IPI) / Cross-CPU Notification
 
@@ -527,10 +529,12 @@ cpu_count` (stale `task->assigned_cpu` values from a prior migration).
 
 #### Planned upgrade: targeted ARM64 SGI
 
-Once the Jetson plan's P3 step 3 fixes `gic_send_sgi()` for
-dual-cluster MPIDR (Jetson's Aff0 is 0 for every CPU, so the current
-`(1UL << target_cpu)` target-list bit is wrong), the ARM64
-implementation of `smp_notify_cpu` will upgrade from broadcast SEV to:
+Once `gic_send_sgi()` is fixed for dual-cluster MPIDR (Jetson's
+Aff0 is 0 for every CPU, so the current `(1UL << target_cpu)`
+target-list bit is wrong; the C-side fold sites already use
+`cpu_logical_map[]`, but the SGI sender still derives the target
+list from the legacy fold), the ARM64 implementation of
+`smp_notify_cpu` will upgrade from broadcast SEV to:
 
 ```c
 void smp_notify_cpu(uint32_t cpu) {
