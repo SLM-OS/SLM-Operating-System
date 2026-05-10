@@ -17,7 +17,9 @@
 #include "unity.h"
 #include "../include/smp.h"
 #include "../include/preempt.h"
+#include "../include/trap.h"
 #include <stdint.h>
+#include <stddef.h>
 
 /*
  * Pi 5: Aff1-encoded, four cores. Lookup must agree with the static
@@ -129,6 +131,62 @@ static void test_unknown_mpidr_returns_negative(void)
         "preempt_trampoline_cpu_for_mpidr must clamp -1 to 0");
 }
 
+/*
+ * #750 / PR #752 regression test.
+ *
+ * `maybe_arm_resched_trampoline` must bail safely when called before
+ * `preempt_init()` has allocated `reschedule_pending` from NC memory.
+ * Without this guard, the original `if (!reschedule_pending[cpu])`
+ * dereferenced a NULL pointer; on Jetson with patched BL31 routing
+ * IRQs to NS-EL2, an inherited xudc IRQ delivered between mmu_enable's
+ * `daifclr` and scheduler_init's `preempt_init` triggered a level-3
+ * TTW external abort that BL31's RAS handler turned into a core
+ * power-off (#750). The fix is a single `if (!reschedule_pending)
+ * return;` at function entry; this test pins that semantics by
+ * temporarily clearing the global and confirming the call doesn't
+ * fault.
+ *
+ * Tests run after scheduler_init has populated reschedule_pending;
+ * we save and restore the pointer around the call so the harness's
+ * other tests still see a valid pointer afterwards.
+ *
+ * Gated on SECONDARY_PREEMPT because the function and the global
+ * only exist when that build flag is on. The default `make test`
+ * build leaves SECONDARY_PREEMPT off, so this test reports
+ * IGNORE under default flags and PASSes under
+ * `make test SECONDARY_PREEMPT=ON`.
+ */
+static void test_maybe_arm_resched_trampoline_null_safe(void)
+{
+#if defined(SECONDARY_PREEMPT)
+    /* Snapshot, clear, call, restore. The call returns void — surviving
+     * it without faulting IS the assertion. */
+    volatile uint32_t *saved = reschedule_pending;
+    struct trap_frame tf;
+    /* zero-init: ELR / SPSR fields aren't touched on the bail path,
+     * but giving them deterministic values makes the diagnostic
+     * print path's output reproducible if something does change. */
+    for (size_t i = 0; i < sizeof(tf); i++) {
+        ((uint8_t *)&tf)[i] = 0;
+    }
+    tf.elr  = 0xdeadbeefULL;
+    tf.spsr = 0x60400009ULL; /* EL2h, IRQs unmasked — matches the real trigger */
+
+    reschedule_pending = NULL;
+    maybe_arm_resched_trampoline(&tf);
+    reschedule_pending = saved;
+
+    /* If we reach here, the bail worked. */
+    TEST_ASSERT_MESSAGE(reschedule_pending == saved,
+        "reschedule_pending was not restored after the test — "
+        "subsequent tests would see a stale NULL");
+#else
+    TEST_IGNORE_MESSAGE("SECONDARY_PREEMPT off — test_maybe_arm_resched_"
+                        "trampoline_null_safe requires it (run "
+                        "`make test SECONDARY_PREEMPT=ON`)");
+#endif
+}
+
 int test_suite_mpidr_lookup(void)
 {
     UnityBegin("test_mpidr_lookup.c");
@@ -136,5 +194,6 @@ int test_suite_mpidr_lookup(void)
     RUN_TEST(test_jetson_dual_cluster);
     RUN_TEST(test_qemu_encoding);
     RUN_TEST(test_unknown_mpidr_returns_negative);
+    RUN_TEST(test_maybe_arm_resched_trampoline_null_safe);
     return UnityEnd();
 }
