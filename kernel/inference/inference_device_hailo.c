@@ -2176,6 +2176,21 @@ static int hailo_backend_run(struct inference_device *dev,
      * Disambiguates stale boot-time UR/MA from runtime UR/MA. */
     hailo_platform_dump_bridge_errors("pre-IN-submit");
     hailo_platform_clear_bridge_errors("pre-IN-submit");
+    /* #682 hyp-X-1 (DISCONFIRMED 2026-05-09): mirror Linux's
+     * hailo_pcie_read_interrupt drain at pre-IN-submit. Linux MNIST
+     * trace (~/slmos-ref/derivatives/hailort-traces/
+     *  hailort-v4.23.0-mnist-inference-pios-pi5.txt:3181-3186) shows
+     * the host issues a read+W1C of BCS_ISTATUS_HOST + per-channel
+     * SRC/DST registers immediately before the boundary IN avail
+     * bump. SLM-OS arrives here with stale PER_SRC bits for ch=0+1
+     * (CFG channels from load) + ISTATUS.BOOT_IRQ still latched.
+     * The drain clears them cleanly (0x02800001→0x00000000) but the
+     * ch=2 wedge is unchanged: dev_proc stays 0, dev_base[31:16]
+     * never advances to 0x001f. Pending host-side IRQ acks are not
+     * the gating factor for fw's ch=2 prep. Helper kept wired here
+     * for cleaner post-timeout state correlation; cheap (4-6 MMIO
+     * ops) and does no harm. */
+    hailo_control_drain_pending_irqs("pre-IN-submit");
     /* #682 hypothesis-7: BAR4 SRAM baseline before submit. Diff'd
      * against post-timeout snapshot to detect fw activity hiding
      * outside our normal trace points. */

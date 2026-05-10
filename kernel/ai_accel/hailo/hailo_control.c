@@ -376,6 +376,84 @@ void hailo_control_dump_irq_state(const char *label)
                 (unsigned)per_src, (unsigned)per_dst);
 }
 
+/*
+ * #682 hyp-X-1 (DISCONFIRMED 2026-05-09): drain stale per-channel
+ * VDMA IRQ pending bits + aggregate ISTATUS bits the same way
+ * Linux's hailo_pcie_read_interrupt does (hailo-pcie-common.c:443-460).
+ * Linux's MNIST trace shows the host issues this exact drain
+ * sequence at vaddr+0x18c, +0x400 (and +0x500 if DEST set)
+ * IMMEDIATELY before the first boundary IN avail bump. SLM-OS
+ * leaves CFG-channel SRC pending bits stale after load completes
+ * (PER_SRC=0x00000003 from ch=0+1 servicing during fw context-info
+ * upload).
+ *
+ * Disconfirmation: with the drain wired at pre-IN-submit on pi-5-1,
+ * ISTATUS goes 0x02800001→0x00000000 and PER_SRC 0x00000003→0
+ * cleanly, but the boundary IN ch=2 wedge is unchanged. Stale host-
+ * side IRQ acks are not the gating factor for fw's ch=2 prep. Helper
+ * retained for cleaner post-timeout state correlation.
+ *
+ * Mirrors control_msi_handler's drain logic with one extra guard:
+ * the FW_CONTROL_BIT is preserved (excluded from the aggregate W1C)
+ * and, if set, control_msi_pending is raised. This keeps the contract
+ * that one fw FW_CONTROL signal always reaches one wait_for_response
+ * wake — so a polling RPC waiter on another CPU doesn't lose a
+ * notification we happened to drain.
+ */
+void hailo_control_drain_pending_irqs(const char *label)
+{
+    if (!hailo_platform || !hailo_platform->read32 ||
+        !hailo_platform->write32) return;
+
+    uint32_t istatus_pre = hailo_platform->read32(
+        HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
+    uint32_t src_pre = 0, dst_pre = 0;
+
+    if (istatus_pre & HAILO_BCS_ISTATUS_HOST_VDMA_SRC_MASK) {
+        src_pre = hailo_platform->read32(
+            HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL);
+        if (src_pre != 0) {
+            hailo_platform->write32(
+                HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL,
+                src_pre);
+        }
+    }
+    if (istatus_pre & HAILO_BCS_ISTATUS_HOST_VDMA_DEST_MASK) {
+        dst_pre = hailo_platform->read32(
+            HAILO_BAR_CONFIG, HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL);
+        if (dst_pre != 0) {
+            hailo_platform->write32(
+                HAILO_BAR_CONFIG,
+                HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
+                dst_pre);
+        }
+    }
+
+    uint32_t to_clear = istatus_pre & ~HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT;
+    if (to_clear != 0) {
+        hailo_platform->write32(
+            HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST, to_clear);
+    }
+    if (istatus_pre & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
+        __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);
+    }
+    if (hailo_platform->mb) hailo_platform->mb();
+
+    uint32_t istatus_post = hailo_platform->read32(
+        HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
+    uint32_t src_post = hailo_platform->read32(
+        HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL);
+    uint32_t dst_post = hailo_platform->read32(
+        HAILO_BAR_CONFIG, HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL);
+    uart_printf("[irq-drain] %s: ISTATUS pre=0x%08x post=0x%08x "
+                "PER_SRC pre=0x%08x post=0x%08x "
+                "PER_DST pre=0x%08x post=0x%08x\r\n",
+                label ? label : "(none)",
+                (unsigned)istatus_pre, (unsigned)istatus_post,
+                (unsigned)src_pre, (unsigned)src_post,
+                (unsigned)dst_pre, (unsigned)dst_post);
+}
+
 int hailo_control_arm_irq_masks(void)
 {
     if (control_irq_masks_armed) return HAILO_OK;

@@ -82,6 +82,28 @@ void hailo_fw_dump_logs_hex(uint32_t max_bytes);
 void hailo_platform_log_link_state(const char *label);
 
 /*
+ * #682 hyp-X-1 (DISCONFIRMED 2026-05-09 on pi-5-1, kept as
+ * diagnostic). Mirror Linux's hailo_pcie_read_interrupt drain:
+ * read BCS_ISTATUS_HOST, then if VDMA_SRC bit set read+W1C
+ * BCS_SOURCE_INTERRUPT_PER_CHANNEL (0x400); if VDMA_DEST set
+ * read+W1C BCS_DESTINATION_INTERRUPT_PER_CHANNEL (0x500); finally
+ * W1C the aggregate ISTATUS_HOST excluding FW_CONTROL_BIT
+ * (preserves an in-flight RPC notification). Mirrors the same logic
+ * in control_msi_handler.
+ *
+ * Disconfirmation: with the drain wired at pre-IN-submit, ISTATUS
+ * goes 0x02800001→0x00000000 and PER_SRC 0x00000003→0x00000000
+ * cleanly, but the boundary IN ch=2 wedge is unchanged (dev_proc
+ * stays 0, dev_base[31:16] stays 0). Stale host-side IRQ acks are
+ * NOT the gating factor for fw's ch=2 prep. Helper retained because
+ * it produces a cleaner post-timeout state for future correlation.
+ *
+ * Implementation in kernel/ai_accel/hailo/hailo_control.c so it can
+ * access control_msi_pending (preserved across the W1C).
+ */
+void hailo_control_drain_pending_irqs(const char *label);
+
+/*
  * Diagnostic-only (#682 hyp-U / hyp-W): dump RC bridge status /
  * error registers, the Hailo endpoint's standard PCI Status + PCI
  * Express Cap Device Status, and the EP MSI capability. Use after
