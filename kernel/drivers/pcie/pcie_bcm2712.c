@@ -131,12 +131,24 @@
  * the CplD never comes back to the requester. */
 #define PCIE1_MISC_CTRL_1                     0x40A0u
 #define   MISC_CTRL_1_EN_VDM_QOS_CONTROL_MASK (1u << 5)
+#define PCIE1_VDM_PRIORITY_TO_QOS_MAP_HI      0x4164u
+#define PCIE1_VDM_PRIORITY_TO_QOS_MAP_LO      0x4168u
 #define PCIE1_AXI_INTF_CTRL                   0x416Cu
 #define   AXI_EN_RCLK_QOS_ARRAY_FIX           (1u << 13)
 #define   AXI_EN_QOS_UPDATE_TIMING_FIX        (1u << 12)
 #define   AXI_DIS_QOS_GATING_IN_MASTER        (1u << 11)
 #define   AXI_REQFIFO_EN_QOS_PROPAGATION      (1u <<  7)
 #define   AXI_MASTER_MAX_OUTSTANDING_REQS     0x3Fu
+
+/* Pi 5 stock DT (bcm2712-rpi-5-b.dts:174):
+ *     &pcie1 { brcm,vdm-qos-map = <0x33333333>; };
+ * Mirror Linux's brcm_pcie_set_tc_qos VDM-property branch
+ * (pcie-brcmstb.c:602-610): set EN_VDM_QOS_CONTROL and program both
+ * VDM priority→QoS map registers with this value. All 8 priority
+ * levels map to QoS 3 — uniform forwarding, but the *enable* bit
+ * is what actually allows VDMs from the endpoint to reach the
+ * AXI/CPU side at all. */
+#define PCIE1_VDM_QOS_MAP_RPI5                0x33333333u
 
 /* HARD_DEBUG offset is variant-specific. For 2712 it's 0x4304 (generic
  * 0x4204). See pcie_offsets_bcm2712[] in the reference driver. */
@@ -594,8 +606,23 @@ static void bcm2712_misc_and_axi_qos(void)
         axi |= 15u;
         pcie1_w32(PCIE1_AXI_INTF_CTRL, axi);
     }
+    /* #682 hyp-T (disconfirmed as wedge lever 2026-05-09; kept for
+     * Linux parity): mirror brcm_pcie_set_tc_qos's brcm,vdm-qos-map
+     * branch. Pi 5 stock DT (bcm2712-rpi-5-b.dts:174) sets
+     * `brcm,vdm-qos-map = <0x33333333>` on pcie1 specifically;
+     * SLM-OS previously cleared the enable bit (matching the
+     * no-DT-property default). The hypothesis that fw's boundary
+     * VDMA completion path used VDMs the RC was dropping was the
+     * motivation, but ch=2 still wedges identically with the
+     * enable bit set + map programmed. Keeping the change because
+     * (a) it's strictly closer to Pi OS's pcie1 configuration and
+     * (b) leaving the enable bit cleared while the DT property is
+     * set would be a silent divergence from the platform's
+     * intended setup. */
+    pcie1_w32(PCIE1_VDM_PRIORITY_TO_QOS_MAP_LO, PCIE1_VDM_QOS_MAP_RPI5);
+    pcie1_w32(PCIE1_VDM_PRIORITY_TO_QOS_MAP_HI, PCIE1_VDM_QOS_MAP_RPI5);
     tmp = pcie1_r32(PCIE1_MISC_CTRL_1);
-    tmp &= ~MISC_CTRL_1_EN_VDM_QOS_CONTROL_MASK;
+    tmp |= MISC_CTRL_1_EN_VDM_QOS_CONTROL_MASK;
     pcie1_w32(PCIE1_MISC_CTRL_1, tmp);
 }
 
