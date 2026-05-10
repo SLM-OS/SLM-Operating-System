@@ -307,6 +307,39 @@ uint32_t ga10b_build_compute_sema_release_pushbuffer(uint32_t *pb,
                                                      uint64_t sem_gpu_va,
                                                      uint32_t payload);
 
+/* Submit a prebuilt pushbuffer through the inherited channel and poll
+ * the semaphore at `poll_phys` for `expected_payload`. Drives the
+ * full GPFIFO + USERD + doorbell sequence and polls the semaphore
+ * for up to 2 seconds.
+ *
+ *   `b`                 - bringup state (must be advanced past PMU_UP /
+ *                         ENGINES_READY, i.e. inherit + channel done)
+ *   `pb_buf, pb_dwords` - the prebuilt pushbuffer
+ *   `poll_phys`         - identity-mapped phys of a u32 the GPU will
+ *                         write `expected_payload` to when the
+ *                         pushbuffer's terminating semaphore release
+ *                         fires
+ *   `expected_payload`  - the value the caller's pushbuffer encoded
+ *                         as the sema-release payload (typically
+ *                         GA10B_SMOKETEST_SEM_PAYLOAD = 0xCAFE)
+ *   `error_phase`       - returned on submit refusal so the caller's
+ *                         phase-tracking can attribute the failure
+ *   `tag`               - short string used in error / debug prints
+ *
+ * Returns 0 on success (semaphore fired with expected payload), the
+ * `error_phase` value on submit-refused failures (e.g. pb_dwords
+ * exceeds the channel's pushbuffer size), or a negative non-`error_phase`
+ * value on dispatch timeout. Exposed in the public header so the CE
+ * dispatcher in `ga10b_ce.c` can submit CE pushbuffers through the
+ * same channel as the compute path. */
+int ga10b_submit_and_poll(struct ga10b_bringup *b,
+                          const uint32_t *pb_buf,
+                          uint32_t pb_dwords,
+                          uint64_t poll_phys,
+                          uint32_t expected_payload,
+                          int error_phase,
+                          const char *tag);
+
 /* Size of the compute-kernel-launch pushbuffer in dwords.
  *
  * Layout (14 dwords):

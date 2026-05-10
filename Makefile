@@ -911,6 +911,24 @@ test-ga10b-bringup:
 	    kernel/gpu/nvidia/gsp.c
 	@./build/host-tools/test_ga10b_bringup
 
+# CE pushbuffer encoding tests. Pure-logic, no MMIO, no kernel deps —
+# compiles ga10b_ce.c standalone (uart_puts / cache_clean_range
+# stubbed inline below). Runs on every host so a wrong class id /
+# wrong method offset / wrong LAUNCH_DMA flag breaks the build, not
+# a kexec-running hardware iteration.
+.PHONY: test-ga10b-ce
+test-ga10b-ce:
+	@mkdir -p build/host-tools
+	@echo "Building + running GA10B CE pushbuffer tests..."
+	$(CC) -std=c11 -Wall -Wextra -O2 -g \
+	    -Ihost-tools/gsp-harness -Ikernel/gpu/nvidia -Ikernel/include \
+	    -DSLM_HOST_HARNESS=1 \
+	    -o build/host-tools/test_ga10b_ce \
+	    host-tools/gsp-harness/test_ga10b_ce.c \
+	    host-tools/gsp-harness/ce_stubs.c \
+	    kernel/gpu/nvidia/ga10b_ce.c
+	@./build/host-tools/test_ga10b_ce
+
 # Jetson GA10B platform shim (nvidia_gsp_platform.c) — portable surfaces.
 #
 # The shim is under kernel/arch/arm64/ and normally compiled for Jetson
