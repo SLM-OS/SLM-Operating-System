@@ -336,9 +336,20 @@ static bool hailo_fw_dump_d2h_notification_once(void)
  * because fw's SAGE1_ISP zero-init is mostly done by then. Bisect
  * down once the load completes cleanly without ECCs. The previous
  * uniform 10 ms unconditional delay did NOT suppress load-time
- * ECCs, so 10 ms is known too short. */
+ * ECCs, so 10 ms is known too short. Tracking: #761. */
 #define HAILO_CORE_CPU_SETTLE_FLOOR_US       50000u /* 50 ms */
+/*
+ * Serialization: this anchor is touched only from `context_switch_load`
+ * and `hailo_backend_run`, both of which run under the inference-layer
+ * slot lock (one model load + one inference at a time). Every writer
+ * also holds `control_lock` for the duration of its CORE-CPU RPC, so
+ * the read-modify-stamp dance below is implicitly single-threaded.
+ * Do not call `hailo_core_cpu_settle()` from a path that bypasses both
+ * locks without revisiting this assumption.
+ */
 static uint64_t hailo_core_cpu_settle_anchor_ticks = 0;
+
+static bool hailo_core_cpu_settle_armed = false;
 
 static inline void hailo_core_cpu_settle(void)
 {
@@ -351,24 +362,24 @@ static inline void hailo_core_cpu_settle(void)
         return;
     }
 
-    uint64_t now = timer_get_count();
-    uint64_t elapsed_us = (uint64_t)0;
-    if (hailo_core_cpu_settle_anchor_ticks != 0 &&
-        now > hailo_core_cpu_settle_anchor_ticks) {
-        elapsed_us = (now - hailo_core_cpu_settle_anchor_ticks)
-                     * 1000000ULL / freq;
-    } else if (hailo_core_cpu_settle_anchor_ticks == 0) {
-        /* No prior anchor — first call after boot. The 500 ms post-
-         * BOOT_IRQ settle in hailo_boot already gave fw plenty of
-         * idle. Treat elapsed as effectively infinite (no extra
-         * wait), but stamp anchor below. */
-        elapsed_us = (uint64_t)HAILO_CORE_CPU_SETTLE_FLOOR_US * 2u;
-    }
-
-    if (elapsed_us < HAILO_CORE_CPU_SETTLE_FLOOR_US) {
-        uint32_t wait_us =
-            HAILO_CORE_CPU_SETTLE_FLOOR_US - (uint32_t)elapsed_us;
-        hailo_platform->udelay(wait_us);
+    /* First call after boot: the 500 ms post-BOOT_IRQ settle in
+     * `hailo_boot` already gave fw plenty of idle, so don't add
+     * another floor wait here. Just arm the anchor for subsequent
+     * calls. Use an explicit boolean rather than (anchor_ticks == 0)
+     * because CNTPCT_EL0 wraps to zero ~292 years after reset on a
+     * 1 GHz timer, which is theoretically a sentinel collision —
+     * unreachable on real hardware but trivially avoidable. */
+    if (hailo_core_cpu_settle_armed) {
+        uint64_t now = timer_get_count();
+        if (now > hailo_core_cpu_settle_anchor_ticks) {
+            uint64_t elapsed_us = (now - hailo_core_cpu_settle_anchor_ticks)
+                                  * 1000000ULL / freq;
+            if (elapsed_us < HAILO_CORE_CPU_SETTLE_FLOOR_US) {
+                uint32_t wait_us = HAILO_CORE_CPU_SETTLE_FLOOR_US -
+                                   (uint32_t)elapsed_us;
+                hailo_platform->udelay(wait_us);
+            }
+        }
     }
 
     /* Stamp anchor at the start of this RPC. Slightly less precise
@@ -376,6 +387,7 @@ static inline void hailo_core_cpu_settle(void)
      * but RPC durations are <5 ms (CLEAR_APPS is the longest); the
      * floor is much larger so this is fine. */
     hailo_core_cpu_settle_anchor_ticks = timer_get_count();
+    hailo_core_cpu_settle_armed = true;
 }
 
 /* Drain pending notifications: for each one, dump it, ACK the buffer,

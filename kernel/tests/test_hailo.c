@@ -4470,6 +4470,133 @@ static void test_control_identify_ignores_non_fw_control_irq(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/* IMASK arm/disarm + drain helpers (#682 hyp-N / hyp-X-1)                    */
+/* -------------------------------------------------------------------------- */
+
+/* hailo_control_disarm_irq_masks must write IMASK_HOST=0 and clear
+ * the one-shot arm flag so a subsequent direct call to
+ * hailo_control_arm_irq_masks re-issues the arming writes (rather
+ * than early-returning because the flag thinks IMASK is already
+ * armed). This is exactly the cycle hailo_boot uses across the
+ * BOOT_IRQ-ack window. */
+static void test_control_disarm_irq_masks_writes_zero_and_resets_arm(void)
+{
+    control_setup_running();
+
+    /* Baseline: arm explicitly (flag was reset by control_setup_running's
+     * hailo_control_reset_state_for_tests). */
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_arm_irq_masks());
+    TEST_ASSERT_EQUAL_UINT32(1, mock_imask_writes);
+    TEST_ASSERT_TRUE(
+        (mock_imask_last_value & HAILO_BSC_ISTATUS_HOST_MASK)
+        == HAILO_BSC_ISTATUS_HOST_MASK);
+
+    /* Second call to arm is a no-op while flag is set. */
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_arm_irq_masks());
+    TEST_ASSERT_EQUAL_UINT32(1, mock_imask_writes);
+
+    /* Disarm: IMASK_HOST = 0, observable via the IMASK write tracker. */
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_disarm_irq_masks());
+    TEST_ASSERT_EQUAL_UINT32(2, mock_imask_writes);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_imask_last_value);
+
+    /* Re-arming after disarm must write IMASK again (proves the flag
+     * was cleared by the disarm path). */
+    TEST_ASSERT_EQUAL_INT(HAILO_OK, hailo_control_arm_irq_masks());
+    TEST_ASSERT_EQUAL_UINT32(3, mock_imask_writes);
+    TEST_ASSERT_TRUE(
+        (mock_imask_last_value & HAILO_BSC_ISTATUS_HOST_MASK)
+        == HAILO_BSC_ISTATUS_HOST_MASK);
+}
+
+/* hailo_control_drain_pending_irqs must:
+ *   - read+W1C BCS_SOURCE_INTERRUPT_PER_CHANNEL when ISTATUS.VDMA_SRC set
+ *   - read+W1C BCS_DESTINATION_INTERRUPT_PER_CHANNEL when ISTATUS.VDMA_DEST set
+ *   - W1C the aggregate ISTATUS bits EXCLUDING FW_CONTROL_BIT (so an
+ *     in-flight RPC notification isn't lost)
+ * Documented contract: the FW_CONTROL_BIT lift is what protects a
+ * polling waiter on another CPU. */
+static void test_control_drain_pending_irqs_clears_aggregate_preserves_fw_control(void)
+{
+    control_setup_running();
+
+    /* Counter reset — control_setup_running zeroes these but be explicit
+     * so the assertions below count only what drain produces. */
+    mock_per_channel_src_write_count = 0;
+    mock_per_channel_src_last_value = 0;
+    mock_per_channel_dst_write_count = 0;
+
+    /* Seed: FW_CONTROL bit + a VDMA_SRC channel bit + a stale ISTATUS
+     * "boot" bit. Drain should W1C the SRC per-channel bits, W1C the
+     * stale aggregate bits, and leave FW_CONTROL_BIT alone. */
+    uint32_t istatus_seed = HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT |
+                            (1u << 0) |   /* VDMA_SRC ch=0 aggregate */
+                            (1u << 25);   /* arbitrary stale bit */
+    uint32_t per_src_seed = (1u << 0) | (1u << 1);
+    memcpy(&mock_bar0[HAILO_BCS_ISTATUS_HOST],
+           &istatus_seed, sizeof(istatus_seed));
+    memcpy(&mock_bar0[HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL],
+           &per_src_seed, sizeof(per_src_seed));
+
+    hailo_control_drain_pending_irqs("test");
+
+    /* PER_SRC W1C: drain wrote the seeded bits back, mock observability
+     * tracks the W1C value. PER_DST: aggregate bit was clear, drain
+     * must not have touched it. */
+    TEST_ASSERT_TRUE(mock_per_channel_src_write_count >= 1u);
+    TEST_ASSERT_EQUAL_UINT32(per_src_seed, mock_per_channel_src_last_value);
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_per_channel_dst_write_count);
+
+    /* ISTATUS: stale aggregate bits cleared, FW_CONTROL preserved. The
+     * mock models ISTATUS as W1C, so the post-drain value equals the
+     * pre-drain value AND-NOT the W1C value drain wrote. */
+    uint32_t istatus_post;
+    memcpy(&istatus_post, &mock_bar0[HAILO_BCS_ISTATUS_HOST],
+           sizeof(istatus_post));
+    TEST_ASSERT_EQUAL_UINT32(HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT,
+                             istatus_post);
+}
+
+/* No VDMA aggregate set → drain must not touch the per-channel
+ * registers (avoid clobbering fw bookkeeping that doesn't have an
+ * IRQ pending). */
+static void test_control_drain_pending_irqs_skips_per_channel_when_aggregate_clear(void)
+{
+    control_setup_running();
+    mock_per_channel_src_write_count = 0;
+    mock_per_channel_dst_write_count = 0;
+
+    uint32_t istatus_zero = 0u;
+    memcpy(&mock_bar0[HAILO_BCS_ISTATUS_HOST],
+           &istatus_zero, sizeof(istatus_zero));
+
+    hailo_control_drain_pending_irqs("test");
+
+    /* Drain only reads+W1Cs the per-channel registers when their
+     * aggregate bit is set in ISTATUS. With ISTATUS=0, neither
+     * per-channel register should have been written. */
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_per_channel_src_write_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, mock_per_channel_dst_write_count);
+}
+
+/* hailo_control_get_hw_consts_response_body returns the static body
+ * buffer pointer + capacity (no allocation, no race with concurrent
+ * RPC because both pointers are NULL-safe). */
+static void test_control_get_hw_consts_response_body_accessor(void)
+{
+    const uint8_t *body = NULL;
+    uint32_t capacity = 0;
+    hailo_control_get_hw_consts_response_body(&body, &capacity);
+    TEST_ASSERT_NOT_NULL(body);
+    TEST_ASSERT_TRUE(capacity > 0u);
+
+    /* Either out-pointer may be NULL — accessor must be tolerant. */
+    hailo_control_get_hw_consts_response_body(NULL, &capacity);
+    hailo_control_get_hw_consts_response_body(&body, NULL);
+    hailo_control_get_hw_consts_response_body(NULL, NULL);
+}
+
+/* -------------------------------------------------------------------------- */
 /* WRITE_MEMORY / READ_MEMORY (Phase 5.3, #281 tier-2)                         */
 /* -------------------------------------------------------------------------- */
 
@@ -7885,6 +8012,12 @@ int test_suite_hailo(void)
     RUN_TEST(test_control_identify_request_wire_format_is_be);
     RUN_TEST(test_control_identify_arms_imask_once);
     RUN_TEST(test_control_identify_ignores_non_fw_control_irq);
+
+    /* IMASK arm/disarm + drain helpers (#682 hyp-N / hyp-X-1) */
+    RUN_TEST(test_control_disarm_irq_masks_writes_zero_and_resets_arm);
+    RUN_TEST(test_control_drain_pending_irqs_clears_aggregate_preserves_fw_control);
+    RUN_TEST(test_control_drain_pending_irqs_skips_per_channel_when_aggregate_clear);
+    RUN_TEST(test_control_get_hw_consts_response_body_accessor);
 
     /* WRITE_MEMORY / READ_MEMORY (Phase 5.3 tier-2, #281) */
     RUN_TEST(test_control_write_memory_rejects_null);

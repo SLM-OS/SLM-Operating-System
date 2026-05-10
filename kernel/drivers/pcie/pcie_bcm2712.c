@@ -36,6 +36,7 @@
 #if defined(PLATFORM_RASPI5)
 
 #include "pcie.h"
+#include "pcie_bcm2712.h"
 #include "debug.h"
 #include "spinlock.h"
 #include "vmm.h"
@@ -759,30 +760,33 @@ static int bcm2712_train_link(void)
     bcm2712_misc_and_axi_qos();
 
     /*
-     * 7. Inbound window (RC_BAR2). DT says
-     *    dma-ranges = 0x10_00000000 PCIe → 0x0 CPU, 64 GB.
-     *    Encoded-size = log2(64GB) - 15 = 36 - 15 = 21 (0x15).
+     * 7. Inbound window (RC_BAR2) + SCB0 size. Both registers describe
+     *    the SAME inbound aperture and MUST encode the same log2(size)-15
+     *    value, or the RC accepts inbound TLPs on an aperture that the
+     *    SoC's coherency unit doesn't know about (or vice versa) — silent
+     *    DMA corruption. Linux's brcm_pcie_setup derives both from the
+     *    DT `dma-ranges` union size; Pi 5 pcie1's dma-ranges declares
+     *    64 GB at PCIe 0x10_00000000, so log2(64 GB) - 15 = 21 (0x15).
+     *
+     *    Earlier SLM-OS code used 0x11 (4 GB) for SCB0 derived from
+     *    "physical RAM size," which under-sized the SCB-coherent window.
+     *    #682 hyp-V (disconfirmed as the wedge lever 2026-05-09; kept
+     *    for Linux parity): widen to 0x15 so we match brcmstb-pcie.
      */
+#define BCM2712_PCIE1_INBOUND_LOG2_SIZE_MINUS_15  0x15u  /* 64 GB */
     pcie1_w32(PCIE1_RC_BAR2_CONFIG_LO,
-              (0u /* cpu_phys low */ & 0xFFFFFFE0u) | 0x15u);
+              (0u /* cpu_phys low */ & 0xFFFFFFE0u) |
+              BCM2712_PCIE1_INBOUND_LOG2_SIZE_MINUS_15);
     pcie1_w32(PCIE1_RC_BAR2_CONFIG_HI, 0x10u /* high 32 of 0x10_00000000 */);
 
     uint32_t tmp = pcie1_r32(PCIE1_UBUS_BAR2_CONFIG_REMAP);
     tmp |= UBUS_BAR_REMAP_ACCESS_EN;
     pcie1_w32(PCIE1_UBUS_BAR2_CONFIG_REMAP, tmp);
 
-    /* SCB0 size: encoded as log2(memc_size) - 15 in bits 27:31 of
-     * MISC_CTRL. Linux's brcm_pcie_setup derives this from the
-     * dma-ranges union size (NOT physical RAM size) when
-     * `brcm,scb-sizes` is absent — Pi 5 pcie1's dma-ranges declares
-     * 64 GB starting at PCIe 0x10_00000000, so Linux uses
-     * log2(64 GB) - 15 = 21 (0x15). The previous SLM-OS value of 17
-     * was derived from "4 GB RAM"; that capped the inbound window
-     * to 4 GB of bus address space. #682 hyp-V (disconfirmed as the
-     * wedge lever 2026-05-09; kept for Linux parity): widen to 0x15
-     * so the inbound accept range matches what brcmstb-pcie sets. */
+    /* SCB0 size MUST equal the RC_BAR2 size encoding above. */
     tmp = pcie1_r32(PCIE1_MISC_CTRL);
-    tmp = (tmp & ~MISC_CTRL_SCB0_SIZE_MASK) | ((21u & 0x1Fu) << 27);
+    tmp = (tmp & ~MISC_CTRL_SCB0_SIZE_MASK) |
+          ((BCM2712_PCIE1_INBOUND_LOG2_SIZE_MINUS_15 & 0x1Fu) << 27);
     pcie1_w32(PCIE1_MISC_CTRL, tmp);
 
     /* 8. Suppress AXI error responses on unreachable endpoints

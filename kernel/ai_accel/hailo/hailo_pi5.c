@@ -18,6 +18,7 @@
 
 #include "hailo.h"
 #include "pcie.h"
+#include "pcie_bcm2712.h"
 #include "pmm.h"
 #include "gpu.h"          /* cache_clean_range / cache_invalidate_range */
 #include "debug.h"
@@ -615,10 +616,6 @@ void hailo_platform_log_link_state(const char *label)
                 label ? label : "(none)",
                 cur_spd, cur_wid, max_spd, max_wid, (unsigned)lnksta);
 }
-
-/* Forward decl from kernel/drivers/pcie/pcie_bcm2712.c — internal
- * diagnostic helper, no public header. */
-void pcie_bcm2712_dump_status_for_debug(const char *label);
 
 void hailo_platform_dump_bridge_errors(const char *label)
 {

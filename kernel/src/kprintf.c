@@ -203,8 +203,7 @@ static void fmt_string_width(struct fmt_output *out, const char *s, int width,
     int len;
     if (precision >= 0) {
         /* Bounded scan: stop at NUL or at `precision` bytes, whichever
-         * comes first. strnlen is not available freestanding, so do it
-         * explicitly. */
+         * comes first. */
         len = 0;
         while (len < precision && s[len] != '\0') len++;
     } else {

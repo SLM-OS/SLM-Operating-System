@@ -585,6 +585,96 @@ int hailo_decode_core_fw(const uint8_t *blob, size_t fw_size,
  * platform), the scope of atr0_lock would need to widen or become
  * per-device.
  */
+
+/* Post-boot IDENTIFY readback: ask the running firmware to identify
+ * itself and log whether it matches what we just uploaded. WARNs (does
+ * not fail the boot) on rc/version mismatch so a debugging session
+ * with a swapped fw blob can still proceed; production callers should
+ * treat any WARN here as boot-blocking.
+ *
+ * `expected` is the LOCAL blob header (what we *intended* to install)
+ * — IDENTIFY is the ground truth from the device side.
+ */
+static void hailo_post_boot_verify_identify(
+    const struct hailo_firmware_header *expected)
+{
+    struct hailo_control_identify_response idr;
+    memset(&idr, 0, sizeof(idr));
+    int id_rc = hailo_control_identify(&idr);
+    if (id_rc != HAILO_OK) {
+        WARN("hailo: post-boot IDENTIFY failed (rc=%d) — cannot "
+             "verify running fw matches uploaded blob", id_rc);
+        return;
+    }
+
+    INFO("hailo IDENTIFY: running fw %u.%u rev=0x%08x "
+         "(uploaded fw %u.%u rev=0x%08x)",
+         idr.fw_version.major, idr.fw_version.minor,
+         idr.fw_version.revision,
+         expected->firmware_major, expected->firmware_minor,
+         expected->firmware_revision);
+
+    if (idr.fw_version.major    != expected->firmware_major ||
+        idr.fw_version.minor    != expected->firmware_minor ||
+        idr.fw_version.revision != expected->firmware_revision) {
+        WARN("hailo IDENTIFY: running fw does NOT match uploaded "
+             "blob — boot continues, but inference results from this "
+             "run should not be trusted");
+    }
+
+    /* #682 (2026-05-09) — log every field both raw (4-byte little-
+     * endian native, as the struct holds it) and BE-swapped (which
+     * is how HailoRT serializes scalar params across the wire).
+     * fw_version is documented as native LE per HailoRT's identify.cpp
+     * (memcpy'd raw); other scalars (protocol_version, logger_version,
+     * device_architecture) are TLV scalars and should arrive BE — we
+     * dump both so a future endianness regression surfaces immediately. */
+    INFO("hailo IDENTIFY: protocol_version raw=0x%08x be=%u",
+         idr.protocol_version,
+         __builtin_bswap32(idr.protocol_version));
+    INFO("hailo IDENTIFY: logger_version raw=0x%08x be=%u",
+         idr.logger_version,
+         __builtin_bswap32(idr.logger_version));
+    INFO("hailo IDENTIFY: device_architecture raw=0x%08x be=%u",
+         idr.device_architecture,
+         __builtin_bswap32(idr.device_architecture));
+    /* Use %.*s — fields are fixed-width and may not be NUL-
+     * terminated. The precision caps printing at the buffer size;
+     * fmt_string_width also stops at any embedded NUL. */
+    INFO("hailo IDENTIFY: board='%.*s'",
+         (int)HAILO_CONTROL_MAX_BOARD_NAME_LENGTH,
+         (const char *)idr.board_name);
+    INFO("hailo IDENTIFY: serial='%.*s'",
+         (int)HAILO_CONTROL_MAX_SERIAL_NUMBER_LENGTH,
+         (const char *)idr.serial_number);
+    INFO("hailo IDENTIFY: part='%.*s'",
+         (int)HAILO_CONTROL_MAX_PART_NUMBER_LENGTH,
+         (const char *)idr.part_number);
+    INFO("hailo IDENTIFY: product='%.*s'",
+         (int)HAILO_CONTROL_MAX_PRODUCT_NAME_LENGTH,
+         (const char *)idr.product_number);
+
+#ifdef HAILO_WIRE_DEBUG
+    /* Hex-dump the full 162 B response body. 16 bytes/line so it lines
+     * up with the Pi OS hailo-resp kprobe format, which lets a future
+     * Linux IDENTIFY capture diff line-by-line against this. ~13 UART
+     * lines × ~63 chars = ~7 ms at 115200 baud per boot — gated behind
+     * HAILO_WIRE_DEBUG so production builds don't pay it. */
+    uart_printf("[hailo IDENTIFY] response body (%u B):\r\n",
+                (unsigned)sizeof(idr));
+    const uint8_t *raw = (const uint8_t *)&idr;
+    for (uint32_t off = 0; off < sizeof(idr); off += 16u) {
+        uart_printf("[hailo IDENTIFY] %08x:", (unsigned)off);
+        uint32_t row = (sizeof(idr) - off) < 16u
+                        ? (sizeof(idr) - off) : 16u;
+        for (uint32_t j = 0; j < row; j++) {
+            uart_printf(" %02x", raw[off + j]);
+        }
+        uart_printf("\r\n");
+    }
+#endif /* HAILO_WIRE_DEBUG */
+}
+
 int hailo_boot(const void *fw_bytes, size_t fw_size)
 {
     if (!hailo_platform || state == HAILO_STATE_FAILED) return HAILO_ERR_NODEV;
@@ -833,89 +923,9 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
          hdr.firmware_major, hdr.firmware_minor, hdr.firmware_revision);
 
     /* Readback + sanity-check what's actually running. IDENTIFY is an
-     * APP-CPU RPC and should always be safe immediately post-boot —
-     * if it fails, fw didn't come up the way we think it did. The
-     * fw-version compare WARNs (does not fail the boot) so a useful
-     * debugging scenario where someone swaps a fw blob mid-
-     * investigation can still proceed; a real production setup
-     * should treat any WARN here as boot-blocking.
-     *
-     * #682 (2026-05-09) — log every field both raw (4-byte little-
-     * endian native, as the struct holds it) and BE-swapped (which
-     * is how HailoRT serializes scalar params across the wire).
-     * fw_version is documented as native LE per HailoRT's identify.cpp
-     * (memcpy'd raw); other scalars (protocol_version, logger_version,
-     * device_architecture) are TLV scalars and should arrive BE — but
-     * we dump both reads so a future endianness regression surfaces
-     * immediately. Hex-dump the whole 162 B response for byte-level
-     * diff against a Pi OS HailoRT IDENTIFY kprobe capture. */
-    {
-        struct hailo_control_identify_response idr;
-        memset(&idr, 0, sizeof(idr));
-        int id_rc = hailo_control_identify(&idr);
-        if (id_rc != HAILO_OK) {
-            WARN("hailo: post-boot IDENTIFY failed (rc=%d) — cannot "
-                 "verify running fw matches uploaded blob", id_rc);
-        } else {
-            INFO("hailo IDENTIFY: running fw %u.%u rev=0x%08x "
-                 "(uploaded fw %u.%u rev=0x%08x)",
-                 idr.fw_version.major, idr.fw_version.minor,
-                 idr.fw_version.revision,
-                 hdr.firmware_major, hdr.firmware_minor,
-                 hdr.firmware_revision);
-
-            if (idr.fw_version.major    != hdr.firmware_major ||
-                idr.fw_version.minor    != hdr.firmware_minor ||
-                idr.fw_version.revision != hdr.firmware_revision) {
-                WARN("hailo IDENTIFY: running fw does NOT match "
-                     "uploaded blob — boot continues, but inference "
-                     "results from this run should not be trusted");
-            }
-
-            INFO("hailo IDENTIFY: protocol_version raw=0x%08x be=%u",
-                 idr.protocol_version,
-                 __builtin_bswap32(idr.protocol_version));
-            INFO("hailo IDENTIFY: logger_version raw=0x%08x be=%u",
-                 idr.logger_version,
-                 __builtin_bswap32(idr.logger_version));
-            INFO("hailo IDENTIFY: device_architecture raw=0x%08x be=%u",
-                 idr.device_architecture,
-                 __builtin_bswap32(idr.device_architecture));
-            /* Use %.*s — fields are fixed-width and may not be NUL-
-             * terminated. The precision caps printing at the buffer
-             * size; fmt_string_width also stops at any embedded NUL,
-             * which gives "Hailo-8\0\0\0..." → "Hailo-8". */
-            INFO("hailo IDENTIFY: board='%.*s'",
-                 (int)HAILO_CONTROL_MAX_BOARD_NAME_LENGTH,
-                 (const char *)idr.board_name);
-            INFO("hailo IDENTIFY: serial='%.*s'",
-                 (int)HAILO_CONTROL_MAX_SERIAL_NUMBER_LENGTH,
-                 (const char *)idr.serial_number);
-            INFO("hailo IDENTIFY: part='%.*s'",
-                 (int)HAILO_CONTROL_MAX_PART_NUMBER_LENGTH,
-                 (const char *)idr.part_number);
-            INFO("hailo IDENTIFY: product='%.*s'",
-                 (int)HAILO_CONTROL_MAX_PRODUCT_NAME_LENGTH,
-                 (const char *)idr.product_number);
-
-            /* Hex-dump the full 162 B response body. 16 bytes/line so
-             * it lines up with the Pi OS hailo-resp kprobe format,
-             * which lets a future Linux IDENTIFY capture diff line-
-             * by-line against this. */
-            uart_printf("[hailo IDENTIFY] response body (%u B):\r\n",
-                        (unsigned)sizeof(idr));
-            const uint8_t *raw = (const uint8_t *)&idr;
-            for (uint32_t off = 0; off < sizeof(idr); off += 16u) {
-                uart_printf("[hailo IDENTIFY] %08x:", (unsigned)off);
-                uint32_t row = (sizeof(idr) - off) < 16u
-                                ? (sizeof(idr) - off) : 16u;
-                for (uint32_t j = 0; j < row; j++) {
-                    uart_printf(" %02x", raw[off + j]);
-                }
-                uart_printf("\r\n");
-            }
-        }
-    }
+     * APP-CPU RPC and should always be safe immediately post-boot — if
+     * it fails, fw didn't come up the way we think it did. */
+    hailo_post_boot_verify_identify(&hdr);
 
 #ifdef HAILO_WIRE_DEBUG
     /* #682 hypothesis-1 diagnostic: confirm the per-channel IRQ enable

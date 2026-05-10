@@ -776,11 +776,6 @@ void hailo_vdma_snap_channels(const char *label)
             ? HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_H2D
             : HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_D2H;
         uint32_t dev_off  = (host_off == 0u) ? 0x10u : 0x00u;
-        char host_label[32], dev_label[32];
-        /* uart_printf doesn't have %s+integer formatting we can rely
-         * on for the embedded ch tag; use cs_strfmt-style direct
-         * concatenation via uart_printf calls. */
-        (void)host_label; (void)dev_label;
         uart_printf("[snap] %s %s ch=%u host:\r\n",
                     label, snap_names[i], (unsigned)ch);
         dump_channel_block(ch, host_off, "host");
