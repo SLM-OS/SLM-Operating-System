@@ -771,10 +771,18 @@ static int bcm2712_train_link(void)
     tmp |= UBUS_BAR_REMAP_ACCESS_EN;
     pcie1_w32(PCIE1_UBUS_BAR2_CONFIG_REMAP, tmp);
 
-    /* SCB0 size: on Pi 5 with 4 GB RAM, log2(4GB) - 15 = 17 (0x11).
-     * Bits 27-31 of MISC_CTRL. */
+    /* SCB0 size: encoded as log2(memc_size) - 15 in bits 27:31 of
+     * MISC_CTRL. Linux's brcm_pcie_setup derives this from the
+     * dma-ranges union size (NOT physical RAM size) when
+     * `brcm,scb-sizes` is absent — Pi 5 pcie1's dma-ranges declares
+     * 64 GB starting at PCIe 0x10_00000000, so Linux uses
+     * log2(64 GB) - 15 = 21 (0x15). The previous SLM-OS value of 17
+     * was derived from "4 GB RAM"; that capped the inbound window
+     * to 4 GB of bus address space. #682 hyp-V (disconfirmed as the
+     * wedge lever 2026-05-09; kept for Linux parity): widen to 0x15
+     * so the inbound accept range matches what brcmstb-pcie sets. */
     tmp = pcie1_r32(PCIE1_MISC_CTRL);
-    tmp = (tmp & ~MISC_CTRL_SCB0_SIZE_MASK) | ((17u & 0x1Fu) << 27);
+    tmp = (tmp & ~MISC_CTRL_SCB0_SIZE_MASK) | ((21u & 0x1Fu) << 27);
     pcie1_w32(PCIE1_MISC_CTRL, tmp);
 
     /* 8. Suppress AXI error responses on unreachable endpoints
@@ -1344,6 +1352,51 @@ static const struct pcie_host_ops bcm2712_ops = {
 int pcie_backend_register(void)
 {
     return pcie_core_register_host(&bcm2712_ops);
+}
+
+/*
+ * Diagnostic-only: dump the BCM2712 RC bridge status / error
+ * registers. Useful after a suspected fw-side DMA stall to see
+ * whether the RC has captured a TLP completion timeout, link
+ * downgrade, or AXI read-error substitution.
+ *
+ * Reads (no writes — purely passive):
+ *   PCIE_STATUS (0x4068)    — link state: PORT, DL_ACTIVE,
+ *                              PHYLINKUP, IN_L23
+ *   UBUS_CTRL (0x40A4)      — reply-error/decerr disable bits
+ *   AXI_INTF_CTRL (0x416C)  — runtime QoS state, throttle config
+ *   AXI_READ_ERROR_DATA     — readback of the seed value the RC
+ *      (0x4170)               substitutes on AXI read errors;
+ *                              still 0xFFFFFFFF if untouched
+ *   MISC_CTRL_1 (0x40A0)    — VDM QoS enable bit (post-hyp-T)
+ *
+ * Caller-provided label distinguishes pre-submit / post-timeout.
+ */
+void pcie_bcm2712_dump_status_for_debug(const char *label)
+{
+    const char *lbl = label ? label : "(none)";
+    uint32_t pcie_status = pcie1_r32(PCIE1_MISC_STATUS);
+    uint32_t ubus_ctrl   = pcie1_r32(PCIE1_UBUS_CTRL);
+    uint32_t axi_intf    = pcie1_r32(PCIE1_AXI_INTF_CTRL);
+    uint32_t axi_err     = pcie1_r32(PCIE1_AXI_READ_ERROR_DATA);
+    uint32_t misc_ctrl_1 = pcie1_r32(PCIE1_MISC_CTRL_1);
+
+    /* PCIE_STATUS bit layout (per pcie-brcmstb.c:114-119):
+     *   bit 4  PHYLINKUP
+     *   bit 5  DL_ACTIVE
+     *   bit 6  PORT (2712 variant) / IN_L23
+     *   bit 7  PORT (generic) */
+    unsigned phylink = (pcie_status >> 4) & 1u;
+    unsigned dl_act  = (pcie_status >> 5) & 1u;
+    unsigned port    = (pcie_status >> 6) & 1u;
+
+    uart_printf("[bridge-err] %s: PCIE_STATUS=0x%08x "
+                "(phylinkup=%u dl_active=%u port_or_l23=%u) "
+                "UBUS_CTRL=0x%08x AXI_INTF_CTRL=0x%08x "
+                "AXI_READ_ERROR_DATA=0x%08x MISC_CTRL_1=0x%08x\r\n",
+                lbl,
+                pcie_status, phylink, dl_act, port,
+                ubus_ctrl, axi_intf, axi_err, misc_ctrl_1);
 }
 
 #endif /* PLATFORM_RASPI5 */

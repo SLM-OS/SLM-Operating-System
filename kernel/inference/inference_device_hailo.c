@@ -40,6 +40,7 @@
 #include "hailo_control.h"
 #include "hailo_cs_translator.h"
 #include "hailo_infer.h"
+#include "hailo_internal.h"
 #include "hailo_tensor.h"
 #include "hailo_vdma.h"
 #include "hef_header.h"
@@ -2169,6 +2170,12 @@ static int hailo_backend_run(struct inference_device *dev,
      * the trained speed/width is anything other than what was
      * captured at post-boot-arm, the link re-trained between RPCs. */
     hailo_platform_log_link_state("pre-IN-submit");
+    /* #682 hyp-W: snapshot bridge errors right before the submit,
+     * then W1C the EP error bits so the post-timeout dump shows
+     * only errors that fired *during* the boundary submit window.
+     * Disambiguates stale boot-time UR/MA from runtime UR/MA. */
+    hailo_platform_dump_bridge_errors("pre-IN-submit");
+    hailo_platform_clear_bridge_errors("pre-IN-submit");
     /* #682 hypothesis-7: BAR4 SRAM baseline before submit. Diff'd
      * against post-timeout snapshot to detect fw activity hiding
      * outside our normal trace points. */
@@ -2232,6 +2239,12 @@ static int hailo_backend_run(struct inference_device *dev,
          * step-down here would mean the link was dropping during the
          * window we expected fw to fetch descriptors. */
         hailo_platform_log_link_state("post-timeout");
+        /* #682 hyp-U: dump RC bridge + endpoint error registers. If
+         * fw issued a transaction the BCM2712 RC dropped, the EP's
+         * Device Status will have UR/Non-Fatal/Fatal set; if the
+         * RC's AXI bus saw a read error, AXI_READ_ERROR_DATA will
+         * differ from the 0xFFFFFFFF seed. */
+        hailo_platform_dump_bridge_errors("post-timeout");
         /* #682 hypothesis-7: BAR4 SRAM snapshot after the 500 ms wait.
          * Diff against pre-submit baseline. Any changed dword tells
          * us where fw is active during a stall that proc=0 alone

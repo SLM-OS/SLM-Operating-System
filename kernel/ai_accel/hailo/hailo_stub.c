@@ -21,4 +21,21 @@ int hailo_platform_install(void)
     return HAILO_ERR_NODEV;
 }
 
+/* No-ops so cross-platform call sites under HAILO_WIRE_DEBUG link
+ * cleanly on non-Pi5 builds. */
+void hailo_platform_log_link_state(const char *label)
+{
+    (void)label;
+}
+
+void hailo_platform_dump_bridge_errors(const char *label)
+{
+    (void)label;
+}
+
+void hailo_platform_clear_bridge_errors(const char *label)
+{
+    (void)label;
+}
+
 #endif /* !PLATFORM_RASPI5 */

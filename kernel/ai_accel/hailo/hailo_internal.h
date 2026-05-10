@@ -69,4 +69,40 @@ void hailo_fw_drain_d2h_notifications(uint32_t max_events);
 void hailo_fw_dump_logs(void);
 void hailo_fw_dump_logs_hex(uint32_t max_bytes);
 
+/*
+ * #682 hypothesis-6 diagnostic. Reads PCIe Link Status (cap+0x12)
+ * and Link Capabilities (cap+0x0C) on the Hailo endpoint and prints
+ * trained-vs-max speed/width with the supplied label. Used to
+ * confirm `dtparam=pciex1_gen=3` actually trained Gen3 at our call
+ * sites, and that the link doesn't drop into recovery / Gen1
+ * fallback during the boundary-submit poll window. Implemented in
+ * the platform shim (Pi 5 = real read; non-Pi5 = no-op stub) so
+ * cross-platform builds keep linking.
+ */
+void hailo_platform_log_link_state(const char *label);
+
+/*
+ * Diagnostic-only (#682 hyp-U / hyp-W): dump RC bridge status /
+ * error registers, the Hailo endpoint's standard PCI Status + PCI
+ * Express Cap Device Status, and the EP MSI capability. Use after
+ * a suspected fw-side DMA stall to see whether the BCM2712 RC has
+ * caught a TLP completion timeout, address error, AXI read-error
+ * substitution, and whether the endpoint detected an Unsupported
+ * Request / Master Abort completion. Pi 5 implementation reads
+ * BCM2712 RC MMIO via pcie_bcm2712_dump_status_for_debug(); other
+ * platforms = no-op.
+ */
+void hailo_platform_dump_bridge_errors(const char *label);
+
+/*
+ * Diagnostic-only (#682 hyp-W): W1C the EP's PCI_STATUS error bits
+ * and PCI Express Cap Device Status error bits, so a subsequent
+ * dump shows only errors that fired AFTER this clear. Use to
+ * disambiguate stale boot-time errors from runtime errors during
+ * a specific window (e.g., clear at pre-IN-submit, dump at
+ * post-timeout). Reads back after the clear and logs the
+ * post-clear state.
+ */
+void hailo_platform_clear_bridge_errors(const char *label);
+
 #endif /* AI_ACCEL_HAILO_INTERNAL_H */
