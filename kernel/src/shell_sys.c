@@ -4460,7 +4460,7 @@ int cmd_nvgpu(int argc, char *argv[])
 {
     /* `b_p` aliases the file-scope `g_nvgpu_b` so the rest of this
      * function reads as `b_p->state` / `b_p` (passed where the
-     * inline calls previously took `b_p`). A pointer alias rather
+     * inline calls previously took `&b`). A pointer alias rather
      * than a `#define b g_nvgpu_b` macro because the macro would
      * silently rewrite any future local named `b` (loop variable,
      * parameter, struct field path) — flagged in the round-1
