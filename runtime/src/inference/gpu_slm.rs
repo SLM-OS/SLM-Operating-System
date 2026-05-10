@@ -305,6 +305,32 @@ fn reset_tier_table() {
     }
 }
 
+/// FFI shim for the C-side oplib probe (#714 §B.2). Called once per
+/// successfully-probed op_kind; flips the matching `TIER_TABLE`
+/// entry from `Tier::Cpu` (the boot default) to `Tier::Simt` so the
+/// SLM forward path routes that op through the GPU dispatcher
+/// instead of the CPU NEON kernel.
+///
+/// Returns 0 on success, -1 if `op_kind` is out of range. Never
+/// panics; safe to call from C without an unwind handler. Caller
+/// responsibility: only invoke after the dispatcher has validated
+/// the op (today: registry hit + cbuf/launch-shape build accepted
+/// a fixture; once #714 §B.3 lands: real Backend::execute against
+/// the embedded CPU reference).
+///
+/// SAFETY: no pointer arguments; bounds-checks `op_kind` before
+/// indexing `TIER_TABLE`. The atomic store is lock-free, so
+/// concurrent callers can't corrupt the table.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn slm_runtime_set_tier_simt(op_kind: u32) -> i32 {
+    if (op_kind as usize) >= OpKind::COUNT {
+        return -1;
+    }
+    TIER_TABLE[op_kind as usize].store(Tier::Simt);
+    0
+}
+
 // =====================================================================
 // FFI shim
 // =====================================================================

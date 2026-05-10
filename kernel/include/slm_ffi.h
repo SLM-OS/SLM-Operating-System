@@ -1151,6 +1151,23 @@ extern int rust_slm_get_info(uint32_t index, SlmModelInfoC *info);
 extern uint32_t rust_slm_count(void);
 
 /*
+ * Set the GPU dispatch tier for an SLM op kind to Tier::Simt
+ * (#714 §B.2). Called once per successfully-probed op_kind from
+ * the kernel-side oplib_probe_run() after SASS pool staging; flips
+ * the matching TIER_TABLE entry in runtime/src/inference/gpu_slm.rs
+ * from the boot default Tier::Cpu so the SLM forward path routes
+ * the op through the GPU dispatcher.
+ *
+ * `op_kind` is one of the SLM_GPU_OP_* enum values defined in
+ * <gpu_handoff.h>. Values out of range (>= OpKind::COUNT == 8)
+ * return -1 without touching the table; valid values return 0.
+ *
+ * Lock-free (atomic store inside Rust). Safe to call from any
+ * context that can also call uart_printf().
+ */
+extern int slm_runtime_set_tier_simt(uint32_t op_kind);
+
+/*
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
  *
  * Single source of truth for the shell's pre-load size gate. Pinned

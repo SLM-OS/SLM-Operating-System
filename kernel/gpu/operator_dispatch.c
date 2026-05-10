@@ -647,6 +647,11 @@ static int q4k_dot_launch_shape(const struct operator_dispatch_args *args,
     out->block_x = Q4K_DOT_BLOCK_DIM;
     out->block_y = 1;
     out->block_z = 1;
+    /* register_count_v = 64. Verified against the SASS via
+     * `cuobjdump --dump-resource-usage q4k_dot_f16` on Jetson
+     * (sm_87): REG:40, comfortably under 64. CONSTANT[0]:384
+     * matches the cbuf write window (0x160 + 0x20 + 4 = 0x184,
+     * rounded up to 0x180 by nvcc) exactly. (#757) */
     out->register_count_v = 64;
     out->smem_size_bytes = Q4K_DOT_SMEM_BYTES;
     out->slm_size_bytes  = 0;
@@ -772,11 +777,19 @@ static int gqa_attn_launch_shape(const struct operator_dispatch_args *args,
     out->block_x = GQA_ATTN_BLOCK_DIM;
     out->block_y = 1;
     out->block_z = 1;
+    /* register_count_v = 64. Verified against the SASS via
+     * `cuobjdump --dump-resource-usage gqa_attn_f16` on Jetson
+     * (sm_87): REG:40, comfortably under 64. SHARED:17928 from
+     * the same dump matches GQA_ATTN_SMEM_BYTES exactly, and
+     * CONSTANT[0]:400 matches the cbuf write window (0x160 +
+     * 0x30 = 0x190) exactly. (#757) */
     out->register_count_v = 64;
     /* Static smem footprint: independent of runtime args because the
      * kernel declares fixed-size __shared__ arrays sized to MAX_HEAD_DIM
      * and MAX_SEQ_LEN. The actual Q head's working set is smaller for
-     * shorter contexts but the QMD must reserve the full static size. */
+     * shorter contexts but the QMD must reserve the full static size.
+     * Pinned to GQA_ATTN_SMEM_BYTES = 17928, byte-exact against
+     * cuobjdump's SHARED:17928. */
     out->smem_size_bytes = GQA_ATTN_SMEM_BYTES;
     out->slm_size_bytes  = 0;
     /* Multiple `__syncthreads()` between phases — barrier slot
