@@ -56,7 +56,7 @@ Qwen2.5-1.5B Q4_K_M is the demo target:
 
 | Tensor | Bytes | Notes |
 |---|---:|---|
-| `token_embd.weight` (Q6_K) | ~150 MB | 151,936 × 1024 |
+| `token_embd.weight` (Q6_K) | ~191 MB | 151,936 × 1260 (Q6_K is ~0.82 B/elem × 1536 hidden) |
 | `attn_*.weight` × 30 layers | ~600 MB | Q/K/V/O × 30 |
 | `ffn_*.weight` × 30 layers | ~250 MB | gate/up/down × 30 |
 | `output_norm.weight` etc. | <1 MB | small per-layer norms |
@@ -86,8 +86,13 @@ the pool as a bump allocator with per-tensor slots:
 ```
 
 Each `(tensor_name, gpu_va, size)` triple goes into `LoadedSlm`'s new
-`gpu_tensor_map: BTreeMap<&'static str, GpuTensorRef>`. Lookup is O(log n)
-on tensor count (~250 tensors for Qwen 30 layers) — negligible.
+`gpu_tensor_map: BTreeMap<String, GpuTensorRef>`. Tensor names are
+constructed at runtime via `format!` against the layer index
+(`blk.0.attn_q.weight`, `blk.1.attn_q.weight`, …) so `&'static str`
+keys aren't workable; `String` allocates per-key but the population
+runs once at `slm load` time and lookups are read-only afterwards.
+Lookup is O(log n) on tensor count (~250 tensors for Qwen 30 layers)
+— negligible.
 
 `slm unload` frees the slots back into the bump allocator's free list.
 For the simplest first cut: no free list, the pool resets when SLM-OS
@@ -144,8 +149,10 @@ pub struct LoadedSlm {
 
     /// Per-tensor GPU VA cache. Populated at `slm load` time when a
     /// weights pool is available; empty otherwise. Forward.rs's hybrid
-    /// wrappers query this map; on miss, fall through to CPU.
-    pub gpu_tensor_map: BTreeMap<&'static str, GpuTensorRef>,
+    /// wrappers query this map; on miss, fall through to CPU. Keys
+    /// are owned `String`s because per-layer tensor names
+    /// (`blk.<i>.attn_q.weight`) are constructed at runtime.
+    pub gpu_tensor_map: BTreeMap<String, GpuTensorRef>,
 }
 
 pub struct GpuTensorRef {
@@ -172,7 +179,7 @@ Rust wrapper:
 impl LoadedSlm {
     pub fn stage_tensor_to_gpu(
         &mut self,
-        name: &'static str,
+        name: &str,         /* clones to a String for the map key */
         bytes: &[u8],
     ) -> Result<(), &'static str> {
         let mut gpu_va = 0u64;
@@ -183,7 +190,7 @@ impl LoadedSlm {
                                       bytes.len(), &mut gpu_va)
         };
         if rc != 0 { return Err("weights pool staging failed"); }
-        self.gpu_tensor_map.insert(name, GpuTensorRef {
+        self.gpu_tensor_map.insert(name.to_string(), GpuTensorRef {
             gpu_va,
             size_bytes: bytes.len(),
         });
@@ -215,7 +222,8 @@ fn embedding_lookup_hybrid(
         if select_tier(OpKind::Embedding) == Tier::Simt {
             if OperatorLibraryBackend::dispatch_embedding(
                 table.gpu_va, table.size_bytes,
-                token_id, out, /*head_dim*/ slm.arch.hidden_size,
+                token_id, out,
+                /*embedding_length*/ slm.arch.hidden_size,
             ).is_ok() {
                 return Some(());
             }
@@ -251,11 +259,25 @@ bit-exactly against the CPU reference.
 
 ## Memory cost
 
-Per-channel pool of 1.5 GB on Jetson Orin Nano (8 GB total). Combined
-with Linux running pre-kexec (~2 GB) and SLM-OS's static + dynamic
-allocations (~1 GB Rust heap + ~1 GB ramdisk + ~150 MB kernel
-runtime), worst-case usage ≈ 5.5 GB. Comfortable headroom; doesn't
-require RAM-budget renegotiation.
+Per-channel pool of 1.5 GB on Jetson Orin Nano (8 GB total). Two
+distinct memory windows to track:
+
+1. **Pre-kexec window** (Linux running, helper allocating). Linux
+   uses ~2 GB; the helper's nvmap allocation reserves the 1.5 GB
+   pool. Concurrent peak ≈ 3.5 GB. Linux still has headroom for
+   normal processes.
+2. **Post-kexec window** (SLM-OS owns RAM). Linux vacates; SLM-OS's
+   static + dynamic allocations (~1 GB Rust heap + ~1 GB ramdisk +
+   ~150 MB kernel runtime) plus the inherited 1.5 GB pool ≈ 3.7 GB
+   concurrent. Plenty of headroom.
+
+The transient peak isn't either window — it's **at `slm load` time**:
+the GGUF mmap-buffer + Rust-heap copy hold the weights once, then
+`stage_tensor_to_gpu`'s memcpy transiently holds them again in the
+pool. Peak ≈ 2 × weight size = ~2 GB for Qwen 1.5B until the CPU-side
+buffer is freed. Doable on Jetson but tight; future optimization
+(see "mmap-existing-pages alternative" below) eliminates the
+duplication.
 
 For development, smaller test fixtures (e.g. SmolLM2-135M ≈ 90 MB
 weights) need a much smaller pool. The `--weights-pool-size` flag lets
@@ -279,6 +301,28 @@ multi-op-on-GPU is a future arc once the per-op hybrids are all live.
 
 ## Risks
 
+- **CMA contiguity at 1.5 GB** (W1 prerequisite). Jetson's
+  `dma_alloc_coherent` (which nvmap eventually calls) is bounded by
+  the kernel's CMA region size — typically configured at boot.
+  Default Jetson L4T CMA varies by image (often 256 MB or 1 GB).
+  A request for 1.5 GB contiguous DMA memory may fail. Validation:
+  before merging W1's schema design, run a one-shot allocation
+  proof-of-concept on jetson-nano-1 (`gpu-channel-helper
+  --weights-pool-size 1610612736 --dry-run`-style) to confirm
+  feasibility. **Mitigation if CMA is too small**: multi-chunk
+  allocation backed by an array of smaller buffers, with the helper
+  publishing a list of `(phys, gpu_va, size)` triples — the GMMU
+  stitches them into one virtually-contiguous range. Adds wire-
+  format complexity to W1 (handoff carries an array, not a single
+  triple).
+- **Bump-allocator alignment policy** (W2 prerequisite). Q4_K
+  weight rows have 144-byte super-block alignment requirements
+  (already pinned in `EMBEDDING_Q4K_BLOCK_BYTES`). The bump
+  allocator must round each `stage_tensor_to_gpu` call up to a
+  suitable boundary (256 B for Q4_K-shaped tensors, 4 KB for
+  conservative page-aligned everything-else) so per-tensor offsets
+  decode correctly under the GPU's GMMU view. Trivial implementation;
+  pinned here so W2 doesn't ship an unaligned bump pointer.
 - **Helper backward compatibility**: production SLM-OS deployments
   using the old helper without `--weights-pool-size` see
   `weights_pool_size = 0`, fall through to CPU. ✓ safe.
@@ -298,18 +342,75 @@ multi-op-on-GPU is a future arc once the per-op hybrids are all live.
   is alive in Linux requires the user to power-cycle and re-stage.
   Same constraint as today's SASS pool.
 
+## Future optimization: mmap-existing-pages alternative
+
+The W2 design **copies** CPU heap → GPU pool at `slm load` time.
+That doubles peak memory (~2× weight size during the copy window)
+and burns ~30 ms of CPU↔DRAM bandwidth per gigabyte of weights.
+
+An alternative is to **map the existing CPU heap pages directly into
+the GMMU**, no copy. This requires a kernel API like
+`ga10b_gmmu_map_existing(phys, size) → gpu_va` that doesn't exist
+today: the current `ga10b_gmmu_alloc` allocates fresh PMM pages and
+maps them. Adding `_map_existing` is a contained kernel change
+(builds PTE entries from an arbitrary physical-page list).
+
+Saved: 1 GB transient peak at `slm load`, plus the memcpy time.
+Cost: weight pages stay locked in PMM (can't be paged out — moot
+in a no-paging system) and lifetime management becomes more
+delicate (the mapped pages must outlive the channel).
+
+**Sequencing**: the copy-based design (W1-W3 above) is the safe
+first cut. If memory pressure on Jetson Orin Nano under the 1.5 GB
+pool turns out to bite, file a follow-on for `_map_existing`.
+Not blocking for the umbrella tracking issue.
+
 ## Validation plan
 
-For W1-W3:
-- QEMU: helper signature change verified by build; handoff struct size
-  asserts catch wire-format drift.
-- Hardware: helper allocates pool, SLM-OS dumps `[oplib-pool] weights
-  region: phys=… gpu_va=… size=…` post-`oplib stage`.
+Each PR plugs into the existing test infrastructure rather than
+inventing a new harness:
 
-For W4-W7 (per-op):
-- Hardware: bit-exact comparison of GPU output against CPU reference,
-  using the same shape the smoke verb already validates. Loaded SLM
-  produces tokens; tokens match a known-good reference run.
+For W1 (helper + handoff schema):
+- QEMU `make test`: handoff struct size + offset `_Static_assert`s
+  in `kernel/gpu/nvidia/ga10b_channel_handoff.h` catch wire-format
+  drift at compile time.
+- Hardware (jetson-nano-1): helper allocates the pool successfully
+  with the new flag; SLM-OS post-`oplib stage` prints
+  `[oplib-pool] weights region: phys=… gpu_va=… size=…` and the
+  values match the helper's stdout.
+
+For W2 (`stage_weight` FFI + Rust API):
+- Hosted unit tests in `runtime/src/inference/gpu_slm.rs` (pattern
+  from PR #762's `oplib_backend_*` tests): mock the FFI to return
+  a deterministic `gpu_va`, verify `stage_tensor_to_gpu` populates
+  `gpu_tensor_map` with the right key/value/size triple. Bounds
+  checks on pool-exhaustion and the bump-pointer alignment math
+  covered here too.
+- QEMU `make test`: the FFI's stub return `-1` (no handoff) is
+  exercised by every test that loads a model — verifies the
+  fallback path stays bit-exact with the pre-W2 behavior.
+
+For W3 (`slm load` populates `gpu_tensor_map`):
+- Hosted: the existing `test_slm_load.c` fixtures load synthetic
+  Qwen-shaped models; assert that `gpu_tensor_map` is populated
+  with the expected tensor names when staging is mocked-success
+  and stays empty when mocked-fail.
+- Hardware: `slm gpu` shell verb extends to dump the staged tensor
+  count + total bytes; expect ~250 / ~1 GB for Qwen2.5-1.5B.
+
+For W4-W7 (per-op hybrids):
+- Hardware: bit-exact comparison of GPU output against CPU reference
+  per op, using the existing smoke-verb fixtures (#759). Each op's
+  hybrid wrapper is exercised twice in the same `slm prompt` run —
+  once with the tier flipped to `Tier::Cpu` (forces CPU path), once
+  with `Tier::Simt` (forces GPU path); the two outputs must match
+  bit-for-bit (modulo documented FP rounding tolerance).
+- `boot_test --count 10` on jetson-nano-1 against a fixed prompt
+  catches regressions across the full pipeline.
+
+Throughout: the existing `make test` (QEMU) + cross-platform builds
+(Pi 5, x86-64) gate every PR; behavior on non-Jetson platforms is
+unchanged because the weights pool is Jetson-only.
 
 ## References
 
