@@ -217,11 +217,18 @@ endif()
 # at all, which covers all tasks that poll UART / message queues / locks.
 # A pure CPU-bound loop with no yield still monopolizes its CPU.
 #
-# Enabled by default on platforms where the real timer-IRQ path is
-# blocked (Pi 5 and Jetson). The legacy `PI5_COOP_PREEMPT` option is
-# kept as a backward-compatible alias.
-option(COOP_PREEMPT "Cooperative preemption via CNTPCT-driven scheduler_tick (ARM64 NC-memory platforms)" ON)
-option(PI5_COOP_PREEMPT "Deprecated alias for COOP_PREEMPT" ON)
+# Default ON only where hardware timer-IRQ delivery is unavailable.
+# Pi 5 now ships SECONDARY_PREEMPT=ON by default (timer IRQs deliver
+# at EL2/VHE on PPI 26), so the cooperative path is no longer needed
+# on RASPI5 and is OFF by default. Jetson and other ARM64 NC-memory
+# platforms still default ON.
+if(PLATFORM STREQUAL "RASPI5")
+    set(_default_coop OFF)
+else()
+    set(_default_coop ON)
+endif()
+option(COOP_PREEMPT "Cooperative preemption via CNTPCT-driven scheduler_tick (ARM64 NC-memory platforms)" ${_default_coop})
+option(PI5_COOP_PREEMPT "Deprecated alias for COOP_PREEMPT" ${_default_coop})
 # Alias propagation: either knob being OFF disables the feature. If a
 # user sets only one explicitly, respect that.
 if(NOT PI5_COOP_PREEMPT)
@@ -640,8 +647,11 @@ set(KERNEL_SOURCES
     $<$<BOOL:${SCHEDULER_HEF_BLOB}>:kernel/src/sched_hef_embed.S>
     # Phase 8: user .hef embed (gated on USER_HEF_BLOB). Same stub
     # pattern as the scheduler HEF above. Writes to /mnt/files/user.hef.
+    # NOTE: the .S embed file is added later via target_sources() so it
+    # can see the auto-detected USER_HEF_BLOB value (the gen-expression
+    # form expands ${USER_HEF_BLOB} at parse time, which is before the
+    # auto-detect block runs).
     kernel/src/user_hef_init.c
-    $<$<BOOL:${USER_HEF_BLOB}>:kernel/src/user_hef_embed.S>
     # MNIST test-digit fixtures (gated on MNIST_DIGITS_DIR). Same stub
     # pattern. Writes 10 fp32 digit binaries to /mnt/files/digits/ so
     # slm.model_infer_file() has a known-good demo set out of the box.
@@ -1322,12 +1332,24 @@ endif()
 # HEF (e.g. resnet_v1_18 for Hailo-8L).
 set(USER_HEF_BLOB "" CACHE FILEPATH
     "Path to a user HEF to embed via .incbin (Phase 8)")
+# Auto-detect: if no path is passed and the canonical build-time
+# output exists, default to it. Keeps "no HEF" builds working when
+# the file is absent; opt-out by passing -DUSER_HEF_BLOB="" explicitly
+# only matters here when overriding the default with empty string.
+if(NOT USER_HEF_BLOB)
+    set(_user_hef_default "${CMAKE_SOURCE_DIR}/build/hailo/mnist.hef")
+    if(EXISTS "${_user_hef_default}")
+        set(USER_HEF_BLOB "${_user_hef_default}")
+        message(STATUS "USER_HEF_BLOB auto-detected: ${USER_HEF_BLOB}")
+    endif()
+endif()
 if(USER_HEF_BLOB)
     if(NOT EXISTS "${USER_HEF_BLOB}")
         message(FATAL_ERROR "USER_HEF_BLOB set but file does not exist: "
                             "${USER_HEF_BLOB}")
     endif()
     add_compile_definitions(ENABLE_USER_HEF_EMBED=1)
+    target_sources(slmos.elf PRIVATE kernel/src/user_hef_embed.S)
     set_source_files_properties(
         kernel/src/user_hef_embed.S
         PROPERTIES
@@ -1347,6 +1369,22 @@ endif()
 # embedded". The blob is distributed with the Linux HailoRT driver
 # (open redistribution) and lives at `hailo8_fw.bin` in that tree.
 set(HAILO_FW_BLOB "" CACHE FILEPATH "Path to hailo8_fw.bin to embed via .incbin")
+# Auto-detect: search canonical install paths shipped by Hailo's
+# Linux driver package, then the build/hailo/ staging dir, then
+# ~/Downloads. First-existing wins.
+if(NOT HAILO_FW_BLOB)
+    foreach(_fw_candidate
+        "/usr/lib/firmware/hailo/hailo8_fw.4.23.0.bin"
+        "/usr/lib/firmware/hailo/hailo8_fw.bin"
+        "${CMAKE_SOURCE_DIR}/build/hailo/hailo8_fw.bin"
+        "$ENV{HOME}/Downloads/hailo8_fw.bin")
+        if(EXISTS "${_fw_candidate}")
+            set(HAILO_FW_BLOB "${_fw_candidate}")
+            message(STATUS "HAILO_FW_BLOB auto-detected: ${HAILO_FW_BLOB}")
+            break()
+        endif()
+    endforeach()
+endif()
 if(HAILO_FW_BLOB)
     if(NOT EXISTS "${HAILO_FW_BLOB}")
         message(FATAL_ERROR
