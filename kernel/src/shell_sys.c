@@ -4239,6 +4239,207 @@ static int cmd_nvgpu_engine_status(void)
     return 0;
 }
 
+/* ============================================================================
+ * `nvgpu oplib smoke <op_kind>` per-op fixtures
+ * ============================================================================
+ *
+ * Each fixture builder memsets the op's input buffers to zero, issues
+ * cache_clean_range so the GPU sees the zeros, populates the dispatcher
+ * args struct, and reports the output region (phys/va/bytes) the
+ * smoke verb needs to pre-fill with the 0xCAFE sentinel and verify
+ * post-dispatch. The "all-zero inputs → all-zero output" property
+ * holds for every SLM op (see the smoke verb's header comment for
+ * the per-op math).
+ *
+ * Output buffers are NOT pre-filled here — the smoke verb does that
+ * after every fixture is built so the sentinel writes are sequenced
+ * after any input cache_clean_range that might also touch the
+ * output's cacheline (relevant for GQA_ATTN where Q and out share
+ * slot 0 across two pages). */
+
+static void smoke_fixture_rmsnorm(uint64_t base_phys, uint64_t base_gva,
+                                   struct operator_dispatch_args *args,
+                                   uint64_t *out_phys, uint64_t *out_va,
+                                   uint64_t *out_bytes)
+{
+    /* x[1×256] FP16, gamma[256] FP16, out[1×256] FP16. */
+    uint32_t n = 256u;
+    uint64_t in_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t in_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t gam_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t gam_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+    memset((void *)(uintptr_t)in_phys,  0, n * 2u);
+    memset((void *)(uintptr_t)gam_phys, 0, n * 2u);
+    cache_clean_range((void *)(uintptr_t)in_phys,  4096u);
+    cache_clean_range((void *)(uintptr_t)gam_phys, 4096u);
+    args->u.rmsnorm.x_gpu_va     = in_va;
+    args->u.rmsnorm.gamma_gpu_va = gam_va;
+    args->u.rmsnorm.out_gpu_va   = *out_va;
+    args->u.rmsnorm.n_rows       = 1u;
+    args->u.rmsnorm.n            = n;
+    args->u.rmsnorm.eps_bits     = 0x358637BDu;
+    *out_bytes = (uint64_t)n * 2u;
+}
+
+static void smoke_fixture_embedding(uint64_t base_phys, uint64_t base_gva,
+                                     struct operator_dispatch_args *args,
+                                     uint64_t *out_phys, uint64_t *out_va,
+                                     uint64_t *out_bytes)
+{
+    /* Q4_K table[1 token × 1 super-block (144 B)], out[256] FP16. */
+    uint64_t tbl_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t tbl_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    memset((void *)(uintptr_t)tbl_phys, 0, 144u);
+    cache_clean_range((void *)(uintptr_t)tbl_phys, 4096u);
+    args->u.embedding.table_gpu_va     = tbl_va;
+    args->u.embedding.out_gpu_va       = *out_va;
+    args->u.embedding.token_id         = 0u;
+    args->u.embedding.embedding_length = 256u;
+    args->u.embedding.table_row_bytes  = 144u;
+    *out_bytes = 256u * 2u;
+}
+
+static void smoke_fixture_q4k_dequant(uint64_t base_phys, uint64_t base_gva,
+                                       struct operator_dispatch_args *args,
+                                       uint64_t *out_phys, uint64_t *out_va,
+                                       uint64_t *out_bytes)
+{
+    /* 1 super-block in / 256 FP16 out. */
+    uint64_t blk_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t blk_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    memset((void *)(uintptr_t)blk_phys, 0, 144u);
+    cache_clean_range((void *)(uintptr_t)blk_phys, 4096u);
+    args->u.q4k_dequant.blocks_gpu_va = blk_va;
+    args->u.q4k_dequant.out_gpu_va    = *out_va;
+    args->u.q4k_dequant.nb            = 1u;
+    *out_bytes = 256u * 2u;
+}
+
+static void smoke_fixture_swiglu(uint64_t base_phys, uint64_t base_gva,
+                                  struct operator_dispatch_args *args,
+                                  uint64_t *out_phys, uint64_t *out_va,
+                                  uint64_t *out_bytes)
+{
+    /* gate=0[256] up=0[256] → out=0[256] FP16. */
+    uint32_t n = 256u;
+    uint64_t gate_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t gate_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t up_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t up_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+    memset((void *)(uintptr_t)gate_phys, 0, n * 2u);
+    memset((void *)(uintptr_t)up_phys,   0, n * 2u);
+    cache_clean_range((void *)(uintptr_t)gate_phys, 4096u);
+    cache_clean_range((void *)(uintptr_t)up_phys,   4096u);
+    args->u.swiglu.gate_gpu_va = gate_va;
+    args->u.swiglu.up_gpu_va   = up_va;
+    args->u.swiglu.out_gpu_va  = *out_va;
+    args->u.swiglu.n           = n;
+    *out_bytes = (uint64_t)n * 2u;
+}
+
+static void smoke_fixture_q4k_dot(uint64_t base_phys, uint64_t base_gva,
+                                   struct operator_dispatch_args *args,
+                                   uint64_t *out_phys, uint64_t *out_va,
+                                   uint64_t *out_bytes)
+{
+    /* x[256] FP16, weights[1 row × 1 super-block = 144 B Q4_K-zero],
+     * out[1] FP32. K=256, N=1. */
+    uint64_t x_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t x_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t w_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t w_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+    memset((void *)(uintptr_t)x_phys, 0, 256u * 2u);
+    memset((void *)(uintptr_t)w_phys, 0, 144u);
+    cache_clean_range((void *)(uintptr_t)x_phys, 4096u);
+    cache_clean_range((void *)(uintptr_t)w_phys, 4096u);
+    args->u.q4k_dot.x_gpu_va       = x_va;
+    args->u.q4k_dot.weights_gpu_va = w_va;
+    args->u.q4k_dot.out_gpu_va     = *out_va;
+    args->u.q4k_dot.k              = 256u;
+    args->u.q4k_dot.n              = 1u;
+    *out_bytes = 1u * 4u;     /* FP32 */
+}
+
+static void smoke_fixture_gqa_attn(uint64_t base_phys, uint64_t base_gva,
+                                    struct operator_dispatch_args *args,
+                                    uint64_t *out_phys, uint64_t *out_va,
+                                    uint64_t *out_bytes)
+{
+    /* Realistic-ish fixture: 2 Q × 1 KV × 128 head_dim, seq_len=4.
+     * All-zero inputs → all-zero output.
+     *   Q   = 2 × 128 × 2 =  512 B  (slot 0 + 0x0000)
+     *   K   = 4 × 128 × 2 = 1024 B  (slot 1)
+     *   V   = 4 × 128 × 2 = 1024 B  (slot 2)
+     *   out = 2 × 128 × 2 =  512 B  (slot 0 + 0x1000 sub-page)
+     * head_dim=128 matches BLOCK_DIM so all threads work in phase 3;
+     * seq_len=4 exercises the multi-position softmax path. Q and out
+     * share slot 0 across two 4 KB sub-pages — slot 4 isn't usable
+     * because the helper's 1 MB nvmap allocation may not be physically
+     * contiguous past the first few slots (phys-direct CPU reads then
+     * see stale data); slots 0-2 are proven-contig by the existing
+     * dispatch-rmsnorm/dispatch-rope smokes. */
+    uint32_t hd = 128u;
+    uint32_t sl = 4u;
+    uint64_t q_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t q_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t k_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t k_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t v_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t v_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
+    memset((void *)(uintptr_t)q_phys, 0, 2u * hd * 2u);
+    memset((void *)(uintptr_t)k_phys, 0, sl * hd * 2u);
+    memset((void *)(uintptr_t)v_phys, 0, sl * hd * 2u);
+    cache_clean_range((void *)(uintptr_t)q_phys, 4096u);
+    cache_clean_range((void *)(uintptr_t)k_phys, 4096u);
+    cache_clean_range((void *)(uintptr_t)v_phys, 4096u);
+    args->u.gqa_attn.q_gpu_va    = q_va;
+    args->u.gqa_attn.k_gpu_va    = k_va;
+    args->u.gqa_attn.v_gpu_va    = v_va;
+    args->u.gqa_attn.out_gpu_va  = *out_va;
+    args->u.gqa_attn.n_head_q    = 2u;
+    args->u.gqa_attn.n_head_kv   = 1u;
+    args->u.gqa_attn.head_dim    = hd;
+    args->u.gqa_attn.seq_len     = sl;
+    *out_bytes = 2u * hd * 2u;
+}
+
+/* Operator-library schema lookup: maps op_kind to its (tier, dtype)
+ * triple, mirroring scripts/cuda/operator_library/MANIFEST.json. The
+ * smoke verb uses this so the dispatch call site doesn't have to
+ * branch on op_kind to pick the dtype, and so a future op landing
+ * adds one row here rather than a chained ternary. Returns
+ * SLM_GPU_DTYPE_FP16 for unknown op_kinds — safe default; the
+ * dispatcher's lookup will miss on the (op, tier, dtype) triple
+ * regardless. */
+static uint32_t smoke_dtype_for(uint32_t op_kind)
+{
+    switch (op_kind) {
+    case SLM_GPU_OP_EMBEDDING:
+    case SLM_GPU_OP_Q4K_DOT:
+        return SLM_GPU_DTYPE_Q4K;
+    case SLM_GPU_OP_RMSNORM:
+    case SLM_GPU_OP_ROPE:
+    case SLM_GPU_OP_Q4K_DEQUANT:
+    case SLM_GPU_OP_SWIGLU:
+    case SLM_GPU_OP_GQA_ATTN:
+        return SLM_GPU_DTYPE_FP16;
+    default:
+        return SLM_GPU_DTYPE_FP16;
+    }
+}
+
 int cmd_nvgpu(int argc, char *argv[])
 {
     static struct ga10b_bringup b;
@@ -5189,7 +5390,11 @@ oplib_stage_call:
             /* Per-op scratch sizes — kept small so every op fits in
              * a single 64 KB slot per buffer. The fixtures are
              * deliberately tiny: enough work to exercise dispatch,
-             * not enough to need real-shape allocations. */
+             * not enough to need real-shape allocations. Each
+             * smoke_fixture_* helper above memsets its inputs and
+             * issues cache_clean_range; the smoke verb here only
+             * dispatches per op_kind and pre-fills the output
+             * sentinel afterwards. */
             uint64_t out_bytes = 0;
             uint64_t out_phys  = 0;
             uint64_t out_va    = 0;
@@ -5198,147 +5403,39 @@ oplib_stage_call:
             args.op_kind = op_kind;
 
             switch (op_kind) {
-            case SLM_GPU_OP_RMSNORM: {
-                /* x[1×256] FP16, gamma[256] FP16, out[1×256] FP16.
-                 * Every buffer fits in 512 B. */
-                uint32_t n = 256u;
-                uint64_t in_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t in_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t gam_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
-                uint64_t gam_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
-                out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
-                out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
-                memset((void *)(uintptr_t)in_phys,  0, n * 2u);
-                memset((void *)(uintptr_t)gam_phys, 0, n * 2u);
-                cache_clean_range((void *)(uintptr_t)in_phys,  4096u);
-                cache_clean_range((void *)(uintptr_t)gam_phys, 4096u);
-                args.u.rmsnorm.x_gpu_va     = in_va;
-                args.u.rmsnorm.gamma_gpu_va = gam_va;
-                args.u.rmsnorm.out_gpu_va   = out_va;
-                args.u.rmsnorm.n_rows       = 1u;
-                args.u.rmsnorm.n            = n;
-                args.u.rmsnorm.eps_bits     = 0x358637BDu;
-                out_bytes = (uint64_t)n * 2u;
+            case SLM_GPU_OP_RMSNORM:
+                smoke_fixture_rmsnorm(base_phys, base_gva, &args,
+                                      &out_phys, &out_va, &out_bytes);
                 break;
-            }
-            case SLM_GPU_OP_EMBEDDING: {
-                /* Q4_K table[1 token × 1 super-block (144 B)],
-                 * out[256] FP16. Zero everything → out=0. */
-                uint64_t tbl_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t tbl_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
-                out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
-                out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
-                memset((void *)(uintptr_t)tbl_phys, 0, 144u);
-                cache_clean_range((void *)(uintptr_t)tbl_phys, 4096u);
-                args.u.embedding.table_gpu_va     = tbl_va;
-                args.u.embedding.out_gpu_va       = out_va;
-                args.u.embedding.token_id         = 0u;
-                args.u.embedding.embedding_length = 256u;
-                args.u.embedding.table_row_bytes  = 144u;
-                out_bytes = 256u * 2u;
+            case SLM_GPU_OP_EMBEDDING:
+                smoke_fixture_embedding(base_phys, base_gva, &args,
+                                        &out_phys, &out_va, &out_bytes);
                 break;
-            }
-            case SLM_GPU_OP_Q4K_DEQUANT: {
-                /* 1 super-block in / 256 FP16 out. */
-                uint64_t blk_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t blk_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
-                out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
-                out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
-                memset((void *)(uintptr_t)blk_phys, 0, 144u);
-                cache_clean_range((void *)(uintptr_t)blk_phys, 4096u);
-                args.u.q4k_dequant.blocks_gpu_va = blk_va;
-                args.u.q4k_dequant.out_gpu_va    = out_va;
-                args.u.q4k_dequant.nb            = 1u;
-                out_bytes = 256u * 2u;
+            case SLM_GPU_OP_Q4K_DEQUANT:
+                smoke_fixture_q4k_dequant(base_phys, base_gva, &args,
+                                          &out_phys, &out_va, &out_bytes);
                 break;
-            }
-            case SLM_GPU_OP_SWIGLU: {
-                /* gate=0[256] up=0[256] → out=0[256] FP16. */
-                uint32_t n = 256u;
-                uint64_t gate_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t gate_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t up_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH1;
-                uint64_t up_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
-                out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
-                out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
-                memset((void *)(uintptr_t)gate_phys, 0, n * 2u);
-                memset((void *)(uintptr_t)up_phys,   0, n * 2u);
-                cache_clean_range((void *)(uintptr_t)gate_phys, 4096u);
-                cache_clean_range((void *)(uintptr_t)up_phys,   4096u);
-                args.u.swiglu.gate_gpu_va = gate_va;
-                args.u.swiglu.up_gpu_va   = up_va;
-                args.u.swiglu.out_gpu_va  = out_va;
-                args.u.swiglu.n           = n;
-                out_bytes = (uint64_t)n * 2u;
+            case SLM_GPU_OP_SWIGLU:
+                smoke_fixture_swiglu(base_phys, base_gva, &args,
+                                     &out_phys, &out_va, &out_bytes);
                 break;
-            }
-            case SLM_GPU_OP_Q4K_DOT: {
-                /* x[256] FP16, weights[1 row × 1 super-block = 144 B
-                 * Q4_K-zero], out[1] FP32. K=256, N=1. */
-                uint64_t x_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t x_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t w_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
-                uint64_t w_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
-                out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
-                out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
-                memset((void *)(uintptr_t)x_phys, 0, 256u * 2u);
-                memset((void *)(uintptr_t)w_phys, 0, 144u);
-                cache_clean_range((void *)(uintptr_t)x_phys, 4096u);
-                cache_clean_range((void *)(uintptr_t)w_phys, 4096u);
-                args.u.q4k_dot.x_gpu_va       = x_va;
-                args.u.q4k_dot.weights_gpu_va = w_va;
-                args.u.q4k_dot.out_gpu_va     = out_va;
-                args.u.q4k_dot.k              = 256u;
-                args.u.q4k_dot.n              = 1u;
-                out_bytes = 1u * 4u;     /* FP32 */
+            case SLM_GPU_OP_Q4K_DOT:
+                smoke_fixture_q4k_dot(base_phys, base_gva, &args,
+                                      &out_phys, &out_va, &out_bytes);
                 break;
-            }
-            case SLM_GPU_OP_GQA_ATTN: {
-                /* Realistic-ish fixture: 2 Q × 1 KV × 128 head_dim,
-                 * seq_len=4. All-zero inputs → all-zero output.
-                 *   Q   = 2 × 128 × 2 =  512 B  (slot 0)
-                 *   K   = 4 × 128 × 2 = 1024 B  (slot 1)
-                 *   V   = 4 × 128 × 2 = 1024 B  (slot 2)
-                 *   out = 2 × 128 × 2 =  512 B  (slot 0 + 0x1000 sub-offset
-                 *                                — same slot, different page)
-                 * head_dim=128 matches BLOCK_DIM so all threads work in
-                 * phase 3; seq_len=4 exercises the multi-position
-                 * softmax path (vs the trivial seq_len=1). Stays well
-                 * within slot caps and within the helper's
-                 * proven-contig first few slots. */
-                uint32_t hd = 128u;
-                uint32_t sl = 4u;
-                uint64_t q_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t q_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
-                uint64_t k_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
-                uint64_t k_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
-                uint64_t v_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
-                uint64_t v_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
-                out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
-                out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
-                memset((void *)(uintptr_t)q_phys, 0, 2u * hd * 2u);
-                memset((void *)(uintptr_t)k_phys, 0, sl * hd * 2u);
-                memset((void *)(uintptr_t)v_phys, 0, sl * hd * 2u);
-                cache_clean_range((void *)(uintptr_t)q_phys, 4096u);
-                cache_clean_range((void *)(uintptr_t)k_phys, 4096u);
-                cache_clean_range((void *)(uintptr_t)v_phys, 4096u);
-                args.u.gqa_attn.q_gpu_va    = q_va;
-                args.u.gqa_attn.k_gpu_va    = k_va;
-                args.u.gqa_attn.v_gpu_va    = v_va;
-                args.u.gqa_attn.out_gpu_va  = out_va;
-                args.u.gqa_attn.n_head_q    = 2u;
-                args.u.gqa_attn.n_head_kv   = 1u;
-                args.u.gqa_attn.head_dim    = hd;
-                args.u.gqa_attn.seq_len     = sl;
-                out_bytes = 2u * hd * 2u;
+            case SLM_GPU_OP_GQA_ATTN:
+                smoke_fixture_gqa_attn(base_phys, base_gva, &args,
+                                       &out_phys, &out_va, &out_bytes);
                 break;
-            }
             default:
                 shell_printf("smoke: op_kind=%u not supported by this "
                              "verb (try 0/1/2/3/5/6/12)\r\n",
                              (unsigned)op_kind);
                 return -1;
             }
+            (void)out_va;     /* set by helper for completeness; the
+                               * dispatch path reads it from
+                               * args.u.<op>.out_gpu_va already. */
 
             /* Pre-fill the output region with the 0xCAFE sentinel.
              * out_bytes is the kernel's actual write size; round up
@@ -5357,10 +5454,7 @@ oplib_stage_call:
 
             int rc = slm_oplib_dispatch(&b, 0, op_kind,
                                          SLM_GPU_TIER_SIMT,
-                                         (op_kind == SLM_GPU_OP_Q4K_DOT ||
-                                          op_kind == SLM_GPU_OP_EMBEDDING)
-                                             ? SLM_GPU_DTYPE_Q4K
-                                             : SLM_GPU_DTYPE_FP16,
+                                         smoke_dtype_for(op_kind),
                                          &args);
             if (rc < 0) {
                 shell_printf("FAIL: rc=%d\r\n", rc);
