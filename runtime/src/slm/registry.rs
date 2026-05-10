@@ -19,6 +19,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -74,6 +75,20 @@ pub struct OwnedTensorInfo {
     pub offset: u64,
 }
 
+/// W2 reference into the GPU weights pool. Returned by
+/// [`crate::inference::gpu_slm::OperatorLibraryBackend::stage_tensor`]
+/// and stored in [`LoadedSlm::gpu_tensor_map`] keyed by tensor name.
+/// `gpu_va` is the GPU virtual address inside the helper-published
+/// pool (4 KB-aligned in practice — the kernel side uses 256-byte
+/// alignment, but pool slots end up page-aligned because every slot
+/// is multi-page); `size_bytes` matches the CPU-side tensor byte
+/// count exactly so forward.rs's hybrid wrappers can shape-check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuTensorRef {
+    pub gpu_va: u64,
+    pub size_bytes: usize,
+}
+
 /// Per-slot record in the SLM registry. Exposed publicly only via
 /// the closure-based [`with_loaded_slm`] accessor — the slot table
 /// owns the value, callers borrow it under the registry lock.
@@ -123,6 +138,17 @@ pub struct LoadedSlm {
     /// [`Self::weight_pages`]. Adding a tensor's relative `offset`
     /// gives the absolute byte address of that tensor's data.
     tensor_data_start: usize,
+
+    /// W2: per-tensor GPU VA cache. Populated by `slm load` (W3) when
+    /// a v8 channel handoff exposes a non-zero weights pool; empty
+    /// otherwise. Forward.rs's hybrid wrappers (W4-W7) consult this
+    /// map; on miss they fall through to the CPU path. Keys are
+    /// owned `String`s because per-layer tensor names
+    /// (`blk.<i>.attn_q.weight`) are constructed at runtime.
+    /// `BTreeMap` rather than `HashMap` because the runtime crate
+    /// has no allocator-friendly hash impl by default and the
+    /// O(log n) lookup over ~250 tensors is negligible.
+    gpu_tensor_map: BTreeMap<String, GpuTensorRef>,
 }
 
 impl LoadedSlm {
@@ -203,6 +229,22 @@ impl LoadedSlm {
     /// [`Self::tensor_bytes`].
     pub fn tensor_data_start(&self) -> usize {
         self.tensor_data_start
+    }
+
+    /// W2 read accessor for the GPU-tensor map. Returns an empty
+    /// map until `slm load` (W3) populates it. Forward.rs hybrid
+    /// wrappers call `.get(name)` and fall through to CPU on `None`.
+    pub fn gpu_tensor_map(&self) -> &BTreeMap<String, GpuTensorRef> {
+        &self.gpu_tensor_map
+    }
+
+    /// W2 mutating helper: record a freshly-staged tensor in the
+    /// map. Caller is `slm load` (W3) once it has called the
+    /// staging FFI and gotten a `GpuTensorRef` back. Replaces any
+    /// existing entry for `name` — the load path stages each
+    /// tensor at most once per `slm load` call.
+    pub fn insert_gpu_tensor(&mut self, name: String, ref_: GpuTensorRef) {
+        self.gpu_tensor_map.insert(name, ref_);
     }
 
     fn weight_buffer(&self) -> Option<&[u8]> {
@@ -491,6 +533,7 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         tokenizer: Some(parsed.tokenizer),
         tensors: parsed.tensors,
         tensor_data_start: parsed.tensor_data_start,
+        gpu_tensor_map: BTreeMap::new(),
     };
     match insert_entry(entry) {
         Ok(idx) => Ok(idx),
@@ -556,6 +599,7 @@ pub fn load_slm_take_pages(
         tokenizer: Some(parsed.tokenizer),
         tensors: parsed.tensors,
         tensor_data_start: parsed.tensor_data_start,
+        gpu_tensor_map: BTreeMap::new(),
     };
     insert_entry(entry)
 }
@@ -622,6 +666,25 @@ where
     // duration of `f`.
     let slot = unsafe { &*core::ptr::addr_of!(SLOTS) };
     let entry = slot[index].as_ref()?;
+    Some(f(entry))
+}
+
+/// Mutable variant of [`with_loaded_slm`] for callers that need to
+/// update slot state (W3's GPU-tensor staging populates
+/// `gpu_tensor_map` this way). Same locking + non-reentrancy
+/// requirements; the closure must not re-enter the registry.
+pub fn with_loaded_slm_mut<F, R>(index: usize, f: F) -> Option<R>
+where
+    F: FnOnce(&mut LoadedSlm) -> R,
+{
+    if index >= SLM_MAX_SLOTS {
+        return None;
+    }
+    let _g = SpinGuard::new();
+    // SAFETY: SpinGuard held — exclusive access to SLOTS for the
+    // duration of `f`.
+    let slot = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS) };
+    let entry = slot[index].as_mut()?;
     Some(f(entry))
 }
 

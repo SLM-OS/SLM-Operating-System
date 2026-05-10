@@ -484,6 +484,7 @@ set(KERNEL_SOURCES
     kernel/src/gpu_tier.c
     kernel/gpu/operator_library.c
     kernel/gpu/oplib_pool.c
+    kernel/gpu/oplib_weights_pool.c
     kernel/gpu/operator_dispatch.c
     kernel/gpu/oplib_dispatch.c
     kernel/gpu/oplib_probe.c
@@ -800,6 +801,7 @@ set(TEST_SOURCES
     kernel/tests/test_gpu_tier.c
     kernel/tests/test_operator_library.c
     kernel/tests/test_oplib_pool.c
+    kernel/tests/test_oplib_weights_pool.c
     kernel/tests/test_operator_dispatch.c
     kernel/tests/test_oplib_probe.c
     kernel/tests/test_gpu_dispatch_breaker.c

@@ -1208,6 +1208,37 @@ extern int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                               uint32_t eps_bits);
 
 /*
+ * W2: stage `len` bytes of CPU-resident weight data into the GPU
+ * weights pool published by gpu-channel-helper's --weights-pool-size
+ * flag. Returns 0 on success and writes the assigned GPU VA into
+ * `*out_gpu_va`; returns -1 (with `*out_gpu_va` left untouched) if:
+ *   - any pointer is NULL or `len` is zero,
+ *   - no v8 handoff is staged (pool size == 0 — common on QEMU and
+ *     when the helper was launched without --weights-pool-size),
+ *   - the bump allocator is exhausted,
+ *   - the per-page GMMU walk that resolves CPU-writable phys for
+ *     each destination page fails.
+ *
+ * The Rust caller (`LoadedSlm::stage_tensor_to_gpu`) treats -1 as
+ * "no GPU staging available", logs once per `slm load`, and leaves
+ * the tensor name out of `gpu_tensor_map` so forward.rs's hybrid
+ * wrappers fall through to the CPU path.
+ *
+ * Allocation alignment is 256 bytes (matches GA10B QMD granularity
+ * and is large enough to keep adjacent tensors in distinct
+ * cachelines). Caller does not specify alignment.
+ *
+ * Single-shot: the FFI takes `g_gpu_dispatch_lock` for the entire
+ * (alloc + stage) sequence so a concurrent `slm_runtime_dispatch_*`
+ * dispatch can't observe a partially-staged tensor.
+ *
+ * Jetson-only. On other platforms returns -1 without side effects.
+ */
+extern int slm_runtime_stage_weight(const void *cpu_bytes,
+                                     uint64_t len,
+                                     uint64_t *out_gpu_va);
+
+/*
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
  *
  * Single source of truth for the shell's pre-load size gate. Pinned

@@ -300,6 +300,17 @@ unsafe extern "C" {
         n: u32,
         eps_bits: u32,
     ) -> i32;
+
+    /// W2: stage `len` bytes of CPU-resident weight data into the
+    /// GPU weights pool. Returns 0 + writes `*out_gpu_va` on success;
+    /// returns -1 on null arg, zero len, missing v8 handoff, pool
+    /// exhausted, or per-page GMMU walk failure. See
+    /// `kernel/include/slm_ffi.h` for the full contract.
+    fn slm_runtime_stage_weight(
+        cpu_bytes: *const u8,
+        len: u64,
+        out_gpu_va: *mut u64,
+    ) -> i32;
 }
 
 /// `cargo test` doesn't link the kernel-side FFI; the host-side
@@ -316,6 +327,19 @@ unsafe fn slm_runtime_dispatch_rmsnorm_simt(
     _n_rows: u32,
     _n: u32,
     _eps_bits: u32,
+) -> i32 {
+    -1
+}
+
+/// `cargo test` stub for `slm_runtime_stage_weight`. Same
+/// "always-fail" shape as the dispatch stubs so backend tests can
+/// verify the `BackendError::NotAvailable` fall-through without
+/// staging a real GPU channel.
+#[cfg(test)]
+unsafe fn slm_runtime_stage_weight(
+    _cpu_bytes: *const u8,
+    _len: u64,
+    _out_gpu_va: *mut u64,
 ) -> i32 {
     -1
 }
@@ -377,6 +401,40 @@ impl OperatorLibraryBackend {
             return Err(BackendError::NotAvailable);
         }
         Ok(())
+    }
+
+    /// W2: stage `bytes` into the GPU weights pool. Returns the
+    /// `(gpu_va, size)` pair that `slm load` (W3) records in the
+    /// model's `gpu_tensor_map`. On any failure (no v8 handoff,
+    /// pool exhausted, walk failure) returns
+    /// `BackendError::NotAvailable` — the load path treats it as
+    /// "skip this tensor; forward.rs falls through to CPU".
+    ///
+    /// Empty input is rejected with `BadShape` to surface caller
+    /// bugs rather than silently no-op.
+    pub fn stage_tensor(bytes: &[u8]) -> Result<crate::slm::registry::GpuTensorRef,
+                                                BackendError> {
+        if bytes.is_empty() {
+            return Err(BackendError::BadShape);
+        }
+        let mut gpu_va: u64 = 0;
+        // SAFETY: `bytes` is valid for `bytes.len()` bytes for the
+        // duration of the call; the FFI copies and does not retain
+        // the pointer. `&mut gpu_va` is exclusive.
+        let rc = unsafe {
+            slm_runtime_stage_weight(
+                bytes.as_ptr(),
+                bytes.len() as u64,
+                &mut gpu_va as *mut u64,
+            )
+        };
+        if rc != 0 {
+            return Err(BackendError::NotAvailable);
+        }
+        Ok(crate::slm::registry::GpuTensorRef {
+            gpu_va,
+            size_bytes: bytes.len(),
+        })
     }
 }
 
@@ -654,6 +712,24 @@ mod tests {
             &x, &gamma, &mut out, 0, 0, 1.0e-6,
         );
         assert_eq!(r, Err(BackendError::BadShape));
+    }
+
+    /* W2 stage_tensor — backend-side shape gate + FFI fall-through. */
+
+    #[test]
+    fn stage_tensor_rejects_empty_input() {
+        let r = OperatorLibraryBackend::stage_tensor(&[]);
+        assert_eq!(r, Err(BackendError::BadShape));
+    }
+
+    #[test]
+    fn stage_tensor_returns_not_available_when_ffi_fails() {
+        /* cfg(test) stub returns -1 unconditionally, mirroring the
+         * kernel-side path on a non-Jetson build (no v8 handoff,
+         * pool size = 0). */
+        let bytes = [0u8; 64];
+        let r = OperatorLibraryBackend::stage_tensor(&bytes);
+        assert_eq!(r, Err(BackendError::NotAvailable));
     }
 
     #[test]
