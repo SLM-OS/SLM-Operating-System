@@ -11,8 +11,14 @@ BUILD_TYPE ?= Release
 # Platform: QEMU_VIRT, JETSON_ORIN_NANO, or RASPI5
 PLATFORM ?= QEMU_VIRT
 
-# AI Scheduler: OFF by default, ON to include trained ML models
-AI_SCHED ?= OFF
+# AI Scheduler: ON for Pi 5 (trained MLP/PPO weights + the
+# `hailo load ... sched` path that the inference workflow needs);
+# OFF elsewhere. Override on the command line if needed.
+ifeq ($(PLATFORM),RASPI5)
+    AI_SCHED ?= ON
+else
+    AI_SCHED ?= OFF
+endif
 
 # Verbose Hailo wire-format diagnostic dumps (context hex rows, VDMA
 # register / descriptor dumps, per-submit chatter). Default OFF — the
@@ -31,11 +37,16 @@ HAILO_WIRE_DEBUG ?= OFF
 # anything else leaves the platform default in place.
 WORK_STEALING ?=
 
-# Secondary-CPU preemption via ELR trampoline: OFF by default. Required
-# for Jetson / Pi 5 to get timer-driven preemption on CPUs 1..N. Replaces
-# the platform-specific PI5_SECONDARY_PREEMPT; legacy name still works.
-SECONDARY_PREEMPT ?= OFF
-PI5_SECONDARY_PREEMPT ?= OFF
+# Secondary-CPU preemption via ELR trampoline. Default ON for Pi 5 +
+# Jetson (timer-driven quantum preemption on CPUs 1..N), OFF elsewhere
+# (cooperative-only). Override on the command line.
+ifeq ($(PLATFORM),RASPI5)
+    SECONDARY_PREEMPT ?= ON
+else
+    SECONDARY_PREEMPT ?= OFF
+endif
+# Legacy alias — still respected for back-compat.
+PI5_SECONDARY_PREEMPT ?= $(SECONDARY_PREEMPT)
 ifeq ($(PI5_SECONDARY_PREEMPT),ON)
     SECONDARY_PREEMPT := ON
 endif

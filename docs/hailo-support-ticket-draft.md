@@ -192,6 +192,18 @@ body[2..3] mostly stable; the variability is consistent with the
 ECC being raised on a real read of *uninitialized* memory whose
 bit pattern depends on residual SRAM state.
 
+**Note (2026-05-10): the affected SRAM *block* is not constant
+across runs.** Most of our captures show `SAGE1_ISP_12`. A
+fresh SLM-OS reproduction the same day produced the same
+`memory_bitmap=0x00001000` syndrome on `SAGE1_MIPI_RX_13`
+instead. The runtime-ECC pattern appears to be "fw reads
+uninitialized SRAM in whichever block it walks first" — the
+500 ms post-BOOT settle (hyp-O) eliminates *boot-time* ECC on
+SAGE1_ISP cleanly, but it does not eliminate the *runtime*
+ECC, which can fire in a different memory block than the
+boot-time one. We don't have a theory for what determines
+which block fw walks during the wedge.
+
 ### 4. fw debug log: deterministic exception PC
 
 We dump the fw debug rings (BAR4[0x2000] APP CPU, BAR4[0x3000]
