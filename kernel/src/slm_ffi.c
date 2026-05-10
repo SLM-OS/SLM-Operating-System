@@ -1279,6 +1279,77 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     return 0;
 }
 
+/* W4: dispatch EMBEDDING against a GPU-resident table. The table's
+ * gpu_va comes from `gpu_tensor_map`; output is written to a
+ * scratch slot, then memcpy'd back to the caller's CPU buffer. */
+int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
+                                         uint64_t table_size_bytes,
+                                         uint32_t token_id,
+                                         void *out_cpu_out,
+                                         uint32_t embedding_length,
+                                         uint32_t table_row_bytes)
+{
+    if (out_cpu_out == NULL || table_gpu_va == 0 ||
+        embedding_length == 0 || table_row_bytes == 0) {
+        return -1;
+    }
+    /* table_size_bytes is informational; pin a sanity range. */
+    if (table_size_bytes != 0 &&
+        table_size_bytes < (uint64_t)table_row_bytes) {
+        return -1;
+    }
+    uint64_t out_bytes = (uint64_t)embedding_length * 2u;
+    if (out_bytes > OPLIB_POOL_SLOT_BYTES) {
+        return -1;
+    }
+
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
+        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+    struct ga10b_bringup *b = ga10b_bringup_state();
+    if (b == NULL) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+
+    /* Output slot in the existing scratch carve-out. SCRATCH0 has
+     * worked for every smoke verb; reuse it. */
+    uint64_t out_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t out_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
+
+    struct operator_dispatch_args args = {
+        .op_kind = SLM_GPU_OP_EMBEDDING,
+        .u.embedding = {
+            .table_gpu_va     = table_gpu_va,
+            .out_gpu_va       = out_va,
+            .token_id         = token_id,
+            .embedding_length = embedding_length,
+            .table_row_bytes  = table_row_bytes,
+        },
+    };
+    int rc = slm_oplib_dispatch(b, 0,
+                                 SLM_GPU_OP_EMBEDDING,
+                                 SLM_GPU_TIER_SIMT,
+                                 SLM_GPU_DTYPE_FP16,
+                                 &args);
+    if (rc < 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return rc;
+    }
+
+    cache_invalidate_range((void *)(uintptr_t)out_phys,
+                           (size_t)((out_bytes + 4095u) & ~4095ull));
+    memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)out_bytes);
+
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return 0;
+}
+
 /* W2: stage CPU weight bytes into the helper-published GPU weights
  * pool. See oplib_weights_pool.h for the per-page GMMU-walk
  * staging mechanism. The lock guards the (alloc, stage) pair so a
@@ -1337,6 +1408,19 @@ int slm_runtime_stage_weight(const void *cpu_bytes,
     (void)cpu_bytes;
     (void)len;
     (void)out_gpu_va;
+    return -1;
+}
+
+int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
+                                         uint64_t table_size_bytes,
+                                         uint32_t token_id,
+                                         void *out_cpu_out,
+                                         uint32_t embedding_length,
+                                         uint32_t table_row_bytes)
+{
+    (void)table_gpu_va; (void)table_size_bytes;
+    (void)token_id; (void)out_cpu_out;
+    (void)embedding_length; (void)table_row_bytes;
     return -1;
 }
 

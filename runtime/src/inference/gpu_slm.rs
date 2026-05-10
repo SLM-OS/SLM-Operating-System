@@ -311,6 +311,18 @@ unsafe extern "C" {
         len: u64,
         out_gpu_va: *mut u64,
     ) -> i32;
+
+    /// W4: dispatch EMBEDDING against a GPU-resident table previously
+    /// staged via `slm_runtime_stage_weight`. Output FP16 row of
+    /// `embedding_length * 2` bytes is written into `out_cpu_out`.
+    fn slm_runtime_dispatch_embedding_simt(
+        table_gpu_va: u64,
+        table_size_bytes: u64,
+        token_id: u32,
+        out_cpu_out: *mut u8,
+        embedding_length: u32,
+        table_row_bytes: u32,
+    ) -> i32;
 }
 
 /// `cargo test` doesn't link the kernel-side FFI; the host-side
@@ -340,6 +352,18 @@ unsafe fn slm_runtime_stage_weight(
     _cpu_bytes: *const u8,
     _len: u64,
     _out_gpu_va: *mut u64,
+) -> i32 {
+    -1
+}
+
+#[cfg(test)]
+unsafe fn slm_runtime_dispatch_embedding_simt(
+    _table_gpu_va: u64,
+    _table_size_bytes: u64,
+    _token_id: u32,
+    _out_cpu_out: *mut u8,
+    _embedding_length: u32,
+    _table_row_bytes: u32,
 ) -> i32 {
     -1
 }
@@ -395,6 +419,48 @@ impl OperatorLibraryBackend {
                 n_rows,
                 n,
                 eps_bits,
+            )
+        };
+        if rc != 0 {
+            return Err(BackendError::NotAvailable);
+        }
+        Ok(())
+    }
+
+    /// W4: dispatch EMBEDDING against a GPU-resident table. The
+    /// table's `gpu_va` and `size_bytes` come from
+    /// `LoadedSlm::gpu_tensor_map`. The FFI memcpys the FP16 output
+    /// row into `out` (caller pre-sizes to `embedding_length`
+    /// elements).
+    pub fn dispatch_embedding(
+        table_gpu_va: u64,
+        table_size_bytes: usize,
+        token_id: u32,
+        out: &mut [u16],
+        embedding_length: u32,
+        table_row_bytes: u32,
+    ) -> Result<(), BackendError> {
+        if select_tier(OpKind::Embedding) != Tier::Simt {
+            return Err(BackendError::NotAvailable);
+        }
+        if embedding_length == 0 || table_row_bytes == 0 ||
+           table_gpu_va == 0 {
+            return Err(BackendError::BadShape);
+        }
+        if (out.len() as u32) != embedding_length {
+            return Err(BackendError::BadShape);
+        }
+        // SAFETY: `out` is valid for `out.len() * 2` bytes mutable;
+        // FFI writes exactly `embedding_length * 2` bytes there and
+        // does not retain the pointer past return.
+        let rc = unsafe {
+            slm_runtime_dispatch_embedding_simt(
+                table_gpu_va,
+                table_size_bytes as u64,
+                token_id,
+                out.as_mut_ptr() as *mut u8,
+                embedding_length,
+                table_row_bytes,
             )
         };
         if rc != 0 {

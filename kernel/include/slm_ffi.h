@@ -1239,6 +1239,35 @@ extern int slm_runtime_stage_weight(const void *cpu_bytes,
                                      uint64_t *out_gpu_va);
 
 /*
+ * W4: dispatch the EMBEDDING op against a GPU-resident embedding
+ * table previously staged via `slm_runtime_stage_weight`. The table
+ * is at `table_gpu_va` (size `table_size_bytes` for diagnostic-only
+ * shape checks); `token_id` indexes one row. The kernel's GA10B
+ * dispatcher writes the FP16 row into a scratch slot, then this
+ * shim memcpys it back into `out_cpu_out` (caller's buffer of size
+ * `embedding_length * 2` bytes).
+ *
+ * `table_row_bytes` is the byte width of one row in the Q4_K-packed
+ * table (multiple of 144 = EMBEDDING_Q4K_BLOCK_BYTES). For Qwen2.5
+ * with embedding_length=1536, table_row_bytes is (1536/256)*144=864.
+ *
+ * Returns 0 on success. -1 on:
+ *   - any null/zero pointer or shape,
+ *   - missing v8 handoff or pool empty,
+ *   - GPU dispatch failure (timeout, gr_exception),
+ *   - output size > 64 KB scratch slot ceiling (caller can split
+ *     into smaller chunks if a future model has hidden > 32K).
+ *
+ * Jetson-only. On other platforms returns -1 without side effects.
+ */
+extern int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
+                                                uint64_t table_size_bytes,
+                                                uint32_t token_id,
+                                                void *out_cpu_out,
+                                                uint32_t embedding_length,
+                                                uint32_t table_row_bytes);
+
+/*
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
  *
  * Single source of truth for the shell's pre-load size gate. Pinned

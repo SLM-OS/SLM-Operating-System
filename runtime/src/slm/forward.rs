@@ -63,7 +63,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use crate::inference::gpu_slm::OperatorLibraryBackend;
+use crate::inference::gpu_slm::{select_tier, OpKind, OperatorLibraryBackend, Tier};
 use crate::inference::ops_transformer::{
     gqa_decode_step, lm_head_q, matmul_quant_rows, rmsnorm, swiglu_mlp_q, RopeTable,
 };
@@ -108,6 +108,88 @@ fn rmsnorm_hybrid(
         return Some(());
     }
     rmsnorm(x, gamma, eps, out)
+}
+
+/// W4: EMBEDDING hybrid wrapper. Looks up the token embedding table
+/// in `gpu_tensor_map`; if present and the tier table allows GPU
+/// dispatch, calls `OperatorLibraryBackend::dispatch_embedding`. On
+/// any miss/error, falls through to the existing CPU
+/// `embedding_lookup_any` path (which does the Q4_K dequant +
+/// FP32→FP16 conversion in one pass).
+///
+/// `out` is the FP16 hidden-state row written for this token; size
+/// `embedding_length` u16 elements. `cpu_scratch` is the FP32
+/// dequant scratch the CPU path needs — unused on the GPU success
+/// path but always passed because the function contract has to be
+/// the same as `embedding_lookup_any` for the call sites.
+#[inline]
+fn embedding_lookup_hybrid(
+    slm: &LoadedSlm,
+    token_id: u32,
+    out: &mut [u16],
+    cpu_scratch: &mut Vec<f32>,
+) -> Option<()> {
+    let hidden = out.len();
+    if hidden == 0 {
+        return None;
+    }
+    /* GPU path. The `if let` chain bails to CPU on any miss without
+     * rebinding ergonomics. */
+    if let Some(table) = slm.gpu_tensor_map().get("token_embd.weight") {
+        if select_tier(OpKind::Embedding) == Tier::Simt {
+            /* Need table_row_bytes for the kernel's Q4_K block math
+             * — derive from the on-disk tensor descriptor (the
+             * staging didn't change byte layout, just location). */
+            if let Some(info) = slm.tensor_info("token_embd.weight") {
+                let table_row_bytes = match table_row_bytes_q4k(info, hidden) {
+                    Some(b) => b,
+                    None => 0,
+                };
+                if table_row_bytes != 0 {
+                    if let Ok(()) = OperatorLibraryBackend::dispatch_embedding(
+                        table.gpu_va,
+                        table.size_bytes,
+                        token_id,
+                        out,
+                        hidden as u32,
+                        table_row_bytes,
+                    ) {
+                        return Some(());
+                    }
+                }
+            }
+        }
+    }
+    /* CPU fall-through — same as the pre-W4 path. */
+    let (embd_bytes, embd_quant) = tensor_q(slm, "token_embd.weight")?;
+    embedding_lookup_any(
+        embd_quant,
+        embd_bytes,
+        hidden,
+        token_id,
+        out,
+        cpu_scratch,
+    )
+}
+
+/// Compute the Q4_K table_row_bytes for a 1-D embedding row of
+/// `hidden` elements. The kernel uses this to walk the row's
+/// super-blocks; it must equal `ceil(hidden / 256) * 144`. Returns
+/// `None` if the tensor isn't Q4_K (the GPU EMBEDDING kernel only
+/// supports Q4_K today; SmolLM2's Q8_0 / Qwen2.5's Q6_K stay on
+/// the CPU path until those kernels exist).
+#[inline]
+fn table_row_bytes_q4k(info: &crate::slm::registry::OwnedTensorInfo,
+                       hidden: usize) -> Option<u32> {
+    use crate::slm::gguf::GgmlType;
+    if info.ggml_type != GgmlType::Q4_K.0 {
+        return None;
+    }
+    /* Round hidden up to a 256-element super-block, multiply by the
+     * 144-byte block stride. */
+    let blocks = hidden.checked_add(255)?.checked_div(256)?;
+    let bytes  = blocks.checked_mul(144)?;
+    u32::try_from(bytes).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -352,11 +434,8 @@ pub fn forward_one(
     // M5.3.x synthetic fixture as Q4_K. Dispatch on whatever the
     // GGUF descriptor says.
     // ---------------------------------------------------------------
-    let (embd_bytes, embd_quant) = tensor_q(slm, "token_embd.weight")?;
-    embedding_lookup_any(
-        embd_quant,
-        embd_bytes,
-        hidden,
+    embedding_lookup_hybrid(
+        slm,
         token_id,
         &mut scratch.x_fp16,
         &mut scratch.embed_f32,
