@@ -7,7 +7,7 @@ Current inference paths and what each platform delivers today.
 | Sub-capability | QEMU | Pi 5 | Jetson | x86-64 |
 |---|---|---|---|---|
 | GPU / accelerator hardware | — | None (VideoCore blocked) | GA10B integrated Ampere | RTX 3050 (GA107, PCIe) |
-| AI HAT+ / NPU path | — | ⏸️ planned (#260) | — | — |
+| AI HAT+ / NPU path | — | ❌ blocked at boundary IN ch=2 (#682) | — | — |
 | GPU driver stub | ✅ | ✅ | Full shim + nvgpu bringup | Full shim + GSP-RM |
 | Platform shim (`gsp_platform_ops`) | — | — | Complete (11/11 fns) | Complete (11/11 fns) |
 | BAR0/1 MMIO access | — | — | ✅ at NS EL2 | ✅ via PCI |
@@ -29,7 +29,8 @@ Current inference paths and what each platform delivers today.
 - **x86-64 Phases 5-8 (RPC, compute, inference loop)** — transitively blocked on #185. Code ships and transfers cleanly to any platform where SEC2 is accessible.
 - **Jetson Phases 6-8 beyond inherit** — blocked on #258. Remaining work (SASS kernel, QMD dispatch, inference loop) cannot be reached until the doorbell path is open.
 - **Jetson CBB firewall apertures for GPU channel setup** — PFIFO (`0x002000`), CHRAM (channel enable/disable), NV_USERMODE (`0x800000`), per-runlist PRI config. All locked at NS EL2. See `docs/jetson-cbb-report.md` §5.
-- **Pi 5 GPU (VideoCore)** — stub driver only. No NVIDIA hardware, no intent to bring up VideoCore as a compute engine. AI HAT+ (Hailo-8L) is the planned accelerator path for Pi 5 (#260).
+- **Pi 5 GPU (VideoCore)** — stub driver only. No NVIDIA hardware, no intent to bring up VideoCore as a compute engine. AI HAT+ (Hailo-8L) is the accelerator path for Pi 5 (#260).
+- **#682 — Pi 5 AI HAT+ Hailo-8L boundary IN wedge.** Driver brings the chip through `state=running`, byte-identical FW_CONTROL RPCs vs HailoRT, HEF load completes (`last_err=0`), CCW upload reaches expected `num_proc`. First inference submit to boundary IN ch=2 wedges: `dev_proc` stays at 0 across the full 500 ms timeout, `dev_base[31:16]` never advances to `0x001f` (HailoRT shows fw pre-arms this during load). Correlated symptoms: `CPU_ECC_ERROR/FATAL` with `memory_bitmap=0x1000` (`SAGE1_ISP_12`) on every runtime CORE-CPU RPC (HailoRT gets 0/10 boots), and EP-internal `DEVSTA.UR=1` with `rcv_mabort=0` post-timeout (RC bridge clean). Disconfirmed: hyp-R prefetch=1, hyp-S D3 hold, hyp-T VDM QoS, hyp-V `SCB0` size widen (kept for Linux parity), hyp-X-1 IRQ drain, hyp-X-2 production build (no `HAILO_WIRE_DEBUG`), hyp-X-3 longer post-BOOT_IRQ settle (2000 ms), ATR audit. Suspect: fw-internal SAGE1_ISP scrub trigger we can't drive from the host. Awaiting Hailo support — see `docs/hailo-support-ticket-draft.md`.
 - **QEMU GPU** — no GPU device in `virt` machine; stub driver returns "no device."
 
 ## Capabilities delivered regardless of blockers
@@ -49,4 +50,4 @@ Current inference paths and what each platform delivers today.
 - `docs/archive/plans/capstone-feature-status.md` §GPU-Based Inference (narrative)
 - Issues: #258 (Jetson — closed 2026-04-21), #185 (x86-64), #190 (resolved)
 
-*Last updated: 26 April 2026*
+*Last updated: 9 May 2026*

@@ -38,7 +38,7 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 | Memory management | ✅ | ✅ | ✅ | ✅ | [memory.md](memory.md) |
 | Preemptive multitasking | ✅ HW | 🟡 cooperative | 🟡 cooperative | ✅ HW | [preemption.md](preemption.md) |
 | Networking | ✅ DHCP + ping | ✅ DHCP + ping | ✅ DHCP + ping (USB CDC-ECM) | ✅ DHCP + ping | [networking.md](networking.md) |
-| GPU / accelerator inference | — | ✅ Hailo-8 NPU | ✅ | ✅ | [gpu-inference.md](gpu-inference.md) |
+| GPU / accelerator inference | — | ❌ Hailo-8L NPU blocked at boundary IN ch=2 (#682) | 🟡 GA10B GPU MNIST fastpath | 🟡 SEC2 priv-lockdown blocks dispatch (#185) | [gpu-inference.md](gpu-inference.md) |
 | Storage / filesystem | ✅ RAM disk + LittleFS | ✅ | ✅ | ✅ | [storage.md](storage.md) |
 | Shell / observability | ✅ | ✅ | ✅ | ✅ | [shell.md](shell.md) |
 | AI task scheduler | ✅ NEON | ✅ NEON | ✅ NEON | ✅ SSE | [ai-scheduler.md](ai-scheduler.md) |
@@ -60,4 +60,4 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 - **Update a sheet when delivering code** — every merged PR that adds/removes a capability updates the affected sheet in the same commit.
 - **Add a new sheet** when introducing a new top-level capability. Link it from this README.
 
-*Last updated: 27 April 2026*
+*Last updated: 9 May 2026*
