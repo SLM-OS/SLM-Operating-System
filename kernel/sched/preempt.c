@@ -19,6 +19,7 @@
 #include "debug.h"
 #include "config.h"
 #include "cpu_id_asm.h"
+#include "uart.h"
 #include <stdint.h>
 
 /* Tie ARM64_MAX_CPUS_LITERAL (used by the asm macro in cpu_id_asm.h)
@@ -150,6 +151,44 @@ void preempt_check_cpu_mpidr(uint32_t this_cpu)
  */
 void maybe_arm_resched_trampoline(struct trap_frame *tf)
 {
+    /* Pre-preempt_init bail (#750).
+     *
+     * preempt_init() — which allocates reschedule_pending / orig_elr /
+     * orig_spsr from NC memory — runs inside scheduler_init(). Under
+     * JETSON_HW_TICK=ON + SECONDARY_PREEMPT=ON, IRQs are unmasked by
+     * the `msr daifclr, #0xf` at the tail of mmu_enable (kernel/arch/
+     * arm64/mmu.S), which is reached from vmm_init() — long before
+     * scheduler_init() runs. Any IRQ delivered in that window (a
+     * pending xudc IRQ 198 inherited from Linux is the canonical
+     * trigger on Jetson) takes the el1_irq vector path, which under
+     * SECONDARY_PREEMPT calls `bl maybe_arm_resched_trampoline`.
+     * Without this guard, the original `if (!reschedule_pending[cpu])`
+     * dereffed a NULL pointer; the resulting page-table walk for VA 0
+     * hit DFSC=0x17 (synchronous external abort, level-3 TTW) which
+     * BL31's RAS handler catches and powers off the core.
+     *
+     * The window is real on every ARM64 platform that takes IRQs
+     * before scheduler_init — Jetson is the one that exercises it
+     * because Linux leaves xudc enabled across kexec. Pi 5 boots
+     * via VC firmware and clears the GIC distributor, so it never
+     * hits this case in practice; the guard is still a no-cost
+     * structural fix everywhere.
+     *
+     * No reschedule can be pending pre-preempt_init by construction,
+     * so the bail is correct. The one-shot uart_printf surfaces the
+     * fact that IRQs are firing pre-init (useful diagnostic for any
+     * future regression in the boot sequence) without flooding the
+     * console under an IRQ storm. */
+    if (!reschedule_pending) {
+        static volatile int warned = 0;
+        if (!__atomic_exchange_n(&warned, 1, __ATOMIC_RELAXED)) {
+            uart_printf("[preempt] IRQ taken pre-preempt_init "
+                        "(elr=0x%lx spsr=0x%lx) — bail\n",
+                        (unsigned long)tf->elr, (unsigned long)tf->spsr);
+        }
+        return;
+    }
+
     uint32_t cpu = cpu_id();
 
     if (!reschedule_pending[cpu])
