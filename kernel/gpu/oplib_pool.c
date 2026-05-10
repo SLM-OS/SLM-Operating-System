@@ -203,15 +203,23 @@ int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
         size_t sass_pages_bytes = ((sass_len + 4095u) / 4096u) * 4096u;
         if (h != NULL && h->shader_gpu_va != 0 &&
             h->shader_phys != 0 && h->shader_size >= sass_pages_bytes) {
+            /* The SASS bytes occupy slot 0 of the helper-staged
+             * pool (see `OPLIB_POOL_OFF_SASS` in oplib_pool.h). The
+             * `+ OPLIB_POOL_OFF_SASS` is a no-op today because the
+             * offset is 0, but adding it explicitly keeps the slot
+             * mapping symmetric with the SCRATCH slots that the
+             * dispatch verbs in shell_sys.c carve out. */
+            uint64_t sass_phys = h->shader_phys + OPLIB_POOL_OFF_SASS;
+            uint64_t sass_gva  = h->shader_gpu_va + OPLIB_POOL_OFF_SASS;
             volatile uint8_t *dst =
-                (volatile uint8_t *)(uintptr_t)h->shader_phys;
+                (volatile uint8_t *)(uintptr_t)sass_phys;
             const uint8_t *src = g_handle.sass_region;
             for (size_t i = 0; i < sass_len; i++) {
                 dst[i] = src[i];
             }
-            cache_clean_range((void *)(uintptr_t)h->shader_phys, sass_len);
+            cache_clean_range((void *)(uintptr_t)sass_phys, sass_len);
             __asm__ volatile("dsb sy" ::: "memory");
-            g_sass_pool_gpu_va = h->shader_gpu_va;
+            g_sass_pool_gpu_va = sass_gva;
             g_sass_pool_n_pages = (sass_len + 4095) / 4096;
             g_stage_rc = 0;
             g_staged = true;
@@ -219,8 +227,8 @@ int oplib_pool_stage_to_gpu(uint64_t inst_block_phys)
                         "staged SASS region at gpu_va=0x%llx (phys=0x%llx, "
                         "capacity %u B)\n",
                         sass_len,
-                        (unsigned long long)h->shader_gpu_va,
-                        (unsigned long long)h->shader_phys,
+                        (unsigned long long)sass_gva,
+                        (unsigned long long)sass_phys,
                         (unsigned)h->shader_size);
             return 0;
         }

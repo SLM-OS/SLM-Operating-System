@@ -150,8 +150,117 @@ static int rmsnorm_launch_shape(const struct operator_dispatch_args *args,
     return 0;
 }
 
+/* ============================================================================
+ * ROPE (op_kind = 1)
+ * ============================================================================
+ *
+ * cbuf[0] layout (relative to OPERATOR_CBUF0_BASE):
+ *   [0x00] vec_gpu_va        uint64_t  (in/out)
+ *   [0x08] positions_gpu_va  uint64_t
+ *   [0x10] cos_sin_gpu_va    uint64_t
+ *   [0x18] batch             uint32_t
+ *   [0x1C] num_heads         uint32_t
+ *   [0x20] head_dim          uint32_t
+ *
+ * Launch:
+ *   grid  = (batch * num_heads, 1, 1)
+ *   block = (head_dim/2,        1, 1)
+ *
+ * Element-wise per pair: one block per (token, head); one thread per
+ * (pair_idx ∈ [0, head_dim/2)). No shared memory, no syncthreads,
+ * no SLM. See scripts/cuda/rope_f16.cu.
+ */
+
+static int rope_build_cbuf(void *cbuf,
+                            const struct operator_dispatch_args *args)
+{
+    if (cbuf == NULL || args == NULL) {
+        return -1;
+    }
+    if (args->op_kind != SLM_GPU_OP_ROPE) {
+        return -1;
+    }
+
+    const struct operator_dispatch_args_rope *r = &args->u.rope;
+
+    /* Same defensive shape checks as the rmsnorm builder: refuse to
+     * dispatch a kernel that would compute over zero work or read
+     * from a NULL pointer. The SASS doesn't validate these — it
+     * just reads cbuf words and uses them as addresses. */
+    if (r->batch == 0 || r->num_heads == 0 || r->head_dim == 0) {
+        return -1;
+    }
+    /* head_dim must be even — pairs are (vec[2i], vec[2i+1]). The
+     * launch_shape divides by 2 to pick block_x; an odd head_dim
+     * would silently round down and skip the last element. */
+    if ((r->head_dim & 1u) != 0u) {
+        return -1;
+    }
+    if (r->vec_gpu_va == 0 || r->positions_gpu_va == 0 ||
+        r->cos_sin_gpu_va == 0) {
+        return -1;
+    }
+
+    uint8_t *p = (uint8_t *)cbuf + OPERATOR_CBUF0_BASE;
+
+    memcpy(p + ROPE_CBUF_OFFSET_VEC,       &r->vec_gpu_va,
+           sizeof(uint64_t));
+    memcpy(p + ROPE_CBUF_OFFSET_POSITIONS, &r->positions_gpu_va,
+           sizeof(uint64_t));
+    memcpy(p + ROPE_CBUF_OFFSET_COS_SIN,   &r->cos_sin_gpu_va,
+           sizeof(uint64_t));
+    memcpy(p + ROPE_CBUF_OFFSET_BATCH,     &r->batch,     sizeof(uint32_t));
+    memcpy(p + ROPE_CBUF_OFFSET_NUM_HEADS, &r->num_heads, sizeof(uint32_t));
+    memcpy(p + ROPE_CBUF_OFFSET_HEAD_DIM,  &r->head_dim,  sizeof(uint32_t));
+
+    return 0;
+}
+
+static int rope_launch_shape(const struct operator_dispatch_args *args,
+                              struct operator_launch_shape *out)
+{
+    if (args == NULL || out == NULL) {
+        return -1;
+    }
+    if (args->op_kind != SLM_GPU_OP_ROPE) {
+        return -1;
+    }
+    const struct operator_dispatch_args_rope *r = &args->u.rope;
+    if (r->batch == 0 || r->num_heads == 0 || r->head_dim == 0) {
+        return -1;
+    }
+    if ((r->head_dim & 1u) != 0u) {
+        return -1;
+    }
+
+    /* One block per (token, head). The CUDA source maps
+     * `blockIdx.x = token_idx * num_heads + head_idx`. */
+    out->grid_x = r->batch * r->num_heads;
+    out->grid_y = 1;
+    out->grid_z = 1;
+    /* One thread per pair. head_dim is even (validated above) so
+     * head_dim/2 is exact. */
+    out->block_x = r->head_dim / 2u;
+    out->block_y = 1;
+    out->block_z = 1;
+    /* register_count_v: 64. Same conservative pick as rmsnorm —
+     * RoPE is simpler (no reduction, no shared memory) and uses
+     * fewer regs in practice, but keeping the value uniform until
+     * the SASS-header parser lands avoids per-op handcraft. */
+    out->register_count_v = 64;
+    /* No shared memory, no SLM, no barriers. RoPE has no
+     * cross-thread communication: each thread reads its own
+     * (cos, sin) from the LUT and rotates its own pair in-place.
+     * grep'd the .cu source for `__syncthreads` / `__shared__` —
+     * 0 hits. */
+    out->smem_size_bytes = 0;
+    out->slm_size_bytes  = 0;
+    out->barrier_count   = 0;
+    return 0;
+}
+
 /* Per-op metadata registry. Linear scan in
- * `operator_dispatch_get_metadata` — N is small (one entry today,
+ * `operator_dispatch_get_metadata` — N is small (two entries today,
  * grows to seven once #714 lands all the SLM kernels), so a
  * direct-indexed table is overkill. */
 static const struct operator_dispatch_metadata g_metadata[] = {
@@ -159,6 +268,11 @@ static const struct operator_dispatch_metadata g_metadata[] = {
         .op_kind      = SLM_GPU_OP_RMSNORM,
         .build_cbuf   = rmsnorm_build_cbuf,
         .launch_shape = rmsnorm_launch_shape,
+    },
+    {
+        .op_kind      = SLM_GPU_OP_ROPE,
+        .build_cbuf   = rope_build_cbuf,
+        .launch_shape = rope_launch_shape,
     },
 };
 

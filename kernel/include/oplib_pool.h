@@ -22,6 +22,22 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Layout of the helper-staged SASS pool. The Linux-side helper
+ * allocates a 1 MB region and maps it into the GA10B channel's
+ * GMMU; the pool is divided into four 64 KB slots. Slot 0 holds
+ * the staged SASS bytes (consumed by `oplib_pool_stage_to_gpu`'s
+ * helper-staged fast path); slots 1-3 are scratch I/O buffers
+ * carved by the per-op smoke verbs in shell_sys.c (input/gamma/
+ * output for rmsnorm; vec/positions/cos_sin for rope). The
+ * `OPLIB_POOL_MIN_BYTES` threshold guards `h->shader_size` to
+ * make sure the helper actually allocated all four slots. */
+#define OPLIB_POOL_SLOT_BYTES   0x10000u           /* 64 KB per slot */
+#define OPLIB_POOL_MIN_BYTES    (4u * OPLIB_POOL_SLOT_BYTES)
+#define OPLIB_POOL_OFF_SASS     0x00000ull          /* slot 0 */
+#define OPLIB_POOL_OFF_SCRATCH0 0x10000ull          /* slot 1 */
+#define OPLIB_POOL_OFF_SCRATCH1 0x20000ull          /* slot 2 */
+#define OPLIB_POOL_OFF_SCRATCH2 0x30000ull          /* slot 3 */
+
 /* Initialize the operator-library handle from the embedded blob.
  *
  * Called once during kernel boot, after early UART is up. If the
