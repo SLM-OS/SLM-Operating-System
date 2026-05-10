@@ -24,12 +24,21 @@
 
 /* Layout of the helper-staged SASS pool. The Linux-side helper
  * allocates a 1 MB region and maps it into the GA10B channel's
- * GMMU; the pool is divided into four 64 KB slots. Slot 0 holds
- * the staged SASS bytes (consumed by `oplib_pool_stage_to_gpu`'s
+ * GMMU; the pool is divided into 64 KB slots. Slot 0 holds the
+ * staged SASS bytes (consumed by `oplib_pool_stage_to_gpu`'s
  * helper-staged fast path); slots 1-3 are scratch I/O buffers
- * carved by the per-op smoke verbs in shell_sys.c (input/gamma/
- * output for rmsnorm; vec/positions/cos_sin for rope). The
- * `OPLIB_POOL_MIN_BYTES` threshold guards `h->shader_size` to
+ * carved by the per-op smoke verbs in shell_sys.c:
+ *   - rmsnorm: in / gamma / out               (slots 1-3)
+ *   - rope:    vec / positions / cos_sin      (slots 1-3)
+ *   - smoke EMBEDDING / Q4K_DEQUANT: 2 slots
+ *   - smoke SWIGLU / Q4K_DOT:        3 slots
+ *   - smoke GQA_ATTN:                4 buffers, packed via sub-
+ *     page offsets within slots 1-3 (the helper's 1 MB allocation
+ *     may not be physically contiguous past the first few slots —
+ *     Linux nvmap can stitch discontiguous pages via GMMU PTEs,
+ *     while slm_oplib_dispatch computes phys via
+ *     `h->shader_phys + offset` assuming contig).
+ * The `OPLIB_POOL_MIN_BYTES` threshold guards `h->shader_size` to
  * make sure the helper actually allocated all four slots. */
 #define OPLIB_POOL_SLOT_BYTES   0x10000u           /* 64 KB per slot */
 #define OPLIB_POOL_MIN_BYTES    (4u * OPLIB_POOL_SLOT_BYTES)
