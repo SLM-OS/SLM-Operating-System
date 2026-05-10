@@ -1268,6 +1268,32 @@ extern int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
                                                 uint32_t table_row_bytes);
 
 /*
+ * W5: dispatch Q4K_DOT against a GPU-resident weight matrix
+ * previously staged via `slm_runtime_stage_weight`. Computes
+ * `out[N] = W[N×K] · x[K]` where W is Q4_K-packed and x is FP16.
+ *
+ * Per-call activation staging: x is copied into a scratch slot,
+ * the kernel dispatches against (scratch_x_va, weights_gpu_va,
+ * scratch_out_va), output FP32 is memcpy'd back into out_cpu_out.
+ *
+ * Shapes: K must be a multiple of 256 (Q4_K block size). Caller
+ * pre-checks `cols % 256 == 0`. K * 2 bytes (FP16 x) + N * 4 bytes
+ * (FP32 out) must each fit in one scratch slot (64 KB) — covers
+ * Qwen2.5 hidden=1536 and FFN=8960 with room to spare.
+ *
+ * Returns 0 on success. -1 on null/zero shape, missing handoff,
+ * scratch-slot overflow, or GPU dispatch failure.
+ *
+ * Jetson-only.
+ */
+extern int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
+                                              uint64_t weights_gpu_va,
+                                              uint64_t weights_size_bytes,
+                                              void *out_cpu_out,
+                                              uint32_t k,
+                                              uint32_t n);
+
+/*
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
  *
  * Single source of truth for the shell's pre-load size gate. Pinned

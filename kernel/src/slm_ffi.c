@@ -1279,6 +1279,83 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     return 0;
 }
 
+/* W5: dispatch Q4K_DOT against a GPU-resident weight matrix.
+ * Per-call activation staging: x → SCRATCH0, dispatch with
+ * (scratch_x_va, weights_gpu_va, scratch_out_va), pull FP32 out.
+ * Uses two scratch slots (SCRATCH0 for x_in, SCRATCH1 for out). */
+int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
+                                       uint64_t weights_gpu_va,
+                                       uint64_t weights_size_bytes,
+                                       void *out_cpu_out,
+                                       uint32_t k,
+                                       uint32_t n)
+{
+    if (x_cpu_in == NULL || out_cpu_out == NULL || weights_gpu_va == 0 ||
+        k == 0 || n == 0 || (k & 255u) != 0) {
+        return -1;
+    }
+    uint64_t x_bytes   = (uint64_t)k * 2u;        /* FP16 */
+    uint64_t out_bytes = (uint64_t)n * 4u;        /* FP32 */
+    if (x_bytes > OPLIB_POOL_SLOT_BYTES || out_bytes > OPLIB_POOL_SLOT_BYTES) {
+        return -1;
+    }
+    /* Sanity: weights_size_bytes is informational; require it covers
+     * at least one Q4_K row (144 bytes) when supplied. */
+    if (weights_size_bytes != 0 && weights_size_bytes < 144u) {
+        return -1;
+    }
+
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
+        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+    struct ga10b_bringup *b = ga10b_bringup_state();
+    if (b == NULL) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+
+    uint64_t x_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t x_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t out_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t out_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
+
+    memcpy((void *)(uintptr_t)x_phys, x_cpu_in, (size_t)x_bytes);
+    cache_clean_range((void *)(uintptr_t)x_phys,
+                      (size_t)((x_bytes + 4095u) & ~4095ull));
+
+    struct operator_dispatch_args args = {
+        .op_kind = SLM_GPU_OP_Q4K_DOT,
+        .u.q4k_dot = {
+            .x_gpu_va       = x_va,
+            .weights_gpu_va = weights_gpu_va,
+            .out_gpu_va     = out_va,
+            .k              = k,
+            .n              = n,
+        },
+    };
+    int rc = slm_oplib_dispatch(b, 0,
+                                 SLM_GPU_OP_Q4K_DOT,
+                                 SLM_GPU_TIER_SIMT,
+                                 SLM_GPU_DTYPE_FP16,
+                                 &args);
+    if (rc < 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return rc;
+    }
+
+    cache_invalidate_range((void *)(uintptr_t)out_phys,
+                           (size_t)((out_bytes + 4095u) & ~4095ull));
+    memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)out_bytes);
+
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return 0;
+}
+
 /* W4: dispatch EMBEDDING against a GPU-resident table. The table's
  * gpu_va comes from `gpu_tensor_map`; output is written to a
  * scratch slot, then memcpy'd back to the caller's CPU buffer. */
@@ -1421,6 +1498,18 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
     (void)table_gpu_va; (void)table_size_bytes;
     (void)token_id; (void)out_cpu_out;
     (void)embedding_length; (void)table_row_bytes;
+    return -1;
+}
+
+int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
+                                       uint64_t weights_gpu_va,
+                                       uint64_t weights_size_bytes,
+                                       void *out_cpu_out,
+                                       uint32_t k,
+                                       uint32_t n)
+{
+    (void)x_cpu_in; (void)weights_gpu_va; (void)weights_size_bytes;
+    (void)out_cpu_out; (void)k; (void)n;
     return -1;
 }
 

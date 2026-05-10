@@ -172,6 +172,75 @@ fn embedding_lookup_hybrid(
     )
 }
 
+/// W5: Q4K_DOT hybrid wrapper — try the GPU operator-library path
+/// for a Q4_K matmul, fall back to the existing CPU implementation
+/// on any miss/error.
+///
+/// Conditions for GPU dispatch:
+/// 1. `slm.gpu_tensor_map().get(weight_name)` returns Some — the
+///    weight tensor was successfully staged at `slm load` time.
+/// 2. `select_tier(OpKind::Q4kDot) == Tier::Simt` — the boot probe
+///    flipped this op to GPU.
+/// 3. `cols % 256 == 0` — Q4K_DOT requires whole-superblock rows.
+/// 4. `quant_type == Q4_K` — the kernel only supports Q4_K weights.
+///
+/// On any miss, falls through to `matmul_quant_rows` (which itself
+/// dispatches Q4_K → `matmul_q4k_rows` and other types to the
+/// per-row dequant path).
+///
+/// This is a primitive: bias addition stays the caller's
+/// responsibility (the existing `project_with_bias` path is
+/// unchanged and still used for Q/K/V projections; only direct
+/// `matmul_quant_rows` callers should swap to this helper).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn matmul_q4k_rows_hybrid(
+    slm: &LoadedSlm,
+    weight_name: &str,
+    quant_type: GgmlType,
+    weights: &[u8],
+    rows: usize,
+    cols: usize,
+    x: &[u16],
+    q8k_scratch: &mut [u8],
+    dequant_scratch: &mut [f32],
+    acts_f32_scratch: &mut [f32],
+    out_fp32: &mut [f32],
+) -> Option<()> {
+    if quant_type == GgmlType::Q4_K
+        && cols % 256 == 0
+        && cols < (1u32 << 31) as usize
+        && rows < (1u32 << 31) as usize
+        && select_tier(OpKind::Q4kDot) == Tier::Simt
+    {
+        if let Some(gref) = slm.gpu_tensor_map().get(weight_name) {
+            if OperatorLibraryBackend::dispatch_q4k_dot(
+                x,
+                gref.gpu_va,
+                gref.size_bytes,
+                out_fp32,
+                cols as u32,
+                rows as u32,
+            )
+            .is_ok()
+            {
+                return Some(());
+            }
+        }
+    }
+    matmul_quant_rows(
+        quant_type,
+        weights,
+        rows,
+        cols,
+        x,
+        q8k_scratch,
+        dequant_scratch,
+        acts_f32_scratch,
+        out_fp32,
+    )
+}
+
 /// Compute the Q4_K table_row_bytes for a 1-D embedding row of
 /// `hidden` elements. The kernel uses this to walk the row's
 /// super-blocks; it must equal `ceil(hidden / 256) * 144`. Returns
@@ -560,7 +629,15 @@ pub fn forward_one(
         if scratch.acts_f32.len() < proj_in_len {
             scratch.acts_f32.resize(proj_in_len, 0.0);
         }
-        matmul_quant_rows(
+        /* W5: hybrid path — try GPU Q4K_DOT for the output
+         * projection if the tensor was staged. Falls through to
+         * `matmul_quant_rows` on miss (no staging, wrong quant,
+         * tier table says CPU). */
+        let attn_output_name = layer_tensor_name(
+            &mut scratch.name_buf, layer, "attn_output.weight")?;
+        matmul_q4k_rows_hybrid(
+            slm,
+            attn_output_name,
             o_quant,
             o_w,
             proj_out_len,
@@ -830,6 +907,20 @@ fn project_with_bias(
         }
     }
     Some(())
+}
+
+/// W5 helper: format `blk.{layer}.{suffix}` into `name_buf` (cleared
+/// first) and return the formatted string slice. Used by hybrid
+/// wrappers that need the tensor name for `gpu_tensor_map` lookup
+/// without doing the bytes read.
+fn layer_tensor_name<'a>(
+    name_buf: &'a mut String,
+    layer: usize,
+    suffix: &str,
+) -> Option<&'a str> {
+    name_buf.clear();
+    write!(name_buf, "blk.{}.{}", layer, suffix).ok()?;
+    Some(name_buf.as_str())
 }
 
 /// Format `blk.{layer}.{suffix}` into `name_buf` (cleared first) and
