@@ -212,6 +212,20 @@ The `MAX_TASKS * STACK_SIZE` worst-case PMM budget is now 16 MB
 (64 tasks × 256 KB). Comfortable on every shipping platform; bump
 the assertion in `config.h` if `MAX_TASKS` ever grows past 64.
 
+**ARM64 IRQ trap-frame budget (PR #753):** Every IRQ entry on
+ARM64 allocates `TRAP_FRAME_ALLOC` = **800 bytes** on the
+interrupted task's kernel stack — 264 bytes for x0-x30 + ELR +
+SPSR plus 528 bytes for the full FP/SIMD register file
+(q0-q31 + FPCR + FPSR). The FP slots exist so AAPCS64 caller-save
+clobbers inside `el1_irq_handler` /
+`maybe_arm_resched_trampoline` can't corrupt the interrupted
+task's q-regs (see save_regs in `kernel/arch/arm64/vectors.S`
+for the rationale). Combined with the trampoline's own
+~192-byte frame and any nested exception, expect a peak of
+~1.5 KB consumed for IRQ machinery alone. Negligible against
+the 256 KB per-task budget; flagged here so future stack-size
+audits factor it in.
+
 ---
 
 ## Stack-Overflow Guard — save-side SP-range assertion (May 2026)
