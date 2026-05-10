@@ -1168,6 +1168,46 @@ extern uint32_t rust_slm_count(void);
 extern int slm_runtime_set_tier_simt(uint32_t op_kind);
 
 /*
+ * SLM-runtime → operator-library RMSNORM dispatch (#714 §B.3).
+ *
+ * Called from runtime/src/inference/gpu_slm.rs's
+ * OperatorLibraryBackend when forward.rs dispatches an RMSNORM
+ * op and `select_tier(RmsNorm) == Tier::Simt` (i.e. the boot
+ * probe registered the op as GPU-capable).
+ *
+ *   x_cpu_in     [n_rows × n] FP16, host-readable
+ *   gamma_cpu_in [n]          FP16, host-readable
+ *   out_cpu_out  [n_rows × n] FP16, host-writable
+ *   n_rows       row count (must be > 0)
+ *   n            row width (must be > 0; reasonable for 256-strided
+ *                reduction inside the SASS kernel)
+ *   eps_bits     IEEE 754 FP32 bit pattern for the normalization
+ *                epsilon — see RMSNORM cbuf doc in operator_dispatch.h
+ *
+ * The shim copies CPU input + gamma into the helper-staged GPU
+ * scratch slots, fires `slm_oplib_dispatch(SLM_GPU_OP_RMSNORM,
+ * SIMT, FP16)` through the inherited GA10B channel, then copies
+ * the GPU output back to `out_cpu_out`.
+ *
+ * Returns 0 on success, -1 on:
+ *   - `nvgpu inherit / channel / oplib stage` not yet run (no
+ *     handoff, or shader_size below OPLIB_POOL_MIN_BYTES)
+ *   - row dims that don't fit in a 64 KB scratch slot
+ *   - GPU dispatch failure (timeout, gr_exception, etc.)
+ *
+ * The Rust caller treats any -1 as `BackendError::NotAvailable`
+ * and falls back to the existing CPU NEON path.
+ *
+ * Jetson-only. On other platforms returns -1 without side effects.
+ */
+extern int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
+                                              const void *gamma_cpu_in,
+                                              void *out_cpu_out,
+                                              uint32_t n_rows,
+                                              uint32_t n,
+                                              uint32_t eps_bits);
+
+/*
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
  *
  * Single source of truth for the shell's pre-load size gate. Pinned

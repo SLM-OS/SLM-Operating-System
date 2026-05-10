@@ -185,6 +185,18 @@ uint32_t ga10b_bringup_active_pipeline_kind(void);
  * extern. */
 const struct ga10b_channel_handoff *ga10b_bringup_handoff(void);
 
+/* Long-lived bringup state owned by the `nvgpu` shell verbs in
+ * shell_sys.c. The shell's `nvgpu inherit` / `channel` / `oplib stage`
+ * sequence initializes the state across calls; the SLM-runtime FFI
+ * (`slm_runtime_dispatch_rmsnorm_simt`, #714 §B.3) reads it to fire
+ * dispatches through the same inherited GPU channel. Returns NULL
+ * on non-Jetson platforms (where the bringup state doesn't exist).
+ *
+ * Caller responsibility: only invoke after `nvgpu channel` has
+ * succeeded (state >= 6); otherwise dispatches will fail because
+ * the channel handoff fields haven't been populated. */
+struct ga10b_bringup *ga10b_bringup_state(void);
+
 /* Per-op dispatch tracing toggle. Default OFF. When ON, every
  * `ga10b_submit_and_poll` call and every pipeline op emits ~7
  * lines of qmd / GPFIFO / doorbell / poll / payload state — useful

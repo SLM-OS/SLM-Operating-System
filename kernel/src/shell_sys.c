@@ -4440,9 +4440,30 @@ static uint32_t smoke_dtype_for(uint32_t op_kind)
     }
 }
 
+/* `cmd_nvgpu`'s long-lived bringup state. Hoisted from a function-
+ * local static to file scope (#714 §B.3) so the SLM-runtime FFI
+ * (`slm_runtime_dispatch_rmsnorm_simt` in `slm_ffi.c`, called from
+ * Rust's OperatorLibraryBackend) can dispatch through the same
+ * inherited GPU channel that the shell verbs set up. The shell's
+ * `nvgpu inherit` / `channel` / `oplib stage` sequence still owns
+ * the initialization; the FFI is read-mostly and only fires after
+ * the boot probe (#714 §B.2) has flipped TIER_TABLE entries to
+ * Simt. */
+static struct ga10b_bringup g_nvgpu_b;
+
+struct ga10b_bringup *ga10b_bringup_state(void)
+{
+    return &g_nvgpu_b;
+}
+
 int cmd_nvgpu(int argc, char *argv[])
 {
-    static struct ga10b_bringup b;
+    /* `b` aliases the file-scope `g_nvgpu_b` so the rest of this
+     * function reads as before; existing `b.state` / `&b` /
+     * `slm_oplib_dispatch(&b, ...)` usages stay verbatim. The macro
+     * is `#undef`'d at end-of-function so it can't leak into other
+     * sites in this translation unit. */
+#define b g_nvgpu_b
 
     if (argc < 2 || strcmp(argv[1], "info") == 0) {
         shell_puts("GA10B firmware inventory:\r\n");
@@ -5989,6 +6010,7 @@ oplib_stage_call:
               "alloc-multi-synth | reuse-synth> | "
               "oplib]\r\n");
     return -1;
+#undef b
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
 

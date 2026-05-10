@@ -63,9 +63,48 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use crate::inference::gpu_slm::OperatorLibraryBackend;
 use crate::inference::ops_transformer::{
     gqa_decode_step, lm_head_q, matmul_quant_rows, rmsnorm, swiglu_mlp_q, RopeTable,
 };
+
+/// Hybrid RMSNorm: try the GPU operator library if the boot probe
+/// (#714 §B.2) flipped this op's tier to `Tier::Simt`, fall through
+/// to the existing CPU NEON kernel on any `BackendError` (staging
+/// didn't happen, FFI failed, shape rejected, etc.). The CPU path
+/// is the source of truth; the GPU path is opportunistic.
+///
+/// The signature mirrors the CPU `rmsnorm()` so the call sites in
+/// `forward_one` / `forward_step` / final norm don't need to change
+/// shape — they just swap `rmsnorm` for `rmsnorm_hybrid`. forward.rs
+/// always passes single-row slices (`x.len() == gamma.len() ==
+/// out.len() == n`), so the GPU dispatch is `n_rows=1, n=x.len()`.
+///
+/// Per-call cost on the GPU path is ~50-60 µs (cache flush +
+/// dispatch + readback) — a net loss vs CPU NEON's ~5 µs, but the
+/// path is here as the framework that pays off once the matmul-
+/// shaped ops (Q4K_DOT, GQA_ATTN) are wired in follow-on PRs.
+#[inline]
+fn rmsnorm_hybrid(
+    x: &[u16],
+    gamma: &[u16],
+    eps: f32,
+    out: &mut [u16],
+) -> Option<()> {
+    /* CPU rmsnorm requires x.len() == gamma.len() == out.len().
+     * Validate up front so the GPU FFI's shape check matches and
+     * we can dispatch with n_rows=1. */
+    let n = x.len();
+    if n == 0 || gamma.len() != n || out.len() != n {
+        return None;
+    }
+    if let Ok(()) = OperatorLibraryBackend::dispatch_rmsnorm(
+        x, gamma, out, 1u32, n as u32, eps,
+    ) {
+        return Some(());
+    }
+    rmsnorm(x, gamma, eps, out)
+}
 use crate::inference::quant::{dequantize_row_any, q8_k_byte_size};
 use crate::slm::gguf::{f32_to_f16, ArchInfo, GgmlType};
 use crate::slm::registry::LoadedSlm;
@@ -333,7 +372,7 @@ pub fn forward_one(
         // -- attention RMSNorm ---------------------------------------
         let attn_norm_bytes = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "attn_norm.weight")?;
         f32_bytes_into_fp16_slice(attn_norm_bytes, &mut scratch.norm_fp16)?;
-        rmsnorm(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+        rmsnorm_hybrid(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
 
         // -- Q / K / V projections (matmul + optional F32 bias add) --
         //
@@ -465,7 +504,7 @@ pub fn forward_one(
 
         let ffn_norm_bytes = layer_tensor_bytes(slm, &mut scratch.name_buf, layer, "ffn_norm.weight")?;
         f32_bytes_into_fp16_slice(ffn_norm_bytes, &mut scratch.norm_fp16)?;
-        rmsnorm(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+        rmsnorm_hybrid(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
 
         // FFN weights mix quant types in K_M tiers — Qwen2.5-1.5B has
         // ffn_gate/ffn_up = Q4_K but ffn_down = Q6_K; SmolLM mixes
@@ -505,7 +544,7 @@ pub fn forward_one(
 
     let out_norm_bytes = slm.tensor_bytes("output_norm.weight")?;
     f32_bytes_into_fp16_slice(out_norm_bytes, &mut scratch.norm_fp16)?;
-    rmsnorm(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
+    rmsnorm_hybrid(&scratch.x_fp16, &scratch.norm_fp16, 1e-6, &mut scratch.x_norm)?;
 
     // Some Qwen2 builds tie `output.weight` to `token_embd.weight`. If
     // a dedicated LM-head tensor is present, use it; otherwise fall
