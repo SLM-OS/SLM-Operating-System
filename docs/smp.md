@@ -146,7 +146,7 @@ Non-contiguous MPIDR values are common on real hardware:
 | Fused-off cores | Manufacturing defects disable cores, leaving gaps |
 | Asymmetric configs | Clusters with different core counts |
 
-The Jetson Orin Nano has 6 Cortex-A78AE cores likely arranged in 2 clusters of 3, giving MPIDR values like 0x000, 0x001, 0x002, 0x100, 0x101, 0x102 — non-contiguous.
+The Jetson Orin Nano has 6 Cortex-A78AE cores arranged in two asymmetric clusters: cluster 0 holds CPUs 0–3 with MPIDR `0x000, 0x100, 0x200, 0x300` (Aff1-encoded), and cluster 1 holds CPUs 4–5 with MPIDR `0x10200, 0x10300` (Aff2 set). The legacy `(Aff0 | Aff1)` fold collapsed Aff2 silently and produced `2/3` for CPUs 4/5, colliding with cluster 0 cores 2/3 — fixed by routing all CPU-id resolution through `cpu_logical_map[]` (PR #647). See `kernel/tests/test_mpidr_lookup.c` for the regression coverage.
 
 **Tradeoff:**
 
@@ -641,7 +641,7 @@ The full test suite passes on both QEMU and Pi 5 hardware (393 tests, 0 failures
 **Known Limitations:**
 - UART output is intentionally unsynchronized to avoid deadlock risks with panics
 - Blocked-task sleep queue attempted but wake mechanism failed on Pi 5 (deferred)
-- Pi 5 hardware timer IRQs don't deliver to NS-EL1 (cooperative `COOP_PREEMPT` path used instead). Original tracking: #134; investigation closed in #672 with the conclusion that NS-EL1 IRQ delivery is broken regardless of PPI on Pi 5 / BCM2712 / GIC-400 firmware. Production fix tracked in #683 — move SLM-OS to EL2 with VHE so IRQs route through `VBAR_EL2` (the path Linux + Pi firmware actually validate). See `docs/pi5-el2-vhe-plan.md`.
+- Pi 5 hardware timer IRQs deliver via PPI 26 (CNTHP, Hyp Physical Timer) at EL2/VHE under the patched BL31 (`tools/tfa-patches/0001-*`). Default Pi 5 build still ships `COOP_PREEMPT=ON / SECONDARY_PREEMPT=OFF` pending a broader workload audit; opt-in with `make kernel PLATFORM=RASPI5 SECONDARY_PREEMPT=ON EXTRA_KERNEL_CMAKE_ARGS="-DCOOP_PREEMPT=OFF"`. Closed: #134, #672 (NS-EL1 GIC pin assertion, resolved by EL2/VHE pivot in #683), #742 (`SECONDARY_PREEMPT` viable at EL2/VHE).
 
 ### Files Modified/Added
 
@@ -709,5 +709,5 @@ The fix: `cache_clean_range(cpu_data, sizeof(cpu_data))` is called after `init_c
 ---
 
 *Created: December 2025*
-*Updated: April 2026*
+*Updated: May 2026*
 *Status: Implementation complete, all tests passing (393 tests on Pi 5, 0 failures)*
