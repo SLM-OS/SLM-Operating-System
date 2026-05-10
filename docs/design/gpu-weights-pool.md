@@ -301,20 +301,19 @@ multi-op-on-GPU is a future arc once the per-op hybrids are all live.
 
 ## Risks
 
-- **CMA contiguity at 1.5 GB** (W1 prerequisite). Jetson's
-  `dma_alloc_coherent` (which nvmap eventually calls) is bounded by
-  the kernel's CMA region size — typically configured at boot.
-  Default Jetson L4T CMA varies by image (often 256 MB or 1 GB).
-  A request for 1.5 GB contiguous DMA memory may fail. Validation:
-  before merging W1's schema design, run a one-shot allocation
-  proof-of-concept on jetson-nano-1 (`gpu-channel-helper
-  --weights-pool-size 1610612736 --dry-run`-style) to confirm
-  feasibility. **Mitigation if CMA is too small**: multi-chunk
-  allocation backed by an array of smaller buffers, with the helper
-  publishing a list of `(phys, gpu_va, size)` triples — the GMMU
-  stitches them into one virtually-contiguous range. Adds wire-
-  format complexity to W1 (handoff carries an array, not a single
-  triple).
+- ~~**CMA contiguity at 1.5 GB** (W1 prerequisite).~~ **Resolved by
+  the W1 PoC on jetson-nano-1 (2026-05-10).** `scripts/cma-probe.c`
+  allocates 1.5 GB via the same nvmap IOVMM-heap path the helper
+  uses (`heap_mask=0x40000000`), mmaps the result, touches every
+  64 KB chunk to verify real backing — succeeds on the first try.
+  Key insight: CmaTotal on Jetson L4T is only 256 MB, but the
+  IOVMM heap doesn't actually require physically-contiguous CMA
+  pages — the SMMU stitches scattered physical pages into one
+  virtually-contiguous IO address. So the 1.5 GB pool fits a
+  single (phys, gpu_va, size) triple in the v8 handoff; the
+  multi-chunk fallback design isn't needed for the W1 cut.
+  Re-probe via `cma-probe` if a future design wants > 1.5 GB or
+  a non-IOVMM heap.
 - **Bump-allocator alignment policy** (W2 prerequisite). Q4_K
   weight rows have 144-byte super-block alignment requirements
   (already pinned in `EMBEDDING_Q4K_BLOCK_BYTES`). The bump
