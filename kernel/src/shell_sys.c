@@ -4238,6 +4238,21 @@ static int cmd_nvgpu_engine_status(void)
     return 0;
 }
 
+/* Layout of the helper-staged SASS pool used by `nvgpu oplib stage`
+ * and the `dispatch-*` smoke verbs. The helper allocates a 1 MB
+ * region and maps it into the channel's GMMU; the pool is divided
+ * into four 64 KB slots. Slot 0 holds the staged SASS; slots 1-3
+ * are scratch I/O buffers carved per dispatch verb (input, weights,
+ * output for rmsnorm; vec, positions, cos_sin for rope). The
+ * `OPLIB_POOL_MIN_BYTES` threshold guards `h->shader_size` to make
+ * sure the helper actually allocated all four slots. */
+#define OPLIB_POOL_SLOT_BYTES   0x10000u           /* 64 KB per slot */
+#define OPLIB_POOL_MIN_BYTES    (4u * OPLIB_POOL_SLOT_BYTES)
+#define OPLIB_POOL_OFF_SASS     0x00000ull          /* slot 0 */
+#define OPLIB_POOL_OFF_SCRATCH0 0x10000ull          /* slot 1 */
+#define OPLIB_POOL_OFF_SCRATCH1 0x20000ull          /* slot 2 */
+#define OPLIB_POOL_OFF_SCRATCH2 0x30000ull          /* slot 3 */
+
 int cmd_nvgpu(int argc, char *argv[])
 {
     static struct ga10b_bringup b;
@@ -4787,23 +4802,26 @@ oplib_stage_call:
              * helper already mapped the pool in the channel's
              * address space. */
             if (h != NULL && h->shader_gpu_va != 0 &&
-                h->shader_phys != 0 && h->shader_size >= 0x40000u) {
+                h->shader_phys != 0 &&
+                h->shader_size >= OPLIB_POOL_MIN_BYTES) {
                 uint64_t base_phys = h->shader_phys;
                 uint64_t base_gva  = h->shader_gpu_va;
-                /* SASS occupies [0..0x10000); leave that alone. */
-                in_phys  = base_phys + 0x10000ull;
-                in_va    = base_gva  + 0x10000ull;
-                gam_phys = base_phys + 0x20000ull;
-                gam_va   = base_gva  + 0x20000ull;
-                out_phys = base_phys + 0x30000ull;
-                out_va   = base_gva  + 0x30000ull;
-                if (in_bytes  > 0x10000u || gam_bytes > 0x10000u ||
-                    out_bytes > 0x10000u) {
+                /* SASS occupies slot 0; carve scratch from slots 1-3. */
+                in_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+                in_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+                gam_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+                gam_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+                out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+                out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+                if (in_bytes  > OPLIB_POOL_SLOT_BYTES ||
+                    gam_bytes > OPLIB_POOL_SLOT_BYTES ||
+                    out_bytes > OPLIB_POOL_SLOT_BYTES) {
                     shell_printf("dispatch-rmsnorm: scratch slot too small "
-                                 "(in=%llu gam=%llu out=%llu vs 64 KB)\r\n",
+                                 "(in=%llu gam=%llu out=%llu vs %u B)\r\n",
                                  (unsigned long long)in_bytes,
                                  (unsigned long long)gam_bytes,
-                                 (unsigned long long)out_bytes);
+                                 (unsigned long long)out_bytes,
+                                 (unsigned)OPLIB_POOL_SLOT_BYTES);
                     return -1;
                 }
                 in_cpu  = (void *)(uintptr_t)in_phys;
@@ -4971,46 +4989,54 @@ oplib_stage_call:
                            "(pairs are (vec[2i], vec[2i+1]))\r\n");
                 return -1;
             }
-            /* Cap each scratch slot at 64 KB (the per-slot ceiling
-             * from the helper-staged SASS pool carve-out). vec is
-             * batch × num_heads × head_dim FP16 (2 B); cos_sin is
-             * head_dim FP32 (4 B) for the position-0 case (we only
-             * need positions=0 entries, which is just the first
-             * head_dim floats); positions is batch int32 (4 B). */
+            /* Cap each scratch slot at OPLIB_POOL_SLOT_BYTES (the
+             * per-slot ceiling from the helper-staged SASS pool
+             * carve-out). vec is batch × num_heads × head_dim FP16
+             * (2 B); positions is batch int32 (4 B). cos_sin is the
+             * precomputed (cos, sin) lookup table for one position:
+             * head_dim/2 pairs × 2 floats per pair × 4 B = head_dim
+             * × 4 B. The fill loop below over-writes 2× this for
+             * convenience (head_dim * 8 B with both cos and sin set
+             * to identity at every index); the kernel only reads
+             * the first head_dim/2 pairs, so the extra writes are
+             * harmless. Sized to the over-fill so the bounds check
+             * matches what we actually write. */
             uint64_t vec_bytes = (uint64_t)batch * num_heads *
                                   head_dim * 2u;
             uint64_t pos_bytes = (uint64_t)batch * 4u;
-            uint64_t cs_bytes  = (uint64_t)head_dim * 2u * 4u;
-            if (vec_bytes > 0x10000u || pos_bytes > 0x10000u ||
-                cs_bytes > 0x10000u) {
+            uint64_t cs_bytes  = (uint64_t)head_dim * 8u;
+            if (vec_bytes > OPLIB_POOL_SLOT_BYTES ||
+                pos_bytes > OPLIB_POOL_SLOT_BYTES ||
+                cs_bytes  > OPLIB_POOL_SLOT_BYTES) {
                 shell_printf("dispatch-rope: scratch slot too small "
-                             "(vec=%llu pos=%llu cs=%llu vs 64 KB)\r\n",
+                             "(vec=%llu pos=%llu cs=%llu vs %u B)\r\n",
                              (unsigned long long)vec_bytes,
                              (unsigned long long)pos_bytes,
-                             (unsigned long long)cs_bytes);
+                             (unsigned long long)cs_bytes,
+                             (unsigned)OPLIB_POOL_SLOT_BYTES);
                 return -1;
             }
 
             /* Carve scratch from the pre-staged SASS pool. Same
-             * offsets as dispatch-rmsnorm: SASS at +0x00..+0x10000,
-             * input/gamma/out (or here vec/positions/cos_sin) at
-             * +0x10000 / +0x20000 / +0x30000. */
+             * slot layout as dispatch-rmsnorm: SASS in slot 0,
+             * vec/positions/cos_sin in slots 1-3. */
             const struct ga10b_channel_handoff *h =
                 ga10b_bringup_handoff();
             if (h == NULL || h->shader_gpu_va == 0 ||
-                h->shader_phys == 0 || h->shader_size < 0x40000u) {
+                h->shader_phys == 0 ||
+                h->shader_size < OPLIB_POOL_MIN_BYTES) {
                 shell_puts("dispatch-rope: pre-staged SASS pool "
                            "missing — run helper with --qmd-pool\r\n");
                 return -1;
             }
             uint64_t base_phys = h->shader_phys;
             uint64_t base_gva  = h->shader_gpu_va;
-            uint64_t vec_phys  = base_phys + 0x10000ull;
-            uint64_t vec_va    = base_gva  + 0x10000ull;
-            uint64_t pos_phys  = base_phys + 0x20000ull;
-            uint64_t pos_va    = base_gva  + 0x20000ull;
-            uint64_t cs_phys   = base_phys + 0x30000ull;
-            uint64_t cs_va     = base_gva  + 0x30000ull;
+            uint64_t vec_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+            uint64_t vec_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+            uint64_t pos_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+            uint64_t pos_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+            uint64_t cs_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+            uint64_t cs_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
             shell_puts("dispatch-rope: scratch buffers carved from "
                        "pre-staged SASS pool\r\n");
 
