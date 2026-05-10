@@ -104,11 +104,14 @@ endif()
 # task_sleep_ms's, since the post-#739 yield-spin fallback (active
 # under stock BL31) gets bypassed.
 #
-# Off by default so plain `make kernel PLATFORM=JETSON_ORIN_NANO` keeps
-# working on dev kits that haven't reflashed BL31. Enable with
-# `make kernel PLATFORM=JETSON_ORIN_NANO JETSON_HW_TICK=ON
-#  SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` on a board running the
-# patched BL31.
+# CMake default is OFF (safe for non-Jetson builds and for direct
+# CMake users on stock-BL31 dev kits). The build-system default for
+# `make kernel PLATFORM=JETSON_ORIN_NANO` is ON — driven from the
+# Makefile, which conditionally forwards `-DJETSON_HW_TICK=ON` for
+# the Jetson platform once #750 / #752 / #753 (NULL-bail + FP/SIMD
+# trap-frame save) landed. Stock-BL31 boards must override:
+#
+#   make kernel PLATFORM=JETSON_ORIN_NANO JETSON_HW_TICK=OFF
 option(JETSON_HW_TICK "Drive Jetson preemption via per-CPU CNTHP / PPI 26 (requires patched BL31)" OFF)
 if(JETSON_HW_TICK)
     if(PLATFORM STREQUAL "JETSON_ORIN_NANO")

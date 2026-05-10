@@ -45,7 +45,22 @@ endif
 # tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch
 # (`make tfa-jetson` + flash). Without that, this option produces a
 # kernel that programs CNTHP but never receives the IRQ.
-JETSON_HW_TICK ?= OFF
+#
+# Default flipped to ON for PLATFORM=JETSON_ORIN_NANO once the
+# patched BL31 + #752 NULL-bail in maybe_arm_resched_trampoline +
+# #753 FP/SIMD trap-frame save chain landed (closes #750). The
+# lab Jetson boards (jetson-nano-1 / jetson-nano-2) ship with the
+# patched BL31. Dev kits running stock BL31 must override:
+#
+#   make kernel PLATFORM=JETSON_ORIN_NANO JETSON_HW_TICK=OFF
+#
+# OFF on every other platform (the option is Jetson-only; CMakeLists
+# silently ignores it elsewhere with a STATUS message).
+ifeq ($(PLATFORM),JETSON_ORIN_NANO)
+    JETSON_HW_TICK ?= ON
+else
+    JETSON_HW_TICK ?= OFF
+endif
 
 # Eviction:
 #   DISABLE_EVICTION=ON    — compile out the pluggable eviction framework.

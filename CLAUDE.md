@@ -137,7 +137,9 @@ make kexec-deploy PLATFORM=X86_64     # scp ELF to test-pc + fire kexec (mb2 mod
 
 # Other platforms:
 make kernel PLATFORM=RASPI5            # Raspberry Pi 5
-make kernel PLATFORM=JETSON_ORIN_NANO  # Jetson Orin Nano
+make kernel PLATFORM=JETSON_ORIN_NANO  # Jetson Orin Nano (HW timer preempt
+                                       #   ON by default; pass JETSON_HW_TICK=OFF
+                                       #   on stock-BL31 dev kits — see #755)
 
 # AI scheduler (optional, adds MLP/PPO policies with real trained weights):
 make kernel AI_SCHED=ON                        # QEMU ARM64 with AI scheduler
