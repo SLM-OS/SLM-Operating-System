@@ -88,6 +88,108 @@
 #define ROPE_CBUF_OFFSET_NUM_HEADS   0x1Cu
 #define ROPE_CBUF_OFFSET_HEAD_DIM    0x20u
 
+/* EMBEDDING (scripts/cuda/embedding_q4k_f16.cu):
+ *   [0x160 + 0x00] table_bytes      const uint8_t *  [n_tokens × table_row_bytes]
+ *   [0x160 + 0x08] out              half *           [embedding_length]
+ *   [0x160 + 0x10] token_id         int              [0, n_tokens)
+ *   [0x160 + 0x14] embedding_length int              FP16 outputs to write
+ *   [0x160 + 0x18] table_row_bytes  int              bytes per token row
+ * Launch shape: grid=(n_blocks, 1, 1) block=(256, 1, 1) where
+ *               n_blocks = table_row_bytes / EMBEDDING_Q4K_BLOCK_BYTES.
+ * One CUDA block per Q4_K super-block in the row; one thread per element
+ * within the super-block. Padding tail (elem_idx >= embedding_length)
+ * skipped without writing. No shared memory, no syncthreads, no SLM. */
+#define EMBEDDING_CBUF_OFFSET_TABLE        0x00u
+#define EMBEDDING_CBUF_OFFSET_OUT          0x08u
+#define EMBEDDING_CBUF_OFFSET_TOKEN_ID     0x10u
+#define EMBEDDING_CBUF_OFFSET_EMBED_LEN    0x14u
+#define EMBEDDING_CBUF_OFFSET_ROW_BYTES    0x18u
+#define EMBEDDING_BLOCK_DIM                256u
+/* Q4_K super-block geometry — fixed by the GGUF Q4_K format
+ * (see runtime/src/inference/quant.rs::Q4K_BLOCK_SIZE). */
+#define EMBEDDING_Q4K_BLOCK_BYTES          144u
+#define EMBEDDING_Q4K_BLOCK_ELEMS          256u
+
+/* Q4K_DEQUANT (scripts/cuda/q4k_dequant_f16.cu):
+ *   [0x160 + 0x00] blocks  const uint8_t *  Q4_K super-blocks
+ *   [0x160 + 0x08] out     half *           [256 × nb] FP16 output
+ *   [0x160 + 0x10] nb      int              number of super-blocks
+ * Launch shape: grid=(nb, 1, 1) block=(256, 1, 1). One CUDA block per
+ * super-block; same Q4_K decode path as EMBEDDING but without the
+ * per-token offset / padding tail. No shared memory, no syncthreads. */
+#define Q4K_DEQUANT_CBUF_OFFSET_BLOCKS     0x00u
+#define Q4K_DEQUANT_CBUF_OFFSET_OUT        0x08u
+#define Q4K_DEQUANT_CBUF_OFFSET_NB         0x10u
+#define Q4K_DEQUANT_BLOCK_DIM              256u
+
+/* SWIGLU (scripts/cuda/swiglu_f16.cu):
+ *   [0x160 + 0x00] gate const half *  [n] post-gate-projection FP16
+ *   [0x160 + 0x08] up   const half *  [n] post-up-projection FP16
+ *   [0x160 + 0x10] out  half *        [n] silu(gate) * up
+ *   [0x160 + 0x18] n    int           total element count (rows × intermediate)
+ * Launch shape: grid=(ceil(n/256), 1, 1) block=(256, 1, 1). One thread
+ * per output FP16 element. Element-wise pure; no shared, no syncthreads. */
+#define SWIGLU_CBUF_OFFSET_GATE            0x00u
+#define SWIGLU_CBUF_OFFSET_UP              0x08u
+#define SWIGLU_CBUF_OFFSET_OUT             0x10u
+#define SWIGLU_CBUF_OFFSET_N               0x18u
+#define SWIGLU_BLOCK_DIM                   256u
+
+/* Q4K_DOT (scripts/cuda/q4k_dot_f16.cu):
+ *   [0x160 + 0x00] x       const half *     [K] FP16 activations
+ *   [0x160 + 0x08] weights const uint8_t *  [N × K × 144/256] Q4_K-packed
+ *   [0x160 + 0x10] out     float *          [N] FP32 dot products
+ *   [0x160 + 0x18] K       int              input dim, multiple of 256
+ *   [0x160 + 0x1C] N       int              output dim
+ * Launch shape: grid=(N, 1, 1) block=(256, 1, 1). One CUDA block per
+ * output row; 256 threads per block, each walking K/256 super-blocks
+ * of the row. Uses 1024 B shared memory + a tree reduction with
+ * `__syncthreads()` — barrier_count = 1 (Volta+ ITS-aware barriers,
+ * #747 fix). */
+#define Q4K_DOT_CBUF_OFFSET_X              0x00u
+#define Q4K_DOT_CBUF_OFFSET_WEIGHTS        0x08u
+#define Q4K_DOT_CBUF_OFFSET_OUT            0x10u
+#define Q4K_DOT_CBUF_OFFSET_K              0x18u
+#define Q4K_DOT_CBUF_OFFSET_N              0x1Cu
+#define Q4K_DOT_BLOCK_DIM                  256u
+/* Shared memory: BLOCK_DIM × sizeof(float) = 1024 B for the
+ * partial-sum tree reduction. */
+#define Q4K_DOT_SMEM_BYTES                 1024u
+/* K must be a multiple of EMBEDDING_Q4K_BLOCK_ELEMS (256) — every
+ * row is a whole number of Q4_K super-blocks. */
+
+/* GQA_ATTN (scripts/cuda/gqa_attn_f16.cu):
+ *   [0x160 + 0x00] q         const half *   [n_head_q  × head_dim]
+ *   [0x160 + 0x08] k         const half *   [seq_len × n_head_kv × head_dim]
+ *   [0x160 + 0x10] v         const half *   [seq_len × n_head_kv × head_dim]
+ *   [0x160 + 0x18] out       half *         [n_head_q × head_dim]
+ *   [0x160 + 0x20] n_head_q  int
+ *   [0x160 + 0x24] n_head_kv int
+ *   [0x160 + 0x28] head_dim  int
+ *   [0x160 + 0x2C] seq_len   int
+ * Launch shape: grid=(n_head_q, 1, 1) block=(128, 1, 1). One CUDA
+ * block per query head; threads cooperate over (seq_len, head_dim).
+ * Static shared memory: q_cache[256] + logits[4096] + reduce_buf[128]
+ * + 2 broadcast scalars = 17928 B. Three-phase fused logits/softmax/
+ * weighted-sum kernel; uses `__syncthreads()` between phases →
+ * barrier_count = 1. */
+#define GQA_ATTN_CBUF_OFFSET_Q             0x00u
+#define GQA_ATTN_CBUF_OFFSET_K             0x08u
+#define GQA_ATTN_CBUF_OFFSET_V             0x10u
+#define GQA_ATTN_CBUF_OFFSET_OUT           0x18u
+#define GQA_ATTN_CBUF_OFFSET_N_HEAD_Q      0x20u
+#define GQA_ATTN_CBUF_OFFSET_N_HEAD_KV     0x24u
+#define GQA_ATTN_CBUF_OFFSET_HEAD_DIM      0x28u
+#define GQA_ATTN_CBUF_OFFSET_SEQ_LEN       0x2Cu
+#define GQA_ATTN_BLOCK_DIM                 128u
+/* Static shared-memory caps from the kernel source. Exceeding these
+ * would overrun the static __shared__ arrays (q_cache[MAX_HEAD_DIM],
+ * logits[MAX_SEQ_LEN]) and read past valid scratch. */
+#define GQA_ATTN_MAX_HEAD_DIM              256u
+#define GQA_ATTN_MAX_SEQ_LEN               4096u
+/* q_cache[256]×4 + logits[4096]×4 + reduce_buf[128]×4 + 2 floats. */
+#define GQA_ATTN_SMEM_BYTES                17928u
+
 /* Per-op runtime arguments. Different op_kinds have different
  * argument shapes; the registry's cbuf-builder dispatches on
  * op_kind to pick which sub-struct to read. */
@@ -119,6 +221,62 @@ struct operator_dispatch_args_rope {
     uint32_t head_dim;        /* must be even — pairs are (vec[2i], vec[2i+1]) */
 };
 
+struct operator_dispatch_args_embedding {
+    uint64_t table_gpu_va;    /* Q4_K embedding table [n_tokens × table_row_bytes] */
+    uint64_t out_gpu_va;      /* output FP16 row [embedding_length] */
+    uint32_t token_id;        /* row index — must be < n_tokens (caller checks) */
+    uint32_t embedding_length;/* width of the dequantized row (e.g. 1536 for Qwen2.5).
+                               * May be < table_row_bytes/144*256 when the row was
+                               * padded up to a Q4_K-block boundary (e.g. SmolLM2 576). */
+    uint32_t table_row_bytes; /* bytes per token row — must be a multiple of
+                               * EMBEDDING_Q4K_BLOCK_BYTES (144). For Qwen2.5
+                               * with embedding_length=1536, this is
+                               * (1536/256)*144 = 864. */
+};
+
+struct operator_dispatch_args_q4k_dequant {
+    uint64_t blocks_gpu_va;   /* Q4_K-packed input [nb × 144 B] */
+    uint64_t out_gpu_va;      /* FP16 output [nb × 256] */
+    uint32_t nb;              /* number of Q4_K super-blocks */
+};
+
+struct operator_dispatch_args_swiglu {
+    uint64_t gate_gpu_va;     /* [n] post-gate-projection FP16 */
+    uint64_t up_gpu_va;       /* [n] post-up-projection FP16 */
+    uint64_t out_gpu_va;      /* [n] silu(gate) * up — FP16 */
+    uint32_t n;               /* total element count (rows × intermediate_size).
+                               * For Qwen2.5-1.5B intermediate=8960; per-token
+                               * decode → n=8960, 16-row prefill → n=143360. */
+};
+
+struct operator_dispatch_args_q4k_dot {
+    uint64_t x_gpu_va;        /* [K] FP16 input activations */
+    uint64_t weights_gpu_va;  /* [N × K × 144/256] Q4_K-packed weights */
+    uint64_t out_gpu_va;      /* [N] FP32 output dot products */
+    uint32_t k;               /* input dim — must be a multiple of 256 (every
+                               * row is a whole number of Q4_K super-blocks). */
+    uint32_t n;               /* output dim — number of rows in W. For Qwen2.5
+                               * Q/O proj: 1536, KV proj: 256, gate/up: 8960,
+                               * down: 1536, lm_head: 151936. */
+};
+
+struct operator_dispatch_args_gqa_attn {
+    uint64_t q_gpu_va;        /* [n_head_q × head_dim] FP16 query rows */
+    uint64_t k_gpu_va;        /* [seq_len × n_head_kv × head_dim] FP16 key cache */
+    uint64_t v_gpu_va;        /* [seq_len × n_head_kv × head_dim] FP16 value cache */
+    uint64_t out_gpu_va;      /* [n_head_q × head_dim] FP16 attention output */
+    uint32_t n_head_q;        /* number of query heads (12 for Qwen2.5-1.5B) */
+    uint32_t n_head_kv;       /* number of KV heads (2 for Qwen2.5-1.5B).
+                               * n_head_q must be a multiple of n_head_kv —
+                               * group = n_head_q / n_head_kv. */
+    uint32_t head_dim;        /* dim per head (128 for Qwen2.5-1.5B). Must be
+                               * ≤ GQA_ATTN_MAX_HEAD_DIM (256). */
+    uint32_t seq_len;         /* count of past+current positions to attend to.
+                               * Causal mask is implicit (future positions
+                               * aren't passed in). Must be ≤
+                               * GQA_ATTN_MAX_SEQ_LEN (4096). */
+};
+
 /* Tagged-union arg holder. The dispatcher fills the right sub-struct
  * based on the op_kind, then hands a pointer-to-union to the cbuf
  * builder which already knows which member to read. Keeping this
@@ -127,8 +285,13 @@ struct operator_dispatch_args_rope {
 struct operator_dispatch_args {
     uint32_t op_kind;
     union {
-        struct operator_dispatch_args_rmsnorm rmsnorm;
-        struct operator_dispatch_args_rope    rope;
+        struct operator_dispatch_args_rmsnorm     rmsnorm;
+        struct operator_dispatch_args_rope        rope;
+        struct operator_dispatch_args_embedding   embedding;
+        struct operator_dispatch_args_q4k_dequant q4k_dequant;
+        struct operator_dispatch_args_swiglu      swiglu;
+        struct operator_dispatch_args_q4k_dot     q4k_dot;
+        struct operator_dispatch_args_gqa_attn    gqa_attn;
     } u;
 };
 
