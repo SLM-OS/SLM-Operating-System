@@ -73,7 +73,7 @@ flashed via R36.4.4 BSP USB-recovery.
 
 - `docs/scheduler.md` (narrative)
 - `docs/plans/jetson-preemption-restoration-plan.md`
-- `kernel/CLAUDE.md` §"ARM64 Hardware Timer IRQs — cooperative preemption"
+- `kernel/CLAUDE.md` §"ARM64 Hardware Timer IRQs"
 - `kernel/CLAUDE.md` §"Secondary-CPU preemption — SECONDARY_PREEMPT"
 
 *Last updated: 9 May 2026*

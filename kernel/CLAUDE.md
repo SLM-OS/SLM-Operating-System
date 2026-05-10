@@ -166,7 +166,7 @@ On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite
 | `current_task[MAX_CPUS]` | ~32B | Per-CPU current running task pointer |
 | (Trace slots at `NC_MEM_SIZE - 256`) | 256B | Reserved for `nc_trace.h` diagnostics (not allocated) |
 
-**Cross-CPU dispatch status (April 16, 2026):** FULL. `bench smp`, `bench stealing`, and all 15 integration tests pass on Pi 5 hardware when secondary CPUs wake as expected; see issue #216 for a boot-to-boot dormancy pattern that occasionally keeps one or more secondaries from entering `schedule()` and knocks out unrelated multi-CPU tests. Timer-based preemption on secondary CPUs still uses the cooperative path (CNTPCT-driven tick at yield points); hardware timer IRQ delivery remains a separate blocker tracked under #134. NC run queues, NC task table, NC current-task pointers. All tasks run with `DAIF.I=1` (no in-task timer preemption). See this file's "Pi 5 spinlock DRAM flush" section for what unblocked the last gap.
+**Cross-CPU dispatch status (April 16, 2026):** FULL. `bench smp`, `bench stealing`, and all 15 integration tests pass on Pi 5 hardware when secondary CPUs wake as expected; see issue #216 for a boot-to-boot dormancy pattern that occasionally keeps one or more secondaries from entering `schedule()` and knocks out unrelated multi-CPU tests. Timer-based preemption on secondary CPUs is hardware-driven on Jetson under default `JETSON_HW_TICK=ON` (PR #746/#755) and on Pi 5 under opt-in `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` (PR #742); the default Pi 5 build still runs the cooperative path (CNTPCT-driven tick at yield points). Tasks start with `DAIF.I=1` and unmask naturally on the first `spin_unlock_irqrestore` or idle-task `daifclr` — under HW-preempt builds the timer ISR then preempts inside running tasks via the ELR trampoline. NC run queues, NC task table, NC current-task pointers. See this file's "Pi 5 spinlock DRAM flush" section for what unblocked the last cross-CPU dispatch gap.
 
 **`test_work_stealing_distributes_load` success criterion (April 16, 2026):** The test now asserts "at least one task ran on a CPU other than the owner (CPU 1)" — the semantic meaning of "stealing distributes load". The earlier assertion required ≥2 distinct stealer CPUs per attempt, which flaked under the #216 dormancy pattern whenever only one of CPUs 2/3 was alive (a single awake stealer grabs all 5 tasks before the others wake, giving `distinct == 1` but still successfully moving work off the owner). On `PLATFORM_RASPI5`, the test prints a `ws-diag` line per attempt with per-CPU `(steal_attempts / successes / stale / schedule / picked)` deltas so future flake investigations can tell "no stealer awake" apart from "one stealer monopolized" apart from "stealing rejected" without reflashing diagnostic builds.
 
@@ -264,7 +264,7 @@ write through the canary region.
 
 The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry. `context.S` saves this masked DAIF into idle's context. On resume, the restored DAIF keeps IRQ masked. If the unmask is only at function entry, idle would loop forever in `wfi` with IRQ disabled.
 
-**Pi 5 platform split:** CPU 0's idle task does `daifclr` + `wfi` (timer-driven preemption). Secondary CPUs use `wfe` only (cooperative via SEV) because timer IRQs on secondary CPUs cause an exception handler hang (under investigation). This means `pit_ticks` only advances when CPU 0 is idle.
+**Pi 5 platform split (default cooperative build):** CPU 0's idle task does `daifclr` + `wfi` (timer-driven preemption). Secondary CPUs use `wfe` only and rely on cooperative SEV wakes; this is the default `COOP_PREEMPT=ON / SECONDARY_PREEMPT=OFF` shape, in which `pit_ticks` only advances when CPU 0 is idle. Under opt-in `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` (PR #742, EL2/VHE PPI 26 / CNTHP), all CPUs `daifclr` + `wfi` and the timer ISR drives preemption per-CPU via the ELR trampoline.
 
 **Jetson platform split (build-flag dependent).** Under the default
 `JETSON_HW_TICK=ON` build (PR #746 + #755), CPU 0 idle does the standard
@@ -287,7 +287,7 @@ in `kernel/sched/sched.c`.
 
 ---
 
-## ARM64 Hardware Timer IRQs — cooperative preemption (April 2026, partially superseded May 2026)
+## ARM64 Hardware Timer IRQs — patched BL31 + cooperative fallback
 
 **Original blocker (still true on stock TF-A).** The GIC on Pi 5 and
 Jetson runs with two security states; the Group register that routes
@@ -357,12 +357,15 @@ Jetson (default with `JETSON_HW_TICK=ON`).
 
 ---
 
-## Secondary-CPU preemption — `SECONDARY_PREEMPT` (April 2026)
+## Secondary-CPU preemption — `SECONDARY_PREEMPT`
 
 The ELR-trampoline infrastructure (`kernel/sched/preempt.c`,
 `resched_trampoline` in `kernel/arch/arm64/vectors.S`) is gated behind
-the CMake option `SECONDARY_PREEMPT` (default OFF). When ON, timer IRQs
-on secondary CPUs are deferred to task context via the trampoline
+the CMake option `SECONDARY_PREEMPT`. Default OFF for Pi 5 / QEMU /
+x86-64; default ON for Jetson under `JETSON_HW_TICK=ON` (the Makefile
+sets `JETSON_HW_TICK ?= ON` for `PLATFORM=JETSON_ORIN_NANO`, which in
+turn implies `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`). When ON, timer
+IRQs on secondary CPUs are deferred to task context via the trampoline
 rather than calling `schedule()` from the ISR (which corrupts the
 abandoned exception frame on real ARM64 hardware).
 
