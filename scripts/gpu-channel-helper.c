@@ -102,7 +102,7 @@ static void xioctl(int fd, unsigned long req, void *arg, const char *name)
 }
 
 /* Forward declare for use by the helper buffer allocator below. */
-static int nvmap_alloc_dmabuf(int nvmap_fd, uint32_t size, uint32_t align);
+static int nvmap_alloc_dmabuf(int nvmap_fd, uint64_t size, uint32_t align);
 static uint64_t virt_to_phys(void *vaddr);
 
 /* Allocate a single dmabuf, register it with nvgpu, GMMU-map it
@@ -125,15 +125,29 @@ static uint64_t virt_to_phys(void *vaddr);
  * caller can compute the same way (`(size + 4095u) & ~4095u`).
  * The handoff fields that record buffer size should reflect the
  * rounded value, not the requested `size_bytes`. */
+/* `size_bytes` is uint64_t so the W1 weights pool (~1.5 GB design
+ * target) can use the same helper. `zero_fill=true` matches the
+ * pre-W1 behavior (zero the whole buffer before handoff); pass
+ * false for the weights pool so we don't burn ~50 ms memset'ing
+ * 1.5 GB that SLM-OS will overwrite with weight bytes anyway.
+ *
+ * `phys_required=true` aborts the allocation if /proc/self/pagemap
+ * can't resolve the first page's PFN. The weights pool can pass
+ * `false` here because IOVMM-backed dmabufs that are big enough
+ * to span many SMMU-stitched pages don't have a meaningful
+ * "first physical page" anyway — SLM-OS uses gpu_va for that
+ * pool, and a 0 in `weights_pool_phys` is the sentinel saying
+ * "informational only / not usable for offset arithmetic". */
 static int alloc_channel_buffer(int nvmap_fd, int ctrl_fd, int as_fd,
-                                uint32_t size_bytes, const char *tag,
+                                uint64_t size_bytes, const char *tag,
+                                bool zero_fill, bool phys_required,
                                 int *out_dmabuf, void **out_cpu_va,
                                 uint64_t *out_phys, uint64_t *out_gpu_va)
 {
-    const uint32_t page_size = 4096u;
-    uint32_t rounded = (size_bytes + page_size - 1u) & ~(page_size - 1u);
+    const uint64_t page_size = 4096u;
+    uint64_t rounded = (size_bytes + page_size - 1ull) & ~(page_size - 1ull);
 
-    int dmabuf = nvmap_alloc_dmabuf(nvmap_fd, rounded, page_size);
+    int dmabuf = nvmap_alloc_dmabuf(nvmap_fd, rounded, (uint32_t)page_size);
 
     struct nvgpu_gpu_register_buffer_args regbuf;
     memset(&regbuf, 0, sizeof(regbuf));
@@ -152,7 +166,7 @@ static int alloc_channel_buffer(int nvmap_fd, int ctrl_fd, int as_fd,
     map.incompr_kind = 0;
     map.dmabuf_fd = dmabuf;
     map.mapping_size = 0;
-    map.page_size = page_size;
+    map.page_size = (uint32_t)page_size;
     if (ioctl(as_fd, NVGPU_AS_IOCTL_MAP_BUFFER_EX, &map) < 0) {
         fprintf(stderr,
                 "[gpu-helper] MAP_BUFFER_EX(%s) failed: %s\n",
@@ -160,20 +174,38 @@ static int alloc_channel_buffer(int nvmap_fd, int ctrl_fd, int as_fd,
         return -1;
     }
 
-    void *cpu_va = mmap(NULL, rounded, PROT_READ | PROT_WRITE,
+    void *cpu_va = mmap(NULL, (size_t)rounded, PROT_READ | PROT_WRITE,
                         MAP_SHARED, dmabuf, 0);
     if (cpu_va == MAP_FAILED) {
         fprintf(stderr, "[gpu-helper] mmap(%s): %s\n", tag, strerror(errno));
         return -1;
     }
-    memset(cpu_va, 0, rounded);
-    msync(cpu_va, rounded, MS_SYNC);
+    if (zero_fill) {
+        memset(cpu_va, 0, (size_t)rounded);
+        msync(cpu_va, (size_t)rounded, MS_SYNC);
+    } else {
+        /* Skip memset for !zero_fill callers — saves ~150 ms on
+         * 1.5 GB pools. SLM-OS's first weight upload will write
+         * over each page anyway. */
+    }
 
     uint64_t phys = virt_to_phys(cpu_va);
     if (phys == 0) {
+        if (phys_required) {
+            fprintf(stderr,
+                    "[gpu-helper] virt_to_phys returned 0 for %s\n",
+                    tag);
+            return -1;
+        }
+        /* Non-fatal: GB-scale IOVMM dmabufs span many
+         * SMMU-stitched pages, so even when the first page is
+         * resident /proc/self/pagemap may not expose a usable
+         * PFN. The caller (weights pool) doesn't rely on this
+         * value — it's informational, and SLM-OS uses gpu_va. */
         fprintf(stderr,
-                "[gpu-helper] virt_to_phys returned 0 for %s\n", tag);
-        return -1;
+                "[gpu-helper] %s: virt_to_phys unavailable, "
+                "publishing phys=0 (gpu_va is authoritative)\n",
+                tag);
     }
 
     *out_dmabuf = dmabuf;
@@ -184,7 +216,7 @@ static int alloc_channel_buffer(int nvmap_fd, int ctrl_fd, int as_fd,
 }
 
 /* Allocate an nvmap buffer and return a dmabuf fd for it. */
-static int nvmap_alloc_dmabuf(int nvmap_fd, uint32_t size, uint32_t align)
+static int nvmap_alloc_dmabuf(int nvmap_fd, uint64_t size, uint32_t align)
 {
     /* Create handle */
     struct nvmap_create_handle cr = { .size64 = size };
@@ -259,6 +291,15 @@ int main(int argc, char **argv)
      * ignore them. */
     int timeout_secs = DEFAULT_TIMEOUT_SECS;
     int qmd_pool_slots = 0;
+    /* W1 weights pool size in bytes. Zero = no pool (v7 handoff,
+     * existing behavior); non-zero = allocate the pool, map into the
+     * channel's GMMU, populate the v8 handoff fields. SLM-OS's
+     * `slm load` then stages weight tensors into the pool so the
+     * forward.rs hybrid path can dispatch against GPU-resident
+     * weights. The W1 PoC (PR #766) confirmed nvmap can grant
+     * 1.5 GB single-buffer; larger sizes haven't been probed
+     * (the design target is 1.5 GB for Qwen2.5-1.5B). */
+    uint64_t weights_pool_size = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--timeout-secs") == 0 && i + 1 < argc) {
             timeout_secs = atoi(argv[++i]);
@@ -269,6 +310,35 @@ int main(int argc, char **argv)
                    i + 1 < argc) {
             qmd_pool_slots = atoi(argv[++i]);
             if (qmd_pool_slots <= 0) qmd_pool_slots = 1024;
+        } else if (strcmp(argv[i], "--weights-pool-size") == 0 &&
+                   i + 1 < argc) {
+            /* Accept human-friendly suffixes: bare bytes, "K", "M",
+             * "G". 1.5 GB → "1610612736" or "1536M" or "1536MB". */
+            const char *arg = argv[++i];
+            char *end = NULL;
+            unsigned long long v = strtoull(arg, &end, 0);
+            if (end && *end != '\0') {
+                if (*end == 'K' || *end == 'k') v *= 1024ULL;
+                else if (*end == 'M' || *end == 'm') v *= 1024ULL * 1024;
+                else if (*end == 'G' || *end == 'g') v *= 1024ULL * 1024 * 1024;
+                else {
+                    fprintf(stderr,
+                            "[gpu-helper] --weights-pool-size: bad "
+                            "suffix '%c' (use bare bytes or K/M/G)\n",
+                            *end);
+                    return 1;
+                }
+            }
+            weights_pool_size = (uint64_t)v;
+            /* nvmap rounds up to 4 KB; reject obviously-wrong inputs
+             * before we burn an ioctl. */
+            if (weights_pool_size != 0 && weights_pool_size < 4096) {
+                fprintf(stderr,
+                        "[gpu-helper] --weights-pool-size %llu too "
+                        "small (must be 0 or >= 4096)\n",
+                        (unsigned long long)weights_pool_size);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--preserve-for-kexec") == 0) {
             /* No-op: this helper always preserves the channel by
              * holding fds open through the sleep loop. */
@@ -594,6 +664,8 @@ int main(int argc, char **argv)
         qmd_pool_size_bytes = ((uint32_t)bytes + 4095u) & ~4095u;
         if (alloc_channel_buffer(nvmap_fd, ctrl_fd, as_fd,
                                  qmd_pool_size_bytes, "QMD_POOL",
+                                 /*zero_fill=*/true,
+                                 /*phys_required=*/true,
                                  &qmd_pool_dmabuf, &qmd_pool_va,
                                  &qmd_pool_phys, &qmd_pool_gva) < 0) {
             return 1;
@@ -645,6 +717,8 @@ int main(int argc, char **argv)
         sass_size_bytes = 1u << 20;  /* 1 MB */
         if (alloc_channel_buffer(nvmap_fd, ctrl_fd, as_fd,
                                  sass_size_bytes, "SASS_POOL",
+                                 /*zero_fill=*/true,
+                                 /*phys_required=*/true,
                                  &sass_dmabuf, &sass_va,
                                  &sass_phys, &sass_gva) < 0) {
             return 1;
@@ -656,6 +730,8 @@ int main(int argc, char **argv)
 
         if (alloc_channel_buffer(nvmap_fd, ctrl_fd, as_fd,
                                  4096u, "CBUF",
+                                 /*zero_fill=*/true,
+                                 /*phys_required=*/true,
                                  &cbuf_dmabuf, &cbuf_va,
                                  &cbuf_phys, &cbuf_gva) < 0) {
             return 1;
@@ -663,6 +739,36 @@ int main(int argc, char **argv)
         printf("[gpu-helper] cbuf: 4096 B, phys=0x%llx, gpu_va=0x%llx\n",
                (unsigned long long)cbuf_phys,
                (unsigned long long)cbuf_gva);
+    }
+
+    /* W1 weights pool. Allocated only when --weights-pool-size is
+     * non-zero. Mapped into the same channel address space as the
+     * SASS pool / pushbuffer so SLM-OS's `slm load` can stage
+     * weight tensors and forward.rs hybrid wrappers can dispatch
+     * against GPU-resident weights. zero_fill=false because the
+     * pool is potentially GB-scale and SLM-OS will overwrite every
+     * byte with weight data anyway; zeroing 1.5 GB would burn
+     * ~50 ms of pre-kexec time pointlessly. See
+     * docs/design/gpu-weights-pool.md. */
+    int      weights_pool_dmabuf = -1;
+    void    *weights_pool_va     = NULL;
+    uint64_t weights_pool_phys   = 0;
+    uint64_t weights_pool_gva    = 0;
+    if (weights_pool_size > 0) {
+        if (alloc_channel_buffer(nvmap_fd, ctrl_fd, as_fd,
+                                 weights_pool_size, "WEIGHTS_POOL",
+                                 /*zero_fill=*/false,
+                                 /*phys_required=*/false,
+                                 &weights_pool_dmabuf, &weights_pool_va,
+                                 &weights_pool_phys, &weights_pool_gva) < 0) {
+            return 1;
+        }
+        printf("[gpu-helper] Weights pool: %llu B (%.2f GB), "
+               "phys=0x%llx, gpu_va=0x%llx\n",
+               (unsigned long long)weights_pool_size,
+               weights_pool_size / (1024.0 * 1024.0 * 1024.0),
+               (unsigned long long)weights_pool_phys,
+               (unsigned long long)weights_pool_gva);
     }
 
     /* Allocate a dedicated dmabuf for the handoff block. Writing via
@@ -685,13 +791,19 @@ int main(int argc, char **argv)
      * Using named fields (not hand-indexed words) means SLM-OS and
      * this helper can never drift out of sync silently — any struct
      * reorder is a compile error on rebuild. */
-    /* Handoff version is bumped to 7 when a QMD pool was allocated,
-     * so SLM-OS's `ga10b_v7_validate_handoff` accepts it. The v7
-     * dispatch path is the only one that consumes qmd_pool_*; v2
-     * scanners simply ignore those bytes. */
+    /* Handoff version selection:
+     *   v8 — weights pool allocated (W1, this commit)
+     *   v7 — QMD pool allocated (no weights pool)
+     *   v2 — channel-only (no v7 pool, no weights pool)
+     * Each higher version is a strict superset: v7 readers can
+     * consume v8 handoffs by ignoring the trailing weights_pool_*
+     * fields, v2 readers ignore both v7 and v8 trailing bytes. */
+    uint32_t handoff_version = (weights_pool_size > 0) ? 8u
+                              : (qmd_pool_slots > 0)   ? 7u
+                              :                          2u;
     struct ga10b_channel_handoff hoff = {
         .magic              = GA10B_CHANNEL_HANDOFF_MAGIC,
-        .version            = (qmd_pool_slots > 0) ? 7u : 2u,
+        .version            = handoff_version,
         .channel_id         = 0,  /* nvgpu doesn't expose this cheaply;
                                    * work_submit_token below is the
                                    * authoritative field for the
@@ -729,6 +841,11 @@ int main(int argc, char **argv)
         .qmd_pool_gpu_va    = qmd_pool_gva,
         .qmd_pool_size_bytes = qmd_pool_size_bytes,
         .qmd_pool_n_slots   = qmd_pool_size_bytes / 256u,
+        /* v8-only: weights pool. Zero in v2/v7 mode. SLM-OS's
+         * `slm load` populates the pool's contents post-kexec. */
+        .weights_pool_phys       = weights_pool_phys,
+        .weights_pool_gpu_va     = weights_pool_gva,
+        .weights_pool_size_bytes = weights_pool_size,
     };
     memcpy(handoff, &hoff, sizeof(hoff));
     msync(handoff, 4096, MS_SYNC);

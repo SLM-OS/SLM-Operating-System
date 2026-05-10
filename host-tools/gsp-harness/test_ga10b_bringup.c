@@ -1055,7 +1055,9 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 7;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
-    h.version = 8;                  /* future, not yet defined */
+    h.version = 8;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 9;                  /* future, not yet defined */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
@@ -1674,8 +1676,9 @@ static void test_handoff_v7_layout_size(void)
     /* Belt-and-suspenders runtime check. The header pins the size
      * with a _Static_assert but a fresh-eyes reader shouldn't have
      * to dig into compile-time errors to discover that v2 was 120,
-     * v3 was 192, v4 was 200, v5 was 216, v6 was 232, and v7 is 256. */
-    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 256u);
+     * v3 was 192, v4 was 200, v5 was 216, v6 was 232, v7 was 256,
+     * and v8 (W1 weights pool) is 280. */
+    REQUIRE_EQ(sizeof(struct ga10b_channel_handoff), 280u);
 }
 
 static void test_handoff_v7_pool_offsets(void)

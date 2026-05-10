@@ -4782,6 +4782,22 @@ oplib_stage_call:
             }
             shell_printf("oplib stage: ok, gpu_va_base=0x%lx\r\n",
                          (unsigned long)oplib_pool_gpu_va_base());
+            /* W1 weights-pool descriptor (#714 §B.3 follow-on, see
+             * docs/design/gpu-weights-pool.md). Prints when the
+             * helper was run with --weights-pool-size N; otherwise
+             * size is 0 and the line shows "(none)" for clarity. */
+            uint64_t wp_size = ga10b_weights_pool_size_bytes();
+            if (wp_size != 0) {
+                shell_printf("[oplib-pool] weights region: phys=0x%lx "
+                             "gpu_va=0x%lx size=%lu B (%lu MB)\r\n",
+                             (unsigned long)ga10b_weights_pool_phys(),
+                             (unsigned long)ga10b_weights_pool_gpu_va(),
+                             (unsigned long)wp_size,
+                             (unsigned long)(wp_size / (1024u * 1024u)));
+            } else {
+                shell_puts("[oplib-pool] weights region: (none — "
+                           "helper run without --weights-pool-size)\r\n");
+            }
             /* #714 §B.2: walk every registered op_kind, validate the
              * dispatcher metadata accepts a representative fixture,
              * and flip TIER_TABLE entries from Cpu to Simt for the
