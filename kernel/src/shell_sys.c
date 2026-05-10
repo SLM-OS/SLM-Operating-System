@@ -4238,21 +4238,6 @@ static int cmd_nvgpu_engine_status(void)
     return 0;
 }
 
-/* Layout of the helper-staged SASS pool used by `nvgpu oplib stage`
- * and the `dispatch-*` smoke verbs. The helper allocates a 1 MB
- * region and maps it into the channel's GMMU; the pool is divided
- * into four 64 KB slots. Slot 0 holds the staged SASS; slots 1-3
- * are scratch I/O buffers carved per dispatch verb (input, weights,
- * output for rmsnorm; vec, positions, cos_sin for rope). The
- * `OPLIB_POOL_MIN_BYTES` threshold guards `h->shader_size` to make
- * sure the helper actually allocated all four slots. */
-#define OPLIB_POOL_SLOT_BYTES   0x10000u           /* 64 KB per slot */
-#define OPLIB_POOL_MIN_BYTES    (4u * OPLIB_POOL_SLOT_BYTES)
-#define OPLIB_POOL_OFF_SASS     0x00000ull          /* slot 0 */
-#define OPLIB_POOL_OFF_SCRATCH0 0x10000ull          /* slot 1 */
-#define OPLIB_POOL_OFF_SCRATCH1 0x20000ull          /* slot 2 */
-#define OPLIB_POOL_OFF_SCRATCH2 0x30000ull          /* slot 3 */
-
 int cmd_nvgpu(int argc, char *argv[])
 {
     static struct ga10b_bringup b;
