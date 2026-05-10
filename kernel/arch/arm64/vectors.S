@@ -10,6 +10,7 @@
 
 #include "el_regs.h"
 #include "cpu_id_asm.h"
+#include "trap.h"
 
 .section .text
 
@@ -87,14 +88,16 @@ exception_vectors:
  * Macro to save all general-purpose registers AND FP/SIMD state.
  * Creates a trap frame on the stack.
  *
- * Frame layout (800 bytes, 16-byte aligned):
- *   [sp, #0..239]    x0-x29 (15 stp pairs)
- *   [sp, #240]       x30
- *   [sp, #248..263]  ELR, SPSR
- *   [sp, #264..271]  padding (keeps q-region 16-byte aligned)
- *   [sp, #272..783]  q0-q31 (16 stp pairs of q,q at stride 0x20)
- *   [sp, #784..791]  FPCR
- *   [sp, #792..799]  FPSR
+ * Frame layout (TRAP_FRAME_ALLOC bytes, 16-byte aligned — defined
+ * symbolically in kernel/include/trap.h, with _Static_asserts that
+ * pin every offset below to the C view):
+ *   [sp, #0..239]                  x0-x29 (15 stp pairs)
+ *   [sp, #240]                     x30
+ *   [sp, #248..263]                ELR, SPSR
+ *   [sp, #264..271]                padding (keeps q-region 16-byte aligned)
+ *   [sp, #TRAP_FRAME_OFF_QREGS+0..511]  q0-q31 (16 stp pairs at stride 0x20)
+ *   [sp, #TRAP_FRAME_OFF_FPCR]     FPCR
+ *   [sp, #TRAP_FRAME_OFF_FPSR]     FPSR
  *
  * AAPCS reserves x18 as the "platform register" — toolchains that
  * generate code for a runtime which uses x18 as a TLS / shadow-call
@@ -126,14 +129,20 @@ exception_vectors:
  *      the corrupted q-regs are restored. Old task continues with
  *      garbage FPU state.
  *
- * Same shape as switch_to in context.S (eager save of full FP/SIMD
- * file). Cost: 16 stp pairs + 2 mrs + 1 stp = ~20 instructions +
- * 528 bytes of stack per IRQ on every ARM64 path. Acceptable
- * universal cost; there is no FPU-trap mechanism in this kernel
- * that would let us defer the save to first-use.
+ * Lazy save (CPACR_EL1.FPEN trap-on-FP-use, then save on first-use)
+ * is NOT implemented here. SLM-OS already eagerly saves the full
+ * q0-q31 + FPCR + FPSR file in `switch_to` (kernel/arch/arm64/
+ * context.S), so making the IRQ path also eager keeps both paths in
+ * the same model. Switching to lazy save would be a coordinated
+ * change across both paths and is out of scope for #750.
+ *
+ * Cost: 16 stp pairs + 2 mrs + 2 str = ~20 instructions + 528 bytes
+ * of stack per IRQ on every ARM64 path. Pi 5 hardware bench (#753):
+ * `bench irq` min jitter +112 ns (3% over baseline), p50/p99 within
+ * noise.
  */
 .macro save_regs
-    sub     sp, sp, #800            /* GPRs + ELR/SPSR + pad + q-regs + FPCR/FPSR */
+    sub     sp, sp, #TRAP_FRAME_ALLOC   /* GPRs + ELR/SPSR + pad + q-regs + FPCR/FPSR */
     stp     x0, x1, [sp, #0]
     stp     x2, x3, [sp, #16]
     stp     x4, x5, [sp, #32]
@@ -151,41 +160,47 @@ exception_vectors:
     stp     x28, x29, [sp, #224]
     str     x30, [sp, #240]
 
-    /* Save ELR and SPSR (KERN_ELR / KERN_SPSR resolve to elr_el2 /
-     * spsr_el2 on PLATFORM_RASPI5, elr_el1 / spsr_el1 elsewhere). */
+    /* Save ELR and SPSR. x0/x1 here are scratch — the original caller
+     * values were stored at offsets 0/8 above before this reuse.
+     * KERN_ELR / KERN_SPSR resolve to elr_el2 / spsr_el2 on
+     * PLATFORM_RASPI5 / PLATFORM_JETSON_ORIN_NANO, elr_el1 / spsr_el1
+     * elsewhere — see el_regs.h. */
     mrs     x0, KERN_ELR
     mrs     x1, KERN_SPSR
     stp     x0, x1, [sp, #248]
 
-    /* Save FP/SIMD register file (q0-q31). 16-byte aligned at offset
-     * 272 since stp q,q requires that alignment. Stride 0x20 (32B) per
-     * pair; covers the whole 512-byte register file. */
-    stp     q0,  q1,  [sp, #272]
-    stp     q2,  q3,  [sp, #304]
-    stp     q4,  q5,  [sp, #336]
-    stp     q6,  q7,  [sp, #368]
-    stp     q8,  q9,  [sp, #400]
-    stp     q10, q11, [sp, #432]
-    stp     q12, q13, [sp, #464]
-    stp     q14, q15, [sp, #496]
-    stp     q16, q17, [sp, #528]
-    stp     q18, q19, [sp, #560]
-    stp     q20, q21, [sp, #592]
-    stp     q22, q23, [sp, #624]
-    stp     q24, q25, [sp, #656]
-    stp     q26, q27, [sp, #688]
-    stp     q28, q29, [sp, #720]
-    stp     q30, q31, [sp, #752]
+    /* Save FP/SIMD register file (q0-q31). Base offset
+     * TRAP_FRAME_OFF_QREGS is pinned 16-byte-aligned by a static
+     * assertion in trap.h (stp q,q requires that). Stride 0x20 (32B)
+     * per pair; covers the whole 512-byte register file. */
+    stp     q0,  q1,  [sp, #(TRAP_FRAME_OFF_QREGS + 0)]
+    stp     q2,  q3,  [sp, #(TRAP_FRAME_OFF_QREGS + 32)]
+    stp     q4,  q5,  [sp, #(TRAP_FRAME_OFF_QREGS + 64)]
+    stp     q6,  q7,  [sp, #(TRAP_FRAME_OFF_QREGS + 96)]
+    stp     q8,  q9,  [sp, #(TRAP_FRAME_OFF_QREGS + 128)]
+    stp     q10, q11, [sp, #(TRAP_FRAME_OFF_QREGS + 160)]
+    stp     q12, q13, [sp, #(TRAP_FRAME_OFF_QREGS + 192)]
+    stp     q14, q15, [sp, #(TRAP_FRAME_OFF_QREGS + 224)]
+    stp     q16, q17, [sp, #(TRAP_FRAME_OFF_QREGS + 256)]
+    stp     q18, q19, [sp, #(TRAP_FRAME_OFF_QREGS + 288)]
+    stp     q20, q21, [sp, #(TRAP_FRAME_OFF_QREGS + 320)]
+    stp     q22, q23, [sp, #(TRAP_FRAME_OFF_QREGS + 352)]
+    stp     q24, q25, [sp, #(TRAP_FRAME_OFF_QREGS + 384)]
+    stp     q26, q27, [sp, #(TRAP_FRAME_OFF_QREGS + 416)]
+    stp     q28, q29, [sp, #(TRAP_FRAME_OFF_QREGS + 448)]
+    stp     q30, q31, [sp, #(TRAP_FRAME_OFF_QREGS + 480)]
 
     /* Save FPCR / FPSR. mrs reads each into a 64-bit GPR slot; the
      * upper half is RES0 in both registers. Use individual str (not
-     * stp) because offsets 784/792 are outside the stp x,x signed
-     * 7-bit *8 immediate range (-512..504); str has a 12-bit unsigned
-     * scaled immediate that comfortably reaches the end of this frame. */
+     * stp) because TRAP_FRAME_OFF_FPCR/FPSR (784/792) are outside
+     * the stp x,x signed 7-bit *8 immediate range (-512..504); str
+     * has a 12-bit unsigned scaled immediate that comfortably reaches
+     * the end of this frame. x0 reused as scratch — its original
+     * caller value is at offset 0. */
     mrs     x0, fpcr
-    str     x0, [sp, #784]
+    str     x0, [sp, #TRAP_FRAME_OFF_FPCR]
     mrs     x0, fpsr
-    str     x0, [sp, #792]
+    str     x0, [sp, #TRAP_FRAME_OFF_FPSR]
 .endm
 
 /*
@@ -231,29 +246,30 @@ exception_vectors:
      * actually exercise FPCR/FPSR — but keep the program-state-first,
      * data-second ordering consistent with switch_to in context.S).
      * Individual ldr (not ldp) for the same imm-range reason as the
-     * save side. */
-    ldr     x0, [sp, #784]
+     * save side. x0 reused as scratch — caller's value is restored
+     * from offset 0 below. */
+    ldr     x0, [sp, #TRAP_FRAME_OFF_FPCR]
     msr     fpcr, x0
-    ldr     x0, [sp, #792]
+    ldr     x0, [sp, #TRAP_FRAME_OFF_FPSR]
     msr     fpsr, x0
 
     /* Restore FP/SIMD register file. Stride matches save_regs above. */
-    ldp     q0,  q1,  [sp, #272]
-    ldp     q2,  q3,  [sp, #304]
-    ldp     q4,  q5,  [sp, #336]
-    ldp     q6,  q7,  [sp, #368]
-    ldp     q8,  q9,  [sp, #400]
-    ldp     q10, q11, [sp, #432]
-    ldp     q12, q13, [sp, #464]
-    ldp     q14, q15, [sp, #496]
-    ldp     q16, q17, [sp, #528]
-    ldp     q18, q19, [sp, #560]
-    ldp     q20, q21, [sp, #592]
-    ldp     q22, q23, [sp, #624]
-    ldp     q24, q25, [sp, #656]
-    ldp     q26, q27, [sp, #688]
-    ldp     q28, q29, [sp, #720]
-    ldp     q30, q31, [sp, #752]
+    ldp     q0,  q1,  [sp, #(TRAP_FRAME_OFF_QREGS + 0)]
+    ldp     q2,  q3,  [sp, #(TRAP_FRAME_OFF_QREGS + 32)]
+    ldp     q4,  q5,  [sp, #(TRAP_FRAME_OFF_QREGS + 64)]
+    ldp     q6,  q7,  [sp, #(TRAP_FRAME_OFF_QREGS + 96)]
+    ldp     q8,  q9,  [sp, #(TRAP_FRAME_OFF_QREGS + 128)]
+    ldp     q10, q11, [sp, #(TRAP_FRAME_OFF_QREGS + 160)]
+    ldp     q12, q13, [sp, #(TRAP_FRAME_OFF_QREGS + 192)]
+    ldp     q14, q15, [sp, #(TRAP_FRAME_OFF_QREGS + 224)]
+    ldp     q16, q17, [sp, #(TRAP_FRAME_OFF_QREGS + 256)]
+    ldp     q18, q19, [sp, #(TRAP_FRAME_OFF_QREGS + 288)]
+    ldp     q20, q21, [sp, #(TRAP_FRAME_OFF_QREGS + 320)]
+    ldp     q22, q23, [sp, #(TRAP_FRAME_OFF_QREGS + 352)]
+    ldp     q24, q25, [sp, #(TRAP_FRAME_OFF_QREGS + 384)]
+    ldp     q26, q27, [sp, #(TRAP_FRAME_OFF_QREGS + 416)]
+    ldp     q28, q29, [sp, #(TRAP_FRAME_OFF_QREGS + 448)]
+    ldp     q30, q31, [sp, #(TRAP_FRAME_OFF_QREGS + 480)]
 
     /* Restore ELR and SPSR (see KERN_ELR / KERN_SPSR in el_regs.h). */
     ldp     x0, x1, [sp, #248]
@@ -276,7 +292,7 @@ exception_vectors:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldr     x30, [sp, #240]
-    add     sp, sp, #800
+    add     sp, sp, #TRAP_FRAME_ALLOC
 .endm
 
 /*
