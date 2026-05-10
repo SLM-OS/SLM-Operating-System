@@ -177,7 +177,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 /* ---- GSP RISCV registers (offsets from NV_PGSP_RISCV_BASE) ----
  *
  * Used by phase 1 to start the HS ACR ucode in preloaded mode.
- * Register meanings per ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_priscv_ga10b.h. */
+ * Register meanings per ~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_priscv_ga10b.h. */
 
 #define RISCV_BOOT_VECTOR_LO        0x380u
 #define RISCV_BOOT_VECTOR_HI        0x384u
@@ -199,12 +199,12 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* ACR HS completion marker — written to MAILBOX0 by the ucode when
  * it runs. nvgpu's acr_sw_ga10b checks for ACR_OK. Exact constant
- * verified in ../slmos-reference-cache/nvidia/nvgpu-common-acr-acr_bootstrap.c. */
+ * verified in ~/slmos-ref/nvidia/nvgpu-common-acr-acr_bootstrap.c. */
 #define ACR_BOOT_OK                 0x000000ffu
 
 /* ---- FECS / GPCCS (GR Falcon) register offsets ----
  *
- * Offsets from ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_gr_ga10b.h (OE4T l4t-r36.5).
+ * Offsets from ~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_gr_ga10b.h (OE4T l4t-r36.5).
  * FECS is the GR front-end context-switch Falcon; GPCCS is per-GPC. On
  * GA10B cold boot (SEC_SECUREGPCCS path) ACR pre-loads both IMEM/DMEM
  * from WPR — SLM-OS only needs to issue STARTCPU and wait for the
@@ -244,7 +244,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  * here (not 1), and STRUCTURE_SIZE must be SEMAPHORE_ONE_WORD for
  * 32-bit payloads.
  *
- * Source: ../slmos-reference-cache/nvidia/nvgpu-include-class-clc7c0.h:109-142 */
+ * Source: ~/slmos-ref/nvidia/nvgpu-include-class-clc7c0.h:109-142 */
 #define NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_LOWER   0x0158u
 #define NVC7C0_SET_REPORT_SEMAPHORE_PAYLOAD_UPPER   0x015Cu
 #define NVC7C0_SET_REPORT_SEMAPHORE_ADDRESS_LOWER   0x0160u
@@ -257,13 +257,13 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* ---- COMPUTE_B compute-kernel launch methods --------------------
  * Used by ga10b_bringup_launch_kernel (Phase 8). Offsets from
- * ../slmos-reference-cache/mesa/mesa-clc7c0.h. */
+ * ~/slmos-ref/mesa/mesa-clc7c0.h. */
 #define NVC7C0_INVALIDATE_SHADER_CACHES               0x021cu
 #define NVC7C0_INVALIDATE_TEXTURE_HEADER_CACHE_NO_WFI 0x0244u
 #define NVC7C0_INVALIDATE_SKED_CACHES                 0x0298u
 
 /* INVALIDATE_SHADER_CACHES bitfields per
- * ../slmos-reference-cache/mesa/mesa-clc7c0.h:299-314 (bit positions
+ * ~/slmos-ref/mesa/mesa-clc7c0.h:299-314 (bit positions
  * decoded from "MSB:LSB" notation). All five bits set = nuke every
  * shader-side cache before the next dispatch reads input/cbuf data.
  *
@@ -285,7 +285,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
 
 /* Per-arch window base addresses for Ampere. Mesa NVK hardcodes these
  * for `VOLTA_COMPUTE_A <= cls_compute < HOPPER_COMPUTE_A` in
- * ../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c:63-79. */
+ * ~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c:63-79. */
 #define NVC7C0_SHARED_MEMORY_WINDOW_BASE 0xfe000000u
 #define NVC7C0_LOCAL_MEMORY_WINDOW_BASE  0xff000000u
 
@@ -392,7 +392,7 @@ int ga10b_firmware_get(enum ga10b_firmware_kind kind,
  * No channel, GMMU, or page tables required.
  *
  * Reference: nvgpu gm20b_gr_falcon_submit_fecs_method_op
- *   ../slmos-reference-cache/nvidia/nvgpu-gr-falcon-gm20b-fusa.c
+ *   ~/slmos-ref/nvidia/nvgpu-gr-falcon-gm20b-fusa.c
  */
 #define GR_FECS_METHOD_DATA         0x00409500u
 #define GR_FECS_METHOD_PUSH         0x00409504u
@@ -461,7 +461,7 @@ int ga10b_bringup_prepare(struct ga10b_bringup *b)
  * IMEM and ACR runs.
  *
  * This matches nvgpu_acr_bootstrap_hs_ucode_riscv in
- *   ../slmos-reference-cache/nvidia/nvgpu-common-acr-acr_bootstrap.c:360–419
+ *   ~/slmos-ref/nvidia/nvgpu-common-acr-acr_bootstrap.c:360–419
  * (preloaded BCR_CTRL=0x11 branch — we skip the 0x111 DMA path).
  *
  * On success the RISCV core runs, ACR authenticates FECS/GPCCS/(PMU),
@@ -490,7 +490,7 @@ static inline void bar0_w32(uint32_t off, uint32_t val)
  *   2. Wait 10+ µs
  *   3. Write ENGINE.RESET = 0       (deassert — crucial!)
  *
- * Reference: ../slmos-reference-cache/nvidia/nvgpu-hal-gsp-gsp_ga10b.c:54 ga10b_gsp_engine_reset.
+ * Reference: ~/slmos-ref/nvidia/nvgpu-hal-gsp-gsp_ga10b.c:54 ga10b_gsp_engine_reset.
  * Without the deassert write the engine stays in reset forever, and
  * HWCFG2/CPUCTL read back as PRI poison (0xbadfXXXX) — which is
  * exactly what we see on jetson-nano-2 after Linux's nvgpu detach.
@@ -736,8 +736,8 @@ int ga10b_bringup_acr(struct ga10b_bringup *b)
  * sentinel that the ucode writes as its first readiness signal.
  *
  * Reference:
- *   ../slmos-reference-cache/nvidia/nvgpu-common-gr-gr_falcon.c:737-738  — start_gpccs/start_fecs
- *   ../slmos-reference-cache/nvidia/nvgpu-hal-gr-falcon-gr_falcon_ga10b_fusa.c — mailbox plumbing
+ *   ~/slmos-ref/nvidia/nvgpu-common-gr-gr_falcon.c:737-738  — start_gpccs/start_fecs
+ *   ~/slmos-ref/nvidia/nvgpu-hal-gr-falcon-gr_falcon_ga10b_fusa.c — mailbox plumbing
  *
  * We split FECS and GPCCS into separate phases so the shell can invoke
  * them independently while iterating. The nvgpu driver issues them
@@ -845,7 +845,7 @@ int ga10b_bringup_gpccs(struct ga10b_bringup *b)
  * now we don't need PMU to submit a single NOP+SEMAPHORE method,
  * so skipping here is the pragmatic path.
  *
- * Reference: ../slmos-reference-cache/nvidia/nvgpu-common-acr-acr_sw_ga10b.c:417
+ * Reference: ~/slmos-ref/nvidia/nvgpu-common-acr-acr_sw_ga10b.c:417
  *   (lsf->is_lazy_bootstrap = g->support_ls_pmu ? true : false) */
 int ga10b_bringup_pmu(struct ga10b_bringup *b)
 {
@@ -880,7 +880,7 @@ int ga10b_bringup_pmu(struct ga10b_bringup *b)
  */
 
 /* GA10B UFLUSH register block (BAR0+0x70000-0x70010), per
- * ../slmos-reference-cache/nvidia/nvgpu-hw-ga10b-hw_flush_ga10b.h.
+ * ~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_flush_ga10b.h.
  * All four registers share the layout: bit 0 = PENDING_BUSY (write 1
  * to start the op), bit 1 = OUTSTANDING_TRUE. Op completes when both
  * bits read back 0. */
@@ -931,8 +931,13 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * instead of fetching fresh data we wrote at the same GPU VA, which
  * surfaces as the iter-1 "got nvgpu's helper output" race (#596).
  *
+ * Also called between dispatches via the post-launch coherency
+ * site in `ga10b_bringup_read_pipeline_output` (#722 originally
+ * landed a 3-point evict; #723 narrowed to post-launch only). Same
+ * UFLUSH sequence; same preconditions.
+ *
  * Sequence per gv11b_mm_l2_flush in
- * ../slmos-reference-cache/nvidia/nvgpu-hal-mm-cache-flush_gv11b_fusa.c
+ * ~/slmos-ref/nvidia/nvgpu-hal-mm-cache-flush_gv11b_fusa.c
  * (and kmemsysCacheOp_GM200 in OGKM):
  *
  *   1. fb_flush   — drain pending sysmem writes into L2
@@ -946,12 +951,31 @@ static int ga10b_uflush_op(uint32_t reg, const char *name)
  * comment. GK20A is the predecessor Tegra GPU; the same ordering applies
  * to GA10B.
  *
- * Lock-hold cost: callers run this under `g_gpu_dispatch_lock` with
- * IRQs disabled (see `ensure_bringup` in slm_ffi.c). Worst-case time
- * is 4 ops × ~500 µs/op ≈ 2 ms IRQ-off if every op hits its retry
- * limit. Typical post-kexec cold-state run is ~40 µs total (each op
- * completes in <10 µs per `ga10b_uflush_op`'s comment). Bounded and
- * well below the file's existing IRQ-off budgets. */
+ * Preconditions (all callers must hold):
+ *   - `g_gpu_dispatch_lock` IRQ-off (UFLUSH ops are not re-entrant
+ *     against concurrent dispatch from another context)
+ *   - GPU is quiescent on the active channel — either pre-handoff
+ *     (inherit), or after a prior dispatch's sema fired and before
+ *     the next submit's USERD GP_PUT write. The 100-retry budget in
+ *     `ga10b_uflush_op` was sized for this; if the GPU has in-flight
+ *     work targeting the same memory addresses, the L2_FLUSH_DIRTY
+ *     op may need the larger 2000-retry budget nvgpu uses.
+ *
+ * Caller logging policy: the inherit caller uses the
+ * `(void)ga10b_l2_evict_sysmem()` form because the failure mode
+ * (iter-1 stale-read race) is observable from the calling context.
+ * The post-launch dispatch caller surfaces failures explicitly
+ * because a timeout there silently returns stale logits to the FFI
+ * caller — there's no follow-up call to make the staleness visible.
+ *
+ * Lock-hold cost: 4 ops × ~500 µs/op ≈ 2 ms IRQ-off worst case if
+ * every op hits its retry limit. Typical run is ~40 µs total (each
+ * op completes in <10 µs per `ga10b_uflush_op`'s comment). One
+ * evict per dispatch (post-launch) — see
+ * `ga10b_bringup_read_pipeline_output` for the narrowing rationale
+ * (#723). Bounded and acceptable for MNIST workloads; not the right
+ * shape for SLM forward-path latency (see
+ * docs/gpu-qmd-per-dispatch-plan.md §Status). */
 int ga10b_l2_evict_sysmem(void)
 {
     if (!gsp_platform) return -1;
@@ -1210,10 +1234,21 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
      *      (model inference path).
      * v6: + input_buf_phys/size so SLM-OS can swap the model's input
      *      tensor at runtime (per-image MNIST classification).
-     * Phase 6 inherit accepts all five; launch_kernel version-gates
-     * at dispatch time (v3 minimum for single-shot, v5 for pipelines). */
+     * v7: + per-dispatch QMD pool (qmd_pool_phys/gpu_va/size_bytes/
+     *      n_slots). Prefix layout is identical to v6, so the
+     *      address/size/payload checks below all apply unchanged.
+     *      The v7-specific tail fields are validated later at the
+     *      dispatch path via `ga10b_v7_validate_handoff`. Without
+     *      v7 in this list the scanner rejects v7 handoffs and
+     *      reports "Handoff not found" even though the magic+kind
+     *      match — the bug that blocked end-to-end v7 inherit on
+     *      hardware until 2026-05-07.
+     * Phase 6 inherit accepts all six; launch_kernel version-gates
+     * at dispatch time (v3 minimum for single-shot, v5 for pipelines,
+     * v7 for the QMD-pool path). */
     if (h->version != 2 && h->version != 3 &&
-        h->version != 4 && h->version != 5 && h->version != 6) return -1;
+        h->version != 4 && h->version != 5 && h->version != 6 &&
+        h->version != 7) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
@@ -1377,6 +1412,21 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
      * for defense-in-depth. */
     g_handoff.pipeline_kind      = hoff->pipeline_kind;
 
+    /* v7 extension: per-dispatch QMD pool descriptor. Zero on v2..v6.
+     * Without these copies `ga10b_handoff_is_v7` returns false even
+     * when the helper published v7, so `ga10b_bringup_launch_kernel`
+     * falls through to the v5/v6 path and submits dispatches against
+     * the v7 ops' empty `qmd_gpu_va` fields — observed on hardware
+     * (issue #710) as "GP_GET advanced but payload didn't land" at
+     * the first op. The receiver is unconditionally version-7-shaped
+     * (the `_Static_assert sizeof(...) == 256` covers it), so the
+     * unconditional read is safe; older helpers leave these zero
+     * and `is_v7` correctly returns false. */
+    g_handoff.qmd_pool_phys      = hoff->qmd_pool_phys;
+    g_handoff.qmd_pool_gpu_va    = hoff->qmd_pool_gpu_va;
+    g_handoff.qmd_pool_size_bytes = hoff->qmd_pool_size_bytes;
+    g_handoff.qmd_pool_n_slots   = hoff->qmd_pool_n_slots;
+
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
                                 &g_handoff) < 0) {
@@ -1428,6 +1478,18 @@ uint32_t ga10b_bringup_active_pipeline_kind(void)
      * task is the only caller path today (slm_ffi.c's
      * ensure_*_bringup helpers). */
     return g_handoff.pipeline_kind;
+}
+
+const struct ga10b_channel_handoff *ga10b_bringup_handoff(void)
+{
+    /* g_handoff is zero-initialised; magic stays 0 until the
+     * channel-inherit phase copies a validated block in. Use that
+     * as the "loaded" signal so callers can detect the no-handoff
+     * case without inspecting individual fields. */
+    if (g_handoff.magic != GA10B_CHANNEL_HANDOFF_MAGIC) {
+        return NULL;
+    }
+    return &g_handoff;
 }
 
 /* ---- Phase 7: Pushbuffer submission (NOP + SEMAPHORE_RELEASE) ----
@@ -1999,46 +2061,44 @@ int ga10b_bringup_smoke_test_compute(struct ga10b_bringup *b)
  * take handoff + slot counter as parameters and a stub-submit
  * function pointer).
  */
-static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
+/* Internal worker — fires N v7 ops + 1 trailing semaphore release
+ * through g_handoff's QMD pool + pushbuf + GPFIFO + semaphore.
+ *
+ * Both the existing `ga10b_dispatch_v7_pipeline` (which reads ops
+ * from the inherited handoff's pipeline_ops_phys) and the new
+ * `slm_oplib_dispatch_v7_op` path (which builds ops in C memory)
+ * funnel through here. Decoupling the dispatch loop from the
+ * handoff-published ops array is what enables the operator-library
+ * dispatcher (#714, A.2) to fire arbitrary kernels without a
+ * MNIST-shaped pre-staged pipeline.
+ *
+ * Caller responsibilities:
+ *   - `b` is in CHANNEL_OPEN or METHOD_ACCEPTED state.
+ *   - `g_handoff` has its v7 resource fields populated
+ *     (qmd_pool, pushbuf, gpfifo, semaphore, userd, work_submit_token).
+ *   - `ops_v7` is non-NULL and `n > 0`. Each op's QMD-construction
+ *     fields (shader_gpu_va, cbuf_gpu_va, grid/block, regs/smem)
+ *     have valid values.
+ *   - If `ops_v7` lives in DRAM that the GPU may have written to
+ *     previously, the caller has already invalidated the array's
+ *     cache range (the dispatch path reads but doesn't write).
+ *
+ * Returns 0 on successful semaphore release within timeout, -1
+ * otherwise (with `b->last_error_phase = 8` set on hardware
+ * failure paths).
+ */
+int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
+                                       const struct ga10b_pipeline_op_v7 *ops_v7,
+                                       uint32_t n)
 {
-    enum ga10b_v7_validation_error verr =
-        ga10b_v7_validate_handoff(&g_handoff);
-    if (verr != GA10B_V7_OK) {
-        switch (verr) {
-        case GA10B_V7_ERR_OPS_PHYS_ZERO:
-            uart_puts("[GA10B-P8-v7] pipeline_n_ops > 0 but "
-                      "pipeline_ops_phys is zero\n");
-            break;
-        case GA10B_V7_ERR_OPS_EXCEED_CAP:
-            uart_printf("[GA10B-P8-v7] pipeline_n_ops=%lu exceeds "
-                        "GA10B_PIPELINE_V7_MAX_OPS=%u — refusing "
-                        "to dispatch (handoff likely corrupt)\n",
-                        (unsigned long)g_handoff.pipeline_n_ops,
-                        (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
-            break;
-        case GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT:
-            uart_printf("[GA10B-P8-v7] qmd_pool_size_bytes=%lu < "
-                        "qmd_pool_n_slots=%lu × %u — handoff "
-                        "inconsistent\n",
-                        (unsigned long)g_handoff.qmd_pool_size_bytes,
-                        (unsigned long)g_handoff.qmd_pool_n_slots,
-                        (unsigned)GA10B_QMD_SIZE_BYTES);
-            break;
-        case GA10B_V7_ERR_NULL_HANDOFF:
-            /* Unreachable in production — `ga10b_handoff_is_v7`
-             * already null-checks and we only enter this branch
-             * when it returned true. Defensive log so a future
-             * caller that skips `is_v7` still surfaces the bug
-             * instead of dispatching with garbage. */
-            uart_puts("[GA10B-P8-v7] handoff pointer is NULL — "
-                      "validate-after-is_v7 contract violated\n");
-            break;
-        case GA10B_V7_OK:
-            /* Unreachable — the outer `if (verr != OK)` rejects
-             * this case. Keeping the case label so a future
-             * addition to the enum prompts a -Wswitch warning. */
-            break;
-        }
+    if (b == NULL || ops_v7 == NULL || n == 0) {
+        return -1;
+    }
+    if (n > GA10B_PIPELINE_V7_MAX_OPS) {
+        uart_printf("[GA10B-P8-v7] inline n=%lu exceeds "
+                    "GA10B_PIPELINE_V7_MAX_OPS=%u\n",
+                    (unsigned long)n,
+                    (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
         b->last_error_phase = 8;
         return -1;
     }
@@ -2050,7 +2110,6 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
      * + headroom). With the post-#601 ring of 512, that allows up
      * to 255 ops per chain — vastly more than the ~8 a typical
      * MNIST or sched chain requires. */
-    uint32_t n = g_handoff.pipeline_n_ops;
     uint32_t total_entries = n + 1u;
     if (total_entries > (g_handoff.gpfifo_entries / 2u)) {
         uart_printf("[GA10B-P8-v7] %lu entries (%lu ops + 1 sema) "
@@ -2083,23 +2142,17 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
     }
 
     /* CPU-physical → identity-mapped CPU VA on Jetson. Same
-     * contract as the v3 dispatch fields and the v5/v6 ops array:
-     * the helper allocates these via nvmap into the IOVMM heap,
-     * where SMMU passthrough makes the CPU's view of the page
-     * numerically equal to the physical address. Holds at EL2
-     * with the unified DRAM map; would need an explicit
-     * phys-to-virt translation on any platform that doesn't
-     * identity-map. */
-    const struct ga10b_pipeline_op_v7 *ops_v7 =
-        (const struct ga10b_pipeline_op_v7 *)
-            (uintptr_t)g_handoff.pipeline_ops_phys;
+     * contract as the v3 dispatch fields: the helper allocates
+     * these via nvmap into the IOVMM heap, where SMMU passthrough
+     * makes the CPU's view of the page numerically equal to the
+     * physical address. Holds at EL2 with the unified DRAM map. */
     uint8_t *pool_va =
         (uint8_t *)(uintptr_t)g_handoff.qmd_pool_phys;
-    if (gsp_platform->cache_invalidate) {
-        gsp_platform->cache_invalidate(
-            (void *)ops_v7,
-            (size_t)n * sizeof(*ops_v7));
-    }
+    /* `ops_v7` cache-invalidate is the caller's responsibility
+     * — for the wrapper that reads from g_handoff, it lives in
+     * Linux-staged DRAM and needs invalidation; for the inline
+     * caller that built ops in C memory the writes are already
+     * coherent. */
 
     /* Pre-clear the poll target ONCE — the trailing sema entry is
      * the only writer. Pre-zero so a non-zero match below is
@@ -2117,8 +2170,34 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
 
     uint32_t gp_put_start = g_handoff.initial_gp_put;
     uint32_t ring_mask = g_handoff.gpfifo_entries - 1u;
-    uint64_t pushbuf_phys = g_handoff.pushbuf_phys;
-    uint64_t pushbuf_gpu_va = g_handoff.pushbuf_gpu_va;
+
+    /* Pushbuffer ring-buffer offset (#732 follow-up): each dispatch
+     * advances `g_pushbuf_ring_offset` so consecutive calls write
+     * into different bytes of the pushbuf. The "first dispatch
+     * passes, second hangs" failure with a fixed offset 0 was
+     * suspected to be PBDMA caching the first dispatch's PB at
+     * those exact bytes; rotating the write offset eliminates that
+     * confound. Wraps when `offset + total_pb_bytes` would exceed
+     * `pushbuf_size`.
+     *
+     * Single-threaded contract: this static counter assumes only
+     * one caller of `ga10b_dispatch_v7_pipeline_inline` is in
+     * flight at a time. The shell verb is the only caller today,
+     * and `slm_oplib_dispatch` polls the trailing semaphore before
+     * returning, so a second invocation can't race the first.
+     * Same assumption applies to `g_qmd_pool_next_slot` above. If
+     * a future caller fires this from a Lua-thread or scheduler
+     * task, both counters need `_Atomic uint32_t` + a CAS update,
+     * or a spinlock around the entire dispatch. */
+    static uint32_t g_pushbuf_ring_offset = 0u;
+    if ((uint64_t)g_pushbuf_ring_offset + total_pb_bytes >
+            g_handoff.pushbuf_size) {
+        g_pushbuf_ring_offset = 0u;
+    }
+    uint64_t pushbuf_phys =
+        g_handoff.pushbuf_phys + g_pushbuf_ring_offset;
+    uint64_t pushbuf_gpu_va =
+        g_handoff.pushbuf_gpu_va + g_pushbuf_ring_offset;
     volatile uint64_t *gpfifo =
         (volatile uint64_t *)(uintptr_t)g_handoff.gpfifo_phys;
 
@@ -2311,6 +2390,13 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
     g_handoff.initial_gp_put = new_gp_put;
     g_handoff.initial_gp_get = final_gp_get;
 
+    /* Advance the pushbuf ring offset so the next dispatch lands
+     * on fresh bytes. Round up to 256 B so each dispatch's PB
+     * region is well-separated (avoids any cacheline-aliasing
+     * concern in addition to PBDMA prefetch). */
+    g_pushbuf_ring_offset = (g_pushbuf_ring_offset +
+                              (uint32_t)total_pb_bytes + 255u) & ~255u;
+
     bool payload_matched =
         ga10b_poll_match(poll_val, GA10B_SEMA_RELEASE_PAYLOAD);
     if (payload_matched) {
@@ -2343,6 +2429,62 @@ static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
     }
     b->last_error_phase = 8;
     return -1;
+}
+
+/* Thin wrapper preserving the original
+ * `ga10b_dispatch_v7_pipeline(b)` entry-point: validates the v7
+ * handoff fields, reads the ops_v7 array from
+ * `g_handoff.pipeline_ops_phys`, cache-invalidates the array (it
+ * lives in Linux-staged DRAM the GPU may have touched), then
+ * dispatches via the inline worker. The MNIST path goes through
+ * here unchanged. */
+static int ga10b_dispatch_v7_pipeline(struct ga10b_bringup *b)
+{
+    enum ga10b_v7_validation_error verr =
+        ga10b_v7_validate_handoff(&g_handoff);
+    if (verr != GA10B_V7_OK) {
+        switch (verr) {
+        case GA10B_V7_ERR_OPS_PHYS_ZERO:
+            uart_puts("[GA10B-P8-v7] pipeline_n_ops > 0 but "
+                      "pipeline_ops_phys is zero\n");
+            break;
+        case GA10B_V7_ERR_OPS_EXCEED_CAP:
+            uart_printf("[GA10B-P8-v7] pipeline_n_ops=%lu exceeds "
+                        "GA10B_PIPELINE_V7_MAX_OPS=%u — refusing "
+                        "to dispatch (handoff likely corrupt)\n",
+                        (unsigned long)g_handoff.pipeline_n_ops,
+                        (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
+            break;
+        case GA10B_V7_ERR_POOL_SIZE_INSUFFICIENT:
+            uart_printf("[GA10B-P8-v7] qmd_pool_size_bytes=%lu < "
+                        "qmd_pool_n_slots=%lu × %u — handoff "
+                        "inconsistent\n",
+                        (unsigned long)g_handoff.qmd_pool_size_bytes,
+                        (unsigned long)g_handoff.qmd_pool_n_slots,
+                        (unsigned)GA10B_QMD_SIZE_BYTES);
+            break;
+        case GA10B_V7_ERR_NULL_HANDOFF:
+            uart_puts("[GA10B-P8-v7] handoff pointer is NULL — "
+                      "validate-after-is_v7 contract violated\n");
+            break;
+        case GA10B_V7_OK:
+            break;
+        }
+        b->last_error_phase = 8;
+        return -1;
+    }
+
+    uint32_t n = g_handoff.pipeline_n_ops;
+    const struct ga10b_pipeline_op_v7 *ops_v7 =
+        (const struct ga10b_pipeline_op_v7 *)
+            (uintptr_t)g_handoff.pipeline_ops_phys;
+    if (gsp_platform->cache_invalidate) {
+        gsp_platform->cache_invalidate(
+            (void *)ops_v7,
+            (size_t)n * sizeof(*ops_v7));
+    }
+
+    return ga10b_dispatch_v7_pipeline_inline(b, ops_v7, n);
 }
 
 int ga10b_bringup_launch_kernel(struct ga10b_bringup *b)
@@ -2631,20 +2773,85 @@ int ga10b_bringup_read_pipeline_output(struct ga10b_bringup *b,
 
     /* Resolve the LAST op's output_phys. Same identity-DRAM-mapping
      * assumption as the pipeline runner — physical address read from
-     * DRAM is also a valid VA SLM-OS can dereference at EL2. */
-    const struct ga10b_pipeline_op *ops =
-        (const struct ga10b_pipeline_op *)
-            (uintptr_t)g_handoff.pipeline_ops_phys;
-    const struct ga10b_pipeline_op *last =
-        &ops[g_handoff.pipeline_n_ops - 1u];
-    if (last->output_phys == 0u) return -1;
+     * DRAM is also a valid VA SLM-OS can dereference at EL2.
+     *
+     * Stride must match the on-disk op layout: 24 bytes on v5/v6
+     * (struct ga10b_pipeline_op), 80 bytes on v7 (struct
+     * ga10b_pipeline_op_v7). Both share `output_phys` at byte offset
+     * 8 in their prefix, but indexing as v6 across a v7 array reads
+     * from inside an earlier op's tail (op[N-1] under v6 stride lands
+     * inside op[(N-1)*3/10] under v7 stride for the MNIST 8-op
+     * shape). The helper sets v7 `expected_payload = 0` and `flags
+     * = 0` per op, so the bogus v6-cast read of `ops[7].output_phys`
+     * returns 0 and this function returned -1 even when v7 dispatch
+     * succeeded. Discovered via #710. */
+    uint64_t last_output_phys;
+    if (ga10b_handoff_is_v7(&g_handoff)) {
+        const struct ga10b_pipeline_op_v7 *ops =
+            (const struct ga10b_pipeline_op_v7 *)
+                (uintptr_t)g_handoff.pipeline_ops_phys;
+        last_output_phys = ops[g_handoff.pipeline_n_ops - 1u].output_phys;
+    } else {
+        const struct ga10b_pipeline_op *ops =
+            (const struct ga10b_pipeline_op *)
+                (uintptr_t)g_handoff.pipeline_ops_phys;
+        last_output_phys = ops[g_handoff.pipeline_n_ops - 1u].output_phys;
+    }
+    if (last_output_phys == 0u) return -1;
+
+    /* Post-dispatch L2 evict — load-bearing for #715. The trailing
+     * COMPUTE_SEMA_RELEASE entry in the dispatch fires with
+     * FLUSH_DISABLE=0, which is supposed to flush GPU writes through to
+     * sysmem before the sema release — but on GA10B silicon, hardware
+     * verification showed output reads still return stale data without
+     * an explicit L2 evict here. Drops any GPU L2 lines that hold this
+     * dispatch's output (writeback dirty lines + invalidate clean), so
+     * the CPU's subsequent cache_invalidate + memcpy reads fresh
+     * DRAM. Without this, two consecutive dispatches with different
+     * inputs return identical (stale) logits.
+     *
+     * #722 originally landed a 3-point evict at set_input + pre-launch
+     * + post-launch. The narrowing experiment in #723 (runtime mask
+     * gating each site, ABBA + AAAA on jetson-nano-2) showed
+     * post-launch is necessary AND sufficient: every passing subset
+     * includes this site, every failing subset omits it. The
+     * set_input and pre-launch evicts were redundant — and pre-launch
+     * without set_input wedged the channel mid-AAAA on two boots
+     * (PBDMA stopped seeing submits). Keeping only this site saves
+     * ~2/3 of the per-dispatch evict cost (~80 µs of #722's 120 µs).
+     *
+     * Why one site is enough: the UFLUSH sequence is a chip-wide L2
+     * op, not a per-buffer one. So this evict does double duty —
+     * it (a) flushes THIS dispatch's dirty output lines back to DRAM
+     * for the CPU read immediately below, and (b) invalidates ANY
+     * lines the GPU's LDG path may have cached for the NEXT
+     * dispatch's input/cbuf/shader/QMD reads. The set_input and
+     * pre-launch sites were targeting (b) directly, but the prior
+     * dispatch's post-launch site already covers it.
+     *
+     * Regression guard: the call-site count is pinned in
+     * `host-tools/gsp-harness/test_ga10b_bringup.c`
+     * (`test_l2_evict_call_sites_pinned_to_minimal`). A future PR
+     * that re-adds an evict at set_input or pre-launch without
+     * updating the test will fail at build time, not at
+     * hardware-debug time.
+     *
+     * Surface failures here. A timed-out evict on this site means the
+     * read below will return whatever was previously in DRAM at
+     * `last_output_phys` — exactly the off-by-one symptom #715 closed.
+     * Logging makes the silent-staleness regression visible without
+     * having to re-run the ABBA hardware test. */
+    if (ga10b_l2_evict_sysmem() < 0) {
+        uart_puts("[GA10B] post-dispatch L2 evict timed out — "
+                  "output read may return stale logits\n");
+    }
 
     /* Invalidate the buffer's cache range before the read. The GPU
      * wrote the data via its own (uncached-from-CPU's-perspective)
      * write path; without this, a stale cache line could mask the
      * fresh data. Same pattern as ga10b_submit_and_poll's poll
      * invalidate. */
-    const void *src = (const void *)(uintptr_t)last->output_phys;
+    const void *src = (const void *)(uintptr_t)last_output_phys;
     if (gsp_platform && gsp_platform->cache_invalidate) {
         gsp_platform->cache_invalidate((void *)src, cap);
     }

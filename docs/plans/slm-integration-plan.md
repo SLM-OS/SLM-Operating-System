@@ -1,7 +1,7 @@
 # SLM Integration — Implementation Plan
 
 Phased delivery plan for the spec in
-[`docs/specs/slm-integration.md`](../specs/slm-integration.md). Brings
+[`docs/design/slm-integration.md`](../design/slm-integration.md). Brings
 **Qwen2.5-1.5B-Instruct** end-to-end on the Jetson Orin Nano Super:
 upload → CLI launch → prompt → streaming response → live perf monitoring →
 GPU-accelerated inference.
@@ -464,7 +464,7 @@ reports.
   prefill + 256-token decode, three runs, reports min/avg/max.
 - ☐ Benchmark report committed to `docs/benchmarks.md` covering CPU and
   GPU paths on QEMU, Pi 5, and Jetson.
-- ☐ Update `docs/specs/slm-integration.md` matrix with measured ✅ vs goal
+- ☐ Update `docs/design/slm-integration.md` matrix with measured ✅ vs goal
   ✅.
 - ☐ Demo script `scripts/slm-demo.lua` for the capstone presentation.
 - ☐ User guide `docs/tutorials/slm-prompt.md`.
@@ -568,7 +568,7 @@ boot can:
 
 ## See also
 
-- [`docs/specs/slm-integration.md`](../specs/slm-integration.md) — the
+- [`docs/design/slm-integration.md`](../design/slm-integration.md) — the
   spec this plan implements
 - [`docs/onnx-support.md`](../onnx-support.md) — the parallel ONNX path
   (kept, not replaced)

@@ -164,7 +164,7 @@ This is the big one. Reuses almost all of the Falcon driver we already have, but
   ```
   These are nvgpu-native (not openrm / not nouveau). Source: L4T
   `drivers/gpu/nvgpu/common/acr/acr_bin.h`, `acr_blob_construct_*.c`.
-  **Not in `../slmos-reference-cache/` yet — must fetch before coding.**
+  **Not in `~/slmos-ref/` yet — must fetch before coding.**
 
 **Upload:**
 - Falcon DMA is the same as what we already do (256-byte chunks). `kernel/gpu/nvidia/falcon.c:falcon_dma_upload` works unchanged.
@@ -427,7 +427,7 @@ likely only need NETA (the default) — the B/C/D variants are for
 safety fault-reset paths. Format: same `bin_hdr` container, body is
 encrypted IMEM/DMEM pair.
 
-**Action item:** fetch the following L4T files into `../slmos-reference-cache/` before coding:
+**Action item:** fetch the following L4T files into `~/slmos-ref/` before coding:
 - `drivers/gpu/nvgpu/common/acr/acr_bin_interface.h`
 - `drivers/gpu/nvgpu/common/acr/acr_blob_construct.c` (or the version matching R36)
 - `drivers/gpu/nvgpu/include/nvgpu/firmware_hdr.h`
@@ -585,7 +585,7 @@ that:
 
 Before writing a single line of new kernel code:
 
-1. **Fetch L4T nvgpu sources** into `../slmos-reference-cache/`:
+1. **Fetch L4T nvgpu sources** into `~/slmos-ref/`:
    - `drivers/gpu/nvgpu/common/acr/acr_bin_interface.h`
    - `drivers/gpu/nvgpu/common/acr/acr_blob_construct_v1.c` (or matching R36 variant)
    - `drivers/gpu/nvgpu/include/nvgpu/firmware_hdr.h`
@@ -606,7 +606,7 @@ that exercises almost all of the existing Falcon driver.
 
 ## 11. References
 
-**Cached in `../slmos-reference-cache/`:**
+**Cached in `~/slmos-ref/`:**
 - `nouveau-nvfw-acr.h` — `wpr_header`, `lsb_header`, `flcn_acr_desc` (discrete-Ampere ACR shapes; related but not identical to Tegra ACR)
 - `nouveau-nvfw-flcn.h` — `loader_config`, `flcn_bl_dmem_desc` (Falcon bootloader descriptors)
 - `nouveau-falcon-hs-boot.md` — distilled HS boot + BROM register sequence (applies verbatim)

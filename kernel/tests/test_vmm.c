@@ -565,6 +565,316 @@ static void test_public_remap_invalidates_tlb(void)
 }
 
 /* ============================================================================
+ * #697 PR-2: Per-task TTBR0 L1 helpers
+ * ============================================================================ */
+
+/* The boot L1 is file-scoped static in vmm.c. Reach it via
+ * vmm_get_ttbr1() (returns the live TTBR1_EL1 register value). The
+ * register layout is BADDR[47:1] | CnP[0], with optional ASID in bits
+ * [63:48] (TCR_EL1.AS controlled). Mask to bits [47:12] to extract
+ * the table PA — survives a future ASID introduction. Identity-mapped,
+ * so the PA can be cast directly to uint64_t * for table reads. */
+#define BOOT_L1_PA()        (vmm_get_ttbr1() & 0x0000FFFFFFFFF000UL)
+
+/* Test: vmm_create_user_l1 returns a fresh, non-zero L1 PA. */
+static void test_create_user_l1_returns_fresh_pa(void)
+{
+    uint64_t pa1 = 0;
+    int rc = vmm_create_user_l1(&pa1);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_TRUE(pa1 != 0);
+    TEST_ASSERT_EQUAL_UINT64(0, pa1 & 0xFFF);   /* page-aligned */
+
+    uint64_t pa2 = 0;
+    rc = vmm_create_user_l1(&pa2);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    TEST_ASSERT_TRUE(pa2 != 0);
+    TEST_ASSERT_TRUE(pa1 != pa2);               /* distinct pages */
+
+    vmm_destroy_user_l1(pa1);
+    vmm_destroy_user_l1(pa2);
+}
+
+/* Test: kernel-region L1 entries (0..USER_L1_FIRST-1) mirror the boot L1.
+ * Read entries from both tables and verify byte-for-byte equality. */
+static void test_create_user_l1_mirrors_kernel_entries(void)
+{
+    uint64_t pa = 0;
+    int rc = vmm_create_user_l1(&pa);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    /* Identity-mapped: PA == VA for kernel pages. */
+    uint64_t *user_l1 = (uint64_t *)(uintptr_t)pa;
+    uint64_t *boot_l1 = (uint64_t *)(uintptr_t)BOOT_L1_PA();
+
+    /* Sample several kernel-region indices, including known mapped ones
+     * (L1[0] is MMIO, L1[1] is RAM on QEMU). */
+    for (size_t i = 0; i < USER_L1_FIRST; i++) {
+        TEST_ASSERT_EQUAL_HEX64(boot_l1[i], user_l1[i]);
+    }
+
+    vmm_destroy_user_l1(pa);
+}
+
+/* Test: user-region L1 entries (USER_L1_FIRST..USER_L1_LIMIT-1) are zero. */
+static void test_create_user_l1_zeros_user_entries(void)
+{
+    uint64_t pa = 0;
+    int rc = vmm_create_user_l1(&pa);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    uint64_t *user_l1 = (uint64_t *)(uintptr_t)pa;
+    for (size_t i = USER_L1_FIRST; i < USER_L1_LIMIT; i++) {
+        TEST_ASSERT_EQUAL_UINT64(0, user_l1[i]);
+    }
+
+    vmm_destroy_user_l1(pa);
+}
+
+/* Test: NULL out_pa returns -1 without allocating. */
+static void test_create_user_l1_rejects_null_out(void)
+{
+    int rc = vmm_create_user_l1(NULL);
+    TEST_ASSERT_EQUAL_INT(-1, rc);
+}
+
+/* Test: vmm_destroy_user_l1(0) is a no-op (does not panic, does not
+ * touch PMM). */
+static void test_destroy_user_l1_zero_is_noop(void)
+{
+    /* Should not crash, should not assert. */
+    vmm_destroy_user_l1(0);
+    TEST_PASS();
+}
+
+/* Test: create + destroy returns the L1 page to PMM (free count
+ * recovers). */
+static void test_create_destroy_user_l1_no_leak(void)
+{
+    struct pmm_stats before, after;
+    pmm_get_stats(&before);
+
+    uint64_t pa = 0;
+    int rc = vmm_create_user_l1(&pa);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+    vmm_destroy_user_l1(pa);
+
+    pmm_get_stats(&after);
+    /* Allocator may keep some metadata; require free count >= before
+     * (i.e. no net leak). */
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "PMM leaked pages across create+destroy");
+}
+
+/* Test (mmap follow-up): vmm_user_unmap_page clears the L3 entry and
+ * frees the leaf when VMM_FLAG_PMM_OWNED was set. Net PMM count
+ * recovers across map+unmap+destroy. */
+static void test_user_unmap_page_frees_pmm_owned(void)
+{
+    struct pmm_stats before, after;
+    pmm_get_stats(&before);
+
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    void *leaf = pmm_alloc_pages(1);
+    TEST_ASSERT_NOT_NULL(leaf);
+
+    uint64_t va = USER_VA_BASE + 0x10000;   /* arbitrary user-window page */
+    int rc = vmm_user_map_page(l1_pa, va, (uint64_t)(uintptr_t)leaf,
+                               VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    /* Unmap — should free the leaf and clear the L3 entry. A second
+     * call must fail because the slot is no longer mapped. */
+    TEST_ASSERT_EQUAL_INT(0, vmm_user_unmap_page(l1_pa, va));
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, va));
+
+    vmm_destroy_user_l1(l1_pa);
+
+    pmm_get_stats(&after);
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "PMM leaked across map+unmap+destroy");
+}
+
+/* Test: destroy walks L3 leaves and frees PMM_OWNED pages without
+ * the caller having to unmap them first. */
+static void test_destroy_user_l1_frees_owned_leaves(void)
+{
+    struct pmm_stats before, after;
+    pmm_get_stats(&before);
+
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    /* Map two PMM_OWNED pages and one un-owned page (kernel-image PA
+     * placeholder — we just borrow the boot-L1 PA for the test; the
+     * destroy path must leave it alone). */
+    void *p1 = pmm_alloc_pages(1);
+    void *p2 = pmm_alloc_pages(1);
+    TEST_ASSERT_NOT_NULL(p1);
+    TEST_ASSERT_NOT_NULL(p2);
+
+    uint64_t kernel_pa_placeholder = vmm_boot_l1_pa();   /* not allocated by us */
+
+    TEST_ASSERT_EQUAL_INT(0, vmm_user_map_page(l1_pa, USER_VA_BASE + 0x1000,
+                                               (uint64_t)(uintptr_t)p1,
+                                               VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED));
+    TEST_ASSERT_EQUAL_INT(0, vmm_user_map_page(l1_pa, USER_VA_BASE + 0x2000,
+                                               (uint64_t)(uintptr_t)p2,
+                                               VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED));
+    TEST_ASSERT_EQUAL_INT(0, vmm_user_map_page(l1_pa, USER_VA_BASE + 0x3000,
+                                               kernel_pa_placeholder,
+                                               VMM_FLAGS_USER_CODE));   /* no PMM_OWNED */
+
+    vmm_destroy_user_l1(l1_pa);
+
+    /* Both PMM_OWNED leaves should have been returned. The kernel-PA
+     * leaf must NOT have been freed (would corrupt the boot L1 free
+     * lists in PMM if it was). */
+    pmm_get_stats(&after);
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "destroy leaked PMM_OWNED leaves");
+}
+
+/* Test: out-of-range or unmapped VA returns -1 from unmap_page. */
+static void test_user_unmap_page_validation(void)
+{
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    /* VA below user window. */
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, USER_VA_BASE - PAGE_SIZE));
+    /* VA at the upper edge (== USER_VA_LIMIT, out of range). */
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, USER_VA_LIMIT));
+    /* Unaligned VA. */
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, USER_VA_BASE + 0x1));
+    /* Unmapped (no L2 yet). */
+    TEST_ASSERT_EQUAL_INT(-1, vmm_user_unmap_page(l1_pa, USER_VA_BASE));
+
+    vmm_destroy_user_l1(l1_pa);
+}
+
+/* ============================================================================
+ * ASID allocator (per-task TTBR0 ASID tagging).
+ * ============================================================================ */
+
+static void test_alloc_asid_returns_nonzero_unique(void)
+{
+    /* First two ASIDs out of the pool must both be non-zero (kernel
+     * ASID is reserved) and distinct. */
+    uint16_t a = vmm_alloc_asid();
+    uint16_t b = vmm_alloc_asid();
+    TEST_ASSERT_NOT_EQUAL(0, a);
+    TEST_ASSERT_NOT_EQUAL(0, b);
+    TEST_ASSERT_NOT_EQUAL(a, b);
+    TEST_ASSERT_TRUE(a <= VMM_USER_ASID_MAX);
+    TEST_ASSERT_TRUE(b <= VMM_USER_ASID_MAX);
+
+    vmm_free_asid(a);
+    vmm_free_asid(b);
+}
+
+static void test_alloc_asid_recycles_after_free(void)
+{
+    /* Free → re-alloc must hand back a previously-freed slot.
+     * (Allocator is a linear scan from slot 1, so the freed slot is
+     * the lowest free index by the time we re-alloc — but we only
+     * need to check that *some* slot is reused without exhausting
+     * the pool.) */
+    uint16_t a = vmm_alloc_asid();
+    TEST_ASSERT_NOT_EQUAL(0, a);
+    vmm_free_asid(a);
+    uint16_t b = vmm_alloc_asid();
+    TEST_ASSERT_EQUAL_UINT16(a, b);
+    vmm_free_asid(b);
+}
+
+static void test_free_asid_zero_noop(void)
+{
+    /* Freeing ASID 0 (kernel-reserved) and out-of-range values must
+     * be silent no-ops. The allocator's bitmap shouldn't underflow
+     * or trip a panic. */
+    vmm_free_asid(0);
+    vmm_free_asid(VMM_USER_ASID_MAX + 1);
+    vmm_free_asid(0xFFFF);
+    /* If any of those touched the bitmap, a fresh alloc might fail
+     * or hand back ASID 0; assert it doesn't. */
+    uint16_t a = vmm_alloc_asid();
+    TEST_ASSERT_NOT_EQUAL(0, a);
+    vmm_free_asid(a);
+}
+
+static void test_user_pte_has_ng_bit(void)
+{
+    /* User mappings must set PTE_NG (bit 11) so the hardware tags
+     * them with the active ASID. */
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    void *backing = pmm_alloc_pages(1);
+    TEST_ASSERT_NOT_NULL(backing);
+    uint64_t pa = (uint64_t)(uintptr_t)backing;
+
+    TEST_ASSERT_EQUAL_INT(0,
+        vmm_user_map_page(l1_pa, USER_VA_BASE, pa,
+                          VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED));
+
+    /* Walk the L1 to read the L3 entry directly and check nG. */
+    uint64_t *l1 = (uint64_t *)(uintptr_t)l1_pa;
+    uint64_t l1_idx = (USER_VA_BASE >> 30) & 0x1FF;
+    uint64_t l2_pa = l1[l1_idx] & PTE_ADDR_MASK;
+    uint64_t *l2 = (uint64_t *)(uintptr_t)l2_pa;
+    uint64_t l2_idx = (USER_VA_BASE >> 21) & 0x1FF;
+    uint64_t l3_pa = l2[l2_idx] & PTE_ADDR_MASK;
+    uint64_t *l3 = (uint64_t *)(uintptr_t)l3_pa;
+    uint64_t l3_idx = (USER_VA_BASE >> 12) & 0x1FF;
+    uint64_t pte = l3[l3_idx];
+
+    TEST_ASSERT_MESSAGE(pte & PTE_NG, "user PTE missing nG bit");
+
+    vmm_destroy_user_l1(l1_pa);
+}
+
+static void test_kernel_pte_global(void)
+{
+    /* Kernel-mapped pages walked from the boot L1 must have nG=0 so
+     * they apply across all ASIDs (no per-ASID retagging on TTBR0
+     * swap). Read the boot L1's L2/L3 chain for a known kernel VA —
+     * any page in the kernel image works. */
+    extern char __text_start[];
+    uint64_t kva = (uint64_t)(uintptr_t)__text_start;
+    /* Round to page boundary in case the symbol isn't aligned. */
+    kva &= ~(PAGE_SIZE - 1UL);
+
+    uint64_t l1_pa = vmm_boot_l1_pa();
+    uint64_t *l1 = (uint64_t *)(uintptr_t)l1_pa;
+    uint64_t l1_idx = (kva >> 30) & 0x1FF;
+    uint64_t l1_entry = l1[l1_idx];
+    /* L1 may be a 1 GB block (Pi 5 / Jetson) or a table descriptor
+     * (QEMU virt). Block descriptors carry the nG bit directly; for
+     * tables we walk to L2. */
+    if ((l1_entry & PTE_TYPE_MASK) == PTE_TYPE_BLOCK) {
+        TEST_ASSERT_MESSAGE(!(l1_entry & PTE_NG),
+            "kernel L1 block has nG=1");
+        return;
+    }
+    uint64_t *l2 = (uint64_t *)(uintptr_t)(l1_entry & PTE_ADDR_MASK);
+    uint64_t l2_idx = (kva >> 21) & 0x1FF;
+    uint64_t l2_entry = l2[l2_idx];
+    if ((l2_entry & PTE_TYPE_MASK) == PTE_TYPE_BLOCK) {
+        TEST_ASSERT_MESSAGE(!(l2_entry & PTE_NG),
+            "kernel L2 block has nG=1");
+        return;
+    }
+    uint64_t *l3 = (uint64_t *)(uintptr_t)(l2_entry & PTE_ADDR_MASK);
+    uint64_t l3_idx = (kva >> 12) & 0x1FF;
+    uint64_t l3_entry = l3[l3_idx];
+    TEST_ASSERT_MESSAGE(!(l3_entry & PTE_NG),
+        "kernel L3 page has nG=1");
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -604,6 +914,24 @@ int test_suite_vmm(void)
 
     /* PCIe BAR3→MIP0 routing (Pi 5 UART IRQ path) */
     RUN_TEST(test_bar3_mip0_routing);
+
+    /* #697 PR-2: per-task TTBR0 L1 helpers */
+    RUN_TEST(test_create_user_l1_returns_fresh_pa);
+    RUN_TEST(test_create_user_l1_mirrors_kernel_entries);
+    RUN_TEST(test_create_user_l1_zeros_user_entries);
+    RUN_TEST(test_create_user_l1_rejects_null_out);
+    RUN_TEST(test_destroy_user_l1_zero_is_noop);
+    RUN_TEST(test_create_destroy_user_l1_no_leak);
+    RUN_TEST(test_user_unmap_page_frees_pmm_owned);
+    RUN_TEST(test_destroy_user_l1_frees_owned_leaves);
+    RUN_TEST(test_user_unmap_page_validation);
+
+    /* ASID allocator (per-task TTBR0 ASID tagging follow-up) */
+    RUN_TEST(test_alloc_asid_returns_nonzero_unique);
+    RUN_TEST(test_alloc_asid_recycles_after_free);
+    RUN_TEST(test_free_asid_zero_noop);
+    RUN_TEST(test_user_pte_has_ng_bit);
+    RUN_TEST(test_kernel_pte_global);
 
     return UnityEnd();
 }

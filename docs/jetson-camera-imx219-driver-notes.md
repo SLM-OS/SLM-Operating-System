@@ -15,7 +15,7 @@ lives in this driver.
 - Ref used: `v6.12` (tag, fetched 2026-04-25). 1258 lines. The
   `master`-branch fallback was not needed.
 - Local cache:
-  `../slmos-reference-cache/linux/linux-imx219.c`
+  `~/slmos-ref/linux/linux-imx219.c`
 - License header (verbatim from the file):
   `// SPDX-License-Identifier: GPL-2.0`
 - Copyright: 2019 Raspberry Pi (Trading) Ltd, with derivation notices
@@ -48,7 +48,7 @@ question (see "Open questions").
 
 - Upstream URL:
   `https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/i2c/busses/i2c-tegra.c`
-- Local cache: `../slmos-reference-cache/linux/linux-i2c-tegra.c` (1979 lines, GPL-2.0)
+- Local cache: `~/slmos-ref/linux/linux-i2c-tegra.c` (1979 lines, GPL-2.0)
 - Why cached: the SLM-OS Tegra HSI2C controller driver (Pre-Hardware
   Task #1 in `jetson-camera-imx219-plan.md`) needs the `I2C_CNFG`,
   `I2C_STATUS`, `I2C_TX_FIFO`, `I2C_RX_FIFO`, packet-mode header
@@ -437,7 +437,7 @@ HSI2C controllers. The original SLM-OS port mirrored Tegra210 — and
 that's why CHIP_ID reads completed with `PACKET_XFER_COMPLETE` set
 but `RX_FIFO` empty (rc=-5). Pinned regression is in
 `kernel/tests/test_camera.c` (`I2C_T194_*` constants); cross-
-checked against `../slmos-reference-cache/linux/linux-i2c-tegra.c` `tegra194_i2c_hw`.
+checked against `~/slmos-ref/linux/linux-i2c-tegra.c` `tegra194_i2c_hw`.
 
 What changed on T194/T234:
 

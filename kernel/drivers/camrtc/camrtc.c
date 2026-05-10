@@ -2,8 +2,8 @@
  * camrtc.c — Tegra234 Camera RTCPU (RCE) HSP-VM transport.
  *
  * Implements the HSP-VM mailbox protocol L4T's `tegra-camera-rtcpu`
- * driver uses, distilled from `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-hsp-combo.c`
- * + `../slmos-reference-cache/tegra-l4t/l4t-camrtc-commands.h`. SLM-OS only needs the
+ * driver uses, distilled from `~/slmos-ref/tegra-l4t/l4t-rtcpu-hsp-combo.c`
+ * + `~/slmos-ref/tegra-l4t/l4t-camrtc-commands.h`. SLM-OS only needs the
  * HELLO / PROTOCOL / RESUME boot-sync (steps 7 of the L4T bring-up)
  * to establish a session; CH_SETUP and IVC ring construction land
  * in a follow-up commit.
@@ -71,7 +71,7 @@
 /* CAMRTC_HSP_MSG opcodes used only inside the driver (the boot-sync
  * sequence). Public opcodes that callers reference (IRQ, PING,
  * FW_HASH, CH_SETUP) live in `camrtc.h`. Full set in
- * `../slmos-reference-cache/tegra-l4t/l4t-camrtc-commands.h:42-77`. */
+ * `~/slmos-ref/tegra-l4t/l4t-camrtc-commands.h:42-77`. */
 #define CAMRTC_HSP_HELLO          0x40u
 #define CAMRTC_HSP_BYE            0x41u
 #define CAMRTC_HSP_RESUME         0x42u
@@ -95,7 +95,7 @@
 #define CAMRTC_VM_RX_SM_IDX       1u
 #define CAMRTC_VM_SS_IDX          0u
 
-/* SS register layout (per ../slmos-reference-cache/linux/linux-tegra-hsp.c). */
+/* SS register layout (per ~/slmos-ref/linux/linux-tegra-hsp.c). */
 #define HSP_SS_SHRD_SEM           0x0u
 #define HSP_SS_SHRD_SEM_SET       0x4u
 #define HSP_SS_SHRD_SEM_CLR       0x8u
@@ -246,7 +246,7 @@ static int sm_rx_recv(uint32_t *out_msg, uint32_t timeout_us)
  * frequently; the lower 24 bits are sufficiently entropic.
  *
  * Avoid 0: L4T's `camrtc_hsp_vm_cookie` (cached at
- * `../slmos-reference-cache/tegra-l4t/l4t-rtcpu-hsp-combo.c:310`) explicitly increments
+ * `~/slmos-ref/tegra-l4t/l4t-rtcpu-hsp-combo.c:310`) explicitly increments
  * past 0. Whether RCE treats cookie==0 specially is undocumented,
  * so mirror the defensive check rather than discover an edge case
  * the hard way. */
@@ -269,7 +269,7 @@ int camrtc_init(void)
      * inverse of this: sends `CAMRTC_HSP_BYE` to RCE, then calls
      * `tegra_camrtc_poweroff` which asserts `RESET_RCE_ALL` and
      * disables the rce clocks (cached at
-     * `../slmos-reference-cache/tegra-l4t/l4t-tegra-camera-rtcpu.c:893,1402`). After
+     * `~/slmos-ref/tegra-l4t/l4t-tegra-camera-rtcpu.c:893,1402`). After
      * kexec, R5 stops executing (clock-gated) even though
      * `R5_CTRL_0.FWLOADDONE` stays set. SLM-OS's HELLO writes to
      * SM[0] then sit forever because the HSP-VM ISR isn't running.
@@ -633,7 +633,7 @@ int camrtc_diag_dump(void)
  * Two constraints:
  *  1. RCE only accepts CH_SETUP IOVAs inside its compiled-in VM1
  *     aperture 0xA0000000..0xC0000000 (per
- *     `../slmos-reference-cache/tegra-l4t/l4t-binding-nvidia-tegra194-rce.txt:51-53`).
+ *     `~/slmos-ref/tegra-l4t/l4t-binding-nvidia-tegra194-rce.txt:51-53`).
  *     With SMMU translation disabled by Linux pre-kexec, RCE sees
  *     physical addresses directly, so the region must be a
  *     physical page in that aperture.

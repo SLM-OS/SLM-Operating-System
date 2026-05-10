@@ -154,7 +154,7 @@ void ga10b_qmd_populate(uint32_t *qmd,
      * ~83% iter-1 failure rate on the alternating-fill probe before
      * this fix). The cost is one membar per dispatch — measured in
      * nanoseconds at Tegra GPU clocks. Reference: NVC7C0_QMDV02_03
-     * field MW(369:368) per ../slmos-reference-cache/mesa/mesa-clc7c0qmd.h. */
+     * field MW(369:368) per ~/slmos-ref/mesa/mesa-clc7c0qmd.h. */
     ga10b_qmd_set_bits(qmd, GA10B_QMD_CWD_MEMBAR_TYPE_HI_BIT,
                        GA10B_QMD_CWD_MEMBAR_TYPE_LO_BIT,
                        GA10B_QMD_CWD_MEMBAR_TYPE_L1_SYSMEMBAR);
@@ -179,6 +179,19 @@ void ga10b_qmd_populate(uint32_t *qmd,
     ga10b_qmd_set_bits(qmd,
                        GA10B_QMD_CBUF_VALID_BASE + cbuf_idx,
                        GA10B_QMD_CBUF_VALID_BASE + cbuf_idx, 1u);
+    /* Force SKED to re-fetch cbuf[0] bytes from DRAM on every
+     * dispatch. Without this, when SLM-OS reuses a single cbuf
+     * page across consecutive dispatches (the
+     * `slm_oplib_dispatch` cbuf-pool path), SKED's cached cbuf
+     * bytes from the prior launch can starve the new launch's
+     * SM stage init — observed empirically as "first dispatch
+     * passes, second hangs" with PBDMA consuming both pushbuf
+     * entries but the trailing semaphore never firing. NVK sets
+     * this bit on every QMD via `qmd_impl_set_cbuf!(NONE,
+     * SHIFTED4)` for the same reason. */
+    ga10b_qmd_set_bits(qmd,
+                       GA10B_QMD_CBUF_INVALIDATE_BASE + cbuf_idx * 64u,
+                       GA10B_QMD_CBUF_INVALIDATE_BASE + cbuf_idx * 64u, 1u);
 }
 
 struct ga10b_qmd_pool_slot
@@ -211,6 +224,36 @@ ga10b_qmd_pool_prepare(uint8_t *pool_va,
                        op->register_count_v,
                        op->grid_x, op->grid_y, op->grid_z,
                        op->block_x, op->block_y, op->block_z);
+
+    /* HMMA / WMMA shaders ship with non-default barrier_count and
+     * shared-memory requirements that the v6 helper used to bake into
+     * its per-op QMD bytes (gpu-kernel-mnist.c sets BARRIER_COUNT=3
+     * and SHARED_MEMORY_SIZE=2048 for the FP32A×FP16W tensor-core GEMM).
+     * v7 builds the QMD per-dispatch from op fields; without these
+     * overrides the HMMA shader stalls op[N+1] (observed empirically as
+     * AddBias output staying all-zero for 5 s on Jetson GA10B).
+     *
+     * The v7 op fields are authoritative: write them unconditionally
+     * over whatever populate wrote. SIMT kernels send 0 in all three
+     * fields, which yields the same encoded bits as populate's zero
+     * defaults — but doing the write keeps the v7 path's behavior
+     * decoupled from any future change to the encoder defaults. The
+     * SLM field carries up to 24 bits (LOW half, ~16 MB ceiling); the
+     * HIGH half stays at populate's zero default since `slm_size_bytes`
+     * cannot exceed 32 bits and no realistic kernel approaches that. */
+    uint32_t *qmd = (uint32_t *)slot_va;
+    ga10b_qmd_set_bits(qmd,
+                       GA10B_QMD_SHARED_MEMORY_SIZE_HI,
+                       GA10B_QMD_SHARED_MEMORY_SIZE_LO,
+                       op->smem_size_bytes);
+    ga10b_qmd_set_bits(qmd,
+                       GA10B_QMD_SHADER_LOCAL_MEM_LOW_SIZE_HI,
+                       GA10B_QMD_SHADER_LOCAL_MEM_LOW_SIZE_LO,
+                       op->slm_size_bytes);
+    ga10b_qmd_set_bits(qmd,
+                       GA10B_QMD_BARRIER_COUNT_HI,
+                       GA10B_QMD_BARRIER_COUNT_LO,
+                       op->barrier_count);
 
     *slot_inout = (slot + 1u) % pool_n_slots;
 

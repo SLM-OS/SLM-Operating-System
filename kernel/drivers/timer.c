@@ -57,14 +57,53 @@ static inline uint64_t read_cntpct(void)
     return val;
 }
 
-static inline void write_cntp_ctl(uint64_t val)
+/* Pi 5 boots at EL2 with HCR_EL2.{E2H,TGE} = {1,1} (boot.S:560
+ * sets `(1<<34)|(1<<31)|(1<<27)` = E2H|RW|TGE). Per ARM ARM
+ * `CNTP_CTL_EL0` / `CNTP_TVAL_EL0` access rules (DDI 0487, register
+ * "Configurations" tables — RES0 from EL2 when the EL2&0 translation
+ * regime is in use), writes from EL2 in that mode are silently
+ * ignored. The VHE `_EL1`→`_EL2` register-name redirect does not
+ * cover the `_EL0` names, so writing `CNTP_CTL_EL0` here would be a
+ * no-op and the timer would never fire. The Hyp Physical Timer's
+ * `CNTHP_*_EL2` registers ARE what the firmware wires to PPI 26,
+ * and they have the same bit layout as the `CNTP_*_EL0` versions,
+ * so on Pi 5 we drive them directly while QEMU + x86 keep using the
+ * `_EL0` names from EL1 where the access is well-defined.
+ *
+ * Jetson runs at NS-EL2/VHE post-kexec exactly like Pi 5 — the same
+ * RES0 rule applies. Under JETSON_HW_TICK=ON we take the Pi 5 path
+ * (cnthp_*_el2 + PPI 26); without that flag the kernel-side code is
+ * inert (stock NVIDIA BL31 leaves PPIs Group 0 → trapped to EL3, so
+ * no timer IRQ delivers regardless), but we still need to avoid the
+ * RES0 write — without JETSON_HW_TICK we don't program the timer at
+ * all on Jetson, leaving COOP_PREEMPT to drive ticks at yield points.
+ */
+/* Add new VHE-platform entries to this disjunction. The criterion is
+ * "kernel runs at NS-EL2 with HCR_EL2.E2H=1" — anything that boots
+ * that way must drive cnthp_*_el2 directly, because writes to
+ * cntp_*_el0 from EL2 are RES0 in that mode. Tegra194/T210 ports
+ * would extend this gate similarly. */
+#if defined(PLATFORM_RASPI5) || \
+    (defined(PLATFORM_JETSON_ORIN_NANO) && defined(JETSON_HW_TICK))
+#define SLMOS_TIMER_USES_CNTHP_EL2 1
+#endif
+
+static inline void write_timer_ctl(uint64_t val)
 {
+#if defined(SLMOS_TIMER_USES_CNTHP_EL2)
+    __asm__ volatile("msr cnthp_ctl_el2, %0" :: "r"(val));
+#else
     __asm__ volatile("msr cntp_ctl_el0, %0" :: "r"(val));
+#endif
 }
 
-static inline void write_cntp_tval(int64_t val)
+static inline void write_timer_tval(int64_t val)
 {
+#if defined(SLMOS_TIMER_USES_CNTHP_EL2)
+    __asm__ volatile("msr cnthp_tval_el2, %0" :: "r"(val));
+#else
     __asm__ volatile("msr cntp_tval_el0, %0" :: "r"(val));
+#endif
 }
 
 /* Timer control bits (CNTP_CTL_EL0 — also the layout of CNTHP_CTL_EL2
@@ -89,7 +128,7 @@ void timer_init(void)
     DEBUG_PRINT("  Interval: %lu ticks (%d Hz)", timer_interval, TIMER_HZ);
 
     /* Disable timer while configuring */
-    write_cntp_ctl(0);
+    write_timer_ctl(0);
 
     /* Configure GIC for timer interrupt */
     gic_set_priority(ACTUAL_TIMER_IRQ, GIC_PRIORITY_DEFAULT);
@@ -105,10 +144,10 @@ void timer_init(void)
 void timer_start(void)
 {
     /* Set initial timer value */
-    write_cntp_tval(timer_interval);
+    write_timer_tval(timer_interval);
 
     /* Enable timer, unmask interrupt */
-    write_cntp_ctl(CNTP_CTL_ENABLE);
+    write_timer_ctl(CNTP_CTL_ENABLE);
 
     /* INFO print removed — called from per-CPU scheduler_start where
      * secondary CPUs cannot safely use uart_lock (L2 incoherency).
@@ -121,7 +160,7 @@ void timer_start(void)
 void timer_stop(void)
 {
     /* Disable timer */
-    write_cntp_ctl(0);
+    write_timer_ctl(0);
 
     INFO("Timer stopped");
 }
@@ -142,7 +181,7 @@ void timer_handler(void)
      * Read frequency from system register instead of cacheable timer_interval
      * because secondary CPUs' L2 may have stale data (0) for the variable,
      * causing an infinite IRQ storm (tval=0 → immediate re-fire). */
-    write_cntp_tval(read_cntfrq() / TIMER_HZ);
+    write_timer_tval(read_cntfrq() / TIMER_HZ);
 
     /* Call scheduler tick handler */
     scheduler_tick();
@@ -172,7 +211,7 @@ uint64_t timer_get_frequency(void)
 void timer_percpu_init(void)
 {
     /* Disable timer (will be started when scheduler runs on this core) */
-    write_cntp_ctl(0);
+    write_timer_ctl(0);
 
     /*
      * Enable timer interrupt in GIC for this CPU.

@@ -653,6 +653,106 @@ int cmd_sleep(int argc, char *argv[])
     return 0;
 }
 
+#if !defined(PLATFORM_X86_64)
+/* ============================================================================
+ * usertest - Smoke test for #697 EL0 user-mode execution.
+ *
+ * Creates a user task whose entry is `user_smoke_main` (in .text.user),
+ * adds it to the scheduler, and waits up to 1 s for it to terminate.
+ * The user task is expected to print "[USERTEST] hello\n" via SYS_LOG
+ * and exit via SYS_EXIT — proving the EL1 → EL0 → EL1 round-trip on
+ * the per-task TTBR0_EL1 from PR-3 actually works end-to-end.
+ * ============================================================================ */
+extern void user_smoke_main(void *arg);
+extern void user_mmap_smoke_main(void *arg);
+
+/* Embedded EL0 hello ELF (kernel/src/user_hello_embed.S). */
+extern const uint8_t user_hello_elf_start[];
+extern const uint8_t user_hello_elf_end[];
+
+/* Pin a freshly-created user task to this CPU, dispatch it, and
+ * yield-poll until the slot is reaped or TERMINATED. Shared between
+ * cmd_usertest, cmd_mmaptest, and cmd_userelf; the only difference
+ * between those commands is how the task is constructed (linker
+ * smoke vs ELF blob). Returns 0 on success or -1 on poll timeout. */
+static int run_user_task_until_exit(struct task *t, const char *cmd_name)
+{
+    task_set_affinity(t, cpu_id());
+    uint32_t task_id = t->id;
+    scheduler_add_task(t);
+
+    /* 100k yield cap absorbs cooperative-preempt delays on Pi 5 /
+     * Jetson without a wall-clock check; on QEMU resolves in a few
+     * yields. */
+    for (int i = 0; i < 100000; i++) {
+        struct task *cur = task_get(task_id);
+        if (!cur || cur->id != task_id) {
+            return 0;
+        }
+        if (cur->state == TASK_TERMINATED) {
+            return 0;
+        }
+        yield();
+    }
+
+    shell_printf("%s: timeout — user task did not exit\r\n", cmd_name);
+    return -1;
+}
+
+int cmd_usertest(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    struct task *t = task_create_user("usertest", user_smoke_main, NULL,
+                                      TASK_PRIORITY_DEFAULT);
+    if (!t) {
+        shell_puts("usertest: task_create_user failed\r\n");
+        return -1;
+    }
+    if (run_user_task_until_exit(t, "usertest") != 0) {
+        return -1;
+    }
+    shell_puts("usertest: ok\r\n");
+    return 0;
+}
+
+int cmd_mmaptest(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    struct task *t = task_create_user("mmaptest", user_mmap_smoke_main, NULL,
+                                      TASK_PRIORITY_DEFAULT);
+    if (!t) {
+        shell_puts("mmaptest: task_create_user failed\r\n");
+        return -1;
+    }
+    if (run_user_task_until_exit(t, "mmaptest") != 0) {
+        return -1;
+    }
+    shell_puts("mmaptest: ok\r\n");
+    return 0;
+}
+
+int cmd_userelf(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+    size_t blob_len = (size_t)(user_hello_elf_end - user_hello_elf_start);
+    struct task *t = task_create_user_elf("userelf",
+                                          user_hello_elf_start, blob_len,
+                                          TASK_PRIORITY_DEFAULT);
+    if (!t) {
+        shell_puts("userelf: task_create_user_elf failed\r\n");
+        return -1;
+    }
+    if (run_user_task_until_exit(t, "userelf") != 0) {
+        return -1;
+    }
+    shell_puts("userelf: ok\r\n");
+    return 0;
+}
+#endif /* !PLATFORM_X86_64 */
+
 /* ============================================================================
  * bench - Performance benchmarking
  *
@@ -3920,6 +4020,20 @@ int cmd_telemetry(int argc, char *argv[])
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../gpu/nvidia/ga10b_bringup.h"
+#include "../gpu/nvidia/ga10b_channel_handoff.h"
+#include "../gpu/nvidia/ga10b_gmmu.h"
+#include "oplib_pool.h"
+#include "oplib_probe.h"
+#include "oplib_dispatch.h"
+/* cache_clean_range / pmm_alloc_page are already pulled in via the
+ * earlier `gpu/gpu.h` and top-level `pmm.h` includes. Don't add
+ * `cache.h` here — gpu.h declares cache_clean_range as
+ * `void cache_clean_range(void *, size_t)` (the linked C ABI in
+ * `kernel/gpu/cache.c`) while `kernel/include/cache.h` declares it
+ * `static inline ... (const volatile void *, size_t)`; including
+ * both in the same TU triggers conflicting-types build errors.
+ * Pre-existing API inconsistency tracked separately; for this PR
+ * we use whichever declaration is already in scope. */
 
 /*
  * nvgpu - Jetson GA10B nvgpu-native bringup driver (ACR → FECS → GPCCS
@@ -3931,6 +4045,401 @@ int cmd_telemetry(int argc, char *argv[])
  *   nvgpu run            Attempt all phases end-to-end
  *   nvgpu info           Show firmware inventory only
  */
+/* GA10B BAR0 base + GR/PBDMA register byte offsets used by the
+ * `nvgpu engine-status` and `engine-clear` shell verbs. The BAR0
+ * base mirrors `GA10B_BAR0_BASE` in kernel/gpu/nvidia/ga10b_gmmu.c
+ * (file-static there); these are spelled out here rather than
+ * exported via a header because they're used only at this single
+ * call site. PBDMA[0] uses the i=0 stride of pbdma_*_r(i); GR
+ * registers are non-indexed. All offsets sourced from
+ * ~/slmos-ref/nvidia/nvgpu-include-nvgpu-hw-ga10b/
+ * hw_pbdma_ga10b.h and hw_gr_ga10b.h. */
+#define ENG_BAR0_BASE              0x17000000ull
+#define ENG_PBDMA0_INTR_0          0x00040108u   /* pbdma_intr_0_r(0) */
+#define ENG_PBDMA0_STATUS_SCHED    0x0004015cu   /* pbdma_status_sched_r(0) */
+#define ENG_PBDMA0_SUBDEVICE       0x00040094u   /* pbdma_subdevice_r(0) */
+#define ENG_PBDMA0_PB_HEADER       0x00040084u   /* pbdma_pb_header_r(0) */
+#define ENG_PBDMA0_ACQUIRE         0x00040010u   /* pbdma_acquire_r(0) */
+#define ENG_GR_INTR                0x00400100u   /* gr_intr_r() */
+#define ENG_GR_EXCEPTION           0x00400108u   /* gr_exception_r() */
+#define ENG_GR_STATUS              0x00400700u   /* gr_status_r() */
+#define ENG_GR_STATUS_1            0x00400604u   /* gr_status_1_r() */
+#define ENG_GR_ENGINE_STATUS       0x0040060cu   /* gr_engine_status_r() */
+
+static volatile uint32_t *eng_bar0(void)
+{
+    return (volatile uint32_t *)(uintptr_t)ENG_BAR0_BASE;
+}
+
+static int cmd_nvgpu_engine_clear(void)
+{
+    /* Attempt write-1-to-clear on `gr_intr_r` and `gr_exception_r`
+     * — nvgpu's gr_intr_handle pattern (`writel(gr_intr_r,
+     * U32_MAX)`) does this from the kernel driver.
+     *
+     * EMPIRICAL: Verified twice on jetson-nano-1 (PR #747) that
+     * the writes appear to be accepted (no fault) but the
+     * registers do NOT change value. Either the GA10B PRIv
+     * firewall blocks writes from NS-EL2 even where reads work,
+     * or `gr_exception.gpc` is a status rollup whose underlying
+     * per-GPC exception state must be cleared at
+     * `gr_pri_gpc{N}_exception_r` (0x00501xxx range) before the
+     * top-level rollup will reset. The verb is still useful as a
+     * confirmation tool — running it and seeing pre==post is
+     * the diagnostic. Real clearing of GPC-rooted exceptions
+     * needs per-GPC writes, which requires a way to clear the
+     * underlying SM hww_warp_esr / hww_global_esr first; those
+     * are `peek 0x17504730 / 0x17504734`-accessible and
+     * `poke ... 0` empirically does clear them (see PR #747
+     * commit message for the BSSY barrier-slot diagnosis chain
+     * that used this). */
+    volatile uint32_t *bar = eng_bar0();
+    uint32_t prev_intr = bar[ENG_GR_INTR / 4u];
+    uint32_t prev_exc  = bar[ENG_GR_EXCEPTION / 4u];
+    bar[ENG_GR_INTR      / 4u] = 0xFFFFFFFFu;
+    bar[ENG_GR_EXCEPTION / 4u] = 0xFFFFFFFFu;
+    __asm__ volatile("dsb sy" ::: "memory");
+    uint32_t new_intr = bar[ENG_GR_INTR / 4u];
+    uint32_t new_exc  = bar[ENG_GR_EXCEPTION / 4u];
+    shell_printf("engine-clear: gr_intr 0x%08x -> 0x%08x, "
+                 "gr_exception 0x%08x -> 0x%08x%s\r\n",
+                 (unsigned)prev_intr, (unsigned)new_intr,
+                 (unsigned)prev_exc, (unsigned)new_exc,
+                 (prev_intr == new_intr && prev_exc == new_exc)
+                     ? " (writes ignored — see verb comment)"
+                     : "");
+    return 0;
+}
+
+/* PBDMA[0] status block of `engine-status`, split out for
+ * readability. Decodes `pbdma_intr_0` pending bits, the
+ * `status_sched` channel-status enum, and the subdevice
+ * active/DMA-enable bits. */
+static void engine_status_dump_pbdma(volatile uint32_t *bar)
+{
+    uint32_t pbdma_intr_0       = bar[ENG_PBDMA0_INTR_0       / 4u];
+    uint32_t pbdma_status_sched = bar[ENG_PBDMA0_STATUS_SCHED / 4u];
+    uint32_t pbdma_subdevice    = bar[ENG_PBDMA0_SUBDEVICE    / 4u];
+    uint32_t pbdma_pb_header    = bar[ENG_PBDMA0_PB_HEADER    / 4u];
+    uint32_t pbdma_acquire      = bar[ENG_PBDMA0_ACQUIRE      / 4u];
+
+    shell_printf("\r\n=== PBDMA[0] ===\r\n");
+    shell_printf("  intr_0       = 0x%08x  ",
+                 (unsigned)pbdma_intr_0);
+    if (pbdma_intr_0 != 0) {
+        shell_printf("(");
+        if (pbdma_intr_0 & 0x2000u)   shell_printf("gpfifo ");
+        if (pbdma_intr_0 & 0x4000u)   shell_printf("gpptr ");
+        if (pbdma_intr_0 & 0x8000u)   shell_printf("gpentry ");
+        if (pbdma_intr_0 & 0x10000u)  shell_printf("gpcrc ");
+        if (pbdma_intr_0 & 0x20000u)  shell_printf("pbptr ");
+        if (pbdma_intr_0 & 0x40000u)  shell_printf("pbentry ");
+        if (pbdma_intr_0 & 0x80000u)  shell_printf("pbcrc ");
+        if (pbdma_intr_0 & 0x200000u) shell_printf("method ");
+        if (pbdma_intr_0 & 0x800000u) shell_printf("device ");
+        shell_printf(")\r\n");
+    } else {
+        shell_printf("(no pending interrupts)\r\n");
+    }
+
+    unsigned tsgid = (unsigned)(pbdma_status_sched & 0xfffu);
+    unsigned chan_status = (unsigned)((pbdma_status_sched >> 13) & 0x7u);
+    unsigned next_tsgid = (unsigned)((pbdma_status_sched >> 16) & 0xfffu);
+    const char *cs_name;
+    switch (chan_status) {
+        case 0: cs_name = "invalid"; break;
+        case 1: cs_name = "valid"; break;
+        case 5: cs_name = "chsw_save"; break;
+        case 6: cs_name = "chsw_load"; break;
+        case 7: cs_name = "chsw_switch"; break;
+        default: cs_name = "?"; break;
+    }
+    shell_printf("  status_sched = 0x%08x  (tsgid=%u next_tsgid=%u "
+                 "chan_status=%u/%s)\r\n",
+                 (unsigned)pbdma_status_sched,
+                 tsgid, next_tsgid, chan_status, cs_name);
+
+    unsigned subdev_id = (unsigned)(pbdma_subdevice & 0xfffu);
+    bool subdev_active = (pbdma_subdevice & 0x10000000u) != 0;
+    bool subdev_dma = (pbdma_subdevice & 0x20000000u) != 0;
+    shell_printf("  subdevice    = 0x%08x  (id=%u active=%d dma_en=%d)"
+                 "\r\n",
+                 (unsigned)pbdma_subdevice,
+                 subdev_id, subdev_active, subdev_dma);
+
+    shell_printf("  pb_header    = 0x%08x\r\n",
+                 (unsigned)pbdma_pb_header);
+    shell_printf("  acquire      = 0x%08x\r\n",
+                 (unsigned)pbdma_acquire);
+}
+
+/* GR engine status block of `engine-status`, split out for
+ * readability. Decodes `gr_exception` (top-level rollup of
+ * fe/memfmt/pd/scc/ds/ssync/mme/sked/mme_fe1/gpc), and the
+ * `gr_status` busy + fe-method-upper/lower flags. Note that
+ * GR registers read 0xbadf1002 (PRI poison) when FECS is idle
+ * — they only become readable after at least one channel
+ * dispatch has woken the GR engine. */
+static void engine_status_dump_gr(volatile uint32_t *bar)
+{
+    uint32_t gr_intr           = bar[ENG_GR_INTR          / 4u];
+    uint32_t gr_exception      = bar[ENG_GR_EXCEPTION     / 4u];
+    uint32_t gr_status         = bar[ENG_GR_STATUS        / 4u];
+    uint32_t gr_status_1       = bar[ENG_GR_STATUS_1      / 4u];
+    uint32_t gr_engine_status  = bar[ENG_GR_ENGINE_STATUS / 4u];
+
+    shell_printf("\r\n=== GR ===\r\n");
+    shell_printf("  intr         = 0x%08x  %s\r\n",
+                 (unsigned)gr_intr,
+                 gr_intr == 0 ? "(no pending)" : "(pending!)");
+    shell_printf("  exception    = 0x%08x  ",
+                 (unsigned)gr_exception);
+    if (gr_exception != 0) {
+        shell_printf("(");
+        if (gr_exception & 0x1u)        shell_printf("fe ");
+        if (gr_exception & 0x2u)        shell_printf("memfmt ");
+        if (gr_exception & 0x4u)        shell_printf("pd ");
+        if (gr_exception & 0x8u)        shell_printf("scc ");
+        if (gr_exception & 0x10u)       shell_printf("ds ");
+        if (gr_exception & 0x20u)       shell_printf("ssync ");
+        if (gr_exception & 0x80u)       shell_printf("mme ");
+        if (gr_exception & 0x100u)      shell_printf("sked ");
+        if (gr_exception & 0x200u)      shell_printf("mme_fe1 ");
+        if (gr_exception & 0x1000000u)  shell_printf("gpc ");
+        shell_printf(")\r\n");
+    } else {
+        shell_printf("(no exception)\r\n");
+    }
+    bool gr_busy = (gr_status & 0x1u) != 0;
+    bool gr_fe_method_upper = (gr_status & 0x2u) != 0;
+    bool gr_fe_method_lower = (gr_status & 0x4u) != 0;
+    shell_printf("  status       = 0x%08x  (busy=%d fe_method_upper=%d "
+                 "fe_method_lower=%d)\r\n",
+                 (unsigned)gr_status,
+                 gr_busy, gr_fe_method_upper, gr_fe_method_lower);
+    shell_printf("  status_1     = 0x%08x\r\n",
+                 (unsigned)gr_status_1);
+    shell_printf("  engine_status= 0x%08x\r\n",
+                 (unsigned)gr_engine_status);
+    shell_printf("\r\n");
+}
+
+static int cmd_nvgpu_engine_status(void)
+{
+    /* Read GR + PBDMA engine status registers from BAR0 and
+     * decode key fields. Diagnosis tool for the "first dispatch
+     * passes, second hangs" failure mode (PR #744 follow-up,
+     * PR #747 root-causing). Run before and after a stalled
+     * dispatch to localize the wedged engine. PBDMA[0] is the
+     * only instance our channel uses (channel 0, PBDMA stride
+     * 2048 bytes). */
+    volatile uint32_t *bar = eng_bar0();
+    engine_status_dump_pbdma(bar);
+    engine_status_dump_gr(bar);
+    return 0;
+}
+
+/* ============================================================================
+ * `nvgpu oplib smoke <op_kind>` per-op fixtures
+ * ============================================================================
+ *
+ * Each fixture builder memsets the op's input buffers to zero, issues
+ * cache_clean_range so the GPU sees the zeros, populates the dispatcher
+ * args struct, and reports the output region (phys/va/bytes) the
+ * smoke verb needs to pre-fill with the 0xCAFE sentinel and verify
+ * post-dispatch. The "all-zero inputs → all-zero output" property
+ * holds for every SLM op (see the smoke verb's header comment for
+ * the per-op math).
+ *
+ * Output buffers are NOT pre-filled here — the smoke verb does that
+ * after every fixture is built so the sentinel writes are sequenced
+ * after any input cache_clean_range that might also touch the
+ * output's cacheline (relevant for GQA_ATTN where Q and out share
+ * slot 0 across two pages). */
+
+static void smoke_fixture_rmsnorm(uint64_t base_phys, uint64_t base_gva,
+                                   struct operator_dispatch_args *args,
+                                   uint64_t *out_phys, uint64_t *out_va,
+                                   uint64_t *out_bytes)
+{
+    /* x[1×256] FP16, gamma[256] FP16, out[1×256] FP16. */
+    uint32_t n = 256u;
+    uint64_t in_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t in_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t gam_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t gam_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+    memset((void *)(uintptr_t)in_phys,  0, n * 2u);
+    memset((void *)(uintptr_t)gam_phys, 0, n * 2u);
+    cache_clean_range((void *)(uintptr_t)in_phys,  4096u);
+    cache_clean_range((void *)(uintptr_t)gam_phys, 4096u);
+    args->u.rmsnorm.x_gpu_va     = in_va;
+    args->u.rmsnorm.gamma_gpu_va = gam_va;
+    args->u.rmsnorm.out_gpu_va   = *out_va;
+    args->u.rmsnorm.n_rows       = 1u;
+    args->u.rmsnorm.n            = n;
+    args->u.rmsnorm.eps_bits     = 0x358637BDu;
+    *out_bytes = (uint64_t)n * 2u;
+}
+
+static void smoke_fixture_embedding(uint64_t base_phys, uint64_t base_gva,
+                                     struct operator_dispatch_args *args,
+                                     uint64_t *out_phys, uint64_t *out_va,
+                                     uint64_t *out_bytes)
+{
+    /* Q4_K table[1 token × 1 super-block (144 B)], out[256] FP16. */
+    uint64_t tbl_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t tbl_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    memset((void *)(uintptr_t)tbl_phys, 0, 144u);
+    cache_clean_range((void *)(uintptr_t)tbl_phys, 4096u);
+    args->u.embedding.table_gpu_va     = tbl_va;
+    args->u.embedding.out_gpu_va       = *out_va;
+    args->u.embedding.token_id         = 0u;
+    args->u.embedding.embedding_length = 256u;
+    args->u.embedding.table_row_bytes  = 144u;
+    *out_bytes = 256u * 2u;
+}
+
+static void smoke_fixture_q4k_dequant(uint64_t base_phys, uint64_t base_gva,
+                                       struct operator_dispatch_args *args,
+                                       uint64_t *out_phys, uint64_t *out_va,
+                                       uint64_t *out_bytes)
+{
+    /* 1 super-block in / 256 FP16 out. */
+    uint64_t blk_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t blk_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    memset((void *)(uintptr_t)blk_phys, 0, 144u);
+    cache_clean_range((void *)(uintptr_t)blk_phys, 4096u);
+    args->u.q4k_dequant.blocks_gpu_va = blk_va;
+    args->u.q4k_dequant.out_gpu_va    = *out_va;
+    args->u.q4k_dequant.nb            = 1u;
+    *out_bytes = 256u * 2u;
+}
+
+static void smoke_fixture_swiglu(uint64_t base_phys, uint64_t base_gva,
+                                  struct operator_dispatch_args *args,
+                                  uint64_t *out_phys, uint64_t *out_va,
+                                  uint64_t *out_bytes)
+{
+    /* gate=0[256] up=0[256] → out=0[256] FP16. */
+    uint32_t n = 256u;
+    uint64_t gate_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t gate_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t up_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t up_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+    memset((void *)(uintptr_t)gate_phys, 0, n * 2u);
+    memset((void *)(uintptr_t)up_phys,   0, n * 2u);
+    cache_clean_range((void *)(uintptr_t)gate_phys, 4096u);
+    cache_clean_range((void *)(uintptr_t)up_phys,   4096u);
+    args->u.swiglu.gate_gpu_va = gate_va;
+    args->u.swiglu.up_gpu_va   = up_va;
+    args->u.swiglu.out_gpu_va  = *out_va;
+    args->u.swiglu.n           = n;
+    *out_bytes = (uint64_t)n * 2u;
+}
+
+static void smoke_fixture_q4k_dot(uint64_t base_phys, uint64_t base_gva,
+                                   struct operator_dispatch_args *args,
+                                   uint64_t *out_phys, uint64_t *out_va,
+                                   uint64_t *out_bytes)
+{
+    /* x[256] FP16, weights[1 row × 1 super-block = 144 B Q4_K-zero],
+     * out[1] FP32. K=256, N=1. */
+    uint64_t x_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t x_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t w_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t w_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+    memset((void *)(uintptr_t)x_phys, 0, 256u * 2u);
+    memset((void *)(uintptr_t)w_phys, 0, 144u);
+    cache_clean_range((void *)(uintptr_t)x_phys, 4096u);
+    cache_clean_range((void *)(uintptr_t)w_phys, 4096u);
+    args->u.q4k_dot.x_gpu_va       = x_va;
+    args->u.q4k_dot.weights_gpu_va = w_va;
+    args->u.q4k_dot.out_gpu_va     = *out_va;
+    args->u.q4k_dot.k              = 256u;
+    args->u.q4k_dot.n              = 1u;
+    *out_bytes = 1u * 4u;     /* FP32 */
+}
+
+static void smoke_fixture_gqa_attn(uint64_t base_phys, uint64_t base_gva,
+                                    struct operator_dispatch_args *args,
+                                    uint64_t *out_phys, uint64_t *out_va,
+                                    uint64_t *out_bytes)
+{
+    /* Realistic-ish fixture: 2 Q × 1 KV × 128 head_dim, seq_len=4.
+     * All-zero inputs → all-zero output.
+     *   Q   = 2 × 128 × 2 =  512 B  (slot 0 + 0x0000)
+     *   K   = 4 × 128 × 2 = 1024 B  (slot 1)
+     *   V   = 4 × 128 × 2 = 1024 B  (slot 2)
+     *   out = 2 × 128 × 2 =  512 B  (slot 0 + 0x1000 sub-page)
+     * head_dim=128 matches BLOCK_DIM so all threads work in phase 3;
+     * seq_len=4 exercises the multi-position softmax path. Q and out
+     * share slot 0 across two 4 KB sub-pages — slot 4 isn't usable
+     * because the helper's 1 MB nvmap allocation may not be physically
+     * contiguous past the first few slots (phys-direct CPU reads then
+     * see stale data); slots 0-2 are proven-contig by the existing
+     * dispatch-rmsnorm/dispatch-rope smokes. */
+    uint32_t hd = 128u;
+    uint32_t sl = 4u;
+    uint64_t q_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t q_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t k_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t k_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t v_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t v_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+    *out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
+    *out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
+    memset((void *)(uintptr_t)q_phys, 0, 2u * hd * 2u);
+    memset((void *)(uintptr_t)k_phys, 0, sl * hd * 2u);
+    memset((void *)(uintptr_t)v_phys, 0, sl * hd * 2u);
+    cache_clean_range((void *)(uintptr_t)q_phys, 4096u);
+    cache_clean_range((void *)(uintptr_t)k_phys, 4096u);
+    cache_clean_range((void *)(uintptr_t)v_phys, 4096u);
+    args->u.gqa_attn.q_gpu_va    = q_va;
+    args->u.gqa_attn.k_gpu_va    = k_va;
+    args->u.gqa_attn.v_gpu_va    = v_va;
+    args->u.gqa_attn.out_gpu_va  = *out_va;
+    args->u.gqa_attn.n_head_q    = 2u;
+    args->u.gqa_attn.n_head_kv   = 1u;
+    args->u.gqa_attn.head_dim    = hd;
+    args->u.gqa_attn.seq_len     = sl;
+    *out_bytes = 2u * hd * 2u;
+}
+
+/* Operator-library schema lookup: maps op_kind to its (tier, dtype)
+ * triple, mirroring scripts/cuda/operator_library/MANIFEST.json. The
+ * smoke verb uses this so the dispatch call site doesn't have to
+ * branch on op_kind to pick the dtype, and so a future op landing
+ * adds one row here rather than a chained ternary. Returns
+ * SLM_GPU_DTYPE_FP16 for unknown op_kinds — safe default; the
+ * dispatcher's lookup will miss on the (op, tier, dtype) triple
+ * regardless. */
+static uint32_t smoke_dtype_for(uint32_t op_kind)
+{
+    switch (op_kind) {
+    case SLM_GPU_OP_EMBEDDING:
+    case SLM_GPU_OP_Q4K_DOT:
+        return SLM_GPU_DTYPE_Q4K;
+    case SLM_GPU_OP_RMSNORM:
+    case SLM_GPU_OP_ROPE:
+    case SLM_GPU_OP_Q4K_DEQUANT:
+    case SLM_GPU_OP_SWIGLU:
+    case SLM_GPU_OP_GQA_ATTN:
+        return SLM_GPU_DTYPE_FP16;
+    default:
+        return SLM_GPU_DTYPE_FP16;
+    }
+}
+
 int cmd_nvgpu(int argc, char *argv[])
 {
     static struct ga10b_bringup b;
@@ -4029,6 +4538,12 @@ int cmd_nvgpu(int argc, char *argv[])
         shell_printf("channel: rc=%d, state=%d\r\n", rc, (int)b.state);
         return rc;
     }
+    if (strcmp(argv[1], "engine-clear") == 0) {
+        return cmd_nvgpu_engine_clear();
+    }
+    if (strcmp(argv[1], "engine-status") == 0) {
+        return cmd_nvgpu_engine_status();
+    }
     if (strcmp(argv[1], "submit") == 0) {
         /* Phase 7: pushbuffer smoke test. */
         int rc = ga10b_bringup_smoke_test(&b);
@@ -4089,9 +4604,1390 @@ int cmd_nvgpu(int argc, char *argv[])
         return 0;
     }
 
+    if (strcmp(argv[1], "oplib") == 0) {
+        if (argc < 3 || strcmp(argv[2], "status") == 0) {
+            oplib_pool_status_print();
+            return 0;
+        }
+        if (strcmp(argv[2], "stage") == 0) {
+            /* Stage the embedded SASS region into GPU VA so the
+             * dispatcher (#714) can fetch instructions through the
+             * inherited channel's GMMU. Uses inst_block_phys from
+             * the loaded handoff if present, else FECS_CURRENT_CTX.
+             *
+             *   nvgpu oplib stage              — auto-discover inst block
+             *   nvgpu oplib stage <inst_hex>   — explicit inst block
+             */
+            uint64_t inst_phys = 0;
+            if (argc >= 4) {
+                const char *s = argv[3];
+                if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                    s += 2;
+                }
+                while (*s) {
+                    uint64_t d;
+                    if (*s >= '0' && *s <= '9') {
+                        d = *s - '0';
+                    } else if (*s >= 'a' && *s <= 'f') {
+                        d = 10 + (*s - 'a');
+                    } else if (*s >= 'A' && *s <= 'F') {
+                        d = 10 + (*s - 'A');
+                    } else {
+                        shell_puts("bad hex inst_phys\r\n");
+                        return -1;
+                    }
+                    inst_phys = (inst_phys << 4) | d;
+                    s++;
+                }
+            } else {
+                const struct ga10b_channel_handoff *h =
+                    ga10b_bringup_handoff();
+                /* Diagnostic dump of relevant handoff fields, gated
+                 * behind `gpu debug on` so steady-state callers
+                 * aren't spammed. Useful when the fast path doesn't
+                 * trigger and you need to tell "helper didn't pre-
+                 * stage" from "fast path picked but failed". */
+                if (ga10b_dispatch_verbose_get()) {
+                    shell_printf("oplib stage: handoff h=%p shader_phys=0x%lx "
+                                 "shader_gpu_va=0x%lx shader_size=%u "
+                                 "cbuf_phys=0x%lx cbuf_gpu_va=0x%lx\r\n",
+                                 (const void *)h,
+                                 (h ? (unsigned long)h->shader_phys : 0ul),
+                                 (h ? (unsigned long)h->shader_gpu_va : 0ul),
+                                 (h ? (unsigned)h->shader_size : 0u),
+                                 (h ? (unsigned long)h->cbuf_phys : 0ul),
+                                 (h ? (unsigned long)h->cbuf_gpu_va : 0ul));
+                }
+                /* Fast path: when the helper pre-staged the SASS
+                 * region in the channel's GMMU (v7 mode), skip
+                 * inst-block discovery entirely — `oplib_pool_-
+                 * stage_to_gpu` doesn't need it. The function
+                 * detects the pre-staged region via h->shader_*
+                 * and writes the SASS bytes directly into the
+                 * helper's mapped buffer. */
+                if (h != NULL && h->shader_gpu_va != 0 &&
+                    h->shader_phys != 0) {
+                    shell_puts("oplib stage: using helper-staged SASS "
+                               "region (no inst block discovery needed)\r\n");
+                    inst_phys = 0;
+                    goto oplib_stage_call;
+                }
+                if (h != NULL && h->inst_block_phys != 0) {
+                    inst_phys = h->inst_block_phys;
+                } else {
+                    /* FECS_CURRENT_CTX may hold a stale pointer when
+                     * Linux nvgpu freed and reused the inst-block-
+                     * pointing memory between the helper's last
+                     * channel activity and the kexec. Verify that the
+                     * discovered inst block actually maps the
+                     * inherited channel's pushbuffer; if not, fall
+                     * back to a DRAM walk that cross-checks every
+                     * candidate against the handoff's
+                     * (pushbuf_gpu_va, pushbuf_phys) pair. */
+                    inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                    bool fecs_ok = false;
+                    if (inst_phys != 0 && h != NULL &&
+                        h->pushbuf_gpu_va != 0 && h->pushbuf_phys != 0) {
+                        struct ga10b_gmmu_walk_result wr;
+                        ga10b_gmmu_walk(inst_phys,
+                                        h->pushbuf_gpu_va, &wr);
+                        shell_printf("oplib stage: FECS inst=0x%lx walk "
+                                     "status=%d levels=%d pdb=0x%lx "
+                                     "leaf=0x%lx (want 0x%lx)\r\n",
+                                     (unsigned long)inst_phys,
+                                     (int)wr.status,
+                                     wr.levels_walked,
+                                     (unsigned long)wr.pdb_phys,
+                                     (unsigned long)wr.leaf_phys,
+                                     (unsigned long)h->pushbuf_phys);
+                        if (wr.status == GA10B_GMMU_WALK_OK &&
+                            wr.leaf_phys == h->pushbuf_phys) {
+                            fecs_ok = true;
+                        }
+                    }
+                    if (!fecs_ok) {
+                        if (h == NULL || h->pushbuf_gpu_va == 0 ||
+                            h->pushbuf_phys == 0) {
+                            shell_puts("oplib stage: no handoff and "
+                                       "FECS_CURRENT_CTX read failed\r\n");
+                            return -1;
+                        }
+                        /* Scan all of mapped DRAM — both low (Linux
+                         * dma_alloc_coherent often places inst
+                         * blocks here) and high (where the per-
+                         * channel nvmap dmabufs live). High region
+                         * scanned first since inst blocks usually
+                         * cluster near the dmabufs that follow them
+                         * in allocation order. The phys_in_dram
+                         * helper already excludes the OP-TEE
+                         * carveout (0xBE..0xC2) so the walker won't
+                         * fault inside it. */
+                        struct { uint64_t lo, hi; } ranges[] = {
+                            { 0x100000000ull, 0x180000000ull },
+                            { 0x80000000ull,  0x100000000ull },
+                        };
+                        shell_printf("oplib stage: FECS inst=0x%lx didn't "
+                                     "map handoff PB; walking DRAM "
+                                     "(2 ranges)\r\n",
+                                     (unsigned long)inst_phys);
+                        inst_phys = 0;
+                        for (size_t r = 0; r < sizeof(ranges)/sizeof(ranges[0]);
+                             r++) {
+                            inst_phys = ga10b_gmmu_discover_inst_block_via_walk(
+                                h->pushbuf_gpu_va, h->pushbuf_phys,
+                                ranges[r].lo, ranges[r].hi);
+                            if (inst_phys != 0) break;
+                        }
+                        if (inst_phys == 0) {
+                            shell_puts("oplib stage: walk-based discovery "
+                                       "found no inst block matching the "
+                                       "handoff's PB\r\n");
+                            return -1;
+                        }
+                    }
+                    shell_printf("oplib stage: discovered inst_block_phys "
+                                 "= 0x%lx (%s)\r\n",
+                                 (unsigned long)inst_phys,
+                                 fecs_ok ? "FECS" : "DRAM walk");
+                }
+            }
+oplib_stage_call:
+            int rc = oplib_pool_stage_to_gpu(inst_phys);
+            if (rc < 0) {
+                shell_printf("oplib stage: rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("oplib stage: ok, gpu_va_base=0x%lx\r\n",
+                         (unsigned long)oplib_pool_gpu_va_base());
+            /* #714 §B.2: walk every registered op_kind, validate the
+             * dispatcher metadata accepts a representative fixture,
+             * and flip TIER_TABLE entries from Cpu to Simt for the
+             * ones that pass. Prints a one-line summary. The probe
+             * must fire AFTER staging because B.3's hardware-execute
+             * variant will fire each op against the staged SASS;
+             * locating the call here keeps the static + future-
+             * hardware probe paths in the same place. */
+            (void)oplib_probe_run();
+            return 0;
+        }
+        if (strcmp(argv[2], "probe") == 0) {
+            /* Look up an SASS kernel by (op_kind, tier, dtype) and
+             * print its GPU VA + size. Validates the staged pool
+             * resolves a known triple correctly.
+             *
+             *   nvgpu oplib probe <op_kind> <tier> <dtype>
+             *
+             * Discriminants are decimal ints — see kernel/include/
+             * gpu_handoff.h for the enum values.
+             */
+            if (argc < 6) {
+                shell_puts("usage: nvgpu oplib probe "
+                           "<op_kind> <tier> <dtype>\r\n");
+                return -1;
+            }
+            uint32_t op_kind = (uint32_t)atoi(argv[3]);
+            uint32_t tier    = (uint32_t)atoi(argv[4]);
+            uint32_t dtype   = (uint32_t)atoi(argv[5]);
+            uint64_t gpu_va = 0;
+            size_t   size = 0;
+            int rc = oplib_pool_get_sass_gpu_va(op_kind, tier, dtype,
+                                                 &gpu_va, &size);
+            if (rc != 0) {
+                shell_printf("oplib probe: (%u, %u, %u) rc=%d\r\n",
+                             (unsigned)op_kind, (unsigned)tier,
+                             (unsigned)dtype, rc);
+                return rc;
+            }
+            shell_printf("oplib probe: (%u, %u, %u) gpu_va=0x%lx size=%zu\r\n",
+                         (unsigned)op_kind, (unsigned)tier, (unsigned)dtype,
+                         (unsigned long)gpu_va, size);
+            return 0;
+        }
+        if (strcmp(argv[2], "prep-rmsnorm") == 0) {
+            /* #714 A.2 follow-on: prepare a v7-op for RMSNORM
+             * dispatch. Allocates input/gamma/output buffers via
+             * GMMU, builds + populates a cbuf, computes launch
+             * shape — everything except the actual pushbuffer
+             * submit. Prints the prepared dispatch parameters for
+             * inspection.
+             *
+             * Usage: nvgpu oplib prep-rmsnorm <n_rows> <n>
+             *
+             * Hardware verification: stage the operator library
+             * first via `nvgpu oplib stage`, then run this verb.
+             * Output should show non-zero shader_va, cbuf_va, and
+             * the expected grid/block dims.
+             */
+            if (argc < 5) {
+                shell_puts("usage: nvgpu oplib prep-rmsnorm "
+                           "<n_rows> <n>\r\n");
+                return -1;
+            }
+            uint32_t n_rows = (uint32_t)atoi(argv[3]);
+            uint32_t n      = (uint32_t)atoi(argv[4]);
+            if (n_rows == 0 || n == 0) {
+                shell_puts("oplib prep-rmsnorm: n_rows and n must be > 0\r\n");
+                return -1;
+            }
+            /* Cap inputs at safety margins large enough for any
+             * realistic SLM workload (Qwen2.5-1.5B prefill: 16
+             * rows × 8960 elements; LM head: 1 row × 151936
+             * vocab). 1<<16 each leaves >2 orders of magnitude of
+             * headroom on both axes.
+             *
+             * Without this cap, atoi-supplied multi-million values
+             * would overflow uint32_t in `n_rows * n * 2`, allocate
+             * a tiny cbuf, and pass garbage grid_x past GA10B's
+             * 65535-CTA limit to the launch-shape function. */
+            if (n_rows > 65536u || n > 65536u) {
+                shell_printf("oplib prep-rmsnorm: n_rows=%u n=%u "
+                             "exceeds safety cap (65536 each)\r\n",
+                             (unsigned)n_rows, (unsigned)n);
+                return -1;
+            }
+
+            /* Resolve inst_block_phys: handoff first, FECS fallback. */
+            uint64_t inst_phys = 0;
+            const struct ga10b_channel_handoff *h =
+                ga10b_bringup_handoff();
+            if (h != NULL && h->inst_block_phys != 0) {
+                inst_phys = h->inst_block_phys;
+            } else {
+                inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys == 0) {
+                    shell_puts("oplib prep-rmsnorm: no handoff and "
+                               "FECS_CURRENT_CTX read failed\r\n");
+                    return -1;
+                }
+            }
+
+            /* Allocate input/gamma/output buffers in the channel's
+             * GMMU. RmsNorm consumes input + gamma (both n_rows*n /
+             * n FP16 halves), produces output (n_rows*n halves).
+             * Use uint64_t for the byte arithmetic — the input cap
+             * above (n_rows*n ≤ 2^32) means n_rows*n*2 fits in u64
+             * with room. Round each up to a 4 KB page boundary. */
+            uint64_t in_bytes  = (uint64_t)n_rows * n * 2u;
+            uint64_t gam_bytes = (uint64_t)n * 2u;
+            uint64_t out_bytes = (uint64_t)n_rows * n * 2u;
+            uint32_t in_pages  = (uint32_t)((in_bytes  + 4095u) / 4096u);
+            uint32_t gam_pages = (uint32_t)((gam_bytes + 4095u) / 4096u);
+            uint32_t out_pages = (uint32_t)((out_bytes + 4095u) / 4096u);
+            if (in_pages == 0)  in_pages = 1;
+            if (gam_pages == 0) gam_pages = 1;
+            if (out_pages == 0) out_pages = 1;
+
+            uint64_t in_va = 0, gam_va = 0, out_va = 0;
+            uint64_t in_phys = 0, gam_phys = 0, out_phys = 0;
+            void *in_cpu = NULL, *gam_cpu = NULL, *out_cpu = NULL;
+            int rc = ga10b_gmmu_alloc(inst_phys, in_pages, 0,
+                                       &in_va, &in_cpu, &in_phys);
+            if (rc < 0) {
+                shell_printf("oplib prep-rmsnorm: input alloc rc=%d\r\n", rc);
+                return rc;
+            }
+            rc = ga10b_gmmu_alloc(inst_phys, gam_pages, 0,
+                                   &gam_va, &gam_cpu, &gam_phys);
+            if (rc < 0) {
+                shell_printf("oplib prep-rmsnorm: gamma alloc rc=%d\r\n", rc);
+                return rc;
+            }
+            rc = ga10b_gmmu_alloc(inst_phys, out_pages, 0,
+                                   &out_va, &out_cpu, &out_phys);
+            if (rc < 0) {
+                shell_printf("oplib prep-rmsnorm: output alloc rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("oplib prep-rmsnorm: in=0x%lx gamma=0x%lx out=0x%lx\r\n",
+                         (unsigned long)in_va, (unsigned long)gam_va,
+                         (unsigned long)out_va);
+
+            /* Build args. eps = 1e-6f (Qwen default) — 0x358637BD
+             * is the IEEE 754 bit pattern. */
+            struct operator_dispatch_args args = {
+                .op_kind = SLM_GPU_OP_RMSNORM,
+                .u.rmsnorm = {
+                    .x_gpu_va     = in_va,
+                    .gamma_gpu_va = gam_va,
+                    .out_gpu_va   = out_va,
+                    .n_rows       = n_rows,
+                    .n            = n,
+                    .eps_bits     = 0x358637BDu,
+                },
+            };
+
+            struct slm_oplib_dispatch_prep prep;
+            rc = slm_oplib_prepare_dispatch(inst_phys,
+                                             SLM_GPU_OP_RMSNORM,
+                                             SLM_GPU_TIER_SIMT,
+                                             SLM_GPU_DTYPE_FP16,
+                                             &args, &prep);
+            if (rc < 0) {
+                shell_printf("oplib prep-rmsnorm: prepare rc=%d "
+                             "(did you `nvgpu oplib stage` first?)\r\n", rc);
+                return rc;
+            }
+            shell_printf("oplib prep-rmsnorm: PREPARED — submit not yet "
+                         "wired (#714 follow-on)\r\n");
+            return 0;
+        }
+        if (strcmp(argv[2], "dispatch-rmsnorm") == 0) {
+            /* #732: end-to-end RMSNORM-on-GPU smoke test. Allocates
+             * input/gamma/output buffers via GMMU, fills input with
+             * a known FP16 pattern (sentinel: alternating 0x3C00
+             * and 0xBC00 = +1.0 / -1.0 so RMSNorm has work to do
+             * but a deterministic answer), fills gamma with all
+             * 0x3C00 (+1.0), then dispatches RMSNORM through the
+             * operator library and prints the first few output
+             * halves for inspection.
+             *
+             * Usage: nvgpu oplib dispatch-rmsnorm <n_rows> <n>
+             *
+             * Pre: `nvgpu oplib stage` must have run + the channel
+             * must be inherited. */
+            if (argc < 5) {
+                shell_puts("usage: nvgpu oplib dispatch-rmsnorm "
+                           "<n_rows> <n>\r\n");
+                return -1;
+            }
+            uint32_t n_rows = (uint32_t)atoi(argv[3]);
+            uint32_t n      = (uint32_t)atoi(argv[4]);
+            if (n_rows == 0 || n == 0) {
+                shell_puts("dispatch-rmsnorm: n_rows and n must be > 0\r\n");
+                return -1;
+            }
+            if (n_rows > 65536u || n > 65536u) {
+                shell_printf("dispatch-rmsnorm: cap exceeded "
+                             "(n_rows=%u n=%u, max 65536 each)\r\n",
+                             (unsigned)n_rows, (unsigned)n);
+                return -1;
+            }
+
+            uint64_t inst_phys = 0;
+            const struct ga10b_channel_handoff *h =
+                ga10b_bringup_handoff();
+            uint64_t in_bytes  = (uint64_t)n_rows * n * 2u;
+            uint64_t gam_bytes = (uint64_t)n * 2u;
+            uint64_t out_bytes = (uint64_t)n_rows * n * 2u;
+            uint32_t in_pages  = (uint32_t)((in_bytes  + 4095u) / 4096u);
+            uint32_t gam_pages = (uint32_t)((gam_bytes + 4095u) / 4096u);
+            uint32_t out_pages = (uint32_t)((out_bytes + 4095u) / 4096u);
+            if (in_pages == 0)  in_pages = 1;
+            if (gam_pages == 0) gam_pages = 1;
+            if (out_pages == 0) out_pages = 1;
+
+            uint64_t in_va = 0, gam_va = 0, out_va = 0;
+            uint64_t in_phys = 0, gam_phys = 0, out_phys = 0;
+            void *in_cpu = NULL, *gam_cpu = NULL, *out_cpu = NULL;
+            int rc;
+
+            /* Fast path: when the helper pre-staged the SASS pool
+             * (1 MB), carve scratch input/gamma/output out of the
+             * tail. The SASS region itself sits at offset 0 with
+             * length 7680 B for the rmsnorm-only blob; we leave a
+             * safety margin and start the scratch carve-outs at
+             * 64 KB so any future SASS region growth doesn't
+             * collide. Each region is sized to in_bytes/gam_bytes/
+             * out_bytes — the cap upstream limits each to
+             * 65536² × 2 B but the smoke test uses tiny shapes
+             * (4×16 → 128 B). The 1 MB pool is plenty for any
+             * shape this verb is realistically invoked with.
+             *
+             * Avoiding the post-kexec ga10b_gmmu_alloc path means
+             * we don't need a discovered inst_block_phys — the
+             * helper already mapped the pool in the channel's
+             * address space. */
+            if (h != NULL && h->shader_gpu_va != 0 &&
+                h->shader_phys != 0 &&
+                h->shader_size >= OPLIB_POOL_MIN_BYTES) {
+                uint64_t base_phys = h->shader_phys;
+                uint64_t base_gva  = h->shader_gpu_va;
+                /* SASS occupies slot 0; carve scratch from slots 1-3. */
+                in_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+                in_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+                gam_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+                gam_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+                out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+                out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+                if (in_bytes  > OPLIB_POOL_SLOT_BYTES ||
+                    gam_bytes > OPLIB_POOL_SLOT_BYTES ||
+                    out_bytes > OPLIB_POOL_SLOT_BYTES) {
+                    shell_printf("dispatch-rmsnorm: scratch slot too small "
+                                 "(in=%llu gam=%llu out=%llu vs %u B)\r\n",
+                                 (unsigned long long)in_bytes,
+                                 (unsigned long long)gam_bytes,
+                                 (unsigned long long)out_bytes,
+                                 (unsigned)OPLIB_POOL_SLOT_BYTES);
+                    return -1;
+                }
+                in_cpu  = (void *)(uintptr_t)in_phys;
+                gam_cpu = (void *)(uintptr_t)gam_phys;
+                out_cpu = (void *)(uintptr_t)out_phys;
+                shell_puts("dispatch-rmsnorm: scratch buffers carved from "
+                           "pre-staged SASS pool\r\n");
+            } else {
+                if (h != NULL && h->inst_block_phys != 0) {
+                    inst_phys = h->inst_block_phys;
+                } else {
+                    inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                    if (inst_phys == 0) {
+                        shell_puts("dispatch-rmsnorm: no handoff and "
+                                   "FECS_CURRENT_CTX read failed\r\n");
+                        return -1;
+                    }
+                }
+                rc = ga10b_gmmu_alloc(inst_phys, in_pages, 0,
+                                       &in_va, &in_cpu, &in_phys);
+                if (rc < 0) {
+                    shell_printf("dispatch-rmsnorm: input alloc rc=%d\r\n", rc);
+                    return rc;
+                }
+                rc = ga10b_gmmu_alloc(inst_phys, gam_pages, 0,
+                                       &gam_va, &gam_cpu, &gam_phys);
+                if (rc < 0) {
+                    shell_printf("dispatch-rmsnorm: gamma alloc rc=%d\r\n", rc);
+                    return rc;
+                }
+                rc = ga10b_gmmu_alloc(inst_phys, out_pages, 0,
+                                       &out_va, &out_cpu, &out_phys);
+                if (rc < 0) {
+                    shell_printf("dispatch-rmsnorm: output alloc rc=%d\r\n", rc);
+                    return rc;
+                }
+            }
+
+            /* Fill input with alternating +1.0/-1.0 FP16 (0x3C00 /
+             * 0xBC00). After RMSNorm with gamma=1.0, the output
+             * should also be ±1.0 for each element since
+             * sqrt(mean(1^2)) == 1.0 and rms_inv = 1.0. */
+            volatile uint16_t *in_p = (volatile uint16_t *)in_cpu;
+            uint64_t in_count = (uint64_t)n_rows * n;
+            for (uint64_t i = 0; i < in_count; i++) {
+                in_p[i] = (i & 1) ? 0xBC00u : 0x3C00u;
+            }
+            cache_clean_range(in_cpu, in_pages * 4096u);
+
+            volatile uint16_t *gam_p = (volatile uint16_t *)gam_cpu;
+            for (uint32_t i = 0; i < n; i++) {
+                gam_p[i] = 0x3C00u;     /* FP16 +1.0 */
+            }
+            cache_clean_range(gam_cpu, gam_pages * 4096u);
+
+            /* Pre-fill output with a sentinel so we can tell if
+             * the GPU wrote anything at all. */
+            volatile uint16_t *out_p = (volatile uint16_t *)out_cpu;
+            for (uint64_t i = 0; i < in_count; i++) {
+                out_p[i] = 0xCAFEu;
+            }
+            cache_clean_range(out_cpu, out_pages * 4096u);
+
+            shell_printf("dispatch-rmsnorm: in=0x%lx gamma=0x%lx out=0x%lx "
+                         "(n_rows=%u, n=%u)\r\n",
+                         (unsigned long)in_va, (unsigned long)gam_va,
+                         (unsigned long)out_va,
+                         (unsigned)n_rows, (unsigned)n);
+
+            struct operator_dispatch_args args = {
+                .op_kind = SLM_GPU_OP_RMSNORM,
+                .u.rmsnorm = {
+                    .x_gpu_va     = in_va,
+                    .gamma_gpu_va = gam_va,
+                    .out_gpu_va   = out_va,
+                    .n_rows       = n_rows,
+                    .n            = n,
+                    .eps_bits     = 0x358637BDu,    /* 1e-6f */
+                },
+            };
+
+            rc = slm_oplib_dispatch(&b, inst_phys,
+                                     SLM_GPU_OP_RMSNORM,
+                                     SLM_GPU_TIER_SIMT,
+                                     SLM_GPU_DTYPE_FP16,
+                                     &args);
+            if (rc < 0) {
+                shell_printf("dispatch-rmsnorm: slm_oplib_dispatch rc=%d\r\n", rc);
+                return rc;
+            }
+
+            /* Read back output. Cache-invalidate first so the CPU
+             * sees what the GPU wrote (not stale L1). */
+            cache_invalidate_range(out_cpu, out_pages * 4096u);
+
+            /* Print the first 8 output halves + a sample from the
+             * tail. With sentinel-fill above, any 0xCAFE means the
+             * GPU didn't write that slot. */
+            shell_puts("dispatch-rmsnorm: output[0..7] = ");
+            for (int i = 0; i < 8 && (uint64_t)i < in_count; i++) {
+                shell_printf("0x%04x ", (unsigned)out_p[i]);
+            }
+            shell_puts("\r\n");
+            if (in_count > 8) {
+                uint64_t tail = in_count - 1;
+                shell_printf("dispatch-rmsnorm: output[%llu] = 0x%04x\r\n",
+                             (unsigned long long)tail,
+                             (unsigned)out_p[tail]);
+            }
+
+            /* Sentinel check: at least output[0] must not be 0xCAFE. */
+            if (out_p[0] == 0xCAFEu) {
+                shell_puts("dispatch-rmsnorm: FAIL — output[0] is "
+                           "still 0xCAFE sentinel (GPU didn't write)\r\n");
+                return -1;
+            }
+            shell_puts("dispatch-rmsnorm: PASS — GPU wrote output\r\n");
+            return 0;
+        }
+        if (strcmp(argv[2], "dispatch-rope") == 0) {
+            /* End-to-end RoPE-on-GPU smoke test. RoPE is in-place on
+             * `vec`, so the assertion strategy is different from
+             * dispatch-rmsnorm:
+             *
+             *   - Fill positions[] with all-zeros so every rotation
+             *     is by angle 0.
+             *   - Fill cos_sin[] with (1.0f, 0.0f) pairs — the
+             *     identity rotation factors.
+             *   - Fill vec[] with alternating ±1.0 FP16 (0x3C00 /
+             *     0xBC00).
+             *   - Pre-fill vec[] with the same 0xCAFE sentinel as
+             *     rmsnorm — but unlike rmsnorm, the kernel READS
+             *     and WRITES vec, so we have to overwrite the
+             *     sentinel with the real input AFTER the sentinel
+             *     fill. Then dispatch.
+             *
+             * After dispatch with identity rotation, vec[] should
+             * still hold the alternating ±1.0 pattern bit-exact.
+             * Any 0xCAFE remaining means the GPU didn't write that
+             * slot; any change away from ±1.0 means the rotation
+             * isn't identity (cos_sin or positions wrong). This
+             * exercises the dispatch path without needing a CPU
+             * trig reference (which SLM-OS lacks: no libm).
+             *
+             * Usage: nvgpu oplib dispatch-rope <batch> <num_heads> <head_dim>
+             *
+             * Pre: `nvgpu oplib stage` and `nvgpu channel` must
+             * have run.
+             */
+            if (argc < 6) {
+                shell_puts("usage: nvgpu oplib dispatch-rope "
+                           "<batch> <num_heads> <head_dim>\r\n");
+                return -1;
+            }
+            uint32_t batch     = (uint32_t)atoi(argv[3]);
+            uint32_t num_heads = (uint32_t)atoi(argv[4]);
+            uint32_t head_dim  = (uint32_t)atoi(argv[5]);
+            if (batch == 0 || num_heads == 0 || head_dim == 0) {
+                shell_puts("dispatch-rope: batch/num_heads/head_dim "
+                           "must be > 0\r\n");
+                return -1;
+            }
+            if ((head_dim & 1u) != 0u) {
+                shell_puts("dispatch-rope: head_dim must be even "
+                           "(pairs are (vec[2i], vec[2i+1]))\r\n");
+                return -1;
+            }
+            /* Cap each scratch slot at OPLIB_POOL_SLOT_BYTES (the
+             * per-slot ceiling from the helper-staged SASS pool
+             * carve-out). vec is batch × num_heads × head_dim FP16
+             * (2 B); positions is batch int32 (4 B). cos_sin is the
+             * precomputed (cos, sin) lookup table for one position:
+             * head_dim/2 pairs × 2 floats per pair × 4 B = head_dim
+             * × 4 B. The fill loop below over-writes 2× this for
+             * convenience (head_dim * 8 B with both cos and sin set
+             * to identity at every index); the kernel only reads
+             * the first head_dim/2 pairs, so the extra writes are
+             * harmless. Sized to the over-fill so the bounds check
+             * matches what we actually write. */
+            uint64_t vec_bytes = (uint64_t)batch * num_heads *
+                                  head_dim * 2u;
+            uint64_t pos_bytes = (uint64_t)batch * 4u;
+            uint64_t cs_bytes  = (uint64_t)head_dim * 8u;
+            if (vec_bytes > OPLIB_POOL_SLOT_BYTES ||
+                pos_bytes > OPLIB_POOL_SLOT_BYTES ||
+                cs_bytes  > OPLIB_POOL_SLOT_BYTES) {
+                shell_printf("dispatch-rope: scratch slot too small "
+                             "(vec=%llu pos=%llu cs=%llu vs %u B)\r\n",
+                             (unsigned long long)vec_bytes,
+                             (unsigned long long)pos_bytes,
+                             (unsigned long long)cs_bytes,
+                             (unsigned)OPLIB_POOL_SLOT_BYTES);
+                return -1;
+            }
+
+            /* Carve scratch from the pre-staged SASS pool. Same
+             * slot layout as dispatch-rmsnorm: SASS in slot 0,
+             * vec/positions/cos_sin in slots 1-3. */
+            const struct ga10b_channel_handoff *h =
+                ga10b_bringup_handoff();
+            if (h == NULL || h->shader_gpu_va == 0 ||
+                h->shader_phys == 0 ||
+                h->shader_size < OPLIB_POOL_MIN_BYTES) {
+                shell_puts("dispatch-rope: pre-staged SASS pool "
+                           "missing — run helper with --qmd-pool\r\n");
+                return -1;
+            }
+            uint64_t base_phys = h->shader_phys;
+            uint64_t base_gva  = h->shader_gpu_va;
+            uint64_t vec_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+            uint64_t vec_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+            uint64_t pos_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+            uint64_t pos_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+            uint64_t cs_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+            uint64_t cs_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
+            shell_puts("dispatch-rope: scratch buffers carved from "
+                       "pre-staged SASS pool\r\n");
+
+            /* Pre-fill vec with sentinel, then overwrite with real
+             * input. This way any byte the GPU doesn't touch keeps
+             * the sentinel. Identity rotation should leave the
+             * input pattern intact. */
+            volatile uint16_t *vec_p =
+                (volatile uint16_t *)(uintptr_t)vec_phys;
+            uint64_t vec_count =
+                (uint64_t)batch * num_heads * head_dim;
+            for (uint64_t i = 0; i < vec_count; i++) {
+                vec_p[i] = 0xCAFEu;
+            }
+            cache_clean_range((void *)(uintptr_t)vec_phys,
+                              (size_t)((vec_bytes + 4095u) & ~4095ull));
+            for (uint64_t i = 0; i < vec_count; i++) {
+                vec_p[i] = (i & 1u) ? 0xBC00u : 0x3C00u;
+            }
+            cache_clean_range((void *)(uintptr_t)vec_phys,
+                              (size_t)((vec_bytes + 4095u) & ~4095ull));
+
+            /* positions[i] = 0 for every token. */
+            volatile uint32_t *pos_p =
+                (volatile uint32_t *)(uintptr_t)pos_phys;
+            for (uint32_t i = 0; i < batch; i++) {
+                pos_p[i] = 0u;
+            }
+            cache_clean_range((void *)(uintptr_t)pos_phys,
+                              (size_t)((pos_bytes + 4095u) & ~4095ull));
+
+            /* cos_sin[2i]   = 1.0f (cos 0)  → IEEE 0x3F800000
+             * cos_sin[2i+1] = 0.0f (sin 0)  → IEEE 0x00000000 */
+            volatile uint32_t *cs_p =
+                (volatile uint32_t *)(uintptr_t)cs_phys;
+            for (uint32_t i = 0; i < head_dim; i++) {
+                cs_p[i * 2u]      = 0x3F800000u;
+                cs_p[i * 2u + 1u] = 0x00000000u;
+            }
+            cache_clean_range((void *)(uintptr_t)cs_phys,
+                              (size_t)((cs_bytes + 4095u) & ~4095ull));
+
+            shell_printf("dispatch-rope: vec=0x%lx pos=0x%lx "
+                         "cos_sin=0x%lx (batch=%u heads=%u head_dim=%u)\r\n",
+                         (unsigned long)vec_va,
+                         (unsigned long)pos_va,
+                         (unsigned long)cs_va,
+                         (unsigned)batch, (unsigned)num_heads,
+                         (unsigned)head_dim);
+
+            struct operator_dispatch_args args = {
+                .op_kind = SLM_GPU_OP_ROPE,
+                .u.rope = {
+                    .vec_gpu_va       = vec_va,
+                    .positions_gpu_va = pos_va,
+                    .cos_sin_gpu_va   = cs_va,
+                    .batch            = batch,
+                    .num_heads        = num_heads,
+                    .head_dim         = head_dim,
+                },
+            };
+
+            int rc = slm_oplib_dispatch(&b, 0,
+                                         SLM_GPU_OP_ROPE,
+                                         SLM_GPU_TIER_SIMT,
+                                         SLM_GPU_DTYPE_FP16,
+                                         &args);
+            if (rc < 0) {
+                shell_printf("dispatch-rope: slm_oplib_dispatch rc=%d\r\n",
+                             rc);
+                return rc;
+            }
+
+            cache_invalidate_range((void *)(uintptr_t)vec_phys,
+                                   (size_t)((vec_bytes + 4095u) & ~4095ull));
+
+            shell_puts("dispatch-rope: vec[0..7] = ");
+            for (int i = 0; i < 8 && (uint64_t)i < vec_count; i++) {
+                shell_printf("0x%04x ", (unsigned)vec_p[i]);
+            }
+            shell_puts("\r\n");
+            if (vec_count > 8) {
+                uint64_t tail = vec_count - 1;
+                shell_printf("dispatch-rope: vec[%llu] = 0x%04x\r\n",
+                             (unsigned long long)tail,
+                             (unsigned)vec_p[tail]);
+            }
+
+            /* Identity-rotation check: every element should be the
+             * original alternating ±1.0 FP16 pattern. */
+            for (uint64_t i = 0; i < vec_count; i++) {
+                uint16_t expect = (i & 1u) ? 0xBC00u : 0x3C00u;
+                if (vec_p[i] != expect) {
+                    shell_printf("dispatch-rope: FAIL — vec[%llu] = "
+                                 "0x%04x (expected 0x%04x)\r\n",
+                                 (unsigned long long)i,
+                                 (unsigned)vec_p[i],
+                                 (unsigned)expect);
+                    return -1;
+                }
+            }
+            shell_puts("dispatch-rope: PASS — identity rotation "
+                       "preserved input bit-exact\r\n");
+            return 0;
+        }
+        if (strcmp(argv[2], "smoke") == 0) {
+            /* Generic per-op smoke verb (#714 §B.1 acceptance:
+             * "extend the A shell verb to one verb per op, OR accept
+             * op_kind as an argument"). Drives every registered op
+             * with a tiny "all-zero inputs → all-zero output"
+             * fixture and verifies the GPU touched the output by
+             * checking that the post-dispatch buffer is bit-exact
+             * zero (overwriting the pre-fill 0xCAFE sentinel).
+             *
+             * The math holds for every SLM op because:
+             *   RMSNORM:    x=0, gamma=0  → 0 * (1/sqrt(eps)) * 0   = 0
+             *   ROPE:       (covered by the dedicated dispatch-rope
+             *                identity test; smoke just exercises
+             *                the dispatch path)
+             *   EMBEDDING:  Q4_K table all zeros (d=0,dmin=0,...)   → 0
+             *   Q4K_DEQUANT: same Q4_K-zero pattern                  → 0
+             *   SWIGLU:     gate=0 → silu(0)*up = 0*up               = 0
+             *   Q4K_DOT:    weights all zeros → dot=0 for any x      = 0
+             *   GQA_ATTN:   Q=0 → logits=0 → softmax uniform → mean(V)
+             *               with V=0 →                                  0
+             *
+             * Output buffer pre-filled with 0xCAFE; verification
+             * passes if every byte ends up 0x00.
+             *
+             * Usage: nvgpu oplib smoke <op_kind>
+             *
+             * Pre: `nvgpu oplib stage` and `nvgpu channel` must
+             * have run.
+             */
+            if (argc < 4) {
+                shell_puts("usage: nvgpu oplib smoke <op_kind>\r\n"
+                           "  op_kind: 0=RMSNORM 1=ROPE 2=EMBEDDING "
+                           "3=Q4K_DOT 5=GQA_ATTN 6=SWIGLU 12=Q4K_DEQUANT\r\n");
+                return -1;
+            }
+            uint32_t op_kind = (uint32_t)atoi(argv[3]);
+
+            const struct ga10b_channel_handoff *h =
+                ga10b_bringup_handoff();
+            if (h == NULL || h->shader_gpu_va == 0 ||
+                h->shader_phys == 0 ||
+                h->shader_size < OPLIB_POOL_MIN_BYTES) {
+                shell_puts("smoke: pre-staged SASS pool missing — "
+                           "run helper with --qmd-pool\r\n");
+                return -1;
+            }
+            uint64_t base_phys = h->shader_phys;
+            uint64_t base_gva  = h->shader_gpu_va;
+
+            /* Per-op scratch sizes — kept small so every op fits in
+             * a single 64 KB slot per buffer. The fixtures are
+             * deliberately tiny: enough work to exercise dispatch,
+             * not enough to need real-shape allocations. Each
+             * smoke_fixture_* helper above memsets its inputs and
+             * issues cache_clean_range; the smoke verb here only
+             * dispatches per op_kind and pre-fills the output
+             * sentinel afterwards. */
+            uint64_t out_bytes = 0;
+            uint64_t out_phys  = 0;
+            uint64_t out_va    = 0;
+            struct operator_dispatch_args args;
+            memset(&args, 0, sizeof(args));
+            args.op_kind = op_kind;
+
+            switch (op_kind) {
+            case SLM_GPU_OP_RMSNORM:
+                smoke_fixture_rmsnorm(base_phys, base_gva, &args,
+                                      &out_phys, &out_va, &out_bytes);
+                break;
+            case SLM_GPU_OP_EMBEDDING:
+                smoke_fixture_embedding(base_phys, base_gva, &args,
+                                        &out_phys, &out_va, &out_bytes);
+                break;
+            case SLM_GPU_OP_Q4K_DEQUANT:
+                smoke_fixture_q4k_dequant(base_phys, base_gva, &args,
+                                          &out_phys, &out_va, &out_bytes);
+                break;
+            case SLM_GPU_OP_SWIGLU:
+                smoke_fixture_swiglu(base_phys, base_gva, &args,
+                                     &out_phys, &out_va, &out_bytes);
+                break;
+            case SLM_GPU_OP_Q4K_DOT:
+                smoke_fixture_q4k_dot(base_phys, base_gva, &args,
+                                      &out_phys, &out_va, &out_bytes);
+                break;
+            case SLM_GPU_OP_GQA_ATTN:
+                smoke_fixture_gqa_attn(base_phys, base_gva, &args,
+                                       &out_phys, &out_va, &out_bytes);
+                break;
+            default:
+                shell_printf("smoke: op_kind=%u not supported by this "
+                             "verb (try 0/1/2/3/5/6/12)\r\n",
+                             (unsigned)op_kind);
+                return -1;
+            }
+            (void)out_va;     /* set by helper for completeness; the
+                               * dispatch path reads it from
+                               * args.u.<op>.out_gpu_va already. */
+
+            /* Pre-fill the output region with the 0xCAFE sentinel.
+             * out_bytes is the kernel's actual write size; round up
+             * to a 4 KB cache-clean unit. */
+            volatile uint16_t *out_p =
+                (volatile uint16_t *)(uintptr_t)out_phys;
+            uint64_t out_words = (out_bytes + 1u) / 2u;
+            for (uint64_t i = 0; i < out_words; i++) {
+                out_p[i] = 0xCAFEu;
+            }
+            cache_clean_range((void *)(uintptr_t)out_phys,
+                              (size_t)((out_bytes + 4095u) & ~4095ull));
+
+            shell_printf("smoke: op_kind=%u dispatching... ",
+                         (unsigned)op_kind);
+
+            int rc = slm_oplib_dispatch(&b, 0, op_kind,
+                                         SLM_GPU_TIER_SIMT,
+                                         smoke_dtype_for(op_kind),
+                                         &args);
+            if (rc < 0) {
+                shell_printf("FAIL: rc=%d\r\n", rc);
+                return rc;
+            }
+
+            cache_invalidate_range(
+                (void *)(uintptr_t)out_phys,
+                (size_t)((out_bytes + 4095u) & ~4095ull));
+
+            /* Verify the GPU wrote zeros over the sentinel. Check
+             * every output byte (treat output as uint8_t to handle
+             * Q4K_DOT's FP32 case alongside the FP16 ops). On
+             * mismatch, dump the first 16 output FP16 words so the
+             * failure mode is visible (sentinel-intact vs partial
+             * write vs unexpected non-zero output). */
+            volatile uint8_t *out_b =
+                (volatile uint8_t *)(uintptr_t)out_phys;
+            for (uint64_t i = 0; i < out_bytes; i++) {
+                if (out_b[i] != 0u) {
+                    shell_printf("FAIL: first non-zero at out[%llu]=0x%02x "
+                                 "(expected 0x00).\r\nout[0..15] = ",
+                                 (unsigned long long)i, (unsigned)out_b[i]);
+                    uint64_t dump_words = (out_bytes / 2u);
+                    if (dump_words > 16u) {
+                        dump_words = 16u;
+                    }
+                    for (uint64_t w = 0; w < dump_words; w++) {
+                        shell_printf("0x%04x ", (unsigned)out_p[w]);
+                    }
+                    shell_puts("\r\n");
+                    return -1;
+                }
+            }
+            shell_printf("PASS (%llu output bytes verified zero)\r\n",
+                         (unsigned long long)out_bytes);
+            return 0;
+        }
+        shell_puts("usage: nvgpu oplib [status | stage [<inst_hex>] | "
+                   "probe <op_kind> <tier> <dtype> | "
+                   "prep-rmsnorm <n_rows> <n> | "
+                   "dispatch-rmsnorm <n_rows> <n> | "
+                   "dispatch-rope <batch> <num_heads> <head_dim> | "
+                   "smoke <op_kind>]\r\n");
+        return -1;
+    }
+
+    if (strcmp(argv[1], "gmmu") == 0) {
+        /* Read-only GMMU page-table walker (#666 Milestone A).
+         *
+         * Subcommands:
+         *   nvgpu gmmu pushbuf   — walk g_handoff.pushbuf_gpu_va,
+         *                          assert leaf phys == pushbuf_phys
+         *   nvgpu gmmu walk <hex_va>
+         *                        — walk an arbitrary GPU VA against
+         *                          the loaded handoff's inst block
+         *   nvgpu gmmu walk-raw <inst_block_phys_hex> <gpu_va_hex>
+         *                        — walk against a caller-supplied
+         *                          inst-block phys. Bypasses the
+         *                          handoff requirement; useful for
+         *                          structural validation when the
+         *                          host-side helper hasn't run.
+         *
+         * `pushbuf` and `walk` need a handoff (run `nvgpu inherit`
+         * + `nvgpu channel` first). `walk-raw` doesn't.
+         */
+        if (argc < 3) {
+            shell_puts("usage: nvgpu gmmu <pushbuf | walk <hex_va> | "
+                       "walk-raw <inst_phys_hex> <hex_va> | "
+                       "alloc-page | alloc-page-synth | "
+                       "alloc-multi-synth <n_pages>>\r\n");
+            return -1;
+        }
+        if (strcmp(argv[2], "reuse-synth") == 0) {
+            /* #666 Milestone D: alloc-free-alloc round-trip on a
+             * synthetic inst block. Validates:
+             *   - free's TLB-invalidate doesn't crash the GPU
+             *   - the freed extent goes into the tracker
+             *   - the next alloc with matching n_pages reuses the
+             *     same VA from the tracker (not the bump cursor)
+             *   - the new PTE is written correctly at the reused
+             *     VA (walker reads back the new alloc's phys, not
+             *     stale bytes from the freed alloc)
+             */
+            void *inst = pmm_alloc_page();
+            void *pdb_page = pmm_alloc_page();
+            if (inst == NULL || pdb_page == NULL) {
+                shell_puts("reuse-synth: PMM exhaustion\r\n");
+                return -1;
+            }
+            for (int i = 0; i < 512; i++) {
+                ((volatile uint64_t *)inst)[i] = 0;
+                ((volatile uint64_t *)pdb_page)[i] = 0;
+            }
+            uint64_t inst_phys = (uint64_t)(uintptr_t)inst;
+            uint64_t pdb_phys = (uint64_t)(uintptr_t)pdb_page;
+            volatile uint32_t *iw = (volatile uint32_t *)inst;
+            iw[128] = ((uint32_t)pdb_phys & 0xfffff000u) |
+                      (2u << 1) | (1u << 3);
+            iw[129] = (uint32_t)(pdb_phys >> 32);
+            cache_clean_range(inst, 4096);
+            cache_clean_range(pdb_page, 4096);
+
+            /* First alloc. */
+            uint64_t va_a = 0, phys_a = 0;
+            void *cpu_a = NULL;
+            int rc = ga10b_gmmu_alloc_page(inst_phys, 0, &va_a, &cpu_a, &phys_a);
+            if (rc < 0) { shell_printf("alloc#1 rc=%d\r\n", rc); return rc; }
+            shell_printf("alloc#1 va=0x%lx phys=0x%lx\r\n",
+                         (unsigned long)va_a, (unsigned long)phys_a);
+
+            /* Free it — fires TLB invalidate, returns extent to tracker. */
+            int frc = ga10b_gmmu_free(inst_phys, va_a, 1);
+            if (frc < 0) { shell_printf("free rc=%d\r\n", frc); return frc; }
+            shell_printf("free: ok (tracker_count=%u)\r\n",
+                         (unsigned)ga10b_gmmu_free_tracker_count());
+
+            /* Second alloc — should pull va_a back out of the tracker. */
+            uint64_t va_b = 0, phys_b = 0;
+            void *cpu_b = NULL;
+            rc = ga10b_gmmu_alloc_page(inst_phys, 0, &va_b, &cpu_b, &phys_b);
+            if (rc < 0) { shell_printf("alloc#2 rc=%d\r\n", rc); return rc; }
+            shell_printf("alloc#2 va=0x%lx phys=0x%lx (tracker_count=%u)\r\n",
+                         (unsigned long)va_b, (unsigned long)phys_b,
+                         (unsigned)ga10b_gmmu_free_tracker_count());
+
+            /* Walk the reused VA — leaf must point at alloc#2's phys
+             * (not alloc#1's stale phys). */
+            struct ga10b_gmmu_walk_result wr;
+            ga10b_gmmu_walk(inst_phys, va_b, &wr);
+            if (wr.status != GA10B_GMMU_WALK_OK) {
+                shell_printf("walk after alloc#2: status=%d — FAIL\r\n",
+                             (int)wr.status);
+                return -1;
+            }
+            int va_match = (va_b == va_a) ? 1 : 0;
+            int phys_match = (wr.leaf_phys == phys_b) ? 1 : 0;
+            int phys_distinct = (phys_b != phys_a) ? 1 : 0;
+            shell_printf("VERIFY: va_reused=%s leaf_match=%s phys_distinct=%s\r\n",
+                         va_match ? "YES" : "NO",
+                         phys_match ? "YES" : "NO",
+                         phys_distinct ? "YES" : "NO");
+            return (va_match && phys_match && phys_distinct) ? 0 : -1;
+        }
+        if (strcmp(argv[2], "alloc-multi-synth") == 0) {
+            /* #666 Milestone C: alloc N contiguous-VA pages on a
+             * synthetic inst block, walk a few sample VAs to
+             * confirm leaf PTEs are valid + correct, then free
+             * and walk again to confirm PTEs are cleared.
+             *
+             * Synthetic inst block (same setup as alloc-page-synth)
+             * keeps this self-contained — no real GPU channel
+             * needed. */
+            if (argc < 4) {
+                shell_puts("usage: nvgpu gmmu alloc-multi-synth <n_pages>\r\n");
+                return -1;
+            }
+            uint32_t n_pages = 0;
+            if (shell_parse_uint(argv[3], &n_pages) < 0 ||
+                n_pages == 0 || n_pages > 512) {
+                shell_puts("n_pages must be 1..512\r\n");
+                return -1;
+            }
+            void *inst = pmm_alloc_page();
+            void *pdb_page = pmm_alloc_page();
+            if (inst == NULL || pdb_page == NULL) {
+                shell_puts("alloc-multi-synth: PMM exhaustion\r\n");
+                return -1;
+            }
+            for (int i = 0; i < 512; i++) {
+                ((volatile uint64_t *)inst)[i] = 0;
+                ((volatile uint64_t *)pdb_page)[i] = 0;
+            }
+            uint64_t inst_phys = (uint64_t)(uintptr_t)inst;
+            uint64_t pdb_phys = (uint64_t)(uintptr_t)pdb_page;
+            volatile uint32_t *iw = (volatile uint32_t *)inst;
+            iw[128] = ((uint32_t)pdb_phys & 0xfffff000u) |
+                      (2u << 1) | (1u << 3);
+            iw[129] = (uint32_t)(pdb_phys >> 32);
+            cache_clean_range(inst, 4096);
+            cache_clean_range(pdb_page, 4096);
+
+            shell_printf("alloc-multi-synth: inst=0x%lx pdb=0x%lx n=%u\r\n",
+                         (unsigned long)inst_phys,
+                         (unsigned long)pdb_phys,
+                         (unsigned)n_pages);
+
+            uint64_t va_base = 0, first_phys = 0;
+            void *first_cpu_va = NULL;
+            int rc = ga10b_gmmu_alloc(inst_phys, n_pages, 0,
+                                      &va_base, &first_cpu_va, &first_phys);
+            if (rc < 0) {
+                shell_printf("ga10b_gmmu_alloc(n=%u) failed: rc=%d\r\n",
+                             (unsigned)n_pages, rc);
+                return rc;
+            }
+            shell_printf("alloc-multi-synth: va_base=0x%lx first_cpu=%p first_phys=0x%lx\r\n",
+                         (unsigned long)va_base, first_cpu_va,
+                         (unsigned long)first_phys);
+
+            /* Walk first / middle / last to spot-check. */
+            uint32_t probes[3] = {0, n_pages / 2, n_pages - 1};
+            int n_probes = (n_pages == 1) ? 1 : (n_pages == 2 ? 2 : 3);
+            int verify_pass = 1;
+            for (int p = 0; p < n_probes; p++) {
+                uint32_t idx = probes[p];
+                uint64_t va_i = va_base + (uint64_t)idx * 4096ull;
+                struct ga10b_gmmu_walk_result wr;
+                ga10b_gmmu_walk(inst_phys, va_i, &wr);
+                if (wr.status != GA10B_GMMU_WALK_OK) {
+                    shell_printf("PROBE[%u] va=0x%lx: walk status=%d — FAIL\r\n",
+                                 (unsigned)idx, (unsigned long)va_i,
+                                 (int)wr.status);
+                    verify_pass = 0;
+                    continue;
+                }
+                shell_printf("PROBE[%u] va=0x%lx leaf_phys=0x%lx\r\n",
+                             (unsigned)idx, (unsigned long)va_i,
+                             (unsigned long)wr.leaf_phys);
+            }
+
+            /* Free and confirm PTEs are cleared. */
+            int frc = ga10b_gmmu_free(inst_phys, va_base, n_pages);
+            if (frc < 0) {
+                shell_printf("ga10b_gmmu_free failed: rc=%d\r\n", frc);
+                return frc;
+            }
+            shell_printf("free: ok (tracker_count=%u)\r\n",
+                         (unsigned)ga10b_gmmu_free_tracker_count());
+
+            int free_verify_pass = 1;
+            for (int p = 0; p < n_probes; p++) {
+                uint32_t idx = probes[p];
+                uint64_t va_i = va_base + (uint64_t)idx * 4096ull;
+                struct ga10b_gmmu_walk_result wr;
+                ga10b_gmmu_walk(inst_phys, va_i, &wr);
+                if (wr.status == GA10B_GMMU_WALK_PTE_INVALID) {
+                    shell_printf("POST-FREE[%u] va=0x%lx: PTE_INVALID — OK\r\n",
+                                 (unsigned)idx, (unsigned long)va_i);
+                } else {
+                    shell_printf("POST-FREE[%u] va=0x%lx: status=%d phys=0x%lx — FAIL\r\n",
+                                 (unsigned)idx, (unsigned long)va_i,
+                                 (int)wr.status, (unsigned long)wr.leaf_phys);
+                    free_verify_pass = 0;
+                }
+            }
+
+            shell_printf("VERIFY: alloc=%s free=%s\r\n",
+                         verify_pass ? "PASS" : "FAIL",
+                         free_verify_pass ? "PASS" : "FAIL");
+            return (verify_pass && free_verify_pass) ? 0 : -1;
+        }
+        if (strcmp(argv[2], "alloc-page-synth") == 0) {
+            /* Synthetic-handoff variant of alloc-page: build a fresh
+             * inst block + PDB page in PMM, then run the writer
+             * against that. Proves the writer composes correct
+             * PDE/PTE entries that the walker can read back —
+             * without depending on a real GPU channel handoff
+             * (jetson-nano-1 has no gpu-mnist host helper, so no
+             * handoff gets published pre-kexec).
+             *
+             * Real-channel validation needs `nvgpu inherit + channel`
+             * on a Jetson with helpers staged. Tracked in #678 /
+             * Milestone B follow-up. */
+            void *inst = pmm_alloc_page();
+            void *pdb_page = pmm_alloc_page();
+            if (inst == NULL || pdb_page == NULL) {
+                shell_puts("alloc-page-synth: PMM exhaustion\r\n");
+                return -1;
+            }
+            /* Zero both pages so all PT entries are invalid. */
+            for (int i = 0; i < 512; i++) {
+                ((volatile uint64_t *)inst)[i] = 0;
+                ((volatile uint64_t *)pdb_page)[i] = 0;
+            }
+            /* Write the PDB pointer into the inst block at byte
+             * offset 512 (= word 128 = ram_in_page_dir_base_lo_w()).
+             * Encoding: bits[2:1]=target sys_mem_coh(2), bit[3]=vol,
+             * bits[31:12]=pdb_phys[31:12], hi word = pdb_phys[63:32]. */
+            uint64_t inst_phys = (uint64_t)(uintptr_t)inst;
+            uint64_t pdb_phys = (uint64_t)(uintptr_t)pdb_page;
+            volatile uint32_t *iw = (volatile uint32_t *)inst;
+            iw[128] = ((uint32_t)pdb_phys & 0xfffff000u) |
+                      (2u << 1) /* target=sys_mem_coh */ |
+                      (1u << 3) /* volatile */;
+            iw[129] = (uint32_t)(pdb_phys >> 32);
+            cache_clean_range(inst, 4096);
+            cache_clean_range(pdb_page, 4096);
+
+            shell_printf("alloc-page-synth: inst=0x%lx pdb=0x%lx\r\n",
+                         (unsigned long)inst_phys, (unsigned long)pdb_phys);
+
+            uint64_t gpu_va = 0, phys = 0;
+            void *cpu_va = NULL;
+            int rc = ga10b_gmmu_alloc_page(inst_phys, 0,
+                                           &gpu_va, &cpu_va, &phys);
+            if (rc < 0) {
+                shell_printf("ga10b_gmmu_alloc_page failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("alloc-page-synth: gpu_va=0x%lx cpu_va=%p phys=0x%lx\r\n",
+                         (unsigned long)gpu_va, cpu_va, (unsigned long)phys);
+
+            volatile uint32_t *sentinel = (volatile uint32_t *)cpu_va;
+            sentinel[0] = 0xDEADBEEFu;
+            sentinel[1] = 0xCAFEBABEu;
+            shell_printf("alloc-page-synth: wrote sentinel via cpu_va: "
+                         "[0]=0x%08x [1]=0x%08x\r\n",
+                         (unsigned)sentinel[0], (unsigned)sentinel[1]);
+
+            struct ga10b_gmmu_walk_result wr;
+            int wrc = ga10b_gmmu_walk(inst_phys, gpu_va, &wr);
+            if (wrc != 0) {
+                shell_printf("alloc-page-synth: walker rc=%d\r\n", wrc);
+                return wrc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            if (wr.status == GA10B_GMMU_WALK_OK && wr.leaf_phys == phys) {
+                shell_printf("VERIFY: walker leaf_phys 0x%lx == "
+                             "alloc'd phys 0x%lx — PASS\r\n",
+                             (unsigned long)wr.leaf_phys,
+                             (unsigned long)phys);
+                return 0;
+            }
+            shell_printf("VERIFY: walker leaf_phys 0x%lx != "
+                         "alloc'd phys 0x%lx — FAIL\r\n",
+                         (unsigned long)wr.leaf_phys,
+                         (unsigned long)phys);
+            return -1;
+        }
+        if (strcmp(argv[2], "alloc-page") == 0) {
+            /* #666 Milestone B: allocate a single 4 KB page in the
+             * inherited channel's GMMU address space, write a
+             * sentinel pattern via the kernel-VA alias, then re-walk
+             * the GPU VA via Milestone A's walker and confirm the
+             * leaf PTE points at our new page. CPU-side smoke test
+             * — proves the writer composed correct PDE/PTE entries
+             * that the walker can read back. Real GPU verification
+             * (a kernel that reads from gpu_va) is deferred. */
+            const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+            if (h == NULL) {
+                shell_puts("alloc-page: no handoff loaded — run `nvgpu inherit` "
+                           "+ `nvgpu channel` first\r\n");
+                return -1;
+            }
+            uint64_t inst_phys2 = h->inst_block_phys;
+            if (inst_phys2 == 0) {
+                inst_phys2 = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys2 == 0) {
+                    shell_puts("alloc-page: handoff inst_block_phys=0 "
+                               "and FECS_CURRENT_CTX read failed\r\n");
+                    return -1;
+                }
+                shell_printf("alloc-page: using FECS_CURRENT_CTX inst=0x%lx\r\n",
+                             (unsigned long)inst_phys2);
+            }
+            uint64_t gpu_va = 0, phys = 0;
+            void *cpu_va = NULL;
+            int rc = ga10b_gmmu_alloc_page(inst_phys2, 0,
+                                           &gpu_va, &cpu_va, &phys);
+            if (rc < 0) {
+                shell_printf("ga10b_gmmu_alloc_page failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            shell_printf("alloc-page: gpu_va=0x%lx cpu_va=%p phys=0x%lx\r\n",
+                         (unsigned long)gpu_va, cpu_va, (unsigned long)phys);
+            /* Write sentinel via cpu_va to prove the page is writable. */
+            volatile uint32_t *sentinel = (volatile uint32_t *)cpu_va;
+            sentinel[0] = 0xDEADBEEFu;
+            sentinel[1] = 0xCAFEBABEu;
+            shell_printf("alloc-page: wrote sentinel via cpu_va: "
+                         "[0]=0x%08x [1]=0x%08x\r\n",
+                         (unsigned)sentinel[0], (unsigned)sentinel[1]);
+            /* Re-walk the GPU VA — leaf phys must equal phys we got. */
+            struct ga10b_gmmu_walk_result wr;
+            int wrc = ga10b_gmmu_walk(inst_phys2, gpu_va, &wr);
+            if (wrc != 0) {
+                shell_printf("alloc-page: walker rc=%d\r\n", wrc);
+                return wrc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            if (wr.status == GA10B_GMMU_WALK_OK && wr.leaf_phys == phys) {
+                shell_printf("VERIFY: walker leaf_phys 0x%lx == "
+                             "alloc'd phys 0x%lx — PASS\r\n",
+                             (unsigned long)wr.leaf_phys,
+                             (unsigned long)phys);
+                return 0;
+            }
+            shell_printf("VERIFY: walker leaf_phys 0x%lx != "
+                         "alloc'd phys 0x%lx — FAIL\r\n",
+                         (unsigned long)wr.leaf_phys,
+                         (unsigned long)phys);
+            return -1;
+        }
+        if (strcmp(argv[2], "walk-raw") == 0) {
+            if (argc < 5) {
+                shell_puts("usage: nvgpu gmmu walk-raw <inst_phys_hex> <hex_va>\r\n");
+                return -1;
+            }
+            uint64_t inst = 0, va = 0;
+            for (int a = 0; a < 2; a++) {
+                const char *s = argv[3 + a];
+                if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                    s += 2;
+                }
+                uint64_t v = 0;
+                while (*s) {
+                    uint64_t d;
+                    if (*s >= '0' && *s <= '9') {
+                        d = *s - '0';
+                    } else if (*s >= 'a' && *s <= 'f') {
+                        d = 10 + (*s - 'a');
+                    } else if (*s >= 'A' && *s <= 'F') {
+                        d = 10 + (*s - 'A');
+                    } else {
+                        shell_puts("bad hex\r\n");
+                        return -1;
+                    }
+                    v = (v << 4) | d;
+                    s++;
+                }
+                if (a == 0) {
+                    inst = v;
+                } else {
+                    va = v;
+                }
+            }
+            struct ga10b_gmmu_walk_result wr;
+            int rc = ga10b_gmmu_walk(inst, va, &wr);
+            if (rc != 0) {
+                shell_printf("ga10b_gmmu_walk failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            return 0;
+        }
+        const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+        if (h == NULL) {
+            shell_puts("gmmu: no handoff loaded — run `nvgpu inherit` "
+                       "+ `nvgpu channel` first (or use `walk-raw`)\r\n");
+            return -1;
+        }
+        if (strcmp(argv[2], "pushbuf") == 0) {
+            uint64_t inst_phys = h->inst_block_phys;
+            if (inst_phys == 0) {
+                inst_phys = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys == 0) {
+                    shell_puts("gmmu pushbuf: handoff inst_block_phys=0 "
+                               "and FECS_CURRENT_CTX read failed\r\n");
+                    return -1;
+                }
+                shell_printf("gmmu pushbuf: handoff inst_block_phys=0; "
+                             "discovered via FECS_CURRENT_CTX = 0x%lx\r\n",
+                             (unsigned long)inst_phys);
+            }
+            struct ga10b_gmmu_walk_result wr;
+            int rc = ga10b_gmmu_walk(inst_phys, h->pushbuf_gpu_va, &wr);
+            if (rc != 0) {
+                shell_printf("ga10b_gmmu_walk failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            if (wr.status == GA10B_GMMU_WALK_OK) {
+                if (wr.leaf_phys == h->pushbuf_phys) {
+                    shell_printf("VERIFY: leaf phys 0x%lx == "
+                                 "g_handoff.pushbuf_phys 0x%lx — PASS\r\n",
+                                 (unsigned long)wr.leaf_phys,
+                                 (unsigned long)h->pushbuf_phys);
+                    return 0;
+                }
+                shell_printf("VERIFY: leaf phys 0x%lx != "
+                             "g_handoff.pushbuf_phys 0x%lx — FAIL\r\n",
+                             (unsigned long)wr.leaf_phys,
+                             (unsigned long)h->pushbuf_phys);
+                return -1;
+            }
+            return -1;
+        }
+        if (strcmp(argv[2], "walk") == 0) {
+            if (argc < 4) {
+                shell_puts("usage: nvgpu gmmu walk <hex_va>\r\n");
+                return -1;
+            }
+            const char *s = argv[3];
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                s += 2;
+            }
+            uint64_t va = 0;
+            while (*s) {
+                uint64_t d;
+                if (*s >= '0' && *s <= '9') {
+                    d = *s - '0';
+                } else if (*s >= 'a' && *s <= 'f') {
+                    d = 10 + (*s - 'a');
+                } else if (*s >= 'A' && *s <= 'F') {
+                    d = 10 + (*s - 'A');
+                } else {
+                    shell_puts("bad hex VA\r\n");
+                    return -1;
+                }
+                va = (va << 4) | d;
+                s++;
+            }
+            uint64_t inst_phys3 = h->inst_block_phys;
+            if (inst_phys3 == 0) {
+                inst_phys3 = ga10b_gmmu_discover_inst_block_phys();
+                if (inst_phys3 == 0) {
+                    shell_puts("walk: handoff inst_block_phys=0 "
+                               "and FECS_CURRENT_CTX read failed\r\n");
+                    return -1;
+                }
+            }
+            struct ga10b_gmmu_walk_result wr;
+            int rc = ga10b_gmmu_walk(inst_phys3, va, &wr);
+            if (rc != 0) {
+                shell_printf("ga10b_gmmu_walk failed: rc=%d\r\n", rc);
+                return rc;
+            }
+            ga10b_gmmu_walk_print(&wr);
+            return (wr.status == GA10B_GMMU_WALK_OK) ? 0 : -1;
+        }
+        shell_puts("usage: nvgpu gmmu <pushbuf | walk <hex_va>>\r\n");
+        return -1;
+    }
+
     shell_puts("usage: nvgpu [info | prepare | inherit | acr | test | "
-              "channel | submit | submit-compute | launch-kernel | "
-              "run-mnist | fecs | gpccs | pmu | run]\r\n");
+              "channel | engine-status | engine-clear | "
+              "submit | submit-compute | launch-kernel | "
+              "run-mnist | fecs | gpccs | pmu | run | "
+              "gmmu <pushbuf | walk | walk-raw | "
+              "alloc-page | alloc-page-synth | "
+              "alloc-multi-synth | reuse-synth> | "
+              "oplib]\r\n");
     return -1;
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
@@ -7304,7 +9200,7 @@ int cmd_nvcsi(int argc, char *argv[])
     } else {
         uart_puts("  *** Non-zero INTR_STATUS — receiver saw a   ***\r\n");
         uart_puts("  *** packet or fault during init. Inspect    ***\r\n");
-        uart_puts("  *** bits per ../slmos-reference-cache/tegra-l4t/l4t-csi4_registers.h ***\r\n");
+        uart_puts("  *** bits per ~/slmos-ref/tegra-l4t/l4t-csi4_registers.h ***\r\n");
     }
 
     uart_puts("=== End ===\r\n");
@@ -7358,7 +9254,7 @@ int cmd_rcediag(int argc, char *argv[])
          * the established session can carry arbitrary HSP-VM
          * messages — not just the boot-sync HELLO/PROTOCOL/RESUME
          * sequence. PING is documented in
-         * `../slmos-reference-cache/tegra-l4t/l4t-camrtc-commands.h:64-66` as the
+         * `~/slmos-ref/tegra-l4t/l4t-camrtc-commands.h:64-66` as the
          * "check aliveness of RCE FW and the HSP protocol" probe;
          * RCE echoes the 24-bit param verbatim. This is the
          * smallest pre-CH_SETUP gate proving `camrtc_send_msg` is
@@ -7423,7 +9319,7 @@ int cmd_rcediag(int argc, char *argv[])
  *   2. CAPTURE_PHY_STREAM_OPEN_REQ (NVCSI port A, stream 0, D-PHY)
  *   3. Print the response result.
  *
- * Result codes are in `../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture-messages.h`
+ * Result codes are in `~/slmos-ref/tegra-l4t/l4t-camrtc-capture-messages.h`
  * (CAPTURE_OK = 0, CAPTURE_ERROR_* otherwise). Anything other than
  * 0 means the request reached RCE, came back, but RCE rejected it
  * — e.g. NVCSI not powered, port already open, bad PHY type. The
@@ -7447,7 +9343,7 @@ int cmd_csidiag(int argc, char *argv[])
 
     uint32_t result = 0xDEADBEEFu;
     /* NVCSI_STREAM_0 = 0, NVCSI_PORT_A = 0, NVCSI_PHY_TYPE_DPHY = 0
-     * (`../slmos-reference-cache/tegra-l4t/l4t-camrtc-capture.h:1372/1387/1443`). */
+     * (`~/slmos-ref/tegra-l4t/l4t-camrtc-capture.h:1372/1387/1443`). */
     rc = camrtc_capture_phy_stream_open(0u, 0u, 0u, &result);
     uart_printf("  PHY_STREAM_OPEN: rc=%d result=0x%x\r\n",
                 rc, (unsigned)result);
@@ -7466,7 +9362,7 @@ int cmd_csidiag(int argc, char *argv[])
 
     /* PHY_STREAM_OPEN succeeded. Configure the brick + CIL for
      * IMX219: 2 D-PHY lanes, 456 MHz MIPI clock (the IMX219
-     * default link freq from `../slmos-reference-cache/linux/linux-imx219.c:139`).
+     * default link freq from `~/slmos-ref/linux/linux-imx219.c:139`).
      * SoC-default t_hs_settle / t_clk_settle (0). */
     uint32_t cfg_result = 0xDEADBEEFu;
     rc = camrtc_capture_csi_stream_set_config(0u, 0u, 2u, 456000u,

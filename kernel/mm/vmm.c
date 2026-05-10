@@ -11,6 +11,7 @@
 #include "uart.h"
 #include "debug.h"
 #include "spinlock.h"
+#include "cache.h"
 #include <stddef.h>
 
 /*
@@ -119,9 +120,19 @@ static struct {
 
 /*
  * Build a block descriptor (L2 entry for 2MB block).
+ *
+ * Block descriptors are kernel-mappings only — the per-task user L1
+ * always installs 4 KB pages via make_page_desc (which OR's PTE_NG
+ * for ASID tagging). A future caller that asks for a user-accessible
+ * block would silently produce a global mapping, breaking the ASID
+ * model; assert against it.
  */
 static uint64_t make_block_desc(uint64_t pa, uint32_t flags)
 {
+    if (flags & VMM_FLAG_USER) {
+        panic("make_block_desc: VMM_FLAG_USER on block descriptor "
+              "(user mappings must be 4 KB pages for ASID nG handling)");
+    }
     uint64_t desc = PTE_TYPE_BLOCK;
 
     /* Physical address (aligned to 2MB) */
@@ -194,6 +205,13 @@ static uint64_t make_block_desc(uint64_t pa, uint32_t flags)
 __attribute__((unused))
 static uint64_t make_l1_block_desc(uint64_t pa, uint32_t flags)
 {
+    /* Same restriction as make_block_desc: kernel-mappings only.
+     * User mappings must be 4 KB pages so make_page_desc can set
+     * PTE_NG for ASID tagging. */
+    if (flags & VMM_FLAG_USER) {
+        panic("make_l1_block_desc: VMM_FLAG_USER on L1 block "
+              "(user mappings must be 4 KB pages for ASID nG handling)");
+    }
     uint64_t desc = PTE_TYPE_BLOCK;
 
     /* Physical address (1GB aligned) */
@@ -246,6 +264,70 @@ static uint64_t make_l1_block_desc(uint64_t pa, uint32_t flags)
 static uint64_t make_table_desc(uint64_t table_pa)
 {
     return PTE_TYPE_TABLE | (table_pa & PTE_ADDR_MASK);
+}
+
+/*
+ * Build an L3 page descriptor (4 KB granule).
+ *
+ * Same lower/upper attribute layout as make_block_desc — the only
+ * differences are the descriptor type (PTE_TYPE_PAGE = 0b11 at L3,
+ * vs. PTE_TYPE_BLOCK = 0b01 at L1/L2) and the address mask (4 KB
+ * aligned, bits [47:12]).
+ */
+static uint64_t make_page_desc(uint64_t pa, uint32_t flags)
+{
+    uint64_t desc = PTE_TYPE_PAGE;
+
+    desc |= (pa & PTE_ADDR_MASK);
+    desc |= PTE_AF;
+
+    if (flags & VMM_FLAG_DEVICE) {
+        desc |= PTE_ATTR_INDEX(MAIR_IDX_DEVICE_nGnRnE);
+        desc |= PTE_SH_NON;
+    } else if (flags & VMM_FLAG_NOCACHE) {
+        desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_NC);
+        desc |= PTE_SH_INNER;
+    } else {
+        desc |= PTE_ATTR_INDEX(MAIR_IDX_NORMAL_WB);
+        desc |= PTE_SH_INNER;
+    }
+
+    if (flags & VMM_FLAG_USER) {
+        if (!(flags & VMM_FLAG_WRITE)) {
+            desc |= PTE_AP_RO_ALL;
+        } else {
+            desc |= PTE_AP_RW_ALL;
+        }
+    } else {
+        if (!(flags & VMM_FLAG_WRITE)) {
+            desc |= PTE_AP_RO_EL1;
+        } else {
+            desc |= PTE_AP_RW_EL1;
+        }
+    }
+
+    if (!(flags & VMM_FLAG_EXEC)) {
+        desc |= PTE_PXN;
+    }
+    if (!(flags & VMM_FLAG_USER) || !(flags & VMM_FLAG_EXEC)) {
+        desc |= PTE_UXN;
+    }
+
+    /* Software bit so vmm_destroy_user_l1 / vmm_user_unmap_page know
+     * whether the leaf PA is theirs to free or belongs to a caller
+     * (e.g. the .text.user kernel-image pages are NOT PMM-owned). */
+    if (flags & VMM_FLAG_PMM_OWNED) {
+        desc |= PTE_SW_PMM_OWNED;
+    }
+
+    /* User pages are non-global (nG=1), so the hardware tags them with
+     * the active ASID at fill-time and a TTBR0 swap to a different
+     * ASID doesn't see them. Kernel pages stay global (nG=0). */
+    if (flags & VMM_FLAG_USER) {
+        desc |= PTE_NG;
+    }
+
+    return desc;
 }
 
 /*
@@ -463,6 +545,412 @@ bool vmm_is_mapped(uint64_t virt)
 
     uint64_t l2_idx = L2_INDEX(virt);
     return (l2[l2_idx] & PTE_TYPE_MASK) != PTE_TYPE_INVALID;
+}
+
+/*
+ * #697 PR-2 — per-task TTBR0 L1 helpers.
+ *
+ * vmm_create_user_l1 allocates a fresh 4 KB L1 page from PMM,
+ * populates L1[0..USER_L1_FIRST-1] with copies of the boot L1's
+ * entries (so kernel mappings remain reachable when this L1 is
+ * loaded into TTBR0_EL1), and zeroes L1[USER_L1_FIRST..USER_L1_LIMIT-1]
+ * (PR-3's task_create_user populates these).
+ *
+ * vmm_destroy_user_l1 walks the user-region entries to free any
+ * per-task L2/L3 sub-tables, then frees the L1 page itself. It must
+ * not touch the kernel-region L1 entries — those point to L2 tables
+ * shared with the boot L1 and other per-task L1s.
+ */
+int vmm_create_user_l1(uint64_t *out_pa)
+{
+    if (!out_pa) {
+        return -1;
+    }
+
+    void *page = pmm_alloc_pages(1);
+    if (!page) {
+        ERROR("vmm_create_user_l1: PMM allocation failed");
+        return -1;
+    }
+
+    /* PMM returns identity-mapped VAs; VA == PA for kernel pages. */
+    uint64_t *user_l1 = (uint64_t *)page;
+
+    /* Mirror kernel L1 entries by COPY. Each copied entry is an L2
+     * table pointer (or 1 GB block descriptor); the pointed-to L2
+     * tables are shared with the boot L1 and other per-task L1s.
+     * Kernel-side mapping changes that go through L2-level edits
+     * propagate to all per-task L1s for free. Direct boot-L1 edits
+     * do NOT propagate — see "per-task L1 mirroring drift" risk in
+     * docs/pi5-el0-execution-plan.md. */
+    for (size_t i = 0; i < USER_L1_FIRST; i++) {
+        user_l1[i] = l1_table[i];
+    }
+
+    /* Zero user-region entries — task_create_user (PR-3) populates. */
+    for (size_t i = USER_L1_FIRST; i < USER_L1_LIMIT; i++) {
+        user_l1[i] = 0;
+    }
+
+    /* The page-table walker reads PAs directly. Clean the L1 page to
+     * Point of Coherency so the data is in DRAM before any future
+     * TTBR0 swap reads from it. Critical on Pi 5 / Jetson where
+     * SMPEN is not set and per-CPU L2 caches are incoherent. */
+    cache_clean_range(user_l1, TABLE_SIZE);
+
+    *out_pa = (uint64_t)(uintptr_t)page;
+    return 0;
+}
+
+void vmm_user_addrspace_switch(uint64_t l1_pa, uint16_t asid)
+{
+#if !defined(PLATFORM_X86_64)
+    /* TTBR0_EL1 layout with TCR.AS=1 (16-bit ASIDs, set in
+     * TCR_EL1_VALUE):
+     *   bits [63:48] = ASID
+     *   bits [47:1]  = base address
+     *
+     * No TLB invalidate. User PTEs carry nG=1 so the hardware tags
+     * them with the current ASID at fill time; entries from a
+     * different ASID can co-exist in the TLB without aliasing this
+     * one. Kernel PTEs are global (nG=0) and apply across all ASIDs.
+     * Stale ASID-tagged entries are flushed at vmm_alloc_asid time
+     * if/when an ASID slot is recycled.
+     *
+     * DSB ISHST before the MSR drains any prior PTE writes from the
+     * same CPU (e.g. vmm_user_map_page calls before this swap)
+     * through to the inner-shareable PoC, so the page-table walker
+     * is guaranteed to observe them when it next walks via the new
+     * TTBR0. Empirically the scheduler's spinlock cache maintenance
+     * already closes this window on Pi 5, but the architecture
+     * mandates the explicit barrier. */
+    uint64_t ttbr0 = ((uint64_t)asid << 48) | (l1_pa & 0x0000FFFFFFFFFFFFUL);
+    __asm__ volatile(
+        "dsb ishst\n"
+        "msr ttbr0_el1, %0\n"
+        "isb\n"
+        :: "r"(ttbr0)
+        : "memory");
+#else
+    (void)l1_pa;
+    (void)asid;
+#endif
+}
+
+/* ============================================================================
+ * ASID allocator (#697 follow-up: per-task TTBR0 needs ASID tagging
+ * so context switches don't cost a full TLB flush).
+ *
+ * Pool: 1..VMM_USER_ASID_MAX (slot 0 reserved for kernel/boot).
+ * Bitmap: one bit per slot; 0 = free, 1 = in use.
+ * Spinlock: simple cacheable spinlock; protects both the bitmap and
+ *           the recycle-flush flag.
+ *
+ * The "recycle" flag is one bit per slot, set on free and cleared on
+ * the next alloc that hands the slot out. When the alloc sees recycle=1,
+ * it issues `tlbi aside1is, asid<<48` before returning — flushing any
+ * stale entries from the prior holder of that ASID across all CPUs in
+ * the inner-shareable domain.
+ * ============================================================================ */
+
+#if !defined(PLATFORM_X86_64)
+
+#define ASID_BITMAP_BITS    (VMM_USER_ASID_MAX + 1)
+#define ASID_BITMAP_WORDS   ((ASID_BITMAP_BITS + 63) / 64)
+
+static uint64_t asid_in_use[ASID_BITMAP_WORDS];
+static uint64_t asid_recycled[ASID_BITMAP_WORDS];
+static spinlock_t asid_lock = SPINLOCK_INIT;
+
+static inline void asid_bit_set(uint64_t *bm, uint16_t i)
+{
+    bm[i / 64] |= (1UL << (i % 64));
+}
+static inline void asid_bit_clear(uint64_t *bm, uint16_t i)
+{
+    bm[i / 64] &= ~(1UL << (i % 64));
+}
+static inline int asid_bit_test(const uint64_t *bm, uint16_t i)
+{
+    return (bm[i / 64] >> (i % 64)) & 1;
+}
+
+uint16_t vmm_alloc_asid(void)
+{
+    irq_flags_t flags = spin_lock_irqsave(&asid_lock);
+
+    /* Linear scan starting at 1 — slot 0 is the kernel ASID. With
+     * MAX_TASKS = 64 and a 256-slot pool, this is fine. If the pool
+     * is ever sized larger or the live-task count grows past ~32,
+     * switch to a hint cursor. */
+    for (uint16_t i = 1; i <= VMM_USER_ASID_MAX; i++) {
+        if (asid_bit_test(asid_in_use, i)) {
+            continue;
+        }
+        asid_bit_set(asid_in_use, i);
+
+        /* Recycle: flush any stale TLB entries tagged with this ASID
+         * before returning it. The flush is broadcast (-IS) so other
+         * CPUs that may have run an earlier task with this ASID also
+         * drop their stale entries. */
+        bool recycled = asid_bit_test(asid_recycled, i) != 0;
+        if (recycled) {
+            asid_bit_clear(asid_recycled, i);
+        }
+        spin_unlock_irqrestore(&asid_lock, flags);
+
+        if (recycled) {
+            uint64_t arg = (uint64_t)i << 48;
+            __asm__ volatile(
+                "dsb ishst\n"
+                "tlbi aside1is, %0\n"
+                "dsb ish\n"
+                "isb\n"
+                :: "r"(arg)
+                : "memory");
+        }
+        return i;
+    }
+
+    /* Pool exhausted. Should never happen with VMM_USER_ASID_MAX (255)
+     * >> MAX_TASKS (64). If it does, the caller treats 0 as "no ASID
+     * available" and refuses to create the user task. */
+    spin_unlock_irqrestore(&asid_lock, flags);
+    return 0;
+}
+
+void vmm_free_asid(uint16_t asid)
+{
+    if (asid == 0 || asid > VMM_USER_ASID_MAX) {
+        return;
+    }
+    irq_flags_t flags = spin_lock_irqsave(&asid_lock);
+    asid_bit_clear(asid_in_use, asid);
+    /* Defer the TLB flush until alloc-time recycle: free is the
+     * common case (every task_destroy), alloc that recycles the
+     * same slot is rare. */
+    asid_bit_set(asid_recycled, asid);
+    spin_unlock_irqrestore(&asid_lock, flags);
+}
+
+#else  /* PLATFORM_X86_64 */
+
+uint16_t vmm_alloc_asid(void) { return 0; }
+void vmm_free_asid(uint16_t asid) { (void)asid; }
+
+#endif
+
+uint64_t vmm_boot_l1_pa(void)
+{
+    /* l1_table is identity-mapped; VA == PA in the kernel's low-VA
+     * window. Cast through uintptr_t because the C standard forbids
+     * implicit pointer-to-integer with the type system. */
+    return (uint64_t)(uintptr_t)l1_table;
+}
+
+int vmm_user_map_page(uint64_t l1_pa, uint64_t va, uint64_t pa, uint32_t flags)
+{
+    if (l1_pa == 0) {
+        return -1;
+    }
+    if (va < USER_VA_BASE || va >= USER_VA_LIMIT) {
+        return -1;
+    }
+    if ((va & (PAGE_SIZE - 1)) != 0) {
+        return -1;
+    }
+    if ((pa & (PAGE_SIZE - 1)) != 0) {
+        return -1;
+    }
+
+    uint64_t *user_l1 = (uint64_t *)(uintptr_t)l1_pa;
+    uint64_t l1_idx = L1_INDEX(va);
+    uint64_t l2_idx = L2_INDEX(va);
+    uint64_t l3_idx = L3_INDEX(va);
+
+    /* Track sub-tables installed by THIS call so a failure on a later
+     * step can roll them back instead of leaving an orphan L2 / L3
+     * for vmm_destroy_user_l1 to clean up at task tear-down. The
+     * fast path (everything pre-existing) leaves both NULL. */
+    void *new_l2_page = NULL;
+    void *new_l3_page = NULL;
+
+    /* L1 → L2: install fresh L2 if absent. */
+    uint64_t l2_pa;
+    uint64_t l1_entry = user_l1[l1_idx];
+    uint64_t l1_type = l1_entry & PTE_TYPE_MASK;
+    if (l1_type == PTE_TYPE_TABLE) {
+        l2_pa = l1_entry & PTE_ADDR_MASK;
+    } else if (l1_type == PTE_TYPE_INVALID) {
+        new_l2_page = pmm_alloc_pages(1);
+        if (!new_l2_page) {
+            return -1;
+        }
+        for (size_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+            ((uint64_t *)new_l2_page)[i] = 0;
+        }
+        cache_clean_range(new_l2_page, TABLE_SIZE);
+        l2_pa = (uint64_t)(uintptr_t)new_l2_page;
+        user_l1[l1_idx] = make_table_desc(l2_pa);
+        cache_clean_range(&user_l1[l1_idx], sizeof(uint64_t));
+    } else {
+        /* L1 block (1 GB) — incompatible with 4 KB page mapping. */
+        return -1;
+    }
+
+    /* L2 → L3: install fresh L3 if absent. */
+    uint64_t *l2 = (uint64_t *)(uintptr_t)l2_pa;
+    uint64_t l3_pa;
+    uint64_t l2_entry = l2[l2_idx];
+    uint64_t l2_type = l2_entry & PTE_TYPE_MASK;
+    if (l2_type == PTE_TYPE_TABLE) {
+        l3_pa = l2_entry & PTE_ADDR_MASK;
+    } else if (l2_type == PTE_TYPE_INVALID) {
+        new_l3_page = pmm_alloc_pages(1);
+        if (!new_l3_page) {
+            goto fail;
+        }
+        for (size_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+            ((uint64_t *)new_l3_page)[i] = 0;
+        }
+        cache_clean_range(new_l3_page, TABLE_SIZE);
+        l3_pa = (uint64_t)(uintptr_t)new_l3_page;
+        l2[l2_idx] = make_table_desc(l3_pa);
+        cache_clean_range(&l2[l2_idx], sizeof(uint64_t));
+    } else {
+        /* L2 block (2 MB) — incompatible with 4 KB page mapping. */
+        goto fail;
+    }
+
+    /* L3 → page. */
+    uint64_t *l3 = (uint64_t *)(uintptr_t)l3_pa;
+    if ((l3[l3_idx] & PTE_TYPE_MASK) != PTE_TYPE_INVALID) {
+        goto fail;
+    }
+    l3[l3_idx] = make_page_desc(pa, flags);
+    cache_clean_range(&l3[l3_idx], sizeof(uint64_t));
+
+    return 0;
+
+fail:
+    /* Roll back any sub-tables this call installed. Pre-existing
+     * sub-tables (l1_type/l2_type were TABLE on entry) are left
+     * untouched — the caller's prior mappings inside them stay valid. */
+    if (new_l3_page) {
+        l2[l2_idx] = 0;
+        cache_clean_range(&l2[l2_idx], sizeof(uint64_t));
+        pmm_free_pages(new_l3_page, 1);
+    }
+    if (new_l2_page) {
+        user_l1[l1_idx] = 0;
+        cache_clean_range(&user_l1[l1_idx], sizeof(uint64_t));
+        pmm_free_pages(new_l2_page, 1);
+    }
+    return -1;
+}
+
+void vmm_destroy_user_l1(uint64_t l1_pa)
+{
+    if (l1_pa == 0) {
+        return;
+    }
+
+    uint64_t *user_l1 = (uint64_t *)(uintptr_t)l1_pa;
+
+    /* Walk only the user-region entries. Kernel-region entries point
+     * to shared L2 tables that other per-task L1s and the boot L1
+     * still reference. */
+    for (size_t i = USER_L1_FIRST; i < USER_L1_LIMIT; i++) {
+        uint64_t entry = user_l1[i];
+        if ((entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+            continue;       /* invalid or 1 GB block — nothing to free */
+        }
+
+        uint64_t l2_pa = entry & PTE_ADDR_MASK;
+        uint64_t *l2 = (uint64_t *)(uintptr_t)l2_pa;
+
+        /* L2 entries can be 2 MB blocks (no sub-table to free) or L3
+         * page tables (free L3 leaf pages flagged PMM_OWNED, then the
+         * L3 page itself). */
+        for (size_t j = 0; j < ENTRIES_PER_TABLE; j++) {
+            uint64_t l2_entry = l2[j];
+            if ((l2_entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+                continue;
+            }
+            uint64_t l3_pa = l2_entry & PTE_ADDR_MASK;
+            uint64_t *l3 = (uint64_t *)(uintptr_t)l3_pa;
+
+            /* Walk L3 leaves. Free any leaf PA tagged PMM_OWNED — the
+             * caller's mmap-style mappings + the per-task EL0 stack
+             * land here. Untagged leaves (e.g. .text.user pages whose
+             * PA is in the kernel image) are left alone. */
+            for (size_t k = 0; k < ENTRIES_PER_TABLE; k++) {
+                uint64_t l3_entry = l3[k];
+                if ((l3_entry & PTE_TYPE_MASK) != PTE_TYPE_PAGE) {
+                    continue;
+                }
+                if (l3_entry & PTE_SW_PMM_OWNED) {
+                    uint64_t leaf_pa = l3_entry & PTE_ADDR_MASK;
+                    pmm_free_pages((void *)(uintptr_t)leaf_pa, 1);
+                }
+            }
+
+            pmm_free_pages((void *)(uintptr_t)l3_pa, 1);
+        }
+
+        pmm_free_pages((void *)(uintptr_t)l2_pa, 1);
+    }
+
+    pmm_free_pages((void *)(uintptr_t)l1_pa, 1);
+}
+
+int vmm_user_unmap_page(uint64_t l1_pa, uint64_t va)
+{
+    if (l1_pa == 0) {
+        return -1;
+    }
+    if (va < USER_VA_BASE || va >= USER_VA_LIMIT) {
+        return -1;
+    }
+    if ((va & (PAGE_SIZE - 1)) != 0) {
+        return -1;
+    }
+
+    uint64_t *user_l1 = (uint64_t *)(uintptr_t)l1_pa;
+    uint64_t l1_idx = L1_INDEX(va);
+    uint64_t l2_idx = L2_INDEX(va);
+    uint64_t l3_idx = L3_INDEX(va);
+
+    /* Walk L1 → L2 → L3. Any missing level means the VA isn't mapped. */
+    uint64_t l1_entry = user_l1[l1_idx];
+    if ((l1_entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return -1;
+    }
+    uint64_t *l2 = (uint64_t *)(uintptr_t)(l1_entry & PTE_ADDR_MASK);
+
+    uint64_t l2_entry = l2[l2_idx];
+    if ((l2_entry & PTE_TYPE_MASK) != PTE_TYPE_TABLE) {
+        return -1;
+    }
+    uint64_t *l3 = (uint64_t *)(uintptr_t)(l2_entry & PTE_ADDR_MASK);
+
+    uint64_t l3_entry = l3[l3_idx];
+    if ((l3_entry & PTE_TYPE_MASK) != PTE_TYPE_PAGE) {
+        return -1;
+    }
+
+    /* Capture the leaf PA + ownership before clearing. */
+    uint64_t leaf_pa = l3_entry & PTE_ADDR_MASK;
+    bool pmm_owned = (l3_entry & PTE_SW_PMM_OWNED) != 0;
+
+    l3[l3_idx] = 0;
+    cache_clean_range(&l3[l3_idx], sizeof(uint64_t));
+
+    if (pmm_owned) {
+        pmm_free_pages((void *)(uintptr_t)leaf_pa, 1);
+    }
+
+    return 0;
 }
 
 /*

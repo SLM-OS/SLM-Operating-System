@@ -32,6 +32,7 @@
 #include "blob_autoload.h"
 #include "boot_media.h"
 #include "help.h"
+#include "oplib_pool.h"
 #if defined(ENABLE_NETWORKING)
 #include "net.h"
 #include "net_driver.h"
@@ -369,6 +370,13 @@ void kernel_main(void *dtb)
 
     /* Initialize non-cacheable shared memory region (Pi 5 only) */
     ncmem_init();
+
+    /* Parse the embedded operator-library blob (#714). Pure CPU side
+     * — no PMM / no GPU resources required, just a .rodata read. The
+     * default build embeds a 32-byte stub (op_count=0); pass
+     * -DOPLIB_BLOB=path to embed a real library produced by
+     * scripts/build-operator-library.py. */
+    (void)oplib_pool_init();
 
     /* Move UART lock to NC memory for cross-CPU safety */
     {

@@ -491,6 +491,10 @@ int hailo_control_arm_irq_masks(void)
  * without competition from a host handler — disarming gives it the
  * same conditions Linux does.
  *
+ * Also used under HAILO_IRQ_CYCLE_AT_BOOT to wrap a disable→re-enable
+ * cycle around the post-boot D3hot transition (replaces the older
+ * hailo_control_disable_imask name from PR #695).
+ *
  * The arm flag is cleared too; control_post_boot_init's existing call
  * to hailo_control_arm_irq_masks (early-returns when the flag is set)
  * will re-arm on the first FW_CONTROL RPC, symmetric to Linux's
@@ -501,7 +505,7 @@ int hailo_control_disarm_irq_masks(void)
         return HAILO_ERR_NODEV;
     }
     hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, 0u);
-    hailo_platform->mb();
+    if (hailo_platform->mb) hailo_platform->mb();
     control_irq_masks_armed = false;
     return HAILO_OK;
 }
@@ -1456,7 +1460,7 @@ int hailo_control_config_stream_pcie(
  * Firmware rejects any other size with
  * CONTROL_PROTOCOL_STATUS_INVALID_CONTEXT_SWITCH_APP_HEADER_LENGTH
  * (major=0x40030060). The newer upstream reference header at
- * ../slmos-reference-cache/hailo/hailort-control-protocol.h:883-894 shows the 53-byte
+ * ~/slmos-ref/hailo/hailort-control-protocol.h:883-894 shows the 53-byte
  * layout (4 bools + 24 cfg channels) — that's a newer fw release,
  * not what pi-5-1 ships.
  */
@@ -1566,7 +1570,7 @@ int hailo_control_set_network_group_header(
 
 /* Fixed prefix before context_network_data. All length fields are
  * BE on the wire; the u8 payload bytes they precede are 1-byte and
- * stored native. Per reference: ../slmos-reference-cache/hailo/hailort-control-protocol.h
+ * stored native. Per reference: ~/slmos-ref/hailo/hailort-control-protocol.h
  * lines 969-978 and -control_protocol.cpp:1162-1211. */
 struct hailo_cs_set_ctx_info_req_prefix_wire {
     struct hailo_control_common_header common;

@@ -205,7 +205,7 @@ it a bare MMIO write or a VC mailbox RPC?
   1. `RPI_FIRMWARE_SET_REBOOT_FLAGS = 0x00038064`, payload `u32 = 1`.
   2. `RPI_FIRMWARE_NOTIFY_REBOOT = 0x00030048`, empty payload.
   Mailbox MMIO physical: `0x10_7C01_3880`, size `0x40`
-  (`../slmos-reference-cache/linux/linux-bcm2712.dtsi:123-128` after applying SoC
+  (`~/slmos-ref/linux/linux-bcm2712.dtsi:123-128` after applying SoC
   `ranges` at line 90).
 - **SLM-OS already has the transport.** `kernel/drivers/bcm_mailbox.c`
   + `kernel/include/bcm_mailbox.h` implement the property-channel

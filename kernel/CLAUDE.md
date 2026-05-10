@@ -166,7 +166,7 @@ On real ARM64 hardware (Pi 5, Jetson), per-core L2 caches are incoherent despite
 | `current_task[MAX_CPUS]` | ~32B | Per-CPU current running task pointer |
 | (Trace slots at `NC_MEM_SIZE - 256`) | 256B | Reserved for `nc_trace.h` diagnostics (not allocated) |
 
-**Cross-CPU dispatch status (April 16, 2026):** FULL. `bench smp`, `bench stealing`, and all 15 integration tests pass on Pi 5 hardware when secondary CPUs wake as expected; see issue #216 for a boot-to-boot dormancy pattern that occasionally keeps one or more secondaries from entering `schedule()` and knocks out unrelated multi-CPU tests. Timer-based preemption on secondary CPUs still uses the cooperative path (CNTPCT-driven tick at yield points); hardware timer IRQ delivery remains a separate blocker tracked under #134. NC run queues, NC task table, NC current-task pointers. All tasks run with `DAIF.I=1` (no in-task timer preemption). See this file's "Pi 5 spinlock DRAM flush" section for what unblocked the last gap.
+**Cross-CPU dispatch status (April 16, 2026):** FULL. `bench smp`, `bench stealing`, and all 15 integration tests pass on Pi 5 hardware when secondary CPUs wake as expected; see issue #216 for a boot-to-boot dormancy pattern that occasionally keeps one or more secondaries from entering `schedule()` and knocks out unrelated multi-CPU tests. Timer-based preemption on secondary CPUs is hardware-driven on Jetson under default `JETSON_HW_TICK=ON` (PR #746/#755) and on Pi 5 under opt-in `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` (PR #742); the default Pi 5 build still runs the cooperative path (CNTPCT-driven tick at yield points). Tasks start with `DAIF.I=1` and unmask naturally on the first `spin_unlock_irqrestore` or idle-task `daifclr` — under HW-preempt builds the timer ISR then preempts inside running tasks via the ELR trampoline. NC run queues, NC task table, NC current-task pointers. See this file's "Pi 5 spinlock DRAM flush" section for what unblocked the last cross-CPU dispatch gap.
 
 **`test_work_stealing_distributes_load` success criterion (April 16, 2026):** The test now asserts "at least one task ran on a CPU other than the owner (CPU 1)" — the semantic meaning of "stealing distributes load". The earlier assertion required ≥2 distinct stealer CPUs per attempt, which flaked under the #216 dormancy pattern whenever only one of CPUs 2/3 was alive (a single awake stealer grabs all 5 tasks before the others wake, giving `distinct == 1` but still successfully moving work off the owner). On `PLATFORM_RASPI5`, the test prints a `ws-diag` line per attempt with per-CPU `(steal_attempts / successes / stale / schedule / picked)` deltas so future flake investigations can tell "no stealer awake" apart from "one stealer monopolized" apart from "stealing rejected" without reflashing diagnostic builds.
 
@@ -212,6 +212,20 @@ The `MAX_TASKS * STACK_SIZE` worst-case PMM budget is now 16 MB
 (64 tasks × 256 KB). Comfortable on every shipping platform; bump
 the assertion in `config.h` if `MAX_TASKS` ever grows past 64.
 
+**ARM64 IRQ trap-frame budget (PR #753):** Every IRQ entry on
+ARM64 allocates `TRAP_FRAME_ALLOC` = **800 bytes** on the
+interrupted task's kernel stack — 264 bytes for x0-x30 + ELR +
+SPSR plus 528 bytes for the full FP/SIMD register file
+(q0-q31 + FPCR + FPSR). The FP slots exist so AAPCS64 caller-save
+clobbers inside `el1_irq_handler` /
+`maybe_arm_resched_trampoline` can't corrupt the interrupted
+task's q-regs (see save_regs in `kernel/arch/arm64/vectors.S`
+for the rationale). Combined with the trampoline's own
+~192-byte frame and any nested exception, expect a peak of
+~1.5 KB consumed for IRQ machinery alone. Negligible against
+the 256 KB per-task budget; flagged here so future stack-size
+audits factor it in.
+
 ---
 
 ## Stack-Overflow Guard — save-side SP-range assertion (May 2026)
@@ -250,35 +264,108 @@ write through the canary region.
 
 The idle task's `msr daifclr, #2` (IRQ unmask) must be **inside** the `while(1)` loop, not before it. When idle is preempted by the timer ISR, ARM hardware masks IRQ on exception entry. `context.S` saves this masked DAIF into idle's context. On resume, the restored DAIF keeps IRQ masked. If the unmask is only at function entry, idle would loop forever in `wfi` with IRQ disabled.
 
-**Pi 5/Jetson platform split:** CPU 0's idle task does `daifclr` + `wfi` (timer-driven preemption). Secondary CPUs use `wfe` only (cooperative via SEV) because timer IRQs on secondary CPUs cause an exception handler hang (under investigation). This means `pit_ticks` only advances when CPU 0 is idle.
+**Pi 5 platform split (default cooperative build):** CPU 0's idle task does `daifclr` + `wfi` (timer-driven preemption). Secondary CPUs use `wfe` only and rely on cooperative SEV wakes; this is the default `COOP_PREEMPT=ON / SECONDARY_PREEMPT=OFF` shape, in which `pit_ticks` only advances when CPU 0 is idle. Under opt-in `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` (PR #742, EL2/VHE PPI 26 / CNTHP), all CPUs `daifclr` + `wfi` and the timer ISR drives preemption per-CPU via the ELR trampoline.
+
+**Jetson platform split (build-flag dependent).** Under the default
+`JETSON_HW_TICK=ON` build (PR #746 + #755), CPU 0 idle does the standard
+`daifclr; wfi` because PPI 26 (CNTHP) wakes it — same as QEMU.
+Under `JETSON_HW_TICK=OFF` (cooperative fallback for stock-BL31 /
+production-fused boards), CPU 0 idle falls through directly to
+`yield()` without WFI: cooperative-only Jetson has no timer IRQ, so
+a CPU 0 in WFI would never wake. The bug this guards against
+surfaces under cooperative-only when the only ready task on CPU 0
+(e.g. the serial-console shell, pinned to CPU 0 in `shell_start`)
+calls `task_sleep_ms`: shell blocks, idle takes over, idle WFIs,
+deadlock. Reproducer (cooperative-only): `lua-admin -e slm.sleep(500)`
+on serial after a fresh `slmos-kexec`. Telnet "fixes" it because
+lwIP/`net_pump` activity yields on a secondary CPU and that yield
+runs `coop_preempt_maybe_tick → scheduler_tick → task_wake_sleepers`,
+which finds CPU 0's sleeper and wakes it. PR #739's spin-yield
+remains the cooperative-fallback fix; secondary CPUs still WFE under
+either build (cross-CPU dispatch SEVs them). See `idle_task_func`
+in `kernel/sched/sched.c`.
 
 ---
 
-## ARM64 Hardware Timer IRQs — cooperative preemption (April 2026)
+## ARM64 Hardware Timer IRQs — patched BL31 + cooperative fallback
 
-**Hardware timer IRQs do not deliver to EL1/EL2 on Pi 5 or Jetson.** The GIC in both platforms runs with two security states; the Group register that routes a PPI to IRQ vs FIQ is owned by EL3 firmware and Non-secure writes are silently ignored. Pi 5 evidence: `docs/archive/investigations/pi5-preemption-resolution.md`. Jetson evidence: `docs/archive/investigations/jetson-preemption-investigation.md` — an 8-path empirical investigation confirmed every NS-accessible route is blocked (PPIs/SGIs/SPIs all Group 0, ICC_IGRPEN0 reads trap to EL3, SCR_EL3.FIQ=1 routes FIQ to EL3).
+**Original blocker (still true on stock TF-A).** The GIC on Pi 5 and
+Jetson runs with two security states; the Group register that routes
+a PPI to IRQ vs FIQ is owned by EL3 firmware and Non-secure writes
+are silently ignored. With stock TF-A neither platform delivers
+hardware timer IRQs to EL1/EL2. Pi 5 evidence:
+`docs/archive/investigations/pi5-preemption-resolution.md`. Jetson
+evidence: `docs/archive/investigations/jetson-preemption-investigation.md`
+— 8-path empirical investigation confirmed every NS-accessible route
+was blocked (PPIs/SGIs/SPIs all Group 0, ICC_IGRPEN0 reads trap to
+EL3, SCR_EL3.FIQ=1 routes FIQ to EL3).
 
-**Diagnostics:** The `timdiag` shell command (`kernel/src/shell_sys.c`) dumps live GIC and timer state on any ARM64 platform. Run after boot to see the current group configuration. The command deliberately skips `ICC_IGRPEN0_EL1` reads because TF-A traps them (causes EC=0x18 exception on Jetson). Optional `timdiag fiq` argument runs an additional FIQ delivery test — DO NOT use on Jetson, it writes ICC_IGRPEN0 which crashes the EL3 handler.
+**Resolution — patched BL31 + EL2/VHE per platform.**
 
-**Resolution — `COOP_PREEMPT` (CMake option, default `ON` for RASPI5 and JETSON_ORIN_NANO):** `schedule()` checks `CNTPCT_EL0` on every entry and synthesizes a `scheduler_tick()` call whenever ≥10 ms has elapsed on that CPU since the last tick. See `coop_preempt_maybe_tick()` in `kernel/sched/sched.c`. This drives the AI scheduler, deadline boosts, migration, and `pit_ticks` / `timer_handler_count` observability at yield points rather than preemptively.
+- **Pi 5 (`tools/tfa-patches/0001-SLM-OS-Pi-5-IRQ-routing-patches.patch`,
+  PRs #640/#641/#649, May 2026):** clears `SCR_EL3.IRQ/FIQ` for the
+  NS context at BL33 entry and writes `GICD_IGROUPR[0]=0xFFFFFFFF`,
+  restoring NS access to GIC group routing. Combined with the
+  EL2/VHE pivot (#683) and the `cnthp_*_el2`-direct path in
+  `timer.c` (PR #742), PPI 26 (CNTHP, the Hyp Physical Timer) now
+  delivers per-CPU at EL2 via `VBAR_EL2`. Default Pi 5 build still
+  ships `COOP_PREEMPT=ON / SECONDARY_PREEMPT=OFF` pending a broader
+  policy audit; opt-in with
+  `make kernel PLATFORM=RASPI5 SECONDARY_PREEMPT=ON
+   EXTRA_KERNEL_CMAKE_ARGS="-DCOOP_PREEMPT=OFF"`.
+- **Jetson (`tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch`,
+  PR #746, May 2026):** structurally identical change against
+  NVIDIA's tegra234 BL31 — `SCR_EL3.IRQ/FIQ` cleared in
+  `setup_ns_context`, `GICR_IGROUPR0=0xFFFFFFFF` written from both
+  `tegra_gic_init` (primary CPU) and `tegra_gic_pcpu_init`
+  (secondary CPUs on warmboot). PPI 26 (CNTHP) delivers per-CPU to
+  NS-EL2 via `VBAR_EL2` after kexec. **Default Jetson build now
+  ships `JETSON_HW_TICK=ON / SECONDARY_PREEMPT=ON / COOP_PREEMPT=OFF`**
+  (PR #755). Override with `make kernel PLATFORM=JETSON_ORIN_NANO
+  JETSON_HW_TICK=OFF` for stock-BL31 / production-fused boards.
+  Hardware verification: `boot_test --count 10` 10/10 on
+  jetson-nano-2 (2026-05-09).
 
-The `PI5_COOP_PREEMPT` spelling is retained as a deprecated Makefile/CMake alias for backward compatibility; source code uses `COOP_PREEMPT` everywhere.
+**Cooperative fallback (`COOP_PREEMPT=ON`, default for Pi 5 and
+build-flag-selectable for Jetson).** `schedule()` checks
+`CNTPCT_EL0` on every entry and synthesizes a `scheduler_tick()` call
+whenever ≥10 ms has elapsed on that CPU since the last tick. See
+`coop_preempt_maybe_tick()` in `kernel/sched/sched.c`. This drives
+the AI scheduler, deadline boosts, migration, and `pit_ticks` /
+`timer_handler_count` observability at yield points rather than
+preemptively. The `PI5_COOP_PREEMPT` spelling is retained as a
+deprecated Makefile/CMake alias for backward compatibility; source
+code uses `COOP_PREEMPT` everywhere.
 
-**Consequences:**
+**Diagnostics:** The `timdiag` shell command (`kernel/src/shell_sys.c`)
+dumps live GIC and timer state on any ARM64 platform. Run after boot
+to see the current group configuration. The command deliberately
+skips `ICC_IGRPEN0_EL1` reads because stock TF-A traps them (causes
+EC=0x18 exception on Jetson). Optional `timdiag fiq` argument runs
+an additional FIQ delivery test — DO NOT use on Jetson, it writes
+ICC_IGRPEN0 which crashes the EL3 handler.
+
+**Consequences when `COOP_PREEMPT=ON` is the active path:**
 - `pit_ticks` and `timer_handler_count` advance on all CPUs when those CPUs yield.
-- A pure CPU-bound loop that never yields still monopolizes its CPU. The **`slm_preempt_point()`** macro in `kernel/include/preempt_point.h` is the policy fix: any in-tree loop that may iterate >1 000 times without a yielding primitive must call it on the back-edge. Cheap when the quantum hasn't expired (~5 instructions); falls into `schedule()` when ≥10 ms has elapsed. Compile-time no-op on non-`COOP_PREEMPT` platforms. See `docs/scheduler.md` §"Preemption Model" for the full policy.
+- A pure CPU-bound loop that never yields still monopolizes its CPU. The **`slm_preempt_point()`** macro in `kernel/include/preempt_point.h` is the policy fix: any in-tree loop that may iterate >1 000 times without a yielding primitive must call it on the back-edge. Cheap when the quantum hasn't expired (~5 instructions); falls into `schedule()` when ≥10 ms has elapsed. Compile-time no-op on non-`COOP_PREEMPT` platforms. See `docs/scheduler.md` §"Preemption Model" for the full policy. Retained as defense-in-depth even under hardware preemption — cheap when the quantum hasn't expired.
 - `timer_get_count()` (CNTPCT_EL0) remains the authoritative wall-clock source for timeouts; see `hw_timeout_start()` / `hw_timeout_expired()` in `component_runtime.c`. Works regardless of IRQ delivery state.
 
-**`sched_set_policy()` must hold IRQs disabled.** The function wraps init/swap/shutdown in `irq_save`/`irq_restore`. Retained because the ELR-trampoline path (PR #98, inert under coop-preempt but kept for future hardware-IRQ restoration) still relies on it.
+**`sched_set_policy()` must hold IRQs disabled.** The function wraps
+init/swap/shutdown in `irq_save`/`irq_restore`. Required for the
+ELR-trampoline path (PR #98), which is now live on Pi 5 (opt-in) and
+Jetson (default with `JETSON_HW_TICK=ON`).
 
 ---
 
-## Secondary-CPU preemption — `SECONDARY_PREEMPT` (April 2026)
+## Secondary-CPU preemption — `SECONDARY_PREEMPT`
 
 The ELR-trampoline infrastructure (`kernel/sched/preempt.c`,
 `resched_trampoline` in `kernel/arch/arm64/vectors.S`) is gated behind
-the CMake option `SECONDARY_PREEMPT` (default OFF). When ON, timer IRQs
-on secondary CPUs are deferred to task context via the trampoline
+the CMake option `SECONDARY_PREEMPT`. Default OFF for Pi 5 / QEMU /
+x86-64; default ON for Jetson under `JETSON_HW_TICK=ON` (the Makefile
+sets `JETSON_HW_TICK ?= ON` for `PLATFORM=JETSON_ORIN_NANO`, which in
+turn implies `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`). When ON, timer
+IRQs on secondary CPUs are deferred to task context via the trampoline
 rather than calling `schedule()` from the ISR (which corrupts the
 abandoned exception frame on real ARM64 hardware).
 
@@ -291,19 +378,42 @@ abandoned exception frame on real ARM64 hardware).
 
 **Platform status:**
 
-- **Pi 5:** functional in combination with `COOP_PREEMPT` (the
-  trampoline path is inert today because timer IRQs don't deliver;
-  infrastructure kept for when #134 restores hardware IRQ delivery).
-- **Jetson:** compiles but **not safe to enable yet** — the
-  `resched_trampoline` in `vectors.S:377-380` uses
-  `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` to compute the CPU index,
-  which collides on dual-cluster CPU 4/5. Jetson plan P3 step 2 owns
-  the fix. **Enforced at boot (#137):** `preempt_check_cpu_mpidr`
-  (kernel/sched/preempt.c) panics from `scheduler_init` /
-  `secondary_init` if the fold disagrees with the caller's logical
-  CPU id, so the soft documentation warning can no longer be
-  bypassed silently — a Jetson build with `SECONDARY_PREEMPT=ON`
-  halts loudly on the first secondary bring-up.
+- **Pi 5:** **live on hardware as of May 2026.** TF-A (#134) and the
+  EL2/VHE migration (#683) together restored hardware timer IRQ
+  delivery on PPI 26 (CNTHP, the Hyp Physical Timer). Two fixes were
+  needed to make the trampoline path itself work at EL2/VHE: (1)
+  `timer.c` writes the timer via `cnthp_*_el2` directly under
+  `PLATFORM_RASPI5` because `CNTP_*_EL0` accesses from EL2 with
+  `HCR_EL2.{E2H,TGE}=1` are RES0 (only the `_EL1` register names get
+  redirected to `CNTHP_*_EL2`); (2) `maybe_arm_resched_trampoline`
+  accepts both EL1h (0x5) and EL2h (0x9) as kernel-mode SPSR values,
+  since at EL2/VHE the interrupted context is always EL2h. The
+  default build still ships `SECONDARY_PREEMPT=OFF` /
+  `COOP_PREEMPT=ON` pending a broader policy decision; flipping the
+  default is a separate change from enabling the option.
+- **Jetson:** **live on hardware as of May 2026** (PR #746 + #752 +
+  #753 + #755, default-on under `JETSON_HW_TICK=ON`). The trampoline's
+  MPIDR fold was the second blocker after the BL31 GIC group fix-up:
+  the legacy `(mpidr & 0xFF) | ((mpidr >> 8) & 0xFF)` collided on
+  dual-cluster CPUs 4/5 (`MPIDR=0x10200, 0x10300`); the asm sites
+  (in `vectors.S` `DIAG_BUMP_VEC` and `resched_trampoline`) and the
+  matching C-side fold sites (`preempt.c`, `task.c`, `exceptions.c`,
+  `sched.c`) now go through `cpu_logical_map[]` — the asm via the
+  shared `ARM64_GET_LOGICAL_CPU` macro in `kernel/include/cpu_id_asm.h`,
+  C via `cpu_logical_id()` in `<smp.h>`. `preempt_check_cpu_mpidr`
+  remains as a boot-time invariant check (#137 / #647). Two follow-on
+  fixes were needed before the trampoline path was hardware-stable:
+  PR #752 added a NULL-safe entry guard to `maybe_arm_resched_trampoline`
+  (Linux's xudc IRQ 198 was firing the moment `mmu_enable` unmasked
+  IRQs and dereferencing `reschedule_pending` before `preempt_init`
+  allocated it — #750 root cause, manifested as a BL31 power-off
+  via DFSC=0x17 / RAS), and PR #753 expanded the IRQ trap-frame to
+  save the full FP/SIMD register file (q0-q31 + FPCR + FPSR, frame
+  grew 272 → 800 bytes) so AAPCS64 caller-save clobbers in
+  `el1_irq_handler` couldn't corrupt interrupted-task FP state.
+  Hardware-IRQ delivery on Jetson under stock NVIDIA BL31 remains
+  blocked; `JETSON_HW_TICK=OFF` retains the cooperative path for
+  production-fused boards.
 - **QEMU:** works today but rarely needed — QEMU's timer IRQ from an
   ISR doesn't crash the kernel; the default cooperative path is fine.
 
@@ -399,7 +509,7 @@ page tag is a separate register. Without per-page IMEMT updates:
 
 Reference: nvgpu's `gk20a_falcon_copy_to_imem` mirrors this in
 three sites in
-`../slmos-reference-cache/nvidia/nvgpu-hal-falcon-falcon_gk20a_fusa.c`. SLM-OS
+`~/slmos-ref/nvidia/nvgpu-hal-falcon-falcon_gk20a_fusa.c`. SLM-OS
 matches the pattern. Regression coverage in
 `host-tools/gsp-harness/test_falcon.c`:
 `test_pio_imem_multi_page_writes_tag_per_page` (4-page upload,
@@ -437,12 +547,12 @@ The post-fail diagnostic in `nvidia_gpu.c` originally peeked
 "SEC2 BROM MOD_SEL = 0xbadf5720" — same bug, same wrong conclusion.
 
 **Source-read of nouveau confirms the real story.** `ga102_flcn_fw_boot`
-(`../slmos-reference-cache/nouveau/nouveau-falcon-ga102.c:113-123`) writes the BROM
+(`~/slmos-ref/nouveau/nouveau-falcon-ga102.c:113-123`) writes the BROM
 selectors via plain BAR0 MMIO at exactly the same `0x841180/198/19c/210`
 addresses SLM-OS uses in `kernel/gpu/nvidia/bringup.c:710-716`. There
 is no DMEMMAPPER fixup; the booter HS blob carries only the
 `(fuse_ver, engine_id, ucode_id)` triple in its meta_data block
-(`../slmos-reference-cache/nouveau/nouveau-gsp-ga102.c:41-92` `ga102_gsp_booter_ctor`).
+(`~/slmos-ref/nouveau/nouveau-gsp-ga102.c:41-92` `ga102_gsp_booter_ctor`).
 
 **Phase 2 STOPPED root cause located + fixed (PR #289, 2026-04-18).**
 The diagnostic added in PR #288 surfaced the actual bug on the next
@@ -473,8 +583,8 @@ WprMeta correctly is the documented E4 boundary.
   diagnostic was peeking. PR #288 has the corrected offsets.
 - For HS booter blobs (R535 booter_load), BOOTVEC must be
   `apps[0].offset`, not `os_code_offset` — see OGKM
-  `../slmos-reference-cache/nvidia/ogkm-kernel_gsp_falcon_ga102.c:278` and nouveau
-  v2 `../slmos-reference-cache/nouveau/nouveau-falcon-fw.c:351`. Pinned in
+  `~/slmos-ref/nvidia/ogkm-kernel_gsp_falcon_ga102.c:278` and nouveau
+  v2 `~/slmos-ref/nouveau/nouveau-falcon-fw.c:351`. Pinned in
   `host-tools/gsp-harness/test_bringup.c:test_booter_layout_*`.
 - When source-reading converging-but-wrong candidates from
   multiple references (Jetson code, nouveau, OGKM), add a runtime
@@ -498,7 +608,7 @@ booter to walk the chain without faulting, then advance to a
 
 **Layout pinning is load-bearing.** `kernel/gpu/nvidia/gsp_wpr_meta.h`
 copies the struct definition verbatim from
-`../slmos-reference-cache/nouveau/nouveau-r535-nvrm-gsp.h:417-555` and adds 11
+`~/slmos-ref/nouveau/nouveau-r535-nvrm-gsp.h:417-555` and adds 11
 `_Static_assert`s pinning sizeof + every field offset booter or
 SEC2 reads directly. If a future maintainer reorders fields or
 forgets a `uint64_t` somewhere, the build breaks instead of SEC2
@@ -513,7 +623,7 @@ IOVA, L2[0] = ELF IOVA, every other entry zeroed. Single-entry
 shape is the Stage A simplification — production GSP-RM ELF spans
 many L2 pages and `sizeOfRadix3Elf` would be the actual ELF byte
 length, not 4096. Reference: nouveau `nvkm_gsp_radix3_sg`
-(`../slmos-reference-cache/nouveau/nouveau-gsp-r535.c:1656-1713`).
+(`~/slmos-ref/nouveau/nouveau-gsp-r535.c:1656-1713`).
 
 **What Stage A deliberately leaves zero.** Bootloader address +
 size + offsets, signature address + size, heap fields, partition
@@ -538,7 +648,7 @@ consumes the pushbuffer, `GP_GET` advances, no dmesg error, no
 fault notifier — but the dispatch never reaches the SMs. The
 kernel silently does not run.
 
-Source: `../slmos-reference-cache/mesa/mesa-nvk_cmd_dispatch.c:322-340` — NVK
+Source: `~/slmos-ref/mesa/mesa-nvk_cmd_dispatch.c:322-340` — NVK
 branches on `cls_compute <= TURING_COMPUTE_A`:
 
 ```c

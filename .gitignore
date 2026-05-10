@@ -86,3 +86,10 @@ build/nanopb-venv/
 scripts/arm-smmu-noshutdown/.*.cmd
 scripts/arm-smmu-noshutdown/Module.symvers
 scripts/arm-smmu-noshutdown/modules.order
+
+# CUDA SASS build outputs — extracted on Jetson via cuobjdump from
+# the cubins built by the per-kernel .cu sources, then packed into
+# operator_library.bin via scripts/build-operator-library.py. Path-
+# scoped (not a global *.sass) because NVIDIA SASS shares the
+# extension with CSS Sass.
+scripts/cuda/operator_library/*.sass

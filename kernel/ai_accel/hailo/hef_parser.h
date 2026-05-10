@@ -48,7 +48,7 @@
  * against hef.proto line 114 after resnet_v1_18_8L.hef parser
  * misreported hw_arch=3 as "hailo15m" (it's actually HAILO8L).
  * The prior mapping was a guess; the proto is the source of truth.
- * See ../slmos-reference-cache/hailo/hailo-hef-parser-head.cpp for HailoRT usage. */
+ * See ~/slmos-ref/hailo/hailo-hef-parser-head.cpp for HailoRT usage. */
 #define HEF_HW_ARCH_HAILO8         0
 #define HEF_HW_ARCH_HAILO8P        1
 #define HEF_HW_ARCH_HAILO8R        2
@@ -64,14 +64,15 @@
 /*
  * Cap on ProtoHEFActionWriteDataCcw entries recorded from the first
  * network group's preliminary_config. Typical Hailo-8 models have
- * 30–120 CCW writes (one per layer/weight group); 256 gives us
- * headroom for the biggest Model Zoo entries with a clear truncation
- * signal if a future model overruns. Size cost: 256 × 12 B = 3 KB
- * inside the hef_info stack-allocated aggregate, balanced against
- * the 1.2 KB already consumed by pads[] — well under the 16 KB
- * kernel stack budget.
+ * 30–120 CCW writes (one per layer/weight group); ResNet-18 8L
+ * lands at 480, so 512 covers it with headroom for future
+ * YOLOv6/v8 variants. Size cost: 512 × ~16 B = 8 KB inside the
+ * hef_info stack-allocated aggregate. Negligible against the
+ * 256 KB STACK_SIZE budget (kernel/CLAUDE.md, May 2026 bump).
+ * If a future model overruns, the truncation flag in hef_info
+ * still trips loudly so the next bump is easy to scope.
  */
-#define HEF_PARSER_MAX_CCW_ACTIONS 256
+#define HEF_PARSER_MAX_CCW_ACTIONS 512
 /* Cap on the number of HEF contexts whose compute-phase action
  * streams we capture (ProtoHEFContext.operations[].actions[]).
  * A simple MLP emits ~1-2 dynamic contexts; the fixed ACTIVATION/

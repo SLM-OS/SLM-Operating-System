@@ -186,6 +186,47 @@ struct task {
     uint8_t _user_pad[6];              /* Alignment padding */
     void (*user_entry)(void *arg);      /* EL0 entry point (for user tasks) */
 
+    /* Per-task TTBR0_EL1 L1 table (#697 PR-3 scaffolding).
+     *
+     * Physical address of this task's L1 table for the lower VA half.
+     * Populated by task_create_user (PR-3); written to TTBR0_EL1 on
+     * context-switch into a user task (PR-3); freed by task_destroy
+     * (PR-3). Set to 0 for kernel-mode tasks.
+     *
+     * Stored as PA (not VA) because the page-table walker does PA
+     * lookups and because the L1 table is allocated from PMM (which
+     * returns PAs). Value 0 = "no per-task user mapping; do not write
+     * TTBR0 on switch_to". Allocated unused in PR-1 so PR-3 can
+     * populate without changing the struct layout / TASK_CONTEXT_OFFSET
+     * invariants. */
+    uint64_t user_l1_pa;
+
+    /* Per-task EL0 stack (#697 PR-4).
+     *
+     * `user_stack_top` is the user VA passed to user_task_enter as
+     * SP_EL0 (one past the last addressable byte of the stack page —
+     * standard ARM64 SP convention). `user_stack_phys` is the PA of
+     * the PMM page backing the stack, captured so task_destroy can
+     * free it without re-walking the per-task L1.
+     *
+     * Both fields are zero for kernel-mode tasks. */
+    uint64_t user_stack_top;
+    uint64_t user_stack_phys;
+
+    /* sys_mmap bump-allocator cursor. Starts at USER_MMAP_VA_START on
+     * task_create_user; each sys_mmap advances by the requested size
+     * (rounded up to page size). The allocator never reuses VA, so
+     * a freshly-allocated range cannot alias stale TLB entries from
+     * a prior munmap. Zero for kernel-mode tasks. */
+    uint64_t user_va_next;
+
+    /* ASID for the per-task TTBR0 (16-bit, set by vmm_alloc_asid in
+     * task_create_user / task_create_user_elf). Composed into TTBR0_EL1
+     * on schedule so the hardware can disambiguate this task's user
+     * PTEs from other tasks' without a full TLB flush at swap time.
+     * Zero for kernel-mode tasks (kernel ASID is reserved). */
+    uint16_t user_asid;
+
     /* Slot generation counter for work-stealing ABA avoidance (#139).
      *
      * Bumped by task_destroy each time this task_table slot is freed,
@@ -341,6 +382,34 @@ struct task *task_current_on_cpu(uint32_t cpu);
 #if !defined(PLATFORM_X86_64)
 struct task *task_create_user(const char *name, task_entry_t user_entry,
                               void *arg, uint8_t priority);
+
+/*
+ * Create a new user-mode (EL0) task from a static ARM64 ELF blob.
+ *
+ * Parses the ELF, allocates a per-task L1, maps every PT_LOAD
+ * segment via elf_load_user, allocates + maps a stack page at
+ * USER_ELF_STACK_PAGE_VA, and registers a kernel-side task that
+ * will ERET into the ELF's entry point on first schedule.
+ *
+ * Sibling of task_create_user — same is_user/per-task-L1 plumbing,
+ * different VA layout (the embedded smoke binary lives at
+ * USER_TEXT_VA + 1 page; ELF segments span multiple pages and need
+ * the high stack VA so they don't collide).
+ *
+ * @name:     Task name (for debugging / shell output).
+ * @blob:     Pointer to the ELF image (typically a kernel-VA pointer
+ *            into an .incbin'd blob).
+ * @blob_len: Size of the ELF image.
+ * @priority: Scheduler priority.
+ *
+ * Returns the task pointer on success, NULL on failure (invalid
+ * ELF, PMM exhausted, task table full, etc.). Failure paths free
+ * any partial state — no leak. The caller adds the task to the
+ * scheduler via scheduler_add_task.
+ */
+struct task *task_create_user_elf(const char *name,
+                                  const void *blob, size_t blob_len,
+                                  uint8_t priority);
 #endif
 
 /*

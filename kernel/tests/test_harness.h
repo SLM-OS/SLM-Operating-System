@@ -215,6 +215,9 @@ int test_suite_coop_preempt(void);
 /* CPU resurrection supervisor tests (#216 Tier 2) */
 int test_suite_cpu_supervisor(void);
 
+/* MPIDR -> logical CPU id lookup tests (#647) */
+int test_suite_mpidr_lookup(void);
+
 /* Scheduler trace buffer tests (#195) */
 int test_suite_sched_trace(void);
 
@@ -229,6 +232,15 @@ int test_suite_gpu_tier(void);
 
 /* Operator library parser tests (#663 — tensor-core stage 5). */
 int test_suite_operator_library(void);
+
+/* In-kernel embedded operator-library handle tests (#714). */
+int test_suite_oplib_pool(void);
+
+/* Per-op dispatch metadata registry tests (#714, A.2). */
+int test_suite_operator_dispatch(void);
+
+/* Boot-time op-tier probe tests (#714, B.2). */
+int test_suite_oplib_probe(void);
 
 /* GPU dispatch circuit-breaker tests (#552 mitigation, PR #555). */
 int test_suite_gpu_dispatch_breaker(void);

@@ -145,7 +145,7 @@ visible deliverable on the SLM track.
 
 ## See also
 
-- `docs/specs/slm-integration.md` — full integration spec
+- `docs/design/slm-integration.md` — full integration spec
 - `docs/plans/slm-integration-plan.md` — milestone-by-milestone plan
 - `docs/tutorials/slm-models.md` — fetching and staging GGUF files
 - `docs/tutorials/slm-component.md` — the `slm-runner` path

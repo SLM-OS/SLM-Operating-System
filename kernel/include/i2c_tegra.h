@@ -9,7 +9,7 @@
  * The Tegra234 controller speaks "packet mode": every transfer is
  * preceded by a 12-byte header (3 × u32 words pushed into TX_FIFO).
  * `i2c-tegra.c` from Linux v6.12 is the reference implementation;
- * the cached copy lives at `../slmos-reference-cache/linux/linux-i2c-tegra.c`.
+ * the cached copy lives at `~/slmos-ref/linux/linux-i2c-tegra.c`.
  *
  * Lifecycle for the IMX219 use case:
  *

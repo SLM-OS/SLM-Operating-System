@@ -7,18 +7,18 @@ MSI-X peripheral (MIP1).
 
 Primary sources — all line references are to the
 `raspberrypi/linux` `rpi-6.6.y` branch; local copies live in
-`../slmos-reference-cache/` as `rpi-linux-*`:
+`~/slmos-ref/` as `rpi-linux-*`:
 
 - `arch/arm64/boot/dts/broadcom/bcm2712.dtsi` —
-  `../slmos-reference-cache/rpi/rpi-linux-bcm2712.dtsi`
+  `~/slmos-ref/rpi/rpi-linux-bcm2712.dtsi`
 - `arch/arm64/boot/dts/broadcom/bcm2712-rpi-5-b.dts` —
-  `../slmos-reference-cache/rpi/rpi-linux-bcm2712-rpi-5-b.dts`
+  `~/slmos-ref/rpi/rpi-linux-bcm2712-rpi-5-b.dts`
 - `drivers/pci/controller/pcie-brcmstb.c` —
-  `../slmos-reference-cache/rpi/rpi-linux-pcie-brcmstb.c`
+  `~/slmos-ref/rpi/rpi-linux-pcie-brcmstb.c`
 - `drivers/irqchip/irq-bcm2712-mip.c` —
-  `../slmos-reference-cache/rpi/rpi-linux-irq-bcm2712-mip.c`
+  `~/slmos-ref/rpi/rpi-linux-irq-bcm2712-mip.c`
 - `arch/arm/boot/dts/overlays/pciex1-compat-pi5-overlay.dts` —
-  `../slmos-reference-cache/rpi/rpi-linux-pciex1-compat-pi5-overlay.dts`
+  `~/slmos-ref/rpi/rpi-linux-pciex1-compat-pi5-overlay.dts`
 
 ---
 
@@ -466,7 +466,7 @@ MSI allocation path:
 
 ## 8. Cached reference files
 
-Under `../slmos-reference-cache/`:
+Under `~/slmos-ref/`:
 
 - `rpi-linux-bcm2712.dtsi` — master DTSI with pcie0/1/2 + mip0/1 nodes
 - `rpi-linux-bcm2712-rpi-5-b.dts` — board file; confirms pcie1 not

@@ -33,7 +33,7 @@
 #
 # Usage:
 #   sudo ./jetson-kexec-slmos.sh /path/to/slmos.elf
-#   sudo ./jetson-kexec-slmos.sh --no-gpu-suspend /path/to/slmos.elf
+#   sudo ./jetson-kexec-slmos.sh --gpu-suspend   /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-usb-hold   /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-smmu-fix   /path/to/slmos.elf
 #   sudo ./jetson-kexec-slmos.sh --no-usb-root-cleanup /path/to/slmos.elf
@@ -43,15 +43,24 @@
 #   sudo slmos-kexec /root/slmos.elf
 #
 # Options:
-#   --no-gpu-suspend    Skip the GPU runtime-PM suspend and BPMP
-#                       clock re-enable steps. Preserves the GPU's
-#                       ACR/Falcon security state through the kexec
-#                       transition (HWCFG2 bit 13 stays clear).
-#                       Required for Path 3 (#190) — SLM-OS inherits
-#                       Linux's already-running FECS/GPCCS/PMU state.
-#                       Risk: stale nvgpu DMA may trigger a TF-A RAS
-#                       error. In practice this hasn't fired in testing
-#                       when GPU consumers are stopped before kexec.
+#   --gpu-suspend       Runtime-PM suspend the GPU before kexec and
+#                       re-enable clocks via BPMP afterward. This was
+#                       the default behavior pre-2026-05-08 (the
+#                       "suspend mode" in earlier docs). Tradeoff:
+#                       drains GPU DMA cleanly so a stale nvgpu
+#                       transaction can't trigger a TF-A RAS error,
+#                       but resets the GPU's ACR/Falcon security
+#                       state — SLM-OS then falls back to CPU
+#                       inference because channel inherit fails
+#                       (priv-lock asserts post-reset).
+#
+#                       The default — preserve the running GPU
+#                       state, formerly --no-gpu-suspend — is what
+#                       Path 3 (#190) needs and is what the GPU
+#                       fastpath assumes. The RAS risk has not fired
+#                       in testing when GPU consumers are stopped
+#                       before kexec, which the helper does at
+#                       step [1/9].
 #
 #   --no-usb-hold       Skip the xusb clock + powergate holds. Only
 #                       useful for SLM-OS builds that don't drive the
@@ -73,7 +82,7 @@
 #                       downstream slot-3 handoff for that run.
 #
 #   --no-helper         Skip the auto-start of the GPU channel-inherit
-#                       helper. By default, when --no-gpu-suspend is set,
+#                       helper. By default (channel-preserving mode),
 #                       this script starts gpu-kernel-mnist (and, if
 #                       present, gpu-kernel-sched-mlp) with
 #                       --preserve-for-kexec from $SLMOS_HELPER_DIR
@@ -90,9 +99,25 @@
 #                       gpu-kernel-sched-mlp + their weights/shaders.
 #                       Defaults to /root/gpu-mnist.
 #
+#   SLMOS_GEMM_TIER     "hmma" (default) opts the FC layer (op 6) into
+#                       the FP32-activation × FP16-weight tensor-core
+#                       GEMM. Set to "simt" (or any other value) to
+#                       fall back to the FP32 SIMT GEMM. The default
+#                       was flipped to "hmma" on 2026-05-08 once the
+#                       GA10B cross-dispatch coherency work (#715,
+#                       #722, #723, #727) made HMMA the production
+#                       inference path.
+#
 set -euo pipefail
 
-NO_GPU_SUSPEND=0
+# GPU mode default: preserve the running GPU through kexec (formerly
+# the --no-gpu-suspend opt-in). Flipped 2026-05-08 because
+# channel-preserving is what Path 3 / GPU fastpath needs; the prior
+# suspend-default silently routed inference to CPU even though
+# `compute_ready` reported 1. Use --gpu-suspend to opt back into the
+# old behavior (e.g. for diagnostics or to reproduce the suspend-mode
+# baseline).
+NO_GPU_SUSPEND=1
 NO_USB_HOLD=0
 NO_SMMU_FIX=0
 NO_USB_ROOT_CLEANUP=0
@@ -103,7 +128,11 @@ XHCI_SLOT1_HANDOFF_PAYLOAD=""
 XHCI_SLOT3_HANDOFF_PAYLOAD=""
 for arg in "$@"; do
     case "$arg" in
+        # --no-gpu-suspend is now a no-op alias kept for backward
+        # compat with older invocations and docs. The opt-in counterpart
+        # --gpu-suspend reverts to the pre-2026-05-08 suspend behavior.
         --no-gpu-suspend) NO_GPU_SUSPEND=1 ;;
+        --gpu-suspend)    NO_GPU_SUSPEND=0 ;;
         --no-usb-hold)    NO_USB_HOLD=1 ;;
         --no-smmu-fix)    NO_SMMU_FIX=1 ;;
         --no-usb-root-cleanup) NO_USB_ROOT_CLEANUP=1 ;;
@@ -127,10 +156,14 @@ KERNEL="${KERNEL:-/root/slmos.elf}"
 #   $1 = helper basename (gpu-kernel-mnist | gpu-kernel-sched-mlp)
 #   $2 = weights directory under $helper_dir
 #   $3 = log file path
+#   $4..  = extra argv tokens passed verbatim to the helper (per-helper
+#          flags like --qmd-pool, --gemm-tier hmma, etc.)
 start_one_helper() {
     local helper_name="$1"
     local weights_subdir="$2"
     local log="$3"
+    shift 3
+    local extra_args=("$@")
     local helper_dir="${SLMOS_HELPER_DIR:-/root/gpu-mnist}"
     local helper_path="$helper_dir/$helper_name"
 
@@ -179,7 +212,8 @@ start_one_helper() {
             --preserve-for-kexec \
             --timeout-secs 1800 \
             --weights-dir "$weights_subdir" \
-            --shader-dir "." > "$log" 2>&1 < /dev/null &)
+            --shader-dir "." \
+            "${extra_args[@]}" > "$log" 2>&1 < /dev/null &)
 
     # Wait for the helper to reach the "Sleeping ... kexec now" line.
     # The "kexec now" suffix is a stringly-typed handoff contract
@@ -226,7 +260,29 @@ maybe_start_gpu_helpers() {
     # Start MNIST first (kind=0 handoff). Sched-MLP is best-effort —
     # only stage it if the binary is on disk, since not every Jetson
     # build has the sched-mlp pipeline compiled.
-    start_one_helper gpu-kernel-mnist     mnist-weights /tmp/gpu-kernel-mnist.log || true
+    #
+    # `--qmd-pool` (MNIST only) produces a v7 handoff where each launch
+    # authors fresh QMD bytes into a slot of a GMMU-mapped pool. This
+    # forces SKED to redecode the descriptor every dispatch, which
+    # fixes the v6 off-by-one staleness where SKED's cached decode of
+    # replayed byte-identical QMDs serves the previous launch's output
+    # on the next call. Surfaces as `model_infer_file(N)` returning the
+    # prediction of input `N-1` under multi-inference workloads (e.g.
+    # mnist_loop.lua). See docs/gpu-qmd-per-dispatch-plan.md and #558.
+    #
+    # `SLMOS_GEMM_TIER=hmma` (the default since 2026-05-08) opts the
+    # FC layer (op 6) into the FP32-activation × FP16-weight
+    # tensor-core GEMM. The helper reads W_fc as FP16 from
+    # `mnist-weights-fp16/`. Other ops still use SIMT FP32 shaders.
+    # Set SLMOS_GEMM_TIER to anything else (e.g. "simt") to fall back
+    # to the FP32 SIMT GEMM.
+    local mnist_extra=("--qmd-pool")
+    local gemm_tier="${SLMOS_GEMM_TIER:-hmma}"
+    if [[ "$gemm_tier" == "hmma" ]]; then
+        mnist_extra+=("--gemm-tier" "hmma"
+                      "--weights-fp16-dir" "mnist-weights-fp16")
+    fi
+    start_one_helper gpu-kernel-mnist     mnist-weights /tmp/gpu-kernel-mnist.log "${mnist_extra[@]}" || true
     start_one_helper gpu-kernel-sched-mlp sched-weights /tmp/gpu-kernel-sched-mlp.log || true
 }
 

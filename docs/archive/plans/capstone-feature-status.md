@@ -6,7 +6,7 @@ Eviction.
 
 **Platforms:** QEMU (ARM64), Raspberry Pi 5, Jetson Orin Nano, x86-64
 
-**Last updated:** 15 April 2026
+**Last updated:** 9 May 2026 (Section 2 + Cross-Cutting refreshed for Jetson HW preempt landing)
 
 ---
 
@@ -81,20 +81,24 @@ maintenance.
 
 ### Summary
 
-QEMU and x86-64 have true hardware-timer-driven preemption. Pi 5 and
-Jetson use cooperative preemption (`COOP_PREEMPT`) because TF-A firmware
-masks timer IRQs from non-secure EL1/EL2. This is an accepted design
-limitation.
+All four platforms support true hardware-timer-driven preemption.
+QEMU, x86-64, and **Jetson Orin Nano** (default-on, May 2026) ship
+hardware preemption out of the box. Pi 5 has hardware preemption
+available as an opt-in build (`SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`,
+PR #742) and ships cooperative by default pending a broader workload
+audit. Stock-BL31 / production-fused boards retain a `COOP_PREEMPT`
+fallback path that synthesizes ticks at `schedule()` entry.
 
 ### Per-Platform Status
 
 | | QEMU | Pi 5 | Jetson | x86-64 |
 |--|------|------|--------|--------|
-| Preemption model | True (HW timer) | Cooperative | Cooperative | True (HW timer) |
-| Timer source | GIC PPI 30 | CNTPCT_EL0 polled | CNTPCT_EL0 polled | LAPIC timer (vec 48) |
-| Tick rate | 100 Hz | 100 Hz synthesized | 100 Hz synthesized | 100 Hz |
-| Context switch | From ISR | From `schedule()` | From `schedule()` | From ISR (IST1 stack) |
-| FPU save/restore | NEON v0-v31 | NEON v0-v31 | NEON v0-v31 | FXSAVE/FXRSTOR |
+| Preemption model (default) | True (HW timer) | Cooperative | True (HW timer, `JETSON_HW_TICK=ON`) | True (HW timer) |
+| Preemption model (opt-in) | — | True via `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF` | Cooperative via `JETSON_HW_TICK=OFF` | — |
+| Timer source | GIC PPI 30 | GIC PPI 26 (CNTHP) at EL2/VHE | GIC PPI 26 (CNTHP) at EL2/VHE | LAPIC timer (vec 48) |
+| Tick rate | 100 Hz | 100 Hz HW (opt-in) / synthesized (default) | 100 Hz HW (default) / synthesized (`JETSON_HW_TICK=OFF`) | 100 Hz |
+| Context switch | From ISR | From ISR via ELR trampoline (opt-in) / from `schedule()` (default) | From ISR via ELR trampoline (default) / from `schedule()` (`JETSON_HW_TICK=OFF`) | From ISR (IST1 stack) |
+| FPU save/restore | NEON v0-v31 | NEON v0-v31 | NEON v0-v31 (q0-q31 + FPCR + FPSR saved across IRQ in trap frame) | FXSAVE/FXRSTOR |
 | Work stealing | ON | ON | ON | ON |
 
 ### Details
@@ -104,23 +108,36 @@ limitation.
 switches via `switch_to()`. Callee-saved GPRs (x19-x30), SP, DAIF, and
 all 32 SIMD registers (v0-v31, FPCR, FPSR) are saved/restored.
 
-**Pi 5 and Jetson (cooperative preemption):** The GIC on both platforms
-runs with two security states; the Group register that routes PPIs to
-IRQ vs FIQ is owned by EL3 firmware, and non-secure writes are silently
-ignored. Hardware timer IRQs never arrive at EL1/EL2 (issue #99, #134).
+**Pi 5:** Default build ships `COOP_PREEMPT=ON / SECONDARY_PREEMPT=OFF`.
+Hardware preemption is opt-in via the patched BCM2712 BL31
+(`tools/tfa-patches/0001-*`) plus `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`.
+At EL2/VHE, PPI 26 (CNTHP, Hyp Physical Timer) delivers per-CPU via
+`VBAR_EL2`; the ELR-trampoline in `vectors.S` defers `schedule()` to
+task context so the abandoned exception frame is never corrupted.
+Default flip pending workload audit.
 
-Resolution: `COOP_PREEMPT` (CMake option, default ON for both
-platforms). `schedule()` checks `CNTPCT_EL0` on every entry; if >= 10 ms
-has elapsed since the last tick on that CPU, it synthesizes a
-`scheduler_tick()` call. This drives AI scheduling, deadline boosts,
-migration, and observability counters at yield points. A pure CPU-bound
-loop that never yields still monopolizes its CPU.
+**Jetson Orin Nano:** Default build ships `JETSON_HW_TICK=ON`
+(implies `SECONDARY_PREEMPT=ON COOP_PREEMPT=OFF`). The patched
+tegra234 BL31 (`tools/tfa-patches/0004-*`) clears `SCR_EL3.IRQ/FIQ`
+for NS context and writes `GICR_IGROUPR0=0xFFFFFFFF` so PPI 26
+delivers to NS-EL2 after kexec. Trampoline path uses
+`cpu_logical_map[]` for dual-cluster MPIDR resolution (PR #647);
+NULL-safe entry guard (PR #752) bails if Linux IRQs fire before
+`preempt_init` allocates `reschedule_pending`; IRQ trap frame saves
+the full FP/SIMD register file (q0-q31 + FPCR + FPSR, PR #753) so
+AAPCS64 caller-save clobbers can't corrupt interrupted-task FP
+state. Hardware verification: `boot_test --count 10` 10/10 on
+jetson-nano-2 (2026-05-09). Stock-BL31 / production-fused boards
+keep the `JETSON_HW_TICK=OFF` cooperative fallback.
 
-`SECONDARY_PREEMPT` (ELR-trampoline infrastructure) is compiled but
-inert on Pi 5 (awaiting hardware IRQ restoration). On Jetson it is
-unsafe — the MPIDR-folding formula in the trampoline collides on
-dual-cluster cores 4/5. A boot-time check (`preempt_check_cpu_mpidr`)
-panics if enabled on Jetson.
+**Cooperative fallback path (`COOP_PREEMPT=ON`).**
+`schedule()` checks `CNTPCT_EL0` on every entry; if ≥ 10 ms has
+elapsed since the last tick on that CPU, it synthesizes a
+`scheduler_tick()` call. Drives AI scheduling, deadline boosts,
+migration, and observability counters at yield points. A pure CPU-
+bound loop that never yields still monopolizes its CPU; the
+`slm_preempt_point()` macro is the policy-level fix and stays in
+place as defense-in-depth even under hardware preemption.
 
 **x86-64:** LAPIC timer in periodic mode at 100 Hz, calibrated against
 PIT (8254). Timer ISR (vector 48, interrupt gate) calls
@@ -215,7 +232,7 @@ command, Phase 5.1 I/O tensor-shape extraction (input/output pad
 dims from the first network group), and Phase 5.2 firmware
 control-channel RPC transport (`hailo_control.{c,h}` — MD5-stamped,
 MSI-on-BAR0 completion, BE header scalars; see
-`../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md` §4.5/4.6 for the wire-format
+`~/slmos-ref/derivatives/notes/hailo-driver-notes.md` §4.5/4.6 for the wire-format
 gotchas and opcode layouts) all landed. On pi-5-1 with the HAT+
 mounted: `hailo probe` succeeds (vendor=0x1e60 device=0x2864),
 `hailo boot` uploads the 164 KB Hailo-8 firmware blob (app + cert
@@ -666,8 +683,8 @@ benchmarks, FFI contracts, and test coverage).
 
 | Feature | QEMU | Pi 5 | Jetson | x86-64 |
 |---------|------|------|--------|--------|
-| SMP | Full | Boot OK, dispatch limited | Full (fixed Apr 15) | Full |
-| Preemption | True (HW timer) | Cooperative | Cooperative | True (HW timer) |
+| SMP | Full | Full | Full | Full |
+| Preemption | True (HW timer) | Cooperative default; True opt-in (#742) | True (HW timer) default; cooperative via `JETSON_HW_TICK=OFF` | True (HW timer) |
 | GPU inference | N/A | N/A (no bare-metal VC) | CPU-only; best GPU path | CPU-only; FWSEC done, SEC2 blocked |
 | AI scheduler | Complete (MLP+PPO) | Complete | Complete | Complete |
 | AI page eviction | Complete (CACHEUS) | Complete | Complete | Complete |

@@ -117,7 +117,7 @@ int imx219_read_chip_id(uint16_t *out_chip_id);
  * Apply the full register-bank init sequence for IMX219 binning
  * mode: 1640×1232 RAW10 @ 30 fps. Writes ~45 registers in three
  * groups (per L4T's `imx219_start_streaming` callback in
- * `../slmos-reference-cache/linux/linux-imx219.c:671`):
+ * `~/slmos-ref/linux/linux-imx219.c:671`):
  *
  *   1. Common init (31 writes) — PLL clock table, undocumented
  *      tuning registers, frame-bank baseline. Registers in this

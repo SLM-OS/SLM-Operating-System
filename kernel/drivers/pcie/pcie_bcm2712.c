@@ -72,7 +72,7 @@
 
 /* -------------------------------------------------------------------------- */
 /* Link-training registers (Phase 1.5 — firmware doesn't train pcie1).        */
-/* All offsets from ../slmos-reference-cache/rpi/rpi-linux-pcie-brcmstb.c unless noted.     */
+/* All offsets from ~/slmos-ref/rpi/rpi-linux-pcie-brcmstb.c unless noted.     */
 /* -------------------------------------------------------------------------- */
 
 #define PCIE1_RC_CFG_VENDOR_SPECIFIC_REG1  0x0188u
@@ -222,7 +222,7 @@ static const struct { uint8_t regad; uint16_t val; } mdio_pll_tune[] = {
  * Outbound window — firmware-programmed translation from PCIe-side
  * addresses to CPU physical addresses. These constants come from
  * `bcm2712.dtsi` lines 1053-1060 (cached at
- * ../slmos-reference-cache/rpi/rpi-linux-bcm2712.dtsi).
+ * ~/slmos-ref/rpi/rpi-linux-bcm2712.dtsi).
  */
 #define PCIE1_NONPREF_PCIE_BASE 0x0000000080000000ULL
 #define PCIE1_NONPREF_CPU_BASE  0x0000001b80000000ULL
@@ -387,7 +387,7 @@ static inline void rescal_w32(uint32_t off, uint32_t val)
 /*
  * Toggle a reset line managed by the brcmstb-reset controller.
  * Each bank is 0x18 bytes; bit = ID & 0x1F.
- * See ../slmos-reference-cache/rpi/rpi-linux-reset-brcmstb.c for the reference logic.
+ * See ~/slmos-ref/rpi/rpi-linux-reset-brcmstb.c for the reference logic.
  */
 static void bcm_reset_assert(uint32_t id)
 {
@@ -406,7 +406,7 @@ static void bcm_reset_deassert(uint32_t id)
 /*
  * Run the shared PCIe/SATA rescal. Idempotent — if firmware already
  * ran it for pcie2, running again doesn't break anything. Per
- * ../slmos-reference-cache/rpi/rpi-linux-reset-brcmstb-rescal.c.
+ * ~/slmos-ref/rpi/rpi-linux-reset-brcmstb-rescal.c.
  */
 static int rescal_bring_up(void)
 {
@@ -680,7 +680,7 @@ static void bcm2712_perst_tperst_clk_ms(void)
  *
  * RC config space is directly mapped at pcie1_regs — the Linux
  * driver confirms this pattern (brcm_pcie_map_bus at
- * ../slmos-reference-cache/rpi/rpi-linux-pcie-brcmstb.c:940-941: RC access goes
+ * ~/slmos-ref/rpi/rpi-linux-pcie-brcmstb.c:940-941: RC access goes
  * through `base + offset` without EXT_CFG_INDEX).
  */
 #define BCM2712_RC_CFG_COMMAND         0x04u  /* PCI COMMAND/STATUS dword */

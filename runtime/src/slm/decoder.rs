@@ -2,7 +2,7 @@
 //!
 //! M5.2 of the SLM integration plan (see
 //! `docs/plans/slm-integration-plan.md` §M5 and
-//! `docs/specs/slm-integration.md`). Drives prefill + autoregressive
+//! `docs/design/slm-integration.md`). Drives prefill + autoregressive
 //! decode against a [`Session`], honouring the cooperative-cancel
 //! flag and per-token callback.
 //!

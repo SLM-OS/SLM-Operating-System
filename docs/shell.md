@@ -165,7 +165,7 @@ Hardware control & diagnostics:       # mix of always-available + platform-gated
 | `gpu use status` | Tabular view of the three GPU consumer toggles (sched, eviction, inference) with last-change timestamps |
 | `gpu use inference <on\|off>` | Master toggle for GPU inference dispatch. Default OFF. On Jetson with `--no-gpu-suspend` kexec + a v6 channel handoff, flipping ON routes the MNIST model through the GA10B fastpath. Other platforms accept the flag but engine still uses CPU NEON. |
 | `gpu use sched <on\|off>` | Master toggle for AI-scheduler GPU dispatch (`ai_mlp` policy). When ON and a sched-MLP v6 handoff is in DRAM (Jetson with `--no-gpu-suspend` kexec + `gpu-kernel-sched-mlp` host helper running pre-kexec), every `ai_mlp_assign_cpu` runs the 4-layer forward on GA10B and falls back to CPU NEON only on dispatch error. Default OFF. Other policies (`heuristic`, `ai_ppo`, `ai_hailo`) ignore the flag. |
-| `gpu use eviction <on\|off>` | Operator-intent flag for eviction-policy GPU dispatch. Accepted with a "scaffold only" warning today — no eviction policy declares a GPU backend yet. See `docs/specs/gpu-policy-models.md` PR-5/PR-6 for the wiring plan. |
+| `gpu use eviction <on\|off>` | Operator-intent flag for eviction-policy GPU dispatch. Accepted with a "scaffold only" warning today — no eviction policy declares a GPU backend yet. See `docs/design/gpu-policy-models.md` PR-5/PR-6 for the wiring plan. |
 | `dtb` | Show Device Tree info (parsed or defaults) |
 | `elftest` | Run ELF loader validation tests (header parsing, architecture checks) |
 | `run <name>` | Run a program by name from the ELF table |

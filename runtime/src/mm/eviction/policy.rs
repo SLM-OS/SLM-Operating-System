@@ -89,7 +89,7 @@ pub trait EvictionPolicy {
     /// warning, recording operator intent without changing dispatch.
     /// Flipping a policy's return value to `true` requires the
     /// matching `slm_gpu_run_eviction_inference()` plumbing on the
-    /// SLM-OS side — see `docs/specs/gpu-policy-models.md` PR-6.
+    /// SLM-OS side — see `docs/design/gpu-policy-models.md` PR-6.
     fn has_gpu_backend(&self) -> bool { false }
 
     /// Per-expert weights for ensemble policies (CACHEUS). Default

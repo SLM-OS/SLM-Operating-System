@@ -144,8 +144,29 @@
 #define GIC_REDIST_BASE     0x0F440000UL    /* GICR (per-CPU redistributors) */
 #define GIC_REDIST_SIZE     0x00200000UL    /* 2 MB (covers all CPUs) */
 
-/* Timer - ARM Generic Timer */
-#define TIMER_IRQ           30              /* PPI 14 — NS Phys Timer (CNTP_*_EL0), same as QEMU */
+/* Timer - ARM Generic Timer.
+ *
+ * SLM-OS boots at EL2/VHE on Jetson (kexec-from-Linux entry path
+ * leaves the CPU at EL2; `boot.S` enables HCR_EL2.E2H/TGE before
+ * jumping to C). Two timer IRQ configurations:
+ *
+ *   - JETSON_HW_TICK=ON  (requires patched BL31 from
+ *     tools/tfa-patches/0004-*.patch): TIMER_IRQ = 26 (PPI 10 =
+ *     Hyp Physical Timer / CNTHP). Mirrors Pi 5's #693/#742 path.
+ *     timer.c writes cnthp_ctl_el2 / cnthp_tval_el2 directly
+ *     (CNTP_*_EL0 from EL2 with E2H=1 are RES0). PPI 26 is
+ *     Group 1 NS only after the BL31 patch promotes PPIs/SGIs;
+ *     stock NVIDIA BL31 leaves it Group 0 → trapped to EL3.
+ *   - JETSON_HW_TICK=OFF (default): TIMER_IRQ = 30 (PPI 14 = NS
+ *     Phys Timer). Inert — stock TF-A doesn't route NS PPIs to
+ *     EL2 either, so this only exists for build symmetry. The
+ *     COOP_PREEMPT path in sched.c drives ticks at yield points.
+ */
+#if defined(JETSON_HW_TICK)
+#define TIMER_IRQ           26              /* PPI 10 — Hyp Phys Timer (CNTHP), needs patched BL31 */
+#else
+#define TIMER_IRQ           30              /* PPI 14 — NS Phys Timer; inert under stock BL31 (COOP_PREEMPT carries) */
+#endif
 
 /* CPU configuration */
 #define CPU_MAX             6               /* 6x Cortex-A78AE */
@@ -367,7 +388,7 @@
  * the pad's function (GPIO vs SFIO peripheral), pull, drive enable,
  * input receiver, and other pad-level config. Per-pad register
  * offsets come from `tegra234_groups[]` in
- * `../slmos-reference-cache/linux/linux-pinctrl-tegra234.c` — see the per-offset
+ * `~/slmos-ref/linux/linux-pinctrl-tegra234.c` — see the per-offset
  * comment block below for why T194's table is *not* a safe source.
  * Pinmux register layout (per PIN_PINGROUP_ENTRY_Y):
  *   bits[1:0]  PM       — special-function select (0..3 = SF1..SF4)
@@ -402,7 +423,7 @@
  * **Don't trust pinmux offsets from Tegra194 source for T234.** The
  * pad table layout was reshuffled between T194 and T234; same pad
  * names but different register offsets. These values come from
- * `tegra234_groups[]` in `../slmos-reference-cache/linux/linux-pinctrl-tegra234.c`,
+ * `tegra234_groups[]` in `~/slmos-ref/linux/linux-pinctrl-tegra234.c`,
  * not the T194 table.
  */
 #define TEGRA234_PINMUX_CAM_RESET_OFF  0x4008u   /* PH.06 (within MAIN) */
@@ -607,7 +628,7 @@
 /* RP1 clock controller, at RP1_BAR + 0x18000 per rp1.dtsi. Stage 2
  * of the MACB driver writes CLK_ETH_CTRL / CLK_ETH_TSU_CTRL here to
  * enable the Ethernet clocks. Offsets from Linux drivers/clk/clk-rp1.c
- * (cached at ../slmos-reference-cache/linux/linux-rpi-clk-rp1.c). */
+ * (cached at ~/slmos-ref/linux/linux-rpi-clk-rp1.c). */
 #define RP1_CLOCKS_BASE         0x1F00018000UL
 #define RP1_CLK_ETH_CTRL        0x00064     /* 125 MHz TX clock */
 #define RP1_CLK_ETH_TSU_CTRL    0x00134     /*  50 MHz timestamp unit clock */

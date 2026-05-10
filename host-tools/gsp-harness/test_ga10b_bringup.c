@@ -1034,9 +1034,15 @@ static void test_handoff_validate_bad_version(void)
     h.version = 1;                  /* v1 lacked work_submit_token */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     /* v2 (channel-only), v3 (+ kernel-launch state), v4 (+
-     * expected_payload), v5 (+ pipeline), and v6 (+ input_buf) all
-     * pass — Phase 6/7 reads only v2 fields, Phase 8 checks the
-     * version at dispatch time before reading v3..v6 fields. */
+     * expected_payload), v5 (+ pipeline), v6 (+ input_buf), and v7
+     * (+ qmd-pool) all pass — Phase 6/7 reads only v2 fields, Phase 8
+     * checks the version at dispatch time before reading v3..v7
+     * fields. v7 specifically must pass because the scan loop
+     * (`ga10b_find_handoff_of_kind_in_range`) calls this validator
+     * to filter magic-collision candidates; rejecting v7 here makes
+     * the QMD-pool path unreachable from a real kexec — the bug
+     * fixed 2026-05-07 alongside the v7 HMMA override propagation
+     * (PR #694). */
     h.version = 2;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 3;
@@ -1047,7 +1053,9 @@ static void test_handoff_validate_bad_version(void)
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
     h.version = 6;
     REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
-    h.version = 7;                  /* future, not yet defined */
+    h.version = 7;
+    REQUIRE_EQ(ga10b_validate_handoff(&h), 0);
+    h.version = 8;                  /* future, not yet defined */
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
     h.version = 0xFFFFFFFF;
     REQUIRE_EQ(ga10b_validate_handoff(&h), -1);
@@ -1130,7 +1138,7 @@ static void test_method_header_encoding(void)
     /* --- Test-side EXPECT_INC_HDR coverage --- */
 
     /* Host-family (subch 0, byte 0x5C-0x6C): nvgpu's exact literals
-     * from ../slmos-reference-cache/nvidia/nvgpu-hal-sync-sema_cmdbuf_gv11b.c. */
+     * from ~/slmos-ref/nvidia/nvgpu-hal-sync-sema_cmdbuf_gv11b.c. */
     REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x5Cu), 0x20010017u);  /* SEM_ADDR_LO */
     REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x60u), 0x20010018u);  /* SEM_ADDR_HI */
     REQUIRE_EQ(EXPECT_INC_HDR(1, 0, 0x64u), 0x20010019u);  /* SEM_PAYLOAD_LO */
@@ -2667,6 +2675,67 @@ static void test_qmd_pool_prepare_writes_match_direct_populate(void)
     REQUIRE_EQ(memcmp(r.cpu_va, expected, GA10B_QMD_SIZE_BYTES), 0);
 }
 
+static void test_qmd_pool_prepare_applies_hmma_overrides(void)
+{
+    printf("== test_qmd_pool_prepare_applies_hmma_overrides ==\n");
+    /* HMMA / WMMA shaders need non-default SHARED_MEMORY_SIZE +
+     * BARRIER_COUNT. The v7 pool encoder must honor the op's
+     * smem_size_bytes / barrier_count fields; without these
+     * overrides, helper-staged HMMA dispatches stall the next op
+     * (observed empirically — gpu-kernel-mnist.c §"BARRIER_COUNT=3
+     * matches what the SM expects"). SIMT ops set these fields to
+     * 0 and the encoder defaults stand. */
+    uint8_t pool[4 * GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot = 0;
+
+    struct ga10b_pipeline_op_v7 op = make_test_op_v7(
+        0x10000000ULL, 0x20000000ULL, 64u, 1u, 1u, 1u);
+    op.smem_size_bytes = 2048u;
+    op.slm_size_bytes  = 0u;       /* SIMT-default */
+    op.barrier_count   = 3u;
+
+    struct ga10b_qmd_pool_slot r = ga10b_qmd_pool_prepare(
+        pool, 0xEE000000ULL, 4u, &slot, &op);
+    REQUIRE_EQ(r.index, 0u);
+
+    /* Read back the QMD fields. The 32-bit-word layout uses
+     * `ga10b_qmd_get_bits` parity reads — but we don't have a public
+     * getter, so reconstruct by encoding a reference QMD with the
+     * same effective parameters and comparing byte-by-byte. */
+    uint32_t expected[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(expected,
+                       op.shader_gpu_va, op.cbuf_gpu_va,
+                       op.register_count_v,
+                       op.grid_x, op.grid_y, op.grid_z,
+                       op.block_x, op.block_y, op.block_z);
+    /* Apply the same overrides the pool path would, so we can
+     * byte-compare the result. */
+    ga10b_qmd_set_bits(expected, GA10B_QMD_SHARED_MEMORY_SIZE_HI,
+                       GA10B_QMD_SHARED_MEMORY_SIZE_LO, 2048u);
+    ga10b_qmd_set_bits(expected, GA10B_QMD_BARRIER_COUNT_HI,
+                       GA10B_QMD_BARRIER_COUNT_LO, 3u);
+    REQUIRE_EQ(memcmp(r.cpu_va, expected, GA10B_QMD_SIZE_BYTES), 0);
+
+    /* Sanity: a SIMT-default op (smem=slm=barrier=0) must NOT have
+     * the HMMA bits set in its QMD — that would corrupt SIMT
+     * dispatch by the same path. */
+    uint8_t pool2[GA10B_QMD_SIZE_BYTES] = {0};
+    uint32_t slot2 = 0;
+    struct ga10b_pipeline_op_v7 simt_op = make_test_op_v7(
+        0x10000000ULL, 0x20000000ULL, 64u, 1u, 1u, 1u);
+    /* simt_op already has smem/slm/barrier zeroed by make_test_op_v7. */
+    struct ga10b_qmd_pool_slot rs = ga10b_qmd_pool_prepare(
+        pool2, 0u, 1u, &slot2, &simt_op);
+    REQUIRE_EQ(rs.index, 0u);
+    uint32_t simt_expected[GA10B_QMD_DWORDS];
+    ga10b_qmd_populate(simt_expected,
+                       simt_op.shader_gpu_va, simt_op.cbuf_gpu_va,
+                       simt_op.register_count_v,
+                       simt_op.grid_x, simt_op.grid_y, simt_op.grid_z,
+                       simt_op.block_x, simt_op.block_y, simt_op.block_z);
+    REQUIRE_EQ(memcmp(rs.cpu_va, simt_expected, GA10B_QMD_SIZE_BYTES), 0);
+}
+
 static void test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds(void)
 {
     printf("== test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds ==\n");
@@ -3005,6 +3074,70 @@ static void test_qmd_set_bits_rejects_inverted_range(void)
 }
 
 /* ======================================================================
+ * Cross-dispatch L2 evict — call-site count pin (#723 / PR #727)
+ * ====================================================================== */
+
+/* PR #722 added `ga10b_l2_evict_sysmem()` calls at three sites for
+ * cross-dispatch coherency on GA10B's chip-wide L2. The narrowing
+ * experiment in #723 (runtime mask gate over all 8 subsets, ABBA +
+ * AAAA on jetson-nano-2) showed the post-launch site is necessary
+ * AND sufficient — every passing subset includes it; pre-launch
+ * without set_input actually wedged the channel. PR #727 dropped
+ * the redundant set_input + pre-launch evicts; only the inherit
+ * call (`ga10b_bringup_inherit`, #596 race) and the per-dispatch
+ * post-launch call (`ga10b_bringup_read_pipeline_output`) remain.
+ *
+ * This test scans the source text and pins the call-site count at
+ * exactly two. A future PR that re-adds an evict at set_input or
+ * pre-launch (or anywhere else) will fail at build-time, not at
+ * hardware-debug-time — same spirit as
+ * `test_launch_kernel_pb_uses_ampere_pcas2_b`.
+ *
+ * The test runs from the project root via `make test-ga10b-bringup`
+ * (Makefile:775), so the source path is relative to cwd. */
+static void test_l2_evict_call_sites_pinned_to_minimal(void)
+{
+    printf("== test_l2_evict_call_sites_pinned_to_minimal ==\n");
+
+    const char *path = "kernel/gpu/nvidia/ga10b_bringup.c";
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(stderr, "  could not open %s (cwd must be project root)\n",
+                path);
+        REQUIRE(f != NULL);
+        return;
+    }
+
+    /* Count `ga10b_l2_evict_sysmem(` occurrences that look like
+     * function-call sites — i.e. not inside a comment line and not
+     * the function's own definition. The cheap heuristic: ignore
+     * lines whose first non-whitespace is `*` (block-comment body)
+     * or `//` (line comment), and ignore the line that starts the
+     * function definition (`int ga10b_l2_evict_sysmem(void)`). */
+    char line[512];
+    int call_sites = 0;
+    while (fgets(line, sizeof(line), f)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (p[0] == '*') continue;
+        if (p[0] == '/' && p[1] == '/') continue;
+        if (strstr(line, "ga10b_l2_evict_sysmem(void)")) continue;
+        const char *q = line;
+        while ((q = strstr(q, "ga10b_l2_evict_sysmem(")) != NULL) {
+            call_sites++;
+            q += strlen("ga10b_l2_evict_sysmem(");
+        }
+    }
+    fclose(f);
+
+    /* Expected sites:
+     *   1. `ga10b_bringup_inherit` — post-kexec L2 evict (#596 race)
+     *   2. `ga10b_bringup_read_pipeline_output` — per-dispatch
+     *      post-launch coherency (#715 / #722, narrowed by #723) */
+    REQUIRE_EQ(call_sites, 2);
+}
+
+/* ======================================================================
  * Entry
  * ====================================================================== */
 
@@ -3127,6 +3260,7 @@ int main(void)
     test_qmd_pool_prepare_starts_from_inout_value();
     test_qmd_pool_prepare_writes_match_direct_populate();
     test_qmd_pool_prepare_distinct_ops_produce_distinct_qmds();
+    test_qmd_pool_prepare_applies_hmma_overrides();
     test_qmd_pool_prepare_rejects_invalid_inputs();
 
     test_handoff_is_v7_accepts_well_formed();
@@ -3144,6 +3278,8 @@ int main(void)
     test_qmd_populate_sets_cwd_sysmembar();
     test_qmd_populate_is_deterministic();
     test_qmd_set_bits_rejects_inverted_range();
+
+    test_l2_evict_call_sites_pinned_to_minimal();
 
     if (failures) {
         fprintf(stderr, "[test_ga10b_bringup] %d FAILURES\n", failures);

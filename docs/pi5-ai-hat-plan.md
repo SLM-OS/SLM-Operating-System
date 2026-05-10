@@ -30,7 +30,7 @@ and the slot model carries pad arrays instead of single-pad fields.
 
 | Phase | State | Notes |
 |---|---|---|
-| 0 — Research | ✅ done | `../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md` + `docs/pi5-pcie1-registers.md` + 22 cached source files + `hef.proto` fetched |
+| 0 — Research | ✅ done | `~/slmos-ref/derivatives/notes/hailo-driver-notes.md` + `docs/pi5-pcie1-registers.md` + 22 cached source files + `hef.proto` fetched |
 | 1 — ARM64 PCIe host controller | ✅ done | `kernel/drivers/pcie/` with QEMU GPEX + BCM2712 backends, 7 QEMU tests |
 | 2 — Inference-device abstraction | ✅ done | `kernel/include/inference_device.h` + CPU-MLP backend, `ai_mlp_assign_cpu` routes through it |
 | 3 — Hailo driver scaffolding | ✅ done (software) | `kernel/ai_accel/hailo/` + mocked-ops tests; probe/boot/FW-upload need hardware |
@@ -93,7 +93,7 @@ The BCM2712 exposes two PCIe root complexes relevant here:
 - **EEPROM constraint** — the Sep 2024 EEPROM is required for SLM-OS's RP1 UART to survive the firmware → kernel handoff (see `pi5_eeprom_findings.md`: firmware ≥ v2025.01.22 silently breaks writes to `0x1F00030000`). So "upgrade the EEPROM and hope firmware auto-trains pcie1" is not an option — we need to do the training ourselves.
 - **`dtparam=pciex1`** is not a valid firmware option on this EEPROM. Setting it in `config.txt` has no effect.
 
-**Consequence:** SLM-OS must implement its own PCIe link-training path for pcie1 — porting `brcm_pcie_setup()` from `drivers/pci/controller/pcie-brcmstb.c` (full reference cached at `../slmos-reference-cache/rpi/rpi-linux-pcie-brcmstb.c`). This is **Phase 1.5** below, inserted between the existing Phase 1 (enumerator) and Phase 3 (Hailo driver).
+**Consequence:** SLM-OS must implement its own PCIe link-training path for pcie1 — porting `brcm_pcie_setup()` from `drivers/pci/controller/pcie-brcmstb.c` (full reference cached at `~/slmos-ref/rpi/rpi-linux-pcie-brcmstb.c`). This is **Phase 1.5** below, inserted between the existing Phase 1 (enumerator) and Phase 3 (Hailo driver).
 
 What SLM-OS needs to do (now that the assumption about firmware training is gone):
 
@@ -124,7 +124,7 @@ No hardware or seating problems — the gap is purely the missing link-training 
 | MIP0 | `0x10_00130000` | 64      | 128–191      | pcie2 (RP1) |
 | MIP1 | `0x10_00131000` | **8**   | **247–254**  | pcie1 (external HAT) |
 
-MIP1's 8-vector limit is fine for Hailo (one MSI) but constrains how many PCIe-attached endpoints Phase 1+ can handle simultaneously. See `../slmos-reference-cache/rpi/rpi-linux-irq-bcm2712-mip.c` for the doorbell layout.
+MIP1's 8-vector limit is fine for Hailo (one MSI) but constrains how many PCIe-attached endpoints Phase 1+ can handle simultaneously. See `~/slmos-ref/rpi/rpi-linux-irq-bcm2712-mip.c` for the doorbell layout.
 
 ---
 
@@ -135,14 +135,14 @@ Each phase is self-contained and deliverable. Later phases assume earlier ones l
 ### Phase 0: Research & Prerequisites ✅ complete (2026-04-17)
 
 **Deliverables:**
-- ✅ `../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md` — annotated notes from Hailo's open-source Linux driver (`hailo8` branch — `master` has dropped Hailo-8). Covers firmware upload, VDMA, `.hef` layout, submit/complete, register map, IDs, gotchas.
+- ✅ `~/slmos-ref/derivatives/notes/hailo-driver-notes.md` — annotated notes from Hailo's open-source Linux driver (`hailo8` branch — `master` has dropped Hailo-8). Covers firmware upload, VDMA, `.hef` layout, submit/complete, register map, IDs, gotchas.
 - ✅ `docs/pi5-pcie1-registers.md` — `pcie1` RC register layout + MIP1 programming model with line references into rpi-6.6.y sources.
-- ✅ 21 cached source files under `../slmos-reference-cache/` (`hailo-*`, `rpi-linux-*`).
+- ✅ 21 cached source files under `~/slmos-ref/` (`hailo-*`, `rpi-linux-*`).
 - ✅ Model frozen: MobileNetV1 INT8 from Hailo Model Zoo, Hailo Dataflow Compiler v5.3.0. `.hef` compile deferred to Phase 4 (dev workstation only).
 - ☐🔗 Confirm AI HAT+ link trains under stock Linux — hardware-gated, deferred to when the Pi 5 + HAT+ lab unit is available.
 
 **Key findings that reshape later phases:**
-1. **`.hef` body is a protobuf blob** (`hef_proto_size` bytes after the header), not a flat binary. Follow-up research (2026-04-17) confirmed `hef.proto` is published under MIT license in `hailo-ai/hailort` as a single self-contained file (proto3, 1059 LOC, 87 messages, no imports, no `map`/`Any`/extensions). Originally cached at `../slmos-reference-cache/hailo/hailo-hef.proto`; moved to `kernel/ai_accel/hailo/hef.proto` as part of Phase 4 since it's now a first-class build input (not a cached external reference). **Parse in-kernel with [nanopb](https://github.com/nanopb/nanopb)** (zlib license, ~1500 LOC portable C, used in Zephyr RTOS). The large weight payloads are in the CCWS block that follows the proto body, not in the proto itself — so nanopb only parses metadata (layer shapes, I/O directions, ops config), keeping memory pressure low. ~45 `repeated`/`bytes` fields need `pb_callback_t` glue backed by PMM. Sidecar pre-parse has been ruled out. If nanopb's generated output trips `-std=c23 -Wpedantic`, consider an upstream contribution.
+1. **`.hef` body is a protobuf blob** (`hef_proto_size` bytes after the header), not a flat binary. Follow-up research (2026-04-17) confirmed `hef.proto` is published under MIT license in `hailo-ai/hailort` as a single self-contained file (proto3, 1059 LOC, 87 messages, no imports, no `map`/`Any`/extensions). Originally cached at `~/slmos-ref/hailo/hailo-hef.proto`; moved to `kernel/ai_accel/hailo/hef.proto` as part of Phase 4 since it's now a first-class build input (not a cached external reference). **Parse in-kernel with [nanopb](https://github.com/nanopb/nanopb)** (zlib license, ~1500 LOC portable C, used in Zephyr RTOS). The large weight payloads are in the CCWS block that follows the proto body, not in the proto itself — so nanopb only parses metadata (layer shapes, I/O directions, ops config), keeping memory pressure low. ~45 `repeated`/`bytes` fields need `pb_callback_t` glue backed by PMM. Sidecar pre-parse has been ruled out. If nanopb's generated output trips `-std=c23 -Wpedantic`, consider an upstream contribution.
 2. **Device IDs:** vendor `0x1E60`, Hailo-8 / Hailo-8L both enumerate as `0x2864` (SKU differentiation happens in firmware config, not PCI).
 3. **Firmware upload is not VDMA on Hailo-8.** It uses the ATR[0] address translation window plus direct MMIO writes to BAR4. `hailo-driver-notes.md` §4 documents the ~5 s boot-status + ATR[1] poll sequence.
 4. **Plain MSI, not MSI-X.** Driver calls `pci_enable_msi(pdev)` with one vector. Phase 1 API must expose `pcie_alloc_msi()` in addition to the originally planned `pcie_alloc_msix()`.
@@ -188,7 +188,7 @@ Each phase is self-contained and deliverable. Later phases assume earlier ones l
 
 **Deliverables:**
 
-- Port of `brcm_pcie_setup()` from `drivers/pci/controller/pcie-brcmstb.c` (cached at `../slmos-reference-cache/rpi/rpi-linux-pcie-brcmstb.c`) into `kernel/drivers/pcie/pcie_bcm2712.c`. The Linux function does ~400 lines of work — SLM-OS only needs the subset for the `brcm,bcm2712-pcie` compatible string (2712-specific paths).
+- Port of `brcm_pcie_setup()` from `drivers/pci/controller/pcie-brcmstb.c` (cached at `~/slmos-ref/rpi/rpi-linux-pcie-brcmstb.c`) into `kernel/drivers/pcie/pcie_bcm2712.c`. The Linux function does ~400 lines of work — SLM-OS only needs the subset for the `brcm,bcm2712-pcie` compatible string (2712-specific paths).
 - Reset-domain access: `pcie_rescal` + reset IDs 7 and 43 from `bcm2712.dtsi:1048`. Needs either a minimal reset-controller driver or a direct-register implementation for the CPR / BCM reset block at `0x10_00000000+`.
 - PHY / rescal programming: MDIO-style access via `PCIE_RC_DL_MDIO_{ADDR,WR_DATA,RD_DATA}` at RC offsets 0x1100/0x1104/0x1108 (`pcie-brcmstb.c:61-63`).
 - Outbound window programming: `PCIE_MISC_CPU_2_PCIE_MEM_WIN*` — tell the RC which PCIe-side addresses map to which CPU phys addresses. Today's code assumes firmware set these; with pcie1 reset, we have to program them ourselves.
@@ -301,7 +301,7 @@ When Hailo inference lands (Phase 5), switching the MLP policy to the NPU is one
   - IDENTIFY — `hailo fw` returns `firmware 4.23.536870912` (0x20000000), matching the boot-log fingerprint across three consecutive runs.
   - WRITE/READ_MEMORY — both opcodes round-trip against firmware with correct BE wire format and response parsing; firmware returns `major_status=0x40000058` for arbitrary-address access without an active stream context (expected HailoRT behavior).
   - CONFIG_STREAM — both input and output variants round-trip, firmware returns `major_status=0x40030050, minor_status=0x40030005` for our minimal skip_nn_stream_config probe (requires a real `.hef`'s context-switch state to accept). Observed firmware convention: on rejection it returns `opcode_echo=0xFFFFFFFF` rather than mirroring the request opcode; the driver checks `major_status` first so this surfaces as `HAILO_ERR_IO` with diagnostic codes, not `HAILO_ERR_BAD_FIRMWARE`.
-- Four non-obvious wire-format gotchas surfaced during bring-up and are recorded in `../slmos-reference-cache/derivatives/notes/hailo-driver-notes.md` §4.5 and the `hailo_control_wire_gotchas` auto-memory: big-endian header scalars, IMASK-before-ISTATUS unmask, FW_CONTROL-bit-specific polling, and the 4-byte `parameter_count` gap between response header and body (plus `__packed` on the body struct).
+- Four non-obvious wire-format gotchas surfaced during bring-up and are recorded in `~/slmos-ref/derivatives/notes/hailo-driver-notes.md` §4.5 and the `hailo_control_wire_gotchas` auto-memory: big-endian header scalars, IMASK-before-ISTATUS unmask, FW_CONTROL-bit-specific polling, and the 4-byte `parameter_count` gap between response header and body (plus `__packed` on the body struct).
 - 36 QEMU-mocked tests in `test_hailo.c` cover the transport — 7 IDENTIFY cases (`test_control_identify_*`) + 22 WRITE/READ_MEMORY cases (`test_control_{write,read}_memory_*`) + 7 CONFIG_STREAM cases (`test_control_config_stream_*`). The mock has a 4 KB smart backing store that simulates firmware memory so WRITE pattern → READ back round-trips can be asserted locally.
 
 #### Phase 5.3: `hailo_load` with weight DMA ✅ software-complete (2026-04-18)
@@ -474,7 +474,7 @@ Transport works end-to-end on real hardware. Remaining rejection is at the firmw
 
 ### Phase 6.4: HEF → action-list translator (in progress, 2026-04-19)
 
-The natural continuation of 6.3. HEF proto stores structured `ProtoHEFAction` oneof messages (WriteDataCcw, EnableLcu, TriggerSequencer, …). HailoRT translates these into the wire-format action stream defined in `../slmos-reference-cache/hailo/hailort-context_switch_defs.h` (45 action types, repeated-action compression, common-header + per-type body, `host_buffer_info_t` embedded for CCW DMA pulls). SLM-OS needs to implement the same translator.
+The natural continuation of 6.3. HEF proto stores structured `ProtoHEFAction` oneof messages (WriteDataCcw, EnableLcu, TriggerSequencer, …). HailoRT translates these into the wire-format action stream defined in `~/slmos-ref/hailo/hailort-context_switch_defs.h` (45 action types, repeated-action compression, common-header + per-type body, `host_buffer_info_t` embedded for CCW DMA pulls). SLM-OS needs to implement the same translator.
 
 #### What landed in 6.4a–d
 
@@ -509,7 +509,7 @@ The original 6.4d writeup claimed firmware v4.23 reads
 (8 bytes) despite the `#pragma pack(1)` in the reference. **That was
 wrong.** A HailoRT v4.23 wire capture against a real Hailo-8L Model
 Zoo HEF on 2026-04-20 (cached at
-`../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mobilenet.txt`) shows
+`~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mobilenet.txt`) shows
 `BURST_CREDITS_TASK_RESET` — a zero-body action — emitted as exactly
 5 bytes: `1e ff ff ff ff` before the next action header begins.
 
@@ -754,7 +754,7 @@ commit on branch `pi5-180-path-a-iova-align`):**
    `sudo cp /usr/lib/libhailort.so.4.23.0.bak /usr/lib/libhailort.so.4.23.0`
 
 The resulting capture is cached at
-`../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mobilenet.txt` so
+`~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mobilenet.txt` so
 future sessions can decode further without re-running the patch.
 
 #### Phase 6.10 landed (2026-04-20): REPEATED_ACTION wrapper + ENABLE transition
@@ -1025,11 +1025,11 @@ changes rather than the full investigation history.
 
 **Reference captured in-tree** (commit `5371194`):
 
-- `../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt`:
+- `~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-wire-capture-mnist-pi5.txt`:
   full dmesg wire trace of a successful `hailortcli run
   /tmp/mnist.hef --frames-count 10` at 5541 FPS on pi-5-1 after
   swapping to Pi OS + patched `hailo_pci` DKMS build.
-- `../slmos-reference-cache/derivatives/hailort-traces/pios_{ACTIVATION,BATCH_SWITCHING,PRELIMINARY,
+- `~/slmos-ref/derivatives/hailort-traces/pios_{ACTIVATION,BATCH_SWITCHING,PRELIMINARY,
   DYNAMIC}.bin`: raw `SET_CONTEXT_INFO` request bodies for
   byte-for-byte diff against SLM-OS output.
 
@@ -1193,10 +1193,10 @@ hardware + firmware are fine and any failure is on our side.
 
 Captured two reference traces during a working MNIST run:
 
-- `../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-vdma-mnist-pi5.txt` — kprobe
+- `~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-vdma-mnist-pi5.txt` — kprobe
   trace of `hailo_vdma_launch_transfer` showing the per-
   transfer parameters (channel, starting_desc, IRQ domains).
-- `../slmos-reference-cache/derivatives/hailort-traces/hailort-v4.23.0-mmio-trace-mnist-pi5.txt` —
+- `~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-mmio-trace-mnist-pi5.txt` —
   ftrace of `hailo_resource_write32` / `hailo_pcie_read_interrupt`
   capturing the full BAR0 MMIO sequence + IRQ timing during a
   single inference (fw fires the ch=2 SRC IRQ within 17 μs of
@@ -1257,7 +1257,7 @@ IRQ ack (no effect), endpoint ASPM (already off), RC ASPM
 fill descs).
 
 Side-by-side source comparison
-(`../slmos-reference-cache/derivatives/notes/hailort-vs-slmos-source-comparison.md`)
+(`~/slmos-ref/derivatives/notes/hailort-vs-slmos-source-comparison.md`)
 walks the launch_transfer flow line-by-line against
 `hailo_pci`'s `vdma_common.c`. Every checkable layer matches.
 The bug is on our side per Pi OS proof, but lives at a layer

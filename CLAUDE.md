@@ -137,7 +137,9 @@ make kexec-deploy PLATFORM=X86_64     # scp ELF to test-pc + fire kexec (mb2 mod
 
 # Other platforms:
 make kernel PLATFORM=RASPI5            # Raspberry Pi 5
-make kernel PLATFORM=JETSON_ORIN_NANO  # Jetson Orin Nano
+make kernel PLATFORM=JETSON_ORIN_NANO  # Jetson Orin Nano (HW timer preempt
+                                       #   ON by default; pass JETSON_HW_TICK=OFF
+                                       #   on stock-BL31 dev kits — see #755)
 
 # AI scheduler (optional, adds MLP/PPO policies with real trained weights):
 make kernel AI_SCHED=ON                        # QEMU ARM64 with AI scheduler
@@ -226,14 +228,23 @@ The CBB firewall has per-peripheral permissions. By running at **EL2 with VHE** 
 - Use UARTC (0x0C280000) for serial console (visible via TCU on USB-C debug)
 - OP-TEE carveout at 0xBE-0xC2 skipped; ~6.7 GB usable across 3 regions
 
-**SMP (April 2026):**
+**SMP:**
 - 6-core boot working via PSCI CPU_ON after kexec
 - Root cause of prior failure: wrong MPIDR encoding. Jetson uses dual-cluster Aff2.Aff1: 0x000, 0x100, 0x200, 0x300, 0x10200, 0x10300
+- All CPU-id resolution goes through `cpu_logical_map[]` (asm via `ARM64_GET_LOGICAL_CPU`, C via `cpu_logical_id()`); regression coverage in `kernel/tests/test_mpidr_lookup.c` (PR #647)
 - Boot flag visibility uses PSCI success fallback (same cache incoherency as Pi 5)
 - VHE set up on all secondary CPUs in `smp_boot.S`
 - NC memory at 0xBDE00000 (2 MB, last block of region 1 before OP-TEE) for cross-CPU shared data
-- Cross-CPU task dispatch working — `bench smp` dispatches to all 6 CPUs via cooperative WFE/SEV
+- Cross-CPU task dispatch working — `bench smp` dispatches to all 6 CPUs. Under default `JETSON_HW_TICK=ON` build (PR #746/#755), secondaries WFI and wake from per-CPU PPI 26 timer IRQs (SEV broadcast is redundant but harmless). Under `JETSON_HW_TICK=OFF` cooperative fallback, secondaries WFE and wake from cross-CPU SEV.
 - DC CVAC/CIVAC cache maintenance active (cache.h), page tables flushed to DRAM before secondary boot
+
+**Preemptive multitasking:** Default `JETSON_HW_TICK=ON` build runs
+true hardware quantum preemption at 100 Hz on every CPU under the
+patched tegra234 BL31 (`tools/tfa-patches/0004-*`). Override with
+`make kernel PLATFORM=JETSON_ORIN_NANO JETSON_HW_TICK=OFF` for
+stock-BL31 / production-fused boards. Hardware verification:
+`boot_test --count 10` 10/10 on jetson-nano-2 (2026-05-09). See
+`docs/fact-sheets/preemption.md`.
 
 **UEFI direct boot (WIP, not required for SMP):**
 - EFI stub (`efi_stub.c`) with VHE-compatible MMU disable + self-relocating trampoline in `boot.S`
@@ -336,21 +347,15 @@ When debugging hardware issues, follow this order:
 
 ## Reference File Cache
 
-Third-party reference material (NVIDIA L4T nvgpu, Mesa/NVK, nouveau, HailoRT, Linux kernel, RPi firmware, etc.) lives in a **private companion repo** at `SLM-OS/slmos-reference-cache`, cloned as a sibling directory next to this checkout:
+Third-party reference material (NVIDIA L4T nvgpu, Mesa/NVK, nouveau, HailoRT, Linux kernel, RPi firmware, ARM Trusted Firmware, etc.) lives in a local-only reference library at `~/slmos-ref/`. This is no longer a git repo — it's a flat reference tree on the developer's machine.
 
-```
-parent-dir/
-├── SLM-Operating-System/      ← this repo (public)
-└── slmos-reference-cache/     ← reference material (private)
-```
+In-tree citations use the form `~/slmos-ref/<vendor>/<filename>:<line>`. Vendor folders: `nvidia/`, `nouveau/`, `mesa/`, `hailo/`, `tegra-l4t/`, `linux/`, `rpi/`, `circle/`, `uboot/`, `kexec/`, `tf-a/`. SLM-OS-authored investigation notes and lab traces live under `derivatives/`.
 
-In-tree citations use the form `../slmos-reference-cache/<vendor>/<filename>:<line>`. Vendor folders: `nvidia/`, `nouveau/`, `mesa/`, `hailo/`, `tegra-l4t/`, `linux/`, `rpi/`, `circle/`, `uboot/`, `kexec/`. SLM-OS-authored investigation notes and lab traces live under `derivatives/`.
-
-Before launching a subagent to fetch source files from GitHub, check `../slmos-reference-cache/` first. If the file has been fetched before, use the local copy. If fetching new files, save them to the appropriate vendor folder there (not into the public repo). The private repo's `README.md` documents the layout.
+Before launching a subagent to fetch source files from GitHub, check `~/slmos-ref/` first. If the file has been fetched before, use the local copy. If fetching new files, save them to the appropriate vendor folder there (not into the public repo). `~/slmos-ref/README.md` documents the layout.
 
 Do NOT re-fetch the same GitHub raw URLs across multiple subagents in the same session. Fetch once, read from disk afterward.
 
-Do NOT add third-party source files to this public repo's `docs/` tree. The reference cache is intentionally private to keep the public repo's git history clean of vendored upstream material.
+Do NOT add third-party source files to this public repo's `docs/` tree. The reference cache is intentionally outside the repo to keep the public repo's git history clean of vendored upstream material.
 
 ---
 
@@ -434,4 +439,4 @@ gh issue list --search "MPIDR"
 
 ---
 
-*Last updated: 11 April 2026*
+*Last updated: 9 May 2026*

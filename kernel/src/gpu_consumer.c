@@ -125,7 +125,7 @@ int gpu_consumer_set(enum gpu_consumer c, bool enabled,
      *
      *   eviction:  SCAFFOLDED ONLY. The eviction trait now exposes
      *              `EvictionPolicy::has_gpu_backend()` (see
-     *              docs/specs/gpu-policy-models.md PR-4) and the
+     *              docs/design/gpu-policy-models.md PR-4) and the
      *              Rust→C trampoline `eviction_active_policy_has_gpu_backend`
      *              scans both pools. Every shipped policy
      *              (LRU/LFU/ARC/CACHEUS/MLP/XGBoost) returns false

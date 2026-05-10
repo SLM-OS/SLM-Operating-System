@@ -188,7 +188,7 @@ runner publishes on `/slm/done`.
 | `runtime/src/slm/decoder.rs` | Rust-side prefill + decode loop |
 | `runtime/src/msg_router.rs` | Topic router driving `/slm/prompt` -> `/slm/token` -> `/slm/done` |
 
-See [`docs/specs/slm-integration.md`](../specs/slm-integration.md)
+See [`docs/design/slm-integration.md`](../design/slm-integration.md)
 "Component Integration" for the design rationale and
 [`docs/plans/slm-integration-plan.md`](../plans/slm-integration-plan.md)
 M8 for the delivery context.

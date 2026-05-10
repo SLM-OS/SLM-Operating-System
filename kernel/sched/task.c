@@ -12,6 +12,10 @@
 #include "cache.h"
 #include "ncmem.h"
 #include "arch.h"
+#if !defined(PLATFORM_X86_64)
+#include "vmm.h"
+#include "elf.h"
+#endif
 #include <stddef.h>
 
 /* Task table - NC on Pi 5, BSS fallback otherwise */
@@ -134,10 +138,11 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
     {
         uint64_t _mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(_mpidr));
-        /* Pi 5: CPU index in Aff1 (bits[15:8]), QEMU: Aff0 (bits[7:0]).
-         * OR gives correct index when only one field is non-zero. */
-        uint32_t _cpu = (_mpidr & 0xFF) | ((_mpidr >> 8) & 0xFF);
-        *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xDD;
+        /* cpu_logical_map[] lookup — correct on every platform incl.
+         * Jetson dual-cluster (#647). */
+        int _cpu = cpu_logical_id(_mpidr);
+        if (_cpu >= 0 && _cpu < (int)MAX_CPUS)
+            *(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + _cpu * 4) = 0xDD;
     }
 #endif
 
@@ -154,8 +159,9 @@ void task_entry_trampoline(uint64_t entry_addr, uint64_t arg_addr)
         extern volatile int preempt_disabled[];
         uint64_t mpidr;
         __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-        uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
-        if (hw_cpu < MAX_CPUS) {
+        /* cpu_logical_map[] lookup — Jetson dual-cluster safe (#647). */
+        int hw_cpu = cpu_logical_id(mpidr);
+        if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS) {
             preempt_disabled[hw_cpu] = 0;
         }
         __asm__ volatile("dsb sy" ::: "memory");
@@ -249,6 +255,18 @@ struct task *task_alloc(const char *name, uint8_t priority)
     /* No cleanup callback by default */
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
+
+    /* User-mode defaults — task_create_user overrides is_user +
+     * user_entry; #697 PR-3 will populate user_l1_pa. Explicit init
+     * guards against stale-slot reuse: alloc_task_slot may return a
+     * slot whose previous owner was an EL0 task. */
+    task->is_user = 0;
+    task->user_entry = NULL;
+    task->user_l1_pa = 0;
+    task->user_stack_top = 0;
+    task->user_stack_phys = 0;
+    task->user_va_next = 0;
+    task->user_asid = 0;
 
     DEBUG_PRINT("Allocated task '%s' (id=%u, priority=%u)",
                 task->name, task->id, task->priority);
@@ -369,6 +387,17 @@ struct task *task_create_with_priority(const char *name, task_entry_t entry,
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
 
+    /* User-mode defaults — task_create_user overrides is_user +
+     * user_entry; #697 PR-3 will populate user_l1_pa. Explicit init
+     * guards against stale-slot reuse. */
+    task->is_user = 0;
+    task->user_entry = NULL;
+    task->user_l1_pa = 0;
+    task->user_stack_top = 0;
+    task->user_stack_phys = 0;
+    task->user_va_next = 0;
+    task->user_asid = 0;
+
     /* Clean the context struct to PoC so a secondary CPU can read it
      * during switch_to(). Without SMPEN, task_create's writes to
      * context.sp, context.x30, etc. stay in this CPU's L1 cache.
@@ -427,13 +456,17 @@ extern void user_task_enter(void *entry, void *stack_top, void *arg);
 static void user_task_wrapper(void *arg)
 {
     struct task *t = task_current();
-    if (!t || !t->user_entry) {
+    if (!t || !t->user_entry || !t->user_stack_top) {
         task_exit();
         return;
     }
 
-    /* ERET to EL0 — does not return */
-    user_task_enter((void *)(uintptr_t)t->user_entry, t->stack_top, arg);
+    /* ERET to EL0 — does not return. SP_EL0 = the per-task EL0 stack
+     * top (mapped into the per-task L1 with VMM_FLAG_USER), NOT the
+     * kernel stack at t->stack_top — EL0 cannot access kernel VAs. */
+    user_task_enter((void *)(uintptr_t)t->user_entry,
+                    (void *)(uintptr_t)t->user_stack_top,
+                    arg);
 
     /* Should never reach here */
     task_exit();
@@ -445,17 +478,202 @@ static void user_task_wrapper(void *arg)
  * The task starts in kernel mode (via task_entry_wrapper) then
  * transitions to EL0 via ERET. Syscalls (SVC #0) return to EL1.
  */
+/* Linker-defined .text.user range (#697 PR-4). The section holds the
+ * EL0-runnable code+rodata pages; task_create_user maps PA→user VA at
+ * USER_TEXT_VA so the ERET target lands inside the user window. */
+extern char __text_user_start[];
+extern char __text_user_end[];
+
 struct task *task_create_user(const char *name, task_entry_t user_entry,
                               void *arg, uint8_t priority)
 {
-    /* Create a kernel task that runs the user_task_wrapper */
+    /* Allocate the per-task L1 page table BEFORE the task slot. If the
+     * allocation fails we never publish a half-initialized task; if the
+     * task allocation fails we tear the L1 back down on the same path.
+     * vmm_create_user_l1 mirrors the boot L1's kernel entries (L1[0..255])
+     * and zeros the user window (L1[256..511]); subsequent user mappings
+     * land in this L1 without touching the kernel's. */
+    uint64_t user_l1_pa = 0;
+    if (vmm_create_user_l1(&user_l1_pa) != 0) {
+        ERROR("task_create_user: vmm_create_user_l1 failed");
+        return NULL;
+    }
+
+    uint16_t user_asid = vmm_alloc_asid();
+    if (!user_asid) {
+        ERROR("task_create_user: ASID pool exhausted");
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+
+    /* Map every 4 KB page of .text.user into the per-task L1 at
+     * USER_TEXT_VA, RX user. Multiple user tasks share the same backing
+     * pages (the section is read-only and execute-only at EL0), so no
+     * copy is needed. */
+    uintptr_t text_user_kva = (uintptr_t)__text_user_start;
+    size_t text_user_bytes = (size_t)(__text_user_end - __text_user_start);
+    if ((text_user_kva & (PAGE_SIZE - 1)) != 0 ||
+        (text_user_bytes & (PAGE_SIZE - 1)) != 0 ||
+        text_user_bytes == 0) {
+        ERROR("task_create_user: .text.user is not page-aligned/sized "
+              "(start=0x%lx, size=0x%zx)", text_user_kva, text_user_bytes);
+        vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
+        return NULL;
+    }
+    for (size_t off = 0; off < text_user_bytes; off += PAGE_SIZE) {
+        uint64_t pa = (uint64_t)text_user_kva + off;
+        uint64_t va = USER_TEXT_VA + off;
+        if (vmm_user_map_page(user_l1_pa, va, pa,
+                              VMM_FLAGS_USER_CODE) != 0) {
+            ERROR("task_create_user: failed to map .text.user page "
+                  "VA=0x%lx PA=0x%lx", va, pa);
+            vmm_destroy_user_l1(user_l1_pa);
+            vmm_free_asid(user_asid);
+            return NULL;
+        }
+    }
+
+    /* Allocate a single 4 KB EL0 stack page from PMM and map it RW
+     * user at USER_STACK_PAGE_VA. Per-task; not shared. The PMM_OWNED
+     * flag tells vmm_destroy_user_l1 to free this leaf when the task
+     * is destroyed — no explicit user_stack_phys tracking needed. */
+    void *user_stack_page = pmm_alloc_pages(1);
+    if (!user_stack_page) {
+        ERROR("task_create_user: failed to allocate user stack page");
+        vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
+        return NULL;
+    }
+    if (vmm_user_map_page(user_l1_pa, USER_STACK_PAGE_VA,
+                          (uint64_t)(uintptr_t)user_stack_page,
+                          VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED) != 0) {
+        ERROR("task_create_user: failed to map user stack page");
+        pmm_free_pages(user_stack_page, 1);
+        vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
+        return NULL;
+    }
+
+    /* Translate the linker-resolved kernel VA of `user_entry` to its
+     * user VA inside the mapped .text.user window. Out-of-range entries
+     * fall through unchanged — that supports unit tests that pass a
+     * kernel-only stub (e.g. task_exit) and immediately TERMINATE the
+     * task without ever ERETing to EL0. */
+    uintptr_t entry_kva = (uintptr_t)user_entry;
+    uint64_t entry_va;
+    if (entry_kva >= text_user_kva && entry_kva < text_user_kva + text_user_bytes) {
+        entry_va = USER_TEXT_VA + (entry_kva - text_user_kva);
+    } else {
+        entry_va = entry_kva;
+    }
+
+    /* Create the kernel-side task slot last. If alloc fails we tear
+     * down everything we've built up to this point. */
     struct task *task = task_create_with_priority(name, user_task_wrapper,
                                                    arg, priority);
-    if (!task) return NULL;
+    if (!task) {
+        pmm_free_pages(user_stack_page, 1);
+        vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
+        return NULL;
+    }
 
-    /* Mark as user-mode and store the real EL0 entry point */
+    /* Mark as user-mode and stash the per-task address-space state.
+     * No scheduler hand-off has happened yet (caller is responsible
+     * for `scheduler_add_task`), so these stores can't race with
+     * schedule() picking the task. */
     task->is_user = 1;
-    task->user_entry = user_entry;
+    task->user_entry = (void (*)(void *))(uintptr_t)entry_va;
+    task->user_l1_pa = user_l1_pa;
+    task->user_stack_top = USER_STACK_TOP;
+    task->user_stack_phys = (uint64_t)(uintptr_t)user_stack_page;
+    task->user_va_next = USER_MMAP_VA_START;
+    task->user_asid = user_asid;
+
+    return task;
+}
+
+/*
+ * Create a user-mode task from a static ARM64 ELF blob.
+ *
+ * Sibling of task_create_user. Differences:
+ *   - text/rodata/data come from PT_LOAD segments mapped by
+ *     elf_load_user (each page PMM_OWNED), not the linker's
+ *     `.text.user` window.
+ *   - the user stack lives at USER_ELF_STACK_PAGE_VA (just below
+ *     the mmap window) so it cannot collide with multi-page ELF
+ *     segments. user_stack_top mirrors that VA.
+ *   - the entry point is whatever ELF e_entry pointed at, used as
+ *     the ERET target directly (no kernel→user VA translation).
+ */
+struct task *task_create_user_elf(const char *name,
+                                  const void *blob, size_t blob_len,
+                                  uint8_t priority)
+{
+    if (!blob || blob_len == 0) {
+        return NULL;
+    }
+
+    uint64_t user_l1_pa = 0;
+    if (vmm_create_user_l1(&user_l1_pa) != 0) {
+        ERROR("task_create_user_elf: vmm_create_user_l1 failed");
+        return NULL;
+    }
+
+    uint16_t user_asid = vmm_alloc_asid();
+    if (!user_asid) {
+        ERROR("task_create_user_elf: ASID pool exhausted");
+        vmm_destroy_user_l1(user_l1_pa);
+        return NULL;
+    }
+
+    uint64_t entry_va = 0;
+    int rc = elf_load_user(blob, blob_len, user_l1_pa, &entry_va);
+    if (rc != ELF_OK) {
+        ERROR("task_create_user_elf: elf_load_user failed: %s",
+              elf_strerror(rc));
+        vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
+        return NULL;
+    }
+
+    /* Allocate the EL0 stack page and map it RW-user at the ELF
+     * stack VA. PMM_OWNED so vmm_destroy_user_l1 reclaims it
+     * alongside the ELF segments at task teardown. */
+    void *user_stack_page = pmm_alloc_pages(1);
+    if (!user_stack_page) {
+        ERROR("task_create_user_elf: failed to allocate user stack page");
+        vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
+        return NULL;
+    }
+    if (vmm_user_map_page(user_l1_pa, USER_ELF_STACK_PAGE_VA,
+                          (uint64_t)(uintptr_t)user_stack_page,
+                          VMM_FLAGS_USER_DATA | VMM_FLAG_PMM_OWNED) != 0) {
+        ERROR("task_create_user_elf: failed to map user stack page");
+        pmm_free_pages(user_stack_page, 1);
+        vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
+        return NULL;
+    }
+
+    struct task *task = task_create_with_priority(name, user_task_wrapper,
+                                                   NULL, priority);
+    if (!task) {
+        pmm_free_pages(user_stack_page, 1);
+        vmm_destroy_user_l1(user_l1_pa);
+        vmm_free_asid(user_asid);
+        return NULL;
+    }
+
+    task->is_user = 1;
+    task->user_entry = (void (*)(void *))(uintptr_t)entry_va;
+    task->user_l1_pa = user_l1_pa;
+    task->user_stack_top = USER_ELF_STACK_TOP;
+    task->user_stack_phys = (uint64_t)(uintptr_t)user_stack_page;
+    task->user_va_next = USER_MMAP_VA_START;
+    task->user_asid = user_asid;
 
     return task;
 }
@@ -608,6 +826,9 @@ void task_destroy(struct task *task)
     str_copy(task_name, task->name, TASK_NAME_LEN);
     task_cleanup_t cleanup = task->cleanup;
     void *cleanup_arg = task->cleanup_arg;
+    uint64_t user_l1_pa = task->user_l1_pa;
+    uint64_t user_stack_phys = task->user_stack_phys;
+    uint16_t user_asid = task->user_asid;
 
     /* Clear task slot (marks as free: id == 0) */
     task->id = 0;
@@ -616,6 +837,13 @@ void task_destroy(struct task *task)
     task->stack_top = NULL;
     task->cleanup = NULL;
     task->cleanup_arg = NULL;
+    task->is_user = 0;
+    task->user_entry = NULL;
+    task->user_l1_pa = 0;
+    task->user_stack_top = 0;
+    task->user_stack_phys = 0;
+    task->user_va_next = 0;
+    task->user_asid = 0;
 
     /* Bump the slot generation (#139) so any still-cached captures in
      * per-CPU steal deques from the previous life of this slot will
@@ -648,6 +876,29 @@ void task_destroy(struct task *task)
         size_t stack_pages = STACK_SIZE / 4096;
         pmm_free_pages(stack, stack_pages);
     }
+
+#if !defined(PLATFORM_X86_64)
+    /* Free the per-task L1, all user-region L2/L3 sub-tables, and
+     * any L3 leaf pages flagged VMM_FLAG_PMM_OWNED — that's the EL0
+     * stack page allocated in task_create_user, plus any pages the
+     * task mapped via mmap-style helpers. .text.user pages (kernel-
+     * image PA, not PMM-owned) are left alone. */
+    if (user_l1_pa) {
+        vmm_destroy_user_l1(user_l1_pa);
+    }
+    /* Free the ASID after destroying the L1 — vmm_destroy_user_l1
+     * doesn't touch TTBR0 (it just walks the L1 tree freeing pages),
+     * so any other CPU that might still be running this task is the
+     * scheduler's concern, not ours. The ASID-recycle TLB flush
+     * happens at vmm_alloc_asid time when the slot is reused. */
+    if (user_asid) {
+        vmm_free_asid(user_asid);
+    }
+    (void)user_stack_phys;  /* now reclaimed by vmm_destroy_user_l1 */
+#else
+    (void)user_l1_pa;
+    (void)user_stack_phys;
+#endif
 
     /* Note: DEBUG_PRINT removed here to avoid output interleaving issues
      * during test runs with concurrent task destruction across multiple CPUs.

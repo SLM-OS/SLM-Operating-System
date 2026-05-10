@@ -17,7 +17,7 @@
  *
  * Real text generation (non-empty prompts, multi-token streaming) is
  * exercised end-to-end in the integration deploy path documented in
- * docs/specs/slm-integration.md once M5.3 plumbs real weights.
+ * docs/design/slm-integration.md once M5.3 plumbs real weights.
  */
 
 #include "unity.h"

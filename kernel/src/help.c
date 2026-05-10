@@ -425,6 +425,50 @@ static const struct help_entry help_entries[] = {
         "  - Task name\n"
     ),
 
+    HELP_TEXT("usertest",
+        "usertest - Run the EL0 smoke task (#697 PR-4)\n"
+        "\n"
+        "Usage:\n"
+        "  usertest\n"
+        "\n"
+        "Creates a user-mode (EL0) task whose entry is `user_smoke_main`\n"
+        "in .text.user, runs it on the per-task TTBR0_EL1 from PR-3, and\n"
+        "waits up to 1 s for it to terminate. The task prints\n"
+        "\"[USERTEST] hello\" via SYS_LOG and exits via SYS_EXIT.\n"
+        "\n"
+        "Used to verify the EL1 -> EL0 -> EL1 round-trip end-to-end.\n"
+    ),
+
+    HELP_TEXT("mmaptest",
+        "mmaptest - Run the EL0 sys_mmap/munmap smoke task\n"
+        "\n"
+        "Usage:\n"
+        "  mmaptest\n"
+        "\n"
+        "Creates a user-mode (EL0) task that calls sys_mmap to allocate\n"
+        "a single anonymous RW page, writes a sentinel through the user\n"
+        "VA, reads it back, then calls sys_munmap. Logs\n"
+        "\"[MMAPTEST] mmap+write+read+munmap ok\" on success.\n"
+        "\n"
+        "Used to verify the dynamic-user-memory path end-to-end.\n"
+    ),
+
+    HELP_TEXT("userelf",
+        "userelf - Run the embedded EL0 hello ELF\n"
+        "\n"
+        "Usage:\n"
+        "  userelf\n"
+        "\n"
+        "Loads a static ARM64 ELF (built from user/hello and embedded\n"
+        "in the kernel image at link time) into a fresh per-task EL0\n"
+        "address space, then schedules and runs it. The program logs\n"
+        "\"[ELFTEST] hello from EL0 ELF\" via SYS_LOG and exits via\n"
+        "SYS_EXIT.\n"
+        "\n"
+        "Distinct from `elftest`, which exercises the kernel-mode ELF\n"
+        "loader (elf_create_task) used by the component framework.\n"
+    ),
+
     HELP_TEXT("cpu",
         "cpu - Show CPU status\n"
         "\n"
@@ -929,7 +973,7 @@ static const struct help_entry help_entries[] = {
         "MNIST GA10B fastpath (Jetson, with --no-gpu-suspend kexec). `sched`\n"
         "and `eviction` accept on/off but currently have no GPU forward pass\n"
         "wired — flipping them ON records intent and emits a\n"
-        "`note: scaffold only…` warning. See docs/specs/gpu-policy-models.md\n"
+        "`note: scaffold only…` warning. See docs/design/gpu-policy-models.md\n"
         "for the wiring plan.\n"
         "\n"
         "Usage on x86-64 (richer external command, registered via\n"

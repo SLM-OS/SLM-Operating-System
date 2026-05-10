@@ -20,7 +20,7 @@ demo target is **Qwen2.5-1.5B-Instruct** (Alibaba, Apache-2.0),
 quantized to Q4_K_M, with optional fallback to **Llama-3.2-1B-Instruct**
 (Meta, Llama-3.2 community license).
 
-See `docs/specs/slm-integration.md` for the full spec and
+See `docs/design/slm-integration.md` for the full spec and
 `docs/plans/slm-integration-plan.md` for the milestone breakdown.
 
 ---
@@ -78,7 +78,7 @@ Qwen2.5-1.5B-Q4_K_M needs ~1.0 GB for weights and ~230 MB for a
 The QEMU / Pi 5 / x86-64 defaults are tuned for the smaller Phase-5
 ONNX models. The KV-cache sub-pool overlaps the workspace allocator
 arithmetically (≥ 256 MB for KV against a 256 MB workspace pool) —
-the spec resolves this in `docs/specs/slm-integration.md` "Memory
+the spec resolves this in `docs/design/slm-integration.md` "Memory
 Plan" by carving the KV pool out of an extended workspace allocator
 when M5 lands; the `MODEL_MEM_WORKSPACE_MB` constant will grow at
 that point if needed.
@@ -183,7 +183,7 @@ slmos> slm load /mnt/files/qwen2.5-1.5b-instruct-q4_k_m.gguf
 [slm] loaded handle=0  qwen2  1.54 B params  weights=1014 MB  load=412 ms
 ```
 
-For the full launch / prompt flow, see `docs/specs/slm-integration.md`
+For the full launch / prompt flow, see `docs/design/slm-integration.md`
 §"CLI Surface (Shell)". For the spec memory plan, KV-cache sizing,
 and tensor-core utilization targets, see the rest of that document.
 
@@ -205,7 +205,7 @@ GPU kexec-handoff bridge) is working.
 
 ## See also
 
-- `docs/specs/slm-integration.md` — full spec
+- `docs/design/slm-integration.md` — full spec
 - `docs/plans/slm-integration-plan.md` — milestone breakdown
 - `docs/tutorials/models.md` — Phase-5 ONNX (vision) path
 - `docs/model-memory.md` — pool layout

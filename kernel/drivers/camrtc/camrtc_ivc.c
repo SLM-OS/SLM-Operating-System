@@ -13,7 +13,7 @@
 #include "platform.h"
 #include "timer.h"
 
-/* ---- Queue header layout (matches ../slmos-reference-cache/linux/linux-tegra-ivc.c) ---- */
+/* ---- Queue header layout (matches ~/slmos-ref/linux/linux-tegra-ivc.c) ---- */
 
 /* TX half (writer-owned): count + state + 56 bytes of pad. */
 #define IVC_HDR_TX_COUNT_OFF      0u
@@ -39,7 +39,7 @@
 /* SS register window for the camera-RTCPU HSP block. SS[0] base lives
  * at HSP_BASE + 0x10000 (common region) + num_sm * 0x8000 (8 SMs per
  * `rcediag` DIMENSIONING dump = 0x40000) = HSP_BASE + 0x50000.
- * Per-SS register offsets (from ../slmos-reference-cache/linux/linux-tegra-hsp.c):
+ * Per-SS register offsets (from ~/slmos-ref/linux/linux-tegra-hsp.c):
  *   +0x00 SHRD_SEM_STATUS
  *   +0x04 SHRD_SEM_SET (write-1-to-set)
  *   +0x08 SHRD_SEM_CLR (write-1-to-clear) */
@@ -139,7 +139,7 @@ static void byte_zero(volatile uint8_t *dst, uint32_t n)
 
 /* ---- Notification: wake RCE for `group`. ----
  *
- * Mirrors `camrtc_hsp_vm_group_ring` in `../slmos-reference-cache/
+ * Mirrors `camrtc_hsp_vm_group_ring` in `~/slmos-ref/
  * l4t-rtcpu-hsp-combo.c:252`: write the group bit shifted into the
  * VM→FW half of SS[0], then send a CAMRTC_HSP_IRQ mailbox message
  * (which `camrtc_send_msg` would otherwise drain as unidirectional).
@@ -155,7 +155,7 @@ static void notify_rce(uint32_t group)
     mmio_write32(HSP_SS0_BASE + HSP_SS_SHRD_SEM_SET, bits);
 
     /* IRQ mailbox kick. Fire-and-forget; param=1 is what L4T uses
-     * (`../slmos-reference-cache/tegra-l4t/l4t-rtcpu-hsp-combo.c:268`). The kick wakes
+     * (`~/slmos-ref/tegra-l4t/l4t-rtcpu-hsp-combo.c:268`). The kick wakes
      * RCE's mailbox-FULL ISR which then reads SS[0] to learn which
      * IVC group has new traffic — without this the SS_SET write
      * sits unread until RCE's next unrelated wake. */

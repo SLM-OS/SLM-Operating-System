@@ -23,7 +23,7 @@
  * `PLATFORM_RASPI5`-only — hardware verification of the round-trip
  * is Stage 5 of the dynamic-kernel-replace plan (#371).
  *
- * References (cached under ../slmos-reference-cache/):
+ * References (cached under ~/slmos-ref/):
  *   - linux-bcm2835-mailbox.c      (register layout, status bits)
  *   - linux-rpi-firmware.c         (property-channel consumer)
  *   - linux-bcm2712.dtsi           (mailbox node + soc ranges)

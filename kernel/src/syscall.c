@@ -13,6 +13,9 @@
 #include "uart.h"
 #include "timer.h"
 #include "slm_ffi.h"
+#include "vmm.h"
+#include "pmm.h"
+#include "string.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -200,6 +203,140 @@ static int64_t sys_log_handler(struct trap_frame *frame)
     return 0;
 }
 
+/* SYS_MMAP: Allocate and map zero-filled anonymous user pages.
+ *
+ *   x0 = hint (advisory; ignored today)
+ *   x1 = len in bytes (rounded up to PAGE_SIZE)
+ *   x2 = prot bits (PROT_READ | PROT_WRITE | PROT_EXEC)
+ *   x3 = flags (reserved; today implicitly MAP_ANONYMOUS)
+ *
+ * Returns the user VA of the new mapping in x0, or -1 on failure
+ * (overlong len, PMM exhausted, user-VA window exhausted, called
+ * from a kernel-mode task). Pages are zero-filled before mapping.
+ *
+ * Allocation is via the per-task `user_va_next` bump cursor. Fresh
+ * VA never aliases prior TLB entries from a prior munmap, so no
+ * TLB invalidation is needed at install time.
+ */
+static int64_t sys_mmap_handler(struct trap_frame *frame)
+{
+    (void)frame->x0;   /* hint — ignored */
+    uint64_t len    = frame->x1;
+    uint32_t prot   = (uint32_t)frame->x2;
+    uint32_t flags  = (uint32_t)frame->x3;
+    (void)flags;       /* MAP_ANONYMOUS implicit */
+
+    /* Reject zero / absurdly-large requests; cap guards the page-
+     * count arithmetic below from integer-overflow shenanigans. */
+    if (len == 0 || len > SYS_MMAP_MAX_LEN_BYTES) {
+        return -1;
+    }
+
+    struct task *t = task_current();
+    if (!t || !t->is_user || !t->user_l1_pa) {
+        return -1;
+    }
+
+    uint64_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t total = pages * PAGE_SIZE;
+
+    /* user_va_next is monotonic; cursor exhaustion = -1. */
+    if (t->user_va_next < USER_MMAP_VA_START ||
+        t->user_va_next + total > USER_VA_LIMIT) {
+        return -1;
+    }
+    uint64_t base_va = t->user_va_next;
+
+    /* Build the per-page VMM flags from the user's prot bits. PMM_OWNED
+     * tells vmm_destroy_user_l1 (and vmm_user_unmap_page) to reclaim
+     * the leaf when the mapping is torn down. */
+    uint32_t vmm_flags = VMM_FLAG_USER | VMM_FLAG_PMM_OWNED;
+    if (prot & PROT_READ)  vmm_flags |= VMM_FLAG_READ;
+    if (prot & PROT_WRITE) vmm_flags |= VMM_FLAG_WRITE;
+    if (prot & PROT_EXEC)  vmm_flags |= VMM_FLAG_EXEC;
+
+    /* Allocate + map each page. On any failure mid-loop, roll back
+     * by unmapping the partial range — vmm_user_unmap_page sees the
+     * PMM_OWNED bit and frees the leaf back to PMM. */
+    for (uint64_t i = 0; i < pages; i++) {
+        void *page = pmm_alloc_pages(1);
+        if (!page) {
+            for (uint64_t j = 0; j < i; j++) {
+                vmm_user_unmap_page(t->user_l1_pa, base_va + j * PAGE_SIZE);
+            }
+            return -1;
+        }
+        memset(page, 0, PAGE_SIZE);
+
+        if (vmm_user_map_page(t->user_l1_pa, base_va + i * PAGE_SIZE,
+                              (uint64_t)(uintptr_t)page, vmm_flags) != 0) {
+            pmm_free_pages(page, 1);
+            for (uint64_t j = 0; j < i; j++) {
+                vmm_user_unmap_page(t->user_l1_pa, base_va + j * PAGE_SIZE);
+            }
+            return -1;
+        }
+    }
+
+    t->user_va_next = base_va + total;
+    return (int64_t)base_va;
+}
+
+/* SYS_MUNMAP: Tear down pages previously returned by sys_mmap.
+ *
+ *   x0 = addr (must be page-aligned, in the mmap window)
+ *   x1 = len in bytes (rounded up to PAGE_SIZE)
+ *
+ * Returns 0 on success, -1 on validation failure. Each page is
+ * unmapped and its PMM-owned leaf freed via vmm_user_unmap_page,
+ * then the TLB is invalidated for the range so a subsequent EL0
+ * access faults instead of hitting a stale entry.
+ */
+static int64_t sys_munmap_handler(struct trap_frame *frame)
+{
+    uint64_t addr = frame->x0;
+    uint64_t len  = frame->x1;
+
+    if (len == 0 || len > SYS_MMAP_MAX_LEN_BYTES) {
+        return -1;
+    }
+    if ((addr & (PAGE_SIZE - 1)) != 0) {
+        return -1;
+    }
+
+    struct task *t = task_current();
+    if (!t || !t->is_user || !t->user_l1_pa) {
+        return -1;
+    }
+
+    /* Only the mmap window is munmap-able; .text.user / stack are
+     * managed by task_create_user / task_destroy. */
+    if (addr < USER_MMAP_VA_START || addr >= USER_VA_LIMIT) {
+        return -1;
+    }
+    uint64_t pages = (len + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (addr + pages * PAGE_SIZE > USER_VA_LIMIT) {
+        return -1;
+    }
+
+    /* Best-effort tear-down: continue past per-page failures so a
+     * partially-mapped range still has its installed pages freed,
+     * and report a single -1 on any failure. The caller cannot
+     * recover per-page rc anyway. */
+    int rc = 0;
+    for (uint64_t i = 0; i < pages; i++) {
+        if (vmm_user_unmap_page(t->user_l1_pa, addr + i * PAGE_SIZE) != 0) {
+            rc = -1;
+        }
+    }
+
+    /* The task's L1 is the active TTBR0_EL1 right now (we got here
+     * via SVC from EL0), so stale entries would shadow the unmap.
+     * Flush the range. */
+    vmm_invalidate_tlb_range(addr, addr + pages * PAGE_SIZE);
+    return rc;
+}
+
 /* SYS_TOUCH_BLOCK: Touch a model memory block (update LRU timestamp).
  * x0 = block_index (uint16), x1 = pool_id (uint8), x2 = generation (uint8).
  * Packed into a ModelHandle and forwarded to rust_model_touch.
@@ -237,6 +374,8 @@ static syscall_handler_t syscall_table[SYS_MAX] = {
     [SYS_SLEEP] = sys_sleep_handler,
     [SYS_LOG]         = sys_log_handler,
     [SYS_TOUCH_BLOCK] = sys_touch_block_handler,
+    [SYS_MMAP]   = sys_mmap_handler,
+    [SYS_MUNMAP] = sys_munmap_handler,
 };
 
 void syscall_dispatch(struct trap_frame *frame)

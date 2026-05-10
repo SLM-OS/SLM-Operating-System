@@ -37,7 +37,7 @@
  * Linux's kexec `.shutdown` callback for `tegra-camera-rtcpu`
  * sends `CAMRTC_HSP_BYE` to RCE and then asserts `RESET_RCE_ALL`
  * + disables the rce clocks (cached at
- * `../slmos-reference-cache/tegra-l4t/l4t-tegra-camera-rtcpu.c:893,1402`). Even though
+ * `~/slmos-ref/tegra-l4t/l4t-tegra-camera-rtcpu.c:893,1402`). Even though
  * `R5_CTRL_0.FWLOADDONE` stays set, R5 is clock-gated and the
  * HSP-VM ISR is dead. `camrtc_init` re-engages RCE by mirroring
  * `tegra_camrtc_poweron` (RCE clocks on, `RESET_RCE_ALL`
@@ -85,7 +85,7 @@ int camrtc_init(void);
 /*
  * CAMRTC_HSP_MSG opcode subset that callers outside the driver
  * actually use. Full set (and protocol comments) lives in
- * `../slmos-reference-cache/tegra-l4t/l4t-camrtc-commands.h:42-77`. Driver-internal
+ * `~/slmos-ref/tegra-l4t/l4t-camrtc-commands.h:42-77`. Driver-internal
  * constants for HELLO / PROTOCOL / RESUME stay file-local.
  */
 #define CAMRTC_HSP_IRQ            0x00u

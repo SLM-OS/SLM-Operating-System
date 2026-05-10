@@ -2,7 +2,7 @@
  * hailo_control.h — Hailo firmware control-channel wire format.
  *
  * Ported from HailoRT's common/include/control_protocol.h (MIT
- * license; see ../slmos-reference-cache/hailo/hailort-control-protocol.h). We
+ * license; see ~/slmos-ref/hailo/hailort-control-protocol.h). We
  * carry only the subset the kernel actually sends today: IDENTIFY
  * for version-probe (#281 tier-1 milestone), WRITE/READ_MEMORY
  * and CONFIG_STREAM / OPEN_STREAM for the Phase 5.2 CCW streaming
@@ -135,7 +135,7 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS = 0x47,
     HAILO_CONTROL_OPCODE_GET_HW_CONSTS                        = 0x48,
     HAILO_CONTROL_OPCODE_CHANGE_HW_INFER_STATUS               = 0x4A,
-    /* Full table in ../slmos-reference-cache/hailo/hailort-control-protocol.h. */
+    /* Full table in ~/slmos-ref/hailo/hailort-control-protocol.h. */
 };
 
 /* CHANGE_HW_INFER_STATUS state values (mirrors HailoRT
@@ -494,7 +494,7 @@ int hailo_control_config_stream_pcie(
  *
  * IMPORTANT: MAX_CFG_CHANNELS is 4 in firmware v4.23 (running on the
  * AI HAT+ in the lab), NOT the 24 the cached reference header
- * ../slmos-reference-cache/hailo/hailort-control-protocol.h shows for newer releases.
+ * ~/slmos-ref/hailo/hailort-control-protocol.h shows for newer releases.
  * The application_header_t wire size is 32 bytes on v4.23; firmware
  * rejects any other length with
  * CONTROL_PROTOCOL_STATUS_INVALID_CONTEXT_SWITCH_APP_HEADER_LENGTH
@@ -800,16 +800,17 @@ int hailo_control_arm_irq_masks(void);
  * next call to hailo_control_arm_irq_masks runs the full re-arm
  * sequence (which currently early-returns when the flag is set).
  * Linux disables IMASK after BOOT_IRQ and re-enables on first open();
- * we call this from hailo_boot() right after the BOOT_IRQ ack, and
- * control_post_boot_init re-arms on the first FW_CONTROL RPC.
+ * SLM-OS calls this from hailo_boot() right after the BOOT_IRQ ack,
+ * and control_post_boot_init re-arms on the first FW_CONTROL RPC.
  *
- * Hypothesis: leaving IMASK armed continuously across the post-boot/
- * pre-configure idle window lets our MSI handler W1C fw-internal
- * bookkeeping bits (CPU_ECC notifications, etc.) during a phase where
- * fw expects host quiet. If true, disarming should let the SAGE1_ISP
- * ECC events (memory_bitmap=0x00001000) settle the way they do on
- * Linux. Returns HAILO_OK on success, or HAILO_ERR_NODEV if the
- * platform shim isn't wired up (e.g., test stub).
+ * Also used under HAILO_IRQ_CYCLE_AT_BOOT to wrap a disable→re-enable
+ * cycle around the post-boot D3hot transition (replaces the older
+ * hailo_control_disable_imask name from PR #695). Per-channel SRC/DST
+ * IRQ masks are NOT cleared here — Linux's disable path leaves them
+ * armed too.
+ *
+ * Returns HAILO_OK on success, or HAILO_ERR_NODEV if the platform
+ * shim isn't wired up (e.g., test stub).
  */
 int hailo_control_disarm_irq_masks(void);
 
@@ -827,14 +828,15 @@ int hailo_control_disarm_irq_masks(void);
 void hailo_control_dump_irq_state(const char *label);
 
 /*
- * #682 hyp-A (2026-05-08): CHANGE_HW_INFER_STATUS RPC. Targets CORE
- * CPU. Used by HailoRT's hw-only benchmark mode to start internal
- * inference (where fw generates synthetic input). We're trying it as
+ * #682 hyp-A (2026-05-08, disconfirmed): CHANGE_HW_INFER_STATUS RPC.
+ * Targets CORE CPU. Used by HailoRT's hw-only benchmark mode to start
+ * internal inference (where fw generates synthetic input). Tested as
  * a "wake up the DYNAMIC context's APPLICATION_CHANGE_INTERRUPT wait"
  * experiment — fw's pios_DYNAMIC.bin ends with action 0x15 (waiting
- * for an app-change signal) and our bar4 memscan shows fw is parked
- * there. If this RPC's processing satisfies the wait, we win. If
- * fw rejects or runs HW-only synthetic data, we still learn.
+ * for an app-change signal). RPC was rejected with status
+ * 0x400300ca/0x40000001; HW-only mode requires special HEF state not
+ * applicable to streaming inference. Kept as reference for the wire
+ * layout in case a future fw version honours it.
  *
  * `state`: HAILO_HW_INFER_STATE_START or _STOP.
  * `app_idx`: network group index (0 for our single-NG MNIST).

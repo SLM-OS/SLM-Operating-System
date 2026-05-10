@@ -15,8 +15,21 @@
 
 #if defined(__aarch64__)
 
+/*
+ * Every stub MUST be inlined into the calling user_smoke.c function.
+ * The compiler is otherwise free to outline `static inline` and place
+ * the resulting body in `.text` — a kernel-image VA that the per-task
+ * user L1 never maps. An EL0 caller would then fault on the first
+ * `bl <stub>` it issues. `always_inline` is load-bearing here, not a
+ * micro-optimisation. (Discovered the hard way when sys_exit got
+ * outlined post-mmap-stub addition and EL0 took an instruction abort
+ * mid-function.)
+ */
+#define SLMOS_USER_SYSCALL_INLINE \
+    static inline __attribute__((always_inline))
+
 /* Exit the current component */
-static inline void sys_exit(int code)
+SLMOS_USER_SYSCALL_INLINE void sys_exit(int code)
 {
     register uint64_t x0 __asm__("x0") = (uint64_t)(uint32_t)code;
     register uint64_t x8 __asm__("x8") = SYS_EXIT;
@@ -25,14 +38,14 @@ static inline void sys_exit(int code)
 }
 
 /* Yield the CPU */
-static inline void sys_yield(void)
+SLMOS_USER_SYSCALL_INLINE void sys_yield(void)
 {
     register uint64_t x8 __asm__("x8") = SYS_YIELD;
     __asm__ volatile("svc #0" :: "r"(x8) : "memory", "x0");
 }
 
 /* Sleep for the given number of milliseconds */
-static inline void sys_sleep(uint32_t ms)
+SLMOS_USER_SYSCALL_INLINE void sys_sleep(uint32_t ms)
 {
     register uint64_t x0 __asm__("x0") = (uint64_t)ms;
     register uint64_t x8 __asm__("x8") = SYS_SLEEP;
@@ -40,7 +53,7 @@ static inline void sys_sleep(uint32_t ms)
 }
 
 /* Log a string to the kernel UART */
-static inline void sys_log(const char *str, uint32_t len)
+SLMOS_USER_SYSCALL_INLINE void sys_log(const char *str, uint32_t len)
 {
     register uint64_t x0 __asm__("x0") = (uint64_t)str;
     register uint64_t x1 __asm__("x1") = (uint64_t)len;
@@ -49,7 +62,7 @@ static inline void sys_log(const char *str, uint32_t len)
 }
 
 /* Send a message to a topic */
-static inline int sys_send(const char *topic, const char *data, uint32_t len)
+SLMOS_USER_SYSCALL_INLINE int sys_send(const char *topic, const char *data, uint32_t len)
 {
     register uint64_t x0 __asm__("x0") = (uint64_t)topic;
     register uint64_t x1 __asm__("x1") = (uint64_t)data;
@@ -60,7 +73,7 @@ static inline int sys_send(const char *topic, const char *data, uint32_t len)
 }
 
 /* Receive a message */
-static inline int sys_recv(char *topic_out, char *buf, uint32_t len, uint32_t timeout_ms)
+SLMOS_USER_SYSCALL_INLINE int sys_recv(char *topic_out, char *buf, uint32_t len, uint32_t timeout_ms)
 {
     register uint64_t x0 __asm__("x0") = (uint64_t)topic_out;
     register uint64_t x1 __asm__("x1") = (uint64_t)buf;
@@ -71,8 +84,36 @@ static inline int sys_recv(char *topic_out, char *buf, uint32_t len, uint32_t ti
     return (int)(int64_t)x0;
 }
 
+/* Map anonymous user pages. Returns the user VA of the new mapping
+ * (cast to void *), or `(void *)-1` on failure. `len` is rounded up
+ * to PAGE_SIZE; pages are zero-filled. `hint` is currently advisory
+ * and ignored — the kernel picks a fresh VA from the per-task bump
+ * allocator. */
+SLMOS_USER_SYSCALL_INLINE void *sys_mmap(void *hint, uint64_t len, int prot, int flags)
+{
+    register uint64_t x0 __asm__("x0") = (uint64_t)hint;
+    register uint64_t x1 __asm__("x1") = len;
+    register uint64_t x2 __asm__("x2") = (uint64_t)(uint32_t)prot;
+    register uint64_t x3 __asm__("x3") = (uint64_t)(uint32_t)flags;
+    register uint64_t x8 __asm__("x8") = SYS_MMAP;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x8) : "memory");
+    return (void *)(uintptr_t)x0;
+}
+
+/* Unmap pages previously returned by sys_mmap. Returns 0 on success,
+ * -1 on failure (unaligned addr, addr outside the mmap window, or
+ * unmapped). */
+SLMOS_USER_SYSCALL_INLINE int sys_munmap(void *addr, uint64_t len)
+{
+    register uint64_t x0 __asm__("x0") = (uint64_t)addr;
+    register uint64_t x1 __asm__("x1") = len;
+    register uint64_t x8 __asm__("x8") = SYS_MUNMAP;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory");
+    return (int)(int64_t)x0;
+}
+
 /* Run inference on a loaded model */
-static inline int sys_infer(uint32_t model_idx, const void *input, uint32_t in_len,
+SLMOS_USER_SYSCALL_INLINE int sys_infer(uint32_t model_idx, const void *input, uint32_t in_len,
                             void *output, uint32_t out_len)
 {
     register uint64_t x0 __asm__("x0") = (uint64_t)model_idx;

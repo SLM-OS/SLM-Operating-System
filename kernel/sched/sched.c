@@ -23,6 +23,9 @@
 #include "cache.h"
 #include "ncmem.h"
 #include "preempt.h"
+#if !defined(PLATFORM_X86_64)
+#include "vmm.h"
+#endif
 #include "string.h"
 #include "runtime_model.h"
 #if CONFIG_WORK_STEALING
@@ -564,13 +567,14 @@ static void idle_task_func(void *arg)
 #if defined(SCHED_DEBUG_NC_TRACE) && defined(PLATFORM_HAS_NC_MEMORY)
         /* Belt-and-braces trace slot at a fixed NC address so early-
          * boot analysis can confirm the counter is wired up even
-         * before scheduler_init finishes. Pi 5: CPU index in Aff1
-         * (bits[15:8]), QEMU: Aff0 (bits[7:0]). */
+         * before scheduler_init finishes. cpu_logical_map[] lookup —
+         * Jetson dual-cluster safe (#647). */
         {
             uint64_t mpidr;
             __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
-            uint32_t hw_cpu = (mpidr & 0xFF) | ((mpidr >> 8) & 0xFF);
-            (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
+            int hw_cpu = cpu_logical_id(mpidr);
+            if (hw_cpu >= 0 && hw_cpu < (int)MAX_CPUS)
+                (*(volatile uint32_t *)(NC_MEM_BASE + NC_MEM_SIZE - 256 + hw_cpu * 4))++;
         }
 #endif
 
@@ -600,10 +604,44 @@ static void idle_task_func(void *arg)
         __asm__ volatile("msr daifclr, #3" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
         __asm__ volatile("wfi");
-#elif defined(SECONDARY_PREEMPT)
+#elif defined(SECONDARY_PREEMPT) && \
+      (!defined(PLATFORM_JETSON_ORIN_NANO) || defined(JETSON_HW_TICK))
+        /* Pi 5 always (#742 landed the BL31 routing fix), or Jetson
+         * when JETSON_HW_TICK=ON pairs with the patched BL31 from
+         * tools/tfa-patches/0004-*. Both: per-CPU CNTHP fires Group
+         * 1 NS IRQs at NS-EL2/VHE; daifclr unmasks I, WFI sleeps
+         * until the next tick. The ELR trampoline handles the
+         * switch_to-in-ISR problem on secondary CPUs. */
         __asm__ volatile("msr daifclr, #2" ::: "memory");
         __asm__ volatile("isb" ::: "memory");
         __asm__ volatile("wfi");
+#elif defined(PLATFORM_JETSON_ORIN_NANO)
+        /* Jetson without JETSON_HW_TICK (stock BL31): hardware timer
+         * IRQs do not deliver to EL1/EL2 because the GIC group/route
+         * is owned by EL3 firmware — see "ARM64 Hardware Timer IRQs"
+         * in kernel/CLAUDE.md. The Pi-5-equivalent SECONDARY_PREEMPT
+         * branch above would WFI here and never wake — when shell is
+         * the only ready task on CPU 0 and it calls task_sleep_ms,
+         * the shell blocks, idle takes over, WFI hangs forever
+         * waiting for an IRQ that never comes. Reproducer:
+         * `lua-admin -e slm.sleep(500)` on the serial console after
+         * a fresh kexec. Telnet "fixes" it because lwIP/net_pump
+         * activity yields on a secondary CPU, and *that* yield
+         * triggers coop_preempt_maybe_tick → scheduler_tick →
+         * task_wake_sleepers, which finds CPU 0's sleeper and wakes
+         * it.
+         *
+         * Fix: on CPU 0, skip the wait entirely and fall through to
+         * the post-loop yield(), which drives schedule() and fires
+         * coop_preempt_maybe_tick. Secondary CPUs still WFE — they're
+         * only wake-worthy when cross-CPU dispatch SEVs them, which
+         * is fine. The cost is CPU 0 burns power instead of sleeping;
+         * acceptable for stock-BL31 builds. The JETSON_HW_TICK build
+         * path above is the long-term answer (#380 / PR with
+         * tools/tfa-patches/0004-*). */
+        if (cpu_id() != 0) {
+            __asm__ volatile("wfe" ::: "memory");
+        }
 #else
         if (cpu_id() == 0) {
             __asm__ volatile("msr daifclr, #2" ::: "memory");
@@ -2153,6 +2191,25 @@ void schedule(void)
                   "current task's [stack_base, stack_top]");
         }
     }
+
+#if !defined(PLATFORM_X86_64)
+    /* TTBR0_EL1 management for user-task transitions (#697 PR-3 + PR-4).
+     *
+     *   user → user / kernel → user: write next's L1.
+     *   user → kernel : restore the boot L1 so the outgoing user L1
+     *     (which task_destroy may free) is no longer the walker's
+     *     active root. Without this, freeing the user L1 corrupts the
+     *     active translation tables on the same CPU.
+     *   kernel → kernel: leave TTBR0 alone (already boot L1).
+     *
+     * The swap runs under rq_lock_irqsave, so no other CPU (or this
+     * CPU) can observe a half-swapped state. */
+    if (next->is_user && next->user_l1_pa) {
+        vmm_user_addrspace_switch(next->user_l1_pa, next->user_asid);
+    } else if (current && current->is_user) {
+        vmm_user_addrspace_switch(vmm_boot_l1_pa(), VMM_KERNEL_ASID);
+    }
+#endif
 
     switch_to(current, next);
 

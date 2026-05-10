@@ -843,7 +843,7 @@ int slm_model_gpu_dispatch_enabled(uint32_t model_index);
  * `gpu use eviction on` accepts cleanly or with a "scaffold only"
  * warning. Today every shipped policy returns false; flipping
  * requires landing the matching `slm_gpu_run_eviction_inference`
- * dispatch — see `docs/specs/gpu-policy-models.md` PR-6.
+ * dispatch — see `docs/design/gpu-policy-models.md` PR-6.
  */
 bool eviction_active_policy_has_gpu_backend(void);
 
@@ -952,7 +952,7 @@ int slm_gpu_set_mnist_input(const void *bytes, size_t cap);
 int slm_gpu_set_mnist_input_fill(uint32_t value_bits, uint32_t n_floats);
 
 /*
- * Sched-MLP dispatch — PR-3 of docs/specs/gpu-policy-models.md.
+ * Sched-MLP dispatch — PR-3 of docs/design/gpu-policy-models.md.
  *
  * Runs the AI scheduler MLP forward pass on GA10B by dispatching
  * the 8-op pipeline staged by `scripts/gpu-kernel-sched-mlp.c`
@@ -1149,6 +1149,23 @@ extern int rust_slm_get_info(uint32_t index, SlmModelInfoC *info);
  * Number of currently-loaded SLMs.
  */
 extern uint32_t rust_slm_count(void);
+
+/*
+ * Set the GPU dispatch tier for an SLM op kind to Tier::Simt
+ * (#714 §B.2). Called once per successfully-probed op_kind from
+ * the kernel-side oplib_probe_run() after SASS pool staging; flips
+ * the matching TIER_TABLE entry in runtime/src/inference/gpu_slm.rs
+ * from the boot default Tier::Cpu so the SLM forward path routes
+ * the op through the GPU dispatcher.
+ *
+ * `op_kind` is one of the SLM_GPU_OP_* enum values defined in
+ * <gpu_handoff.h>. Values out of range (>= OpKind::COUNT == 8)
+ * return -1 without touching the table; valid values return 0.
+ *
+ * Lock-free (atomic store inside Rust). Safe to call from any
+ * context that can also call uart_printf().
+ */
+extern int slm_runtime_set_tier_simt(uint32_t op_kind);
 
 /*
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.

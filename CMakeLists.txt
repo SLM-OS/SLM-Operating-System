@@ -94,6 +94,33 @@ if(SECONDARY_PREEMPT)
                        "(only Pi 5 and Jetson use the ELR trampoline)")
     endif()
 endif()
+
+# Jetson hardware-tick mode — enables the per-CPU CNTHP path on Jetson
+# Orin Nano. Pairs with the patched BL31 from
+# tools/tfa-patches/0004-SLM-OS-Jetson-IRQ-routing-patches.patch which
+# promotes PPIs/SGIs to Group 1 NS in NVIDIA's downstream TF-A. Without
+# the patched BL31, this option produces a kernel that programs CNTHP
+# but never receives the IRQ — symptom is CPU 0 deadlock when shell
+# task_sleep_ms's, since the post-#739 yield-spin fallback (active
+# under stock BL31) gets bypassed.
+#
+# CMake default is OFF (safe for non-Jetson builds and for direct
+# CMake users on stock-BL31 dev kits). The build-system default for
+# `make kernel PLATFORM=JETSON_ORIN_NANO` is ON — driven from the
+# Makefile, which conditionally forwards `-DJETSON_HW_TICK=ON` for
+# the Jetson platform once #750 / #752 / #753 (NULL-bail + FP/SIMD
+# trap-frame save) landed. Stock-BL31 boards must override:
+#
+#   make kernel PLATFORM=JETSON_ORIN_NANO JETSON_HW_TICK=OFF
+option(JETSON_HW_TICK "Drive Jetson preemption via per-CPU CNTHP / PPI 26 (requires patched BL31)" OFF)
+if(JETSON_HW_TICK)
+    if(PLATFORM STREQUAL "JETSON_ORIN_NANO")
+        add_compile_definitions(JETSON_HW_TICK=1)
+    else()
+        message(STATUS "JETSON_HW_TICK=ON ignored on PLATFORM=${PLATFORM} "
+                       "(Jetson-only)")
+    endif()
+endif()
 # Pi 5 FIQ-routed timer (Phase 2 of issue #99): el1_fiq_handler dispatches
 # GICC_AIAR on IRQ 30 to timer_handler(), because non-secure IGROUPR writes
 # cannot promote Group 0 → Group 1 on this GICv2 and the timer therefore
@@ -131,6 +158,21 @@ endif()
 option(HAILO_D3HOT_AT_BOOT "Replicate Linux's D0->D3hot->D0 cycle after fw boot" ON)
 if(HAILO_D3HOT_AT_BOOT)
     add_compile_definitions(HAILO_D3HOT_AT_BOOT=1)
+endif()
+
+# Replicate Linux hailo_pcie's enable->fw_load->DISABLE->...->enable
+# IRQ-mask cycle around the post-boot D3hot transition. SLM-OS used to
+# pre-arm IMASK_HOST + per-channel SRC/DST masks before the fw trigger
+# and leave them armed forever; Linux instead writes 0 to IMASK_HOST
+# after load_firmware completes, then re-arms it later from the
+# user-space open() path. #682 hypothesis (2026-05-07): the missing
+# disable cycle leaves an IRQ-state divergence that prevents fw from
+# advancing `proc` on the boundary IN VDMA channel during runmodel.
+# Default ON to match Linux's order; turn OFF for A/B comparison.
+# See kernel/ai_accel/hailo/hailo_core.c hailo_boot post-trigger site.
+option(HAILO_IRQ_CYCLE_AT_BOOT "Disable IMASK_HOST after fw load and re-arm post-D3hot (Linux parity)" ON)
+if(HAILO_IRQ_CYCLE_AT_BOOT)
+    add_compile_definitions(HAILO_IRQ_CYCLE_AT_BOOT=1)
 endif()
 
 # Pi 5 IRQ-delivery diagnostics (issue #99 Phase 1). Adds EL2 register
@@ -410,6 +452,9 @@ set(KERNEL_SOURCES
     # No-op when nothing calls ga10b_qmd_populate (Phase 1 — encoder
     # ported but not yet wired into the dispatch path).
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_qmd.c>
+    # Jetson-only: read-only GMMU page-table walker (#666 Milestone A).
+    # No-op until invoked via the `nvgpu gmmu walk` shell verb.
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_gmmu.c>
     # Jetson: full GSP platform shim — MMIO at GPU_BASE, unified memory
     # DMA, cache maintenance, firmware via .incbin. Replaces the old
     # nvidia_gsp_platform_stub.c now that CBB firewall is bypassed.
@@ -438,6 +483,10 @@ set(KERNEL_SOURCES
     kernel/src/gpu_consumer.c
     kernel/src/gpu_tier.c
     kernel/gpu/operator_library.c
+    kernel/gpu/oplib_pool.c
+    kernel/gpu/operator_dispatch.c
+    kernel/gpu/oplib_dispatch.c
+    kernel/gpu/oplib_probe.c
     kernel/src/admin_telemetry.c
     kernel/src/model_engine.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/sched/smp.c>
@@ -670,6 +719,15 @@ set(KERNEL_SOURCES
     kernel/src/slm_ffi.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/syscall.c>
 
+    # User-mode smoke (#697 PR-4) — single EL0 entry point that
+    # logs and exits, used by the `usertest` shell command.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/user_smoke.c>
+
+    # ELF loader for EL0 user-mode tasks. Companion to elf.c which
+    # loads ELFs into kernel space; this variant maps PT_LOAD
+    # segments into a per-task user L1 with the right RWX bits.
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/src/elf_user.c>
+
     # Semihosting (for QEMU test exit)
     kernel/src/semihosting.c
 
@@ -741,6 +799,9 @@ set(TEST_SOURCES
     kernel/tests/test_gpu_consumer.c
     kernel/tests/test_gpu_tier.c
     kernel/tests/test_operator_library.c
+    kernel/tests/test_oplib_pool.c
+    kernel/tests/test_operator_dispatch.c
+    kernel/tests/test_oplib_probe.c
     kernel/tests/test_gpu_dispatch_breaker.c
     kernel/tests/test_admin_telemetry.c
     kernel/tests/test_telemetry_feed.c
@@ -842,6 +903,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_msg_router.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_coop_preempt.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_cpu_supervisor.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_mpidr_lookup.c>
 )
 
 # lwIP library sources (QEMU networking only)
@@ -1139,6 +1201,112 @@ if(MOCK_CAMERA_FRAME)
         OBJECT_DEPENDS      "${MOCK_CAMERA_FRAME_BIN}"
     )
     message(STATUS "Embedding mock camera frame from: ${MOCK_CAMERA_FRAME_DIGIT}")
+endif()
+
+# ============================================================================
+# Operator library blob (.incbin — packed (op_kind,tier,dtype) → SASS table)
+# ============================================================================
+#
+# Set -DOPLIB_BLOB=path/to/operator_library.bin to embed a pre-built
+# library produced by `python3 scripts/build-operator-library.py`.
+#
+# When unset (the default), CMake generates a tiny stub (32 B —
+# valid OPLB header with op_count=0) via
+# `scripts/build-operator-library-stub.py`. The kernel-side parser
+# accepts the stub; every dispatch lookup returns NOT_FOUND so callers
+# fall through to CPU. This keeps QEMU and dev builds working without
+# Jetson access while preserving a single embedding code path.
+#
+# The Jetson workflow that produces a real blob is:
+#   1. Build each scripts/cuda/*.cu kernel on Jetson (nvcc -arch=sm_87)
+#   2. Extract SASS via cuobjdump + dd into scripts/cuda/operator_library/
+#   3. Run scripts/build-operator-library.py to pack into a .bin
+#   4. Configure CMake with -DOPLIB_BLOB=<path-to-bin>
+#
+# Steps 1-3 are codified by `scripts/cuda/<op>.cu` header comments.
+set(OPLIB_BLOB "" CACHE FILEPATH
+    "Path to operator_library.bin to embed. Empty = generate a stub.")
+if(OPLIB_BLOB)
+    if(NOT EXISTS "${OPLIB_BLOB}")
+        message(FATAL_ERROR "OPLIB_BLOB set but file does not exist: "
+                            "${OPLIB_BLOB}")
+    endif()
+    set(OPLIB_BLOB_FINAL "${OPLIB_BLOB}")
+    message(STATUS "Embedding operator library from: ${OPLIB_BLOB}")
+else()
+    set(OPLIB_BLOB_FINAL "${CMAKE_BINARY_DIR}/operator_library_stub.bin")
+    add_custom_command(
+        OUTPUT  "${OPLIB_BLOB_FINAL}"
+        COMMAND ${CMAKE_COMMAND} -E echo
+                "[gen] operator_library_stub.bin (op_count=0)"
+        COMMAND python3
+                "${CMAKE_SOURCE_DIR}/scripts/build-operator-library-stub.py"
+                "${OPLIB_BLOB_FINAL}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/scripts/build-operator-library-stub.py"
+        VERBATIM
+    )
+    message(STATUS "Embedding operator library: stub (set OPLIB_BLOB to override)")
+endif()
+target_sources(slmos.elf PRIVATE kernel/src/oplib_embed.S)
+set_source_files_properties(
+    kernel/src/oplib_embed.S
+    PROPERTIES
+    COMPILE_DEFINITIONS "OPLIB_BLOB_PATH=${OPLIB_BLOB_FINAL}"
+    OBJECT_DEPENDS      "${OPLIB_BLOB_FINAL}"
+)
+
+# ============================================================================
+# EL0 hello ELF (user/hello/) — built stand-alone with the ARM64
+# toolchain and embedded into the kernel image via .incbin so the
+# `elftest` shell command can load it without a filesystem.
+# ============================================================================
+#
+# Built only on ARM64 platforms (the EL0 path is not yet wired on
+# x86-64). Uses the same aarch64-none-elf-gcc the kernel uses, but
+# with stand-alone user-binary flags: no kernel includes (just
+# kernel/include/ for syscall.h + user_syscall.h), no PIC, page-
+# aligned segments via -z max-page-size=0x1000 so the loader can
+# map each segment with one vmm_user_map_page call per 4 KB page.
+# objcopy --strip-all keeps the embedded blob small (<10 KB).
+if(NOT PLATFORM STREQUAL "X86_64")
+    set(USER_HELLO_ELF "${CMAKE_BINARY_DIR}/user_hello.elf")
+    set(USER_HELLO_SRC "${CMAKE_SOURCE_DIR}/user/hello/start.S"
+                       "${CMAKE_SOURCE_DIR}/user/hello/main.c")
+    set(USER_HELLO_LD  "${CMAKE_SOURCE_DIR}/user/user.ld")
+
+    # Resolve the ARM64 cross compiler / objcopy. CMake's
+    # CMAKE_C_COMPILER points at this when PLATFORM is an ARM64
+    # variant; we use it directly so the user binary is always built
+    # with the same toolchain version as the kernel (avoids weird
+    # ABI skew between user and kernel ELFs).
+    add_custom_command(
+        OUTPUT  "${USER_HELLO_ELF}"
+        COMMAND ${CMAKE_C_COMPILER}
+                -ffreestanding -nostdlib -static -fno-pic -fno-pie
+                -fno-stack-protector -fno-builtin
+                -O2 -Wall -Wextra -std=c2x
+                -mgeneral-regs-only
+                -I ${CMAKE_SOURCE_DIR}/kernel/include
+                -T ${USER_HELLO_LD}
+                -Wl,-no-pie
+                -Wl,-z,max-page-size=0x1000
+                -Wl,-z,common-page-size=0x1000
+                ${USER_HELLO_SRC}
+                -o "${USER_HELLO_ELF}.unstripped"
+        COMMAND ${CMAKE_OBJCOPY} --strip-all
+                "${USER_HELLO_ELF}.unstripped" "${USER_HELLO_ELF}"
+        DEPENDS ${USER_HELLO_SRC} ${USER_HELLO_LD}
+        COMMENT "Building EL0 hello ELF (${USER_HELLO_ELF})"
+        VERBATIM
+    )
+
+    target_sources(slmos.elf PRIVATE kernel/src/user_hello_embed.S)
+    set_source_files_properties(
+        kernel/src/user_hello_embed.S
+        PROPERTIES
+        COMPILE_DEFINITIONS "USER_HELLO_ELF_PATH=${USER_HELLO_ELF}"
+        OBJECT_DEPENDS      "${USER_HELLO_ELF}"
+    )
 endif()
 
 # ============================================================================

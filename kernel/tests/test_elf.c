@@ -8,6 +8,9 @@
 #include "unity.h"
 #include "../include/elf.h"
 #include "../include/string.h"
+#include "../include/vmm.h"
+#include "../include/pmm.h"
+#include "../include/task.h"
 #include <stdint.h>
 
 /* Build a minimally valid ELF64 header for the current target machine.
@@ -220,6 +223,109 @@ static void test_elf_load_rejects_p_vaddr_overflow(void)
     TEST_ASSERT_EQUAL_INT(ELF_ERR_TRUNCATED, rc);
 }
 
+#if !defined(PLATFORM_X86_64)
+/* Embedded EL0 hello ELF (kernel/src/user_hello_embed.S). The build
+ * system always supplies this on ARM64 platforms — used both as a
+ * runtime artefact (the `userelf` shell command) and as a ready-made
+ * fixture for the elf_load_user / task_create_user_elf tests. */
+extern const uint8_t user_hello_elf_start[];
+extern const uint8_t user_hello_elf_end[];
+
+static void test_elf_load_user_loads_embedded_blob(void)
+{
+    size_t blob_len = (size_t)(user_hello_elf_end - user_hello_elf_start);
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+    TEST_ASSERT_NOT_EQUAL(0, l1_pa);
+
+    uint64_t entry = 0;
+    int rc = elf_load_user(user_hello_elf_start, blob_len, l1_pa, &entry);
+    TEST_ASSERT_EQUAL_INT(ELF_OK, rc);
+    /* Entry must be inside the loaded ELF window. */
+    TEST_ASSERT_TRUE(entry >= USER_TEXT_VA);
+    TEST_ASSERT_TRUE(entry < USER_ELF_STACK_PAGE_VA);
+
+    vmm_destroy_user_l1(l1_pa);
+}
+
+static void test_elf_load_user_pmm_neutral(void)
+{
+    struct pmm_stats before, after;
+    pmm_get_stats(&before);
+
+    size_t blob_len = (size_t)(user_hello_elf_end - user_hello_elf_start);
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    uint64_t entry = 0;
+    int rc = elf_load_user(user_hello_elf_start, blob_len, l1_pa, &entry);
+    TEST_ASSERT_EQUAL_INT(ELF_OK, rc);
+
+    /* vmm_destroy_user_l1 walks user-region L3 leaves and frees every
+     * PMM_OWNED page back to PMM. After the round trip, free pages
+     * must be at least where they started — net-neutral or better. */
+    vmm_destroy_user_l1(l1_pa);
+
+    pmm_get_stats(&after);
+    TEST_ASSERT_MESSAGE(after.free_pages >= before.free_pages,
+                        "elf_load_user + destroy leaked pages");
+}
+
+static void test_elf_load_user_rejects_garbage(void)
+{
+    uint64_t l1_pa = 0;
+    TEST_ASSERT_EQUAL_INT(0, vmm_create_user_l1(&l1_pa));
+
+    uint8_t buf[64];
+    memset(buf, 0, sizeof(buf));
+
+    uint64_t entry = 0;
+    int rc = elf_load_user(buf, sizeof(buf), l1_pa, &entry);
+    TEST_ASSERT_NOT_EQUAL(ELF_OK, rc);
+
+    vmm_destroy_user_l1(l1_pa);
+}
+
+static void test_elf_load_user_rejects_null_args(void)
+{
+    uint64_t entry = 0;
+    /* NULL blob */
+    TEST_ASSERT_EQUAL_INT(ELF_ERR_INVALID,
+                          elf_load_user(NULL, 1, 0x1000, &entry));
+    /* NULL entry_out */
+    size_t blob_len = (size_t)(user_hello_elf_end - user_hello_elf_start);
+    TEST_ASSERT_EQUAL_INT(ELF_ERR_INVALID,
+                          elf_load_user(user_hello_elf_start, blob_len,
+                                        0x1000, NULL));
+    /* Zero L1 PA */
+    TEST_ASSERT_EQUAL_INT(ELF_ERR_INVALID,
+                          elf_load_user(user_hello_elf_start, blob_len,
+                                        0, &entry));
+}
+
+static void test_task_create_user_elf_populates_task(void)
+{
+    size_t blob_len = (size_t)(user_hello_elf_end - user_hello_elf_start);
+    struct task *t = task_create_user_elf("elf_t",
+                                          user_hello_elf_start, blob_len, 4);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_INT(1, t->is_user);
+    TEST_ASSERT_NOT_EQUAL(0, t->user_l1_pa);
+    TEST_ASSERT_EQUAL_UINT64(USER_ELF_STACK_TOP, t->user_stack_top);
+    TEST_ASSERT_EQUAL_UINT64(USER_MMAP_VA_START, t->user_va_next);
+    /* Entry must lie in the user code range we loaded into. */
+    uint64_t entry = (uint64_t)(uintptr_t)t->user_entry;
+    TEST_ASSERT_TRUE(entry >= USER_TEXT_VA);
+    TEST_ASSERT_TRUE(entry < USER_ELF_STACK_PAGE_VA);
+
+    /* Tear down without ever scheduling. task_destroy frees the L1
+     * (which reclaims every PMM_OWNED leaf the loader installed) and
+     * the stack page. */
+    t->state = TASK_TERMINATED;
+    task_destroy(t);
+}
+#endif /* !PLATFORM_X86_64 */
+
 int test_suite_elf(void)
 {
     UnityBegin("ELF Loader Tests");
@@ -238,6 +344,15 @@ int test_suite_elf(void)
     /* PR-465 segment-bounds overflow regressions. */
     RUN_TEST(test_elf_load_rejects_p_offset_overflow);
     RUN_TEST(test_elf_load_rejects_p_vaddr_overflow);
+
+#if !defined(PLATFORM_X86_64)
+    /* EL0 ELF loader (this PR). */
+    RUN_TEST(test_elf_load_user_loads_embedded_blob);
+    RUN_TEST(test_elf_load_user_pmm_neutral);
+    RUN_TEST(test_elf_load_user_rejects_garbage);
+    RUN_TEST(test_elf_load_user_rejects_null_args);
+    RUN_TEST(test_task_create_user_elf_populates_task);
+#endif
 
     return UnityEnd();
 }
