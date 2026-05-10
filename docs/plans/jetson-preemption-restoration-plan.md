@@ -12,6 +12,11 @@ multitasking on Jetson Orin Nano. Tracks issue **#380**.
 | 1 | Custom tegra234 TF-A patch (mirror of Pi 5's #134 / `0001-*`) | ✅ landed (PR #746, hardware-verified) |
 | 2 | Dual-cluster MPIDR fold fix (#647) | ✅ landed |
 | 3 | `TIMER_IRQ` 30 → 26, restore CPU 0 idle WFI, regression | ✅ landed (PR #746) |
+| 3.5 | NULL-safe `maybe_arm_resched_trampoline` (#750 fix) | ✅ landed (PR #752) |
+| 3.5b | IRQ trap-frame FP/SIMD save (q0-q31 + FPCR/FPSR, 800-byte frame) | ✅ landed (PR #753) |
+| 3.6 | Default-flip `JETSON_HW_TICK=ON` for `PLATFORM=JETSON_ORIN_NANO` | ✅ landed (PR #755) |
+| 3.7 | Update fact sheets / plan / `kernel/CLAUDE.md` | ✅ landed (this commit, 2026-05-09) |
+| 3.8 | Close #380 | ✅ closed 2026-05-09 (5-PR chain: #647 + #746 + #752 + #753 + #755; 10/10 boot_test on jetson-nano-2) |
 
 **Hardware verification (jetson-nano-2, 2026-05-09):** patched BL31
 flashed to both `A_secure-os` and `B_secure-os` slots via
@@ -231,16 +236,18 @@ Conditional on Phase 1 producing a working BL31.
       (~100 Hz).
     - `bench context` round-trips in expected µs range.
     - `boot_test --count 20` clean.
-- ☐ **3.6** Update `docs/specs/preemption.md` matrix Jetson column
-  to "True HW timer (PPI 26 / CNTHP)". Remove the
-  "Skipped / Blocked" Jetson entry.
-- ☐ **3.7** Update `kernel/CLAUDE.md` §"ARM64 Hardware Timer IRQs"
+- ✅ **3.6** Update `docs/fact-sheets/preemption.md` matrix Jetson
+  column to "True HW timer (PPI 26 / CNTHP)". Remove the
+  "Skipped / Blocked" Jetson entry. Done 2026-05-09.
+- ✅ **3.7** Update `kernel/CLAUDE.md` §"ARM64 Hardware Timer IRQs"
   to remove the "Hardware timer IRQs do not deliver to EL1/EL2 on
   Pi 5 or Jetson" text — both platforms now deliver under default
-  / `JETSON_HW_TICK=ON` builds.
-- ☐ **3.8** Close #380. `slm_preempt_point()` (#635/#636) stays as
+  / `JETSON_HW_TICK=ON` builds. Done 2026-05-09.
+- ✅ **3.8** Close #380. `slm_preempt_point()` (#635/#636) stays as
   defense-in-depth — cheap when the quantum hasn't expired, no harm
-  leaving it under HW preemption.
+  leaving it under HW preemption. Closed 2026-05-09 with the 5-PR
+  chain summary in `docs/fact-sheets/preemption.md` §"Resolved
+  blockers".
 
 ### Acceptance
 
@@ -280,4 +287,4 @@ Conditional on Phase 1 producing a working BL31.
 
 ---
 
-*Last updated: 8 May 2026*
+*Last updated: 9 May 2026*
