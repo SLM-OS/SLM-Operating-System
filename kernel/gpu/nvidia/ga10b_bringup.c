@@ -1243,12 +1243,18 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
      *      reports "Handoff not found" even though the magic+kind
      *      match — the bug that blocked end-to-end v7 inherit on
      *      hardware until 2026-05-07.
-     * Phase 6 inherit accepts all six; launch_kernel version-gates
+     * v8: + weights pool (weights_pool_phys/gpu_va/size_bytes).
+     *      Strict superset of v7 — same channel + QMD pool prefix,
+     *      three trailing u64s. Adding v8 here lets the scanner
+     *      accept the W1 handoff; oplib_pool consumers still
+     *      check `version >= 8u` before reading the trailing
+     *      weights_pool_* fields.
+     * Phase 6 inherit accepts all seven; launch_kernel version-gates
      * at dispatch time (v3 minimum for single-shot, v5 for pipelines,
-     * v7 for the QMD-pool path). */
+     * v7 for the QMD-pool path, v8 for the weights pool). */
     if (h->version != 2 && h->version != 3 &&
         h->version != 4 && h->version != 5 && h->version != 6 &&
-        h->version != 7) return -1;
+        h->version != 7 && h->version != 8) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
@@ -1427,6 +1433,16 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
     g_handoff.qmd_pool_size_bytes = hoff->qmd_pool_size_bytes;
     g_handoff.qmd_pool_n_slots   = hoff->qmd_pool_n_slots;
 
+    /* v8 extension: GPU weights pool. Zero on v2..v7. The pool's
+     * gpu_va is what `slm load` and the hybrid-forward dispatchers
+     * read; phys is informational and may be 0 when the pool is
+     * IOVMM-backed (SMMU-stitched, no single physical base). The
+     * unconditional read is safe — same `_Static_assert` shape
+     * argument as the v7 fields above. */
+    g_handoff.weights_pool_phys       = hoff->weights_pool_phys;
+    g_handoff.weights_pool_gpu_va     = hoff->weights_pool_gpu_va;
+    g_handoff.weights_pool_size_bytes = hoff->weights_pool_size_bytes;
+
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
                                 &g_handoff) < 0) {
@@ -1490,6 +1506,31 @@ const struct ga10b_channel_handoff *ga10b_bringup_handoff(void)
         return NULL;
     }
     return &g_handoff;
+}
+
+/* Weights-pool descriptor accessors (#714 W1). Each returns 0 when:
+ *   - no handoff is staged (channel-inherit not yet run), OR
+ *   - the staged handoff was built by a pre-v8 helper that didn't
+ *     allocate a weights pool (the v7 → v8 wire format leaves the
+ *     trailing fields as zeros, by design — backward compatible).
+ * Callers treat 0-size as "no GPU weights pool, fall through to
+ * CPU." */
+uint64_t ga10b_weights_pool_phys(void)
+{
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    return (h != NULL) ? h->weights_pool_phys : 0;
+}
+
+uint64_t ga10b_weights_pool_gpu_va(void)
+{
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    return (h != NULL) ? h->weights_pool_gpu_va : 0;
+}
+
+uint64_t ga10b_weights_pool_size_bytes(void)
+{
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    return (h != NULL) ? h->weights_pool_size_bytes : 0;
 }
 
 /* ---- Phase 7: Pushbuffer submission (NOP + SEMAPHORE_RELEASE) ----

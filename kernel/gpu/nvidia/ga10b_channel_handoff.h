@@ -229,6 +229,50 @@ struct ga10b_channel_handoff {
     uint64_t qmd_pool_gpu_va;
     uint32_t qmd_pool_size_bytes;
     uint32_t qmd_pool_n_slots;
+
+    /* --- v8 extension: per-channel weights pool. ---
+     * Zero on v2..v7. Populated by `gpu-channel-helper
+     * --weights-pool-size <bytes>`. When non-zero, SLM-OS's `slm
+     * load` copies model weight tensors into this pool and caches
+     * per-tensor GPU VAs in `LoadedSlm.gpu_tensor_map`; forward.rs
+     * hybrid wrappers then dispatch against GPU-resident weights
+     * instead of round-tripping through 64 KB scratch slots
+     * per-call. See docs/design/gpu-weights-pool.md.
+     *
+     * Backward compatible: a v7-or-earlier helper writes these as
+     * zero; SLM-OS then sees `weights_pool_size_bytes == 0` and
+     * forward.rs falls through to CPU on every weight-bearing op
+     * (existing behavior).
+     *
+     * The W1 PoC on jetson-nano-1 (2026-05-10, see PR #766) confirmed
+     * that nvmap's IOVMM heap (heap_mask=0x40000000) can grant a
+     * single 1.5 GB allocation despite Jetson L4T's 256 MB CmaTotal
+     * — the SMMU stitches scattered physical pages into one
+     * virtually-contiguous IO address. So a single (phys, gpu_va,
+     * size) triple suffices for the W1 cut; multi-chunk fallback
+     * deferred unless future workloads need >1.5 GB.
+     *
+     * `weights_pool_phys` is the FIRST page's CPU-physical address.
+     * Because the SMMU stitches scattered pages into one virtually-
+     * contiguous IO range, beyond the first few pages the
+     * `phys + offset` arithmetic that works for the small SASS
+     * pool DOES NOT WORK for the 1.5 GB weights pool. SLM-OS must
+     * use the `weights_pool_gpu_va` for GPU dispatch (the SMMU
+     * resolves offsets transparently) and a separate staging
+     * mechanism (W2 — TBD between GPU-CE memcpy from sysmem, or
+     * a helper-published pagemap) to populate the pool's contents
+     * from CPU-side weight tensors. The phys field is retained for
+     * diagnostic identification of the pool in /proc/iomem-style
+     * dumps and as a uniqueness key, NOT as a CPU-side base
+     * pointer for tensor staging.
+     *
+     * `weights_pool_size_bytes` is a u64 (rather than the u32 used
+     * by `qmd_pool_size_bytes`) because the pool is intentionally
+     * GB-scale; a u32 would cap at 4 GB which is fine today but
+     * leaves no room for future Qwen-3B-class models. */
+    uint64_t weights_pool_phys;
+    uint64_t weights_pool_gpu_va;
+    uint64_t weights_pool_size_bytes;
 };
 
 /* Pipeline-kind discriminator values stored in
@@ -318,8 +362,10 @@ struct ga10b_pipeline_op_v7 {
  * breaks the handoff silently — the static_assert catches it at
  * compile time on both sides. v7 grew the struct by 24 bytes
  * (qmd_pool_phys + qmd_pool_gpu_va + qmd_pool_size_bytes +
- * qmd_pool_n_slots) → 232 + 24 = 256. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 256,
+ * qmd_pool_n_slots) → 232 + 24 = 256. v8 grows it by another 24
+ * (weights_pool_phys + weights_pool_gpu_va +
+ * weights_pool_size_bytes) → 256 + 24 = 280. */
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 280,
                "ga10b_channel_handoff layout changed — update Linux "
                "helper (scripts/gpu-channel-helper.c, "
                "scripts/gpu-kernel-launch.c, scripts/gpu-launch-common.c) "
@@ -384,6 +430,16 @@ _Static_assert(offsetof(struct ga10b_channel_handoff, qmd_pool_size_bytes) == 24
                "v7 qmd_pool_size_bytes offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, qmd_pool_n_slots) == 252,
                "v7 qmd_pool_n_slots offset drifted");
+
+/* v8 weights pool — appended after qmd_pool_*. Same fall-back
+ * pattern as v7: a v8-aware reader detects a v7-built handoff
+ * by reading these as zero. */
+_Static_assert(offsetof(struct ga10b_channel_handoff, weights_pool_phys) == 256,
+               "v8 weights_pool_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, weights_pool_gpu_va) == 264,
+               "v8 weights_pool_gpu_va offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, weights_pool_size_bytes) == 272,
+               "v8 weights_pool_size_bytes offset drifted");
 
 _Static_assert(offsetof(struct ga10b_pipeline_op, qmd_gpu_va) == 0,
                "pipeline_op.qmd_gpu_va must be at offset 0");

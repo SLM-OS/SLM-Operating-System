@@ -197,6 +197,24 @@ const struct ga10b_channel_handoff *ga10b_bringup_handoff(void);
  * the channel handoff fields haven't been populated. */
 struct ga10b_bringup *ga10b_bringup_state(void);
 
+/* Weights-pool descriptor convenience accessors (#714 W1, see
+ * docs/design/gpu-weights-pool.md). The handoff v8 extension exposes
+ * three fields (phys / gpu_va / size_bytes) that SLM-OS's `slm load`
+ * reads to know where to stage model weight tensors and what the
+ * pool's GPU VA base is. These accessors are thin wrappers around
+ * `ga10b_bringup_handoff()->weights_pool_*` so call sites (slm_ffi.c,
+ * the future `slm load` weight-staging path) don't have to know the
+ * field names directly.
+ *
+ * Returns 0 on every field when the handoff is unstaged or carried
+ * a pre-v8 helper that didn't allocate a pool (the v7 → v8 wire-
+ * format extension reads as zero on a v7-built handoff, by design).
+ * Callers treat 0-size as "no GPU weights pool, fall through to
+ * CPU." */
+uint64_t ga10b_weights_pool_phys(void);
+uint64_t ga10b_weights_pool_gpu_va(void);
+uint64_t ga10b_weights_pool_size_bytes(void);
+
 /* Per-op dispatch tracing toggle. Default OFF. When ON, every
  * `ga10b_submit_and_poll` call and every pipeline op emits ~7
  * lines of qmd / GPFIFO / doorbell / poll / payload state — useful
