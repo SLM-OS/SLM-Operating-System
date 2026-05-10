@@ -1123,8 +1123,10 @@ void test_gqa_attn_launch_shape_qwen(void)
     TEST_ASSERT_EQUAL_INT(0, rc);
     TEST_ASSERT_EQUAL_UINT32(12u,  shape.grid_x);
     TEST_ASSERT_EQUAL_UINT32(128u, shape.block_x);
-    /* Static smem from kernel: q_cache + logits + reduce_buf + 2 floats. */
-    TEST_ASSERT_EQUAL_UINT32(17928u, shape.smem_size_bytes);
+    /* Static smem from kernel: q_cache + logits + reduce_buf + 2 floats =
+     * 17928 raw, rounded up to 18176 (next 256-B boundary) for GA10B's
+     * QMD SHARED_MEMORY_SIZE granularity. */
+    TEST_ASSERT_EQUAL_UINT32(18176u, shape.smem_size_bytes);
     TEST_ASSERT_EQUAL_UINT32(1u,     shape.barrier_count);
 }
 
