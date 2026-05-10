@@ -35,7 +35,7 @@ that was attempted but blocked.
 | Boot to shell | ✅ | ✅ | ✅ | ✅ | [boot.md](boot.md) |
 | SMP | ✅ 4 cores | ✅ 4 cores | ✅ 6 cores | ✅ 8 cores | [smp.md](smp.md) |
 | Memory management | ✅ | ✅ | ✅ | ✅ | [memory.md](memory.md) |
-| Preemptive multitasking | ✅ HW | ✅ HW (opt-in `SECONDARY_PREEMPT=ON`) / 🟡 cooperative (default) | 🟡 cooperative | ✅ HW | [preemption.md](preemption.md) |
+| Preemptive multitasking | ✅ HW | ✅ HW (opt-in `SECONDARY_PREEMPT=ON`) / 🟡 cooperative (default) | ✅ HW (default `JETSON_HW_TICK=ON`) / 🟡 cooperative (`JETSON_HW_TICK=OFF`) | ✅ HW | [preemption.md](preemption.md) |
 | Networking | ✅ DHCP + ping | ✅ DHCP + ping | ✅ DHCP + ping (USB CDC-ECM) | ✅ DHCP + ping | [networking.md](networking.md) |
 | GPU / accelerator inference | — | ✅ Hailo-8 NPU | ✅ GA10B HMMA + dispatcher | ✅ | [gpu-inference.md](gpu-inference.md) |
 | Storage / filesystem | ✅ RAM disk + LittleFS | ✅ | ✅ | ✅ | [storage.md](storage.md) |
