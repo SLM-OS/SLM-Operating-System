@@ -67,6 +67,10 @@ use crate::inference::gpu_slm::OperatorLibraryBackend;
 use crate::inference::ops_transformer::{
     gqa_decode_step, lm_head_q, matmul_quant_rows, rmsnorm, swiglu_mlp_q, RopeTable,
 };
+use crate::inference::quant::{dequantize_row_any, q8_k_byte_size};
+use crate::slm::gguf::{f32_to_f16, ArchInfo, GgmlType};
+use crate::slm::registry::LoadedSlm;
+use crate::slm::session::Session;
 
 /// Hybrid RMSNorm: try the GPU operator library if the boot probe
 /// (#714 §B.2) flipped this op's tier to `Tier::Simt`, fall through
@@ -105,10 +109,6 @@ fn rmsnorm_hybrid(
     }
     rmsnorm(x, gamma, eps, out)
 }
-use crate::inference::quant::{dequantize_row_any, q8_k_byte_size};
-use crate::slm::gguf::{f32_to_f16, ArchInfo, GgmlType};
-use crate::slm::registry::LoadedSlm;
-use crate::slm::session::Session;
 
 // ---------------------------------------------------------------------------
 // Public types

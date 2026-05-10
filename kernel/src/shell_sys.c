@@ -4458,12 +4458,14 @@ struct ga10b_bringup *ga10b_bringup_state(void)
 
 int cmd_nvgpu(int argc, char *argv[])
 {
-    /* `b` aliases the file-scope `g_nvgpu_b` so the rest of this
-     * function reads as before; existing `b.state` / `&b` /
-     * `slm_oplib_dispatch(&b, ...)` usages stay verbatim. The macro
-     * is `#undef`'d at end-of-function so it can't leak into other
-     * sites in this translation unit. */
-#define b g_nvgpu_b
+    /* `b_p` aliases the file-scope `g_nvgpu_b` so the rest of this
+     * function reads as `b_p->state` / `b_p` (passed where the
+     * inline calls previously took `b_p`). A pointer alias rather
+     * than a `#define b g_nvgpu_b` macro because the macro would
+     * silently rewrite any future local named `b` (loop variable,
+     * parameter, struct field path) — flagged in the round-1
+     * review of #762. */
+    struct ga10b_bringup *const b_p = &g_nvgpu_b;
 
     if (argc < 2 || strcmp(argv[1], "info") == 0) {
         shell_puts("GA10B firmware inventory:\r\n");
@@ -4487,13 +4489,13 @@ int cmd_nvgpu(int argc, char *argv[])
         }
         if (argc < 2) {
             shell_printf("\r\nState: %d  Last error phase: %d\r\n",
-                        (int)b.state, b.last_error_phase);
+                        (int)b_p->state, b_p->last_error_phase);
         }
         return 0;
     }
 
     if (strcmp(argv[1], "prepare") == 0) {
-        int rc = ga10b_bringup_prepare(&b);
+        int rc = ga10b_bringup_prepare(b_p);
         shell_printf("prepare: rc=%d\r\n", rc);
         return rc;
     }
@@ -4503,28 +4505,28 @@ int cmd_nvgpu(int argc, char *argv[])
          * guarantees the Falcon context is populated (imem_size etc.).
          * Without this, fresh shell invocations run acr against a
          * zeroed `struct falcon` and fail size checks. */
-        int rc = ga10b_bringup_prepare(&b);
+        int rc = ga10b_bringup_prepare(b_p);
         if (rc < 0) {
             shell_printf("prepare failed: rc=%d\r\n", rc);
             return rc;
         }
-        rc = ga10b_bringup_acr(&b);
-        shell_printf("acr: rc=%d, state=%d\r\n", rc, (int)b.state);
+        rc = ga10b_bringup_acr(b_p);
+        shell_printf("acr: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
 
     if (strcmp(argv[1], "inherit") == 0) {
         /* Path 3 (#190): detect Linux's already-bootstrapped Falcon
          * state after a --no-gpu-suspend kexec. Skips phases 1-4. */
-        int rc = ga10b_bringup_inherit(&b);
-        shell_printf("inherit: rc=%d, state=%d\r\n", rc, (int)b.state);
+        int rc = ga10b_bringup_inherit(b_p);
+        shell_printf("inherit: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
 
     if (strcmp(argv[1], "run") == 0) {
-        int rc = ga10b_bringup_run(&b);
+        int rc = ga10b_bringup_run(b_p);
         shell_printf("run: rc=%d, state=%d, last_err_phase=%d\r\n",
-                    rc, (int)b.state, b.last_error_phase);
+                    rc, (int)b_p->state, b_p->last_error_phase);
         return rc;
     }
 
@@ -4532,31 +4534,31 @@ int cmd_nvgpu(int argc, char *argv[])
      * corresponding phase against the persistent `b` — preceding phases
      * must have completed so `b->state` satisfies the phase precondition. */
     if (strcmp(argv[1], "fecs") == 0) {
-        int rc = ga10b_bringup_fecs(&b);
-        shell_printf("fecs: rc=%d, state=%d\r\n", rc, (int)b.state);
+        int rc = ga10b_bringup_fecs(b_p);
+        shell_printf("fecs: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
     if (strcmp(argv[1], "gpccs") == 0) {
-        int rc = ga10b_bringup_gpccs(&b);
-        shell_printf("gpccs: rc=%d, state=%d\r\n", rc, (int)b.state);
+        int rc = ga10b_bringup_gpccs(b_p);
+        shell_printf("gpccs: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
     if (strcmp(argv[1], "pmu") == 0) {
-        int rc = ga10b_bringup_pmu(&b);
-        shell_printf("pmu: rc=%d, state=%d\r\n", rc, (int)b.state);
+        int rc = ga10b_bringup_pmu(b_p);
+        shell_printf("pmu: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
     if (strcmp(argv[1], "test") == 0) {
         /* Phase 5: FECS method gateway smoke test. */
-        int rc = ga10b_bringup_address_space(&b);
-        shell_printf("test: rc=%d, state=%d\r\n", rc, (int)b.state);
+        int rc = ga10b_bringup_address_space(b_p);
+        shell_printf("test: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
 
     if (strcmp(argv[1], "channel") == 0) {
         /* Phase 6: inherit channel from Linux handoff block. */
-        int rc = ga10b_bringup_channel(&b);
-        shell_printf("channel: rc=%d, state=%d\r\n", rc, (int)b.state);
+        int rc = ga10b_bringup_channel(b_p);
+        shell_printf("channel: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
     if (strcmp(argv[1], "engine-clear") == 0) {
@@ -4567,26 +4569,26 @@ int cmd_nvgpu(int argc, char *argv[])
     }
     if (strcmp(argv[1], "submit") == 0) {
         /* Phase 7: pushbuffer smoke test. */
-        int rc = ga10b_bringup_smoke_test(&b);
-        shell_printf("submit: rc=%d, state=%d\r\n", rc, (int)b.state);
+        int rc = ga10b_bringup_smoke_test(b_p);
+        shell_printf("submit: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
     if (strcmp(argv[1], "submit-compute") == 0) {
         /* Phase 7 (compute): COMPUTE_B SEMAPHORE_RELEASE smoke test.
          * Requires `nvgpu inherit` + `nvgpu channel` first (same as
          * the host-family `submit`). Unblocked by PR #295. */
-        int rc = ga10b_bringup_smoke_test_compute(&b);
+        int rc = ga10b_bringup_smoke_test_compute(b_p);
         shell_printf("submit-compute: rc=%d, state=%d\r\n",
-                     rc, (int)b.state);
+                     rc, (int)b_p->state);
         return rc;
     }
     if (strcmp(argv[1], "launch-kernel") == 0) {
         /* Phase 8: launch a pre-uploaded compute kernel from a v3
          * handoff (shader + QMD + cbuf + output pre-populated by
          * scripts/gpu-kernel-launch.c --preserve-for-kexec). */
-        int rc = ga10b_bringup_launch_kernel(&b);
+        int rc = ga10b_bringup_launch_kernel(b_p);
         shell_printf("launch-kernel: rc=%d, state=%d\r\n",
-                     rc, (int)b.state);
+                     rc, (int)b_p->state);
         return rc;
     }
     if (strcmp(argv[1], "run-mnist") == 0) {
@@ -4600,13 +4602,13 @@ int cmd_nvgpu(int argc, char *argv[])
          * patterns — the kernel target compiles with
          * -mgeneral-regs-only and can't format fp32 as decimal.
          * Use `slm.gpu_run_mnist()` from Lua for decimal output. */
-        int rc = ga10b_bringup_launch_kernel(&b);
+        int rc = ga10b_bringup_launch_kernel(b_p);
         if (rc < 0) {
             shell_printf("run-mnist: launch failed rc=%d\r\n", rc);
             return rc;
         }
         uint8_t logits_bytes[40];
-        int n = ga10b_bringup_read_pipeline_output(&b, logits_bytes,
+        int n = ga10b_bringup_read_pipeline_output(b_p, logits_bytes,
                                                     sizeof(logits_bytes));
         if (n < 0) {
             shell_printf("run-mnist: failed to read logits "
@@ -5120,7 +5122,7 @@ oplib_stage_call:
                 },
             };
 
-            rc = slm_oplib_dispatch(&b, inst_phys,
+            rc = slm_oplib_dispatch(b_p, inst_phys,
                                      SLM_GPU_OP_RMSNORM,
                                      SLM_GPU_TIER_SIMT,
                                      SLM_GPU_DTYPE_FP16,
@@ -5316,7 +5318,7 @@ oplib_stage_call:
                 },
             };
 
-            int rc = slm_oplib_dispatch(&b, 0,
+            int rc = slm_oplib_dispatch(b_p, 0,
                                          SLM_GPU_OP_ROPE,
                                          SLM_GPU_TIER_SIMT,
                                          SLM_GPU_DTYPE_FP16,
@@ -5473,7 +5475,7 @@ oplib_stage_call:
             shell_printf("smoke: op_kind=%u dispatching... ",
                          (unsigned)op_kind);
 
-            int rc = slm_oplib_dispatch(&b, 0, op_kind,
+            int rc = slm_oplib_dispatch(b_p, 0, op_kind,
                                          SLM_GPU_TIER_SIMT,
                                          smoke_dtype_for(op_kind),
                                          &args);
@@ -6010,7 +6012,6 @@ oplib_stage_call:
               "alloc-multi-synth | reuse-synth> | "
               "oplib]\r\n");
     return -1;
-#undef b
 }
 #endif /* PLATFORM_JETSON_ORIN_NANO */
 

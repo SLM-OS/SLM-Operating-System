@@ -1193,24 +1193,38 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
         return -1;
     }
 
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
-        h->shader_size < OPLIB_POOL_MIN_BYTES) {
-        return -1;
-    }
-    struct ga10b_bringup *b = ga10b_bringup_state();
-    if (b == NULL) {
-        return -1;
-    }
-
     /* Sizes: x is [n_rows × n] FP16, gamma is [n] FP16, out is
-     * [n_rows × n] FP16. Cap each at the 64 KB slot ceiling. */
+     * [n_rows × n] FP16. Cap each at the 64 KB slot ceiling.
+     * Validated outside the lock so the caller takes the early-exit
+     * path on shape errors without paying the IRQ-off cost. */
     uint64_t x_bytes     = (uint64_t)n_rows * n * 2u;
     uint64_t gamma_bytes = (uint64_t)n * 2u;
     uint64_t out_bytes   = x_bytes;
     if (x_bytes > OPLIB_POOL_SLOT_BYTES ||
         gamma_bytes > OPLIB_POOL_SLOT_BYTES ||
         out_bytes > OPLIB_POOL_SLOT_BYTES) {
+        return -1;
+    }
+
+    /* Serialize against the older `slm_gpu_*` FFI (which uses the
+     * same lock) and against any other concurrent caller of this
+     * shim — e.g. slm-runner's task pulling /slm/prompt messages
+     * while the shell user dispatches a smoke verb on a different
+     * task. Both ultimately mutate the inherited GPU channel
+     * (pushbuffer / semaphore / QMD pool) through `g_nvgpu_b` +
+     * `g_handoff`; without the lock the channel-state mutations
+     * race. The lock is cleared on every return path. */
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
+        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+    struct ga10b_bringup *b = ga10b_bringup_state();
+    if (b == NULL) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
         return -1;
     }
 
@@ -1250,6 +1264,7 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                  SLM_GPU_DTYPE_FP16,
                                  &args);
     if (rc < 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
         return rc;
     }
 
@@ -1257,6 +1272,8 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     cache_invalidate_range((void *)(uintptr_t)out_phys,
                            (size_t)((out_bytes + 4095u) & ~4095ull));
     memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)out_bytes);
+
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
     return 0;
 }
 
