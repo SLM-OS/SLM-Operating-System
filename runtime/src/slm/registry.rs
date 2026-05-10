@@ -521,7 +521,7 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         core::ptr::copy_nonoverlapping(data.as_ptr(), weight_ptr.as_ptr(), data.len());
     }
 
-    let entry = LoadedSlm {
+    let mut entry = LoadedSlm {
         name: clamp_name(name),
         info: parsed.info,
         vocab_size: parsed.vocab_size,
@@ -535,6 +535,21 @@ pub fn load_slm(name: &[u8], data: &[u8]) -> Result<usize, LoadError> {
         tensor_data_start: parsed.tensor_data_start,
         gpu_tensor_map: BTreeMap::new(),
     };
+
+    /* W3: stage every supported tensor into the GPU weights pool.
+     * Failures are non-fatal — `OperatorLibraryBackend::stage_tensor`
+     * returns `Err(NotAvailable)` when the helper didn't allocate a
+     * pool, the bump allocator is exhausted, or the staging backend
+     * itself is unavailable. In all those cases the tensor stays out
+     * of `gpu_tensor_map` and forward.rs's hybrid wrappers (W4-W7)
+     * fall through to the CPU path on lookup miss.
+     *
+     * SAFETY: `weight_ptr` was just returned by `alloc_pages(pages)`
+     * and `data.len()` bytes were just `copy_nonoverlapping`'d into
+     * it. The slice lives until `unload_slm` frees the pages — well
+     * past the end of this function. */
+    populate_gpu_tensor_map(&mut entry, weight_ptr, data.len());
+
     match insert_entry(entry) {
         Ok(idx) => Ok(idx),
         Err(e) => {
@@ -587,7 +602,7 @@ pub fn load_slm_take_pages(
 
     let parsed = parse_gguf_for_registry(data, c"take_pages")?;
 
-    let entry = LoadedSlm {
+    let mut entry = LoadedSlm {
         name: clamp_name(name),
         info: parsed.info,
         vocab_size: parsed.vocab_size,
@@ -601,6 +616,8 @@ pub fn load_slm_take_pages(
         tensor_data_start: parsed.tensor_data_start,
         gpu_tensor_map: BTreeMap::new(),
     };
+    /* W3: same staging pass as load_slm — see the comment there. */
+    populate_gpu_tensor_map(&mut entry, weight_ptr, data_len);
     insert_entry(entry)
 }
 
@@ -887,6 +904,101 @@ pub fn ggml_type_byte_size(ggml_type: u32, n_elements: u64) -> Option<u64> {
 /// `None` on multiplication overflow.
 fn elements_of(dims: &[u64]) -> Option<u64> {
     dims.iter().try_fold(1u64, |acc, &d| acc.checked_mul(d))
+}
+
+/// W3: walk every tensor in `entry`, stage its bytes into the GPU
+/// weights pool via `OperatorLibraryBackend::stage_tensor`, and
+/// record successes in `entry.gpu_tensor_map`. Failures (no pool,
+/// pool exhausted, staging backend currently unavailable) are
+/// silenced after the first to avoid spamming the UART when the
+/// pool simply isn't available — the diagnostic is sufficient.
+///
+/// `weight_ptr` + `weight_len` describe the same byte buffer that
+/// `entry.weight_pages` / `entry.weight_data_len` point at, just
+/// passed in directly so the caller can avoid re-deriving the
+/// slice through the (still-being-built) `LoadedSlm`.
+fn populate_gpu_tensor_map(
+    entry: &mut LoadedSlm,
+    weight_ptr: core::ptr::NonNull<u8>,
+    weight_len: usize,
+) {
+    // SAFETY: `weight_ptr` was returned by the caller's recent
+    // `alloc_pages(pages)` and `weight_len` bytes were just
+    // initialized via `copy_nonoverlapping`. The slice is read-only
+    // and tied to the local stack frame — released when the function
+    // returns. The pages stay valid for the registry slot's lifetime
+    // (we're still pre-`insert_entry`).
+    let buffer: &[u8] = unsafe {
+        core::slice::from_raw_parts(weight_ptr.as_ptr(), weight_len)
+    };
+
+    let tensor_data_start = entry.tensor_data_start;
+    let mut staged = 0usize;
+    let mut failed = 0usize;
+
+    /* Borrow `entry.tensors` separately from `entry.gpu_tensor_map`
+     * so the loop can mutate the map while iterating the slice. The
+     * slice borrow ends when this scope closes. */
+    let infos: &[OwnedTensorInfo] = entry.tensors.as_slice();
+    for info in infos {
+        let Some(range) = tensor_byte_range(info, tensor_data_start, buffer.len())
+        else {
+            /* Unsupported quant or shape overflow — skip silently;
+             * the CPU forward path will fail on its own lookup if
+             * this tensor is actually used. */
+            continue;
+        };
+        let bytes = &buffer[range];
+        match crate::inference::gpu_slm::OperatorLibraryBackend::stage_tensor(bytes) {
+            Ok(gref) => {
+                entry.gpu_tensor_map.insert(info.name.clone(), gref);
+                staged += 1;
+            }
+            Err(_) => {
+                failed += 1;
+            }
+        }
+    }
+
+    if staged > 0 {
+        unsafe {
+            kernel_ffi::uart_puts(
+                b"[slm] GPU staging: some tensors landed in the pool\n\0"
+                    .as_ptr(),
+            );
+        }
+    }
+    if failed > 0 && staged == 0 {
+        /* All tensors failed — likely no pool available. Emit a
+         * single hint so the operator knows GPU staging is inert
+         * (vs. silently passing). */
+        unsafe {
+            kernel_ffi::uart_puts(
+                b"[slm] GPU staging unavailable; forward path stays on CPU\n\0"
+                    .as_ptr(),
+            );
+        }
+    }
+}
+
+/// W3: byte range for a tensor inside the owned weight buffer,
+/// computed without needing a `LoadedSlm` reference. Used by
+/// `load_slm` to slice tensor bytes for GPU staging before the
+/// slot lands in the registry. Returns `None` on overflow,
+/// unsupported quant type, or out-of-bounds indices.
+fn tensor_byte_range(
+    info: &OwnedTensorInfo,
+    tensor_data_start: usize,
+    buffer_len: usize,
+) -> Option<core::ops::Range<usize>> {
+    let n_elements = elements_of(&info.dims)?;
+    let size = ggml_type_byte_size(info.ggml_type, n_elements)? as usize;
+    let abs_start = tensor_data_start.checked_add(info.offset as usize)?;
+    let abs_end = abs_start.checked_add(size)?;
+    if abs_end > buffer_len {
+        return None;
+    }
+    Some(abs_start..abs_end)
 }
 
 // ---------------------------------------------------------------------------
