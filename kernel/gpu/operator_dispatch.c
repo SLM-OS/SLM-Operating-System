@@ -310,9 +310,17 @@ static int embedding_build_cbuf(void *cbuf,
     /* embedding_length must fit in the dequantized capacity of the
      * row. n_blocks × 256 is the max # of FP16 outputs the row can
      * produce; passing a longer embedding_length would walk past
-     * the output buffer. */
+     * the output buffer.
+     *
+     * Widen the multiply to uint64_t so a hostile table_row_bytes
+     * near UINT32_MAX doesn't wrap n_blocks × 256 past the 32-bit
+     * boundary and falsely accept an oversize embedding_length —
+     * realistic SLM tables stay far below the wraparound, but this
+     * is a memory-safety boundary check on attacker-controllable
+     * input. */
     uint32_t n_blocks = e->table_row_bytes / EMBEDDING_Q4K_BLOCK_BYTES;
-    if (e->embedding_length > n_blocks * EMBEDDING_Q4K_BLOCK_ELEMS) {
+    if ((uint64_t)e->embedding_length >
+        (uint64_t)n_blocks * EMBEDDING_Q4K_BLOCK_ELEMS) {
         return -1;
     }
     if (e->table_gpu_va == 0 || e->out_gpu_va == 0) {
@@ -489,6 +497,13 @@ static int swiglu_build_cbuf(void *cbuf,
     if (s->n == 0) {
         return -1;
     }
+    /* Cap n so the ceil-div in `swiglu_launch_shape` can't wrap
+     * past UINT32_MAX. Realistic Qwen2.5 prefill tops out at
+     * ~16 rows × 8960 = 143 360, so this is purely defensive
+     * against pathological / hostile inputs. */
+    if (s->n > UINT32_MAX - (SWIGLU_BLOCK_DIM - 1u)) {
+        return -1;
+    }
     if (s->gate_gpu_va == 0 || s->up_gpu_va == 0 || s->out_gpu_va == 0) {
         return -1;
     }
@@ -518,6 +533,12 @@ static int swiglu_launch_shape(const struct operator_dispatch_args *args,
     }
     const struct operator_dispatch_args_swiglu *s = &args->u.swiglu;
     if (s->n == 0) {
+        return -1;
+    }
+    /* Same overflow guard as swiglu_build_cbuf — keep both paths
+     * in sync so a caller that bypassed build_cbuf can't slip a
+     * UINT32_MAX-adjacent n past the ceil-div. */
+    if (s->n > UINT32_MAX - (SWIGLU_BLOCK_DIM - 1u)) {
         return -1;
     }
 

@@ -189,6 +189,18 @@
 #define GQA_ATTN_MAX_SEQ_LEN               4096u
 /* q_cache[256]×4 + logits[4096]×4 + reduce_buf[128]×4 + 2 floats. */
 #define GQA_ATTN_SMEM_BYTES                17928u
+/* Pin the smem footprint formula at compile time so a future tweak
+ * to MAX_HEAD_DIM / MAX_SEQ_LEN / BLOCK_DIM that doesn't update
+ * GQA_ATTN_SMEM_BYTES breaks the build instead of silently under-
+ * allocating shared memory in the QMD. */
+_Static_assert(GQA_ATTN_SMEM_BYTES ==
+               (GQA_ATTN_MAX_HEAD_DIM * 4u) +
+               (GQA_ATTN_MAX_SEQ_LEN  * 4u) +
+               (GQA_ATTN_BLOCK_DIM    * 4u) +
+               (2u * 4u),
+               "GQA_ATTN_SMEM_BYTES must equal the sum of the kernel's "
+               "static __shared__ arrays (q_cache + logits + "
+               "reduce_buf + 2 broadcast scalars)");
 
 /* Per-op runtime arguments. Different op_kinds have different
  * argument shapes; the registry's cbuf-builder dispatches on
