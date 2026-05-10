@@ -99,7 +99,9 @@ int hailo_dev_desc_list_program(int fd,
     p.channel_index           = channel_index;
     p.starting_desc           = starting_desc;
     p.should_bind             = should_bind;
-    p.last_interrupts_domain  = HAILO_VDMA_INTERRUPTS_DOMAIN_HOST;
+    /* HailoRT's static-bind default is NONE; HOST is reserved for the
+     * last descriptor of an actual transfer (set on launch). */
+    p.last_interrupts_domain  = HAILO_VDMA_INTERRUPTS_DOMAIN_NONE;
     p.is_debug                = false;
     p.stride                  = 0; /* use desc_page_size */
 
@@ -140,7 +142,10 @@ int hailo_dev_launch_transfer(int fd,
                               uintptr_t desc_handle,
                               uint32_t starting_desc,
                               const void *user_addr,
-                              uint32_t transfer_size)
+                              uint32_t transfer_size,
+                              bool should_bind,
+                              enum hailo_vdma_interrupts_domain
+                                  last_interrupts_domain)
 {
     struct hailo_vdma_launch_transfer_params p;
     memset(&p, 0, sizeof(p));
@@ -148,15 +153,13 @@ int hailo_dev_launch_transfer(int fd,
     p.channel_index            = channel_index;
     p.desc_handle              = desc_handle;
     p.starting_desc            = starting_desc;
-    p.should_bind              = false;  /* buffer already bound by
-                                           * desc_list_program with
-                                           * should_bind=true */
+    p.should_bind              = should_bind;
     p.buffers_count            = 1;
     p.buffers[0].buffer_type   = HAILO_DMA_USER_PTR_BUFFER;
     p.buffers[0].addr_or_fd    = (uintptr_t)user_addr;
     p.buffers[0].size          = transfer_size;
     p.first_interrupts_domain  = HAILO_VDMA_INTERRUPTS_DOMAIN_NONE;
-    p.last_interrupts_domain   = HAILO_VDMA_INTERRUPTS_DOMAIN_HOST;
+    p.last_interrupts_domain   = last_interrupts_domain;
     p.is_debug                 = false;
 
     if (ioctl(fd, HAILO_VDMA_LAUNCH_TRANSFER, &p) < 0) return -errno;

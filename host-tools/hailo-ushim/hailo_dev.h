@@ -115,7 +115,10 @@ int hailo_dev_launch_transfer(int fd,
                               uintptr_t desc_handle,
                               uint32_t starting_desc,
                               const void *user_addr,
-                              uint32_t transfer_size);
+                              uint32_t transfer_size,
+                              bool should_bind,
+                              enum hailo_vdma_interrupts_domain
+                                  last_interrupts_domain);
 
 /*
  * Block up to `timeout_ms` waiting for an interrupt on any channel

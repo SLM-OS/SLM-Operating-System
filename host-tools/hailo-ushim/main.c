@@ -519,6 +519,13 @@ static int cmd_set_network_group_header(int fd,
  * bare-metal bringup. If it fails, we've localized to a specific
  * RPC the driver path also rejects.
  */
+#define FH_CCW_DESC_COUNT     2u
+#define FH_CCW_PAGE_SIZE      512u
+#define FH_BND_DESC_COUNT     64u
+#define FH_BND_PAGE_SIZE      4096u
+#define FH_CCW_RING_BYTES     (FH_CCW_DESC_COUNT * FH_CCW_PAGE_SIZE)
+#define FH_BND_RING_BYTES     (FH_BND_DESC_COUNT * FH_BND_PAGE_SIZE)
+
 static int cmd_full_handshake(int fd)
 {
     int rc = 0;
@@ -530,9 +537,10 @@ static int cmd_full_handshake(int fd)
     bool ccw_dh_set = false, bnd_in_dh_set = false, bnd_out_dh_set = false;
     bool ch_in_enabled = false, ch_ccw_enabled = false, ch_out_enabled = false;
 
-    long page_sz = sysconf(_SC_PAGESIZE);
-    if (page_sz <= 0) page_sz = 4096;
-    size_t map_size = (size_t)page_sz;
+    /* One mapped buffer size for all three rings — sized to the
+     * largest (boundary). Matches HailoRT's BoundaryChannel::bind_buffer()
+     * shape; CCW is harmlessly oversized. */
+    size_t map_size = FH_BND_RING_BYTES;
 
     printf("=== full-handshake: SLM-OS CS RPC chain + LAUNCH_TRANSFER ===\n");
 
@@ -642,17 +650,20 @@ static int cmd_full_handshake(int fd)
     bnd_out_mh_set = true;
 
     /* 2. Create 3 desc lists matching SLM-OS's ctxsmoke geometry. */
-    rc = hailo_dev_desc_list_create(fd, /*count=*/2, /*page=*/512, false,
+    rc = hailo_dev_desc_list_create(fd, FH_CCW_DESC_COUNT,
+                                    FH_CCW_PAGE_SIZE, false,
                                     &ccw_dh, &ccw_iova);
     if (rc < 0) { fprintf(stderr, "[2] DESC_LIST_CREATE ccw: %s\n",
         strerror(-rc)); goto cleanup; }
     ccw_dh_set = true;
-    rc = hailo_dev_desc_list_create(fd, /*count=*/64, /*page=*/4096, false,
+    rc = hailo_dev_desc_list_create(fd, FH_BND_DESC_COUNT,
+                                    FH_BND_PAGE_SIZE, false,
                                     &bnd_in_dh, &bnd_in_iova);
     if (rc < 0) { fprintf(stderr, "[2] DESC_LIST_CREATE bnd_in: %s\n",
         strerror(-rc)); goto cleanup; }
     bnd_in_dh_set = true;
-    rc = hailo_dev_desc_list_create(fd, /*count=*/64, /*page=*/4096, false,
+    rc = hailo_dev_desc_list_create(fd, FH_BND_DESC_COUNT,
+                                    FH_BND_PAGE_SIZE, false,
                                     &bnd_out_dh, &bnd_out_iova);
     if (rc < 0) { fprintf(stderr, "[2] DESC_LIST_CREATE bnd_out: %s\n",
         strerror(-rc)); goto cleanup; }
@@ -661,16 +672,21 @@ static int cmd_full_handshake(int fd)
            (unsigned long)ccw_iova, (unsigned long)bnd_in_iova,
            (unsigned long)bnd_out_iova);
 
-    /* 3. Program desc lists (binds buffer to channel). */
-    rc = hailo_dev_desc_list_program(fd, ccw_dh, ccw_mh, 0, 256,
+    /* 3. Program desc lists. HailoRT's BoundaryChannel::bind_buffer()
+     * binds the full mapped buffer (size up to desc_count *
+     * page_size), not just one frame; matching that for parity. */
+    rc = hailo_dev_desc_list_program(fd, ccw_dh, ccw_mh, 0,
+                                     FH_CCW_RING_BYTES,
                                      /*ch=*/1, 0, true);
     if (rc < 0) { fprintf(stderr, "[3] DESC_LIST_PROGRAM ccw: %s\n",
         strerror(-rc)); goto cleanup; }
-    rc = hailo_dev_desc_list_program(fd, bnd_in_dh, bnd_in_mh, 0, 784,
+    rc = hailo_dev_desc_list_program(fd, bnd_in_dh, bnd_in_mh, 0,
+                                     FH_BND_RING_BYTES,
                                      /*ch=*/2, 0, true);
     if (rc < 0) { fprintf(stderr, "[3] DESC_LIST_PROGRAM bnd_in: %s\n",
         strerror(-rc)); goto cleanup; }
-    rc = hailo_dev_desc_list_program(fd, bnd_out_dh, bnd_out_mh, 0, 16,
+    rc = hailo_dev_desc_list_program(fd, bnd_out_dh, bnd_out_mh, 0,
+                                     FH_BND_RING_BYTES,
                                      /*ch=*/16, 0, true);
     if (rc < 0) { fprintf(stderr, "[3] DESC_LIST_PROGRAM bnd_out: %s\n",
         strerror(-rc)); goto cleanup; }
@@ -762,7 +778,9 @@ static int cmd_full_handshake(int fd)
      * declare enough buffering. Sticking with 256 B for the known-
      * working case; tune later if needed. */
     printf("[7b] LAUNCH_TRANSFER ch=1 (CCW upload, 256 B real MNIST)...\n");
-    rc = hailo_dev_launch_transfer(fd, 1, ccw_dh, 0, ccw_buf, 256);
+    rc = hailo_dev_launch_transfer(fd, 1, ccw_dh, 0, ccw_buf, 256,
+                                   /*should_bind=*/false,
+                                   HAILO_VDMA_INTERRUPTS_DOMAIN_HOST);
     if (rc < 0) {
         fprintf(stderr, "[7b] ch=1 LAUNCH_TRANSFER: %s\n", strerror(-rc));
         goto cleanup;
@@ -788,15 +806,20 @@ static int cmd_full_handshake(int fd)
     /* 7c. Pre-arm output channel 16 with a LAUNCH_TRANSFER. HailoRT's
      * order per the VDMA trace is: pre-arm output BEFORE input. */
     printf("[7c] LAUNCH_TRANSFER ch=16 (bnd_out pre-arm)...\n");
-    rc = hailo_dev_launch_transfer(fd, 16, bnd_out_dh, 0, bnd_out_buf, 16);
+    rc = hailo_dev_launch_transfer(fd, 16, bnd_out_dh, 0, bnd_out_buf, 16,
+                                   /*should_bind=*/false,
+                                   HAILO_VDMA_INTERRUPTS_DOMAIN_HOST);
     if (rc < 0) {
         fprintf(stderr, "[7c] ch=16 LAUNCH_TRANSFER: %s\n", strerror(-rc));
         goto cleanup;
     }
 
-    /* 8. LAUNCH_TRANSFER on channel 2. */
+    /* 8. LAUNCH_TRANSFER on channel 2. should_bind=false because the
+     * desc list was already statically bound at step 3. */
     printf("[8] LAUNCH_TRANSFER on channel 2 (boundary input)...\n");
-    rc = hailo_dev_launch_transfer(fd, 2, bnd_in_dh, 0, bnd_in_buf, 784);
+    rc = hailo_dev_launch_transfer(fd, 2, bnd_in_dh, 0, bnd_in_buf, 784,
+                                   /*should_bind=*/false,
+                                   HAILO_VDMA_INTERRUPTS_DOMAIN_HOST);
     if (rc < 0) {
         fprintf(stderr, "[8] LAUNCH_TRANSFER: %s\n", strerror(-rc));
         goto cleanup;
@@ -1023,7 +1046,9 @@ static int cmd_submit_probe(int fd)
     rc = hailo_dev_launch_transfer(fd, PROBE_CHANNEL_INDEX,
                                    desc_handle, /*starting_desc=*/0,
                                    user_buf,
-                                   (uint32_t)buf_size);
+                                   (uint32_t)buf_size,
+                                   /*should_bind=*/false,
+                                   HAILO_VDMA_INTERRUPTS_DOMAIN_HOST);
     if (rc < 0) {
         fprintf(stderr, "[6] HAILO_VDMA_LAUNCH_TRANSFER failed: %s\n",
                 strerror(-rc));
