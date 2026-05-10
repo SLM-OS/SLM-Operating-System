@@ -761,6 +761,16 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
             WARN("hailo: post-boot D3hot transition failed (rc=%d) — "
                  "skipping cycle", pm_rc);
         } else {
+            /* #682 hyp-S (disconfirmed 2026-05-09): tested a 1 s
+             * D3hot dwell (matching Linux's seconds-long probe→open
+             * idle window) before D0 restore. ch=2 wedge persists
+             * with identical signature; the dwell window is not
+             * the gating signal. Notably, ECC notifications
+             * escalated to CPU_ECC_FATAL on multiple checkpoints
+             * during the test — same severity-aggravation pattern
+             * as hyp-N2 (D3hot before IDENTIFY). Restored back-to-
+             * back round-trip; the existing 10 ms intra-call
+             * udelay is sufficient. */
             pm_rc = hailo_platform->set_power_state(0); /* D0 */
             if (pm_rc != HAILO_OK) {
                 WARN("hailo: D3hot→D0 restore failed (rc=%d) — device "
