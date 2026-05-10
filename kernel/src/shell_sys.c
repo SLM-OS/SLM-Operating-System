@@ -4023,6 +4023,7 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_channel_handoff.h"
 #include "../gpu/nvidia/ga10b_gmmu.h"
 #include "oplib_pool.h"
+#include "oplib_probe.h"
 #include "oplib_dispatch.h"
 /* cache_clean_range / pmm_alloc_page are already pulled in via the
  * earlier `gpu/gpu.h` and top-level `pmm.h` includes. Don't add
@@ -4557,6 +4558,15 @@ oplib_stage_call:
             }
             shell_printf("oplib stage: ok, gpu_va_base=0x%lx\r\n",
                          (unsigned long)oplib_pool_gpu_va_base());
+            /* #714 §B.2: walk every registered op_kind, validate the
+             * dispatcher metadata accepts a representative fixture,
+             * and flip TIER_TABLE entries from Cpu to Simt for the
+             * ones that pass. Prints a one-line summary. The probe
+             * must fire AFTER staging because B.3's hardware-execute
+             * variant will fire each op against the staged SASS;
+             * locating the call here keeps the static + future-
+             * hardware probe paths in the same place. */
+            (void)oplib_probe_run();
             return 0;
         }
         if (strcmp(argv[2], "probe") == 0) {

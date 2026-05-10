@@ -239,6 +239,9 @@ int test_suite_oplib_pool(void);
 /* Per-op dispatch metadata registry tests (#714, A.2). */
 int test_suite_operator_dispatch(void);
 
+/* Boot-time op-tier probe tests (#714, B.2). */
+int test_suite_oplib_probe(void);
+
 /* GPU dispatch circuit-breaker tests (#552 mitigation, PR #555). */
 int test_suite_gpu_dispatch_breaker(void);
 
