@@ -110,6 +110,14 @@ enum hailo_control_cpu {
 #define HAILO_PCIE_NNC_FW_CONTROL_IRQ            0x04u
 #define HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT    \
     (HAILO_PCIE_NNC_FW_CONTROL_IRQ << HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT)
+/* Mirrors HAILO_PCIE_BOOT_IRQ in pcie_common.h (sw bit 0x2). Raised
+ * by fw after a successful boot. Linux's hailo_pcie_read_interrupt
+ * read-and-clears it from BCS_ISTATUS_HOST as part of normal IRQ
+ * dispatch; SLM-OS polls ATR[1] for the FW_LOADED magic instead, so
+ * the bit stays asserted unless we W1C it explicitly. */
+#define HAILO_PCIE_BOOT_IRQ                      0x02u
+#define HAILO_BCS_ISTATUS_HOST_BOOT_IRQ_BIT      \
+    (HAILO_PCIE_BOOT_IRQ << HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT)
 
 /* Subset of HailoRT's HAILO_CONTROL_OPCODE_*. Add more as the
  * kernel learns to send them. */
@@ -126,8 +134,27 @@ enum hailo_control_opcode {
     HAILO_CONTROL_OPCODE_RUN_BIST_TEST                        = 0x3C,
     HAILO_CONTROL_OPCODE_CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS = 0x47,
     HAILO_CONTROL_OPCODE_GET_HW_CONSTS                        = 0x48,
+    HAILO_CONTROL_OPCODE_CHANGE_HW_INFER_STATUS               = 0x4A,
     /* Full table in ~/slmos-ref/hailo/hailort-control-protocol.h. */
 };
+
+#ifdef HAILO_HYP_A_RPC
+/* CHANGE_HW_INFER_STATUS state values (mirrors HailoRT
+ * CONTROL_PROTOCOL__hw_infer_state_t). hyp-A was disconfirmed
+ * (2026-05-08); declarations are gated behind HAILO_HYP_A_RPC so the
+ * dead reference RPC doesn't ship in production. */
+enum hailo_hw_infer_state {
+    HAILO_HW_INFER_STATE_START = 0,
+    HAILO_HW_INFER_STATE_STOP  = 1,
+};
+
+/* CHANGE_HW_INFER_STATUS boundary_channel_mode values (mirrors
+ * HailoRT CONTROL_PROTOCOL__boundary_channel_mode_t). */
+enum hailo_boundary_channel_mode {
+    HAILO_BOUNDARY_CHANNEL_MODE_DESC = 0,
+    HAILO_BOUNDARY_CHANNEL_MODE_CCB  = 1,
+};
+#endif /* HAILO_HYP_A_RPC */
 
 /* CONTROL_PROTOCOL__communication_type_t values.
  * Mirrored from hailort-control-protocol.h:1522. We only use PCIE
@@ -668,6 +695,23 @@ int hailo_control_context_switch_clear_configured_apps(void);
 int hailo_control_get_hw_consts(uint32_t *out_response_len);
 
 /*
+ * Accessor for the static BSS response body of the most recent
+ * GET_HW_CONSTS call. Useful for HAILO_WIRE_DEBUG dumps that need to
+ * run *after* the caller's timing window has closed — any uart_printf
+ * inside hailo_control_get_hw_consts itself would be bracketed by the
+ * caller's timer reads and skew measurements (51 B body → 5 hex lines
+ * → ~21 ms at 115200 baud). The buffer is `out_capacity` bytes; the
+ * meaningful prefix is the `*out_response_len` returned by the most
+ * recent get_hw_consts call.
+ *
+ * Both pointers may be NULL if the caller wants only one. The buffer
+ * remains valid until the next GET_HW_CONSTS call (writer is serialized
+ * under control_lock).
+ */
+void hailo_control_get_hw_consts_response_body(const uint8_t **out_body,
+                                               uint32_t       *out_capacity);
+
+/*
  * CORE_IDENTIFY (opcode 0x2A, CPU_ID_CORE_CPU). Empty-body liveness
  * probe. Firmware responds with its fw_version ({major, minor,
  * revision} u32s). If the CORE CPU's RPC thread is alive, it responds
@@ -755,19 +799,24 @@ int hailo_control_run_bist_test(bool     is_top_test,
 int hailo_control_arm_irq_masks(void);
 
 /*
- * Mirror of hailo_pcie_disable_interrupts. Writes 0 to BSC_IMASK_HOST
- * and clears the "armed" flag so a follow-up arm call re-runs the
- * register writes. Linux disables IMASK_HOST after load_firmware
- * completes (see hailo_activate_board), then re-enables it later from
- * the user-space open() path. SLM-OS uses this in the boot path
- * (HAILO_IRQ_CYCLE_AT_BOOT) to replicate the disable→re-enable cycle
- * around the post-boot D3hot transition.
+ * #682 hyp-N (2026-05-09): mirror Linux's hailo_disable_interrupts
+ * after BOOT_IRQ. Writes IMASK_HOST=0 and clears the arm flag so the
+ * next call to hailo_control_arm_irq_masks runs the full re-arm
+ * sequence (which currently early-returns when the flag is set).
+ * Linux disables IMASK after BOOT_IRQ and re-enables on first open();
+ * SLM-OS calls this from hailo_boot() right after the BOOT_IRQ ack,
+ * and control_post_boot_init re-arms on the first FW_CONTROL RPC.
  *
- * Per-channel SRC/DST IRQ masks are NOT cleared here — Linux's
- * disable path leaves them armed too. Safe to call on platforms with
- * no MMIO (no-op).
+ * Also used under HAILO_IRQ_CYCLE_AT_BOOT to wrap a disable→re-enable
+ * cycle around the post-boot D3hot transition (replaces the older
+ * hailo_control_disable_imask name from PR #695). Per-channel SRC/DST
+ * IRQ masks are NOT cleared here — Linux's disable path leaves them
+ * armed too.
+ *
+ * Returns HAILO_OK on success, or HAILO_ERR_NODEV if the platform
+ * shim isn't wired up (e.g., test stub).
  */
-void hailo_control_disable_imask(void);
+int hailo_control_disarm_irq_masks(void);
 
 /*
  * #682 hypothesis-1 diagnostic. Reads back the four interrupt-state
@@ -781,6 +830,37 @@ void hailo_control_disable_imask(void);
  * I/O on the load/run hot paths.
  */
 void hailo_control_dump_irq_state(const char *label);
+
+#ifdef HAILO_HYP_A_RPC
+/*
+ * #682 hyp-A (2026-05-08, disconfirmed): CHANGE_HW_INFER_STATUS RPC.
+ * Targets CORE CPU. Used by HailoRT's hw-only benchmark mode to start
+ * internal inference (where fw generates synthetic input). Tested as
+ * a "wake up the DYNAMIC context's APPLICATION_CHANGE_INTERRUPT wait"
+ * experiment — fw's pios_DYNAMIC.bin ends with action 0x15 (waiting
+ * for an app-change signal). RPC was rejected with status
+ * 0x400300ca/0x40000001; HW-only mode requires special HEF state not
+ * applicable to streaming inference. Gated behind HAILO_HYP_A_RPC so
+ * production builds don't ship the dead RPC; flip the build flag if
+ * a future fw version honours it. The wire layout (`_Static_assert`s
+ * in the .c file) and the comment trail are why we keep this around.
+ *
+ * `state`: HAILO_HW_INFER_STATE_START or _STOP.
+ * `app_idx`: network group index (0 for our single-NG MNIST).
+ * `dynamic_batch_size` / `batch_count`: for the experiment, both 1.
+ * `boundary_mode`: HAILO_BOUNDARY_CHANNEL_MODE_DESC for descriptor-
+ *   based (matches our setup); _CCB for circular-credit mode.
+ * The host-side channels_info struct is sent ALL ZEROS (channel_count=0)
+ * since we don't have desc_programed counts to populate; whether fw
+ * accepts that is itself the experimental signal.
+ */
+int hailo_control_change_hw_infer_status(
+    enum hailo_hw_infer_state         state,
+    uint8_t                           app_idx,
+    uint16_t                          dynamic_batch_size,
+    uint16_t                          batch_count,
+    enum hailo_boundary_channel_mode  boundary_mode);
+#endif /* HAILO_HYP_A_RPC */
 
 /*
  * Pre-boot MSI registration. Linux's hailo_pcie_enable_interrupts

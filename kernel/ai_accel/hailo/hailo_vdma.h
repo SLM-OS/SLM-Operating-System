@@ -413,26 +413,14 @@ int hailo_vdma_channel_wait_proc(uint8_t channel_index,
                                  uint32_t timeout_us);
 
 /*
- * OR `ctrl_mask` (lower 8 bits of page_size_desc_control) into the
- * first descriptor of `list`. Mirrors the reference driver's pattern
- * in hailo_vdma_launch_transfer (hailo-vdma-common.c:505-506):
- *
- *   desc_list->desc_list[first_desc].PageSize_DescControl |=
- *       get_interrupts_bitmask(vdma_hw, first_interrupts_domain, ...);
- *
- * For boundary transfers the typical choice is the DEVICE-side IRQ
- * bitmask (0x10 | 0x04 | 0x08 = 0x1C) so the NPU's DMA engine sees
- * "new transfer starting here". Pair with the LAST descriptor's
- * HOST-side bits set at program time to close the round-trip.
- *
- * Cache-flushes the descriptor after the OR so fw reads the new
- * control byte. Safe to call multiple times; idempotent on already-
- * set bits.
- *
- * Returns HAILO_OK / HAILO_ERR_INVAL.
+ * #682 step-through diagnostic: dump host + device register blocks
+ * for the four inference-path channels (ch=0/1/2/16) with the supplied
+ * label. Call between RPCs in load() / run() to capture fw's view of
+ * channel state at each phase boundary. Each invocation prints 9
+ * lines (header + 4 channels × 2 sides). Cheap enough to leave at
+ * many call sites; gate via HAILO_WIRE_DEBUG at the call site since
+ * the helper itself doesn't.
  */
-int hailo_vdma_arm_first_desc_irq(struct hailo_vdma_desc_list *list,
-                                  uint32_t starting_desc,
-                                  uint32_t ctrl_mask);
+void hailo_vdma_snap_channels(const char *label);
 
 #endif /* AI_ACCEL_HAILO_VDMA_H */

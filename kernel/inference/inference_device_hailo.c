@@ -40,6 +40,7 @@
 #include "hailo_control.h"
 #include "hailo_cs_translator.h"
 #include "hailo_infer.h"
+#include "hailo_internal.h"
 #include "hailo_tensor.h"
 #include "hailo_vdma.h"
 #include "hef_header.h"
@@ -425,6 +426,74 @@ static bool hailo_fw_dump_d2h_notification_once(void)
 #define HAILO_HAILORT_GAP_POST_CLEAR_APPS_US   5000u /* HailoRT: 4.5 ms */
 #define HAILO_HAILORT_GAP_POST_DYNAMIC_US      3000u /* HailoRT: 2.8 ms */
 #define HAILO_HAILORT_GAP_POST_SETTLE_PINGS_US 2000u /* HailoRT: 1.6 ms */
+
+/* #682 hyp-Q (2026-05-09): minimum-gap pre-RPC pacing for every
+ * CORE-CPU control call in the load sequence. Each CORE-CPU RPC
+ * touches SAGE1_ISP and fires CPU_ECC_FATAL if fw's async post-RPC
+ * init hasn't finished. Linux's HailoRT achieves the gap incidentally
+ * via user-space scheduling latency (seconds between RPCs from
+ * vstreams library) — we shouldn't replicate the sketch with a fixed
+ * unconditional sleep. Instead track the absolute timestamp of the
+ * last RPC and only wait the difference needed to reach the floor.
+ *
+ * Floor calibration (initial guess): 50 ms. The boot-time ECC fix
+ * needed 500 ms after BOOT_IRQ; load-time RPCs likely need less
+ * because fw's SAGE1_ISP zero-init is mostly done by then. Bisect
+ * down once the load completes cleanly without ECCs. The previous
+ * uniform 10 ms unconditional delay did NOT suppress load-time
+ * ECCs, so 10 ms is known too short. Tracking: #761. */
+#define HAILO_CORE_CPU_SETTLE_FLOOR_US       50000u /* 50 ms */
+/*
+ * Serialization: this anchor is touched only from `context_switch_load`
+ * and `hailo_backend_run`, both of which run under the inference-layer
+ * slot lock (one model load + one inference at a time). Every writer
+ * also holds `control_lock` for the duration of its CORE-CPU RPC, so
+ * the read-modify-stamp dance below is implicitly single-threaded.
+ * Do not call `hailo_core_cpu_settle()` from a path that bypasses both
+ * locks without revisiting this assumption.
+ */
+static uint64_t hailo_core_cpu_settle_anchor_ticks = 0;
+
+static bool hailo_core_cpu_settle_armed = false;
+
+static inline void hailo_core_cpu_settle(void)
+{
+    if (!hailo_platform || !hailo_platform->udelay) return;
+
+    uint64_t freq = timer_get_frequency();
+    if (!freq) {
+        /* Timer not ready — fall back to unconditional floor wait. */
+        hailo_platform->udelay(HAILO_CORE_CPU_SETTLE_FLOOR_US);
+        return;
+    }
+
+    /* First call after boot: the 500 ms post-BOOT_IRQ settle in
+     * `hailo_boot` already gave fw plenty of idle, so don't add
+     * another floor wait here. Just arm the anchor for subsequent
+     * calls. Use an explicit boolean rather than (anchor_ticks == 0)
+     * because CNTPCT_EL0 wraps to zero ~292 years after reset on a
+     * 1 GHz timer, which is theoretically a sentinel collision —
+     * unreachable on real hardware but trivially avoidable. */
+    if (hailo_core_cpu_settle_armed) {
+        uint64_t now = timer_get_count();
+        if (now > hailo_core_cpu_settle_anchor_ticks) {
+            uint64_t elapsed_us = (now - hailo_core_cpu_settle_anchor_ticks)
+                                  * 1000000ULL / freq;
+            if (elapsed_us < HAILO_CORE_CPU_SETTLE_FLOOR_US) {
+                uint32_t wait_us = HAILO_CORE_CPU_SETTLE_FLOOR_US -
+                                   (uint32_t)elapsed_us;
+                hailo_platform->udelay(wait_us);
+            }
+        }
+    }
+
+    /* Stamp anchor at the start of this RPC. Slightly less precise
+     * than stamping at end (RPC-duration is rolled into the gap),
+     * but RPC durations are <5 ms (CLEAR_APPS is the longest); the
+     * floor is much larger so this is fine. */
+    hailo_core_cpu_settle_anchor_ticks = timer_get_count();
+    hailo_core_cpu_settle_armed = true;
+}
 
 /* Drain pending notifications: for each one, dump it, ACK the buffer,
  * then delay a little so fw can write the next queued event before we
@@ -823,6 +892,77 @@ static int copy_ccws_for_cfg_channel(
     }
     return (int)off;
 }
+
+#ifdef HAILO_WIRE_DEBUG
+/* #682 hyp-7 diagnostic: snapshot fw's BAR4 SRAM (the ATR0-mapped
+ * 16 KB control window) at pre-IN-submit and post-timeout, then
+ * dword-diff. If proc never advances AND BAR4 contents are unchanged,
+ * fw is genuinely doing nothing during the 500 ms wait. If BAR4
+ * changes despite proc=0, fw is actively touching memory we don't
+ * normally inspect — pinpointing the changed offsets gives the next
+ * lead.
+ *
+ * Static BSS allocation (32 KB) avoids stack pressure and works on
+ * any platform where bar4_read is implemented.
+ */
+#define HAILO_BAR4_SNAP_SIZE 0x4000u
+static uint8_t hailo_bar4_snap_pre[HAILO_BAR4_SNAP_SIZE];
+static uint8_t hailo_bar4_snap_post[HAILO_BAR4_SNAP_SIZE];
+
+static void hailo_bar4_snap(uint8_t *out)
+{
+    if (!hailo_platform || !hailo_platform->bar4_read) return;
+    hailo_platform->bar4_read(0, out, HAILO_BAR4_SNAP_SIZE);
+}
+
+static void hailo_bar4_diff_print(const char *label)
+{
+    const uint32_t *a = (const uint32_t *)(const void *)hailo_bar4_snap_pre;
+    const uint32_t *b = (const uint32_t *)(const void *)hailo_bar4_snap_post;
+    size_t words = HAILO_BAR4_SNAP_SIZE / 4;
+    int diffs = 0;
+    /* Region buckets so we can see the shape at a glance:
+     *  +0x0000..0x063F  control RPC
+     *  +0x0640..0x0C7F  control response
+     *  +0x0C80..0x1FFF  d2h ring + undocumented state
+     *  +0x2000..0x2FFF  APP CPU debug log (header + data)
+     *  +0x3000..0x3FFF  CORE CPU debug log
+     */
+    int n_ctrl = 0, n_resp = 0, n_d2h = 0, n_app_log = 0, n_core_log = 0;
+    /* Print every diff OUTSIDE the debug log regions (those are
+     * fw printf spam, expected). Inside the debug log regions
+     * just count. */
+    for (size_t i = 0; i < words; i++) {
+        if (a[i] != b[i]) {
+            unsigned off = (unsigned)(i * 4);
+            bool in_app_log  = (off >= 0x2000u && off < 0x3000u);
+            bool in_core_log = (off >= 0x3000u && off < 0x4000u);
+            if (in_app_log) {
+                n_app_log++;
+            } else if (in_core_log) {
+                n_core_log++;
+            } else if (off < 0x640u) {
+                n_ctrl++;
+            } else if (off < 0xC80u) {
+                n_resp++;
+            } else {
+                n_d2h++;
+            }
+
+            if (!in_app_log && !in_core_log) {
+                uart_printf("[bar4-diff] %s +0x%04x: 0x%08x -> 0x%08x\r\n",
+                            label, off,
+                            (unsigned)a[i], (unsigned)b[i]);
+            }
+            diffs++;
+        }
+    }
+    uart_printf("[bar4-diff] %s buckets ctrl=%d resp=%d d2h+state=%d "
+                "app_log=%d core_log=%d  total=%d\r\n",
+                label, n_ctrl, n_resp, n_d2h,
+                n_app_log, n_core_log, diffs);
+}
+#endif /* HAILO_WIRE_DEBUG */
 
 /* The full 6-step load sequence. Called from load_model after the
  * slot has been claimed and shapes stored. Returns HAILO_OK on
@@ -1264,7 +1404,14 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * pre-configure handshake before accepting network-group-
      * level setup. */
     cs_load_stage_set(50);
+    /* Pre-RESET settle: pings (#361) warm up fw state via APP-CPU
+     * IDENTIFY + GET_DEVICE_INFO; the wall-clock floor (#682 hyp-Q)
+     * then guarantees a minimum gap to the RESET RPC. The two are
+     * complementary — pings give fw a chance to do init work; the
+     * floor catches paths where the pings themselves return faster
+     * than the floor. */
     context_switch_settle_pings("RESET");
+    hailo_core_cpu_settle();
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_RESET,
             HAILO_CS_IGNORE_APPLICATION_INDEX,
@@ -1285,6 +1432,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * default builds — hence the HAILO_WIRE_DEBUG gate. */
     uart_printf("[bisect] post RESET:\r\n");
     hailo_fw_drain_d2h_notifications(2);
+    hailo_vdma_snap_channels("post-RESET");
 #endif
     cs_load_stage_set(51);
 
@@ -1294,7 +1442,18 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * reads hardware constants firmware needs to have handy
      * before it can validate subsequent context-switch bytes. */
     context_switch_settle_pings("CLEAR_CONFIGURED_APPS");
+    hailo_core_cpu_settle();
+    /* #682 (2026-05-09): time CLEAR_APPS — Linux's response is 4.4 ms
+     * (longest single RPC in init); if SLM-OS's is much shorter, fw
+     * isn't doing the same internal work (likely SAGE init). */
+    uint64_t t_clear_start = timer_get_count();
     rc = hailo_control_context_switch_clear_configured_apps();
+    uint64_t t_clear_end = timer_get_count();
+    uint64_t clear_us = (t_clear_end - t_clear_start) * 1000000ULL
+                         / timer_get_frequency();
+    uart_printf("[hailo] CLEAR_CONFIGURED_APPS rc=%d latency=%lu us "
+                "(Linux baseline: ~4400 us)\r\n",
+                rc, (unsigned long)clear_us);
     if (rc != HAILO_OK) {
         WARN("hailo backend: CLEAR_CONFIGURED_APPS failed (rc=%d)", rc);
         goto fail;
@@ -1302,6 +1461,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #ifdef HAILO_WIRE_DEBUG
     uart_printf("[bisect] post CLEAR_CONFIGURED_APPS:\r\n");
     hailo_fw_drain_d2h_notifications(2);
+    hailo_vdma_snap_channels("post-CLEAR_APPS");
     /* #253 (2026-04-23): HailoRT's wire capture shows a 4.5 ms wall-
      * clock gap after CLEAR_APPS before the next RPC. Try matching. */
     if (hailo_platform && hailo_platform->udelay) {
@@ -1321,18 +1481,74 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * load-bearing; next concrete delta is APP-CPU settle pings. */
     context_switch_settle_pings("GET_HW_CONSTS");
     uint32_t hw_consts_len = 0;
-    rc = hailo_control_get_hw_consts(&hw_consts_len);
-    if (rc != HAILO_OK) {
-        WARN("hailo backend: GET_HW_CONSTS failed (rc=%d)", rc);
-        goto fail;
+    /* #682 hyp-M (2026-05-09): Linux's HailoRT calls GET_HW_CONSTS
+     * SIX times back-to-back during init (Pi OS inference trace
+     * 2026-05-09, ~165 µs each, no other RPCs interleaved). SLM-OS
+     * called it 1×; an earlier `[Hailo #361]` test of 4× was
+     * disconfirmed but the actual reference count is 6. The body is
+     * empty (20 B request, 51 B response with HW const struct), so
+     * the cost is small and the gain — if any — is whatever fw
+     * state-machine settling 6× back-to-back affords. Per
+     * convention with the settle delay, leave 6× in tree once the
+     * device is operational; revisit / minimize via bisect later. */
+    for (uint32_t hw_consts_iter = 0; hw_consts_iter < 6u; hw_consts_iter++) {
+        hailo_core_cpu_settle();
+        uint64_t t_hw_start = timer_get_count();
+        rc = hailo_control_get_hw_consts(&hw_consts_len);
+        uint64_t t_hw_end = timer_get_count();
+        uint64_t hw_us = (t_hw_end - t_hw_start) * 1000000ULL
+                         / timer_get_frequency();
+        uart_printf("[hailo] GET_HW_CONSTS [%u/6] rc=%d resp_len=%u "
+                    "latency=%lu us\r\n",
+                    (unsigned)(hw_consts_iter + 1u), rc,
+                    (unsigned)hw_consts_len, (unsigned long)hw_us);
+        if (rc != HAILO_OK) {
+            WARN("hailo backend: GET_HW_CONSTS [%u/6] failed (rc=%d)",
+                 (unsigned)(hw_consts_iter + 1u), rc);
+            goto fail;
+        }
+#ifdef HAILO_WIRE_DEBUG
+        /* Phase 8 #253 / #682: dump the raw response body for off-line
+         * decode. Runs AFTER t_hw_end so the ~21 ms of UART output
+         * doesn't contaminate the latency measurement (the Linux
+         * baseline is ~165 µs per call; mixing the dump into the timed
+         * window made our calls look 100× slower than they actually
+         * were). HailoRT v4.23 control_protocol.h declares the body as
+         * fifo_word_granularity_bytes (u32 BE) + max_periph_buffers_per_frame
+         * (u16) + max_periph_bytes_per_buffer (u16) + max_acceptable_bytes
+         * (u16) + outbound_data_stream_size (u32) + should_optimize_credits
+         * (u8) + default_initial_credit_size (u32), each as a 4-B
+         * BE-length-prefixed param. Only the last iteration is dumped
+         * to keep the boot log short — fw response is identical across
+         * the 6 calls per Pi OS trace. */
+        if (hw_consts_iter == 5u && hw_consts_len > 0) {
+            const uint8_t *body = NULL;
+            uint32_t       body_cap = 0;
+            hailo_control_get_hw_consts_response_body(&body, &body_cap);
+            uint32_t body_len = hw_consts_len < body_cap
+                                ? hw_consts_len : body_cap;
+            uart_printf("[hw_consts] response body %u bytes:\r\n",
+                        (unsigned)body_len);
+            for (uint32_t i = 0; body && i < body_len; i += 16) {
+                uart_printf("[hw_consts] [%03x]:", (unsigned)i);
+                uint32_t end = (i + 16 > body_len) ? body_len : (i + 16);
+                for (uint32_t j = i; j < end; j++) {
+                    uart_printf(" %02x", body[j]);
+                }
+                uart_printf("\r\n");
+            }
+        }
+#endif
     }
 #ifdef HAILO_WIRE_DEBUG
     uart_printf("[bisect] post GET_HW_CONSTS:\r\n");
     hailo_fw_drain_d2h_notifications(2);
+    hailo_vdma_snap_channels("post-GET_HW_CONSTS");
 #endif
     cs_load_stage_set(53);
 
     context_switch_settle_pings("SET_NETWORK_GROUP_HEADER");
+    hailo_core_cpu_settle();
     rc = hailo_control_set_network_group_header(&hdr);
     if (rc != HAILO_OK) {
         WARN("hailo backend: SET_NETWORK_GROUP_HEADER failed (rc=%d)", rc);
@@ -1341,6 +1557,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #ifdef HAILO_WIRE_DEBUG
     uart_printf("[bisect] post SET_NETWORK_GROUP_HEADER:\r\n");
     hailo_fw_drain_d2h_notifications(2);
+    hailo_vdma_snap_channels("post-NET_GROUP_HDR");
 #endif
     cs_load_stage_set(53);
 
@@ -1426,6 +1643,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
     for (uint32_t i = 0; i < sizeof(ctxs) / sizeof(ctxs[0]); i++) {
         cs_load_stage_set(60 + (int)i * 2);     /* 60, 62, 64, 66 per context */
         context_switch_settle_pings(ctxs[i].name);
+        hailo_core_cpu_settle();
         rc = hailo_control_set_context_info(ctxs[i].type,
                                             ctxs[i].bytes, ctxs[i].len);
         if (rc != HAILO_OK) {
@@ -1441,6 +1659,14 @@ static int context_switch_load(struct hailo_model_slot *slot,
 #ifdef HAILO_WIRE_DEBUG
         uart_printf("[bisect] post SET_CONTEXT_INFO(%s):\r\n", ctxs[i].name);
         hailo_fw_drain_d2h_notifications(2);
+        {
+            const char *snap_labels[] = {
+                "post-CTX_ACTIVATION", "post-CTX_BATCH_SWITCHING",
+                "post-CTX_PRELIMINARY", "post-CTX_DYNAMIC"
+            };
+            hailo_vdma_snap_channels(
+                (i < 4u) ? snap_labels[i] : "post-CTX_?");
+        }
 #endif
         cs_load_stage_set(61 + (int)i * 2);
 
@@ -1460,6 +1686,11 @@ static int context_switch_load(struct hailo_model_slot *slot,
     }
 #endif
 
+    /* #682 hyp-F (2026-05-08): Pi OS HailoRT kprobe shows 4 APP-CPU
+     * settle pings (GDI, ID, GDI, ID) BETWEEN SET_CONTEXT_INFO(DYNAMIC)
+     * and CHANGE_STATUS(ENABLED). Tested unconditionally on pi-5-1 —
+     * disconfirmed (ch=2 still stalls with proc=0). Reverted. */
+
     cs_load_stage_set(70);                      /* about to CHANGE_STATUS(ENABLED) */
     context_switch_settle_pings("CHANGE_STATUS_ENABLED");
     /* Pi OS wire capture (2026-04-22, HailoRT v4.23.0 MNIST on pi-5-1
@@ -1474,6 +1705,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * gated the boundary dataflow on a state machine transition that
      * never fired from our host writes, leaving num_proc pinned at 0
      * on the boundary channels. */
+    hailo_core_cpu_settle();
     rc = hailo_control_change_context_switch_status(
             HAILO_CS_STATE_ENABLED,
             /*application_index=*/0,
@@ -1490,6 +1722,7 @@ static int context_switch_load(struct hailo_model_slot *slot,
     hailo_vdma_dump_channel_regs(2, "[682-cp3] post ENABLED");
     uart_printf("[bisect] post CHANGE_STATUS(ENABLED):\r\n");
     hailo_fw_drain_d2h_notifications(2);
+    hailo_vdma_snap_channels("post-ENABLED");
 
     /* #253 (2026-04-23): HailoRT's wire capture shows 2× (GET_DEVICE_INFO
      * + IDENTIFY) interleaved after CHANGE_STATUS(ENABLED) and before the
@@ -1604,7 +1837,17 @@ static int context_switch_load(struct hailo_model_slot *slot,
      * baseline — if any of the 32 SRC/DST bits flipped, fw is
      * clearing them on us. */
     hailo_control_dump_irq_state("post-load");
+    /* #682 hypothesis-6: re-check the trained link speed after the
+     * full load completes. A step-down between post-boot-arm and
+     * post-load indicates the link drops during context-switch RPCs. */
+    hailo_platform_log_link_state("post-load");
 #endif
+
+    /* #682 hyp-F2 (2026-05-08): Pi OS HailoRT kprobe placed the
+     * second set of (GDI, ID, GDI, ID) AFTER CCW upload and BEFORE
+     * the first inference. Tested at this position — also
+     * disconfirmed (ch=2 still stalls). Reverted. */
+
     cs_load_stage_set(71);
     INFO("hailo backend: context-switch load OK (CCW=%u B, IN=%u B, OUT=%u B)",
          ccw_bytes,
@@ -2052,6 +2295,9 @@ static int hailo_backend_run(struct inference_device *dev,
      * out_num_avail from program_buffer above is the count for ONE
      * descriptor; we ignore it here and pre-arm
      * HAILO_BOUNDARY_OUT_PREFETCH_DEPTH credits sequentially. */
+#ifdef HAILO_WIRE_DEBUG
+    hailo_vdma_snap_channels("pre-OUT-prefetch");
+#endif
     for (uint16_t i = 0; i < HAILO_BOUNDARY_OUT_PREFETCH_DEPTH; i++) {
         if (i > 0) {
             (void)hailo_vdma_program_buffer(
@@ -2062,6 +2308,9 @@ static int hailo_backend_run(struct inference_device *dev,
         }
         (void)hailo_vdma_write_num_avail(out_channel, (uint16_t)(i + 1));
     }
+#ifdef HAILO_WIRE_DEBUG
+    hailo_vdma_snap_channels("post-OUT-prefetch");
+#endif
     /* `out_num_avail` from program_buffer above is the desc count fw
      * is expected to *consume* for one inference (== 1 for our single-
      * desc OUT). Keep that as the wait target — even though we
@@ -2083,6 +2332,63 @@ static int hailo_backend_run(struct inference_device *dev,
      * means fw never tried to fetch; root cause is upstream of the
      * channel-arming/IRQ layer. */
     hailo_control_dump_irq_state("pre-IN-submit");
+    /* #682 hypothesis-6: link-state immediately before submit. If
+     * the trained speed/width is anything other than what was
+     * captured at post-boot-arm, the link re-trained between RPCs. */
+    hailo_platform_log_link_state("pre-IN-submit");
+    /* #682 hyp-W: dump (read-only) then W1C-clear (real config-space
+     * write — mutates EP state) the bridge error bits so the
+     * post-timeout dump shows only errors that fired *during* the
+     * boundary submit window. Disambiguates stale boot-time UR/MA
+     * from runtime UR/MA. The clear is the only `HAILO_WIRE_DEBUG`
+     * site that mutates device state; if you're debugging an
+     * unexpected post-submit DEVSTA value with WIRE_DEBUG enabled,
+     * remember this clear ran first. */
+    hailo_platform_dump_bridge_errors("pre-IN-submit");
+    hailo_platform_clear_bridge_errors("pre-IN-submit");
+    /* #682 hyp-X-1 (DISCONFIRMED 2026-05-09): mirror Linux's
+     * hailo_pcie_read_interrupt drain at pre-IN-submit. Linux MNIST
+     * trace (~/slmos-ref/derivatives/hailort-traces/
+     *  hailort-v4.23.0-mnist-inference-pios-pi5.txt:3181-3186) shows
+     * the host issues a read+W1C of BCS_ISTATUS_HOST + per-channel
+     * SRC/DST registers immediately before the boundary IN avail
+     * bump. SLM-OS arrives here with stale PER_SRC bits for ch=0+1
+     * (CFG channels from load) + ISTATUS.BOOT_IRQ still latched.
+     * The drain clears them cleanly (0x02800001→0x00000000) but the
+     * ch=2 wedge is unchanged: dev_proc stays 0, dev_base[31:16]
+     * never advances to 0x001f. Pending host-side IRQ acks are not
+     * the gating factor for fw's ch=2 prep. Helper kept wired here
+     * for cleaner post-timeout state correlation; cheap (4-6 MMIO
+     * ops) and does no harm. */
+    hailo_control_drain_pending_irqs("pre-IN-submit");
+    /* #682 hypothesis-7: BAR4 SRAM baseline before submit. Diff'd
+     * against post-timeout snapshot to detect fw activity hiding
+     * outside our normal trace points. */
+    hailo_bar4_snap(hailo_bar4_snap_pre);
+    /* #682 hypothesis-A (2026-05-08): RPC was rejected by fw with
+     * status 0x400300ca/0x40000001 (CORE-CPU). HW-only benchmark mode
+     * requires special HEF state; not applicable to streaming inference.
+     * Disabled — kept here for the bisect record. */
+
+    /* #682 hypothesis-E (2026-05-08): host-side AP→SR ctrl cycle on
+     * ch=2 just before the avail bump. Disconfirmed — ctrl writes
+     * land cleanly (read-back showed 0x01→0x02→0x01) but the avail
+     * bump that followed still failed to advance proc. Channel state
+     * is healthy from host's view; the wedge is upstream of the host
+     * channel registers, in fw or device internals. */
+#endif
+
+    /* #682 hyp-H2 (2026-05-08, DISCONFIRMED): mirrored HailoRT v4.23's
+     * 4-RPC settle ping set (GDI, IDENTIFY × 2) between OUT prefetch
+     * and IN submit, per Pi OS kprobe trace at
+     * ~/slmos-ref/derivatives/hailort-traces/
+     * hailort-v4.23.0-irq-rpc-resnet50-pi5.txt. All 4 pings returned
+     * rc=0 but ch=2 still wedged at proc=0, dev_base=0x00022801. The
+     * settle pings are not the gating factor for fw boundary
+     * processing. */
+
+#ifdef HAILO_WIRE_DEBUG
+    hailo_vdma_snap_channels("pre-IN-submit");
 #endif
 
     int rc;
@@ -2090,6 +2396,9 @@ static int hailo_backend_run(struct inference_device *dev,
     rc = hailo_vdma_submit_and_wait(in_channel, in_num_avail,
                                     slot->cfg.timeout_us);
     uint64_t t_in_done = timer_get_count();
+#ifdef HAILO_WIRE_DEBUG
+    hailo_vdma_snap_channels("post-IN-submit");
+#endif
     if (rc != HAILO_OK) {
         uart_printf("[hailo] run: IN submit_and_wait rc=%d (avail=%u)\r\n",
                     rc, (unsigned)in_num_avail);
@@ -2111,6 +2420,22 @@ static int hailo_backend_run(struct inference_device *dev,
          * cleared during the 500 ms poll window, fw is dynamically
          * disabling them — completes the four-point trail. */
         hailo_control_dump_irq_state("post-timeout");
+        /* #682 hypothesis-6: link-state after the 500 ms timeout. A
+         * step-down here would mean the link was dropping during the
+         * window we expected fw to fetch descriptors. */
+        hailo_platform_log_link_state("post-timeout");
+        /* #682 hyp-U: dump RC bridge + endpoint error registers. If
+         * fw issued a transaction the BCM2712 RC dropped, the EP's
+         * Device Status will have UR/Non-Fatal/Fatal set; if the
+         * RC's AXI bus saw a read error, AXI_READ_ERROR_DATA will
+         * differ from the 0xFFFFFFFF seed. */
+        hailo_platform_dump_bridge_errors("post-timeout");
+        /* #682 hypothesis-7: BAR4 SRAM snapshot after the 500 ms wait.
+         * Diff against pre-submit baseline. Any changed dword tells
+         * us where fw is active during a stall that proc=0 alone
+         * makes look idle. */
+        hailo_bar4_snap(hailo_bar4_snap_post);
+        hailo_bar4_diff_print("post-timeout");
 #endif
         /* #253: dump fw debug log + D2H notification buffer on submit
          * failure. The D2H notification contains CONTEXT_SWITCH_RUN_TIME_ERROR

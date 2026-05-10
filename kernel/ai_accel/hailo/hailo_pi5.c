@@ -18,6 +18,7 @@
 
 #include "hailo.h"
 #include "pcie.h"
+#include "pcie_bcm2712.h"
 #include "pmm.h"
 #include "gpu.h"          /* cache_clean_range / cache_invalidate_range */
 #include "debug.h"
@@ -582,6 +583,178 @@ int hailo_platform_install(void)
 {
     hailo_platform = &pi5_ops;
     return hailo_init();
+}
+
+/*
+ * #682 hypothesis-6 diagnostic. Prints one line with the trained
+ * PCIe Gen/width and the cap (max) Gen/width. Cheap: 2 config-space
+ * reads per call, no MMIO writes, no side effects. Safe to call
+ * before pi5_init() returns — short-circuits if the endpoint
+ * pointer is unset.
+ */
+void hailo_platform_log_link_state(const char *label)
+{
+    if (!hailo_pcidev) {
+        uart_printf("[link] %s: no endpoint\r\n", label ? label : "(none)");
+        return;
+    }
+    uint8_t cap = pcie_find_capability(hailo_pcidev, 0x10);
+    if (!cap) {
+        uart_printf("[link] %s: no PCIe cap\r\n", label ? label : "(none)");
+        return;
+    }
+    uint16_t lnksta    = pcie_config_read16(hailo_pcidev,
+                                            (uint16_t)(cap + 0x12));
+    uint16_t lnkcap_lo = pcie_config_read16(hailo_pcidev,
+                                            (uint16_t)(cap + 0x0C));
+    unsigned cur_spd = lnksta    & 0xFu;
+    unsigned cur_wid = (lnksta    >> 4) & 0x3Fu;
+    unsigned max_spd = lnkcap_lo & 0xFu;
+    unsigned max_wid = (lnkcap_lo >> 4) & 0x3Fu;
+    uart_printf("[link] %s: trained Gen%u x%u (max Gen%u x%u) "
+                "lnksta=0x%04x\r\n",
+                label ? label : "(none)",
+                cur_spd, cur_wid, max_spd, max_wid, (unsigned)lnksta);
+}
+
+void hailo_platform_dump_bridge_errors(const char *label)
+{
+    const char *lbl = label ? label : "(none)";
+
+    /* RC-side BCM2712 status registers. */
+    pcie_bcm2712_dump_status_for_debug(lbl);
+
+    if (!hailo_pcidev) {
+        uart_printf("[bridge-err] %s: no endpoint — RC side only\r\n",
+                    lbl);
+        return;
+    }
+
+    /* Endpoint-side standard PCI Status (offset 0x06).
+     * Bits of interest (PCI 3.0 §6.2.3):
+     *   bit 11 SIGNALED_TARGET_ABORT
+     *   bit 12 RECEIVED_TARGET_ABORT
+     *   bit 13 RECEIVED_MASTER_ABORT
+     *   bit 14 SIGNALED_SYSTEM_ERROR
+     *   bit 15 DETECTED_PARITY_ERROR
+     * Bits are RW1C — set on event, cleared by writing 1. We
+     * only read here. */
+    uint16_t pci_status = pcie_config_read16(hailo_pcidev, 0x06);
+
+    /* Endpoint-side PCI Express Cap Device Status (offset cap+0x0A).
+     * Bits of interest (PCIe 4.0 §7.5.3.5):
+     *   bit 0 CORRECTABLE_ERROR_DETECTED
+     *   bit 1 NON_FATAL_ERROR_DETECTED
+     *   bit 2 FATAL_ERROR_DETECTED
+     *   bit 3 UNSUPPORTED_REQUEST_DETECTED
+     * Same RW1C semantics. If fw issued a DMA the RC dropped, the
+     * endpoint typically sees a UR completion and bit 3 is set. */
+    uint8_t exp_cap = pcie_find_capability(hailo_pcidev, 0x10);
+    uint16_t devsta = exp_cap
+        ? pcie_config_read16(hailo_pcidev, (uint16_t)(exp_cap + 0x0A))
+        : 0xFFFFu;
+
+    uart_printf("[bridge-err] %s: EP PCI_STATUS=0x%04x "
+                "(sig_tabort=%u rcv_tabort=%u rcv_mabort=%u "
+                "sig_serr=%u parity=%u) DEVSTA=0x%04x "
+                "(corr=%u nonfatal=%u fatal=%u ur=%u)\r\n",
+                lbl,
+                (unsigned)pci_status,
+                (unsigned)((pci_status >> 11) & 1u),
+                (unsigned)((pci_status >> 12) & 1u),
+                (unsigned)((pci_status >> 13) & 1u),
+                (unsigned)((pci_status >> 14) & 1u),
+                (unsigned)((pci_status >> 15) & 1u),
+                (unsigned)devsta,
+                (unsigned)((devsta >> 0) & 1u),
+                (unsigned)((devsta >> 1) & 1u),
+                (unsigned)((devsta >> 2) & 1u),
+                (unsigned)((devsta >> 3) & 1u));
+
+    /* MSI capability (cap id 0x05) — what address has the kernel
+     * programmed for fw to write its MSIs to? If MSGADDR is 0 or
+     * outside any inbound window the RC recognizes, every MSI the
+     * EP emits would be UR'd.
+     *
+     * Layout (PCI 3.0 §6.8):
+     *   +0x00: cap_id (1B) | next (1B) | MSI_CTRL (2B)
+     *          MSI_CTRL bit 0 = ENABLE
+     *          MSI_CTRL bit 7 = 64-bit address capable
+     *   +0x04: MSGADDR_LO (4B)
+     *   +0x08: MSGADDR_HI (4B, only if 64-bit capable)
+     *   +0x0C (or +0x08 if 32-bit): MSGDATA (2B)
+     */
+    uint8_t msi_cap = pcie_find_capability(hailo_pcidev, 0x05);
+    if (msi_cap == 0) {
+        uart_printf("[bridge-err] %s: EP no MSI cap\r\n", lbl);
+    } else {
+        uint16_t msi_ctrl = pcie_config_read16(hailo_pcidev,
+                                               (uint16_t)(msi_cap + 0x02));
+        uint32_t msg_addr_lo = pcie_config_read32(hailo_pcidev,
+                                                  (uint16_t)(msi_cap + 0x04));
+        bool is_64 = (msi_ctrl >> 7) & 1u;
+        uint32_t msg_addr_hi = is_64
+            ? pcie_config_read32(hailo_pcidev,
+                                 (uint16_t)(msi_cap + 0x08))
+            : 0u;
+        uint16_t msi_data = pcie_config_read16(hailo_pcidev,
+                                               (uint16_t)(msi_cap + (is_64 ? 0x0C : 0x08)));
+        uart_printf("[bridge-err] %s: EP MSI cap=+0x%02x ctrl=0x%04x "
+                    "(en=%u 64bit=%u multi_en=%u multi_cap=%u) "
+                    "MSGADDR=0x%08x_%08x MSGDATA=0x%04x\r\n",
+                    lbl,
+                    (unsigned)msi_cap,
+                    (unsigned)msi_ctrl,
+                    (unsigned)(msi_ctrl & 1u),
+                    (unsigned)is_64,
+                    (unsigned)((msi_ctrl >> 4) & 0x7u),
+                    (unsigned)((msi_ctrl >> 1) & 0x7u),
+                    (unsigned)msg_addr_hi,
+                    (unsigned)msg_addr_lo,
+                    (unsigned)msi_data);
+    }
+}
+
+void hailo_platform_clear_bridge_errors(const char *label)
+{
+    const char *lbl = label ? label : "(none)";
+    if (!hailo_pcidev) {
+        uart_printf("[bridge-err] %s: clear — no endpoint\r\n", lbl);
+        return;
+    }
+
+    /* PCI_STATUS at offset 0x06: error bits [11..15] are RW1C. Read
+     * the value, write it back to clear all set bits in one shot.
+     * Bits below 11 (cap-list, capabilities-supported, etc.) are
+     * read-only; writing 1 to them is a no-op. Mask to the W1C bits
+     * to be safe regardless. */
+    uint16_t pci_status_pre = pcie_config_read16(hailo_pcidev, 0x06);
+    if (pci_status_pre & 0xF900u) {
+        pcie_config_write16(hailo_pcidev, 0x06,
+                            (uint16_t)(pci_status_pre & 0xF900u));
+    }
+
+    /* PCI Express Cap Device Status at cap+0x0A: bits [0..3] RW1C. */
+    uint8_t exp_cap = pcie_find_capability(hailo_pcidev, 0x10);
+    uint16_t devsta_pre = exp_cap
+        ? pcie_config_read16(hailo_pcidev, (uint16_t)(exp_cap + 0x0A))
+        : 0xFFFFu;
+    if (exp_cap != 0 && (devsta_pre & 0x000Fu)) {
+        pcie_config_write16(hailo_pcidev,
+                            (uint16_t)(exp_cap + 0x0A),
+                            (uint16_t)(devsta_pre & 0x000Fu));
+    }
+
+    /* Read back to confirm the clear took. */
+    uint16_t pci_status_post = pcie_config_read16(hailo_pcidev, 0x06);
+    uint16_t devsta_post = exp_cap
+        ? pcie_config_read16(hailo_pcidev, (uint16_t)(exp_cap + 0x0A))
+        : 0xFFFFu;
+    uart_printf("[bridge-err] %s: cleared — pre PCI_STATUS=0x%04x "
+                "DEVSTA=0x%04x; post PCI_STATUS=0x%04x DEVSTA=0x%04x\r\n",
+                lbl,
+                (unsigned)pci_status_pre, (unsigned)devsta_pre,
+                (unsigned)pci_status_post, (unsigned)devsta_post);
 }
 
 #endif /* PLATFORM_RASPI5 */

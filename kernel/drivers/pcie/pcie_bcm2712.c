@@ -36,6 +36,7 @@
 #if defined(PLATFORM_RASPI5)
 
 #include "pcie.h"
+#include "pcie_bcm2712.h"
 #include "debug.h"
 #include "spinlock.h"
 #include "vmm.h"
@@ -131,12 +132,24 @@
  * the CplD never comes back to the requester. */
 #define PCIE1_MISC_CTRL_1                     0x40A0u
 #define   MISC_CTRL_1_EN_VDM_QOS_CONTROL_MASK (1u << 5)
+#define PCIE1_VDM_PRIORITY_TO_QOS_MAP_HI      0x4164u
+#define PCIE1_VDM_PRIORITY_TO_QOS_MAP_LO      0x4168u
 #define PCIE1_AXI_INTF_CTRL                   0x416Cu
 #define   AXI_EN_RCLK_QOS_ARRAY_FIX           (1u << 13)
 #define   AXI_EN_QOS_UPDATE_TIMING_FIX        (1u << 12)
 #define   AXI_DIS_QOS_GATING_IN_MASTER        (1u << 11)
 #define   AXI_REQFIFO_EN_QOS_PROPAGATION      (1u <<  7)
 #define   AXI_MASTER_MAX_OUTSTANDING_REQS     0x3Fu
+
+/* Pi 5 stock DT (bcm2712-rpi-5-b.dts:174):
+ *     &pcie1 { brcm,vdm-qos-map = <0x33333333>; };
+ * Mirror Linux's brcm_pcie_set_tc_qos VDM-property branch
+ * (pcie-brcmstb.c:602-610): set EN_VDM_QOS_CONTROL and program both
+ * VDM priority→QoS map registers with this value. All 8 priority
+ * levels map to QoS 3 — uniform forwarding, but the *enable* bit
+ * is what actually allows VDMs from the endpoint to reach the
+ * AXI/CPU side at all. */
+#define PCIE1_VDM_QOS_MAP_RPI5                0x33333333u
 
 /* HARD_DEBUG offset is variant-specific. For 2712 it's 0x4304 (generic
  * 0x4204). See pcie_offsets_bcm2712[] in the reference driver. */
@@ -594,8 +607,23 @@ static void bcm2712_misc_and_axi_qos(void)
         axi |= 15u;
         pcie1_w32(PCIE1_AXI_INTF_CTRL, axi);
     }
+    /* #682 hyp-T (disconfirmed as wedge lever 2026-05-09; kept for
+     * Linux parity): mirror brcm_pcie_set_tc_qos's brcm,vdm-qos-map
+     * branch. Pi 5 stock DT (bcm2712-rpi-5-b.dts:174) sets
+     * `brcm,vdm-qos-map = <0x33333333>` on pcie1 specifically;
+     * SLM-OS previously cleared the enable bit (matching the
+     * no-DT-property default). The hypothesis that fw's boundary
+     * VDMA completion path used VDMs the RC was dropping was the
+     * motivation, but ch=2 still wedges identically with the
+     * enable bit set + map programmed. Keeping the change because
+     * (a) it's strictly closer to Pi OS's pcie1 configuration and
+     * (b) leaving the enable bit cleared while the DT property is
+     * set would be a silent divergence from the platform's
+     * intended setup. */
+    pcie1_w32(PCIE1_VDM_PRIORITY_TO_QOS_MAP_LO, PCIE1_VDM_QOS_MAP_RPI5);
+    pcie1_w32(PCIE1_VDM_PRIORITY_TO_QOS_MAP_HI, PCIE1_VDM_QOS_MAP_RPI5);
     tmp = pcie1_r32(PCIE1_MISC_CTRL_1);
-    tmp &= ~MISC_CTRL_1_EN_VDM_QOS_CONTROL_MASK;
+    tmp |= MISC_CTRL_1_EN_VDM_QOS_CONTROL_MASK;
     pcie1_w32(PCIE1_MISC_CTRL_1, tmp);
 }
 
@@ -732,22 +760,33 @@ static int bcm2712_train_link(void)
     bcm2712_misc_and_axi_qos();
 
     /*
-     * 7. Inbound window (RC_BAR2). DT says
-     *    dma-ranges = 0x10_00000000 PCIe → 0x0 CPU, 64 GB.
-     *    Encoded-size = log2(64GB) - 15 = 36 - 15 = 21 (0x15).
+     * 7. Inbound window (RC_BAR2) + SCB0 size. Both registers describe
+     *    the SAME inbound aperture and MUST encode the same log2(size)-15
+     *    value, or the RC accepts inbound TLPs on an aperture that the
+     *    SoC's coherency unit doesn't know about (or vice versa) — silent
+     *    DMA corruption. Linux's brcm_pcie_setup derives both from the
+     *    DT `dma-ranges` union size; Pi 5 pcie1's dma-ranges declares
+     *    64 GB at PCIe 0x10_00000000, so log2(64 GB) - 15 = 21 (0x15).
+     *
+     *    Earlier SLM-OS code used 0x11 (4 GB) for SCB0 derived from
+     *    "physical RAM size," which under-sized the SCB-coherent window.
+     *    #682 hyp-V (disconfirmed as the wedge lever 2026-05-09; kept
+     *    for Linux parity): widen to 0x15 so we match brcmstb-pcie.
      */
+#define BCM2712_PCIE1_INBOUND_LOG2_SIZE_MINUS_15  0x15u  /* 64 GB */
     pcie1_w32(PCIE1_RC_BAR2_CONFIG_LO,
-              (0u /* cpu_phys low */ & 0xFFFFFFE0u) | 0x15u);
+              (0u /* cpu_phys low */ & 0xFFFFFFE0u) |
+              BCM2712_PCIE1_INBOUND_LOG2_SIZE_MINUS_15);
     pcie1_w32(PCIE1_RC_BAR2_CONFIG_HI, 0x10u /* high 32 of 0x10_00000000 */);
 
     uint32_t tmp = pcie1_r32(PCIE1_UBUS_BAR2_CONFIG_REMAP);
     tmp |= UBUS_BAR_REMAP_ACCESS_EN;
     pcie1_w32(PCIE1_UBUS_BAR2_CONFIG_REMAP, tmp);
 
-    /* SCB0 size: on Pi 5 with 4 GB RAM, log2(4GB) - 15 = 17 (0x11).
-     * Bits 27-31 of MISC_CTRL. */
+    /* SCB0 size MUST equal the RC_BAR2 size encoding above. */
     tmp = pcie1_r32(PCIE1_MISC_CTRL);
-    tmp = (tmp & ~MISC_CTRL_SCB0_SIZE_MASK) | ((17u & 0x1Fu) << 27);
+    tmp = (tmp & ~MISC_CTRL_SCB0_SIZE_MASK) |
+          ((BCM2712_PCIE1_INBOUND_LOG2_SIZE_MINUS_15 & 0x1Fu) << 27);
     pcie1_w32(PCIE1_MISC_CTRL, tmp);
 
     /* 8. Suppress AXI error responses on unreachable endpoints
@@ -786,6 +825,15 @@ static int bcm2712_train_link(void)
     tmp = pcie1_r32(PCIE1_RC_CFG_VENDOR_SPECIFIC_REG1);
     tmp &= ~RC_CFG_VENDOR_ENDIAN_MODE_BAR2_MASK;
     pcie1_w32(PCIE1_RC_CFG_VENDOR_SPECIFIC_REG1, tmp);
+
+    /* pcie1 is left at the link's auto-negotiated speed (Gen2 x1
+     * on the AI HAT+ on this hardware) rather than pinned to Gen3
+     * via LNKCAP/LNKCTL2 like Linux's brcm_pcie_set_gen does.
+     * Empirically: Gen3 x1 trains stably here, but Linux's LTSSM
+     * also auto-downgrades to Gen2 x1 in practice despite the DT
+     * `pciex1_gen=3` ask — matching Linux's actual operating point
+     * is safer than pushing Gen3, which is apparently signal-
+     * integrity marginal on the Pi 5 pcie1 x1 to Hailo path. */
 
     /* 13b + 14 + 15. CLKREQ# disable, tperst_clk_ms dance, CEM settle. */
     bcm2712_perst_tperst_clk_ms();
@@ -1308,6 +1356,51 @@ static const struct pcie_host_ops bcm2712_ops = {
 int pcie_backend_register(void)
 {
     return pcie_core_register_host(&bcm2712_ops);
+}
+
+/*
+ * Diagnostic-only: dump the BCM2712 RC bridge status / error
+ * registers. Useful after a suspected fw-side DMA stall to see
+ * whether the RC has captured a TLP completion timeout, link
+ * downgrade, or AXI read-error substitution.
+ *
+ * Reads (no writes — purely passive):
+ *   PCIE_STATUS (0x4068)    — link state: PORT, DL_ACTIVE,
+ *                              PHYLINKUP, IN_L23
+ *   UBUS_CTRL (0x40A4)      — reply-error/decerr disable bits
+ *   AXI_INTF_CTRL (0x416C)  — runtime QoS state, throttle config
+ *   AXI_READ_ERROR_DATA     — readback of the seed value the RC
+ *      (0x4170)               substitutes on AXI read errors;
+ *                              still 0xFFFFFFFF if untouched
+ *   MISC_CTRL_1 (0x40A0)    — VDM QoS enable bit (post-hyp-T)
+ *
+ * Caller-provided label distinguishes pre-submit / post-timeout.
+ */
+void pcie_bcm2712_dump_status_for_debug(const char *label)
+{
+    const char *lbl = label ? label : "(none)";
+    uint32_t pcie_status = pcie1_r32(PCIE1_MISC_STATUS);
+    uint32_t ubus_ctrl   = pcie1_r32(PCIE1_UBUS_CTRL);
+    uint32_t axi_intf    = pcie1_r32(PCIE1_AXI_INTF_CTRL);
+    uint32_t axi_err     = pcie1_r32(PCIE1_AXI_READ_ERROR_DATA);
+    uint32_t misc_ctrl_1 = pcie1_r32(PCIE1_MISC_CTRL_1);
+
+    /* PCIE_STATUS bit layout (per pcie-brcmstb.c:114-119):
+     *   bit 4  PHYLINKUP
+     *   bit 5  DL_ACTIVE
+     *   bit 6  PORT (2712 variant) / IN_L23
+     *   bit 7  PORT (generic) */
+    unsigned phylink = (pcie_status >> 4) & 1u;
+    unsigned dl_act  = (pcie_status >> 5) & 1u;
+    unsigned port    = (pcie_status >> 6) & 1u;
+
+    uart_printf("[bridge-err] %s: PCIE_STATUS=0x%08x "
+                "(phylinkup=%u dl_active=%u port_or_l23=%u) "
+                "UBUS_CTRL=0x%08x AXI_INTF_CTRL=0x%08x "
+                "AXI_READ_ERROR_DATA=0x%08x MISC_CTRL_1=0x%08x\r\n",
+                lbl,
+                pcie_status, phylink, dl_act, port,
+                ubus_ctrl, axi_intf, axi_err, misc_ctrl_1);
 }
 
 #endif /* PLATFORM_RASPI5 */

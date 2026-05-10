@@ -1,584 +1,335 @@
-# Hailo Support Ticket Draft — Phase 8 #253
+# Hailo Support Ticket Draft — Hailo-8L on Pi 5: ch=2 boundary IN never advances
 
 > Draft for support@hailo.ai or community.hailo.ai forum post.
-> Edit the salutation and account/contact info before sending.
+> Edit the salutation, account/contact info, and trim the rule-out
+> table to fit the support channel's length cap before sending.
+>
+> Last refreshed 2026-05-09 after hyp-U/W bridge-error analysis,
+> hyp-X dev-state divergence finding, and hyp-X-1 / X-2 / X-3
+> disconfirmations. The boot-time CPU_ECC issue documented in
+> earlier drafts of this ticket is resolved internally (see hyp-O
+> in commit history); this version is about the *runtime* wedge
+> that boot-time fix does not address.
 
 ---
 
 ## Subject
 
-Hailo-8L on Pi 5: CPU_ECC_ERROR on every host RPC from a custom (non-HailoRT) driver — what does memory_bitmap=0x00001000 refer to in fw v4.23?
+Hailo-8L (AI HAT+ on Pi 5): boundary IN VDMA channel `proc` never advances despite byte-identical RPCs vs HailoRT — EP detects internal UR + persistent SAGE1_ISP CPU_ECC during runtime RPCs
 
 ## Summary
 
-We're driving a Hailo-8L on Pi 5 (AI HAT+) from a custom bare-metal driver
-(no Linux, no HailoRT userspace library). HailoRT runs MNIST inference on
-this exact chip + HEF correctly at 17.8 FPS. Our driver issues byte-for-byte
-identical FW_CONTROL request payloads and an equivalent MMIO sequence, but
-firmware emits a `HEALTH_MONITOR_CPU_ECC_ERROR` (event_id=7,
-priority=CRITICAL) with `memory_bitmap=0x00001000` on the very first
-`CHANGE_CONTEXT_SWITCH_STATUS(RESET)` RPC, and again on
-`SET_CONTEXT_INFO(ACTIVATION)` and `CCW DMA pull`. Subsequent inference
-submits time out: `num_proc` on the boundary input channel never
-advances, and reading the descriptor `RemainingPageSize_Status` field
-shows the firmware never even attempts to fetch our descriptors
-(status=0x00 across all entries).
+We're driving a Hailo-8L (vendor=0x1e60, device=0x2864) on Raspberry
+Pi 5 (BCM2712) from a custom bare-metal driver — no Linux, no
+HailoRT userspace. HailoRT runs MNIST inference on the same chip
++ HEF + firmware blob successfully (17.8 FPS). Our driver issues
+byte-for-byte identical FW_CONTROL request payloads, the same
+descriptor list geometry, and an equivalent MMIO sequence — but
+the boundary INPUT VDMA channel (ch=2 on this HEF) never advances
+its `num_proc` past 0, and inference times out.
 
-We've validated everything we can think of from the host side. We're
-asking for two specific things:
+We've narrowed the failure to two correlated symptoms:
 
-1. **What memory region does bit 12 of `memory_bitmap` correspond to in
-   fw v4.23?** (i.e., what does `0x00001000` mean for the `D2H_EVENT_health_monitor_cpu_ecc_event_message_t.memory_bitmap` field on Hailo-8L?)
-2. **What host-side initialization step does `hailo_pci` perform such
-   that firmware can safely access that region?** Our driver does
-   everything we could find in the open-source `hailo_pci` source, but
-   evidently there's something that prevents the ECC trip when HailoRT
-   drives the device.
+1. **`HEALTH_MONITOR_CPU_ECC_ERROR/FATAL`** notifications fire
+   after every runtime CORE-CPU RPC (CLEAR_CONFIGURED_APPS,
+   GET_HW_CONSTS, all four SET_CONTEXT_INFO contexts, the
+   post-ENABLED settle pings). HailoRT on the same hardware,
+   instrumented with `trace_notif`, gets ZERO of these events
+   across 10 boots + a yolov6n inference run. `memory_bitmap`
+   is consistently `0x00001000` (bit 12). On Hailo-8L this maps
+   to `CONTROL_PROTOCOL__TOP_MEM_BLOCK_SAGE1_ISP_12` per the
+   `hailort-control-protocol.h` enum.
+
+2. **EP-internal UR** detected post-timeout. Reading
+   `DEVSTA` (PCIe Cap +0x0A) at the EP after the boundary submit
+   times out shows `UR=1`, `corr=1`, while `PCI_STATUS.rcv_mabort=0`
+   (the EP did NOT receive a UR completion from the RC for any
+   outbound request). The UR is fired by the EP itself, internally.
+   The BCM2712 root complex bridge status is clean: `phylinkup=1`,
+   `dl_active=1`, `AXI_READ_ERROR_DATA=0xFFFFFFFF` (unchanged
+   seed), no aborts. So whatever fw is touching that triggers UR
+   never reaches the bus — it's caught by the EP's own address
+   decoder.
+
+Working hypothesis we'd like Hailo to confirm or refute:
+
+> Both symptoms are the same mechanism — fw reads from
+> uninitialized SAGE1_ISP code/data during context-switch
+> processing for the boundary IN channel. The address decoder
+> rejects the access (UR), the ECC checker fires on the same access
+> path, and fw silently aborts the per-channel arming work for ch=2
+> while letting the rest of the load complete. HailoRT's
+> kernel-driver init somehow primes SAGE1_ISP into a state where
+> these accesses succeed.
+
+We're asking for help understanding what step we're missing.
 
 ## Hardware
 
 - Raspberry Pi 5, BCM2712, ARM Cortex-A76, 4 GB RAM
 - AI HAT+ daughterboard: Hailo-8L (vendor=0x1e60, device=0x2864, rev=0x01)
-- BAR0 (config), BAR2 (vDMA), BAR4 (fw access) — 16K/4K/16K
-- PCIe link: Gen2 x1 (downgraded by Pi 5; same on HailoRT working path)
+- BAR0 (config) 16 KB, BAR2 (vDMA) 4 KB, BAR4 (fw access) 16 KB
+- PCIe link: trained Gen2 x1 (downgraded by Pi 5; HailoRT trains the
+  same on the same hardware)
 
 ## Firmware
 
 - `hailort-pcie-driver 4.23.0` (Pi OS apt package)
-- Firmware blob: 164560 bytes, identifies as version 4.23, rev=0x20000000
-- HEF: `mnist.hef`, 240815 bytes, hw_arch=hailo8l, sdk_version=3.33.1
-  (single network group, 1 input pad 28×28×1, 1 output pad 1×1×10,
-  28 CCW actions)
-
-## Smoking-gun event
-
-After every host RPC that triggers the issue, draining the D2H
-notification mailbox at `BAR4 + 0x640` returns:
-
-```
-header: version=0 sequence=N priority=1 module_id=22
-        event_id=7 (HEALTH_MONITOR_CPU_ECC_ERROR_EVENT_ID) /
-                  or event_id=8 (CPU_ECC_FATAL on some runs)
-        param_count=1 payload_len=4
-body[0..3]: 0x00001000 0x02000054 0xeafff6fb 0xb77fff7f
-```
-
-Decoded per `D2H_EVENT_health_monitor_cpu_ecc_event_message_t`:
-
-```
-memory_bitmap = 0x00001000   (bit 12 set)
-```
-
-The same bit is set on every triggering RPC across power cycles, fresh
-or warm boots, with both our embedded firmware blob and Pi OS's shipped
-blob.
+- Firmware blob: 164 560 bytes, identifies as v4.23 rev=0x20000000
+- HEF: `mnist.hef`, 240 869 bytes, hw_arch=hailo8l, sdk_version=3.33.1.
+  Single network group: 1 input pad 28×28×1, 1 output pad 1×1×10,
+  28 CCW actions split across cfg_channel[0]=22 and cfg_channel[1]=6,
+  total 112 256 bytes of CCW microcode.
 
 ## Reproducer
 
-The chip is correctly driven by HailoRT under Pi OS:
+HailoRT path (works):
 
 ```
 $ sudo hailortcli run mnist.hef --frames-count 1
 Network mnist/mnist: 100% | 1/1 | FPS: 17.81 | ETA: 00:00:00
 ```
 
-`dmesg` is clean — zero ECC events.
+`dmesg` clean. Zero ECC events captured by an instrumented
+`hailo_pci` with `trace_notif`.
 
-The chip fails under our driver, on the same hardware, with the same
-HEF. Power-cycling between sessions doesn't change the outcome. We've
-confirmed:
+SLM-OS path (fails):
 
-- HailoRT clean shutdown → power off → SLM-OS boot: still fails
-- Cold boot → HailoRT's exact firmware blob embedded in our driver:
-  ECC pattern shifts (RESET clean) but boundary submit still fails
-- Cold boot → our originally-shipped firmware blob: original ECC
-  pattern, boundary submit fails
+```
+hailo probe                  # PCI enable, BAR map → state=probed
+hailo boot                   # fw upload + handshake → state=running
+hailo load /mnt/files/user.hef sched   # CCW upload, context-switch
+                                       # load completes (last_err=0),
+                                       # CPU_ECC fires after every RPC
+hailo runmodel 1 1           # IN submit times out after 500 ms,
+                             # ch=2 num_proc stays 0
+```
 
-## What our driver does (verified equivalent to `hailo_pci` source)
+Final result: `IN submit_and_wait rc=-4 (avail=2)`, all 32 IN
+descriptors show `RemainingPageSize_Status` low byte = 0x00 (fw
+never tried to fetch them), bar4-diff during the timeout window
+shows fw IS alive (~185 dwords change in the APP CPU log region).
 
-Boot path (mirrors `hailo_pcie_write_firmware_batch` +
-`hailo_trigger_firmware_boot`):
+## Smoking-gun evidence
 
-1. PCI enable, BAR0/2/4 mapping
-2. Disable ASPM L0s on RC and endpoint (matches Linux's
-   `hailo_pcie_disable_aspm`)
-3. Arm interrupts (`BSC_IMASK_HOST` |= mask, W1C `BCS_ISTATUS_HOST`,
-   write `0xFFFFFFFF` to `BCS_SOURCE_INTERRUPT_PER_CHANNEL` and
-   `BCS_DESTINATION_INTERRUPT_PER_CHANNEL`) — done before fw trigger
-4. Allocate MSI vector, register handler — done before fw trigger
-5. Validate fw header, decode app/cert/core blocks
-6. Write `boot_fw_header` to `0xE0030`
-7. Write `app_fw_code` to `0x60000` (chunked via 4 KB ATR window)
-8. Write `boot_key_cert` to `0xE0048`
-9. Write `boot_cont_cert` to `0xE0390`
-10. Write `core_code` to `0xC0000`
-11. Write `core_fw_header` to `0xA0000`
-12. Write `1` to `trigger_address = 0xE0980`
-13. Wait for `ATR[1].trsl_addr_lo` to read `PCIE_CONTROL_SECTION_ADDRESS_H8`
-    (5 s budget, 50 ms interval) — equivalent to
-    `hailo_pcie_is_firmware_loaded`
+### 1. Channel state divergence at first IN-submit
 
-Load path (mirrors `hailo_activate_board` post-fw-boot + first inference):
+Pi OS instrumented `hailo_pci` MNIST trace
+(`hailort-v4.23.0-mnist-inference-pios-pi5.txt`, line 3187),
+chronologically:
 
-1. `IDENTIFY` (opcode 0x00, APP_CPU)
-2. `GET_DEVICE_INFORMATION` (0x33, APP_CPU) ×2
-3. `CHANGE_CONTEXT_SWITCH_STATUS(state=RESET, app=0xff, batch_size=0, batch_count=0)`
-   (0x25, CORE_CPU) — **this is where the first ECC event fires**
-4. `CONTEXT_SWITCH_CLEAR_CONFIGURED_APPS` (0x47, CORE_CPU)
-5. `GET_HW_CONSTS` (0x48, CORE_CPU)
-6. `SET_NETWORK_GROUP_HEADER` (0x20, CORE_CPU)
-7. `SET_CONTEXT_INFO(ACTIVATION)` (0x21, CORE_CPU) — **second ECC event fires**
-8. `SET_CONTEXT_INFO(BATCH_SWITCHING)`
-9. `SET_CONTEXT_INFO(PRELIMINARY)`
-10. `SET_CONTEXT_INFO(DYNAMIC)`
-11. `CHANGE_CONTEXT_SWITCH_STATUS(state=ENABLED, app=0, batch_size=0, batch_count=0)`
-12. CCW VDMA pull (write `num_avail` to bulk cfg channel, wait for
-    `num_proc` to catch up) — **on some runs, third ECC event fires here**
+```
+hailo-sub: set_num_avail regs=...fbd23e16
+           prev=0x00002801 post=0x00022801
+           avail=2  dev_base=0x001f2c01  dev_proc=0x00020002
+```
 
-We then submit one MNIST inference: pre-prime 8 OUTPUT descriptors on
-ch=16, then write `num_avail=2` to ch=2 (boundary input). HailoRT's
-trace shows ch=2 SRC_IRQ within 7 µs; on our driver, `num_proc` on
-ch=2 stays 0 indefinitely. Reading back the descriptor list (after a
-host cache invalidate) shows status=0x00 on every descriptor — fw
-never tried to fetch them.
+Same workload on SLM-OS (HEF + fw blob byte-identical):
 
-## Ordering of ECC events vs host RPCs
+```
+[vdma] ch=2 new_avail=2 base_pre=0x00002801 base_post=0x00022801
+       proc_pre=0x00000000
+[vdma-poll] t=0 us  dev base_dword 0xffffffff -> 0x00002c01
+[vdma-poll] t=0 us  dev proc_dword 0xffffffff -> 0x00000000
+[vdma-poll] t=49900 us heartbeat  ... base=0x00022801
+                                  dev base=0x00002c01 dev_proc=0x00000000
+[vdma-poll] t=499900 us heartbeat ... (full 500 ms timeout, no change)
+[vdma] ch=2 TIMEOUT proc_end=0x00000000 base_end=0x00022801
+```
 
-To pre-empt the "is the ECC caused by your RPC or already in flight?"
-question: the `D2H_EVENT` mailbox at `BAR4 + 0x640` is drained and
-confirmed empty immediately before each RPC. The ECC notification
-appears only *after* the FW_CONTROL response has been read back and
-decoded. FW_CONTROL responses themselves report status=0 (success) —
-firmware acknowledges the RPC, then posts the ECC event as a separate
-D2H notification. This ordering has been consistent across ~50 runs.
+On HailoRT, fw has *already* populated `dev_base[31:16]=0x001f`
+and `dev_proc=0x00020002` BEFORE the host bumps `num_avail`. fw
+pre-armed the channel during the load sequence. On SLM-OS,
+`dev_base[31:16]` stays `0x0000` and `dev_proc` stays `0x00000000`
+indefinitely — fw never advances ch=2 internal state.
 
-## What we ruled out (confirmed identical to HailoRT)
+### 2. EP-internal UR (post-timeout)
 
-- **Wire bytes**: byte-for-byte identical for `CHANGE_STATUS(RESET)`
-  request (42 B) and `SET_CONTEXT_INFO(ACTIVATION)` request (102 B
-  total: 39 B prefix + 63 B body). The only diffs in ACTIVATION are
-  the two `OPEN_BOUNDARY_{INPUT,OUTPUT}` `dma_address` fields, which
-  are expected to differ (different DMA allocators), and both are
-  inside the configured BAR2 inbound translation window.
-- **Periph values** (`periph_bytes_per_buffer=784`,
-  `periph_buffers_per_frame=1`): match HailoRT's wire capture exactly.
-- **`initial_credit_size=0x10000`**: matches.
-- **HEF parsing**: the HEF's intermediate decoded fields match
-  `libhailort`'s view (action types, packed_vdma channel ids, page
-  sizes, desc counts).
-- **CCW upload**: cfg channel `num_proc` reaches the expected count
-  (109 for cfg_channel[0], 1 for cfg_channel[1]) — the bulk weight
-  upload completes successfully.
-- **Cache flush to DRAM**: verified via `dc civac` probe — descriptor
-  contents are visible in DRAM after `dc cvac` flush.
-- **Firmware blob**: tested with both our originally-shipped blob and
-  Pi OS's `/lib/firmware/hailo/hailo8_fw.bin` (which differ in
-  content despite both reporting v4.23 — separate question worth
-  investigating).
-- **MMIO sequence**: trace_mmio capture from `hailo_pci` (1557
-  events) shows boot trigger and runtime doorbell writes match what
-  our driver does.
-- **HailoRT-style settle pings**: added 2× `GET_DEVICE_INFO` +
-  IDENTIFY before RESET, 4× more after ENABLED, plus 5/3/2 ms wall
-  delays at the same phase boundaries HailoRT shows in its capture.
-  No effect.
-- **MSI registered before fw trigger**: yes, host MSI capability is
-  programmed before we write to `0xE0980`.
-- **Per-channel IRQ masks armed before fw trigger**: yes,
-  `BCS_SRC/DST_INTERRUPT_PER_CHANNEL = 0xFFFFFFFF` set pre-trigger.
-- **Boundary descriptor page size**: we use 512 B (input) / 64 B
-  (output) / 512 B (CCW) — all well under `hailo_pci`'s Pi 5
-  `max_desc_page_size=4096` cap (and under the recommended 16384),
-  matching HailoRT's observed values byte-for-byte from the wire
-  capture. 4-KB-page and 64-KB-alignment concerns ruled out.
-- **Thread #6601 context**: we saw Hailo engineer Nadav's forum
-  comment that `memory_bitmap` bit 12 can also fire under thermal
-  stress. Pi 5 + AI HAT+ is actively cooled (official case fan),
-  chip temp is steady under load, and the event fires on the *first*
-  RPC from cold boot before any sustained compute — so unless bit 12
-  is multiplexed across very different failure causes, thermal
-  doesn't fit our repro.
+```
+[bridge-err] post-timeout: PCIE_STATUS=0x0003e0b0
+              (phylinkup=1 dl_active=1 port_or_l23=0)
+              UBUS_CTRL=0x00082000 AXI_INTF_CTRL=0x0000004f
+              AXI_READ_ERROR_DATA=0xffffffff MISC_CTRL_1=0x00000020
+[bridge-err] post-timeout: EP PCI_STATUS=0x0018
+              (sig_tabort=0 rcv_tabort=0 rcv_mabort=0 sig_serr=0 parity=0)
+              DEVSTA=0x0009 (corr=1 nonfatal=0 fatal=0 ur=1)
+[bridge-err] post-timeout: EP MSI cap=+0xe0 ctrl=0x0081
+              (en=1 64bit=1 multi_en=0 multi_cap=0)
+              MSGADDR=0x000000ff_ffffe000 MSGDATA=0x0000
+```
+
+We W1C the EP's `PCI_STATUS` and `DEVSTA` immediately before the
+IN-submit, so this dump represents *only* errors that fired
+DURING the boundary submit window. Read:
+
+- `phylinkup=1, dl_active=1` — link healthy throughout.
+- `AXI_READ_ERROR_DATA` unchanged from the RC's seed — no AXI
+  fabric error during the timeout window.
+- `rcv_mabort=0` — the EP received NO UR completions from the
+  bus for outbound requests. So fw is not issuing TLPs that the
+  RC is dropping.
+- `DEVSTA.UR=1` — the EP's internal address decoder rejected a
+  request as Unsupported. Since `rcv_mabort=0`, the request that
+  triggered UR never went outbound at all — it was caught by the
+  EP itself.
+- `MSGADDR=0x000000ff_ffffe000` matches the host's MIP1
+  programming, confirming MSI delivery is configured correctly.
+
+### 3. SAGE1_ISP CPU_ECC body
+
+Drained from BAR4+0x640 after every runtime CORE-CPU RPC:
+
+```
+header: version=0 sequence=N priority=1 module_id=22
+        event_id=7 (CPU_ECC_ERROR) | 8 (CPU_ECC_FATAL — random per run)
+        param_count=1 payload_len=4
+body[0..3]: 0x00001000 0x02800050 0xeafff6fb 0xb77fe77f
+```
+
+`memory_bitmap = 0x00001000` (bit 12 set, exclusively) every time.
+The lower 16 bits of body[1] vary slightly between RPCs while
+body[2..3] mostly stable; the variability is consistent with the
+ECC being raised on a real read of *uninitialized* memory whose
+bit pattern depends on residual SRAM state.
+
+### 4. fw debug log: deterministic exception PC
+
+We dump the fw debug rings (BAR4[0x2000] APP CPU, BAR4[0x3000]
+CORE CPU, 4 KB each — header `host_offset` and `chip_offset`
+advance cleanly during the wedge so fw IS executing). Decoding
+8-byte records with bytes [0..3] = u32 LE PC and bytes [4..7] =
+counter or timestamp, the post-failed-runmodel CORE buffer
+shows a tight loop:
+
+```
+[0xa0] iter 0  PC=0x90004520 ts=0x00006698
+[0xb0] iter 1  PC=0x90004520 ts=0x00018da8
+[0xc0] iter 2 + EXCEPTION at PC=0x9000018c ts=0x000247ad
+[0xd0] iter 3  PC=0x90004520 ts=0x0002c621
+[0xe0] iter 4  PC=0x90004520 ts=0x0002ed31
+[0xf0] iter 5  PC=0x90004520 ts=0x00031441
+[0x100] iter 6 + EXCEPTION at PC=0x9000018c ts=0x00035890
+[0x110] iter 7  PC=0x90004520 ts=0x00036261
+```
+
+PC=`0x9000018c` is the exception entry/handler. PC=`0x90004520`
+is the loop body — almost certainly the boundary-credit /
+`num_avail` poll on the CORE CPU. The exception fires multiple
+times in a single 500 ms wedge window: fw catches it, returns
+to the loop, faults again a few iterations later, and the
+`0x00001000` ECC notification arrives shortly after the loop
+exits. Both PCs are deterministic across reruns and across
+power cycles.
+
+This is the most direct evidence we can produce that something
+inside fw's `wait_for_boundary_input_credit`-equivalent
+repeatedly accesses an invalid SAGE1_ISP location.
+
+## What we believe we've ruled out (host side)
+
+| Class | Test | Result |
+|---|---|---|
+| Wire bytes | Byte-by-byte diff vs HailoRT MMIO trace for RESET, CLEAR_APPS, GET_HW_CONSTS, NETWORK_GROUP_HEADER, all 4 SET_CONTEXT_INFO, ENABLED | byte-identical modulo IOVA fields |
+| Body sizes | SET_CONTEXT_INFO: 102/153/528/161 (after 39 B framing prefix) | byte-identical to HailoRT |
+| Periph values | `periph_bytes_per_buffer=784`, `periph_buffers_per_frame=1`, `initial_credit_size=0x10000` | match HailoRT wire capture exactly |
+| HEF parse | action types, packed_vdma channel ids, page sizes, desc counts | match `libhailort` view |
+| CCW upload | cfg_channel[0] reaches `num_proc=109`, cfg_channel[1] reaches `num_proc=1` | bulk weight upload completes |
+| Cache flush | `dc civac` probe before reads; `dc cvac` after writes | descriptor contents visible in DRAM |
+| Firmware blob | tested original blob + Pi OS `/lib/firmware/hailo/hailo8_fw.bin` | both produce same wedge |
+| MMIO sequence | `trace_mmio` capture (1 557 events) replicated | matches |
+| Settle pings | `(IDENTIFY, GET_DEVICE_INFO) × 2` between OUT prefetch and IN submit, matching HailoRT cadence | rc=0 from each ping; wedge unchanged |
+| GET_HW_CONSTS count | called 6× (matching HailoRT) | done; wedge unchanged |
+| MSI binding | host MSI cap programmed before fw trigger write at `0xE0980` | done; matches `hailo_pcie_enable_interrupts` |
+| Per-channel IRQ masks | `BCS_SOURCE_INTERRUPT_PER_CHANNEL = BCS_DESTINATION_INTERRUPT_PER_CHANNEL = 0xFFFFFFFF` armed pre-trigger | done |
+| Pre-IN-submit IRQ drain | host reads/W1Cs `BCS_ISTATUS_HOST` + per-channel SRC/DST registers right before avail bump (mirrors `hailo_pcie_read_interrupt`) | drains cleanly; wedge unchanged |
+| ATR table | save → retarget → access → restore around fw memory window accesses, ATR[0] only, canonical PARAM=0x17 / SRC=0 / TRSL_PARAM=6 | matches Linux's pattern |
+| Descriptor geometry | desc_count=32, page_size=512 (in) / 64 (out) / 512 (cfg), non-circular, ch=2 (in), ch=16 (out) | accepted by `hailo_pci` validation paths via `host-tools/hailo-ushim` |
+| IOVA / inbound window | RC `SCB0` size widened to 64 GB to match `dma-ranges` union (Linux `brcm-pcie` derivation) | matches Linux; wedge unchanged |
+| BCM2712 VDM QoS | `EN_VDM_QoS_CONTROL=1`, both VDM map registers programmed | matches Linux; wedge unchanged |
+| D3hot/D0 round-trip | PCI PM `PMCSR=0x2008→0x200b→0x2008` between fw load and first RPC | matches Linux; wedge unchanged |
+| Post-BOOT_IRQ settle | 500 ms `udelay` between BOOT_IRQ ack and first RPC | suppresses *boot-time* ECC at IDENTIFY (60% → 0/10 boots); does NOT suppress runtime ECCs |
+| Longer settle | 2000 ms variant tested | runtime ECC rate unchanged (rules out wall-clock as the lever) |
+| BIST `RUN_BIST_TEST` (0x3C) | bit 12 (`SAGE1_ISP_12`) rejected with `major=0x400300b2` per BIST whitelist; L4 banks pass with all-zero result | confirms L4 healthy; can't directly probe SAGE1_ISP |
+| Multi-stage fw upload | Hailo-8 has only stage-1 upload (stage-2 is `HAILO_BOARD_TYPE_HAILO10H`) | confirmed; not applicable |
+| HailoRT-via-ushim | drove `hailo_pci` ioctl surface (`HAILO_FW_CONTROL`, `HAILO_VDMA_BUFFER_MAP`, `HAILO_DESC_LIST_CREATE`, `HAILO_VDMA_LAUNCH_TRANSFER`) with our exact byte sequences from a Linux userspace tool | reproduces wedge identically — confirms issue is not in our bare-metal MMIO/cache/IRQ paths |
 
 ## Specific questions
 
-1. **What is bit 12 of `memory_bitmap` in
-   `D2H_EVENT_health_monitor_cpu_ecc_event_message_t`?** Is it a
-   physical memory region, an L2 cache way, an SRAM bank? The
-   consistent value across runs (always exactly `0x00001000`)
-   suggests a single named region rather than uninitialized error
-   bits. If you can share the full bit → region mapping for fw
-   v4.23 on Hailo-8L, that would let us cross-reference other
-   `memory_bitmap` values we see (e.g. 0x02000054 in `body[1]`
-   of the notification — if that's also a region mask, it's a
-   much wider spread than bit 12 alone).
-
-2. **What host-side action is required for firmware to safely access
-   that region?** Our `hailo_pci`-equivalent does the same probe-time
-   register writes, the same fw upload sequence, the same trigger
-   write, and signals the same MSI infrastructure. What's missing?
-
-3. **Does `libhailort` issue a `DISABLE_NOTIFICATION` / health-monitor
-   mask RPC during init?** We see in `hailo-pcie.c` that the IOCTL
-   surface exposes `HAILO_DISABLE_NOTIFICATION`, but we haven't been
-   able to confirm whether HailoRT actually *uses* it during normal
-   inference init (vs. reserving it for diagnostics). If userspace
-   masks CPU_ECC notifications early in the load sequence, a bare-
-   metal driver that never issues that mask will see notifications
-   that HailoRT users never do — even if the underlying ECC
-   condition is present in both cases. Our MMIO-layer wire capture
-   can't decode FW_CONTROL payloads, so this is invisible to our
-   diff.
-
-4. **Are these CPU_ECC events ever harmless** (e.g., HailoRT triggers
-   them too but the kernel driver silently ACKs them and inference
-   still works)? Our reading of the open-source driver suggests not
-   — the events are critical-priority and `hailo_pcie_handle_d2h_irq`
-   surfaces them — but we'd like to confirm. Thread #6601 suggests
-   bit 12 can be set by thermal stress (see note in "What we ruled
-   out" above), which would imply at least one scenario where the
-   same bit means "non-fatal" vs "fatal" depending on context.
-
-5. **Is there any documentation for the post-fw-boot, pre-load-network
-   handshake** beyond what's visible in the open-source `hailo_pci`
-   driver (`hailo-pcie.c`, `hailo-pcie-common.c`, `hailo-vdma-common.c`)?
-   We've line-by-line audited those and replicated the visible logic;
-   if there's a step that lives only in `libhailort` userspace
-   (closed source) and matters at the kernel-equivalent layer, that's
-   probably where our gap is.
-
-6. **Firmware logger access**: is there a way to turn on verbose
-   firmware logging (beyond the `FW_LOGGER` RPC surface visible in
-   the driver) that would surface *why* the ECC event fires — e.g.,
-   which fw task, which access address, which source instruction
-   pointer? That would likely short-circuit the whole investigation.
-
-## Update 2026-04-24 (status: still investigating; safe to send)
-
-The "root cause identified — LCU under-emission" header that lived
-here briefly was a false alarm caused by comparing HailoRT's wire
-sizes (which include the 39-byte SET_CONTEXT_INFO framing prefix)
-against our body sizes. After byte-by-byte comparison, our
-production `hailo_backend_run` emits CS bodies that match HailoRT's
-byte-for-byte modulo IOVA fields. So the "we under-emit" theory
-is dead.
-
-The `host-tools/hailo-ushim` bisect findings below remain accurate.
-The remaining concrete asymmetries between HailoRT and our drive
-are:
-
-1. HailoRT calls `GET_HW_CONSTS` (opcode 0x48) four times per
-   session before `SET_NETWORK_GROUP_HEADER`. We call it once.
-2. HailoRT interleaves APP_CPU settle pings (`IDENTIFY` 0x00,
-   `GET_DEVICE_INFO` 0x33) between CS steps — specifically
-   between the four `SET_CONTEXT_INFO` calls and
-   `CHANGE_STATUS(ENABLED)`. We send the four CS calls
-   back-to-back, then ENABLED immediately.
-3. Our drive triggers `CPU_ECC_FATAL` (event_id=8) and
-   `CPU_ECC_ERROR` (event_id=7) D2H events with
-   `memory_bitmap=0x00001000` on every CORE-CPU RPC starting
-   from `CHANGE_STATUS(RESET)`. HailoRT-on-Pi-OS doesn't.
-
-Sending this ticket as-is is appropriate. The questions in the
-"Specific questions" section are still the right asks. We are
-trying the GET_HW_CONSTS-×4 change ourselves in parallel — if
-that fixes the ECC events and the boundary submit hang, we'll
-update the ticket; if it doesn't, the ticket is even more
-relevant.
-
----
-
-## Userspace-shim bisect (2026-04-24)
-
-To narrow the problem space, we built a minimal Linux userspace
-tool (`host-tools/hailo-ushim`, ~600 lines of C) that drives your
-official `hailo_pci` kernel driver directly via its ioctl surface.
-The tool allocates buffers via `HAILO_VDMA_BUFFER_MAP`, descriptor
-lists via `HAILO_DESC_LIST_CREATE`, and sends `HAILO_FW_CONTROL`
-payloads byte-for-byte from our bare-metal driver. Running it on
-a HailoRT-booted Pi 5 + AI HAT+ exercises the exact kernel path
-your supported tooling uses, with our exact byte sequences.
-
-**Decisive results from four hardware iterations:**
-
-1. SLM-OS's **descriptor geometry** (desc_count=64, page_size=512,
-   non-circular, ch=2) is accepted by every `hailo_pci` validation
-   path without modification.
-
-2. SLM-OS's **CS RPC wire format** (parameter_count framing,
-   length-prefixed fields, LE/BE conventions) is byte-for-byte
-   accepted by fw. RESET, CLEAR_CONFIGURED_APPS, GET_HW_CONSTS,
-   SET_NETWORK_GROUP_HEADER, all 4 SET_CONTEXT_INFO contexts, and
-   ENABLED each return `major_status=0x00000000`.
-
-3. **Real MNIST CCW microcode** (from `mnist.hef`, file offset
-   0x1f623, 256 bytes = 1 × 512 B descriptor) uploaded via
-   `HAILO_VDMA_LAUNCH_TRANSFER` on ch=1 completes cleanly —
-   `num_proc` on ch=1 advances, confirming fw processes VDMA
-   traffic on the config channel.
-
-4. Subsequent **`LAUNCH_TRANSFER` on ch=2 (boundary input) times
-   out with `num_proc=0`** — byte-identical symptom to what our
-   bare-metal driver exhibits.
-
-**Interpretation:** given the same byte sequences produce the
-same hang through two completely independent software stacks
-(our bare-metal OS + your `hailo_pci`), the issue is not in our
-low-level MMIO/cache/IRQ path, not in our descriptor geometry,
-and not in our CS RPC wire format. It's in the relationship
-between the CS handshake bodies and what fw needs to unblock the
-boundary-input data path.
-
-## Update 2026-04-25 — all three asymmetries tested, all disconfirmed
-
-The earlier draft (2026-04-24) listed three concrete asymmetries vs
-HailoRT's MNIST trace. We've since tested each and ruled it out:
-
-1. **GET_HW_CONSTS call count.** Implemented 4× call as a tight
-   loop matching HailoRT's cadence. Result: CPU_ECC events shifted
-   distribution slightly, boundary submit still hangs identically.
-   Asymmetry is real but not load-bearing.
-
-2. **SET_CONTEXT_INFO body sizes.** The earlier draft claimed our
-   bodies were 102/16/37/103 vs HailoRT's 102/153/528/161 —
-   **this was a measurement error.** Our ctxsmoke probe path emits
-   minimal bodies (16/37/103 for the BSW/PRELIMINARY/DYNAMIC slots);
-   our production load path (`hailo_backend_run`) emits 63/114/489/122.
-   With the 39-byte SET_CONTEXT_INFO framing prefix added, that's
-   102/153/528/161 — **byte-for-byte match to HailoRT, modulo the
-   4 IOVA-bearing bytes per ACTIVATE_BOUNDARY action.** The
-   "we under-emit actions" theory is dead.
-
-3. **Settle pings between CS steps.** Tested at all three plausible
-   positions: pre-RESET (3 pings), post-ENABLED (4 pings), and
-   pre-ENABLED (4 pings, the position HailoRT actually uses per
-   the trace timeline). Each ping returned `rc=0` from fw. Boundary
-   submit still hangs in all three configurations. Asymmetry is real
-   but not load-bearing.
-
-### Additional structural probes done 2026-04-25
-
-We continued investigating to narrow the gap further. Each probe
-is small, falsifiable, and tested on hardware:
-
-- **BIST (RUN_BIST_TEST opcode 0x3C).** Implemented to probe whether
-  bit 12 of `memory_bitmap` matches the BIST `top_bypass_bitmap`
-  enum. The BIST whitelist is hard-enforced to bits 2-5 (the L4
-  SRAM banks); bit 12 (which `CONTROL_PROTOCOL__bist_top_mem_block_t`
-  names `SAGE1_ISP_12`) is rejected with `major=0x400300b2`. We can
-  confirm L4 SRAM is healthy (rc=0 with all-zero result) but cannot
-  directly probe the SAGE1_ISP region. Also confirmed BIST itself
-  does not trigger ECC events.
-
-- **HailoRT SCB-style pre-trigger init sequence.** HailoRT's MMIO
-  trace at boot (lines 1463-1480) shows an 8-write sequence to BAR0
-  offsets 0x96c..0x988 — including `0x000005fa` written to 0x978
-  (the ARM Cortex-M `SCB->AIRCR` vector key). We replicated all 8
-  writes via dev_write32 before our trigger. Result: ECC distribution
-  shifted (load itself stays clean) but boundary submit still hangs
-  with same proc=0 / desc_status=0x00 signature.
-
-- **D3hot transition.** `hailo_pcie:949` puts the device in
-  `PCI_D3hot` after fw load; user open later transitions back to
-  D0. SLM-OS now does the same round-trip via the standard PCI PM
-  capability. Confirmed PMCSR transitions D0→D3→D0 (0x2008→0x200b
-  →0x2008). Result: bit-12 ECC shifts entirely out of the load and
-  pre-submit drain paths — but still fires the moment we attempt
-  the boundary submit on ch=2. The submit hang is unchanged.
-
-- **WRITE_MEMORY targeting audit.** Reviewed every host-side use of
-  `WRITE_MEMORY` (opcode 0x01) in our driver and HailoRT's MMIO
-  trace. Neither side issues `WRITE_MEMORY` during MNIST inference.
-  Our CCW upload uses VDMA descriptor lists, not FW_CONTROL.
-  Symmetric to HailoRT — not a host/device data-write divergence.
-
-- **MSI binding before fw trigger.** Already implemented prior to
-  this round. The MSI capability is programmed and handler bound
-  before the `0xE0980` trigger write. No structural difference vs
-  Linux's `hailo_pcie_enable_interrupts` flow.
-
-- **Stage-2 firmware upload.** `hailo-pcie-common.c:308-315` shows
-  Hailo-8 has only ONE upload stage — stage-2 exists only for
-  `HAILO_BOARD_TYPE_HAILO10H`. Verified there's no stage-2 to
-  replicate.
-
-### Net effect on the bit-12 ECC trigger
-
-Across the three structural changes that move state (D3hot, SCB
-sequence, settle pings), the bit-12 CPU_ECC trigger MOVES — but
-never disappears. Each change shifts which RPC or which timing
-window first surfaces it. The boundary submit on channel 2 fails
-identically in every configuration: `num_proc=0`, all
-`RemainingPageSize_Status` bytes 0x00, fw never fetches our
-descriptors.
-
-Our updated reading: the bit-12 ECC may be a **symptom** of fw
-state divergence, not the direct cause of the submit hang. Whatever
-internal state HailoRT's flow leaves the chip in lets channel 2
-proceed; ours doesn't, regardless of what host-observable bytes/
-MMIO/IRQ/power-state we replicate.
-
-### What we believe we've ruled out (host side)
-
-- Wire-format bytes (CS RPC headers, parameter framing, length prefixes)
-- Action body content (verified byte-for-byte vs HailoRT, IOVA-only diff)
-- Descriptor geometry (page size, count, channel index, alignment)
-- IOVA / inbound-window translation
-- Cache flushing (DRAM-OK probe via `dc civac` before reads)
-- Initial credit size, periph values, nn_stream_config
-- IRQ mask ordering (armed before fw trigger)
-- MSI capability programming (cap configured before trigger)
-- D3hot/D0 round-trip (now in our driver)
-- SCB/AIRCR pre-trigger init sequence
-- PCIe state (link speed, MPS, MRRS, ASPM L0s disabled both ends)
-- Firmware blob version (Pi OS blob and your distribution blob both tried)
-- Multi-stage firmware upload (Hailo-8 has only stage-1)
-
-We've published an end-to-end ushim probe that drives **your**
-`hailo_pci` ioctls with our exact byte sequences. The probe
-reproduces the boundary-submit hang identically — confirming the
-issue is not in our bare-metal kernel's MMIO/cache/IRQ paths but
-in something fw-side that our handshake fails to configure.
-
-We're out of host-side hypotheses. The questions in the
-"Specific questions" section are the right asks. Bit-12 decode is
-the highest-leverage answer — once we know what region SAGE1_ISP
-is, we can either probe it directly or stop chasing the symptom.
-
-## Update 2026-04-25 (continued) — fw debug log capture
-
-After concluding the structural-suspect sweep, we instrumented our
-driver to dump the fw debug log buffers (`BAR4[0x2000]` for APP CPU,
-`BAR4[0x3000]` for CORE CPU, 4 KB rings) as raw hex. The `host_offset`
-/ `chip_offset` header advances cleanly, so the fw IS running and
-writing log entries; the format isn't documented but appears to be
-8-byte structured records:
-
-- bytes 0..3: u32 LE — PC pointer (or address being logged)
-- bytes 4..7: u32 LE — timestamp / counter / parameter
-
-PCs in the `0x9xxxxxxx` range correspond to CORE CPU code memory;
-`0x8xxxxxxx` for APP CPU.
-
-### Captured sequence (post-boot → post-load → post-failed-runmodel)
-
-CORE chip_offset advances 32 → 164 → 268 across the three states.
-
-**Smoking-gun finding:** in the post-runmodel CORE buffer (offsets
-0xa0..0x110), an 8-iteration poll loop is visible:
-
-```
-[00a0] ... 20 45 00 90 | 98 66 01 00 | 05 00 00 00
-[00b0] 01 00 00 00 | 20 45 00 90 | a8 8d 01 00 | 05 00 00 00
-[00c0] 02 00 00 00 | 20 45 00 90 | b8 b4 01 00 | 05 00 00 00
-[00d0] 03 00 00 00 | 20 45 00 90 | c8 db 01 00 | 05 00 00 00
-[00e0] 04 00 00 00 | 20 45 00 90 | d8 02 02 00 | 05 00 00 00
-[00f0] 05 00 00 00 | 20 45 00 90 | e8 29 02 00 | 05 00 00 00
-[0100] 06 00 00 00 | 8c 01 00 90 | 6d 47 02 00 | 20 45 00 90
-[0110] f8 50 02 00 | 05 00 00 00 | 07 00 00 00
-```
-
-- PC=`0x90004520` called 8 times (a 7-iteration loop with counter
-  going 0→7). Plausibly the boundary-credit / `num_avail` poll
-  on the CORE CPU.
-- Timestamps spaced uniformly ≈ 0x2710 (10000) per iteration —
-  ten "ticks" of some internal time unit.
-- **Between iterations 6 and 7 an exception fires at PC=`0x9000018c`**
-  with timestamp `0x0002476d`. Iteration 7 then completes and the
-  loop ends.
-
-The `0x00001000` CPU_ECC_ERROR D2H notification arrives after
-loop exit. This is the first concrete fw-side address tied to the
-bit-12 trigger.
-
-### Specific decoding asks
-
-In addition to the bit-12 region question, please decode against
-fw v4.23 symbols:
-
-1. **PC = `0x9000018c`** — what function is this? It's where the
-   exception (presumably the ECC fault) is taken or handled.
-2. **PC = `0x90004520`** — what's the loop body? Almost certainly
-   tied to boundary-input handling on VDMA channel 2.
-3. The earlier-fired CS RPC PCs for context: `0x90003e24`,
-   `0x90001fd8`, `0x90003d94`, `0x90003da4` (load), and the boot
-   init sequence `0x90000030 / 0x90008b80 / 0x90000b64 /
-   0x900003f4`.
-
-If the answer to (1) is "an `__exception_handler_ecc()` style
-catch-all," the line above it will tell us the actual instruction
-that faulted (likely a load from the SAGE1_ISP region). If (2) is
-named something like `wait_for_boundary_input_credit`, we know
-the loop is what we expect — and the fact that it never observes
-a credit confirms our reading that the boundary input pipeline
-is gated on something that requires SAGE1_ISP to be in a valid
-state.
-
-### Capture method (reproducer)
-
-```
-hailo probe
-hailo boot                 (PMCSR D0->D3->D0 cycle is now in our flow)
-hailo fwloghex 256         (snapshot 1: post-boot, pre-RPC)
-hailo load /mnt/files/user.hef sched
-hailo fwloghex 256         (snapshot 2: post-load)
-hailo runmodel 1 1
-hailo fwloghex 320         (snapshot 3: post-failed-runmodel)
-```
-
-Full hex output is captured and we can attach it to the ticket.
-The serial baud rate is 115200; `hailo fwloghex 0` to dump the
-full ring takes ~8 s and tends to overflow the labctl ser2net
-buffer, so we cap at 256-320 B per call.
-
-### Reproducibility — multiple runmodel attempts, deterministic fault PC
-
-Re-issuing `runmodel` (without reload) reproduces the same
-fault. Second runmodel CORE diff:
-
-```
-[00a0] iter 0  PC=0x90004520 ts=0x00007801
-[00b0] iter 1  PC=0x90004520 ts=0x00009f11
-[00c0] iter 2 + EXCEPTION PC=0x9000018c ts=0x0000a2c9
-[00d0] iter 3  PC=0x90004520 ts=0x0000c621
-[00e0] iter 4  PC=0x90004520 ts=0x0000ed31
-[00f0] iter 5  PC=0x90004520 ts=0x00011441
-[0100] iter 6 + EXCEPTION PC=0x9000018c ts=0x00015890
-[0110] iter 7  PC=0x90004520 ts=0x00016261
-```
-
-**The exception at PC=`0x9000018c` fires multiple times in a
-single 500 ms window.** fw catches it, returns to the loop,
-faults again a few iterations later. This rules out a one-off
-transient memory glitch and indicates SAGE1_ISP is in a
-persistent invalid state that fw keeps trying to access.
-
-Both runs produce the same D2H notification body
-`0x00001000 0x028xxxxx ...` with bit-12 set, confirming the
-exception correlates with the bit-12 ECC error notification.
-
-## Artifacts
-
-We can share (private channel preferred):
-
-- Boot-time MMIO trace from `hailo_pci` with `trace_mmio=Y` (1646
-  lines): full fw upload + boot trigger + first inference RPC sequence
-- Inference-time MMIO trace (1631 lines): all FWCTL TX bodies +
-  doorbell writes + ISTATUS reads
-- Side-by-side wire diff for `RESET` (byte-identical) and
-  `ACTIVATION` (byte-identical except IOVAs)
-- Our complete driver source (~5K LOC C in a public repo)
-- Serial captures of failing inference attempts including the full
-  D2H notification dump
+1. **Bit 12 of `D2H_EVENT_health_monitor_cpu_ecc_event_message_t.memory_bitmap`
+   on Hailo-8L fw v4.23**: the enum names this region
+   `TOP_MEM_BLOCK_SAGE1_ISP_12`. Is that name documented further?
+   Specifically, what kind of memory is it (code / data / cache /
+   scratch SRAM), what address range does it cover, and what is the
+   expected post-boot initialization state?
+
+2. **What host-side (or RPC-side) action triggers fw to scrub /
+   prime SAGE1_ISP** such that the runtime CORE-CPU RPCs and the
+   boundary-channel arming don't fault on uninitialized reads? We
+   demonstrably do everything in the open-source `hailo_pci` source
+   (down to the BCS register order and the per-channel IRQ
+   pre-arming), so the missing step is plausibly in `libhailort` or
+   in fw-internal logic not surfaced through the kernel driver.
+
+3. **Decode for the deterministic fault PC `0x9000018c`** in
+   fw v4.23. The exception fires repeatedly during the
+   boundary-input poll loop at `0x90004520`. If `0x9000018c` is an
+   ECC fault handler / synchronous abort vector / breakpoint at a
+   well-known fw routine, that name + the surrounding code tells us
+   exactly what fw is trying to read that doesn't exist.
+
+4. **Decode for `0x90004520`**: is this
+   `wait_for_boundary_input_credit` or equivalent? Confirming the
+   loop body's name lets us anchor whether the wedge is in
+   "fw never received the credit" (host side) or "fw can't proceed
+   past credit because internal init is incomplete" (fw-internal,
+   matches our reading).
+
+5. **Does `libhailort` issue any RPC during normal inference init
+   that the open-source `hailo_pci` doesn't surface** — e.g., a
+   memory-setup, capability-init, or scrub command that we wouldn't
+   see in the MMIO trace because it's a FW_CONTROL message, not a
+   register write? `hailo_pci` exposes `HAILO_DISABLE_NOTIFICATION`;
+   are there parallel "enable scrubber" / "init memory region"
+   opcodes in `libhailort`?
+
+6. **Is there a fw-side switch to make `0x00001000` ECC events
+   non-fatal during the load + first-frame window** (e.g., a
+   debug-mode firmware variant that masks ECC notifications until
+   the first inference completes)? That would let us isolate
+   whether the wedge is gated on the ECC itself (fw aborts
+   ch=2 prep on detection) or the ECC is purely a side-effect of
+   the same uninitialized read that the EP is also UR'ing.
+
+## Artifacts available on request (private channel preferred)
+
+- Boot-time `trace_mmio` from instrumented `hailo_pci` (1 646 lines
+  covering fw upload + boot trigger + first inference RPC sequence)
+- Inference-time `trace_mmio` (1 631 lines: all FWCTL TX bodies +
+  doorbell writes + ISTATUS reads)
+- Side-by-side wire diff for RESET (byte-identical) and ACTIVATION
+  (byte-identical except for IOVA fields)
+- Pi OS MNIST trace (3 913 lines) and yolov6n trace (9 463 lines)
+  with `trace_mmio` + `trace_notif`
+- Our complete bare-metal driver source (~5 KLOC C, public MIT
+  repo)
+- `host-tools/hailo-ushim` source — minimal Linux userspace tool
+  (~600 lines C) that drives the `hailo_pci` ioctl surface with
+  our byte sequences and reproduces the wedge
+- Serial captures of failing inference attempts including full
+  D2H notification dumps and BAR4 fw-debug-log hex
+- Bridge-error MMIO trace captured under `HAILO_WIRE_DEBUG`
+  showing `PCIE_STATUS`, `AXI_READ_ERROR_DATA`, EP `PCI_STATUS`,
+  `DEVSTA`, MSI cap, at pre-IN-submit and post-timeout
 
 ## Environment context
 
 This is a university capstone project building a small bare-metal
 operating system that targets AI accelerators directly without a
-host OS. We're not redistributing any Hailo IP — we link against the
-hailort firmware blob you ship via `apt install hailort-pcie-driver`
+host OS. We're not redistributing any Hailo IP — we link against
+the firmware blob shipped via `apt install hailort-pcie-driver`
 (`modinfo hailo_pci` reports version 4.23.0) and our driver is
-published under MIT license. Happy to discuss further or provide
-whatever traces would help.
+published under MIT license. Happy to share traces, source, or
+repro instructions on whatever channel works best.
 
 Best regards,
 [Your name]
