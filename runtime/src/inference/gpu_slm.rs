@@ -323,6 +323,19 @@ unsafe extern "C" {
         embedding_length: u32,
         table_row_bytes: u32,
     ) -> i32;
+
+    /// W5: dispatch Q4K_DOT against a GPU-resident weight matrix.
+    /// `x_cpu_in` is FP16 of length `k`; `out_cpu_out` is FP32 of
+    /// length `n`. The kernel-side FFI memcpys both ends through
+    /// scratch slots; caller does not deal with GPU staging.
+    fn slm_runtime_dispatch_q4k_dot_simt(
+        x_cpu_in: *const u8,
+        weights_gpu_va: u64,
+        weights_size_bytes: u64,
+        out_cpu_out: *mut u8,
+        k: u32,
+        n: u32,
+    ) -> i32;
 }
 
 /// `cargo test` doesn't link the kernel-side FFI; the host-side
@@ -364,6 +377,18 @@ unsafe fn slm_runtime_dispatch_embedding_simt(
     _out_cpu_out: *mut u8,
     _embedding_length: u32,
     _table_row_bytes: u32,
+) -> i32 {
+    -1
+}
+
+#[cfg(test)]
+unsafe fn slm_runtime_dispatch_q4k_dot_simt(
+    _x_cpu_in: *const u8,
+    _weights_gpu_va: u64,
+    _weights_size_bytes: u64,
+    _out_cpu_out: *mut u8,
+    _k: u32,
+    _n: u32,
 ) -> i32 {
     -1
 }
@@ -461,6 +486,46 @@ impl OperatorLibraryBackend {
                 out.as_mut_ptr() as *mut u8,
                 embedding_length,
                 table_row_bytes,
+            )
+        };
+        if rc != 0 {
+            return Err(BackendError::NotAvailable);
+        }
+        Ok(())
+    }
+
+    /// W5: dispatch Q4K_DOT against a GPU-resident weight matrix.
+    /// `x` is FP16 length `k`; `out` is FP32 length `n`. The
+    /// caller is responsible for shape validity (`k % 256 == 0`)
+    /// and ensuring the weights tensor was previously staged so
+    /// `weights_gpu_va` is non-zero.
+    pub fn dispatch_q4k_dot(
+        x: &[u16],
+        weights_gpu_va: u64,
+        weights_size_bytes: usize,
+        out: &mut [f32],
+        k: u32,
+        n: u32,
+    ) -> Result<(), BackendError> {
+        if select_tier(OpKind::Q4kDot) != Tier::Simt {
+            return Err(BackendError::NotAvailable);
+        }
+        if k == 0 || n == 0 || (k & 255) != 0 || weights_gpu_va == 0 {
+            return Err(BackendError::BadShape);
+        }
+        if x.len() != k as usize || out.len() != n as usize {
+            return Err(BackendError::BadShape);
+        }
+        // SAFETY: `x` valid for `x.len() * 2` bytes; `out` valid for
+        // `out.len() * 4` bytes mutable. FFI doesn't retain pointers.
+        let rc = unsafe {
+            slm_runtime_dispatch_q4k_dot_simt(
+                x.as_ptr() as *const u8,
+                weights_gpu_va,
+                weights_size_bytes as u64,
+                out.as_mut_ptr() as *mut u8,
+                k,
+                n,
             )
         };
         if rc != 0 {
