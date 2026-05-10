@@ -24,6 +24,14 @@
 #ifdef PLATFORM_JETSON_ORIN_NANO
 #include "../gpu/nvidia/ga10b_bringup.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
+#include "operator_dispatch.h"      /* struct operator_dispatch_args */
+#include "oplib_dispatch.h"         /* slm_oplib_dispatch */
+#include "oplib_pool.h"             /* OPLIB_POOL_* slot offsets */
+/* cache_clean_range / cache_invalidate_range come from gpu.h above
+ * (already included on the non-Jetson side). The kernel/include/cache.h
+ * variant has a stricter signature (const volatile void *) and would
+ * conflict with gpu.h's declaration if pulled in here. */
+#include <string.h>                 /* memcpy */
 #endif
 
 /*
@@ -1141,3 +1149,151 @@ void slm_irq_restore(uint64_t flags)
 {
     irq_restore((irq_flags_t)flags);
 }
+
+/*
+ * SLM-runtime → operator-library dispatch (#714 §B.3)
+ *
+ * The Rust-side OperatorLibraryBackend in
+ * runtime/src/inference/gpu_slm.rs calls these per-op shims to fire
+ * a SASS dispatch through the inherited GPU channel. Each shim:
+ *
+ *   1. Validates the helper-staged SASS pool is present (handoff
+ *      has shader_phys/shader_gpu_va; size >= OPLIB_POOL_MIN_BYTES).
+ *   2. Validates per-op size constraints fit in a 64 KB scratch slot.
+ *   3. Copies CPU-side input data into the matching GPU scratch slot
+ *      (helper-mapped, so the GPU can read it via its GMMU); issues
+ *      cache_clean_range so the CPU's writes drain to PoC.
+ *   4. Calls slm_oplib_dispatch() with the staged scratch GPU VAs.
+ *   5. cache_invalidate_range on the output slot, then memcpy GPU
+ *      output back to the CPU-side caller buffer.
+ *
+ * Returns 0 on success, -1 on any failure (no handoff, size cap,
+ * dispatch error). On failure the caller treats it as
+ * BackendError::NotAvailable and falls back to the CPU NEON path.
+ *
+ * Per-call overhead (1536-wide RMSNORM): ~5-10 µs cache + memcpy
+ * round-trip plus ~30-50 µs GPU dispatch latency. Net loss vs CPU
+ * NEON for cheap ops; the framework wins for matmul-shaped ops once
+ * those are wired (Q4K_DOT, GQA_ATTN).
+ */
+
+#ifdef PLATFORM_JETSON_ORIN_NANO
+
+int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
+                                       const void *gamma_cpu_in,
+                                       void *out_cpu_out,
+                                       uint32_t n_rows,
+                                       uint32_t n,
+                                       uint32_t eps_bits)
+{
+    if (x_cpu_in == NULL || gamma_cpu_in == NULL || out_cpu_out == NULL) {
+        return -1;
+    }
+    if (n_rows == 0 || n == 0) {
+        return -1;
+    }
+
+    /* Sizes: x is [n_rows × n] FP16, gamma is [n] FP16, out is
+     * [n_rows × n] FP16. Cap each at the 64 KB slot ceiling.
+     * Validated outside the lock so the caller takes the early-exit
+     * path on shape errors without paying the IRQ-off cost. */
+    uint64_t x_bytes     = (uint64_t)n_rows * n * 2u;
+    uint64_t gamma_bytes = (uint64_t)n * 2u;
+    uint64_t out_bytes   = x_bytes;
+    if (x_bytes > OPLIB_POOL_SLOT_BYTES ||
+        gamma_bytes > OPLIB_POOL_SLOT_BYTES ||
+        out_bytes > OPLIB_POOL_SLOT_BYTES) {
+        return -1;
+    }
+
+    /* Serialize against the older `slm_gpu_*` FFI (which uses the
+     * same lock) and against any other concurrent caller of this
+     * shim — e.g. slm-runner's task pulling /slm/prompt messages
+     * while the shell user dispatches a smoke verb on a different
+     * task. Both ultimately mutate the inherited GPU channel
+     * (pushbuffer / semaphore / QMD pool) through `g_nvgpu_b` +
+     * `g_handoff`; without the lock the channel-state mutations
+     * race. The lock is cleared on every return path. */
+    irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
+
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
+        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+    struct ga10b_bringup *b = ga10b_bringup_state();
+    if (b == NULL) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return -1;
+    }
+
+    /* Scratch addresses: same slot layout as the smoke verb. */
+    uint64_t in_phys  = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t in_va    = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t gam_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t gam_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t out_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t out_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH2;
+
+    /* Stage CPU input + gamma into GPU scratch. Jetson's 1:1
+     * phys/virt mapping for DRAM lets the kernel-side phys pointer
+     * be dereferenced as a regular C pointer. */
+    memcpy((void *)(uintptr_t)in_phys,  x_cpu_in,     (size_t)x_bytes);
+    memcpy((void *)(uintptr_t)gam_phys, gamma_cpu_in, (size_t)gamma_bytes);
+    cache_clean_range((void *)(uintptr_t)in_phys,
+                      (size_t)((x_bytes + 4095u) & ~4095ull));
+    cache_clean_range((void *)(uintptr_t)gam_phys,
+                      (size_t)((gamma_bytes + 4095u) & ~4095ull));
+
+    /* Build dispatcher args + fire. */
+    struct operator_dispatch_args args = {
+        .op_kind = SLM_GPU_OP_RMSNORM,
+        .u.rmsnorm = {
+            .x_gpu_va     = in_va,
+            .gamma_gpu_va = gam_va,
+            .out_gpu_va   = out_va,
+            .n_rows       = n_rows,
+            .n            = n,
+            .eps_bits     = eps_bits,
+        },
+    };
+    int rc = slm_oplib_dispatch(b, 0,
+                                 SLM_GPU_OP_RMSNORM,
+                                 SLM_GPU_TIER_SIMT,
+                                 SLM_GPU_DTYPE_FP16,
+                                 &args);
+    if (rc < 0) {
+        spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+        return rc;
+    }
+
+    /* Pull GPU output back into the CPU caller's buffer. */
+    cache_invalidate_range((void *)(uintptr_t)out_phys,
+                           (size_t)((out_bytes + 4095u) & ~4095ull));
+    memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)out_bytes);
+
+    spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    return 0;
+}
+
+#else  /* !PLATFORM_JETSON_ORIN_NANO */
+
+int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
+                                       const void *gamma_cpu_in,
+                                       void *out_cpu_out,
+                                       uint32_t n_rows,
+                                       uint32_t n,
+                                       uint32_t eps_bits)
+{
+    (void)x_cpu_in;
+    (void)gamma_cpu_in;
+    (void)out_cpu_out;
+    (void)n_rows;
+    (void)n;
+    (void)eps_bits;
+    /* Non-Jetson: no GA10B GMMU, no operator library staging. */
+    return -1;
+}
+
+#endif /* PLATFORM_JETSON_ORIN_NANO */

@@ -265,6 +265,122 @@ impl Backend for StubBackend {
 }
 
 // =====================================================================
+// OperatorLibraryBackend — real GPU-dispatch backend (#714 §B.3)
+// =====================================================================
+//
+// The original `Backend` trait above is one-input/one-output shaped,
+// which doesn't fit ops like RMSNORM (x + gamma → out) or GQA_ATTN
+// (Q + K + V → out). `OperatorLibraryBackend` instead exposes per-op
+// methods whose signatures match each op's natural shape; forward.rs
+// calls the one matching the op it's about to execute. The methods
+// route through per-op extern "C" FFI shims that handle the
+// CPU↔GPU staging round-trip via the helper-staged scratch slots.
+//
+// Self-gating: each method first reads `select_tier(op_kind)` and
+// returns `BackendError::NotAvailable` if the entry is `Tier::Cpu`
+// (i.e. the boot probe in #714 §B.2 didn't flip it to `Tier::Simt`).
+// That keeps the dispatch path inert on platforms / boot states
+// where the operator library isn't staged — forward.rs's CPU
+// fallback then handles the op as it does today.
+
+/// Real backend for the SLM operator library. Sits behind every
+/// hybrid-forward call site in `runtime/src/slm/forward.rs`; per-op
+/// methods route through FFI to `slm_oplib_dispatch` on the kernel
+/// side.
+pub struct OperatorLibraryBackend;
+
+#[cfg(not(test))]
+unsafe extern "C" {
+    /// See `kernel/include/slm_ffi.h` for the full contract.
+    fn slm_runtime_dispatch_rmsnorm_simt(
+        x_cpu_in: *const u8,
+        gamma_cpu_in: *const u8,
+        out_cpu_out: *mut u8,
+        n_rows: u32,
+        n: u32,
+        eps_bits: u32,
+    ) -> i32;
+}
+
+/// `cargo test` doesn't link the kernel-side FFI; the host-side
+/// stub returns -1 so backend tests can verify the
+/// `BackendError::NotAvailable` fall-through path without staging
+/// a real GPU channel. Marked `unsafe` to match the production
+/// `extern "C"` signature so callers don't trip the
+/// `unused_unsafe` lint when both branches compile.
+#[cfg(test)]
+unsafe fn slm_runtime_dispatch_rmsnorm_simt(
+    _x_cpu_in: *const u8,
+    _gamma_cpu_in: *const u8,
+    _out_cpu_out: *mut u8,
+    _n_rows: u32,
+    _n: u32,
+    _eps_bits: u32,
+) -> i32 {
+    -1
+}
+
+impl OperatorLibraryBackend {
+    /// Dispatch an RMSNORM through the GPU operator library. Returns
+    /// `Ok(())` on success (output bytes written to `out`), or
+    /// `BackendError::NotAvailable` if the tier table says CPU or
+    /// the FFI failed (no handoff, dispatch error, etc.). Caller —
+    /// usually `forward.rs` — falls back to the CPU NEON kernel on
+    /// any error.
+    ///
+    /// Shapes: `x` and `out` are `[n_rows × n]` FP16; `gamma` is
+    /// `[n]` FP16. `eps` is converted to its IEEE 754 FP32 bit
+    /// pattern at the FFI boundary because the kernel build forbids
+    /// FP types (`-mgeneral-regs-only`); the Rust side handles the
+    /// conversion since FP arithmetic is allowed here.
+    pub fn dispatch_rmsnorm(
+        x: &[u16],
+        gamma: &[u16],
+        out: &mut [u16],
+        n_rows: u32,
+        n: u32,
+        eps: f32,
+    ) -> Result<(), BackendError> {
+        if select_tier(OpKind::RmsNorm) != Tier::Simt {
+            return Err(BackendError::NotAvailable);
+        }
+        /* Defensive shape checks: the FFI itself validates these but
+         * surfacing them here as `BadShape` rather than `NotAvailable`
+         * helps diagnose forward.rs bugs vs missing-staging. */
+        let expected = (n_rows as usize) * (n as usize);
+        if x.len() != expected || out.len() != expected ||
+           gamma.len() != (n as usize) {
+            return Err(BackendError::BadShape);
+        }
+        if n_rows == 0 || n == 0 {
+            return Err(BackendError::BadShape);
+        }
+
+        let eps_bits = eps.to_bits();
+        // SAFETY: `x`, `gamma` are valid for `expected*2 / n*2` bytes
+        // respectively; `out` is valid for `expected*2` bytes mutable.
+        // The FFI copies these into GPU scratch slots and writes the
+        // result back into `out`'s memory; no aliasing because `out`
+        // is a `&mut` slice and `x` / `gamma` are `&` slices. The
+        // FFI never retains the pointers past return.
+        let rc = unsafe {
+            slm_runtime_dispatch_rmsnorm_simt(
+                x.as_ptr() as *const u8,
+                gamma.as_ptr() as *const u8,
+                out.as_mut_ptr() as *mut u8,
+                n_rows,
+                n,
+                eps_bits,
+            )
+        };
+        if rc != 0 {
+            return Err(BackendError::NotAvailable);
+        }
+        Ok(())
+    }
+}
+
+// =====================================================================
 // Per-op tier preference table
 // =====================================================================
 
@@ -472,6 +588,72 @@ mod tests {
                            "kind={:?} tier={:?} should be NotAvailable", k, t);
             }
         }
+    }
+
+    /* OperatorLibraryBackend::dispatch_rmsnorm — #714 §B.3 hosted
+     * tests. The kernel-side FFI is stubbed to always return -1 in
+     * `cargo test` (the `#[cfg(test)]` shim above), so dispatch
+     * goes through the early `Tier::Cpu` short-circuit when the
+     * tier table holds the boot default, and falls through to the
+     * "FFI returned -1 → NotAvailable" branch when the tier is
+     * forced to Simt. Both paths surface as `NotAvailable` to the
+     * caller so forward.rs's CPU fallback fires; the tests below
+     * verify that mapping plus the BadShape pre-flight checks. */
+
+    #[test]
+    fn oplib_backend_returns_not_available_when_tier_is_cpu() {
+        reset_globals();
+        /* Boot default for every op is Tier::Cpu. */
+        assert_eq!(select_tier(OpKind::RmsNorm), Tier::Cpu);
+        let x = [0u16; 256];
+        let gamma = [0u16; 256];
+        let mut out = [0u16; 256];
+        let r = OperatorLibraryBackend::dispatch_rmsnorm(
+            &x, &gamma, &mut out, 1, 256, 1.0e-6,
+        );
+        assert_eq!(r, Err(BackendError::NotAvailable));
+    }
+
+    #[test]
+    fn oplib_backend_returns_not_available_when_ffi_fails() {
+        reset_globals();
+        /* Force Simt so the tier short-circuit doesn't fire; the
+         * cfg(test) FFI stub returns -1, which dispatch_rmsnorm
+         * maps to NotAvailable. */
+        set_tier(OpKind::RmsNorm, Tier::Simt);
+        let x = [0u16; 256];
+        let gamma = [0u16; 256];
+        let mut out = [0u16; 256];
+        let r = OperatorLibraryBackend::dispatch_rmsnorm(
+            &x, &gamma, &mut out, 1, 256, 1.0e-6,
+        );
+        assert_eq!(r, Err(BackendError::NotAvailable));
+    }
+
+    #[test]
+    fn oplib_backend_rejects_shape_mismatch() {
+        reset_globals();
+        set_tier(OpKind::RmsNorm, Tier::Simt);
+        let x = [0u16; 256];
+        let gamma = [0u16; 128];   /* gamma.len() != n */
+        let mut out = [0u16; 256];
+        let r = OperatorLibraryBackend::dispatch_rmsnorm(
+            &x, &gamma, &mut out, 1, 256, 1.0e-6,
+        );
+        assert_eq!(r, Err(BackendError::BadShape));
+    }
+
+    #[test]
+    fn oplib_backend_rejects_zero_dims() {
+        reset_globals();
+        set_tier(OpKind::RmsNorm, Tier::Simt);
+        let x: [u16; 0]     = [];
+        let gamma: [u16; 0] = [];
+        let mut out: [u16; 0] = [];
+        let r = OperatorLibraryBackend::dispatch_rmsnorm(
+            &x, &gamma, &mut out, 0, 0, 1.0e-6,
+        );
+        assert_eq!(r, Err(BackendError::BadShape));
     }
 
     #[test]
