@@ -814,6 +814,15 @@ static int bcm2712_train_link(void)
     tmp &= ~RC_CFG_VENDOR_ENDIAN_MODE_BAR2_MASK;
     pcie1_w32(PCIE1_RC_CFG_VENDOR_SPECIFIC_REG1, tmp);
 
+    /* pcie1 is left at the link's auto-negotiated speed (Gen2 x1
+     * on the AI HAT+ on this hardware) rather than pinned to Gen3
+     * via LNKCAP/LNKCTL2 like Linux's brcm_pcie_set_gen does.
+     * Empirically: Gen3 x1 trains stably here, but Linux's LTSSM
+     * also auto-downgrades to Gen2 x1 in practice despite the DT
+     * `pciex1_gen=3` ask — matching Linux's actual operating point
+     * is safer than pushing Gen3, which is apparently signal-
+     * integrity marginal on the Pi 5 pcie1 x1 to Hailo path. */
+
     /* 13b + 14 + 15. CLKREQ# disable, tperst_clk_ms dance, CEM settle. */
     bcm2712_perst_tperst_clk_ms();
 
