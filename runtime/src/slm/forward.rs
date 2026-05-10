@@ -172,6 +172,62 @@ fn embedding_lookup_hybrid(
     )
 }
 
+/// W6: GQA_ATTN hybrid wrapper. Dispatches the GPU operator-library
+/// path when:
+/// - `select_tier(OpKind::GqaAttn) == Tier::Simt`,
+/// - the K/V scratch slot can hold `seq_len * n_head_kv * head_dim * 2`
+///   bytes (≤ 64 KB ≈ 128 positions for Qwen2.5-1.5B),
+/// - the per-call CPU staging memcpys complete.
+///
+/// Falls through to `gqa_decode_step` (the existing CPU path) on
+/// any miss. Persistent-KV staging is a future enhancement; today
+/// every K/V byte crosses the FFI per token, which limits the GPU
+/// path to short contexts. For longer contexts the CPU path is
+/// the only correct choice until the W2 staging backend allows
+/// pinning the KV cache on the GPU.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn gqa_decode_hybrid(
+    q: &[u16],
+    k: &[u16],
+    v: &[u16],
+    n_head_q: usize,
+    n_head_kv: usize,
+    head_dim: usize,
+    seq_len: usize,
+    attn_logits: &mut [f32],
+    out: &mut [u16],
+) -> Option<()> {
+    /* GPU path — pre-flight shape checks BEFORE we touch the FFI
+     * (avoids the IRQ-off lock cost on the obvious miss cases). */
+    if select_tier(OpKind::GqaAttn) == Tier::Simt {
+        let kv_bytes = seq_len.checked_mul(n_head_kv)?
+            .checked_mul(head_dim)?
+            .checked_mul(2)?;
+        let q_bytes  = n_head_q.checked_mul(head_dim)?.checked_mul(2)?;
+        /* Slot ceilings mirror `slm_runtime_dispatch_gqa_attn_simt`:
+         * Q + out share SCRATCH0's first 4 KB sub-page each; KV uses
+         * full 64 KB scratch slots. */
+        if q_bytes <= 0x1000 && kv_bytes <= 65536 {
+            if let Ok(()) = OperatorLibraryBackend::dispatch_gqa_attn(
+                q, k, v, out,
+                n_head_q as u32,
+                n_head_kv as u32,
+                head_dim as u32,
+                seq_len as u32,
+            ) {
+                return Some(());
+            }
+        }
+    }
+    /* CPU fall-through: same call as before. */
+    gqa_decode_step(
+        q, k, v,
+        n_head_q, n_head_kv, head_dim, seq_len,
+        attn_logits, out,
+    )
+}
+
 /// W5: Q4K_DOT hybrid wrapper — try the GPU operator-library path
 /// for a Q4_K matmul, fall back to the existing CPU implementation
 /// on any miss/error.
@@ -603,7 +659,7 @@ pub fn forward_one(
         }
         let k_view = session.kv.k_view_with_pending(layer)?;
         let v_view = session.kv.v_view_with_pending(layer)?;
-        gqa_decode_step(
+        gqa_decode_hybrid(
             &scratch.q_fp16,
             k_view,
             v_view,
