@@ -1412,4 +1412,63 @@ In parallel, the cheapest still-untested fix on our side: **zero DMA buffers at 
 
 ---
 
-*Last updated: 2026-04-26 (PR #355 audit + PR #359 ushim bisect + PR #405 BIST/D3hot/fwlog merged; fault localized to fw PC=0x9000018c during boundary-credit poll; awaiting Hailo support response on bit-12 region decode)*
+## 8. Phase 8 progress — 2026-05-09: SAGE1_ISP CPU_ECC root cause CONFIRMED + fixed (#682 hyp-O)
+
+**TL;DR.** The persistent `CPU_ECC_ERROR`/`CPU_ECC_FATAL` notifications
+with `memory_bitmap=0x00001000` were caused by SLM-OS issuing its
+first `FW_CONTROL` RPC ~1 ms after BOOT_IRQ ack — too soon. fw uses
+the post-BOOT_IRQ window to finish zero-initializing SAGE1_ISP and
+related CORE-CPU memory. Our too-soon IDENTIFY arrived mid-init, the
+processing path read uninitialized SAGE1_ISP, and the on-chip ECC
+checker fired the notification.
+
+**Fix (in tree at commit ba042d49+):** 500 ms `udelay` between the
+post-BOOT_IRQ IMASK disarm (hyp-N) and the IDENTIFY readback inside
+`hailo_boot()`. See `kernel/ai_accel/hailo/hailo_core.c:~770` for the
+full comment.
+
+**Empirical evidence (pi-5-1, fw v4.23, AI HAT+ Hailo-8L):**
+
+| Stack | Boots | CPU_ECC events |
+|---|---|---|
+| SLM-OS pre-fix (immediate IDENTIFY ~1 ms after BOOT_IRQ) | 5 | 1× ECC_ERROR + 2× ECC_FATAL + 2× clean (~60% rate) |
+| **SLM-OS post-fix (500 ms settle)** | **10** | **0** |
+| Linux/Pi OS (instrumented `hailo_pci` w/ `trace_notif=1`) | 10 boots + 1 yolov6n inference | **0** |
+
+SLM-OS now matches Linux exactly on CPU_ECC behavior.
+
+**Why Linux doesn't need an explicit settle.** Linux's `hailortcli`
+runs from user-space, typically seconds-to-minutes after the kernel
+module finishes the fw upload. fw is fully settled by then. SLM-OS
+issues IDENTIFY synchronously inside `hailo_boot()`, which is
+hundreds of times faster — hence the explicit `udelay`. We confirmed
+Linux's silence directly: a patched `hailo_pci` with a runtime
+`trace_notif` knob captured **zero** notifications across 10 boots
+plus a 5-frame yolov6n inference. The "Linux gets ECC too" assumption
+in earlier tickets (task #243) was wrong — that was indirect inference
+from #361 work, never instrumented.
+
+**Open follow-ups:**
+- **#682 hyp-O2 — bisect the settle.** 500 ms is deliberately
+  generous. Real minimum is unknown; expected on the order of 10s of
+  ms. Add at least 50 ms of buffer above the empirical floor.
+- **The ch=2 boundary IN wedge is a separate symptom.** ECC
+  closure does not automatically resolve the `hailo runmodel`
+  inference timeout. Verify under the new code; if still wedged,
+  ECC and wedge are independent and we need to pursue the wedge
+  on its own.
+- ~~**#682 hyp-P — fw upload speedup.**~~ — RETRACTED. Direct
+  instrumentation showed SLM-OS fw upload + ATR1 handshake = **120 ms
+  wall-clock**, ~2× FASTER than Linux's 282 ms baseline. The "~3 sec"
+  figure in the original analysis was incorrect (likely from an older
+  build or different measurement window). Poll interval also tightened
+  from 50 ms → 5 ms (still 5 s budget) for good measure. No work needed.
+
+**Investigation memory files** (point-in-time observations):
+- `memory/hailo_post_bootirq_settle_fixes_ecc.md` — confirmed root cause
+- `memory/hailo_linux_no_ecc_notifications.md` — Linux instrumented baseline
+- `memory/hailo_ecc_nondeterministic.md` — pre-fix variance pattern
+
+---
+
+*Last updated: 2026-05-09 (CPU_ECC root cause confirmed + fixed; ch=2 boundary IN wedge verification pending under new code)*

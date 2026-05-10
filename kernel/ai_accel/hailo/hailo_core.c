@@ -30,6 +30,7 @@
 #include "hailo_internal.h"
 #include "debug.h"
 #include "spinlock.h"
+#include "timer.h"
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
@@ -640,6 +641,29 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
 
     state = HAILO_STATE_FIRMWARE_ARMED;
 
+    /* #682 hyp-K (2026-05-08): mirror Linux's hailo_activate_board
+     * ordering exactly — IRQ arm + MSI registration FIRST, fw byte
+     * upload SECOND. Linux's order is hailo_pcie_disable_aspm →
+     * hailo_enable_interrupts (pci_enable_msi + request_irq +
+     * hailo_pcie_enable_interrupts) → board->fw_boot.is_in_boot=true →
+     * load_firmware (fw write + trigger) → wait for fw_loaded IRQ.
+     * SLM-OS used to write fw bytes first then arm IRQs. If fw boot
+     * ROM samples IMASK_HOST or ISTATUS_HOST during the fw write phase
+     * to decide a SAGE-init branch (or treats W1C of ISTATUS done
+     * AFTER fw bytes land as part of "device initialized" signal),
+     * the order matters. Cheap to reorder; if it doesn't change
+     * anything, it's still strictly closer to Linux. */
+    {
+        int irq_rc = hailo_control_arm_irq_masks();
+        if (irq_rc != HAILO_OK) {
+            INFO("hailo: pre-write IRQ mask arm failed (rc=%d)", irq_rc);
+        }
+        int msi_rc = hailo_control_register_msi_for_boot();
+        if (msi_rc != HAILO_OK) {
+            INFO("hailo: pre-write MSI registration failed (rc=%d)", msi_rc);
+        }
+    }
+
     /* Upload. Order matches Linux's hailo_write_app_firmware
      * followed by hailo_write_core_firmware. */
     rc = dev_write(hailo_fw_addrs_hailo8.boot_fw_header, &hdr, sizeof(hdr));
@@ -673,37 +697,8 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
 
     state = HAILO_STATE_BOOTING;
 
-    /* #253 (2026-04-23): mirror Linux's hailo_activate_board ordering
-     * by arming IMASK_HOST + per-channel IRQ masks BEFORE triggering
-     * fw boot. fw may initialize differently when it observes the
-     * IRQ infrastructure already configured at boot time vs lazily
-     * armed later (which is what SLM-OS used to do — first
-     * FW_CONTROL RPC armed them via control_post_boot_init). MSI
-     * handler registration stays post-boot since it requires the
-     * RUNNING state. */
-    {
-        int irq_rc = hailo_control_arm_irq_masks();
-        if (irq_rc != HAILO_OK) {
-            INFO("hailo: pre-trigger IRQ mask arm failed (rc=%d)", irq_rc);
-            /* Non-fatal: leave fw to boot without armed masks (the
-             * old behavior). control_post_boot_init still runs on
-             * first RPC and will retry. */
-        }
-        /* #253 (2026-04-23): register MSI handler before fw trigger
-         * so the MSI cap is configured (host address+data programmed
-         * in the device's PCI cap) when fw observes its post-boot
-         * environment. Linux does this in hailo_pcie_enable_interrupts
-         * before load_firmware. We continue to use ATR[1] polling
-         * for the actual fw-loaded handshake — this is just to make
-         * the MSI cap visible to fw at boot. */
-        int msi_rc = hailo_control_register_msi_for_boot();
-        if (msi_rc != HAILO_OK) {
-            INFO("hailo: pre-trigger MSI registration failed (rc=%d)", msi_rc);
-            /* Also non-fatal — same fallback. */
-        }
-    }
-
     /* Trigger: write 1 to trigger_address (doorbell). */
+    uint64_t t_trigger = timer_get_count();
     rc = dev_write32(hailo_fw_addrs_hailo8.trigger_address,
                      HAILO_FW_TRIGGER_VALUE);
     if (rc != HAILO_OK) goto fail;
@@ -711,33 +706,226 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
     /*
      * Wait for firmware-loaded handshake: the on-device bootloader
      * finishes loading our FW and writes HAILO_ATR1_FW_LOADED_MAGIC
-     * into ATR[1].trsl_addr_lo. This is the only post-trigger poll
-     * Linux runs (see hailo_pcie_wait_for_firmware in
-     * pcie-common.c:832). boot_status may stay at 1 during the load
-     * because "UNINITIALIZED" in the Hailo enum actually means
-     * "boot ROM in ready state", not "device dead" — polling it to
-     * transition off 1 was the wrong invariant and caused a
-     * spurious timeout on real hardware. 5 s budget, 50 ms interval.
+     * into ATR[1].trsl_addr_lo. Linux's hailo_pcie_wait_for_firmware
+     * (pcie-common.c:832) polls the same predicate with msleep(50) ×
+     * 100 retries (5 s budget). Tightened our poll interval from 50 ms
+     * to 5 ms × 1000 retries (still 5 s budget) so wakeup tracks the
+     * actual fw boot time, not the poll cadence.
+     *
+     * Empirical (#682 hyp-P, 2026-05-09): 120 ms wall-clock from
+     * trigger doorbell to ATR1 magic, consistent across runs. That's
+     * ~2× FASTER than Linux's 282 ms baseline — the prior "3 sec"
+     * figure quoted in the bootphase trace annotation was based on
+     * an old build/measurement and is no longer correct. fw boot time
+     * (~120 ms) is the dominant cost, not poll latency.
      */
-    rc = hailo_poll(atr1_shows_fw_loaded, 50000u, 5000000u);
+    rc = hailo_poll(atr1_shows_fw_loaded, 5000u, 5000000u);
+    uint64_t t_loaded = timer_get_count();
+    uint32_t fw_us = (uint32_t)((t_loaded - t_trigger) * 1000000ULL
+                                 / timer_get_frequency());
+    INFO("hailo: fw upload + handshake = %u us "
+         "(Linux baseline: ~282000 us; we are ~2x faster)",
+         fw_us);
     if (rc != HAILO_OK) {
         INFO("hailo: ATR[1] never reached FW_LOADED magic (fw image bad?)");
         goto fail;
+    }
+
+    /* #682 hyp-J (2026-05-08): mirror what Linux's hailo_pcie_read_interrupt
+     * does when fw raises HAILO_PCIE_BOOT_IRQ — read BCS_ISTATUS_HOST and
+     * write the value back to W1C the BOOT_IRQ bit (bit 25). Linux clears
+     * this as part of normal IRQ handling because pci_enable_msi + the
+     * registered handler dispatch fw's BOOT_IRQ to boot_irq_handler. SLM-OS
+     * polls ATR[1] instead and never visits the IRQ path during boot, so
+     * the bit stays asserted indefinitely. If fw waits for the host to
+     * acknowledge BOOT_IRQ before completing internal SAGE init (the
+     * bit-12 SAGE1_ISP ECC errors fire on every CORE-CPU RPC, suggesting
+     * uninitialized memory there), this ack would unstick that path. */
+    {
+        uint32_t istatus_post_boot = hailo_platform->read32(
+            HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
+        if (istatus_post_boot != 0u) {
+            hailo_platform->write32(HAILO_BAR_CONFIG,
+                                    HAILO_BCS_ISTATUS_HOST,
+                                    istatus_post_boot);
+            hailo_platform->mb();
+        }
+        INFO("hailo: post-fw-loaded ISTATUS=0x%08x boot_irq=%d",
+             istatus_post_boot,
+             (istatus_post_boot & HAILO_BCS_ISTATUS_HOST_BOOT_IRQ_BIT) ? 1 : 0);
+    }
+
+    /* #682 hyp-N (2026-05-09): mirror Linux's hailo_disable_interrupts
+     * after BOOT_IRQ ack. Linux's boot trace shows IMASK_HOST written
+     * to 0 immediately after the post-FW_LOADED ISTATUS W1C above; the
+     * driver then idles in D3hot until first open() and re-arms IMASK
+     * at that point. SLM-OS leaves IMASK armed continuously, which
+     * means our MSI handler can fire on fw-internal events during the
+     * post-boot/pre-configure idle window and silently W1C bits the
+     * fw was using for its own bookkeeping. control_post_boot_init
+     * re-arms on the first FW_CONTROL RPC (IDENTIFY below), symmetric
+     * to Linux's re-enable on open(). */
+    {
+        int dis_rc = hailo_control_disarm_irq_masks();
+        if (dis_rc != HAILO_OK) {
+            INFO("hailo: post-boot IMASK disarm failed (rc=%d) — "
+                 "continuing with IMASK armed (Linux-divergent)",
+                 dis_rc);
+        } else {
+            INFO("hailo: IMASK_HOST=0 (post-BOOT_IRQ disarm, "
+                 "matches Linux)");
+        }
+    }
+
+    /* #682 hyp-O — CONFIRMED ROOT CAUSE (2026-05-09): post-BOOT_IRQ
+     * settle is required before any FW_CONTROL RPC. Hailo-8 fw uses
+     * this window to finish its internal SAGE init (zero out
+     * SAGE1_ISP among other CORE-CPU memory). Without it, the first
+     * RPC's processing path on fw touches uninitialized SAGE1_ISP and
+     * the CORE-CPU ECC checker fires a CPU_ECC notification — varying
+     * boot-to-boot between event_id=7 (correctable) and event_id=8
+     * (fatal) depending on the random uninit-read syndrome.
+     *
+     * Empirical evidence (pi-5-1, fw v4.23):
+     *   pre-fix (immediate IDENTIFY ~1 ms after BOOT_IRQ ack):
+     *     5 boots → 1× ECC_ERROR + 2× ECC_FATAL + 2× clean (~60% rate)
+     *   post-fix (500 ms settle):
+     *     10 boots → 0 CPU_ECC events
+     *   Linux/Pi OS baseline (instrumented hailo_pci trace_notif=1):
+     *     10 boots + yolov6n inference → 0 events
+     * SLM-OS now matches Linux. See
+     * memory/hailo_post_bootirq_settle_fixes_ecc.md for the
+     * full investigation history.
+     *
+     * Why Linux didn't need an explicit settle: Linux's
+     * `hailortcli identify` runs from user-space, typically
+     * seconds-to-minutes after kernel module load completes the fw
+     * upload. fw is already settled by then. SLM-OS issues IDENTIFY
+     * synchronously inside `hailo_boot`, ~1 ms after BOOT_IRQ ack —
+     * which is before fw has finished init. Hence the explicit udelay.
+     *
+     * 500 ms is calibrated from the bisect (#682 hyp-O2, 2026-05-09):
+     *   100 ms: 1 fail in 3 boots (FAIL)
+     *   250 ms: 1 fail in 1 boots (FAIL)
+     *   375 ms: 1 fail in 4 boots (FAIL)
+     *   450 ms: 0 fails in 5 boots (clean)
+     *   500 ms: 0 fails in 10 boots (clean)
+     * Floor sits between 375 ms and 450 ms. 500 ms is ~50–125 ms above
+     * the empirical floor — comfortably satisfying the "≥ 50 ms buffer
+     * above the floor" requirement. Don't drop below 500 ms without
+     * re-running the bisect on the same hardware revision and fw
+     * version; fw's SAGE init time has run-to-run variance and we
+     * never want to be one boot away from a regression. */
+    if (hailo_platform->udelay) {
+        hailo_platform->udelay(500000u); /* 500 ms (bisect-anchored) */
+        INFO("hailo: post-disarm settle complete (500 ms)");
     }
 
     state = HAILO_STATE_RUNNING;
     /* firmware_revision is a build/tag ID (real FW 4.23.0 ships with
      * revision=0x20000000), not a semver digit — print it in hex so
      * the value reads as intentional. major/minor are conventional
-     * decimals. */
-    INFO("hailo: firmware %u.%u rev=0x%08x booted",
+     * decimals. NOTE: these come from our LOCAL blob header — they
+     * are what we *intended* to install, not a readback from the
+     * device. The IDENTIFY check below validates what's actually
+     * running. */
+    INFO("hailo: firmware %u.%u rev=0x%08x uploaded",
          hdr.firmware_major, hdr.firmware_minor, hdr.firmware_revision);
+
+    /* Readback + sanity-check what's actually running. IDENTIFY is an
+     * APP-CPU RPC and should always be safe immediately post-boot —
+     * if it fails, fw didn't come up the way we think it did. The
+     * fw-version compare WARNs (does not fail the boot) so a useful
+     * debugging scenario where someone swaps a fw blob mid-
+     * investigation can still proceed; a real production setup
+     * should treat any WARN here as boot-blocking.
+     *
+     * #682 (2026-05-09) — log every field both raw (4-byte little-
+     * endian native, as the struct holds it) and BE-swapped (which
+     * is how HailoRT serializes scalar params across the wire).
+     * fw_version is documented as native LE per HailoRT's identify.cpp
+     * (memcpy'd raw); other scalars (protocol_version, logger_version,
+     * device_architecture) are TLV scalars and should arrive BE — but
+     * we dump both reads so a future endianness regression surfaces
+     * immediately. Hex-dump the whole 162 B response for byte-level
+     * diff against a Pi OS HailoRT IDENTIFY kprobe capture. */
+    {
+        struct hailo_control_identify_response idr;
+        memset(&idr, 0, sizeof(idr));
+        int id_rc = hailo_control_identify(&idr);
+        if (id_rc != HAILO_OK) {
+            WARN("hailo: post-boot IDENTIFY failed (rc=%d) — cannot "
+                 "verify running fw matches uploaded blob", id_rc);
+        } else {
+            INFO("hailo IDENTIFY: running fw %u.%u rev=0x%08x "
+                 "(uploaded fw %u.%u rev=0x%08x)",
+                 idr.fw_version.major, idr.fw_version.minor,
+                 idr.fw_version.revision,
+                 hdr.firmware_major, hdr.firmware_minor,
+                 hdr.firmware_revision);
+
+            if (idr.fw_version.major    != hdr.firmware_major ||
+                idr.fw_version.minor    != hdr.firmware_minor ||
+                idr.fw_version.revision != hdr.firmware_revision) {
+                WARN("hailo IDENTIFY: running fw does NOT match "
+                     "uploaded blob — boot continues, but inference "
+                     "results from this run should not be trusted");
+            }
+
+            INFO("hailo IDENTIFY: protocol_version raw=0x%08x be=%u",
+                 idr.protocol_version,
+                 __builtin_bswap32(idr.protocol_version));
+            INFO("hailo IDENTIFY: logger_version raw=0x%08x be=%u",
+                 idr.logger_version,
+                 __builtin_bswap32(idr.logger_version));
+            INFO("hailo IDENTIFY: device_architecture raw=0x%08x be=%u",
+                 idr.device_architecture,
+                 __builtin_bswap32(idr.device_architecture));
+            /* Use %.*s — fields are fixed-width and may not be NUL-
+             * terminated. The precision caps printing at the buffer
+             * size; fmt_string_width also stops at any embedded NUL,
+             * which gives "Hailo-8\0\0\0..." → "Hailo-8". */
+            INFO("hailo IDENTIFY: board='%.*s'",
+                 (int)HAILO_CONTROL_MAX_BOARD_NAME_LENGTH,
+                 (const char *)idr.board_name);
+            INFO("hailo IDENTIFY: serial='%.*s'",
+                 (int)HAILO_CONTROL_MAX_SERIAL_NUMBER_LENGTH,
+                 (const char *)idr.serial_number);
+            INFO("hailo IDENTIFY: part='%.*s'",
+                 (int)HAILO_CONTROL_MAX_PART_NUMBER_LENGTH,
+                 (const char *)idr.part_number);
+            INFO("hailo IDENTIFY: product='%.*s'",
+                 (int)HAILO_CONTROL_MAX_PRODUCT_NAME_LENGTH,
+                 (const char *)idr.product_number);
+
+            /* Hex-dump the full 162 B response body. 16 bytes/line so
+             * it lines up with the Pi OS hailo-resp kprobe format,
+             * which lets a future Linux IDENTIFY capture diff line-
+             * by-line against this. */
+            uart_printf("[hailo IDENTIFY] response body (%u B):\r\n",
+                        (unsigned)sizeof(idr));
+            const uint8_t *raw = (const uint8_t *)&idr;
+            for (uint32_t off = 0; off < sizeof(idr); off += 16u) {
+                uart_printf("[hailo IDENTIFY] %08x:", (unsigned)off);
+                uint32_t row = (sizeof(idr) - off) < 16u
+                                ? (sizeof(idr) - off) : 16u;
+                for (uint32_t j = 0; j < row; j++) {
+                    uart_printf(" %02x", raw[off + j]);
+                }
+                uart_printf("\r\n");
+            }
+        }
+    }
 
 #ifdef HAILO_WIRE_DEBUG
     /* #682 hypothesis-1 diagnostic: confirm the per-channel IRQ enable
      * bits are still 0xFFFFFFFF immediately after fw boots and arm_irq_masks
      * has run. Baseline read-back. */
     hailo_control_dump_irq_state("post-boot-arm");
+    /* #682 hypothesis-6: confirm pcie1 is still trained at the speed
+     * dtparam=pciex1_gen=3 selected. A re-train during fw load would
+     * show as a step-down to Gen1 here. */
+    hailo_platform_log_link_state("post-boot-arm");
 #endif
 
 #ifdef HAILO_D3HOT_AT_BOOT
@@ -749,6 +937,19 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
      * — fw stays in a cleaner state until the boundary submit attempt
      * itself. Boundary submit still hangs (#253 has another root cause),
      * but the cleaner state matches Linux's expected init flow.
+     *
+     * Position note (#682 hyp-N2 — disconfirmed 2026-05-09): we briefly
+     * tried moving this cycle to BEFORE IDENTIFY (immediately after the
+     * IMASK disarm above) to better match Linux's literal lifecycle
+     * (disable_interrupts → D3hot → idle → D0 on open()). That made the
+     * SAGE1_ISP ECC notification escalate from CPU_ECC_ERROR
+     * (correctable, event_id=7) to CPU_ECC_FATAL (uncorrectable,
+     * event_id=8). Hypothesis: cycling power immediately after BOOT_IRQ
+     * interrupts fw's internal SAGE-init settle window. Linux's actual
+     * call to set_power_state(D3hot) happens at the end of the driver
+     * probe routine, not the instant after BOOT_IRQ ack — there's an
+     * implicit settling window. So we keep the cycle at the END of
+     * hailo_boot where the empirical evidence supports it.
      *
      * Gated behind HAILO_D3HOT_AT_BOOT (default ON) so we can A/B test
      * vs. the no-cycle path. Turn OFF for direct comparison or if the

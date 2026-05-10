@@ -377,28 +377,23 @@ void hailo_control_dump_irq_state(const char *label)
 }
 
 /*
- * #682 hyp-X-1 (DISCONFIRMED 2026-05-09): drain stale per-channel
- * VDMA IRQ pending bits + aggregate ISTATUS bits the same way
- * Linux's hailo_pcie_read_interrupt does (hailo-pcie-common.c:443-460).
+ * #682 hyp-X-1 (2026-05-09): drain stale per-channel VDMA IRQ
+ * pending bits + aggregate ISTATUS bits the same way Linux's
+ * hailo_pcie_read_interrupt does (hailo-pcie-common.c:443-460).
  * Linux's MNIST trace shows the host issues this exact drain
  * sequence at vaddr+0x18c, +0x400 (and +0x500 if DEST set)
  * IMMEDIATELY before the first boundary IN avail bump. SLM-OS
  * leaves CFG-channel SRC pending bits stale after load completes
  * (PER_SRC=0x00000003 from ch=0+1 servicing during fw context-info
- * upload).
+ * upload), and the trace from e8976dfc on pi-5-1 shows ch=2 wedges
+ * indefinitely while these stale bits sit there.
  *
- * Disconfirmation: with the drain wired at pre-IN-submit on pi-5-1,
- * ISTATUS goes 0x02800001→0x00000000 and PER_SRC 0x00000003→0
- * cleanly, but the boundary IN ch=2 wedge is unchanged. Stale host-
- * side IRQ acks are not the gating factor for fw's ch=2 prep. Helper
- * retained for cleaner post-timeout state correlation.
- *
- * Mirrors control_msi_handler's drain logic with one extra guard:
- * the FW_CONTROL_BIT is preserved (excluded from the aggregate W1C)
- * and, if set, control_msi_pending is raised. This keeps the contract
- * that one fw FW_CONTROL signal always reaches one wait_for_response
- * wake — so a polling RPC waiter on another CPU doesn't lose a
- * notification we happened to drain.
+ * Mirrors control_msi_handler's drain logic with one extra
+ * guard: the FW_CONTROL_BIT is preserved (excluded from the
+ * aggregate W1C) and, if set, control_msi_pending is raised. This
+ * keeps the contract that one fw FW_CONTROL signal always reaches
+ * one wait_for_response wake — so a polling RPC waiter on another
+ * CPU doesn't lose a notification we happened to drain.
  */
 void hailo_control_drain_pending_irqs(const char *label)
 {
@@ -481,6 +476,33 @@ int hailo_control_arm_irq_masks(void)
     hailo_platform->mb();
 
     control_irq_masks_armed = true;
+    return HAILO_OK;
+}
+
+/* #682 hyp-N (2026-05-09): mirror Linux's hailo_disable_interrupts
+ * after the BOOT_IRQ ack. The Pi OS boot-phase MMIO trace shows
+ * IMASK_HOST written to 0 right after the post-fw-load ISTATUS W1C;
+ * Linux then idles in D3hot until first open() and re-arms IMASK at
+ * that point. SLM-OS leaves IMASK armed continuously, which means our
+ * MSI handler can fire on fw-internal events (CPU_ECC notifications,
+ * boundary IRQ aggregates, etc.) during the post-boot/pre-load idle
+ * window and silently W1C them. If fw is sensitive to host IRQ state
+ * during that window — e.g., expects to W1C its own SAGE init bits
+ * without competition from a host handler — disarming gives it the
+ * same conditions Linux does.
+ *
+ * The arm flag is cleared too; control_post_boot_init's existing call
+ * to hailo_control_arm_irq_masks (early-returns when the flag is set)
+ * will re-arm on the first FW_CONTROL RPC, symmetric to Linux's
+ * re-enable on open(). */
+int hailo_control_disarm_irq_masks(void)
+{
+    if (!hailo_platform || !hailo_platform->write32) {
+        return HAILO_ERR_NODEV;
+    }
+    hailo_platform->write32(HAILO_BAR_CONFIG, HAILO_BSC_IMASK_HOST, 0u);
+    hailo_platform->mb();
+    control_irq_masks_armed = false;
     return HAILO_OK;
 }
 
@@ -1855,48 +1877,28 @@ int hailo_control_context_switch_clear_configured_apps(void)
 
 int hailo_control_get_hw_consts(uint32_t *out_response_len)
 {
-    int rc = control_send_empty_body_core_rpc(
+    return control_send_empty_body_core_rpc(
         HAILO_CONTROL_OPCODE_GET_HW_CONSTS,
         "GET_HW_CONSTS",
         &control_hw_consts_req,
         &control_hw_consts_resp,
         sizeof(control_hw_consts_resp),
         out_response_len);
-    if (rc != HAILO_OK) return rc;
+}
 
-#ifdef HAILO_WIRE_DEBUG
-    /* Phase 8 #253 (2026-04-23 probe): dump the raw response body so
-     * we can decode the hw_consts struct on the host side. HailoRT's
-     * upstream control_protocol.h v4.23 declares:
-     *   uint32_t fifo_word_granularity_bytes;
-     *   uint16_t max_periph_buffers_per_frame;
-     *   uint16_t max_periph_bytes_per_buffer;
-     *   uint16_t max_acceptable_bytes_per_buffer;
-     *   uint32_t outbound_data_stream_size;
-     *   uint8_t  should_optimize_credits;
-     *   uint32_t default_initial_credit_size;
-     * Wire layout per param: 4 B BE length + value. We dump the raw
-     * bytes; future revision can parse fields once layout confirmed
-     * against what fw on Hailo-8L actually returns. */
-    if (out_response_len && *out_response_len > 0) {
-        uint32_t body_len = *out_response_len;
-        if (body_len > sizeof(control_hw_consts_resp.body)) {
-            body_len = sizeof(control_hw_consts_resp.body);
-        }
-        uart_printf("[hw_consts] response body %u bytes:\r\n",
-                    (unsigned)body_len);
-        const uint8_t *b = control_hw_consts_resp.body;
-        for (uint32_t i = 0; i < body_len; i += 16) {
-            uart_printf("[hw_consts] [%03x]:", (unsigned)i);
-            uint32_t end = (i + 16 > body_len) ? body_len : (i + 16);
-            for (uint32_t j = i; j < end; j++) {
-                uart_printf(" %02x", b[j]);
-            }
-            uart_printf("\r\n");
-        }
-    }
-#endif /* HAILO_WIRE_DEBUG */
-    return HAILO_OK;
+/* Accessor for the most recent GET_HW_CONSTS response body. Lets a
+ * caller dump or decode the response *after* its timing window has
+ * closed — the previous in-function dump (5 lines × ~63 chars at
+ * 115200 baud) added ~21 ms to any externally-bracketed measurement,
+ * which masked the real RPC latency. The static BSS buffer here is
+ * single-writer (control_lock-serialized inside
+ * hailo_control_get_hw_consts) and stable until the next
+ * GET_HW_CONSTS call. */
+void hailo_control_get_hw_consts_response_body(const uint8_t **out_body,
+                                               uint32_t       *out_capacity)
+{
+    if (out_body)     *out_body     = control_hw_consts_resp.body;
+    if (out_capacity) *out_capacity = (uint32_t)sizeof(control_hw_consts_resp.body);
 }
 
 int hailo_control_core_identify(uint32_t *out_response_len)
@@ -2122,4 +2124,136 @@ int hailo_control_set_context_info(
         is_first   = false;
     }
     return HAILO_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/* CHANGE_HW_INFER_STATUS (opcode 0x4A, CORE CPU). #682 hyp-A.                */
+/* -------------------------------------------------------------------------- */
+
+/* Per-channel info entry. Mirrors HailoRT's
+ * CONTROL_PROTOCOL__hw_infer_channel_info_t (4 bytes packed). */
+struct hailo_hw_infer_channel_info {
+    uint8_t  channel_index;
+    uint8_t  engine_index;
+    uint16_t desc_programed;            /* native LE */
+} __attribute__((packed));
+
+/* HailoRT's CONTROL_PROTOCOL__MAX_TOTAL_CHANNEL_COUNT
+ * = MAX_VDMA_CHANNELS_PER_ENGINE(40) * MAX_VDMA_ENGINES_COUNT(3) = 120. */
+#define HAILO_HW_INFER_MAX_TOTAL_CHANNEL_COUNT 120u
+
+/* Mirrors hw_infer_channels_info_t: array of 120 channel_info
+ * (4 B each = 480 B) + 1-byte channel_count = 481 B total. */
+struct hailo_hw_infer_channels_info {
+    struct hailo_hw_infer_channel_info channel_info[HAILO_HW_INFER_MAX_TOTAL_CHANNEL_COUNT];
+    uint8_t channel_count;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_hw_infer_channels_info) == 481,
+               "hw_infer_channels_info wire size must be 481 bytes");
+
+/* Wire layout: parameter_count=6 with six length+value pairs.
+ *   1: hw_infer_state (u8)
+ *   2: application_index (u8)
+ *   3: dynamic_batch_size (u16, native LE)
+ *   4: batch_count (u16, native LE)
+ *   5: channels_info (481 B blob, native LE per-field)
+ *   6: boundary_channel_mode (u8)
+ */
+struct hailo_cs_change_hw_infer_status_req_wire {
+    struct hailo_control_common_header common;
+    uint32_t parameter_count;                    /* BE, = 6 */
+    uint32_t hw_infer_state_length;              /* BE, = 1 */
+    uint8_t  hw_infer_state;
+    uint32_t application_index_length;           /* BE, = 1 */
+    uint8_t  application_index;
+    uint32_t dynamic_batch_size_length;          /* BE, = 2 */
+    uint16_t dynamic_batch_size;                 /* native LE */
+    uint32_t batch_count_length;                 /* BE, = 2 */
+    uint16_t batch_count;                        /* native LE */
+    uint32_t channels_info_length;               /* BE, = 481 */
+    struct hailo_hw_infer_channels_info channels_info;
+    uint32_t boundary_channel_mode_length;       /* BE, = 1 */
+    uint8_t  boundary_channel_mode;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct hailo_cs_change_hw_infer_status_req_wire) ==
+               16 /* common */ + 4 /* param_count */ +
+               (4+1) + (4+1) + (4+2) + (4+2) + (4+481) + (4+1),
+               "CHANGE_HW_INFER_STATUS wire size mismatch");
+
+/* Response: parameter_count=1 carrying hw_only_infer_results_t
+ * (bool infer_done + uint32_t infer_cycles, 5 B packed). The
+ * 32 B ceiling is defensive — header(12) + parameter_count(4) +
+ * length(4) + body(5) = 25 bytes, leaving slack for any framing
+ * variation. */
+struct hailo_cs_change_hw_infer_status_resp_wire {
+    struct hailo_control_response_header header;
+    uint32_t parameter_count;                    /* BE */
+    uint8_t  body[32];
+} __attribute__((packed));
+
+static struct hailo_cs_change_hw_infer_status_req_wire   control_change_hw_infer_req;
+static struct hailo_cs_change_hw_infer_status_resp_wire  control_change_hw_infer_resp;
+
+int hailo_control_change_hw_infer_status(
+    enum hailo_hw_infer_state         state,
+    uint8_t                           app_idx,
+    uint16_t                          dynamic_batch_size,
+    uint16_t                          batch_count,
+    enum hailo_boundary_channel_mode  boundary_mode)
+{
+    spin_lock(&control_lock);
+
+    struct hailo_cs_change_hw_infer_status_req_wire *r = &control_change_hw_infer_req;
+    memset(r, 0, sizeof(*r));
+
+    r->common.version  = hailo_cpu_to_be32(HAILO_CONTROL_PROTOCOL_VERSION);
+    r->common.flags    = 0;
+    r->common.sequence = hailo_cpu_to_be32(control_next_sequence());
+    r->common.opcode   = hailo_cpu_to_be32(HAILO_CONTROL_OPCODE_CHANGE_HW_INFER_STATUS);
+    r->parameter_count = hailo_cpu_to_be32(6u);
+
+    r->hw_infer_state_length        = hailo_cpu_to_be32(sizeof(r->hw_infer_state));
+    r->hw_infer_state               = (uint8_t)state;
+    r->application_index_length     = hailo_cpu_to_be32(sizeof(r->application_index));
+    r->application_index            = app_idx;
+    r->dynamic_batch_size_length    = hailo_cpu_to_be32(sizeof(r->dynamic_batch_size));
+    r->dynamic_batch_size           = dynamic_batch_size;
+    r->batch_count_length           = hailo_cpu_to_be32(sizeof(r->batch_count));
+    r->batch_count                  = batch_count;
+    r->channels_info_length         = hailo_cpu_to_be32(sizeof(r->channels_info));
+    /* channels_info already zeroed by memset above — channel_count=0,
+     * all channel_info entries zero. Whether fw accepts that is part
+     * of the experimental signal. */
+    r->boundary_channel_mode_length = hailo_cpu_to_be32(sizeof(r->boundary_channel_mode));
+    r->boundary_channel_mode        = (uint8_t)boundary_mode;
+
+    uint32_t resp_len = 0;
+    int rc = control_validate_send_recv_args(&control_change_hw_infer_req, sizeof(*r),
+                                             &control_change_hw_infer_resp,
+                                             sizeof(control_change_hw_infer_resp),
+                                             &resp_len);
+    if (rc == HAILO_OK) {
+        rc = hailo_control_send_recv_locked(HAILO_CTRL_CPU_CORE,
+                                            &control_change_hw_infer_req, sizeof(*r),
+                                            &control_change_hw_infer_resp,
+                                            sizeof(control_change_hw_infer_resp),
+                                            &resp_len,
+                                            /* 5 s — generous: HW-only START
+                                             * may run inference before
+                                             * acking */ 5000000u);
+    }
+    if (rc != HAILO_OK) {
+        spin_unlock(&control_lock);
+        return rc;
+    }
+
+    struct hailo_control_response_header hdr_copy;
+    memcpy(&hdr_copy, &control_change_hw_infer_resp.header, sizeof(hdr_copy));
+    rc = control_check_response_header(&hdr_copy, resp_len,
+                                       HAILO_CONTROL_OPCODE_CHANGE_HW_INFER_STATUS,
+                                       "CHANGE_HW_INFER_STATUS");
+    spin_unlock(&control_lock);
+    return rc;
 }

@@ -751,6 +751,45 @@ static void dump_channel_block(uint8_t channel_index, uint32_t side_offset,
                 (unsigned)addr_l, (unsigned)addr_h);
 }
 
+/* #682 (2026-05-08): step-through state snapshot. Dump host-side AND
+ * device-side (fw-owned mirror) register blocks for the four channels
+ * that participate in inference: ch=0 (CFG IN), ch=1 (CFG OUT), ch=2
+ * (BND IN), ch=16 (BND OUT). The dev-side block is the most useful
+ * surface — it's where fw publishes its view of channel progress and
+ * where divergence vs Linux/HailoRT will be visible. The label is
+ * printed verbatim on each line so a checkpoint sequence can be
+ * grep'd out after the fact. */
+void hailo_vdma_snap_channels(const char *label)
+{
+    if (!hailo_platform || !hailo_platform->read32) return;
+    if (!label) label = "?";
+
+    static const uint8_t snap_channels[] = { 0u, 1u, 2u, 16u };
+    static const char   *snap_names[]    = {
+        "CFG_IN", "CFG_OUT", "BND_IN", "BND_OUT"
+    };
+
+    uart_printf("[snap] === %s ===\r\n", label);
+    for (uint32_t i = 0; i < 4u; i++) {
+        uint8_t  ch  = snap_channels[i];
+        uint32_t host_off = (ch < HAILO_VDMA_H2D_CHANNEL_COUNT)
+            ? HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_H2D
+            : HAILO_VDMA_CHANNEL_HOST_REGS_OFFSET_D2H;
+        uint32_t dev_off  = (host_off == 0u) ? 0x10u : 0x00u;
+        char host_label[32], dev_label[32];
+        /* uart_printf doesn't have %s+integer formatting we can rely
+         * on for the embedded ch tag; use cs_strfmt-style direct
+         * concatenation via uart_printf calls. */
+        (void)host_label; (void)dev_label;
+        uart_printf("[snap] %s %s ch=%u host:\r\n",
+                    label, snap_names[i], (unsigned)ch);
+        dump_channel_block(ch, host_off, "host");
+        uart_printf("[snap] %s %s ch=%u dev:\r\n",
+                    label, snap_names[i], (unsigned)ch);
+        dump_channel_block(ch, dev_off, "dev");
+    }
+}
+
 int hailo_vdma_channel_wait_armed(uint8_t channel_index, uint32_t timeout_us)
 {
     if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
@@ -791,23 +830,6 @@ int hailo_vdma_write_num_avail(uint8_t channel_index, uint16_t num_avail)
     (void)base_pre;
     (void)base_post;
 #endif
-    return HAILO_OK;
-}
-
-int hailo_vdma_arm_first_desc_irq(struct hailo_vdma_desc_list *list,
-                                  uint32_t starting_desc,
-                                  uint32_t ctrl_mask)
-{
-    if (!list || !list->descs) return HAILO_ERR_INVAL;
-    if (starting_desc >= list->desc_count) return HAILO_ERR_INVAL;
-
-    uint32_t slot = starting_desc & list->desc_count_mask;
-    struct hailo_vdma_descriptor *d = &list->descs[slot];
-    d->page_size_desc_control |= (ctrl_mask & 0xFFu);
-
-    if (hailo_platform && hailo_platform->cache_clean) {
-        hailo_platform->cache_clean(d, sizeof(*d));
-    }
     return HAILO_OK;
 }
 

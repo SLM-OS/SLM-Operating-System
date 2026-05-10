@@ -1743,7 +1743,15 @@ static void test_decode_core_fw_success_populates_outputs(void)
 
 /* Boot the device to state=RUNNING and reset ATR[0] so the control-
  * channel offsets on BAR4 map cleanly onto the mock SRAM
- * (0 → SRAM[0], 0x640 → SRAM[0x640], 0x1684 → SRAM[0x1684]). */
+ * (0 → SRAM[0], 0x640 → SRAM[0x640], 0x1684 → SRAM[0x1684]).
+ *
+ * `hailo_boot` now performs a post-boot IDENTIFY (#682 hyp-K — mirrors
+ * Linux's hailo_activate_board) which rings the control doorbell,
+ * arms+disarms+rearms IMASK, and registers the MSI handler. To keep
+ * existing per-RPC tests independent of this internal handshake, zero
+ * the observability counters that boot consumed and reset the control-
+ * layer one-shot flags so the test's first control RPC re-fires the
+ * arm/register path it was originally written against. */
 static void control_setup_running(void)
 {
     boot_setup_probed();
@@ -1755,6 +1763,28 @@ static void control_setup_running(void)
     /* Post-boot ATR[0] may point anywhere from the firmware upload
      * path; clear it so the control-channel offsets map cleanly. */
     mock_atr0_target = 0;
+
+    /* Mock-side observability reset — counters that the in-boot
+     * IDENTIFY consumed start fresh for the test that called us. */
+    mock_control_doorbells          = 0;
+    mock_control_core_doorbells     = 0;
+    mock_control_last_doorbell_val  = 0;
+    memset(mock_last_control_request, 0, sizeof(mock_last_control_request));
+    mock_last_control_request_len   = 0;
+    mock_imask_writes               = 0;
+    mock_imask_last_value           = 0;
+    mock_istatus_clears_all         = 0;
+    mock_per_channel_src_write_count = 0;
+    mock_per_channel_src_last_value  = 0;
+    mock_per_channel_dst_write_count = 0;
+    mock_per_channel_dst_last_value  = 0;
+    mock_register_irq_calls         = 0;
+    mock_registered_irq_handler     = NULL;
+    mock_registered_irq_ctx         = NULL;
+    /* Driver-side one-shot flags — re-cleared so the next RPC the
+     * test issues re-walks the arm-IMASK / register-MSI / post-boot-
+     * init path it was authored against. */
+    hailo_control_reset_state_for_tests();
 }
 
 static void test_control_identify_rejects_when_not_running(void)
@@ -6895,17 +6925,18 @@ static void test_inf_hailo_load_rings_context_switch_sequence(void)
     TEST_ASSERT_EQUAL_INT(INF_OK, inference_load_model(dev, blob, n, &h));
 
     /* Expected core-CPU RPCs per context_switch_load:
-     *   1. CHANGE_STATUS(RESET)
-     *   2. CLEAR_CONFIGURED_APPS     (pre-configure handshake)
-     *   3. GET_HW_CONSTS             (pre-configure handshake)
-     *   4. SET_NETWORK_GROUP_HEADER
-     *   5-8. SET_CONTEXT_INFO × 4    (ACT/BS/PRE/DYN)
-     *   9. CHANGE_STATUS(ENABLED)
+     *   1.    CHANGE_STATUS(RESET)
+     *   2.    CLEAR_CONFIGURED_APPS    (pre-configure handshake)
+     *   3-8.  GET_HW_CONSTS × 6        (#682 hyp-M — Linux HailoRT
+     *                                    calls it 6× back-to-back)
+     *   9.    SET_NETWORK_GROUP_HEADER
+     *   10-13. SET_CONTEXT_INFO × 4    (ACT/BS/PRE/DYN)
+     *   14.   CHANGE_STATUS(ENABLED)
      * Post-ENABLED the driver also writes num_avail on the CFG VDMA
      * channel (#253 / f160fe0) but that's an MMIO poke, not an RPC, so
      * it doesn't touch mock_control_core_doorbells. */
     uint32_t core_rpcs = mock_control_core_doorbells - core_before;
-    TEST_ASSERT_EQUAL_UINT32(9u, core_rpcs);
+    TEST_ASSERT_EQUAL_UINT32(14u, core_rpcs);
 }
 
 /* #179 failure unwind: if the context-switch sequence fails partway

@@ -191,21 +191,35 @@ static void fmt_char_width(struct fmt_output *out, char c, int width,
     }
 }
 
-/* Helper: output a string with width (\r\n conversion if crlf flag is set) */
+/* Helper: output a string with width (\r\n conversion if crlf flag is set).
+ * `precision` follows C99/C11 rules for %s: -1 means "no precision given,
+ * print the full NUL-terminated string"; >= 0 means "print at most
+ * `precision` bytes, regardless of NUL termination". This matters for
+ * fixed-width device fields (e.g. board_name[32]) that may not be
+ * NUL-terminated. */
 static void fmt_string_width(struct fmt_output *out, const char *s, int width,
-                             int left_justify)
+                             int precision, int left_justify)
 {
-    int len = (int)strlen(s);
+    int len;
+    if (precision >= 0) {
+        /* Bounded scan: stop at NUL or at `precision` bytes, whichever
+         * comes first. strnlen is not available freestanding, so do it
+         * explicitly. */
+        len = 0;
+        while (len < precision && s[len] != '\0') len++;
+    } else {
+        len = (int)strlen(s);
+    }
     int pad = width > len ? width - len : 0;
 
     if (!left_justify && pad > 0) {
         fmt_padding(out, ' ', pad);
     }
-    while (*s) {
-        if (out->crlf && *s == '\n') {
+    for (int i = 0; i < len; i++) {
+        if (out->crlf && s[i] == '\n') {
             out->putc(out, '\r');
         }
-        out->putc(out, *s++);
+        out->putc(out, s[i]);
     }
     if (left_justify && pad > 0) {
         fmt_padding(out, ' ', pad);
@@ -362,17 +376,27 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
             fmt++;
         }
 
-        /* Parse precision (`.N`). -1 means "default for the conversion"
-         * (e.g., 6 decimals for %f). 0 is a real value (no fractional
-         * part for %f). Only the float specifiers honor this — %d /
-         * %s / %x ignore it for now. */
+        /* Parse precision (`.N` or `.*`). -1 means "default for the
+         * conversion" (e.g., 6 decimals for %f). 0 is a real value
+         * (no fractional part for %f). Float specifiers honor this
+         * for fractional digits; %s honors it as a max-bytes cap
+         * (useful for fixed-width non-NUL-terminated device fields).
+         * %d/%i/%u/%x ignore it for now. */
         int precision = -1;
         if (*fmt == '.') {
             fmt++;
-            precision = 0;
-            while (*fmt >= '0' && *fmt <= '9') {
-                precision = precision * 10 + (*fmt - '0');
+            if (*fmt == '*') {
+                precision = va_arg(args, int);
                 fmt++;
+                /* Negative precision per C99 = "as if precision were
+                 * omitted" — undo the `.*` we just parsed. */
+                if (precision < 0) precision = -1;
+            } else {
+                precision = 0;
+                while (*fmt >= '0' && *fmt <= '9') {
+                    precision = precision * 10 + (*fmt - '0');
+                    fmt++;
+                }
             }
         }
 
@@ -406,7 +430,7 @@ static void fmt_vprintf(struct fmt_output *out, const char *fmt, va_list args)
         case 's': {
             const char *s = va_arg(args, const char *);
             if (s == NULL) s = "(null)";
-            fmt_string_width(out, s, width, left_justify);
+            fmt_string_width(out, s, width, precision, left_justify);
             break;
         }
 
