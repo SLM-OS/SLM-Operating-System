@@ -2,7 +2,7 @@
 //!
 //! M5.2 of the SLM integration plan (see
 //! `docs/plans/slm-integration-plan.md` §M5 and
-//! `docs/fact-sheets/slm-integration.md`). A `Session` ties together a loaded
+//! `docs/design/slm-integration.md`). A `Session` ties together a loaded
 //! GGUF model (looked up in [`crate::slm::registry`]), an FP16 KV cache
 //! ([`crate::slm::kv_cache::KvCache`]), and a sampler
 //! ([`crate::slm::sampler`]). The session is the unit of conversation

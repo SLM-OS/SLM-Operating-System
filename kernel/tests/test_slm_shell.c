@@ -11,7 +11,7 @@
  *
  * Hardware-side acceptance (real GGUF load, prompt streaming,
  * stats) lives in the integration / hardware-deploy path documented
- * in docs/fact-sheets/slm-integration.md.
+ * in docs/design/slm-integration.md.
  */
 
 #include "unity.h"

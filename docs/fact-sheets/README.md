@@ -6,7 +6,6 @@ sub-features across the four supported platforms, including anything
 that was attempted but blocked.
 
 **Not** a status report — these are stable facts about the codebase.
-For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 
 **Platforms:**
 
@@ -47,6 +46,7 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 | Components (hot-swap) | ✅ | ✅ | ✅ | 🟡 no EL0 yet | [components.md](components.md) |
 | Lua scripting | ✅ 5.4.7 | ✅ | ✅ | ✅ | [lua.md](lua.md) |
 | Multi-session shell (TCP + telnet + telnetd) | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ | [shell.md](shell.md) |
+| Generative SLM (Qwen2.5-1.5B Q4_K_M) | ✅ CPU | ✅ CPU | ✅ CPU + partial GPU | 🟡 SSE | [slm-integration.md](slm-integration.md) |
 | Testing / CI | ✅ full | 🟡 HW-in-loop | 🟡 HW-in-loop | ✅ QEMU + HW | [testing.md](testing.md) |
 
 ---
@@ -63,4 +63,4 @@ For delivery narrative, see `docs/archive/plans/capstone-feature-status.md`.
 - [`../design/`](../design/) — design specs and engineering proposals (forward-looking).
 - [`../contracts/`](../contracts/) — stable interface contracts (e.g. runtime blob formats, device-file layout).
 
-*Last updated: 8 May 2026 (post-#742, post-oplib-dispatcher, post-fact-sheets refactor)*
+*Last updated: 9 May 2026*

@@ -2,7 +2,7 @@
  * slm_shell.c — `slm` shell command family (Phase SLM, M7.1).
  *
  * Wires the M1.4 (loader) + M5.2 (session/decoder) Rust FFI through
- * the kernel shell. See docs/fact-sheets/slm-integration.md "CLI Surface
+ * the kernel shell. See docs/design/slm-integration.md "CLI Surface
  * (Shell)" for the verb table; the dispatcher below mirrors the
  * existing `model` verb in kernel/src/shell_sys.c (cmd_model).
  *
@@ -585,7 +585,7 @@ static int slm_launch(int argc, char *argv[])
         return -1;
     }
 
-    /* Defaults — match the demo line in docs/fact-sheets/slm-integration.md. */
+    /* Defaults — match the demo line in docs/design/slm-integration.md. */
     uint32_t max_ctx       = 2048u;
     uint32_t sampler_kind  = SLM_SAMPLER_TOP_K_TOP_P;
     float    temperature   = 0.7f;

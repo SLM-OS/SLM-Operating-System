@@ -18,7 +18,7 @@ Cross-platform symmetric-multiprocessing bring-up and runtime behavior.
 | Manual DC CVAC/CIVAC needed | — | ✅ | ✅ | — |
 | Spinlock model | LDAXR/STXR | Runtime `spinlock_hw_enabled`; barrier-only pre-MMU; DC CIVAC around LDAXR/STLR | Runtime `spinlock_hw_enabled`; same as Pi 5 | `lock cmpxchg` |
 | Work stealing | ON | ON | ON | ON |
-| Multi-core integration tests | 5/5 pass | 15/15 pass (modulo #216 flake) | 6-core `bench smp` 5/5 | Full suite |
+| Multi-core integration tests | 5/5 pass | 15/15 pass (modulo #216 dormancy flake) | 6-core `bench smp` 5/5 | Full suite |
 | SMP-safe UART lock | Standard | IRQ-disable-only (NC lock deadlocks) | IRQ-disable-only | Standard |
 | CPU 0 idle behavior | WFI (timer wakes) | WFI (HW preempt opt-in) / WFE-spin (default coop) | WFI (HW tick default) / spin-yield under `JETSON_HW_TICK=OFF` | HLT |
 
@@ -34,6 +34,5 @@ Cross-platform symmetric-multiprocessing bring-up and runtime behavior.
 - `kernel/CLAUDE.md` §"Non-Cacheable Shared Memory"
 - `kernel/CLAUDE.md` §"Cross-CPU notification — `smp_notify_cpu()`"
 - `docs/smp.md` (narrative)
-- `docs/archive/resolved-blockers.md` (closed-issue history)
 
 *Last updated: 9 May 2026*

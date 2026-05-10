@@ -19,18 +19,16 @@ Block devices, VFS, filesystem backends.
 | File operations | open/close/read/write/seek/stat/mkdir/rm/rename | Same | Same | Same |
 | Max path length | `VFS_PATH_MAX` (256) | Same | Same | Same |
 | Shell file ops | `ls cd pwd cat write mkdir rm mv cp touch stat tree wc hexdump grep find df truncate append` | Same | Same | Same |
-| File handle generation counter | ✅ (prevents stale-handle reuse, 8dee772) | ✅ | ✅ | ✅ |
+| File handle generation counter | ✅ (prevents stale-handle reuse) | ✅ | ✅ | ✅ |
 | VFS lock | Global spinlock | Same | Same | Same |
 | Model file loading from VFS | ONNX via `model load <path>` | Same | Same | Same |
 | Embedded assets | Lua scripts, ONNX models, AI scheduler weights via `.incbin` | Same | Same | Same |
 
 ## Skipped / Blocked
 
-- **Real block device drivers (eMMC, NVMe) on non-Pi platforms** — deferred. Pi 5 BCM2712 EMMC2 SDHCI is now in tree (`kernel/drivers/sdhci.c`, PR #389) and drives FAT32 access on the SD boot partition. Other platforms still rely on RAM disk:
+- **Real block device drivers (eMMC, NVMe) on non-Pi platforms** — deferred. Pi 5 BCM2712 EMMC2 SDHCI is in tree and drives FAT32 access on the SD boot partition. Other platforms still rely on RAM disk:
   - Jetson: eMMC controller (behind CBB — untested)
   - x86-64: NVMe or SATA AHCI driver
-- **Pi 5 `pmm_free_pages` free-list page fault under stealing (#166)** — closed. Was a generic PMM/spinlock issue, not storage-specific.
-- **LittleFS file handle reuse with stale file state** — closed 2026-04-17 (8dee772) via per-handle generation counter.
 - **Persistent `/mnt/files` on Jetson/x86-64/QEMU** — gated on a real block device for those platforms.
 - **Journal / transaction-aware ops** — LittleFS has its own power-loss-safety model; not exposed to shell as explicit transactions.
 - **File permissions / ownership** — no users, no permissions, no ACLs. Single-user bare-metal.

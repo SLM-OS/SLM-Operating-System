@@ -12,7 +12,7 @@ Message routing, pub/sub, shared buffers, priority-inheritance mutexes.
 | Topic name limit | Fixed size in struct | Same | Same | Same |
 | Message shape | Pointer + size; no serialization | Same | Same | Same |
 | Ack model | Per-message ack with timeout | Same | Same | Same |
-| Ack timeout source | `pit_ticks` | `timer_get_count()` CNTPCT (post #80 fix) | Same | LAPIC timer |
+| Ack timeout source | `pit_ticks` | `timer_get_count()` CNTPCT | Same | LAPIC timer |
 | Shared buffers | Ring buffers with producer/consumer pointers | Same | Same | Same |
 | Shared buffer cache maintenance | — | DC CVAC/CIVAC required | Same | — |
 | Priority-inheritance mutex | ✅ (mutex.h) | Same | Same | Same |
@@ -23,9 +23,8 @@ Message routing, pub/sub, shared buffers, priority-inheritance mutexes.
 
 ## Skipped / Blocked
 
-- **Cross-state `msg_subscribe` ack loss** — shared `LUA_MSG_SUB_IDX` ack-always hazard documented during PR #217 review. Fix queued as an issue; not currently filed as its own ticket. Non-blocking for demo.
-- **`lua_msg_subs` spinlock** — the global Lua message-subscribers table is not currently protected by a spinlock. OK today because all shell-driven Lua access runs on CPU 0 and Lua states are per-session, but incorrect under truly concurrent access. Fix queued as an issue.
-- **Pi 5 IPC ack timeouts used to break** (#80 closed) — `pit_ticks` never advanced on Pi 5, so `msg_router_publish` ack waits hung. Fixed by switching ack timeout to `timer_get_count()` via CNTPCT_EL0 (PR #102).
+- **Cross-state `msg_subscribe` ack loss** — shared `LUA_MSG_SUB_IDX` ack-always hazard. Non-blocking for demo; not currently filed as its own ticket.
+- **`lua_msg_subs` spinlock** — the global Lua message-subscribers table is not protected by a spinlock. Safe today because all shell-driven Lua access runs on CPU 0 and Lua states are per-session; incorrect under truly concurrent access.
 - **Message persistence** — no durable message store; all messages live in RAM and die on reboot.
 - **Cross-OS / cross-machine IPC** — nothing. The message router is single-machine.
 - **Message serialization format** — raw pointer + size. No versioning, no schema. Subscribers must know the producer's layout.
@@ -34,7 +33,6 @@ Message routing, pub/sub, shared buffers, priority-inheritance mutexes.
 
 - `docs/ipc.md` (narrative)
 - `docs/m7-message-router.md` (design doc)
-- `docs/archive/investigations/echo-ipc-debugging.md` (historical debugging notes)
 - `docs/component-development.md` §"Message router hookup"
 
 *Last updated: 18 April 2026*

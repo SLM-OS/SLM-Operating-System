@@ -2,7 +2,7 @@
 //!
 //! Includes the GGUF v3 parser, BBPE tokenizer, INT4 dequantization
 //! kernels, transformer ops, KV cache, and decoder. See
-//! `docs/fact-sheets/slm-integration.md` for the full spec.
+//! `docs/design/slm-integration.md` for the full spec.
 
 #![cfg(feature = "slm")]
 

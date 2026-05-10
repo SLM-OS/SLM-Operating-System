@@ -22,6 +22,7 @@ here.
 | [gpu-per-op-dispatch.md](gpu-per-op-dispatch.md) | Replace name-based whole-graph GPU eligibility with graph-aware per-op dispatch. |
 | [gpu-policy-models.md](gpu-policy-models.md) | Wire AI-scheduler and page-eviction policy models to the same GA10B compute-dispatch path used by the MNIST inference engine. |
 | [gpu-slm-handoff.md](gpu-slm-handoff.md) | Pre-kexec SLM model staging + bare-metal pushbuffer dispatch for the SLM integration milestones (M6.A → M6.D). |
+| [slm-integration.md](slm-integration.md) | Full design for end-to-end Qwen2.5-1.5B Q4_K_M inference on Jetson Orin Nano: target SLM rationale, runtime stack, memory plan, GPU integration paths, CLI surface, telemetry plan. |
 
 ## See also
 
