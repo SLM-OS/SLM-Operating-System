@@ -1967,6 +1967,18 @@ int ga10b_submit_and_poll(struct ga10b_bringup *b,
         uart_printf("[%s] GP_GET did not advance — PBDMA didn't see "
                     "our submit\n", tag);
     }
+    /* GR engine state dump (#779 wedge diagnosis). See the BULK
+     * timeout path for offset references. */
+    uart_printf("[%s]   gr_intr=0x%08lx gr_exception=0x%08lx "
+                "class_error=0x%08lx trapped_addr=0x%08lx fe_hww_esr=0x%08lx "
+                "fecs_intr=0x%08lx\n",
+                tag,
+                (unsigned long)bar0_r32(0x00400100u),
+                (unsigned long)bar0_r32(0x00400108u),
+                (unsigned long)bar0_r32(0x00400110u),
+                (unsigned long)bar0_r32(0x00400704u),
+                (unsigned long)bar0_r32(0x00404000u),
+                (unsigned long)bar0_r32(0x00400144u));
     b->last_error_phase = error_phase;
     return -1;
 }
@@ -2468,6 +2480,28 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
                     "didn't see our submits (GP_GET still %lu)\n",
                     (unsigned long)final_gp_get);
     }
+    /* GR engine state dump — surface the actual fault that wedged
+     * the dispatch path. Offsets per
+     * `~/slmos-ref/nvidia/nvgpu-hw-gr-ga10b.h`:
+     *   gr_intr_r        @ 0x00400100 — top-level interrupt status
+     *   gr_exception_r   @ 0x00400108 — per-engine exception bits
+     *   gr_class_error_r @ 0x00400110 — SET_OBJECT / method addr fault
+     *   gr_trapped_addr  @ 0x00400704 — method addr the engine choked on
+     *   gr_fe_hww_esr_r  @ 0x00404000 — front-end hardware-wedge ESR
+     *   gr_fecs_intr_r   @ 0x00400144 — FECS-side interrupt mask
+     * Non-zero values here name the fault class. The wedge in
+     * issue #779 prints these so the next iteration knows whether
+     * we're looking at a method-decode error, an SM trap, or a
+     * pipeline drain that just didn't release the sema. */
+    uart_printf("[GA10B-P8-v7]   gr_intr=0x%08lx gr_exception=0x%08lx "
+                "class_error=0x%08lx trapped_addr=0x%08lx fe_hww_esr=0x%08lx "
+                "fecs_intr=0x%08lx\n",
+                (unsigned long)bar0_r32(0x00400100u),
+                (unsigned long)bar0_r32(0x00400108u),
+                (unsigned long)bar0_r32(0x00400110u),
+                (unsigned long)bar0_r32(0x00400704u),
+                (unsigned long)bar0_r32(0x00404000u),
+                (unsigned long)bar0_r32(0x00400144u));
     b->last_error_phase = 8;
     return -1;
 }
