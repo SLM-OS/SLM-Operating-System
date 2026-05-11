@@ -446,6 +446,18 @@ void hailo_control_drain_pending_irqs(const char *label)
     }
     if (hailo_platform->mb) hailo_platform->mb();
 
+    /* Polled-drain IRQ trace. The MSI handler also emits an IRQ
+     * trace at its tail, but on fast-fw RPCs the polling path
+     * (wait_for_response → this drain) clears ISTATUS before the
+     * handler runs. Without this emit, polled drains would be
+     * invisible in the trace while interrupt-delivered IRQs would
+     * appear — confusing asymmetry. spi=0 marks this as a poll
+     * rather than a hardware IRQ delivery. */
+    if ((src_pre | dst_pre | istatus_pre) != 0u &&
+        hailo_trace_active(HAILO_TRACE_MECH_IRQ)) {
+        hailo_trace_emit_irq(0u, istatus_pre, src_pre, dst_pre);
+    }
+
     uint32_t istatus_post = hailo_platform->read32(
         HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
     uint32_t src_post = hailo_platform->read32(
@@ -705,16 +717,17 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                &doorbell_val, sizeof(doorbell_val));
     hailo_platform->mb();
 
-    /* RPC tx trace. Opcode is the first BE32 of the payload (per
-     * `req.common.opcode = hailo_cpu_to_be32(...)` convention used
-     * by every wire builder). md5 lives in control_req_wire bytes
-     * 0..15; first 8 bytes are enough to identify the RPC across
-     * a capture without bloating the line. */
+    /* RPC tx trace. The request common header is 16 bytes:
+     *   [version(4)][flags(4)][sequence(4)][opcode(4)] (all BE32)
+     * so the opcode's low byte is at offset 15 of req_payload.
+     * md5 lives in control_req_wire bytes 0..15; first 8 bytes are
+     * enough to identify the RPC across a capture without bloating
+     * the line. */
     if (hailo_trace_active(HAILO_TRACE_MECH_RPC)) {
         uint8_t op = 0;
-        if (req_payload && req_len >= 4) {
+        if (req_payload && req_len >= 16) {
             const uint8_t *p = (const uint8_t *)req_payload;
-            op = p[3];  /* BE32 low byte = opcode byte for 1-byte opcodes */
+            op = p[15];  /* low byte of BE32 opcode at offset 12..15 */
         }
         hailo_trace_emit_rpc_tx(op, req_len, (uint8_t)doorbell_val,
                                 control_req_wire);
@@ -773,14 +786,21 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
     *resp_len = copy_len;
     rc = HAILO_OK;
 
-    /* RPC rx trace. Status major/minor are buried in the response
-     * payload (resp.header.status.{major,minor}_status at known
-     * per-opcode offsets). Decoding them here would couple this
-     * function to every opcode's wire layout — leave the trace
-     * status fields at 0:0 for now; len + the preceding tx line's
-     * md5/opcode are enough to correlate. */
-    if (hailo_trace_active(HAILO_TRACE_MECH_RPC))
-        hailo_trace_emit_rpc_rx(0u, 0u, copy_len);
+    /* RPC rx trace. Response common header is 16 B (same layout as
+     * request) followed by an 8-B response_status:
+     *   [version(4)][flags(4)][sequence(4)][opcode(4)] [major(4)][minor(4)]
+     * all BE32. Decode major+minor from bytes 16..23 of the response
+     * payload when the readback is at least header-sized. major+minor
+     * are u32 on the wire but real status codes fit in u8, so the
+     * trace passes the low byte of each. */
+    if (hailo_trace_active(HAILO_TRACE_MECH_RPC)) {
+        uint8_t major = 0, minor = 0;
+        if (read_len >= 24) {
+            major = control_resp_wire[19]; /* low byte of major BE32 @ 16 */
+            minor = control_resp_wire[23]; /* low byte of minor BE32 @ 20 */
+        }
+        hailo_trace_emit_rpc_rx(major, minor, copy_len);
+    }
 
 out:
     return rc;

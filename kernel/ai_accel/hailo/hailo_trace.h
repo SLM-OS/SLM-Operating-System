@@ -68,10 +68,20 @@ enum hailo_trace_phase {
 #define HAILO_TRACE_MECH_MMIO      (1u << 0)   /* BAR0/2/4 read/write */
 #define HAILO_TRACE_MECH_PCI_CFG   (1u << 1)   /* ECAM config space read/write */
 #define HAILO_TRACE_MECH_RPC       (1u << 2)   /* FW_CONTROL wire bytes (md5+len+body) */
-#define HAILO_TRACE_MECH_IRQ       (1u << 3)   /* MIP1 → MSI → ISTATUS handler entry */
+#define HAILO_TRACE_MECH_IRQ       (1u << 3)   /* MIP1 → MSI → ISTATUS handler entry, plus polled drains */
 #define HAILO_TRACE_MECH_DMA       (1u << 4)   /* descriptor list arm/start, num_avail */
 #define HAILO_TRACE_MECH_BUSY_WAIT (1u << 5)   /* udelay call sites */
 #define HAILO_TRACE_MECH_ALL       0x3Fu
+
+/* IRQ trace note: emits fire from BOTH the MSI handler tail AND the
+ * polled drain in hailo_control_drain_pending_irqs. The driver's
+ * fast-fw RPC path uses cooperative polling that clears ISTATUS
+ * before the hardware-delivered MSI handler runs, so on fast paths
+ * the trace lines come from the polled drain (spi=0); on slow paths
+ * (notifications, ECC events, async fw signals) they come from the
+ * handler. Both paths emit the same line shape with the same
+ * ISTATUS/SRC/DEST values, so consumers can treat them
+ * interchangeably — spi=0 just disambiguates the source. */
 
 /* -------------------------------------------------------------------------- */
 /* Globals + hot-path guard                                                    */
