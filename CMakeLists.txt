@@ -1287,9 +1287,7 @@ elseif(OPLIB_SASS_FILES)
                 ${OPLIB_SASS_FILES}
         VERBATIM
     )
-    message(STATUS "Embedding operator library: auto-detected "
-                   "${OPLIB_MANIFEST} "
-                   "(set OPLIB_BLOB to override)")
+    message(STATUS "Embedding operator library: auto-detected ${OPLIB_MANIFEST} (set OPLIB_BLOB to override)")
 else()
     set(OPLIB_BLOB_FINAL "${CMAKE_BINARY_DIR}/operator_library_stub.bin")
     add_custom_command(
@@ -1302,9 +1300,7 @@ else()
         DEPENDS "${CMAKE_SOURCE_DIR}/scripts/build-operator-library-stub.py"
         VERBATIM
     )
-    message(STATUS "Embedding operator library: stub (no SASS files in "
-                   "scripts/cuda/operator_library/; set OPLIB_BLOB to "
-                   "override or extract SASS via the .cu source recipe)")
+    message(STATUS "Embedding operator library: stub (no SASS files in scripts/cuda/operator_library/; set OPLIB_BLOB to override or extract SASS via the .cu source recipe)")
 endif()
 target_sources(slmos.elf PRIVATE kernel/src/oplib_embed.S)
 set_source_files_properties(
