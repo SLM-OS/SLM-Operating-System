@@ -3,14 +3,30 @@ name: Build and Test
 on:
   push:
     branches: [ main, develop ]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
   workflow_dispatch:  # Allow manual trigger
 
-# Cancel in-progress runs for the same PR / branch on new pushes.
+# Cancel in-progress runs for the same PR on new pushes. Scoped to
+# pull_request events only — main/develop push runs must complete so
+# rapid-fire merges still produce verifiable history per merged commit.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Minimal default token permissions. The workflow only checks out code
+# and uploads artifacts; broaden this when adding steps that comment on
+# PRs, publish releases, etc.
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
@@ -22,11 +38,21 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Cache ARM toolchain
+      id: arm-toolchain
+      uses: actions/cache@v4
+      with:
+        path: /opt/arm-gnu-toolchain-13.2.Rel1-x86_64-aarch64-none-elf
+        key: arm-gnu-13.2.rel1-aarch64-none-elf-${{ runner.os }}
+
     - name: Install bare-metal ARM toolchain (aarch64-none-elf)
+      if: steps.arm-toolchain.outputs.cache-hit != 'true'
       run: |
         wget -q https://developer.arm.com/-/media/Files/downloads/gnu/13.2.rel1/binrel/arm-gnu-toolchain-13.2.rel1-x86_64-aarch64-none-elf.tar.xz
         sudo tar -xf arm-gnu-toolchain-13.2.rel1-x86_64-aarch64-none-elf.tar.xz -C /opt
-        echo "/opt/arm-gnu-toolchain-13.2.Rel1-x86_64-aarch64-none-elf/bin" >> $GITHUB_PATH
+
+    - name: Add ARM toolchain to PATH
+      run: echo "/opt/arm-gnu-toolchain-13.2.Rel1-x86_64-aarch64-none-elf/bin" >> $GITHUB_PATH
 
     - name: Install QEMU + build deps
       run: |
@@ -66,17 +92,17 @@ jobs:
           build/kernel-test/slmos.bin
           build/test-output.log
         retention-days: 7
-        if-no-files-found: ignore
+        if-no-files-found: warn
 
   build-x86-64:
     name: x86-64 build + test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # x86-64 currently hits a pre-existing rustc/LLVM ICE in slm-runtime
-    # ("Do not know how to soften this operator's operand"). Tracked
-    # separately; the job runs so we see when it starts passing again
-    # but doesn't block the overall workflow status until that ICE is
-    # resolved.
+    # ("Do not know how to soften this operator's operand"). Tracked in
+    # #786 — drop `continue-on-error` and revert these lines when that
+    # issue closes. The job stays in the matrix so we see when it
+    # starts passing.
     continue-on-error: true
 
     steps:
@@ -118,7 +144,7 @@ jobs:
           build/kernel-test/iso/boot/kernel.elf
           build/test-output.log
         retention-days: 7
-        if-no-files-found: ignore
+        if-no-files-found: warn
 
   shell-script-tests:
     name: Shell script tests
