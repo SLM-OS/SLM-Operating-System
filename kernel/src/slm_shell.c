@@ -657,7 +657,11 @@ static int slm_launch(int argc, char *argv[])
         (sampler_kind == SLM_SAMPLER_TOP_P)         ? "topp"   :
         (sampler_kind == SLM_SAMPLER_TOP_K_TOP_P)   ? "topkp"  :
                                                       "?";
-    shell_printf("[slm] session=%ld backend=CPU(M5.2 stub) sampler=%s "
+    /* Forward path is M5.3.2 (full Qwen2 transformer chain); per-op
+     * tier is decided at dispatch time from the GPU tier table (see
+     * `slm gpu`). Don't promise SIMT/HMMA here — at launch we just
+     * know the implementation, not what the runtime will pick. */
+    shell_printf("[slm] session=%ld backend=M5.3.2 sampler=%s "
                  "ctx=%lu",
                  (long)sid, sname, (unsigned long)max_ctx);
     if (sampler_kind != SLM_SAMPLER_GREEDY) {
@@ -906,8 +910,8 @@ static int slm_status(void)
     for (uint32_t i = 0; i < 32u; i++) {
         if (rust_slm_stats(i, &st) == 0) sessions++;
     }
-    shell_printf("models=%lu sessions=%lu (M5.2 stub forward — "
-                 "decoder emits zero-logit tokens)\r\n",
+    shell_printf("models=%lu sessions=%lu (M5.3.2 forward — run "
+                 "`slm gpu` for per-op tier state)\r\n",
                  (unsigned long)models, (unsigned long)sessions);
     return 0;
 }
@@ -943,12 +947,33 @@ static int slm_stats(int argc, char *argv[])
 
 static int slm_gpu(void)
 {
-    /* M6.A-3 (per-op tier dispatch) is deferred per the integration
-     * plan. When wired, this verb walks rust_slm_gpu_* to print the
-     * per-op tier table. For now it's a structured "not yet" line so
-     * scripted demos can detect the state. */
-    shell_puts("GPU dispatch not yet wired (M6.A-3 deferred — "
-               "see docs/plans/slm-integration-plan.md)\r\n");
+    /* Walk the 8 first-class SLM op kinds and report which tier the
+     * forward path will route each one through. The tier table is
+     * populated at boot by `oplib_probe_run`, which flips an entry
+     * from CPU to SIMT once the op's metadata + SASS pass the static
+     * smoke probe. HMMA tier is reserved for M6.B kernels not yet
+     * shipped. */
+    static const struct { uint32_t op; const char *name; } ops[] = {
+        { 0u, "RMSNORM"   },
+        { 1u, "ROPE"      },
+        { 2u, "EMBEDDING" },
+        { 3u, "Q4K_DOT"   },
+        { 4u, "Q4K_GEMM"  },
+        { 5u, "GQA_ATTN"  },
+        { 6u, "SWIGLU"    },
+        { 7u, "LM_HEAD"   },
+    };
+    shell_puts("op           tier\r\n");
+    shell_puts("-----------  ----\r\n");
+    for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
+        int tier = slm_runtime_get_tier(ops[i].op);
+        const char *tname =
+            (tier == 0) ? "AUTO" :
+            (tier == 1) ? "HMMA" :
+            (tier == 2) ? "SIMT" :
+            (tier == 3) ? "CPU"  : "ERR";
+        shell_printf("%-11s  %s\r\n", ops[i].name, tname);
+    }
     return 0;
 }
 

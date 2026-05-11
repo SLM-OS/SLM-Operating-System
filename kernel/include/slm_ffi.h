@@ -1168,6 +1168,17 @@ extern uint32_t rust_slm_count(void);
 extern int slm_runtime_set_tier_simt(uint32_t op_kind);
 
 /*
+ * Readback for the per-op tier table. Returns the current
+ * SLM_GPU_TIER_* value for `op_kind`, or -1 on out-of-range. Used by
+ * the `slm gpu` shell verb to report which ops are routed through
+ * the GPU operator library vs the M4 CPU fallback.
+ *
+ * Lock-free (atomic load inside Rust). Safe to call from any context
+ * that can also call uart_printf().
+ */
+extern int slm_runtime_get_tier(uint32_t op_kind);
+
+/*
  * SLM-runtime → operator-library RMSNORM dispatch (#714 §B.3).
  *
  * Called from runtime/src/inference/gpu_slm.rs's

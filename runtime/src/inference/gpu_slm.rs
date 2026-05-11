@@ -1,15 +1,25 @@
-//! Bare-metal SLM-OS GPU backend (M6.A scaffolding).
+//! Bare-metal SLM-OS GPU backend (M6.A wired, M6.B HMMA deferred).
 //!
-//! Reads the `slm_gpu_handoff_v1` struct staged by the pre-kexec L4T
-//! loader (`scripts/slm-gpu-bringup.c`, M6.A-2 — not yet authored)
-//! and exposes a `Backend` trait the M5 decoder dispatches through.
+//! Reads the v8 channel handoff staged by the pre-kexec L4T loader
+//! (`scripts/gpu-channel-helper.c`) and exposes a backend the M5
+//! decoder dispatches through. Per-op tier is read from `TIER_TABLE`,
+//! populated at boot by `oplib_probe_run` (kernel-side) calling
+//! `slm_runtime_set_tier_simt`.
 //!
-//! Status: **structural skeleton only**. The actual SASS kernels
-//! (M6.B Tier-1 HMMA, M6.C Tier-2 CUDA-core, M6.D element-wise) and
-//! the pushbuffer / semaphore-poll dispatch are weeks of work
-//! deferred per `docs/design/gpu-slm-handoff.md`. Every entry point
-//! currently returns `BackendError::NotAvailable`, which the
-//! M4-CPU-fallback path catches.
+//! Status: **W1–W7 SIMT kernels wired** (RMSNORM, EMBEDDING, Q4K_DOT,
+//! GQA_ATTN, SWIGLU, Q4K_DEQUANT, ROPE) and validated end-to-end on
+//! Jetson Orin Nano (1169 dispatches in a single SmolLM2 prompt run,
+//! 2026-05-10). M6.B HMMA tensor-core kernels are still deferred —
+//! tier table just keeps those ops on SIMT.
+//!
+//! Every `OperatorLibraryBackend::dispatch_*` method self-gates on
+//! `select_tier(op_kind) == Tier::Simt`; if the boot probe didn't
+//! flip the op to SIMT (no SASS, no handoff, etc.), the dispatch
+//! returns `BackendError::NotAvailable` and `forward.rs` falls back
+//! to the M4 CPU NEON kernel.
+//!
+//! Hosted `cargo test` builds (`#[cfg(test)]`) link in always-fail
+//! FFI stubs so the backend tests run without a real GPU channel.
 //!
 //! See `docs/design/gpu-slm-handoff.md` for the full design and
 //! per-section bring-up plan.
@@ -771,6 +781,20 @@ pub extern "C" fn slm_runtime_set_tier_simt(op_kind: u32) -> i32 {
     }
     TIER_TABLE[op_kind as usize].store(Tier::Simt);
     0
+}
+
+/// Readback shim for the `slm gpu` shell verb. Returns the current
+/// `Tier` value (`SLM_GPU_TIER_*`) for `op_kind`, or `-1` on out-of-
+/// range. Lock-free atomic load.
+///
+/// SAFETY: no pointer arguments; bounds-checks `op_kind`.
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
+pub extern "C" fn slm_runtime_get_tier(op_kind: u32) -> i32 {
+    if (op_kind as usize) >= OpKind::COUNT {
+        return -1;
+    }
+    TIER_TABLE[op_kind as usize].load() as i32
 }
 
 // =====================================================================
