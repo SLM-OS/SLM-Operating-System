@@ -120,6 +120,13 @@ def main() -> int:
     ap.add_argument("out", type=Path,
                     help="Output operator_library.bin path")
     ap.add_argument("--verbose", "-v", action="store_true")
+    ap.add_argument("--skip-missing", action="store_true",
+                    help="Skip manifest entries whose SASS file doesn't "
+                         "exist, with a warning to stderr. Without this "
+                         "flag, missing SASS is a fatal error. Used by "
+                         "host builds that want to pack whichever kernels "
+                         "have been compiled on Jetson today without "
+                         "blocking the whole library on the longest pole.")
     args = ap.parse_args()
 
     with args.manifest.open("r") as f:
@@ -181,13 +188,22 @@ def main() -> int:
             )
 
         if not sass_path.exists():
+            if args.skip_missing:
+                sys.stderr.write(
+                    f"[build-operator-library] skipping entry {i} "
+                    f"({entry['op_kind']}.{entry['tier']}.{entry['dtype']}) "
+                    f"— missing SASS: {sass_path}\n"
+                )
+                continue
             raise SystemExit(
                 f"manifest entry {i} references missing SASS file: "
                 f"{sass_path}\n"
                 f"  Build the .cu sources on Jetson first (see header "
                 f"comment in scripts/cuda/{entry['sass'][:-5]}.cu for "
                 f"the nvcc + cuobjdump + dd recipe), or remove the "
-                f"entry from the manifest if the kernel isn't ready yet."
+                f"entry from the manifest if the kernel isn't ready yet.\n"
+                f"  Alternative: pass --skip-missing to pack the library "
+                f"with only the entries whose SASS is currently available."
             )
         sass_bytes = sass_path.read_bytes()
         resolved.append((op_kind, tier, dtype, flags, sass_bytes,
