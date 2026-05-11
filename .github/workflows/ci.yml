@@ -28,6 +28,15 @@ concurrency:
 permissions:
   contents: read
 
+# ARM bare-metal toolchain version + extracted directory name, pinned
+# here so cache path / cache key / wget URL / PATH addition stay in
+# sync. ARM's developer site uses mixed case (`13.2.rel1` in URLs,
+# `13.2.Rel1` in extracted directory names) so the two-variable shape
+# is load-bearing.
+env:
+  ARM_TOOLCHAIN_VER: 13.2.rel1
+  ARM_TOOLCHAIN_DIR: arm-gnu-toolchain-13.2.Rel1-x86_64-aarch64-none-elf
+
 jobs:
   build-and-test:
     name: ARM64 build + test (QEMU_VIRT)
@@ -42,17 +51,20 @@ jobs:
       id: arm-toolchain
       uses: actions/cache@v4
       with:
-        path: /opt/arm-gnu-toolchain-13.2.Rel1-x86_64-aarch64-none-elf
-        key: arm-gnu-13.2.rel1-aarch64-none-elf-${{ runner.os }}
+        path: /opt/${{ env.ARM_TOOLCHAIN_DIR }}
+        key: arm-gnu-${{ env.ARM_TOOLCHAIN_VER }}-aarch64-none-elf-${{ runner.os }}
 
     - name: Install bare-metal ARM toolchain (aarch64-none-elf)
       if: steps.arm-toolchain.outputs.cache-hit != 'true'
       run: |
-        wget -q https://developer.arm.com/-/media/Files/downloads/gnu/13.2.rel1/binrel/arm-gnu-toolchain-13.2.rel1-x86_64-aarch64-none-elf.tar.xz
-        sudo tar -xf arm-gnu-toolchain-13.2.rel1-x86_64-aarch64-none-elf.tar.xz -C /opt
+        set -e
+        TARBALL="arm-gnu-toolchain-${ARM_TOOLCHAIN_VER}-x86_64-aarch64-none-elf.tar.xz"
+        wget -q "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_TOOLCHAIN_VER}/binrel/${TARBALL}"
+        sudo tar -xf "$TARBALL" -C /opt
+        rm -f "$TARBALL"
 
     - name: Add ARM toolchain to PATH
-      run: echo "/opt/arm-gnu-toolchain-13.2.Rel1-x86_64-aarch64-none-elf/bin" >> $GITHUB_PATH
+      run: echo "/opt/${ARM_TOOLCHAIN_DIR}/bin" >> $GITHUB_PATH
 
     - name: Install QEMU + build deps
       run: |
@@ -66,6 +78,7 @@ jobs:
 
     - name: Verify toolchain
       run: |
+        set -e
         aarch64-none-elf-gcc --version | head -1
         qemu-system-aarch64 --version | head -1
         rustc --version
@@ -122,6 +135,7 @@ jobs:
 
     - name: Verify toolchain
       run: |
+        set -e
         qemu-system-x86_64 --version | head -1
         rustc --version
         cmake --version | head -1
