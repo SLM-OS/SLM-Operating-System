@@ -51,14 +51,23 @@ enum hailo_trace_phase {
     HAILO_TRACE_PHASE_TEARDOWN   = 6,  /* DRIVER_SHUTDOWN signal */
 };
 
-#define HAILO_TRACE_PHASE_BIT(p)        (1u << ((p) - 1))
+/* NONE-safe helper: returns 0 for HAILO_TRACE_PHASE_NONE (avoids the
+ * `1u << -1` UB the raw shift would otherwise produce) and the bit
+ * for any concrete phase. Used by `hailo_trace_active` and
+ * `hailo_trace_set_phase`. The per-phase _BIT constants below are
+ * direct shifts so they remain integer-constant expressions usable
+ * in initializers and case labels. */
+static inline uint32_t hailo_trace_phase_bit(enum hailo_trace_phase p)
+{
+    return (p == HAILO_TRACE_PHASE_NONE) ? 0u : (1u << ((unsigned)p - 1));
+}
 
-#define HAILO_TRACE_PHASE_LINKUP_BIT     HAILO_TRACE_PHASE_BIT(HAILO_TRACE_PHASE_LINKUP)
-#define HAILO_TRACE_PHASE_FW_BOOT_BIT    HAILO_TRACE_PHASE_BIT(HAILO_TRACE_PHASE_FW_BOOT)
-#define HAILO_TRACE_PHASE_POSTBOOT_BIT   HAILO_TRACE_PHASE_BIT(HAILO_TRACE_PHASE_POSTBOOT)
-#define HAILO_TRACE_PHASE_MODEL_LOAD_BIT HAILO_TRACE_PHASE_BIT(HAILO_TRACE_PHASE_MODEL_LOAD)
-#define HAILO_TRACE_PHASE_INFERENCE_BIT  HAILO_TRACE_PHASE_BIT(HAILO_TRACE_PHASE_INFERENCE)
-#define HAILO_TRACE_PHASE_TEARDOWN_BIT   HAILO_TRACE_PHASE_BIT(HAILO_TRACE_PHASE_TEARDOWN)
+#define HAILO_TRACE_PHASE_LINKUP_BIT     (1u << (HAILO_TRACE_PHASE_LINKUP     - 1))
+#define HAILO_TRACE_PHASE_FW_BOOT_BIT    (1u << (HAILO_TRACE_PHASE_FW_BOOT    - 1))
+#define HAILO_TRACE_PHASE_POSTBOOT_BIT   (1u << (HAILO_TRACE_PHASE_POSTBOOT   - 1))
+#define HAILO_TRACE_PHASE_MODEL_LOAD_BIT (1u << (HAILO_TRACE_PHASE_MODEL_LOAD - 1))
+#define HAILO_TRACE_PHASE_INFERENCE_BIT  (1u << (HAILO_TRACE_PHASE_INFERENCE  - 1))
+#define HAILO_TRACE_PHASE_TEARDOWN_BIT   (1u << (HAILO_TRACE_PHASE_TEARDOWN   - 1))
 #define HAILO_TRACE_PHASE_ALL            0x3Fu
 
 /* -------------------------------------------------------------------------- */
@@ -66,6 +75,11 @@ enum hailo_trace_phase {
 /* -------------------------------------------------------------------------- */
 
 #define HAILO_TRACE_MECH_MMIO      (1u << 0)   /* BAR0/2/4 read/write */
+/* PCI_CFG fires for EVERY pcie_config_* call across the kernel, not
+ * just Hailo's BDF. When armed during phases where other PCIe devices
+ * enumerate (e.g. LINKUP if a GPU is also probing), captures contain
+ * lines from unrelated devices. Filter by `bdf=<bus>:<dev>.<func>` in
+ * post-processing; the trace line carries BDF on every emit. */
 #define HAILO_TRACE_MECH_PCI_CFG   (1u << 1)   /* ECAM config space read/write */
 #define HAILO_TRACE_MECH_RPC       (1u << 2)   /* FW_CONTROL wire bytes (md5+len+body) */
 #define HAILO_TRACE_MECH_IRQ       (1u << 3)   /* MIP1 → MSI → ISTATUS handler entry, plus polled drains */
@@ -87,9 +101,16 @@ enum hailo_trace_phase {
 /* Globals + hot-path guard                                                    */
 /* -------------------------------------------------------------------------- */
 
-extern uint32_t                hailo_trace_phase_mask;
-extern uint32_t                hailo_trace_mech_mask;
-extern enum hailo_trace_phase  hailo_trace_current_phase;
+/* `volatile` is defensive — emit sites call into uart_printf (long,
+ * non-inlinable across translation units) so the compiler can't
+ * realistically cache these across emit calls today, but marking
+ * volatile pins the contract: every guard re-reads the mask, and
+ * a runtime arm/disarm from the shell takes effect on the next
+ * transaction without relying on call-boundary spill. ARM64 32-bit
+ * aligned loads are atomic so no torn reads. */
+extern volatile uint32_t       hailo_trace_phase_mask;
+extern volatile uint32_t       hailo_trace_mech_mask;
+extern volatile enum hailo_trace_phase  hailo_trace_current_phase;
 
 /* Returns true when both:
  *   (1) the current phase bit is armed in the phase mask, AND
@@ -101,9 +122,7 @@ static inline bool hailo_trace_active(uint32_t mech_bit)
     if (hailo_trace_mech_mask == 0u || hailo_trace_phase_mask == 0u)
         return false;
     if ((hailo_trace_mech_mask & mech_bit) == 0u) return false;
-    const uint32_t phase_bit = (hailo_trace_current_phase == HAILO_TRACE_PHASE_NONE)
-        ? 0u
-        : HAILO_TRACE_PHASE_BIT(hailo_trace_current_phase);
+    const uint32_t phase_bit = hailo_trace_phase_bit(hailo_trace_current_phase);
     return (hailo_trace_phase_mask & phase_bit) != 0u;
 }
 

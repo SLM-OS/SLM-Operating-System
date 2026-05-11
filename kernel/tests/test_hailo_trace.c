@@ -122,6 +122,19 @@ static void test_cmdline_or_merges_with_build_default(void)
                              hailo_trace_phase_mask);
 }
 
+static void test_cmdline_key_prefix_collision_does_not_match(void)
+{
+    /* `hailo_trace.phasex=...` must NOT match `hailo_trace.phase`.
+     * find_kv requires `tok[klen] == '='` so a prefix that doesn't
+     * end at `=` is correctly rejected. Regression guard for anyone
+     * who "simplifies" find_kv to a strncmp. */
+    reset_trace();
+    hailo_trace_cmdline_parse("hailo_trace.phasex=link "
+                              "hailo_trace.mechs=mmio");
+    TEST_ASSERT_EQUAL_UINT32(0u, hailo_trace_phase_mask);
+    TEST_ASSERT_EQUAL_UINT32(0u, hailo_trace_mech_mask);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Shell-side manipulators                                                     */
 /* -------------------------------------------------------------------------- */
@@ -258,6 +271,7 @@ int test_suite_hailo_trace(void)
     RUN_TEST(test_cmdline_mech_synonyms);
     RUN_TEST(test_cmdline_unknown_token_skipped_others_applied);
     RUN_TEST(test_cmdline_or_merges_with_build_default);
+    RUN_TEST(test_cmdline_key_prefix_collision_does_not_match);
 
     RUN_TEST(test_set_phase_mask_overwrites);
     RUN_TEST(test_set_mech_mask_off);

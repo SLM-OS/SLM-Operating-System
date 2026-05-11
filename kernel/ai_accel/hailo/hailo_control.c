@@ -234,7 +234,15 @@ static void control_msi_handler(void *ctx)
     /* IRQ trace: emit one line per handler invocation with the
      * snapshotted ISTATUS + per-channel aggregates. SPI is reported
      * as 0 (the platform shim doesn't currently pass it through
-     * ctx); the trace consumer can identify by mech=IRQ + phase. */
+     * ctx); the trace consumer can identify by mech=IRQ + phase.
+     *
+     * IRQ-context UART note: hailo_trace_emit_irq calls uart_printf,
+     * which on Pi 5 / Jetson uses an IRQ-disable-only lock (no
+     * cross-CPU spinlock — see kernel/CLAUDE.md "UART Lock on Pi 5
+     * / Jetson"), so this is safe to call from the MSI handler. The
+     * emit blocks for the duration of the serial drain (~hundreds
+     * of bytes at 115200 baud = several ms) and lengthens the ISR
+     * accordingly — acceptable for diagnostics, not for production. */
     if (hailo_trace_active(HAILO_TRACE_MECH_IRQ))
         hailo_trace_emit_irq(0u, istatus, src_bits, dst_bits);
 }
@@ -719,7 +727,9 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
 
     /* RPC tx trace. The request common header is 16 bytes:
      *   [version(4)][flags(4)][sequence(4)][opcode(4)] (all BE32)
-     * so the opcode's low byte is at offset 15 of req_payload.
+     * so the opcode's low byte is at offset 15 of req_payload. The
+     * 16-byte size is pinned by the _Static_assert next to
+     * `struct hailo_control_common_header` in hailo_control.h.
      * md5 lives in control_req_wire bytes 0..15; first 8 bytes are
      * enough to identify the RPC across a capture without bloating
      * the line. */
@@ -790,9 +800,15 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
      * request) followed by an 8-B response_status:
      *   [version(4)][flags(4)][sequence(4)][opcode(4)] [major(4)][minor(4)]
      * all BE32. Decode major+minor from bytes 16..23 of the response
-     * payload when the readback is at least header-sized. major+minor
-     * are u32 on the wire but real status codes fit in u8, so the
-     * trace passes the low byte of each. */
+     * payload when the readback is at least header-sized.
+     *
+     * major/minor are u32 on the wire, but the running fw populates
+     * only the low byte of each (all known HAILO_COMMON_STATUS_*
+     * codes fit in u8). The trace deliberately passes only that low
+     * byte — narrowing the line by 6 chars per field. If a future fw
+     * starts populating the upper 24 bits, widen the trace fields
+     * to u32 here AND in hailo_trace_emit_rpc_rx; the low-byte read
+     * is intentional truncation, not a placeholder. */
     if (hailo_trace_active(HAILO_TRACE_MECH_RPC)) {
         uint8_t major = 0, minor = 0;
         if (read_len >= 24) {

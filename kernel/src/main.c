@@ -685,8 +685,6 @@ void kernel_main(void *dtb)
      * the tokens are absent. Phase explicitly bumped to LINKUP so
      * pcie_init's MMIO carries that tag. */
     {
-        extern void hailo_trace_cmdline_parse(const char *bootargs);
-        extern void hailo_trace_set_phase(enum hailo_trace_phase);
         const dtb_chosen_t *chosen = dtb_get_chosen();
         if (chosen) hailo_trace_cmdline_parse(chosen->bootargs);
         hailo_trace_set_phase(HAILO_TRACE_PHASE_LINKUP);

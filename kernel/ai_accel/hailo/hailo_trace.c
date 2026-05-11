@@ -47,9 +47,9 @@
 /* Globals                                                                     */
 /* -------------------------------------------------------------------------- */
 
-uint32_t hailo_trace_phase_mask = (uint32_t)HAILO_TRACE_PHASE_DEFAULT;
-uint32_t hailo_trace_mech_mask  = (uint32_t)HAILO_TRACE_MECH_DEFAULT;
-enum hailo_trace_phase hailo_trace_current_phase = HAILO_TRACE_PHASE_NONE;
+volatile uint32_t hailo_trace_phase_mask = (uint32_t)HAILO_TRACE_PHASE_DEFAULT;
+volatile uint32_t hailo_trace_mech_mask  = (uint32_t)HAILO_TRACE_MECH_DEFAULT;
+volatile enum hailo_trace_phase hailo_trace_current_phase = HAILO_TRACE_PHASE_NONE;
 
 /* -------------------------------------------------------------------------- */
 /* Name lookup tables                                                          */
@@ -233,6 +233,7 @@ static const char *find_kv(const char *cmdline, const char *key,
 
 static void copy_bounded(char *dst, const char *src, size_t src_len, size_t cap)
 {
+    if (cap == 0) return;                 /* defensive: cap-1 would underflow */
     size_t n = src_len < cap - 1 ? src_len : cap - 1;
     for (size_t i = 0; i < n; i++) dst[i] = src[i];
     dst[n] = '\0';
@@ -304,10 +305,8 @@ void hailo_trace_set_phase(enum hailo_trace_phase next)
     /* Marker line emits if either old or new is armed — keeps the
      * transition locatable in capture even when only one side has
      * tracing on. */
-    const uint32_t prev_bit = (prev == HAILO_TRACE_PHASE_NONE)
-        ? 0u : HAILO_TRACE_PHASE_BIT(prev);
-    const uint32_t next_bit = (next == HAILO_TRACE_PHASE_NONE)
-        ? 0u : HAILO_TRACE_PHASE_BIT(next);
+    const uint32_t prev_bit = hailo_trace_phase_bit(prev);
+    const uint32_t next_bit = hailo_trace_phase_bit(next);
     bool emit = (hailo_trace_phase_mask & (prev_bit | next_bit)) != 0u;
 
     hailo_trace_current_phase = next;
