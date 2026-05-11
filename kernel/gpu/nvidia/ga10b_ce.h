@@ -66,7 +66,13 @@
 #define NVC7B5_LINE_LENGTH_IN          0x418u
 #define NVC7B5_LINE_COUNT              0x41Cu
 
-/* LAUNCH_DMA bit fields. */
+/* LAUNCH_DMA bit fields. `SRC_TYPE` is at bit 12, `DST_TYPE` at
+ * bit 13 — pinned to their respective fields so future `*_PHYSICAL`
+ * variants land at the right bit. Today every `*_VIRTUAL` expands
+ * to 0 so a wrong shift would still compose to the same value, but
+ * encoding-symmetric-with-spec is the only way the
+ * test_ce_launch_dma_flags_compose_expected_value harness keeps
+ * catching real drift. */
 #define NVC7B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NONE           (0u << 0)
 #define NVC7B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_PIPELINED      (1u << 0)
 #define NVC7B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED  (2u << 0)
@@ -76,7 +82,9 @@
 #define NVC7B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH           (1u << 7)
 #define NVC7B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH           (1u << 8)
 #define NVC7B5_LAUNCH_DMA_SRC_TYPE_VIRTUAL                  (0u << 12)
-#define NVC7B5_LAUNCH_DMA_DST_TYPE_VIRTUAL                  (0u << 12)
+#define NVC7B5_LAUNCH_DMA_SRC_TYPE_PHYSICAL                 (1u << 12)
+#define NVC7B5_LAUNCH_DMA_DST_TYPE_VIRTUAL                  (0u << 13)
+#define NVC7B5_LAUNCH_DMA_DST_TYPE_PHYSICAL                 (1u << 13)
 
 /* Completion payload the CE writes to the channel's semaphore when
  * the copy retires. Distinctive value (`0xCAFE`) so a stale read or

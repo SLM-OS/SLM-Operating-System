@@ -108,6 +108,22 @@ static void test_ce_launch_dma_flags_compose_expected_value(void)
     REQUIRE_EQ(composed, expected);
 }
 
+static void test_ce_launch_dma_src_dst_type_bits_independent(void)
+{
+    printf("== test_ce_launch_dma_src_dst_type_bits_independent ==\n");
+    /* SRC_TYPE is at bit 12, DST_TYPE at bit 13 per the
+     * clc7b5 spec. Verifying both bits explicitly so a future
+     * "let's reuse bit 12 for both" regression breaks the build,
+     * not a CE dispatch in production. */
+    REQUIRE_EQ(NVC7B5_LAUNCH_DMA_SRC_TYPE_PHYSICAL, 1u << 12);
+    REQUIRE_EQ(NVC7B5_LAUNCH_DMA_DST_TYPE_PHYSICAL, 1u << 13);
+    /* OR-composing src=PHYS dst=PHYS must set both bits 12 AND 13. */
+    REQUIRE_EQ(
+        NVC7B5_LAUNCH_DMA_SRC_TYPE_PHYSICAL |
+        NVC7B5_LAUNCH_DMA_DST_TYPE_PHYSICAL,
+        (1u << 12) | (1u << 13));
+}
+
 static void test_ce_build_pushbuffer_encoding(void)
 {
     printf("== test_ce_build_pushbuffer_encoding ==\n");
@@ -170,6 +186,7 @@ int main(void)
     test_ce_subchannel_is_4();
     test_ce_method_offsets_match_clc7b5();
     test_ce_launch_dma_flags_compose_expected_value();
+    test_ce_launch_dma_src_dst_type_bits_independent();
     test_ce_build_pushbuffer_encoding();
 
     if (g_failures != 0) {
