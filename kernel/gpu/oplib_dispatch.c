@@ -190,19 +190,27 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
     out->slm_size_bytes   = shape.slm_size_bytes;
     out->barrier_count    = shape.barrier_count;
 
-    uart_printf("[oplib-dispatch] prepared op_kind=%u: "
-                "shader_va=0x%llx (%zu B), cbuf_va=0x%llx (cpu=%p phys=0x%llx), "
-                "grid=(%u,%u,%u) block=(%u,%u,%u) regs=%u smem=%u\n",
-                (unsigned)op_kind,
-                (unsigned long long)sass_va, sass_size,
-                (unsigned long long)cbuf_va,
-                cbuf_cpu, (unsigned long long)cbuf_phys,
-                (unsigned)shape.grid_x, (unsigned)shape.grid_y,
-                (unsigned)shape.grid_z,
-                (unsigned)shape.block_x, (unsigned)shape.block_y,
-                (unsigned)shape.block_z,
-                (unsigned)shape.register_count_v,
-                (unsigned)shape.smem_size_bytes);
+    /* Per-dispatch chatter is gated behind `gpu debug on|off` (same
+     * flag the GA10B_DBG macro reads). Steady-state SLM inference
+     * fires ~90 dispatches per token through this path; without the
+     * gate, real prompt output is drowned by debug log lines. The
+     * `[oplib-dispatch] inline dispatch failed: rc=N` print below
+     * stays unconditional so a real wedge is still visible. */
+    if (ga10b_dispatch_verbose_get()) {
+        uart_printf("[oplib-dispatch] prepared op_kind=%u: "
+                    "shader_va=0x%llx (%zu B), cbuf_va=0x%llx (cpu=%p phys=0x%llx), "
+                    "grid=(%u,%u,%u) block=(%u,%u,%u) regs=%u smem=%u\n",
+                    (unsigned)op_kind,
+                    (unsigned long long)sass_va, sass_size,
+                    (unsigned long long)cbuf_va,
+                    cbuf_cpu, (unsigned long long)cbuf_phys,
+                    (unsigned)shape.grid_x, (unsigned)shape.grid_y,
+                    (unsigned)shape.grid_z,
+                    (unsigned)shape.block_x, (unsigned)shape.block_y,
+                    (unsigned)shape.block_z,
+                    (unsigned)shape.register_count_v,
+                    (unsigned)shape.smem_size_bytes);
+    }
     return 0;
 }
 
@@ -269,8 +277,12 @@ int slm_oplib_dispatch(struct ga10b_bringup *b,
         uart_printf("[oplib-dispatch] inline dispatch failed: rc=%d\n", rc);
         return rc;
     }
-    uart_printf("[oplib-dispatch] op_kind=%u dispatched + completed\n",
-                (unsigned)op_kind);
+    /* Success print is gated — see the matching comment on the
+     * prepared-op gate above. */
+    if (ga10b_dispatch_verbose_get()) {
+        uart_printf("[oplib-dispatch] op_kind=%u dispatched + completed\n",
+                    (unsigned)op_kind);
+    }
     return 0;
 }
 
