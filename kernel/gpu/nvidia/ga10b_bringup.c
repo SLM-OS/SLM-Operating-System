@@ -1763,6 +1763,34 @@ uint32_t ga10b_build_launch_kernel_with_sema_pushbuffer(uint32_t *pb,
  * pressure and matches the path NVIDIA tests at scale. The
  * bookkeeping fix here remains load-bearing for any single-op
  * caller (smoke tests, debug paths). */
+
+/* GR engine state dump used by every dispatch-timeout path (#779
+ * diagnostic). Surfaces the actual fault that wedged the dispatch
+ * instead of leaving "PBDMA advanced but sema didn't fire" to
+ * guesswork. Offsets per `~/slmos-ref/nvidia/nvgpu-hw-gr-ga10b.h`:
+ *   gr_intr_r        @ 0x00400100 — top-level interrupt status
+ *   gr_exception_r   @ 0x00400108 — per-engine exception bits
+ *   gr_class_error_r @ 0x00400110 — SET_OBJECT / method addr fault
+ *   gr_trapped_addr  @ 0x00400704 — method addr the engine choked on
+ *   gr_fe_hww_esr_r  @ 0x00404000 — front-end hardware-wedge ESR
+ *   gr_fecs_intr_r   @ 0x00400144 — FECS-side interrupt mask
+ * Non-zero values here name the fault class — the next iteration
+ * knows whether it's looking at a method-decode error, an SM trap,
+ * or a pipeline drain that just didn't release the sema. */
+static void ga10b_dump_gr_state(const char *tag)
+{
+    uart_printf("[%s]   gr_intr=0x%08lx gr_exception=0x%08lx "
+                "class_error=0x%08lx trapped_addr=0x%08lx fe_hww_esr=0x%08lx "
+                "fecs_intr=0x%08lx\n",
+                tag,
+                (unsigned long)bar0_r32(0x00400100u),
+                (unsigned long)bar0_r32(0x00400108u),
+                (unsigned long)bar0_r32(0x00400110u),
+                (unsigned long)bar0_r32(0x00400704u),
+                (unsigned long)bar0_r32(0x00404000u),
+                (unsigned long)bar0_r32(0x00400144u));
+}
+
 int ga10b_submit_and_poll(struct ga10b_bringup *b,
                           const uint32_t *pb_buf,
                           uint32_t pb_dwords,
@@ -1967,6 +1995,7 @@ int ga10b_submit_and_poll(struct ga10b_bringup *b,
         uart_printf("[%s] GP_GET did not advance — PBDMA didn't see "
                     "our submit\n", tag);
     }
+    ga10b_dump_gr_state(tag);
     b->last_error_phase = error_phase;
     return -1;
 }
@@ -2468,6 +2497,7 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
                     "didn't see our submits (GP_GET still %lu)\n",
                     (unsigned long)final_gp_get);
     }
+    ga10b_dump_gr_state("GA10B-P8-v7");
     b->last_error_phase = 8;
     return -1;
 }
