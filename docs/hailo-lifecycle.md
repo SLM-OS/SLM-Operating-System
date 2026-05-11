@@ -57,9 +57,11 @@ under `kernel/drivers/pcie/pcie_bcm2712.c`.
 |---|---|
 | **ATR** | Address Translation Region — a window in BAR4 that the host moves around to access different parts of the Hailo's internal SRAM. |
 | **BAR0/2/4** | PCIe Base Address Registers. The Hailo-8 exposes three: BAR0 = device config + ATR programming, BAR2 = per-VDMA-channel registers, BAR4 = ATR-mapped SRAM access. |
+| **BDF** | PCI Bus/Device/Function tuple identifying an endpoint in config space. On Pi 5 the Hailo-8L enumerates as `01:00.0` (bus 1, dev 0, fn 0). Used in this doc as `BDF 01:00.0 + 0xNN` to mean "config-space offset NN on the Hailo endpoint", reached via ECAM at `0x1F00000000 + (1<<20) + 0xNN` on BCM2712. |
 | **VDMA** | Vendor DMA engine on the Hailo. Channels are per-direction (H2D vs D2H), each programmed via descriptor lists. |
 | **CS / context-switch** | Hailo's network-group / context-switch protocol layered over FW_CONTROL RPCs. |
 | **MIP1** | Pi 5 PCIe1 MSI peripheral at `0x1000131000`. Translates 8 MSI vectors to GIC SPIs `247..254`. |
+| **PM cap / PMCSR** | PCI Power Management capability (cap_id `0x01`) in the endpoint's config-space cap chain. PMCSR (Power Management Control/Status Register) is a 16-bit register at `PM_cap + 0x04`. Per PCI spec §5.4.1, D3hot→D0 needs ≥10 ms before the device responds to config cycles. **PMCSR bit layout (PCI PM 1.2 §3.2.4):** `[1:0]` PowerState (RW; D0=00, D3hot=11), `[2]` Reserved (RO 0), `[3]` NoSoftReset (RO; hardware-defined), `[7:4]` Reserved (RO 0), `[8]` PME_En (RW), `[12:9]` Data_Select (RW), `[14:13]` Data_Scale (RO), `[15]` PME_Status (RW1C). SLM-OS only touches bits[1:0] via RMW; all other RW bits are preserved. |
 | **ch=1 / ch=2 / ch=16** | The three VDMA channels the inference path uses: CCW upload (1, H2D), boundary input (2, H2D), boundary output (16, D2H). |
 
 ---
@@ -70,140 +72,280 @@ This section is what the boundary between SLM-OS and the outside world
 sees. Every row is *one* MMIO transaction, IRQ, RPC round-trip,
 doorbell, or DMA event — internal function calls are out of scope.
 
-**Legend:**
+**Legend — mechanism column values:**
 
-| Type | Direction | Mechanism |
+| Mechanism | Direction | Description |
 |---|---|---|
 | MMIO-W | host → device | 32-bit write to a BAR offset |
 | MMIO-R | host → device | 32-bit read returning a value |
-| Doorbell | host → device | MMIO-W to a trigger register |
-| RPC | host → fw | Body in BAR4+0x000, doorbell at BAR4+0x1684 |
-| RPC-resp | fw → host | Body in BAR4+0x640, signaled by MSI bit 26 |
+| MMIO-W RMW | host → device | Read-modify-write a sub-field |
+| MMIO-R poll | host → device | Repeated reads until a condition is met |
+| PCI-cfg-W | host → device | Config-space write (ECAM) |
+| PCI-cfg-W RMW | host → device | Config-space read-modify-write of a sub-field |
+| PCI-cfg-R | host → device | Config-space read (ECAM) |
+| RPC | host → fw | Body in `BAR4+0x000` (ATR[0] → `0x60000000`), doorbell at fixed `BAR4+0x1684` |
+| RPC-resp | fw → host | Body in `BAR4+0x640`, signaled by MSI bit 26 |
 | IRQ | device → host | MSI to MIP1 → GIC SPI 247..254 |
 | DMA-pull | device → host RAM | Endpoint reads through inbound aperture |
 | DMA-push | device → host RAM | Endpoint writes through inbound aperture |
+| busy-wait | (none) | `udelay` — host blocks for a fixed period; no transactions |
 
-**Timing markers:**
+**Column schema — each row is one transaction:**
+
+| Column | Content |
+|---|---|
+| # | Step number within the phase. Cross-reference as "Phase 3 step 10". |
+| Purpose (lingo) | What we'd say in conversation: "Load firmware", "Set D3hot", "Submit input on ch=2". |
+| Mechanism | One of the values in the legend table above. |
+| Target | Concrete address. Formats: `BAR<n> + 0xOFF` (MMIO), `BDF 01:00.0 + 0xOFF` (PCI config), `dev 0xADDR` (device-side via ATR[0]), `SPI <n>` (IRQ), `RPC <opcode-name>` (FW_CONTROL RPC name). |
+| Payload (lingo → bits) | Both: `"Set D3hot" → PMCSR bits[1:0] = 0b11 (0x0003)`. |
+| Expected response | Both: `"PMCSR readback in D3hot" → bits[1:0] == 0b11`. |
+
+**Timing markers** (appear as suffix on phase totals and individual steps):
 
 - † = calibrated value (post-bisect, do not change without re-measuring)
 - ‡ = observed bound (timeout ceiling or measured upper)
 - ★ = best estimate, not characterized
 - (no mark) = sequential / negligible / fast (µs-order)
 
-### Phase 1 — Power-up
-*T = 0 at first PCIe controller MMIO. Total ~50-150 ms.*
+---
 
-| T+ | Type | Target | Operation |
-|---|---|---|---|
-| 0 | MMIO-W ×2 | RESCAL_BASE+0x00 | **Toggle PCIe1 controller SW reset** (bridge ID 43, bit 0 = 1 then 0) |
-| ~1 ms★ | MMIO-R poll | RESCAL_BASE+0x08 | **Wait for RESCAL done** (poll bit 0) |
-| ~ms | MMIO-W ×7 | PCIE1_MDIO_* (0x1100-0x1108) | **Program SerDes PHY PLL** for 54 MHz xosc refclk (7-entry `mdio_pll_tune[]` table) |
-| ~10 ms | MMIO-W batch | PCIE1_BASE+config | **Configure RC bridge:** RC_BAR2 size=0x15 (64 GB inbound aperture), class=PCI bridge, vendor endian, HARD_DEBUG CLKREQ control, VDM QoS forwarding (hyp-T) |
-| ≤100 ms‡ | MMIO-R poll | PCIE1_MISC_STATUS (0x4068) | **Wait for PCIe link up** (PHY_LINKUP+DL_ACTIVE, bits 4,5) |
-| | MMIO-R | EP cfg space (bus 1) | **Read endpoint vendor/device** — expect 0x1E60/0x2864 (Hailo-8); enumeration |
-| | MMIO-W | EP cfg cmd reg | **Enable BUS_MASTER + MEM_SPACE** — endpoint can now issue DMA |
-| | MMIO-W | EP PCIe Express cap+0x10 | **Disable ASPM L0s** (clear LNKCTL bit 0) — avoids link-recovery storms under heavy VDMA |
-| | MMIO-W ×3 | EP MSI cap | **Program endpoint MSI cap** (MSI_ADDR_LO/HI/DATA → MIP1 doorbell) |
-| | MMIO-W ×4 | MIP1 (0x1000131000) | **Configure MSI peripheral:** unmask host vectors (MASKL_HOST=0), mask VPU (=0xFFFFFFFF), edge-triggered (CFGL=0xFFFFFFFF), clear pending |
-| | MMIO-W ×3 | BCM2712 outbound windows | **Map outbound translations** (BAR0/2/4 PCIe addr → CPU addr) — host can now reach endpoint BARs |
+### Phase 1 — PCIe link-up + BAR mapping
+*Total ~50-150 ms. SLM-OS owns this — Pi 5 firmware does not train `pcie1`.*
+
+| # | Purpose (lingo) | Mechanism | Target | Payload (lingo → bits) | Expected response |
+|---|---|---|---|---|---|
+| 1 | Reset the PCIe1 controller (clean slate) | MMIO-W ×2 | `RESCAL_BASE+0x00` (bridge ID 43) | "Assert SW reset" → set bit 0; then "Deassert" → clear bit 0 | None (writes); status visible at step 2 |
+| 2 | Wait for reset to complete | MMIO-R poll | `RESCAL_BASE+0x08` | "Poll status bit 0" | Bit 0 → 1 within ~1 ms★ |
+| 3 | Program SerDes PHY PLL for 54 MHz xosc refclk | MMIO-W ×7 | `PCIE1_MDIO_*` (0x1100-0x1108) | "MDIO PLL tune table" → 7 `(regad, val)` pairs from `mdio_pll_tune[]` | None; PLL locked before downstream writes |
+| 4 | Tell RC bridge it's a host (vendor endian, PCI bridge class, CLKREQ, VDM QoS — hyp-T) | MMIO-W batch | `PCIE1_BASE` config regs | Vendor endian, class=PCI bridge, RC_BAR2 size=`0x15` (64 GB inbound aperture), HARD_DEBUG CLKREQ bits, VDM credit programming | None (config writes) |
+| 5 | Wait for PCIe link train | MMIO-R poll | `PCIE1_MISC_STATUS = 0x4068` | "Poll PHY_LINKUP + DL_ACTIVE" → bits 4,5 | Both bits set within ≤100 ms‡ |
+| 6 | Read endpoint vendor/device ID (enumeration + smoke test) | PCI-cfg-R | `BDF 01:00.0 + 0x00` | "Read 32-bit ID register" | `0x2864_1E60` (Hailo-8 device/vendor) |
+| 7 | Enable bus mastering + memory space on endpoint | PCI-cfg-W RMW | `BDF 01:00.0 + 0x04` (Command register) | "Set BUS_MASTER + MEM_SPACE, preserve other bits" → `new = old \| 0x0006` (bit 1 = MEM_SPACE, bit 2 = BUS_MASTER) | Endpoint may now DMA + respond to memory cycles |
+| 8 | Disable ASPM L0s (avoid link-recovery storms under VDMA) | PCI-cfg-W RMW | `BDF 01:00.0 + PCIe Express cap + 0x10` (LNKCTL) | "Clear ASPM L0s, preserve other LNKCTL bits" → `new = old & ~0x0001` (bit 0 = ASPM_Control L0s enable) | LNKCTL readback bit 0 == 0 |
+| 9 | Aim endpoint MSIs at MIP1 | PCI-cfg-W ×3 | `BDF 01:00.0 + MSI cap + 0x04/0x08/0x0C` | MSI_ADDR_LO, MSI_ADDR_HI, MSI_DATA → MIP1 doorbell address | Endpoint sends MSI writes to MIP1 from here on |
+| 10 | Unmask MIP1 host vectors, mask VPU, edge-triggered, clear pending | MMIO-W ×4 | `MIP1 (0x1000131000)` | `MASKL_HOST=0x00000000`, `MASKL_VPU=0xFFFFFFFF`, `CFGL=0xFFFFFFFF` (edge), `CLEAR=0xFF` | MIP1 forwards future MSIs to GIC SPIs 247..254 |
+| 11 | Map outbound CPU-addr → PCIe-addr windows for BAR0/2/4 | MMIO-W ×3 | BCM2712 outbound window programming regs | Per-BAR translation (PCIe `0x00_80000000` → CPU `0x1b_80000000` non-prefetch; PCIe `0x04_00000000` → CPU `0x18_00000000` prefetch) | Host CPU may now reach endpoint BARs |
+
+---
 
 ### Phase 2 — Firmware boot
-*T = 0 at first probe MMIO. Total ~150-1000 ms (mostly fw upload time).*
+*Total ~150-1000 ms (dominated by fw upload).*
 
-| T+ | Type | Target | Operation |
-|---|---|---|---|
-| 0 | MMIO-W | BAR0+ATR[0] | **Retarget BAR4 ATR window** to device 0xE0000 (boot status region) |
-| | MMIO-R | BAR4+(0xE0000 & 0xFFF) | **Read boot status** word — sanity check that PCIe + ATR work |
-| | MMIO-R | BAR0+0x0098 | **Read vendor ID** (HAILO_REG_VENDOR) — second smoke test |
-| ~50-200 ms★ | MMIO-W ×N | BAR4 ATR window (low 4 KB) | **Upload app firmware** to device 0x60000; chunked across 4 KB ATR pages, ATR retargeted per page |
-| ~10 ms★ | MMIO-W ×N | BAR4 ATR window | **Upload boot key cert** to device 0xE0048 |
-| ~10 ms★ | MMIO-W ×N | BAR4 ATR window | **Upload boot content cert** to device 0xE0390 |
-| ~50-200 ms★ | MMIO-W ×N | BAR4 ATR window | **Upload core firmware** to device 0xC0000 |
-| | MMIO-W | dev 0xE0980 (BAR4+0x980 after ATR[0] retarget to 0xE0000) | **Trigger fw boot** — write 0x00000001 to the boot ROM trigger register; chip branches to loaded firmware |
-| ≤1000 ms‡ | MMIO-R poll | BAR0+ATR[1].trsl_lo | **Poll for 0x00200000 magic** — fw signals "boot complete" by writing this register |
-| (varies) | IRQ | MIP1 → GIC SPI | **BOOT_IRQ** — fw raises MSI to host once running |
+| # | Purpose (lingo) | Mechanism | Target | Payload (lingo → bits) | Expected response |
+|---|---|---|---|---|---|
+| 1 | Aim BAR4 window at the boot-status region | MMIO-W | `BAR0 + 0x0700` (ATR[0].trsl_addr_lo, `HAILO_ATR_BASE`) | "Retarget ATR[0] to device 0xE0000" → `trsl_addr = 0x000E0000` | None (write-only) |
+| 2 | Read boot-status register (smoke test fw is alive in ROM) | MMIO-R | `BAR4 + 0x000` (= dev `0xE0000` via ATR[0]) | "Read boot status word" | `HAILO_BOOT_STATUS_UNINIT=0x1` or `HAILO_BOOT_STATUS_IN_BOOTLOADER=0x2`; NOT `0xFFFFFFFF` (poison) |
+| 3 | Read endpoint vendor ID (second smoke test) | MMIO-R | `BAR0 + 0x0098` (`HAILO_REG_VENDOR`) | "Read 32-bit vendor reg" | Non-zero, non-poison |
+| 4 | Upload **app firmware** to device `0x60000` | MMIO-W ×N | `BAR4 + ATR[0]` window (retargeted per 4 KB page across dev `0x60000..`) | "App fw bytes" → chunked dwords (~50-200 ms★ total) | None |
+| 5 | Upload **boot key cert** to device `0xE0048` | MMIO-W ×N | `BAR4 + ATR[0]` window (target `0xE0048`) | "Key cert bytes" (~10 ms★) | None |
+| 6 | Upload **boot content cert** to device `0xE0390` | MMIO-W ×N | `BAR4 + ATR[0]` window (target `0xE0390`) | "Content cert bytes" (~10 ms★) | None |
+| 7 | Upload **core firmware** to device `0xC0000` | MMIO-W ×N | `BAR4 + ATR[0]` window (target `0xC0000..`) | "Core fw bytes" → chunked dwords (~50-200 ms★) | None |
+| 8 | Tell the boot ROM the upload is done — go run fw | MMIO-W | dev `0xE0980` (= `BAR4 + 0x980` after ATR[0] retarget to `0xE0000`) | "Boot trigger" → `0x00000001` (`HAILO_FW_TRIGGER_VALUE`) | None on this register; chip branches to loaded fw |
+| 9 | Wait for fw "boot complete" magic | MMIO-R poll | `BAR0 + 0x0700 + ATR1 stride` (ATR[1].trsl_addr_lo) | "Poll for fw-written magic" | `0x00200000` (`HAILO_ATR1_FW_LOADED_MAGIC`) within ≤1000 ms‡ |
+| 10 | Receive BOOT_IRQ (fw signals "running") | IRQ | MIP1 → `SPI 247..254` (one) | n/a (passive wait) | One MSI; ISR ACKs MIP1 latch + reads ISTATUS |
 
-> **Two separate "doorbells" — don't confuse them.** The boot trigger
-> (above) is a write to *device address* `0xE0980`, reached via
-> ATR[0] retargeting BAR4's low 4 KB to device page `0xE0000`, then
-> writing at BAR4+`0x980`. The FW_CONTROL doorbell used in later
-> phases lives at *fixed* `BAR4+0x1684`, outside the ATR window —
-> a register that doesn't move when ATR[0] is retargeted.
+> **Two doorbells to keep separate.** Step 8's boot trigger writes to
+> *device address* `0xE0980` — reached by retargeting ATR[0] so device
+> page `0xE0000` lands at BAR4's low 4 KB, then writing at
+> `BAR4 + 0x980`. The FW_CONTROL doorbell used in Phase 3+ lives at
+> *fixed* `BAR4 + 0x1684` (`HAILO_FW_TRIGGER_OFFSET`), outside the ATR
+> window — that register does not move when ATR[0] is retargeted.
+
+---
 
 ### Phase 3 — Post-boot setup
-*T = 0 at boot magic / BOOT_IRQ. Total ~510-550 ms (dominated by 500 ms settle).*
+*Total ~510-550 ms boot path + ~20 ms PMCSR cycle (gated by `HAILO_D3HOT_AT_BOOT`).*
 
-| T+ | Type | Direction | Operation |
-|---|---|---|---|
-| 0 | (busy-wait) | — | **500 ms settle** (hyp-O†) — empirically suppresses boot-time `SAGE1_ISP` ECC during the first RPC. Mechanism is not fully characterized — fw-internal init / SRAM scrub / task scheduling all plausible; runtime ECC is *not* fixed by this delay. Bisect-anchored at 500 ms (375 ms still fails 1/10, 450 ms passes; 500 ms is the floor + margin). |
-| 500 ms | MMIO-W | host → BAR0 | **Disarm boot-time IRQ masks** (hyp-N) — clear `IMASK_HOST` + per-channel SRC/DEST enables before steady-state IRQ flow |
-| 500 ms | RPC | host → CORE CPU | **`CHANGE_STATUS(RESET)`** opcode `0x25`; params: state=0, app=0xff, batch_size=0, batch_count=0 — reset context-switch state machine |
-| | RPC-resp | CORE CPU → host | major=0 minor=0; signaled by MSI bit 26 |
-| | RPC | host → CORE CPU | **`CLEAR_CONFIGURED_APPS`** opcode `0x47` — wipe leftover network-group state from prior runs |
-| | RPC | host → CORE CPU | **`GET_HW_CONSTS`** opcode `0x48` — fw returns ~35 B (channel counts, page sizes, hw architecture) |
-| | RPC ×N | host → APP CPU | **`IDENTIFY`** opcode `0x00` — settle pings; 174 B response with "Hailo-8" name + fw version |
+| # | Purpose (lingo) | Mechanism | Target | Payload (lingo → bits) | Expected response |
+|---|---|---|---|---|---|
+| 1 | Clear boot-time host IRQ mask | MMIO-W | `BAR0 + 0x0190` (IMASK_HOST) | "Disarm IMASK" → `0x00000000` | Future ISTATUS reads return only intentional events |
+| 2 | Clear per-channel SRC enables set during boot arm | MMIO-W | `BAR0 + 0x0400` (per-ch SRC enable) | "Disarm SRC" → `0x00000000` for boot-set bits | Steady-state SRC IRQ flow |
+| 3 | Clear per-channel DEST enables set during boot arm | MMIO-W | `BAR0 + 0x0500` (per-ch DEST enable) | "Disarm DEST" → `0x00000000` for boot-set bits | Steady-state DEST IRQ flow |
+| 4 | W1C any pending ISTATUS bits | MMIO-W | `BAR0 + 0x018C` (ISTATUS_HOST) | "Clear all pending" → write-1-to-clear | ISTATUS readback == 0 |
+| 5 | **500 ms settle (hyp-O†)** — let fw finish SAGE1_ISP zero-init | busy-wait | (no MMIO) | "udelay 500000 µs" | Suppresses ~60% CPU_ECC rate on first RPC. Bisect-anchored: 375 ms fails 1/10, 450 ms passes, 500 ms = floor+margin. |
+| 6 | Reset CS state machine | RPC | `CORE CPU` (mask `0x2` → `BAR4+0x1684`); body @ `BAR4+0x000` (ATR[0]→`0x60000000`) | `CHANGE_STATUS(RESET)` op `0x25`; params: state=0, app=0xFF, batch_size=0, batch_count=0 | Response @ `BAR4+0x640`; MSI bit 26; status major=0 minor=0 |
+| 7 | Wipe stale network-group state from prior runs | RPC | `CORE CPU` | `CLEAR_CONFIGURED_APPS` op `0x47`; no params | Status OK; MSI bit 26 |
+| 8 | Read fw-side hw constants (channel counts, page sizes, arch) | RPC | `CORE CPU` | `GET_HW_CONSTS` op `0x48`; no params | ~35 B response body; MSI bit 26 |
+| 9 | Liveness ping (cache warm) | RPC ×N | `APP CPU` (mask `0x1` → `BAR4+0x1684`) | `IDENTIFY` op `0x00`; no params | 174 B response: "Hailo-8" name, fw version, hw arch |
+| 10 | Bounce device to D3hot (mirror Linux probe→idle window) | PCI-cfg-W RMW | `BDF 01:00.0 + PM_cap + 0x04` (PMCSR; `PM_cap` from `pcie_find_capability(0x01)`) | "Set D3hot, preserve other bits" → `new = (old & ~0x0003) \| 0x0003`. Only PowerState bits[1:0] change; PME_En/Data_Select (RW) preserved; NoSoftReset/Data_Scale (RO) unaffected; PME_Status (RW1C) written-back-as-read. | PMCSR readback bits[1:0] == `0b11`; chip stays config-responsive |
+| 11 | Let D-state transition settle | busy-wait | (no MMIO) | "udelay 10000 µs" (PCI spec §5.4.1) | Quiet bus |
+| 12 | Return device to D0 for normal operation | PCI-cfg-W RMW | `BDF 01:00.0 + PM_cap + 0x04` (PMCSR) | "Set D0, preserve other bits" → `new = (old & ~0x0003) \| 0x0000`. Same RMW pattern as step 10. | PMCSR readback bits[1:0] == `0b00` |
+| 13 | Wait for D0 to settle (D3hot→D0 needs ≥10 ms per PCI spec) | busy-wait | (no MMIO) | "udelay 10000 µs" | Device fully responsive to MMIO |
 
-For each RPC: host writes `[md5(16) + buffer_len(4) + payload]` to
-the ATR[0]-mapped control section (BAR4+0x000 with ATR[0] retargeted
-to `0x60000000`), writes `APP_CPU_MASK` (=0x1) or `CORE_CPU_MASK` to
-the *fixed* FW_CONTROL doorbell at `BAR4+0x1684` (not affected by
-ATR[0]), fw raises MSI bit 26 when done, host reads response from
-BAR4+0x640 (still in ATR[0] window). ~ms each round-trip.
+> **Phase 3 steps 10-13 are gated by `HAILO_D3HOT_AT_BOOT` (default
+> ON).** Disabling skips them — fw stays in D0 throughout boot.
+> Empirically the cycle shifts the CPU_ECC trigger out of the load
+> and pre-submit drain paths into the boundary-submit attempt
+> (#253 testing). Position must be END of boot: #682 hyp-N2
+> (cycling BEFORE IDENTIFY) was disconfirmed — it escalates
+> SAGE1_ISP from correctable CPU_ECC_ERROR (event_id=7) to fatal
+> CPU_ECC_FATAL (event_id=8). #682 hyp-S (1 s D3hot dwell instead
+> of 10 ms) was disconfirmed too — wedge persists, ECCs aggravate.
+
+---
 
 ### Phase 4 — Model load (CS handshake)
-*T = 0 at first CONFIG_STREAM. Total ~250-500 ms (CCW upload + 200 ms enable wait).*
+*Total ~250-500 ms (CCW upload dominates + 200 ms post-ENABLED wait).*
 
-| T+ | Type | Direction | Operation |
-|---|---|---|---|
-| 0 | RPC ×N | host → APP CPU | **`CONFIG_STREAM`** opcode `0x03` (per input/output stream); fw returns `dataflow_manager_id` for later reference |
-| ~ms each | RPC ×many | host → APP CPU | **`WRITE_MEMORY`** opcode `0x01` (1 KB chunks) — upload CCW microcode parsed from HEF |
-| | RPC | host → CORE CPU | **`SET_NETWORK_GROUP_HEADER`** opcode `0x20`, 32 B action-stream body (context count, batching params, latency mode) |
-| | RPC | host → CORE CPU | **`SET_CONTEXT_INFO(ACTIVATION)`** opcode `0x21`, type=3, 63 B action-stream body (descriptor-list IOVAs for bnd_in + bnd_out patched at known offsets) |
-| (50 ms gap†) | RPC | host → CORE CPU | **`SET_CONTEXT_INFO(BATCH_SWITCHING)`** type=2, 16 B action-stream body (hyp-Q† inter-RPC floor) |
-| (50 ms gap†) | RPC | host → CORE CPU | **`SET_CONTEXT_INFO(PRELIMINARY)`** type=0, 37 B action-stream body (CCW descriptor-list IOVA patched at known offset) |
-| (50 ms gap†) | RPC | host → CORE CPU | **`SET_CONTEXT_INFO(DYNAMIC)`** type=1, 103 B action-stream body (bnd_in + bnd_out descriptor-list IOVAs patched at known offsets) |
-| | RPC | host → CORE CPU | **`CHANGE_STATUS(ENABLED)`** opcode `0x25`, state=1 — fw enters CS state machine and *asynchronously* arms ALL VDMA channels (ch=1, ch=2, ch=16) by walking the action streams above |
-| | (busy-wait) | — | **~200 ms★** fixed delay — fragile proxy for "ch arming complete". Correct predicate would be polling ch=2 device-side `dev_base[31:16] != 0 && dev_proc != 0` — see #682 follow-up. |
+| # | Purpose (lingo) | Mechanism | Target | Payload (lingo → bits) | Expected response |
+|---|---|---|---|---|---|
+| 1 | Tell fw the I/O stream's channel + descriptor list + page geometry (one per input/output stream) | RPC ×N | `APP CPU` | `CONFIG_STREAM` op `0x03`; body: channel index, desc-list IOVA, page count, page size | Response carries `dataflow_manager_id` — stash for later RPC references |
+| 2 | Upload CCW microcode parsed from HEF (1 KB chunks) | RPC ×many | `APP CPU` | `WRITE_MEMORY` op `0x01`; body: dest addr, length, payload | Status OK each (~ms each round-trip) |
+| 3 | Send network-group header | RPC | `CORE CPU` | `SET_NETWORK_GROUP_HEADER` op `0x20`; 32 B action-stream body (context count, batching params, latency mode) | Status OK |
+| 4 | Send context info (ACTIVATION) — bnd_in + bnd_out IOVAs patched at known offsets | RPC | `CORE CPU` | `SET_CONTEXT_INFO(ACTIVATION)` op `0x21`, type=3; 63 B action-stream body | Status OK |
+| 5 | 50 ms inter-RPC floor (hyp-Q†) before next SET_CONTEXT_INFO | busy-wait | (no MMIO) | "udelay 50000 µs" | Fw absorbs context info without backpressure |
+| 6 | Send context info (BATCH_SWITCHING) | RPC | `CORE CPU` | `SET_CONTEXT_INFO(BATCH_SWITCHING)` op `0x21`, type=2; 16 B body | Status OK |
+| 7 | 50 ms inter-RPC floor (hyp-Q†) | busy-wait | (no MMIO) | "udelay 50000 µs" | — |
+| 8 | Send context info (PRELIMINARY) — CCW desc-list IOVA patched at known offset | RPC | `CORE CPU` | `SET_CONTEXT_INFO(PRELIMINARY)` op `0x21`, type=0; 37 B body | Status OK |
+| 9 | 50 ms inter-RPC floor (hyp-Q†) | busy-wait | (no MMIO) | "udelay 50000 µs" | — |
+| 10 | Send context info (DYNAMIC) — bnd_in + bnd_out IOVAs patched at known offsets | RPC | `CORE CPU` | `SET_CONTEXT_INFO(DYNAMIC)` op `0x21`, type=1; 103 B body | Status OK |
+| 11 | Flip fw into the CS state machine — fw asynchronously arms ch=1, ch=2, ch=16 by walking the action streams | RPC | `CORE CPU` | `CHANGE_STATUS(ENABLED)` op `0x25`; param: state=1 (ENABLED) | Status OK; fw walks action streams in background |
+| 12 | Wait for channel arming to complete (fragile fixed delay) | busy-wait | (no MMIO) | "udelay 200000 µs ★" | Channels armed device-side. Correct predicate would poll ch=2 device sub-block `dev_base[31:16] != 0 && dev_proc != 0` — see #682 follow-up. |
 
-Strict order enforced by fw v4.23: ACTIVATION → BATCH_SWITCHING →
-PRELIMINARY → DYNAMIC. Skipping any returns
-`0x4013006e UNEXPECTED_CONTEXT_ORDER`.
+> **Strict order enforced by fw v4.23:** ACTIVATION → BATCH_SWITCHING
+> → PRELIMINARY → DYNAMIC. Skipping any returns
+> `0x4013006e UNEXPECTED_CONTEXT_ORDER`.
 
-> **Notes on body sizes and offsets.** "Body" sizes above are
-> *action-stream payload* bytes. The full FW_CONTROL request on the
-> wire is larger: `[md5(16) + buffer_len(4) + parameter_count(4) +
-> length-prefixes + body]`. **The IOVA-patch offsets are HEF-specific
-> + ABI-specific** — they were extracted from a captured HailoRT trace
-> for the MNIST test HEF on fw v4.23. A different HEF or fw version
-> can move them. Either re-derive from a trace or parse the action
-> stream symbolically; do not hard-code without re-validating.
+> **Body sizes are action-stream payload bytes.** The full FW_CONTROL
+> request on the wire is larger: `[md5(16) + buffer_len(4) +
+> parameter_count(4) + length-prefixes + body]`. **IOVA-patch
+> offsets are HEF-specific + ABI-specific** — extracted from a
+> captured HailoRT trace for the MNIST HEF on fw v4.23. A different
+> HEF or fw version may move them.
 
-> **No host-side channel-start MMIO.** This is not a missing step —
-> SLM-OS's production path (`inference_device_hailo.c:2218`) explicitly
-> does NOT call `hailo_vdma_channel_start()` for any channel during
-> inference. fw arms ch=1, ch=2, and ch=16 itself by interpreting the
-> action streams in `SET_CONTEXT_INFO`. The older `hailo_infer.c` path
-> calls channel_start, but it isn't on the production code path.
+> **No host-side channel-start MMIO.** SLM-OS's production path
+> (`inference_device_hailo.c:2218`) does NOT call
+> `hailo_vdma_channel_start()` for any inference channel. fw arms
+> ch=1, ch=2, ch=16 itself via the action streams above. The older
+> `hailo_infer.c` path does call channel_start but is not on the
+> production code path.
+
+---
 
 ### Phase 5 — Inference dispatch
-*T = 0 at first `num_avail` write. Total = inference latency (model dependent).*
+*Total = inference latency (model-dependent: ms to 100s of ms).*
 
-| T+ | Type | Direction / Target | Operation |
+| # | Purpose (lingo) | Mechanism | Target | Payload (lingo → bits) | Expected response |
+|---|---|---|---|---|---|
+| 1 | Bump `num_avail=1` on ch=1 (CCW upload, H2D) | MMIO-W RMW | `BAR2 + (1×0x20) + 0x00 = BAR2+0x20` (ch=1 HOST sub-block BASE_DWORD) | "One descriptor ready" → set bits[31:16] (num_avail) to 1 | Fw fetches CCW descriptor in background |
+| 2 | Device pulls CCW buffer via descriptor IOVA | DMA-pull | (host RAM @ ch=1 desc IOVA) | (256 B - few KB depending on model) | Data arrives at fw side; ch=1 SRC IRQ pending |
+| 3 | Receive ch=1 SRC completion IRQ | IRQ | MIP1 → `SPI 247..254` | n/a (passive); ISR reads ISTATUS aggregate then per-ch SRC at `BAR0+0x0400` | bit 0..7 in ISTATUS asserted; ack via W1C |
+| 4 | Pre-arm output ch=16 (D2H) | MMIO-W RMW | `BAR2 + (16×0x20) + 0x10 = BAR2+0x210` (ch=16 D2H sub-block; D2H HOST sub-block is at `+0x10`) | "Descriptor staged for output" → set bits[31:16] (num_avail) | Fw stages but does not yet fire transfer |
+| 5 | **Submit input on ch=2 (boundary IN, H2D) — #682 wedge fires here** | MMIO-W RMW | `BAR2 + (2×0x20) + 0x00 = BAR2+0x40` (ch=2 HOST sub-block BASE_DWORD) | "Input descriptor ready" → set bits[31:16] (num_avail) to 1 | **Healthy:** fw fetches input, advances `dev_proc`. **Wedged:** write returns success, `dev_base[31:16]` stays `0x0000` (HailoRT trace shows `0x001f`), `dev_proc` stays `0x00000000` (HailoRT: `0x00020002`), no IRQ fires. |
+| 6 | Device pulls input tensor via descriptor IOVA (healthy path only) | DMA-pull | (host RAM @ ch=2 desc IOVA) | "Input tensor" (784 B for MNIST) | Data at fw side; NN core begins inference |
+| 7 | Model inference (matmul, activations, etc.) | (internal NN) | — | (no host visibility) | Output produced; ch=16 DMA fires |
+| 8 | Device pushes output tensor to ch=16's bound buffer | DMA-push | (host RAM @ ch=16 desc IOVA) | "Output tensor" | Buffer written; ch=2 SRC + ch=16 DEST IRQs pending |
+| 9 | Receive ch=2 SRC + ch=16 DEST completion IRQs | IRQ | MIP1 → `SPI 247..254` | n/a; ISR reads ISTATUS then per-ch SRC + DEST registers | bits 2 + 24 (8+16) in ISTATUS; ack via W1C |
+| 10 | Read incremented `num_proc` to confirm completion | MMIO-R | `BAR2 + 0x44` (ch=2 NUM_PROC_DWORD) and `BAR2 + 0x214` (ch=16 NUM_PROC_DWORD) | "Read num_proc bits[15:0]" | Both incremented; host invalidates cache lines over ch=16 buffer before reading output |
+
+> **Wedged path:** ch=2 NUM_AVAIL write returns success but fw never
+> advances NUM_PROC and never fetches the input. No IRQ fires. Host
+> times out after 5 s (ushim) or kernel timeout (production). See
+> `docs/hailo-support-ticket-draft.md` for the full investigation.
+
+---
+
+### Phase 6 — Teardown
+*Triggered by shell `reboot` (cmd_reboot → `hailo_control_signal_driver_shutdown`).*
+
+| # | Purpose (lingo) | Mechanism | Target | Payload (lingo → bits) | Expected response |
+|---|---|---|---|---|---|
+| 1 | Tell fw the driver is going away — park gracefully | MMIO-W | `BAR4 + 0x1684` (`raise_ready_offset`) | "Driver shutdown signal" → `0x00000004` (`HAILO_FW_ACCESS_DRIVER_SHUTDOWN_MASK`) | No reply expected. Fw may assert ISTATUS bit 27 (driver-down ACK) — currently drained but not acted on. |
+
+> SLM-OS has no in-tree "soft reset" path. If the chip wedges
+> (state machine in `HAILO_STATE_FAILED` after a `hailo_boot`
+> failure, or ATR[0] poisoned by a probe-then-reboot sequence),
+> only a full SoC reboot recovers. See §1.7.
+
+---
+
+### 1.6 Driver state machine
+
+The driver tracks one state variable (`state` in `hailo_core.c:65`,
+type `enum hailo_state` in `hailo.h:277-284`):
+
+| Value | Name | Meaning | How entered |
 |---|---|---|---|
-| 0 | MMIO-W RMW | BAR2+0x20+0x00 (ch=1 host sub-block BASE_DWORD) | **Bump num_avail=1 on ch=1 (CCW upload, H2D)** — signal "one descriptor ready" by writing the high 16 bits of BASE_DWORD; fw should fetch CCW microcode |
-| ~ms | DMA-pull | device → host RAM | Device fetches CCW buffer (256 B - few KB) via descriptor IOVA in ch=1's bound desc list |
-| ~ms | IRQ | MIP1 → GIC SPI | **ch=1 SRC complete** (data=0x01 = num descriptors processed) |
-| | MMIO-W RMW | BAR2+0x200+0x10 (ch=16 host sub-block BASE_DWORD) | **Pre-arm output ch=16 (D2H)** — descriptor staged; transfer fires when fw produces output |
-| | MMIO-W RMW | BAR2+0x40+0x00 (ch=2 host sub-block BASE_DWORD) | **Submit input on ch=2 (boundary IN, H2D)** — fw should fetch input and feed NN core. **#682 wedge fires here** |
-| ~ms★ | DMA-pull | device → host RAM | Device reads input tensor (784 B for MNIST) via descriptor IOVA |
-| (model lat.) | (internal NN) | — | Model inference (matmul, activations, etc.) — ~ms-100s ms depending on model |
-| (model lat.) | DMA-push | device → host RAM | Device writes output tensor to ch=16's bound buffer |
-| | IRQ | MIP1 → GIC SPI | **ch=2 SRC + ch=16 DEST completions** |
-| | MMIO-R | ch=2 + ch=16 host sub-block NUM_PROC_DWORD | **Read incremented num_proc counters** — confirm completion + ack IRQ |
+| `0` | `UNINIT` | Platform vtable not installed, or platform init failed | Default at boot; `hailo_init()` failure (`hailo_core.c:297`) |
+| `1` | `PROBED` | IDs read, BARs mapped, ATR[0] usable | `hailo_probe()` success (`hailo_core.c:358`) |
+| `2` | `FIRMWARE_ARMED` | FW image validated + uploaded, trigger doorbell not yet raised | `hailo_boot()` partway through (`hailo_core.c:732`) |
+| `3` | `BOOTING` | Trigger raised, polling for ATR[1] magic | `hailo_boot()` (`hailo_core.c:788`) |
+| `4` | `RUNNING` | FW alive, control channel live, RPCs OK | End of `hailo_boot()` (`hailo_core.c:919`) |
+| `0xFF` | `FAILED` | Terminal error — `hailo_probe` and `hailo_boot` both refuse further work | Any `hailo_boot()` early-return error path (`hailo_core.c:689, 697, 703, 720, 728, 1037`) |
 
-**Wedged path:** ch=2 `NUM_AVAIL` write returns success but fw never
-advances `NUM_PROC` and never fetches the input. No IRQ fires. Host
-times out after 5 s (ushim) or kernel timeout (production).
+Transitions only ever advance — there is no `RUNNING → PROBED` or
+`FAILED → anything`. The shell's `hailo probe` from a `RUNNING`
+state does NOT reset the state; it short-circuits because the
+device is already initialized.
+
+### 1.7 Recovery from FAILED — only a full reboot
+
+SLM-OS has no `hailo_reset` / `hailo_recover` entry point. Once
+`state = HAILO_STATE_FAILED` is set, the only path back to RUNNING
+is a full kernel boot. This matters in two practical scenarios:
+
+1. **Boot failure mid-upload.** A `hailo_boot()` that fails at
+   firmware validation, upload, trigger, or poll latches FAILED.
+   Re-issuing `hailo boot` from the shell sees the FAILED guard
+   at `hailo_core.c:680` and returns `HAILO_ERR_NODEV`.
+
+2. **Probe-after-running-then-failed.** A `hailo probe` against a
+   chip whose fw is already running advances the state machine
+   back to PROBED; a subsequent `hailo boot` then refuses because
+   `boot_status` reads `0xFFFFFFFF` (the boot ROM is no longer
+   the active code path — running fw owns the register). That
+   refusal sets FAILED. Empirically this also poisons ATR[0]
+   such that subsequent `hailo probe` reads return NODEV. Only
+   reboot recovers.
+
+The driver does program a `hailo_control_signal_driver_shutdown`
+(`0x4` to `BAR4+0x1684`) from `cmd_reboot` (Phase 6) to give fw
+a chance to park, but the chip side of that signal is not
+characterized as a true reset — fw continues running, just with
+an awareness that the host is going down.
+
+### 1.8 Shell command surface
+
+`hailo <subcmd>` — full list in `kernel/ai_accel/hailo/hailo_shell.c`.
+Each line is one `strcmp(argv[1], …)` site.
+
+| Subcommand | Purpose | Line |
+|---|---|---|
+| `probe` | Re-run `hailo_probe`; advances UNINIT → PROBED | 656 |
+| `cfgdump` | Raw 64-byte bus-1 PCI config-space hex dump | 671 |
+| `boot` | Upload embedded fw, trigger boot, poll for magic, settle, handshake | 693 |
+| `load <path> [upload <B>\|sched]` | Read a HEF, dump header, optionally upload CCWs or arm AI scheduler | 726 |
+| `fw` | Print fw version (post-boot only) | 1085 |
+| `peek <addr> [N]` | READ_MEMORY N bytes (≤64) at device-side `addr`; hex-dump | 1097 |
+| `poke <addr> <val>` | WRITE_MEMORY a single u32 at device-side `addr` (little-endian) | 1131 |
+| `cfgstream <dir> <ch>` | Issue CONFIG_STREAM probe; report `dataflow_manager_id` | 1161 |
+| `infer <B>` | End-to-end VDMA inference smoke test with synthetic B-byte tensor | 1210 |
+| `ctxsmoke` | Replay ushim's context-switch handshake; partial pings | 1265 |
+| `stage` | Stage descriptor lists for the wedge reproducer | 1273 |
+| `d2h` | Drain device-to-host queue (notification consumer) | 1284 |
+| `runmodel` | Full production-path inference run | 1302 |
+| `edges` | List boundary channels (in/out, channel index) | 1405 |
+| `edgeinfo <ch>` | Per-channel HOST + DEVICE sub-block register dump | 1462 |
+| `fwlog` | Read fw log buffer as ASCII | 1483 |
+| `fwloghex` | Read fw log buffer as hex | 1493 |
+| `bist` | Built-in self-test (post-boot diagnostic) | 1515 |
+| `last_err` | Print most recent driver error code + string | 1555 |
+
+### 1.9 Out of scope
+
+The following are **not** covered by this section:
+
+- HailoRT userspace scheduling / multi-process / device-sharing
+  protocols. SLM-OS owns the device single-process.
+- Hailo-15 / Hailo-10 silicon. SLM-OS targets Hailo-8L only;
+  some register addresses and fw RPC opcodes are shared with
+  Hailo-8 (non-L) but the fw build is different.
+- Multi-NPU / chained inference. SLM-OS enumerates one Hailo
+  endpoint per boot.
+- Hot-plug. The device is assumed present from kernel boot.
+- The internal RP1 controller on `pcie0`. SLM-OS does not use
+  RP1 in the Hailo path.
 
 ---
 
@@ -941,4 +1083,6 @@ arm logic and currently sits with Hailo support.
 
 *Last updated: 2026-05-10. Reflects the state of the codebase at
 PR #768 (`682/ushim-bind-parity` merged into main). Doc-review fixes
-applied in PR #771.*
+in PR #771. §1 v2 rewrite (per-row schema with purpose/mechanism/
+target/payload/expected; PMCSR cycle, state machine, recovery,
+shell surface added) on branch `docs/hailo-lifecycle-v2`.*
