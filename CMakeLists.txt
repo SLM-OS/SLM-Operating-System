@@ -1244,7 +1244,19 @@ endif()
 #
 # Steps 1-3 are codified by `scripts/cuda/<op>.cu` header comments.
 set(OPLIB_BLOB "" CACHE FILEPATH
-    "Path to operator_library.bin to embed. Empty = generate a stub.")
+    "Path to operator_library.bin to embed. Empty = auto-detect: pack the SASS files in scripts/cuda/operator_library/ via the manifest if any exist, else fall back to a 32-byte op_count=0 stub.")
+
+# Auto-detection: if at least one *_shader.sass file exists in the
+# manifest directory we can pack a real operator library (the build
+# script's --skip-missing flag handles partial sets). This keeps the
+# QEMU stub working on hosts that haven't extracted SASS, and turns
+# the Jetson dev loop into one less manual step (no -DOPLIB_BLOB to
+# pass on every reconfigure). The presence-check uses CMake's GLOB
+# at configure time, so a freshly-built SASS triggers reconfigure
+# via CONFIGURE_DEPENDS.
+file(GLOB OPLIB_SASS_FILES CONFIGURE_DEPENDS
+     "${CMAKE_SOURCE_DIR}/scripts/cuda/operator_library/*_shader.sass")
+
 if(OPLIB_BLOB)
     if(NOT EXISTS "${OPLIB_BLOB}")
         message(FATAL_ERROR "OPLIB_BLOB set but file does not exist: "
@@ -1252,6 +1264,32 @@ if(OPLIB_BLOB)
     endif()
     set(OPLIB_BLOB_FINAL "${OPLIB_BLOB}")
     message(STATUS "Embedding operator library from: ${OPLIB_BLOB}")
+elseif(OPLIB_SASS_FILES)
+    # Real-SASS path. Pack whatever's in scripts/cuda/operator_library/
+    # via the manifest, skipping entries whose SASS hasn't been
+    # extracted yet (build-operator-library.py --skip-missing prints
+    # one line per skip to stderr so an unexpectedly-empty library
+    # is visible without grovelling through build logs).
+    set(OPLIB_BLOB_FINAL "${CMAKE_BINARY_DIR}/operator_library.bin")
+    set(OPLIB_MANIFEST
+        "${CMAKE_SOURCE_DIR}/scripts/cuda/operator_library/MANIFEST.json")
+    add_custom_command(
+        OUTPUT  "${OPLIB_BLOB_FINAL}"
+        COMMAND ${CMAKE_COMMAND} -E echo
+                "[gen] operator_library.bin (auto-detected SASS)"
+        COMMAND python3
+                "${CMAKE_SOURCE_DIR}/scripts/build-operator-library.py"
+                --skip-missing
+                "${OPLIB_MANIFEST}"
+                "${OPLIB_BLOB_FINAL}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/scripts/build-operator-library.py"
+                "${OPLIB_MANIFEST}"
+                ${OPLIB_SASS_FILES}
+        VERBATIM
+    )
+    message(STATUS "Embedding operator library: auto-detected "
+                   "${OPLIB_MANIFEST} "
+                   "(set OPLIB_BLOB to override)")
 else()
     set(OPLIB_BLOB_FINAL "${CMAKE_BINARY_DIR}/operator_library_stub.bin")
     add_custom_command(
@@ -1264,7 +1302,9 @@ else()
         DEPENDS "${CMAKE_SOURCE_DIR}/scripts/build-operator-library-stub.py"
         VERBATIM
     )
-    message(STATUS "Embedding operator library: stub (set OPLIB_BLOB to override)")
+    message(STATUS "Embedding operator library: stub (no SASS files in "
+                   "scripts/cuda/operator_library/; set OPLIB_BLOB to "
+                   "override or extract SASS via the .cu source recipe)")
 endif()
 target_sources(slmos.elf PRIVATE kernel/src/oplib_embed.S)
 set_source_files_properties(
