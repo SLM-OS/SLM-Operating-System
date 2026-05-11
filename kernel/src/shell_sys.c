@@ -4022,6 +4022,7 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_bringup.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"
 #include "../gpu/nvidia/ga10b_gmmu.h"
+#include "../gpu/nvidia/ga10b_ce.h"
 #include "oplib_pool.h"
 #include "oplib_weights_pool.h"
 #include "oplib_probe.h"
@@ -6020,6 +6021,113 @@ oplib_stage_call:
         return -1;
     }
 
+    if (strcmp(argv[1], "ce") == 0) {
+        /* `nvgpu ce smoke [size_hex]` — proof-of-life for the GA10B
+         * Copy Engine dispatch path. Tests CE memcpy independently
+         * of the weights pool: CPU writes a pattern into SCRATCH0,
+         * CE memcpys SCRATCH0 → SCRATCH1, CPU reads SCRATCH1 back
+         * and compares.
+         *
+         * Both endpoints have helper-published contiguous phys, so
+         * a failure here is the CE infrastructure itself (class
+         * binding, runlist, method encoding) — not the pool's
+         * GMMU. Diagnostic ordering matters: run this BEFORE
+         * `nvgpu weights-pool smoke`; if `ce smoke` fails the pool
+         * smoke is guaranteed to fail too. */
+        if (argc < 3 || strcmp(argv[2], "smoke") != 0) {
+            shell_puts("usage: nvgpu ce smoke [size_hex]\r\n");
+            return -1;
+        }
+        uint32_t want_bytes = 256u;
+        if (argc >= 4) {
+            const char *s = argv[3];
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+                s += 2;
+            }
+            uint32_t v = 0;
+            while (*s) {
+                char c = *s;
+                uint32_t d;
+                if (c >= '0' && c <= '9') {
+                    d = (uint32_t)(c - '0');
+                } else if (c >= 'a' && c <= 'f') {
+                    d = 10u + (uint32_t)(c - 'a');
+                } else if (c >= 'A' && c <= 'F') {
+                    d = 10u + (uint32_t)(c - 'A');
+                } else {
+                    shell_puts("ce smoke: bad hex size\r\n");
+                    return -1;
+                }
+                v = (v << 4) | d;
+                s++;
+            }
+            if (v == 0 || v > 0x1000u) {
+                shell_puts("ce smoke: size must be in (0, 0x1000]\r\n");
+                return -1;
+            }
+            want_bytes = v;
+        }
+
+        const struct ga10b_channel_handoff *h_ce = ga10b_bringup_handoff();
+        struct ga10b_bringup *b_ce = ga10b_bringup_state();
+        if (h_ce == NULL || b_ce == NULL ||
+            h_ce->shader_phys == 0 || h_ce->shader_gpu_va == 0) {
+            shell_puts("ce smoke: channel state not ready — run "
+                       "`nvgpu inherit / channel / oplib stage` first\r\n");
+            return -1;
+        }
+
+        uint64_t src_phys = h_ce->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
+        uint64_t src_gva  = h_ce->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
+        uint64_t dst_phys = h_ce->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
+        uint64_t dst_gva  = h_ce->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
+
+        /* Distinguishable pattern + zero destination so a stale
+         * read can't pose as success. */
+        uint8_t *src = (uint8_t *)(uintptr_t)src_phys;
+        uint8_t *dst = (uint8_t *)(uintptr_t)dst_phys;
+        for (uint32_t i = 0; i < want_bytes; i++) {
+            src[i] = (uint8_t)(0xA5u ^ (i & 0xFFu));
+        }
+        memset(dst, 0, (size_t)want_bytes);
+        size_t flush_bytes =
+            (size_t)((want_bytes + 4095u) & ~4095u);
+        cache_clean_range(src, flush_bytes);
+        cache_clean_range(dst, flush_bytes);
+
+        int rc = ga10b_ce_memcpy(b_ce, src_gva, dst_gva, want_bytes);
+        if (rc != 0) {
+            shell_printf("ce smoke: ga10b_ce_memcpy rc=%d "
+                         "(class/runlist binding issue?)\r\n", rc);
+            return rc;
+        }
+
+        cache_invalidate_range(dst, flush_bytes);
+        int mismatches = 0;
+        for (uint32_t i = 0; i < want_bytes; i++) {
+            uint8_t want = (uint8_t)(0xA5u ^ (i & 0xFFu));
+            if (dst[i] != want) {
+                if (mismatches < 4) {
+                    shell_printf("  byte %u: got 0x%02x want 0x%02x\r\n",
+                                 (unsigned)i,
+                                 (unsigned)dst[i], (unsigned)want);
+                }
+                mismatches++;
+            }
+        }
+        if (mismatches != 0) {
+            shell_printf("ce smoke: FAIL, %d byte(s) differ in "
+                         "%u B span\r\n",
+                         mismatches, (unsigned)want_bytes);
+            return -1;
+        }
+        shell_printf("[ce] smoke PASS — %u B CE memcpy "
+                     "SCRATCH0(0x%lx)→SCRATCH1(0x%lx) byte-exact\r\n",
+                     (unsigned)want_bytes,
+                     (unsigned long)src_gva, (unsigned long)dst_gva);
+        return 0;
+    }
+
     if (strcmp(argv[1], "weights-pool") == 0) {
         if (argc < 3 || strcmp(argv[2], "status") == 0) {
             /* `nvgpu weights-pool status` — describe what the v8
@@ -6087,24 +6195,9 @@ oplib_stage_call:
             uint64_t gpu_va = 0;
             int rc = slm_runtime_stage_weight(pattern, want_bytes, &gpu_va);
             if (rc != 0) {
-                /* Stage path is currently inert on this Jetson —
-                 * GMMU walk-discovery for the inherited channel's
-                 * inst block fails post-kexec because Linux's
-                 * teardown frees the inst-block tree before SLM-OS
-                 * boots. The pushbuf bytes survive (which is why
-                 * compute dispatch via the doorbell still works),
-                 * but the CPU-walkable GMMU is gone. W2 ships the
-                 * FFI + bump allocator scaffolding so W3-W7 hybrid
-                 * wrappers have a stable interface to call; the
-                 * actual staging backend (likely a GA10B Copy
-                 * Engine path) lands in a follow-up. See
-                 * docs/design/gpu-weights-pool.md for the full
-                 * architecture. */
                 shell_printf("weights-pool smoke: stage rc=%d "
-                             "(pool used=%lu B; staging backend "
-                             "currently inert post-kexec on this "
-                             "board, see docs/design/"
-                             "gpu-weights-pool.md)\r\n",
+                             "(pool used=%lu B; see "
+                             "docs/design/gpu-weights-pool.md)\r\n",
                              rc,
                              (unsigned long)oplib_weights_pool_bytes_used());
                 return rc;
@@ -6113,46 +6206,44 @@ oplib_stage_call:
                          (unsigned long)want_bytes,
                          (unsigned long)gpu_va);
 
-            /* Read-back via GMMU walk + identity-mapped phys. */
+            /* CE-based readback. The stage path's CPU→bounce→CE
+             * leg only proves the GPU received our bytes; to verify
+             * they landed at the right gpu_va we need to pull them
+             * back to CPU-visible memory and compare. Use a second
+             * CE memcpy from the pool slot into SCRATCH1 (a
+             * different scratch slot than the staging bounce so the
+             * post-readback compare can't accidentally observe
+             * residual bounce contents). Both endpoints have known
+             * helper-published phys — no GMMU walk needed. */
             const struct ga10b_channel_handoff *h_dbg =
                 ga10b_bringup_handoff();
-            uint64_t inst = ga10b_gmmu_discover_inst_block_phys();
-            if (inst != 0 && h_dbg != NULL) {
-                struct ga10b_gmmu_walk_result vr;
-                if (!(ga10b_gmmu_walk(inst, h_dbg->pushbuf_gpu_va, &vr) == 0
-                      && vr.status == GA10B_GMMU_WALK_OK
-                      && vr.leaf_phys == h_dbg->pushbuf_phys)) {
-                    inst = 0;
-                }
-            }
-            if (inst == 0 && h_dbg != NULL) {
-                inst = ga10b_gmmu_discover_inst_block_via_walk(
-                    h_dbg->pushbuf_gpu_va, h_dbg->pushbuf_phys,
-                    0x80000000ULL, 0x240000000ULL);
-            }
-            if (inst == 0) {
+            struct ga10b_bringup *b_dbg = ga10b_bringup_state();
+            if (h_dbg == NULL || b_dbg == NULL ||
+                h_dbg->shader_phys == 0 || h_dbg->shader_gpu_va == 0) {
                 shell_puts("weights-pool smoke: stage succeeded but "
-                           "no readback path (inst block discovery "
-                           "failed — same blocker as the stage path)\r\n");
+                           "readback channel state unavailable\r\n");
+                return -1;
+            }
+            uint64_t rb_phys = h_dbg->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
+            uint64_t rb_gva  = h_dbg->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
+
+            /* Zero the destination before the CE so a stale read
+             * doesn't masquerade as success. */
+            memset((void *)(uintptr_t)rb_phys, 0, (size_t)want_bytes);
+            cache_clean_range((void *)(uintptr_t)rb_phys,
+                              (size_t)((want_bytes + 4095u) & ~4095ull));
+
+            int rb_rc = ga10b_ce_memcpy(b_dbg, gpu_va, rb_gva,
+                                         (uint32_t)want_bytes);
+            if (rb_rc != 0) {
+                shell_printf("weights-pool smoke: readback CE memcpy "
+                             "rc=%d\r\n", rb_rc);
                 return -1;
             }
 
-            /* Walk the page that contains gpu_va. The smoke
-             * payload is <= 4 KB so it cannot span two pages
-             * (allocator always returns offsets that, together
-             * with size, stay under 4 KB on the smoke path —
-             * verified by the size cap above). */
-            struct ga10b_gmmu_walk_result wr;
-            uint64_t page_va = gpu_va & ~((uint64_t)4096u - 1u);
-            size_t   page_off = (size_t)(gpu_va - page_va);
-            if (ga10b_gmmu_walk(inst, page_va, &wr) != 0 ||
-                wr.status != GA10B_GMMU_WALK_OK) {
-                shell_puts("weights-pool smoke: GMMU walk failed\r\n");
-                return -1;
-            }
-            uint8_t *readback = (uint8_t *)(uintptr_t)
-                                (wr.leaf_phys + page_off);
-            cache_invalidate_range(readback, (size_t)want_bytes);
+            uint8_t *readback = (uint8_t *)(uintptr_t)rb_phys;
+            cache_invalidate_range(readback,
+                                   (size_t)((want_bytes + 4095u) & ~4095ull));
 
             int mismatches = 0;
             for (uint64_t i = 0; i < want_bytes; i++) {
@@ -6173,10 +6264,9 @@ oplib_stage_call:
                 return -1;
             }
             shell_printf("[weights-pool] smoke PASS — %lu B byte-exact "
-                         "round-trip via gpu_va=0x%lx, phys=0x%lx\r\n",
+                         "round-trip via gpu_va=0x%lx through CE memcpy\r\n",
                          (unsigned long)want_bytes,
-                         (unsigned long)gpu_va,
-                         (unsigned long)(wr.leaf_phys + page_off));
+                         (unsigned long)gpu_va);
             return 0;
         }
         shell_puts("usage: nvgpu weights-pool <status | smoke [size_hex]>\r\n");
@@ -6191,6 +6281,7 @@ oplib_stage_call:
               "alloc-page | alloc-page-synth | "
               "alloc-multi-synth | reuse-synth> | "
               "oplib | "
+              "ce smoke | "
               "weights-pool <status | smoke>]\r\n");
     return -1;
 }

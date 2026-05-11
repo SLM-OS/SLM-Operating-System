@@ -1,9 +1,19 @@
 /*
- * oplib_weights_pool.c — bump allocator + GMMU-walked CPU staging
- * for the W1-published weights pool. See header for design notes.
+ * oplib_weights_pool.c — bump allocator + GA10B Copy Engine staging
+ * for the W1-published weights pool. See header for design notes
+ * and docs/design/gpu-weights-pool.md for the architecture trail.
+ *
+ * Staging mechanism: CPU writes the source bytes into a helper-staged
+ * bounce buffer (the SASS pool's SCRATCH0 slot — contiguous, known
+ * phys, identity-mapped on Jetson), then asks the GPU's Copy Engine
+ * to memcpy bounce_gpu_va → pool_slot_gpu_va over the channel's
+ * inherited GMMU mapping. This sidesteps the post-kexec GMMU-walk-
+ * discovery failure described in PR #769: SLM-OS never needs the
+ * channel's inst-block phys.
  */
 
 #include "oplib_weights_pool.h"
+#include "oplib_pool.h"          /* OPLIB_POOL_SLOT_BYTES + slot offsets */
 #include "uart.h"
 
 #include <stdbool.h>
@@ -12,91 +22,20 @@
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 #include "../include/cache.h"
 #include "nvidia/ga10b_bringup.h"
+#include "nvidia/ga10b_ce.h"
 #include "nvidia/ga10b_channel_handoff.h"
-#include "nvidia/ga10b_gmmu.h"
 
-/* GMMU page granularity used by the pool's helper-side mapping
- * (the helper's NVGPU_AS_IOCTL_MAP_BUFFER_EX call passes
- * page_size=4096). Per-page walks are at this granularity. */
-#define POOL_PAGE_SIZE   4096u
 #define POOL_DEFAULT_ALIGN 256u
 
+/* Chunk size for the staging loop — one CE memcpy moves up to this
+ * many bytes from the SASS pool's SCRATCH0 bounce slot into the
+ * weights pool. Equal to OPLIB_POOL_SLOT_BYTES (64 KB) so a single
+ * memcpy fills the bounce before each CE dispatch. CE itself can
+ * move much more per LAUNCH_DMA (up to GA10B_CE_MAX_BYTES_PER_LAUNCH
+ * = 16 MB), but the bounce-slot ceiling is the binding constraint. */
+#define POOL_STAGE_CHUNK_BYTES  OPLIB_POOL_SLOT_BYTES
+
 static uint64_t g_pool_bytes_used = 0;
-/* Cached after first successful resolve so per-stage calls don't
- * re-scan DRAM. Reset when the pool resets (unload path) so a
- * post-kexec re-bringup doesn't reuse a stale value. */
-static uint64_t g_inst_block_phys_cache = 0;
-
-/* Validate a candidate inst-block phys by walking the channel
- * handoff's pushbuf gpu_va and confirming the walk lands at the
- * handoff's pushbuf phys. The pushbuf is the most reliable witness
- * pair available post-kexec — every helper-built channel maps it,
- * and its phys is recorded in the v2+ handoff prefix.
- *
- * Returns true if the inst block is usable. False if the walk
- * fails or lands at the wrong phys (FECS_CURRENT_CTX has been
- * observed to return a stale-but-non-zero value on Jetson when
- * Linux unbound the channel between the helper's last activity
- * and SLM-OS's first GMMU touch — the address-bits look plausible
- * but the PDB reads as zero or points into freed memory). */
-static bool inst_block_validates(uint64_t inst)
-{
-    if (inst == 0) {
-        return false;
-    }
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h == NULL ||
-        h->pushbuf_gpu_va == 0 ||
-        h->pushbuf_phys == 0) {
-        return false;
-    }
-    struct ga10b_gmmu_walk_result wr;
-    if (ga10b_gmmu_walk(inst, h->pushbuf_gpu_va, &wr) != 0) {
-        return false;
-    }
-    if (wr.status != GA10B_GMMU_WALK_OK) {
-        return false;
-    }
-    return wr.leaf_phys == h->pushbuf_phys;
-}
-
-static uint64_t resolve_inst_block(void)
-{
-    if (g_inst_block_phys_cache != 0) {
-        return g_inst_block_phys_cache;
-    }
-    /* Try the cheap FECS_CURRENT_CTX read first, then validate. */
-    uint64_t inst = ga10b_gmmu_discover_inst_block_phys();
-    if (inst_block_validates(inst)) {
-        g_inst_block_phys_cache = inst;
-        return inst;
-    }
-
-    /* Walk-based fallback: scan DRAM for a 4 KB-aligned candidate
-     * whose GMMU walk for `pushbuf_gpu_va` lands at the handoff's
-     * `pushbuf_phys`. Bounded by the 4 GB scan range; cost is in
-     * milliseconds and only paid once per pool init. The
-     * walk-discoverer rejects bogus candidates internally so its
-     * return value already implies a valid PDB. */
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h == NULL ||
-        h->pushbuf_gpu_va == 0 ||
-        h->pushbuf_phys == 0) {
-        return 0;
-    }
-    /* Cover the full Tegra Orin DRAM range — `phys_in_dram`'s
-     * cap is 0x240000000 (9 GB). nvgpu inst-block carveouts have
-     * been observed below 4 GB on some boots; weights/pushbuf
-     * dmabufs cluster in 4-8 GB. The 0x80000000..0x240000000
-     * span covers everything `phys_in_dram` permits. */
-    inst = ga10b_gmmu_discover_inst_block_via_walk(
-        h->pushbuf_gpu_va, h->pushbuf_phys,
-        0x80000000ULL, 0x240000000ULL);
-    if (inst != 0) {
-        g_inst_block_phys_cache = inst;
-    }
-    return inst;
-}
 
 uint64_t oplib_weights_pool_alloc(size_t size, size_t align)
 {
@@ -155,40 +94,58 @@ int oplib_weights_pool_stage(uint64_t gpu_va,
         return -1;
     }
 
-    uint64_t inst = resolve_inst_block();
-    if (inst == 0) {
+    struct ga10b_bringup *b = ga10b_bringup_state();
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (b == NULL || h == NULL ||
+        h->shader_phys == 0 || h->shader_gpu_va == 0 ||
+        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+        /* No helper-staged bounce buffer means we have nowhere to
+         * land CPU bytes before the CE picks them up. Return -1 so
+         * the Rust caller falls back to "GPU staging unavailable". */
         return -1;
     }
+
+    /* Bounce slot in the SASS pool's SCRATCH0 region. The CE dispatch
+     * path is single-threaded (caller holds g_gpu_dispatch_lock), so
+     * even though SCRATCH0 is shared with the per-op dispatchers
+     * (W4-W7), staging completes before inference fires and the slot
+     * is free again. */
+    uint64_t bounce_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t bounce_gva  = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
 
     const uint8_t *src_bytes = (const uint8_t *)src;
     size_t off = 0;
     while (off < len) {
-        uint64_t cur_va  = gpu_va + off;
-        uint64_t page_va = cur_va & ~((uint64_t)POOL_PAGE_SIZE - 1u);
-        size_t page_off  = (size_t)(cur_va - page_va);
-        size_t to_copy   = POOL_PAGE_SIZE - page_off;
+        size_t to_copy = POOL_STAGE_CHUNK_BYTES;
         if (to_copy > len - off) {
             to_copy = len - off;
         }
 
-        struct ga10b_gmmu_walk_result r;
-        if (ga10b_gmmu_walk(inst, page_va, &r) != 0 ||
-            r.status != GA10B_GMMU_WALK_OK) {
-            return -1;
+        /* CPU writes the chunk into the bounce slot. Identity-mapped
+         * phys works here because the SASS pool is small-and-
+         * contiguous carveout (unlike the GB-scale IOVMM weights
+         * pool whose CPU-side phys is unreliable). cache_clean_range
+         * drains the writes to PoC; CE reads through DRAM. */
+        memcpy((void *)(uintptr_t)bounce_phys, src_bytes + off, to_copy);
+        cache_clean_range((void *)(uintptr_t)bounce_phys,
+                          (size_t)((to_copy + 4095u) & ~4095ull));
+
+        /* CE memcpy bounce_gva → destination chunk inside the pool.
+         * Both VAs resolve through the channel's inherited GMMU,
+         * which the GPU side never needs SLM-OS to re-walk. */
+        int rc = ga10b_ce_memcpy(b, bounce_gva, gpu_va + off,
+                                  (uint32_t)to_copy);
+        if (rc != 0) {
+            return rc;
         }
-        uint8_t *dst = (uint8_t *)(uintptr_t)(r.leaf_phys + page_off);
-        memcpy(dst, src_bytes + off, to_copy);
-        cache_clean_range(dst, to_copy);
         off += to_copy;
     }
-    __asm__ volatile("dsb sy" ::: "memory");
     return 0;
 }
 
 void oplib_weights_pool_reset(void)
 {
     g_pool_bytes_used = 0;
-    g_inst_block_phys_cache = 0;
 }
 
 size_t oplib_weights_pool_bytes_used(void)

@@ -1763,13 +1763,13 @@ uint32_t ga10b_build_launch_kernel_with_sema_pushbuffer(uint32_t *pb,
  * pressure and matches the path NVIDIA tests at scale. The
  * bookkeeping fix here remains load-bearing for any single-op
  * caller (smoke tests, debug paths). */
-static int ga10b_submit_and_poll(struct ga10b_bringup *b,
-                                 const uint32_t *pb_buf,
-                                 uint32_t pb_dwords,
-                                 uint64_t poll_phys,
-                                 uint32_t expected_payload,
-                                 int error_phase,
-                                 const char *tag)
+int ga10b_submit_and_poll(struct ga10b_bringup *b,
+                          const uint32_t *pb_buf,
+                          uint32_t pb_dwords,
+                          uint64_t poll_phys,
+                          uint32_t expected_payload,
+                          int error_phase,
+                          const char *tag)
 {
     /* Bound pb_dwords against the inherited pushbuffer size before any
      * write. Today's callers cap at GA10B_LAUNCH_KERNEL_SEMA_PB_DWORDS

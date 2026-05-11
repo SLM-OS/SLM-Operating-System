@@ -462,6 +462,13 @@ set(KERNEL_SOURCES
     # Jetson-only: read-only GMMU page-table walker (#666 Milestone A).
     # No-op until invoked via the `nvgpu gmmu walk` shell verb.
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_gmmu.c>
+    # Jetson-only: GA10B Copy Engine memcpy primitive — the
+    # GPU-resident weights pool staging backend (see
+    # docs/design/gpu-weights-pool.md). Pushes
+    # AMPERE_DMA_COPY_B method bursts through the inherited
+    # channel; no CPU-side phys arithmetic required, sidesteps the
+    # GMMU walk-discovery failure observed post-kexec.
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_ce.c>
     # Jetson: full GSP platform shim — MMIO at GPU_BASE, unified memory
     # DMA, cache maintenance, firmware via .incbin. Replaces the old
     # nvidia_gsp_platform_stub.c now that CBB firewall is bypassed.
