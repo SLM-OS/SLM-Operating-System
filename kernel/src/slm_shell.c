@@ -35,6 +35,9 @@
 #include "uart.h"
 #include "vfs.h"
 #include "pmm.h"
+#if !defined(PLATFORM_X86_64)
+#include "kbuf.h"
+#endif
 #include "slm_ffi.h"
 #include "string.h"
 #include "timer.h"
@@ -434,7 +437,29 @@ static int slm_xload(int argc, char *argv[])
     }
 
     size_t pages = (total + 4095u) / 4096u;
+    /*
+     * Allocate the stream buffer via `kbuf_alloc` on platforms that
+     * have VMM block-mapping support. kbuf transparently falls back
+     * from "single contiguous buddy block" to "N × 2 MB chunks mapped
+     * contiguously" when the buddy allocator can't satisfy the request
+     * in one block — fixes #789 (Qwen 1.07 GB xload + 1.5 GB IOVMM
+     * helper pool fragments PMM beyond an order-18 single allocation).
+     *
+     * On x86-64 (where `vmm_map_block` isn't compiled in) the kbuf
+     * module isn't built; fall back to plain `pmm_alloc_pages`, which
+     * matches the pre-#789 behavior. The fragmentation pattern hasn't
+     * been observed on x86-64.
+     *
+     * `slm_free_pages` (the C-side free hook called by the Rust
+     * registry on `slm unload`) dispatches to `kbuf_free` when the
+     * pointer lives in the kbuf-tracked table, so the registry's
+     * release path stays a one-liner.
+     */
+#if !defined(PLATFORM_X86_64)
+    uint8_t *buf = (uint8_t *)kbuf_alloc((size_t)total);
+#else
     uint8_t *buf = (uint8_t *)pmm_alloc_pages(pages);
+#endif
     if (!buf) {
         shell_puts("slm xload: out of memory for stream buffer\r\n");
         return -1;
@@ -447,25 +472,27 @@ static int slm_xload(int argc, char *argv[])
     bool ok = slm_xload_drain_session(buf, total);
     shell_session_set_binary_mode(false);
     if (!ok) {
+#if !defined(PLATFORM_X86_64)
+        kbuf_free(buf);
+#else
         pmm_free_pages(buf, pages);
+#endif
         return -1;
     }
     shell_printf("SLM-XLOAD done received=%lu\r\n", (unsigned long)total);
 
     /* Transfer ownership of the streaming buffer to the registry. On
      * success the registry will free the pages on `slm unload`; we
-     * MUST NOT call pmm_free_pages here. On failure (-1) the caller
-     * still owns the pages and we free them ourselves. The take-pages
-     * variant exists specifically because the original `rust_slm_load`
-     * allocates a SECOND buffer of the same size to copy into — on a
-     * Jetson 8 GB system the buddy allocator can only produce one
-     * order-19 (2 GB) block at a time, so the alloc+copy path fails
-     * for a 1.04 GB Q4_K_M GGUF even though the file itself fits in
-     * available PMM. */
+     * MUST NOT call pmm_free_pages / kbuf_free here. On failure (-1)
+     * the caller still owns the pages and we free them ourselves. */
     int idx = rust_slm_load_take_pages((const uint8_t *)name_buf,
                                        buf, pages, (size_t)total);
     if (idx < 0) {
+#if !defined(PLATFORM_X86_64)
+        kbuf_free(buf);
+#else
         pmm_free_pages(buf, pages);
+#endif
         shell_puts("slm xload: failed to parse stream "
                    "(not a GGUF or unsupported architecture)\r\n");
         return -1;

@@ -5,6 +5,9 @@
  */
 
 #include "slm_ffi.h"
+#if !defined(PLATFORM_X86_64)
+#include "kbuf.h"
+#endif
 /* Pull gpu_handoff.h into a translation unit so its _Static_assert
  * sizes are actually exercised on every kernel build (catches struct
  * drift the moment the C header is touched). */
@@ -47,6 +50,26 @@ void *slm_alloc_pages(size_t count)
 
 void slm_free_pages(void *addr, size_t count)
 {
+    /* The Rust `kernel_ffi::free_pages` shim calls this with the
+     * exact pointer that was handed to it. Two producers feed those
+     * pointers today:
+     *   - `slm_alloc_pages` (above) → plain `pmm_alloc_pages`. The
+     *     pointer lives in the identity map.
+     *   - `slm xload` → `kbuf_alloc` (#789). The pointer may be a
+     *     fast-path PMM block (identity-mapped) OR a chunked VMM
+     *     mapping in the kbuf VA window. Either way kbuf knows how
+     *     to release it.
+     *
+     * `kbuf_owns_va` looks up the pointer in kbuf's bookkeeping
+     * table and is the authoritative signal — relying on a VA range
+     * test alone would miss the fast-path PMM allocations kbuf
+     * also tracks. */
+#if !defined(PLATFORM_X86_64)
+    if (addr != NULL && kbuf_owns_va(addr)) {
+        kbuf_free(addr);
+        return;
+    }
+#endif
     pmm_free_pages(addr, count);
 }
 
