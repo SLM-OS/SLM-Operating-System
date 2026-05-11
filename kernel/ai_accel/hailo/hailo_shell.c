@@ -33,6 +33,7 @@
 
 #include "hailo.h"
 #include "hailo_control.h"
+#include "hailo_trace.h"
 #include "hailo_cs_actions.h"
 #include "hailo_cs_builder.h"
 #include "hailo_cs_translator.h"
@@ -1564,6 +1565,44 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
+    /* `hailo trace [...]` — runtime trace mask control. See
+     * docs/hailo-lifecycle.md §"trace framework" for the full grammar.
+     * Examples:
+     *   hailo trace                     # print current masks
+     *   hailo trace off                  # both masks = 0
+     *   hailo trace phase=all mech=all
+     *   hailo trace phase=inference
+     *   hailo trace mech=mmio,pci */
+    if (argc >= 2 && strcmp(argv[1], "trace") == 0) {
+        if (argc == 2) {
+            hailo_trace_print_state();
+            return 0;
+        }
+        for (int i = 2; i < argc; i++) {
+            const char *a = argv[i];
+            if (strcmp(a, "off") == 0 || strcmp(a, "reset") == 0 ||
+                strcmp(a, "clear") == 0) {
+                hailo_trace_reset();
+            } else if (strncmp(a, "phase=", 6) == 0) {
+                if (hailo_trace_set_phase_mask(a + 6) != 0) {
+                    shell_printf("hailo trace: unknown phase token(s) "
+                                 "in '%s' (others applied)\n", a + 6);
+                }
+            } else if (strncmp(a, "mech=", 5) == 0) {
+                if (hailo_trace_set_mech_mask(a + 5) != 0) {
+                    shell_printf("hailo trace: unknown mech token(s) "
+                                 "in '%s' (others applied)\n", a + 5);
+                }
+            } else {
+                shell_printf("hailo trace: unknown arg '%s' (expected "
+                             "off|phase=...|mech=...)\n", a);
+                return -1;
+            }
+        }
+        hailo_trace_print_state();
+        return 0;
+    }
+
     /* Default: one-line status. */
     shell_printf("hailo: state=%s\n", hailo_state_str(hailo_get_state()));
     return 0;
@@ -1572,7 +1611,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name     = "hailo",
     .handler  = cmd_hailo,
-    .help     = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke [min|out|in|full])",
+    .help     = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke [min|out|in|full], trace [off|phase=...|mech=...])",
     .mutates  = true,   /* probe/fw mutate driver state; status is a whole-command tag */
     .category = SHELL_CAT_HARDWARE,
 };

@@ -121,6 +121,15 @@ typedef struct {
     uint32_t bootloader_capabilities;
     uint32_t bootloader_build_timestamp;
     uint32_t bootloader_update_timestamp;
+
+    /* Kernel command line — /chosen/bootargs. Populated from
+     * cmdline.txt by the Pi 5 firmware (and from -append on QEMU).
+     * NUL-terminated; empty when the property is absent. 256 bytes
+     * comfortably accommodates the few key=value tokens we read
+     * during early init (currently just hailo_trace.*). Truncation
+     * is silent — any caller that runs out of room before finding
+     * its key should look at sizeof(bootargs). */
+    char     bootargs[256];
 } dtb_chosen_t;
 
 /* ============================================================================

@@ -49,6 +49,7 @@
 #include "hailo.h"
 #include "hailo_control.h"
 #include "hailo_internal.h"
+#include "hailo_trace.h"
 #include "hef_parser.h"
 #include "debug.h"
 #include "md5.h"
@@ -197,8 +198,10 @@ static void control_msi_handler(void *ctx)
      *
      * Skipping the W1C when the read returns 0 avoids issuing a
      * no-op MMIO that the PCIe RC still pays a round-trip for. */
+    uint32_t src_bits = 0;
+    uint32_t dst_bits = 0;
     if (istatus & HAILO_BCS_ISTATUS_HOST_VDMA_SRC_MASK) {
-        uint32_t src_bits = hailo_platform->read32(
+        src_bits = hailo_platform->read32(
             HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL);
         if (src_bits != 0) {
             hailo_platform->write32(
@@ -207,7 +210,7 @@ static void control_msi_handler(void *ctx)
         }
     }
     if (istatus & HAILO_BCS_ISTATUS_HOST_VDMA_DEST_MASK) {
-        uint32_t dst_bits = hailo_platform->read32(
+        dst_bits = hailo_platform->read32(
             HAILO_BAR_CONFIG, HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL);
         if (dst_bits != 0) {
             hailo_platform->write32(
@@ -227,6 +230,13 @@ static void control_msi_handler(void *ctx)
     if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
         __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);
     }
+
+    /* IRQ trace: emit one line per handler invocation with the
+     * snapshotted ISTATUS + per-channel aggregates. SPI is reported
+     * as 0 (the platform shim doesn't currently pass it through
+     * ctx); the trace consumer can identify by mech=IRQ + phase. */
+    if (hailo_trace_active(HAILO_TRACE_MECH_IRQ))
+        hailo_trace_emit_irq(0u, istatus, src_bits, dst_bits);
 }
 
 /*
@@ -345,6 +355,8 @@ int hailo_control_signal_driver_shutdown(void)
 {
     if (!hailo_platform || !hailo_platform->bar4_write) return HAILO_ERR_NODEV;
     if (hailo_get_state() != HAILO_STATE_RUNNING) return HAILO_OK;
+
+    hailo_trace_set_phase(HAILO_TRACE_PHASE_TEARDOWN);
 
     /* Mirror Linux's finalize_doorbell write: doorbell at
      * raise_ready_offset (0x1684) with FW_ACCESS_DRIVER_SHUTDOWN_MASK
@@ -693,6 +705,21 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                &doorbell_val, sizeof(doorbell_val));
     hailo_platform->mb();
 
+    /* RPC tx trace. Opcode is the first BE32 of the payload (per
+     * `req.common.opcode = hailo_cpu_to_be32(...)` convention used
+     * by every wire builder). md5 lives in control_req_wire bytes
+     * 0..15; first 8 bytes are enough to identify the RPC across
+     * a capture without bloating the line. */
+    if (hailo_trace_active(HAILO_TRACE_MECH_RPC)) {
+        uint8_t op = 0;
+        if (req_payload && req_len >= 4) {
+            const uint8_t *p = (const uint8_t *)req_payload;
+            op = p[3];  /* BE32 low byte = opcode byte for 1-byte opcodes */
+        }
+        hailo_trace_emit_rpc_tx(op, req_len, (uint8_t)doorbell_val,
+                                control_req_wire);
+    }
+
     /* TODO(#332): wait_for_response is a udelay-polled busy wait.
      * For #281 tier-1 (shell-driven IDENTIFY) this is fine — the
      * lone caller on CPU 0 just waits. For Phase 5.3+ inference
@@ -745,6 +772,15 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
     memcpy(resp_payload, control_resp_wire, copy_len);
     *resp_len = copy_len;
     rc = HAILO_OK;
+
+    /* RPC rx trace. Status major/minor are buried in the response
+     * payload (resp.header.status.{major,minor}_status at known
+     * per-opcode offsets). Decoding them here would couple this
+     * function to every opcode's wire layout — leave the trace
+     * status fields at 0:0 for now; len + the preceding tx line's
+     * md5/opcode are enough to correlate. */
+    if (hailo_trace_active(HAILO_TRACE_MECH_RPC))
+        hailo_trace_emit_rpc_rx(0u, 0u, copy_len);
 
 out:
     return rc;

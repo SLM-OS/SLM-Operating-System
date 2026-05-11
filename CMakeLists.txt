@@ -145,6 +145,23 @@ if(HAILO_WIRE_DEBUG)
     add_compile_definitions(HAILO_WIRE_DEBUG=1)
 endif()
 
+# Boundary trace framework — initial mask values at kernel start.
+# Both default to 0 (silent). Override at build time to capture phases
+# that run before the shell can take input (PCIe link train, fw boot,
+# post-boot RPC handshake). Runtime override via cmdline.txt
+# (hailo_trace.phase=...) is preferred when possible since it doesn't
+# require a rebuild.
+if(NOT DEFINED HAILO_TRACE_PHASE_DEFAULT)
+    set(HAILO_TRACE_PHASE_DEFAULT 0)
+endif()
+if(NOT DEFINED HAILO_TRACE_MECH_DEFAULT)
+    set(HAILO_TRACE_MECH_DEFAULT 0)
+endif()
+add_compile_definitions(
+    HAILO_TRACE_PHASE_DEFAULT=${HAILO_TRACE_PHASE_DEFAULT}
+    HAILO_TRACE_MECH_DEFAULT=${HAILO_TRACE_MECH_DEFAULT}
+)
+
 # Replicate Linux hailo_pcie's post-boot D0->D3hot->D0 power-state
 # round-trip. Linux does this between firmware load and user open;
 # SLM-OS's tests (2026-04-25) show it shifts the bit-12 CPU_ECC
@@ -835,6 +852,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_bpmp.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hailo.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hailo_trace.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hef.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hef_parser.c>
     kernel/tests/test_littlefs.c
@@ -992,6 +1010,7 @@ set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/kernel/gpu
     ${CMAKE_SOURCE_DIR}/kernel/sched/ai
     ${CMAKE_SOURCE_DIR}/kernel/inference
+    ${CMAKE_SOURCE_DIR}/kernel/ai_accel/hailo
     ${CMAKE_SOURCE_DIR}/kernel/lib/littlefs
     ${CMAKE_SOURCE_DIR}/kernel/lib/lwip/src/include
     ${CMAKE_SOURCE_DIR}/kernel/lib/lua/src

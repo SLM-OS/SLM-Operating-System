@@ -27,6 +27,28 @@
 #include "debug.h"
 #include <string.h>
 
+/* The boundary-trace framework lives under kernel/ai_accel/hailo/ but
+ * its PCI-cfg call-site coverage has to be here — config-space writes
+ * (PMCSR, Command, LNKCTL, MSI cap) bypass the BAR4 path entirely. The
+ * coupling is one-way (pcie_core.c calls into hailo_trace), and the
+ * trace header is platform-independent (no Hailo-specific types). */
+#if !defined(PLATFORM_X86_64)
+#include "hailo_trace.h"
+#define PCIE_TRACE_BDF(d) ((uint16_t)((((d)->bus & 0xFFu) << 8) | \
+                                       (((d)->dev & 0x1Fu) << 3) | \
+                                       ((d)->func & 0x07u)))
+#else
+/* x86-64 doesn't compile the Hailo path; stub the helpers so the
+ * call sites don't need #ifdef chains. */
+static inline bool hailo_trace_active(uint32_t mech) { (void)mech; return false; }
+static inline void hailo_trace_emit_cfg_w(uint16_t b, uint16_t o, unsigned w, uint32_t v)
+{ (void)b; (void)o; (void)w; (void)v; }
+static inline void hailo_trace_emit_cfg_r(uint16_t b, uint16_t o, unsigned w, uint32_t v)
+{ (void)b; (void)o; (void)w; (void)v; }
+#define HAILO_TRACE_MECH_PCI_CFG 0u
+#define PCIE_TRACE_BDF(d) (uint16_t)0u
+#endif
+
 /* -------------------------------------------------------------------------- */
 /* Config-space offsets                                                        */
 /* -------------------------------------------------------------------------- */
@@ -162,19 +184,28 @@ static void cfg_w16(uint8_t bus, uint8_t dev, uint8_t func, uint16_t off,
 uint8_t pcie_config_read8(const struct pcie_device *d, uint16_t off)
 {
     if (!d || !host_ops) return 0xFF;
-    return host_ops->config_read8(d->bus, d->dev, d->func, off);
+    uint8_t v = host_ops->config_read8(d->bus, d->dev, d->func, off);
+    if (hailo_trace_active(HAILO_TRACE_MECH_PCI_CFG))
+        hailo_trace_emit_cfg_r(PCIE_TRACE_BDF(d), off, 8u, (uint32_t)v);
+    return v;
 }
 
 uint16_t pcie_config_read16(const struct pcie_device *d, uint16_t off)
 {
     if (!d || !host_ops) return 0xFFFF;
-    return host_ops->config_read16(d->bus, d->dev, d->func, off);
+    uint16_t v = host_ops->config_read16(d->bus, d->dev, d->func, off);
+    if (hailo_trace_active(HAILO_TRACE_MECH_PCI_CFG))
+        hailo_trace_emit_cfg_r(PCIE_TRACE_BDF(d), off, 16u, (uint32_t)v);
+    return v;
 }
 
 uint32_t pcie_config_read32(const struct pcie_device *d, uint16_t off)
 {
     if (!d || !host_ops) return 0xFFFFFFFFu;
-    return host_ops->config_read32(d->bus, d->dev, d->func, off);
+    uint32_t v = host_ops->config_read32(d->bus, d->dev, d->func, off);
+    if (hailo_trace_active(HAILO_TRACE_MECH_PCI_CFG))
+        hailo_trace_emit_cfg_r(PCIE_TRACE_BDF(d), off, 32u, v);
+    return v;
 }
 
 void pcie_config_write32(const struct pcie_device *d, uint16_t off,
@@ -182,6 +213,8 @@ void pcie_config_write32(const struct pcie_device *d, uint16_t off,
 {
     if (!d || !host_ops) return;
     host_ops->config_write32(d->bus, d->dev, d->func, off, val);
+    if (hailo_trace_active(HAILO_TRACE_MECH_PCI_CFG))
+        hailo_trace_emit_cfg_w(PCIE_TRACE_BDF(d), off, 32u, val);
 }
 
 /* 8/16-bit writes via read-modify-write on the enclosing dword.
@@ -203,6 +236,11 @@ void pcie_config_write16(const struct pcie_device *d, uint16_t off, uint16_t val
     unsigned shift = (off & 2u) * 8u;
     dword = (dword & ~(0xFFFFu << shift)) | (((uint32_t)val) << shift);
     host_ops->config_write32(d->bus, d->dev, d->func, dword_off, dword);
+    /* Emit the logical write only — the internal RMW dword cycle is
+     * an implementation detail, not a transaction the trace consumer
+     * cares about. */
+    if (hailo_trace_active(HAILO_TRACE_MECH_PCI_CFG))
+        hailo_trace_emit_cfg_w(PCIE_TRACE_BDF(d), off, 16u, (uint32_t)val);
 }
 
 void pcie_config_write8(const struct pcie_device *d, uint16_t off, uint8_t val)
@@ -213,6 +251,8 @@ void pcie_config_write8(const struct pcie_device *d, uint16_t off, uint8_t val)
     unsigned shift = (off & 3u) * 8u;
     dword = (dword & ~(0xFFu << shift)) | (((uint32_t)val) << shift);
     host_ops->config_write32(d->bus, d->dev, d->func, aligned, dword);
+    if (hailo_trace_active(HAILO_TRACE_MECH_PCI_CFG))
+        hailo_trace_emit_cfg_w(PCIE_TRACE_BDF(d), off, 8u, (uint32_t)val);
 }
 
 /* -------------------------------------------------------------------------- */

@@ -113,6 +113,9 @@ int test_suite_inference_device(void);
 /* Hailo-8 driver core tests (mocked platform ops) */
 int test_suite_hailo(void);
 
+/* Hailo boundary-trace framework: cmdline parser, masks, phase tracker */
+int test_suite_hailo_trace(void);
+
 /* HEF outer-header validator + nanopb freestanding smoke test */
 int test_suite_hef(void);
 

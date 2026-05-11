@@ -28,6 +28,7 @@
 #include "hailo.h"
 #include "hailo_control.h"
 #include "hailo_internal.h"
+#include "hailo_trace.h"
 #include "debug.h"
 #include "spinlock.h"
 #include "timer.h"
@@ -684,6 +685,8 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
         return HAILO_ERR_INVAL;
     }
 
+    hailo_trace_set_phase(HAILO_TRACE_PHASE_FW_BOOT);
+
     int rc = hailo_validate_firmware(fw_bytes, fw_size);
     if (rc != HAILO_OK) {
         state = HAILO_STATE_FAILED;
@@ -855,6 +858,7 @@ int hailo_boot(const void *fw_bytes, size_t fw_size)
      * fw was using for its own bookkeeping. control_post_boot_init
      * re-arms on the first FW_CONTROL RPC (IDENTIFY below), symmetric
      * to Linux's re-enable on open(). */
+    hailo_trace_set_phase(HAILO_TRACE_PHASE_POSTBOOT);
     {
         int dis_rc = hailo_control_disarm_irq_masks();
         if (dis_rc != HAILO_OK) {

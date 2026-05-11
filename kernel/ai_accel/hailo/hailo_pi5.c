@@ -17,6 +17,7 @@
 #if defined(PLATFORM_RASPI5)
 
 #include "hailo.h"
+#include "hailo_trace.h"
 #include "pcie.h"
 #include "pcie_bcm2712.h"
 #include "pmm.h"
@@ -216,13 +217,18 @@ static inline volatile uint32_t *bar_u32(uint8_t bar, uint32_t offset)
 static uint32_t pi5_read32(uint8_t bar, uint32_t offset)
 {
     if (bar >= HAILO_PI5_NUM_BARS || !bar_map[bar]) return 0xFFFFFFFFu;
-    return *bar_u32(bar, offset);
+    uint32_t v = *bar_u32(bar, offset);
+    if (hailo_trace_active(HAILO_TRACE_MECH_MMIO))
+        hailo_trace_emit_mmio_r((int)bar, offset, v);
+    return v;
 }
 
 static void pi5_write32(uint8_t bar, uint32_t offset, uint32_t value)
 {
     if (bar >= HAILO_PI5_NUM_BARS || !bar_map[bar]) return;
     *bar_u32(bar, offset) = value;
+    if (hailo_trace_active(HAILO_TRACE_MECH_MMIO))
+        hailo_trace_emit_mmio_w((int)bar, offset, value);
 }
 
 /*
