@@ -124,12 +124,19 @@ typedef struct {
 
     /* Kernel command line — /chosen/bootargs. Populated from
      * cmdline.txt by the Pi 5 firmware (and from -append on QEMU).
-     * NUL-terminated; empty when the property is absent. 256 bytes
-     * comfortably accommodates the few key=value tokens we read
-     * during early init (currently just hailo_trace.*). Truncation
-     * is silent — any caller that runs out of room before finding
-     * its key should look at sizeof(bootargs). */
-    char     bootargs[256];
+     * NUL-terminated; empty when the property is absent.
+     *
+     * Sizing note: Pi 5 firmware silently prepends ~225 bytes of
+     * standard args (reboot=w coherent_pool=1M 8250.nr_uarts=N
+     * pci=pcie_bus_safe cgroup_disable=memory numa_policy=interleave
+     * nvme.max_host_mem_size_mb=0 smsc95xx.macaddr=... vc_mem.mem_*=...)
+     * AHEAD of cmdline.txt content. A 1024-byte buffer leaves ~800 B
+     * for user tokens — comfortably above anything we'd reasonably
+     * type. Truncation past the buffer is silent — any caller that
+     * runs out of room before finding its key should look at
+     * sizeof(bootargs). Verified empirically on pi-5-1 with Pi
+     * firmware capabilities=0x7f, 2026-05-10. */
+    char     bootargs[1024];
 } dtb_chosen_t;
 
 /* ============================================================================
