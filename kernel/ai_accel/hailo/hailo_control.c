@@ -49,6 +49,7 @@
 #include "hailo.h"
 #include "hailo_control.h"
 #include "hailo_internal.h"
+#include "hailo_trace.h"
 #include "hef_parser.h"
 #include "debug.h"
 #include "md5.h"
@@ -197,8 +198,10 @@ static void control_msi_handler(void *ctx)
      *
      * Skipping the W1C when the read returns 0 avoids issuing a
      * no-op MMIO that the PCIe RC still pays a round-trip for. */
+    uint32_t src_bits = 0;
+    uint32_t dst_bits = 0;
     if (istatus & HAILO_BCS_ISTATUS_HOST_VDMA_SRC_MASK) {
-        uint32_t src_bits = hailo_platform->read32(
+        src_bits = hailo_platform->read32(
             HAILO_BAR_CONFIG, HAILO_BCS_SOURCE_INTERRUPT_PER_CHANNEL);
         if (src_bits != 0) {
             hailo_platform->write32(
@@ -207,7 +210,7 @@ static void control_msi_handler(void *ctx)
         }
     }
     if (istatus & HAILO_BCS_ISTATUS_HOST_VDMA_DEST_MASK) {
-        uint32_t dst_bits = hailo_platform->read32(
+        dst_bits = hailo_platform->read32(
             HAILO_BAR_CONFIG, HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL);
         if (dst_bits != 0) {
             hailo_platform->write32(
@@ -227,6 +230,21 @@ static void control_msi_handler(void *ctx)
     if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
         __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);
     }
+
+    /* IRQ trace: emit one line per handler invocation with the
+     * snapshotted ISTATUS + per-channel aggregates. SPI is reported
+     * as 0 (the platform shim doesn't currently pass it through
+     * ctx); the trace consumer can identify by mech=IRQ + phase.
+     *
+     * IRQ-context UART note: hailo_trace_emit_irq calls uart_printf,
+     * which on Pi 5 / Jetson uses an IRQ-disable-only lock (no
+     * cross-CPU spinlock — see kernel/CLAUDE.md "UART Lock on Pi 5
+     * / Jetson"), so this is safe to call from the MSI handler. The
+     * emit blocks for the duration of the serial drain (~hundreds
+     * of bytes at 115200 baud = several ms) and lengthens the ISR
+     * accordingly — acceptable for diagnostics, not for production. */
+    if (hailo_trace_active(HAILO_TRACE_MECH_IRQ))
+        hailo_trace_emit_irq(0u, istatus, src_bits, dst_bits);
 }
 
 /*
@@ -346,6 +364,8 @@ int hailo_control_signal_driver_shutdown(void)
     if (!hailo_platform || !hailo_platform->bar4_write) return HAILO_ERR_NODEV;
     if (hailo_get_state() != HAILO_STATE_RUNNING) return HAILO_OK;
 
+    hailo_trace_set_phase(HAILO_TRACE_PHASE_TEARDOWN);
+
     /* Mirror Linux's finalize_doorbell write: doorbell at
      * raise_ready_offset (0x1684) with FW_ACCESS_DRIVER_SHUTDOWN_MASK
      * (0x4) so fw can clear active-driver state. Best-effort: any
@@ -433,6 +453,18 @@ void hailo_control_drain_pending_irqs(const char *label)
         __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);
     }
     if (hailo_platform->mb) hailo_platform->mb();
+
+    /* Polled-drain IRQ trace. The MSI handler also emits an IRQ
+     * trace at its tail, but on fast-fw RPCs the polling path
+     * (wait_for_response → this drain) clears ISTATUS before the
+     * handler runs. Without this emit, polled drains would be
+     * invisible in the trace while interrupt-delivered IRQs would
+     * appear — confusing asymmetry. spi=0 marks this as a poll
+     * rather than a hardware IRQ delivery. */
+    if ((src_pre | dst_pre | istatus_pre) != 0u &&
+        hailo_trace_active(HAILO_TRACE_MECH_IRQ)) {
+        hailo_trace_emit_irq(0u, istatus_pre, src_pre, dst_pre);
+    }
 
     uint32_t istatus_post = hailo_platform->read32(
         HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
@@ -693,6 +725,24 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
                                &doorbell_val, sizeof(doorbell_val));
     hailo_platform->mb();
 
+    /* RPC tx trace. The request common header is 16 bytes:
+     *   [version(4)][flags(4)][sequence(4)][opcode(4)] (all BE32)
+     * so the opcode's low byte is at offset 15 of req_payload. The
+     * 16-byte size is pinned by the _Static_assert next to
+     * `struct hailo_control_common_header` in hailo_control.h.
+     * md5 lives in control_req_wire bytes 0..15; first 8 bytes are
+     * enough to identify the RPC across a capture without bloating
+     * the line. */
+    if (hailo_trace_active(HAILO_TRACE_MECH_RPC)) {
+        uint8_t op = 0;
+        if (req_payload && req_len >= 16) {
+            const uint8_t *p = (const uint8_t *)req_payload;
+            op = p[15];  /* low byte of BE32 opcode at offset 12..15 */
+        }
+        hailo_trace_emit_rpc_tx(op, req_len, (uint8_t)doorbell_val,
+                                control_req_wire);
+    }
+
     /* TODO(#332): wait_for_response is a udelay-polled busy wait.
      * For #281 tier-1 (shell-driven IDENTIFY) this is fine — the
      * lone caller on CPU 0 just waits. For Phase 5.3+ inference
@@ -745,6 +795,28 @@ static int hailo_control_send_recv_locked(enum hailo_control_cpu cpu_id,
     memcpy(resp_payload, control_resp_wire, copy_len);
     *resp_len = copy_len;
     rc = HAILO_OK;
+
+    /* RPC rx trace. Response common header is 16 B (same layout as
+     * request) followed by an 8-B response_status:
+     *   [version(4)][flags(4)][sequence(4)][opcode(4)] [major(4)][minor(4)]
+     * all BE32. Decode major+minor from bytes 16..23 of the response
+     * payload when the readback is at least header-sized.
+     *
+     * major/minor are u32 on the wire, but the running fw populates
+     * only the low byte of each (all known HAILO_COMMON_STATUS_*
+     * codes fit in u8). The trace deliberately passes only that low
+     * byte — narrowing the line by 6 chars per field. If a future fw
+     * starts populating the upper 24 bits, widen the trace fields
+     * to u32 here AND in hailo_trace_emit_rpc_rx; the low-byte read
+     * is intentional truncation, not a placeholder. */
+    if (hailo_trace_active(HAILO_TRACE_MECH_RPC)) {
+        uint8_t major = 0, minor = 0;
+        if (read_len >= 24) {
+            major = control_resp_wire[19]; /* low byte of major BE32 @ 16 */
+            minor = control_resp_wire[23]; /* low byte of minor BE32 @ 20 */
+        }
+        hailo_trace_emit_rpc_rx(major, minor, copy_len);
+    }
 
 out:
     return rc;

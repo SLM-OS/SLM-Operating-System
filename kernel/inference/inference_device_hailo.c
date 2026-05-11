@@ -42,6 +42,7 @@
 #include "hailo_infer.h"
 #include "hailo_internal.h"
 #include "hailo_tensor.h"
+#include "hailo_trace.h"
 #include "hailo_vdma.h"
 #include "hef_header.h"
 #include "hef_parser.h"
@@ -1908,6 +1909,8 @@ static int hailo_backend_load_model(struct inference_device *dev,
     if (!model || size == 0 || !out) return INF_ERR_INVAL;
     *out = INF_INVALID_HANDLE;
 
+    hailo_trace_set_phase(HAILO_TRACE_PHASE_MODEL_LOAD);
+
     /* Firmware must be booted before we can feed any model. */
     if (hailo_get_state() != HAILO_STATE_RUNNING) return INF_ERR_NODEV;
 
@@ -2099,6 +2102,8 @@ static int hailo_backend_run(struct inference_device *dev,
 
     if (!in || !out || !in->data || !out->data) return INF_ERR_INVAL;
     if (h <= 0 || (uint32_t)h > HAILO_MAX_MODELS) return INF_ERR_INVAL;
+
+    hailo_trace_set_phase(HAILO_TRACE_PHASE_INFERENCE);
 
     struct hailo_model_slot *slot = &slots[h - 1];
     /* Audit F-07: take a slot reference under the lock. From here

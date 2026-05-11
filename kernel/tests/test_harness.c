@@ -163,6 +163,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_bpmp();
     total_failures += test_suite_inference_device();
     total_failures += test_suite_hailo();
+    total_failures += test_suite_hailo_trace();
     total_failures += test_suite_hef();
     total_failures += test_suite_hef_parser();
 #endif

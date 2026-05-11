@@ -557,6 +557,8 @@ static void parse_chosen(const void *dtb)
                       &g_chosen.bootloader_build_timestamp);
     (void)fdt_get_u32(&h, "/chosen/bootloader", "update-timestamp",
                       &g_chosen.bootloader_update_timestamp);
+    copy_chosen_string(&h, "/chosen", "bootargs",
+                       g_chosen.bootargs, sizeof(g_chosen.bootargs));
 }
 
 /* ============================================================================

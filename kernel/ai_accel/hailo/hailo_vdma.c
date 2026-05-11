@@ -10,6 +10,7 @@
 #include "hailo_vdma.h"
 #include "hailo.h"
 #include "hailo_internal.h"
+#include "hailo_trace.h"
 #include "debug.h"
 #include "uart.h"
 #include <string.h>
@@ -430,6 +431,13 @@ int hailo_vdma_channel_start(uint8_t channel_index,
     if (!list || !list->descs) return HAILO_ERR_INVAL;
     if (channel_index >= HAILO_VDMA_MAX_CHANNELS) return HAILO_ERR_INVAL;
     if (list->iova & 0xFFFFu) return HAILO_ERR_INVAL;  /* 64 KB-aligned */
+
+    if (hailo_trace_active(HAILO_TRACE_MECH_DMA))
+        hailo_trace_emit_dma("channel_start", (int)channel_index,
+                             (uint32_t)(list->iova & 0xFFFFFFFFu),
+                             (uint32_t)(list->iova >> 32),
+                             (uint32_t)list->desc_count,
+                             (uint32_t)data_id);
     /* Reject IOVAs that don't fit in the 48-bit register window
      * formed by `addr_l = (iova >> 16) & 0xFFFF` + `addr_h = iova >>
      * 32`. The address range encoded by the channel is bits[47:16],
@@ -813,6 +821,10 @@ int hailo_vdma_write_num_avail(uint8_t channel_index, uint16_t num_avail)
         | ((uint32_t)num_avail << HAILO_VDMA_CHANNEL_NUM_AVAIL_SHIFT);
     channel_write_base_dword(channel_index, base_post);
     hailo_platform->mb();
+
+    if (hailo_trace_active(HAILO_TRACE_MECH_DMA))
+        hailo_trace_emit_dma("num_avail", (int)channel_index,
+                             (uint32_t)num_avail, base_pre, base_post, 0u);
 
 #ifdef HAILO_WIRE_DEBUG
     uart_printf("[vdma] ch=%u write_avail host_off=0x%02x pre=0x%08x "
