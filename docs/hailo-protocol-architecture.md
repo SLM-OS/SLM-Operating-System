@@ -59,7 +59,7 @@ How this compares against other PCIe accelerators:
 
 | Vendor / Family | Kernel-only config supported? | Documentation level |
 |---|---|---|
-| NVIDIA GPUs (GA10B, GA107, …) | ✅ — nouveau works without proprietary userspace | Kernel modules open-sourced (`open-gpu-kernel-modules`). SLM-OS dispatches GA10B compute kernels successfully (see `docs/jetson-el2-bringup.md`, capstone GA10B results). |
+| NVIDIA GPUs (GA10B, GA107, …) | ✅ — nouveau works without proprietary userspace | Kernel modules open-sourced (`open-gpu-kernel-modules`). SLM-OS dispatches GA10B compute kernels successfully. |
 | Intel iGPUs (i915 / Xe) | ✅ | Open-source driver, public PRM docs |
 | AMD GPUs (amdgpu / radv / amdkfd) | ✅ | Open-source driver, public ISA + register docs |
 | Google Coral Edge TPU | Partial — `libedgetpu` is closed userspace, but PCIe Coral has open kernel interface | Open-source kernel module + closed userspace |
@@ -72,7 +72,7 @@ Hailo sits alone in the "fully closed black-box accelerator" corner. This is a v
 
 Any host that wants to drive a Hailo NPU without HailoRT (SLM-OS, custom embedded runtime, different OS, microcontroller bringup) has three options:
 
-- **Use the documented fw_control RPC interface.** Gets you to ~90% of load. Firmware accepts every RPC. Boundary channels exist, descriptors get programmed, num_avail bumps land. But the final channel-to-inference-binding step lives in the undocumented direct-memory protocol — submit-time wedge results.
+- **Use the documented fw_control RPC interface.** Reaches ~90% of load. Firmware accepts every RPC. Boundary channels exist, descriptors get programmed, num_avail bumps land. But the final channel-to-inference-binding step lives in the undocumented direct-memory protocol — submit-time wedge results.
 - **Reverse-engineer HailoRT's BAR4 protocol.** Read `~/slmos-ref/hailo/v4.23.0/libhailort/src/`, instrument HailoRT in gdb, capture every BAR4 write during `Configure()` + `Activate()`. Replicate. Weeks of work; produces an officially-unsupported configuration path that may break on the next firmware update.
 - **Wait for Hailo to publish the protocol.** Or release HailoRT source. As of 2026-05-12 neither is publicly committed to.
 
@@ -109,9 +109,11 @@ Mere "I have a new hypothesis about descriptor bytes / settle timing / channel s
 
 The boundary-trace toolkit (PRs [#780](https://github.com/SLM-OS/SLM-Operating-System/pull/780), [#783](https://github.com/SLM-OS/SLM-Operating-System/pull/783)) is the first move on any new Hailo wedge:
 
-1. **SLM-OS side.** Build with `make kernel PLATFORM=RASPI5 HAILO_WIRE_DEBUG=ON`. Deploy via `scripts/capture-hailo-trace.sh --phase all --mech irq,rpc,dma --scenario <name> --shell-cmd "..."`. Output lands under `<your local>/slmos-ref/derivatives/slmos-traces/`. Provides per-phase + per-mechanism trace lines plus channel/descriptor/desc-status dumps on timeout.
+> Reference-cache paths below (`~/slmos-ref/...`) are developer-local — the reference cache is a flat tree on each developer's machine, not checked into the repo. See memory `reference_cache_location.md` or the top-level `CLAUDE.md` "Reference File Cache" section.
 
-2. **Linux side.** Swap to Pi OS card on the lab board. Reload `hailo_pci` with trace masks: `modprobe -r hailo_pci && modprobe hailo_pci trace_phase=0x3f trace_mech=0x0e`. The v2 trace patch is at `<your local>/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-trace-instrumentation-v2.patch`. Provides cross-correlatable trace lines.
+1. **SLM-OS side.** Build with `make kernel PLATFORM=RASPI5 HAILO_WIRE_DEBUG=ON`. Deploy via `scripts/capture-hailo-trace.sh --phase all --mech irq,rpc,dma --scenario <name> --shell-cmd "..."`. Output lands under `~/slmos-ref/derivatives/slmos-traces/`. Provides per-phase + per-mechanism trace lines plus channel/descriptor/desc-status dumps on timeout.
+
+2. **Linux side.** Swap to Pi OS card on the lab board. Reload `hailo_pci` with trace masks: `modprobe -r hailo_pci && modprobe hailo_pci trace_phase=0x3f trace_mech=0x0e`. The v2 trace patch is at `~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-trace-instrumentation-v2.patch`. Provides cross-correlatable trace lines.
 
 3. **Linux fw_control inspection.** Use ftrace + a kprobe on `hailo_pcie_write_firmware_control` to log opcodes. Example used 2026-05-12:
    ```sh
@@ -136,4 +138,4 @@ The boundary-trace toolkit (PRs [#780](https://github.com/SLM-OS/SLM-Operating-S
 - Lifecycle: `docs/hailo-lifecycle.md` (boundary-channel state machine)
 - Toolchain: `docs/hailo-toolchain.md` (HEF compilation pipeline)
 - Trace toolkit: `scripts/capture-hailo-trace.sh`, `kernel/ai_accel/hailo/hailo_trace.{h,c}`
-- Linux v2 trace patch: `<your local>/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-trace-instrumentation-v2.patch`
+- Linux v2 trace patch: `~/slmos-ref/derivatives/hailort-traces/hailort-v4.23.0-trace-instrumentation-v2.patch` (developer-local)
