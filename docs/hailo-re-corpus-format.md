@@ -101,14 +101,17 @@ The stub MUST NOT silently fall back to returning 0 for unknown reads. Doing so 
 
 On a BAR write at the stub's current sequence counter `N` to offset `X` with value `V`:
 
-1. If a corpus entry exists at `(seq=N, bar, offset=X, dir="write")`, assert `value == V`. Mismatch means HailoRT's write order is non-deterministic between runs — this is a fatal capture-invariant violation; halt and surface the divergence loudly.
+1. If a corpus entry exists at `(seq=N, bar, offset=X, dir="write")`, assert `value == V`. Mismatch means HailoRT's write order is non-deterministic between runs — this is a fatal capture-invariant violation; emit a §Divergence report and halt.
 2. If no entry exists, append a fresh entry with `source="qemu_capture"`, `validated_at_commit=null`, `validated_at=null`. Writes are recorded but not yet validated (their validation happens implicitly when SLM-OS successfully replays them).
 3. Increment the stub's seq counter.
 
-### SLM-OS `hailo replay-step <N>` — write replay + read capture
+### SLM-OS `hailo replay-step <N>` — operation replay + read capture
 
 1. Read the corpus and find the entry at `seq=N` — must be `dir="read"` and `validated_at_commit=null` (otherwise there is nothing to do, the entry is already validated).
-2. For each entry with `seq < N` and `dir="write"`, in seq order, issue the corresponding BAR write against real hardware. Do not skip; do not reorder.
+2. For each entry with `seq < N`, in seq order:
+   - If `dir="write"`, issue the BAR write against real hardware with the recorded value.
+   - If `dir="read"`, issue the BAR read against real hardware and discard the returned value. Reads are replayed for their device-side side effects (W1C status registers, FIFO pops, IRQ acknowledgment) so the device state machine matches the state HailoRT-in-QEMU drove the corpus from. Optionally, the driver may compare the observed value against the corpus's recorded value and report a divergence per §Divergence report — this turns every replay-step into a free inline mini-validation.
+   Do not skip; do not reorder.
 3. Issue the read at `seq=N` against the offset specified in the corpus entry. Capture the response value `V`.
 4. Print a single line in the **Corpus-extension response** format (§Corpus-extension response) so the driver script can append it.
 
@@ -150,16 +153,42 @@ The driver script parses this line, invokes `hailo replay-step <N>` against real
 `hailo replay-step <N>` prints a single line in this format to the serial console once it has issued the writes and the read:
 
 ```
-HAILO_RE_CORPUS_RESPONSE seq=<N> bar=<B> offset=<X> size=<S> value=<hex> slmos_sha=<short-sha>
+HAILO_RE_CORPUS_RESPONSE seq=<N> bar=<B> offset=<X> size=<S> value=<hex> slmos_sha=<full-sha>
 ```
+
+`slmos_sha` MUST be the full 40-character SHA the SLM-OS build was compiled from — not abbreviated. The driver script copies this value verbatim into the corpus entry's `validated_at_commit` field, so abbreviating it here forces a `git rev-parse` round-trip the driver shouldn't need.
 
 Example:
 
 ```
-HAILO_RE_CORPUS_RESPONSE seq=128 bar=4 offset=3204 size=4 value=42000000 slmos_sha=ad007df8
+HAILO_RE_CORPUS_RESPONSE seq=128 bar=4 offset=3204 size=4 value=42000000 slmos_sha=ad007df819581b493bcb1fae00f131fef176713b
 ```
 
 The driver script captures the line via `serial_capture`, validates the `slmos_sha` matches the build under test, and appends a new corpus entry with `source="slmos_observed"`, `validated_at_commit="<full-sha>"`, `validated_at="<now>"`.
+
+## Divergence report (QEMU stub or SLM-OS replay-step → driver script)
+
+Emitted on any of three conditions:
+
+- QEMU sees HailoRT issue a write whose `value` differs from the corpus's recorded write at the same `(seq, bar, offset)` — write-order non-determinism (see §Lookup rules / QEMU stub — write logging).
+- QEMU sees HailoRT issue an operation whose `dir` / `bar` / `offset` / `size` doesn't match the corpus entry at that seq — capture invariant violation.
+- SLM-OS replay-step issues a `seq < N` read for side-effect replay and the observed value differs from the corpus's recorded value, AND the implementation has the optional inline-validation enabled (see §Lookup rules / SLM-OS step 2).
+
+Format:
+
+```
+HAILO_RE_CORPUS_DIVERGENCE seq=<N> bar=<B> offset=<X> size=<S> dir=<read|write> expected=<hex> observed=<hex> source=<qemu|slmos> reason=<short-tag>
+```
+
+`reason` tags: `write_value_mismatch`, `op_shape_mismatch`, `inline_read_mismatch`. Tools must accept any string; new tags can be added without bumping `format_version`.
+
+Example:
+
+```
+HAILO_RE_CORPUS_DIVERGENCE seq=87 bar=4 offset=3072 size=4 dir=write expected=01000000 observed=03000000 source=qemu reason=write_value_mismatch
+```
+
+The driver script treats a divergence as a hard stop on Phase 2 single-stepping. It triggers the §Re-validation rollback procedure starting from the divergence point.
 
 ## Re-validation rollback
 
