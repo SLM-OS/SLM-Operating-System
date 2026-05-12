@@ -1764,20 +1764,28 @@ uint32_t ga10b_build_launch_kernel_with_sema_pushbuffer(uint32_t *pb,
  * bookkeeping fix here remains load-bearing for any single-op
  * caller (smoke tests, debug paths). */
 
-/* GR engine state dump used by every dispatch-timeout path (#779
- * diagnostic). Surfaces the actual fault that wedged the dispatch
- * instead of leaving "PBDMA advanced but sema didn't fire" to
- * guesswork. Offsets per `~/slmos-ref/nvidia/nvgpu-hw-gr-ga10b.h`:
- *   gr_intr_r        @ 0x00400100 — top-level interrupt status
- *   gr_exception_r   @ 0x00400108 — per-engine exception bits
- *   gr_class_error_r @ 0x00400110 — SET_OBJECT / method addr fault
- *   gr_trapped_addr  @ 0x00400704 — method addr the engine choked on
- *   gr_fe_hww_esr_r  @ 0x00404000 — front-end hardware-wedge ESR
- *   gr_fecs_intr_r   @ 0x00400144 — FECS-side interrupt mask
- * Non-zero values here name the fault class — the next iteration
- * knows whether it's looking at a method-decode error, an SM trap,
- * or a pipeline drain that just didn't release the sema. */
-static void ga10b_dump_gr_state(const char *tag)
+/* GR-engine state dump used by every dispatch-timeout path
+ * (#779 / #788 diagnostic). Surfaces the actual fault class that
+ * wedged the dispatch instead of leaving "PBDMA advanced but sema
+ * didn't fire" to guesswork.
+ *
+ * Split into per-layer helpers below — each one fronts a logically
+ * distinct set of registers (top-level GR / FECS sub-status / FB
+ * MMU fault / PBDMA), with the register offsets + meaning
+ * documented next to the helper that reads them. `ga10b_dump_gr_state`
+ * just calls them in order on the timeout path.
+ *
+ * Non-zero values name the fault class. Stash the decoded payload
+ * in the issue tracker (#779 / #788) so the next investigator
+ * inherits the trail.
+ */
+
+/* Layer 1: top-level GR interrupt status. Discriminates between
+ * method/class faults (illegal_method, class_error), SM/GPC traps
+ * (gr_exception bits), and FECS-microcontroller failures
+ * (fecs_error_pending) — the FECS case is decoded further in layer
+ * 2 below. */
+static void dump_gr_top_level(const char *tag)
 {
     uart_printf("[%s]   gr_intr=0x%08lx gr_exception=0x%08lx "
                 "class_error=0x%08lx trapped_addr=0x%08lx fe_hww_esr=0x%08lx "
@@ -1789,6 +1797,85 @@ static void ga10b_dump_gr_state(const char *tag)
                 (unsigned long)bar0_r32(0x00400704u),
                 (unsigned long)bar0_r32(0x00404000u),
                 (unsigned long)bar0_r32(0x00400144u));
+}
+
+/* Layer 2: FECS host-side status + the full ctxsw mailbox bank.
+ * `fecs_host_int_status` decodes WHICH FECS sub-class failed
+ * (fault_during_ctxsw / watchdog / umimp_method / ecc / ...).
+ * Mailbox 6 holds the FECS-firmware error code for ctxsw_intr0;
+ * adjacent mailboxes sometimes carry companion payload. */
+static void dump_fecs_state(const char *tag)
+{
+    uart_printf("[%s]   fecs_host_int=0x%08lx ctxsw_mb6=0x%08lx "
+                "current_ctx=0x%08lx mb0=0x%08lx mb1=0x%08lx\n",
+                tag,
+                (unsigned long)bar0_r32(0x00409c18u),
+                (unsigned long)bar0_r32(0x00409818u),
+                (unsigned long)bar0_r32(0x00409b00u),
+                (unsigned long)bar0_r32(0x00409040u),
+                (unsigned long)bar0_r32(0x00409044u));
+    /* Mailbox 6 carries error codes for ctxsw_intr0; the others
+     * may carry companion payload for `fault_during_ctxsw` or
+     * `watchdog_active` cases. (#788 — the captured `mb6=0x77`
+     * code isn't documented in our nvgpu reference cache so
+     * dumping the full set gives us more context to correlate
+     * against vendor source.) */
+    uart_printf("[%s]   ctxsw_mb[0..7]="
+                "0x%08lx 0x%08lx 0x%08lx 0x%08lx "
+                "0x%08lx 0x%08lx 0x%08lx 0x%08lx\n",
+                tag,
+                (unsigned long)bar0_r32(0x00409800u),
+                (unsigned long)bar0_r32(0x00409804u),
+                (unsigned long)bar0_r32(0x00409808u),
+                (unsigned long)bar0_r32(0x0040980cu),
+                (unsigned long)bar0_r32(0x00409810u),
+                (unsigned long)bar0_r32(0x00409814u),
+                (unsigned long)bar0_r32(0x00409818u),
+                (unsigned long)bar0_r32(0x0040981cu));
+}
+
+/* Layer 2c: FB MMU fault info. `fault_during_ctxsw` (#788 working
+ * theory) implies a GMMU walk failed during context save/restore.
+ * These registers capture the faulting VA + the engine/client
+ * that issued the access, decoded per
+ * `~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_fb_ga10b.h`:
+ *   fault_addr_lo/hi @ 0x100e4c/50 — faulting VA (bits[12:31] low + 32 hi)
+ *   fault_inst_lo/hi @ 0x100e54/58 — faulting inst_block pa + engine_id
+ *   fault_info       @ 0x100e5c    — fault_type/client/access_type/valid
+ *   fault_status     @ 0x100e60    — dropped/replayed flags
+ * `fault_info.valid` (bit 31) indicates whether the fault info is
+ * meaningful; expect 0 if no MMU fault is latched. */
+static void dump_mmu_fault(const char *tag)
+{
+    uart_printf("[%s]   fb_fault_addr=0x%08lx_%08lx "
+                "inst=0x%08lx_%08lx info=0x%08lx status=0x%08lx\n",
+                tag,
+                (unsigned long)bar0_r32(0x00100e50u),  /* addr_hi */
+                (unsigned long)bar0_r32(0x00100e4cu),  /* addr_lo */
+                (unsigned long)bar0_r32(0x00100e58u),  /* inst_hi */
+                (unsigned long)bar0_r32(0x00100e54u),  /* inst_lo */
+                (unsigned long)bar0_r32(0x00100e5cu),  /* info    */
+                (unsigned long)bar0_r32(0x00100e60u)); /* status  */
+}
+
+/* Layer 3: PBDMA status. Confirms whether PBDMA itself faulted or
+ * is just stalled waiting for GR to recover (the latter is the
+ * #788 pattern). Tegra GA10B has a single host engine so the
+ * PBDMA index is 0. */
+static void dump_pbdma_state(const char *tag)
+{
+    uart_printf("[%s]   pbdma_intr_0=0x%08lx pbdma_status_sched=0x%08lx\n",
+                tag,
+                (unsigned long)bar0_r32(0x00040108u),
+                (unsigned long)bar0_r32(0x00040088u));
+}
+
+static void ga10b_dump_gr_state(const char *tag)
+{
+    dump_gr_top_level(tag);
+    dump_fecs_state(tag);
+    dump_mmu_fault(tag);
+    dump_pbdma_state(tag);
 }
 
 int ga10b_submit_and_poll(struct ga10b_bringup *b,

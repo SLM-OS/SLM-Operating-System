@@ -7,7 +7,9 @@
 
 #include "ga10b_bringup.h"
 #include "ga10b_channel_handoff.h"
+#include "uart.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -114,6 +116,36 @@ uint32_t ga10b_build_ce_memcpy_pushbuffer(uint32_t *pb,
     return i;
 }
 
+/* Sticky "channel went into a FECS-error wedge on a prior CE submit"
+ * flag. Once `gr_intr & fecs_error_pending` latches, PBDMA refuses
+ * to advance the channel — every subsequent CE submit times out
+ * the same way (2 s × thousands of remaining chunks during a Qwen-
+ * scale W3 staging pass = hours of stuck wall time). The latch lets
+ * caller loops bail in O(1) so a single wedge stops the run instead
+ * of snowballing. #788 investigation.
+ *
+ * Reset is exposed for a future recovery path that re-arms the
+ * channel after a real reset; no caller in-tree clears the flag
+ * today because we don't have a channel-reset implementation yet. */
+static atomic_bool g_ce_channel_dead = false;
+
+bool ga10b_ce_channel_dead(void)
+{
+    return atomic_load_explicit(&g_ce_channel_dead, memory_order_relaxed);
+}
+
+/* Intentionally unused in-tree today. Exposed for the future
+ * channel-recovery path tracked in #788 (the planned "patch the
+ * channel inst block to point at a freshly-allocated ctxsw save
+ * buffer" or "rebuild the low-VA GMMU tree" fix would clear the
+ * latch after re-arming the channel). Kept in the build despite
+ * being unused so a future cleanup pass that strips unused symbols
+ * stops to read #788 first. */
+void ga10b_ce_channel_dead_reset(void)
+{
+    atomic_store_explicit(&g_ce_channel_dead, false, memory_order_relaxed);
+}
+
 int ga10b_ce_memcpy(struct ga10b_bringup *b,
                     uint64_t src_gpu_va,
                     uint64_t dst_gpu_va,
@@ -122,6 +154,12 @@ int ga10b_ce_memcpy(struct ga10b_bringup *b,
     if (b == NULL ||
         bytes == 0 || bytes > GA10B_CE_MAX_BYTES_PER_LAUNCH ||
         src_gpu_va == 0 || dst_gpu_va == 0) {
+        return -1;
+    }
+    /* Short-circuit if a prior submit on this channel wedged.
+     * Without this, a single wedge during W3 staging spawns
+     * thousands of 2-second timeouts on a single load. */
+    if (ga10b_ce_channel_dead()) {
         return -1;
     }
     const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
@@ -144,7 +182,22 @@ int ga10b_ce_memcpy(struct ga10b_bringup *b,
      * `semaphore_gpu_va` (used by the GPU) and at `semaphore_phys`
      * (identity-mapped for CPU polling). `ga10b_submit_and_poll`
      * polls the phys-side address. */
-    return ga10b_submit_and_poll(b, pb, dwords,
-                                  h->semaphore_phys, payload,
-                                  /*error_phase=*/-1, "ce-memcpy");
+    int rc = ga10b_submit_and_poll(b, pb, dwords,
+                                    h->semaphore_phys, payload,
+                                    /*error_phase=*/-1, "ce-memcpy");
+    if (rc != 0) {
+        /* Latch the channel as dead. Once PBDMA stops advancing
+         * GP_GET (FECS_ERROR latched, or any other wedge cause)
+         * the only recovery path is a full channel re-arm, which
+         * we don't implement today. Bailing fast keeps a single
+         * wedge from snowballing into thousands of 2 s timeouts.
+         * #788 — captured fault info is dumped by the
+         * `ga10b_dump_gr_state` call inside `submit_and_poll`. */
+        atomic_store_explicit(&g_ce_channel_dead, true,
+                              memory_order_relaxed);
+        uart_puts("[ce-memcpy] latching channel as dead — "
+                  "subsequent CE submits will short-circuit. "
+                  "Power-cycle to recover.\n");
+    }
+    return rc;
 }
