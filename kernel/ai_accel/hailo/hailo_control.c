@@ -231,6 +231,18 @@ static void control_msi_handler(void *ctx)
         __atomic_store_n(&control_msi_pending, 1, __ATOMIC_RELEASE);
     }
 
+    /* FW_NOTIFICATION_IRQ: fw posted an event to the D2H
+     * notification buffer at BAR4+0x0c80. Mirrors Linux's
+     * firmware_notification_irq_handler dispatch. The handler is
+     * ISR-safe (single read + single ACK, no udelay/no loop); if
+     * fw has more events queued it re-raises this bit and the next
+     * MSI fires us again. Without this, the bit gets W1C'd above
+     * and the buffer is never read — every notification (ECC,
+     * CONTEXT_SWITCH_RUN_TIME_ERROR, etc.) is dropped silently. */
+    if (istatus & HAILO_BCS_ISTATUS_HOST_FW_NOTIFICATION_BIT) {
+        hailo_fw_handle_d2h_notification(true);
+    }
+
     /* IRQ trace: emit one line per handler invocation with the
      * snapshotted ISTATUS + per-channel aggregates. SPI is reported
      * as 0 (the platform shim doesn't currently pass it through
@@ -279,6 +291,15 @@ static int wait_for_response(uint32_t timeout_us)
         uint32_t istatus = hailo_platform->read32(
             HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST);
         if (istatus != 0) {
+            /* Handle FW_NOTIFICATION BEFORE the W1C below. If a
+             * notification was posted while we were polling for a
+             * FW_CONTROL response, the W1C clears the bit and Linux's
+             * model has nothing to re-raise it on (notifications are
+             * edge-triggered per buffer state). Reading + ACKing here
+             * drains the buffer so fw can post the next event. */
+            if (istatus & HAILO_BCS_ISTATUS_HOST_FW_NOTIFICATION_BIT) {
+                hailo_fw_handle_d2h_notification(false);
+            }
             hailo_platform->write32(
                 HAILO_BAR_CONFIG, HAILO_BCS_ISTATUS_HOST, istatus);
             if (istatus & HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT) {
@@ -442,6 +463,14 @@ void hailo_control_drain_pending_irqs(const char *label)
                 HAILO_BCS_DESTINATION_INTERRUPT_PER_CHANNEL,
                 dst_pre);
         }
+    }
+
+    /* Read+ACK the D2H notification buffer BEFORE the aggregate
+     * W1C below. If a notification was posted, clearing the bit
+     * without reading the buffer drops the event silently —
+     * matches the wait_for_response polling-fallback fix. */
+    if (istatus_pre & HAILO_BCS_ISTATUS_HOST_FW_NOTIFICATION_BIT) {
+        hailo_fw_handle_d2h_notification(false);
     }
 
     uint32_t to_clear = istatus_pre & ~HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT;

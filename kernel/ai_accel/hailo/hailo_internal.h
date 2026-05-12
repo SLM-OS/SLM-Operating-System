@@ -70,6 +70,40 @@ void hailo_fw_dump_logs(void);
 void hailo_fw_dump_logs_hex(uint32_t max_bytes);
 
 /*
+ * Single-shot D2H notification reader for the IRQ path. Reads the
+ * notification buffer header, prints a trace summary, and ACKs by
+ * writing zero to the in_use field. Mirrors Linux's
+ * firmware_notification_irq_handler shape: one read + one ACK per
+ * IRQ firing — no loop, no delay. If fw has more events queued, it
+ * re-raises FW_NOTIFICATION_IRQ and this runs again on the next
+ * MSI dispatch.
+ *
+ * Safe to call from ISR context (the underlying read/write/uart_printf
+ * are all ISR-safe under SLM-OS's IRQ-disable-only UART lock on Pi 5
+ * / Jetson; see kernel/CLAUDE.md "UART Lock on Pi 5 / Jetson"). Do
+ * NOT replace with `hailo_fw_drain_d2h_notifications(N)` from ISR —
+ * that helper sleeps 5 ms between events.
+ *
+ * `from_irq` distinguishes ISR vs polled-fallback delivery for the
+ * diagnostic counters (see hailo_irq_delivery_counts).
+ */
+void hailo_fw_handle_d2h_notification(bool from_irq);
+
+/*
+ * Diagnostic counters: how many notifications were handled via the
+ * MSI ISR vs the polled fallback (wait_for_response /
+ * hailo_control_drain_pending_irqs) since boot. Wire-driven debug —
+ * if `irq` stays at 0 across a workload that produces ECCs or async
+ * fw signals, the MSI delivery path is silently broken and we're
+ * back to losing notifications.
+ */
+struct hailo_irq_delivery_counts {
+    uint32_t notification_irq;
+    uint32_t notification_polled;
+};
+void hailo_irq_delivery_get_counts(struct hailo_irq_delivery_counts *out);
+
+/*
  * #682 hypothesis-6 diagnostic. Reads PCIe Link Status (cap+0x12)
  * and Link Capabilities (cap+0x0C) on the Hailo endpoint and prints
  * trained-vs-max speed/width with the supplied label. Used to

@@ -1603,8 +1603,19 @@ static int cmd_hailo(int argc, char *argv[])
         return 0;
     }
 
-    /* Default: one-line status. */
-    shell_printf("hailo: state=%s\n", hailo_state_str(hailo_get_state()));
+    /* Default: status + IRQ-delivery counts. The counts are the
+     * empirical proof that FW_NOTIFICATION_IRQ is reaching us as
+     * intended after the IRQ-driven notification handler landed —
+     * if `notification_irq=0 polled=0` after a workload that should
+     * have produced ECCs or async fw signals, the MSI delivery
+     * path is silently broken. */
+    struct hailo_irq_delivery_counts counts;
+    hailo_irq_delivery_get_counts(&counts);
+    shell_printf("hailo: state=%s irq.notification=%u "
+                 "polled.notification=%u\n",
+                 hailo_state_str(hailo_get_state()),
+                 (unsigned)counts.notification_irq,
+                 (unsigned)counts.notification_polled);
     return 0;
 }
 
