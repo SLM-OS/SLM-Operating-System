@@ -1,0 +1,1 @@
+{"type":"header","format_version":1,"hailort_version":"4.23.0","fw_version":"4.23.0","capture_host":"qemu-x86_64-ubuntu24.04","slmos_base_sha":"0000000000000000000000000000000000000000","capture_started_at":"2026-05-12T00:00:00Z","notes":"empty fixture for smoke testing — first read triggers HAILO_RE_CORPUS_EXTEND"}
