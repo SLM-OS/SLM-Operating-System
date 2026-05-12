@@ -137,6 +137,55 @@ static void test_kbuf_free_null_is_noop(void)
     TEST_ASSERT_EQUAL_UINT(region_before, kbuf_region_count());
 }
 
+/* Slow-path: same alloc/free shape as the fast-path test, but with
+ * `kbuf_test_set_force_slow_path(true)` so `try_fast_path` is
+ * short-circuited and every allocation lands on the chunked
+ * VMM-remap path. Verifies that the slow-path code (which doesn't
+ * naturally trigger on QEMU because PMM is never fragmented enough
+ * here) round-trips a multi-chunk allocation correctly. */
+static void test_kbuf_slow_path_round_trip(void)
+{
+    size_t region_before = kbuf_region_count();
+    size_t bytes_before  = kbuf_total_bytes_allocated();
+
+    kbuf_test_set_force_slow_path(true);
+
+    /* 6 MB → 3 × 2 MB chunks. Each comes from a separate
+     * `pmm_alloc_pages(512)` and is mapped at a successive 2 MB
+     * slot in the kbuf VA window. */
+    size_t want_bytes = 6u * 1024u * 1024u;
+    void *p = kbuf_alloc(want_bytes);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_TRUE(kbuf_owns_va(p));
+    TEST_ASSERT_EQUAL_UINT(region_before + 1u, kbuf_region_count());
+
+    /* Pointer must be in the dedicated kbuf VA window — the fast
+     * path's identity-mapped VAs would be far below this. */
+    TEST_ASSERT_TRUE((uintptr_t)p >= (uintptr_t)KBUF_VA_BASE);
+    TEST_ASSERT_TRUE((uintptr_t)p <  (uintptr_t)KBUF_VA_LIMIT);
+
+    /* Write across every chunk boundary; if the VMM mappings are
+     * wrong, the second-or-third chunk access will trap. */
+    volatile uint8_t *p8 = (volatile uint8_t *)p;
+    p8[0]                          = 0xA1u;
+    p8[KBUF_CHUNK_BYTES]           = 0xB2u;
+    p8[2u * KBUF_CHUNK_BYTES]      = 0xC3u;
+    p8[3u * KBUF_CHUNK_BYTES - 1u] = 0xD4u;
+    TEST_ASSERT_EQUAL_UINT8(0xA1u, p8[0]);
+    TEST_ASSERT_EQUAL_UINT8(0xB2u, p8[KBUF_CHUNK_BYTES]);
+    TEST_ASSERT_EQUAL_UINT8(0xC3u, p8[2u * KBUF_CHUNK_BYTES]);
+    TEST_ASSERT_EQUAL_UINT8(0xD4u, p8[3u * KBUF_CHUNK_BYTES - 1u]);
+
+    kbuf_free(p);
+    TEST_ASSERT_FALSE(kbuf_owns_va(p));
+    TEST_ASSERT_EQUAL_UINT(region_before, kbuf_region_count());
+    TEST_ASSERT_EQUAL_UINT64(bytes_before, kbuf_total_bytes_allocated());
+
+    /* Restore default so subsequent tests get the production-shaped
+     * fast/slow split. */
+    kbuf_test_set_force_slow_path(false);
+}
+
 /* `kbuf_owns_va` accurately reflects table state: false for NULL,
  * false for stack pointers, false for PMM-but-not-kbuf pointers,
  * true for a live kbuf allocation, false again after free. */
@@ -172,6 +221,7 @@ int test_suite_kbuf(void)
     RUN_TEST(test_kbuf_counters_stable_across_many_allocs);
     RUN_TEST(test_kbuf_zero_size_returns_null);
     RUN_TEST(test_kbuf_free_null_is_noop);
+    RUN_TEST(test_kbuf_slow_path_round_trip);
     RUN_TEST(test_kbuf_owns_va_discriminates);
 
     return UnityEnd();

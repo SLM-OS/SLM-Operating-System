@@ -121,4 +121,16 @@ bool  kbuf_owns_va(const void *va);
 size_t kbuf_total_bytes_allocated(void);
 size_t kbuf_region_count(void);
 
+/*
+ * Test-only: force every `kbuf_alloc` to skip the fast path and use
+ * the chunked VMM-remap path. Lets the QEMU unit tests exercise the
+ * slow path without needing the post-kexec PMM-fragmentation pattern
+ * that triggers it in production. Caller is responsible for clearing
+ * the flag after the test.
+ *
+ * Defined in `kbuf.c`; not declared inside `#ifdef TEST` because the
+ * kernel and test builds share the same kbuf.o.
+ */
+void kbuf_test_set_force_slow_path(bool on);
+
 #endif /* SLM_OS_KBUF_H */

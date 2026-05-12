@@ -44,6 +44,34 @@
  * cover ~2× the largest model we expect to load. */
 #define KBUF_MAX_CHUNKS_PER_REGION    2048u
 
+/*
+ * Failure reasons captured by `try_slow_path` so `kbuf_alloc` can
+ * print the diagnostic AFTER releasing g_lock. Keeps `uart_printf`
+ * out of the critical section — important because on QEMU /
+ * non-NC-memory platforms the UART driver takes its own spinlock,
+ * and we'd otherwise extend the global lock-order chain.
+ *
+ * Single-writer (try_slow_path under g_lock), single-reader
+ * (kbuf_alloc immediately after the unlock). Storage doesn't need
+ * separate synchronization since both ends sit under the same
+ * lock-acquire/release pair.
+ */
+enum kbuf_slow_err {
+    KBUF_SLOW_OK = 0,
+    KBUF_SLOW_OUT_OF_VA,
+    KBUF_SLOW_PMM_EXHAUSTION,
+    KBUF_SLOW_VMM_MAP_FAIL,
+};
+
+struct kbuf_slow_diag {
+    enum kbuf_slow_err err;
+    uint32_t failed_chunk;
+    uint32_t total_chunks;
+    uint64_t failed_va;
+    uint64_t failed_phys;
+    int      vmm_rc;
+};
+
 struct kbuf_region {
     /* `va_base == 0` means slot free. */
     uint64_t va_base;
@@ -87,6 +115,15 @@ static size_t g_region_count;
  */
 static spinlock_t g_lock = SPINLOCK_INIT;
 
+/*
+ * Test-only knob: when set, `try_fast_path` returns NULL
+ * unconditionally so `kbuf_alloc` always falls through to the
+ * chunked VMM-remap path. Lets the QEMU unit tests exercise the
+ * slow path without needing the post-kexec PMM-fragmentation that
+ * triggers it in production. Default OFF.
+ */
+static bool g_force_slow_path = false;
+
 /* ------------------------------------------------------------------ */
 /* Internal helpers                                                   */
 /* ------------------------------------------------------------------ */
@@ -124,10 +161,18 @@ static struct kbuf_region *find_region_by_va_locked(uint64_t va)
  *
  * On success: r->n_chunks stays 0, phys_single is set, va_base and
  * va_end mirror the identity-mapped VA range.
+ *
+ * If the test knob `g_force_slow_path` is set, returns NULL without
+ * even calling PMM — used by `test_kbuf.c` to exercise the chunked
+ * path under QEMU where fragmentation pressure never naturally
+ * triggers it.
  */
 static void *try_fast_path(struct kbuf_region *r, size_t total_bytes)
 {
-    size_t total_pages = total_bytes / 4096u;
+    if (g_force_slow_path) {
+        return NULL;
+    }
+    size_t total_pages = total_bytes / PAGE_SIZE;
     void *p = pmm_alloc_pages(total_pages);
     if (p == NULL) {
         return NULL;
@@ -146,9 +191,13 @@ static void *try_fast_path(struct kbuf_region *r, size_t total_bytes)
  * blocks, frees allocated chunks).
  *
  * Returns the base VA on success, NULL otherwise. On failure the
- * caller's table slot is left zeroed so it's reusable.
+ * caller's table slot is left zeroed so it's reusable. The reason
+ * is written into `*diag` so the caller can `uart_printf` it AFTER
+ * releasing g_lock (avoids `g_lock → uart_lock` lock-order edge on
+ * non-NC platforms).
  */
-static void *try_slow_path(struct kbuf_region *r, size_t total_bytes)
+static void *try_slow_path(struct kbuf_region *r, size_t total_bytes,
+                            struct kbuf_slow_diag *diag)
 {
     uint32_t n_chunks = (uint32_t)(total_bytes / KBUF_CHUNK_BYTES);
     if (n_chunks == 0 || n_chunks > KBUF_MAX_CHUNKS_PER_REGION) {
@@ -157,18 +206,39 @@ static void *try_slow_path(struct kbuf_region *r, size_t total_bytes)
     /* Reserve VA range. The bump-allocator never recycles, so we
      * just advance once we commit to this request. */
     if (g_next_va + total_bytes > KBUF_VA_LIMIT) {
-        uart_puts("[kbuf] out of VA window — slow path refused\n");
+        diag->err          = KBUF_SLOW_OUT_OF_VA;
+        diag->total_chunks = n_chunks;
         return NULL;
     }
     uint64_t va_base = g_next_va;
+
+    /* Ensure every L1 entry the request spans has an L2 table
+     * installed. vmm_init only pre-populates the identity-map
+     * L1 slots; the kbuf VA window sits above that and would
+     * otherwise hit "no L2 table for VA..." on the first chunk.
+     * Idempotent — repeat allocations into the same 1 GB span
+     * skip the alloc. */
+    for (uint64_t off = 0; off < total_bytes;
+         off += (1UL << 30) /* 1 GB L1 stride */) {
+        if (vmm_ensure_kernel_l2_table(va_base + off) != 0) {
+            diag->err          = KBUF_SLOW_VMM_MAP_FAIL;
+            diag->failed_chunk = 0;
+            diag->total_chunks = n_chunks;
+            diag->failed_va    = va_base + off;
+            diag->failed_phys  = 0;
+            diag->vmm_rc       = -1;
+            return NULL;
+        }
+    }
 
     /* Allocate + map every chunk. On any failure, unmap + free
      * what's been installed so far. */
     for (uint32_t i = 0; i < n_chunks; i++) {
         void *phys = pmm_alloc_pages(KBUF_CHUNK_PAGES);
         if (phys == NULL) {
-            uart_printf("[kbuf] slow-path PMM exhaustion at chunk %u/%u\n",
-                        (unsigned)i, (unsigned)n_chunks);
+            diag->err          = KBUF_SLOW_PMM_EXHAUSTION;
+            diag->failed_chunk = i;
+            diag->total_chunks = n_chunks;
             for (uint32_t j = 0; j < i; j++) {
                 (void)vmm_unmap_block(va_base + (uint64_t)j * KBUF_CHUNK_BYTES);
                 pmm_free_pages((void *)(uintptr_t)r->phys_chunks[j],
@@ -180,9 +250,12 @@ static void *try_slow_path(struct kbuf_region *r, size_t total_bytes)
         int rc = vmm_map_block(chunk_va, (uint64_t)(uintptr_t)phys,
                                VMM_FLAGS_KERNEL_DATA);
         if (rc != 0) {
-            uart_printf("[kbuf] vmm_map_block(0x%lx -> 0x%lx) rc=%d\n",
-                        (unsigned long)chunk_va,
-                        (unsigned long)(uintptr_t)phys, rc);
+            diag->err          = KBUF_SLOW_VMM_MAP_FAIL;
+            diag->failed_chunk = i;
+            diag->total_chunks = n_chunks;
+            diag->failed_va    = chunk_va;
+            diag->failed_phys  = (uint64_t)(uintptr_t)phys;
+            diag->vmm_rc       = rc;
             pmm_free_pages(phys, KBUF_CHUNK_PAGES);
             for (uint32_t j = 0; j < i; j++) {
                 (void)vmm_unmap_block(va_base + (uint64_t)j * KBUF_CHUNK_BYTES);
@@ -212,6 +285,7 @@ void *kbuf_alloc(size_t bytes)
         return NULL;
     }
     size_t total_bytes = round_up_chunk(bytes);
+    struct kbuf_slow_diag diag = { .err = KBUF_SLOW_OK };
 
     irq_flags_t flags = spin_lock_irqsave(&g_lock);
 
@@ -227,7 +301,7 @@ void *kbuf_alloc(size_t bytes)
      * common case where the buddy allocator can satisfy. */
     void *p = try_fast_path(r, total_bytes);
     if (p == NULL) {
-        p = try_slow_path(r, total_bytes);
+        p = try_slow_path(r, total_bytes, &diag);
     }
     if (p != NULL) {
         g_total_bytes_allocated += total_bytes;
@@ -238,6 +312,39 @@ void *kbuf_alloc(size_t bytes)
     }
 
     spin_unlock_irqrestore(&g_lock, flags);
+
+    /* Now that g_lock is released, surface any deferred diagnostic
+     * from try_slow_path. Logging here keeps `uart_printf` out of
+     * the critical section (matters on platforms where the UART
+     * driver has its own spinlock). */
+    if (p == NULL) {
+        switch (diag.err) {
+        case KBUF_SLOW_OUT_OF_VA:
+            uart_puts("[kbuf] out of VA window — slow path refused\n");
+            break;
+        case KBUF_SLOW_PMM_EXHAUSTION:
+            uart_printf("[kbuf] slow-path PMM exhaustion at chunk %u/%u\n",
+                        (unsigned)diag.failed_chunk,
+                        (unsigned)diag.total_chunks);
+            break;
+        case KBUF_SLOW_VMM_MAP_FAIL:
+            uart_printf("[kbuf] vmm_map_block(0x%lx -> 0x%lx) rc=%d "
+                        "(chunk %u/%u)\n",
+                        (unsigned long)diag.failed_va,
+                        (unsigned long)diag.failed_phys,
+                        diag.vmm_rc,
+                        (unsigned)diag.failed_chunk,
+                        (unsigned)diag.total_chunks);
+            break;
+        case KBUF_SLOW_OK:
+            /* Reached only when `try_fast_path` returned NULL and
+             * `try_slow_path` was never called (e.g., total_bytes
+             * misaligned past KBUF_MAX_CHUNKS_PER_REGION). The
+             * fast-path failure is informationally sufficient on
+             * its own; nothing more to print. */
+            break;
+        }
+    }
     return p;
 }
 
@@ -259,7 +366,7 @@ void kbuf_free(void *va)
 
     if (r->n_chunks == 0) {
         /* Fast-path region: single PMM allocation. */
-        pmm_free_pages(r->phys_single, r->total_bytes / 4096u);
+        pmm_free_pages(r->phys_single, r->total_bytes / PAGE_SIZE);
     } else {
         for (uint32_t i = 0; i < r->n_chunks; i++) {
             (void)vmm_unmap_block(r->va_base + (uint64_t)i * KBUF_CHUNK_BYTES);
@@ -308,4 +415,18 @@ size_t kbuf_region_count(void)
     size_t v = g_region_count;
     spin_unlock_irqrestore(&g_lock, flags);
     return v;
+}
+
+/*
+ * Test-only knob (declared in kbuf.h). Flips `g_force_slow_path`,
+ * which makes `try_fast_path` short-circuit to NULL so every
+ * `kbuf_alloc` falls through to the chunked VMM-remap path. Used
+ * by `test_kbuf.c` to exercise the slow path under QEMU. Not
+ * wired to any production caller.
+ */
+void kbuf_test_set_force_slow_path(bool on)
+{
+    irq_flags_t flags = spin_lock_irqsave(&g_lock);
+    g_force_slow_path = on;
+    spin_unlock_irqrestore(&g_lock, flags);
 }

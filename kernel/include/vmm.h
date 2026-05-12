@@ -303,6 +303,22 @@ void vmm_init(void);
 int vmm_map_block(uint64_t virt, uint64_t phys, uint32_t flags);
 
 /*
+ * Lazy-allocate an L2 page-table for the L1 entry covering `virt`
+ * in the kernel address space, if one isn't already installed.
+ * Idempotent. Required before `vmm_map_block` calls into a VA range
+ * that vmm_init didn't pre-populate (e.g., the kbuf chunked-alloc
+ * window — see #789).
+ *
+ * Returns 0 if the L1 entry is now (or was already) a table
+ * descriptor, -1 if the L1 entry holds a 1 GB block descriptor
+ * (incompatible with 2 MB sub-mappings) or PMM is exhausted.
+ *
+ * Concurrency: takes `vmm_lock` internally; callers must NOT hold
+ * vmm_lock when calling.
+ */
+int vmm_ensure_kernel_l2_table(uint64_t virt);
+
+/*
  * Unmap a 2MB block from the kernel address space.
  *
  * @virt: Virtual address (must be 2MB aligned)

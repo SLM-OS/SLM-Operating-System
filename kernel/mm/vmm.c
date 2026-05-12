@@ -414,6 +414,84 @@ static int vmm_unmap_block_locked(uint64_t virt)
     return 0;
 }
 
+/*
+ * Lazy-allocate an L2 table for the L1 entry covering `virt` in the
+ * kernel page-table tree, if one isn't already installed. Idempotent;
+ * returns 0 if the L1 entry was already a TABLE descriptor or if a
+ * new L2 was successfully installed, -1 if the L1 entry holds a
+ * 1 GB block (incompatible with 2 MB sub-mappings) or PMM is
+ * exhausted.
+ *
+ * Motivation (#789): the kbuf chunked-allocation path maps fresh
+ * 2 MB blocks into a kernel VA window (`KBUF_VA_BASE` onwards) that
+ * sits above the identity-mapped DRAM range, so vmm_init never
+ * allocated L2 tables for it. Without this lazy-install step,
+ * `vmm_map_block` would error out on every chunk with "no L2 table
+ * for VA 0x...".
+ *
+ * Concurrency: takes `vmm_lock` internally. Callers must NOT hold
+ * vmm_lock when calling.
+ */
+int vmm_ensure_kernel_l2_table(uint64_t virt)
+{
+    if (!vmm_state.initialized) {
+        ERROR("vmm_ensure_kernel_l2_table: VMM not initialized");
+        return -1;
+    }
+
+    uint64_t l1_idx = L1_INDEX(virt);
+    irq_flags_t flags_save = spin_lock_irqsave(&vmm_lock);
+
+    uint64_t l1_entry = l1_table[l1_idx];
+    uint64_t l1_type  = l1_entry & PTE_TYPE_MASK;
+    if (l1_type == PTE_TYPE_TABLE) {
+        spin_unlock_irqrestore(&vmm_lock, flags_save);
+        return 0;  /* L2 already installed */
+    }
+    if (l1_type != PTE_TYPE_INVALID) {
+        /* L1 holds a 1 GB block (e.g. inside identity-mapped DRAM).
+         * 2 MB sub-mapping is impossible without first un-blocking. */
+        spin_unlock_irqrestore(&vmm_lock, flags_save);
+        ERROR("vmm_ensure_kernel_l2_table: L1[%lu] is a block descriptor",
+              l1_idx);
+        return -1;
+    }
+
+    /* Allocate + zero a new L2 table, install it as a TABLE
+     * descriptor. The L2 entries themselves are all INVALID; the
+     * subsequent `vmm_map_block` calls fill them in. Cache-clean
+     * the table and the L1 entry write so the MMU walker (which
+     * may bypass the data cache) sees the populated descriptor. */
+    void *new_l2 = pmm_alloc_pages(1);
+    if (new_l2 == NULL) {
+        spin_unlock_irqrestore(&vmm_lock, flags_save);
+        ERROR("vmm_ensure_kernel_l2_table: PMM exhausted");
+        return -1;
+    }
+    for (size_t i = 0; i < ENTRIES_PER_TABLE; i++) {
+        ((uint64_t *)new_l2)[i] = 0;
+    }
+    cache_clean_range(new_l2, TABLE_SIZE);
+    l1_table[l1_idx] = make_table_desc((uint64_t)(uintptr_t)new_l2);
+    cache_clean_range(&l1_table[l1_idx], sizeof(uint64_t));
+
+    /* Invalidate any speculative walk that cached the prior INVALID
+     * L1 entry. `tlbi vaae1is` against any address in the L1's
+     * 1 GB span flushes the relevant walk-cache entries. */
+    __asm__ volatile(
+        "dsb ishst\n"
+        "tlbi vaae1is, %0\n"
+        "dsb ish\n"
+        "isb\n"
+        :
+        : "r"(virt >> 12)
+        : "memory"
+    );
+
+    spin_unlock_irqrestore(&vmm_lock, flags_save);
+    return 0;
+}
+
 int vmm_map_block(uint64_t virt, uint64_t phys, uint32_t flags)
 {
     if (!vmm_state.initialized) {
