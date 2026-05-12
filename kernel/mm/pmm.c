@@ -464,9 +464,55 @@ int pmm_carve_reserves(uintptr_t start, uintptr_t end,
  * cap grows in the future, the worst-case ~1 KB stack footprint per
  * call would otherwise scale with it.
  */
-static uintptr_t        pmm_split_starts[DTB_MAX_MEMRESERVES + 1];
-static uintptr_t        pmm_split_ends  [DTB_MAX_MEMRESERVES + 1];
-static dtb_memreserve_t pmm_split_rsv   [DTB_MAX_MEMRESERVES];
+/* User-supplied reserve slots. PMM init feeds these into the same
+ * `pmm_carve_reserves` pipeline as the firmware /memreserve/ entries,
+ * so runtime-discovered protected ranges (the canonical case: nvgpu
+ * inst block + GMMU page tables that survived kexec but live in
+ * physical pages SLM-OS would otherwise allocate from) get carved
+ * out before any page is published to the buddy. See
+ * `pmm_user_reserve_add` in pmm.h.
+ *
+ * Capacity sized for the Jetson kexec-handoff caller, which adds at
+ * most a handful of regions per boot. Sized to PMM_MAX_USER_RESERVES
+ * = 16 — generous for the current use case, leaves room for
+ * follow-on work (PDB-tree-walk-style enumeration) without revisiting
+ * the cap. */
+#define PMM_MAX_USER_RESERVES 16
+static dtb_memreserve_t pmm_user_reserves[PMM_MAX_USER_RESERVES];
+static size_t           pmm_n_user_reserves = 0;
+
+/* Scratch arrays are sized to fit the worst case = firmware reserves
+ * + user reserves, plus one extra slot for the split helper's own
+ * bookkeeping (matches the prior `DTB_MAX_MEMRESERVES + 1` rationale
+ * for `pmm_split_starts`/`pmm_split_ends`). */
+#define PMM_SPLIT_RSV_MAX  (DTB_MAX_MEMRESERVES + PMM_MAX_USER_RESERVES)
+static uintptr_t        pmm_split_starts[PMM_SPLIT_RSV_MAX + 1];
+static uintptr_t        pmm_split_ends  [PMM_SPLIT_RSV_MAX + 1];
+static dtb_memreserve_t pmm_split_rsv   [PMM_SPLIT_RSV_MAX];
+
+int pmm_user_reserve_add(uint64_t phys, uint64_t size)
+{
+    if (size == 0u) {
+        return -1;
+    }
+    if (pmm_n_user_reserves >= PMM_MAX_USER_RESERVES) {
+        return -1;
+    }
+    pmm_user_reserves[pmm_n_user_reserves].addr = phys;
+    pmm_user_reserves[pmm_n_user_reserves].size = size;
+    pmm_n_user_reserves++;
+    return 0;
+}
+
+size_t pmm_user_reserve_count(void)
+{
+    return pmm_n_user_reserves;
+}
+
+void pmm_user_reserve_reset(void)
+{
+    pmm_n_user_reserves = 0;
+}
 
 static void pmm_add_region_split(uintptr_t start, uintptr_t end)
 {
@@ -493,9 +539,22 @@ static void pmm_add_region_split(uintptr_t start, uintptr_t end)
     in_split = true;
 
     int n_rsv = dtb_get_memreserves(pmm_split_rsv, DTB_MAX_MEMRESERVES);
+    /* Append the user-registered reserves (e.g. GPU kexec handoff
+     * state — see `pmm_user_reserve_add`). The carve helper handles
+     * unsorted, overlapping, and out-of-region entries identically
+     * to firmware reserves, so the two lists can be concatenated
+     * without further bookkeeping. Bounded by PMM_SPLIT_RSV_MAX so
+     * the writes can never overrun `pmm_split_rsv[]`. */
+    for (size_t i = 0;
+         i < pmm_n_user_reserves && (size_t)n_rsv < PMM_SPLIT_RSV_MAX;
+         i++) {
+        pmm_split_rsv[n_rsv].addr = pmm_user_reserves[i].addr;
+        pmm_split_rsv[n_rsv].size = pmm_user_reserves[i].size;
+        n_rsv++;
+    }
     int n_out = pmm_carve_reserves(start, end, pmm_split_rsv, n_rsv,
                                    pmm_split_starts, pmm_split_ends,
-                                   DTB_MAX_MEMRESERVES + 1);
+                                   PMM_SPLIT_RSV_MAX + 1);
     for (int i = 0; i < n_out; i++) {
         pmm_add_region(pmm_split_starts[i], pmm_split_ends[i]);
     }

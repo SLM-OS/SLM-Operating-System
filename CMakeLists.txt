@@ -486,6 +486,11 @@ set(KERNEL_SOURCES
     # channel; no CPU-side phys arithmetic required, sidesteps the
     # GMMU walk-discovery failure observed post-kexec.
     $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_ce.c>
+    # Jetson: register the kexec'd channel's inst block as a PMM
+    # user-reserve before PMM init publishes pages, so nvgpu state
+    # surviving in DRAM doesn't get clobbered by SLM-OS kernel
+    # allocations. #788 root-cause fix.
+    $<$<STREQUAL:${PLATFORM},JETSON_ORIN_NANO>:kernel/gpu/nvidia/ga10b_handoff_reserve.c>
     # Jetson: full GSP platform shim — MMIO at GPU_BASE, unified memory
     # DMA, cache maintenance, firmware via .incbin. Replaces the old
     # nvidia_gsp_platform_stub.c now that CBB firewall is bypassed.
