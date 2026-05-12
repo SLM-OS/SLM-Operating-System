@@ -149,15 +149,19 @@ static int parse_key(json_cursor_t *c, char *out, size_t outlen)
     return 0;
 }
 
-/* parse_value: returns 0 on success. Fills exactly one of (str_out, int_out,
- * is_null). If is_null is non-NULL and value is `null`, sets *is_null=1.
- * Strings come back with simple escape handling for \" and \\. */
+/* parse_value: returns 0 on success consuming a JSON scalar from `c`.
+ * Sets *is_str / *is_int when the value is a string / integer (callers
+ * dispatch on these). Tokens `null`, `true`, `false` parse successfully
+ * but neither flag is set — callers naturally skip the field, which is
+ * the correct behavior since the corpus schema treats `null` for
+ * `validated_at_commit` etc. as "absent". Strings come back with
+ * simple escape handling for \" \\ \n \t. */
 static int parse_value(json_cursor_t *c,
                        char *str_out, size_t str_outlen,
                        int64_t *int_out,
-                       int *is_str, int *is_int, int *is_null, int *is_bool, int *bool_val)
+                       int *is_str, int *is_int)
 {
-    *is_str = *is_int = *is_null = *is_bool = 0;
+    *is_str = *is_int = 0;
     skip_ws(c);
     if (c->p >= c->end) return -1;
 
@@ -200,19 +204,14 @@ static int parse_value(json_cursor_t *c,
 
     if (c->end - c->p >= 4 && memcmp(c->p, "null", 4) == 0) {
         c->p += 4;
-        *is_null = 1;
         return 0;
     }
     if (c->end - c->p >= 4 && memcmp(c->p, "true", 4) == 0) {
         c->p += 4;
-        *is_bool = 1;
-        if (bool_val) *bool_val = 1;
         return 0;
     }
     if (c->end - c->p >= 5 && memcmp(c->p, "false", 5) == 0) {
         c->p += 5;
-        *is_bool = 1;
-        if (bool_val) *bool_val = 0;
         return 0;
     }
 
@@ -359,15 +358,14 @@ static int parse_op_line(const char *line, size_t linelen,
 
         char strbuf[512];
         int64_t intval = 0;
-        int is_str = 0, is_int = 0, is_null = 0, is_bool = 0, bool_val = 0;
+        int is_str = 0, is_int = 0;
         if (parse_value(&cur, strbuf, sizeof(strbuf),
-                        &intval, &is_str, &is_int, &is_null, &is_bool, &bool_val) != 0) {
+                        &intval, &is_str, &is_int) != 0) {
             set_err(errbuf, errlen, "bad value for key '%s'", key);
             return -1;
         }
 
         if (strcmp(key, "type") == 0 && is_str) {
-            copy_str(op->entry.source, sizeof(op->entry.source), "");
             if (strcmp(strbuf, "op") != 0) {
                 set_err(errbuf, errlen, "expected type='op', got '%s'", strbuf);
                 return -1;
@@ -485,9 +483,9 @@ static int parse_header_line(hailo_corpus_t *c,
 
         char strbuf[256];
         int64_t intval = 0;
-        int is_str = 0, is_int = 0, is_null = 0, is_bool = 0, bool_val = 0;
+        int is_str = 0, is_int = 0;
         if (parse_value(&cur, strbuf, sizeof(strbuf),
-                        &intval, &is_str, &is_int, &is_null, &is_bool, &bool_val) != 0) {
+                        &intval, &is_str, &is_int) != 0) {
             set_err(errbuf, errlen, "bad header value for '%s'", key);
             return -1;
         }

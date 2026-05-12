@@ -325,6 +325,11 @@ static void hailo8_realize(PCIDevice *pci_dev, Error **errp)
                       /*msi_per_vector_mask=*/ false,
                       &local_err);
     if (rc < 0) {
+        /* QEMU does not call .exit on a failed realize, so the corpus
+         * append handle would leak across repeated `device_add` attempts
+         * from the monitor. Tear it down explicitly here. */
+        hailo_corpus_free(s->corpus);
+        s->corpus = NULL;
         error_propagate(errp, local_err);
         return;
     }

@@ -6,13 +6,17 @@ qtest accelerator exposes a tiny text protocol that lets us program PCI
 config space, then directly read/write BAR memory addresses to exercise
 the device's MemoryRegionOps callbacks.
 
-Three scenarios mapped to the Phase 0.2 Definition of Done:
+Four scenarios mapped to the Phase 0.2 Definition of Done:
 
   1. empty corpus      → first BAR0 read produces HAILO_RE_CORPUS_EXTEND
                          and QEMU exits non-zero.
   2. hand-crafted hit  → BAR0 read at the corpus's recorded offset
                          returns the recorded value.
-  3. write divergence  → a write whose value differs from the corpus
+  3. shape divergence  → a write where the corpus expects a read produces
+                         HAILO_RE_CORPUS_DIVERGENCE with reason=
+                         op_shape_mismatch and the expected_* extension
+                         fields.
+  4. write divergence  → a write whose value differs from the corpus
                          produces HAILO_RE_CORPUS_DIVERGENCE and exit.
 
 Run:
