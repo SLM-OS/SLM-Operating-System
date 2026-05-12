@@ -28,14 +28,33 @@ concurrency:
 permissions:
   contents: read
 
-# ARM bare-metal toolchain version + extracted directory name, pinned
-# here so cache path / cache key / wget URL / PATH addition stay in
-# sync. ARM's developer site uses mixed case (`13.2.rel1` in URLs,
-# `13.2.Rel1` in extracted directory names) so the two-variable shape
-# is load-bearing.
+# ARM bare-metal toolchain version + extracted directory name + MD5,
+# pinned here so cache path / cache key / wget URL / PATH addition /
+# integrity check stay in sync. ARM's developer site uses mixed case
+# (`13.2.rel1` in URLs, `13.2.Rel1` in extracted directory names) so
+# the two-variable shape for VER/DIR is load-bearing.
+#
+# Syntax note: reference these via ${{ env.NAME }} in step-level
+# fields (cache `path`/`key`, etc.) and ${NAME} in `run:` bodies.
+# Workflow-level `env:` is auto-exported as shell environment, so
+# both forms work — but only in their respective contexts. Don't
+# normalize one form across both; the step-level fields are
+# evaluated by the Actions runner before any shell starts.
+#
+# Integrity caveat: ARM only publishes MD5 for these tarballs (at
+# the `.tar.xz.asc` URL, despite the `.asc` extension being more
+# commonly used for GPG signatures). MD5 is adequate for catching
+# corruption / wrong-file delivery but is NOT a supply-chain hash;
+# a deliberate attacker who can compute collisions could substitute
+# a malicious tarball. Pinning the MD5 in-repo + fetching the
+# tarball over HTTPS narrows the attack surface to "compromise both
+# the git repo and the ARM CDN" — strictly better than no check.
+# Stronger verification (TOFU-pinned SHA-256, or GPG if ARM ever
+# starts signing) is a follow-up if/when threat model warrants it.
 env:
   ARM_TOOLCHAIN_VER: 13.2.rel1
   ARM_TOOLCHAIN_DIR: arm-gnu-toolchain-13.2.Rel1-x86_64-aarch64-none-elf
+  ARM_TOOLCHAIN_MD5: b4aa2d1c2d9c857e194e28a2a8271321
 
 jobs:
   build-and-test:
@@ -60,6 +79,8 @@ jobs:
         set -e
         TARBALL="arm-gnu-toolchain-${ARM_TOOLCHAIN_VER}-x86_64-aarch64-none-elf.tar.xz"
         wget -q "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_TOOLCHAIN_VER}/binrel/${TARBALL}"
+        # Integrity check — see env-block "Integrity caveat" comment for why this is MD5.
+        echo "${ARM_TOOLCHAIN_MD5}  ${TARBALL}" | md5sum -c -
         sudo tar -xf "$TARBALL" -C /opt
         rm -f "$TARBALL"
 
