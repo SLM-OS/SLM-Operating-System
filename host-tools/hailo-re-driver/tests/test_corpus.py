@@ -158,6 +158,36 @@ class CorpusValidationTests(unittest.TestCase):
                 corpus_mod.init(p, make_header())
 
 
+class ConcurrentWriterTests(unittest.TestCase):
+    """fcntl.flock under LOCK_NB rejects a second writer with CorpusError."""
+
+    def test_second_writer_raises_corpus_error(self) -> None:
+        try:
+            import fcntl  # noqa: F401  — skip cleanly on Windows
+        except ImportError:  # pragma: no cover
+            self.skipTest("fcntl not available on this platform")
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "corpus.jsonl"
+            corpus = corpus_mod.init(p, make_header())
+            corpus_mod.append_op(corpus, make_write(1))
+
+            # Open the corpus with our own fd and take an exclusive flock.
+            # BSD flock is per-open-file-description, so a second open() in
+            # the same process produces a distinct OFD whose lock attempt
+            # should fail with EAGAIN -> CorpusError.
+            import fcntl
+            with p.open("a", encoding="utf-8") as competitor:
+                fcntl.flock(competitor.fileno(), fcntl.LOCK_EX)
+                try:
+                    with self.assertRaises(CorpusError) as cm:
+                        corpus_mod.append_op(corpus, make_read(2, "00000000"))
+                    self.assertIn("another writer holds the corpus lock",
+                                  str(cm.exception))
+                finally:
+                    fcntl.flock(competitor.fileno(), fcntl.LOCK_UN)
+
+
 class TrailerExtrasTests(unittest.TestCase):
     def test_extras_must_not_overwrite_reserved_keys(self) -> None:
         bad = Trailer(

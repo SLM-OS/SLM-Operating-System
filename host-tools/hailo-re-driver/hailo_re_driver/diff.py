@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterator, Optional
 
 from . import corpus as corpus_mod
 from .corpus import OpEntry
@@ -74,8 +74,12 @@ def diff_ops_against_path(
                       rows=rows, first_divergent_seq=first)
 
 
-def load_observed_ops(path: Path) -> Iterable[OpEntry]:
-    """Stream-parse an observed-trace JSONL (no header; op lines only)."""
+def load_observed_ops(path: Path) -> Iterator[OpEntry]:
+    """Stream-parse an observed-trace JSONL (no header; op lines only).
+
+    Single-shot iterator — callers that need to re-read should `list()` the
+    result.
+    """
     with path.open("r", encoding="utf-8") as f:
         for i, raw in enumerate(f, start=1):
             raw = raw.strip()
@@ -93,15 +97,6 @@ def load_observed_ops(path: Path) -> Iterable[OpEntry]:
                     f"(got type={obj.get('type')!r})"
                 )
             yield corpus_mod._validate_op(obj)  # type: ignore[attr-defined]
-
-
-def observed_seqs(path: Path) -> list[int]:
-    """Return the seq values present in an observed-trace JSONL.
-
-    Prefer `load_observed_ops` directly when the caller also needs the
-    parsed op entries themselves.
-    """
-    return [op.seq for op in load_observed_ops(path)]
 
 
 def _diff_op_streams(

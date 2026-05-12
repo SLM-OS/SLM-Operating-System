@@ -150,6 +150,13 @@ _PROTOCOL_RE = re.compile(
 
 @dataclass
 class SlmosRunner:
+    """End-to-end driver for one `hailo replay-step <N>` cycle on a real SBC.
+
+    `shell_prompt` is a regex compiled once at construction. Mutating it
+    after the fact (e.g. `runner.shell_prompt = "new>"`) does NOT refresh
+    the cached pattern — build a new SlmosRunner instead.
+    """
+
     sbc: str = "pi-5-1"
     kernel_path: Path = Path("build/kernel/slmos.bin")
     kernel_dst: str = "kernel_2712.img"

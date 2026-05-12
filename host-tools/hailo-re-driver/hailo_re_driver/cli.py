@@ -159,20 +159,19 @@ def validate_main(argv: Optional[list[str]] = None) -> int:
     # Load corpus + observed-trace exactly once.
     corpus = corpus_mod.load(args.corpus)
     observed_ops = list(diff_mod.load_observed_ops(args.observed_trace))
-    observed_seq_list = [op.seq for op in observed_ops]
 
     # Detect duplicate seqs in the trace — these point at an SLM-OS bug, not
     # a corpus integrity issue, but stamping past one would be wrong.
     seen: set[int] = set()
-    duplicates: list[int] = []
-    for s in observed_seq_list:
-        if s in seen:
-            duplicates.append(s)
-        seen.add(s)
+    duplicates: set[int] = set()
+    for op in observed_ops:
+        if op.seq in seen:
+            duplicates.add(op.seq)
+        seen.add(op.seq)
     if duplicates:
         print(
             f"refusing to validate: observed-trace contains duplicate seq "
-            f"values {sorted(set(duplicates))[:5]}",
+            f"values {sorted(duplicates)[:5]}",
             file=sys.stderr,
         )
         return 2
@@ -180,13 +179,12 @@ def validate_main(argv: Optional[list[str]] = None) -> int:
     # Require the observed-trace to cover every seq in the corpus before
     # advancing the validation watermark. Otherwise a partial replay could
     # stamp entries SLM-OS never actually verified.
-    observed_seqs = seen
     corpus_seqs = {op.seq for op in corpus.ops}
-    missing = sorted(corpus_seqs - observed_seqs)
+    missing = sorted(corpus_seqs - seen)
     if missing:
         print(
             f"refusing to validate: observed-trace covers "
-            f"{len(observed_seqs & corpus_seqs)}/{len(corpus_seqs)} corpus "
+            f"{len(seen & corpus_seqs)}/{len(corpus_seqs)} corpus "
             f"entries. Missing seq examples: {missing[:5]}"
             f"{'...' if len(missing) > 5 else ''}",
             file=sys.stderr,
