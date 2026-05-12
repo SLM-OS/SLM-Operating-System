@@ -2,10 +2,16 @@
 
 **Target:** GeeekPi AI HAT+ (Hailo-8L, 13 TOPS) and AI HAT+ 26 TOPS (Hailo-8) on Raspberry Pi 5, end-to-end to running AI inference workloads from SLM-OS.
 
-**Status:** Phase 0–7 software-complete; Phase 8 in progress with the
-boundary-input submit blocker still open (firmware does not advance
-`num_proc` on the H2D channel; descriptor status stays zero). Tracked
-in [#253](https://github.com/SLM-OS/SLM-Operating-System/issues/253).
+**Status (2026-05-12):** Phase 0–7 software-complete. **Phase 8 CLOSED** —
+boundary-input submit blocker tracked in
+[#682](https://github.com/SLM-OS/SLM-Operating-System/issues/682) was
+investigated to root cause and accepted as a Hailo-side architectural
+limit. SLM-OS gets ~90% through HEF load (last_err=0, all RPCs rc=0,
+descriptors bit-identical to HailoRT), but the final channel-to-inference
+binding lives in an undocumented direct-BAR4-write protocol that
+HailoRT (proprietary userspace) uses and that fw_control RPCs cannot
+fully reproduce. See `docs/hailo-protocol-architecture.md` for the
+empirical finding, vendor comparison, and reopen criteria.
 
 **Scope honesty (2026-04-24, audit F-04 / F-11):** The current Hailo
 backend should be characterized as a **Hailo-8L / MNIST bring-up
@@ -1471,4 +1477,94 @@ from #361 work, never instrumented.
 
 ---
 
-*Last updated: 2026-05-09 (CPU_ECC root cause confirmed + fixed; ch=2 boundary IN wedge verification pending under new code)*
+## 9. Phase 8 closeout — 2026-05-12: #682 accepted as Hailo-side architectural limit
+
+After the SAGE1_ISP CPU_ECC root cause was fixed (§8 above), the boundary
+IN ch=2 wedge was investigated to root cause and closed as a Hailo-side
+architectural limitation. Full details in
+[`docs/hailo-protocol-architecture.md`](./hailo-protocol-architecture.md);
+brief summary here.
+
+### What was tried, what was disproven
+
+| Hypothesis | Outcome |
+|---|---|
+| Descriptor content (ps_ctrl, page_size, data_id) | DISPROVEN — bit-identical to Linux MNIST reference |
+| Channel state (STARTED, did=0/4 split) | CORRECT — matches Linux |
+| Pre-submit drain perturbing fw state | DISPROVEN — PR #793 made notification handling IRQ-driven (matches Linux); wedge persists |
+| Settle timing pre-submit | DISPROVEN — 500 ms pre-IN-submit: null effect |
+| Settle timing pre-CLEAR_CONFIGURED_APPS | DISPROVEN — 500 ms before first CORE-CPU RPC: null effect |
+| Skip CLEAR_CONFIGURED_APPS entirely | DISPROVEN — load fails earlier at SET_CONTEXT_INFO major=0x40130016 |
+| Skip CHANGE_CONTEXT_SWITCH_STATUS(RESET) | DISPROVEN — total ECC count rises 9→20, wedge persists |
+| CPU_ECC on SAGE1_MIPI_RX_13 | NOT THE CAUSE — fw boot-scrub on unused MIPI block, decoupled from wedge timing |
+
+### What turned out to be the answer
+
+**Experiment B** (Linux-side capture under HailoRT 2026-05-12):
+HailoRT's `hailo_pcie_write_firmware_control` is called only for IDENTIFY
+(27 RPCs across 84k MNIST inferences, 100% opcode=0). Zero
+SET_CONTEXT_INFO / SET_NETWORK_GROUP_HEADER / CHANGE_STATUS via
+fw_control. The Linux NNC ioctl surface
+(`linux/pcie/src/nnc.c:213`) exposes only 4 operations:
+`HAILO_FW_CONTROL`, `HAILO_READ_NOTIFICATION`,
+`HAILO_DISABLE_NOTIFICATION`, `HAILO_READ_LOG`. **All real
+configuration goes through VDMA ioctls operating on mmap'd PCIe
+resources — userspace writes BAR4 directly.**
+
+The documented fw_control RPC protocol (`hailort-control-protocol.h`)
+that SLM-OS uses is accepted by fw as a fallback / debug / fragmented-
+update interface, but is intentionally incomplete for primary
+configuration on v4.23 firmware. Channels exist, descriptors are
+programmed, num_avail bumps land — but fw's internal "ch=2 is wired
+to the inference data path" state never fully completes.
+
+This is not a SLM-OS deficiency. Hailo combines four properties that
+are unusual among PCIe accelerator vendors: closed firmware (no
+source), closed userspace runtime (`libhailort.so` shipped as binary),
+**undocumented primary configuration protocol** (the direct BAR4 mmap
+writes), and documented RPC interface that is intentionally incomplete.
+NVIDIA (`open-gpu-kernel-modules` + nouveau), Intel (`i915`), AMD
+(`amdgpu`), and standard PCIe devices all expose documented
+kernel-side configuration. Google Coral is closer (closed userspace
+but open kernel interface). Hailo alone sits in the "fully closed
+black-box accelerator" corner.
+
+### What SLM-OS achieved within the documented surface
+
+- ✅ Boots Hailo fw cleanly (BOOT_IRQ + 500 ms SAGE1 settle matches
+  Linux 0/10 ECC baseline)
+- ✅ Completes context-switch load (last_err=0, all 9 CORE-CPU RPCs rc=0)
+- ✅ Programs descriptor lists bit-identical to HailoRT's MNIST reference
+- ✅ Handles FW_NOTIFICATION IRQ end-to-end matching Linux (PR #793)
+- ✅ Cross-side trace toolkit (PRs #780, #783) reusable for any future
+  Hailo bringup
+- ❌ Cannot complete channel-to-inference-path binding — that step is
+  in the undocumented direct-memory protocol HailoRT uses
+
+### Reopen criteria
+
+Reopen #682 only if:
+
+- Hailo publishes the BAR4 configuration protocol, or
+- Hailo releases HailoRT source, or
+- A new firmware revision exposes additional fw_control opcodes that
+  complete channel binding, or
+- A reverse-engineering effort produces a verified mapping from
+  HailoRT operations to BAR4 writes, or
+- A different host runtime (not HailoRT) is observed completing
+  inference on Hailo-8L using only documented interfaces.
+
+Mere "I have a new hypothesis about descriptor bytes / settle timing /
+channel state" is not sufficient — those surfaces have been
+exhaustively bisected.
+
+### Status of phases 6 and 7
+
+Phases 6 (AI scheduler Hailo policy) and 7 (shell/demo polish) were
+hardware-gated on Phase 8 success. Both are now **deferred** pending
+any future shift in Hailo's documentation policy or a reverse-
+engineering effort under the §9 reopen criteria.
+
+---
+
+*Last updated: 2026-05-12 (Phase 8 closed, #682 accepted as Hailo-side limit)*
