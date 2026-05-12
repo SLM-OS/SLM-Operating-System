@@ -77,9 +77,9 @@ need qemu-img
 need curl
 need sha256sum
 if command -v xorriso >/dev/null 2>&1; then
-    MKISO="xorriso -as mkisofs"
+    MKISO=(xorriso -as mkisofs)
 elif command -v genisoimage >/dev/null 2>&1; then
-    MKISO="genisoimage"
+    MKISO=(genisoimage)
 else
     echo "neither xorriso nor genisoimage installed" >&2
     exit 2
@@ -166,7 +166,7 @@ cp "${DRIVER_DEB}"    "${SEED_STAGING}/stage/hailort-pcie-driver_${HAILORT_VERSI
 cp "${GUEST_SCRIPTS_DIR}"/*.sh "${SEED_STAGING}/stage/"
 
 rm -f "${SEED_ISO}"
-${MKISO} -output "${SEED_ISO}" \
+"${MKISO[@]}" -output "${SEED_ISO}" \
     -volid CIDATA -joliet -rock -quiet \
     "${SEED_STAGING}"
 
@@ -189,7 +189,11 @@ else
     echo "WARNING: /dev/kvm not accessible; falling back to TCG (slow). Add the invoking user to the 'kvm' group to speed this up." >&2
 fi
 
-BUILD_LOG="${WORK_DIR}/build-boot.log"
+# Per-invocation log path so re-runs don't overwrite forensic evidence.
+# A `latest` symlink always points at the most recent run for convenience.
+BUILD_LOG_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+BUILD_LOG="${WORK_DIR}/build-boot-${BUILD_LOG_STAMP}.log"
+ln -sfn "$(basename "${BUILD_LOG}")" "${WORK_DIR}/build-boot.log"
 set +e
 timeout "${BUILD_TIMEOUT}" qemu-system-x86_64 \
     "${ACCEL_ARGS[@]}" \

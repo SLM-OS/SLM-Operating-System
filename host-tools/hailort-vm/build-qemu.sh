@@ -108,7 +108,12 @@ fi
 "${PATCH_DIR}/apply.sh" "${SRC_DIR}"
 
 # ---------------------------------------------------------------------------
-# Configure (minimal — just x86_64-softmmu, KVM, slirp, no GUI)
+# Configure (minimal — just x86_64-softmmu, KVM, slirp, no GUI).
+#
+# We wipe the build dir unconditionally because QEMU's meson-based configure
+# is sensitive to leftover state from prior `configure` runs (especially when
+# the apply.sh patch is iterated). Incremental rebuilds are not worth the
+# debugging cost; full rebuild is ~3-4 min on a modern host.
 # ---------------------------------------------------------------------------
 rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}"

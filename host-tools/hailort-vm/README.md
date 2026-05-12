@@ -94,7 +94,7 @@ The determinism check is the load-bearing deliverable of Task 0.3 — see [§ De
 │  │  │   - built hailo_pci.ko via DKMS                        │  │   │
 │  │  │   - disabled ASLR, NTP, irqbalance, ...                │  │   │
 │  │  │                                                        │  │   │
-│  │  │  20-capture-run.sh runs at first boot:                 │  │   │
+│  │  │  20-capture-run.sh runs once per capture boot:         │  │   │
 │  │  │   1. modprobe hailo_pci  (auto-binds to Hailo IDs)     │  │   │
 │  │  │   2. taskset -c 0 hailortcli fw-control identify       │  │   │
 │  │  │   3. shutdown -h now                                   │  │   │
@@ -129,7 +129,7 @@ Mitigations applied (all enforced via `cloud-init/user-data` + `guest-scripts/00
 | Telemetry / hailo-monitor | Not installed in the .deb chain we use; `systemctl mask hailo-monitor.service` defensively |
 | HailoRT internal async paths | TBD: `HAILORT_LOGGER_PATH` + `HAILORT_CONSOLE_LOGGER_LEVEL=trace` to inspect post-capture; if async pre-fetch is observed, set `HAILO_DISABLE_ASYNC=1` (or whatever the v4.23 env knob is — discover during capture) |
 | QEMU CPU-mode jitter | `-cpu host,migratable=no` under KVM; `-smp 1` for the capture VM |
-| Wall-clock dependent code paths | Boot the guest with `clocksource=hpet` and a fixed RTC base (`-rtc base=2026-05-12T00:00:00,clock=vm`) |
+| Wall-clock dependent code paths | Fixed RTC base via `-rtc base=2026-05-12T00:00:00,clock=vm` (guest's `time()` returns a deterministic starting point each boot) |
 
 `verify-determinism.sh` runs two captures back-to-back from the same cold qcow2 snapshot and diffs the trace files. Expected result: byte-for-byte match. Any divergence is documented in this README under [§ Observed determinism](#observed-determinism) below.
 

@@ -3,7 +3,8 @@
 #
 # Sequence:
 #   1. Apply runtime determinism knobs that don't survive snapshot/reboot.
-#   2. Force-bind hailo_pci to the placeholder `edu` device.
+#   2. Bring up hailo_pci against the QEMU placeholder via 10-bind-stub.sh
+#      (auto-probe on the hailo-stub-stub device; new_id fallback on edu).
 #   3. Run `hailortcli fw-control identify` pinned to CPU 0.
 #   4. Emit a single boundary marker on the serial console so the host knows
 #      capture is complete and QEMU can be shut down.

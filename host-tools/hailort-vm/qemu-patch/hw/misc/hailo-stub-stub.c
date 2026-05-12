@@ -23,11 +23,11 @@
  */
 
 #include "qemu/osdep.h"
+#include "qapi/error.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/msi.h"
 #include "qemu/module.h"
 #include "qom/object.h"
-#include "trace.h"
 
 #define TYPE_HAILO_STUB_STUB "hailo-stub-stub"
 typedef struct HailoStubStubState HailoStubStubState;
@@ -126,8 +126,10 @@ static void hailo_stub_realize(PCIDevice *pdev, Error **errp)
 {
     HailoStubStubState *s = HAILO_STUB_STUB(pdev);
     uint8_t *pci_conf = pdev->config;
+    Error *local_err = NULL;
 
-    /* Enable bus-master so the guest driver doesn't bail on PCI setup. */
+    /* Advertise INTA so the kernel's PCI subsystem won't reject the device
+     * even when it falls back from MSI; the stub never asserts the line. */
     pci_conf[PCI_INTERRUPT_PIN] = 1;
 
     memory_region_init_io(&s->bar0, OBJECT(s), &hailo_stub_bar0_ops, s,
@@ -151,10 +153,11 @@ static void hailo_stub_realize(PCIDevice *pdev, Error **errp)
                      &s->bar4);
 
     /* Single MSI vector so the guest driver can register an IRQ handler.
-     * The stub never raises MSIs; Task 0.2 will. */
-    if (msi_init(pdev, 0, 1, true, false, errp) < 0) {
-        /* Non-fatal — the kernel driver tolerates absence of MSI. */
-        *errp = NULL;
+     * The stub never raises MSIs; Task 0.2 will. msi_init failure is
+     * non-fatal (the kernel driver tolerates absence of MSI), so discard
+     * the Error via local_err rather than leaking it through *errp. */
+    if (msi_init(pdev, 0, 1, true, false, &local_err) < 0) {
+        error_free(local_err);
     }
 }
 

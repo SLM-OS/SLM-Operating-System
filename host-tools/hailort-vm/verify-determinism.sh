@@ -76,7 +76,7 @@ echo
 echo "RESULT: NON-DETERMINISTIC — runs A and B diverge."
 echo "Diff:                ${DIFF_OUT}"
 echo "First mismatch (op): "
-diff -u "${OPS_A}" "${OPS_B}" | grep -E '^[-+]' | grep -v '^[-+]{3}' | head -20
+diff -u "${OPS_A}" "${OPS_B}" | grep -E '^[-+]' | grep -vE '^(---|\+\+\+) ' | head -20
 
 FIRST_A_DIVERGE="$(diff "${OPS_A}" "${OPS_B}" | grep -m1 -E '^< ' | sed 's/^< //')"
 FIRST_B_DIVERGE="$(diff "${OPS_A}" "${OPS_B}" | grep -m1 -E '^> ' | sed 's/^> //')"

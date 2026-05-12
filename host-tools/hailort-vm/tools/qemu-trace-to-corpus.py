@@ -57,28 +57,23 @@ BAR_SIZE_BY_NAME = {
 }
 
 
-def parse_capture_window(serial_log: Path) -> tuple[int | None, int | None]:
+def check_capture_markers(serial_log: Path) -> bool:
     """
-    Return (begin_byte, end_byte) offsets bracketing the HAILORT_CAPTURE_BEGIN /
-    HAILORT_CAPTURE_DONE markers in the serial log. Used only for human-friendly
-    reporting — the QEMU trace itself has no synchronized timestamps with the
-    serial log, so we capture *everything* the trace emitted during the boot
-    and rely on the placeholder device having no other MMIO consumers.
+    Confirm the guest emitted both HAILORT_CAPTURE_BEGIN and HAILORT_CAPTURE_DONE
+    on the serial console. Returns True if both markers are present. Trace lines
+    are not filtered by capture window because QEMU's trace timestamps don't
+    cross-correlate with serial output — instead, the parser drops MMIO from
+    any MR not in BAR_NAME_MAP, which keeps the corpus scoped to the stub device.
     """
-    begin, end = None, None
     text = serial_log.read_text(errors="replace")
-    if "HAILORT_CAPTURE_BEGIN" in text:
-        begin = text.index("HAILORT_CAPTURE_BEGIN")
-    if "HAILORT_CAPTURE_DONE" in text:
-        end = text.index("HAILORT_CAPTURE_DONE")
-    return begin, end
+    return "HAILORT_CAPTURE_BEGIN" in text and "HAILORT_CAPTURE_DONE" in text
 
 
 def hex_value_to_le_bytes(value_hex: str, size: int) -> str:
     """
-    Corpus spec § operation entries: value is hex-encoded, little-endian, no 0x
-    prefix, lowercase, exactly size*2 characters. QEMU prints values as
-    big-endian integers (host byte order in hex), so we convert.
+    Convert an integer (parsed from QEMU's `value 0x...` trace field) into a
+    `size`-byte little-endian hex string. The corpus spec requires LE byte
+    order, lowercase hex, no 0x prefix, exactly `size * 2` characters.
     """
     v = int(value_hex, 16)
     return v.to_bytes(size, "little").hex()
@@ -97,16 +92,15 @@ def main() -> int:
     ap.add_argument("--output", required=True, type=Path)
     args = ap.parse_args()
 
-    begin, end = parse_capture_window(args.serial)
-    if begin is None or end is None:
-        print("warn: serial log missing CAPTURE_BEGIN/DONE markers; including all trace lines",
+    if not check_capture_markers(args.serial):
+        print("warn: serial log missing CAPTURE_BEGIN/DONE markers; capture may be incomplete",
               file=sys.stderr)
 
     seq = 0
     entries: list[dict] = []
     unknown_names: set[str] = set()
     dropped = 0
-    total_trace_lines = 0
+    matched_trace_lines = 0
 
     with args.trace.open(errors="replace") as fh:
         for line in fh:
@@ -116,7 +110,7 @@ def main() -> int:
             m = TRACE_LINE.match(line)
             if not m:
                 continue
-            total_trace_lines += 1
+            matched_trace_lines += 1
             name = m.group("name") or ""
 
             if name not in BAR_NAME_MAP:
@@ -177,7 +171,7 @@ def main() -> int:
 
     print(f"corpus: {args.output}", file=sys.stderr)
     print(f"  ops: {len(entries)}", file=sys.stderr)
-    print(f"  trace lines parsed: {total_trace_lines}", file=sys.stderr)
+    print(f"  matched trace lines: {matched_trace_lines}", file=sys.stderr)
     print(f"  dropped (unknown MR): {dropped}", file=sys.stderr)
     if unknown_names:
         print(f"  unknown MR names seen: {sorted(unknown_names)}", file=sys.stderr)

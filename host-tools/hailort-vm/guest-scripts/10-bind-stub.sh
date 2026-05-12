@@ -1,17 +1,16 @@
 #!/bin/bash
-# Force-bind hailo_pci to the QEMU `edu` test device.
+# Bring up the hailo_pci driver against the QEMU placeholder device.
 #
-# The `edu` device has PCI vendor:device 0x1234:0x11e8 — not Hailo's
-# 0x1e60:0x2864. hailo_pci's id_table only matches Hailo IDs, so without help it
-# never probes. The kernel's `new_id` sysfs entry lets us register an extra
-# (vendor, device) pair against the driver at runtime and trigger probe.
+# Primary path: the custom QEMU's `hailo-stub-stub` device advertises Hailo's
+# vendor/device IDs (0x1e60:0x2864), so hailo_pci's id_table matches and the
+# kernel auto-probes at module load.
 #
-# This is the Task 0.3 placeholder strategy: the edu device's BAR0 R/W returns
-# zero for unwritten offsets, which is the "stub-stub" behavior #795's plan calls
-# for. The corpus produced under this binding is not a useful protocol artifact —
-# its only purpose is to validate that the capture pipeline produces a
-# deterministic MMIO stream end-to-end. Replaced by Task 0.2's real stub on
-# integration.
+# Fallback path: if the custom QEMU isn't built and we're running against
+# stock QEMU + `-device edu` (0x1234:0x11e8), the kernel won't auto-probe;
+# we force-bind via `/sys/bus/pci/drivers/hailo/new_id`. Corpora captured
+# under the edu fallback are NOT protocol-valid (BAR2/BAR4 missing) — that
+# path exists only as a smoke test for the load-module pipeline. Replaced
+# by Task 0.2's real stub on integration.
 
 set -euo pipefail
 

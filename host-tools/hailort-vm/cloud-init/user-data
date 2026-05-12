@@ -12,13 +12,13 @@ users:
   - name: slmos
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-    lock_passwd: false
-    plain_text_passwd: slmos
+    # Account is sudo-able but its password is locked. The capture pipeline
+    # never logs in interactively — hailort-capture.service runs at boot and
+    # shuts down. For debugging, mount the qcow2 via qemu-nbd and chroot,
+    # or boot with `init=/bin/bash` on the kernel cmdline.
+    lock_passwd: true
 
-chpasswd:
-  expire: false
-
-ssh_pwauth: true
+ssh_pwauth: false
 
 # No network-time, no DNS, no apt-daily timers. Determinism > convenience.
 write_files:
@@ -121,9 +121,3 @@ runcmd:
   - touch /opt/hailort-stage/build-complete.stamp
   - sync
   - shutdown -h now
-
-# Disable cloud-init on subsequent boots — capture runs are not first-boot scenarios.
-power_state:
-  mode: poweroff
-  timeout: 60
-  condition: true
