@@ -1,0 +1,3 @@
+test_corpus
+*.o
+__pycache__/
