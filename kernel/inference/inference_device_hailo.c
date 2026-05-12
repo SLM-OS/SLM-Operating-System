@@ -394,15 +394,12 @@ static bool hailo_fw_dump_d2h_notification_once(void)
     return true;
 }
 
-/* Pre-submit drain cap. Sized for "any reasonable backlog from boot
- * + RPC chatter": observed worst case post-handshake on Pi 5 is ~30
- * events (boot ECC scrub, identify echoes, context-switch progress
- * reports), so 128 leaves comfortable headroom while still bounding
- * the wall-clock cost (each drained event sleeps ~5 ms, so a full
- * 128 takes ~640 ms — only paid in the pathological "fw is spamming
- * us" case). The post-failure drain uses a smaller cap because by
- * then we just want the most recent error event, not full history. */
-#define HAILO_D2H_PRE_SUBMIT_DRAIN_CAP   128u
+/* Post-failure drain cap. After a submit times out we want the
+ * most recent fw-side error event, not full history — 8 is enough
+ * to flush whatever fw posted while we waited. The previous
+ * pre-submit drain (cap 128) was removed when notification
+ * handling moved to the FW_NOTIFICATION_IRQ path; see the comment
+ * at the former call site in hailo_backend_run. */
 #define HAILO_D2H_POST_FAIL_DRAIN_CAP    8u
 
 /* OUT boundary-channel descriptor pre-fill depth. Linux's HailoRT
@@ -517,6 +514,57 @@ void hailo_fw_drain_d2h_notifications(uint32_t max_events)
     }
     uart_printf("[d2h] drain: hit max_events=%u cap; more may be queued\r\n",
                 (unsigned)max_events);
+}
+
+/*
+ * IRQ-delivery counters for the notification path. Updated from
+ * three call sites (control_msi_handler, wait_for_response,
+ * hailo_control_drain_pending_irqs) via hailo_fw_handle_d2h_notification.
+ * Read by `hailo state` and tests.
+ *
+ * Plain uint32_t with __atomic ops — increments race against each
+ * other when (e.g.) the MSI fires on CPU N while a polled drain
+ * runs on CPU 0. The counts are diagnostic only; eventual
+ * consistency is fine.
+ */
+static volatile uint32_t hailo_notification_irq_count = 0;
+static volatile uint32_t hailo_notification_polled_count = 0;
+
+void hailo_irq_delivery_get_counts(struct hailo_irq_delivery_counts *out)
+{
+    if (!out) return;
+    out->notification_irq    = __atomic_load_n(&hailo_notification_irq_count,
+                                               __ATOMIC_ACQUIRE);
+    out->notification_polled = __atomic_load_n(&hailo_notification_polled_count,
+                                               __ATOMIC_ACQUIRE);
+}
+
+/*
+ * Mirrors Linux's firmware_notification_irq_handler. Reads one
+ * event, prints + decodes (existing dump_once helper), then writes
+ * zero to in_use so fw can post the next event. Idempotent on an
+ * empty buffer — dump_once returns false, we still touch the
+ * counter so verification captures still show this path ran.
+ *
+ * Called from BOTH the MSI ISR (from_irq=true) and the polled
+ * fallback paths in wait_for_response /
+ * hailo_control_drain_pending_irqs (from_irq=false). The bool tags
+ * which counter to bump; otherwise the two call sites are
+ * indistinguishable behavior-wise.
+ */
+void hailo_fw_handle_d2h_notification(bool from_irq)
+{
+    bool had = hailo_fw_dump_d2h_notification_once();
+    if (had) {
+        hailo_fw_ack_d2h_notification();
+    }
+    if (from_irq) {
+        __atomic_fetch_add(&hailo_notification_irq_count, 1u,
+                           __ATOMIC_ACQ_REL);
+    } else {
+        __atomic_fetch_add(&hailo_notification_polled_count, 1u,
+                           __ATOMIC_ACQ_REL);
+    }
 }
 
 /* #361 settle pings (2026-05-06): APP-CPU IDENTIFY + GET_DEVICE_
@@ -2203,13 +2251,20 @@ static int hailo_backend_run(struct inference_device *dev,
                     (unsigned long)probe_us);
     }
 
-    /* #253: drain any pending D2H notifications BEFORE the submit so
-     * fw can post a CONTEXT_SWITCH_RUN_TIME_ERROR (or similar) after
-     * processing our transfer. Without this drain, a stale boot-time
-     * ECC notification can sit in the buffer indefinitely, blocking
-     * fw from delivering the event we actually want to see. */
-    uart_printf("[d2h] pre-submit drain:\r\n");
-    hailo_fw_drain_d2h_notifications(HAILO_D2H_PRE_SUBMIT_DRAIN_CAP);
+    /* #682 (2026-05-11): the unconditional pre-submit drain that
+     * used to live here was perturbing fw's channel state machine
+     * on every submit. The drain wrote zero to BAR4+0x0c80 (the
+     * in_use flag) regardless of whether fw had actually posted a
+     * notification — Linux hailo_pci's IRQ-driven path never
+     * touches the notification buffer unless FW_NOTIFICATION_IRQ
+     * fires. With FW_NOTIFICATION_IRQ now handled in
+     * control_msi_handler and the polling-fallback paths
+     * (wait_for_response, hailo_control_drain_pending_irqs), the
+     * buffer is read+ACK'd at delivery time, which is the same
+     * model Linux uses. Stale boot-time ECC notifications are
+     * caught by the 500 ms post-BOOT_IRQ settle (see memory
+     * hailo_post_bootirq_settle_fixes_ecc.md) and the FW_NOTIFICATION
+     * IRQ path, not by submit-boundary draining. */
 
     /* Copy caller's input into the pre-allocated DMA buffer +
      * cache-clean so the device picks up the fresh bytes.

@@ -110,11 +110,27 @@ enum hailo_control_cpu {
 #define HAILO_PCIE_NNC_FW_CONTROL_IRQ            0x04u
 #define HAILO_BCS_ISTATUS_HOST_FW_CONTROL_BIT    \
     (HAILO_PCIE_NNC_FW_CONTROL_IRQ << HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT)
-/* Mirrors HAILO_PCIE_BOOT_IRQ in pcie_common.h (sw bit 0x2). Raised
- * by fw after a successful boot. Linux's hailo_pcie_read_interrupt
- * read-and-clears it from BCS_ISTATUS_HOST as part of normal IRQ
- * dispatch; SLM-OS polls ATR[1] for the FW_LOADED magic instead, so
- * the bit stays asserted unless we W1C it explicitly. */
+/* Mirrors HAILO_PCIE_NNC_FW_NOTIFICATION_IRQ in pcie_common.h (sw
+ * bit 0x2 in the NNC group). Raised by fw whenever it posts an
+ * event into the D2H notification buffer at offset 0x0c80 — ECC
+ * errors, CONTEXT_SWITCH_RUN_TIME_ERROR, app/driver signals, etc.
+ * Linux's hailo_irqhandler routes this to firmware_notification_irq_handler
+ * which reads the buffer and wakes any waiters. SLM-OS previously
+ * IGNORED this bit and polled the buffer at submit boundaries
+ * instead; that perturbed fw state on every submit. The ISR now
+ * reads + ACKs the buffer when this bit fires, matching Linux. */
+#define HAILO_PCIE_NNC_FW_NOTIFICATION_IRQ       0x02u
+#define HAILO_BCS_ISTATUS_HOST_FW_NOTIFICATION_BIT \
+    (HAILO_PCIE_NNC_FW_NOTIFICATION_IRQ << HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT)
+/* Mirrors HAILO_PCIE_BOOT_IRQ in pcie_common.h (sw bit 0x2 in the
+ * BOOT group — same numeric value as FW_NOTIFICATION_IRQ above but
+ * a different group; the BOOT vs NNC distinction is only meaningful
+ * before fw_boot.is_in_boot flips to false, after which the bit
+ * encodes FW_NOTIFICATION). Raised by fw after a successful boot.
+ * Linux's hailo_pcie_read_interrupt read-and-clears it from
+ * BCS_ISTATUS_HOST as part of normal IRQ dispatch; SLM-OS polls
+ * ATR[1] for the FW_LOADED magic instead, so the bit stays
+ * asserted unless we W1C it explicitly. */
 #define HAILO_PCIE_BOOT_IRQ                      0x02u
 #define HAILO_BCS_ISTATUS_HOST_BOOT_IRQ_BIT      \
     (HAILO_PCIE_BOOT_IRQ << HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT)

@@ -2746,6 +2746,111 @@ static void test_msi_handler_skips_per_channel_when_no_vdma_bits(void)
     TEST_ASSERT_EQUAL_UINT32(0u, mock_per_channel_dst_write_count);
 }
 
+/*
+ * #682 fix (2026-05-11): when ISTATUS_HOST has FW_NOTIFICATION_BIT
+ * set, the MSI handler must read+ACK the D2H notification buffer
+ * at BAR4+0x0c80. Pre-fix the bit was W1C'd and the buffer was
+ * left untouched, dropping every async fw event silently. Linux's
+ * firmware_notification_irq_handler is the reference.
+ *
+ * Seeded notification: in_use=1, buffer_len=28 (one header, no
+ * payload — minimal valid event). Verifies the handler:
+ *   - reads in_use (count bumps)
+ *   - ACKs by writing 0 to in_use
+ *   - bumps notification_irq counter (not polled)
+ */
+static void test_msi_handler_reads_and_acks_d2h_notification(void)
+{
+    control_setup_running();
+    msi_handler_register_via_identify();
+
+    /* Snapshot the IRQ-delivery counts so the assert checks the
+     * delta, not the absolute value (boot-time RPCs may have
+     * already ticked them up). */
+    struct hailo_irq_delivery_counts before;
+    hailo_irq_delivery_get_counts(&before);
+
+    /* Seed the d2h buffer: u16 in_use=1, u16 buffer_len=28, then
+     * a 28-byte header (all zero). BAR4 offset 0x0c80 routes
+     * through ATR[0] to the in-memory SRAM. control_setup_running
+     * has already programmed ATR[0] so bar4 writes land in the
+     * SRAM at the configured offset. Direct memcpy into mock_sram
+     * at the same offset achieves the same wire-level effect. */
+    uint32_t notification_word = (1u) | (28u << 16);  /* in_use=1, buf_len=28 */
+    memcpy(&mock_sram[0x0c80u], &notification_word, sizeof(notification_word));
+    /* Header bytes (28) — all zero is a valid (boring) event. */
+    memset(&mock_sram[0x0c80u + 4u], 0, 28);
+
+    /* Fire the ISR with FW_NOTIFICATION_BIT set. */
+    mock_istatus_one_shot_preload = HAILO_BCS_ISTATUS_HOST_FW_NOTIFICATION_BIT;
+    mock_msi_invoke();
+
+    /* Verify the buffer was ACK'd: first u32 must now be zero
+     * (in_use cleared by the handler's write). */
+    uint32_t after_ack = 0;
+    memcpy(&after_ack, &mock_sram[0x0c80u], sizeof(after_ack));
+    TEST_ASSERT_EQUAL_UINT32(0u, after_ack);
+
+    /* Verify the IRQ counter incremented (and the polled counter
+     * did NOT — this is an ISR-path delivery). */
+    struct hailo_irq_delivery_counts after;
+    hailo_irq_delivery_get_counts(&after);
+    TEST_ASSERT_EQUAL_UINT32(before.notification_irq + 1u,
+                             after.notification_irq);
+    TEST_ASSERT_EQUAL_UINT32(before.notification_polled,
+                             after.notification_polled);
+}
+
+/*
+ * Companion test for the polled-fallback path. When the MSI ISR
+ * doesn't run (e.g. stub platform / pre-MSI init / IRQ delivery
+ * silently broken), the polling drainer in
+ * hailo_control_drain_pending_irqs must also handle
+ * FW_NOTIFICATION_BIT before W1C-ing the aggregate ISTATUS. Pre-
+ * fix this path cleared the bit without reading the buffer,
+ * dropping the notification.
+ *
+ * Drives the drain helper directly with FW_NOTIFICATION_BIT
+ * seeded into mock_bar0[ISTATUS_HOST] and a fake notification in
+ * mock_sram[0x0c80]. Asserts the buffer was read+ACK'd and the
+ * polled counter bumped (ISR counter untouched).
+ */
+static void test_drain_pending_irqs_handles_notification(void)
+{
+    control_setup_running();
+    msi_handler_register_via_identify();
+
+    struct hailo_irq_delivery_counts before;
+    hailo_irq_delivery_get_counts(&before);
+
+    /* Seed the d2h buffer: in_use=1, buf_len=28 (one header). */
+    uint32_t notification_word = (1u) | (28u << 16);
+    memcpy(&mock_sram[0x0c80u], &notification_word, sizeof(notification_word));
+    memset(&mock_sram[0x0c80u + 4u], 0, 28);
+
+    /* Seed ISTATUS with FW_NOTIFICATION_BIT (direct bar0 storage,
+     * not the one_shot preload — drain_pending_irqs reads ISTATUS
+     * twice (pre + post), and we want the pre-read to see the
+     * bit, then the post-read to see zero after the W1C). */
+    uint32_t istatus = HAILO_BCS_ISTATUS_HOST_FW_NOTIFICATION_BIT;
+    memcpy(&mock_bar0[HAILO_BCS_ISTATUS_HOST], &istatus, sizeof(istatus));
+
+    hailo_control_drain_pending_irqs("test");
+
+    /* Buffer ACK'd — first u32 cleared. */
+    uint32_t after_ack = 0;
+    memcpy(&after_ack, &mock_sram[0x0c80u], sizeof(after_ack));
+    TEST_ASSERT_EQUAL_UINT32(0u, after_ack);
+
+    /* Polled counter bumped exactly once; ISR counter untouched. */
+    struct hailo_irq_delivery_counts after;
+    hailo_irq_delivery_get_counts(&after);
+    TEST_ASSERT_EQUAL_UINT32(before.notification_irq,
+                             after.notification_irq);
+    TEST_ASSERT_EQUAL_UINT32(before.notification_polled + 1u,
+                             after.notification_polled);
+}
+
 /* CORE_IDENTIFY (opcode 0x2A, CPU_ID_CORE_CPU, empty-body request).
  * #253 / commit 4a0043a — added as a pre-submit liveness probe. This
  * test verifies the wire layout: 20-byte packed request (16 B common
@@ -7993,6 +8098,8 @@ int test_suite_hailo(void)
     RUN_TEST(test_msi_handler_acks_per_channel_src_irq);
     RUN_TEST(test_msi_handler_acks_per_channel_dst_irq);
     RUN_TEST(test_msi_handler_skips_per_channel_when_no_vdma_bits);
+    RUN_TEST(test_msi_handler_reads_and_acks_d2h_notification);
+    RUN_TEST(test_drain_pending_irqs_handles_notification);
     RUN_TEST(test_cs_translate_application_header_fills_defaults);
     RUN_TEST(test_cs_translate_application_header_boundary_bitmap);
     RUN_TEST(test_cs_translate_application_header_dual_cfg_channels);
