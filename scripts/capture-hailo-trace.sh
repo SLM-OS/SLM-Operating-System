@@ -55,21 +55,33 @@ KERNEL_BIN="${REPO_ROOT}/build/kernel/slmos.bin"
 # ---- arg parse -------------------------------------------------------------
 
 usage() {
-    sed -n '2,30p' "$0" >&2
+    # Print the entire leading comment block (everything from line 2
+    # up to the first non-`#` line). Beats a hardcoded line range,
+    # which silently truncated the idempotency note when the header
+    # grew past its assumed length.
+    awk 'NR==1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0" >&2
     exit 1
+}
+
+# Helper: error out cleanly if the flag that just matched has no
+# following value (e.g. `--phase` as the last token). Without this,
+# the `"$2"` reference triggers a generic "unbound variable" abort
+# under `set -u` instead of a useful message.
+require_val() {
+    [[ $# -ge 2 ]] || { echo "error: $1 requires a value" >&2; exit 1; }
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --phase)         PHASE="$2"; shift 2 ;;
-        --mech)          MECH="$2"; shift 2 ;;
-        --shell-cmd)     SHELL_CMD="$2"; shift 2 ;;
-        --scenario)      SCENARIO="$2"; shift 2 ;;
-        --board)         BOARD="$2"; shift 2 ;;
+        --phase)         require_val "$@"; PHASE="$2"; shift 2 ;;
+        --mech)          require_val "$@"; MECH="$2"; shift 2 ;;
+        --shell-cmd)     require_val "$@"; SHELL_CMD="$2"; shift 2 ;;
+        --scenario)      require_val "$@"; SCENARIO="$2"; shift 2 ;;
+        --board)         require_val "$@"; BOARD="$2"; shift 2 ;;
         --skip-build)    SKIP_BUILD=1; shift ;;
         --keep-cmdline)  KEEP_CMDLINE=1; shift ;;
-        --duration)      DURATION_MIN="$2"; shift 2 ;;
-        --out-dir)       OUT_DIR="$2"; shift 2 ;;
+        --duration)      require_val "$@"; DURATION_MIN="$2"; shift 2 ;;
+        --out-dir)       require_val "$@"; OUT_DIR="$2"; shift 2 ;;
         -h|--help)       usage ;;
         *) echo "unknown arg: $1" >&2; usage ;;
     esac
@@ -125,9 +137,15 @@ fi
 
 CLAIM_HELD=0
 CMDLINE_PUSHED=0
+TMP_CMDLINE=""  # set in the "write cmdline.txt" section; cleanup deletes if non-empty
 
 cleanup() {
     local rc=$?
+    # Tempfile may have been created but not yet rm'd on the success
+    # path (e.g. if labctl sdwire update failed mid-flight). Idempotent.
+    if [[ -n "$TMP_CMDLINE" ]]; then
+        rm -f "$TMP_CMDLINE" 2>/dev/null || true
+    fi
     if [[ "$CMDLINE_PUSHED" -eq 1 && "$KEEP_CMDLINE" -eq 0 ]]; then
         echo "==> removing cmdline.txt (restoring clean card state)" >&2
         labctl power off "$BOARD" >/dev/null 2>&1 || true
@@ -154,8 +172,11 @@ CLAIM_HELD=1
 
 # ---- write cmdline.txt + flash kernel --------------------------------------
 
+# Tempfile is tracked via the file-scope $TMP_CMDLINE so the EXIT
+# trap's cleanup() can rm it on any failure path between here and the
+# explicit rm at the end of this section. (A `trap '...' RETURN` only
+# fires inside functions, not at script-global scope.)
 TMP_CMDLINE="$(mktemp -t cmdline.XXXXXX.txt)"
-trap 'rm -f "$TMP_CMDLINE"' RETURN  # local cleanup for this section
 echo "hailo_trace.phase=${PHASE} hailo_trace.mech=${MECH}" > "$TMP_CMDLINE"
 
 echo "==> powering off + flashing kernel + cmdline.txt" >&2
@@ -168,12 +189,18 @@ labctl sdwire update "$BOARD" -p 1 \
     || { echo "error: sdwire update failed" >&2; exit 3; }
 CMDLINE_PUSHED=1
 rm -f "$TMP_CMDLINE"
+TMP_CMDLINE=""  # cleanup() now no-ops on the tempfile
 
 # ---- capture ---------------------------------------------------------------
 
 # Boot capture: read serial until the shell prompt appears, panic
 # pattern hits, or timeout. The kernel emits >100 lines of init output
 # before the shell; a 90 s window is generous.
+#
+# labctl's `--until` is interpreted as a POSIX extended regex (verified
+# end-to-end against pi-5-1 in PR #781 / #783). `|` is alternation and
+# `$` anchors end-of-line; that's why "slmos> $" further down matches
+# the bare prompt line after each command rather than a literal `$`.
 echo "==> capturing boot serial → $OUT_FILE" >&2
 {
     echo "# SLM-OS hailo_trace capture"
@@ -198,6 +225,10 @@ if [[ -n "$SHELL_CMD" ]]; then
     echo "==> sending shell command(s): $SHELL_CMD" >&2
     # Multiple commands separated by ; are sent in sequence. labctl
     # serial send handles one command at a time so we split + loop.
+    # Known limitation: split is unconditional on `;`, so a quoted
+    # semicolon inside the shell command (e.g. --shell-cmd "echo 'a;
+    # b'") gets miscounted. Acceptable for a debug tool; if needed,
+    # switch to a flag that takes a repeated --shell-cmd instead.
     {
         echo ""
         echo "# --- shell-cmd output ---"
