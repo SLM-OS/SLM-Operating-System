@@ -225,6 +225,29 @@ uint64_t ga10b_weights_pool_size_bytes(void);
 void ga10b_dispatch_verbose_set(bool on);
 bool ga10b_dispatch_verbose_get(void);
 
+/* #788 diagnostic: latch FECS_CURRENT_CTX + fb_mmu_fault_inst +
+ * fb_mmu_fault_addr + fb_mmu_fault_info in one tight read window,
+ * decode the inst-block physical addresses, hex-dump both inst
+ * blocks' 4 KB contents, and scan for pointer-encoded forms of the
+ * canonical fault VA `0xc01000`.
+ *
+ * The atomic latch prevents a fresh MMU fault landing during the
+ * slow per-byte DRAM dump from clobbering the registers we wanted
+ * to capture — a problem hit when probing via the `peek` shell
+ * command over serial (see `issue_788_path_b_diagnostic.md` in
+ * the project memory).
+ *
+ * `tag` is the log prefix for the latch line; per-inst-block dumps
+ * tag themselves "GA10B-INST-CTX" and "GA10B-INST-FAULT" so the
+ * captured UART log can grep them apart regardless of the caller's
+ * outer tag.
+ *
+ * Hooked into `ga10b_dump_gr_state` so every wedge handler that
+ * prints the GR-state register snapshot also dumps the inst blocks.
+ * Also callable directly via the `nvgpu instdump` shell verb for
+ * post-mortem inspection after the channel has been latched dead. */
+void ga10b_dump_inst_blocks_atomic(const char *tag);
+
 /* Phase 7: Submit host-family SEMAPHORE_RELEASE as smoke test.
  * Returns 0 iff the semaphore is observed at its target VA within
  * timeout. PBDMA-decoded; bypasses GR. */
