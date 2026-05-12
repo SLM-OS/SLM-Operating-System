@@ -4576,6 +4576,39 @@ int cmd_nvgpu(int argc, char *argv[])
         ga10b_dump_inst_blocks_atomic("nvgpu-instdump");
         return 0;
     }
+    if (strcmp(argv[1], "rebuild-gmmu") == 0) {
+        /* #788 Stage 2: allocate a fresh PDB tree in SLM-OS,
+         * overwrite the inst block's PDB pointer, and re-install
+         * PTEs mapping every preserved dmabuf at its original GPU
+         * VA. See `ga10b_gmmu_rebuild_for_handoff` in
+         * ga10b_gmmu.c.
+         *
+         * Requires `nvgpu channel` to have run first (so the
+         * handoff is loaded). Reads `inst_block_phys` from
+         * FECS_CURRENT_CTX — the runlist still references that
+         * physical page, so filling it with valid contents is
+         * what makes the channel usable post-kexec.
+         *
+         * Usage:
+         *   nvgpu rebuild-gmmu     — rebuild against the handoff
+         *                            and FECS_CURRENT_CTX */
+        const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+        if (h == NULL || h->magic != GA10B_CHANNEL_HANDOFF_MAGIC) {
+            shell_puts("rebuild-gmmu: handoff not loaded — "
+                       "run `nvgpu channel` first\r\n");
+            return -1;
+        }
+        uint64_t inst_phys = ga10b_gmmu_discover_inst_block_phys();
+        if (inst_phys == 0) {
+            shell_puts("rebuild-gmmu: FECS_CURRENT_CTX returned no "
+                       "current ctx (target=0)\r\n");
+            return -1;
+        }
+        int rc = ga10b_gmmu_rebuild_for_handoff(inst_phys, h);
+        shell_printf("rebuild-gmmu: rc=%d (inst_phys=0x%lx)\r\n",
+                     rc, (unsigned long)inst_phys);
+        return rc;
+    }
     if (strcmp(argv[1], "engine-clear") == 0) {
         return cmd_nvgpu_engine_clear();
     }

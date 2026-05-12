@@ -997,6 +997,210 @@ int ga10b_gmmu_free(uint64_t inst_block_phys,
     return 0;
 }
 
+/* ============================================================
+ * #788 Stage 2: rebuild GMMU state for an inherited channel.
+ *
+ * After kexec, Linux's nvgpu has freed the channel's inst block,
+ * page-directory base (PDB), and intermediate page tables —
+ * verified by `nvgpu instdump` (PR #797) showing inst-block
+ * contents as ARM64 kernel code (mid-boot allocations) or random
+ * weight bytes (mid-xload). The Stage 1 reservation in
+ * `pmm_user_reserve_add` (PR #801) keeps SLM-OS from overwriting
+ * the inst-block page itself, but the PDB and page tables stay
+ * gone — they were freed before SLM-OS could see them.
+ *
+ * What survives: the helper's user-allocated dmabufs (USERD,
+ * GPFIFO, pushbuffer, semaphore, SASS pool, cbuf, QMD pool,
+ * weights pool first-page, handoff dmabuf). These are tied to
+ * the helper's open file descriptors, so Linux's reference
+ * counting keeps them alive across kexec. The handoff struct
+ * publishes (phys, gpu_va, size) for each.
+ *
+ * Strategy: build a fresh PDB tree in SLM-OS and re-install PTEs
+ * mapping every preserved dmabuf at its original GPU VA. Write
+ * the inst-block's PDB pointer to point at the new tree. The
+ * GPU's runlist still references the old inst-block physical
+ * address (because that's what nvgpu wrote pre-kexec), but we're
+ * filling THAT physical page with a fresh inst block — so the
+ * runlist's pointer becomes meaningful again. TLB-invalidate
+ * after the rebuild so any cached PDB-walks from before-kexec
+ * are flushed.
+ *
+ * **Scope:** maps fixed-size buffers from the handoff at their
+ * recorded GPU VAs. Skips the weights pool beyond its first
+ * page — the 1.5 GB region is SMMU-stitched from scattered
+ * physical pages, and the handoff only publishes the first
+ * page's phys. A future enhancement (Helper Stage 2.1?) could
+ * enumerate per-page phys via /proc/self/pagemap pre-kexec and
+ * publish a longer reserve list, enabling full weights-pool
+ * mapping. Until then, slm xload's W3 staging will succeed for
+ * the first 4 KB chunk only.
+ * ============================================================ */
+
+#include "ga10b_channel_handoff.h"
+#include "../../include/uart.h"
+
+/* Inst-block PDB-pointer encoding per
+ * `~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_ram_ga10b.h:62-71`.
+ * Replicates `ga10b_ramin_init_pdb` from the nvgpu source — keeps
+ * the encoding correct without dragging the full HW reg header in. */
+#define GA10B_RAM_IN_PDB_TARGET_SYS_NCOH  0x3u
+#define GA10B_RAM_IN_PDB_VOL_TRUE         0x4u
+#define GA10B_RAM_IN_USE_VER2_PT_FORMAT   0x400u
+#define GA10B_RAM_IN_BIG_PAGE_SIZE_64KB   0x800u
+
+/* Map `n_pages` of contiguous physical memory at the given GPU
+ * VA. Helper for the rebuild path — calls into the existing
+ * `map_one_page` so it benefits from the auto-allocated
+ * intermediate-table code. Returns 0 on success, -1 on PMM
+ * exhaustion or invalid range; on partial failure, the pages
+ * mapped before the failure stay mapped (the caller treats this
+ * as fatal). */
+static int rebuild_map_range(uint64_t pdb_phys, uint64_t gpu_va_base,
+                             uint64_t phys_base, uint32_t n_pages)
+{
+    for (uint32_t i = 0; i < n_pages; i++) {
+        uint64_t va_i   = gpu_va_base + (uint64_t)i * 4096ull;
+        uint64_t phys_i = phys_base   + (uint64_t)i * 4096ull;
+        if (map_one_page(pdb_phys, va_i, phys_i, 0) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
+                                   const struct ga10b_channel_handoff *h)
+{
+    if (h == NULL) {
+        return -1;
+    }
+    if (!phys_in_dram(inst_block_phys, 4096)) {
+        return -1;
+    }
+
+    /* 1. Allocate a fresh PDB page from SLM-OS PMM. Zero it so
+     *    every PDE3 entry reads as invalid until `map_one_page`
+     *    populates the ones it needs. */
+    void *pdb_page = alloc_zero_table_page();
+    if (pdb_page == NULL) {
+        uart_puts("[rebuild-gmmu] PMM exhausted allocating PDB\n");
+        return -1;
+    }
+    uint64_t pdb_phys = (uint64_t)(uintptr_t)pdb_page;
+    uart_printf("[rebuild-gmmu] fresh PDB at phys=0x%lx\n",
+                (unsigned long)pdb_phys);
+
+    /* 2. Zero the inst block (Stage 1 reservation kept the page
+     *    around but Linux may have left non-zero residue) and
+     *    write the PDB pointer at words 128-129 (byte offsets
+     *    512/516) per `ram_in_page_dir_base_lo_w()`/`_hi_w()`. */
+    volatile uint32_t *inst = (volatile uint32_t *)(uintptr_t)inst_block_phys;
+    for (int i = 0; i < 1024; i++) {
+        inst[i] = 0;
+    }
+
+    /* Encode PDB-lo word: aperture (sys_mem_ncoh on Tegra),
+     * volatile bit, ver2 page-table format, 64 KB big-page size,
+     * and phys[31:12] in bits [31:12] (the bottom 12 bits of phys
+     * are zero by page alignment). */
+    uint32_t pdb_lo_word =
+        GA10B_RAM_IN_PDB_TARGET_SYS_NCOH |
+        GA10B_RAM_IN_PDB_VOL_TRUE |
+        GA10B_RAM_IN_USE_VER2_PT_FORMAT |
+        GA10B_RAM_IN_BIG_PAGE_SIZE_64KB |
+        (uint32_t)(pdb_phys & 0xfffff000u);
+    uint32_t pdb_hi_word = (uint32_t)(pdb_phys >> 32);
+
+    inst[128] = pdb_lo_word;
+    inst[129] = pdb_hi_word;
+    cache_clean_range((void *)(uintptr_t)inst_block_phys, 4096);
+
+    uart_printf("[rebuild-gmmu] inst_block@0x%lx written: "
+                "PDB_lo=0x%08x PDB_hi=0x%08x\n",
+                (unsigned long)inst_block_phys,
+                (unsigned)pdb_lo_word, (unsigned)pdb_hi_word);
+
+    /* 3. Map each preserved buffer at its original GPU VA. The
+     *    handoff publishes (phys, gpu_va, size) for every dmabuf
+     *    the helper allocated; we replay those mappings into the
+     *    fresh PDB tree.
+     *
+     *    USERD and GPFIFO are accessed by PBDMA via physical
+     *    addresses (not GPU VAs), so they don't need GMMU
+     *    mappings — skip them.
+     *
+     *    Buffers that DO need GMMU mappings (Pushbuffer +
+     *    Semaphore + SASS pool + cbuf + QMD pool + weights pool
+     *    first-page) are mapped below. Anything with size=0 or
+     *    gpu_va=0 is skipped — that means the helper didn't
+     *    allocate that buffer for this channel. */
+    struct rebuild_buf {
+        const char *tag;
+        uint64_t phys;
+        uint64_t gpu_va;
+        uint64_t size_bytes;
+    };
+
+    struct rebuild_buf bufs[] = {
+        { "pushbuf", h->pushbuf_phys, h->pushbuf_gpu_va,
+          (uint64_t)h->pushbuf_size },
+        { "sem", h->semaphore_phys, h->semaphore_gpu_va, 4096 },
+        { "shader", h->shader_phys, h->shader_gpu_va,
+          (uint64_t)h->shader_size },
+        { "cbuf", h->cbuf_phys, h->cbuf_gpu_va,
+          (uint64_t)h->cbuf_size },
+        { "qmd_pool", h->qmd_pool_phys, h->qmd_pool_gpu_va,
+          (uint64_t)h->qmd_pool_size_bytes },
+        /* Weights pool: only the first physical page's phys is
+         * known. The 1.5 GB region is SMMU-stitched from
+         * scattered pages so a single (phys, size) reserve
+         * doesn't cover the rest. Map the first page so the
+         * caller can at least chunk-0-test W3 staging; further
+         * pages will MMU-fault and the wedge handler will dump. */
+        { "weights_first", h->weights_pool_phys, h->weights_pool_gpu_va,
+          (h->weights_pool_size_bytes != 0) ? 4096ull : 0ull },
+    };
+
+    int mapped = 0;
+    for (size_t i = 0; i < sizeof(bufs) / sizeof(bufs[0]); i++) {
+        const struct rebuild_buf *b = &bufs[i];
+        if (b->size_bytes == 0 || b->phys == 0 || b->gpu_va == 0) {
+            uart_printf("[rebuild-gmmu]  skip %-14s (not allocated)\n",
+                        b->tag);
+            continue;
+        }
+        uint32_t n_pages = (uint32_t)((b->size_bytes + 4095u) / 4096u);
+        if (rebuild_map_range(pdb_phys, b->gpu_va, b->phys,
+                               n_pages) < 0) {
+            uart_printf("[rebuild-gmmu]  FAIL %-14s gpu_va=0x%lx "
+                        "phys=0x%lx pages=%u\n",
+                        b->tag, (unsigned long)b->gpu_va,
+                        (unsigned long)b->phys, (unsigned)n_pages);
+            return -1;
+        }
+        uart_printf("[rebuild-gmmu]  ok   %-14s gpu_va=0x%lx "
+                    "phys=0x%lx pages=%u\n",
+                    b->tag, (unsigned long)b->gpu_va,
+                    (unsigned long)b->phys, (unsigned)n_pages);
+        mapped++;
+    }
+
+    /* Amortized dsb sy so all PTE writes are visible to the GPU
+     * before TLB invalidate fires (matches the `dsb sy` at the
+     * tail of `ga10b_gmmu_alloc` for the same reason). */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* 4. Flush any TLB entries the GPU might have cached against
+     *    the old PDB-tree state. `ga10b_gmmu_tlb_invalidate`
+     *    targets the new PDB phys so the next walk loads fresh
+     *    PTEs from the tree we just built. */
+    int rc = ga10b_gmmu_tlb_invalidate(pdb_phys);
+    uart_printf("[rebuild-gmmu] TLB invalidate rc=%d, %d buffer(s) "
+                "mapped\n", rc, mapped);
+    return (rc == 0) ? 0 : -1;
+}
+
 /* Try to satisfy an allocation of `n_pages` from the free-extent
  * tracker (exact-fit). Returns the freed VA on success, removing
  * its slot; returns 0 on miss (caller falls through to the bump
