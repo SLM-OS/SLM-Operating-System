@@ -134,6 +134,19 @@ enum hailo_control_cpu {
 #define HAILO_PCIE_BOOT_IRQ                      0x02u
 #define HAILO_BCS_ISTATUS_HOST_BOOT_IRQ_BIT      \
     (HAILO_PCIE_BOOT_IRQ << HAILO_BCS_ISTATUS_HOST_SW_IRQ_SHIFT)
+/* The BOOT and FW_NOTIFICATION encodings share the same ISTATUS
+ * bit (0x02 in the SW_IRQ byte). The aliasing is intentional and
+ * temporal — during boot fw drives it as BOOT_IRQ; after
+ * fw_boot.is_in_boot flips to false it encodes FW_NOTIFICATION.
+ * `hailo_core.c` W1Cs it explicitly post-FW_LOADED before the MSI
+ * handler is registered, so by the time `control_msi_handler` sees
+ * the bit it always means FW_NOTIFICATION. Pinned here so a future
+ * "let's normalise these to different bits" refactor breaks the
+ * build instead of silently changing IRQ semantics. */
+_Static_assert(HAILO_BCS_ISTATUS_HOST_BOOT_IRQ_BIT ==
+               HAILO_BCS_ISTATUS_HOST_FW_NOTIFICATION_BIT,
+               "BOOT_IRQ and FW_NOTIFICATION must share the same "
+               "ISTATUS bit — temporal disambiguation only");
 
 /* Subset of HailoRT's HAILO_CONTROL_OPCODE_*. Add more as the
  * kernel learns to send them. */

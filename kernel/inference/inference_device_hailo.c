@@ -527,8 +527,8 @@ void hailo_fw_drain_d2h_notifications(uint32_t max_events)
  * runs on CPU 0. The counts are diagnostic only; eventual
  * consistency is fine.
  */
-static volatile uint32_t hailo_notification_irq_count = 0;
-static volatile uint32_t hailo_notification_polled_count = 0;
+static uint32_t hailo_notification_irq_count = 0;
+static uint32_t hailo_notification_polled_count = 0;
 
 void hailo_irq_delivery_get_counts(struct hailo_irq_delivery_counts *out)
 {
