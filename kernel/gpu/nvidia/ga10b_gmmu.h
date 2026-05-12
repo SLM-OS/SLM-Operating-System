@@ -346,6 +346,16 @@ uint32_t ga10b_gmmu_free_tracker_count(void);
  */
 uint64_t ga10b_gmmu_discover_inst_block_phys(void);
 
+/* Bounds-check a candidate physical address against the platform's
+ * DRAM aperture (and OP-TEE carveout on Jetson). Wraps the
+ * file-static `phys_in_dram` helper in ga10b_gmmu.c so other GA10B
+ * code (e.g. the wedge-handler inst-block dumper) can validate a
+ * phys before dereferencing it as a normal-memory load — a
+ * dereference of an MMIO or unmapped region can fault or hang the
+ * CPU. Returns true iff [phys, phys+bytes) is fully inside DRAM
+ * and does not intersect the OP-TEE carveout. */
+bool ga10b_phys_in_dram(uint64_t phys, size_t bytes);
+
 /* Discover the inherited channel's inst block by walking DRAM and
  * cross-checking each candidate against a known (gpu_va, leaf_phys)
  * pair from the channel handoff. Used as a fallback when

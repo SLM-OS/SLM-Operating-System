@@ -115,6 +115,13 @@ static inline bool phys_in_dram(uint64_t phys, size_t bytes)
     return true;
 }
 
+/* Non-inline public wrapper so other GA10B TUs can bounds-check a
+ * phys before dereferencing it. Declared in ga10b_gmmu.h. */
+bool ga10b_phys_in_dram(uint64_t phys, size_t bytes)
+{
+    return phys_in_dram(phys, bytes);
+}
+
 static inline uint32_t phys_read32(uint64_t phys)
 {
     if (!phys_in_dram(phys, 4)) return 0;
