@@ -113,6 +113,17 @@ int oplib_weights_pool_stage(uint64_t gpu_va,
     uint64_t bounce_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
     uint64_t bounce_gva  = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
 
+    /* Diagnostic counter for the #788 FECS-wedge investigation:
+     * cumulative count of CE chunks staged across every call to
+     * this function. Printed every CHUNK_PROGRESS_PRINT chunks so
+     * the operator can see roughly when a wedge fires relative to
+     * total staged volume. Unconditional (not gated by `gpu debug`)
+     * — print rate is ~1 line per 64 MB at the 64 KB chunk size,
+     * low enough not to drown the log but high enough to map the
+     * wedge to a specific tensor / staged-bytes window. */
+    static uint64_t g_chunk_count = 0;
+    enum { CHUNK_PROGRESS_PRINT = 1024 };
+
     const uint8_t *src_bytes = (const uint8_t *)src;
     size_t off = 0;
     while (off < len) {
@@ -136,9 +147,25 @@ int oplib_weights_pool_stage(uint64_t gpu_va,
         int rc = ga10b_ce_memcpy(b, bounce_gva, gpu_va + off,
                                   (uint32_t)to_copy);
         if (rc != 0) {
+            uart_printf("[weights-pool] stage FAILED at cumulative "
+                        "chunk %llu (dst_gva=0x%llx, off=%zu/%zu, "
+                        "rc=%d)\n",
+                        (unsigned long long)g_chunk_count,
+                        (unsigned long long)(gpu_va + off),
+                        off, len, rc);
             return rc;
         }
         off += to_copy;
+        g_chunk_count++;
+        if ((g_chunk_count % CHUNK_PROGRESS_PRINT) == 0) {
+            uart_printf("[weights-pool] %llu chunks staged "
+                        "(~%llu MB cumulative)\n",
+                        (unsigned long long)g_chunk_count,
+                        (unsigned long long)
+                            ((uint64_t)g_chunk_count *
+                             (uint64_t)POOL_STAGE_CHUNK_BYTES /
+                             (1024ull * 1024ull)));
+        }
     }
     return 0;
 }

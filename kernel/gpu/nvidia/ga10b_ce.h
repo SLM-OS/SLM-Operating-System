@@ -28,6 +28,7 @@
 #ifndef GPU_NVIDIA_GA10B_CE_H
 #define GPU_NVIDIA_GA10B_CE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -167,5 +168,17 @@ int ga10b_ce_memcpy(struct ga10b_bringup *b,
                     uint64_t src_gpu_va,
                     uint64_t dst_gpu_va,
                     uint32_t bytes);
+
+/*
+ * "Channel went into a wedge state on a prior CE submit" latch.
+ * Set automatically by `ga10b_ce_memcpy` when a submit times out;
+ * checked at the head of every subsequent submit so a single wedge
+ * during a long W3 staging pass doesn't snowball into thousands of
+ * 2-second timeouts. Resettable so a future channel-recovery path
+ * (M6.B-level work) can clear it after fixing the underlying
+ * state. #788 investigation.
+ */
+bool ga10b_ce_channel_dead(void);
+void ga10b_ce_channel_dead_reset(void);
 
 #endif /* GPU_NVIDIA_GA10B_CE_H */
