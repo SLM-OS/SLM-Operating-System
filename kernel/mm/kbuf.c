@@ -58,8 +58,19 @@
  */
 enum kbuf_slow_err {
     KBUF_SLOW_OK = 0,
+    /* Bump-allocator can't fit the request inside `KBUF_VA_LIMIT`. */
     KBUF_SLOW_OUT_OF_VA,
+    /* `vmm_ensure_kernel_l2_table` failed (no PMM page for the L2
+     * table, or the L1 entry was a 1 GB block conflicting with
+     * 2 MB sub-mapping). Reported BEFORE any chunk is allocated, so
+     * `failed_chunk` is not meaningful for this case. */
+    KBUF_SLOW_L2_INSTALL_FAIL,
+    /* PMM ran out while allocating a 2 MB chunk mid-loop;
+     * `failed_chunk` and `total_chunks` are valid. */
     KBUF_SLOW_PMM_EXHAUSTION,
+    /* `vmm_map_block` rejected an otherwise-valid chunk (rare —
+     * collision with an existing mapping at the bump position).
+     * `failed_chunk`, `failed_va`, `failed_phys`, `vmm_rc` valid. */
     KBUF_SLOW_VMM_MAP_FAIL,
 };
 
@@ -218,15 +229,11 @@ static void *try_slow_path(struct kbuf_region *r, size_t total_bytes,
      * otherwise hit "no L2 table for VA..." on the first chunk.
      * Idempotent — repeat allocations into the same 1 GB span
      * skip the alloc. */
-    for (uint64_t off = 0; off < total_bytes;
-         off += (1UL << 30) /* 1 GB L1 stride */) {
+    for (uint64_t off = 0; off < total_bytes; off += L1_BLOCK_SIZE) {
         if (vmm_ensure_kernel_l2_table(va_base + off) != 0) {
-            diag->err          = KBUF_SLOW_VMM_MAP_FAIL;
-            diag->failed_chunk = 0;
+            diag->err          = KBUF_SLOW_L2_INSTALL_FAIL;
             diag->total_chunks = n_chunks;
             diag->failed_va    = va_base + off;
-            diag->failed_phys  = 0;
-            diag->vmm_rc       = -1;
             return NULL;
         }
     }
@@ -321,6 +328,12 @@ void *kbuf_alloc(size_t bytes)
         switch (diag.err) {
         case KBUF_SLOW_OUT_OF_VA:
             uart_puts("[kbuf] out of VA window — slow path refused\n");
+            break;
+        case KBUF_SLOW_L2_INSTALL_FAIL:
+            uart_printf("[kbuf] L2-table install failed at VA 0x%lx "
+                        "(total %u chunks)\n",
+                        (unsigned long)diag.failed_va,
+                        (unsigned)diag.total_chunks);
             break;
         case KBUF_SLOW_PMM_EXHAUSTION:
             uart_printf("[kbuf] slow-path PMM exhaustion at chunk %u/%u\n",

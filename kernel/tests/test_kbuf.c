@@ -145,6 +145,13 @@ static void test_kbuf_free_null_is_noop(void)
  * here) round-trips a multi-chunk allocation correctly. */
 static void test_kbuf_slow_path_round_trip(void)
 {
+    /* Defensive: clear any leftover force-slow flag from a previous
+     * test. Today the suite's TEST_ASSERT_NOT_NULL is fatal so the
+     * end-of-test reset (below) always runs, but if the harness ever
+     * switches to continue-on-failure semantics this guard keeps
+     * this test self-contained. */
+    kbuf_test_set_force_slow_path(false);
+
     size_t region_before = kbuf_region_count();
     size_t bytes_before  = kbuf_total_bytes_allocated();
 
