@@ -1,0 +1,129 @@
+#cloud-config
+# First-boot configuration for the HailoRT capture VM.
+# Runs once during build-vm-image.sh; installs HailoRT, builds hailo_pci via DKMS,
+# applies determinism tweaks, then powers off. The customized qcow2 is preserved
+# and reused for every capture run.
+
+hostname: hailort-capture
+manage_etc_hosts: true
+
+users:
+  - default
+  - name: slmos
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: slmos
+
+chpasswd:
+  expire: false
+
+ssh_pwauth: true
+
+# No network-time, no DNS, no apt-daily timers. Determinism > convenience.
+write_files:
+  - path: /etc/systemd/system/hailort-capture.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=HailoRT MMIO capture run
+      After=multi-user.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/opt/hailort-stage/20-capture-run.sh
+      StandardOutput=journal+console
+      StandardError=journal+console
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/sysctl.d/99-hailort-determinism.conf
+    permissions: "0644"
+    content: |
+      kernel.randomize_va_space = 0
+      kernel.perf_event_paranoid = 3
+      kernel.kptr_restrict = 2
+
+  - path: /etc/modprobe.d/hailo_pci.conf
+    permissions: "0644"
+    content: |
+      # The placeholder QEMU stub-stub device only fakes the absolute minimum
+      # magic to satisfy hailo_pci's probe (vendor ID + firmware-loaded flag).
+      # `support_soft_reset=0` lets load_nnc_firmware early-return on the
+      # firmware-loaded check instead of trying to soft-reset (which would
+      # require a much larger magic-register surface).
+      # Applies to the kernel's PCI-auto-probe at boot, not just modprobe.
+      #
+      # no_power_mode=1 disables `pci_set_power_state(PCI_D3hot)` after the
+      # board is activated. The stub-stub doesn't expose a PCI Power
+      # Management capability, so that call fails with -EIO and probe
+      # propagates the error.
+      options hailo_pci support_soft_reset=0 no_power_mode=1
+
+package_update: true
+package_upgrade: false
+packages:
+  - pciutils
+  - kmod
+
+runcmd:
+  # Install build deps + headers for the CURRENTLY RUNNING kernel only.
+  # We intentionally avoid `linux-headers-generic` because the meta package
+  # pulls in a newer linux-image (e.g. -111 when the base image runs -106),
+  # which causes DKMS to build for the running kernel (-106) while grub picks
+  # the newer one (-111) on next boot — modprobe then fails because hailo_pci
+  # was never built for the boot kernel. `linux-headers-$(uname -r)` keeps
+  # the running kernel and the DKMS target identical.
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential dkms "linux-headers-$(uname -r)"
+
+  # Stage payload: copy bundled scripts + .debs off the cloud-init seed ISO.
+  # The seed ISO is built with `genisoimage -volid CIDATA`, which writes the
+  # label uppercase on iso9660. Older docs say lowercase `cidata` — using blkid
+  # to look up the device by label is case-correct either way.
+  - mkdir -p /opt/hailort-stage
+  - 'SEED_DEV=$(blkid -L CIDATA || blkid -L cidata); echo "seed device: $SEED_DEV"'
+  - 'SEED_DEV=$(blkid -L CIDATA || blkid -L cidata); mount "$SEED_DEV" /mnt'
+  - cp -v /mnt/stage/*.deb /opt/hailort-stage/
+  - cp -v /mnt/stage/*.sh  /opt/hailort-stage/
+  - chmod +x /opt/hailort-stage/*.sh
+  - umount /mnt
+
+  # Mask everything that issues background activity. Order matters: mask before enable,
+  # so the capture service does not race with apt-daily, snapd, etc.
+  - bash /opt/hailort-stage/00-determinism.sh
+
+  # Install Hailo PCIe driver DKMS package first, then HailoRT userspace.
+  # Hailo's postinst scripts have hardcoded interactive prompts (`read -t 10`)
+  # that bail under non-interactive dpkg: when stdin is closed they return
+  # exit 1 (not >128), the `|| (($? > 128))` guard evaluates false, and
+  # `set -e` kills the postinst. `yes Y` feeds a continuous stream so every
+  # prompt is answered Y. Side effects:
+  #   - hailort-pcie-driver: Y -> compile_and_install_pcie_driver_with_dkms
+  #   - hailort:             Y -> start_hailort_service  (we re-mask it below)
+  - 'yes Y | DEBIAN_FRONTEND=noninteractive dpkg -i /opt/hailort-stage/hailort-pcie-driver_4.23.0_all.deb || (apt-get -fy install && yes Y | dpkg -i /opt/hailort-stage/hailort-pcie-driver_4.23.0_all.deb)'
+  - 'yes Y | DEBIAN_FRONTEND=noninteractive dpkg -i /opt/hailort-stage/hailort_4.23.0_amd64.deb           || (apt-get -fy install && yes Y | dpkg -i /opt/hailort-stage/hailort_4.23.0_amd64.deb)'
+
+  # Mask hailort service (started by its postinst's Y answer) — capture runs
+  # bring up the device themselves; an auto-started daemon would race them.
+  - systemctl mask hailort.service || true
+
+  # Confirm DKMS built the module.
+  - bash -c 'modinfo hailo_pci > /opt/hailort-stage/modinfo.txt 2>&1 || echo "hailo_pci modinfo FAILED" > /opt/hailort-stage/modinfo.txt'
+
+  # Enable the capture service for next boot.
+  - systemctl enable hailort-capture.service
+
+  # Reload sysctls without rebooting.
+  - sysctl --system
+
+  # Mark completion and power off so the qcow2 is reusable as a snapshot.
+  - touch /opt/hailort-stage/build-complete.stamp
+  - sync
+  - shutdown -h now
+
+# Disable cloud-init on subsequent boots — capture runs are not first-boot scenarios.
+power_state:
+  mode: poweroff
+  timeout: 60
+  condition: true
