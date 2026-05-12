@@ -116,6 +116,9 @@ int test_suite_hailo(void);
 /* Hailo boundary-trace framework: cmdline parser, masks, phase tracker */
 int test_suite_hailo_trace(void);
 
+/* Hailo BAR4 RE corpus parser + replay-step mechanism (#795 Task 0.4) */
+int test_suite_hailo_replay(void);
+
 /* HEF outer-header validator + nanopb freestanding smoke test */
 int test_suite_hef(void);
 

@@ -55,6 +55,76 @@ set_property(CACHE PLATFORM PROPERTY STRINGS "QEMU_VIRT" "JETSON_ORIN_NANO" "RAS
 # Add platform define
 add_compile_definitions(PLATFORM_${PLATFORM}=1)
 
+# Full 40-character git SHA the build is being compiled from.
+# Consumed by the Hailo RE replay-step shell command (#795 Phase 0
+# Task 0.4), which emits the SHA verbatim into the
+# `HAILO_RE_CORPUS_RESPONSE` line for the driver script to copy into
+# the corpus entry's `validated_at_commit` field. The abbreviation
+# round-trip in the driver is what the full SHA exists to skip — do
+# NOT shorten this to --short or rev-list-7.
+#
+# Falls back to the literal string `unknown` when git is unavailable
+# (out-of-tree builds, source tarballs). The fallback intentionally
+# does not match the 40-hex shape so the driver script can reject it
+# as a non-validated build.
+execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE _slmos_git_sha
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+    RESULT_VARIABLE _slmos_git_sha_rc
+)
+if(NOT _slmos_git_sha_rc EQUAL 0 OR _slmos_git_sha STREQUAL "")
+    set(_slmos_git_sha "unknown")
+endif()
+add_compile_definitions(SLMOS_GIT_SHA="${_slmos_git_sha}")
+
+# Force a reconfigure whenever HEAD changes — without this, the SHA
+# captured above gets baked into the cached compile_definitions at
+# the first `cmake -B build` and silently goes stale after every
+# subsequent commit. CMake's CMAKE_CONFIGURE_DEPENDS is the documented
+# way to add files whose mtime triggers a reconfigure.
+#
+# `git rev-parse --git-path <path>` resolves to the canonical location
+# regardless of whether the build is a normal clone (`.git/HEAD`) or a
+# worktree (`.git` is a file pointing at `.git/worktrees/<name>/HEAD`).
+# We watch three files:
+#
+#   - `HEAD`: changes on branch checkout
+#   - the active branch's ref (e.g. `refs/heads/main`): changes on commit
+#   - `packed-refs`: changes when refs are repacked
+function(_slmos_add_git_path_dep relpath)
+    execute_process(
+        COMMAND git rev-parse --git-path ${relpath}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE _abs
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _rc
+    )
+    if(_rc EQUAL 0 AND NOT "${_abs}" STREQUAL "" AND EXISTS "${_abs}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${_abs}"
+        )
+    endif()
+endfunction()
+if(NOT _slmos_git_sha STREQUAL "unknown")
+    _slmos_add_git_path_dep(HEAD)
+    _slmos_add_git_path_dep(packed-refs)
+    execute_process(
+        COMMAND git rev-parse --symbolic-full-name HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE _slmos_git_ref
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _slmos_git_ref_rc
+    )
+    if(_slmos_git_ref_rc EQUAL 0 AND _slmos_git_ref MATCHES "^refs/")
+        _slmos_add_git_path_dep("${_slmos_git_ref}")
+    endif()
+endif()
+
 # Deferred-scheduling preemption (ELR-trampoline) for secondary CPUs.
 # Calling switch_to() directly from an exception handler hangs on real
 # ARM64 hardware (abandoned exception frame); the trampoline runs
@@ -624,6 +694,7 @@ set(KERNEL_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_tensor.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_vdma.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_infer.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_re_corpus.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hailo_shell.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hef_header.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/ai_accel/hailo/hef_parser.c>
@@ -862,6 +933,7 @@ set(TEST_SOURCES
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hailo.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hailo_trace.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hailo_replay.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hef.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_hef_parser.c>
     kernel/tests/test_littlefs.c

@@ -25,6 +25,16 @@
  *   hailo infer B          — run an end-to-end VDMA inference smoke test
  *                            with a synthetic B-byte tensor.
  *   hailo cfgdump          — (Pi 5 only) raw 64-byte bus 1 config dump.
+ *   hailo replay-step P N  — read corpus at path P, replay every op
+ *                            with seq<N against real hardware, then
+ *                            issue the read at seq=N and print a
+ *                            HAILO_RE_CORPUS_RESPONSE line. P may be a
+ *                            VFS path (e.g. /mnt/files/tiny.jsonl) OR
+ *                            a FatFs path (0:/tiny.jsonl) when the
+ *                            corpus has been deposited directly on the
+ *                            boot SD card. #795 Phase 0 Task 0.4 —
+ *                            corpus format spec is in
+ *                            docs/hailo-re-corpus-format.md.
  *
  * Safe to run on any platform. On non-RASPI5 builds the driver is
  * never installed (stub returns -ENODEV) so `hailo` just reports
@@ -33,6 +43,7 @@
 
 #include "hailo.h"
 #include "hailo_control.h"
+#include "hailo_re_corpus.h"
 #include "hailo_trace.h"
 #include "hailo_cs_actions.h"
 #include "hailo_cs_builder.h"
@@ -43,6 +54,9 @@
 #include "hailo_vdma.h"
 #include "hef_header.h"
 #include "hef_parser.h"
+#include "boot_media.h"
+#include "fat32.h"
+#include "../lib/fatfs/ff.h"
 #include "pmm.h"
 #include "shell.h"
 #include "uart.h"
@@ -649,6 +663,326 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
     hailo_tensor_free(&ccw_tensor);
 
     shell_puts("hailo: ctxsmoke done\n");
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* `hailo replay-step` — #795 Phase 0 Task 0.4                                 */
+/* -------------------------------------------------------------------------- */
+
+/* Slurp a corpus file from the boot FAT volume into `dst` of size
+ * `dst_cap`. Returns the byte count on success, or a negative error
+ * code. The path must be FatFs-shaped (e.g. `0:/tiny.jsonl`), the
+ * caller is responsible for ensuring boot_media_allow_creates() has
+ * already been called at kernel start.
+ *
+ * Mirrors blob_autoload's mount-and-read pattern so the FAT volume
+ * is unmounted cleanly even if `f_open` fails. */
+static int replay_read_fat_file(const char *path, char *dst, size_t dst_cap,
+                                size_t *out_size)
+{
+    FATFS  fs;
+    FIL    fp;
+    FRESULT res;
+
+    struct blkdev *dev = boot_media_acquire();
+    if (!dev) return -1;
+    fatfs_disk_attach(dev);
+
+    res = f_mount(&fs, "0:", 1);
+    if (res != FR_OK) {
+        fatfs_disk_detach();
+        boot_media_release(dev);
+        return -2;
+    }
+
+    res = f_open(&fp, path, FA_READ);
+    if (res != FR_OK) {
+        (void)f_mount(NULL, "0:", 0);
+        fatfs_disk_detach();
+        boot_media_release(dev);
+        return -3;
+    }
+
+    FSIZE_t sz = f_size(&fp);
+    if ((uint64_t)sz > (uint64_t)dst_cap) {
+        (void)f_close(&fp);
+        (void)f_mount(NULL, "0:", 0);
+        fatfs_disk_detach();
+        boot_media_release(dev);
+        return -4;
+    }
+
+    UINT got = 0;
+    res = f_read(&fp, dst, (UINT)sz, &got);
+    (void)f_close(&fp);
+    (void)f_mount(NULL, "0:", 0);
+    fatfs_disk_detach();
+    boot_media_release(dev);
+
+    if (res != FR_OK || (FSIZE_t)got != sz) return -5;
+    if (out_size) *out_size = (size_t)got;
+    return 0;
+}
+
+/* `hailo replay-step <corpus-path> <seq-N>` — replay every op with
+ * `seq < N` against real hardware, then issue the read at `seq == N`
+ * and emit a single HAILO_RE_CORPUS_RESPONSE line for the driver
+ * script (Task 0.5) to ingest. Reads with seq < N are issued for
+ * their device-side side effects (W1C status, FIFO pop, IRQ ack);
+ * if the observed value disagrees with the corpus's recorded value
+ * we additionally emit a HAILO_RE_CORPUS_DIVERGENCE line and keep
+ * going so the operator gets the full picture.
+ *
+ * Full corpus format + line shapes: docs/hailo-re-corpus-format.md. */
+static int cmd_hailo_replay_step(int argc, char *argv[])
+{
+    if (argc < 4) {
+        shell_puts("usage: hailo replay-step <corpus-path> <seq-N>\n");
+        return 0;
+    }
+    if (!hailo_platform || !hailo_platform->read32 || !hailo_platform->write32) {
+        shell_puts("hailo: replay-step: no platform installed — "
+                   "compile with PLATFORM=RASPI5 and probe first\n");
+        return 0;
+    }
+
+    const char *path = argv[2];
+
+    /* Parse seq-N as a decimal uint32. Match the inline style other
+     * handlers use — no libc. */
+    uint64_t target_seq = 0;
+    for (const char *p = argv[3]; *p; p++) {
+        if (*p < '0' || *p > '9') {
+            shell_printf("hailo: replay-step: bad seq '%s'\n", argv[3]);
+            return 0;
+        }
+        if (target_seq > (UINT32_MAX - 9u) / 10u) {
+            shell_printf("hailo: replay-step: seq '%s' overflows u32\n", argv[3]);
+            return 0;
+        }
+        target_seq = target_seq * 10u + (uint64_t)(*p - '0');
+    }
+    if (target_seq == 0) {
+        shell_puts("hailo: replay-step: seq must be >= 1\n");
+        return 0;
+    }
+    const uint32_t target_seq_u32 = (uint32_t)target_seq;
+
+    /* Two input transports. A `0:/...` path reads directly from the
+     * boot FAT volume — Phase 0 driver scripts push corpora to the SD
+     * card via `sdwire_update`, so this is the operationally-relevant
+     * path. Anything else goes through VFS (LittleFS-backed
+     * /mnt/files) following the same convention as `hailo load`. */
+    const bool fat_path = (path[0] == '0' && path[1] == ':');
+
+    size_t text_size = 0;
+    size_t text_pages = 0;
+    char *text = NULL;
+
+    if (fat_path) {
+        /* Cap FAT-side allocation at 64 MB up-front — we don't know
+         * the file size until we've opened it, but the dst_cap on
+         * `replay_read_fat_file` enforces the bound. */
+        const size_t cap = 64u * 1024u * 1024u;
+        size_t max_pages = (cap + PAGE_SIZE - 1) / PAGE_SIZE;
+        /* Start with one page; the FAT reader returns -4 if the file
+         * exceeds the buffer, in which case we grow once. Single grow
+         * keeps the path simple for Phase 0; if corpora outgrow this
+         * the caller can pre-stat. */
+        text_pages = 1;
+        text = (char *)pmm_alloc_pages(text_pages);
+        if (!text) {
+            shell_puts("hailo: replay-step: pmm_alloc_pages failed\n");
+            return 0;
+        }
+        int rrc = replay_read_fat_file(path, text, text_pages * PAGE_SIZE,
+                                       &text_size);
+        if (rrc == -4) {
+            /* File larger than one page — retry with the cap allocation. */
+            pmm_free_pages(text, text_pages);
+            text_pages = max_pages;
+            text = (char *)pmm_alloc_pages(text_pages);
+            if (!text) {
+                shell_puts("hailo: replay-step: pmm_alloc_pages "
+                           "(grown) failed\n");
+                return 0;
+            }
+            rrc = replay_read_fat_file(path, text, text_pages * PAGE_SIZE,
+                                       &text_size);
+        }
+        if (rrc != 0) {
+            shell_printf("hailo: replay-step: FAT read '%s' failed "
+                         "(rc=%d)\n", path, rrc);
+            pmm_free_pages(text, text_pages);
+            return 0;
+        }
+    } else {
+        struct vfs_entry_info info = {0};
+        if (vfs_stat_path(path, &info) != 0) {
+            shell_printf("hailo: replay-step: stat '%s' failed\n", path);
+            return 0;
+        }
+        if (info.size == 0 || info.size > 64u * 1024u * 1024u) {
+            shell_printf("hailo: replay-step: '%s' size %lu out of range\n",
+                         path, (unsigned long)info.size);
+            return 0;
+        }
+        text_pages = (info.size + PAGE_SIZE - 1) / PAGE_SIZE;
+        text = (char *)pmm_alloc_pages(text_pages);
+        if (!text) {
+            shell_puts("hailo: replay-step: pmm_alloc_pages failed\n");
+            return 0;
+        }
+        int n = vfs_read_path(path, text, info.size, 0);
+        if (n < 0 || (size_t)n != info.size) {
+            shell_printf("hailo: replay-step: short read (%d of %lu)\n",
+                         n, (unsigned long)info.size);
+            pmm_free_pages(text, text_pages);
+            return 0;
+        }
+        text_size = info.size;
+    }
+
+    /* Allocate the ops array sized to the corpus we just read in.
+     * One op-struct is 16 bytes; the smallest possible op line is
+     * a tight ~70 bytes (header + every required field at minimum
+     * width). Estimate one op per 32 bytes of text and add a small
+     * floor so even an all-blank/all-trailer file gets a non-zero
+     * buffer. Cap at 65 536 entries (1 MB) so a corpus crafted to
+     * exhaust RAM via a long string of `\n`s can't oversize the
+     * allocation. */
+    const uint32_t ops_capacity_max = 65536u;
+    uint64_t ops_estimate = (uint64_t)(text_size / 32u) + 64u;
+    if (ops_estimate > ops_capacity_max) ops_estimate = ops_capacity_max;
+    const uint32_t ops_capacity = (uint32_t)ops_estimate;
+    size_t ops_bytes = (size_t)ops_capacity * sizeof(struct hailo_re_op);
+    size_t ops_pages = (ops_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (ops_pages == 0) ops_pages = 1;
+    struct hailo_re_op *ops = (struct hailo_re_op *)pmm_alloc_pages(ops_pages);
+    if (!ops) {
+        shell_puts("hailo: replay-step: pmm_alloc_pages for ops failed\n");
+        pmm_free_pages(text, text_pages);
+        return 0;
+    }
+
+    struct hailo_re_corpus corpus = {
+        .ops = ops,
+        .op_capacity = ops_capacity,
+    };
+    int prc = hailo_re_corpus_parse(text, text_size, &corpus);
+    if (prc != HAILO_RE_CORPUS_OK) {
+        shell_printf("hailo: replay-step: corpus parse failed (rc=%d, "
+                     "ops_parsed=%u)\n", prc, corpus.op_count);
+        pmm_free_pages(ops, ops_pages);
+        pmm_free_pages(text, text_pages);
+        return 0;
+    }
+    if (corpus.skipped_unknown > 0) {
+        shell_printf("hailo: replay-step: warning: %u line(s) with "
+                     "unknown `type` were skipped\n", corpus.skipped_unknown);
+    }
+
+    /* Find the seq=N entry. Must be a read, must not yet be validated. */
+    const struct hailo_re_op *target = hailo_re_corpus_find_seq(&corpus,
+                                                                target_seq_u32);
+    if (!target) {
+        shell_printf("hailo: replay-step: no entry at seq=%u\n",
+                     target_seq_u32);
+        pmm_free_pages(ops, ops_pages);
+        pmm_free_pages(text, text_pages);
+        return 0;
+    }
+    if (target->dir != HAILO_RE_DIR_READ) {
+        shell_printf("hailo: replay-step: seq=%u is a write — refusing "
+                     "(seq=N must be a read with validated_at_commit=null)\n",
+                     target_seq_u32);
+        pmm_free_pages(ops, ops_pages);
+        pmm_free_pages(text, text_pages);
+        return 0;
+    }
+    if (target->validated) {
+        shell_printf("hailo: replay-step: seq=%u is already "
+                     "validated — refusing (corpus is inconsistent)\n",
+                     target_seq_u32);
+        pmm_free_pages(ops, ops_pages);
+        pmm_free_pages(text, text_pages);
+        return 0;
+    }
+    if (target->size != 4) {
+        shell_printf("hailo: replay-step: seq=%u has size=%u; only "
+                     "size=4 is supported by the platform shim\n",
+                     target_seq_u32, (unsigned)target->size);
+        pmm_free_pages(ops, ops_pages);
+        pmm_free_pages(text, text_pages);
+        return 0;
+    }
+
+    shell_printf("hailo: replay-step: corpus ops=%u target seq=%u "
+                 "bar=%u offset=0x%x\n",
+                 corpus.op_count, target->seq,
+                 (unsigned)target->bar, target->offset);
+
+    /* Replay loop. Walk every op with seq < target_seq_u32 in order;
+     * issue write or read against the real platform. The corpus is
+     * already monotonic so a forward iteration is sufficient. */
+    uint32_t divergences = 0;
+    for (uint32_t i = 0; i < corpus.op_count; i++) {
+        const struct hailo_re_op *op = &corpus.ops[i];
+        if (op->seq >= target_seq_u32) break;
+        if (op->size != 4) {
+            shell_printf("hailo: replay-step: seq=%u has size=%u "
+                         "(platform shim is 32-bit only) — aborting\n",
+                         op->seq, (unsigned)op->size);
+            pmm_free_pages(ops, ops_pages);
+            pmm_free_pages(text, text_pages);
+            return 0;
+        }
+        if (op->dir == HAILO_RE_DIR_WRITE) {
+            hailo_platform->write32(op->bar, op->offset, op->value);
+        } else {
+            uint32_t observed = hailo_platform->read32(op->bar, op->offset);
+            if (observed != op->value) {
+                /* Inline mini-validation. Emit a divergence line and
+                 * keep going — the operator wants the complete trail
+                 * even when an earlier read disagreed. Format pinned
+                 * by §"Divergence report" in the corpus spec. */
+                char exp_hex[2 * 4 + 1];
+                char obs_hex[2 * 4 + 1];
+                hailo_re_format_le_hex(op->value, op->size, exp_hex);
+                hailo_re_format_le_hex(observed,  op->size, obs_hex);
+                shell_printf("HAILO_RE_CORPUS_DIVERGENCE seq=%u bar=%u "
+                             "offset=%u size=%u dir=read expected=%s "
+                             "observed=%s source=slmos "
+                             "reason=inline_read_mismatch\n",
+                             op->seq, (unsigned)op->bar,
+                             op->offset, (unsigned)op->size,
+                             exp_hex, obs_hex);
+                divergences++;
+            }
+        }
+    }
+
+    /* Issue the read at seq=N and emit the response line. */
+    uint32_t captured = hailo_platform->read32(target->bar, target->offset);
+    char val_hex[2 * 4 + 1];
+    hailo_re_format_le_hex(captured, target->size, val_hex);
+
+    shell_printf("HAILO_RE_CORPUS_RESPONSE seq=%u bar=%u offset=%u "
+                 "size=%u value=%s slmos_sha=%s\n",
+                 target->seq, (unsigned)target->bar,
+                 target->offset, (unsigned)target->size,
+                 val_hex, SLMOS_GIT_SHA);
+
+    if (divergences > 0) {
+        shell_printf("hailo: replay-step: %u inline divergence(s) "
+                     "observed during seq<%u prefix — see "
+                     "HAILO_RE_CORPUS_DIVERGENCE lines above\n",
+                     divergences, target_seq_u32);
+    }
+
+    pmm_free_pages(ops, ops_pages);
+    pmm_free_pages(text, text_pages);
     return 0;
 }
 
@@ -1267,6 +1601,10 @@ static int cmd_hailo(int argc, char *argv[])
         return cmd_hailo_ctxsmoke(argc, argv);
     }
 
+    if (argc >= 2 && strcmp(argv[1], "replay-step") == 0) {
+        return cmd_hailo_replay_step(argc, argv);
+    }
+
     /* Phase 8: dump the cs_load progress counter. Updated by the
      * inference backend at each stage of context_switch_load so we
      * can diagnose wedges without relying on live serial output.
@@ -1622,7 +1960,7 @@ static int cmd_hailo(int argc, char *argv[])
 static const shell_cmd_t hailo_cmd = {
     .name     = "hailo",
     .handler  = cmd_hailo,
-    .help     = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke [min|out|in|full], trace [off|phase=...|mech=...])",
+    .help     = "Hailo NPU control (hailo, probe, boot, load <path>, fw, peek, poke, cfgstream <in|out> <ch>, cfgdump, ctxsmoke [min|out|in|full], replay-step <corpus> <N>, trace [off|phase=...|mech=...])",
     .mutates  = true,   /* probe/fw mutate driver state; status is a whole-command tag */
     .category = SHELL_CAT_HARDWARE,
 };
