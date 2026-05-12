@@ -91,9 +91,10 @@ The QEMU stub returns `00000000` for the reads at `seq=43,44` and `01000000` at 
 
 On a BAR read at the stub's current sequence counter `N` against offset `X`:
 
-1. Search the corpus for an entry where `type="op"`, `seq=N`, `bar=<the bar>`, `offset=X`, `dir="read"`, `size=<the access width>`.
-2. If found: return `value` to HailoRT, increment the stub's seq counter.
-3. If not found: freeze the VM, emit a corpus-extension request to stdout in the format defined by §Corpus-extension request, and exit non-zero so the driver script knows to advance the loop.
+1. If a corpus entry exists at `seq=N` whose `dir`, `bar`, `offset`, or `size` doesn't match the current operation, emit a §Divergence report with `reason=op_shape_mismatch` and halt. (The unknown-read path below only fires when there is no entry at `seq=N` at all.)
+2. Search the corpus for an entry where `type="op"`, `seq=N`, `bar=<the bar>`, `offset=X`, `dir="read"`, `size=<the access width>`.
+3. If found: return `value` to HailoRT, increment the stub's seq counter.
+4. If not found: freeze the VM, emit a corpus-extension request to stdout in the format defined by §Corpus-extension request, and exit non-zero so the driver script knows to advance the loop.
 
 The stub MUST NOT silently fall back to returning 0 for unknown reads. Doing so re-introduces the contamination failure mode this design exists to prevent.
 
@@ -110,7 +111,7 @@ On a BAR write at the stub's current sequence counter `N` to offset `X` with val
 1. Read the corpus and find the entry at `seq=N` — must be `dir="read"` and `validated_at_commit=null` (otherwise there is nothing to do, the entry is already validated).
 2. For each entry with `seq < N`, in seq order:
    - If `dir="write"`, issue the BAR write against real hardware with the recorded value.
-   - If `dir="read"`, issue the BAR read against real hardware and discard the returned value. Reads are replayed for their device-side side effects (W1C status registers, FIFO pops, IRQ acknowledgment) so the device state machine matches the state HailoRT-in-QEMU drove the corpus from. Optionally, the driver may compare the observed value against the corpus's recorded value and report a divergence per §Divergence report — this turns every replay-step into a free inline mini-validation.
+   - If `dir="read"`, issue the BAR read against real hardware and discard the returned value. Reads are replayed for their device-side side effects (W1C status registers, FIFO pops, IRQ acknowledgment) so the device state machine matches the state HailoRT-in-QEMU drove the corpus from. Optionally, the replay-step command may compare the observed value against the corpus's recorded value and report a divergence per §Divergence report — this turns every replay-step into a free inline mini-validation.
    Do not skip; do not reorder.
 3. Issue the read at `seq=N` against the offset specified in the corpus entry. Capture the response value `V`.
 4. Print a single line in the **Corpus-extension response** format (§Corpus-extension response) so the driver script can append it.
@@ -130,7 +131,7 @@ Reserve other values for future sources (e.g., `"manual_annotation"` for hand-de
 
 The corpus has a known-good frontier at any point in time: the highest `seq` value for which every entry up to and including that seq has a non-null `validated_at_commit`. The driver script (Task 0.5) maintains this frontier as `last_validated_seq` in memory; the periodic re-validation pass (Phase 3) is what advances it.
 
-Single-step Phase 2 captures all run *ahead* of the validated frontier — entries are appended with `validated_at_commit=null`. The Phase 3 re-validation pass replays the entire write trace against real hardware, confirms the read responses match, and stamps `validated_at_commit` on each entry. After a successful re-validation pass at seq `K`, `last_validated_seq` advances to `K`.
+Single-step Phase 2 captures all run *ahead* of the validated frontier — entries are appended with `validated_at_commit=null`. The Phase 3 re-validation pass replays the entire operation trace (every write and every read, in seq order) against real hardware, confirms each observed read value matches the corpus, and stamps `validated_at_commit` on every entry up to the divergence point or end-of-trace. After a successful re-validation pass at seq `K`, `last_validated_seq` advances to `K`.
 
 ## Corpus-extension request (QEMU stub → driver script)
 
