@@ -4563,6 +4563,19 @@ int cmd_nvgpu(int argc, char *argv[])
         shell_printf("channel: rc=%d, state=%d\r\n", rc, (int)b_p->state);
         return rc;
     }
+    if (strcmp(argv[1], "instdump") == 0) {
+        /* #788 diagnostic: dump the channel's inst block and the
+         * FB MMU's latched fault-inst contents.
+         *
+         *   nvgpu instdump            — dump current_ctx + fault_inst
+         *
+         * The dumper latches FECS_CURRENT_CTX + the fault registers
+         * atomically up-front (a fresh MMU fault landing mid-dump
+         * can't clobber the latched values). See
+         * `ga10b_dump_inst_blocks_atomic` in ga10b_bringup.c. */
+        ga10b_dump_inst_blocks_atomic("nvgpu-instdump");
+        return 0;
+    }
     if (strcmp(argv[1], "engine-clear") == 0) {
         return cmd_nvgpu_engine_clear();
     }

@@ -10,6 +10,7 @@
  */
 
 #include "ga10b_bringup.h"
+#include "ga10b_gmmu.h"
 #include "ga10b_qmd.h"
 #include "gsp.h"
 #include "falcon.h"
@@ -1870,12 +1871,211 @@ static void dump_pbdma_state(const char *tag)
                 (unsigned long)bar0_r32(0x00040088u));
 }
 
+/* Layer 4: hex-dump a 4 KB inst block from DRAM and scan it for
+ * pointer-encoded forms of the canonical #788 fault VA `0xc01000`.
+ *
+ * The inst block lives in sysmem on Tegra GA10B — identity-mapped
+ * to CPU phys. Read via volatile uint32_t deref. Print
+ * `GA10B_INST_BLOCK_DWORDS` dwords (4 KB), 4 per line, offset-
+ * prefixed for grep'ability against the GA10B `ram_in_*_w()` HW
+ * field offsets in
+ * `~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_ram_ga10b.h`.
+ *
+ * Post-dump scan: many encodings of a 40-bit GPU VA pointer exist
+ * in the inst block (raw 32-bit VA, `ptr_lo` with VA bits[31:12] in
+ * word bits[31:12], `ptr_hi` with VA bits[39:32] in word bits[7:0]).
+ * The scan calls out any word that matches a few common encodings
+ * of `GA10B_788_FAULT_VA` so the operator can pinpoint candidate
+ * fields without decoding the full 4 KB by hand.
+ *
+ * `tag` is the log prefix; passing distinct tags (e.g.
+ * "GA10B-INST-CTX" vs "GA10B-INST-FAULT") lets the dumps be told
+ * apart in a captured UART log.
+ *
+ * **Safety:** `inst_phys` is bounds-checked via `ga10b_phys_in_dram`
+ * before any dereference. The dumper is wired to wedge handlers
+ * that receive `inst_phys` straight from FECS_CURRENT_CTX or
+ * fb_mmu_fault_inst — both of which can hold garbage post-kexec or
+ * after a non-channel fault. Without the bounds check, a stray
+ * value landing in an MMIO aperture would fault the CPU at the
+ * worst possible moment (mid-wedge diagnostic). */
+#define GA10B_INST_BLOCK_BYTES   4096u
+#define GA10B_INST_BLOCK_DWORDS  (GA10B_INST_BLOCK_BYTES / 4u)
+
+/* The #788 wedge consistently faults at this channel-local VA
+ * (the freed low-VA GMMU region nvgpu had used for the GR ctxsw
+ * save buffer). The scan looks for this VA in any of the common
+ * inst-block pointer encodings. If a future investigator finds a
+ * different fault VA, update `GA10B_788_FAULT_VA` — the `_PTR_LO`
+ * form is derived from it at preprocessor time so the two can't
+ * drift apart. No other callers consume either value. */
+#define GA10B_788_FAULT_VA        0x00c01000u
+#define GA10B_788_FAULT_VA_PTR_LO (GA10B_788_FAULT_VA >> 12)
+
+static void dump_one_inst_block(const char *tag, uint64_t inst_phys)
+{
+    if (inst_phys == 0) {
+        uart_printf("[%s] inst_phys=0 — skipping dump\n", tag);
+        return;
+    }
+    /* Refuse to dereference anything outside DRAM. FECS_CURRENT_CTX
+     * and fb_mmu_fault_inst can both hold values that decode to
+     * MMIO apertures or unmapped regions post-kexec; reading those
+     * would fault or hang the CPU. Same bounds-check the GMMU
+     * walker uses for its candidate phys (#788 investigation). */
+    if (!ga10b_phys_in_dram(inst_phys, GA10B_INST_BLOCK_BYTES)) {
+        uart_printf("[%s] inst_phys=0x%lx outside DRAM (or in OP-TEE "
+                    "carveout) — skipping dump\n",
+                    tag, (unsigned long)inst_phys);
+        return;
+    }
+    uart_printf("[%s] inst_phys=0x%lx — 4 KB hex dump:\n",
+                tag, (unsigned long)inst_phys);
+
+    /* 1024 dwords × 4 dwords/line = 256 lines. Volatile read so the
+     * compiler can't elide the access; the CPU-visible inst block
+     * is in cacheable sysmem so a stale L1 line is unlikely here,
+     * but volatile keeps the dump truthful even if the surrounding
+     * call site changes someday. */
+    for (uint32_t i = 0; i < GA10B_INST_BLOCK_DWORDS; i++) {
+        uint64_t a = inst_phys + (uint64_t)i * 4u;
+        uint32_t val = *(volatile uint32_t *)(uintptr_t)a;
+        if ((i & 3u) == 0u) {
+            uart_printf("[%s]  +0x%03x", tag, i * 4u);
+        }
+        uart_printf(" %08lx", (unsigned long)val);
+        if ((i & 3u) == 3u) {
+            uart_puts("\n");
+        }
+    }
+
+    /* Pinpoint scan: flag any word whose value plausibly encodes
+     * `GA10B_788_FAULT_VA`. Patterns:
+     *
+     *   - Raw 32-bit VA: word == GA10B_788_FAULT_VA
+     *   - ramin engine_wfi ptr_lo: bits[31:12] = VA[31:12], so
+     *     (word >> 12) == GA10B_788_FAULT_VA_PTR_LO with arbitrary
+     *     low bits
+     *   - ramin engine_wfi ptr_hi: bits[7:0] = VA[39:32] = 0 for
+     *     a 12 MB VA — not unique enough to flag, omitted to
+     *     avoid thousands of false hits
+     *   - PTE-style encoding (page-aligned + bit 0 = valid):
+     *     (word & 0x1) and (word >> 12) == GA10B_788_FAULT_VA_PTR_LO
+     *
+     * Hits print as a separate trailing block so they survive
+     * captured-log scroll-back even if the verbose dump is
+     * truncated. */
+    uart_printf("[%s] scan for 0xc01000-encoded pointers:\n", tag);
+    int hits = 0;
+    for (uint32_t i = 0; i < GA10B_INST_BLOCK_DWORDS; i++) {
+        uint64_t a = inst_phys + (uint64_t)i * 4u;
+        uint32_t val = *(volatile uint32_t *)(uintptr_t)a;
+        bool raw = (val == GA10B_788_FAULT_VA);
+        bool ptr_lo = ((val >> 12) == GA10B_788_FAULT_VA_PTR_LO);
+        bool pte = ((val & 1u) != 0u) &&
+                   ((val >> 12) == GA10B_788_FAULT_VA_PTR_LO);
+        if (raw || ptr_lo || pte) {
+            uart_printf("[%s]  HIT @+0x%03x = 0x%08lx (%s%s%s)\n",
+                        tag, i * 4u, (unsigned long)val,
+                        raw ? "raw " : "",
+                        ptr_lo ? "ptr_lo " : "",
+                        pte ? "pte" : "");
+            hits++;
+        }
+    }
+    if (hits == 0) {
+        uart_printf("[%s]  (no 0xc01000-encoded matches)\n", tag);
+    }
+}
+
+/* Decode FECS_CURRENT_CTX and fb_mmu_fault_inst into 40-bit
+ * physical addresses and dump both inst blocks atomically — i.e.
+ * latch every relevant register up-front before the slow DRAM
+ * dumps begin, so a fresh fault landing during the dump can't
+ * mutate the values we're about to print. Public so the shell
+ * command (`nvgpu instdump`) can invoke it without re-entering
+ * the dump_gr_state path. */
+void ga10b_dump_inst_blocks_atomic(const char *tag)
+{
+    /* Atomic latch phase — read everything we need in one tight
+     * window, before the slow per-byte dump starts. */
+    uint32_t current_ctx = bar0_r32(0x00409b00u);
+    uint32_t fault_inst_lo = bar0_r32(0x00100e54u);
+    uint32_t fault_inst_hi = bar0_r32(0x00100e58u);
+    uint32_t fault_addr_lo = bar0_r32(0x00100e4cu);
+    uint32_t fault_addr_hi = bar0_r32(0x00100e50u);
+    uint32_t fault_info    = bar0_r32(0x00100e5cu);
+
+    /* Decode FECS_CURRENT_CTX per `gr_fecs_current_ctx_*`:
+     *   bits [27:0]  = inst_block_phys >> 12
+     *   bits [29:28] = target (0=vid_mem, 2=sys_mem_coh, 3=sys_mem_ncoh)
+     * target == 0 on Tegra means "no current ctx" (no vidmem there)
+     * or stale post-kexec garbage; print but skip the dump if 0. */
+    uint64_t channel_inst_phys = 0;
+    uint8_t  ctx_target = (uint8_t)((current_ctx >> 28) & 0x3u);
+    if (ctx_target != 0u) {
+        channel_inst_phys =
+            ((uint64_t)(current_ctx & 0x0FFFFFFFu)) << 12;
+    }
+
+    /* fb_mmu_fault_inst is a 40-bit physical address split across
+     * two 32-bit registers — `_lo` holds bits[31:0], `_hi` holds
+     * bits[39:32] in its low byte (upper 24 bits reserved). The
+     * captured wedge prints `0x1_xxxxxxxx` style, matching
+     * hi=1, lo=0x_xxxxxxxx. */
+    uint64_t fault_inst_phys =
+        ((uint64_t)fault_inst_hi << 32) | (uint64_t)fault_inst_lo;
+    /* fb_mmu_fault_addr is also split across two 32-bit registers
+     * for the same 40-bit VA: `_lo` = VA bits[31:0], `_hi` =
+     * VA bits[39:32] in its low byte. Low 12 bits of the VA are
+     * the page offset (typically 0 for a page-fault report).
+     * Captured wedge shows fault VA `0x00000000_00c01000` for the
+     * #788 case (hi=0, lo=0x00c01000). */
+    uint64_t fault_va =
+        ((uint64_t)fault_addr_hi << 32) | (uint64_t)fault_addr_lo;
+
+    uart_printf("[%s] latch: current_ctx=0x%08lx (target=%u, "
+                "channel_inst=0x%lx) fault_inst=0x%lx fault_va=0x%lx "
+                "fault_info=0x%08lx\n",
+                tag,
+                (unsigned long)current_ctx,
+                (unsigned)ctx_target,
+                (unsigned long)channel_inst_phys,
+                (unsigned long)fault_inst_phys,
+                (unsigned long)fault_va,
+                (unsigned long)fault_info);
+
+    /* Dump channel inst (what FECS thinks is currently loaded).
+     * Tag-suffix is distinct so the operator can grep the two
+     * dumps apart in a captured UART log — caller's `tag` is for
+     * the latch line only. */
+    dump_one_inst_block("GA10B-INST-CTX", channel_inst_phys);
+
+    /* Dump fault inst. Skip if fault_info.valid (bit 31) is 0 —
+     * the registers may hold stale zeros if no MMU fault has been
+     * latched since last clear. */
+    if ((fault_info & (1u << 31)) == 0u) {
+        uart_printf("[GA10B-INST-FAULT] fault_info.valid=0 — "
+                    "no fault latched, skipping fault-inst dump\n");
+        return;
+    }
+    dump_one_inst_block("GA10B-INST-FAULT", fault_inst_phys);
+}
+
 static void ga10b_dump_gr_state(const char *tag)
 {
     dump_gr_top_level(tag);
     dump_fecs_state(tag);
     dump_mmu_fault(tag);
     dump_pbdma_state(tag);
+    /* Layer 4 — slowest by far (4 KB DRAM dump × 2). Last so the
+     * fast diagnostic registers print first and the operator can
+     * see the broad failure class without waiting for the inst
+     * dumps. The atomic latch inside the function reads all the
+     * fault registers up front, so even if a fresh fault lands
+     * during the DRAM walk the printed values stay self-consistent
+     * with what triggered this dump. #788 investigation. */
+    ga10b_dump_inst_blocks_atomic(tag);
 }
 
 int ga10b_submit_and_poll(struct ga10b_bringup *b,
