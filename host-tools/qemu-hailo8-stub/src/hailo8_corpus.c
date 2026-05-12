@@ -82,14 +82,24 @@ int hailo_value_from_hex(const char *hex, uint32_t size, uint64_t *out)
         int hi, lo;
         char ch_hi = hex[i * 2 + 0];
         char ch_lo = hex[i * 2 + 1];
-        if (ch_hi >= '0' && ch_hi <= '9') hi = ch_hi - '0';
-        else if (ch_hi >= 'a' && ch_hi <= 'f') hi = 10 + (ch_hi - 'a');
-        else if (ch_hi >= 'A' && ch_hi <= 'F') hi = 10 + (ch_hi - 'A');
-        else return -1;
-        if (ch_lo >= '0' && ch_lo <= '9') lo = ch_lo - '0';
-        else if (ch_lo >= 'a' && ch_lo <= 'f') lo = 10 + (ch_lo - 'a');
-        else if (ch_lo >= 'A' && ch_lo <= 'F') lo = 10 + (ch_lo - 'A');
-        else return -1;
+        if (ch_hi >= '0' && ch_hi <= '9') {
+            hi = ch_hi - '0';
+        } else if (ch_hi >= 'a' && ch_hi <= 'f') {
+            hi = 10 + (ch_hi - 'a');
+        } else if (ch_hi >= 'A' && ch_hi <= 'F') {
+            hi = 10 + (ch_hi - 'A');
+        } else {
+            return -1;
+        }
+        if (ch_lo >= '0' && ch_lo <= '9') {
+            lo = ch_lo - '0';
+        } else if (ch_lo >= 'a' && ch_lo <= 'f') {
+            lo = 10 + (ch_lo - 'a');
+        } else if (ch_lo >= 'A' && ch_lo <= 'F') {
+            lo = 10 + (ch_lo - 'A');
+        } else {
+            return -1;
+        }
         v |= ((uint64_t)((hi << 4) | lo)) << (i * 8);
     }
     *out = v;
@@ -158,22 +168,32 @@ static int parse_value(json_cursor_t *c,
             char ch = *c->p++;
             if (ch == '\\' && c->p < c->end) {
                 char esc = *c->p++;
-                if (esc == '"') ch = '"';
-                else if (esc == '\\') ch = '\\';
-                else if (esc == 'n') ch = '\n';
-                else if (esc == 't') ch = '\t';
-                else ch = esc;
+                if (esc == '"') {
+                    ch = '"';
+                } else if (esc == '\\') {
+                    ch = '\\';
+                } else if (esc == 'n') {
+                    ch = '\n';
+                } else if (esc == 't') {
+                    ch = '\t';
+                } else {
+                    ch = esc;
+                }
             }
+            /* Always advance via the loop's c->p++ above; only store into
+             * str_out when there's room. Strings beyond outlen are silently
+             * truncated — `note` fields can be arbitrarily long. */
             if (str_out && i + 1 < str_outlen) {
                 str_out[i++] = ch;
-            } else if (str_out) {
-                /* truncate quietly; long strings come from `note` fields */
             }
-            if (!str_out && i == 0) i++;     /* still consume */
         }
-        if (c->p >= c->end) return -1;
+        if (c->p >= c->end) {
+            return -1;
+        }
         c->p++;
-        if (str_out) str_out[i < str_outlen ? i : str_outlen - 1] = '\0';
+        if (str_out) {
+            str_out[i < str_outlen ? i : str_outlen - 1] = '\0';
+        }
         *is_str = 1;
         return 0;
     }
@@ -202,14 +222,26 @@ static int parse_value(json_cursor_t *c,
         neg = 1;
         c->p++;
     }
-    if (c->p >= c->end || !isdigit((unsigned char)*c->p)) return -1;
+    if (c->p >= c->end || !isdigit((unsigned char)*c->p)) {
+        return -1;
+    }
     int64_t v = 0;
     while (c->p < c->end && isdigit((unsigned char)*c->p)) {
-        v = v * 10 + (*c->p - '0');
+        int d = *c->p - '0';
+        /* Guard against int64 overflow (signed overflow is UB). 20-digit
+         * literals like 99999999999999999999 would otherwise wrap silently. */
+        if (v > (INT64_MAX - d) / 10) {
+            return -1;
+        }
+        v = v * 10 + d;
         c->p++;
     }
-    if (neg) v = -v;
-    if (int_out) *int_out = v;
+    if (neg) {
+        v = -v;
+    }
+    if (int_out) {
+        *int_out = v;
+    }
     *is_int = 1;
     return 0;
 }
@@ -240,8 +272,11 @@ static int ensure_seq_index(hailo_corpus_t *c, uint64_t seq)
 static int push_entry(hailo_corpus_t *c, const hailo_op_entry_t *e,
                       char *errbuf, size_t errlen)
 {
-    if (e->seq == 0) {
-        set_err(errbuf, errlen, "seq must be >= 1");
+    if (e->seq == 0 || e->seq >= HAILO_CORPUS_MAX_SEQ) {
+        set_err(errbuf, errlen,
+                "seq must be in [1, %u), got %llu",
+                HAILO_CORPUS_MAX_SEQ,
+                (unsigned long long)e->seq);
         return -1;
     }
     if (ensure_seq_index(c, e->seq) != 0) {
@@ -480,32 +515,44 @@ static int parse_header_line(hailo_corpus_t *c,
     return 0;
 }
 
-/* Detect the `type` field of a line — header / op / trailer / other. */
-static const char *line_type_field(const char *line, size_t linelen)
+/* Detect the `type` field of a line — header / op / trailer / other.
+ * Writes the value into the caller's buffer (null-terminated) and returns
+ * 0 on success. Returns -1 when no `"type": "..."` pair is present. The
+ * caller buffer is preferred over a static internal one so future
+ * call sites that retain two type strings concurrently don't trip on
+ * mutated state. */
+static int line_type_field(const char *line, size_t linelen,
+                           char *out, size_t outlen)
 {
-    /* Cheap pre-scan; we accept anywhere `"type"` appears followed by a
-     * string value. */
-    static char buf[16];
+    if (!out || outlen == 0) {
+        return -1;
+    }
+    out[0] = '\0';
     const char *p = line;
     const char *end = line + linelen;
-    while (p < end - 6) {
+    /* `p + 6 <= end` avoids the `end - 6` pointer-underflow case when
+     * `linelen < 6` (pointer arithmetic that lands outside the array's
+     * one-past-the-end region is implementation-defined per C11 6.5.6). */
+    while (p + 6 <= end) {
         if (*p == '"' && memcmp(p, "\"type\"", 6) == 0) {
             p += 6;
-            while (p < end && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+            while (p < end && (*p == ' ' || *p == ':' || *p == '\t')) {
+                p++;
+            }
             if (p < end && *p == '"') {
                 p++;
                 size_t i = 0;
-                while (p < end && *p != '"' && i + 1 < sizeof(buf)) {
-                    buf[i++] = *p++;
+                while (p < end && *p != '"' && i + 1 < outlen) {
+                    out[i++] = *p++;
                 }
-                buf[i] = '\0';
-                return buf;
+                out[i] = '\0';
+                return 0;
             }
-            return NULL;
+            return -1;
         }
         p++;
     }
-    return NULL;
+    return -1;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -566,8 +613,8 @@ hailo_corpus_t *hailo_corpus_load(const char *path,
         if (len == 0) continue;
         if (line[0] == '#') continue;   /* tolerate hand-edited comments */
 
-        const char *type = line_type_field(line, len);
-        if (!type) {
+        char type[16];
+        if (line_type_field(line, len, type, sizeof(type)) != 0) {
             set_err(errbuf, errlen, "line %d: no 'type' field", lineno);
             goto fail;
         }

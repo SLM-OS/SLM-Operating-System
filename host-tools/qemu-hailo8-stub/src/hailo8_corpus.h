@@ -33,6 +33,15 @@ extern "C" {
 #define HAILO_CORPUS_MAX_TIME    31
 #define HAILO_CORPUS_MAX_NOTE    255
 
+/*
+ * Upper bound on seq values accepted by the loader / push paths. The
+ * seq_index is an int32 array sized to max_seq; without this cap, a
+ * malformed corpus with `seq=10000000000` would request tens of GB of
+ * index memory. 16M entries (64 MB index) is well above any realistic
+ * single capture session (typical configure() flows are O(10k) ops).
+ */
+#define HAILO_CORPUS_MAX_SEQ     (1u << 24)
+
 typedef struct hailo_op_entry {
     uint64_t seq;                                /* >= 1 */
     int      bar;                                /* 0, 2, 4 in practice */

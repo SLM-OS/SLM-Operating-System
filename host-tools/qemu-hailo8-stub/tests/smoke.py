@@ -30,7 +30,7 @@ import time
 QEMU = os.environ.get("QEMU") or os.path.expanduser(
     "~/projects/qemu/build/qemu-system-x86_64"
 )
-DEFAULT_BAR0_BASE = 0xFEB00000   # Far above PCI hole so q35 can place it freely
+DEFAULT_BAR0_BASE = 0xFEB00000   # Top of the q35 PCI hole, just below LAPIC (0xFEC00000+)
 
 # -------------------------------------------------------------------------- #
 # qtest protocol — tiny client                                                #
@@ -300,6 +300,37 @@ def scenario_lookup_hit():
     )
 
 
+def scenario_shape_divergence():
+    """Corpus expects a read at seq=1 but we issue a write — exercises the
+    op_shape_mismatch path and the expected_* extension fields."""
+    entry = {
+        "type": "op", "seq": 1, "bar": 0, "offset": 0, "size": 4,
+        "dir": "read", "value": "deadbeef",
+        "source": "slmos_observed",
+        "validated_at_commit": "a" * 40,
+        "validated_at": "2026-05-12T00:00:00Z",
+    }
+    return scenario(
+        name="shape_divergence",
+        corpus_entries=[entry],
+        qtest_ops=[("writel", 0x0, 0x00000001)],
+        expect_exit_nonzero=True,
+        expect_stdout_contains=[
+            "HAILO_RE_CORPUS_DIVERGENCE",
+            "seq=1",
+            "bar=0",
+            "dir=write",
+            "expected=00000000",
+            "observed=00000000",
+            "reason=op_shape_mismatch",
+            "expected_bar=0",
+            "expected_offset=0",
+            "expected_size=4",
+            "expected_dir=read",
+        ],
+    )
+
+
 def scenario_write_divergence():
     # value="01000000" in the corpus is LE-encoded uint32 0x00000001 (matches
     # the corpus spec's worked example for hex encoding: byte 0 is the LSB).
@@ -341,6 +372,7 @@ def main():
     scenarios = [
         ("empty_corpus_extend", scenario_empty_corpus),
         ("lookup_hit",          scenario_lookup_hit),
+        ("shape_divergence",    scenario_shape_divergence),
         ("write_divergence",    scenario_write_divergence),
     ]
 

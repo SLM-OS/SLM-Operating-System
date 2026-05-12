@@ -313,6 +313,56 @@ static int test_inject_no_file(void)
     return 1;
 }
 
+static int test_load_rejects_seq_above_max(void)
+{
+    /* HAILO_CORPUS_MAX_SEQ guards against malicious huge seq values that
+     * would force tens of GB of index allocation. Use one past the cap. */
+    char line[512];
+    snprintf(line, sizeof(line),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"x\",\"fw_version\":\"x\",\"capture_host\":\"x\",\"slmos_base_sha\":\"x\",\"capture_started_at\":\"x\"}\n"
+        "{\"type\":\"op\",\"seq\":%u,\"bar\":4,\"offset\":0,\"size\":4,\"dir\":\"read\",\"value\":\"00000000\",\"source\":\"slmos_observed\",\"validated_at_commit\":null,\"validated_at\":null}\n",
+        (unsigned)HAILO_CORPUS_MAX_SEQ);
+    make_tmp();
+    write_file(tmp_path, line);
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "seq must be in") != NULL);
+    unlink(tmp_path);
+    return 1;
+}
+
+static int test_load_rejects_int_overflow(void)
+{
+    /* 20-digit positive literal — overflows int64 if the parser doesn't guard. */
+    make_tmp();
+    write_file(tmp_path,
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"x\",\"fw_version\":\"x\",\"capture_host\":\"x\",\"slmos_base_sha\":\"x\",\"capture_started_at\":\"x\"}\n"
+        "{\"type\":\"op\",\"seq\":99999999999999999999,\"bar\":4,\"offset\":0,\"size\":4,\"dir\":\"read\",\"value\":\"00000000\",\"source\":\"slmos_observed\",\"validated_at_commit\":null,\"validated_at\":null}\n");
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    unlink(tmp_path);
+    return 1;
+}
+
+static int test_load_handles_short_line(void)
+{
+    /* line_type_field's boundary check is `p + 6 <= end`; verify we don't
+     * crash on lines shorter than the "\"type\"" marker. */
+    make_tmp();
+    write_file(tmp_path,
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"x\",\"fw_version\":\"x\",\"capture_host\":\"x\",\"slmos_base_sha\":\"x\",\"capture_started_at\":\"x\"}\n"
+        "{}\n");
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    /* Short non-empty line with no `type` should fail cleanly, not crash. */
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "no 'type' field") != NULL);
+    unlink(tmp_path);
+    return 1;
+}
+
 int main(void)
 {
     TEST(test_hex_roundtrip_u32);
@@ -325,6 +375,9 @@ int main(void)
     TEST(test_load_tolerates_unknown_keys);
     TEST(test_load_picks_up_msi_after);
     TEST(test_load_tolerates_comments_and_blank_lines);
+    TEST(test_load_rejects_seq_above_max);
+    TEST(test_load_rejects_int_overflow);
+    TEST(test_load_handles_short_line);
     TEST(test_append_write_persists);
     TEST(test_inject_no_file);
     fprintf(stderr, "\n%d / %d tests passed\n", g_test_count - g_fail_count, g_test_count);

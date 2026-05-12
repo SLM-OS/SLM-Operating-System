@@ -122,19 +122,39 @@ read entry to the corpus, and restarts QEMU.
 
 ### `HAILO_RE_CORPUS_DIVERGENCE` (stdout, then exit 1)
 
-Emitted in three cases per [§Divergence report][spec]:
+Emitted in two cases per [§Divergence report][spec]:
 
 | Reason                | Trigger                                                          |
 |-----------------------|------------------------------------------------------------------|
 | `op_shape_mismatch`   | Corpus has an entry at this `seq` but `dir`/`bar`/`offset`/`size` differs from the current op |
 | `write_value_mismatch`| Corpus has a recorded write at this `(seq, bar, offset)` whose `value` differs from what HailoRT wrote |
 
-Format:
+Base format (always present):
 
 ```
 HAILO_RE_CORPUS_DIVERGENCE seq=<N> bar=<B> offset=<X> size=<S> dir=<read|write> \
     expected=<hex> observed=<hex> source=qemu reason=<tag>
 ```
+
+For `reason=write_value_mismatch`, `expected` and `observed` carry the
+real LE-encoded hex values of the corpus's recorded write and HailoRT's
+attempted write.
+
+For `reason=op_shape_mismatch`, the value fields aren't the divergence
+axis — the front-matter `bar=B offset=X size=S dir=W` already shows the
+observed op shape, so `expected`/`observed` are zero-filled at the
+access width and four extra tokens follow `reason=` carrying the
+corpus-side shape:
+
+```
+HAILO_RE_CORPUS_DIVERGENCE seq=<N> bar=<B> offset=<X> size=<S> dir=<W> \
+    expected=00000000 observed=00000000 source=qemu reason=op_shape_mismatch \
+    expected_bar=<E_B> expected_offset=<E_X> expected_size=<E_S> expected_dir=<E_W>
+```
+
+The extra tokens are additive and tolerated-but-ignored by readers that
+don't understand them, so they don't require a corpus `format_version`
+bump.
 
 A divergence is fatal for Phase 2 single-stepping — the driver script
 treats it as a poisoned-corpus signal and starts the rollback procedure
@@ -175,14 +195,17 @@ matches is silently accepted; a value mismatch triggers
 
 ## Smoke tests
 
-`tests/smoke.py` exercises the three Definition-of-Done scenarios
-against a built QEMU using the qtest accelerator:
+`tests/smoke.py` exercises the Definition-of-Done scenarios against a
+built QEMU using the qtest accelerator:
 
 1. **Empty corpus**: first BAR read produces `HAILO_RE_CORPUS_EXTEND`
    and QEMU exits 1.
 2. **Hand-crafted lookup**: a corpus with one read entry returns the
    recorded value to a qtest `readl`.
-3. **Write divergence**: a corpus with one write entry expecting `V1`
+3. **Shape divergence**: a corpus expecting a read at `seq=1` but the
+   guest issues a write produces `HAILO_RE_CORPUS_DIVERGENCE` with
+   `reason=op_shape_mismatch` plus the `expected_*` extension tokens.
+4. **Write divergence**: a corpus with one write entry expecting `V1`
    produces `HAILO_RE_CORPUS_DIVERGENCE` when qtest issues `writel V2`.
 
 Run with:

@@ -84,11 +84,13 @@ static void emit_corpus_extend(uint64_t seq, int bar,
     fflush(stdout);
 }
 
-static void emit_corpus_divergence(uint64_t seq, int bar,
-                                   uint64_t offset, uint32_t size,
-                                   const char *dir,
-                                   uint64_t expected, uint64_t observed,
-                                   const char *reason)
+/* Emit a value-divergence line (reason = write_value_mismatch /
+ * inline_read_mismatch — the value fields carry the actual divergence). */
+static void emit_corpus_divergence_value(uint64_t seq, int bar,
+                                         uint64_t offset, uint32_t size,
+                                         const char *dir,
+                                         uint64_t expected, uint64_t observed,
+                                         const char *reason)
 {
     char exp_hex[32], obs_hex[32];
     if (hailo_value_to_hex(expected, size, exp_hex, sizeof(exp_hex)) != 0) {
@@ -102,6 +104,34 @@ static void emit_corpus_divergence(uint64_t seq, int bar,
             " bar=%d offset=%" PRIu64 " size=%u dir=%s "
             "expected=%s observed=%s source=qemu reason=%s\n",
             seq, bar, offset, size, dir, exp_hex, obs_hex, reason);
+    fflush(stdout);
+}
+
+/* Emit a shape-divergence line (reason = op_shape_mismatch — bar / offset /
+ * size / dir don't match the corpus entry at this seq). The value fields
+ * aren't the divergence axis here; emit zero-filled placeholders at the
+ * spec-required width, then append explicit expected_* tokens so the
+ * Task 0.5 driver script can recover the corpus-side shape without a
+ * round-trip back through the corpus file. */
+static void emit_corpus_divergence_shape(uint64_t seq,
+                                         int obs_bar, uint64_t obs_offset,
+                                         uint32_t obs_size, const char *obs_dir,
+                                         int exp_bar, uint64_t exp_offset,
+                                         uint32_t exp_size, const char *exp_dir)
+{
+    char zero_hex[32];
+    if (hailo_value_to_hex(0, obs_size, zero_hex, sizeof(zero_hex)) != 0) {
+        snprintf(zero_hex, sizeof(zero_hex), "00000000");
+    }
+    fprintf(stdout,
+            "HAILO_RE_CORPUS_DIVERGENCE seq=%" PRIu64
+            " bar=%d offset=%" PRIu64 " size=%u dir=%s "
+            "expected=%s observed=%s source=qemu reason=op_shape_mismatch "
+            "expected_bar=%d expected_offset=%" PRIu64
+            " expected_size=%u expected_dir=%s\n",
+            seq, obs_bar, obs_offset, obs_size, obs_dir,
+            zero_hex, zero_hex,
+            exp_bar, exp_offset, exp_size, exp_dir);
     fflush(stdout);
 }
 
@@ -139,12 +169,11 @@ static uint64_t hailo8_bar_read(void *opaque, hwaddr addr, unsigned size)
     /* Step 0 — op shape mismatch. */
     if (e->is_write || e->bar != ctx->bar_index ||
         e->offset != (uint64_t)addr || e->size != size) {
-        uint64_t exp_marker = ((uint64_t)e->bar << 56) | e->offset;
-        uint64_t obs_marker = ((uint64_t)ctx->bar_index << 56) | (uint64_t)addr;
-        emit_corpus_divergence(seq, ctx->bar_index, (uint64_t)addr, size,
-                               bar_dir_str(false),
-                               exp_marker, obs_marker,
-                               "op_shape_mismatch");
+        emit_corpus_divergence_shape(seq,
+                                     ctx->bar_index, (uint64_t)addr,
+                                     size, bar_dir_str(false),
+                                     e->bar, e->offset,
+                                     e->size, bar_dir_str(e->is_write));
         exit(1);
     }
 
@@ -172,19 +201,18 @@ static void hailo8_bar_write(void *opaque, hwaddr addr,
         /* Step 1 of write logging — shape + value check. */
         if (!e->is_write || e->bar != ctx->bar_index ||
             e->offset != (uint64_t)addr || e->size != size) {
-            uint64_t exp_marker = ((uint64_t)e->bar << 56) | e->offset;
-            uint64_t obs_marker = ((uint64_t)ctx->bar_index << 56) | (uint64_t)addr;
-            emit_corpus_divergence(seq, ctx->bar_index, (uint64_t)addr, size,
-                                   bar_dir_str(true),
-                                   exp_marker, obs_marker,
-                                   "op_shape_mismatch");
+            emit_corpus_divergence_shape(seq,
+                                         ctx->bar_index, (uint64_t)addr,
+                                         size, bar_dir_str(true),
+                                         e->bar, e->offset,
+                                         e->size, bar_dir_str(e->is_write));
             exit(1);
         }
         if (e->value != data) {
-            emit_corpus_divergence(seq, ctx->bar_index, (uint64_t)addr, size,
-                                   bar_dir_str(true),
-                                   e->value, data,
-                                   "write_value_mismatch");
+            emit_corpus_divergence_value(seq, ctx->bar_index, (uint64_t)addr,
+                                         size, bar_dir_str(true),
+                                         e->value, data,
+                                         "write_value_mismatch");
             exit(1);
         }
         return;
@@ -214,6 +242,11 @@ static const MemoryRegionOps hailo8_bar_ops = {
 /* Lifecycle                                                                   */
 /* -------------------------------------------------------------------------- */
 
+static bool bar_size_is_pow2(uint64_t v)
+{
+    return v != 0 && (v & (v - 1)) == 0;
+}
+
 static void hailo8_realize(PCIDevice *pci_dev, Error **errp)
 {
     Hailo8State *s = HAILO8(pci_dev);
@@ -221,6 +254,24 @@ static void hailo8_realize(PCIDevice *pci_dev, Error **errp)
 
     if (!s->corpus_path || !*s->corpus_path) {
         error_setg(errp, "hailo8: 'corpus' property is required");
+        return;
+    }
+
+    /* PCI BARs require power-of-2 sizes; reject early with a clear
+     * message rather than letting QEMU's memory subsystem complain later. */
+    if (!bar_size_is_pow2(s->bar0_size)) {
+        error_setg(errp, "hailo8: bar0_size must be a non-zero power of 2 "
+                         "(got 0x%" PRIx64 ")", s->bar0_size);
+        return;
+    }
+    if (!bar_size_is_pow2(s->bar2_size)) {
+        error_setg(errp, "hailo8: bar2_size must be a non-zero power of 2 "
+                         "(got 0x%" PRIx64 ")", s->bar2_size);
+        return;
+    }
+    if (!bar_size_is_pow2(s->bar4_size)) {
+        error_setg(errp, "hailo8: bar4_size must be a non-zero power of 2 "
+                         "(got 0x%" PRIx64 ")", s->bar4_size);
         return;
     }
 
@@ -289,11 +340,10 @@ static void hailo8_exit(PCIDevice *pci_dev)
 
 static void hailo8_reset(DeviceState *dev)
 {
-    Hailo8State *s = HAILO8(dev);
+    (void)dev;
     /* On guest-driven reset, do NOT reset the seq counter — the corpus is
      * keyed on a session-monotonic seq, and HailoRT may reset BARs during
      * its normal init flow without that meaning "restart the capture". */
-    (void)s;
 }
 
 static Property hailo8_properties[] = {
