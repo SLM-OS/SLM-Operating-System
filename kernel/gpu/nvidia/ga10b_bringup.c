@@ -1906,10 +1906,11 @@ static void dump_pbdma_state(const char *tag)
  * (the freed low-VA GMMU region nvgpu had used for the GR ctxsw
  * save buffer). The scan looks for this VA in any of the common
  * inst-block pointer encodings. If a future investigator finds a
- * different fault VA, update this constant and the scan in
- * `dump_one_inst_block` — no other callers consume the value. */
+ * different fault VA, update `GA10B_788_FAULT_VA` — the `_PTR_LO`
+ * form is derived from it at preprocessor time so the two can't
+ * drift apart. No other callers consume either value. */
 #define GA10B_788_FAULT_VA        0x00c01000u
-#define GA10B_788_FAULT_VA_PTR_LO 0xc01u       /* VA >> 12 */
+#define GA10B_788_FAULT_VA_PTR_LO (GA10B_788_FAULT_VA >> 12)
 
 static void dump_one_inst_block(const char *tag, uint64_t inst_phys)
 {
