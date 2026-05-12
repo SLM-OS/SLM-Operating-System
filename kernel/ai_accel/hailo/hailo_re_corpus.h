@@ -93,6 +93,16 @@ int hailo_re_corpus_parse(const char *text, size_t len,
 const struct hailo_re_op *
 hailo_re_corpus_find_seq(const struct hailo_re_corpus *c, uint32_t target);
 
+/* Format a 32-bit value as a lowercase little-endian hex string with
+ * exactly `2*size` characters, matching the corpus format spec's
+ * `value` field encoding (byte 0 first, byte size-1 last). The caller's
+ * buffer must have room for `2*size + 1` characters (NUL-terminator
+ * included). Used by `hailo replay-step` to render the
+ * `HAILO_RE_CORPUS_RESPONSE` value field and any `HAILO_RE_CORPUS_DIVERGENCE`
+ * expected/observed fields. Exposed so test code can assert against
+ * the production implementation rather than reimplementing it. */
+void hailo_re_format_le_hex(uint32_t value, uint8_t size, char *out);
+
 #ifdef __cplusplus
 }
 #endif

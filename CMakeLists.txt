@@ -80,6 +80,51 @@ if(NOT _slmos_git_sha_rc EQUAL 0 OR _slmos_git_sha STREQUAL "")
 endif()
 add_compile_definitions(SLMOS_GIT_SHA="${_slmos_git_sha}")
 
+# Force a reconfigure whenever HEAD changes — without this, the SHA
+# captured above gets baked into the cached compile_definitions at
+# the first `cmake -B build` and silently goes stale after every
+# subsequent commit. CMake's CMAKE_CONFIGURE_DEPENDS is the documented
+# way to add files whose mtime triggers a reconfigure.
+#
+# `git rev-parse --git-path <path>` resolves to the canonical location
+# regardless of whether the build is a normal clone (`.git/HEAD`) or a
+# worktree (`.git` is a file pointing at `.git/worktrees/<name>/HEAD`).
+# We watch three files:
+#
+#   - `HEAD`: changes on branch checkout
+#   - the active branch's ref (e.g. `refs/heads/main`): changes on commit
+#   - `packed-refs`: changes when refs are repacked
+function(_slmos_add_git_path_dep relpath)
+    execute_process(
+        COMMAND git rev-parse --git-path ${relpath}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE _abs
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _rc
+    )
+    if(_rc EQUAL 0 AND NOT "${_abs}" STREQUAL "" AND EXISTS "${_abs}")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${_abs}"
+        )
+    endif()
+endfunction()
+if(NOT _slmos_git_sha STREQUAL "unknown")
+    _slmos_add_git_path_dep(HEAD)
+    _slmos_add_git_path_dep(packed-refs)
+    execute_process(
+        COMMAND git rev-parse --symbolic-full-name HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE _slmos_git_ref
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _slmos_git_ref_rc
+    )
+    if(_slmos_git_ref_rc EQUAL 0 AND _slmos_git_ref MATCHES "^refs/")
+        _slmos_add_git_path_dep("${_slmos_git_ref}")
+    endif()
+endif()
+
 # Deferred-scheduling preemption (ELR-trampoline) for secondary CPUs.
 # Calling switch_to() directly from an exception handler hangs on real
 # ARM64 hardware (abandoned exception frame); the trampoline runs

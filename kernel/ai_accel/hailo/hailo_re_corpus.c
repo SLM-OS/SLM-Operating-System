@@ -145,10 +145,17 @@ static bool parse_uint_value(const char *v, const char *end, uint64_t *out,
     return true;
 }
 
-/* True iff the JSON value starts with the literal `null`. */
+/* True iff the JSON value is the literal `null`. Requires the byte
+ * after the four-char match to be either end-of-line or a non-alpha
+ * structural character so a hypothetical `"validated_at_commit":
+ * "nullable"` isn't silently treated as JSON `null`. */
 static bool value_is_null(const char *v, const char *end)
 {
-    return (end - v) >= 4 && memcmp(v, "null", 4) == 0;
+    if ((end - v) < 4 || memcmp(v, "null", 4) != 0) return false;
+    if ((end - v) == 4) return true;
+    char after = v[4];
+    return (after == ',' || after == '}' || after == ' '
+            || after == '\t' || after == '\r' || after == '\n');
 }
 
 /* Decode a value-field hex string of exactly 2*size lowercase chars
@@ -371,4 +378,15 @@ hailo_re_corpus_find_seq(const struct hailo_re_corpus *c, uint32_t target)
         }
     }
     return NULL;
+}
+
+void hailo_re_format_le_hex(uint32_t value, uint8_t size, char *out)
+{
+    static const char digits[] = "0123456789abcdef";
+    for (uint8_t i = 0; i < size; i++) {
+        uint8_t byte = (uint8_t)((value >> (i * 8u)) & 0xFFu);
+        out[i * 2u]     = digits[(byte >> 4) & 0xFu];
+        out[i * 2u + 1] = digits[byte & 0xFu];
+    }
+    out[size * 2u] = '\0';
 }

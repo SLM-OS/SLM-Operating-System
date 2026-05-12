@@ -670,21 +670,6 @@ static int cmd_hailo_ctxsmoke(int argc, char *argv[])
 /* `hailo replay-step` — #795 Phase 0 Task 0.4                                 */
 /* -------------------------------------------------------------------------- */
 
-/* Format a 32-bit value as a lowercase little-endian hex string, with
- * exactly 2*size characters. Matches the corpus format spec's value
- * encoding: byte 0 first, byte (size-1) last. Caller's buffer must
- * have room for `2*size + 1` characters. */
-static void replay_format_le_hex(uint32_t value, uint8_t size, char *out)
-{
-    static const char digits[] = "0123456789abcdef";
-    for (uint8_t i = 0; i < size; i++) {
-        uint8_t byte = (uint8_t)((value >> (i * 8u)) & 0xFFu);
-        out[i * 2u]     = digits[(byte >> 4) & 0xFu];
-        out[i * 2u + 1] = digits[byte & 0xFu];
-    }
-    out[size * 2u] = '\0';
-}
-
 /* Slurp a corpus file from the boot FAT volume into `dst` of size
  * `dst_cap`. Returns the byte count on success, or a negative error
  * code. The path must be FatFs-shaped (e.g. `0:/tiny.jsonl`), the
@@ -859,12 +844,21 @@ static int cmd_hailo_replay_step(int argc, char *argv[])
         text_size = info.size;
     }
 
-    /* Allocate the ops array. One op-struct is 16 bytes; cap at
-     * 65 536 entries (1 MB). Phase 0 corpora are far smaller, but
-     * the cap keeps a malicious input from exhausting RAM. */
-    const uint32_t ops_capacity = 65536u;
+    /* Allocate the ops array sized to the corpus we just read in.
+     * One op-struct is 16 bytes; the smallest possible op line is
+     * a tight ~70 bytes (header + every required field at minimum
+     * width). Estimate one op per 32 bytes of text and add a small
+     * floor so even an all-blank/all-trailer file gets a non-zero
+     * buffer. Cap at 65 536 entries (1 MB) so a corpus crafted to
+     * exhaust RAM via a long string of `\n`s can't oversize the
+     * allocation. */
+    const uint32_t ops_capacity_max = 65536u;
+    uint64_t ops_estimate = (uint64_t)(text_size / 32u) + 64u;
+    if (ops_estimate > ops_capacity_max) ops_estimate = ops_capacity_max;
+    const uint32_t ops_capacity = (uint32_t)ops_estimate;
     size_t ops_bytes = (size_t)ops_capacity * sizeof(struct hailo_re_op);
     size_t ops_pages = (ops_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (ops_pages == 0) ops_pages = 1;
     struct hailo_re_op *ops = (struct hailo_re_op *)pmm_alloc_pages(ops_pages);
     if (!ops) {
         shell_puts("hailo: replay-step: pmm_alloc_pages for ops failed\n");
@@ -955,8 +949,8 @@ static int cmd_hailo_replay_step(int argc, char *argv[])
                  * by §"Divergence report" in the corpus spec. */
                 char exp_hex[2 * 4 + 1];
                 char obs_hex[2 * 4 + 1];
-                replay_format_le_hex(op->value, op->size, exp_hex);
-                replay_format_le_hex(observed,  op->size, obs_hex);
+                hailo_re_format_le_hex(op->value, op->size, exp_hex);
+                hailo_re_format_le_hex(observed,  op->size, obs_hex);
                 shell_printf("HAILO_RE_CORPUS_DIVERGENCE seq=%u bar=%u "
                              "offset=%u size=%u dir=read expected=%s "
                              "observed=%s source=slmos "
@@ -972,7 +966,7 @@ static int cmd_hailo_replay_step(int argc, char *argv[])
     /* Issue the read at seq=N and emit the response line. */
     uint32_t captured = hailo_platform->read32(target->bar, target->offset);
     char val_hex[2 * 4 + 1];
-    replay_format_le_hex(captured, target->size, val_hex);
+    hailo_re_format_le_hex(captured, target->size, val_hex);
 
     shell_printf("HAILO_RE_CORPUS_RESPONSE seq=%u bar=%u offset=%u "
                  "size=%u value=%s slmos_sha=%s\n",

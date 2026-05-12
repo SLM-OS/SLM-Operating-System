@@ -161,6 +161,24 @@ static void test_parse_op_read_marks_unvalidated(void)
     TEST_ASSERT_EQUAL_UINT8(0u, c.ops[0].validated);
 }
 
+static void test_parse_validated_at_commit_string_not_misread_as_null(void)
+{
+    /* Tightens value_is_null: a `validated_at_commit` string whose
+     * value starts with "null" but extends further (e.g., a literal
+     * "nullable" placeholder) must NOT be silently treated as JSON
+     * null. The corpus parser must mark the op as validated=1. */
+    struct hailo_re_op ops[8];
+    struct hailo_re_corpus c = { .ops = ops, .op_capacity = 8 };
+    const char *text =
+        "{\"type\":\"header\",\"format_version\":1}\n"
+        "{\"type\":\"op\",\"seq\":1,\"bar\":4,\"offset\":0,\"size\":4,"
+        "\"dir\":\"read\",\"value\":\"00000000\","
+        "\"validated_at_commit\":\"nullable-placeholder\"}\n";
+    int rc = hailo_re_corpus_parse(text, strlen(text), &c);
+    TEST_ASSERT_EQUAL_INT(HAILO_RE_CORPUS_OK, rc);
+    TEST_ASSERT_EQUAL_UINT8(1u, c.ops[0].validated);
+}
+
 static void test_parse_op_read_validated_sha(void)
 {
     struct hailo_re_op ops[8];
@@ -368,29 +386,14 @@ static void test_replay_loop_drives_platform_in_seq_order(void)
     TEST_ASSERT_EQUAL_HEX32(0u, captured);
 }
 
-/* Re-declare the local format helper from hailo_shell.c so the test
- * can pin its output. The function is `static` in hailo_shell.c by
- * design — having a parallel copy here means the format is asserted
- * directly without exposing it as a public symbol. If the shell-side
- * implementation drifts, the integration test on real hardware will
- * catch the divergence. */
-static void replay_format_le_hex_test_copy(uint32_t value, uint8_t size,
-                                           char *out)
-{
-    static const char digits[] = "0123456789abcdef";
-    for (uint8_t i = 0; i < size; i++) {
-        uint8_t byte = (uint8_t)((value >> (i * 8u)) & 0xFFu);
-        out[i * 2u]     = digits[(byte >> 4) & 0xFu];
-        out[i * 2u + 1] = digits[byte & 0xFu];
-    }
-    out[size * 2u] = '\0';
-}
-
 static void test_response_value_le_hex_encoding(void)
 {
-    /* The spec example: 32-bit value 0x40130016 → "16001340". */
+    /* The spec example: 32-bit value 0x40130016 → "16001340". The
+     * formatter is the production helper from hailo_re_corpus.c so
+     * the same code path renders the test fixture and the live
+     * `HAILO_RE_CORPUS_RESPONSE` line — no risk of drift. */
     char buf[2 * 4 + 1];
-    replay_format_le_hex_test_copy(0x40130016u, 4, buf);
+    hailo_re_format_le_hex(0x40130016u, 4, buf);
     TEST_ASSERT_EQUAL_STRING("16001340", buf);
 
     /* Round-trip: encode + parse should be identity. */
@@ -405,9 +408,9 @@ static void test_response_value_le_hex_encoding(void)
     TEST_ASSERT_EQUAL_HEX32(0x40130016u, c.ops[0].value);
 
     /* Zero and all-ones. */
-    replay_format_le_hex_test_copy(0u, 4, buf);
+    hailo_re_format_le_hex(0u, 4, buf);
     TEST_ASSERT_EQUAL_STRING("00000000", buf);
-    replay_format_le_hex_test_copy(0xFFFFFFFFu, 4, buf);
+    hailo_re_format_le_hex(0xFFFFFFFFu, 4, buf);
     TEST_ASSERT_EQUAL_STRING("ffffffff", buf);
 }
 
@@ -423,6 +426,7 @@ int test_suite_hailo_replay(void)
     RUN_TEST(test_parse_missing_header_rejected);
     RUN_TEST(test_parse_op_write_decodes_le_hex);
     RUN_TEST(test_parse_op_read_marks_unvalidated);
+    RUN_TEST(test_parse_validated_at_commit_string_not_misread_as_null);
     RUN_TEST(test_parse_op_read_validated_sha);
     RUN_TEST(test_parse_rejects_nonmonotonic);
     RUN_TEST(test_parse_tolerates_unknown_type);
