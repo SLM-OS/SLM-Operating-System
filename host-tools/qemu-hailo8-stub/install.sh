@@ -34,6 +34,17 @@ if [[ ! -f "${SRC_DIR}/hailo8.c" ]]; then
 fi
 
 echo "==> Symlinking hailo8 sources into ${QEMU_SRC}/hw/misc/"
+# Refuse to clobber a regular file at the target path — guards against
+# the (unlikely but possible) future case where QEMU upstream ships its
+# own hw/misc/hailo8.c and `ln -sf` would silently destroy it.
+for f in hailo8.c hailo8_corpus.c hailo8_corpus.h; do
+    target="${QEMU_SRC}/hw/misc/${f}"
+    if [[ -e "${target}" && ! -L "${target}" ]]; then
+        echo "error: ${target} exists and is not a symlink — refusing to overwrite" >&2
+        echo "       (delete or move it manually if you intend to replace it)" >&2
+        exit 1
+    fi
+done
 ln -sf "${SRC_DIR}/hailo8.c"        "${QEMU_SRC}/hw/misc/hailo8.c"
 ln -sf "${SRC_DIR}/hailo8_corpus.c" "${QEMU_SRC}/hw/misc/hailo8_corpus.c"
 ln -sf "${SRC_DIR}/hailo8_corpus.h" "${QEMU_SRC}/hw/misc/hailo8_corpus.h"

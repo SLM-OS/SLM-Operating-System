@@ -228,7 +228,11 @@ static int parse_value(json_cursor_t *c,
     while (c->p < c->end && isdigit((unsigned char)*c->p)) {
         int d = *c->p - '0';
         /* Guard against int64 overflow (signed overflow is UB). 20-digit
-         * literals like 99999999999999999999 would otherwise wrap silently. */
+         * literals like 99999999999999999999 would otherwise wrap silently.
+         * Side effect: an explicit `-9223372036854775808` (INT64_MIN as a
+         * negative literal) is rejected because we check magnitude before
+         * applying the sign. The corpus schema never uses negative
+         * integers, so this corner case is harmless. */
         if (v > (INT64_MAX - d) / 10) {
             return -1;
         }
@@ -627,6 +631,14 @@ hailo_corpus_t *hailo_corpus_load(const char *path,
             }
             header_seen = 1;
         } else if (strcmp(type, "op") == 0) {
+            /* Spec §File layout requires the header before any op lines.
+             * Reject out-of-order corpora; the driver script will not
+             * produce these, and accepting them silently masks bugs. */
+            if (!header_seen) {
+                set_err(errbuf, errlen,
+                        "line %d: op entry before header", lineno);
+                goto fail;
+            }
             op_parse_t op;
             if (parse_op_line(line, len, &op, errbuf, errlen) != 0) {
                 goto fail;

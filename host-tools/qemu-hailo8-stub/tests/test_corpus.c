@@ -346,6 +346,21 @@ static int test_load_rejects_int_overflow(void)
     return 1;
 }
 
+static int test_load_rejects_op_before_header(void)
+{
+    /* Spec §File layout requires the header before any op lines. */
+    make_tmp();
+    write_file(tmp_path,
+        "{\"type\":\"op\",\"seq\":1,\"bar\":4,\"offset\":0,\"size\":4,\"dir\":\"read\",\"value\":\"00000000\",\"source\":\"slmos_observed\",\"validated_at_commit\":null,\"validated_at\":null}\n"
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"x\",\"fw_version\":\"x\",\"capture_host\":\"x\",\"slmos_base_sha\":\"x\",\"capture_started_at\":\"x\"}\n");
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "before header") != NULL);
+    unlink(tmp_path);
+    return 1;
+}
+
 static int test_load_handles_short_line(void)
 {
     /* line_type_field's boundary check is `p + 6 <= end`; verify we don't
@@ -377,6 +392,7 @@ int main(void)
     TEST(test_load_tolerates_comments_and_blank_lines);
     TEST(test_load_rejects_seq_above_max);
     TEST(test_load_rejects_int_overflow);
+    TEST(test_load_rejects_op_before_header);
     TEST(test_load_handles_short_line);
     TEST(test_append_write_persists);
     TEST(test_inject_no_file);
