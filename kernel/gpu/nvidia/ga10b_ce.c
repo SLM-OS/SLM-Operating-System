@@ -134,6 +134,13 @@ bool ga10b_ce_channel_dead(void)
     return atomic_load_explicit(&g_ce_channel_dead, memory_order_relaxed);
 }
 
+/* Intentionally unused in-tree today. Exposed for the future
+ * channel-recovery path tracked in #788 (the planned "patch the
+ * channel inst block to point at a freshly-allocated ctxsw save
+ * buffer" or "rebuild the low-VA GMMU tree" fix would clear the
+ * latch after re-arming the channel). Marked `void` so a future
+ * cleanup pass that strips unused symbols doesn't delete it
+ * without first reading #788. */
 void ga10b_ce_channel_dead_reset(void)
 {
     atomic_store_explicit(&g_ce_channel_dead, false, memory_order_relaxed);

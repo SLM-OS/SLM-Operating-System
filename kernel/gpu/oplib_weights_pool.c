@@ -120,7 +120,13 @@ int oplib_weights_pool_stage(uint64_t gpu_va,
      * total staged volume. Unconditional (not gated by `gpu debug`)
      * — print rate is ~1 line per 64 MB at the 64 KB chunk size,
      * low enough not to drown the log but high enough to map the
-     * wedge to a specific tensor / staged-bytes window. */
+     * wedge to a specific tensor / staged-bytes window.
+     *
+     * INTENTIONALLY NEVER RESET — the count is meant to be process-
+     * lifetime cumulative so a wedge can be correlated against
+     * "total bytes pushed through CE since boot" across slm unload
+     * / xload cycles. A future per-load tally would need its own
+     * counter rather than reusing this one. */
     static uint64_t g_chunk_count = 0;
     enum { CHUNK_PROGRESS_PRINT = 1024 };
 
