@@ -158,6 +158,18 @@ class CorpusValidationTests(unittest.TestCase):
                 corpus_mod.init(p, make_header())
 
 
+class TrailerExtrasTests(unittest.TestCase):
+    def test_extras_must_not_overwrite_reserved_keys(self) -> None:
+        bad = Trailer(
+            ended_at="2026-05-12T20:00:00Z",
+            last_seq=1,
+            reason="test",
+            extras={"type": "evil"},
+        )
+        with self.assertRaises(CorpusError):
+            bad.to_json_obj()
+
+
 class WriteFullTests(unittest.TestCase):
     def test_round_trip_with_trailer(self) -> None:
         with tempfile.TemporaryDirectory() as d:

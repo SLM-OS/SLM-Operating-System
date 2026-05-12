@@ -14,6 +14,7 @@ The driver script is the only writer. No other tool may invoke this.
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 import re
 import subprocess
 from dataclasses import dataclass
@@ -24,13 +25,26 @@ from . import corpus as corpus_mod
 from .corpus import Corpus, CorpusError, Trailer
 
 
+log = logging.getLogger("hailo_re_driver.rollback")
+
 SHA_REACHABLE = Callable[[str], bool]
 
 
 def git_reachable_from_main(repo_root: Optional[Path] = None,
                             base_ref: str = "main") -> SHA_REACHABLE:
-    """Return a predicate: True if SHA is reachable from <base_ref>."""
+    """Return a predicate: True if SHA is reachable from <base_ref>.
+
+    `git merge-base --is-ancestor` exit codes:
+      0 — SHA is an ancestor of base_ref (reachable)
+      1 — SHA is not an ancestor (not reachable)
+      128 — error (not a git repo, unknown SHA, bad ref, etc.)
+
+    We log the first 128-rc the predicate sees so operators can diagnose
+    "no validated frontier" errors that turn out to be "you're not in a git
+    repo" or "your local main is too stale to contain this SHA".
+    """
     cwd = str(repo_root) if repo_root else None
+    warned = {"flag": False}
 
     def predicate(sha: str) -> bool:
         if not sha:
@@ -39,10 +53,25 @@ def git_reachable_from_main(repo_root: Optional[Path] = None,
             ["git", "merge-base", "--is-ancestor", sha, base_ref],
             cwd=cwd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
             check=False,
         )
-        return proc.returncode == 0
+        if proc.returncode == 0:
+            return True
+        if proc.returncode == 1:
+            return False
+        # rc >= 2 (typically 128) — git itself errored out.
+        if not warned["flag"]:
+            log.warning(
+                "git merge-base failed (rc=%d) checking sha=%s vs ref=%s: %s — "
+                "all reachability checks will return False; verify cwd is a "
+                "git checkout and that `git fetch origin %s` is up to date",
+                proc.returncode, sha[:12], base_ref,
+                (proc.stderr or "").strip(), base_ref,
+            )
+            warned["flag"] = True
+        return False
 
     return predicate
 
@@ -56,14 +85,24 @@ class RollbackResult:
 
 
 def find_rollback_target(corpus: Corpus, reachable: SHA_REACHABLE) -> int:
-    """Find the last seq with validated_at_commit reachable from main."""
+    """Find the highest seq whose entry — and every prior validated entry — is
+    reachable from main.
+
+    Walks in seq order. Skips entries with `validated_at_commit=None` (these
+    are implicit-validated writes captured by QEMU, or pre-Phase-3 reads —
+    both legitimate states). Stops as soon as it sees an entry whose
+    `validated_at_commit` is set but NOT reachable from main: that entry was
+    stamped against a SHA no longer on main, so everything from that point
+    forward is suspect.
+    """
     target = 0
     for op in corpus.ops:
         sha = op.validated_at_commit
         if sha is None:
             continue
-        if reachable(sha):
-            target = op.seq
+        if not reachable(sha):
+            break
+        target = op.seq
     return target
 
 

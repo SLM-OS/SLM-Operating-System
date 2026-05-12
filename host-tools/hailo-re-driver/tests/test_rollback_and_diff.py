@@ -58,6 +58,43 @@ class RollbackTests(unittest.TestCase):
             )
             self.assertEqual(target, 2)
 
+    def test_find_rollback_target_stops_at_unreachable_even_if_later_ok(
+        self,
+    ) -> None:
+        # Contiguity invariant: an unreachable SHA in the middle halts the
+        # scan, even if entries after it are reachable. Otherwise a returned
+        # target K would have a non-reachable entry between 0 and K.
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "c-2026-05-12.jsonl"
+            corpus = corpus_mod.init(p, header())
+            corpus_mod.append_op(corpus, validated_read(1, "00000000"))
+            corpus_mod.append_op(corpus, validated_read(2, "01000000",
+                                                       sha=SHA_BAD))
+            corpus_mod.append_op(corpus, validated_read(3, "02000000"))
+            target = rollback_mod.find_rollback_target(
+                corpus, reachable=lambda sha: sha == SHA_GOOD
+            )
+            self.assertEqual(target, 1)
+
+    def test_find_rollback_target_skips_unvalidated_writes(self) -> None:
+        # validated_at_commit=None entries are legitimate (qemu_capture
+        # writes pre-Phase-3); they must not halt the scan.
+        from hailo_re_driver.corpus import OpEntry
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "c-2026-05-12.jsonl"
+            corpus = corpus_mod.init(p, header())
+            corpus_mod.append_op(corpus, OpEntry(
+                seq=1, bar=4, offset=0, size=4, dir="write",
+                value="01000000", source="qemu_capture",
+                validated_at_commit=None, validated_at=None,
+            ))
+            corpus_mod.append_op(corpus, validated_read(2, "00000000"))
+            target = rollback_mod.find_rollback_target(
+                corpus, reachable=lambda sha: sha == SHA_GOOD
+            )
+            self.assertEqual(target, 2)
+
     def test_handle_writes_new_file_and_renames_poisoned(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "c-2026-05-12.jsonl"

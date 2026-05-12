@@ -68,13 +68,27 @@ def _load_observed_ops(path: Path) -> Iterable[OpEntry]:
             raw = raw.strip()
             if not raw:
                 continue
-            obj = json.loads(raw)
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"{path}:{i}: observed-trace line is not valid JSON: {e}"
+                ) from e
             if obj.get("type") != "op":
                 raise ValueError(
                     f"{path}:{i}: observed-trace lines must all be op entries "
                     f"(got type={obj.get('type')!r})"
                 )
             yield corpus_mod._validate_op(obj)  # type: ignore[attr-defined]
+
+
+def observed_seqs(path: Path) -> list[int]:
+    """Return the seq values present in an observed-trace JSONL.
+
+    Used by `hailo-re-validate` to refuse stamping when the trace doesn't
+    cover every corpus entry.
+    """
+    return [op.seq for op in _load_observed_ops(path)]
 
 
 def _diff_op_streams(

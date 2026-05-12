@@ -156,6 +156,23 @@ def validate_main(argv: Optional[list[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
+    # Require the observed-trace to cover every seq in the corpus before
+    # advancing the validation watermark. Otherwise a partial replay could
+    # stamp entries SLM-OS never actually verified.
+    corpus_preview = corpus_mod.load(args.corpus)
+    observed_seqs = set(diff_mod.observed_seqs(args.observed_trace))
+    corpus_seqs = {op.seq for op in corpus_preview.ops}
+    missing = sorted(corpus_seqs - observed_seqs)
+    if missing:
+        print(
+            f"refusing to validate: observed-trace covers "
+            f"{len(observed_seqs & corpus_seqs)}/{len(corpus_seqs)} corpus "
+            f"entries. Missing seq examples: {missing[:5]}"
+            f"{'...' if len(missing) > 5 else ''}",
+            file=sys.stderr,
+        )
+        return 2
+
     report = diff_mod.diff_against_observed(args.corpus, args.observed_trace)
     print(diff_mod.format_report(report))
 

@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, IO, Iterable, Optional, Union
@@ -76,8 +78,13 @@ class QemuRunner:
     """Run a QEMU+stub process against a corpus and return the first event.
 
     `command_factory` takes the corpus path and returns the argv list for
-    `subprocess.Popen`. Defaults are wired to Task 0.3's launch script via
-    `HAILO_RE_QEMU_LAUNCHER` env var, falling back to `./scripts/run-qemu-stub.sh`.
+    `subprocess.Popen`. The launcher itself is the Task 0.3 deliverable named
+    in the `HAILO_RE_QEMU_LAUNCHER` env var; `default_command_factory` raises
+    if it isn't set.
+
+    stderr is drained on a background thread to prevent pipe-buffer deadlock
+    when QEMU emits more than ~64 KB of stderr while we're still parsing
+    stdout.
     """
 
     command_factory: Callable[[Path], list[str]]
@@ -98,9 +105,15 @@ class QemuRunner:
             env=env,
             text=True,
         )
+        stderr_buf: deque[str] = deque(maxlen=self.capture_stderr_tail)
+        stderr_thread = threading.Thread(
+            target=_tail_into,
+            args=(proc.stderr, stderr_buf),
+            daemon=True,
+        )
+        stderr_thread.start()
         try:
             event = _consume_stream(proc.stdout)  # type: ignore[arg-type]
-            stderr_tail = _tail_close(proc.stderr, self.capture_stderr_tail)
             proc.wait()
             rc = proc.returncode
         finally:
@@ -113,6 +126,8 @@ class QemuRunner:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+            stderr_thread.join(timeout=1.0)
+        stderr_tail = "".join(stderr_buf)
         if event is not None:
             return event
         if rc == 0:
@@ -154,14 +169,15 @@ def _consume_stream(stream: IO[str]) -> Optional[QemuEvent]:
     return found
 
 
-def _tail_close(stream: Optional[IO[str]], n: int) -> str:
+def _tail_into(stream: Optional[IO[str]], buf: "deque[str]") -> None:
+    """Drain a stream into a bounded deque on a background thread."""
     if stream is None:
-        return ""
+        return
     try:
-        lines = stream.readlines()
+        for line in stream:
+            buf.append(line)
     except Exception:
-        return ""
-    return "".join(lines[-n:])
+        return
 
 
 # --------------------------------------------------------------------------- #

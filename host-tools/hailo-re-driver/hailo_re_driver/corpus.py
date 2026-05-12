@@ -6,12 +6,37 @@ an optional trailer. The driver script (this package) is the single writer.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import IO, Iterable, Iterator, Optional
+
+try:
+    import fcntl  # POSIX advisory locks
+    _HAVE_FLOCK = True
+except ImportError:  # pragma: no cover — Windows fallback
+    _HAVE_FLOCK = False
+
+
+@contextlib.contextmanager
+def _exclusive(fh: IO[str]):
+    """Best-effort advisory exclusive lock on the open file handle.
+
+    The spec mandates a single writer per corpus. This lock makes a violation
+    surface as a wait/error rather than silent interleaving. On platforms
+    without fcntl (Windows) the lock is a no-op.
+    """
+    if _HAVE_FLOCK:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    else:
+        yield
 
 
 SUPPORTED_FORMAT_VERSION = 1
@@ -84,6 +109,12 @@ class Trailer:
     extras: dict = field(default_factory=dict)  # rollback_from_seq, etc.
 
     def to_json_obj(self) -> dict:
+        reserved = {"type", "ended_at", "last_seq", "reason"}
+        clashing = sorted(k for k in self.extras if k in reserved)
+        if clashing:
+            raise CorpusError(
+                f"trailer.extras must not contain reserved keys {clashing!r}"
+            )
         obj: dict = {"type": "trailer", "ended_at": self.ended_at}
         if self.last_seq is not None:
             obj["last_seq"] = self.last_seq
@@ -317,7 +348,7 @@ def append_op(corpus: Corpus, op: OpEntry) -> None:
         )
     # Validate the entry round-tripped through the same gate `load` uses.
     _validate_op(op.to_json_obj())
-    with corpus.path.open("a", encoding="utf-8") as f:
+    with corpus.path.open("a", encoding="utf-8") as f, _exclusive(f):
         f.write(json.dumps(op.to_json_obj(), separators=(",", ":")))
         f.write("\n")
     corpus.ops.append(op)
@@ -327,7 +358,7 @@ def append_trailer(corpus: Corpus, trailer: Trailer) -> None:
     if corpus.trailer is not None:
         raise CorpusError(f"{corpus.path}: trailer already present")
     _validate_trailer(trailer.to_json_obj())
-    with corpus.path.open("a", encoding="utf-8") as f:
+    with corpus.path.open("a", encoding="utf-8") as f, _exclusive(f):
         f.write(json.dumps(trailer.to_json_obj(), separators=(",", ":")))
         f.write("\n")
     corpus.trailer = trailer

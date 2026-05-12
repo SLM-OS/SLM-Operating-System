@@ -193,7 +193,14 @@ class SlmosRunner:
     def send_replay_command(
         self, corpus_path: Path, seq: int
     ) -> CmdResult:
-        cmd = f"hailo replay-step {corpus_path} {seq}"
+        # Command shape per docs/hailo-re-corpus-format.md §SLM-OS hailo
+        # replay-step: single seq argument. corpus_path is dev-side and not
+        # visible to SLM-OS; how SLM-OS obtains the corpus (baked-in blob,
+        # UART stream, etc.) is the Task 0.4 deliverable. We retain the
+        # corpus_path parameter on this method so callers can pass it
+        # through once Task 0.4 commits to a transport.
+        del corpus_path  # currently unused; see comment above
+        cmd = f"hailo replay-step {seq}"
         return self.transport(
             [
                 "labctl", "serial", "send", self.sbc, cmd,
@@ -231,7 +238,8 @@ class SlmosRunner:
                     stderr=flash.stderr,
                 )
             shell = self.wait_for_shell()
-            if shell.returncode != 0 or self.shell_prompt not in shell.stdout:
+            prompt_re = re.compile(self.shell_prompt)
+            if shell.returncode != 0 or not prompt_re.search(shell.stdout):
                 return ReplayError(
                     kind="error",
                     message=(
