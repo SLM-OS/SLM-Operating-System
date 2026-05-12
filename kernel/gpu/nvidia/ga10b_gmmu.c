@@ -1049,6 +1049,88 @@ int ga10b_gmmu_free(uint64_t inst_block_phys,
 #define GA10B_RAM_IN_USE_VER2_PT_FORMAT   0x400u
 #define GA10B_RAM_IN_BIG_PAGE_SIZE_64KB   0x800u
 
+/* RAMFC field word offsets per
+ * `~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_ram_ga10b.h:118-140`.
+ * RAMFC starts at word 0 of the inst block and ends at word 127;
+ * PDB lives at words 128/129. All offsets here are word indices
+ * (multiply by 4 for the byte offset into the inst block). */
+#define GA10B_RAMFC_W_SIGNATURE            4u
+#define GA10B_RAMFC_W_ACQUIRE              12u
+#define GA10B_RAMFC_W_GP_BASE              18u
+#define GA10B_RAMFC_W_GP_BASE_HI           19u
+#define GA10B_RAMFC_W_PB_HEADER            33u
+#define GA10B_RAMFC_W_SUBDEVICE            37u
+#define GA10B_RAMFC_W_TARGET               43u
+#define GA10B_RAMFC_W_CONFIG               61u
+#define GA10B_RAMFC_W_INTR_NOTIFY          62u
+#define GA10B_RAMFC_W_SET_CHANNEL_INFO     63u
+/* engine_wfi block (post-PDB), word 134 for the VEID field. */
+#define GA10B_RAMIN_W_ENGINE_WFI_VEID      134u
+
+/* PBDMA-encoded field values for a default Tegra GA10B channel
+ * (chid=0, subctx=1 ASYNC veid, engine=GR rleng_id=0, intr_vec=0,
+ * privileged-config=no, long acquire timeout saturated). Derived
+ * by mechanically following the L4T r36.4.4 nvgpu HAL ops chain:
+ *
+ *   .signature   = gp10b_pbdma_get_signature
+ *                  → litter(GPFIFO_CLASS) = AMPERE_CHANNEL_GPFIFO_B
+ *   .pb_header   = gv11b_pbdma_get_fc_pb_header
+ *                  → method_zero | subch_zero | level_main |
+ *                    first_true | type_inc
+ *   .subdevice   = gm20b_pbdma_get_fc_subdevice
+ *                  → subdevice_id(1) | status_active | channel_dma_enable
+ *   .target      = ga10b_pbdma_get_fc_target
+ *                  → engine_f(rleng=0) | eng_ctx_valid_true | ce_ctx_valid_true
+ *   .acquire     = gm20b_pbdma_acquire_val (2 s scaled saturates)
+ *                  → retry_man_2 | retry_exp_2 |
+ *                    timeout_man_max | timeout_exp_max | timeout_en_enable
+ *   .intr_notify = ga10b_pbdma_set_intr_notify(0)
+ *                  → vector_f(0) | ctrl_cpu_enable | ctrl_gsp_disable
+ *   .config      = gv11b_pbdma_config_userd_writeback_enable(0)
+ *                  → userd_writeback_enable bit (12)
+ *
+ * Documented offsets keyed back to the L4T header so a future
+ * investigator can re-derive these from the nvgpu source if the
+ * Tegra HAL chain ever changes. */
+#define GA10B_RAMFC_VAL_SIGNATURE          0x0000C76Fu  /* AMPERE_CHANNEL_GPFIFO_B */
+#define GA10B_RAMFC_VAL_PB_HEADER          0x20400000u  /* first | type_inc */
+#define GA10B_RAMFC_VAL_SUBDEVICE          0x30000001u  /* id=1 | active | dma_enable */
+#define GA10B_RAMFC_VAL_TARGET_GR          0x00030000u  /* rleng=0 | eng+ce_ctx_valid */
+#define GA10B_RAMFC_VAL_ACQUIRE_LONG       0xFFFF7902u  /* saturated 2 s acquire */
+#define GA10B_RAMFC_VAL_INTR_NOTIFY        0x80000000u  /* vec=0 | cpu_enable */
+#define GA10B_RAMFC_VAL_CONFIG_USERD_WB    0x00001000u  /* userd_writeback bit */
+
+/* `set_channel_info` is read-modify-write on a 32-bit value with
+ * `chid` at bits[27:16] and `veid` at bits[13:8]. We start from 0
+ * (the inst block was just zeroed) and OR in the encoded fields. */
+#define GA10B_RAMFC_SET_CHANNEL_INFO(chid, veid) \
+    ((((uint32_t)(chid) & 0xfffu) << 16) | (((uint32_t)(veid) & 0x3fu) << 8))
+
+/* The helper's CREATE_SUBCONTEXT call publishes subctx_id=1 (ASYNC
+ * veid=1). The handoff doesn't carry this explicitly today
+ * (channel_id and tsg_id are u32 fields but veid is implicit);
+ * hardcoded here matching the helper's invariant. If a future
+ * helper revision uses a different subctx_id, both this constant
+ * AND the helper need updating in lock-step — fortunately the
+ * runlist + USERD config flow through SLM-OS only handles single-
+ * subctx channels today, so the hardcode is the simplest safe
+ * choice. Document in `ga10b_channel_handoff.h` if a veid field
+ * is ever added to the handoff struct. */
+#define GA10B_HELPER_SUBCTX_ID             1u
+
+/* Compute log2 of `n` for n that's a non-zero power of two. Used
+ * for the gpfifo `limit2` field in gp_base_hi which encodes
+ * log2(num_entries). Returns 0 for n=0 (defensive — caller should
+ * have validated). The handoff always carries
+ * GPU_LAUNCH_GPFIFO_ENTRIES (currently 512 → log2 = 9), but the
+ * computation generalises so a future helper change doesn't bake
+ * the magic 9 in. */
+static inline uint32_t log2_pow2(uint32_t n)
+{
+    if (n == 0) return 0;
+    return (uint32_t)__builtin_ctz(n);
+}
+
 /* Map `n_pages` of contiguous physical memory at the given GPU
  * VA. Helper for the rebuild path — calls into the existing
  * `map_one_page` so it benefits from the auto-allocated
@@ -1114,12 +1196,76 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
 
     inst[128] = pdb_lo_word;
     inst[129] = pdb_hi_word;
+
+    /* 2b. Populate RAMFC fields PBDMA reads when fetching submits
+     *    for this channel. Without these, PBDMA finds gpfifo_phys
+     *    = 0 in the inst block and silently does nothing — the
+     *    Stage 2 PR's known limitation. Mirrors
+     *    `ga10b_ramfc_setup` from
+     *    `~/slmos-ref/nvidia/nvgpu-hal-fifo-ramfc_ga10b_fusa.c`,
+     *    with the PBDMA-HAL-computed values inlined as constants
+     *    above (the HAL chain dispatches through 4 chip-version
+     *    HAL ops to produce them on Linux; we replicate the
+     *    Tegra GA10B output values directly). */
+
+    /* `gp_base_offset_f` shifts the gpfifo phys's bits[31:3] into
+     * word bits[31:3]. We just need to mask off the bottom 3 bits;
+     * gpfifo phys is page-aligned (4 KB) so the bottom 12 bits are
+     * already zero, but the mask keeps the encoding explicit. */
+    uint32_t gp_base_lo_val =
+        (uint32_t)(h->gpfifo_phys & 0xfffffff8u);
+    /* `gp_base_hi` carries phys bits[39:32] in bits[7:0], and the
+     * gpfifo size in entries-log2 at bits[20:16]. Tegra GA10B
+     * gpfifo phys is 40-bit so the high byte is at most 0xFF. */
+    uint32_t gp_base_hi_val =
+        ((uint32_t)(h->gpfifo_phys >> 32) & 0xffu) |
+        (log2_pow2(h->gpfifo_entries) << 16);
+
+    inst[GA10B_RAMFC_W_GP_BASE]       = gp_base_lo_val;
+    inst[GA10B_RAMFC_W_GP_BASE_HI]    = gp_base_hi_val;
+    inst[GA10B_RAMFC_W_SIGNATURE]     = GA10B_RAMFC_VAL_SIGNATURE;
+    inst[GA10B_RAMFC_W_PB_HEADER]     = GA10B_RAMFC_VAL_PB_HEADER;
+    inst[GA10B_RAMFC_W_SUBDEVICE]     = GA10B_RAMFC_VAL_SUBDEVICE;
+    inst[GA10B_RAMFC_W_TARGET]        = GA10B_RAMFC_VAL_TARGET_GR;
+    inst[GA10B_RAMFC_W_ACQUIRE]       = GA10B_RAMFC_VAL_ACQUIRE_LONG;
+    inst[GA10B_RAMFC_W_INTR_NOTIFY]   = GA10B_RAMFC_VAL_INTR_NOTIFY;
+    inst[GA10B_RAMFC_W_CONFIG]        = GA10B_RAMFC_VAL_CONFIG_USERD_WB;
+    inst[GA10B_RAMFC_W_SET_CHANNEL_INFO] =
+        GA10B_RAMFC_SET_CHANNEL_INFO(h->channel_id,
+                                      GA10B_HELPER_SUBCTX_ID);
+
+    /* engine_wfi block (post-RAMFC, pre-PDB region for the
+     * engine-wait-for-idle save pointer). Only the VEID is written
+     * by `ga10b_ramfc_setup`; ptr_lo/ptr_hi/target stay zero in
+     * the inherited channel because the helper doesn't allocate a
+     * GR ctxsw save buffer (Tegra's nvgpu lazy-allocates it on
+     * first GR engagement, and the helper never engages GR — only
+     * does host-family sema releases on subch 0). */
+    inst[GA10B_RAMIN_W_ENGINE_WFI_VEID] = GA10B_HELPER_SUBCTX_ID;
+
     cache_clean_range((void *)(uintptr_t)inst_block_phys, 4096);
 
-    uart_printf("[rebuild-gmmu] inst_block@0x%lx written: "
-                "PDB_lo=0x%08x PDB_hi=0x%08x\n",
-                (unsigned long)inst_block_phys,
+    uart_printf("[rebuild-gmmu] inst_block@0x%lx written:\n",
+                (unsigned long)inst_block_phys);
+    uart_printf("[rebuild-gmmu]   PDB_lo=0x%08x PDB_hi=0x%08x\n",
                 (unsigned)pdb_lo_word, (unsigned)pdb_hi_word);
+    uart_printf("[rebuild-gmmu]   gp_base=0x%08x gp_base_hi=0x%08x "
+                "(entries=%u → log2=%u)\n",
+                (unsigned)gp_base_lo_val, (unsigned)gp_base_hi_val,
+                (unsigned)h->gpfifo_entries,
+                (unsigned)log2_pow2(h->gpfifo_entries));
+    uart_printf("[rebuild-gmmu]   signature=0x%08x pb_header=0x%08x "
+                "subdevice=0x%08x target=0x%08x\n",
+                GA10B_RAMFC_VAL_SIGNATURE, GA10B_RAMFC_VAL_PB_HEADER,
+                GA10B_RAMFC_VAL_SUBDEVICE, GA10B_RAMFC_VAL_TARGET_GR);
+    uart_printf("[rebuild-gmmu]   acquire=0x%08x intr_notify=0x%08x "
+                "config=0x%08x set_channel_info=0x%08x veid=%u\n",
+                GA10B_RAMFC_VAL_ACQUIRE_LONG,
+                GA10B_RAMFC_VAL_INTR_NOTIFY,
+                GA10B_RAMFC_VAL_CONFIG_USERD_WB,
+                GA10B_RAMFC_SET_CHANNEL_INFO(h->channel_id,
+                                              GA10B_HELPER_SUBCTX_ID),
+                (unsigned)GA10B_HELPER_SUBCTX_ID);
 
     /* 3. Map each preserved buffer at its original GPU VA. The
      *    handoff publishes (phys, gpu_va, size) for every dmabuf
