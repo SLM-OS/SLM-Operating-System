@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hailo-re-driver"
+version = "0.1.0"
+description = "Driver script for the Hailo BAR4 RE capture-and-replay loop (issue #795 Phase 0 Task 0.5)."
+requires-python = ">=3.10"
+authors = [{ name = "SLM-OS" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+hailo-re-bootstrap = "hailo_re_driver.cli:bootstrap_main"
+hailo-re-validate  = "hailo_re_driver.cli:validate_main"
+hailo-re-diff      = "hailo_re_driver.cli:diff_main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hailo_re_driver*"]
