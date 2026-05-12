@@ -499,6 +499,7 @@ set(KERNEL_SOURCES
     kernel/mm/pmm.c
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/mm/vmm.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/mm/ncmem.c>
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/mm/kbuf.c>
 
     # ==========================================================================
     # Scheduler
@@ -855,6 +856,7 @@ set(TEST_SOURCES
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_telnetd_cmd.c>
     $<$<BOOL:${ENABLE_NETWORKING}>:kernel/tests/test_tcp_telemetry_server.c>
     kernel/tests/test_pmm.c
+    $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_kbuf.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_pcie.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_bpmp.c>
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_inference_device.c>

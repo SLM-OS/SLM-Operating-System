@@ -159,6 +159,10 @@ int test_harness_run_all(void)
 #endif
     total_failures += test_suite_pmm();
 #if !defined(PLATFORM_X86_64)
+    {
+        extern int test_suite_kbuf(void);
+        total_failures += test_suite_kbuf();
+    }
     total_failures += test_suite_pcie();
     total_failures += test_suite_bpmp();
     total_failures += test_suite_inference_device();
