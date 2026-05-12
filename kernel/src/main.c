@@ -366,6 +366,24 @@ void kernel_main(void *dtb)
     uart_puts("\n");
     vmm_init();
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* #788 root-cause fix: register the kexec'd nvgpu channel's
+     * inst block as a PMM user-reserve BEFORE pmm_init publishes
+     * pages. The MMU is up (vmm_init just ran) so reading the GPU
+     * BAR0 MMIO and the inst-block DRAM page is safe. The reservation
+     * feeds into the same /memreserve/ carve path firmware DTB entries
+     * use, so kernel allocations naturally steer around the channel's
+     * pages and the post-kexec wedge (inst block clobbered with
+     * SLM-OS kernel code or model bytes — see PR #797 diagnostic)
+     * doesn't fire. Safe to call on non-kexec boots: the function
+     * early-returns when FECS_CURRENT_CTX is zero / target=0 / a
+     * poisoned-MMIO pattern. */
+    {
+        extern void ga10b_kexec_handoff_register_reserves(void);
+        ga10b_kexec_handoff_register_reserves();
+    }
+#endif
+
     uart_puts("\n");
     pmm_init();
     pmm_dump_stats();

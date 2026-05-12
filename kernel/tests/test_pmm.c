@@ -1058,6 +1058,97 @@ static void test_carve_null_output_returns_zero(void)
 }
 
 /* ============================================================================
+ * User-reserve API (#788)
+ * ============================================================================
+ *
+ * `pmm_user_reserve_add` registers a (phys, size) range that PMM init
+ * carves out of every region added to the buddy allocator. The
+ * production caller is `ga10b_kexec_handoff_register_reserves` in
+ * the Jetson early-boot path; these unit tests cover the API shape
+ * (count tracking, reset, full-table behaviour) so a regression
+ * shows up in QEMU `make test` before it can break the Jetson
+ * boot path.
+ *
+ * Every test resets the table at entry so it doesn't matter which
+ * other test ran before. */
+
+static void test_user_reserve_count_starts_zero(void)
+{
+    pmm_user_reserve_reset();
+    TEST_ASSERT_EQUAL_UINT64(0, pmm_user_reserve_count());
+}
+
+static void test_user_reserve_add_increments_count(void)
+{
+    pmm_user_reserve_reset();
+
+    TEST_ASSERT_EQUAL_INT(0, pmm_user_reserve_add(0x100000, 0x1000));
+    TEST_ASSERT_EQUAL_UINT64(1, pmm_user_reserve_count());
+
+    TEST_ASSERT_EQUAL_INT(0, pmm_user_reserve_add(0x200000, 0x2000));
+    TEST_ASSERT_EQUAL_UINT64(2, pmm_user_reserve_count());
+
+    TEST_ASSERT_EQUAL_INT(0, pmm_user_reserve_add(0x300000, 0x1000));
+    TEST_ASSERT_EQUAL_UINT64(3, pmm_user_reserve_count());
+}
+
+static void test_user_reserve_zero_size_rejected(void)
+{
+    pmm_user_reserve_reset();
+
+    /* Zero-size reservations are nonsense — `pmm_carve_reserves`
+     * silently skips them, so accepting them here would just bloat
+     * the table without effect. Reject up front. */
+    TEST_ASSERT_EQUAL_INT(-1, pmm_user_reserve_add(0x100000, 0));
+    TEST_ASSERT_EQUAL_UINT64(0, pmm_user_reserve_count());
+}
+
+static void test_user_reserve_reset_zeros_count(void)
+{
+    pmm_user_reserve_reset();
+    (void)pmm_user_reserve_add(0x100000, 0x1000);
+    (void)pmm_user_reserve_add(0x200000, 0x1000);
+    TEST_ASSERT_EQUAL_UINT64(2, pmm_user_reserve_count());
+
+    pmm_user_reserve_reset();
+    TEST_ASSERT_EQUAL_UINT64(0, pmm_user_reserve_count());
+}
+
+static void test_user_reserve_table_full_rejects(void)
+{
+    pmm_user_reserve_reset();
+
+    /* Fill the table — capacity = PMM_MAX_USER_RESERVES (16, file-
+     * static in pmm.c). Use an inflated upper bound (32) to avoid
+     * the test breaking when the capacity is bumped; the loop just
+     * notices when adds start failing and asserts the count tops
+     * out at the natural cap. */
+    int last_ok_count = 0;
+    for (int i = 0; i < 32; i++) {
+        int rc = pmm_user_reserve_add(
+            (uint64_t)(0x100000 + (uint64_t)i * 0x1000), 0x1000);
+        if (rc == 0) {
+            last_ok_count = i + 1;
+        } else {
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(last_ok_count >= 1);
+
+    /* Once the table is full, further adds reject. */
+    TEST_ASSERT_EQUAL_INT(-1, pmm_user_reserve_add(0x900000, 0x1000));
+
+    /* Count is stable at the cap, not silently incremented. */
+    TEST_ASSERT_EQUAL_UINT64((size_t)last_ok_count,
+                             pmm_user_reserve_count());
+
+    /* Clean up so a later test doesn't inherit a full table — defensive
+     * even though every test starts with a reset (one consistent
+     * idiom). */
+    pmm_user_reserve_reset();
+}
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -1139,6 +1230,19 @@ int test_suite_pmm(void)
     RUN_TEST(test_ncmem_oversize_rejected);
     RUN_TEST(test_ncmem_overflow_rejected);
 #endif
+
+    /* User-reserve API (#788 root-cause fix prep). The integration
+     * test that the reserves are actually honored by `pmm_init` is
+     * impractical here — `pmm_init` has already run by the time the
+     * test harness starts, so a fresh registration has no effect on
+     * the live buddy. The unit tests below cover the API shape
+     * (count, add, reset, full-table behavior); the integration is
+     * exercised on hardware via the call site in `kernel_main`. */
+    RUN_TEST(test_user_reserve_count_starts_zero);
+    RUN_TEST(test_user_reserve_add_increments_count);
+    RUN_TEST(test_user_reserve_zero_size_rejected);
+    RUN_TEST(test_user_reserve_reset_zeros_count);
+    RUN_TEST(test_user_reserve_table_full_rejects);
 
     return UnityEnd();
 }

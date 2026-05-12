@@ -70,6 +70,54 @@ struct pmm_buddy_stats {
 void pmm_init(void);
 
 /*
+ * Register a physical range that PMM must NOT hand out to the buddy
+ * allocator. Adds to an internal list that `pmm_init` reads alongside
+ * the firmware-supplied /memreserve/ entries from the DTB; both lists
+ * feed `pmm_carve_reserves` so the buddy never sees the reserved pages.
+ *
+ * Use this for runtime-discovered reservations the firmware doesn't
+ * know about — primarily GPU kexec handoff state (channel inst block,
+ * page tables, save buffers) that nvgpu allocated pre-kexec and that
+ * SLM-OS must not clobber. The caller discovers the physical addresses
+ * from GPU MMIO registers (FECS_CURRENT_CTX, etc.) at a point in boot
+ * after the MMU is up but before PMM publishes pages. See
+ * `ga10b_handoff_reserve.c` for the canonical Jetson-side caller.
+ *
+ * MUST be called BEFORE `pmm_init`. Reservations added after pmm_init
+ * are ignored (the buddy has already been built); the function still
+ * returns 0 in that case to keep the API tolerant of mis-ordered boot
+ * code, but no protection is granted. The caller is responsible for
+ * the ordering — there's no late-binding rescan.
+ *
+ * `size` is the byte length; the carve helper page-rounds internally
+ * so partial-page reservations protect the containing 4 KB page.
+ *
+ * Returns 0 on success, -1 if the user-reserve table is full
+ * (PMM_MAX_USER_RESERVES, file-static in pmm.c) or `size == 0`. The
+ * cap is currently 16 — generous for the kexec-handoff use case
+ * which adds a handful of regions per boot.
+ *
+ * Thread-safety: file-static array, no locking. PMM init runs early
+ * in single-CPU context before scheduler bring-up, so callers don't
+ * need to synchronize. */
+int pmm_user_reserve_add(uint64_t phys, uint64_t size);
+
+/*
+ * Test-only accessor: read back the number of user reserves currently
+ * registered. Returns 0 if `pmm_user_reserve_add` has never been
+ * called. Used by `test_pmm.c` to verify the reservation API without
+ * having to expose the file-static array.
+ */
+size_t pmm_user_reserve_count(void);
+
+/*
+ * Test-only accessor: reset the user-reserve table. The production
+ * path adds reserves once during boot and never clears them; tests
+ * need to wipe state between cases.
+ */
+void pmm_user_reserve_reset(void);
+
+/*
  * Allocate a single 4KB physical page.
  *
  * Returns: Physical address of allocated page, or 0 on failure.
