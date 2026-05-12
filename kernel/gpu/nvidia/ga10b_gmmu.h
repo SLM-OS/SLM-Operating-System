@@ -356,6 +356,68 @@ uint64_t ga10b_gmmu_discover_inst_block_phys(void);
  * and does not intersect the OP-TEE carveout. */
 bool ga10b_phys_in_dram(uint64_t phys, size_t bytes);
 
+/* Forward decl — full struct is in `ga10b_channel_handoff.h`,
+ * pulled in by the rebuild path's translation unit. Declaring here
+ * lets callers of `ga10b_gmmu_rebuild_for_handoff` work with an
+ * opaque pointer if they only need the function signature. */
+struct ga10b_channel_handoff;
+
+/* #788 Stage 2 — rebuild a fresh GMMU page-table tree for a kexec'd
+ * channel and write the inst block to point at it.
+ *
+ * Use case: after Linux kexecs, nvgpu's module .shutdown handler
+ * frees the channel's PDB + page tables. The inst-block page
+ * survives via the Stage 1 `pmm_user_reserve_add` reservation, but
+ * its contents (PDB pointer, ramfc state) are gone. The helper's
+ * USER-allocated buffers (pushbuffer, semaphore, SASS pool, etc.)
+ * survive intact because the helper's open file descriptors keep
+ * Linux from reclaiming them.
+ *
+ * This function rebuilds:
+ *
+ *   1. A fresh PDB page allocated from SLM-OS PMM, zeroed so every
+ *      PDE3 entry reads invalid until mapped.
+ *   2. The inst block at `inst_block_phys` — overwritten with a
+ *      valid PDB pointer (sys_mem_ncoh aperture, volatile, ver2
+ *      page-table format, 64 KB big-page size) and zeroed
+ *      elsewhere.
+ *   3. PTEs in the new tree mapping each preserved dmabuf from the
+ *      handoff at its original GPU VA: pushbuf, semaphore, SASS
+ *      pool (shader_*), cbuf, QMD pool, and the first 4 KB of the
+ *      weights pool. USERD and GPFIFO are PBDMA-accessed via phys
+ *      and don't need GMMU entries.
+ *   4. TLB invalidate against the new PDB so the GPU loads fresh
+ *      PTEs on the next walk.
+ *
+ * **Limitations:**
+ *
+ *   - Weights pool beyond its first page is NOT mapped. The 1.5 GB
+ *     IOVMM allocation is SMMU-stitched from physically-scattered
+ *     pages; the handoff publishes only the first page's phys.
+ *     `slm xload qwen`'s W3 staging will succeed for the first 4
+ *     KB chunk only; further chunks MMU-fault. A future helper
+ *     enhancement could enumerate per-page phys via
+ *     /proc/self/pagemap pre-kexec.
+ *
+ *   - GR engine ctxsw save buffer is NOT rebuilt. nvgpu allocates
+ *     this lazily on first GR engagement; if FECS tries to save a
+ *     context during the rebuilt channel's life, the save will
+ *     fault. The MVP doesn't attempt to recreate it; if hardware
+ *     testing shows it's needed, a future revision will allocate a
+ *     save buffer and patch the inst block's engine_wfi fields.
+ *
+ *   - The runlist on the GPU still references the OLD inst-block
+ *     physical address (because that's where nvgpu wrote it
+ *     pre-kexec). The Stage 1 reservation keeps that page intact;
+ *     this function fills it with valid contents so the runlist's
+ *     reference becomes meaningful again. No runlist edit needed.
+ *
+ * Returns 0 on success, -1 on PMM exhaustion / invalid inst_phys /
+ * mapping failure / TLB-invalidate timeout. All UART-logged so the
+ * caller can correlate failures with the boot-time trace. */
+int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
+                                   const struct ga10b_channel_handoff *h);
+
 /* Discover the inherited channel's inst block by walking DRAM and
  * cross-checking each candidate against a known (gpu_va, leaf_phys)
  * pair from the channel handoff. Used as a fallback when
