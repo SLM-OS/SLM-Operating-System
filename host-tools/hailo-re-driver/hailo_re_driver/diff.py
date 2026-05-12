@@ -55,14 +55,27 @@ def diff_against_observed(
     Produced by SLM-OS Phase 3 replay (one line per real-hardware op).
     """
     left = corpus_mod.load(corpus_path)
-    right_ops = list(_load_observed_ops(observed_path))
-    rows = _diff_op_streams(left.ops, right_ops)
+    right_ops = list(load_observed_ops(observed_path))
+    return diff_ops_against_path(
+        left.ops, right_ops,
+        left_path=corpus_path, right_path=observed_path,
+    )
+
+
+def diff_ops_against_path(
+    left_ops: list[OpEntry], right_ops: list[OpEntry],
+    *, left_path: Path, right_path: Path,
+) -> DiffReport:
+    """Diff already-loaded op lists. Used when the caller already has both
+    sides in memory and wants to avoid re-reading files."""
+    rows = _diff_op_streams(left_ops, right_ops)
     first = next((r.seq for r in rows if r.status != "match"), None)
-    return DiffReport(left_path=corpus_path, right_path=observed_path,
+    return DiffReport(left_path=left_path, right_path=right_path,
                       rows=rows, first_divergent_seq=first)
 
 
-def _load_observed_ops(path: Path) -> Iterable[OpEntry]:
+def load_observed_ops(path: Path) -> Iterable[OpEntry]:
+    """Stream-parse an observed-trace JSONL (no header; op lines only)."""
     with path.open("r", encoding="utf-8") as f:
         for i, raw in enumerate(f, start=1):
             raw = raw.strip()
@@ -85,10 +98,10 @@ def _load_observed_ops(path: Path) -> Iterable[OpEntry]:
 def observed_seqs(path: Path) -> list[int]:
     """Return the seq values present in an observed-trace JSONL.
 
-    Used by `hailo-re-validate` to refuse stamping when the trace doesn't
-    cover every corpus entry.
+    Prefer `load_observed_ops` directly when the caller also needs the
+    parsed op entries themselves.
     """
-    return [op.seq for op in _load_observed_ops(path)]
+    return [op.seq for op in load_observed_ops(path)]
 
 
 def _diff_op_streams(

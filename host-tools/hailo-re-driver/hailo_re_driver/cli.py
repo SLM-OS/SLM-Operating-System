@@ -156,12 +156,32 @@ def validate_main(argv: Optional[list[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
+    # Load corpus + observed-trace exactly once.
+    corpus = corpus_mod.load(args.corpus)
+    observed_ops = list(diff_mod.load_observed_ops(args.observed_trace))
+    observed_seq_list = [op.seq for op in observed_ops]
+
+    # Detect duplicate seqs in the trace — these point at an SLM-OS bug, not
+    # a corpus integrity issue, but stamping past one would be wrong.
+    seen: set[int] = set()
+    duplicates: list[int] = []
+    for s in observed_seq_list:
+        if s in seen:
+            duplicates.append(s)
+        seen.add(s)
+    if duplicates:
+        print(
+            f"refusing to validate: observed-trace contains duplicate seq "
+            f"values {sorted(set(duplicates))[:5]}",
+            file=sys.stderr,
+        )
+        return 2
+
     # Require the observed-trace to cover every seq in the corpus before
     # advancing the validation watermark. Otherwise a partial replay could
     # stamp entries SLM-OS never actually verified.
-    corpus_preview = corpus_mod.load(args.corpus)
-    observed_seqs = set(diff_mod.observed_seqs(args.observed_trace))
-    corpus_seqs = {op.seq for op in corpus_preview.ops}
+    observed_seqs = seen
+    corpus_seqs = {op.seq for op in corpus.ops}
     missing = sorted(corpus_seqs - observed_seqs)
     if missing:
         print(
@@ -173,7 +193,10 @@ def validate_main(argv: Optional[list[str]] = None) -> int:
         )
         return 2
 
-    report = diff_mod.diff_against_observed(args.corpus, args.observed_trace)
+    report = diff_mod.diff_ops_against_path(
+        corpus.ops, observed_ops,
+        left_path=args.corpus, right_path=args.observed_trace,
+    )
     print(diff_mod.format_report(report))
 
     if report.diverged:
@@ -181,7 +204,6 @@ def validate_main(argv: Optional[list[str]] = None) -> int:
             print("(dry-run) would trigger rollback")
             return 1
         reachable = rollback_mod.git_reachable_from_main()
-        corpus = corpus_mod.load(args.corpus)
         rb = rollback_mod.handle(
             corpus,
             divergent_seq=report.first_divergent_seq,

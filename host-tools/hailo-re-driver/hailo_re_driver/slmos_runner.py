@@ -161,6 +161,11 @@ class SlmosRunner:
     verify_sd_before_flash: bool = True
     transport: Transport = field(default=subprocess_transport)
 
+    def __post_init__(self) -> None:
+        # Validate + compile the shell-prompt regex once at construction
+        # time. A bad regex would otherwise surface on every replay_step.
+        self._shell_prompt_re = re.compile(self.shell_prompt)
+
     # ----- pipeline steps --------------------------------------------------
 
     def verify_card(self) -> CmdResult:
@@ -238,8 +243,7 @@ class SlmosRunner:
                     stderr=flash.stderr,
                 )
             shell = self.wait_for_shell()
-            prompt_re = re.compile(self.shell_prompt)
-            if shell.returncode != 0 or not prompt_re.search(shell.stdout):
+            if shell.returncode != 0 or not self._shell_prompt_re.search(shell.stdout):
                 return ReplayError(
                     kind="error",
                     message=(

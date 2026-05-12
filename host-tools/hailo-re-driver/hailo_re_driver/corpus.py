@@ -23,14 +23,23 @@ except ImportError:  # pragma: no cover — Windows fallback
 
 @contextlib.contextmanager
 def _exclusive(fh: IO[str]):
-    """Best-effort advisory exclusive lock on the open file handle.
+    """Non-blocking advisory exclusive lock on the open file handle.
 
-    The spec mandates a single writer per corpus. This lock makes a violation
-    surface as a wait/error rather than silent interleaving. On platforms
-    without fcntl (Windows) the lock is a no-op.
+    The spec mandates a single writer per corpus. If a second process is
+    already writing the same corpus, fail loud (CorpusError) rather than
+    silently wait — silent serialization hides operator mistakes that the
+    single-writer invariant exists to catch. On platforms without fcntl
+    (Windows) the lock is a no-op.
     """
     if _HAVE_FLOCK:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as e:
+            raise CorpusError(
+                f"{getattr(fh, 'name', '?')}: another writer holds the "
+                "corpus lock — the single-writer invariant has been "
+                "violated (is a second hailo-re-bootstrap running?)"
+            ) from e
         try:
             yield
         finally:

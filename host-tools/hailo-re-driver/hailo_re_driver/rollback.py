@@ -44,9 +44,10 @@ def git_reachable_from_main(repo_root: Optional[Path] = None,
     repo" or "your local main is too stale to contain this SHA".
     """
     cwd = str(repo_root) if repo_root else None
-    warned = {"flag": False}
+    warned = False
 
     def predicate(sha: str) -> bool:
+        nonlocal warned
         if not sha:
             return False
         proc = subprocess.run(
@@ -62,7 +63,7 @@ def git_reachable_from_main(repo_root: Optional[Path] = None,
         if proc.returncode == 1:
             return False
         # rc >= 2 (typically 128) — git itself errored out.
-        if not warned["flag"]:
+        if not warned:
             log.warning(
                 "git merge-base failed (rc=%d) checking sha=%s vs ref=%s: %s — "
                 "all reachability checks will return False; verify cwd is a "
@@ -70,7 +71,7 @@ def git_reachable_from_main(repo_root: Optional[Path] = None,
                 proc.returncode, sha[:12], base_ref,
                 (proc.stderr or "").strip(), base_ref,
             )
-            warned["flag"] = True
+            warned = True
         return False
 
     return predicate

@@ -116,6 +116,10 @@ class QemuRunner:
             event = _consume_stream(proc.stdout)  # type: ignore[arg-type]
             proc.wait()
             rc = proc.returncode
+            # Let the stderr drain thread see EOF naturally (QEMU has closed
+            # its write end now that wait() returned) and join before we
+            # close the pipe, so the deque captures the tail.
+            stderr_thread.join(timeout=2.0)
         finally:
             for pipe in (proc.stdout, proc.stderr):
                 try:
@@ -126,7 +130,10 @@ class QemuRunner:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
-            stderr_thread.join(timeout=1.0)
+            # Final join in case we got here via an exception path before
+            # the natural join above ran.
+            if stderr_thread.is_alive():
+                stderr_thread.join(timeout=1.0)
         stderr_tail = "".join(stderr_buf)
         if event is not None:
             return event
