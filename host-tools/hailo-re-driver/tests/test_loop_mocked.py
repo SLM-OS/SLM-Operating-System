@@ -279,5 +279,70 @@ class StubAppendDuringRunTests(unittest.TestCase):
             self.assertEqual(reloaded.ops[-1].value, "42424242")
 
 
+class WritePendingCorpusCleanupTests(unittest.TestCase):
+    """Regression coverage for the resource-cleanup contract on
+    `_write_pending_corpus`: if anything in the construction window
+    raises, the temp file is unlinked AND the fd from mkstemp is closed.
+    Both must hold — leaking either across thousands of iterations would
+    exhaust /tmp or the process fd table.
+    """
+
+    SHA = "ef" * 20
+
+    def _make_corpus(self, d: Path) -> Path:
+        p = d / "c.jsonl"
+        from hailo_re_driver.corpus import Header
+        corpus_mod.init(p, Header(
+            format_version=1, hailort_version="4.23.0",
+            fw_version="4.23.0",
+            capture_host="qemu-x86_64",
+            slmos_base_sha=self.SHA,
+            capture_started_at="2026-05-12T18:30:00Z",
+        ))
+        return p
+
+    def _open_fds(self) -> set[int]:
+        import os
+        try:
+            return {int(name) for name in os.listdir("/proc/self/fd")}
+        except FileNotFoundError:
+            self.skipTest("/proc/self/fd not available on this host")
+
+    def test_corpus_open_failure_cleans_up_temp_file_and_fd(self) -> None:
+        """If `corpus.path.open()` raises after mkstemp succeeds, neither
+        the on-disk temp file nor the OS fd should leak."""
+        from hailo_re_driver.line_protocols import ExtendRequest
+        from hailo_re_driver.loop import _write_pending_corpus
+
+        with tempfile.TemporaryDirectory() as d:
+            corpus_path = self._make_corpus(Path(d))
+            corpus = corpus_mod.load(corpus_path)
+
+            # Snapshot fd table BEFORE the call, then sabotage the source
+            # open by unlinking the corpus between load() and _write_pending.
+            fds_before = self._open_fds()
+            corpus_path.unlink()
+
+            req = ExtendRequest(
+                seq=1, bar=4, offset=0, size=4, reason="unknown_read",
+            )
+            with self.assertRaises(FileNotFoundError):
+                _write_pending_corpus(corpus, req)
+
+            # No `*-pending-*` siblings in the dir.
+            siblings = list(Path(d).glob("*-pending-*"))
+            self.assertEqual(
+                siblings, [],
+                f"temp file leaked after failure: {siblings!r}",
+            )
+
+            # fd table back to baseline (no leaked fds).
+            fds_after = self._open_fds()
+            self.assertEqual(
+                fds_after, fds_before,
+                f"fd leaked: before={fds_before!r} after={fds_after!r}",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

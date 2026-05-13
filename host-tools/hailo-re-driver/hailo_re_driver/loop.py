@@ -290,13 +290,17 @@ def _write_pending_corpus(corpus: Corpus, request: ExtendRequest) -> Path:
         dir=corpus.path.parent,
     )
     pending_path = Path(tmp_name)
-    # mkstemp creates the file before returning; if anything below raises
-    # (corpus moved/permissions lost between iterations, disk full on the
-    # write side, etc.) we still own the empty temp file and must clean it
-    # up before propagating.
+    # mkstemp returns both an open fd and a path on disk; if anything below
+    # raises (corpus moved/permissions lost between iterations, disk full on
+    # the write side, etc.) we own both the fd and the temp file and must
+    # release both before propagating. Wrap the fd in os.fdopen as the FIRST
+    # context manager so its __exit__ closes the fd even when the corpus
+    # open() that follows raises — `with A, B:` only enters B after A
+    # succeeds, so flipping the order means we don't leak the raw fd from
+    # mkstemp on an early failure in opening the source.
     try:
-        with corpus.path.open("r", encoding="utf-8") as src, \
-                open(fd, "w", encoding="utf-8") as dst:
+        with os.fdopen(fd, "w", encoding="utf-8") as dst, \
+                corpus.path.open("r", encoding="utf-8") as src:
             dst.write(src.read())
             if not dst.tell() or not _ends_with_newline(corpus.path):
                 dst.write("\n")
