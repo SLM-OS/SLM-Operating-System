@@ -18,7 +18,10 @@ Pseudocode from KICKOFF.md (with rollback hooked up):
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -108,6 +111,11 @@ def run_loop(
             iteration, corpus_path, corpus.last_validated_seq, corpus.next_seq,
         )
         event = qemu.run(corpus_path)
+        # The Task 0.2 stub appends unknown writes to the corpus file in
+        # place during its run (per hailo8.c::hailo8_bar_write). Reload so
+        # our in-memory view picks up those appended writes before deciding
+        # what to do with the event.
+        corpus = corpus_mod.load(corpus_path)
 
         if isinstance(event, ConfigureCompleteEvent):
             return LoopOutcome(
@@ -177,7 +185,19 @@ def _extend_corpus(
             ),
         )
 
-    result = slmos.replay_step(corpus.path, request.seq)
+    # SLM-OS `hailo replay-step` (Task 0.4) requires the seq=N entry to pre-
+    # exist in the corpus so it knows what to read. Build a per-iteration
+    # pending corpus = the persistent corpus + a placeholder read entry at
+    # the EXTEND seq. SLM-OS reads this pending corpus from the SD card;
+    # only the real RESPONSE value is appended to the persistent corpus.
+    pending_path = _write_pending_corpus(corpus, request)
+    try:
+        result = slmos.replay_step(pending_path, request.seq)
+    finally:
+        try:
+            pending_path.unlink()
+        except FileNotFoundError:
+            pass
 
     if isinstance(result, ReplayError):
         return _StepOutcome(
@@ -241,6 +261,66 @@ def _handle_divergence(
         ),
         rollback=rb,
     )
+
+
+def _write_pending_corpus(corpus: Corpus, request: ExtendRequest) -> Path:
+    """Materialize a temp corpus = persistent corpus + a placeholder seq=N read.
+
+    The placeholder's value is a zero-filled hex string of the correct width;
+    SLM-OS replay-step ignores the corpus's recorded value at seq=N (it issues
+    a real BAR read) and only consumes (bar, offset, size), so the value is a
+    don't-care. The pending file lives next to the persistent corpus and is
+    deleted by the caller once replay_step returns.
+    """
+    placeholder = OpEntry(
+        seq=request.seq,
+        bar=request.bar,
+        offset=request.offset,
+        size=request.size,
+        dir="read",
+        value="0" * (request.size * 2),
+        source="slmos_observed",
+        validated_at_commit=None,
+        validated_at=None,
+        note="pending: placeholder for replay-step",
+    )
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=corpus.path.stem + "-pending-",
+        suffix=corpus.path.suffix,
+        dir=corpus.path.parent,
+    )
+    pending_path = Path(tmp_name)
+    # mkstemp returns both an open fd and a path on disk; if anything below
+    # raises (corpus moved/permissions lost between iterations, disk full on
+    # the write side, etc.) we own both the fd and the temp file and must
+    # release both before propagating. Wrap the fd in os.fdopen as the FIRST
+    # context manager so its __exit__ closes the fd even when the corpus
+    # open() that follows raises — `with A, B:` only enters B after A
+    # succeeds, so flipping the order means we don't leak the raw fd from
+    # mkstemp on an early failure in opening the source.
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as dst, \
+                corpus.path.open("r", encoding="utf-8") as src:
+            dst.write(src.read())
+            if not dst.tell() or not _ends_with_newline(corpus.path):
+                dst.write("\n")
+            dst.write(json.dumps(
+                placeholder.to_json_obj(), separators=(",", ":")
+            ))
+            dst.write("\n")
+    except BaseException:
+        pending_path.unlink(missing_ok=True)
+        raise
+    return pending_path
+
+
+def _ends_with_newline(path: Path) -> bool:
+    with path.open("rb") as f:
+        try:
+            f.seek(-1, os.SEEK_END)
+        except OSError:
+            return True  # empty file — nothing to terminate
+        return f.read(1) == b"\n"
 
 
 # Internal step outcome that carries forward into the top-level LoopOutcome.

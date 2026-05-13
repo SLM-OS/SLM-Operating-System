@@ -6,9 +6,20 @@ This directory contains environment + automation. No SLM-OS or HailoRT source li
 
 ## Status
 
-Phase 0 scaffolding. Pre-integration with [Task 0.2 (QEMU stub device)](https://github.com/SLM-OS/SLM-Operating-System/issues/795).
+Phase 1 integrated 2026-05-12. The custom QEMU built by `build-qemu.sh` now
+registers two devices:
 
-Until Task 0.2 lands a corpus-driven Hailo stub, this environment uses a **stub-stub**: a ~150-line QEMU device patch (`qemu-patch/hw/misc/hailo-stub-stub.c`) that advertises Hailo-8 PCI IDs (0x1e60:0x2864) and three BARs (4 KB / 16 KB / 1 MB) where every read returns 0 and writes are discarded. That's enough for the upstream `hailo_pci` driver to probe successfully and for HailoRT to begin issuing MMIO. Trace capture goes through QEMU's `--trace memory_region_ops_*` channel and is post-processed into the corpus format.
+- `-device hailo-stub-stub` — the original throwaway placeholder. Read traffic
+  goes through `launch-capture.sh` + `tools/qemu-trace-to-corpus.py` as the
+  determinism-check artifact path. Kept to keep that artifact reproducible.
+- `-device hailo8,corpus=<path>` — Task 0.2's real corpus-driven stub
+  (sources at `../qemu-hailo8-stub/`). Used by Phase 1's
+  `launch-bootstrap.sh`, which is the launcher the Task 0.5 driver script
+  invokes via `HAILO_RE_QEMU_LAUNCHER`. This is the path that closes the
+  capture-replay loop end-to-end against real pi-5-1 hardware.
+
+The historical "stub-stub" mode below is retained for reference; the
+corpus-driven path is what Phase 1+ actually uses.
 
 Why a separate stub-stub instead of just using the QEMU `edu` device: `edu` exposes only BAR0. The Hailo driver hard-requires BAR0 + BAR2 + BAR4 to be present and non-zero-size — it fails probe with `Invalid PCIe BAR 2` against any device with fewer BARs. Hence the minimal patch.
 
@@ -19,7 +30,8 @@ Why a separate stub-stub instead of just using the QEMU `edu` device: `edu` expo
 | `README.md` | This file |
 | `build-qemu.sh` | Fetches QEMU 8.2 source, applies the hailo-stub-stub patch, builds a custom `qemu-system-x86_64` binary. Output: `~/slmos-ref/derivatives/hailort-vm-qemu/qemu-system-x86_64` |
 | `build-vm-image.sh` | Builds a customized Ubuntu 24.04 qcow2 via cloud-init seed ISO. Output: `~/slmos-ref/derivatives/hailort-vm-images/`, **not in this repo** |
-| `launch-capture.sh` | Boots the qcow2 with the custom QEMU + `-device hailo-stub-stub`, captures MMIO trace, emits a corpus JSONL |
+| `launch-capture.sh` | Boots the qcow2 with the custom QEMU + `-device hailo-stub-stub`, captures MMIO trace, emits a corpus JSONL. Legacy stub-stub path. |
+| `launch-bootstrap.sh` | Phase 1+ launcher. Boots the qcow2 with `-device hailo8,corpus=<path>` and propagates the corpus-driven stub's `HAILO_RE_CORPUS_*` stdout. Wired into the Task 0.5 driver via `HAILO_RE_QEMU_LAUNCHER`. |
 | `verify-determinism.sh` | Runs `launch-capture.sh` twice from a cold snapshot, diffs the traces, reports match / first divergence |
 | `qemu-patch/hw/misc/hailo-stub-stub.c` | Minimal QEMU PCI device with Hailo-8 IDs (0x1e60:0x2864) and three BARs (4 KB / 16 KB / 1 MB). Reads return 0; writes are discarded. Throwaway placeholder for Task 0.2's real stub |
 | `qemu-patch/apply.sh` | Copies hailo-stub-stub.c into a QEMU source tree and registers it in `hw/misc/meson.build` |

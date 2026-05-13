@@ -8,10 +8,16 @@ parameterised so tests pass a fake.
 Steps for one replay:
 
 1. (Optional) `labctl sdwire info <sbc>` — verify card identity before flash.
-2. `labctl sdwire update <sbc> -p 1 -c <kernel>:kernel_2712.img --reboot`
+2. `labctl sdwire update <sbc> -p 1 -c <kernel>:kernel_2712.img
+                                       -c <corpus>:corpus.jsonl --reboot`
 3. Poll `labctl serial capture <sbc> --until '<shell-prompt>'` for the prompt.
-4. `labctl serial send <sbc> 'hailo replay-step <corpus> <N>' --capture ... --until 'HAILO_RE_CORPUS_(RESPONSE|DIVERGENCE)'`.
+4. `labctl serial send <sbc> 'hailo replay-step 0:/corpus.jsonl <N>'
+       --capture ... --until 'HAILO_RE_CORPUS_(RESPONSE|DIVERGENCE)'`.
 5. Parse the captured line.
+
+The corpus is flashed onto the boot partition alongside the kernel, so the
+on-card path that SLM-OS sees is FatFs `0:/corpus.jsonl` per the Task 0.4
+`hailo replay-step` reference (docs/hailo-re-replay-step.md §Usage).
 """
 
 from __future__ import annotations
@@ -160,6 +166,8 @@ class SlmosRunner:
     sbc: str = "pi-5-1"
     kernel_path: Path = Path("build/kernel/slmos.bin")
     kernel_dst: str = "kernel_2712.img"
+    corpus_dst: str = "corpus.jsonl"
+    corpus_on_card_path: str = "0:/corpus.jsonl"
     boot_partition: int = 1
     shell_prompt: str = r"slmos>"
     boot_timeout_s: float = 45.0
@@ -175,18 +183,46 @@ class SlmosRunner:
 
     # ----- pipeline steps --------------------------------------------------
 
+    def power_off(self) -> CmdResult:
+        return self.transport(
+            ["labctl", "power", "off", self.sbc], self.cmd_timeout_s
+        )
+
     def verify_card(self) -> CmdResult:
+        """Power off the board, then query `labctl sdwire info`.
+
+        WARNING: this method has a side effect — it powers off the SBC
+        before running sdwire info. The power-off is required because
+        sdwire info needs the SD card switched to the host bus, which
+        labctl refuses to do while the board is powered on. Each replay
+        iteration leaves the board ON (the previous `sdwire update
+        --reboot` finishes with power ON), so the power-off cycle must
+        precede info on every iteration.
+
+        Returns the labctl power-off result (with a non-zero returncode)
+        if that step fails; otherwise returns the sdwire info result.
+        """
+        off = self.transport(
+            ["labctl", "power", "off", self.sbc], self.cmd_timeout_s
+        )
+        if off.returncode != 0:
+            return off
         return self.transport(
             ["labctl", "sdwire", "info", self.sbc], self.cmd_timeout_s
         )
 
-    def flash_and_reboot(self, kernel_path: Optional[Path] = None) -> CmdResult:
+    def flash_and_reboot(
+        self,
+        corpus_path: Path,
+        kernel_path: Optional[Path] = None,
+    ) -> CmdResult:
         kp = kernel_path or self.kernel_path
         return self.transport(
             [
                 "labctl", "sdwire", "update", self.sbc,
                 "-p", str(self.boot_partition),
                 "-c", f"{kp}:{self.kernel_dst}",
+                "-c", f"{corpus_path}:{self.corpus_dst}",
                 "--reboot",
             ],
             self.cmd_timeout_s,
@@ -205,19 +241,33 @@ class SlmosRunner:
     def send_replay_command(
         self, corpus_path: Path, seq: int
     ) -> CmdResult:
-        # Command shape per docs/hailo-re-corpus-format.md §SLM-OS hailo
-        # replay-step: single seq argument. corpus_path is dev-side and not
-        # visible to SLM-OS; how SLM-OS obtains the corpus (baked-in blob,
-        # UART stream, etc.) is the Task 0.4 deliverable. We retain the
-        # corpus_path parameter on this method so callers can pass it
-        # through once Task 0.4 commits to a transport.
-        del corpus_path  # currently unused; see comment above
-        cmd = f"hailo replay-step {seq}"
+        # The dev-side corpus_path is unused here — the SD-card flash step
+        # has already copied the corpus to `corpus_on_card_path` on the FAT
+        # boot partition, which is the path SLM-OS reads from. Task 0.4's
+        # `hailo replay-step` command (docs/hailo-re-replay-step.md §Usage)
+        # takes the on-card path as its first argument.
+        del corpus_path
+        cmd = f"hailo replay-step {self.corpus_on_card_path} {seq}"
+        # labctl --until evaluates the regex against the receive buffer as
+        # bytes arrive, so a prefix-only anchor like
+        # `^HAILO_RE_CORPUS_RESPONSE` cuts the line off mid-value. Anchor on
+        # tokens that only land near end-of-line: the full slmos_sha for the
+        # success path, the reason= tag for the divergence path.
+        #
+        # The reason= alternative uses `\S+` rather than `[a-z_]+` because
+        # the corpus spec (docs/hailo-re-corpus-format.md §Divergence
+        # report) explicitly says tools must accept any string for the
+        # reason tag — additive tags can be added without bumping the
+        # corpus format_version, so the matcher must not narrow that.
+        until_re = (
+            r"(?:slmos_sha=[0-9a-f]{40}|"
+            r"HAILO_RE_CORPUS_DIVERGENCE.*reason=\S+)"
+        )
         return self.transport(
             [
                 "labctl", "serial", "send", self.sbc, cmd,
                 "--capture", str(self.replay_timeout_s),
-                "--until", r"^HAILO_RE_CORPUS_(RESPONSE|DIVERGENCE)",
+                "--until", until_re,
             ],
             self.replay_timeout_s + 5.0,
         )
@@ -241,7 +291,7 @@ class SlmosRunner:
                     stderr=info.stderr,
                 )
         if fresh_boot:
-            flash = self.flash_and_reboot()
+            flash = self.flash_and_reboot(corpus_path)
             if flash.returncode != 0:
                 return ReplayError(
                     kind="error",
