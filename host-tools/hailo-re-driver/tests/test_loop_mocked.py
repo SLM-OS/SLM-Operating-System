@@ -174,5 +174,110 @@ class LoopE2ETests(unittest.TestCase):
                              "original corpus must be renamed to .poisoned")
 
 
+class StubAppendDuringRunTests(unittest.TestCase):
+    """Regression coverage for the "QEMU stub appends writes to the corpus
+    file in place during its run, so the driver's in-memory view is stale
+    when it returns" gap. The fix is the `corpus_mod.load` call placed
+    immediately after `qemu.run` in `run_loop`; this test would catch a
+    future refactor that drops it.
+    """
+
+    SHA = "cd" * 20
+
+    def _header(self) -> Header:
+        return Header(
+            format_version=1, hailort_version="4.23.0",
+            fw_version="4.23.0",
+            capture_host="qemu-x86_64",
+            slmos_base_sha=self.SHA,
+            capture_started_at="2026-05-12T18:30:00Z",
+        )
+
+    def test_extend_seq_matches_post_run_next_seq(self) -> None:
+        """A QEMU run that appends writes to the corpus file before
+        emitting EXTEND must not be flagged as
+        'EXTEND seq=N but corpus next_seq=M — corpus and stub disagree'.
+        """
+        from hailo_re_driver.line_protocols import ExtendRequest
+        from hailo_re_driver.qemu_runner import ExtendEvent
+
+        with tempfile.TemporaryDirectory() as d:
+            corpus_path = Path(d) / "c.jsonl"
+            corpus_mod.init(corpus_path, self._header())
+            c = corpus_mod.load(corpus_path)
+            # Pre-existing seq=1..3 to put the in-memory snapshot at
+            # next_seq=4.
+            for s in (1, 2, 3):
+                corpus_mod.append_op(c, OpEntry(
+                    seq=s, bar=4, offset=0x100 + s, size=4, dir="read",
+                    value="00000000", source="slmos_observed",
+                    validated_at_commit=self.SHA,
+                    validated_at="2026-05-12T19:00:00Z",
+                ))
+
+            # Build a runner that mutates the corpus file as a side effect
+            # before returning its EXTEND (simulating Task 0.2's stub
+            # appending captured writes during its run). The driver must
+            # reload the corpus after the run; if it doesn't, request.seq
+            # (8) and the stale corpus.next_seq (4) disagree and the loop
+            # bails with status=error.
+            class _AppendingRunner:
+                def __init__(self, corpus_path: Path):
+                    self.calls = 0
+                    self.corpus_path = corpus_path
+
+                def run(self, path: Path):
+                    self.calls += 1
+                    if self.calls == 1:
+                        # Simulate four writes the stub recorded during
+                        # the run, immediately before halting on the
+                        # unknown read at seq=8.
+                        fresh = corpus_mod.load(path)
+                        for s in range(4, 8):
+                            corpus_mod.append_op(fresh, OpEntry(
+                                seq=s, bar=4, offset=0x200 + s, size=4,
+                                dir="write", value="ffffffff",
+                                source="qemu_capture",
+                                validated_at_commit=None,
+                                validated_at=None,
+                            ))
+                        return ExtendEvent(
+                            kind="extend",
+                            request=ExtendRequest(
+                                seq=8, bar=4, offset=0x800, size=4,
+                                reason="unknown_read",
+                            ),
+                            raw_line=(
+                                "HAILO_RE_CORPUS_EXTEND seq=8 bar=4 "
+                                "offset=2048 size=4 reason=unknown_read"
+                            ),
+                        )
+                    return ConfigureCompleteEvent()
+
+            slmos = _ScriptedSlmosRunner([
+                ExtendResponse(seq=8, bar=4, offset=0x800, size=4,
+                               value="42424242", slmos_sha=self.SHA),
+            ])
+
+            outcome = loop_mod.run_loop(
+                corpus_path,
+                _AppendingRunner(corpus_path),  # type: ignore[arg-type]
+                slmos,  # type: ignore[arg-type]
+                loop_mod.LoopConfig(
+                    max_iterations=5,
+                    reachable=lambda _sha: True,
+                ),
+            )
+            self.assertEqual(
+                outcome.status, "complete",
+                f"loop must reload corpus after qemu.run; "
+                f"got status={outcome.status} detail={outcome.detail}",
+            )
+            reloaded = corpus_mod.load(corpus_path)
+            self.assertEqual(reloaded.next_seq, 9)
+            self.assertEqual(reloaded.ops[-1].seq, 8)
+            self.assertEqual(reloaded.ops[-1].value, "42424242")
+
+
 if __name__ == "__main__":
     unittest.main()

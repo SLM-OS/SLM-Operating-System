@@ -20,6 +20,18 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# Hard prerequisites
+# ---------------------------------------------------------------------------
+# GNU coreutils `timeout` caps the QEMU run; we don't have a portable
+# fallback. Check up-front so the error message is actionable instead of
+# the bash "command not found" further down.
+if ! command -v timeout >/dev/null 2>&1; then
+    echo "ERROR: GNU coreutils 'timeout' is required but not on PATH." >&2
+    echo "       Install coreutils (apt: 'sudo apt install coreutils')." >&2
+    exit 3
+fi
+
+# ---------------------------------------------------------------------------
 # Args
 # ---------------------------------------------------------------------------
 CORPUS=""
@@ -50,6 +62,17 @@ if [[ ! -f "${CORPUS}" ]]; then
     exit 2
 fi
 CORPUS="$(readlink -f "${CORPUS}")"
+
+# QEMU's `-device key=value,key=value` parser splits on commas. A corpus
+# path containing a comma would be silently truncated. Reject early.
+case "${CORPUS}" in
+    *,*)
+        echo "ERROR: corpus path contains a comma — QEMU's -device parser" >&2
+        echo "       splits on commas and would mis-parse this path:" >&2
+        echo "       ${CORPUS}" >&2
+        exit 2
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Environment

@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import logging
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -289,20 +290,30 @@ def _write_pending_corpus(corpus: Corpus, request: ExtendRequest) -> Path:
         dir=corpus.path.parent,
     )
     pending_path = Path(tmp_name)
-    with corpus.path.open("r", encoding="utf-8") as src, \
-            open(fd, "w", encoding="utf-8") as dst:
-        dst.write(src.read())
-        if not dst.tell() or not _ends_with_newline(corpus.path):
+    # mkstemp creates the file before returning; if anything below raises
+    # (corpus moved/permissions lost between iterations, disk full on the
+    # write side, etc.) we still own the empty temp file and must clean it
+    # up before propagating.
+    try:
+        with corpus.path.open("r", encoding="utf-8") as src, \
+                open(fd, "w", encoding="utf-8") as dst:
+            dst.write(src.read())
+            if not dst.tell() or not _ends_with_newline(corpus.path):
+                dst.write("\n")
+            dst.write(json.dumps(
+                placeholder.to_json_obj(), separators=(",", ":")
+            ))
             dst.write("\n")
-        dst.write(json.dumps(placeholder.to_json_obj(), separators=(",", ":")))
-        dst.write("\n")
+    except BaseException:
+        pending_path.unlink(missing_ok=True)
+        raise
     return pending_path
 
 
 def _ends_with_newline(path: Path) -> bool:
     with path.open("rb") as f:
         try:
-            f.seek(-1, 2)  # SEEK_END
+            f.seek(-1, os.SEEK_END)
         except OSError:
             return True  # empty file — nothing to terminate
         return f.read(1) == b"\n"

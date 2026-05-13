@@ -189,10 +189,19 @@ class SlmosRunner:
         )
 
     def verify_card(self) -> CmdResult:
-        # sdwire info needs the SD card switched to the host, which requires
-        # the board powered off. Each replay iteration leaves the board ON
-        # (the previous `sdwire update --reboot` finishes with power ON), so
-        # power-off must precede info on every iteration.
+        """Power off the board, then query `labctl sdwire info`.
+
+        WARNING: this method has a side effect — it powers off the SBC
+        before running sdwire info. The power-off is required because
+        sdwire info needs the SD card switched to the host bus, which
+        labctl refuses to do while the board is powered on. Each replay
+        iteration leaves the board ON (the previous `sdwire update
+        --reboot` finishes with power ON), so the power-off cycle must
+        precede info on every iteration.
+
+        Returns the labctl power-off result (with a non-zero returncode)
+        if that step fails; otherwise returns the sdwire info result.
+        """
         off = self.transport(
             ["labctl", "power", "off", self.sbc], self.cmd_timeout_s
         )
@@ -244,9 +253,15 @@ class SlmosRunner:
         # `^HAILO_RE_CORPUS_RESPONSE` cuts the line off mid-value. Anchor on
         # tokens that only land near end-of-line: the full slmos_sha for the
         # success path, the reason= tag for the divergence path.
+        #
+        # The reason= alternative uses `\S+` rather than `[a-z_]+` because
+        # the corpus spec (docs/hailo-re-corpus-format.md §Divergence
+        # report) explicitly says tools must accept any string for the
+        # reason tag — additive tags can be added without bumping the
+        # corpus format_version, so the matcher must not narrow that.
         until_re = (
             r"(?:slmos_sha=[0-9a-f]{40}|"
-            r"HAILO_RE_CORPUS_DIVERGENCE.*reason=[a-z_]+)"
+            r"HAILO_RE_CORPUS_DIVERGENCE.*reason=\S+)"
         )
         return self.transport(
             [
