@@ -232,10 +232,11 @@ void ga10b_kexec_handoff_register_reserves(void)
         } refs[] = {
             { "userd",    userd_p,   4096 },
             { "gpfifo",   gpfifo_p,  (uint64_t)gpfifo_e * (uint64_t)gpfifo_es },
-            /* Stage 5 bisect F: USERD + GPFIFO + sem only. */
-            { "sem",      sem_p,     4096 },
+            /* Stage 6: USERD + GPFIFO + pushbuf (bisect E config —
+             * the failing case we want to instrument). */
+            { "pushbuf",  pushbuf_p, (uint64_t)pushbuf_s },
         };
-        (void)pushbuf_p; (void)pushbuf_s; (void)shader_p; (void)shader_s;
+        (void)sem_p; (void)shader_p; (void)shader_s;
         for (size_t i = 0; i < sizeof(refs) / sizeof(refs[0]); i++) {
             if (refs[i].phys == 0 || refs[i].size == 0) {
                 continue;

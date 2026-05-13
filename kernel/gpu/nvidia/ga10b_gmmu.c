@@ -489,10 +489,37 @@ static inline uint64_t encode_pte(uint64_t phys, uint32_t flags)
  * thing so the GPU sees an all-zero (= all-invalid) table when
  * we point a parent PDE at it. Returns kernel VA (== phys on
  * Jetson via identity map) or NULL on PMM exhaustion. */
+
+/* uart_printf forward decl — file-scope `extern` further down
+ * covers later sites; the trace path below needs it earlier. */
+extern int uart_printf(const char *fmt, ...);
+
+/* #788 Stage 6: trace every alloc_zero_table_page call when the
+ * flag is on. Set by the rebuild path before its mapping loop;
+ * cleared at the end. Lets the operator see which physes the
+ * rebuild's intermediate PT pages landed on — needed to identify
+ * the colliding-with-FW-state phys that breaks `nvgpu submit` in
+ * Stage 4 bisect E/F (pushbuf/sem reservation regression). */
+static bool g_table_alloc_trace = false;
+static int  g_table_alloc_count = 0;
+
+void ga10b_gmmu_table_alloc_trace_set(bool on)
+{
+    g_table_alloc_trace = on;
+    if (on) {
+        g_table_alloc_count = 0;
+    }
+}
+
 static void *alloc_zero_table_page(void)
 {
     void *p = pmm_alloc_page();
     if (p == NULL) return NULL;
+    if (g_table_alloc_trace) {
+        uart_printf("[rebuild-pt] alloc[%d] phys=0x%lx\n",
+                    g_table_alloc_count++,
+                    (unsigned long)(uintptr_t)p);
+    }
     volatile uint64_t *q = (volatile uint64_t *)p;
     for (int i = 0; i < 512; i++) {
         q[i] = 0;
@@ -1161,6 +1188,12 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
         return -1;
     }
 
+    /* #788 Stage 6: trace every PMM page the rebuild allocates so
+     * the operator can spot which one might be colliding with an
+     * unknown FW range. Tail of the function disables tracing
+     * once mapping is done. */
+    ga10b_gmmu_table_alloc_trace_set(true);
+
     /* 1. Allocate a fresh PDB page from SLM-OS PMM. Zero it so
      *    every PDE3 entry reads as invalid until `map_one_page`
      *    populates the ones it needs. */
@@ -1412,7 +1445,10 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
      *    PTEs from the tree we just built. */
     int rc = ga10b_gmmu_tlb_invalidate(pdb_phys);
     uart_printf("[rebuild-gmmu] TLB invalidate rc=%d, %d buffer(s) "
-                "mapped\n", rc, mapped);
+                "mapped (%d PT pages allocated)\n",
+                rc, mapped, g_table_alloc_count);
+
+    ga10b_gmmu_table_alloc_trace_set(false);
     return (rc == 0) ? 0 : -1;
 }
 
