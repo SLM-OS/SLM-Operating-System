@@ -284,10 +284,21 @@ def _write_pending_corpus(corpus: Corpus, request: ExtendRequest) -> Path:
         validated_at=None,
         note="pending: placeholder for replay-step",
     )
+    # The pending file is read by the labctl daemon (`shutil.copy2` inside
+    # `labctl sdwire update`). Co-locating it with the corpus is convenient
+    # but breaks on filesystems where local file ownership/visibility races
+    # the labctl daemon's read (observed: Dropbox FUSE under
+    # `~/slmos-ref/derivatives/` — files created by the driver are visible
+    # to `john` but transiently unreadable by labctl until the sync daemon
+    # reassigns ownership). `HAILO_RE_PENDING_DIR` lets the operator point
+    # the temp file at a normal POSIX filesystem (e.g. `/tmp`) without
+    # moving the persistent corpus out of its conventional location.
+    pending_dir_env = os.environ.get("HAILO_RE_PENDING_DIR")
+    pending_dir = Path(pending_dir_env) if pending_dir_env else corpus.path.parent
     fd, tmp_name = tempfile.mkstemp(
         prefix=corpus.path.stem + "-pending-",
         suffix=corpus.path.suffix,
-        dir=corpus.path.parent,
+        dir=pending_dir,
     )
     pending_path = Path(tmp_name)
     # mkstemp returns both an open fd and a path on disk; if anything below
