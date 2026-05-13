@@ -192,6 +192,13 @@ void ga10b_kexec_handoff_register_reserves(void)
     uint32_t n_extents = h->weights_n_extents;
     uint64_t extents_phys = h->weights_extents_phys;
 
+#if 1  /* Stage 5 bisect B: only USERD + GPFIFO reserved */
+#define BISECT_B_USERD_GPFIFO_ONLY 1
+#else
+#define BISECT_B_USERD_GPFIFO_ONLY 0
+#endif
+
+#if BISECT_B_USERD_GPFIFO_ONLY  /* Stage 5 bisect B: only USERD + GPFIFO */
     /* Reserve every helper-allocated buffer the channel needs
      * (USERD, GPFIFO, pushbuf, sem, SASS pool, cbuf, QMD pool).
      * Without these, SLM-OS PMM can hand them out to its own
@@ -217,10 +224,6 @@ void ga10b_kexec_handoff_register_reserves(void)
         uint64_t sem_p     = h->semaphore_phys;
         uint64_t shader_p  = h->shader_phys;
         uint32_t shader_s  = h->shader_size;
-        uint64_t cbuf_p    = h->cbuf_phys;
-        uint32_t cbuf_s    = h->cbuf_size;
-        uint64_t qmd_p     = h->qmd_pool_phys;
-        uint32_t qmd_s     = h->qmd_pool_size_bytes;
 
         struct {
             const char *tag;
@@ -229,12 +232,10 @@ void ga10b_kexec_handoff_register_reserves(void)
         } refs[] = {
             { "userd",    userd_p,   4096 },
             { "gpfifo",   gpfifo_p,  (uint64_t)gpfifo_e * (uint64_t)gpfifo_es },
-            { "pushbuf",  pushbuf_p, (uint64_t)pushbuf_s },
+            /* Stage 5 bisect F: USERD + GPFIFO + sem only. */
             { "sem",      sem_p,     4096 },
-            { "shader",   shader_p,  (uint64_t)shader_s },
-            { "cbuf",     cbuf_p,    (uint64_t)cbuf_s },
-            { "qmd_pool", qmd_p,     (uint64_t)qmd_s },
         };
+        (void)pushbuf_p; (void)pushbuf_s; (void)shader_p; (void)shader_s;
         for (size_t i = 0; i < sizeof(refs) / sizeof(refs[0]); i++) {
             if (refs[i].phys == 0 || refs[i].size == 0) {
                 continue;
@@ -255,6 +256,9 @@ void ga10b_kexec_handoff_register_reserves(void)
             }
         }
     }
+#else
+    uart_puts("[ga10b-reserve]   STAGE5-BISECT: helper-buffer reservations SKIPPED\n");
+#endif
     if (version < 9u || n_extents == 0u || extents_phys == 0u) {
         uart_printf("[ga10b-reserve]   handoff@0x%lx v=%u no v9 "
                     "extents (n=%u extents_phys=0x%lx) — skipping\n",
