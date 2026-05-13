@@ -43,6 +43,8 @@
 #ifndef GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H
 #define GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H
 
+#include <stdint.h>
+
 /*
  * Discover the kexec'd channel's inst block via FECS_CURRENT_CTX and
  * register its physical page with the PMM as a user-supplied reserve.
@@ -60,5 +62,25 @@
  * a no-op via the file-level platform guard in `ga10b_handoff_reserve.c`.
  */
 void ga10b_kexec_handoff_register_reserves(void);
+
+/*
+ * Return the inst-block phys captured by `ga10b_kexec_handoff_-
+ * register_reserves` at boot from FECS_CURRENT_CTX.
+ *
+ * Returns 0 if the boot capture was skipped (fresh boot / no current
+ * ctx / poisoned read) or if the function hasn't run yet. Non-zero
+ * means the kernel saved a valid inst-block phys from the very first
+ * FECS read after kexec — before any subsequent SLM-OS GPU MMIO
+ * could trigger a FECS context switch.
+ *
+ * Use case (#788 Stage 9): `nvgpu oplib stage`'s auto-discovery
+ * reads FECS_CURRENT_CTX at command time, but by then FECS may
+ * have ctx-switched to a different channel (observed empirically:
+ * boot read 0x13e647000, but post-`nvgpu channel` FECS reads
+ * 0x127ebb000 — both valid inst blocks, but only the boot capture
+ * matches the inherited channel SLM-OS wants to drive). Prefer the
+ * boot capture over live FECS reads for that workflow.
+ */
+uint64_t ga10b_kexec_inherited_inst_block_phys(void);
 
 #endif /* GPU_NVIDIA_GA10B_HANDOFF_RESERVE_H */

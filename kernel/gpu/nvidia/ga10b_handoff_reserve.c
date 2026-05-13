@@ -80,6 +80,21 @@
  * Ampere, both sites need updating in lock-step. */
 #define GA10B_INST_BLOCK_BYTES 4096u
 
+/* Boot-time capture of the kexec'd channel's inst-block phys. Read
+ * from FECS_CURRENT_CTX in `ga10b_kexec_handoff_register_reserves`
+ * BEFORE any other SLM-OS GPU MMIO touches FECS. The live
+ * FECS_CURRENT_CTX register drifts after kexec — SLM-OS's own
+ * subsequent GPU probes (nvgpu inherit / channel / submit) trigger
+ * FECS context switches to other channels Linux had loaded, and
+ * the helper-published handoff doesn't carry an inst_block_phys
+ * field. So this is the single authoritative copy of "which inst
+ * block did Linux just leave on the GR engine when we kexec'd."
+ *
+ * Exposed via `ga10b_kexec_inherited_inst_block_phys()` for the
+ * `nvgpu oplib stage` shell verb (and any future caller that needs
+ * to dereference the inherited channel's GMMU after FECS has drifted). */
+static uint64_t g_boot_inst_block_phys = 0;
+
 void ga10b_kexec_handoff_register_reserves(void)
 {
     /* Read FECS_CURRENT_CTX directly via the identity mapping that
@@ -139,6 +154,15 @@ void ga10b_kexec_handoff_register_reserves(void)
                     (unsigned)GA10B_INST_BLOCK_BYTES, rc);
         return;
     }
+
+    /* Save the verified inst_phys for the inherited-inst-block
+     * accessor — the only point in boot where FECS_CURRENT_CTX is
+     * guaranteed to still hold Linux's last-active channel pointer.
+     * Future GPU MMIO touches by SLM-OS can ctx-switch FECS away
+     * from this channel; callers that need to drive the inherited
+     * channel later (e.g. `nvgpu oplib stage` for SASS upload)
+     * must read this stashed value, not the live register. */
+    g_boot_inst_block_phys = inst_phys;
 
     uart_printf("[ga10b-reserve] reserved kexec'd channel inst block "
                 "at phys=0x%lx (size=%u, FECS_CURRENT_CTX=0x%08x, "
@@ -440,6 +464,11 @@ void ga10b_kexec_handoff_register_reserves(void)
                 (unsigned long)handoff_phys);
 }
 
+uint64_t ga10b_kexec_inherited_inst_block_phys(void)
+{
+    return g_boot_inst_block_phys;
+}
+
 #else  /* !PLATFORM_JETSON_ORIN_NANO */
 
 /* No-op stub for non-Jetson platforms. The header's documentation
@@ -449,6 +478,16 @@ void ga10b_kexec_handoff_register_reserves(void)
  * the call entirely at LTO time. */
 void ga10b_kexec_handoff_register_reserves(void)
 {
+}
+
+/* Non-Jetson stub: no kexec channel-inheritance on this platform,
+ * so the inherited inst-block is meaningless. Return 0 to signal
+ * "no boot capture" — callers must already handle that case (the
+ * Jetson implementation also returns 0 on fresh boots / poisoned
+ * FECS reads). */
+uint64_t ga10b_kexec_inherited_inst_block_phys(void)
+{
+    return 0;
 }
 
 #endif

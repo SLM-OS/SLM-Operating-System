@@ -285,6 +285,23 @@ void *gpu_load_file(const char *path, size_t *out_size);
  * /proc/self/pagemap. Returns 0 on failure. */
 uint64_t gpu_virt_to_phys(void *vaddr);
 
+/* Read GA10B's FECS_CURRENT_CTX register via /dev/mem and decode the
+ * channel inst-block phys it points to.
+ *
+ * Intended for use by helpers right before publishing the handoff —
+ * by then the helper's own pushbuffer submissions have made FECS
+ * load our channel onto GR, so the live register value matches the
+ * channel SLM-OS will inherit. SLM-OS's `nvgpu oplib stage` reads
+ * the published `inst_block_phys` directly, bypassing the multi-GB
+ * DRAM walk that otherwise has to scan for a candidate inst block.
+ *
+ * Returns the decoded phys on success, or 0 if /dev/mem isn't
+ * accessible (helper not root), the register reads as priv-bad
+ * poison, or the target aperture is 0 (no current ctx). Caller
+ * stores 0 in `h->inst_block_phys` on failure, which SLM-OS treats
+ * as "skip, fall back to discovery". #788 Stage 9. */
+uint64_t gpu_read_fecs_inst_block_phys(void);
+
 /* Full channel bringup: alloc AS, open TSG + channel, bind
  * subcontext, SETUP_BIND, ALLOC_OBJ_CTX(COMPUTE_B),
  * SET_PREEMPT_MODE, SET_ERROR_NOTIFIER, allocate + register + map

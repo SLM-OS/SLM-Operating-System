@@ -98,6 +98,65 @@ uint64_t gpu_virt_to_phys(void *vaddr)
     return pfn * 4096 + ((uint64_t)vaddr & 0xFFF);
 }
 
+uint64_t gpu_read_fecs_inst_block_phys(void)
+{
+    /* GA10B GPU BAR0 base + FECS_CURRENT_CTX offset. Hardcoded to
+     * keep this TU free of GPU-specific header dependencies — both
+     * constants are pinned by SLM-OS's `ga10b_handoff_reserve.c`
+     * which reads the same register from the kernel side post-kexec. */
+    const uint64_t bar0_base       = 0x17000000ull;
+    const uint32_t fecs_ctx_offset = 0x00409b00u;
+    const uint64_t page_size       = 4096u;
+
+    int fd = open("/dev/mem", O_RDONLY | O_SYNC);
+    if (fd < 0) {
+        fprintf(stderr,
+                "[gpu-launch] FECS read: open(/dev/mem) failed: %s "
+                "(run as root). inst_block_phys=0 — SLM-OS falls back "
+                "to DRAM walk.\n", strerror(errno));
+        return 0;
+    }
+
+    uint64_t reg_abs   = bar0_base + fecs_ctx_offset;
+    uint64_t page_base = reg_abs & ~(page_size - 1);
+    uint32_t page_off  = (uint32_t)(reg_abs & (page_size - 1));
+
+    void *map = mmap(NULL, page_size, PROT_READ, MAP_SHARED, fd,
+                     (off_t)page_base);
+    close(fd);
+    if (map == MAP_FAILED) {
+        fprintf(stderr,
+                "[gpu-launch] FECS read: mmap @0x%llx failed: %s. "
+                "inst_block_phys=0.\n",
+                (unsigned long long)page_base, strerror(errno));
+        return 0;
+    }
+
+    volatile uint32_t *reg_ptr =
+        (volatile uint32_t *)((uint8_t *)map + page_off);
+    uint32_t reg = *reg_ptr;
+    munmap(map, page_size);
+
+    if ((reg & 0xFFFF0000u) == 0xbadf0000u) {
+        fprintf(stderr,
+                "[gpu-launch] FECS read: register=0x%08x (priv-bad — "
+                "GPU power-gated?). inst_block_phys=0.\n", reg);
+        return 0;
+    }
+    uint32_t target = (reg >> 28) & 0x3u;
+    if (target == 0) {
+        fprintf(stderr,
+                "[gpu-launch] FECS read: register=0x%08x (target=0 — "
+                "no current ctx). inst_block_phys=0.\n", reg);
+        return 0;
+    }
+    uint64_t inst_phys = ((uint64_t)(reg & 0x0FFFFFFFu)) << 12;
+    printf("[gpu-launch] FECS_CURRENT_CTX=0x%08x → "
+           "inst_block_phys=0x%llx (target=%u). Publishing in handoff.\n",
+           reg, (unsigned long long)inst_phys, target);
+    return inst_phys;
+}
+
 /* gpu_qmd_set_bits is now `static inline` in scripts/gpu-qmd-bits.h
  * so the host-test harness can pick it up directly. See that header
  * for the implementation + UB-shift-guard rationale. */
@@ -729,7 +788,7 @@ uint64_t gpu_write_handoff_v4(const struct gpu_launch_ctx *ctx,
          * anyway. */
         .semaphore_phys     = output_phys,
         .semaphore_gpu_va   = output_gpu_va,
-        .inst_block_phys    = 0,
+        .inst_block_phys    = gpu_read_fecs_inst_block_phys(),
         .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
                                 [GPU_LAUNCH_USERD_GP_PUT_WORD],
         .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
@@ -800,7 +859,7 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
          * caller provides a meaningful (final-op) target. */
         .semaphore_phys     = output_phys,
         .semaphore_gpu_va   = output_gpu_va,
-        .inst_block_phys    = 0,
+        .inst_block_phys    = gpu_read_fecs_inst_block_phys(),
         .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
                                 [GPU_LAUNCH_USERD_GP_PUT_WORD],
         .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
@@ -868,7 +927,7 @@ uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
         .pushbuf_size       = 65536,
         .semaphore_phys     = output_phys,
         .semaphore_gpu_va   = output_gpu_va,
-        .inst_block_phys    = 0,
+        .inst_block_phys    = gpu_read_fecs_inst_block_phys(),
         .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
                                 [GPU_LAUNCH_USERD_GP_PUT_WORD],
         .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
@@ -1022,7 +1081,7 @@ uint64_t gpu_write_handoff_v7(const struct gpu_launch_ctx *ctx,
         .pushbuf_size       = 65536,
         .semaphore_phys     = output_phys,
         .semaphore_gpu_va   = output_gpu_va,
-        .inst_block_phys    = 0,
+        .inst_block_phys    = gpu_read_fecs_inst_block_phys(),
         .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
                                 [GPU_LAUNCH_USERD_GP_PUT_WORD],
         .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)

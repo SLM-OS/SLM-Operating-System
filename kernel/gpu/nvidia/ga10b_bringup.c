@@ -2076,9 +2076,100 @@ void ga10b_dump_inst_blocks_atomic(const char *tag)
     dump_one_inst_block("GA10B-INST-FAULT", fault_inst_phys);
 }
 
+/* Layer 1b: GPC / TPC / SM drill-down for when top-level
+ * `gr_exception` has bit 24 set (GPC exception). Decodes the
+ * GPC0 exception register; if a TPC or SM bit is set, reads
+ * the corresponding TPC + SM ESRs.
+ *
+ * Register offsets per
+ *   `~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_gr_ga10b.h`:
+ *     gr_pri_gpc0_gpccs_gpc_exception_r   = 0x00502c90
+ *     gr_gpc0_gpccs_hww_esr_r             = 0x00502c98
+ *     gr_pri_gpc0_tpc0_tpccs_tpc_exception_r = 0x00504508
+ *     gr_gpc0_tpc0_sm0_hww_global_esr_r   = 0x00504734
+ *     gr_gpc0_tpc0_sm0_hww_warp_esr_r     = 0x00504730
+ *     gr_gpc0_tpc0_sm0_hww_warp_esr_pc_hi = 0x0050473c
+ *
+ * GPC exception bit layout (low bits only — see header for
+ * full list):
+ *   bit 0  = prop, 1 = zcull, 2 = gcc, 3 = setup,
+ *   bit 4  = pes0, 5 = pes1, 13 = gpcmmu0, 14 = gpccs,
+ *   bits[23:16] = TPC0..TPC7 pending masks
+ *
+ * Only TPC0/SM0 are sampled here. Orin Nano has 1 GPC × 8 TPCs
+ * but most GR exceptions in the wild surface on TPC0/SM0; if a
+ * future regression points elsewhere, expand to iterate. */
+static void dump_gpc_tpc_sm(const char *tag, uint32_t gr_exception)
+{
+    /* Bit 24 of gr_exception = GPC exception per
+     * gr_exception_gpc_m() = (1U << 24). Skip the drill-down if
+     * the GPC bit isn't set — the fault is upstream of any GPC. */
+    if ((gr_exception & 0x01000000u) == 0u) {
+        return;
+    }
+
+    uint32_t gpc_exc       = bar0_r32(0x00502c90u);
+    uint32_t gpccs_hww_esr = bar0_r32(0x00502c98u);
+    uart_printf("[%s]   gpc0_exception=0x%08lx (prop=%u zcull=%u gcc=%u "
+                "setup=%u pes0=%u pes1=%u gpcmmu0=%u gpccs=%u tpc_mask=0x%02x "
+                "crop=%u%u zrop=%u%u rrh=%u%u) gpccs_hww_esr=0x%08lx\n",
+                tag, (unsigned long)gpc_exc,
+                (unsigned)(gpc_exc & 0x1u),
+                (unsigned)((gpc_exc >> 1) & 0x1u),
+                (unsigned)((gpc_exc >> 2) & 0x1u),
+                (unsigned)((gpc_exc >> 3) & 0x1u),
+                (unsigned)((gpc_exc >> 4) & 0x1u),
+                (unsigned)((gpc_exc >> 5) & 0x1u),
+                (unsigned)((gpc_exc >> 13) & 0x1u),
+                (unsigned)((gpc_exc >> 14) & 0x1u),
+                (unsigned)((gpc_exc >> 16) & 0xffu),
+                (unsigned)((gpc_exc >> 26) & 0x1u),
+                (unsigned)((gpc_exc >> 29) & 0x1u),
+                (unsigned)((gpc_exc >> 27) & 0x1u),
+                (unsigned)((gpc_exc >> 30) & 0x1u),
+                (unsigned)((gpc_exc >> 28) & 0x1u),
+                (unsigned)((gpc_exc >> 31) & 0x1u),
+                (unsigned long)gpccs_hww_esr);
+
+    /* If any TPC bit is set, sample TPC0's exception register.
+     * Drills into SM/MPC/PE pending bits. */
+    if ((gpc_exc & 0x00ff0000u) != 0u) {
+        uint32_t tpc0_exc = bar0_r32(0x00504508u);
+        uart_printf("[%s]   gpc0_tpc0_exception=0x%08lx "
+                    "(sm=%u pe=%u mpc=%u)\n",
+                    tag, (unsigned long)tpc0_exc,
+                    (unsigned)((tpc0_exc >> 1) & 0x1u),
+                    (unsigned)((tpc0_exc >> 2) & 0x1u),
+                    (unsigned)((tpc0_exc >> 4) & 0x1u));
+
+        /* SM bit set → dump SM-level error state. The
+         * `global_esr` carries the bp/poison/error_in_trap
+         * class; `warp_esr` carries the actual fault code
+         * (misaligned_pc, mmu_fault, oor_addr, ...) and
+         * `warp_esr_pc_hi` pairs with `warp_esr_pc_lo` (4 B
+         * below the hi register at 0x00504738) to identify
+         * which SASS PC triggered the fault. */
+        if (((tpc0_exc >> 1) & 0x1u) != 0u) {
+            uint32_t sm_global = bar0_r32(0x00504734u);
+            uint32_t sm_warp   = bar0_r32(0x00504730u);
+            uint32_t pc_lo     = bar0_r32(0x00504738u);
+            uint32_t pc_hi     = bar0_r32(0x0050473cu);
+            uart_printf("[%s]   sm0_global_esr=0x%08lx sm0_warp_esr=0x%08lx "
+                        "warp_pc=0x%08lx_%08lx (error_code=0x%02x)\n",
+                        tag, (unsigned long)sm_global,
+                        (unsigned long)sm_warp,
+                        (unsigned long)pc_hi, (unsigned long)pc_lo,
+                        (unsigned)(sm_warp & 0xffu));
+        }
+    }
+}
+
 static void ga10b_dump_gr_state(const char *tag)
 {
     dump_gr_top_level(tag);
+    /* GR exception register again — re-read so the GPC drill-down
+     * sees the same snapshot the top-level dump just printed. */
+    dump_gpc_tpc_sm(tag, bar0_r32(0x00400108u));
     dump_fecs_state(tag);
     dump_mmu_fault(tag);
     dump_pbdma_state(tag);
@@ -2578,6 +2669,27 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
               (unsigned long)gp_put_start,
               (unsigned long)pushbuf_phys,
               (unsigned long)g_handoff.qmd_pool_phys);
+
+    /* #788 Stage 9 instrumentation — dump each op's shader/cbuf
+     * GPU VAs to confirm whether the v7 ops the helper published
+     * point at the right SASS pool. The bisect-E SM fault at PC =
+     * pushbuf_gpu_va + 0x10000 suggests op[i].shader_gpu_va is
+     * being mis-set. */
+    uart_printf("[GA10B-P8-v7-DBG] ops_v7 array @0x%lx, n=%lu\n",
+                (unsigned long)g_handoff.pipeline_ops_phys,
+                (unsigned long)n);
+    for (uint32_t i = 0; i < n; i++) {
+        const struct ga10b_pipeline_op_v7 *opdbg = &ops_v7[i];
+        uart_printf("[GA10B-P8-v7-DBG]   op[%lu] shader_gpu_va=0x%lx "
+                    "cbuf_gpu_va=0x%lx qmd_gpu_va=0x%lx output_phys=0x%lx "
+                    "reg_v=%lu\n",
+                    (unsigned long)i,
+                    (unsigned long)opdbg->shader_gpu_va,
+                    (unsigned long)opdbg->cbuf_gpu_va,
+                    (unsigned long)opdbg->qmd_gpu_va,
+                    (unsigned long)opdbg->output_phys,
+                    (unsigned long)opdbg->register_count_v);
+    }
 
     /* Phase 1: queue all N kernel-dispatch entries. */
     for (uint32_t i = 0; i < n; i++) {

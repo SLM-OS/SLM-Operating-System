@@ -261,6 +261,105 @@ static uint64_t virt_to_phys(void *vaddr)
     return pfn * 4096 + ((uint64_t)vaddr & 0xFFF);
 }
 
+/* Read FECS_CURRENT_CTX via /dev/mem and decode the channel inst-
+ * block phys it points to. Used to publish `inst_block_phys` in the
+ * handoff so SLM-OS's post-kexec `nvgpu oplib stage` can locate the
+ * inherited channel's GMMU root without scanning DRAM.
+ *
+ * Background (#788 Stage 9): SLM-OS captures FECS_CURRENT_CTX at
+ * boot, but by that time the live register may show a *different*
+ * channel than the helper's — Xorg / nvgpu's GR-internal channel /
+ * etc. were GR-current when kexec landed. Reading FECS here in the
+ * helper's process gives us a chance to capture the value while our
+ * channel is more likely to be the current GR context — and even if
+ * it's wrong, having a concrete address in the handoff lets SLM-OS's
+ * existing `if (h->inst_block_phys != 0)` fast path try it before
+ * falling back to walk-based discovery.
+ *
+ * GA10B FECS_CURRENT_CTX encoding (per
+ * `~/slmos-ref/nvidia/nvgpu-include-nvgpu-hw-gv11b-hw_gr_gv11b.h`):
+ *   bits [27:0]  = inst_block_phys >> 12
+ *   bits [29:28] = target aperture
+ *                  0 = vid_mem (Tegra has none — treat as invalid)
+ *                  2 = sys_mem_coherent
+ *                  3 = sys_mem_noncoherent
+ *
+ * Returns the decoded inst-block phys on success, or 0 if:
+ *   - /dev/mem can't be opened (helper isn't running as root)
+ *   - mmap fails
+ *   - The register reads as poison (`0xbadfXXXX`)
+ *   - The target aperture is 0 (no current ctx)
+ *
+ * On failure the function logs a diagnostic line — caller treats 0
+ * the same way SLM-OS does (skip publish, fall back to discovery). */
+#define GA10B_BAR0_BASE                  0x17000000ull
+#define GA10B_GR_FECS_CURRENT_CTX_OFFSET 0x00409b00u
+#define GA10B_INST_BLOCK_PAGE_SIZE       4096u
+
+static uint64_t read_fecs_current_ctx_inst_phys(void)
+{
+    int fd = open("/dev/mem", O_RDONLY | O_SYNC);
+    if (fd < 0) {
+        fprintf(stderr,
+                "[gpu-helper] FECS read: open(/dev/mem) failed: %s "
+                "(running as root?). inst_block_phys will be 0; "
+                "SLM-OS falls back to walk-based discovery.\n",
+                strerror(errno));
+        return 0;
+    }
+
+    /* mmap the page containing FECS_CURRENT_CTX. Page-align the mmap
+     * base since mmap() requires it; index within with the byte
+     * offset. The FECS register is 4 bytes at BAR0+0x409b00, which
+     * sits inside the 4 KB page at BAR0+0x409000. */
+    const uint64_t page_size = 4096u;
+    uint64_t reg_abs = GA10B_BAR0_BASE + GA10B_GR_FECS_CURRENT_CTX_OFFSET;
+    uint64_t page_base = reg_abs & ~(page_size - 1);
+    uint32_t page_off  = (uint32_t)(reg_abs & (page_size - 1));
+
+    void *map = mmap(NULL, page_size, PROT_READ, MAP_SHARED, fd,
+                     (off_t)page_base);
+    close(fd);
+    if (map == MAP_FAILED) {
+        fprintf(stderr,
+                "[gpu-helper] FECS read: mmap @0x%llx failed: %s\n",
+                (unsigned long long)page_base, strerror(errno));
+        return 0;
+    }
+
+    volatile uint32_t *reg_ptr =
+        (volatile uint32_t *)((uint8_t *)map + page_off);
+    uint32_t reg = *reg_ptr;
+    munmap(map, page_size);
+
+    if ((reg & 0xFFFF0000u) == 0xbadf0000u) {
+        fprintf(stderr,
+                "[gpu-helper] FECS read: register=0x%08x (priv-bad "
+                "poison — GPU power-gated?). Publishing inst_block_phys=0.\n",
+                reg);
+        return 0;
+    }
+
+    uint32_t target = (reg >> 28) & 0x3u;
+    if (target == 0) {
+        fprintf(stderr,
+                "[gpu-helper] FECS read: register=0x%08x (target=0 — no "
+                "current ctx). Publishing inst_block_phys=0.\n",
+                reg);
+        return 0;
+    }
+
+    uint64_t inst_phys = ((uint64_t)(reg & 0x0FFFFFFFu)) << 12;
+    printf("[gpu-helper] FECS_CURRENT_CTX=0x%08x → inst_block_phys=0x%llx "
+           "(target=%u, %s). NOTE: this is whatever channel was GR-current "
+           "at the read moment — may or may not be this helper's channel; "
+           "SLM-OS validates via pushbuf-PA walk before use.\n",
+           reg, (unsigned long long)inst_phys, target,
+           target == 3 ? "sys_mem_noncoherent" :
+           target == 2 ? "sys_mem_coherent" : "unknown");
+    return inst_phys;
+}
+
 /* SIGTERM handler — on clean shutdown, let the kernel reap us (which
  * releases all nvgpu fds and frees the channel). No explicit cleanup
  * needed because nvgpu's release paths run on fd close. */
@@ -967,7 +1066,15 @@ int main(int argc, char **argv)
         .pushbuf_size       = 65536,
         .semaphore_phys     = sem_phys,
         .semaphore_gpu_va   = sem_map.offset,
-        .inst_block_phys    = 0,  /* filled in from FECS_CURRENT_CTX if needed */
+        .inst_block_phys    = 0,  /* populated post-ALLOC by the isolation
+                                   * test's FECS_CURRENT_CTX read, AFTER
+                                   * the GR engine confirms our channel
+                                   * just ran. See `read_fecs_current_ctx_-
+                                   * inst_phys` + the publish site below the
+                                   * sema-fire branch. The initial-zero
+                                   * sentinel here means "skip", picked up
+                                   * by SLM-OS's `nvgpu oplib stage` to fall
+                                   * back to walk-based discovery. */
         .initial_gp_put     = 0,
         .initial_gp_get     = 0,
         .work_submit_token  = sb.work_submit_token,
@@ -1103,6 +1210,30 @@ int main(int argc, char **argv)
         if (sem_val == HELPER_SMOKETEST_SEM_PAYLOAD) {
             printf("[gpu-helper] >>> ISOLATION: sema fires Linux-side — "
                    "channel capable, kexec breaks state\n");
+
+            /* #788 Stage 9 fix: publish `inst_block_phys` in the
+             * handoff so SLM-OS's `nvgpu oplib stage` doesn't have
+             * to walk DRAM looking for our inst block.
+             *
+             * Critically, we do this read RIGHT AFTER the
+             * isolation-test sema fires — at that moment the GR
+             * engine just ran our pushbuffer, so FECS_CURRENT_CTX
+             * is guaranteed to point at OUR channel. If we read
+             * any later, GR might context-switch back to Xorg or
+             * nvgpu's internal channel. If we read earlier, our
+             * channel might not yet have been scheduled.
+             *
+             * SLM-OS's `oplib stage` still pushbuf-PA validates
+             * before trusting the value, so a wrong inst_block_phys
+             * here (e.g. if FECS drifts before we read in some
+             * future timing-sensitive case) won't propagate as a
+             * bad pointer downstream. */
+            hoff.inst_block_phys = read_fecs_current_ctx_inst_phys();
+            if (hoff.inst_block_phys != 0) {
+                printf("[gpu-helper] >>> publishing inst_block_phys=0x%llx "
+                       "in handoff (skips SLM-OS's DRAM walk)\n",
+                       (unsigned long long)hoff.inst_block_phys);
+            }
         } else if (gp_get_after == 1) {
             printf("[gpu-helper] >>> ISOLATION: PBDMA consumed entry but "
                    "method didn't fire — channel setup incomplete\n");
@@ -1112,7 +1243,8 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Re-read + update handoff with the current GP_PUT/GP_GET values. */
+    /* Re-read + update handoff with the current GP_PUT/GP_GET values
+     * AND the FECS-derived inst_block_phys captured above. */
     hoff.initial_gp_put = ((volatile uint32_t *)userd_va)[35];
     hoff.initial_gp_get = ((volatile uint32_t *)userd_va)[34];
     memcpy(handoff, &hoff, sizeof(hoff));
