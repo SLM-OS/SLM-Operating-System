@@ -7,8 +7,15 @@
 #
 # launch-capture.sh prefers this binary if present.
 #
-# This is throwaway: Task 0.2 ships a corpus-driven stub that this script's
-# binary will be retired in favour of.
+# The binary registers two PCI devices:
+#
+#  - hailo-stub-stub  (the throwaway placeholder originally shipped with
+#    Task 0.3 — kept for the determinism-check artifact).
+#  - hailo8           (Task 0.2's real corpus-driven stub — used by
+#    Phase 1's launch-bootstrap.sh).
+#
+# Both source trees live in this repo and are installed into the same QEMU
+# tree before build.
 
 set -euo pipefail
 
@@ -37,6 +44,7 @@ done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PATCH_DIR="${HERE}/qemu-patch"
+HAILO8_STUB_DIR="$(cd "${HERE}/../qemu-hailo8-stub" && pwd)"
 
 mkdir -p "${QEMU_OUT_DIR}" "${QEMU_BUILD_ROOT}"
 
@@ -59,11 +67,17 @@ fi
 if [[ -x "${OUT_BIN}" && "${FORCE_REBUILD}" -eq 0 ]]; then
     echo "Custom QEMU already built: ${OUT_BIN}"
     "${OUT_BIN}" --version | head -1
-    if "${OUT_BIN}" -device help 2>&1 | grep -q hailo-stub-stub; then
-        echo "Confirmed: -device hailo-stub-stub is registered."
+    DEVS="$("${OUT_BIN}" -device help 2>&1 || true)"
+    HAVE_STUB_STUB=0
+    HAVE_HAILO8=0
+    grep -q hailo-stub-stub <<<"${DEVS}" && HAVE_STUB_STUB=1
+    grep -q '"hailo8"'      <<<"${DEVS}" && HAVE_HAILO8=1
+    if [[ "${HAVE_STUB_STUB}" -eq 1 && "${HAVE_HAILO8}" -eq 1 ]]; then
+        echo "Confirmed: -device hailo-stub-stub AND -device hailo8 are registered."
         exit 0
     else
-        echo "Binary exists but hailo-stub-stub not registered. Rebuilding." >&2
+        echo "Binary exists but missing one of {hailo-stub-stub, hailo8}. Rebuilding." >&2
+        echo "  stub-stub registered: ${HAVE_STUB_STUB}, hailo8 registered: ${HAVE_HAILO8}" >&2
         FORCE_REBUILD=1
     fi
 fi
@@ -103,9 +117,15 @@ if [[ ! -d "${SRC_DIR}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Apply patch
+# Apply Task 0.3 placeholder + Task 0.2 real-stub patches
 # ---------------------------------------------------------------------------
 "${PATCH_DIR}/apply.sh" "${SRC_DIR}"
+
+if [[ ! -x "${HAILO8_STUB_DIR}/install.sh" ]]; then
+    echo "ERROR: Task 0.2 stub not found at ${HAILO8_STUB_DIR}/install.sh" >&2
+    exit 4
+fi
+"${HAILO8_STUB_DIR}/install.sh" "${SRC_DIR}"
 
 # ---------------------------------------------------------------------------
 # Configure (minimal — just x86_64-softmmu, KVM, slirp, no GUI).
@@ -164,13 +184,18 @@ cp -a "${SRC_DIR}/pc-bios" "${PC_BIOS_OUT}"
 # Verify
 # ---------------------------------------------------------------------------
 "${OUT_BIN}" --version | head -1
-if ! "${OUT_BIN}" -device help 2>&1 | grep -q hailo-stub-stub; then
+DEVS="$("${OUT_BIN}" -device help 2>&1 || true)"
+if ! grep -q hailo-stub-stub <<<"${DEVS}"; then
     echo "ERROR: built QEMU does not register hailo-stub-stub" >&2
+    exit 4
+fi
+if ! grep -q '"hailo8"' <<<"${DEVS}"; then
+    echo "ERROR: built QEMU does not register hailo8 (Task 0.2 real stub)" >&2
     exit 4
 fi
 if [[ ! -f "${PC_BIOS_OUT}/bios-256k.bin" ]]; then
     echo "ERROR: pc-bios/bios-256k.bin not copied to ${PC_BIOS_OUT}" >&2
     exit 4
 fi
-echo "OK: ${OUT_BIN} ready (hailo-stub-stub registered)."
+echo "OK: ${OUT_BIN} ready (hailo-stub-stub + hailo8 registered)."
 echo "    pc-bios at ${PC_BIOS_OUT}"
