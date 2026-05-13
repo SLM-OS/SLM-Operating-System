@@ -147,6 +147,97 @@ void ga10b_kexec_handoff_register_reserves(void)
                 (unsigned)GA10B_INST_BLOCK_BYTES,
                 (unsigned)reg, (unsigned)target);
 
+    /* #788 Stage 7: read the GR engine's runlist submit_base register
+     * and reserve the runlist's pages.
+     *
+     * The runlist is a per-engine DRAM buffer that PBDMA reads to
+     * find which channels to schedule. Linux's nvgpu allocates it
+     * via `gk20a_gmmu_alloc_sys` (sys mem, page-aligned) and writes
+     * the address into `runlist_submit_base_lo/hi`. The handoff
+     * struct doesn't publish the runlist phys, so without this
+     * step SLM-OS's PMM may hand out the runlist's pages to its
+     * own allocations — Stage 6 trace proves intermediate PT-page
+     * allocations during the GMMU rebuild land on physical pages
+     * adjacent to / overlapping the runlist when pushbuf or sem
+     * is reserved.
+     *
+     * GA10B Tegra has a single GR runlist with empirically-observed
+     * pri_base at BAR0 + 0xC000 (per the PTOP device-info table
+     * walk in L4T nvgpu's `ga10b_top_parse_next_dev`). So
+     * `runlist_submit_base_lo` is at BAR0 + 0xC080, `_hi` at
+     * BAR0 + 0xC084.
+     *
+     * Register encoding per `~/slmos-ref/nvidia/nvgpu-hw-ga10b-hw_runlist_ga10b.h`:
+     *   lo bits[31:10] = runlist_iova >> 10 (1 KB-aligned ptr)
+     *   lo bits[1:0]   = target aperture
+     *   hi bits[7:0]   = runlist_iova bits[39:32]
+     *
+     * Runlist size: 32 KiB per buffer × 2 buffers (double-buffered)
+     * = 64 KiB total, page-aligned.
+     *
+     * If the empirical 0xC000 offset is wrong on a future chip
+     * revision, the read will return a value outside DRAM and
+     * the `ga10b_phys_in_dram` check will skip the reservation
+     * cleanly — Stage 4+5 regression behavior worsens but the
+     * boot continues. */
+    {
+        const uint64_t runlist_lo_addr = GA10B_BAR0_BASE + 0xC080u;
+        const uint64_t runlist_hi_addr = GA10B_BAR0_BASE + 0xC084u;
+        uint32_t rl_lo = *(volatile uint32_t *)(uintptr_t)runlist_lo_addr;
+        uint32_t rl_hi = *(volatile uint32_t *)(uintptr_t)runlist_hi_addr;
+
+        if ((rl_lo & 0xFFFF0000u) == 0xbadf0000u ||
+            (rl_hi & 0xFFFF0000u) == 0xbadf0000u) {
+            uart_printf("[ga10b-reserve] runlist submit_base reads "
+                        "poison (lo=0x%08x hi=0x%08x) — wrong "
+                        "pri_base offset or GPU power-gated. Skipping.\n",
+                        (unsigned)rl_lo, (unsigned)rl_hi);
+        } else {
+            /* Decode: lo bits[31:10] are ptr bits[31:10] (1 KB-aligned).
+             * Mask off the low 10 bits, those carry target + flags. */
+            uint64_t runlist_phys =
+                ((uint64_t)(rl_lo & 0xfffffc00u)) |
+                ((uint64_t)(rl_hi & 0xffu) << 32);
+            uint32_t aperture = rl_lo & 0x3u;
+
+            /* Double-buffered 32 KiB → 64 KiB total. Page-round
+             * the size to ensure we cover both buffers even if
+             * the base isn't 64 KiB-aligned. */
+            const uint64_t runlist_bytes = 64u * 1024u;
+
+            if (!ga10b_phys_in_dram(runlist_phys, (size_t)runlist_bytes)) {
+                uart_printf("[ga10b-reserve] runlist phys=0x%lx (size=%llu, "
+                            "lo=0x%08x hi=0x%08x ap=%u) outside DRAM — "
+                            "skipping reservation. Either the pri_base "
+                            "offset is wrong or Linux's nvgpu hadn't "
+                            "programmed the runlist yet.\n",
+                            (unsigned long)runlist_phys,
+                            (unsigned long long)runlist_bytes,
+                            (unsigned)rl_lo, (unsigned)rl_hi,
+                            (unsigned)aperture);
+            } else {
+                uint64_t runlist_page_base = runlist_phys & ~4095ull;
+                uint64_t runlist_page_end =
+                    (runlist_phys + runlist_bytes + 4095ull) & ~4095ull;
+                uint64_t runlist_reserve_bytes =
+                    runlist_page_end - runlist_page_base;
+                if (pmm_user_reserve_add(runlist_page_base,
+                                          runlist_reserve_bytes) != 0) {
+                    uart_printf("[ga10b-reserve] pmm_user_reserve_add "
+                                "for runlist @0x%lx failed (table full)\n",
+                                (unsigned long)runlist_page_base);
+                } else {
+                    uart_printf("[ga10b-reserve] reserved GR runlist "
+                                "@0x%lx (%llu B, lo=0x%08x hi=0x%08x ap=%u)\n",
+                                (unsigned long)runlist_page_base,
+                                (unsigned long long)runlist_reserve_bytes,
+                                (unsigned)rl_lo, (unsigned)rl_hi,
+                                (unsigned)aperture);
+                }
+            }
+        }
+    }
+
     /* #788 Stage 4 — scan DRAM for the handoff and reserve every
      * weights-pool extent it lists. The IOVMM-stitched 1.5 GB
      * weights pool is physically scattered across hundreds-to-
@@ -224,19 +315,28 @@ void ga10b_kexec_handoff_register_reserves(void)
         uint64_t sem_p     = h->semaphore_phys;
         uint64_t shader_p  = h->shader_phys;
         uint32_t shader_s  = h->shader_size;
+        uint64_t cbuf_p    = h->cbuf_phys;
+        uint32_t cbuf_s    = h->cbuf_size;
+        uint64_t qmd_p     = h->qmd_pool_phys;
+        uint32_t qmd_s     = h->qmd_pool_size_bytes;
 
         struct {
             const char *tag;
             uint64_t phys;
             uint64_t size;
         } refs[] = {
+            /* Stage 7: full helper-buf reservation. Stage 4 was
+             * broken by pushbuf/sem reservation (bisect E/F);
+             * Stage 7 adds the runlist reservation above which
+             * should make the rebuild's PT-page allocations safe. */
             { "userd",    userd_p,   4096 },
             { "gpfifo",   gpfifo_p,  (uint64_t)gpfifo_e * (uint64_t)gpfifo_es },
-            /* Stage 6: USERD + GPFIFO + pushbuf (bisect E config —
-             * the failing case we want to instrument). */
             { "pushbuf",  pushbuf_p, (uint64_t)pushbuf_s },
+            { "sem",      sem_p,     4096 },
+            { "shader",   shader_p,  (uint64_t)shader_s },
+            { "cbuf",     cbuf_p,    (uint64_t)cbuf_s },
+            { "qmd_pool", qmd_p,     (uint64_t)qmd_s },
         };
-        (void)sem_p; (void)shader_p; (void)shader_s;
         for (size_t i = 0; i < sizeof(refs) / sizeof(refs[0]); i++) {
             if (refs[i].phys == 0 || refs[i].size == 0) {
                 continue;

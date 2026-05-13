@@ -1191,8 +1191,10 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
     /* #788 Stage 6: trace every PMM page the rebuild allocates so
      * the operator can spot which one might be colliding with an
      * unknown FW range. Tail of the function disables tracing
-     * once mapping is done. */
-    ga10b_gmmu_table_alloc_trace_set(true);
+     * once mapping is done. Currently OFF — the 4000+-line trace
+     * is overwhelming when not specifically investigating.
+     * Toggle on for diagnostic captures. */
+    /* ga10b_gmmu_table_alloc_trace_set(true); */
 
     /* 1. Allocate a fresh PDB page from SLM-OS PMM. Zero it so
      *    every PDE3 entry reads as invalid until `map_one_page`
