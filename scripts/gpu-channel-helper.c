@@ -771,6 +771,149 @@ int main(int argc, char **argv)
                (unsigned long long)weights_pool_gva);
     }
 
+    /* #788 Stage 4: walk the weights pool's pages via
+     * /proc/self/pagemap, coalesce consecutive physical pages
+     * into extents, and publish the list in a separate dmabuf
+     * so SLM-OS can re-establish GMMU PTEs covering the entire
+     * pool post-kexec.
+     *
+     * The 1.5 GB IOVMM-stitched pool is physically scattered
+     * (CMA backing returns hundreds-to-thousands of separate
+     * contiguous physical runs depending on fragmentation).
+     * `weights_pool_phys` records only the first page's phys;
+     * the rest is invisible without the explicit per-page walk
+     * this loop performs.
+     *
+     * Cap matches `GA10B_WEIGHTS_EXTENTS_MAX` in the shared
+     * handoff header (8192 entries × 16 bytes = 128 KB dmabuf).
+     * If a future allocation fragments more than that, we
+     * truncate and warn; the operator's fix is to bump the cap
+     * on both sides in lock-step. */
+    int      extents_dmabuf = -1;
+    void    *extents_va     = NULL;
+    uint64_t extents_phys   = 0;
+    uint32_t n_extents      = 0;
+    const uint32_t MAX_EXTENTS = 8192u;  /* matches GA10B_WEIGHTS_EXTENTS_MAX */
+    const size_t   extents_bytes_total =
+        (size_t)MAX_EXTENTS * sizeof(struct ga10b_phys_extent);
+    if (weights_pool_size > 0 && weights_pool_va != NULL) {
+        extents_dmabuf = nvmap_alloc_dmabuf(nvmap_fd,
+                                            (uint64_t)extents_bytes_total,
+                                            4096);
+        extents_va = mmap(NULL, extents_bytes_total,
+                          PROT_READ | PROT_WRITE,
+                          MAP_SHARED, extents_dmabuf, 0);
+        if (extents_va == MAP_FAILED) {
+            perror("[gpu-helper] mmap extents dmabuf");
+            extents_va = NULL;
+        } else {
+            memset(extents_va, 0, extents_bytes_total);
+            msync(extents_va, extents_bytes_total, MS_SYNC);
+            extents_phys = virt_to_phys(extents_va);
+            if (extents_phys == 0) {
+                fprintf(stderr, "[gpu-helper] extents dmabuf phys "
+                        "resolution failed — extents disabled\n");
+                extents_va = NULL;
+            }
+        }
+    }
+
+    if (extents_va != NULL) {
+        /* First-touch the weights pool to force every page to
+         * fault in. NVMAP's IOVMM-backed dmabuf creates a userspace
+         * mmap that's lazy — pages aren't bound to physical backing
+         * until accessed. Without touching them first,
+         * /proc/self/pagemap reports "page not present" for the
+         * entire 1.5 GB and the extent walk finds nothing.
+         *
+         * A single byte read per page is enough to fault it in.
+         * 393,216 pages × ~ns-scale read ≈ ~1-2 s on Tegra Orin
+         * Nano — a one-time pre-kexec cost; nothing on the hot
+         * path. */
+        {
+            volatile uint8_t *touch = (volatile uint8_t *)weights_pool_va;
+            for (size_t pi = 0;
+                 pi < weights_pool_size / 4096u;
+                 pi++) {
+                (void)touch[pi * 4096u];
+            }
+        }
+
+        /* Walk every 4 KB page in the weights pool, resolving
+         * its physical address via /proc/self/pagemap. Coalesce
+         * consecutive pages whose physes match `prev_phys +
+         * 4 KB` into one extent entry, and flush the current
+         * extent when a discontinuity appears or we reach the
+         * pool's end. */
+        struct ga10b_phys_extent *extents = extents_va;
+        size_t   total_pages  = weights_pool_size / 4096u;
+        uint64_t cur_run_phys = 0;
+        uint32_t cur_run_pages = 0;
+        size_t   pagemap_failures = 0;
+        uint8_t *base = (uint8_t *)weights_pool_va;
+
+        for (size_t pi = 0; pi < total_pages; pi++) {
+            uint64_t va = (uint64_t)(uintptr_t)base + pi * 4096ull;
+            uint64_t phys = virt_to_phys((void *)(uintptr_t)va);
+            if (phys == 0) {
+                pagemap_failures++;
+                /* Flush current run; skip this page. SLM-OS
+                 * will leave the corresponding 4 KB hole in
+                 * the GMMU and a CE memcpy that lands there
+                 * will MMU-fault. */
+                if (cur_run_pages > 0 && n_extents < MAX_EXTENTS) {
+                    extents[n_extents].phys = cur_run_phys;
+                    extents[n_extents].n_pages = cur_run_pages;
+                    extents[n_extents].reserved = 0;
+                    n_extents++;
+                    cur_run_phys = 0;
+                    cur_run_pages = 0;
+                }
+                continue;
+            }
+            if (cur_run_pages == 0) {
+                cur_run_phys = phys;
+                cur_run_pages = 1;
+            } else if (phys ==
+                       cur_run_phys + (uint64_t)cur_run_pages * 4096ull) {
+                cur_run_pages++;
+            } else {
+                /* Discontinuity — flush. */
+                if (n_extents < MAX_EXTENTS) {
+                    extents[n_extents].phys = cur_run_phys;
+                    extents[n_extents].n_pages = cur_run_pages;
+                    extents[n_extents].reserved = 0;
+                    n_extents++;
+                } else {
+                    /* Table full — break out, will warn below. */
+                    break;
+                }
+                cur_run_phys = phys;
+                cur_run_pages = 1;
+            }
+        }
+        /* Flush final run. */
+        if (cur_run_pages > 0 && n_extents < MAX_EXTENTS) {
+            extents[n_extents].phys = cur_run_phys;
+            extents[n_extents].n_pages = cur_run_pages;
+            extents[n_extents].reserved = 0;
+            n_extents++;
+        }
+        msync(extents_va, extents_bytes_total, MS_SYNC);
+
+        printf("[gpu-helper] Weights extents: %u runs (%zu pages "
+               "total) → phys=0x%llx",
+               (unsigned)n_extents, total_pages,
+               (unsigned long long)extents_phys);
+        if (n_extents == MAX_EXTENTS) {
+            printf(" [TRUNCATED — bump MAX_EXTENTS]");
+        }
+        if (pagemap_failures > 0) {
+            printf(" [%zu pagemap failures]", pagemap_failures);
+        }
+        printf("\n");
+    }
+
     /* Allocate a dedicated dmabuf for the handoff block. Writing via
      * /dev/mem is blocked by CONFIG_STRICT_DEVMEM for System RAM, but
      * we can write to dmabuf memory via its own mmap. SLM-OS scans
@@ -795,10 +938,11 @@ int main(int argc, char **argv)
      *   v8 — weights pool allocated (W1, this commit)
      *   v7 — QMD pool allocated (no weights pool)
      *   v2 — channel-only (no v7 pool, no weights pool)
-     * Each higher version is a strict superset: v7 readers can
-     * consume v8 handoffs by ignoring the trailing weights_pool_*
-     * fields, v2 readers ignore both v7 and v8 trailing bytes. */
-    uint32_t handoff_version = (weights_pool_size > 0) ? 8u
+     * Each higher version is a strict superset: v9 readers can
+     * consume v8 handoffs by ignoring the trailing weights_extents_*
+     * fields, v8 readers ignore v9, etc. */
+    uint32_t handoff_version = (n_extents > 0)         ? 9u
+                              : (weights_pool_size > 0) ? 8u
                               : (qmd_pool_slots > 0)   ? 7u
                               :                          2u;
     struct ga10b_channel_handoff hoff = {
@@ -846,6 +990,10 @@ int main(int argc, char **argv)
         .weights_pool_phys       = weights_pool_phys,
         .weights_pool_gpu_va     = weights_pool_gva,
         .weights_pool_size_bytes = weights_pool_size,
+        /* v9-only: weights-pool per-page extents. Zero in v2..v8
+         * mode (no pagemap walk done). #788 Stage 4. */
+        .weights_extents_phys    = extents_phys,
+        .weights_n_extents       = n_extents,
     };
     memcpy(handoff, &hoff, sizeof(hoff));
     msync(handoff, 4096, MS_SYNC);

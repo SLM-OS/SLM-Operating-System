@@ -47,7 +47,9 @@
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
+#include "ga10b_channel_handoff.h"
 #include "ga10b_gmmu.h"
+#include "../../include/dtb.h"
 #include "../../include/pmm.h"
 #include "../../include/uart.h"
 
@@ -144,6 +146,193 @@ void ga10b_kexec_handoff_register_reserves(void)
                 (unsigned long)inst_phys,
                 (unsigned)GA10B_INST_BLOCK_BYTES,
                 (unsigned)reg, (unsigned)target);
+
+    /* #788 Stage 4 — scan DRAM for the handoff and reserve every
+     * weights-pool extent it lists. The IOVMM-stitched 1.5 GB
+     * weights pool is physically scattered across hundreds-to-
+     * thousands of contiguous runs; without reserving each run's
+     * pages, SLM-OS PMM allocates from those pages and the CE
+     * memcpy writes during W3 staging clobber whatever kernel
+     * data SLM-OS put there.
+     *
+     * The handoff itself lives somewhere in the 4-8 GB DRAM
+     * range (the helper's nvmap allocation lands wherever the
+     * IOVMM heap has room). Scanning at 4 KB stride is ~50 ms
+     * one-time-only at boot; acceptable cost for the protection.
+     *
+     * If the scan fails (no handoff found) we still finished the
+     * inst-block reservation above — a fresh-boot or no-helper
+     * test path that doesn't have a kexec'd channel works
+     * normally without the extents protection. */
+    uart_puts("[ga10b-reserve] scanning DRAM for handoff magic + "
+              "weights-pool extents...\n");
+    uint64_t handoff_phys =
+        ga10b_find_handoff_in_range(0x100000000ull, 0x200000000ull,
+                                     4096ull);
+    if (handoff_phys == 0) {
+        uart_puts("[ga10b-reserve]   handoff not found — skipping "
+                  "weights-pool extent reservation\n");
+        return;
+    }
+
+    /* Reserve the handoff dmabuf page itself first (cheap + small). */
+    if (pmm_user_reserve_add(handoff_phys & ~4095ull, 4096ull) != 0) {
+        uart_printf("[ga10b-reserve]   pmm_user_reserve_add for "
+                    "handoff page @0x%lx failed (table full?)\n",
+                    (unsigned long)handoff_phys);
+    } else {
+        uart_printf("[ga10b-reserve]   reserved handoff dmabuf "
+                    "@0x%lx (4 KB)\n",
+                    (unsigned long)(handoff_phys & ~4095ull));
+    }
+    const volatile struct ga10b_channel_handoff *h =
+        (const volatile struct ga10b_channel_handoff *)
+        (uintptr_t)handoff_phys;
+    uint32_t version = h->version;
+    uint32_t n_extents = h->weights_n_extents;
+    uint64_t extents_phys = h->weights_extents_phys;
+
+    /* Reserve every helper-allocated buffer the channel needs
+     * (USERD, GPFIFO, pushbuf, sem, SASS pool, cbuf, QMD pool).
+     * Without these, SLM-OS PMM can hand them out to its own
+     * allocations (e.g. the GMMU rebuild's page-table pages —
+     * Stage 4 maps a 1.5 GB weights pool which requires ~3 MB of
+     * PTE tables, way more PMM activity than the Stage 3
+     * single-page case), and the channel state gets clobbered.
+     * Stage 3 worked without these because the PTE-table footprint
+     * was tiny (a few pages); Stage 4's larger PTE footprint
+     * surfaced the latent collision.
+     *
+     * Each buffer is small + finite (max ~1 MB for SASS pool);
+     * collectively well under the PMM user-reserve table cap.
+     * Read the (volatile) handoff fields into locals first so the
+     * struct-initializer fits a static helper table cleanly. */
+    {
+        uint64_t userd_p   = h->userd_phys;
+        uint64_t gpfifo_p  = h->gpfifo_phys;
+        uint32_t gpfifo_e  = h->gpfifo_entries;
+        uint32_t gpfifo_es = h->gpfifo_entry_size;
+        uint64_t pushbuf_p = h->pushbuf_phys;
+        uint32_t pushbuf_s = h->pushbuf_size;
+        uint64_t sem_p     = h->semaphore_phys;
+        uint64_t shader_p  = h->shader_phys;
+        uint32_t shader_s  = h->shader_size;
+        uint64_t cbuf_p    = h->cbuf_phys;
+        uint32_t cbuf_s    = h->cbuf_size;
+        uint64_t qmd_p     = h->qmd_pool_phys;
+        uint32_t qmd_s     = h->qmd_pool_size_bytes;
+
+        struct {
+            const char *tag;
+            uint64_t phys;
+            uint64_t size;
+        } refs[] = {
+            { "userd",    userd_p,   4096 },
+            { "gpfifo",   gpfifo_p,  (uint64_t)gpfifo_e * (uint64_t)gpfifo_es },
+            { "pushbuf",  pushbuf_p, (uint64_t)pushbuf_s },
+            { "sem",      sem_p,     4096 },
+            { "shader",   shader_p,  (uint64_t)shader_s },
+            { "cbuf",     cbuf_p,    (uint64_t)cbuf_s },
+            { "qmd_pool", qmd_p,     (uint64_t)qmd_s },
+        };
+        for (size_t i = 0; i < sizeof(refs) / sizeof(refs[0]); i++) {
+            if (refs[i].phys == 0 || refs[i].size == 0) {
+                continue;
+            }
+            uint64_t base = refs[i].phys & ~4095ull;
+            uint64_t end  = (refs[i].phys + refs[i].size + 4095ull) &
+                            ~4095ull;
+            uint64_t sz   = end - base;
+            if (pmm_user_reserve_add(base, sz) != 0) {
+                uart_printf("[ga10b-reserve]   pmm_user_reserve_add "
+                            "for %s @0x%lx failed (table full?)\n",
+                            refs[i].tag, (unsigned long)base);
+            } else {
+                uart_printf("[ga10b-reserve]   reserved %s @0x%lx "
+                            "(%llu B)\n",
+                            refs[i].tag, (unsigned long)base,
+                            (unsigned long long)sz);
+            }
+        }
+    }
+    if (version < 9u || n_extents == 0u || extents_phys == 0u) {
+        uart_printf("[ga10b-reserve]   handoff@0x%lx v=%u no v9 "
+                    "extents (n=%u extents_phys=0x%lx) — skipping\n",
+                    (unsigned long)handoff_phys, (unsigned)version,
+                    (unsigned)n_extents, (unsigned long)extents_phys);
+        return;
+    }
+    uint64_t extents_bytes =
+        (uint64_t)n_extents * sizeof(struct ga10b_phys_extent);
+    if (!ga10b_phys_in_dram(extents_phys, (size_t)extents_bytes)) {
+        uart_printf("[ga10b-reserve]   extents_phys=0x%lx (n=%u) "
+                    "outside DRAM — skipping\n",
+                    (unsigned long)extents_phys, (unsigned)n_extents);
+        return;
+    }
+
+    /* Reserve the extents dmabuf itself so PMM doesn't allocate
+     * from it before the rebuild path reads it. The dmabuf can
+     * be 100s of KB for a fragmented IOVMM allocation (1033
+     * extents × 16 B = 16 KB; capped at GA10B_WEIGHTS_EXTENTS_MAX
+     * × 16 B = 128 KB), much larger than the inst-block page or
+     * handoff dmabuf — without explicit reservation, SLM-OS PMM
+     * easily hands those pages to ramdisk allocations or model
+     * preload buffers, and by rebuild-time the extents array
+     * reads as random bytes. */
+    {
+        uint64_t extents_page_base = extents_phys & ~4095ull;
+        uint64_t extents_page_end =
+            (extents_phys + extents_bytes + 4095ull) & ~4095ull;
+        uint64_t extents_reserve_bytes =
+            extents_page_end - extents_page_base;
+        if (pmm_user_reserve_add(extents_page_base,
+                                  extents_reserve_bytes) != 0) {
+            uart_printf("[ga10b-reserve]   pmm_user_reserve_add for "
+                        "extents dmabuf failed — array will be at "
+                        "risk of clobber between boot and rebuild\n");
+        } else {
+            uart_printf("[ga10b-reserve]   reserved extents dmabuf "
+                        "@0x%lx (%llu B)\n",
+                        (unsigned long)extents_page_base,
+                        (unsigned long long)extents_reserve_bytes);
+        }
+    }
+
+    const struct ga10b_phys_extent *exts =
+        (const struct ga10b_phys_extent *)(uintptr_t)extents_phys;
+    int reserved_count = 0;
+    int skipped_count = 0;
+    uint64_t total_pages = 0;
+    for (uint32_t i = 0; i < n_extents; i++) {
+        uint64_t ph = exts[i].phys;
+        uint32_t np = exts[i].n_pages;
+        if (np == 0u) {
+            continue;
+        }
+        uint64_t sz = (uint64_t)np * 4096ull;
+        if (!ga10b_phys_in_dram(ph, sz)) {
+            skipped_count++;
+            continue;
+        }
+        if (pmm_user_reserve_add(ph, sz) != 0) {
+            uart_printf("[ga10b-reserve]   pmm_user_reserve_add "
+                        "failed at extent %u/%u — table full, "
+                        "tail unprotected\n",
+                        (unsigned)i, (unsigned)n_extents);
+            break;
+        }
+        reserved_count++;
+        total_pages += np;
+    }
+    uart_printf("[ga10b-reserve]   weights extents: %u reserved "
+                "(%llu pages, ~%llu MB), %u skipped (outside DRAM), "
+                "from handoff@0x%lx\n",
+                (unsigned)reserved_count,
+                (unsigned long long)total_pages,
+                (unsigned long long)(total_pages / 256ull),
+                (unsigned)skipped_count,
+                (unsigned long)handoff_phys);
 }
 
 #else  /* !PLATFORM_JETSON_ORIN_NANO */

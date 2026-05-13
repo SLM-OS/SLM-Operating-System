@@ -273,7 +273,80 @@ struct ga10b_channel_handoff {
     uint64_t weights_pool_phys;
     uint64_t weights_pool_gpu_va;
     uint64_t weights_pool_size_bytes;
+
+    /* --- v9 extension: weights-pool per-page physical layout. ---
+     * Zero on v2..v8. Populated by the helper when it walks the
+     * weights pool's pages via /proc/self/pagemap and coalesces
+     * consecutive physical pages into extents.
+     *
+     * The 1.5 GB IOVMM weights pool is SMMU-stitched from
+     * physically-scattered pages — `weights_pool_phys` records
+     * only the FIRST page's CPU phys (the rest can't be derived
+     * by `phys + offset` arithmetic). For SLM-OS to install GMMU
+     * PTEs covering the entire pool post-kexec (#788 Stage 4),
+     * the helper publishes a list of `(phys, n_pages)` extents
+     * describing the contiguous physical runs that make up the
+     * IO-virtually-contiguous 1.5 GB region.
+     *
+     * `weights_extents_phys` is the CPU physical address of a
+     * separate dmabuf containing an array of
+     * `struct ga10b_phys_extent` entries. The dmabuf is
+     * page-aligned (4 KB) and sized to hold at most
+     * GA10B_WEIGHTS_EXTENTS_MAX entries (see below). The phys
+     * is in DRAM and identity-mapped, so SLM-OS can read it
+     * directly without re-walking GMMU.
+     *
+     * `weights_n_extents` is the actual count of valid entries.
+     * If the helper finds more physical runs than the dmabuf
+     * can hold, it warns and truncates — SLM-OS only maps the
+     * extents that fit; the tail of the weights pool will
+     * trigger MMU faults if a CE memcpy writes there. The
+     * helper's warning gives a fix-by-resizing path.
+     *
+     * SLM-OS PMM also reserves every extent's pages via the
+     * `pmm_user_reserve_add` API (PR #801), so the kernel
+     * doesn't allocate from physical pages that the GPU is
+     * about to receive weight data into.
+     *
+     * Backward compatible: a v8-or-earlier helper writes zero
+     * here; SLM-OS sees `weights_n_extents == 0` and falls back
+     * to mapping the single first-page run from
+     * `weights_pool_phys` (the Stage 3 behaviour).
+     *
+     * Note: this field only applies when `weights_pool_size_bytes`
+     * is non-zero. A helper that didn't allocate a weights pool
+     * leaves both at zero. */
+    uint64_t weights_extents_phys;
+    uint32_t weights_n_extents;
+    uint32_t _pad_v9;
 };
+
+/* One entry in the v9 weights-pool extents array. Represents a
+ * contiguous run of physical pages within the IOVMM-stitched
+ * weights pool. Walking the entries in order from GPU-VA
+ * `weights_pool_gpu_va`, each extent covers `n_pages * 4 KB` of
+ * virtual address space starting at the cursor (which advances
+ * by `n_pages * 4 KB` after each extent).
+ *
+ * Wire-format-locked to 16 bytes — pinned by static_assert
+ * below. */
+struct ga10b_phys_extent {
+    uint64_t phys;        /* run's base physical address (4 KB aligned) */
+    uint32_t n_pages;     /* number of consecutive 4 KB pages */
+    uint32_t reserved;    /* zero; reserved for future flags */
+};
+
+/* Cap on extents the helper publishes. With 1.5 GB at 4 KB pages
+ * = 393,216 pages, the worst case is one extent per page (most
+ * scattered allocation) → too many to inline. In practice nvmap's
+ * IOVMM allocator returns sequences of contiguous runs (often
+ * dozens to low thousands of extents for a 1.5 GB CMA-backed
+ * region on Tegra), so 8192 caps the dmabuf at 128 KB (8192 × 16
+ * bytes) — generous for empirically-observed L4T behaviour, leaves
+ * headroom for fragmentation as the system ages. If a future
+ * helper logs `extents truncated`, bump this cap on both sides
+ * in lock-step and re-publish the handoff. */
+#define GA10B_WEIGHTS_EXTENTS_MAX 8192u
 
 /* Pipeline-kind discriminator values stored in
  * `struct ga10b_channel_handoff::pipeline_kind`. Numbered to keep
@@ -364,12 +437,17 @@ struct ga10b_pipeline_op_v7 {
  * (qmd_pool_phys + qmd_pool_gpu_va + qmd_pool_size_bytes +
  * qmd_pool_n_slots) → 232 + 24 = 256. v8 grows it by another 24
  * (weights_pool_phys + weights_pool_gpu_va +
- * weights_pool_size_bytes) → 256 + 24 = 280. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 280,
+ * weights_pool_size_bytes) → 256 + 24 = 280. v9 grows it by 16
+ * (weights_extents_phys + weights_n_extents + _pad_v9) → 280 + 16
+ * = 296. */
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 296,
                "ga10b_channel_handoff layout changed — update Linux "
                "helper (scripts/gpu-channel-helper.c, "
                "scripts/gpu-kernel-launch.c, scripts/gpu-launch-common.c) "
                "and bump version");
+_Static_assert(sizeof(struct ga10b_phys_extent) == 16,
+               "ga10b_phys_extent layout changed — Linux helper and "
+               "SLM-OS must agree on the v9 extents-array entry size");
 _Static_assert(sizeof(struct ga10b_pipeline_op) == 24,
                "ga10b_pipeline_op layout changed — Linux + SLM-OS "
                "must agree on the per-op size");
@@ -440,6 +518,15 @@ _Static_assert(offsetof(struct ga10b_channel_handoff, weights_pool_gpu_va) == 26
                "v8 weights_pool_gpu_va offset drifted");
 _Static_assert(offsetof(struct ga10b_channel_handoff, weights_pool_size_bytes) == 272,
                "v8 weights_pool_size_bytes offset drifted");
+
+/* v9 extents descriptor — appended after weights_pool_size_bytes.
+ * `weights_n_extents == 0` lets a v9-aware reader detect a v8-
+ * built handoff (where these bytes are zero) and fall back to
+ * mapping just `weights_pool_phys` as a single 4 KB run. */
+_Static_assert(offsetof(struct ga10b_channel_handoff, weights_extents_phys) == 280,
+               "v9 weights_extents_phys offset drifted");
+_Static_assert(offsetof(struct ga10b_channel_handoff, weights_n_extents) == 288,
+               "v9 weights_n_extents offset drifted");
 
 _Static_assert(offsetof(struct ga10b_pipeline_op, qmd_gpu_va) == 0,
                "pipeline_op.qmd_gpu_va must be at offset 0");

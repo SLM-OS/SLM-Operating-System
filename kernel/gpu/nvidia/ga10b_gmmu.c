@@ -1298,12 +1298,17 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
           (uint64_t)h->cbuf_size },
         { "qmd_pool", h->qmd_pool_phys, h->qmd_pool_gpu_va,
           (uint64_t)h->qmd_pool_size_bytes },
-        /* Weights pool: only the first physical page's phys is
-         * known. The 1.5 GB region is SMMU-stitched from
-         * scattered pages so a single (phys, size) reserve
-         * doesn't cover the rest. Map the first page so the
-         * caller can at least chunk-0-test W3 staging; further
-         * pages will MMU-fault and the wedge handler will dump. */
+        /* Weights pool: when the helper publishes a v9 extents
+         * list, we walk it below (after this fixed-list loop)
+         * and map every extent. The single-page first-run entry
+         * stays here as a fallback for v8 helpers — SLM-OS sees
+         * `weights_n_extents == 0` and maps only this 4 KB run,
+         * mirroring the Stage 3 behaviour. v9 helpers leave
+         * `weights_pool_phys` populated (matches the first
+         * extent's phys) so the entry is harmlessly redundant
+         * with extent[0] — the GMMU's PTE write is idempotent
+         * since both writes encode the same `phys → gpu_va`
+         * mapping for the first page. */
         { "weights_first", h->weights_pool_phys, h->weights_pool_gpu_va,
           (h->weights_pool_size_bytes != 0) ? 4096ull : 0ull },
     };
@@ -1330,6 +1335,70 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
                     b->tag, (unsigned long)b->gpu_va,
                     (unsigned long)b->phys, (unsigned)n_pages);
         mapped++;
+    }
+
+    /* v9 weights-pool extents — the helper walks
+     * /proc/self/pagemap over the 1.5 GB IOVMM-stitched pool
+     * pre-kexec and publishes a list of (phys, n_pages) extents
+     * in a separate dmabuf. Walk them and install PTEs covering
+     * the entire pool. Without this, only the first 4 KB above
+     * is mapped and CE memcpy writes past that fault.
+     *
+     * The cursor advances by `n_pages * 4 KB` per extent because
+     * the pool is IO-virtually contiguous at `weights_pool_gpu_va`
+     * — the SMMU stitches scattered phys into one IOVA range —
+     * but the underlying physical pages aren't contiguous. Each
+     * extent maps a contiguous physical run to its corresponding
+     * stretch of GPU VA. */
+    if (h->version >= 9u && h->weights_n_extents > 0u &&
+        h->weights_extents_phys != 0u &&
+        h->weights_pool_gpu_va != 0u) {
+        if (!phys_in_dram(h->weights_extents_phys,
+                          (size_t)h->weights_n_extents *
+                          sizeof(struct ga10b_phys_extent))) {
+            uart_printf("[rebuild-gmmu] weights_extents_phys=0x%lx "
+                        "(n=%u) outside DRAM — skipping extent map\n",
+                        (unsigned long)h->weights_extents_phys,
+                        (unsigned)h->weights_n_extents);
+        } else {
+            const struct ga10b_phys_extent *exts =
+                (const struct ga10b_phys_extent *)
+                (uintptr_t)h->weights_extents_phys;
+            uint64_t cursor_va = h->weights_pool_gpu_va;
+            uint32_t total_pages_mapped = 0;
+            uint32_t failed_at = 0;
+            bool extent_fail = false;
+            for (uint32_t i = 0; i < h->weights_n_extents; i++) {
+                if (exts[i].n_pages == 0u) {
+                    continue;
+                }
+                if (rebuild_map_range(pdb_phys, cursor_va,
+                                       exts[i].phys,
+                                       exts[i].n_pages) < 0) {
+                    failed_at = i;
+                    extent_fail = true;
+                    break;
+                }
+                cursor_va += (uint64_t)exts[i].n_pages * 4096ull;
+                total_pages_mapped += exts[i].n_pages;
+            }
+            if (extent_fail) {
+                uart_printf("[rebuild-gmmu] weights extents FAIL at "
+                            "index %u of %u (mapped %u pages before "
+                            "failure)\n",
+                            (unsigned)failed_at,
+                            (unsigned)h->weights_n_extents,
+                            (unsigned)total_pages_mapped);
+                return -1;
+            }
+            uart_printf("[rebuild-gmmu]  ok   weights_extents  "
+                        "n=%u total_pages=%u (~%u MB) end_va=0x%lx\n",
+                        (unsigned)h->weights_n_extents,
+                        (unsigned)total_pages_mapped,
+                        (unsigned)(total_pages_mapped / 256u),
+                        (unsigned long)cursor_va);
+            mapped++;
+        }
     }
 
     /* Amortized dsb sy so all PTE writes are visible to the GPU
