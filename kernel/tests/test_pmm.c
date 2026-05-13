@@ -1118,13 +1118,13 @@ static void test_user_reserve_table_full_rejects(void)
 {
     pmm_user_reserve_reset();
 
-    /* Fill the table — capacity = PMM_MAX_USER_RESERVES (16, file-
-     * static in pmm.c). Use an inflated upper bound (32) to avoid
-     * the test breaking when the capacity is bumped; the loop just
-     * notices when adds start failing and asserts the count tops
-     * out at the natural cap. */
+    /* Fill the table — capacity = PMM_MAX_USER_RESERVES (file-static
+     * in pmm.c). The current value is 8192 (#788 Stage 4 bumped from
+     * 16 to fit the weights-pool extents list); the upper-bound here
+     * is 10000 so the loop has headroom over the cap and the
+     * test still works if the cap is bumped further. */
     int last_ok_count = 0;
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 10000; i++) {
         int rc = pmm_user_reserve_add(
             (uint64_t)(0x100000 + (uint64_t)i * 0x1000), 0x1000);
         if (rc == 0) {

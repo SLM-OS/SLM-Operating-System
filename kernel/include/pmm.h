@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "dtb.h"  /* dtb_memreserve_t for pmm_user_reserve_add_array */
 
 /* Page sizes */
 #define PAGE_SIZE           4096            /* 4 KB standard page */
@@ -101,6 +102,27 @@ void pmm_init(void);
  * in single-CPU context before scheduler bring-up, so callers don't
  * need to synchronize. */
 int pmm_user_reserve_add(uint64_t phys, uint64_t size);
+
+/*
+ * Bulk wrapper around `pmm_user_reserve_add` for callers that have
+ * a contiguous array of (phys, size) pairs to register — the
+ * canonical case being #788 Stage 4's weights-pool extent list,
+ * where the helper publishes potentially thousands of extents
+ * describing the physically-scattered IOVMM allocation. Calling
+ * `pmm_user_reserve_add` per-entry would still work but spreads
+ * the loop into the caller; this helper keeps the loop centralized
+ * with the rest of the user-reserve API.
+ *
+ * `extents[i].addr` and `extents[i].size` are passed through to
+ * `pmm_user_reserve_add` unchanged. Returns the number of
+ * successfully-added entries; stops early on the first failure
+ * (table full or zero-size entry), which lets the caller see
+ * how many made it before truncation.
+ *
+ * Same pre-`pmm_init` ordering constraint as the single-entry
+ * variant. */
+int pmm_user_reserve_add_array(const dtb_memreserve_t *extents,
+                                size_t n_extents);
 
 /*
  * Test-only accessor: read back the number of user reserves currently

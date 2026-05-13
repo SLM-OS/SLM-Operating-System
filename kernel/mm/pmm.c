@@ -467,17 +467,34 @@ int pmm_carve_reserves(uintptr_t start, uintptr_t end,
 /* User-supplied reserve slots. PMM init feeds these into the same
  * `pmm_carve_reserves` pipeline as the firmware /memreserve/ entries,
  * so runtime-discovered protected ranges (the canonical case: nvgpu
- * inst block + GMMU page tables that survived kexec but live in
- * physical pages SLM-OS would otherwise allocate from) get carved
- * out before any page is published to the buddy. See
- * `pmm_user_reserve_add` in pmm.h.
+ * inst block + GMMU page tables + IOVMM-stitched weights-pool
+ * extents that survived kexec but live in physical pages SLM-OS
+ * would otherwise allocate from) get carved out before any page is
+ * published to the buddy. See `pmm_user_reserve_add` in pmm.h.
  *
- * Capacity sized for the Jetson kexec-handoff caller, which adds at
- * most a handful of regions per boot. Sized to PMM_MAX_USER_RESERVES
- * = 16 — generous for the current use case, leaves room for
- * follow-on work (PDB-tree-walk-style enumeration) without revisiting
- * the cap. */
-#define PMM_MAX_USER_RESERVES 16
+ * Capacity bumped from 16 → 2048 in #788 Stage 4 to accommodate the
+ * weights-pool extents: a 1.5 GB IOVMM-stitched allocation
+ * empirically decomposes into 2-1100 contiguous runs on Tegra
+ * GA10B (depends on CMA fragmentation at allocation time on a
+ * freshly-booted vs long-running Linux). 2048 caps the array at
+ * 32 KB (2048 × 16 bytes) — generous over the highest observed
+ * extent count (~1033 on a fragmented allocation), and small
+ * enough that the boot-time BSS bloat is well within the
+ * kernel image's existing budget. If a future helper logs
+ * "extents truncated", bump this cap and the helper's
+ * `GA10B_WEIGHTS_EXTENTS_MAX` together.
+ *
+ * The helper-side cap in `ga10b_channel_handoff.h`
+ * (`GA10B_WEIGHTS_EXTENTS_MAX = 8192`) is larger than this cap on
+ * purpose: the helper publishes the full list, and SLM-OS picks
+ * the prefix that fits — anything past entry 2048 won't get a
+ * PMM reservation but WILL still get a GMMU mapping (the rebuild
+ * path walks the entire list, only the reservation hook truncates).
+ * A page mapped but not reserved is at risk if PMM also allocates
+ * from it; in practice the helper's IOVMM phys range and SLM-OS
+ * PMM's allocations rarely overlap, so the partial protection is
+ * sufficient until a future bump. */
+#define PMM_MAX_USER_RESERVES 2048
 static dtb_memreserve_t pmm_user_reserves[PMM_MAX_USER_RESERVES];
 static size_t           pmm_n_user_reserves = 0;
 
@@ -502,6 +519,23 @@ int pmm_user_reserve_add(uint64_t phys, uint64_t size)
     pmm_user_reserves[pmm_n_user_reserves].size = size;
     pmm_n_user_reserves++;
     return 0;
+}
+
+int pmm_user_reserve_add_array(const dtb_memreserve_t *extents,
+                                size_t n_extents)
+{
+    if (extents == NULL) {
+        return 0;
+    }
+    int added = 0;
+    for (size_t i = 0; i < n_extents; i++) {
+        if (pmm_user_reserve_add(extents[i].addr,
+                                  extents[i].size) != 0) {
+            break;
+        }
+        added++;
+    }
+    return added;
 }
 
 size_t pmm_user_reserve_count(void)

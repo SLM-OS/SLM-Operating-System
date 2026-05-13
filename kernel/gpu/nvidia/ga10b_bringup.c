@@ -1250,12 +1250,18 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
      *      accept the W1 handoff; oplib_pool consumers still
      *      check `version >= 8u` before reading the trailing
      *      weights_pool_* fields.
-     * Phase 6 inherit accepts all seven; launch_kernel version-gates
+     * v9: + weights-pool per-page extents (weights_extents_phys +
+     *      weights_n_extents). Lets SLM-OS map the full 1.5 GB
+     *      IOVMM-stitched weights pool post-kexec instead of just
+     *      the first 4 KB. Helpers that don't allocate a weights
+     *      pool leave these at zero; SLM-OS rebuild path falls
+     *      back to the Stage 3 single-page mapping. #788 Stage 4.
+     * Phase 6 inherit accepts all eight; launch_kernel version-gates
      * at dispatch time (v3 minimum for single-shot, v5 for pipelines,
      * v7 for the QMD-pool path, v8 for the weights pool). */
     if (h->version != 2 && h->version != 3 &&
         h->version != 4 && h->version != 5 && h->version != 6 &&
-        h->version != 7 && h->version != 8) return -1;
+        h->version != 7 && h->version != 8 && h->version != 9) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
@@ -1443,6 +1449,14 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
     g_handoff.weights_pool_phys       = hoff->weights_pool_phys;
     g_handoff.weights_pool_gpu_va     = hoff->weights_pool_gpu_va;
     g_handoff.weights_pool_size_bytes = hoff->weights_pool_size_bytes;
+
+    /* v9 extension: weights-pool per-page extents. Same
+     * "unconditional read is safe" argument as v7/v8 — the
+     * `_Static_assert` pins the offsets so a v8 helper leaves
+     * these as zero and SLM-OS's rebuild path falls back to the
+     * single-page mapping. #788 Stage 4. */
+    g_handoff.weights_extents_phys = hoff->weights_extents_phys;
+    g_handoff.weights_n_extents    = hoff->weights_n_extents;
 
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
