@@ -217,12 +217,35 @@ int camrtc_capture_csi_stream_set_config(uint32_t stream_id,
     req.body.stream_id  = stream_id;
     req.body.csi_port   = csi_port;
     /* config_flags=0, brick.phy_mode=0 (DPHY), lane_swizzle=0,
-     * lane_polarity[]=0, error_config zeroed — all correct from
-     * the bulk-zero above. */
+     * error_config zeroed — all correct from the bulk-zero above. */
     req.body.cil_config.num_lanes       = num_lanes;
     req.body.cil_config.mipi_clock_rate = mipi_clock_rate;
-    /* lp_bypass_mode=0, t_hs_settle=0/SoC default, t_clk_settle=0,
-     * cil_clock_rate=0 (deprecated upstream) — also from bulk zero. */
+    /* lp_bypass_mode = 1 for D-PHY, per L4T csi5_stream_set_config
+     * (`~/slmos-ref/tegra-l4t/l4t-csi5_fops.c:286`):
+     *     cil_config.lp_bypass_mode = is_cphy ? 0 : 1;
+     * Tells the CIL receiver to expect D-PHY's LP-11 → HS line-state
+     * transitions. With 0 the receiver behaves as if C-PHY and never
+     * locks on a D-PHY signal — the symptom is no SOF. Hardcoded
+     * here because csidiag is D-PHY-only; productize as a parameter
+     * if a C-PHY path ever lands. */
+    req.body.cil_config.lp_bypass_mode  = 1u;
+    /* Lane polarity per IMX219-A binning-mode DT
+     * (`tegra234-p3767-camera-p3768-imx219-A.dtbo:mode3:lane_polarity = "6"`).
+     * The DT value packs per-lane polarity bits LSB-first; L4T expands
+     * `(lane_polarity >> i) & 1` into `brick_config.lane_polarity[i]`
+     * (`~/slmos-ref/tegra-l4t/l4t-csi5_fops.c:279-281`).
+     * 6 = 0b0110 → lane[0]=0, lane[1]=1, lane[2]=1, lane[3]=0.
+     * Wrong polarity on a connected lane decodes the differential
+     * signal inverted, no valid packets reach NVCSI. */
+    req.body.brick_config.lane_polarity[0] = 0u;
+    req.body.brick_config.lane_polarity[1] = 1u;
+    req.body.brick_config.lane_polarity[2] = 1u;
+    req.body.brick_config.lane_polarity[3] = 0u;
+    /* t_hs_settle=0 / SoC default, t_clk_settle=0, cil_clock_rate=0
+     * (deprecated upstream) — left at zero per bulk-zero above. The
+     * L4T DT specifies cil_settletime=0 for ALL IMX219 modes
+     * (`tegra234-p3767-camera-p3768-imx219-A.dtbo`), so the SoC
+     * default is correct. */
 
     INFO("csi_stream_set_config: send REQ tx=0x%x stream=%u port=%u "
          "lanes=%u mipi_kHz=%u",
@@ -309,8 +332,14 @@ int camrtc_capture_channel_setup(uint32_t stream_id,
     req.hdr.transaction = tx;
 
     struct camrtc_capture_channel_config *cfg = &req.body.channel_config;
+    /* EMBDATA matches L4T's vi5 default_setup
+     * (`~/slmos-ref/tegra-l4t/l4t-vi5_fops.c:46-52`); without it, RCE
+     * configures the VI channel to reject embedded-data lines and
+     * raises CHANSEL_EMBED_INFRINGE on every frame for sensors (like
+     * IMX219) that emit metadata lines by default. */
     cfg->channel_flags  = CAPTURE_CHANNEL_FLAG_VIDEO
                         | CAPTURE_CHANNEL_FLAG_RAW
+                        | CAPTURE_CHANNEL_FLAG_EMBDATA
                         | CAPTURE_CHANNEL_FLAG_CSI;
     /* channel_id stays 0 — RCE assigns it in the response. */
     cfg->vi_unit_id     = VI_UNIT_VI;

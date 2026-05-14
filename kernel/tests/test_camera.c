@@ -1192,8 +1192,14 @@ _Static_assert(CAPTURE_CHANNEL_FLAG_VIDEO == 0x0001u,
     "CAPTURE_CHANNEL_FLAG_VIDEO drift");
 _Static_assert(CAPTURE_CHANNEL_FLAG_RAW == 0x0002u,
     "CAPTURE_CHANNEL_FLAG_RAW drift");
+_Static_assert(CAPTURE_CHANNEL_FLAG_EMBDATA == 0x0040u,
+    "CAPTURE_CHANNEL_FLAG_EMBDATA drift — IMX219 first-light needs this set");
 _Static_assert(CAPTURE_CHANNEL_FLAG_CSI == 0x10000u,
     "CAPTURE_CHANNEL_FLAG_CSI drift");
+_Static_assert(VI_ATOMP_SURFACE_MAIN == 0u,
+    "VI_ATOMP_SURFACE_MAIN drift — pixel plane on surface 0");
+_Static_assert(VI_ATOMP_SURFACE_EMBEDDED == 3u,
+    "VI_ATOMP_SURFACE_EMBEDDED drift — sensor metadata on surface 3");
 
 /* CAPTURE_REQUEST_REQ + CAPTURE_STATUS_IND wire-format pins
  * (PR4 of HW Task 4). Both message bodies are 8 B (just buffer_index
