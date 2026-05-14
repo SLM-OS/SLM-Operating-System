@@ -70,6 +70,41 @@ A capture session may end with a trailer line for bookkeeping. Tools must tolera
 {"type":"trailer","ended_at":"2026-05-12T19:45:00Z","last_seq":1247,"reason":"hailort_configure_complete"}
 ```
 
+### Region rule (Phase 4 compression)
+
+A region rule short-circuits per-`seq` capture for a contiguous BAR range whose bytes come from a known external artifact (typically a firmware blob shipped with HailoRT). Region rules let the corpus represent ~160 KB of firmware upload as a single ~200-byte JSONL line instead of ~40 000 per-seq op entries.
+
+```json
+{"type":"region","bar":4,"start":0,"end":164536,
+ "source_kind":"file","source_path":"/lib/firmware/hailo/hailo8_fw.bin","source_offset":24,
+ "validated_at_commit":"<sha>","validated_at":"<iso>","note":"..."}
+```
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `type` | string | yes | Always `"region"` |
+| `bar` | integer | yes | Which BAR — 0, 2, or 4 |
+| `start` | integer | yes | First covered BAR offset, inclusive (decimal) |
+| `end` | integer | yes | Last covered BAR offset + 1, **exclusive** (decimal) — half-open `[start, end)` |
+| `source_kind` | string | yes | Currently `"file"`. Reserve other values (`"inline"`, `"const"`) for future additive extensions |
+| `source_path` | string | yes (for `source_kind="file"`) | Absolute path to the artifact file. Resolved at QEMU stub startup |
+| `source_offset` | integer | yes (for `source_kind="file"`) | Byte offset within the file corresponding to BAR `start` |
+| `validated_at_commit` | string\|null | yes | Audit field, same semantics as op entries — full 40-char SHA when validated, `null` until a verification pass confirms HailoRT writes match the region |
+| `validated_at` | string\|null | yes | ISO 8601 timestamp, same semantics |
+| `note` | string | no | Free-form annotation (e.g. "Hailo-8 firmware code section, identified via signature match on first 32 bytes") |
+
+(Fields use flat names — `source_kind` etc. — rather than a nested `source` object so the existing hand-rolled JSON parser in the QEMU stub doesn't need to grow nested-object support. Functionally equivalent to a nested representation.)
+
+**Precedence:** A region rule covering a `(bar, offset, size)` access **takes precedence over any per-`seq` op entry** at that location. The QEMU stub consults regions FIRST; only if no region covers the access does it fall back to the per-seq lookup. This matters because the legacy per-seq entries captured during single-step grinding for the same range are equivalent (they were derived from the same artifact) — the region rule is the authoritative summary.
+
+**Read semantics under a region rule:** the stub serves the read from `source_path` at byte `source_offset + (access_offset - start)`. The corresponding seq counter still increments — region serving is transparent to seq sequencing.
+
+**Write semantics under a region rule:** the stub computes the expected bytes from the file and compares against the incoming write data. On match: silent success, no corpus append. On mismatch: emit `HAILO_RE_CORPUS_DIVERGENCE` with `reason=region_write_mismatch`, halt. This catches the case where HailoRT writes something not present in the artifact, indicating either an incorrect region rule or HailoRT applying a runtime transformation before upload.
+
+**Multiple regions:** A corpus may contain multiple region rules for different BAR ranges. Overlapping regions within the same BAR are a configuration error and tools SHOULD reject the corpus on load.
+
+**Backward compatibility:** Region entries are an additive extension. Tools that don't recognize `type="region"` MUST silently skip those lines. `format_version` remains at `1`. Tools that DO consume region rules MUST also implement the precedence rule above.
+
 ## Sequence semantics
 
 `seq` is strictly monotonic across the entire session, starting at 1. Every BAR R or W from HailoRT increments it by 1. This is what defeats the cross-step contamination problem identified in #795: the same offset read at two different points in the session can return two different values (typical for polling loops, status bits, completion flags), and keying by `(seq, offset)` makes each occurrence independent.

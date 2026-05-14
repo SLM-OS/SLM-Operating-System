@@ -268,6 +268,11 @@ class Corpus:
     header: Header
     ops: list[OpEntry] = field(default_factory=list)
     trailer: Optional[Trailer] = None
+    # Phase 4 region rules — kept as raw dicts; the driver does not author
+    # these (the standalone region-authoring tool does), so a structured
+    # dataclass would be dead weight here. Stored so callers that DO care
+    # (e.g. inspection tools) can introspect without re-parsing the file.
+    regions: list[dict] = field(default_factory=list)
 
     @property
     def next_seq(self) -> int:
@@ -302,6 +307,7 @@ def load(path: os.PathLike | str) -> Corpus:
         raise CorpusError(f"{p}: header is not valid JSON: {e}") from e
     header = _validate_header(header_obj)
     ops: list[OpEntry] = []
+    regions: list[dict] = []
     trailer: Optional[Trailer] = None
     prev_seq = 0
     for i, raw in enumerate(lines[1:], start=2):
@@ -319,6 +325,13 @@ def load(path: os.PathLike | str) -> Corpus:
                 )
             ops.append(op)
             prev_seq = op.seq
+        elif kind == "region":
+            # Tolerance per docs/hailo-re-corpus-format.md §"Backward
+            # compatibility": tools that don't author regions still load
+            # corpora that contain them. Stored as a raw dict for
+            # introspection; the QEMU stub is the source of truth for
+            # region semantics.
+            regions.append(obj)
         elif kind == "trailer":
             if trailer is not None:
                 raise CorpusError(f"{p}:{i}: more than one trailer")
@@ -329,7 +342,7 @@ def load(path: os.PathLike | str) -> Corpus:
             raise CorpusError(
                 f"{p}:{i}: trailer must be the final non-empty line"
             )
-    return Corpus(path=p, header=header, ops=ops, trailer=trailer)
+    return Corpus(path=p, header=header, ops=ops, trailer=trailer, regions=regions)
 
 
 def init(path: os.PathLike | str, header: Header) -> Corpus:
