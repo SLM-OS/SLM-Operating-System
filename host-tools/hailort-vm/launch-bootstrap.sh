@@ -103,9 +103,19 @@ fi
 
 # ---------------------------------------------------------------------------
 # Working directory — fresh disk overlay per run.
+#
+# The default location (alongside the base VM image under ${VM_IMG_DIR}) is
+# convenient but breaks on filesystems where local file visibility races the
+# qemu-img/QEMU process (observed: Dropbox FUSE under `~/slmos-ref/` —
+# qemu-img creates the overlay, then QEMU fails to open it on the next system
+# call with `Could not open ...: Permission denied`, intermittent under
+# sustained load). HAILO_RE_VM_RUNS_DIR lets the operator route the per-run
+# overlay onto a normal POSIX filesystem (e.g. `/tmp`) without moving the base
+# VM image. Mirrors HAILO_RE_PENDING_DIR for the corpus pending file.
 # ---------------------------------------------------------------------------
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-${VARIANT}"
-RUN_DIR="${VM_IMG_DIR}/.runs/${RUN_ID}"
+RUNS_DIR_BASE="${HAILO_RE_VM_RUNS_DIR:-${VM_IMG_DIR}/.runs}"
+RUN_DIR="${RUNS_DIR_BASE}/${RUN_ID}"
 mkdir -p "${RUN_DIR}"
 
 DISK_CLONE="${RUN_DIR}/disk.qcow2"

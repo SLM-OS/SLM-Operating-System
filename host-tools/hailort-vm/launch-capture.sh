@@ -64,9 +64,16 @@ fi
 
 # ---------------------------------------------------------------------------
 # Working directory per run — fresh disk clone, fresh trace log.
+#
+# HAILO_RE_VM_RUNS_DIR routes the per-run overlay onto a normal POSIX
+# filesystem (e.g. `/tmp`) for environments where the default location
+# (alongside the base VM image) is on a FUSE filesystem that races
+# qemu-img / QEMU open() calls — observed under Dropbox sync. Mirrors the
+# matching env var in launch-bootstrap.sh.
 # ---------------------------------------------------------------------------
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-${VARIANT}"
-RUN_DIR="${VM_IMG_DIR}/.runs/${RUN_ID}"
+RUNS_DIR_BASE="${HAILO_RE_VM_RUNS_DIR:-${VM_IMG_DIR}/.runs}"
+RUN_DIR="${RUNS_DIR_BASE}/${RUN_ID}"
 mkdir -p "${RUN_DIR}"
 
 DISK_CLONE="${RUN_DIR}/disk.qcow2"
