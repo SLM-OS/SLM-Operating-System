@@ -417,7 +417,9 @@ static void reserve_per_op_shaders(const volatile struct ga10b_channel_handoff *
                     (unsigned)GA10B_PIPELINE_V7_MAX_OPS);
         return;
     }
-    if (!ga10b_phys_in_dram(ops_phys, (size_t)n_ops * 80u)) {
+    if (!ga10b_phys_in_dram(ops_phys,
+                            (size_t)n_ops *
+                            sizeof(struct ga10b_pipeline_op_v7))) {
         uart_printf("[ga10b-reserve]   pipeline_ops_phys=0x%lx "
                     "(n=%u) outside DRAM — skipping per-op "
                     "shader reservation\n",
@@ -430,7 +432,8 @@ static void reserve_per_op_shaders(const volatile struct ga10b_channel_handoff *
      * Without this, SLM-OS PMM could clobber the ops array between
      * boot and the launch-kernel command reading it. */
     uint64_t ops_page_base = ops_phys & ~4095ull;
-    uint64_t ops_bytes     = (uint64_t)n_ops * 80ull;
+    uint64_t ops_bytes     = (uint64_t)n_ops *
+                             sizeof(struct ga10b_pipeline_op_v7);
     uint64_t ops_page_end  =
         (ops_phys + ops_bytes + 4095ull) & ~4095ull;
     if (pmm_user_reserve_add(ops_page_base,

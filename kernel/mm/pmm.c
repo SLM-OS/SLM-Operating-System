@@ -535,9 +535,9 @@ int pmm_user_reserve_add_array(const dtb_memreserve_t *extents,
              * `added < n_extents` and the wedge that fires later
              * on the unprotected tail is otherwise hard to
              * attribute back to "PMM reserve table was full". */
-            uart_printf("[pmm] WARN: user-reserve table full at "
-                        "entry %zu/%zu (cap=%u). Pages from extent "
-                        "%zu onward are NOT protected — expect "
+            uart_printf("Warning: user-reserve table full at entry "
+                        "%zu/%zu (cap=%u). Pages from extent %zu "
+                        "onward are NOT protected — expect "
                         "downstream clobber.\n",
                         i, n_extents,
                         (unsigned)PMM_MAX_USER_RESERVES, i);
