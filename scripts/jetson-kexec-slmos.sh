@@ -1073,5 +1073,72 @@ else
     kexec -l "$KERNEL" --command-line="$KEXEC_CMDLINE"
 fi
 
+# Pre-fire safety check + force-on (#788 stress test Mode A fix).
+#
+# Stress testing across 10 boot cycles revealed a 30% rate of GPU
+# power-gated post-kexec (all GR MMIO reads as `0xbadf1002` PRI
+# poison; SLM-OS's NV_PMC_BOOT_0 returns 0xFFFFFFFF). Root cause:
+# in --no-gpu-suspend mode we rely on the channel-helper's open
+# nvgpu fd to keep the GPU active, but Linux can still autosuspend
+# the GPU between the helper's "kexec now" message (step 4) and
+# the actual `kexec -e` fire (step 9). Steps 5-7 take several
+# seconds (USB hold + SMMU load + handoff stashing) which is enough
+# window for an aggressive PM policy to gate the GPU.
+#
+# Fix: force-on the GPU clocks + powergate at the LAST possible
+# moment before exec'ing kexec, regardless of suspend mode. Same
+# BPMP debugfs writes the suspend-mode path does in step 3 — these
+# are channel-preserving writes that go through the kernel BPMP
+# driver (BPMP firmware accepts them; SLM-OS's own BPMP MRQs are
+# rejected per #190 so this is our only window).
+#
+# Also: verify the helper is still alive. If it died (timed out,
+# crashed, killed), no channel will be live and inheritance fails
+# regardless of GPU power state.
+if [[ -d "$GPU_POWER" && -d "$BPMP" ]]; then
+    echo "[8.5/9] Pre-kexec GPU force-on + sanity check..."
+
+    # Helper liveness check (only relevant in --no-gpu-suspend mode).
+    if [[ "$NO_GPU_SUSPEND" == "1" && "$NO_HELPER" != "1" ]]; then
+        helper_dir="${SLMOS_HELPER_DIR:-/root/gpu-mnist}"
+        helper_path_re="$(printf '%s' "$helper_dir/gpu-kernel-mnist" | \
+                          sed 's/[][\\.*^$()+?{}|]/\\&/g')"
+        if pgrep -fx "$helper_path_re --preserve-for-kexec.*" >/dev/null 2>&1; then
+            echo "       gpu-kernel-mnist still alive ($(pgrep -fx \"$helper_path_re --preserve-for-kexec.*\" | head -1))"
+        else
+            echo "Warning: gpu-kernel-mnist NOT running at kexec time — channel inherit will fail" >&2
+            echo "         (tail of helper log:)" >&2
+            tail -10 /tmp/gpu-kernel-mnist.log 2>/dev/null >&2 || true
+        fi
+    fi
+
+    # Unconditional GPU force-on. Mirror step 3's suspend-mode
+    # sequence — channel-preserving on warm GPU, no-op-ish if
+    # GPU is already up.
+    echo 1 > "$BPMP/powergate/gpu/state" 2>/dev/null || \
+        echo "       powergate write failed (state may already be 1)" >&2
+    for clk in gpu_pwr gpusysclk gpunvdclk nafll_gpusys; do
+        if [[ -w "$BPMP/clk/$clk/state" ]]; then
+            echo 1 > "$BPMP/clk/$clk/state" 2>/dev/null || true
+        fi
+    done
+
+    # Verify by reading NV_PMC_BOOT_0 via /dev/mem. This is the
+    # same register SLM-OS reads to identify the GPU; if Linux
+    # reads 0xB7B000A1 here and SLM-OS reads 0xFFFFFFFF post-
+    # kexec, we know the gating happened during kexec's
+    # device-shutdown sweep (different fix needed). If Linux
+    # reads 0xFFFFFFFF here too, the GPU is already gated and
+    # this iteration is hopeless.
+    pmc_boot0="$(busybox devmem 0x17000000 2>/dev/null || echo 'devmem-failed')"
+    pg_now="$(cat "$BPMP/powergate/gpu/state" 2>/dev/null || echo '?')"
+    gpusys_now="$(cat "$BPMP/clk/gpusysclk/state" 2>/dev/null || echo '?')"
+    echo "       NV_PMC_BOOT_0=$pmc_boot0 powergate=$pg_now gpusysclk=$gpusys_now"
+    if [[ "$pmc_boot0" == "0xFFFFFFFF" || "$pmc_boot0" == "devmem-failed" ]]; then
+        echo "Warning: GPU appears power-gated at kexec time (NV_PMC_BOOT_0=$pmc_boot0)" >&2
+        echo "         SLM-OS GPU init will fail with PRI-bad poison reads" >&2
+    fi
+fi
+
 echo "[9/9] Executing kexec (serial console will take over)"
 exec kexec -e
