@@ -39,6 +39,8 @@ extern const unsigned char demo_admin_lua_start[];
 extern const unsigned char demo_admin_lua_end[];
 extern const unsigned char demo_imx219_mnist_lua_start[];
 extern const unsigned char demo_imx219_mnist_lua_end[];
+extern const unsigned char demo_camera_heatmap_lua_start[];
+extern const unsigned char demo_camera_heatmap_lua_end[];
 
 int demo_init(void)
 {
@@ -120,6 +122,18 @@ int demo_init(void)
                             (size_t)(demo_imx219_mnist_lua_end -
                                      demo_imx219_mnist_lua_start));
         littlefs_file_close(mnt, fim);
+    }
+
+    /* IMX219 debug aid: ASCII heatmap of the post-preprocess
+     * 28x28 tensor. Useful when the MNIST demo collapses to a
+     * single class regardless of scene. */
+    int fch = littlefs_file_open(mnt, "/camera_heatmap.lua",
+                                 LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (fch >= 0) {
+        littlefs_file_write(mnt, fch, demo_camera_heatmap_lua_start,
+                            (size_t)(demo_camera_heatmap_lua_end -
+                                     demo_camera_heatmap_lua_start));
+        littlefs_file_close(mnt, fch);
     }
 
     /* #64: boot-time model preload config. One model name per line.
