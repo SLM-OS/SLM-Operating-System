@@ -9649,10 +9649,30 @@ int cmd_csidiag(int argc, char *argv[])
         return 0;
     }
 
+    /*
+     * Port + stream selection — IMX219-A on Orin Nano carrier (J20)
+     * is wired to NVCSI **port B** (= 1), not port A (= 0). NVIDIA's
+     * L4T R36.4.4 DTBO is the source of truth:
+     *   /home/john/slmos-ref/nvidia/Linux_for_Tegra-R36.4.4/Linux_for_Tegra/
+     *     kernel/dtb/tegra234-p3767-camera-p3768-imx219-A.dtbo
+     * specifies `port-index = <1>` for cam0/A on every endpoint
+     * (sensor → vi-port → nvcsi-port). Confirmed by reading the same
+     * value out of the dual overlay (cam0=1, cam1=2 — port 0 is unused
+     * on this carrier).
+     *
+     * For NVCSI ports A..D, csi5_port_to_stream(csi_port) returns the
+     * port id unchanged (`~/slmos-ref/tegra-l4t/l4t-csi5_fops.c:32-36`),
+     * so stream_id == csi_port == 1 here.
+     *
+     * NVCSI_PHY_TYPE_DPHY = 0 (`~/slmos-ref/tegra-l4t/l4t-camrtc-capture.h:1443`).
+     */
+    const uint32_t kCsiPort  = 1u;          /* NVCSI_PORT_B */
+    const uint32_t kStreamId = 1u;          /* csi5_port_to_stream(B) */
+    const uint32_t kPhyDphy  = 0u;          /* NVCSI_PHY_TYPE_DPHY */
+
     uint32_t result = 0xDEADBEEFu;
-    /* NVCSI_STREAM_0 = 0, NVCSI_PORT_A = 0, NVCSI_PHY_TYPE_DPHY = 0
-     * (`~/slmos-ref/tegra-l4t/l4t-camrtc-capture.h:1372/1387/1443`). */
-    rc = camrtc_capture_phy_stream_open(0u, 0u, 0u, &result);
+    rc = camrtc_capture_phy_stream_open(kStreamId, kCsiPort, kPhyDphy,
+                                        &result);
     uart_printf("  PHY_STREAM_OPEN: rc=%d result=0x%x\r\n",
                 rc, (unsigned)result);
     if (rc != 0 || result != 0u) {
@@ -9673,7 +9693,8 @@ int cmd_csidiag(int argc, char *argv[])
      * default link freq from `~/slmos-ref/linux/linux-imx219.c:139`).
      * SoC-default t_hs_settle / t_clk_settle (0). */
     uint32_t cfg_result = 0xDEADBEEFu;
-    rc = camrtc_capture_csi_stream_set_config(0u, 0u, 2u, 456000u,
+    rc = camrtc_capture_csi_stream_set_config(kStreamId, kCsiPort,
+                                              2u, 456000u,
                                               &cfg_result);
     uart_printf("  CSI_SET_CONFIG:  rc=%d result=0x%x\r\n",
                 rc, (unsigned)cfg_result);
@@ -9696,7 +9717,7 @@ int cmd_csidiag(int argc, char *argv[])
     uint32_t ch_result = 0xDEADBEEFu;
     uint32_t ch_id     = 0xDEADBEEFu;
     uint64_t vi_mask   = 0xDEADBEEFDEADBEEFull;
-    rc = camrtc_capture_channel_setup(0u, 0u,
+    rc = camrtc_capture_channel_setup(kStreamId, kCsiPort,
                                       camrtc_vi_req_ring_iova(),
                                       camrtc_vi_req_meminfo_iova(),
                                       camrtc_vi_req_queue_depth(),
@@ -9810,16 +9831,37 @@ int cmd_csidiag(int argc, char *argv[])
      * doesn't set them. */
     vi->match.datatype       = 43u;             /* NVCSI_DATATYPE_RAW10 */
     vi->match.datatype_mask  = 0x3fu;
-    vi->match.stream         = (uint8_t)(1u << 0); /* one-hot: NVCSI_STREAM_0 */
+    vi->match.stream         = (uint8_t)(1u << kStreamId); /* one-hot for the open stream */
     vi->match.stream_mask    = 0x3fu;
     vi->match.vc             = (uint16_t)(1u << 0);/* one-hot: NVCSI_VIRTUAL_CHANNEL_0 */
     vi->match.vc_mask        = 0xFFFFu;
 
-    /* Frame geometry — IMX219 binning mode 1640×1232. embed_*
-     * = 0 disables embedded-data lines (we don't need sensor
-     * metadata). skip + crop = 0 means "emit the full frame". */
-    vi->frame.frame_x = (uint16_t)camrtc_frame_buffer_width();
-    vi->frame.frame_y = (uint16_t)camrtc_frame_buffer_height();
+    /* Frame geometry — IMX219 binning mode 1640×1232. The sensor
+     * emits 2 lines of embedded metadata per frame by default
+     * (`tegra234-p3767-camera-p3768-imx219-A.dtbo:embedded_metadata_height
+     * = "2"` for every mode). VI must be told to expect them or it
+     * raises CHANSEL_EMBED_INFRINGE — what blocked #518 on the prior
+     * iteration once port=B was correct.
+     *
+     * Per L4T `vi5_fops.c:420-431`, all three of these need to land:
+     *   - frame.embed_x = embedded_data_width × BPP_MEM
+     *   - frame.embed_y = embedded_metadata_height
+     *   - embdata_enable = 1
+     *
+     * For IMX219 the embedded line width equals the active line width
+     * in pixels and goes through the same T_R16 (BPP_MEM=2) expansion
+     * as RAW10 pixels, so the byte count happens to match the main
+     * pixel-row stride — but treat it as its own quantity here so a
+     * future change to either the main pixel format or the embedded
+     * line width can't silently desync the routing. */
+    const uint32_t kEmbedLineBytes = (uint32_t)camrtc_frame_buffer_width()
+                                   * 2u; /* BPP_MEM = T_R16 = 2 B */
+    const uint32_t kEmbedLines     = 2u;
+    vi->frame.frame_x  = (uint16_t)camrtc_frame_buffer_width();
+    vi->frame.frame_y  = (uint16_t)camrtc_frame_buffer_height();
+    vi->frame.embed_x  = kEmbedLineBytes;
+    vi->frame.embed_y  = kEmbedLines;
+    vi->embdata_enable = 1u;
 
     /* Pixel formatter — T_R16 (= 196 in L4T `vi5_formats.h:74`)
      * is the standard memory format for any RAW8/10/12 sensor on
@@ -9831,22 +9873,38 @@ int cmd_csidiag(int argc, char *argv[])
     vi->pixfmt.format          = 196u;       /* TEGRA_IMAGE_FORMAT_T_R16 */
     vi->pixfmt.pad0_en         = 0u;
 
-    /* Atomic packer stride — bytes between rows (= width × 2 for
-     * T_R16). The surface IOVA goes in the *memoryinfo* ring,
-     * NOT here in vi_channel_config — see below. */
+    /* Atomic packer stride — bytes between rows. Main surface uses
+     * the frame-buffer stride (width × 2 for T_R16). Embedded
+     * surface stride matches its own per-line byte count. Per L4T
+     * `vi5_fops.c:430-431`. Surface IOVAs go in the *memoryinfo*
+     * ring below, not here. */
     uintptr_t fb_iova               = camrtc_frame_buffer_iova();
-    vi->atomp.surface_stride[0]     = camrtc_frame_buffer_stride();
+    vi->atomp.surface_stride[VI_ATOMP_SURFACE_MAIN]     =
+        camrtc_frame_buffer_stride();
+    vi->atomp.surface_stride[VI_ATOMP_SURFACE_EMBEDDED] = kEmbedLineBytes;
 
     /* memoryinfo ring slot 0 — RCE reads the per-surface IOVA +
      * size from here in lock-step with the request_ring slot.
      * Per L4T `vi5_fops.c:416-417`. The ring was zeroed inside
-     * camrtc_ch_setup_capture_control. */
+     * camrtc_ch_setup_capture_control.
+     *
+     * Embedded surface is parked at the tail of the same 4 MB
+     * frame-buffer carveout — the active frame is 1640×1232 ×
+     * 2 B = 4,040,960 B (~3.85 MB), leaving ~150 KB of slack
+     * before the carveout end at +4 MB. 2 lines × 3280 B = 6560 B
+     * fits comfortably. */
+    uint64_t main_size = (uint64_t)camrtc_frame_buffer_stride()
+                       * camrtc_frame_buffer_height();
+    uint64_t embed_size = (uint64_t)kEmbedLineBytes * kEmbedLines;
     volatile struct camrtc_capture_descriptor_memoryinfo *meminfo =
         (volatile struct camrtc_capture_descriptor_memoryinfo *)
         camrtc_vi_req_meminfo_iova();
-    meminfo->surface[0].base_address = (uint64_t)fb_iova;
-    meminfo->surface[0].size         = (uint64_t)camrtc_frame_buffer_stride()
-                                     * camrtc_frame_buffer_height();
+    meminfo->surface[VI_ATOMP_SURFACE_MAIN].base_address     =
+        (uint64_t)fb_iova;
+    meminfo->surface[VI_ATOMP_SURFACE_MAIN].size             = main_size;
+    meminfo->surface[VI_ATOMP_SURFACE_EMBEDDED].base_address =
+        (uint64_t)fb_iova + main_size;
+    meminfo->surface[VI_ATOMP_SURFACE_EMBEDDED].size         = embed_size;
 
     __asm__ volatile("dsb sy" ::: "memory");
 

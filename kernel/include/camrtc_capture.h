@@ -185,6 +185,7 @@ struct camrtc_syncpoint_info {
  * compatible channel. */
 #define CAPTURE_CHANNEL_FLAG_VIDEO    0x0001u  /* video frames */
 #define CAPTURE_CHANNEL_FLAG_RAW      0x0002u  /* raw Bayer (no ISP) */
+#define CAPTURE_CHANNEL_FLAG_EMBDATA  0x0040u  /* sensor embedded-data lines */
 #define CAPTURE_CHANNEL_FLAG_CSI      0x10000u /* CSI source (vs SLVS-EC) */
 
 /* VI unit selector (`l4t-camrtc-capture.h:355`). Orin Nano has VI0
@@ -272,6 +273,12 @@ struct camrtc_capture_descriptor_header {
 /* Number of atom-packer surface slots in `camrtc_vi_channel_config`
  * — fixed at 4 for T194/T234 per L4T `l4t-camrtc-capture.h:231`. */
 #define VI_NUM_ATOMP_SURFACES   4u
+
+/* atomp surface indices (`~/slmos-ref/tegra-l4t/l4t-camrtc-capture.h:240-258`).
+ * Surfaces 0/1/2 carry the main pixel plane(s); surface 3 carries
+ * sensor embedded-data lines when CAPTURE_CHANNEL_FLAG_EMBDATA is set. */
+#define VI_ATOMP_SURFACE_MAIN     0u
+#define VI_ATOMP_SURFACE_EMBEDDED 3u
 
 /* `struct vi_channel_config` — 160 bytes wire format
  * (`l4t-camrtc-capture.h:538`). Per-frame VI-unit register
