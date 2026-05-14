@@ -443,74 +443,81 @@ void ga10b_kexec_handoff_register_reserves(void)
                             (unsigned long long)(ops_page_end - ops_page_base));
             }
 
-            /* Walk each op's shader_gpu_va. Dedup: same shader_gpu_va
-             * across multiple ops (mnist reuses 4 shaders across 8
-             * ops) → only reserve once. Simple linear scan over the
-             * reserved-so-far list is O(n²) but n≤51 so it's fine. */
+            /* v7.1 path (commit b2b6c2dc+): the helper now publishes
+             * shader_phys + shader_size_bytes per op directly. No
+             * GMMU walking needed — read the values and reserve.
+             *
+             * Falls back to GMMU walk for older helpers (shader_phys=0)
+             * if h->inst_block_phys is available. The walk path is
+             * less reliable because the helper-side FECS read can
+             * catch a wrong channel (Xorg / nvgpu-internal) — but
+             * better than no per-op reservation at all.
+             *
+             * Dedup: mnist reuses 4 shaders across 8 ops, dedup by
+             * phys. Simple O(n²) linear scan, n ≤ 42 (v7.1 cap). */
             const struct ga10b_pipeline_op_v7 *ops_v7 =
                 (const struct ga10b_pipeline_op_v7 *)(uintptr_t)ops_phys;
-            uint64_t reserved_phys[51];
+            uint64_t reserved_phys[42];
             uint32_t n_reserved = 0;
-            uint32_t n_walked = 0, n_walk_ok = 0, n_reserved_now = 0;
+            uint32_t n_direct = 0, n_walked = 0, n_walk_ok = 0;
             for (uint32_t i = 0; i < n_ops; i++) {
-                uint64_t gva = ops_v7[i].shader_gpu_va;
-                if (gva == 0u) continue;
-                n_walked++;
-                struct ga10b_gmmu_walk_result wr;
-                ga10b_gmmu_walk(inst_phys_for_walk, gva, &wr);
-                if (wr.status != GA10B_GMMU_WALK_OK) continue;
-                n_walk_ok++;
+                uint64_t phys = 0;
+                uint64_t size_b = 0;
 
-                uint64_t shader_phys_pg = wr.leaf_phys & ~4095ull;
-                if (!ga10b_phys_in_dram(shader_phys_pg, 4096)) continue;
+                /* Prefer the explicit fields. Falls back to walk if
+                 * helper didn't populate them. */
+                if (ops_v7[i].shader_phys != 0 &&
+                    ops_v7[i].shader_size_bytes > 0) {
+                    phys   = ops_v7[i].shader_phys;
+                    size_b = (uint64_t)ops_v7[i].shader_size_bytes;
+                    n_direct++;
+                } else if (ops_v7[i].shader_gpu_va != 0) {
+                    n_walked++;
+                    struct ga10b_gmmu_walk_result wr;
+                    ga10b_gmmu_walk(inst_phys_for_walk,
+                                    ops_v7[i].shader_gpu_va, &wr);
+                    if (wr.status != GA10B_GMMU_WALK_OK) continue;
+                    n_walk_ok++;
+                    phys   = wr.leaf_phys;
+                    size_b = 4096u;  /* walk gives one page */
+                } else {
+                    continue;
+                }
+
+                uint64_t page_base = phys & ~4095ull;
+                uint64_t page_end  = (phys + size_b + 4095ull) & ~4095ull;
+                uint64_t reserve_bytes = page_end - page_base;
+                if (!ga10b_phys_in_dram(page_base, (size_t)reserve_bytes)) {
+                    continue;
+                }
 
                 /* Dedup */
                 bool seen = false;
                 for (uint32_t j = 0; j < n_reserved; j++) {
-                    if (reserved_phys[j] == shader_phys_pg) {
+                    if (reserved_phys[j] == page_base) {
                         seen = true;
                         break;
                     }
                 }
                 if (seen) continue;
 
-                /* Reserve only the leaf phys page (4 KB). The shader
-                 * dmabuf may be larger (up to 64 KB) but its
-                 * underlying phys pages are scattered (nvmap maps
-                 * non-contiguous phys to contiguous iova). Reserving
-                 * more than 4 KB from `leaf_phys` overruns into
-                 * neighbor phys which may belong to FECS ctx_save
-                 * state — observed empirically as the
-                 * `ctxsw_checksum_mismatch` (mb6=0x21) failure that
-                 * Stage 9 Mode D fix surfaced when this was 64 KB.
-                 *
-                 * Covering the tail of multi-page shaders requires
-                 * walking shader_gpu_va + 4096, + 8192, ... separately.
-                 * The simple 1-page reservation is sufficient for
-                 * mnist's largest shader (gemm at ~5-20 KB
-                 * is at most 5 pages, so first-page reservation
-                 * catches op[0]'s SM PC at SM entry — the most
-                 * common Mode B fault location). Multi-page walk is
-                 * Stage 11 work; for now first-page coverage
-                 * empirically eliminates ~50% of Mode B. */
-                const uint64_t reserve_bytes = 4096u;
-                if (pmm_user_reserve_add(shader_phys_pg,
+                if (pmm_user_reserve_add(page_base,
                                          reserve_bytes) != 0) {
                     uart_printf("[ga10b-reserve]   per-op shader: "
-                                "pmm_user_reserve_add(0x%lx) failed — "
+                                "pmm_user_reserve_add(0x%lx, %llu) failed — "
                                 "table full, op %u/%u uncovered\n",
-                                (unsigned long)shader_phys_pg,
+                                (unsigned long)page_base,
+                                (unsigned long long)reserve_bytes,
                                 (unsigned)i, (unsigned)n_ops);
                     break;
                 }
-                reserved_phys[n_reserved++] = shader_phys_pg;
-                n_reserved_now++;
+                reserved_phys[n_reserved++] = page_base;
             }
-            uart_printf("[ga10b-reserve]   per-op shader: %u walked, "
-                        "%u walk_ok, %u unique reservations (inst=0x%lx)\n",
-                        (unsigned)n_walked, (unsigned)n_walk_ok,
-                        (unsigned)n_reserved_now,
-                        (unsigned long)inst_phys_for_walk);
+            uart_printf("[ga10b-reserve]   per-op shader (v7.1): "
+                        "%u direct, %u walked (%u ok), %u unique "
+                        "reservations\n",
+                        (unsigned)n_direct, (unsigned)n_walked,
+                        (unsigned)n_walk_ok, (unsigned)n_reserved);
         }
     } else {
         uart_printf("[ga10b-reserve]   per-op shader reservation skipped "

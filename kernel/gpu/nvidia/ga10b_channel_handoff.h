@@ -413,6 +413,28 @@ struct ga10b_pipeline_op_v7 {
     uint32_t smem_size_bytes;   /* shared memory per block */
     uint32_t slm_size_bytes;    /* shader local memory per thread */
     uint32_t barrier_count;     /* num_control_barriers */
+
+    /* v7.1 additions (#788 Mode B fix): per-op shader phys + size
+     * for SLM-OS's PMM reservation. Without these, SLM-OS would
+     * have to GMMU-walk shader_gpu_va from h->inst_block_phys to
+     * find the phys — which fails when h->inst_block_phys was
+     * read from FECS at a moment FECS happened to be on another
+     * channel (Xorg, nvgpu's GR-internal). The helper has these
+     * values directly from `gpu_virt_to_phys` at allocation time;
+     * publishing them bypasses the walk entirely.
+     *
+     * `shader_size_bytes` is the dmabuf size (≥ SASS_len, page-
+     * rounded up). SLM-OS reserves the full dmabuf phys range so
+     * multi-page shaders are covered. Zero means "helper didn't
+     * populate" (older builds) — SLM-OS falls back to walk-based
+     * discovery.
+     *
+     * Adding 16 B bumps sizeof to 96 B per op, lowers v7 cap
+     * from 51 → 42 ops per 4 KB array page. mnist uses 8 ops;
+     * still ample headroom. */
+    uint64_t shader_phys;       /* CPU-phys of op's SASS dmabuf, 0 if unset */
+    uint32_t shader_size_bytes; /* dmabuf size in bytes, 0 if unset */
+    uint32_t _pad_v71;          /* explicit pad → keeps 8 B alignment */
 };
 
 /* Upper bound on pipeline length, enforced by the kernel-side runner.
@@ -421,14 +443,14 @@ struct ga10b_pipeline_op_v7 {
  * Anything past that would dereference into adjacent memory.
  *
  *   v6 ops (24 B): 4096 / 24 = 170 max
- *   v7 ops (80 B): 4096 / 80 = 51  max
+ *   v7 ops (96 B): 4096 / 96 = 42  max (#788 Mode B v7.1 fields)
  *
  * MNIST uses 8 ops on either layout. Larger SLMs (Qwen 2.5 1.5B has
  * ~370 ops/token) need either the launcher to allocate >1 page or
  * a different ops-array structure entirely — tracked separately
  * (#573 covers the dispatch architecture rework). */
 #define GA10B_PIPELINE_MAX_OPS    170u   /* v6 cap (existing) */
-#define GA10B_PIPELINE_V7_MAX_OPS 51u    /* v7 cap (4096 / 80) */
+#define GA10B_PIPELINE_V7_MAX_OPS 42u    /* v7 cap (4096 / 96) */
 
 /* Wire-format size is locked: both the Linux helper and SLM-OS
  * depend on this exact layout. Any struct reorder or field addition
@@ -451,7 +473,7 @@ _Static_assert(sizeof(struct ga10b_phys_extent) == 16,
 _Static_assert(sizeof(struct ga10b_pipeline_op) == 24,
                "ga10b_pipeline_op layout changed — Linux + SLM-OS "
                "must agree on the per-op size");
-_Static_assert(sizeof(struct ga10b_pipeline_op_v7) == 80,
+_Static_assert(sizeof(struct ga10b_pipeline_op_v7) == 96,
                "ga10b_pipeline_op_v7 layout changed — Linux helper "
                "and SLM-OS must agree on the v7 per-op size");
 
