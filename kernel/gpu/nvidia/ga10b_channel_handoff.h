@@ -319,6 +319,36 @@ struct ga10b_channel_handoff {
     uint64_t weights_extents_phys;
     uint32_t weights_n_extents;
     uint32_t _pad_v9;
+
+    /* --- v10 extension (#788 Mode C fix): per-channel GR context
+     * buffer physical ranges. Zero on v2..v9. ---
+     *
+     * The helper reads /sys/kernel/debug/gpu.0/fifo/slmos_gr_ctx_phys
+     * (a debugfs file exported by a patched nvgpu.ko — see
+     * `tools/nvgpu-patches/0001-expose-gr-ctx-phys-via-debugfs.patch`)
+     * which lists every active channel's GR context buffers
+     * (`NVGPU_GR_CTX_CTX` at ~513 KB, `NVGPU_GR_CTX_PATCH_CTX` at
+     * 4 KB, etc.). Without this protection, SLM-OS's PMM allocates
+     * from those physical pages and FECS's next context-load reads
+     * garbage — surfaces as the `mb6=0x5a` watchdog failure that
+     * dominates the N=30 stress test (50% of iterations).
+     *
+     * `gr_ctx_extents_phys` is the CPU physical address of a
+     * dmabuf containing an array of `struct ga10b_phys_extent`
+     * entries (same layout as the v9 weights extents). Each entry
+     * covers one of the channel-internal GR buffers. SLM-OS
+     * reserves every extent in `ga10b_kexec_handoff_register_-
+     * reserves`.
+     *
+     * The helper publishes ALL active channels' GR contexts, not
+     * just its own — Xorg / nvgpu-internal channels also leave
+     * GR ctx state in DRAM that FECS may try to load post-kexec
+     * during context-switch. Conservatively protecting all of
+     * them is cheap (each phys_extent = 16 B; 16 channels × 8
+     * buffers × 16 B = 2 KB max). */
+    uint64_t gr_ctx_extents_phys;
+    uint32_t gr_ctx_n_extents;
+    uint32_t _pad_v10;
 };
 
 /* One entry in the v9 weights-pool extents array. Represents a
@@ -462,11 +492,11 @@ struct ga10b_pipeline_op_v7 {
  * weights_pool_size_bytes) → 256 + 24 = 280. v9 grows it by 16
  * (weights_extents_phys + weights_n_extents + _pad_v9) → 280 + 16
  * = 296. */
-_Static_assert(sizeof(struct ga10b_channel_handoff) == 296,
+_Static_assert(sizeof(struct ga10b_channel_handoff) == 312,
                "ga10b_channel_handoff layout changed — update Linux "
                "helper (scripts/gpu-channel-helper.c, "
                "scripts/gpu-kernel-launch.c, scripts/gpu-launch-common.c) "
-               "and bump version");
+               "and bump version. v10 adds gr_ctx_extents (+16 B).");
 _Static_assert(sizeof(struct ga10b_phys_extent) == 16,
                "ga10b_phys_extent layout changed — Linux helper and "
                "SLM-OS must agree on the v9 extents-array entry size");

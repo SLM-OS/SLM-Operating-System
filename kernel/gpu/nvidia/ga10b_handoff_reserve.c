@@ -527,6 +527,80 @@ void ga10b_kexec_handoff_register_reserves(void)
                     (unsigned long)h->inst_block_phys);
     }
 
+    /* v10 (#788 Mode C fix): per-channel GR context buffer reservation.
+     *
+     * The helper read /sys/kernel/debug/gpu.0/fifo/slmos_gr_ctx_phys
+     * (exposed by a patched nvgpu.ko) and published every active
+     * channel's GR context buffer phys ranges in an extents array.
+     * Each entry covers one channel-internal GR buffer (main ctx,
+     * patch ctx, etc.). Without this, SLM-OS PMM clobbers the
+     * buffers and FECS hits mb6=0x5a on context-load. */
+    {
+        uint64_t gr_ctx_extents_phys = h->gr_ctx_extents_phys;
+        uint32_t gr_ctx_n_extents    = h->gr_ctx_n_extents;
+        if (gr_ctx_extents_phys != 0 && gr_ctx_n_extents > 0) {
+            uint64_t gr_extents_bytes =
+                (uint64_t)gr_ctx_n_extents *
+                sizeof(struct ga10b_phys_extent);
+            if (!ga10b_phys_in_dram(gr_ctx_extents_phys,
+                                    (size_t)gr_extents_bytes)) {
+                uart_printf("[ga10b-reserve]   gr_ctx_extents_phys=0x%lx "
+                            "(n=%u) outside DRAM — skipping gr_ctx "
+                            "reservation\n",
+                            (unsigned long)gr_ctx_extents_phys,
+                            (unsigned)gr_ctx_n_extents);
+            } else {
+                /* Reserve the extents-array dmabuf itself */
+                uint64_t arr_page_base = gr_ctx_extents_phys & ~4095ull;
+                uint64_t arr_page_end  =
+                    (gr_ctx_extents_phys + gr_extents_bytes + 4095ull) &
+                    ~4095ull;
+                if (pmm_user_reserve_add(arr_page_base,
+                                          arr_page_end - arr_page_base) == 0) {
+                    uart_printf("[ga10b-reserve]   reserved gr_ctx_extents "
+                                "array @0x%lx\n",
+                                (unsigned long)arr_page_base);
+                }
+
+                /* Reserve every entry. */
+                const struct ga10b_phys_extent *gr_exts =
+                    (const struct ga10b_phys_extent *)(uintptr_t)
+                    gr_ctx_extents_phys;
+                int gr_reserved = 0, gr_skipped = 0;
+                uint64_t gr_total_bytes = 0;
+                for (uint32_t i = 0; i < gr_ctx_n_extents; i++) {
+                    uint64_t ph = gr_exts[i].phys;
+                    uint32_t np = gr_exts[i].n_pages;
+                    if (np == 0u) continue;
+                    uint64_t sz = (uint64_t)np * 4096ull;
+                    if (!ga10b_phys_in_dram(ph, sz)) {
+                        gr_skipped++;
+                        continue;
+                    }
+                    if (pmm_user_reserve_add(ph, sz) != 0) {
+                        uart_printf("[ga10b-reserve]   gr_ctx reserve "
+                                    "table full at extent %u/%u\n",
+                                    (unsigned)i, (unsigned)gr_ctx_n_extents);
+                        break;
+                    }
+                    gr_reserved++;
+                    gr_total_bytes += sz;
+                }
+                uart_printf("[ga10b-reserve]   gr_ctx: %u extents reserved "
+                            "(%llu KB total), %u skipped\n",
+                            (unsigned)gr_reserved,
+                            (unsigned long long)(gr_total_bytes / 1024ull),
+                            (unsigned)gr_skipped);
+            }
+        } else {
+            uart_printf("[ga10b-reserve]   gr_ctx reservation skipped "
+                        "(extents_phys=0x%lx n=%u — helper didn't publish, "
+                        "older or non-patched nvgpu)\n",
+                        (unsigned long)gr_ctx_extents_phys,
+                        (unsigned)gr_ctx_n_extents);
+        }
+    }
+
     if (version < 9u || n_extents == 0u || extents_phys == 0u) {
         uart_printf("[ga10b-reserve]   handoff@0x%lx v=%u no v9 "
                     "extents (n=%u extents_phys=0x%lx) — skipping\n",

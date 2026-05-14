@@ -285,6 +285,24 @@ void *gpu_load_file(const char *path, size_t *out_size);
  * /proc/self/pagemap. Returns 0 on failure. */
 uint64_t gpu_virt_to_phys(void *vaddr);
 
+/* Read /sys/kernel/debug/gpu.0/fifo/slmos_gr_ctx_phys (exposed by a
+ * patched nvgpu.ko) and produce a v10 GR-ctx-extents dmabuf for
+ * publication in the channel handoff.
+ *
+ * Allocates a new nvmap dmabuf, copies parsed (phys, n_pages) pairs
+ * into it, and returns the dmabuf phys + entry count via the out
+ * parameters. The dmabuf is leaked intentionally — it must stay
+ * resident through kexec so SLM-OS can read it in
+ * ga10b_kexec_handoff_register_reserves.
+ *
+ * Returns 0 on success (out fields valid), -1 on failure (out fields
+ * set to 0). Failure is non-fatal — the channel handoff just won't
+ * carry v10 gr_ctx_extents, and SLM-OS will see n=0 and skip the
+ * reservation. */
+int gpu_collect_gr_ctx_extents(struct gpu_launch_ctx *ctx,
+                                uint64_t *out_extents_phys,
+                                uint32_t *out_n_extents);
+
 /* Read GA10B's FECS_CURRENT_CTX register via /dev/mem and decode the
  * channel inst-block phys it points to.
  *

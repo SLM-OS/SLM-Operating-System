@@ -98,6 +98,85 @@ uint64_t gpu_virt_to_phys(void *vaddr)
     return pfn * 4096 + ((uint64_t)vaddr & 0xFFF);
 }
 
+int gpu_collect_gr_ctx_extents(struct gpu_launch_ctx *ctx,
+                                uint64_t *out_extents_phys,
+                                uint32_t *out_n_extents)
+{
+    /* Match the v9 weights extents layout (16 B per entry). */
+    struct gr_phys_extent {
+        uint64_t phys;
+        uint32_t n_pages;
+        uint32_t reserved;
+    };
+
+    *out_extents_phys = 0;
+    *out_n_extents = 0;
+
+    FILE *fp = fopen("/sys/kernel/debug/gpu.0/fifo/slmos_gr_ctx_phys", "r");
+    if (!fp) {
+        fprintf(stderr,
+                "[gpu-launch] gr_ctx_extents: open debugfs failed: %s "
+                "(patched nvgpu.ko not installed?). Skipping v10 publish.\n",
+                strerror(errno));
+        return -1;
+    }
+
+    /* Allocate a 4 KB dmabuf — fits 256 entries (16 channels × 8 buffers
+     * = 128 entries worst case, plenty of headroom). */
+    int dmabuf = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
+    void *va = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, dmabuf, 0);
+    if (va == MAP_FAILED) {
+        perror("[gpu-launch] gr_ctx_extents: mmap dmabuf");
+        fclose(fp);
+        return -1;
+    }
+    memset(va, 0, 4096);
+
+    struct gr_phys_extent *entries = (struct gr_phys_extent *)va;
+    uint32_t n = 0;
+    char line[256];
+    /* Skip the header line ("chid tsgid idx phys size"). */
+    if (!fgets(line, sizeof(line), fp)) {
+        fclose(fp);
+        munmap(va, 4096);
+        return -1;
+    }
+    while (fgets(line, sizeof(line), fp) && n < 256u) {
+        uint32_t chid, tsgid, idx;
+        unsigned long long phys;
+        unsigned long size;
+        if (sscanf(line, "%u %u %u 0x%llx %lu",
+                   &chid, &tsgid, &idx, &phys, &size) != 5) {
+            continue;
+        }
+        if (phys == 0 || size == 0) continue;
+        uint64_t base = phys & ~4095ull;
+        uint64_t end  = (phys + size + 4095ull) & ~4095ull;
+        uint32_t n_pages = (uint32_t)((end - base) / 4096ull);
+        entries[n].phys = base;
+        entries[n].n_pages = n_pages;
+        entries[n].reserved = 0;
+        n++;
+    }
+    fclose(fp);
+    msync(va, 4096, MS_SYNC);
+
+    uint64_t extents_phys = gpu_virt_to_phys(va);
+    if (extents_phys == 0) {
+        fprintf(stderr,
+                "[gpu-launch] gr_ctx_extents: gpu_virt_to_phys returned 0. "
+                "Skipping v10 publish.\n");
+        munmap(va, 4096);
+        return -1;
+    }
+
+    *out_extents_phys = extents_phys;
+    *out_n_extents = n;
+    printf("[gpu-launch] gr_ctx_extents: %u extents @ phys 0x%llx\n",
+           n, (unsigned long long)extents_phys);
+    return 0;
+}
+
 uint64_t gpu_read_fecs_inst_block_phys(void)
 {
     /* GA10B GPU BAR0 base + FECS_CURRENT_CTX offset. Hardcoded to
@@ -1113,6 +1192,21 @@ uint64_t gpu_write_handoff_v7(const struct gpu_launch_ctx *ctx,
         .qmd_pool_size_bytes = ctx->qmd_pool_size_bytes,
         .qmd_pool_n_slots   = ctx->qmd_pool_n_slots,
     };
+
+    /* #788 Mode C v10: collect per-channel GR ctx buffer phys ranges
+     * via the patched-nvgpu debugfs file and publish them in the
+     * handoff. Failure is non-fatal — older / unpatched nvgpu just
+     * leaves the fields zero and SLM-OS skips the reservation. */
+    {
+        uint64_t gr_ext_phys = 0;
+        uint32_t gr_ext_n    = 0;
+        if (gpu_collect_gr_ctx_extents((struct gpu_launch_ctx *)ctx,
+                                       &gr_ext_phys, &gr_ext_n) == 0) {
+            hoff.gr_ctx_extents_phys = gr_ext_phys;
+            hoff.gr_ctx_n_extents    = gr_ext_n;
+        }
+    }
+
     memcpy(handoff_va, &hoff, sizeof(hoff));
     msync(handoff_va, 4096, MS_SYNC);
 
