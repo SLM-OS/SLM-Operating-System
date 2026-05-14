@@ -515,9 +515,21 @@ static int parse_region_line(const char *line, size_t linelen,
             rp->region.bar = (int)intval;
             rp->has_bar = 1;
         } else if (strcmp(key, "start") == 0 && is_int) {
+            if (intval < 0) {
+                set_err(errbuf, errlen,
+                        "region 'start' must be >= 0 (got %lld)",
+                        (long long)intval);
+                return -1;
+            }
             rp->region.start = (uint64_t)intval;
             rp->has_start = 1;
         } else if (strcmp(key, "end") == 0 && is_int) {
+            if (intval < 0) {
+                set_err(errbuf, errlen,
+                        "region 'end' must be >= 0 (got %lld)",
+                        (long long)intval);
+                return -1;
+            }
             rp->region.end = (uint64_t)intval;
             rp->has_end = 1;
         } else if (strcmp(key, "source_kind") == 0 && is_str) {
@@ -529,6 +541,12 @@ static int parse_region_line(const char *line, size_t linelen,
                      sizeof(rp->region.source_path), strbuf);
             rp->has_source_path = 1;
         } else if (strcmp(key, "source_offset") == 0 && is_int) {
+            if (intval < 0) {
+                set_err(errbuf, errlen,
+                        "region 'source_offset' must be >= 0 (got %lld)",
+                        (long long)intval);
+                return -1;
+            }
             rp->region.source_offset = (uint64_t)intval;
             rp->has_source_offset = 1;
         } else if (strcmp(key, "validated_at_commit") == 0 && is_str) {
@@ -564,6 +582,14 @@ static int parse_region_line(const char *line, size_t linelen,
                 "region end (%llu) must be > start (%llu)",
                 (unsigned long long)rp->region.end,
                 (unsigned long long)rp->region.start);
+        return -1;
+    }
+    uint64_t span = rp->region.end - rp->region.start;
+    if (span > HAILO_CORPUS_MAX_REGION_BYTES) {
+        set_err(errbuf, errlen,
+                "region span (%llu bytes) exceeds max (%llu bytes)",
+                (unsigned long long)span,
+                (unsigned long long)HAILO_CORPUS_MAX_REGION_BYTES);
         return -1;
     }
     if (strcmp(rp->region.source_kind, "file") != 0) {

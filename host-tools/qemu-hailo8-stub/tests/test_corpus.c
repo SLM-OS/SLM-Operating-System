@@ -523,6 +523,121 @@ static int test_region_rejects_overlap(void)
     return 1;
 }
 
+static int test_region_rejects_bad_source_kind(void)
+{
+    /* source_kind != "file" must be rejected — schema reserves "inline"
+     * etc. for future use but the loader doesn't implement them yet. */
+    uint8_t bytes[16];
+    memset(bytes, 0x55, sizeof(bytes));
+    write_tmp_artifact(bytes, sizeof(bytes));
+
+    make_tmp();
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"inline\",\"source_path\":\"%s\",\"source_offset\":0,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n",
+        tmp_artifact_path);
+    write_file(tmp_path, buf);
+
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "source_kind") != NULL);
+    unlink(tmp_path);
+    unlink(tmp_artifact_path);
+    return 1;
+}
+
+static int test_region_rejects_missing_file(void)
+{
+    /* Region pointing at a non-existent source_path must fail loudly
+     * at load time, not silently degrade to empty data. */
+    make_tmp();
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"/nonexistent/path/that/should/not/exist\",\"source_offset\":0,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n");
+    write_file(tmp_path, buf);
+
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "open") != NULL);
+    unlink(tmp_path);
+    return 1;
+}
+
+static int test_region_rejects_short_read(void)
+{
+    /* Region asking for more bytes than the artifact actually contains
+     * (source_offset + (end-start) > file_size) must fail at load time. */
+    uint8_t bytes[8];
+    memset(bytes, 0x77, sizeof(bytes));
+    write_tmp_artifact(bytes, sizeof(bytes));  /* 8-byte file */
+
+    make_tmp();
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        /* Region wants 32 bytes from a file that only has 8. */
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":32,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":0,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n",
+        tmp_artifact_path);
+    write_file(tmp_path, buf);
+
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "short read") != NULL);
+    unlink(tmp_path);
+    unlink(tmp_artifact_path);
+    return 1;
+}
+
+static int test_region_rejects_negative_fields(void)
+{
+    /* Negative start/end/source_offset must be rejected with a clear
+     * diagnostic — silent uint64_t wraparound would let the load proceed
+     * with a garbage (huge unsigned) value. */
+    uint8_t bytes[16];
+    memset(bytes, 0x33, sizeof(bytes));
+    write_tmp_artifact(bytes, sizeof(bytes));
+
+    make_tmp();
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":-1,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":0,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n",
+        tmp_artifact_path);
+    write_file(tmp_path, buf);
+
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "start") != NULL);
+    unlink(tmp_path);
+    unlink(tmp_artifact_path);
+    return 1;
+}
+
+static int test_region_free_handles_empty(void)
+{
+    /* In-memory corpus has n_regions=0; hailo_corpus_free must not
+     * dereference regions[].data on the empty path. */
+    hailo_corpus_t *c = hailo_corpus_new_memory();
+    EXPECT(c != NULL);
+    EXPECT_EQ(c->n_regions, 0);
+    hailo_corpus_free(c);
+    return 1;
+}
+
 int main(void)
 {
     TEST(test_hex_roundtrip_u32);
@@ -544,6 +659,11 @@ int main(void)
     TEST(test_region_load_and_lookup);
     TEST(test_region_with_source_offset);
     TEST(test_region_rejects_overlap);
+    TEST(test_region_rejects_bad_source_kind);
+    TEST(test_region_rejects_missing_file);
+    TEST(test_region_rejects_short_read);
+    TEST(test_region_rejects_negative_fields);
+    TEST(test_region_free_handles_empty);
     fprintf(stderr, "\n%d / %d tests passed\n", g_test_count - g_fail_count, g_test_count);
     return g_fail_count == 0 ? 0 : 1;
 }

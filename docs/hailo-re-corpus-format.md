@@ -97,13 +97,13 @@ A region rule short-circuits per-`seq` capture for a contiguous BAR range whose 
 
 **Precedence:** A region rule covering a `(bar, offset, size)` access **takes precedence over any per-`seq` op entry** at that location. The QEMU stub consults regions FIRST; only if no region covers the access does it fall back to the per-seq lookup. This matters because the legacy per-seq entries captured during single-step grinding for the same range are equivalent (they were derived from the same artifact) — the region rule is the authoritative summary.
 
-**Read semantics under a region rule:** the stub serves the read from `source.path` at byte `source.offset + (access_offset - start)`. The corresponding seq counter still increments — region serving is transparent to seq sequencing.
+**Read semantics under a region rule:** the stub serves the read from `source_path` at byte `source_offset + (access_offset - start)`. The corresponding seq counter still increments — region serving is transparent to seq sequencing.
 
 **Write semantics under a region rule:** the stub computes the expected bytes from the file and compares against the incoming write data. On match: silent success, no corpus append. On mismatch: emit `HAILO_RE_CORPUS_DIVERGENCE` with `reason=region_write_mismatch`, halt. This catches the case where HailoRT writes something not present in the artifact, indicating either an incorrect region rule or HailoRT applying a runtime transformation before upload.
 
 **Multiple regions:** A corpus may contain multiple region rules for different BAR ranges. Overlapping regions within the same BAR are a configuration error and tools SHOULD reject the corpus on load.
 
-**Backward compatibility:** Region entries are an additive extension. Tools that don't recognize `type="region"` MUST silently skip those lines (same tolerance as unknown values in `source` field). `format_version` remains at `1`. Tools that DO consume region rules MUST also implement the precedence rule above.
+**Backward compatibility:** Region entries are an additive extension. Tools that don't recognize `type="region"` MUST silently skip those lines. `format_version` remains at `1`. Tools that DO consume region rules MUST also implement the precedence rule above.
 
 ## Sequence semantics
 

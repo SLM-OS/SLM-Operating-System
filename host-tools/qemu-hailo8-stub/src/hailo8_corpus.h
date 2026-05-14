@@ -63,6 +63,14 @@ typedef struct hailo_op_entry {
 #define HAILO_CORPUS_MAX_KIND    15
 
 /*
+ * Upper bound on the bytes-per-region cap, used to reject pathological
+ * corpus inputs early. 16 MiB matches Hailo-8 BAR4 — the largest backing
+ * artifact we'd ever map (a full firmware blob is ~160 KB; anything
+ * approaching the cap is almost certainly malformed).
+ */
+#define HAILO_CORPUS_MAX_REGION_BYTES  (16ull * 1024 * 1024)
+
+/*
  * Phase 4 region rule — short-circuits per-seq capture for a contiguous BAR
  * range whose bytes come from a known artifact. See
  * docs/hailo-re-corpus-format.md §"Region rule (Phase 4 compression)".
