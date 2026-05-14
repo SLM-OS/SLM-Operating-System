@@ -17,10 +17,12 @@
 
 #if !defined(DEMO_LUA_PATH) || !defined(DEMO_MENU_LUA_PATH) || \
     !defined(DEMO_AUTO_LUA_PATH) || !defined(DEMO_MULTIPROC_LUA_PATH) || \
-    !defined(DEMO_HAILO_LUA_PATH) || !defined(DEMO_ADMIN_LUA_PATH)
+    !defined(DEMO_HAILO_LUA_PATH) || !defined(DEMO_ADMIN_LUA_PATH) || \
+    !defined(DEMO_IMX219_MNIST_LUA_PATH)
 # error "DEMO_LUA_PATH, DEMO_MENU_LUA_PATH, DEMO_AUTO_LUA_PATH, "\
-        "DEMO_MULTIPROC_LUA_PATH, DEMO_HAILO_LUA_PATH, and "\
-        "DEMO_ADMIN_LUA_PATH must be supplied by the build system"
+        "DEMO_MULTIPROC_LUA_PATH, DEMO_HAILO_LUA_PATH, "\
+        "DEMO_ADMIN_LUA_PATH, and DEMO_IMX219_MNIST_LUA_PATH "\
+        "must be supplied by the build system"
 #endif
 
 #define xstr(s) str(s)
@@ -83,6 +85,17 @@ demo_hailo_lua_end:
 demo_admin_lua_start:
     .incbin xstr(DEMO_ADMIN_LUA_PATH)
 demo_admin_lua_end:
+
+    /* #396: IMX219 -> MNIST capstone demo. Pipes a real camera frame
+     * through slm.camera.preprocess_mnist + slm.model_infer_bytes
+     * from a single Lua entry point. Degrades to a clean "camera not
+     * available" message on platforms without IMX219 hardware. */
+    .global demo_imx219_mnist_lua_start
+    .global demo_imx219_mnist_lua_end
+    .align 4
+demo_imx219_mnist_lua_start:
+    .incbin xstr(DEMO_IMX219_MNIST_LUA_PATH)
+demo_imx219_mnist_lua_end:
 
 #if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__))
     .section .note.GNU-stack, "", @progbits
