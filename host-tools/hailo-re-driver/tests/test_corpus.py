@@ -117,14 +117,42 @@ class CorpusValidationTests(unittest.TestCase):
             with self.assertRaises(CorpusError):
                 corpus_mod.append_op(corpus, bad)
 
-    def test_load_rejects_seq_gap(self) -> None:
+    def test_load_accepts_seq_gap(self) -> None:
+        # Phase 4 region rules cover a contiguous range with a single
+        # entry; the stub's seq counter still ticks for every covered
+        # access, so the next captured op has a seq far past the prior
+        # one. Gaps are legitimate.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "corpus.jsonl"
             with p.open("w") as f:
                 f.write(json.dumps(make_header().to_json_obj()) + "\n")
                 f.write(json.dumps(make_write(1).to_json_obj()) + "\n")
-                # skip seq=2 — should be rejected on load
-                f.write(json.dumps(make_write(3).to_json_obj()) + "\n")
+                # Seq 2..99 served by an implicit region — no entries.
+                f.write(json.dumps(make_write(100).to_json_obj()) + "\n")
+            corpus = corpus_mod.load(p)
+            self.assertEqual(len(corpus.ops), 2)
+            self.assertEqual(corpus.ops[0].seq, 1)
+            self.assertEqual(corpus.ops[1].seq, 100)
+
+    def test_load_rejects_seq_decrease(self) -> None:
+        # Strictly-increasing is still enforced — seqs that go backwards
+        # or repeat indicate file corruption / concurrent-writer bugs.
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "corpus.jsonl"
+            with p.open("w") as f:
+                f.write(json.dumps(make_header().to_json_obj()) + "\n")
+                f.write(json.dumps(make_write(5).to_json_obj()) + "\n")
+                f.write(json.dumps(make_write(3).to_json_obj()) + "\n")  # backwards
+            with self.assertRaises(CorpusError):
+                corpus_mod.load(p)
+
+    def test_load_rejects_seq_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "corpus.jsonl"
+            with p.open("w") as f:
+                f.write(json.dumps(make_header().to_json_obj()) + "\n")
+                f.write(json.dumps(make_write(5).to_json_obj()) + "\n")
+                f.write(json.dumps(make_write(5).to_json_obj()) + "\n")  # duplicate
             with self.assertRaises(CorpusError):
                 corpus_mod.load(p)
 

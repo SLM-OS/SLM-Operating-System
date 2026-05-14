@@ -318,10 +318,17 @@ def load(path: os.PathLike | str) -> Corpus:
         kind = obj.get("type")
         if kind == "op":
             op = _validate_op(obj)
-            if op.seq != prev_seq + 1:
+            # Op entries must be strictly increasing in seq, but NOT
+            # necessarily contiguous. Phase 4 region rules cover a
+            # contiguous BAR range with a single entry; the seq counter
+            # still ticks for every region-served access inside that
+            # range, so the next captured op naturally has a seq several
+            # hundred (or thousand) past the prior one. The +1 invariant
+            # held pre-Phase 4 only because every access generated an op.
+            if op.seq <= prev_seq:
                 raise CorpusError(
-                    f"{p}:{i}: seq jumped {prev_seq} -> {op.seq} "
-                    "(must be strictly monotonic +1)"
+                    f"{p}:{i}: seq went backwards {prev_seq} -> {op.seq} "
+                    "(must be strictly increasing)"
                 )
             ops.append(op)
             prev_seq = op.seq
@@ -358,7 +365,14 @@ def init(path: os.PathLike | str, header: Header) -> Corpus:
 
 
 def append_op(corpus: Corpus, op: OpEntry) -> None:
-    """Append a new op, enforcing strict monotonic seq."""
+    """Append a new op, enforcing strict +1 seq.
+
+    Unlike ``load``, which accepts gaps (region-served accesses don't
+    produce op entries), this function is only ever called to record
+    the immediately-next captured read — the seq the QEMU stub halted
+    at, one past its own most-recent C-side auto-append. So +1 is the
+    right invariant here, and a non-+1 seq indicates a caller bug.
+    """
     if corpus.trailer is not None:
         raise CorpusError(
             f"{corpus.path}: cannot append after trailer is written"
