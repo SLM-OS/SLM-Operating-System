@@ -4029,6 +4029,14 @@ static int l_camera_preprocess_mnist(lua_State *L) {
     lua_Integer width    = luaL_checkinteger(L, 2);
     lua_Integer height   = luaL_checkinteger(L, 3);
     lua_Integer bayer    = luaL_checkinteger(L, 4);
+    /* Optional camera-name (5th arg). Defaults to "mock" so existing
+     * Lua callers continue to work unchanged; pass "imx219-0" on
+     * Jetson to feed a real captured frame through the same
+     * MNIST preprocess pipeline. The whole `preprocess_mnist` shape
+     * is MNIST-specific (1640×1232 RGGB → green-only → 28×28 fp32)
+     * and will be replaced by composable Rust-side preprocessing
+     * — see follow-up issue. */
+    const char *name = luaL_optstring(L, 5, "mock");
 
     if (frame_id != 0) {
         lua_pushnil(L);
@@ -4036,7 +4044,7 @@ static int l_camera_preprocess_mnist(lua_State *L) {
         return 2;
     }
     struct camera_frame frame;
-    if (camera_open("mock", &frame) != 0) {
+    if (camera_open(name, &frame) != 0) {
         lua_pushnil(L);
         lua_pushinteger(L, -2);
         return 2;
