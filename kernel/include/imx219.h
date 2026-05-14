@@ -181,6 +181,39 @@ int imx219_streaming_disable(void);
 struct camera_frame;
 
 /*
+ * Set the runtime ANALOG_GAIN (reg 0x0157, 8-bit) and DIGITAL_GAIN
+ * (reg 0x0158, 16-bit) values. Both are stored in module-scope
+ * statics and applied to the sensor on every subsequent
+ * `imx219_set_mode_binning_1640x1232` (i.e. every capture). The
+ * running sensor doesn't latch these mid-frame.
+ *
+ * ANALOG_GAIN encoding: register value n maps to gain factor
+ * 256/(256-n). Useful values: 0 (1×), 192 (4×), 224 (8×), 232
+ * (~10.67×, the IMX219 max).
+ *
+ * DIGITAL_GAIN is fixed-point: 0x0100 = 1.0×, 0x0200 = 2.0×,
+ * 0x0400 = 4.0×. Caps at 0x0FFF per the datasheet.
+ *
+ * Returns 0 on success (the writes are deferred to next mode-init,
+ * so there's no I²C path to fail here). QEMU stub returns -1.
+ */
+int imx219_set_runtime_gain(uint8_t analog, uint16_t digital);
+
+/* Read back the current runtime gain values. Either pointer may
+ * be NULL to skip; both NULL is a no-op. */
+void imx219_get_runtime_gain(uint8_t *analog_out, uint16_t *digital_out);
+
+/*
+ * Set the runtime EXPOSURE (reg 0x015a, 16-bit, in sensor lines).
+ * Applied on the next mode-init like the gain setters above.
+ * Useful range for 1640×1232 binning mode is 1..VTS-4 (VTS=1763).
+ * QEMU stub returns -1. */
+int imx219_set_runtime_exposure(uint16_t lines);
+
+/* Read back the current runtime exposure (in lines). */
+uint16_t imx219_get_runtime_exposure(void);
+
+/*
  * Capture exactly one frame end-to-end and fill *out with a pointer
  * into the kernel-owned IMX219 frame-buffer carveout at
  * `CAMRTC_FRAME_BUFFER_PHYS`. Each call walks the full bring-up

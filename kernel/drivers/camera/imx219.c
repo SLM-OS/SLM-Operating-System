@@ -327,15 +327,56 @@ static const struct imx219_reg_seq imx219_mode_binning_1640x1232[] = {
  * frame timing", so the sensor never emits a SOF.
  *
  * For binning mode 1640×1232, VTS=1763 (per supported_modes[2]
- * .vts_def in L4T). EXPOSURE=0x640 (1600 lines, IMX219_EXPOSURE_DEFAULT).
- * DIGITAL_GAIN=0x0100 ("1.0x", IMX219_DGTL_GAIN_DEFAULT).
- * ANALOG_GAIN=0 (IMX219_ANA_GAIN_DEFAULT). */
+ * .vts_def in L4T). VTS is fixed-shape per mode, so it stays in
+ * this const table. Gain + exposure are operator-tunable; they
+ * live in the imx219_runtime_* statics below and are written
+ * inline by imx219_set_mode_binning_1640x1232 after this table. */
 static const struct imx219_reg_seq imx219_default_ctrls_binning[] = {
-    R8 (0x0157, 0),                         /* ANALOG_GAIN */
-    R16(0x0158, 0x0100),                    /* DIGITAL_GAIN = 1.0x */
-    R16(0x015a, 0x0640),                    /* EXPOSURE = 1600 lines */
     R16(0x0160, 1763),                      /* VTS — binning-mode 30 fps frame timing */
 };
+
+/* Runtime-mutable gain + exposure. SLM-OS doesn't run a 3A
+ * (auto-exposure / AGC / AWB) loop, so these are the "ship" values
+ * the sensor wakes up with on every mode init. The
+ * slm.camera.imx219_set_{gain,exposure} Lua bindings (admin) let
+ * the operator override them from the shell to find a usable combo
+ * for the current scene without rebuilding the kernel.
+ *
+ * IMX219 ANALOG_GAIN encoding: register value n maps to gain factor
+ * 256/(256-n). n=192 → 4×, n=224 → 8×, n=232 → ~10.67× (max).
+ * DIGITAL_GAIN is fixed-point: 0x0100 = 1.0×, 0x0200 = 2.0×.
+ *
+ * Iteration history on jetson-nano-1 looking at a 5cm × 5cm hand-
+ * drawn digit on white paper under typical indoor ambient (after
+ * invert + center-crop preprocess):
+ *
+ *   ANALOG=0   DIGITAL=0x0100  → max pixel 0.085, argmax stuck
+ *                                on 5 regardless of scene
+ *                                (degenerate — sensor too dark)
+ *   ANALOG=192 DIGITAL=0x0100  → narrow pixel band [0.82, 0.89],
+ *                                argmax stuck on 4 regardless of
+ *                                input digit (degenerate — input
+ *                                pinned near saturation, classifier
+ *                                sees no shape)
+ *   ANALOG=224 DIGITAL=0x0100  → max pixel 0.252, model began
+ *                                responding to content (e.g. a 6
+ *                                held upside-down classified as 9)
+ *   ANALOG=232 DIGITAL=0x0200  → max pixel ≈0.74, logit spread 3+,
+ *                                model meaningfully discriminates
+ *                                between digit shapes — works on
+ *                                multiple test digits (3, 4) but
+ *                                still misclassifies others (8) due
+ *                                to residual lens vignette and
+ *                                stroke-thickness asymmetry. Best
+ *                                shipping default until flat-field
+ *                                calibration lands.
+ *
+ * Operators can sweep both knobs via slm.camera.imx219_set_{gain,
+ * exposure} from lua-admin when scene changes; see scripts/
+ * camera_sweep.lua for an A×D matrix at fixed exposure. */
+static uint8_t  imx219_runtime_analog_gain  = 232u;
+static uint16_t imx219_runtime_digital_gain = 0x0200u;
+static uint16_t imx219_runtime_exposure     = 0x0640u;
 
 #undef R8
 #undef R16
@@ -393,17 +434,69 @@ int imx219_set_mode_binning_1640x1232(void)
                             / sizeof(imx219_mode_binning_1640x1232[0]));
     if (rc != 0) return rc;
 
-    /* 4. Default controls (4 writes) — VTS for frame timing,
-     * EXPOSURE / GAIN / DIGITAL_GAIN for AE baseline. Without
-     * VTS the sensor never produces a SOF (verified blocker on
-     * jetson-nano-1, this PR's iteration 1). */
+    /* 4a. VTS for frame timing — fixed per mode. Without this the
+     * sensor never produces a SOF (verified blocker on jetson-nano-1
+     * during issue #518 bring-up). */
     rc = imx219_write_table(imx219_default_ctrls_binning,
                             sizeof(imx219_default_ctrls_binning)
                             / sizeof(imx219_default_ctrls_binning[0]));
     if (rc != 0) return rc;
 
-    INFO("imx219: mode-init OK — 1640x1232 RAW10 binning, MODE_SELECT=standby");
+    /* 4b. Apply the current runtime gain + exposure. These are
+     * normal sensor controls (ANALOG_GAIN, DIGITAL_GAIN, EXPOSURE)
+     * but kept out of the const table because operators tune them
+     * from Lua via slm.camera.imx219_set_{gain,exposure} between
+     * captures. A change to the statics takes effect on this next
+     * mode-init pass — the running sensor doesn't latch them
+     * mid-frame, but every capture goes through this function. */
+    rc = tegra_i2c_write_reg16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                               0x0157, imx219_runtime_analog_gain);
+    if (rc != 0) {
+        WARN("imx219: ANALOG_GAIN write failed rc=%d", rc);
+        return rc;
+    }
+    rc = tegra_i2c_write_reg16_val16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                                     0x0158, imx219_runtime_digital_gain);
+    if (rc != 0) {
+        WARN("imx219: DIGITAL_GAIN write failed rc=%d", rc);
+        return rc;
+    }
+    rc = tegra_i2c_write_reg16_val16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                                     0x015a, imx219_runtime_exposure);
+    if (rc != 0) {
+        WARN("imx219: EXPOSURE write failed rc=%d", rc);
+        return rc;
+    }
+
+    INFO("imx219: mode-init OK — 1640x1232 RAW10 binning, gain=(0x%02x,0x%04x) exp=%u, MODE_SELECT=standby",
+         (unsigned)imx219_runtime_analog_gain,
+         (unsigned)imx219_runtime_digital_gain,
+         (unsigned)imx219_runtime_exposure);
     return 0;
+}
+
+int imx219_set_runtime_gain(uint8_t analog, uint16_t digital)
+{
+    imx219_runtime_analog_gain  = analog;
+    imx219_runtime_digital_gain = digital;
+    return 0;
+}
+
+void imx219_get_runtime_gain(uint8_t *analog_out, uint16_t *digital_out)
+{
+    if (analog_out)  *analog_out  = imx219_runtime_analog_gain;
+    if (digital_out) *digital_out = imx219_runtime_digital_gain;
+}
+
+int imx219_set_runtime_exposure(uint16_t lines)
+{
+    imx219_runtime_exposure = lines;
+    return 0;
+}
+
+uint16_t imx219_get_runtime_exposure(void)
+{
+    return imx219_runtime_exposure;
 }
 
 int imx219_streaming_enable(void)
@@ -645,6 +738,11 @@ int imx219_capture_one_frame(struct camera_frame *out)
     out->height = fb_h;
     out->bayer  = CAMERA_BAYER_RGGB;
     out->format = CAMERA_FORMAT_T_R16;
+    /* IMX219 captures raw photographic data through a wide-angle
+     * lens with heavy corner vignette — invert and center-crop are
+     * what MNIST needs to classify the result. */
+    out->recommended_invert      = true;
+    out->recommended_center_crop = true;
     return 0;
 }
 
@@ -664,5 +762,16 @@ int imx219_capture_one_frame(struct camera_frame *out) {
     (void)out;
     return -1;
 }
+int imx219_set_runtime_gain(uint8_t analog, uint16_t digital) {
+    (void)analog; (void)digital; return -1;
+}
+void imx219_get_runtime_gain(uint8_t *analog_out, uint16_t *digital_out) {
+    if (analog_out)  *analog_out  = 0u;
+    if (digital_out) *digital_out = 0u;
+}
+int imx219_set_runtime_exposure(uint16_t lines) {
+    (void)lines; return -1;
+}
+uint16_t imx219_get_runtime_exposure(void) { return 0u; }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

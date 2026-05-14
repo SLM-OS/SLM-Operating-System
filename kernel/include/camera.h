@@ -65,6 +65,20 @@ struct camera_frame {
     uint32_t       height;
     uint32_t       bayer;   /* CAMERA_BAYER_*  */
     uint32_t       format;  /* CAMERA_FORMAT_* */
+
+    /* Per-backend defaults for `camera_preprocess_mnist`'s `invert`
+     * and `center_crop` args. The mock backend ships MNIST-shaped
+     * data (bright stroke on dark background, full-frame digit) so
+     * both default false. The IMX219 backend captures raw
+     * photographic data (black ink on white paper) through a wide-
+     * angle lens with heavy corner vignette, so both default true.
+     *
+     * The Lua wrapper consults these when the caller omits the
+     * corresponding optional arg — keeping the recommendation
+     * data-driven from the backend rather than implicit on the
+     * camera name string. */
+    bool recommended_invert;
+    bool recommended_center_crop;
 };
 
 /*
@@ -109,6 +123,41 @@ int camera_open(const char *name, struct camera_frame *out);
  * the same high-8-bit value per pixel, so the produced fp32 output
  * is byte-identical regardless of source format for a given scene.
  *
+ * `invert` selects the output polarity. MNIST is trained on images
+ * where the *digit strokes* are bright (~1.0) on a dark (~0.0)
+ * background — i.e. the opposite of natural photographic data.
+ *
+ *   invert=false → straight normalize: bright input → output near 1.0
+ *                  Correct for the embedded mock frame, which is
+ *                  already MNIST-shaped (black background, bright
+ *                  stroke pixels). All pre-existing pinned-output
+ *                  tests use this polarity.
+ *
+ *   invert=true  → inverted normalize: bright input → output near 0.0
+ *                  Correct for raw photographic data like the IMX219
+ *                  sensor capturing a hand-drawn black digit on
+ *                  white paper. Without this, the model receives a
+ *                  photographic negative of what it was trained on,
+ *                  and argmax collapses toward closed-shape classes
+ *                  (0/6/8) regardless of the actual digit.
+ *
+ * `center_crop` selects how much of the source frame is sampled.
+ *
+ *   center_crop=false → cover the full 1232-tall frame: 28×44-pixel
+ *                       blocks, no Y-offset, X-offset 204 (matches
+ *                       the legacy mock-frame contract; pinned tests
+ *                       use this mode).
+ *
+ *   center_crop=true  → use a 616×616 region centred on the sensor:
+ *                       28×22-pixel blocks, X-offset 512, Y-offset
+ *                       308. Required for the IMX219 backend because
+ *                       the Tegra ISP isn't reachable from SLM-OS,
+ *                       so the raw sensor frame carries the lens's
+ *                       full vignette pattern (heavy ~50% light
+ *                       fall-off at the corners on the standard
+ *                       wide-angle modules). Sampling only the
+ *                       central half rejects the vignetted region.
+ *
  * Returns 0 on success. Negative on bad arguments:
  *   -1 = NULL pointer / out_bytes too small
  *   -2 = unsupported width/height/bayer/format (only RGGB 1640x1232
@@ -120,5 +169,7 @@ int camera_preprocess_mnist(const uint8_t *data,
                             uint32_t       height,
                             uint32_t       bayer,
                             uint32_t       format,
+                            bool           invert,
+                            bool           center_crop,
                             uint8_t       *out_bytes,
                             size_t         out_capacity);

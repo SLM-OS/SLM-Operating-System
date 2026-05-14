@@ -41,24 +41,26 @@ extern const uint8_t mock_camera_frame_end[]   __attribute__((weak));
 #define MOCK_FRAME_T_R16_BYTES (MOCK_FRAME_W * MOCK_FRAME_H * 2u)
 
 #define MNIST_DIM          28u
-#define MNIST_BLOCK        44u   /* 28 * 44 == 1232 */
-#define MNIST_CROP         (MNIST_DIM * MNIST_BLOCK)
-#define MNIST_CROP_X_OFF   ((MOCK_FRAME_W - MNIST_CROP) / 2u)  /* 204, even */
+#define MNIST_BLOCK_FULL   44u   /* 28 * 44 == 1232 (full frame height) */
+#define MNIST_BLOCK_HALF   22u   /* 28 * 22 == 616  (centre-crop mode)  */
 
-/* Half the RGGB grid is green: 44 * 44 / 2 = 968 samples per block. */
-#define MNIST_GREEN_PER_BLOCK ((MNIST_BLOCK * MNIST_BLOCK) / 2u)
-
-/* Geometry invariants. Pin them at compile time so a future tweak to
- * MOCK_FRAME_W / MNIST_BLOCK can't silently break the algorithm in a
- * way the tests would only catch as an opaque MD5 mismatch. */
-_Static_assert((MNIST_CROP_X_OFF & 1u) == 0u,
-    "Centred crop X offset must be even to preserve RGGB Bayer phase");
-_Static_assert((MNIST_BLOCK & 1u) == 0u,
-    "Box-average block must be even so r0 = i*MNIST_BLOCK stays even "
-    "(preserves Bayer row phase) and so each row contains the same "
-    "number of green pixels");
-_Static_assert(MNIST_CROP == MOCK_FRAME_H,
-    "Centred crop assumes a square equal to the frame height");
+/* Geometry invariants. Both block sizes must be even (preserves Bayer
+ * row phase + identical green-sample count per row), and the centred
+ * crop offsets must be even (preserves RGGB column phase). Numbers
+ * baked at compile time so a future tweak to MOCK_FRAME_W / either
+ * block size can't silently break the algorithm. */
+_Static_assert((MNIST_BLOCK_FULL & 1u) == 0u,
+    "Full-frame box-average block must be even");
+_Static_assert((MNIST_BLOCK_HALF & 1u) == 0u,
+    "Centre-crop box-average block must be even");
+_Static_assert(((MOCK_FRAME_W - MNIST_DIM * MNIST_BLOCK_FULL) / 2u & 1u) == 0u,
+    "Full-frame X-offset must be even (Bayer phase)");
+_Static_assert(((MOCK_FRAME_W - MNIST_DIM * MNIST_BLOCK_HALF) / 2u & 1u) == 0u,
+    "Centre-crop X-offset must be even (Bayer phase)");
+_Static_assert(((MOCK_FRAME_H - MNIST_DIM * MNIST_BLOCK_HALF) / 2u & 1u) == 0u,
+    "Centre-crop Y-offset must be even (Bayer phase)");
+_Static_assert(MNIST_DIM * MNIST_BLOCK_FULL == MOCK_FRAME_H,
+    "Full-frame mode covers the whole frame height with no Y-offset");
 
 /*
  * Read the high 8 bits of pixel `pixel_index` from a RAW10 packed
@@ -154,6 +156,11 @@ int camera_open(const char *name, struct camera_frame *out)
         out->height = MOCK_FRAME_H;
         out->bayer  = CAMERA_BAYER_RGGB;
         out->format = CAMERA_FORMAT_RAW10_PACKED;
+        /* Mock frame is hand-crafted MNIST-shape data (bright digit
+         * on dark background, full-frame). No vignette, no polarity
+         * flip needed. */
+        out->recommended_invert      = false;
+        out->recommended_center_crop = false;
         return 0;
     }
 
@@ -176,6 +183,8 @@ int camera_preprocess_mnist(const uint8_t *data,
                             uint32_t       height,
                             uint32_t       bayer,
                             uint32_t       format,
+                            bool           invert,
+                            bool           center_crop,
                             uint8_t       *out_bytes,
                             size_t         out_capacity)
 {
@@ -199,29 +208,55 @@ int camera_preprocess_mnist(const uint8_t *data,
     }
     if (data_len < min_bytes) return -1;
 
+    /* Crop geometry is selected by center_crop. Full-frame mode
+     * matches the legacy contract: cover the whole 1232-tall frame
+     * (Y-offset 0) with 28 × 44-pixel blocks. Centre-crop mode uses
+     * 28 × 22-pixel blocks over a 616×616 region centred on the
+     * sensor — the half-area is needed because IMX219's wide-angle
+     * lens has heavy vignette in the corners (see camera_heatmap
+     * blank-paper trace, this PR), and the L4T `nvarguscamerasrc`
+     * ISP path that would normally apply lens-shading correction
+     * isn't reachable from SLM-OS. */
+    const uint32_t mnist_block      = center_crop ? MNIST_BLOCK_HALF
+                                                  : MNIST_BLOCK_FULL;
+    const uint32_t mnist_crop       = MNIST_DIM * mnist_block;
+    const uint32_t crop_x_off       = (MOCK_FRAME_W - mnist_crop) / 2u;
+    const uint32_t crop_y_off       = (MOCK_FRAME_H - mnist_crop) / 2u;
+    const uint32_t green_per_block  = (mnist_block * mnist_block) / 2u;
+    const uint32_t denom            = green_per_block * 255u;
+
     for (uint32_t i = 0; i < MNIST_DIM; i++) {
-        uint32_t r0 = i * MNIST_BLOCK;
+        uint32_t r0 = i * mnist_block + crop_y_off;
         for (uint32_t j = 0; j < MNIST_DIM; j++) {
-            uint32_t c0 = j * MNIST_BLOCK + MNIST_CROP_X_OFF;
+            uint32_t c0 = j * mnist_block + crop_x_off;
             uint32_t sum = 0;
 
-            for (uint32_t dy = 0; dy < MNIST_BLOCK; dy++) {
+            for (uint32_t dy = 0; dy < mnist_block; dy++) {
                 uint32_t r = r0 + dy;
                 /* RGGB green pixels: (r%2 == 0, c%2 == 1) ∪
                  *                    (r%2 == 1, c%2 == 0). Pick the
                  * starting column phase based on r's parity, then
                  * stride by 2. */
                 uint32_t c_start = c0 + ((r & 1u) ? 0u : 1u);
-                for (uint32_t c = c_start; c < c0 + MNIST_BLOCK; c += 2u) {
+                for (uint32_t c = c_start; c < c0 + mnist_block; c += 2u) {
                     sum += pixel_hi8(data, r * MOCK_FRAME_W + c, format);
                 }
             }
 
-            /* avg = sum / 968 ∈ [0, 255]; normalise to [0, 1] by
-             * dividing by 968*255. Integer-only IEEE 754 build because
-             * -mgeneral-regs-only forbids float/NEON in kernel C. */
-            uint32_t bits = fp32_div_bits(sum,
-                                          MNIST_GREEN_PER_BLOCK * 255u);
+            /* avg = sum / green_per_block ∈ [0, 255]; normalise to
+             * [0, 1] by dividing by green_per_block*255. Integer-only
+             * IEEE 754 build because -mgeneral-regs-only forbids
+             * float/NEON in kernel C.
+             *
+             * Polarity (see camera_preprocess_mnist docstring): MNIST
+             * trains on bright-stroke-on-dark-background, but raw
+             * sensor data of a black-on-white drawing produces the
+             * opposite. The invert path flips the polarity at the
+             * integer-numerator step before fp32 division so we never
+             * touch fp arithmetic — denom is unchanged, only the
+             * numerator becomes (denom_byte_total − sum). */
+            uint32_t num = invert ? (denom - sum) : sum;
+            uint32_t bits = fp32_div_bits(num, denom);
             uint8_t *dst = out_bytes + (i * MNIST_DIM + j) * 4u;
             __builtin_memcpy(dst, &bits, sizeof(bits));
         }
