@@ -21,6 +21,9 @@
 #include "gpu.h"
 #include "shell.h"
 #include "dtb.h"
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "../gpu/nvidia/ga10b_handoff_reserve.h"
+#endif
 #if !defined(PLATFORM_X86_64)
 #include "hailo_trace.h"
 #endif
@@ -378,10 +381,7 @@ void kernel_main(void *dtb)
      * doesn't fire. Safe to call on non-kexec boots: the function
      * early-returns when FECS_CURRENT_CTX is zero / target=0 / a
      * poisoned-MMIO pattern. */
-    {
-        extern void ga10b_kexec_handoff_register_reserves(void);
-        ga10b_kexec_handoff_register_reserves();
-    }
+    ga10b_kexec_handoff_register_reserves();
 #endif
 
     uart_puts("\n");

@@ -24,6 +24,7 @@
 
 #include "../../include/cache.h"
 #include "../../include/pmm.h"
+#include "../../include/string.h"
 #include "../../include/timer.h"
 
 #include <stdint.h>
@@ -209,13 +210,8 @@ int ga10b_gmmu_walk(uint64_t inst_block_phys, uint64_t gpu_va,
         return -1;
     }
 
-    /* Zero the result struct so partial walks have well-defined
-     * fields. Use a small loop because the kernel's freestanding
-     * environment doesn't have memset declared in this TU. */
-    {
-        uint8_t *p = (uint8_t *)result;
-        for (size_t i = 0; i < sizeof(*result); i++) p[i] = 0;
-    }
+    /* Zero the result struct so partial walks have well-defined fields. */
+    memset(result, 0, sizeof(*result));
     result->inst_block_phys = inst_block_phys;
     result->gpu_va = gpu_va;
     result->status = GA10B_GMMU_WALK_BAD_INST;
@@ -520,10 +516,7 @@ static void *alloc_zero_table_page(void)
                     g_table_alloc_count++,
                     (unsigned long)(uintptr_t)p);
     }
-    volatile uint64_t *q = (volatile uint64_t *)p;
-    for (int i = 0; i < 512; i++) {
-        q[i] = 0;
-    }
+    memset(p, 0, 4096);
     cache_clean_range(p, 4096);
     return p;
 }
@@ -933,8 +926,8 @@ int ga10b_gmmu_alloc(uint64_t inst_block_phys,
         if (data == NULL) {
             /* Partial alloc — the pages we mapped before this
              * stay mapped and the PTEs stay set. The PMM pages
-             * we already alloc'd leak (no phys-tracker yet,
-             * Milestone D). Caller treats this as fatal. */
+             * we already alloc'd leak (no rollback yet; tracked
+             * in #825). Caller treats this as fatal. */
             return -1;
         }
         if (i == 0) {

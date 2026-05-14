@@ -531,6 +531,16 @@ int pmm_user_reserve_add_array(const dtb_memreserve_t *extents,
     for (size_t i = 0; i < n_extents; i++) {
         if (pmm_user_reserve_add(extents[i].addr,
                                   extents[i].size) != 0) {
+            /* Surface truncation loudly — the caller will see
+             * `added < n_extents` and the wedge that fires later
+             * on the unprotected tail is otherwise hard to
+             * attribute back to "PMM reserve table was full". */
+            uart_printf("[pmm] WARN: user-reserve table full at "
+                        "entry %zu/%zu (cap=%u). Pages from extent "
+                        "%zu onward are NOT protected — expect "
+                        "downstream clobber.\n",
+                        i, n_extents,
+                        (unsigned)PMM_MAX_USER_RESERVES, i);
             break;
         }
         added++;
