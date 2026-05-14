@@ -1847,6 +1847,29 @@ static void dump_fecs_state(const char *tag)
                 (unsigned long)bar0_r32(0x00409814u),
                 (unsigned long)bar0_r32(0x00409818u),
                 (unsigned long)bar0_r32(0x0040981cu));
+    /* ctxsw_status_0/1 — additional FECS state the official NVIDIA
+     * `ctxsw_err_info` struct records alongside mailbox_value (see
+     * `mon_ctxsw.c::nvgpu_report_ctxsw_err` + the struct's three
+     * fields `ctxsw_status0`, `ctxsw_status1`, `mailbox_value` in
+     * `nvgpu_err.h:373-388`). Without these two, mb6 alone is hard
+     * to interpret because the FECS ucode error code is opaque —
+     * NVIDIA doesn't publish a value→meaning table for mb6 in any
+     * source I can access. Status0 (FE_0 register) shows what
+     * stage of ctxsw FE was in; status1 includes the arb_busy bit
+     * and other state. Register offsets per
+     * `~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_gr_ga10b.h`:
+     *   gr_fecs_ctxsw_status_1_r()    = 0x00409400
+     *   gr_fecs_ctxsw_status_fe_0_r() = 0x00409c00
+     * Plus the GPCCS-side mirror (some errors originate on GPCCS):
+     *   gr_gpc0_gpccs_ctxsw_status_1_r() = 0x00502400
+     *   gr_gpc0_gpccs_ctxsw_status_gpc_0_r() = 0x00502c04 */
+    uart_printf("[%s]   ctxsw_status fecs_fe_0=0x%08lx fecs_1=0x%08lx "
+                "gpccs_gpc_0=0x%08lx gpccs_1=0x%08lx\n",
+                tag,
+                (unsigned long)bar0_r32(0x00409c00u),
+                (unsigned long)bar0_r32(0x00409400u),
+                (unsigned long)bar0_r32(0x00502c04u),
+                (unsigned long)bar0_r32(0x00502400u));
 }
 
 /* Layer 2c: FB MMU fault info. `fault_during_ctxsw` (#788 working
