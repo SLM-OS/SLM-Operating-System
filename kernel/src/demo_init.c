@@ -37,6 +37,8 @@ extern const unsigned char demo_hailo_lua_start[];
 extern const unsigned char demo_hailo_lua_end[];
 extern const unsigned char demo_admin_lua_start[];
 extern const unsigned char demo_admin_lua_end[];
+extern const unsigned char demo_imx219_mnist_lua_start[];
+extern const unsigned char demo_imx219_mnist_lua_end[];
 
 int demo_init(void)
 {
@@ -107,6 +109,17 @@ int demo_init(void)
         littlefs_file_write(mnt, fad, demo_admin_lua_start,
                             (size_t)(demo_admin_lua_end - demo_admin_lua_start));
         littlefs_file_close(mnt, fad);
+    }
+
+    /* #396: IMX219 -> MNIST capstone demo. Runnable as
+     * `lua /mnt/files/demo_imx219_mnist.lua` from the shell. */
+    int fim = littlefs_file_open(mnt, "/demo_imx219_mnist.lua",
+                                 LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (fim >= 0) {
+        littlefs_file_write(mnt, fim, demo_imx219_mnist_lua_start,
+                            (size_t)(demo_imx219_mnist_lua_end -
+                                     demo_imx219_mnist_lua_start));
+        littlefs_file_close(mnt, fim);
     }
 
     /* #64: boot-time model preload config. One model name per line.
