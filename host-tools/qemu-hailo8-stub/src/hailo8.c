@@ -162,10 +162,11 @@ static uint64_t hailo8_bar_read(void *opaque, hwaddr addr, unsigned size)
 
     /* Phase 4 region check — takes precedence over per-seq lookup per
      * docs/hailo-re-corpus-format.md §"Region rule (Phase 4 compression)".
-     * If the access falls inside a region, serve from the region's
-     * artifact and skip the per-seq path entirely. */
+     * If the access falls inside a region AND seq is in the region's
+     * seq window, serve from the region's artifact and skip the per-seq
+     * path entirely. */
     const hailo_region_t *rgn = hailo_corpus_region_lookup(
-        s->corpus, ctx->bar_index, (uint64_t)addr, size);
+        s->corpus, ctx->bar_index, (uint64_t)addr, size, seq);
     if (rgn) {
         uint64_t val = 0;
         if (hailo_region_get_value(rgn, (uint64_t)addr, size, &val) != 0) {
@@ -215,11 +216,12 @@ static void hailo8_bar_write(void *opaque, hwaddr addr,
     data &= mask;
 
     /* Phase 4 region check — takes precedence over per-seq lookup. A write
-     * landing inside a region is expected to match the artifact bytes
-     * verbatim; any divergence is a real protocol change, not a corpus
-     * extension, so we surface it loudly instead of appending. */
+     * landing inside a region (with matching seq window) is expected to
+     * match the artifact bytes verbatim; any divergence is a real
+     * protocol change, not a corpus extension, so we surface it loudly
+     * instead of appending. */
     const hailo_region_t *rgn = hailo_corpus_region_lookup(
-        s->corpus, ctx->bar_index, (uint64_t)addr, size);
+        s->corpus, ctx->bar_index, (uint64_t)addr, size, seq);
     if (rgn) {
         uint64_t expected = 0;
         if (hailo_region_get_value(rgn, (uint64_t)addr, size, &expected) != 0) {

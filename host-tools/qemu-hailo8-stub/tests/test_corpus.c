@@ -9,6 +9,7 @@
 #include "../src/hailo8_corpus.h"
 
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -429,17 +430,21 @@ static int test_region_load_and_lookup(void)
     EXPECT_EQ(c->regions[0].data[0], 0x10);
     EXPECT_EQ(c->regions[0].data[15], 0x1F);
 
-    /* In-range lookups. */
-    const hailo_region_t *r = hailo_corpus_region_lookup(c, 4, 256, 4);
+    /* In-range lookups (any seq — default window is [1, UINT64_MAX]). */
+    const hailo_region_t *r = hailo_corpus_region_lookup(c, 4, 256, 4, 1);
     EXPECT(r != NULL);
-    r = hailo_corpus_region_lookup(c, 4, 268, 4);  /* last 4 bytes */
+    r = hailo_corpus_region_lookup(c, 4, 268, 4, 12345);  /* last 4 bytes */
     EXPECT(r != NULL);
 
     /* Out-of-range: before, after, wrong BAR, partial-overlap-at-end. */
-    EXPECT(hailo_corpus_region_lookup(c, 4, 255, 1) == NULL);
-    EXPECT(hailo_corpus_region_lookup(c, 4, 272, 1) == NULL);
-    EXPECT(hailo_corpus_region_lookup(c, 2, 256, 4) == NULL);
-    EXPECT(hailo_corpus_region_lookup(c, 4, 270, 4) == NULL);  /* spans end */
+    EXPECT(hailo_corpus_region_lookup(c, 4, 255, 1, 1) == NULL);
+    EXPECT(hailo_corpus_region_lookup(c, 4, 272, 1, 1) == NULL);
+    EXPECT(hailo_corpus_region_lookup(c, 2, 256, 4, 1) == NULL);
+    EXPECT(hailo_corpus_region_lookup(c, 4, 270, 4, 1) == NULL);  /* spans end */
+
+    /* Default seq window is full range — region should accept seq=1 and seq=UINT64_MAX. */
+    EXPECT(c->regions[0].applies_from_seq == 1);
+    EXPECT(c->regions[0].applies_to_seq == UINT64_MAX);
 
     /* Value decode (little-endian, matches op value semantics). */
     uint64_t v = 0;
@@ -638,6 +643,220 @@ static int test_region_free_handles_empty(void)
     return 1;
 }
 
+static int test_region_seq_window_disjoint_allowed(void)
+{
+    /* Two regions on the same BAR with the same offset range BUT disjoint
+     * seq windows should both load — the multi-pass firmware upload case.
+     * The first region serves seq [1, 100], the second serves seq [200, ∞). */
+    uint8_t bytes[32];
+    for (size_t i = 0; i < sizeof(bytes); i++) bytes[i] = (uint8_t)(0xA0 + i);
+    write_tmp_artifact(bytes, sizeof(bytes));
+
+    make_tmp();
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":0,"
+        "\"applies_from_seq\":1,\"applies_to_seq\":100,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":16,"
+        "\"applies_from_seq\":200,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n",
+        tmp_artifact_path, tmp_artifact_path);
+    write_file(tmp_path, buf);
+
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    if (!c) {
+        fprintf(stderr, "load failed: %s\n", err);
+        return 0;
+    }
+    EXPECT_EQ(c->n_regions, 2);
+    EXPECT_EQ(c->regions[0].applies_from_seq, 1);
+    EXPECT_EQ(c->regions[0].applies_to_seq, 100);
+    EXPECT_EQ(c->regions[1].applies_from_seq, 200);
+    EXPECT_EQ(c->regions[1].applies_to_seq, UINT64_MAX);
+
+    /* Seq-bounded lookup: same offset, different seqs → different regions. */
+    const hailo_region_t *r1 = hailo_corpus_region_lookup(c, 4, 0, 4, 50);
+    const hailo_region_t *r2 = hailo_corpus_region_lookup(c, 4, 0, 4, 500);
+    EXPECT(r1 != NULL);
+    EXPECT(r2 != NULL);
+    EXPECT(r1 != r2);
+    /* Verify the right region serves the right bytes (source_offset differs). */
+    uint64_t v1 = 0, v2 = 0;
+    EXPECT_EQ(hailo_region_get_value(r1, 0, 4, &v1), 0);
+    EXPECT_EQ(hailo_region_get_value(r2, 0, 4, &v2), 0);
+    EXPECT_EQ(v1, 0xA3A2A1A0ULL);  /* first 4 bytes of artifact */
+    EXPECT_EQ(v2, 0xB3B2B1B0ULL);  /* bytes 16..20 of artifact */
+
+    /* Gap between windows: seq=150 should miss both. */
+    EXPECT(hailo_corpus_region_lookup(c, 4, 0, 4, 150) == NULL);
+    /* Boundary tests — both ends inclusive. */
+    EXPECT(hailo_corpus_region_lookup(c, 4, 0, 4, 1) == r1);
+    EXPECT(hailo_corpus_region_lookup(c, 4, 0, 4, 100) == r1);
+    EXPECT(hailo_corpus_region_lookup(c, 4, 0, 4, 200) == r2);
+
+    hailo_corpus_free(c);
+    unlink(tmp_path);
+    unlink(tmp_artifact_path);
+    return 1;
+}
+
+static int test_region_seq_window_overlapping_rejected(void)
+{
+    /* Same offset range, OVERLAPPING seq windows → must be rejected. */
+    uint8_t bytes[32];
+    memset(bytes, 0x55, sizeof(bytes));
+    write_tmp_artifact(bytes, sizeof(bytes));
+
+    make_tmp();
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":0,"
+        "\"applies_from_seq\":1,\"applies_to_seq\":100,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":16,"
+        "\"applies_from_seq\":50,\"applies_to_seq\":150,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n",
+        tmp_artifact_path, tmp_artifact_path);
+    write_file(tmp_path, buf);
+
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "overlap") != NULL);
+    unlink(tmp_path);
+    unlink(tmp_artifact_path);
+    return 1;
+}
+
+static int test_region_rejects_inverted_seq_window(void)
+{
+    /* applies_to_seq < applies_from_seq is nonsense — reject. */
+    uint8_t bytes[16];
+    memset(bytes, 0x66, sizeof(bytes));
+    write_tmp_artifact(bytes, sizeof(bytes));
+
+    make_tmp();
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":0,"
+        "\"applies_from_seq\":100,\"applies_to_seq\":50,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n",
+        tmp_artifact_path);
+    write_file(tmp_path, buf);
+
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "applies_to_seq") != NULL);
+    unlink(tmp_path);
+    unlink(tmp_artifact_path);
+    return 1;
+}
+
+static int test_region_rejects_zero_seq_bounds(void)
+{
+    /* applies_from_seq and applies_to_seq must be >= 1 — seq=0 is never
+     * produced by the stub (seq counter starts at 1) and a zero bound
+     * usually means the field was accidentally omitted from a struct
+     * initializer somewhere in a producer tool. Reject loudly. */
+    uint8_t bytes[16];
+    memset(bytes, 0x77, sizeof(bytes));
+    write_tmp_artifact(bytes, sizeof(bytes));
+
+    make_tmp();
+    char buf[2048];
+    /* applies_from_seq=0 */
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":0,"
+        "\"applies_from_seq\":0,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n",
+        tmp_artifact_path);
+    write_file(tmp_path, buf);
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "applies_from_seq") != NULL);
+    unlink(tmp_path);
+
+    /* applies_to_seq=0 */
+    make_tmp();
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":0,"
+        "\"applies_to_seq\":0,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n",
+        tmp_artifact_path);
+    write_file(tmp_path, buf);
+    c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    EXPECT(c == NULL);
+    EXPECT(strstr(err, "applies_to_seq") != NULL);
+    unlink(tmp_path);
+    unlink(tmp_artifact_path);
+    return 1;
+}
+
+static int test_region_disjoint_offsets_overlapping_seq_allowed(void)
+{
+    /* Two regions on the same BAR with disjoint OFFSET ranges but
+     * overlapping (or default-unbounded) SEQ windows are legitimate —
+     * the offset disjointness alone is enough to disambiguate which
+     * region serves an access. Lock in that this isn't flagged as a
+     * conflict. */
+    uint8_t bytes[64];
+    memset(bytes, 0x42, sizeof(bytes));
+    write_tmp_artifact(bytes, sizeof(bytes));
+
+    make_tmp();
+    char buf[2048];
+    snprintf(buf, sizeof(buf),
+        "{\"type\":\"header\",\"format_version\":1,\"hailort_version\":\"4.23.0\",\"fw_version\":\"4.23.0\",\"capture_host\":\"qemu\",\"slmos_base_sha\":\"abc\",\"capture_started_at\":\"2026-05-14T00:00:00Z\"}\n"
+        /* Region A: bar=4 offsets [0, 16), seq unbounded */
+        "{\"type\":\"region\",\"bar\":4,\"start\":0,\"end\":16,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":0,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n"
+        /* Region B: bar=4 offsets [32, 48), seq unbounded */
+        "{\"type\":\"region\",\"bar\":4,\"start\":32,\"end\":48,"
+        "\"source_kind\":\"file\",\"source_path\":\"%s\",\"source_offset\":32,"
+        "\"validated_at_commit\":null,\"validated_at\":null}\n",
+        tmp_artifact_path, tmp_artifact_path);
+    write_file(tmp_path, buf);
+
+    char err[256];
+    hailo_corpus_t *c = hailo_corpus_load(tmp_path, false, err, sizeof(err));
+    if (!c) {
+        fprintf(stderr, "load failed: %s\n", err);
+        return 0;
+    }
+    EXPECT_EQ(c->n_regions, 2);
+    /* Same seq, different offsets → different regions. */
+    const hailo_region_t *rA = hailo_corpus_region_lookup(c, 4, 0, 4, 1000);
+    const hailo_region_t *rB = hailo_corpus_region_lookup(c, 4, 32, 4, 1000);
+    EXPECT(rA != NULL);
+    EXPECT(rB != NULL);
+    EXPECT(rA != rB);
+    /* The 16-byte gap [16, 32) belongs to neither. */
+    EXPECT(hailo_corpus_region_lookup(c, 4, 16, 4, 1000) == NULL);
+    EXPECT(hailo_corpus_region_lookup(c, 4, 28, 4, 1000) == NULL);
+
+    hailo_corpus_free(c);
+    unlink(tmp_path);
+    unlink(tmp_artifact_path);
+    return 1;
+}
+
 int main(void)
 {
     TEST(test_hex_roundtrip_u32);
@@ -664,6 +883,11 @@ int main(void)
     TEST(test_region_rejects_short_read);
     TEST(test_region_rejects_negative_fields);
     TEST(test_region_free_handles_empty);
+    TEST(test_region_seq_window_disjoint_allowed);
+    TEST(test_region_seq_window_overlapping_rejected);
+    TEST(test_region_rejects_inverted_seq_window);
+    TEST(test_region_rejects_zero_seq_bounds);
+    TEST(test_region_disjoint_offsets_overlapping_seq_allowed);
     fprintf(stderr, "\n%d / %d tests passed\n", g_test_count - g_fail_count, g_test_count);
     return g_fail_count == 0 ? 0 : 1;
 }

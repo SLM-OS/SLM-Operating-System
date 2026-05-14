@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -465,6 +466,12 @@ static int parse_region_line(const char *line, size_t linelen,
                              char *errbuf, size_t errlen)
 {
     memset(rp, 0, sizeof(*rp));
+    /* Seq window defaults — region applies to every seq unless caller
+     * overrides. memset's zero would make applies_from_seq=0 which would
+     * still include seq=1 (the first op), but for clarity we set the
+     * explicit default to 1. UINT64_MAX is the "no upper bound" sentinel. */
+    rp->region.applies_from_seq = 1;
+    rp->region.applies_to_seq = UINT64_MAX;
     json_cursor_t cur = { .p = line, .end = line + linelen };
     skip_ws(&cur);
     if (cur.p >= cur.end || *cur.p != '{') {
@@ -549,6 +556,22 @@ static int parse_region_line(const char *line, size_t linelen,
             }
             rp->region.source_offset = (uint64_t)intval;
             rp->has_source_offset = 1;
+        } else if (strcmp(key, "applies_from_seq") == 0 && is_int) {
+            if (intval < 1) {
+                set_err(errbuf, errlen,
+                        "region 'applies_from_seq' must be >= 1 (got %lld)",
+                        (long long)intval);
+                return -1;
+            }
+            rp->region.applies_from_seq = (uint64_t)intval;
+        } else if (strcmp(key, "applies_to_seq") == 0 && is_int) {
+            if (intval < 1) {
+                set_err(errbuf, errlen,
+                        "region 'applies_to_seq' must be >= 1 (got %lld)",
+                        (long long)intval);
+                return -1;
+            }
+            rp->region.applies_to_seq = (uint64_t)intval;
         } else if (strcmp(key, "validated_at_commit") == 0 && is_str) {
             copy_str(rp->region.validated_at_commit,
                      sizeof(rp->region.validated_at_commit), strbuf);
@@ -582,6 +605,13 @@ static int parse_region_line(const char *line, size_t linelen,
                 "region end (%llu) must be > start (%llu)",
                 (unsigned long long)rp->region.end,
                 (unsigned long long)rp->region.start);
+        return -1;
+    }
+    if (rp->region.applies_to_seq < rp->region.applies_from_seq) {
+        set_err(errbuf, errlen,
+                "region applies_to_seq (%llu) must be >= applies_from_seq (%llu)",
+                (unsigned long long)rp->region.applies_to_seq,
+                (unsigned long long)rp->region.applies_from_seq);
         return -1;
     }
     uint64_t span = rp->region.end - rp->region.start;
@@ -648,19 +678,29 @@ static int region_load_data(hailo_region_t *r, char *errbuf, size_t errlen)
 static int push_region(hailo_corpus_t *c, const hailo_region_t *src,
                        char *errbuf, size_t errlen)
 {
-    /* Overlap check — spec rejects overlapping regions on the same BAR. */
+    /* Overlap check — two regions on the same BAR conflict only if their
+     * offset ranges AND their seq windows both overlap. Same offsets in
+     * disjoint seq windows is the multi-pass firmware upload case and is
+     * legitimate. */
     for (size_t i = 0; i < c->n_regions; i++) {
         const hailo_region_t *other = &c->regions[i];
         if (other->bar != src->bar) continue;
-        bool overlaps = !(src->end <= other->start || other->end <= src->start);
-        if (overlaps) {
+        bool off_overlap = !(src->end <= other->start || other->end <= src->start);
+        bool seq_overlap = !(src->applies_to_seq < other->applies_from_seq ||
+                             other->applies_to_seq < src->applies_from_seq);
+        if (off_overlap && seq_overlap) {
             set_err(errbuf, errlen,
-                    "region overlap on bar=%d: new [%llu,%llu) vs existing [%llu,%llu)",
+                    "region overlap on bar=%d: new [%llu,%llu) seq [%llu,%llu] "
+                    "vs existing [%llu,%llu) seq [%llu,%llu]",
                     src->bar,
                     (unsigned long long)src->start,
                     (unsigned long long)src->end,
+                    (unsigned long long)src->applies_from_seq,
+                    (unsigned long long)src->applies_to_seq,
                     (unsigned long long)other->start,
-                    (unsigned long long)other->end);
+                    (unsigned long long)other->end,
+                    (unsigned long long)other->applies_from_seq,
+                    (unsigned long long)other->applies_to_seq);
             return -1;
         }
     }
@@ -993,7 +1033,7 @@ int hailo_corpus_append_write(hailo_corpus_t *c,
 
 const hailo_region_t *hailo_corpus_region_lookup(const hailo_corpus_t *c,
                                                  int bar, uint64_t offset,
-                                                 uint32_t size)
+                                                 uint32_t size, uint64_t seq)
 {
     if (!c || size == 0) return NULL;
     uint64_t access_end = offset + size;  /* exclusive */
@@ -1004,6 +1044,8 @@ const hailo_region_t *hailo_corpus_region_lookup(const hailo_corpus_t *c,
     for (size_t i = 0; i < c->n_regions; i++) {
         const hailo_region_t *r = &c->regions[i];
         if (r->bar != bar) continue;
+        /* Seq window filter — see hailo_region_t docs. */
+        if (seq < r->applies_from_seq || seq > r->applies_to_seq) continue;
         /* Require the access to be ENTIRELY inside the region. Partial
          * overlap counts as not covered — serving a sliced access half
          * from the artifact and half from the per-seq lookup is incoherent. */

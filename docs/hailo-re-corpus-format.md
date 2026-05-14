@@ -91,6 +91,8 @@ A region rule short-circuits per-`seq` capture for a contiguous BAR range whose 
 | `source_offset` | integer | yes (for `source_kind="file"`) | Byte offset within the file corresponding to BAR `start` |
 | `validated_at_commit` | string\|null | yes | Audit field, same semantics as op entries — full 40-char SHA when validated, `null` until a verification pass confirms HailoRT writes match the region |
 | `validated_at` | string\|null | yes | ISO 8601 timestamp, same semantics |
+| `applies_from_seq` | integer | no | Inclusive lower seq bound — region rule fires only for accesses with `seq >= applies_from_seq`. Defaults to `1`. Must be `>= 1`. See "Seq-bounded regions" below |
+| `applies_to_seq` | integer | no | Inclusive upper seq bound — region rule fires only for accesses with `seq <= applies_to_seq`. **Omit the field to mean "unbounded"** — the loader's hand-rolled JSON parser stores integers as `int64_t`, so explicitly encoding `UINT64_MAX` (`18446744073709551615`) overflows to a negative value and is rejected. Defaults to unbounded. Must be `>= applies_from_seq` |
 | `note` | string | no | Free-form annotation (e.g. "Hailo-8 firmware code section, identified via signature match on first 32 bytes") |
 
 (Fields use flat names — `source_kind` etc. — rather than a nested `source` object so the existing hand-rolled JSON parser in the QEMU stub doesn't need to grow nested-object support. Functionally equivalent to a nested representation.)
@@ -101,9 +103,24 @@ A region rule short-circuits per-`seq` capture for a contiguous BAR range whose 
 
 **Write semantics under a region rule:** the stub computes the expected bytes from the file and compares against the incoming write data. On match: silent success, no corpus append. On mismatch: emit `HAILO_RE_CORPUS_DIVERGENCE` with `reason=region_write_mismatch`, halt. This catches the case where HailoRT writes something not present in the artifact, indicating either an incorrect region rule or HailoRT applying a runtime transformation before upload.
 
-**Multiple regions:** A corpus may contain multiple region rules for different BAR ranges. Overlapping regions within the same BAR are a configuration error and tools SHOULD reject the corpus on load.
+**Multiple regions:** A corpus may contain multiple region rules for different BAR ranges. Overlapping regions within the same BAR are a configuration error and tools SHOULD reject the corpus on load — UNLESS their seq windows are disjoint (see below).
 
-**Backward compatibility:** Region entries are an additive extension. Tools that don't recognize `type="region"` MUST silently skip those lines. `format_version` remains at `1`. Tools that DO consume region rules MUST also implement the precedence rule above.
+### Seq-bounded regions
+
+`applies_from_seq` and `applies_to_seq` narrow a region rule to a specific seq window. The intended use case is **multi-pass firmware uploads**, where HailoRT writes one firmware section into a BAR window, then later writes a *different* section into the *same* BAR window. A single region rule can only describe one of the two passes; seq-bounded regions let both coexist.
+
+Two regions on the same BAR with overlapping offset ranges are legitimate IF their seq windows are disjoint (`A.applies_to_seq < B.applies_from_seq` OR vice versa). The loader rejects regions that overlap in BOTH offset and seq.
+
+Lookup: for each access, the stub finds the unique region whose `(bar, offset+size)` covers the access AND whose `[applies_from_seq, applies_to_seq]` includes the access's `seq`. If no such region exists, the stub falls through to per-seq lookup as usual.
+
+Example: a corpus with two passes over BAR4 [0, 0x272B8):
+
+```json
+{"type":"region","bar":4,"start":72,"end":164536,"source_kind":"file","source_path":"/lib/firmware/hailo/hailo8_fw.4.23.0.bin","source_offset":96,"applies_to_seq":2107,"validated_at_commit":null,"validated_at":null,"note":"pass 1 — section A"}
+{"type":"region","bar":4,"start":0,"end":160440,"source_kind":"file","source_path":"/lib/firmware/hailo/hailo8_fw.4.23.0.bin","source_offset":4120,"applies_from_seq":2118,"validated_at_commit":null,"validated_at":null,"note":"pass 2 — section B"}
+```
+
+**Backward compatibility:** Region entries are an additive extension. Tools that don't recognize `type="region"` MUST silently skip those lines. `format_version` remains at `1`. Tools that DO consume region rules MUST also implement the precedence rule above. Tools that consume region rules but predate `applies_from_seq` / `applies_to_seq` see them as unknown keys (tolerated) and treat the region as universally applicable — which is wrong for a corpus that depends on the seq filter to avoid overlap. Producers of seq-bounded regions therefore should not co-publish such corpora to consumers known to be on the older schema; in practice this isn't a concern since the only consumer is the in-tree QEMU stub built from the same revision.
 
 ## Sequence semantics
 

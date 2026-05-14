@@ -88,6 +88,16 @@ typedef struct hailo_region {
     char      source_path[HAILO_CORPUS_MAX_PATH + 1];
     uint64_t  source_offset;  /* byte offset within source_path */
 
+    /* Optional seq window — region rule fires only for accesses whose
+     * `seq` is in [applies_from_seq, applies_to_seq], inclusive. Lets
+     * multiple regions on the same BAR with overlapping offset ranges
+     * coexist as long as their seq windows are disjoint (e.g. multi-pass
+     * firmware uploads that re-use the same BAR window for different
+     * bytes). Defaults: applies_from_seq=1, applies_to_seq=UINT64_MAX
+     * (i.e. no seq filter — original Phase 4 behavior). */
+    uint64_t  applies_from_seq;
+    uint64_t  applies_to_seq;
+
     /* Loaded artifact bytes. Owned by the region; freed in
      * hailo_corpus_free. `data[i]` corresponds to BAR offset
      * `start + i` (after subtracting source_offset). */
@@ -155,14 +165,17 @@ const hailo_op_entry_t *hailo_corpus_get(const hailo_corpus_t *c, uint64_t seq);
 
 /*
  * Phase 4 region lookup. Returns the region covering the half-open range
- * `[offset, offset + size)` on `bar`, or NULL if no region covers the
- * access. The covering region must contain the ENTIRE access width — a
- * partial overlap counts as NOT covered, since serving a fraction of an
- * access from the artifact and the rest from … nowhere is incoherent.
+ * `[offset, offset + size)` on `bar` AND whose seq window includes `seq`,
+ * or NULL if no such region exists. The covering region must contain the
+ * ENTIRE access width — a partial overlap counts as NOT covered, since
+ * serving a fraction of an access from the artifact and the rest from …
+ * nowhere is incoherent. The seq filter lets multiple regions on the
+ * same BAR cover the same offset range across disjoint seq windows
+ * (e.g. multi-pass firmware uploads).
  */
 const hailo_region_t *hailo_corpus_region_lookup(const hailo_corpus_t *c,
                                                  int bar, uint64_t offset,
-                                                 uint32_t size);
+                                                 uint32_t size, uint64_t seq);
 
 /*
  * Extract `size` bytes from the region's loaded artifact starting at BAR
