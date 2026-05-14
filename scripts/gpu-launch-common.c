@@ -175,6 +175,9 @@ int gpu_collect_gr_ctx_extents(struct gpu_launch_ctx *ctx,
     total += parse_phys_file_into_extents(
         "/sys/kernel/debug/gpu.0/fifo/slmos_global_ctx_phys",
         entries, total, 256u);
+    total += parse_phys_file_into_extents(
+        "/sys/kernel/debug/gpu.0/fifo/slmos_falcon_ucode_phys",
+        entries, total, 256u);
 
     if (total == 0) {
         fprintf(stderr,
