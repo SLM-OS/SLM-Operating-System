@@ -4057,7 +4057,8 @@ static int l_camera_preprocess_mnist(lua_State *L) {
      * leaking the page. Stack-resident output unwinds for free. */
     uint8_t out[CAMERA_MNIST_OUT_BYTES];
     int rc = camera_preprocess_mnist(frame.data, frame.size,
-                                     frame.width, frame.height, frame.bayer,
+                                     frame.width, frame.height,
+                                     frame.bayer, frame.format,
                                      out, sizeof(out));
     if (rc != 0) {
         lua_pushnil(L);
