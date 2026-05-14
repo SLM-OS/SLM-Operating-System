@@ -318,10 +318,17 @@ def load(path: os.PathLike | str) -> Corpus:
         kind = obj.get("type")
         if kind == "op":
             op = _validate_op(obj)
-            if op.seq != prev_seq + 1:
+            # Op entries must be strictly increasing in seq, but NOT
+            # necessarily contiguous. Phase 4 region rules cover a
+            # contiguous BAR range with a single entry; the seq counter
+            # still ticks for every region-served access inside that
+            # range, so the next captured op naturally has a seq several
+            # hundred (or thousand) past the prior one. The +1 invariant
+            # held pre-Phase 4 only because every access generated an op.
+            if op.seq <= prev_seq:
                 raise CorpusError(
-                    f"{p}:{i}: seq jumped {prev_seq} -> {op.seq} "
-                    "(must be strictly monotonic +1)"
+                    f"{p}:{i}: seq went backwards {prev_seq} -> {op.seq} "
+                    "(must be strictly increasing)"
                 )
             ops.append(op)
             prev_seq = op.seq
