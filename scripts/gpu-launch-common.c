@@ -98,6 +98,173 @@ uint64_t gpu_virt_to_phys(void *vaddr)
     return pfn * 4096 + ((uint64_t)vaddr & 0xFFF);
 }
 
+/* Parse one debugfs file and append entries into the extents array.
+ * Returns number of entries appended. Skips entries whose phys looks
+ * like a kernel VA (top 16 bits set — the VPR-protected buffers fall
+ * into this case; nvgpu_mem_get_phys_addr returns the cpu_va for
+ * those instead of a real DRAM phys). */
+struct slmos_phys_extent {
+    uint64_t phys;
+    uint32_t n_pages;
+    uint32_t reserved;
+};
+
+static uint32_t parse_phys_file_into_extents(const char *path,
+                                              struct slmos_phys_extent *entries,
+                                              uint32_t start_idx,
+                                              uint32_t cap)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        fprintf(stderr,
+                "[gpu-launch] gr_ctx_extents: %s open failed: %s\n",
+                path, strerror(errno));
+        return 0;
+    }
+    char line[256];
+    if (!fgets(line, sizeof(line), fp)) { fclose(fp); return 0; }
+    uint32_t n = 0;
+    while (fgets(line, sizeof(line), fp) && (start_idx + n) < cap) {
+        uint32_t chid, tsgid, idx;
+        unsigned long long phys;
+        unsigned long size;
+        if (sscanf(line, "%u %u %u 0x%llx %lu",
+                   &chid, &tsgid, &idx, &phys, &size) != 5) continue;
+        if (phys == 0 || size == 0) continue;
+        /* Reject obvious kernel-VA returns (top byte set). On Tegra DRAM
+         * phys is at most 0x2_8000_0000 (10 GB) — anything above
+         * 0x10_0000_0000 is a kernel virtual address that
+         * nvgpu_mem_get_phys_addr returned as a fallback (e.g. for
+         * VPR-protected buffers). SLM-OS would skip these via
+         * ga10b_phys_in_dram anyway but we save a slot. */
+        if (phys >= 0x1000000000ull) continue;
+        uint64_t base = phys & ~4095ull;
+        uint64_t end  = (phys + size + 4095ull) & ~4095ull;
+        uint32_t pages = (uint32_t)((end - base) / 4096ull);
+        entries[start_idx + n].phys = base;
+        entries[start_idx + n].n_pages = pages;
+        entries[start_idx + n].reserved = 0;
+        n++;
+    }
+    fclose(fp);
+    return n;
+}
+
+int gpu_collect_gr_ctx_extents(struct gpu_launch_ctx *ctx,
+                                uint64_t *out_extents_phys,
+                                uint32_t *out_n_extents)
+{
+    *out_extents_phys = 0;
+    *out_n_extents = 0;
+
+    /* Allocate a 4 KB dmabuf — fits 256 entries (16 channels × 8 buffers
+     * + 9 globals = ~140 entries worst case, plenty of headroom). */
+    int dmabuf = gpu_nvmap_alloc_dmabuf(ctx->nvmap_fd, 4096, 4096);
+    void *va = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, dmabuf, 0);
+    if (va == MAP_FAILED) {
+        perror("[gpu-launch] gr_ctx_extents: mmap dmabuf");
+        return -1;
+    }
+    memset(va, 0, 4096);
+
+    struct slmos_phys_extent *entries = (struct slmos_phys_extent *)va;
+    uint32_t total = 0;
+    total += parse_phys_file_into_extents(
+        "/sys/kernel/debug/gpu.0/fifo/slmos_gr_ctx_phys",
+        entries, total, 256u);
+    total += parse_phys_file_into_extents(
+        "/sys/kernel/debug/gpu.0/fifo/slmos_global_ctx_phys",
+        entries, total, 256u);
+    total += parse_phys_file_into_extents(
+        "/sys/kernel/debug/gpu.0/fifo/slmos_falcon_ucode_phys",
+        entries, total, 256u);
+
+    if (total == 0) {
+        fprintf(stderr,
+                "[gpu-launch] gr_ctx_extents: 0 entries from both debugfs "
+                "files (patched nvgpu.ko not installed, or no channels "
+                "active). Skipping v10 publish.\n");
+        munmap(va, 4096);
+        return -1;
+    }
+    msync(va, 4096, MS_SYNC);
+
+    uint64_t extents_phys = gpu_virt_to_phys(va);
+    if (extents_phys == 0) {
+        fprintf(stderr,
+                "[gpu-launch] gr_ctx_extents: gpu_virt_to_phys returned 0. "
+                "Skipping v10 publish.\n");
+        munmap(va, 4096);
+        return -1;
+    }
+
+    *out_extents_phys = extents_phys;
+    *out_n_extents = total;
+    printf("[gpu-launch] gr_ctx_extents: %u entries @ phys 0x%llx "
+           "(per-channel + global)\n",
+           total, (unsigned long long)extents_phys);
+    return 0;
+}
+
+uint64_t gpu_read_fecs_inst_block_phys(void)
+{
+    /* GA10B GPU BAR0 base + FECS_CURRENT_CTX offset. Hardcoded to
+     * keep this TU free of GPU-specific header dependencies — both
+     * constants are pinned by SLM-OS's `ga10b_handoff_reserve.c`
+     * which reads the same register from the kernel side post-kexec. */
+    const uint64_t bar0_base       = 0x17000000ull;
+    const uint32_t fecs_ctx_offset = 0x00409b00u;
+    const uint64_t page_size       = 4096u;
+
+    int fd = open("/dev/mem", O_RDONLY | O_SYNC);
+    if (fd < 0) {
+        fprintf(stderr,
+                "[gpu-launch] FECS read: open(/dev/mem) failed: %s "
+                "(run as root). inst_block_phys=0 — SLM-OS falls back "
+                "to DRAM walk.\n", strerror(errno));
+        return 0;
+    }
+
+    uint64_t reg_abs   = bar0_base + fecs_ctx_offset;
+    uint64_t page_base = reg_abs & ~(page_size - 1);
+    uint32_t page_off  = (uint32_t)(reg_abs & (page_size - 1));
+
+    void *map = mmap(NULL, page_size, PROT_READ, MAP_SHARED, fd,
+                     (off_t)page_base);
+    close(fd);
+    if (map == MAP_FAILED) {
+        fprintf(stderr,
+                "[gpu-launch] FECS read: mmap @0x%llx failed: %s. "
+                "inst_block_phys=0.\n",
+                (unsigned long long)page_base, strerror(errno));
+        return 0;
+    }
+
+    volatile uint32_t *reg_ptr =
+        (volatile uint32_t *)((uint8_t *)map + page_off);
+    uint32_t reg = *reg_ptr;
+    munmap(map, page_size);
+
+    if ((reg & 0xFFFF0000u) == 0xbadf0000u) {
+        fprintf(stderr,
+                "[gpu-launch] FECS read: register=0x%08x (priv-bad — "
+                "GPU power-gated?). inst_block_phys=0.\n", reg);
+        return 0;
+    }
+    uint32_t target = (reg >> 28) & 0x3u;
+    if (target == 0) {
+        fprintf(stderr,
+                "[gpu-launch] FECS read: register=0x%08x (target=0 — "
+                "no current ctx). inst_block_phys=0.\n", reg);
+        return 0;
+    }
+    uint64_t inst_phys = ((uint64_t)(reg & 0x0FFFFFFFu)) << 12;
+    printf("[gpu-launch] FECS_CURRENT_CTX=0x%08x → "
+           "inst_block_phys=0x%llx (target=%u). Publishing in handoff.\n",
+           reg, (unsigned long long)inst_phys, target);
+    return inst_phys;
+}
+
 /* gpu_qmd_set_bits is now `static inline` in scripts/gpu-qmd-bits.h
  * so the host-test harness can pick it up directly. See that header
  * for the implementation + UB-shift-guard rationale. */
@@ -729,7 +896,7 @@ uint64_t gpu_write_handoff_v4(const struct gpu_launch_ctx *ctx,
          * anyway. */
         .semaphore_phys     = output_phys,
         .semaphore_gpu_va   = output_gpu_va,
-        .inst_block_phys    = 0,
+        .inst_block_phys    = gpu_read_fecs_inst_block_phys(),
         .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
                                 [GPU_LAUNCH_USERD_GP_PUT_WORD],
         .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
@@ -800,7 +967,7 @@ uint64_t gpu_write_handoff_v5(const struct gpu_launch_ctx *ctx,
          * caller provides a meaningful (final-op) target. */
         .semaphore_phys     = output_phys,
         .semaphore_gpu_va   = output_gpu_va,
-        .inst_block_phys    = 0,
+        .inst_block_phys    = gpu_read_fecs_inst_block_phys(),
         .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
                                 [GPU_LAUNCH_USERD_GP_PUT_WORD],
         .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
@@ -868,7 +1035,7 @@ uint64_t gpu_write_handoff_v6(const struct gpu_launch_ctx *ctx,
         .pushbuf_size       = 65536,
         .semaphore_phys     = output_phys,
         .semaphore_gpu_va   = output_gpu_va,
-        .inst_block_phys    = 0,
+        .inst_block_phys    = gpu_read_fecs_inst_block_phys(),
         .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
                                 [GPU_LAUNCH_USERD_GP_PUT_WORD],
         .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
@@ -1022,7 +1189,7 @@ uint64_t gpu_write_handoff_v7(const struct gpu_launch_ctx *ctx,
         .pushbuf_size       = 65536,
         .semaphore_phys     = output_phys,
         .semaphore_gpu_va   = output_gpu_va,
-        .inst_block_phys    = 0,
+        .inst_block_phys    = gpu_read_fecs_inst_block_phys(),
         .initial_gp_put     = ((volatile uint32_t *)ctx->userd_va)
                                 [GPU_LAUNCH_USERD_GP_PUT_WORD],
         .initial_gp_get     = ((volatile uint32_t *)ctx->userd_va)
@@ -1054,6 +1221,21 @@ uint64_t gpu_write_handoff_v7(const struct gpu_launch_ctx *ctx,
         .qmd_pool_size_bytes = ctx->qmd_pool_size_bytes,
         .qmd_pool_n_slots   = ctx->qmd_pool_n_slots,
     };
+
+    /* #788 Mode C v10: collect per-channel GR ctx buffer phys ranges
+     * via the patched-nvgpu debugfs file and publish them in the
+     * handoff. Failure is non-fatal — older / unpatched nvgpu just
+     * leaves the fields zero and SLM-OS skips the reservation. */
+    {
+        uint64_t gr_ext_phys = 0;
+        uint32_t gr_ext_n    = 0;
+        if (gpu_collect_gr_ctx_extents((struct gpu_launch_ctx *)ctx,
+                                       &gr_ext_phys, &gr_ext_n) == 0) {
+            hoff.gr_ctx_extents_phys = gr_ext_phys;
+            hoff.gr_ctx_n_extents    = gr_ext_n;
+        }
+    }
+
     memcpy(handoff_va, &hoff, sizeof(hoff));
     msync(handoff_va, 4096, MS_SYNC);
 

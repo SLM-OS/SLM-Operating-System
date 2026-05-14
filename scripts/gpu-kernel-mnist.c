@@ -133,6 +133,11 @@ struct mnist_op {
     uint32_t v7_smem_size_bytes;    /* SHARED_MEMORY_SIZE; non-zero for HMMA */
     uint32_t v7_slm_size_bytes;     /* SHADER_LOCAL_MEM size */
     uint32_t v7_barrier_count;      /* BARRIER_COUNT; 3 for the WMMA SASS */
+    /* #788 Mode B fix (v7.1): per-op shader phys + size for SLM-OS's
+     * PMM reservation. Captured via gpu_virt_to_phys at allocation
+     * time — no GMMU walking needed post-kexec. */
+    uint64_t v7_shader_phys;
+    uint32_t v7_shader_size_bytes;
 };
 
 /* Record the v7 dispatch inputs alongside each helper-baked QMD.
@@ -146,6 +151,23 @@ struct mnist_op {
         (op_)->v7_register_count_v = GPU_LAUNCH_REGISTER_COUNT_V_DEFAULT;   \
         (op_)->v7_grid_x = (gx_); (op_)->v7_grid_y = (gy_); (op_)->v7_grid_z = (gz_); \
         (op_)->v7_block_x = (bx_); (op_)->v7_block_y = (by_); (op_)->v7_block_z = (bz_); \
+    } while (0)
+
+/* #788 Mode B v7.1 shader phys+size: captured per-op after
+ * MNIST_RECORD_V7 fires. Pass the originating gpu_buffer (or NULL
+ * + ctx for the special case where the shader lives in ctx.shader_va
+ * — the conv2d shader on this launcher). The buffer's `.phys` and
+ * `.size_bytes` are what SLM-OS will reserve from PMM.
+ *
+ * For the conv2d case (ctx.shader_va), the buffer is a single 65536-B
+ * dmabuf allocated by gpu_launch_setup; phys is gpu_virt_to_phys of
+ * its mmap address. Size is the full dmabuf, not just SASS_len —
+ * reserving the whole dmabuf covers any future shader-bytes growth
+ * within that allocation. */
+#define MNIST_RECORD_V7_SHADER_PHYS(op_, shader_phys_, shader_size_) \
+    do {                                                              \
+        (op_)->v7_shader_phys       = (shader_phys_);                 \
+        (op_)->v7_shader_size_bytes = (shader_size_);                 \
     } while (0)
 
 int main(int argc, char **argv)
@@ -244,6 +266,32 @@ int main(int argc, char **argv)
     uint64_t addrelu_shader_gva = addrelu_shader.gpu_va;
     uint64_t pool_shader_gva    = pool_shader.gpu_va;
     uint64_t gemm_shader_gva    = gemm_shader.gpu_va;
+
+    /* #788 Mode B fix: capture per-shader phys+size for SLM-OS PMM
+     * reservation. Each shader is allocated as a separate dmabuf;
+     * the helper has the phys via gpu_virt_to_phys, no GMMU walking
+     * needed post-kexec.
+     *
+     * Size is the SASS byte count from the .sass file, page-rounded
+     * up. The dmabuf alloc is 64 KB but the actual SASS bytes are
+     * 1-20 KB depending on kernel — over-reserving the full 64 KB
+     * would protect 15 phys pages of irrelevant memory, potentially
+     * clobbering FECS ctx_save state in adjacent phys (#788 Mode D
+     * issue from the earlier GMMU-walk attempt). */
+    uint64_t conv_shader_phys    = gpu_virt_to_phys(ctx.shader_va);
+    uint32_t conv_shader_rsv_sz  = (uint32_t)((conv_size + 4095u) & ~4095u);
+    uint64_t addrelu_shader_phys = addrelu_shader.phys;
+    uint32_t addrelu_rsv_sz      = (uint32_t)((addrelu_size + 4095u) & ~4095u);
+    uint64_t pool_shader_phys    = pool_shader.phys;
+    uint32_t pool_rsv_sz         = (uint32_t)((pool_size + 4095u) & ~4095u);
+    uint64_t gemm_shader_phys    = gemm_shader.phys;
+    uint32_t gemm_rsv_sz         = (uint32_t)((gemm_size + 4095u) & ~4095u);
+    printf("[mnist] shader phys: conv=0x%llx(%u B) addrelu=0x%llx(%u B) "
+           "pool=0x%llx(%u B) gemm=0x%llx(%u B)\n",
+           (unsigned long long)conv_shader_phys, conv_shader_rsv_sz,
+           (unsigned long long)addrelu_shader_phys, addrelu_rsv_sz,
+           (unsigned long long)pool_shader_phys, pool_rsv_sz,
+           (unsigned long long)gemm_shader_phys, gemm_rsv_sz);
 
     /* --- Weight buffers + input --- */
     struct gpu_buffer W_conv1 = gpu_alloc_buffer(&ctx,  4096, 4096);  /* 800 B */
@@ -380,6 +428,7 @@ int main(int argc, char **argv)
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         MNIST_RECORD_V7(op, conv_shader_gva,
                         grid_x, grid_y, grid_z, 256u, 1u, 1u);
+        MNIST_RECORD_V7_SHADER_PHYS(op, conv_shader_phys, conv_shader_rsv_sz);
     }
 
     /* Op 1: Add+ReLU on Conv1 output. Shape 1×8×28×28. */
@@ -412,6 +461,7 @@ int main(int argc, char **argv)
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         MNIST_RECORD_V7(op, addrelu_shader_gva,
                         grid_x, 8u, 1u, 256u, 1u, 1u);
+        MNIST_RECORD_V7_SHADER_PHYS(op, addrelu_shader_phys, addrelu_rsv_sz);
     }
 
     /* Op 2: MaxPool1. Shape 1×8×28×28 → 1×8×14×14. */
@@ -448,6 +498,7 @@ int main(int argc, char **argv)
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         MNIST_RECORD_V7(op, pool_shader_gva,
                         grid_x, 8u, 1u, 256u, 1u, 1u);
+        MNIST_RECORD_V7_SHADER_PHYS(op, pool_shader_phys, pool_rsv_sz);
     }
 
     /* Op 3: Conv2. Shape 1×8×14×14, 16 out-ch. */
@@ -484,6 +535,7 @@ int main(int argc, char **argv)
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         MNIST_RECORD_V7(op, conv_shader_gva,
                         grid_x, 16u, 1u, 256u, 1u, 1u);
+        MNIST_RECORD_V7_SHADER_PHYS(op, conv_shader_phys, conv_shader_rsv_sz);
     }
 
     /* Op 4: Add+ReLU on Conv2 output. Shape 1×16×14×14. */
@@ -516,6 +568,7 @@ int main(int argc, char **argv)
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         MNIST_RECORD_V7(op, addrelu_shader_gva,
                         grid_x, 16u, 1u, 256u, 1u, 1u);
+        MNIST_RECORD_V7_SHADER_PHYS(op, addrelu_shader_phys, addrelu_rsv_sz);
     }
 
     /* Op 5: MaxPool2. Shape 1×16×14×14 → 1×16×4×4. */
@@ -552,6 +605,7 @@ int main(int argc, char **argv)
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         MNIST_RECORD_V7(op, pool_shader_gva,
                         grid_x, 16u, 1u, 256u, 1u, 1u);
+        MNIST_RECORD_V7_SHADER_PHYS(op, pool_shader_phys, pool_rsv_sz);
     }
 
     /* Op 6: GEMM. M=1, K=256, N=10. Reshape is free (pool2 output is
@@ -617,6 +671,7 @@ int main(int argc, char **argv)
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         MNIST_RECORD_V7(op, gemm_shader_gva,
                         grid_x, grid_y, 1u, block_x, block_y, 1u);
+        MNIST_RECORD_V7_SHADER_PHYS(op, gemm_shader_phys, gemm_rsv_sz);
         /* HMMA QMD overrides for the v7 dispatch path. SLM-OS rebuilds
          * the QMD per-launch from these op fields and otherwise leaves
          * SHARED_MEMORY_SIZE / BARRIER_COUNT at the encoder's defaults
@@ -658,6 +713,7 @@ int main(int argc, char **argv)
         msync(op->qmd_page.cpu_va, op->qmd_page.size_bytes, MS_SYNC);
         MNIST_RECORD_V7(op, addrelu_shader_gva,
                         1u, 10u, 1u, 256u, 1u, 1u);
+        MNIST_RECORD_V7_SHADER_PHYS(op, addrelu_shader_phys, addrelu_rsv_sz);
     }
 
     /* Pre-zero every output buffer so the per-cell sentinel poll
@@ -856,6 +912,11 @@ int main(int argc, char **argv)
             p[i].smem_size_bytes  = ops[i].v7_smem_size_bytes;
             p[i].slm_size_bytes   = ops[i].v7_slm_size_bytes;
             p[i].barrier_count    = ops[i].v7_barrier_count;
+            /* #788 Mode B v7.1: per-op shader phys + size. SLM-OS
+             * uses these to reserve the shader pages from PMM
+             * without GMMU walking. */
+            p[i].shader_phys       = ops[i].v7_shader_phys;
+            p[i].shader_size_bytes = ops[i].v7_shader_size_bytes;
         }
         msync(pipe_ops.cpu_va, pipe_ops.size_bytes, MS_SYNC);
     } else {

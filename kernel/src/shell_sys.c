@@ -4022,6 +4022,7 @@ int cmd_telemetry(int argc, char *argv[])
 #include "../gpu/nvidia/ga10b_bringup.h"
 #include "../gpu/nvidia/ga10b_channel_handoff.h"
 #include "../gpu/nvidia/ga10b_gmmu.h"
+#include "../gpu/nvidia/ga10b_handoff_reserve.h"
 #include "../gpu/nvidia/ga10b_ce.h"
 #include "oplib_pool.h"
 #include "oplib_weights_pool.h"
@@ -4239,6 +4240,37 @@ static int cmd_nvgpu_engine_status(void)
     engine_status_dump_pbdma(bar);
     engine_status_dump_gr(bar);
     return 0;
+}
+
+/* #788 Stage 2: rebuild the kexec'd channel's PDB tree.
+ *
+ * Allocate a fresh PDB tree in SLM-OS, overwrite the inst block's
+ * PDB pointer, and re-install PTEs mapping every preserved dmabuf
+ * at its original GPU VA. See `ga10b_gmmu_rebuild_for_handoff` in
+ * ga10b_gmmu.c.
+ *
+ * Requires `nvgpu channel` to have run first (so the handoff is
+ * loaded). Reads `inst_block_phys` from FECS_CURRENT_CTX — the
+ * runlist still references that physical page, so filling it with
+ * valid contents is what makes the channel usable post-kexec. */
+static int cmd_nvgpu_rebuild_gmmu(void)
+{
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h == NULL || h->magic != GA10B_CHANNEL_HANDOFF_MAGIC) {
+        shell_puts("rebuild-gmmu: handoff not loaded — "
+                   "run `nvgpu channel` first\r\n");
+        return -1;
+    }
+    uint64_t inst_phys = ga10b_gmmu_discover_inst_block_phys();
+    if (inst_phys == 0) {
+        shell_puts("rebuild-gmmu: FECS_CURRENT_CTX returned no "
+                   "current ctx (target=0)\r\n");
+        return -1;
+    }
+    int rc = ga10b_gmmu_rebuild_for_handoff(inst_phys, h);
+    shell_printf("rebuild-gmmu: rc=%d (inst_phys=0x%lx)\r\n",
+                 rc, (unsigned long)inst_phys);
+    return rc;
 }
 
 /* ============================================================================
@@ -4576,6 +4608,9 @@ int cmd_nvgpu(int argc, char *argv[])
         ga10b_dump_inst_blocks_atomic("nvgpu-instdump");
         return 0;
     }
+    if (strcmp(argv[1], "rebuild-gmmu") == 0) {
+        return cmd_nvgpu_rebuild_gmmu();
+    }
     if (strcmp(argv[1], "engine-clear") == 0) {
         return cmd_nvgpu_engine_clear();
     }
@@ -4713,6 +4748,56 @@ int cmd_nvgpu(int argc, char *argv[])
                 if (h != NULL && h->inst_block_phys != 0) {
                     inst_phys = h->inst_block_phys;
                 } else {
+                    /* Prefer the boot-time capture from
+                     * `ga10b_kexec_handoff_register_reserves` over a
+                     * live FECS_CURRENT_CTX read. The live register
+                     * has drifted by this point — SLM-OS's GPU
+                     * touches between boot and `oplib stage`
+                     * (vmm_init's GPU BAR0 identity map probe,
+                     * `nvgpu inherit`'s mailbox/cpuctl reads,
+                     * `nvgpu channel`'s handoff scan, etc.) trigger
+                     * FECS context switches to other inst blocks
+                     * Linux had loaded, which then fail the
+                     * pushbuf-PA cross-check below.
+                     *
+                     * BUT the boot capture may itself be Xorg's
+                     * channel or another non-helper channel that
+                     * happened to be GR-current at kexec time. So
+                     * we still run the same pushbuf-PA walk
+                     * validation as the live-FECS path. If the boot
+                     * capture's inst block walks to the handoff's
+                     * pushbuf_phys, we use it. Otherwise we fall
+                     * through to the existing live-FECS + DRAM walk
+                     * (which has its own validation).
+                     *
+                     * See `issue_788_stage9_gr_exception_root_cause.md`. */
+                    uint64_t boot_inst =
+                        ga10b_kexec_inherited_inst_block_phys();
+                    if (boot_inst != 0 && h != NULL &&
+                        h->pushbuf_gpu_va != 0 && h->pushbuf_phys != 0) {
+                        struct ga10b_gmmu_walk_result bwr;
+                        ga10b_gmmu_walk(boot_inst, h->pushbuf_gpu_va,
+                                        &bwr);
+                        shell_printf("oplib stage: boot-captured inst=0x%lx "
+                                     "walk status=%d levels=%d pdb=0x%lx "
+                                     "leaf=0x%lx (want 0x%lx)\r\n",
+                                     (unsigned long)boot_inst,
+                                     (int)bwr.status, bwr.levels_walked,
+                                     (unsigned long)bwr.pdb_phys,
+                                     (unsigned long)bwr.leaf_phys,
+                                     (unsigned long)h->pushbuf_phys);
+                        if (bwr.status == GA10B_GMMU_WALK_OK &&
+                            bwr.leaf_phys == h->pushbuf_phys) {
+                            inst_phys = boot_inst;
+                            goto oplib_stage_call;
+                        }
+                        shell_puts("oplib stage: boot-captured inst doesn't "
+                                   "map handoff PB — likely Xorg or another "
+                                   "non-helper channel was GR-current at "
+                                   "kexec; falling through to FECS + DRAM "
+                                   "walk\r\n");
+                    }
+
                     /* FECS_CURRENT_CTX may hold a stale pointer when
                      * Linux nvgpu freed and reused the inst-block-
                      * pointing memory between the helper's last
@@ -4759,14 +4844,28 @@ int cmd_nvgpu(int argc, char *argv[])
                          * in allocation order. The phys_in_dram
                          * helper already excludes the OP-TEE
                          * carveout (0xBE..0xC2) so the walker won't
-                         * fault inside it. */
+                         * fault inside it.
+                         *
+                         * #788 Stage 9: extended ranges to cover the
+                         * full SLM-OS PMM aperture (up to
+                         * GA10B_GMMU_DRAM_TOP=0x240000000). On
+                         * jetson-nano-2 the helper's inst block
+                         * wasn't in [0x100M..0x180M] — looks like
+                         * nvgpu places the channel inst at the
+                         * upper end of system DRAM, separate from
+                         * the dmabufs (the dmabufs themselves are
+                         * at 0x10xxxxxxx). Walks ~3.5 GB of phys at
+                         * 4 KB stride which is the cost of getting
+                         * `nvgpu oplib stage` working without
+                         * helper changes. */
                         struct { uint64_t lo, hi; } ranges[] = {
+                            { 0x180000000ull, 0x240000000ull },
                             { 0x100000000ull, 0x180000000ull },
                             { 0x80000000ull,  0x100000000ull },
                         };
                         shell_printf("oplib stage: FECS inst=0x%lx didn't "
                                      "map handoff PB; walking DRAM "
-                                     "(2 ranges)\r\n",
+                                     "(3 ranges)\r\n",
                                      (unsigned long)inst_phys);
                         inst_phys = 0;
                         for (size_t r = 0; r < sizeof(ranges)/sizeof(ranges[0]);

@@ -1250,12 +1250,18 @@ int ga10b_validate_handoff(const struct ga10b_channel_handoff *h)
      *      accept the W1 handoff; oplib_pool consumers still
      *      check `version >= 8u` before reading the trailing
      *      weights_pool_* fields.
-     * Phase 6 inherit accepts all seven; launch_kernel version-gates
+     * v9: + weights-pool per-page extents (weights_extents_phys +
+     *      weights_n_extents). Lets SLM-OS map the full 1.5 GB
+     *      IOVMM-stitched weights pool post-kexec instead of just
+     *      the first 4 KB. Helpers that don't allocate a weights
+     *      pool leave these at zero; SLM-OS rebuild path falls
+     *      back to the Stage 3 single-page mapping. #788 Stage 4.
+     * Phase 6 inherit accepts all eight; launch_kernel version-gates
      * at dispatch time (v3 minimum for single-shot, v5 for pipelines,
      * v7 for the QMD-pool path, v8 for the weights pool). */
     if (h->version != 2 && h->version != 3 &&
         h->version != 4 && h->version != 5 && h->version != 6 &&
-        h->version != 7 && h->version != 8) return -1;
+        h->version != 7 && h->version != 8 && h->version != 9) return -1;
     if (h->userd_phys == 0 || h->gpfifo_phys == 0 ||
         h->pushbuf_phys == 0 || h->semaphore_phys == 0) return -1;
     if (h->work_submit_token == 0) return -1;
@@ -1443,6 +1449,14 @@ int ga10b_bringup_channel_kind(struct ga10b_bringup *b, uint32_t wanted_kind)
     g_handoff.weights_pool_phys       = hoff->weights_pool_phys;
     g_handoff.weights_pool_gpu_va     = hoff->weights_pool_gpu_va;
     g_handoff.weights_pool_size_bytes = hoff->weights_pool_size_bytes;
+
+    /* v9 extension: weights-pool per-page extents. Same
+     * "unconditional read is safe" argument as v7/v8 — the
+     * `_Static_assert` pins the offsets so a v8 helper leaves
+     * these as zero and SLM-OS's rebuild path falls back to the
+     * single-page mapping. #788 Stage 4. */
+    g_handoff.weights_extents_phys = hoff->weights_extents_phys;
+    g_handoff.weights_n_extents    = hoff->weights_n_extents;
 
     /* Validate the handoff block (pure-logic, host-testable). */
     if (ga10b_validate_handoff((const struct ga10b_channel_handoff *)
@@ -1833,6 +1847,29 @@ static void dump_fecs_state(const char *tag)
                 (unsigned long)bar0_r32(0x00409814u),
                 (unsigned long)bar0_r32(0x00409818u),
                 (unsigned long)bar0_r32(0x0040981cu));
+    /* ctxsw_status_0/1 — additional FECS state the official NVIDIA
+     * `ctxsw_err_info` struct records alongside mailbox_value (see
+     * `mon_ctxsw.c::nvgpu_report_ctxsw_err` + the struct's three
+     * fields `ctxsw_status0`, `ctxsw_status1`, `mailbox_value` in
+     * `nvgpu_err.h:373-388`). Without these two, mb6 alone is hard
+     * to interpret because the FECS ucode error code is opaque —
+     * NVIDIA doesn't publish a value→meaning table for mb6 in any
+     * source I can access. Status0 (FE_0 register) shows what
+     * stage of ctxsw FE was in; status1 includes the arb_busy bit
+     * and other state. Register offsets per
+     * `~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_gr_ga10b.h`:
+     *   gr_fecs_ctxsw_status_1_r()    = 0x00409400
+     *   gr_fecs_ctxsw_status_fe_0_r() = 0x00409c00
+     * Plus the GPCCS-side mirror (some errors originate on GPCCS):
+     *   gr_gpc0_gpccs_ctxsw_status_1_r() = 0x00502400
+     *   gr_gpc0_gpccs_ctxsw_status_gpc_0_r() = 0x00502c04 */
+    uart_printf("[%s]   ctxsw_status fecs_fe_0=0x%08lx fecs_1=0x%08lx "
+                "gpccs_gpc_0=0x%08lx gpccs_1=0x%08lx\n",
+                tag,
+                (unsigned long)bar0_r32(0x00409c00u),
+                (unsigned long)bar0_r32(0x00409400u),
+                (unsigned long)bar0_r32(0x00502c04u),
+                (unsigned long)bar0_r32(0x00502400u));
 }
 
 /* Layer 2c: FB MMU fault info. `fault_during_ctxsw` (#788 working
@@ -2062,9 +2099,100 @@ void ga10b_dump_inst_blocks_atomic(const char *tag)
     dump_one_inst_block("GA10B-INST-FAULT", fault_inst_phys);
 }
 
+/* Layer 1b: GPC / TPC / SM drill-down for when top-level
+ * `gr_exception` has bit 24 set (GPC exception). Decodes the
+ * GPC0 exception register; if a TPC or SM bit is set, reads
+ * the corresponding TPC + SM ESRs.
+ *
+ * Register offsets per
+ *   `~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_gr_ga10b.h`:
+ *     gr_pri_gpc0_gpccs_gpc_exception_r   = 0x00502c90
+ *     gr_gpc0_gpccs_hww_esr_r             = 0x00502c98
+ *     gr_pri_gpc0_tpc0_tpccs_tpc_exception_r = 0x00504508
+ *     gr_gpc0_tpc0_sm0_hww_global_esr_r   = 0x00504734
+ *     gr_gpc0_tpc0_sm0_hww_warp_esr_r     = 0x00504730
+ *     gr_gpc0_tpc0_sm0_hww_warp_esr_pc_hi = 0x0050473c
+ *
+ * GPC exception bit layout (low bits only — see header for
+ * full list):
+ *   bit 0  = prop, 1 = zcull, 2 = gcc, 3 = setup,
+ *   bit 4  = pes0, 5 = pes1, 13 = gpcmmu0, 14 = gpccs,
+ *   bits[23:16] = TPC0..TPC7 pending masks
+ *
+ * Only TPC0/SM0 are sampled here. Orin Nano has 1 GPC × 8 TPCs
+ * but most GR exceptions in the wild surface on TPC0/SM0; if a
+ * future regression points elsewhere, expand to iterate. */
+static void dump_gpc_tpc_sm(const char *tag, uint32_t gr_exception)
+{
+    /* Bit 24 of gr_exception = GPC exception per
+     * gr_exception_gpc_m() = (1U << 24). Skip the drill-down if
+     * the GPC bit isn't set — the fault is upstream of any GPC. */
+    if ((gr_exception & 0x01000000u) == 0u) {
+        return;
+    }
+
+    uint32_t gpc_exc       = bar0_r32(0x00502c90u);
+    uint32_t gpccs_hww_esr = bar0_r32(0x00502c98u);
+    uart_printf("[%s]   gpc0_exception=0x%08lx (prop=%u zcull=%u gcc=%u "
+                "setup=%u pes0=%u pes1=%u gpcmmu0=%u gpccs=%u tpc_mask=0x%02x "
+                "crop=%u%u zrop=%u%u rrh=%u%u) gpccs_hww_esr=0x%08lx\n",
+                tag, (unsigned long)gpc_exc,
+                (unsigned)(gpc_exc & 0x1u),
+                (unsigned)((gpc_exc >> 1) & 0x1u),
+                (unsigned)((gpc_exc >> 2) & 0x1u),
+                (unsigned)((gpc_exc >> 3) & 0x1u),
+                (unsigned)((gpc_exc >> 4) & 0x1u),
+                (unsigned)((gpc_exc >> 5) & 0x1u),
+                (unsigned)((gpc_exc >> 13) & 0x1u),
+                (unsigned)((gpc_exc >> 14) & 0x1u),
+                (unsigned)((gpc_exc >> 16) & 0xffu),
+                (unsigned)((gpc_exc >> 26) & 0x1u),
+                (unsigned)((gpc_exc >> 29) & 0x1u),
+                (unsigned)((gpc_exc >> 27) & 0x1u),
+                (unsigned)((gpc_exc >> 30) & 0x1u),
+                (unsigned)((gpc_exc >> 28) & 0x1u),
+                (unsigned)((gpc_exc >> 31) & 0x1u),
+                (unsigned long)gpccs_hww_esr);
+
+    /* If any TPC bit is set, sample TPC0's exception register.
+     * Drills into SM/MPC/PE pending bits. */
+    if ((gpc_exc & 0x00ff0000u) != 0u) {
+        uint32_t tpc0_exc = bar0_r32(0x00504508u);
+        uart_printf("[%s]   gpc0_tpc0_exception=0x%08lx "
+                    "(sm=%u pe=%u mpc=%u)\n",
+                    tag, (unsigned long)tpc0_exc,
+                    (unsigned)((tpc0_exc >> 1) & 0x1u),
+                    (unsigned)((tpc0_exc >> 2) & 0x1u),
+                    (unsigned)((tpc0_exc >> 4) & 0x1u));
+
+        /* SM bit set → dump SM-level error state. The
+         * `global_esr` carries the bp/poison/error_in_trap
+         * class; `warp_esr` carries the actual fault code
+         * (misaligned_pc, mmu_fault, oor_addr, ...) and
+         * `warp_esr_pc_hi` pairs with `warp_esr_pc_lo` (4 B
+         * below the hi register at 0x00504738) to identify
+         * which SASS PC triggered the fault. */
+        if (((tpc0_exc >> 1) & 0x1u) != 0u) {
+            uint32_t sm_global = bar0_r32(0x00504734u);
+            uint32_t sm_warp   = bar0_r32(0x00504730u);
+            uint32_t pc_lo     = bar0_r32(0x00504738u);
+            uint32_t pc_hi     = bar0_r32(0x0050473cu);
+            uart_printf("[%s]   sm0_global_esr=0x%08lx sm0_warp_esr=0x%08lx "
+                        "warp_pc=0x%08lx_%08lx (error_code=0x%02x)\n",
+                        tag, (unsigned long)sm_global,
+                        (unsigned long)sm_warp,
+                        (unsigned long)pc_hi, (unsigned long)pc_lo,
+                        (unsigned)(sm_warp & 0xffu));
+        }
+    }
+}
+
 static void ga10b_dump_gr_state(const char *tag)
 {
     dump_gr_top_level(tag);
+    /* GR exception register again — re-read so the GPC drill-down
+     * sees the same snapshot the top-level dump just printed. */
+    dump_gpc_tpc_sm(tag, bar0_r32(0x00400108u));
     dump_fecs_state(tag);
     dump_mmu_fault(tag);
     dump_pbdma_state(tag);
@@ -2564,6 +2692,27 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
               (unsigned long)gp_put_start,
               (unsigned long)pushbuf_phys,
               (unsigned long)g_handoff.qmd_pool_phys);
+
+    /* #788 Stage 9 instrumentation — dump each op's shader/cbuf
+     * GPU VAs to confirm whether the v7 ops the helper published
+     * point at the right SASS pool. The bisect-E SM fault at PC =
+     * pushbuf_gpu_va + 0x10000 suggests op[i].shader_gpu_va is
+     * being mis-set. */
+    uart_printf("[GA10B-P8-v7-DBG] ops_v7 array @0x%lx, n=%lu\n",
+                (unsigned long)g_handoff.pipeline_ops_phys,
+                (unsigned long)n);
+    for (uint32_t i = 0; i < n; i++) {
+        const struct ga10b_pipeline_op_v7 *opdbg = &ops_v7[i];
+        uart_printf("[GA10B-P8-v7-DBG]   op[%lu] shader_gpu_va=0x%lx "
+                    "cbuf_gpu_va=0x%lx qmd_gpu_va=0x%lx output_phys=0x%lx "
+                    "reg_v=%lu\n",
+                    (unsigned long)i,
+                    (unsigned long)opdbg->shader_gpu_va,
+                    (unsigned long)opdbg->cbuf_gpu_va,
+                    (unsigned long)opdbg->qmd_gpu_va,
+                    (unsigned long)opdbg->output_phys,
+                    (unsigned long)opdbg->register_count_v);
+    }
 
     /* Phase 1: queue all N kernel-dispatch entries. */
     for (uint32_t i = 0; i < n; i++) {

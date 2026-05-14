@@ -261,6 +261,105 @@ static uint64_t virt_to_phys(void *vaddr)
     return pfn * 4096 + ((uint64_t)vaddr & 0xFFF);
 }
 
+/* Read FECS_CURRENT_CTX via /dev/mem and decode the channel inst-
+ * block phys it points to. Used to publish `inst_block_phys` in the
+ * handoff so SLM-OS's post-kexec `nvgpu oplib stage` can locate the
+ * inherited channel's GMMU root without scanning DRAM.
+ *
+ * Background (#788 Stage 9): SLM-OS captures FECS_CURRENT_CTX at
+ * boot, but by that time the live register may show a *different*
+ * channel than the helper's — Xorg / nvgpu's GR-internal channel /
+ * etc. were GR-current when kexec landed. Reading FECS here in the
+ * helper's process gives us a chance to capture the value while our
+ * channel is more likely to be the current GR context — and even if
+ * it's wrong, having a concrete address in the handoff lets SLM-OS's
+ * existing `if (h->inst_block_phys != 0)` fast path try it before
+ * falling back to walk-based discovery.
+ *
+ * GA10B FECS_CURRENT_CTX encoding (per
+ * `~/slmos-ref/nvidia/nvgpu-include-nvgpu-hw-gv11b-hw_gr_gv11b.h`):
+ *   bits [27:0]  = inst_block_phys >> 12
+ *   bits [29:28] = target aperture
+ *                  0 = vid_mem (Tegra has none — treat as invalid)
+ *                  2 = sys_mem_coherent
+ *                  3 = sys_mem_noncoherent
+ *
+ * Returns the decoded inst-block phys on success, or 0 if:
+ *   - /dev/mem can't be opened (helper isn't running as root)
+ *   - mmap fails
+ *   - The register reads as poison (`0xbadfXXXX`)
+ *   - The target aperture is 0 (no current ctx)
+ *
+ * On failure the function logs a diagnostic line — caller treats 0
+ * the same way SLM-OS does (skip publish, fall back to discovery). */
+#define GA10B_BAR0_BASE                  0x17000000ull
+#define GA10B_GR_FECS_CURRENT_CTX_OFFSET 0x00409b00u
+#define GA10B_INST_BLOCK_PAGE_SIZE       4096u
+
+static uint64_t read_fecs_current_ctx_inst_phys(void)
+{
+    int fd = open("/dev/mem", O_RDONLY | O_SYNC);
+    if (fd < 0) {
+        fprintf(stderr,
+                "[gpu-helper] FECS read: open(/dev/mem) failed: %s "
+                "(running as root?). inst_block_phys will be 0; "
+                "SLM-OS falls back to walk-based discovery.\n",
+                strerror(errno));
+        return 0;
+    }
+
+    /* mmap the page containing FECS_CURRENT_CTX. Page-align the mmap
+     * base since mmap() requires it; index within with the byte
+     * offset. The FECS register is 4 bytes at BAR0+0x409b00, which
+     * sits inside the 4 KB page at BAR0+0x409000. */
+    const uint64_t page_size = 4096u;
+    uint64_t reg_abs = GA10B_BAR0_BASE + GA10B_GR_FECS_CURRENT_CTX_OFFSET;
+    uint64_t page_base = reg_abs & ~(page_size - 1);
+    uint32_t page_off  = (uint32_t)(reg_abs & (page_size - 1));
+
+    void *map = mmap(NULL, page_size, PROT_READ, MAP_SHARED, fd,
+                     (off_t)page_base);
+    close(fd);
+    if (map == MAP_FAILED) {
+        fprintf(stderr,
+                "[gpu-helper] FECS read: mmap @0x%llx failed: %s\n",
+                (unsigned long long)page_base, strerror(errno));
+        return 0;
+    }
+
+    volatile uint32_t *reg_ptr =
+        (volatile uint32_t *)((uint8_t *)map + page_off);
+    uint32_t reg = *reg_ptr;
+    munmap(map, page_size);
+
+    if ((reg & 0xFFFF0000u) == 0xbadf0000u) {
+        fprintf(stderr,
+                "[gpu-helper] FECS read: register=0x%08x (priv-bad "
+                "poison — GPU power-gated?). Publishing inst_block_phys=0.\n",
+                reg);
+        return 0;
+    }
+
+    uint32_t target = (reg >> 28) & 0x3u;
+    if (target == 0) {
+        fprintf(stderr,
+                "[gpu-helper] FECS read: register=0x%08x (target=0 — no "
+                "current ctx). Publishing inst_block_phys=0.\n",
+                reg);
+        return 0;
+    }
+
+    uint64_t inst_phys = ((uint64_t)(reg & 0x0FFFFFFFu)) << 12;
+    printf("[gpu-helper] FECS_CURRENT_CTX=0x%08x → inst_block_phys=0x%llx "
+           "(target=%u, %s). NOTE: this is whatever channel was GR-current "
+           "at the read moment — may or may not be this helper's channel; "
+           "SLM-OS validates via pushbuf-PA walk before use.\n",
+           reg, (unsigned long long)inst_phys, target,
+           target == 3 ? "sys_mem_noncoherent" :
+           target == 2 ? "sys_mem_coherent" : "unknown");
+    return inst_phys;
+}
+
 /* SIGTERM handler — on clean shutdown, let the kernel reap us (which
  * releases all nvgpu fds and frees the channel). No explicit cleanup
  * needed because nvgpu's release paths run on fd close. */
@@ -771,6 +870,149 @@ int main(int argc, char **argv)
                (unsigned long long)weights_pool_gva);
     }
 
+    /* #788 Stage 4: walk the weights pool's pages via
+     * /proc/self/pagemap, coalesce consecutive physical pages
+     * into extents, and publish the list in a separate dmabuf
+     * so SLM-OS can re-establish GMMU PTEs covering the entire
+     * pool post-kexec.
+     *
+     * The 1.5 GB IOVMM-stitched pool is physically scattered
+     * (CMA backing returns hundreds-to-thousands of separate
+     * contiguous physical runs depending on fragmentation).
+     * `weights_pool_phys` records only the first page's phys;
+     * the rest is invisible without the explicit per-page walk
+     * this loop performs.
+     *
+     * Cap matches `GA10B_WEIGHTS_EXTENTS_MAX` in the shared
+     * handoff header (8192 entries × 16 bytes = 128 KB dmabuf).
+     * If a future allocation fragments more than that, we
+     * truncate and warn; the operator's fix is to bump the cap
+     * on both sides in lock-step. */
+    int      extents_dmabuf = -1;
+    void    *extents_va     = NULL;
+    uint64_t extents_phys   = 0;
+    uint32_t n_extents      = 0;
+    const uint32_t MAX_EXTENTS = 8192u;  /* matches GA10B_WEIGHTS_EXTENTS_MAX */
+    const size_t   extents_bytes_total =
+        (size_t)MAX_EXTENTS * sizeof(struct ga10b_phys_extent);
+    if (weights_pool_size > 0 && weights_pool_va != NULL) {
+        extents_dmabuf = nvmap_alloc_dmabuf(nvmap_fd,
+                                            (uint64_t)extents_bytes_total,
+                                            4096);
+        extents_va = mmap(NULL, extents_bytes_total,
+                          PROT_READ | PROT_WRITE,
+                          MAP_SHARED, extents_dmabuf, 0);
+        if (extents_va == MAP_FAILED) {
+            perror("[gpu-helper] mmap extents dmabuf");
+            extents_va = NULL;
+        } else {
+            memset(extents_va, 0, extents_bytes_total);
+            msync(extents_va, extents_bytes_total, MS_SYNC);
+            extents_phys = virt_to_phys(extents_va);
+            if (extents_phys == 0) {
+                fprintf(stderr, "[gpu-helper] extents dmabuf phys "
+                        "resolution failed — extents disabled\n");
+                extents_va = NULL;
+            }
+        }
+    }
+
+    if (extents_va != NULL) {
+        /* First-touch the weights pool to force every page to
+         * fault in. NVMAP's IOVMM-backed dmabuf creates a userspace
+         * mmap that's lazy — pages aren't bound to physical backing
+         * until accessed. Without touching them first,
+         * /proc/self/pagemap reports "page not present" for the
+         * entire 1.5 GB and the extent walk finds nothing.
+         *
+         * A single byte read per page is enough to fault it in.
+         * 393,216 pages × ~ns-scale read ≈ ~1-2 s on Tegra Orin
+         * Nano — a one-time pre-kexec cost; nothing on the hot
+         * path. */
+        {
+            volatile uint8_t *touch = (volatile uint8_t *)weights_pool_va;
+            for (size_t pi = 0;
+                 pi < weights_pool_size / 4096u;
+                 pi++) {
+                (void)touch[pi * 4096u];
+            }
+        }
+
+        /* Walk every 4 KB page in the weights pool, resolving
+         * its physical address via /proc/self/pagemap. Coalesce
+         * consecutive pages whose physes match `prev_phys +
+         * 4 KB` into one extent entry, and flush the current
+         * extent when a discontinuity appears or we reach the
+         * pool's end. */
+        struct ga10b_phys_extent *extents = extents_va;
+        size_t   total_pages  = weights_pool_size / 4096u;
+        uint64_t cur_run_phys = 0;
+        uint32_t cur_run_pages = 0;
+        size_t   pagemap_failures = 0;
+        uint8_t *base = (uint8_t *)weights_pool_va;
+
+        for (size_t pi = 0; pi < total_pages; pi++) {
+            uint64_t va = (uint64_t)(uintptr_t)base + pi * 4096ull;
+            uint64_t phys = virt_to_phys((void *)(uintptr_t)va);
+            if (phys == 0) {
+                pagemap_failures++;
+                /* Flush current run; skip this page. SLM-OS
+                 * will leave the corresponding 4 KB hole in
+                 * the GMMU and a CE memcpy that lands there
+                 * will MMU-fault. */
+                if (cur_run_pages > 0 && n_extents < MAX_EXTENTS) {
+                    extents[n_extents].phys = cur_run_phys;
+                    extents[n_extents].n_pages = cur_run_pages;
+                    extents[n_extents].reserved = 0;
+                    n_extents++;
+                    cur_run_phys = 0;
+                    cur_run_pages = 0;
+                }
+                continue;
+            }
+            if (cur_run_pages == 0) {
+                cur_run_phys = phys;
+                cur_run_pages = 1;
+            } else if (phys ==
+                       cur_run_phys + (uint64_t)cur_run_pages * 4096ull) {
+                cur_run_pages++;
+            } else {
+                /* Discontinuity — flush. */
+                if (n_extents < MAX_EXTENTS) {
+                    extents[n_extents].phys = cur_run_phys;
+                    extents[n_extents].n_pages = cur_run_pages;
+                    extents[n_extents].reserved = 0;
+                    n_extents++;
+                } else {
+                    /* Table full — break out, will warn below. */
+                    break;
+                }
+                cur_run_phys = phys;
+                cur_run_pages = 1;
+            }
+        }
+        /* Flush final run. */
+        if (cur_run_pages > 0 && n_extents < MAX_EXTENTS) {
+            extents[n_extents].phys = cur_run_phys;
+            extents[n_extents].n_pages = cur_run_pages;
+            extents[n_extents].reserved = 0;
+            n_extents++;
+        }
+        msync(extents_va, extents_bytes_total, MS_SYNC);
+
+        printf("[gpu-helper] Weights extents: %u runs (%zu pages "
+               "total) → phys=0x%llx",
+               (unsigned)n_extents, total_pages,
+               (unsigned long long)extents_phys);
+        if (n_extents == MAX_EXTENTS) {
+            printf(" [TRUNCATED — bump MAX_EXTENTS]");
+        }
+        if (pagemap_failures > 0) {
+            printf(" [%zu pagemap failures]", pagemap_failures);
+        }
+        printf("\n");
+    }
+
     /* Allocate a dedicated dmabuf for the handoff block. Writing via
      * /dev/mem is blocked by CONFIG_STRICT_DEVMEM for System RAM, but
      * we can write to dmabuf memory via its own mmap. SLM-OS scans
@@ -795,10 +1037,11 @@ int main(int argc, char **argv)
      *   v8 — weights pool allocated (W1, this commit)
      *   v7 — QMD pool allocated (no weights pool)
      *   v2 — channel-only (no v7 pool, no weights pool)
-     * Each higher version is a strict superset: v7 readers can
-     * consume v8 handoffs by ignoring the trailing weights_pool_*
-     * fields, v2 readers ignore both v7 and v8 trailing bytes. */
-    uint32_t handoff_version = (weights_pool_size > 0) ? 8u
+     * Each higher version is a strict superset: v9 readers can
+     * consume v8 handoffs by ignoring the trailing weights_extents_*
+     * fields, v8 readers ignore v9, etc. */
+    uint32_t handoff_version = (n_extents > 0)         ? 9u
+                              : (weights_pool_size > 0) ? 8u
                               : (qmd_pool_slots > 0)   ? 7u
                               :                          2u;
     struct ga10b_channel_handoff hoff = {
@@ -823,7 +1066,15 @@ int main(int argc, char **argv)
         .pushbuf_size       = 65536,
         .semaphore_phys     = sem_phys,
         .semaphore_gpu_va   = sem_map.offset,
-        .inst_block_phys    = 0,  /* filled in from FECS_CURRENT_CTX if needed */
+        .inst_block_phys    = 0,  /* populated post-ALLOC by the isolation
+                                   * test's FECS_CURRENT_CTX read, AFTER
+                                   * the GR engine confirms our channel
+                                   * just ran. See `read_fecs_current_ctx_-
+                                   * inst_phys` + the publish site below the
+                                   * sema-fire branch. The initial-zero
+                                   * sentinel here means "skip", picked up
+                                   * by SLM-OS's `nvgpu oplib stage` to fall
+                                   * back to walk-based discovery. */
         .initial_gp_put     = 0,
         .initial_gp_get     = 0,
         .work_submit_token  = sb.work_submit_token,
@@ -846,6 +1097,10 @@ int main(int argc, char **argv)
         .weights_pool_phys       = weights_pool_phys,
         .weights_pool_gpu_va     = weights_pool_gva,
         .weights_pool_size_bytes = weights_pool_size,
+        /* v9-only: weights-pool per-page extents. Zero in v2..v8
+         * mode (no pagemap walk done). #788 Stage 4. */
+        .weights_extents_phys    = extents_phys,
+        .weights_n_extents       = n_extents,
     };
     memcpy(handoff, &hoff, sizeof(hoff));
     msync(handoff, 4096, MS_SYNC);
@@ -955,6 +1210,30 @@ int main(int argc, char **argv)
         if (sem_val == HELPER_SMOKETEST_SEM_PAYLOAD) {
             printf("[gpu-helper] >>> ISOLATION: sema fires Linux-side — "
                    "channel capable, kexec breaks state\n");
+
+            /* #788 Stage 9 fix: publish `inst_block_phys` in the
+             * handoff so SLM-OS's `nvgpu oplib stage` doesn't have
+             * to walk DRAM looking for our inst block.
+             *
+             * Critically, we do this read RIGHT AFTER the
+             * isolation-test sema fires — at that moment the GR
+             * engine just ran our pushbuffer, so FECS_CURRENT_CTX
+             * is guaranteed to point at OUR channel. If we read
+             * any later, GR might context-switch back to Xorg or
+             * nvgpu's internal channel. If we read earlier, our
+             * channel might not yet have been scheduled.
+             *
+             * SLM-OS's `oplib stage` still pushbuf-PA validates
+             * before trusting the value, so a wrong inst_block_phys
+             * here (e.g. if FECS drifts before we read in some
+             * future timing-sensitive case) won't propagate as a
+             * bad pointer downstream. */
+            hoff.inst_block_phys = read_fecs_current_ctx_inst_phys();
+            if (hoff.inst_block_phys != 0) {
+                printf("[gpu-helper] >>> publishing inst_block_phys=0x%llx "
+                       "in handoff (skips SLM-OS's DRAM walk)\n",
+                       (unsigned long long)hoff.inst_block_phys);
+            }
         } else if (gp_get_after == 1) {
             printf("[gpu-helper] >>> ISOLATION: PBDMA consumed entry but "
                    "method didn't fire — channel setup incomplete\n");
@@ -964,7 +1243,8 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Re-read + update handoff with the current GP_PUT/GP_GET values. */
+    /* Re-read + update handoff with the current GP_PUT/GP_GET values
+     * AND the FECS-derived inst_block_phys captured above. */
     hoff.initial_gp_put = ((volatile uint32_t *)userd_va)[35];
     hoff.initial_gp_get = ((volatile uint32_t *)userd_va)[34];
     memcpy(handoff, &hoff, sizeof(hoff));

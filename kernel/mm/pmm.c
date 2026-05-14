@@ -464,9 +464,99 @@ int pmm_carve_reserves(uintptr_t start, uintptr_t end,
  * cap grows in the future, the worst-case ~1 KB stack footprint per
  * call would otherwise scale with it.
  */
-static uintptr_t        pmm_split_starts[DTB_MAX_MEMRESERVES + 1];
-static uintptr_t        pmm_split_ends  [DTB_MAX_MEMRESERVES + 1];
-static dtb_memreserve_t pmm_split_rsv   [DTB_MAX_MEMRESERVES];
+/* User-supplied reserve slots. PMM init feeds these into the same
+ * `pmm_carve_reserves` pipeline as the firmware /memreserve/ entries,
+ * so runtime-discovered protected ranges (the canonical case: nvgpu
+ * inst block + GMMU page tables + IOVMM-stitched weights-pool
+ * extents that survived kexec but live in physical pages SLM-OS
+ * would otherwise allocate from) get carved out before any page is
+ * published to the buddy. See `pmm_user_reserve_add` in pmm.h.
+ *
+ * Capacity bumped from 16 → 2048 in #788 Stage 4 to accommodate the
+ * weights-pool extents: a 1.5 GB IOVMM-stitched allocation
+ * empirically decomposes into 2-1100 contiguous runs on Tegra
+ * GA10B (depends on CMA fragmentation at allocation time on a
+ * freshly-booted vs long-running Linux). 2048 caps the array at
+ * 32 KB (2048 × 16 bytes) — generous over the highest observed
+ * extent count (~1033 on a fragmented allocation), and small
+ * enough that the boot-time BSS bloat is well within the
+ * kernel image's existing budget. If a future helper logs
+ * "extents truncated", bump this cap and the helper's
+ * `GA10B_WEIGHTS_EXTENTS_MAX` together.
+ *
+ * The helper-side cap in `ga10b_channel_handoff.h`
+ * (`GA10B_WEIGHTS_EXTENTS_MAX = 8192`) is larger than this cap on
+ * purpose: the helper publishes the full list, and SLM-OS picks
+ * the prefix that fits — anything past entry 2048 won't get a
+ * PMM reservation but WILL still get a GMMU mapping (the rebuild
+ * path walks the entire list, only the reservation hook truncates).
+ * A page mapped but not reserved is at risk if PMM also allocates
+ * from it; in practice the helper's IOVMM phys range and SLM-OS
+ * PMM's allocations rarely overlap, so the partial protection is
+ * sufficient until a future bump. */
+#define PMM_MAX_USER_RESERVES 2048
+static dtb_memreserve_t pmm_user_reserves[PMM_MAX_USER_RESERVES];
+static size_t           pmm_n_user_reserves = 0;
+
+/* Scratch arrays are sized to fit the worst case = firmware reserves
+ * + user reserves, plus one extra slot for the split helper's own
+ * bookkeeping (matches the prior `DTB_MAX_MEMRESERVES + 1` rationale
+ * for `pmm_split_starts`/`pmm_split_ends`). */
+#define PMM_SPLIT_RSV_MAX  (DTB_MAX_MEMRESERVES + PMM_MAX_USER_RESERVES)
+static uintptr_t        pmm_split_starts[PMM_SPLIT_RSV_MAX + 1];
+static uintptr_t        pmm_split_ends  [PMM_SPLIT_RSV_MAX + 1];
+static dtb_memreserve_t pmm_split_rsv   [PMM_SPLIT_RSV_MAX];
+
+int pmm_user_reserve_add(uint64_t phys, uint64_t size)
+{
+    if (size == 0u) {
+        return -1;
+    }
+    if (pmm_n_user_reserves >= PMM_MAX_USER_RESERVES) {
+        return -1;
+    }
+    pmm_user_reserves[pmm_n_user_reserves].addr = phys;
+    pmm_user_reserves[pmm_n_user_reserves].size = size;
+    pmm_n_user_reserves++;
+    return 0;
+}
+
+int pmm_user_reserve_add_array(const dtb_memreserve_t *extents,
+                                size_t n_extents)
+{
+    if (extents == NULL) {
+        return 0;
+    }
+    int added = 0;
+    for (size_t i = 0; i < n_extents; i++) {
+        if (pmm_user_reserve_add(extents[i].addr,
+                                  extents[i].size) != 0) {
+            /* Surface truncation loudly — the caller will see
+             * `added < n_extents` and the wedge that fires later
+             * on the unprotected tail is otherwise hard to
+             * attribute back to "PMM reserve table was full". */
+            uart_printf("Warning: user-reserve table full at entry "
+                        "%zu/%zu (cap=%u). Pages from extent %zu "
+                        "onward are NOT protected — expect "
+                        "downstream clobber.\n",
+                        i, n_extents,
+                        (unsigned)PMM_MAX_USER_RESERVES, i);
+            break;
+        }
+        added++;
+    }
+    return added;
+}
+
+size_t pmm_user_reserve_count(void)
+{
+    return pmm_n_user_reserves;
+}
+
+void pmm_user_reserve_reset(void)
+{
+    pmm_n_user_reserves = 0;
+}
 
 static void pmm_add_region_split(uintptr_t start, uintptr_t end)
 {
@@ -493,9 +583,22 @@ static void pmm_add_region_split(uintptr_t start, uintptr_t end)
     in_split = true;
 
     int n_rsv = dtb_get_memreserves(pmm_split_rsv, DTB_MAX_MEMRESERVES);
+    /* Append the user-registered reserves (e.g. GPU kexec handoff
+     * state — see `pmm_user_reserve_add`). The carve helper handles
+     * unsorted, overlapping, and out-of-region entries identically
+     * to firmware reserves, so the two lists can be concatenated
+     * without further bookkeeping. Bounded by PMM_SPLIT_RSV_MAX so
+     * the writes can never overrun `pmm_split_rsv[]`. */
+    for (size_t i = 0;
+         i < pmm_n_user_reserves && (size_t)n_rsv < PMM_SPLIT_RSV_MAX;
+         i++) {
+        pmm_split_rsv[n_rsv].addr = pmm_user_reserves[i].addr;
+        pmm_split_rsv[n_rsv].size = pmm_user_reserves[i].size;
+        n_rsv++;
+    }
     int n_out = pmm_carve_reserves(start, end, pmm_split_rsv, n_rsv,
                                    pmm_split_starts, pmm_split_ends,
-                                   DTB_MAX_MEMRESERVES + 1);
+                                   PMM_SPLIT_RSV_MAX + 1);
     for (int i = 0; i < n_out; i++) {
         pmm_add_region(pmm_split_starts[i], pmm_split_ends[i]);
     }
