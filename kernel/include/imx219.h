@@ -75,17 +75,28 @@
 
 /*
  * Power the sensor up through the full sequence described in the file
- * header. Idempotent — calling twice in a row is safe and runs the
- * sequence each time (BPMP clock_enable is itself idempotent; GPIOs
- * are simply re-driven to the same state).
+ * header, then force the CSI-2 D-PHY lanes into LP-11. Idempotent —
+ * calling twice in a row is safe and runs the sequence each time
+ * (BPMP clock_enable is itself idempotent; GPIOs are simply re-driven
+ * to the same state).
+ *
+ * The trailing LP-11 force step writes MODE_SELECT=1 then MODE_SELECT=0
+ * with 100-110 µs between (per L4T linux-imx219.c:1145-1162). Without
+ * this, NVCSI's DPHY can't train its receivers — see issue #518 for
+ * the failure mode it caused before this fix.
  *
  * Returns 0 on success, negative on error:
  *   -1  any prerequisite failed (see kprintf for the specific stage)
  *   -2  CHIP_ID readback failed (sensor not responding after power-up)
  *   -3  CHIP_ID mismatch (sensor responded but with wrong identity)
+ *   -4  LP-11 force I²C write failed (sensor wedged after CHIP_ID OK;
+ *       sensor state is undefined — caller must power-cycle before
+ *       any subsequent use)
  *
  * On success the caller may immediately issue `tegra_i2c_*` reads /
- * writes to `IMX219_I2C_ADDR` on `tegra_i2c_cam_bus`.
+ * writes to `IMX219_I2C_ADDR` on `tegra_i2c_cam_bus`, and the sensor
+ * is left in software standby (MODE_SELECT=0) with CSI-2 lanes in
+ * LP-11.
  */
 int imx219_power_on(void);
 

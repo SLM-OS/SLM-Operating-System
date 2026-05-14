@@ -99,7 +99,11 @@ int imx219_power_on(void)
      * Skip cam_pwr — Linux observation showed PH.03 stays LOW even
      * during active streaming on this carrier, so the camera rails
      * are sourced from a fixed always-on regulator and PH.03 controls
-     * something else. Driving it HIGH risks unrelated side effects. */
+     * something else. Driving it HIGH risks unrelated side effects.
+     *
+     * Issue #518 troubleshooting (2026-04-27) verified: driving PH.03
+     * HIGH does NOT unblock the no-SOF symptom. So the original
+     * comment is correct — PH.03 doesn't control CSI-2 PHY power. */
     rc = gpio_tegra_drive_output(&gpio_tegra_cam_mux_sel,
                                  IMX219_MUX_SELECT_A);
     if (rc != 0) {
@@ -146,6 +150,42 @@ int imx219_power_on(void)
              (unsigned)chip_id);
         return -3;
     }
+
+    /* Force CSI-2 D-PHY lanes into LP-11 (low-power, both lanes
+     * pulled HIGH via termination). Per L4T linux-imx219.c:1145-1162:
+     *
+     *   "Sensor doesn't enter LP-11 state upon power up until and
+     *    unless streaming is started, so upon power up switch the
+     *    modes to: streaming -> standby"
+     *
+     * NVCSI's DPHY block trains its receivers by observing
+     * LP-11 → HS line-state transitions. Without an established
+     * LP-11 baseline before NVCSI is brought up by RCE
+     * (CAPTURE_PHY_STREAM_OPEN_REQ), the DPHY never locks and
+     * the VI Falcon scheduler reports FRAME_START_TIMEOUT — the
+     * exact symptom from issue #518.
+     *
+     * Two writes with 100-110 µs delays each, matching the L4T
+     * usleep_range pattern. Errors logged + propagated; the
+     * sensor is responsive on I²C at this point so a failure
+     * here means something is fundamentally wrong with the bus. */
+    rc = tegra_i2c_write_reg16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                               IMX219_REG_MODE_SELECT,
+                               IMX219_MODE_STREAMING);
+    if (rc != 0) {
+        WARN("imx219: LP-11 force step 1 (MODE_SELECT=1) rc=%d", rc);
+        return -4;
+    }
+    timer_busy_wait_us(110u);
+    rc = tegra_i2c_write_reg16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                               IMX219_REG_MODE_SELECT,
+                               IMX219_MODE_STANDBY);
+    if (rc != 0) {
+        WARN("imx219: LP-11 force step 2 (MODE_SELECT=0) rc=%d", rc);
+        return -4;
+    }
+    timer_busy_wait_us(110u);
+    INFO("imx219: LP-11 forced (MODE_SELECT 1→0); CSI-2 lanes parked");
 
     return 0;
 }
