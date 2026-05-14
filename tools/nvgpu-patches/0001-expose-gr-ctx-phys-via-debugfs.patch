@@ -1,0 +1,235 @@
+--- a/drivers/gpu/nvgpu/include/nvgpu/gr/gr_falcon.h
++++ b/drivers/gpu/nvgpu/include/nvgpu/gr/gr_falcon.h
+@@ -316,6 +316,10 @@
+ void *nvgpu_gr_falcon_get_surface_desc_cpu_va(
+ 		struct nvgpu_gr_falcon *falcon);
+ 
++/* SLM-OS #788 v12: return surface_desc nvgpu_mem* for phys dump. */
++struct nvgpu_mem *nvgpu_gr_falcon_get_surface_desc_mem(
++		struct nvgpu_gr_falcon *falcon);
++
+ /**
+  * @brief Get size of golden context image.
+  *
+--- a/drivers/gpu/nvgpu/common/gr/gr_falcon.c
++++ b/drivers/gpu/nvgpu/common/gr/gr_falcon.c
+@@ -763,3 +763,11 @@
+ 	return &falcon->fecs_mutex;
+ }
+ #endif
++
++/* SLM-OS #788 v12: expose surface_desc mem so a debugfs reader
++ * can dump its phys for SLM-OS PMM reservation. */
++struct nvgpu_mem *nvgpu_gr_falcon_get_surface_desc_mem(
++                struct nvgpu_gr_falcon *falcon)
++{
++        return &falcon->ctxsw_ucode_info.surface_desc;
++}
+--- a/drivers/gpu/nvgpu/os/linux/debug_fifo.c
++++ b/drivers/gpu/nvgpu/os/linux/debug_fifo.c
+@@ -24,6 +24,10 @@
+ #include <nvgpu/timers.h>
+ #include <nvgpu/channel.h>
+ #include <nvgpu/gr/ctx.h>
++#include <nvgpu/nvgpu_mem.h>
++#include <nvgpu/gr/global_ctx.h>
++#include <nvgpu/gr/gr_utils.h>
++#include <nvgpu/gr/gr_falcon.h>
+ #include <nvgpu/engines.h>
+ #include <nvgpu/device.h>
+ #include <nvgpu/runlist.h>
+@@ -139,6 +143,181 @@
+ 	.release = seq_release
+ };
+ 
++/*
++ * SLM-OS #788 Mode C fix: expose per-channel GR context buffer phys
++ * addresses via a new debugfs file.
++ *
++ * nvgpu allocates several internal buffers per channel when binding a
++ * compute class (ALLOC_OBJ_CTX). The phys of those buffers is not
++ * available to userspace via the standard ioctl interface — only the
++ * channel's GPU VAs are. After a kexec to SLM-OS, the new kernel has
++ * no way to discover these phys ranges and clobbers them with its own
++ * PMM allocations, causing FECS to fail loading the channel context
++ * (mb6=0x5a watchdog at ~50% iteration rate per the N=30 stress test).
++ *
++ * This file dumps one line per (channel, ctx-buffer-index) tuple:
++ *
++ *   chid <chid> tsgid <tsgid> idx <i> phys 0x<phys> size <bytes>
++ *
++ * The reading helper publishes these phys values in the SLM-OS channel
++ * handoff so post-kexec PMM init can reserve them.
++ */
++static int slmos_gr_ctx_phys_show(struct seq_file *s, void *v)
++{
++	struct gk20a *g = s->private;
++	struct nvgpu_fifo *f = &g->fifo;
++	u32 chid;
++
++	seq_puts(s, "chid tsgid idx phys size\n");
++	for (chid = 0; chid < f->num_channels; chid++) {
++		struct nvgpu_channel *ch = &f->channel[chid];
++		struct nvgpu_tsg *tsg;
++		u32 i;
++
++		if (!nvgpu_channel_get(ch))
++			continue;
++		tsg = nvgpu_tsg_from_ch(ch);
++		if (!tsg || !tsg->gr_ctx) {
++			nvgpu_channel_put(ch);
++			continue;
++		}
++		for (i = 0; i < NVGPU_GR_CTX_COUNT; i++) {
++			struct nvgpu_mem *mem =
++				nvgpu_gr_ctx_get_ctx_mem(tsg->gr_ctx, i);
++			u64 phys;
++			size_t size;
++
++			if (mem == NULL || !nvgpu_mem_is_valid(mem))
++				continue;
++
++			phys = nvgpu_mem_get_phys_addr(g, mem);
++			size = mem->size;
++			if (phys == 0 || size == 0)
++				continue;
++
++			seq_printf(s,
++				"%u %u %u 0x%llx %zu\n",
++				ch->chid, ch->tsgid, i,
++				(unsigned long long)phys, size);
++		}
++		nvgpu_channel_put(ch);
++	}
++	return 0;
++}
++
++static int slmos_gr_ctx_phys_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, slmos_gr_ctx_phys_show, inode->i_private);
++}
++
++static const struct file_operations slmos_gr_ctx_phys_fops = {
++	.owner   = THIS_MODULE,
++	.open    = slmos_gr_ctx_phys_open,
++	.read    = seq_read,
++	.llseek  = seq_lseek,
++	.release = single_release
++};
++
++/*
++ * SLM-OS #788 v11 extension: also dump the per-GPU global context
++ * buffers. These are NOT per-channel but FECS touches them on every
++ * ctxsw (priv_access_map / circular / pagepool / attribute / rtv).
++ * Without protection, SLM-OS PMM clobbers them after kexec, causing
++ * Mode D (mb6=0x21 checksum mismatch) failures.
++ *
++ * Emitted with chid=4294967295 (-1) and tsgid=4294967295 to flag them
++ * as global; idx is the NVGPU_GR_GLOBAL_CTX_* slot.
++ */
++static int slmos_global_ctx_phys_show(struct seq_file *s, void *v)
++{
++	struct gk20a *g = s->private;
++	struct nvgpu_gr_global_ctx_buffer_desc *desc;
++	u32 i;
++
++	seq_puts(s, "chid tsgid idx phys size\n");
++	desc = nvgpu_gr_get_global_ctx_buffer_ptr(g);
++	if (desc == NULL)
++		return 0;
++
++	for (i = 0; i < NVGPU_GR_GLOBAL_CTX_COUNT; i++) {
++		struct nvgpu_mem *mem;
++		u64 phys;
++		size_t size;
++
++		if (!nvgpu_gr_global_ctx_buffer_ready(desc, i))
++			continue;
++		mem = nvgpu_gr_global_ctx_buffer_get_mem(desc, i);
++		if (mem == NULL || !nvgpu_mem_is_valid(mem))
++			continue;
++
++		phys = nvgpu_mem_get_phys_addr(g, mem);
++		size = mem->size;
++		if (phys == 0 || size == 0)
++			continue;
++
++		seq_printf(s,
++			"4294967295 4294967295 %u 0x%llx %zu\n",
++			i, (unsigned long long)phys, size);
++	}
++	return 0;
++}
++
++static int slmos_global_ctx_phys_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, slmos_global_ctx_phys_show, inode->i_private);
++}
++
++static const struct file_operations slmos_global_ctx_phys_fops = {
++	.owner   = THIS_MODULE,
++	.open    = slmos_global_ctx_phys_open,
++	.read    = seq_read,
++	.llseek  = seq_lseek,
++	.release = single_release
++};
++
++/* SLM-OS #788 v12: dump the FECS+GPCCS ctxsw ucode surface
++ * (one combined DRAM mirror, allocated at probe by nvgpu). FECS
++ * reads this during ctxsw to reload itself; if SLM-OS PMM
++ * clobbers it, ctxsw fails with mb6=0x21 / 0x15 / 0x5a.
++ *
++ * Emit with chid=4294967294 (-2) to flag it as a per-GPU
++ * non-channel buffer (distinct from chid=-1 for global ctx). */
++static int slmos_falcon_ucode_phys_show(struct seq_file *s, void *v)
++{
++	struct gk20a *g = s->private;
++	struct nvgpu_gr_falcon *falcon;
++	struct nvgpu_mem *mem;
++	u64 phys;
++
++	seq_puts(s, "chid tsgid idx phys size\n");
++	falcon = nvgpu_gr_get_falcon_ptr(g);
++	if (falcon == NULL)
++		return 0;
++	mem = nvgpu_gr_falcon_get_surface_desc_mem(falcon);
++	if (mem == NULL || !nvgpu_mem_is_valid(mem))
++		return 0;
++	phys = nvgpu_mem_get_phys_addr(g, mem);
++	if (phys != 0 && mem->size != 0) {
++		seq_printf(s,
++			"4294967294 4294967294 0 0x%llx %zu\n",
++			(unsigned long long)phys, mem->size);
++	}
++	return 0;
++}
++
++static int slmos_falcon_ucode_phys_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, slmos_falcon_ucode_phys_show, inode->i_private);
++}
++
++static const struct file_operations slmos_falcon_ucode_phys_fops = {
++	.owner   = THIS_MODULE,
++	.open    = slmos_falcon_ucode_phys_open,
++	.read    = seq_read,
++	.llseek  = seq_lseek,
++	.release = single_release
++};
++
+ void gk20a_fifo_debugfs_init(struct gk20a *g)
+ {
+ 	struct nvgpu_os_linux *l = nvgpu_os_linux_from_gk20a(g);
+@@ -160,4 +339,12 @@
+ 				     "recovery_profiler");
+ 	nvgpu_debugfs_swprofile_init(g, fifo_root, &g->fifo.eng_reset_profiler,
+ 				     "eng_reset_profiler");
++
++	/* SLM-OS #788: per-channel GR context buffer phys dump */
++	debugfs_create_file("slmos_gr_ctx_phys", 0400, fifo_root, g,
++			    &slmos_gr_ctx_phys_fops);
++	debugfs_create_file("slmos_global_ctx_phys", 0400, fifo_root, g,
++			    &slmos_global_ctx_phys_fops);
++	debugfs_create_file("slmos_falcon_ucode_phys", 0400, fifo_root, g,
++			    &slmos_falcon_ucode_phys_fops);
+ }
