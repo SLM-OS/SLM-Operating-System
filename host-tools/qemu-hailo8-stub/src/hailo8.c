@@ -160,6 +160,24 @@ static uint64_t hailo8_bar_read(void *opaque, hwaddr addr, unsigned size)
     Hailo8State *s = ctx->s;
     uint64_t seq = ++s->seq;
 
+    /* Phase 4 region check — takes precedence over per-seq lookup per
+     * docs/hailo-re-corpus-format.md §"Region rule (Phase 4 compression)".
+     * If the access falls inside a region, serve from the region's
+     * artifact and skip the per-seq path entirely. */
+    const hailo_region_t *rgn = hailo_corpus_region_lookup(
+        s->corpus, ctx->bar_index, (uint64_t)addr, size);
+    if (rgn) {
+        uint64_t val = 0;
+        if (hailo_region_get_value(rgn, (uint64_t)addr, size, &val) != 0) {
+            /* Should be impossible if region_lookup just succeeded; if it
+             * does happen, treat as an unknown read (loud error from the
+             * existing path is better than returning garbage). */
+            emit_corpus_extend(seq, ctx->bar_index, (uint64_t)addr, size);
+            exit(1);
+        }
+        return val;
+    }
+
     const hailo_op_entry_t *e = hailo_corpus_get(s->corpus, seq);
     if (!e) {
         emit_corpus_extend(seq, ctx->bar_index, (uint64_t)addr, size);
@@ -195,6 +213,31 @@ static void hailo8_bar_write(void *opaque, hwaddr addr,
     /* Mask data to access width — QEMU passes the full uint64_t. */
     uint64_t mask = (size == 8) ? UINT64_MAX : ((1ULL << (size * 8)) - 1);
     data &= mask;
+
+    /* Phase 4 region check — takes precedence over per-seq lookup. A write
+     * landing inside a region is expected to match the artifact bytes
+     * verbatim; any divergence is a real protocol change, not a corpus
+     * extension, so we surface it loudly instead of appending. */
+    const hailo_region_t *rgn = hailo_corpus_region_lookup(
+        s->corpus, ctx->bar_index, (uint64_t)addr, size);
+    if (rgn) {
+        uint64_t expected = 0;
+        if (hailo_region_get_value(rgn, (uint64_t)addr, size, &expected) != 0) {
+            /* Should be impossible if region_lookup just succeeded. */
+            error_report("hailo8: region_get_value failed inside covered "
+                         "range at seq=%" PRIu64 " bar=%d offset=%" PRIu64,
+                         seq, ctx->bar_index, (uint64_t)addr);
+            exit(1);
+        }
+        if (expected != data) {
+            emit_corpus_divergence_value(seq, ctx->bar_index, (uint64_t)addr,
+                                         size, bar_dir_str(true),
+                                         expected, data,
+                                         "region_write_mismatch");
+            exit(1);
+        }
+        return;
+    }
 
     const hailo_op_entry_t *e = hailo_corpus_get(s->corpus, seq);
     if (e) {

@@ -59,6 +59,37 @@ typedef struct hailo_op_entry {
     char note[HAILO_CORPUS_MAX_NOTE + 1];
 } hailo_op_entry_t;
 
+#define HAILO_CORPUS_MAX_PATH    1023
+#define HAILO_CORPUS_MAX_KIND    15
+
+/*
+ * Phase 4 region rule — short-circuits per-seq capture for a contiguous BAR
+ * range whose bytes come from a known artifact. See
+ * docs/hailo-re-corpus-format.md §"Region rule (Phase 4 compression)".
+ *
+ * Currently only `source.kind="file"` is supported. The file is read in full
+ * at load time into `data` (regions are small relative to fw blobs that fit
+ * in BAR4 = 16 MiB).
+ */
+typedef struct hailo_region {
+    int       bar;            /* 0, 2, or 4 */
+    uint64_t  start;          /* BAR offset, inclusive */
+    uint64_t  end;            /* BAR offset, exclusive (half-open) */
+
+    char      source_kind[HAILO_CORPUS_MAX_KIND + 1];   /* "file" */
+    char      source_path[HAILO_CORPUS_MAX_PATH + 1];
+    uint64_t  source_offset;  /* byte offset within source_path */
+
+    /* Loaded artifact bytes. Owned by the region; freed in
+     * hailo_corpus_free. `data[i]` corresponds to BAR offset
+     * `start + i` (after subtracting source_offset). */
+    uint8_t  *data;
+    size_t    data_size;      /* exactly end - start */
+
+    char      validated_at_commit[HAILO_CORPUS_MAX_SHA + 1];
+    char      validated_at[HAILO_CORPUS_MAX_TIME + 1];
+} hailo_region_t;
+
 typedef struct hailo_corpus {
     hailo_op_entry_t *entries;
     size_t            n_entries;
@@ -68,6 +99,12 @@ typedef struct hailo_corpus {
     int32_t *seq_index;
     size_t   seq_index_cap;
     uint64_t max_seq;
+
+    /* Phase 4 region rules. Linear search on lookup; typical corpus has
+     * O(1)-O(10) regions, so a tree would be overkill. */
+    hailo_region_t *regions;
+    size_t          n_regions;
+    size_t          cap_regions;
 
     /* Header fields (informational). */
     int  format_version;
@@ -107,6 +144,29 @@ void hailo_corpus_free(hailo_corpus_t *c);
  * Return the entry at `seq`, or NULL if none. seq must be >= 1.
  */
 const hailo_op_entry_t *hailo_corpus_get(const hailo_corpus_t *c, uint64_t seq);
+
+/*
+ * Phase 4 region lookup. Returns the region covering the half-open range
+ * `[offset, offset + size)` on `bar`, or NULL if no region covers the
+ * access. The covering region must contain the ENTIRE access width — a
+ * partial overlap counts as NOT covered, since serving a fraction of an
+ * access from the artifact and the rest from … nowhere is incoherent.
+ */
+const hailo_region_t *hailo_corpus_region_lookup(const hailo_corpus_t *c,
+                                                 int bar, uint64_t offset,
+                                                 uint32_t size);
+
+/*
+ * Extract `size` bytes from the region's loaded artifact starting at BAR
+ * offset `bar_offset`, decode as a little-endian unsigned integer (matching
+ * the corpus value semantics), and return via *out_value. Returns 0 on
+ * success, -1 if `(bar_offset, size)` is not fully inside `[rgn->start,
+ * rgn->end)`. Caller is expected to have already validated coverage via
+ * hailo_corpus_region_lookup; this is a belt-and-suspenders check.
+ */
+int hailo_region_get_value(const hailo_region_t *rgn,
+                           uint64_t bar_offset, uint32_t size,
+                           uint64_t *out_value);
 
 /*
  * Append a freshly-captured write entry. Writes one JSONL line to the open

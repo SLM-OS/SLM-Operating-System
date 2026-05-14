@@ -450,6 +450,213 @@ static int parse_op_line(const char *line, size_t linelen,
     return 0;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Region rule parsing + storage                                               */
+/* -------------------------------------------------------------------------- */
+
+typedef struct {
+    hailo_region_t region;
+    int has_bar, has_start, has_end;
+    int has_source_kind, has_source_path, has_source_offset;
+} region_parse_t;
+
+static int parse_region_line(const char *line, size_t linelen,
+                             region_parse_t *rp,
+                             char *errbuf, size_t errlen)
+{
+    memset(rp, 0, sizeof(*rp));
+    json_cursor_t cur = { .p = line, .end = line + linelen };
+    skip_ws(&cur);
+    if (cur.p >= cur.end || *cur.p != '{') {
+        set_err(errbuf, errlen, "region line does not start with '{'");
+        return -1;
+    }
+    cur.p++;
+
+    while (1) {
+        skip_ws(&cur);
+        if (cur.p >= cur.end) {
+            set_err(errbuf, errlen, "truncated region object");
+            return -1;
+        }
+        if (*cur.p == '}') {
+            cur.p++;
+            break;
+        }
+
+        char key[64];
+        if (parse_key(&cur, key, sizeof(key)) != 0) {
+            set_err(errbuf, errlen, "bad region key");
+            return -1;
+        }
+        skip_ws(&cur);
+        if (cur.p >= cur.end || *cur.p != ':') {
+            set_err(errbuf, errlen, "missing ':' after region key '%s'", key);
+            return -1;
+        }
+        cur.p++;
+
+        char strbuf[1024];
+        int64_t intval = 0;
+        int is_str = 0, is_int = 0;
+        if (parse_value(&cur, strbuf, sizeof(strbuf),
+                        &intval, &is_str, &is_int) != 0) {
+            set_err(errbuf, errlen, "bad value for region key '%s'", key);
+            return -1;
+        }
+
+        if (strcmp(key, "type") == 0 && is_str) {
+            if (strcmp(strbuf, "region") != 0) {
+                set_err(errbuf, errlen,
+                        "expected type='region', got '%s'", strbuf);
+                return -1;
+            }
+        } else if (strcmp(key, "bar") == 0 && is_int) {
+            rp->region.bar = (int)intval;
+            rp->has_bar = 1;
+        } else if (strcmp(key, "start") == 0 && is_int) {
+            rp->region.start = (uint64_t)intval;
+            rp->has_start = 1;
+        } else if (strcmp(key, "end") == 0 && is_int) {
+            rp->region.end = (uint64_t)intval;
+            rp->has_end = 1;
+        } else if (strcmp(key, "source_kind") == 0 && is_str) {
+            copy_str(rp->region.source_kind,
+                     sizeof(rp->region.source_kind), strbuf);
+            rp->has_source_kind = 1;
+        } else if (strcmp(key, "source_path") == 0 && is_str) {
+            copy_str(rp->region.source_path,
+                     sizeof(rp->region.source_path), strbuf);
+            rp->has_source_path = 1;
+        } else if (strcmp(key, "source_offset") == 0 && is_int) {
+            rp->region.source_offset = (uint64_t)intval;
+            rp->has_source_offset = 1;
+        } else if (strcmp(key, "validated_at_commit") == 0 && is_str) {
+            copy_str(rp->region.validated_at_commit,
+                     sizeof(rp->region.validated_at_commit), strbuf);
+        } else if (strcmp(key, "validated_at") == 0 && is_str) {
+            copy_str(rp->region.validated_at,
+                     sizeof(rp->region.validated_at), strbuf);
+        }
+        /* unknown keys silently tolerated for forward-compat */
+
+        skip_ws(&cur);
+        if (cur.p < cur.end && *cur.p == ',') {
+            cur.p++;
+            continue;
+        }
+        skip_ws(&cur);
+        if (cur.p < cur.end && *cur.p == '}') {
+            cur.p++;
+            break;
+        }
+    }
+
+    if (!rp->has_bar || !rp->has_start || !rp->has_end ||
+        !rp->has_source_kind || !rp->has_source_path ||
+        !rp->has_source_offset) {
+        set_err(errbuf, errlen, "region line missing required field "
+                "(bar/start/end/source_kind/source_path/source_offset)");
+        return -1;
+    }
+    if (rp->region.end <= rp->region.start) {
+        set_err(errbuf, errlen,
+                "region end (%llu) must be > start (%llu)",
+                (unsigned long long)rp->region.end,
+                (unsigned long long)rp->region.start);
+        return -1;
+    }
+    if (strcmp(rp->region.source_kind, "file") != 0) {
+        set_err(errbuf, errlen,
+                "unsupported source_kind '%s' (only 'file' supported)",
+                rp->region.source_kind);
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Load the source file's bytes into the region's data buffer. Reads
+ * exactly `region->end - region->start` bytes starting at
+ * `region->source_offset` within `region->source_path`. */
+static int region_load_data(hailo_region_t *r, char *errbuf, size_t errlen)
+{
+    FILE *fp = fopen(r->source_path, "rb");
+    if (!fp) {
+        set_err(errbuf, errlen, "region: open(%s) failed: %s",
+                r->source_path, strerror(errno));
+        return -1;
+    }
+    if (fseek(fp, (long)r->source_offset, SEEK_SET) != 0) {
+        set_err(errbuf, errlen,
+                "region: fseek(%s, %llu) failed: %s",
+                r->source_path,
+                (unsigned long long)r->source_offset,
+                strerror(errno));
+        fclose(fp);
+        return -1;
+    }
+    size_t want = (size_t)(r->end - r->start);
+    uint8_t *buf = malloc(want);
+    if (!buf) {
+        set_err(errbuf, errlen,
+                "region: out of memory allocating %zu bytes", want);
+        fclose(fp);
+        return -1;
+    }
+    size_t got = fread(buf, 1, want, fp);
+    if (got != want) {
+        set_err(errbuf, errlen,
+                "region: short read on %s — wanted %zu got %zu (file too small?)",
+                r->source_path, want, got);
+        free(buf);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    r->data = buf;
+    r->data_size = want;
+    return 0;
+}
+
+static int push_region(hailo_corpus_t *c, const hailo_region_t *src,
+                       char *errbuf, size_t errlen)
+{
+    /* Overlap check — spec rejects overlapping regions on the same BAR. */
+    for (size_t i = 0; i < c->n_regions; i++) {
+        const hailo_region_t *other = &c->regions[i];
+        if (other->bar != src->bar) continue;
+        bool overlaps = !(src->end <= other->start || other->end <= src->start);
+        if (overlaps) {
+            set_err(errbuf, errlen,
+                    "region overlap on bar=%d: new [%llu,%llu) vs existing [%llu,%llu)",
+                    src->bar,
+                    (unsigned long long)src->start,
+                    (unsigned long long)src->end,
+                    (unsigned long long)other->start,
+                    (unsigned long long)other->end);
+            return -1;
+        }
+    }
+
+    if (c->n_regions == c->cap_regions) {
+        size_t new_cap = c->cap_regions ? c->cap_regions * 2 : 4;
+        hailo_region_t *nr = realloc(c->regions,
+                                     new_cap * sizeof(hailo_region_t));
+        if (!nr) {
+            set_err(errbuf, errlen, "out of memory growing regions");
+            return -1;
+        }
+        c->regions = nr;
+        c->cap_regions = new_cap;
+    }
+    c->regions[c->n_regions] = *src;
+    /* Move ownership of `data` (which lives on the heap) into the
+     * corpus's region slot. The caller's stack copy must NOT free it. */
+    c->n_regions++;
+    return 0;
+}
+
 static int parse_header_line(hailo_corpus_t *c,
                              const char *line, size_t linelen,
                              char *errbuf, size_t errlen)
@@ -577,6 +784,10 @@ void hailo_corpus_free(hailo_corpus_t *c)
     }
     free(c->entries);
     free(c->seq_index);
+    for (size_t i = 0; i < c->n_regions; i++) {
+        free(c->regions[i].data);
+    }
+    free(c->regions);
     free(c);
 }
 
@@ -648,6 +859,26 @@ hailo_corpus_t *hailo_corpus_load(const char *path,
             }
         } else if (strcmp(type, "trailer") == 0) {
             /* Trailer is informational; ignore for now. */
+        } else if (strcmp(type, "region") == 0) {
+            /* Phase 4 region rule. Header must precede regions for the
+             * same reason it must precede ops — a corpus is consumed
+             * top-down and header fields parameterise what follows. */
+            if (!header_seen) {
+                set_err(errbuf, errlen,
+                        "line %d: region entry before header", lineno);
+                goto fail;
+            }
+            region_parse_t rp;
+            if (parse_region_line(line, len, &rp, errbuf, errlen) != 0) {
+                goto fail;
+            }
+            if (region_load_data(&rp.region, errbuf, errlen) != 0) {
+                goto fail;
+            }
+            if (push_region(c, &rp.region, errbuf, errlen) != 0) {
+                free(rp.region.data);
+                goto fail;
+            }
         } else {
             /* Unknown type — tolerate forward-compat. */
         }
@@ -732,4 +963,48 @@ int hailo_corpus_append_write(hailo_corpus_t *c,
     }
 
     return push_entry(c, &e, errbuf, errlen);
+}
+
+const hailo_region_t *hailo_corpus_region_lookup(const hailo_corpus_t *c,
+                                                 int bar, uint64_t offset,
+                                                 uint32_t size)
+{
+    if (!c || size == 0) return NULL;
+    uint64_t access_end = offset + size;  /* exclusive */
+    /* Overflow guard — offset+size shouldn't exceed UINT64_MAX, but if a
+     * caller passes pathological values, treat as no coverage. */
+    if (access_end < offset) return NULL;
+
+    for (size_t i = 0; i < c->n_regions; i++) {
+        const hailo_region_t *r = &c->regions[i];
+        if (r->bar != bar) continue;
+        /* Require the access to be ENTIRELY inside the region. Partial
+         * overlap counts as not covered — serving a sliced access half
+         * from the artifact and half from the per-seq lookup is incoherent. */
+        if (offset >= r->start && access_end <= r->end) {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+int hailo_region_get_value(const hailo_region_t *rgn,
+                           uint64_t bar_offset, uint32_t size,
+                           uint64_t *out_value)
+{
+    if (!rgn || !out_value || size == 0 || size > 8) return -1;
+    uint64_t access_end = bar_offset + size;
+    if (access_end < bar_offset) return -1;
+    if (bar_offset < rgn->start || access_end > rgn->end) return -1;
+    size_t data_off = (size_t)(bar_offset - rgn->start);
+    if (data_off + size > rgn->data_size) return -1;
+
+    /* Decode `size` bytes little-endian — matches the corpus value
+     * semantics defined in docs/hailo-re-corpus-format.md §"Lines 2..N". */
+    uint64_t v = 0;
+    for (uint32_t i = 0; i < size; i++) {
+        v |= ((uint64_t)rgn->data[data_off + i]) << (i * 8);
+    }
+    *out_value = v;
+    return 0;
 }
