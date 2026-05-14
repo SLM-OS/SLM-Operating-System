@@ -53,7 +53,7 @@ local cam = slm.camera.open(cam_name)
 if cam == nil then
     note("Camera open failed — no '" .. cam_name .. "' backend on this build.")
     note("On Jetson Orin Nano, kexec a JETSON_ORIN_NANO build first.")
-    note("On other platforms try:  lua /mnt/files/demo_imx219_mnist.lua mock")
+    note("On other platforms try:  lua-admin /mnt/files/demo_imx219_mnist.lua mock")
     return
 end
 note(string.format("camera.open: %d ms", slm.uptime() - t_open))
@@ -106,12 +106,16 @@ note(string.format("model_load:  %d ms  (model_id=%d)",
 header("4. Inference — slm.model_infer_bytes()")
 
 local t_inf = slm.uptime()
-local logits, argmax = slm.model_infer_bytes(mid, bytes)
+-- model_infer_bytes returns (logits_string, argmax) on success or
+-- (nil, rc<0) on failure. Capture as a second name so the failure
+-- branch reads correctly; rebind to argmax once success is confirmed.
+local logits, argmax_or_rc = slm.model_infer_bytes(mid, bytes)
 if logits == nil then
-    note(string.format("model_infer_bytes failed: rc=%d", argmax or 0))
+    note(string.format("model_infer_bytes failed: rc=%d", argmax_or_rc or 0))
     cam:close()
     return
 end
+local argmax = argmax_or_rc
 note(string.format("inference:   %d ms", slm.uptime() - t_inf))
 note("")
 note("Logits (class -> score):")
