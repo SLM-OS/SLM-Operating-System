@@ -365,7 +365,14 @@ def init(path: os.PathLike | str, header: Header) -> Corpus:
 
 
 def append_op(corpus: Corpus, op: OpEntry) -> None:
-    """Append a new op, enforcing strict monotonic seq."""
+    """Append a new op, enforcing strict +1 seq.
+
+    Unlike ``load``, which accepts gaps (region-served accesses don't
+    produce op entries), this function is only ever called to record
+    the immediately-next captured read — the seq the QEMU stub halted
+    at, one past its own most-recent C-side auto-append. So +1 is the
+    right invariant here, and a non-+1 seq indicates a caller bug.
+    """
     if corpus.trailer is not None:
         raise CorpusError(
             f"{corpus.path}: cannot append after trailer is written"
