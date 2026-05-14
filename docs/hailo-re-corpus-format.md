@@ -91,8 +91,8 @@ A region rule short-circuits per-`seq` capture for a contiguous BAR range whose 
 | `source_offset` | integer | yes (for `source_kind="file"`) | Byte offset within the file corresponding to BAR `start` |
 | `validated_at_commit` | string\|null | yes | Audit field, same semantics as op entries — full 40-char SHA when validated, `null` until a verification pass confirms HailoRT writes match the region |
 | `validated_at` | string\|null | yes | ISO 8601 timestamp, same semantics |
-| `applies_from_seq` | integer | no | Inclusive lower seq bound — region rule fires only for accesses with `seq >= applies_from_seq`. Defaults to `1`. See "Seq-bounded regions" below |
-| `applies_to_seq` | integer | no | Inclusive upper seq bound — region rule fires only for accesses with `seq <= applies_to_seq`. Defaults to "unbounded" (treated as `UINT64_MAX` internally). Must be `>= applies_from_seq` |
+| `applies_from_seq` | integer | no | Inclusive lower seq bound — region rule fires only for accesses with `seq >= applies_from_seq`. Defaults to `1`. Must be `>= 1`. See "Seq-bounded regions" below |
+| `applies_to_seq` | integer | no | Inclusive upper seq bound — region rule fires only for accesses with `seq <= applies_to_seq`. **Omit the field to mean "unbounded"** — the loader's hand-rolled JSON parser stores integers as `int64_t`, so explicitly encoding `UINT64_MAX` (`18446744073709551615`) overflows to a negative value and is rejected. Defaults to unbounded. Must be `>= applies_from_seq` |
 | `note` | string | no | Free-form annotation (e.g. "Hailo-8 firmware code section, identified via signature match on first 32 bytes") |
 
 (Fields use flat names — `source_kind` etc. — rather than a nested `source` object so the existing hand-rolled JSON parser in the QEMU stub doesn't need to grow nested-object support. Functionally equivalent to a nested representation.)
