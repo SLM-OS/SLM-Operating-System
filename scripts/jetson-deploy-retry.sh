@@ -55,6 +55,12 @@ RETRIES=4
 SKIP_TEST=0
 LOG_DIR=""
 
+# Per-stage timeouts (seconds). Hoisted so future board / firmware changes
+# only touch one place.
+LINUX_LOGIN_TIMEOUT=90
+SSH_READY_TIMEOUT=90
+SLMOS_SHELL_TIMEOUT=90
+
 usage() {
     cat <<'EOF'
 Usage: jetson-deploy-retry.sh [options]
@@ -86,11 +92,16 @@ while (( $# > 0 )); do
         -t|--target)   TARGET="$2"; shift 2 ;;
         -i|--ip)       JET_IP="$2"; shift 2 ;;
         -u|--user)     SSH_USER="$2"; shift 2 ;;
-        -r|--retries)  RETRIES="$2"; shift 2 ;;
+        -r|--retries)
+            [[ "${2:-}" =~ ^[0-9]+$ ]] || {
+                echo "Error: --retries requires non-negative integer, got: ${2:-<empty>}" >&2
+                exit 2
+            }
+            RETRIES="$2"; shift 2 ;;
         --skip-test)   SKIP_TEST=1; shift ;;
         --log-dir)     LOG_DIR="$2"; shift 2 ;;
         -h|--help)     usage 0 ;;
-        *) echo "Unknown argument: $1" >&2; usage 1 ;;
+        *) echo "Unknown argument: $1" >&2; usage 2 ;;
     esac
 done
 
@@ -110,6 +121,12 @@ fi
 mkdir -p "$LOG_DIR"
 
 SUMMARY="$LOG_DIR/summary.txt"
+
+# On Ctrl-C / SIGTERM, leave a breadcrumb in the summary so post-mortem
+# `cat summary.txt` shows the run was interrupted (and at which attempt).
+# Intentionally do NOT auto-release the labctl claim — the operator may
+# want to inspect Jetson state before releasing.
+trap 'printf "\nINTERRUPTED at %s\n" "$(date -Is)" | tee -a "$SUMMARY" >&2; exit 130' INT TERM
 
 ATTEMPTS=$((RETRIES + 1))
 SSH_OPTS=(
@@ -146,15 +163,16 @@ attempt_deploy() {
     # 1. Power cycle into Linux
     echo "[1/5] power cycle" >> "$log_file"
     if ! labctl power cycle "$TARGET" >> "$log_file" 2>&1; then
-        echo "      power cycle failed" >> "$log_file"
+        echo "      FAIL detail: stage=power-cycle" >> "$log_file"
         return 1
     fi
     sleep 2
 
     # 2. Wait for Linux login prompt over serial
     echo "[2/5] waiting for Linux login" >> "$log_file"
-    if ! labctl serial capture "$TARGET" -t 90 -u "login:" -n 3 >> "$log_file" 2>&1; then
-        echo "      Linux did not reach login:" >> "$log_file"
+    if ! labctl serial capture "$TARGET" -t "$LINUX_LOGIN_TIMEOUT" -u "login:" -n 3 \
+            >> "$log_file" 2>&1; then
+        echo "      FAIL detail: stage=linux-login-timeout" >> "$log_file"
         return 1
     fi
 
@@ -164,8 +182,8 @@ attempt_deploy() {
     until ssh "${SSH_OPTS[@]}" "$SSH_USER@$JET_IP" 'echo up' >/dev/null 2>&1; do
         sleep 5
         waited=$((waited + 5))
-        if (( waited > 90 )); then
-            echo "      ssh never came up" >> "$log_file"
+        if (( waited > SSH_READY_TIMEOUT )); then
+            echo "      FAIL detail: stage=ssh-timeout" >> "$log_file"
             return 1
         fi
     done
@@ -174,7 +192,7 @@ attempt_deploy() {
     echo "[4/5] deploying $KERNEL" >> "$log_file"
     if ! scp "${SSH_OPTS[@]}" "$KERNEL" "$SSH_USER@$JET_IP:/root/slmos.elf" \
             >> "$log_file" 2>&1; then
-        echo "      scp failed" >> "$log_file"
+        echo "      FAIL detail: stage=scp" >> "$log_file"
         return 1
     fi
     ssh "${SSH_OPTS[@]}" "$SSH_USER@$JET_IP" \
@@ -184,9 +202,9 @@ attempt_deploy() {
     # session is torn down by kexec; we don't wait on it.
 
     # Wait for SLM-OS shell.
-    if ! labctl serial capture "$TARGET" -t 90 -u "slmos>" -n 5 \
+    if ! labctl serial capture "$TARGET" -t "$SLMOS_SHELL_TIMEOUT" -u "slmos>" -n 5 \
             >> "$log_file" 2>&1; then
-        echo "      SLM-OS shell did not appear" >> "$log_file"
+        echo "      FAIL detail: stage=slmos-shell-timeout" >> "$log_file"
         return 1
     fi
 
@@ -233,10 +251,13 @@ for n in $(seq 1 "$ATTEMPTS"); do
         log "  PASS"
         break
     fi
-    # Surface the one-line failure cause into the summary
+    # Surface the one-line failure cause into the summary. Strip the
+    # "FAIL detail: " prefix once here so both the per-attempt log line
+    # and the failure-modes recap below read consistently.
     detail=$(grep -oE 'FAIL detail: .*' "$log_file" | head -1)
-    log "  FAIL${detail:+ — ${detail#FAIL detail: }}"
-    FAIL_DETAILS+=("$detail")
+    detail="${detail#FAIL detail: }"
+    log "  FAIL${detail:+ — $detail}"
+    FAIL_DETAILS+=("${detail:-unknown}")
 done
 
 OVERALL_ELAPSED=$(( $(date +%s) - OVERALL_START ))
@@ -247,6 +268,12 @@ log "  total wall:    ${OVERALL_ELAPSED}s"
 log "  attempts used: $(( PASS == 1 ? n : ATTEMPTS )) / $ATTEMPTS"
 log "  finished:      $(date -Is)"
 log "  full logs in:  $LOG_DIR"
+if (( PASS == 0 )) && (( ${#FAIL_DETAILS[@]} > 0 )); then
+    log "  failure modes:"
+    for d in "${FAIL_DETAILS[@]}"; do
+        log "    $d"
+    done
+fi
 
 if [[ "$PASS" == "1" ]]; then
     exit 0
