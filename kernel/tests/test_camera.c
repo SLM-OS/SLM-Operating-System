@@ -65,6 +65,7 @@ static void test_camera_open_mock(void)
     TEST_ASSERT_EQUAL_UINT(1640u, frame.width);
     TEST_ASSERT_EQUAL_UINT(1232u, frame.height);
     TEST_ASSERT_EQUAL_UINT(CAMERA_BAYER_RGGB, frame.bayer);
+    TEST_ASSERT_EQUAL_UINT(CAMERA_FORMAT_RAW10_PACKED, frame.format);
 }
 
 /*
@@ -74,7 +75,14 @@ static void test_camera_open_mock(void)
 static void test_camera_open_unknown_returns_minus_one(void)
 {
     struct camera_frame frame;
-    TEST_ASSERT_EQUAL_INT(-1, camera_open("imx219-0", &frame));
+    /* "imx219-0" is recognised on JETSON_ORIN_NANO builds (returns
+     * 0 or -3 depending on whether the sensor is actually wired);
+     * on every other platform the dispatch resolves to -2
+     * ("backend not built"). Either way, it's NOT -1 — that's
+     * reserved for "unknown name". */
+#if !defined(PLATFORM_JETSON_ORIN_NANO)
+    TEST_ASSERT_EQUAL_INT(-2, camera_open("imx219-0", &frame));
+#endif
     TEST_ASSERT_EQUAL_INT(-1, camera_open("",         &frame));
     TEST_ASSERT_EQUAL_INT(-1, camera_open("nonsense", &frame));
 }
@@ -107,28 +115,33 @@ static void test_camera_preprocess_bad_args(void)
     /* NULL guards. */
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         NULL, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, dummy_out, sizeof(dummy_out)));
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        NULL, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, NULL, sizeof(dummy_out)));
 
     /* out_capacity too small. */
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        dummy_out, CAMERA_MNIST_OUT_BYTES - 1u));
+        CAMERA_FORMAT_RAW10_PACKED, dummy_out, CAMERA_MNIST_OUT_BYTES - 1u));
 
     /* Wrong geometry — only 1640x1232 supported today. */
     TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 640u, 480u, CAMERA_BAYER_RGGB,
-        dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, dummy_out, sizeof(dummy_out)));
     TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_GRBG,
-        dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, dummy_out, sizeof(dummy_out)));
 
-    /* Right geometry but raw10_len smaller than the frame requires. */
+    /* Unknown format — must reject before reading data. */
+    TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
+        dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
+        99u, dummy_out, sizeof(dummy_out)));
+
+    /* Right geometry but data_len smaller than the frame requires. */
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, dummy_out, sizeof(dummy_out)));
 }
 
 /*
@@ -148,7 +161,8 @@ static void test_camera_preprocess_mock_first_pixel(void)
 
     uint8_t out[CAMERA_MNIST_OUT_BYTES];
     int rc = camera_preprocess_mnist(frame.data, frame.size,
-                                     frame.width, frame.height, frame.bayer,
+                                     frame.width, frame.height,
+                                     frame.bayer, frame.format,
                                      out, sizeof(out));
     TEST_ASSERT_EQUAL_INT(0, rc);
 
@@ -160,6 +174,54 @@ static void test_camera_preprocess_mock_first_pixel(void)
     uint32_t bits;
     __builtin_memcpy(&bits, &out[0], sizeof(bits));
     TEST_ASSERT_EQUAL_HEX32(0x00000000u, bits);
+}
+
+/*
+ * Test: T_R16 and RAW10_PACKED produce byte-identical fp32 output
+ * when the high-8-bit samples match. Synthesises a 4 MB T_R16
+ * buffer from the embedded mock RAW10 frame, runs preprocess on
+ * both, and asserts the outputs are equal. Catches regressions in
+ * `t_r16_hi8` (the IMX219 backend's read path) without needing
+ * real Jetson hardware. Skipped when MOCK_CAMERA_FRAME=OFF.
+ */
+static uint8_t t_r16_synth_buffer[1640u * 1232u * 2u];
+
+static void test_camera_preprocess_t_r16_matches_raw10(void)
+{
+    if (!mock_frame_embedded()) {
+        TEST_IGNORE_MESSAGE("MOCK_CAMERA_FRAME=OFF — mock backend skipped");
+    }
+    struct camera_frame frame;
+    TEST_ASSERT_EQUAL_INT(0, camera_open("mock", &frame));
+
+    /* For each pixel, copy the RAW10 high-8 byte into the high byte
+     * of a u16 (little-endian: byte[i*2 + 1]); leave the low byte
+     * zero (matches `pad0_en=0` behaviour — VI writes the low 6
+     * bits + 2 high bits of the 10-bit sample, but our reader
+     * discards those anyway). */
+    const uint8_t *raw10 = frame.data;
+    for (uint32_t pi = 0; pi < 1640u * 1232u; pi++) {
+        uint32_t group  = pi >> 2;
+        uint32_t in_grp = pi & 3u;
+        t_r16_synth_buffer[pi * 2u]     = 0u;
+        t_r16_synth_buffer[pi * 2u + 1u] = raw10[group * 5u + in_grp];
+    }
+
+    uint8_t out_raw10[CAMERA_MNIST_OUT_BYTES];
+    uint8_t out_t_r16[CAMERA_MNIST_OUT_BYTES];
+
+    TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
+        frame.data, frame.size, frame.width, frame.height,
+        frame.bayer, CAMERA_FORMAT_RAW10_PACKED,
+        out_raw10, sizeof(out_raw10)));
+    TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
+        t_r16_synth_buffer, sizeof(t_r16_synth_buffer),
+        frame.width, frame.height, frame.bayer,
+        CAMERA_FORMAT_T_R16, out_t_r16, sizeof(out_t_r16)));
+
+    for (uint32_t i = 0; i < CAMERA_MNIST_OUT_BYTES; i++) {
+        TEST_ASSERT_EQUAL_UINT8(out_raw10[i], out_t_r16[i]);
+    }
 }
 
 /* ---- Tegra HSI2C driver ----
@@ -900,6 +962,7 @@ int test_suite_camera(void)
     RUN_TEST(test_camera_open_null_safe);
     RUN_TEST(test_camera_preprocess_bad_args);
     RUN_TEST(test_camera_preprocess_mock_first_pixel);
+    RUN_TEST(test_camera_preprocess_t_r16_matches_raw10);
     RUN_TEST(test_tegra_i2c_stubs_return_minus_one);
     RUN_TEST(test_tegra_i2c_cam_bus_wiring);
     RUN_TEST(test_tegra_i2c_api_arg_validation);

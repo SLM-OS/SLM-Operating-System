@@ -17,9 +17,14 @@
 
 #if defined(PLATFORM_JETSON_ORIN_NANO)
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "bpmp.h"
+#include "cache.h"
+#include "camera.h"
+#include "camrtc.h"
+#include "camrtc_capture.h"
 #include "debug.h"
 #include "gpio_tegra.h"
 #include "i2c_tegra.h"
@@ -415,6 +420,234 @@ int imx219_streaming_disable(void)
                                  IMX219_MODE_STANDBY);
 }
 
+/*
+ * Capture-pipeline parameters discovered (the hard way) by issue #518:
+ *
+ *   IMX219-A on the J20 connector of the Jetson Orin Nano carrier is
+ *   wired to NVCSI port B (= 1), not port A. The L4T R36.4.4 DTBO
+ *   `tegra234-p3767-camera-p3768-imx219-A.dtbo` carries
+ *   `port-index = <1>` on every endpoint (sensor → vi-port → nvcsi-
+ *   port), and for ports A..D `csi5_port_to_stream(port)` returns the
+ *   port id unchanged so stream_id == csi_port == 1.
+ *
+ *   The sensor emits 2 lines of embedded metadata per frame by
+ *   default (`embedded_metadata_height = "2"` for every mode in the
+ *   L4T DT). VI must be told to expect them or it raises
+ *   CHANSEL_EMBED_INFRINGE — the embedded surface is parked at the
+ *   tail of the same 4 MB frame-buffer carveout because the active
+ *   frame (1640 × 1232 × 2 B = 4,040,960 B) only consumes ~3.85 MB,
+ *   leaving ~150 KB of slack before the carveout end.
+ */
+#define IMX219_NVCSI_PORT          1u   /* NVCSI_PORT_B */
+#define IMX219_STREAM_ID           1u   /* csi5_port_to_stream(B) */
+#define IMX219_PHY_DPHY            0u   /* NVCSI_PHY_TYPE_DPHY */
+#define IMX219_LANES               2u   /* IMX219 = 2-lane CSI-2 */
+#define IMX219_MIPI_CLK_KHZ   456000u   /* default link freq, see
+                                         * ~/slmos-ref/linux/linux-imx219.c:139 */
+#define IMX219_VC                  0u   /* virtual channel 0 */
+#define IMX219_CSI2_RAW10_DT      43u   /* CSI-2 datatype 0x2B */
+#define VI5_PIXFMT_T_R16         196u   /* TEGRA_IMAGE_FORMAT_T_R16,
+                                         * see ~/slmos-ref/tegra-l4t/...vi5_formats.h:74 */
+#define VI5_BPP_MEM                2u   /* T_R16 bytes per sample */
+#define IMX219_EMBED_LINES         2u   /* IMX219 default embedded metadata */
+#define IMX219_FRAME_TIMEOUT_MS 1500u
+#define IMX219_CAPTURE_WAIT_US 2000000u /* 2 s — see csidiag note */
+
+int imx219_capture_one_frame(struct camera_frame *out)
+{
+    if (out == NULL) {
+        WARN("imx219_capture: NULL out");
+        return -1;
+    }
+
+    /* 1. Sensor power. imx219_power_on is idempotent. */
+    int rc = imx219_power_on();
+    if (rc != 0) {
+        WARN("imx219_capture: power_on rc=%d", rc);
+        return -1;
+    }
+
+    /* 2. RCE/HSP/IVC session. Also idempotent. */
+    rc = camrtc_capture_init();
+    if (rc != 0) {
+        WARN("imx219_capture: camrtc_capture_init rc=%d", rc);
+        return -1;
+    }
+
+    /* 3. NVCSI port + stream config (see header comment for why
+     * port=B). Both RCE replies must carry result=0 to indicate the
+     * brick/CIL config landed. */
+    uint32_t result = 0;
+    rc = camrtc_capture_phy_stream_open(IMX219_STREAM_ID, IMX219_NVCSI_PORT,
+                                        IMX219_PHY_DPHY, &result);
+    if (rc != 0 || result != 0u) {
+        WARN("imx219_capture: PHY_STREAM_OPEN rc=%d result=0x%x",
+             rc, (unsigned)result);
+        return -1;
+    }
+
+    rc = camrtc_capture_csi_stream_set_config(IMX219_STREAM_ID,
+                                              IMX219_NVCSI_PORT,
+                                              IMX219_LANES,
+                                              IMX219_MIPI_CLK_KHZ,
+                                              &result);
+    if (rc != 0 || result != 0u) {
+        WARN("imx219_capture: CSI_SET_CONFIG rc=%d result=0x%x",
+             rc, (unsigned)result);
+        return -1;
+    }
+
+    /* 4. CHANNEL_SETUP — RCE allocates a VI channel for us and
+     * returns its id + mask. */
+    uint32_t ch_id = 0;
+    uint64_t vi_mask = 0;
+    rc = camrtc_capture_channel_setup(IMX219_STREAM_ID, IMX219_NVCSI_PORT,
+                                      camrtc_vi_req_ring_iova(),
+                                      camrtc_vi_req_meminfo_iova(),
+                                      camrtc_vi_req_queue_depth(),
+                                      camrtc_vi_req_request_size(),
+                                      camrtc_vi_req_meminfo_size(),
+                                      &result, &ch_id, &vi_mask);
+    if (rc != 0 || result != 0u) {
+        WARN("imx219_capture: CHANNEL_SETUP rc=%d result=0x%x",
+             rc, (unsigned)result);
+        return -1;
+    }
+
+    /* 5. Sensor mode-init + streaming on. Without the register-bank
+     * write the sensor stays in default state and never emits a
+     * SOF (PR #513). */
+    rc = imx219_set_mode_binning_1640x1232();
+    if (rc != 0) {
+        WARN("imx219_capture: mode-init rc=%d", rc);
+        return -1;
+    }
+    rc = imx219_streaming_enable();
+    if (rc != 0) {
+        WARN("imx219_capture: streaming_enable rc=%d", rc);
+        return -1;
+    }
+    /* PLL lock + AGC settle. One full frame at 30 fps. */
+    timer_busy_wait_us(50000u);
+
+    /* 6. Build per-frame descriptor in slot 0 of the request ring.
+     * The slot is in NC memory, so descriptor stores are
+     * RCE-visible without cache maintenance — only the trailing
+     * `dsb sy` is needed to order them before the IVC kick. */
+    uintptr_t desc_base = camrtc_vi_req_ring_iova();
+    volatile uint32_t *desc_words = (volatile uint32_t *)desc_base;
+    uint32_t slot_words = camrtc_vi_req_request_size() / 4u;
+    for (uint32_t i = 0; i < slot_words; i++) desc_words[i] = 0u;
+
+    volatile struct camrtc_capture_descriptor_header *desc =
+        (volatile struct camrtc_capture_descriptor_header *)desc_base;
+    desc->sequence                 = 1u;
+    desc->capture_flags            = CAPTURE_FLAG_STATUS_REPORT_ENABLE
+                                   | CAPTURE_FLAG_ERROR_REPORT_ENABLE;
+    desc->frame_start_timeout      = IMX219_FRAME_TIMEOUT_MS;
+    desc->frame_completion_timeout = IMX219_FRAME_TIMEOUT_MS;
+
+    volatile struct camrtc_vi_channel_config *vi =
+        (volatile struct camrtc_vi_channel_config *)
+        (desc_base + CAMRTC_DESC_CH_CFG_OFFSET);
+
+    /* CHANSEL match — RAW10 on stream `IMX219_STREAM_ID`, VC 0.
+     * `stream` and `vc` are one-hot bit fields, not raw IDs. */
+    vi->match.datatype       = IMX219_CSI2_RAW10_DT;
+    vi->match.datatype_mask  = 0x3fu;
+    vi->match.stream         = (uint8_t)(1u << IMX219_STREAM_ID);
+    vi->match.stream_mask    = 0x3fu;
+    vi->match.vc             = (uint16_t)(1u << IMX219_VC);
+    vi->match.vc_mask        = 0xFFFFu;
+
+    /* Frame geometry + embedded-data routing. embed_x is the
+     * per-line byte count after T_R16 expansion (= width × BPP_MEM,
+     * not the raw RAW10 wire bytes). embdata_enable=1 plus
+     * CAPTURE_CHANNEL_FLAG_EMBDATA in CHANNEL_SETUP is what tells
+     * VI to expect the IMX219's 2 metadata lines instead of
+     * tossing the frame with CHANSEL_EMBED_INFRINGE. */
+    uint32_t fb_w     = camrtc_frame_buffer_width();
+    uint32_t fb_h     = camrtc_frame_buffer_height();
+    uint32_t fb_stride = camrtc_frame_buffer_stride();
+    uint32_t embed_line_bytes = fb_w * VI5_BPP_MEM;
+
+    vi->frame.frame_x  = (uint16_t)fb_w;
+    vi->frame.frame_y  = (uint16_t)fb_h;
+    vi->frame.embed_x  = embed_line_bytes;
+    vi->frame.embed_y  = IMX219_EMBED_LINES;
+    vi->embdata_enable = 1u;
+
+    vi->pixfmt_enable          = 1u;
+    vi->pixfmt.format          = VI5_PIXFMT_T_R16;
+    vi->pixfmt.pad0_en         = 0u;
+
+    uintptr_t fb_iova = camrtc_frame_buffer_iova();
+    vi->atomp.surface_stride[VI_ATOMP_SURFACE_MAIN]     = fb_stride;
+    vi->atomp.surface_stride[VI_ATOMP_SURFACE_EMBEDDED] = embed_line_bytes;
+
+    /* Memoryinfo ring slot 0. Main + embedded surfaces both live in
+     * the 4 MB frame-buffer carveout; embedded is parked past the
+     * active frame. The carveout is reserved by `pmm.c` so it
+     * can't be reused under us. */
+    uint64_t main_size  = (uint64_t)fb_stride * fb_h;
+    uint64_t embed_size = (uint64_t)embed_line_bytes * IMX219_EMBED_LINES;
+
+    volatile struct camrtc_capture_descriptor_memoryinfo *meminfo =
+        (volatile struct camrtc_capture_descriptor_memoryinfo *)
+        camrtc_vi_req_meminfo_iova();
+    meminfo->surface[VI_ATOMP_SURFACE_MAIN].base_address     =
+        (uint64_t)fb_iova;
+    meminfo->surface[VI_ATOMP_SURFACE_MAIN].size             = main_size;
+    meminfo->surface[VI_ATOMP_SURFACE_EMBEDDED].base_address =
+        (uint64_t)fb_iova + main_size;
+    meminfo->surface[VI_ATOMP_SURFACE_EMBEDDED].size         = embed_size;
+
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    /* 7. Trigger the capture and wait for STATUS_IND. */
+    uint32_t status_index = 0xDEADBEEFu;
+    rc = camrtc_capture_request(0u, &status_index, IMX219_CAPTURE_WAIT_US);
+    if (rc != 0) {
+        WARN("imx219_capture: CAPTURE_REQUEST rc=%d (IVC error or timeout)",
+             rc);
+        return -1;
+    }
+
+    /* 8. Decode capture_status. status=1 (CAPTURE_STATUS_SUCCESS)
+     * means the frame is in the buffer; anything else is a
+     * Falcon/CHANSEL/CSIMUX error. err_data + notify_bits in the
+     * descriptor identify the specific failure for post-mortem. */
+    volatile const struct camrtc_capture_status *cap_status =
+        (volatile const struct camrtc_capture_status *)
+        (desc_base + CAMRTC_DESC_STATUS_OFFSET);
+    uint32_t code = cap_status->status;
+    if (code != CAPTURE_STATUS_SUCCESS) {
+        WARN("imx219_capture: status=%u err_data=0x%x notify_bits=0x%lx",
+             (unsigned)code, (unsigned)cap_status->err_data,
+             (unsigned long)cap_status->notify_bits);
+        return -1;
+    }
+
+    /* VI's atomp packer DMA-wrote the frame to the cached carveout
+     * without going through the AP's cache. Invalidate the
+     * caller-visible region before returning so consumers
+     * (`camera_preprocess_mnist`, future ISP / preview paths) read
+     * the fresh frame instead of cache lines populated by a prior
+     * capture's read. First-capture-after-boot is correct without
+     * this — there are no cache lines for the carveout before any
+     * AP touch — but back-to-back captures depend on it. */
+    cache_invalidate_range((const volatile void *)fb_iova,
+                           (size_t)main_size);
+
+    out->data   = (const uint8_t *)fb_iova;
+    out->size   = (size_t)main_size;
+    out->width  = fb_w;
+    out->height = fb_h;
+    out->bayer  = CAMERA_BAYER_RGGB;
+    out->format = CAMERA_FORMAT_T_R16;
+    return 0;
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO — stubs for cross-platform builds */
 
 int imx219_power_on(void) { return -1; }
@@ -427,5 +660,9 @@ int imx219_read_chip_id(uint16_t *out)
 int imx219_set_mode_binning_1640x1232(void) { return -1; }
 int imx219_streaming_enable(void)  { return -1; }
 int imx219_streaming_disable(void) { return -1; }
+int imx219_capture_one_frame(struct camera_frame *out) {
+    (void)out;
+    return -1;
+}
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */

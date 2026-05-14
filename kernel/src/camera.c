@@ -21,6 +21,10 @@
 
 #include "string.h"   /* strcmp */
 
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+#include "imx219.h"   /* imx219_capture_one_frame */
+#endif
+
 /* The embed file declares these as global symbols when MOCK_CAMERA_FRAME
  * is ON. Both are weak so kernels built with MOCK_CAMERA_FRAME=OFF link
  * cleanly — camera_open("mock") then reports "backend not built". */
@@ -28,12 +32,13 @@ extern const uint8_t mock_camera_frame_start[] __attribute__((weak));
 extern const uint8_t mock_camera_frame_end[]   __attribute__((weak));
 
 /* Frame geometry — pinned to IMX219 2-lane RAW10 1640x1232 binned
- * mode, the only shape the mock and the in-progress IMX219 driver
- * produce. Generalising preprocess_mnist to other shapes is fine
- * later but not in scope today. */
+ * mode, the only shape the mock and the IMX219 driver produce.
+ * Generalising preprocess_mnist to other shapes is fine later but
+ * not in scope today. */
 #define MOCK_FRAME_W       1640u
 #define MOCK_FRAME_H       1232u
-#define MOCK_FRAME_BYTES   (MOCK_FRAME_W * MOCK_FRAME_H * 10u / 8u)
+#define MOCK_FRAME_RAW10_BYTES (MOCK_FRAME_W * MOCK_FRAME_H * 10u / 8u)
+#define MOCK_FRAME_T_R16_BYTES (MOCK_FRAME_W * MOCK_FRAME_H * 2u)
 
 #define MNIST_DIM          28u
 #define MNIST_BLOCK        44u   /* 28 * 44 == 1232 */
@@ -61,11 +66,34 @@ _Static_assert(MNIST_CROP == MOCK_FRAME_H,
  * high 8 bits of each pixel and byte 4 packs the four 2-bit low
  * remainders. We discard the low bits — see the file header for why.
  */
-static inline uint8_t raw10_hi8(const uint8_t *raw10, uint32_t pixel_index)
+static inline uint8_t raw10_packed_hi8(const uint8_t *raw10,
+                                       uint32_t pixel_index)
 {
     uint32_t group   = pixel_index >> 2;
     uint32_t in_grp  = pixel_index & 3u;
     return raw10[group * 5u + in_grp];
+}
+
+/*
+ * Read the high 8 bits of pixel `pixel_index` from a T_R16 buffer.
+ * T_R16 is little-endian u16 with the RAW10 sample in bits [15:6],
+ * so the high 8 bits live in the high byte of each u16 — i.e. byte
+ * `pixel_index * 2 + 1`. ARM64 little-endian is the build's
+ * universal endianness; no cross-platform endianness wrapper needed.
+ */
+static inline uint8_t t_r16_hi8(const uint8_t *t_r16, uint32_t pixel_index)
+{
+    return t_r16[pixel_index * 2u + 1u];
+}
+
+static inline uint8_t pixel_hi8(const uint8_t *buf,
+                                uint32_t pixel_index,
+                                uint32_t format)
+{
+    if (format == CAMERA_FORMAT_T_R16) {
+        return t_r16_hi8(buf, pixel_index);
+    }
+    return raw10_packed_hi8(buf, pixel_index);
 }
 
 /*
@@ -125,29 +153,51 @@ int camera_open(const char *name, struct camera_frame *out)
         out->width  = MOCK_FRAME_W;
         out->height = MOCK_FRAME_H;
         out->bayer  = CAMERA_BAYER_RGGB;
+        out->format = CAMERA_FORMAT_RAW10_PACKED;
         return 0;
+    }
+
+    if (strcmp(name, "imx219-0") == 0) {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+        int rc = imx219_capture_one_frame(out);
+        if (rc != 0) return -3;
+        return 0;
+#else
+        return -2;
+#endif
     }
 
     return -1;
 }
 
-int camera_preprocess_mnist(const uint8_t *raw10,
-                            size_t         raw10_len,
+int camera_preprocess_mnist(const uint8_t *data,
+                            size_t         data_len,
                             uint32_t       width,
                             uint32_t       height,
                             uint32_t       bayer,
+                            uint32_t       format,
                             uint8_t       *out_bytes,
                             size_t         out_capacity)
 {
-    if (!raw10 || !out_bytes) return -1;
+    if (!data || !out_bytes) return -1;
     if (out_capacity < CAMERA_MNIST_OUT_BYTES) return -1;
 
-    /* Hard-coded geometry — see file header. Generalising to other
-     * sensor modes is a follow-up once the real IMX219 driver lands
-     * and we know which mode tables it ships with. */
+    /* Hard-coded geometry — see file header. */
     if (width != MOCK_FRAME_W || height != MOCK_FRAME_H) return -2;
     if (bayer != CAMERA_BAYER_RGGB) return -2;
-    if (raw10_len < MOCK_FRAME_BYTES) return -1;
+
+    size_t min_bytes;
+    switch (format) {
+    case CAMERA_FORMAT_RAW10_PACKED:
+        min_bytes = MOCK_FRAME_RAW10_BYTES;
+        break;
+    case CAMERA_FORMAT_T_R16:
+        min_bytes = MOCK_FRAME_T_R16_BYTES;
+        break;
+    default:
+        return -2;
+    }
+    if (data_len < min_bytes) return -1;
 
     for (uint32_t i = 0; i < MNIST_DIM; i++) {
         uint32_t r0 = i * MNIST_BLOCK;
@@ -163,7 +213,7 @@ int camera_preprocess_mnist(const uint8_t *raw10,
                  * stride by 2. */
                 uint32_t c_start = c0 + ((r & 1u) ? 0u : 1u);
                 for (uint32_t c = c_start; c < c0 + MNIST_BLOCK; c += 2u) {
-                    sum += raw10_hi8(raw10, r * MOCK_FRAME_W + c);
+                    sum += pixel_hi8(data, r * MOCK_FRAME_W + c, format);
                 }
             }
 

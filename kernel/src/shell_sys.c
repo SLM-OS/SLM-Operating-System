@@ -9515,6 +9515,7 @@ int cmd_nvcsi(int argc, char *argv[])
     return 0;
 }
 
+#include "camera.h"
 #include "camrtc.h"
 #include "camrtc_capture.h"
 
@@ -9622,343 +9623,75 @@ int cmd_rcediag(int argc, char *argv[])
 }
 
 /*
- * csidiag — first capture-control IVC round-trip:
- *   1. camrtc_capture_init (HSP-VM session + CH_SETUP + IVC ring init)
- *   2. CAPTURE_PHY_STREAM_OPEN_REQ (NVCSI port A, stream 0, D-PHY)
- *   3. Print the response result.
+ * csidiag — single-shot IMX219 capture via the camera_open backend.
  *
- * Result codes are in `~/slmos-ref/tegra-l4t/l4t-camrtc-capture-messages.h`
- * (CAPTURE_OK = 0, CAPTURE_ERROR_* otherwise). Anything other than
- * 0 means the request reached RCE, came back, but RCE rejected it
- * — e.g. NVCSI not powered, port already open, bad PHY type. The
- * goal here is to *prove the IVC ring works end-to-end*; an
- * RCE-side error is still a successful round-trip from SLM-OS's
- * perspective.
+ * Thin wrapper around `camera_open("imx219-0", ...)` (the real
+ * capture pipeline lives in `imx219_capture_one_frame`,
+ * `kernel/drivers/camera/imx219.c`). Prints the resulting frame
+ * descriptor on success; on failure decodes the most recent
+ * `capture_status` from the NC descriptor ring so the user sees a
+ * named status code without grepping for WARN.
+ *
+ * Result code reference: `~/slmos-ref/tegra-l4t/l4t-camrtc-capture.h`
+ * (CAPTURE_STATUS_*). Pre-RCE failures (power-on, I²C, IVC ring) log
+ * to WARN; the status decode below only applies when the failure
+ * happened on the RCE/VI side (i.e. CAPTURE_REQUEST returned).
  */
 int cmd_csidiag(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    uart_puts("\r\n=== NVCSI port A open via RCE IVC ===\r\n");
+    uart_puts("\r\n=== IMX219 capture via camera_open(\"imx219-0\") ===\r\n");
 
-    int rc = camrtc_capture_init();
-    uart_printf("  capture_init:   rc=%d\r\n", rc);
-    if (rc != 0) {
-        uart_puts("  *** capture_init failed — see WARN log; ***\r\n");
-        uart_puts("  *** can't proceed without IVC channel.   ***\r\n");
-        uart_puts("=== End ===\r\n");
-        return 0;
-    }
-
-    /*
-     * Port + stream selection — IMX219-A on Orin Nano carrier (J20)
-     * is wired to NVCSI **port B** (= 1), not port A (= 0). NVIDIA's
-     * L4T R36.4.4 DTBO is the source of truth:
-     *   /home/john/slmos-ref/nvidia/Linux_for_Tegra-R36.4.4/Linux_for_Tegra/
-     *     kernel/dtb/tegra234-p3767-camera-p3768-imx219-A.dtbo
-     * specifies `port-index = <1>` for cam0/A on every endpoint
-     * (sensor → vi-port → nvcsi-port). Confirmed by reading the same
-     * value out of the dual overlay (cam0=1, cam1=2 — port 0 is unused
-     * on this carrier).
-     *
-     * For NVCSI ports A..D, csi5_port_to_stream(csi_port) returns the
-     * port id unchanged (`~/slmos-ref/tegra-l4t/l4t-csi5_fops.c:32-36`),
-     * so stream_id == csi_port == 1 here.
-     *
-     * NVCSI_PHY_TYPE_DPHY = 0 (`~/slmos-ref/tegra-l4t/l4t-camrtc-capture.h:1443`).
-     */
-    const uint32_t kCsiPort  = 1u;          /* NVCSI_PORT_B */
-    const uint32_t kStreamId = 1u;          /* csi5_port_to_stream(B) */
-    const uint32_t kPhyDphy  = 0u;          /* NVCSI_PHY_TYPE_DPHY */
-
-    uint32_t result = 0xDEADBEEFu;
-    rc = camrtc_capture_phy_stream_open(kStreamId, kCsiPort, kPhyDphy,
-                                        &result);
-    uart_printf("  PHY_STREAM_OPEN: rc=%d result=0x%x\r\n",
-                rc, (unsigned)result);
-    if (rc != 0 || result != 0u) {
-        if (rc != 0) {
-            uart_puts("  *** PHY_STREAM_OPEN failed at the IVC layer  ***\r\n");
-            uart_puts("  *** (see WARN log); skipping SET_CONFIG.     ***\r\n");
-        } else {
-            uart_puts("  *** RCE rejected PHY_STREAM_OPEN; skipping   ***\r\n");
-            uart_puts("  *** SET_CONFIG. Decode result via            ***\r\n");
-            uart_puts("  *** l4t-camrtc-capture-messages.h.           ***\r\n");
-        }
-        uart_puts("=== End ===\r\n");
-        return 0;
-    }
-
-    /* PHY_STREAM_OPEN succeeded. Configure the brick + CIL for
-     * IMX219: 2 D-PHY lanes, 456 MHz MIPI clock (the IMX219
-     * default link freq from `~/slmos-ref/linux/linux-imx219.c:139`).
-     * SoC-default t_hs_settle / t_clk_settle (0). */
-    uint32_t cfg_result = 0xDEADBEEFu;
-    rc = camrtc_capture_csi_stream_set_config(kStreamId, kCsiPort,
-                                              2u, 456000u,
-                                              &cfg_result);
-    uart_printf("  CSI_SET_CONFIG:  rc=%d result=0x%x\r\n",
-                rc, (unsigned)cfg_result);
-    if (rc != 0 || cfg_result != 0u) {
-        if (rc == 0) {
-            uart_puts("  *** RCE rejected SET_CONFIG; decode result   ***\r\n");
-            uart_puts("  *** via l4t-camrtc-capture-messages.h.       ***\r\n");
-        } else {
-            uart_puts("  *** SET_CONFIG failed at the IVC layer.      ***\r\n");
-        }
-        uart_puts("=== End ===\r\n");
-        return 0;
-    }
-
-    /* CSI_SET_CONFIG succeeded — fire CHANNEL_SETUP_REQ with the
-     * real VI request ring + memoryinfo ring carved out of the
-     * NC region by camrtc.c. RCE should now accept the request
-     * (queue_depth=1 + valid IOVAs) and assign a channel_id; the
-     * actual CAPTURE_REQUEST_REQ to fill a frame lands in PR4. */
-    uint32_t ch_result = 0xDEADBEEFu;
-    uint32_t ch_id     = 0xDEADBEEFu;
-    uint64_t vi_mask   = 0xDEADBEEFDEADBEEFull;
-    rc = camrtc_capture_channel_setup(kStreamId, kCsiPort,
-                                      camrtc_vi_req_ring_iova(),
-                                      camrtc_vi_req_meminfo_iova(),
-                                      camrtc_vi_req_queue_depth(),
-                                      camrtc_vi_req_request_size(),
-                                      camrtc_vi_req_meminfo_size(),
-                                      &ch_result, &ch_id, &vi_mask);
-    uart_printf("  CHANNEL_SETUP:   rc=%d result=0x%x channel_id=0x%x "
-                "vi_mask=0x%lx\r\n",
-                rc, (unsigned)ch_result, (unsigned)ch_id,
-                (unsigned long)vi_mask);
-    if (rc != 0 || ch_result != 0u) {
-        if (rc == 0) {
-            uart_puts("  *** Round-trip OK; RCE rejected the request   ***\r\n");
-            uart_puts("  *** — see WARN log + decode result via        ***\r\n");
-            uart_puts("  *** l4t-camrtc-capture-messages.h.            ***\r\n");
-        } else {
-            uart_puts("  *** CHANNEL_SETUP failed at the IVC layer.   ***\r\n");
-        }
-        uart_puts("=== End ===\r\n");
-        return 0;
-    }
-    uart_printf("  *** CHANNEL_SETUP OK — RCE allocated VI      ***\r\n");
-    uart_printf("  *** channel %u (vi_mask=0x%lx).              ***\r\n",
-                (unsigned)ch_id, (unsigned long)vi_mask);
-
-    /* CHANNEL_SETUP succeeded — populate slot 0 of the request
-     * ring with a *full* capture_descriptor (header + populated
-     * vi_channel_config) and fire CAPTURE_REQUEST_REQ over the
-     * capture IVC channel.
-     *
-     * vi_channel_config carries IMX219 binning-mode RAW10 frame
-     * geometry (1640×1232) and atomp surface[0] = the 4 MB
-     * frame-buffer carveout at 0xA1000000 (PMM-reserved in
-     * pmm.c). RCE programs the VI hardware, the sensor (newly
-     * told to STREAMING via I²C below) emits a frame, the VI
-     * pipeline writes ~4 MB of T_R16 pixels into the buffer, and
-     * RCE sends CAPTURE_STATUS_IND with `capture_status.status`
-     * = CAPTURE_STATUS_SUCCESS (1). */
-
-    /* Apply IMX219 mode-init register bank — 1640×1232 RAW10
-     * binning. ~45 register writes (PLL + lane mode + crop +
-     * binning + format). Without this the sensor stays in
-     * default state and never emits a SOF — verified hardware
-     * blocker on jetson-nano-1, PR #513. */
-    rc = imx219_set_mode_binning_1640x1232();
-    uart_printf("  imx219 mode-init: rc=%d (1640x1232 RAW10 binning)\r\n", rc);
-    if (rc != 0) {
-        uart_puts("  *** IMX219 mode-init failed — see WARN log.   ***\r\n");
-        uart_puts("  *** Run `imx219` first to power the sensor.   ***\r\n");
-        uart_puts("=== End ===\r\n");
-        return 0;
-    }
-
-    /* Tell IMX219 to start streaming. MODE_SELECT (0x0100) goes
-     * 0 → 1; sensor begins emitting CSI-2 frames on the next
-     * frame boundary (~33 ms at 30 fps). */
-    rc = imx219_streaming_enable();
-    uart_printf("  imx219 stream-on: rc=%d (MODE_SELECT=0x01)\r\n", rc);
-    if (rc != 0) {
-        uart_puts("  *** I²C write to IMX219 MODE_SELECT failed.  ***\r\n");
-        uart_puts("=== End ===\r\n");
-        return 0;
-    }
-    /* Wait ~50 ms for the sensor to settle. At 30 fps the first
-     * SOF appears within 33 ms; one full frame interval gives the
-     * sensor's PLL time to lock and the AGC to converge. */
-    timer_busy_wait_us(50000u);
-
-    /* Zero the entire descriptor slot first so any RCE-side read
-     * of an unset field (pfsd_cfg, prefence, pad) lands as 0. */
-    volatile uint32_t *desc_words =
-        (volatile uint32_t *)camrtc_vi_req_ring_iova();
-    uint32_t slot_words = camrtc_vi_req_request_size() / 4u;
-    for (uint32_t i = 0; i < slot_words; i++) desc_words[i] = 0u;
-    uintptr_t desc_base = camrtc_vi_req_ring_iova();
-
-    /* Header overlay — sequence + capture_flags + timeouts. */
-    volatile struct camrtc_capture_descriptor_header *desc =
-        (volatile struct camrtc_capture_descriptor_header *)desc_base;
-    desc->sequence                 = 1u;
-    desc->capture_flags            = CAPTURE_FLAG_STATUS_REPORT_ENABLE
-                                   | CAPTURE_FLAG_ERROR_REPORT_ENABLE;
-    /* Cap RCE-side waits at 1500 ms each so STATUS_IND fires
-     * within our 2 s IVC poll even on a "no frame" path. The
-     * channel default is 5000 ms which is too long for first-
-     * light debugging. */
-    desc->frame_start_timeout      = 1500u;
-    desc->frame_completion_timeout = 1500u;
-
-    /* vi_channel_config overlay — IMX219 binning-mode RAW10
-     * (1640×1232) on NVCSI stream 0 / virtual channel 0, written
-     * to the frame-buffer carveout as 16-bit-per-pixel (T_R16).
-     * Layout: ch_cfg sits at offset 64 of the descriptor (per
-     * CAMRTC_DESC_CH_CFG_OFFSET in camrtc_capture.h, which is
-     * computed from header(12) + prefence_count(4) + prefence[2]
-     * (48) = 64). */
-    volatile struct camrtc_vi_channel_config *vi =
-        (volatile struct camrtc_vi_channel_config *)
-        (desc_base + CAMRTC_DESC_CH_CFG_OFFSET);
-
-    /* Channel selector: match RAW10 datatype (CSI-2 datatype
-     * 0x2B = 43) on stream 0 / VC 0. Per L4T `vi5_fops.c:61-78`
-     * (capture_template) + `vi5_fops.c:407-412` (per-frame
-     * overrides), the masks are NOT zero — they enable matching
-     * on the corresponding fields:
-     *   stream_mask = 0x3f   (6 NVCSI streams)
-     *   vc_mask     = 0xffff (16-bit VC field)
-     *   datatype_mask = 0x3f (6-bit CSI-2 datatype field)
-     * `match.stream` and `match.vc` use ONE-HOT bit encoding
-     * (1 << id). frameid* / dol* stay zero — L4T's template
-     * doesn't set them. */
-    vi->match.datatype       = 43u;             /* NVCSI_DATATYPE_RAW10 */
-    vi->match.datatype_mask  = 0x3fu;
-    vi->match.stream         = (uint8_t)(1u << kStreamId); /* one-hot for the open stream */
-    vi->match.stream_mask    = 0x3fu;
-    vi->match.vc             = (uint16_t)(1u << 0);/* one-hot: NVCSI_VIRTUAL_CHANNEL_0 */
-    vi->match.vc_mask        = 0xFFFFu;
-
-    /* Frame geometry — IMX219 binning mode 1640×1232. The sensor
-     * emits 2 lines of embedded metadata per frame by default
-     * (`tegra234-p3767-camera-p3768-imx219-A.dtbo:embedded_metadata_height
-     * = "2"` for every mode). VI must be told to expect them or it
-     * raises CHANSEL_EMBED_INFRINGE — what blocked #518 on the prior
-     * iteration once port=B was correct.
-     *
-     * Per L4T `vi5_fops.c:420-431`, all three of these need to land:
-     *   - frame.embed_x = embedded_data_width × BPP_MEM
-     *   - frame.embed_y = embedded_metadata_height
-     *   - embdata_enable = 1
-     *
-     * For IMX219 the embedded line width equals the active line width
-     * in pixels and goes through the same T_R16 (BPP_MEM=2) expansion
-     * as RAW10 pixels, so the byte count happens to match the main
-     * pixel-row stride — but treat it as its own quantity here so a
-     * future change to either the main pixel format or the embedded
-     * line width can't silently desync the routing. */
-    const uint32_t kEmbedLineBytes = (uint32_t)camrtc_frame_buffer_width()
-                                   * 2u; /* BPP_MEM = T_R16 = 2 B */
-    const uint32_t kEmbedLines     = 2u;
-    vi->frame.frame_x  = (uint16_t)camrtc_frame_buffer_width();
-    vi->frame.frame_y  = (uint16_t)camrtc_frame_buffer_height();
-    vi->frame.embed_x  = kEmbedLineBytes;
-    vi->frame.embed_y  = kEmbedLines;
-    vi->embdata_enable = 1u;
-
-    /* Pixel formatter — T_R16 (= 196 in L4T `vi5_formats.h:74`)
-     * is the standard memory format for any RAW8/10/12 sensor on
-     * VI5: each sample stored as a u16 with the upper 10 bits
-     * carrying the RAW10 value. pad0_en=0 means "leave the lower
-     * 6 bits untouched" — fine for first-light; setting pad0_en=1
-     * would zero them. */
-    vi->pixfmt_enable          = 1u;
-    vi->pixfmt.format          = 196u;       /* TEGRA_IMAGE_FORMAT_T_R16 */
-    vi->pixfmt.pad0_en         = 0u;
-
-    /* Atomic packer stride — bytes between rows. Main surface uses
-     * the frame-buffer stride (width × 2 for T_R16). Embedded
-     * surface stride matches its own per-line byte count. Per L4T
-     * `vi5_fops.c:430-431`. Surface IOVAs go in the *memoryinfo*
-     * ring below, not here. */
-    uintptr_t fb_iova               = camrtc_frame_buffer_iova();
-    vi->atomp.surface_stride[VI_ATOMP_SURFACE_MAIN]     =
-        camrtc_frame_buffer_stride();
-    vi->atomp.surface_stride[VI_ATOMP_SURFACE_EMBEDDED] = kEmbedLineBytes;
-
-    /* memoryinfo ring slot 0 — RCE reads the per-surface IOVA +
-     * size from here in lock-step with the request_ring slot.
-     * Per L4T `vi5_fops.c:416-417`. The ring was zeroed inside
-     * camrtc_ch_setup_capture_control.
-     *
-     * Embedded surface is parked at the tail of the same 4 MB
-     * frame-buffer carveout — the active frame is 1640×1232 ×
-     * 2 B = 4,040,960 B (~3.85 MB), leaving ~150 KB of slack
-     * before the carveout end at +4 MB. 2 lines × 3280 B = 6560 B
-     * fits comfortably. */
-    uint64_t main_size = (uint64_t)camrtc_frame_buffer_stride()
-                       * camrtc_frame_buffer_height();
-    uint64_t embed_size = (uint64_t)kEmbedLineBytes * kEmbedLines;
-    volatile struct camrtc_capture_descriptor_memoryinfo *meminfo =
-        (volatile struct camrtc_capture_descriptor_memoryinfo *)
-        camrtc_vi_req_meminfo_iova();
-    meminfo->surface[VI_ATOMP_SURFACE_MAIN].base_address     =
-        (uint64_t)fb_iova;
-    meminfo->surface[VI_ATOMP_SURFACE_MAIN].size             = main_size;
-    meminfo->surface[VI_ATOMP_SURFACE_EMBEDDED].base_address =
-        (uint64_t)fb_iova + main_size;
-    meminfo->surface[VI_ATOMP_SURFACE_EMBEDDED].size         = embed_size;
-
-    __asm__ volatile("dsb sy" ::: "memory");
-
-    uart_printf("  vi_channel_config populated: %ux%u T_R16 → "
-                "surface[0]=0x%lx stride=%u\r\n",
-                (unsigned)camrtc_frame_buffer_width(),
-                (unsigned)camrtc_frame_buffer_height(),
-                (unsigned long)fb_iova,
-                (unsigned)camrtc_frame_buffer_stride());
-
-    uart_printf("  CAPTURE_REQUEST: send buffer_index=0 "
-                "(descriptor at 0x%lx)\r\n", (unsigned long)desc_base);
-    uint32_t status_index = 0xDEADBEEFu;
-    /* Allow up to 2 s for the request: ~33 ms first-frame
-     * latency on a streaming sensor, plus headroom for sensor
-     * warm-up + CSI training + the 1500 ms RCE-side timeouts to
-     * fire if no frame ever arrives. */
-    rc = camrtc_capture_request(0u, &status_index, 2000000u);
-    uart_printf("  CAPTURE_REQUEST: rc=%d status_buffer_index=0x%x\r\n",
-                rc, (unsigned)status_index);
-
+    struct camera_frame frame = {0};
+    int rc = camera_open("imx219-0", &frame);
     if (rc == 0) {
-        /* STATUS_IND received — RCE has filled the descriptor's
-         * `capture_status` substruct at offset 272 with the
-         * per-frame outcome. Decode it. */
-        volatile const struct camrtc_capture_status *cap_status =
+        uart_printf("  *** CAPTURE SUCCESS — %ux%u %s, %u bytes @ 0x%lx ***\r\n",
+                    (unsigned)frame.width, (unsigned)frame.height,
+                    frame.format == CAMERA_FORMAT_T_R16 ? "T_R16" :
+                    frame.format == CAMERA_FORMAT_RAW10_PACKED ? "RAW10_PACKED" :
+                    "?",
+                    (unsigned)frame.size, (unsigned long)frame.data);
+
+        /* Echo the most recent capture_status fields too — useful for
+         * confirming SOF/EOF timestamps and frame_id increments on
+         * back-to-back csidiag runs. The descriptor ring slot 0 is
+         * NC and stays valid until the next CAPTURE_REQUEST_REQ. */
+        volatile const struct camrtc_capture_status *cs =
             (volatile const struct camrtc_capture_status *)
-            (desc_base + CAMRTC_DESC_STATUS_OFFSET);
-        uint32_t code = cap_status->status;
+            (camrtc_vi_req_ring_iova() + CAMRTC_DESC_STATUS_OFFSET);
         uart_printf("  capture_status: status=%u frame_id=%u "
                     "src_stream=%u vc=%u\r\n",
-                    (unsigned)code,
-                    (unsigned)cap_status->frame_id,
-                    (unsigned)cap_status->src_stream,
-                    (unsigned)cap_status->virtual_channel);
-        if (code == CAPTURE_STATUS_SUCCESS) {
-            uint64_t sof = cap_status->sof_timestamp;
-            uint64_t eof = cap_status->eof_timestamp;
-            uart_printf("  sof_ts=0x%lx eof_ts=0x%lx (ticks)\r\n",
-                        (unsigned long)sof, (unsigned long)eof);
-            uart_puts("  *** CAPTURE SUCCESS — first frame in       ***\r\n");
-            uart_printf("  *** buffer at 0x%lx (~%u KB).             ***\r\n",
-                        (unsigned long)fb_iova,
-                        (unsigned)(camrtc_frame_buffer_size() / 1024u));
+                    (unsigned)cs->status, (unsigned)cs->frame_id,
+                    (unsigned)cs->src_stream, (unsigned)cs->virtual_channel);
+        uart_printf("  sof_ts=0x%lx eof_ts=0x%lx (ticks)\r\n",
+                    (unsigned long)cs->sof_timestamp,
+                    (unsigned long)cs->eof_timestamp);
+    } else {
+        uart_printf("  camera_open: rc=%d\r\n", rc);
+        if (rc == -2) {
+            uart_puts("  *** backend not built for this platform.   ***\r\n");
         } else {
-            uint64_t notify = cap_status->notify_bits;
+            /* rc == -3 (capture failed). Decode the descriptor's
+             * capture_status to surface the RCE/VI failure mode
+             * without forcing the user to grep WARN. The descriptor
+             * is valid even on failure — RCE fills it before sending
+             * STATUS_IND. */
+            volatile const struct camrtc_capture_status *cs =
+                (volatile const struct camrtc_capture_status *)
+                (camrtc_vi_req_ring_iova() + CAMRTC_DESC_STATUS_OFFSET);
+            uint32_t code = cs->status;
+            uint64_t notify = cs->notify_bits;
+            uart_printf("  capture_status: status=%u frame_id=%u "
+                        "src_stream=%u vc=%u\r\n",
+                        (unsigned)code, (unsigned)cs->frame_id,
+                        (unsigned)cs->src_stream,
+                        (unsigned)cs->virtual_channel);
             uart_printf("  err_data=0x%x flags=0x%x notify_bits=0x%lx\r\n",
-                        (unsigned)cap_status->err_data,
-                        (unsigned)cap_status->flags,
+                        (unsigned)cs->err_data, (unsigned)cs->flags,
                         (unsigned long)notify);
-            /* Print symbolic name for the most common first-light
-             * failure paths (full enum in l4t-camrtc-capture.h:833).
-             * Indexed by status code 0..15; SUCCESS is unreachable
-             * here (handled in the if-branch above). */
+            /* Symbolic decode for the codes most likely to show up on
+             * first-light regressions. Full enum at
+             * `~/slmos-ref/tegra-l4t/l4t-camrtc-capture.h:833`. */
             static const char *const names[] = {
                 [CAPTURE_STATUS_UNKNOWN]               = "UNKNOWN",
                 [CAPTURE_STATUS_SUCCESS]               = "SUCCESS",
@@ -9983,27 +9716,19 @@ int cmd_csidiag(int argc, char *argv[])
             uart_printf("  *** Capture FAILED — status=%u (%s).       ***\r\n",
                         (unsigned)code, name);
             if (notify & CAPTURE_STATUS_NOTIFY_BIT_FRAME_START_TIMEOUT) {
-                uart_puts("  *** notify: FRAME_START_TIMEOUT — sensor    ***\r\n");
-                uart_puts("  *** never produced an SOF on CSI-2.         ***\r\n");
-                uart_puts("  *** Likely fix: full IMX219 register-bank   ***\r\n");
-                uart_puts("  *** init (binning mode + format + AE)       ***\r\n");
-                uart_puts("  *** before MODE_SELECT=1.                   ***\r\n");
+                uart_puts("  *** notify: FRAME_START_TIMEOUT — no SOF.   ***\r\n");
             } else if (notify & CAPTURE_STATUS_NOTIFY_BIT_FRAME_COMPLETION_TIMEOUT) {
                 uart_puts("  *** notify: FRAME_COMPLETION_TIMEOUT —      ***\r\n");
                 uart_puts("  *** SOF arrived but EOF didn't.             ***\r\n");
             } else if (notify & CAPTURE_STATUS_NOTIFY_BIT_CHANSEL_NO_MATCH) {
                 uart_puts("  *** notify: CHANSEL_NO_MATCH — frame        ***\r\n");
-                uart_puts("  *** received but no VI channel selector     ***\r\n");
-                uart_puts("  *** matched. Check vi_channel_config.match. ***\r\n");
+                uart_puts("  *** received but no channel selector hit.   ***\r\n");
             }
         }
-    } else {
-        uart_puts("  *** CAPTURE_REQUEST failed at the IVC layer ***\r\n");
-        uart_puts("  *** — see WARN log for details.             ***\r\n");
     }
 
-    /* Stop streaming so the sensor doesn't keep firing CSI
-     * frames into a now-stale VI configuration. */
+    /* Stop streaming so the sensor doesn't keep firing CSI frames
+     * into a now-stale VI configuration. Best-effort. */
     int stop_rc = imx219_streaming_disable();
     if (stop_rc != 0) {
         uart_printf("  imx219 stream-off: rc=%d (sensor still streaming)\r\n",

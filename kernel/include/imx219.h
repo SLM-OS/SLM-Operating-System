@@ -175,3 +175,46 @@ int imx219_streaming_enable(void);
  * Returns 0 on success, negative on I²C write error.
  */
 int imx219_streaming_disable(void);
+
+/* Forward declaration to avoid pulling camera.h into the IMX219
+ * header. Defined in `kernel/include/camera.h`. */
+struct camera_frame;
+
+/*
+ * Capture exactly one frame end-to-end and fill *out with a pointer
+ * into the kernel-owned IMX219 frame-buffer carveout at
+ * `CAMRTC_FRAME_BUFFER_PHYS`. Each call walks the full bring-up
+ * pipeline:
+ *
+ *   1. imx219_power_on() if the sensor isn't already responsive.
+ *   2. camrtc_capture_init() to bring up the RCE HSP/IVC session
+ *      (idempotent — returns immediately if already up).
+ *   3. CAPTURE_PHY_STREAM_OPEN_REQ on NVCSI_PORT_B.
+ *   4. CAPTURE_CSI_STREAM_SET_CONFIG_REQ — D-PHY, 2 lanes,
+ *      lp_bypass_mode=1, IMX219-A lane_polarity from the L4T DT.
+ *   5. CAPTURE_CHANNEL_SETUP_REQ with EMBDATA enabled.
+ *   6. imx219_set_mode_binning_1640x1232() + streaming_enable +
+ *      ~50 ms PLL/AGC settle.
+ *   7. Build the per-frame descriptor (vi_channel_config +
+ *      memoryinfo ring slot 0) and fire CAPTURE_REQUEST_REQ.
+ *   8. Block up to 2 s on the STATUS_IND. On
+ *      CAPTURE_STATUS_SUCCESS, populate `*out` and return 0.
+ *
+ * On success `*out` is set to:
+ *   data   = `camrtc_frame_buffer_iova()` (kernel-owned; pointer
+ *            remains valid until the next call to
+ *            `imx219_capture_one_frame`, which overwrites it).
+ *   size   = width × height × 2  (T_R16, ~4 MB)
+ *   width  = 1640
+ *   height = 1232
+ *   bayer  = CAMERA_BAYER_RGGB
+ *   format = CAMERA_FORMAT_T_R16
+ *
+ * Returns 0 on success, negative on any failure (errors logged via
+ * `WARN(...)` along the way; see the file-level comment in
+ * `kernel/drivers/camera/imx219.c` for the specific RCE status
+ * codes that can fire).
+ *
+ * QEMU stub: returns -1 (no hardware) without touching *out.
+ */
+int imx219_capture_one_frame(struct camera_frame *out);
