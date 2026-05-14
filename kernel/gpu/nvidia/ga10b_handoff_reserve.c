@@ -384,6 +384,142 @@ void ga10b_kexec_handoff_register_reserves(void)
 #else
     uart_puts("[ga10b-reserve]   STAGE5-BISECT: helper-buffer reservations SKIPPED\n");
 #endif
+
+    /* #788 Mode B fix — per-op shader reservation via GMMU walk.
+     *
+     * In v7+ mode the helper allocates each pipeline op's SASS as a
+     * separate nvmap dmabuf and publishes only the GPU VA in
+     * `pipeline_ops_phys[i].shader_gpu_va`. The single `h->shader_phys`
+     * is either 0 (v6/v7 publish path in gpu-launch-common.c) or
+     * covers only one shader buffer, so the existing helper-buf
+     * reservation block above doesn't protect the other shader pages.
+     *
+     * Stress-test Mode B (4/10 fails on post-Mode-A-fix run) is
+     * empty-SASS at op[0].shader_gpu_va — SLM-OS PMM clobbered the
+     * helper's shader pages before launch-kernel could fetch them.
+     *
+     * Fix: walk the GMMU starting from the inherited channel's inst
+     * block (h->inst_block_phys, populated by the Stage 9 helper-side
+     * fix) for each op[i].shader_gpu_va. Reserve the resulting leaf
+     * phys. Reads-only walk — no PMM allocations involved, so safe
+     * to run before `pmm_init`.
+     *
+     * Bounded by GA10B_PIPELINE_V7_MAX_OPS (51) — well under
+     * pmm_user_reserve_add table cap of 2048. */
+    if (h->pipeline_n_ops > 0u && h->pipeline_ops_phys != 0u &&
+        h->inst_block_phys != 0u) {
+        uint64_t ops_phys = h->pipeline_ops_phys;
+        uint32_t n_ops    = h->pipeline_n_ops;
+        uint64_t inst_phys_for_walk = h->inst_block_phys;
+
+        /* Bound check: cap at GA10B_PIPELINE_V7_MAX_OPS to match the
+         * dispatch path's enforced max. A bigger value in the handoff
+         * is a corruption signal, not a real op count. */
+        if (n_ops > 51u) {
+            uart_printf("[ga10b-reserve]   pipeline_n_ops=%u exceeds "
+                        "cap 51 — likely corrupt handoff; skipping "
+                        "per-op shader reservation\n",
+                        (unsigned)n_ops);
+        } else if (!ga10b_phys_in_dram(ops_phys,
+                                       (size_t)n_ops * 80u)) {
+            uart_printf("[ga10b-reserve]   pipeline_ops_phys=0x%lx "
+                        "(n=%u) outside DRAM — skipping per-op "
+                        "shader reservation\n",
+                        (unsigned long)ops_phys, (unsigned)n_ops);
+        } else {
+            /* Reserve the ops array page itself (cheap + small —
+             * single 4 KB page for ≤51 v7 ops × 80 B). Without this,
+             * SLM-OS PMM could clobber the ops array between boot
+             * and the launch-kernel command reading it. */
+            uint64_t ops_page_base = ops_phys & ~4095ull;
+            uint64_t ops_bytes     = (uint64_t)n_ops * 80ull;
+            uint64_t ops_page_end  =
+                (ops_phys + ops_bytes + 4095ull) & ~4095ull;
+            if (pmm_user_reserve_add(ops_page_base,
+                                      ops_page_end - ops_page_base) == 0) {
+                uart_printf("[ga10b-reserve]   reserved pipeline_ops "
+                            "@0x%lx (%llu B)\n",
+                            (unsigned long)ops_page_base,
+                            (unsigned long long)(ops_page_end - ops_page_base));
+            }
+
+            /* Walk each op's shader_gpu_va. Dedup: same shader_gpu_va
+             * across multiple ops (mnist reuses 4 shaders across 8
+             * ops) → only reserve once. Simple linear scan over the
+             * reserved-so-far list is O(n²) but n≤51 so it's fine. */
+            const struct ga10b_pipeline_op_v7 *ops_v7 =
+                (const struct ga10b_pipeline_op_v7 *)(uintptr_t)ops_phys;
+            uint64_t reserved_phys[51];
+            uint32_t n_reserved = 0;
+            uint32_t n_walked = 0, n_walk_ok = 0, n_reserved_now = 0;
+            for (uint32_t i = 0; i < n_ops; i++) {
+                uint64_t gva = ops_v7[i].shader_gpu_va;
+                if (gva == 0u) continue;
+                n_walked++;
+                struct ga10b_gmmu_walk_result wr;
+                ga10b_gmmu_walk(inst_phys_for_walk, gva, &wr);
+                if (wr.status != GA10B_GMMU_WALK_OK) continue;
+                n_walk_ok++;
+
+                uint64_t shader_phys_pg = wr.leaf_phys & ~4095ull;
+                if (!ga10b_phys_in_dram(shader_phys_pg, 4096)) continue;
+
+                /* Dedup */
+                bool seen = false;
+                for (uint32_t j = 0; j < n_reserved; j++) {
+                    if (reserved_phys[j] == shader_phys_pg) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (seen) continue;
+
+                /* Reserve only the leaf phys page (4 KB). The shader
+                 * dmabuf may be larger (up to 64 KB) but its
+                 * underlying phys pages are scattered (nvmap maps
+                 * non-contiguous phys to contiguous iova). Reserving
+                 * more than 4 KB from `leaf_phys` overruns into
+                 * neighbor phys which may belong to FECS ctx_save
+                 * state — observed empirically as the
+                 * `ctxsw_checksum_mismatch` (mb6=0x21) failure that
+                 * Stage 9 Mode D fix surfaced when this was 64 KB.
+                 *
+                 * Covering the tail of multi-page shaders requires
+                 * walking shader_gpu_va + 4096, + 8192, ... separately.
+                 * The simple 1-page reservation is sufficient for
+                 * mnist's largest shader (gemm at ~5-20 KB
+                 * is at most 5 pages, so first-page reservation
+                 * catches op[0]'s SM PC at SM entry — the most
+                 * common Mode B fault location). Multi-page walk is
+                 * Stage 11 work; for now first-page coverage
+                 * empirically eliminates ~50% of Mode B. */
+                const uint64_t reserve_bytes = 4096u;
+                if (pmm_user_reserve_add(shader_phys_pg,
+                                         reserve_bytes) != 0) {
+                    uart_printf("[ga10b-reserve]   per-op shader: "
+                                "pmm_user_reserve_add(0x%lx) failed — "
+                                "table full, op %u/%u uncovered\n",
+                                (unsigned long)shader_phys_pg,
+                                (unsigned)i, (unsigned)n_ops);
+                    break;
+                }
+                reserved_phys[n_reserved++] = shader_phys_pg;
+                n_reserved_now++;
+            }
+            uart_printf("[ga10b-reserve]   per-op shader: %u walked, "
+                        "%u walk_ok, %u unique reservations (inst=0x%lx)\n",
+                        (unsigned)n_walked, (unsigned)n_walk_ok,
+                        (unsigned)n_reserved_now,
+                        (unsigned long)inst_phys_for_walk);
+        }
+    } else {
+        uart_printf("[ga10b-reserve]   per-op shader reservation skipped "
+                    "(n_ops=%u ops_phys=0x%lx inst_block_phys=0x%lx)\n",
+                    (unsigned)h->pipeline_n_ops,
+                    (unsigned long)h->pipeline_ops_phys,
+                    (unsigned long)h->inst_block_phys);
+    }
+
     if (version < 9u || n_extents == 0u || extents_phys == 0u) {
         uart_printf("[ga10b-reserve]   handoff@0x%lx v=%u no v9 "
                     "extents (n=%u extents_phys=0x%lx) — skipping\n",
