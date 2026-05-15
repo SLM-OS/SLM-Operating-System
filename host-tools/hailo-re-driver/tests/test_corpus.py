@@ -76,22 +76,37 @@ class CorpusRoundTripTests(unittest.TestCase):
 
 
 class CorpusValidationTests(unittest.TestCase):
-    def test_seq_must_start_at_one(self) -> None:
+    def test_seq_must_be_positive(self) -> None:
+        # seq >= 1 is a schema invariant (the stub's seq counter
+        # starts at 1). The +1-from-empty rule we used to have was
+        # dropped when out-of-order appends became legal — a corpus
+        # legitimately can have its first op at any seq if earlier
+        # seqs were region-served.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "corpus.jsonl"
             corpus = corpus_mod.init(p, make_header())
             with self.assertRaises(CorpusError):
-                corpus_mod.append_op(corpus, make_write(2))
+                bad = OpEntry(
+                    seq=0, bar=4, offset=0, size=4, dir="write",
+                    value="00000000", source="qemu_capture",
+                    validated_at_commit=None, validated_at=None,
+                )
+                corpus_mod.append_op(corpus, bad)
 
-    def test_seq_must_be_monotonic(self) -> None:
+    def test_seq_must_be_unique(self) -> None:
+        # Append now allows gaps and out-of-order writes (the C-side
+        # QEMU stub appends in capture time order, which may not match
+        # seq order across runs); only duplicates are rejected.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "corpus.jsonl"
             corpus = corpus_mod.init(p, make_header())
             corpus_mod.append_op(corpus, make_write(1))
-            with self.assertRaises(CorpusError):
-                corpus_mod.append_op(corpus, make_write(3))  # skipped 2
+            corpus_mod.append_op(corpus, make_write(3))  # gap is OK
+            corpus_mod.append_op(corpus, make_write(2))  # filling the gap is OK
             with self.assertRaises(CorpusError):
                 corpus_mod.append_op(corpus, make_write(1))  # duplicate
+            # ops stay sorted regardless of insertion order
+            self.assertEqual([o.seq for o in corpus.ops], [1, 2, 3])
 
     def test_value_length_must_match_size(self) -> None:
         bad = OpEntry(
@@ -134,17 +149,20 @@ class CorpusValidationTests(unittest.TestCase):
             self.assertEqual(corpus.ops[0].seq, 1)
             self.assertEqual(corpus.ops[1].seq, 100)
 
-    def test_load_rejects_seq_decrease(self) -> None:
-        # Strictly-increasing is still enforced — seqs that go backwards
-        # or repeat indicate file corruption / concurrent-writer bugs.
+    def test_load_accepts_unordered_file(self) -> None:
+        # File order is unconstrained — the C-side stub appends in
+        # capture-time order, which may not be seq order across runs.
+        # load() sorts internally; duplicate seqs are still rejected.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "corpus.jsonl"
             with p.open("w") as f:
                 f.write(json.dumps(make_header().to_json_obj()) + "\n")
                 f.write(json.dumps(make_write(5).to_json_obj()) + "\n")
-                f.write(json.dumps(make_write(3).to_json_obj()) + "\n")  # backwards
-            with self.assertRaises(CorpusError):
-                corpus_mod.load(p)
+                f.write(json.dumps(make_write(3).to_json_obj()) + "\n")
+                f.write(json.dumps(make_write(7).to_json_obj()) + "\n")
+                f.write(json.dumps(make_write(1).to_json_obj()) + "\n")
+            corpus = corpus_mod.load(p)
+            self.assertEqual([o.seq for o in corpus.ops], [1, 3, 5, 7])
 
     def test_load_rejects_seq_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as d:
