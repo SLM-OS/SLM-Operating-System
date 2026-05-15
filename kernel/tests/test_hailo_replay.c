@@ -193,7 +193,7 @@ static void test_parse_op_read_validated_sha(void)
     TEST_ASSERT_EQUAL_UINT8(1u, c.ops[0].validated);
 }
 
-static void test_parse_rejects_nonmonotonic(void)
+static void test_parse_rejects_duplicate_seq(void)
 {
     struct hailo_re_op ops[8];
     struct hailo_re_corpus c = { .ops = ops, .op_capacity = 8 };
@@ -204,9 +204,46 @@ static void test_parse_rejects_nonmonotonic(void)
         "{\"type\":\"op\",\"seq\":2,\"bar\":4,\"offset\":4,\"size\":4,"
         "\"dir\":\"write\",\"value\":\"02000000\"}\n";
     int rc = hailo_re_corpus_parse(text, strlen(text), &c);
-    TEST_ASSERT_EQUAL_INT(HAILO_RE_CORPUS_E_NONMONOTONIC, rc);
-    /* op_count should reflect what was parsed before the failure (1). */
-    TEST_ASSERT_EQUAL_UINT32(1u, c.op_count);
+    TEST_ASSERT_EQUAL_INT(HAILO_RE_CORPUS_E_DUPLICATE, rc);
+    /* Both ops were stored before the post-parse uniqueness check
+     * caught the duplicate; op_count reflects all parsed entries. */
+    TEST_ASSERT_EQUAL_UINT32(2u, c.op_count);
+}
+
+static void test_parse_accepts_unordered_ops(void)
+{
+    /* The QEMU stub's C-side appends are monotonic within one run but
+     * NOT necessarily across runs (a later run can fill a gap left by
+     * an earlier run with a smaller seq). The kernel parser must sort
+     * the ops array after parsing so the find_seq binary search
+     * downstream keeps working. */
+    struct hailo_re_op ops[8];
+    struct hailo_re_corpus c = { .ops = ops, .op_capacity = 8 };
+    const char *text =
+        "{\"type\":\"header\",\"format_version\":1}\n"
+        "{\"type\":\"op\",\"seq\":5,\"bar\":4,\"offset\":0,\"size\":4,"
+        "\"dir\":\"write\",\"value\":\"05000000\"}\n"
+        "{\"type\":\"op\",\"seq\":3,\"bar\":4,\"offset\":4,\"size\":4,"
+        "\"dir\":\"write\",\"value\":\"03000000\"}\n"
+        "{\"type\":\"op\",\"seq\":7,\"bar\":4,\"offset\":8,\"size\":4,"
+        "\"dir\":\"write\",\"value\":\"07000000\"}\n"
+        "{\"type\":\"op\",\"seq\":1,\"bar\":4,\"offset\":12,\"size\":4,"
+        "\"dir\":\"write\",\"value\":\"01000000\"}\n";
+    int rc = hailo_re_corpus_parse(text, strlen(text), &c);
+    TEST_ASSERT_EQUAL_INT(HAILO_RE_CORPUS_OK, rc);
+    TEST_ASSERT_EQUAL_UINT32(4u, c.op_count);
+    /* After sort: 1, 3, 5, 7. */
+    TEST_ASSERT_EQUAL_UINT32(1u, c.ops[0].seq);
+    TEST_ASSERT_EQUAL_UINT32(3u, c.ops[1].seq);
+    TEST_ASSERT_EQUAL_UINT32(5u, c.ops[2].seq);
+    TEST_ASSERT_EQUAL_UINT32(7u, c.ops[3].seq);
+    /* Binary search on the sorted array must find each seq. */
+    TEST_ASSERT_TRUE(hailo_re_corpus_find_seq(&c, 1) != NULL);
+    TEST_ASSERT_TRUE(hailo_re_corpus_find_seq(&c, 5) != NULL);
+    TEST_ASSERT_TRUE(hailo_re_corpus_find_seq(&c, 7) != NULL);
+    /* And gaps are not found. */
+    TEST_ASSERT_TRUE(hailo_re_corpus_find_seq(&c, 2) == NULL);
+    TEST_ASSERT_TRUE(hailo_re_corpus_find_seq(&c, 6) == NULL);
 }
 
 static void test_parse_tolerates_unknown_type(void)
@@ -428,7 +465,8 @@ int test_suite_hailo_replay(void)
     RUN_TEST(test_parse_op_read_marks_unvalidated);
     RUN_TEST(test_parse_validated_at_commit_string_not_misread_as_null);
     RUN_TEST(test_parse_op_read_validated_sha);
-    RUN_TEST(test_parse_rejects_nonmonotonic);
+    RUN_TEST(test_parse_rejects_duplicate_seq);
+    RUN_TEST(test_parse_accepts_unordered_ops);
     RUN_TEST(test_parse_tolerates_unknown_type);
     RUN_TEST(test_parse_tolerates_trailer);
     RUN_TEST(test_parse_note_with_embedded_keylike_string);

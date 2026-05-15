@@ -206,7 +206,7 @@ static int parse_header_line(const char *line, size_t len,
 }
 
 static int parse_op_line(const char *line, size_t len,
-                         struct hailo_re_corpus *c, uint32_t *last_seq)
+                         struct hailo_re_corpus *c)
 {
     if (c->op_count >= c->op_capacity) {
         return HAILO_RE_CORPUS_E_OVERFLOW;
@@ -222,9 +222,11 @@ static int parse_op_line(const char *line, size_t len,
         return HAILO_RE_CORPUS_E_BAD_FIELD;
     }
     op.seq = (uint32_t)seq;
-    if (c->op_count > 0 && op.seq <= *last_seq) {
-        return HAILO_RE_CORPUS_E_NONMONOTONIC;
-    }
+    /* File order is unconstrained — the QEMU stub auto-appends writes
+     * at EOF in capture time order, which is monotonic within one run
+     * but not necessarily across runs. The post-parse pass sorts the
+     * ops array and rejects duplicates. See PR #829 for the matching
+     * fix on the host-side Python loader. */
 
     v = find_value_after_key(line, len, "bar");
     if (!v) return HAILO_RE_CORPUS_E_BAD_FIELD;
@@ -283,7 +285,31 @@ static int parse_op_line(const char *line, size_t len,
     }
 
     c->ops[c->op_count++] = op;
-    *last_seq = op.seq;
+    return HAILO_RE_CORPUS_OK;
+}
+
+/* Insertion sort the ops array by seq, then detect duplicates in one
+ * pass. Insertion sort is fine here: typical corpora have N≈2k ops and
+ * most are already in seq order (the C-side QEMU stub appends each run
+ * monotonically; only cross-run gap-fills land out of place). Worst
+ * case is O(N²) but practical workload is O(N + K) where K is the
+ * count of out-of-order entries. Returns OK or E_DUPLICATE. */
+static int sort_ops_and_check_unique(struct hailo_re_corpus *c)
+{
+    for (uint32_t i = 1; i < c->op_count; i++) {
+        struct hailo_re_op key = c->ops[i];
+        uint32_t j = i;
+        while (j > 0 && c->ops[j - 1].seq > key.seq) {
+            c->ops[j] = c->ops[j - 1];
+            j--;
+        }
+        c->ops[j] = key;
+    }
+    for (uint32_t i = 1; i < c->op_count; i++) {
+        if (c->ops[i].seq == c->ops[i - 1].seq) {
+            return HAILO_RE_CORPUS_E_DUPLICATE;
+        }
+    }
     return HAILO_RE_CORPUS_OK;
 }
 
@@ -304,7 +330,6 @@ int hailo_re_corpus_parse(const char *text, size_t len,
     c->has_trailer = false;
     c->skipped_unknown = 0;
 
-    uint32_t last_seq = 0;
     bool saw_first_nonempty = false;
     const char *p = text;
     const char *end = text + len;
@@ -345,7 +370,7 @@ int hailo_re_corpus_parse(const char *text, size_t len,
             int hrc = parse_header_line(line, line_len, c);
             if (hrc != HAILO_RE_CORPUS_OK) return hrc;
         } else if (strcmp(type_buf, "op") == 0) {
-            int orc = parse_op_line(line, line_len, c, &last_seq);
+            int orc = parse_op_line(line, line_len, c);
             if (orc != HAILO_RE_CORPUS_OK) return orc;
         } else if (strcmp(type_buf, "trailer") == 0) {
             c->has_trailer = true;
@@ -357,6 +382,10 @@ int hailo_re_corpus_parse(const char *text, size_t len,
     }
 
     if (!c->has_header) return HAILO_RE_CORPUS_E_NO_HEADER;
+    /* Post-parse: sort by seq so the binary search in
+     * hailo_re_corpus_find_seq stays correct, and reject duplicates. */
+    int src = sort_ops_and_check_unique(c);
+    if (src != HAILO_RE_CORPUS_OK) return src;
     return HAILO_RE_CORPUS_OK;
 }
 
