@@ -1356,6 +1356,33 @@ extern int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
                                              uint32_t n);
 
 /*
+ * Per-op GPU dispatch counters. `op_kind` is one of the
+ * `SLM_GPU_OP_*` discriminants (RMSNORM=0, ROPE=1, EMBEDDING=2,
+ * Q4K_DOT=3, Q4K_GEMM=4, GQA_ATTN=5, SWIGLU=6, LM_HEAD=7).
+ *
+ * `attempts` counts every entry to the matching
+ * `slm_runtime_dispatch_<op>_simt` past arg validation; `ok` counts
+ * only successful dispatches (returned 0). The difference is the
+ * silent-fallback rate — the rate at which forward.rs's hybrid
+ * wrappers dropped back to the CPU NEON kernel because the FFI
+ * returned -1. Surfaced via the `slm gpu` shell verb.
+ *
+ * Pass NULL for either out parameter to skip. Op kinds without a
+ * dispatcher (ROPE, Q4K_GEMM, LM_HEAD) always read 0. Counters are
+ * unsigned 64-bit so a continuous-inference workload can run for
+ * decades without wrap.
+ */
+extern void slm_runtime_dispatch_stats(uint32_t op_kind,
+                                        uint64_t *out_attempts,
+                                        uint64_t *out_ok);
+
+/*
+ * Zero all `slm_runtime_dispatch_stats` counters. Intended for the
+ * shell to call before a fresh benchmark / test pass.
+ */
+extern void slm_runtime_dispatch_stats_reset(void);
+
+/*
  * Maximum GGUF buffer size accepted by rust_slm_load, in bytes.
  *
  * Single source of truth for the shell's pre-load size gate. Pinned

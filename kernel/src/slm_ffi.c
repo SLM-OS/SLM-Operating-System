@@ -1204,6 +1204,68 @@ void slm_irq_restore(uint64_t flags)
 
 #ifdef PLATFORM_JETSON_ORIN_NANO
 
+/* Per-op dispatch counters — #764 acceptance + ongoing diagnostic.
+ *
+ * Each `slm_runtime_dispatch_<op>_simt` increments `g_dispatch_attempts`
+ * on entry and `g_dispatch_ok` only on the success path. The
+ * difference is the per-op silent-fallback rate, which the shell's
+ * `slm gpu` verb surfaces alongside the tier table. Without these,
+ * "is the GPU dispatch path actually running?" was answerable only by
+ * sprinkling uart_printf instrumentation through the FFI on every
+ * investigation.
+ *
+ * Counters are unsigned 64-bit so a long-running session can't wrap
+ * — at 1k dispatches/s a u32 wraps in ~50 days, u64 in ~500M years.
+ * Relaxed ordering: counters are observed by a single shell reader
+ * after the inference completes; we don't need synchronization with
+ * the dispatch hot path. */
+static _Atomic uint64_t g_op_dispatch_attempts[8];
+static _Atomic uint64_t g_op_dispatch_ok[8];
+
+static inline void op_dispatch_record_attempt(uint32_t op_kind)
+{
+    if (op_kind < 8u) {
+        atomic_fetch_add_explicit(&g_op_dispatch_attempts[op_kind], 1u,
+                                  memory_order_relaxed);
+    }
+}
+
+static inline void op_dispatch_record_ok(uint32_t op_kind)
+{
+    if (op_kind < 8u) {
+        atomic_fetch_add_explicit(&g_op_dispatch_ok[op_kind], 1u,
+                                  memory_order_relaxed);
+    }
+}
+
+void slm_runtime_dispatch_stats(uint32_t op_kind,
+                                 uint64_t *out_attempts,
+                                 uint64_t *out_ok)
+{
+    if (out_attempts) {
+        *out_attempts = (op_kind < 8u)
+            ? atomic_load_explicit(&g_op_dispatch_attempts[op_kind],
+                                    memory_order_relaxed)
+            : 0u;
+    }
+    if (out_ok) {
+        *out_ok = (op_kind < 8u)
+            ? atomic_load_explicit(&g_op_dispatch_ok[op_kind],
+                                    memory_order_relaxed)
+            : 0u;
+    }
+}
+
+void slm_runtime_dispatch_stats_reset(void)
+{
+    for (uint32_t i = 0; i < 8u; i++) {
+        atomic_store_explicit(&g_op_dispatch_attempts[i], 0u,
+                              memory_order_relaxed);
+        atomic_store_explicit(&g_op_dispatch_ok[i], 0u,
+                              memory_order_relaxed);
+    }
+}
+
 int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                        const void *gamma_cpu_in,
                                        void *out_cpu_out,
@@ -1217,6 +1279,7 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     if (n_rows == 0 || n == 0) {
         return -1;
     }
+    op_dispatch_record_attempt(SLM_GPU_OP_RMSNORM);
 
     /* Sizes: x is [n_rows × n] FP16, gamma is [n] FP16, out is
      * [n_rows × n] FP16. Cap each at the 64 KB slot ceiling.
@@ -1299,6 +1362,7 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)out_bytes);
 
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    op_dispatch_record_ok(SLM_GPU_OP_RMSNORM);
     return 0;
 }
 
@@ -1314,6 +1378,7 @@ int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
         n == 0) {
         return -1;
     }
+    op_dispatch_record_attempt(SLM_GPU_OP_SWIGLU);
     uint64_t bytes = (uint64_t)n * 2u;
     if (bytes > OPLIB_POOL_SLOT_BYTES) {
         return -1;
@@ -1371,6 +1436,7 @@ int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
     memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)bytes);
 
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    op_dispatch_record_ok(SLM_GPU_OP_SWIGLU);
     return 0;
 }
 
@@ -1395,6 +1461,7 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
     if ((n_head_q % n_head_kv) != 0) {
         return -1;
     }
+    op_dispatch_record_attempt(SLM_GPU_OP_GQA_ATTN);
     uint64_t q_bytes   = (uint64_t)n_head_q  * head_dim * 2u;
     uint64_t kv_bytes  = (uint64_t)seq_len   * n_head_kv * head_dim * 2u;
     uint64_t out_bytes = q_bytes;
@@ -1469,6 +1536,7 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
     memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)out_bytes);
 
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    op_dispatch_record_ok(SLM_GPU_OP_GQA_ATTN);
     return 0;
 }
 
@@ -1487,6 +1555,7 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
         k == 0 || n == 0 || (k & 255u) != 0) {
         return -1;
     }
+    op_dispatch_record_attempt(SLM_GPU_OP_Q4K_DOT);
     uint64_t x_bytes   = (uint64_t)k * 2u;        /* FP16 */
     uint64_t out_bytes = (uint64_t)n * 4u;        /* FP32 */
     if (x_bytes > OPLIB_POOL_SLOT_BYTES || out_bytes > OPLIB_POOL_SLOT_BYTES) {
@@ -1546,6 +1615,7 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
     memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)out_bytes);
 
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    op_dispatch_record_ok(SLM_GPU_OP_Q4K_DOT);
     return 0;
 }
 
@@ -1563,6 +1633,7 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
         embedding_length == 0 || table_row_bytes == 0) {
         return -1;
     }
+    op_dispatch_record_attempt(SLM_GPU_OP_EMBEDDING);
     /* table_size_bytes is informational; pin a sanity range. */
     if (table_size_bytes != 0 &&
         table_size_bytes < (uint64_t)table_row_bytes) {
@@ -1617,6 +1688,7 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
     memcpy(out_cpu_out, (void *)(uintptr_t)out_phys, (size_t)out_bytes);
 
     spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
+    op_dispatch_record_ok(SLM_GPU_OP_EMBEDDING);
     return 0;
 }
 
@@ -1728,5 +1800,16 @@ int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
     (void)gate_cpu_in; (void)up_cpu_in; (void)out_cpu_out; (void)n;
     return -1;
 }
+
+void slm_runtime_dispatch_stats(uint32_t op_kind,
+                                 uint64_t *out_attempts,
+                                 uint64_t *out_ok)
+{
+    (void)op_kind;
+    if (out_attempts) { *out_attempts = 0; }
+    if (out_ok) { *out_ok = 0; }
+}
+
+void slm_runtime_dispatch_stats_reset(void) { }
 
 #endif /* PLATFORM_JETSON_ORIN_NANO */
