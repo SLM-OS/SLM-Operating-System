@@ -30,8 +30,7 @@
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
 #include "operator_dispatch.h"      /* struct operator_dispatch_args */
 #include "oplib_dispatch.h"         /* slm_oplib_dispatch */
-#include "oplib_pool.h"             /* oplib_pool_base_phys / _gpu_va_base */
-#include "oplib_pool.h"             /* OPLIB_POOL_* slot offsets */
+#include "oplib_pool.h"             /* OPLIB_POOL_* slot offsets + accessors */
 #include "oplib_weights_pool.h"     /* W2 weight staging */
 /* cache_clean_range / cache_invalidate_range come from gpu.h above
  * (already included on the non-Jetson side). The kernel/include/cache.h
