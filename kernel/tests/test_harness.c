@@ -195,7 +195,6 @@ int test_harness_run_all(void)
     total_failures += test_suite_slm_load();
     total_failures += test_suite_slm_shell();
     total_failures += test_suite_slm_runner();
-    total_failures += test_suite_slm_dispatch_stats();
     total_failures += test_suite_scheduler();
     total_failures += test_suite_component();
     total_failures += test_suite_vmm();
@@ -203,6 +202,11 @@ int test_harness_run_all(void)
     /* libc-stub regression: strtol/strtod chain rewrite in lua_stubs.c. */
     total_failures += test_suite_lua_stubs();
 #endif
+    /* SLM GPU dispatch counter FFI tests — outside the !X86_64 gate
+     * because the suite calls only `slm_runtime_dispatch_stats` /
+     * `_reset`, which are defined on every platform (Jetson real
+     * impl + non-Jetson stub in slm_ffi.c). No Rust deps. */
+    total_failures += test_suite_slm_dispatch_stats();
     /* Networking tests run on all platforms with ENABLE_NETWORKING */
 #if defined(ENABLE_NETWORKING)
     total_failures += test_suite_net();
