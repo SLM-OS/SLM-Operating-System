@@ -6,6 +6,7 @@ an optional trailer. The driver script (this package) is the single writer.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import json
 import os
@@ -273,6 +274,11 @@ class Corpus:
     # dataclass would be dead weight here. Stored so callers that DO care
     # (e.g. inspection tools) can introspect without re-parsing the file.
     regions: list[dict] = field(default_factory=list)
+    # O(1) seq -> OpEntry index, kept in sync with `ops` by load and
+    # append_op. Avoids the O(N) linear scan find_op() used to do, which
+    # showed up in profiles once a single append_op started doing a
+    # uniqueness check on every captured seq.
+    _by_seq: dict[int, OpEntry] = field(default_factory=dict, repr=False)
 
     @property
     def next_seq(self) -> int:
@@ -289,10 +295,7 @@ class Corpus:
         return last
 
     def find_op(self, seq: int) -> Optional[OpEntry]:
-        for op in self.ops:
-            if op.seq == seq:
-                return op
-        return None
+        return self._by_seq.get(seq)
 
 
 def load(path: os.PathLike | str) -> Corpus:
@@ -307,9 +310,9 @@ def load(path: os.PathLike | str) -> Corpus:
         raise CorpusError(f"{p}: header is not valid JSON: {e}") from e
     header = _validate_header(header_obj)
     ops: list[OpEntry] = []
+    op_line_by_seq: dict[int, int] = {}  # seq -> file line number, for diagnostics
     regions: list[dict] = []
     trailer: Optional[Trailer] = None
-    prev_seq = 0
     for i, raw in enumerate(lines[1:], start=2):
         try:
             obj = json.loads(raw)
@@ -318,20 +321,21 @@ def load(path: os.PathLike | str) -> Corpus:
         kind = obj.get("type")
         if kind == "op":
             op = _validate_op(obj)
-            # Op entries must be strictly increasing in seq, but NOT
-            # necessarily contiguous. Phase 4 region rules cover a
-            # contiguous BAR range with a single entry; the seq counter
-            # still ticks for every region-served access inside that
-            # range, so the next captured op naturally has a seq several
-            # hundred (or thousand) past the prior one. The +1 invariant
-            # held pre-Phase 4 only because every access generated an op.
-            if op.seq <= prev_seq:
+            # File order is unconstrained — the C-side QEMU stub appends
+            # at EOF in capture time order, which is monotonic within a
+            # single run but not necessarily across runs (e.g. when a
+            # later run captures a write at a seq the earlier run didn't
+            # reach, then a still-later run uncovers a hole at a smaller
+            # seq). The invariant we DO enforce: every seq appears at
+            # most once. Strict ordering is checked on the sorted view
+            # below.
+            if op.seq in op_line_by_seq:
                 raise CorpusError(
-                    f"{p}:{i}: seq went backwards {prev_seq} -> {op.seq} "
-                    "(must be strictly increasing)"
+                    f"{p}:{i}: duplicate seq={op.seq} "
+                    f"(first seen at line {op_line_by_seq[op.seq]})"
                 )
+            op_line_by_seq[op.seq] = i
             ops.append(op)
-            prev_seq = op.seq
         elif kind == "region":
             # Tolerance per docs/hailo-re-corpus-format.md §"Backward
             # compatibility": tools that don't author regions still load
@@ -349,7 +353,12 @@ def load(path: os.PathLike | str) -> Corpus:
             raise CorpusError(
                 f"{p}:{i}: trailer must be the final non-empty line"
             )
-    return Corpus(path=p, header=header, ops=ops, trailer=trailer, regions=regions)
+    # Sort ops by seq so callers iterating Corpus.ops get them in order
+    # regardless of file order. Uniqueness was checked above.
+    ops.sort(key=lambda o: o.seq)
+    by_seq = {op.seq: op for op in ops}
+    return Corpus(path=p, header=header, ops=ops, trailer=trailer,
+                  regions=regions, _by_seq=by_seq)
 
 
 def init(path: os.PathLike | str, header: Header) -> Corpus:
@@ -365,29 +374,28 @@ def init(path: os.PathLike | str, header: Header) -> Corpus:
 
 
 def append_op(corpus: Corpus, op: OpEntry) -> None:
-    """Append a new op, enforcing strict +1 seq.
+    """Append a new op, enforcing seq uniqueness.
 
-    Unlike ``load``, which accepts gaps (region-served accesses don't
-    produce op entries), this function is only ever called to record
-    the immediately-next captured read — the seq the QEMU stub halted
-    at, one past its own most-recent C-side auto-append. So +1 is the
-    right invariant here, and a non-+1 seq indicates a caller bug.
+    The seq just needs to be unique within the corpus; gaps and
+    out-of-file-order appends are both allowed. The file may end up
+    with op lines in non-seq order — ``load`` sorts on the way in.
     """
     if corpus.trailer is not None:
         raise CorpusError(
             f"{corpus.path}: cannot append after trailer is written"
         )
-    if op.seq != corpus.next_seq:
+    if corpus.find_op(op.seq) is not None:
         raise CorpusError(
-            f"{corpus.path}: appended seq={op.seq} but expected "
-            f"{corpus.next_seq}"
+            f"{corpus.path}: appended seq={op.seq} already exists in corpus"
         )
     # Validate the entry round-tripped through the same gate `load` uses.
     _validate_op(op.to_json_obj())
     with corpus.path.open("a", encoding="utf-8") as f, _exclusive(f):
         f.write(json.dumps(op.to_json_obj(), separators=(",", ":")))
         f.write("\n")
-    corpus.ops.append(op)
+    # Keep corpus.ops sorted by seq so iteration order matches load order.
+    bisect.insort(corpus.ops, op, key=lambda o: o.seq)
+    corpus._by_seq[op.seq] = op
 
 
 def append_trailer(corpus: Corpus, trailer: Trailer) -> None:
