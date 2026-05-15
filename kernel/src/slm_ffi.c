@@ -1219,12 +1219,12 @@ void slm_irq_restore(uint64_t flags)
  * Relaxed ordering: counters are observed by a single shell reader
  * after the inference completes; we don't need synchronization with
  * the dispatch hot path. */
-static _Atomic uint64_t g_op_dispatch_attempts[8];
-static _Atomic uint64_t g_op_dispatch_ok[8];
+static _Atomic uint64_t g_op_dispatch_attempts[SLM_GPU_OP_COUNT];
+static _Atomic uint64_t g_op_dispatch_ok[SLM_GPU_OP_COUNT];
 
 static inline void op_dispatch_record_attempt(uint32_t op_kind)
 {
-    if (op_kind < 8u) {
+    if (op_kind < SLM_GPU_OP_COUNT) {
         atomic_fetch_add_explicit(&g_op_dispatch_attempts[op_kind], 1u,
                                   memory_order_relaxed);
     }
@@ -1232,7 +1232,7 @@ static inline void op_dispatch_record_attempt(uint32_t op_kind)
 
 static inline void op_dispatch_record_ok(uint32_t op_kind)
 {
-    if (op_kind < 8u) {
+    if (op_kind < SLM_GPU_OP_COUNT) {
         atomic_fetch_add_explicit(&g_op_dispatch_ok[op_kind], 1u,
                                   memory_order_relaxed);
     }
@@ -1243,13 +1243,13 @@ void slm_runtime_dispatch_stats(uint32_t op_kind,
                                  uint64_t *out_ok)
 {
     if (out_attempts) {
-        *out_attempts = (op_kind < 8u)
+        *out_attempts = (op_kind < SLM_GPU_OP_COUNT)
             ? atomic_load_explicit(&g_op_dispatch_attempts[op_kind],
                                     memory_order_relaxed)
             : 0u;
     }
     if (out_ok) {
-        *out_ok = (op_kind < 8u)
+        *out_ok = (op_kind < SLM_GPU_OP_COUNT)
             ? atomic_load_explicit(&g_op_dispatch_ok[op_kind],
                                     memory_order_relaxed)
             : 0u;
@@ -1258,7 +1258,7 @@ void slm_runtime_dispatch_stats(uint32_t op_kind,
 
 void slm_runtime_dispatch_stats_reset(void)
 {
-    for (uint32_t i = 0; i < 8u; i++) {
+    for (uint32_t i = 0; i < SLM_GPU_OP_COUNT; i++) {
         atomic_store_explicit(&g_op_dispatch_attempts[i], 0u,
                               memory_order_relaxed);
         atomic_store_explicit(&g_op_dispatch_ok[i], 0u,
@@ -1279,7 +1279,6 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     if (n_rows == 0 || n == 0) {
         return -1;
     }
-    op_dispatch_record_attempt(SLM_GPU_OP_RMSNORM);
 
     /* Sizes: x is [n_rows × n] FP16, gamma is [n] FP16, out is
      * [n_rows × n] FP16. Cap each at the 64 KB slot ceiling.
@@ -1293,6 +1292,14 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
         out_bytes > OPLIB_POOL_SLOT_BYTES) {
         return -1;
     }
+
+    /* All arg/shape validation passed — count this as a real dispatch
+     * attempt. Anything that returns -1 from here onward (handoff
+     * unavailable, dispatch failure) is silent fallback that the
+     * `slm gpu` shell verb surfaces as `attempts > ok`. Recorded
+     * BEFORE the lock acquire so a hot path with contention doesn't
+     * skew the count toward unfairly-stalled callers. */
+    op_dispatch_record_attempt(SLM_GPU_OP_RMSNORM);
 
     /* Serialize against the older `slm_gpu_*` FFI (which uses the
      * same lock) and against any other concurrent caller of this
@@ -1378,12 +1385,12 @@ int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
         n == 0) {
         return -1;
     }
-    op_dispatch_record_attempt(SLM_GPU_OP_SWIGLU);
     uint64_t bytes = (uint64_t)n * 2u;
     if (bytes > OPLIB_POOL_SLOT_BYTES) {
         return -1;
     }
 
+    op_dispatch_record_attempt(SLM_GPU_OP_SWIGLU);
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
 
     const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
@@ -1461,7 +1468,6 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
     if ((n_head_q % n_head_kv) != 0) {
         return -1;
     }
-    op_dispatch_record_attempt(SLM_GPU_OP_GQA_ATTN);
     uint64_t q_bytes   = (uint64_t)n_head_q  * head_dim * 2u;
     uint64_t kv_bytes  = (uint64_t)seq_len   * n_head_kv * head_dim * 2u;
     uint64_t out_bytes = q_bytes;
@@ -1476,6 +1482,7 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
         return -1;
     }
 
+    op_dispatch_record_attempt(SLM_GPU_OP_GQA_ATTN);
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
 
     const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
@@ -1555,7 +1562,6 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
         k == 0 || n == 0 || (k & 255u) != 0) {
         return -1;
     }
-    op_dispatch_record_attempt(SLM_GPU_OP_Q4K_DOT);
     uint64_t x_bytes   = (uint64_t)k * 2u;        /* FP16 */
     uint64_t out_bytes = (uint64_t)n * 4u;        /* FP32 */
     if (x_bytes > OPLIB_POOL_SLOT_BYTES || out_bytes > OPLIB_POOL_SLOT_BYTES) {
@@ -1567,6 +1573,7 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
         return -1;
     }
 
+    op_dispatch_record_attempt(SLM_GPU_OP_Q4K_DOT);
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
 
     const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
@@ -1633,7 +1640,6 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
         embedding_length == 0 || table_row_bytes == 0) {
         return -1;
     }
-    op_dispatch_record_attempt(SLM_GPU_OP_EMBEDDING);
     /* table_size_bytes is informational; pin a sanity range. */
     if (table_size_bytes != 0 &&
         table_size_bytes < (uint64_t)table_row_bytes) {
@@ -1644,6 +1650,7 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
         return -1;
     }
 
+    op_dispatch_record_attempt(SLM_GPU_OP_EMBEDDING);
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
 
     const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();

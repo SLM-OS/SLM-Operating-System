@@ -195,6 +195,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_slm_load();
     total_failures += test_suite_slm_shell();
     total_failures += test_suite_slm_runner();
+    total_failures += test_suite_slm_dispatch_stats();
     total_failures += test_suite_scheduler();
     total_failures += test_suite_component();
     total_failures += test_suite_vmm();
