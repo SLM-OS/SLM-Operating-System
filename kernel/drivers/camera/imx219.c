@@ -373,10 +373,68 @@ static const struct imx219_reg_seq imx219_default_ctrls_binning[] = {
  *
  * Operators can sweep both knobs via slm.camera.imx219_set_{gain,
  * exposure} from lua-admin when scene changes; see scripts/
- * camera_sweep.lua for an A×D matrix at fixed exposure. */
+ * camera_sweep.lua for an A×D matrix at fixed exposure.
+ *
+ * Single-task contract — applies to every static below this point
+ * in the file (runtime gain/exposure trio, session_open, capture_seq).
+ * All reads/writes come from the shell task on CPU 0: capture path
+ * via cmd_imx219, setters via lua-admin. The shell dispatcher
+ * serializes mutating commands, so no lock is needed. If anyone ever
+ * moves capture to a worker task they must add one — otherwise a
+ * concurrent capture + setter can interleave I²C writes against the
+ * sensor and the runtime-gain statics can be torn-read by the
+ * capture path's mode-init. */
 static uint8_t  imx219_runtime_analog_gain  = 232u;
 static uint16_t imx219_runtime_digital_gain = 0x0200u;
 static uint16_t imx219_runtime_exposure     = 0x0640u;
+
+/* Capture-session caching. The first call to imx219_capture_one_frame
+ * does the full RCE bring-up (PHY_STREAM_OPEN, CSI_SET_CONFIG,
+ * CHANNEL_SETUP, mode-init, streaming_enable, settle); subsequent
+ * calls reuse the same VI channel and just rewrite slot 0 + fire
+ * CAPTURE_REQUEST. This avoids exhausting RCE's small per-VI channel
+ * pool — empirically the pool runs out around 35 CHANNEL_SETUP_REQs
+ * with no matching CHANNEL_RELEASE, after which capture wedges until
+ * power-cycle. CAPTURE_RELEASE_REQ / STREAM_CLOSE_REQ aren't yet
+ * implemented in camrtc_capture; closing a session just clears the
+ * flag, so the *next* capture re-runs the full bring-up but the
+ * channels held by the old session leak until power-cycle. Net win:
+ * a flat-field calibration sweep that captures hundreds of frames
+ * stays inside one channel allocation instead of overflowing.
+ *
+ * imx219_capture_seq is the per-session capture counter, written
+ * into capture_descriptor.sequence. RCE expects monotonically-
+ * increasing sequence per channel; reusing 1 across captures was
+ * fine before because each capture got a fresh channel. */
+static bool     imx219_session_open = false;
+static uint32_t imx219_capture_seq  = 0u;
+
+/* Push the runtime gain + exposure trio to the sensor over I²C.
+ * Used both by mode-init (always) and by the live setters when a
+ * capture session is open (so operator tuning takes effect on the
+ * next capture without a session reset). */
+static int imx219_apply_runtime_gain_exposure(void)
+{
+    int rc = tegra_i2c_write_reg16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                                   0x0157, imx219_runtime_analog_gain);
+    if (rc != 0) {
+        WARN("imx219: ANALOG_GAIN write failed rc=%d", rc);
+        return rc;
+    }
+    rc = tegra_i2c_write_reg16_val16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                                     0x0158, imx219_runtime_digital_gain);
+    if (rc != 0) {
+        WARN("imx219: DIGITAL_GAIN write failed rc=%d", rc);
+        return rc;
+    }
+    rc = tegra_i2c_write_reg16_val16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
+                                     0x015a, imx219_runtime_exposure);
+    if (rc != 0) {
+        WARN("imx219: EXPOSURE write failed rc=%d", rc);
+        return rc;
+    }
+    return 0;
+}
 
 #undef R8
 #undef R16
@@ -442,31 +500,11 @@ int imx219_set_mode_binning_1640x1232(void)
                             / sizeof(imx219_default_ctrls_binning[0]));
     if (rc != 0) return rc;
 
-    /* 4b. Apply the current runtime gain + exposure. These are
-     * normal sensor controls (ANALOG_GAIN, DIGITAL_GAIN, EXPOSURE)
-     * but kept out of the const table because operators tune them
-     * from Lua via slm.camera.imx219_set_{gain,exposure} between
-     * captures. A change to the statics takes effect on this next
-     * mode-init pass — the running sensor doesn't latch them
-     * mid-frame, but every capture goes through this function. */
-    rc = tegra_i2c_write_reg16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
-                               0x0157, imx219_runtime_analog_gain);
-    if (rc != 0) {
-        WARN("imx219: ANALOG_GAIN write failed rc=%d", rc);
-        return rc;
-    }
-    rc = tegra_i2c_write_reg16_val16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
-                                     0x0158, imx219_runtime_digital_gain);
-    if (rc != 0) {
-        WARN("imx219: DIGITAL_GAIN write failed rc=%d", rc);
-        return rc;
-    }
-    rc = tegra_i2c_write_reg16_val16(&tegra_i2c_cam_bus, IMX219_I2C_ADDR,
-                                     0x015a, imx219_runtime_exposure);
-    if (rc != 0) {
-        WARN("imx219: EXPOSURE write failed rc=%d", rc);
-        return rc;
-    }
+    /* 4b. Apply the current runtime gain + exposure. Kept out of the
+     * const table because operators tune them from Lua via
+     * slm.camera.imx219_set_{gain,exposure} between captures. */
+    rc = imx219_apply_runtime_gain_exposure();
+    if (rc != 0) return rc;
 
     INFO("imx219: mode-init OK — 1640x1232 RAW10 binning, gain=(0x%02x,0x%04x) exp=%u, MODE_SELECT=standby",
          (unsigned)imx219_runtime_analog_gain,
@@ -479,6 +517,12 @@ int imx219_set_runtime_gain(uint8_t analog, uint16_t digital)
 {
     imx219_runtime_analog_gain  = analog;
     imx219_runtime_digital_gain = digital;
+    /* Live-update the sensor when a capture session is already open.
+     * Without this the change wouldn't take effect until the next
+     * mode-init, which only runs on the first capture per session. */
+    if (imx219_session_open) {
+        return imx219_apply_runtime_gain_exposure();
+    }
     return 0;
 }
 
@@ -491,6 +535,9 @@ void imx219_get_runtime_gain(uint8_t *analog_out, uint16_t *digital_out)
 int imx219_set_runtime_exposure(uint16_t lines)
 {
     imx219_runtime_exposure = lines;
+    if (imx219_session_open) {
+        return imx219_apply_runtime_gain_exposure();
+    }
     return 0;
 }
 
@@ -553,75 +600,91 @@ int imx219_capture_one_frame(struct camera_frame *out)
         return -1;
     }
 
-    /* 1. Sensor power. imx219_power_on is idempotent. */
-    int rc = imx219_power_on();
-    if (rc != 0) {
-        WARN("imx219_capture: power_on rc=%d", rc);
-        return -1;
-    }
-
-    /* 2. RCE/HSP/IVC session. Also idempotent. */
-    rc = camrtc_capture_init();
+    /* 1. RCE/HSP/IVC session. Truly idempotent — fast no-op once
+     * the channel pair is up — so we always pre-touch it. */
+    int rc = camrtc_capture_init();
     if (rc != 0) {
         WARN("imx219_capture: camrtc_capture_init rc=%d", rc);
         return -1;
     }
 
-    /* 3. NVCSI port + stream config (see header comment for why
-     * port=B). Both RCE replies must carry result=0 to indicate the
-     * brick/CIL config landed. */
-    uint32_t result = 0;
-    rc = camrtc_capture_phy_stream_open(IMX219_STREAM_ID, IMX219_NVCSI_PORT,
-                                        IMX219_PHY_DPHY, &result);
-    if (rc != 0 || result != 0u) {
-        WARN("imx219_capture: PHY_STREAM_OPEN rc=%d result=0x%x",
-             rc, (unsigned)result);
-        return -1;
-    }
+    /* 2-6. Sensor power + RCE channel + sensor bring-up — one-shot
+     * per session. imx219_power_on() ends with the LP-11 force step
+     * that writes MODE_SELECT=1 then MODE_SELECT=0 (parks CSI-2 in
+     * LP-11 for NVCSI training); if we ran it again on a streaming
+     * sensor it would knock the sensor out of streaming and every
+     * subsequent capture would time out waiting for a SOF. So power
+     * + streaming are gated together: when the session is open the
+     * sensor is already up and streaming, and this function does no
+     * sensor-side I²C at all. */
+    if (!imx219_session_open) {
+        /* 2. Sensor power. */
+        rc = imx219_power_on();
+        if (rc != 0) {
+            WARN("imx219_capture: power_on rc=%d", rc);
+            return -1;
+        }
+        /* 3. NVCSI port + stream config (see header comment for why
+         * port=B). Both RCE replies must carry result=0 to indicate
+         * the brick/CIL config landed. */
+        uint32_t result = 0;
+        rc = camrtc_capture_phy_stream_open(IMX219_STREAM_ID, IMX219_NVCSI_PORT,
+                                            IMX219_PHY_DPHY, &result);
+        if (rc != 0 || result != 0u) {
+            WARN("imx219_capture: PHY_STREAM_OPEN rc=%d result=0x%x",
+                 rc, (unsigned)result);
+            return -1;
+        }
 
-    rc = camrtc_capture_csi_stream_set_config(IMX219_STREAM_ID,
-                                              IMX219_NVCSI_PORT,
-                                              IMX219_LANES,
-                                              IMX219_MIPI_CLK_KHZ,
-                                              &result);
-    if (rc != 0 || result != 0u) {
-        WARN("imx219_capture: CSI_SET_CONFIG rc=%d result=0x%x",
-             rc, (unsigned)result);
-        return -1;
-    }
+        rc = camrtc_capture_csi_stream_set_config(IMX219_STREAM_ID,
+                                                  IMX219_NVCSI_PORT,
+                                                  IMX219_LANES,
+                                                  IMX219_MIPI_CLK_KHZ,
+                                                  &result);
+        if (rc != 0 || result != 0u) {
+            WARN("imx219_capture: CSI_SET_CONFIG rc=%d result=0x%x",
+                 rc, (unsigned)result);
+            return -1;
+        }
 
-    /* 4. CHANNEL_SETUP — RCE allocates a VI channel for us and
-     * returns its id + mask. */
-    uint32_t ch_id = 0;
-    uint64_t vi_mask = 0;
-    rc = camrtc_capture_channel_setup(IMX219_STREAM_ID, IMX219_NVCSI_PORT,
-                                      camrtc_vi_req_ring_iova(),
-                                      camrtc_vi_req_meminfo_iova(),
-                                      camrtc_vi_req_queue_depth(),
-                                      camrtc_vi_req_request_size(),
-                                      camrtc_vi_req_meminfo_size(),
-                                      &result, &ch_id, &vi_mask);
-    if (rc != 0 || result != 0u) {
-        WARN("imx219_capture: CHANNEL_SETUP rc=%d result=0x%x",
-             rc, (unsigned)result);
-        return -1;
-    }
+        /* 4. CHANNEL_SETUP — RCE allocates a VI channel for us and
+         * returns its id + mask. */
+        uint32_t ch_id = 0;
+        uint64_t vi_mask = 0;
+        rc = camrtc_capture_channel_setup(IMX219_STREAM_ID, IMX219_NVCSI_PORT,
+                                          camrtc_vi_req_ring_iova(),
+                                          camrtc_vi_req_meminfo_iova(),
+                                          camrtc_vi_req_queue_depth(),
+                                          camrtc_vi_req_request_size(),
+                                          camrtc_vi_req_meminfo_size(),
+                                          &result, &ch_id, &vi_mask);
+        if (rc != 0 || result != 0u) {
+            WARN("imx219_capture: CHANNEL_SETUP rc=%d result=0x%x",
+                 rc, (unsigned)result);
+            return -1;
+        }
 
-    /* 5. Sensor mode-init + streaming on. Without the register-bank
-     * write the sensor stays in default state and never emits a
-     * SOF (PR #513). */
-    rc = imx219_set_mode_binning_1640x1232();
-    if (rc != 0) {
-        WARN("imx219_capture: mode-init rc=%d", rc);
-        return -1;
+        /* 5. Sensor mode-init + streaming on. Without the
+         * register-bank write the sensor stays in default state and
+         * never emits a SOF (PR #513). */
+        rc = imx219_set_mode_binning_1640x1232();
+        if (rc != 0) {
+            WARN("imx219_capture: mode-init rc=%d", rc);
+            return -1;
+        }
+        rc = imx219_streaming_enable();
+        if (rc != 0) {
+            WARN("imx219_capture: streaming_enable rc=%d", rc);
+            return -1;
+        }
+        /* PLL lock + AGC settle. One full frame at 30 fps. */
+        timer_busy_wait_us(50000u);
+
+        imx219_session_open = true;
+        imx219_capture_seq  = 0u;
+        INFO("imx219_capture: session opened (channel_id=%u vi_mask=0x%lx)",
+             (unsigned)ch_id, (unsigned long)vi_mask);
     }
-    rc = imx219_streaming_enable();
-    if (rc != 0) {
-        WARN("imx219_capture: streaming_enable rc=%d", rc);
-        return -1;
-    }
-    /* PLL lock + AGC settle. One full frame at 30 fps. */
-    timer_busy_wait_us(50000u);
 
     /* 6. Build per-frame descriptor in slot 0 of the request ring.
      * The slot is in NC memory, so descriptor stores are
@@ -634,7 +697,10 @@ int imx219_capture_one_frame(struct camera_frame *out)
 
     volatile struct camrtc_capture_descriptor_header *desc =
         (volatile struct camrtc_capture_descriptor_header *)desc_base;
-    desc->sequence                 = 1u;
+    /* RCE expects monotonically-increasing sequence per channel.
+     * Reusing 1 was fine when each capture got a fresh channel; with
+     * session caching we have to bump per call. */
+    desc->sequence                 = ++imx219_capture_seq;
     desc->capture_flags            = CAPTURE_FLAG_STATUS_REPORT_ENABLE
                                    | CAPTURE_FLAG_ERROR_REPORT_ENABLE;
     desc->frame_start_timeout      = IMX219_FRAME_TIMEOUT_MS;
@@ -746,6 +812,24 @@ int imx219_capture_one_frame(struct camera_frame *out)
     return 0;
 }
 
+void imx219_session_close(void)
+{
+    if (!imx219_session_open) return;
+    /* Best-effort streaming halt so the next mode-init starts from a
+     * known state. CHANNEL_RELEASE / STREAM_CLOSE aren't yet wired
+     * up in camrtc_capture, so the RCE-side channel stays allocated
+     * until the next power-cycle — see imx219_session_open above. */
+    (void)imx219_streaming_disable();
+    imx219_session_open = false;
+    imx219_capture_seq  = 0u;
+    INFO("imx219_capture: session closed (channel leaks until power-cycle)");
+}
+
+bool imx219_session_is_open(void)
+{
+    return imx219_session_open;
+}
+
 #else /* !PLATFORM_JETSON_ORIN_NANO — stubs for cross-platform builds */
 
 int imx219_power_on(void) { return -1; }
@@ -762,6 +846,8 @@ int imx219_capture_one_frame(struct camera_frame *out) {
     (void)out;
     return -1;
 }
+void imx219_session_close(void) { /* no-op */ }
+bool imx219_session_is_open(void) { return false; }
 int imx219_set_runtime_gain(uint8_t analog, uint16_t digital) {
     (void)analog; (void)digital; return -1;
 }

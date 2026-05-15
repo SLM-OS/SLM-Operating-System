@@ -121,6 +121,16 @@ demo_camera_sweep_lua_start:
     .incbin xstr(DEMO_CAMERA_SWEEP_LUA_PATH)
 demo_camera_sweep_lua_end:
 
+    /* IMX219 flat-field calibration — capture a uniform background as
+     * a per-block reference, then sweep the per-mode normalize options
+     * on a digit to see which one classifies best. */
+    .global demo_camera_flatfield_lua_start
+    .global demo_camera_flatfield_lua_end
+    .align 4
+demo_camera_flatfield_lua_start:
+    .incbin xstr(DEMO_CAMERA_FLATFIELD_LUA_PATH)
+demo_camera_flatfield_lua_end:
+
 #if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__))
     .section .note.GNU-stack, "", @progbits
 #endif

@@ -49,6 +49,45 @@
  * inference path; see runtime/src/inference/gpu.rs. */
 #define CAMERA_MNIST_OUT_BYTES (28u * 28u * 4u)
 
+/* Flat-field reference grid dimensions. Matches the centre-crop
+ * preprocess geometry one-to-one (28×28 MNIST blocks at 22 source
+ * pixels per block over the 616×616 centred region) so the per-
+ * block reference sum can divide the per-block input sum directly.
+ * Anchored full-frame mode isn't supported — flat-field calibration
+ * only makes sense for the center_crop=true preprocess path that
+ * real captures use. */
+#define CAMERA_FLATFIELD_DIM 28u
+
+/* Normalization modes for camera_preprocess_mnist's normalize_mode
+ * arg. NONE keeps the legacy contract (per-block sum / max). The
+ * FLATFIELD_* modes divide each input block sum by the stored
+ * flat-field reference block sum, then re-anchor to a chosen
+ * scalar so the output stays in [0, 1]. The anchor controls which
+ * scene location keeps its original brightness:
+ *
+ *   FLATFIELD_CENTER   — central 4 blocks' reference avg.
+ *                        Vignetted corners brighten toward what
+ *                        the centre reads.
+ *   FLATFIELD_MAX      — max reference block sum (typically
+ *                        somewhere near the centre, but not
+ *                        guaranteed). Output ratio stays in
+ *                        [0, 1] without clamping.
+ *   FLATFIELD_MID_EDGE — average of blocks at half-radius from
+ *                        centre. Compromise between the centre-
+ *                        bright bias and the corner-noise bias.
+ *
+ * Modes other than NONE require a stored reference (capture one
+ * via camera_flatfield_capture); without one, preprocess returns
+ * -3 instead of silently falling back. */
+#define CAMERA_NORMALIZE_NONE                0u
+#define CAMERA_NORMALIZE_FLATFIELD_CENTER    1u
+#define CAMERA_NORMALIZE_FLATFIELD_MAX       2u
+#define CAMERA_NORMALIZE_FLATFIELD_MID_EDGE  3u
+/* Sentinel — keep last. New modes must be inserted ABOVE this so
+ * range checks (`mode < CAMERA_NORMALIZE_COUNT`) stay correct
+ * automatically. */
+#define CAMERA_NORMALIZE_COUNT               4u
+
 /* Bound used by callers to size temporary stack buffers when probing
  * a capture. The IMX219 T_R16 1640x1232 buffer is the largest single
  * frame any current backend produces (~4 MB; double the packed RAW10
@@ -161,7 +200,11 @@ int camera_open(const char *name, struct camera_frame *out);
  * Returns 0 on success. Negative on bad arguments:
  *   -1 = NULL pointer / out_bytes too small
  *   -2 = unsupported width/height/bayer/format (only RGGB 1640x1232
- *        in RAW10_PACKED or T_R16 today)
+ *        in RAW10_PACKED or T_R16 today), unknown normalize_mode,
+ *        or FLATFIELD_* mode requested with center_crop=false
+ *   -3 = FLATFIELD_* mode requested but no flat-field reference
+ *        is currently stored (capture one via
+ *        camera_flatfield_capture)
  */
 int camera_preprocess_mnist(const uint8_t *data,
                             size_t         data_len,
@@ -171,5 +214,53 @@ int camera_preprocess_mnist(const uint8_t *data,
                             uint32_t       format,
                             bool           invert,
                             bool           center_crop,
+                            uint32_t       normalize_mode,
                             uint8_t       *out_bytes,
                             size_t         out_capacity);
+
+/*
+ * Capture-time flat-field calibration.
+ *
+ * The wide-angle IMX219 module on the Jetson Orin Nano carrier has
+ * heavy lens vignette (~30-50 % corner light fall-off) which the
+ * Tegra ISP's lens-shading correction would normally remove. The
+ * ISP isn't reachable from SLM-OS, so the raw frame carries the
+ * full vignette pattern. Capturing a uniformly-lit scene (a sheet
+ * of blank paper filling the frame) and storing its per-block
+ * green-channel sums gives `camera_preprocess_mnist` a reference
+ * to divide subsequent inputs by, flattening the lens response.
+ *
+ * Same geometry as preprocess(center_crop=true): 28×28 blocks of
+ * 22×22 source pixels each, walking the centred 616×616 region.
+ *
+ * Returns 0 on success, -1 on NULL/short buffer, -2 on shape
+ * mismatch.
+ */
+int camera_flatfield_capture(const uint8_t *data,
+                             size_t         data_len,
+                             uint32_t       width,
+                             uint32_t       height,
+                             uint32_t       bayer,
+                             uint32_t       format);
+
+/* Drop the stored reference. Subsequent FLATFIELD_* preprocess
+ * calls will return -3 until another capture lands. */
+void camera_flatfield_clear(void);
+
+/* True if a flat-field reference is currently stored. */
+bool camera_flatfield_is_valid(void);
+
+/* Read one cell of the stored reference. Returns the raw
+ * green-channel sum (range [0, (CAMERA_FLATFIELD_DIM-block)²/2 *
+ * 255] = [0, 61710]). Returns UINT32_MAX if (i, j) is out of
+ * range or no reference is stored — useful for the operator-side
+ * gradient analysis. */
+uint32_t camera_flatfield_get(uint32_t i, uint32_t j);
+
+/* The per-mode anchor value (the reference block sum the
+ * normalization re-anchors corrected output to). Returns
+ * UINT32_MAX if no reference is stored or `mode` isn't a
+ * FLATFIELD_* mode (matches camera_flatfield_get's sentinel
+ * convention so callers can disambiguate "no data" from a
+ * legitimate zero anchor on a fully-dark reference). */
+uint32_t camera_flatfield_anchor(uint32_t mode);
