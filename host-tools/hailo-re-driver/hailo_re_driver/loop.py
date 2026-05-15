@@ -296,6 +296,17 @@ def _write_pending_corpus(corpus: Corpus, request: ExtendRequest) -> Path:
         dir=corpus.path.parent,
     )
     pending_path = Path(tmp_name)
+    # mkstemp creates the file mode 0o600. If the corpus directory is
+    # under a sync agent (Dropbox observed in the SLM-OS dev tree) the
+    # agent may chown the new file to its own service uid moments after
+    # creation — once that races ahead of the downstream `labctl sdwire
+    # update` subprocess, that subprocess (running as the invoking user)
+    # gets EACCES on its own temp file. Widening to 0o644 makes the
+    # ownership flip irrelevant: world-readable means whichever uid the
+    # sync agent picks, the labctl subprocess can still copy the file
+    # onto the SD card. The pending file lives ~milliseconds and is
+    # unlinked by the caller; the wider mode is not a security concern.
+    os.chmod(tmp_name, 0o644)
     # mkstemp returns both an open fd and a path on disk; if anything below
     # raises (corpus moved/permissions lost between iterations, disk full on
     # the write side, etc.) we own both the fd and the temp file and must
