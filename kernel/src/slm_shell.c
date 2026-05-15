@@ -1002,8 +1002,8 @@ static int slm_gpu(void)
         { 6u, "SWIGLU"    },
         { 7u, "LM_HEAD"   },
     };
-    shell_puts("op           tier\r\n");
-    shell_puts("-----------  ----\r\n");
+    shell_puts("op           tier  attempts          ok          fallback\r\n");
+    shell_puts("-----------  ----  ----------------  ----------  --------\r\n");
     for (size_t i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
         int tier = slm_runtime_get_tier(ops[i].op);
         const char *tname =
@@ -1011,7 +1011,14 @@ static int slm_gpu(void)
             (tier == 1) ? "HMMA" :
             (tier == 2) ? "SIMT" :
             (tier == 3) ? "CPU"  : "ERR";
-        shell_printf("%-11s  %s\r\n", ops[i].name, tname);
+        uint64_t attempts = 0, ok = 0;
+        slm_runtime_dispatch_stats(ops[i].op, &attempts, &ok);
+        uint64_t fallback = attempts > ok ? (attempts - ok) : 0;
+        shell_printf("%-11s  %-4s  %-16llu  %-10llu  %-llu\r\n",
+                     ops[i].name, tname,
+                     (unsigned long long)attempts,
+                     (unsigned long long)ok,
+                     (unsigned long long)fallback);
     }
     return 0;
 }

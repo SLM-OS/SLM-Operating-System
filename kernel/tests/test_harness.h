@@ -53,6 +53,11 @@ int test_suite_slm_shell(void);
  * /slm/token → /slm/done streaming) */
 int test_suite_slm_runner(void);
 
+/* SLM GPU dispatch counter FFI tests (PR #831 — pins the contract
+ * of `slm_runtime_dispatch_stats` / `_reset`: post-reset zeros,
+ * out-of-range op_kind safety, NULL-tolerance, op-kind coverage) */
+int test_suite_slm_dispatch_stats(void);
+
 /* Priority inheritance mutex tests */
 int test_suite_pi_mutex(void);
 

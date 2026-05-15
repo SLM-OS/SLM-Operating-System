@@ -130,6 +130,21 @@ enum slm_gpu_op_kind {
     SLM_GPU_OP_Q4K_DEQUANT   = 12, /* Q4_K → FP16 dequantize            */
 };
 
+/* Number of SLM transformer ops (discriminants 0..7) — sizes the
+ * runtime's `TIER_TABLE` (gpu_slm.rs::OpKind::COUNT) and the C-side
+ * `slm_runtime_dispatch_stats` counter arrays. The full enum
+ * continues past this (CNN ops at 8+, Q4K_DEQUANT at 12) but those
+ * don't share the per-op SLM dispatch FFI, so they aren't counted. */
+#define SLM_GPU_OP_COUNT 8u
+
+/* Belt-and-braces: pin SLM_GPU_OP_COUNT against renumbering of the
+ * transformer-op range. If a future PR moves LM_HEAD's discriminant
+ * or inserts an op below it without bumping the count, the build
+ * fails here instead of silently mis-sizing
+ * `g_op_dispatch_attempts[]` and friends. */
+_Static_assert(SLM_GPU_OP_LM_HEAD + 1u == SLM_GPU_OP_COUNT,
+               "SLM_GPU_OP_COUNT must equal LM_HEAD discriminant + 1");
+
 /*
  * Data-type enum used by the operator library to disambiguate
  * within a tier (e.g. SIMT FP32 vs SIMT FP16 vs IMMA INT8). The
