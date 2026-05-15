@@ -87,10 +87,15 @@
  * pages) AND a big-page leaf table. Entry is 8 bytes split into two
  * 4-byte halves: small (low) + big (high).
  *
- * For Milestone A's read-only walker, we only follow the SMALL half
- * (4 KB pages). Big-page mappings are ignored — they won't show up
- * in handoff buffers like pushbuf which Linux maps with 4 KB
- * granularity by default for small DMA buffers. */
+ * Walker behavior: tries the SMALL half first; if invalid, falls
+ * back to the BIG half (64 KB or 128 KB pages — bit 11 of inst-
+ * block word 128 selects). Before the fallback was added (#834
+ * investigation, May 2026), big-page mappings were silently
+ * mis-classified as unmapped — which mattered for buffers Linux
+ * nvgpu chose to back with 64 KB pages, including the handoff's
+ * 64 KB pushbuffer in some configurations. The writer-side
+ * `ensure_dual_pde_small_table` still uses small only because
+ * SLM-OS-side mappings always author 4 KB PTEs. */
 #define GA10B_DUAL_PDE_SMALL_APERTURE_MASK   (0x7ull << 1)
 #define GA10B_DUAL_PDE_SMALL_APERTURE_SHIFT  1
 #define GA10B_DUAL_PDE_SMALL_VOL_BIT         (1ull << 3)

@@ -171,8 +171,10 @@ static void decode_regular_pde(uint64_t entry,
     *out_next_phys = ((addr_hi << 24) | addr_lo) << 12;
 }
 
-/* Decode the small-page half of a dual PDE (PDE0). Big half is
- * ignored for Milestone A — see ga10b_gmmu.h. */
+/* Decode the small-page half of a dual PDE (PDE0). Used by the
+ * writer-side `ensure_dual_pde_small_table` helper, which only ever
+ * needs the small-page subtree because SLM-OS-side mappings author
+ * 4 KB PTEs. */
 static void decode_dual_pde_small(uint64_t entry,
                                   uint64_t *out_next_phys,
                                   uint8_t *out_aperture,
@@ -184,6 +186,53 @@ static void decode_dual_pde_small(uint64_t entry,
     /* Small PT phys >> 12 in low word [31:8]. */
     uint64_t lo = (entry >> 8) & 0xffffff;
     *out_next_phys = lo << 12;
+}
+
+/* Decode the dual PDE at PDE0 level for the walker. Tries the small-
+ * page half first (4 KB pages, the common case for handoff dmabufs).
+ * If the small half is invalid, falls back to the big-page half
+ * (64 KB or 128 KB pages — bit 11 of word 128 in the inst block
+ * selects). The caller sets `out_followed_small` so walk output can
+ * disambiguate which subtree was descended.
+ *
+ * Why both halves: NVIDIA's nvgpu maps buffers via big pages when
+ * their size + alignment qualify (typically ≥64 KB and 64 KB-aligned).
+ * The handoff's pushbuffer is exactly 64 KB on Tegra GA10B; if Linux
+ * picked the big-page path for it, the small subtree at PDE0 would
+ * be invalid for those VAs but the big subtree would have the
+ * mapping. The original Milestone A walker only checked small,
+ * which silently mis-classified big-page mappings as unmapped. See
+ * #834 investigation 2026-05-14 for the case where this matters. */
+static void decode_dual_pde(uint64_t entry,
+                            uint64_t *out_next_phys,
+                            uint8_t *out_aperture,
+                            bool *out_valid,
+                            bool *out_followed_small)
+{
+    uint8_t small_ap =
+        (uint8_t)((entry >> GA10B_DUAL_PDE_SMALL_APERTURE_SHIFT) & 0x7);
+    if (small_ap != 0) {
+        *out_aperture = small_ap;
+        *out_valid = true;
+        uint64_t lo = (entry >> 8) & 0xffffff;
+        *out_next_phys = lo << 12;
+        *out_followed_small = true;
+        return;
+    }
+
+    /* Big half lives in the high 32 bits — aperture at bits [35:33]
+     * (= 32 + 1), vol at bit 35 (= 32 + 3), big PT phys >> 8 at
+     * bits [63:36] (= 32 + [31:4]). The big PT phys shift differs
+     * from small: the big PT page is aligned to 256 B (not 4 KB)
+     * because each big PTE covers 64 KB or 128 KB and the table is
+     * smaller. */
+    uint8_t big_ap =
+        (uint8_t)((entry >> GA10B_DUAL_PDE_BIG_APERTURE_SHIFT) & 0x7);
+    *out_aperture = big_ap;
+    *out_valid = (big_ap != 0);
+    *out_followed_small = false;
+    uint64_t big_hi = (entry >> (32 + 4)) & 0x0fffffffull;
+    *out_next_phys = big_hi << 8;
 }
 
 /* Decode a leaf PTE. */
@@ -287,8 +336,10 @@ int ga10b_gmmu_walk(uint64_t inst_block_phys, uint64_t gpu_va,
         uint8_t aperture;
         bool valid;
         if (lvl == 3) {
-            decode_dual_pde_small(entry, &next_phys, &aperture, &valid);
-            rec->dual_pde_followed_small = true;
+            bool followed_small = false;
+            decode_dual_pde(entry, &next_phys, &aperture, &valid,
+                            &followed_small);
+            rec->dual_pde_followed_small = followed_small;
         } else {
             decode_regular_pde(entry, &next_phys, &aperture, &valid);
         }
