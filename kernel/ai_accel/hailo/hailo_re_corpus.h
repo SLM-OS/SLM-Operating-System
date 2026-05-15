@@ -57,12 +57,12 @@ struct hailo_re_op {
 };
 
 enum hailo_re_corpus_error {
-    HAILO_RE_CORPUS_OK            =  0,
-    HAILO_RE_CORPUS_E_PARSE       = -1,   /* malformed JSON line shape */
-    HAILO_RE_CORPUS_E_NO_HEADER   = -2,   /* line 1 missing/wrong type */
-    HAILO_RE_CORPUS_E_NONMONOTONIC = -3,  /* seq did not strictly increase */
-    HAILO_RE_CORPUS_E_OVERFLOW    = -4,   /* op_capacity exhausted */
-    HAILO_RE_CORPUS_E_BAD_FIELD   = -5,   /* required field missing or bad value */
+    HAILO_RE_CORPUS_OK             =  0,
+    HAILO_RE_CORPUS_E_PARSE        = -1,   /* malformed JSON line shape */
+    HAILO_RE_CORPUS_E_NO_HEADER    = -2,   /* line 1 missing/wrong type */
+    HAILO_RE_CORPUS_E_DUPLICATE    = -3,   /* same seq appeared twice */
+    HAILO_RE_CORPUS_E_OVERFLOW     = -4,   /* op_capacity exhausted */
+    HAILO_RE_CORPUS_E_BAD_FIELD    = -5,   /* required field missing or bad value */
 };
 
 /* Parsed corpus state. The op buffer is caller-owned (typically a
