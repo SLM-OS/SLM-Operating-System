@@ -19,11 +19,13 @@
     !defined(DEMO_AUTO_LUA_PATH) || !defined(DEMO_MULTIPROC_LUA_PATH) || \
     !defined(DEMO_HAILO_LUA_PATH) || !defined(DEMO_ADMIN_LUA_PATH) || \
     !defined(DEMO_IMX219_MNIST_LUA_PATH) || \
-    !defined(DEMO_CAMERA_HEATMAP_LUA_PATH)
+    !defined(DEMO_CAMERA_HEATMAP_LUA_PATH) || \
+    !defined(DEMO_CAMERA_SWEEP_LUA_PATH)
 # error "DEMO_LUA_PATH, DEMO_MENU_LUA_PATH, DEMO_AUTO_LUA_PATH, "\
         "DEMO_MULTIPROC_LUA_PATH, DEMO_HAILO_LUA_PATH, "\
-        "DEMO_ADMIN_LUA_PATH, DEMO_IMX219_MNIST_LUA_PATH, and "\
-        "DEMO_CAMERA_HEATMAP_LUA_PATH must be supplied by the build system"
+        "DEMO_ADMIN_LUA_PATH, DEMO_IMX219_MNIST_LUA_PATH, "\
+        "DEMO_CAMERA_HEATMAP_LUA_PATH, and "\
+        "DEMO_CAMERA_SWEEP_LUA_PATH must be supplied by the build system"
 #endif
 
 #define xstr(s) str(s)
@@ -107,6 +109,17 @@ demo_imx219_mnist_lua_end:
 demo_camera_heatmap_lua_start:
     .incbin xstr(DEMO_CAMERA_HEATMAP_LUA_PATH)
 demo_camera_heatmap_lua_end:
+
+    /* IMX219 gain/exposure sweep — iterate a small grid of
+     * (analog, digital, exposure) combos and report pixel range +
+     * MNIST argmax + top-1 margin for each. Operator picks the
+     * row that looks best, applies it from the REPL. */
+    .global demo_camera_sweep_lua_start
+    .global demo_camera_sweep_lua_end
+    .align 4
+demo_camera_sweep_lua_start:
+    .incbin xstr(DEMO_CAMERA_SWEEP_LUA_PATH)
+demo_camera_sweep_lua_end:
 
 #if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__))
     .section .note.GNU-stack, "", @progbits

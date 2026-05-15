@@ -41,6 +41,8 @@ extern const unsigned char demo_imx219_mnist_lua_start[];
 extern const unsigned char demo_imx219_mnist_lua_end[];
 extern const unsigned char demo_camera_heatmap_lua_start[];
 extern const unsigned char demo_camera_heatmap_lua_end[];
+extern const unsigned char demo_camera_sweep_lua_start[];
+extern const unsigned char demo_camera_sweep_lua_end[];
 
 int demo_init(void)
 {
@@ -134,6 +136,17 @@ int demo_init(void)
                             (size_t)(demo_camera_heatmap_lua_end -
                                      demo_camera_heatmap_lua_start));
         littlefs_file_close(mnt, fch);
+    }
+
+    /* IMX219 gain/exposure sweep — iterate a small grid and
+     * summarise per-trial pixel range + MNIST inference. */
+    int fcs = littlefs_file_open(mnt, "/camera_sweep.lua",
+                                 LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (fcs >= 0) {
+        littlefs_file_write(mnt, fcs, demo_camera_sweep_lua_start,
+                            (size_t)(demo_camera_sweep_lua_end -
+                                     demo_camera_sweep_lua_start));
+        littlefs_file_close(mnt, fcs);
     }
 
     /* #64: boot-time model preload config. One model name per line.

@@ -115,33 +115,34 @@ static void test_camera_preprocess_bad_args(void)
     /* NULL guards. */
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         NULL, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, false, false,
+        dummy_out, sizeof(dummy_out)));
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, NULL, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, NULL, sizeof(dummy_out)));
 
     /* out_capacity too small. */
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, dummy_out, CAMERA_MNIST_OUT_BYTES - 1u));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, dummy_out, CAMERA_MNIST_OUT_BYTES - 1u));
 
     /* Wrong geometry — only 1640x1232 supported today. */
     TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 640u, 480u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, dummy_out, sizeof(dummy_out)));
     TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_GRBG,
-        CAMERA_FORMAT_RAW10_PACKED, dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, dummy_out, sizeof(dummy_out)));
 
     /* Unknown format — must reject before reading data. */
     TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        99u, dummy_out, sizeof(dummy_out)));
+        99u, false, false, dummy_out, sizeof(dummy_out)));
 
     /* Right geometry but data_len smaller than the frame requires. */
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, dummy_out, sizeof(dummy_out)));
 }
 
 /*
@@ -163,6 +164,8 @@ static void test_camera_preprocess_mock_first_pixel(void)
     int rc = camera_preprocess_mnist(frame.data, frame.size,
                                      frame.width, frame.height,
                                      frame.bayer, frame.format,
+                                     /*invert=*/false,
+                                     /*center_crop=*/false,
                                      out, sizeof(out));
     TEST_ASSERT_EQUAL_INT(0, rc);
 
@@ -213,15 +216,186 @@ static void test_camera_preprocess_t_r16_matches_raw10(void)
     TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
         frame.data, frame.size, frame.width, frame.height,
         frame.bayer, CAMERA_FORMAT_RAW10_PACKED,
+        /*invert=*/false, /*center_crop=*/false,
         out_raw10, sizeof(out_raw10)));
     TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
         t_r16_synth_buffer, sizeof(t_r16_synth_buffer),
         frame.width, frame.height, frame.bayer,
-        CAMERA_FORMAT_T_R16, out_t_r16, sizeof(out_t_r16)));
+        CAMERA_FORMAT_T_R16,
+        /*invert=*/false, /*center_crop=*/false,
+        out_t_r16, sizeof(out_t_r16)));
 
     for (uint32_t i = 0; i < CAMERA_MNIST_OUT_BYTES; i++) {
         TEST_ASSERT_EQUAL_UINT8(out_raw10[i], out_t_r16[i]);
     }
+}
+
+/*
+ * Test: invert=true must produce a complemented output relative to
+ * invert=false for the same input. The math is num' = denom - num,
+ * so for every cell, out[i] (invert=true) and out[i] (invert=false)
+ * are fp32 values whose pre-division numerators sum to denom. After
+ * fp32_div_bits, that round-trips to fp32 values that sum to ~1.0.
+ *
+ * Mock frame is partially black (numerator 0 → fp32 0.0) and partially
+ * bright (numerator near denom → fp32 near 1.0). With invert=true the
+ * mapping swaps. The test picks a couple of pixels at known positions
+ * (one bright, one dark in the mock) and asserts the swap.
+ */
+static void test_camera_preprocess_invert_flips_polarity(void)
+{
+    if (!mock_frame_embedded()) {
+        TEST_IGNORE_MESSAGE("MOCK_CAMERA_FRAME=OFF — mock backend skipped");
+    }
+    struct camera_frame frame;
+    TEST_ASSERT_EQUAL_INT(0, camera_open("mock", &frame));
+
+    uint8_t out_norm[CAMERA_MNIST_OUT_BYTES];
+    uint8_t out_inv [CAMERA_MNIST_OUT_BYTES];
+
+    TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
+        frame.data, frame.size, frame.width, frame.height,
+        frame.bayer, frame.format,
+        /*invert=*/false, /*center_crop=*/false,
+        out_norm, sizeof(out_norm)));
+    TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
+        frame.data, frame.size, frame.width, frame.height,
+        frame.bayer, frame.format,
+        /*invert=*/true,  /*center_crop=*/false,
+        out_inv,  sizeof(out_inv)));
+
+    /* For every cell, normal_fp32 + inverted_fp32 ≈ 1.0. Decode the
+     * fp32 by reinterpreting the four bytes — kernel build is
+     * little-endian with no float regs (-mgeneral-regs-only), so
+     * use the integer bit pattern + a software comparison. The
+     * sum-to-1 invariant collapses to: the two numerators sum to
+     * denom = 968*255 = 246840 at full-frame block size. A simpler
+     * stricter check works: cells that are 0.0 normal must be ~1.0
+     * inverted, and cells that are ~1.0 normal must be 0.0 inverted.
+     * Use the bit pattern: 0x00000000 == 0.0f, 0x3f800000 == 1.0f. */
+    uint32_t saw_complement_pair = 0;
+    for (uint32_t i = 0; i < CAMERA_MNIST_OUT_BYTES; i += 4) {
+        uint32_t n, v;
+        __builtin_memcpy(&n, out_norm + i, sizeof(n));
+        __builtin_memcpy(&v, out_inv  + i, sizeof(v));
+        if (n == 0u && v == 0x3f800000u) {
+            saw_complement_pair++;
+        }
+        if (n == 0x3f800000u && v == 0u) {
+            saw_complement_pair++;
+        }
+    }
+    /* The mock contains both fully-dark and fully-bright cells, so
+     * we should see at least one of each complement direction. */
+    TEST_ASSERT_TRUE(saw_complement_pair >= 2u);
+}
+
+/*
+ * Test: center_crop=true must produce different output than
+ * center_crop=false for a frame whose content differs between the
+ * full-frame and the centred 616×616 region. The mock frame is
+ * MNIST-shaped digit centred in the source, so the center-crop
+ * region has noticeably different green-channel statistics from
+ * the full frame. Any nonzero difference proves the new arg path
+ * is actually live (regression-catches the case where the arg is
+ * accidentally dropped or hard-coded).
+ */
+static void test_camera_preprocess_center_crop_changes_output(void)
+{
+    if (!mock_frame_embedded()) {
+        TEST_IGNORE_MESSAGE("MOCK_CAMERA_FRAME=OFF — mock backend skipped");
+    }
+    struct camera_frame frame;
+    TEST_ASSERT_EQUAL_INT(0, camera_open("mock", &frame));
+
+    uint8_t out_full[CAMERA_MNIST_OUT_BYTES];
+    uint8_t out_crop[CAMERA_MNIST_OUT_BYTES];
+    TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
+        frame.data, frame.size, frame.width, frame.height,
+        frame.bayer, frame.format,
+        /*invert=*/false, /*center_crop=*/false,
+        out_full, sizeof(out_full)));
+    TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
+        frame.data, frame.size, frame.width, frame.height,
+        frame.bayer, frame.format,
+        /*invert=*/false, /*center_crop=*/true,
+        out_crop, sizeof(out_crop)));
+
+    bool any_differ = false;
+    for (uint32_t i = 0; i < CAMERA_MNIST_OUT_BYTES; i++) {
+        if (out_full[i] != out_crop[i]) {
+            any_differ = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(any_differ);
+}
+
+/*
+ * Test: camera_open populates the per-backend defaults.
+ *   mock     → both false (MNIST-shape, full frame)
+ *   imx219-0 → both true (raw photo data, wide-angle vignette)
+ *
+ * On QEMU only the mock branch is reachable; the imx219 branch
+ * needs a Jetson build to capture, so it's not asserted here.
+ */
+static void test_camera_open_populates_recommended_defaults(void)
+{
+    if (!mock_frame_embedded()) {
+        TEST_IGNORE_MESSAGE("MOCK_CAMERA_FRAME=OFF — mock backend skipped");
+    }
+    struct camera_frame frame = {0};
+    TEST_ASSERT_EQUAL_INT(0, camera_open("mock", &frame));
+    TEST_ASSERT_FALSE(frame.recommended_invert);
+    TEST_ASSERT_FALSE(frame.recommended_center_crop);
+}
+
+/* ---- IMX219 runtime gain/exposure (admin bindings) ----
+ *
+ * On QEMU the imx219_*_runtime_* surface is stubbed: setters return
+ * -1, getters return 0 / write 0 through out-params. The tests below
+ * pin that contract so the stub linkage stays correct across builds.
+ * On Jetson the real implementation owns the value and we'd need a
+ * mock sensor to test round-trip behavior; not in scope here.
+ */
+static void test_imx219_runtime_gain_exposure_stubs(void)
+{
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* Jetson real impl: round-trip set → get must observe the new
+     * value (stored in module-scope statics; no I²C touch since the
+     * test isn't running a real capture session). */
+    imx219_set_runtime_gain(192u, 0x0100u);
+    uint8_t  a = 0u;
+    uint16_t d = 0u;
+    imx219_get_runtime_gain(&a, &d);
+    TEST_ASSERT_EQUAL_HEX8(192u, a);
+    TEST_ASSERT_EQUAL_HEX16(0x0100u, d);
+
+    TEST_ASSERT_EQUAL_INT(0, imx219_set_runtime_exposure(0x0123u));
+    TEST_ASSERT_EQUAL_HEX16(0x0123u, imx219_get_runtime_exposure());
+
+    /* Restore the shipped defaults so any later test capture sees
+     * the values the rest of the driver assumes. */
+    imx219_set_runtime_gain(232u, 0x0200u);
+    imx219_set_runtime_exposure(0x0640u);
+#else
+    /* Non-Jetson stubs: setters report -1, getters yield 0. */
+    TEST_ASSERT_EQUAL_INT(-1, imx219_set_runtime_gain(0u, 0u));
+    uint8_t  a = 0xAAu;
+    uint16_t d = 0xBBBBu;
+    imx219_get_runtime_gain(&a, &d);
+    TEST_ASSERT_EQUAL_HEX8(0u, a);
+    TEST_ASSERT_EQUAL_HEX16(0u, d);
+
+    /* NULL-safe: both NULL must be a no-op, neither NULL must work. */
+    imx219_get_runtime_gain(NULL, NULL);
+    a = 0xAAu;
+    imx219_get_runtime_gain(&a, NULL);
+    TEST_ASSERT_EQUAL_HEX8(0u, a);
+
+    TEST_ASSERT_EQUAL_INT(-1, imx219_set_runtime_exposure(0u));
+    TEST_ASSERT_EQUAL_HEX16(0u, imx219_get_runtime_exposure());
+#endif
 }
 
 /* ---- Tegra HSI2C driver ----
@@ -963,6 +1137,10 @@ int test_suite_camera(void)
     RUN_TEST(test_camera_preprocess_bad_args);
     RUN_TEST(test_camera_preprocess_mock_first_pixel);
     RUN_TEST(test_camera_preprocess_t_r16_matches_raw10);
+    RUN_TEST(test_camera_preprocess_invert_flips_polarity);
+    RUN_TEST(test_camera_preprocess_center_crop_changes_output);
+    RUN_TEST(test_camera_open_populates_recommended_defaults);
+    RUN_TEST(test_imx219_runtime_gain_exposure_stubs);
     RUN_TEST(test_tegra_i2c_stubs_return_minus_one);
     RUN_TEST(test_tegra_i2c_cam_bus_wiring);
     RUN_TEST(test_tegra_i2c_api_arg_validation);

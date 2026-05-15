@@ -8,6 +8,7 @@
 #include "lua_slm.h"
 #include "build_info.h"
 #include "camera.h"
+#include "imx219.h"   /* imx219_set/get_runtime_gain, _exposure */
 #include "debug.h"
 #include "timer.h"
 #include "pmm.h"
@@ -4038,6 +4039,29 @@ static int l_camera_preprocess_mnist(lua_State *L) {
      * — see follow-up issue. */
     const char *name = luaL_optstring(L, 5, "mock");
 
+    /* Optional `invert` (6th arg) — flips output polarity so raw
+     * photographic data (black ink on white paper) matches MNIST's
+     * trained convention (bright stroke on dark background). When
+     * omitted, the per-backend recommendation from
+     * `camera_frame.recommended_invert` is used (mock: false, imx219:
+     * true). Pass an explicit boolean to override.
+     *
+     * Optional `center_crop` (7th arg) — sample the central 616×616
+     * of the sensor instead of the full 1232×1232. Required for the
+     * IMX219 backend whose wide-angle lens has heavy vignette in the
+     * corners (the Tegra ISP that would normally apply lens-shading
+     * correction isn't reachable from SLM-OS). When omitted, the
+     * per-backend recommendation from
+     * `camera_frame.recommended_center_crop` is used.
+     *
+     * The defaults can only be resolved after camera_open populates
+     * the frame, so the explicit-pass cases are captured here and
+     * defaulted below. */
+    bool invert_explicit      = !lua_isnoneornil(L, 6);
+    bool center_crop_explicit = !lua_isnoneornil(L, 7);
+    int  invert_arg            = invert_explicit      ? lua_toboolean(L, 6) : 0;
+    int  center_crop_arg       = center_crop_explicit ? lua_toboolean(L, 7) : 0;
+
     if (frame_id != 0) {
         lua_pushnil(L);
         lua_pushinteger(L, -1);
@@ -4056,6 +4080,10 @@ static int l_camera_preprocess_mnist(lua_State *L) {
         lua_pushinteger(L, -3);
         return 2;
     }
+    bool invert      = invert_explicit      ? (bool)invert_arg
+                                            : frame.recommended_invert;
+    bool center_crop = center_crop_explicit ? (bool)center_crop_arg
+                                            : frame.recommended_center_crop;
 
     /* 3,136 bytes on the kernel-task stack — STACK_SIZE is 64 KB
      * (kernel/include/config.h), so this is ~5% of budget. Stack
@@ -4067,6 +4095,7 @@ static int l_camera_preprocess_mnist(lua_State *L) {
     int rc = camera_preprocess_mnist(frame.data, frame.size,
                                      frame.width, frame.height,
                                      frame.bayer, frame.format,
+                                     invert, center_crop,
                                      out, sizeof(out));
     if (rc != 0) {
         lua_pushnil(L);
@@ -4082,6 +4111,88 @@ static const luaL_Reg slm_camera_lib[] = {
     {"capture",          l_camera_capture},
     {"close",            l_camera_close},
     {"preprocess_mnist", l_camera_preprocess_mnist},
+    {NULL, NULL}
+};
+
+/* ========================================================================
+ * slm.camera.imx219_* — operator tuning surface (admin-only)
+ *
+ * The IMX219's analog gain, digital gain, and exposure live as
+ * file-scope statics in kernel/drivers/camera/imx219.c and are
+ * written to the sensor on every mode-init (i.e. every capture).
+ * These four bindings let an operator sweep them from Lua to find
+ * a usable combo for the current scene without rebuilding.
+ *
+ *   imx219_set_gain(analog, digital)  - analog ∈ [0, 255],
+ *                                       digital ∈ [0, 0x0FFF]
+ *                                       (datasheet cap). Returns 0
+ *                                       on success.
+ *   imx219_get_gain()                 - returns (analog, digital).
+ *   imx219_set_exposure(lines)        - lines ∈ [0, 0xFFFF].
+ *                                       Returns 0 on success.
+ *   imx219_get_exposure()             - returns lines.
+ *
+ * QEMU / non-Jetson builds return -1 from the setters and 0 from
+ * the getters (sensor not present). The change is staged in the
+ * runtime statics and takes effect on the next capture's mode-init
+ * — the running sensor doesn't latch them mid-frame. See the
+ * `imx219_runtime_*` block in imx219.c for the iteration history
+ * that motivated the defaults.
+ * ======================================================================== */
+
+static int l_camera_imx219_set_gain(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer analog  = luaL_checkinteger(L, 1);
+    lua_Integer digital = luaL_checkinteger(L, 2);
+    if (analog < 0 || analog > UINT8_MAX) {
+        return luaL_error(L, "analog gain out of range [0, %d]",
+                          (int)UINT8_MAX);
+    }
+    if (digital < 0 || digital > UINT16_MAX) {
+        return luaL_error(L, "digital gain out of range [0, %d]",
+                          (int)UINT16_MAX);
+    }
+    int rc = imx219_set_runtime_gain((uint8_t)analog, (uint16_t)digital);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+static int l_camera_imx219_get_gain(lua_State *L) {
+    if (!L) return 0;
+    uint8_t  analog  = 0u;
+    uint16_t digital = 0u;
+    imx219_get_runtime_gain(&analog, &digital);
+    lua_pushinteger(L, (lua_Integer)analog);
+    lua_pushinteger(L, (lua_Integer)digital);
+    return 2;
+}
+
+static int l_camera_imx219_set_exposure(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer lines = luaL_checkinteger(L, 1);
+    if (lines < 0 || lines > UINT16_MAX) {
+        return luaL_error(L, "exposure lines out of range [0, %d]",
+                          (int)UINT16_MAX);
+    }
+    int rc = imx219_set_runtime_exposure((uint16_t)lines);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+static int l_camera_imx219_get_exposure(lua_State *L) {
+    if (!L) return 0;
+    uint16_t lines = imx219_get_runtime_exposure();
+    lua_pushinteger(L, (lua_Integer)lines);
+    return 1;
+}
+
+/* Admin-only camera bindings appended onto the slm.camera namespace
+ * when the Lua state is opened in admin mode. */
+static const luaL_Reg slm_camera_lib_admin[] = {
+    {"imx219_set_gain",     l_camera_imx219_set_gain},
+    {"imx219_get_gain",     l_camera_imx219_get_gain},
+    {"imx219_set_exposure", l_camera_imx219_set_exposure},
+    {"imx219_get_exposure", l_camera_imx219_get_exposure},
     {NULL, NULL}
 };
 
@@ -4236,10 +4347,17 @@ static void lua_push_slm_library(lua_State *L, bool admin)
     lua_pushstring(L, SLMOS_BUILD_SHA);
     lua_setfield(L, -2, "BUILD_SHA");
 
-    /* slm.camera — read-only backend (mock-only today); fine on the safe
-     * surface. Real hardware backends with side effects can move to admin
-     * when they land. */
+    /* slm.camera — read-only backend on the safe surface. Admin
+     * builds get the operator-tuning IMX219 register bindings
+     * (imx219_set/get_gain, imx219_set/get_exposure) appended onto
+     * the same namespace before the table is sealed onto slm.*. */
     luaL_newlib(L, slm_camera_lib);
+    if (admin) {
+        for (const luaL_Reg *r = slm_camera_lib_admin; r->name; r++) {
+            lua_pushcfunction(L, r->func);
+            lua_setfield(L, -2, r->name);
+        }
+    }
     lua_setfield(L, -2, "camera");
 
     if (admin) {
