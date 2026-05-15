@@ -30,7 +30,7 @@
 #include "../gpu/nvidia/ga10b_channel_handoff.h"  /* GA10B_PIPELINE_KIND_* */
 #include "operator_dispatch.h"      /* struct operator_dispatch_args */
 #include "oplib_dispatch.h"         /* slm_oplib_dispatch */
-#include "oplib_pool.h"             /* OPLIB_POOL_* slot offsets */
+#include "oplib_pool.h"             /* OPLIB_POOL_* slot offsets + accessors */
 #include "oplib_weights_pool.h"     /* W2 weight staging */
 /* cache_clean_range / cache_invalidate_range come from gpu.h above
  * (already included on the non-Jetson side). The kernel/include/cache.h
@@ -1266,6 +1266,48 @@ void slm_runtime_dispatch_stats_reset(void)
     }
 }
 
+/* #832: resolve the (phys, gpu_va) base addresses the W-series
+ * dispatch FFIs use to compute their per-call scratch slots.
+ *
+ * Two sources, in preference order:
+ *
+ *   1. **Helper-published v4 shader region** — `h->shader_*` set
+ *      by `gpu_write_handoff_v4` (or any future handoff producer
+ *      that publishes a contiguous 256 KB scratch area). This is
+ *      the original design; the current MNIST helper's v6/v7
+ *      publish paths zero these fields ("v3 dispatch fields stay
+ *      zero" per gpu-launch-common.c).
+ *
+ *   2. **oplib_pool self-allocated scratch** — `oplib_pool_stage_to_gpu`'s
+ *      slow path (also added in this PR) allocates a 256 KB
+ *      contiguous PMM buffer, maps it into the inherited channel's
+ *      GMMU via `ga10b_gmmu_map`, and exposes the base addresses
+ *      via `oplib_pool_base_phys` / `oplib_pool_gpu_va_base`.
+ *
+ * Returns 0 on success or -1 if neither source has scratch (no
+ * helper handoff + `nvgpu oplib stage` was never called or
+ * failed). Callers translate -1 into a dispatch FFI -1 return,
+ * which forward.rs's hybrid wrappers turn into CPU fallback. */
+static int slm_ffi_resolve_scratch_base(uint64_t *out_phys,
+                                         uint64_t *out_gva)
+{
+    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
+    if (h != NULL && h->shader_phys != 0 && h->shader_gpu_va != 0 &&
+        h->shader_size >= OPLIB_POOL_MIN_BYTES) {
+        *out_phys = h->shader_phys;
+        *out_gva  = h->shader_gpu_va;
+        return 0;
+    }
+    uint64_t pool_phys = oplib_pool_base_phys();
+    uint64_t pool_gva  = oplib_pool_gpu_va_base();
+    if (pool_phys != 0 && pool_gva != 0) {
+        *out_phys = pool_phys;
+        *out_gva  = pool_gva;
+        return 0;
+    }
+    return -1;
+}
+
 int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
                                        const void *gamma_cpu_in,
                                        void *out_cpu_out,
@@ -1311,9 +1353,12 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
      * race. The lock is cleared on every return path. */
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
 
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
-        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+    /* #832: prefer the helper-published shader region; fall back to
+     * oplib_pool's self-allocated 256 KB scratch when the helper's
+     * v6/v7 handoff zeros the v4 shader_* fields. */
+    uint64_t base_phys = 0;
+    uint64_t base_gva  = 0;
+    if (slm_ffi_resolve_scratch_base(&base_phys, &base_gva) < 0) {
         spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
         return -1;
     }
@@ -1324,12 +1369,12 @@ int slm_runtime_dispatch_rmsnorm_simt(const void *x_cpu_in,
     }
 
     /* Scratch addresses: same slot layout as the smoke verb. */
-    uint64_t in_phys  = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
-    uint64_t in_va    = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
-    uint64_t gam_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
-    uint64_t gam_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
-    uint64_t out_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH2;
-    uint64_t out_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t in_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t in_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t gam_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t gam_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
 
     /* Stage CPU input + gamma into GPU scratch. Jetson's 1:1
      * phys/virt mapping for DRAM lets the kernel-side phys pointer
@@ -1393,9 +1438,9 @@ int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
     op_dispatch_record_attempt(SLM_GPU_OP_SWIGLU);
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
 
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
-        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+    uint64_t base_phys = 0;
+    uint64_t base_gva  = 0;
+    if (slm_ffi_resolve_scratch_base(&base_phys, &base_gva) < 0) {
         spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
         return -1;
     }
@@ -1405,12 +1450,12 @@ int slm_runtime_dispatch_swiglu_simt(const void *gate_cpu_in,
         return -1;
     }
 
-    uint64_t gate_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
-    uint64_t gate_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
-    uint64_t up_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
-    uint64_t up_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
-    uint64_t out_phys  = h->shader_phys + OPLIB_POOL_OFF_SCRATCH2;
-    uint64_t out_va    = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t gate_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t gate_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t up_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t up_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t out_phys  = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t out_va    = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
 
     memcpy((void *)(uintptr_t)gate_phys, gate_cpu_in, (size_t)bytes);
     memcpy((void *)(uintptr_t)up_phys,   up_cpu_in,   (size_t)bytes);
@@ -1485,9 +1530,9 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
     op_dispatch_record_attempt(SLM_GPU_OP_GQA_ATTN);
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
 
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
-        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+    uint64_t base_phys = 0;
+    uint64_t base_gva  = 0;
+    if (slm_ffi_resolve_scratch_base(&base_phys, &base_gva) < 0) {
         spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
         return -1;
     }
@@ -1497,15 +1542,15 @@ int slm_runtime_dispatch_gqa_attn_simt(const void *q_cpu_in,
         return -1;
     }
 
-    uint64_t q_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
-    uint64_t q_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
-    uint64_t k_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
-    uint64_t k_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
-    uint64_t v_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH2;
-    uint64_t v_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t q_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t q_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t k_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t k_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t v_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH2;
+    uint64_t v_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH2;
     /* out lives in SCRATCH0's second 4 KB sub-page. */
-    uint64_t out_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
-    uint64_t out_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
+    uint64_t out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
+    uint64_t out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0 + 0x1000ull;
 
     memcpy((void *)(uintptr_t)q_phys, q_cpu_in, (size_t)q_bytes);
     memcpy((void *)(uintptr_t)k_phys, k_cpu_in, (size_t)kv_bytes);
@@ -1576,9 +1621,9 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
     op_dispatch_record_attempt(SLM_GPU_OP_Q4K_DOT);
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
 
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
-        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+    uint64_t base_phys = 0;
+    uint64_t base_gva  = 0;
+    if (slm_ffi_resolve_scratch_base(&base_phys, &base_gva) < 0) {
         spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
         return -1;
     }
@@ -1588,10 +1633,10 @@ int slm_runtime_dispatch_q4k_dot_simt(const void *x_cpu_in,
         return -1;
     }
 
-    uint64_t x_phys   = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
-    uint64_t x_va     = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
-    uint64_t out_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH1;
-    uint64_t out_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t x_phys   = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t x_va     = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH1;
+    uint64_t out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH1;
 
     memcpy((void *)(uintptr_t)x_phys, x_cpu_in, (size_t)x_bytes);
     cache_clean_range((void *)(uintptr_t)x_phys,
@@ -1653,9 +1698,9 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
     op_dispatch_record_attempt(SLM_GPU_OP_EMBEDDING);
     irq_flags_t irq = spin_lock_irqsave(&g_gpu_dispatch_lock);
 
-    const struct ga10b_channel_handoff *h = ga10b_bringup_handoff();
-    if (h == NULL || h->shader_gpu_va == 0 || h->shader_phys == 0 ||
-        h->shader_size < OPLIB_POOL_MIN_BYTES) {
+    uint64_t base_phys = 0;
+    uint64_t base_gva  = 0;
+    if (slm_ffi_resolve_scratch_base(&base_phys, &base_gva) < 0) {
         spin_unlock_irqrestore(&g_gpu_dispatch_lock, irq);
         return -1;
     }
@@ -1667,8 +1712,8 @@ int slm_runtime_dispatch_embedding_simt(uint64_t table_gpu_va,
 
     /* Output slot in the existing scratch carve-out. SCRATCH0 has
      * worked for every smoke verb; reuse it. */
-    uint64_t out_phys = h->shader_phys + OPLIB_POOL_OFF_SCRATCH0;
-    uint64_t out_va   = h->shader_gpu_va + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t out_phys = base_phys + OPLIB_POOL_OFF_SCRATCH0;
+    uint64_t out_va   = base_gva  + OPLIB_POOL_OFF_SCRATCH0;
 
     struct operator_dispatch_args args = {
         .op_kind = SLM_GPU_OP_EMBEDDING,

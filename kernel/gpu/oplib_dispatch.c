@@ -120,11 +120,33 @@ int slm_oplib_prepare_dispatch(uint64_t inst_block_phys,
             cbuf_phys = hp->cbuf_phys;
             cbuf_cpu = (void *)(uintptr_t)hp->cbuf_phys;
         } else {
-            rc = ga10b_gmmu_alloc(inst_block_phys, 1u, 0u,
-                                  &cbuf_va, &cbuf_cpu, &cbuf_phys);
-            if (rc < 0) {
-                uart_printf("[oplib-dispatch] cbuf alloc failed: rc=%d\n", rc);
-                return -1;
+            /* #832 path: fall back to `oplib_pool`'s pre-allocated
+             * cbuf — populated during `oplib_pool_stage_to_gpu` (so
+             * `nvgpu oplib stage` must have run first). Avoids the
+             * old per-dispatch `ga10b_gmmu_alloc` slow path which
+             * (a) leaks a page per dispatch and (b) is unreliable
+             * post-kexec because the W-series FFI passes
+             * inst_block_phys=0 anyway. */
+            uint64_t pool_cbuf_va  = oplib_pool_cbuf_gpu_va();
+            uint64_t pool_cbuf_phys = oplib_pool_cbuf_phys();
+            if (pool_cbuf_va != 0 && pool_cbuf_phys != 0) {
+                cbuf_va   = pool_cbuf_va;
+                cbuf_phys = pool_cbuf_phys;
+                cbuf_cpu  = (void *)(uintptr_t)pool_cbuf_phys;
+            } else {
+                /* Last-resort slow path: ga10b_gmmu_alloc. Requires a
+                 * valid inst_block_phys, which the W-series FFI
+                 * doesn't pass today — kept for diag verbs that
+                 * supply one. */
+                rc = ga10b_gmmu_alloc(inst_block_phys, 1u, 0u,
+                                      &cbuf_va, &cbuf_cpu, &cbuf_phys);
+                if (rc < 0) {
+                    uart_printf("[oplib-dispatch] cbuf alloc failed: "
+                                "rc=%d (no helper cbuf, no oplib_pool "
+                                "cbuf, inst_block_phys=0x%lx)\n",
+                                rc, (unsigned long)inst_block_phys);
+                    return -1;
+                }
             }
         }
     }

@@ -950,6 +950,63 @@ int ga10b_gmmu_alloc(uint64_t inst_block_phys,
     return 0;
 }
 
+int ga10b_gmmu_map(uint64_t inst_block_phys,
+                   uint64_t target_phys,
+                   uint32_t n_pages,
+                   uint32_t flags,
+                   uint64_t *out_gpu_va_base)
+{
+    if (out_gpu_va_base == NULL) return -1;
+    if (n_pages == 0 || n_pages > GA10B_GMMU_MAX_ALLOC_PAGES) {
+        return -1;
+    }
+    /* target_phys must be 4 KB-aligned — the GMMU's smallest PTE
+     * granularity. A non-aligned base would cause every per-page
+     * PTE write to be off by some fraction of a page, which the
+     * GPU would happily fetch from before silently producing
+     * garbage. */
+    if ((target_phys & 4095ull) != 0u) return -1;
+
+    uint64_t pdb_phys = read_pdb_phys(inst_block_phys);
+    if (pdb_phys == 0) return -1;
+
+    /* Reserve a contiguous GPU VA range — same shape as
+     * ga10b_gmmu_alloc, but skip the per-page PMM allocation step
+     * because the caller already owns the physical buffer. */
+    uint64_t va_span = (uint64_t)n_pages * 4096ull;
+    uint64_t va_base = pop_free_extent(n_pages);
+    if (va_base == 0) {
+        if (g_va_cursor + va_span > GA10B_GMMU_VA_LIMIT) {
+            return -1;
+        }
+        va_base = g_va_cursor;
+        g_va_cursor += va_span;
+    }
+
+    /* Per page: emit a PTE pointing at the caller's contiguous
+     * physical buffer. Since target_phys is contiguous, page i's
+     * physical address is just target_phys + i*4096 — no walking
+     * needed. */
+    for (uint32_t i = 0; i < n_pages; i++) {
+        uint64_t va_i   = va_base   + (uint64_t)i * 4096ull;
+        uint64_t phys_i = target_phys + (uint64_t)i * 4096ull;
+        if (map_one_page(pdb_phys, va_i, phys_i, flags) < 0) {
+            /* PT-page allocation can fail mid-walk. We have no
+             * rollback for the PTEs already written (same gap as
+             * ga10b_gmmu_alloc; #825 tracks). Caller treats it
+             * as fatal. */
+            return -1;
+        }
+    }
+
+    /* Single dsb sy at the end — amortizes across all N pages,
+     * matches ga10b_gmmu_alloc's pattern. */
+    __asm__ volatile("dsb sy" ::: "memory");
+
+    *out_gpu_va_base = va_base;
+    return 0;
+}
+
 int ga10b_gmmu_free(uint64_t inst_block_phys,
                     uint64_t gpu_va,
                     uint32_t n_pages)
