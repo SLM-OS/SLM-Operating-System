@@ -106,6 +106,7 @@ const shell_cmd_t builtin_commands[] = {
     {"truncate", cmd_truncate, "Truncate file (truncate <path> <size>)",            false, SHELL_CAT_FILESYSTEM},
     {"wc",       cmd_wc,       "Count lines/words/bytes (wc <path>)",               false, SHELL_CAT_FILESYSTEM},
     {"write",    cmd_write,    "Write to file (write <path> <content>)",            false, SHELL_CAT_FILESYSTEM},  /* VFS locks internally */
+    {"xget-bin", cmd_xget_bin, "Direct binary download (xget-bin <path> [skip])",      false, SHELL_CAT_FILESYSTEM},
     {"xput",     cmd_xput,     "Framed upload (xput begin|chunk|status|finish|abort)", false, SHELL_CAT_FILESYSTEM},
     {"xput-bin", cmd_xput_bin, "Direct binary upload (xput-bin <path> <total>)",       false, SHELL_CAT_FILESYSTEM},
 
@@ -722,6 +723,27 @@ void shell_session_set_binary_mode(bool on)
     if (s && s->io && s->io->set_binary_mode) {
         s->io->set_binary_mode(s->io, on);
     }
+}
+
+void shell_session_write_raw(const uint8_t *buf, size_t len)
+{
+    if (!buf || len == 0) return;
+    struct shell_session *s = shell_session_current();
+    /* Backends without write_raw (UART today) can't deliver bit-exact
+     * binary — the cooked write path's CR-LF expansion would corrupt
+     * the stream. Drop silently here; callers must use
+     * shell_session_supports_write_raw() to gate before starting a
+     * binary frame so the operator sees a useful error instead of a
+     * truncated download. */
+    if (s && s->io && s->io->write_raw) {
+        s->io->write_raw(s->io, buf, len);
+    }
+}
+
+bool shell_session_supports_write_raw(void)
+{
+    struct shell_session *s = shell_session_current();
+    return s && s->io && s->io->write_raw;
 }
 
 /* ============================================================================

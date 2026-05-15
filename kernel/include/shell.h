@@ -269,4 +269,30 @@ int shell_session_read_raw(char *dst, int max_len);
  */
 void shell_session_set_binary_mode(bool on);
 
+/*
+ * Write `len` bytes verbatim through the current session's I/O
+ * backend, with no CR-LF expansion. The transport layer is still
+ * responsible for any wire-level escaping it owns — the TCP/telnet
+ * backend doubles 0xFF bytes per RFC 854 IAC stuffing. Mirror of
+ * `shell_session_read_raw` for the write direction; used by
+ * `cmd_xget-bin` to stream raw file bytes after the framing header.
+ *
+ * On backends that don't implement `write_raw` (UART, serial), the
+ * call is a silent no-op — the cooked write path's CR-LF expansion
+ * would corrupt a binary stream, and falling back to it would
+ * produce a wrong-but-plausible download that the host couldn't
+ * detect. Callers that emit binary frames must gate on
+ * `shell_session_supports_write_raw()` first and refuse to start
+ * the transfer if it returns false.
+ */
+void shell_session_write_raw(const uint8_t *buf, size_t len);
+
+/*
+ * True iff the current session's I/O backend implements `write_raw`
+ * (i.e. can deliver bit-exact binary payloads). False on UART /
+ * serial backends. Use this to gate any command that streams
+ * binary data before sending the framing header to the peer.
+ */
+bool shell_session_supports_write_raw(void);
+
 #endif /* SHELL_H */

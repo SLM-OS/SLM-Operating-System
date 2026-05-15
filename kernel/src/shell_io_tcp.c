@@ -799,6 +799,82 @@ static void tcp_write_buf(struct shell_io *io, const char *buf, size_t len)
     }
 }
 
+/*
+ * Raw-byte write: like tcp_write_buf but skips CR-LF expansion and
+ * IAC-stuffs 0xFF (per RFC 854) so binary payloads survive the
+ * telnet transport. Mirror of tcp_write_buf's wait/wedge handling
+ * — same write-timeout, same closed-session check — so callers see
+ * identical failure semantics regardless of which path they use.
+ *
+ * Worst case the wire byte count is 2× the input (every byte is
+ * 0xFF). The ring-fill loop only commits a byte if the IAC double
+ * fits, so a one-slot-free ring still makes forward progress on
+ * non-IAC bytes.
+ */
+static void tcp_write_raw_buf(struct shell_io *io,
+                              const uint8_t *buf, size_t len)
+{
+    struct tcp_shell_ctx *ctx = (struct tcp_shell_ctx *)io->ctx;
+    if (ctx->write_degraded || ctx->closed) return;
+
+    const uint64_t freq = shell_io_tcp_timer_freq();
+    const uint64_t timeout_ticks = (freq * (uint64_t)g_write_timeout_ms) / 1000ULL;
+    const uint64_t deadline = timer_get_count() + timeout_ticks;
+
+    size_t src = 0;
+    while (src < len) {
+        if (ctx->closed) return;
+
+        irq_flags_t flags = spin_lock_irqsave(&ctx->tx_lock);
+        uint32_t avail = ring_free(ctx->tx_head, ctx->tx_tail);
+
+        if (avail == 0) {
+            spin_unlock_irqrestore(&ctx->tx_lock, flags);
+            if (timer_get_count() >= deadline) {
+                tcp_write_timeout_bail(ctx, len - src);
+                return;
+            }
+            sleep_ms(TCP_SHELL_POLL_INTERVAL_MS);
+            continue;
+        }
+
+        size_t queued = 0;
+        while (src < len && queued < avail) {
+            uint8_t b = buf[src];
+            if (b == 0xFFu) {
+                /* IAC stuffing: emit 0xFF 0xFF. Both bytes have to
+                 * fit in the same enqueue or the receiver may see a
+                 * truncated escape that gets paired with the next
+                 * write's first byte. */
+                if (queued + 2 > avail) break;
+                ctx->tx_buf[ctx->tx_head & TCP_SHELL_RING_MASK] = 0xFFu;
+                ctx->tx_head = (ctx->tx_head + 1) & TCP_SHELL_RING_MASK;
+                ctx->tx_buf[ctx->tx_head & TCP_SHELL_RING_MASK] = 0xFFu;
+                ctx->tx_head = (ctx->tx_head + 1) & TCP_SHELL_RING_MASK;
+                queued += 2;
+            } else {
+                ctx->tx_buf[ctx->tx_head & TCP_SHELL_RING_MASK] = b;
+                ctx->tx_head = (ctx->tx_head + 1) & TCP_SHELL_RING_MASK;
+                queued += 1;
+            }
+            src++;
+        }
+        /* Reset tx_prev_was_cr — that flag belongs to the cooked
+         * write path's CR-LF state machine. A raw payload's last
+         * byte being 0x0D would otherwise trick the next cooked
+         * write into swallowing a legitimate following LF. */
+        ctx->tx_prev_was_cr = false;
+        spin_unlock_irqrestore(&ctx->tx_lock, flags);
+        if (queued == 0) {
+            if (timer_get_count() >= deadline) {
+                tcp_write_timeout_bail(ctx, len - src);
+                return;
+            }
+            sleep_ms(TCP_SHELL_POLL_INTERVAL_MS);
+        }
+    }
+}
+
 static void tcp_flush(struct shell_io *io)
 {
     (void)io;
@@ -1252,6 +1328,69 @@ int shell_io_tcp_test_run_read_buf_wrap(void)
     return rc;
 }
 
+/*
+ * Test-only driver for tcp_write_raw_buf's IAC stuffing
+ * (PR #837 follow-up). Pushes a payload containing 0xFF and CR
+ * bytes through the raw write path and asserts:
+ *   1. Every input 0xFF was doubled per RFC 854.
+ *   2. CR/LF/normal bytes are passed through unchanged.
+ *   3. tx_prev_was_cr is reset to false after the raw write so
+ *      it doesn't bleed into the next cooked write.
+ *
+ * Returns 0 on success, -1 on slot alloc fail, -2 on stuffing
+ * mismatch, -3 on CR-flag bleed.
+ */
+int shell_io_tcp_test_run_write_raw_iac_stuffing(void)
+{
+    struct tcp_shell_ctx *ctx = ctx_alloc();
+    if (!ctx) {
+        return -1;
+    }
+
+    ctx->tx_head = 0;
+    ctx->tx_tail = 0;
+    ctx->tx_prev_was_cr = true;  /* poisoned: a previous cooked
+                                   * write left this true. The raw
+                                   * write below must clear it. */
+    ctx->closed = false;
+    ctx->write_degraded = false;
+
+    /* Payload: 0x00, 0xFF, 0x42, 0xFF, 0xFF, 0x0D, 0x0A.
+     * Expected wire: 0x00, 0xFF 0xFF, 0x42, 0xFF 0xFF, 0xFF 0xFF,
+     *                0x0D, 0x0A  (every 0xFF doubled, CR/LF as-is). */
+    static const uint8_t payload[] = {0x00, 0xFFu, 0x42, 0xFFu,
+                                      0xFFu, 0x0Du, 0x0Au};
+    static const uint8_t expected[] = {0x00, 0xFFu, 0xFFu,
+                                       0x42,
+                                       0xFFu, 0xFFu,
+                                       0xFFu, 0xFFu,
+                                       0x0Du, 0x0Au};
+
+    tcp_write_raw_buf(&ctx->io, payload, sizeof(payload));
+
+    int rc = 0;
+    uint32_t produced = (ctx->tx_head - ctx->tx_tail) & TCP_SHELL_RING_MASK;
+    if (produced != sizeof(expected)) {
+        rc = -2;
+        goto out;
+    }
+    for (uint32_t i = 0; i < sizeof(expected); i++) {
+        uint32_t idx = (ctx->tx_tail + i) & TCP_SHELL_RING_MASK;
+        if (ctx->tx_buf[idx] != expected[i]) {
+            rc = -2;
+            goto out;
+        }
+    }
+    if (ctx->tx_prev_was_cr) {
+        rc = -3;  /* raw path leaked the CR flag back into cooked state */
+        goto out;
+    }
+
+out:
+    ctx_free(ctx);
+    return rc;
+}
+
 int shell_io_tcp_test_run_clean_close_cycle(void)
 {
     struct tcp_shell_ctx *ctx = ctx_alloc();
@@ -1359,6 +1498,7 @@ struct shell_io *shell_io_tcp_create(struct tcp_pcb *pcb)
     ctx->io.echo_enabled    = tcp_echo_enabled;
     ctx->io.read_buf        = tcp_read_buf;
     ctx->io.set_binary_mode = tcp_set_binary_mode;
+    ctx->io.write_raw       = tcp_write_raw_buf;
     ctx->io.ctx             = ctx;
 
     /* Initialize the telnet parser with our callback set. ctx->ctx
