@@ -1141,8 +1141,36 @@ int ga10b_gmmu_free(uint64_t inst_block_phys,
 #define GA10B_RAMFC_W_CONFIG               61u
 #define GA10B_RAMFC_W_INTR_NOTIFY          62u
 #define GA10B_RAMFC_W_SET_CHANNEL_INFO     63u
+/* engine_fw_magic_value (word 131) must hold 0xcafeca11 for FECS to
+ * accept the channel during ctxsw. Per nvgpu's
+ * `ga10b_ramin_set_magic_value` (~/slmos-ref/nvidia/
+ * nvgpu-hal-fifo-ramin_ga10b_fusa.c). Missing this value was the
+ * proximate cause of the 0xbadf1002 GR-register poison observed
+ * during the #834 fix-A attempt — FECS rejected the channel because
+ * the rebuild zeroed this slot. #839. */
+#define GA10B_RAMIN_W_ENGINE_FW_MAGIC      131u
+#define GA10B_RAMIN_VAL_ENGINE_FW_MAGIC    0xcafeca11u
 /* engine_wfi block (post-PDB), word 134 for the VEID field. */
 #define GA10B_RAMIN_W_ENGINE_WFI_VEID      134u
+/* Subcontext (per-VEID) PDB region — GA10B inst blocks have 64
+ * per-VEID PDB slots. GR loads the subcontext indexed by VEID and
+ * uses *that* subcontext's PDB pointer when running compute, NOT
+ * the main PDB at word 128. Layout per nvgpu's ram_in_sc_* macros
+ * in `~/slmos-ref/nvidia/nvgpu-l4t-r36.4.4-hw_ram_ga10b.h`:
+ *
+ *   - pdb_valid_long bits: 1 bit per VEID, packed 32-per-word.
+ *     VEID i's bit lives in word `166 + i/32`, bit position `i % 32`.
+ *   - Per-VEID PDB pointer: each subcontext entry is 4 words wide.
+ *     VEID i's pdb_lo is at word `168 + 4*i`, pdb_hi at `169 + 4*i`.
+ *
+ * SLM-OS only uses one subcontext today — GA10B_HELPER_SUBCTX_ID
+ * (= 1 = ASYNC veid, matches what the helper publishes via its
+ * CREATE_SUBCONTEXT call). Writing only this subcontext's slot
+ * leaves the other 63 untouched, which preserves whatever Linux
+ * had set up (e.g., subcontext 0 with a different PDB pointer for
+ * a Linux-side use case the channel may still need). */
+#define GA10B_RAMIN_W_SC_PDB_VALID_LONG_LO 166u
+#define GA10B_RAMIN_W_SC_PDB_BASE(veid)    (168u + 4u * (veid))
 
 /* PBDMA-encoded field values for a default Tegra GA10B channel
  * (chid=0, subctx=1 ASYNC veid, engine=GR rleng_id=0, intr_vec=0,
@@ -1258,14 +1286,33 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
     uart_printf("[rebuild-gmmu] fresh PDB at phys=0x%lx\n",
                 (unsigned long)pdb_phys);
 
-    /* 2. Zero the inst block (Stage 1 reservation kept the page
-     *    around but Linux may have left non-zero residue) and
-     *    write the PDB pointer at words 128-129 (byte offsets
-     *    512/516) per `ram_in_page_dir_base_lo_w()`/`_hi_w()`. */
+    /* 2. PRESERVE the inst block's existing contents — only override
+     *    the specific words SLM-OS needs to control. The original
+     *    "zero everything then write what we know" approach worked
+     *    for SLM-OS-allocated inst blocks (where everything started
+     *    at zero anyway), but is fatal when applied to a Linux-nvgpu-
+     *    allocated inst block: zeroing wipes out
+     *      - engine_fw_magic_value (word 131 = 0xcafeca11)
+     *        — FECS rejects the channel without this on ctxsw, which
+     *          produces the 0xbadf1002 GR register poison observed
+     *          during the #834 fix-A attempt.
+     *      - subcontext PDB pointers (words 168+, one per VEID)
+     *        — GR uses the subcontext indexed by VEID when running
+     *          compute; missing pointer = GR can't find page tables.
+     *      - engine_wfi_target / _ptr_hi / eng_method_buffer (132-137)
+     *        — Linux sets these per its channel config; we don't
+     *          have the values to regenerate them.
+     *
+     *    Override-only is correct for both cases. SLM-OS-allocated
+     *    inst blocks come from `alloc_zero_table_page` (already zero),
+     *    so the words we don't touch stay zero — same as before for
+     *    fields like `eng_method_buffer` that the helper doesn't set.
+     *    Linux-allocated inst blocks keep their existing setup for
+     *    those same fields.
+     *
+     *    #839: the proximate fix for #834 fix-A is the explicit
+     *    word-131 magic + subcontext-PDB write below. */
     volatile uint32_t *inst = (volatile uint32_t *)(uintptr_t)inst_block_phys;
-    for (int i = 0; i < 1024; i++) {
-        inst[i] = 0;
-    }
 
     /* Encode PDB-lo word: aperture (sys_mem_ncoh on Tegra),
      * volatile bit, ver2 page-table format, 64 KB big-page size,
@@ -1281,6 +1328,30 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
 
     inst[128] = pdb_lo_word;
     inst[129] = pdb_hi_word;
+
+    /* engine_fw_magic_value at word 131 — FECS firmware checks this
+     * to accept the channel during ctxsw. Idempotent: when the inst
+     * block was Linux-allocated, this is already set to the same
+     * value; we re-write defensively for the SLM-OS-allocated case
+     * (where the inst block started zero). */
+    inst[GA10B_RAMIN_W_ENGINE_FW_MAGIC] = GA10B_RAMIN_VAL_ENGINE_FW_MAGIC;
+
+    /* Subcontext-VEID PDB pointer — GR uses this when running
+     * compute under the channel's subcontext. We point it at the
+     * same fresh PDB as the main PDB so both PBDMA (main) and GR
+     * (subcontext) see the same page-table tree.
+     *
+     * Also OR in the subcontext-valid-long bit for our VEID. The
+     * valid_long bits are packed 32 per word starting at word 166;
+     * GA10B_HELPER_SUBCTX_ID (= 1) lives at bit 1 of word 166. We
+     * read-modify-write so other valid-long bits Linux had set are
+     * preserved (Linux may have multiple subcontexts active for
+     * its own channel). */
+    uint32_t sc_base = GA10B_RAMIN_W_SC_PDB_BASE(GA10B_HELPER_SUBCTX_ID);
+    inst[sc_base + 0] = pdb_lo_word;
+    inst[sc_base + 1] = pdb_hi_word;
+    inst[GA10B_RAMIN_W_SC_PDB_VALID_LONG_LO] |=
+        (1u << GA10B_HELPER_SUBCTX_ID);
 
     /* 2b. Populate RAMFC fields PBDMA reads when fetching submits
      *    for this channel. Without these, PBDMA finds gpfifo_phys
@@ -1330,10 +1401,16 @@ int ga10b_gmmu_rebuild_for_handoff(uint64_t inst_block_phys,
 
     cache_clean_range((void *)(uintptr_t)inst_block_phys, 4096);
 
-    uart_printf("[rebuild-gmmu] inst_block@0x%lx written:\n",
+    uart_printf("[rebuild-gmmu] inst_block@0x%lx written (preserving "
+                "Linux-set engine_fw_magic + non-target subcontexts):\n",
                 (unsigned long)inst_block_phys);
-    uart_printf("[rebuild-gmmu]   PDB_lo=0x%08x PDB_hi=0x%08x\n",
-                (unsigned)pdb_lo_word, (unsigned)pdb_hi_word);
+    uart_printf("[rebuild-gmmu]   PDB_lo=0x%08x PDB_hi=0x%08x "
+                "(main + subcontext VEID=%u at word %u)\n",
+                (unsigned)pdb_lo_word, (unsigned)pdb_hi_word,
+                (unsigned)GA10B_HELPER_SUBCTX_ID, (unsigned)sc_base);
+    uart_printf("[rebuild-gmmu]   engine_fw_magic=0x%08x sc_valid_long=0x%08x\n",
+                (unsigned)inst[GA10B_RAMIN_W_ENGINE_FW_MAGIC],
+                (unsigned)inst[GA10B_RAMIN_W_SC_PDB_VALID_LONG_LO]);
     uart_printf("[rebuild-gmmu]   gp_base=0x%08x gp_base_hi=0x%08x "
                 "(entries=%u → log2=%u)\n",
                 (unsigned)gp_base_lo_val, (unsigned)gp_base_hi_val,
