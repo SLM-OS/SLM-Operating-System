@@ -274,6 +274,11 @@ class Corpus:
     # dataclass would be dead weight here. Stored so callers that DO care
     # (e.g. inspection tools) can introspect without re-parsing the file.
     regions: list[dict] = field(default_factory=list)
+    # O(1) seq -> OpEntry index, kept in sync with `ops` by load and
+    # append_op. Avoids the O(N) linear scan find_op() used to do, which
+    # showed up in profiles once a single append_op started doing a
+    # uniqueness check on every captured seq.
+    _by_seq: dict[int, OpEntry] = field(default_factory=dict, repr=False)
 
     @property
     def next_seq(self) -> int:
@@ -290,10 +295,7 @@ class Corpus:
         return last
 
     def find_op(self, seq: int) -> Optional[OpEntry]:
-        for op in self.ops:
-            if op.seq == seq:
-                return op
-        return None
+        return self._by_seq.get(seq)
 
 
 def load(path: os.PathLike | str) -> Corpus:
@@ -354,7 +356,9 @@ def load(path: os.PathLike | str) -> Corpus:
     # Sort ops by seq so callers iterating Corpus.ops get them in order
     # regardless of file order. Uniqueness was checked above.
     ops.sort(key=lambda o: o.seq)
-    return Corpus(path=p, header=header, ops=ops, trailer=trailer, regions=regions)
+    by_seq = {op.seq: op for op in ops}
+    return Corpus(path=p, header=header, ops=ops, trailer=trailer,
+                  regions=regions, _by_seq=by_seq)
 
 
 def init(path: os.PathLike | str, header: Header) -> Corpus:
@@ -391,6 +395,7 @@ def append_op(corpus: Corpus, op: OpEntry) -> None:
         f.write("\n")
     # Keep corpus.ops sorted by seq so iteration order matches load order.
     bisect.insort(corpus.ops, op, key=lambda o: o.seq)
+    corpus._by_seq[op.seq] = op
 
 
 def append_trailer(corpus: Corpus, trailer: Trailer) -> None:

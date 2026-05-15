@@ -108,6 +108,33 @@ class CorpusValidationTests(unittest.TestCase):
             # ops stay sorted regardless of insertion order
             self.assertEqual([o.seq for o in corpus.ops], [1, 2, 3])
 
+    def test_append_op_writes_at_eof_in_call_order(self) -> None:
+        # Lock in the on-disk semantics: append_op always writes at the
+        # end of the file, in the order it's called. The in-memory
+        # Corpus.ops list is kept sorted by seq, but the file is NOT —
+        # load() handles unsorted files. This is load-bearing because
+        # the C-side QEMU stub does the same EOF-append; co-mingling
+        # disagreeing on-disk orderings would corrupt the corpus.
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "corpus.jsonl"
+            corpus = corpus_mod.init(p, make_header())
+            corpus_mod.append_op(corpus, make_write(5))
+            corpus_mod.append_op(corpus, make_write(3))
+            corpus_mod.append_op(corpus, make_write(7))
+            # Raw on-disk order should be header, 5, 3, 7.
+            with p.open() as f:
+                disk_seqs = []
+                for line in f:
+                    obj = json.loads(line)
+                    if obj.get("type") == "op":
+                        disk_seqs.append(obj["seq"])
+            self.assertEqual(disk_seqs, [5, 3, 7])
+            # But Corpus.ops is sorted.
+            self.assertEqual([o.seq for o in corpus.ops], [3, 5, 7])
+            # And a fresh load sorts the unsorted file.
+            reloaded = corpus_mod.load(p)
+            self.assertEqual([o.seq for o in reloaded.ops], [3, 5, 7])
+
     def test_value_length_must_match_size(self) -> None:
         bad = OpEntry(
             seq=1, bar=4, offset=0, size=4, dir="write",
