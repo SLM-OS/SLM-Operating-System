@@ -2705,13 +2705,15 @@ int ga10b_dispatch_v7_pipeline_inline(struct ga10b_bringup *b,
         const struct ga10b_pipeline_op_v7 *opdbg = &ops_v7[i];
         uart_printf("[GA10B-P8-v7-DBG]   op[%lu] shader_gpu_va=0x%lx "
                     "cbuf_gpu_va=0x%lx qmd_gpu_va=0x%lx output_phys=0x%lx "
-                    "reg_v=%lu\n",
+                    "reg_v=%lu shader_phys=0x%lx shader_size=%lu\n",
                     (unsigned long)i,
                     (unsigned long)opdbg->shader_gpu_va,
                     (unsigned long)opdbg->cbuf_gpu_va,
                     (unsigned long)opdbg->qmd_gpu_va,
                     (unsigned long)opdbg->output_phys,
-                    (unsigned long)opdbg->register_count_v);
+                    (unsigned long)opdbg->register_count_v,
+                    (unsigned long)opdbg->shader_phys,
+                    (unsigned long)opdbg->shader_size_bytes);
     }
 
     /* Phase 1: queue all N kernel-dispatch entries. */
