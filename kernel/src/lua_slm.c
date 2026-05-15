@@ -4062,6 +4062,17 @@ static int l_camera_preprocess_mnist(lua_State *L) {
     int  invert_arg            = invert_explicit      ? lua_toboolean(L, 6) : 0;
     int  center_crop_arg       = center_crop_explicit ? lua_toboolean(L, 7) : 0;
 
+    /* Optional `normalize_mode` (8th arg) — see CAMERA_NORMALIZE_*
+     * in camera.h. Default NONE. Modes 1..3 require a stored flat-
+     * field reference (capture one via slm.camera.flatfield_capture)
+     * and only work when center_crop=true. */
+    lua_Integer normalize_mode = luaL_optinteger(L, 8,
+                                                 (lua_Integer)CAMERA_NORMALIZE_NONE);
+    if (normalize_mode < 0 || normalize_mode >= (lua_Integer)CAMERA_NORMALIZE_COUNT) {
+        return luaL_error(L, "normalize_mode out of range [0, %d)",
+                          (int)CAMERA_NORMALIZE_COUNT);
+    }
+
     if (frame_id != 0) {
         lua_pushnil(L);
         lua_pushinteger(L, -1);
@@ -4096,6 +4107,7 @@ static int l_camera_preprocess_mnist(lua_State *L) {
                                      frame.width, frame.height,
                                      frame.bayer, frame.format,
                                      invert, center_crop,
+                                     (uint32_t)normalize_mode,
                                      out, sizeof(out));
     if (rc != 0) {
         lua_pushnil(L);
@@ -4106,11 +4118,107 @@ static int l_camera_preprocess_mnist(lua_State *L) {
     return 1;
 }
 
+/* =============================================================================
+ * Flat-field calibration bindings
+ *
+ *   slm.camera.flatfield_capture(name)
+ *       Capture one frame from `name` (default "imx219-0"; pass "mock"
+ *       to seed a degenerate uniform reference for testing) and store
+ *       its per-block green-channel sums as the flat-field reference.
+ *       Returns 0 on success or a negative rc.
+ *
+ *   slm.camera.flatfield_clear()
+ *       Drop the stored reference. Subsequent FLATFIELD_* preprocess
+ *       calls return -3 until another capture lands.
+ *
+ *   slm.camera.flatfield_valid()
+ *       Boolean: true if a reference is currently stored.
+ *
+ *   slm.camera.flatfield_get(i, j)
+ *       Read one cell of the stored reference. Returns the green-
+ *       channel sum (integer 0..61710 for the centre-crop geometry)
+ *       or nil if (i, j) out of range or no reference stored.
+ *
+ *   slm.camera.flatfield_anchor(mode)
+ *       Read the per-mode anchor scalar. Useful for plotting how
+ *       different anchor choices change the corrected output's
+ *       reference brightness. Returns nil if no reference stored.
+ *
+ *   slm.camera.NORMALIZE_NONE / FLATFIELD_CENTER / FLATFIELD_MAX /
+ *   FLATFIELD_MID_EDGE
+ *       Constants matching the CAMERA_NORMALIZE_* enum, exposed on
+ *       the namespace so Lua callers don't hard-code numbers.
+ * ========================================================================== */
+
+static int l_camera_flatfield_capture(lua_State *L) {
+    if (!L) return 0;
+    const char *name = luaL_optstring(L, 1, "imx219-0");
+    struct camera_frame frame;
+    int rc = camera_open(name, &frame);
+    if (rc != 0) {
+        lua_pushinteger(L, rc);
+        return 1;
+    }
+    rc = camera_flatfield_capture(frame.data, frame.size,
+                                  frame.width, frame.height,
+                                  frame.bayer, frame.format);
+    lua_pushinteger(L, rc);
+    return 1;
+}
+
+static int l_camera_flatfield_clear(lua_State *L) {
+    if (!L) return 0;
+    camera_flatfield_clear();
+    return 0;
+}
+
+static int l_camera_flatfield_valid(lua_State *L) {
+    if (!L) return 0;
+    lua_pushboolean(L, camera_flatfield_is_valid() ? 1 : 0);
+    return 1;
+}
+
+static int l_camera_flatfield_get(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer i = luaL_checkinteger(L, 1);
+    lua_Integer j = luaL_checkinteger(L, 2);
+    if (i < 0 || j < 0
+     || i >= (lua_Integer)CAMERA_FLATFIELD_DIM
+     || j >= (lua_Integer)CAMERA_FLATFIELD_DIM) {
+        lua_pushnil(L);
+        return 1;
+    }
+    uint32_t v = camera_flatfield_get((uint32_t)i, (uint32_t)j);
+    if (v == UINT32_MAX) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, (lua_Integer)v);
+    }
+    return 1;
+}
+
+static int l_camera_flatfield_anchor(lua_State *L) {
+    if (!L) return 0;
+    lua_Integer mode = luaL_checkinteger(L, 1);
+    uint32_t v = camera_flatfield_anchor((uint32_t)mode);
+    if (v == UINT32_MAX) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, (lua_Integer)v);
+    }
+    return 1;
+}
+
 static const luaL_Reg slm_camera_lib[] = {
-    {"open",             l_camera_open},
-    {"capture",          l_camera_capture},
-    {"close",            l_camera_close},
-    {"preprocess_mnist", l_camera_preprocess_mnist},
+    {"open",                l_camera_open},
+    {"capture",             l_camera_capture},
+    {"close",               l_camera_close},
+    {"preprocess_mnist",    l_camera_preprocess_mnist},
+    {"flatfield_capture",   l_camera_flatfield_capture},
+    {"flatfield_clear",     l_camera_flatfield_clear},
+    {"flatfield_valid",     l_camera_flatfield_valid},
+    {"flatfield_get",       l_camera_flatfield_get},
+    {"flatfield_anchor",    l_camera_flatfield_anchor},
     {NULL, NULL}
 };
 
@@ -4186,13 +4294,25 @@ static int l_camera_imx219_get_exposure(lua_State *L) {
     return 1;
 }
 
+/* Lua wrapper around imx219_session_close (see imx219.h for the
+ * channel-leak caveat). Returns true if the session was open and
+ * is now closed, false if it was already closed. */
+static int l_camera_imx219_session_reset(lua_State *L) {
+    if (!L) return 0;
+    bool was_open = imx219_session_is_open();
+    imx219_session_close();
+    lua_pushboolean(L, was_open ? 1 : 0);
+    return 1;
+}
+
 /* Admin-only camera bindings appended onto the slm.camera namespace
  * when the Lua state is opened in admin mode. */
 static const luaL_Reg slm_camera_lib_admin[] = {
-    {"imx219_set_gain",     l_camera_imx219_set_gain},
-    {"imx219_get_gain",     l_camera_imx219_get_gain},
-    {"imx219_set_exposure", l_camera_imx219_set_exposure},
-    {"imx219_get_exposure", l_camera_imx219_get_exposure},
+    {"imx219_set_gain",       l_camera_imx219_set_gain},
+    {"imx219_get_gain",       l_camera_imx219_get_gain},
+    {"imx219_set_exposure",   l_camera_imx219_set_exposure},
+    {"imx219_get_exposure",   l_camera_imx219_get_exposure},
+    {"imx219_session_reset",  l_camera_imx219_session_reset},
     {NULL, NULL}
 };
 
@@ -4358,6 +4478,19 @@ static void lua_push_slm_library(lua_State *L, bool admin)
             lua_setfield(L, -2, r->name);
         }
     }
+    /* Normalize-mode constants — exported on every surface so safe
+     * builds can still pass the right enum to preprocess_mnist when
+     * an admin previously captured a flat field. */
+    lua_pushinteger(L, (lua_Integer)CAMERA_NORMALIZE_NONE);
+    lua_setfield(L, -2, "NORMALIZE_NONE");
+    lua_pushinteger(L, (lua_Integer)CAMERA_NORMALIZE_FLATFIELD_CENTER);
+    lua_setfield(L, -2, "FLATFIELD_CENTER");
+    lua_pushinteger(L, (lua_Integer)CAMERA_NORMALIZE_FLATFIELD_MAX);
+    lua_setfield(L, -2, "FLATFIELD_MAX");
+    lua_pushinteger(L, (lua_Integer)CAMERA_NORMALIZE_FLATFIELD_MID_EDGE);
+    lua_setfield(L, -2, "FLATFIELD_MID_EDGE");
+    lua_pushinteger(L, (lua_Integer)CAMERA_FLATFIELD_DIM);
+    lua_setfield(L, -2, "FLATFIELD_DIM");
     lua_setfield(L, -2, "camera");
 
     if (admin) {

@@ -115,34 +115,37 @@ static void test_camera_preprocess_bad_args(void)
     /* NULL guards. */
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         NULL, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, false, false,
+        CAMERA_FORMAT_RAW10_PACKED, false, false, CAMERA_NORMALIZE_NONE,
         dummy_out, sizeof(dummy_out)));
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, false, false, NULL, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, CAMERA_NORMALIZE_NONE, NULL, sizeof(dummy_out)));
 
     /* out_capacity too small. */
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, false, false, dummy_out, CAMERA_MNIST_OUT_BYTES - 1u));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, CAMERA_NORMALIZE_NONE, dummy_out, CAMERA_MNIST_OUT_BYTES - 1u));
 
     /* Wrong geometry — only 1640x1232 supported today. */
     TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 640u, 480u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, false, false, dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, CAMERA_NORMALIZE_NONE,
+        dummy_out, sizeof(dummy_out)));
     TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_GRBG,
-        CAMERA_FORMAT_RAW10_PACKED, false, false, dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, CAMERA_NORMALIZE_NONE,
+        dummy_out, sizeof(dummy_out)));
 
     /* Unknown format — must reject before reading data. */
     TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        99u, false, false, dummy_out, sizeof(dummy_out)));
+        99u, false, false, CAMERA_NORMALIZE_NONE, dummy_out, sizeof(dummy_out)));
 
     /* Right geometry but data_len smaller than the frame requires. */
     TEST_ASSERT_EQUAL_INT(-1, camera_preprocess_mnist(
         dummy_in, sizeof(dummy_in), 1640u, 1232u, CAMERA_BAYER_RGGB,
-        CAMERA_FORMAT_RAW10_PACKED, false, false, dummy_out, sizeof(dummy_out)));
+        CAMERA_FORMAT_RAW10_PACKED, false, false, CAMERA_NORMALIZE_NONE,
+        dummy_out, sizeof(dummy_out)));
 }
 
 /*
@@ -166,6 +169,7 @@ static void test_camera_preprocess_mock_first_pixel(void)
                                      frame.bayer, frame.format,
                                      /*invert=*/false,
                                      /*center_crop=*/false,
+                                     CAMERA_NORMALIZE_NONE,
                                      out, sizeof(out));
     TEST_ASSERT_EQUAL_INT(0, rc);
 
@@ -216,13 +220,13 @@ static void test_camera_preprocess_t_r16_matches_raw10(void)
     TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
         frame.data, frame.size, frame.width, frame.height,
         frame.bayer, CAMERA_FORMAT_RAW10_PACKED,
-        /*invert=*/false, /*center_crop=*/false,
+        /*invert=*/false, /*center_crop=*/false, CAMERA_NORMALIZE_NONE,
         out_raw10, sizeof(out_raw10)));
     TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
         t_r16_synth_buffer, sizeof(t_r16_synth_buffer),
         frame.width, frame.height, frame.bayer,
         CAMERA_FORMAT_T_R16,
-        /*invert=*/false, /*center_crop=*/false,
+        /*invert=*/false, /*center_crop=*/false, CAMERA_NORMALIZE_NONE,
         out_t_r16, sizeof(out_t_r16)));
 
     for (uint32_t i = 0; i < CAMERA_MNIST_OUT_BYTES; i++) {
@@ -257,11 +261,13 @@ static void test_camera_preprocess_invert_flips_polarity(void)
         frame.data, frame.size, frame.width, frame.height,
         frame.bayer, frame.format,
         /*invert=*/false, /*center_crop=*/false,
+        CAMERA_NORMALIZE_NONE,
         out_norm, sizeof(out_norm)));
     TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
         frame.data, frame.size, frame.width, frame.height,
         frame.bayer, frame.format,
         /*invert=*/true,  /*center_crop=*/false,
+        CAMERA_NORMALIZE_NONE,
         out_inv,  sizeof(out_inv)));
 
     /* For every cell, normal_fp32 + inverted_fp32 ≈ 1.0. Decode the
@@ -314,11 +320,13 @@ static void test_camera_preprocess_center_crop_changes_output(void)
         frame.data, frame.size, frame.width, frame.height,
         frame.bayer, frame.format,
         /*invert=*/false, /*center_crop=*/false,
+        CAMERA_NORMALIZE_NONE,
         out_full, sizeof(out_full)));
     TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
         frame.data, frame.size, frame.width, frame.height,
         frame.bayer, frame.format,
         /*invert=*/false, /*center_crop=*/true,
+        CAMERA_NORMALIZE_NONE,
         out_crop, sizeof(out_crop)));
 
     bool any_differ = false;
@@ -396,6 +404,130 @@ static void test_imx219_runtime_gain_exposure_stubs(void)
     TEST_ASSERT_EQUAL_INT(-1, imx219_set_runtime_exposure(0u));
     TEST_ASSERT_EQUAL_HEX16(0u, imx219_get_runtime_exposure());
 #endif
+}
+
+static void test_camera_flatfield_roundtrip(void)
+{
+    if (!mock_frame_embedded()) {
+        TEST_IGNORE_MESSAGE("MOCK_CAMERA_FRAME=OFF — mock backend skipped");
+    }
+    struct camera_frame frame;
+    TEST_ASSERT_EQUAL_INT(0, camera_open("mock", &frame));
+
+    /* No reference yet → preprocess in a FLATFIELD_* mode must error. */
+    uint8_t out[CAMERA_MNIST_OUT_BYTES];
+    camera_flatfield_clear();
+    TEST_ASSERT_FALSE(camera_flatfield_is_valid());
+    TEST_ASSERT_EQUAL_INT(-3, camera_preprocess_mnist(
+        frame.data, frame.size, frame.width, frame.height,
+        frame.bayer, frame.format,
+        /*invert=*/false, /*center_crop=*/true,
+        CAMERA_NORMALIZE_FLATFIELD_CENTER,
+        out, sizeof(out)));
+
+    /* Capture and verify anchors are populated. */
+    TEST_ASSERT_EQUAL_INT(0, camera_flatfield_capture(
+        frame.data, frame.size, frame.width, frame.height,
+        frame.bayer, frame.format));
+    TEST_ASSERT_TRUE(camera_flatfield_is_valid());
+    uint32_t anchor_c   = camera_flatfield_anchor(CAMERA_NORMALIZE_FLATFIELD_CENTER);
+    uint32_t anchor_max = camera_flatfield_anchor(CAMERA_NORMALIZE_FLATFIELD_MAX);
+    TEST_ASSERT_TRUE(anchor_max >= anchor_c);
+    TEST_ASSERT_TRUE(anchor_max > 0u);
+
+    /* Flat-field divide must require center_crop=true (the geometry
+     * the reference was captured at). */
+    TEST_ASSERT_EQUAL_INT(-2, camera_preprocess_mnist(
+        frame.data, frame.size, frame.width, frame.height,
+        frame.bayer, frame.format,
+        /*invert=*/false, /*center_crop=*/false,
+        CAMERA_NORMALIZE_FLATFIELD_CENTER,
+        out, sizeof(out)));
+
+    /* With the reference loaded, FLATFIELD_MAX preprocess of the
+     * same frame should succeed without errors. The output values
+     * after divide+anchor land back near the original sum/denom
+     * pattern (they would be exactly equal under uniform input;
+     * they're approximately equal for a real frame because we
+     * divide each block's sum by itself, scaled by the global max).
+     */
+    TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
+        frame.data, frame.size, frame.width, frame.height,
+        frame.bayer, frame.format,
+        /*invert=*/false, /*center_crop=*/true,
+        CAMERA_NORMALIZE_FLATFIELD_MAX,
+        out, sizeof(out)));
+
+    /* Clear drops the reference. Both anchor and get return
+     * UINT32_MAX as the "no data" sentinel. */
+    camera_flatfield_clear();
+    TEST_ASSERT_FALSE(camera_flatfield_is_valid());
+    TEST_ASSERT_EQUAL_INT(UINT32_MAX,
+        camera_flatfield_anchor(CAMERA_NORMALIZE_FLATFIELD_CENTER));
+    TEST_ASSERT_EQUAL_INT(UINT32_MAX, camera_flatfield_get(0u, 0u));
+}
+
+/*
+ * Test: under perfectly-uniform input, the flat-field divide path
+ * must reproduce the same per-pixel output as the no-divide path.
+ * Captures a synthetic uniform frame (every 16-bit T_R16 sample =
+ * 0x4000), uses it as both the reference and the live input, then
+ * asserts every output byte matches the no-divide baseline. This
+ * is the load-bearing arithmetic identity: corrected = sum × ref / ref
+ * = sum, renormalized to the same denominator.
+ */
+static void test_camera_flatfield_uniform_input_is_identity(void)
+{
+    /* Reuse the existing 4 MB BSS T_R16 buffer that the
+     * t_r16_matches_raw10 test already uses — keeps the test
+     * suite's static footprint flat and sidesteps both the
+     * mid-test PMM-failure case and the leak-on-assert-abort
+     * case the heap-alloc shape had. */
+    const uint32_t W = 1640u, H = 1232u;
+    const size_t   n = sizeof(t_r16_synth_buffer);
+    /* Fill with high-byte=0x40 (mid-grey-ish). Low byte irrelevant —
+     * preprocess only reads the high 8 bits. */
+    __builtin_memset(t_r16_synth_buffer, 0, n);
+    for (size_t k = 1; k < n; k += 2) {
+        t_r16_synth_buffer[k] = 0x40u;
+    }
+
+    uint8_t out_none[CAMERA_MNIST_OUT_BYTES];
+    uint8_t out_ff  [CAMERA_MNIST_OUT_BYTES];
+
+    /* Baseline: NONE mode. */
+    camera_flatfield_clear();
+    TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
+        t_r16_synth_buffer, n, W, H,
+        CAMERA_BAYER_RGGB, CAMERA_FORMAT_T_R16,
+        /*invert=*/false, /*center_crop=*/true,
+        CAMERA_NORMALIZE_NONE, out_none, sizeof(out_none)));
+
+    /* Capture the same buffer as the flat-field reference, then
+     * preprocess it again under each FLATFIELD_* mode. Output must
+     * be byte-identical to the NONE baseline. */
+    TEST_ASSERT_EQUAL_INT(0, camera_flatfield_capture(
+        t_r16_synth_buffer, n, W, H,
+        CAMERA_BAYER_RGGB, CAMERA_FORMAT_T_R16));
+    TEST_ASSERT_TRUE(camera_flatfield_is_valid());
+
+    const uint32_t modes[] = {
+        CAMERA_NORMALIZE_FLATFIELD_CENTER,
+        CAMERA_NORMALIZE_FLATFIELD_MAX,
+        CAMERA_NORMALIZE_FLATFIELD_MID_EDGE,
+    };
+    for (size_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m++) {
+        TEST_ASSERT_EQUAL_INT(0, camera_preprocess_mnist(
+            t_r16_synth_buffer, n, W, H,
+            CAMERA_BAYER_RGGB, CAMERA_FORMAT_T_R16,
+            /*invert=*/false, /*center_crop=*/true,
+            modes[m], out_ff, sizeof(out_ff)));
+        for (uint32_t i = 0; i < CAMERA_MNIST_OUT_BYTES; i++) {
+            TEST_ASSERT_EQUAL_UINT8(out_none[i], out_ff[i]);
+        }
+    }
+
+    camera_flatfield_clear();
 }
 
 /* ---- Tegra HSI2C driver ----
@@ -1141,6 +1273,8 @@ int test_suite_camera(void)
     RUN_TEST(test_camera_preprocess_center_crop_changes_output);
     RUN_TEST(test_camera_open_populates_recommended_defaults);
     RUN_TEST(test_imx219_runtime_gain_exposure_stubs);
+    RUN_TEST(test_camera_flatfield_roundtrip);
+    RUN_TEST(test_camera_flatfield_uniform_input_is_identity);
     RUN_TEST(test_tegra_i2c_stubs_return_minus_one);
     RUN_TEST(test_tegra_i2c_cam_bus_wiring);
     RUN_TEST(test_tegra_i2c_api_arg_validation);

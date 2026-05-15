@@ -43,6 +43,8 @@ extern const unsigned char demo_camera_heatmap_lua_start[];
 extern const unsigned char demo_camera_heatmap_lua_end[];
 extern const unsigned char demo_camera_sweep_lua_start[];
 extern const unsigned char demo_camera_sweep_lua_end[];
+extern const unsigned char demo_camera_flatfield_lua_start[];
+extern const unsigned char demo_camera_flatfield_lua_end[];
 
 int demo_init(void)
 {
@@ -147,6 +149,18 @@ int demo_init(void)
                             (size_t)(demo_camera_sweep_lua_end -
                                      demo_camera_sweep_lua_start));
         littlefs_file_close(mnt, fcs);
+    }
+
+    /* IMX219 flat-field calibration — capture a uniform background
+     * as a per-block reference, then sweep the per-mode normalize
+     * options on a digit. */
+    int fcf = littlefs_file_open(mnt, "/camera_flatfield.lua",
+                                 LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+    if (fcf >= 0) {
+        littlefs_file_write(mnt, fcf, demo_camera_flatfield_lua_start,
+                            (size_t)(demo_camera_flatfield_lua_end -
+                                     demo_camera_flatfield_lua_start));
+        littlefs_file_close(mnt, fcf);
     }
 
     /* #64: boot-time model preload config. One model name per line.

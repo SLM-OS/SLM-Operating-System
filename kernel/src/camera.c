@@ -44,6 +44,48 @@ extern const uint8_t mock_camera_frame_end[]   __attribute__((weak));
 #define MNIST_BLOCK_FULL   44u   /* 28 * 44 == 1232 (full frame height) */
 #define MNIST_BLOCK_HALF   22u   /* 28 * 22 == 616  (centre-crop mode)  */
 
+/* Flat-field reference. Captured once via camera_flatfield_capture
+ * with the same centre-crop geometry preprocess uses, then divided
+ * out per-block from subsequent inputs to flatten lens vignette.
+ * Storage is small (~3 KB) because it's at MNIST-block resolution,
+ * not source-pixel resolution.
+ *
+ * Single-task contract: every read and write of g_flatfield comes
+ * from the shell task (camera_flatfield_capture/clear via Lua,
+ * camera_preprocess_mnist via the inference path that the same
+ * shell task drives). No locking — if anyone moves preprocess to a
+ * worker task in the future they must add one, otherwise a racing
+ * re-capture can hand out a torn (valid=true, anchor_*=stale) view. */
+_Static_assert(MNIST_DIM == CAMERA_FLATFIELD_DIM,
+    "Flat-field grid must match MNIST output grid");
+static struct {
+    bool     valid;
+    uint32_t block[CAMERA_FLATFIELD_DIM][CAMERA_FLATFIELD_DIM];
+    uint32_t anchor_center;     /* avg of central 2×2 blocks */
+    uint32_t anchor_max;        /* global max block sum */
+    uint32_t anchor_mid_edge;   /* avg of blocks at half-radius from centre */
+} g_flatfield;
+
+/* Anchor-block coordinates, derived from CAMERA_FLATFIELD_DIM so a
+ * future grid-size change doesn't silently mean something different.
+ * CENTER_LO/HI are the two indices straddling the grid's geometric
+ * centre (DIM-1)/2 = 13.5 for DIM=28). MID_NEAR / MID_FAR are the
+ * quarter-radius cardinal points from the centre row/column. */
+#define FF_CENTER_LO  ((CAMERA_FLATFIELD_DIM / 2u) - 1u)   /* 13 */
+#define FF_CENTER_HI  ( CAMERA_FLATFIELD_DIM / 2u)         /* 14 */
+#define FF_MID_NEAR   ( CAMERA_FLATFIELD_DIM / 4u)         /*  7 */
+#define FF_MID_FAR    ((CAMERA_FLATFIELD_DIM * 3u) / 4u)   /* 21 */
+
+/* Below this raw block sum the per-block reference is dominated by
+ * sensor noise (heavy-vignette corners can read near-zero), so the
+ * divide path passes the live sample through uncorrected rather
+ * than amplifying noise into a wild "corrected" value. Threshold
+ * picked empirically against blank-paper captures on the wide-angle
+ * IMX219 module — corners read ~30-150 there, so 64 stays clear of
+ * the legitimate corner-block range while still rejecting genuine
+ * dead-pixel / lens-cap captures. */
+#define FF_REF_NOISE_FLOOR  64u
+
 /* Geometry invariants. Both block sizes must be even (preserves Bayer
  * row phase + identical green-sample count per row), and the centred
  * crop offsets must be even (preserves RGGB column phase). Numbers
@@ -177,6 +219,51 @@ int camera_open(const char *name, struct camera_frame *out)
     return -1;
 }
 
+/* Sum the green-channel (RGGB) high-8-bit samples in one MNIST
+ * block of the source frame at logical (i, j). Pure block-level
+ * helper — caller owns the geometry / crop math. Inlined into both
+ * preprocess and flat-field-capture so the two paths produce
+ * byte-identical sums and the divide is mathematically cancellable
+ * under uniform illumination. */
+static inline uint32_t green_block_sum(const uint8_t *data,
+                                       uint32_t       format,
+                                       uint32_t       i,
+                                       uint32_t       j,
+                                       uint32_t       mnist_block,
+                                       uint32_t       crop_x_off,
+                                       uint32_t       crop_y_off)
+{
+    uint32_t r0  = i * mnist_block + crop_y_off;
+    uint32_t c0  = j * mnist_block + crop_x_off;
+    uint32_t sum = 0;
+    for (uint32_t dy = 0; dy < mnist_block; dy++) {
+        uint32_t r = r0 + dy;
+        /* RGGB green pixels: (r%2==0, c%2==1) ∪ (r%2==1, c%2==0).
+         * Pick starting column phase from r's parity, stride 2. */
+        uint32_t c_start = c0 + ((r & 1u) ? 0u : 1u);
+        for (uint32_t c = c_start; c < c0 + mnist_block; c += 2u) {
+            sum += pixel_hi8(data, r * MOCK_FRAME_W + c, format);
+        }
+    }
+    return sum;
+}
+
+/* Pick the anchor reference value for a given normalize mode.
+ * Returns UINT32_MAX if no reference is stored or the mode isn't
+ * a FLATFIELD_* mode (matches camera_flatfield_get's sentinel
+ * convention; lets callers tell "no data" from a legitimate zero
+ * anchor on a fully-dark reference). */
+static uint32_t flatfield_anchor_for(uint32_t mode)
+{
+    if (!g_flatfield.valid) return UINT32_MAX;
+    switch (mode) {
+    case CAMERA_NORMALIZE_FLATFIELD_CENTER:   return g_flatfield.anchor_center;
+    case CAMERA_NORMALIZE_FLATFIELD_MAX:      return g_flatfield.anchor_max;
+    case CAMERA_NORMALIZE_FLATFIELD_MID_EDGE: return g_flatfield.anchor_mid_edge;
+    default: return UINT32_MAX;
+    }
+}
+
 int camera_preprocess_mnist(const uint8_t *data,
                             size_t         data_len,
                             uint32_t       width,
@@ -185,6 +272,7 @@ int camera_preprocess_mnist(const uint8_t *data,
                             uint32_t       format,
                             bool           invert,
                             bool           center_crop,
+                            uint32_t       normalize_mode,
                             uint8_t       *out_bytes,
                             size_t         out_capacity)
 {
@@ -208,6 +296,24 @@ int camera_preprocess_mnist(const uint8_t *data,
     }
     if (data_len < min_bytes) return -1;
 
+    if (normalize_mode >= CAMERA_NORMALIZE_COUNT) return -2;
+    bool use_flatfield = (normalize_mode != CAMERA_NORMALIZE_NONE);
+    /* Flat-field normalization only makes sense for the center-crop
+     * geometry — that's the only one the reference is captured at. */
+    if (use_flatfield && !center_crop) return -2;
+    uint32_t anchor = 0u;
+    if (use_flatfield) {
+        if (!g_flatfield.valid) return -3;
+        anchor = flatfield_anchor_for(normalize_mode);
+        /* The two upstream guards (mode < COUNT and g_flatfield.valid)
+         * make UINT32_MAX unreachable today. Keep the check as
+         * defense-in-depth so a future refactor that drops one of
+         * them surfaces here instead of later as a wild divide. A
+         * legitimate anchor of 0 (fully-dark reference) is fine —
+         * the per-block divide skips via FF_REF_NOISE_FLOOR. */
+        if (anchor == UINT32_MAX) return -2;
+    }
+
     /* Crop geometry is selected by center_crop. Full-frame mode
      * matches the legacy contract: cover the whole 1232-tall frame
      * (Y-offset 0) with 28 × 44-pixel blocks. Centre-crop mode uses
@@ -226,36 +332,41 @@ int camera_preprocess_mnist(const uint8_t *data,
     const uint32_t denom            = green_per_block * 255u;
 
     for (uint32_t i = 0; i < MNIST_DIM; i++) {
-        uint32_t r0 = i * mnist_block + crop_y_off;
         for (uint32_t j = 0; j < MNIST_DIM; j++) {
-            uint32_t c0 = j * mnist_block + crop_x_off;
-            uint32_t sum = 0;
+            uint32_t sum = green_block_sum(data, format, i, j,
+                                           mnist_block,
+                                           crop_x_off, crop_y_off);
 
-            for (uint32_t dy = 0; dy < mnist_block; dy++) {
-                uint32_t r = r0 + dy;
-                /* RGGB green pixels: (r%2 == 0, c%2 == 1) ∪
-                 *                    (r%2 == 1, c%2 == 0). Pick the
-                 * starting column phase based on r's parity, then
-                 * stride by 2. */
-                uint32_t c_start = c0 + ((r & 1u) ? 0u : 1u);
-                for (uint32_t c = c_start; c < c0 + mnist_block; c += 2u) {
-                    sum += pixel_hi8(data, r * MOCK_FRAME_W + c, format);
+            uint32_t num;
+            if (use_flatfield) {
+                /* Flat-field divide: corrected = sum × anchor / ref.
+                 * Numerator fits u64 comfortably (sum, anchor, ref
+                 * each < 62000; product < 4×10⁹). Renormalize to
+                 * the same denom = green_per_block × 255 the NONE
+                 * path uses so an inverted-output value of 0.5 means
+                 * the same thing in both modes. Skip the divide
+                 * when ref is suspiciously low — corner blocks under
+                 * extreme vignette can read near-zero, in which case
+                 * the corrected value is dominated by sensor noise
+                 * and any answer we synthesise is misleading. Pass
+                 * the raw sum through instead. */
+                uint32_t ref = g_flatfield.block[i][j];
+                if (ref < FF_REF_NOISE_FLOOR) {
+                    num = sum;
+                } else {
+                    uint64_t corrected = (uint64_t)sum * anchor / ref;
+                    if (corrected > denom) corrected = denom;
+                    num = (uint32_t)corrected;
                 }
+            } else {
+                num = sum;
             }
 
-            /* avg = sum / green_per_block ∈ [0, 255]; normalise to
-             * [0, 1] by dividing by green_per_block*255. Integer-only
-             * IEEE 754 build because -mgeneral-regs-only forbids
-             * float/NEON in kernel C.
-             *
-             * Polarity (see camera_preprocess_mnist docstring): MNIST
-             * trains on bright-stroke-on-dark-background, but raw
-             * sensor data of a black-on-white drawing produces the
-             * opposite. The invert path flips the polarity at the
-             * integer-numerator step before fp32 division so we never
-             * touch fp arithmetic — denom is unchanged, only the
-             * numerator becomes (denom_byte_total − sum). */
-            uint32_t num = invert ? (denom - sum) : sum;
+            /* Polarity: MNIST trains on bright-stroke-on-dark-
+             * background. Sensor produces the inverse. The invert
+             * path flips at the integer numerator step so we stay
+             * out of fp arithmetic. */
+            if (invert) num = denom - num;
             uint32_t bits = fp32_div_bits(num, denom);
             uint8_t *dst = out_bytes + (i * MNIST_DIM + j) * 4u;
             __builtin_memcpy(dst, &bits, sizeof(bits));
@@ -263,4 +374,89 @@ int camera_preprocess_mnist(const uint8_t *data,
     }
 
     return 0;
+}
+
+int camera_flatfield_capture(const uint8_t *data,
+                             size_t         data_len,
+                             uint32_t       width,
+                             uint32_t       height,
+                             uint32_t       bayer,
+                             uint32_t       format)
+{
+    if (!data) return -1;
+    if (width != MOCK_FRAME_W || height != MOCK_FRAME_H) return -2;
+    if (bayer != CAMERA_BAYER_RGGB) return -2;
+
+    size_t min_bytes;
+    switch (format) {
+    case CAMERA_FORMAT_RAW10_PACKED: min_bytes = MOCK_FRAME_RAW10_BYTES; break;
+    case CAMERA_FORMAT_T_R16:        min_bytes = MOCK_FRAME_T_R16_BYTES; break;
+    default: return -2;
+    }
+    if (data_len < min_bytes) return -1;
+
+    /* Mirror the centre-crop preprocess geometry exactly. */
+    const uint32_t mnist_block = MNIST_BLOCK_HALF;
+    const uint32_t mnist_crop  = MNIST_DIM * mnist_block;
+    const uint32_t crop_x_off  = (MOCK_FRAME_W - mnist_crop) / 2u;
+    const uint32_t crop_y_off  = (MOCK_FRAME_H - mnist_crop) / 2u;
+
+    uint32_t max_sum = 0;
+    for (uint32_t i = 0; i < MNIST_DIM; i++) {
+        for (uint32_t j = 0; j < MNIST_DIM; j++) {
+            uint32_t s = green_block_sum(data, format, i, j,
+                                         mnist_block,
+                                         crop_x_off, crop_y_off);
+            g_flatfield.block[i][j] = s;
+            if (s > max_sum) max_sum = s;
+        }
+    }
+
+    /* Anchors. Center: avg of the 4 blocks straddling the grid's
+     * geometric centre. Mid-edge: avg of the 4 quarter-radius
+     * cardinal points (north/south/east/west of centre). Index
+     * constants live near the storage decl so a future grid-size
+     * change pulls them along. */
+    uint32_t cs = g_flatfield.block[FF_CENTER_LO][FF_CENTER_LO]
+                + g_flatfield.block[FF_CENTER_LO][FF_CENTER_HI]
+                + g_flatfield.block[FF_CENTER_HI][FF_CENTER_LO]
+                + g_flatfield.block[FF_CENTER_HI][FF_CENTER_HI];
+    g_flatfield.anchor_center = cs / 4u;
+
+    uint32_t es = g_flatfield.block[FF_CENTER_HI][FF_MID_NEAR]
+                + g_flatfield.block[FF_CENTER_HI][FF_MID_FAR]
+                + g_flatfield.block[FF_MID_NEAR][FF_CENTER_HI]
+                + g_flatfield.block[FF_MID_FAR ][FF_CENTER_HI];
+    g_flatfield.anchor_mid_edge = es / 4u;
+
+    g_flatfield.anchor_max = max_sum;
+    g_flatfield.valid = true;
+    return 0;
+}
+
+void camera_flatfield_clear(void)
+{
+    g_flatfield.valid = false;
+    g_flatfield.anchor_center   = 0;
+    g_flatfield.anchor_max      = 0;
+    g_flatfield.anchor_mid_edge = 0;
+}
+
+bool camera_flatfield_is_valid(void)
+{
+    return g_flatfield.valid;
+}
+
+uint32_t camera_flatfield_get(uint32_t i, uint32_t j)
+{
+    if (!g_flatfield.valid) return UINT32_MAX;
+    if (i >= CAMERA_FLATFIELD_DIM || j >= CAMERA_FLATFIELD_DIM) {
+        return UINT32_MAX;
+    }
+    return g_flatfield.block[i][j];
+}
+
+uint32_t camera_flatfield_anchor(uint32_t mode)
+{
+    return flatfield_anchor_for(mode);
 }

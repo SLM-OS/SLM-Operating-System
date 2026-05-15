@@ -182,10 +182,11 @@ struct camera_frame;
 
 /*
  * Set the runtime ANALOG_GAIN (reg 0x0157, 8-bit) and DIGITAL_GAIN
- * (reg 0x0158, 16-bit) values. Both are stored in module-scope
- * statics and applied to the sensor on every subsequent
- * `imx219_set_mode_binning_1640x1232` (i.e. every capture). The
- * running sensor doesn't latch these mid-frame.
+ * (reg 0x0158, 16-bit) values. Stored in module-scope statics. When
+ * a capture session is already open (see imx219_session_close), the
+ * new values are pushed to the sensor over I²C immediately so the
+ * next capture uses them; otherwise they're applied on the next
+ * mode-init (i.e. the first capture after open).
  *
  * ANALOG_GAIN encoding: register value n maps to gain factor
  * 256/(256-n). Useful values: 0 (1×), 192 (4×), 224 (8×), 232
@@ -194,8 +195,8 @@ struct camera_frame;
  * DIGITAL_GAIN is fixed-point: 0x0100 = 1.0×, 0x0200 = 2.0×,
  * 0x0400 = 4.0×. Caps at 0x0FFF per the datasheet.
  *
- * Returns 0 on success (the writes are deferred to next mode-init,
- * so there's no I²C path to fail here). QEMU stub returns -1.
+ * Returns 0 on success, or the I²C write rc when a live update
+ * fails. QEMU stub returns -1.
  */
 int imx219_set_runtime_gain(uint8_t analog, uint16_t digital);
 
@@ -205,7 +206,8 @@ void imx219_get_runtime_gain(uint8_t *analog_out, uint16_t *digital_out);
 
 /*
  * Set the runtime EXPOSURE (reg 0x015a, 16-bit, in sensor lines).
- * Applied on the next mode-init like the gain setters above.
+ * Pushed live when a capture session is open, otherwise deferred
+ * to the next mode-init (same model as the gain setters).
  * Useful range for 1640×1232 binning mode is 1..VTS-4 (VTS=1763).
  * QEMU stub returns -1. */
 int imx219_set_runtime_exposure(uint16_t lines);
@@ -216,22 +218,35 @@ uint16_t imx219_get_runtime_exposure(void);
 /*
  * Capture exactly one frame end-to-end and fill *out with a pointer
  * into the kernel-owned IMX219 frame-buffer carveout at
- * `CAMRTC_FRAME_BUFFER_PHYS`. Each call walks the full bring-up
- * pipeline:
+ * `CAMRTC_FRAME_BUFFER_PHYS`.
  *
- *   1. imx219_power_on() if the sensor isn't already responsive.
- *   2. camrtc_capture_init() to bring up the RCE HSP/IVC session
+ * The first call after boot (or after `imx219_session_close`) walks
+ * the full bring-up pipeline:
+ *
+ *   1. camrtc_capture_init() to bring up the RCE HSP/IVC session
  *      (idempotent — returns immediately if already up).
+ *   2. imx219_power_on() — XCLK + GPIOs + I²C + CHIP_ID +
+ *      LP-11 force.
  *   3. CAPTURE_PHY_STREAM_OPEN_REQ on NVCSI_PORT_B.
  *   4. CAPTURE_CSI_STREAM_SET_CONFIG_REQ — D-PHY, 2 lanes,
  *      lp_bypass_mode=1, IMX219-A lane_polarity from the L4T DT.
  *   5. CAPTURE_CHANNEL_SETUP_REQ with EMBDATA enabled.
  *   6. imx219_set_mode_binning_1640x1232() + streaming_enable +
  *      ~50 ms PLL/AGC settle.
- *   7. Build the per-frame descriptor (vi_channel_config +
- *      memoryinfo ring slot 0) and fire CAPTURE_REQUEST_REQ.
- *   8. Block up to 2 s on the STATUS_IND. On
- *      CAPTURE_STATUS_SUCCESS, populate `*out` and return 0.
+ *
+ * Subsequent calls reuse the open VI channel and skip steps 2-6.
+ * Step 2 is gated alongside the rest because the LP-11 force at the
+ * tail of power_on writes MODE_SELECT=1 then MODE_SELECT=0, which
+ * would knock a streaming sensor back into standby and every
+ * follow-up capture would time out waiting for an SOF. Skipping
+ * also avoids exhausting the small RCE channel pool (~35 channels
+ * per power-on with no CHANNEL_RELEASE op available). Every call then:
+ *
+ *   7. Builds the per-frame descriptor (vi_channel_config +
+ *      memoryinfo ring slot 0) with a monotonically-increasing
+ *      sequence and fires CAPTURE_REQUEST_REQ.
+ *   8. Blocks up to 2 s on the STATUS_IND. On
+ *      CAPTURE_STATUS_SUCCESS, populates `*out` and returns 0.
  *
  * On success `*out` is set to:
  *   data   = `camrtc_frame_buffer_iova()` (kernel-owned; pointer
@@ -251,3 +266,21 @@ uint16_t imx219_get_runtime_exposure(void);
  * QEMU stub: returns -1 (no hardware) without touching *out.
  */
 int imx219_capture_one_frame(struct camera_frame *out);
+
+/*
+ * Drop the cached capture session: stop streaming and clear the
+ * "session open" flag so the next imx219_capture_one_frame re-runs
+ * the full RCE bring-up. The RCE-side VI channel currently leaks
+ * (no CHANNEL_RELEASE / STREAM_CLOSE op wired up in
+ * camrtc_capture); after roughly 35 closes-then-opens, RCE will
+ * refuse the next CHANNEL_SETUP and capture wedges until the next
+ * power-cycle. Useful for the case where a different sensor mode
+ * or descriptor shape needs to be programmed; not useful as a
+ * defensive "reset between captures" — that would just burn through
+ * the channel pool faster.
+ */
+void imx219_session_close(void);
+
+/* True if a capture session is currently open (i.e. the next
+ * imx219_capture_one_frame will skip the RCE bring-up). */
+bool imx219_session_is_open(void);
