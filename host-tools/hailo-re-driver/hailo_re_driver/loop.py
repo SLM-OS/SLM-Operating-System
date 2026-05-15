@@ -40,6 +40,7 @@ from .qemu_runner import (
 from .slmos_runner import (
     ReplayDivergence,
     ReplayError,
+    ReplayRefused,
     ReplayResponse,
     SlmosRunner,
 )
@@ -209,6 +210,21 @@ def _extend_corpus(
         return _StepOutcome(
             status="error",
             detail=f"replay-step failed: {result.message}\nstderr: {result.stderr}",
+        )
+
+    if isinstance(result, ReplayRefused):
+        # State-condition refuse from the kernel — surface the exact
+        # kernel line and the classified reason so the operator can
+        # diagnose (corpus inconsistency, target seq drift, etc.)
+        # instead of seeing a generic transient. The wrapper still
+        # counts this against MAX_TRANSIENT_FAILURES for now; a future
+        # change may treat refuses as fatal-fast.
+        return _StepOutcome(
+            status="error",
+            detail=(
+                f"replay-step refused: reason={result.reason} "
+                f"line={result.raw_line!r}"
+            ),
         )
 
     if isinstance(result, ReplayDivergence):

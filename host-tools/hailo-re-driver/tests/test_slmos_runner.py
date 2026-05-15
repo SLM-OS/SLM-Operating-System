@@ -20,7 +20,12 @@ import conftest  # noqa: F401
 
 from hailo_re_driver.slmos_runner import (
     CmdResult,
+    ReplayDivergence,
+    ReplayError,
+    ReplayRefused,
+    ReplayResponse,
     SlmosRunner,
+    parse_replay_output,
 )
 
 
@@ -202,6 +207,144 @@ class VerifyCardSideEffectTests(unittest.TestCase):
             rec.calls[0][0],
             ["labctl", "power", "off", "pi-5-1"],
         )
+
+
+class SoftRefuseClassificationTests(unittest.TestCase):
+    """The kernel's `hailo replay-step` emits informational refuse lines
+    (kernel/ai_accel/hailo/hailo_shell.c) that contain neither
+    `slmos_sha=` nor `reason=`. Before this regression net those caused
+    `labctl serial send --until` to burn the full 30 s replay timeout
+    and the wrapper logged "no RESPONSE or DIVERGENCE line" — i.e. a
+    silent classification bug that ate hours of overnight grind. Each
+    test below pins one refuse class to ReplayRefused with the right
+    reason tag."""
+
+    def test_parse_classifies_parse_failed_refuse(self) -> None:
+        text = (
+            "hailo replay-step 0:/corpus.jsonl 100\n"
+            "hailo: replay-step: corpus parse failed (rc=-3, ops_parsed=2056)\n"
+            "slmos>\n"
+        )
+        result = parse_replay_output(text)
+        self.assertIsInstance(result, ReplayRefused)
+        assert isinstance(result, ReplayRefused)
+        self.assertEqual(result.reason, "parse_failed")
+        self.assertIn("rc=-3", result.raw_line)
+
+    def test_parse_classifies_no_entry_refuse(self) -> None:
+        text = "hailo: replay-step: no entry at seq=99999\nslmos>\n"
+        result = parse_replay_output(text)
+        self.assertIsInstance(result, ReplayRefused)
+        assert isinstance(result, ReplayRefused)
+        self.assertEqual(result.reason, "no_entry")
+
+    def test_parse_classifies_is_write_refuse(self) -> None:
+        text = (
+            "hailo: replay-step: seq=52288 is a write — refusing "
+            "(seq=N must be a read with validated_at_commit=null)\n"
+            "slmos>\n"
+        )
+        result = parse_replay_output(text)
+        self.assertIsInstance(result, ReplayRefused)
+        assert isinstance(result, ReplayRefused)
+        self.assertEqual(result.reason, "is_write")
+        self.assertIn("seq=52288", result.raw_line)
+
+    def test_parse_classifies_already_validated_refuse(self) -> None:
+        text = (
+            "hailo: replay-step: seq=51511 is already "
+            "validated — refusing (corpus is inconsistent)\n"
+            "slmos>\n"
+        )
+        result = parse_replay_output(text)
+        self.assertIsInstance(result, ReplayRefused)
+        assert isinstance(result, ReplayRefused)
+        self.assertEqual(result.reason, "already_validated")
+
+    def test_parse_classifies_wrong_size_refuse(self) -> None:
+        text = (
+            "hailo: replay-step: seq=100 has size=8; only size=4 is "
+            "supported by the platform shim\n"
+            "slmos>\n"
+        )
+        result = parse_replay_output(text)
+        self.assertIsInstance(result, ReplayRefused)
+        assert isinstance(result, ReplayRefused)
+        self.assertEqual(result.reason, "wrong_size")
+
+    def test_parse_prefers_response_over_refuse(self) -> None:
+        """If both a RESPONSE line and a refuse marker appear (impossible
+        in practice but cheap to pin), the protocol line wins so a
+        success isn't mis-classified as a refuse."""
+        text = (
+            "hailo: replay-step: corpus parse failed (rc=-1, ops_parsed=0)\n"
+            "HAILO_RE_CORPUS_RESPONSE seq=1 bar=4 offset=0 size=4 "
+            "value=12345678 slmos_sha=" + "ab" * 20 + "\n"
+        )
+        result = parse_replay_output(text)
+        self.assertIsInstance(result, ReplayResponse)
+
+    def test_parse_unmatched_output_stays_replay_error(self) -> None:
+        """Output that's neither a protocol line nor a known refuse
+        falls through to ReplayError — so genuine "Pi 5 hung" cases are
+        still distinguishable from refuses."""
+        text = "some unrelated boot noise\nslmos>\n"
+        result = parse_replay_output(text)
+        self.assertIsInstance(result, ReplayError)
+
+
+class SoftRefuseUntilRegexTests(unittest.TestCase):
+    """The `--until` regex passed to `labctl serial send` must fire
+    immediately on a soft-refuse line so the wrapper doesn't burn
+    replay_timeout_s (30 s) per refuse iteration. Pinned per-class so a
+    future kernel message tweak that breaks the regex fails fast."""
+
+    def _get_until_re(self) -> "re.Pattern[str]":
+        import re as re_mod
+
+        rec = _RecordingTransport()
+        runner = SlmosRunner(sbc="pi-5-1", transport=rec)
+        runner.send_replay_command(Path("/dev/null"), 1)
+        argv = rec.calls[0][0]
+        until_idx = argv.index("--until")
+        return re_mod.compile(argv[until_idx + 1])
+
+    def test_until_fires_on_parse_failed(self) -> None:
+        rx = self._get_until_re()
+        line = "hailo: replay-step: corpus parse failed (rc=-3, ops_parsed=2056)"
+        self.assertIsNotNone(rx.search(line))
+
+    def test_until_fires_on_no_entry(self) -> None:
+        rx = self._get_until_re()
+        line = "hailo: replay-step: no entry at seq=99999"
+        self.assertIsNotNone(rx.search(line))
+
+    def test_until_fires_on_is_write(self) -> None:
+        rx = self._get_until_re()
+        line = "hailo: replay-step: seq=52288 is a write — refusing (...)"
+        self.assertIsNotNone(rx.search(line))
+
+    def test_until_fires_on_already_validated(self) -> None:
+        rx = self._get_until_re()
+        line = "hailo: replay-step: seq=51511 is already validated — refusing"
+        self.assertIsNotNone(rx.search(line))
+
+    def test_until_fires_on_wrong_size(self) -> None:
+        rx = self._get_until_re()
+        line = "hailo: replay-step: seq=100 has size=8; only size=4 supported"
+        self.assertIsNotNone(rx.search(line))
+
+    def test_until_does_not_fire_on_in_progress_diag(self) -> None:
+        """The success-path diagnostic line `hailo: replay-step: corpus
+        ops=N target seq=M ...` must NOT match the until regex — if it
+        did, labctl would return before the actual RESPONSE line
+        landed."""
+        rx = self._get_until_re()
+        line = (
+            "hailo: replay-step: corpus ops=2057 target seq=51511 "
+            "bar=4 offset=0x0"
+        )
+        self.assertIsNone(rx.search(line))
 
 
 if __name__ == "__main__":
