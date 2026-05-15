@@ -278,6 +278,116 @@ class StubAppendDuringRunTests(unittest.TestCase):
             self.assertEqual(reloaded.ops[-1].seq, 8)
             self.assertEqual(reloaded.ops[-1].value, "42424242")
 
+    def test_extend_accepts_gap_fill_below_max_seq(self) -> None:
+        """When the corpus has gaps (e.g. a region was dropped, exposing
+        previously-region-served seqs), the QEMU stub halts on the LOWEST
+        uncovered seq, which may be below corpus.next_seq. The loop must
+        accept that EXTEND, not bail with 'corpus and stub disagree'.
+        """
+        from hailo_re_driver.line_protocols import ExtendRequest
+        from hailo_re_driver.qemu_runner import ExtendEvent
+
+        with tempfile.TemporaryDirectory() as d:
+            corpus_path = Path(d) / "c.jsonl"
+            corpus_mod.init(corpus_path, self._header())
+            c = corpus_mod.load(corpus_path)
+            # Seed corpus with seqs 1, 2, 3, 5, 6, 7 — gap at seq=4.
+            # next_seq is 8, but the stub will EXTEND at the gap (seq=4).
+            for s in (1, 2, 3, 5, 6, 7):
+                corpus_mod.append_op(c, OpEntry(
+                    seq=s, bar=4, offset=0x100 + s, size=4, dir="read",
+                    value="00000000", source="slmos_observed",
+                    validated_at_commit=self.SHA,
+                    validated_at="2026-05-12T19:00:00Z",
+                ))
+
+            class _GapExtendRunner:
+                def __init__(self):
+                    self.calls = 0
+
+                def run(self, path: Path):
+                    self.calls += 1
+                    if self.calls == 1:
+                        return ExtendEvent(
+                            kind="extend",
+                            request=ExtendRequest(
+                                seq=4, bar=4, offset=0x104, size=4,
+                                reason="unknown_read",
+                            ),
+                            raw_line=(
+                                "HAILO_RE_CORPUS_EXTEND seq=4 bar=4 "
+                                "offset=260 size=4 reason=unknown_read"
+                            ),
+                        )
+                    return ConfigureCompleteEvent()
+
+            slmos = _ScriptedSlmosRunner([
+                ExtendResponse(seq=4, bar=4, offset=0x104, size=4,
+                               value="cafef00d", slmos_sha=self.SHA),
+            ])
+
+            outcome = loop_mod.run_loop(
+                corpus_path,
+                _GapExtendRunner(),  # type: ignore[arg-type]
+                slmos,  # type: ignore[arg-type]
+                loop_mod.LoopConfig(
+                    max_iterations=5,
+                    reachable=lambda _sha: True,
+                ),
+            )
+            self.assertEqual(
+                outcome.status, "complete",
+                f"gap-fill EXTEND must be accepted; got status="
+                f"{outcome.status} detail={outcome.detail}",
+            )
+            reloaded = corpus_mod.load(corpus_path)
+            filled = reloaded.find_op(4)
+            self.assertIsNotNone(filled)
+            self.assertEqual(filled.value, "cafef00d")
+
+    def test_extend_rejects_already_captured_seq(self) -> None:
+        """If the stub somehow EXTENDs at a seq the corpus already has
+        a captured entry for, that's a real disagreement — bail loud.
+        """
+        from hailo_re_driver.line_protocols import ExtendRequest
+        from hailo_re_driver.qemu_runner import ExtendEvent
+
+        with tempfile.TemporaryDirectory() as d:
+            corpus_path = Path(d) / "c.jsonl"
+            corpus_mod.init(corpus_path, self._header())
+            c = corpus_mod.load(corpus_path)
+            corpus_mod.append_op(c, OpEntry(
+                seq=5, bar=4, offset=0x100, size=4, dir="read",
+                value="00000000", source="slmos_observed",
+                validated_at_commit=self.SHA,
+                validated_at="2026-05-12T19:00:00Z",
+            ))
+
+            class _DuplicateExtendRunner:
+                def run(self, path: Path):
+                    return ExtendEvent(
+                        kind="extend",
+                        request=ExtendRequest(
+                            seq=5, bar=4, offset=0x100, size=4,
+                            reason="unknown_read",
+                        ),
+                        raw_line=("HAILO_RE_CORPUS_EXTEND seq=5 ..."),
+                    )
+
+            slmos = _ScriptedSlmosRunner([])
+
+            outcome = loop_mod.run_loop(
+                corpus_path,
+                _DuplicateExtendRunner(),  # type: ignore[arg-type]
+                slmos,  # type: ignore[arg-type]
+                loop_mod.LoopConfig(
+                    max_iterations=2,
+                    reachable=lambda _sha: True,
+                ),
+            )
+            self.assertEqual(outcome.status, "error")
+            self.assertIn("already has an entry", outcome.detail or "")
+
 
 class WritePendingCorpusCleanupTests(unittest.TestCase):
     """Regression coverage for the resource-cleanup contract on

@@ -176,12 +176,18 @@ def _extend_corpus(
     slmos: SlmosRunner,
     cfg: LoopConfig,
 ) -> "_StepOutcome":
-    if request.seq != corpus.next_seq:
+    # The QEMU stub may halt on EXTEND at any seq that isn't already
+    # covered by the corpus — that's typically max_seq+1, but with
+    # Phase 4 region rules (#824) plus order-agnostic appends (#829),
+    # a region drop or per-seq grind can leave gaps in the captured
+    # ops, and a subsequent run halts on the LOWEST uncovered seq.
+    # The only invariant we need is: this seq isn't already captured.
+    if corpus.find_op(request.seq) is not None:
         return _StepOutcome(
             status="error",
             detail=(
-                f"EXTEND seq={request.seq} but corpus next_seq="
-                f"{corpus.next_seq} — corpus and stub disagree"
+                f"EXTEND seq={request.seq} but corpus already has an "
+                f"entry at that seq — stub and corpus disagree"
             ),
         )
 
