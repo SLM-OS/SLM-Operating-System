@@ -283,6 +283,32 @@ int ga10b_gmmu_alloc(uint64_t inst_block_phys,
                      void    **out_first_cpu_va,
                      uint64_t *out_first_phys);
 
+/* Map an EXISTING contiguous physical buffer into the channel's
+ * GMMU at a fresh GPU VA. Mirrors `ga10b_gmmu_alloc` but skips the
+ * per-page PMM allocation step — caller already owns the buffer.
+ *
+ * `target_phys` must be 4 KB-aligned and refer to `n_pages`
+ * contiguous physical pages (i.e. typically the return of
+ * `pmm_alloc_pages(n_pages)`). `flags` is forwarded to
+ * `map_one_page` (GA10B_GMMU_FLAG_RO / etc.). Output GPU VA is
+ * page-aligned and covers `[gpu_va, gpu_va + n_pages*4096)`.
+ *
+ * Returns 0 on success or -1 on any failure (bad args, VA range
+ * exhausted, PT-page alloc failed mid-walk). Same partial-failure
+ * semantics as `ga10b_gmmu_alloc`: if any per-page PTE write
+ * fails, the previously-written PTEs stay in place — no rollback.
+ *
+ * Used by `oplib_pool_stage_to_gpu`'s slow path (#832) to map a
+ * SLM-OS-allocated 256 KB scratch region into the inherited
+ * channel when the helper's v6/v7 handoff publish zeros the v4
+ * single-shader fields.
+ */
+int ga10b_gmmu_map(uint64_t inst_block_phys,
+                   uint64_t target_phys,
+                   uint32_t n_pages,
+                   uint32_t flags,
+                   uint64_t *out_gpu_va_base);
+
 /* Free N contiguous pages previously returned by `ga10b_gmmu_alloc`
  * (or `ga10b_gmmu_alloc_page` with n_pages=1). Per page:
  *   - Walk the existing leaf PTE.

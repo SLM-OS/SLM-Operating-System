@@ -141,4 +141,37 @@ int oplib_pool_get_sass_gpu_va(uint32_t op_kind, uint32_t tier, uint32_t dtype,
  * staged. Used by the status verb. */
 uint64_t oplib_pool_gpu_va_base(void);
 
+/* Inspector: physical address (CPU side) of the pool's base — i.e.
+ * the start of the SASS slot. Returns 0 if the pool isn't staged
+ * yet, or if `oplib_pool_stage_to_gpu` took a slow path that
+ * couldn't expose contiguous CPU phys (older slow path that
+ * allocated non-contig PMM pages — kept as a fallback when the new
+ * contig path fails).
+ *
+ * Layered with `oplib_pool_gpu_va_base`, this gives the W-series
+ * dispatch FFI (#832) a single source of truth for per-call scratch
+ * slots: `(base_phys|base_gpu_va) + OPLIB_POOL_OFF_SCRATCH<N>`.
+ *
+ * Fast path (helper-published v4 shader region exists): returns
+ * `h->shader_phys`. Slow path (this PR): returns the
+ * `pmm_alloc_pages`-returned contiguous phys.
+ */
+uint64_t oplib_pool_base_phys(void);
+
+/* Inspector: 4 KB cbuf page used by `slm_oplib_prepare_dispatch` to
+ * stage the per-dispatch cbuf[0] argument layout. Pre-allocated and
+ * mapped during `oplib_pool_stage_to_gpu`:
+ *
+ *   - Fast path: if the helper handoff publishes `h->cbuf_*`,
+ *     accessors return those addresses.
+ *   - Slow path: oplib_pool allocates a 4 KB PMM page and maps it
+ *     into the channel's GMMU via `ga10b_gmmu_map`.
+ *
+ * Returns 0 if no cbuf is available (helper didn't publish + slow
+ * path allocation failed). Callers translate that into a CPU
+ * fallback in the dispatch FFI.
+ */
+uint64_t oplib_pool_cbuf_phys(void);
+uint64_t oplib_pool_cbuf_gpu_va(void);
+
 #endif /* OPLIB_POOL_H */
