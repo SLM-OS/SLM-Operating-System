@@ -364,7 +364,18 @@ class StubAppendDuringRunTests(unittest.TestCase):
             ))
 
             class _DuplicateExtendRunner:
+                def __init__(self):
+                    self.calls = 0
+
                 def run(self, path: Path):
+                    self.calls += 1
+                    # Loop should bail with status=error on the first
+                    # call's response; the counter guards against silent
+                    # infinite loops if that early-out ever regresses.
+                    assert self.calls == 1, (
+                        "loop should error out before re-invoking the "
+                        "runner on a duplicate-seq EXTEND"
+                    )
                     return ExtendEvent(
                         kind="extend",
                         request=ExtendRequest(
