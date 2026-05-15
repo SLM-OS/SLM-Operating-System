@@ -1221,6 +1221,145 @@ int cmd_xput_bin(int argc, char *argv[])
 }
 
 /*
+ * xget-bin <path> [skip] - Direct binary download (mirror of xput-bin)
+ *
+ * Streams the file at `path` raw over the current shell session's
+ * TCP transport. No hex encoding, no per-line shell parse —
+ * symmetric counterpart to xput-bin for the device→host direction.
+ * `skip` is an optional resume offset; bytes at file positions
+ * [skip, total) are sent. Default skip=0.
+ *
+ * Wire format: telnet IAC byte-stuffed (0xFF in payload doubles to
+ * 0xFF 0xFF on the wire per RFC 854). The host's TelnetShell
+ * un-stuffs it back to the original bytes.
+ *
+ * Protocol:
+ *   client:  xget-bin <path> [skip]\n
+ *   kernel:  XGET-BIN ready size=<total>\r\n
+ *   kernel:  <total - skip> raw bytes (with 0xFF doubled)
+ *   kernel:  XGET-BIN done size=<total>\r\n
+ *   kernel:  slmos>     (normal prompt resumes)
+ *
+ * On error before the data stream begins, prints an `xget-bin: ...`
+ * message and returns -1 — no `XGET-BIN ready` was sent so the
+ * client knows nothing came. On error mid-stream (partial write to
+ * peer, file shrank under us), prints
+ * `XGET-BIN err sent=N reason=...\r\n` and returns -1.
+ */
+/* 64 KB chunk for the LFS→TCP streaming loop. Picked to match a
+ * typical lwIP send-buffer high-water mark so the read+stuff+enqueue
+ * pipeline keeps the TX ring full without one read dominating the
+ * loop iteration time. Single-flight guard below means only one
+ * cmd_xget_bin owns this buffer at a time. */
+#define XGET_BIN_BUF_BYTES 65536u
+
+/* Compile-time guard against a future LittleFS that widens lfs_size_t
+ * past 32 bits — would silently truncate `total` in the header. */
+_Static_assert(sizeof(((struct lfs_entry_info *)0)->size) == sizeof(uint32_t),
+    "lfs_entry_info.size must be uint32_t — cmd_xget_bin truncates header otherwise");
+
+int cmd_xget_bin(int argc, char *argv[])
+{
+    if (argc < 2) {
+        shell_puts("Usage: xget-bin <path> [skip]\r\n");
+        return -1;
+    }
+
+    /* Transport gate — UART/serial backends can't deliver bit-exact
+     * binary (the cooked write path's CR-LF expansion would corrupt
+     * the stream). Refuse upfront, before any framing header lands
+     * on the wire, so the operator gets a clear error. */
+    if (!shell_session_supports_write_raw()) {
+        shell_puts("xget-bin: not supported on this transport "
+                   "(requires TCP/telnet shell)\r\n");
+        return -1;
+    }
+
+    char resolved[VFS_MAX_PATH];
+    if (shell_resolve_path(argv[1], resolved, sizeof(resolved)) < 0) {
+        shell_puts("xget-bin: path too long\r\n");
+        return -1;
+    }
+    uint32_t skip = 0;
+    if (argc >= 3 && shell_parse_uint(argv[2], &skip) != 0) {
+        shell_printf("xget-bin: invalid skip: %s\r\n", argv[2]);
+        return -1;
+    }
+
+    /* Single-flight guard. Mirrors xput-bin's pattern; serializes
+     * the shared static bin_buf below. */
+    static bool xget_bin_active = false;
+    if (__atomic_exchange_n(&xget_bin_active, true, __ATOMIC_ACQ_REL)) {
+        shell_puts("XGET-BIN err sent=0 reason=busy\r\n");
+        return -1;
+    }
+
+    int rc = -1;
+    int fd = -1;
+    struct lfs_mount *mnt = NULL;
+    uint32_t total = 0;
+    uint32_t sent = 0;
+
+    const char *subpath = NULL;
+    mnt = vfs_get_mount_ctx(resolved, &subpath);
+    if (!mnt) {
+        shell_printf("xget-bin: %s: Not a mounted filesystem\r\n", resolved);
+        goto fail;
+    }
+
+    struct lfs_entry_info info;
+    if (littlefs_stat_path(mnt, subpath, &info) != LFS_ERR_OK) {
+        shell_printf("xget-bin: %s: not found\r\n", resolved);
+        goto fail;
+    }
+    total = info.size;
+    if (skip > total) {
+        shell_printf("xget-bin: %s: skip %lu > size %lu\r\n",
+                     resolved, (unsigned long)skip, (unsigned long)total);
+        goto fail;
+    }
+
+    fd = littlefs_file_open(mnt, subpath, LFS_O_RDONLY);
+    if (fd < 0) {
+        shell_printf("xget-bin: %s: failed to open\r\n", resolved);
+        goto fail;
+    }
+    if (skip > 0 &&
+        littlefs_file_seek(mnt, fd, (lfs_soff_t)skip, LFS_SEEK_SET) < 0) {
+        shell_printf("xget-bin: %s: seek failed\r\n", resolved);
+        goto fail;
+    }
+
+    /* Header: tell the client how many bytes to expect. */
+    shell_printf("XGET-BIN ready size=%lu\r\n", (unsigned long)total);
+
+    static uint8_t bin_buf[XGET_BIN_BUF_BYTES];
+    sent = skip;
+    while (sent < total) {
+        uint32_t want = total - sent;
+        if (want > sizeof(bin_buf)) want = sizeof(bin_buf);
+        int got = littlefs_file_read(mnt, fd, bin_buf, (size_t)want);
+        if (got <= 0) {
+            shell_printf("XGET-BIN err sent=%lu reason=read\r\n",
+                         (unsigned long)(sent - skip));
+            goto fail;
+        }
+        shell_session_write_raw(bin_buf, (size_t)got);
+        sent += (uint32_t)got;
+    }
+
+    shell_printf("XGET-BIN done size=%lu\r\n", (unsigned long)total);
+    rc = 0;
+
+fail:
+    if (fd >= 0 && mnt) {
+        littlefs_file_close(mnt, fd);
+    }
+    __atomic_store_n(&xget_bin_active, false, __ATOMIC_RELEASE);
+    return rc;
+}
+
+/*
  * mkdir <path> - Create a directory
  * Supports relative paths.
  */

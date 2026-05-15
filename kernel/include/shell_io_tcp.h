@@ -152,4 +152,14 @@ int shell_io_tcp_test_run_read_buf_drains_ring(void);
  * region — guards against an off-by-one in the rx_tail update). */
 int shell_io_tcp_test_run_read_buf_wrap(void);
 
+/* Test-only driver for `tcp_write_raw_buf` IAC stuffing (PR #837).
+ * Pushes a known payload through the raw write path with
+ * tx_prev_was_cr pre-poisoned to true, then verifies:
+ *   - every 0xFF byte was doubled per RFC 854,
+ *   - other bytes (including CR/LF) passed through unchanged,
+ *   - tx_prev_was_cr was reset to false (raw-path bleed guard).
+ * Returns 0 on success, -1 if no slot could be allocated, -2 on
+ * stuffing mismatch, -3 on CR-flag bleed. */
+int shell_io_tcp_test_run_write_raw_iac_stuffing(void);
+
 #endif /* SHELL_IO_TCP_H */

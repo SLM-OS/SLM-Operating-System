@@ -571,6 +571,33 @@ static void test_shell_io_tcp_read_buf_handles_wrap(void)
 }
 
 /*
+ * Test: tcp_write_raw_buf IAC-stuffs 0xFF bytes per RFC 854 and
+ * doesn't bleed the raw-payload's last-byte-was-CR state into the
+ * cooked write path's CR-LF state machine (PR #837 review fix).
+ *
+ * Pre-stuffing regression: a payload containing 0xFF bytes would
+ * reach the host with single 0xFF, and the host's telnet decoder
+ * would interpret it as IAC (start-of-command). Pre-CR-bleed
+ * regression: a raw payload ending in 0x0D would set tx_prev_was_cr
+ * true, causing the next cooked write's leading 0x0A to be silently
+ * suppressed.
+ */
+static void test_shell_io_tcp_write_raw_iac_stuffing(void)
+{
+    int rc = shell_io_tcp_test_run_write_raw_iac_stuffing();
+    TEST_ASSERT_MESSAGE(rc != -1,
+        "test_run_write_raw_iac_stuffing: pool slot allocation failed");
+    TEST_ASSERT_MESSAGE(rc != -2,
+        "test_run_write_raw_iac_stuffing: stuffed bytes don't match "
+        "expected pattern (every 0xFF must be doubled, other bytes "
+        "pass through unchanged)");
+    TEST_ASSERT_MESSAGE(rc != -3,
+        "test_run_write_raw_iac_stuffing: tx_prev_was_cr leaked from "
+        "raw write path back into cooked CR-LF state machine");
+    TEST_ASSERT_EQUAL_INT(0, rc);
+}
+
+/*
  * Test: 50-cycle close-path drive must not increment leak_warnings (#537).
  *
  * Field observation summary (2026-05-02 jetson-nano-2 traces): post the
@@ -2567,6 +2594,7 @@ int test_suite_net(void)
     RUN_TEST(test_shell_io_tcp_close_settling);
     RUN_TEST(test_shell_io_tcp_read_buf_drains_ring);
     RUN_TEST(test_shell_io_tcp_read_buf_handles_wrap);
+    RUN_TEST(test_shell_io_tcp_write_raw_iac_stuffing);
     RUN_TEST(test_tcp_shell_no_false_leak_over_50_close_cycles);
     RUN_TEST(test_net_stats_initial_values);
 

@@ -252,6 +252,31 @@ static const struct help_entry help_entries[] = {
         "host side.\n"
     ),
 
+    HELP_TEXT("xget-bin",
+        "xget-bin - Direct binary download (mirror of xput-bin)\n"
+        "\n"
+        "Usage:\n"
+        "  xget-bin <path> [skip]\n"
+        "\n"
+        "Streams the file at `path` raw over the current shell session's\n"
+        "TCP transport. Symmetric counterpart to xput-bin for the\n"
+        "device→host direction. `skip` is an optional resume offset —\n"
+        "bytes at file positions [skip, total) are sent. Default skip=0.\n"
+        "\n"
+        "Wire format: telnet IAC byte-stuffed (0xFF in payload doubles\n"
+        "to 0xFF 0xFF on the wire per RFC 854). The host's TelnetShell\n"
+        "un-stuffs it back to the original bytes.\n"
+        "\n"
+        "Protocol:\n"
+        "  client:  xget-bin <path> [skip]\\n\n"
+        "  kernel:  XGET-BIN ready size=<total>\\r\\n\n"
+        "  kernel:  <total - skip> raw bytes (with 0xFF doubled)\n"
+        "  kernel:  XGET-BIN done size=<total>\\r\\n\n"
+        "\n"
+        "Use `scripts/tools/slm-get.py` to drive this from the host\n"
+        "side.\n"
+    ),
+
     HELP_TEXT("append",
         "append - Append content to file\n"
         "\n"

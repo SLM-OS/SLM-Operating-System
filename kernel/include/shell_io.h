@@ -85,6 +85,17 @@ struct shell_io {
      * shell_session_set_binary_mode helper which does). */
     void (*set_binary_mode)(struct shell_io *io, bool on);
 
+    /* Optional. Write `len` bytes verbatim — no CR-LF expansion, no
+     * other text transforms. The transport is still responsible for
+     * any wire-level escaping it owns: the TCP/telnet backend doubles
+     * 0xFF bytes per RFC 854 IAC stuffing here so binary payloads
+     * containing 0xFF reach the peer intact. Used by `cmd_xget-bin`
+     * to stream raw file bytes after the framing header. UART
+     * backends without a wire protocol leave this NULL; callers
+     * must use `shell_session_write_raw` (which NULL-checks and
+     * falls back to plain write). */
+    void (*write_raw)(struct shell_io *io, const uint8_t *buf, size_t len);
+
     /* Backend-private data. */
     void *ctx;
 };
