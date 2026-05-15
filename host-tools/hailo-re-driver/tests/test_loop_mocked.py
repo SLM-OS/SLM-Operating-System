@@ -464,6 +464,34 @@ class WritePendingCorpusCleanupTests(unittest.TestCase):
                 f"fd leaked: before={fds_before!r} after={fds_after!r}",
             )
 
+    def test_pending_corpus_is_world_readable(self) -> None:
+        """The pending temp file must be at least mode 0o644 so a
+        downstream `labctl sdwire update` subprocess can read it even
+        after a sync-agent (Dropbox) chowns it to a service uid. This is
+        the regression for the overnight grind stalling at 3/3 transient
+        failures with `PermissionError` on `*-pending-XXXX.jsonl`."""
+        import os
+        from hailo_re_driver.line_protocols import ExtendRequest
+        from hailo_re_driver.loop import _write_pending_corpus
+
+        with tempfile.TemporaryDirectory() as d:
+            corpus_path = self._make_corpus(Path(d))
+            corpus = corpus_mod.load(corpus_path)
+
+            req = ExtendRequest(
+                seq=1, bar=4, offset=0, size=4, reason="unknown_read",
+            )
+            pending_path = _write_pending_corpus(corpus, req)
+            try:
+                mode = os.stat(pending_path).st_mode & 0o777
+                # Require world-read (others-r); group-r implied by 0o644.
+                self.assertTrue(
+                    mode & 0o004,
+                    f"pending file mode {oct(mode)} is not world-readable",
+                )
+            finally:
+                pending_path.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()
