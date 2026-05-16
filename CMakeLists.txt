@@ -1806,6 +1806,107 @@ target_compile_definitions(slm_runner PRIVATE
 target_link_libraries(slmos.elf PRIVATE slm_runner)
 
 # ==========================================================================
+# wolfCrypt + wolfSSH (Phase 3 SSH — #199, #893)
+#
+# Vendored under kernel/lib/{wolfcrypt,wolfssh}/. See VENDOR.md in
+# each directory for the pinned upstream tags. SLM-OS local config
+# lives in kernel/lib/wolfcrypt/user_settings.h — it's pulled in via
+# -DWOLFSSL_USER_SETTINGS=1 on the wolf static-library compile lines.
+#
+# Built as two separate static libraries so they get relaxed warnings
+# (upstream code uses patterns SLM-OS's -Werror would reject) and
+# their own include path. Same isolation pattern as the `lua` and
+# `nanopb` static libraries above.
+#
+# ARM64 only (matches the rest of the networking story today). x86-64
+# remains "build-clean" but is not the SSH demo target.
+# ==========================================================================
+if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
+    set(WOLFCRYPT_SOURCES
+        kernel/lib/wolfcrypt/src/random.c
+        kernel/lib/wolfcrypt/src/chacha.c
+        kernel/lib/wolfcrypt/src/poly1305.c
+        kernel/lib/wolfcrypt/src/chacha20_poly1305.c
+        kernel/lib/wolfcrypt/src/sha256.c
+        kernel/lib/wolfcrypt/src/sha.c
+        kernel/lib/wolfcrypt/src/sha512.c
+        kernel/lib/wolfcrypt/src/aes.c
+        kernel/lib/wolfcrypt/src/hash.c
+        kernel/lib/wolfcrypt/src/hmac.c
+        kernel/lib/wolfcrypt/src/ed25519.c
+        kernel/lib/wolfcrypt/src/fe_operations.c
+        kernel/lib/wolfcrypt/src/ge_operations.c
+        kernel/lib/wolfcrypt/src/curve25519.c
+        kernel/lib/wolfcrypt/src/coding.c
+        kernel/lib/wolfcrypt/src/error.c
+        kernel/lib/wolfcrypt/src/logging.c
+        kernel/lib/wolfcrypt/src/memory.c
+        kernel/lib/wolfcrypt/src/wc_port.c
+        kernel/lib/wolfcrypt/src/wc_encrypt.c
+        kernel/lib/wolfcrypt/src/kdf.c
+        kernel/lib/wolfcrypt/src/misc.c
+    )
+
+    add_library(wolfcrypt STATIC ${WOLFCRYPT_SOURCES})
+    target_include_directories(wolfcrypt PUBLIC
+        ${CMAKE_SOURCE_DIR}/kernel/lib/wolfcrypt
+        ${CMAKE_SOURCE_DIR}/kernel/lib/wolfcrypt/include)
+    target_include_directories(wolfcrypt PRIVATE ${KERNEL_INCLUDES})
+    target_compile_definitions(wolfcrypt PUBLIC
+        WOLFSSL_USER_SETTINGS=1)
+    target_compile_options(wolfcrypt PRIVATE
+        -std=gnu11
+        -ffreestanding
+        -nostdlib
+        -mcpu=${TARGET_CPU}
+        -mgeneral-regs-only
+        -fno-pie
+        -Wno-unused-parameter -Wno-unused-variable -Wno-type-limits
+        -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes
+        -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
+        -Wno-unused-but-set-variable -Wno-missing-field-initializers
+        -Wno-conversion -Wno-pointer-arith -Wno-pedantic
+        -Wno-cast-function-type -Wno-error
+    )
+
+    set(WOLFSSH_SOURCES
+        kernel/lib/wolfssh/src/internal.c
+        kernel/lib/wolfssh/src/io.c
+        kernel/lib/wolfssh/src/log.c
+        kernel/lib/wolfssh/src/misc.c
+        kernel/lib/wolfssh/src/port.c
+        kernel/lib/wolfssh/src/ssh.c
+        kernel/lib/wolfssh/src/keygen.c
+    )
+
+    add_library(wolfssh STATIC ${WOLFSSH_SOURCES})
+    target_include_directories(wolfssh PUBLIC
+        ${CMAKE_SOURCE_DIR}/kernel/lib/wolfssh/include)
+    target_include_directories(wolfssh PRIVATE ${KERNEL_INCLUDES})
+    target_compile_definitions(wolfssh PUBLIC
+        WOLFSSL_USER_SETTINGS=1)
+    target_compile_options(wolfssh PRIVATE
+        -std=gnu11
+        -ffreestanding
+        -nostdlib
+        -mcpu=${TARGET_CPU}
+        -mgeneral-regs-only
+        -fno-pie
+        -Wno-unused-parameter -Wno-unused-variable -Wno-type-limits
+        -Wno-cast-align -Wno-sign-compare -Wno-strict-prototypes
+        -Wno-redundant-decls -Wno-shadow -Wno-implicit-fallthrough
+        -Wno-unused-but-set-variable -Wno-missing-field-initializers
+        -Wno-conversion -Wno-pointer-arith -Wno-pedantic
+        -Wno-cast-function-type -Wno-error
+    )
+    target_link_libraries(wolfssh PRIVATE wolfcrypt)
+
+    # SLM-OS-side glue: time, RNG seed, future lwIP IO callbacks.
+    target_sources(slmos.elf PRIVATE kernel/net/ssh/wolf_os.c)
+    target_link_libraries(slmos.elf PRIVATE wolfssh wolfcrypt)
+endif()
+
+# ==========================================================================
 # nanopb — freestanding protobuf runtime (for .hef parsing)
 # ==========================================================================
 # Built as a separate static library so it can take its own compile
