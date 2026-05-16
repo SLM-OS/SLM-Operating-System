@@ -1202,6 +1202,15 @@ static void test_shell_cmd_timdiag_no_args(void)
  */
 static void test_shell_cmd_timdiag_fiq_arg(void)
 {
+#if defined(PLATFORM_JETSON_ORIN_NANO)
+    /* On Jetson the `timdiag fiq` path writes ICC_IGRPEN0_EL1, which
+     * BL31 traps and panics on (per kernel/CLAUDE.md §"ARM64 Hardware
+     * Timer IRQs"). The panic kills the kernel mid-test_suite, blocking
+     * every later test suite (including test_integration where the
+     * cross-CPU msg_router stress tests live). Closes #907. */
+    TEST_IGNORE_MESSAGE("timdiag fiq writes ICC_IGRPEN0 — crashes EL3 on Jetson");
+    return;
+#endif
     int ret = shell_execute("timdiag fiq");
     TEST_ASSERT_EQUAL_INT(0, ret);
 }
