@@ -287,23 +287,76 @@ publish/ack sequence wedges immediately — `kernel/tests/test_integration.c`
 `test_msg_router_multi_subscriber` and `test_msg_router_priority_concurrent`
 are the regression catch-points.
 
-### Single-slot mailbox limitation (post-capstone follow-up — #869)
+### Single-slot mailbox flow control (#869, reject-when-busy)
 
 `Mailbox` carries a single set of `ready`/`ack`/`data` atomics per
-subscription. Two `publish_internal` calls that target the *same*
-mailbox before the subscriber has acked the first message will see
-the second `deliver()` overwrite the first in place. The standard
-ack-waiting publish path cannot trigger this — its loop blocks on
-ack between iterations — but multiple concurrent publishers writing
-to the same subscriber's mailbox can. A queued mailbox redesign
-(bounded ring per subscription, with per-mailbox lock + sequence
-counter) is the planned fix; see #869 for the queued vs.
-reject-when-busy decision.
+subscription. `Mailbox::try_deliver` (formerly `deliver`) refuses to
+write when `ready == 1` — i.e. when a prior message is still
+unacked — and returns `false`. Two flavors of caller behavior follow:
+
+- **`publish_internal` (ack-waiting):** if `try_deliver` returns
+  `false`, the publisher bumps `FLOW_CONTROL_BUSY_RETRIES`, yields,
+  and retries inside the same overall `ACK_TIMEOUT_SECS` budget. A
+  slow subscriber spends the budget either in the busy-retry loop or
+  in the post-deliver ack-wait — the publisher's `delivered` return
+  value distinguishes "successfully sent" (was acked in time) from
+  "subscriber never acked" (delivered=0).
+- **`publish_internal_nowait` (fire-and-forget):** if `try_deliver`
+  returns `false`, the publisher bumps `FLOW_CONTROL_NOWAIT_DROPS`,
+  does NOT retry (caller asked for non-blocking), and excludes the
+  failed target from the `delivered` return count. Pre-#869 this
+  path silently overwrote the prior message; post-fix the caller is
+  told the message didn't land.
+
+The two counters are read via `msg_router_flow_control_stats(busy_out,
+drops_out)` and reset by `msg_router_flow_control_reset()`. The shell
+`msg stats` surfaces them so operators can distinguish "publisher
+waited briefly" (busy retries > 0, drops = 0) from "data was lost on a
+nowait path" (drops > 0).
+
+This fix preserves zero-loss on the ack-waiting path and converts
+silent loss to explicit, observable loss on the nowait path — the
+contract a non-blocking publisher implicitly accepts. The queued-
+mailbox redesign (option 1 in #869's scope comment) remains a future
+option if measured publisher latency under contention proves too
+high; it's a strictly larger change (per-mailbox ring + lock +
+sequence counter) and isn't needed for the workloads in tree today.
+
+Regression coverage:
+- `kernel/tests/test_msg_router.c::test_publish_nowait_basic_contract`
+  pins the new "no silent overwrite + nowait_drops counter increments"
+  contract.
+- `kernel/tests/test_integration.c::test_msg_router_same_mailbox_zero_loss`
+  exercises two concurrent publishers writing to the same mailbox; the
+  invariant is that publisher counts and subscriber-seen counts match
+  exactly. QEMU's serial TCG hides the race window, so this test's
+  primary value is on real Pi 5 / Jetson SMP hardware.
 
 This is distinct from the LAST_RECEIVED ack-targeting case
 (`msg_router_ack` clears the right mailbox when the component has
 multiple mailboxes), which works correctly and is pinned by the
 67c tests.
+
+### Concurrent-publisher TOCTOU caveat (residual, not fixed by #869)
+
+`try_deliver`'s ready-then-write sequence is not a single atomic
+operation. Two publishers that both observe `ready == 0` between their
+Acquire load and their later Release stores will both proceed to
+write, and the second arrival's `ready.store(1)` will overwrite the
+first's data in-place — the same loss this method is meant to prevent.
+
+In practice the in-tree caller (`publish_internal`) holds
+`MSG_ROUTER_LOCK` only across the gather phase, not the deliver phase,
+so two publishers CAN arrive at `try_deliver` concurrently for the
+SAME mailbox edge if they both publish to the SAME topic with one
+subscriber. The check in `try_deliver` closes the larger
+"deliver-then-deliver-without-yield" window that single-publisher
+sequential code can hit; the smaller "both-CPUs-in-flight-at-the-same-
+nanosecond" window remains. A CAS-loop redesign (treat `ready` as
+0=idle, 2=writing, 1=ready) or the full queued-mailbox option from
+#869's scope would close this. Not done here because the workloads in
+tree today don't sustain enough simultaneity to surface it; if a
+telemetry fan-in or sensor producer trips it on hardware, escalate.
 
 ---
 

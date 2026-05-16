@@ -191,12 +191,24 @@ Pub/Sub" for the full reference):
   component, even when a newer message lands in a *different* mailbox
   between the receive and the ack. The bookkeeping survives genuine
   cross-CPU activity (publish on one CPU while ack runs on another).
-- **Known limitation — single-slot mailbox overwrite.** A *single*
-  mailbox can lose a message if two `publish_internal` calls target it
-  back-to-back with no intervening ack. The standard ack-waiting publish
-  loop blocks between iterations so a single publisher cannot trigger
-  this; the case requires multiple concurrent publishers writing to the
-  same subscriber's mailbox. Tracked for post-capstone follow-up as #869.
+- **Mailbox flow control (#869, reject-when-busy).** `Mailbox::try_deliver`
+  refuses to write while a prior message is still unacked. The
+  ack-waiting `msg_router_publish` / `msg_router_publish_priority` path
+  yields and retries inside the same `ACK_TIMEOUT_SECS` budget, so the
+  zero-loss contract holds for concurrent publishers writing to the same
+  mailbox. The fire-and-forget `msg_router_publish_nowait` path drops
+  the message instead of overwriting and excludes the target from its
+  `delivered` return value, so the caller can see that the send didn't
+  land. Two counters — `flow_control_busy_retries` (ack-waiting path
+  yielded and retried; no loss) and `flow_control_nowait_drops`
+  (nowait path dropped a message; caller opted out of blocking) — are
+  exposed via `msg_router_flow_control_stats()` and the shell
+  `msg stats` command. A residual TOCTOU window remains where two
+  CPUs racing into `try_deliver` for the same mailbox can both see
+  `ready == 0` between the Acquire load and the Release stores;
+  closing it requires a CAS-loop redesign or the full queued-mailbox
+  option in #869's scope, neither of which is needed for the workloads
+  in tree today.
 
 ### SMP Support
 

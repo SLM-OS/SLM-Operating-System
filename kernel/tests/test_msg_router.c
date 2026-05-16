@@ -18,6 +18,9 @@ extern int msg_router_publish_nowait(const uint8_t *topic_name,
                                      const uint8_t *data);
 extern const uint8_t *msg_router_receive(int component_idx, uint8_t *topic_out);
 extern void msg_router_ack(int component_idx);
+extern void msg_router_flow_control_stats(uint32_t *busy_retries_out,
+                                          uint32_t *nowait_drops_out);
+extern void msg_router_flow_control_reset(void);
 
 /*
  * Regression for GitHub issue #80: msg_router_publish hangs on Pi 5 when
@@ -442,28 +445,31 @@ static void test_publish_nowait_basic_contract(void)
     TEST_ASSERT_EQUAL_INT(1, delivered);
     TEST_ASSERT_LESS_THAN(freq, elapsed);
 
-    /* Contract (5): second nowait deliver to the same unacked mailbox
-     * overwrites the first. The subscriber receives only the second
-     * payload — first is lost. This pins the documented limitation
-     * tracked as #869; if a queued-mailbox redesign lands, this test
-     * is the canary that forces the test to be updated together with
-     * the doc/runtime change. */
+    /* Contract (5): second nowait deliver to a mailbox that already
+     * holds an unacked message is REJECTED — returns 0, does not
+     * overwrite, increments FLOW_CONTROL_NOWAIT_DROPS. The subscriber
+     * receives the FIRST payload, not the second. This is the #869
+     * fix landing: pre-fix the second publish silently overwrote the
+     * first; post-fix the caller is told the message didn't land. */
+    uint32_t drops_before = 0;
+    msg_router_flow_control_stats(NULL, &drops_before);
     delivered = msg_router_publish_nowait(
         (const uint8_t *)"/nw/one", (const uint8_t *)"two");
-    TEST_ASSERT_EQUAL_INT(1, delivered);
+    TEST_ASSERT_EQUAL_INT(0, delivered);  /* refused — mailbox busy */
+    uint32_t drops_after = 0;
+    msg_router_flow_control_stats(NULL, &drops_after);
+    TEST_ASSERT_EQUAL_UINT32(drops_before + 1, drops_after);
 
     uint8_t topic_buf[16];
     const uint8_t *msg = msg_router_receive(9, topic_buf);
     TEST_ASSERT_NOT_NULL(msg);
     TEST_ASSERT_EQUAL_STRING("/nw/one", (const char *)topic_buf);
-    /* Single-slot mailbox: only the second message survives — the
-     * first ("hi") was overwritten in place by the second ("two"). */
-    TEST_ASSERT_EQUAL_STRING("two", (const char *)msg);
+    /* Zero-loss: the first message ("hi") survived; the second
+     * ("two") was rejected at deliver time, not silently overwritten. */
+    TEST_ASSERT_EQUAL_STRING("hi", (const char *)msg);
     msg_router_ack(9);
 
-    /* Mailbox now empty — a second receive returns NULL (confirms
-     * the overwrite collapsed two publishes into one mailbox slot,
-     * not two slots). */
+    /* Mailbox now empty — receive returns NULL. */
     TEST_ASSERT_NULL(msg_router_receive(9, topic_buf));
 
     msg_router_unsubscribe_all(9);
