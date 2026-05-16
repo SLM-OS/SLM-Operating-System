@@ -601,20 +601,26 @@ impl XgbModel {
     /// (see #920).
     pub fn predict_label(&self, features: &[f32], n_classes: usize) -> i32 {
         let idx = if n_classes == 2 {
-            // Empty `roots` is unreachable from `parse_*` (rejected as
-            // `EmptyModel`); guard anyway so `from_parts_for_test`
-            // can't trigger the implicit "no trees → margin 0 → class
-            // 1" fallthrough below. NaN propagated through any leaf
-            // value compares false against `>= 0.0` and lands on
-            // class 0, which matches the eval_tree fallback semantics
-            // for malformed trees.
             if self.roots.is_empty() {
+                // Unreachable from `parse_*` (rejected as `EmptyModel`),
+                // but `from_parts_for_test` can construct it. Without
+                // this branch the sum loop below would leave `margin`
+                // at the initial 0.0 and the `>= 0.0` threshold would
+                // pick class 1, which is the multiclass fallback
+                // (lowest-index argmax) inverted — return class 0
+                // explicitly to match.
                 0usize
             } else {
                 let mut margin = 0.0_f32;
                 for &root in &self.roots {
                     margin += self.eval_tree(root as usize, features);
                 }
+                // `NaN >= 0.0` is false in IEEE-754, so a NaN leaf
+                // (only reachable via `from_parts_for_test`; the
+                // parser rejects via `validate_node`) routes to class
+                // 0. Treating it as "negative margin" matches the
+                // class-0 fallback the empty-roots branch above
+                // returns, so both degenerate inputs agree.
                 if margin >= 0.0 { 1usize } else { 0usize }
             }
         } else {
