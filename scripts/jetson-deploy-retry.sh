@@ -149,6 +149,43 @@ log "  test:     $([[ "$SKIP_TEST" == "1" ]] && echo 'skip (shell-only)' || echo
 log "  started:  $(date -Is)"
 log ""
 
+# Capture serial output and verify a pattern was actually matched (#935).
+#
+# `labctl serial capture --until PATTERN` exits 0 even when the pattern
+# never matched and the capture timed out. Relying on its exit code alone
+# turned "kexec went silent, BL31 reset, no SLM-OS output" into a false
+# PASS during PMU #60 hardware validation. This wrapper:
+#
+#   1. Captures stdout+stderr into a variable so the actual lines are
+#      available for inspection.
+#   2. Tees them into the per-attempt log_file (same as the original).
+#   3. Fails the step if the trailing `[N lines, T, ...]` status line
+#      reports `timeout` instead of `... matched]`.
+#
+# Args: <port-name> <timeout-sec> <pattern> <tail-n> <log-file>
+# Returns: 0 if labctl exited 0 AND the status line reports a match,
+#          1 otherwise.
+capture_until_match() {
+    local port="$1" timeout="$2" pattern="$3" tail_n="$4" log_file="$5"
+    local out rc
+    out=$(labctl serial capture "$port" -t "$timeout" -u "$pattern" -n "$tail_n" 2>&1)
+    rc=$?
+    printf '%s\n' "$out" >> "$log_file"
+    if (( rc != 0 )); then
+        return 1
+    fi
+    # labctl prints a status line like `[Captured N lines in T, pattern '...' matched]`
+    # on success or `[Captured 0 lines in T, timeout]` on timeout. We match
+    # the explicit "matched]" suffix on any line of the capture output —
+    # fragile to format changes but lets us distinguish "saw the pattern"
+    # from "ran the clock out." Status line need not be the last line of
+    # output (labctl may emit benign trailers after it).
+    if printf '%s\n' "$out" | grep -qE 'matched\]\s*$'; then
+        return 0
+    fi
+    return 1
+}
+
 # attempt_deploy — one full deploy cycle. Returns 0 on PASS, 1 on FAIL.
 #   $1 = attempt index (1-based, for logging)
 #   $2 = per-attempt log file
@@ -170,8 +207,7 @@ attempt_deploy() {
 
     # 2. Wait for Linux login prompt over serial
     echo "[2/5] waiting for Linux login" >> "$log_file"
-    if ! labctl serial capture "$TARGET" -t "$LINUX_LOGIN_TIMEOUT" -u "login:" -n 3 \
-            >> "$log_file" 2>&1; then
+    if ! capture_until_match "$TARGET" "$LINUX_LOGIN_TIMEOUT" "login:" 3 "$log_file"; then
         echo "      FAIL detail: stage=linux-login-timeout" >> "$log_file"
         return 1
     fi
@@ -202,8 +238,7 @@ attempt_deploy() {
     # session is torn down by kexec; we don't wait on it.
 
     # Wait for SLM-OS shell.
-    if ! labctl serial capture "$TARGET" -t "$SLMOS_SHELL_TIMEOUT" -u "slmos>" -n 5 \
-            >> "$log_file" 2>&1; then
+    if ! capture_until_match "$TARGET" "$SLMOS_SHELL_TIMEOUT" "slmos>" 5 "$log_file"; then
         echo "      FAIL detail: stage=slmos-shell-timeout" >> "$log_file"
         return 1
     fi
