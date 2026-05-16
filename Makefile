@@ -149,6 +149,19 @@ endif
 BUILD_DIR := build
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel
 KERNEL_TEST_BUILD_DIR := $(BUILD_DIR)/kernel-test
+
+# Per-build-dir lock files (#934). Two `make kernel PLATFORM=X` invocations
+# against different platforms used to silently clobber each other in
+# $(KERNEL_BUILD_DIR); the resulting ELF was whichever build finished
+# last, regardless of which target the user thought they were building.
+# Wrapping the build targets in `flock` on these files makes concurrent
+# invocations serialise instead of race. Lock files live in $(BUILD_DIR)
+# (parent of the build dirs) so `kernel-clean` and friends don't delete
+# them mid-wait.
+KERNEL_BUILD_LOCK         := $(BUILD_DIR)/.kernel.lock
+KERNEL_TEST_BUILD_LOCK    := $(BUILD_DIR)/.kernel-test.lock
+KERNEL_KEXEC_BUILD_LOCK   := $(BUILD_DIR)/.kernel-kexec.lock
+KERNEL_BZIMAGE_BUILD_LOCK := $(BUILD_DIR)/.kernel-bzimage.lock
 ifeq ($(PLATFORM),X86_64)
     RUNTIME_BUILD_DIR := runtime/target/x86_64-unknown-none
 else
@@ -255,7 +268,13 @@ kernel-config-check:
 	fi
 
 .PHONY: kernel
-kernel: check-build-dir runtime kernel-config-check $(KERNEL_BUILD_DIR)/Makefile
+kernel:
+	@mkdir -p $(BUILD_DIR)
+	@flock --verbose $(KERNEL_BUILD_LOCK) \
+	    $(MAKE) --no-print-directory _kernel-build PLATFORM=$(PLATFORM)
+
+.PHONY: _kernel-build
+_kernel-build: check-build-dir runtime kernel-config-check $(KERNEL_BUILD_DIR)/Makefile
 	@echo "Building kernel..."
 	$(CMAKE) --build $(KERNEL_BUILD_DIR)
 
@@ -525,10 +544,16 @@ KERNEL_KEXEC_BUILD_DIR := $(BUILD_DIR)/kernel-kexec
 KERNEL_KEXEC_ELF := $(KERNEL_KEXEC_BUILD_DIR)/slmos.elf
 
 .PHONY: kernel-kexec
-kernel-kexec: runtime kernel-kexec-config-check $(KERNEL_KEXEC_BUILD_DIR)/Makefile
+kernel-kexec:
 ifneq ($(PLATFORM),X86_64)
 	@echo "kernel-kexec requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
 endif
+	@mkdir -p $(BUILD_DIR)
+	@flock --verbose $(KERNEL_KEXEC_BUILD_LOCK) \
+	    $(MAKE) --no-print-directory _kernel-kexec-build PLATFORM=$(PLATFORM)
+
+.PHONY: _kernel-kexec-build
+_kernel-kexec-build: runtime kernel-kexec-config-check $(KERNEL_KEXEC_BUILD_DIR)/Makefile
 	@echo "Building kernel (kexec variant, link address 0x20000000)..."
 	$(CMAKE) --build $(KERNEL_KEXEC_BUILD_DIR)
 	@echo "kexec ELF: $(KERNEL_KEXEC_ELF)"
@@ -651,10 +676,16 @@ KERNEL_BZIMAGE_ELF       := $(KERNEL_BZIMAGE_BUILD_DIR)/slmos.elf
 KERNEL_BZIMAGE           := $(KERNEL_BZIMAGE_BUILD_DIR)/slmos.bzimage
 
 .PHONY: kernel-bzimage
-kernel-bzimage: runtime $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
+kernel-bzimage:
 ifneq ($(PLATFORM),X86_64)
 	@echo "kernel-bzimage requires PLATFORM=X86_64 (got $(PLATFORM))"; exit 1
 endif
+	@mkdir -p $(BUILD_DIR)
+	@flock --verbose $(KERNEL_BZIMAGE_BUILD_LOCK) \
+	    $(MAKE) --no-print-directory _kernel-bzimage-build PLATFORM=$(PLATFORM)
+
+.PHONY: _kernel-bzimage-build
+_kernel-bzimage-build: runtime $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
 	@echo "Building kernel (bzImage variant)..."
 	$(CMAKE) --build $(KERNEL_BZIMAGE_BUILD_DIR)
 	@echo "Wrapping ELF as Linux bzImage..."
@@ -1269,7 +1300,13 @@ QEMU_GUARD := $(shell if command -v systemd-run >/dev/null 2>&1 && systemd-run -
 
 # Build kernel with ENABLE_BOOT_TESTS (runs tests at boot and exits)
 .PHONY: kernel-test
-kernel-test: check-kernel-test-build-dir runtime kernel-test-config-check $(KERNEL_TEST_BUILD_DIR)/Makefile
+kernel-test:
+	@mkdir -p $(BUILD_DIR)
+	@flock --verbose $(KERNEL_TEST_BUILD_LOCK) \
+	    $(MAKE) --no-print-directory _kernel-test-build PLATFORM=$(PLATFORM)
+
+.PHONY: _kernel-test-build
+_kernel-test-build: check-kernel-test-build-dir runtime kernel-test-config-check $(KERNEL_TEST_BUILD_DIR)/Makefile
 	@echo "Building test kernel..."
 	$(CMAKE) --build $(KERNEL_TEST_BUILD_DIR)
 
