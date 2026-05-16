@@ -221,6 +221,11 @@ int test_suite_rng(void);
 /* SSH daemon (#199a / #893) — sshd_get_stats public API + per-conn
  * RX ring round-trip / capacity / wrap / pool-cap behaviour. */
 int test_suite_sshd(void);
+
+/* SSH host-key persistence tests (#199b / #892). Same NET_SSHD gate
+ * as the daemon itself; the TU only compiles when the host_key
+ * module does. */
+int test_suite_host_key(void);
 #endif
 
 /* General-purpose FDT reader tests (kernel/lib/fdt) */

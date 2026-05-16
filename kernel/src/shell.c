@@ -218,7 +218,12 @@ const shell_cmd_t builtin_commands[] = {
 const int NUM_BUILTIN_COMMANDS = sizeof(builtin_commands) / sizeof(builtin_commands[0]);
 
 /* External command slots for runtime registration */
-#define MAX_EXTERNAL_COMMANDS 16
+/* External command slots — sized to cover every production registration
+ * (net_shell, kernel_cmd, nvidia_gpu_register_shell_commands, etc.) plus
+ * a handful of test fixtures registered at runtime. Bumped from 16 in
+ * #199a / #893 to absorb the new `sshd` verb alongside the existing
+ * net verbs without crowding out test-time fixtures. */
+#define MAX_EXTERNAL_COMMANDS 24
 shell_cmd_t external_commands[MAX_EXTERNAL_COMMANDS];
 int num_external_commands = 0;
 

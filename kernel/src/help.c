@@ -436,6 +436,30 @@ static const struct help_entry help_entries[] = {
         "  - Buddy allocator state\n"
     ),
 
+#if defined(NET_SSHD)
+    HELP_TEXT("sshd",
+        "sshd - SSH daemon (port 22 / 2222)\n"
+        "\n"
+        "Usage:\n"
+        "  sshd                          Show status (alias of `sshd status`)\n"
+        "  sshd status                   Running state, port, KEX counters\n"
+        "  sshd start [port]             Bring up the listener (default 2222)\n"
+        "  sshd stop                     Tear down the listener + active sessions\n"
+        "  sshd fingerprint              SHA-256 fingerprint of the host public key\n"
+        "  sshd regenerate-host-key      Remove + recreate the host keypair (rare)\n"
+        "\n"
+        "Wired against the vendored wolfSSH (v1.4.18-stable) + wolfCrypt\n"
+        "(v5.7.4-stable) on top of the kernel's lwIP raw TCP API. KEX:\n"
+        "curve25519-sha256. Cipher: AES-256-GCM. Host key: Ed25519,\n"
+        "persisted to /mnt/files/etc/ssh/host_ed25519_key. The .pub file\n"
+        "is OpenSSH-compatible — `cat .pub >> ~/.ssh/known_hosts` works.\n"
+        "\n"
+        "#199c lands the shell-channel binding (today the daemon refuses\n"
+        "shell channels after KEX); #199d adds real password auth; #199e\n"
+        "flips the autostart default to ON behind the bootstrap gate.\n"
+    ),
+#endif
+
     HELP_TEXT("rng",
         "rng - Crypto-quality random number generator\n"
         "\n"

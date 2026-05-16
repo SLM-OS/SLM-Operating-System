@@ -15,6 +15,7 @@
 
 #include "sshd.h"
 
+#include "host_key.h"
 #include "net.h"
 #include "shell.h"
 #include "shell_internal.h"
@@ -82,6 +83,41 @@ static int do_start(int argc, char **argv)
     return rc;
 }
 
+static int do_fingerprint(void)
+{
+    const uint8_t *pub = sshd_internal_public_key();
+    if (!pub) {
+        uart_printf("sshd: no host key loaded — run `sshd start` first\r\n");
+        return -1;
+    }
+    char fp[HOST_KEY_FINGERPRINT_MAX];
+    if (host_key_fingerprint(pub, fp, sizeof(fp)) != HOST_KEY_OK) {
+        uart_printf("sshd: fingerprint computation failed\r\n");
+        return -1;
+    }
+    uart_printf("%s\r\n", fp);
+    return 0;
+}
+
+static int do_regenerate(void)
+{
+    uint8_t buf[HOST_KEY_RAW_BUF_LEN];
+    int rc = host_key_regenerate(buf);
+    /* Wipe the local stack copy regardless of result. */
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = 0u;
+    if (rc != HOST_KEY_OK) {
+        uart_printf("sshd: regenerate failed (rc=%d)\r\n", rc);
+        return rc;
+    }
+    /* Tear down the cached sshd state so the next sshd start picks up
+     * the new key. If the listener is currently up, stop it first. */
+    sshd_stop();
+    sshd_invalidate_hostkey();
+    uart_printf("sshd: host key regenerated; run `sshd start` to bring "
+                "the listener back up\r\n");
+    return 0;
+}
+
 int cmd_sshd(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "status") == 0) {
@@ -94,6 +130,13 @@ int cmd_sshd(int argc, char **argv)
     if (strcmp(argv[1], "stop") == 0) {
         return sshd_stop();
     }
-    uart_printf("usage: sshd [status|start [port]|stop]\r\n");
+    if (strcmp(argv[1], "fingerprint") == 0) {
+        return do_fingerprint();
+    }
+    if (strcmp(argv[1], "regenerate-host-key") == 0) {
+        return do_regenerate();
+    }
+    uart_printf("usage: sshd [status|start [port]|stop|fingerprint|"
+                "regenerate-host-key]\r\n");
     return -1;
 }

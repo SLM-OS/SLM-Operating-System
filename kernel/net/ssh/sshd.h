@@ -52,4 +52,14 @@ int sshd_stop(void);
 /* Fill `out` with current stats. Always succeeds when `out != NULL`. */
 void sshd_get_stats(struct sshd_stats *out);
 
+/* Internal accessor used by the `sshd fingerprint` shell verb to
+ * compute the SHA-256 of the live public key. Returns NULL if no
+ * host key has been loaded yet (sshd_start hasn't run). */
+const uint8_t *sshd_internal_public_key(void);
+
+/* Tell sshd to forget the cached host key so the next sshd_start
+ * call re-reads it from disk (or regenerates if removed). Used by
+ * `sshd regenerate-host-key`. */
+void sshd_invalidate_hostkey(void);
+
 #endif /* SSHD_H */
