@@ -162,7 +162,15 @@ static struct bench_wl_slot wl_slots[BENCH_WORKLOAD_MAX_TASKS] __attribute__((al
 /* Re-entry guard. `bench_workload_run` mutates the module-static
  * `wl_slots` array; a concurrent second caller (Lua, IPC, future
  * non-shell entry point) would silently corrupt records. Mirrors the
- * `in_split` pattern documented in kernel/CLAUDE.md §"Buddy Allocator". */
+ * `in_split` pattern documented in kernel/CLAUDE.md §"Buddy Allocator".
+ *
+ * Best-effort fail-loud, NOT a cross-CPU lock — on Pi 5 / Jetson the
+ * `volatile bool` write isn't guaranteed visible to a concurrent reader
+ * on another CPU without cache maintenance. The documented precondition
+ * (shell task on CPU 0, single-threaded) makes this a non-issue in
+ * practice. A future Lua/IPC binding that legitimately needs concurrent
+ * access must add an external spinlock around the whole run rather than
+ * lean on this guard. */
 static volatile bool bench_workload_in_flight = false;
 
 static void workload_busy_wait_us(uint32_t us)
