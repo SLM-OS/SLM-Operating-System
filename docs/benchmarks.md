@@ -316,6 +316,13 @@ Every sample in 1000 iterations measured 1,092 µs except one outlier at 1,100 �
 
 The per-op profiling harness in `runtime/src/inference/engine.rs` wraps every `execute_node` dispatch in CNTPCT timestamps and accumulates per-`OpType` counts and latencies. Enable with `model profile on`, run the workload, then `model profile show` (clear with `model profile reset`). Overhead is negligible: 200-iteration MNIST bench on pi-5-2 measured 3,011 µs/inference both profile-on and profile-off (run-to-run jitter swamps the harness cost).
 
+> **Scope: CPU inference only.** Every change in #56 — the per-op profiler, the 4×4 NEON micro-kernel, and the prefetch hints — lives in the CPU operator path (`runtime/src/inference/ops.rs` and `engine.rs::execute_node`). The GPU path is separate on two levels:
+>
+> - **Per-op GPU dispatch** (`engine.rs::exec_matmul_gpu` → `gpu_execute_matmul` FFI) bypasses `ops.rs::matmul_tiled` entirely; the 4×4 kernel never runs on GPU-served ops.
+> - **MNIST GPU fastpath** (`engine.rs::run_mnist_gpu_fastpath`, enabled by `gpu use inference on` + a per-model toggle, Jetson-only today) routes the whole graph through the GPU pre-uploaded handoff and returns from `run_inference` before `execute_node` is ever called. As a side effect, `model profile show` reports an empty table after a GPU-served bench — that's not a bug, it's the GPU fastpath legitimately bypassing the profile hook. Use `gpu use inference off` (default) for any per-op profile measurement.
+>
+> The 6.23× speedup below is therefore the CPU-baseline win. A similar treatment of the GPU path (e.g. tuning `scripts/gpu-kernel-mnist.c` or the GA10b channel-handoff dispatch) is out of scope for #56 and would be a separate effort.
+
 All measurements on Pi 5 (BCM2712 Cortex-A76 @ 2.4 GHz), pi-5-2, `BUILD_TYPE=Release`, `model bench mnist 200`. Per-op figures are microseconds; "calls" is the count of `execute_node` invocations across the run.
 
 **Baseline (pre-#56 — row × scalar `simd_fma_row` inner kernel):**
