@@ -401,7 +401,23 @@ abandoned exception frame on real ARM64 hardware).
   `sched.c`) now go through `cpu_logical_map[]` — the asm via the
   shared `ARM64_GET_LOGICAL_CPU` macro in `kernel/include/cpu_id_asm.h`,
   C via `cpu_logical_id()` in `<smp.h>`. `preempt_check_cpu_mpidr`
-  remains as a boot-time invariant check (#137 / #647). Two follow-on
+  remains as a boot-time invariant check (#137 / #647).
+  **GIC affinity routing was missed in that pass and was fixed
+  separately in #909** — `gic_set_affinity`,
+  `gic_exclude_cpu_from_spis`, and `gic_include_cpu_in_spis` in
+  `kernel/drivers/gic.c`'s GICv3 path were hardcoding `affinity = cpu`
+  into `GICD_IROUTER`, which targets MPIDR{Aff0=cpu} — every Jetson CPU
+  has Aff0=0, so the writes targeted nothing real and the `include`
+  path corrupted SPI routing enough to crash the kernel during
+  `test_suite_scheduler`'s isolation block. The fix resolves through
+  `cpu_logical_map[]` and applies TF-A's `MPIDR_AFFINITY_MASK | IRM_PE`
+  formula (`~/slmos-ref/tf-a/drivers/arm/gic/v3/gicv3_private.h:172`).
+  The new GICv3 exclude path also records re-routed SPIs in
+  `spi_excluded_by[cpu][]` so `include` can restore *exactly* the
+  SPIs that were on `cpu` rather than the prior `count % (cpu+1) == cpu`
+  formula that just stomped a fraction of IROUTERs. Any new GICv3-
+  IROUTER write site must use `gic_irouter_val_from_cpu()`; tests in
+  `kernel/tests/test_gic.c` pin the round-trip. Two follow-on
   fixes were needed before the trampoline path was hardware-stable:
   PR #752 added a NULL-safe entry guard to `maybe_arm_resched_trampoline`
   (Linux's xudc IRQ 198 was firing the moment `mmu_enable` unmasked
