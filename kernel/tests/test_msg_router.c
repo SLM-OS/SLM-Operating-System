@@ -311,6 +311,84 @@ static void test_wildcard_only_delivers_once(void)
     msg_router_unsubscribe_all(0);
 }
 
+/*
+ * Regression for #867 (#67c): msg_router_ack targets the mailbox returned
+ * by the most recent msg_router_receive() call, even when a newer message
+ * arrives in a DIFFERENT mailbox between receive() and ack().
+ *
+ * This is the LAST_RECEIVED machinery at runtime/src/msg_router.rs:232 +
+ * the ack-side targeting logic at lines 923-947. Without LAST_RECEIVED,
+ * ack would clear "the highest-priority ready mailbox", which could be a
+ * different mailbox than the one receive just returned — losing a message.
+ *
+ * Sequence:
+ *   1. publish_nowait /a (prio 5) — MA.ready=1
+ *   2. receive() — returns /a, sets LAST_RECEIVED[C] = (idx of /a)
+ *   3. publish_nowait /b (prio 5) — MB.ready=1 (still pre-ack)
+ *   4. ack() — must clear MA (the receive's source), NOT MB
+ *   5. receive() — must return /b (MA is cleared; MB is still ready)
+ *   6. ack() — clears MB
+ *   7. receive() — NULL (both mailboxes drained)
+ *
+ * The critical assertion is step 5: if ack had cleared the wrong mailbox
+ * (MB instead of MA), step 5 would still see MA ready and return /a.
+ *
+ * Scope note: this test covers LAST_RECEIVED targeting across MULTIPLE
+ * mailboxes (one component, two distinct topics). It does NOT cover the
+ * single-mailbox-overwrite-drop case (two messages arrive in the SAME
+ * mailbox before ack — second overwrites first) — that is a real
+ * limitation of the single-slot mailbox design tracked separately as
+ * #869.
+ */
+static void test_msg_router_ack_targets_last_received(void)
+{
+    msg_router_init();
+
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/a", 5));
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/b", 5));
+
+    /* Step 1: publish to /a. MA.ready=1. publish_nowait is used so the
+     * test runs single-threaded — the full ack-wait publish path is
+     * exercised by the cross-CPU variant in test_integration.c. */
+    int d_a = msg_router_publish_nowait((const uint8_t *)"/a",
+                                        (const uint8_t *)"A1");
+    TEST_ASSERT_EQUAL_INT(1, d_a);
+
+    /* Step 2: receive returns /a; LAST_RECEIVED[5] := /a's mailbox. */
+    uint8_t topic_buf[16];
+    const uint8_t *m1 = msg_router_receive(5, topic_buf);
+    TEST_ASSERT_NOT_NULL(m1);
+    TEST_ASSERT_EQUAL_STRING("/a", (const char *)topic_buf);
+    TEST_ASSERT_EQUAL_STRING("A1", (const char *)m1);
+
+    /* Step 3: publish to /b BEFORE acking /a. MB.ready=1. */
+    int d_b = msg_router_publish_nowait((const uint8_t *)"/b",
+                                        (const uint8_t *)"B1");
+    TEST_ASSERT_EQUAL_INT(1, d_b);
+
+    /* Step 4: ack. LAST_RECEIVED says /a, so MA is cleared and MB is
+     * untouched. There's no public read of MA.ready / MB.ready, so we
+     * verify the outcome via the next receive: if step 5 returns /b,
+     * then MA was cleared (otherwise the equal-priority scan would
+     * pick MA first because TOPICS[0]=/a was subscribed earlier). */
+    msg_router_ack(5);
+
+    /* Step 5: receive returns /b — the still-ready mailbox. THIS is
+     * the load-bearing assertion. If ack had wrongly cleared MB,
+     * we'd see /a returned again here. */
+    const uint8_t *m2 = msg_router_receive(5, topic_buf);
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_STRING("/b", (const char *)topic_buf);
+    TEST_ASSERT_EQUAL_STRING("B1", (const char *)m2);
+
+    /* Step 6: ack /b. Step 7: receive returns NULL. */
+    msg_router_ack(5);
+    const uint8_t *m3 = msg_router_receive(5, topic_buf);
+    TEST_ASSERT_NULL(m3);
+
+    msg_router_unsubscribe_all(5);
+}
+
 int test_suite_msg_router(void)
 {
     UNITY_BEGIN();
@@ -323,6 +401,7 @@ int test_suite_msg_router(void)
     RUN_TEST(test_subscribe_max_topics_sixteen);
     RUN_TEST(test_wildcard_exact_overlap_delivers_twice);
     RUN_TEST(test_wildcard_only_delivers_once);
+    RUN_TEST(test_msg_router_ack_targets_last_received);
     RUN_TEST(test_publish_times_out_without_ack);
     return UNITY_END();
 }
