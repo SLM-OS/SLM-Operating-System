@@ -271,7 +271,7 @@ kernel-config-check:
 kernel:
 	@mkdir -p $(BUILD_DIR)
 	@flock --verbose $(KERNEL_BUILD_LOCK) \
-	    $(MAKE) --no-print-directory _kernel-build PLATFORM=$(PLATFORM)
+	    $(MAKE) --no-print-directory _kernel-build
 
 .PHONY: _kernel-build
 _kernel-build: check-build-dir runtime kernel-config-check $(KERNEL_BUILD_DIR)/Makefile
@@ -550,7 +550,7 @@ ifneq ($(PLATFORM),X86_64)
 endif
 	@mkdir -p $(BUILD_DIR)
 	@flock --verbose $(KERNEL_KEXEC_BUILD_LOCK) \
-	    $(MAKE) --no-print-directory _kernel-kexec-build PLATFORM=$(PLATFORM)
+	    $(MAKE) --no-print-directory _kernel-kexec-build
 
 .PHONY: _kernel-kexec-build
 _kernel-kexec-build: runtime kernel-kexec-config-check $(KERNEL_KEXEC_BUILD_DIR)/Makefile
@@ -682,7 +682,7 @@ ifneq ($(PLATFORM),X86_64)
 endif
 	@mkdir -p $(BUILD_DIR)
 	@flock --verbose $(KERNEL_BZIMAGE_BUILD_LOCK) \
-	    $(MAKE) --no-print-directory _kernel-bzimage-build PLATFORM=$(PLATFORM)
+	    $(MAKE) --no-print-directory _kernel-bzimage-build
 
 .PHONY: _kernel-bzimage-build
 _kernel-bzimage-build: runtime $(KERNEL_BZIMAGE_BUILD_DIR)/Makefile
@@ -1303,7 +1303,7 @@ QEMU_GUARD := $(shell if command -v systemd-run >/dev/null 2>&1 && systemd-run -
 kernel-test:
 	@mkdir -p $(BUILD_DIR)
 	@flock --verbose $(KERNEL_TEST_BUILD_LOCK) \
-	    $(MAKE) --no-print-directory _kernel-test-build PLATFORM=$(PLATFORM)
+	    $(MAKE) --no-print-directory _kernel-test-build
 
 .PHONY: _kernel-test-build
 _kernel-test-build: check-kernel-test-build-dir runtime kernel-test-config-check $(KERNEL_TEST_BUILD_DIR)/Makefile
