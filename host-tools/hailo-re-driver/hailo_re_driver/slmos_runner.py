@@ -65,7 +65,28 @@ class ReplayError:
     stderr: str
 
 
-ReplayResult = Union[ReplayResponse, ReplayDivergence, ReplayError]
+@dataclass(frozen=True)
+class ReplayRefused:
+    """SLM-OS understood the command but declined to execute it.
+
+    Refuses are emitted by `hailo replay-step` for state conditions that
+    won't resolve on retry — the corpus has a duplicate seq, the target
+    seq is already validated, the target is a write, etc. Distinct from
+    ReplayError (which means the request never reached the kernel or the
+    output was unreadable) so callers can stop counting refuses as
+    "transient" and surface them as actionable feedback to the operator.
+
+    `reason` is one of: "parse_failed", "no_entry", "is_write",
+    "already_validated", "wrong_size". `raw_line` is the kernel's
+    diagnostic text verbatim for the log.
+    """
+
+    kind: str  # "refused"
+    reason: str
+    raw_line: str
+
+
+ReplayResult = Union[ReplayResponse, ReplayDivergence, ReplayError, ReplayRefused]
 
 
 # --------------------------------------------------------------------------- #
@@ -151,6 +172,33 @@ class MockSlmosRunner:
 
 _PROTOCOL_RE = re.compile(
     r"^HAILO_RE_CORPUS_(RESPONSE|DIVERGENCE) .*$", re.MULTILINE
+)
+
+# Kernel soft-refuse messages emitted by `hailo replay-step` in
+# kernel/ai_accel/hailo/hailo_shell.c. These are persistent state
+# conditions (corpus inconsistency, target seq is a write, etc.) — not
+# transients. The host classifies them as ReplayRefused so the wrapper
+# can surface the cause instead of burning the full replay timeout
+# waiting for a RESPONSE that will never come.
+_REFUSE_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("parse_failed", re.compile(
+        r"^hailo: replay-step: corpus parse failed \(rc=-?\d+.*$",
+        re.MULTILINE,
+    )),
+    ("no_entry", re.compile(
+        r"^hailo: replay-step: no entry at seq=\d+.*$", re.MULTILINE,
+    )),
+    ("is_write", re.compile(
+        r"^hailo: replay-step: seq=\d+ is a write — refusing.*$",
+        re.MULTILINE,
+    )),
+    ("already_validated", re.compile(
+        r"^hailo: replay-step: seq=\d+ is already validated.*$",
+        re.MULTILINE,
+    )),
+    ("wrong_size", re.compile(
+        r"^hailo: replay-step: seq=\d+ has size=\d+.*$", re.MULTILINE,
+    )),
 )
 
 
@@ -259,9 +307,19 @@ class SlmosRunner:
         # report) explicitly says tools must accept any string for the
         # reason tag — additive tags can be added without bumping the
         # corpus format_version, so the matcher must not narrow that.
+        # The labctl --until regex must fire on success AND on any
+        # kernel soft-refuse so the wrapper doesn't burn replay_timeout_s
+        # (30 s) waiting for a RESPONSE/DIVERGENCE that the kernel
+        # explicitly declined to produce. Each refuse phrase appears
+        # before its trailing newline, so anchoring on the tail token
+        # ("refusing", "(rc=", "supported") keeps the line intact for
+        # the downstream parser.
         until_re = (
             r"(?:slmos_sha=[0-9a-f]{40}|"
-            r"HAILO_RE_CORPUS_DIVERGENCE.*reason=\S+)"
+            r"HAILO_RE_CORPUS_DIVERGENCE.*reason=\S+|"
+            r"hailo: replay-step: corpus parse failed \(rc=|"
+            r"hailo: replay-step: no entry at seq=\d+|"
+            r"hailo: replay-step: seq=\d+ (?:is a write|is already validated|has size=\d+))"
         )
         return self.transport(
             [
@@ -322,9 +380,20 @@ class SlmosRunner:
 
 
 def parse_replay_output(text: str) -> ReplayResult:
-    """Find the first HAILO_RE_CORPUS_(RESPONSE|DIVERGENCE) line in text."""
+    """Classify `hailo replay-step` output. Prefers protocol lines
+    (RESPONSE/DIVERGENCE); falls back to soft-refuse detection so
+    state-condition messages from the kernel are surfaced as
+    ReplayRefused rather than the generic "no RESPONSE" timeout."""
     match = _PROTOCOL_RE.search(text)
     if not match:
+        for reason, pattern in _REFUSE_PATTERNS:
+            rm = pattern.search(text)
+            if rm:
+                return ReplayRefused(
+                    kind="refused",
+                    reason=reason,
+                    raw_line=rm.group(0),
+                )
         return ReplayError(
             kind="error",
             message="no HAILO_RE_CORPUS_RESPONSE or _DIVERGENCE line in output",
