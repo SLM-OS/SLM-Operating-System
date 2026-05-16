@@ -808,6 +808,7 @@ extern void rust_infer_batch_reset_stats(void);
  *   -2 — MNIST not loaded (call rust_model_load_builtin_mnist first)
  *   -3 — another stress run is in flight
  *   -4 — task spawn failure
+ *   -5 — join deadline exceeded
  */
 extern int32_t rust_infer_stress_run(uint32_t n_workers,
                                      uint32_t iters_per_worker,
