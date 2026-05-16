@@ -273,6 +273,55 @@ The AI scheduler adds ~40 µs overhead per scheduling decision on Pi 5 hardware.
 - Systems where optimal CPU placement matters more than scheduling overhead
 - Evaluation of learned scheduling policies against heuristic baselines
 
+### Scheduling-quality workload harness (#882, sub-ticket of #61)
+
+The `bench sched-policy` verb also accepts a workload mode that
+drives a representative task mix through `scheduler_add_task` so
+policies can be compared on real scheduling **quality** — deadline
+miss rate, completion-time percentiles, per-CPU balance, and
+throughput — not only inference-only decision latency. The
+inference-only mode (legacy `bench sched-policy` with no flags)
+still runs and remains backward compatible.
+
+```
+slmos> bench sched-policy --workload mixed --all
+slmos> bench sched-policy --workload deadline-heavy --policy ai_mlp
+slmos> bench sched-policy --list-workloads
+```
+
+Workloads are static templates defined in
+`kernel/sched/ai/workloads.c`:
+
+| Workload            | Tasks | Templates | Purpose                                                     |
+|---------------------|-------|-----------|-------------------------------------------------------------|
+| `mixed`             | 24    | 3         | Representative cross-section — short tight-deadline + long no-deadline tasks. Closest shape to the synthetic-baseline training set. |
+| `deadline-heavy`    | 24    | 3         | Every task carries a tight relative deadline; surfaces deadline-pressure policy differences. |
+| `latency-sensitive` | 24    | 2         | Very short tasks with very tight deadlines; CPU-balance matters most. |
+| `cpu-bound`         | 16    | 2         | Long tasks, no deadlines; surfaces work-balance differences without deadline pressure. |
+
+Output format — one row per policy, columns `Done / DL-tasks /
+DL-miss% / p50 us / p99 us / max us / CPU-cov / Tasks/s`. `CPU-cov`
+is the coefficient of variation of completed-task counts across
+CPUs (lower = more balanced). `Tasks/s` reports steady-state
+throughput. Per the [exploratory-OS framing][i848], the table is
+characterization data; no winning policy is declared in the output.
+
+[i848]: https://github.com/SLM-OS/SLM-Operating-System/issues/848
+
+The harness wraps the existing pluggable-policy interface — switching
+policies between rows via `sched_set_policy`, dispatching tasks
+through `scheduler_add_task` so the active policy's `assign_cpu`
+callback is exercised, then restoring the prior policy on the way
+out. Worker tasks run at `TASK_PRIORITY_HIGH` so they preempt the
+shell's busy-wait on cooperative-preempt platforms.
+
+Real hardware comparison tables for Pi 5 (4 CPUs) and Jetson Orin
+Nano (6 CPUs) — across all four registered policies, on both the
+synthetic-trained baseline weights and the SLM-OS-fine-tuned weights
+— land in #884 (61d) after the trace-capture (#880) and fine-tune
+(#879) sub-tickets complete. The harness lands here so that work has
+a stable target shape.
+
 ### XGBoost cascade workflow
 
 The XGBoost cascade is loaded at runtime — there is no kernel-image

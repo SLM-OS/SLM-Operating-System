@@ -4897,6 +4897,121 @@ static void test_task_pinned_to_cpu0(void)
 }
 
 /* ============================================================================
+ * Real-workload comparison harness tests (#882, sub-ticket of #61)
+ *
+ * The harness lives in `kernel/sched/ai/workloads.c` and is exercised
+ * from the shell via `bench sched-policy --workload <name>`. These
+ * tests pin the public API (workload lookup, result struct shape) so a
+ * future refactor can't silently change the table the docs cite.
+ * ============================================================================ */
+
+#ifdef CONFIG_AI_SCHEDULER
+#include "../sched/ai/workloads.h"
+
+/* Integer-only smoke: lookup table is what `bench sched-policy
+ * --list-workloads` advertises and what the sibling-repo training
+ * pipeline expects to read back. */
+static void test_bench_workload_find_known_names(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(4, bench_workload_count());
+
+    const struct bench_workload *mixed = bench_workload_find("mixed");
+    TEST_ASSERT_NOT_NULL(mixed);
+    TEST_ASSERT_NOT_NULL(mixed->templates);
+    TEST_ASSERT_TRUE(mixed->n_templates >= 1);
+    TEST_ASSERT_TRUE(mixed->n_tasks_total > 0);
+    TEST_ASSERT_TRUE(mixed->n_tasks_total <= BENCH_WORKLOAD_MAX_TASKS);
+
+    TEST_ASSERT_NOT_NULL(bench_workload_find("deadline-heavy"));
+    TEST_ASSERT_NOT_NULL(bench_workload_find("latency-sensitive"));
+    TEST_ASSERT_NOT_NULL(bench_workload_find("cpu-bound"));
+
+    TEST_ASSERT_NULL(bench_workload_find("does-not-exist"));
+    TEST_ASSERT_NULL(bench_workload_find(NULL));
+
+    /* Pin a representative template value so a future edit that
+     * accidentally changes a workload's runtime by an order of
+     * magnitude surfaces here rather than in silent table drift. */
+    TEST_ASSERT_TRUE(mixed->templates[0].est_runtime_us > 0);
+    TEST_ASSERT_TRUE(mixed->templates[0].est_runtime_us < 10000);
+    TEST_ASSERT_TRUE(mixed->arrival_spacing_us < 10000);
+}
+
+static void test_bench_workload_get_enumerates_all(void)
+{
+    /* Every index < count must return a populated workload; every
+     * index >= count must return NULL. This keeps `--list-workloads`
+     * honest against a future entry being added without bumping the
+     * count or vice versa. */
+    uint32_t n = bench_workload_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const struct bench_workload *wl = bench_workload_get(i);
+        TEST_ASSERT_NOT_NULL(wl);
+        TEST_ASSERT_NOT_NULL(wl->name);
+        TEST_ASSERT_NOT_NULL(wl->templates);
+        TEST_ASSERT_TRUE(wl->n_templates >= 1);
+        TEST_ASSERT_TRUE(wl->n_tasks_total > 0);
+    }
+    TEST_ASSERT_NULL(bench_workload_get(n));
+    TEST_ASSERT_NULL(bench_workload_get(n + 100));
+}
+
+static void test_bench_workload_run_rejects_bad_args(void)
+{
+    struct bench_workload_result r;
+    const struct sched_policy_ops *heur = sched_find_policy("heuristic");
+    const struct bench_workload *mixed = bench_workload_find("mixed");
+    TEST_ASSERT_NOT_NULL(heur);
+    TEST_ASSERT_NOT_NULL(mixed);
+
+    TEST_ASSERT_EQUAL_INT(-1, bench_workload_run(NULL, mixed, &r));
+    TEST_ASSERT_EQUAL_INT(-1, bench_workload_run(heur, NULL, &r));
+    TEST_ASSERT_EQUAL_INT(-1, bench_workload_run(heur, mixed, NULL));
+}
+
+#if defined(ENABLE_BOOT_TESTS)
+/* End-to-end: heuristic policy + mixed workload. We don't assert any
+ * specific scheduling-quality threshold (QEMU timing is jittery and
+ * the harness is characterization-only per #848). Instead we pin the
+ * invariants that downstream tooling depends on: dispatch != 0,
+ * `tasks_completed <= tasks_dispatched`, percentile fields populated
+ * when any task completed, throughput nonzero when any task
+ * completed. */
+static void test_bench_workload_run_heuristic_mixed(void)
+{
+    const struct sched_policy_ops *heur = sched_find_policy("heuristic");
+    const struct bench_workload *mixed = bench_workload_find("mixed");
+    TEST_ASSERT_NOT_NULL(heur);
+    TEST_ASSERT_NOT_NULL(mixed);
+
+    struct bench_workload_result r = { 0 };
+    int rc = bench_workload_run(heur, mixed, &r);
+    TEST_ASSERT_EQUAL_INT(0, rc);
+
+    TEST_ASSERT_TRUE(r.tasks_dispatched > 0);
+    TEST_ASSERT_TRUE(r.tasks_dispatched <= mixed->n_tasks_total);
+    TEST_ASSERT_TRUE(r.tasks_completed <= r.tasks_dispatched);
+    TEST_ASSERT_TRUE(r.deadline_misses <= r.deadline_tasks);
+    TEST_ASSERT_TRUE(r.duration_ns > 0);
+    if (r.tasks_completed > 0) {
+        TEST_ASSERT_TRUE(r.completion_p50_us <= r.completion_p99_us);
+        TEST_ASSERT_TRUE(r.completion_p99_us <= r.completion_max_us);
+        TEST_ASSERT_TRUE(r.throughput_milli > 0);
+    }
+
+    /* Sum of per-CPU completions == total completions (no records
+     * leak past the cpu_completions[] array). */
+    uint32_t cpu_sum = 0;
+    for (uint32_t i = 0; i < MAX_CPUS; i++) {
+        cpu_sum += r.cpu_completions[i];
+    }
+    TEST_ASSERT_EQUAL_UINT32(r.tasks_completed, cpu_sum);
+}
+#endif /* ENABLE_BOOT_TESTS */
+
+#endif /* CONFIG_AI_SCHEDULER */
+
+/* ============================================================================
  * Test Suite Entry Point
  * ============================================================================ */
 
@@ -5164,6 +5279,14 @@ int test_suite_scheduler(void)
     RUN_TEST(test_sched_cmd_policy_list);
     RUN_TEST(test_sched_cmd_stats);
     RUN_TEST(test_sched_cmd_invalid);
+
+    /* #882 — real-workload comparison harness (kernel/sched/ai/workloads.c). */
+    RUN_TEST(test_bench_workload_find_known_names);
+    RUN_TEST(test_bench_workload_get_enumerates_all);
+    RUN_TEST(test_bench_workload_run_rejects_bad_args);
+#if defined(ENABLE_BOOT_TESTS)
+    RUN_TEST(test_bench_workload_run_heuristic_mixed);
+#endif
 #endif
 
     return UnityEnd();
