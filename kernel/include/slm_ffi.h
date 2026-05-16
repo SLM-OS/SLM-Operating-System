@@ -712,6 +712,78 @@ extern int rust_inference_test(void);
 extern int rust_batch_inference_test(void);
 
 /*
+ * Dynamic-batching admin + stress FFI (#860). All entrypoints are
+ * safe to call from any task context; the shell and Lua bindings
+ * forward to them directly.
+ */
+
+/* Status snapshot — must stay in lockstep with `RustBatchStatus` in
+ * runtime/src/lib.rs. */
+typedef struct {
+    uint32_t enabled;
+    uint32_t batch_size;
+    uint32_t timeout_us;
+    uint32_t queue_depth;
+    uint64_t total_submitted;
+    uint64_t completed;
+    uint64_t failed;
+    uint64_t batches_dispatched;
+    uint64_t batches_full;
+    uint64_t batches_timeout;
+    uint64_t bypassed_deadline;
+    uint64_t singleton_dispatches;
+} RustBatchStatus;
+
+/* Stress workload result — must stay in lockstep with
+ * `RustStressResult` in runtime/src/lib.rs. */
+typedef struct {
+    uint32_t n_workers;
+    uint32_t iters_per_worker;
+    uint64_t success_count;
+    uint64_t error_count;
+    uint64_t wall_ns;
+    uint64_t total_lat_ns;
+    uint64_t min_lat_ns;
+    uint64_t max_lat_ns;
+    uint64_t batches_dispatched;
+    uint64_t batches_full;
+    uint64_t batches_timeout;
+    uint64_t bypassed_deadline;
+    uint64_t singleton_dispatches;
+} RustStressResult;
+
+/* `on != 0` enables batched dispatch; `on == 0` disables. Default OFF. */
+extern void rust_infer_batch_set_mode(int32_t on);
+
+/* Returns 1 if batched dispatch is currently enabled, 0 otherwise. */
+extern int32_t rust_infer_batch_get_mode(void);
+
+/* Configure batch-size threshold + flush timeout. Out-of-range values
+ * clamp to the nearest bound. Returns 0 on success. */
+extern int32_t rust_infer_batch_set_config(uint32_t batch_size, uint32_t timeout_us);
+
+/* Fill `out` with the current batching status snapshot. Returns 0 on
+ * success, -1 if `out` is null. */
+extern int32_t rust_infer_batch_status(RustBatchStatus *out);
+
+/* Reset the SchedulerStats counters. */
+extern void rust_infer_batch_reset_stats(void);
+
+/* Run the concurrent stress workload. Spawns `n_workers` tasks each
+ * running `iters_per_worker` MNIST inferences against the batched
+ * dispatcher, joins, and writes the aggregated result into `out`.
+ *
+ * Returns 0 on success, negative on error:
+ *   -1 — `out` is null, or n_workers/iters out of range
+ *   -2 — MNIST not loaded (call rust_model_load_builtin_mnist first)
+ *   -3 — another stress run is in flight
+ *   -4 — task spawn failure
+ */
+extern int32_t rust_infer_stress_run(uint32_t n_workers,
+                                     uint32_t iters_per_worker,
+                                     RustStressResult *out);
+
+/*
  * Inference statistics structure.
  */
 typedef struct {

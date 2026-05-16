@@ -69,6 +69,7 @@ int cmd_diag(int argc, char **argv);
 int cmd_vmm(int argc, char **argv);
 int cmd_ipc(int argc, char **argv);
 int cmd_model(int argc, char **argv);
+int cmd_infer(int argc, char **argv);
 int cmd_slm(int argc, char **argv);
 int cmd_dtb(int argc, char **argv);
 int cmd_gpu(int argc, char **argv);
