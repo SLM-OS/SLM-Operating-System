@@ -83,6 +83,81 @@ int slm_wolfcrypt_seed(unsigned char *output, unsigned int sz)
 }
 
 /* ---------------------------------------------------------------- */
+/* Freestanding-toolchain string ops needed by wolfSSH               */
+/* ---------------------------------------------------------------- */
+
+/* The bare-metal aarch64-none-elf toolchain's newlib subset declares
+ * these as standard names but doesn't ship implementations linkable
+ * in -nostdlib builds. wolfssh references them from internal.c and
+ * ssh.c — provide minimal in-kernel implementations.
+ *
+ * `strncasecmp` is byte-wise case-insensitive compare, ASCII only.
+ * `strtok_r` is the reentrant string tokeniser. Both implementations
+ * are straight RFC/POSIX semantics, no locale awareness. */
+
+static int slm_tolower(int c)
+{
+    return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+}
+
+int strncasecmp(const char *a, const char *b, size_t n)
+{
+    while (n-- != 0) {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+        int la = slm_tolower(ca);
+        int lb = slm_tolower(cb);
+        if (la != lb) return la - lb;
+        if (ca == 0)  return 0;
+    }
+    return 0;
+}
+
+char *strtok_r(char *str, const char *delim, char **saveptr)
+{
+    if (saveptr == NULL || delim == NULL) return NULL;
+    char *s = (str != NULL) ? str : *saveptr;
+    if (s == NULL) return NULL;
+
+    /* Skip leading delimiters. */
+    while (*s != '\0') {
+        const char *d = delim;
+        while (*d != '\0' && *s != *d) d++;
+        if (*d == '\0') break;
+        s++;
+    }
+    if (*s == '\0') { *saveptr = s; return NULL; }
+
+    char *tok = s;
+    /* Find end of token. */
+    while (*s != '\0') {
+        const char *d = delim;
+        while (*d != '\0' && *s != *d) d++;
+        if (*d != '\0') { *s++ = '\0'; *saveptr = s; return tok; }
+        s++;
+    }
+    *saveptr = s;
+    return tok;
+}
+
+/* ---------------------------------------------------------------- */
+/* Unused wolfSSL function stubs                                     */
+/* ---------------------------------------------------------------- */
+
+/* wolfSSH's DoPemKey calls wc_KeyPemToDer unconditionally — but the
+ * PEM key format isn't reachable in our SLM-OS code (we use the
+ * RAW format for the in-memory Ed25519 key, OPENSSH for keys on
+ * disk). Returning a negative value signals the parse error path,
+ * which wolfSSH handles cleanly. */
+int wc_KeyPemToDer(const unsigned char *pem, int pemSz,
+                   unsigned char *buff, int buffSz,
+                   const char *pass)
+{
+    (void)pem; (void)pemSz; (void)buff; (void)buffSz; (void)pass;
+    return -1;
+}
+
+/* ---------------------------------------------------------------- */
 /* Time hook — provided by lua_stubs.c                               */
 /* ---------------------------------------------------------------- */
 /*

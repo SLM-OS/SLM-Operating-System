@@ -1876,7 +1876,12 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
         kernel/lib/wolfssh/src/internal.c
         kernel/lib/wolfssh/src/io.c
         kernel/lib/wolfssh/src/log.c
-        kernel/lib/wolfssh/src/misc.c
+        # wolfssh's misc.c duplicates ForceZero/ConstantCompare/min/c32toa/ato32
+        # which wolfcrypt's misc.c already defines; including both produces
+        # multiple-definition link errors. wolfcrypt's set is a superset, so
+        # we drop the wolfssh one and let wolfssh inline the helpers from
+        # wolfcrypt at link time.
+        # kernel/lib/wolfssh/src/misc.c
         kernel/lib/wolfssh/src/port.c
         kernel/lib/wolfssh/src/ssh.c
         kernel/lib/wolfssh/src/keygen.c
@@ -1904,8 +1909,15 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
     )
     target_link_libraries(wolfssh PRIVATE wolfcrypt)
 
-    # SLM-OS-side glue: time, RNG seed, future lwIP IO callbacks.
-    target_sources(slmos.elf PRIVATE kernel/net/ssh/wolf_os.c)
+    # SLM-OS-side glue: time, RNG seed, lwIP IO callbacks, listener,
+    # accept loop, shell verb.
+    target_sources(slmos.elf PRIVATE
+        kernel/net/ssh/wolf_os.c
+        kernel/net/ssh/sshd.c
+        kernel/net/ssh/sshd_shell.c
+    )
+    target_include_directories(slmos.elf PRIVATE
+        ${CMAKE_SOURCE_DIR}/kernel/net/ssh)
     target_link_libraries(slmos.elf PRIVATE wolfssh wolfcrypt)
 endif()
 
