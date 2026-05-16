@@ -222,6 +222,9 @@ int test_suite_elf(void);
 /* Message router tests (Rust FFI, ARM64 only) */
 int test_suite_msg_router(void);
 
+/* GIC driver tests (GICv3 affinity round-trip, #909) */
+int test_suite_gic(void);
+
 /* Steal-deque unit tests (#59 Phase A) */
 int test_suite_steal_deque(void);
 

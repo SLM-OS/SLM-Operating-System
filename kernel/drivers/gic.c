@@ -863,94 +863,228 @@ void gic_include_cpu_in_spis(uint32_t cpu)
 #else /* GIC_VERSION == 3 */
 
 /*
+ * GICv3 affinity routing — MPIDR-correct, dual-cluster safe.
+ *
+ * GICD_IROUTER<n> encodes the SPI target as MPIDR affinity bits
+ * (Aff0/Aff1/Aff2/Aff3) plus the IRM bit at [31] selecting between
+ * route-to-any-PE (IRM=1) and route-to-specific-PE (IRM=0).
+ *
+ * Earlier revisions of this driver hardcoded `affinity = cpu` (Aff0
+ * holds the logical CPU number). That assumes a single-cluster layout.
+ * Jetson Orin Nano is dual-cluster (Aff2.Aff1 = 0.0, 0.1, 0.2, 0.3,
+ * 1.2, 1.3 for CPUs 0..5) — every CPU has Aff0=0; the cluster
+ * differentiator is Aff1/Aff2. The hardcoded form wrote nonsense
+ * affinity values that targeted no actual CPU; on the Jetson it
+ * surfaced as a kernel panic when `sched_isolate_core(1)` ran
+ * `gic_include_cpu_in_spis(1)` and re-routed half the SPIs to a
+ * nonexistent affinity (issue #909).
+ *
+ * cpu_logical_map[] (populated by smp_init from PSCI / DT) is the
+ * canonical logical-CPU → MPIDR table — same source of truth used by
+ * the trampoline path (PR #647). All GICv3 affinity sites now resolve
+ * through it. The mask matches TF-A's gicd_irouter_val_from_mpidr()
+ * (`~/slmos-ref/tf-a/drivers/arm/gic/v3/gicv3_private.h:172`):
+ * keep Aff0..Aff3, clear MPIDR_EL1's U / MT / reserved bits.
+ */
+
+/* IRM bit at [31]: 0 = route to single PE specified by affinity,
+ * 1 = route to any participating PE (1-of-N routing). Functions in
+ * this file always use single-PE routing for predictable behaviour. */
+#define IROUTER_IRM_PE          (0ULL << 31)
+
+/* MPIDR affinity mask — keeps Aff0..Aff3, clears the MPIDR_EL1
+ * U (bit 30), MT (bit 24), and reserved bits. Matches TF-A's
+ * MPIDR_AFFINITY_MASK for AArch64. */
+#define IROUTER_AFF_MASK        0xFF00FFFFFFULL
+
+/* Maximum SPI count the GICv3 spec allows is IRQ 1019 (32..1019).
+ * GICv4-style ESPIs are not used; sticking to the classic range
+ * keeps the per-CPU save table small (124 bytes / CPU). */
+#define GIC_MAX_SPIS            988  /* IRQs 32..1019 inclusive */
+#define GIC_SPI_BITMAP_BYTES    ((GIC_MAX_SPIS + 7) / 8)
+
+/*
+ * Per-CPU bitmap recording which SPIs we re-routed AWAY from `cpu`
+ * during the last gic_exclude_cpu_from_spis(cpu) call. The matching
+ * gic_include_cpu_in_spis(cpu) restores exactly those SPIs back to
+ * `cpu` and clears the bits. Static BSS storage; no allocator
+ * required. ~744 bytes for MAX_CPUS=6.
+ *
+ * Each bit position B corresponds to SPI (GIC_SPI_START + B), i.e.
+ * IRQ 32 is bit 0, IRQ 33 is bit 1, etc.
+ */
+static uint8_t spi_excluded_by[MAX_CPUS][GIC_SPI_BITMAP_BYTES];
+
+static inline bool spi_excluded_test(uint32_t cpu, uint32_t spi_off)
+{
+    if (cpu >= MAX_CPUS || spi_off >= GIC_MAX_SPIS) {
+        return false;
+    }
+    return (spi_excluded_by[cpu][spi_off / 8] >> (spi_off % 8)) & 1u;
+}
+
+static inline void spi_excluded_set(uint32_t cpu, uint32_t spi_off)
+{
+    if (cpu >= MAX_CPUS || spi_off >= GIC_MAX_SPIS) {
+        return;
+    }
+    spi_excluded_by[cpu][spi_off / 8] |= (uint8_t)(1u << (spi_off % 8));
+}
+
+static inline void spi_excluded_clear(uint32_t cpu, uint32_t spi_off)
+{
+    if (cpu >= MAX_CPUS || spi_off >= GIC_MAX_SPIS) {
+        return;
+    }
+    spi_excluded_by[cpu][spi_off / 8] &= (uint8_t)~(1u << (spi_off % 8));
+}
+
+/*
+ * Convert a logical CPU id into a GICD_IROUTER value targeting that CPU.
+ *
+ * Returns the affinity-and-IRM-bit value to write into IROUTER. Caller
+ * is responsible for any RWP synchronisation.
+ *
+ * Defensive: if `logical_cpu` is out of range or not in the logical
+ * map (cpu_logical_map slot zero), returns 0 — which on most GICv3
+ * implementations means "route to MPIDR{0,0,0,0}", i.e. typically the
+ * boot CPU. Out-of-range writes are filtered at the API boundary
+ * (gic_set_affinity, gic_exclude_cpu_from_spis); this fallback exists
+ * only for the unreachable-by-construction branch and is logged.
+ */
+static uint64_t gic_irouter_val_from_cpu(uint32_t logical_cpu)
+{
+    if (logical_cpu >= cpu_count) {
+        return 0;
+    }
+    uint64_t mpidr = cpu_logical_map[logical_cpu];
+    return (mpidr & IROUTER_AFF_MASK) | IROUTER_IRM_PE;
+}
+
+/*
+ * Reverse lookup: given an IROUTER value (or any MPIDR-shaped value),
+ * find which logical CPU it targets. Returns the bitmask `1 << logical`
+ * on match, or 0 if no logical CPU matches.
+ */
+static uint32_t gic_cpu_mask_from_irouter(uint64_t irouter)
+{
+    uint64_t aff = irouter & IROUTER_AFF_MASK;
+    for (uint32_t i = 0; i < cpu_count; i++) {
+        if ((cpu_logical_map[i] & IROUTER_AFF_MASK) == aff) {
+            return 1u << i;
+        }
+    }
+    return 0;
+}
+
+/*
  * Set interrupt target CPU for an SPI (GICv3).
  *
- * GICv3 uses IROUTER registers with MPIDR-style affinity routing.
- * cpu_mask is interpreted as a single CPU ID (lowest set bit).
+ * cpu_mask is interpreted as a single CPU ID (lowest set bit). Returns
+ * 0 on success, -1 if irq is not an SPI or no valid CPU is set.
  */
 int gic_set_affinity(uint32_t irq, uint32_t cpu_mask)
 {
-    /* Only SPIs (32+) can have their affinity changed */
     if (irq < GIC_SPI_START) {
         return -1;  /* SGIs and PPIs are per-CPU, cannot be routed */
     }
 
-    /* Find first CPU in mask (GICv3 routes to single CPU, not mask) */
+    /* Find first CPU in mask. */
     uint32_t cpu = 0;
-    while (cpu < 32 && !(cpu_mask & (1 << cpu))) {
+    while (cpu < 32 && !(cpu_mask & (1u << cpu))) {
         cpu++;
     }
-    if (cpu >= 32) {
-        return -1;  /* No CPU in mask */
+    if (cpu >= cpu_count) {
+        return -1;
     }
 
-    /* Build affinity value (assuming single cluster) */
-    uint64_t affinity = cpu;  /* Aff0 = CPU number */
-    GICD_IROUTER(irq) = affinity;
-
+    GICD_IROUTER(irq) = gic_irouter_val_from_cpu(cpu);
     return 0;
 }
 
 /*
  * Get interrupt target CPU for an SPI (GICv3).
  *
- * Returns a bitmask for API compatibility with GICv2.
+ * Returns a bitmask (`1 << logical_cpu`) for API compatibility with
+ * GICv2, or 0 if the current IROUTER value doesn't map to any logical
+ * CPU in `cpu_logical_map[]`.
  */
 uint32_t gic_get_affinity(uint32_t irq)
 {
-    /* Only SPIs (32+) have configurable affinity */
     if (irq < GIC_SPI_START) {
         return 0;
     }
-
-    uint64_t affinity = GICD_IROUTER(irq);
-    uint32_t cpu = affinity & 0xFF;  /* Aff0 */
-
-    return (cpu < 32) ? (1 << cpu) : 0;
+    return gic_cpu_mask_from_irouter(GICD_IROUTER(irq));
 }
 
 /*
  * Route all SPIs away from a CPU (GICv3).
  *
- * Re-routes SPIs currently targeting this CPU to CPU 0.
+ * For every SPI currently targeting `cpu`, re-route to CPU 0 and
+ * record the move in `spi_excluded_by[cpu]`. The paired
+ * `gic_include_cpu_in_spis(cpu)` walks the recorded bitmap and
+ * restores routing to `cpu`.
+ *
+ * Out-of-range `cpu`, including out-of-range logical-map slots, is a
+ * no-op (returns silently). Re-entering after a successful exclude
+ * without an include in between is also safe: only currently-
+ * targeting SPIs are recorded, so a second exclude finds nothing.
  */
 void gic_exclude_cpu_from_spis(uint32_t cpu)
 {
-    /* Get number of interrupt lines from TYPER */
+    if (cpu >= cpu_count || cpu >= MAX_CPUS) {
+        return;
+    }
+
+    uint64_t cpu_aff   = gic_irouter_val_from_cpu(cpu) & IROUTER_AFF_MASK;
+    uint64_t cpu0_irouter = gic_irouter_val_from_cpu(0);
+
     uint32_t typer = GICD_TYPER;
     uint32_t num_irqs = ((typer & 0x1F) + 1) * 32;
+    if (num_irqs > GIC_SPI_START + GIC_MAX_SPIS) {
+        num_irqs = GIC_SPI_START + GIC_MAX_SPIS;
+    }
 
-    /* Check each SPI's routing */
     for (uint32_t irq = GIC_SPI_START; irq < num_irqs; irq++) {
-        uint64_t affinity = GICD_IROUTER(irq);
-        if ((affinity & 0xFF) == cpu) {
-            /* Re-route to CPU 0 */
-            GICD_IROUTER(irq) = 0;
+        uint64_t current = GICD_IROUTER(irq);
+        if ((current & IROUTER_AFF_MASK) == cpu_aff) {
+            GICD_IROUTER(irq) = cpu0_irouter;
+            spi_excluded_set(cpu, irq - GIC_SPI_START);
         }
     }
 
-    DEBUG_PRINT("GIC: Excluded CPU %u from SPI routing", cpu);
+    DEBUG_PRINT("GIC: Excluded CPU %u from SPI routing (aff %llx)",
+                cpu, (unsigned long long)cpu_aff);
 }
 
 /*
- * Restore SPI routing to include a CPU (GICv3).
+ * Restore SPI routing for a CPU (GICv3).
  *
- * Routes SPIs currently on CPU 0 to this CPU (for load balancing).
- * This is a simplified implementation; production code might be smarter.
+ * Walks the bitmap populated by the matching
+ * `gic_exclude_cpu_from_spis(cpu)` and restores each recorded SPI's
+ * routing back to `cpu`. Bits are cleared as they're processed so a
+ * later exclude/include pair starts from a clean slate.
  */
 void gic_include_cpu_in_spis(uint32_t cpu)
 {
-    /* Get number of interrupt lines from TYPER */
+    if (cpu >= cpu_count || cpu >= MAX_CPUS) {
+        return;
+    }
+
+    uint64_t cpu_irouter = gic_irouter_val_from_cpu(cpu);
+
     uint32_t typer = GICD_TYPER;
     uint32_t num_irqs = ((typer & 0x1F) + 1) * 32;
+    if (num_irqs > GIC_SPI_START + GIC_MAX_SPIS) {
+        num_irqs = GIC_SPI_START + GIC_MAX_SPIS;
+    }
 
-    /* Route some SPIs to this CPU (every Nth SPI) */
-    uint32_t count = 0;
     for (uint32_t irq = GIC_SPI_START; irq < num_irqs; irq++) {
-        if ((count % (cpu + 1)) == cpu) {
-            GICD_IROUTER(irq) = cpu;
+        uint32_t spi_off = irq - GIC_SPI_START;
+        if (spi_excluded_test(cpu, spi_off)) {
+            GICD_IROUTER(irq) = cpu_irouter;
+            spi_excluded_clear(cpu, spi_off);
         }
-        count++;
     }
 
     DEBUG_PRINT("GIC: Included CPU %u in SPI routing", cpu);

@@ -140,6 +140,7 @@ int test_harness_run_all(void)
     total_failures += test_suite_model_engine();
 #if !defined(PLATFORM_X86_64)
     total_failures += test_suite_msg_router();
+    total_failures += test_suite_gic();
     total_failures += test_suite_coop_preempt();
     total_failures += test_suite_cpu_supervisor();
     total_failures += test_suite_mpidr_lookup();
