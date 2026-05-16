@@ -437,7 +437,14 @@ void kernel_main(void *dtb)
      * lwip_rand_slm — the latter is for TCP ISN choices and is
      * explicitly non-crypto. See `kernel/include/rng.h`. */
     INFO("Initializing RNG...");
-    (void)rng_init();
+    if (rng_init() != 0) {
+        /* rng_init still bootstrapped the jitter pool — the non-zero
+         * return only means firmware-supplied /chosen entropy was
+         * absent. On QEMU TCG with a stock DTB this is normal; on Pi 5
+         * / Jetson it can flag a firmware-config regression. The
+         * jitter source's CNTPCT samples remain the floor. */
+        WARN("RNG firmware seed absent — boot entropy is jitter-only");
+    }
 
 #if defined(PLATFORM_HAS_NC_MEMORY)
     /* Zero the NC scheduler init flag BEFORE booting secondary CPUs.

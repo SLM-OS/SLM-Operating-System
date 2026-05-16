@@ -98,9 +98,18 @@ const char *rng_source_name(enum rng_source s);
 bool rng_has_trng(void);
 
 /*
- * Statistics surfaced to the `rng` shell command + diagnostics. Read
- * atomically by the caller (volatile u64 reads). Counters are
- * monotonic since boot; resetting requires a reboot. */
+ * Statistics surfaced to the `rng` shell command + diagnostics. Each
+ * counter is a `volatile uint64_t` updated under `g_rng_lock`; reads
+ * are atomic per-field but the struct as a whole is a best-effort
+ * snapshot — concurrent rng_get_bytes calls may interleave between
+ * field reads, leaving the snapshot internally inconsistent. Counters
+ * are monotonic since boot; resetting requires a reboot.
+ *
+ * Latency: rng_get_bytes holds `g_rng_lock` (IRQ-disable) across the
+ * jitter SHA-256 squeeze. A 256-byte request is ~80 µs of disabled
+ * IRQs on Pi 5. Safe for SSH-handshake frequency; not safe for an
+ * inner hot loop — re-shape the API to a per-task DRBG if a hot-path
+ * crypto consumer appears. */
 struct rng_stats {
     uint64_t bytes_served;           /* total returned to callers */
     uint64_t hw_calls;               /* underlying TRNG-instruction invocations */
@@ -142,7 +151,16 @@ enum rng_source rng_test_force_source(enum rng_source src);
  * Test hook: inject a synthetic chunk of "TRNG output" so the arch
  * path can be exercised in a self-contained unit test. Returns the
  * number of bytes accepted. Cleared on the next rng_init or on an
- * explicit pass of NULL/0. */
+ * explicit pass of NULL/0.
+ *
+ * **Lifetime:** the buffer is stored by reference, not copied. The
+ * caller MUST ensure `bytes` remains live (not freed, not stack-
+ * popped, not overwritten with unrelated data) until either the
+ * injection drains naturally via rng_get_bytes calls or the caller
+ * explicitly clears the injection with `rng_test_inject_bytes(NULL, 0)`.
+ *
+ * In-tree callers (`kernel/tests/test_rng.c`) pass `static const`
+ * buffers, which satisfy the invariant trivially. */
 size_t rng_test_inject_bytes(const uint8_t *bytes, size_t len);
 
 /*

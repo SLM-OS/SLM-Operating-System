@@ -38,6 +38,7 @@ static void rng_test_reset_overrides(void)
 
 static void test_init_returns_and_source_is_set(void)
 {
+    rng_test_reset_overrides();
     /* rng_init has already been called from kernel_main, so the
      * source must be one of the three live values. NONE would
      * indicate the init path silently exited without bootstrapping
@@ -50,6 +51,7 @@ static void test_init_returns_and_source_is_set(void)
 
 static void test_get_bytes_produces_nonzero_output(void)
 {
+    rng_test_reset_overrides();
     uint8_t buf[64];
     memset(buf, 0, sizeof(buf));
 
@@ -67,6 +69,7 @@ static void test_get_bytes_produces_nonzero_output(void)
 
 static void test_get_bytes_rejects_bad_args(void)
 {
+    rng_test_reset_overrides();
     uint8_t buf[8];
     TEST_ASSERT_NOT_EQUAL(0, rng_get_bytes(NULL, sizeof(buf)));
     TEST_ASSERT_NOT_EQUAL(0, rng_get_bytes(buf, 0u));
@@ -156,6 +159,7 @@ static void test_selftest_fails_on_stuck_zero_source(void)
 
 static void test_get_u32_nonzero_with_high_probability(void)
 {
+    rng_test_reset_overrides();
     /* A single u32 is 0 with probability ~2^-32; do four pulls and
      * assert at least one is non-zero to keep the test deterministic
      * even on a (statistically improbable) zero output. */
@@ -168,6 +172,7 @@ static void test_get_u32_nonzero_with_high_probability(void)
 
 static void test_stats_monotonic(void)
 {
+    rng_test_reset_overrides();
     struct rng_stats a, b;
     rng_get_stats(&a);
 
