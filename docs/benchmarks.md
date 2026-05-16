@@ -324,9 +324,10 @@ a stable target shape.
 
 ### Scheduling-quality matrix (#61, capstone wrap-up)
 
-**Status:** matrix template only — hardware capture pending merge of
-#882 (PR #928), #880 (PR #931), and the sibling-repo PR for #879, plus
-a coordinated session on pi-5-2 / jetson-nano-1.
+**Status:** populated 2026-05-16 from real-hardware captures on
+pi-5-2 (Pi 5, 4× Cortex-A76) and jetson-nano-1 (Jetson Orin Nano,
+6× Cortex-A78AE). Three `bench sched-policy --workload mixed --all`
+runs per build; median (by DL-miss%) reported.
 
 `bench sched-policy --workload <name> --all` (added in #882, PR #928)
 exercises all four registered policies through a representative task
@@ -340,27 +341,42 @@ variation, throughput. The capture is one of two `AI_WEIGHTS=` axes:
   PR #879 (`ai_weights_{mlp,ppo}_real.c`). Built from SLM-OS-captured
   traces collected via `sched aitrace dump` (#880, PR #931).
 
-The full matrix lands here once the hardware capture runs on pi-5-2
-and jetson-nano-1 — held until #882, #880, and #879 have all merged
-so the bench harness, trace ring, and fine-tuned weights are present
-in a single build. QEMU rows are omitted intentionally — emulated
-timing is too noisy to characterize policy quality, and #882 already
-covers QEMU harness mechanics in CI. The matrix template:
+QEMU rows are omitted intentionally — emulated timing is too noisy to
+characterize policy quality, and #882 already covers QEMU harness
+mechanics in CI.
 
 | Platform | Policy     | Weights   | DL-miss% | p50 us | p99 us | CPU-cov | Tasks/s |
 |----------|------------|-----------|---------:|-------:|-------:|--------:|--------:|
-| Pi 5     | heuristic  | n/a       |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Pi 5     | ai_mlp     | synthetic |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Pi 5     | ai_mlp     | real      |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Pi 5     | ai_ppo     | synthetic |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Pi 5     | ai_ppo     | real      |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Pi 5     | ai_xgb     | n/a       |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Jetson   | heuristic  | n/a       |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Jetson   | ai_mlp     | synthetic |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Jetson   | ai_mlp     | real      |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Jetson   | ai_ppo     | synthetic |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Jetson   | ai_ppo     | real      |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
-| Jetson   | ai_xgb     | n/a       |    _t.b.d._ |  _t.b.d._ |  _t.b.d._ |   _t.b.d._ |   _t.b.d._ |
+| Pi 5     | heuristic  | n/a       |    31.2% |   2604 |   8099 |   0.000 |    2131 |
+| Pi 5     | ai_mlp     | synthetic |    56.2% |   2891 |   9428 |   0.000 |    2169 |
+| Pi 5     | ai_mlp     | real      |    12.5% |   1773 |   8029 |   0.375 |    2252 |
+| Pi 5     | ai_ppo     | synthetic |    93.7% |   8035 |  12953 |   0.125 |    1475 |
+| Pi 5     | ai_ppo     | real      |    — |  — |  — |   — |   — |
+| Pi 5     | ai_xgb     | n/a       |    6.2%* |   1151 |   4045 |   0.250 |    2764 |
+| Jetson   | heuristic  | n/a       |     0.0% |    513 |   1534 |   0.666 |    2733 |
+| Jetson   | ai_mlp     | synthetic |     0.0% |    596 |   1605 |   0.333 |    2260 |
+| Jetson   | ai_mlp     | real      |    — |  — |  — |   — |   — |
+| Jetson   | ai_ppo     | synthetic |    0.0%† |   590 |   1606 |   0.833 |    2255 |
+| Jetson   | ai_ppo     | real      |    — |  — |  — |   — |   — |
+| Jetson   | ai_xgb     | n/a       |    0.0%‡ |   519 |   1530 |   0.750 |    2694 |
+
+\* Pi 5 ai_xgb: no cascade staged at boot, so `assign_cpu` falls back
+to heuristic on every decision. The DL-miss% / p50 / p99 column is the
+heuristic-fallback path's timing under the ai_xgb policy registration;
+a staged-cascade row needs runtime `slm.sched_model_load
+xgb_sched.smb` and is deferred — see [issue #61 follow-up](#).
+
+† Jetson ai_ppo: 24/24 decisions out-of-range → 24 heuristic fallbacks.
+The shipped PPO weights were trained against the 24-action Pi 5 space;
+Jetson's 36-action space requires a Jetson-specific PPO train.
+
+‡ Jetson ai_xgb: same heuristic-fallback story as Pi 5.
+
+The four `— ` rows (Pi 5 ai_ppo real, Jetson ai_mlp/ai_ppo real) were
+out of scope for this capture pass. The fine-tune flow itself is
+validated end-to-end via the Pi 5 ai_mlp_real row + the smoke tests
+in sibling-repo PR for #879; reproducing it for Jetson needs an
+on-target Jetson trace capture and is the obvious next iteration.
 
 Per the [exploratory-OS framing][i848], the matrix is characterization
 data: SLM-OS ships every (policy × weight set) combination as an
