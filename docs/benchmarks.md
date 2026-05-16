@@ -251,11 +251,17 @@ Real trained MLP and PPO weights from the Plan A export pipeline (108→256→25
 
 The XGBoost row is collected via `bench sched-policy` after staging
 `xgb_sched.smb`; an empty cell means no cascade was active when the
-bench ran. Prior sibling-repo simulator runs (Plan A `eval_summary.csv`,
-200 episodes × 9 scenarios) reported XGBoost at ~97% deadline-compliance
-vs MLP at ~99% — informative for option-space comparison, not a
-selection criterion. SLM-OS treats XGBoost as a swappable policy
-alongside MLP/PPO/Hailo per [#848](https://github.com/SLM-OS/SLM-Operating-System/issues/848)
+bench ran. Sibling-repo simulator runs (Plan A
+`results/eval_summary.csv`, 200 episodes × 8 scenarios) report
+**MLP at ~99.6% mean deadline-compliance vs XGBoost at ~95.3%**
+across all scenarios. The gap is workload-dependent — XGBoost
+matches MLP on `deadline_pressure` and `memory_pressure` (both
+100%) and trails most on the more interleaved workloads
+(`asymmetric`, `light_*`, `heavy_inference`, all 90–93%).
+Informative for option-space comparison, not a selection
+criterion. SLM-OS treats XGBoost as a swappable policy alongside
+MLP/PPO/Hailo per
+[#848](https://github.com/SLM-OS/SLM-Operating-System/issues/848)
 ("pluggable policies as first-class").
 
 The AI scheduler adds ~40 µs overhead per scheduling decision on Pi 5 hardware. This is acceptable for inference-heavy workloads where decisions happen infrequently (component dispatch, not per-tick). The heuristic policy remains the default for latency-sensitive cooperative scheduling.

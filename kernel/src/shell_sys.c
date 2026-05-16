@@ -1160,6 +1160,11 @@ static void bench_xgb_one(uint32_t iters)
     for (size_t i = 0; i < AI_STATE_DIM; i++) state[i] = 0.0f;
 
     uint64_t t0 = timer_get_count();
+    /* `ok` defends against a mid-bench cascade clear (the early-out
+     * above only catches "active at start"). With a healthy active
+     * cascade the predict FFI always returns 0, so ok == iters in
+     * practice; the per-decision divide below uses ok rather than
+     * iters so an unlikely mid-bench failure doesn't skew the result. */
     uint32_t ok = 0;
     for (uint32_t i = 0; i < iters; i++) {
         if (rust_sched_xgb_predict(state, &core, &prio, &preempt) == 0) ok++;
