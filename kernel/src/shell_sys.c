@@ -3157,8 +3157,18 @@ int cmd_model(int argc, char *argv[])
                 shell_puts("model profile: no data\r\n");
                 return 0;
             }
-            shell_puts("Per-op profile (count / avg us / min us / max us)\r\n");
-            shell_puts("---------------------------------------------------\r\n");
+            /*
+             * Print latency columns first (cnt / avg_us / min_us /
+             * max_us), then PMU-derived columns (L1D miss-rate %, IPC,
+             * branch-mispred %). The PMU columns are blank on QEMU TCG
+             * and pre-init CPUs — Rust hands us zero for every PMU
+             * field there, and we print "-" instead of bogus zeros so
+             * the reader knows "no PMU data" vs "true zero events."
+             */
+            shell_puts("Per-op profile (count / avg us / min us / max us"
+                       " / L1D% / IPC / mispred%)\r\n");
+            shell_puts("-------------------------------------------------"
+                       "----------------------------\r\n");
             int printed = 0;
             for (int i = 0; i < n; i++) {
                 if (entries[i].count == 0) {
@@ -3176,12 +3186,55 @@ int cmd_model(int argc, char *argv[])
                 }
                 unsigned long avg_us = (unsigned long)(
                     entries[i].total_ns / entries[i].count / 1000u);
-                shell_printf("  %-10s  %8lu  %6lu  %6lu  %6lu\r\n",
+                /* L1D miss-rate %, IPC ×100, branch-mispred %. Compute
+                 * in integer math — IPC × 100 keeps two decimal places
+                 * worth of resolution without floats. */
+                bool have_pmu = entries[i].cache_references > 0
+                             || entries[i].cycles > 0;
+                char l1d_buf[16];
+                char ipc_buf[16];
+                char mispred_buf[16];
+                if (have_pmu && entries[i].cache_references > 0) {
+                    unsigned long l1d_pct = (unsigned long)(
+                        entries[i].cache_misses * 100u
+                        / entries[i].cache_references);
+                    /* Cap at 100 — defensive against counter races
+                     * where a refill is double-counted vs a reference.
+                     */
+                    if (l1d_pct > 100) l1d_pct = 100;
+                    uart_snprintf(l1d_buf, sizeof(l1d_buf),
+                                   "%lu", l1d_pct);
+                } else {
+                    l1d_buf[0] = '-'; l1d_buf[1] = '\0';
+                }
+                if (have_pmu && entries[i].cycles > 0) {
+                    unsigned long ipc_x100 = (unsigned long)(
+                        entries[i].instructions_retired * 100u
+                        / entries[i].cycles);
+                    uart_snprintf(ipc_buf, sizeof(ipc_buf),
+                                   "%lu.%02lu",
+                                   ipc_x100 / 100u, ipc_x100 % 100u);
+                } else {
+                    ipc_buf[0] = '-'; ipc_buf[1] = '\0';
+                }
+                if (have_pmu && entries[i].instructions_retired > 0) {
+                    /* Mispred per 100 instructions — interpretable
+                     * cross-platform. */
+                    unsigned long mp_pct = (unsigned long)(
+                        entries[i].branch_mispredictions * 100u
+                        / entries[i].instructions_retired);
+                    uart_snprintf(mispred_buf, sizeof(mispred_buf),
+                                   "%lu", mp_pct);
+                } else {
+                    mispred_buf[0] = '-'; mispred_buf[1] = '\0';
+                }
+                shell_printf("  %-10s  %8lu  %6lu  %6lu  %6lu  %4s  %5s  %5s\r\n",
                     label,
                     (unsigned long)entries[i].count,
                     avg_us,
                     (unsigned long)(entries[i].min_ns / 1000u),
-                    (unsigned long)(entries[i].max_ns / 1000u));
+                    (unsigned long)(entries[i].max_ns / 1000u),
+                    l1d_buf, ipc_buf, mispred_buf);
                 printed++;
             }
             if (printed == 0) {
