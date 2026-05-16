@@ -112,7 +112,13 @@ static inline uint64_t pmu_read_pmcr(void)
  * Jetson; QEMU virt runs at EL1. We unconditionally set NSH=1 so
  * EL2 events are captured under VHE. On EL1-only platforms NSH is
  * harmless (no EL2 to filter). */
-#define PMU_FILTER_NSH (1u << 27)
+#define PMU_FILTER_NSH (1ULL << 27)
+
+/* MDCR_EL2.HPMN[4:0] mask. HPMN partitions the PMU event counters
+ * into a non-secure half [0, HPMN) and an EL2-only half [HPMN, N).
+ * pmu_enable_self writes PMU_NUM_EVENT_COUNTERS here so all six are
+ * in the NS partition. */
+#define MDCR_EL2_HPMN_MASK 0x1FULL
 
 /*
  * Program PMEVTYPER<idx>_EL0 to track `event_id`. ARM exposes the
@@ -184,7 +190,8 @@ bool pmu_enable_self(void)
         uint64_t mdcr_el2;
         __asm__ volatile("mrs %0, mdcr_el2" : "=r"(mdcr_el2));
         /* Clear HPMN[4:0] and set to PMU_NUM_EVENT_COUNTERS. */
-        mdcr_el2 = (mdcr_el2 & ~(uint64_t)0x1F) | (uint64_t)PMU_NUM_EVENT_COUNTERS;
+        mdcr_el2 = (mdcr_el2 & ~MDCR_EL2_HPMN_MASK)
+                 | (uint64_t)PMU_NUM_EVENT_COUNTERS;
         __asm__ volatile("msr mdcr_el2, %0" :: "r"(mdcr_el2) : "memory");
         __asm__ volatile("isb" ::: "memory");
     }
