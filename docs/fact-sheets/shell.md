@@ -24,7 +24,7 @@ Interactive shell, command surface, observability commands, multi-session.
 | Network commands (`net`, `ping`, `ifconfig`, `netstat`, `tcpsh`) | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ |
 | Lua (`lua`, `lua -e`, `lua <file>`) | ✅ | ✅ | ✅ | ✅ |
 | Scheduler (`sched`, `sched policy`, `sched stats`) | ✅ | ✅ | ✅ | ✅ |
-| Diagnostic (`dtb`, `timdiag`, `peek`, `macbdiag`) | ✅ | ✅ | ✅ | 🟡 (`timdiag` ARM-only) |
+| Diagnostic (`dtb`, `timdiag`, `peek`, `macbdiag`, `pmu`) | ✅ (`pmu` skips event values under TCG) | ✅ | ✅ | 🟡 (`timdiag` / `pmu` ARM-only — `pmu` x86 sibling tracked as #870) |
 | Kernel-replace admin (`kernel status/stage/activate/promote/rollback`) | 🟡 stub (no boot media) | ✅ tryboot-driven | 🟡 stub | 🟡 stub |
 | GPU/hw shell (`gpu`, `nvgpu phase-N`) | — | — | ✅ | ✅ |
 | Multi-session TCP shell (port 2323) | ✅ | ✅ | ✅ (USB CDC-ECM) | ✅ |
