@@ -5663,6 +5663,391 @@ pub unsafe extern "C" fn rust_slm_stats(session_id: u32, out: *mut SlmStatsC) ->
 }
 
 // =============================================================================
+// Dynamic-batching admin + stress FFI (#860)
+// =============================================================================
+
+/// Status snapshot exposed via `rust_infer_batch_status` to the C
+/// shell + Lua bindings.
+///
+/// Field order is part of the FFI contract — extending this struct
+/// requires updating `kernel/include/slm_ffi.h` in lockstep.
+#[repr(C)]
+pub struct RustBatchStatus {
+    /// Non-zero when batched dispatch is currently enabled.
+    pub enabled: u32,
+    /// Configured batch-size threshold (clamped to [1, MAX_BATCH]).
+    pub batch_size: u32,
+    /// Configured partial-batch flush timeout (microseconds).
+    pub timeout_us: u32,
+    /// Current pending queue depth.
+    pub queue_depth: u32,
+    /// Total requests submitted since boot (or last reset).
+    pub total_submitted: u64,
+    /// Successful completions.
+    pub completed: u64,
+    /// Engine errors.
+    pub failed: u64,
+    /// Total batched dispatches (size + timeout).
+    pub batches_dispatched: u64,
+    /// Batched dispatches triggered by hitting the size threshold.
+    pub batches_full: u64,
+    /// Batched dispatches triggered by the partial-batch timer.
+    pub batches_timeout: u64,
+    /// Requests that bypassed the queue due to a tight deadline.
+    pub bypassed_deadline: u64,
+    /// Requests that fell through to the singleton path.
+    pub singleton_dispatches: u64,
+}
+
+/// Toggle batched dispatch mode.
+///
+/// `on == 0` disables (default); any non-zero enables.
+#[no_mangle]
+pub extern "C" fn rust_infer_batch_set_mode(on: i32) {
+    sched::set_batching_enabled(on != 0);
+}
+
+/// Read the current batched-dispatch mode (1 = on, 0 = off).
+#[no_mangle]
+pub extern "C" fn rust_infer_batch_get_mode() -> i32 {
+    if sched::batching_enabled() { 1 } else { 0 }
+}
+
+/// Upper bound on the partial-batch flush timeout exposed via the FFI.
+/// `sched::set_batch_timeout_us` applies the matching lower bound (100 µs).
+const MAX_BATCH_TIMEOUT_US: u32 = 100_000;
+
+/// Configure batch size + timeout.
+///
+/// Bounds: `1 ≤ batch_size ≤ MAX_BATCH`, `100 µs ≤ timeout_us ≤ 100_000 µs`
+/// (out-of-range values clamp to the nearest bound — upper bound on
+/// `timeout_us` is enforced here, lower bound on `timeout_us` and the
+/// full clamp on `batch_size` are enforced by the underlying setters).
+/// Returns 0 on success.
+#[no_mangle]
+pub extern "C" fn rust_infer_batch_set_config(batch_size: u32, timeout_us: u32) -> i32 {
+    sched::set_batch_size(batch_size as usize);
+    sched::set_batch_timeout_us(timeout_us.min(MAX_BATCH_TIMEOUT_US));
+    0
+}
+
+/// Fill `out` with the current batching status snapshot.
+///
+/// Returns 0 on success, -1 if `out` is null.
+#[no_mangle]
+pub extern "C" fn rust_infer_batch_status(out: *mut RustBatchStatus) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    let s = sched::scheduler_stats();
+    let status = RustBatchStatus {
+        enabled: if sched::batching_enabled() { 1 } else { 0 },
+        batch_size: sched::batch_size() as u32,
+        timeout_us: sched::batch_timeout_us(),
+        queue_depth: s.queued as u32,
+        total_submitted: s.total_submitted,
+        completed: s.completed,
+        failed: s.failed,
+        batches_dispatched: s.batches_dispatched,
+        batches_full: s.batches_full,
+        batches_timeout: s.batches_timeout,
+        bypassed_deadline: s.bypassed_deadline,
+        singleton_dispatches: s.singleton_dispatches,
+    };
+    unsafe { *out = status; }
+    0
+}
+
+// -----------------------------------------------------------------------------
+// Stress workload — spawn N worker tasks each running M iterations
+// of `submit_inference_sync` against MNIST. Exercises the batched
+// dispatch path end-to-end (the OS has no other concurrent inference
+// call site today).
+// -----------------------------------------------------------------------------
+
+#[repr(C)]
+pub struct RustStressResult {
+    /// N workers actually spawned.
+    pub n_workers: u32,
+    /// Iterations per worker requested by the caller.
+    pub iters_per_worker: u32,
+    /// Total successful inferences across all workers.
+    pub success_count: u64,
+    /// Total failed inferences across all workers.
+    pub error_count: u64,
+    /// Wall-clock time the stress run took, in nanoseconds (from the
+    /// first worker spawn to the last worker completion).
+    pub wall_ns: u64,
+    /// Sum of per-iteration latencies across all workers, nanoseconds.
+    pub total_lat_ns: u64,
+    /// Minimum observed per-iteration latency, nanoseconds.
+    pub min_lat_ns: u64,
+    /// Maximum observed per-iteration latency, nanoseconds.
+    pub max_lat_ns: u64,
+    /// Counter deltas captured between pre-run and post-run snapshots.
+    pub batches_dispatched: u64,
+    pub batches_full: u64,
+    pub batches_timeout: u64,
+    pub bypassed_deadline: u64,
+    pub singleton_dispatches: u64,
+}
+
+// Base join-deadline budget for a stress run: 30 s of headroom plus a
+// per-iteration allowance. Sized so MNIST's ~1 ms/inference (QEMU)
+// and ~3 ms (Pi 5 / Jetson without batching) leave ~30× safety
+// margin — a timeout therefore indicates a real regression in the
+// dispatcher rather than under-budgeting.
+const STRESS_JOIN_BASE_NS: u64 = 30_000_000_000;
+const STRESS_JOIN_PER_ITER_NS: u64 = 100_000_000;
+
+// Stress workload shared state — file-static atomics. The stress
+// workload is single-run at a time (the shell + Lua entry points
+// serialise via the global `STRESS_BUSY` flag). `STRESS_GENERATION`
+// is incremented at the top of every run; workers cache the current
+// generation at entry and a stale-generation check on the back-edge
+// drops straggler writes if a prior run's join deadline expired and
+// a fresh run started before the straggler finished.
+static STRESS_BUSY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static STRESS_GENERATION: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static STRESS_WORKERS_DONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static STRESS_ITERS_PER_WORKER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static STRESS_MODEL_INDEX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static STRESS_SUCCESS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STRESS_ERROR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STRESS_LAT_TOTAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static STRESS_LAT_MIN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+static STRESS_LAT_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Atomically minimise `atom` against `candidate`. Used by stress
+/// workers to track the per-iteration latency floor; identical pattern
+/// to the max helper below.
+fn atomic_min_u64(atom: &core::sync::atomic::AtomicU64, candidate: u64) {
+    use core::sync::atomic::Ordering;
+    let mut cur = atom.load(Ordering::Relaxed);
+    while candidate < cur {
+        match atom.compare_exchange_weak(cur, candidate, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(v) => cur = v,
+        }
+    }
+}
+
+/// Atomically maximise `atom` against `candidate`.
+fn atomic_max_u64(atom: &core::sync::atomic::AtomicU64, candidate: u64) {
+    use core::sync::atomic::Ordering;
+    let mut cur = atom.load(Ordering::Relaxed);
+    while candidate > cur {
+        match atom.compare_exchange_weak(cur, candidate, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(v) => cur = v,
+        }
+    }
+}
+
+/// Worker-task entry point. Runs `STRESS_ITERS_PER_WORKER` inferences
+/// against `STRESS_MODEL_INDEX` and signals completion via
+/// `STRESS_WORKERS_DONE`. Cached `gen` at entry isolates this worker
+/// from a later run that bumps `STRESS_GENERATION` — see W1 fix below.
+extern "C" fn stress_worker_entry(_arg: *mut core::ffi::c_void) {
+    use core::sync::atomic::Ordering;
+
+    // Per-worker buffers on this task's stack. INPUT stays uniform —
+    // for stress testing the engine doesn't need varied input; the
+    // counter-update path is what we want to exercise.
+    let input: [f32; 784] = [0.0; 784];
+    let mut output: [f32; 64] = [0.0; 64];
+    let iters = STRESS_ITERS_PER_WORKER.load(Ordering::Acquire);
+    let model_index = STRESS_MODEL_INDEX.load(Ordering::Acquire) as usize;
+    let gen_at_entry = STRESS_GENERATION.load(Ordering::Acquire);
+
+    for _ in 0..iters {
+        let start = kernel_ffi::get_time_ns();
+        let r = unsafe {
+            sched::submit_inference_sync(
+                model_index,
+                input.as_ptr(), input.len(),
+                output.as_mut_ptr(), output.len(),
+                sched::TaskDeadline::NONE,
+            )
+        };
+        let elapsed = kernel_ffi::get_time_ns().saturating_sub(start);
+
+        // Drop the write if a later run has rolled the generation
+        // forward (e.g. our run timed out and the operator started a
+        // new one). The inference itself still ran — we just don't
+        // contaminate the next run's counters.
+        //
+        // Residual race window (known-and-bounded): the four atomic
+        // writes below are NOT gated. A straggler that passes this
+        // check at the same instant a new run bumps GENERATION and
+        // resets counters will still apply up to those four writes —
+        // a sub-microsecond window. Worst case is a handful of stale
+        // increments leaking into the next run's `total_lat_ns` /
+        // `success_count` / min / max. The stress workload is a
+        // diagnostic, not a load-bearing measurement, so this is
+        // accepted. `WORKERS_DONE` is gated separately below and is
+        // race-free; the join loop therefore never exits early on a
+        // straggler bump. Eliminating the window entirely would mean
+        // moving to per-worker private counters summed at the end —
+        // overkill for the current use case.
+        if STRESS_GENERATION.load(Ordering::Acquire) != gen_at_entry {
+            return;
+        }
+
+        STRESS_LAT_TOTAL.fetch_add(elapsed, Ordering::Relaxed);
+        atomic_min_u64(&STRESS_LAT_MIN, elapsed);
+        atomic_max_u64(&STRESS_LAT_MAX, elapsed);
+        if r.is_ok() {
+            STRESS_SUCCESS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            STRESS_ERROR.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // Last-chance generation check before signalling done — a straggler
+    // from a timed-out run must not bump WORKERS_DONE for the current
+    // run.
+    if STRESS_GENERATION.load(Ordering::Acquire) == gen_at_entry {
+        STRESS_WORKERS_DONE.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Run a concurrent stress workload.
+///
+/// Spawns `n_workers` task workers (each `CPU_AFFINITY_ANY`), waits
+/// for completion, then writes the aggregated result into `out`.
+/// MNIST must be loaded (use `rust_model_load_builtin_mnist` first);
+/// the model index is looked up by name.
+///
+/// Returns 0 on success, negative on error:
+///  -1 — `out` is null, or n_workers/iters out of range
+///  -2 — MNIST not loaded
+///  -3 — stress workload already running
+///  -4 — task spawn failure
+///  -5 — join deadline exceeded (workers didn't finish in time)
+///
+/// # Safety
+///
+/// Caller obligations match `rust_infer_classify` (must run in task
+/// context with an initialised scheduler).
+#[no_mangle]
+pub unsafe extern "C" fn rust_infer_stress_run(
+    n_workers: u32,
+    iters_per_worker: u32,
+    out: *mut RustStressResult,
+) -> i32 {
+    use core::sync::atomic::Ordering;
+
+    if out.is_null() {
+        return -1;
+    }
+    if n_workers == 0 || n_workers > 32 || iters_per_worker == 0 || iters_per_worker > 100_000 {
+        return -1;
+    }
+
+    // Serialise concurrent stress invocations.
+    if STRESS_BUSY
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return -3;
+    }
+    struct BusyGuard;
+    impl Drop for BusyGuard {
+        fn drop(&mut self) {
+            STRESS_BUSY.store(false, Ordering::Release);
+        }
+    }
+    let _busy = BusyGuard;
+
+    // Resolve MNIST model index.
+    let model_idx = match loader::registry::find_by_name(b"mnist") {
+        Some(i) => i as u32,
+        None => return -2,
+    };
+
+    // Snapshot pre-run counters so we can compute deltas.
+    let pre = sched::scheduler_stats();
+
+    // Bump the generation FIRST so any straggler workers from a prior
+    // timed-out run will observe a generation mismatch and abandon
+    // their writes before we reset the shared counters.
+    STRESS_GENERATION.fetch_add(1, Ordering::AcqRel);
+
+    // Reset worker-shared counters.
+    STRESS_WORKERS_DONE.store(0, Ordering::Release);
+    STRESS_SUCCESS.store(0, Ordering::Release);
+    STRESS_ERROR.store(0, Ordering::Release);
+    STRESS_LAT_TOTAL.store(0, Ordering::Release);
+    STRESS_LAT_MIN.store(u64::MAX, Ordering::Release);
+    STRESS_LAT_MAX.store(0, Ordering::Release);
+    STRESS_ITERS_PER_WORKER.store(iters_per_worker, Ordering::Release);
+    STRESS_MODEL_INDEX.store(model_idx, Ordering::Release);
+
+    let start_ns = kernel_ffi::get_time_ns();
+    let mut spawned: u32 = 0;
+    for _ in 0..n_workers {
+        let r = kernel_ffi::task_create(
+            b"infer-stress\0",
+            stress_worker_entry,
+            core::ptr::null_mut(),
+        );
+        if r.is_ok() {
+            spawned += 1;
+        }
+    }
+
+    if spawned == 0 {
+        return -4;
+    }
+
+    // Join: spin-yield until all spawned workers signal done. On
+    // timeout we return -5 and rely on the generation counter (bumped
+    // at the top of each run) to keep straggler workers from
+    // contaminating the next run's counters.
+    let join_deadline_ns = kernel_ffi::get_time_ns().saturating_add(
+        STRESS_JOIN_BASE_NS.saturating_add(
+            (iters_per_worker as u64).saturating_mul(STRESS_JOIN_PER_ITER_NS),
+        ),
+    );
+    extern "C" {
+        #[link_name = "yield"]
+        fn sched_yield();
+    }
+    loop {
+        if STRESS_WORKERS_DONE.load(Ordering::Acquire) >= spawned {
+            break;
+        }
+        if kernel_ffi::get_time_ns() >= join_deadline_ns {
+            return -5;
+        }
+        sched_yield();
+    }
+
+    let end_ns = kernel_ffi::get_time_ns();
+
+    let post = sched::scheduler_stats();
+    let min_lat = STRESS_LAT_MIN.load(Ordering::Acquire);
+    let result = RustStressResult {
+        n_workers: spawned,
+        iters_per_worker,
+        success_count: STRESS_SUCCESS.load(Ordering::Acquire),
+        error_count: STRESS_ERROR.load(Ordering::Acquire),
+        wall_ns: end_ns.saturating_sub(start_ns),
+        total_lat_ns: STRESS_LAT_TOTAL.load(Ordering::Acquire),
+        min_lat_ns: if min_lat == u64::MAX { 0 } else { min_lat },
+        max_lat_ns: STRESS_LAT_MAX.load(Ordering::Acquire),
+        batches_dispatched: post.batches_dispatched.saturating_sub(pre.batches_dispatched),
+        batches_full: post.batches_full.saturating_sub(pre.batches_full),
+        batches_timeout: post.batches_timeout.saturating_sub(pre.batches_timeout),
+        bypassed_deadline: post.bypassed_deadline.saturating_sub(pre.bypassed_deadline),
+        singleton_dispatches: post.singleton_dispatches.saturating_sub(pre.singleton_dispatches),
+    };
+    *out = result;
+    0
+}
+
+// =============================================================================
 // Inference API (Phase 5, M2)
 // =============================================================================
 
@@ -7776,6 +8161,63 @@ pub extern "C" fn rust_batch_inference_test() -> i32 {
 
         sched::set_batching_enabled(false);
         sched::set_batch_timeout_us(DEFAULT_BATCH_TIMEOUT_US); // restore default
+    }
+
+    // Test 9 (#860): admin FFI round-trip. The shell + Lua bindings
+    // all forward to `rust_infer_batch_set_mode`, `_set_config`, and
+    // `_status`; verify the read/write contract.
+    {
+        rust_infer_batch_set_mode(0);
+        let off_mode = rust_infer_batch_get_mode();
+        rust_infer_batch_set_mode(1);
+        let on_mode = rust_infer_batch_get_mode();
+        rust_infer_batch_set_config(4, 1234);
+        let mut s: RustBatchStatus = unsafe { core::mem::zeroed() };
+        let rc = rust_infer_batch_status(&mut s as *mut _);
+        let null_rc = rust_infer_batch_status(core::ptr::null_mut());
+        let passed = off_mode == 0
+            && on_mode == 1
+            && rc == 0
+            && null_rc == -1
+            && s.enabled == 1
+            && s.batch_size == 4
+            && s.timeout_us == 1234;
+        print_test_result(b"batch: admin FFI set/get round-trip\0", passed);
+        if !passed { failures += 1; }
+        rust_infer_batch_set_mode(0);
+        rust_infer_batch_set_config(8, 5000);
+    }
+
+    // Test 10 (#860): concurrent stress workload. Spawns N=4 task
+    // workers, each running 8 inferences. Verifies the run reports the
+    // expected success count and that the FFI rejects out-of-range
+    // arguments.
+    {
+        rust_infer_batch_set_mode(1);
+        rust_infer_batch_set_config(8, 5000);
+
+        // Out-of-range guard.
+        let mut bogus: RustStressResult = unsafe { core::mem::zeroed() };
+        let bad_n = unsafe { rust_infer_stress_run(0, 1, &mut bogus as *mut _) };
+        let bad_null = unsafe { rust_infer_stress_run(2, 2, core::ptr::null_mut()) };
+        let bad_iter = unsafe { rust_infer_stress_run(2, 0, &mut bogus as *mut _) };
+
+        let mut res: RustStressResult = unsafe { core::mem::zeroed() };
+        let rc = unsafe { rust_infer_stress_run(4, 8, &mut res as *mut _) };
+
+        let expected = (res.n_workers as u64) * (res.iters_per_worker as u64);
+        let passed = bad_n == -1
+            && bad_null == -1
+            && bad_iter == -1
+            && rc == 0
+            && res.n_workers == 4
+            && res.iters_per_worker == 8
+            && res.success_count == expected
+            && res.error_count == 0;
+        print_test_result(b"batch: stress workload (4x8) completes + rejects bad args\0", passed);
+        if !passed { failures += 1; }
+
+        rust_infer_batch_set_mode(0);
     }
 
     // Summary

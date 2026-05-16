@@ -600,6 +600,27 @@ static const struct help_entry help_entries[] = {
         "Displays message queue and shared buffer statistics.\n"
     ),
 
+    HELP_TEXT("infer",
+        "infer - Inference engine admin (dynamic batching)\n"
+        "\n"
+        "Usage:\n"
+        "  infer batch on                        Enable batched dispatch\n"
+        "  infer batch off                       Disable (default)\n"
+        "  infer batch config <size> <us>        Set batch threshold + flush timeout\n"
+        "  infer batch status                    Show batching state + counters\n"
+        "\n"
+        "Default at boot is OFF. With batching ON, concurrent inference\n"
+        "requests are collected into a batch of up to <size> (default 8)\n"
+        "and dispatched together via a single engine call once the queue\n"
+        "fills or <us> microseconds (default 5000) elapse since the first\n"
+        "request landed. Requests carrying a tight `TaskDeadline` bypass\n"
+        "the queue and dispatch as singletons. SLM-OS is an exploratory\n"
+        "OS — batching is a runtime-toggleable mode, not a default.\n"
+        "\n"
+        "See `bench infer-stress N [iters]` for the concurrent workload\n"
+        "that exercises the feature.\n"
+    ),
+
     HELP_TEXT("model",
         "model - Model registry and inference control\n"
         "\n"

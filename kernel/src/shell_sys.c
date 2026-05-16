@@ -1418,7 +1418,7 @@ static void s3_steal_work_task(void *arg)
 int cmd_bench(int argc, char *argv[])
 {
     if (argc < 2) {
-        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|q4kdot|gpu|stats|all>\r\n");
+        shell_puts("Usage: bench <context|irq|ipc|eviction|deadline|isolate|shared|smp|stealing|matmul|conv|quant|q4kdot|gpu|infer-stress|stats|all>\r\n");
         return 1;
     }
 
@@ -1817,6 +1817,105 @@ int cmd_bench(int argc, char *argv[])
     } else if (strcmp(argv[1], "sched-policy") == 0) {
         bench_sched_policy();
 #endif
+    } else if (strcmp(argv[1], "infer-stress") == 0) {
+        /* Concurrent inference stress workload (#860).
+         *
+         * Usage: bench infer-stress N [iters]
+         *
+         *   N       — number of concurrent task workers (1..32).
+         *   iters   — inferences per worker (default 50).
+         *
+         * Exercises the dynamic-batching dispatcher with N workers
+         * sharing a single MNIST model. The exact ratio of batched
+         * vs singleton dispatches depends on the runtime mode (`infer
+         * batch on|off`) and the configured batch size. Reports
+         * aggregate req/s, min/avg/max latency, and the
+         * SchedulerStats counter deltas captured around the run.
+         */
+        uint32_t n_workers = 0;
+        uint32_t iters = 50;
+        if (argc < 3 || shell_parse_uint(argv[2], &n_workers) != 0
+            || n_workers == 0 || n_workers > 32) {
+            shell_puts("Usage: bench infer-stress <N (1..32)> [iters]\r\n");
+            return 1;
+        }
+        if (argc >= 4) {
+            uint32_t n;
+            if (shell_parse_uint(argv[3], &n) != 0 || n == 0 || n > 100000) {
+                shell_puts("bench infer-stress: iters must be 1..100000\r\n");
+                return 1;
+            }
+            iters = n;
+        }
+
+        /* Ensure MNIST is loaded — the stress runner refuses without it. */
+        int mnist_idx = rust_model_find("mnist");
+        if (mnist_idx < 0) {
+            shell_puts("Loading MNIST...\r\n");
+            mnist_idx = rust_model_load_builtin_mnist();
+            if (mnist_idx < 0) {
+                shell_puts("  FAILED to load MNIST — cannot run stress\r\n");
+                return 1;
+            }
+        }
+
+        shell_puts("Dynamic Batching Stress Workload\r\n");
+        shell_puts("================================\r\n");
+        RustBatchStatus pre_status;
+        rust_infer_batch_status(&pre_status);
+        shell_printf("  Batching mode: %s\r\n", pre_status.enabled ? "ON" : "off");
+        if (pre_status.enabled) {
+            shell_printf("  Batch size:    %u\r\n", pre_status.batch_size);
+            shell_printf("  Timeout:       %u us\r\n", pre_status.timeout_us);
+        }
+        shell_printf("  Workers:       %u  Iters/worker: %u\r\n", n_workers, iters);
+
+        RustStressResult res;
+        int32_t rc = rust_infer_stress_run(n_workers, iters, &res);
+        if (rc != 0) {
+            shell_printf("  Stress run failed: rc=%d\r\n", (int)rc);
+            return 1;
+        }
+        if (res.n_workers < n_workers) {
+            shell_printf("  WARNING: only %u of %u workers spawned "
+                         "(task-table likely exhausted)\r\n",
+                         res.n_workers, n_workers);
+        }
+
+        uint64_t completed = res.success_count;
+        uint64_t total_iter = (uint64_t)res.n_workers * (uint64_t)res.iters_per_worker;
+        unsigned long min_us = (unsigned long)(res.min_lat_ns / 1000);
+        unsigned long max_us = (unsigned long)(res.max_lat_ns / 1000);
+        unsigned long avg_us = completed > 0
+            ? (unsigned long)((res.total_lat_ns / completed) / 1000)
+            : 0;
+        unsigned long wall_us = (unsigned long)(res.wall_ns / 1000);
+        unsigned long req_per_s = res.wall_ns > 0
+            ? (unsigned long)((completed * 1000000000ULL) / res.wall_ns)
+            : 0;
+
+        shell_puts("\r\nResults:\r\n");
+        shell_printf("  Successful infers: %lu / %lu\r\n",
+                    (unsigned long)completed, (unsigned long)total_iter);
+        if (res.error_count > 0) {
+            shell_printf("  Errors:            %lu\r\n",
+                        (unsigned long)res.error_count);
+        }
+        shell_printf("  Wall time:         %lu us\r\n", wall_us);
+        shell_printf("  Aggregate req/s:   %lu\r\n", req_per_s);
+        shell_printf("  Per-iter latency:  min=%lu us  avg=%lu us  max=%lu us\r\n",
+                    min_us, avg_us, max_us);
+        shell_puts("\r\nCounter deltas (this run):\r\n");
+        shell_printf("  batches_dispatched: %lu\r\n",
+                    (unsigned long)res.batches_dispatched);
+        shell_printf("  batches_full:       %lu  (size-threshold)\r\n",
+                    (unsigned long)res.batches_full);
+        shell_printf("  batches_timeout:    %lu  (timer flush)\r\n",
+                    (unsigned long)res.batches_timeout);
+        shell_printf("  bypassed_deadline:  %lu\r\n",
+                    (unsigned long)res.bypassed_deadline);
+        shell_printf("  singleton_dispatches: %lu\r\n",
+                    (unsigned long)res.singleton_dispatches);
     } else if (strcmp(argv[1], "all") == 0) {
         shell_puts("SLM-OS Performance Benchmarks\r\n");
         shell_puts("=============================\r\n\r\n");
@@ -1835,7 +1934,7 @@ int cmd_bench(int argc, char *argv[])
         bench_sched_stats();
     } else {
         shell_printf("Unknown benchmark: %s\r\n", argv[1]);
-        shell_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, sched-policy, stats, all\r\n");
+        shell_puts("Available: context, irq, ipc, deadline, isolate, shared, smp, gpu, sched-policy, infer-stress, stats, all\r\n");
         return 1;
     }
 
@@ -2988,6 +3087,88 @@ static const char *const slm_op_type_names[] = {
 };
 #define SLM_OP_TYPE_NAME_COUNT \
     (sizeof(slm_op_type_names) / sizeof(slm_op_type_names[0]))
+
+/*
+ * `infer batch on|off|config <size> <timeout_us>|status` — admin
+ * toggle for the dynamic-batching dispatcher (#860).
+ *
+ * Default at boot is OFF. Flip on for a multi-tenant inference
+ * workload (e.g., `bench infer-stress`) and back off to restore the
+ * historical singleton-dispatch behaviour.
+ */
+int cmd_infer(int argc, char *argv[])
+{
+    if (argc < 3 || strcmp(argv[1], "batch") != 0) {
+        shell_puts("Usage: infer batch <on|off|config <size> <timeout_us>|status>\r\n");
+        return 1;
+    }
+
+    const char *sub = argv[2];
+
+    if (strcmp(sub, "on") == 0) {
+        rust_infer_batch_set_mode(1);
+        shell_puts("infer batch: ON\r\n");
+        return 0;
+    }
+    if (strcmp(sub, "off") == 0) {
+        rust_infer_batch_set_mode(0);
+        shell_puts("infer batch: off\r\n");
+        return 0;
+    }
+    if (strcmp(sub, "config") == 0) {
+        if (argc < 5) {
+            shell_puts("Usage: infer batch config <size (1..32)> <timeout_us (100..100000)>\r\n");
+            return 1;
+        }
+        uint32_t size, timeout;
+        if (shell_parse_uint(argv[3], &size) != 0 || size == 0 || size > 32) {
+            shell_puts("infer batch config: size must be 1..32\r\n");
+            return 1;
+        }
+        if (shell_parse_uint(argv[4], &timeout) != 0
+            || timeout < 100 || timeout > 100000) {
+            shell_puts("infer batch config: timeout_us must be 100..100000\r\n");
+            return 1;
+        }
+        rust_infer_batch_set_config(size, timeout);
+        shell_printf("infer batch config: size=%u timeout_us=%u\r\n", size, timeout);
+        return 0;
+    }
+    if (strcmp(sub, "status") == 0) {
+        RustBatchStatus s;
+        if (rust_infer_batch_status(&s) != 0) {
+            shell_puts("infer batch status: failed\r\n");
+            return 1;
+        }
+        shell_puts("Dynamic Batching Status\r\n");
+        shell_puts("=======================\r\n");
+        shell_printf("  Mode:                  %s\r\n", s.enabled ? "ON" : "off");
+        shell_printf("  Batch size:            %u\r\n", s.batch_size);
+        shell_printf("  Timeout:               %u us\r\n", s.timeout_us);
+        shell_printf("  Queue depth:           %u\r\n", s.queue_depth);
+        shell_puts("  Counters (since reset):\r\n");
+        shell_printf("    total_submitted:     %lu\r\n",
+                    (unsigned long)s.total_submitted);
+        shell_printf("    completed:           %lu\r\n",
+                    (unsigned long)s.completed);
+        shell_printf("    failed:              %lu\r\n",
+                    (unsigned long)s.failed);
+        shell_printf("    batches_dispatched:  %lu\r\n",
+                    (unsigned long)s.batches_dispatched);
+        shell_printf("    batches_full:        %lu\r\n",
+                    (unsigned long)s.batches_full);
+        shell_printf("    batches_timeout:     %lu\r\n",
+                    (unsigned long)s.batches_timeout);
+        shell_printf("    bypassed_deadline:   %lu\r\n",
+                    (unsigned long)s.bypassed_deadline);
+        shell_printf("    singleton_dispatches:%lu\r\n",
+                    (unsigned long)s.singleton_dispatches);
+        return 0;
+    }
+
+    shell_printf("infer batch: unknown subcommand '%s'\r\n", sub);
+    return 1;
+}
 
 int cmd_model(int argc, char *argv[])
 {
