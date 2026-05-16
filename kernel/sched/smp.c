@@ -12,6 +12,7 @@
 #include "timer.h"
 #include "sched.h"
 #include "preempt.h"
+#include "pmu.h"
 #include "dtb.h"
 #include "cache.h"
 #include "ncmem.h"
@@ -417,11 +418,13 @@ void secondary_init(uint32_t logical_cpu_id)
 #if !defined(PLATFORM_X86_64)
     /* Initialize PMU on this CPU (#874). PMU sysregs are per-CPU, so
      * every CPU must run pmu_enable_self() — primary CPU does it from
-     * kernel_main, secondaries from here. */
-    {
-        extern bool pmu_enable_self(void);
-        (void)pmu_enable_self();
-    }
+     * kernel_main, secondaries from here. The return value is intentionally
+     * discarded: a per-CPU PMU enable failure stamps the readiness flag
+     * to false, and `pmu probe` (#875) is the surface that reports it.
+     * Secondaries cannot WARN/INFO directly — Pi 5 / Jetson UART writes
+     * from secondaries deadlock the UART lock (kernel/CLAUDE.md "UART
+     * Lock on Pi 5 / Jetson"). */
+    (void)pmu_enable_self();
 #endif
 
     /* Signal the primary CPU that we're online.

@@ -48,6 +48,21 @@
 #define PMCNTEN_EVENT_MASK_6  0x3Fu
 #define PMCNTEN_CYCLE_BIT     (1u << 31)
 
+/* If PMU_NUM_EVENT_COUNTERS grows past 6, both pmu_write_evtyper and
+ * pmu_read_evcntr below need new switch arms — silently dropping the
+ * extra indices would be a correctness bug (events 6+ never programmed,
+ * never read). Pin the contract at compile time. */
+_Static_assert(PMU_NUM_EVENT_COUNTERS == 6,
+    "pmu.c switch tables hardcode 6 counters; widen them when bumping "
+    "PMU_NUM_EVENT_COUNTERS");
+
+/* PMCR_EL0.LC selects the 64-bit cycle counter on ARMv8.5+. Cortex-A76
+ * is v8.2 where the bit may be RES0 — the cycle counter falls back to
+ * 32-bit and wraps in ~6 s at 1 GHz. The per-op profile harness (#871)
+ * calls pmu_reset() at the start of every execute_node so the per-op
+ * cycle delta stays in the microsecond range regardless. We set LC=1
+ * defensively for v8.5 and later. */
+
 /* Per-CPU readiness flag. Read by the profile harness to discriminate
  * "PMU not initialized on this CPU yet" from "PMU returned 0 for a
  * real reason." Cache-line padded would be ideal; in practice this

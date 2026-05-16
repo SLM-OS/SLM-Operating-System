@@ -13,6 +13,7 @@
 #include "sched.h"
 #include "gic.h"
 #include "timer.h"
+#include "pmu.h"
 #include "smp.h"
 #include "cpu_supervisor.h"
 #include "ipc.h"
@@ -420,7 +421,6 @@ void kernel_main(void *dtb)
      * PMU sysregs are per-CPU and have no dependencies on other kernel
      * subsystems. */
     {
-        extern bool pmu_enable_self(void);
         bool pmu_ok = pmu_enable_self();
         if (!pmu_ok) {
             WARN("PMU enable failed on primary CPU (likely EL3 trap)");
