@@ -62,7 +62,10 @@ fn map_err(e: xgb_tree::XgbError) -> RuntimeXGBoostError {
         xgb_tree::XgbError::TooManyTrees => RuntimeXGBoostError::TooManyTrees,
         xgb_tree::XgbError::TooManyNodes => RuntimeXGBoostError::TooManyNodes,
         // The cascade-only variants below are unreachable from
-        // single-classifier parsing; map conservatively to BadLength.
+        // `parse_single` (which never enters the cascade path) — map
+        // to BadLength purely as a defensive catch-all so a future
+        // shared-parser refactor that surfaces them here doesn't fail
+        // with a missing match arm.
         xgb_tree::XgbError::TooManyClassifiers
         | xgb_tree::XgbError::TooManyLabels => RuntimeXGBoostError::BadLength,
         xgb_tree::XgbError::RootOutOfRange => RuntimeXGBoostError::RootOutOfRange,

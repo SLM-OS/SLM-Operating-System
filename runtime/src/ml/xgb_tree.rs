@@ -180,6 +180,14 @@ pub fn parse_single(bytes: &[u8], max_feature_idx: usize) -> Result<XgbModel, Xg
     })
 }
 
+/// Cascade-payload absolute byte ceiling. Each classifier is
+/// independently bounded by `MAX_NODES_CASCADE * 20` ≈ 40 MB; with
+/// 8 classifiers the worst case is ~320 MB. Cap the entire blob at
+/// 128 MB so a malicious header that declares the maximum N + max
+/// trees + max nodes can't cause the parser to chase a payload that
+/// would never realistically exist on the file system.
+const MAX_CASCADE_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
+
 /// Parse an `XGBC` cascade payload (N classifiers in one blob).
 /// `max_feature_idx_per_classifier` is a slice of length N, supplying
 /// the per-classifier feature-count bound. The cascade ordering is
@@ -192,6 +200,9 @@ pub fn parse_cascade(
 ) -> Result<XgbCascade, XgbError> {
     if bytes.len() < CASCADE_HEADER_LEN {
         return Err(XgbError::TooShort);
+    }
+    if bytes.len() > MAX_CASCADE_PAYLOAD_BYTES {
+        return Err(XgbError::BadLength);
     }
     if bytes[0..4] != PAYLOAD_MAGIC_CASCADE_V1 {
         return Err(XgbError::BadMagic);
@@ -431,8 +442,17 @@ impl XgbModel {
     }
 
     /// Walk one tree from `root_idx`, returning the leaf value (or
-    /// 0.0 if depth-capped — see [`MAX_TREE_DEPTH`]). `features` is
-    /// indexed by `node.feature_idx`.
+    /// 0.0 if depth-capped — see [`MAX_TREE_DEPTH`]).
+    ///
+    /// `features` is indexed by `node.feature_idx`; the parser
+    /// rejects feature indices ≥ the per-classifier `max_feature_idx`
+    /// supplied at parse time, so passing a slice ≥ that bound is
+    /// safe. A shorter slice would panic on indexing — `eval_tree`
+    /// runs in IRQ context where a panic is fatal, so the loop
+    /// degrades to the 0.0 fallback rather than panic when a feature
+    /// index is out of slice range. Callers are still expected to
+    /// pass the right-shape slice; this is defence-in-depth, not a
+    /// substitute for shaping the input correctly.
     pub fn eval_tree(&self, root_idx: usize, features: &[f32]) -> f32 {
         let mut idx = root_idx;
         for _ in 0..MAX_TREE_DEPTH {
@@ -440,7 +460,11 @@ impl XgbModel {
             if (node.flags & FLAG_LEAF) != 0 {
                 return node.value;
             }
-            let f = features[node.feature_idx as usize];
+            let fi = node.feature_idx as usize;
+            if fi >= features.len() {
+                return 0.0_f32;
+            }
+            let f = features[fi];
             idx = if f < node.threshold {
                 node.left_idx as usize
             } else {
@@ -573,7 +597,7 @@ mod tests {
         };
 
         let leaf_only = XgbModel::from_parts_for_test(
-            alloc::vec![0u16],
+            alloc::vec![0u32],
             alloc::vec![leaf],
             Vec::new(),
         );
@@ -581,7 +605,7 @@ mod tests {
         assert_eq!(leaf_only.eval_tree(0, &features), 1.0);
 
         let cyc = XgbModel::from_parts_for_test(
-            alloc::vec![0u16],
+            alloc::vec![0u32],
             alloc::vec![cyclic],
             Vec::new(),
         );
