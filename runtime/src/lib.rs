@@ -784,7 +784,7 @@ pub extern "C" fn rust_run_tests() -> i32 {
         print_test_result(b"sched_xgb_is_active_after_activate\0", is_active);
         if !is_active { failures += 1; }
 
-        let state = [0.0_f32; 108];
+        let state = [0.0_f32; sched::xgb::STATE_DIM];
         let mut core: i32 = -1;
         let mut prio: i32 = -1;
         let mut preempt: i32 = -1;
@@ -835,7 +835,7 @@ pub extern "C" fn rust_run_tests() -> i32 {
         };
         let mut equiv_ok = stage_rc == 0 && activate_rc == 0;
         for k in 0..16u32 {
-            let mut s = [0.0_f32; 108];
+            let mut s = [0.0_f32; sched::xgb::STATE_DIM];
             // Vary each state slightly so we know the loop isn't
             // returning a cached predict result.
             s[0] = k as f32;
@@ -857,6 +857,46 @@ pub extern "C" fn rust_run_tests() -> i32 {
         }
         print_test_result(b"sched_xgb_equiv_loop_synthetic\0", equiv_ok);
         if !equiv_ok { failures += 1; }
+
+        // Binary classifier regression (#920). XGBoost binary stores
+        // 1 tree per boosting round (all contributing to a single
+        // class-1 margin); predict_label has to sum + threshold, not
+        // route through predict_argmax's `cls = i % n_classes` split.
+        // build_binary_cascade_smoke_blob is shaped so the pre-fix
+        // argmax path would return (42, 10, 40) and the post-fix
+        // binary-margin path returns (42, 20, 30).
+        sched::xgb::clear();
+        let bin_blob = sched::xgb::build_binary_cascade_smoke_blob();
+        let bin_stage = sched::xgb::rust_sched_xgb_stage_blob(
+            bin_blob.as_ptr(), bin_blob.len(),
+        );
+        let bin_activate = if bin_stage == 0 {
+            sched::xgb::rust_sched_xgb_activate()
+        } else {
+            -1
+        };
+        let mut bin_c: i32 = -1;
+        let mut bin_p: i32 = -1;
+        let mut bin_e: i32 = -1;
+        let bin_state = [0.0_f32; sched::xgb::STATE_DIM];
+        let bin_predict_rc = if bin_activate == 0 {
+            sched::xgb::rust_sched_xgb_predict(
+                bin_state.as_ptr(),
+                &mut bin_c as *mut i32,
+                &mut bin_p as *mut i32,
+                &mut bin_e as *mut i32,
+            )
+        } else {
+            -1
+        };
+        let binary_ok = bin_stage == 0
+            && bin_activate == 0
+            && bin_predict_rc == 0
+            && bin_c == 42
+            && bin_p == 20
+            && bin_e == 30;
+        print_test_result(b"sched_xgb_binary_predict_label\0", binary_ok);
+        if !binary_ok { failures += 1; }
 
         sched::xgb::clear();
     }

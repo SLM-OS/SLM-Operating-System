@@ -7128,6 +7128,7 @@ static uint16_t sched_model_kind_id(const char *name)
     if (strcmp(name, "config") == 0) return SCHED_MODEL_KIND_CONFIG;
     if (strcmp(name, "thresholds") == 0) return SCHED_MODEL_KIND_THRESHOLDS;
     if (strcmp(name, "rebalance") == 0) return SCHED_MODEL_KIND_REBALANCE;
+    if (strcmp(name, "xgboost") == 0) return SCHED_MODEL_KIND_XGBOOST;
     return 0;
 }
 
@@ -7139,6 +7140,7 @@ static const char *sched_model_kind_name(uint16_t kind_id)
         case SCHED_MODEL_KIND_CONFIG: return "config";
         case SCHED_MODEL_KIND_THRESHOLDS: return "thresholds";
         case SCHED_MODEL_KIND_REBALANCE: return "rebalance";
+        case SCHED_MODEL_KIND_XGBOOST: return "xgboost";
         default: return "unknown";
     }
 }
@@ -7330,7 +7332,7 @@ static int sched_model_autoload_cmd(int argc, char *argv[])
     static const uint16_t kinds[] = {
         SCHED_MODEL_KIND_MLP, SCHED_MODEL_KIND_PPO,
         SCHED_MODEL_KIND_CONFIG, SCHED_MODEL_KIND_THRESHOLDS,
-        SCHED_MODEL_KIND_REBALANCE
+        SCHED_MODEL_KIND_REBALANCE, SCHED_MODEL_KIND_XGBOOST
     };
 
     if (argc < 4 || strcmp(argv[3], "status") == 0) {
@@ -7438,6 +7440,7 @@ int cmd_sched(int argc, char *argv[])
             if (sched_model_status_one(SCHED_MODEL_KIND_CONFIG) != 0) return 1;
             if (sched_model_status_one(SCHED_MODEL_KIND_THRESHOLDS) != 0) return 1;
             if (sched_model_status_one(SCHED_MODEL_KIND_REBALANCE) != 0) return 1;
+            if (sched_model_status_one(SCHED_MODEL_KIND_XGBOOST) != 0) return 1;
             if (argc < 3) {
                 shell_puts("\r\nUsage:\r\n");
                 shell_puts("  sched model status\r\n");
