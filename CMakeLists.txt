@@ -1019,6 +1019,9 @@ set(TEST_SOURCES
     # adds an #if defined(NET_SSHD) around the suite call so non-SSH
     # builds keep linking.
     $<$<AND:$<BOOL:${ENABLE_NETWORKING}>,$<BOOL:${NET_SSHD}>,$<NOT:$<STREQUAL:${PLATFORM},X86_64>>>:kernel/tests/test_sshd.c>
+    # SSH host-key persistence tests (#199b / #892). Gated on
+    # NET_SSHD at the source level (whole TU is #if NET_SSHD).
+    kernel/tests/test_host_key.c
     # DTB is ARM64 only (x86-64 doesn't build kernel/src/dtb.c)
     $<$<NOT:$<STREQUAL:${PLATFORM},X86_64>>:kernel/tests/test_dtb.c>
     # FDT general-purpose reader (kernel/lib/fdt) — ARM64 only for
@@ -1915,11 +1918,12 @@ if(ENABLE_NETWORKING AND NET_SSHD AND NOT PLATFORM STREQUAL "X86_64")
     target_link_libraries(wolfssh PRIVATE wolfcrypt)
 
     # SLM-OS-side glue: time, RNG seed, lwIP IO callbacks, listener,
-    # accept loop, shell verb.
+    # accept loop, host-key persistence, shell verb.
     target_sources(slmos.elf PRIVATE
         kernel/net/ssh/wolf_os.c
         kernel/net/ssh/sshd.c
         kernel/net/ssh/sshd_shell.c
+        kernel/net/ssh/host_key.c
     )
     target_include_directories(slmos.elf PRIVATE
         ${CMAKE_SOURCE_DIR}/kernel/net/ssh)

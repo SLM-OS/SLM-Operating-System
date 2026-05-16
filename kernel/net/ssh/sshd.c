@@ -30,6 +30,7 @@
 #include "sshd.h"
 
 #include "config.h"
+#include "host_key.h"
 #include "rng.h"
 #include "sched.h"
 #include "spinlock.h"
@@ -48,6 +49,7 @@
 #include <wolfssh/ssh.h>
 #include <wolfssh/error.h>
 #include <wolfssh/internal.h>
+#include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/ed25519.h>
 #include <wolfssl/wolfcrypt/random.h>
 
@@ -95,42 +97,37 @@ static volatile uint32_t   g_kex_failed;
 static volatile uint32_t   g_active;
 
 /* ---------------------------------------------------------------- */
-/* Ephemeral host key (#199a interim — replaced by #199b)            */
+/* Host key — VFS-persisted via kernel/net/ssh/host_key.c            */
 /* ---------------------------------------------------------------- */
 
-/* Ed25519 keypair encoded as the 64-byte "private+public" buffer
- * wolfSSH's UsePrivateKey_buffer expects for `WOLFSSH_FORMAT_RAW`.
- * Filled by `generate_ephemeral_hostkey`. */
-static uint8_t  g_hostkey_raw[ED25519_KEY_SIZE + ED25519_PUB_KEY_SIZE];
+/* Cached keypair held resident for the daemon's lifetime. Loaded
+ * from `/mnt/files/etc/ssh/host_ed25519_key` (or generated +
+ * persisted on first boot). Layout is [32-byte private seed][32-byte
+ * public key] — matches wolfSSH's WOLFSSH_FORMAT_RAW expectation. */
+static uint8_t  g_hostkey_raw[HOST_KEY_RAW_BUF_LEN];
 static uint32_t g_hostkey_raw_len;
 
-static int generate_ephemeral_hostkey(void)
+const uint8_t *sshd_internal_public_key(void)
 {
-    WC_RNG    rng;
-    ed25519_key key;
-    int rc = wc_InitRng(&rng);
-    if (rc != 0) return SSHD_E_NO_HOSTKEY;
+    if (g_hostkey_raw_len == 0u) return NULL;
+    return g_hostkey_raw + HOST_KEY_PRIV_LEN;
+}
 
-    rc = wc_ed25519_init(&key);
-    if (rc != 0) { wc_FreeRng(&rng); return SSHD_E_NO_HOSTKEY; }
-
-    rc = wc_ed25519_make_key(&rng, ED25519_KEY_SIZE, &key);
-    if (rc != 0) goto out;
-
-    /* Export private + public side-by-side for wolfSSH's raw-format
-     * importer. */
-    uint32_t priv_len = ED25519_KEY_SIZE;
-    uint32_t pub_len  = ED25519_PUB_KEY_SIZE;
-    rc = wc_ed25519_export_key(&key,
-                               g_hostkey_raw,                          &priv_len,
-                               g_hostkey_raw + ED25519_KEY_SIZE,       &pub_len);
-    if (rc == 0) {
-        g_hostkey_raw_len = priv_len + pub_len;
+void sshd_invalidate_hostkey(void)
+{
+    /* Wipe the cached private+public buffer so the next sshd_start
+     * re-runs the load path. Also tears down the cached CTX so its
+     * cached PrivateKey is dropped. */
+    irq_flags_t flags = spin_lock_irqsave(&g_mod_lock);
+    for (size_t i = 0; i < HOST_KEY_RAW_BUF_LEN; i++) {
+        g_hostkey_raw[i] = 0u;
     }
-out:
-    wc_ed25519_free(&key);
-    wc_FreeRng(&rng);
-    return (rc == 0) ? SSHD_OK : SSHD_E_NO_HOSTKEY;
+    g_hostkey_raw_len = 0u;
+    if (g_ctx) {
+        wolfSSH_CTX_free(g_ctx);
+        g_ctx = NULL;
+    }
+    spin_unlock_irqrestore(&g_mod_lock, flags);
 }
 
 /* ---------------------------------------------------------------- */
@@ -466,11 +463,14 @@ int sshd_start(uint16_t port)
         return SSHD_E_WOLF_INIT;
     }
 
-    /* Generate the ephemeral host key (#199b replaces with a
-     * persisted key). */
+    /* Load (or first-boot-generate-and-persist) the Ed25519 host
+     * keypair under /mnt/files/etc/ssh/. See kernel/net/ssh/host_key.c.
+     * Re-loaded across sshd_stop/start cycles in case the operator
+     * regenerated the key. */
     if (g_hostkey_raw_len == 0u) {
-        int rc = generate_ephemeral_hostkey();
-        if (rc != SSHD_OK) return rc;
+        int rc = host_key_load_or_generate(g_hostkey_raw);
+        if (rc != HOST_KEY_OK) return SSHD_E_NO_HOSTKEY;
+        g_hostkey_raw_len = HOST_KEY_RAW_BUF_LEN;
     }
 
     /* Create the shared SERVER context. */
@@ -481,9 +481,38 @@ int sshd_start(uint16_t port)
         wolfSSH_SetIORecv(g_ctx, wolf_io_recv);
         wolfSSH_SetIOSend(g_ctx, wolf_io_send);
 
+        /* Convert the SLM-OS-native (seed || pub) layout into the
+         * PKCS#8 DER form wolfSSH's WOLFSSH_FORMAT_RAW importer
+         * actually expects (it requires bytes starting with 0x30,
+         * the ASN.1 SEQUENCE tag — "RAW" in wolfSSH terminology is
+         * "DER without PEM wrapper"). We materialise the DER each
+         * sshd_start so the cached host-key buffer remains the
+         * compact 64-byte seed||pub format on disk. */
+        ed25519_key tmp_key;
+        if (wc_ed25519_init(&tmp_key) != 0) {
+            wolfSSH_CTX_free(g_ctx); g_ctx = NULL; return SSHD_E_NO_HOSTKEY;
+        }
+        if (wc_ed25519_import_private_key(g_hostkey_raw, HOST_KEY_PRIV_LEN,
+                                          g_hostkey_raw + HOST_KEY_PRIV_LEN,
+                                          HOST_KEY_PUB_LEN,
+                                          &tmp_key) != 0) {
+            wc_ed25519_free(&tmp_key);
+            wolfSSH_CTX_free(g_ctx); g_ctx = NULL; return SSHD_E_NO_HOSTKEY;
+        }
+
+        /* DER form for Ed25519 PKCS#8 is at most ~85 bytes; 128 gives
+         * a safe margin. wc_Ed25519PrivateKeyToDer returns the length
+         * actually written. */
+        uint8_t der[128];
+        int der_len = wc_Ed25519PrivateKeyToDer(&tmp_key, der, (uint32_t)sizeof(der));
+        wc_ed25519_free(&tmp_key);
+        if (der_len <= 0) {
+            wolfSSH_CTX_free(g_ctx); g_ctx = NULL; return SSHD_E_NO_HOSTKEY;
+        }
+
         if (wolfSSH_CTX_UsePrivateKey_buffer(g_ctx,
-                                             g_hostkey_raw,
-                                             g_hostkey_raw_len,
+                                             der,
+                                             (uint32_t)der_len,
                                              WOLFSSH_FORMAT_RAW) != WS_SUCCESS) {
             wolfSSH_CTX_free(g_ctx);
             g_ctx = NULL;
