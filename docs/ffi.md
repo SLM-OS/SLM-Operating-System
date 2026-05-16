@@ -401,6 +401,104 @@ typedef struct {
 
 The `rust_infer_stats()` function fills the caller-provided struct with cumulative statistics from the inference engine. Latency values are tracked per-inference and reported in microseconds. The `rust_infer_bench()` function runs the specified number of iterations on the given model and prints a summary (min/avg/max latency) to the UART console.
 
+### Dynamic Batching FFI (called from C)
+
+Issue #55 / PRs #862 + #908 + #917. The `InferenceScheduler`
+(`runtime/src/sched/inference.rs`) exposes a runtime-toggleable
+batched-dispatch mode to the C kernel via the entrypoints below.
+Mode is OFF by default; flip it on via the shell (`infer batch on`)
+or Lua (`slm.infer_batch_mode("on")`). All entrypoints are safe to
+call from any task context.
+
+```c
+/* Toggle batched dispatch. `on != 0` enables, `0` disables. */
+void rust_infer_batch_set_mode(int32_t on);
+
+/* Returns 1 when batched dispatch is enabled, 0 otherwise. */
+int32_t rust_infer_batch_get_mode(void);
+
+/* Configure batch-size threshold + flush timeout.
+ * Bounds: 1 <= batch_size <= MAX_BATCH (32),
+ *         100 us <= timeout_us <= 100_000 us.
+ * Out-of-range values clamp to the nearest bound (upper bound on
+ * timeout_us is enforced in the FFI; lower bound + batch_size clamp
+ * happen inside `sched::set_batch_size` / `set_batch_timeout_us`).
+ * Returns 0 on success. */
+int32_t rust_infer_batch_set_config(uint32_t batch_size, uint32_t timeout_us);
+
+/* Snapshot the dispatcher state into `*out`. Returns 0 on success,
+ * -1 if `out` is null. */
+int32_t rust_infer_batch_status(RustBatchStatus *out);
+
+/* Run the concurrent stress workload. Spawns `n_workers` task workers
+ * (1..32), each running `iters_per_worker` (1..100_000) MNIST
+ * inferences against the dispatcher. Joins, then writes the
+ * aggregated result into `*out`. MNIST must be loaded first
+ * (`rust_model_load_builtin_mnist`).
+ *
+ * Returns 0 on success, negative on error:
+ *   -1  out is null, or n_workers / iters_per_worker out of range
+ *   -2  MNIST not loaded
+ *   -3  a stress run is already in flight
+ *   -4  task spawn failure (zero workers spawned)
+ *   -5  join deadline exceeded (workers didn't finish in time)
+ *
+ * Safety: caller must run in task context (not ISR) with the
+ * scheduler initialised. A timed-out run's stragglers are isolated
+ * from the next run by an internal generation counter — they
+ * continue to completion but never increment the next run's
+ * counters or `STRESS_WORKERS_DONE`. */
+int32_t rust_infer_stress_run(uint32_t n_workers,
+                              uint32_t iters_per_worker,
+                              RustStressResult *out);
+```
+
+#### RustBatchStatus Structure
+
+```c
+typedef struct {
+    uint32_t enabled;              // 1 if batched dispatch is on, 0 otherwise
+    uint32_t batch_size;           // Configured threshold (clamped to [1, MAX_BATCH])
+    uint32_t timeout_us;           // Configured partial-batch flush timeout
+    uint32_t queue_depth;          // Current pending queue depth
+    uint64_t total_submitted;      // Requests submitted since last reset
+    uint64_t completed;            // Successful completions
+    uint64_t failed;               // Engine errors
+    uint64_t batches_dispatched;   // Total batched dispatches (size + timeout)
+    uint64_t batches_full;         // Batches triggered by size threshold
+    uint64_t batches_timeout;      // Batches triggered by partial-batch timer
+    uint64_t bypassed_deadline;    // Requests that bypassed the queue (tight deadline)
+    uint64_t singleton_dispatches; // Requests that fell through to the singleton path
+} RustBatchStatus;
+```
+
+#### RustStressResult Structure
+
+```c
+typedef struct {
+    uint32_t n_workers;            // Workers actually spawned (may be < requested
+                                   // if task table was exhausted; the shell and
+                                   // Lua bindings surface this explicitly)
+    uint32_t iters_per_worker;     // Iterations per worker requested by caller
+    uint64_t success_count;        // Successful inferences across all workers
+    uint64_t error_count;          // Failed inferences across all workers
+    uint64_t wall_ns;              // Wall-clock duration of the stress run
+    uint64_t total_lat_ns;         // Sum of per-iteration latencies
+    uint64_t min_lat_ns;           // Minimum observed per-iteration latency
+    uint64_t max_lat_ns;           // Maximum observed per-iteration latency
+    /* Counter deltas captured between pre-run and post-run snapshots. */
+    uint64_t batches_dispatched;
+    uint64_t batches_full;
+    uint64_t batches_timeout;
+    uint64_t bypassed_deadline;
+    uint64_t singleton_dispatches;
+} RustStressResult;
+```
+
+Field layout is part of the FFI contract — extending either struct
+requires updating both `runtime/src/lib.rs` and
+`kernel/include/slm_ffi.h` in lockstep.
+
 ### GPU Compute (called from C)
 
 The GPU compute layer provides capability detection and status reporting for GPU-accelerated inference. Implemented in Rust (`runtime/src/inference/gpu.rs`) with C FFI wrappers in `kernel/src/slm_ffi.c`.

@@ -53,6 +53,11 @@ int test_suite_slm_shell(void);
  * /slm/token → /slm/done streaming) */
 int test_suite_slm_runner(void);
 
+/* Dynamic-batching shell verb tests (#55 / PR #917 — covers
+ * `infer batch ...` and `bench infer-stress` argument validation
+ * + `infer batch on/off/config` FFI round-trip) */
+int test_suite_infer_shell(void);
+
 /* SLM GPU dispatch counter FFI tests (PR #831 — pins the contract
  * of `slm_runtime_dispatch_stats` / `_reset`: post-reset zeros,
  * out-of-range op_kind safety, NULL-tolerance, op-kind coverage) */

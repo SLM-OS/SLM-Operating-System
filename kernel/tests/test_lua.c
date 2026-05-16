@@ -1360,6 +1360,127 @@ static void test_slm_infer_stats(void)
 }
 
 /*
+ * Test: slm.infer_batch_status (safe surface) returns a table with
+ * the documented fields. Exercises the C-side table marshalling.
+ */
+static void test_slm_infer_batch_status_shape(void)
+{
+    lua_State *L = test_lua_open_safe();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local s = slm.infer_batch_status()\n"
+        "assert(type(s) == 'table', 'should return table')\n"
+        "assert(type(s.enabled) == 'boolean', 'enabled bool')\n"
+        "assert(type(s.batch_size) == 'number', 'batch_size num')\n"
+        "assert(type(s.timeout_us) == 'number', 'timeout_us num')\n"
+        "assert(type(s.queue_depth) == 'number', 'queue_depth num')\n"
+        "assert(type(s.batches_dispatched) == 'number')\n"
+        "assert(type(s.batches_full) == 'number')\n"
+        "assert(type(s.batches_timeout) == 'number')\n"
+        "assert(type(s.bypassed_deadline) == 'number')\n"
+        "assert(type(s.singleton_dispatches) == 'number')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+    test_lua_close(L);
+}
+
+/*
+ * Test: slm.infer_batch_mode round-trips through the dispatcher.
+ * Admin-only surface. Restores OFF at the end.
+ */
+static void test_slm_infer_batch_mode_round_trip(void)
+{
+    lua_State *L = test_lua_open_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    /* Force a known starting state. */
+    rust_infer_batch_set_mode(0);
+
+    const char *code =
+        "local on = slm.infer_batch_mode('on')\n"
+        "assert(on == true, 'on should be true')\n"
+        "assert(slm.infer_batch_status().enabled == true)\n"
+        "local off = slm.infer_batch_mode('off')\n"
+        "assert(off == false, 'off should be false')\n"
+        "assert(slm.infer_batch_status().enabled == false)\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+    test_lua_close(L);
+}
+
+/*
+ * Test: slm.infer_batch_mode rejects non-"on"/"off" arguments via
+ * luaL_error. lua_slm_dostring returns non-zero on Lua error.
+ */
+static void test_slm_infer_batch_mode_bad_arg(void)
+{
+    lua_State *L = test_lua_open_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code = "slm.infer_batch_mode('garbage')\n";
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_NOT_EQUAL(0, result);
+    test_lua_close(L);
+}
+
+/*
+ * Test: slm.infer_batch_config applies in-range values, returns the
+ * applied table, and rejects out-of-range values via luaL_error
+ * (pins the S7 fix from PR #917 review). Restores defaults at end.
+ */
+static void test_slm_infer_batch_config(void)
+{
+    lua_State *L = test_lua_open_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local r = slm.infer_batch_config({size=4, timeout_us=1234})\n"
+        "assert(r.size == 4, 'size applied')\n"
+        "assert(r.timeout_us == 1234, 'timeout applied')\n"
+        /* size out of range → luaL_error → pcall returns false */
+        "local ok = pcall(slm.infer_batch_config, {size=99})\n"
+        "assert(not ok, 'oversize should error')\n"
+        "local ok2 = pcall(slm.infer_batch_config, {timeout_us=200000})\n"
+        "assert(not ok2, 'oversize timeout should error')\n"
+        "local ok3 = pcall(slm.infer_batch_config, {size=-1})\n"
+        "assert(not ok3, 'negative size should error')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+    test_lua_close(L);
+    /* Restore defaults. */
+    rust_infer_batch_set_config(8, 5000);
+}
+
+/*
+ * Test: slm.infer_stress rejects out-of-range N and iters via
+ * luaL_error. Success-path coverage (which would spawn worker
+ * tasks) lives in `rust_batch_inference_test` Test 11.
+ */
+static void test_slm_infer_stress_arg_validation(void)
+{
+    lua_State *L = test_lua_open_admin();
+    TEST_ASSERT_NOT_NULL(L);
+
+    const char *code =
+        "local ok = pcall(slm.infer_stress, 0)\n"
+        "assert(not ok, 'N=0 should error')\n"
+        "local ok2 = pcall(slm.infer_stress, 33)\n"
+        "assert(not ok2, 'N>32 should error')\n"
+        "local ok3 = pcall(slm.infer_stress, 4, 0)\n"
+        "assert(not ok3, 'iters=0 should error')\n"
+        "local ok4 = pcall(slm.infer_stress, 4, 200000)\n"
+        "assert(not ok4, 'iters too large should error')\n";
+
+    int result = lua_slm_dostring(L, code);
+    TEST_ASSERT_EQUAL_INT(0, result);
+    test_lua_close(L);
+}
+
+/*
  * Test: slm.gpu_status always returns a table with .available boolean.
  */
 static void test_slm_gpu_status(void)
@@ -3996,6 +4117,12 @@ int test_suite_lua(void)
     RUN_TEST(test_slm_model_load_bad_paths);
     RUN_TEST(test_slm_model_load_non_onnx);
     RUN_TEST(test_slm_infer_stats);
+    /* #55 / PR #917 dynamic-batching Lua bindings */
+    RUN_TEST(test_slm_infer_batch_status_shape);
+    RUN_TEST(test_slm_infer_batch_mode_round_trip);
+    RUN_TEST(test_slm_infer_batch_mode_bad_arg);
+    RUN_TEST(test_slm_infer_batch_config);
+    RUN_TEST(test_slm_infer_stress_arg_validation);
     RUN_TEST(test_slm_gpu_status);
     RUN_TEST(test_slm_ai_sched_stats);
     RUN_TEST(test_slm_eviction_bindings);
