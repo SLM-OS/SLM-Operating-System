@@ -1000,18 +1000,8 @@ unsafe fn matmul_4x4_kernel_neon(
     let ap3 = ap_block.add(3 * k_stride);
 
     for kki in 0..kn {
-        // Note (#56 PR 3): an in-loop B-row prefetch was tried here
-        // (`prfm pldl1keep` with PFDIST_K = 4 / 8 / 16 lookaheads) and
-        // measured ~3% SLOWER on Pi 5 / Cortex-A76, MNIST 200-iter
-        // bench: 483 µs → 500 µs avg. The address arithmetic
-        // (`bp_block + (kki + PFDIST_K) * n_stride`) added a multiply
-        // and a compare per K-step that the Cortex-A76 hardware
-        // prefetcher already covers — the matmul tile working set
-        // (12 KB) fits in 64 KB L1D with comfortable headroom. The
-        // in-loop prefetch is intentionally NOT included. The
-        // tile-level A-row prefetch in `matmul_tiled` runs only once
-        // per 4-row group and remained neutral-to-positive, so it
-        // was kept.
+        // No in-loop B-row prefetch — tried and reverted (3% Pi 5
+        // regression). See "After PR 3" in `docs/benchmarks.md`.
         let b_row = vld1q_f32(bp_block.add(kki * n_stride));
 
         let a0 = vdupq_n_f32(*ap_block.add(kki));
