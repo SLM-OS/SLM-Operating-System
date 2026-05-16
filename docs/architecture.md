@@ -164,11 +164,39 @@ This hybrid approach leverages:
 |-----------|---------|---------|
 | Message Queues | `kernel/ipc/ipc.c` | Synchronous message passing |
 | Shared Memory | `kernel/ipc/ipc.c` | Zero-copy buffer sharing |
+| Message Router | `runtime/src/msg_router.rs` | Topic-based pub/sub with per-subscription mailboxes |
 
 **Phase 3 Learnings:**
 - Timeout support essential for robust applications
 - Statistics tracking helps debug queue sizing issues
 - Single-threaded stress tests more reliable than multi-task in early development
+
+**Message router concurrency guarantees** (pinned by automated tests in
+`kernel/tests/test_msg_router.c` and `kernel/tests/test_integration.c`,
+verified on QEMU + Pi 5 + Jetson — see `docs/ipc.md` §"Topic-Based
+Pub/Sub" for the full reference):
+
+- **Per-subscription delivery.** Each subscription owns an independent
+  mailbox. A component subscribed via both an exact topic and a matching
+  wildcard pattern receives the message twice — once per subscription.
+  Matches DDS / ROS 2 / ZeroMQ semantics; applications dedupe at the
+  application layer if they need exactly-once across overlapping patterns.
+- **Cross-mailbox priority ordering.** When `msg_router_receive`'s
+  lock-held scan finds multiple ready mailboxes, the highest-priority
+  message wins. Under sustained two-publisher load (one high-prio, one
+  low-prio) the subscriber observes every message of both topics — no
+  starvation deadlock and no message loss across distinct mailboxes.
+- **LAST_RECEIVED ack-targeting.** `msg_router_ack` clears exactly the
+  mailbox returned by the most recent `msg_router_receive` call for the
+  component, even when a newer message lands in a *different* mailbox
+  between the receive and the ack. The bookkeeping survives genuine
+  cross-CPU activity (publish on one CPU while ack runs on another).
+- **Known limitation — single-slot mailbox overwrite.** A *single*
+  mailbox can lose a message if two `publish_internal` calls target it
+  back-to-back with no intervening ack. The standard ack-waiting publish
+  loop blocks between iterations so a single publisher cannot trigger
+  this; the case requires multiple concurrent publishers writing to the
+  same subscriber's mailbox. Tracked for post-capstone follow-up as #869.
 
 ### SMP Support
 
