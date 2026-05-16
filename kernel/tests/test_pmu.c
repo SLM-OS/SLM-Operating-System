@@ -155,6 +155,63 @@ static void test_pmu_read_event_out_of_range_safe(void)
         "pmu_read_event with absurd idx must return 0");
 }
 
+/*
+ * #872 — pmu_sample_cache_pressure and pmu_get_cache_pressure_q16
+ * coverage. The sampler is called from scheduler_tick on every CPU,
+ * feeding the per-core slot the AI scheduler reads via
+ * pmu_get_cache_pressure_q16(cpu). These tests confirm the plumbing
+ * works (no fault, sensible return values, out-of-range bound check)
+ * without depending on a specific cache-miss rate — QEMU TCG returns
+ * zero L1D refills regardless, so the EWMA stays at 0 under emulation.
+ */
+static void test_pmu_get_cache_pressure_q16_out_of_range(void)
+{
+    /* Out-of-range CPU id must return 0, not fault. ai_state.c
+     * iterates over AI_STATE_NUM_CORES (6) which can exceed cpu_count
+     * on Pi 5 (4 cores); the guard ensures the resulting slot read
+     * never crashes regardless of how the caller bounds its iteration. */
+    TEST_ASSERT_MESSAGE(pmu_get_cache_pressure_q16(MAX_CPUS) == 0,
+        "pmu_get_cache_pressure_q16(MAX_CPUS) must return 0");
+    TEST_ASSERT_MESSAGE(pmu_get_cache_pressure_q16(UINT32_MAX) == 0,
+        "pmu_get_cache_pressure_q16(UINT32_MAX) must return 0");
+}
+
+static void test_pmu_sample_cache_pressure_no_fault(void)
+{
+    /* The sampler is called from scheduler_tick on every CPU. It
+     * must complete without faulting even when:
+     *   - The PMU is already enabled (the common path).
+     *   - It's called multiple times in quick succession (prime →
+     *     normal-update → normal-update).
+     * QEMU TCG returns zero L1D refills, so the EWMA stays at 0,
+     * but the underlying state machine (prime + delta tracking +
+     * EWMA blend) still exercises every code path.
+     *
+     * Surviving the calls IS the assertion — there's no PMCR_EL0
+     * trap or null-deref to surface a regression. */
+    pmu_sample_cache_pressure();  /* first call: prime the per-CPU state */
+    pmu_sample_cache_pressure();  /* second call: takes the delta path */
+    pmu_sample_cache_pressure();  /* third call: exercises EWMA blend */
+    TEST_ASSERT_MESSAGE(true,
+        "pmu_sample_cache_pressure must not fault under normal use");
+}
+
+static void test_pmu_get_cache_pressure_q16_bounded(void)
+{
+    /* After the sampler runs, the per-CPU cache returns a Q16.16
+     * fixed-point value in [0, PMU_Q16_ONE]. PMU_Q16_ONE is the
+     * sentinel for 1.0 (full saturation). Under QEMU TCG the value
+     * stays at 0 because L1D refills don't tick; on hardware it can
+     * be anywhere in the range. Either way, the value must never
+     * exceed the saturation cap — a regression in the EWMA clamp
+     * would surface here as a value > 0x10000. */
+    pmu_sample_cache_pressure();
+    uint32_t cp = pmu_get_cache_pressure_q16(cpu_id());
+    TEST_ASSERT_MESSAGE(cp <= (1u << 16),
+        "pmu_get_cache_pressure_q16 returned a value > 1.0 in Q16.16 — "
+        "the EWMA saturation clamp regressed");
+}
+
 int test_suite_pmu(void)
 {
     UnityBegin("test_pmu.c");
@@ -165,6 +222,10 @@ int test_suite_pmu(void)
     RUN_TEST(test_pmu_reset_clears_counters);
     RUN_TEST(test_pmu_read_all_snapshot_consistent);
     RUN_TEST(test_pmu_read_event_out_of_range_safe);
+    /* #872 — cache_pressure sampler + getter coverage. */
+    RUN_TEST(test_pmu_get_cache_pressure_q16_out_of_range);
+    RUN_TEST(test_pmu_sample_cache_pressure_no_fault);
+    RUN_TEST(test_pmu_get_cache_pressure_q16_bounded);
     return UnityEnd();
 }
 

@@ -7338,11 +7338,24 @@ pub extern "C" fn rust_inference_test() -> i32 {
         let zeroed_ok = buf.iter().all(|e| {
             e.count == 0 && e.total_ns == 0 && e.min_ns == 0 && e.max_ns == 0
         });
+        // #871: PMU sum fields must also reset to zero. A regression
+        // that forgot to extend op_profile_reset to clear the new
+        // atomics would surface here as a non-zero PMU column after
+        // reset, which would then leak into every snapshot.
+        let pmu_zeroed_ok = buf.iter().all(|e| {
+            e.cache_misses == 0
+                && e.l2_misses == 0
+                && e.instructions_retired == 0
+                && e.branch_mispredictions == 0
+                && e.cache_references == 0
+                && e.backend_stalls == 0
+                && e.cycles == 0
+        });
         // Slot 0 is MatMul (discriminant 0); slot 17 is Unknown
         // (discriminant 255). Both label assertions catch reorderings
         // of `op_type_to_index` / `index_to_op_type_u8`.
         let labels_ok = buf[0].op_type == 0 && buf[17].op_type == 255;
-        let passed = len_ok && zeroed_ok && labels_ok;
+        let passed = len_ok && zeroed_ok && pmu_zeroed_ok && labels_ok;
         print_test_result(b"profile: reset/snapshot baseline\0", passed);
         if !passed { failures += 1; }
     }
