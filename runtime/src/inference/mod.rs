@@ -32,4 +32,7 @@ pub mod gpu_slm;
 
 pub use tensor::Tensor;
 pub use workspace::BumpAllocator;
-pub use engine::{InferenceEngine, EngineError, InferenceStats, run_inference, get_stats};
+pub use engine::{
+    InferenceEngine, EngineError, InferenceStats, run_inference,
+    run_inference_batched, get_stats,
+};

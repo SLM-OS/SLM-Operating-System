@@ -704,6 +704,14 @@ extern int rust_infer(uint32_t model_index, const float *input_data,
 extern int rust_inference_test(void);
 
 /*
+ * Run dynamic-batching scheduler tests (#857).
+ * Returns: Number of failures (0 = all passed).
+ *
+ * Depends on the embedded MNIST ONNX model — loads it internally.
+ */
+extern int rust_batch_inference_test(void);
+
+/*
  * Inference statistics structure.
  */
 typedef struct {
