@@ -389,6 +389,86 @@ static void test_msg_router_ack_targets_last_received(void)
     msg_router_unsubscribe_all(5);
 }
 
+/*
+ * Coverage for msg_router_publish_nowait's own contracts (#67 audit follow-up).
+ *
+ * `publish_nowait` was previously only exercised as a *vehicle* in the 67b
+ * and 67c tests above. Those tests pin contracts (per-subscription delivery,
+ * LAST_RECEIVED ack-targeting) that depend on publish_nowait's fan-out
+ * behaviour but don't assert publish_nowait's own contracts directly:
+ *
+ *   1. **Returns immediately** with the mailbox fan-out count — no 5 s
+ *      ack-wait like msg_router_publish.
+ *   2. **Returns 0 for NULL topic_name.**
+ *   3. **Returns 0 for oversized topic_name** (rejects truncation per #69).
+ *   4. **Returns 0 when no subscribers match** (no targets to deliver to).
+ *   5. **Overwrites unconditionally** — a second nowait deliver to the same
+ *      mailbox while the first is still unacked replaces the data, ready
+ *      stays set. The subscriber sees only the second message; the first
+ *      is lost. This is the documented single-slot mailbox behaviour
+ *      (tracked for queued-mailbox redesign as #869). The test asserts the
+ *      contract as it stands today so a future fix that changes semantics
+ *      forces an explicit test update rather than a silent regression.
+ */
+static void test_publish_nowait_basic_contract(void)
+{
+    msg_router_init();
+
+    /* Contract (2): NULL topic returns 0. */
+    TEST_ASSERT_EQUAL_INT(0,
+        msg_router_publish_nowait(NULL, (const uint8_t *)"x"));
+
+    /* Contract (3): oversized topic (>= TOPIC_NAME_LEN) returns 0.
+     * "/sensors/temperature" is 20 bytes; TOPIC_NAME_LEN is 16. */
+    TEST_ASSERT_EQUAL_INT(0, msg_router_publish_nowait(
+        (const uint8_t *)"/sensors/temperature", (const uint8_t *)"x"));
+
+    /* Contract (4): no subscribers → 0, and returns immediately
+     * (we measure the timer to confirm no ack-wait). */
+    uint64_t freq = timer_get_frequency();
+    uint64_t t0 = timer_get_count();
+    int delivered = msg_router_publish_nowait(
+        (const uint8_t *)"/nw/empty", (const uint8_t *)"x");
+    uint64_t elapsed = timer_get_count() - t0;
+    TEST_ASSERT_EQUAL_INT(0, delivered);
+    TEST_ASSERT_LESS_THAN(freq, elapsed);  /* << 1 second */
+
+    /* Contract (1): subscribed topic → returns fan-out count immediately. */
+    TEST_ASSERT_EQUAL_INT(0, msg_router_subscribe("/nw/one", 9));
+    t0 = timer_get_count();
+    delivered = msg_router_publish_nowait(
+        (const uint8_t *)"/nw/one", (const uint8_t *)"hi");
+    elapsed = timer_get_count() - t0;
+    TEST_ASSERT_EQUAL_INT(1, delivered);
+    TEST_ASSERT_LESS_THAN(freq, elapsed);
+
+    /* Contract (5): second nowait deliver to the same unacked mailbox
+     * overwrites the first. The subscriber receives only the second
+     * payload — first is lost. This pins the documented limitation
+     * tracked as #869; if a queued-mailbox redesign lands, this test
+     * is the canary that forces the test to be updated together with
+     * the doc/runtime change. */
+    delivered = msg_router_publish_nowait(
+        (const uint8_t *)"/nw/one", (const uint8_t *)"two");
+    TEST_ASSERT_EQUAL_INT(1, delivered);
+
+    uint8_t topic_buf[16];
+    const uint8_t *msg = msg_router_receive(9, topic_buf);
+    TEST_ASSERT_NOT_NULL(msg);
+    TEST_ASSERT_EQUAL_STRING("/nw/one", (const char *)topic_buf);
+    /* Single-slot mailbox: only the second message survives — the
+     * first ("hi") was overwritten in place by the second ("two"). */
+    TEST_ASSERT_EQUAL_STRING("two", (const char *)msg);
+    msg_router_ack(9);
+
+    /* Mailbox now empty — a second receive returns NULL (confirms
+     * the overwrite collapsed two publishes into one mailbox slot,
+     * not two slots). */
+    TEST_ASSERT_NULL(msg_router_receive(9, topic_buf));
+
+    msg_router_unsubscribe_all(9);
+}
+
 int test_suite_msg_router(void)
 {
     UNITY_BEGIN();
@@ -402,6 +482,7 @@ int test_suite_msg_router(void)
     RUN_TEST(test_wildcard_exact_overlap_delivers_twice);
     RUN_TEST(test_wildcard_only_delivers_once);
     RUN_TEST(test_msg_router_ack_targets_last_received);
+    RUN_TEST(test_publish_nowait_basic_contract);
     RUN_TEST(test_publish_times_out_without_ack);
     return UNITY_END();
 }
